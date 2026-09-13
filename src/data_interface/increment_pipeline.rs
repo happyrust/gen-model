@@ -426,79 +426,11 @@ impl StageTimings {
 #[derive(Debug, Default, Clone)]
 pub struct IncrementPipeline;
 
-fn same_attempt_file_path(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-
-    #[cfg(windows)]
-    {
-        let normalize = |path: &str| path.replace('/', "\\").to_ascii_lowercase();
-        normalize(left) == normalize(right)
-    }
-
-    #[cfg(not(windows))]
-    {
-        match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-            (Ok(left), Ok(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-
-fn validate_prepared_attempt(
-    attempt: &crate::data_interface::increment_tail::IncrementUpdateAttempt,
-    db_type: &str,
-    file_path: &str,
-    current_file_latest_sesno: i32,
-) -> anyhow::Result<FrozenSource> {
-    if attempt.db_type != db_type || !same_attempt_file_path(&attempt.file_path, file_path) {
-        anyhow::bail!(
-            "unfinished increment attempt dbnum={} belongs to type={} path={}, \
-             current type={db_type} path={file_path}",
-            attempt.dbnum,
-            attempt.db_type,
-            attempt.file_path
-        );
-    }
-    if attempt.end_sesno > current_file_latest_sesno {
-        anyhow::bail!(
-            "unfinished increment attempt dbnum={} requires sesno {}..={}, \
-             but current file only covers through {current_file_latest_sesno}; \
-             file rollback/replacement is blocked",
-            attempt.dbnum,
-            attempt.start_sesno,
-            attempt.end_sesno,
-        );
-    }
-    let token_json = attempt.commit_token.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "unfinished increment attempt dbnum={} has no durable source commit token; drain or rebuild it before automatic recovery",
-            attempt.dbnum
-        )
-    })?;
-    let frozen = FrozenSource::from_commit_token_json(token_json)?;
-    anyhow::ensure!(
-        frozen.matches_path(std::path::Path::new(file_path)),
-        "unfinished increment attempt dbnum={} token path {} does not match current path {file_path}",
-        attempt.dbnum,
-        frozen.path().display()
-    );
-    anyhow::ensure!(
-        frozen.dbnum() == attempt.dbnum as i32
-            && frozen.db_type().eq_ignore_ascii_case(db_type)
-            && frozen.target_sesno() == attempt.end_sesno as u32,
-        "unfinished increment attempt dbnum={} token identity/range does not match attempt",
-        attempt.dbnum
-    );
-    frozen.reopen_verified_at(attempt.end_sesno as u32)
-}
-
 /// 交入窗口的采信判定（纯函数）：调用方交出的预收集结果只有与本次要应用的区间
 /// **完全一致**才复用；错位区间（重叠、错一格、方向反了）与没交都回退自行收集。
 /// 部分重叠也拒绝——增量窗口是按「水位+1..=文件最新」整体应用的，掐头去尾的
-/// 子集会让折叠与影响判定漏看会话。崩溃重放分支根本不询问本函数：它按持久化的
-/// 固定区间重新收集（见 `apply_one` 的 prepared 分支）。
+/// 子集会让折叠与影响判定漏看会话。崩溃后的重跑同样走这条路：区间由回退后的水位
+/// 重新算出来，没有「持久化的旧计划」这一档了（ADR-072 D1）。
 fn accept_handed_in_window(
     precollected: Option<(RangeInclusive<i32>, CollectedWindow)>,
     requested_range: &RangeInclusive<i32>,
@@ -970,88 +902,44 @@ impl IncrementPipeline {
         let dbnum = basic_info.dbnum as u32;
         let path_text = path.to_string_lossy().into_owned();
 
-        // A crash may leave PE chunks partially applied while the watermark is
-        // intentionally unchanged. In that case the pre-update OWNER graph is
-        // no longer trustworthy, so reuse the durable fixed range + model plan
-        // prepared before the first write.
-        let prepared = crate::data_interface::increment_tail::load_attempt(dbnum).await?;
-        // 恢复记录一律按持久化的固定区间**原样重放**（ADR-056 P1 之后只有直写这一条路）：
-        // PE 块可能已经写了一半而水位故意没动，这条路上没有 journal、也没有「整窗口
-        // 重算」那条退路，只能照先前备好的计划走。记录超前于文件（回退 / 换文件）由
-        // `validate_prepared_attempt` 拒绝并给出人话诊断；记录落后于文件时先把它重放完，
-        // 水位推进后下一轮再追新会话——直写路径从不丢弃一份持久化计划。
-        let (sesno_range, mut model_plan, collected, recovery_frozen) = if let Some(attempt) = prepared {
-            let frozen = validate_prepared_attempt(
-                &attempt,
-                db_type,
-                &path_text,
-                *requested_range.end(),
-            )?;
-            warnings.push(format!(
-                "dbnum={dbnum}: replay unfinished range {}..={} after an interrupted persist",
-                attempt.start_sesno, attempt.end_sesno
-            ));
-            (
-                attempt.start_sesno..=attempt.end_sesno,
-                attempt.plan,
-                None,
-                Some(frozen),
-            )
-        } else {
-            // 采信判定见 `accept_handed_in_window`；复用时 `timings.collect`
-            // 自然为 0，收集成本记在调用方那一侧。
-            let collected = match accept_handed_in_window(precollected, &requested_range) {
-                Some(collected) => collected,
-                None => {
-                    let start = Instant::now();
-                    let collected = Self::collect_window(path, requested_range.clone())?;
-                    timings.collect += start.elapsed();
-                    collected
-                }
-            };
-            // 口径 warning 必须先于任何可能失败的计划/attempt I/O 进入旁路；
-            // `apply_one` 即使随后返回 Err，也会把这份 warnings 交给调用方。
-            warnings.extend(collected.warnings.iter().cloned());
-
-            let end_sesno = *requested_range.end();
-            // Direct DESI uses the same file-pinned S→T root planner as the
-            // live e3d-model parity test.  Other modes retain the established
-            // CATA temporarily keeps its isolated ref_rev cascade planner.
-            let base_sesno = requested_range.start().saturating_sub(1) as u32;
-            let model_plan = StageTimings::measure(
-                &mut timings.plan,
-                crate::data_interface::window_root_plan::build_effective_model_update_plan(
-                    dbnum,
-                    db_type,
-                    base_sesno,
-                    end_sesno as u32,
-                    &collected.range_eles,
-                ),
-            )
-            .await?;
-            let commit_token = collected
-                .frozen
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("增量窗口缺冻结源，不能准备 durable attempt"))?
-                .commit_token_json()?;
-            StageTimings::measure(
-                &mut timings.plan,
-                crate::data_interface::increment_tail::prepare_attempt(
-                    &crate::data_interface::increment_tail::IncrementUpdateAttempt {
-                        dbnum,
-                        db_type: db_type.to_string(),
-                        file_path: path_text,
-                        start_sesno: *requested_range.start(),
-                        end_sesno,
-                        plan: model_plan.clone(),
-                        commit_token: Some(commit_token),
-                        status: "prepared".into(),
-                    },
-                ),
-            )
-            .await?;
-            (requested_range, model_plan, Some(collected), None)
+        // 崩溃恢复不在这一层了（ADR-072 D1）：从前这里先读 `increment_update_attempt`，
+        // 见到未收口的记录就**复用旧计划**原样重放那一段。现在写入标记
+        // （`write_state::mark_writing`）说「上一次死在写库中途」，任务开工前 / 启动水化段
+        // 先把该库回退到 S，再从头重算 S→T——半应用的库不会被拿来当规划输入，所以
+        // 这里只认调用方交下来的那个区间。
+        let _ = &path_text;
+        // 采信判定见 `accept_handed_in_window`；复用时 `timings.collect`
+        // 自然为 0，收集成本记在调用方那一侧。
+        let collected = match accept_handed_in_window(precollected, &requested_range) {
+            Some(collected) => collected,
+            None => {
+                let start = Instant::now();
+                let collected = Self::collect_window(path, requested_range.clone())?;
+                timings.collect += start.elapsed();
+                collected
+            }
         };
+        // 口径 warning 必须先于任何可能失败的计划 I/O 进入旁路；
+        // `apply_one` 即使随后返回 Err，也会把这份 warnings 交给调用方。
+        warnings.extend(collected.warnings.iter().cloned());
+
+        // Direct DESI uses the same file-pinned S→T root planner as the
+        // live e3d-model parity test.  Other modes retain the established
+        // CATA temporarily keeps its isolated ref_rev cascade planner.
+        let base_sesno = requested_range.start().saturating_sub(1) as u32;
+        let mut model_plan = StageTimings::measure(
+            &mut timings.plan,
+            crate::data_interface::window_root_plan::build_effective_model_update_plan(
+                dbnum,
+                db_type,
+                base_sesno,
+                *requested_range.end() as u32,
+                &collected.range_eles,
+            ),
+        )
+        .await?;
+        let sesno_range = requested_range;
+        let collected = Some(collected);
         let start_sesno = *sesno_range.start();
         let end_sesno = *sesno_range.end();
 
@@ -1060,21 +948,7 @@ impl IncrementPipeline {
             path, db_type, &sesno_range
         );
 
-        // Recovery recollects the durable fixed range; a fresh attempt reuses
-        // the collection that produced its pre-update model plan.
-        let collected = match collected {
-            Some(collected) => collected,
-            None => {
-                let start = Instant::now();
-                let token = recovery_frozen.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("prepared attempt recovery is missing its verified frozen source")
-                })?;
-                let collected = Self::collect_window_for_candidate(path, sesno_range, Some(token))?;
-                timings.collect += start.elapsed();
-                warnings.extend(collected.warnings.iter().cloned());
-                collected
-            }
-        };
+        let collected = collected.expect("the window is collected before the plan is built");
         let frozen = collected.frozen.ok_or_else(|| {
             anyhow::anyhow!("增量窗口缺冻结源 FrozenSource，拒绝持久化和推进水位")
         })?;
@@ -2227,34 +2101,10 @@ mod cache_tests {
         );
     }
 
-    #[test]
-    fn prepared_attempt_rejects_a_file_that_no_longer_covers_fixed_range() {
-        let attempt = crate::data_interface::increment_tail::IncrementUpdateAttempt {
-            dbnum: 8191,
-            db_type: "DESI".to_string(),
-            file_path: "D:/project/desi".to_string(),
-            start_sesno: 40,
-            end_sesno: 42,
-            plan: Default::default(),
-            commit_token: None,
-            status: "prepared".into(),
-        };
-        let error = validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 41)
-            .expect_err("rollback must be rejected");
-        assert!(error.to_string().contains("only covers through 41"));
-        let error = validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 42)
-            .expect_err("old attempts without a durable token must fail closed");
-        assert!(error.to_string().contains("no durable source commit token"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn prepared_attempt_accepts_equivalent_windows_path_spelling() {
-        assert!(same_attempt_file_path(
-            "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
-            "d:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001",
-        ));
-    }
+    // `prepared_attempt_rejects_a_file_that_no_longer_covers_fixed_range` 与
+    // `prepared_attempt_accepts_equivalent_windows_path_spelling` 随 `validate_prepared_attempt`
+    // 一起退役（ADR-072 D1）：崩溃后不再拿一份持久化的旧区间去对当前文件，而是回退到 S、
+    // 按当前文件重解窗口。「文件被换回旧版本」那一档由冻结点的回退检出 + 整库重建接手。
 
     /// IU-S3-04：交入窗口只有与请求区间**完全一致**才被采信，其余一律回退
     /// 自行收集。掐头/去尾/整体错位的窗口混进来，折叠与影响判定就会漏看会话。
@@ -2471,13 +2321,14 @@ mod cache_tests {
         );
     }
 
-    /// IU-S3-03（L1 源码钉）：崩溃重放分支**永远按 durable token 重新收集**——prepared 命中时
-    /// collected 位恒为 None、冻结源为 Some，交入窗口只在 prepared 落空的 fresh 分支
-    /// 被询问。把交入结果喂给重放分支，就是把「按持久化固定区间重放」偷换成
-    /// 「按调用方本次窗口重放」，`validate_prepared_attempt` 挡的正是这种错位。
-    /// 回退即红。
+    /// IU-S3-03 的接班人（ADR-072 D1）：`apply_one` 里**只有一条**窗口来源。
+    ///
+    /// 从前这里有两条：见到未收口的 `increment_update_attempt` 就复用它的固定区间与
+    /// 持久化计划「原样重放」，否则才走交入 / 自行收集。那条分支连同恢复记录一起退役了
+    /// ——崩溃由写入标记回退（`write_state::rollback_to_watermark`）+ 从头重算 S→T 接手，
+    /// 半应用的库根本不会被当成规划输入。钉的是「第二条来源不许回来」。
     #[test]
-    fn crash_replay_never_consumes_the_handed_in_window() {
+    fn the_window_has_exactly_one_source_and_no_replay_branch() {
         let source = include_str!("increment_pipeline.rs");
         let body = source
             .split_once(concat!("async fn ", "apply_one("))
@@ -2487,37 +2338,31 @@ mod cache_tests {
             .expect("invalidate_caches follows apply_one in this file")
             .0;
 
-        // prepared 分支的产物：固定区间 + 持久化计划 + None 收集结果 + durable frozen source。
-        assert!(
-            body.contains("attempt.plan,")
-                && body.contains("None,")
-                && body.contains("Some(frozen)"),
-            "重放分支必须携带 durable frozen source 进入收集阶段: {body}"
-        );
-        assert!(
-            body.contains("collect_window_for_candidate(path, sesno_range, Some(token))"),
-            "重放收集必须复用 durable frozen source: {body}"
-        );
-        // 交入窗口的唯一询问点在 prepared 校验之后（即 fresh 分支里）。
-        let replay_at = body
-            .find("let frozen = validate_prepared_attempt(")
-            .expect("重放校验缺失");
-        let handed_at = body
-            .find(concat!(
-                "accept_handed_in_window",
-                "(precollected, &requested_range)"
-            ))
-            .expect("交入窗口采信点缺失");
-        assert!(
-            replay_at < handed_at,
-            "交入窗口只能在 prepared 落空之后询问: {body}"
-        );
-        // 反空转：采信点恰好一处——多出第二处就说明有人绕开了统一判定。
+        for retired in [
+            "load_attempt(",
+            "prepare_attempt(",
+            "validate_prepared_attempt(",
+            "attempt.plan",
+            "recovery_frozen",
+        ] {
+            assert!(
+                !body.contains(retired),
+                "恢复记录那条重放分支已退（ADR-072 D1），不许回来: {retired}\n{body}"
+            );
+        }
+        // 采信点恰好一处——多出第二处就说明有人绕开了统一判定。
         assert_eq!(
             body.matches(concat!("accept_handed_in_window", "("))
                 .count(),
             1,
             "采信判定必须只有一个入口"
+        );
+        // 窗口收集也只有这一处：交入落空才自行收集。
+        assert_eq!(
+            body.matches("Self::collect_window(path, requested_range.clone())")
+                .count(),
+            1,
+            "窗口收集只有一个回退口: {body}"
         );
     }
 
@@ -3794,272 +3639,4 @@ mod live_tests {
         assert_eq!(count, 2, "重放后 children 关系应恰好各一条，不得重复累积");
     }
 
-    /// D-03（live）：ProjAMS 上一次**真实** E3D 删除会话。
-    ///
-    /// 六个变化桶里 Deleted 是唯一还没有真实文件会话的一个。FTUB 是伪类型、BRAN 内的组件，
-    /// 覆盖不到「元素自身带模型被删」的清理路径。这里的 VTWA 24381/107146 自带 `inst_relate`
-    /// 与 `SPRE`，且属于 `INLINE` 变化等价类——此前没有任何用例覆盖过该类。
-    ///
-    /// 会话由 `scripts/e3d/projams_incr_delete_apply.mac`（E3D TTY）产生——TTY 做过的事就是
-    /// 本用例的判据。删除不可逆、refno 不会被重新发放，回滚只能靠删除前的文件备份
-    /// `ams7997_0001.codex-before-d03-delete-20260727`。
-    /// 执行前基线见 `docs/evidence/2026-07-27-d03-delete-session-baseline.md`。
-    ///
-    /// 2026-09-04：收集改走生产入口 `collect_window`（单会话窗口，净口径与逐会话回放给的
-    /// 是同一条墓碑）；old-pdms-io 回放臂已删。改口径后**未在 live 现场复跑**。
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: needs the real delete session from scripts/e3d/projams_incr_delete_apply.mac (collect_window 口径 2026-09-04 起，未复跑)"]
-    async fn live_real_delete_session_cleans_up_model_and_regenerates_branch() {
-        use crate::data_interface::generation_root::{
-            configured_delivery_unit_types, resolve_live_element_generation_root,
-        };
-        use crate::data_interface::manual_update::load_pending_model_units;
-        use crate::data_interface::model_update_pending::drain;
-        use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
-
-        let design_file = PathBuf::from(std::env::var("AIOS_PROJAMS_DELETE_FILE").unwrap_or_else(
-            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into(),
-        ));
-        assert!(
-            design_file.is_file(),
-            "missing design file: {}",
-            design_file.display()
-        );
-        let sesno: i32 = std::env::var("AIOS_PROJAMS_DELETE_SESNO")
-            .ok()
-            .and_then(|raw| raw.parse().ok())
-            .unwrap_or(84);
-
-        aios_core::init_test_surreal()
-            .await
-            .expect("connect isolated surreal");
-        let manager = AiosDBManager::init_form_config()
-            .await
-            .expect("init manager");
-
-        let deleted = RefnoEnum::from("24381/107146");
-        let branch = RefnoEnum::from("24381/107104");
-
-        let mut response = SUL_DB
-            .query("SELECT VALUE applied_sesno FROM dbnum_watermark:7997;")
-            .await
-            .expect("read watermark before the delete window")
-            .check()
-            .expect("valid watermark query");
-        let applied_before = response
-            .take::<Vec<i32>>(0)
-            .expect("decode watermark")
-            .first()
-            .copied()
-            .unwrap_or_default();
-        assert!(
-            applied_before < sesno,
-            "window {sesno} is already applied (applied_sesno={applied_before}); \
-             restore the pre-delete file backup and reload before rerunning"
-        );
-
-        // 墓碑落库后元素链路就查不到了，生成根必须先解析。
-        let root = resolve_live_element_generation_root(deleted, &configured_delivery_unit_types())
-            .await
-            .expect("inspect VTWA before applying its tombstone")
-            .expect("VTWA must resolve to its owning BRAN");
-        assert_eq!(
-            (root.root.to_pdms_str(), root.noun.as_str()),
-            (branch.to_pdms_str(), "BRAN")
-        );
-        let children_before = aios_core::get_children_pes(branch)
-            .await
-            .expect("read BRAN children before the delete")
-            .len();
-
-        let changes = IncrementPipeline::collect_window(&design_file, sesno..=sesno)
-            .expect("collect the real delete session")
-            .range_eles;
-        let operations = changes
-            .get(&u32::try_from(sesno).expect("sesno fits u32"))
-            .expect("the delete session must exist in the file");
-        assert!(
-            operations.iter().any(|operation| {
-                RefnoEnum::from(operation.refno) == deleted
-                    && matches!(operation.detail, EleOperationDetail::Deleted)
-            }),
-            "sesno {sesno} must carry the VTWA tombstone: {operations:?}"
-        );
-
-        let plan = build_model_update_plan(7997, sesno, "DESI", &changes)
-            .await
-            .expect("build delete model plan");
-        let actions = plan
-            .work_items
-            .iter()
-            .map(|item| (item.action, item.target_refno.as_str()))
-            .collect::<Vec<_>>();
-        assert!(
-            actions
-                .iter()
-                .any(|(action, _)| *action == ModelWorkAction::DeleteCleanup),
-            "a real tombstone must plan model cleanup: {actions:?}"
-        );
-        assert!(
-            actions.contains(&(ModelWorkAction::RegenRoot, branch.to_pdms_str().as_str())),
-            "the owning BRAN must be replanned after losing a component: {actions:?}"
-        );
-
-        let basic_info = DbFileHeader::read(&design_file).expect("design file header");
-        assert_eq!(basic_info.dbnum, 7997);
-
-        let result = IncrementPipeline::new()
-            .apply(IndexMap::from([(
-                design_file.clone(),
-                (basic_info.clone(), sesno..=sesno, "DESI".into()),
-            )]))
-            .await;
-        assert!(
-            result.errors.is_empty(),
-            "delete window failed: {:?}",
-            result.errors
-        );
-        drain(&manager)
-            .await
-            .expect("consume the model work of the delete window");
-
-        let mut response = SUL_DB
-            .query(
-                "RETURN [
-                    (SELECT VALUE deleted FROM pe:24381_107146)[0],
-                    inst_relate:24381_107146.id != none,
-                    count(SELECT * FROM pe:24381_107146<->ref_rev),
-                    count(SELECT * FROM pe:24381_107146->pe_owner),
-                    (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
-                ];",
-            )
-            .await
-            .expect("query the state left by the delete window")
-            .check()
-            .expect("valid cleanup query");
-        let state: Vec<serde_json::Value> = response.take(0).expect("decode cleanup state");
-        assert!(
-            state[0].is_null() || state[0] == serde_json::json!(true),
-            "the tombstoned VTWA must be gone or soft-deleted: {state:?}"
-        );
-        assert_eq!(
-            state[1],
-            serde_json::json!(false),
-            "inst_relate must not outlive its element: {state:?}"
-        );
-        assert_eq!(
-            state[2],
-            serde_json::json!(0),
-            "no ref_rev edge may keep the deleted refno as an endpoint: {state:?}"
-        );
-        assert_eq!(
-            state[3],
-            serde_json::json!(0),
-            "the pe_owner edge to the BRAN must be removed: {state:?}"
-        );
-        assert!(
-            state[4]
-                .as_i64()
-                .is_some_and(|applied| applied >= sesno as i64),
-            "the watermark must advance past the delete window: {state:?}"
-        );
-        assert_eq!(
-            aios_core::get_children_pes(branch)
-                .await
-                .expect("read BRAN children after the delete")
-                .len(),
-            children_before - 1,
-            "the BRAN must lose exactly the deleted component"
-        );
-
-        // 同区间重放。`apply` 是不带水位闸门的底层原语：崩溃恢复本就要求它能把一个
-        // 已部分落库的固定区间原样重跑，而两个生产调用方的区间都是从水位算出来的，
-        // 谁都不会拿已应用的窗口来调它。所以可断言的是收敛，不是「重放不排活」——
-        // 重放会按同样的键重新建立同一批工作，这与 `live_real_ftub_delete_move_and_
-        // reorder` 里「重放固定区间不得重复建立模型工作」是同一条约定。
-        let replay = IncrementPipeline::new()
-            .apply(IndexMap::from([(
-                design_file,
-                (basic_info, sesno..=sesno, "DESI".into()),
-            )]))
-            .await;
-        assert!(
-            replay.errors.is_empty(),
-            "same-range replay failed: {:?}",
-            replay.errors
-        );
-        let mut response = SUL_DB
-            .query(
-                "SELECT action, target_refno FROM model_update_pending
-                 WHERE dbnum = 7997 ORDER BY action;",
-            )
-            .await
-            .expect("read the work replanned by the replay")
-            .check()
-            .expect("valid replanned-work query");
-        let replanned: Vec<serde_json::Value> = response.take(0).expect("decode replanned work");
-        assert_eq!(
-            replanned,
-            vec![
-                serde_json::json!({
-                    "action": "delete_cleanup",
-                    "target_refno": "24381/107146",
-                }),
-                serde_json::json!({
-                    "action": "regen_root",
-                    "target_refno": "24381/107104",
-                }),
-            ],
-            "the replay must re-establish exactly the same keyed work, never duplicates: \
-             {replanned:?}"
-        );
-
-        drain(&manager)
-            .await
-            .expect("consume the work replanned by the replay");
-        assert!(
-            load_pending_model_units()
-                .await
-                .expect("read pending model units after the replay drain")
-                .is_empty(),
-            "the replayed window must drain back to an empty queue"
-        );
-
-        // 收敛：墓碑没被复活，水位没再动，BRAN 也没多出或少掉子件。
-        let mut response = SUL_DB
-            .query(
-                "RETURN [
-                    (SELECT VALUE deleted FROM pe:24381_107146)[0],
-                    inst_relate:24381_107146.id != none,
-                    (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
-                ];",
-            )
-            .await
-            .expect("query the state left by the replay")
-            .check()
-            .expect("valid convergence query");
-        let converged: Vec<serde_json::Value> = response.take(0).expect("decode converged state");
-        assert!(
-            converged[0].is_null() || converged[0] == serde_json::json!(true),
-            "the replay must not resurrect the tombstoned VTWA: {converged:?}"
-        );
-        assert_eq!(
-            converged[1],
-            serde_json::json!(false),
-            "the replay must not recreate inst_relate for a deleted element: {converged:?}"
-        );
-        assert_eq!(
-            converged[2],
-            serde_json::json!(sesno),
-            "the replay must leave the watermark where the first pass put it: {converged:?}"
-        );
-        assert_eq!(
-            aios_core::get_children_pes(branch)
-                .await
-                .expect("read BRAN children after the replay")
-                .len(),
-            children_before - 1,
-            "the BRAN child count must not drift across a replay"
-        );
-    }
 }

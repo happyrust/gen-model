@@ -1,0 +1,598 @@
+--- a/src/data_interface/element_attributes.rs
++++ b/src/data_interface/element_attributes.rs
+@@ -141,12 +141,12 @@
+     project: String,
+     mdb: String,
+     store: Arc<DirectStore>,
+-    catalog: Arc<UdaCatalog>,
++    catalog: Arc<super::uda_catalog_provider::UdaCatalogProvider>,
+     membership: Arc<MdbMembership>,
+     backup_tx: mpsc::Sender<()>,
+     spool: Arc<MirrorSpool>,
+     stats: Arc<QueueStats>,
+-    /// MDB 成员清单 + 每个成员文件身份（长度 / 修改时刻）的哈希。
++    /// MDB 非 DICT 成员文件身份（长度 / 修改时刻）的哈希。
+     /// 本服务「还新不新」只看它——不再比对整份元素骨架的会话指纹（切片 W5）。
+     file_fingerprint: u64,
+     /// 交给镜像 spool 的来源世代。骨架退役后取 [`Self::file_fingerprint`]：同一份成员文件
+@@ -204,7 +204,7 @@
+             stats.project_candidates,
+             started.elapsed().as_millis()
+         );
+-        let catalog = Arc::new(load_uda_catalog(&membership, &schema)?);
++        let catalog = super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema.clone());
+         let file_fingerprint = membership_fingerprint(&membership)?;
+         let store = Arc::new(DirectStore::new(schema, Arc::new(directory)));
+         let spool = Arc::new(MirrorSpool::for_process(&option.surreal_ns, project, mdb)?);
+@@ -243,18 +243,18 @@
+         health
+     }
+ 
+-    /// 成员文件（DESI / CATA / DICT …）任一的长度或修改时刻变了，就是不新了——
+-    /// 粗粒度但不静默：重建一次服务，路由目录与 UDA 字典一起刷新。按 dbnum 定向失效是
+-    /// 母计划阶段 5 的活。
++    /// 非 DICT 成员变化仍按服务重建；UDA provider 独立刷新 DICT。
++    /// 如果调用者直接读过 DICT 元素或 MDB 外的目录依赖，也验证那些已开会话的身份。
+     fn is_current(&self) -> anyhow::Result<bool> {
+-        Ok(membership_fingerprint(&self.membership)? == self.file_fingerprint)
++        Ok(membership_fingerprint(&self.membership)? == self.file_fingerprint
++            && self.store.verify_all_file_identities().is_ok())
+     }
+ 
+     pub fn read(&self, refno: RefU64) -> anyhow::Result<ElementAttributesResponse> {
+         let mut snapshot = self.store.element_snapshot(refno)?;
++        let catalog = self.catalog.get()?;
+         let mut diagnostics = AttributeDiagnostics {
+-            uda_issues: self
+-                .catalog
++            uda_issues: catalog
+                 .issues()
+                 .iter()
+                 .map(|issue| format!("{}: {}", issue.refno, issue.detail))
+@@ -281,14 +281,13 @@
+                 .map(|item| json!({ "name": item.name, "reason": item.reason }))
+                 .collect();
+         }
+-        let known_uda_keys = self
+-            .catalog
++        let known_uda_keys = catalog
+             .definitions()
+             .iter()
+             .flat_map(|definition| [Some(definition.key), definition.old_key])
+             .flatten()
+             .collect::<HashSet<_>>();
+-        self.catalog
++        catalog
+             .materialize_for_element(&mut snapshot.extraction, &snapshot.explicit_attributes);
+ 
+         let noun = snapshot
+@@ -334,7 +333,7 @@
+         attributes.sort_by(|left, right| left.name.cmp(&right.name));
+         attributes.dedup_by(|left, right| left.name == right.name);
+ 
+-        let backup = self.offer_backup(&snapshot);
++        let backup = self.offer_backup(&snapshot, &catalog);
+         let complete = diagnostics.outside_schema.is_empty()
+             && diagnostics.shape_conflicts.is_empty()
+             && diagnostics.undecoded.is_empty()
+@@ -408,6 +407,7 @@
+         );
+         let started = Instant::now();
+         let root_snapshot = self.store.element_snapshot(root)?;
++        let catalog = self.catalog.get()?;
+         if !crate::options::store_mode().is_durable() {
+             return Ok(EnsureReceipt {
+                 status: "skipped-memory".into(),
+@@ -483,7 +483,7 @@
+                     .explicit_attributes
+                     .iter()
+                     .filter(|attribute| attribute.is_uda)
+-                    .filter_map(|attribute| self.catalog.by_key(attribute.hash).cloned()),
++                    .filter_map(|attribute| catalog.by_key(attribute.hash).cloned()),
+             );
+         }
+ 
+@@ -507,7 +507,7 @@
+             })
+             .await
+             .context("ensure file-open task failed")??;
+-            let uda_keys = UdaKeyMap::from_catalog(&self.catalog);
++            let uda_keys = UdaKeyMap::from_catalog(&catalog);
+             definitions.sort_by_key(|definition| definition.key);
+             definitions.dedup_by_key(|definition| definition.key);
+             let prerequisites = definitions
+@@ -515,7 +515,7 @@
+                 .map(uda_definition_upsert)
+                 .collect::<Vec<_>>();
+             let rendered =
+-                render_rows_with_catalog(&set, &source, &refnos, &uda_keys, Some(&self.catalog))?;
++                render_rows_with_catalog(&set, &source, &refnos, &uda_keys, Some(&catalog))?;
+             self.spool.persist(
+                 self.snapshot_epoch,
+                 vec![(source.dbnum, source.sesno)],
+@@ -557,6 +557,7 @@
+             id: Value,
+             dbnum: i32,
+         }
++        let catalog = self.catalog.get()?;
+         let started = Instant::now();
+         let dbnums = self
+             .membership
+@@ -592,7 +593,7 @@
+                             .explicit_attributes
+                             .iter()
+                             .filter(|attribute| attribute.is_uda)
+-                            .filter_map(|attribute| self.catalog.by_key(attribute.hash).cloned()),
++                            .filter_map(|attribute| catalog.by_key(attribute.hash).cloned()),
+                     );
+                     groups
+                         .entry((
+@@ -631,7 +632,7 @@
+             requested: rows.len(),
+             ..EnsureReceipt::default()
+         };
+-        let uda_keys = UdaKeyMap::from_catalog(&self.catalog);
++        let uda_keys = UdaKeyMap::from_catalog(&catalog);
+         for ((dbnum, db_type, file, sesno), refnos) in groups {
+             let source = ReadThroughSource {
+                 dbnum: dbnum as u32,
+@@ -652,7 +653,7 @@
+                 &source,
+                 &refnos,
+                 &uda_keys,
+-                Some(self.catalog.clone()),
++                Some(catalog.clone()),
+                 &prerequisites,
+             )
+             .await?;
+@@ -682,7 +683,7 @@
+         Ok(receipt)
+     }
+ 
+-    fn offer_backup(&self, snapshot: &DirectElementSnapshot) -> &'static str {
++    fn offer_backup(&self, snapshot: &DirectElementSnapshot, catalog: &UdaCatalog) -> &'static str {
+         if !crate::options::store_mode().is_durable() {
+             return "skipped-memory";
+         }
+@@ -704,16 +705,16 @@
+                 .explicit_attributes
+                 .iter()
+                 .filter(|attribute| attribute.is_uda)
+-                .filter_map(|attribute| self.catalog.by_key(attribute.hash))
++                .filter_map(|attribute| catalog.by_key(attribute.hash))
+                 .map(uda_definition_upsert)
+                 .collect::<Vec<_>>();
+-            let keys = UdaKeyMap::from_catalog(&self.catalog);
++            let keys = UdaKeyMap::from_catalog(&catalog);
+             let rendered = render_rows_with_catalog(
+                 &set,
+                 &source,
+                 &[snapshot.extraction.refno],
+                 &keys,
+-                Some(&self.catalog),
++                Some(&catalog),
+             )?;
+             self.spool.persist(
+                 self.snapshot_epoch,
+@@ -885,7 +886,7 @@
+     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+     membership.project().hash(&mut hasher);
+     membership.mdb().hash(&mut hasher);
+-    for db in membership.databases() {
++    for db in membership.databases().iter().filter(|db| db.styp != super::mdb_membership::DICT_STYP) {
+         db.dbnum.hash(&mut hasher);
+         db.styp.hash(&mut hasher);
+         db.path.hash(&mut hasher);
+@@ -899,20 +900,6 @@
+         }
+     }
+     Ok(hasher.finish())
+-}
+-
+-pub(crate) fn load_uda_catalog(
+-    membership: &MdbMembership,
+-    schema: &DirectSchema,
+-) -> anyhow::Result<UdaCatalog> {
+-    let dicvir = schema.template_dir().join("dicvir.dat");
+-    let mut merged = UdaCatalog::default();
+-    for dictionary in membership.dictionary_paths() {
+-        let catalog = UdaCatalog::read(&dictionary, &dicvir, schema.attlib())
+-            .map_err(|error| anyhow::anyhow!("read DICT {}: {error}", dictionary.display()))?;
+-        merged.merge_in_order(catalog);
+-    }
+-    Ok(merged)
+ }
+ 
+ fn identity_attribute(name: &str, value: Value) -> AttributeValue {
+--- a/src/data_interface/mdb_memory_store.rs
++++ b/src/data_interface/mdb_memory_store.rs
+@@ -40,7 +40,6 @@
+ use aios_core::RefU64;
+ use anyhow::Context;
+ use e3d_io::refno::RefNo;
+-use e3d_io::uda_catalog::UdaCatalog;
+ use e3d_io::{ReadOnlyEngine, ScanTier};
+ 
+ use super::mdb_membership::MdbMembership;
+@@ -81,7 +80,6 @@
+     project: String,
+     mdb: String,
+     membership: Arc<MdbMembership>,
+-    uda_catalog: Arc<UdaCatalog>,
+     databases: Vec<LoadedDb>,
+     /// `ref0 → dbnum`。**不是** `RefU64::get_0()`——那只是 ref0，不是库号。
+     affiliations: HashMap<u32, u32>,
+@@ -100,14 +98,11 @@
+     /// 「这个 refno 不存在」，跟「这个元素真的被删了」长得一模一样。
+     pub fn load(project: &str, mdb: &str, membership: &MdbMembership) -> anyhow::Result<Self> {
+         let started = Instant::now();
+-        let schema = super::direct_store::DirectSchema::open_from_env()?;
+-        let uda_catalog = super::element_attributes::load_uda_catalog(membership, &schema)?;
+         let mut store = Self {
+             epoch: 0,
+             project: project.to_string(),
+             mdb: format!("/{}", mdb.trim_start_matches('/')),
+             membership: Arc::new(membership.clone()),
+-            uda_catalog: Arc::new(uda_catalog),
+             databases: Vec::new(),
+             affiliations: HashMap::new(),
+             elements: HashMap::new(),
+@@ -229,10 +224,6 @@
+         self.membership.clone()
+     }
+ 
+-    pub fn uda_catalog(&self) -> Arc<UdaCatalog> {
+-        self.uda_catalog.clone()
+-    }
+-
+     pub fn mdb(&self) -> &str {
+         &self.mdb
+     }
+@@ -503,7 +494,6 @@
+             project: "P".into(),
+             mdb: "/ALL".into(),
+             membership: Arc::new(MdbMembership::default()),
+-            uda_catalog: Arc::new(UdaCatalog::default()),
+             databases: Vec::new(),
+             affiliations: HashMap::from([(1, 7000), (2, 8000)]),
+             elements: HashMap::from([
+--- a/src/data_interface/mod.rs
++++ b/src/data_interface/mod.rs
+@@ -1,5 +1,6 @@
+ /// CATA 依赖闭包按需入库：每一批 DESI 写回都把它依赖的目录元素一起写进库（plan 2026-09-06 §3 D5–D7）。
+ pub mod cata_dependency;
++pub mod uda_catalog_provider;
+ pub mod db_model;
+ pub mod dbnum_stats;
+ /// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
+--- a/src/data_interface/read_through.rs
++++ b/src/data_interface/read_through.rs
+@@ -474,8 +474,14 @@
+ ) -> anyhow::Result<ReadThroughReceipt> {
+     let started = Instant::now();
+     let option = aios_core::get_db_option();
+-    let snapshot = super::mdb_memory_store::ensure(&option.project_name, &option.mdb_name)?;
+-    let catalog = snapshot.uda_catalog();
++    let membership = super::mdb_membership::get(&option.project_name, &option.mdb_name)
++        .map(Ok).unwrap_or_else(|| super::mdb_membership::resolve(
++            option, &option.project_name, &option.mdb_name).map(Arc::new))?;
++    let schema = Arc::new(super::direct_store::DirectSchema::open_from_env()?);
++    let provider = super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema);
++    // Dictionary epoch and the source (dbnum, sesno) below describe this job;
++    // rendering its UDA definitions does not require an MDB element snapshot.
++    let (snapshot_epoch, catalog) = provider.snapshot()?;
+     let keys = UdaKeyMap::from_catalog(&catalog);
+     let prerequisites = catalog
+         .definitions()
+@@ -492,7 +498,6 @@
+         &option.project_name,
+         &option.mdb_name,
+     )?;
+-    let snapshot_epoch = snapshot.epoch();
+     spool.persist(
+         snapshot_epoch,
+         vec![(source.dbnum, source.sesno)],
+--- /dev/null
++++ b/src/data_interface/uda_catalog_provider.rs
+@@ -0,0 +1,278 @@
++//! UDA definitions have a DICT lifecycle, independent of DESI element caches.
++use std::collections::HashMap;
++use std::hash::{Hash, Hasher};
++use std::path::PathBuf;
++use std::sync::{Arc, Mutex, OnceLock};
++use std::time::SystemTime;
++
++use anyhow::Context;
++use e3d_io::uda_catalog::UdaCatalog;
++
++use super::direct_store::DirectSchema;
++use super::mdb_membership::MdbMembership;
++
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
++struct DictionaryIdentity {
++    path: PathBuf,
++    len: u64,
++    modified: SystemTime,
++}
++
++struct CachedCatalog {
++    identities: Vec<DictionaryIdentity>,
++    catalog: Arc<UdaCatalog>,
++    epoch: u64,
++}
++
++pub struct UdaCatalogProvider {
++    paths: Vec<PathBuf>,
++    schema: Arc<DirectSchema>,
++    cached: Mutex<Option<CachedCatalog>>,
++}
++
++impl UdaCatalogProvider {
++    /// CURD order is part of the key: later DICT entries have merge precedence.
++    /// Sharing survives an attribute service reload caused by a DESI SAVEWORK.
++    pub fn shared(membership: &MdbMembership, schema: Arc<DirectSchema>) -> Arc<Self> {
++        type Key = (PathBuf, Vec<PathBuf>);
++        static PROVIDERS: OnceLock<Mutex<HashMap<Key, Arc<UdaCatalogProvider>>>> = OnceLock::new();
++        let paths = membership.dictionary_paths();
++        let key = (schema.template_dir().to_owned(), paths.clone());
++        let mut providers = PROVIDERS.get_or_init(Default::default).lock().unwrap();
++        providers
++            .entry(key)
++            .or_insert_with(|| {
++                Arc::new(Self {
++                    paths,
++                    schema,
++                    cached: Mutex::new(None),
++                })
++            })
++            .clone()
++    }
++
++    pub fn get(&self) -> anyhow::Result<Arc<UdaCatalog>> {
++        Ok(self.snapshot()?.1)
++    }
++
++    /// The returned epoch describes exactly the definitions returned with it.
++    pub fn snapshot(&self) -> anyhow::Result<(u64, Arc<UdaCatalog>)> {
++        self.load_if_changed(|| {
++            let dicvir = self.schema.template_dir().join("dicvir.dat");
++            let mut merged = UdaCatalog::default();
++            for dictionary in &self.paths {
++                let catalog = UdaCatalog::read(dictionary, &dicvir, self.schema.attlib()).map_err(
++                    |error| anyhow::anyhow!("read DICT {}: {error}", dictionary.display()),
++                )?;
++                merged.merge_in_order(catalog);
++            }
++            Ok(merged)
++        })
++    }
++
++    fn identities(&self) -> anyhow::Result<Vec<DictionaryIdentity>> {
++        self.paths
++            .iter()
++            .map(|path| {
++                let metadata = std::fs::metadata(path)
++                    .with_context(|| format!("stat DICT {}", path.display()))?;
++                Ok(DictionaryIdentity {
++                    path: path.clone(),
++                    len: metadata.len(),
++                    modified: metadata.modified()?,
++                })
++            })
++            .collect()
++    }
++
++    fn load_if_changed(
++        &self,
++        load: impl FnOnce() -> anyhow::Result<UdaCatalog>,
++    ) -> anyhow::Result<(u64, Arc<UdaCatalog>)> {
++        // Serialize check + load + publication. An error leaves the previous
++        // snapshot intact for existing readers, but never serves it as current.
++        let mut slot = self
++            .cached
++            .lock()
++            .map_err(|_| anyhow::anyhow!("UDA cache lock poisoned"))?;
++        let before = self.identities()?;
++        if let Some(cached) = slot.as_ref().filter(|cached| cached.identities == before) {
++            return Ok((cached.epoch, cached.catalog.clone()));
++        }
++        let catalog = Arc::new(load()?);
++        anyhow::ensure!(
++            self.identities()? == before,
++            "DICT changed while loading UDA definitions"
++        );
++        let mut hash = std::collections::hash_map::DefaultHasher::new();
++        before.hash(&mut hash);
++        let epoch = hash.finish();
++        *slot = Some(CachedCatalog {
++            identities: before,
++            catalog: catalog.clone(),
++            epoch,
++        });
++        Ok((epoch, catalog))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    fn provider(paths: Vec<PathBuf>) -> Arc<UdaCatalogProvider> {
++        Arc::new(UdaCatalogProvider {
++            paths,
++            schema: Arc::new(DirectSchema::open_from_env().unwrap()),
++            cached: Mutex::new(None),
++        })
++    }
++
++    #[test]
++    fn concurrent_first_read_loads_once_and_desi_changes_do_not_reload_dict() {
++        let temp = tempfile::tempdir().unwrap();
++        let dictionary = temp.path().join("dict");
++        let design = temp.path().join("desi");
++        std::fs::write(&dictionary, b"first dictionary").unwrap();
++        std::fs::write(&design, b"first design").unwrap();
++        let provider = provider(vec![dictionary.clone()]);
++        let loads = Arc::new(AtomicUsize::new(0));
++        let threads: Vec<_> = (0..8)
++            .map(|_| {
++                let provider = provider.clone();
++                let loads = loads.clone();
++                std::thread::spawn(move || {
++                    provider
++                        .load_if_changed(|| {
++                            loads.fetch_add(1, Ordering::SeqCst);
++                            Ok(UdaCatalog::default())
++                        })
++                        .unwrap()
++                })
++            })
++            .collect();
++        let results: Vec<_> = threads
++            .into_iter()
++            .map(|thread| thread.join().unwrap())
++            .collect();
++        assert_eq!(loads.load(Ordering::SeqCst), 1);
++        assert!(
++            results
++                .iter()
++                .all(|(_, catalog)| Arc::ptr_eq(catalog, &results[0].1))
++        );
++        std::fs::write(&design, b"a new design session").unwrap();
++        let unchanged = provider
++            .load_if_changed(|| panic!("DESI must not reload UDA"))
++            .unwrap();
++        assert!(Arc::ptr_eq(&unchanged.1, &results[0].1));
++        std::fs::write(&dictionary, b"second, longer dictionary").unwrap();
++        let changed = provider
++            .load_if_changed(|| Ok(UdaCatalog::default()))
++            .unwrap();
++        assert_ne!(changed.0, unchanged.0);
++        assert!(!Arc::ptr_eq(&changed.1, &unchanged.1));
++        std::fs::write(&dictionary, b"first dictionary").unwrap();
++        let restored = provider
++            .load_if_changed(|| Ok(UdaCatalog::default()))
++            .unwrap();
++        assert!(!Arc::ptr_eq(&restored.1, &changed.1));
++    }
++
++    #[test]
++    fn failed_or_changing_dictionary_is_not_published_or_returned_as_current() {
++        let temp = tempfile::tempdir().unwrap();
++        let path = temp.path().join("dict");
++        std::fs::write(&path, b"original").unwrap();
++        let provider = provider(vec![path.clone()]);
++        let old = provider
++            .load_if_changed(|| Ok(UdaCatalog::default()))
++            .unwrap();
++        std::fs::write(&path, b"changed dictionary").unwrap();
++        assert!(
++            provider
++                .load_if_changed(|| anyhow::bail!("decode failed"))
++                .is_err()
++        );
++        assert!(Arc::ptr_eq(
++            &provider.cached.lock().unwrap().as_ref().unwrap().catalog,
++            &old.1
++        ));
++        assert!(
++            provider
++                .load_if_changed(|| {
++                    std::fs::write(&path, b"changed again while reading").unwrap();
++                    Ok(UdaCatalog::default())
++                })
++                .is_err()
++        );
++        assert!(Arc::ptr_eq(
++            &provider.cached.lock().unwrap().as_ref().unwrap().catalog,
++            &old.1
++        ));
++        std::fs::remove_file(&path).unwrap();
++        assert!(
++            provider
++                .load_if_changed(|| panic!("missing file must fail before load"))
++                .is_err()
++        );
++    }
++
++    #[test]
++    #[ignore = "requires local AMS source files; mutates only temporary DICT copies"]
++    fn ams_dictionary_copy_reload_failure_and_restore() {
++        let option = aios_core::get_db_option();
++        let membership =
++            super::super::mdb_membership::resolve(option, "AvevaMarineSample", "ALL").unwrap();
++        let originals = membership.dictionary_paths();
++        assert!(!originals.is_empty());
++        let temp = tempfile::tempdir().unwrap();
++        let copies: Vec<_> = originals
++            .iter()
++            .enumerate()
++            .map(|(index, source)| {
++                let copy = temp.path().join(format!("dict-{index}"));
++                std::fs::copy(source, &copy).unwrap();
++                copy
++            })
++            .collect();
++        let provider = provider(copies.clone());
++        e3d_io::read_stats::reset();
++        let original = provider.get().unwrap();
++        let definitions = original.definitions().len();
++        assert!(definitions > 0);
++        let first_cost = e3d_io::read_stats::snapshot();
++        let unchanged = provider.get().unwrap();
++        assert!(Arc::ptr_eq(&original, &unchanged));
++        assert_eq!(
++            e3d_io::read_stats::snapshot().database_opens,
++            first_cost.database_opens
++        );
++        std::fs::write(&copies[0], b"broken dictionary").unwrap();
++        assert!(provider.get().is_err());
++        assert_eq!(original.definitions().len(), definitions);
++        std::fs::copy(&originals[0], &copies[0]).unwrap();
++        // Force a distinct identity even on coarse timestamp filesystems.
++        std::fs::OpenOptions::new()
++            .write(true)
++            .open(&copies[0])
++            .unwrap()
++            .set_times(
++                std::fs::FileTimes::new()
++                    .set_modified(SystemTime::now() + std::time::Duration::from_secs(2)),
++            )
++            .unwrap();
++        let restored = provider.get().unwrap();
++        assert!(!Arc::ptr_eq(&original, &restored));
++        assert_eq!(restored.definitions().len(), definitions);
++        let cost = e3d_io::read_stats::snapshot();
++        assert_eq!(cost.scan_calls, 0);
++        eprintln!(
++            "AMS DICT copies={} definitions={} original_preserved=true restored=true costs={}",
++            copies.len(),
++            definitions,
++            cost.summary()
++        );
++    }
++}
+--- a/tests/refno_native_guards.rs
++++ b/tests/refno_native_guards.rs
+@@ -81,6 +81,20 @@
+     let fingerprint = function_body(ELEMENT_ATTRIBUTES, "fn membership_fingerprint(");
+     assert!(!fingerprint.contains("DbFileHeader::read("));
+     assert!(!fingerprint.contains("ReadOnlyEngine::open("));
++}
++
++#[test]
++fn uda_catalogue_and_spool_do_not_depend_on_the_element_skeleton() {
++    let legacy = production(include_str!("../src/data_interface/mdb_memory_store.rs"));
++    assert!(!legacy.contains("uda_catalog"));
++    let read_through = include_str!("../src/data_interface/read_through.rs");
++    let spool = function_body(read_through, "pub(crate) fn spool_write_through(");
++    assert!(!spool.contains("mdb_memory_store::"));
++    assert!(spool.contains("UdaCatalogProvider::shared("));
++    let fingerprint = function_body(ELEMENT_ATTRIBUTES, "fn membership_fingerprint(");
++    assert!(fingerprint.contains("db.styp != super::mdb_membership::DICT_STYP"));
++    let read = function_body(ELEMENT_ATTRIBUTES, "pub fn read(&self, refno: RefU64)");
++    assert_eq!(read.matches("self.catalog.get()?").count(), 1);
+ }
+ 
+ /// 不变量 1：dbnum 只由 `RefNo::dbno()` 给出，且只在 `refno_route` 里出现这一个解码式。

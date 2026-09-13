@@ -4,9 +4,8 @@
 //! `http_api` 门后，而合流后的队列消费者（单 worker）不分编译形态都要写
 //! 任务状态——队列真身只能有一份，不能随 feature 分叉（rollout 第九节第 4 条）。
 //!
-//! durable 语义仍由 `applied_sesno` 水位与 `model_update_pending` 表承担；
-//! 本表仅内存、重启即清空，重启后由 `init_watcher` 重扫水位把队列重建出来
-//! （ADR-011 §4——界面必须说得出「这是重建的队列」）。
+//! durable 语义由应用/模型水位与写入状态承担；本表仅内存、重启即清空，
+//! 数据批次由 `init_watcher` 重扫水位重建，整库即时模型任务则由调用方重新发起。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -17,14 +16,17 @@ use serde::Serialize;
 
 /// 一个数据批次（dbnum × 会话区间）的任务行。
 pub const TASK_KIND_DATA_BATCH: &str = "data_batch";
-/// 一页持久模型工作单的消费尝试。真值仍在 `model_update_pending` 表；这行只供观察。
+/// 历史模型 drain kind；pending 表退役后不再创建新行，常量仅供兼容既有事件/测试。
 pub const TASK_KIND_MODEL_DRAIN: &str = "model_drain";
-/// 人工触发的指定 dbnum 全量模型重建；工作仍落入同一 durable 模型队列。
+/// 人工触发的指定 dbnum 全量模型重建。
 pub const TASK_KIND_MODEL_REBUILD: &str = "model_rebuild";
+/// 读透 / memory-routed 库的整库即时生成；只写进程内投影，不进 durable 队列。
+pub const TASK_KIND_DBNUM_MODEL_ENSURE: &str = "dbnum_model_ensure";
 /// A read-only source session rebuilt into the dedicated historical kv-mem.
 pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";
-/// 一轮房间归属收敛（ADR-011 §10：与数据批次同构的一种 kind）。
-pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
+// 房间轮那一种 kind（`room_recalc`）随房间流程退役（ADR-073 D1 / W1）：房间归属随每个
+// 生成根在数据批次任务里算完写完，没有独立的房间任务行；`GET /tasks?kind=room_recalc`
+// 从此恒回空列表（spec §4.7.2）。
 
 /// 分层保留的兜底上限（ADR-011 §11 + rollout 第九节第 8 条）：
 /// 首轮放宽 `manual_db_nums` 后 287 条排队 + 287 条终态就要 ≥574，
@@ -178,6 +180,16 @@ pub struct TaskEntry {
     /// 被 [`MAX_TASK_STEPS`] 挤掉的更早步数；0 = 账是全的。
     #[serde(skip_serializing_if = "step_count_is_zero")]
     pub steps_dropped: u64,
+}
+
+/// `(kind, dbnum)` 原子 single-flight 的准入结果。
+///
+/// 调用方只有拿到 `Created` 才能启动 worker；`Existing` 必须复用同一任务的固定
+/// `total_units` 与进度，不能在注册表锁外再做一次「先查后插」。
+#[derive(Debug, Clone)]
+pub enum DbnumModelEnsureAdmission {
+    Created(TaskEntry),
+    Existing(TaskEntry),
 }
 
 /// 把当前阶段结算成一步账。任务还没报过阶段时什么都不记。
@@ -356,50 +368,6 @@ impl TaskRegistry {
         });
     }
 
-    /// 新排一条房间收敛轮（房间轮不排队，创建即 running；ADR-011 §10）。
-    ///
-    /// `detail` 携带本轮的分项计数（面板 / 构件 / 死信），随任务详情带出。
-    pub fn insert_running_room_round(
-        &self,
-        task_id: &str,
-        project: &str,
-        total: u32,
-        detail: serde_json::Value,
-    ) {
-        let now = Local::now().to_rfc3339();
-        self.insert_entry(TaskEntry {
-            task_id: task_id.to_string(),
-            kind: TASK_KIND_ROOM_RECALC,
-            state: TaskState::Running,
-            project: project.to_string(),
-            created_at: now.clone(),
-            started_at: Some(now),
-            finished_at: None,
-            dbnum: None,
-            db_type: None,
-            start_sesno: None,
-            end_sesno: None,
-            start_sesno_time: None,
-            end_sesno_time: None,
-            units_done: Some(0),
-            total_units: Some(total),
-            events_seen: 0,
-            current_stage: None,
-            stage_started_at: None,
-            stage_last_progress_at: None,
-            dependency_dbnum: None,
-            dependency_path: None,
-            dependency_refnos_total: None,
-            dependency_refnos_parsed: None,
-            dependency_refnos_missing: None,
-            stall_deadline: None,
-            detail: Some(detail),
-            result: None,
-            steps: Vec::new(),
-            steps_dropped: 0,
-        });
-    }
-
     /// 建一条模型消费页。它不是第二份队列：重启恢复只看 durable pending，
     /// TaskRegistry 仅把本次认领的 epoch、来源与根暴露给 REST/Python/Plant UI。
     ///
@@ -499,6 +467,108 @@ impl TaskRegistry {
             steps: Vec::new(),
             steps_dropped: 0,
         });
+    }
+
+    fn dbnum_model_ensure_entry(
+        task_id: &str,
+        project: &str,
+        dbnum: u32,
+        db_type: &str,
+        total: u32,
+        detail: serde_json::Value,
+    ) -> TaskEntry {
+        let now = Local::now().to_rfc3339();
+        TaskEntry {
+            task_id: task_id.to_string(),
+            kind: TASK_KIND_DBNUM_MODEL_ENSURE,
+            state: TaskState::Running,
+            project: project.to_string(),
+            created_at: now.clone(),
+            started_at: Some(now.clone()),
+            finished_at: None,
+            dbnum: Some(dbnum),
+            db_type: Some(db_type.to_string()),
+            start_sesno: None,
+            end_sesno: None,
+            start_sesno_time: None,
+            end_sesno_time: None,
+            units_done: Some(0),
+            total_units: Some(total),
+            events_seen: 0,
+            current_stage: Some("generate".to_string()),
+            stage_started_at: Some(now),
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
+            detail: Some(detail),
+            result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
+        }
+    }
+
+    /// 当前同库整库即时生成。只返回非终态；终态快照由模型任务模块短期保留，
+    /// 下一次显式 ensure 可以创建新任务。
+    pub fn active_dbnum_model_ensure(&self, dbnum: u32) -> Option<TaskEntry> {
+        self.entries()
+            .values()
+            .rev()
+            .find(|entry| {
+                entry.kind == TASK_KIND_DBNUM_MODEL_ENSURE
+                    && entry.dbnum == Some(dbnum)
+                    && !entry.state.is_terminal()
+            })
+            .cloned()
+    }
+
+    /// 在**同一把注册表锁**内按 `(dbnum_model_ensure, dbnum)` get-or-create。
+    ///
+    /// `proposed_task_id` 只在确实创建时使用。并发请求如果已经有活动行，返回那一行，
+    /// 因而只有 `Created` 一方有权 spawn。
+    pub fn get_or_create_dbnum_model_ensure(
+        &self,
+        proposed_task_id: &str,
+        project: &str,
+        dbnum: u32,
+        db_type: &str,
+        total: u32,
+        detail: serde_json::Value,
+    ) -> DbnumModelEnsureAdmission {
+        let mut inner = self.entries();
+        if let Some(existing) = inner.values().rev().find(|entry| {
+            entry.kind == TASK_KIND_DBNUM_MODEL_ENSURE
+                && entry.dbnum == Some(dbnum)
+                && !entry.state.is_terminal()
+        }) {
+            return DbnumModelEnsureAdmission::Existing(existing.clone());
+        }
+
+        if inner.len() >= MAX_TASKS {
+            Self::evict_one(&mut inner);
+        }
+        let entry = Self::dbnum_model_ensure_entry(
+            proposed_task_id,
+            project,
+            dbnum,
+            db_type,
+            total,
+            detail,
+        );
+        if let Some(existing) = inner.get(&entry.task_id) {
+            log::error!(
+                "task_id 撞键 {}：既有行(kind={} state={} dbnum={:?})将被整库即时生成行(dbnum={dbnum})覆盖",
+                entry.task_id,
+                existing.kind,
+                existing.state.as_str(),
+                existing.dbnum,
+            );
+        }
+        inner.insert(entry.task_id.clone(), entry.clone());
+        DbnumModelEnsureAdmission::Created(entry)
     }
 
     pub fn insert_running_model_history(
@@ -1270,70 +1340,6 @@ mod tests {
         );
     }
 
-    /// 房间轮收尾用收敛后的计数覆盖 detail（2026-07-30 审计 B2）。
-    ///
-    /// `finish` 从不动 `detail`，而收敛到 0 的下一空闲轮不建新行——没有 `set_detail`
-    /// 的话，客户端泳道读到的 live 永远停在本轮开跑前的数字，收敛得越干净，
-    /// 「N 块面板待重算」的误报挂得越久，30 分钟后还会被判成「饥饿」。
-    #[test]
-    fn a_room_round_detail_can_be_overwritten_after_convergence() {
-        let registry = TaskRegistry::default();
-        registry.insert_running_room_round(
-            "room-1",
-            "P",
-            5,
-            serde_json::json!({ "panels": 3, "elements": 2, "dead_letters": 1 }),
-        );
-        registry.set_detail(
-            "room-1",
-            serde_json::json!({ "panels": 0, "elements": 0, "dead_letters": 1 }),
-        );
-        registry.finish(
-            "room-1",
-            TaskState::Succeeded,
-            serde_json::json!({ "done": 5, "total": 5 }),
-        );
-
-        let entry = registry.get("room-1").unwrap();
-        let detail = entry.detail.expect("detail 必须保留分项计数");
-        assert_eq!(detail["panels"], 0, "收敛后的面板数必须归零");
-        assert_eq!(detail["elements"], 0);
-        assert_eq!(detail["dead_letters"], 1, "死信数是唯一的暴露出口，不能丢");
-    }
-
-    #[test]
-    fn room_round_detail_preserves_membership_delta_for_task_api() {
-        let registry = TaskRegistry::default();
-        registry.insert_running_room_round(
-            "room-delta",
-            "P",
-            1,
-            serde_json::json!({
-                "panels": 0,
-                "elements": 1,
-                "dead_letters": 0,
-                "membership_delta": {
-                    "room_membership_changes": 1,
-                    "members_entered": 0,
-                    "members_left": 0,
-                    "samples": ["构件 4000000001_20: K100 -> K200"]
-                }
-            }),
-        );
-
-        let entry = registry.get("room-delta").expect("room task exists");
-        let payload = serde_json::to_value(&entry).expect("task entry serializes");
-        assert_eq!(payload["kind"], TASK_KIND_ROOM_RECALC);
-        assert_eq!(
-            payload["detail"]["membership_delta"]["room_membership_changes"],
-            1
-        );
-        assert_eq!(
-            payload["detail"]["membership_delta"]["samples"][0],
-            "构件 4000000001_20: K100 -> K200"
-        );
-    }
-
     #[test]
     fn started_at_is_set_on_freeze_not_on_enqueue() {
         let registry = TaskRegistry::default();
@@ -1346,6 +1352,96 @@ mod tests {
             entry.started_at.is_some(),
             "「已排」与「已用」是两个起点，开跑时刻不能缺"
         );
+    }
+
+    #[test]
+    fn dbnum_model_ensure_admission_is_atomic_single_flight() {
+        let registry = TaskRegistry::default();
+        let first = registry.get_or_create_dbnum_model_ensure(
+            "whole-1",
+            "P",
+            7997,
+            "DESI",
+            12,
+            serde_json::json!({"source_sesno": 42}),
+        );
+        let second = registry.get_or_create_dbnum_model_ensure(
+            "whole-2",
+            "P",
+            7997,
+            "DESI",
+            99,
+            serde_json::json!({"source_sesno": 43}),
+        );
+
+        let DbnumModelEnsureAdmission::Created(created) = first else {
+            panic!("first request must create");
+        };
+        let DbnumModelEnsureAdmission::Existing(existing) = second else {
+            panic!("second request must reuse");
+        };
+        assert_eq!(created.task_id, "whole-1");
+        assert_eq!(existing.task_id, created.task_id);
+        assert_eq!(existing.total_units, Some(12), "fixed denominator must win");
+        assert!(registry.get("whole-2").is_none(), "only one row may exist");
+
+        registry.finish("whole-1", TaskState::Succeeded, serde_json::json!({}));
+        let third = registry.get_or_create_dbnum_model_ensure(
+            "whole-3",
+            "P",
+            7997,
+            "DESI",
+            8,
+            serde_json::json!({"source_sesno": 44}),
+        );
+        let DbnumModelEnsureAdmission::Created(created) = third else {
+            panic!("a terminal predecessor must not block a new explicit task");
+        };
+        assert_eq!(created.task_id, "whole-3");
+        assert_eq!(created.total_units, Some(8));
+    }
+
+    #[test]
+    fn concurrent_dbnum_model_ensure_admission_has_exactly_one_creator() {
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles = (0..8)
+            .map(|index| {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let proposed = format!("whole-race-{index}");
+                    barrier.wait();
+                    registry.get_or_create_dbnum_model_ensure(
+                        &proposed,
+                        "P",
+                        7997,
+                        "DESI",
+                        12,
+                        serde_json::json!({"source_sesno": 42}),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let admissions = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("admission thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admissions
+                .iter()
+                .filter(|admission| matches!(admission, DbnumModelEnsureAdmission::Created(_)))
+                .count(),
+            1
+        );
+        let task_ids = admissions
+            .iter()
+            .map(|admission| match admission {
+                DbnumModelEnsureAdmission::Created(entry)
+                | DbnumModelEnsureAdmission::Existing(entry) => entry.task_id.as_str(),
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(task_ids.len(), 1, "every caller must receive the winner");
     }
 
     #[test]

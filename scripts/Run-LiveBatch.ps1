@@ -15,7 +15,7 @@
 
 .EXAMPLE
     powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\batch1-selfcontained.json
-    powershell -File scripts\Run-LiveBatch.ps1 -Manifest ... -Only live_room_fixture_parity
+    powershell -File scripts\Run-LiveBatch.ps1 -Manifest ... -Only <用例名子串>[,<子串>...]
 #>
 [CmdletBinding()]
 param(
@@ -67,8 +67,8 @@ try {
 
     $env:DB_OPTION_FILE = $spec.config
     # 本批次自己起了库并把靶定在 $port 上：进程必须连它，不许自己再拉一台。
-    # store_mode 的默认值翻过两次（2026-09-04 spawned-mem、2026-09-07 翻回 external），
-    # 而这里有一部分 live 用例不读 DB_OPTION_FILE（见下），它们只能靠这个环境变量收口。
+    # store_mode 默认值已多次翻转（2026-09-11 当前为 spawned-mem）；而这里有一部分
+    # live 用例不读 DB_OPTION_FILE（见下），它们只能靠这个环境变量收口。
     $env:AIOS_STORE_MODE = 'external'
     # 数据面同理：live 用例要的是摄入（基线 + 增量窗口），data_face 的新默认
     # （read-through，2026-09-05）不做基线，靠这一行收口。

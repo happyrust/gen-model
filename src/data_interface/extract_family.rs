@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Filename form recognised as a numbered PDMS/E3D database (not sys/com/mis).
+/// Filename form recognised as a numbered PDMS/E3D database (not sys/com/mis/glb).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractFileName {
     pub prefix: String,
@@ -45,8 +45,8 @@ pub struct CollapseResult {
     pub mismatches: Vec<DbnumMismatch>,
 }
 
-/// Parse `<prefix><dbnum>` or `<prefix><dbnum>_<NNNN>`. `sys`/`com`/`mis` are not
-/// numbered extract families.
+/// Parse `<prefix><dbnum>` or `<prefix><dbnum>_<NNNN>`. `sys`/`com`/`mis`/`glb`
+/// are project administration files, not numbered extract families.
 pub fn parse_extract_file_name(name: &str) -> Option<ExtractFileName> {
     let bytes = name.as_bytes();
     if bytes.len() <= 3 || !bytes[..3].iter().all(u8::is_ascii_alphabetic) {
@@ -54,7 +54,10 @@ pub fn parse_extract_file_name(name: &str) -> Option<ExtractFileName> {
     }
     let prefix = name[..3].to_string();
     let rest = &name[3..];
-    if matches!(rest.to_ascii_lowercase().as_str(), "sys" | "com" | "mis") {
+    if matches!(
+        rest.to_ascii_lowercase().as_str(),
+        "sys" | "com" | "mis" | "glb"
+    ) {
         return None;
     }
     let (dbnum_str, extract) = match rest.split_once('_') {
@@ -272,6 +275,7 @@ mod tests {
         assert_eq!(wide.extract, Some(1));
 
         assert!(parse_extract_file_name("amssys").is_none());
+        assert!(parse_extract_file_name("jeuglb").is_none());
         assert!(parse_extract_file_name("ams1112_0001 copy").is_none());
     }
 

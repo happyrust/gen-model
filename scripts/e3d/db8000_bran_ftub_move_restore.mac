@@ -9,7 +9,7 @@
 --
 -- 纪律同 apply 腿：恰好一个 SAVEWORK，不写 QUIT/FINISH。
 
-ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_ftub_move_restore.log" OVER
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/db8000_bran_ftub_move_restore.log" OVER
 $P CODEX-DB8000-BRAN-FTUB-MOVE-RESTORE-ALIVE
 =24384/23262
 Q CE

@@ -15,10 +15,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
-use crate::data_interface::manual_update::{
-    PendingModelUnit, PendingRoomUnit, load_pending_model_units, load_pending_room_units,
-};
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
+use crate::fast_model::spatial_query;
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
@@ -199,6 +197,16 @@ fn health_status(
     } else {
         "degraded"
     }
+}
+
+fn model_cache_health(store_reachable: bool) -> Value {
+    let mut health =
+        json!(crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats());
+    health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
+    health["store_reachable"] = json!(store_reachable);
+    health["degraded_read_only"] =
+        json!(crate::options::store_mode().is_durable() && !store_reachable);
+    health
 }
 
 /// 运维面板的内嵌副本。
@@ -502,91 +510,114 @@ fn health_census_observation() -> Value {
         "refresh_interval_ms":30000,"refreshing":cache.pending,"last_error":cache.error})
 }
 
-// `model_update_pending` 的状态是对一张**无索引**表做三条全表聚合。全量初始化把
-// 十万个生成根一次排进这张表之后（2026-09-06 全 AMS 实测 106,645 行），每条聚合
-// 1.8 s、一次 /health 三条 5 s 以上；采样器 / 面板每 5 s 一问，SurrealDB 就被这一个
-// 分项占满一整核——分项预算 2 s 到点只是 HTTP 侧不再等，库里那三条照样跑完——
-// 基线 `INSERT`、`baseline_counts` 与收口事务全排在它后面（7329 一库 351 s，其中
-// 真正解析只 52 s）。它与上面的 root census 同一性质：是仪表，不是闸门，所以用
-// 同一套采样纪律：至多 [`MODEL_PENDING_STATUS_REFRESH`] 刷一次、同时只跑一个刷新、
-// 分项超时不叠加新扫描。代价是 `blocking_conditions` 里的死信判定最多晚一个刷新
-// 周期出现；死信是终态，不会自己消失，晚 30 s 看见不影响任何决策。
-#[derive(Default)]
-struct ModelPendingStatusCache {
-    pending: bool,
-    started: Option<std::time::Instant>,
-    value: Option<(
-        std::time::Instant,
-        crate::data_interface::model_update_pending::ModelPendingStatus,
-    )>,
-    error: Option<String>,
-}
-static MODEL_PENDING_STATUS: std::sync::LazyLock<std::sync::Mutex<ModelPendingStatusCache>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(ModelPendingStatusCache::default()));
-const MODEL_PENDING_STATUS_REFRESH: Duration = Duration::from_secs(30);
-
-async fn sampled_model_pending_status()
--> anyhow::Result<crate::data_interface::model_update_pending::ModelPendingStatus> {
-    let (refresh, cached) = {
-        let mut cache = MODEL_PENDING_STATUS.lock().unwrap();
-        let stale = cache
-            .started
-            .is_none_or(|t| t.elapsed() >= MODEL_PENDING_STATUS_REFRESH);
-        let refresh = if !cache.pending && stale {
-            cache.pending = true;
-            cache.started = Some(std::time::Instant::now());
-            Some(tokio::spawn(async move {
-                let result =
-                    crate::data_interface::model_update_pending::model_pending_status().await;
-                let mut cache = MODEL_PENDING_STATUS.lock().unwrap();
-                cache.pending = false;
-                match result {
-                    Ok(value) => {
-                        cache.value = Some((std::time::Instant::now(), value));
-                        cache.error = None;
-                    }
-                    Err(error) => cache.error = Some(format!("{error:#}")),
-                }
-            }))
+fn model_capabilities() -> Value {
+    json!({
+        "dbnum_model_ensure": true,
+        "dbnum_model_ready_roots": true,
+        "model_records_batch_max_roots": MAX_MODEL_RECORDS_ROOTS,
+        "mesh_formats": ["mesh", "glb"],
+        "room_complete_publication_ack": true,
+        "room_rebuild_executor": if crate::options::data_face().is_read_through() {
+            "memory"
         } else {
-            None
-        };
-        (
-            refresh,
-            cache.value.as_ref().map(|(_, value)| value.clone()),
-        )
-    };
-    if let Some(value) = cached {
-        return Ok(value);
-    }
-    // 还没有第一份样本：等这一次刷新落定。刷新是独立任务，外层分项预算到点取消的
-    // 只是这里的等待，库里那一次扫描的结果仍会进缓存，下一问直接拿到。
-    if let Some(refresh) = refresh {
-        let _ = refresh.await;
-    }
-    let cache = MODEL_PENDING_STATUS.lock().unwrap();
-    cache
-        .value
-        .as_ref()
-        .map(|(_, value)| value.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                cache
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "model pending status sampling in progress".into())
-            )
-        })
+            "durable"
+        },
+    })
 }
-fn model_pending_status_observation() -> Value {
-    let cache = MODEL_PENDING_STATUS.lock().unwrap();
-    json!({"sample_age_ms":cache.value.as_ref().map(|(t,_)|t.elapsed().as_millis() as u64),
-        "refresh_interval_ms":MODEL_PENDING_STATUS_REFRESH.as_millis() as u64,
-        "refreshing":cache.pending,"last_error":cache.error})
+
+fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
+    use crate::fast_model::room_resident::ResidentLifecycle;
+
+    if !crate::options::room_membership() {
+        return json!({"status": "disabled", "reason": "room_membership=false"});
+    }
+    if !store_connected {
+        return json!({"status": "degraded", "reason": "process store unavailable"});
+    }
+    let generation = match crate::fast_model::room_resident::lifecycle() {
+        ResidentLifecycle::Ready { generation, .. } => generation,
+        ResidentLifecycle::Loading { phase, .. } => {
+            return json!({"status": "initializing", "reason": phase});
+        }
+        ResidentLifecycle::Degraded {
+            generation,
+            problems,
+        } => {
+            return json!({
+                "status": "unavailable",
+                "reason": "resident degraded",
+                "generation": generation,
+                "problems": problems,
+            });
+        }
+        ResidentLifecycle::Blocked { problems } => {
+            return json!({"status": "unavailable", "reason": "resident blocked", "problems": problems});
+        }
+        ResidentLifecycle::Unsupported { reason } => {
+            return json!({"status": "unavailable", "reason": reason});
+        }
+        ResidentLifecycle::Disabled { source } => {
+            return json!({"status": "unavailable", "reason": source});
+        }
+    };
+
+    let initialization =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot();
+    let executor = if crate::options::data_face().is_read_through() {
+        match initialization.room_bootstrap.status {
+            "ready" => "memory",
+            "initializing" | "idle" | "" => {
+                return json!({
+                    "status": "initializing",
+                    "reason": "startup room bootstrap not settled",
+                    "generation": generation,
+                    "room_bootstrap": initialization.room_bootstrap,
+                });
+            }
+            status => {
+                return json!({
+                    "status": "unavailable",
+                    "reason": format!("room bootstrap {status}"),
+                    "generation": generation,
+                    "room_bootstrap": initialization.room_bootstrap,
+                });
+            }
+        }
+    } else if worker_alive {
+        "durable"
+    } else {
+        return json!({"status": "unavailable", "reason": "durable room executor unavailable"});
+    };
+    json!({
+        "status": "available",
+        "generation": generation,
+        "executor": executor,
+    })
+}
+
+fn require_room_bootstrap_ready() -> Result<(), ApiError> {
+    if !crate::options::room_membership() || !crate::options::data_face().is_read_through() {
+        return Ok(());
+    }
+    // Point generation needs the room geometry, not publication of every MDB root.
+    crate::fast_model::room_resident::current_for_calculation()
+        .map(|_| ())
+        .map_err(|error| ApiError::service_unavailable("room_reference_unavailable", error.to_string()))
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
+    let web_options = crate::get_db_option_ext();
+    let http_bind_addr = super::runtime_http_api_addr(
+        web_options.http_api_addr.as_deref(),
+        &web_options.server_release_ip,
+    );
+    let http_public_addr =
+        super::public_http_addr(&http_bind_addr, web_options.http_public_addr.as_deref());
+    let http_addresses = json!({
+        "bind_addr": http_bind_addr,
+        "public_addr": http_public_addr,
+    });
     let probe_started = std::time::Instant::now();
     let sul_db_connected = match tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -659,29 +690,32 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         crate::data_interface::model_type_scope::resolved();
     let model_incremental_types_origin =
         (!model_incremental_types.is_empty()).then(|| model_type_origin.describe());
+    let dabacon_tags = crate::data_interface::dabacon_tag_summary::health_snapshot();
+    let mut core = crate::data_interface::mdb_route_directory::active(
+        &state.identity.project, &state.identity.mdb,
+    ).map(|directory| directory.health()).unwrap_or_else(|| json!({
+        "status": "initializing", "route_count": 0, "snapshot_epoch": 0,
+        "session_vector": [], "stale_dbnums": [], "failed_dbnums": [],
+        "last_targeted_refresh": null,
+    }));
+    let (mut opened, cached_elements) = crate::data_interface::mdb_read_store::cache_stats(
+        &state.identity.project, &state.identity.mdb);
+    opened.sort_unstable();
+    core["open_db_count"] = json!(opened.len());
+    core["open_dbnums"] = json!(opened);
+    core["cached_elements"] = json!(cached_elements);
+    let source_reads = e3d_io::read_stats::snapshot();
+    core["source_reads"] = json!({
+        "database_opens": source_reads.database_opens,
+        "scan_calls": source_reads.scan_calls,
+        "scanned_elements": source_reads.scanned_elements,
+        "index_point_lookups": source_reads.index_point_lookups,
+    });
     if sul_db.get("connected").and_then(Value::as_bool) == Some(false) {
         let read_through = state.element_attributes.health().await;
-        let snapshot = crate::data_interface::mdb_memory_store::get(
-            &state.identity.project,
-            &state.identity.mdb,
-        );
-        let stale_reason = crate::data_interface::mdb_memory_store::stale_reason(
-            &state.identity.project,
-            &state.identity.mdb,
-        );
-        let fingerprint = snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.session_fingerprint())
-            .unwrap_or_default();
         return Json(json!({
-            "status": if snapshot.is_some() && stale_reason.is_none() { "ok" } else { "degraded" },
-            "core": {
-                "status": if stale_reason.is_some() { "stale" } else if snapshot.is_some() { "ready" } else { "unavailable" },
-                "snapshot_epoch": snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
-                "session_vector": fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
-                "stale_reason": stale_reason,
-                "skeleton_elements": snapshot.as_ref().map(|value| value.stats().elements).unwrap_or_default(),
-            },
+            "status": if core["status"] == "ready" { "ok" } else { "degraded" },
+            "core": core,
             "mirror": {
                 "status": "degraded",
                 "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
@@ -693,7 +727,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
                 "last_error": sul_db.get("last_disconnect_error").cloned().unwrap_or(Value::Null),
             },
             "features": {
-                "room": {"status": "degraded", "reason": "mirror unavailable"},
+                "room": room_feature_status(false, worker_alive),
                 "history": {"status": "degraded", "reason": "mirror unavailable"},
                 "operations": {"status": "degraded", "reason": "mirror unavailable"},
             },
@@ -702,20 +736,24 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "project": state.identity.project,
             "mdb": state.identity.mdb,
             "namespace": state.identity.namespace,
+            "dabacon_tags": dabacon_tags.clone(),
+            "http": http_addresses.clone(),
             // 读路由只剩 direct（2026-09-08 S4）；键留着给老客户端对形态，值是常量。
             "data_read_mode": "direct",
             "data_face": crate::options::data_face().as_str(),
             "read_through": read_through,
             "dbnum_consistency": serde_json::Value::Null,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::build_info::VERSION,
+            "build_id": crate::build_info::BUILD_ID,
             "started_at": crate::data_interface::task_registry::process_started_at(),
+            "capabilities": model_capabilities(),
             "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
             "startup_autorun": crate::options::startup_autorun(),
             "auto_initialize_new_dbnums": crate::options::auto_initialize_new_dbnums(),
             "awaiting_manual_initialization": crate::data_interface::increment_manager::awaiting_manual_initialization_snapshot(),
             "data_incremental": crate::options::data_incremental(),
             "model_incremental": crate::options::model_incremental(),
-            "room_incremental": crate::options::room_incremental(),
+            "room_membership": crate::options::room_membership(),
             "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
             "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
             "worker_alive": worker_alive,
@@ -723,7 +761,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "active_dependency": crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot(),
             "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
             "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
-            "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
             "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
             "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
             "runtime_lag": crate::runtime_lag::snapshot(),
@@ -736,51 +773,17 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "model_incremental_types": model_incremental_types,
             "model_incremental_types_origin": model_incremental_types_origin,
             "in_memory_db": !crate::options::store_mode().is_durable(),
+            "model_cache": model_cache_health(false),
         }));
     }
     // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
     // degraded_sections，绝不让任何一项把整个端点拖住。
     let mut degraded: Vec<&'static str> = Vec::new();
-    let window_blocks = or_degraded(
-        "window_blocks",
-        within_health_budget(crate::data_interface::staging::attempts::load_window_blocks())
-            .await
-            .and_then(Result::ok),
-        &mut degraded,
-        Vec::new,
-    );
-    // 读库失败的降级形状与成功形状同源（side_effect_pending 里同键渲染，
-    // 形状由那边的单测钉住），不在这里手搓 JSON。超时走同一份降级形状，
-    // 只是错误那句换成预算超限。
-    let spatial_reconcile = match within_health_budget(
-        crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_status(),
-    )
-    .await
-    {
-        Some(Ok(status)) => status,
-        Some(Err(error)) => crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(&error),
-        None => {
-            degraded.push("spatial_reconcile");
-            crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(
-                &health_budget_exceeded("空间收敛状态"),
-            )
-        }
-    };
-    // 采样版（见 `sampled_model_pending_status`）：现读三条全表聚合每 5 s 一次会把
-    // SurrealDB 占满；仍套分项预算，第一份样本没到时按超时降级。
-    let model_update_pending = match within_health_budget(sampled_model_pending_status()).await {
-        Some(Ok(status)) => status,
-        Some(Err(error)) => {
-            degraded.push("model_update_pending");
-            crate::data_interface::model_update_pending::ModelPendingStatus::error(error)
-        }
-        None => {
-            degraded.push("model_update_pending");
-            crate::data_interface::model_update_pending::ModelPendingStatus::error(
-                health_budget_exceeded("模型工作状态"),
-            )
-        }
-    };
+    // `window_blocks` / `spatial_reconcile` / `model_update_pending`（含 `_observation`）/
+    // `model_drain` 这几格随第二条异步账退了（ADR-072 D5，spec §7 退役格清单）：没有 pending
+    // 表、没有空间意图行、没有文件轮次，也就没有死信与页级停滞可报。写库中途死掉的库由
+    // `/dbnums` 每行的 `write_state` 说。
+    //
     // 双水位是仪表，不是健康闸门：lagging 只做陈述，不进入
     // `blocking_conditions`（ADR-060 M4/M7）。
     let dbnum_consistency = match within_health_budget(sampled_health_census()).await {
@@ -790,19 +793,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             Value::Null
         }
     };
-    let mut blocking_conditions: Vec<&'static str> = Vec::new();
-    if model_update_pending.has_data_dead_letters() {
-        blocking_conditions.push("model_update_pending.data_dead_letters");
-    }
-    if model_update_pending.has_room_dead_letters() {
-        blocking_conditions.push("model_update_pending.room_dead_letters");
-    }
-    // 页级停滞：模型页在认领、在烧 CPU，却一页都收不掉。它与死信是两种不同的卡死
-    // ——死信是「这些行认输了」，停滞是「这些行还在被无限重试」——但对外都是同一件
-    // 事：模型阶段不会自己走完。进程内读数，不套 within_health_budget。
-    if crate::data_interface::model_update_pending::model_drain_page_starved() {
-        blocking_conditions.push("model_drain.page_starved");
-    }
+    let blocking_conditions: Vec<&'static str> = Vec::new();
     let parse_errors = or_degraded(
         "parse_errors",
         within_health_budget(crate::data_interface::parse_error::snapshot()).await,
@@ -821,46 +812,24 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         &mut degraded,
         || Value::Null,
     );
-    // room_build 自带 2 秒上限（room_build_health_from），降级形状也是它自己渲染的。
-    let mut room_build = crate::fast_model::room_model::room_build_health().await;
-    // 常驻房间模型（`room_resident_model` 开关）：启动初始化的结局 + 每一路当前模型的统计；
-    // 无几何的在册面板按库点名，限定域之外的库单独成一句（第 5 轮 Q20 (a)）。哪些库在
-    // 限定域里由这里对 `watch_scope` 说——房间文件自己不认识它。进程内读数，不套预算。
-    // P4 之后还多一格 `last_swap`：最近一次换代的 diff 摘要与护栏结论（拓扑变了而这一轮
-    // 一块面板目标都没碰到它 = 账本触发漏了，只出声不标脏）。
-    if let Value::Object(map) = &mut room_build {
-        let mut resident = crate::fast_model::room_resident::resident_health(
+    // 房间流程退役（t-678）：全量重建的盖章 / 对账那一格随 `room_model` 的 StartupRoomBuild
+    // 一族没了，启动对比的 `reference` / `startup_compare` 随 `room_startup` 没了。这一格
+    // 只剩常驻房间模型自己的统计——无几何的在册面板按库点名，限定域之外的库单独成一句
+    // （第 5 轮 Q20 (a)）。哪些库在限定域里由这里对 `watch_scope` 说。进程内读数，不套预算。
+    let room_build = json!({
+        "resident": crate::fast_model::room_resident::resident_health(
             crate::data_interface::watch_scope::admits,
-        );
-        // 启动对比（d-42 §4.7）再加两格：`reference`（上次成功结算所依据的文件版本与拓扑摘要，
-        // 读库、自带 2 秒上限）与 `startup_compare`（本进程最近一次对比的回执，进程内）。
-        if let Value::Object(resident) = &mut resident {
-            resident.extend(crate::fast_model::room_startup::startup_health().await);
-        }
-        map.insert("resident".to_string(), resident);
-    }
+        ),
+        "bootstrap": crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .snapshot()
+            .room_bootstrap,
+    });
     let read_through = state.element_attributes.health().await;
-    let source_snapshot =
-        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
-    let source_stale = crate::data_interface::mdb_memory_store::stale_reason(
-        &state.identity.project,
-        &state.identity.mdb,
-    );
-    let source_fingerprint = source_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.session_fingerprint())
-        .unwrap_or_default();
     Json(json!({
         // 有分项没在预算内答完就不是 ok：库半死不活时这个字段是唯一一眼可见的
         // 信号，剩下的看 degraded_sections。
         "status": health_status(&degraded, &blocking_conditions),
-        "core": {
-            "status": if source_stale.is_some() { "stale" } else if source_snapshot.is_some() { "ready" } else { "unavailable" },
-            "snapshot_epoch": source_snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
-            "session_vector": source_fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
-            "stale_reason": source_stale,
-            "skeleton_elements": source_snapshot.as_ref().map(|value| value.stats().elements).unwrap_or_default(),
-        },
+        "core": core,
         "mirror": {
             "status": "ready",
             "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
@@ -873,7 +842,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "last_success": chrono::Utc::now().to_rfc3339(),
         },
         "features": {
-            "room": {"status": "available"},
+            "room": room_feature_status(true, worker_alive),
             "history": {"status": "available"},
             "operations": {"status": "available"},
         },
@@ -886,6 +855,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "project": state.identity.project,
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
+        "dabacon_tags": dabacon_tags,
+        "http": http_addresses,
         // 数据面读路由只剩 direct（legacy db 读路由 2026-09-08 随 refactor plan S4 退役）。
         // 键保留：plant-ui M1 拿 `data_read_mode == "direct"` 配 `worker_alive` 判形态，
         // 老客户端还在读它；值从此是常量。
@@ -895,8 +866,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 摄入下缺行 = 还在灌；`applied_sesno` 在读透下恒 0，不是落后。
         "data_face": crate::options::data_face().as_str(),
         "read_through": read_through,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::build_info::VERSION,
+        "build_id": crate::build_info::BUILD_ID,
         "started_at": crate::data_interface::task_registry::process_started_at(),
+        "capabilities": model_capabilities(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
         // 冷启动开关（默认 true）与它此刻的姿态。「服务活着、队列有货、就是不动」
         // 有三种完全不同的成因：运维按了暂停（queue_paused）、冷启动还没被真实增量
@@ -908,13 +881,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 空、新库就是不动」少了这一格只能翻 sweep 日志；逐库真值（按水位现算）在
         // /dbnums 的 awaiting_manual_initialization。开关打开或没有新库时是空数组。
         "awaiting_manual_initialization": crate::data_interface::increment_manager::awaiting_manual_initialization_snapshot(),
-        // 三段增量的最终生效值（含环境变量覆盖）。顺序依赖由 worker 的共享阶段门
-        // 保证；这里拆成三个平铺字段，面板不用猜「没活」还是「阶段关闭」。
+        // 两段增量的最终生效值（含环境变量覆盖）。房间归属随生成根同步计算，
+        // 不再是一条可独立关闭的阶段。
         "data_incremental": crate::options::data_incremental(),
         "model_incremental": crate::options::model_incremental(),
-        // 房间增量的总开关（默认 true）。关着时房间泳道永远是空的，而「没活」与
-        // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
-        "room_incremental": crate::options::room_incremental(),
+        // 房间归属计算的开关（默认 false，ADR-073 D1 逐根房间归属那一步）。关着时生成根
+        // 与 model_sesno 照常推进，只跳过房间边重算；重新打开不自动补历史欠账。这个字段让
+        // 客户端知道「模型一致」是否包含房间归属。
+        "room_membership": crate::options::room_membership(),
+        "model_cache": model_cache_health(true),
         // 本项目此刻生效的最小交付单元名词表。客户端要按元素归并生成根时只能靠它
         // ——`delivery_unit_types` 能整体替换默认值、`append_delivery_unit_types`
         // 能扩充，硬编码那四个默认名词在改过配置的项目上会静默算错。进程内
@@ -953,7 +928,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // （启动那一次在 `initialization.startup.reconcile`）；`stale_catalogue_dbnums` 非空
         // 且 `catalogue_cascade_degraded` 为真 = 前移了却没能精确反查，看 `catalogue_cascade`。
         "catalogue_reconcile": crate::data_interface::model_coverage::catalogue_reconcile_snapshot(),
-        "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
         "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
         // tokio 调度延迟（specs/033 T003）：定时器「该醒」与「真醒」的差。CPU 密集段
@@ -962,21 +936,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "runtime_lag": crate::runtime_lag::snapshot(),
         "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
         "sul_db": sul_db,
-        // 数据侧确定性失败的终态（attempts.rs `window_block`），**跨重启活着**。
-        // kv-mem 暂存窗口退役（ADR-056 P1）后 `staging_windows` / `staging_commit`
-        // 两个 gauge 不再有来源，已摘；这一键随之从 `staging_window_blocks` 改名
-        // （spec 035 T301）——它记的是数据窗口直写路径上的确定性失败，跟暂存没关系，
-        // 顶着旧名字会让人以为暂存窗口还在。
-        //
-        // ADR-056 D1 要求原始错误可见：每条带 `reason` 原话与 `bad_roots`，面板把它
-        // 升成数据面独立一级判决，不再埋在别的卡的尾巴里。
-        "window_blocks": window_blocks,
-        "spatial_reconcile": spatial_reconcile,
-        // 数据模型与房间工作一次查询得出同一快照；死信样本最多十条，普通积压
-        // 只计数、不把启动期间的正常工作误标成 degraded。
-        "model_update_pending": model_update_pending,
-        // 上一格是采样值（至多 30 s 刷一次）：这里说清样本多旧、是否正在刷新。
-        "model_update_pending_observation": model_pending_status_observation(),
+        // `window_blocks` / `spatial_reconcile` / `model_update_pending` /
+        // `model_update_pending_observation` 四格随第二条异步账退了（ADR-072 D5，spec §7）：
+        // 数据侧确定性失败跨重启的那一份在 `logs/batch-failures-*.jsonl`（`batch_failures`
+        // 是进程内那一份）；写库中途死掉的库看 `/dbnums` 每行的 `write_state`。
         "dbnum_consistency": dbnum_consistency,
         "dbnum_consistency_observation": health_census_observation(),
         // 空间树状态机 + 文件/库指纹（现读现比）+ 本次启动的装载裁决
@@ -1294,6 +1257,116 @@ pub async fn tree_ancestors(
         "source": "direct",
         "refnos": refnos,
     })))
+}
+
+/// `GET /api/v1/spatial/nearby[/refnos]` 的 query 串：身份三格 + 查询参数原文。
+///
+/// 查询参数全部按字串收、由 `spatial_query::SpatialQueryParams::parse` 解析：`serde(flatten)`
+/// 之下 urlencoded 会把每个值先缓冲成字串，数字字段直接标 `f32` / `usize` 会在反序列化时报
+/// 「invalid type: string」；自己解还能给出中文错误信息。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialNearbyReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_query::RawSpatialQuery,
+}
+
+/// `spatial/*` 的错误：`ApiError` 之外多一档「空间树未就绪」（spec §4.13）。它要带
+/// `Retry-After` 与非空的 `detail.state`，而 `ApiError` 的信封把 `detail` 写死为 `null`、也不带
+/// 响应头（spec §3），所以单独成型，不去改动统一信封与它的十几处构造点。
+#[derive(Debug)]
+pub enum SpatialApiError {
+    Api(ApiError),
+    NotReady(crate::fast_model::spatial_state::SpatialTreeState),
+}
+
+impl From<ApiError> for SpatialApiError {
+    fn from(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+}
+
+impl From<spatial_query::SpatialQueryError> for SpatialApiError {
+    fn from(error: spatial_query::SpatialQueryError) -> Self {
+        use spatial_query::SpatialQueryError;
+        match error {
+            SpatialQueryError::BadRequest(message) => Self::Api(ApiError::bad_request(message)),
+            SpatialQueryError::NotFound(message) => Self::Api(ApiError::not_found(message)),
+            SpatialQueryError::NotReady(state) => Self::NotReady(state),
+            SpatialQueryError::Internal(error) => Self::Api(ApiError::from_domain(error)),
+        }
+    }
+}
+
+impl IntoResponse for SpatialApiError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Api(error) => error.into_response(),
+            Self::NotReady(state) => {
+                let retry_after = spatial_query::RETRY_AFTER_SECS;
+                let body = json!({
+                    "code": "spatial_not_ready",
+                    "message": format!(
+                        "空间树状态为 {}，范围查询暂不可用；{retry_after} 秒后重试",
+                        state.as_str()
+                    ),
+                    "detail": { "state": state.as_str() },
+                });
+                let mut response =
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    header::HeaderValue::from(retry_after),
+                );
+                response
+            }
+        }
+    }
+}
+
+/// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页
+/// （spec §4.13）。只读树、不取空间串行锁；树不在 Ready / ReadyEmpty 回 503 `spatial_not_ready`。
+pub async fn spatial_nearby(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialNearbyReq>,
+) -> Result<Json<spatial_query::NearbyResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby(&params, service.as_ref()).await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。
+pub async fn spatial_nearby_refnos(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialNearbyReq>,
+) -> Result<Json<spatial_query::NearbyRefnosResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_refnos(&params, service.as_ref()).await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/negative-nouns — 负实体 noun 清单（`TOTAL_NEG_NOUN_NAMES` 去重）。
+pub async fn spatial_negative_nouns(
+    State(state): State<AppState>,
+    Query(identity): Query<ProjectReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &identity)?;
+    Ok(Json(json!({ "nouns": spatial_query::negative_nouns() })))
 }
 
 /// POST /api/v1/update/preview — 映射 `preview_manual_update`（spec §4.2）。
@@ -1662,6 +1735,8 @@ pub async fn model_ensure(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.ensure",
+        format!("refno={} force={}", req.refno, req.force));
     resolve_identity(&state, &req.identity)?;
     let Ok(refu) = RefU64::from_str(&req.refno) else {
         return Err(ApiError::bad_request(format!(
@@ -1689,12 +1764,28 @@ pub async fn model_ensure(
     let memory_only_dbnum = route
         .filter(|route| !route.is_database())
         .map(|route| route.dbnum);
+    if memory_only_dbnum.is_some() {
+        require_room_bootstrap_ready()?;
+    }
+    if let Some(dbnum) = memory_only_dbnum
+        && let Some(task) = crate::data_interface::task_registry::TaskRegistry::global()
+            .active_dbnum_model_ensure(dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum={dbnum} 已有整库模型任务 {} 在运行；单根 ensure 不与它并发写同一库",
+            task.task_id
+        )));
+    }
     let mgr = state.mgr.clone();
     let force = req.force;
     let worker_refno = req.refno.clone();
     let direct_tree = state.direct_tree.clone();
     let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
+        let mut worker_log = crate::process_diagnostics::Operation::begin("model.worker.begin",
+            format!("refno={worker_refno} dbnum={memory_only_dbnum:?} force={force}"));
         let generate = async move {
+            let mut root_log = crate::process_diagnostics::Operation::begin("model.roots.begin",
+                format!("refno={refno}"));
             // 范围下的生成根由 e3d-io 骨架给（唯一路：legacy 那条经 SurrealDB `pe` 子树上溯的
             // `ensure_model_scope_generated` 随 db 读路由于 2026-09-08 退役）。
             let tree = direct_tree.get().await?;
@@ -1706,6 +1797,7 @@ pub async fn model_ensure(
             })
             .await
             .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
+            root_log.finish(format!("refno={refno} generation_roots={}", roots.len()));
             mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
                 .await
         };
@@ -1716,7 +1808,10 @@ pub async fn model_ensure(
             None => generate.await,
         };
         if let Err(error) = &result {
+            worker_log.finish(format!("failed refno={worker_refno} error={error:#}"));
             log::error!("按需生成后台失败 refno={worker_refno}: {error:#}");
+        } else {
+            worker_log.finish(format!("success refno={worker_refno}"));
         }
         result
     })
@@ -1730,16 +1825,21 @@ pub async fn model_ensure(
     })?;
     let result = task_result
         .map_err(|error| {
+            diagnostic.finish(format!("worker_join_failed: {error}"));
             ApiError::from_domain(anyhow::anyhow!("按需生成后台任务异常结束: {error}"))
         })?
-        .map_err(ensure_error)?;
+        .map_err(|error| {
+            diagnostic.finish(format!("generation_failed: {error:#}"));
+            ensure_error(error)
+        })?;
+    diagnostic.finish(format!("generated refno={} available={}", req.refno, result.model_available));
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
     if let Some(route) = route {
         let object = payload.as_object_mut().ok_or_else(|| {
             ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
         })?;
-        // 回执说清这一批模型现在在哪、活不活得过重启（§8 R2）：`durable = false` 的那一档
-        // 由 `/model/records` 从进程内投影供数，持久由初始化 run 负责。
+        // 回执说清这一批模型现在从哪读、活不活得过重启：`durable = false` 的读透档
+        // 仍会发布到本进程 kv-mem，只是不跨重启保存。
         object.insert("dbnum".into(), json!(route.dbnum));
         object.insert("model_source".into(), json!(route.source.as_str()));
         object.insert(
@@ -1862,6 +1962,29 @@ async fn append_publication_state(
     Ok(())
 }
 
+fn memory_dbnum_task_error(dbnum: u32, error: anyhow::Error) -> ApiError {
+    if error
+        .downcast_ref::<crate::data_interface::model_dbnum_ensure::RoomBootstrapInProgress>()
+        .is_some()
+    {
+        return ApiError::service_unavailable(
+            "room_bootstrap_in_progress",
+            format!(
+                "dbnum={dbnum} 的房间启动初始化尚未完成；查看 /health.initialization.room_bootstrap"
+            ),
+        );
+    }
+    if error
+        .downcast_ref::<crate::data_interface::model_dbnum_ensure::DbnumModelEnsureRequiresMemory>()
+        .is_some()
+    {
+        return ApiError::conflict(format!(
+            "dbnum={dbnum} 在冻结根集合期间已切换为 database 模型源；本次未创建整库即时任务"
+        ));
+    }
+    ApiError::from_domain(error)
+}
+
 /// POST /api/v1/dbnums/{dbnum}/model/rebuild — 强制把该库当前全部权威生成根投入
 /// 现有模型协调器。端点不直调全量生成器，不删旧模型，也不触碰数据水位。
 pub async fn dbnum_model_rebuild(
@@ -1869,18 +1992,131 @@ pub async fn dbnum_model_rebuild(
     Path(dbnum): Path<u32>,
     Json(identity): Json<ProjectReq>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    resolve_identity(&state, &identity)?;
-    if !crate::data_interface::watch_scope::admits(dbnum) {
-        return Err(ApiError::bad_request(
-            crate::data_interface::watch_scope::excluded_reason(dbnum),
-        ));
-    }
-    let receipt = crate::data_interface::model_rebuild::start(&state.mgr, dbnum)
+    let identity = resolve_identity(&state, &identity)?;
+    let route = crate::data_interface::model_read_route::route_for(dbnum)
         .await
         .map_err(ApiError::from_domain)?;
-    let body =
-        serde_json::to_value(receipt).map_err(|error| ApiError::from_domain(error.into()))?;
+    let body = if route.is_database() {
+        if !crate::data_interface::watch_scope::admits(dbnum) {
+            return Err(ApiError::bad_request(
+                crate::data_interface::watch_scope::excluded_reason(dbnum),
+            ));
+        }
+        serde_json::to_value(
+            crate::data_interface::model_rebuild::start(&state.mgr, dbnum)
+                .await
+                .map_err(ApiError::from_domain)?,
+        )
+    } else {
+        serde_json::to_value(
+            crate::data_interface::model_dbnum_ensure::start_forced(
+                state.mgr.clone(),
+                &identity.project,
+                dbnum,
+            )
+            .await
+            .map_err(|error| memory_dbnum_task_error(dbnum, error))?,
+        )
+    }
+    .map_err(|error| ApiError::from_domain(error.into()))?;
     Ok((StatusCode::ACCEPTED, Json(body)))
+}
+
+/// POST /api/v1/dbnums/{dbnum}/model/ensure — 对 memory-routed 库冻结一次源与根集合，
+/// 创建进程内异步整库任务。与 durable 的 `model/rebuild` 是两条入口。
+pub async fn dbnum_model_ensure(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Json(identity): Json<ProjectReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let identity = resolve_identity(&state, &identity)?;
+    let route = crate::data_interface::model_read_route::route_for(dbnum)
+        .await
+        .map_err(ApiError::from_domain)?;
+    if route.is_database() {
+        return Err(ApiError::conflict(format!(
+            "dbnum={dbnum} 当前以 database 模型为准；整库即时 ensure 只服务 memory-routed \
+             投影，需要持久重建时请调用 POST /api/v1/dbnums/{dbnum}/model/rebuild"
+        )));
+    }
+    let receipt = crate::data_interface::model_dbnum_ensure::start(
+        state.mgr.clone(),
+        &identity.project,
+        dbnum,
+    )
+    .await
+    .map_err(|error| memory_dbnum_task_error(dbnum, error))?;
+    let mut body =
+        serde_json::to_value(receipt).map_err(|error| ApiError::from_domain(error.into()))?;
+    let object = body.as_object_mut().ok_or_else(|| {
+        ApiError::from_domain(anyhow::anyhow!(
+            "dbnum model ensure receipt is not an object"
+        ))
+    })?;
+    object.insert("model_source".into(), json!(route.source.as_str()));
+    object.insert(
+        "model_source_reason".into(),
+        json!(route.reason.map(|reason| reason.as_str())),
+    );
+    object.insert("durable".into(), json!(false));
+    Ok((StatusCode::ACCEPTED, Json(body)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DbnumModelRootsQuery {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub ready: Option<String>,
+}
+
+fn query_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// GET /api/v1/dbnums/{dbnum}/model/roots — 返回任务冻结根集合，或（未给 task_id 时）
+/// 当前文件的诊断快照。`ready` 与任务进度共用 source_sesno 有下限的投影回执判据。
+pub async fn dbnum_model_roots(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Query(query): Query<DbnumModelRootsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    let view = match query.task_id.as_deref() {
+        Some(task_id) => crate::data_interface::model_dbnum_ensure::task_roots(task_id, dbnum)
+            .ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "dbnum model task snapshot 不存在或不属于 dbnum={dbnum}: {task_id}"
+                ))
+            })?,
+        None => crate::data_interface::model_dbnum_ensure::current_roots(dbnum)
+            .await
+            .map_err(ApiError::from_domain)?,
+    };
+    let only_ready = query_flag(query.ready.as_deref());
+    let roots = view
+        .roots
+        .into_iter()
+        .filter(|root| !only_ready || root.ready)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "source": "direct",
+        "task_id": view.task_id,
+        "dbnum": view.dbnum,
+        "source_sesno": view.source_sesno,
+        "source_file": view.source_file,
+        "total": view.total,
+        "ready_total": view.ready_total,
+        "only_ready": only_ready,
+        "roots": roots,
+    })))
 }
 
 /// POST /api/v1/dbnums/{dbnum}/data/reinitialize — 人工「重新解析」（2026-09-10 重新计算契约 C2 / C3）。
@@ -1945,88 +2181,6 @@ fn ensure_error(error: anyhow::Error) -> ApiError {
     }
 }
 
-/// GET /api/v1/update/pending-units — 映射 `load_pending_model_units`（spec §4.6）。
-pub async fn pending_units(
-    State(_state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let units = load_pending_model_units()
-        .await
-        .map_err(ApiError::from_domain)?;
-    let room_units = load_pending_room_units()
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(pending_units_payload(units, room_units)))
-}
-
-fn pending_units_payload(
-    units: Vec<PendingModelUnit>,
-    room_units: Vec<PendingRoomUnit>,
-) -> serde_json::Value {
-    // `units` / `dead_letters` 保留原来只统计 regen_root 的契约；房间侧追加独立字段，
-    // 避免旧客户端把面板/构件误当生成根，也避免悄悄改变旧状态栏整数的含义。
-    let dead_letters = units.iter().filter(|unit| unit.dead).count();
-    let room_dead_letters = room_units.iter().filter(|unit| unit.dead).count();
-    json!({
-        "units": units,
-        "dead_letters": dead_letters,
-        "room_units": room_units,
-        "room_dead_letters": room_dead_letters,
-    })
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PendingUnitRetryReq {
-    /// 队列行动作名（`regen_root` / `transform` / …）。缺省 `regen_root`——
-    /// 死信几乎全是它，检查视图（GET /pending-units）列的也正是这一种。
-    #[serde(default)]
-    pub action: Option<String>,
-    /// PDMS `a/b` 目标（与检查视图回执里的 `root_refno` 同值）。
-    pub target_refno: String,
-    #[serde(flatten)]
-    pub identity: ProjectReq,
-}
-
-/// POST /api/v1/update/pending-units/retry — 人工复活一行死信（spec §4.6.1）。
-///
-/// 自动路径的 attempts 上限把到顶的行永远挡在 drain 之外，此前除了直接改库没有
-/// 第二条复活路。只允许操作已存在的 `(action, target_refno)`：这个端点是「复活」
-/// 不是「入队」。成功回 202 + 复活后的行，行不存在回 404。
-pub async fn pending_units_retry(
-    State(state): State<AppState>,
-    Json(req): Json<PendingUnitRetryReq>,
-) -> Result<impl IntoResponse, ApiError> {
-    resolve_identity(&state, &req.identity)?;
-    let action = match req.action.as_deref() {
-        None => crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
-        Some(name) => crate::data_interface::model_update_plan::ModelWorkAction::parse(name)
-            .ok_or_else(|| ApiError::bad_request(format!("未知的队列动作: {name}")))?,
-    };
-    let revived =
-        crate::data_interface::model_update_pending::retry_pending_unit(action, &req.target_refno)
-            .await
-            .map_err(ApiError::from_domain)?
-            .ok_or_else(|| {
-                ApiError::not_found(format!(
-                    "待重试任务不存在: ({}, {})，复活只作用于已存在的行",
-                    action.as_str(),
-                    req.target_refno
-                ))
-            })?;
-    // 复活绕过了入队通道，worker 的 Notify 没人碰过；不叫醒它，这行要等 30s
-    // 兜底轮询才被捡走。
-    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "action": revived.action.as_str(),
-            "target_refno": revived.target_refno,
-            "revision": revived.revision,
-            "attempts": revived.attempts,
-            "status": revived.status,
-        })),
-    ))
-}
-
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
 ///
 /// 登记表 ∪ 项目扫描，每行带 `anomaly` / `blocked` / `excluded`：阻断与排除的库
@@ -2045,7 +2199,7 @@ pub async fn dbnums(
             .get()
             .await
             .map_err(ApiError::from_domain)?;
-        let skeleton = service.skeleton().map_err(ApiError::from_domain)?;
+        let skeleton = service.metadata().map_err(ApiError::from_domain)?;
         let mut dbnums = skeleton_dbnums(skeleton.databases());
         annotate_ref0s(&mut dbnums, |dbnum| skeleton.ref0s_of(dbnum));
         return Ok(Json(json!({
@@ -2062,7 +2216,7 @@ pub async fn dbnums(
             .get()
             .await
             .map_err(ApiError::from_domain)?;
-        let skeleton = service.skeleton().map_err(ApiError::from_domain)?;
+        let skeleton = service.metadata().map_err(ApiError::from_domain)?;
         let mut dbnums = Vec::new();
         append_cold_read_through_dbnums(&mut dbnums, skeleton.databases());
         annotate_ref0s(&mut dbnums, |dbnum| skeleton.ref0s_of(dbnum));
@@ -2173,7 +2327,7 @@ pub async fn dbnums(
 
 fn append_cold_read_through_dbnums(
     rows: &mut Vec<Value>,
-    databases: &[crate::data_interface::mdb_memory_store::LoadedDb],
+    databases: &[crate::data_interface::direct_tree::TreeDatabase],
 ) {
     let mut present = rows
         .iter()
@@ -2226,7 +2380,7 @@ fn append_cold_read_through_dbnums(
     rows.sort_by_key(|row| row.get("dbnum").and_then(Value::as_u64).unwrap_or_default());
 }
 
-fn skeleton_dbnums(databases: &[crate::data_interface::mdb_memory_store::LoadedDb]) -> Vec<Value> {
+fn skeleton_dbnums(databases: &[crate::data_interface::direct_tree::TreeDatabase]) -> Vec<Value> {
     let mut rows = databases
         .iter()
         .map(|database| {
@@ -2247,11 +2401,9 @@ fn skeleton_dbnums(databases: &[crate::data_interface::mdb_memory_store::LoadedD
 
 /// 给 `/dbnums` 的每一行写 `model_source` / `model_source_reason`（plan 2026-09-06 §8 R1）：
 /// 这个库的模型现在该从哪儿读。判据只有 `model_read_route::route` 一处，这里只是把行上已有的
-/// 三枚水位与「该库的数据批次任务在不在跑」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
+/// 两枚水位与「该库的数据批次任务在不在跑」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
 ///
-/// 模型 / 房间两枚水位只在行上**有**那两格时才参与比较（ADR-071 D8「三水位相等」）：判决列
-/// （`dbnum_consistency`）只给 DESI 行，普查失败时整格缺席。没有那两格就不判「落后」——
-/// 「不知道」不能写成「落后」，否则 SYST / CATA 与一次普查失败都会被讲成 `model_lagging`。
+/// 模型水位缺席时不能伪造成与数据水位相等；判据 fail closed 到内存并点名 unknown。
 fn annotate_model_source(
     rows: &mut [Value],
     data_face: crate::options::DataFace,
@@ -2275,14 +2427,12 @@ fn annotate_model_source(
                 .and_then(|value| i32::try_from(value).ok())
         };
         let applied = watermark("applied_sesno").unwrap_or_default();
-        let model = watermark("model_sesno").unwrap_or(applied);
-        let room = watermark("room_sesno").unwrap_or(applied);
-        let route = crate::data_interface::model_read_route::route(
+        let model = watermark("model_sesno");
+        let route = crate::data_interface::model_read_route::route_with_optional_model_watermark(
             dbnum,
             data_face,
             applied,
             model,
-            room,
             publishing(dbnum),
         );
         object.insert("model_source".into(), json!(route.source.as_str()));
@@ -2402,35 +2552,10 @@ pub async fn dbnum_prune_above_preview(
         .map_err(|error| ApiError::from_domain(error.into()))
 }
 
-/// DELETE /api/v1/dbnums/{dbnum}/data/above/{watermark}
-///
-/// Queue pause and an exact `confirm={dbnum}:{watermark}` are mandatory. The
-/// queue stays paused so the caller can inspect the result before replay.
-pub async fn dbnum_prune_above(
-    State(state): State<AppState>,
-    Path((dbnum, watermark)): Path<(u32, i32)>,
-    Query(query): Query<PruneAboveWatermarkReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    resolve_identity(&state, &query.identity)?;
-    let expected = format!("{dbnum}:{watermark}");
-    if query.confirm.as_deref() != Some(expected.as_str()) {
-        return Err(ApiError::bad_request(format!(
-            "confirm must equal {expected}"
-        )));
-    }
-    ensure_dbnum_mutation_idle(dbnum)?;
-    let result = crate::data_interface::fast_delete::prune_above_watermark(dbnum, watermark)
-        .await
-        .map_err(ApiError::from_domain)?;
-    serde_json::to_value(result)
-        .map(Json)
-        .map_err(|error| ApiError::from_domain(error.into()))
-}
-
 // `POST /dbnums/{dbnum}/realign`（单库回退对齐，2026-08-12 引入）随 ADR-021
 // 移除：回退由扫描路径自动入队重建批次、worker 冻结点复核后整库清空重建，
 // 端点没有剩余职责。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`（整库
-// 快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理）。
+// 快删）；按水位残留端点仅保留 GET 预览，不再允许局部删除。
 
 /// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
 ///
@@ -2529,7 +2654,7 @@ pub async fn search(
         })
         .collect::<Vec<_>>();
     let next = cursor.saturating_add(nodes.len());
-    let skeleton = service.skeleton().map_err(ApiError::from_domain)?;
+    let skeleton = service.metadata().map_err(ApiError::from_domain)?;
     let fingerprint = skeleton.session_fingerprint();
     Ok(Json(json!({
         "source": "snapshot",
@@ -2628,79 +2753,6 @@ pub(crate) fn page_records_across_roots<T>(
     }
 }
 
-/// 进程内投影的一条记录 → `GeomInstQuery`（与从库里读出来的同一形状；`owner` 填生成根）。
-fn projection_record_to_query(
-    record: crate::fast_model::model_memory_store::ProjectedGeometry,
-    root: e3d_io::refno::RefNo,
-) -> aios_core::GeomInstQuery {
-    // Ordinary canonical primitives keep their placement separate from
-    // the element world transform. Tubes already fold it into world.
-    let local_transform = match (&record.shape, &record.tube) {
-        (
-            crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                local_transform,
-                ..
-            },
-            None,
-        ) => *local_transform,
-        _ => glam::DMat4::IDENTITY,
-    };
-    let (local_scale, local_rotation, local_translation) =
-        local_transform.to_scale_rotation_translation();
-    let (scale, rotation, translation) = record.world_transform.to_scale_rotation_translation();
-    let world_trans = bevy_transform::components::Transform {
-        translation: glam::Vec3::new(
-            translation.x as f32,
-            translation.y as f32,
-            translation.z as f32,
-        ),
-        rotation: glam::Quat::from_xyzw(
-            rotation.x as f32,
-            rotation.y as f32,
-            rotation.z as f32,
-            rotation.w as f32,
-        ),
-        scale: glam::Vec3::new(scale.x as f32, scale.y as f32, scale.z as f32),
-    };
-    let source = RefnoEnum::from(RefU64::from_two_nums(
-        record.source_refno.word0,
-        record.source_refno.word1,
-    ));
-    let owner = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-    aios_core::GeomInstQuery {
-        refno: source,
-        old_refno: None,
-        owner,
-        world_aabb: parry3d::bounding_volume::Aabb::new(
-            parry3d::math::Point::new(
-                record.world_bounds[0][0],
-                record.world_bounds[0][1],
-                record.world_bounds[0][2],
-            ),
-            parry3d::math::Point::new(
-                record.world_bounds[1][0],
-                record.world_bounds[1][1],
-                record.world_bounds[1][2],
-            ),
-        ),
-        world_trans,
-        insts: vec![aios_core::ModelHashInst {
-            geo_hash: record.mesh_id,
-            transform: bevy_transform::components::Transform {
-                translation: local_translation.as_vec3(),
-                rotation: local_rotation.as_quat(),
-                scale: local_scale.as_vec3(),
-            },
-            is_tubi: record.tube.is_some(),
-            is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
-        }],
-        has_neg: false,
-        generic: record.noun,
-        pts: None,
-        date: None,
-    }
-}
-
 /// POST /api/v1/model/records — 按生成根分页取模型记录：单根（原有形状）或
 /// `generation_roots[]` 多根批量（spec §4.5.2，决策 d-181）。
 pub async fn model_records(
@@ -2780,25 +2832,54 @@ pub async fn model_records(
             return Err(ApiError::conflict(message));
         }
     }
+    let mut memory_overlay_used = false;
     let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
         Vec::with_capacity(roots.len());
     for (name, root) in roots.iter().zip(&parsed_roots) {
-        let records = if route.is_database() {
-            let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        // Durable reads never hydrate kv-mem.  A resident receipt is a complete
+        // newer root snapshot and shadows the RocksDB root; cold roots continue
+        // to be served directly by RocksDB.
+        let memory_overlay = store.receipt(scope, *root).is_some();
+        memory_overlay_used |= memory_overlay;
+        let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        let records =
             crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
                 .await
-                .map_err(ApiError::from_domain)?
-        } else {
-            store
-                .records_of_root(scope, *root)
-                .into_iter()
-                .map(|record| projection_record_to_query(record, *root))
-                .collect()
-        };
+                .map_err(ApiError::from_domain)?;
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
-    let source = route.source.records_source_label();
+    let source = if route.is_database() && memory_overlay_used {
+        "rocksdb+memory-overlay"
+    } else {
+        route.source.records_source_label()
+    };
+    let incomplete_roots = if route.is_database()
+        || !crate::data_interface::model_read_route::publication_policy(true).uses_process_store()
+    {
+        Vec::new()
+    } else {
+        let room_required = crate::options::room_membership();
+        let room_generation = crate::fast_model::model_db_adapter::required_room_generation()
+            .ok()
+            .flatten();
+        roots
+            .iter()
+            .zip(&parsed_roots)
+            .filter_map(|(name, root)| {
+                let receipt = store.receipt(scope, *root)?;
+                let complete = (!room_required || room_generation.is_some())
+                    && store.publication_ack(scope, *root).is_some_and(|ack| {
+                        ack.dbnum == dbnum
+                            && ack.source_sesno >= receipt.source_sesno
+                            && ack.geometry_count == receipt.geometry_count
+                            && ack.room_membership == room_required
+                            && ack.room_generation.as_deref() == room_generation.as_deref()
+                    });
+                (!complete).then(|| name.clone())
+            })
+            .collect::<Vec<_>>()
+    };
     let snapshot =
         crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
     let session_vector = snapshot
@@ -2811,6 +2892,8 @@ pub async fn model_records(
         "model_source": route.source.as_str(),
         "model_source_reason": route.reason.map(|reason| reason.as_str()),
         "durable": route.is_database(),
+        "complete": incomplete_roots.is_empty(),
+        "incomplete_roots": incomplete_roots,
         "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
         "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
         "items": page.items,
@@ -2960,11 +3043,13 @@ mod tests {
             index.contains("./pkg/plant_ui_app.js"),
             "入口页必须加载内嵌 WASM 启动器"
         );
-        assert_eq!(
-            index.matches("window.location.origin").count(),
-            3,
-            "动态配置必须把默认模型服务和空数据服务映射到当前内置服务"
-        );
+        // Assert the URL fallbacks themselves, not an incidental total count:
+        // the embedded page supports both legacy and current config shapes.
+        assert!(index.contains("configuredModelUrl !== \"http://127.0.0.1:8022\""));
+        assert!(index.contains("current.data_api_url?.trim() || window.location.origin"));
+        assert!(index.contains("current.data_api_url = configuredDataUrl || window.location.origin"));
+        assert!(index.contains(": window.location.origin"));
+
     }
 
     #[test]
@@ -3011,9 +3096,9 @@ mod tests {
         assert!(rows[2].get("ref0s").is_none(), "没有 dbnum 的行不该被写");
     }
 
-    /// `/dbnums` 每行的 `model_source` 只由行上的三枚水位与「该库的数据批次任务在不在跑」决定
-    /// （plan 2026-09-06 §8 R1；ADR-071 D8 三水位相等）；没有 `dbnum` 的行不碰；没有模型 / 房间
-    /// 判决列的行（非 DESI、普查失败）不判「落后」。
+    /// `/dbnums` 每行的 `model_source` 只由行上的两枚水位与「该库的数据批次任务在不在跑」决定
+    /// （plan 2026-09-06 §8 R1；ADR-071 D8 水位相等，ADR-073 D2 收成两枚）；没有 `dbnum` 的行不碰；
+    /// 没有模型判决列的行（非 DESI、普查失败）不判「落后」。
     #[test]
     fn dbnum_rows_carry_their_model_source_from_the_single_predicate() {
         let mut rows = vec![
@@ -3021,16 +3106,19 @@ mod tests {
             json!({ "dbnum": 8000, "applied_sesno": 285 }),
             json!({ "dbnum": 7999, "applied_sesno": 0 }),
             json!({ "note": "no dbnum here" }),
-            json!({ "dbnum": 7998, "applied_sesno": 264, "model_sesno": 260, "room_sesno": 264 }),
-            json!({ "dbnum": 7996, "applied_sesno": 264, "model_sesno": 264, "room_sesno": 200 }),
-            json!({ "dbnum": 7995, "applied_sesno": 264, "model_sesno": 264, "room_sesno": 264 }),
+            json!({ "dbnum": 7998, "applied_sesno": 264, "model_sesno": 260 }),
+            json!({ "dbnum": 7996, "applied_sesno": 264, "model_sesno": 264 }),
+            json!({ "dbnum": 7995, "applied_sesno": 264, "model_sesno": 264 }),
         ];
         annotate_model_source(&mut rows, crate::options::DataFace::Ingest, |dbnum| {
             dbnum == 8000
         });
-        // 没有判决列（SYST / CATA 行、普查失败）：不判落后，仍按 applied + 在飞给。
-        assert_eq!(rows[0]["model_source"], "database");
-        assert!(rows[0]["model_source_reason"].is_null());
+        // 缺模型水位不能证明相等：不冒充持久层权威。
+        assert_eq!(rows[0]["model_source"], "memory");
+        assert_eq!(
+            rows[0]["model_source_reason"],
+            "model_watermark_unavailable"
+        );
         assert_eq!(rows[1]["model_source"], "memory");
         assert_eq!(rows[1]["model_source_reason"], "initialization_publishing");
         assert_eq!(rows[2]["model_source"], "memory");
@@ -3044,8 +3132,9 @@ mod tests {
         );
         assert_eq!(rows[4]["model_source"], "memory");
         assert_eq!(rows[4]["model_source_reason"], "model_lagging");
-        assert_eq!(rows[5]["model_source"], "memory");
-        assert_eq!(rows[5]["model_source_reason"], "room_lagging");
+        // 模型追平即整库追平：房间边随根写在模型块里，没有第三枚水位可落后（ADR-073 D2）。
+        assert_eq!(rows[5]["model_source"], "database");
+        assert!(rows[5]["model_source_reason"].is_null());
         assert_eq!(rows[6]["model_source"], "database");
         assert!(rows[6]["model_source_reason"].is_null());
 
@@ -3157,26 +3246,23 @@ mod tests {
     fn cold_read_through_dbnums_include_mdb_design_files_without_duplicate_rows() {
         let mut rows = vec![json!({ "dbnum": 7999, "db_type": "DESI" })];
         let databases = vec![
-            crate::data_interface::mdb_memory_store::LoadedDb {
+            crate::data_interface::direct_tree::TreeDatabase {
                 dbnum: 7997,
                 db_type: "DESI".into(),
                 file: std::path::PathBuf::from("ams7997_0001"),
                 sesno: 264,
-                elements: 10,
             },
-            crate::data_interface::mdb_memory_store::LoadedDb {
+            crate::data_interface::direct_tree::TreeDatabase {
                 dbnum: 7999,
                 db_type: "ISOD".into(),
                 file: std::path::PathBuf::from("ams7999_0001"),
                 sesno: 46,
-                elements: 20,
             },
-            crate::data_interface::mdb_memory_store::LoadedDb {
+            crate::data_interface::direct_tree::TreeDatabase {
                 dbnum: 8001,
                 db_type: "ISOD".into(),
                 file: std::path::PathBuf::from("ams8001_0001"),
                 sesno: 8,
-                elements: 5,
             },
         ];
 
@@ -3196,19 +3282,17 @@ mod tests {
     #[test]
     fn skeleton_dbnums_are_sufficient_for_startup_identity() {
         let rows = skeleton_dbnums(&[
-            crate::data_interface::mdb_memory_store::LoadedDb {
+            crate::data_interface::direct_tree::TreeDatabase {
                 dbnum: 8000,
                 db_type: "DESI".into(),
                 file: std::path::PathBuf::from("ams8000_0001"),
                 sesno: 444,
-                elements: 12,
             },
-            crate::data_interface::mdb_memory_store::LoadedDb {
+            crate::data_interface::direct_tree::TreeDatabase {
                 dbnum: 7997,
                 db_type: "DESI".into(),
                 file: std::path::PathBuf::from("ams7997_0001"),
                 sesno: 155,
-                elements: 34,
             },
         ]);
 
@@ -3268,42 +3352,6 @@ mod tests {
                 "delete response must expose {field}: {body}"
             );
         }
-    }
-
-    #[test]
-    fn pending_units_adds_room_rows_without_changing_legacy_counts() {
-        let units = vec![PendingModelUnit {
-            attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
-            dead: true,
-            ..Default::default()
-        }];
-        let room_units = vec![PendingRoomUnit {
-            dbnum: 7997,
-            action: crate::data_interface::model_update_plan::ModelWorkAction::RoomRecalcElement,
-            target_refno: "24381/100677".into(),
-            noun: "EQUI".into(),
-            source_end_sesno: 42,
-            status: "failed".into(),
-            attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
-            last_error: Some("boom".into()),
-            file_rounds: vec!["file_round:7997:42".into()],
-            required_publish_version: 9,
-            published_version: 8,
-            computed_publish_version: 7,
-            stale: true,
-            dead: true,
-        }];
-
-        let payload = pending_units_payload(units, room_units);
-        assert_eq!(payload["dead_letters"], 1, "旧口径仍只统计模型根");
-        assert_eq!(payload["room_dead_letters"], 1);
-        assert_eq!(payload["units"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["room_units"][0]["action"], "room_recalc_element");
-        assert_eq!(payload["room_units"][0]["target_refno"], "24381/100677");
-        assert_eq!(payload["room_units"][0]["required_publish_version"], 9);
-        assert_eq!(payload["room_units"][0]["published_version"], 8);
-        assert_eq!(payload["room_units"][0]["computed_publish_version"], 7);
-        assert_eq!(payload["room_units"][0]["stale"], true);
     }
 
     /// 面板内嵌进二进制之后，两件事都得钉住。
@@ -3395,6 +3443,138 @@ mod tests {
         }
     }
 
+    #[test]
+    fn health_advertises_the_dbnum_model_capabilities() {
+        let capabilities = model_capabilities();
+        assert_eq!(capabilities["dbnum_model_ensure"], true);
+        assert_eq!(capabilities["dbnum_model_ready_roots"], true);
+        assert_eq!(
+            capabilities["model_records_batch_max_roots"],
+            MAX_MODEL_RECORDS_ROOTS
+        );
+        assert_eq!(capabilities["mesh_formats"], json!(["mesh", "glb"]));
+        assert_eq!(capabilities["room_complete_publication_ack"], true);
+        assert!(
+            matches!(
+                capabilities["room_rebuild_executor"].as_str(),
+                Some("memory" | "durable")
+            ),
+            "{capabilities}"
+        );
+
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert_eq!(
+            health
+                .matches("\"capabilities\": model_capabilities()")
+                .count(),
+            2,
+            "connected and disconnected health responses must advertise the same capabilities"
+        );
+    }
+
+    #[test]
+    fn health_exposes_startup_dabacon_tag_summary_without_making_it_a_health_gate() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert!(
+            health.contains("dabacon_tag_summary::health_snapshot()"),
+            "/health 必须只读启动时项目 DAB tag 聚合快照"
+        );
+        assert_eq!(
+            health.matches("\"dabacon_tags\"").count(),
+            2,
+            "持久层连通与断开两种 health 响应都必须带 dabacon_tags"
+        );
+        assert!(
+            !health.contains("degraded.push(\"dabacon_tags\")")
+                && !health.contains("blocking_conditions.push(\"dabacon_tags\")"),
+            "DAB tag 是版本诊断，不得改变服务健康结论"
+        );
+    }
+
+    #[test]
+    fn health_never_calls_rooms_available_from_store_connectivity_alone() {
+        let source = include_str!("handlers.rs").replace("\r\n", "\n");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert!(
+            health.contains("\"room\": room_feature_status("),
+            "room availability must combine the switch, resident, startup bootstrap and executor"
+        );
+        assert!(
+            !health.contains("\"room\": {\"status\": \"available\"}"),
+            "a connected SUL_DB alone cannot prove room calculation is available"
+        );
+    }
+
+    #[test]
+    fn dbnum_model_roots_ready_flag_accepts_only_explicit_true_values() {
+        for value in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(query_flag(Some(value)), "{value:?}");
+        }
+        for value in ["0", "false", "no", "off", "anything", ""] {
+            assert!(!query_flag(Some(value)), "{value:?}");
+        }
+        assert!(!query_flag(None));
+    }
+
+    #[test]
+    fn dbnum_model_ensure_routes_by_model_source_and_ignores_watch_scope() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn dbnum_model_ensure(")
+            .expect("dbnum ensure handler")
+            .1
+            .split_once("pub struct DbnumModelRootsQuery")
+            .expect("roots query follows ensure")
+            .0;
+        let route = body
+            .find("model_read_route::route_for(dbnum)")
+            .expect("route");
+        let start = body.find("model_dbnum_ensure::start(").expect("task start");
+        assert!(
+            route < start,
+            "Database must be rejected before task creation"
+        );
+        assert!(body.contains("if route.is_database()"));
+        assert!(!body.contains("watch_scope"));
+    }
+
+    #[test]
+    fn dbnum_model_roots_prefers_the_task_snapshot() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn dbnum_model_roots(")
+            .expect("dbnum roots handler")
+            .1
+            .split_once("/// POST /api/v1/dbnums/{dbnum}/data/reinitialize")
+            .expect("roots handler end")
+            .0;
+        assert!(body.contains("query.task_id.as_deref()"));
+        assert!(body.contains("model_dbnum_ensure::task_roots(task_id, dbnum)"));
+        assert!(body.contains("model_dbnum_ensure::current_roots(dbnum)"));
+        assert!(body.contains("\"ready_total\": view.ready_total"));
+        assert!(body.contains("\"only_ready\": only_ready"));
+    }
+
     /// **`spawned-mem` 的 `endpoint` 必须是真地址。**
     ///
     /// 那台库是本进程拉起来的，但端口是真的、别人连得上；报 `embedded:mem` 会让
@@ -3462,51 +3642,6 @@ mod tests {
     }
 
     #[test]
-    fn every_health_db_section_runs_on_a_budget() {
-        let source = include_str!("handlers.rs");
-        let body = source
-            .split_once("pub async fn health(")
-            .expect("health handler must exist")
-            .1
-            .split_once("pub async fn trace(")
-            .expect("health 之后是 trace")
-            .0;
-
-        for section in [
-            "load_window_blocks()",
-            "spatial_reconcile_status()",
-            "model_pending_status()",
-            "parse_error::snapshot()",
-            "geom_error::snapshot()",
-            "spatial_tree_status()",
-        ] {
-            let at = body
-                .find(section)
-                .unwrap_or_else(|| panic!("{section} 必须还在 /health 里: {body}"));
-            let before = &body[..at];
-            let budget_at = before
-                .rfind("within_health_budget(")
-                .unwrap_or_else(|| panic!("{section} 必须套在 within_health_budget 里: {body}"));
-            assert!(
-                !before[budget_at..].contains(".await"),
-                "{section} 与它前面那个 within_health_budget 之间不该再有 .await——说明它没被套住: {body}"
-            );
-        }
-
-        // room_build 是唯一的豁免：它自带 ROOM_BUILD_HEALTH_TIMEOUT。
-        assert!(
-            body.contains("room_build_health()"),
-            "room_build 必须来自 room_model 的共享渲染器（含它自己的超时）: {body}"
-        );
-        // 超时不能装作没发生：降级分项名要摆出来，否则 `null` 分不出「表空」
-        // 还是「没答上来」。
-        assert!(
-            body.contains("\"degraded_sections\""),
-            "超时分项必须记名: {body}"
-        );
-    }
-
-    #[test]
     fn health_and_model_ensure_expose_initialization_contract() {
         let source = include_str!("handlers.rs");
         let health = source
@@ -3546,47 +3681,6 @@ mod tests {
         assert!(
             queue.contains("initialization.blocked_by"),
             "结构化 blocker 没跟着队列快照一起回: {queue}"
-        );
-    }
-
-    #[test]
-    fn health_is_degraded_by_dead_letters_but_not_by_retryable_backlog() {
-        assert_eq!(health_status(&[], &[]), "ok");
-        assert_eq!(
-            health_status(&[], &["model_update_pending.data_dead_letters"]),
-            "degraded"
-        );
-        assert_eq!(
-            health_status(&[], &["model_update_pending.room_dead_letters"]),
-            "degraded"
-        );
-        assert_eq!(health_status(&["model_update_pending"], &[]), "degraded");
-
-        let source = include_str!("handlers.rs");
-        let body = source
-            .split_once("pub async fn health(")
-            .expect("health exists")
-            .1
-            .split_once("pub async fn trace(")
-            .expect("health end")
-            .0;
-        assert!(body.contains("\"model_update_pending\""), "{body}");
-        assert!(body.contains("\"blocking_conditions\""), "{body}");
-        assert!(
-            body.contains("model_update_pending.data_dead_letters"),
-            "{body}"
-        );
-        assert!(
-            body.contains("model_update_pending.room_dead_letters"),
-            "{body}"
-        );
-        // 页级停滞与死信是两种不同的卡死，但对外是同一件事：模型阶段不会自己走完。
-        // 死信是「这些行认输了」，停滞是「这些行还在被无限重试」——2026-08-27 现场
-        // 只有后者，于是 118 页零收口烧了 50 分钟，而 /health 一路报 ok。
-        assert!(body.contains("model_drain.page_starved"), "{body}");
-        assert_eq!(
-            health_status(&[], &["model_drain.page_starved"]),
-            "degraded"
         );
     }
 
@@ -3633,10 +3727,29 @@ mod tests {
         for key in [
             "\"data_incremental\"",
             "\"model_incremental\"",
-            "\"room_incremental\"",
+            "\"room_membership\"",
         ] {
-            assert!(health.contains(key), "health 必须暴露 {key}: {health}");
+            assert_eq!(
+                health.matches(key).count(),
+                2,
+                "health 的两个分支都必须暴露 {key}: {health}"
+            );
         }
+    }
+
+    #[test]
+    fn health_exposes_bind_and_public_http_addresses_in_both_branches() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert_eq!(health.matches("\"http\": http_addresses").count(), 2);
+        assert!(health.contains("\"bind_addr\": http_bind_addr"));
+        assert!(health.contains("\"public_addr\": http_public_addr"));
     }
 
     /// `/health` 必须报出本项目生效的最小交付单元名词表。
@@ -3662,44 +3775,6 @@ mod tests {
         assert!(
             health.contains("generation_root::configured_delivery_unit_types()"),
             "名词表必须来自共享的项目配置解析，不许在 handler 里另列一份: {health}"
-        );
-    }
-
-    /// `/health` 的 `spatial_reconcile` / `spatial_tree` / `room_build` 字段。
-    ///
-    /// 值级形状由渲染器旁边的单测钉住（side_effect_pending 四键 / aabb_tree
-    /// 九键），这里钉的是接线纪律：两个键必须在、读库失败的降级必须走共享的
-    /// 同键渲染器而不是在 handler 里手搓 JSON——手搓正是这两个形状此前
-    /// 靠肉眼保持一致的原因。
-    #[test]
-    fn health_routes_spatial_and_room_status_through_the_shared_renderers() {
-        let source = include_str!("handlers.rs");
-        let body = source
-            .split_once("pub async fn health(")
-            .expect("health handler must exist")
-            .1
-            .split_once("pub async fn update_preview(")
-            .expect("health 之后是 update_preview")
-            .0;
-
-        for key in [
-            "\"spatial_reconcile\"",
-            "\"spatial_tree\"",
-            "\"room_build\"",
-        ] {
-            assert!(body.contains(key), "health 必须暴露 {key}: {body}");
-        }
-        assert!(
-            body.contains("spatial_reconcile_error_status"),
-            "降级形状必须与成功形状同源: {body}"
-        );
-        assert!(
-            body.contains("spatial_tree_status()"),
-            "spatial_tree 必须来自 aabb_tree 的共享渲染器: {body}"
-        );
-        assert!(
-            body.contains("room_build_health()"),
-            "room_build 必须来自 room_model 的共享渲染器: {body}"
         );
     }
 
@@ -3814,5 +3889,85 @@ mod tests {
             "scope must be checked before task/pending creation: {body}"
         );
         assert!(body.contains("StatusCode::ACCEPTED"));
+    }
+
+    #[test]
+    fn dbnum_model_rebuild_routes_memory_to_the_live_executor_not_the_durable_queue() {
+        let source = include_str!("handlers.rs").replace("\r\n", "\n");
+        let body = source
+            .split_once("pub async fn dbnum_model_rebuild(")
+            .expect("model rebuild handler exists")
+            .1
+            .split_once("/// 解不出生成根")
+            .expect("ensure error mapping follows rebuild")
+            .0;
+        let route = body
+            .find("model_read_route::route_for(dbnum)")
+            .expect("rebuild must resolve the model route");
+        let memory = body
+            .find("model_dbnum_ensure::start_forced(")
+            .expect("memory rebuild must use the live whole-dbnum executor");
+        let durable = body
+            .find("model_rebuild::start(")
+            .expect("database rebuild must retain the durable executor");
+        assert!(
+            route < memory && route < durable,
+            "route selection must happen before either executor is admitted: {body}"
+        );
+    }
+
+    /// spec §4.13：树不在 Ready / ReadyEmpty 时 `spatial/*` 回 503 `spatial_not_ready`，带
+    /// `Retry-After: 5` 与非空的 `detail.state`（状态字面值）——统一信封（§3）之外唯一一处，
+    /// 客户端按它分型重试而不是当 500。另外三档（400 / 404 / 500）仍走 `ApiError` 的信封。
+    #[tokio::test]
+    async fn spatial_not_ready_is_a_503_with_retry_after_and_the_state_in_detail() {
+        use crate::fast_model::spatial_state::SpatialTreeState;
+
+        for state in [
+            SpatialTreeState::Uninitialized,
+            SpatialTreeState::Loading,
+            SpatialTreeState::ReplayRequired,
+            SpatialTreeState::Rebuilding,
+            SpatialTreeState::DegradedReuse,
+            SpatialTreeState::DegradedBlocked,
+        ] {
+            let error: SpatialApiError = spatial_query::SpatialQueryError::NotReady(state).into();
+            let response = error.into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{state:?}"
+            );
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&header::HeaderValue::from(spatial_query::RETRY_AFTER_SECS)),
+                "{state:?}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("503 body is readable");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("503 body is JSON");
+            assert_eq!(body["code"], "spatial_not_ready", "{state:?}");
+            assert_eq!(body["detail"]["state"], state.as_str(), "{state:?}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(state.as_str()),
+                "{state:?}: {body}"
+            );
+        }
+
+        let bad: SpatialApiError =
+            spatial_query::SpatialQueryError::BadRequest("radius".into()).into();
+        let response = bad.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("400 body is readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("400 body is JSON");
+        assert_eq!(body["code"], "bad_request");
+        assert!(body["detail"].is_null(), "{body}");
     }
 }

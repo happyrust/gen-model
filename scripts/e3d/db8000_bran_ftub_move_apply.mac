@@ -22,7 +22,7 @@
 --
 -- restore 搭档：db8000_bran_ftub_move_restore.mac
 
-ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_ftub_move_apply.log" OVER
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/db8000_bran_ftub_move_apply.log" OVER
 $P CODEX-DB8000-BRAN-FTUB-MOVE-APPLY-ALIVE
 =24384/23262
 Q CE

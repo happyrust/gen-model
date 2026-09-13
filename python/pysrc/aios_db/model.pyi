@@ -33,9 +33,8 @@ def update_aabbs(
 ) -> list[dict[str, Any]]:
     """刷新 inst_relate aabb，返回真变化的元素列表 [{refno, noun}, ...]。
 
-    durable=True 走定向增量入口：直写时 AABB 指针、room_recalc 任务与
-    spatial epoch 同事务（房间任务的发布受 room_incremental 开关门控）。
-    返回形态可直接喂给 room.enqueue。
+    durable=True 走定向增量入口：直写时 AABB 指针与 spatial epoch 同事务
+    （房间归属随该库任务的房间段整库算，不再逐目标排待办行，ADR-072 D4 / D5）。
     """
 
 def delete_subtree(refnos: list[str], chunk_size: int = 100) -> None:

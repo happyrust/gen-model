@@ -1,0 +1,626 @@
+--- a/docs/specs/web-service-api.md
++++ b/docs/specs/web-service-api.md
+@@ -85,6 +85,16 @@
+ ## 4. REST 接口定义
+ 
+ ### 4.1 `GET /api/v1/health`
++`core` 从当前 MDB 路由账本读取，不初始化属性或树 provider，不打开源文件。
++RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`，使用
++`route_count`、`open_db_count`、`open_dbnums`、`cached_elements`、`stale_dbnums`、
++`failed_dbnums` 和 `last_targeted_refresh`。`snapshot_epoch` / `session_vector`
++来自按 dbnum 的世代账本；目录尚未注册时 `core.status=initializing`。
++`open_db_count` 是 HTTP 属性与树服务仍持有会话的不同 dbnum 数，不是累计文件打开数；
++`source_reads` 单独报告进程累计 `database_opens`、`scan_calls`、`scanned_elements`
++与 `index_point_lookups`，包含 SYS/DICT 等依赖读取。缺失的已声明文件进入
++`failed_dbnums`，有旧世代但当前读取失败的库同时进入 `stale_dbnums`。
++
+ 存活探针。响应：
+ 
+ ```json
+--- a/src/data_interface/direct_store.rs
++++ b/src/data_interface/direct_store.rs
+@@ -655,6 +655,10 @@
+         self.attrs.len()
+     }
+ 
++    pub fn opened_dbnums(&self) -> Vec<i32> {
++        self.sessions.iter().map(|entry| *entry.key()).collect()
++    }
++
+     /// refno → dbnum：**位解码**（`refno_route::refno_dbnum`，与 core.dll `DB_Element::dbno` 同式），
+     /// 再问一句「这个库我认识吗」——钉过、或定位器有它的文件，就是认识。
+     ///
+--- a/src/data_interface/direct_tree.rs
++++ b/src/data_interface/direct_tree.rs
+@@ -379,6 +379,12 @@
+ }
+ 
+ impl DirectTreeProvider {
++    pub async fn cache_stats(&self) -> (Vec<i32>, usize) {
++        self.service.read().await.as_ref().map(|service|
++            (service.store.opened_dbnums(), service.store.cached_elements()))
++            .unwrap_or_default()
++    }
++
+     pub fn new(project: impl Into<String>, mdb: impl Into<String>) -> Self {
+         Self {
+             project: project.into(),
+--- a/src/data_interface/element_attributes.rs
++++ b/src/data_interface/element_attributes.rs
+@@ -146,7 +146,7 @@
+     backup_tx: mpsc::Sender<()>,
+     spool: Arc<MirrorSpool>,
+     stats: Arc<QueueStats>,
+-    /// MDB 成员清单 + 每个成员文件的身份（长度 / 修改时刻 / 最新会话）的哈希。
++    /// MDB 成员清单 + 每个成员文件身份（长度 / 修改时刻）的哈希。
+     /// 本服务「还新不新」只看它——不再比对整份元素骨架的会话指纹（切片 W5）。
+     file_fingerprint: u64,
+     /// 交给镜像 spool 的来源世代。骨架退役后取 [`Self::file_fingerprint`]：同一份成员文件
+@@ -243,7 +243,7 @@
+         health
+     }
+ 
+-    /// 成员文件（DESI / CATA / DICT …）任一的长度、修改时刻或最新会话变了，就是不新了——
++    /// 成员文件（DESI / CATA / DICT …）任一的长度或修改时刻变了，就是不新了——
+     /// 粗粒度但不静默：重建一次服务，路由目录与 UDA 字典一起刷新。按 dbnum 定向失效是
+     /// 母计划阶段 5 的活。
+     fn is_current(&self) -> anyhow::Result<bool> {
+@@ -841,6 +841,12 @@
+         }
+     }
+ 
++    pub async fn cache_stats(&self) -> (Vec<i32>, usize) {
++        self.service.read().await.as_ref().map(|service|
++            (service.store.opened_dbnums(), service.store.cached_elements()))
++            .unwrap_or_default()
++    }
++
+     pub async fn refresh_cached(&self) -> anyhow::Result<EnsureReceipt> {
+         self.get().await?.refresh_cached().await
+     }
+@@ -888,9 +894,8 @@
+                 .with_context(|| format!("read E3D identity for {}", path.display()))?;
+             metadata.len().hash(&mut hasher);
+             metadata.modified().ok().hash(&mut hasher);
+-            if let Ok(header) = super::db_file_header::DbFileHeader::read(path) {
+-                header.latest_sesno().hash(&mut hasher);
+-            }
++            // Session reads belong to the generation poller / actual target open.
++            // A freshness check on one attribute must not reopen every MDB file.
+         }
+     }
+     Ok(hasher.finish())
+--- a/src/data_interface/increment_manager.rs
++++ b/src/data_interface/increment_manager.rs
+@@ -2524,8 +2524,9 @@
+                 .map_or(sweep.len(), |next| at + 1 + next);
+             let region = &sweep[at..end];
+             assert!(
+-                region.contains(".with_dbnum("),
+-                "阶段 blocker 必须带上它自己的 dbnum: {region}"
++                region.contains(".with_dbnum(")
++                    || (region.contains("SYS 文件解析失败:") && region.contains(".with_project(")),
++                "阶段 blocker 必须带 dbnum；SYS 头损坏、库号未知时必须带 project: {region}"
+             );
+         }
+ 
+@@ -3625,70 +3626,15 @@
+             // batches or advance applied_sesno in read-through mode.
+             crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                 .mark_data_ready_without_manifest();
+-            let project = self.db_option.project_name.clone();
+-            let mdb = self.db_option.mdb_name.clone();
+-            let skeleton_changed = match tokio::task::spawn_blocking(move || {
+-                crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb)
+-            })
+-            .await
+-            {
+-                Ok(Ok(true)) => {
+-                    log::info!(
+-                        "[{origin}] read-through MDB skeleton advanced atomically to the latest file sessions"
+-                    );
+-                    true
+-                }
+-                Ok(Ok(false)) => false,
+-                Ok(Err(error)) => {
+-                    log::error!(
+-                        "[{origin}] read-through MDB skeleton refresh failed; retaining the old snapshot: {error:#}"
+-                    );
+-                    false
+-                }
+-                Err(error) => {
+-                    log::error!(
+-                        "[{origin}] read-through MDB skeleton refresh task failed: {error}"
+-                    );
+-                    false
+-                }
+-            };
+-            if skeleton_changed {
+-                // This creates model work only.  It does not enter the data
+-                // batch/finalize path and therefore cannot advance
+-                // `applied_sesno` in read-through mode.
+-                crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup()
+-                    .await;
+-                if let Err(error) = crate::data_interface::element_attributes::refresh_cached(
+-                    &self.db_option.project_name,
+-                    &self.db_option.mdb_name,
+-                )
+-                .await
+-                {
+-                    log::warn!("[{origin}] read-through refresh-if-present degraded: {error:#}");
+-                }
+-            }
++            // run_read_through_core owns generation polling and targeted model refresh.
++            // A filesystem notification must not start a second MDB-wide refresh.
+             log::info!(
+                 "[{origin}] read-through data face: skipped ingest sweep (ensure_archives={ensure_archives})"
+             );
+             return Ok(());
+         }
+-        // Direct tree/attribute readers use the same in-memory MDB snapshot in
+-        // RocksDB mode. Advancing only SQL rows leaves those readers on the old session.
+-        let project = self.db_option.project_name.clone();
+-        let mdb = self.db_option.mdb_name.clone();
+-        match tokio::task::spawn_blocking(move || {
+-            crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb)
+-        })
+-        .await
+-        {
+-            Ok(Ok(_)) => {}
+-            Ok(Err(error)) => {
+-                log::error!("[{origin}] ingest MDB snapshot refresh failed: {error:#}")
+-            }
+-            Err(error) => {
+-                log::error!("[{origin}] ingest MDB snapshot refresh task failed: {error}")
+-            }
+-        }
++        // Direct readers check their source identities on demand. Ingest discovery
++        // does not build or refresh an element skeleton.
+         let watch_dirs = self.watch_dirs();
+         // 目录集合为空时这轮重扫会「成功地」扫出 0 个候选，与「确实没有新会话」
+         // 长得一模一样。它同时也是手动摄入的候选面，所以必须自己喊出来。
+--- a/src/data_interface/mdb_route_directory.rs
++++ b/src/data_interface/mdb_route_directory.rs
+@@ -22,13 +22,29 @@
+ use std::collections::{BTreeMap, BTreeSet, HashMap};
+ use std::fmt;
+ use std::path::{Path, PathBuf};
+-use std::sync::{Mutex, PoisonError};
++use std::sync::{Arc, Mutex, PoisonError, RwLock};
+ 
+ use aios_core::RefU64;
+ use e3d_io::db_element::{DbFilePin, DbFileResolver, template_file_for};
+ use e3d_io::refno::RefNo;
+ 
+ use super::cata_closure::CataDbLocator;
++
++// The HTTP health reader observes the exact directory used by the watcher.
++// Reading health must never initialize a provider or open source files.
++static ACTIVE_DIRECTORY: RwLock<Option<Arc<MdbRouteDirectory>>> = RwLock::new(None);
++
++pub fn register_active(directory: Arc<MdbRouteDirectory>) {
++    *ACTIVE_DIRECTORY.write().unwrap_or_else(PoisonError::into_inner) = Some(directory);
++}
++
++pub fn active(project: &str, mdb: &str) -> Option<Arc<MdbRouteDirectory>> {
++    ACTIVE_DIRECTORY.read().unwrap_or_else(PoisonError::into_inner)
++        .as_ref()
++        .filter(|directory| directory.project() == project
++            && directory.mdb().trim_start_matches('/') == mdb.trim_start_matches('/'))
++        .cloned()
++}
+ use super::db_file_header::{DbBasicInfo, DbFileHeader};
+ use super::db_generation::{
+     DbGeneration, FileIdentity, GenerationChange, GenerationLedger, Observation,
+@@ -636,6 +652,27 @@
+             .collect()
+     }
+ 
++    /// Process-local observation only; no filesystem access on a health request.
++    pub fn health(&self) -> serde_json::Value {
++        let state = self.poll_state();
++        let failed: BTreeSet<_> = state.unreadable.iter().copied()
++            .chain(self.declared_without_file.keys().copied()).collect();
++        let stale: Vec<_> = state.unreadable.iter().copied()
++            .filter(|dbnum| state.ledger.get(*dbnum).is_some()).collect();
++        serde_json::json!({
++            "status": if failed.is_empty() { "ready" } else { "degraded" },
++            "route_count": self.len(),
++            "snapshot_epoch": state.ledger.epoch(),
++            "session_vector": state.ledger.iter().map(|(dbnum, entry)|
++                serde_json::json!({"dbnum": dbnum, "sesno": entry.latest_sesno,
++                    "generation": entry.generation})).collect::<Vec<_>>(),
++            "stale_dbnums": stale,
++            "failed_dbnums": failed,
++            "problems": self.problems(),
++            "last_targeted_refresh": super::db_generation::last_targeted_refresh(),
++        })
++    }
++
+     /// DESI / ISOD 路由，CURD 原序。
+     pub fn element_databases(&self) -> impl Iterator<Item = &DbRoute> {
+         self.curd_order
+@@ -800,6 +837,20 @@
+             ],
+             TEMPLATE_DIR,
+         )
++    }
++
++    #[test]
++    fn health_reports_missing_routes_without_opening_or_polling_files() {
++        let directory = directory();
++        let before = directory.generations();
++        let health = directory.health();
++        assert_eq!(health["route_count"], 4); // SYS is not an element/catalogue route.
++        assert_eq!(health["failed_dbnums"], serde_json::json!([7000]));
++        assert_eq!(health["stale_dbnums"], serde_json::json!([]));
++        assert_eq!(health["status"], "degraded");
++        assert_eq!(directory.generations(), before);
++        assert_eq!(health["session_vector"], serde_json::json!([]));
++        assert!(health.get("skeleton_elements").is_none());
+     }
+ 
+     /// 路由键是**解码出的 dbnum**，不是 word0：同一库的三个 extent 都落到同一条路由。
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -716,7 +716,7 @@
+ /// RefNo 位解码 + 路由目录（跨库属性切片 W4–W6），启动链要的只剩「这个 MDB 有哪些库、文件在哪」。
+ fn startup_route_directory(
+     db_option: &DbOption,
+-) -> anyhow::Result<crate::data_interface::mdb_route_directory::MdbRouteDirectory> {
++) -> anyhow::Result<Arc<crate::data_interface::mdb_route_directory::MdbRouteDirectory>> {
+     let membership =
+         crate::data_interface::mdb_membership::get(&db_option.project_name, &db_option.mdb_name)
+             .map(Ok)
+@@ -729,12 +729,14 @@
+                 .map(Arc::new)
+             })?;
+     let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()?;
+-    Ok(
++    let directory = Arc::new(
+         crate::data_interface::mdb_route_directory::MdbRouteDirectory::from_membership(
+             &membership,
+             schema.template_dir(),
+         ),
+-    )
++    );
++    crate::data_interface::mdb_route_directory::register_active(directory.clone());
++    Ok(directory)
+ }
+ 
+ /// 路由目录的启动横幅：路由数 / 元素库数 / 声明了没文件 / 构造期问题，尾巴带 e3d-io 读计数器
+@@ -2215,10 +2217,7 @@
+         })?;
+     let manager = Arc::new(manager);
+     #[cfg(feature = "http_api")]
+-    let web_task = {
+-        let manager = manager.clone();
+-        tokio::spawn(async move { crate::web_service::serve_if_configured(manager).await })
+-    };
++    let web_task = crate::web_service::start_configured(manager.clone()).await?;
+     // 不再预热元素骨架（lazy-startup L3）：HTTP 已经 spawn，这里只造 dbnum 路由目录打横幅
+     // ——零元素 I/O，初始化三步紧跟其后，不等任何元素读取。属性 / 树服务各自按需开库；树服务
+     // 剩下的骨架用途（WORL 枚举、noun / owner）由它第一次被用到时自建，L5 换掉。
+@@ -2252,7 +2251,6 @@
+     // 此前这里是 `refresh_if_stale`——任一库的会话号一变就重解 MDB 成员、整份重扫全 MDB 重建
+     // 元素骨架，再把**全部**发布回执作废；一个 DESI 的 SAVEWORK = 重扫 AMS 28 库 / JEU 417 库。
+     // 先叫一次把每个库的基线记进账本：第一次见只记不报，之后每轮返回的才是「自上次以来变了的库」。
+-    let directory = Arc::new(directory);
+     let seeded = directory.poll_generations();
+     debug_assert!(seeded.is_empty(), "第一次轮询只记基线，不该报变化");
+     let refresh_manager = manager.clone();
+--- a/src/web_service/handlers.rs
++++ b/src/web_service/handlers.rs
+@@ -695,29 +695,33 @@
+     let model_incremental_types_origin =
+         (!model_incremental_types.is_empty()).then(|| model_type_origin.describe());
+     let dabacon_tags = crate::data_interface::dabacon_tag_summary::health_snapshot();
++    let mut core = crate::data_interface::mdb_route_directory::active(
++        &state.identity.project, &state.identity.mdb,
++    ).map(|directory| directory.health()).unwrap_or_else(|| json!({
++        "status": "initializing", "route_count": 0, "snapshot_epoch": 0,
++        "session_vector": [], "stale_dbnums": [], "failed_dbnums": [],
++        "last_targeted_refresh": null,
++    }));
++    let (mut opened, attribute_elements) = state.element_attributes.cache_stats().await;
++    let (tree_opened, tree_elements) = state.direct_tree.cache_stats().await;
++    opened.extend(tree_opened);
++    opened.sort_unstable();
++    opened.dedup();
++    core["open_db_count"] = json!(opened.len());
++    core["open_dbnums"] = json!(opened);
++    core["cached_elements"] = json!(attribute_elements + tree_elements);
++    let source_reads = e3d_io::read_stats::snapshot();
++    core["source_reads"] = json!({
++        "database_opens": source_reads.database_opens,
++        "scan_calls": source_reads.scan_calls,
++        "scanned_elements": source_reads.scanned_elements,
++        "index_point_lookups": source_reads.index_point_lookups,
++    });
+     if sul_db.get("connected").and_then(Value::as_bool) == Some(false) {
+         let read_through = state.element_attributes.health().await;
+-        let snapshot = crate::data_interface::mdb_memory_store::get(
+-            &state.identity.project,
+-            &state.identity.mdb,
+-        );
+-        let stale_reason = crate::data_interface::mdb_memory_store::stale_reason(
+-            &state.identity.project,
+-            &state.identity.mdb,
+-        );
+-        let fingerprint = snapshot
+-            .as_ref()
+-            .map(|snapshot| snapshot.session_fingerprint())
+-            .unwrap_or_default();
+         return Json(json!({
+-            "status": if snapshot.is_some() && stale_reason.is_none() { "ok" } else { "degraded" },
+-            "core": {
+-                "status": if stale_reason.is_some() { "stale" } else if snapshot.is_some() { "ready" } else { "unavailable" },
+-                "snapshot_epoch": snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
+-                "session_vector": fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+-                "stale_reason": stale_reason,
+-                "skeleton_elements": snapshot.as_ref().map(|value| value.stats().elements).unwrap_or_default(),
+-            },
++            "status": if core["status"] == "ready" { "ok" } else { "degraded" },
++            "core": core,
+             "mirror": {
+                 "status": "degraded",
+                 "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
+@@ -826,27 +830,11 @@
+             .room_bootstrap,
+     });
+     let read_through = state.element_attributes.health().await;
+-    let source_snapshot =
+-        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
+-    let source_stale = crate::data_interface::mdb_memory_store::stale_reason(
+-        &state.identity.project,
+-        &state.identity.mdb,
+-    );
+-    let source_fingerprint = source_snapshot
+-        .as_ref()
+-        .map(|snapshot| snapshot.session_fingerprint())
+-        .unwrap_or_default();
+     Json(json!({
+         // 有分项没在预算内答完就不是 ok：库半死不活时这个字段是唯一一眼可见的
+         // 信号，剩下的看 degraded_sections。
+         "status": health_status(&degraded, &blocking_conditions),
+-        "core": {
+-            "status": if source_stale.is_some() { "stale" } else if source_snapshot.is_some() { "ready" } else { "unavailable" },
+-            "snapshot_epoch": source_snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
+-            "session_vector": source_fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+-            "stale_reason": source_stale,
+-            "skeleton_elements": source_snapshot.as_ref().map(|value| value.stats().elements).unwrap_or_default(),
+-        },
++        "core": core,
+         "mirror": {
+             "status": "ready",
+             "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
+@@ -3004,11 +2992,13 @@
+             index.contains("./pkg/plant_ui_app.js"),
+             "入口页必须加载内嵌 WASM 启动器"
+         );
+-        assert_eq!(
+-            index.matches("window.location.origin").count(),
+-            3,
+-            "动态配置必须把默认模型服务和空数据服务映射到当前内置服务"
+-        );
++        // Assert the URL fallbacks themselves, not an incidental total count:
++        // the embedded page supports both legacy and current config shapes.
++        assert!(index.contains("configuredModelUrl !== \"http://127.0.0.1:8022\""));
++        assert!(index.contains("current.data_api_url?.trim() || window.location.origin"));
++        assert!(index.contains("current.data_api_url = configuredDataUrl || window.location.origin"));
++        assert!(index.contains(": window.location.origin"));
++
+     }
+ 
+     #[test]
+--- a/src/web_service/mod.rs
++++ b/src/web_service/mod.rs
+@@ -275,6 +275,27 @@
+ 
+ /// 按有效地址启动 Web 服务；新键缺失时兼容旧键，再缺失则提供本机默认访问。
+ pub async fn serve_if_configured(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
++    serve_configured(mgr, None).await
++}
++
++/// Return only after bind succeeds. A bind error reaches startup before it can
++/// launch source polling, model generation or optional room work.
++pub async fn start_configured(
++    mgr: Arc<AiosDBManager>,
++) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
++    let (ready, bound) = tokio::sync::oneshot::channel();
++    let task = tokio::spawn(serve_configured(mgr, Some(ready)));
++    if bound.await.is_err() {
++        task.await??;
++        anyhow::bail!("HTTP service exited before binding");
++    }
++    Ok(task)
++}
++
++async fn serve_configured(
++    mgr: Arc<AiosDBManager>,
++    ready: Option<tokio::sync::oneshot::Sender<()>>,
++) -> anyhow::Result<()> {
+     let ext = crate::get_db_option_ext();
+     let addr = effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
+     if ext
+@@ -289,7 +310,7 @@
+         }
+     }
+     let public_addr = public_http_addr(&addr, ext.http_public_addr.as_deref());
+-    serve(mgr, &addr, &public_addr, ext.http_api_cors.clone()).await
++    serve_with_ready(mgr, &addr, &public_addr, ext.http_api_cors.clone(), ready).await
+ }
+ 
+ /// 在 `addr` 上启动服务并阻塞运行（正常情况下不返回）。
+@@ -298,6 +319,16 @@
+     addr: &str,
+     public_addr: &str,
+     cors_origins: Option<Vec<String>>,
++) -> anyhow::Result<()> {
++    serve_with_ready(mgr, addr, public_addr, cors_origins, None).await
++}
++
++async fn serve_with_ready(
++    mgr: Arc<AiosDBManager>,
++    addr: &str,
++    public_addr: &str,
++    cors_origins: Option<Vec<String>>,
++    ready: Option<tokio::sync::oneshot::Sender<()>>,
+ ) -> anyhow::Result<()> {
+     let db_option = aios_core::get_db_option();
+     let ui_root = PathBuf::from(
+@@ -336,13 +367,6 @@
+     let direct_tree = DirectTreeProvider::new(identity.project.clone(), identity.mdb.clone());
+     let element_attributes =
+         ElementAttributeProvider::new(identity.project.clone(), identity.mdb.clone());
+-    if crate::options::data_face().is_read_through()
+-        && let Err(error) = element_attributes.get().await
+-    {
+-        // Keep the HTTP service alive so health and structured endpoint errors
+-        // remain available; the provider retries atomically on the next call.
+-        log::error!("read-through attribute/UDA prewarm failed: {error:#}");
+-    }
+     let state = AppState {
+         mgr,
+         tasks: TaskRegistry::global(),
+@@ -471,6 +495,9 @@
+ 
+     // 交接窗口内重试绑定：restart 口的父进程还有零点几秒才交出端口。
+     let listener = setup::bind_with_handoff(addr).await?;
++    if let Some(ready) = ready {
++        let _ = ready.send(());
++    }
+     let ui_url = plant_ui_url(public_addr);
+     println!("plant-ui 网页: {ui_url}");
+     maybe_open_plant_ui(&ui_url);
+@@ -640,7 +667,7 @@
+     fn a_missing_asset_dir_degrades_instead_of_killing_the_service() {
+         let source = include_str!("mod.rs");
+         let body = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve 必须存在")
+             .1
+             .split_once("\nfn resolve_asset_root")
+@@ -676,7 +703,7 @@
+     fn model_subtree_delete_uses_delete_method_and_query_handler() {
+         let source = include_str!("mod.rs");
+         let serve = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve must exist")
+             .1
+             .split_once("\nfn resolve_asset_root")
+@@ -695,7 +722,7 @@
+     fn direct_tree_routes_are_read_only_get_endpoints() {
+         let source = include_str!("mod.rs");
+         let serve = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve must exist")
+             .1
+             .split_once("\nfn resolve_asset_root")
+@@ -718,7 +745,7 @@
+     fn residue_preview_route_has_no_delete_method() {
+         let source = include_str!("mod.rs");
+         let serve = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve must exist")
+             .1
+             .split_once("\nfn resolve_asset_root")
+@@ -747,7 +774,7 @@
+     fn mesh_glb_is_a_read_only_get_route_under_api_v1() {
+         let source = include_str!("mod.rs");
+         let serve = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve must exist")
+             .1
+             .split_once("\nfn resolve_asset_root")
+@@ -763,7 +790,7 @@
+     fn dbnum_model_ensure_and_roots_use_their_fixed_http_methods() {
+         let source = include_str!("mod.rs");
+         let serve = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve must exist")
+             .1
+             .split_once("\nfn resolve_asset_root")
+@@ -781,7 +808,7 @@
+     fn plant_ui_web_is_the_last_fallback_after_api_routes() {
+         let source = include_str!("mod.rs");
+         let serve = source
+-            .split_once("pub async fn serve(")
++            .split_once("async fn serve_with_ready(")
+             .expect("serve must exist")
+             .1
+             .split_once("\nfn resolve_asset_root")
+--- a/tests/refno_native_api_contract.rs
++++ b/tests/refno_native_api_contract.rs
+@@ -206,8 +206,12 @@
+             "core",
+             "snapshot_epoch",
+             "session_vector",
+-            "stale_reason",
+-            "skeleton_elements",
++            "route_count",
++            "open_db_count",
++            "cached_elements",
++            "stale_dbnums",
++            "failed_dbnums",
++            "last_targeted_refresh",
+             "mirror",
+             "features",
+             "degraded_sections",
+--- a/tests/refno_native_guards.rs
++++ b/tests/refno_native_guards.rs
+@@ -35,7 +35,12 @@
+ /// 从签名到与它同缩进的闭括号：方法（四格缩进）与自由函数（零缩进）都停在自己的 `}` 上。
+ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+     let start = source
+-        .find(signature)
++        .match_indices(signature)
++        .map(|(at, _)| at)
++        .find(|at| {
++            let line_start = source[..*at].rfind('\n').map_or(0, |i| i + 1);
++            source[line_start..*at].chars().all(char::is_whitespace)
++        })
+         .unwrap_or_else(|| panic!("missing function: {signature}"));
+     let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+     let indent = &source[line_start..start];
+@@ -48,6 +53,34 @@
+         .find(&format!("\n{indent}}}\n"))
+         .unwrap_or_else(|| panic!("function end not found: {signature}"));
+     &rest[..end]
++}
++
++#[test]
++fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
++    let watcher = include_str!("../src/data_interface/increment_manager.rs");
++    let sweep = function_body(watcher, "async fn sweep_watch_dirs(");
++    for forbidden in ["mdb_memory_store::", "scan_elements(", "refresh_cached(",
++        "reconcile_model_coverage_at_startup("] {
++        assert!(!sweep.contains(forbidden), "watcher reintroduced {forbidden}");
++    }
++    let handlers = include_str!("../src/web_service/handlers.rs");
++    let health = function_body(handlers, "pub async fn health(");
++    for forbidden in ["mdb_memory_store::", "skeleton_elements", ".get().await"] {
++        assert!(!health.contains(forbidden), "health reintroduced {forbidden}");
++    }
++    assert!(health.contains("mdb_route_directory::active("));
++    assert!(health.contains("cache_stats().await"));
++    let web = include_str!("../src/web_service/mod.rs");
++    let serve = function_body(web, "async fn serve_with_ready(");
++    assert!(!serve.contains(".get().await"));
++    assert!(serve.find("bind_with_handoff(addr).await?").unwrap()
++        < serve.find("ready.send(())").unwrap());
++    let core = function_body(LIB, "async fn run_read_through_core(");
++    assert!(core.find("start_configured(manager.clone()).await?").unwrap()
++        < core.find("startup_route_directory(&db_option)").unwrap());
++    let fingerprint = function_body(ELEMENT_ATTRIBUTES, "fn membership_fingerprint(");
++    assert!(!fingerprint.contains("DbFileHeader::read("));
++    assert!(!fingerprint.contains("ReadOnlyEngine::open("));
+ }
+ 
+ /// 不变量 1：dbnum 只由 `RefNo::dbno()` 给出，且只在 `refno_route` 里出现这一个解码式。

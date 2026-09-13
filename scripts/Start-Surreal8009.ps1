@@ -1,16 +1,15 @@
 <#
 .SYNOPSIS
     启动本项目用的 SurrealDB（8009），并挡住版本不匹配的二进制。
-    **store_mode = "external" 的部署要它——2026-09-07 起这又是默认值。**
+    仅 `store_mode = "external"` 的部署需要它；默认 `spawned-mem` 不要手工起库。
 
 .DESCRIPTION
-    【先看这一段，2026-09-07】store_mode 的默认值 2026-09-04 翻成过 spawned-mem，
-    2026-09-07 又翻回 external。现在的口径是：
+    【先看这一段，2026-09-11】现在的口径是：
 
-      * external（默认）：库不由 gen-model 拉起，**先跑这个脚本**再起 gen-model；
-      * spawned-mem（从此要显式写）：gen-model **自己拉一台 memory 后端的 SurrealDB**
+      * spawned-mem（默认）：gen-model **自己拉一台 memory 后端的 SurrealDB**
         （同样绑 v_ip:v_port、同样先过下面这道版本闸，实现见 src/store_process.rs），
         那一档**不要跑这个脚本**。
+      * external（需显式写）：库不由 gen-model 拉起，**先跑这个脚本**再起 gen-model。
 
     端口已经被占着时 gen-model 不会硬上：读不到自家署名就拒绝启动。也就是说配了
     spawned-mem、又先手工跑了这个脚本，服务会**明确报错**而不是悄悄连上你这台库。

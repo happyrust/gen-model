@@ -34,7 +34,9 @@ pub struct SessionStamp {
     pub index_root_pgno: u32,
     /// `+0x34..+0x48` 五个字，原样。
     pub stamp_words: [u32; 5],
-    pub machine: String,
+    /// 写这一会话的用户名（`+0x7C`，长度在 `+0x78`，core.dll 的会话属性 `USER`）。
+    /// 曾叫 `machine`，2026-09-12 对照 core.dll 改正。
+    pub user: String,
     pub comment: String,
 }
 
@@ -47,7 +49,7 @@ impl SessionStamp {
             end_pgno: page.end.page,
             index_root_pgno: page.index_root.page,
             stamp_words: page.stamp_words,
-            machine: page.machine.clone(),
+            user: page.user.clone(),
             comment: page.comment.clone(),
         }
     }

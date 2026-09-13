@@ -25,6 +25,52 @@ use crate::data_interface::model_coverage::{
 };
 use crate::data_interface::model_watermark::reconcile_model_watermarks;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StartupModelRecoveryPlan {
+    pub model_start_sesno: i32,
+    pub reason: &'static str,
+    pub credential_behind: bool,
+}
+
+/// Reduce the durable startup evidence to the one decision the scheduler
+/// needs.  Keeping this rule independent from MDB/file discovery lets the
+/// RocksDB restart test exercise the same decision used by production without
+/// constructing process globals or hydrating kv-mem.
+pub(crate) fn startup_model_recovery_plan(
+    applied_sesno: i32,
+    probe: &crate::data_interface::model_watermark::ModelWatermarkProbe,
+    floor: Option<&StartupCoverageFloor>,
+) -> Option<StartupModelRecoveryPlan> {
+    if applied_sesno <= 0 || probe.legacy_adopted() {
+        return None;
+    }
+    let credential_behind = floor.is_some_and(|floor| {
+        floor.unsettled_roots > 0
+            || floor
+                .settled_floor
+                .is_none_or(|settled| settled < applied_sesno)
+    });
+    let completion_covers = probe.supported() >= applied_sesno;
+    if probe.recorded >= applied_sesno && !credential_behind && completion_covers {
+        return None;
+    }
+    Some(StartupModelRecoveryPlan {
+        model_start_sesno: model_recovery_base(
+            probe.recorded,
+            floor.and_then(|floor| floor.settled_floor),
+            false,
+        ),
+        reason: if !probe.has_roots {
+            "empty_inventory_unverified"
+        } else if credential_behind {
+            "root_credential_behind"
+        } else {
+            "model_watermark_behind"
+        },
+        credential_behind,
+    })
+}
+
 /// 启动期把生成根凭证与**文件最新会话**对齐——[`clear_stale_at_process_start`]（ADR-050）
 /// 的补偿路径。清空之后，凭证（`gen_root.source_end_sesno[_time]`）是上一进程模型进度唯一
 /// 活下来的记录；不在这里核对，重启就会把「积压被清掉」静默判成「模型完整」。
@@ -63,6 +109,109 @@ pub async fn reconcile_model_coverage_at_startup() {
     coordinator.settle_startup_reconcile();
     // 复核可能刚排进一批工作项；调度器的空闲等待是 30 秒一圈，不叫醒就白等一圈。
     crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
+}
+
+/// 启动水化段的**第一步**（ADR-073 D3）：把上一进程死在写库中途的库排成
+/// `Reinitialize`。这里只分类和排队；整库清空留在 worker 冻结点执行。
+///
+/// 位置有讲究——必须排在
+/// [`hydrate_watermark_mirror`](crate::data_interface::dbnum_state::DbnumState::hydrate_watermark_mirror)
+/// **之前**。镜像是一次整表替换，替换之后每格只走「按需装载 + 写后作废」；先水化再回退，
+/// 发布出去的就是一版已经被删掉痕迹的水位，而回退那几格既没人作废、也没人重新装载。
+///
+/// 逐库独立：任何一库失败都不中止启动，只是把标记留在库里等下一次——回退是幂等的
+/// （`writing{S,T}` 那一行到最后一步才删）。返回要打的行，调用方原样打出来。
+pub async fn schedule_unfinished_writes_for_reinitialize() -> Vec<String> {
+    let states = match crate::data_interface::write_state::writing_states().await {
+        Ok(states) => states,
+        Err(error) => {
+            return vec![format!(
+                "写入标记扫描失败：本次启动不能安排未完成写入重建（是未知，不是「都干净」），下次启动重试: {error:#}"
+            )];
+        }
+    };
+    if states.is_empty() {
+        return Vec::new();
+    }
+    // 排队要的是登记行里的项目 / 库类型 / 文件路径。读不到就只回退不排队——watcher 首扫
+    // 会把缺口补成一条新批次，比拿一份猜出来的身份去排要好。
+    let registered = crate::data_interface::dbnum_state::DbnumState::list_registered()
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|state| (state.dbnum, state))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![format!(
+        "写入标记扫描：{} 个库上一次死在写库中途，逐库安排 Reinitialize（ADR-073 D3）",
+        states.len()
+    )];
+    for state in states {
+        lines.push(format!(
+            "  dbnum={} interrupted_intent={} 窗口 {}→{}，保留标记等待 worker 整库重建",
+            state.dbnum,
+            state.intent.as_str(),
+            state.start_sesno,
+            state.end_sesno
+        ));
+        lines.push(format!(
+            "    {}",
+            schedule_reinitialize(registered.get(&state.dbnum), &state)
+        ));
+    }
+    lines
+}
+
+/// 把未完成写入排成整库重建。排不成时保留 `writing` 标记；watcher 首扫产生的
+/// 任意同库批次到 worker 冻结点后也会被该标记就地转成 Reinitialize。
+fn schedule_reinitialize(
+    state: Option<&crate::data_interface::dbnum_state::DbnumState>,
+    marker: &crate::data_interface::write_state::WriteState,
+) -> String {
+    let Some(state) = state else {
+        return format!(
+            "dbnum={} 在登记表里没有行，Reinitialize 暂未排成；writing 标记保留",
+            marker.dbnum
+        );
+    };
+    if state.file_path.is_empty() {
+        return format!(
+            "dbnum={} 登记行没有文件路径，Reinitialize 暂未排成；writing 标记保留",
+            marker.dbnum
+        );
+    }
+    let path = std::path::PathBuf::from(&state.file_path);
+    let intent = crate::data_interface::write_state::recovery_batch_intent(marker.intent);
+    let applied = state.applied_sesno.max(0);
+    let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
+        project: state.owner_project.clone(),
+        dbnum: marker.dbnum,
+        db_type: state.db_type.clone(),
+        phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(&state.db_type),
+        epoch_id: 0,
+        intent,
+        model_start_sesno: None,
+        path,
+        file_name: state.file_name.clone(),
+        applied_sesno: applied,
+        file_latest_sesno: marker.end_sesno.max(applied),
+        previous_observed_sesno: applied,
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: None,
+        reinit_requested: false,
+        regen_roots: Vec::new(),
+    };
+    let outcome = crate::data_interface::batch_scheduler::BatchScheduler::global().enqueue(
+        crate::data_interface::task_registry::TaskRegistry::global(),
+        &found,
+        false,
+    );
+    format!(
+        "dbnum={} 已排整库重建 intent={} task={}",
+        marker.dbnum, outcome.info.intent, outcome.info.task_id
+    )
 }
 
 /// 启动那一刻**当前 MDB 声明了、却一条凭证记录都没有**的 DESI 库（ADR-058 D6：等按需
@@ -331,37 +480,21 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
                 continue;
             }
         };
-        // 一级过滤：安定凭证已不早于文件最新，且没有未安定的行 —— 这个库连窗都不用开。
-        let credential_behind = floors.get(&dbnum).is_some_and(|floor| {
-            floor.unsettled_roots > 0
-                || floor
-                    .settled_floor
-                    .is_none_or(|settled| settled < state.applied_sesno)
-        });
-        let completion_covers = probe
-            .completed_sesno
-            .is_some_and(|end| end >= state.applied_sesno)
-            && probe.supported() >= state.applied_sesno;
-        let behind =
-            probe.recorded < state.applied_sesno || credential_behind || !completion_covers;
-        if !behind {
+        // 一级过滤：权威 RocksDB 水位与根凭证共同决定是否需要 ModelOnly。这个纯决策也由
+        // 真实停机重启测试直接调用，避免生产规则与测试里的手写判据漂移。
+        let Some(recovery) =
+            startup_model_recovery_plan(state.applied_sesno, probe, floors.get(&dbnum))
+        else {
             continue;
-        }
+        };
         println!(
             "[model-completion] dbnum={dbnum} applied={} model={} floor={:?} \
-            reason={} credential_behind={credential_behind}",
+            reason={} credential_behind={}",
             state.applied_sesno,
             probe.recorded,
             probe.settled_floor,
-            if !probe.has_roots {
-                "empty_inventory_unverified"
-            } else if probe.completion_present && probe.completed_sesno.is_none() {
-                "input_changed"
-            } else if credential_behind {
-                "root_credential_behind"
-            } else {
-                "legacy_completion_missing"
-            }
+            recovery.reason,
+            recovery.credential_behind,
         );
         if source.sesno < state.applied_sesno as u32 {
             unreadable += 1;
@@ -378,11 +511,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         // Taking `min(floor, recorded)` turns that local completion correction
         // into a full-history model rebuild even though the per-root evidence
         // still proves a much newer base.
-        let model_start_sesno = model_recovery_base(
-            probe.recorded,
-            floors.get(&dbnum).and_then(|floor| floor.settled_floor),
-            probe.completion_present && probe.completed_sesno.is_none(),
-        );
+        let model_start_sesno = recovery.model_start_sesno;
         let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
             project: state.owner_project.clone(),
             dbnum,
@@ -460,4 +589,56 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         catalogue_dependency_refresh,
     };
     coverage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_interface::model_watermark::ModelWatermarkProbe;
+
+    fn probe(recorded: i32, applied_sesno: i32) -> ModelWatermarkProbe {
+        ModelWatermarkProbe {
+            blockers: Vec::new(),
+            abandoned: 0,
+            settled_floor: Some(recorded),
+            applied_sesno,
+            recorded,
+            has_roots: true,
+            has_attributes: true,
+            has_model_projection: true,
+        }
+    }
+
+    #[test]
+    fn durable_watermark_gap_becomes_model_only_recovery_window() {
+        let plan = startup_model_recovery_plan(43, &probe(42, 43), None)
+            .expect("a durable model watermark gap must be rebuilt after restart");
+        assert_eq!(plan.model_start_sesno, 42);
+        assert_eq!(plan.reason, "model_watermark_behind");
+        assert!(!plan.credential_behind);
+    }
+
+    #[test]
+    fn aligned_durable_watermark_and_credentials_do_not_requeue() {
+        let floor = StartupCoverageFloor {
+            settled_floor: Some(43),
+            settled_roots: 1,
+            unsettled_roots: 0,
+        };
+        assert!(startup_model_recovery_plan(43, &probe(43, 43), Some(&floor)).is_none());
+    }
+
+    #[test]
+    fn credential_gap_uses_the_settled_root_floor_as_recovery_base() {
+        let floor = StartupCoverageFloor {
+            settled_floor: Some(40),
+            settled_roots: 1,
+            unsettled_roots: 1,
+        };
+        let plan = startup_model_recovery_plan(43, &probe(43, 43), Some(&floor))
+            .expect("an unsettled root must keep startup recovery open");
+        assert_eq!(plan.model_start_sesno, 40);
+        assert_eq!(plan.reason, "root_credential_behind");
+        assert!(plan.credential_behind);
+    }
 }

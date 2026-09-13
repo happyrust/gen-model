@@ -16,19 +16,30 @@
 //! 生成链不消费的键两侧不一致不影响产物，不计冲突——但**照样逐键打印**，因为这条豁免
 //! 兜住的可能是库的缺陷（如 `CRFA`，见 `issues/ISSUE-027`），不是「没事」。
 //!
+//! 定位器是 `MdbRouteDirectory`（SYS/CURD 成员清单 + 文件头，零元素 I/O；切片 W7）：refno 归哪个库由
+//! `RefNo::dbno()` 位解码定，与生产路径同一套。**不再**用 `InMemoryCataLocator::build_for_project`
+//! 全库扫描建 ref0 表——那条路已退役，探针若还走它，验的就是一条生产里不存在的路。
+//!
+//! 顺带一份**活体对账**（`--owner-climb` 时对每个样本、owner 链上每一跳、每条跨库引用的目标都记）：
+//! `decoded_dbnum`（从 refno 位里解出来的）必须等于 `descriptor_dbnum`（真正打开那个库后
+//! 文件头 `db_mark` 自报的）。这是母计划不变量 1 / 3 在真库真路径上的那一句；一条不等就退出码 1。
+//!
 //! 用法：
 //! ```text
 //! cargo run --release --bin direct_attmap_probe -- --dbnum 8000 --sample 200
 //! cargo run --release --bin direct_attmap_probe -- --dbnum 0            # 列水位行
-//! cargo run --release --bin direct_attmap_probe -- --dbnum 8000 --owner-climb
+//! cargo run --release --bin direct_attmap_probe -- --dbnum 8000 --owner-climb --nouns EQUI,BRAN,GENSEC
 //! ```
 
 use aios_core::options::DbOption;
 use aios_core::types::NamedAttrValue;
-use aios_core::{NamedAttrMap, RefnoEnum, SUL_DB};
-use aios_database::data_interface::cata_closure::InMemoryCataLocator;
+use aios_core::{NamedAttrMap, RefU64, RefnoEnum, SUL_DB};
+use aios_database::data_interface::db_file_header::DbFileHeader;
 use aios_database::data_interface::direct_attmap::DirectAttrs;
 use aios_database::data_interface::direct_store::{DirectSchema, DirectStore, pins_from_watermark};
+use aios_database::data_interface::mdb_route_directory::MdbRouteDirectory;
+use aios_database::data_interface::refno_route::refno_dbnum;
+use aios_database::data_interface::{mdb_membership, project_paths};
 use clap::Parser;
 use config::{Config, File};
 use std::collections::BTreeMap;
@@ -54,8 +65,9 @@ struct Args {
     /// 按 noun 过滤采样（逗号分隔，如 EQUI,BRAN,GENSEC）。
     #[arg(long)]
     nouns: Option<String>,
-    /// 额外验一遍跨库 owner 上溯：抽到的元素里，OWNER 落在别的 dbnum 的，
-    /// 用 ref0 反查换库后必须也能读出属性（ADR-053 R2）。
+    /// 额外验一遍跨库 owner 上溯与跨库引用换库：抽到的元素里，OWNER / 命名引用落在别的 dbnum 的，
+    /// 按 RefNo 位解码换库后必须也能读出属性（ADR-053 R2），且每一处解出的 dbnum 都要与目标文件头
+    /// 自报的一致（切片 W7 对账栏）。
     #[arg(long, default_value_t = false)]
     owner_climb: bool,
     /// 只 dump 指定键（逗号分隔）的 direct 原始描述符值与 DB 值，用于定位精确类型。
@@ -311,19 +323,49 @@ async fn main() -> anyhow::Result<()> {
         target.file.display()
     );
 
-    // 取数底座：字典单例 + ref0 定位器 + 全部水位 pin（跨库 owner 上溯要用别的库）。
+    // 取数底座：字典单例 + dbnum 路由目录 + 全部水位 pin（跨库 owner 上溯要用别的库）。
+    // 路由目录与生产（属性服务 / 树服务）同一种造法：CURD 成员清单 + 依赖项目的 CATA / PROP 文件头，
+    // 不读任何元素；refno → dbnum 由 `DirectStore::dbnum_of` 位解码，不在这里建表。
     let schema = Arc::new(DirectSchema::open_from_env()?);
     println!("[probe] 模板目录 {}", schema.template_dir().display());
-    let locator = Arc::new(InMemoryCataLocator::build_for_project(&db_option.project_name).await?);
+    let project = db_option.project_name.as_str();
+    let mdb = db_option.mdb_name.as_str();
+    let membership = match mdb_membership::get(project, mdb) {
+        Some(membership) => membership,
+        None => Arc::new(mdb_membership::resolve(&db_option, project, mdb)?),
+    };
+    let directory_started = Instant::now();
+    let mut directory = MdbRouteDirectory::from_membership(&membership, schema.template_dir());
+    for dependency_project in &db_option.included_projects {
+        let Some(project_root) =
+            project_paths::resolve_project_root(&db_option, dependency_project)
+        else {
+            continue;
+        };
+        let scan = directory.add_dependency_dir(dependency_project, &project_root);
+        println!(
+            "[probe] 依赖项目 {dependency_project}: candidates={} added_routes={} duplicate_keys={}",
+            scan.candidates, scan.added_routes, scan.duplicate_keys
+        );
+    }
+    for problem in directory.problems() {
+        println!("[probe] 路由目录: {problem}");
+    }
+    let directory_stats = directory.stats();
     println!(
-        "[probe] 定位器 ref0={} dbnum={}",
-        locator.ref0_count(),
-        locator.dbnum_count()
+        "[probe] 路由目录 routes={} element={} dependency={} declared_without_file={} candidates={} elapsed_ms={}（零元素扫描）",
+        directory_stats.routes,
+        directory_stats.element_routes,
+        directory_stats.dependency_routes,
+        directory_stats.declared_without_file,
+        directory_stats.project_candidates,
+        directory_started.elapsed().as_millis()
     );
-    let store = DirectStore::new(schema, locator);
+    let store = DirectStore::new(schema, Arc::new(directory));
     for pin in &pins {
         store.pin(pin.clone());
     }
+    let mut ledger = DbnumLedger::default();
 
     let refnos: Vec<RefnoEnum> = if let Some(list) = &args.refnos {
         list.split(',')
@@ -422,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_default();
         *tally.noun_hist.entry(type_name.clone()).or_default() += 1;
         record_side_channels(&mut tally, &direct);
+        ledger.check(&store, refno.refno(), args.dbnum);
 
         if !dump_keys.is_empty()
             && let Ok(extraction) = store.extraction(args.dbnum, refno.refno())
@@ -446,7 +489,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if args.owner_climb {
-            match climb_owners(&store, args.dbnum, &direct) {
+            match climb_owners(&store, &mut ledger, args.dbnum, &direct) {
                 Ok(Some(hop)) => {
                     cross_db_owners += 1;
                     if cross_db_climbs.len() < 8 {
@@ -456,7 +499,7 @@ async fn main() -> anyhow::Result<()> {
                 Ok(None) => owner_chains_within_db += 1,
                 Err(error) => owner_failures.push(format!("{refno}: {error}")),
             }
-            for (key, target) in cross_db_references(&store, args.dbnum, &direct) {
+            for (key, target) in cross_db_references(&store, &mut ledger, args.dbnum, &direct) {
                 match target {
                     Ok(line) => {
                         cross_db_refs += 1;
@@ -635,6 +678,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     println!(
+        "\n解码 = 文件自报 对账：{} 处（样本 + owner 链每跳 + 跨库引用目标），decoded_dbnum == descriptor_dbnum {} 处，不符 {} 处；触达 {} 个库 {:?}",
+        ledger.checked,
+        ledger.checked - ledger.mismatches.len(),
+        ledger.mismatches.len(),
+        ledger.headers.len(),
+        ledger.headers.keys().collect::<Vec<_>>()
+    );
+    for line in ledger.mismatches.iter().take(12) {
+        println!("  [dbnum-mismatch] {line}");
+    }
+    println!(
         "\n耗时：direct 平均 {}us/元素，DB 平均 {}us/元素｜会话池 {:?}",
         direct_us / n,
         db_us / n,
@@ -644,13 +698,62 @@ async fn main() -> anyhow::Result<()> {
     let fatal = tally.diverged
         + tally.missing_direct.len()
         + tally.missing_db.len()
-        + tally.shape_conflict_hist.values().sum::<usize>();
+        + tally.shape_conflict_hist.values().sum::<usize>()
+        + ledger.mismatches.len();
     if fatal > 0 {
-        println!("\n[probe] 存在 {fatal} 处真值冲突 / 缺失 / 形状冲突，direct 供给等价性不通过。");
+        println!(
+            "\n[probe] 存在 {fatal} 处真值冲突 / 缺失 / 形状冲突 / 解码与文件自报不符，direct 供给等价性不通过。"
+        );
         std::process::exit(1);
     }
-    println!("\n[probe] 无真值冲突：direct 读出的属性是 DB 读出的超集。direct 供给等价性通过。");
+    println!(
+        "\n[probe] 无真值冲突：direct 读出的属性是 DB 读出的超集，解码 dbnum 与文件自报逐处相等。direct 供给等价性通过。"
+    );
     Ok(())
+}
+
+/// 「解码 = 文件自报」的活体账本（切片 W7）。
+///
+/// 每处触达一个元素就记一笔：`decoded_dbnum` 是 `refno_route::refno_dbnum` 从 refno 位里解出来的，
+/// `descriptor_dbnum` 是真正打开那个库的文件后第 0 页 `db_mark` 自报的（按 dbnum 缓存，一库只读一次头）。
+/// 两者还要都等于 `DirectStore` 实际打开的那个 dbnum——`open_session` 自己也核这一条
+/// （不变量 3，不符会报 `DbNumberMismatch`），这里再独立记一遍，是让探针的输出里**看得见**这个数，
+/// 而不是只在「没报错」里隐含着。
+#[derive(Default)]
+struct DbnumLedger {
+    /// dbnum → 文件头自报的库号；读不到头就记 `Err` 文案，每库只读一次。
+    headers: BTreeMap<i32, Result<i32, String>>,
+    checked: usize,
+    mismatches: Vec<String>,
+}
+
+impl DbnumLedger {
+    fn descriptor_dbnum(&mut self, store: &DirectStore, dbnum: i32) -> Result<i32, String> {
+        if let Some(cached) = self.headers.get(&dbnum) {
+            return cached.clone();
+        }
+        let read = match store.pinned(dbnum) {
+            Some(pin) => DbFileHeader::read(&pin.file)
+                .map(|header| header.dbnum)
+                .map_err(|error| format!("{}: {error}", pin.file.display())),
+            None => Err(format!("dbnum {dbnum} 没有 pin，无从读文件头")),
+        };
+        self.headers.insert(dbnum, read.clone());
+        read
+    }
+
+    /// `refno` 刚在 `opened_dbnum` 里读出了属性：记一笔，解码、打开的库、文件自报三者必须相等。
+    fn check(&mut self, store: &DirectStore, refno: RefU64, opened_dbnum: i32) {
+        self.checked += 1;
+        let decoded = refno_dbnum(refno).map(|dbnum| dbnum as i32);
+        let descriptor = self.descriptor_dbnum(store, opened_dbnum);
+        match (decoded, &descriptor) {
+            (Some(decoded), Ok(descriptor)) if decoded == opened_dbnum && *descriptor == opened_dbnum => {}
+            _ => self.mismatches.push(format!(
+                "{refno}: decoded_dbnum={decoded:?} opened={opened_dbnum} descriptor_dbnum={descriptor:?}"
+            )),
+        }
+    }
 }
 
 /// 顺 OWNER 链一路上溯，直到走进**另一个 dbnum**（ADR-053 R2：DESI 元素的 owner 在
@@ -658,12 +761,13 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// 单看一个元素的 OWNER 是验不出跨库的：随机抽到的都是叶子，它们的 owner 就在本库。
 /// 跨库那一跳发生在树的顶上（ZONE → SITE），所以必须一路爬。每一跳都走
-/// `DirectStore::dbnum_of`（ref0 反查）换库，换完还要真把属性读出来——只换不读证明不了
-/// 那个库能开。
+/// `DirectStore::dbnum_of`（RefNo 位解码 + 路由目录）换库，换完还要真把属性读出来——只换不读
+/// 证明不了那个库能开；读出来之后再在账本上记一笔「解码 = 文件自报」。
 ///
 /// `Ok(Some(路径))` = 走到了别的库并读出属性；`Ok(None)` = 到根都在本库。
 fn climb_owners(
     store: &DirectStore,
+    ledger: &mut DbnumLedger,
     start_db: i32,
     start: &DirectAttrs,
 ) -> anyhow::Result<Option<String>> {
@@ -680,6 +784,7 @@ fn climb_owners(
     for _ in 0..MAX_HOPS {
         let owner_db = store.dbnum_of(owner)?;
         let attrs = store.attrs_in(owner_db, owner)?;
+        ledger.check(store, owner, owner_db);
         path.push(format!("{owner}@{owner_db}"));
 
         if owner_db != current_db {
@@ -705,9 +810,10 @@ fn climb_owners(
 /// 这才是这套工程里真正的跨库路径。owner 链是不跨库的（opus-5-20 在 ams8000 上量到
 /// 6605/6605 全在本库），跨库的是 `SPRE` / `LSTU` / `PSPE` / `CATR` 这些命名引用——
 /// 同一份实测里，8000 库的命名引用属性 82% 指向别的库，主要是目录库 5052。目录库不入
-/// 水位表，所以这条同时验的是 `DirectStore::pin_from_locator`。
+/// 水位表，所以这条同时验的是 `DirectStore::pin_from_locator`（现在是路由目录按文件头给 pin）。
 fn cross_db_references(
     store: &DirectStore,
+    ledger: &mut DbnumLedger,
     home_db: i32,
     attrs: &DirectAttrs,
 ) -> Vec<(String, anyhow::Result<String>)> {
@@ -722,31 +828,28 @@ fn cross_db_references(
         if !target.is_valid() {
             continue;
         }
-        // 反查不到归属的引用不算失败：本工程之外的库本来就不在定位器里。
+        // 解出的 dbnum 不在路由目录里的引用不算失败：本工程之外的库本来就不在 MDB / 依赖目录里。
         let Ok(Some(target_db)) = store.locator_dbnum(*target) else {
             continue;
         };
         if target_db == home_db {
             continue;
         }
-        out.push((
-            key.clone(),
-            store
-                .attrs(*target)
-                .map(|read| {
-                    let noun = match read.map.map.get("TYPE") {
-                        Some(NamedAttrValue::StringType(s) | NamedAttrValue::WordType(s)) => {
-                            s.clone()
-                        }
-                        _ => String::new(),
-                    };
-                    format!(
-                        "{key} → {target}@{target_db} ({noun}, pinned_sesno={:?})",
-                        store.pinned_sesno(target_db)
-                    )
-                })
-                .map_err(|error| anyhow::anyhow!("{key} → {target}@{target_db}: {error}")),
-        ));
+        let read = store
+            .attrs(*target)
+            .map(|read| {
+                ledger.check(store, *target, target_db);
+                let noun = match read.map.map.get("TYPE") {
+                    Some(NamedAttrValue::StringType(s) | NamedAttrValue::WordType(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                format!(
+                    "{key} → {target}@{target_db} ({noun}, pinned_sesno={:?})",
+                    store.pinned_sesno(target_db)
+                )
+            })
+            .map_err(|error| anyhow::anyhow!("{key} → {target}@{target_db}: {error}"));
+        out.push((key.clone(), read));
     }
     out
 }
@@ -769,7 +872,9 @@ fn refno_of(attrs: &DirectAttrs) -> String {
 fn error_kind(error: &aios_database::data_interface::direct_store::DirectStoreError) -> String {
     use aios_database::data_interface::direct_store::DirectStoreError as E;
     match error {
-        E::UnresolvedRef0 { .. } => "UnresolvedRef0".into(),
+        E::InvalidRefNo { .. } => "InvalidRefNo".into(),
+        E::DbNotInMdb { .. } => "DbNotInMdb".into(),
+        E::DbNumberMismatch { .. } => "DbNumberMismatch".into(),
         E::Session { .. } => "Session".into(),
         E::NoSuchElement { .. } => "NoSuchElement".into(),
         E::FileReplaced { .. } => "FileReplaced".into(),

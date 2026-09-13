@@ -170,6 +170,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_sys_scan_reports_version_evidence_without_blocking() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后应当是 reinit_batch")
+            .0;
+        assert!(
+            body.contains("origin == \"init\"")
+                && body.contains("db_type.eq_ignore_ascii_case(\"SYST\")")
+                && body.contains("project.eq_ignore_ascii_case(&self.db_option.project_name)"),
+            "版本证据只挂初始化启动时主项目的 SYST 文件"
+        );
+        assert!(
+            body.contains("e3d_io::database_version_evidence(path)"),
+            "SYS 版本证据必须来自数据库二进制探针"
+        );
+        assert!(
+            body.contains("read_header_diagnostics_summary(path)"),
+            "SYS 启动日志必须同时读取 CRINFO/TMPLVN/session DAB tag"
+        );
+        // e3d-io 2c6f11d 起 detect_* 一律返回 AutomaticVersionSelectionUnavailable：
+        // 启动扫描再调它，就是每次启动都把主项目 SYS 从 Meta 批次里踢掉。
+        assert!(
+            !body.contains(concat!("e3d_io::", "detect_database_version("))
+                && !body.contains(concat!("e3d_io::", "detect_project_version(")),
+            "自动版本识别已废止，启动扫描只准读证据（*_version_evidence），不准调 detect_*"
+        );
+        assert!(
+            body.contains("e3d_io::project_version_evidence(&self.db_option.project_path)")
+                && body.contains("项目数据库二进制版本证据读取失败"),
+            "SYS/MDB 先于文件扫描失败时也必须补充项目二进制版本证据或其读取失败原因"
+        );
+        for required in [
+            "SYS E3D 版本证据:",
+            "e3d_version={e3d_version}",
+            "仅诊断，不用于选版本",
+            "SYS E3D 版本证据读取失败",
+            "原因: {reason}",
+            "SYS 文件解析失败",
+        ] {
+            assert!(body.contains(required), "启动日志缺字段 {required}");
+        }
+        for required in [
+            "header_crinfo=",
+            "header_tmplvn=",
+            "session_dab_tag=",
+            "header_diagnostics_error=",
+        ] {
+            assert!(src.contains(required), "头诊断摘要缺字段 {required}");
+        }
+        // 版本证据是诊断，不是门：从证据日志到范围门之间不得有 blocker、不得 continue。
+        let evidence_block = body
+            .split_once("SYS E3D 版本证据:")
+            .expect("版本证据日志")
+            .1
+            .split_once("let in_scope = self.in_scope(")
+            .expect("版本证据之后应当是范围门")
+            .0;
+        assert!(
+            !evidence_block.contains(concat!("phase_blockers", ".push("))
+                && !evidence_block.contains("continue;"),
+            "版本证据读不出来只能告警：不得进 Meta blocker，也不得把 SYS 文件跳掉"
+        );
+        assert!(
+            body.matches(concat!("phase_blockers", ".push(")).count() >= 4,
+            "SYS 头解析失败仍必须进入 Meta blocker，而不是只打一行日志"
+        );
+    }
+
+    #[test]
+    fn startup_header_summary_names_creator_template_and_selected_session_writer() {
+        let summary = super::header_diagnostics_summary(&e3d_io::DatabaseHeaderDiagnostics {
+            database: PathBuf::from("amssys"),
+            template_type_hash: e3d_attlib::db1_hash("SYST"),
+            template_type_name: Some("SYST".to_owned()),
+            template_version: -1,
+            creation_info: Some("AVEVA Marine Project Creator Mk12.1.SP4.0".to_owned()),
+            header_format: Some(1),
+            session_page: e3d_io::page::PageId::new(1, 9601),
+            session_number: 281,
+            dabacon_version_tag: Some("2_35_23o".to_owned()),
+        });
+        for required in [
+            "header_crinfo=Some(\"AVEVA Marine Project Creator Mk12.1.SP4.0\")",
+            "header_tmplno=SYST",
+            "header_tmplvn=-1",
+            "header_format=Some(1)",
+            "header_session_page=9601",
+            "header_session_number=281",
+            "session_dab_tag=Some(\"2_35_23o\")",
+        ] {
+            assert!(summary.contains(required), "缺 {required}: {summary}");
+        }
+    }
+
+    #[test]
+    fn project_dabacon_tag_summary_is_pending_before_health_without_blocking_startup() {
+        let startup = include_str!("../lib.rs");
+        let sample = startup
+            .find("dabacon_tag_summary::start_at_startup")
+            .expect("启动必须采样项目 DAB tag");
+        let health_server = startup
+            .find("let web_task =")
+            .expect("启动必须先拉起 health server");
+        assert!(
+            sample < health_server,
+            "health 接请求前先登记 pending；实际文件扫描仍须在后台"
+        );
+        let sampler = include_str!("dabacon_tag_summary.rs");
+        assert!(
+            sampler.contains("tokio::spawn(refresh(project_root))"),
+            "DAB tag 诊断不得让慢共享盘阻塞服务启动"
+        );
+        for required in [
+            "项目 DAB tag 聚合:",
+            "latest_tags=",
+            "historical_session_tags=",
+            "仅诊断，不用于选版本",
+            "聚合失败（仅诊断，不阻塞）",
+        ] {
+            assert!(sampler.contains(required), "启动聚合日志缺 {required}");
+        }
+    }
+
     use super::*;
     use crate::SUL_DB;
     use std::path::Path;
@@ -1003,7 +1131,9 @@ mod tests {
             "amssys", // SYST 库 8191：MDB / CURD 就存在它里面
             "amscom",
             "amsmis",
+            "jeuglb", // Global Project 的全局管理库；dbnum 以文件头为准
             "TESsys",
+            "TESglb",
         ] {
             assert!(is_pdms_db_file_name(name), "{name} 应当算库文件");
         }
@@ -1023,7 +1153,8 @@ mod tests {
             "ab12_0001",   // 前缀不足三位字母
             "ams1112_001", // 序号不足四位
             "ams",         // 只有前缀
-            "amssys2",     // sys/com/mis 后面不许再挂东西
+            "amssys2",     // sys/com/mis/glb 后面不许再挂东西
+            "jeuglb2",
         ] {
             assert!(!is_pdms_db_file_name(name), "{name} 不该算库文件");
         }
@@ -1913,13 +2044,15 @@ mod tests {
             "TES1000_0001",
             "ams3001",
             "zdj7209",
-            // sys / com / mis 三个项目库。注意 `amscom` 与黑名单里的 `com`
+            // sys / com / mis / glb 项目元数据库。注意 `amscom` 与黑名单里的 `com`
             // 扩展名同名却毫不相干——它没有扩展名，误伤它等于丢掉 SYST 8191
             // 之外的整套项目库。
             "amssys",
             "amscom",
             "amsmis",
+            "jeuglb",
             "TESsys",
+            "TESglb",
         ] {
             assert!(
                 is_candidate_db_file(Path::new(name)),
@@ -2391,8 +2524,9 @@ mod tests {
                 .map_or(sweep.len(), |next| at + 1 + next);
             let region = &sweep[at..end];
             assert!(
-                region.contains(".with_dbnum("),
-                "阶段 blocker 必须带上它自己的 dbnum: {region}"
+                region.contains(".with_dbnum(")
+                    || (region.contains("SYS 文件解析失败:") && region.contains(".with_project(")),
+                "阶段 blocker 必须带 dbnum；SYS 头损坏、库号未知时必须带 project: {region}"
             );
         }
 
@@ -2433,9 +2567,10 @@ pub struct IncrementInfo {
 ///
 /// - `<前缀><库号>` 带或不带 `_<四位序号>`——`ams1112_0001`、`acp250705_0001`、
 ///   `TES1000_0001`，以及没有序号的老形态 `ams3001`、`zdj7209`、`TES001`；
-/// - `<前缀>sys` / `com` / `mis`——项目的系统、通信与杂项库，每个项目各一个。
+/// - `<前缀>sys` / `com` / `mis` / `glb`——项目的系统、通信、杂项与 Global 库。
 ///   **`amssys` 就是 SYST 库 8191**，MDB 与 CURD 都存在它里面，认不出它等于
-///   让本期执行范围再也刷新不了。
+///   让本期执行范围再也刷新不了；Global Project 的 MDB 可从 `jeusys` 跨库引用
+///   `jeuglb` 中的 DB 声明，漏掉 `glb` 同样会让范围为空。
 ///
 /// 大小写不敏感：TEST 项目整套用的是大写 `TES…`，按小写认会把它 85 个库全吞掉。
 ///
@@ -2447,14 +2582,25 @@ pub struct IncrementInfo {
 /// `ams7997_0001.codex-before-d03-delete-20260727` 这种带日期后缀的备份。
 ///
 /// 规则拿真实项目校过：`D:/AVEVA/Projects/E3D3.1` 下 8 个项目的库目录，999 个
-/// 编号库 + 每项目 3 个 sys/com/mis + 一批无序号老库全部命中，杂项一个不漏地弃掉。
+/// 编号库 + 每项目的 sys/com/mis（Global Project 另有 glb）+ 一批无序号老库全部命中，
+/// 杂项一个不漏地弃掉。
+pub fn is_project_runtime_db_file_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > 3
+        && bytes[..3].iter().all(u8::is_ascii_alphabetic)
+        && matches!(
+            name[3..].to_ascii_lowercase().as_str(),
+            "sys" | "com" | "mis" | "glb"
+        )
+}
+
 pub fn is_pdms_db_file_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.len() <= 3 || !bytes[..3].iter().all(u8::is_ascii_alphabetic) {
         return false;
     }
     let rest = &name[3..];
-    if matches!(rest.to_ascii_lowercase().as_str(), "sys" | "com" | "mis") {
+    if is_project_runtime_db_file_name(name) {
         return true;
     }
     // `<库号>` 或 `<库号>_<四位序号>`，别的一律不是。
@@ -2595,6 +2741,70 @@ fn is_foreign_design_data(db_option: &DbOption, project: &str, db_type: &str) ->
         && !project
             .trim()
             .eq_ignore_ascii_case(db_option.project_name.trim())
+}
+
+/// 启动诊断日志里的有效 `e3d_version`。
+///
+/// DbOption 未配置时与 schema 加载保持同一口径：有模板目录覆盖就标出覆盖，
+/// 否则明确标出产品默认值。这样
+/// 「证据说的是什么」与「实际选的是什么」会并排出现在同一行。
+fn configured_e3d_version_label() -> String {
+    match crate::options::configured_e3d_version() {
+        Ok(Some(version)) => version,
+        Ok(None)
+            if std::env::var_os(crate::data_interface::direct_store::TEMPLATE_DIR_ENV)
+                .is_some() =>
+        {
+            format!(
+                "explicit({})",
+                crate::data_interface::direct_store::TEMPLATE_DIR_ENV
+            )
+        }
+        Ok(None) => format!(
+            "{}(default)",
+            crate::data_interface::direct_store::DEFAULT_E3D_VERSION
+        ),
+        Err(error) => format!("读取失败({error})"),
+    }
+}
+
+/// e3d-io 探针读到的版本证据，压成一段 `key=value`。
+///
+/// 探针只会给到「哪个字段、什么原始值、会话页在哪」，从不给出版本结论——目前没有任何
+/// 库字段被证明能分开 2.1 与 3.1。字段名照 e3d-io 的 [`e3d_io::VersionEvidenceSource`]。
+fn version_evidence_summary(evidence: &e3d_io::DatabaseVersionEvidence) -> String {
+    format!(
+        "field={} raw_value={:?} raw_text={:?} session_page={:?}",
+        evidence.source.field_name(),
+        evidence.raw_value,
+        evidence.raw_text,
+        evidence.session_page
+    )
+}
+
+/// 页 0 与所选 session 上的版本邻近事实。
+///
+/// 三项都只作排障：CRINFO 是创建工具，TMPLVN 是模板兼容版本，DAB tag 是该
+/// session 的最后写入引擎。任何一项都不得在这里映射成 `e3d210/e3d31`。
+fn header_diagnostics_summary(evidence: &e3d_io::DatabaseHeaderDiagnostics) -> String {
+    format!(
+        "header_crinfo={:?} header_tmplno={} header_tmplvn={} header_format={:?} \
+         header_session_page={} header_session_number={} session_dab_tag={:?}",
+        evidence.creation_info,
+        evidence.template_type_name.as_deref().unwrap_or("unknown"),
+        evidence.template_version,
+        evidence.header_format,
+        evidence.session_page.page,
+        evidence.session_number,
+        evidence.dabacon_version_tag
+    )
+}
+
+fn read_header_diagnostics_summary(path: &std::path::Path) -> String {
+    match e3d_io::database_header_diagnostics(path) {
+        Ok(evidence) => header_diagnostics_summary(&evidence),
+        Err(error) => format!("header_diagnostics_error={error}"),
+    }
 }
 
 /// 增量摄入的唯一判定：**本期 MDB 声明的 DESI**。
@@ -3222,6 +3432,40 @@ impl AiosDBManager {
         )
     }
 
+    /// Prepare the Catalogue dependency inputs for a direct dbnum initializer.
+    ///
+    /// `watch_dbnums` limits DESI data/model work; it must never narrow the
+    /// CATA/DICT identity surface needed to interpret one admitted DESI file.
+    /// The automatic watcher installs the same manifests during `sweep_dirs`.
+    /// Specification tools (`initialize_ams_dbnums`, Python baseline helpers)
+    /// do not run that sweep, so they enter through this explicit preparation.
+    pub(crate) fn prepare_dependency_manifests_for_initialization(&self) -> anyhow::Result<()> {
+        let watch_dirs = self.watch_dirs();
+        let (_, blockers, _, cata_dependencies, dependency_identities) =
+            self.catalogue_manifest_for_dirs(&watch_dirs);
+        if !blockers.is_empty() {
+            let reasons = blockers
+                .iter()
+                .map(|blocker| format!("{}: {}", blocker.phase.as_str(), blocker.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!("初始化依赖清单裁决失败: {reasons}");
+        }
+        let cata_count = cata_dependencies.len();
+        let identity_count = dependency_identities.len();
+        let dependency_version =
+            crate::data_interface::cata_closure::install_dependency_manifest(cata_dependencies);
+        let identity_version =
+            crate::data_interface::cata_closure::install_dependency_identity_manifest(
+                dependency_identities,
+            );
+        println!(
+            "[initialization-manifest] CATA 依赖不受 watch_dbnums 限制：选中 {cata_count} 个目录库，\
+             身份 {identity_count} 个文件，依赖版本={dependency_version}，身份版本={identity_version}"
+        );
+        Ok(())
+    }
+
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
     ///
     /// 分类与落库都交给 [`DbnumState::classify_scan`] / [`DbnumState::record_observation`]
@@ -3382,70 +3626,15 @@ impl AiosDBManager {
             // batches or advance applied_sesno in read-through mode.
             crate::data_interface::initialization_phase::InitializationCoordinator::global()
                 .mark_data_ready_without_manifest();
-            let project = self.db_option.project_name.clone();
-            let mdb = self.db_option.mdb_name.clone();
-            let skeleton_changed = match tokio::task::spawn_blocking(move || {
-                crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb)
-            })
-            .await
-            {
-                Ok(Ok(true)) => {
-                    log::info!(
-                        "[{origin}] read-through MDB skeleton advanced atomically to the latest file sessions"
-                    );
-                    true
-                }
-                Ok(Ok(false)) => false,
-                Ok(Err(error)) => {
-                    log::error!(
-                        "[{origin}] read-through MDB skeleton refresh failed; retaining the old snapshot: {error:#}"
-                    );
-                    false
-                }
-                Err(error) => {
-                    log::error!(
-                        "[{origin}] read-through MDB skeleton refresh task failed: {error}"
-                    );
-                    false
-                }
-            };
-            if skeleton_changed {
-                // This creates model work only.  It does not enter the data
-                // batch/finalize path and therefore cannot advance
-                // `applied_sesno` in read-through mode.
-                crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup()
-                    .await;
-                if let Err(error) = crate::data_interface::element_attributes::refresh_cached(
-                    &self.db_option.project_name,
-                    &self.db_option.mdb_name,
-                )
-                .await
-                {
-                    log::warn!("[{origin}] read-through refresh-if-present degraded: {error:#}");
-                }
-            }
+            // run_read_through_core owns generation polling and targeted model refresh.
+            // A filesystem notification must not start a second MDB-wide refresh.
             log::info!(
                 "[{origin}] read-through data face: skipped ingest sweep (ensure_archives={ensure_archives})"
             );
             return Ok(());
         }
-        // Direct tree/attribute readers use the same in-memory MDB snapshot in
-        // RocksDB mode. Advancing only SQL rows leaves those readers on the old session.
-        let project = self.db_option.project_name.clone();
-        let mdb = self.db_option.mdb_name.clone();
-        match tokio::task::spawn_blocking(move || {
-            crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                log::error!("[{origin}] ingest MDB snapshot refresh failed: {error:#}")
-            }
-            Err(error) => {
-                log::error!("[{origin}] ingest MDB snapshot refresh task failed: {error}")
-            }
-        }
+        // Direct readers check their source identities on demand. Ingest discovery
+        // does not build or refresh an element skeleton.
         let watch_dirs = self.watch_dirs();
         // 目录集合为空时这轮重扫会「成功地」扫出 0 个候选，与「确实没有新会话」
         // 长得一模一样。它同时也是手动摄入的候选面，所以必须自己喊出来。
@@ -3489,7 +3678,31 @@ impl AiosDBManager {
         let scope = match self.update_scope(None).await {
             Ok(scope) => scope,
             Err(error) => {
-                let msg = format!("[{origin}] 无法确定本期执行范围，未入队任何批次: {error:#}");
+                let e3d_context = if origin == "init" {
+                    // 版本证据只作诊断，不参与裁决（原因见下面 SYST 那段的注释）。
+                    let e3d_version = configured_e3d_version_label();
+                    match e3d_io::project_version_evidence(&self.db_option.project_path) {
+                        Ok(evidence) => {
+                            let header =
+                                read_header_diagnostics_summary(evidence.database.as_path());
+                            format!(
+                                "；e3d_version={e3d_version}，项目数据库二进制版本证据: \
+                                 database={} {} {header}（仅诊断，不用于选版本）",
+                                evidence.database.display(),
+                                version_evidence_summary(&evidence)
+                            )
+                        }
+                        Err(version_error) => format!(
+                            "；e3d_version={e3d_version}，项目数据库二进制版本证据读取失败: \
+                             {version_error}"
+                        ),
+                    }
+                } else {
+                    String::new()
+                };
+                let msg = format!(
+                    "[{origin}] 无法确定本期执行范围，未入队任何批次: {error:#}{e3d_context}"
+                );
                 log::error!("{msg}");
                 eprintln!("{msg}");
                 return Ok(());
@@ -3606,6 +3819,7 @@ impl AiosDBManager {
                     println!("[{origin}] 跳过无法解析文件名的条目: {}", path.display());
                     continue;
                 };
+                let sys_filename = file_name.to_ascii_lowercase().ends_with("sys");
 
                 // 解析数据库基本信息
                 let Some(DbBasicInfo {
@@ -3614,7 +3828,40 @@ impl AiosDBManager {
                     db_no,
                 }) = try_parse_db_basic_info(path)
                 else {
-                    println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
+                    let project = self.owning_project(path);
+                    if origin == "init"
+                        && sys_filename
+                        && project.eq_ignore_ascii_case(&self.db_option.project_name)
+                    {
+                        // 用 e3d-io 的探针再开一次，只为把「头到底哪里读不出」说清：它
+                        // 能开说明基础头解析器与 e3d-io 的口径不一致，开不了就把它的原因
+                        // 原样带上。探针不选版本（见下面 SYST 那段的注释）。
+                        let reason = match e3d_io::database_version_evidence(path) {
+                            Ok(evidence) => {
+                                let header = read_header_diagnostics_summary(path);
+                                format!(
+                                    "基础头解析失败，但 e3d-io 能打开该文件（{} {header}）",
+                                    version_evidence_summary(&evidence)
+                                )
+                            }
+                            Err(error) => error.to_string(),
+                        };
+                        let msg = format!(
+                            "[{origin}] SYS 文件解析失败: project={project} file={}；原因: {reason}",
+                            path.display()
+                        );
+                        log::error!("{msg}");
+                        eprintln!("{msg}");
+                        phase_blockers.push(
+                            crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                crate::data_interface::initialization_phase::DataPhase::Meta,
+                                format!("SYS 文件解析失败: {}；原因: {reason}", path.display()),
+                            )
+                            .with_project(project),
+                        );
+                    } else {
+                        println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
+                    }
                     continue;
                 };
                 // 记在所有门之前：这里回答的是「盘上有没有这个库号的设计库文件」，
@@ -3653,6 +3900,46 @@ impl AiosDBManager {
                 // 主项目目录里找，必然找不到、批次必然 failed（见 `project_of_path`）。
                 // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
                 let project = self.owning_project(path);
+                if origin == "init"
+                    && db_type.eq_ignore_ascii_case("SYST")
+                    && project.eq_ignore_ascii_case(&self.db_option.project_name)
+                {
+                    // 只打证据，不裁决。页身份、WORL.UPGDNO、COMM.VERS 在 2.1 与 3.1
+                    // 的样本里都分不开（见 e3d-io
+                    // docs/evidence/2026-09-11-e3d-database-version.md）；CRINFO/TMPLVN/
+                    // session DAB tag 又分别只说明创建工具、模板兼容版本与最后写入引擎，
+                    // 仍不能可靠双向选版。选版本的唯一来源是 DbOption 的 e3d_version。
+                    // 之前这里拿 detect_* 的失败当 Meta blocker
+                    // 并把 SYS 文件跳掉——那样每次启动必中，手动模式也中。读不出证据只是
+                    // 少一行诊断，SYS 照常往下走；文件真坏，后面的头解析 / MDB 解析会
+                    // 用自己的原因报出来。
+                    let e3d_version = configured_e3d_version_label();
+                    let header = read_header_diagnostics_summary(path);
+                    match e3d_io::database_version_evidence(path) {
+                        Ok(evidence) => {
+                            let msg = format!(
+                                "[{origin}] SYS E3D 版本证据: project={project} file={} \
+                                 dbnum={db_no} e3d_version={e3d_version} {} {header}\
+                                 （仅诊断，不用于选版本）",
+                                path.display(),
+                                version_evidence_summary(&evidence)
+                            );
+                            log::info!("{msg}");
+                            println!("{msg}");
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let msg = format!(
+                                "[{origin}] SYS E3D 版本证据读取失败（仅诊断，不阻塞）: \
+                                 project={project} file={} dbnum={db_no} \
+                                 e3d_version={e3d_version} {header}；原因: {reason}",
+                                path.display()
+                            );
+                            log::warn!("{msg}");
+                            eprintln!("{msg}");
+                        }
+                    }
+                }
                 // 本期 MDB 声明的设计库（SYS meta 例外），与手动路径共用（`in_scope`）。
                 let in_scope = self.in_scope(&scope, &project, &db_type, db_no);
                 if !in_scope {
@@ -3878,7 +4165,7 @@ impl AiosDBManager {
                                     .as_str(),
                                 streak: parked.streak,
                                 max_attempts:
-                                    crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+                                    crate::data_interface::batch_worker::MAX_ATTEMPTS,
                                 end_sesno: parked.end_sesno,
                                 file_path: path.to_str(),
                                 last_reason: &parked.last_reason,
@@ -5187,14 +5474,8 @@ mod staged_transform_write_routing_tests {
             "新指针必须指向暂存里存在的 trans 记录（D9 不悬空）"
         );
 
-        // 3. 位姿位移 → 包围盒变化 → 房间重算意图寄存进窗口。
-        let spatial = window.deferred_spatial().await;
-        assert_eq!(
-            spatial.room_changes.get(&equi),
-            Some(&"EQUI".to_string()),
-            "包围盒确实变了的位姿目标必须寄存房间变更: {:?}",
-            spatial.room_changes
-        );
+        // 3.（原先这里断言「位姿位移 → 包围盒变化 → 房间重算意图寄存进窗口」；房间轮随
+        //    房间流程退役，房间归属在生成根落库时就地算，ADR-073 D1——窗口不再寄存房间变更。）
 
         window.drop_database().await.expect("cleanup");
     }

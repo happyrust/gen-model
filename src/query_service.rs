@@ -12,7 +12,6 @@ use tokio::sync::OnceCell;
 use crate::data_interface::generation_root::{
     configured_delivery_unit_types, resolve_live_element_generation_root,
 };
-use crate::data_interface::manual_update::load_pending_model_units;
 use crate::data_interface::model_impact::{
     AttributeEffect, classify_attribute_effect, normalize_attribute_name,
 };
@@ -21,7 +20,7 @@ use crate::e3d_query::{
     render_owner_chain, scalar, section, validate_refno,
 };
 
-pub const QUERY_TOOL_NAMES: [&str; 12] = [
+pub const QUERY_TOOL_NAMES: [&str; 11] = [
     "e3d.element.identity",
     "e3d.element.owner_chain",
     "e3d.element.attributes",
@@ -32,11 +31,92 @@ pub const QUERY_TOOL_NAMES: [&str; 12] = [
     "e3d.room.lookup",
     "model.generation_root",
     "model.change_impact",
-    "model.pending_units",
     "model.spatial.bounds",
 ];
 
 static MODEL_DB: OnceCell<()> = OnceCell::const_new();
+
+/// `e3d.room.lookup` 读到的一条归属边。
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct RoomMembershipEdge {
+    panel: String,
+    room_num: String,
+    inside_count: u8,
+    center_dist: f32,
+}
+
+/// 一个构件挂在哪些面板上：直接读 `room_relate` 边（ADR-073 D1 / D4）。
+///
+/// 房间归属由生成路径逐根写成 `panel -> room_relate -> element` 边、与该根的模型行同事务落库，
+/// 库上没有别的房间结果形态——结果目录 / 分片工件与旧结果表随房间流程退役，结果版本那一格
+/// 随第三枚水位退（D2）。排序与 `fn::room_relate_of` 同一口径（`inside_count` 降序 →
+/// `center_dist` 升序 → `room_num` 升序，ADR-010 §5），多归属时首条即材料表取到的那条。
+async fn read_room_memberships(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    member: &str,
+) -> anyhow::Result<Vec<RoomMembershipEdge>> {
+    let mut response = db
+        .query(
+            "LET $pe = type::thing('pe', $member);
+            SELECT record::id(in) AS panel, room_num, inside_count ?? 0 AS inside_count, \
+             center_dist ?? 0.0 AS center_dist FROM room_relate WHERE out = $pe \
+             ORDER BY inside_count DESC, center_dist ASC, room_num ASC;",
+        )
+        .bind(("member", member.to_owned()))
+        .await?
+        .check()?;
+    Ok(response.take(1)?)
+}
+
+fn room_calculation_status(
+    memberships: usize,
+    dbnum: u32,
+    generation_root: Option<e3d_io::refno::RefNo>,
+) -> &'static str {
+    use crate::fast_model::room_resident::ResidentLifecycle;
+
+    if !crate::options::room_membership() {
+        return "disabled";
+    }
+    let generation = match crate::fast_model::room_resident::lifecycle() {
+        ResidentLifecycle::Ready { generation, .. } => generation,
+        ResidentLifecycle::Loading { .. } => return "initializing",
+        ResidentLifecycle::Degraded { .. }
+        | ResidentLifecycle::Blocked { .. }
+        | ResidentLifecycle::Unsupported { .. }
+        | ResidentLifecycle::Disabled { .. } => return "failed",
+    };
+    if crate::options::data_face().is_read_through() {
+        match crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .snapshot()
+            .room_bootstrap
+            .status
+        {
+            "ready" => {}
+            "idle" | "initializing" | "" => return "initializing",
+            _ => return "failed",
+        }
+    }
+    let Some(root) = generation_root else {
+        return "not_computed";
+    };
+    let ack = crate::fast_model::model_memory_store::ModelMemoryStore::global().publication_ack(
+        crate::fast_model::model_memory_store::ProjectionScope::Current,
+        root,
+    );
+    if !ack.is_some_and(|ack| {
+        ack.dbnum == dbnum
+            && ack.room_membership
+            && ack.room_generation.as_deref() == Some(generation.as_str())
+    }) {
+        return "not_computed";
+    }
+    if memberships == 0 {
+        "ready_empty"
+    } else {
+        "ready_nonempty"
+    }
+}
 
 #[derive(Clone)]
 pub struct QueryService {
@@ -114,18 +194,6 @@ struct MembersArgs {
     limit: usize,
 }
 
-#[derive(Default, Deserialize)]
-struct PendingArgs {
-    #[serde(default)]
-    dbnum: Option<u32>,
-    #[serde(default = "default_true")]
-    include_dead: bool,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
 #[derive(Deserialize)]
 struct ImpactArgs {
     attribute: String,
@@ -133,33 +201,6 @@ struct ImpactArgs {
 
 fn default_limit() -> usize {
     200
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn render_room_pending_probe(room_targets: &[String]) -> String {
-    if room_targets.is_empty() {
-        return "RETURN false;".to_string();
-    }
-    let targets = room_targets
-        .iter()
-        .map(|target| {
-            format!(
-                "'{}'",
-                crate::data_interface::dbnum_state::escape_surql_str(target)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "RETURN array::len((SELECT VALUE id FROM {} WHERE action IN \
-         ['room_recalc_panel', 'room_recalc_element'] AND status IN \
-         ['collecting', 'pending', 'failed', 'running'] AND target_refno IN \
-         [{targets}] LIMIT 1)) > 0;",
-        crate::data_interface::model_update_pending::TABLE
-    )
 }
 
 impl QueryService {
@@ -199,7 +240,6 @@ impl QueryService {
             "e3d.room.lookup" => self.room(decode(arguments)?).await?,
             "model.generation_root" => self.generation_root(decode(arguments)?).await?,
             "model.change_impact" => self.change_impact(decode(arguments)?)?,
-            "model.pending_units" => self.pending_units(decode(arguments)?).await?,
             "model.spatial.bounds" => self.spatial_bounds(decode(arguments)?).await?,
             _ => return Err(QueryError::invalid(format!("unknown query tool {tool}"))),
         };
@@ -262,51 +302,57 @@ impl QueryService {
         Ok(())
     }
 
-    /// 派生面（空间树 / 房间归属）的发布状态三元组 `(published_version, stale, publication_status)`。
+    /// 随模型水位推进的派生面发布状态三元组
+    /// `(published_version, stale, publication_status)`。
     ///
     /// 读透形态（`data_face = read-through`，spawned-mem / embedded-mem 的默认）没有数据批次，
-    /// 也就没有文件轮次：`published_file_input` 停在启动基线，`room_published_inst` 不再更新，
-    /// 房间任务改读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
-    /// 「stale」——ADR-062 明写读透不承诺文件级发布语义，所以两格回 `null`、状态回
-    /// `unsupported`，不拿「无 collecting / 无 pending」凑成 `current`（审核 F-B）。
+    /// 房间任务读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
+    /// 「stale」——读透不承诺文件级发布语义，所以两格回 `null`、状态回 `unsupported`（审核 F-B）。
+    ///
+    /// ingest 形态（ADR-072 D4，publish 阶段退役）：**`published_version` = 该库的
+    /// `model_sesno`**，读水位镜像、不问派生表。**`stale` = 该库有任务在飞**
+    /// （`task_registry` 是在飞的唯一来源）。
+    /// 没有具体库号的调用（空间边界那一路）：版本回 `null`、在飞看全局。此前这里还问一遍
+    /// 第二条异步账里的房间待办行——那张表随账本退役，房间归属如今随根算完写完，
+    /// 任务不在飞就是算完了。
     async fn published_derivation_status(
-        room_targets: Option<&[String]>,
+        dbnum: Option<u32>,
     ) -> Result<(Value, Value, &'static str), QueryError> {
         if crate::options::data_face().is_read_through() {
             return Ok((Value::Null, Value::Null, "unsupported"));
         }
         crate::fast_model::spatial_state::ensure_spatial_ready()
             .map_err(|error| QueryError::new("UPDATING", error))?;
-        let published_version =
-            crate::data_interface::side_effect_pending::SideEffectCompensator::
-                published_spatial_version()
-                .await
-                .map_err(db_error)?;
-        // 「有没有一轮发布在飞」问任务注册表，不问库（ADR-071 / 计划 v3 S7：`task_registry`
-        // 是在飞的唯一来源）。原先问的 `has_collecting_file_rounds()` 是「文件轮次那一行还
-        // 开着吗」，那一行随账本退役。崩溃留下的未收敛意图不归这一问管——它由上面那句
-        // `ensure_spatial_ready()` 拦住（空间树是 `ReplayRequired` 时这里根本走不到）。
-        let collecting =
-            crate::data_interface::task_registry::TaskRegistry::global().has_running_data_batch();
-        let room_pending = if let Some(room_targets) = room_targets {
-            let mut response = SUL_DB
-                .query(render_room_pending_probe(room_targets))
-                .await
-                .and_then(|response| response.check())
-                .map_err(db_error)?;
-            response
-                .take::<Option<bool>>(0)
-                .unwrap_or(Some(true))
-                .unwrap_or(true)
-        } else {
-            false
+        let registry = crate::data_interface::task_registry::TaskRegistry::global();
+        let (published_version, stale) = match dbnum {
+            Some(dbnum) => {
+                let model_sesno = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+                    .await
+                    .map_err(db_error)?
+                    .map(|state| state.model_sesno);
+                (
+                    model_sesno.map_or(Value::Null, |sesno| json!(sesno)),
+                    registry.has_running_data_batch_for(dbnum),
+                )
+            }
+            None => (Value::Null, registry.has_running_data_batch()),
         };
-        let stale = collecting || room_pending;
         Ok((
-            json!(published_version),
+            published_version,
             json!(stale),
             if stale { "updating" } else { "current" },
         ))
+    }
+
+    /// 房间查询在总开关关闭时不能拿 `model_sesno` 冒充房间版本：模型水位此时只承诺
+    /// 几何。旧边仍返回供诊断，但状态明确为 disabled，版本与新鲜度都按未知处理。
+    async fn room_derivation_status(
+        dbnum: u32,
+    ) -> Result<(Value, Value, &'static str), QueryError> {
+        if !crate::options::room_membership() {
+            return Ok((Value::Null, Value::Null, "disabled"));
+        }
+        Self::published_derivation_status(Some(dbnum)).await
     }
 
     async fn identity(&self, args: RefnoArgs) -> Result<Value, QueryError> {
@@ -535,6 +581,21 @@ impl QueryService {
 
     async fn room(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        if crate::options::data_face().is_read_through() && crate::options::room_membership() {
+            let tree = self.direct_tree.get().await
+                .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
+            return crate::data_interface::room_read_through::lookup(refno, tree).await
+                .map_err(|error| {
+                    let code = if error.is::<crate::data_interface::room_read_through::RoomNotReady>() {
+                        "UPDATING"
+                    } else if error.chain().any(|cause| matches!(
+                        cause.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
+                        Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { refno: missing, .. })
+                            if missing == &refno.to_string() || missing == &refno.to_pdms_str()
+                    )) { "NOT_FOUND" } else { "SOURCE_UNAVAILABLE" };
+                    QueryError::new(code, error)
+                });
+        }
         Self::ensure_model_db().await?;
         let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
         #[derive(Deserialize)]
@@ -543,11 +604,8 @@ impl QueryService {
             #[serde(default)]
             room_num: Option<String>,
         }
-        // A REFNO's first word is a project-local Ref0, not the database number.
-        // Resolve it through the MDB skeleton just like the tree HTTP handlers do;
-        // using `get_0()` here silently queried an unrelated dbnum and made every
-        // valid room membership look empty in plant-ui (for example Ref0 17496 is
-        // owned by dbnum 1112 in the AMS /ALL MDB).
+        // Decode the database through the shared native RefNo route. MDB membership
+        // selects the project-local file; no element skeleton is needed.
         let tree = self
             .direct_tree
             .get()
@@ -563,12 +621,18 @@ impl QueryService {
                 ),
             )
         })?;
-        let edges = crate::data_interface::room_delta::read_member_compatible_on(
-            &SUL_DB, dbnum, &refno.to_string()).await
+        let generation_root = tree
+            .generation_root_of(
+                refno.refno(),
+                &crate::data_interface::generation_root::configured_delivery_unit_types(),
+            )
+            .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?
+            .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root));
+        let edges = read_room_memberships(&SUL_DB, &refno.to_string())
+            .await
             .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;
         let resident = crate::fast_model::room_resident::current_for_calculation().ok();
         let mut memberships = Vec::new();
-        let mut panels = Vec::with_capacity(edges.len());
         for edge in edges {
             let panel = RefnoEnum::from(
                 edge.panel
@@ -588,17 +652,15 @@ impl QueryService {
                 "room_num": edge.room_num,
                 "panel_refno": panel.to_string(),
             }));
-            panels.push(panel);
         }
-        let mut room_targets = vec![refno.to_pdms_str()];
-        room_targets.extend(panels.iter().map(|panel| panel.to_pdms_str()));
-        room_targets.sort_unstable();
-        room_targets.dedup();
         let (published_version, stale, publication_status) =
-            Self::published_derivation_status(Some(&room_targets)).await?;
+            Self::room_derivation_status(dbnum).await?;
+        let calculation_status = room_calculation_status(memberships.len(), dbnum, generation_root);
         Ok(json!({
             "refno": refno.to_string(),
             "memberships": memberships,
+            "room_membership": crate::options::room_membership(),
+            "calculation_status": calculation_status,
             "published_version": published_version,
             "stale": stale,
             "publication_status": publication_status,
@@ -662,38 +724,19 @@ impl QueryService {
         }))
     }
 
-    async fn pending_units(&self, args: PendingArgs) -> Result<Value, QueryError> {
-        validate_limit(args.limit)?;
-        Self::ensure_model_db().await?;
-        let mut units = load_pending_model_units().await.map_err(db_error)?;
-        if let Some(dbnum) = args.dbnum {
-            units.retain(|unit| unit.dbnum == dbnum);
-        }
-        if !args.include_dead {
-            units.retain(|unit| !unit.dead);
-        }
-        let total = units.len();
-        let dead_count = units.iter().filter(|unit| unit.dead).count();
-        let units = units
-            .into_iter()
-            .skip(args.offset)
-            .take(args.limit)
-            .collect::<Vec<_>>();
-        Ok(json!({
-            "total": total,
-            "dead_count": dead_count,
-            "offset": args.offset,
-            "limit": args.limit,
-            "truncated": args.offset.saturating_add(args.limit) < total,
-            "units": units,
-        }))
-    }
-
     async fn spatial_bounds(&self, args: BoundsArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        let source_root = crate::data_interface::generation_root::refno_to_e3d(refno);
+        let overlay_present = crate::fast_model::model_memory_store::ModelMemoryStore::global()
+            .receipt(
+                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                source_root,
+            )
+            .is_some();
         // Use the same per-database projection as ensure/records. In ingest mode,
         // a database without an applied watermark still publishes on-demand models to memory.
-        let memory_projection = if crate::options::data_face().is_read_through() {
+        let memory_projection = if overlay_present || crate::options::data_face().is_read_through()
+        {
             true
         } else if args.scope == BoundsScope::Subtree {
             let dbnum = crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
@@ -709,7 +752,7 @@ impl QueryService {
             false
         };
         if memory_projection {
-            let source = crate::data_interface::generation_root::refno_to_e3d(refno);
+            let source = source_root;
             let target = crate::fast_model::model_memory_store::packed_refno(source);
             let records = crate::fast_model::model_memory_store::ModelMemoryStore::global()
                 .records_of_root(
@@ -961,22 +1004,97 @@ mod tests {
     }
 
     #[test]
-    fn contract_has_exactly_twelve_unique_tools() {
+    /// `model.pending_units` 随 pending 表退了（ADR-072 D5），契约剩十一个工具。
+    fn contract_has_exactly_eleven_unique_tools() {
         let unique = QUERY_TOOL_NAMES
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), 12);
+        assert_eq!(unique.len(), 11);
+        assert!(!unique.contains(&"model.pending_units"));
     }
 
+    /// 房间开关开启时，`e3d.room.lookup` 继续用该库的 `model_sesno` 与在飞任务表达版本；
+    /// 关闭时模型水位不再承诺房间，必须返回 disabled + 未知版本/新鲜度，不能冒充 current。
     #[test]
-    fn room_freshness_probe_is_targeted_and_escapes_refnos() {
-        let sql = render_room_pending_probe(&["24381/10".into(), "panel'with\\quote".into()]);
-        assert!(sql.contains("target_refno IN ['24381/10', 'panel\\'with\\\\quote']"));
-        assert!(sql.contains("'collecting', 'pending', 'failed', 'running'"));
+    fn room_lookup_marks_membership_disabled_instead_of_reusing_the_model_watermark() {
+        let source = include_str!("query_service.rs");
+        let status = source
+            .split_once("async fn published_derivation_status(")
+            .expect("published_derivation_status exists")
+            .1
+            .split_once("async fn identity(&self")
+            .expect("status boundary")
+            .0;
+        assert!(status.contains("state.model_sesno"), "{status}");
         assert!(
-            !sql.contains("dbnum ="),
-            "shared targets cannot be filtered by file: {sql}"
+            status.contains("has_running_data_batch_for(dbnum)"),
+            "{status}"
         );
+        assert!(status.contains("has_running_data_batch()"), "{status}");
+        assert!(
+            status.contains("!crate::options::room_membership()"),
+            "{status}"
+        );
+        assert!(
+            status.contains("Value::Null, Value::Null, \"disabled\""),
+            "{status}"
+        );
+        for retired in [
+            "published_spatial_version",
+            concat!("model_update_", "pending"),
+            concat!("side_effect_", "pending"),
+            "SUL_DB",
+            "room_recalc",
+            concat!("room_", "sesno"),
+        ] {
+            assert!(
+                !status.contains(retired),
+                "`{retired}` 已随 publish 阶段 / 房间流程退役: {status}"
+            );
+        }
+        // 读口只认两张边（ADR-073 D4）：结果目录 / 分片工件与旧结果表都退了。
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for retired in [
+            concat!("room_", "result"),
+            concat!("room_", "directory"),
+            concat!("room_", "fragment"),
+        ] {
+            assert!(
+                !production.contains(retired),
+                "`{retired}` 已随房间流程退役"
+            );
+        }
+        assert!(
+            production.contains("FROM room_relate WHERE out = $pe"),
+            "读口直接按 relation.out 查边，不依赖 kv-mem 里存在 pe 属性行"
+        );
+        let room = source
+            .split_once("async fn room(&self")
+            .expect("room query exists")
+            .1
+            .split_once("async fn generation_root")
+            .expect("room query boundary")
+            .0;
+        assert!(
+            room.contains("room_derivation_status(dbnum)"),
+            "房间查询先经过开关感知的状态包装: {room}"
+        );
+        assert!(room.contains("\"room_membership\""), "{room}");
+        assert!(room.contains("\"calculation_status\""), "{room}");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        assert!(!production.contains(concat!("fn render_room_", "pending_probe")));
+        assert!(!production.contains(concat!("model_update_", "pending::TABLE")));
+    }
+
+    #[tokio::test]
+    async fn disabled_room_status_has_no_fake_published_version() {
+        let _off = crate::options::RoomMembershipOverride::set(false);
+        let (version, stale, status) = QueryService::room_derivation_status(7997)
+            .await
+            .expect("disabled status");
+        assert_eq!(version, Value::Null);
+        assert_eq!(stale, Value::Null);
+        assert_eq!(status, "disabled");
     }
 
     #[test]
@@ -1002,8 +1120,10 @@ mod tests {
             assert!(body.contains("\"stale\""), "{body}");
             assert!(body.contains("\"publication_status\""), "{body}");
         }
-        assert!(room.contains("room_delta::read_member_compatible_on"), "{room}");
+        assert!(room.contains("read_room_memberships(&SUL_DB"), "{room}");
         assert!(room.contains("tree.dbnum_of(refno.refno())"), "{room}");
+        assert!(room.contains(".generation_root_of("), "{room}");
+        assert!(!room.contains(".generation_roots_in_subtree("), "{room}");
         assert!(
             !room.contains("let dbnum = refno.refno().get_0()"),
             "ref0 is not a dbnum: {room}"
@@ -1011,6 +1131,52 @@ mod tests {
         assert!(!room.contains("<-room_relate"), "{room}");
         assert!(!room.contains("<-room_panel_relate"), "{room}");
         assert!(spatial.contains("\"unsupported\""));
+    }
+
+    #[tokio::test]
+    async fn room_membership_edges_are_readable_without_pe_attribute_rows() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem surreal");
+        db.use_ns("room_lookup")
+            .use_db("room_lookup")
+            .await
+            .expect("namespace");
+        db.query(
+            "CREATE room_relate:edge SET \
+             in=type::thing('pe','24383_500'), \
+             out=type::thing('pe','24383_10'), \
+             room_num='R1', inside_count=8, center_dist=12.5;",
+        )
+        .await
+        .expect("seed relation")
+        .check()
+        .expect("seed relation statement");
+
+        assert_eq!(
+            db.query("RETURN array::len((SELECT VALUE id FROM pe));")
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take::<Option<i64>>(0)
+                .unwrap()
+                .unwrap_or_default(),
+            0,
+            "fixture must stay attribute-free"
+        );
+        let memberships = read_room_memberships(&db, "24383_10")
+            .await
+            .expect("read relation directly");
+        assert_eq!(
+            memberships,
+            vec![RoomMembershipEdge {
+                panel: "24383_500".into(),
+                room_num: "R1".into(),
+                inside_count: 8,
+                center_dist: 12.5,
+            }]
+        );
     }
 
     #[test]

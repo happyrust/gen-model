@@ -1,0 +1,32 @@
+[
+  {
+    "path": "src/data_interface/cata_closure.rs",
+    "before": "1ef885100c1cb3178dc909e1398157e5c8da9a5433fc93d1c5fb5883258a904d",
+    "after": "6d97e05115d60ac014178bd39b62458e4c7c582415ff39d1970774f834816482"
+  },
+  {
+    "path": "src/data_interface/direct_store.rs",
+    "before": "0ba46b40666a84dc0e0d558d50787677476ede3c53d158694619e8edecc968ba",
+    "after": "7cfd8671e82e4ef1ce763ca78fbb2f84948501ad39f0f9aaec5d582b67a5418f"
+  },
+  {
+    "path": "src/data_interface/mdb_route_directory.rs",
+    "before": "5a39a687283227fd36cb61f7bc8baae6237aae73e9e92d13d78d4820a83710db",
+    "after": "c38e173cd67383a19d9a30805f61e1411d51c639bdc6ec796c99004802ad3403"
+  },
+  {
+    "path": "src/fast_model/model_memory_store.rs",
+    "before": "e53dcb9a5bef4b9be2d8546fc542586d7bdecb47407a6015b9d9683f4879e664",
+    "after": "a313eace93b04feda3f61698b419ee5d5c02be8b576e6d0ea57c13d28025f44f"
+  },
+  {
+    "path": "src/lib.rs",
+    "before": "9b4d80c555a06af2064bee33ada7caa255b364c84a33d197ab79f979fe77a1d1",
+    "after": "b7e2a80b68b4a6e005337865d8246d5cd02654440803cf82adf775afcfadfab5"
+  },
+  {
+    "path": "tests/refno_native_guards.rs",
+    "before": "8a916e9531ad065670d22bc762044592866795a0294c29a4ea756b06392ca5ae",
+    "after": "bd57e6513ac145ad8b96e875dfe00118a518507af0fb532618be8e69b287b9e3"
+  }
+]

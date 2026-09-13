@@ -1,173 +1,28 @@
-//! 数据窗口的崩溃恢复记录（`increment_update_attempt`）与收口尾事务。
+//! 数据窗口的收口尾事务：「数据 + 水位（+ 未触根凭证前移）」那一笔原子提交。
 //!
 //! 与隔壁 [`model_update_pending`](crate::data_interface::model_update_pending) 同住过
-//! 一个文件，命却不同：那张表是模型工作队列，ADR-065 D3 判它**整体退役**；这里的两样
-//! 东西属**数据面**，同一条 D3 点名**保留**——`increment_update_attempt` 是固定区间重放
-//! 的恢复记录，收口尾事务是「数据 + 水位（+ 未触根凭证前移）」那一笔原子提交，两者都与
-//! 模型欠账无关。
+//! 一个文件，命却不同：那张表是模型工作队列，ADR-065 D3 判它**整体退役**；收口尾事务属
+//! **数据面**，同一条 D3 点名保留。搬出来是计划 §4 **S5a**
+//! （`docs/plans/2026-09-08-external-increment-refactor-plan.md`，缺口 G1）。
 //!
-//! 搬出来是计划 §4 **S5a**（`docs/plans/2026-09-08-external-increment-refactor-plan.md`，
-//! 缺口 G1）：不先搬，T5 的「删 `model_update_pending` 写读两侧」要么删不动、要么把水位
-//! 一起删了。**名字与行为不变**，只换住址：调用点与 `increment_pipeline` 那几条源码钉
-//! 现在一律写 `increment_tail::finalize_attempt`，`model_update_pending` 不再再导出本模块
-//! ——「退表」与「退模块」从此是两件分得开的事。
+//! **2026-09-10（ADR-072 D1）**：一起搬出来的那半边——固定区间重放的恢复记录
+//! `increment_update_attempt:{dbnum}`（`IncrementUpdateAttempt` / `prepare_attempt` /
+//! `load_attempt`）——退役了。崩溃恢复不再「复用旧计划重放那一段」，改成
+//! [`write_state`](crate::data_interface::write_state) 的写入标记：见 `writing{S,T}` 就回退到 S、
+//! 从头重算 S→T。于是尾事务这边少了最后一句：**它不再删任何标记行**，标记由任务收尾那一笔
+//! （`task_end`）盖成 `finished`。
 //!
-//! 尾事务渲染仍要回头调 `model_update_pending` 的 [`render_upsert`] / [`source_time_for`] /
-//! [`render_delete_revision`]：模型意图这会儿还落成 pending 行，那是 S6 / S7 掐掉写入点
-//! 之后才会消失的依赖，不是本次搬家要解决的。
+//! **2026-09-10（ADR-072 D5）**：尾事务不再写模型意图行——任务计划在内存，`RegenRoot` 之外的
+//! 工作项由任务就地执行（`batch_worker::run_model_side_actions`）；空间意图行、per-root
+//! attempts 与 `window_block` 也随第二条异步账一起退了。尾事务现在只剩：房间全量重建要求
+//! （ADR-040）、懒生成根观察值、水位推进。
 
 use aios_core::SUL_DB;
-use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
-use crate::data_interface::model_update_pending::{
-    render_delete_revision, render_upsert, source_time_for,
-};
-use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction};
+use crate::data_interface::model_update_plan::ModelUpdatePlan;
 use crate::data_interface::window_root_plan::CredentialAdvanceOutcome;
-
-pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
-
-/// Short-lived recovery record written before any PE mutation. A retry reuses
-/// this exact range and pre-update model plan instead of recomputing ownership
-/// from a possibly partially-applied database.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IncrementUpdateAttempt {
-    pub dbnum: u32,
-    pub db_type: String,
-    pub file_path: String,
-    pub start_sesno: i32,
-    pub end_sesno: i32,
-    pub plan: ModelUpdatePlan,
-    #[serde(default)]
-    pub commit_token: Option<String>,
-    #[serde(default = "prepared_attempt_status")]
-    pub status: String,
-}
-
-fn prepared_attempt_status() -> String {
-    "prepared".to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct AttemptRow {
-    dbnum: u32,
-    db_type: String,
-    file_path: String,
-    start_sesno: i32,
-    end_sesno: i32,
-    plan_json: String,
-    #[serde(default)]
-    commit_token: Option<String>,
-    #[serde(default = "prepared_attempt_status")]
-    status: String,
-}
-
-pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAttempt>> {
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT dbnum, db_type, file_path, start_sesno, end_sesno, plan_json, \
-                    commit_token, status \
-             FROM {ATTEMPT_TABLE}:{dbnum};"
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("load increment attempt dbnum={dbnum} failed: {error}"))?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!("load increment attempt dbnum={dbnum} statement failed: {error}")
-        })?;
-    let rows: Vec<AttemptRow> = response.take(0).map_err(|error| {
-        anyhow::anyhow!("decode increment attempt dbnum={dbnum} failed: {error}")
-    })?;
-    rows.into_iter()
-        .next()
-        .map(|row| {
-            let plan = serde_json::from_str(&row.plan_json).map_err(|error| {
-                anyhow::anyhow!("decode increment attempt plan dbnum={dbnum} failed: {error}")
-            })?;
-            Ok(IncrementUpdateAttempt {
-                dbnum: row.dbnum,
-                db_type: row.db_type,
-                file_path: row.file_path,
-                start_sesno: row.start_sesno,
-                end_sesno: row.end_sesno,
-                plan,
-                commit_token: row.commit_token,
-                status: row.status,
-            })
-        })
-        .transpose()
-}
-
-pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        attempt
-            .commit_token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty()),
-        "increment attempt dbnum={} requires a durable source commit token",
-        attempt.dbnum
-    );
-    let plan_json = escape_surql_str(&serde_json::to_string(&attempt.plan)?);
-    let db_type = escape_surql_str(&attempt.db_type);
-    let file_path = escape_surql_str(&attempt.file_path);
-    let commit_token = attempt
-        .commit_token
-        .as_deref()
-        .map(escape_surql_str)
-        .map(|value| format!("'{value}'"))
-        .unwrap_or_else(|| "NONE".to_string());
-    let status = escape_surql_str(&attempt.status);
-    let sql = format!(
-        "UPSERT {ATTEMPT_TABLE}:{dbnum} SET dbnum = {dbnum}, \
-         db_type = '{db_type}', file_path = '{file_path}', \
-         start_sesno = {start_sesno}, end_sesno = {end_sesno}, \
-         plan_json = '{plan_json}', commit_token = {commit_token}, status = '{status}', \
-         created_at = created_at?:time::now(), updated_at = time::now();",
-        dbnum = attempt.dbnum,
-        start_sesno = attempt.start_sesno,
-        end_sesno = attempt.end_sesno,
-    );
-    SUL_DB
-        .query(sql)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "prepare increment attempt dbnum={} failed: {error}",
-                attempt.dbnum
-            )
-        })?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "prepare increment attempt dbnum={} statement failed: {error}",
-                attempt.dbnum
-            )
-        })?;
-    Ok(())
-}
-
-pub async fn mark_attempt_commit_state_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    commit_token: &str,
-    status: &str,
-) -> anyhow::Result<()> {
-    let commit_token = escape_surql_str(commit_token);
-    let status = escape_surql_str(status);
-    db.query(format!(
-        "UPDATE {ATTEMPT_TABLE}:{dbnum} SET commit_token = '{commit_token}', \
-         status = '{status}', updated_at = time::now();"
-    ))
-    .await
-    .map_err(|error| anyhow::anyhow!("mark increment attempt dbnum={dbnum} failed: {error}"))?
-    .check()
-    .map_err(|error| {
-        anyhow::anyhow!("mark increment attempt dbnum={dbnum} statement failed: {error}")
-    })?;
-    Ok(())
-}
 
 /// The monotonic watermark advance for one `dbnum`. Rendered in one place so
 /// the window and baseline transactions cannot drift apart.
@@ -252,9 +107,8 @@ pub(crate) const FINALIZE_WINDOW_TX_CHUNK: usize = 500;
 /// 拆块之后不变量依然成立：任何一块失败都发生在水位推进**之前**——水位不动、
 /// 恢复记录还在，整窗口按同一区间重放，幂等的固定目标 UPDATE 重复应用只是空转。
 ///
-/// `tail`：收口尾事务体（未包装）——durable 模型工作、空间意图、revision 收口、
-/// 水位推进、attempts 清除、恢复记录删除。行数有界（∝ 工作项数），保持单个原子
-/// 事务：这一段才是「要么全部成立、要么整体重放」的收口本体。
+/// `tail`：收口尾事务体（未包装）——房间全量重建要求、懒生成根观察值、水位推进。
+/// 行数有界，保持单个原子事务：这一段才是「要么全部成立、要么整体重放」的收口本体。
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizeRender {
     /// 已各自包装成 `BEGIN…COMMIT` 的窗口语句批，按原序执行。
@@ -277,11 +131,13 @@ fn render_window_statement_batches(window_statements: &[String]) -> Vec<String> 
 
 /// ADR-017 T1.3：窗口收口的渲染（窗口语句批 + 尾事务体）。
 ///
-/// 暂存路径由 `StagedExecutor::commit_to` 在 journal 重放之后、尾事务之前逐批
-/// 执行 `window_batches`；直写路径由 [`finalize_attempt_on`] 同序执行——两条
-/// 路径共用同一份渲染，收口内容不可能漂移。顺序：窗口语句批（datacenter 交付
-/// 状态 + anc 重算，commit-time 语义）→ 尾事务（durable 模型工作 → 水位推进 →
-/// 恢复记录删除）。收口条件（水位单调、revision 判真）全部在持久层事务内判定。
+/// 直写路径由 [`finalize_attempt`] 同序执行。顺序：窗口语句批（datacenter 交付
+/// 状态 + anc 重算，commit-time 语义）→ 尾事务（房间重建要求 → 懒根观察 → 水位推进）。
+/// 收口条件（水位单调）在持久层事务内判定。
+///
+/// 计划里的工作项**不进**这一笔（ADR-072 D5）：它们随 `IncrFileSuccess::model_plan` 交回任务，
+/// 由任务在内存里执行。写入标记 `dbnum_write_state:{dbnum}` 也**不在这里动**：数据尾事务盖的
+/// 是 `applied_sesno`，而「本任务的写库结束了」由任务收尾那一笔说（ADR-072 D1 / W2）。
 pub(crate) fn render_finalize_tail(
     dbnum: u32,
     end_sesno: i32,
@@ -289,93 +145,28 @@ pub(crate) fn render_finalize_tail(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> FinalizeRender {
-    render_finalize_tail_with_effects(
-        dbnum,
-        end_sesno,
-        end_sesno_time,
-        plan,
-        window_statements,
-        &[],
-        &[],
-        &[],
-    )
-    .expect("empty finalize effects are valid")
-}
-
-pub(crate) fn render_finalize_tail_with_effects(
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
-    window_statements: &[String],
-    refresh_refnos: &[String],
-    remove_refnos: &[String],
-    settled_regen: &[(String, u64)],
-) -> anyhow::Result<FinalizeRender> {
-    let mut statements: Vec<String> = plan
-        .work_items
-        .iter()
-        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
-        .collect();
-    if !refresh_refnos.is_empty() || !remove_refnos.is_empty() {
-        statements.push(
-            crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
-                dbnum,
-                end_sesno,
-                refresh_refnos,
-                remove_refnos,
-            )?,
-        );
-        // 空间版本号与意图、水位同一事务递增：启动侧拿 sidecar 与它比相等来决定
-        // 树文件还能不能信（load_project_tree_verified）。只有携带空间意图的尾
-        // 事务才 bump——没动树的提交不该作废别人的文件。
-        statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-    }
-    if plan.room_rebuild_required {
-        statements.push(crate::fast_model::room_model::render_room_rebuild_required(
-            plan.room_rebuild_reason.as_deref(),
-        ));
-    }
-    statements.extend(settled_regen.iter().map(|(root, revision)| {
-        render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
-    }));
+    let mut statements: Vec<String> = Vec::new();
     if let Some(lazy_roots) = plan.lazy_roots {
         statements.push(render_model_root_observation(dbnum, lazy_roots, end_sesno));
     }
     statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
-    statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
-    statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
-    Ok(FinalizeRender {
+    FinalizeRender {
         window_batches: render_window_statement_batches(window_statements),
         tail: statements.join("\n"),
-    })
+    }
 }
 
-/// Render the ordered batches that close a freshly parsed baseline.
-///
-/// Generation work is idempotent and executes in bounded transactions before
-/// the watermark tail. A failed batch therefore leaves the watermark in place;
-/// replaying the baseline only upserts the same deterministic work again. A
-/// baseline has no `increment_update_attempt` row, so the tail never removes
-/// one that may belong to another path.
+/// Render the transaction that closes a freshly parsed baseline: watermark + the
+/// confirmed-empty marker. 基线的全量生成根不落库（ADR-072 D5），随
+/// `manual_update::BaselineOutcome` 交给本任务生成；基线的写入标记（`writing{0,T}`，
+/// `baseline_ingest::ingest_file` 开头落）同样不在这一笔里收——收它的是任务收尾（ADR-072 D1）。
 pub(crate) fn render_baseline_finalize(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
     confirmed_empty: bool,
 ) -> FinalizeRender {
-    let work_statements: Vec<String> = plan
-        .work_items
-        .iter()
-        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
-        .collect();
     let mut tail = Vec::new();
-    if plan.room_rebuild_required {
-        tail.push(crate::fast_model::room_model::render_room_rebuild_required(
-            plan.room_rebuild_reason.as_deref(),
-        ));
-    }
     tail.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     tail.push(if confirmed_empty {
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
@@ -383,13 +174,13 @@ pub(crate) fn render_baseline_finalize(
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = NONE;")
     });
     FinalizeRender {
-        window_batches: render_window_statement_batches(&work_statements),
+        window_batches: Vec::new(),
         tail: tail.join("\n"),
     }
 }
 
-/// Establish durable model work, advance the authoritative watermark, and
-/// remove the recovery record — the last three atomically.
+/// Establish durable model work and advance the authoritative watermark
+/// atomically.
 ///
 /// `window_statements` carries writes that must never be lost under an
 /// advancing watermark — this window's `datacenter_version` status updates and
@@ -415,30 +206,10 @@ pub async fn finalize_attempt(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
-    let outcome = finalize_attempt_on(
-        &SUL_DB,
-        dbnum,
-        end_sesno,
-        end_sesno_time,
-        plan,
-        window_statements,
-    )
-    .await?;
-    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
-    Ok(outcome)
-}
-
-pub(crate) async fn finalize_attempt_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
-    window_statements: &[String],
-) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
     let render = render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements);
     for (index, batch) in render.window_batches.iter().enumerate() {
-        db.query(batch)
+        SUL_DB
+            .query(batch)
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
@@ -453,56 +224,64 @@ pub(crate) async fn finalize_attempt_on(
                 )
             })?;
     }
-    db.query(format!(
-        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        render.tail
-    ))
-    .await
-    .map_err(|error| anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}"))?
-    .check()
-    .map_err(|error| {
-        anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
-    })?;
+    SUL_DB
+        .query(format!(
+            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+            render.tail
+        ))
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}")
+        })?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
+        })?;
 
-    // Unchanged roots retain their generation receipt. The enclosing Task
-    // commits continuous dbnum coverage only after all changed roots publish.
-    Ok(None)
+    let outcome = if plan.credential_advance.is_empty() {
+        None
+    } else {
+        let requested = plan.credential_advance.len();
+        Some(
+            match crate::data_interface::window_root_plan::advance_root_credentials_on(
+                &SUL_DB,
+                dbnum,
+                end_sesno,
+                end_sesno_time,
+                &plan.credential_advance,
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    log::warn!(
+                        "credential advance degraded after watermark commit dbnum={dbnum} end_sesno={end_sesno}: {error:#}"
+                    );
+                    CredentialAdvanceOutcome {
+                        requested,
+                        advanced: 0,
+                    }
+                }
+            },
+        )
+    };
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+    Ok(outcome)
 }
 
-/// Establish a freshly parsed `dbnum`'s model work before advancing its watermark.
+/// Advance a freshly parsed `dbnum`'s watermark.
 ///
-/// A baseline full-parse writes element data but no geometry, and every later
-/// incremental window only regenerates the roots that window itself touched. So
-/// a watermark that advances without its generation work leaves the database
-/// permanently modelless — nothing revisits a root that never changes again.
-/// Work upserts run in bounded, idempotent batches before the small watermark
-/// transaction. Any failure returns before the watermark moves, so a retry
-/// converges on the same work and a modelless watermarked baseline remains
-/// unreachable.
+/// A baseline full-parse writes element data but no geometry. 全量生成根由本任务随即生成
+/// （`manual_update::BaselineOutcome::units`），不落库：任务死在生成中途时写入标记
+/// `writing{0,T}` 让下一次启动整库 wipe 重排初始化（ADR-072 D2），所以「水位推上去、库里
+/// 一个模型都没有、而且此后永远不会有」这条路不存在。
 pub async fn finalize_baseline(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
     confirmed_empty: bool,
 ) -> anyhow::Result<()> {
-    let render = render_baseline_finalize(dbnum, end_sesno, end_sesno_time, plan, confirmed_empty);
-    for (index, batch) in render.window_batches.iter().enumerate() {
-        SUL_DB
-            .query(batch)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "finalize baseline dbnum={dbnum} model work batch {index} failed: {error}"
-                )
-            })?
-            .check()
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "finalize baseline dbnum={dbnum} model work batch {index} statement failed: {error}"
-                )
-            })?;
-    }
+    let render = render_baseline_finalize(dbnum, end_sesno, end_sesno_time, confirmed_empty);
     SUL_DB
         .query(format!(
             "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",

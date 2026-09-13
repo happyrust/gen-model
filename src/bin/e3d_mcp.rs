@@ -41,18 +41,6 @@ struct MembersArgs {
     limit: usize,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
-struct PendingArgs {
-    #[serde(default)]
-    dbnum: Option<u32>,
-    #[serde(default = "default_true")]
-    include_dead: bool,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 struct ImpactArgs {
     attribute: String,
@@ -60,10 +48,6 @@ struct ImpactArgs {
 
 fn default_limit() -> usize {
     200
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl E3dMcp {
@@ -197,14 +181,6 @@ impl E3dMcp {
     }
 
     #[tool(
-        name = "model.pending_units",
-        description = "List persisted model retry units, including dead letters by default"
-    )]
-    async fn pending_units(&self, Parameters(args): Parameters<PendingArgs>) -> CallToolResult {
-        self.call("model.pending_units", args).await
-    }
-
-    #[tool(
         name = "model.spatial.bounds",
         description = "Read an element's persisted world AABB from inst_relate"
     )]
@@ -227,7 +203,6 @@ mod tests {
     #[test]
     fn defaults_are_bounded() {
         assert_eq!(default_limit(), 200);
-        assert!(default_true());
     }
 
     #[test]

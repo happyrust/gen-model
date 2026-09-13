@@ -3,9 +3,30 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // The portable fixture owns its stack. Keep it off the legacy golden-suite
 // ports so a retained 8048/8028 process cannot make assertions hit stale data.
-const FIXTURE_API: &str = "http://127.0.0.1:18028/api/v1";
-const FIXTURE_API_PORT: u16 = 18028;
-const FIXTURE_SURREAL_PORT: u16 = 18048;
+const DEFAULT_FIXTURE_API_PORT: u16 = 18028;
+const DEFAULT_FIXTURE_SURREAL_PORT: u16 = 18048;
+
+fn fixture_port(name: &str, default: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            raw.parse::<u16>()
+                .unwrap_or_else(|error| panic!("{name} must be a TCP port: {error}"))
+        })
+        .unwrap_or(default)
+}
+
+fn fixture_api_port() -> u16 {
+    fixture_port("L3_FIXTURE_API_PORT", DEFAULT_FIXTURE_API_PORT)
+}
+
+fn fixture_surreal_port() -> u16 {
+    fixture_port("L3_FIXTURE_SURREAL_PORT", DEFAULT_FIXTURE_SURREAL_PORT)
+}
+
+fn fixture_api() -> String {
+    format!("http://127.0.0.1:{}/api/v1", fixture_api_port())
+}
 const FIXTURE_SURREAL_SQL: &str = "http://127.0.0.1:18048/sql";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -532,7 +553,7 @@ fn start_fixture_stack(
     project: &str,
     namespace: &str,
 ) -> Result<(Stack, PathBuf)> {
-    for port in [FIXTURE_SURREAL_PORT, FIXTURE_API_PORT] {
+    for port in [fixture_surreal_port(), fixture_api_port()] {
         ensure!(!port_open(port), "fixture port {port} is already in use");
     }
     let tools = tool_dir(repo);
@@ -579,13 +600,13 @@ fn start_fixture_stack(
                     "--pass",
                     "root",
                     "--bind",
-                    "127.0.0.1:18048",
+                    &format!("127.0.0.1:{}", fixture_surreal_port()),
                 ])
                 .arg(format!("rocksdb:{}", store.display())),
             &run_dir.join("stack-surreal.log"),
         )?,
     );
-    wait_port(FIXTURE_SURREAL_PORT, Duration::from_secs(60))?;
+    wait_port(fixture_surreal_port(), Duration::from_secs(60))?;
     run_fixture_bin(
         &initialize,
         &[dbnum.to_string()],
@@ -600,31 +621,11 @@ fn start_fixture_stack(
         &baseline_config_no_ext,
         &run_dir.join("baseline-scan.log"),
     )?;
-    // A full baseline intentionally discovers every delivery unit in the target
-    // database. This fixture suite owns only its named roots, so discard that
-    // unrelated baseline backlog before the worker starts; seed_fixture_models
-    // below regenerates the fixture roots explicitly and verifies them.
-    let reset = fixture_surreal_sql(
-        namespace,
-        project,
-        &format!(
-            "DELETE model_update_pending WHERE dbnum = {dbnum}; \
-             RETURN count(SELECT * FROM model_update_pending WHERE dbnum = {dbnum});"
-        ),
-    )?;
-    fs::write(
-        run_dir.join("baseline-pending-reset.json"),
-        serde_json::to_vec_pretty(&reset)?,
-    )?;
-    let remaining = reset
-        .as_array()
-        .and_then(|rows| rows.last())
-        .and_then(|row| row.get("result"))
-        .and_then(Value::as_u64);
-    ensure!(
-        remaining == Some(0),
-        "failed to isolate fixture model backlog for dbnum {dbnum}"
-    );
+    // A full baseline no longer leaves a model backlog behind: models are generated
+    // inside the dbnum task (ADR-071 D1) and the queue table of the second async
+    // ledger is retired (ADR-072 D5), so there is nothing to discard here;
+    // seed_fixture_models below regenerates the fixture roots explicitly and
+    // verifies them.
     let (mirror_project_dir, mirror_target_db) = create_service_project_mirror(
         project_dir,
         target_db_file,
@@ -647,7 +648,11 @@ fn start_fixture_stack(
         spawn_logged(
             with_debug_dbnum(
                 Command::new(service)
-                    .current_dir(repo)
+                    // Instance locks and other run-scoped artifacts belong to
+                    // this isolated fixture, not to the source checkout. Using
+                    // the repo as CWD collides with any developer service that
+                    // is legitimately running from the same checkout.
+                    .current_dir(run_dir)
                     .env("DB_OPTION_FILE", &config_no_ext)
                     // 套件自己在 18048 上起了一台 rocksdb surreal（上面那一段）：
                     // 服务必须连它，不许自己再拉一台 memory 库——那样整套断言会对着
@@ -664,15 +669,13 @@ fn start_fixture_stack(
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
                     // 整套断言都建立在「批次真的被执行」之上。
-                    // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
-                    .env("AIOS_STARTUP_AUTORUN", "1")
-                    .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+                    .env("AIOS_STARTUP_AUTORUN", "1"),
                 cli.debug_dbnum.as_deref(),
             ),
             &run_dir.join("stack-service.log"),
         )?,
     );
-    wait_http(&format!("{FIXTURE_API}/health"), Duration::from_secs(180))?;
+    wait_http(&format!("{}/health", fixture_api()), Duration::from_secs(180))?;
     if cli.fixture_ui {
         let ui = tools.join("plant-ui-app.exe");
         let inspect = tools.join("inspect.exe");
@@ -693,7 +696,7 @@ fn start_fixture_stack(
                     .env("EGUI_INSPECTION", "1")
                     .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
                     .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
-                    .env("PLANT_MODEL_API_URL", "http://127.0.0.1:18028"),
+                    .env("PLANT_MODEL_API_URL", format!("http://127.0.0.1:{}", fixture_api_port())),
                 &run_dir.join("stack-plant-ui.log"),
             )?,
         );
@@ -796,23 +799,27 @@ fn write_runtime_config(
         ("project_code", namespace.to_owned()),
         ("surreal_ns", namespace.to_owned()),
         ("mdb_name", format!("\"{}\"", mdb.trim_start_matches('/'))),
-        ("v_port", FIXTURE_SURREAL_PORT.to_string()),
-        ("http_api_addr", "\"127.0.0.1:18028\"".into()),
+        ("v_port", fixture_surreal_port().to_string()),
+        ("http_api_addr", format!("\"127.0.0.1:{}\"", fixture_api_port())),
         // Keep the portable fixture's room coverage barrier scoped to the two
         // rooms created by setup.mac. The real AMS database contains hundreds
         // of unrelated PANE rows whose models are intentionally not seeded by
         // this focused suite; using the production "-RM" keyword would make
         // those unrelated panels block every fixture room assertion.
         ("room_key_word", "[\"AIOS-INC-RM\"]".into()),
+        // The base config may carry a temporary production watch window. The
+        // fixture's named target must replace it as well as manual_db_nums;
+        // otherwise scan_project_candidates filters the target before the
+        // explicit baseline initializer can see it.
+        ("watch_dbnums", format!("[{dbnum}]")),
         ("manual_db_nums", format!("[{dbnum}]")),
         ("included_db_files", files),
         ("gen_model", "false".into()),
         ("gen_mesh", "false".into()),
         ("gen_spatial_tree", "true".into()),
-        // `room-member` asserts that a transform recomputes room membership.
-        // The production default is deliberately off, so fixture mode must opt
-        // in instead of silently running that scenario with room work disabled.
-        ("room_incremental", "true".into()),
+        // `room-member` asserts that a transform recomputes room membership. Room
+        // membership is computed per generated root inside the task (ADR-073 D1);
+        // there is no separate room stage to opt into any more.
         ("load_spatial_tree", "false".into()),
         ("save_spatial_tree_to_db", "false".into()),
     ]);
@@ -1043,7 +1050,7 @@ fn run_case(
     // before E3D mutates the file; previewing after SAVEWORK would correctly yield an empty list.
     let preview = http_json(
         "POST",
-        &format!("{FIXTURE_API}/update/preview"),
+        &format!("{}/update/preview", fixture_api()),
         Some(fixture_identity(project, &driver.mdb, ns)),
     )?;
     fs::write(
@@ -1128,7 +1135,7 @@ fn run_case(
         )?;
         let repeat = http_json(
             "POST",
-            &format!("{FIXTURE_API}/update/execute"),
+            &format!("{}/update/execute", fixture_api()),
             Some(fixture_identity(project, &driver.mdb, ns)),
         )?;
         ensure!(
@@ -1476,7 +1483,7 @@ fn seed_fixture_models(
         body.as_object_mut()
             .unwrap()
             .insert("force".into(), Value::Bool(true));
-        let response = http_json("POST", &format!("{FIXTURE_API}/model/ensure"), Some(body))?;
+        let response = http_json("POST", &format!("{}/model/ensure", fixture_api()), Some(body))?;
         evidence.push(response);
     }
     fs::write(
@@ -1630,8 +1637,7 @@ fn fixture_snapshot(
            unrelated_owner: (SELECT id, ->pe_owner.{{id,in,out}} AS outgoing, <-pe_owner.{{id,in,out}} AS incoming FROM [{unrelated}] ORDER BY id), \
            unrelated_inst: (SELECT id, ->inst_relate.{{id,in,out,aabb,world_trans}} AS outgoing, <-inst_relate.{{id,in,out,aabb,world_trans}} AS incoming FROM [{unrelated}] ORDER BY id), \
            unrelated_geo: (SELECT id, ->geo_relate.{{id,in,out}} AS outgoing, <-geo_relate.{{id,in,out}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           unrelated_room: (SELECT id, ->room_relate.{{id,in,out,room_num}} AS outgoing, <-room_relate.{{id,in,out,room_num}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           pending: (SELECT action,target_refno,attempts,last_error FROM model_update_pending WHERE dbnum={dbnum}) \
+           unrelated_room: (SELECT id, ->room_relate.{{id,in,out,room_num}} AS outgoing, <-room_relate.{{id,in,out,room_num}} AS incoming FROM [{unrelated}] ORDER BY id) \
          }};"
     );
     let response = fixture_surreal_sql(ns, project, &sql)?;
@@ -1662,12 +1668,20 @@ fn assert_case(
             .all(|task| task_terminal(task).ok() == Some(Some(true))),
         "one or more data/model tasks failed"
     );
-    ensure!(
+    // Model debt is answered by the watermark pair since the queue table retired
+    // (ADR-072 D5): the task tail stamps `model_sesno` only when every root of
+    // this dbnum settled, so a lagging model watermark is the remaining debt.
+    let watermark = |key: &str| {
         after
-            .pointer("/payload/pending")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        "pending model/room work remains"
+            .pointer(&format!("/payload/watermark/{key}"))
+            .and_then(Value::as_i64)
+    };
+    ensure!(
+        watermark("model_sesno").is_some()
+            && watermark("model_sesno") == watermark("applied_sesno"),
+        "pending model work remains: model_sesno={:?} applied_sesno={:?}",
+        watermark("model_sesno"),
+        watermark("applied_sesno")
     );
     for key in [
         "unrelated_pe",
@@ -1886,7 +1900,7 @@ fn execute_fixture_and_wait(
     );
     let receipt = http_json(
         "POST",
-        &format!("{FIXTURE_API}/update/execute"),
+        &format!("{}/update/execute", fixture_api()),
         Some(fixture_identity(project, mdb, ns)),
     )?;
     fs::write(
@@ -1897,7 +1911,7 @@ fn execute_fixture_and_wait(
     let mut tasks = Vec::new();
     for id in ids {
         loop {
-            let task = http_json("GET", &format!("{FIXTURE_API}/tasks/{id}"), None)?;
+            let task = http_json("GET", &format!("{}/tasks/{id}", fixture_api()), None)?;
             if task_terminal(&task)?.is_some() {
                 tasks.push(task);
                 break;
@@ -1921,6 +1935,14 @@ fn fixture_identity(project: &str, mdb: &str, ns: &str) -> Value {
     json!({"project":project,"mdb":mdb.trim_start_matches('/'),"namespace":ns})
 }
 
+/// Wait until the dbnum task of `phase` has finished writing: the write marker
+/// (`dbnum_write_state`, ADR-072 D1) is no longer `writing` and the model
+/// watermark caught up with the data watermark. The queue table this used to
+/// poll (`model_update_pending`) retired with the second async ledger
+/// (ADR-072 D5); model work now runs inside the task and the task tail stamps the
+/// watermarks in one transaction, so the watermark row is the truth. Room edges
+/// are written with each root's model rows (ADR-073 D1), so there is no room
+/// watermark to record or gate on.
 fn wait_fixture_pending(
     dir: &Path,
     ns: &str,
@@ -1929,53 +1951,54 @@ fn wait_fixture_pending(
     phase: &str,
 ) -> Result<()> {
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    let mut empty_observations = 0_u8;
+    let mut settled_observations = 0_u8;
     loop {
         let response = fixture_surreal_sql(
             ns,
             project,
             &format!(
-                "RETURN SELECT action,target_refno,status,attempts,last_error \
-                 FROM model_update_pending WHERE \
-                 (dbnum = {dbnum} AND action NOT IN ['room_recalc_panel','room_recalc_element']) \
-                 OR action IN ['room_recalc_panel','room_recalc_element'];"
+                "RETURN {{ \
+                   watermark: (SELECT applied_sesno, model_sesno \
+                               FROM dbnum_watermark:{dbnum})[0], \
+                   write_state: (SELECT status, start_sesno, end_sesno, intent \
+                                 FROM dbnum_write_state:{dbnum})[0] \
+                 }};"
             ),
         )?;
-        let pending = surreal_result(&response)?;
-        let failed = pending.as_array().is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row.get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| matches!(status, "failed" | "dead_letter"))
-                    || row.get("last_error").is_some_and(|error| !error.is_null())
-            })
-        });
-        if failed {
-            fs::write(
-                dir.join(format!("{phase}-pending.json")),
-                serde_json::to_vec_pretty(&response)?,
-            )?;
-            anyhow::bail!("{phase} pending work failed: {pending}");
-        }
-        if pending.as_array().is_some_and(Vec::is_empty) {
-            empty_observations += 1;
+        let settlement = surreal_result(&response)?;
+        let writing = settlement
+            .pointer("/write_state/status")
+            .and_then(Value::as_str)
+            == Some("writing");
+        let watermark = |key: &str| {
+            settlement
+                .pointer(&format!("/watermark/{key}"))
+                .and_then(Value::as_i64)
+        };
+        let caught_up = watermark("applied_sesno").is_some()
+            && watermark("model_sesno") == watermark("applied_sesno");
+        if !writing && caught_up {
+            settled_observations += 1;
         } else {
-            empty_observations = 0;
+            settled_observations = 0;
         }
-        // Model generation and the idle worker hand room targets off in two
-        // adjacent phases. Require a short quiet window so an empty query in
-        // between those phases cannot become the case baseline.
-        if empty_observations >= 2 {
+        // Require a short quiet window: two consecutive settled reads, so a
+        // marker row observed between two back-to-back tasks cannot become the
+        // case baseline.
+        if settled_observations >= 2 {
             fs::write(
-                dir.join(format!("{phase}-pending.json")),
+                dir.join(format!("{phase}-settlement.json")),
                 serde_json::to_vec_pretty(&response)?,
             )?;
             return Ok(());
         }
-        ensure!(
-            Instant::now() < deadline,
-            "{phase} pending work did not converge: {pending}"
-        );
+        if Instant::now() >= deadline {
+            fs::write(
+                dir.join(format!("{phase}-settlement.json")),
+                serde_json::to_vec_pretty(&response)?,
+            )?;
+            anyhow::bail!("{phase} task did not settle: {settlement}");
+        }
         thread::sleep(Duration::from_secs(2));
     }
 }
@@ -2243,10 +2266,12 @@ mod tests {
     }
 
     #[test]
-    fn normalized_payload_ignores_watermarks_and_pending_only() {
-        let a = json!({"payload":{"watermark":{"applied_sesno":1},"pending":[],"room_pending":[],"pe":[1]}});
-        let b = json!({"payload":{"watermark":{"applied_sesno":2},"pending":[1],"room_pending":[2],"pe":[1]}});
+    fn normalized_payload_ignores_watermarks_only() {
+        let a = json!({"payload":{"watermark":{"applied_sesno":1},"pe":[1]}});
+        let b = json!({"payload":{"watermark":{"applied_sesno":2},"pe":[1]}});
         assert_eq!(restorable_payload(&a), restorable_payload(&b));
+        let c = json!({"payload":{"watermark":{"applied_sesno":2},"pe":[2]}});
+        assert_ne!(restorable_payload(&a), restorable_payload(&c));
     }
 
     #[test]
@@ -2303,8 +2328,35 @@ mod tests {
         );
     }
 
+    /// The fixture pins the spatial tree on and never writes the retired
+    /// `room_incremental` key (ADR-073 D7): room membership has no switch of its
+    /// own in the fixture config any more.
     #[test]
-    fn fixture_runtime_config_enables_room_incremental_work() {
+    fn fixture_service_uses_the_run_directory_for_its_instance_lock() {
+        let source = include_str!("fixture.rs");
+        let stack = source
+            .split_once("fn start_fixture_stack(")
+            .expect("fixture stack")
+            .1
+            .split_once("fn create_service_project_mirror(")
+            .expect("stack boundary")
+            .0;
+        let service = stack
+            .split_once("Command::new(service)")
+            .expect("service command")
+            .1
+            .split_once("&run_dir.join(\"stack-service.log\")")
+            .expect("service command boundary")
+            .0;
+        assert!(service.contains(".current_dir(run_dir)"));
+        assert!(
+            !service.lines().any(|line| line.trim() == ".current_dir(repo)"),
+            "fixture service must not share the checkout instance lock"
+        );
+    }
+
+    #[test]
+    fn fixture_runtime_config_enables_spatial_tree_and_writes_no_room_switch() {
         let dir = std::env::temp_dir().join(format!("e3d-fixture-config-{}", std::process::id()));
         let project = dir.join("AvevaMarineSample");
         let db_dir = project.join("ams000");
@@ -2314,7 +2366,7 @@ mod tests {
         let target = db_dir.join("ams8000_0001");
         fs::write(
             &base,
-            "room_incremental = false\ngen_spatial_tree = false\n",
+            "gen_spatial_tree = false\nwatch_dbnums = [7998, 8000]\n",
         )
         .unwrap();
         fs::write(&target, []).unwrap();
@@ -2333,9 +2385,8 @@ mod tests {
 
         let rendered = fs::read_to_string(output).unwrap();
         assert!(
-            rendered
-                .lines()
-                .any(|line| line == "room_incremental = true")
+            !rendered.contains(concat!("room_", "incremental")),
+            "retired switch must not be rendered: {rendered}"
         );
         assert!(
             rendered
@@ -2346,6 +2397,14 @@ mod tests {
             rendered
                 .lines()
                 .any(|line| { line == "catalogue_project_priority = [\"AvevaMarineSample\"]" })
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("watch_dbnums = "))
+                .collect::<Vec<_>>(),
+            vec!["watch_dbnums = [8000]"],
+            "fixture target must replace a stale production watch window"
         );
         let _ = fs::remove_dir_all(dir);
     }

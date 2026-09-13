@@ -29,378 +29,57 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Revision guard and settlement statements supplied by the durable room queue.
-/// Geometry code owns the edge mutations; queue code owns task identity. Keeping
-/// the textual seam here lets both sets of statements share one transaction.
-pub(crate) struct RoomWriteGuard {
-    pub select_work: String,
-    pub settle_statements: Vec<String>,
-}
-
-/// Geometry source used by one room calculation. Incremental room tasks use
-/// the immutable per-file publication view; maintenance/full rebuild callers
-/// keep an explicit live entry point.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum RoomGeometryView {
-    #[default]
-    Live,
-    Published,
-}
-
-/// 房间增量消费（两条分支 + 在册面板索引）该读哪一份几何。
-///
-/// ingest 形态读已发布房间几何（`room_published_inst` 里当前清单选中的行，ADR-062）。
-/// 读透形态（spawned-mem / embedded-mem 默认）没有数据批次、没有文件轮次，
-/// `room_published_inst` 永远停在启动基线；再读它等于拿旧几何算新任务、算完还销账。
-/// 所以读透退回实时行——一致性回到 ADR-062 之前的弱口径，但不撒谎：`e3d.room.lookup`
-/// 同时回 `publication_status = unsupported`（`query_service::published_derivation_status`）。
-/// 把文件轮次延伸到读透是另一份计划，见 `docs/2026-09-07-room-increment-audit.md` §4。
-pub(crate) fn consumption_view() -> RoomGeometryView {
-    consumption_view_for(crate::options::data_face())
-}
-
-/// [`consumption_view`] 的纯函数形态，单测直接喂数据面。
-pub(crate) fn consumption_view_for(face: crate::options::DataFace) -> RoomGeometryView {
-    if face.is_read_through() {
-        RoomGeometryView::Live
-    } else {
-        RoomGeometryView::Published
-    }
-}
-
-async fn query_room_insts(
-    view: RoomGeometryView,
-    refnos: &[RefnoEnum],
-) -> anyhow::Result<Vec<GeomInstQuery>> {
-    match view {
-        RoomGeometryView::Live => crate::fast_model::room_publication::query_memory_room_insts(refnos),
-        RoomGeometryView::Published => {
-            crate::fast_model::room_publication::query_published_room_insts(refnos).await
-        }
-    }
-}
-
 /// 面板侧几何这一轮从哪来（常驻房间模型 P2-b）。
 ///
 /// `Some(模型)` = 走常驻那份：面板实例表已经在内存里，三角网经 `MeshCache`（键 =
 /// `geo_hash` + 世界矩阵位模式）跨代复用。`None` = 走今天那条路：每块面板各查一次
-/// `query_room_insts`、各读一次 `.mesh`。
+/// 库内实例、各读一次 `.mesh`。
 ///
 /// **本文件不读开关，也不摸进程单例。** 开关（`options::room_resident_model`）与形态
-/// （`options::data_face`）只在换代点判一次——`model_update_pending::ensure_resident_rooms`
-/// 里那一句 `room_resident::ensure_current(`，串行锁之内；启动对比那一路由
-/// `room_startup` 把它已经装好的那份直接递进来。模型只以参数形态进出，这里没有第二处
-/// 判定可以漂，也没有第二个取法可以绕开 `for_membership(`。
+/// （`options::data_face`）只在换代点判一次——`room_resident::ensure_current(` 的调用方
+/// （串行锁之内）。模型只以参数形态进出，这里没有第二处判定可以漂，也没有第二个取法
+/// 可以绕开 `for_membership(`。
 ///
 /// 全量重建（[`load_panel_index`] / [`cal_room_refnos`] / [`recalc_panel_membership`]）在**类型
 /// 层面**恒为 `None`：它是显式修复入口，常驻模型不可信时正是靠它重算，接上去就没有退路了。
 type ResidentSource<'a> = Option<&'a ResidentRoomModel>;
 
-pub(crate) fn render_room_write(mutations: &[String], guard: Option<&RoomWriteGuard>) -> String {
-    let statements = match guard {
-        None => mutations.to_vec(),
-        Some(guard) => {
-            let mut guarded = mutations.to_vec();
-            guarded.extend(guard.settle_statements.iter().cloned());
-            vec![
-                format!("LET $room_work = {}", guard.select_work),
-                format!(
-                    "IF $room_work != NONE {{\n{}\n}}",
-                    guarded
-                        .iter()
-                        .map(|statement| format!("{statement};"))
-                        .join("\n")
-                ),
-            ]
-        }
-    };
-    wrap_in_transaction(&statements).unwrap_or_default()
-}
-
-pub(crate) async fn execute_guarded_room_write(
-    mutations: &[String],
-    guard: &RoomWriteGuard,
-    description: &str,
-) -> anyhow::Result<()> {
-    crate::surreal_retry::execute_model_write(
-        &render_room_write(mutations, Some(guard)),
-        description,
-    )
-    .await
-}
-
-#[tokio::test]
-#[ignore = "manual integration: requires the configured Surreal project and room mesh files"]
-pub async fn test_cal_rooms() -> anyhow::Result<()> {
-    let option = init_test_surreal().await?;
-    crate::fast_model::aabb_tree::load_project_tree_verified().await?;
-
-    let rooms = load_room_panel_map(&option).await?;
-    assert!(!rooms.rooms.is_empty(), "AMS 房间清单不得为空");
-    assert!(!rooms.all_panels.is_empty(), "AMS 房间面板清单不得为空");
-    if let Ok(raw) = std::env::var("AIOS_EXPECT_ROOM_COUNT") {
-        let expected = raw
-            .parse::<usize>()
-            .expect("AIOS_EXPECT_ROOM_COUNT must be usize");
-        assert_eq!(rooms.rooms.len(), expected, "AMS 房间数与显式基线不符");
+/// 一次房间计算的几何输入：面板取常驻模型里那份实例表，其余构件取内存模型投影。
+///
+/// 从 `room_publication.rs` 搬过来的（房间流程退役，t-678）：它本来就一句库都不查
+/// ——面板来自 `room_resident`、构件来自 `ModelMemoryStore`——是计算输入而不是发布面。
+/// 此前它还有一个 `RoomGeometryView` 形参，发布视图退役后只剩一档，形参一并去掉。
+async fn query_room_insts(refnos: &[RefnoEnum]) -> anyhow::Result<Vec<GeomInstQuery>> {
+    if refnos.is_empty() {
+        return Ok(Vec::new());
     }
-    if let Ok(raw) = std::env::var("AIOS_EXPECT_ROOM_PANEL_COUNT") {
-        let expected = raw
-            .parse::<usize>()
-            .expect("AIOS_EXPECT_ROOM_PANEL_COUNT must be usize");
-        assert_eq!(
-            rooms.all_panels.len(),
-            expected,
-            "AMS 房间面板数与显式基线不符"
+    let resident = crate::fast_model::room_resident::current_for_calculation()?;
+    let mut rows = Vec::new();
+    let mut members = BTreeSet::new();
+    for refno in refnos.iter().copied().collect::<BTreeSet<_>>() {
+        anyhow::ensure!(
+            !resident.missing_panels.contains(&refno),
+            "preloaded room panel {refno} has no geometry"
         );
-    }
-    build_room_relations(&option).await?;
-
-    #[derive(Debug, Deserialize, PartialEq)]
-    struct Edge {
-        panel: String,
-        member: String,
-        room_num: String,
-        inside_count: i64,
-        center_dist: f64,
-    }
-
-    let sql = "SELECT record::id(in) AS panel, record::id(out) AS member, \
-               room_num, inside_count, center_dist FROM room_relate \
-               WHERE string::starts_with(record::id(out), '24381_') \
-               ORDER BY panel, member";
-    let mut response = SUL_DB.query(sql).await?.check()?;
-    let baseline: Vec<Edge> = response.take(0)?;
-    let first = baseline
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("7997 全量房间计算没有产生任何成员边"))?;
-
-    let element = RefnoEnum::from(first.member.replace('_', "/").as_str());
-    let panels = load_panel_index(&option, &rooms).await?;
-    let history = ElementRoomHistory::load(&[element]).await?;
-    recalc_element_membership(&rooms, &panels, &history, element).await?;
-
-    let mut response = SUL_DB.query(sql).await?.check()?;
-    let incremental: Vec<Edge> = response.take(0)?;
-    assert_eq!(
-        incremental, baseline,
-        "7997 单构件增量重算必须与全量基线逐边一致"
-    );
-    Ok(())
-}
-
-//TODO need figure out
-#[tokio::test]
-#[ignore = "manual integration: requires the configured Surreal project and mesh files"]
-pub async fn test_cal_distance() -> anyhow::Result<()> {
-    init_test_surreal().await;
-    let panel_refno = "24381/34303".into();
-    let mut geom_insts: Vec<GeomInstQuery> =
-        crate::data_interface::staging::query_valid_insts(&[panel_refno])
-            .await
-            .unwrap_or_default();
-    // dbg!(&geom_insts);
-    if geom_insts.is_empty() {
-        return Ok(());
-    }
-
-    //将panel的 plant mesh 转换成TriMesh
-    for geom_inst in geom_insts {
-        for inst in geom_inst.insts {
-            let Ok(mesh) =
-                PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash))
-            else {
-                continue;
-            };
-            let Some(mut tri_mesh) = mesh
-                .get_tri_mesh_with_flag(inst.transform.compute_matrix(), TriMeshFlags::ORIENTED)
-            else {
-                continue;
-            };
-            dbg!(tri_mesh.indices().len());
-            dbg!(tri_mesh.vertices().len());
-
-            dbg!(tri_mesh.local_aabb());
-
-            let point = Vec3::new(8495.01953125, -8.15999984741211, 0.0);
-            dbg!(tri_mesh.local_aabb().contains_local_point(&point.into()));
-            dbg!(tri_mesh.contains_local_point(&point.into()));
-
-            let mat = (geom_inst.world_trans * inst.transform).compute_matrix();
+        if let Some(panel) = resident.panels.get(&refno) {
+            rows.push(panel.room_inst());
+        } else {
+            members.insert(refno.refno().0 as i64);
         }
     }
-    return Ok(());
-}
-
-/// 构建房间关系
-///
-/// 该函数用于构建房间之间的空间关系,包括:
-/// 1. 根据房间关键词匹配房间和面板的对应关系
-/// 2. 计算每个面板内包含的构件
-/// 3. 保存房间和构件的关联关系
-///
-/// # 参数
-/// * `db_option` - 数据库配置选项,包含房间关键词等参数
-///
-/// # 返回值
-/// * `anyhow::Result<()>` - 返回构建结果,成功返回Ok(()),失败返回错误信息
-/// 一次全量房间重建的回执（[`build_room_relations_with_view`] 成功时交出）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct FullRebuildOutcome {
-    /// 在册面板总数（含命名不合规房间名下的——它们只进排除集）。
-    pub registered_panels: usize,
-    /// 这一轮写下的 `room_relate` 边数。
-    pub written_edges: usize,
-    /// 在册面板里**一条几何行都没有**的（从未生成）：这次没算、边不动。它**不挡参照**
-    /// （共识 D-A (a)，2026-09-08）：没有几何就没有边可陈旧，几何到来时由发布事务排的
-    /// `RoomRecalcPanel` 补算。有行却不可用（包围盒坏 / 网格读不出）不在这一格——那是
-    /// `failures`，整轮 `Err`，参照不写。
-    pub without_geometry: Vec<RefnoEnum>,
-}
-
-/// 全量房间重建，几何恒走实时行（`RoomGeometryView::Live`）：开关关着的启动臂、
-/// `POST /model/rebuild`、python 绑定与夹具都从这里进，行为与引入
-/// [`build_room_relations_with_view`] 之前逐字相同。
-pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
-    build_room_relations_with_view(db_option, RoomGeometryView::Live)
-        .await
-        .map(|_| ())
-}
-
-/// 全量房间重建，几何视图由调用方给（审核 F-H）。
-///
-/// 常驻房间模型开着时 `lib.rs` 的显式全量臂传 [`consumption_view`]（摄入 Published / 读透
-/// Live）——与增量两条分支、启动对比读的是**同一份**几何，ADR-010 §9「增量 == 全量逐边」
-/// 那道门才是在同一份数据上比；此前全量恒 Live、增量读 Published，稳态相等只是巧合，
-/// 轮次中途或 F-D 那类口径差就会让对拍在前提上打折。开关关着的老臂仍由
-/// [`build_room_relations`] 传 Live，一字不变。
-///
-/// 常驻模型在这里**恒不接**（`cal_room_refnos_from` 的 `resident` 恒 `None`）：它是显式修复
-/// 入口，常驻模型不可信时正是靠它重算，接上去就没有退路了。
-pub(crate) async fn build_room_relations_with_view(
-    db_option: &DbOption,
-    view: RoomGeometryView,
-) -> anyhow::Result<FullRebuildOutcome> {
-    let mesh_dir = db_option.get_meshes_path();
-    let room_key_words = db_option.get_room_key_word();
-    let room_panel_map = build_room_panels_relate(&room_key_words).await?;
-    // 排除集覆盖**所有**面板，包括命名不合规、因而不参与归属计算的那些房间的：
-    // 面板本身不该成为另一间房的成员。
-    let exclude_panel_refnos = &room_panel_map.all_panels;
-    println!(
-        "房间归属重建: {} 间房 / {} 块面板",
-        room_panel_map.rooms.len(),
-        exclude_panel_refnos.len()
+    rows.extend(
+        crate::fast_model::model_memory_store::ModelMemoryStore::global()
+            .room_records_for_members(&members)
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.geometry_id,
+                    e3d_model::elmodl::GeometryId::Element { .. }
+                )
+            })
+            .map(|record| record.room_inst()),
     );
-
-    // 整间分支的成员候选取自空间树（少量面板 × 大量构件，这才是树的正当用途；元素
-    // 分支那个反方向的依赖已经拆掉，见 [`PanelIndex`]）。树里捞不到候选时每块面板都会
-    // 算出 0 个成员，而这套写入是先清后写——一次重建就足以把整库房间归属抹平。判不了就
-    // 不写，与元素分支同一个口径。调用点（`lib.rs`）已把失败降级为告警，启动不受影响；
-    // 存量归属边陈旧也比被清成空强，它下一轮还能收敛回来。
-    //
-    // 判据曾经是 `is_empty()`，而那挡不住真正发生过的那一幕：**树非空、但整整缺了一个
-    // 库**。2026-08-06 现场就是这样——树里只有另一个项目的两千条，7997 的四万多条不在，
-    // 于是 147 块在册面板逐块算出空集、逐块先清后写，`room_relate` 全库从上千条掉到 1
-    // 条（仅剩的那条还是事后元素分支单独写回的）。所以改成覆盖率判据。
-    if !room_panel_map.rooms.is_empty() {
-        ensure_room_tree_coverage().await.map_err(|error| {
-            anyhow::anyhow!(
-                "{} 间在册房间的成员判不了，跳过本次全量重建，不清掉存量归属边: {error:#}",
-                room_panel_map.rooms.len()
-            )
-        })?;
-    }
-
-    // 开跑前先取凭据，收尾成功才盖上去（见 [`stamp_room_build`]）。取不到不拦重建：
-    // 凭据只决定「下次启动要不要再来一遍」，本轮该做的事一件不少。
-    let stamp = match current_room_build_stamp().await {
-        Ok(stamp) => Some(stamp),
-        Err(error) => {
-            println!(
-                "[房间全量] 读取本轮空间凭据失败（本次不盖章，下次启动会再重建一次）: {error:#}"
-            );
-            None
-        }
-    };
-
-    // 重建前的存量成员数，一条查询查完。收尾时用它说出「哪几块面板从有成员变成了 0」
-    // ——先清后写这条路上唯一会造成数据损失的转变就是它，而此前全量重建这一侧一行日志
-    // 都没有（增量两条分支反倒都有）。查不到就不报这一项，不影响重建本身。
-    let previous_members = existing_member_counts().await.unwrap_or_else(|error| {
-        println!("[房间全量] 读取存量成员数失败（本次不报成员变化）: {error:#}");
-        HashMap::new()
-    });
-
-    // 单块面板失败不中断整轮：每块面板的写入是自己的事务、先清后写、可重放，
-    // 一个坏面板拖垮全量重建只会让其余 123 间房也拿不到结果。失败逐条收集，
-    // 收尾统一上抛——既不静默，也不放大。
-    let mut failures = Vec::new();
-    let mut without_geometry: Vec<RefnoEnum> = Vec::new();
-    let mut written_edges = 0usize;
-    let mut emptied: Vec<RefnoEnum> = Vec::new();
-    for room in &room_panel_map.rooms {
-        for &panel_refno in &room.panels {
-            // 全量修复入口恒不接常驻模型（`resident = None`），几何视图由调用方给。
-            let members = match cal_room_refnos_from(
-                &mesh_dir,
-                panel_refno,
-                exclude_panel_refnos,
-                view,
-                None,
-            )
-            .await
-            {
-                // 没有几何就判不了，跳过而**不写**：写空集等于把这块面板的存量归属边
-                // 抹掉。成批出现（结构库没生成）时逐块报错只会刷屏，收尾汇总一行即可。
-                Ok(PanelMembers::NoGeometry) => {
-                    without_geometry.push(panel_refno);
-                    continue;
-                }
-                Ok(PanelMembers::Computed(members)) => members,
-                Err(error) => {
-                    failures.push(format!("{panel_refno} 计算房间成员失败: {error:#}"));
-                    continue;
-                }
-            };
-            // 成员为空也要写：先清后写里那一步 DELETE 正是「面板挪走后旧成员必须掉」。
-            if members.is_empty() && previous_members.get(&panel_refno).copied().unwrap_or(0) > 0 {
-                emptied.push(panel_refno);
-            }
-            written_edges += members.len();
-            if let Err(error) = save_room_relate(panel_refno, &members, &room.room_num).await {
-                failures.push(format!("{panel_refno} 写入房间归属失败: {error:#}"));
-            }
-        }
-    }
-
-    report_full_rebuild(
-        exclude_panel_refnos.len(),
-        written_edges,
-        &without_geometry,
-        &emptied,
-    );
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} 块面板的房间归属未能重建: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    // 只有走到这里才算「这一轮全做完了」。盖章失败不算重建失败——白盖不上章的
-    // 后果只是下次启动多重建一次，而把已经成功的重建报成失败会误导排查。
-    if let Some(stamp) = stamp
-        && let Err(error) = stamp_room_build(stamp).await
-    {
-        println!("[房间全量] 重建成功但凭据没盖上（下次启动会再重建一次）: {error:#}");
-    }
-    Ok(FullRebuildOutcome {
-        registered_panels: exclude_panel_refnos.len(),
-        written_edges,
-        without_geometry,
-    })
+    Ok(rows)
 }
 
 /// 空间树至少要装下库里可用包围盒指针的这个比例，全量重建才允许改写房间归属。
@@ -479,355 +158,6 @@ async fn ensure_room_tree_coverage() -> anyhow::Result<(usize, usize)> {
     Ok((tree_entries, db_pointers))
 }
 
-/// 上一次**成功**的全量房间重建当时看到的世界，存在 `room_build:main`。
-///
-/// 两个字段各补一个盲区：`spatial_epoch` 认得出经过意图队列的空间变更，但直写与
-/// 全量生成两条路不递增 epoch（见 `aabb_tree::persist_project_tree_now`）；
-/// `tree_entries` 认得出那些路径造成的条数变化，但认不出「同数漂移」。合起来
-/// 拦得住绝大多数「库变了而房间没跟上」，拦不住的那部分本来就归增量房间队列收，
-/// 全量重建只是双保险——这也是它值得被跳过的原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct RoomBuildStamp {
-    spatial_epoch: u64,
-    tree_entries: u64,
-}
-
-/// 凭据行的读取形状。`rebuild_required` 必须是 `Option<bool>` 而不是 `bool`。
-///
-/// SurrealDB 的投影会把记录上**不存在**的字段照样列进结果、值为 `NONE`，而
-/// `#[serde(default)]` 只兜得住「键缺失」，兜不住「键在、值是 NONE」。老二进制
-/// 盖的章没有后两个字段——2026-08-20 现场那行就只有 `spatial_epoch=355` /
-/// `tree_entries=105650` / `built_at`，`SELECT` 回来的 `rebuild_required` 是
-/// `null`，整份凭据 `expected a boolean, found None` 解析失败。
-///
-/// 代价不只是 /health 上那句难看的错误：[`reconcile_startup_room_build`] 读不出
-/// 凭据一律判「跑」，于是每次重启都白做一次全量房间重建。
-///
-/// 严格读 + 初始化时删旧行也能解，但那要求有一条真的迁移语句；没有它，严格读
-/// 就是把线上每一次启动都钉死在重建上。缺字段按「不要求重建」读并不放松安全：
-/// 真该重建的情形仍由 stamp 对账（epoch / 条数）与「没有凭据 ⇒ 跑」两条兜住。
-///
-/// 章的两格（`spatial_epoch` / `tree_entries`）同样得是 `Option`：这一行从 2026-09-07 起
-/// 不再只由全量重建写——常驻房间模型把 `resident_blocked` / `resident_reference` 两格也
-/// 放在 `room_build:main` 上（`room_resident.rs`），启动房间初始化先于任何全量重建就会
-/// `UPSERT` 出这一行，那时章的两格投影回来是 `NONE`。按 `u64` 读就是整份「解析房间重建
-/// 凭据失败」：`/health` 报错、启动对账判「跑」——真库门 2026-09-08（`watch_dbnums=[8000]`）
-/// 撞上的正是这一形状。两格缺任一即 [`Self::stamp`] 为 `None`，含义就是「还没成功建过」。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RoomBuildRecord {
-    #[serde(default)]
-    spatial_epoch: Option<u64>,
-    #[serde(default)]
-    tree_entries: Option<u64>,
-    #[serde(default)]
-    rebuild_required: Option<bool>,
-    #[serde(default)]
-    rebuild_reason: Option<String>,
-}
-
-impl RoomBuildRecord {
-    fn requires_rebuild(&self) -> bool {
-        self.rebuild_required.unwrap_or(false)
-    }
-
-    /// 上次成功全量重建盖的章；两格都在才算有。行存在而章不在（只写过
-    /// `resident_blocked` / `resident_reference` / 持久重建要求）与没有这一行同义：从没成功建过。
-    fn stamp(&self) -> Option<RoomBuildStamp> {
-        Some(RoomBuildStamp {
-            spatial_epoch: self.spatial_epoch?,
-            tree_entries: self.tree_entries?,
-        })
-    }
-}
-
-/// 启动该不该跑全量房间重建，以及那句要打给人看的理由。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartupRoomBuild {
-    Skip(String),
-    Run(String),
-}
-
-/// 现在这一刻的对账凭据。
-async fn current_room_build_stamp() -> anyhow::Result<RoomBuildStamp> {
-    Ok(RoomBuildStamp {
-        spatial_epoch: crate::fast_model::aabb_tree::read_db_spatial_epoch().await?,
-        tree_entries: GLOBAL_AABB_TREE.read().await.tree.size() as u64,
-    })
-}
-
-async fn read_room_build_record() -> anyhow::Result<Option<RoomBuildRecord>> {
-    let mut response = SUL_DB
-        .query(
-            "SELECT spatial_epoch, tree_entries, rebuild_required, rebuild_reason \
-             FROM room_build:main;",
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("读取房间重建凭据失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("读取房间重建凭据语句失败: {error}"))?;
-    Ok(response
-        .take::<Vec<RoomBuildRecord>>(0)
-        .map_err(|error| anyhow::anyhow!("解析房间重建凭据失败: {error}"))?
-        .into_iter()
-        .next())
-}
-
-/// 盖章：本次全量重建**完全成功**才调用。
-///
-/// 盖的是重建**开跑前**读到的那份凭据，不是收尾时重读的：重建途中树若被动过，
-/// 收尾值会把「我用的是混合状态」记成「我与现在一致」，下次启动就此不再重建。
-/// 记开跑值时这种情况表现为下次启动凭据对不上、再重建一次——多跑一次远好过
-/// 永久跳过。
-async fn stamp_room_build(stamp: RoomBuildStamp) -> anyhow::Result<()> {
-    let RoomBuildStamp {
-        spatial_epoch,
-        tree_entries,
-    } = stamp;
-    SUL_DB
-        .query(format!(
-            "UPSERT room_build:main SET spatial_epoch = {spatial_epoch}, \
-             tree_entries = {tree_entries}, rebuild_required = false, \
-             rebuild_reason = NONE, built_at = time::now();"
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("写入房间重建凭据失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("写入房间重建凭据语句失败: {error}"))?;
-    Ok(())
-}
-
-/// 空世界的全量重建是平凡的，但照样盖章。
-///
-/// 空间树校验为空（`ReadyEmpty`：库里 0 条可用几何指针）时，每块在册面板都会算成
-/// `NoGeometry`、一条边都写不出，`build_room_relations` 走一遍只是白扫全部 DESI 的房间
-/// 拓扑——启动那道门（`lib.rs::skip_startup_room_build` 第三道）因此跳过它。但凭据说的是
-/// 「上次成功重建看到的世界」，空世界也是一个世界：不盖的话 `/health.room_build` 在
-/// spawned-mem 下永远是「没有成功的全量房间重建凭据」，下次启动的对账也没有比较对象。
-/// 随后每一次几何发布都 bump spatial epoch，重启时凭据失配照样判「跑」，什么都没放松。
-///
-/// 只对空树成立：树非空时拒绝盖章——那不是平凡重建，是想绕过覆盖率闸门。
-pub(crate) async fn stamp_vacuous_room_build() -> anyhow::Result<()> {
-    let stamp = current_room_build_stamp().await?;
-    anyhow::ensure!(
-        stamp.tree_entries == 0,
-        "空间树有 {} 条，不是空世界，不按平凡重建盖章",
-        stamp.tree_entries
-    );
-    stamp_room_build(stamp).await
-}
-
-/// 窗口可以提交、但结构枚举已不足以建立精确面板任务时的持久恢复信号。
-/// 该语句由数据窗口尾事务调用，只有成功的全量房间重建会清除它。
-pub(crate) fn render_room_rebuild_required(reason: Option<&str>) -> String {
-    let reason = crate::data_interface::dbnum_state::escape_surql_str(
-        reason.unwrap_or("房间结构枚举失败，需要全量重建"),
-    );
-    format!(
-        "UPSERT room_build:main SET spatial_epoch = spatial_epoch ?: 0, \
-         tree_entries = tree_entries ?: 0, rebuild_required = true, \
-         rebuild_reason = '{reason}', invalidated_at = time::now();"
-    )
-}
-
-const ROOM_BUILD_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-async fn room_build_health_from<F>(timeout: std::time::Duration, read: F) -> serde_json::Value
-where
-    F: std::future::Future<Output = anyhow::Result<Option<RoomBuildRecord>>>,
-{
-    match tokio::time::timeout(timeout, read).await {
-        Ok(Ok(Some(record))) => match record.stamp() {
-            Some(stamp) => serde_json::json!({
-                "rebuild_required": record.requires_rebuild(),
-                "rebuild_reason": record.rebuild_reason,
-                "stamped": true,
-                "spatial_epoch": stamp.spatial_epoch,
-                "tree_entries": stamp.tree_entries,
-            }),
-            // 行在、章不在：常驻房间模型先写了自己那几格。与没有这一行同一句话。
-            None => serde_json::json!({
-                "rebuild_required": record.requires_rebuild(),
-                "rebuild_reason": record.rebuild_reason.unwrap_or_else(unstamped_reason),
-                "stamped": false,
-            }),
-        },
-        Ok(Ok(None)) => serde_json::json!({
-            "rebuild_required": false,
-            "rebuild_reason": unstamped_reason(),
-            "stamped": false,
-        }),
-        // 读不出来 = 判不了，照旧 fail-closed 报要重建：这一档说的是「不知道」，
-        // 与「没人要求过」不是一回事。
-        Ok(Err(error)) => serde_json::json!({
-            "rebuild_required": true,
-            "rebuild_reason": format!("读取房间重建凭据失败: {error:#}"),
-            "stamped": null,
-        }),
-        Err(_) => serde_json::json!({
-            "rebuild_required": true,
-            "rebuild_reason": format!(
-                "读取房间重建凭据超过 {} 秒",
-                timeout.as_secs_f64()
-            ),
-            "stamped": null,
-        }),
-    }
-}
-
-/// 章不在时的说明。**不再据此报 `rebuild_required`**。
-///
-/// 这枚章由「项目级启动全量房间重建」盖，而那套机制已经退役（`lib.rs`：「房间计算采用逐 dbnum
-/// 实时内存模式；启动项目全算与数据库计算输入已停用」）——`stamp_room_build` 的两个调用点都在
-/// 退役了的启动臂上，现役形态下它**永远盖不上**。把「没盖过章」渲染成「要求重建」，等于让
-/// `/health` 对着一个不存在的机制常亮报警：2026-09-10 三轮 live 里 `rebuild_required` 恒为 true，
-/// 而同一份 payload 里常驻房间模型报的是 `status: ready` / 215 间房 / 230 块面板 / 0 块无几何，
-/// monitor 的 DONE 判据（`status == 'ready' && !rebuild_required`）因此永远不成立。
-///
-/// 现役的「欠一次全量重建」信号是**持久标志**本身（`render_room_rebuild_required`，数据窗口尾
-/// 事务在结构枚举失败时写、只有成功的全量重建清除）——那一条一格没动。章在不在另有 `stamped`
-/// 一格如实报，没有藏起来。
-///
-/// 启动那一侧的判据（[`room_build_record_verdict`]）**不跟着改**：它决定要不要真跑一次重建，
-/// 「没建过就跑」是那里该有的保守。
-fn unstamped_reason() -> String {
-    "没有全量房间重建凭据（项目级启动全量已退役，改由常驻房间模型逐 dbnum 实时计算）；\
-     此项不代表欠一次重建，真要求见 rebuild_required"
-        .to_string()
-}
-
-pub async fn room_build_health() -> serde_json::Value {
-    room_build_health_from(ROOM_BUILD_HEALTH_TIMEOUT, read_room_build_record()).await
-}
-
-/// 启动全量房间重建的对账：与上次成功重建时的凭据一致就跳过。
-///
-/// 读不到凭据（库刚建、或查询本身出错）一律判「跑」：这是历史行为，而破坏性的
-/// 先清后写另有 [`ensure_room_tree_coverage`] 那道 fail-closed 门把着，多跑一次
-/// 的代价只是时间。反过来「读不出就跳过」会让一个查询故障静默变成房间永不重建。
-pub async fn reconcile_startup_room_build() -> StartupRoomBuild {
-    let current = match current_room_build_stamp().await {
-        Ok(current) => current,
-        Err(error) => return StartupRoomBuild::Run(format!("读不到当前空间状态（{error:#}）")),
-    };
-    match read_room_build_record().await {
-        Ok(last) => room_build_record_verdict(last, current),
-        Err(error) => StartupRoomBuild::Run(format!("读不到上次重建凭据（{error:#}）")),
-    }
-}
-
-fn room_build_record_verdict(
-    last: Option<RoomBuildRecord>,
-    current: RoomBuildStamp,
-) -> StartupRoomBuild {
-    match last {
-        Some(record) if record.requires_rebuild() => StartupRoomBuild::Run(format!(
-            "持久重建要求：{}",
-            record
-                .rebuild_reason
-                .as_deref()
-                .unwrap_or("房间结构枚举失败")
-        )),
-        // 行在而章不在（只写过 resident_blocked / resident_reference）走 `None` 那支：没成功建过。
-        last => room_build_verdict(last.and_then(|record| record.stamp()), current),
-    }
-}
-
-/// 对账本身：两份凭据一比。抽出来是为了能在没有库的地方钉住这几条分支。
-fn room_build_verdict(last: Option<RoomBuildStamp>, current: RoomBuildStamp) -> StartupRoomBuild {
-    match last {
-        None => StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string()),
-        Some(last) if last == current => StartupRoomBuild::Skip(format!(
-            "与上次成功全量重建一致（空间 epoch {}、树 {} 条）",
-            current.spatial_epoch, current.tree_entries
-        )),
-        Some(last) => StartupRoomBuild::Run(format!(
-            "空间状态已变（epoch {} → {}，树 {} → {} 条）",
-            last.spatial_epoch, current.spatial_epoch, last.tree_entries, current.tree_entries
-        )),
-    }
-}
-
-/// 每块面板当前收着多少个成员，一条查询查完。
-async fn existing_member_counts() -> anyhow::Result<HashMap<RefnoEnum, usize>> {
-    #[derive(Deserialize)]
-    struct Row {
-        panel: RefnoEnum,
-        c: usize,
-    }
-    let mut response = crate::data_interface::staging::active_data_db()
-        .query("SELECT in AS panel, count() AS c FROM room_relate GROUP BY panel;")
-        .await
-        .map_err(|error| anyhow::anyhow!("查询存量房间成员数失败: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("查询存量房间成员数语句失败: {error}"))?;
-    Ok(response
-        .take::<Vec<Row>>(0)
-        .map_err(|error| anyhow::anyhow!("解析存量房间成员数失败: {error}"))?
-        .into_iter()
-        .map(|row| (row.panel, row.c))
-        .collect())
-}
-
-/// 全量重建的收尾汇报：写了多少、几块面板没几何、几块从有成员掉到 0。
-///
-/// 后两项是这条路上唯二会「让房间号消失」的形态。此前它们都不出声：没几何的面板被
-/// 当成 0 个成员照常写（把存量边清掉），而掉到 0 这件事从来没人统计。
-fn report_full_rebuild(
-    registered_panels: usize,
-    written_edges: usize,
-    without_geometry: &[RefnoEnum],
-    emptied: &[RefnoEnum],
-) {
-    let sample = |refnos: &[RefnoEnum]| {
-        refnos
-            .iter()
-            .take(5)
-            .map(RefnoEnum::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    println!("房间归属重建完成: 写入 {written_edges} 条成员边");
-    if !without_geometry.is_empty() {
-        println!(
-            "  {} / {} 块在册面板没有任何几何实例，已跳过（**未**清除它们的存量归属边）\
-             ——例如 {}。这通常意味着结构库还没生成过",
-            without_geometry.len(),
-            registered_panels,
-            sample(without_geometry)
-        );
-    }
-    if !emptied.is_empty() {
-        println!(
-            "  {} 块面板的成员从非空变成 0（例如 {}）——若非预期，先查它们的网格与包围盒",
-            emptied.len(),
-            sample(emptied)
-        );
-    }
-}
-
-/// 渲染一块面板的房间归属写入：**先清后写**，整体一个事务（ADR-010 §8）。
-///
-/// 为什么不是差分：差分要先读旧集合再比对，多一次往返，并发下更难保证；先清后写天然
-/// 幂等、可重放，而「增量收敛结果 == 全量重建结果」的对拍验收（ADR-010 §9）正是押在
-/// 这个幂等性上。此前这里是裸 `relate`，record id 固定为 `panel_member`，第二次跑同一
-/// 个 id 会报「已存在」，而调用处没有 `.check()`，错误被静默吞掉——于是全量重建既删不掉
-/// 陈旧边，也不会报错（缺陷 D6）。
-///
-/// 成员为空时只剩那条 DELETE。这不是退化情形而是主要用途之一：面板挪走、房间清空之后，
-/// 旧成员必须掉。
-///
-/// 成员按 refno 排序后渲染：`HashMap` 的遍历顺序每次都不同，不排序的话同一份输入会渲染
-/// 出不同的 SQL，重放与逐边对拍都失去意义。
-///
-/// 那条 DELETE 走图遍历的边目标（`{panel}->room_relate`），**不要**写成
-/// `WHERE in = {panel}`。库里确实有 `unique_room_relate (in, out)`，`in` 又正是它的
-/// 前缀——但那只救得了 SELECT：**DELETE 拿不到二级索引**，谓词形式一律整表扫
-/// （`increment_pipeline::render_persist_statements` 同一发）。10 万条边、索引在场的
-/// 隔离实例实测：`DELETE … WHERE in = X` 3.132s，`DELETE X->room_relate` 244.973ms，
-/// 删除行数相同（`docs/evidence/2026-08-20-edge-scan-sweep/`）。代价随全库边数线性涨，
-/// 与本面板成员数无关，而每块面板重算各发一次——全量重建就是面板数乘边表全扫。
-/// 同一条纪律的读侧见 [`render_element_room_history`]，删除侧见
-/// `helper.rs::render_room_membership_delete`。
 fn render_room_relate_write(
     panel_refno: RefnoEnum,
     within_refnos: &HashMap<RefnoEnum, RoomMember>,
@@ -1111,24 +441,18 @@ fn render_panel_room_topology_statements(
 }
 
 /// 增量整间分支的唯一提交单元：成员边与 panel→room 拓扑同成同败。
+///
+/// 写守卫那一档随房间队列退役（t-678）：队列没了就只剩「直接写」这一种形态，
+/// `Option<&RoomWriteGuard>` 恒 `None`，形参一并去掉。
 fn render_panel_state_write(
     panel: RefnoEnum,
     members: &HashMap<RefnoEnum, RoomMember>,
     room: Option<&RoomPanels>,
 ) -> String {
-    render_panel_state_write_guarded(panel, members, room, None)
-}
-
-fn render_panel_state_write_guarded(
-    panel: RefnoEnum,
-    members: &HashMap<RefnoEnum, RoomMember>,
-    room: Option<&RoomPanels>,
-    guard: Option<&RoomWriteGuard>,
-) -> String {
     let room_num = room.map(|room| room.room_num.as_str()).unwrap_or("");
     let mut statements = render_room_relate_statements(panel, members, room_num);
     statements.extend(render_panel_room_topology_statements(panel, room));
-    render_room_write(&statements, guard)
+    wrap_in_transaction(&statements).unwrap_or_default()
 }
 
 async fn save_panel_state(
@@ -1136,17 +460,8 @@ async fn save_panel_state(
     members: &HashMap<RefnoEnum, RoomMember>,
     room: Option<&RoomPanels>,
 ) -> anyhow::Result<()> {
-    save_panel_state_guarded(panel, members, room, None).await
-}
-
-async fn save_panel_state_guarded(
-    panel: RefnoEnum,
-    members: &HashMap<RefnoEnum, RoomMember>,
-    room: Option<&RoomPanels>,
-    guard: Option<&RoomWriteGuard>,
-) -> anyhow::Result<()> {
     crate::surreal_retry::execute_model_write(
-        &render_panel_state_write_guarded(panel, members, room, guard),
+        &render_panel_state_write(panel, members, room),
         &format!("原子写入 {panel} 的房间成员与面板拓扑"),
     )
     .await
@@ -1177,10 +492,11 @@ where
     }
 }
 
-/// 房间 → 面板现状的来源（ADR-053 / ADR-056 N7 的房间面）：先看已发布文件清单（ADR-062），
-/// 没有就从 MDB 的设计库文件实时读（`room_topology`）。一行 SurrealDB 都不读——legacy
-/// 「noun 表 + `pe_owner`」那条读路由 2026-09-08 随 S4 退役（不跑数据解析的部署与零解析库
-/// 此前在那条路上拿到的是 0 间房）。名字里的 `_by_mode` 是历史遗留：数据面只剩一条读路由。
+/// 房间 → 面板现状的来源（ADR-053 / ADR-056 N7 的房间面）：从 MDB 的设计库文件实时读
+/// （`room_topology`）。一行 SurrealDB 都不读——legacy「noun 表 + `pe_owner`」那条读路由
+/// 2026-09-08 随 S4 退役（不跑数据解析的部署与零解析库此前在那条路上拿到的是 0 间房）；
+/// 「先看已发布文件清单」那一档 2026-09-10 随 publish 阶段退役（ADR-072 D4）。
+/// 名字里的 `_by_mode` 是历史遗留：数据面只剩一条读路由。
 async fn load_room_panel_groups_by_mode<F>(
     room_key_word: &Vec<String>,
     match_room_fn: F,
@@ -1190,16 +506,6 @@ where
 {
     let hierarchy = crate::fast_model::room_topology::RoomHierarchy::configured()
         .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
-    if let Some(published) =
-        crate::fast_model::room_topology::load_room_panel_map_from_published_files(
-            room_key_word,
-            hierarchy,
-            &match_room_fn,
-        )
-        .await?
-    {
-        return Ok(published);
-    }
     crate::fast_model::room_topology::load_room_panel_map_from_files(
         room_key_word,
         hierarchy,
@@ -1397,21 +703,13 @@ pub async fn cal_room_refnos(
     panel_refno: RefnoEnum,
     exclude_refnos: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<PanelMembers> {
-    cal_room_refnos_from(
-        mesh_dir,
-        panel_refno,
-        exclude_refnos,
-        RoomGeometryView::Live,
-        None,
-    )
-    .await
+    cal_room_refnos_from(mesh_dir, panel_refno, exclude_refnos, None).await
 }
 
 async fn cal_room_refnos_from(
     mesh_dir: &PathBuf,
     panel_refno: RefnoEnum,
     exclude_refnos: &HashSet<RefnoEnum>,
-    view: RoomGeometryView,
     resident: ResidentSource<'_>,
 ) -> anyhow::Result<PanelMembers> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
@@ -1431,7 +729,7 @@ async fn cal_room_refnos_from(
             //（`GeomInstQuery` 的 `pe.owner` / `inst_relate.generic` 都是非 Option 字符串），
             // 反序列化错误就被吞成空 Vec，紧接着下面的 `is_empty()` 让整间房**无声地**算成
             // 0 个成员，日志里一行都没有。合成夹具首跑就是被它藏了半天。
-            let geom_insts: Vec<GeomInstQuery> = query_room_insts(view, &[panel_refno])
+            let geom_insts: Vec<GeomInstQuery> = query_room_insts(&[panel_refno])
                 .await
                 .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
             // dbg!(&geom_insts);
@@ -1523,7 +821,7 @@ async fn cal_room_refnos_from(
                 .keys()
                 .map(|refno| RefnoEnum::from(*refno))
                 .collect();
-            let geom_pts = query_geom_pts_for_view(view, &candidates, mesh_dir)
+            let geom_pts = query_geom_pts_for_view(&candidates, mesh_dir)
                 .await
                 .map_err(|error| anyhow::anyhow!("面板 {panel_refno} 的候选几何点: {error:#}"))?;
             // dbg!(&geom_pts);
@@ -1598,10 +896,10 @@ pub async fn recalc_panel_membership(
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Live, None).await
+    recalc_panel_membership_inner(db_option, rooms, panel, None).await
 }
 
-/// 单件执行路径与启动对比的整间分支（无写守卫）：几何视图按数据面选（[`consumption_view`]）。
+/// 单件执行路径与启动对比的整间分支。
 ///
 /// `resident` 由调用方给（[`ResidentSource`]）：启动对比递的是它刚装好的那份，单件执行路径
 /// 递 `None`——那条路不在 `lock_spatial_serial` 之内，拿不到合法的换代点。
@@ -1614,11 +912,10 @@ pub(crate) async fn recalc_panel_membership_for_consumption(
     // 业务 ready 门（完成定义 #5）。开关判定在状态机里（Disabled/Unsupported 放行），
     // 本文件不判开关（源码钉 the_full_rebuild_entry_never_takes_the_resident_model）。
     crate::fast_model::room_resident::ensure_ready()?;
-    recalc_panel_membership_inner(db_option, rooms, panel, None, consumption_view(), resident).await
+    recalc_panel_membership_inner(db_option, rooms, panel, resident).await
 }
 
-/// 第二轮逐点兜底的数据源，按几何视图选：Live 走库内 `inst_geo.pts`（`where !booled`）再补上
-/// 烘焙件的网格顶点；Published 从已发布几何清单里逐 `.mesh` 读顶点。
+/// 第二轮逐点兜底的数据源：库内 `inst_geo.pts`（`where !booled`）再补上烘焙件的网格顶点。
 ///
 /// **烘焙件（`has_neg` / `booled_id`）也进第二轮**（审核 F-D）。e3d-model 直写路径里带负实体的
 /// 元素落成 `ProjectedShape::Baked`：`inst_relate` 行 `booled = true`、`booled_id` 指内容寻址的
@@ -1628,80 +925,26 @@ pub(crate) async fn recalc_panel_membership_for_consumption(
 /// 布尔运算吃掉的实例不再代表真实几何」；烘焙**结果**恰恰是真实几何，不在那句话之内。两个视图
 /// 同一口径：烘焙件的点 = 烘焙网格的顶点 × `world_trans`。
 async fn query_geom_pts_for_view(
-    view: RoomGeometryView,
     refnos: &[RefnoEnum],
     mesh_dir: &Path,
 ) -> anyhow::Result<Vec<GeomPtsQuery>> {
-    if view == RoomGeometryView::Live {
-        let mut rows = query_geom_pts(refnos).await?;
-        rows.extend(query_baked_geom_pts(refnos, mesh_dir).await?);
-        return Ok(rows);
-    }
-    let mut rows = Vec::new();
-    for inst in query_room_insts(view, refnos).await? {
-        let mut pts_group = Vec::with_capacity(inst.insts.len());
-        for geo in &inst.insts {
-            // 烘焙件的 `insts` 是 stage 时按 `booled_id != NONE` 折出来的 `[{geo_hash: booled_id}]`
-            //（`room_publication.rs`），历史脏值 `''` / `'none'` 也会折进来；它们是「无成品」
-            // 不是网格 id，没有点可查——与 Live 侧 `VALID_BOOLED` 同一口径，跳过而不是拿去读
-            // `.mesh` 把整块面板判成失败。
-            if geo_hash_is_dirty(&geo.geo_hash) {
-                continue;
-            }
-            let path = mesh_dir.join(format!("{}.mesh", geo.geo_hash));
-            let mesh = PlantMesh::des_mesh_file(&path).map_err(|error| {
-                anyhow::anyhow!("读取已发布网格 {} 失败: {error}", path.display())
-            })?;
-            pts_group.push((
-                geo.transform,
-                Some(mesh.vertices.iter().map(|point| point.as_dvec3()).collect()),
-            ));
-        }
-        rows.push(GeomPtsQuery {
-            refno: inst.refno,
-            world_trans: inst.world_trans,
-            world_aabb: inst.world_aabb,
-            pts_group,
-        });
-    }
+    let mut rows = query_geom_pts(refnos).await?;
+    rows.extend(query_baked_geom_pts(refnos, mesh_dir).await?);
     Ok(rows)
 }
 
-/// `booled_id` 的历史脏值（空串、任意大小写的字面 `none`）被 stage 折成 `geo_hash` 之后的样子。
+/// `booled_id` 的历史脏值（空串、任意大小写的字面 `none`）被折成 `geo_hash` 之后的样子。
 /// 判据与 [`VALID_BOOLED`](crate::fast_model::pdms_inst::VALID_BOOLED) 那句 SurrealQL 逐条对应
-///（`!= ''` 与 `string::lowercase(…) != 'none'`），Rust 侧这一份只给已经物化好的
-/// `room_published_inst` 行用——它们在 stage 时没经过那道判据。
+///（`!= ''` 与 `string::lowercase(…) != 'none'`），Rust 侧这一份给已经物化成 `insts` 的行用
+/// （实时行的 `insts_flat` / 常驻面板的实例表）——它们没经过那道 SurrealQL 判据。
 pub(crate) fn geo_hash_is_dirty(geo_hash: &str) -> bool {
     geo_hash.is_empty() || geo_hash.eq_ignore_ascii_case("none")
-}
-
-/// 房间队列消费的整间分支：几何视图按数据面选（[`consumption_view`]），与同一轮的
-/// 在册面板索引（[`load_consumption_panel_index`]）必须同源，两条分支才收敛到同一个边集。
-pub(crate) async fn recalc_panel_membership_guarded(
-    db_option: &DbOption,
-    rooms: &RoomPanelMap,
-    panel: RefnoEnum,
-    guard: &RoomWriteGuard,
-    resident: ResidentSource<'_>,
-) -> anyhow::Result<HashSet<RefnoEnum>> {
-    crate::fast_model::room_resident::ensure_ready()?;
-    recalc_panel_membership_inner(
-        db_option,
-        rooms,
-        panel,
-        Some(guard),
-        consumption_view(),
-        resident,
-    )
-    .await
 }
 
 async fn recalc_panel_membership_inner(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
-    guard: Option<&RoomWriteGuard>,
-    view: RoomGeometryView,
     resident: ResidentSource<'_>,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let Some(room) = rooms.room_of_panel(panel) else {
@@ -1713,7 +956,7 @@ async fn recalc_panel_membership_inner(
                 println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
                 HashSet::new()
             });
-        save_panel_state_guarded(panel, &HashMap::new(), None, guard).await?;
+        save_panel_state(panel, &HashMap::new(), None).await?;
         if !old_members.is_empty() {
             println!(
                 "[房间增量] 面板 {panel} 已不在册，清空其房间归属（原 {} 个成员掉出）",
@@ -1744,7 +987,6 @@ async fn recalc_panel_membership_inner(
         &db_option.get_meshes_path(),
         panel,
         &exclude,
-        view,
         resident,
     )
     .await?
@@ -1762,7 +1004,7 @@ async fn recalc_panel_membership_inner(
             println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
             HashSet::new()
         });
-    save_panel_state_guarded(panel, &members, Some(room), guard).await?;
+    save_panel_state(panel, &members, Some(room)).await?;
     log_panel_membership_change(panel, &room_num, &old_members, &new_members);
     Ok(new_members)
 }
@@ -1791,7 +1033,6 @@ pub struct PanelIndex {
     mesh_dir: PathBuf,
     /// 在册、但没能进索引的面板：`query_insts` 没返回行，或世界包围盒不可用。
     missing: Vec<RefnoEnum>,
-    view: RoomGeometryView,
     /// 这一轮的面板侧几何来自哪份常驻模型（`None` = 今天那条库内查询）。
     ///
     /// 存在索引里而不是逐次传参，是为了让**两条分支同源**这条既有纪律在类型上兜住：
@@ -1967,7 +1208,7 @@ impl PanelIndex {
     }
 
     /// 这一轮的面板侧几何来自哪份常驻模型。整间分支（`run_room_task` →
-    /// [`recalc_panel_membership_guarded`]）从这里取，与元素分支同源。
+    /// [`recalc_panel_membership_for_consumption`]）从这里取，与元素分支同源。
     pub(crate) fn resident(&self) -> ResidentSource<'_> {
         self.resident.as_deref()
     }
@@ -2041,29 +1282,26 @@ pub async fn load_panel_index(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
 ) -> anyhow::Result<PanelIndex> {
-    load_panel_index_from(db_option, rooms, RoomGeometryView::Live, None).await
+    load_panel_index_from(db_option, rooms, None).await
 }
 
-/// 房间队列消费用的在册面板索引：几何视图按数据面选（[`consumption_view`]），面板侧几何
-/// 由调用方决定从哪来（[`ResidentSource`]）——`drain_rooms_selected` 在串行锁下换代之后把
-/// 那一份递进来，单件执行路径递 `None`。
+/// 房间消费用的在册面板索引：面板侧几何由调用方决定从哪来（[`ResidentSource`]）——
+/// 换代之后把那一份递进来，单件执行路径递 `None`。
 pub(crate) async fn load_consumption_panel_index(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
-    load_panel_index_from(db_option, rooms, consumption_view(), resident).await
+    load_panel_index_from(db_option, rooms, resident).await
 }
 
 async fn load_panel_index_from(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
-    view: RoomGeometryView,
     resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
     let mut index = PanelIndex {
         mesh_dir: db_option.get_meshes_path(),
-        view,
         resident,
         ..Default::default()
     };
@@ -2082,7 +1320,7 @@ async fn load_panel_index_from(
         fill_panel_index_from_resident(&mut index, rooms, &registered, &model);
         return Ok(index);
     }
-    let insts: Vec<GeomInstQuery> = query_room_insts(view, &registered).await.map_err(|error| {
+    let insts: Vec<GeomInstQuery> = query_room_insts(&registered).await.map_err(|error| {
         anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
     })?;
     fill_panel_index_from_rows(&mut index, rooms, &registered, insts);
@@ -2286,12 +1524,9 @@ pub async fn element_candidate_panels(
     if !panels.missing_panels().is_empty() {
         return Ok(out);
     }
-    let insts: Vec<GeomInstQuery> =
-        query_room_insts(panels.view, elements)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
-            })?;
+    let insts: Vec<GeomInstQuery> = query_room_insts(elements).await.map_err(|error| {
+        anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
+    })?;
     let mut invalid: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
         // 任一实例不可用时整项候选未知：不能拿其余实例的部分候选去吸收该元素任务。
@@ -2345,18 +1580,7 @@ pub async fn recalc_element_membership(
     history: &ElementRoomHistory,
     element: RefnoEnum,
 ) -> anyhow::Result<()> {
-    recalc_element_membership_inner(rooms, panels, history, element, None).await
-}
-
-pub(crate) async fn recalc_element_membership_guarded(
-    rooms: &RoomPanelMap,
-    panels: &PanelIndex,
-    history: &ElementRoomHistory,
-    element: RefnoEnum,
-    guard: &RoomWriteGuard,
-) -> anyhow::Result<()> {
-    crate::fast_model::room_resident::ensure_ready()?;
-    recalc_element_membership_inner(rooms, panels, history, element, Some(guard)).await
+    recalc_element_membership_inner(rooms, panels, history, element).await
 }
 
 /// 元素分支第一轮的产物（纯函数 [`element_first_pass`] 的返回值）。
@@ -2434,14 +1658,10 @@ async fn recalc_element_membership_inner(
     panels: &PanelIndex,
     history: &ElementRoomHistory,
     element: RefnoEnum,
-    guard: Option<&RoomWriteGuard>,
 ) -> anyhow::Result<()> {
     // 面板本身不参与归属。整间分支把**所有**面板排除在成员之外，反向路径必须同口径，
     // 否则一块面板在两条路径下会得到不同答案。PANE 自身变更按 ADR §2 走整间分支。
     if rooms.all_panels.contains(&element) {
-        if let Some(guard) = guard {
-            execute_guarded_room_write(&[], guard, &format!("结算面板元素任务 {element}")).await?;
-        }
         return Ok(());
     }
 
@@ -2455,7 +1675,7 @@ async fn recalc_element_membership_inner(
     // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
     let old_rooms = history.room_nums_of(element);
 
-    let element_insts: Vec<GeomInstQuery> = query_room_insts(panels.view, &[element])
+    let element_insts: Vec<GeomInstQuery> = query_room_insts(&[element])
         .await
         .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
     // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉：全量重建
@@ -2464,13 +1684,12 @@ async fn recalc_element_membership_inner(
     // 就说明刚才还算得出来，此刻却查不到，本身就是要查的信号。
     if element_insts.is_empty() {
         println!("构件 {element} 查不到几何实例，房间归属按空集收敛（存量入边已清）");
-        return write_element_room_relate_logged_guarded(
+        return write_element_room_relate_logged(
             element,
             &[],
             &old_rooms,
             protected_panels,
             &preserved_rooms,
-            guard,
         )
         .await;
     }
@@ -2504,7 +1723,7 @@ async fn recalc_element_membership_inner(
     // 只有跨界构件才需要实际几何点，而取点是一次库往返。此前无论第一轮判成什么都先
     // 取一遍，八顶点全在内或全在外的构件（绝大多数）白付一次查询。
     if !pending_point_checks.is_empty() {
-        let world_points = element_world_points(element, panels.view, mesh_dir)
+        let world_points = element_world_points(element, mesh_dir)
             .await
             .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
         for (element_slot, panel_slot, mesh_slot, inside_count) in pending_point_checks {
@@ -2523,13 +1742,12 @@ async fn recalc_element_membership_inner(
     }
 
     let edges: Vec<ElementRoomEdge> = edges.into_values().collect();
-    write_element_room_relate_logged_guarded(
+    write_element_room_relate_logged(
         element,
         &edges,
         &old_rooms,
         protected_panels,
         &preserved_rooms,
-        guard,
     )
     .await
 }
@@ -2547,11 +1765,10 @@ fn same_world_aabb(left: &Aabb, right: &Aabb) -> bool {
 /// 构件各实例在世界坐标系下的实际几何点，与正向第二轮取的是同一批。
 async fn element_world_points(
     element: RefnoEnum,
-    view: RoomGeometryView,
     mesh_dir: &Path,
 ) -> anyhow::Result<Vec<ElementWorldPoints>> {
     let mut rows = Vec::new();
-    for geom_pts in query_geom_pts_for_view(view, &[element], mesh_dir).await? {
+    for geom_pts in query_geom_pts_for_view(&[element], mesh_dir).await? {
         let mut points = Vec::new();
         for (trans, pts) in &geom_pts.pts_group {
             let Some(pts) = pts else {
@@ -2585,10 +1802,46 @@ pub(crate) struct MemoryRoomCalculator {
     definition_version: String,
 }
 
+/// 一个闭合且朝外的盒子。`TriMeshFlags::ORIENTED` 下 `contains_point` 依赖法线朝向，
+/// 绕序错了会把内外判反，而房间判定的两轮全押在它上面。
+///
+/// 从 `room_fixture.rs` 搬过来的（房间流程退役，t-678）：本文件与 `room_predicate` 的
+/// 单测共用同一个盒子构造，不在两处各造一份形状。
+#[cfg(test)]
+pub(crate) fn box_mesh_for_test(min: Vec3, max: Vec3) -> PlantMesh {
+    let vertices = vec![
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    #[rustfmt::skip]
+    let indices = vec![
+        0, 2, 1,  0, 3, 2, // -z
+        4, 5, 6,  4, 6, 7, // +z
+        0, 1, 5,  0, 5, 4, // -y
+        3, 7, 6,  3, 6, 2, // +y
+        0, 4, 7,  0, 7, 3, // -x
+        1, 2, 6,  1, 6, 5, // +x
+    ];
+    let mut mesh = PlantMesh {
+        indices,
+        vertices,
+        normals: Vec::new(),
+        wire_vertices: Vec::new(),
+        aabb: None,
+    };
+    mesh.aabb = mesh.cal_aabb();
+    mesh
+}
+
 #[cfg(test)]
 mod memory_calculation_tests {
     use super::*;
-    use crate::data_interface::dbnum_state::RoomInputVersion;
     use crate::fast_model::model_memory_store::{ProjectedGeometry, ProjectedShape};
     use crate::fast_model::room_resident::{MeshCache, ResidentForm, ResidentManifest};
 
@@ -2615,8 +1868,7 @@ mod memory_calculation_tests {
     #[test]
     fn component_points_match_the_previous_triangle_mesh_vertices() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mesh =
-            crate::fast_model::room_fixture::box_mesh_for_test(Vec3::ZERO, Vec3::splat(1.));
+        let mut mesh = box_mesh_for_test(Vec3::ZERO, Vec3::splat(1.));
         // The old TriMesh drops unreferenced vertices and merges duplicates
         // in triangle traversal order; neither may change point-test behavior.
         mesh.vertices.push(Vec3::splat(1234.));
@@ -2647,7 +1899,7 @@ mod memory_calculation_tests {
     #[test]
     fn memory_projection_calculates_without_database_or_global_tree() {
         let dir = tempfile::tempdir().unwrap();
-        crate::fast_model::room_fixture::box_mesh_for_test(Vec3::ZERO, Vec3::splat(1000.))
+        box_mesh_for_test(Vec3::ZERO, Vec3::splat(1000.))
             .ser_to_file(&dir.path().join("panel.mesh"))
             .unwrap();
         let panel: RefnoEnum = "7000_1".into();
@@ -2674,50 +1926,65 @@ mod memory_calculation_tests {
             &[panel_record],
             Arc::<MeshCache>::default(),
         ));
-        let input = RoomInputVersion {
-            version: 1,
-            source_identity: "source".into(),
-            model_sesno: 12,
-            model_version: "model".into(),
-            room_definition_version: model.input_version(),
-            generation_rule_version: "v1".into(),
-        };
+        let model_sesno = 12;
+        let rooms_version = model.input_version();
         let calc = MemoryRoomCalculator::new(model, dir.path().to_path_buf()).unwrap();
         let inside = record(10, 400., 600.);
         let outside = record(20, 1400., 1600.);
         let full = calc
-            .calculate_with_points(8000, &input, &[inside.clone(), outside.clone()], |_| {
-                panic!("fully inside/outside must not load mesh points")
-            })
+            .calculate_with_points(
+                8000,
+                model_sesno,
+                &rooms_version,
+                &[inside.clone(), outside.clone()],
+                |_| panic!("fully inside/outside must not load mesh points"),
+            )
             .unwrap();
         assert_eq!(full.len(), 1);
         assert_eq!(full[0].member.inside_count, 8);
         let moved = record(10, 1400., 1600.);
-        assert!(calc.calculate(8000, &input, &[moved]).unwrap().is_empty());
-        assert!(calc.calculate(8000, &input, &[]).unwrap().is_empty());
+        assert!(
+            calc.calculate(8000, model_sesno, &rooms_version, &[moved])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            calc.calculate(8000, model_sesno, &rooms_version, &[])
+                .unwrap()
+                .is_empty()
+        );
         // Multiple instances of the same element keep their individual boxes.
         let mut far = record(10, 2400., 2600.);
         far.record_id = "second-instance".into();
-        let split = calc.calculate(8000, &input, &[inside, far]).unwrap();
+        let split = calc
+            .calculate(8000, model_sesno, &rooms_version, &[inside, far])
+            .unwrap();
         assert_eq!(split.len(), 1);
         assert_eq!(split[0].member.center_dist, full[0].member.center_dist);
         let straddling = record(30, 900., 1100.);
         let edges = calc
-            .calculate_with_points(8000, &input, &[straddling.clone()], |_| {
-                Ok(vec![Point::new(950., 500., 500.)])
-            })
+            .calculate_with_points(
+                8000,
+                model_sesno,
+                &rooms_version,
+                &[straddling.clone()],
+                |_| Ok(vec![Point::new(950., 500., 500.)]),
+            )
             .unwrap();
         assert_eq!(edges.len(), 1);
         assert!(
-            calc.calculate_with_points(8000, &input, &[straddling], |_| {
+            calc.calculate_with_points(8000, model_sesno, &rooms_version, &[straddling], |_| {
                 anyhow::bail!("local mesh missing")
             })
             .is_err()
         );
-        let mut stale = input.clone();
-        stale.room_definition_version = "old-rooms".into();
-        assert!(calc.calculate(8000, &stale, &[]).is_err());
-        assert!(calc.calculate(7000, &input, &[outside]).is_err());
+        // 面板定义换了版 / 模型版本非法 / 记录不属于这个库：与原先拿房间输入版本结构对版本时同样拒算。
+        assert!(calc.calculate(8000, model_sesno, "old-rooms", &[]).is_err());
+        assert!(calc.calculate(8000, -1, &rooms_version, &[]).is_err());
+        assert!(
+            calc.calculate(7000, model_sesno, &rooms_version, &[outside])
+                .is_err()
+        );
     }
 }
 
@@ -2726,28 +1993,35 @@ impl MemoryRoomCalculator {
     pub(crate) fn calculate_with_component_bvh(
         &self,
         dbnum: u32,
-        input: &crate::data_interface::dbnum_state::RoomInputVersion,
+        model_sesno: i32,
+        room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
-        self.calculate_with_points(dbnum, input, records, |record| {
-            let transform = match &record.shape {
-                crate::fast_model::model_memory_store::ProjectedShape::Baked => {
-                    record.world_transform
-                }
-                crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                    local_transform,
-                    ..
-                } => record.world_transform * *local_transform,
-            };
-            Ok(crate::fast_model::room_resident::build_tri_mesh(
-                self.panels.mesh_dir(),
-                &record.mesh_id,
-                transform.as_mat4(),
-            )
-            .map_err(anyhow::Error::msg)?
-            .vertices()
-            .to_vec())
-        })
+        self.calculate_with_points(
+            dbnum,
+            model_sesno,
+            room_definition_version,
+            records,
+            |record| {
+                let transform = match &record.shape {
+                    crate::fast_model::model_memory_store::ProjectedShape::Baked => {
+                        record.world_transform
+                    }
+                    crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                        local_transform,
+                        ..
+                    } => record.world_transform * *local_transform,
+                };
+                Ok(crate::fast_model::room_resident::build_tri_mesh(
+                    self.panels.mesh_dir(),
+                    &record.mesh_id,
+                    transform.as_mat4(),
+                )
+                .map_err(anyhow::Error::msg)?
+                .vertices()
+                .to_vec())
+            },
+        )
     }
 
     pub(crate) fn new(model: Arc<ResidentRoomModel>, mesh_dir: PathBuf) -> anyhow::Result<Self> {
@@ -2771,21 +2045,31 @@ impl MemoryRoomCalculator {
         })
     }
 
+    /// `model_sesno`：记录的 `source_sesno` 不得越过它（算的是哪一版模型）；
+    /// `room_definition_version`：调用方以为的面板索引版本，与本计算器建索引时的那一版不符就拒算。
+    /// （原先这两格装在 `dbnum_state` 的房间输入版本结构里，那个结构随第三枚水位退了，ADR-073 D2。）
     pub(crate) fn calculate(
         &self,
         dbnum: u32,
-        input: &crate::data_interface::dbnum_state::RoomInputVersion,
+        model_sesno: i32,
+        room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         #[cfg(test)]
         let mut reads = HashMap::<String, usize>::new();
-        let result = self.calculate_with_points(dbnum, input, records, |record| {
-            #[cfg(test)]
-            {
-                *reads.entry(record.mesh_id.clone()).or_default() += 1;
-            }
-            memory_model_world_points(record, self.panels.mesh_dir())
-        });
+        let result = self.calculate_with_points(
+            dbnum,
+            model_sesno,
+            room_definition_version,
+            records,
+            |record| {
+                #[cfg(test)]
+                {
+                    *reads.entry(record.mesh_id.clone()).or_default() += 1;
+                }
+                memory_model_world_points(record, self.panels.mesh_dir())
+            },
+        );
         #[cfg(test)]
         println!(
             "ROOM_MESH_READS dbnum={dbnum} records={} reads={} unique={}",
@@ -2799,35 +2083,126 @@ impl MemoryRoomCalculator {
     fn calculate_with_points(
         &self,
         dbnum: u32,
-        input: &crate::data_interface::dbnum_state::RoomInputVersion,
+        model_sesno: i32,
+        room_definition_version: &str,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        points: impl FnMut(
+            &crate::fast_model::model_memory_store::ProjectedGeometry,
+        ) -> anyhow::Result<Vec<Point<Real>>>,
+    ) -> anyhow::Result<Vec<ElementRoomEdge>> {
+        anyhow::ensure!(
+            model_sesno >= 0
+                && !room_definition_version.is_empty()
+                && room_definition_version == self.definition_version,
+            "room definition version changed"
+        );
+        for record in records {
+            anyhow::ensure!(
+                record.dbnum == dbnum && i64::from(record.source_sesno) <= i64::from(model_sesno),
+                "room model input is outside the frozen file window"
+            );
+        }
+        self.calculate_edges(records, points)
+    }
+
+    /// 逐根房间归属（ADR-073 D1）：一根的模型算完，紧接着用它的内存投影算这一根名下每个
+    /// 构件的房间归属，结果随该根的模型行同一事务落边（[`crate::fast_model::model_db_adapter`]
+    /// 的 `room_stage`）。
+    ///
+    /// 与 [`Self::calculate`] 同一套算法，只是不再对模型水位与房间定义版本：房间定义的版本就是
+    /// 这台计算器自己（任务开工时按常驻模型冻出来的不可变引用，任务期间不换代），文件窗口的
+    /// 边界由生成路径守——记录到了这里就是这一根这一版的最终几何。一句库不读。
+    /// 输入不合法（盒子不可用、面板网格不全）直接 `Err`：房间算不出来的根不落库，
+    /// 房间失败 = 该根失败（ADR-073 D2）。
+    pub(crate) fn calculate_for_root(
+        &self,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+    ) -> anyhow::Result<Vec<ElementRoomEdge>> {
+        self.calculate_edges(records, |record| {
+            memory_model_world_points(record, self.panels.mesh_dir())
+        })
+    }
+
+    /// 这台计算器冻结的 resident generation。完整根 ACK 用它防止旧房间拓扑冒充新代。
+    pub(crate) fn resident_generation(&self) -> &str {
+        &self
+            .panels
+            .resident
+            .as_ref()
+            .expect("a memory room calculator is always built from a resident model")
+            .manifest
+            .key
+    }
+
+    /// 冻结那一刻的房间 → 面板现状（谁是面板、面板属于哪间在册的房）。
+    fn room_panel_map(&self) -> &RoomPanelMap {
+        &self
+            .panels
+            .resident
+            .as_ref()
+            .expect("a memory room calculator is always built from a resident model")
+            .map
+    }
+
+    /// 一根的两张房间边，拼进该根落库的**同一笔**事务（ADR-073 D1 / W2；模型行在前、这一段在后）。
+    ///
+    /// 按构件先删后插：这一根投影里每个构件各一句 `DELETE {element}<-room_relate`，再把算出来的
+    /// 成员边 `INSERT RELATION` 回去——新归属为空的构件只剩那句 DELETE，旧边随之清掉。构件本身是
+    /// 面板（在册与否都算）时再补 `room_panel_relate` 那一半：删掉指向它的旧 `房间 → 面板` 入边，
+    /// 属于某间在册房间就写回本次的（ADR-073 D4：两张边表的写者都是这条逐根路径）。根里没有几何的
+    /// 构件不在 `records` 里，它的边由对账删除那一半清（`model_db_adapter::room_edges_to_clear`）。
+    /// 语句以 `;\n` 收尾，直接 `push_str` 进发布事务的语句串。
+    pub(crate) fn render_root_room_edges(
+        &self,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        edges: &[ElementRoomEdge],
+    ) -> String {
+        let map = self.room_panel_map();
+        let mut by_element = std::collections::BTreeMap::<RefnoEnum, Vec<ElementRoomEdge>>::new();
+        for record in records {
+            by_element
+                .entry(crate::data_interface::generation_root::refno_from_e3d(
+                    record.source_refno,
+                ))
+                .or_default();
+        }
+        for edge in edges {
+            by_element
+                .entry(edge.member.refno)
+                .or_default()
+                .push(edge.clone());
+        }
+        let mut out = String::new();
+        for (element, edges) in &by_element {
+            let mut statements = render_element_relate_statements(*element, edges, &[]);
+            if map.all_panels.contains(element) {
+                statements.extend(render_panel_room_topology_statements(
+                    *element,
+                    map.room_of_panel(*element),
+                ));
+            }
+            for statement in statements {
+                out.push_str(&statement);
+                out.push_str(";\n");
+            }
+        }
+        out
+    }
+
+    fn calculate_edges(
+        &self,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
         mut points: impl FnMut(
             &crate::fast_model::model_memory_store::ProjectedGeometry,
         ) -> anyhow::Result<Vec<Point<Real>>>,
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
-        anyhow::ensure!(
-            input.is_valid() && input.room_definition_version == self.definition_version,
-            "room definition version changed"
-        );
         let mut by_element =
             std::collections::BTreeMap::<RefnoEnum, HashMap<RefnoEnum, ElementRoomEdge>>::new();
         for record in records {
-            anyhow::ensure!(
-                record.dbnum == dbnum
-                    && i64::from(record.source_sesno) <= i64::from(input.model_sesno),
-                "room model input is outside the frozen file window"
-            );
             let element =
                 crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
-            if self
-                .panels
-                .resident
-                .as_ref()
-                .unwrap()
-                .map
-                .all_panels
-                .contains(&element)
-            {
+            // 面板本身不做成员判定（它另有 `room_panel_relate` 那一半，见 `render_root_room_edges`）。
+            if self.room_panel_map().all_panels.contains(&element) {
                 continue;
             }
             let bounds = Aabb::new(record.world_bounds[0].into(), record.world_bounds[1].into());
@@ -2938,15 +2313,22 @@ fn render_element_relate_write(
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> String {
-    render_element_relate_write_guarded(element, edges, protected_panels, None)
+    wrap_in_transaction(&render_element_relate_statements(
+        element,
+        edges,
+        protected_panels,
+    ))
+    .unwrap_or_default()
 }
 
-fn render_element_relate_write_guarded(
+/// [`render_element_relate_write`] 的语句形态（不带事务壳）：`DELETE` 在前、`INSERT RELATION`
+/// 在后，边 id 与整间分支逐字一致；逐根路径（[`MemoryRoomCalculator::render_root_room_edges`]）
+/// 把它拼进该根的发布事务。
+fn render_element_relate_statements(
     element: RefnoEnum,
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
-    guard: Option<&RoomWriteGuard>,
-) -> String {
+) -> Vec<String> {
     let element_key = element.to_pe_key();
     let mut delete = format!("DELETE {element_key}<-room_relate");
     if !protected_panels.is_empty() {
@@ -2981,8 +2363,7 @@ fn render_element_relate_write_guarded(
             rows.join(",")
         ));
     }
-
-    render_room_write(&statements, guard)
+    statements
 }
 
 async fn write_element_room_relate(
@@ -2990,16 +2371,7 @@ async fn write_element_room_relate(
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> anyhow::Result<()> {
-    write_element_room_relate_guarded(element, edges, protected_panels, None).await
-}
-
-async fn write_element_room_relate_guarded(
-    element: RefnoEnum,
-    edges: &[ElementRoomEdge],
-    protected_panels: &[RefnoEnum],
-    guard: Option<&RoomWriteGuard>,
-) -> anyhow::Result<()> {
-    let sql = render_element_relate_write_guarded(element, edges, protected_panels, guard);
+    let sql = render_element_relate_write(element, edges, protected_panels);
     crate::surreal_retry::execute_model_write(&sql, &format!("写入 {element} 的房间归属")).await
 }
 
@@ -3016,29 +2388,10 @@ async fn write_element_room_relate_logged(
     protected_panels: &[RefnoEnum],
     preserved_rooms: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    write_element_room_relate_logged_guarded(
-        element,
-        edges,
-        old_rooms,
-        protected_panels,
-        preserved_rooms,
-        None,
-    )
-    .await
-}
-
-async fn write_element_room_relate_logged_guarded(
-    element: RefnoEnum,
-    edges: &[ElementRoomEdge],
-    old_rooms: &BTreeSet<String>,
-    protected_panels: &[RefnoEnum],
-    preserved_rooms: &BTreeSet<String>,
-    guard: Option<&RoomWriteGuard>,
-) -> anyhow::Result<()> {
     let mut new_rooms: BTreeSet<String> = edges.iter().map(|edge| edge.room_num.clone()).collect();
     new_rooms.extend(preserved_rooms.iter().cloned());
     log_room_membership_change("构件", element, old_rooms, &new_rooms);
-    write_element_room_relate_guarded(element, edges, protected_panels, guard).await
+    write_element_room_relate(element, edges, protected_panels).await
 }
 
 /// 增量房间归属变化的控制台日志：只在归属真的变了时说一句，把「从哪到哪」讲清楚
@@ -3754,8 +3107,8 @@ mod tests {
             .split_once("async fn ensure_room_tree_coverage(")
             .expect("coverage gate must exist")
             .1
-            .split_once("\n/// 上一次**成功**")
-            .expect("stamp doc follows")
+            .split_once("\nfn render_room_relate_write(")
+            .expect("覆盖率闸门之后是边渲染")
             .0;
         let gate_at = body.find("ensure_spatial_ready()").expect("状态门必须存在");
         let empty_at = body
@@ -3767,252 +3120,6 @@ mod tests {
         assert!(
             gate_at < empty_at && empty_at < count_at,
             "顺序必须是 状态门 → ReadyEmpty 放行 → 计数校验: {body}"
-        );
-    }
-
-    fn stamp(spatial_epoch: u64, tree_entries: u64) -> RoomBuildStamp {
-        RoomBuildStamp {
-            spatial_epoch,
-            tree_entries,
-        }
-    }
-
-    fn record(rebuild_required: bool) -> RoomBuildRecord {
-        RoomBuildRecord {
-            spatial_epoch: Some(292),
-            tree_entries: Some(22056),
-            rebuild_required: Some(rebuild_required),
-            rebuild_reason: rebuild_required.then(|| "panel enumeration failed".into()),
-        }
-    }
-
-    /// 行在、章不在：常驻房间模型的 `resident_blocked` / `resident_reference` 先于任何全量
-    /// 重建就会把 `room_build:main` 建出来，章的两格投影回来是 `NONE`。
-    ///
-    /// 真库门 2026-09-08（`watch_dbnums=[8000]`，`test-increment/runs/resident-advance-*`）
-    /// 撞上的形状：按 `u64` 读整份「解析房间重建凭据失败: expected a 64-bit unsigned integer,
-    /// found None」，`/health.room_build` 报错、启动对账判「跑」。正确含义是「还没成功建过」
-    /// ——与没有这一行同一句话，不是解析错误。
-    #[tokio::test]
-    async fn a_record_without_the_stamp_reads_as_never_built() {
-        let record: RoomBuildRecord = serde_json::from_value(serde_json::json!({
-            "spatial_epoch": null,
-            "tree_entries": null,
-            "rebuild_required": null,
-            "rebuild_reason": null,
-        }))
-        .expect("只写过 resident_blocked 的行必须仍然读得动");
-        assert_eq!(record.stamp(), None);
-        assert!(!record.requires_rebuild());
-        assert_eq!(
-            room_build_record_verdict(Some(record.clone()), stamp(0, 0)),
-            StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string()),
-            "章不在 = 从没成功建过，不是「凭据损坏」"
-        );
-        // `/health` 那一侧与启动判据分家（2026-09-10）：章不在只说明「项目级启动全量已退役、
-        // 没人盖得上这枚章」，不是「欠一次重建」。欠不欠看持久标志本身。
-        let health = room_build_health_from(
-            std::time::Duration::from_secs(1),
-            std::future::ready(Ok(Some(record))),
-        )
-        .await;
-        assert_eq!(health["rebuild_required"], false, "{health}");
-        assert_eq!(health["stamped"], false, "章在不在要如实报");
-        assert!(
-            health["rebuild_reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("不代表欠一次重建")),
-            "{health}"
-        );
-        assert!(health.get("spatial_epoch").is_none(), "{health}");
-
-        // 一格在一格不在也不算章（半截章只能来自手改）。
-        let half: RoomBuildRecord = serde_json::from_value(serde_json::json!({
-            "spatial_epoch": 292,
-            "tree_entries": null,
-            "rebuild_required": false,
-            "rebuild_reason": null,
-        }))
-        .unwrap();
-        assert_eq!(half.stamp(), None);
-        // 持久重建要求压过一切，哪怕章不在。
-        let required: RoomBuildRecord = serde_json::from_value(serde_json::json!({
-            "spatial_epoch": null,
-            "tree_entries": null,
-            "rebuild_required": true,
-            "rebuild_reason": "房间结构枚举失败",
-        }))
-        .unwrap();
-        assert!(matches!(
-            room_build_record_verdict(Some(required), stamp(0, 0)),
-            StartupRoomBuild::Run(reason) if reason.contains("房间结构枚举失败")
-        ));
-    }
-
-    /// 老二进制盖的章缺 `rebuild_required`，而 SurrealDB 的投影把它当 `NONE` 列出来。
-    ///
-    /// 2026-08-20 现场就卡在这里：`room_build:main` 只有 `spatial_epoch` /
-    /// `tree_entries` / `built_at`，严格读法整份凭据解析失败，`/health` 常驻
-    /// 「读取房间重建凭据失败」，启动对账一路判「跑」，每次重启白做一次全量重建。
-    #[test]
-    fn a_stamp_without_the_rebuild_flag_stays_readable() {
-        let record: RoomBuildRecord = serde_json::from_value(serde_json::json!({
-            "spatial_epoch": 292,
-            "tree_entries": 22056,
-            "rebuild_required": null,
-            "rebuild_reason": null,
-        }))
-        .expect("Surreal 的 NONE 必须仍然读得动");
-        assert!(!record.requires_rebuild());
-        assert_eq!(
-            room_build_record_verdict(Some(record), stamp(292, 22056)),
-            StartupRoomBuild::Skip("与上次成功全量重建一致（空间 epoch 292、树 22056 条）".into()),
-            "缺字段不该被读成「要求重建」"
-        );
-    }
-
-    #[test]
-    fn explicit_rebuild_requirement_overrides_an_equal_stamp() {
-        assert!(matches!(
-            room_build_record_verdict(Some(record(true)), stamp(292, 22056)),
-            StartupRoomBuild::Run(reason) if reason.contains("panel enumeration failed")
-        ));
-        assert_eq!(
-            room_build_record_verdict(Some(record(false)), stamp(292, 22056)),
-            StartupRoomBuild::Skip("与上次成功全量重建一致（空间 epoch 292、树 22056 条）".into())
-        );
-    }
-
-    /// 持久标志说要重建，`/health` 就得说要重建——哪怕章不在。分家分的是「没盖过章」那一支，
-    /// 不是把这条信号一起松掉。
-    #[tokio::test]
-    async fn an_unstamped_row_still_reports_a_persisted_rebuild_demand() {
-        let required: RoomBuildRecord = serde_json::from_value(serde_json::json!({
-            "spatial_epoch": null,
-            "tree_entries": null,
-            "rebuild_required": true,
-            "rebuild_reason": "房间结构枚举失败",
-        }))
-        .unwrap();
-        let health = room_build_health_from(
-            std::time::Duration::from_secs(1),
-            std::future::ready(Ok(Some(required))),
-        )
-        .await;
-        assert_eq!(health["rebuild_required"], true, "{health}");
-        assert_eq!(health["rebuild_reason"], "房间结构枚举失败");
-        assert_eq!(health["stamped"], false);
-
-        // 整行都没有 = 没人要求过，也没盖过章。
-        let missing = room_build_health_from(
-            std::time::Duration::from_secs(1),
-            std::future::ready(Ok(None)),
-        )
-        .await;
-        assert_eq!(missing["rebuild_required"], false, "{missing}");
-        assert_eq!(missing["stamped"], false);
-
-        // 读不出来仍然 fail-closed：「不知道」不等于「没人要求过」。
-        let stalled = room_build_health_from(
-            std::time::Duration::from_millis(1),
-            std::future::pending::<anyhow::Result<Option<RoomBuildRecord>>>(),
-        )
-        .await;
-        assert_eq!(stalled["rebuild_required"], true, "{stalled}");
-        assert!(stalled["stamped"].is_null(), "判不了就别说章在不在");
-    }
-
-    #[test]
-    fn rebuild_marker_escapes_external_reason() {
-        let sql = render_room_rebuild_required(Some("C:\\fixture\\room's panel"));
-        assert!(sql.contains("rebuild_required = true"));
-        assert!(sql.contains("C:\\\\fixture\\\\room\\'s panel"), "{sql}");
-    }
-
-    #[tokio::test]
-    async fn room_health_returns_degraded_status_when_record_read_stalls() {
-        let stalled = std::future::pending::<anyhow::Result<Option<RoomBuildRecord>>>();
-        let health = room_build_health_from(std::time::Duration::from_millis(1), stalled).await;
-        assert_eq!(health["rebuild_required"], true);
-        assert!(
-            health["rebuild_reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("超过")),
-            "{health}"
-        );
-    }
-
-    /// 对账的正例：空间状态与上次成功重建时一模一样，这一轮就该省掉。
-    ///
-    /// 省掉的是十几秒的全库枚举 + 逐面板先清后写，而这一轮多半一条边都不会变——
-    /// 真有变化的那部分归增量房间队列收，全量重建只是双保险。
-    #[test]
-    fn an_unchanged_spatial_state_skips_the_startup_rebuild() {
-        assert_eq!(
-            room_build_verdict(Some(stamp(292, 22056)), stamp(292, 22056)),
-            StartupRoomBuild::Skip(
-                "与上次成功全量重建一致（空间 epoch 292、树 22056 条）".to_string()
-            )
-        );
-    }
-
-    /// 两个字段各自都要能触发重建：epoch 认得出走意图队列的变更，条数认得出
-    /// 直写与全量生成那两条不递增 epoch 的路径。只看其中一个就会漏掉另一半。
-    #[test]
-    fn either_field_moving_brings_the_rebuild_back() {
-        assert!(matches!(
-            room_build_verdict(Some(stamp(292, 22056)), stamp(293, 22056)),
-            StartupRoomBuild::Run(_)
-        ));
-        assert!(matches!(
-            room_build_verdict(Some(stamp(292, 22056)), stamp(292, 105536)),
-            StartupRoomBuild::Run(_)
-        ));
-    }
-
-    /// 没有凭据 = 从没成功建过，必须建。
-    ///
-    /// 方向不能反：这条分支同时兜着「库刚建」「上一次重建被覆盖率闸门拦下」
-    /// 「盖章那步失败」三种情况，判成跳过就等于让房间归属永远停在空白。
-    #[test]
-    fn a_missing_stamp_means_it_has_never_been_built() {
-        assert_eq!(
-            room_build_verdict(None, stamp(0, 0)),
-            StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string())
-        );
-    }
-
-    /// 被覆盖率闸门拦下的那一轮**不许**盖章。
-    ///
-    /// 盖了的话，2026-08-10 现场那种「树 22056 条、库 105536 条」的残缺状态会被
-    /// 记成「已建好」，于是闸门修好之后启动也不再重建——一次失败被永久固化成成功。
-    #[test]
-    fn a_gated_rebuild_leaves_no_stamp_behind() {
-        let source = include_str!("room_model.rs");
-        let body = source
-            .split_once("pub async fn build_room_relations(")
-            .expect("build_room_relations 必须存在")
-            .1
-            .split_once("/// 空间树至少要装下库里可用包围盒指针的这个比例")
-            .expect("全量重建之后是覆盖率常量")
-            .0;
-
-        let gate_at = body
-            .find("ensure_room_tree_coverage().await")
-            .expect("覆盖率闸门必须在全量重建里");
-        let stamp_at = body
-            .find("stamp_room_build(stamp).await")
-            .expect("成功收尾必须盖章");
-        let failures_at = body
-            .find("if !failures.is_empty()")
-            .expect("逐面板失败必须汇总上抛");
-        assert!(
-            gate_at < stamp_at,
-            "盖章必须排在覆盖率闸门之后，否则被拦下的那一轮也会留下凭据: {body}"
-        );
-        assert!(
-            failures_at < stamp_at,
-            "盖章必须排在逐面板失败汇总之后，否则半成功的一轮也会被记成建好了: {body}"
         );
     }
 
@@ -4037,7 +3144,7 @@ mod tests {
             .0;
 
         let unregistered_at = body
-            .find("save_panel_state_guarded(panel, &HashMap::new(), None, guard)")
+            .find("save_panel_state(panel, &HashMap::new(), None)")
             .expect("面板不在册时仍要清边");
         let guard_at = body
             .find("ensure_room_tree_coverage().await")
@@ -4046,7 +3153,7 @@ mod tests {
             .find("cal_room_refnos_from(")
             .expect("整间分支必须算成员");
         let write_at = body
-            .find("save_panel_state_guarded(panel, &members, Some(room), guard)")
+            .find("save_panel_state(panel, &members, Some(room))")
             .expect("整间分支必须写回成员");
 
         assert!(
@@ -4090,32 +3197,15 @@ mod tests {
 
     /// 「没有几何」不得被折成「没有成员」写下去。
     ///
-    /// 两条路都是先清后写：把 `NoGeometry` 当空集交出去，就等于**主动**把这块面板的
-    /// 存量归属边抹掉，而任务还算成功、日志一行没有。全量那边跳过并在收尾汇总上报
-    /// （结构库没生成时这是成批的，逐块报错只会刷屏）；增量整间分支上抛保留重试
-    /// （它的入队条件是这块面板的包围盒刚变过，此刻却没有几何，本身就是信号）。
+    /// 写入是先清后写：把 `NoGeometry` 当空集交出去，就等于**主动**把这块面板的存量归属边
+    /// 抹掉，而任务还算成功、日志一行没有。整间分支上抛保留重试（它的入队条件是这块面板的
+    /// 包围盒刚变过，此刻却没有几何，本身就是信号）。
+    ///
+    /// 全量重建那一半随房间流程退役（t-678，`build_room_relations` 已删），这条钉只剩增量
+    /// 整间分支；`PanelMembers` 那个「算不了 ≠ 算出空集」的类型区分是算法约束，照旧钉着。
     #[test]
     fn a_panel_without_geometry_is_never_written_as_an_empty_member_set() {
         let source = include_str!("room_model.rs");
-
-        let full = source
-            .split_once("pub async fn build_room_relations(")
-            .expect("build_room_relations 必须存在")
-            .1
-            .split_once("\n/// 每块面板当前收着多少个成员")
-            .expect("全量重建之后是 existing_member_counts")
-            .0;
-        let no_geometry_at = full
-            .find("PanelMembers::NoGeometry)")
-            .expect("全量重建必须显式处理没有几何的面板");
-        let write_at = full
-            .find("save_room_relate(")
-            .expect("重建必须写 room_relate");
-        assert!(no_geometry_at < write_at, "{full}");
-        assert!(
-            full[no_geometry_at..write_at].contains("continue"),
-            "没有几何的面板必须跳过，而不是写一个空集把它的存量边清掉: {full}"
-        );
 
         let panel_branch = source
             .split_once("async fn recalc_panel_membership_inner(")
@@ -4132,7 +3222,7 @@ mod tests {
             .map(|at| arm_at + at)
             .expect("整间分支必须上抛，让任务保留重试而不是算成功");
         let write_at = panel_branch
-            .find("save_panel_state_guarded(panel, &members, Some(room), guard)")
+            .find("save_panel_state(panel, &members, Some(room))")
             .expect("整间分支必须写回成员");
         assert!(bail_at < write_at, "{panel_branch}");
     }
@@ -4207,7 +3297,7 @@ mod tests {
             .find("if !pending_point_checks.is_empty()")
             .expect("取点必须被待办列表守着");
         let fetch_at = body
-            .find("element_world_points(element, panels.view, mesh_dir)")
+            .find("element_world_points(element, mesh_dir)")
             .expect("第二轮必须取实际几何点");
 
         assert!(first_round_at < guard_at, "第一轮必须先跑完: {body}");
@@ -4501,11 +3591,6 @@ mod tests {
             ("pub async fn load_panel_index(", "\n}\n"),
             ("pub async fn cal_room_refnos(", "\n}\n"),
             ("pub async fn recalc_panel_membership(", "\n}\n"),
-            // F-H 之后全量重建的几何视图由调用方给，但常驻模型仍恒不接。
-            (
-                "pub(crate) async fn build_room_relations_with_view(",
-                "\n}\n",
-            ),
         ] {
             let body = source
                 .split_once(head)
@@ -4526,7 +3611,7 @@ mod tests {
             .join("\n");
         assert!(
             !code.contains("room_resident_model()"),
-            "开关只在换代点判一次（model_update_pending::ensure_resident_rooms），本文件不判"
+            "开关只在换代点（`room_resident::ensure_current` 的调用方）判一次，本文件不判"
         );
     }
 
@@ -4542,7 +3627,7 @@ mod tests {
             .expect("索引入口之后是两条填充路径")
             .0;
         assert!(
-            index.contains("query_room_insts(view, &registered)")
+            index.contains("query_room_insts(&registered)")
                 && index
                     .contains("fill_panel_index_from_rows(&mut index, rooms, &registered, insts)"),
             "没有常驻模型时必须照旧查库再按行填索引: {index}"
@@ -4551,7 +3636,7 @@ mod tests {
             .find("fill_panel_index_from_resident(")
             .expect("开着时走常驻那条填充");
         let query_at = index
-            .find("query_room_insts(view, &registered)")
+            .find("query_room_insts(&registered)")
             .expect("关着时走库内查询");
         assert!(
             resident_at < query_at,
@@ -4566,7 +3651,7 @@ mod tests {
             .expect("整间分支之后是 recalc_panel_membership")
             .0;
         assert!(
-            panel_branch.contains("query_room_insts(view, &[panel_refno])")
+            panel_branch.contains("query_room_insts(&[panel_refno])")
                 && panel_branch.contains("PanelMeshes::from_rows(&geom_insts, mesh_dir)"),
             "关着时整间分支照旧各查一次面板实例: {panel_branch}"
         );
@@ -4610,7 +3695,6 @@ mod tests {
     /// 调用方 `cal_room_refnos_from` 见 `failures` 非空即 `bail!`，这块面板整块不写。
     #[test]
     fn from_rows_treats_an_unusable_world_aabb_as_a_failure_not_a_skipped_row() {
-        use crate::fast_model::room_fixture::box_mesh_for_test;
         use aios_core::ModelHashInst;
         use glam::Vec3;
 
@@ -4745,309 +3829,5 @@ mod tests {
         fill_panel_index_from_resident(&mut resident_index, &map, &[rm(7), rm(8), rm(9)], &model);
         assert_eq!(resident_index.missing_panels(), today.missing_panels());
         assert_eq!(resident_index.usable_panels(), 0, "这是唯一的口径差");
-    }
-
-    /// `mem://` 两态门（P2 验收）：同一份夹具、同一批任务，开关**关**（面板几何来自
-    /// `query_published_room_insts`）与开关**开**（来自常驻模型）算出的 `room_relate`
-    /// 写入语句**逐字相同**——边 id、目标、`room_num`、`inside_count`、`center_dist` 全在里面。
-    ///
-    /// 接缝选的是**显式参数**而不是环境变量：`room_resident_model()` 读的是进程级
-    /// `OnceLock`，同一个测试进程里翻不了两次；而生产侧的开关本来就只在换代点判一次
-    /// （`ensure_resident_rooms`），几何侧收到的一律是「用不用这份模型」这个参数
-    /// （[`ResidentSource`]）。于是这道门喂的正是生产走的那两条分支，没有为测试另开的路。
-    ///
-    /// **范围**：面板侧几何（索引、候选、三角网、整间分支的输入）。拓扑两态同源已由 P2-a
-    /// 的钉守着（`model.map` 与 `load_room_panel_map` 都出自 `registered_map`），这里直接
-    /// 用同一份 `RoomPanelMap`。写库那一段（`SUL_DB` / `GLOBAL_AABB_TREE` 两个进程级单例）
-    /// 不在 `mem://` 能喂的范围里，所以门比到**渲染出来的语句**为止，不落库。
-    #[tokio::test]
-    async fn the_two_faces_render_the_same_room_edges_on_a_mem_fixture() {
-        use crate::data_interface::side_effect_pending::PublishedFileInput;
-        use crate::fast_model::room_fixture::box_mesh_for_test;
-        use crate::fast_model::room_publication::{
-            query_published_room_insts_on, render_stage_published_room_input,
-        };
-        use crate::fast_model::room_resident::{self, MeshCache};
-        use crate::fast_model::room_topology::{
-            RoomGroup, RoomHierarchy, published_topology_manifest_key,
-        };
-        use glam::Vec3;
-        use surrealdb::engine::any::connect;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mesh_dir = dir.path().to_path_buf();
-        for (name, min, max) in [
-            ("panel7", Vec3::ZERO, Vec3::splat(1000.0)),
-            (
-                "panel9",
-                Vec3::new(2000.0, 0.0, 0.0),
-                Vec3::new(3000.0, 1000.0, 1000.0),
-            ),
-        ] {
-            box_mesh_for_test(min, max)
-                .ser_to_file(&mesh_dir.join(format!("{name}.mesh")))
-                .expect("write fixture mesh");
-        }
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_model").use_db("two_faces").await.unwrap();
-        // 一间房两块面板（7 有几何、8 在册无几何），另一间房两块（9 有几何、10 的包围盒
-        // 溢出成 inf 不可用）；三个构件：20 完全落在 7 里、21 谁都不沾、22 跨 7 的边界
-        // （第二轮逐点兜底的待办）。
-        let mut statements = vec![
-            "CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'token-a';"
-                .to_string(),
-        ];
-        for (seq, generic, mesh, mins, maxs) in [
-            (
-                7u32,
-                "PANE",
-                Some("panel7"),
-                (0.0, 0.0, 0.0),
-                (1000.0, 1000.0, 1000.0),
-            ),
-            (
-                9,
-                "PANE",
-                Some("panel9"),
-                (2000.0, 0.0, 0.0),
-                (3000.0, 1000.0, 1000.0),
-            ),
-            (
-                10,
-                "PANE",
-                Some("panel9"),
-                (-3.0e38, 0.0, 0.0),
-                (3.0e38, 1000.0, 1000.0),
-            ),
-            (
-                20,
-                "BOX",
-                None,
-                (400.0, 400.0, 400.0),
-                (600.0, 600.0, 600.0),
-            ),
-            (
-                21,
-                "BOX",
-                None,
-                (5000.0, 5000.0, 5000.0),
-                (5100.0, 5100.0, 5100.0),
-            ),
-            (
-                22,
-                "BOX",
-                None,
-                (900.0, 400.0, 400.0),
-                (1100.0, 600.0, 600.0),
-            ),
-        ] {
-            let geo_hash = mesh.unwrap_or("box");
-            statements.push(format!(
-                "CREATE pe:24384_{seq} SET noun = '{generic}', owner = pe:24384_1;"
-            ));
-            statements.push(format!(
-                "CREATE inst_relate:24384_{seq} SET dbnum = 8000, in = pe:24384_{seq}, \
-                 generic = '{generic}', \
-                 aabb_d = {{ mins: [{}f, {}f, {}f], maxs: [{}f, {}f, {}f] }}, \
-                 world_trans_d = {{ translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], \
-                   scale: [1f, 1f, 1f] }}, \
-                 insts_flat = [{{ geo_hash: '{geo_hash}' }}], booled_id = NONE;",
-                mins.0, mins.1, mins.2, maxs.0, maxs.1, maxs.2
-            ));
-        }
-        db.query(statements.join(" "))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-
-        let inputs = vec![PublishedFileInput {
-            dbnum: 8000,
-            db_type: "DESI".into(),
-            end_sesno: 5,
-            commit_token: "token-a".into(),
-            published_version: 1,
-        }];
-        let groups = vec![
-            RoomGroup {
-                room: rm(1),
-                name: "/1RX-RM03-R301".into(),
-                panels: vec![rm(7), rm(8)],
-            },
-            RoomGroup {
-                room: rm(2),
-                name: "/1RX-RM03-R302".into(),
-                panels: vec![rm(9), rm(10)],
-            },
-        ];
-        let manifest_key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
-        db.query(format!(
-            "CREATE room_published_topology:a SET manifest_key = '{manifest_key}', \
-             dbnum = 8000, groups = {}; BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-            serde_json::to_string(&groups).unwrap(),
-            render_stage_published_room_input(8000, "token-a"),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        let keywords = vec!["-RM".to_string()];
-        let meshes: Arc<MeshCache> = Arc::default();
-        let model = Arc::new(
-            room_resident::load_published_on(
-                &db,
-                &inputs,
-                RoomHierarchy::Hd,
-                &keywords,
-                match_room_name_hd,
-                meshes.clone(),
-            )
-            .await
-            .expect("常驻模型建得起来"),
-        );
-
-        let rooms = model.map.clone();
-        let registered = room_resident::registered_panels(&rooms);
-        assert_eq!(registered, vec![rm(7), rm(8), rm(9), rm(10)]);
-        let rows = query_published_room_insts_on(&db, &registered)
-            .await
-            .expect("今天那条路读在册面板");
-
-        let mut off = PanelIndex {
-            mesh_dir: mesh_dir.clone(),
-            view: RoomGeometryView::Published,
-            ..Default::default()
-        };
-        fill_panel_index_from_rows(&mut off, &rooms, &registered, rows);
-        let mut on = PanelIndex {
-            mesh_dir: mesh_dir.clone(),
-            view: RoomGeometryView::Published,
-            resident: Some(model.clone()),
-            ..Default::default()
-        };
-        fill_panel_index_from_resident(&mut on, &rooms, &registered, &model);
-
-        // ① 索引的对外形状：判不了的面板集合与顺序、可用面板数、候选相交答案。
-        // 顺序是 `to_string` 序而不是在册序，所以 10 排在 8 前面——两条填充路径都得这么排。
-        assert_eq!(
-            off.missing_panels(),
-            [rm(10), rm(8)],
-            "没拿到行的 8 与包围盒不可用的 10 都要露出来"
-        );
-        assert_eq!(off.missing_panels(), on.missing_panels());
-        assert_eq!(
-            off.missing_panels(),
-            model.missing_panels.as_slice(),
-            "常驻模型自称与 PanelIndex::missing_panels 同口径同序，这里就是那句话的门"
-        );
-        assert_eq!(off.usable_panels(), 2);
-        assert_eq!(off.usable_panels(), on.usable_panels());
-        for probe in [
-            Aabb::new(
-                Point::new(400.0, 400.0, 400.0),
-                Point::new(600.0, 600.0, 600.0),
-            ),
-            Aabb::new(
-                Point::new(2400.0, 400.0, 400.0),
-                Point::new(2600.0, 600.0, 600.0),
-            ),
-            Aabb::new(
-                Point::new(5000.0, 5000.0, 5000.0),
-                Point::new(5100.0, 5100.0, 5100.0),
-            ),
-        ] {
-            assert_eq!(
-                off.candidate_panel_refnos(&probe),
-                on.candidate_panel_refnos(&probe),
-                "候选相交答案两态必须一致"
-            );
-        }
-
-        // ② 整间分支喂进判定的东西：世界包围盒与三角网逐字相同。
-        for panel in [rm(7), rm(9)] {
-            let panel_rows = query_published_room_insts_on(&db, &[panel])
-                .await
-                .expect("面板实例");
-            let today = PanelMeshes::from_rows(&panel_rows, &mesh_dir);
-            let resident = PanelMeshes::from_resident(&model, panel, &mesh_dir);
-            assert!(today.failures.is_empty() && resident.failures.is_empty());
-            assert_eq!(today.world_aabbs, resident.world_aabbs, "{panel}");
-            assert_eq!(today.tri_meshes.len(), resident.tri_meshes.len());
-            for (a, b) in today.tri_meshes.iter().zip(&resident.tri_meshes) {
-                assert_eq!(a.vertices(), b.vertices(), "{panel}");
-                assert_eq!(a.indices(), b.indices(), "{panel}");
-            }
-        }
-
-        // ③ 逐边对拍：元素分支第一轮的产物渲染成 `room_relate` 语句，两态逐字相同。
-        let mut shape = Vec::new();
-        for element in [rm(20), rm(21), rm(22)] {
-            let element_insts = query_published_room_insts_on(&db, &[element])
-                .await
-                .expect("构件实例");
-            assert_eq!(element_insts.len(), 1, "{element}");
-            let mut rendered = Vec::new();
-            let mut pending = Vec::new();
-            for index in [&off, &on] {
-                let pass = element_first_pass(index, element, &element_insts);
-                assert!(pass.undecidable_panels.is_empty(), "{element}");
-                pending.push(
-                    pass.pending_point_checks
-                        .iter()
-                        .map(|(slot, panel_slot, mesh_slot, inside)| {
-                            (*slot, index.entry(*panel_slot).panel, *mesh_slot, *inside)
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                let edges: Vec<ElementRoomEdge> = pass.edges.into_values().collect();
-                rendered.push(render_element_relate_write(
-                    element,
-                    &edges,
-                    index.missing_panels(),
-                ));
-            }
-            assert_eq!(
-                rendered[0], rendered[1],
-                "{element} 的归属边两态必须逐字相同"
-            );
-            assert_eq!(pending[0], pending[1], "{element} 的第二轮待办两态必须一致");
-            // 保护子句照旧带上判不了的那两块面板，两态同款（顺序也同）。
-            assert!(
-                rendered[0].contains(&format!(
-                    "WHERE in NOT IN [{}, {}]",
-                    rm(10).to_pe_key(),
-                    rm(8).to_pe_key()
-                )),
-                "{}",
-                rendered[0]
-            );
-            shape.push((
-                rendered[0].contains("INSERT RELATION INTO room_relate"),
-                pending[0].len(),
-            ));
-        }
-        // 三个构件必须各走到一条不同的路，否则这道门是空跑的（两边都空当然相等）：
-        // 20 直接成边、21 连候选都没有、22 只留下第二轮待办。
-        assert_eq!(shape, vec![(true, 0), (false, 0), (false, 1)], "{shape:?}");
-
-        // ④ 跨代复用：同一把 `MeshCache` 建出的第二份模型直接命中，不再读盘。
-        let next = room_resident::load_published_on(
-            &db,
-            &inputs,
-            RoomHierarchy::Hd,
-            &keywords,
-            match_room_name_hd,
-            meshes.clone(),
-        )
-        .await
-        .expect("第二代");
-        let first = model
-            .panel_tri_meshes(rm(7), &mesh_dir)
-            .expect("第一代网格");
-        let second = next.panel_tri_meshes(rm(7), &mesh_dir).expect("第二代网格");
-        assert!(Arc::ptr_eq(&first[0], &second[0]), "换代不该让三角网重建");
-        assert_eq!(meshes.len(), 2, "两块有几何的面板各一份");
     }
 }

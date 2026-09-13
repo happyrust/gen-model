@@ -167,8 +167,12 @@ pub async fn generation_roots_cache_current(
         .map_err(|error| anyhow::anyhow!("resolve catalogue versions task failed: {error}"))?
     };
     let mut covered = BTreeMap::new();
-    for dbnum in versions.iter().map(|(_, dbnum, _)| *dbnum).collect::<BTreeSet<_>>() {
-        if let Some((sesno, _)) = super::model_completion::coverage_on(&SUL_DB, dbnum).await? {
+    for dbnum in versions
+        .iter()
+        .map(|(_, dbnum, _)| *dbnum)
+        .collect::<BTreeSet<_>>()
+    {
+        if let Some(sesno) = library_coverage_on(&SUL_DB, dbnum).await? {
             covered.insert(dbnum, sesno);
         }
     }
@@ -178,19 +182,55 @@ pub async fn generation_roots_cache_current(
             let root_id = root_refno.replace('/', "_");
             rows.get(&root_id)
                 .is_some_and(|row| {
-                    super::window_root_plan::root_is_settled(row.status.as_deref(), row.source_end_sesno,
-                        row.publication_status.as_deref(), row.desired_revision, row.published_revision)
-                    && (covered.get(&dbnum).is_some_and(|sesno| *sesno >= required_sesno)
-                    || crate::data_interface::model_source::credential_covers(
+                    super::window_root_plan::root_is_settled(
+                        row.status.as_deref(),
                         row.source_end_sesno,
-                        required_sesno,
-                    )) && catalogue_stamps_current(&row.catalogue, |dbnum| {
-                        catalogue_latest.get(&dbnum).copied().flatten()
-                    })
+                        row.publication_status.as_deref(),
+                        row.desired_revision,
+                        row.published_revision,
+                    ) && (covered
+                        .get(&dbnum)
+                        .is_some_and(|sesno| *sesno >= required_sesno)
+                        || crate::data_interface::model_source::credential_covers(
+                            row.source_end_sesno,
+                            required_sesno,
+                        ))
+                        && catalogue_stamps_current(&row.catalogue, |dbnum| {
+                            catalogue_latest.get(&dbnum).copied().flatten()
+                        })
                 })
                 .then_some(root_refno)
         })
         .collect())
+}
+
+/// 库级模型覆盖：这个库追平到哪一版——就是 `dbnum_watermark.model_sesno`。
+///
+/// 任务收尾只在这一版的根**全部**落进去时才盖它（ADR-072 D4 / `task_end::render_task_end_tail`
+/// 的 `TaskModelOutcome::all_roots_ok` 守卫），所以这一格本身就是凭据；原先另开一张
+/// `CompletionReceipt` 收据再交叉核验的那一路随 publish 阶段退了。`None` = 从没追平过。
+/// 生产库走水位镜像（`DbnumState::read`），测试夹具与旁路连接直查那一行。
+async fn library_coverage_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<Option<i32>> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(default)]
+        model_sesno: Option<i32>,
+    }
+    let model_sesno = if std::ptr::eq(db, &*SUL_DB) {
+        crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+            .await?
+            .map(|state| state.model_sesno)
+    } else {
+        let row: Option<Row> = db
+            .query(format!(
+                "SELECT model_sesno FROM ONLY dbnum_watermark:{dbnum};"
+            ))
+            .await?
+            .check()?
+            .take(0)?;
+        row.and_then(|row| row.model_sesno)
+    };
+    Ok(model_sesno.filter(|sesno| *sesno > 0))
 }
 
 #[cfg(test)]
@@ -274,11 +314,17 @@ pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
     .map_err(|error| {
         anyhow::anyhow!("model coverage dbnum={dbnum} source read panicked: {error}")
     })??;
-    let covered = super::model_completion::coverage_on(&SUL_DB, dbnum).await?
-        .is_some_and(|(sesno, _)| sesno >= target.sesno as i32);
+    let covered = library_coverage_on(&SUL_DB, dbnum)
+        .await?
+        .is_some_and(|sesno| sesno >= target.sesno as i32);
     let settled = super::model_watermark::settled_root_predicate();
-    let lag = if covered { String::new() } else {
-        format!(" OR (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}", target.sesno)
+    let lag = if covered {
+        String::new()
+    } else {
+        format!(
+            " OR (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}",
+            target.sesno
+        )
     };
     let started = Instant::now();
     let coverage_result = SUL_DB
@@ -416,7 +462,8 @@ pub(crate) async fn startup_coverage_floors_on(
     }
     for (dbnum, entry) in &mut floors {
         if entry.unsettled_roots == 0
-            && let Some((sesno, _)) = super::model_completion::coverage_on(db, *dbnum).await? {
+            && let Some(sesno) = library_coverage_on(db, *dbnum).await?
+        {
             entry.settled_floor = Some(sesno);
         }
     }
@@ -550,7 +597,7 @@ struct StaleCatalogueWindow {
 ///
 /// ADR-058 D2 的触发源就在这里：direct / 读透形态下目录库没有数据批次，读透形态的文件事件也
 /// 汇到 `reconcile_model_coverage_at_startup`，所以启动与文件事件共用这一处。**摄入形态**
-/// （external / rocksdb，2026-09-07 起的默认）的文件事件走的是数据面 sweep，目录库在那条路上
+/// （external / rocksdb，需显式配置）的文件事件走的是数据面 sweep，目录库在那条路上
 /// 被 `UpdateScope::admits` 挡在数据批次之外——2026-09-08 之前它们到不了这里，目录改了要等
 /// 重启；现在 sweep 收尾经 [`reconcile_catalogue_versions_after_sweep`]、`/update/execute` 经
 /// [`reconcile_catalogue_versions_now`] 也汇到这一处（H1）。三条入口串行（同一把
@@ -1689,7 +1736,10 @@ mod tests {
             .expect("model gate ends before the next row type")
             .0;
         assert!(body.contains("(source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}"));
-        assert!(body.contains("model_completion::coverage_on"));
+        assert!(
+            body.contains("library_coverage_on(&SUL_DB, dbnum)"),
+            "库级覆盖读水位镜像，不再问收据"
+        );
         assert!(
             !body.contains("source_end_sesno_time"),
             "时刻列只记不比（ADR-054）: {body}"

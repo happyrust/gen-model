@@ -1,6 +1,6 @@
 # ADR-068：本地发布包带全资源、但不带库数据与源模型
 
-状态：**已接受**（2026-09-09 用户「全按推荐来」拍板发布追问 Q1–Q9：包里那份 exe / 全资源档 / 一体化布局 / 加 CHANGELOG / -full 命名 / 本机脚本全链路。**号到提交时复核**——ADR-060 曾撞号两次，ADR-067 亦有此注）。
+状态：**已接受，2026-09-13 修订为 runtime 默认 embedded-mem、带 workspace 档默认 spawned-rocksdb**（完整包以跨重启持久化为默认，同时保留 kv-mem 增量 overlay。）
 日期：2026-09-09
 落地：`scripts/New-LocalRelease.ps1`（全链路组包）、`docs/release-notes/<版本>.md`（后端提炼稿）、产物 `releases/ams-local-0.1.19-full.zip`。
 关联：
@@ -29,11 +29,16 @@
 
 - **SurrealDB 数据目录不进包**（`rocksdb://ams.db`，8010 那台的持久层）。
 - **源模型不进包**（AVEVA E3D 工程目录）。
-- `DbOption.toml` **原样带走、不改写**：`store_mode` 默认 `external`、`v_port=8010`、`project_path` 绝对路径照旧。换机器时这些是「连回原环境」的坐标，不是包内自足的东西。
+- 包内 `DbOption.toml` 不复制打包机的绝对路径：`project_path` 留空并带
+  `.first-run-pending`，首跑进入配置向导。runtime 档默认 `store_mode=embedded-mem`，
+  无 SurrealDB 子进程与数据库端口；带 workspace 档默认 `spawned-rocksdb@127.0.0.1:8009`，并默认开启房间归属计算。
+  runtime 包根仍保留 fork 2.1.x 的 `bin\surreal.exe`，供用户显式切回 spawned 档。
+- HTTP 监听与展示分开：`http_api_addr` 可用 `0.0.0.0:9099` 覆盖全部接口，
+  `http_public_addr` 填当前主机可导航的局域网地址；首跑向导仍只从回环入口打开。
 
 ### D4　为什么这条线站得住（难回头的口径）
 
-**已生成模型的三维可离线看**：模型树走文件、几何走 `assets` + accel 快照，都不吃库——所以带 `assets` + 快照就够看已生成的模型。**但属性 / 搜索 / 补齐 / 更新仍需连回原库**（`8010`）或先导入数据。这条边界写进包内 README 与 CHANGELOG，不让「换机器解压即跑」被误读成「数据也自足」。要自足到底是「全离线」档的事（D1）。
+**已生成模型的三维可离线看**：模型树走文件、几何走 `assets` + accel 快照，都不吃持久库——所以带 `assets` + 快照就够看已生成的模型。runtime 的 `embedded-mem` 与 workspace 档的 `spawned-mem` 都派生为 read-through，属性直接从用户指定的 E3D 文件读取；内存数据随进程退出消失。浏览器默认服务供数，树、属性、搜索与模型统一走当前页面同源 API，不要求直连 Surreal。房间兼容页仍使用直连库的保留读面：embedded 下客户端必须根据 `mirror.endpoint=embedded:mem` 明确拒绝，不能误连配置里遗留的 TCP 端点。需要这些兼容页或外部 SQL/探针时改 `spawned-mem`；要保留摄入数据，改 `spawned-rocksdb` 或 `external`。
 
 ### D5　Web 不重复带 meshes
 
@@ -42,12 +47,17 @@
 ### D6　版本纪律与冒烟门（Q8 / Q9）
 
 - 版本号以两仓 `Cargo.toml` 为准；`releases` 里已有同名 zip 则**拒绝执行**（`-Force` 才覆盖）；CHANGELOG 找不到当版条目**只警告不中止**（gen-model changelog 按日期记，严格中止会常误伤）。`releases` 旧版不自动清理，人工删。
-- 组包后**冒烟门**：把包内服务拉起来，`health` 200 + 首页含 `plant_ui_app.js` 才算过。默认用 `spawned-mem`（自带内存库、不依赖外部 8010）跑，自足可判。端口被占 / 起不来 → 跳过并在 `release.json.smoke` 与产物名旁标「未冒烟」，**不静默放行**（`-StrictSmoke` 可改为起不来即中止、不出包）。
+- runtime 冒烟两腿：出厂配置进入设置模式；本机真配置以 `embedded-mem` 完整启动，
+  要求首页可用、`/health.sul_db.medium=embedded-mem` 且没有 Surreal 子进程。
+- 带 workspace 档仍跑三腿：设置模式、默认 `spawned-rocksdb`、隔离的 `spawned-rocksdb@18010`。
+  失败写进 `release.json.smoke`，`-StrictSmoke` 下中止出包。
 
 ## 后果
 
-- 产物 `ams-local-0.1.19-full.zip` 约 394 MB（压缩），解压即跑、已生成模型三维可看；补齐 / 更新要连回原库或先导数据。
-- `surreal.exe` 进包但**库是空的**——换机器要么先 `workspace\Start-Surreal.ps1` 起空库再导数据，要么连回原 `8010`。
+- 产物解压后双击 `Start-AMS.cmd`；首次自动进入向导。runtime 配置 E3D 项目后以内嵌
+  kv-mem 启动，不会因机器上已有 SurrealDB 端口而拒绝启动。
+- `surreal.exe` 仍随包并做 2.x 版本与 SHA-256 校验，但在 runtime 默认路径上不启动；
+  它服务于显式切换 spawned-mem / spawned-rocksdb。内存库不持久；持久需求用 spawned-rocksdb/external。
 - **fork 2.1.x 硬约束**：别用 PATH 上 `cargo install` 装的 3.x——会要求对 `.surreal` 做不可逆迁移、且与 2.1.4 客户端握不上手。包内 `bin\surreal.exe` 就是对的那个。
 - `release.json` 记程序文件逐一 sha256 + 资源目录摘要（`workspace/assets` 字节数 / 文件数）+ 冒烟结果 + 整包 sha256（另写 `.zip.sha256` sidecar）。
 - 「资源进包、库数据不进包」成为难回头的发布口径：将来要真自足，是「全离线」新档，不是改这一档。

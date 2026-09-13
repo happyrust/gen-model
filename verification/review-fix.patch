@@ -1,0 +1,301 @@
+--- a/src/data_interface/cata_closure.rs
++++ b/src/data_interface/cata_closure.rs
+@@ -50,6 +50,8 @@
+ /// 抽象成 trait 是为了让闭包引擎不强依赖具体存储（surreal / 文件扫描 / 将来的 sqlite），
+ /// 便于替换实现与单测。语义与参考项目 `data_interface::cata_closure::CataDbLocator` 对齐。
+ pub trait CataDbLocator {
++    /// Membership is independent of source-file availability.
++    fn contains_dbnum(&self, dbnum: u32) -> bool { self.file_of(dbnum).is_some() }
+     /// `ref0`（`RefU64::get_0()`）-> 所属 dbnum。
+     fn dbnum_of_ref0(&self, ref0: u32) -> Option<u32>;
+     /// Resolve an affiliation without hiding an ambiguous Ref0 behind iteration order.
+--- a/src/data_interface/direct_store.rs
++++ b/src/data_interface/direct_store.rs
+@@ -677,7 +677,7 @@
+ 
+     /// 钉过、或定位器登记得出文件——两者任一即「认识这个库」。只问目录，不开文件。
+     fn knows_dbnum(&self, dbnum: u32) -> bool {
+-        self.pinned(dbnum as i32).is_some() || self.locator.file_of(dbnum).is_some()
++        self.pinned(dbnum as i32).is_some() || self.locator.contains_dbnum(dbnum)
+     }
+ 
+     /// 取一个元素的属性，库由 ref0 反查决定。**跨库引用走的就是这条。**
+@@ -1153,6 +1153,22 @@
+         }
+     }
+ 
++    #[test]
++    fn declared_missing_file_is_not_an_outside_mdb_reference() {
++        struct Missing;
++        impl CataDbLocator for Missing {
++            fn dbnum_of_ref0(&self, _: u32) -> Option<u32> { None }
++            fn contains_dbnum(&self, dbnum: u32) -> bool { dbnum == 8000 }
++            fn db_type_of(&self, _: u32) -> Option<String> { Some("DESI".into()) }
++            fn file_of(&self, _: u32) -> Option<(String, PathBuf)> { None }
++        }
++        let schema = Arc::new(DirectSchema { attlib: e3d_attlib::AttlibData::default(), template_dir: "unused".into(), version: None });
++        let store = DirectStore::new(schema, Arc::new(Missing));
++        let reference = RefU64::from_two_nums(24384, 42);
++        assert_eq!(store.dbnum_of(reference).unwrap(), 8000);
++        assert!(matches!(store.attrs(reference), Err(DirectStoreError::NoFileForDbnum { dbnum: 8000 })));
++    }
++
+     fn store_without_files() -> DirectStore {
+         let schema = Arc::new(DirectSchema {
+             attlib: e3d_attlib::AttlibData::default(),
+--- a/src/data_interface/mdb_route_directory.rs
++++ b/src/data_interface/mdb_route_directory.rs
+@@ -570,21 +570,29 @@
+                     continue;
+                 }
+             };
+-            let latest_sesno = match state.ledger.get(route.dbnum) {
+-                Some(previous) if previous.identity == identity => previous.latest_sesno,
+-                _ => match DbFileHeader::read(&route.path) {
+-                    Ok(header) => header.latest_sesno(),
+-                    Err(error) => {
+-                        if state.unreadable.insert(route.dbnum) {
+-                            log::warn!(
+-                                "[route-poll] dbnum {} 的文件 {} 读不出头，本轮跳过：{error:#}",
+-                                route.dbnum,
+-                                route.path.display()
+-                            );
++            let previous = state.ledger.get(route.dbnum);
++            let (latest_sesno, base_sesno, crossed_backtrack) = match previous {
++                Some(old) if old.identity == identity => (old.latest_sesno, old.base_sesno, false),
++                _ => {
++                    let observed = (|| -> anyhow::Result<_> {
++                        let mut view = e3d_io::session::DbView::open(&route.path)?;
++                        let chain = view.walk_sessions()?;
++                        let latest = chain.first().ok_or_else(|| anyhow::anyhow!("empty session chain"))?;
++                        let crossed = previous.is_some_and(|old| chain.windows(2).any(|pair| {
++                            pair[0].sesno > old.latest_sesno && pair[0].tail.as_ref().is_some_and(|tail|
++                                tail.base_sesno != 0 && tail.base_sesno < pair[1].sesno)
++                        }));
++                        Ok((latest.sesno, latest.tail.as_ref().map(|tail| tail.base_sesno), crossed))
++                    })();
++                    match observed {
++                        Ok(value) => value,
++                        Err(error) => {
++                            state.unreadable.insert(route.dbnum);
++                            log::warn!("[route-poll] dbnum {} session read failed: {error:#}", route.dbnum);
++                            continue;
+                         }
+-                        continue;
+                     }
+-                },
++                }
+             };
+             if state.unreadable.remove(&route.dbnum) {
+                 log::info!(
+@@ -594,7 +602,7 @@
+                 );
+             }
+             if let Observation::Changed { from, to, kind } =
+-                state.ledger.observe(route.dbnum, identity, latest_sesno)
++                state.ledger.observe_session(route.dbnum, super::db_generation::Observed::new(identity, latest_sesno, base_sesno))
+             {
+                 changes.push(RouteRefresh {
+                     dbnum: route.dbnum,
+@@ -602,7 +610,7 @@
+                     path: route.path.clone(),
+                     from,
+                     to,
+-                    kind,
++                    kind: if crossed_backtrack { super::db_generation::GenerationChange::RolledBack } else { kind },
+                 });
+             }
+         }
+@@ -736,6 +744,9 @@
+ /// 迁移期兼容壳：`DirectStore` 还持 `Arc<dyn CataDbLocator>` 时能直接换上；`dbnum` 键的两问照答，
+ /// `ref0` 那一问**永远不答**——见模块头最后一段。
+ impl CataDbLocator for MdbRouteDirectory {
++    fn contains_dbnum(&self, dbnum: u32) -> bool {
++        self.routes.contains_key(&dbnum) || self.declared_without_file.contains_key(&dbnum)
++    }
+     fn dbnum_of_ref0(&self, _ref0: u32) -> Option<u32> {
+         None
+     }
+@@ -1259,6 +1270,43 @@
+         path
+     }
+ 
++    #[test]
++    fn poll_detects_backtrack_between_two_observations() {
++        let tmp = tempfile::tempdir().unwrap();
++        let path = write_session_db(tmp.path(), "ams8000_0001", 8000, "DESI", 242, 0);
++        let directory = MdbRouteDirectory::from_databases("ams", "ALL",
++            &[declared(8000, 1, "/AMS/DESI", path.to_str())], TEMPLATE_DIR);
++        assert!(directory.poll_generations().is_empty());
++        // 244 is an ordinary save on 243, but 243 rolled back to 239 from 242.
++        let full_pages = |sesno| {
++            let short = session_db_pages(8000, "DESI", sesno);
++            let mut bytes = Vec::new();
++            for page in short.chunks(PAGE_BYTES) {
++                bytes.extend_from_slice(page);
++                bytes.resize(bytes.len() + 2048 - PAGE_BYTES, 0);
++            }
++            put_be(&mut bytes, 0x34, 512);
++            bytes
++        };
++        let mut bytes = full_pages(244);
++        put_be(&mut bytes, 2048 + 0x7F0, 243);
++        put_be(&mut bytes, 2048 + 0x04, 4);
++        for (sesno, base, previous) in [(243, 239, 5), (242, 241, u32::MAX)] {
++            let source = full_pages(sesno);
++            let mut page = source[2048..4096].to_vec();
++            put_be(&mut page, 0x7F0, base);
++            put_be(&mut page, 0x04, previous);
++            bytes.extend(page);
++        }
++        std::fs::write(&path, bytes).unwrap();
++        let changes = directory.poll_generations();
++        assert_eq!(changes.len(), 1);
++        assert_eq!(changes[0].kind, GenerationChange::RolledBack);
++        assert_eq!(changes[0].to.latest_sesno, 244);
++        assert_eq!(changes[0].to.base_sesno, Some(243));
++        assert!(directory.poll_generations().is_empty());
++    }
++
+     fn generation_pair(directory: &MdbRouteDirectory, dbnum: u32) -> Option<(u64, u32)> {
+         directory
+             .generation_of(dbnum)
+@@ -1420,6 +1468,9 @@
+     #[test]
+     fn declared_without_file_is_listed_by_dbnum() {
+         let directory = directory();
++        assert!(directory.contains_dbnum(7_000));
++        assert!(directory.file_of(7_000).is_none());
++        assert!(!directory.contains_dbnum(999_999));
+         assert_eq!(
+             directory.declared_without_file().collect::<Vec<_>>(),
+             vec![(7_000, "/AMS/CATA2")]
+--- a/src/fast_model/model_memory_store.rs
++++ b/src/fast_model/model_memory_store.rs
+@@ -255,6 +255,8 @@
+     by_tube_branch: BTreeMap<i64, BTreeSet<String>>,
+     /// 生成根 → 回执。
+     receipts: BTreeMap<i64, RootReceipt>,
++    /// Roots remain discoverable after failed refresh, including empty roots.
++    invalidated_roots: BTreeSet<i64>,
+     /// 生成根 → 当前进程的完整发布确认。任何候选几何变动都先使它失效。
+     publication_acks: BTreeMap<i64, RootPublicationAck>,
+     /// 每个库投影过的最高源会话。单调，只涨不落——它护的是「旧会话不许盖新会话」。
+@@ -516,6 +518,7 @@
+                 .entry(root.dbno())
+                 .or_insert(receipt.source_sesno);
+             *sesno = (*sesno).max(receipt.source_sesno);
++            self.invalidated_roots.remove(&packed_refno(root));
+             self.receipts.insert(packed_refno(root), receipt);
+             self.bump_epoch(root.dbno());
+         }
+@@ -753,6 +756,7 @@
+                 .as_ref()
+                 .is_none_or(|target| target.design.dbnum != dbnum)
+         });
++        state.invalidated_roots.retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
+         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
+         state.published_sesno.remove(&dbnum);
+         for record in records {
+@@ -761,6 +765,7 @@
+         for (root, receipt) in receipts {
+             let session = state.published_sesno.entry(dbnum).or_default();
+             *session = (*session).max(receipt.source_sesno);
++            state.invalidated_roots.remove(&packed_refno(root));
+             state.receipts.insert(packed_refno(root), receipt);
+         }
+         state.flush_room_spatial();
+@@ -792,6 +797,7 @@
+                 .as_ref()
+                 .is_some_and(|target| target.design.dbnum != dbnum)
+         });
++        state.invalidated_roots.retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
+         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
+         state.published_sesno.remove(&dbnum);
+         state.room_changes.remove(&dbnum);
+@@ -879,10 +885,21 @@
+                 state
+                     .receipts
+                     .keys()
+-                    .map(|&packed| RefNo::new((packed >> 32) as u32, packed as u32))
++                    .chain(state.invalidated_roots.iter())
++                    .copied().collect::<BTreeSet<_>>().into_iter()
++                    .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
+                     .collect()
+             })
+             .unwrap_or_default()
++    }
++
++    /// Called only after source absence and output deletion have succeeded.
++    pub fn forget_retired_root(&self, scope: ProjectionScope<'_>, root: RefNo) {
++        if let Some(state) = self.write().get_mut(&scope.key()) {
++            state.invalidated_roots.remove(&packed_refno(root));
++            state.receipts.remove(&packed_refno(root));
++            state.publication_acks.remove(&packed_refno(root));
++        }
+     }
+ 
+     pub fn receipt(&self, scope: ProjectionScope<'_>, root: RefNo) -> Option<RootReceipt> {
+@@ -933,6 +950,9 @@
+     /// must retry publication instead of treating the in-memory rows as done.
+     pub fn invalidate_receipt(&self, scope: ProjectionScope<'_>, root: RefNo) {
+         if let Some(state) = self.write().get_mut(&scope.key()) {
++            if state.receipts.contains_key(&packed_refno(root)) {
++                state.invalidated_roots.insert(packed_refno(root));
++            }
+             state.receipts.remove(&packed_refno(root));
+             state.publication_acks.remove(&packed_refno(root));
+         }
+@@ -949,6 +969,7 @@
+             return 0;
+         };
+         let invalidated = state.receipts.len();
++        state.invalidated_roots.extend(state.receipts.keys().copied());
+         state.receipts.clear();
+         state.publication_acks.clear();
+         invalidated
+@@ -969,6 +990,7 @@
+             )) == Some(dbnum)
+         };
+         let before = state.receipts.len();
++        state.invalidated_roots.extend(state.receipts.keys().filter(|key| belongs(key)).copied());
+         state.receipts.retain(|packed, _| !belongs(packed));
+         state.publication_acks.retain(|packed, _| !belongs(packed));
+         before - state.receipts.len()
+@@ -1131,7 +1153,14 @@
+                 .publication_ack(ProjectionScope::Current, root_8000)
+                 .is_none()
+         );
+-        assert_eq!(store.roots(ProjectionScope::Current), vec![root_7998]);
++        let roots = store.roots(ProjectionScope::Current);
++        assert_eq!(roots.len(), 3);
++        assert!(roots.contains(&root_8000));
++        assert!(roots.contains(&root_8000_second_extent));
++        assert!(roots.contains(&root_7998));
++        store.forget_retired_root(ProjectionScope::Current, root_8000_second_extent);
++        assert!(!store.roots(ProjectionScope::Current).contains(&root_8000_second_extent));
++        assert!(store.roots(ProjectionScope::Current).contains(&root_8000));
+         assert!(
+             store.receipt(ProjectionScope::Current, root_7998).is_some(),
+             "7998 一个回执不动"
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2132,6 +2132,7 @@
+         let requested = refno_from_e3d(root);
+         match manager.delete_model_subtree(requested).await {
+             Ok(()) => {
++                model_store.forget_retired_root(ProjectionScope::Current, root);
+                 refresh.roots_retired += 1;
+                 log::info!(
+                     "[route-poll] dbnum={} retired deleted model root {requested} from the current projection",
+--- a/tests/refno_native_guards.rs
++++ b/tests/refno_native_guards.rs
+@@ -333,7 +333,7 @@
+ 
+     let directory = production(ROUTE_DIRECTORY);
+     let poll = function_body(&directory, "pub fn poll_generations(&self)");
+-    for needle in ["FileIdentity::of(", "DbFileHeader::read(", ".observe("] {
++    for needle in ["FileIdentity::of(", "DbView::open(", ".walk_sessions()", ".observe_session(", "base_sesno"] {
+         assert!(poll.contains(needle), "poll_generations 要含 `{needle}`");
+     }
+     for needle in ["scan_elements(", "find_element(", "search_index("] {

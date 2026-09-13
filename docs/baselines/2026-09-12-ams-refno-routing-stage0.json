@@ -1,0 +1,89 @@
+{
+  "schema": "gen-model/refno-native-stage0-baseline/v1",
+  "project": "AvevaMarineSample",
+  "mdb": "/ALL",
+  "captured_from": {
+    "kind": "local-probe",
+    "date": "2026-09-12",
+    "tool": "src/bin/refno_routing_stage0_baseline.rs",
+    "probe_refno": "24384/23257"
+  },
+  "runtime": {
+    "e3d_version": "e3d31",
+    "project_path": "D:/AVEVA/Projects/E3D3.1",
+    "store_mode": "spawned-mem",
+    "room_membership": false,
+    "watch_dbnums": [
+      7998,
+      8000
+    ]
+  },
+  "membership": {
+    "raw_curd_rows": 71,
+    "decoded_databases": 71,
+    "skipped_databases": 1,
+    "design_or_isod_databases": 29,
+    "problems": [
+      "MDB /ALL: dbnum=7355 (*MDU/CATA) declared project APS has no matching configured source; same-dbnum foreign fallback disabled"
+    ],
+    "elapsed_ms": 745,
+    "read_cost": {
+      "database_opens": 5,
+      "scan_calls": 1,
+      "scanned_elements": 1207,
+      "index_point_lookups": 357,
+      "attr_lookups": 0,
+      "parse_misses": 214,
+      "extract_misses": 143
+    }
+  },
+  "legacy_skeleton": {
+    "databases": 29,
+    "elements": 611438,
+    "unreadable_records": 0,
+    "elapsed_ms_approx": 350,
+    "wall_ms": 932,
+    "database_opens": 69,
+    "scan_calls": 30,
+    "scanned_elements": 612645,
+    "index_point_lookups": 1559,
+    "rss_before_bytes": 111222784,
+    "rss_after_bytes": 146731008,
+    "rss_delta_bytes": 35508224
+  },
+  "process_rss_bytes": 152457216,
+  "process_rss_start_bytes": 10297344,
+  "first_attribute_ms": 3,
+  "first_attribute": {
+    "attributes": 54,
+    "read_cost": {
+      "database_opens": 1,
+      "scan_calls": 0,
+      "scanned_elements": 0,
+      "index_point_lookups": 1,
+      "attr_lookups": 0,
+      "parse_misses": 0,
+      "extract_misses": 0
+    }
+  },
+  "first_generation_root_ms": 1159,
+  "first_generation_root": {
+    "dbnum": 8000,
+    "db_type": "DESI",
+    "sesno": 444,
+    "read_cost": {
+      "database_opens": 20,
+      "scan_calls": 2,
+      "scanned_elements": 2414,
+      "index_point_lookups": 715,
+      "attr_lookups": 0,
+      "parse_misses": 428,
+      "extract_misses": 286
+    }
+  },
+  "limitations": [
+    "首属性 / 首根在骨架已建之后量，量的是冷 DirectStore / 冷定库的成本，不含 HTTP 与 provider 构造。",
+    "旧骨架的 RSS 差值含分配器尚未归还系统的部分；与 mdb_memory_probe --tier header 的口径相同。",
+    "mdb_membership::resolve 不登记进程内注册表，所以旧骨架段（ensure）与首根段（current_mdb_sources）各自又解了一次成员清单：两段的读成本里都多含一次 SYS 库扫描（scan_calls +1、scanned_elements +1207）与它的开库数；服务进程里成员清单只解一次。"
+  ]
+}

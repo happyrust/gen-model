@@ -275,10 +275,9 @@ def _wipe_mirroring_reinit(binding, ref0s: list[int]) -> None:
         for table in RANGE_TABLES + nouns:
             ranges.append(f"DELETE {table}:{ref0}_0..{ref0}_{RANGE_END};")
         ranges.append(f"DELETE {pe_range};")
+    # 第二条异步账的三张表（模型意图队列 / 恢复记录 / 副作用队列）随 ADR-072 D5 整体
+    # 退役，镜像清库不再点名它们——点名只会把退役表重新建出来。
     metadata = [
-        f"DELETE model_update_pending WHERE dbnum = {DBNUM};",
-        f"DELETE increment_update_attempt WHERE dbnum = {DBNUM};",
-        f"DELETE incr_side_effect_pending WHERE dbnum = {DBNUM};",
         f"DELETE dbnum_info_table WHERE dbnum = {DBNUM};",
     ]
     metadata.extend(f"DELETE dbnum_info_table:{ref0};" for ref0 in ref0s)
@@ -296,17 +295,16 @@ def _wipe_mirroring_reinit(binding, ref0s: list[int]) -> None:
 
 
 def _reset_arm(binding, ref0s: list[int], file_latest: int, expect_count: int | None) -> float:
-    """臂重置：镜像清库 + 生产基线入口重建 + 清空基线登记的 regen 积压。
+    """臂重置：镜像清库 + 生产基线入口重建。
 
-    清积压的理由：基线会把全库 2,229 个交付根登记进 `model_update_pending`，
-    而下一个数据批次会把 pending 积压并进自己的模型计划一起生成（2026-08-13
-    run4 实测：窗口批花 22 分钟把 2,229 根全量重生成一遍）——那是基线补课，
-    不是窗口回归的被测面；窗口自己登记/结算的计划行照常进签名。
+    从前这里还要清空基线登记的 regen 积压（2026-08-13 run4 实测：下一个窗口批
+    会把 2,229 根基线积压并进自己的模型计划一起生成，花 22 分钟）。模型工作随
+    dbnum 任务在内存里算、任务内落库之后（ADR-072 D5）库里没有这张积压表，
+    也就没有可清的。
     """
     started = time.monotonic()
     _wipe_mirroring_reinit(binding, ref0s)
     receipt = binding.sync.baseline(DBNUM)
-    binding.db.query(f"DELETE model_update_pending WHERE dbnum = {DBNUM};")
     elapsed = time.monotonic() - started
     assert receipt["dbnum"] == DBNUM
     assert _watermark(binding) == file_latest, "重建后水位对齐文件"
@@ -383,14 +381,8 @@ def _dump(binding, ref0s: list[int]) -> dict:
             if row.get("src") in live_pe:
                 ref_edges.add((row["src"], row["dst"]))
 
-    pending = {
-        (row["action"], row["target_refno"], row.get("source_end_sesno"))
-        for row in _query(
-            binding,
-            f"SELECT action, target_refno, source_end_sesno FROM model_update_pending "
-            f"WHERE dbnum = {DBNUM} LIMIT 200000;",
-        )
-    }
+    # 模型计划行不进签名：任务的单元清单只在内存（ADR-072 D5），库里没有可比的
+    # 「窗口登记 / 结算的计划行」；模型面的终态由 inst_relate / gen_root 那一层回答。
 
     # dbnum_info_table 按 Ref0 记账（record id 就是 ref0 数字）。dbnum / max_ref1
     # 两个字段刻意不进签名：update_dbnum_event 对两者都是「最后一个事件说了算」
@@ -416,7 +408,6 @@ def _dump(binding, ref0s: list[int]) -> dict:
         "attrs": attrs,
         "owner_edges": owner_edges,
         "ref_edges": ref_edges,
-        "pending": pending,
         "info": info,
         "watermark": _normalize(watermark_rows),
     }

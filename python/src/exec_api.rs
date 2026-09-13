@@ -252,7 +252,7 @@ pub fn full_init(
                         .join("、");
                     anyhow::bail!(
                         "检测到还有服务在伺候同一个工程：{who}。执行层与它并发会互踩\
-                         暂存窗口/队列/pending 表——先停掉那个服务，或确认无害后用 \
+                         暂存窗口 / 队列 / 写入标记——先停掉那个服务，或确认无害后用 \
                          aios_db.full_init(..., force=True) 跳过本检查"
                     );
                 }
@@ -267,18 +267,9 @@ pub fn full_init(
                 CONNECTED.store(true, Ordering::SeqCst);
             }
 
-            // 2b. ADR-050：model_update_pending 只是本进程的调度账本。连接建立后、
-            //     任何生产者/消费者可能动手之前，清掉上一进程留下的数据动作工作单
-            //     （room_recalc_* 保留，由房间轮收敛）；本进程的 incr.apply_file /
-            //     drain_data 稍后会消费同一张表，不清就是把两个进程的快照混着回放。
-            //     失败按 ADR-050 §3 上抛——继续跑等于拿陈旧账本当恢复输入。
-            let cleared =
-                aios_database::data_interface::model_update_pending::clear_stale_at_process_start()
-                    .await
-                    .context("启动清理 model_update_pending 失败，拒绝继续")?;
-            if cleared > 0 {
-                println!("启动清理 model_update_pending 完成：删除 {cleared} 条历史数据工作单");
-            }
+            // 2b.（已删）启动清理上一进程的模型工作单：第二条异步账随 ADR-072 D5 整体退役，
+            //     任务的计划只在内存，库里没有跨进程的调度账本可清；崩溃残留的出路是
+            //     服务启动水化段的写入标记回退（`dbnum_write_state`），不归绑定管。
 
             // 3. 收口事务依赖的自定义函数自检 + 增量状态表兼容检查 + dbnum 事件。
             //    与 run_cli 同款：自检失败中止初始化（函数缺失时跑 mutating 必炸）。
@@ -333,8 +324,8 @@ pub fn full_init(
 /// 对单个库文件执行一个增量窗口（默认窗口 = 水位+1 ..= 文件最新会话）。
 ///
 /// 走与服务完全相同的 `IncrementPipeline::apply`（暂存窗口 → 校验 → 提交 →
-/// 水位推进 → durable 模型工作登记）；不含模型生成本身（那是 `incr.drain_data`
-/// 或 `model.*` 的事）。
+/// 水位推进）；不含模型生成本身（那是 `model.*` 的事——模型工作随 dbnum 任务在
+/// 内存里算、任务内同步落库，库里没有可单独消化的模型队列，ADR-072 D5）。
 #[pyfunction]
 #[pyo3(signature = (path, start=None, end=None))]
 pub fn apply_file(
@@ -455,18 +446,8 @@ pub fn execute_manual(
     pythonized(py, &value)
 }
 
-/// 消化 durable pending 的前两个数据阶段（非 regen → regen），不含房间。
-#[pyfunction]
-pub fn drain_data(py: Python<'_>) -> PyResult<usize> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            let mgr = crate::db_api::manager().await?;
-            aios_database::data_interface::model_update_pending::drain_data_phases(mgr).await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
+// `incr.drain_data`（消化 durable 模型工作单）随第二条异步账退役（ADR-072 D5）：
+// 模型工作在 dbnum 任务内就地执行，`execute_manual` 的队列闭环自带它。
 
 /// 只读预览下一增量窗口（不执行、不动水位；连接层即可用）。
 ///
@@ -517,23 +498,8 @@ pub fn resolve_window(py: Python<'_>, path: PathBuf, skip_cata: bool) -> PyResul
     pythonized(py, &value)
 }
 
-/// 消化 SystDerived / RefRevMaintain 两类提交后副作用（**不含**空间收敛——那
-/// 是 `spatial.reconcile()` 的事），返回本轮完成的作业数。
-///
-/// 零售组合（`apply_file` → `drain_data` → `room.drain`）不会像批次闭环那样
-/// 自动收尾副作用，脚本收工前应依次调本函数与 `spatial.reconcile()`。
-#[pyfunction]
-pub fn drain_side_effects(py: Python<'_>) -> PyResult<usize> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            let mgr = crate::db_api::manager().await?;
-            aios_database::data_interface::side_effect_pending::SideEffectCompensator::drain(mgr)
-                .await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
+// `incr.drain_side_effects`（提交后副作用补偿队列）随 ADR-071 D9 / ADR-072 D5 退役：
+// 副作用在任务内就地执行，没有可单独消化的补偿队列，零售组合也就没有「收尾三件套」。
 
 /// 队列状态快照（连接层只读）：先从库同步持久化暂停位，再报进程内调度器状态。
 ///
@@ -738,15 +704,13 @@ pub fn drop_history(py: Python<'_>, snapshot_key: String) -> PyResult<()> {
 }
 
 /// 刷新指定 refno 集的 `inst_relate` aabb，返回真发生变化的元素列表
-/// `[{refno, noun}, ...]`——形态与 `room.enqueue` 的入参一致，noun 决定房间
-/// 分支（PANE → 整间，其它 → 元素）。
+/// `[{refno, noun}, ...]`（noun 留给调用方分辨面板与构件）。
 ///
 /// `durable=True` 走定向增量入口（`update_inst_relate_aabbs_by_refnos_incremental`，
-/// 生产上 TransformOnly / 定向 regen 用的就是它）：直写时把 AABB 指针、
-/// `room_recalc` 任务与 spatial epoch 放进同一个事务。注意其中 room 任务的发布
-/// 还受 `room_incremental` 开关（配置键或 AIOS_ROOM_INCREMENTAL）门控，指针与
-/// epoch 不受。默认 False 走普通刷新——包围盒确有变化时同样带 epoch bump，
-/// 但不发布房间任务（要排队用 `room.enqueue`）。
+/// 生产上 TransformOnly / 定向 regen 用的就是它）：直写时把 AABB 指针与 spatial
+/// epoch 放进同一个事务。默认 False 走普通刷新——包围盒确有变化时同样带 epoch
+/// bump。两条路都不再逐目标排房间待办行：房间归属随生成根在任务内算、随模型块同事务
+/// 落边（ADR-073 D1），绑定侧没有单独的房间入口，看结果走 `room.code|nodes|names`。
 #[pyfunction]
 #[pyo3(signature = (refnos, replace=false, durable=false))]
 pub fn update_aabbs(
@@ -992,85 +956,15 @@ pub fn baseline(py: Python<'_>, dbnum: u32, project: Option<String>) -> PyResult
 
 // `sync.realign`（单库回退对齐）随 ADR-021 移除：回退由服务/绑定的手动入队路径
 // 自动排成重建批次，worker 冻结点复核后整库清空重建（`wipe_dbnum_for_reinit`），
-// 绑定侧的闭环入口是现成的 `incr.execute_manual` + `incr.drain_data`。
+// 绑定侧的闭环入口是现成的 `incr.execute_manual`。
 
 // ── room ────────────────────────────────────────────────────────────────────
 
-/// 房间归属全量重建（`build_room_relations`）。
-#[pyfunction]
-pub fn build_all(py: Python<'_>) -> PyResult<()> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            aios_database::data_interface::initialization_phase::require_postprocess()?;
-            let db_option = db_option().await?;
-            aios_database::fast_model::room_model::build_room_relations(&db_option).await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
-
-/// 消化待重算的房间归属目标（第三阶段），返回 `DrainReport` 的 JSON 形态
-/// （requested/loaded/done + 逐条失败 + 失败牵涉的 dbnum）。
-#[pyfunction]
-pub fn drain(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    ensure_full()?;
-    let value = py
-        .detach(|| {
-            runtime().block_on(async {
-                aios_database::data_interface::initialization_phase::require_postprocess()?;
-                let db_option = db_option().await?;
-                let report =
-                    aios_database::data_interface::model_update_pending::drain_rooms(&db_option)
-                        .await?;
-                anyhow::Ok(json!({
-                    "requested": report.requested,
-                    "loaded": report.loaded,
-                    "done": report.done,
-                    "failures": report.failures,
-                    "failed_dbnums": report.failed_dbnums,
-                }))
-            })
-        })
-        .map_err(anyhow_to_py)?;
-    pythonized(py, &value)
-}
-
-/// 把「包围盒确实变了」的元素排进房间重算队列（`enqueue_room_recalc`），
-/// 返回入队条数。
-///
-/// 入参就是 `model.update_aabbs` 的返回形态 `[{refno, noun}, ...]`，按 noun
-/// 分流（PANE → `room_recalc_panel` 整间分支，其它 → `room_recalc_element`）。
-/// 与 Rust 夹具对拍测试同一触发方式，**不受** `room_incremental` 开关影响；
-/// 消费用 `room.drain()`。同 target 只占一行（record id 不带 dbnum，UPSERT 递增
-/// revision），重复入队幂等。
-#[pyfunction]
-pub fn enqueue(py: Python<'_>, changes: Bound<'_, PyAny>) -> PyResult<usize> {
-    ensure_full()?;
-    #[derive(serde::Deserialize)]
-    struct ChangeIn {
-        refno: String,
-        noun: String,
-    }
-    let changes: Vec<ChangeIn> = pythonize::depythonize(&changes)?;
-    let changes: Vec<aios_database::fast_model::aabb_refresh::AabbChange> = changes
-        .into_iter()
-        .map(
-            |change| aios_database::fast_model::aabb_refresh::AabbChange {
-                refno: parse_refno(&change.refno),
-                noun: change.noun,
-            },
-        )
-        .collect();
-    let count = changes.len();
-    py.detach(|| {
-        runtime().block_on(
-            aios_database::data_interface::model_update_pending::enqueue_room_recalc(&changes),
-        )
-    })
-    .map_err(anyhow_to_py)?;
-    Ok(count)
-}
+// `room.drain` / `room.enqueue`（逐目标的房间重算待办行）随第二条异步账退役
+// （ADR-072 D4 / D5）；`room.build_all`（`build_room_relations` 全量重建）随房间独立
+// 流程整体删除（ADR-073 D1，S1）：房间归属随生成根在任务内算、随模型块同事务落边，
+// 绑定侧不再有任何写房间的入口。留下的只有库层 surql 函数的只读直通
+// （`fn::room_code` / `fn::get_room_nodes` / `fn::get_room_names`，d-831 库层资源保留）。
 
 /// 元素的房间编码（`fn::room_code` 直通，连接层只读；无归属返回 None）。
 #[pyfunction]
@@ -1122,20 +1016,8 @@ pub fn names(py: Python<'_>, refno: String) -> PyResult<Py<PyAny>> {
 
 // ── spatial ─────────────────────────────────────────────────────────────────
 
-/// 空间收敛积压状态（连接层只读）：`{pending, retries, last_error, stalled}`。
-#[pyfunction]
-pub fn status(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    ensure_connected()?;
-    let value = py
-        .detach(|| {
-            runtime().block_on(
-                aios_database::data_interface::side_effect_pending::SideEffectCompensator::
-                    spatial_reconcile_status(),
-            )
-        })
-        .map_err(anyhow_to_py)?;
-    pythonized(py, &value)
-}
+// `spatial.status`（空间收敛积压 `{pending, retries, stalled}`）随空间副作用队列退役
+// （ADR-072 D5）：空间树随任务的模型落库就地收敛，没有积压可报；树的健康看 `tree_status`。
 
 /// 空间树状态（连接层只读）：原样透出 /health `spatial_tree` 那份渲染。
 ///
@@ -1144,8 +1026,8 @@ pub fn status(py: Python<'_>) -> PyResult<Py<PyAny>> {
 /// 走向十五键，复述必然过期）。稳定核：`entries`（当前内存树条目数）、
 /// `file_epoch` / `db_epoch`、`drift`、`startup_verdict`。
 ///
-/// 指纹现读现比（不是启动快照）：`drift=true` 而空间收敛又没有积压
-/// （`spatial.status()`），说明树相对库在静默漂移。
+/// 指纹现读现比（不是启动快照）：没有任务在飞而 `drift=true`，说明树相对库在
+/// 静默漂移。
 #[pyfunction]
 pub fn tree_status(py: Python<'_>) -> PyResult<Py<PyAny>> {
     ensure_connected()?;
@@ -1184,24 +1066,8 @@ pub fn tree_dump(py: Python<'_>) -> PyResult<Py<PyAny>> {
     pythonized(py, &value)
 }
 
-/// 消化待收敛的空间意图（树刷新/删除 + 文件持久化），返回收敛条数。
-///
-/// 与 batch worker 出队门同一实现——零售组合（`apply_file` / `drain_data` /
-/// `room.drain` / `model.gen*`）收工前必须调，否则空间意图滞留 pending 表、
-/// 内存树不落盘（要等下次服务启动重放自愈）。
-#[pyfunction]
-pub fn reconcile(py: Python<'_>) -> PyResult<usize> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            let mgr = crate::db_api::manager().await?;
-            aios_database::data_interface::side_effect_pending::SideEffectCompensator::
-                reconcile_spatial_pending(mgr)
-            .await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
+// `spatial.reconcile`（消化空间意图行）随空间副作用队列退役（ADR-072 D5）：空间树随
+// `persist_roots_batched` 就地收敛、快照置脏后空闲落盘；零售组合收工只需 `spatial.persist`。
 
 /// 把内存空间树落盘。`force=False` 只在脏时写（返回是否真的写了）；
 /// `force=True` 无条件写回并清脏标记。
@@ -1237,118 +1103,6 @@ pub fn rebuild(py: Python<'_>) -> PyResult<()> {
     .map_err(anyhow_to_py)
 }
 
-// ── fixture（测试支撑：合成房间夹具）────────────────────────────────────────
-//
-// 与 Rust 侧 `room_fixture` live 测试**同一套**夹具：1 间房 `/ZZ-R-K100` +
-// 2 块 PANE（A: 0..1000 / B: 900..1900，重叠区 900..1000）+ 5 个盒形构件
-// （2 个在 A、2 个在 B、1 个骑在重叠区上），保留 refno 段 4000000001。
-// **只对一次性测试库使用**：create 会写 pe / FRMW / inst_* / geo_relate /
-// aabb / vec3 多张表并在 mesh 目录落 `zzfx_*.mesh`；drop 按固定 id 清理。
-// 配置的 `room_key_word` 需含 "ZZ-R-" 才能让 build_all / drain 只圈住夹具房。
-
-async fn fixture_mesh_dir(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    match explicit {
-        Some(dir) => Ok(dir),
-        None => Ok(db_option().await?.get_meshes_path()),
-    }
-}
-
-/// 建房间夹具（幂等：内部先 drop 再建）。`mesh_dir` 缺省用配置的 meshes 目录。
-#[pyfunction]
-#[pyo3(name = "create", signature = (mesh_dir=None))]
-pub fn fixture_create(py: Python<'_>, mesh_dir: Option<PathBuf>) -> PyResult<()> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            let dir = fixture_mesh_dir(mesh_dir).await?;
-            aios_database::fast_model::room_fixture::create_room_fixture(&dir).await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
-
-/// 清夹具（库内记录 + `.mesh` 文件），幂等。
-#[pyfunction]
-#[pyo3(name = "drop", signature = (mesh_dir=None))]
-pub fn fixture_drop(py: Python<'_>, mesh_dir: Option<PathBuf>) -> PyResult<()> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            let dir = fixture_mesh_dir(mesh_dir).await?;
-            aios_database::fast_model::room_fixture::drop_room_fixture(&dir).await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
-
-/// 把一个夹具几何体搬到新包围盒（`min` / `max` 为世界坐标三元组）。
-///
-/// 只动几何侧（`aabb:zzfx_*` 记录、`vec3` 顶点、面板还重写 `.mesh`），**不碰**
-/// `inst_relate.aabb`——那要靠 `model.update_aabbs` 从 geo 侧重算，走的正是
-/// 「包围盒真的变了」的触发源；直接改指针等于绕过被测对象。
-#[pyfunction]
-#[pyo3(name = "move_body", signature = (seq, min, max, mesh_dir=None))]
-pub fn fixture_move_body(
-    py: Python<'_>,
-    seq: u64,
-    min: Vec<f32>,
-    max: Vec<f32>,
-    mesh_dir: Option<PathBuf>,
-) -> PyResult<()> {
-    ensure_full()?;
-    py.detach(|| {
-        runtime().block_on(async {
-            anyhow::ensure!(
-                min.len() == 3 && max.len() == 3,
-                "min/max 需为三元组 [x, y, z]（收到 {} / {} 个分量）",
-                min.len(),
-                max.len()
-            );
-            let dir = fixture_mesh_dir(mesh_dir).await?;
-            aios_database::fast_model::room_fixture::move_fixture_body(
-                &dir,
-                seq,
-                glam::Vec3::new(min[0], min[1], min[2]),
-                glam::Vec3::new(max[0], max[1], max[2]),
-            )
-            .await
-        })
-    })
-    .map_err(anyhow_to_py)
-}
-
-/// 夹具清单：面板/构件的 refno（`a_b` 形态）、`move_body` 用的 seq、房间号。
-#[pyfunction]
-#[pyo3(name = "refnos")]
-pub fn fixture_refnos(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    fn seq_of(refno: &str) -> u64 {
-        refno
-            .rsplit('_')
-            .next()
-            .and_then(|tail| tail.parse().ok())
-            .unwrap_or(0)
-    }
-    let (pane_a, pane_b) = aios_database::fast_model::room_fixture::panel_refnos();
-    let (in_a, in_b, straddler) = aios_database::fast_model::room_fixture::part_refnos();
-    let value = json!({
-        // 与夹具源常量一致（room_fixture.rs 的 ROOM_NUM）；边表断言用。
-        "room_num": "K100",
-        "pane_a": pane_a,
-        "pane_b": pane_b,
-        "in_a": in_a,
-        "in_b": in_b,
-        "straddler": straddler,
-        "seqs": {
-            "pane_a": seq_of(&pane_a),
-            "pane_b": seq_of(&pane_b),
-            "in_a": in_a.iter().map(|r| seq_of(r)).collect::<Vec<_>>(),
-            "in_b": in_b.iter().map(|r| seq_of(r)).collect::<Vec<_>>(),
-            "straddler": seq_of(&straddler),
-        },
-    });
-    pythonized(py, &value)
-}
-
 // ── 注册 ────────────────────────────────────────────────────────────────────
 
 pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1357,9 +1111,7 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let incr = PyModule::new(py, "incr")?;
     incr.add_function(wrap_pyfunction!(apply_file, &incr)?)?;
     incr.add_function(wrap_pyfunction!(execute_manual, &incr)?)?;
-    incr.add_function(wrap_pyfunction!(drain_data, &incr)?)?;
     incr.add_function(wrap_pyfunction!(resolve_window, &incr)?)?;
-    incr.add_function(wrap_pyfunction!(drain_side_effects, &incr)?)?;
     incr.add_function(wrap_pyfunction!(queue_pause, &incr)?)?;
     incr.add_function(wrap_pyfunction!(queue_resume, &incr)?)?;
     incr.add_function(wrap_pyfunction!(queue_status, &incr)?)?;
@@ -1378,29 +1130,17 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_submodule(&model)?;
 
     let room = PyModule::new(py, "room")?;
-    room.add_function(wrap_pyfunction!(build_all, &room)?)?;
-    room.add_function(wrap_pyfunction!(drain, &room)?)?;
-    room.add_function(wrap_pyfunction!(enqueue, &room)?)?;
     room.add_function(wrap_pyfunction!(code, &room)?)?;
     room.add_function(wrap_pyfunction!(nodes, &room)?)?;
     room.add_function(wrap_pyfunction!(names, &room)?)?;
     m.add_submodule(&room)?;
 
     let spatial = PyModule::new(py, "spatial")?;
-    spatial.add_function(wrap_pyfunction!(status, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(tree_status, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(tree_dump, &spatial)?)?;
-    spatial.add_function(wrap_pyfunction!(reconcile, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(persist, &spatial)?)?;
     spatial.add_function(wrap_pyfunction!(rebuild, &spatial)?)?;
     m.add_submodule(&spatial)?;
-
-    let fixture = PyModule::new(py, "fixture")?;
-    fixture.add_function(wrap_pyfunction!(fixture_create, &fixture)?)?;
-    fixture.add_function(wrap_pyfunction!(fixture_drop, &fixture)?)?;
-    fixture.add_function(wrap_pyfunction!(fixture_move_body, &fixture)?)?;
-    fixture.add_function(wrap_pyfunction!(fixture_refnos, &fixture)?)?;
-    m.add_submodule(&fixture)?;
 
     let sync = PyModule::new(py, "sync")?;
     sync.add_function(wrap_pyfunction!(baseline, &sync)?)?;
@@ -1411,7 +1151,6 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     modules.set_item("aios_db.model", &model)?;
     modules.set_item("aios_db.room", &room)?;
     modules.set_item("aios_db.spatial", &spatial)?;
-    modules.set_item("aios_db.fixture", &fixture)?;
     modules.set_item("aios_db.sync", &sync)?;
     Ok(())
 }
@@ -1432,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn python_model_writes_and_room_postprocessing_observe_initialization_gates() {
+    fn python_model_writes_observe_initialization_gates() {
         let source = include_str!("exec_api.rs");
         for name in ["gen_models", "gen_dbnum", "update_aabbs", "delete_subtree"] {
             let body = py_function_body(source, &format!("pub fn {name}("));
@@ -1441,13 +1180,9 @@ mod tests {
                 "{name} bypasses the shared model gate: {body}"
             );
         }
-        for name in ["build_all", "drain"] {
-            let body = py_function_body(source, &format!("pub fn {name}("));
-            assert!(
-                body.contains("require_postprocess()?"),
-                "{name} bypasses the postprocess barrier: {body}"
-            );
-        }
+        // 房间侧曾有 build_all / drain 两个走 `require_postprocess()` 门的写入口：
+        // drain 随第二条异步账退役（ADR-072 D5），build_all 随房间独立流程删除
+        // （ADR-073 D1）——绑定里不再有房间写入口，这道门在这里没有可钉的对象。
 
         let queue = py_function_body(source, "pub fn queue_status(");
         for field in ["epoch_id", "blocked_by_phase", "shadowed"] {

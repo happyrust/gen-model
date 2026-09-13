@@ -5,6 +5,14 @@
 - 决策：方案选型已定为 **axum 0.8.9 REST + WebSocket**（用户决策，见会话 gen-model-49）
 - 相关规格：`docs/specs/manual-model-update.md`（手动更新语义）、`CONTEXT.md`（术语表）
 
+> **实施基线（2026-09-11）**：后端基线 `757b23e94390ae202b4dabfda3c596c4b1e8dea7`
+>（`refactor/retire-publish-stage`），前端基线
+> `7cbc1cf65ae1c43c605513afbe3295999ea5b58d`（`main`）。后端工作树在本功能开工前已有
+> 发布阶段退役、存储默认值和配置向导等未提交改动；本功能在该代码真值上前移植，不 reset、
+> 不 cherry-pick 历史实现，也不把既有改动冒充本功能提交。下文凡仍提到
+> `model_update_pending`、model drain、发布 run/ACK 的段落均为历史说明，以 §4.7.1 的退役清单
+> 和本次新增的 §4.5.1B/§4.5.1C 为准。
+
 > **修订注记（2026-07-27，ADR-011 合流落地）**：手动与自动已合流到一条数据批次队列，
 > 本文以下与实现不符的点以 ADR-011 与 `plant-ui/docs/plans/task-queue-rollout.md`
 > 第九节为准，全文修订随服务端 5–9 项（暂停端点 / health / dbnums 扩展）一并做：
@@ -30,11 +38,8 @@
 前端 --HTTP(JSON)--> axum Router ---> 数据批次调度器 ---> 批次 worker
      <--WebSocket--  /api/v1/ws          |                 |
                           ^              v                 v
-                          +-------- TaskRegistry   model_update_pending
-                                                           |
-                                                           v
-                                                共享模型生成执行器
-                                              （按需 ensure 也走这里）
+                          +-------- TaskRegistry   任务内模型生成/落地
+                                                 ↘ ModelMemoryStore
 ```
 
 - 新增模块 `src/web_service/`，feature flag **`http_api`**（2026-08-27 起并入 `default`；`--no-default-features` 时需自行点名。是否真正监听仍由 `http_api_addr` 配置决定）。
@@ -44,8 +49,10 @@
   更新 `TaskRegistry` 并广播 tasks 事件（ADR-011 2026-08-09 修订：一个派发器 + 至多
   `data_batch_workers` 个在飞批次，默认 1、上限 8，同 dbnum 恒串行、特殊批次独占），
   不再保留 HTTP 直跑或 `incr_applied` 旁路。
-- 自动、手动、级联补偿与按需 ensure 产生的模型工作统一进入 durable pending，并由共享
-  执行器完成加锁、生成、结果写入和 revision 收口。
+- 数据批次选出的模型根在该 dbnum 任务内同步生成并落地；没有 durable model pending、
+  drain 页、发布 run 或 ACK。单节点按需 ensure 复用同一生成执行层。
+- memory-routed 整库 ensure 是独立的进程内异步任务：冻结一次源文件与根集合，只写
+  `ModelMemoryStore`，不进入数据批次队列、不推进任何水位。
 
 ## 3. 通用约定
 
@@ -78,33 +85,90 @@
 ## 4. REST 接口定义
 
 ### 4.1 `GET /api/v1/health`
+`core` 从当前 MDB 路由账本读取，不初始化属性或树 provider，不打开源文件。
+RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`，使用
+`route_count`、`open_db_count`、`open_dbnums`、`cached_elements`、`stale_dbnums`、
+`failed_dbnums` 和 `last_targeted_refresh`。`snapshot_epoch` / `session_vector`
+来自按 dbnum 的世代账本；目录尚未注册时 `core.status=initializing`。
+`open_db_count` 是 HTTP 属性与树服务仍持有会话的不同 dbnum 数，不是累计文件打开数；
+`source_reads` 单独报告进程累计 `database_opens`、`scan_calls`、`scanned_elements`
+与 `index_point_lookups`，包含 SYS/DICT 等依赖读取。缺失的已声明文件进入
+`failed_dbnums`，有旧世代但当前读取失败的库同时进入 `stale_dbnums`。
+
 存活探针。响应：
 
 ```json
-{ "status": "ok", "project": "HD", "version": "0.1.3",
+{ "status": "ok", "project": "HD", "version": "0.1.22",
+  "build_id": "0.1.22+patch.1",
   "started_at": "2026-07-27T21:02:11+08:00",
-  "queue_paused": false, "static_assets": false,
-  "model_update_pending": {
-    "retryable": 4053, "dead_letters": 1,
-    "data_phase": { "retryable": 0, "dead_letters": 1 },
-    "room_phase": { "retryable": 4053, "dead_letters": 0 },
-    "by_action": {}, "blocking_samples": []
+  "capabilities": {
+    "dbnum_model_ensure": true,
+    "dbnum_model_ready_roots": true,
+    "model_records_batch_max_roots": 64,
+    "mesh_formats": ["mesh", "glb"],
+    "room_complete_publication_ack": true,
+    "room_rebuild_executor": "memory"
   },
-  "blocking_conditions": ["model_update_pending.data_phase.dead_letters=1"],
+  "dabacon_tags": {
+    "status": "ready", "scope": "startup", "refreshing": false,
+    "sample_duration_ms": 360, "sample_age_ms": 8123,
+    "discovered_databases": 3, "readable_databases": 3,
+    "issue_count": 0, "issues": [], "issues_truncated": 0,
+    "latest": {
+      "tag_database_counts": {"2_35_23o": 1, "2_28_19_": 2},
+      "untagged_databases": 0
+    },
+    "history": {
+      "tag_session_counts": {"2_35_23o": 2, "2_28_19_": 5},
+      "tag_database_counts": {"2_35_23o": 1, "2_28_19_": 2},
+      "tagged_sessions": 7,
+      "untagged_databases": 0, "untagged_sessions": 0
+    },
+    "release_selection": "diagnostic_only"
+  },
+  "queue_paused": false, "static_assets": false,
+  "features": {
+    "room": {"status":"initializing","generation":"...","executor":"memory"}
+  },
+  "blocking_conditions": [],
   "initialization": {
     "status": "running", "epoch_id": 7, "current_phase": "catalogue",
     "data_ready": false, "model_ready": false, "model_in_flight": false,
+    "room_bootstrap": {
+      "status":"initializing","dbnums_total":28,"dbnums_done":4,
+      "roots_total":932,"roots_ready":601,"roots_failed":0,
+      "current_dbnum":7997,"room_edges_written":1834,
+      "max_transaction_bytes":481320,"elapsed_ms":41782,"rss_mib":862
+    },
     "phases": {}, "blockers": [], "blocked_by": [], "shadowed": []
   } }
 ```
 
 - `started_at`：进程启动时刻。队列不持久、重启由重扫重建（ADR-011 §4），界面靠它
   说出「服务 xx:xx 重启过，这条队列是按水位重建的；排队时长从重启起算」。
+- `capabilities`：只加不改的能力协商块。两个整库能力同时为 `true` 才表示
+  §4.5.1B/§4.5.1C 可用；老服务没有整块时客户端可以试探固定路由。批量 records 上限和 mesh
+  格式与实际路由同源公布。`room_complete_publication_ack=true` 表示 ready 根已包含 process-store
+  模型行/房间边/数据库回执的完整确认；`room_rebuild_executor` 在读透形态为 `memory`，摄入形态为
+  `durable`。
+- `dabacon_tags`：启动时对项目目录全部主数据库做的一次只读聚合。`latest` 按数据库
+  统计最新 session tag，`history` 汇总全部保留 session；`issues` 最多 20 条，
+  `issues_truncated` 说明其余数量。启动先登记 pending，实际文件扫描放进后台，
+  health server 不等待它；扫描期间为 `status=pending, refreshing=true`，完成后
+  `status=ready|partial|empty|unavailable, refreshing=false`。状态只描述这次
+  诊断采样，不进入顶层 `status`、`degraded_sections` 或 `blocking_conditions`；
+  `release_selection` 恒为 `diagnostic_only`，不得据此自动选择 `e3d210/e3d31`。
+  每个数据库在它被打开时各自冻结 latest-session 指针，因此这不是跨文件事务快照。
 - `gen_spatial_tree` 字段已于 2026-08-07 退役：空间/房间计算恒开启，界面不再需要
   「房间增量没开」的降级文案（历史语义见 ADR-011 §8）。
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
 - `initialization`：ADR-025 的当前 epoch、严格数据阶段、数据/模型门、逐阶段计数、
   blocker 与被项目优先级遮蔽的 DICT/CATA。`data_ready=false` 时模型写保持待处理。
+- `initialization.room_bootstrap`：`room_membership=true` 的 kv-mem 冷启动屏障，状态为
+  `idle|initializing|ready|partial|blocked`。只有 `ready` 才允许 `model_ready=true`；
+  进度覆盖 MDB 全部可读 DESI，不受 `watch_dbnums` 限制。
+- `features.room.status=available` 必须同时满足配置开启、resident ready、启动屏障 ready、
+  process store 可用且对应执行器在线；仅数据库连通不能推出 available。
 - `initialization.blockers` / `initialization.blocked_by`：同一批阻断的两副面孔。
   前者是渲染好的 `"<phase>: <message>"` 字符串数组，形状与结构化之前一字不差；
   后者是结构化那份，每条形如
@@ -116,18 +180,12 @@
   表示这条阻断没有对应的落盘失败记录，`message` 就是全部原因。
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。
-- `model_update_pending`：一次 SurrealQL 往返形成的持久工作快照，分别列出总量、
-  `data_phase`、`room_phase`、各 action 的可重试/死信计数，以及最多 10 条
-  `blocking_samples`（action、目标、noun、attempts、last_error、revision、updated_at）。
-  `attempts < 5` 只算普通积压；`attempts >= 5` 才是死信。
-- `blocking_conditions`：当前明确阻断健康状态的条件。数据模型死信或房间死信非零时，
-  顶层 `status` 为 `degraded`；普通可重试积压保持 `ok`。模型死信仍关闭模型门，Room
-  不得越过 ADR-025 的 Model 阶段。
+- `model_update_pending` 整格已退役，不再出现；根级失败留在所属任务的 `result` 与失败账本，
+  库级追平看两枚水位。`blocking_conditions` 不再从模型 pending/drain 拼装。
 - `geom_errors`：数据库 `geom_error` 的当前错误摘要。除 `bool_pos` / `bool_neg` 布尔降级外，
   `primitive` 表示基本体缺失/非法 BREP 或 NaN 变换；记录以 `(kind, target)` 唯一，
   `noun` 保存元素类型，`last_error` 保存包含尺寸的原始失败，成功生成后按类别自动销账。
-- `degraded_sections` 仍只表示 health 子查询失败或超过统一 2 秒预算；
-  `model_update_pending` 查询失败/超时时加入同名 section，并在对象的 `error` 字段留因。
+- `degraded_sections` 仍只表示 health 子查询失败或超过统一 2 秒预算。
 - `ref0_affiliation_conflicts`：locator 构建时发现的冲突 Ref0 数量；非零时只阻断命中这些
   Ref0 的工作，不代表整个项目停止服务。
 - `sul_db.endpoint`（2026-08-12 新增）：本服务连接的 SurrealDB 端点（配置的
@@ -171,6 +229,9 @@
   "up_to_date": false
 }
 ```
+
+`version` 是发布线；`build_id` 定位该发布线内的一次具体构建。生成二进制 patch 时
+同时记录 `build_id` 与 EXE SHA-256，真正的准入判据是后者。
 - 错误：500（项目目录不存在等）。`sync_live=true` 时同样可用（ADR-011 §12 合流：
   预览与数据批次并发时「待应用」可能偏大——正在被应用的会话也会算进去，界面按
   队列快照里的运行中批次数标注「N 个库正在应用，数字可能偏大」。
@@ -232,8 +293,10 @@
 - 每个数据批次是一条 `kind = "data_batch"` 的任务：`queued -> running -> succeeded|partial|failed`；
   进度经 WebSocket 推送（第 5 节），终态 result 为 `{ project, status, batch: DataBatchResult,
   units: [ModelUnitResult], warnings, model_verdict?, model_caught_up_at? }`（一行任务一个批次，
-  「一次运行」的复数形态随 ADR-011 退役）。双水位字段在模型与文件轮次发布之后读取；
-  `model_caught_up_at` 只在 `model_verdict = in_sync` 时出现，取自水位行的 `model_settled_at`。
+  「一次运行」的复数形态随 ADR-011 退役）。双水位字段在任务收尾那一笔之后读取（ADR-072 D4
+  之前是「模型与文件轮次发布之后」——文件轮次退役了）；`model_caught_up_at` 只在
+  `model_verdict = in_sync` 时出现，取自水位行的 `model_settled_at`。回执里文件轮次 /
+  pending / drain / publish 那一族格随 ADR-072 一并消失，逐条见 §4.7.1。
 - 模型持久工作由正式消费者 `kind = "model_drain"` 分页认领（每页至多 16 根）。状态为
   `running -> succeeded|partial|failed|yielded`；`yielded` 表示初始化门或数据优先级要求让位，
   是本次进程内任务的终态，但未执行的 durable pending 行、revision 与 attempts 均保持原值。
@@ -260,38 +323,41 @@
 }
 ```
 
+- `kind = "dbnum_model_ensure"`：memory-routed 库的整库即时任务，
+  `running -> succeeded|partial|failed`。`total_units` 是任务创建前从同一冻结源枚举出的固定根数，
+  `units_done` 是其中已有完整根 ACK 的数量；读透且房间开启时，ACK 必须同时匹配冻结源会话与
+  resident generation。`detail` 带 `purpose`（`on_demand|startup_room_bootstrap|forced_rebuild`）、
+  数量、冻结源摘要和失败数，
+  不把完整根数组塞进每次任务 JSON；完整集合由 §4.5.1C 按 `task_id` 查询。
+- 这类任务与投影一样只活在进程内。终态根快照短期、有界保留，服务重启后旧 task id 与快照
+  同时返回 404。
+
 ### 4.5 `POST /api/v1/model/ensure` — 按需生成单构件模型（同步）
-- 数据清单或启动全量模型尚未收口时，已有稳定模型仍可只读返回；实际生成请求返回
-  `409 initialization_not_ready`，message 含当前 phase、epoch 与 blockers，且不会
-  创建新的模型 pending。
-- 映射：`AiosDBManager::ensure_model_generated(refno, force)`；短路未命中时先写入
-  `(regen_root, generation_root)` durable pending，再同步等待共享生成执行器的结果。
-  命中已有 pending 或正在执行的同根任务时等待同一份工作，不另开生成路径。
+- HTTP 层从 e3d-io direct tree 枚举请求子树的生成根，再交给同一模型执行层。
+- 每根所属库先经 `model_read_route::route_for(dbnum)`；读源与发布目标分开判：
+  ingest 中尚未完成的 durable 库使用 `ProjectionOnly`，read-through 的 spawned/embedded
+  kv-mem 使用 `ProcessStore{durable:false}`，会把模型行、可选房间边与 `gen_root` 回执逐根同事务
+  写入本进程 store。
 - 请求：`{ "refno": "24381/100677" }`，可选 `"force": true`。
 - 响应 200：`OnDemandModelResult` 原样，含 `generation_root`、`model_instance_count`（画得出来的实例数）与 `generated_instance_count`（生成写出的实例数，含画不出来的）。`status` 三种：
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
   - `Generated` — 这次跑了生成，拿到了画得出来的实例；
   - `NoRenderableGeometry` — 这次跑了生成，但没有一条画得出来（`model_available` 为 false）。两种形态都归这里：写出了实例却全都画不出来，以及**一条都没写出**（无子件的 BRAN、纯作层级用的 STRU，`generated_instance_count` 为 0）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
-- 等待超过 120s 且 durable pending 仍在排队或执行时响应
-  `202 { "code": "generation_pending", "generation_root": "24381/100677" }`，并带
-  `Retry-After` 响应头。后台工作不取消；客户端随后以 `force=false` 重查，复用或等待同一
-  pending。202 不是生成失败，只有获得成功结果或失败终态后才返回 200 或对应 5xx。
+- HTTP 等待预算为 120 秒；超时返回 `504 timeout`，但后台生成不取消。客户端稍后以
+  `force=false` 重查，命中已经落下的投影回执时直接复用。
 - `force` 只给「人明确要求重生成」用（S4-C 的重试）：它跳过实例与成功结果复用并新增
-  pending revision，但仍服从共享执行器、根锁和 revision 收口。显示补齐**不要**传，
-  否则每显示一次都会提交新的重生成工作；收到 `generation_pending` 后的轮询也不得继续
-  携带 `force=true`。
+  一次重生成，但仍服从共享根锁。显示补齐**不要**传，否则每显示一次都会重算；超时后的
+  重查也不得继续携带 `force=true`。
 - 按需边界使用一个最小领域错误枚举完成以下分型，不把所有 `anyhow::Error` 压成
   `not_found` 或 `internal`，也不扩建全局错误框架：
   - `422 container` — WORL / SITE / ZONE，按契约恒被拒绝做生成根。**这不是失败**：客户端应展开一层，对子节点逐个 ensure（ADR-0009）。
   - `404 not_found` — 依赖查询成功，并确认库里没有这个 refno；只有该情形允许负缓存。
   - `422 precondition` — 构件在、也不是容器，但向上找不到任何合法生成根。
   - `503 ref0_affiliation_unavailable` — refno 合法，但当前缺少 `Ref0 → dbnum` 库归属；客户端不得按 404 负缓存，可稍后重试。
-  - `409 ref0_affiliation_conflict` — 同一 Ref0 同时出现在多个 `dbnum`；pending 保留，
-    自动重试不会自行修复，需先纠正项目文件。无冲突根不受影响。
+  - `409 ref0_affiliation_conflict` — 同一 Ref0 同时出现在多个 `dbnum`；需先纠正项目文件。
   - `503 model_dependency_unavailable` — SurrealDB 查询、项目文件读取或 locator 暂时失败；
     客户端可重试，不得负缓存。
-  - `500 generation_failed` — 确定性的解析、数据损坏或生成失败；已经建立的 pending 保留，
-    不写成功结果。
+  - `500 generation_failed` — 确定性的解析、数据损坏或生成失败；不写成功回执。
   - `400 bad_request` — refno 连格式都不对。
 - 单根生成通常秒级，同步等待即可；HTTP 层等待预算为 120s，耗尽后按上述 202 契约返回，
   不取消后台生成。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
@@ -304,17 +370,22 @@
 - 删除范围严格是传入 refno 自身及其全部 PE 后代，不向上归一到 generation root。
   generation root 解析只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
   返回 `409 conflict`，不与生成并发互相覆盖。
-- 删除模型关系、无剩余引用的实例信息、直管边、房间归属和空间树条目；不删除 PE、
-  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。
+- 删除模型关系、无剩余引用的实例信息、直管边和空间树条目；不删除 PE、
+  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。被删除来源的 `room_relate` /
+  `room_panel_relate` 随模型对账同事务清理（§4.7.2）。
 - 重复调用幂等，响应
   `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
 - 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
 
-### 4.5.1 `POST /api/v1/dbnums/{dbnum}/model/rebuild` — 指定库模型全量重建
+### 4.5.1A `POST /api/v1/dbnums/{dbnum}/model/rebuild` — 指定库模型全量重建
 
 请求体复用 `ProjectReq` 的 `project` / `mdb` / `namespace` 身份字段；端点本身即表示
-强制重建，不接收 `force`。只有 `watch_scope::admits(dbnum)` 且
-`model_full_rebuild_enabled=true` 时建任务；范围外请求零任务、零 pending、零模型写入。
+强制重建，不接收 `force`。入口先按 `model_read_route::route_for(dbnum)` 分派：
+
+- `Database`：保留 durable `model_rebuild` / batch worker 路径，继续受 `watch_scope` 与
+  `model_full_rebuild_enabled` 约束；
+- `Memory`：走与 §4.5.1B 相同的进程内整库执行器（purpose=`forced_rebuild`），不向没有消费者的
+  durable queue 入队；同库已有启动/整库任务时复用 single-flight。
 
 成功返回 `202 Accepted`：
 
@@ -325,6 +396,75 @@
 相同 dbnum 已有活动重建时返回同一 `task_id`。任务调用权威生成根同步并把全部根投入
 既有模型协调器，不直调整库生成函数；不预删旧模型、不改变水位。重建期间同库
 `/model/ensure` 返回 409。任务仅进程内有效，重启后需重新调用本端点。
+
+### 4.5.1B `POST /api/v1/dbnums/{dbnum}/model/ensure` — 整库即时生成
+
+请求体复用 `ProjectReq`。入口先调用 `model_read_route::route_for(dbnum)`：
+
+- `Memory`：允许，返回 `202 Accepted`；
+- `Database`：返回 `409 conflict`，本端点不会改走 rebuild，也不会推进水位；
+- 不受 `watch_scope` 限制，与单节点按需显示同轴。
+
+任务创建前只冻结一次设计文件的稳定身份、库类型与源会话，并从这份冻结源枚举固定、去重保序的
+生成根集合。`expected_roots`、`TaskRegistry.total_units`、后台生成和 §4.5.1C 的任务 roots
+查询全部消费这一集合；后台不得重新读取“当前最新”根集合。
+
+```json
+{
+  "task_id": "dbnum-model-ensure-7997-...",
+  "dbnum": 7997,
+  "expected_roots": 2720,
+  "already_ready": 18,
+  "source_sesno": 264,
+  "state": "running",
+  "model_source": "memory",
+  "model_source_reason": "read-through",
+  "durable": false
+}
+```
+
+同库并发 POST 在 `TaskRegistry` 的同一把锁内按 `(kind, dbnum)` get-or-create，只能有一个
+创建者启动 worker；其余请求返回同一个 task id、固定分母和当前状态。worker 自身运行在
+`scope_memory_only`，但该作用域只禁止写 durable 权威库，不再等价于“不写任何数据库”；
+read-through kv-mem 会复用逐根 process-store 事务。所有未 ready 根一次交给
+`ModelRefreshPolicy::generate_roots_report_from_frozen_source`，不进入数据批次队列、不调用
+rebuild、不推进应用/模型水位。
+
+初始 `units_done` 等于已满足完整根 ACK 判据的根数；生成期间每秒用同一判据刷新。
+零根立即成功。终态规则：
+
+- 全根 ready 且没有生成报告失败：`succeeded`；
+- 至少一根 ready，但有报告失败或缺失：`partial`；
+- 非空集合一根都未 ready：`failed`。
+
+`result` 至少带 `expected`、`already_ready`、`newly_ready`、`ready`、`failed`、`missing`、
+有界的 `failure_samples` 与 `missing_samples`。顶层错误和 generation task panic/JoinError
+也必须收成一个终态，不能留下永久 running 行。
+
+### 4.5.1C `GET /api/v1/dbnums/{dbnum}/model/roots` — 冻结根与 ready 状态
+
+- `task_id=<id>`：读取该整库任务固定的冻结根集合；任务运行中与终态短期对账都用这一形态。
+- 不带 `task_id`：冻结当前文件并返回一次诊断快照，不得拿它与某个既有任务的分母/进度对账。
+- `ready=1|true|yes|on`：响应只保留 ready 根，但 `total` 恒为全根数、`ready_total` 恒为全根中
+  当前 ready 数，`only_ready` 回显过滤形态。
+- ready 的判据：候选几何回执不早于任务冻结源、记录数与回执相符；若发布策略是
+  `ProcessStore`，还必须有同源的 `RootPublicationAck`。`room_membership=true` 时 ACK 还须匹配
+  任务冻结的 resident generation。几何候选可用于诊断预览，但数据库/房间事务失败时不得冒充 ready。
+
+```json
+{
+  "source": "direct",
+  "task_id": "dbnum-model-ensure-7997-...",
+  "dbnum": 7997,
+  "source_sesno": 264,
+  "total": 2720,
+  "ready_total": 128,
+  "only_ready": true,
+  "roots": [
+    {"generation_root":"24381/100677","noun":"BRAN","name":"/B1","ready":true}
+  ]
+}
+```
 
 ### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
 
@@ -341,7 +481,8 @@
 
   ```json
   {"source":"model-database","dbnum":7997,"model_source":"database","model_source_reason":null,
-   "durable":true,"generation_root":"24381/100677","snapshot_epoch":3,
+   "durable":true,"complete":true,"incomplete_roots":[],
+   "generation_root":"24381/100677","snapshot_epoch":3,
    "session_vector":[{"dbnum":7997,"sesno":812}],
    "items":[{"refno":"24381_100678","old_refno":null,"owner":"24381_100677","world_aabb":{"mins":[0,0,0],"maxs":[1,1,1]},
              "world_trans":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
@@ -354,6 +495,8 @@
   `items` 是 `[cursor, cursor+limit)` 那一段，`truncated = next < total`，`next_cursor` 只在还有下一页时给。
   `source` 为 `model-database`（读 rocksdb）或 `model-memory`（读进程内投影）；
   `dbnum` / `model_source` / `model_source_reason` / `durable` 四格见 §4.12。
+  `complete` 表示这些记录对应的完整根发布已提交；`model-memory` 可在数据库/房间事务失败后仍返回
+  候选几何供诊断，此时 `complete=false` 且 `incomplete_roots` 点名根，绝不能把候选 receipt 当成功。
 - 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
   `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
 
@@ -418,13 +561,47 @@ plant-ui 的单根调用零影响。
   "model_caught_up_roots": 956, "model_chasing_roots": 1,
   "model_dead_roots": 0, "model_lazy_roots": 12,
   "initialized": true,
+  "write_state": { "status": "finished", "start_sesno": 1001, "end_sesno": 1005,
+                   "intent": "apply_window",
+                   "started_at": "2026-09-10T17:02:11+08:00",
+                   "finished_at": "2026-09-10T17:06:48+08:00" },
   "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
   "blocked": false, "excluded": false }
 ```
 
+- `write_state`（2026-09-10，ADR-072 D1）：**这个库有没有一次没写完的任务**。它不回答
+  「欠什么」——欠什么仍由两枚水位回答。一库一行（`dbnum_write_state:{dbnum}`），任务第一笔
+  写库之前置 `writing{S,T}`，任务收尾那一笔与两枚水位同事务置 `finished`（行留着，不删）。
+
+  | 字段 | 类型 | 取值 / 含义 |
+  |---|---|---|
+  | `status` | string \| null | `writing`（正在写库，或上一次死在写库中途）\| `finished`（那一次任务的写库结束了）\| `null`（这个库从没被任务写过；等价于整格缺失，见下） |
+  | `start_sesno` | int ≥ 0 | 本次任务的起点 **S**。崩溃后回退删的是 `sesno > S` 的痕迹、两枚水位退回它。初始化 / 重初始化恒 `0`；`apply_window` 是任务开工时的 `applied_sesno`；`model_only` 是起点 `model_sesno` |
+  | `end_sesno` | int ≥ 0 | 目标 **T**。回退之后按 `S→T` 重排 |
+  | `intent` | string | `initialize` \| `apply_window` \| `model_only` \| `reinitialize`。决定回退走哪条清理路：前者与 `reinitialize` 整库清空重排，其余按 sesno 谓词删。`room_only` 随房间流程退役（§4.7.2），不再作为取值出现 |
+  | `started_at` | RFC3339 \| null | 置 `writing` 的时刻 |
+  | `finished_at` | RFC3339 \| null | 置 `finished` 的时刻；`status = writing` 时恒 `null` |
+
+  **整格缺失 / `status: null` 是同一件事**：这个库从没被任务写过，或上一次回退把标记行删掉了、
+  下一次任务还没开工。两种形态客户端都要认，处置一样——那一栏留空，**别退回 `finished` 再据此
+  画绿灯**。
+
+  `status` 与两枚水位的分工要分清：`finished` 只说「本任务的写库结束了」，**不说这个库追平了**
+  ——欠什么仍由 `applied_sesno` / `model_sesno` 回答。一个模型失败的任务照样以
+  `finished` 收尾（`model_sesno` 不动），那不是矛盾。反过来 `writing` 也不表示数据坏了：它只说
+  「这一次写库还没结束」，启动水化段或该库下一次任务开工前会把它回退到 `start_sesno` 再从
+  `start_sesno → end_sesno` 重跑。
+
+  界面读法：`status = writing` 且这个库**不在** `/queue` 的运行行里 = 上一次死在写库中途。
+  回退期间这一行会短暂缺失、两枚水位往回走、`state_revision` 已经前进——那不是异常，是回退在进行。
+
+  字段真值以 `src/data_interface/write_state.rs` 的 `WriteState` 为准（`dbnum` 那一格是行主键，
+  不重复出到 JSON 里；库里还有一个 `updated_at` 是写入时刻的运维痕迹，不进契约）。
 - `model_verdict` 是双水位的唯一判决：`in_sync` 表示 `model_sesno == applied_sesno`
   且没有根仍在追赶；`lagging` 表示数据与模型暂时不同步；`not_judged` 表示当前形态
   没有可比较的两枚水位。读透形态的 reason 为 `read-through`，这是中性状态。
+  **字段名与取值不变，来源换了**（ADR-072 D4）：判决此前由 `dbnum_consistency::verdict_for`
+  在任务收尾之后回问库算出来，现在由水位镜像算——任务内不回读库。消费者不受影响。
 - `model_sesno_time` 表示对应 E3D 保存时刻；`model_caught_up_at` 表示模型水位真正写下的
   挂钟时刻，只在 `model_verdict = in_sync` 时非空。
 - `model_dead_roots` 与 `model_lazy_roots` 不阻断水位，但必须并排展示；后者为 `null`
@@ -453,6 +630,68 @@ plant-ui 的单根调用零影响。
   没有依赖行的库**整格不写**——写 0 读起来像「一个依赖都没有」，那是另一句话。
 - 旧字段是新形状的子集，既有消费者不受影响。
 
+#### 4.7.1 随发布阶段退役的格（ADR-072 D4/D5，2026-09-10）
+
+发布阶段（文件轮次屏障）与第二条异步账整体退役之后，下面这些格**从回执与 `/dbnums` 里消失**。
+它们不是改名、不是置空，是不再出现——客户端读不到就是读不到，按「没有这一格」处理，
+别退回默认值再据此画状态。
+
+| 消失的格 | 出处 | 为什么没了 |
+|---|---|---|
+| `file_round` / `file_round_status`（`collecting` / `pending` / `done`）、`published_version`、`published_input_manifest` | 任务回执、`/dbnums` | 屏障退役：同库单写者同步写，没有「让三条异步路看到同一版本」这回事。想知道「这一次写完没有」看 `write_state.status` |
+| `model_pending` / `model_pending_status` / `model_pending_phase`、`abandoned`、`attempts` / `MAX_ATTEMPTS` 那一族 | `/dbnums`、`web/ops.html` | `model_update_pending` 整表退役。任务的单元清单就是真值；「已放弃」改由镜像的失败根集回答 |
+| `model_drain_*`（`telemetry` / `page_starved` / `starved_pages`）、`drain_report`、`drain_page_progress` | `/dbnums`、WS `task_started` / `task_finished` 的 `model_drain` 分支 | 没有 drain 了：模型随任务同步生成 |
+| `spatial_pending` / `spatial_reconcile_*` / `published_spatial_version` | `/dbnums`、`/health` | 空间树随 `persist_roots_batched` 就地收敛，不再留意图行 |
+| `room_published_*`（`room_published_version` / `room_topology_source`） | 房间查询面 | `room_published_inst` / `room_published_topology` / `room_topology_source` 三表退役。当时的替身是 `room_sesno`，而 `room_sesno` 本身随房间流程一并退役（§4.7.2）——整条房间查询面不再有「已发布到哪一版」这个问题 |
+
+**不动的格**：`applied_sesno` / `model_sesno` 两枚水位、`model_verdict` /
+`model_caught_up_at`（名字与取值不变，来源换镜像）、`credential_advance`、`anomaly` / `blocked` /
+`excluded`、`model_source` / `model_source_reason`。契约上这一轮**只加一格 `write_state`**，
+其余全是减法。
+
+> 本节写成时水位是三枚。第三枚 `room_sesno` 与整条房间对外面随后一并退役，见 §4.7.2
+> ——那是另一刀，不在 ADR-072 的账上。
+
+##### 逐条对照表（T4 改 `handlers.rs` / `ops.html` 时按这张表判真假）
+
+「定义点 / 消费点」一栏给的是**当前源码里 grep 得到的位置**；改完之后那一栏应当查无此项。
+
+| 端点 · 格 | 定义点 / 消费点（grep 得到） | 数据来源 | 退役依据 | plant-ui / ops 侧处置 |
+|---|---|---|---|---|
+| `/health` · `model_update_pending`、`model_update_pending_observation` | `handlers.rs:771`（`sampled_model_pending_status`，:528）、`:979`、`:581` | `model_update_pending::model_pending_status()` | ADR-072 D5（整表退）；计划 C.1 第 2 行 | 整格删；「欠什么」看两枚水位 |
+| `/health` · `model_drain`、`blocking_conditions` 里的 `model_drain.page_starved` | `handlers.rs:726`、`:956`、`:803`–`:804` | `model_update_pending::model_drain_telemetry_snapshot()` / `model_drain_page_starved()` | 计划 C.1 第 2 行（没有 drain 了） | 整格删；`blocking_conditions` 少一档 |
+| `/health` · `spatial_reconcile` | `handlers.rs:755`–`:764`、`:974`；`ops.html:1390`（`m.h.spatial_reconcile`） | `SideEffectCompensator::spatial_reconcile_status()` | ADR-072 D4（空间树随 `persist_roots_batched` 就地收敛）；计划 C.2 第 4 行 | 整格删；树是否落后看下面那两格 |
+| `/health` · `spatial_tree.pending` / `published_version` / `published_input_files` / `published_input_sha256` | 已落 —— 提交 `f2bdaa21c` | 发布输入 manifest（`published_file_input`） | ADR-072 D4；计划 C.2 第 3 行 | **已退**；换成同一节新增的 `snapshot_watermarks` / `db_watermarks` 两格（快照头记的各库 `(applied, model)` 数对 vs 库里现值，不等即重建） |
+| `/health` · `window_blocks` | 已落 —— 提交 `0025edaa4`（`handlers.rs` 取数与回执键）与 `588e71915`（`ops.html` 的「窗口阻断」卡、`renderStaging` 与三处读取整块删） | `staging::attempts::load_window_blocks()`（`increment_update_attempt` 的 `kind = 'window_block'` 行） | 计划 §5 R4（`staging/attempts.rs` 整文件退，`increment_update_attempt` `REMOVE TABLE`） | **已退**：ops 那三处随 R4 一起删了；写了一半的库看 `/dbnums` 每行的 `write_state`（ops.html KPI「写入中 / 未写完」） |
+| 任务回执 · `file_round` / `published_version` / 文件轮次一族 | `handlers.rs:3292`–`:3307`（回执测试里的 `file_rounds` / `published_version`） | `side_effect_pending::CompletedFileRound` | ADR-072 D4/D5 | 不画 |
+| 任务回执 · `model_verdict` / `model_caught_up_at` | `handlers.rs`（`/dbnums` 与 `/tasks` 两处同名） | 由 `dbnum_consistency::verdict_for` 回问库 → **改读水位镜像** | ADR-072 D4（任务内不回读库） | **名字与取值不变，照画**；只是不再等模型那一段 |
+| 任务回执 · `credential_advance` | `window_root_plan::CredentialAdvanceOutcome` | 数据尾事务之后的凭证前移 | 不在本轮（d-427） | 照画 |
+
+判真假的方法：表里每条「定义点」都能 `rg -n "<字段名>" src/web_service/handlers.rs web/ops.html`
+命中；T4 / R4 改完之后同一条命令应当查无此项（`window_blocks` 那一行随 R4 在 `588e71915` 收掉）。
+
+### 4.7.2 房间流程退役后保留的对外契约（2026-09-11 修订）
+
+退役的是独立房间流水线，不是房间结果：`room_sesno` 一族、`room_recalc` 任务/队列、
+`model_update_pending.room_phase` 与 `model_source_reason=room_lagging` 不再出现。房间归属改为
+每个模型根产出的一部分，写者是 `persist_roots_batched` 的逐根事务；`room_relate`、
+`room_panel_relate` 及数据库函数继续保留。
+
+`POST /api/v1/query` 的 `tool="e3d.room.lookup"` 继续存在。它直接按
+`room_relate.out = type::thing('pe', member)` 读关系边，因此 read-through kv-mem 不需要摄入
+`pe` / `ATT_*` / `pe_owner` 属性行。响应保留：
+
+- `memberships[]`、`room_membership`；
+- `published_version` / `stale` / `publication_status`：版本三元组语义不变，read-through 为
+  `null / null / "unsupported"`，关闭房间开关为 `null / null / "disabled"`；
+- `calculation_status`：`ready_nonempty|ready_empty|not_computed|initializing|failed|disabled`。
+
+空 `memberships` 只有在 `calculation_status=ready_empty` 时才表示“已经计算且不属于任何房间”；
+`not_computed`、`initializing` 与 `failed` 不能被客户端画成空归属。ready 判据使用当前根的
+`RootPublicationAck`，房间开启时还要求 ACK 匹配当前 resident generation。
+
+plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，本服务仍不实现。
+
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
   "blockers": [], "shadowed": [], "rows": [{ "task_id": "db-…", "dbnum": 7997,
@@ -478,8 +717,14 @@ plant-ui 的单根调用零影响。
   把回退库排成整库重建批次，worker 冻结点复核后 `wipe_dbnum_for_reinit` 清库并按
   首次导入重新解析，端点没有剩余职责（服役期间无对外消费者，plant-ui 未接入）。
 - 调用该路径现在返回 404。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`
-  （整库快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理），
-  操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
+  （整库快删），操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
+- **`DELETE /dbnums/{dbnum}/data/above/{watermark}`（按水位删残留）随「恢复即整库
+  重初始化」退役**（2026-09-10，决策 d-747）：削库一律改走
+  `POST /dbnums/{dbnum}/data/reinitialize`——它排一条整库重建批次，清库在 worker
+  冻结点做，与「按水位删掉一段」不是一回事，别当同义替换。
+  **同一路径的 `GET` 半边保留**：它只 SELECT，是清库之后自证「真的干净了」的唯一
+  现成只读工具。同一句话的规格出处见 `specs/002-watermark-data-backing/spec.md`
+  的 FR-012 / FR-012a。
 
 ### 4.10 `GET /api/v1/tree/{roots,children,ancestors}`、`GET /api/v1/search` — 直读模型树
 - 数据源是 e3d-io 直读（`DirectTreeService` + 进程级骨架），**不查 `pe` / `pe_owner`**：
@@ -553,16 +798,18 @@ plant-ui 的单根调用零影响。
 
 - **判据只有一处**（`model_read_route::route`）：`database` ⇔ 数据面是 `ingest` ∧ 该库
   `applied_sesno > 0` ∧ 该库没有数据批次任务在跑（`task_registry`）∧ `model_sesno == applied_sesno`
-  ∧ `room_sesno == applied_sesno`（ADR-071 D8「三水位相等」，三枚同一次读进程内镜像）；其余 `memory`，
-  理由五选一、按此优先序只报最靠前的一条：`read-through` / `data_watermark_unestablished`（基线未落）/
+  （ADR-071 D8 原文是「三水位相等」；第三枚 `room_sesno` 随房间流程退役后只剩两枚，仍是同一次
+  读进程内镜像）；其余 `memory`，理由四选一、按此优先序只报最靠前的一条：
+  `read-through` / `data_watermark_unestablished`（基线未落）/
   `initialization_publishing`（基线落了、该库的 dbnum 任务在飞；字面值沿用，含义 = 「这个库正在被写」）/
-  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）/
-  `room_lagging`（数据与模型到了 T、房间水位没追上：这一版的收尾没把房间那一枚盖上）。
-  模型 / 房间水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
-- **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列、不落 rocksdb，直接
-  从文件生成进进程内投影（该库有任务在飞就钉它那一版会话，翻面时零差异）。回执多四格：
+  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）。
+  `room_lagging` 随房间流程退役（§4.7.2），不再作为理由出现。
+  模型水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
+- **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列。ingest 的临时
+  memory 路由只写进程内投影；read-through 则把同一候选投影逐根事务发布到 spawned/embedded
+  kv-mem（仍不落 rocksdb），连同房间边和 `gen_root` 回执。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
-  持久由该库的 dbnum 任务负责）；`publication_status` 取 `ready` / `empty`（`gen_root` 上没有这根的行）。
+  不是“没有写 process store”）；`publication_status` 取 `ready` / `empty`。
 - **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里
   没有这根（还没 ensure 过）回 `409 conflict`，消息以 `not_generated:` 开头——客户端先去
   `/model/ensure`，它今天本来就是这个顺序。空数组**不**用来表达「没生成过」。
@@ -570,11 +817,99 @@ plant-ui 的单根调用零影响。
   `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
 - **`GET /dbnums`** 每行加 `model_source` / `model_source_reason`（§4.7），喂给判据的是行上自己的
-  `applied_sesno` / `model_sesno` / `room_sesno`；没有模型 / 房间判决列的行（非 DESI 库、这一次
+  `applied_sesno` / `model_sesno`；没有模型判决列的行（非 DESI 库、这一次
   普查失败）**不判落后**——「不知道」不写成 `model_lagging`。读透形态的冷行恒 `memory` / `read-through`。
-- **翻面事件**：该库的 dbnum 任务跑完（收尾那一笔把三枚水位盖齐）→ `database`；回退重建清库 →
+- **翻面事件**：该库的 dbnum 任务跑完（收尾那一笔把两枚水位盖齐）→ `database`；回退重建清库 →
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
+
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns}` — 进程内空间树的邻近查询
+
+出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
+§5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
+`model-source/genModelV1/spatialSource.ts`（抽屉「按范围查找」在 `?model_source=gen-model-v1` 下走这三条，legacy 源仍走旧后端
+`/api/sqlite-spatial/*`）。
+
+- **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
+  随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
+  `spatial_query_never_writes_the_tree_or_takes_the_serial_lock` 另钉一道源码扫描）。dbnum / name 都在锁外补——补属性要回
+  元素记录读盘，不该压在树的读锁下拖慢写侧收敛。三条都只读、都是 GET，可选 `?project=&mdb=&namespace=`，与 §4.10 同一道
+  身份门（不一致 422 `identity_mismatch`）。
+- **覆盖面 = 「已生成过模型的构件」**（响应 `coverage: "global-tree"`）：树里只有经 `converge_tree_after_persist` 进过树的盒；
+  没 `ensure` 过的构件、隐式管身 `tube`、`ModelMemoryStore`-only（`ProjectionOnly` / memory-only 库）的盒第一版都不是候选
+  （计划 §5-5 按 (a)）。客户端在结果区提示「结果仅含已生成过模型的构件」，要更全就先 `/model/ensure` 或整库生成。
+- **门禁**：`spatial_state::current_state()` 不在 `Ready` / `ReadyEmpty` → **503 `spatial_not_ready`**，带 `Retry-After: 5`，
+  `detail.state` 是状态字面值（`uninitialized` / `loading` / `rebuilding` / `replay_required` / `degraded_reuse` /
+  `degraded_blocked`）。这是 §3 统一信封之外唯一一处 `detail` 非 `null`、带响应头的错误（`handlers::SpatialApiError`
+  单独成型，不改 `ApiError` 的十几处构造点）——客户端按 `code` 分型重试，不要当 500。`ReadyEmpty` 放行、直接回空结果
+  （`spatial_state: "ready_empty"`）；`AIOS_SPATIAL_COMPUTE=0` 的进程恒回 503。
+
+`GET /spatial/nearby` 的 query 参数（全部按字串收、服务端自己解；错误直接是 400 `bad_request`，`message` 直说哪一格错）：
+
+| 参数 | 说明 |
+|---|---|
+| `refno` \| `x,y,z` | 二选一，同时给 400。`refno` 收 `a/b` 与 `a_b`；`x,y,z` 三个一起给，f32、mm、E3D 世界坐标 |
+| `radius` | 必填，mm，`0 < r ≤ 100000`（100 m；再大就是整库扫描，不是「邻近」） |
+| `shape` | `sphere`（默认）\| `cube` |
+| `nouns` | 逗号分隔，大小写不敏感（服务端按大写比较） |
+| `keyword` | 分页前过滤，大小写不敏感；只匹配 refno（`a_b` / `a/b` 两种写法）与 noun，**不匹配 name**（计划 §5-2 按 (a)） |
+| `sort` | `distance`（默认：距离升序，同距按 dbnum、refno 兜底）\| `name`（名字只对本页解，全集按 noun、refno 作近似序）；两种都是全序，翻页稳定 |
+| `include_self` | 默认 `false`：refno 模式剔除目标自身与祖先链含目标的整个子树；点模式无意义 |
+| `include_negative` | 默认 `false`：按 `aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES` 剔除负实体（NBOX / NCYL …） |
+| `dbnums` | 逗号分隔 u32，限定库；给了它时答不出库号的条目一律剔除 |
+| `page` / `per_page` | `page` 从 1 起；`per_page` 默认 500、夹在 `1..=1000`（超出钳位，不报错） |
+
+- **中心**：点模式 `center.source = "position"`。refno 模式先在 `ModelMemoryStore` 里并「来源是目标或祖先链含目标、`mesh_id`
+  非空、盒可用」的记录（与 `/api/v1/query` 的 `model.spatial.bounds` subtree 口径逐字相同），投影里没有再看树上该 refno 自己的
+  条目（`AccelerationTree::entries_of`，只读、不触发索引重建），两处都没有 → **404 `not_found`**（消息「…还没生成过模型」；
+  客户端提示先显示该构件，接口内**不**隐式 `ensure`——把生成塞进查询会让一次 GET 挂 120 s，计划 §5-3 按 (a)）。
+  解出来的是目标含子树的并集盒，`center.source = "refno_aabb_center"`。
+- **距离口径**（与前端本地扫描 `aabbMinDistanceToPoint` 同口径，两条纯函数有单测钉住）：点模式是候选盒到点的最小表面距离
+  （盒内为 0；sphere 走 rstar `locate_within_distance(p, r²)`，即 `sqrt(distance_2)`；cube 是与 `center ± r` 的盒相交）；
+  refno 模式是候选盒到目标并集盒的最小表面距离（逐轴 `max(0, a.min − b.max, b.min − a.max)` 的欧氏范数；sphere 再按 `≤ r`
+  过滤，cube 只要与目标盒外扩 r 相交）。`within_radius = distance ≤ radius`，cube 下角落上的条目可以是 `false`。
+- **过滤顺序固定**：`include_self` → 负实体 → `dbnums` → 记 `filter_options.nouns` 计数 → `nouns` → `keyword`。noun 计数落在
+  `nouns` / `keyword` 之前：它是给筛选器画可选项用的，选中一个 noun 不能让别的 noun 从清单上消失。
+- **上限**：读锁内最多取 `candidate_cap = 200000` 条候选，超出置 `truncated_candidates: true`（`candidate_count` 是过滤前的
+  候选数）。`groups`（按 dbnum 计数）与 `total_count` 都是**过滤后的全集**、不受分页影响；答不出库号的条目不进 `groups`。
+  不做服务端扫描快照缓存，每页重扫（rstar 查询 ms 级，计划 §5-6 按 (a)）。
+
+响应（200）：
+
+```json
+{ "results": [{ "refno": "24383_71586", "dbnum": 24383, "noun": "PIPE", "name": "/P-1001",
+                "aabb": { "min": [x, y, z], "max": [x, y, z] }, "distance": 123.4, "within_radius": true }],
+  "center": { "x": 0, "y": 0, "z": 0, "source": "position | refno_aabb_center" },
+  "radius": 5000, "shape": "sphere",
+  "total_count": 0, "returned_count": 0, "page": 1, "per_page": 500, "has_more": false,
+  "candidate_count": 0, "truncated_candidates": false, "candidate_cap": 200000,
+  "groups": [{ "dbnum": 24383, "count": 0 }],
+  "filter_options": { "nouns": [{ "value": "PIPE", "count": 0, "is_negative": false }] },
+  "spatial_state": "ready", "coverage": "global-tree" }
+```
+
+- `refno` 一律 `a_b`；`dbnum` 先取投影记录，缺则 `DirectTreeService::dbnum_of`，两处都答不出为 `null`（与 §4.10 同义：
+  「答不出」，不是 0 号库）；`name` **只对本页补**（`DirectTreeService::name_of`，回元素记录读一次 `NAME`，≤ 1000 条），
+  没有名字为 `null`；`aabb` 是 mm、Z-up 的世界坐标盒；`filter_options.nouns` 按 count 降序、同 count 按 noun 字典序。
+  **没有专业（`spec_value`）维度**——v1 链路里根本没有它，前端在这一源下隐藏专业筛选、改按 `groups` 的 dbnum 分组
+  （计划 §5-1 按 (a)；按 noun 派生专业要产品口径，另起切片）。
+
+`GET /spatial/nearby/refnos`：同参、忽略 `page` / `per_page` / `sort`，按距离序给完整命中集、不补 `name`，上限
+`result_cap = 100000`（超出置 `truncated_results: true`，`total_count` 仍是全集数；`by_dbnum` 只收答得出库号的条目）：
+
+```json
+{ "refnos": ["24383_71586"], "by_dbnum": { "24383": ["24383_71586"] }, "total_count": 1,
+  "truncated_results": false, "result_cap": 100000,
+  "center": { "x": 0, "y": 0, "z": 0, "source": "position" }, "radius": 5000, "shape": "sphere",
+  "spatial_state": "ready", "coverage": "global-tree" }
+```
+
+`GET /spatial/negative-nouns` → `{ "nouns": ["NBOX", "NCYL", …] }`：`TOTAL_NEG_NOUN_NAMES` 去重、保持原序；只过身份门，
+不看空间树状态。
+
+错误一览：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒）、422 `identity_mismatch`（§3）、
+503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档）；其余暂时故障（`DirectTreeService` 取不到等）
+按 §3 统一信封 500。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
@@ -618,14 +953,13 @@ plant-ui 的单根调用零影响。
   events_seen, detail?, result? }`——`created_at` 是**入队时刻**，`started_at` 是开跑时刻，
   「已排」与「已用」是两个起点。
 - 状态机：数据任务为 `queued -> running -> succeeded | partial | failed`；模型消费页为
-  `running -> succeeded | partial | failed | yielded`。kind 四种：
+  `running -> succeeded | partial | failed | yielded`。kind 三种：
   `data_batch`（一行 = 一个数据批次；同一 dbnum 至多两行——运行中一行 + 排队中一行）、
-  `room_recalc`（队列跑空时收的一轮房间收敛，创建即 running；`detail` 携带
-  `{ panels, elements, dead_letters }` 分项计数，done/total 用 `units_done`/`total_units`，
-  ADR-011 §10）、`model_drain`（持久模型工作的一页进程内观察）、`manual_update`（已退役，
-  不再产生新行）。
-- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/ `room-…`（房间轮）/
-  `model-…`（模型消费页）。
+  `model_drain`（持久模型工作的一页进程内观察）、`manual_update`（已退役，
+  不再产生新行）。`room_recalc`（曾是队列跑空时收的一轮房间收敛）随房间流程退役
+  （§4.7.2）：不再产生新行，`GET /tasks?kind=room_recalc` 恒回空列表。
+- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/
+  `model-…`（模型消费页）。`room-…`（房间轮）随 `room_recalc` 一并退役，不再产生。
 - 保留策略（ADR-011 §11）：内存上限 1000；queued / running 永不剔除；每个 dbnum 保留
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建
   （界面须说明「这是重建的队列」）。
@@ -639,11 +973,19 @@ plant-ui 的单根调用零影响。
 - `DbOption` 新增（`DbOption.toml`）：
 
 ```toml
-# Web 服务监听地址；不配置则即使编译了 http_api 也不启动
+# Web 服务监听地址；缺失/留空时兼容 server_release_ip，两者都空则回环监听 127.0.0.1:9099
 http_api_addr = "0.0.0.0:8020"     # 评审决议：局域网可访问；8009/8010/1883/8000 已被占用，避开
+# 对外展示地址；只用于日志、自动打开和分享链接，不参与 socket 绑定
+http_public_addr = "192.168.1.9:8020"
 http_api_cors = ["*"]              # 开发期放开，上线前收敛为前端 origin
 ```
 
+- 有效监听地址按 `http_api_addr` → 旧配置键 `server_release_ip` → `127.0.0.1:9099`
+  选择。最后一档只绑定回环，不因缺配置意外开放局域网；地址存在但无法绑定时必须明确报错，
+  不得把 Web task 当作正常完成。read-through 主流程依赖该 task 常驻，不能因新键缺失而
+  无错误退出。
+- `/health.http` 返回 `{ bind_addr, public_addr }`。客户端不得把 `0.0.0.0` 当作可导航链接；
+  配置向导和 restart 轮询固定使用回环地址，不消费 `http_public_addr`。
 - 静态前端资源是可选能力。资源目录存在时挂载 `/assets` 与 SPA fallback；目录缺失时只记录
   一次告警，静态路径返回 404，REST/WS 仍正常启动。无需为此增加配置开关，也不得因
   `PLANT_ASSET_ROOT` 缺失或无效终止服务。
@@ -673,3 +1015,42 @@ tokio/serde/serde_json 均已存在，无其他新增。
 2. **鉴权**：本期不做；前端部署到共享环境前可追加最简 token 头校验。
 3. **`incr_applied` 已退役**：自动与手动批次统一发布 tasks 主题事件。
 4. **任务历史持久化**：仅内存分层保留最多 1000 条（durable 语义由水位 + pending 表承担），不做持久化。
+
+## 10. 给 plant-ui 的一句话（ADR-072，2026-09-10）
+
+**`DbnumStatus` 多一格可选的 `write_state`，此外全是减法：文件轮次 / pending / drain / publish
+那一族格不再出现，消失的格就别画。**
+
+展开成三句：
+
+1. `write_state` 是**可选**的（`DbnumStatus.write_state?: WriteState`）：整格缺失 = 这个库
+   从没被任务写过，或上一次回退刚把标记删掉、下一次任务还没开工。缺失时那一栏留空，
+   别退回 `finished` 再据此画绿灯。字段清单见 §4.7。
+2. 画法：`finished` 是常态（安静，不必出声）；`writing` 且该库在 `/queue` 的运行行里 =
+   正在写库；`writing` 而队列里没有它 = 上一次死在写库中途，下一次启动或该库下一次任务
+   开工会回退到 `start_sesno` 再从 `start_sesno → end_sesno` 重跑——这一档值得在库那一行
+   出声，它是「为什么这个库的水位会往回走」的唯一出处。
+3. 回退进行中那几秒，`write_state` 整格会短暂消失、两枚水位往回走、`state_revision` 前进。
+   **水位回退不是异常**，别按数据丢失报警；跨仓同步一句即可，不阻本仓落地。
+
+## 11. 给前端的一句话（房间流程退役，2026-09-11 修订）
+
+独立房间水位与任务已退役；房间结果随模型根事务发布。对外保留
+`e3d.room.lookup`，并用 `calculation_status` 区分“已算空”与“尚未计算/正在初始化/失败”。
+
+分两头说，因为两个仓的处境不一样：
+
+1. **plant3d-web：不必改。** 你那八条 `/api/room/*` 与 `/api/room-tree/*` 打的本来就是
+   另一套旧后端，本服务从没实现过它们——退役前后都是 404，行为一个字不变。
+2. **plant-ui：**
+   - 任务面板的**房间泳道**（`task_queue.rs` 的 `KIND_ROOM_RECALC`）：`room_recalc` 任务
+     不再产生，泳道会恒空。请把它摘掉，而不是留一条永远「距上一轮 ∞」的空泳道。
+   - `q room` / `q e3d.room.lookup` 命令继续可用；必须消费 `calculation_status`，只有
+     `ready_empty` 才能把空 `memberships` 显示成“不属于任何房间”。
+   - 你**直连 SurrealDB** 读的 `room_relate` / `room_panel_relate` / `fn::room_code`
+     （房间浏览器、材料表 surql）不随本节退役，写者是模型根的 process-store/durable
+     发布事务；kv-mem 启动屏障完成前不得把空结果当最终值。
+
+`DbnumStatus` 上少的那一枚是 `room_sesno`（连同 `room_sesno_time` 等五列）：
+水位从三枚回到两枚，`applied_sesno` / `model_sesno` 语义不变。**少的格别退回默认值再画**
+——`room_sesno` 缺席不等于 `0`，`0` 读起来是「房间一次都没算过」，那是另一句话。

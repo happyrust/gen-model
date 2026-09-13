@@ -12,7 +12,7 @@ pub struct DbOptionExt {
     #[serde(flatten)]
     pub inner: DbOption,
 
-    /// 必须显式选择模板包（e3d210 / e3d31）；缺失时解析器拒绝启动。
+    /// 手动选择 e3d210 / e3d31 模板包；设置后跳过数据库版本识别。
     #[serde(default)]
     pub e3d_version: Option<String>,
 
@@ -48,9 +48,15 @@ pub struct DbOptionExt {
     pub append_delivery_unit_types: Option<Vec<String>>,
 
     /// Web 服务（REST + WebSocket）监听地址，如 `0.0.0.0:8020`。
-    /// 未配置时即使编译了 `http_api` feature 也不启动服务。
+    /// 未配置或留空时兼容使用 [`DbOption::server_release_ip`]；后者也为空时只监听
+    /// `127.0.0.1:9099`，服务不会因缺少新键而静默退出。
     #[serde(default)]
     pub http_api_addr: Option<String>,
+
+    /// 浏览器与日志对外展示的 HTTP 地址，如 `192.168.1.9:9099`。
+    /// 只用于生成链接；未配置时从最终生效的监听地址派生。
+    #[serde(default)]
+    pub http_public_addr: Option<String>,
 
     /// Web 服务允许的 CORS origin 列表；`["*"]` 表示放开（开发期）。
     /// 未配置时默认放开。
@@ -97,20 +103,17 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_incremental_types: Option<Vec<String>>,
 
-    /// 房间归属的**增量**重算（默认 `true` = 照排照收）。
+    // `room_incremental`（房间增量阶段的开关）与 `room_resident_model`（常驻房间模型的开关）
+    // 两个键随房间流程退役（ADR-073 D7；ADR-067 D9 作废）：房间归属随每个生成根算出、与模型行
+    // 同事务落库，没有独立的房间阶段可开关；常驻房间模型是那一步的算法输入，随 `spatial_compute`
+    // 一道门走。配置里再写这两个键会进「未知键」告警名单。
+    /// 房间归属计算的总开关（默认 `false`；ADR-073 D1 的逐根房间归属）。
     ///
-    /// 只管增量这一条链，启动全量重建与人工重建不受它影响。详见
-    /// [`room_incremental`]。
+    /// 关掉时生成路径不算房间归属、不写 `room_relate` / `room_panel_relate` 新边，
+    /// 但模型根与 `model_sesno` 照常推进；启动也不建常驻房间模型，被对账掉的来源
+    /// 旧边照旧清。详见 [`room_membership`]。
     #[serde(default)]
-    pub room_incremental: Option<bool>,
-
-    /// 常驻房间模型（默认 `true`，计划 `docs/plans/2026-09-07-resident-room-model-plan.md`）。
-    ///
-    /// 开着时启动最前段（空间树装载之后、watcher / worker 之前）建一份进程内的房间→面板
-    /// 拓扑与在册面板几何，范围是 MDB 全部设计库、不受 `watch_dbnums` 与上弦位约束；
-    /// 显式关掉时走兼容读取路径。详见 [`room_resident_model`]。
-    #[serde(default)]
-    pub room_resident_model: Option<bool>,
+    pub room_membership: Option<bool>,
 
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
@@ -156,18 +159,29 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub data_tx_elements: Option<u64>,
 
-    /// 持久层换成进程内嵌的 kv-mem 引擎（默认 `false` = 连 `v_ip:v_port` 的
-    /// SurrealDB 服务）。详见 [`in_memory_db`]。
+    /// 旧开关：持久层换成进程内嵌的 kv-mem 引擎。显式 `false` 仍表示 external；
+    /// 两个形态键都不写时的新默认由 [`store_mode`] 决定。详见 [`in_memory_db`]。
     ///
     /// **已被 [`store_mode`] 取代**：它只表达得了 `embedded-mem` 那一档。保留是因为
     /// 它散在环境变量、`/health`、`PersistTarget` 与两份 ADR 里，一次性删的面太大。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
 
-    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-mem` / `embedded-mem`。
+    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-rocksdb` /
+    /// `spawned-mem` / `embedded-mem`。
     /// 详见 [`store_mode`]。
     #[serde(default)]
     pub store_mode: Option<String>,
+
+    /// Durable model projection policy. `incremental-overlay` keeps only
+    /// generated deltas in kv-mem and never hydrates them from RocksDB.
+    #[serde(default)]
+    pub model_cache_mode: Option<String>,
+
+    /// Maximum resident bytes used by the process-local model projection cache.
+    /// The default is 2 GiB. It is only enforced for durable store modes.
+    #[serde(default)]
+    pub model_cache_max_bytes: Option<u64>,
 
     /// 旧数据面配置，保留用于冲突提示；实际备份范围由 `store_mode` 决定。
     #[serde(default)]
@@ -254,6 +268,7 @@ impl From<DbOption> for DbOptionExt {
             delivery_unit_types: None,
             append_delivery_unit_types: None,
             http_api_addr: None,
+            http_public_addr: None,
             http_api_cors: None,
             data_batch_workers: None,
             startup_autorun: None,
@@ -261,8 +276,7 @@ impl From<DbOption> for DbOptionExt {
             data_incremental: None,
             model_incremental: None,
             model_incremental_types: None,
-            room_incremental: None,
-            room_resident_model: None,
+            room_membership: None,
             catalogue_project_priority: None,
             watch_dbnums: None,
             block_file_identity_conflicts: None,
@@ -279,6 +293,8 @@ impl From<DbOption> for DbOptionExt {
             data_tx_elements: None,
             in_memory_db: None,
             store_mode: None,
+            model_cache_mode: None,
+            model_cache_max_bytes: None,
             data_face: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
@@ -317,6 +333,8 @@ struct DbOptionExtFields {
     #[serde(default)]
     http_api_addr: Option<String>,
     #[serde(default)]
+    http_public_addr: Option<String>,
+    #[serde(default)]
     http_api_cors: Option<Vec<String>>,
     #[serde(default)]
     data_batch_workers: Option<usize>,
@@ -331,9 +349,7 @@ struct DbOptionExtFields {
     #[serde(default)]
     model_incremental_types: Option<Vec<String>>,
     #[serde(default)]
-    room_incremental: Option<bool>,
-    #[serde(default)]
-    room_resident_model: Option<bool>,
+    room_membership: Option<bool>,
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
@@ -365,6 +381,10 @@ struct DbOptionExtFields {
     in_memory_db: Option<bool>,
     #[serde(default)]
     store_mode: Option<String>,
+    #[serde(default)]
+    model_cache_mode: Option<String>,
+    #[serde(default)]
+    model_cache_max_bytes: Option<u64>,
     #[serde(default)]
     data_face: Option<String>,
     #[serde(default)]
@@ -526,10 +546,10 @@ pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
     option
 }
 
-/// 模板版本必须严格读配置；不能经过扩展表解析失败后回落默认值的路径。
+/// 严格读取模板版本，配置解析失败时禁止静默回落自动识别。
 ///
-/// `Some` 是唯一可用模式：调用方不得再跑数据库探针或做“冲突阻断”。
-/// `None` 保留到共享加载器报出针对性的必填错误。
+/// `Some` 就是手动选择：调用方不得再跑数据库探针或做“冲突阻断”。
+/// `None` 交给共享加载器（`DirectSchema::open_from_env`）决定后续路径。
 pub(crate) fn configured_e3d_version() -> Result<Option<String>, String> {
     Ok(read_ext_fields(std::env::var_os("DB_OPTION_FILE"))?.e3d_version)
 }
@@ -547,6 +567,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         delivery_unit_types: ext.delivery_unit_types.clone(),
         append_delivery_unit_types: ext.append_delivery_unit_types.clone(),
         http_api_addr: ext.http_api_addr.clone(),
+        http_public_addr: ext.http_public_addr.clone(),
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
         startup_autorun: ext.startup_autorun,
@@ -554,8 +575,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         data_incremental: ext.data_incremental,
         model_incremental: ext.model_incremental,
         model_incremental_types: ext.model_incremental_types.clone(),
-        room_incremental: ext.room_incremental,
-        room_resident_model: ext.room_resident_model,
+        room_membership: ext.room_membership,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
         block_file_identity_conflicts: ext.block_file_identity_conflicts,
@@ -572,6 +592,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         data_tx_elements: ext.data_tx_elements,
         in_memory_db: ext.in_memory_db,
         store_mode: ext.store_mode.clone(),
+        model_cache_mode: ext.model_cache_mode.clone(),
+        model_cache_max_bytes: ext.model_cache_max_bytes,
         data_face: ext.data_face.clone(),
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
@@ -701,6 +723,53 @@ fn effective_in_memory_db(configured: Option<bool>, env_override: Option<&str>) 
 /// 环境变量名：一次性覆盖 [`store_mode`]，不必改配置文件。
 pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
 
+/// Environment override for [`model_cache_mode`].
+pub const MODEL_CACHE_MODE_ENV: &str = "AIOS_MODEL_CACHE_MODE";
+
+/// Environment override for [`model_cache_max_bytes`].
+pub const MODEL_CACHE_MAX_BYTES_ENV: &str = "AIOS_MODEL_CACHE_MAX_BYTES";
+
+/// Policy for the process-local incremental model overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelCacheMode {
+    /// Memory contains generated root overlays; RocksDB serves cold roots.
+    IncrementalOverlay,
+}
+
+impl ModelCacheMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IncrementalOverlay => "incremental-overlay",
+        }
+    }
+}
+
+fn parse_model_cache_mode(raw: Option<&str>) -> Option<ModelCacheMode> {
+    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "incremental-overlay" | "write-behind" | "memory-first" => {
+            Some(ModelCacheMode::IncrementalOverlay)
+        }
+        _ => None,
+    }
+}
+
+pub fn model_cache_mode() -> ModelCacheMode {
+    parse_model_cache_mode(std::env::var(MODEL_CACHE_MODE_ENV).ok().as_deref())
+        .or_else(|| parse_model_cache_mode(load_ext_fields().model_cache_mode.as_deref()))
+        .unwrap_or(ModelCacheMode::IncrementalOverlay)
+}
+
+pub fn model_cache_max_bytes() -> usize {
+    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
+    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .or(load_ext_fields().model_cache_max_bytes)
+        .unwrap_or(DEFAULT)
+        .clamp(1, usize::MAX as u64) as usize
+}
+
 /// 持久层的介质，外加「谁负责把它拉起来」。
 ///
 /// [`in_memory_db`] 只分得出两态，而实际上有四种：外置落盘、自带落盘、自带内存、
@@ -748,11 +817,10 @@ impl StoreMode {
 /// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
 /// [`STORE_MODE_ENV`] 压过它）。
 ///
-/// **默认 `external`**（2026-09-07 用户拍板，翻回 2026-09-04 之前的口径）。默认连
-/// `v_ip:v_port` 上那台已经在跑的 SurrealDB，不由本进程拉起——现场配置绝大多数指着一台
-/// 手工起的落盘库，而那台库没有本进程的[署名][`crate::store_process::StoreSignature`]，
-/// `spawned-mem` 默认下 [`crate::store_process::judge_port`] 只能判「分不清」并拒绝启动。
-/// 开箱即用那一档改为**显式**写 `store_mode = "spawned-mem"`。
+/// **默认 `spawned-mem`**（2026-09-11 用户拍板）：服务自行拉起 `v_ip:v_port` 上的
+/// memory SurrealDB，进程退出后数据消失。需要外置持久库的现场配置必须显式写
+/// `store_mode = "external"`；仓内夹具均由
+/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 护栏钉住，不依赖默认值。
 ///
 /// 这个默认同时决定 [`data_face`]（`external` → `ingest`，两档内存 → `read-through`），
 /// 所以漏写这一项换掉的不只是介质，还有整个数据面；`db_options/` 下的夹具由护栏
@@ -760,7 +828,8 @@ impl StoreMode {
 ///
 /// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `embedded-mem`，与那个旧开关
 /// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的同样回
-/// `external`——与新默认一致，那句 `false` 本来说的就是这件事。
+/// `external`——即使默认已经翻成 `spawned-mem`，这句显式的 `false` 仍然是人的意图，
+/// 不能被新默认覆盖。两个键都没写时才采用 `spawned-mem`。
 /// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
 /// 认不出的值当没设，同样出声。
 pub fn store_mode() -> StoreMode {
@@ -782,14 +851,15 @@ fn effective_store_mode(
     if let Some(mode) = parse_store_mode(env_override).or_else(|| parse_store_mode(configured)) {
         return mode;
     }
-    // 没写 `store_mode` 时由旧开关说话，语义与它今天的两态逐字相同：
-    // `true` = 库在进程里，`false` = 过外置库。两处都没写也是外置——自带存储要显式要。
+    // 没写 `store_mode` 时先尊重旧开关，语义与它今天的两态逐字相同：
+    // `true` = 库在进程里，`false` = 过外置库。两个键都没写才走新默认 spawned-mem。
     match in_memory_db_env
         .and_then(parse_bool_flag)
         .or(configured_in_memory_db)
     {
         Some(true) => StoreMode::EmbeddedMem,
-        Some(false) | None => StoreMode::External,
+        Some(false) => StoreMode::External,
+        None => StoreMode::SpawnedMem,
     }
 }
 
@@ -1057,7 +1127,7 @@ pub fn enable_auto_initialize_new_dbnums() {
 }
 
 /// 单测里摁住 [`auto_initialize_new_dbnums`] 的进程内覆盖（0 = 按配置来）。
-/// 形状与理由同 [`RoomIncrementalOverride`]：live 用例要在同一进程里先钉「缺省
+/// 形状与理由同 [`XgeometryGateOverride`]：live 用例要在同一进程里先钉「缺省
 /// 不初始化新库」、再钉「开关打开走基线」，而 `set_var` 在 2024 edition 是数据
 /// 竞争；CLI 那个 OnceLock 又是一次性的，翻不回来。
 #[cfg(test)]
@@ -1295,9 +1365,6 @@ fn normalise_model_incremental_types(configured: Option<&[String]>) -> Vec<Strin
     normalised
 }
 
-/// 环境变量名：一次性覆盖 [`room_incremental`]，不必改配置文件。
-pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
-
 /// 临时只跑模型生成时关闭所有空间派生工作，不改 `DbOption.toml`。
 pub const SPATIAL_COMPUTE_ENV: &str = "AIOS_SPATIAL_COMPUTE";
 
@@ -1313,121 +1380,86 @@ fn effective_spatial_compute(env_override: Option<&str>) -> bool {
     env_override.and_then(parse_bool_flag).unwrap_or(true)
 }
 
-/// 房间归属的**增量**重算开不开（`DbOption.toml` 的 `room_incremental`，**默认 true**）。
+// `room_incremental()` 与 `room_resident_model()` 两个开关（各带一个 `AIOS_ROOM_*` 环境变量、
+// 前者还带单测覆盖守卫）曾在这里——ADR-033 三阶段的房间那一档、ADR-067 D9 的常驻模型开关。
+// 随房间流程退役（ADR-073 D7、源码钉 6）：房间归属随每个生成根算出、与模型行同事务落库，
+// 「房间阶段」没了，开关只剩一个永远不被问的布尔；常驻房间模型是逐根计算的算法输入，
+// 只随 `spatial_compute` 与 project_hd / project_hh 特性一道门走。
+
+/// 环境变量名：一次性覆盖 [`room_membership`]，不必改配置文件。
+pub const ROOM_MEMBERSHIP_ENV: &str = "AIOS_ROOM_MEMBERSHIP";
+
+/// 房间归属计算开不开（`DbOption.toml` 的 `room_membership`，**默认 false**）。
 ///
-/// 关着时增量链的两个写入点都不再排房间目标（位姿/删除刷新包围盒之后的直写事务、
-/// 暂存窗口的收口计划），空闲轮也不再收房间轮。**已经排在 `model_update_pending`
-/// 里的目标原样留着**——开关一开就照常收，关掉不等于把那些活丢了。
+/// ADR-073 D1 之后房间不是一条独立流程：一个生成根算完几何，紧接着用常驻房间模型里的
+/// 面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行同一笔事务落库。本开关门的
+/// 就是那一步，判定点只有一处——任务开工冻房间计算器的
+/// [`crate::fast_model::model_db_adapter::frozen_room_calculator`]。关着返回 `Ok(None)`：
+/// 模型根照常落库、`model_sesno` 照常前移，只是不计算、不写新房间边；被模型对账删除的
+/// 来源旧边仍清。启动段（`prepare_room_resident_at_startup`）同时跳过常驻房间模型的
+/// 构建，生命周期记 `Disabled { source: "room_membership=false" }`。
 ///
-/// 管的只有增量这一条链：启动全量重建、人工重建、以及 `drain_rooms` 直调（房间
-/// 对拍夹具走的就是它）都不看这个开关。
+/// `model_sesno` 在关闭期间只承诺模型几何，不承诺房间归属；`/health` 的
+/// `room_membership=false` 是这项主动降级的判据。重新打开只影响之后重生成的根，历史期间
+/// 未算或已陈旧的房间边不会凭模型水位自动发现，需显式执行该库的模型重建来补齐。
+/// 护栏：启动横幅与 `/health` 的 `room_membership` 栏必须把这项代价说清楚。
 ///
-/// 默认值的两次翻转都有据可查：
+/// 它不是退役中的 `room_incremental`（ADR-073 D7）：那个键门的「房间阶段」已经没了，
+/// 如今只剩空闲轮一句播报，不管任何计算。
 ///
-/// * 2026-08-10 取假——现场压着 2580 个房间目标，全是查不到几何实例的构件，每页
-///   256 个各付两次全量查询、约 88 秒，四轮下来把同期真正失败的那条模型增量整个
-///   埋在日志里。根因在模型侧（祖先链断裂 → 窗口提交不了 → 几何永远不出现），
-///   先关掉房间这半边，让模型增量的正确性能被单独看清楚。
-/// * 2026-08-12 取真——那批空转目标已经收干净（`/update/pending-units` 的
-///   `room_units` 为空），而关着的代价此刻更贵：房间归属只在删除时还会被清理，
-///   搬家后的重算全靠下一次启动全量重建回补，而那条兜底路径本身还排在
-///   `startup_autorun` 那道门之后（`lib.rs` 的 `skip_startup_room_build` 次序），
-///   默认部署里等于没有回补通道。要单独排查模型增量时，用
-///   `AIOS_ROOM_INCREMENTAL=0` 临时关掉一次即可。
-///
-/// **关闭期间错过的变更靠重启时的启动全量重建回补，这个闭环不需要额外人工动作**：
-/// 开关取值进程内固定（配置经 `load_ext_fields` 的 `OnceLock` 只读一次，环境变量
-/// 随进程出生定死），改开关必然伴随重启；而增量链的两条空间提交（暂存尾事务、
-/// 直写 durable 事务）无论开关都递增 spatial epoch——关着开关只摘 `room_recalc`
-/// 语句，epoch 照 bump（见 `aabb_refresh` 直写分支的注释）——于是「关闭期间发生过
-/// 任何空间提交」⇒ 启动的 `reconcile_startup_room_build` stamp 对账必失配 ⇒ 全量
-/// 重建必跑；对账相等则说明关闭期间真的无可回补。全量/手动生成路径不递增 epoch，
-/// 但本就以整体房间重建收尾，不在此闭环内。唯一要盯的：启动全量重建失败只降级
-/// 告警、不阻断启动（房间是可事后重建的派生数据，ADR-010 第 8 条落地口径），那种
-/// 情况下关闭期间的陈旧会留到下一次成功的全量重建——看启动日志的房间重建行。
-///
-/// 环境变量 [`ROOM_INCREMENTAL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
-pub fn room_incremental() -> bool {
+/// 环境变量 [`ROOM_MEMBERSHIP_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn room_membership() -> bool {
     #[cfg(test)]
-    match ROOM_INCREMENTAL_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+    match ROOM_MEMBERSHIP_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
         1 => return true,
         2 => return false,
         _ => {}
     }
-    effective_room_incremental(
-        load_ext_fields().room_incremental,
-        std::env::var(ROOM_INCREMENTAL_ENV).ok().as_deref(),
+    effective_room_membership(
+        load_ext_fields().room_membership,
+        std::env::var(ROOM_MEMBERSHIP_ENV).ok().as_deref(),
     )
 }
 
-/// 单测里把 [`room_incremental`] 摁成某个取值的进程内覆盖（0 = 按配置来）。
+/// 单测里把 [`room_membership`] 摁成某个取值的进程内覆盖（0 = 按配置来）。
 ///
-/// 为什么不用环境变量：这个开关的**两条分支都得有用例走到**，而 lib 测试是一个
-/// 多线程进程，`std::env::set_var` 在 2024 edition 起就是 unsafe 的（并发读环境
-/// 是数据竞争）。覆盖整段挂在 `cfg(test)` 下，发布二进制里连这几行都不存在。
+/// 形状与 [`RoomIncrementalOverride`] 同一套、理由同一条：两条分支都得有用例走到，而
+/// lib 测试是多线程进程，`std::env::set_var` 不能用。整段挂在 `cfg(test)` 下。
 #[cfg(test)]
-static ROOM_INCREMENTAL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static ROOM_MEMBERSHIP_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 #[cfg(test)]
-static ROOM_INCREMENTAL_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ROOM_MEMBERSHIP_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 覆盖的作用域守卫：离开作用域即恢复「按配置来」，用例之间不会互相串。
 #[cfg(test)]
-pub(crate) struct RoomIncrementalOverride {
+pub(crate) struct RoomMembershipOverride {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
-impl RoomIncrementalOverride {
+impl RoomMembershipOverride {
     pub(crate) fn set(on: bool) -> Self {
-        let lock = ROOM_INCREMENTAL_OVERRIDE_LOCK
+        let lock = ROOM_MEMBERSHIP_OVERRIDE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ROOM_INCREMENTAL_OVERRIDE
-            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        ROOM_MEMBERSHIP_OVERRIDE.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
         Self { _lock: lock }
     }
 }
 
 #[cfg(test)]
-impl Drop for RoomIncrementalOverride {
+impl Drop for RoomMembershipOverride {
     fn drop(&mut self) {
-        ROOM_INCREMENTAL_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+        ROOM_MEMBERSHIP_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-fn effective_room_incremental(configured: Option<bool>, env_override: Option<&str>) -> bool {
+fn effective_room_membership(configured: Option<bool>, env_override: Option<&str>) -> bool {
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
-        .unwrap_or(true)
-}
-
-/// 环境变量名：一次性覆盖 [`room_resident_model`]，不必改配置文件。
-pub const ROOM_RESIDENT_MODEL_ENV: &str = "AIOS_ROOM_RESIDENT_MODEL";
-
-/// 常驻房间模型开不开（`DbOption.toml` 的 `room_resident_model`，**默认 true**）。
-///
-/// 计划 `docs/plans/2026-09-07-resident-room-model-plan.md`（Q12 (a)）：房间→面板拓扑与在册
-/// 面板几何进程内常驻，库里的 `room_published_topology` / `room_published_inst` 从此是存储与
-/// 参照。开着时 `run_cli` 在空间树装载之后、watcher / worker 之前跑一次
-/// `room_resident::initialize_at_startup`——只认 `spatial_compute`，不看 `startup_data_ready` /
-/// 上弦位 / `startup_autorun` / `watch_dbnums`（第 5 轮 Q17–Q20：房间是参照系，不是增量的一部分）。
-/// 关着时走兼容读取路径；环境变量仍可为单次诊断显式关闭。
-///
-/// 环境变量 [`ROOM_RESIDENT_MODEL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
-pub fn room_resident_model() -> bool {
-    effective_room_resident_model(
-        load_ext_fields().room_resident_model,
-        std::env::var(ROOM_RESIDENT_MODEL_ENV).ok().as_deref(),
-    )
-}
-
-fn effective_room_resident_model(configured: Option<bool>, env_override: Option<&str>) -> bool {
-    env_override
-        .and_then(parse_bool_flag)
-        .or(configured)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// 环境变量名：一次性覆盖 [`model_xgeometry_gate`]，不必改配置文件。
@@ -1679,8 +1711,9 @@ fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&
 }
 
 /// 单测里摁住 [`model_xgeometry_gate`] 的进程内覆盖（0 = 按配置来）。
-/// 形状与理由同 [`RoomIncrementalOverride`]：两条分支都得有用例走到，而测试进程
-/// 里 `set_var` 是数据竞争。
+/// 两条分支都得有用例走到，而 lib 测试是一个多线程进程，`std::env::set_var` 在 2024 edition
+/// 起就是 unsafe 的（并发读环境是数据竞争）；覆盖整段挂在 `cfg(test)` 下，发布二进制里
+/// 连这几行都不存在。本文件里其余 `*Override` 守卫都是这一套形状。
 #[cfg(test)]
 static MODEL_XGEOMETRY_GATE_OVERRIDE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(0);
@@ -2246,26 +2279,41 @@ mod tests {
         assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
-    /// **默认是外置库**（2026-09-07 拍板，翻回 2026-09-04 之前的口径）：两个键都没写 =
-    /// `external`。默认 `spawned-mem` 服役期间，任何指着一台手工起的库的现场配置都会被
-    /// `judge_port` 判「端口上是一台没有署名的 SurrealDB」而拒绝启动——那台库不可能有本
-    /// 进程的署名，配置又没说要连它，两边都没错，人却起不来。自带存储从此要显式要。
+    /// **默认是自带 kv-mem**（2026-09-11 拍板）：两个形态键都没写 = `spawned-mem`。
+    /// 外置库部署必须显式写 `external`，不能让旧现场配置靠一个会变化的默认值决定介质。
     #[test]
-    fn the_default_store_mode_is_external() {
+    fn the_default_store_mode_is_spawned_mem() {
         assert_eq!(
             effective_store_mode(None, None, None, None),
-            StoreMode::External
+            StoreMode::SpawnedMem
         );
         assert_eq!(
-            effective_store_mode(Some("spawned-mem"), None, None, None),
-            StoreMode::SpawnedMem,
-            "开箱即用那一档仍然要得到，只是要显式写"
+            effective_store_mode(Some("external"), None, None, None),
+            StoreMode::External,
+            "外置库仍然可显式选择"
+        );
+    }
+
+    #[test]
+    fn model_cache_policy_is_an_incremental_overlay_and_rejects_database_backfill() {
+        assert_eq!(parse_model_cache_mode(None), None);
+        assert_eq!(
+            parse_model_cache_mode(Some(" memory_first ")),
+            Some(ModelCacheMode::IncrementalOverlay)
+        );
+        assert_eq!(parse_model_cache_mode(Some("DATABASE-FIRST")), None);
+        assert_eq!(
+            parse_model_cache_mode(Some("write-behind")),
+            Some(ModelCacheMode::IncrementalOverlay)
+        );
+        assert_eq!(
+            ModelCacheMode::IncrementalOverlay.as_str(),
+            "incremental-overlay"
         );
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
-    /// `in_memory_db = true` 是它唯一还能改变结论的取值；`false` 与不写都是外置库，
-    /// 与新默认一致。
+    /// `in_memory_db = false` 必须继续得到 external，不能被新的 spawned-mem 默认盖掉。
     #[test]
     fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
         assert_eq!(
@@ -2420,14 +2468,14 @@ mod tests {
     /// 漏写的症状一律不是报错，而是「测试莫名其妙全查不到数据」「开机后 `pe` 一行都不进」
     /// ——看上去像解析坏了，实际是配置少了一行。
     ///
-    /// 默认值本身翻过两次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
-    /// `external`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
+    /// 默认值本身翻过三次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
+    /// `external`，2026-09-11 再改为 `spawned-mem`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
     /// （它是从 `store_mode` 派生的）。护栏守的正是「不许有配置去依赖那个会变的默认」，
     /// 所以它与默认值当前指向哪一档无关。
     ///
     /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
     #[test]
-    fn every_db_option_fixture_declares_its_store_mode_and_data_face() {
+    fn every_db_option_fixture_declares_its_store_mode() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut missing = Vec::new();
         let mut checked = 0;
@@ -2454,7 +2502,7 @@ mod tests {
                         !line.starts_with('#') && line.starts_with(key)
                     })
                 };
-                for key in ["store_mode", "data_face"] {
+                for key in ["store_mode"] {
                     if !declares(key) {
                         missing.push(format!("{name} 缺 {key}"));
                     }
@@ -2464,19 +2512,39 @@ mod tests {
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
             missing.is_empty(),
-            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=external、\
-             data_face=ingest）翻过两次，依赖它的配置每翻一次就静默换一回介质 / 数据面"
+            "这些配置没有显式声明存储形态：{missing:?}。data_face 由 store_mode 统一派生，\
+             不要求每份配置重复声明"
         );
     }
 
-    /// 缺配置就是「算增量房间」（2026-08-12 起）：关着时房间归属只在删除路径被
-    /// 清理，搬家后的重算没有任何自动回补通道——兜底的启动全量重建排在
-    /// `startup_autorun` 之后，而它自己默认也是关的。要关得显式写出来。
+    /// ADR-073 D7 / 源码钉 6：房间阶段的开关随流程退役，配置结构里不再有这两个键；
+    /// `data_incremental` / `model_incremental` 不动。
     #[test]
-    fn room_incremental_is_on_unless_someone_turns_it_off() {
-        assert!(effective_room_incremental(None, None));
-        assert!(!effective_room_incremental(Some(false), None));
-        assert!(effective_room_incremental(Some(true), None));
+    fn the_room_stage_switches_are_gone_from_the_configuration() {
+        let names = ext_field_names();
+        for retired in [
+            concat!("room_", "incremental"),
+            concat!("room_", "resident_model"),
+        ] {
+            assert!(
+                !names.iter().any(|name| name == retired),
+                "`{retired}` 随房间流程退役，配置结构里不该再有它: {names:?}"
+            );
+        }
+        for kept in ["data_incremental", "model_incremental"] {
+            assert!(names.iter().any(|name| name == kept), "{kept} 不动");
+        }
+        let source = include_str!("options.rs");
+        for retired in [
+            concat!("AIOS_ROOM_", "INCREMENTAL"),
+            concat!("AIOS_ROOM_", "RESIDENT_MODEL"),
+        ] {
+            assert_eq!(
+                source.matches(retired).count(),
+                0,
+                "环境变量 `{retired}` 随房间流程退役（ADR-073 源码钉 6）"
+            );
+        }
     }
 
     /// 元数据门默认开（2026-09-08 用户拍板接线）；它是「少算」方向的开关，关的位置必须留着，
@@ -2523,35 +2591,43 @@ mod tests {
         ));
     }
 
-    /// 两个方向都要能被环境变量压住：配置里写死 `true` 的部署也得有办法临时关掉，
-    /// 反过来排查房间问题时也得能临时开一次而不改文件。拼错的值退回配置值，
-    /// 理由同 [`effective_startup_autorun`]。
+    /// 房间归属计算默认关：缺配置时不做房间增量更新；配置或环境变量能显式打开，
+    /// 环境变量两个方向都压过配置，拼错的值退回配置值或默认值。
     #[test]
-    fn the_room_incremental_env_override_wins_in_both_directions() {
-        assert!(effective_room_incremental(Some(false), Some("on")));
-        assert!(!effective_room_incremental(Some(true), Some("0")));
-        assert!(effective_room_incremental(None, Some("yes")));
-        assert!(effective_room_incremental(Some(true), Some("ture")));
-        assert!(!effective_room_incremental(Some(false), Some("ture")));
-        assert!(effective_room_incremental(None, Some("ture")));
-    }
-
-    /// 常驻房间模型**默认开**：缺配置、拼错的环境变量都保持默认；配置或环境变量仍能
-    /// 显式关闭，环境变量优先于配置。
-    #[test]
-    fn room_resident_model_is_on_unless_someone_turns_it_off() {
-        assert!(effective_room_resident_model(None, None));
-        assert!(effective_room_resident_model(Some(true), None));
-        assert!(!effective_room_resident_model(Some(false), None));
-        assert!(effective_room_resident_model(None, Some("1")));
-        assert!(!effective_room_resident_model(Some(true), Some("off")));
-        assert!(effective_room_resident_model(Some(true), Some("ture")));
-        assert!(effective_room_resident_model(None, Some("ture")));
+    fn room_membership_is_off_unless_someone_turns_it_on() {
+        assert!(!effective_room_membership(None, None));
+        assert!(effective_room_membership(Some(true), None));
+        assert!(!effective_room_membership(Some(false), None));
+        assert!(effective_room_membership(None, Some("1")));
+        assert!(!effective_room_membership(None, Some("0")));
+        assert!(!effective_room_membership(Some(true), Some("off")));
+        assert!(effective_room_membership(Some(false), Some("on")));
+        assert!(effective_room_membership(Some(true), Some("ture")));
+        assert!(!effective_room_membership(Some(false), Some("ture")));
+        assert!(!effective_room_membership(None, Some("ture")));
         assert!(
             ext_field_names()
                 .iter()
-                .any(|name| name == "room_resident_model"),
+                .any(|name| name == "room_membership"),
             "配置读坏时的告警名单从结构体导出，新键得在里面"
+        );
+    }
+
+    /// 测试覆盖两个方向都得能摁住，且离开作用域即恢复「按配置来」。
+    #[test]
+    fn the_room_membership_override_pins_both_branches_and_releases() {
+        {
+            let _off = RoomMembershipOverride::set(false);
+            assert!(!room_membership());
+        }
+        {
+            let _on = RoomMembershipOverride::set(true);
+            assert!(room_membership());
+        }
+        assert_eq!(
+            ROOM_MEMBERSHIP_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "守卫落下后必须回到「按配置来」"
         );
     }
 
@@ -2644,6 +2720,7 @@ mod tests {
         assert_eq!(fields.watch_dbnums, None);
         assert_eq!(fields.data_batch_workers, None);
         assert_eq!(fields.http_api_addr, None);
+        assert_eq!(fields.http_public_addr, None);
     }
 
     /// **本轮要修的就是这一条。** 一个字段类型写错，此前会让整张扩展表静默回落
@@ -2701,7 +2778,8 @@ mod tests {
             "startup_autorun = false\n\
              watch_dbnums = [8000, 7998]\n\
              data_batch_workers = 4\n\
-             http_api_addr = \"0.0.0.0:8020\"\n",
+             http_api_addr = \"0.0.0.0:8020\"\n\
+             http_public_addr = \"192.168.1.9:8020\"\n",
         );
         let fields = read_ext_fields(Some(path.into())).expect("合法配置要照常读出来");
         assert_eq!(fields.startup_autorun, Some(false));
@@ -2711,6 +2789,7 @@ mod tests {
         );
         assert_eq!(fields.data_batch_workers, Some(4));
         assert_eq!(fields.http_api_addr.as_deref(), Some("0.0.0.0:8020"));
+        assert_eq!(fields.http_public_addr.as_deref(), Some("192.168.1.9:8020"));
     }
 
     /// TOML 本身就坏掉时同样要出声，理由与字段类型写错完全一样：文件在那儿、
@@ -2745,6 +2824,7 @@ mod tests {
             "watch_dbnums",
             "data_batch_workers",
             "http_api_addr",
+            "http_public_addr",
         ] {
             assert!(notice.contains(field), "话里要点到 {field}：{notice}");
         }

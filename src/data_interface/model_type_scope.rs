@@ -153,7 +153,7 @@ pub fn held_reason(noun: &str) -> String {
     let (types, origin) = resolved();
     format!(
         "本进程按 {MODEL_TYPE_CONFIG_KEY} [{}] 限定模型增量类型（来自{}），类型 {noun} 的生成根\
-         留在 model_update_pending 里不消费（这是模型类型限定，不是监听限定，数据增量不受影响）",
+         本任务不生成、留待名单放开后的下一窗（这是模型类型限定，不是监听限定，数据增量不受影响）",
         render_nouns(&types),
         origin.describe()
     )
@@ -167,8 +167,8 @@ pub fn mode_notice() -> Option<String> {
     (!types.is_empty()).then(|| {
         format!(
             "本进程处于模型类型限定模式：模型增量只生成 / 清理 {MODEL_TYPE_CONFIG_KEY} [{}] 里的\
-             生成根类型，其余类型的 regen_root / delete_cleanup 行照常入队但本进程不消费\
-             （凭证不前移、重启后随退化窗口重排、名单一撤即照常消费）；数据增量、Transform、\
+             生成根类型，其余类型的生成根在本任务里暂扣不生成\
+             （凭证不前移、随下一窗重排、名单一撤即照常生成）；数据增量、Transform、\
              CascadeExpand、房间任务与按需 ensure 不受限。限定来自{}——这是被显式收窄的范围，\
              不是完整运行状态。",
             render_nouns(&types),

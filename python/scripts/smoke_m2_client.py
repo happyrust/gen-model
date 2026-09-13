@@ -30,9 +30,6 @@ def main() -> None:
     tasks = client.tasks(limit=5)
     print(f"/tasks: {len(tasks.get('tasks', tasks if isinstance(tasks, list) else []))} 行")
 
-    units = client.pending_units()
-    print(f"/update/pending-units: {len(units['units'])} 行")
-
     preview = client.update_preview()
     print(f"/update/preview: up_to_date={preview['up_to_date']} dbnums={len(preview['dbnums'])}")
 

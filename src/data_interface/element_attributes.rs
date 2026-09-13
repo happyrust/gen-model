@@ -21,10 +21,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use super::cata_closure::InMemoryCataLocator;
-use super::direct_store::{DirectElementSnapshot, DirectSchema, DirectStore, DirectStoreError};
+use super::direct_store::{DirectElementSnapshot, DirectSchema, DirectStoreError};
 use super::e3d_collector::open_pinned_set;
 use super::mdb_membership::MdbMembership;
+use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
 use super::mirror_spool::MirrorSpool;
 use super::read_through::{
     ReadThroughSource, render_rows_with_catalog, rendered_transaction_batches,
@@ -140,50 +140,33 @@ impl QueueStats {
 pub struct ElementAttributeService {
     project: String,
     mdb: String,
-    store: Arc<DirectStore>,
-    catalog: Arc<UdaCatalog>,
+    store: Arc<MdbReadStore>,
+    reader: Arc<MdbReadProvider>,
+    catalog: Arc<super::uda_catalog_provider::UdaCatalogProvider>,
     membership: Arc<MdbMembership>,
     backup_tx: mpsc::Sender<()>,
     spool: Arc<MirrorSpool>,
     stats: Arc<QueueStats>,
-    file_fingerprint: u64,
-    skeleton_fingerprint: Vec<(u32, std::path::PathBuf, u32)>,
+    /// Process-local read-view epoch.
     snapshot_epoch: u64,
 }
 
 impl ElementAttributeService {
+    /// 打开属性服务：接上 `(project, mdb)` 的共享读视图（`MdbReadProvider::shared`），
+    /// 与树服务共用同一份路由目录、`DbSet` 与元素缓存。
+    ///
+    /// **不读任何元素**（切片 W5，母计划阶段 3A）：库文件由 CURD 声明定，refno 属于哪个库
+    /// 由 `RefNo::dbno()` 位解码定（`MdbReadStore::dbnum_of`），所以这里不等任何逐元素
+    /// `ref0 → dbnum` 骨架——JEU 现场那 68 秒 / 1,221,858 个元素就是它。依赖项目的目录库
+    /// （CATA / PROP）按文件头并进目录，同号跨项目副本留作 `preferred_project` 候选。
     fn open(project: &str, mdb: &str) -> anyhow::Result<(Self, mpsc::Receiver<()>)> {
         let option = aios_core::get_db_option();
-        let skeleton = super::mdb_memory_store::ensure(project, mdb)?;
-        let membership = skeleton.membership();
-        let (affiliations, files) = skeleton.locator_parts();
-        let mut locator = InMemoryCataLocator::from_parts(affiliations, files);
-        // DESI affiliation comes from the already-prewarmed MDB skeleton.  A cold
-        // read-through store has no watermark rows, so rebuilding this locator from
-        // the database (or a best-effort directory walk) would make valid tree nodes
-        // unreadable by the attribute service.  Catalogue files are then merged from
-        // every configured dependency project; merge_cata_files deliberately ignores
-        // their DESI/DICT files.
-        for dependency_project in &option.included_projects {
-            let Some(project_root) =
-                super::project_paths::resolve_project_root(option, dependency_project)
-            else {
-                continue;
-            };
-            locator.merge_cata_files(InMemoryCataLocator::build_from_dir(
-                dependency_project,
-                &project_root,
-            ));
-        }
-        anyhow::ensure!(
-            locator.ref0_count() > 0,
-            "no E3D element index could be built for MDB {mdb}"
-        );
-        let schema = Arc::new(DirectSchema::open_from_env()?);
-        let catalog = skeleton.uda_catalog();
-        let file_fingerprint = membership_fingerprint(&membership)?;
-        let skeleton_fingerprint = skeleton.session_fingerprint();
-        let store = Arc::new(DirectStore::new(schema, Arc::new(locator)));
+        let reader = MdbReadProvider::shared(project, mdb)?;
+        let membership = reader.membership.clone();
+        let schema = reader.schema.clone();
+        let store = reader.view()?;
+        let snapshot_epoch = store.epoch;
+        let catalog = super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema.clone());
         let spool = Arc::new(MirrorSpool::for_process(&option.surreal_ns, project, mdb)?);
         let (backup_tx, backup_rx) = mpsc::channel(BACKUP_QUEUE_CAPACITY);
         Ok((
@@ -191,14 +174,13 @@ impl ElementAttributeService {
                 project: project.to_owned(),
                 mdb: format!("/{}", mdb.trim_start_matches('/')),
                 store,
+                reader,
                 catalog,
                 membership,
                 backup_tx,
                 spool,
                 stats: Arc::new(QueueStats::default()),
-                file_fingerprint,
-                skeleton_fingerprint,
-                snapshot_epoch: skeleton.epoch(),
+                snapshot_epoch,
             },
             backup_rx,
         ))
@@ -222,19 +204,14 @@ impl ElementAttributeService {
     }
 
     fn is_current(&self) -> anyhow::Result<bool> {
-        if super::mdb_memory_store::stale_reason(&self.project, &self.mdb).is_some() {
-            return Ok(false);
-        }
-        let skeleton_current = super::mdb_memory_store::get(&self.project, &self.mdb)
-            .is_some_and(|store| store.session_fingerprint() == self.skeleton_fingerprint);
-        Ok(skeleton_current && membership_fingerprint(&self.membership)? == self.file_fingerprint)
+        Ok(Arc::ptr_eq(&self.store, &self.reader.view()?))
     }
 
     pub fn read(&self, refno: RefU64) -> anyhow::Result<ElementAttributesResponse> {
         let mut snapshot = self.store.element_snapshot(refno)?;
+        let catalog = self.catalog.get()?;
         let mut diagnostics = AttributeDiagnostics {
-            uda_issues: self
-                .catalog
+            uda_issues: catalog
                 .issues()
                 .iter()
                 .map(|issue| format!("{}: {}", issue.refno, issue.detail))
@@ -261,14 +238,13 @@ impl ElementAttributeService {
                 .map(|item| json!({ "name": item.name, "reason": item.reason }))
                 .collect();
         }
-        let known_uda_keys = self
-            .catalog
+        let known_uda_keys = catalog
             .definitions()
             .iter()
             .flat_map(|definition| [Some(definition.key), definition.old_key])
             .flatten()
             .collect::<HashSet<_>>();
-        self.catalog
+        catalog
             .materialize_for_element(&mut snapshot.extraction, &snapshot.explicit_attributes);
 
         let noun = snapshot
@@ -314,7 +290,7 @@ impl ElementAttributeService {
         attributes.sort_by(|left, right| left.name.cmp(&right.name));
         attributes.dedup_by(|left, right| left.name == right.name);
 
-        let backup = self.offer_backup(&snapshot);
+        let backup = self.offer_backup(&snapshot, &catalog);
         let complete = diagnostics.outside_schema.is_empty()
             && diagnostics.shape_conflicts.is_empty()
             && diagnostics.undecoded.is_empty()
@@ -388,6 +364,7 @@ impl ElementAttributeService {
         );
         let started = Instant::now();
         let root_snapshot = self.store.element_snapshot(root)?;
+        let catalog = self.catalog.get()?;
         if !crate::options::store_mode().is_durable() {
             return Ok(EnsureReceipt {
                 status: "skipped-memory".into(),
@@ -463,7 +440,7 @@ impl ElementAttributeService {
                     .explicit_attributes
                     .iter()
                     .filter(|attribute| attribute.is_uda)
-                    .filter_map(|attribute| self.catalog.by_key(attribute.hash).cloned()),
+                    .filter_map(|attribute| catalog.by_key(attribute.hash).cloned()),
             );
         }
 
@@ -487,7 +464,7 @@ impl ElementAttributeService {
             })
             .await
             .context("ensure file-open task failed")??;
-            let uda_keys = UdaKeyMap::from_catalog(&self.catalog);
+            let uda_keys = UdaKeyMap::from_catalog(&catalog);
             definitions.sort_by_key(|definition| definition.key);
             definitions.dedup_by_key(|definition| definition.key);
             let prerequisites = definitions
@@ -495,7 +472,7 @@ impl ElementAttributeService {
                 .map(uda_definition_upsert)
                 .collect::<Vec<_>>();
             let rendered =
-                render_rows_with_catalog(&set, &source, &refnos, &uda_keys, Some(&self.catalog))?;
+                render_rows_with_catalog(&set, &source, &refnos, &uda_keys, Some(&catalog))?;
             self.spool.persist(
                 self.snapshot_epoch,
                 vec![(source.dbnum, source.sesno)],
@@ -537,6 +514,7 @@ impl ElementAttributeService {
             id: Value,
             dbnum: i32,
         }
+        let catalog = self.catalog.get()?;
         let started = Instant::now();
         let dbnums = self
             .membership
@@ -572,7 +550,7 @@ impl ElementAttributeService {
                             .explicit_attributes
                             .iter()
                             .filter(|attribute| attribute.is_uda)
-                            .filter_map(|attribute| self.catalog.by_key(attribute.hash).cloned()),
+                            .filter_map(|attribute| catalog.by_key(attribute.hash).cloned()),
                     );
                     groups
                         .entry((
@@ -586,7 +564,8 @@ impl ElementAttributeService {
                 }
                 Err(
                     DirectStoreError::NoSuchElement { .. }
-                    | DirectStoreError::UnresolvedRef0 { .. },
+                    | DirectStoreError::InvalidRefNo { .. }
+                    | DirectStoreError::DbNotInMdb { .. },
                 ) => {
                     missing.entry(row.dbnum).or_default().push(id);
                 }
@@ -610,7 +589,7 @@ impl ElementAttributeService {
             requested: rows.len(),
             ..EnsureReceipt::default()
         };
-        let uda_keys = UdaKeyMap::from_catalog(&self.catalog);
+        let uda_keys = UdaKeyMap::from_catalog(&catalog);
         for ((dbnum, db_type, file, sesno), refnos) in groups {
             let source = ReadThroughSource {
                 dbnum: dbnum as u32,
@@ -631,7 +610,7 @@ impl ElementAttributeService {
                 &source,
                 &refnos,
                 &uda_keys,
-                Some(self.catalog.clone()),
+                Some(catalog.clone()),
                 &prerequisites,
             )
             .await?;
@@ -661,7 +640,7 @@ impl ElementAttributeService {
         Ok(receipt)
     }
 
-    fn offer_backup(&self, snapshot: &DirectElementSnapshot) -> &'static str {
+    fn offer_backup(&self, snapshot: &DirectElementSnapshot, catalog: &UdaCatalog) -> &'static str {
         if !crate::options::store_mode().is_durable() {
             return "skipped-memory";
         }
@@ -683,16 +662,16 @@ impl ElementAttributeService {
                 .explicit_attributes
                 .iter()
                 .filter(|attribute| attribute.is_uda)
-                .filter_map(|attribute| self.catalog.by_key(attribute.hash))
+                .filter_map(|attribute| catalog.by_key(attribute.hash))
                 .map(uda_definition_upsert)
                 .collect::<Vec<_>>();
-            let keys = UdaKeyMap::from_catalog(&self.catalog);
+            let keys = UdaKeyMap::from_catalog(&catalog);
             let rendered = render_rows_with_catalog(
                 &set,
                 &source,
                 &[snapshot.extraction.refno],
                 &keys,
-                Some(&self.catalog),
+                Some(&catalog),
             )?;
             self.spool.persist(
                 self.snapshot_epoch,
@@ -820,6 +799,12 @@ impl ElementAttributeProvider {
         }
     }
 
+    pub async fn cache_stats(&self) -> (Vec<i32>, usize) {
+        self.service.read().await.as_ref().map(|service|
+            (service.store.opened_dbnums(), service.store.cached_elements()))
+            .unwrap_or_default()
+    }
+
     pub async fn refresh_cached(&self) -> anyhow::Result<EnsureReceipt> {
         self.get().await?.refresh_cached().await
     }
@@ -851,42 +836,6 @@ fn value_as_refno_id(value: &Value) -> Option<(RefU64, String)> {
     }
     let refno = RefU64::from(raw.parse::<u64>().ok()?);
     Some((refno, refno.to_string()))
-}
-
-fn membership_fingerprint(membership: &MdbMembership) -> anyhow::Result<u64> {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    membership.project().hash(&mut hasher);
-    membership.mdb().hash(&mut hasher);
-    for db in membership.databases() {
-        db.dbnum.hash(&mut hasher);
-        db.styp.hash(&mut hasher);
-        db.path.hash(&mut hasher);
-        if let Some(path) = &db.path {
-            let metadata = std::fs::metadata(path)
-                .with_context(|| format!("read E3D identity for {}", path.display()))?;
-            metadata.len().hash(&mut hasher);
-            metadata.modified().ok().hash(&mut hasher);
-            if let Ok(header) = super::db_file_header::DbFileHeader::read(path) {
-                header.latest_sesno().hash(&mut hasher);
-            }
-        }
-    }
-    Ok(hasher.finish())
-}
-
-pub(crate) fn load_uda_catalog(
-    membership: &MdbMembership,
-    schema: &DirectSchema,
-) -> anyhow::Result<UdaCatalog> {
-    let dicvir = schema.template_dir().join("dicvir.dat");
-    let mut merged = UdaCatalog::default();
-    for dictionary in membership.dictionary_paths() {
-        let catalog = UdaCatalog::read(&dictionary, &dicvir, schema.attlib())
-            .map_err(|error| anyhow::anyhow!("read DICT {}: {error}", dictionary.display()))?;
-        merged.merge_in_order(catalog);
-    }
-    Ok(merged)
 }
 
 fn identity_attribute(name: &str, value: Value) -> AttributeValue {
@@ -1107,5 +1056,78 @@ mod tests {
             text: Some("OPEN".into()),
         });
         assert_eq!(value, json!("OPEN"));
+    }
+
+    /// 共用证明（母计划 §4 不变量）：树服务与属性服务钉住的是**同一份** `Arc<MdbReadStore>`
+    /// ——同一路由目录、同一 `DbSet`、同一元素缓存。AMS `/ALL` 实跑：第二个服务首读已开库
+    /// 不再开库，同一元素再读缓存不长，全程零扫描。`read_stats` 是进程全局计数器，所以
+    /// 以 `-- --ignored --test-threads=1` 单跑，差值才稳。
+    #[test]
+    #[ignore = "requires local AMS source files"]
+    fn ams_tree_and_attribute_services_share_one_read_view() {
+        use super::super::direct_tree::DirectTreeService;
+
+        let branch = RefU64::from_two_nums(24384, 23257);
+        e3d_io::read_stats::reset();
+        let tree = DirectTreeService::open("AvevaMarineSample", "ALL").unwrap();
+        let (attributes, _backup_rx) =
+            ElementAttributeService::open("AvevaMarineSample", "ALL").unwrap();
+        // 字典归 `UdaCatalogProvider`，不在共享视图里：先暖起来，DICT 的开库不混进下面的差值。
+        attributes.catalog.get().unwrap();
+        let warmed = e3d_io::read_stats::snapshot();
+
+        // 1. 树服务先读：目标库（以及描述符引用到的目录库）在这里打开。
+        let chain = tree.ancestors(branch).unwrap();
+        assert!(chain.len() > 1, "{chain:?}");
+        let after_tree = e3d_io::read_stats::snapshot();
+        assert!(
+            after_tree.database_opens > warmed.database_opens,
+            "the tree read is the one that opens the target database: {}",
+            after_tree.summary()
+        );
+        let cached_after_tree = attributes.store.cached_elements();
+        assert!(cached_after_tree > 0);
+
+        // 2. 属性服务首读同一元素：库已由共享视图打开，开库计数不动；元素已缓存，缓存不长。
+        let response = attributes.read(branch).unwrap();
+        assert_eq!(response.dbnum, tree.dbnum_of(branch).unwrap() as i32);
+        let after_attributes = e3d_io::read_stats::snapshot();
+        assert_eq!(
+            after_attributes.database_opens, after_tree.database_opens,
+            "attribute service reopened an already-open database: {}",
+            after_attributes.summary()
+        );
+        assert_eq!(attributes.store.cached_elements(), cached_after_tree);
+
+        // 3. 同一份视图，不是两份长得一样的。
+        let tree_view = tree.read_view();
+        assert!(Arc::ptr_eq(&attributes.store, &tree_view));
+        assert_eq!(attributes.snapshot_epoch, tree_view.epoch);
+
+        // 4. 两个服务各再读一次同一元素：缓存仍不长。
+        attributes.read(branch).unwrap();
+        tree.ancestors(branch).unwrap();
+        assert_eq!(attributes.store.cached_elements(), cached_after_tree);
+
+        // 5. 全程零扫描。
+        let stats = e3d_io::read_stats::snapshot();
+        assert_eq!(
+            (stats.scan_calls, stats.scanned_elements),
+            (0, 0),
+            "{}",
+            stats.summary()
+        );
+        eprintln!(
+            "AMS shared view: ancestors={} epoch={} opened_dbnums={:?} cached_elements={} \
+             database_opens(warm/tree/attributes)={}/{}/{} | {}",
+            chain.len(),
+            tree_view.epoch,
+            attributes.store.opened_dbnums(),
+            cached_after_tree,
+            warmed.database_opens,
+            after_tree.database_opens,
+            after_attributes.database_opens,
+            stats.summary()
+        );
     }
 }

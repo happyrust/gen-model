@@ -1,0 +1,2771 @@
+--- a/src/db_element.rs
++++ b/src/db_element.rs
+@@ -1,1211 +1,1308 @@
+-//! `DbElement` 句柄门面：对标 core.dll 之上的 `Aveva.Core.Database.DbElement` 读侧 API。
+-//!
+-//! 对标口径见 gen-model `docs/plans/2026-08-30-core-dll-api-alignment.md`（S1）。
+-//! 行为规格 = .NET 反射面（`.ida_scratch/e3d_dbelem_api.txt`），原生落点 = core.dll
+-//! （`0x5xxxxxx`）的 FORTRAN 读库家族：树导航 `idlib/IDQNXT·FORWAR`、typed getter
+-//! `getattlib/GAT*`、ref 工具 `dbreflib/NULREF·EQREF`。本文件不复刻它们的实现，
+-//! 只把本 crate 已有的原语（索引下降、记录解析、描述符抽取）收拢成同语义的句柄面。
+-//!
+-//! 几条语义边界，都是量出来的，不是设计出来的：
+-//!
+-//! * **`IsDeleted` 没有墓碑位。** dabacon 的删除判据是「活树键集不含它」——单时点
+-//!   只能回答 [`DbElement::exists`]；跨时点判删走 `index::diff`（矩阵 G 组）。
+-//! * **成员表保持文件原序**（G3 约束）：不排序、不去重。`build/NXTITM`
+-//!   （0x102547f5）就是这么遍历的，生成链的成员序敏感（BRAN 管路）。
+-//! * **名字没有原生索引。** dabacon 只有 refno 主索引，名字是一条存储属性
+-//!   （`getattlib/GATSTR` 读 NAME），所以 [`DbSet::find_named`] 是一次 Named 档
+-//!   全树扫——这是原生语义的成本。要反复按名查的调用方自建加速结构
+-//!   （gen-model 的 `direct_index` 就是），别在循环里调这条。
+-//! * **typed getter 按文件自报的形状投影**（[`DescriptorValue`]）。DB 读侧那套
+-//!   「schema 定形」（`NamedAttrMap`）是消费方语义，留在 gen-model 的
+-//!   `direct_attmap`，本 crate 不搬也不复制——一个形状两处权威必然分叉。
+-//!
+-//! 跨库：`RefNo` 自带库号（[`RefNo::dbno`]，core.dll `sub_5AEB6B0` 的位布局），
+-//! 引用跳转按它到 [`DbSet`] 池里找已开库。没注册的库**报错**，不猜；装了
+-//! [`DbFileResolver`] 的池子会先问一次 resolver（gen-model 拿 `CataDbLocator`
+-//! 实现它，就得到 `DirectStore::pin_from_locator` 同款的按需补开）。
+-
+-use std::collections::HashMap;
+-use std::path::{Path, PathBuf};
+-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+-
+-use crate::element_name;
+-use crate::engine::{ReadOnlyEngine, ResolveError, ScanTier};
+-use crate::error::E3dReaderError;
+-use crate::record::catalogue_eval::{AttributeNumber, ExpressionForm, ParamEnv};
+-use crate::record::descriptor::{stored_expression_words, DescriptorValue, ElementExtraction};
+-use crate::record::element::ParsedElement;
+-use crate::record::template::TemplateProvider;
+-use crate::record::{catalogue_expr, catalogue_pml};
+-use crate::refno::RefNo;
+-
+-/// 开一个库所需的文件三元组：库文件、该库类型的模板文件、时点。
+-#[derive(Debug, Clone, PartialEq, Eq)]
+-pub struct DbFilePin {
+-    pub file: PathBuf,
+-    /// 该库类型的 `*vir.dat` 模板（`DESI` → `desvir.dat`）。见 [`template_file_for`]。
+-    pub template: PathBuf,
+-    /// 库类型（`DESI`/`CATA`/…）。给了就校验模板文件头的 `template_type`，
+-    /// 拿错模板（用 desvir 抽 CATA 库）读出来的是别人的 schema，宁可开库就报。
+-    pub db_type: Option<String>,
+-    /// `Some(n)` = 按会话 n 打开（copy-on-write 索引选哪棵树下降）；
+-    /// `None` = 开库那一刻解一次文件自报的最新，然后在本池生命周期内冻住——
+-    /// 与 gen-model `DirectStore` 对目录库的语义一致，**不是**「每次读最新」。
+-    pub sesno: Option<u32>,
+-}
+-
+-/// E3D 的模板命名法：通常是库类型前三字母小写 + `vir.dat`。
+-///
+-/// Global DB 是安装格式里的唯一历史例外：文件头/模板类型自报 `GLOB`，但 AVEVA
+-/// 发布的文件名是 `glbvir.dat`，不是机械截断得到的 `glovir.dat`。其余类型仍派生，
+-/// 不维护一张会在新类型上静默退成 DESI 的不完整表。
+-pub fn template_file_for(template_dir: &Path, db_type: &str) -> Result<PathBuf, DbElementError> {
+-    let stem = if db_type.eq_ignore_ascii_case("GLOB") {
+-        "glb".to_string()
+-    } else {
+-        db_type.chars().take(3).collect::<String>().to_lowercase()
+-    };
+-    if stem.chars().count() != 3 {
+-        return Err(DbElementError::Open {
+-            file: template_dir.to_path_buf(),
+-            detail: format!("db_type {db_type:?} is too short to name a template file"),
+-        });
+-    }
+-    Ok(template_dir.join(format!("{stem}vir.dat")))
+-}
+-
+-/// 池子没开过的库从哪来。
+-///
+-/// [`DbSet`] 遇到未注册的 dbno 时问一次；回 `None` 就地报
+-/// [`DbElementError::DbNotRegistered`]，不做第二次猜测。gen-model 侧用它的
+-/// 库定位器实现本 trait，即可复现 `DirectStore` 的跨库按需补开。
+-pub trait DbFileResolver: Send + Sync {
+-    fn resolve(&self, dbno: u32) -> Option<DbFilePin>;
+-}
+-
+-/// 门面的错误。每条都说清是哪个库/哪个元素/哪个属性，静默失效是大忌。
+-#[derive(Debug, thiserror::Error)]
+-pub enum DbElementError {
+-    #[error("db {dbno} 没注册进这个 DbSet，resolver 也给不出它的文件")]
+-    DbNotRegistered { dbno: u32 },
+-    #[error("{}: 文件自报 db {actual}，与要求的 db {expected} 不符", file.display())]
+-    DbNumberMismatch {
+-        file: PathBuf,
+-        expected: u32,
+-        actual: u32,
+-    },
+-    #[error("db {dbno} 会话 {sesno} 的索引里没有 {refno}")]
+-    NotFound { refno: RefNo, dbno: u32, sesno: u32 },
+-    #[error("db {dbno}: {source}")]
+-    Io { dbno: u32, source: E3dReaderError },
+-    #[error("open {}: {detail}", file.display())]
+-    Open { file: PathBuf, detail: String },
+-    #[error("{refno}: 记录解析失败: {detail}")]
+-    Parse { refno: RefNo, detail: String },
+-    #[error("{refno}: {source}")]
+-    Extract { refno: RefNo, source: ResolveError },
+-    #[error("元素 {refno}（{noun}）的模板里没有属性 {name}")]
+-    UnknownAttribute {
+-        refno: RefNo,
+-        noun: String,
+-        name: String,
+-    },
+-    #[error("{refno} 的属性 {name} 是 {found}，不是 {wanted}")]
+-    TypeMismatch {
+-        refno: RefNo,
+-        name: String,
+-        found: String,
+-        wanted: &'static str,
+-    },
+-    #[error("从 {start} 上溯 owner 链在 {at} 转回头了，没到根")]
+-    OwnerCycle { start: RefNo, at: RefNo },
+-    /// E3D 现算的伪属性（`POS`/`ORI` 在电缆桥架件上、`DDES` 之类）没算出来。
+-    ///
+-    /// 与 [`DbElementError::UnknownAttribute`] 分开：属性在字典里**有**、只是
+-    /// 值不在记录里而要按别处的数据推——推不出来是数据关系断了（`POSREF`
+-    /// 指空、路径没有点），不是模板缺字段。Core 那头对应的是 `getAtt` 返回
+-    /// false 并往 `MR_Message` 里塞一条编号错误。
+-    #[error("元素 {refno}（{noun}）的伪属性 {name} 现算失败: {detail}")]
+-    PseudoAttribute {
+-        refno: RefNo,
+-        noun: String,
+-        name: String,
+-        detail: String,
+-    },
+-    #[error("DbSet 里的锁被另一个线程的 panic 毒化了")]
+-    Poisoned,
+-}
+-
+-/// 一个库的打开态：引擎（已钉会话）+ 该库类型的模板 provider。
+-///
+-/// 与 gen-model `DirectStore` 的 `DbSession` 同构；文件身份守卫（FileReplaced）
+-/// 是水位/工程语义，留在消费方，这里不复制。
+-struct OpenDb {
+-    dbno: u32,
+-    engine: ReadOnlyEngine,
+-    provider: TemplateProvider,
+-    /// 实际钉住的会话号：`pin.sesno` 给了就是它，没给就是开库时解出的冻结点。
+-    pinned_sesno: u32,
+-}
+-
+-impl OpenDb {
+-    fn open(pin: &DbFilePin) -> Result<Self, DbElementError> {
+-        let fail = |detail: String| DbElementError::Open {
+-            file: pin.file.clone(),
+-            detail,
+-        };
+-        let engine = match pin.sesno {
+-            Some(sesno) => ReadOnlyEngine::open_at(&pin.file, sesno),
+-            None => ReadOnlyEngine::open(&pin.file),
+-        }
+-        .map_err(|error| fail(format!("open at {:?}: {error}", pin.sesno)))?;
+-
+-        let dbno = engine.descriptor().db_mark;
+-        let pinned_sesno = engine.session().sesno;
+-
+-        let expected_type = pin.db_type.as_deref().map(e3d_attlib::db1_hash);
+-        let provider = TemplateProvider::open(&pin.template, expected_type)
+-            .map_err(|error| fail(format!("open template {}: {error}", pin.template.display())))?;
+-
+-        Ok(Self {
+-            dbno,
+-            engine,
+-            provider,
+-            pinned_sesno,
+-        })
+-    }
+-}
+-
+-/// 按 dbno 池化的已开库集合，[`DbElement`] 句柄的宿主。
+-///
+-/// 对标 `MDB.GetDB(n)` 那一层的机制（矩阵 I 组）；MDB 的成员清单语义
+-/// （SYS 库 `CURD`）是 S4 的活，不在这里冒充。
+-///
+-/// 并发姿势与 `DirectStore` 相同：池表锁与会话锁分离，拿到 `Arc` 就放掉表锁，
+-/// 任何路径不得在持有会话锁时写池表。
+-pub struct DbSet {
+-    attlib: Arc<e3d_attlib::AttlibData>,
+-    dbs: RwLock<HashMap<u32, Arc<Mutex<OpenDb>>>>,
+-    resolver: Option<Box<dyn DbFileResolver>>,
+-    element_cache: Option<RwLock<ElementCache>>,
+-}
+-
+-/// 池级元素缓存（默认关，见 [`DbSet::with_element_cache`]）。
+-///
+-/// 两张表分开：只导航（owner / members / 类型）的路径永远碰不到 `extraction`，
+-/// 合成一张就得为每个只读类型的元素也留一份描述符抽取。
+-#[derive(Default)]
+-struct ElementCache {
+-    parsed: HashMap<RefNo, Arc<ParsedElement>>,
+-    extraction: HashMap<RefNo, Arc<ElementExtraction>>,
+-}
+-
+-impl std::fmt::Debug for DbSet {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        let dbnos = self.db_numbers();
+-        f.debug_struct("DbSet")
+-            .field("dbs", &dbnos)
+-            .field("has_resolver", &self.resolver.is_some())
+-            .finish_non_exhaustive()
+-    }
+-}
+-
+-impl DbSet {
+-    pub fn new(attlib: Arc<e3d_attlib::AttlibData>) -> Self {
+-        Self {
+-            attlib,
+-            dbs: RwLock::new(HashMap::new()),
+-            resolver: None,
+-            element_cache: None,
+-        }
+-    }
+-
+-    /// 打开**池级**元素缓存：同一个 refno 的记录解析与描述符抽取全池只做一次。
+-    ///
+-    /// 默认关，因为内存形状该由消费方决定（句柄级 `OnceLock` 是格式库的下限承诺）。
+-    /// 打开它换来的是「跨句柄」那部分重复——[`DbSet::element`] 每次都造新句柄，于是
+-    /// owner 链上溯与目录链走查（`SPRE→SPCO→CATR→SCOM→GMRE`）会把同一批祖先和同一批
+-    /// 目录件反复查索引、反复解析。
+-    ///
+-    /// 实测（ams8000，e3d-model `gen_ams`，2026-09-04）：6088 个元素跑出 88 万次记录解析
+-    /// 与 79 万次描述符抽取，**每元素真读 145 遍**，合计 5.9s，占生成总时间 88%；
+-    /// 句柄级 `OnceLock` 只挡下其中 24%。
+-    ///
+-    /// 代价是无界：缓存条目随实际读到的元素数增长，不淘汰。生成一棵子树是有界的，
+-    /// 长驻进程按库全量读则不是——那种场景自己建一个短命 `DbSet`，别开这个开关。
+-    ///
+-    /// 缓存的正确性挂在**会话钉死**上：[`DbSet::add_db`] 换库会连同该库的缓存条目一起丢，
+-    /// 因为换了时点再用旧解析读到的就是上一个时点的树。
+-    pub fn with_element_cache(mut self) -> Self {
+-        self.element_cache = Some(RwLock::new(ElementCache::default()));
+-        self
+-    }
+-
+-    pub fn with_resolver(
+-        attlib: Arc<e3d_attlib::AttlibData>,
+-        resolver: Box<dyn DbFileResolver>,
+-    ) -> Self {
+-        Self {
+-            attlib,
+-            dbs: RwLock::new(HashMap::new()),
+-            resolver: Some(resolver),
+-            element_cache: None,
+-        }
+-    }
+-
+-    /// 从 `attlib.dat` 文件直接建池。
+-    pub fn with_attlib_file(attlib_path: impl AsRef<Path>) -> Result<Self, DbElementError> {
+-        let attlib_path = attlib_path.as_ref();
+-        let attlib = e3d_attlib::AttlibData::parse_file(attlib_path).map_err(|error| {
+-            DbElementError::Open {
+-                file: attlib_path.to_path_buf(),
+-                detail: format!("parse attlib: {error}"),
+-            }
+-        })?;
+-        Ok(Self::new(Arc::new(attlib)))
+-    }
+-
+-    /// Parse an attribute library and attach an on-demand cross-database resolver.
+-    ///
+-    /// Production model generation uses this instead of preloading every catalogue
+-    /// file.  The resolver owns project/MDB selection, including same-dbnum files
+-    /// from different projects; `DbSet` only freezes the selected file on first use.
+-    pub fn with_attlib_file_and_resolver(
+-        attlib_path: impl AsRef<Path>,
+-        resolver: Box<dyn DbFileResolver>,
+-    ) -> Result<Self, DbElementError> {
+-        let attlib_path = attlib_path.as_ref();
+-        let attlib = e3d_attlib::AttlibData::parse_file(attlib_path).map_err(|error| {
+-            DbElementError::Open {
+-                file: attlib_path.to_path_buf(),
+-                detail: format!("parse attlib: {error}"),
+-            }
+-        })?;
+-        Ok(Self::with_resolver(Arc::new(attlib), resolver))
+-    }
+-
+-    /// 开一个库并按**文件自报**的库号（描述符 `db_mark`）登记。
+-    ///
+-    /// 同号重复登记以最后一次为准并丢掉旧会话——换了时点还接着用旧引擎，
+-    /// 读到的就是上一个时点的树。
+-    pub fn add_db(&self, pin: DbFilePin) -> Result<u32, DbElementError> {
+-        let opened = OpenDb::open(&pin)?;
+-        let dbno = opened.dbno;
+-        self.dbs
+-            .write()
+-            .map_err(|_| DbElementError::Poisoned)?
+-            .insert(dbno, Arc::new(Mutex::new(opened)));
+-        // 换库 = 换时点，该库此前解析出来的记录全部作废。少了这一步，池级缓存会
+-        // 把上一个会话的树一直喂下去，而且两边都不报错。
+-        self.forget_cached_db(dbno);
+-        Ok(dbno)
+-    }
+-
+-    fn forget_cached_db(&self, dbno: u32) {
+-        let Some(cache) = self.element_cache.as_ref() else {
+-            return;
+-        };
+-        let Ok(mut cache) = cache.write() else {
+-            return;
+-        };
+-        cache.parsed.retain(|refno, _| refno.dbno() != dbno);
+-        cache.extraction.retain(|refno, _| refno.dbno() != dbno);
+-    }
+-
+-    fn cached_parsed(&self, refno: RefNo) -> Option<Arc<ParsedElement>> {
+-        self.element_cache
+-            .as_ref()?
+-            .read()
+-            .ok()?
+-            .parsed
+-            .get(&refno)
+-            .cloned()
+-    }
+-
+-    fn store_parsed(&self, refno: RefNo, parsed: Arc<ParsedElement>) {
+-        let Some(cache) = self.element_cache.as_ref() else {
+-            return;
+-        };
+-        if let Ok(mut cache) = cache.write() {
+-            cache.parsed.insert(refno, parsed);
+-        }
+-    }
+-
+-    fn cached_extraction(&self, refno: RefNo) -> Option<Arc<ElementExtraction>> {
+-        self.element_cache
+-            .as_ref()?
+-            .read()
+-            .ok()?
+-            .extraction
+-            .get(&refno)
+-            .cloned()
+-    }
+-
+-    fn store_extraction(&self, refno: RefNo, extraction: Arc<ElementExtraction>) {
+-        let Some(cache) = self.element_cache.as_ref() else {
+-            return;
+-        };
+-        if let Ok(mut cache) = cache.write() {
+-            cache.extraction.insert(refno, extraction);
+-        }
+-    }
+-
+-    /// 已注册的库号，无序。
+-    pub fn db_numbers(&self) -> Vec<u32> {
+-        self.dbs
+-            .read()
+-            .map(|map| map.keys().copied().collect())
+-            .unwrap_or_default()
+-    }
+-
+-    /// 实际钉住的会话号。对拍时要把它跟每条比对记在一起：时点差不是读错。
+-    pub fn pinned_sesno(&self, dbno: u32) -> Option<u32> {
+-        let slot = self.dbs.read().ok()?.get(&dbno)?.clone();
+-        let sesno = slot.lock().ok()?.pinned_sesno;
+-        Some(sesno)
+-    }
+-
+-    /// 一个**已注册**库的类型名（`DESI` / `CATA` / …），读自文件描述符自报的 db1 类型字。
+-    ///
+-    /// 只看池里已经开着的库，**不问 resolver**——这是「已经读过的元素属于哪类库」的
+-    /// 回答（e3d-model 靠它把一次生成读到的元素分成设计侧与目录侧），不是开库的入口。
+-    /// 没注册、描述符的类型字解不出 db1 名，都回 `None`。
+-    pub fn db_type(&self, dbno: u32) -> Option<String> {
+-        let slot = self.dbs.read().ok()?.get(&dbno)?.clone();
+-        let db = slot.lock().ok()?;
+-        db.engine.descriptor().db_type_name()
+-    }
+-
+-    /// 造一个惰性句柄。不做 I/O；库是否注册、元素是否存在，都等第一次读时再说。
+-    pub fn element(self: &Arc<Self>, refno: RefNo) -> DbElement {
+-        DbElement {
+-            set: self.clone(),
+-            refno,
+-            parsed: OnceLock::new(),
+-            extraction: OnceLock::new(),
+-        }
+-    }
+-
+-    /// 这个 refno 在它所属库的选定会话里有没有被索引。
+-    ///
+-    /// 这就是单时点能回答的全部「存在性」：dabacon 没有墓碑位，「被删过」是
+-    /// 两个时点的键集差（矩阵 G 组），不是一个元素身上的标志。
+-    pub fn element_exists(&self, refno: RefNo) -> Result<bool, DbElementError> {
+-        let dbno = refno.dbno();
+-        self.with_db(dbno, |db| {
+-            db.engine
+-                .search_index(refno)
+-                .map(|found| found.is_some())
+-                .map_err(|source| DbElementError::Io { dbno, source })
+-        })
+-    }
+-
+-    /// 按存储的 NAME 精确匹配找元素，重名不折叠，原序返回。
+-    ///
+-    /// **一次 Named 档全树扫**——原生语义就没有 name 索引（见模块头）。
+-    /// 匹配的是文件里存的原文（含 `/` 前缀就得带 `/` 来查）；
+-    /// 归一化是消费方约定，不在格式库里私设。
+-    pub fn find_named(&self, dbno: u32, name: &str) -> Result<Vec<RefNo>, DbElementError> {
+-        self.with_db(dbno, |db| {
+-            let io = |source| DbElementError::Io { dbno, source };
+-            let mut out = Vec::new();
+-            for item in db.engine.scan_elements(ScanTier::Named).map_err(io)? {
+-                let element = item.map_err(io)?;
+-                if element.name.as_deref() == Some(name) {
+-                    out.push(element.refno);
+-                }
+-            }
+-            Ok(out)
+-        })
+-    }
+-
+-    fn db_slot(&self, dbno: u32) -> Result<Arc<Mutex<OpenDb>>, DbElementError> {
+-        if let Some(hit) = self
+-            .dbs
+-            .read()
+-            .map_err(|_| DbElementError::Poisoned)?
+-            .get(&dbno)
+-        {
+-            return Ok(hit.clone());
+-        }
+-        let pin = self
+-            .resolver
+-            .as_ref()
+-            .and_then(|resolver| resolver.resolve(dbno))
+-            .ok_or(DbElementError::DbNotRegistered { dbno })?;
+-        // 打开在池表锁之外做；两个线程同时开同一个库时后到的那份丢掉，多读几页，
+-        // 换不会在文件 I/O 期间攥着表锁。
+-        let opened = OpenDb::open(&pin)?;
+-        if opened.dbno != dbno {
+-            return Err(DbElementError::DbNumberMismatch {
+-                file: pin.file,
+-                expected: dbno,
+-                actual: opened.dbno,
+-            });
+-        }
+-        let fresh = Arc::new(Mutex::new(opened));
+-        let mut map = self.dbs.write().map_err(|_| DbElementError::Poisoned)?;
+-        Ok(map.entry(dbno).or_insert(fresh).clone())
+-    }
+-
+-    fn with_db<R>(
+-        &self,
+-        dbno: u32,
+-        run: impl FnOnce(&mut OpenDb) -> Result<R, DbElementError>,
+-    ) -> Result<R, DbElementError> {
+-        let slot = self.db_slot(dbno)?;
+-        let mut db = slot.lock().map_err(|_| DbElementError::Poisoned)?;
+-        run(&mut db)
+-    }
+-}
+-
+-/// 一个元素的惰性只读句柄：`(refno, Arc<DbSet>)`，记录与描述符抽取各缓存一次。
+-///
+-/// 句柄创建零成本；第一次身份/导航问询读一次记录，第一次属性问询多一次
+-/// 描述符抽取。缓存挂在句柄上是**下限承诺**：格式库不替消费方决定内存形状。
+-///
+-/// 池级那一层是可选的（[`DbSet::with_element_cache`]，默认关）。2026-09-04 之前
+-/// 这里写的是「池级无界缓存是消费方的取舍，格式库不做」——实测推翻了「消费方能自己
+-/// 补上」这个前提：跨句柄的重复发生在 `owner()` / `get_element()` 内部，消费方拿不到
+-/// 那个位置。于是改成「默认关、要就开」，开关的证据与代价记在那个函数上。
+-pub struct DbElement {
+-    set: Arc<DbSet>,
+-    refno: RefNo,
+-    parsed: OnceLock<Arc<ParsedElement>>,
+-    extraction: OnceLock<Arc<ElementExtraction>>,
+-}
+-
+-impl std::fmt::Debug for DbElement {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        f.debug_struct("DbElement")
+-            .field("refno", &self.refno)
+-            .field("loaded", &self.parsed.get().is_some())
+-            .finish()
+-    }
+-}
+-
+-/// 名字表里找一条属性，顺带把这一次记进 [`crate::read_stats`]。
+-///
+-/// 查表本身在 [`ElementExtraction::find_attribute`]；这里只是两处调用点共用的
+-/// 计数入口——`extraction()` 之后的这半程曾经和记录解析一样贵，得留着量。
+-fn find_attribute<'a>(
+-    extraction: &'a ElementExtraction,
+-    name: &str,
+-) -> Option<&'a crate::record::descriptor::ExtractedAttribute> {
+-    crate::read_stats::note_attr_lookup();
+-    extraction.find_attribute(name)
+-}
+-
+-impl Clone for DbElement {
+-    fn clone(&self) -> Self {
+-        let fresh = Self {
+-            set: self.set.clone(),
+-            refno: self.refno,
+-            parsed: OnceLock::new(),
+-            extraction: OnceLock::new(),
+-        };
+-        if let Some(hit) = self.parsed.get() {
+-            let _ = fresh.parsed.set(hit.clone());
+-        }
+-        if let Some(hit) = self.extraction.get() {
+-            let _ = fresh.extraction.set(hit.clone());
+-        }
+-        fresh
+-    }
+-}
+-
+-impl DbElement {
+-    // ---- A. 身份 ------------------------------------------------------
+-
+-    /// 这枚句柄所属的池：跨库解引用与按需开库都从它走。
+-    pub fn db_set(&self) -> &Arc<DbSet> {
+-        &self.set
+-    }
+-
+-    pub fn refno(&self) -> RefNo {
+-        self.refno
+-    }
+-
+-    /// 库号，从 refno 自身的位布局解出（core.dll `sub_5AEB6B0`），不查表。
+-    pub fn db_no(&self) -> u32 {
+-        self.refno.dbno()
+-    }
+-
+-    /// ref 本身是不是一个合法引用（`dbreflib/NULREF` 语义）。
+-    /// 不做 I/O；「合法但不存在」由 [`Self::exists`] 回答。
+-    pub fn is_null(&self) -> bool {
+-        !self.refno.is_valid()
+-    }
+-
+-    /// 选定会话的索引里有没有它。见 [`DbSet::element_exists`] 的删除语义说明。
+-    pub fn exists(&self) -> Result<bool, DbElementError> {
+-        if self.is_null() {
+-            return Ok(false);
+-        }
+-        self.set.element_exists(self.refno)
+-    }
+-
+-    /// 元素类型名（noun 反哈希）；反不出名字给十六进制，不编一个。
+-    pub fn element_type(&self) -> Result<String, DbElementError> {
+-        let noun_hash = self.noun_hash()?;
+-        Ok(noun_name(noun_hash))
+-    }
+-
+-    pub fn noun_hash(&self) -> Result<u32, DbElementError> {
+-        Ok(self.parsed()?.noun_hash)
+-    }
+-
+-    /// 文件里存的 NAME 原文；多数元素没存，位置显示名是渲染不是存储事实。
+-    pub fn stored_name(&self) -> Result<Option<String>, DbElementError> {
+-        let parsed = self.parsed()?;
+-        Ok(element_name::stored_name(&parsed))
+-    }
+-
+-    /// 自己是不是 `ancestor` 的后代：owner 链上溯逐级比对。
+-    ///
+-    /// 跨库 owner（实测语料 6 库 588k 元素为零例，但那是语料不是格式保证）
+-    /// 会走池子照常跳；目标库没注册就报错，不静默当「不是后代」。
+-    pub fn is_descendant_of(&self, ancestor: &DbElement) -> Result<bool, DbElementError> {
+-        let mut visited: Vec<RefNo> = vec![self.refno];
+-        let mut cursor = self.owner()?;
+-        while let Some(element) = cursor {
+-            if element.refno == ancestor.refno {
+-                return Ok(true);
+-            }
+-            if visited.contains(&element.refno) {
+-                return Err(DbElementError::OwnerCycle {
+-                    start: self.refno,
+-                    at: element.refno,
+-                });
+-            }
+-            visited.push(element.refno);
+-            cursor = element.owner()?;
+-        }
+-        Ok(false)
+-    }
+-
+-    // ---- B. 导航（NXTITM 游标语义，成员原序） --------------------------
+-
+-    /// owner 句柄；记录头 owner 读作非法 ref（WORLD 的 owner 是 0）时给 `None`。
+-    pub fn owner(&self) -> Result<Option<DbElement>, DbElementError> {
+-        let owner = self.parsed()?.owner;
+-        if !owner.is_valid() {
+-            return Ok(None);
+-        }
+-        Ok(Some(self.set.element(owner)))
+-    }
+-
+-    /// 成员游标：文件原序，不排序不去重（G3），一次一个（`build/NXTITM` 的姿势）。
+-    pub fn members(&self) -> Result<MemberCursor, DbElementError> {
+-        Ok(MemberCursor {
+-            set: self.set.clone(),
+-            parsed: self.parsed()?,
+-            next: 0,
+-        })
+-    }
+-
+-    /// 成员 refno 原序裸表——对拍比序列就比它，别经过句柄再拆回去。
+-    pub fn member_refnos(&self) -> Result<Vec<RefNo>, DbElementError> {
+-        Ok(self.parsed()?.members.clone())
+-    }
+-
+-    pub fn member_count(&self) -> Result<usize, DbElementError> {
+-        Ok(self.parsed()?.members.len())
+-    }
+-
+-    /// 第 `index` 个成员，**从 1 起数**（PDMS 惯例）。0 或越界给 `None`。
+-    pub fn member(&self, index: usize) -> Result<Option<DbElement>, DbElementError> {
+-        if index == 0 {
+-            return Ok(None);
+-        }
+-        let parsed = self.parsed()?;
+-        Ok(parsed
+-            .members
+-            .get(index - 1)
+-            .map(|refno| self.set.element(*refno)))
+-    }
+-
+-    pub fn first_member(&self) -> Result<Option<DbElement>, DbElementError> {
+-        let parsed = self.parsed()?;
+-        Ok(parsed.members.first().map(|refno| self.set.element(*refno)))
+-    }
+-
+-    pub fn last_member(&self) -> Result<Option<DbElement>, DbElementError> {
+-        let parsed = self.parsed()?;
+-        Ok(parsed.members.last().map(|refno| self.set.element(*refno)))
+-    }
+-
+-    /// 同 owner 成员表里排我后面的那个（`Next()`）。我不在 owner 的成员表里
+-    /// 是数据不一致，报错不猜。
+-    pub fn next(&self) -> Result<Option<DbElement>, DbElementError> {
+-        self.sibling(1)
+-    }
+-
+-    /// 同 owner 成员表里排我前面的那个（`Previous()`）。
+-    pub fn previous(&self) -> Result<Option<DbElement>, DbElementError> {
+-        self.sibling(-1)
+-    }
+-
+-    fn sibling(&self, step: isize) -> Result<Option<DbElement>, DbElementError> {
+-        let Some(owner) = self.owner()? else {
+-            return Ok(None);
+-        };
+-        let siblings = owner.parsed()?;
+-        let Some(position) = siblings
+-            .members
+-            .iter()
+-            .position(|refno| *refno == self.refno)
+-        else {
+-            return Err(DbElementError::NotFound {
+-                refno: self.refno,
+-                dbno: owner.db_no(),
+-                sesno: self.set.pinned_sesno(owner.db_no()).unwrap_or_default(),
+-            });
+-        };
+-        let target = position as isize + step;
+-        if target < 0 {
+-            return Ok(None);
+-        }
+-        Ok(siblings
+-            .members
+-            .get(target as usize)
+-            .map(|refno| self.set.element(*refno)))
+-    }
+-
+-    /// 成员里 noun 等于 `noun` 的那些（`Members(type)`），原序。
+-    /// noun 名按 PDMS 惯例大写（`db1_hash` 对大小写敏感）。
+-    pub fn members_of_type(&self, noun: &str) -> Result<Vec<DbElement>, DbElementError> {
+-        let wanted = e3d_attlib::db1_hash(noun);
+-        let mut out = Vec::new();
+-        for member in self.members()? {
+-            if member.noun_hash()? == wanted {
+-                out.push(member);
+-            }
+-        }
+-        Ok(out)
+-    }
+-
+-    // ---- C. typed getter（按文件自报形状投影） --------------------------
+-
+-    /// 模板声明的全部属性名，描述符序。
+-    pub fn attribute_names(&self) -> Result<Vec<String>, DbElementError> {
+-        Ok(self
+-            .extraction()?
+-            .attributes
+-            .iter()
+-            .map(|attribute| attribute.name.clone())
+-            .collect())
+-    }
+-
+-    /// 这个 noun 的模板认不认识该属性（`IsAttributeValid` 的键集判定）。
+-    pub fn has_attribute(&self, name: &str) -> Result<bool, DbElementError> {
+-        Ok(self
+-            .extraction()?
+-            .attributes
+-            .iter()
+-            .any(|attribute| attribute.name.eq_ignore_ascii_case(name)))
+-    }
+-
+-    /// 一个属性的文件自报值。
+-    ///
+-    /// `Ok(None)` = 属性在模板里但**逻辑 unset**（E3D 的 unset 与 0/空串/Nulref
+-    /// 都不是一回事）或本记录没解出值；属性根本不在模板里 = `Err(UnknownAttribute)`
+-    /// ——.NET 面对无效属性名就是抛异常，静默 `None` 会把拼错的名字养成静默失效。
+-    pub fn attribute(&self, name: &str) -> Result<Option<DescriptorValue>, DbElementError> {
+-        let extraction = self.extraction()?;
+-        let Some(attribute) = find_attribute(&extraction, name) else {
+-            return Err(DbElementError::UnknownAttribute {
+-                refno: self.refno,
+-                noun: noun_name(extraction.noun_hash),
+-                name: name.to_string(),
+-            });
+-        };
+-        Ok(match &attribute.value {
+-            None | Some(DescriptorValue::Unset) => None,
+-            Some(value) => Some(value.clone()),
+-        })
+-    }
+-
+-    /// 文本值：`Text` 原文，或字值（`Word`）的反哈希文本。
+-    pub fn get_string(&self, name: &str) -> Result<Option<String>, DbElementError> {
+-        let Some(value) = self.attribute(name)? else {
+-            return Ok(None);
+-        };
+-        match string_projection(&value) {
+-            Some(projected) => Ok(projected),
+-            None => Err(DbElementError::TypeMismatch {
+-                refno: self.refno,
+-                name: name.to_ascii_uppercase(),
+-                found: shape_of(&value),
+-                wanted: "Text/Word",
+-            }),
+-        }
+-    }
+-
+-    pub fn get_integer(&self, name: &str) -> Result<Option<i32>, DbElementError> {
+-        self.project(name, "Int", |value| match value {
+-            DescriptorValue::Int(int) => Some(*int),
+-            _ => None,
+-        })
+-    }
+-
+-    /// `Real` 直取；`Int` 无损加宽成 `f64`（`GATRE` 读整型槽也是给实数）。
+-    pub fn get_double(&self, name: &str) -> Result<Option<f64>, DbElementError> {
+-        self.project(name, "Real/Int", |value| match value {
+-            DescriptorValue::Real(real) => Some(*real),
+-            DescriptorValue::Int(int) => Some(f64::from(*int)),
+-            _ => None,
+-        })
+-    }
+-
+-    /// 把一个属性读成数，两种目录表达式当场求值。
+-    ///
+-    /// 目录几何存的常常不是数而是公式。实测 ams8000 路由构件走到的 118 个 P 点，
+-    /// `PDIS` 里 33 个是显式流里的 PML 正文、25 个是五词元组，只有 0 个是直存的数。
+-    /// [`DbElement::get_double`] 碰上这些会报 `TypeMismatch`——但那不是类型错，
+-    /// 是还没求值。
+-    ///
+-    /// 求值顺序与 [`crate::record::descriptor::extract_attribute`] 一致：
+-    /// **显式流里的正文压过槽位**。`BLTP.Bthkness` 这种根本没有隐式槽位的属性
+-    /// 照样带公式，先看槽位就会漏掉它。
+-    ///
+-    /// 属性不在模板里仍然是 `Err`（与 [`DbElement::attribute`] 同口径）；
+-    /// 求不出来是 [`AttributeNumber`] 的一个分支，带着原因，不是错误。
+-    pub fn get_number(
+-        &self,
+-        name: &str,
+-        env: &dyn ParamEnv,
+-    ) -> Result<AttributeNumber, DbElementError> {
+-        let extraction = self.extraction()?;
+-        let Some(attribute) = find_attribute(&extraction, name) else {
+-            return Err(DbElementError::UnknownAttribute {
+-                refno: self.refno,
+-                noun: noun_name(extraction.noun_hash),
+-                name: name.to_string(),
+-            });
+-        };
+-
+-        let parsed = self.parsed()?;
+-        if let Some(words) = stored_expression_words(&parsed, attribute.hash) {
+-            if let Some(value) = catalogue_pml::evaluate_words(words, env) {
+-                return Ok(AttributeNumber::Evaluated {
+-                    value,
+-                    form: ExpressionForm::Pml,
+-                });
+-            }
+-            // 显式流里放的不一定是 PML 程序：ams7324 的 BS 型材库（`SPRE` 直连 SPRF 那
+-            // 一族）把 `SPVE.PX` 存成四词元组 `[20, 1, 1, 0]`（`0.5 TIMES PARAM 1`），
+-            // 键仍是取负的属性哈希。不是程序形状的，交给元组读法；是程序却求不出的，
+-            // 照旧按 PML 报未解——两种形状由 `is_program` 分开，不靠「元组也解不开」兜底。
+-            if !catalogue_pml::is_program(words) {
+-                let tuple: Vec<u32> = words.iter().map(|word| *word as u32).collect();
+-                return Ok(match catalogue_expr::evaluate_words(&tuple, env) {
+-                    Some(value) => AttributeNumber::Evaluated {
+-                        value,
+-                        form: ExpressionForm::Tuple,
+-                    },
+-                    None => AttributeNumber::Unresolved {
+-                        form: ExpressionForm::Tuple,
+-                        text: catalogue_expr::render(&tuple),
+-                    },
+-                });
+-            }
+-            return Ok(AttributeNumber::Unresolved {
+-                form: ExpressionForm::Pml,
+-                text: catalogue_pml::render(words),
+-            });
+-        }
+-
+-        Ok(match &attribute.value {
+-            None | Some(DescriptorValue::Unset) => AttributeNumber::Unset,
+-            Some(DescriptorValue::Real(real)) => AttributeNumber::Stored(*real),
+-            // `GATRE` 读整型槽也是给实数。
+-            Some(DescriptorValue::Int(int)) => AttributeNumber::Stored(f64::from(*int)),
+-            Some(DescriptorValue::RawWords(words)) => {
+-                match catalogue_expr::evaluate_words(words, env) {
+-                    Some(value) => AttributeNumber::Evaluated {
+-                        value,
+-                        form: ExpressionForm::Tuple,
+-                    },
+-                    // 元组解得开却求不出，与「压根不是元组」（`TYPEX: [1, 644065]`
+-                    // 这类）分开：前者要补环境，后者本来就没数可读。
+-                    None => match catalogue_expr::render(words) {
+-                        Some(text) => AttributeNumber::Unresolved {
+-                            form: ExpressionForm::Tuple,
+-                            text: Some(text),
+-                        },
+-                        None => AttributeNumber::NotNumeric,
+-                    },
+-                }
+-            }
+-            Some(_) => AttributeNumber::NotNumeric,
+-        })
+-    }
+-
+-    pub fn get_bool(&self, name: &str) -> Result<Option<bool>, DbElementError> {
+-        self.project(name, "Bool", |value| match value {
+-            DescriptorValue::Bool(flag) => Some(*flag),
+-            _ => None,
+-        })
+-    }
+-
+-    /// 引用值。文件里存的 Nulref（非法 ref）归一成 `None`——`NULREF` 判空语义。
+-    pub fn get_ref(&self, name: &str) -> Result<Option<RefNo>, DbElementError> {
+-        let raw = self.project(name, "RefNo", |value| match value {
+-            DescriptorValue::RefNo(refno) => Some(*refno),
+-            _ => None,
+-        })?;
+-        Ok(raw.filter(RefNo::is_valid))
+-    }
+-
+-    pub fn get_integer_array(&self, name: &str) -> Result<Option<Vec<i32>>, DbElementError> {
+-        self.project(name, "IntArray", |value| match value {
+-            DescriptorValue::IntArray(items) => Some(items.clone()),
+-            _ => None,
+-        })
+-    }
+-
+-    pub fn get_double_array(&self, name: &str) -> Result<Option<Vec<f64>>, DbElementError> {
+-        self.project(name, "RealArray", |value| match value {
+-            DescriptorValue::RealArray(items) => Some(items.clone()),
+-            _ => None,
+-        })
+-    }
+-
+-    pub fn get_ref_array(&self, name: &str) -> Result<Option<Vec<RefNo>>, DbElementError> {
+-        self.project(name, "RefNoArray", |value| match value {
+-            DescriptorValue::RefNoArray(items) => Some(items.clone()),
+-            _ => None,
+-        })
+-    }
+-
+-    /// 位置：三个双精度，文件存的单位（mm），不做单位换算。
+-    pub fn get_position(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
+-        self.triple(name)
+-    }
+-
+-    /// 方向：与位置同形。方向规格串（`axis_spec`）是另一种存储，不在这条上。
+-    pub fn get_direction(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
+-        self.triple(name)
+-    }
+-
+-    /// 姿态角三元组（文件存的度）。要 Y/Z 轴向量拿它去喂
+-    /// [`crate::record::orientation::axes`]，这里不替调用方选表示。
+-    pub fn get_orientation(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
+-        self.triple(name)
+-    }
+-
+-    fn triple(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
+-        let Some(value) = self.attribute(name)? else {
+-            return Ok(None);
+-        };
+-        match &value {
+-            DescriptorValue::RealArray(items) if items.len() == 3 => {
+-                Ok(Some([items[0], items[1], items[2]]))
+-            }
+-            other => Err(DbElementError::TypeMismatch {
+-                refno: self.refno,
+-                name: name.to_ascii_uppercase(),
+-                found: shape_of(other),
+-                wanted: "RealArray[3]",
+-            }),
+-        }
+-    }
+-
+-    fn project<T>(
+-        &self,
+-        name: &str,
+-        wanted: &'static str,
+-        take: impl Fn(&DescriptorValue) -> Option<T>,
+-    ) -> Result<Option<T>, DbElementError> {
+-        let Some(value) = self.attribute(name)? else {
+-            return Ok(None);
+-        };
+-        match take(&value) {
+-            Some(projected) => Ok(Some(projected)),
+-            None => Err(DbElementError::TypeMismatch {
+-                refno: self.refno,
+-                name: name.to_ascii_uppercase(),
+-                found: shape_of(&value),
+-                wanted,
+-            }),
+-        }
+-    }
+-
+-    // ---- D. 引用跳转（跨库走池） ---------------------------------------
+-
+-    /// 引用属性 → 目标元素句柄。目标在别的库照常给句柄，第一次读它时
+-    /// 才要求那个库已注册（或 resolver 供得出）。Nulref 给 `None`。
+-    pub fn get_element(&self, name: &str) -> Result<Option<DbElement>, DbElementError> {
+-        Ok(self.get_ref(name)?.map(|refno| self.set.element(refno)))
+-    }
+-
+-    /// 引用数组 → 句柄数组，原序；数组里的 Nulref 占位原样跳过。
+-    pub fn get_element_array(&self, name: &str) -> Result<Vec<DbElement>, DbElementError> {
+-        Ok(self
+-            .get_ref_array(name)?
+-            .unwrap_or_default()
+-            .into_iter()
+-            .filter(RefNo::is_valid)
+-            .map(|refno| self.set.element(refno))
+-            .collect())
+-    }
+-
+-    // ---- 底层出口：整条记录 / 整张抽取，给要全量的消费方 ----------------
+-
+-    pub fn parsed(&self) -> Result<Arc<ParsedElement>, DbElementError> {
+-        // 「读了哪些元素」的记录点：只记**读成功**的——命中缓存也是一次读（记录器要的是读过的
+-        // 集合，不是花过 I/O 的集合），但索引里没有的 refno（悬空引用）不是一个元素。
+-        let parsed = self.parsed_uncounted();
+-        if parsed.is_ok() {
+-            crate::read_stats::note_element_read(self.refno);
+-        }
+-        parsed
+-    }
+-
+-    fn parsed_uncounted(&self) -> Result<Arc<ParsedElement>, DbElementError> {
+-        if let Some(hit) = self.parsed.get() {
+-            crate::read_stats::note_parse_hit();
+-            return Ok(hit.clone());
+-        }
+-        if let Some(shared) = self.set.cached_parsed(self.refno) {
+-            crate::read_stats::note_parse_shared_hit();
+-            return Ok(self.parsed.get_or_init(|| shared).clone());
+-        }
+-        let refno = self.refno;
+-        let dbno = self.db_no();
+-        let started = std::time::Instant::now();
+-        let parsed = self.set.with_db(dbno, |db| {
+-            let sesno = db.pinned_sesno;
+-            let view = db
+-                .engine
+-                .find_element(refno)
+-                .map_err(|source| DbElementError::Io { dbno, source })?
+-                .ok_or(DbElementError::NotFound { refno, dbno, sesno })?;
+-            ParsedElement::parse(&view.raw_bytes)
+-                .map_err(|detail| DbElementError::Parse { refno, detail })
+-        });
+-        crate::read_stats::note_parse_miss(started.elapsed());
+-        let parsed = parsed?;
+-        let parsed = self.parsed.get_or_init(|| Arc::new(parsed)).clone();
+-        self.set.store_parsed(self.refno, parsed.clone());
+-        Ok(parsed)
+-    }
+-
+-    pub fn extraction(&self) -> Result<Arc<ElementExtraction>, DbElementError> {
+-        // 池级抽取缓存命中时不再经过 `parsed()`，所以这里也要记一次（同一 refno 记两次无害，
+-        // 记录器按集合去重）；同样只记读成功的。
+-        let extraction = self.extraction_uncounted();
+-        if extraction.is_ok() {
+-            crate::read_stats::note_element_read(self.refno);
+-        }
+-        extraction
+-    }
+-
+-    fn extraction_uncounted(&self) -> Result<Arc<ElementExtraction>, DbElementError> {
+-        if let Some(hit) = self.extraction.get() {
+-            crate::read_stats::note_extract_hit();
+-            return Ok(hit.clone());
+-        }
+-        if let Some(shared) = self.set.cached_extraction(self.refno) {
+-            crate::read_stats::note_extract_shared_hit();
+-            return Ok(self.extraction.get_or_init(|| shared).clone());
+-        }
+-        let parsed = self.parsed()?;
+-        let refno = self.refno;
+-        let dbno = self.db_no();
+-        let attlib = self.set.attlib.clone();
+-        let started = std::time::Instant::now();
+-        let extraction = self.set.with_db(dbno, |db| {
+-            let template = db
+-                .provider
+-                .template_for(parsed.noun_hash)
+-                .map_err(|source| DbElementError::Extract {
+-                    refno,
+-                    source: ResolveError::TemplateLoad(source),
+-                })?
+-                .ok_or(DbElementError::Extract {
+-                    refno,
+-                    source: ResolveError::TemplateMissing(parsed.noun_hash),
+-                })?;
+-            db.engine
+-                .extract_parsed_element_with_descriptors(refno, &parsed, &attlib, template)
+-                .map_err(|source| DbElementError::Extract { refno, source })
+-        });
+-        crate::read_stats::note_extract_miss(started.elapsed());
+-        let extraction = extraction?;
+-        let extraction = self.extraction.get_or_init(|| Arc::new(extraction)).clone();
+-        self.set.store_extraction(self.refno, extraction.clone());
+-        Ok(extraction)
+-    }
+-}
+-
+-/// 成员游标：持有已解析的成员表（文件原序），一次交出一个句柄。
+-///
+-/// `build/NXTITM`（0x102547f5）的语义投影：`*a2==0` 取首、走到头给 `-1`——
+-/// 这里是 `Iterator`，走到头给 `None`。
+-pub struct MemberCursor {
+-    set: Arc<DbSet>,
+-    parsed: Arc<ParsedElement>,
+-    next: usize,
+-}
+-
+-impl MemberCursor {
+-    /// 还剩几个，含即将交出的那个。
+-    pub fn remaining(&self) -> usize {
+-        self.parsed.members.len().saturating_sub(self.next)
+-    }
+-}
+-
+-impl Iterator for MemberCursor {
+-    type Item = DbElement;
+-
+-    fn next(&mut self) -> Option<Self::Item> {
+-        let refno = *self.parsed.members.get(self.next)?;
+-        self.next += 1;
+-        Some(DbElement {
+-            set: self.set.clone(),
+-            refno,
+-            parsed: OnceLock::new(),
+-            extraction: OnceLock::new(),
+-        })
+-    }
+-
+-    fn size_hint(&self) -> (usize, Option<usize>) {
+-        let remaining = self.remaining();
+-        (remaining, Some(remaining))
+-    }
+-}
+-
+-fn noun_name(noun_hash: u32) -> String {
+-    e3d_attlib::db1_dehash(noun_hash).unwrap_or_else(|| format!("0x{noun_hash:08X}"))
+-}
+-
+-fn shape_of(value: &DescriptorValue) -> String {
+-    match value {
+-        DescriptorValue::Unset => "Unset".to_string(),
+-        DescriptorValue::Bool(_) => "Bool".to_string(),
+-        DescriptorValue::Int(_) => "Int".to_string(),
+-        DescriptorValue::Real(_) => "Real".to_string(),
+-        DescriptorValue::Text(_) => "Text".to_string(),
+-        DescriptorValue::RefNo(_) => "RefNo".to_string(),
+-        DescriptorValue::Word { .. } => "Word".to_string(),
+-        DescriptorValue::IntArray(items) => format!("IntArray[{}]", items.len()),
+-        DescriptorValue::RealArray(items) => format!("RealArray[{}]", items.len()),
+-        DescriptorValue::RefNoArray(items) => format!("RefNoArray[{}]", items.len()),
+-        DescriptorValue::WordArray(items) => format!("WordArray[{}]", items.len()),
+-        DescriptorValue::BoolArray(items) => format!("BoolArray[{}]", items.len()),
+-        DescriptorValue::RawWords(items) => format!("RawWords[{}]", items.len()),
+-    }
+-}
+-
+-/// A zero word is the physical empty/unset representation. E3D renders it as
+-/// `0`, `unset`, or an empty string depending on the attribute, so the typed
+-/// string projection must return `None`, rather than reporting a false type
+-/// mismatch just because there is no dictionary text.
+-fn string_projection(value: &DescriptorValue) -> Option<Option<String>> {
+-    match value {
+-        DescriptorValue::Text(text) => Some(Some(text.clone())),
+-        DescriptorValue::Word {
+-            text: Some(text), ..
+-        } => Some(Some(text.clone())),
+-        DescriptorValue::Word { raw: 0, text: None } => Some(None),
+-        _ => None,
+-    }
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn zero_word_projects_as_unset_string() {
+-        assert_eq!(
+-            string_projection(&DescriptorValue::Word { raw: 0, text: None }),
+-            Some(None)
+-        );
+-        assert_eq!(
+-            string_projection(&DescriptorValue::Word {
+-                raw: 42,
+-                text: Some("TOP".into()),
+-            }),
+-            Some(Some("TOP".into()))
+-        );
+-        assert_eq!(
+-            string_projection(&DescriptorValue::Word {
+-                raw: 42,
+-                text: None,
+-            }),
+-            None,
+-            "a non-zero unresolved word remains an observable decode gap"
+-        );
+-    }
+-
+-    /// 未注册且无 resolver 的库：报 `DbNotRegistered`，不猜、不开最新。
+-    #[test]
+-    fn an_unregistered_db_is_an_error_not_a_guess() {
+-        let set = Arc::new(DbSet::new(Arc::new(e3d_attlib::AttlibData::default())));
+-        let refno = RefNo::new(16_191, 42); // dbno 7999
+-        let element = set.element(refno);
+-        let error = element.parsed().unwrap_err();
+-        assert!(
+-            matches!(error, DbElementError::DbNotRegistered { dbno: 7999 }),
+-            "{error}"
+-        );
+-        // exists 同样不许静默说「不存在」。
+-        let error = element.exists().unwrap_err();
+-        assert!(
+-            matches!(error, DbElementError::DbNotRegistered { dbno: 7999 }),
+-            "{error}"
+-        );
+-    }
+-
+-    /// resolver 说不认识 → 依旧 fail loud；resolver 给了文件但文件自报别的库号 →
+-    /// `DbNumberMismatch`，同号会话在别的文件里是另一件事。
+-    #[test]
+-    fn a_resolver_miss_still_fails_loud() {
+-        struct Nothing;
+-        impl DbFileResolver for Nothing {
+-            fn resolve(&self, _dbno: u32) -> Option<DbFilePin> {
+-                None
+-            }
+-        }
+-        let set = Arc::new(DbSet::with_resolver(
+-            Arc::new(e3d_attlib::AttlibData::default()),
+-            Box::new(Nothing),
+-        ));
+-        let error = set.element(RefNo::new(16_191, 42)).parsed().unwrap_err();
+-        assert!(
+-            matches!(error, DbElementError::DbNotRegistered { dbno: 7999 }),
+-            "{error}"
+-        );
+-    }
+-
+-    /// 空引用句柄：`is_null` 真、`exists` 假（不去查根本不存在的库 0）。
+-    #[test]
+-    fn a_null_ref_is_null_and_does_not_exist() {
+-        let set = Arc::new(DbSet::new(Arc::new(e3d_attlib::AttlibData::default())));
+-        let element = set.element(RefNo::new(0, 0));
+-        assert!(element.is_null());
+-        assert_eq!(element.exists().unwrap(), false);
+-    }
+-
+-    /// 模板文件名从库类型派生；GLOB 保留 AVEVA 的历史文件名 glbvir.dat。
+-    #[test]
+-    fn a_template_file_is_named_after_the_db_type() {
+-        let dir = Path::new("dir");
+-        assert_eq!(
+-            template_file_for(dir, "DESI").unwrap(),
+-            dir.join("desvir.dat")
+-        );
+-        assert_eq!(
+-            template_file_for(dir, "CATA").unwrap(),
+-            dir.join("catvir.dat")
+-        );
+-        assert_eq!(
+-            template_file_for(dir, "GLOB").unwrap(),
+-            dir.join("glbvir.dat")
+-        );
+-        assert!(template_file_for(dir, "DI").is_err());
+-    }
+-}
++//! `DbElement` 句柄门面：对标 core.dll 之上的 `Aveva.Core.Database.DbElement` 读侧 API。
++//!
++//! 对标口径见 gen-model `docs/plans/2026-08-30-core-dll-api-alignment.md`（S1）。
++//! 行为规格 = .NET 反射面（`.ida_scratch/e3d_dbelem_api.txt`），原生落点 = core.dll
++//! （`0x5xxxxxx`）的 FORTRAN 读库家族：树导航 `idlib/IDQNXT·FORWAR`、typed getter
++//! `getattlib/GAT*`、ref 工具 `dbreflib/NULREF·EQREF`。本文件不复刻它们的实现，
++//! 只把本 crate 已有的原语（索引下降、记录解析、描述符抽取）收拢成同语义的句柄面。
++//!
++//! 几条语义边界，都是量出来的，不是设计出来的：
++//!
++//! * **`IsDeleted` 没有墓碑位。** dabacon 的删除判据是「活树键集不含它」——单时点
++//!   只能回答 [`DbElement::exists`]；跨时点判删走 `index::diff`（矩阵 G 组）。
++//! * **成员表保持文件原序**（G3 约束）：不排序、不去重。`build/NXTITM`
++//!   （0x102547f5）就是这么遍历的，生成链的成员序敏感（BRAN 管路）。
++//! * **名字没有原生索引。** dabacon 只有 refno 主索引，名字是一条存储属性
++//!   （`getattlib/GATSTR` 读 NAME），所以 [`DbSet::find_named`] 是一次 Named 档
++//!   全树扫——这是原生语义的成本。要反复按名查的调用方自建加速结构
++//!   （gen-model 的 `direct_index` 就是），别在循环里调这条。
++//! * **typed getter 按文件自报的形状投影**（[`DescriptorValue`]）。DB 读侧那套
++//!   「schema 定形」（`NamedAttrMap`）是消费方语义，留在 gen-model 的
++//!   `direct_attmap`，本 crate 不搬也不复制——一个形状两处权威必然分叉。
++//!
++//! 跨库：`RefNo` 自带库号（[`RefNo::dbno`]，core.dll `sub_5AEB6B0` 的位布局），
++//! 引用跳转按它到 [`DbSet`] 池里找已开库。没注册的库**报错**，不猜；装了
++//! [`DbFileResolver`] 的池子会先问一次 resolver（gen-model 拿 `CataDbLocator`
++//! 实现它，就得到 `DirectStore::pin_from_locator` 同款的按需补开）。
++
++use std::collections::{HashMap, HashSet};
++use std::path::{Path, PathBuf};
++use std::sync::{Arc, Mutex, OnceLock, RwLock};
++
++use crate::element_name;
++use crate::engine::{ReadOnlyEngine, ResolveError, ScanTier};
++use crate::error::E3dReaderError;
++use crate::record::catalogue_eval::{AttributeNumber, ExpressionForm, ParamEnv};
++use crate::record::descriptor::{stored_expression_words, DescriptorValue, ElementExtraction};
++use crate::record::element::ParsedElement;
++use crate::record::template::TemplateProvider;
++use crate::record::{catalogue_expr, catalogue_pml};
++use crate::refno::RefNo;
++
++/// 开一个库所需的文件三元组：库文件、该库类型的模板文件、时点。
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct DbFilePin {
++    pub file: PathBuf,
++    /// 该库类型的 `*vir.dat` 模板（`DESI` → `desvir.dat`）。见 [`template_file_for`]。
++    pub template: PathBuf,
++    /// 库类型（`DESI`/`CATA`/…）。给了就校验模板文件头的 `template_type`，
++    /// 拿错模板（用 desvir 抽 CATA 库）读出来的是别人的 schema，宁可开库就报。
++    pub db_type: Option<String>,
++    /// `Some(n)` = 按会话 n 打开（copy-on-write 索引选哪棵树下降）；
++    /// `None` = 开库那一刻解一次文件自报的最新，然后在本池生命周期内冻住——
++    /// 与 gen-model `DirectStore` 对目录库的语义一致，**不是**「每次读最新」。
++    pub sesno: Option<u32>,
++}
++
++/// E3D 的模板命名法：通常是库类型前三字母小写 + `vir.dat`。
++///
++/// Global DB 是安装格式里的唯一历史例外：文件头/模板类型自报 `GLOB`，但 AVEVA
++/// 发布的文件名是 `glbvir.dat`，不是机械截断得到的 `glovir.dat`。其余类型仍派生，
++/// 不维护一张会在新类型上静默退成 DESI 的不完整表。
++pub fn template_file_for(template_dir: &Path, db_type: &str) -> Result<PathBuf, DbElementError> {
++    let stem = if db_type.eq_ignore_ascii_case("GLOB") {
++        "glb".to_string()
++    } else {
++        db_type.chars().take(3).collect::<String>().to_lowercase()
++    };
++    if stem.chars().count() != 3 {
++        return Err(DbElementError::Open {
++            file: template_dir.to_path_buf(),
++            detail: format!("db_type {db_type:?} is too short to name a template file"),
++        });
++    }
++    Ok(template_dir.join(format!("{stem}vir.dat")))
++}
++
++/// 池子没开过的库从哪来。
++///
++/// [`DbSet`] 遇到未注册的 dbno 时问一次；回 `None` 就地报
++/// [`DbElementError::DbNotRegistered`]，不做第二次猜测。gen-model 侧用它的
++/// 库定位器实现本 trait，即可复现 `DirectStore` 的跨库按需补开。
++pub trait DbFileResolver: Send + Sync {
++    fn resolve(&self, dbno: u32) -> Option<DbFilePin>;
++}
++
++/// 门面的错误。每条都说清是哪个库/哪个元素/哪个属性，静默失效是大忌。
++#[derive(Debug, thiserror::Error)]
++pub enum DbElementError {
++    #[error("db {dbno} 没注册进这个 DbSet，resolver 也给不出它的文件")]
++    DbNotRegistered { dbno: u32 },
++    #[error("{}: 文件自报 db {actual}，与要求的 db {expected} 不符", file.display())]
++    DbNumberMismatch {
++        file: PathBuf,
++        expected: u32,
++        actual: u32,
++    },
++    #[error("{}: 文件自报类型 {actual}，与要求的 {expected} 不符", file.display())]
++    DbTypeMismatch {
++        file: PathBuf,
++        expected: String,
++        actual: String,
++    },
++    #[error("db {dbno} 会话 {sesno} 的索引里没有 {refno}")]
++    NotFound { refno: RefNo, dbno: u32, sesno: u32 },
++    #[error("db {dbno}: {source}")]
++    Io { dbno: u32, source: E3dReaderError },
++    #[error("open {}: {detail}", file.display())]
++    Open { file: PathBuf, detail: String },
++    #[error("{refno}: 记录解析失败: {detail}")]
++    Parse { refno: RefNo, detail: String },
++    #[error("{refno}: {source}")]
++    Extract { refno: RefNo, source: ResolveError },
++    #[error("元素 {refno}（{noun}）的模板里没有属性 {name}")]
++    UnknownAttribute {
++        refno: RefNo,
++        noun: String,
++        name: String,
++    },
++    #[error("{refno} 的属性 {name} 是 {found}，不是 {wanted}")]
++    TypeMismatch {
++        refno: RefNo,
++        name: String,
++        found: String,
++        wanted: &'static str,
++    },
++    #[error("从 {start} 上溯 owner 链在 {at} 转回头了，没到根")]
++    OwnerCycle { start: RefNo, at: RefNo },
++    /// E3D 现算的伪属性（`POS`/`ORI` 在电缆桥架件上、`DDES` 之类）没算出来。
++    ///
++    /// 与 [`DbElementError::UnknownAttribute`] 分开：属性在字典里**有**、只是
++    /// 值不在记录里而要按别处的数据推——推不出来是数据关系断了（`POSREF`
++    /// 指空、路径没有点），不是模板缺字段。Core 那头对应的是 `getAtt` 返回
++    /// false 并往 `MR_Message` 里塞一条编号错误。
++    #[error("元素 {refno}（{noun}）的伪属性 {name} 现算失败: {detail}")]
++    PseudoAttribute {
++        refno: RefNo,
++        noun: String,
++        name: String,
++        detail: String,
++    },
++    #[error("DbSet 里的锁被另一个线程的 panic 毒化了")]
++    Poisoned,
++}
++
++/// 一个库的打开态：引擎（已钉会话）+ 该库类型的模板 provider。
++///
++/// 与 gen-model `DirectStore` 的 `DbSession` 同构；文件身份守卫（FileReplaced）
++/// 是水位/工程语义，留在消费方，这里不复制。
++struct OpenDb {
++    dbno: u32,
++    engine: ReadOnlyEngine,
++    provider: TemplateProvider,
++    /// 实际钉住的会话号：`pin.sesno` 给了就是它，没给就是开库时解出的冻结点。
++    pinned_sesno: u32,
++}
++
++impl OpenDb {
++    fn open(pin: &DbFilePin) -> Result<Self, DbElementError> {
++        let fail = |detail: String| DbElementError::Open {
++            file: pin.file.clone(),
++            detail,
++        };
++        let engine = match pin.sesno {
++            Some(sesno) => ReadOnlyEngine::open_at(&pin.file, sesno),
++            None => ReadOnlyEngine::open(&pin.file),
++        }
++        .map_err(|error| fail(format!("open at {:?}: {error}", pin.sesno)))?;
++
++        let dbno = engine.descriptor().db_mark;
++        let pinned_sesno = engine.session().sesno;
++
++        if let Some(expected) = pin.db_type.as_ref() {
++            let actual = engine.descriptor().db_type_name().unwrap_or_default();
++            if !actual.eq_ignore_ascii_case(expected) {
++                return Err(DbElementError::DbTypeMismatch {
++                    file: pin.file.clone(),
++                    expected: expected.clone(),
++                    actual,
++                });
++            }
++        }
++
++        let expected_type = pin.db_type.as_deref().map(e3d_attlib::db1_hash);
++        let provider = TemplateProvider::open(&pin.template, expected_type)
++            .map_err(|error| fail(format!("open template {}: {error}", pin.template.display())))?;
++
++        Ok(Self {
++            dbno,
++            engine,
++            provider,
++            pinned_sesno,
++        })
++    }
++}
++
++/// 按 dbno 池化的已开库集合，[`DbElement`] 句柄的宿主。
++///
++/// 对标 `MDB.GetDB(n)` 那一层的机制（矩阵 I 组）；MDB 的成员清单语义
++/// （SYS 库 `CURD`）是 S4 的活，不在这里冒充。
++///
++/// 并发姿势与 `DirectStore` 相同：池表锁与会话锁分离，拿到 `Arc` 就放掉表锁，
++/// 任何路径不得在持有会话锁时写池表。
++pub struct DbSet {
++    attlib: Arc<e3d_attlib::AttlibData>,
++    dbs: RwLock<HashMap<u32, Arc<Mutex<OpenDb>>>>,
++    resolver: Option<Box<dyn DbFileResolver>>,
++    element_cache: Option<RwLock<DbElementCaches>>,
++    opening: Mutex<HashMap<u32, Arc<Mutex<()>>>>,
++}
++
++type DbElementCaches = HashMap<u32, Arc<RwLock<ElementCache>>>;
++
++/// 池级元素缓存（默认关，见 [`DbSet::with_element_cache`]）。
++///
++/// 两张表分开：只导航（owner / members / 类型）的路径永远碰不到 `extraction`，
++/// 合成一张就得为每个只读类型的元素也留一份描述符抽取。
++#[derive(Default)]
++struct ElementCache {
++    parsed: HashMap<RefNo, Arc<ParsedElement>>,
++    extraction: HashMap<RefNo, Arc<ElementExtraction>>,
++}
++
++impl std::fmt::Debug for DbSet {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        let dbnos = self.db_numbers();
++        f.debug_struct("DbSet")
++            .field("dbs", &dbnos)
++            .field("has_resolver", &self.resolver.is_some())
++            .finish_non_exhaustive()
++    }
++}
++
++impl DbSet {
++    pub fn new(attlib: Arc<e3d_attlib::AttlibData>) -> Self {
++        Self {
++            attlib,
++            dbs: RwLock::new(HashMap::new()),
++            resolver: None,
++            element_cache: None,
++            opening: Mutex::new(HashMap::new()),
++        }
++    }
++
++    /// 打开**池级**元素缓存：同一个 refno 的记录解析与描述符抽取全池只做一次。
++    ///
++    /// 默认关，因为内存形状该由消费方决定（句柄级 `OnceLock` 是格式库的下限承诺）。
++    /// 打开它换来的是「跨句柄」那部分重复——[`DbSet::element`] 每次都造新句柄，于是
++    /// owner 链上溯与目录链走查（`SPRE→SPCO→CATR→SCOM→GMRE`）会把同一批祖先和同一批
++    /// 目录件反复查索引、反复解析。
++    ///
++    /// 实测（ams8000，e3d-model `gen_ams`，2026-09-04）：6088 个元素跑出 88 万次记录解析
++    /// 与 79 万次描述符抽取，**每元素真读 145 遍**，合计 5.9s，占生成总时间 88%；
++    /// 句柄级 `OnceLock` 只挡下其中 24%。
++    ///
++    /// 代价是无界：缓存条目随实际读到的元素数增长，不淘汰。生成一棵子树是有界的，
++    /// 长驻进程按库全量读则不是——那种场景自己建一个短命 `DbSet`，别开这个开关。
++    ///
++    /// 缓存的正确性挂在**会话钉死**上：[`DbSet::add_db`] 换库会连同该库的缓存条目一起丢，
++    /// 因为换了时点再用旧解析读到的就是上一个时点的树。
++    pub fn with_element_cache(mut self) -> Self {
++        self.element_cache = Some(RwLock::new(HashMap::new()));
++        self
++    }
++
++    pub fn with_resolver(
++        attlib: Arc<e3d_attlib::AttlibData>,
++        resolver: Box<dyn DbFileResolver>,
++    ) -> Self {
++        Self {
++            attlib,
++            dbs: RwLock::new(HashMap::new()),
++            resolver: Some(resolver),
++            element_cache: None,
++            opening: Mutex::new(HashMap::new()),
++        }
++    }
++
++    /// 从 `attlib.dat` 文件直接建池。
++    pub fn with_attlib_file(attlib_path: impl AsRef<Path>) -> Result<Self, DbElementError> {
++        let attlib_path = attlib_path.as_ref();
++        let attlib = e3d_attlib::AttlibData::parse_file(attlib_path).map_err(|error| {
++            DbElementError::Open {
++                file: attlib_path.to_path_buf(),
++                detail: format!("parse attlib: {error}"),
++            }
++        })?;
++        Ok(Self::new(Arc::new(attlib)))
++    }
++
++    /// Parse an attribute library and attach an on-demand cross-database resolver.
++    ///
++    /// Production model generation uses this instead of preloading every catalogue
++    /// file.  The resolver owns project/MDB selection, including same-dbnum files
++    /// from different projects; `DbSet` only freezes the selected file on first use.
++    pub fn with_attlib_file_and_resolver(
++        attlib_path: impl AsRef<Path>,
++        resolver: Box<dyn DbFileResolver>,
++    ) -> Result<Self, DbElementError> {
++        let attlib_path = attlib_path.as_ref();
++        let attlib = e3d_attlib::AttlibData::parse_file(attlib_path).map_err(|error| {
++            DbElementError::Open {
++                file: attlib_path.to_path_buf(),
++                detail: format!("parse attlib: {error}"),
++            }
++        })?;
++        Ok(Self::with_resolver(Arc::new(attlib), resolver))
++    }
++
++    /// 开一个库并按**文件自报**的库号（描述符 `db_mark`）登记。
++    ///
++    /// 同号重复登记以最后一次为准并丢掉旧会话——换了时点还接着用旧引擎，
++    /// 读到的就是上一个时点的树。
++    pub fn add_db(&self, pin: DbFilePin) -> Result<u32, DbElementError> {
++        let opened = OpenDb::open(&pin)?;
++        let dbno = opened.dbno;
++        self.dbs
++            .write()
++            .map_err(|_| DbElementError::Poisoned)?
++            .insert(dbno, Arc::new(Mutex::new(opened)));
++        // 换库 = 换时点，该库此前解析出来的记录全部作废。少了这一步，池级缓存会
++        // 把上一个会话的树一直喂下去，而且两边都不报错。
++        self.forget_cached_db(dbno);
++        Ok(dbno)
++    }
++
++    fn forget_cached_db(&self, dbno: u32) {
++        let Some(cache) = self.element_cache.as_ref() else {
++            return;
++        };
++        let Ok(mut cache) = cache.write() else {
++            return;
++        };
++        cache.remove(&dbno);
++    }
++
++    /// Create the next immutable MDB view, preserving unaffected open sessions
++    /// and their caches by Arc. Existing callers retain this view and its pins.
++    /// No database opens, element scans, or per-element cache copies occur here.
++    pub fn fork_without(
++        &self,
++        changed: &HashSet<u32>,
++        resolver: Box<dyn DbFileResolver>,
++    ) -> Result<Self, DbElementError> {
++        let dbs: HashMap<_, _> = self
++            .dbs
++            .read()
++            .map_err(|_| DbElementError::Poisoned)?
++            .iter()
++            .filter(|(dbno, _)| !changed.contains(dbno))
++            .map(|(dbno, slot)| (*dbno, slot.clone()))
++            .collect();
++        let element_cache = self
++            .element_cache
++            .as_ref()
++            .map(|cache| {
++                let retained = cache
++                    .read()
++                    .map_err(|_| DbElementError::Poisoned)?
++                    .iter()
++                    .filter(|(dbno, _)| dbs.contains_key(dbno))
++                    .map(|(dbno, entries)| (*dbno, entries.clone()))
++                    .collect();
++                Ok::<_, DbElementError>(RwLock::new(retained))
++            })
++            .transpose()?;
++        Ok(Self {
++            attlib: self.attlib.clone(),
++            dbs: RwLock::new(dbs),
++            resolver: Some(resolver),
++            element_cache,
++            opening: Mutex::new(HashMap::new()),
++        })
++    }
++
++    pub fn cached_element_count(&self) -> usize {
++        self.element_cache
++            .as_ref()
++            .and_then(|cache| cache.read().ok())
++            .map(|databases| {
++                databases
++                    .values()
++                    .filter_map(|cache| cache.read().ok())
++                    // Extraction always parses first, so parsed is the key union.
++                    .map(|cache| cache.parsed.len())
++                    .sum()
++            })
++            .unwrap_or_default()
++    }
++
++    fn cache_of(&self, dbno: u32) -> Option<Arc<RwLock<ElementCache>>> {
++        let caches = self.element_cache.as_ref()?;
++        if let Some(cache) = caches.read().ok()?.get(&dbno) {
++            return Some(cache.clone());
++        }
++        Some(caches.write().ok()?.entry(dbno).or_default().clone())
++    }
++
++    fn cached_parsed(&self, refno: RefNo) -> Option<Arc<ParsedElement>> {
++        self.cache_of(refno.dbno())?
++            .read()
++            .ok()?
++            .parsed
++            .get(&refno)
++            .cloned()
++    }
++
++    fn store_parsed(&self, refno: RefNo, parsed: Arc<ParsedElement>) {
++        let Some(cache) = self.cache_of(refno.dbno()) else {
++            return;
++        };
++        if let Ok(mut cache) = cache.write() {
++            cache.parsed.insert(refno, parsed);
++        };
++    }
++
++    fn cached_extraction(&self, refno: RefNo) -> Option<Arc<ElementExtraction>> {
++        self.cache_of(refno.dbno())?
++            .read()
++            .ok()?
++            .extraction
++            .get(&refno)
++            .cloned()
++    }
++
++    fn store_extraction(&self, refno: RefNo, extraction: Arc<ElementExtraction>) {
++        let Some(cache) = self.cache_of(refno.dbno()) else {
++            return;
++        };
++        if let Ok(mut cache) = cache.write() {
++            cache.extraction.insert(refno, extraction);
++        };
++    }
++
++    /// 已注册的库号，无序。
++    pub fn db_numbers(&self) -> Vec<u32> {
++        self.dbs
++            .read()
++            .map(|map| map.keys().copied().collect())
++            .unwrap_or_default()
++    }
++
++    /// 实际钉住的会话号。对拍时要把它跟每条比对记在一起：时点差不是读错。
++    pub fn pinned_sesno(&self, dbno: u32) -> Option<u32> {
++        let slot = self.dbs.read().ok()?.get(&dbno)?.clone();
++        let sesno = slot.lock().ok()?.pinned_sesno;
++        Some(sesno)
++    }
++
++    /// 一个**已注册**库的类型名（`DESI` / `CATA` / …），读自文件描述符自报的 db1 类型字。
++    ///
++    /// 只看池里已经开着的库，**不问 resolver**——这是「已经读过的元素属于哪类库」的
++    /// 回答（e3d-model 靠它把一次生成读到的元素分成设计侧与目录侧），不是开库的入口。
++    /// 没注册、描述符的类型字解不出 db1 名，都回 `None`。
++    pub fn db_type(&self, dbno: u32) -> Option<String> {
++        let slot = self.dbs.read().ok()?.get(&dbno)?.clone();
++        let db = slot.lock().ok()?;
++        db.engine.descriptor().db_type_name()
++    }
++
++    /// 造一个惰性句柄。不做 I/O；库是否注册、元素是否存在，都等第一次读时再说。
++    pub fn element(self: &Arc<Self>, refno: RefNo) -> DbElement {
++        DbElement {
++            set: self.clone(),
++            refno,
++            parsed: OnceLock::new(),
++            extraction: OnceLock::new(),
++        }
++    }
++
++    /// 这个 refno 在它所属库的选定会话里有没有被索引。
++    ///
++    /// 这就是单时点能回答的全部「存在性」：dabacon 没有墓碑位，「被删过」是
++    /// 两个时点的键集差（矩阵 G 组），不是一个元素身上的标志。
++    pub fn element_exists(&self, refno: RefNo) -> Result<bool, DbElementError> {
++        let dbno = refno.dbno();
++        self.with_db(dbno, |db| {
++            db.engine
++                .search_index(refno)
++                .map(|found| found.is_some())
++                .map_err(|source| DbElementError::Io { dbno, source })
++        })
++    }
++
++    /// 按存储的 NAME 精确匹配找元素，重名不折叠，原序返回。
++    ///
++    /// **一次 Named 档全树扫**——原生语义就没有 name 索引（见模块头）。
++    /// 匹配的是文件里存的原文（含 `/` 前缀就得带 `/` 来查）；
++    /// 归一化是消费方约定，不在格式库里私设。
++    pub fn find_named(&self, dbno: u32, name: &str) -> Result<Vec<RefNo>, DbElementError> {
++        self.with_db(dbno, |db| {
++            let io = |source| DbElementError::Io { dbno, source };
++            let mut out = Vec::new();
++            for item in db.engine.scan_elements(ScanTier::Named).map_err(io)? {
++                let element = item.map_err(io)?;
++                if element.name.as_deref() == Some(name) {
++                    out.push(element.refno);
++                }
++            }
++            Ok(out)
++        })
++    }
++
++    fn db_slot(&self, dbno: u32) -> Result<Arc<Mutex<OpenDb>>, DbElementError> {
++        if let Some(hit) = self
++            .dbs
++            .read()
++            .map_err(|_| DbElementError::Poisoned)?
++            .get(&dbno)
++        {
++            return Ok(hit.clone());
++        }
++        let opening = self
++            .opening
++            .lock()
++            .map_err(|_| DbElementError::Poisoned)?
++            .entry(dbno)
++            .or_default()
++            .clone();
++        let _flight = opening.lock().map_err(|_| DbElementError::Poisoned)?;
++        if let Some(hit) = self
++            .dbs
++            .read()
++            .map_err(|_| DbElementError::Poisoned)?
++            .get(&dbno)
++        {
++            return Ok(hit.clone());
++        }
++        let pin = self
++            .resolver
++            .as_ref()
++            .and_then(|resolver| resolver.resolve(dbno))
++            .ok_or(DbElementError::DbNotRegistered { dbno })?;
++        // Only this dbnum's first-open lock spans I/O. Unrelated dbnums open
++        // independently; concurrent callers of this dbnum reuse the result.
++        let opened = OpenDb::open(&pin)?;
++        if opened.dbno != dbno {
++            return Err(DbElementError::DbNumberMismatch {
++                file: pin.file,
++                expected: dbno,
++                actual: opened.dbno,
++            });
++        }
++        let fresh = Arc::new(Mutex::new(opened));
++        let mut map = self.dbs.write().map_err(|_| DbElementError::Poisoned)?;
++        Ok(map.entry(dbno).or_insert(fresh).clone())
++    }
++
++    fn with_db<R>(
++        &self,
++        dbno: u32,
++        run: impl FnOnce(&mut OpenDb) -> Result<R, DbElementError>,
++    ) -> Result<R, DbElementError> {
++        let slot = self.db_slot(dbno)?;
++        let mut db = slot.lock().map_err(|_| DbElementError::Poisoned)?;
++        run(&mut db)
++    }
++}
++
++/// 一个元素的惰性只读句柄：`(refno, Arc<DbSet>)`，记录与描述符抽取各缓存一次。
++///
++/// 句柄创建零成本；第一次身份/导航问询读一次记录，第一次属性问询多一次
++/// 描述符抽取。缓存挂在句柄上是**下限承诺**：格式库不替消费方决定内存形状。
++///
++/// 池级那一层是可选的（[`DbSet::with_element_cache`]，默认关）。2026-09-04 之前
++/// 这里写的是「池级无界缓存是消费方的取舍，格式库不做」——实测推翻了「消费方能自己
++/// 补上」这个前提：跨句柄的重复发生在 `owner()` / `get_element()` 内部，消费方拿不到
++/// 那个位置。于是改成「默认关、要就开」，开关的证据与代价记在那个函数上。
++pub struct DbElement {
++    set: Arc<DbSet>,
++    refno: RefNo,
++    parsed: OnceLock<Arc<ParsedElement>>,
++    extraction: OnceLock<Arc<ElementExtraction>>,
++}
++
++impl std::fmt::Debug for DbElement {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("DbElement")
++            .field("refno", &self.refno)
++            .field("loaded", &self.parsed.get().is_some())
++            .finish()
++    }
++}
++
++/// 名字表里找一条属性，顺带把这一次记进 [`crate::read_stats`]。
++///
++/// 查表本身在 [`ElementExtraction::find_attribute`]；这里只是两处调用点共用的
++/// 计数入口——`extraction()` 之后的这半程曾经和记录解析一样贵，得留着量。
++fn find_attribute<'a>(
++    extraction: &'a ElementExtraction,
++    name: &str,
++) -> Option<&'a crate::record::descriptor::ExtractedAttribute> {
++    crate::read_stats::note_attr_lookup();
++    extraction.find_attribute(name)
++}
++
++impl Clone for DbElement {
++    fn clone(&self) -> Self {
++        let fresh = Self {
++            set: self.set.clone(),
++            refno: self.refno,
++            parsed: OnceLock::new(),
++            extraction: OnceLock::new(),
++        };
++        if let Some(hit) = self.parsed.get() {
++            let _ = fresh.parsed.set(hit.clone());
++        }
++        if let Some(hit) = self.extraction.get() {
++            let _ = fresh.extraction.set(hit.clone());
++        }
++        fresh
++    }
++}
++
++impl DbElement {
++    // ---- A. 身份 ------------------------------------------------------
++
++    /// 这枚句柄所属的池：跨库解引用与按需开库都从它走。
++    pub fn db_set(&self) -> &Arc<DbSet> {
++        &self.set
++    }
++
++    pub fn refno(&self) -> RefNo {
++        self.refno
++    }
++
++    /// 库号，从 refno 自身的位布局解出（core.dll `sub_5AEB6B0`），不查表。
++    pub fn db_no(&self) -> u32 {
++        self.refno.dbno()
++    }
++
++    /// ref 本身是不是一个合法引用（`dbreflib/NULREF` 语义）。
++    /// 不做 I/O；「合法但不存在」由 [`Self::exists`] 回答。
++    pub fn is_null(&self) -> bool {
++        !self.refno.is_valid()
++    }
++
++    /// 选定会话的索引里有没有它。见 [`DbSet::element_exists`] 的删除语义说明。
++    pub fn exists(&self) -> Result<bool, DbElementError> {
++        if self.is_null() {
++            return Ok(false);
++        }
++        self.set.element_exists(self.refno)
++    }
++
++    /// 元素类型名（noun 反哈希）；反不出名字给十六进制，不编一个。
++    pub fn element_type(&self) -> Result<String, DbElementError> {
++        let noun_hash = self.noun_hash()?;
++        Ok(noun_name(noun_hash))
++    }
++
++    pub fn noun_hash(&self) -> Result<u32, DbElementError> {
++        Ok(self.parsed()?.noun_hash)
++    }
++
++    /// 文件里存的 NAME 原文；多数元素没存，位置显示名是渲染不是存储事实。
++    pub fn stored_name(&self) -> Result<Option<String>, DbElementError> {
++        let parsed = self.parsed()?;
++        Ok(element_name::stored_name(&parsed))
++    }
++
++    /// 自己是不是 `ancestor` 的后代：owner 链上溯逐级比对。
++    ///
++    /// 跨库 owner（实测语料 6 库 588k 元素为零例，但那是语料不是格式保证）
++    /// 会走池子照常跳；目标库没注册就报错，不静默当「不是后代」。
++    pub fn is_descendant_of(&self, ancestor: &DbElement) -> Result<bool, DbElementError> {
++        let mut visited: Vec<RefNo> = vec![self.refno];
++        let mut cursor = self.owner()?;
++        while let Some(element) = cursor {
++            if element.refno == ancestor.refno {
++                return Ok(true);
++            }
++            if visited.contains(&element.refno) {
++                return Err(DbElementError::OwnerCycle {
++                    start: self.refno,
++                    at: element.refno,
++                });
++            }
++            visited.push(element.refno);
++            cursor = element.owner()?;
++        }
++        Ok(false)
++    }
++
++    // ---- B. 导航（NXTITM 游标语义，成员原序） --------------------------
++
++    /// owner 句柄；记录头 owner 读作非法 ref（WORLD 的 owner 是 0）时给 `None`。
++    pub fn owner(&self) -> Result<Option<DbElement>, DbElementError> {
++        let owner = self.parsed()?.owner;
++        if !owner.is_valid() {
++            return Ok(None);
++        }
++        Ok(Some(self.set.element(owner)))
++    }
++
++    /// 成员游标：文件原序，不排序不去重（G3），一次一个（`build/NXTITM` 的姿势）。
++    pub fn members(&self) -> Result<MemberCursor, DbElementError> {
++        Ok(MemberCursor {
++            set: self.set.clone(),
++            parsed: self.parsed()?,
++            next: 0,
++        })
++    }
++
++    /// 成员 refno 原序裸表——对拍比序列就比它，别经过句柄再拆回去。
++    pub fn member_refnos(&self) -> Result<Vec<RefNo>, DbElementError> {
++        Ok(self.parsed()?.members.clone())
++    }
++
++    pub fn member_count(&self) -> Result<usize, DbElementError> {
++        Ok(self.parsed()?.members.len())
++    }
++
++    /// 第 `index` 个成员，**从 1 起数**（PDMS 惯例）。0 或越界给 `None`。
++    pub fn member(&self, index: usize) -> Result<Option<DbElement>, DbElementError> {
++        if index == 0 {
++            return Ok(None);
++        }
++        let parsed = self.parsed()?;
++        Ok(parsed
++            .members
++            .get(index - 1)
++            .map(|refno| self.set.element(*refno)))
++    }
++
++    pub fn first_member(&self) -> Result<Option<DbElement>, DbElementError> {
++        let parsed = self.parsed()?;
++        Ok(parsed.members.first().map(|refno| self.set.element(*refno)))
++    }
++
++    pub fn last_member(&self) -> Result<Option<DbElement>, DbElementError> {
++        let parsed = self.parsed()?;
++        Ok(parsed.members.last().map(|refno| self.set.element(*refno)))
++    }
++
++    /// 同 owner 成员表里排我后面的那个（`Next()`）。我不在 owner 的成员表里
++    /// 是数据不一致，报错不猜。
++    pub fn next(&self) -> Result<Option<DbElement>, DbElementError> {
++        self.sibling(1)
++    }
++
++    /// 同 owner 成员表里排我前面的那个（`Previous()`）。
++    pub fn previous(&self) -> Result<Option<DbElement>, DbElementError> {
++        self.sibling(-1)
++    }
++
++    fn sibling(&self, step: isize) -> Result<Option<DbElement>, DbElementError> {
++        let Some(owner) = self.owner()? else {
++            return Ok(None);
++        };
++        let siblings = owner.parsed()?;
++        let Some(position) = siblings
++            .members
++            .iter()
++            .position(|refno| *refno == self.refno)
++        else {
++            return Err(DbElementError::NotFound {
++                refno: self.refno,
++                dbno: owner.db_no(),
++                sesno: self.set.pinned_sesno(owner.db_no()).unwrap_or_default(),
++            });
++        };
++        let target = position as isize + step;
++        if target < 0 {
++            return Ok(None);
++        }
++        Ok(siblings
++            .members
++            .get(target as usize)
++            .map(|refno| self.set.element(*refno)))
++    }
++
++    /// 成员里 noun 等于 `noun` 的那些（`Members(type)`），原序。
++    /// noun 名按 PDMS 惯例大写（`db1_hash` 对大小写敏感）。
++    pub fn members_of_type(&self, noun: &str) -> Result<Vec<DbElement>, DbElementError> {
++        let wanted = e3d_attlib::db1_hash(noun);
++        let mut out = Vec::new();
++        for member in self.members()? {
++            if member.noun_hash()? == wanted {
++                out.push(member);
++            }
++        }
++        Ok(out)
++    }
++
++    // ---- C. typed getter（按文件自报形状投影） --------------------------
++
++    /// 模板声明的全部属性名，描述符序。
++    pub fn attribute_names(&self) -> Result<Vec<String>, DbElementError> {
++        Ok(self
++            .extraction()?
++            .attributes
++            .iter()
++            .map(|attribute| attribute.name.clone())
++            .collect())
++    }
++
++    /// 这个 noun 的模板认不认识该属性（`IsAttributeValid` 的键集判定）。
++    pub fn has_attribute(&self, name: &str) -> Result<bool, DbElementError> {
++        Ok(self
++            .extraction()?
++            .attributes
++            .iter()
++            .any(|attribute| attribute.name.eq_ignore_ascii_case(name)))
++    }
++
++    /// 一个属性的文件自报值。
++    ///
++    /// `Ok(None)` = 属性在模板里但**逻辑 unset**（E3D 的 unset 与 0/空串/Nulref
++    /// 都不是一回事）或本记录没解出值；属性根本不在模板里 = `Err(UnknownAttribute)`
++    /// ——.NET 面对无效属性名就是抛异常，静默 `None` 会把拼错的名字养成静默失效。
++    pub fn attribute(&self, name: &str) -> Result<Option<DescriptorValue>, DbElementError> {
++        let extraction = self.extraction()?;
++        let Some(attribute) = find_attribute(&extraction, name) else {
++            return Err(DbElementError::UnknownAttribute {
++                refno: self.refno,
++                noun: noun_name(extraction.noun_hash),
++                name: name.to_string(),
++            });
++        };
++        Ok(match &attribute.value {
++            None | Some(DescriptorValue::Unset) => None,
++            Some(value) => Some(value.clone()),
++        })
++    }
++
++    /// 文本值：`Text` 原文，或字值（`Word`）的反哈希文本。
++    pub fn get_string(&self, name: &str) -> Result<Option<String>, DbElementError> {
++        let Some(value) = self.attribute(name)? else {
++            return Ok(None);
++        };
++        match string_projection(&value) {
++            Some(projected) => Ok(projected),
++            None => Err(DbElementError::TypeMismatch {
++                refno: self.refno,
++                name: name.to_ascii_uppercase(),
++                found: shape_of(&value),
++                wanted: "Text/Word",
++            }),
++        }
++    }
++
++    pub fn get_integer(&self, name: &str) -> Result<Option<i32>, DbElementError> {
++        self.project(name, "Int", |value| match value {
++            DescriptorValue::Int(int) => Some(*int),
++            _ => None,
++        })
++    }
++
++    /// `Real` 直取；`Int` 无损加宽成 `f64`（`GATRE` 读整型槽也是给实数）。
++    pub fn get_double(&self, name: &str) -> Result<Option<f64>, DbElementError> {
++        self.project(name, "Real/Int", |value| match value {
++            DescriptorValue::Real(real) => Some(*real),
++            DescriptorValue::Int(int) => Some(f64::from(*int)),
++            _ => None,
++        })
++    }
++
++    /// 把一个属性读成数，两种目录表达式当场求值。
++    ///
++    /// 目录几何存的常常不是数而是公式。实测 ams8000 路由构件走到的 118 个 P 点，
++    /// `PDIS` 里 33 个是显式流里的 PML 正文、25 个是五词元组，只有 0 个是直存的数。
++    /// [`DbElement::get_double`] 碰上这些会报 `TypeMismatch`——但那不是类型错，
++    /// 是还没求值。
++    ///
++    /// 求值顺序与 [`crate::record::descriptor::extract_attribute`] 一致：
++    /// **显式流里的正文压过槽位**。`BLTP.Bthkness` 这种根本没有隐式槽位的属性
++    /// 照样带公式，先看槽位就会漏掉它。
++    ///
++    /// 属性不在模板里仍然是 `Err`（与 [`DbElement::attribute`] 同口径）；
++    /// 求不出来是 [`AttributeNumber`] 的一个分支，带着原因，不是错误。
++    pub fn get_number(
++        &self,
++        name: &str,
++        env: &dyn ParamEnv,
++    ) -> Result<AttributeNumber, DbElementError> {
++        let extraction = self.extraction()?;
++        let Some(attribute) = find_attribute(&extraction, name) else {
++            return Err(DbElementError::UnknownAttribute {
++                refno: self.refno,
++                noun: noun_name(extraction.noun_hash),
++                name: name.to_string(),
++            });
++        };
++
++        let parsed = self.parsed()?;
++        if let Some(words) = stored_expression_words(&parsed, attribute.hash) {
++            if let Some(value) = catalogue_pml::evaluate_words(words, env) {
++                return Ok(AttributeNumber::Evaluated {
++                    value,
++                    form: ExpressionForm::Pml,
++                });
++            }
++            // 显式流里放的不一定是 PML 程序：ams7324 的 BS 型材库（`SPRE` 直连 SPRF 那
++            // 一族）把 `SPVE.PX` 存成四词元组 `[20, 1, 1, 0]`（`0.5 TIMES PARAM 1`），
++            // 键仍是取负的属性哈希。不是程序形状的，交给元组读法；是程序却求不出的，
++            // 照旧按 PML 报未解——两种形状由 `is_program` 分开，不靠「元组也解不开」兜底。
++            if !catalogue_pml::is_program(words) {
++                let tuple: Vec<u32> = words.iter().map(|word| *word as u32).collect();
++                return Ok(match catalogue_expr::evaluate_words(&tuple, env) {
++                    Some(value) => AttributeNumber::Evaluated {
++                        value,
++                        form: ExpressionForm::Tuple,
++                    },
++                    None => AttributeNumber::Unresolved {
++                        form: ExpressionForm::Tuple,
++                        text: catalogue_expr::render(&tuple),
++                    },
++                });
++            }
++            return Ok(AttributeNumber::Unresolved {
++                form: ExpressionForm::Pml,
++                text: catalogue_pml::render(words),
++            });
++        }
++
++        Ok(match &attribute.value {
++            None | Some(DescriptorValue::Unset) => AttributeNumber::Unset,
++            Some(DescriptorValue::Real(real)) => AttributeNumber::Stored(*real),
++            // `GATRE` 读整型槽也是给实数。
++            Some(DescriptorValue::Int(int)) => AttributeNumber::Stored(f64::from(*int)),
++            Some(DescriptorValue::RawWords(words)) => {
++                match catalogue_expr::evaluate_words(words, env) {
++                    Some(value) => AttributeNumber::Evaluated {
++                        value,
++                        form: ExpressionForm::Tuple,
++                    },
++                    // 元组解得开却求不出，与「压根不是元组」（`TYPEX: [1, 644065]`
++                    // 这类）分开：前者要补环境，后者本来就没数可读。
++                    None => match catalogue_expr::render(words) {
++                        Some(text) => AttributeNumber::Unresolved {
++                            form: ExpressionForm::Tuple,
++                            text: Some(text),
++                        },
++                        None => AttributeNumber::NotNumeric,
++                    },
++                }
++            }
++            Some(_) => AttributeNumber::NotNumeric,
++        })
++    }
++
++    pub fn get_bool(&self, name: &str) -> Result<Option<bool>, DbElementError> {
++        self.project(name, "Bool", |value| match value {
++            DescriptorValue::Bool(flag) => Some(*flag),
++            _ => None,
++        })
++    }
++
++    /// 引用值。文件里存的 Nulref（非法 ref）归一成 `None`——`NULREF` 判空语义。
++    pub fn get_ref(&self, name: &str) -> Result<Option<RefNo>, DbElementError> {
++        let raw = self.project(name, "RefNo", |value| match value {
++            DescriptorValue::RefNo(refno) => Some(*refno),
++            _ => None,
++        })?;
++        Ok(raw.filter(RefNo::is_valid))
++    }
++
++    pub fn get_integer_array(&self, name: &str) -> Result<Option<Vec<i32>>, DbElementError> {
++        self.project(name, "IntArray", |value| match value {
++            DescriptorValue::IntArray(items) => Some(items.clone()),
++            _ => None,
++        })
++    }
++
++    pub fn get_double_array(&self, name: &str) -> Result<Option<Vec<f64>>, DbElementError> {
++        self.project(name, "RealArray", |value| match value {
++            DescriptorValue::RealArray(items) => Some(items.clone()),
++            _ => None,
++        })
++    }
++
++    pub fn get_ref_array(&self, name: &str) -> Result<Option<Vec<RefNo>>, DbElementError> {
++        self.project(name, "RefNoArray", |value| match value {
++            DescriptorValue::RefNoArray(items) => Some(items.clone()),
++            _ => None,
++        })
++    }
++
++    /// 位置：三个双精度，文件存的单位（mm），不做单位换算。
++    pub fn get_position(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
++        self.triple(name)
++    }
++
++    /// 方向：与位置同形。方向规格串（`axis_spec`）是另一种存储，不在这条上。
++    pub fn get_direction(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
++        self.triple(name)
++    }
++
++    /// 姿态角三元组（文件存的度）。要 Y/Z 轴向量拿它去喂
++    /// [`crate::record::orientation::axes`]，这里不替调用方选表示。
++    pub fn get_orientation(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
++        self.triple(name)
++    }
++
++    fn triple(&self, name: &str) -> Result<Option<[f64; 3]>, DbElementError> {
++        let Some(value) = self.attribute(name)? else {
++            return Ok(None);
++        };
++        match &value {
++            DescriptorValue::RealArray(items) if items.len() == 3 => {
++                Ok(Some([items[0], items[1], items[2]]))
++            }
++            other => Err(DbElementError::TypeMismatch {
++                refno: self.refno,
++                name: name.to_ascii_uppercase(),
++                found: shape_of(other),
++                wanted: "RealArray[3]",
++            }),
++        }
++    }
++
++    fn project<T>(
++        &self,
++        name: &str,
++        wanted: &'static str,
++        take: impl Fn(&DescriptorValue) -> Option<T>,
++    ) -> Result<Option<T>, DbElementError> {
++        let Some(value) = self.attribute(name)? else {
++            return Ok(None);
++        };
++        match take(&value) {
++            Some(projected) => Ok(Some(projected)),
++            None => Err(DbElementError::TypeMismatch {
++                refno: self.refno,
++                name: name.to_ascii_uppercase(),
++                found: shape_of(&value),
++                wanted,
++            }),
++        }
++    }
++
++    // ---- D. 引用跳转（跨库走池） ---------------------------------------
++
++    /// 引用属性 → 目标元素句柄。目标在别的库照常给句柄，第一次读它时
++    /// 才要求那个库已注册（或 resolver 供得出）。Nulref 给 `None`。
++    pub fn get_element(&self, name: &str) -> Result<Option<DbElement>, DbElementError> {
++        Ok(self.get_ref(name)?.map(|refno| self.set.element(refno)))
++    }
++
++    /// 引用数组 → 句柄数组，原序；数组里的 Nulref 占位原样跳过。
++    pub fn get_element_array(&self, name: &str) -> Result<Vec<DbElement>, DbElementError> {
++        Ok(self
++            .get_ref_array(name)?
++            .unwrap_or_default()
++            .into_iter()
++            .filter(RefNo::is_valid)
++            .map(|refno| self.set.element(refno))
++            .collect())
++    }
++
++    // ---- 底层出口：整条记录 / 整张抽取，给要全量的消费方 ----------------
++
++    pub fn parsed(&self) -> Result<Arc<ParsedElement>, DbElementError> {
++        // 「读了哪些元素」的记录点：只记**读成功**的——命中缓存也是一次读（记录器要的是读过的
++        // 集合，不是花过 I/O 的集合），但索引里没有的 refno（悬空引用）不是一个元素。
++        let parsed = self.parsed_uncounted();
++        if parsed.is_ok() {
++            crate::read_stats::note_element_read(self.refno);
++        }
++        parsed
++    }
++
++    fn parsed_uncounted(&self) -> Result<Arc<ParsedElement>, DbElementError> {
++        if let Some(hit) = self.parsed.get() {
++            crate::read_stats::note_parse_hit();
++            return Ok(hit.clone());
++        }
++        if let Some(shared) = self.set.cached_parsed(self.refno) {
++            crate::read_stats::note_parse_shared_hit();
++            return Ok(self.parsed.get_or_init(|| shared).clone());
++        }
++        let refno = self.refno;
++        let dbno = self.db_no();
++        let started = std::time::Instant::now();
++        let parsed = self.set.with_db(dbno, |db| {
++            let sesno = db.pinned_sesno;
++            let view = db
++                .engine
++                .find_element(refno)
++                .map_err(|source| DbElementError::Io { dbno, source })?
++                .ok_or(DbElementError::NotFound { refno, dbno, sesno })?;
++            ParsedElement::parse(&view.raw_bytes)
++                .map_err(|detail| DbElementError::Parse { refno, detail })
++        });
++        crate::read_stats::note_parse_miss(started.elapsed());
++        let parsed = parsed?;
++        let parsed = self.parsed.get_or_init(|| Arc::new(parsed)).clone();
++        self.set.store_parsed(self.refno, parsed.clone());
++        Ok(parsed)
++    }
++
++    pub fn extraction(&self) -> Result<Arc<ElementExtraction>, DbElementError> {
++        // 池级抽取缓存命中时不再经过 `parsed()`，所以这里也要记一次（同一 refno 记两次无害，
++        // 记录器按集合去重）；同样只记读成功的。
++        let extraction = self.extraction_uncounted();
++        if extraction.is_ok() {
++            crate::read_stats::note_element_read(self.refno);
++        }
++        extraction
++    }
++
++    fn extraction_uncounted(&self) -> Result<Arc<ElementExtraction>, DbElementError> {
++        if let Some(hit) = self.extraction.get() {
++            crate::read_stats::note_extract_hit();
++            return Ok(hit.clone());
++        }
++        if let Some(shared) = self.set.cached_extraction(self.refno) {
++            crate::read_stats::note_extract_shared_hit();
++            return Ok(self.extraction.get_or_init(|| shared).clone());
++        }
++        let parsed = self.parsed()?;
++        let refno = self.refno;
++        let dbno = self.db_no();
++        let attlib = self.set.attlib.clone();
++        let started = std::time::Instant::now();
++        let extraction = self.set.with_db(dbno, |db| {
++            let template = db
++                .provider
++                .template_for(parsed.noun_hash)
++                .map_err(|source| DbElementError::Extract {
++                    refno,
++                    source: ResolveError::TemplateLoad(source),
++                })?
++                .ok_or(DbElementError::Extract {
++                    refno,
++                    source: ResolveError::TemplateMissing(parsed.noun_hash),
++                })?;
++            db.engine
++                .extract_parsed_element_with_descriptors(refno, &parsed, &attlib, template)
++                .map_err(|source| DbElementError::Extract { refno, source })
++        });
++        crate::read_stats::note_extract_miss(started.elapsed());
++        let extraction = extraction?;
++        let extraction = self.extraction.get_or_init(|| Arc::new(extraction)).clone();
++        self.set.store_extraction(self.refno, extraction.clone());
++        Ok(extraction)
++    }
++}
++
++/// 成员游标：持有已解析的成员表（文件原序），一次交出一个句柄。
++///
++/// `build/NXTITM`（0x102547f5）的语义投影：`*a2==0` 取首、走到头给 `-1`——
++/// 这里是 `Iterator`，走到头给 `None`。
++pub struct MemberCursor {
++    set: Arc<DbSet>,
++    parsed: Arc<ParsedElement>,
++    next: usize,
++}
++
++impl MemberCursor {
++    /// 还剩几个，含即将交出的那个。
++    pub fn remaining(&self) -> usize {
++        self.parsed.members.len().saturating_sub(self.next)
++    }
++}
++
++impl Iterator for MemberCursor {
++    type Item = DbElement;
++
++    fn next(&mut self) -> Option<Self::Item> {
++        let refno = *self.parsed.members.get(self.next)?;
++        self.next += 1;
++        Some(DbElement {
++            set: self.set.clone(),
++            refno,
++            parsed: OnceLock::new(),
++            extraction: OnceLock::new(),
++        })
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        let remaining = self.remaining();
++        (remaining, Some(remaining))
++    }
++}
++
++fn noun_name(noun_hash: u32) -> String {
++    e3d_attlib::db1_dehash(noun_hash).unwrap_or_else(|| format!("0x{noun_hash:08X}"))
++}
++
++fn shape_of(value: &DescriptorValue) -> String {
++    match value {
++        DescriptorValue::Unset => "Unset".to_string(),
++        DescriptorValue::Bool(_) => "Bool".to_string(),
++        DescriptorValue::Int(_) => "Int".to_string(),
++        DescriptorValue::Real(_) => "Real".to_string(),
++        DescriptorValue::Text(_) => "Text".to_string(),
++        DescriptorValue::RefNo(_) => "RefNo".to_string(),
++        DescriptorValue::Word { .. } => "Word".to_string(),
++        DescriptorValue::IntArray(items) => format!("IntArray[{}]", items.len()),
++        DescriptorValue::RealArray(items) => format!("RealArray[{}]", items.len()),
++        DescriptorValue::RefNoArray(items) => format!("RefNoArray[{}]", items.len()),
++        DescriptorValue::WordArray(items) => format!("WordArray[{}]", items.len()),
++        DescriptorValue::BoolArray(items) => format!("BoolArray[{}]", items.len()),
++        DescriptorValue::RawWords(items) => format!("RawWords[{}]", items.len()),
++    }
++}
++
++/// A zero word is the physical empty/unset representation. E3D renders it as
++/// `0`, `unset`, or an empty string depending on the attribute, so the typed
++/// string projection must return `None`, rather than reporting a false type
++/// mismatch just because there is no dictionary text.
++fn string_projection(value: &DescriptorValue) -> Option<Option<String>> {
++    match value {
++        DescriptorValue::Text(text) => Some(Some(text.clone())),
++        DescriptorValue::Word {
++            text: Some(text), ..
++        } => Some(Some(text.clone())),
++        DescriptorValue::Word { raw: 0, text: None } => Some(None),
++        _ => None,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn zero_word_projects_as_unset_string() {
++        assert_eq!(
++            string_projection(&DescriptorValue::Word { raw: 0, text: None }),
++            Some(None)
++        );
++        assert_eq!(
++            string_projection(&DescriptorValue::Word {
++                raw: 42,
++                text: Some("TOP".into()),
++            }),
++            Some(Some("TOP".into()))
++        );
++        assert_eq!(
++            string_projection(&DescriptorValue::Word {
++                raw: 42,
++                text: None,
++            }),
++            None,
++            "a non-zero unresolved word remains an observable decode gap"
++        );
++    }
++
++    /// 未注册且无 resolver 的库：报 `DbNotRegistered`，不猜、不开最新。
++    #[test]
++    fn an_unregistered_db_is_an_error_not_a_guess() {
++        let set = Arc::new(DbSet::new(Arc::new(e3d_attlib::AttlibData::default())));
++        let refno = RefNo::new(16_191, 42); // dbno 7999
++        let element = set.element(refno);
++        let error = element.parsed().unwrap_err();
++        assert!(
++            matches!(error, DbElementError::DbNotRegistered { dbno: 7999 }),
++            "{error}"
++        );
++        // exists 同样不许静默说「不存在」。
++        let error = element.exists().unwrap_err();
++        assert!(
++            matches!(error, DbElementError::DbNotRegistered { dbno: 7999 }),
++            "{error}"
++        );
++    }
++
++    /// resolver 说不认识 → 依旧 fail loud；resolver 给了文件但文件自报别的库号 →
++    /// `DbNumberMismatch`，同号会话在别的文件里是另一件事。
++    #[test]
++    fn a_resolver_miss_still_fails_loud() {
++        struct Nothing;
++        impl DbFileResolver for Nothing {
++            fn resolve(&self, _dbno: u32) -> Option<DbFilePin> {
++                None
++            }
++        }
++        let set = Arc::new(DbSet::with_resolver(
++            Arc::new(e3d_attlib::AttlibData::default()),
++            Box::new(Nothing),
++        ));
++        let error = set.element(RefNo::new(16_191, 42)).parsed().unwrap_err();
++        assert!(
++            matches!(error, DbElementError::DbNotRegistered { dbno: 7999 }),
++            "{error}"
++        );
++    }
++
++    /// 空引用句柄：`is_null` 真、`exists` 假（不去查根本不存在的库 0）。
++    #[test]
++    fn a_null_ref_is_null_and_does_not_exist() {
++        let set = Arc::new(DbSet::new(Arc::new(e3d_attlib::AttlibData::default())));
++        let element = set.element(RefNo::new(0, 0));
++        assert!(element.is_null());
++        assert_eq!(element.exists().unwrap(), false);
++    }
++
++    /// 模板文件名从库类型派生；GLOB 保留 AVEVA 的历史文件名 glbvir.dat。
++    #[test]
++    fn a_template_file_is_named_after_the_db_type() {
++        let dir = Path::new("dir");
++        assert_eq!(
++            template_file_for(dir, "DESI").unwrap(),
++            dir.join("desvir.dat")
++        );
++        assert_eq!(
++            template_file_for(dir, "CATA").unwrap(),
++            dir.join("catvir.dat")
++        );
++        assert_eq!(
++            template_file_for(dir, "GLOB").unwrap(),
++            dir.join("glbvir.dat")
++        );
++        assert!(template_file_for(dir, "DI").is_err());
++    }
++}
+--- /dev/null
++++ b/tests/dbset_generations.rs
+@@ -0,0 +1,246 @@
++//! Deterministic immutable-view and first-open regression, no installed E3D needed.
++use std::collections::{HashMap, HashSet};
++use std::path::Path;
++use std::sync::{
++    atomic::{AtomicUsize, Ordering},
++    Arc, Barrier,
++};
++
++use e3d_io::db_element::{DbElementError, DbFilePin, DbFileResolver, DbSet};
++use e3d_io::{read_stats, RefNo};
++
++struct Pins {
++    pins: HashMap<u32, DbFilePin>,
++    resolves: Arc<AtomicUsize>,
++}
++impl DbFileResolver for Pins {
++    fn resolve(&self, dbno: u32) -> Option<DbFilePin> {
++        self.resolves.fetch_add(1, Ordering::SeqCst);
++        self.pins.get(&dbno).cloned()
++    }
++}
++
++fn fixture(root: &Path, name: &str, dbno: u32, session: u32, noun: &str) -> (DbFilePin, RefNo) {
++    let refno = RefNo::new(dbno | (1 << 13), 42);
++    let mut pages = vec![vec![0u8; 256]; 4];
++    fn put(page: &mut [u8], at: usize, value: u32) {
++        page[at..at + 4].copy_from_slice(&value.to_be_bytes());
++    }
++    for (at, value) in [
++        (0x08, dbno),
++        (0x20, e3d_attlib::db1_hash("DESI")),
++        (0x28, 1),
++        (0x2c, 1),
++        (0x30, 1),
++        (0x34, 64),
++        (0x38, refno.word0),
++    ] {
++        put(&mut pages[0], at, value);
++    }
++    for (at, value) in [(0, 3), (4, u32::MAX), (0x0c, session), (0x1c, 2), (0x20, 1)] {
++        put(&mut pages[1], at, value);
++    }
++    for (i, value) in [
++        5,
++        13_387_743,
++        0,
++        2,
++        2,
++        0,
++        53,
++        refno.word0,
++        refno.word1,
++        3,
++        (20 << 12) | 1,
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        put(&mut pages[2], i * 4, value);
++    }
++    put(&mut pages[3], 0, 7);
++    for (i, value) in [
++        11,
++        refno.word0,
++        refno.word1,
++        e3d_attlib::db1_hash(noun),
++        0,
++        0,
++        0,
++        0,
++        0,
++        0,
++        0,
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        put(&mut pages[3], 40 + i * 4, value);
++    }
++    let file = root.join(name);
++    std::fs::write(&file, pages.concat()).unwrap();
++    (
++        DbFilePin {
++            file,
++            template: e3d_io::bundled_schema_root().join("e3d31/binaries/desvir.dat"),
++            db_type: Some("DESI".into()),
++            sesno: None,
++        },
++        refno,
++    )
++}
++
++#[test]
++fn concurrent_open_and_dbnum_generation_forks_preserve_frozen_readers() {
++    let root = tempfile::tempdir().unwrap();
++    let (first, target) = fixture(root.path(), "first", 1000, 1, "SITE");
++    let (second, _) = fixture(root.path(), "second", 1000, 2, "ZONE");
++    let (other, other_ref) = fixture(root.path(), "other", 2000, 7, "EQUI");
++    let resolves = Arc::new(AtomicUsize::new(0));
++    let resolver = |pin: DbFilePin| {
++        Box::new(Pins {
++            pins: HashMap::from([(1000, pin), (2000, other.clone())]),
++            resolves: resolves.clone(),
++        })
++    };
++    let original = Arc::new(
++        DbSet::with_resolver(
++            Arc::new(e3d_attlib::AttlibData::default()),
++            resolver(first.clone()),
++        )
++        .with_element_cache(),
++    );
++    read_stats::reset();
++    let lazy = original.element(target);
++    assert_eq!(lazy.db_no(), 1000);
++    assert_eq!(read_stats::snapshot().database_opens, 0);
++    let barrier = Arc::new(Barrier::new(8));
++    let threads: Vec<_> = (0..8)
++        .map(|_| {
++            let set = original.clone();
++            let barrier = barrier.clone();
++            std::thread::spawn(move || {
++                barrier.wait();
++                assert_eq!(set.element(target).element_type().unwrap(), "SITE");
++            })
++        })
++        .collect();
++    for thread in threads {
++        thread.join().unwrap();
++    }
++    assert_eq!(resolves.load(Ordering::SeqCst), 1);
++    assert_eq!(read_stats::snapshot().database_opens, 1);
++    let retained = original.element(other_ref).parsed().unwrap();
++    let before_fork = read_stats::snapshot().database_opens;
++    let changed = HashSet::from([1000]);
++    let next = Arc::new(original.fork_without(&changed, resolver(second)).unwrap());
++    assert_eq!(next.db_numbers(), vec![2000]);
++    assert_eq!(read_stats::snapshot().database_opens, before_fork);
++    assert!(Arc::ptr_eq(
++        &retained,
++        &next.element(other_ref).parsed().unwrap()
++    ));
++    assert_eq!(next.element(target).element_type().unwrap(), "ZONE");
++    assert_eq!(next.pinned_sesno(1000), Some(2));
++    assert_eq!(original.element(target).element_type().unwrap(), "SITE");
++    assert_eq!(original.pinned_sesno(1000), Some(1));
++    assert_eq!(read_stats::snapshot().database_opens, before_fork + 1);
++    assert_eq!(next.cached_element_count(), 2);
++    let restored = Arc::new(
++        next.fork_without(&changed, resolver(first.clone()))
++            .unwrap(),
++    );
++    assert_eq!(restored.element(target).element_type().unwrap(), "SITE");
++    assert_eq!(next.element(target).element_type().unwrap(), "ZONE");
++    assert!(Arc::ptr_eq(
++        &retained,
++        &restored.element(other_ref).parsed().unwrap()
++    ));
++    assert_eq!(read_stats::snapshot().scan_calls, 0);
++    assert_eq!(read_stats::snapshot().scanned_elements, 0);
++
++    let mut wrong_type = first.clone();
++    wrong_type.db_type = Some("CATA".into());
++    let mismatch = DbSet::with_resolver(
++        Arc::new(e3d_attlib::AttlibData::default()),
++        resolver(wrong_type),
++    );
++    assert!(matches!(
++        mismatch.element_exists(target),
++        Err(DbElementError::DbTypeMismatch { .. })
++    ));
++    let mismatch = DbSet::with_resolver(
++        Arc::new(e3d_attlib::AttlibData::default()),
++        Box::new(Pins {
++            pins: HashMap::from([(1001, first)]),
++            resolves,
++        }),
++    );
++    assert!(matches!(
++        mismatch.element_exists(RefNo::new(1001 | (1 << 13), 42)),
++        Err(DbElementError::DbNumberMismatch {
++            expected: 1001,
++            actual: 1000,
++            ..
++        })
++    ));
++}
++
++#[test]
++#[ignore = "requires AMS source databases"]
++fn ams_fork_retains_catalogue_extraction_and_reloads_only_design_db() {
++    let schema = e3d_io::bundled_schema_root().join("e3d31/binaries");
++    let project = Path::new("D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000");
++    let design = DbFilePin {
++        file: project.join("ams8000_0001"),
++        template: schema.join("desvir.dat"),
++        db_type: Some("DESI".into()),
++        sesno: None,
++    };
++    let catalogue = DbFilePin {
++        file: project.join("ams5052_0001"),
++        template: schema.join("catvir.dat"),
++        db_type: Some("CATA".into()),
++        sesno: None,
++    };
++    let catalogue_world = e3d_io::ReadOnlyEngine::open(&catalogue.file)
++        .unwrap()
++        .descriptor()
++        .world_refno();
++    let resolver = || {
++        Box::new(Pins {
++            pins: HashMap::from([(8000, design.clone()), (5052, catalogue.clone())]),
++            resolves: Arc::new(AtomicUsize::new(0)),
++        })
++    };
++    let attlib = e3d_attlib::AttlibData::parse_file(schema.join("attlib.dat")).unwrap();
++    let old = Arc::new(DbSet::with_resolver(Arc::new(attlib), resolver()).with_element_cache());
++    read_stats::reset();
++    let branch = RefNo::new(24384, 23257);
++    let old_branch = old.element(branch).extraction().unwrap();
++    let old_catalogue = old.element(catalogue_world).extraction().unwrap();
++    let before = read_stats::snapshot();
++    let next = Arc::new(
++        old.fork_without(&HashSet::from([8000]), resolver())
++            .unwrap(),
++    );
++    assert!(Arc::ptr_eq(
++        &old_catalogue,
++        &next.element(catalogue_world).extraction().unwrap()
++    ));
++    assert_eq!(read_stats::snapshot().database_opens, before.database_opens);
++    let fresh_branch = next.element(branch).extraction().unwrap();
++    assert!(!Arc::ptr_eq(&old_branch, &fresh_branch));
++    assert_eq!(old_branch.attributes.len(), fresh_branch.attributes.len());
++    assert!(Arc::ptr_eq(
++        &old_branch,
++        &old.element(branch).extraction().unwrap()
++    ));
++    let after = read_stats::snapshot();
++    assert_eq!(after.database_opens, before.database_opens + 1);
++    assert_eq!(after.scan_calls, 0);
++    eprintln!(
++        "AMS fork: catalogue Arc retained, old branch Arc retained, design opens delta=1, {}",
++        after.summary()
++    );
++}

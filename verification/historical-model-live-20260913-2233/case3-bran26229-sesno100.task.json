@@ -1,0 +1,33 @@
+{
+  "task_id": "model-history-20260913-223507-000002",
+  "kind": "model_history",
+  "state": "failed",
+  "project": "AvevaMarineSample",
+  "created_at": "2026-09-13T22:35:07.873676800+08:00",
+  "started_at": "2026-09-13T22:35:07.873676800+08:00",
+  "finished_at": "2026-09-13T22:35:07.993573500+08:00",
+  "dbnum": 8000,
+  "db_type": "DESI",
+  "units_done": 0,
+  "total_units": 1,
+  "events_seen": 0,
+  "current_stage": "historical_generation",
+  "stage_started_at": "2026-09-13T22:35:07.873676800+08:00",
+  "detail": {
+    "refno": "=24384/26229",
+    "sesno": 100,
+    "time": null
+  },
+  "result": {
+    "code": "GEOMETRY_GENERATION_FAILED",
+    "message": "generate root 24384/26229"
+  },
+  "steps": [
+    {
+      "name": "historical_generation",
+      "at": "2026-09-13T22:35:07.873676800+08:00",
+      "ms": 119,
+      "ok": false
+    }
+  ]
+}

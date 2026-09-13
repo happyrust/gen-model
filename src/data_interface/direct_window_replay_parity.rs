@@ -10,7 +10,7 @@
 //! 窗口是合成的（不读 .dat 文件），但语句全部来自**真实渲染**：生产路
 //! （`IncrementPipeline::terminal_persist_batches` → `element_batch` 批量先删后插，
 //! plan 2026-09-06 §3 D2）与兼容路（`render_persist_statements` → old-pdms-io `to_surql` /
-//! `to_modify_surql`）各对拍一遍；分块来自真实分块、收口走真实 `finalize_attempt_on`：
+//! `to_modify_surql`）各对拍一遍；分块来自真实分块、收口使用真实 `render_finalize_tail`：
 //! 对拍的是生产写法，不是测试自己拼的 SQL。语句形态覆盖 Add（含 refno 复用的边清理）、
 //! Modified（属性修改 / 置空 + children）、删除（生产路落墓碑、兼容路软删）。
 //!
@@ -29,11 +29,12 @@ use surrealdb::engine::any::Any;
 use crate::data_interface::increment_pipeline::{
     IncrementPipeline, PERSIST_TX_CHUNK, persist_transaction_batches,
 };
-use crate::data_interface::increment_tail::{ATTEMPT_TABLE, finalize_attempt_on};
+use crate::data_interface::increment_tail::render_finalize_tail;
 use crate::data_interface::model_update_plan::ModelUpdatePlan;
 use crate::data_interface::table_parity::{
     apply_all, changed_data_tables, fresh_mem_db, init_schema_on, snapshot_data_tables,
 };
+use crate::data_interface::write_state::{WRITE_STATE_TABLE, WriteIntent, render_mark_writing};
 
 /// 保留段 dbnum / refno，避开其它夹具（GLOBAL_AABB_TREE 等进程级共享物不在本文件的
 /// 调用树上，但 refno 空间仍按惯例隔开）。
@@ -79,8 +80,8 @@ fn pe(refno: RefU64) -> String {
     RefnoEnum::from(refno).to_pe_key()
 }
 
-/// 窗口前持久态 + 水位 + `prepare_attempt` 落下的恢复记录（`apply_one` 在写第一块之前
-/// 就把它写好，崩溃后靠它决定重放哪一段）。
+/// 窗口前持久态 + 水位 + 任务开工时落下的写入标记（`writing{BASE_SESNO, END_SESNO}`，
+/// ADR-072 D1：崩溃后靠它决定退到哪一版再重跑）。
 fn base_statements(f: &Fixture) -> Vec<String> {
     let (site, equi, gone, reused, stale_child) = (
         pe(f.site),
@@ -120,11 +121,7 @@ fn base_statements(f: &Fixture) -> Vec<String> {
         format!(
             "UPSERT dbnum_watermark:{DBNUM} SET dbnum = {DBNUM}, applied_sesno = {BASE_SESNO};"
         ),
-        format!(
-            "UPSERT {ATTEMPT_TABLE}:{DBNUM} SET dbnum = {DBNUM}, db_type = 'DESI', \
-             file_path = 'mem://replay-parity', start_sesno = {START_SESNO}, end_sesno = {END_SESNO}, \
-             plan_json = '{{}}', commit_token = NONE, status = 'prepared';"
-        ),
+        render_mark_writing(DBNUM, BASE_SESNO, END_SESNO, WriteIntent::ApplyWindow),
     ]
 }
 
@@ -238,9 +235,18 @@ async fn run_batches(db: &Surreal<Any>, batches: &[String]) {
 }
 
 async fn finalize(db: &Surreal<Any>) {
-    finalize_attempt_on(db, DBNUM, END_SESNO, None, &ModelUpdatePlan::default(), &[])
+    let render = render_finalize_tail(DBNUM, END_SESNO, None, &ModelUpdatePlan::default(), &[]);
+    apply_all(db, &render.window_batches)
         .await
-        .expect("finalize tail");
+        .expect("finalize window batches");
+    db.query(format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render.tail
+    ))
+    .await
+    .expect("finalize tail transport")
+    .check()
+    .expect("finalize tail");
 }
 
 async fn watermark(db: &Surreal<Any>) -> Option<i32> {
@@ -251,12 +257,12 @@ async fn watermark(db: &Surreal<Any>) -> Option<i32> {
     response.take(0).expect("watermark value")
 }
 
-async fn attempt_status(db: &Surreal<Any>) -> Option<String> {
+async fn write_state_status(db: &Surreal<Any>) -> Option<String> {
     let mut response = db
-        .query(format!("RETURN {ATTEMPT_TABLE}:{DBNUM}.status;"))
+        .query(format!("RETURN {WRITE_STATE_TABLE}:{DBNUM}.status;"))
         .await
-        .expect("attempt transport");
-    response.take(0).expect("attempt status")
+        .expect("write state transport");
+    response.take(0).expect("write state status")
 }
 
 async fn ids(db: &Surreal<Any>, sql: String) -> Vec<String> {
@@ -298,9 +304,9 @@ async fn direct_window_replay_converges_from_every_crash_point() {
                 "chunk={chunk} crash_after={crashed_after}: 尾事务之前水位不得动"
             );
             assert_eq!(
-                attempt_status(&db).await.as_deref(),
-                Some("prepared"),
-                "chunk={chunk} crash_after={crashed_after}: 恢复记录必须还在，否则重启后没人知道要重放"
+                write_state_status(&db).await.as_deref(),
+                Some("writing"),
+                "chunk={chunk} crash_after={crashed_after}: 写入标记必须还在，否则重启后没人知道要回退"
             );
             // 重启：按固定区间整窗口重放 + 收口。
             run_batches(&db, &batches).await;
@@ -315,18 +321,18 @@ async fn direct_window_replay_converges_from_every_crash_point() {
             );
             assert_eq!(watermark(&db).await, Some(END_SESNO));
             assert_eq!(
-                attempt_status(&db).await,
-                None,
-                "收口必须删掉恢复记录，否则下一轮会再重放一次"
+                write_state_status(&db).await.as_deref(),
+                Some("writing"),
+                "数据尾事务不碰写入标记（ADR-072 W2）：收它的是任务收尾那一笔"
             );
         }
     }
 }
 
-/// 整窗口写完但尾事务没跑到（崩在 persist 与 finalize 之间）：水位与恢复记录都不动——
+/// 整窗口写完但尾事务没跑到（崩在 persist 与 finalize 之间）：水位与写入标记都不动——
 /// 这是 N1/N2「水位只在尾事务推进」的可执行形态，也是上面每个 crash 点的前提。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_crash_before_the_tail_leaves_watermark_and_recovery_record_untouched() {
+async fn a_crash_before_the_tail_leaves_watermark_and_write_marker_untouched() {
     let f = fixture();
     let statements = IncrementPipeline::render_persist_statements(&window(&f), DBNUM as i32);
     let batches = persist_transaction_batches(&statements, PERSIST_TX_CHUNK);
@@ -334,11 +340,15 @@ async fn a_crash_before_the_tail_leaves_watermark_and_recovery_record_untouched(
     let db = seeded_db("crash_before_tail").await;
     run_batches(&db, &batches).await;
     assert_eq!(watermark(&db).await, Some(BASE_SESNO), "数据落库不推进水位");
-    assert_eq!(attempt_status(&db).await.as_deref(), Some("prepared"));
+    assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"));
 
     finalize(&db).await;
     assert_eq!(watermark(&db).await, Some(END_SESNO), "只有尾事务推进水位");
-    assert_eq!(attempt_status(&db).await, None);
+    assert_eq!(
+        write_state_status(&db).await.as_deref(),
+        Some("writing"),
+        "尾事务只盖 applied_sesno，标记留给任务收尾那一笔"
+    );
 }
 
 /// 一次成功的终态就是它该有的形状——没有这条，「重放 ≡ 一次成功」可能只是两边都
@@ -661,7 +671,7 @@ async fn production_window_replay_converges_from_every_crash_point() {
                 Some(BASE_SESNO),
                 "elements={elements} crash_after={crashed_after}: 尾事务之前水位不得动"
             );
-            assert_eq!(attempt_status(&db).await.as_deref(), Some("prepared"));
+            assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"));
             run_batches(&db, &batches).await;
             finalize(&db).await;
             let replayed = snapshot_data_tables(&db).await.expect("replayed snapshot");
@@ -672,9 +682,267 @@ async fn production_window_replay_converges_from_every_crash_point() {
              expected={expected:#?}\nreplayed={replayed:#?}"
             );
             assert_eq!(watermark(&db).await, Some(END_SESNO));
-            assert_eq!(attempt_status(&db).await, None);
+            assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"));
         }
     }
+}
+
+/// ADR-072 D2 的可执行形态，也是 R1 的验收②：**回退 → 重跑**（而不是「原样重放」）之后，
+/// 终态必须与一次成功逐表相等。
+///
+/// 与上面那条的区别正是这一轮换掉的东西：从前崩溃后按持久化的固定区间**接着写**（半应用
+/// 的库直接被当成重放的起点），现在先 `rollback_to_watermark(dbnum, S, intent)` 把
+/// `sesno > S` 的痕迹删掉、三水位退回 S，再从头跑 S→T。kill 点覆盖每一个事务边界，
+/// 外加「数据全写完、尾事务前」与「尾事务已提交（applied 已到 T）」两处——D3 说崩在任何
+/// 一面都退回 S，已经盖到 T 的水位也要退。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rolled_back_window_reruns_into_the_same_state_as_one_clean_pass() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    for elements in [1usize, 2, 1000] {
+        let batches = production_batches_with_elements(&f, elements);
+
+        let clean = seeded_db(&format!("rollback_clean_{elements}")).await;
+        run_batches(&clean, &batches).await;
+        finalize(&clean).await;
+        let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+        assert_eq!(watermark(&clean).await, Some(END_SESNO));
+
+        // `..=batches.len()` 是「数据全写完、尾事务前」；再多一档是「尾事务也提交了」。
+        for crashed_after in 0..=batches.len() + 1 {
+            let tail_committed = crashed_after > batches.len();
+            let written = crashed_after.min(batches.len());
+            let db = seeded_db(&format!("rollback_crash_{elements}_{crashed_after}")).await;
+            run_batches(&db, &batches[..written]).await;
+            if tail_committed {
+                finalize(&db).await;
+                assert_eq!(
+                    watermark(&db).await,
+                    Some(END_SESNO),
+                    "前提：这一档数据水位已经盖到 T"
+                );
+            }
+
+            // 重启的水化段：见 writing → 回退到 S。
+            let marker = write_state_status(&db).await;
+            assert_eq!(marker.as_deref(), Some("writing"), "崩溃残留必须是 writing");
+            let report = rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ApplyWindow)
+                .await
+                .expect("rollback to watermark");
+            assert!(!report.wiped);
+            assert_eq!(
+                watermark(&db).await,
+                Some(BASE_SESNO),
+                "elements={elements} crash_after={crashed_after}: 三水位必须退回 S"
+            );
+            assert_eq!(
+                write_state_status(&db).await,
+                None,
+                "回退的最后一句删掉标记行，下一次开工重写 writing"
+            );
+
+            // 重跑 S→T：开工写标记 → 数据块 → 尾事务。
+            crate::data_interface::table_parity::apply_all(
+                &db,
+                &[render_mark_writing(
+                    DBNUM,
+                    BASE_SESNO,
+                    END_SESNO,
+                    WriteIntent::ApplyWindow,
+                )],
+            )
+            .await
+            .expect("re-mark writing");
+            run_batches(&db, &batches).await;
+            finalize(&db).await;
+
+            let replayed = snapshot_data_tables(&db).await.expect("replayed snapshot");
+            let mut changed = changed_data_tables(&expected, &replayed);
+            // `spatial_epoch` 是控制面计数器，回退**故意**要 bump 它（§4.3-7：不 bump 就会
+            // 按指纹相等复用一棵还留着被删构件包围盒的树）。它在两边不等正是回退干过活
+            // 的证据，不是数据面差异。
+            assert!(
+                changed.remove("spatial_epoch"),
+                "回退必须在库侧留下空间痕迹（epoch bump）"
+            );
+            assert!(
+                changed.is_empty(),
+                "elements={elements} crash_after={crashed_after}: 回退重跑终态与一次成功不一致，\
+                 差异表 {changed:?}\nexpected={expected:#?}\nreplayed={replayed:#?}"
+            );
+            assert_eq!(watermark(&db).await, Some(END_SESNO));
+        }
+    }
+}
+
+/// 属主没进本窗口的 Modified 元素，回退之后**它在属主名下那条成员边还在**。
+///
+/// 这是 t-468 量出来、这一版修掉的那处缺口：`pe` 是图顶点，删它会级联带走
+/// `pe_owner:[属主, 槽位]`（`in` 指着被删元素的那条），而槽位号只存在于属主的成员表里
+/// ——属主这一版没被改、不进 S→T 重放窗口，那条入边就再也补不回来。所以回退只删卫星行
+/// （noun / `ATT_UDA`）与模型 / 房间面，**不删 `pe` 顶点**：数据面靠行幂等收敛，重放的
+/// `INSERT … ON DUPLICATE KEY UPDATE` 整行覆盖。
+///
+/// 夹具刻意补上 `site → equi` 那条边：原来的 `base_statements` 里 EQUI 没有入边，
+/// 缺口正好测不出来。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_modified_element_keeps_the_membership_edge_its_unchanged_owner_owns() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    let db = seeded_db("membership_edge").await;
+    let (site, equi) = (pe(f.site), pe(f.equi));
+    // SITE 停在窗口前水位、名下挂着 EQUI：EQUI 在窗口里只是 Modified，SITE 不进窗口。
+    crate::data_interface::table_parity::apply_all(
+        &db,
+        &[format!(
+            "INSERT RELATION INTO pe_owner [\
+               {{ id: pe_owner:[{site}, 0], in: {equi}, out: {site} }}];"
+        )],
+    )
+    .await
+    .expect("owner edge fixture");
+
+    let batches = production_batches_with_elements(&f, 1);
+    let clean = seeded_db("membership_edge_clean").await;
+    crate::data_interface::table_parity::apply_all(
+        &clean,
+        &[format!(
+            "INSERT RELATION INTO pe_owner [\
+               {{ id: pe_owner:[{site}, 0], in: {equi}, out: {site} }}];"
+        )],
+    )
+    .await
+    .expect("owner edge fixture");
+    run_batches(&clean, &batches).await;
+    finalize(&clean).await;
+    let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+
+    // 崩在第一块之后 → 回退 → 重跑。
+    run_batches(&db, &batches[..1]).await;
+    rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ApplyWindow)
+        .await
+        .expect("rollback");
+    let owners = ids(
+        &db,
+        format!("SELECT VALUE record::id(out) FROM pe_owner WHERE in = {equi};"),
+    )
+    .await;
+    assert_eq!(
+        owners,
+        vec![f.site.to_string()],
+        "回退不得带走属主名下那条成员边（删 pe 顶点就会）"
+    );
+
+    crate::data_interface::table_parity::apply_all(
+        &db,
+        &[render_mark_writing(
+            DBNUM,
+            BASE_SESNO,
+            END_SESNO,
+            WriteIntent::ApplyWindow,
+        )],
+    )
+    .await
+    .expect("re-mark writing");
+    run_batches(&db, &batches).await;
+    finalize(&db).await;
+
+    let replayed = snapshot_data_tables(&db).await.expect("replayed snapshot");
+    let mut changed = changed_data_tables(&expected, &replayed);
+    changed.remove("spatial_epoch");
+    assert!(
+        changed.is_empty(),
+        "回退重跑之后逐表仍须与一次成功相等，差异表 {changed:?}"
+    );
+}
+
+/// 回退把三枚水位一起退回 S（ADR-072 D3「崩溃不分面」），模型面 / 房间面的行按谓词一起走，
+/// 而 S 及以前的行一个都不许动。
+#[tokio::test(flavor = "multi_thread")]
+async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    let db = seeded_db("rollback_faces").await;
+    run_batches(&db, &production_batches(&f)).await;
+    finalize(&db).await;
+    // 模型面 / 房间面：S 那一版与 (S, T] 那一版各一行，回退只该带走后者。
+    let (equi, gone) = (pe(f.equi), pe(f.gone));
+    crate::data_interface::table_parity::apply_all(
+        &db,
+        &[
+            format!(
+                "INSERT INTO inst_relate [\
+                   {{ id: inst_relate:old, in: {equi}, out: inst_info:old, dbnum: {DBNUM}, \
+                      direct_model: {{ source: 'e3d-model', sesno: {BASE_SESNO} }} }},\
+                   {{ id: inst_relate:new, in: {equi}, out: inst_info:new, dbnum: {DBNUM}, \
+                      direct_model: {{ source: 'e3d-model', sesno: {END_SESNO} }} }}];"
+            ),
+            format!(
+                "INSERT INTO gen_root [\
+                   {{ id: gen_root:old, dbnum: {DBNUM}, source_end_sesno: {BASE_SESNO} }},\
+                   {{ id: gen_root:new, dbnum: {DBNUM}, source_end_sesno: {END_SESNO} }}];"
+            ),
+            format!(
+                "INSERT RELATION INTO room_relate [\
+                   {{ id: room_relate:r1, in: {equi}, out: {gone}, room_num: 'R301' }}];"
+            ),
+            format!("UPDATE dbnum_watermark:{DBNUM} SET model_sesno = {END_SESNO};"),
+        ],
+    )
+    .await
+    .expect("model and room fixture");
+
+    rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ApplyWindow)
+        .await
+        .expect("rollback");
+
+    let survivors = ids(
+        &db,
+        "SELECT VALUE record::id(id) FROM inst_relate;".to_string(),
+    )
+    .await;
+    assert_eq!(
+        survivors,
+        vec!["old".to_string()],
+        "只带走 sesno > S 的模型行"
+    );
+    let roots = ids(
+        &db,
+        "SELECT VALUE record::id(id) FROM gen_root;".to_string(),
+    )
+    .await;
+    assert_eq!(roots, vec!["old".to_string()], "凭证同理");
+    let rooms = ids(
+        &db,
+        "SELECT VALUE record::id(id) FROM room_relate;".to_string(),
+    )
+    .await;
+    assert!(
+        rooms.is_empty(),
+        "房间边整库删（本来就是整库重算）: {rooms:?}"
+    );
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Marks {
+        applied_sesno: Option<i32>,
+        model_sesno: Option<i32>,
+    }
+    let mut response = db
+        .query(format!(
+            "SELECT applied_sesno, model_sesno FROM ONLY dbnum_watermark:{DBNUM};"
+        ))
+        .await
+        .expect("watermark transport");
+    let marks: Option<Marks> = response.take(0).expect("watermark row");
+    let marks = marks.expect("watermark row exists");
+    assert_eq!(
+        (marks.applied_sesno, marks.model_sesno),
+        (Some(BASE_SESNO), Some(BASE_SESNO)),
+        "两枚水位一起退回 S"
+    );
 }
 
 /// 生产路一次成功的终态就是它该有的形状：墓碑保留 noun / owner、被删元素的 noun 行与 UDA 行
@@ -797,7 +1065,7 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
                 .unwrap();
         }
         assert_eq!(watermark(&db).await, Some(BASE_SESNO));
-        assert_eq!(attempt_status(&db).await.as_deref(), Some("prepared"));
+        assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"));
     }
     // pe 统计不再随写事务逐笔记账（ADR-071 D6）：终态批次重放两遍，`dbnum_info_table` 一行都不动
     // ——`count` 由该库任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`），
@@ -820,4 +1088,666 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
     );
     finalize(&db).await;
     assert_eq!(watermark(&db).await, Some(END_SESNO));
+}
+
+// ───────────────────── 整任务的崩溃点重放（ADR-072 D2 / D3，计划 §6-2，R1 验收）─────────────────────
+//
+// 上面几条只在**数据面**的块边界 kill。计划 §3 的时间线还有三段：数据尾事务之后的模型块、
+// 房间提交、`task_end` 收尾——崩在任何一段，D3 说都退回 S 再整窗口重跑。下面把一个 dbnum 任务
+// 的整条写库时间线摆成一串 [`Step`]，在**每一个**步骤边界停一次：重启见 `writing` → 回退 →
+// 重跑 → 逐表与一次成功相等。三种意图各一组：ApplyWindow（S = 窗口前水位）、ModelOnly
+// （S = 模型水位）、Initialize（S = 0，回退 = 整库 wipe）。
+//
+// 数据块与两笔尾事务是真实渲染 / 真实入口；模型块与房间提交是**合成行**——生成器要 e3d 几何，
+// mem:// 上摆不出来，但回退删的正是这些行的 `dbnum` / `direct_model.sesno` / `source_end_sesno`
+// / `in.dbnum` 列，行形状照生产写（`the_rollback_takes_every_face_back_to_s_…` 同一套）。
+
+/// 一个 dbnum 任务写库时间线上的一步。`Data` / `Model` / `Rooms` 各是一笔独立提交。
+enum Step {
+    Data(String),
+    /// 数据尾事务：`render_finalize_tail`（窗口）或 `render_watermark_advance`（基线）。
+    DataTail {
+        baseline: bool,
+    },
+    Model(String),
+    Rooms(String),
+    TaskEnd,
+}
+
+impl Step {
+    fn label(&self) -> &'static str {
+        match self {
+            Step::Data(_) => "data",
+            Step::DataTail { baseline: false } => "data_tail",
+            Step::DataTail { baseline: true } => "baseline_tail",
+            Step::Model(_) => "model",
+            Step::Rooms(_) => "rooms",
+            Step::TaskEnd => "task_end",
+        }
+    }
+}
+
+async fn run_step(db: &Surreal<Any>, step: &Step) {
+    match step {
+        Step::Data(sql) | Step::Model(sql) | Step::Rooms(sql) => {
+            apply_all(db, &[sql.clone()]).await.expect("step statement");
+        }
+        Step::DataTail { baseline: false } => finalize(db).await,
+        Step::DataTail { baseline: true } => {
+            apply_all(
+                db,
+                &[format!(
+                    "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+                    crate::data_interface::increment_tail::render_watermark_advance(
+                        DBNUM, END_SESNO, None
+                    )
+                )],
+            )
+            .await
+            .expect("baseline tail");
+        }
+        Step::TaskEnd => {
+            let receipt = crate::data_interface::task_end::commit_task_end_on(
+                db,
+                &crate::data_interface::task_end::TaskEnd {
+                    dbnum: DBNUM,
+                    target_sesno: END_SESNO,
+                    target_time: None,
+                    model: Some(crate::data_interface::task_end::TaskModelOutcome {
+                        all_roots_ok: true,
+                        dead_roots: 0,
+                    }),
+                    info: None,
+                    closes_task: true,
+                },
+            )
+            .await
+            .expect("task end");
+            assert_eq!(receipt.model_sesno, Some(END_SESNO), "收尾必须盖上模型水位");
+        }
+    }
+}
+
+async fn run_steps(db: &Surreal<Any>, steps: &[Step]) {
+    for step in steps {
+        run_step(db, step).await;
+    }
+}
+
+/// 一根的模型面产物：几何行 `inst_relate` / `inst_info`（`dbnum` + `direct_model.sesno`）与
+/// 凭证 `gen_root`（`dbnum` + `source_end_sesno`），record id 与生产同形（`<ref0>_<ref1>`）。
+fn model_block(root: RefU64, sesno: i32) -> String {
+    let key = root.to_string();
+    format!(
+        "BEGIN TRANSACTION;\n\
+         INSERT INTO inst_info [{{ id: inst_info:⟨{key}⟩, dbnum: {DBNUM}, \
+           direct_model: {{ source: 'e3d-model', sesno: {sesno} }} }}];\n\
+         INSERT INTO inst_relate [{{ id: inst_relate:⟨{key}⟩, in: pe:⟨{key}⟩, out: inst_info:⟨{key}⟩, \
+           dbnum: {DBNUM}, direct_model: {{ source: 'e3d-model', sesno: {sesno} }} }}];\n\
+         INSERT INTO gen_root [{{ id: gen_root:⟨{key}⟩, dbnum: {DBNUM}, pe: pe:⟨{key}⟩, \
+           status: 'ready', source_end_sesno: {sesno} }}];\n\
+         COMMIT TRANSACTION;"
+    )
+}
+
+/// 房间提交：房间边 + 面板边，`in` 是本库的 `pe` 行（回退按 `in.dbnum` 整库删）。
+fn room_block(room: RefU64, panel: RefU64, member: RefU64) -> String {
+    let (room_key, panel_key) = (room.to_string(), panel.to_string());
+    format!(
+        "BEGIN TRANSACTION;\n\
+         INSERT RELATION INTO room_relate [{{ id: room_relate:⟨{room_key}⟩, in: {}, out: {}, \
+           room_num: 'R301' }}];\n\
+         INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:⟨{panel_key}⟩, in: {}, out: {}, \
+           room_num: 'R301' }}];\n\
+         COMMIT TRANSACTION;",
+        pe(room),
+        pe(member),
+        pe(panel),
+        pe(room),
+    )
+}
+
+/// ApplyWindow 一个任务的整条时间线：每元素一块的数据块 → 尾事务 → 三根各一块 → 房间 → 收尾。
+fn apply_window_steps(f: &Fixture) -> Vec<Step> {
+    let mut steps: Vec<Step> = production_batches_with_elements(f, 1)
+        .into_iter()
+        .map(Step::Data)
+        .collect();
+    steps.push(Step::DataTail { baseline: false });
+    steps.extend(model_steps(f));
+    steps.push(Step::Rooms(room_block(f.equi, f.reused, f.new_box)));
+    steps.push(Step::TaskEnd);
+    steps
+}
+
+fn model_steps(f: &Fixture) -> Vec<Step> {
+    [f.equi, f.reused, f.new_box]
+        .into_iter()
+        .map(|root| Step::Model(model_block(root, END_SESNO)))
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+struct WatermarkPair {
+    applied_sesno: Option<i32>,
+    model_sesno: Option<i32>,
+}
+
+async fn watermark_pair(db: &Surreal<Any>) -> Option<WatermarkPair> {
+    let mut response = db
+        .query(format!(
+            "SELECT applied_sesno, model_sesno FROM ONLY dbnum_watermark:{DBNUM};"
+        ))
+        .await
+        .expect("watermark transport");
+    response.take(0).expect("watermark row")
+}
+
+/// 一次成功与「崩溃 → 回退 → 重跑」之后的终态对拍：数据面逐表相等（`spatial_epoch` 是回退
+/// 故意 bump 的控制面计数器，摘掉），两水位都在 T，写入标记盖成 `finished` 且窗口不变。
+async fn assert_converged(
+    db: &Surreal<Any>,
+    expected: &BTreeMap<String, String>,
+    start_sesno: i32,
+    intent: WriteIntent,
+    context: &str,
+) {
+    let replayed = snapshot_data_tables(db).await.expect("replayed snapshot");
+    let mut changed = changed_data_tables(expected, &replayed);
+    assert!(
+        changed.remove("spatial_epoch"),
+        "{context}: 回退必须在库侧留下空间痕迹（epoch bump）"
+    );
+    assert!(
+        changed.is_empty(),
+        "{context}: 回退重跑终态与一次成功不一致，差异表 {changed:?}\n\
+         expected={expected:#?}\nreplayed={replayed:#?}"
+    );
+    assert_eq!(
+        watermark_pair(db).await,
+        Some(WatermarkPair {
+            applied_sesno: Some(END_SESNO),
+            model_sesno: Some(END_SESNO),
+        }),
+        "{context}: 两水位都该在 T"
+    );
+    let marker = crate::data_interface::write_state::load_on(db, DBNUM)
+        .await
+        .expect("load marker")
+        .expect("marker row stays after finished");
+    assert_eq!(
+        marker.status, "finished",
+        "{context}: 收尾那一笔盖成 finished"
+    );
+    assert_eq!(
+        (marker.start_sesno, marker.end_sesno, marker.intent),
+        (start_sesno, END_SESNO, intent),
+        "{context}: 标记记的窗口与意图不随重跑漂移"
+    );
+    assert!(marker.finished_at.is_some(), "{context}: 收尾时刻必须留下");
+}
+
+/// ApplyWindow：数据第 k 块 / 尾事务后 / 模型第 k 块 / 房间提交前 / `task_end` 前，每一处 kill 一次
+/// → 重启见 `writing` → `rollback_to_watermark(S, ApplyWindow)` → 重跑 → 逐表与一次成功相等。
+/// 「房间提交前」= 最后一个模型块之后；「`task_end` 前」= 房间块之后。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_the_clean_state() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    let steps = apply_window_steps(&f);
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| matches!(step, Step::Model(_)))
+            .count(),
+        3,
+        "三根各一块，模型第 k 块才有 k 可停"
+    );
+
+    let clean = seeded_db("task_clean").await;
+    run_steps(&clean, &steps).await;
+    let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+    assert_eq!(
+        crate::data_interface::write_state::load_on(&clean, DBNUM)
+            .await
+            .unwrap()
+            .map(|marker| marker.status),
+        Some("finished".to_owned())
+    );
+
+    // 0 = 第一笔写库之前；steps.len() - 1 = task_end 之前（task_end 之后就是 finished，不是崩溃残留）。
+    for killed_after in 0..steps.len() {
+        let context = format!(
+            "kill after step {killed_after} ({})",
+            steps[..killed_after].last().map_or("start", Step::label)
+        );
+        let db = seeded_db(&format!("task_crash_{killed_after}")).await;
+        run_steps(&db, &steps[..killed_after]).await;
+        assert_eq!(
+            write_state_status(&db).await.as_deref(),
+            Some("writing"),
+            "{context}: 崩溃残留必须是 writing"
+        );
+
+        // 重启的水化段。
+        let report = rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ApplyWindow)
+            .await
+            .expect("rollback to watermark");
+        assert!(!report.wiped, "{context}");
+        // 夹具的窗口前世界只有数据水位（模型水位是 NONE）：`math::min([NONE ?: 0, S])` = 0，
+        // 而已经盖到 T 的那几档（尾事务后 / task_end 前）都得退回 S——崩溃不分面（D3）。
+        assert_eq!(
+            watermark_pair(&db).await,
+            Some(WatermarkPair {
+                applied_sesno: Some(BASE_SESNO),
+                model_sesno: Some(0),
+            }),
+            "{context}: 两水位退到 S（崩溃不分面）"
+        );
+        assert_eq!(
+            write_state_status(&db).await,
+            None,
+            "{context}: 回退删标记行"
+        );
+        let leftovers = ids(
+            &db,
+            format!(
+                "SELECT VALUE record::id(id) FROM inst_relate WHERE dbnum = {DBNUM} \
+                 AND direct_model.sesno > {BASE_SESNO};"
+            ),
+        )
+        .await;
+        assert!(
+            leftovers.is_empty(),
+            "{context}: 模型面 sesno > S 的行必须删干净 {leftovers:?}"
+        );
+
+        // 重跑 S→T：开工标记 → 整条时间线。
+        apply_all(
+            &db,
+            &[render_mark_writing(
+                DBNUM,
+                BASE_SESNO,
+                END_SESNO,
+                WriteIntent::ApplyWindow,
+            )],
+        )
+        .await
+        .expect("re-mark writing");
+        run_steps(&db, &steps).await;
+        assert_converged(
+            &db,
+            &expected,
+            BASE_SESNO,
+            WriteIntent::ApplyWindow,
+            &context,
+        )
+        .await;
+    }
+}
+
+/// ModelOnly：数据已经在 T、模型停在 S 的库上跑一个只写模型的任务，在模型第 k 块 kill。
+///
+/// 回退按标记记的 S = 模型水位走，但**不动数据面**（t-664 ⑥，`fast_delete::render_rollback`）：
+/// 这类任务没写过数据，退数据面只会把上一窗已收口的 (S, applied] 数据行删掉、而重排的 ModelOnly
+/// 又不补数据。所以回退只删 `direct_model.sesno > S` 的模型行、`source_end_sesno > S` 的凭证、
+/// 整库房间边，`model_sesno` 退到 S、`applied_sesno` 原地不动；重跑就是同意图的
+/// ModelOnly S→T（模型 + 开关开启时的房间 + 收尾），终态与一次成功逐表相等。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_watermark_and_reruns() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    // 数据面已到 T、模型 / 房间面停在 S 的库：数据块 + 尾事务，再把模型 / 房间水位摆在 S。
+    async fn data_at_t(label: &str) -> Surreal<Any> {
+        let f = fixture();
+        let db = seeded_db(label).await;
+        let mut steps: Vec<Step> = production_batches_with_elements(&f, 1)
+            .into_iter()
+            .map(Step::Data)
+            .collect();
+        steps.push(Step::DataTail { baseline: false });
+        run_steps(&db, &steps).await;
+        apply_all(
+            &db,
+            &[
+                format!("UPDATE dbnum_watermark:{DBNUM} SET model_sesno = {BASE_SESNO};"),
+                render_mark_writing(DBNUM, BASE_SESNO, END_SESNO, WriteIntent::ModelOnly),
+            ],
+        )
+        .await
+        .expect("model-only fixture");
+        db
+    }
+    let mut model_only: Vec<Step> = model_steps(&f);
+    model_only.push(Step::Rooms(room_block(f.equi, f.reused, f.new_box)));
+    model_only.push(Step::TaskEnd);
+
+    let clean = data_at_t("model_only_clean").await;
+    run_steps(&clean, &model_only).await;
+    let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+
+    // 数据面在崩溃前后都该原样：拿一份「数据在 T、还没跑模型」的快照当对照。
+    let data_only = snapshot_data_tables(&data_at_t("model_only_data_only").await)
+        .await
+        .expect("data-only snapshot");
+
+    for killed_after in 1..model_only.len() {
+        let context = format!("model-only kill after {} step(s)", killed_after);
+        let db = data_at_t(&format!("model_only_crash_{killed_after}")).await;
+        run_steps(&db, &model_only[..killed_after]).await;
+        assert_eq!(
+            write_state_status(&db).await.as_deref(),
+            Some("writing"),
+            "{context}"
+        );
+
+        let report = rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ModelOnly)
+            .await
+            .expect("rollback");
+        assert!(!report.wiped, "{context}");
+        assert_eq!(
+            watermark_pair(&db).await,
+            Some(WatermarkPair {
+                applied_sesno: Some(END_SESNO),
+                model_sesno: Some(BASE_SESNO),
+            }),
+            "{context}: 模型水位退回 S，数据水位原地不动"
+        );
+        // 数据面一行不少、模型面 / 房间面回到「还没跑模型」那一刻。被删空的表还留着表定义，
+        // 对照库里则从没建过——「不存在」与「空」在这里是一回事。
+        let after_rollback = snapshot_data_tables(&db)
+            .await
+            .expect("post-rollback snapshot");
+        for (table, rows) in &data_only {
+            assert_eq!(
+                after_rollback.get(table),
+                Some(rows),
+                "{context}: 回退不得动 {table}（数据面）"
+            );
+        }
+        for (table, rows) in &after_rollback {
+            if table == "spatial_epoch" || data_only.contains_key(table) {
+                continue;
+            }
+            // 空表的序列化形态是 `surrealdb::Value::Array([])`。
+            assert!(
+                rows == "[]" || rows == "{\"Array\":[]}",
+                "{context}: 回退之后 {table} 必须清空: {rows}"
+            );
+        }
+
+        // 重排同意图：ModelOnly S→T。
+        apply_all(
+            &db,
+            &[render_mark_writing(
+                DBNUM,
+                BASE_SESNO,
+                END_SESNO,
+                WriteIntent::ModelOnly,
+            )],
+        )
+        .await
+        .expect("re-mark writing");
+        run_steps(&db, &model_only).await;
+        assert_converged(&db, &expected, BASE_SESNO, WriteIntent::ModelOnly, &context).await;
+    }
+}
+
+/// Initialize：空库上的首次导入（S = 0）在第 k 步 kill → 回退 = 整库 wipe → 从头重排。
+/// 数据块用基线的 `Fresh` 写法（只插不删），尾事务是基线那一句水位推进；模型 / 房间 / 收尾同上。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    let steps = initialization_steps(&f);
+    async fn empty_db(label: &str) -> Surreal<Any> {
+        let db = fresh_mem_db("replay_parity", label)
+            .await
+            .expect("mem boots");
+        init_schema_on(&db).await.expect("production schema");
+        apply_all(
+            &db,
+            &[render_mark_writing(
+                DBNUM,
+                0,
+                END_SESNO,
+                WriteIntent::Initialize,
+            )],
+        )
+        .await
+        .expect("initialize marker");
+        db
+    }
+
+    let clean = empty_db("init_clean").await;
+    run_steps(&clean, &steps).await;
+    let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+    assert!(
+        expected.contains_key("pe") && expected.contains_key("gen_root"),
+        "一次成功的初始化必须真的写了数据面与凭证: {:?}",
+        expected.keys().collect::<Vec<_>>()
+    );
+
+    for killed_after in 1..steps.len() {
+        let context = format!(
+            "init kill after step {killed_after} ({})",
+            steps[killed_after - 1].label()
+        );
+        let db = empty_db(&format!("init_crash_{killed_after}")).await;
+        run_steps(&db, &steps[..killed_after]).await;
+        assert_eq!(
+            write_state_status(&db).await.as_deref(),
+            Some("writing"),
+            "{context}"
+        );
+
+        let report = rollback_to_watermark_on(&db, DBNUM, 0, WriteIntent::Initialize)
+            .await
+            .expect("rollback = wipe");
+        assert!(report.wiped, "{context}: 初始化的回退是整库 wipe");
+        assert_eq!(report.target_watermark, 0);
+        for table in [
+            "pe",
+            "EQUI",
+            "BOX",
+            "inst_relate",
+            "inst_info",
+            "gen_root",
+            "room_relate",
+            "room_panel_relate",
+        ] {
+            let rows = ids(&db, format!("SELECT VALUE <string>id FROM {table};")).await;
+            assert!(
+                rows.is_empty(),
+                "{context}: wipe 之后 {table} 还剩 {rows:?}"
+            );
+        }
+        assert_eq!(
+            write_state_status(&db).await,
+            None,
+            "{context}: 标记行最后删"
+        );
+
+        apply_all(
+            &db,
+            &[render_mark_writing(
+                DBNUM,
+                0,
+                END_SESNO,
+                WriteIntent::Initialize,
+            )],
+        )
+        .await
+        .expect("re-mark writing");
+        run_steps(&db, &steps).await;
+        assert_converged(&db, &expected, 0, WriteIntent::Initialize, &context).await;
+    }
+}
+
+/// 首次导入的世界：夹具里窗口前的五个元素全部以 Add 进库（`Fresh` 只插不删），每元素一块。
+fn initialization_steps(f: &Fixture) -> Vec<Step> {
+    let window = BTreeMap::from([(
+        END_SESNO as u32,
+        vec![
+            EleOperationData::new(
+                f.site,
+                END_SESNO as u32,
+                EleOperationDetail::Add(full_element(
+                    f.site,
+                    RefU64(0),
+                    "SITE",
+                    "/RP-SITE",
+                    &[],
+                    &[f.equi],
+                )),
+            ),
+            EleOperationData::new(
+                f.equi,
+                END_SESNO as u32,
+                EleOperationDetail::Add(full_element(
+                    f.equi,
+                    f.site,
+                    "EQUI",
+                    "/RP-EQUI",
+                    &[("PURP", "old-purpose")],
+                    &[f.gone, f.reused, f.new_box],
+                )),
+            ),
+            EleOperationData::new(
+                f.gone,
+                END_SESNO as u32,
+                EleOperationDetail::Add(full_element(f.gone, f.equi, "BOX", "/RP-GONE", &[], &[])),
+            ),
+            EleOperationData::new(
+                f.reused,
+                END_SESNO as u32,
+                EleOperationDetail::Add(full_element(
+                    f.reused,
+                    f.equi,
+                    "NOZZ",
+                    "/RP-OLD-NOZZ",
+                    &[],
+                    &[],
+                )),
+            ),
+            EleOperationData::new(
+                f.new_box,
+                END_SESNO as u32,
+                EleOperationDetail::Add(full_element(
+                    f.new_box,
+                    f.equi,
+                    "BOX",
+                    "/RP-NEW-BOX",
+                    &[],
+                    &[],
+                )),
+            ),
+        ],
+    )]);
+    let changes =
+        crate::data_interface::ele_ops::terminal_persist_changes(&window, &HashMap::new());
+    let limits = crate::data_interface::tx_limits::DataTxLimits {
+        elements: 1,
+        ..Default::default()
+    };
+    let (batches, _) = crate::data_interface::element_batch::render_transactions_with_limits(
+        &changes,
+        &[],
+        DBNUM as i32,
+        &crate::data_interface::uda_keys::UdaKeyMap::empty(),
+        crate::data_interface::element_batch::WriteMode::Fresh,
+        limits,
+    )
+    .unwrap();
+    let mut steps: Vec<Step> = batches.into_iter().map(Step::Data).collect();
+    steps.push(Step::DataTail { baseline: true });
+    steps.extend(model_steps(f));
+    steps.push(Step::Rooms(room_block(f.equi, f.reused, f.new_box)));
+    steps.push(Step::TaskEnd);
+    steps
+}
+
+// ───────────────────────────── 源码钉（ADR-072 W2，计划 R1 验收）─────────────────────────────
+
+/// 数据尾事务**不写** `finished`、也不再删旧恢复记录 `increment_update_attempt`；`finished`
+/// 全库只有任务收尾那一笔写得出、而且恰好一句（`closes_task = false` 的中途那一笔一个字都没有）。
+#[test]
+fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once() {
+    let render = crate::data_interface::increment_tail::render_finalize_tail(
+        DBNUM,
+        END_SESNO,
+        None,
+        &ModelUpdatePlan::default(),
+        &["UPDATE pe:x SET datacenter_version = 1;".to_owned()],
+    );
+    let tail = format!("{}\n{}", render.window_batches.join("\n"), render.tail);
+    assert!(
+        tail.contains("applied_sesno"),
+        "尾事务至少推进数据水位: {tail}"
+    );
+    // `DELETE increment_update_attempt:{dbnum}` 是旧恢复记录的记录形式（`prepare_attempt` 写、
+    // 尾事务删）——ADR-072 D1 之后尾事务不再删它。同一张表里 per-root attempts / `window_block`
+    // 那两类行的清理（`WHERE dbnum = … AND kind IN […]`）是 R4 随 `staging/attempts.rs` 一起退的
+    // 事，不在这条钉的口径里。
+    for forbidden in [
+        "finished",
+        "DELETE increment_update_attempt:",
+        WRITE_STATE_TABLE,
+    ] {
+        assert!(
+            !tail.contains(forbidden),
+            "数据尾事务不许出现 {forbidden:?}（ADR-072 D1 / W2）: {tail}"
+        );
+    }
+    // 源码本身也钉一遍：渲染器改了形状、测试没跟上时，这一句先红。
+    let production = include_str!("increment_tail.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap()
+        .to_owned();
+    for forbidden in [
+        "'finished'",
+        "STATUS_FINISHED",
+        "render_mark_finished",
+        "DELETE increment_update_attempt:",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "increment_tail.rs 生产段不许出现 {forbidden:?}"
+        );
+    }
+
+    let mut end = crate::data_interface::task_end::TaskEnd {
+        dbnum: DBNUM,
+        target_sesno: END_SESNO,
+        target_time: None,
+        model: Some(crate::data_interface::task_end::TaskModelOutcome {
+            all_roots_ok: true,
+            dead_roots: 0,
+        }),
+        info: None,
+        closes_task: true,
+    };
+    let closing = crate::data_interface::task_end::render_task_end_tail(&end);
+    assert_eq!(
+        closing.matches("status = 'finished'").count(),
+        1,
+        "收尾那一笔恰含一句 finished: {closing}"
+    );
+    assert!(
+        closing.contains(&format!(
+            "UPDATE {WRITE_STATE_TABLE}:{DBNUM} SET status = 'finished'"
+        )),
+        "{closing}"
+    );
+    end.closes_task = false;
+    let midway = crate::data_interface::task_end::render_task_end_tail(&end);
+    assert_eq!(
+        midway.matches("finished").count(),
+        0,
+        "中途那一笔（数据批次之后先落 Ref0 统计）一个 finished 都不许有: {midway}"
+    );
 }

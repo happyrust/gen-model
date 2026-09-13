@@ -2,13 +2,13 @@
 //!
 //! 2026-09-07 grill 四轮定下（`docs/plans/2026-09-07-resident-room-model-plan.md` §8，共识 d-3）：
 //!
-//! 1. **一份真值，两份视图。** 它是库里已发布物（摄入：`room_published_topology` +
-//!    `room_published_inst` 当前清单）或实时行（读透）的**缓存**，不是第二份真值：换代只以
-//!    清单 / 会话摘要为键整份替换（[`ResidentRooms::install`]），不逐条修补。`latest` 与
+//! 1. **一份真值，两份视图。** 它是冻结 E3D 文件（拓扑）与库里那一份几何（`inst_relate`
+//!    实时行，d-21 / ADR-072 D4——发布视图表随 publish 阶段退役）的**缓存**，不是第二份真值：
+//!    换代只以会话摘要为键整份替换（[`ResidentRooms::install`]），不逐条修补。`latest` 与
 //!    `published` 两份并存，**回答归属的入口只许经 [`ResidentRooms::for_membership`]**——
 //!    摄入形态永远拿不到 `latest`。拿错了不报错，只是房间号静默算错，所以这一条是源码钉。
 //! 2. **判不了就不写。** 合成拓扑是跨文件的（`room_topology_source::compose` 一张 lookup），
-//!    任一文件读不到 / 清单分片不齐 → 整份 `Err`（[`ResidentBuildError`]），不产半份模型。
+//!    任一文件读不到 / 分片不齐 → 整份 `Err`（[`ResidentBuildError`]），不产半份模型。
 //! 3. **触发源只有一个。** 结构触发是账本（`room_structural_trigger`）；这里的 [`TopologyDiff`]
 //!    只在启动对比与护栏两处出手，**不产** `RoomRecalcPanel`。
 //! 4. **房间是参照系，不是增量的一部分**（第 5 轮 Q17–Q20）。[`initialize_at_startup`] 在启动
@@ -35,7 +35,6 @@ use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::shape::{TriMesh, TriMeshFlags};
 use sha2::{Digest, Sha256};
 
-use crate::data_interface::side_effect_pending::PublishedFileInput;
 use crate::fast_model::room_model::{RoomPanelMap, RoomPanels, room_panel_map_from_groups};
 use crate::fast_model::room_predicate::aabb_is_usable;
 use crate::fast_model::room_topology::{RoomGroup, RoomHierarchy, room_panel_groups};
@@ -44,7 +43,8 @@ use crate::options::DataFace;
 /// 一份模型跟着哪一路形态走。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ResidentForm {
-    /// 摄入：按发布清单冻结（ADR-062），键 = `room_published_topology.manifest_key`。
+    /// 摄入：键 = 各 DESI `(dbnum, sesno, token)` 的规范摘要（与读透同源；发布清单键随
+    /// ADR-062 一起作废）。名字保留是为了 `/health` 与回执的 `form` 字面不变。
     Published,
     /// 读透：当前文件会话，键 = 各 DESI `(dbnum, sesno, token)` 的规范摘要
     /// （与 `room_topology::load_room_groups_from_files` 的 composite 同一个字符串）。
@@ -271,7 +271,7 @@ pub(crate) fn registered_panels(map: &RoomPanelMap) -> Vec<RefnoEnum> {
 /// 一份合成好的模型。字段是只读快照，换代整份替换。
 pub(crate) struct ResidentRoomModel {
     pub manifest: ResidentManifest,
-    /// 未过关键字的原始分组，与 `room_published_topology.groups` 同形；摘要从它算。
+    /// 未过关键字的原始分组（`room_topology::RoomGroup`）；摘要从它算。
     pub groups: Vec<RoomGroup>,
     /// 过关键字 + 命名校验的在册视图；`all_panels` 是成员候选的排除集。
     pub map: RoomPanelMap,
@@ -287,10 +287,8 @@ pub(crate) struct ResidentRoomModel {
     pub unusable_panels: BTreeSet<RefnoEnum>,
     pub digest: String,
     pub geometry_digest: String,
-    /// 这份拓扑依据的每个文件版本（按 dbnum 序）：读透 = 各 DESI 的冻结令牌；摄入 = 清单
-    /// `published_file_input` 里 DESI 行的 `commit_token`。启动参照按它们从 `room_topology_source`
-    /// 分片合成「旧」视图（共识 d-42：两形态同一条路，摄入侧不再拿 `room_published_topology`
-    /// 当参照——它只重写本清单键的行，旧键的行无人管、不保证在）。
+    /// 这份拓扑依据的每个文件版本（按 dbnum 序）：两形态都是各 DESI 的冻结令牌。启动参照
+    /// 按它们从 `room_topology_source` 的磁盘分片合成「旧」视图（共识 d-42：两形态同一条路）。
     pub source_tokens: Vec<String>,
     /// MDB DESI source set frozen for this generation, sorted by dbnum.
     pub expected_dbnums: Vec<u32>,
@@ -850,69 +848,18 @@ impl fmt::Display for ResidentBuildError {
 
 impl std::error::Error for ResidentBuildError {}
 
-/// 摄入侧：从库里当前清单选中的合成分组与版本化几何合成。`db` 显式传入，`mem://` 门直接喂。
-#[cfg(test)]
-pub(crate) async fn load_published_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    inputs: &[PublishedFileInput],
-    hierarchy: RoomHierarchy,
-    room_key_words: &[String],
-    match_room_fn: impl Fn(&str) -> bool,
-    meshes: Arc<MeshCache>,
-) -> anyhow::Result<ResidentRoomModel> {
-    let key = crate::fast_model::room_topology::published_topology_manifest_key(inputs, hierarchy);
-    let by_file =
-        crate::fast_model::room_topology::load_published_topology_groups_on(db, inputs, hierarchy)
-            .await
-            .map_err(|error| {
-                ResidentBuildError::new(
-                    ResidentForm::Published,
-                    Some(key.clone()),
-                    format!("读发布拓扑失败: {error:#}"),
-                )
-            })?;
-    let room_files = room_files_of(&by_file);
-    let groups = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
-    let map = registered_map(&groups, room_key_words, match_room_fn);
-    let registered = registered_panels(&map);
-    let insts = crate::fast_model::room_publication::query_published_room_insts_on(db, &registered)
-        .await
-        .map_err(|error| {
-            ResidentBuildError::new(
-                ResidentForm::Published,
-                Some(key.clone()),
-                format!(
-                    "读 {} 块在册面板的已发布几何失败: {error:#}",
-                    registered.len()
-                ),
-            )
-        })?;
-    Ok(ResidentRoomModel::assemble(
-        ResidentManifest {
-            form: ResidentForm::Published,
-            key,
-        },
-        groups,
-        map,
-        insts,
-        meshes,
-    )
-    .with_source_tokens(published_source_tokens(inputs))
-    .with_room_files(room_files))
-}
-
-/// 摄入侧模型依据的文件版本：清单里 DESI 行的 `commit_token`，按 dbnum 序——与
-/// `published_topology_manifest_key` 摘要进键里的、`load_published_topology_groups_on` 要求
-/// 齐全的是同一批行。参照按它们读分片合成旧视图。
-pub(crate) fn published_source_tokens(inputs: &[PublishedFileInput]) -> Vec<String> {
-    let mut rows: Vec<&PublishedFileInput> = inputs
-        .iter()
-        .filter(|input| input.db_type.eq_ignore_ascii_case("DESI"))
-        .collect();
-    rows.sort_by_key(|input| input.dbnum);
-    rows.into_iter()
-        .map(|input| input.commit_token.clone())
-        .collect()
+/// 实时行那一份的身份键：按文件 dbnum 序的 `(dbnum, 分组摘要)`。没有令牌可摘时用它——
+/// 只用来判「同一份输入」，不参与任何跨进程比对。
+fn live_generation_key(by_file: &[(u32, Vec<RoomGroup>)]) -> String {
+    let mut ordered: Vec<&(u32, Vec<RoomGroup>)> = by_file.iter().collect();
+    ordered.sort_by_key(|(dbnum, _)| *dbnum);
+    let mut digest = Sha256::new();
+    digest.update(b"resident-live-generation-v1");
+    for (dbnum, groups) in ordered {
+        digest.update(dbnum.to_le_bytes());
+        digest.update(topology_digest(groups).as_bytes());
+    }
+    hex::encode(digest.finalize())
 }
 
 /// 按文件分好的分组 → 房间 → 文件 dbnum。同一个房间在两个文件里都有根是不合法的
@@ -1107,10 +1054,10 @@ async fn preload_panel_projection(
 
 /// 上次成功结算所依据的那组文件版本与拓扑摘要，落在 `room_build:main.resident_reference`。
 ///
-/// **两形态同一条路**（d-42）：`tokens` 是那一份拓扑依据的每个文件版本——读透 = 各 DESI 的
-/// 冻结令牌，摄入 = 清单里 DESI 行的 `commit_token`；启动对比按它们从 `room_topology_source`
-/// 分片合成「旧」那份再 diff。`key` 是形态自己的身份键（摄入 `manifest_key`、读透 composite），
-/// 只用来判「同一组文件版本、拓扑却不同 = 库被恢复 / 手改」；`digest` 是内容摘要，先比它。
+/// **两形态同一条路**（d-42）：`tokens` 是那一份拓扑依据的每个文件版本——两形态都是各 DESI
+/// 的冻结令牌；启动对比按它们从 `room_topology_source` 的磁盘分片合成「旧」那份再 diff。
+/// `key` 是形态自己的身份键（两形态都是文件版本 composite），只用来判「同一组文件版本、
+/// 拓扑却不同 = 库被恢复 / 手改」；`digest` 是内容摘要，先比它。
 /// 三样都不是时间：`settled_at` 只给 `/health` 与日志看，不参与判定。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ResidentReference {
@@ -1174,123 +1121,6 @@ pub(crate) async fn read_resident_reference_on(
     Ok(rows.into_iter().flatten().next())
 }
 
-/// 把这份模型钉成参照并写 `room_build:main.resident_reference`。**只在一轮成功结算之后调**
-/// （启动对比应用全成 / 显式全量全成 / 一轮 drain 全 `done`）——参照说的是「边是按这份拓扑
-/// 算出来的」，算失败的轮次不许推进它。
-///
-/// 读透：先把每个令牌冻成 `room_topology_source` 分片（`prepare_producer_source` 幂等，启动
-/// 初始化多半已经冻过）；摄入：分片由基线 / 文件轮次 / 启动前进三条写清单的路冻过，这里不冻。
-/// 两形态随后都过 [`persist_reference_on`] 的分片核对：缺一片就不写。
-pub(crate) async fn persist_reference(
-    model: &ResidentRoomModel,
-) -> anyhow::Result<ResidentReference> {
-    if model.manifest.form == ResidentForm::Latest {
-        freeze_source_shards(model).await?;
-    }
-    persist_reference_on(&aios_core::SUL_DB, model).await
-}
-
-/// [`persist_reference`] 的库半截：核对模型每个令牌的分片**都在且完整**（头在、`complete`、
-/// 令牌相等，[`room_topology_source::exists_on`]），再写参照。任一片缺失 / 不完整 / 令牌对不上
-/// → 不写、上抛：宁可下次启动多算一次（`NoReference` → 全量），不写一条到时候读不回来的参照
-/// （那会是 `ReferenceUnreadable` → `rebuild_required`，同样是全量，却多绕一圈还标了脏）。
-/// 没有令牌的模型同样拒写——参照没有令牌就没有旧视图可合成。`db` 显式传入，`mem://` 门直接喂。
-///
-/// [`room_topology_source::exists_on`]: crate::fast_model::room_topology_source::exists_on
-pub(crate) async fn persist_reference_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    model: &ResidentRoomModel,
-) -> anyhow::Result<ResidentReference> {
-    anyhow::ensure!(
-        !model.source_tokens.is_empty(),
-        "参照不写：{} 模型 {} 没有来源令牌，下次启动无从合成旧视图",
-        model.manifest.form.as_str(),
-        model.manifest.key
-    );
-    ensure_source_shards_present_on(db, &model.source_tokens).await?;
-    let reference = ResidentReference::for_model(model);
-    write_resident_reference_on(db, &reference).await?;
-    Ok(reference)
-}
-
-/// 每个令牌的分片都在且完整，否则一次说全（哪几片、各为什么）。
-async fn ensure_source_shards_present_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    tokens: &[String],
-) -> anyhow::Result<()> {
-    let mut missing = Vec::new();
-    for token in tokens {
-        match crate::fast_model::room_topology_source::exists_on(db, token).await {
-            Ok(true) => {}
-            Ok(false) => missing.push(format!("{}: 分片缺失", describe_token(token))),
-            Err(error) => missing.push(format!("{}: {error:#}", describe_token(token))),
-        }
-    }
-    anyhow::ensure!(
-        missing.is_empty(),
-        "参照不写：{} 个令牌的房间拓扑分片缺失或不完整 [{}]",
-        missing.len(),
-        missing.join("; ")
-    );
-    Ok(())
-}
-
-/// 给人看的令牌：`dbnum@sesno`；解不出来（纯测里的占位令牌）退回前 24 个字符。
-fn describe_token(token: &str) -> String {
-    match crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token) {
-        Ok(source) => format!("{}@{}", source.dbnum(), source.target_sesno()),
-        Err(_) => token.chars().take(24).collect(),
-    }
-}
-
-/// 把模型依据的每个文件版本冻成 `room_topology_source` 分片（`prepare_producer_source` 幂等：
-/// 已有同令牌的分片只校验不重冻）。返回每个令牌 `(dbnum, sesno, 耗时 ms)`——启动初始化的回执
-/// 逐文件报它。**只冻分片、不写参照**：参照说的是「边是按这份拓扑算出来的」，归结算那一步写。
-pub(crate) async fn freeze_source_shards(
-    model: &ResidentRoomModel,
-) -> anyhow::Result<Vec<(u32, u32, u128)>> {
-    let mut frozen = Vec::with_capacity(model.source_tokens.len());
-    for token in &model.source_tokens {
-        let started = Instant::now();
-        let source =
-            crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)?;
-        crate::fast_model::room_topology_source::prepare_producer_source(&source)
-            .await
-            .with_context(|| format!("冻结 dbnum {} 的房间拓扑分片", source.dbnum()))?;
-        frozen.push((
-            source.dbnum() as u32,
-            source.target_sesno(),
-            started.elapsed().as_millis(),
-        ));
-    }
-    Ok(frozen)
-}
-
-/// 启动对比的「旧」那份：按参照里的令牌读分片、合成、过关键字。任一分片缺失 / 校验失败
-/// → 整份失败（原则 2），调用方按「参照不可读」处置，不拿半份去 diff。
-pub(crate) async fn load_reference_map_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    reference: &ResidentReference,
-    hierarchy: RoomHierarchy,
-    room_key_words: &[String],
-    match_room_fn: impl Fn(&str) -> bool,
-) -> anyhow::Result<(Vec<RoomGroup>, RoomPanelMap)> {
-    let mut sources = Vec::with_capacity(reference.tokens.len());
-    for token in &reference.tokens {
-        sources.push(
-            crate::fast_model::room_topology_source::load_on(db, token)
-                .await
-                .context("读启动参照的房间拓扑分片")?,
-        );
-    }
-    let composed = crate::fast_model::room_topology_source::compose(&sources, hierarchy)?;
-    let groups: Vec<RoomGroup> = composed
-        .into_iter()
-        .flat_map(|(_, groups)| groups)
-        .collect();
-    let map = registered_map(&groups, room_key_words, match_room_fn);
-    Ok((groups, map))
-}
 
 /// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比；臂表 d-42，两形态同一张）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1525,14 +1355,11 @@ pub(crate) struct EnsureOutcome {
 
 /// 身份探针：只算「此刻这一路是哪一组文件版本」，不读拓扑、不读几何。
 ///
-/// 摄入 = 发布清单一次查询 + [`published_topology_manifest_key`]，与
-/// `room_published_topology.manifest_key` 是同一个函数算的；读透 = 各 DESI 的冻结令牌摘要
-/// （`room_topology::latest_frozen_sources`），与 [`load_latest`] 的 composite 同源。
-/// 两边都不许在这里另起一套键——键漂了就是每轮都以为文件变了、每轮整份重建。
+/// 两形态同一把键：各 DESI 的冻结令牌摘要（`room_topology::latest_frozen_sources`），与
+/// [`load_latest`] / [`load_published`] 的 composite 同源（发布清单键随 ADR-062 作废）。
+/// 不许在这里另起一套键——键漂了就是每轮都以为文件变了、每轮整份重建。
 ///
-/// `None` = 摄入侧还没有发布清单（升级基线未建），调用方保留今天的读法。
-///
-/// [`published_topology_manifest_key`]: crate::fast_model::room_topology::published_topology_manifest_key
+/// 回 `Option` 是历史签名：如今两形态都能算出键，不再有「没有发布清单」这一档。
 async fn probe_manifest(
     form: ResidentForm,
     hierarchy: RoomHierarchy,
@@ -1645,41 +1472,6 @@ async fn ensure_current_inner(
 // [`initialize_at_startup`]（P3-b）；门只有 `room_resident_model` 开关与 `spatial_compute`。
 // ---------------------------------------------------------------------------
 
-/// 哪些文件的清单行归**文件轮次**管（Q19 (a)）。由调用方按监听限定域算好传进来——本模块
-/// 不认识 `watch_scope`（原则 4）；归轮次管的行初始化一个字不动，其余的才由它前进。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RoundOwnership {
-    /// 限定域没生效：MDB 每个 DESI 都有自己的文件轮次，初始化一行不动。
-    EveryFile,
-    /// 限定域生效：只有这些库归轮次管；不在其中的库没有轮次推它，清单行由初始化前进。
-    Only(BTreeSet<u32>),
-}
-
-impl RoundOwnership {
-    /// 对这一批 MDB 设计库，归轮次管的 dbnum 集合。
-    pub(crate) fn owned_by_rounds(&self, sources: &[(u32, PathBuf, u32)]) -> BTreeSet<u32> {
-        match self {
-            Self::EveryFile => sources.iter().map(|(dbnum, _, _)| *dbnum).collect(),
-            Self::Only(dbnums) => dbnums.clone(),
-        }
-    }
-
-    /// 给启动日志的一句。
-    pub(crate) fn describe(&self) -> String {
-        match self {
-            Self::EveryFile => "每个设计库都有自己的文件轮次，清单行一律由轮次推进".to_string(),
-            Self::Only(dbnums) => format!(
-                "只有 [{}] 归文件轮次管，其余设计库的清单行由初始化推进到文件最新会话",
-                dbnums
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
-    }
-}
-
 /// 一个 MDB 设计库文件在本次初始化里清单行的去向（摄入形态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ManifestAction {
@@ -1716,102 +1508,6 @@ pub(crate) struct ManifestStep {
     /// 文件此刻的最新会话（`design_sources()` 给的）。
     pub sesno: u32,
     pub action: ManifestAction,
-}
-
-/// 纯函数：MDB 全部 DESI × 现有清单 × 归文件轮次管的库 → 每个文件的去向。
-///
-/// `owned_by_rounds` 由调用方给：监听限定域生效时 = 限定域里的库；未生效时 = MDB 全部
-/// DESI（那时每个文件都有自己的轮次，初始化一行不动）。这里**不看** `watch_scope`——
-/// 房间文件不认识它（原则 4）。
-pub(crate) fn plan_manifest_advance(
-    sources: &[(u32, PathBuf, u32)],
-    rows: &[PublishedFileInput],
-    owned_by_rounds: &BTreeSet<u32>,
-) -> Vec<ManifestStep> {
-    let by_dbnum: BTreeMap<u32, &PublishedFileInput> =
-        rows.iter().map(|row| (row.dbnum, row)).collect();
-    let mut steps: Vec<ManifestStep> = sources
-        .iter()
-        .map(|(dbnum, path, sesno)| {
-            let action = if owned_by_rounds.contains(dbnum) {
-                ManifestAction::OwnedByRounds
-            } else {
-                match by_dbnum.get(dbnum) {
-                    None => ManifestAction::Added,
-                    Some(row) if row.end_sesno == *sesno as i32 => ManifestAction::Current,
-                    Some(row) => ManifestAction::Advanced {
-                        from_sesno: row.end_sesno,
-                    },
-                }
-            };
-            ManifestStep {
-                dbnum: *dbnum,
-                path: path.clone(),
-                sesno: *sesno,
-                action,
-            }
-        })
-        .collect();
-    steps.sort_by_key(|step| step.dbnum);
-    steps
-}
-
-/// The resident generation is a frozen all-MDB view. Its DESI manifest must contain
-/// exactly one current row per design source; extra, duplicate, missing, or stale rows
-/// would mix source sessions inside one generation.
-fn validate_source_coverage(
-    sources: &[(u32, PathBuf, u32)],
-    rows: &[PublishedFileInput],
-) -> Result<(), ResidentBuildError> {
-    let expected: BTreeMap<u32, u32> = sources
-        .iter()
-        .map(|(dbnum, _, sesno)| (*dbnum, *sesno))
-        .collect();
-    if expected.len() != sources.len() {
-        return Err(ResidentBuildError::new(
-            ResidentForm::Published,
-            None,
-            "MDB 设计库清单含重复 dbnum",
-        ));
-    }
-    let design_rows: Vec<&PublishedFileInput> = rows
-        .iter()
-        .filter(|row| row.db_type.eq_ignore_ascii_case("DESI"))
-        .collect();
-    let actual: BTreeMap<u32, i32> = design_rows
-        .iter()
-        .map(|row| (row.dbnum, row.end_sesno))
-        .collect();
-    let duplicate = actual.len() != design_rows.len();
-    let missing: Vec<u32> = expected
-        .keys()
-        .filter(|dbnum| !actual.contains_key(dbnum))
-        .copied()
-        .collect();
-    let extra: Vec<u32> = actual
-        .keys()
-        .filter(|dbnum| !expected.contains_key(dbnum))
-        .copied()
-        .collect();
-    let stale: Vec<String> = expected
-        .iter()
-        .filter_map(|(dbnum, sesno)| {
-            actual
-                .get(dbnum)
-                .filter(|actual| **actual != *sesno as i32)
-                .map(|actual| format!("{dbnum}:{actual}->{sesno}"))
-        })
-        .collect();
-    if duplicate || !missing.is_empty() || !extra.is_empty() || !stale.is_empty() {
-        return Err(ResidentBuildError::new(
-            ResidentForm::Published,
-            None,
-            format!(
-                "MDB source coverage 不完整: duplicate={duplicate} missing={missing:?} extra={extra:?} stale={stale:?}"
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// 一次启动初始化的回执。
@@ -1918,13 +1614,11 @@ impl StartupInitOutcome {
 /// 记 `resident_blocked`、不动边。
 pub(crate) async fn initialize_at_startup(
     face: DataFace,
-    ownership: &RoundOwnership,
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
     mesh_dir: &Path,
 ) -> anyhow::Result<StartupInitOutcome> {
-    let _ = ownership; // file-round ownership no longer changes room calculation inputs
     initialize_file_backed_at_startup(
         ResidentForm::for_face(face),
         hierarchy,
@@ -1951,13 +1645,8 @@ async fn initialize_file_backed_at_startup(
         .mesh_cache();
     let mut model =
         load_file_backed(form, hierarchy, room_key_words, match_room_fn, meshes).await?;
-    let frozen = freeze_source_shards(&model).await.map_err(|error| {
-        ResidentBuildError::new(
-            form,
-            Some(model.manifest.key.clone()),
-            format!("冻结房间拓扑分片失败: {error:#}"),
-        )
-    })?;
+    // 拓扑分片（`room_topology_source`）随房间流程退役（t-678）：没有分片要冻，回执那一格空着。
+    let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let model = resident_rooms()
@@ -1975,217 +1664,6 @@ async fn initialize_file_backed_at_startup(
     })
 }
 
-/// 摄入形态：基线（全 MDB，已有就跳过）→ 替不归轮次管的文件前进清单行 → 从清单建模并装进单例。
-#[cfg(test)]
-async fn initialize_published_at_startup(
-    ownership: &RoundOwnership,
-    hierarchy: RoomHierarchy,
-    room_key_words: &[String],
-    match_room_fn: impl Fn(&str) -> bool,
-    mesh_dir: &Path,
-) -> anyhow::Result<StartupInitOutcome> {
-    use crate::data_interface::side_effect_pending::SideEffectCompensator;
-
-    let started = Instant::now();
-    // 基线本来就是全 MDB 的（`design_sources()`），只是此前要等第一个文件轮次 / 第一次房间
-    // drain 才建。它自带串行锁，所以放在本函数取锁之前。建不成（多半是空间树未就绪——
-    // 它要持久化一份快照头）不拦建模：清单里已有的行照旧能建模，只是这次不写清单。
-    let baseline_failure = SideEffectCompensator::ensure_published_file_baseline(0, 0)
-        .await
-        .err()
-        .map(|error| format!("建房间发布基线失败: {error:#}"));
-    let sources = crate::fast_model::e3d_model_service::E3dModelService::from_current()
-        .await
-        .and_then(|service| service.design_sources())
-        .map_err(|error| {
-            ResidentBuildError::new(
-                ResidentForm::Published,
-                None,
-                format!("枚举 MDB 设计库失败: {error:#}"),
-            )
-        })?;
-
-    let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
-    let rows = SideEffectCompensator::published_file_inputs()
-        .await
-        .map_err(|error| {
-            ResidentBuildError::new(
-                ResidentForm::Published,
-                None,
-                format!("读发布清单失败: {error:#}"),
-            )
-        })?;
-    let steps = plan_manifest_advance(&sources, &rows, &ownership.owned_by_rounds(&sources));
-    let (rows, frozen, advance_warning) = if let Some(reason) = baseline_failure {
-        if steps.iter().any(|step| step.action.moves()) {
-            return Err(ResidentBuildError::new(ResidentForm::Published, None, reason).into());
-        }
-        (rows, Vec::new(), None)
-    } else {
-        match advance_orphaned_manifest_rows(&steps, rows.clone()).await {
-            Ok(advance) => (advance.rows, advance.frozen, advance.header_warning),
-            Err(reason) => {
-                return Err(ResidentBuildError::new(
-                    ResidentForm::Published,
-                    None,
-                    format!("清单前进失败: {reason:#}"),
-                )
-                .into());
-            }
-        }
-    };
-    validate_source_coverage(&sources, &rows)?;
-    if rows.is_empty() {
-        // 空清单建出来的是「零间房」的模型；装进去等于让每个构件都算成不在任何房间里，
-        // 先删后写会把存量边清光（原则 2）。
-        return Err(ResidentBuildError::new(
-            ResidentForm::Published,
-            None,
-            "发布清单为空（基线没建成）：不装零间房的模型",
-        )
-        .into());
-    }
-    let meshes = resident_rooms()
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .mesh_cache();
-    let mut model = match (
-        load_published_on(
-            &aios_core::SUL_DB,
-            &rows,
-            hierarchy,
-            room_key_words,
-            match_room_fn,
-            meshes,
-        )
-        .await,
-        advance_warning.as_deref(),
-    ) {
-        (Ok(model), _) => model,
-        // 清单没前进、模型又建不起来时，「为什么没前进」是唯一有用的那半句：现场只看得到
-        // 「读发布拓扑失败 … got []」这个果（旧清单那份拓扑行早被换代删了）。`context` 挂上
-        // 因，`ResidentBuildError` 仍在链上、照样 `downcast_ref`。
-        (Err(error), Some(warning)) => return Err(error.context(warning.to_string())),
-        (Err(error), None) => return Err(error),
-    }
-    .with_expected_dbnums(sources.iter().map(|(dbnum, _, _)| *dbnum).collect());
-    warm_for_install(&mut model, mesh_dir).await?;
-    let model = resident_rooms()
-        .write()
-        .unwrap_or_else(PoisonError::into_inner)
-        .install(model)
-        .model;
-    Ok(StartupInitOutcome {
-        form: ResidentForm::Published,
-        steps,
-        frozen,
-        advance_warning,
-        model,
-        elapsed_ms: started.elapsed().as_millis(),
-    })
-}
-
-/// [`advance_orphaned_manifest_rows`] 的回执。事务提交之前的失败走 `Err`（清单一行没动）；
-/// 提交之后只剩快照头一步，它没落也只是 `header_warning`——清单已经是新的，模型得照新的建。
-struct ManifestAdvance {
-    /// 前进后的清单（没有要动的行时就是传进来的那份）。
-    rows: Vec<PublishedFileInput>,
-    /// 真的前进 / 新增了的行 `(dbnum, sesno, 冻结耗时 ms)`。
-    frozen: Vec<(u32, u32, u128)>,
-    /// 事务已提交、快照头没持久化（脏标记已保留，空闲轮补写）。
-    header_warning: Option<String>,
-}
-
-/// 替不归任何文件轮次管的文件前进清单行（Q19 (a)）：`capture_at(最新)` → 冻分片 → 重物化该
-/// `(dbnum, token)` 的 `room_published_inst` → `UPSERT published_file_input:{dbnum}` → 按新清单重算
-/// `room_published_topology`，一个事务；随后持久化快照头（清单版本与快照绑定）。
-/// 与 `ensure_published_file_baseline` 同一套纪律：有在途文件轮次就不写。
-///
-/// 调用方已持 `lock_spatial_serial`。
-async fn advance_orphaned_manifest_rows(
-    steps: &[ManifestStep],
-    mut rows: Vec<PublishedFileInput>,
-) -> anyhow::Result<ManifestAdvance> {
-    use crate::data_interface::side_effect_pending::SideEffectCompensator;
-
-    let moving: Vec<&ManifestStep> = steps.iter().filter(|step| step.action.moves()).collect();
-    if moving.is_empty() {
-        return Ok(ManifestAdvance {
-            rows,
-            frozen: Vec::new(),
-            header_warning: None,
-        });
-    }
-    anyhow::ensure!(
-        !SideEffectCompensator::has_inflight_file_round_on(&aios_core::SUL_DB).await?,
-        "存在未完成的文件发布，本次不替未监听文件前进清单行"
-    );
-    crate::fast_model::spatial_state::ensure_spatial_ready()
-        .map_err(|error| anyhow::anyhow!("空间树未就绪，清单行不前进: {error:#}"))?;
-    let published_version = SideEffectCompensator::published_spatial_version().await?;
-    let mut statements = Vec::with_capacity(moving.len() * 2 + 1);
-    let mut frozen = Vec::with_capacity(moving.len());
-    for step in &moving {
-        let started = Instant::now();
-        let source =
-            crate::data_interface::frozen_source::FrozenSource::capture_at(&step.path, step.sesno)
-                .with_context(|| {
-                    format!(
-                        "冻结 dbnum={} {}@{} 失败",
-                        step.dbnum,
-                        step.path.display(),
-                        step.sesno
-                    )
-                })?;
-        let token = source.commit_token_json()?;
-        crate::fast_model::room_topology_source::prepare_producer_source(&source)
-            .await
-            .with_context(|| format!("冻结 dbnum {} 的房间拓扑分片", step.dbnum))?;
-        statements.push(SideEffectCompensator::render_published_file_input_upsert(
-            step.dbnum,
-            source.db_type(),
-            step.sesno as i32,
-            &token,
-            published_version,
-        ));
-        rows.retain(|row| row.dbnum != step.dbnum);
-        rows.push(PublishedFileInput {
-            dbnum: step.dbnum,
-            db_type: source.db_type().to_string(),
-            end_sesno: step.sesno as i32,
-            commit_token: token,
-            published_version,
-        });
-        frozen.push((step.dbnum, step.sesno, started.elapsed().as_millis()));
-    }
-    rows.sort_by_key(|row| row.dbnum);
-    statements
-        .push(crate::fast_model::room_topology::render_stage_published_room_topology(&rows).await?);
-    aios_core::SUL_DB
-        .query(format!(
-            "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-            statements.join(" ")
-        ))
-        .await?
-        .check()?;
-    // 事务已提交：从这里起清单就是新的，快照头落不落只影响回执，不改返回的清单。
-    let header_warning =
-        match crate::fast_model::aabb_tree::persist_aabb_tree_if_dirty_locked_for_publication(&[])
-            .await
-        {
-            Ok(true) => None,
-            Ok(false) => Some("清单已前进但快照头没持久化（脏标记已保留，空闲轮补写）".to_string()),
-            Err(error) => Some(format!(
-                "清单已前进但快照头写失败（脏标记已保留，空闲轮补写）: {error:#}"
-            )),
-        };
-    Ok(ManifestAdvance {
-        rows,
-        frozen,
-        header_warning,
-    })
-}
-
 /// 读透形态：`load_latest`（本就全 MDB）→ 每个令牌冻分片 → 装进单例。读透没有清单，
 /// `owned_by_rounds` 用不上。
 async fn initialize_latest_at_startup(
@@ -2200,13 +1678,8 @@ async fn initialize_latest_at_startup(
         .unwrap_or_else(PoisonError::into_inner)
         .mesh_cache();
     let mut model = load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?;
-    let frozen = freeze_source_shards(&model).await.map_err(|error| {
-        ResidentBuildError::new(
-            ResidentForm::Latest,
-            Some(model.manifest.key.clone()),
-            format!("冻结房间拓扑分片失败: {error:#}"),
-        )
-    })?;
+    // 见 `initialize_file_backed_at_startup`：分片退役，回执那一格空着。
+    let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let model = resident_rooms()
@@ -2742,6 +2215,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real AMS 8000 model and room calculation parity; isolated DB_OPTION_FILE required"]
+    async fn ams_8000_models_and_rooms_without_database() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(Some(8000), true).await
+    }
+
+    #[tokio::test]
     #[ignore = "real AMS 7022 model and room initialization after route repair"]
     async fn ams_7022_models_and_rooms_without_database() -> anyhow::Result<()> {
         measure_ams_memory_rooms(Some(7022), false).await
@@ -2868,22 +2347,20 @@ mod tests {
             let mut reference_room_ms = None;
             let mut optimized_room_ms = None;
             if failures.is_empty() {
-                let version = crate::data_interface::dbnum_state::RoomInputVersion {
-                    version: 1,
-                    source_identity: token,
-                    model_sesno: session as i32,
-                    model_version: input,
-                    room_definition_version: room_version.clone(),
-                    generation_rule_version: "model-target-v1".into(),
-                };
-                match calculator.calculate(dbnum, &version, &records) {
+                // 房间输入版本结构随第三枚水位退了（ADR-073 D2）：算的是哪一版模型、按哪一版
+                // 面板定义，直接两格传给计算器。
+                match calculator.calculate(dbnum, session as i32, &room_version, &records) {
                     Ok(edges) => {
                         optimized_room_ms = Some(room_started.elapsed().as_millis());
                         edge_count = Some(edges.len());
                         if check_parity {
                             let reference_started = Instant::now();
-                            let reference = calculator
-                                .calculate_with_component_bvh(dbnum, &version, &records)?;
+                            let reference = calculator.calculate_with_component_bvh(
+                                dbnum,
+                                session as i32,
+                                &room_version,
+                                &records,
+                            )?;
                             reference_room_ms = Some(reference_started.elapsed().as_millis());
                             let key = |edge: &crate::fast_model::room_model::ElementRoomEdge| {
                                 (
@@ -3333,44 +2810,6 @@ mod tests {
         assert_eq!(rooms.stats().len(), 2);
     }
 
-    fn published_input(dbnum: u32, end_sesno: i32, token: &str) -> PublishedFileInput {
-        PublishedFileInput {
-            dbnum,
-            db_type: "DESI".into(),
-            end_sesno,
-            commit_token: token.into(),
-            published_version: 1,
-        }
-    }
-
-    #[test]
-    fn source_coverage_requires_exactly_one_current_row_per_mdb_design_db() {
-        let sources = vec![
-            (7997, PathBuf::from("7997"), 11),
-            (8000, PathBuf::from("8000"), 22),
-        ];
-        let complete = vec![
-            published_input(7997, 11, "a"),
-            published_input(8000, 22, "b"),
-        ];
-        validate_source_coverage(&sources, &complete).expect("exact coverage");
-
-        for rows in [
-            vec![published_input(7997, 11, "a")],
-            vec![
-                published_input(7997, 10, "a"),
-                published_input(8000, 22, "b"),
-            ],
-            vec![
-                published_input(7997, 11, "a"),
-                published_input(7997, 11, "duplicate"),
-                published_input(8000, 22, "b"),
-            ],
-        ] {
-            assert!(validate_source_coverage(&sources, &rows).is_err());
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn eager_mesh_warm_deduplicates_keys_and_fails_the_generation_on_a_missing_mesh() {
         let dir = tempfile::tempdir().unwrap();
@@ -3551,141 +2990,6 @@ mod tests {
 
         set_lifecycle(restore);
     }
-
-    /// `mem://` 门：从 `room_published_topology` + `room_published_inst` 合成的模型，拓扑与
-    /// 库里那一行逐字相等、几何只取当前令牌、缺分片整份失败。
-    #[tokio::test]
-    async fn published_model_is_composed_from_the_manifest_tables_and_fails_closed() {
-        use crate::fast_model::room_topology::published_topology_manifest_key;
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_resident")
-            .use_db("published")
-            .await
-            .unwrap();
-        let inputs = vec![
-            published_input(8000, 5, "token-a"),
-            published_input(8001, 7, "token-b"),
-        ];
-        let key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
-        let shard_a = vec![group(5, "/1RX-RM03-R301", &[7])];
-        let shard_b = vec![group(6, "/1RX-RM03-R302", &[9])];
-        db.query(format!(
-            "CREATE room_published_topology:a SET manifest_key = '{key}', dbnum = 8000, groups = {}; \
-             CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'token-a'; \
-             CREATE published_file_input:8001 SET dbnum = 8001, commit_token = 'token-b'; \
-             CREATE pe:24384_7 SET noun = 'PANE'; CREATE pe:24384_9 SET noun = 'PANE'; \
-             CREATE inst_relate:24384_7 SET dbnum = 8000, in = pe:24384_7, \
-               anc = [104728482619399, 104728482619393], generic = 'PANE', \
-               aabb_d = {{ mins: [0f, 0f, 0f], maxs: [1f, 1f, 1f] }}, \
-               world_trans_d = {{ translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }}, \
-               insts_flat = [{{ geo_hash: 'mesh-old' }}], booled_id = NONE; \
-             CREATE inst_relate:24384_9 SET dbnum = 8001, in = pe:24384_9, \
-               anc = [104732777586696, 104732777586689], generic = 'PANE', \
-               aabb_d = {{ mins: [2f, 0f, 0f], maxs: [3f, 1f, 1f] }}, \
-               world_trans_d = {{ translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }}, \
-               insts_flat = [{{ geo_hash: 'mesh-b' }}], booled_id = NONE;",
-            serde_json::to_string(&shard_a).unwrap()
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        // 当前令牌的几何 + 一份还没切进清单的候选（新几何）。
-        db.query(format!(
-            "BEGIN TRANSACTION; {} {} COMMIT TRANSACTION;",
-            crate::fast_model::room_publication::render_stage_published_room_input(8000, "token-a"),
-            crate::fast_model::room_publication::render_stage_published_room_input(8001, "token-b"),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db.query("UPDATE inst_relate:24384_7 SET insts_flat = [{ geo_hash: 'mesh-new' }];")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        db.query(format!(
-            "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-            crate::fast_model::room_publication::render_stage_published_room_input(
-                8000,
-                "token-a-next"
-            ),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        // 缺 8001 的分片：整份失败，错误能认出是「建不起来」。
-        let error = load_published_on(
-            &db,
-            &inputs,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-            Arc::default(),
-        )
-        .await
-        .expect_err("缺一个文件分片必须失败关闭");
-        let build_error = error
-            .downcast_ref::<ResidentBuildError>()
-            .expect("ResidentBuildError");
-        assert_eq!(build_error.form, ResidentForm::Published);
-        assert_eq!(build_error.key.as_deref(), Some(key.as_str()));
-        assert!(
-            build_error
-                .to_string()
-                .contains("expected dbnums [8000, 8001]"),
-            "{build_error}"
-        );
-
-        db.query(format!(
-            "CREATE room_published_topology:b SET manifest_key = '{key}', dbnum = 8001, groups = {};",
-            serde_json::to_string(&shard_b).unwrap()
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let model = load_published_on(
-            &db,
-            &inputs,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-            Arc::default(),
-        )
-        .await
-        .expect("两片齐了");
-        assert_eq!(model.manifest, manifest(ResidentForm::Published, &key));
-        assert_eq!(model.groups, [shard_a.clone(), shard_b.clone()].concat());
-        assert_eq!(model.digest, topology_digest(&[shard_a, shard_b].concat()));
-        assert_eq!(registered_panels(&model.map), vec![r(7), r(9)]);
-        assert!(
-            model.missing_panels.is_empty(),
-            "{:?}",
-            model.missing_panels
-        );
-        let seven = model.panel(r(7)).unwrap();
-        assert_eq!(seven.room_num, "R301");
-        assert_eq!(
-            seven
-                .insts
-                .iter()
-                .map(|inst| inst.geo_hash.as_str())
-                .collect::<Vec<_>>(),
-            vec!["mesh-old"],
-            "候选令牌 token-a-next 的新几何在清单切换前不可见"
-        );
-        assert_eq!(
-            model.panel(r(9)).unwrap().world_aabb,
-            Aabb::new(Point::new(2.0, 0.0, 0.0), Point::new(3.0, 1.0, 1.0))
-        );
-    }
-
     /// 参照行只动 `resident_reference` 一格：空间凭据原样，`room_model` 那种按字段投影的读法
     /// 不受影响；读回来逐字相等。
     #[tokio::test]
@@ -3747,95 +3051,6 @@ mod tests {
         newer.digest = "other".into();
         write_resident_reference_on(&db, &newer).await.unwrap();
         assert_eq!(read_resident_reference_on(&db).await.unwrap(), Some(newer));
-    }
-
-    fn shard(
-        dbnum: u32,
-        room_name: &str,
-    ) -> crate::fast_model::room_topology_source::RoomTopologySource {
-        use crate::data_interface::generation_root::refno_from_e3d;
-        use crate::fast_model::room_topology_source::{TopologyNode, fixture_source};
-        use e3d_io::refno::RefNo;
-
-        let node = |id: u32, noun: &str, name: &str, members: Vec<u32>| TopologyNode {
-            refno: refno_from_e3d(RefNo::new(dbnum, id)),
-            noun: noun.into(),
-            name: name.into(),
-            members: members
-                .into_iter()
-                .map(|member| refno_from_e3d(RefNo::new(dbnum, member)))
-                .collect(),
-        };
-        let mut source = fixture_source(dbnum, 1);
-        source.roots = vec![refno_from_e3d(RefNo::new(dbnum, 1))];
-        source.nodes = vec![
-            node(1, "WORL", "", vec![2]),
-            node(2, "FRMW", room_name, vec![3]),
-            node(3, "PANE", "", vec![]),
-        ];
-        source
-    }
-
-    /// 读透参照的旧视图从持久分片合成；缺一片整份失败，不拿半份去 diff。
-    #[tokio::test]
-    async fn reference_map_is_composed_from_persisted_shards_and_fails_closed_when_one_is_missing()
-    {
-        use crate::data_interface::generation_root::refno_from_e3d;
-        use crate::fast_model::room_topology_source::persist_on;
-        use e3d_io::refno::RefNo;
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_resident")
-            .use_db("reference_map")
-            .await
-            .unwrap();
-        let a = shard(1, "/A-RM-R101");
-        let b = shard(2, "/B-RM-R201");
-        persist_on(&db, &a).await.unwrap();
-        let reference = ResidentReference {
-            form: "latest".into(),
-            key: "composite".into(),
-            digest: "d".into(),
-            tokens: vec![a.source_token.clone(), b.source_token.clone()],
-            rooms: 2,
-            registered_panels: 2,
-            settled_at: String::new(),
-        };
-        let error = load_reference_map_on(
-            &db,
-            &reference,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-        )
-        .await
-        .expect_err("b 的分片还没落");
-        assert!(
-            format!("{error:#}").contains("missing exact room topology source"),
-            "{error:#}"
-        );
-
-        persist_on(&db, &b).await.unwrap();
-        let (groups, map) = load_reference_map_on(
-            &db,
-            &reference,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-        )
-        .await
-        .unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(map.rooms.len(), 2);
-        assert_eq!(
-            map.room_num_of(refno_from_e3d(RefNo::new(2, 3))),
-            Some("R201")
-        );
-        assert_eq!(
-            topology_digest(&groups),
-            topology_digest(&groups.iter().rev().cloned().collect::<Vec<_>>())
-        );
     }
 
     #[test]
@@ -3962,139 +3177,6 @@ mod tests {
             StartupRoomPlan::IntegrityMismatch { .. }
         ));
     }
-
-    /// `mem://` 门（d-42）：摄入模型带清单 DESI 行的令牌；参照写进去后按令牌从分片合成的旧视图
-    /// 与现状逐字相等（同一批分片、同一个 `compose`）；任一令牌的分片缺失、或模型没有令牌，
-    /// 参照拒写且原行不动。
-    #[tokio::test]
-    async fn published_reference_carries_the_manifest_tokens_and_is_refused_while_a_shard_is_missing()
-     {
-        use crate::fast_model::room_topology::published_topology_manifest_key;
-        use crate::fast_model::room_topology_source::{compose, persist_on};
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_resident")
-            .use_db("published_reference")
-            .await
-            .unwrap();
-        let a = shard(1, "/A-RM-R101");
-        let b = shard(2, "/B-RM-R201");
-        persist_on(&db, &a).await.unwrap();
-        persist_on(&db, &b).await.unwrap();
-        let inputs = vec![
-            published_input(1, a.source_sesno as i32, &a.source_token),
-            published_input(2, b.source_sesno as i32, &b.source_token),
-        ];
-        let key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
-        // 清单拓扑行就是这批分片合成出来的（生产里 `render_stage_published_room_topology` 同一个
-        // `compose`）。
-        let composed = compose(&[a.clone(), b.clone()], RoomHierarchy::Hd).unwrap();
-        let statements: Vec<String> = composed
-            .iter()
-            .map(|(dbnum, groups)| {
-                format!(
-                    "CREATE room_published_topology:t{dbnum} SET manifest_key = '{key}', \
-                     dbnum = {dbnum}, groups = {};",
-                    serde_json::to_string(groups).unwrap()
-                )
-            })
-            .collect();
-        db.query(statements.join(" "))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-
-        let model = load_published_on(
-            &db,
-            &inputs,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-            Arc::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            model.source_tokens,
-            vec![a.source_token.clone(), b.source_token.clone()],
-            "摄入模型带清单 DESI 行的令牌，按 dbnum 序"
-        );
-        assert_eq!(model.map.rooms.len(), 2);
-
-        let reference = persist_reference_on(&db, &model).await.unwrap();
-        assert_eq!(
-            (reference.form.as_str(), reference.key.as_str()),
-            ("published", key.as_str())
-        );
-        assert_eq!(reference.tokens, model.source_tokens);
-        assert_eq!(
-            read_resident_reference_on(&db).await.unwrap(),
-            Some(reference.clone())
-        );
-
-        let (old_groups, old_map) = load_reference_map_on(
-            &db,
-            &reference,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            topology_digest(&old_groups),
-            model.digest,
-            "按令牌合成的旧视图 == 现状"
-        );
-        assert_eq!(old_map.rooms.len(), model.map.rooms.len());
-        for room in &model.map.rooms {
-            for panel in &room.panels {
-                assert_eq!(old_map.room_num_of(*panel), Some(room.room_num.as_str()));
-            }
-        }
-        assert_eq!(
-            plan_startup(Some(&reference), &model, Some(Ok(&old_map))),
-            StartupRoomPlan::Unchanged
-        );
-
-        // 第三个文件的令牌没冻分片：拒写，原参照行不动。
-        let c = shard(3, "/C-RM-R301");
-        let stale = ResidentRoomModel::assemble(
-            manifest(ResidentForm::Published, "m-next"),
-            model.groups.clone(),
-            registered_map(&model.groups, &keywords(), match_room_name_hd),
-            vec![],
-            Arc::default(),
-        )
-        .with_source_tokens(vec![a.source_token.clone(), c.source_token.clone()]);
-        let error = persist_reference_on(&db, &stale)
-            .await
-            .expect_err("c 的分片还没落");
-        let text = format!("{error:#}");
-        assert!(
-            text.contains("分片缺失") && text.contains("3@"),
-            "错误要点名哪一片: {text}"
-        );
-        assert_eq!(
-            read_resident_reference_on(&db).await.unwrap(),
-            Some(reference.clone()),
-            "拒写时参照行不动"
-        );
-
-        // 没有令牌的模型同样拒写。
-        let tokenless = model_of(groups(), vec![], Arc::default());
-        let error = persist_reference_on(&db, &tokenless)
-            .await
-            .expect_err("没有令牌就没有旧视图");
-        assert!(format!("{error:#}").contains("没有来源令牌"), "{error:#}");
-        assert_eq!(
-            read_resident_reference_on(&db).await.unwrap(),
-            Some(reference)
-        );
-    }
-
     /// 改列只碰交集里面板的边：`room_num` 变、边 id 不变、别的房间与不在交集的面板原样。
     #[tokio::test]
     async fn renumber_statements_change_only_the_room_num_column_of_the_intersection() {
@@ -4187,19 +3269,13 @@ mod tests {
     /// 回退即红：归属路径只许经 [`ensure_current`]（它内部是唯一调 [`ResidentRooms::for_membership`]
     /// 的地方）取模型，不许自己摸进程单例、两代或点名形态。
     ///
-    /// P2 接线后 `model_update_pending.rs` 的换代点走的就是 `ensure_current`；哪一路由
+    /// 启动对比（`room_startup.rs`）的换代点走的就是 `ensure_current`；哪一路由
     /// `data_face()` 决定，代码里出现 `ResidentForm::Latest` 就是绕开了这个决定。注释可以提
     /// ——`room_model.rs` 的凭据读法就在注释里点名 `resident_blocked` 为什么会先于全量重建
     /// 把行建出来。
     #[test]
     fn membership_paths_only_take_the_model_through_for_membership() {
-        for (name, source) in [
-            ("room_model.rs", include_str!("room_model.rs")),
-            (
-                "model_update_pending.rs",
-                include_str!("../data_interface/model_update_pending.rs"),
-            ),
-        ] {
+        for (name, source) in [("room_model.rs", include_str!("room_model.rs"))] {
             let mentions: Vec<&str> = source
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
@@ -4224,88 +3300,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// 清单前进计划（Q19 (a)）：归文件轮次管的行哪怕陈旧也不动；不归轮次管的缺行新增、陈旧行前进、
-    /// 最新的保留；限定域没生效（每个文件都有自己的轮次）时一行不动。
-    #[test]
-    fn manifest_advance_plan_moves_only_rows_no_file_round_owns() {
-        let sources = vec![
-            (8000u32, PathBuf::from("ams8000"), 12u32),
-            (7997, PathBuf::from("ams7997"), 155),
-            (8001, PathBuf::from("ams8001"), 7),
-            (8002, PathBuf::from("ams8002"), 3),
-        ];
-        let rows = vec![
-            published_input(8000, 10, "tok-8000@10"),
-            published_input(8001, 7, "tok-8001@7"),
-            published_input(8002, 2, "tok-8002@2"),
-        ];
-
-        // 限定域圈了 8000：它归轮次，落后两个会话也不动；其余按清单现状。
-        let watched: BTreeSet<u32> = [8000].into_iter().collect();
-        let steps = plan_manifest_advance(&sources, &rows, &watched);
-        assert_eq!(
-            steps
-                .iter()
-                .map(|step| (step.dbnum, step.sesno, step.action.clone()))
-                .collect::<Vec<_>>(),
-            vec![
-                (7997, 155, ManifestAction::Added),
-                (8000, 12, ManifestAction::OwnedByRounds),
-                (8001, 7, ManifestAction::Current),
-                (8002, 3, ManifestAction::Advanced { from_sesno: 2 }),
-            ],
-            "按 dbnum 排序；被监听的 8000 陈旧也不动"
-        );
-        assert_eq!(steps[0].path, PathBuf::from("ams7997"));
-        assert_eq!(
-            steps
-                .iter()
-                .filter(|step| step.action.moves())
-                .map(|step| step.dbnum)
-                .collect::<Vec<_>>(),
-            vec![7997, 8002],
-            "只有新增与前进会写清单"
-        );
-
-        // 限定域没生效：每个文件都归自己的轮次，初始化一行不动。
-        let everyone: BTreeSet<u32> = sources.iter().map(|(dbnum, _, _)| *dbnum).collect();
-        let steps = plan_manifest_advance(&sources, &rows, &everyone);
-        assert!(
-            steps
-                .iter()
-                .all(|step| step.action == ManifestAction::OwnedByRounds),
-            "{steps:?}"
-        );
-
-        // 限定域圈的全是别的库：谁都不归轮次管，陈旧的动、最新的不动。
-        let steps = plan_manifest_advance(&sources, &rows, &BTreeSet::new());
-        assert_eq!(
-            steps
-                .iter()
-                .map(|step| step.action.as_str())
-                .collect::<Vec<_>>(),
-            vec!["新增", "前进", "保留", "前进"]
-        );
-
-        // 调用方给的是「归属口径」，集合按这一批 MDB 设计库解出来：限定域没生效 = 全部，
-        // 生效 = 限定域里那几个（哪怕限定域点了 MDB 里没有的库，也照给——那是数据批次的事）。
-        assert_eq!(
-            RoundOwnership::EveryFile.owned_by_rounds(&sources),
-            everyone
-        );
-        let only: BTreeSet<u32> = [8000, 8191].into_iter().collect();
-        assert_eq!(
-            RoundOwnership::Only(only.clone()).owned_by_rounds(&sources),
-            only
-        );
-        assert!(RoundOwnership::EveryFile.describe().contains("轮次推进"));
-        assert!(
-            RoundOwnership::Only(only)
-                .describe()
-                .contains("[8000, 8191]")
-        );
     }
 
     /// `resident_blocked` 只动自己那一格：写原因 / 清成 NONE 都不碰 `resident_reference` 与空间凭据；
@@ -4592,129 +3586,10 @@ mod tests {
         );
     }
 
-    /// `mem://` 门：前进语句只换目标 dbnum 那一行，其余行逐字不变、行数不变；在途文件轮次的
-    /// 判定只认 `spatial_reconcile` 的 `collecting` / `pending`。
-    #[tokio::test]
-    async fn manifest_advance_upsert_rewrites_only_the_target_row_and_sees_inflight_rounds() {
-        use crate::data_interface::side_effect_pending::SideEffectCompensator;
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_resident")
-            .use_db("manifest_advance")
-            .await
-            .unwrap();
-        db.query(format!(
-            "BEGIN TRANSACTION; {} {} COMMIT TRANSACTION;",
-            SideEffectCompensator::render_published_file_input_upsert(
-                8000,
-                "DESI",
-                12,
-                "tok-8000@12",
-                4
-            ),
-            SideEffectCompensator::render_published_file_input_upsert(
-                7997,
-                "DESI",
-                150,
-                "tok-7997@150",
-                4
-            ),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let before = SideEffectCompensator::published_file_inputs_on(&db)
-            .await
-            .unwrap();
-        assert_eq!(
-            before.iter().map(|row| row.dbnum).collect::<Vec<_>>(),
-            vec![7997, 8000],
-            "按 dbnum 升序"
-        );
-
-        // 7997 不归轮次管、落后于文件最新会话 155：只它这一行前进。
-        db.query(format!(
-            "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-            SideEffectCompensator::render_published_file_input_upsert(
-                7997,
-                "DESI",
-                155,
-                "tok-7997@155",
-                5
-            ),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let after = SideEffectCompensator::published_file_inputs_on(&db)
-            .await
-            .unwrap();
-        assert_eq!(after.len(), 2, "前进不增行");
-        assert_eq!(after[1], before[1], "8000 那一行逐字不变");
-        assert_eq!(
-            after[0],
-            PublishedFileInput {
-                dbnum: 7997,
-                db_type: "DESI".into(),
-                end_sesno: 155,
-                commit_token: "tok-7997@155".into(),
-                published_version: 5,
-            }
-        );
-
-        assert!(
-            !SideEffectCompensator::has_inflight_file_round_on(&db)
-                .await
-                .unwrap()
-        );
-        db.query(
-            "CREATE incr_side_effect_pending:r1 SET kind = 'spatial_reconcile', dbnum = 8000, \
-             status = 'collecting';",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        assert!(
-            SideEffectCompensator::has_inflight_file_round_on(&db)
-                .await
-                .unwrap(),
-            "collecting 在途"
-        );
-        db.query("UPDATE incr_side_effect_pending:r1 SET status = 'pending';")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert!(
-            SideEffectCompensator::has_inflight_file_round_on(&db)
-                .await
-                .unwrap(),
-            "pending 在途"
-        );
-        db.query(
-            "UPDATE incr_side_effect_pending:r1 SET status = 'done'; \
-             CREATE incr_side_effect_pending:r2 SET kind = 'room_publication', status = 'pending';",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        assert!(
-            !SideEffectCompensator::has_inflight_file_round_on(&db)
-                .await
-                .unwrap(),
-            "done 的轮次与别的 kind 都不算在途文件轮次"
-        );
-    }
-
-    /// 源码钉（P2 换代点）：身份探针只许用那两个规范键——摄入的
-    /// `published_topology_manifest_key`（`room_published_topology.manifest_key` 同一个函数）、
-    /// 读透的 `room_topology::latest_frozen_sources`。它在这里自己拼一个摘要，键就与模型自带的
-    /// `manifest` 对不上：每轮都判「文件变了」、每轮整份重建，而且不报错。
+    /// 源码钉（P2 换代点）：身份探针只许用那一个规范键——两形态都是
+    /// `room_topology::latest_frozen_sources` 的 composite（发布清单键随 ADR-062 作废）。它在这里
+    /// 自己拼一个摘要，键就与模型自带的 `manifest` 对不上：每轮都判「文件变了」、每轮整份重建，
+    /// 而且不报错。
     #[test]
     fn the_manifest_probe_takes_both_keys_from_their_canonical_source() {
         let source = include_str!("room_resident.rs");
@@ -4726,7 +3601,7 @@ mod tests {
             .expect("probe_manifest 后面就是 ensure_current")
             .0;
         assert!(
-            !probe.contains("published_file_inputs") && !probe.contains("published_topology_manifest_key"),
+            !probe.contains("published_file_inputs") && !probe.contains("manifest_key("),
             "两种形态均使用文件侧版本，不能读旧发布快照: {probe}"
         );
         assert!(
@@ -4777,11 +3652,6 @@ mod tests {
         for (name, source) in [
             ("room_resident.rs", include_str!("room_resident.rs")),
             ("room_topology.rs", include_str!("room_topology.rs")),
-            (
-                "room_topology_source.rs",
-                include_str!("room_topology_source.rs"),
-            ),
-            ("room_startup.rs", include_str!("room_startup.rs")),
         ] {
             for (index, line) in source.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();

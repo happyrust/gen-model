@@ -925,9 +925,7 @@ fn start_stack(
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
                     // 整套断言都建立在「批次真的被执行」之上。
-                    // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
-                    .env("AIOS_STARTUP_AUTORUN", "1")
-                    .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+                    .env("AIOS_STARTUP_AUTORUN", "1"),
                 debug_dbnum,
             ),
             &out.join("stack-service.log"),
@@ -989,31 +987,13 @@ fn bootstrap_store(paths: &Paths, out: &Path, dbnums: &[u32]) -> Result<()> {
         &config_no_ext,
         &out.join("bootstrap-scan.log"),
     )?;
-    // 首次导入会把库里每个交付单元排进重生成积压。套件只对自己场景的根负责：
-    // 播种步骤（seed_scenario_models）会显式重建并等待那些根，其余积压在
-    // worker 启动前丢弃，否则第一个场景要陪跑上千个无关模型任务。
-    let list = dbnum_list(dbnums);
-    let reset = surreal_sql(&format!(
-        "DELETE model_update_pending WHERE dbnum IN [{list}]; \
-         RETURN count(SELECT * FROM model_update_pending WHERE dbnum IN [{list}]);"
-    ))?;
-    fs::write(
-        out.join("bootstrap-pending-reset.json"),
-        serde_json::to_vec_pretty(&reset)?,
-    )?;
-    let remaining = reset
-        .as_array()
-        .and_then(|rows| rows.last())
-        .and_then(|row| row.get("result"))
-        .and_then(Value::as_u64);
-    ensure!(
-        remaining == Some(0),
-        "failed to discard the bootstrap backlog for dbnums [{list}]"
-    );
+    // 首次导入不再留下「重生成积压」：模型随 dbnum 任务同步生成（ADR-071 D1），第二条
+    // 异步账的队列表已退役（ADR-072 D5）——没有可丢弃的积压，播种步骤
+    //（seed_scenario_models）直接重建并等待自己场景的根。
     Ok(())
 }
 
-/// 选中场景涉及的 dbnum，升序去重。引导（首次导入基线）与积压出清都按它走。
+/// 选中场景涉及的 dbnum，升序去重。引导（首次导入基线）按它走。
 fn scenario_dbnums(selected: &[&'static Scenario]) -> Vec<u32> {
     let mut dbnums = selected.iter().map(|s| s.dbnum).collect::<Vec<_>>();
     dbnums.sort_unstable();
@@ -1021,16 +1001,8 @@ fn scenario_dbnums(selected: &[&'static Scenario]) -> Vec<u32> {
     dbnums
 }
 
-fn dbnum_list(dbnums: &[u32]) -> String {
-    dbnums
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// 给选中场景的根按需播种基线模型（`POST /model/ensure`），并等到这些库的
-/// 非房间 pending 清零。m1/m2 的断言（geo_relate 恒为 5、位移后 inst 变化）
+/// 给选中场景的根按需播种基线模型（`POST /model/ensure`），并等到队列空、本轮任务
+/// 全部到终态。m1/m2 的断言（geo_relate 恒为 5、位移后 inst 变化）
 /// 都以「场景开跑前模型已在」为前提；金基线时代这由全量生成快照保证，
 /// 引导模式下由这里显式建立。
 fn seed_scenario_models(selected: &[&'static Scenario], run_dir: &Path) -> Result<()> {
@@ -1055,34 +1027,10 @@ fn seed_scenario_models(selected: &[&'static Scenario], run_dir: &Path) -> Resul
         run_dir.join("bootstrap-models.json"),
         serde_json::to_vec_pretty(&evidence)?,
     )?;
-    let dbnums = scenario_dbnums(selected);
-    wait_seeded_backlog_empty(&dbnums, run_dir)?;
+    // 「选中库的非房间 pending 清零」那一道等待随队列表退役（ADR-072 D5）：模型欠账
+    // 现在由 `/dbnums` 的双水位判决回答，播种的收敛只看队列空 + 任务终态。
     wait_model_drain_settlement(&model_before)?;
     Ok(())
-}
-
-/// 等选中库的非房间 pending 清零。房间 action 由空闲轮单独收敛（ADR-011 §8），
-/// 计入这里会让任何房间未收干净的库把播种卡成超时。
-fn wait_seeded_backlog_empty(dbnums: &[u32], run_dir: &Path) -> Result<()> {
-    let list = dbnum_list(dbnums);
-    let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    loop {
-        let response = surreal_sql(&format!(
-            "RETURN count(SELECT * FROM model_update_pending WHERE dbnum IN [{list}] \
-             AND action NOT IN ['room_recalc_panel', 'room_recalc_element']);"
-        ))?;
-        let remaining = surreal_result(&response)?.as_u64();
-        if remaining == Some(0) {
-            return Ok(());
-        }
-        ensure!(
-            Instant::now() < deadline,
-            "seeded scenario models did not settle for dbnums [{list}]: {remaining:?} pending; \
-             see {}",
-            run_dir.join("bootstrap-models.json").display()
-        );
-        thread::sleep(Duration::from_secs(2));
-    }
 }
 
 struct PlantUiRuntime {
@@ -1385,11 +1333,6 @@ fn run_scenario(
     let before = database_snapshot(s, None)?;
     fs::write(dir.join("before.json"), serde_json::to_vec_pretty(&before)?)?;
 
-    let room_before = if matches!(s.expect, Expect::Room) {
-        room_task_ids()?
-    } else {
-        HashSet::new()
-    };
     let target_db_file = standard_target_db_file(paths, s.dbnum)?;
     ensure_scenario_project_databases(&paths.project_work, s.required_project_dbs)?;
     ensure_current_scenario_refnos(&target_db_file, s.required_refnos)?;
@@ -1435,9 +1378,8 @@ fn run_scenario(
         "saved session {} is absent from data task merged_sesnos",
         apply_report.after_sesno
     );
-    if matches!(s.expect, Expect::Room) {
-        wait_room(&dir, &room_before)?;
-    }
+    // 房间归属随每个生成根算出、与模型行同一事务落库（ADR-073 D1）：数据任务收尾即房间
+    // 收尾，没有单独的房间轮可等；`Expect::Room` 的 I-4 / I-8 直接对下面的 after 快照判。
     // V 级判据的一半在这里：树上还找不找得到那个节点。删除场景要求找不到，
     // 新增/改名场景要求按**新**名字找得到——四张图只采不判的话，这两件事没人管。
     // --no-ui 档跳过树上判定，但动态 refno（f5 新建件）仍要解析：它走的是
@@ -1885,9 +1827,10 @@ fn model_drain_tasks() -> Result<Vec<Value>> {
 }
 
 fn wait_model_drain_settlement(before: &HashSet<String>) -> Result<Vec<Value>> {
+    // `/update/pending-units` 随第二条异步账退了（ADR-072 D5），这里不再问它：模型随
+    // dbnum 任务同步生成，「模型收敛」= 队列空 + 本轮新起的任务全部到终态。
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
     loop {
-        let pending = http_json("GET", &format!("{API}/update/pending-units"), None)?;
         let queue = http_json("GET", &format!("{API}/queue"), None)?;
         let tasks = model_drain_tasks()?;
         let fresh = tasks
@@ -1898,10 +1841,6 @@ fn wait_model_drain_settlement(before: &HashSet<String>) -> Result<Vec<Value>> {
                     .is_some_and(|id| !before.contains(id))
             })
             .collect::<Vec<_>>();
-        let pending_empty = pending
-            .get("units")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty);
         let queue_empty = queue
             .get("rows")
             .and_then(Value::as_array)
@@ -1909,7 +1848,7 @@ fn wait_model_drain_settlement(before: &HashSet<String>) -> Result<Vec<Value>> {
         let drains_terminal = fresh
             .iter()
             .all(|task| task_terminal(task).ok().flatten().is_some());
-        if pending_empty && queue_empty && drains_terminal {
+        if queue_empty && drains_terminal {
             ensure!(
                 fresh
                     .iter()
@@ -1921,7 +1860,7 @@ fn wait_model_drain_settlement(before: &HashSet<String>) -> Result<Vec<Value>> {
         }
         ensure!(
             Instant::now() < deadline,
-            "model drain did not settle: pending={pending} queue={queue} tasks={fresh:?}"
+            "model drain did not settle: queue={queue} tasks={fresh:?}"
         );
         thread::sleep(Duration::from_secs(2));
     }
@@ -1945,65 +1884,6 @@ fn receipt_task_ids(receipt: &Value) -> Vec<String> {
         .collect()
 }
 
-fn room_task_ids() -> Result<HashSet<String>> {
-    let response = http_json(
-        "GET",
-        &format!("{API}/tasks?kind=room_recalc&limit=200"),
-        None,
-    )?;
-    Ok(response
-        .get("tasks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|task| {
-            task.get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect())
-}
-
-fn wait_room(dir: &Path, old_ids: &HashSet<String>) -> Result<()> {
-    let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    loop {
-        let response = http_json(
-            "GET",
-            &format!("{API}/tasks?kind=room_recalc&limit=200"),
-            None,
-        )?;
-        if let Some(task) = response
-            .get("tasks")
-            .and_then(Value::as_array)
-            .and_then(|tasks| {
-                tasks.iter().find(|task| {
-                    task.get("task_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| !old_ids.contains(id))
-                })
-            })
-            && task_terminal(task)? == Some(true)
-        {
-            let panels = task
-                .pointer("/detail/panels")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let elements = task
-                .pointer("/detail/elements")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            ensure!(
-                panels == 0 && elements == 0,
-                "I-8 room round ended without convergence: {task}"
-            );
-            fs::write(dir.join("room-task.json"), serde_json::to_vec_pretty(task)?)?;
-            return Ok(());
-        }
-        ensure!(Instant::now() < deadline, "room round timed out");
-        thread::sleep(Duration::from_secs(2));
-    }
-}
-
 fn assert_scenario(
     s: &Scenario,
     receipt: &Value,
@@ -2024,12 +1904,19 @@ fn assert_scenario(
             == Some(after_wm),
         "I-1 applied watermark does not equal file_latest_sesno"
     );
-    ensure!(
+    // I-2 的欠账口径：队列表退役之后（ADR-072 D5）「模型欠账」由双水位回答——任务收尾
+    // 盖到的 `model_sesno` 追平 `applied_sesno` 即无欠账（ADR-060 D9 / spec §4.7）。
+    let watermark_pair = |key: &str| {
         after
-            .pointer("/payload/pending")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        "I-2 model debt remains after task completion"
+            .pointer(&format!("/payload/watermark/{key}"))
+            .and_then(Value::as_i64)
+    };
+    ensure!(
+        watermark_pair("model_sesno").is_some()
+            && watermark_pair("model_sesno") == watermark_pair("applied_sesno"),
+        "I-2 model debt remains after task completion: model_sesno={:?} applied_sesno={:?}",
+        watermark_pair("model_sesno"),
+        watermark_pair("applied_sesno")
     );
     ensure!(
         !receipt_task_ids(receipt).is_empty(),
@@ -2245,10 +2132,9 @@ fn database_snapshot(s: &Scenario, dynamic_refno: Option<&str>) -> Result<Value>
         .map(|root| format!("pe:{}", root.replace('/', "_")))
         .collect::<Vec<_>>()
         .join(",");
-    // `pending` 是 I-2 的欠账口径，**排除房间 action**：房间目标由空闲轮单独收敛
-    // （ADR-011 §8），它们带着触发库的 dbnum 落在同一张表里，算进欠账会让任何一个
-    // 房间还没收干净的库永远判 FAIL。房间的收敛由 I-8 那条路径单独判。
-    // `room_pending` 只入证据、不参与断言。
+    // I-2 的欠账口径读 `watermark` 里的双水位（`model_sesno` 对 `applied_sesno`）：原先
+    // 这里还带着队列表的 `pending` / `room_pending` 两个子查询，那张表随第二条异步账
+    // 退役（ADR-072 D5），房间的收敛由 I-8 那条路径单独判。
     // `inst` / `owner` / `room` 三项按记录 id 与边目标取，不走谓词。`inst_relate` 没有
     // in/out 索引（8009 现场只读实测 968.4ms vs 直址 121µs）；`room` 那项按 `out` 过滤，
     // 够不着 `unique_room_relate` 的 `in` 前缀（1.12s vs 392µs）；`owner` 那项按 `in`
@@ -2259,7 +2145,7 @@ fn database_snapshot(s: &Scenario, dynamic_refno: Option<&str>) -> Result<Value>
     // `in` 都是 `inst_info:`，照此它应当恒空；可 m1 的 I-3 断言又要求它恰好是 5。
     // 两者不可能同时成立，要连断言一起判，不是这次性能收口该顺手改的。
     let sql = format!(
-        "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action NOT IN ['room_recalc_panel', 'room_recalc_element']), room_pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action IN ['room_recalc_panel', 'room_recalc_element']), inst: (SELECT in, out, aabb, world_trans FROM inst_relate:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe:{refno}->pe_owner), room: (SELECT in, out, room_num, inside_count, center_dist FROM pe:{refno}<-room_relate) }};",
+        "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, inst: (SELECT in, out, aabb, world_trans FROM inst_relate:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe:{refno}->pe_owner), room: (SELECT in, out, room_num, inside_count, center_dist FROM pe:{refno}<-room_relate) }};",
         db = s.dbnum,
         refno = if refno.is_empty() { "0_0" } else { &refno },
     );
@@ -2283,8 +2169,6 @@ fn restorable_payload(value: &Value) -> Value {
     let mut payload = snapshot_payload(value).clone();
     if let Some(object) = payload.as_object_mut() {
         object.remove("watermark");
-        object.remove("pending");
-        object.remove("room_pending");
     }
     payload
 }

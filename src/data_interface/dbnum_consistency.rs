@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::DbnumState;
-use crate::data_interface::model_update_pending::{MAX_ATTEMPTS, TABLE as MODEL_PENDING_TABLE};
 use crate::data_interface::window_root_plan::SETTLED_ROOT_STATUSES;
 use crate::options::DataFace;
 
@@ -22,7 +21,7 @@ use crate::options::DataFace;
 pub enum NotJudgedReason {
     ReadThrough,
     DataWatermarkUnestablished,
-    /// No roots and no valid authoritative empty-inventory completion receipt.
+    /// No roots and the task never stamped a model watermark for this library.
     NoGenerationRoots,
 }
 
@@ -64,15 +63,13 @@ impl RootQuadrants {
     }
 }
 
-/// 实时根普查。死信与 `http_422` 已从 `chasing` 中扣除并合入 `abandoned`。
+/// 实时根普查。`http_422` 已从 `chasing` 中扣除并合入 `abandoned`。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RootCensus {
     settled: u32,
     chasing: u32,
     abandoned: u32,
     has_roots: bool,
-    verified_completion: Option<i32>,
-    completion_invalid: bool,
 }
 
 impl RootCensus {
@@ -82,8 +79,6 @@ impl RootCensus {
             chasing,
             abandoned,
             has_roots,
-            verified_completion: None,
-            completion_invalid: false,
         }
     }
 
@@ -137,34 +132,6 @@ pub struct VerdictColumns {
     pub model_lazy_roots: Option<u32>,
 }
 
-/// 房间阶段与模型阶段并排暴露的持久证据。这里不重新计算房间归属，
-/// 只转述 `dbnum_watermark` 上已经原子提交的第三枚水位与输入凭证。
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-pub struct RoomVerdictColumns {
-    pub room_sesno: i32,
-    pub room_sesno_time: Option<String>,
-    pub room_settled_at: Option<String>,
-    pub room_input_version: Option<super::dbnum_state::RoomInputVersion>,
-    pub room_required_input: Option<super::dbnum_state::RoomInputVersion>,
-    pub room_result_version: Option<String>,
-    pub room_input_version_matches: bool,
-}
-
-impl From<&DbnumState> for RoomVerdictColumns {
-    fn from(row: &DbnumState) -> Self {
-        Self {
-            room_sesno: row.room_sesno,
-            room_sesno_time: row.room_sesno_time.clone(),
-            room_settled_at: row.room_settled_at.clone(),
-            room_input_version: row.room_input_version.clone(),
-            room_required_input: row.room_required_input.clone(),
-            room_result_version: row.room_result_version.clone(),
-            room_input_version_matches: row.room_input_version.is_some()
-                && row.room_input_version == row.room_required_input,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ConsistencySummary {
     pub judged: u32,
@@ -182,7 +149,6 @@ pub(crate) struct ConsistencyObservation {
     pub applied_sesno: i32,
     pub initialized: bool,
     pub verdict: ConsistencyVerdict,
-    pub room: RoomVerdictColumns,
 }
 
 pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> ConsistencyVerdict {
@@ -211,12 +177,10 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
         lazy: row.model_lazy_roots,
         observed_at: row.model_roots_observed_at,
     };
-    if row.model_sesno == row.applied_sesno
-        && census.chasing == 0
-        && census.abandoned == 0
-        && !census.completion_invalid
-        && (census.has_roots() || census.verified_completion == Some(row.applied_sesno))
-    {
+    // 零根库（只有 WORL + SITE 之类）没有「验证过的空清单收据」可看了（ADR-072 D4）：
+    // 它的完成态由水位行自己说——`model_sesno` 只由任务收尾那一笔盖，而且只在这一版的根
+    // （零个）全落进去时盖，所以 `model_sesno == applied_sesno` 就是那张收据。
+    if row.model_sesno == row.applied_sesno && census.chasing == 0 && census.abandoned == 0 {
         ConsistencyVerdict::InSync {
             sesno: row.model_sesno,
             time: row.model_sesno_time.clone(),
@@ -225,7 +189,7 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
         }
     } else if !census.has_roots() {
         // Table emptiness is not an authoritative inventory. Keep it unjudged
-        // until the task commits a source-bound verified-empty receipt.
+        // until a task stamps the model watermark for this library.
         ConsistencyVerdict::NotJudged {
             reason: NotJudgedReason::NoGenerationRoots,
             model: row.model_sesno,
@@ -241,6 +205,31 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
             roots,
         }
     }
+}
+
+/// 任务收尾那一刻的判决（ADR-072 §2.2「`verdict_for` 出任务」）：水位读**镜像**里的这一行，
+/// 根普查用**本任务的单元清单**——任务不回问库自己刚写的东西（ADR-071 D1）。
+///
+/// 口径与 [`verdict`] 同一份纯函数：本任务生成成功的根算追平、失败的算在赶；「已放弃」
+/// 那一格随 pending 死信退了，恒 0。零单元的任务（这一窗没触到任何根）以水位行说话：
+/// `model_sesno > 0` 就是这个库有过完成态。
+pub fn task_verdict(
+    row: &DbnumState,
+    units: &[crate::data_interface::manual_update::ModelUnitResult],
+) -> ConsistencyVerdict {
+    use crate::data_interface::manual_update::UnitGenStatus;
+    let generated = units
+        .iter()
+        .filter(|unit| unit.status == UnitGenStatus::Generated)
+        .count() as u32;
+    let chasing = units.len() as u32 - generated;
+    let census = RootCensus::new(
+        generated,
+        chasing,
+        0,
+        !units.is_empty() || row.model_sesno > 0,
+    );
+    verdict(row, &census, crate::options::data_face())
 }
 
 impl ConsistencyVerdict {
@@ -379,18 +368,6 @@ struct WatermarkRow {
     #[serde(default)]
     model_settled_at: Option<String>,
     #[serde(default)]
-    room_sesno: Option<i32>,
-    #[serde(default)]
-    room_sesno_time: Option<String>,
-    #[serde(default)]
-    room_settled_at: Option<String>,
-    #[serde(default)]
-    room_input_version: Option<super::dbnum_state::RoomInputVersion>,
-    #[serde(default)]
-    room_required_input: Option<super::dbnum_state::RoomInputVersion>,
-    #[serde(default)]
-    room_result_version: Option<String>,
-    #[serde(default)]
     model_lazy_roots: Option<u32>,
     #[serde(default)]
     model_dead_roots: Option<u32>,
@@ -408,14 +385,6 @@ impl From<WatermarkRow> for DbnumState {
             model_sesno: row.model_sesno.unwrap_or_default(),
             model_sesno_time: row.model_sesno_time,
             model_settled_at: row.model_settled_at,
-            room_sesno: row.room_sesno.unwrap_or_default(),
-            room_sesno_time: row
-                .room_sesno_time
-                .filter(|_| row.room_sesno.unwrap_or_default() > 0),
-            room_settled_at: row.room_settled_at,
-            room_input_version: row.room_input_version,
-            room_required_input: row.room_required_input,
-            room_result_version: row.room_result_version,
             model_lazy_roots: row.model_lazy_roots,
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
@@ -461,12 +430,11 @@ fn root_key(value: &str) -> String {
     value.trim().replace('_', "/")
 }
 
+/// 根普查的那一句：`gen_root` 整表一扫。「已放弃」只剩 `http_422`——死信那一格随
+/// pending 表退了（ADR-072 D5）。
 fn render_root_census_bulk() -> String {
-    format!(
-        "SELECT dbnum, record::id(id) AS root, status, source_end_sesno FROM gen_root WHERE dbnum != NONE;\n\
-         SELECT dbnum, target_refno AS root FROM {MODEL_PENDING_TABLE} WHERE dbnum != NONE AND (attempts ?: 0) >= {MAX_ATTEMPTS} \
-         AND action NOT IN ['room_recalc_element','room_recalc_panel'];"
-    )
+    "SELECT dbnum, record::id(id) AS root, status, source_end_sesno FROM gen_root WHERE dbnum != NONE;"
+        .to_string()
 }
 
 type CensusSnapshot = (BTreeMap<u32, DbnumState>, BTreeMap<u32, RootCensus>);
@@ -475,8 +443,6 @@ async fn watermark_states(db: &Surreal<Any>) -> anyhow::Result<BTreeMap<u32, Dbn
     let mut response = db
         .query(
             "SELECT dbnum, db_type, applied_sesno, model_sesno, model_sesno_time, \
-             room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
-             IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
              IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
              model_lazy_roots, model_dead_roots, model_roots_observed_at FROM dbnum_watermark;",
         )
@@ -494,8 +460,6 @@ async fn watermark_states(db: &Surreal<Any>) -> anyhow::Result<BTreeMap<u32, Dbn
 async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> {
     let mut response = db.query(format!(
         "SELECT dbnum, db_type, applied_sesno, model_sesno, model_sesno_time, \
-         room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
-         IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
          IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
          model_lazy_roots, \
          model_dead_roots, model_roots_observed_at FROM dbnum_watermark;\n{}",
@@ -503,7 +467,6 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
     )).await.context("read dbnum consistency inputs")?.check().context("check dbnum consistency queries")?;
     let rows: Vec<WatermarkRow> = response.take(0).context("decode consistency watermarks")?;
     let roots: Vec<RootStateRow> = response.take(1).context("decode root census")?;
-    let dead: Vec<RootRow> = response.take(2).context("decode dead-letter root census")?;
 
     let states: BTreeMap<u32, DbnumState> = rows
         .into_iter()
@@ -530,7 +493,7 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
         }
     }
     let mut abandoned = BTreeMap::<u32, BTreeSet<String>>::new();
-    for row in refused.into_iter().chain(dead) {
+    for row in refused {
         abandoned
             .entry(row.dbnum)
             .or_default()
@@ -547,38 +510,8 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
     for (dbnum, roots) in blockers {
         census.entry(dbnum).or_default().chasing = roots.len() as u32;
     }
-    #[derive(Deserialize)]
-    struct ReceiptRow {
-        dbnum: u32,
-        end_sesno: i32,
-        model_completion: String,
-    }
-    // 收据住在水位行上（`model_completion::receipt_row`），不再寄居在文件轮次那一行。
-    let receipts: Vec<ReceiptRow> = db
-        .query(
-            "SELECT dbnum, model_completion_sesno AS end_sesno, model_completion \
-         FROM dbnum_watermark WHERE model_completion != NONE AND model_completion_sesno != NONE;",
-        )
-        .await?
-        .check()?
-        .take(0)?;
-    for row in receipts {
-        if states
-            .get(&row.dbnum)
-            .is_none_or(|state| state.model_sesno != row.end_sesno)
-        {
-            continue;
-        }
-        let valid = crate::data_interface::model_completion::validated_receipt(
-            Some(&row.model_completion),
-            row.dbnum,
-            row.end_sesno,
-        )
-        .is_some();
-        let counts = census.entry(row.dbnum).or_default();
-        counts.verified_completion = valid.then_some(row.end_sesno);
-        counts.completion_invalid = !valid;
-    }
+    // 「验证过的空清单收据」那一格随 `CompletionReceipt` 退了（ADR-072 D4）：零根库的完成态由
+    // 水位行自己说——任务只在这一版的根全落进去时才盖 `model_sesno`，见 [`verdict`]。
     Ok((states, census))
 }
 
@@ -692,7 +625,6 @@ pub(crate) async fn observations_for_all(
                     applied_sesno: row.applied_sesno,
                     initialized: row.initialized,
                     verdict: result,
-                    room: RoomVerdictColumns::from(&row),
                 },
             )
         })
@@ -848,10 +780,8 @@ mod tests {
 
         let mut caught_up = row(26, 26);
         caught_up.model_settled_at = Some("2026-09-05T17:01:43Z".into());
-        let completed_empty = RootCensus {
-            verified_completion: Some(26),
-            ..RootCensus::default()
-        };
+        // 零根库：没有「验证过的空清单收据」了（ADR-072 D4），水位相等就是任务盖的那张收据。
+        let completed_empty = RootCensus::default();
         let caught_up = verdict(&caught_up, &completed_empty, DataFace::Ingest);
         assert_eq!(caught_up.caught_up_at(), Some("2026-09-05T17:01:43Z"));
         assert_eq!(caught_up.as_str(), "in_sync");
@@ -877,12 +807,12 @@ mod tests {
              CREATE gen_root:24384_1 SET dbnum=8000, status='Generated', source_end_sesno=26;\
              CREATE gen_root:24384_2 SET dbnum=8000, status='failed', source_end_sesno=0;\
              CREATE gen_root:24384_3 SET dbnum=8000, status='http_422', source_end_sesno=0;\
-             CREATE {MODEL_PENDING_TABLE}:regen_root_24384_2 SET dbnum=8000, target_refno='24384/2', attempts={MAX_ATTEMPTS};\
              CREATE gen_root:24385_1 SET dbnum=8001, status='pending', source_end_sesno=0;"
         )).await.unwrap().check().unwrap();
 
         let (states, census) = states_and_census(&db).await.unwrap();
-        assert_eq!(census[&8000], RootCensus::new(1, 0, 2, true));
+        // `failed` 的根在赶（死信那一格随 pending 表退了，ADR-072 D5）；`http_422` 才是已放弃。
+        assert_eq!(census[&8000], RootCensus::new(1, 1, 1, true));
         assert_eq!(census[&8001], RootCensus::new(0, 1, 0, true));
         let verdicts = states
             .iter()

@@ -7,9 +7,11 @@
 //!   索引是 copy-on-write，会话页各自携带当时的索引根，所以「按会话号打开」不是事后
 //!   过滤，而是选哪棵树下降；`ReadOnlyEngine::open_at` 就是这一步。要与 DB 模式对拍
 //!   读同一逻辑时点，用 [`pins_from_watermark`] 显式钉到 `applied_sesno`。
-//! * **ref0 属于哪个库**——走 [`CataDbLocator`] 反查。`Ref0` 不是 `dbnum`，
-//!   `RefU64::get_0()` 顶不了它；反查不到就报错，不凑一个看着像真的。跨库 owner 上溯
-//!   （DESI 元素的 owner 在 SITE 库）全靠这一步。
+//! * **refno 属于哪个库**——从 refno 自身**位解码**（[`super::refno_route`]，与 core.dll
+//!   `DB_Element::dbno` 同式），再拿 dbnum 问 [`CataDbLocator`] 要文件。`Ref0`（word0）不是
+//!   `dbnum`——它还带着 extent 位——但解码就够了，不需要也不再有 ref0 反查表；解不出、
+//!   或解出的库谁都不认识就报错，不凑一个看着像真的。跨库引用换库与跨库 owner 上溯
+//!   （DESI 元素的 owner 在 SITE 库）全靠这一步。开库后核一次文件自报的库号（不变量 3）。
 //! * **属性长什么形状**——[`super::direct_attmap`]，它查 DB 读侧的同一张 schema。
 //!
 //! 定位器登记不出的 dbnum、反查不到的 ref0、打不开的文件，一律 `Err` 并说出是哪个。
@@ -23,24 +25,50 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use aios_core::{NamedAttrMap, RefU64};
 use dashmap::DashMap;
 use e3d_io::record::element::ParsedElement;
 use e3d_io::record::explicit::ExplicitAttribute;
 use e3d_io::record::template::TemplateProvider;
-use e3d_io::refno::RefNo;
-use e3d_io::ReadOnlyEngine;
+use e3d_io::schema::MANIFEST_FILE;
+use e3d_io::{E3dVersion, ReadOnlyEngine, SchemaPack};
 
 use super::cata_closure::CataDbLocator;
 use super::direct_attmap::{self, DirectAttrs};
 use super::direct_index::{DbIndexes, IndexFingerprint};
+use super::refno_route::{refno_dbnum, to_refno};
 
-/// 旧版显式模板目录环境变量。
+/// 显式覆盖模板与字典文件所在目录。
 ///
-/// 共享加载器不再读取它：版本必须由 `DbOption.toml.e3d_version` 明确选择。
-/// 保留常量只是给仍显式调用 [`DirectSchema::open`] 的工具提供一致的错误提示。
+/// 不设置时不再默认为某台机器的 E3D 3.1 shadow：[`DirectSchema::open_from_env`]
+/// 优先认 DbOption 手填的 `e3d_version`，其次认本变量；两者都没设置时使用
+/// [`DEFAULT_E3D_VERSION`]。目录名与数据库二进制都不参与判定（后者没有可靠的
+/// 版本字段）。设置本变量表示调用方明确接管选择，保留给临时探针和夹具。
 pub const TEMPLATE_DIR_ENV: &str = "AIOS_E3D_TEMPLATE_DIR";
+/// e3d-io schema packs 的父目录；未设置时先找 exe 同级 `schema/`（部署包），
+/// 开发构建再回落到 e3d-io 源码携带的目录。
+pub const SCHEMA_ROOT_ENV: &str = "AIOS_E3D_SCHEMA_ROOT";
+/// `DbOption.toml` 未配置 `e3d_version` 时使用的 schema pack。
+///
+/// 这是产品默认值，不是数据库二进制识别结果；版本证据仍会写入启动日志供排障。
+pub const DEFAULT_E3D_VERSION: &str = "e3d210";
+
+fn schema_root_next_to_executable() -> Option<PathBuf> {
+    let root = std::env::current_exe().ok()?.parent()?.join("schema");
+    root.is_dir().then_some(root)
+}
+
+fn report_schema_info(message: &str) {
+    log::info!("{message}");
+    println!("{message}");
+}
+
+fn report_schema_error(message: &str) {
+    log::error!("{message}");
+    eprintln!("{message}");
+}
 
 /// 一个库的读取时点与身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +115,24 @@ impl FileIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectStoreError {
-    UnresolvedRef0 {
-        ref0: u32,
+    /// `word1` 为负或解出 dbnum 0：这串数字不指向任何库（`refno_route::refno_dbnum` 给 `None`）。
+    InvalidRefNo {
         refno: String,
+    },
+
+    /// 编号合法、dbnum 解出来了，但既没被钉住、定位器也没有这个库的文件：确定性的
+    /// 「不在这个 MDB」。`web_service` 把它与 `NoSuchElement` 同码 404。
+    DbNotInMdb {
+        dbnum: i32,
+        refno: String,
+    },
+
+    /// 文件自报的库号与要开的不一致（不变量 3「文件自证」）：路径还在、文件被换成
+    /// 别的库，或定位器把 dbnum 绑到了错的文件。读出来的东西完全正常，只是不是你要的库。
+    DbNumberMismatch {
+        dbnum: i32,
+        actual: i32,
+        file: PathBuf,
     },
 
     Session {
@@ -132,9 +175,27 @@ pub enum DirectStoreError {
 impl std::fmt::Display for DirectStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnresolvedRef0 { ref0, refno } => {
-                write!(f, "ref0 {ref0} 反查不到 dbnum，{refno} 未解析")
+            Self::InvalidRefNo { refno } => {
+                write!(
+                    f,
+                    "{refno} 不是合法 RefNo（word1 为负或解出 dbnum 0），无库可读"
+                )
             }
+            Self::DbNotInMdb { dbnum, refno } => {
+                write!(
+                    f,
+                    "{refno} 解出 dbnum {dbnum}，但它不在当前 MDB 也不在依赖目录里"
+                )
+            }
+            Self::DbNumberMismatch {
+                dbnum,
+                actual,
+                file,
+            } => write!(
+                f,
+                "要开 dbnum {dbnum}，文件 {} 自报 dbnum {actual}：不是同一个库",
+                file.display()
+            ),
             Self::Session { dbnum, detail } => write!(f, "dbnum {dbnum}：{detail}"),
             Self::NoSuchElement {
                 refno,
@@ -174,54 +235,139 @@ impl std::error::Error for DirectStoreError {
 pub struct DirectSchema {
     attlib: e3d_attlib::AttlibData,
     template_dir: PathBuf,
+    version: Option<&'static E3dVersion>,
 }
 
 impl std::fmt::Debug for DirectSchema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DirectSchema")
             .field("template_dir", &self.template_dir)
+            .field("version", &self.version.map(|version| version.id))
             .finish_non_exhaustive()
     }
 }
 
 impl DirectSchema {
-    /// 只接受 DbOption.toml 的显式版本。
-    ///
-    /// 已调查的 `UPGDNO`、`Saving Meta Data.` 与 `COMM.VERS` 都不是持久产品版本
-    /// 字段；缺配置就失败，不能从路径或会话现场猜一套偏移继续解析。
+    /// TOML 手动版本优先，其次 [`TEMPLATE_DIR_ENV`]；均未设置时读取项目数据库的
+    /// 版本证据供诊断，然后打开 [`DEFAULT_E3D_VERSION`]。
     pub fn open_from_env() -> anyhow::Result<Self> {
-        let version = crate::options::configured_e3d_version()
-            .map_err(anyhow::Error::msg)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "DbOption.toml 必须显式配置 e3d_version = \"e3d210\" 或 \"e3d31\"；\
-                     自动识别已禁用，因为尚未证实持久的数据库产品版本字段"
+        let started = Instant::now();
+        if let Some(version) =
+            crate::options::configured_e3d_version().map_err(anyhow::Error::msg)?
+        {
+            let schema_root = std::env::var_os(SCHEMA_ROOT_ENV)
+                .map(PathBuf::from)
+                .or_else(schema_root_next_to_executable)
+                .unwrap_or_else(e3d_io::bundled_schema_root);
+            let context = format!(
+                "mode=manual source=DbOption e3d_version={version} auto_detect=false schema_root={}",
+                schema_root.display()
+            );
+            report_schema_info(&format!("[E3D schema] 开始加载: {context}"));
+            return Self::report_load_result(
+                Self::open_explicit_version(&schema_root, &version),
+                &context,
+                started,
+            );
+        }
+        if let Some(dir) = std::env::var_os(TEMPLATE_DIR_ENV) {
+            let template_dir = PathBuf::from(dir);
+            let context = format!(
+                "mode=explicit source={TEMPLATE_DIR_ENV} template_dir={}",
+                template_dir.display()
+            );
+            report_schema_info(&format!("[E3D schema] 开始加载: {context}"));
+            return Self::report_load_result(Self::open(template_dir), &context, started);
+        }
+
+        // 默认模式：没有任何已证实的库字段能**可靠双向**分开 2.1 与 3.1。页身份、
+        // WORL.UPGDNO、COMM.VERS 在两版样本里会相同（见 e3d-io
+        // docs/evidence/2026-09-11-e3d-database-version.md）；CRINFO 又是创建工具，
+        // TMPLVN 是模板兼容版本，session DAB tag 是最后写入引擎。detect_* 一律失败。
+        // 这里把探针证据打出来供排障，但选版明确走产品默认值，不把默认伪装成自动识别。
+        let project_root = PathBuf::from(&aios_core::get_db_option().project_path);
+        let (schema_root, schema_root_source) =
+            if let Some(root) = std::env::var_os(SCHEMA_ROOT_ENV) {
+                (PathBuf::from(root), SCHEMA_ROOT_ENV)
+            } else if let Some(root) = schema_root_next_to_executable() {
+                (root, "executable-adjacent")
+            } else {
+                (e3d_io::bundled_schema_root(), "development-bundled")
+            };
+        let context = format!(
+            "mode=default source=DbOption-unconfigured e3d_version={DEFAULT_E3D_VERSION} \
+             auto_detect=false project={} schema_root={} schema_root_source={schema_root_source}",
+            project_root.display(),
+            schema_root.display()
+        );
+        report_schema_info(&format!(
+            "[E3D schema] 开始加载: {context}；DbOption 未配置 e3d_version，使用默认 \
+             {DEFAULT_E3D_VERSION}；自动识别不可用，仍读取项目数据库二进制版本证据供排障"
+        ));
+        let evidence = match e3d_io::project_version_evidence(&project_root) {
+            Ok(evidence) => {
+                let header = match e3d_io::database_header_diagnostics(&evidence.database) {
+                    Ok(header) => format!(
+                        "header_crinfo={:?} header_tmplno={} header_tmplvn={} \
+                         header_format={:?} header_session_page={} header_session_number={} \
+                         session_dab_tag={:?}",
+                        header.creation_info,
+                        header.template_type_name.as_deref().unwrap_or("unknown"),
+                        header.template_version,
+                        header.header_format,
+                        header.session_page.page,
+                        header.session_number,
+                        header.dabacon_version_tag
+                    ),
+                    Err(error) => format!("header_diagnostics_error={error}"),
+                };
+                format!(
+                    "database={} field={} raw_value={:?} raw_text={:?} session_page={:?} {header}",
+                    evidence.database.display(),
+                    evidence.source.field_name(),
+                    evidence.raw_value,
+                    evidence.raw_text,
+                    evidence.session_page
                 )
-            })?;
-        Self::open_version(&version)
+            }
+            Err(error) => format!("读取失败: {error}"),
+        };
+        report_schema_info(&format!(
+            "[E3D schema] 项目数据库二进制版本证据（仅诊断，不用于选版本）: project={} {evidence}",
+            project_root.display()
+        ));
+        Self::report_load_result(
+            Self::open_explicit_version(&schema_root, DEFAULT_E3D_VERSION),
+            &context,
+            started,
+        )
     }
 
-    /// 直接打开该版本的整套模板，不读取工程或数据库进行版本识别。
-    fn open_version(version: &str) -> anyhow::Result<Self> {
+    fn open_explicit_version(schema_root: &Path, version: &str) -> anyhow::Result<Self> {
         let version = e3d_io::schema::version_by_id(version.trim())
             .ok_or_else(|| anyhow::anyhow!("e3d_version={version:?} 无效：支持 e3d210 / e3d31"))?;
-        let schema = Self::open_pack(version)?;
-        log::info!(
-            "[E3D schema] source=DbOption evidence_field=manual raw_value=- raw_text=- \
-             e3d_version={} auto_detect=false template_dir={}",
+        let manifest = schema_root.join(version.id).join(MANIFEST_FILE);
+        report_schema_info(&format!(
+            "[E3D schema] 开始读取 schema pack: manifest={}",
+            manifest.display()
+        ));
+        let pack = SchemaPack::open_version(schema_root, version.id).map_err(|error| {
+            anyhow::anyhow!("读取 E3D schema pack {} 失败: {error}", manifest.display())
+        })?;
+        report_schema_info(&format!(
+            "[E3D schema] schema pack 清单读取成功: pack={} schema={} e3d=\"{}\" \
+             template_entries={}",
+            pack.root().display(),
             version.id,
-            schema.template_dir.display()
-        );
-        Ok(schema)
-    }
-
-    fn open_pack(version: &'static e3d_io::E3dVersion) -> anyhow::Result<Self> {
-        let pack = e3d_io::SchemaPack::open_version(e3d_io::bundled_schema_root(), version.id)?;
-        let attlib = pack.attlib()?;
-        let dir = attlib
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("attlib 缺少父目录"))?;
-        Self::open(dir)
+            version.display,
+            pack.template_types().count()
+        ));
+        report_schema_info(&format!(
+            "[E3D schema] 开始校验 schema 文件并解析 attlib: pack={} \
+             required=attlib.dat,DESI,CATA,DICT",
+            pack.root().display()
+        ));
+        Self::open_pack(pack)
     }
 
     pub fn open(template_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
@@ -238,11 +384,117 @@ impl DirectSchema {
         Ok(Self {
             attlib,
             template_dir,
+            version: None,
         })
+    }
+
+    fn open_pack(pack: SchemaPack) -> anyhow::Result<Self> {
+        let version = pack.version();
+        let attlib_path = pack
+            .attlib()
+            .map_err(|error| anyhow::anyhow!("{} 的 attlib 解析路径失败: {error}", version.id))?;
+        let template_dir = attlib_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("{} 没有父目录", attlib_path.display()))?
+            .to_path_buf();
+        // SchemaPack may search several roots. All release-bound files used
+        // by the legacy directory-shaped API must still resolve together;
+        // accepting a split would reintroduce the cross-version mix the pack
+        // exists to prevent.
+        for db_type in ["DESI", "CATA", "DICT"] {
+            let template = pack.template(db_type).map_err(|error| {
+                anyhow::anyhow!("{} 的 {db_type} 模板解析路径失败: {error}", version.id)
+            })?;
+            anyhow::ensure!(
+                template.parent() == Some(template_dir.as_path()),
+                "{} 的 attlib 与 {db_type} 模板不在同一 schema 目录：{} vs {}",
+                version.id,
+                attlib_path.display(),
+                template.display()
+            );
+        }
+        let attlib = e3d_attlib::AttlibData::parse_file(&attlib_path)
+            .map_err(|error| anyhow::anyhow!("parse {}: {error}", attlib_path.display()))?;
+        Ok(Self {
+            attlib,
+            template_dir,
+            version: Some(version),
+        })
+    }
+
+    fn report_load_result(
+        result: anyhow::Result<Self>,
+        context: &str,
+        started: Instant,
+    ) -> anyhow::Result<Self> {
+        match result {
+            Ok(schema) => {
+                report_schema_info(
+                    &schema.load_success_message(context, started.elapsed().as_millis()),
+                );
+                Ok(schema)
+            }
+            Err(error) => {
+                report_schema_error(&Self::load_failure_message(
+                    context,
+                    started.elapsed().as_millis(),
+                    &error,
+                ));
+                Err(error)
+            }
+        }
+    }
+
+    fn load_success_message(&self, context: &str, elapsed_ms: u128) -> String {
+        let (schema_id, e3d_display, template_validation) = self
+            .version
+            .map(|version| (version.id, version.display, "DESI,CATA,DICT"))
+            .unwrap_or((
+                "explicit",
+                "未知（AIOS_E3D_TEMPLATE_DIR 显式覆盖未做版本识别）",
+                "deferred（按库打开时检查）",
+            ));
+        format!(
+            "[E3D schema] 加载成功: {context} schema={schema_id} e3d=\"{e3d_display}\" \
+             template_dir={} attlib={} validated_templates={template_validation} \
+             elapsed_ms={elapsed_ms}",
+            self.template_dir.display(),
+            self.template_dir.join("attlib.dat").display()
+        )
+    }
+
+    fn load_failure_message(context: &str, elapsed_ms: u128, error: &anyhow::Error) -> String {
+        format!("[E3D schema] 加载失败: {context} elapsed_ms={elapsed_ms}；原因: {error:#}")
     }
 
     pub fn template_dir(&self) -> &Path {
         &self.template_dir
+    }
+
+    /// 模板目录，按进程缓存一次。
+    ///
+    /// [`Self::open_from_env`] 为了交出这个路径，要重解 schema root、重开 schema pack
+    /// 清单、重载 attlib，还要打几行 `[E3D schema]` 日志。只要路径的调用方在热路径上
+    /// （`model_target` 身份核对是逐根跑的），那份加载就是纯浪费。
+    ///
+    /// 缓存是安全的：解析只依赖 DbOption 的 `e3d_version`、[`SCHEMA_ROOT_ENV`]、
+    /// [`TEMPLATE_DIR_ENV`] 与项目路径，四者在一个进程里都不变——设置模式改完配置是
+    /// **重启**进程，不是就地重解。
+    pub(crate) fn template_dir_from_env() -> anyhow::Result<&'static Path> {
+        static TEMPLATE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        if let Some(dir) = TEMPLATE_DIR.get() {
+            return Ok(dir);
+        }
+        let schema = Self::open_from_env()?;
+        Ok(TEMPLATE_DIR.get_or_init(|| schema.template_dir))
+    }
+
+    /// The release named by the schema pack this schema was opened from
+    /// (DbOption `e3d_version`). Explicit [`Self::open`] overrides return
+    /// `None` because a directory of `.dat` files does not identify its own
+    /// release.
+    pub fn version(&self) -> Option<&'static E3dVersion> {
+        self.version
     }
 
     /// The decoded system attribute dictionary.  File-side UDA catalog loading
@@ -421,22 +673,33 @@ impl DirectStore {
         self.attrs.len()
     }
 
-    /// `ref0` → dbnum，走定位器反查。**不是** `RefU64::get_0()`。
+    pub fn opened_dbnums(&self) -> Vec<i32> {
+        self.sessions.iter().map(|entry| *entry.key()).collect()
+    }
+
+    /// refno → dbnum：**位解码**（`refno_route::refno_dbnum`，与 core.dll `DB_Element::dbno` 同式），
+    /// 再问一句「这个库我认识吗」——钉过、或定位器有它的文件，就是认识。
+    ///
+    /// 既不是 `RefU64::get_0()`（那是 word0，带着 extent 位），也不再走 ref0 反查表：
+    /// 同一个库每个 extent 一个 word0，表是为一个不存在的歧义建的（切片计划 §0.2）。
+    /// 解不出 → [`DirectStoreError::InvalidRefNo`]；解出了但谁都不认识 →
+    /// [`DirectStoreError::DbNotInMdb`]，不凑一个看着像真的。
     pub fn dbnum_of(&self, refno: RefU64) -> Result<i32, DirectStoreError> {
-        let ref0 = refno.get_0();
-        match self.locator.resolve_ref0(ref0) {
-            Ok(Some(dbnum)) => Ok(dbnum as i32),
-            Ok(None) => Err(DirectStoreError::UnresolvedRef0 {
-                ref0,
-                refno: refno.to_string(),
-            }),
-            // 归属歧义（同一个 ref0 落在多个库）在定位器那里就是错误，这里照样上浮：
-            // 挑一个「看着像的」库读出来的属性，比读不出来更难查。
-            Err(error) => Err(DirectStoreError::Session {
-                dbnum: 0,
-                detail: format!("resolving ref0 {ref0} for {refno}: {error:#}"),
-            }),
+        let dbnum = refno_dbnum(refno).ok_or_else(|| DirectStoreError::InvalidRefNo {
+            refno: refno.to_string(),
+        })?;
+        if self.knows_dbnum(dbnum) {
+            return Ok(dbnum as i32);
         }
+        Err(DirectStoreError::DbNotInMdb {
+            dbnum: dbnum as i32,
+            refno: refno.to_string(),
+        })
+    }
+
+    /// 钉过、或定位器登记得出文件——两者任一即「认识这个库」。只问目录，不开文件。
+    fn knows_dbnum(&self, dbnum: u32) -> bool {
+        self.pinned(dbnum as i32).is_some() || self.locator.contains_dbnum(dbnum)
     }
 
     /// 取一个元素的属性，库由 ref0 反查决定。**跨库引用走的就是这条。**
@@ -628,10 +891,7 @@ impl DirectStore {
             .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
         let found = session
             .engine
-            .referrers_of(
-                e3d_attlib::db1_hash(attribute),
-                RefNo::new(target.get_0(), target.get_1()),
-            )
+            .referrers_of(e3d_attlib::db1_hash(attribute), to_refno(target))
             .map_err(|error| DirectStoreError::Session {
                 dbnum,
                 detail: format!("反向引用表 {attribute}：{error}"),
@@ -680,7 +940,7 @@ impl DirectStore {
         dbnum: i32,
         refno: RefU64,
     ) -> Result<ParsedElement, DirectStoreError> {
-        let target = RefNo::new(refno.get_0(), refno.get_1());
+        let target = to_refno(refno);
         let sesno = session.pin.sesno;
 
         let view = session
@@ -708,7 +968,7 @@ impl DirectStore {
         dbnum: i32,
         refno: RefU64,
     ) -> Result<e3d_io::record::descriptor::ElementExtraction, DirectStoreError> {
-        let target = RefNo::new(refno.get_0(), refno.get_1());
+        let target = to_refno(refno);
         let DbSession {
             engine,
             provider,
@@ -779,6 +1039,18 @@ impl DirectStore {
             ))
         })?;
 
+        // 文件自证（不变量 3）：描述符页自报的库号必须就是要开的那个。定位器把 dbnum 绑到
+        // 错的文件、或路径上的文件被换成别的库，都在这里响亮地停下——与 e3d-io
+        // `DbSet::db_slot` 的 `DbNumberMismatch` 同一条门。
+        let actual = engine.descriptor().db_mark as i32;
+        if actual != pin.dbnum {
+            return Err(DirectStoreError::DbNumberMismatch {
+                dbnum: pin.dbnum,
+                actual,
+                file: pin.file.clone(),
+            });
+        }
+
         // 冻结点。`pin.sesno` 给了就是它；没给就是**此刻**文件自报的最新，解一次之后
         // 整个 store 生命周期内不再重解——见 `DbPin::sesno` 的注释。
         let pinned_sesno = engine.session().sesno;
@@ -800,23 +1072,18 @@ impl DirectStore {
         })
     }
 
-    /// ref0 反查，反查不到给 `None` 而不是错。
+    /// 「问路」版的 [`DirectStore::dbnum_of`]：解不出、或解出的库谁都不认识，给 `None` 而不是错。
     ///
-    /// 与 [`DirectStore::dbnum_of`] 的区别是「问路」和「要读」：扫一个元素身上的引用
-    /// 属性时，指向本工程之外的引用是正常的，不该把整轮扫描打断。
+    /// 扫一个元素身上的引用属性时，指向本工程之外的引用是正常的，不该把整轮扫描打断。
+    /// `Result` 外壳是历史签名（反查表时代定位器可能报歧义），现在没有失败路径，留着不改调用方。
     pub fn locator_dbnum(&self, refno: RefU64) -> anyhow::Result<Option<i32>> {
-        Ok(self
-            .locator
-            .resolve_ref0(refno.get_0())?
-            .map(|dbnum| dbnum as i32))
+        Ok(self.dbnum_hint(refno))
     }
 
-    /// 缓存失效用的粗筛：这个 refno 的 ref0 反查得到的库。反查不出来就别动它。
+    /// 缓存失效用的粗筛：这个 refno 解出来、且认识的库。解不出或不认识就别动它。
     fn dbnum_hint(&self, refno: RefU64) -> Option<i32> {
-        self.locator
-            .resolve_ref0(refno.get_0())
-            .ok()
-            .flatten()
+        refno_dbnum(refno)
+            .filter(|dbnum| self.knows_dbnum(*dbnum))
             .map(|dbnum| dbnum as i32)
     }
 }
@@ -913,58 +1180,35 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
     }
 
+    /// 手动版本不读工程、不读数据库，直接打开那一版的整套模板（e3d-direct 0.1.22 的
+    /// 约束，接到 gen-model-refactor 的 `open_explicit_version` 上）。
     #[test]
     fn explicit_e3d_version_opens_templates_without_a_database() {
         for version in ["e3d210", "e3d31"] {
-            let schema = DirectSchema::open_version(version).unwrap();
+            let schema =
+                DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), version)
+                    .unwrap();
             let template = schema.template_file("DESI").unwrap();
             let mut provider = TemplateProvider::open(template, None).unwrap();
-            assert!(provider
-                .template_for(e3d_attlib::db1_hash("BRAN"))
-                .unwrap()
-                .is_some());
+            assert!(
+                provider
+                    .template_for(e3d_attlib::db1_hash("BRAN"))
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 
+    /// 拼错的版本号是配置错误，不回落到任何默认版本。
     #[test]
     fn explicit_e3d_version_typo_does_not_fall_back() {
         for version in ["e3d99", "", "auto"] {
-            let error = DirectSchema::open_version(version).unwrap_err().to_string();
+            let error =
+                DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), version)
+                    .unwrap_err()
+                    .to_string();
             assert!(error.contains("e3d_version"), "{error}");
         }
-    }
-
-    #[test]
-    fn missing_e3d_version_never_probes_or_falls_back() {
-        const CHILD: &str = "AIOS_TEST_MISSING_E3D_VERSION";
-        if std::env::var_os(CHILD).is_some() {
-            let error = DirectSchema::open_from_env().unwrap_err().to_string();
-            assert!(error.contains("必须显式配置 e3d_version"), "{error}");
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("DbOption.toml");
-        std::fs::write(
-            &config,
-            "project_path = \"D:/AVEVA/Projects/E3D3.1\"\n\
-             included_projects = [\"AvevaMarineSample\"]\n",
-        )
-        .unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "data_interface::direct_store::tests::missing_e3d_version_never_probes_or_falls_back",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("DB_OPTION_FILE", config)
-            .env(
-                TEMPLATE_DIR_ENV,
-                e3d_io::bundled_schema_root().join("e3d31/binaries"),
-            )
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
     }
 
     #[derive(Default)]
@@ -988,10 +1232,45 @@ mod tests {
         }
     }
 
+    /// 模板目录的热路径取法必须命中缓存，而不是每次重跑一遍 schema 加载：
+    /// `model_target` 身份核对是逐根做的，一个作用域有几百个根。
+    #[test]
+    fn the_template_directory_is_resolved_once_and_matches_a_full_schema_load() {
+        let first = DirectSchema::template_dir_from_env().expect("E3D template directory");
+        let second = DirectSchema::template_dir_from_env().expect("E3D template directory");
+        assert!(
+            std::ptr::eq(first, second),
+            "第二次取应该命中缓存，不该再加载一次 schema"
+        );
+        assert_eq!(
+            first,
+            DirectSchema::open_from_env()
+                .expect("E3D template directory")
+                .template_dir()
+        );
+    }
+
+    #[test]
+    fn declared_missing_file_is_not_an_outside_mdb_reference() {
+        struct Missing;
+        impl CataDbLocator for Missing {
+            fn dbnum_of_ref0(&self, _: u32) -> Option<u32> { None }
+            fn contains_dbnum(&self, dbnum: u32) -> bool { dbnum == 8000 }
+            fn db_type_of(&self, _: u32) -> Option<String> { Some("DESI".into()) }
+            fn file_of(&self, _: u32) -> Option<(String, PathBuf)> { None }
+        }
+        let schema = Arc::new(DirectSchema { attlib: e3d_attlib::AttlibData::default(), template_dir: "unused".into(), version: None });
+        let store = DirectStore::new(schema, Arc::new(Missing));
+        let reference = RefU64::from_two_nums(24384, 42);
+        assert_eq!(store.dbnum_of(reference).unwrap(), 8000);
+        assert!(matches!(store.attrs(reference), Err(DirectStoreError::NoFileForDbnum { dbnum: 8000 })));
+    }
+
     fn store_without_files() -> DirectStore {
         let schema = Arc::new(DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
+            version: None,
         });
         let locator = FakeLocator {
             ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
@@ -1000,27 +1279,74 @@ mod tests {
         DirectStore::new(schema, Arc::new(locator))
     }
 
-    /// **改成「反查不到就拿 get_0() 当 dbnum」会让这条红。**
-    /// `Ref0` 不是 `dbnum`，两者恰好相等只是巧合。
+    /// 同上，但把定位器的把手也交出来——要数它被问了几次 ref0。
+    fn store_with_counting_locator() -> (DirectStore, Arc<FakeLocator>) {
+        let schema = Arc::new(DirectSchema {
+            attlib: e3d_attlib::AttlibData::default(),
+            template_dir: PathBuf::from("nowhere"),
+            version: None,
+        });
+        let locator = Arc::new(FakeLocator {
+            ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
+            lookups: AtomicUsize::new(0),
+        });
+        (DirectStore::new(schema, locator.clone()), locator)
+    }
+
+    fn ref0_lookups(locator: &FakeLocator) -> usize {
+        locator.lookups.load(Ordering::Relaxed)
+    }
+
+    /// **改成「拿 get_0() 当 dbnum」会让这条红。** `99999/7` 的 word0 是 99999，解码出的
+    /// dbnum 是 1695（低 13 位 0x69F；高位段为 0）——两者不等，且谁也不认识 1695。
+    /// 定位器的 ref0 反查**一次都不许被问**：那张表已经不是路由依据。
     #[test]
-    fn an_unresolvable_ref0_is_an_error_not_a_guess() {
-        let store = store_without_files();
+    fn a_valid_refno_nobody_knows_is_not_in_mdb_and_never_consults_the_ref0_table() {
+        let (store, locator) = store_with_counting_locator();
         let unknown = RefU64::from_two_nums(99_999, 7);
         let error = store.attrs(unknown).unwrap_err();
         assert!(
-            matches!(error, DirectStoreError::UnresolvedRef0 { ref0: 99_999, .. }),
+            matches!(
+                &error,
+                DirectStoreError::DbNotInMdb { dbnum: 1_695, refno } if refno == &unknown.to_string()
+            ),
             "{error}"
         );
-        assert!(!error.to_string().contains("99999_7 read from dbnum"));
+        let text = error.to_string();
+        assert!(
+            text.contains("dbnum 1695") && text.contains(&unknown.to_string()),
+            "错误要同时说出 refno 与解出的 dbnum: {text}"
+        );
+        assert_eq!(ref0_lookups(&locator), 0, "dbnum_of 不得再问 ref0 反查表");
+    }
+
+    /// 非法引用（word1 符号位置位 / 解出 dbnum 0）在解码那一步就停，报的是 `InvalidRefNo`。
+    #[test]
+    fn an_invalid_refno_is_rejected_before_any_lookup() {
+        let store = store_without_files();
+        for refno in [
+            RefU64::from_two_nums(0, 0),
+            RefU64::from_two_nums(24_384, 0x8000_0000),
+            RefU64::from_two_nums(3 << 13, 5),
+        ] {
+            let error = store.attrs(refno).unwrap_err();
+            assert!(
+                matches!(&error, DirectStoreError::InvalidRefNo { refno: text } if text == &refno.to_string()),
+                "{refno}: {error}"
+            );
+            assert_eq!(store.locator_dbnum(refno).unwrap(), None);
+        }
     }
 
     /// ADR-054：定位器**不认识**的库才是错误。**改回「没钉 pin 就报错」会让下一条红。**
     ///
-    /// 两条入口同一口径：点名库的 `attrs_in` 与靠 ref0 反查的 `attrs` 都先去定位器补 pin，
-    /// 定位器也拿不出文件时才报 `NoFileForDbnum`——不凑一个看着像真的。
+    /// 两条入口两种说法：点名库的 `attrs_in` 去定位器补 pin，拿不出文件报 `NoFileForDbnum`；
+    /// 靠 refno 解码的 `attrs` 在解出 dbnum 8000 之后先问「认识吗」，不认识就是 `DbNotInMdb`
+    /// ——`web_service` 把后者当 404「不在这个 MDB」。两条都不凑一个看着像真的。
     #[test]
     fn a_dbnum_the_locator_does_not_know_is_an_error_not_a_guess() {
         let store = store_without_files();
+        // 24384 = 0x5F40：extent 2 的 dbnum 8000。
         let refno = RefU64::from_two_nums(24_384, 18_447);
 
         let error = store.attrs_in(8000, refno).unwrap_err();
@@ -1031,8 +1357,49 @@ mod tests {
 
         let error = store.attrs(refno).unwrap_err();
         assert!(
-            matches!(error, DirectStoreError::NoFileForDbnum { dbnum: 8000 }),
+            matches!(error, DirectStoreError::DbNotInMdb { dbnum: 8000, .. }),
             "{error}"
+        );
+        assert_eq!(store.locator_dbnum(refno).unwrap(), None, "问路也说不认识");
+    }
+
+    /// 钉过的库就是认识的库，哪怕定位器没有它的文件：解码出的 dbnum 直接命中 pin。
+    /// 同一个库的另一个 extent（word0 + 0x2000）落到同一个 pin。
+    #[test]
+    fn a_pinned_dbnum_is_known_for_every_extent_without_asking_the_locator() {
+        let (store, locator) = store_with_counting_locator();
+        store.pin(DbPin {
+            dbnum: 8000,
+            db_type: "DESI".to_string(),
+            file: PathBuf::from("no-such-file"),
+            sesno: None,
+        });
+        for word0 in [16_192u32, 24_384, 32_576] {
+            let refno = RefU64::from_two_nums(word0, 1);
+            assert_eq!(store.dbnum_of(refno).unwrap(), 8000, "word0={word0}");
+            assert_eq!(store.locator_dbnum(refno).unwrap(), Some(8000));
+        }
+        assert_eq!(ref0_lookups(&locator), 0);
+    }
+
+    /// 生产代码里不得再出现 ref0 反查：`resolve_ref0(` / `dbnum_of_ref0(` 只许活在测试里。
+    /// （切片 §5.2 源码护栏的本文件那一条，W8 汇总成独立测试文件前先在这里守着。）
+    #[test]
+    fn production_code_never_consults_the_ref0_table() {
+        let source = include_str!("direct_store.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("test module marker")
+            .0;
+        for needle in ["resolve_ref0(", "dbnum_of_ref0(", ".get_0()"] {
+            assert!(
+                !production.contains(needle),
+                "direct_store 生产代码不得包含 `{needle}`：refno → dbnum 只走 refno_route"
+            );
+        }
+        assert!(
+            production.contains("refno_dbnum("),
+            "解码 helper 必须是唯一入口"
         );
     }
 
@@ -1055,6 +1422,7 @@ mod tests {
         let schema = Arc::new(DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
+            version: None,
         });
         let store = DirectStore::new(schema, Arc::new(LocatorWithFile));
         assert!(store.pinned(8000).is_none());
@@ -1141,6 +1509,7 @@ mod tests {
         let schema = DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("dir"),
+            version: None,
         };
         // 目录里没有文件，所以只看它找的是哪一个。
         let error = schema.template_file("DESI").unwrap_err().to_string();
@@ -1149,4 +1518,180 @@ mod tests {
         assert!(error.contains("catvir.dat"), "{error}");
         assert!(schema.template_file("DI").is_err());
     }
+
+    #[test]
+    fn schema_loading_diagnostics_name_success_and_full_failure_context() {
+        let source = include_str!("direct_store.rs");
+        for required in [
+            "[E3D schema] 开始加载",
+            "[E3D schema] 项目数据库二进制版本证据（仅诊断，不用于选版本）",
+            "[E3D schema] 开始读取 schema pack",
+            "[E3D schema] schema pack 清单读取成功",
+            "[E3D schema] 开始校验 schema 文件并解析 attlib",
+            "[E3D schema] 加载成功",
+            "[E3D schema] 加载失败",
+        ] {
+            assert!(
+                source.contains(required),
+                "schema 加载过程缺日志 {required}"
+            );
+        }
+        // 自动识别已废止（e3d-io 2c6f11d）：这里只准读证据，不准再调 detect_*。
+        assert!(
+            !source.contains(concat!("e3d_io::", "detect_project_version("))
+                && !source.contains(concat!("SchemaPack::", "detect_for_project(")),
+            "schema 加载不得再调 detect_*：它一律失败，报错还是一句英文 API 说明"
+        );
+        assert!(
+            source.contains("e3d_io::database_header_diagnostics(&evidence.database)"),
+            "默认 schema 启动日志必须补充 CRINFO/TMPLVN/session DAB tag"
+        );
+        for required in [
+            "header_crinfo=",
+            "header_tmplvn=",
+            "session_dab_tag=",
+            "header_diagnostics_error=",
+        ] {
+            assert!(source.contains(required), "schema 启动头诊断缺 {required}");
+        }
+        assert_eq!(DEFAULT_E3D_VERSION, "e3d210");
+        for required in [
+            "mode=default source=DbOption-unconfigured",
+            "e3d_version={DEFAULT_E3D_VERSION}",
+            "DbOption 未配置 e3d_version，使用默认",
+            "Self::open_explicit_version(&schema_root, DEFAULT_E3D_VERSION)",
+        ] {
+            assert!(
+                source.contains(required),
+                "未配置 e3d_version 的默认路径缺 {required}"
+            );
+        }
+
+        let schema = DirectSchema {
+            attlib: e3d_attlib::AttlibData::default(),
+            template_dir: PathBuf::from(r"C:\runtime\schema\e3d210\binaries"),
+            version: Some(&e3d_io::E3D210),
+        };
+        let success = schema.load_success_message(
+            r"mode=auto project=D:\AVEVA\Projects\E3D2.1 schema_root=C:\runtime\schema",
+            37,
+        );
+        for required in [
+            "[E3D schema] 加载成功",
+            "schema=e3d210",
+            "e3d=\"AVEVA Everything3D 2.1 (2.10)\"",
+            r"attlib=C:\runtime\schema\e3d210\binaries\attlib.dat",
+            "validated_templates=DESI,CATA,DICT",
+            "elapsed_ms=37",
+        ] {
+            assert!(
+                success.contains(required),
+                "成功日志缺字段 {required}: {success}"
+            );
+        }
+
+        let explicit = DirectSchema {
+            version: None,
+            ..schema
+        }
+        .load_success_message("mode=explicit", 1);
+        assert!(explicit.contains("schema=explicit"), "{explicit}");
+        assert!(
+            explicit.contains("validated_templates=deferred（按库打开时检查）"),
+            "{explicit}"
+        );
+
+        let error = anyhow::anyhow!("attlib.dat 不存在").context("读取 pack 失败");
+        let failure = DirectSchema::load_failure_message(
+            r"mode=auto project=D:\broken schema_root=C:\missing",
+            19,
+            &error,
+        );
+        for required in [
+            "[E3D schema] 加载失败",
+            r"project=D:\broken",
+            r"schema_root=C:\missing",
+            "elapsed_ms=19",
+            "原因: 读取 pack 失败: attlib.dat 不存在",
+        ] {
+            assert!(
+                failure.contains(required),
+                "失败日志缺字段 {required}: {failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_e3d210_opens_the_bundled_2_10_schema_pack() {
+        let schema = DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), "e3d210")
+            .expect("the bundled E3D 2.10 schema pack opens");
+        assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
+        assert!(
+            schema
+                .template_dir()
+                .ends_with(Path::new("schema/e3d210/binaries")),
+            "{}",
+            schema.template_dir().display()
+        );
+        assert!(schema.template_file("DESI").unwrap().is_file());
+        assert!(schema.template_file("CATA").unwrap().is_file());
+        assert!(schema.template_file("DICT").unwrap().is_file());
+    }
+
+    #[test]
+    fn explicit_e3d31_opens_the_bundled_3_1_schema_pack() {
+        let schema = DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), " E3D31 ")
+            .expect("the bundled E3D 3.1 schema pack opens (id is trimmed, case-insensitive)");
+        assert_eq!(schema.version().map(|version| version.id), Some("e3d31"));
+        assert!(
+            schema
+                .template_dir()
+                .ends_with(Path::new("schema/e3d31/binaries")),
+            "{}",
+            schema.template_dir().display()
+        );
+        let invalid = DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), "e3d40")
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("支持 e3d210 / e3d31"), "{invalid}");
+    }
+
+    #[test]
+    fn installed_e3d_2_1_bran_parses_through_the_direct_store() {
+        let database = Path::new(r"D:\AVEVA\Projects\E3D2.1\AvevaMarineSample\ams000\ams8000_0001");
+        if !database.is_file() {
+            eprintln!("skipped: installed E3D 2.1 sample is absent");
+            return;
+        }
+
+        let schema = Arc::new(
+            DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), "e3d210")
+                .expect("the bundled E3D 2.10 schema pack opens"),
+        );
+        assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
+
+        let locator = FakeLocator {
+            ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
+            lookups: AtomicUsize::new(0),
+        };
+        let store = DirectStore::new(schema, Arc::new(locator));
+        store.pin(DbPin {
+            dbnum: 8000,
+            db_type: "DESI".to_string(),
+            file: database.to_path_buf(),
+            sesno: None,
+        });
+        let attrs = store
+            .attrs_in(8000, RefU64::from_two_nums(24_384, 23_257))
+            .expect("BRAN 24384/23257 parses with the selected 2.10 descriptors");
+        assert!(attrs.map.map.contains_key("TYPE"));
+        assert!(attrs.map.map.contains_key("OWNER"));
+        assert!(attrs.map.map.contains_key("REFNO"));
+        assert!(store.pinned_sesno(8000).is_some());
+    }
 }
+
+/// 真库门（手动）：跨库引用读通与文件自证，见该文件头。
+#[cfg(test)]
+#[path = "direct_store_refno_live_tests.rs"]
+mod refno_live_tests;

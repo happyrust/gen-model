@@ -1,6 +1,6 @@
 -- F6 / D-02: INCLUDE moves an existing element into the current owner's member list.
 
-ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_ftub_move_apply.log" OVER
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/l3_ftub_move_apply.log" OVER
 $P L3-F6-ALIVE
 =24384/22404
 INCLUDE =24384/22403

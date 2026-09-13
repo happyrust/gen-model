@@ -1,0 +1,33 @@
+{
+  "task_id": "model-history-20260913-224718-000000",
+  "kind": "model_history",
+  "state": "failed",
+  "project": "AvevaMarineSample",
+  "created_at": "2026-09-13T22:47:18.306869+08:00",
+  "started_at": "2026-09-13T22:47:18.306869+08:00",
+  "finished_at": "2026-09-13T22:47:18.442287+08:00",
+  "dbnum": 8000,
+  "db_type": "DESI",
+  "units_done": 0,
+  "total_units": 1,
+  "events_seen": 0,
+  "current_stage": "historical_generation",
+  "stage_started_at": "2026-09-13T22:47:18.306869+08:00",
+  "detail": {
+    "refno": "=24384/26229",
+    "sesno": 100,
+    "time": null
+  },
+  "result": {
+    "code": "REFNO_NOT_FOUND_AT_SESSION",
+    "message": "refno 24384/26229 is not in the element index of dbnum 8000 at session 100"
+  },
+  "steps": [
+    {
+      "name": "historical_generation",
+      "at": "2026-09-13T22:47:18.306869+08:00",
+      "ms": 135,
+      "ok": false
+    }
+  ]
+}

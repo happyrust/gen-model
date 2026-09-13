@@ -191,6 +191,23 @@ async fn ingest_frozen(
         "开始基线摄入 {project} dbnum={dbnum} db_type={db_type} file={file_name} target_sesno={target_sesno}"
     );
 
+    // 写入标记 `writing{0, T}`（ADR-072 D1 / 计划 §4.2-1）：基线的起点恒为 0——库里没有
+    // 「S 版本」可退，崩在中途的回退就是整库 wipe 再重排（D2 第 1 条）。
+    //
+    // 数据批次 worker 在冻结点已经落过一次标记，这里**重写**是为了把 S 与 intent 修正成
+    // 初始化那一档：走到基线说明冻结点重解窗口判了「按首次导入」，worker 那一刻按队列行
+    // 算出来的 S 可能不是 0（回退检出的 `Reinitialize` 行尤其如此）。标记只有一行，重写即纠正。
+    crate::data_interface::write_state::mark_writing(
+        dbnum,
+        0,
+        target_sesno as i32,
+        crate::data_interface::write_state::WriteIntent::Initialize,
+    )
+    .await
+    .with_context(|| {
+        format!("基线写入标记未落 dbnum={dbnum} file={file_name}：没有标记就没有崩溃出路")
+    })?;
+
     // 老库摘 legacy 事件；`execute_on` 里的 `require_no_event_on` 是硬闸，这一步让老库能过闸。
     crate::versioned_db::database::retire_dbnum_event().await?;
     // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`；DICT 相先于 DESI 相，定义此时已在库里。

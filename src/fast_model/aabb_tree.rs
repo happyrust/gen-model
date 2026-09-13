@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
@@ -5,134 +6,117 @@ use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
 
 use crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos;
+use crate::fast_model::model_memory_store::ProjectedGeometry;
 
-/// 写回成功后应用窗口计算期间延迟的空间树变化（提交后收敛专用）。
+/// 一条投影记录在空间树里的条目：世界盒 + 来源元素 + noun（ADR-072 D4）。
 ///
-/// refresh 分支从**已提交的主库**按 `inst_relate.aabb` 指针值同步树条目
-/// （[`sync_tree_from_committed_pointers`]），不重算几何、不写库：窗口 journal
-/// 重放已经把刷新层算出的值落成主库真值，这里只需要让树追上库。此前这一步复跑
-/// `update_inst_relate_aabbs_by_refnos(.., true)`，对着主库把几何 AABB 整个重算
-/// 并重写一遍——跑在「收敛失败即停止出队」的关键路径上（I7），时长随窗口规模
-/// 线性涨，还平白引入几何 join 这块失败面。
+/// 盒**直接取** [`ProjectedGeometry::world_bounds`]——落库那一侧写进 `aabb.d` 的就是同一份值
+/// （`model_db_adapter::collect_record`），树不必等行提交再回读一遍。隐式管身不进树（与此前
+/// 只读 `inst_relate` 指针的口径一致，`tubi_relate` 从来不在树上）；NaN / Inf / 反向范围按
+/// 「无可用盒」对待（[`aabb_is_usable`]）返回 `None`——与全量指针扫描同一裁决，否则重建出来的
+/// 树与增量维护的树会对同一条记录给出两种答案，条目集合永远对不拢。
+pub(crate) fn projected_tree_entry(record: &ProjectedGeometry) -> Option<RStarBoundingBox> {
+    if record.tube.is_some() {
+        return None;
+    }
+    let aabb = parry3d::bounding_volume::Aabb::new(
+        record.world_bounds[0].into(),
+        record.world_bounds[1].into(),
+    );
+    aabb_is_usable(&aabb).then(|| {
+        RStarBoundingBox::new(
+            aabb,
+            crate::data_interface::generation_root::refno_from_e3d(record.source_refno),
+            record.noun.clone(),
+        )
+    })
+}
+
+/// 模型落库提交之后把树追上**内存投影**（ADR-072 D4，取代按已提交指针回读库的旧收敛）。
 ///
-/// 房间触发不在这里产生：AABB 房间目标已在窗口内并入 finalize plan 随尾事务
-/// 持久化，收敛只负责树本身。
+/// `refreshed` 是这一轮写了新几何的来源元素（隐式管身不算），`boxes` 是它们的投影世界盒
+/// （[`projected_tree_entry`]），`removed` 是被对账掉、房间边也一并清掉的来源。三步：
+///
+/// 1. `removed` 摘树；
+/// 2. `refreshed` 里一条可用盒都没有的来源也摘树——树的口径是「镜像投影里可用的盒」，旧盒
+///    留着会一直当房间候选，直到下一次指针重建才自愈；
+/// 3. 其余按 `sync_refnos` 整批换新（一次遍历摘掉这些 refno 的全部旧条目再插新值）。
+///
+/// 不读库、不写库、不重算几何。动了树就置脏（落盘归空闲轮）并把 Ready / ReadyEmpty 那一格
+/// 对齐条目数。调用点在事务**之后**：块没提交成功的组走不到这里（`persist_group` 出错即返回），
+/// 所以树上只会出现库里已经有的盒。返回实际进树的条数。
+pub(crate) async fn converge_tree_after_persist(
+    refreshed: &[RefnoEnum],
+    boxes: Vec<RStarBoundingBox>,
+    removed: &[RefnoEnum],
+) -> usize {
+    let present = boxes.iter().map(|entry| entry.refno).collect::<HashSet<_>>();
+    let mut evict = removed.iter().map(RefnoEnum::refno).collect::<HashSet<_>>();
+    let vanished = refreshed
+        .iter()
+        .map(RefnoEnum::refno)
+        .filter(|refno| !present.contains(refno))
+        .collect::<Vec<_>>();
+    if !vanished.is_empty() {
+        println!(
+            "落库后空间收敛：{} 个刷新来源中 {} 个在投影里没有可用盒，摘除其树条目",
+            refreshed.len(),
+            vanished.len()
+        );
+        evict.extend(vanished);
+    }
+    let synced = boxes.len();
+    if evict.is_empty() && synced == 0 {
+        return 0;
+    }
+    let (evicted, stale, entries) = {
+        let mut tree = GLOBAL_AABB_TREE.write().await;
+        let evicted = tree.remove_by_refnos(&evict);
+        let stale = tree.sync_refnos(boxes).len();
+        (evicted, stale, tree.size())
+    };
+    if evicted > 0 || stale > 0 || synced > 0 {
+        mark_aabb_tree_dirty();
+    }
+    crate::fast_model::spatial_state::refresh_ready_kind(entries);
+    synced
+}
+
+/// 账本重放的过渡壳：`side_effect_pending::publish_one_spatial_round` 还在调它，
+/// 随第二条异步账整体退役（ADR-072 D5 / 计划 R4）。盒同样来自内存投影——按来源在
+/// `ModelMemoryStore::global()` 里查记录——不再回读库。
 pub(crate) async fn apply_deferred_spatial_mutations(
     deferred: crate::data_interface::staging::write_context::DeferredSpatialMutations,
 ) -> anyhow::Result<()> {
-    if !deferred.remove.is_empty() {
-        let removed = deferred
-            .remove
-            .iter()
-            .map(RefnoEnum::refno)
-            .collect::<std::collections::HashSet<_>>();
-        if GLOBAL_AABB_TREE.write().await.remove_by_refnos(&removed) > 0 {
-            mark_aabb_tree_dirty();
-        }
-    }
-    if deferred.refresh.is_empty() {
-        return Ok(());
-    }
-    let mut refnos = deferred.refresh.into_iter().collect::<Vec<_>>();
-    refnos.sort();
-    sync_tree_from_committed_pointers(&refnos).await?;
+    let refreshed = deferred.refresh.into_iter().collect::<Vec<_>>();
+    let removed = deferred.remove.into_iter().collect::<Vec<_>>();
+    let members = refreshed
+        .iter()
+        .map(|refno| refno.refno().0 as i64)
+        .collect::<std::collections::BTreeSet<_>>();
+    let boxes = crate::fast_model::model_memory_store::ModelMemoryStore::global()
+        .room_records_for_members(&members)
+        .iter()
+        .filter_map(projected_tree_entry)
+        .collect::<Vec<_>>();
+    converge_tree_after_persist(&refreshed, boxes, &removed).await;
     Ok(())
 }
 
-/// `(refno, noun, aabb 指针值)` 的查询行——树条目所需的全部信息。
-#[derive(serde::Deserialize)]
-struct PointerRow {
-    refno: RefnoEnum,
-    noun: Option<String>,
-    aabb: parry3d::bounding_volume::Aabb,
+/// 测试专用：把这些来源的条目从全局树上摘掉（用例的准备 / 收尾）。树的写点白名单
+/// （`tree_write_sites_stay_on_the_audited_whitelist`）只认本文件，别的模块的用例经这里动树。
+#[cfg(test)]
+pub(crate) async fn evict_tree_entries_for_test(sources: &[RefnoEnum]) {
+    let refnos = sources.iter().map(RefnoEnum::refno).collect::<HashSet<_>>();
+    GLOBAL_AABB_TREE.write().await.remove_by_refnos(&refnos);
 }
 
-impl PointerRow {
-    fn into_box(self) -> RStarBoundingBox {
-        RStarBoundingBox::new(
-            self.aabb,
-            self.refno,
-            self.noun.unwrap_or_else(|| "UNSET".to_string()),
-        )
-    }
-}
-
-/// 从已提交主库按指针值同步这些 refno 的树条目，返回实际进树的条数。
+/// 空间树自上次写回快照以来是否有未持久化的增量变更。
 ///
-/// 进树口径与刷新层一致（`world_trans.d != none and aabb.d != none`）；库里已经
-/// 没有可用指针的 refno 不进树——对应「从未刷新过 / 几何不可用」的行，它们本来
-/// 也不在树上。查询失败上抛：提交后收敛失败必须阻断出队（I7），不能静默放行。
-pub(crate) async fn sync_tree_from_committed_pointers(
-    refnos: &[RefnoEnum],
-) -> anyhow::Result<usize> {
-    const CHUNK: usize = 500;
-    let mut synced = 0usize;
-    for chunk in refnos.chunks(CHUNK) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let inst_keys = aios_core::get_inst_relate_keys(chunk);
-        let sql = format!(
-            "select in as refno, in.noun as noun, aabb.d as aabb from {inst_keys} \
-             where world_trans.d != none and aabb.d != none"
-        );
-        let mut response = SUL_DB
-            .query(&sql)
-            .await
-            .map_err(|e| anyhow::anyhow!("读取已提交包围盒指针失败: {e}"))?
-            .check()
-            .map_err(|e| anyhow::anyhow!("读取已提交包围盒指针语句失败: {e}"))?;
-        let rows: Vec<PointerRow> = response
-            .take(0)
-            .map_err(|e| anyhow::anyhow!("解析已提交包围盒指针失败: {e}"))?;
-        // 无效指针值（NaN/Inf/反向范围）按「无可用指针」对待——与全量扫描同一
-        // 口径（aabb_is_usable），否则重建后的树与增量维护的树对同一行给出两种
-        // 裁决，条目集合永远对不拢。
-        let (usable, unusable): (Vec<_>, Vec<_>) =
-            rows.into_iter().partition(|row| aabb_is_usable(&row.aabb));
-        if usable.len() < chunk.len() {
-            // 树的口径是「镜像已提交指针」：指针已消失的 refresh 目标必须摘除，
-            // 跳过会让旧盒一直留在树上当房间候选，直到下一次指针重建才自愈。
-            let present = usable
-                .iter()
-                .map(|row| row.refno.refno())
-                .collect::<std::collections::HashSet<_>>();
-            let vanished = chunk
-                .iter()
-                .map(RefnoEnum::refno)
-                .filter(|refno| !present.contains(refno))
-                .collect::<std::collections::HashSet<_>>();
-            println!(
-                "提交后空间收敛：{} 个 refresh 目标中 {} 个在主库已无可用指针（含 {} 条无效值），摘除其树条目",
-                chunk.len(),
-                vanished.len(),
-                unusable.len()
-            );
-            if GLOBAL_AABB_TREE.write().await.remove_by_refnos(&vanished) > 0 {
-                mark_aabb_tree_dirty();
-            }
-        }
-        let boxes = usable
-            .into_iter()
-            .map(PointerRow::into_box)
-            .collect::<Vec<_>>();
-        let count = boxes.len();
-        let stale = GLOBAL_AABB_TREE.write().await.sync_refnos(boxes);
-        if count > 0 || !stale.is_empty() {
-            mark_aabb_tree_dirty();
-        }
-        synced += count;
-    }
-    Ok(synced)
-}
-
-/// 空间树自上次写回项目树文件以来是否有未持久化的增量变更。
-///
-/// 增量路径（AABB 刷新、删除清理）只更新内存树，这个标记决定的只是「这一轮要不要
-/// 真的写文件」；落盘时机归 worker 空闲轮（ADR-010 落盘时机，2026-07-28 已决）。
-/// 它跨不过重启，所以不承担正确性——崩溃后丢掉的内存树变更由库侧痕迹兜底：暂存
-/// 路径靠 `spatial_reconcile` 意图行重放，直写路径靠同事务的 epoch bump 让启动
-/// 判据落到指针重建。
+/// 增量路径（落库后收敛、AABB 刷新、删除清理）只更新内存树，这个标记决定的只是「这一轮要不要
+/// 真的写文件」；落盘时机归 worker 空闲轮（ADR-010 落盘时机，2026-07-28 已决）——任务收尾
+/// 置脏、空闲轮落盘。它跨不过重启，所以不承担正确性：崩溃后丢掉的内存树变更由启动判据兜底
+/// （快照头的 epoch 指纹与各库水位数对任一与库不等即指针重建，见 [`load_project_tree_verified`]）。
 static AABB_TREE_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// 增量路径动过内存树之后调用：标记「有变更待落盘」。
@@ -140,76 +124,21 @@ pub fn mark_aabb_tree_dirty() {
     AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
 }
 
-/// 模型落库提交之后把树追上库（ADR-060）。
-///
-/// 与 [`apply_deferred_spatial_mutations`] 是同一套动作、不同的来源：那一支的名单来自
-/// 窗口计算期间寄存的空间意图，这一支来自刚落库的那一批投影记录——`refreshed` 是写了
-/// 新几何的来源元素，`removed` 是这一轮被对账掉、房间边也一并清掉的来源。两支都只按
-/// 已提交指针同步，不重算几何、不写库。
-///
-/// 调用点在事务**之外**：读的是已提交的 `inst_relate.aabb`，事务里读不到自己还没提交
-/// 的那一半。
-pub(crate) async fn converge_tree_after_persist(
-    refreshed: &[RefnoEnum],
-    removed: &[RefnoEnum],
-) -> anyhow::Result<()> {
-    if !removed.is_empty() {
-        let removed = removed
-            .iter()
-            .map(RefnoEnum::refno)
-            .collect::<std::collections::HashSet<_>>();
-        if GLOBAL_AABB_TREE.write().await.remove_by_refnos(&removed) > 0 {
-            mark_aabb_tree_dirty();
-        }
-    }
-    if refreshed.is_empty() {
-        return Ok(());
-    }
-    sync_tree_from_committed_pointers(refreshed).await?;
-    Ok(())
-}
-
 /// 旧格式（V1）树文件：`accel_tree_{project}.bin`（ADR-010 §6「路径带项目名」）。
 ///
-/// 自单文件快照（2026-08-12 方案 §3）起**只读不写**：仅作一次性迁移候选，
-/// 首次 V3 发布成功后被 [`remove_legacy_tree_files`] 删除（D3——留着它会给
-/// 「回退旧二进制 + 恰有 pending」开静默陈旧窗口；旧代码对 bin 缺失是无条件
-/// 指针重建，删除让任何回退自动安全）。
-///
-/// 读写都由本仓自己做：bincode 编码与 rs-core 的 `serialize_to_bin_file` 同构
-/// （`AccelerationTree` 的反向索引等派生字段是 `#[serde(skip)]`，不进文件），
-/// 反序列化后的索引由 `ensure_refno_index` 在首次按 refno 操作时自愈重建，
-/// 有单测钉着这条假设。rs-core 硬编码的裸 `accel_tree.bin` 不再参与——此前的
-/// 「搬运语义」（加载前复制到裸名、落盘后归档回项目名）在多项目并发共用 cwd
-/// 时是竞态窗口，现在整个消失。
+/// 自单文件快照（2026-08-12 方案 §3）起**不读不写**，只在快照发布成功后被
+/// [`remove_legacy_tree_files`] 清掉。它的 sidecar 只带 epoch 指纹、没有各库水位数对，
+/// 在 ADR-072 的启动判据下永远对不上——读它就是白读，一律从库指针重建。
 pub fn project_tree_file() -> String {
     format!("accel_tree_{}.bin", aios_core::get_db_option().project_name)
 }
 
-/// 树文件的 sidecar 元数据：`accel_tree_{project}.meta.json`。
+/// 旧格式树文件的 sidecar 元数据：`accel_tree_{project}.meta.json`（同上，只清不读）。
 fn project_tree_meta_file() -> String {
     format!(
         "accel_tree_{}.meta.json",
         aios_core::get_db_option().project_name
     )
-}
-
-/// sidecar 内容：树文件对应的库侧空间指纹与条目数。
-///
-/// `(epoch, db_epoch_updated_at)` 合成启动信任指纹（方案
-/// `docs/2026-08-11_spatial-tree-startup-init-plan.md` §3）：单靠计数在
-/// 「库快照回滚恰好回到同一计数」时会撞值，时间戳与计数同一事务写入、同源于
-/// 库端时钟，双字段都相等才信文件。
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct TreeFileMeta {
-    epoch: u64,
-    /// 库侧该 epoch 的 `updated_at`（字符串化 datetime，与 epoch 同一事务落库）。
-    /// 旧版 sidecar 没有此字段：serde 缺省空串，而空串永不等于库侧真实时刻，
-    /// 于是老文件自动落入失配分支、一次自愈后补齐。
-    #[serde(default)]
-    db_epoch_updated_at: String,
-    entries: u64,
-    saved_at_unix: u64,
 }
 
 /// 原子写文件：先写临时文件再 rename 覆盖。
@@ -236,30 +165,20 @@ fn write_file_atomic(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_project_tree_file() -> anyhow::Result<AccelerationTree> {
-    let path = project_tree_file();
-    let bytes = std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
-    bincode::deserialize(&bytes).map_err(|e| anyhow::anyhow!("反序列化 {path} 失败: {e}"))
-}
-
-fn read_tree_meta() -> anyhow::Result<TreeFileMeta> {
-    let path = project_tree_meta_file();
-    let bytes = std::fs::read(&path).map_err(|e| anyhow::anyhow!("读取 {path} 失败: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("解析 {path} 失败: {e}"))
-}
-
-// ── V3 单文件快照（一致性闭环方案 §3）────────────────────────────────────────
+// ── 单文件快照（一致性闭环方案 §3；V4 头随 ADR-072 D4 改水位数对）────────────
 //
 // 旧「bin + sidecar」两个文件之间没有原子性：崩溃可能留下「新树旧章」或
 // 「旧树新章」的组合，指纹校验对后者无能为力。单文件快照把树载荷、指纹与自校验哈希
-// 封进**一个**文件，rename 原子替换，读侧全套校验通过才接受。V3 进一步把
-// 文件级已发布输入清单的版本与摘要写入头部，防止树载荷与冻结源清单错配。
+// 封进**一个**文件，rename 原子替换，读侧全套校验通过才接受。V4 把头里的
+// 「文件级已发布输入清单」（版本 / 文件数 / 摘要，随 publish 阶段退役）换成各库
+// `(applied_sesno, model_sesno)` 数对：树镜像的是任务同步写进库的模型行，
+// 而三水位正是「库写到了哪一版」的唯一表达。
 
-/// 快照格式版本。改结构必须递增并写迁移分支——旧版校验失败一律按不可用重建，
-/// 不做跨版本猜测。
-const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+/// 快照格式版本。改结构必须递增——旧版校验失败一律按不可用重建，不做跨版本猜测
+/// （V3 → V4 的升级就是这样：第一次启动多做一次指针重建，之后落盘的就是 V4）。
+const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 
-/// 本项目空间树的 V3 快照文件：`accel_tree_{project}.snapshot`。
+/// 本项目空间树的单文件快照：`accel_tree_{project}.snapshot`。
 pub fn project_snapshot_file() -> String {
     format!(
         "accel_tree_{}.snapshot",
@@ -267,22 +186,25 @@ pub fn project_snapshot_file() -> String {
     )
 }
 
-/// V3 快照：单文件自足——树载荷（`tree_bytes`，独立 bincode 段，哈希对字节算，
-/// 避免「对结构再序列化一次」的双重序列化歧义）+ 指纹 + 口径统计 + 身份。
+/// 各库 `(applied_sesno, model_sesno)` 数对，键是 dbnum（ADR-072 D4）。
+pub(crate) type WatermarkPairs = BTreeMap<u32, (i32, i32)>;
+
+/// 单文件快照：树载荷（`tree_bytes`，独立 bincode 段，哈希对字节算，避免「对结构再序列化
+/// 一次」的双重序列化歧义）+ 两半指纹（库侧 epoch 章、各库水位数对）+ 口径统计 + 身份。
 /// `project`/`namespace` 挡「拷别的项目的快照 / 换库同项目名」（R4）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct SpatialTreeSnapshotV3 {
+struct SpatialTreeSnapshot {
     format_version: u32,
     project: String,
     namespace: String,
     epoch: u64,
     db_epoch_updated_at: String,
+    /// 封装时刻登记表里各库的 `(applied_sesno, model_sesno)`。启动与镜像同源的那张表
+    /// 比对，任一库不等（含多了 / 少了一个库）即从 `inst_relate` 指针重建。
+    watermarks: WatermarkPairs,
     entries: u64,
     usable_pointer_rows: u64,
     invalid_pointer_rows: u64,
-    published_version: u64,
-    published_input_files: u64,
-    published_input_sha256: String,
     tree_sha256: String,
     saved_at_unix: u64,
     tree_bytes: Vec<u8>,
@@ -293,19 +215,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn encode_snapshot_v3(snapshot: &SpatialTreeSnapshotV3) -> anyhow::Result<Vec<u8>> {
-    bincode::serialize(snapshot).map_err(|e| anyhow::anyhow!("序列化 V3 快照失败: {e}"))
+fn encode_snapshot(snapshot: &SpatialTreeSnapshot) -> anyhow::Result<Vec<u8>> {
+    bincode::serialize(snapshot).map_err(|e| anyhow::anyhow!("序列化空间树快照失败: {e}"))
 }
 
-/// 校验并解码 V3 快照：完整反序列化 + 版本 + 项目/namespace + 载荷哈希 + 条目数
+/// 校验并解码快照：完整反序列化 + 版本 + 项目/namespace + 载荷哈希 + 条目数
 /// **全部**通过才接受；任何一环差错都按不可用处理（调用方走指针重建）。
-fn decode_snapshot_v3(
+fn decode_snapshot(
     bytes: &[u8],
     project: &str,
     namespace: &str,
-) -> anyhow::Result<(SpatialTreeSnapshotV3, AccelerationTree)> {
-    let snapshot: SpatialTreeSnapshotV3 =
-        bincode::deserialize(bytes).map_err(|e| anyhow::anyhow!("反序列化 V3 快照失败: {e}"))?;
+) -> anyhow::Result<(SpatialTreeSnapshot, AccelerationTree)> {
+    let snapshot: SpatialTreeSnapshot = bincode::deserialize(bytes)
+        .map_err(|e| anyhow::anyhow!("反序列化空间树快照失败: {e}"))?;
     anyhow::ensure!(
         snapshot.format_version == SNAPSHOT_FORMAT_VERSION,
         "快照格式版本 {} 不是 {SNAPSHOT_FORMAT_VERSION}",
@@ -338,19 +260,18 @@ fn decode_snapshot_v3(
     Ok((snapshot, tree))
 }
 
-/// 最近一次发布/装载的快照头（/health 用）。V3 是 17MB 量级的单文件，health 每次
+/// 最近一次发布/装载的快照头（/health 用）。快照是 17MB 量级的单文件，health 每次
 /// 全量读盘解码不可取；进程内缓存在发布与装载两个点更新。外部换文件在运行中不可
 /// 见，由下次启动的全套校验接住。std Mutex，不跨 await 持有。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotHeaderInfo {
     pub format_version: u32,
     pub epoch: u64,
     pub db_epoch_updated_at: String,
     pub entries: u64,
-    pub published_version: Option<u64>,
-    pub published_input_files: Option<u64>,
-    pub published_input_sha256: Option<String>,
-    pub tree_sha256: Option<String>,
+    /// 封装时刻各库的 `(applied_sesno, model_sesno)`。
+    pub watermarks: WatermarkPairs,
+    pub tree_sha256: String,
     pub saved_at_unix: u64,
 }
 
@@ -369,121 +290,96 @@ fn snapshot_header() -> Option<SnapshotHeaderInfo> {
         .clone()
 }
 
-fn published_input_manifest_matches(
-    header: &SnapshotHeaderInfo,
-    manifest: &crate::data_interface::side_effect_pending::PublishedInputManifestStamp,
-) -> bool {
-    header.published_version == Some(manifest.published_version)
-        && header.published_input_files == Some(manifest.file_count)
-        && header.published_input_sha256.as_deref() == Some(manifest.sha256.as_str())
+/// 库侧当前的空间指纹：epoch 章 + 各库水位数对。快照头两半都与它相等才算「文件 = 库」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DbSpatialFingerprint {
+    pub epoch: u64,
+    pub db_epoch_updated_at: String,
+    pub watermarks: WatermarkPairs,
 }
 
-impl SpatialTreeSnapshotV3 {
+impl SnapshotHeaderInfo {
+    /// 纯判据：epoch 双字段相等（防「快照回滚撞回同一计数」）**且**各库水位数对逐库相等
+    /// （多一个库、少一个库、任一库的 applied / model 不同，都算不等）。
+    pub(crate) fn matches(&self, db: &DbSpatialFingerprint) -> bool {
+        self.epoch == db.epoch
+            && self.db_epoch_updated_at == db.db_epoch_updated_at
+            && self.watermarks == db.watermarks
+    }
+}
+
+impl SpatialTreeSnapshot {
     fn header(&self) -> SnapshotHeaderInfo {
         SnapshotHeaderInfo {
             format_version: self.format_version,
             epoch: self.epoch,
             db_epoch_updated_at: self.db_epoch_updated_at.clone(),
             entries: self.entries,
-            published_version: Some(self.published_version),
-            published_input_files: Some(self.published_input_files),
-            published_input_sha256: Some(self.published_input_sha256.clone()),
-            tree_sha256: Some(self.tree_sha256.clone()),
+            watermarks: self.watermarks.clone(),
+            tree_sha256: self.tree_sha256.clone(),
             saved_at_unix: self.saved_at_unix,
         }
     }
 }
 
-impl TreeFileMeta {
-    fn header(&self) -> SnapshotHeaderInfo {
-        SnapshotHeaderInfo {
-            format_version: 1,
-            epoch: self.epoch,
-            db_epoch_updated_at: self.db_epoch_updated_at.clone(),
-            entries: self.entries,
-            published_version: None,
-            published_input_files: None,
-            published_input_sha256: None,
-            tree_sha256: None,
-            saved_at_unix: self.saved_at_unix,
-        }
-    }
-}
-
-/// V3 发布成功后删除旧格式文件（方案 D3）。
+/// 快照发布成功后删除旧格式文件（方案 D3）。
 ///
-/// 旧二进制对 bin 缺失是**无条件指针重建**，任何回退场景自动安全；留着旧文件
-/// 反而开一扇静默陈旧窗：回退旧版本时若恰有 pending，旧代码会按 HealByReplay
-/// 复用一个冻结在迁移时刻的文件——迁移后已销账的意图不会再重放，完备集论证
-/// 已破。删除失败只告警：V3 才是权威，残留旧文件最坏让回退多一分风险，
-/// 不影响本版本。
+/// 旧格式自单文件快照起就不再被读，留着只会让人误以为它还算数。删除失败只告警：
+/// 单文件快照才是权威，残留旧文件不影响本版本。
 fn remove_legacy_tree_files() {
     for path in [project_tree_file(), project_tree_meta_file()] {
         match std::fs::remove_file(&path) {
-            Ok(()) => println!("已移除旧格式空间树文件 {path}（V3 快照已接管）"),
+            Ok(()) => println!("已移除旧格式空间树文件 {path}（单文件快照已接管）"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                eprintln!("移除旧格式空间树文件 {path} 失败（不影响 V3 权威性）: {error}")
+                eprintln!("移除旧格式空间树文件 {path} 失败（不影响快照权威性）: {error}")
             }
         }
     }
 }
 
-/// 启动读快照的裁决：V3 优先；V3 缺失才看旧格式（迁移候选）；V3 在场但校验失败
-/// **不**回落旧格式——旧文件自迁移起冻结，回落它就是引入陈旧。
+/// 启动读快照的裁决：只认当前格式的单文件快照；缺失 / 损坏 / 校验失败 / 旧版本
+/// 一律不可用（走指针重建）。旧「bin + sidecar」格式**不**回落——它的头没有水位数对，
+/// 在 ADR-072 的判据下永远对不上，读它就是白读。
 enum SnapshotReadOutcome {
-    /// V3 通过文件内全套校验；发布输入摘要在异步启动阶段再与数据库核对。
-    V3(Box<(SpatialTreeSnapshotV3, AccelerationTree)>),
-    /// V3 不存在，旧 bin 可读（meta 可缺）——一次性迁移候选。
-    Legacy {
-        tree: AccelerationTree,
-        meta: Option<TreeFileMeta>,
-    },
-    /// 两代都不可用（缺失/损坏/校验失败），带原因。
+    /// 通过文件内全套校验；两半指纹在装载器里再与库核对。
+    Usable(Box<(SpatialTreeSnapshot, AccelerationTree)>),
+    /// 不可用（缺失/损坏/校验失败/旧版本），带原因。
     Unusable(String),
 }
 
 fn read_snapshot_for_startup(project: &str, namespace: &str) -> SnapshotReadOutcome {
-    let v3_path = project_snapshot_file();
-    match std::fs::read(&v3_path) {
-        Ok(bytes) => match decode_snapshot_v3(&bytes, project, namespace) {
-            Ok(decoded) => SnapshotReadOutcome::V3(Box::new(decoded)),
+    let path = project_snapshot_file();
+    match std::fs::read(&path) {
+        Ok(bytes) => match decode_snapshot(&bytes, project, namespace) {
+            Ok(decoded) => SnapshotReadOutcome::Usable(Box::new(decoded)),
             Err(error) => {
-                SnapshotReadOutcome::Unusable(format!("V3 快照 {v3_path} 校验失败: {error:#}"))
+                SnapshotReadOutcome::Unusable(format!("快照 {path} 校验失败: {error:#}"))
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match read_project_tree_file() {
-                Ok(tree) => SnapshotReadOutcome::Legacy {
-                    tree,
-                    meta: read_tree_meta().ok(),
-                },
-                Err(error) => {
-                    SnapshotReadOutcome::Unusable(format!("V3 快照缺失且旧格式不可用: {error:#}"))
-                }
-            }
+            SnapshotReadOutcome::Unusable(format!("快照 {path} 不存在"))
         }
-        Err(error) => {
-            SnapshotReadOutcome::Unusable(format!("读取 V3 快照 {v3_path} 失败: {error}"))
-        }
+        Err(error) => SnapshotReadOutcome::Unusable(format!("读取快照 {path} 失败: {error}")),
     }
 }
 
 /// 库侧空间版本号所在的固定记录。
 ///
 /// 不变量：**凡是改变了「树应有内容」的已提交变更，都在同一事务内把它 +1**
-/// （[`render_spatial_epoch_bump`]）。暂存路径由携带空间意图（refresh / remove）的
-/// 尾事务顺带 bump——水位、意图、版本号同一个事务里同生同死；直写路径（包围盒刷新、
-/// 删除清理）没有意图行，epoch 就是它留在库侧的唯一痕迹。启动时 sidecar 的 epoch
-/// 与它不相等，就说明「树文件之后还有过没被镜像进文件的空间提交」，文件不可信。
+/// （[`render_spatial_epoch_bump`]）。模型落库的每一块、直写路径（包围盒刷新、删除清理）、
+/// 回退到水位都 bump——它是「树应有内容」变化在库侧留下的痕迹，与各库水位数对一起组成
+/// 启动指纹：水位数对说「库写到了哪一版」，epoch 章兜住那些不推水位却动了几何的写
+/// （`/model/ensure` 逐根落库、运维删除、手工修复）。启动时快照头的 epoch 与它不相等，
+/// 就说明「快照之后还有过没被镜像进文件的空间提交」，文件不可信。
 const SPATIAL_EPOCH_ID: &str = "spatial_epoch:current";
 
 /// 渲染空间版本号的递增语句，与产生该变更的写入放进同一个事务。
 ///
-/// 三处调用：窗口尾事务（与 `spatial_reconcile` 意图同事务）、直写包围盒刷新
-/// （与指针 UPDATE 同事务）、直写删除清理（与房间边 DELETE 同事务）。
+/// 调用点：模型落库动几何的块、直写包围盒刷新（与指针 UPDATE 同事务）、直写删除清理
+/// （与房间边 DELETE 同事务）、数据尾事务与回退到水位。
 ///
-/// 重试或分块导致的多次递增无害：版本号只与 sidecar 比相等、不表达次数，多 bump
+/// 重试或分块导致的多次递增无害：版本号只与快照头比相等、不表达次数，多 bump
 /// 一次至多让下次启动多做一次指针重建。
 pub(crate) fn render_spatial_epoch_bump() -> String {
     format!("UPSERT {SPATIAL_EPOCH_ID} SET value = (value?:0) + 1, updated_at = time::now();")
@@ -501,7 +397,7 @@ struct EpochRow {
 ///
 /// 记录不存在按 `(0, "")`——全新库 / 从未有过空间提交。`updated_at` 铸成字符串
 /// 取回，跳过 datetime 在 serde 两侧的形状差异；它与计数由
-/// [`render_spatial_epoch_bump`] 同一事务写入，合成的指纹见 [`TreeFileMeta`]。
+/// [`render_spatial_epoch_bump`] 同一事务写入，合成的指纹见 [`DbSpatialFingerprint`]。
 pub(crate) async fn read_db_spatial_epoch_stamp() -> anyhow::Result<(u64, String)> {
     let mut response = SUL_DB
         // `value` 是 SurrealQL 的保留字（`SELECT VALUE …` 的投影修饰符）：不加反引号
@@ -526,23 +422,41 @@ pub(crate) async fn read_db_spatial_epoch() -> anyhow::Result<u64> {
     Ok(read_db_spatial_epoch_stamp().await?.0)
 }
 
-/// 发布当前内存树为 V3 单文件快照。
+/// 各库当前的 `(applied_sesno, model_sesno)` 数对——快照头与启动判据的另一半指纹（ADR-072 D4）。
 ///
-/// 指纹（epoch 值 + 库侧 updated_at）在写文件**之前**读：并发的写入方若在读章与
-/// 写盘之间又推高了版本号，快照只会偏旧 → 下次启动宁可多做一次指针重建，方向
-/// 安全；反过来先写后读会把新章盖在旧内容上。发布成功后顺手清掉旧格式文件
-/// （方案 D3，见 [`remove_legacy_tree_files`]）并更新 /health 用的头缓存。
-async fn persist_project_tree_now() -> anyhow::Result<()> {
-    let manifest = crate::data_interface::side_effect_pending::SideEffectCompensator::
-        current_published_input_manifest()
-    .await?;
-    persist_project_tree_now_with_manifest(manifest).await
+/// 读的是 `dbnum_watermark` 登记表（计划 §4.5 白名单：三水位 / sesno 这类控制面信息），
+/// 与水位镜像**同源**——镜像是这张表按格的缓存、没有整表枚举口，而这里要的是全表：
+/// 一个在快照之后才初始化的库，靠头里已有的键是列举不出来的。只算已建立数据水位的库
+/// （`initialized`）：只被扫到、还没初始化的登记行没有模型行，也就不在树上。
+pub(crate) async fn current_watermark_pairs() -> anyhow::Result<WatermarkPairs> {
+    Ok(crate::data_interface::dbnum_state::DbnumState::list_registered()
+        .await
+        .map_err(|e| anyhow::anyhow!("读取各库水位数对失败: {e}"))?
+        .into_iter()
+        .filter(|state| state.initialized)
+        .map(|state| (state.dbnum, (state.applied_sesno, state.model_sesno)))
+        .collect())
 }
 
-async fn persist_project_tree_now_with_manifest(
-    manifest: crate::data_interface::side_effect_pending::PublishedInputManifestStamp,
-) -> anyhow::Result<()> {
+/// 库侧当前的完整空间指纹：epoch 章 + 各库水位数对，两次读同一处失败语义。
+pub(crate) async fn read_db_spatial_fingerprint() -> anyhow::Result<DbSpatialFingerprint> {
     let (epoch, db_epoch_updated_at) = read_db_spatial_epoch_stamp().await?;
+    let watermarks = current_watermark_pairs().await?;
+    Ok(DbSpatialFingerprint {
+        epoch,
+        db_epoch_updated_at,
+        watermarks,
+    })
+}
+
+/// 发布当前内存树为单文件快照。
+///
+/// 两半指纹（epoch 章 + 各库水位数对）都在写文件**之前**读：并发的写入方若在读章与
+/// 写盘之间又推高了版本号或盖了水位，快照只会偏旧 → 下次启动宁可多做一次指针重建，
+/// 方向安全；反过来先写后读会把新章盖在旧内容上。发布成功后顺手清掉旧格式文件
+/// （方案 D3，见 [`remove_legacy_tree_files`]）并更新 /health 用的头缓存。
+async fn persist_project_tree_now() -> anyhow::Result<()> {
+    let fingerprint = read_db_spatial_fingerprint().await?;
     let (tree_bytes, entries) = {
         let tree = GLOBAL_AABB_TREE.read().await;
         let bytes =
@@ -551,20 +465,18 @@ async fn persist_project_tree_now_with_manifest(
     };
     let stats = crate::fast_model::spatial_state::snapshot();
     let db_option = aios_core::get_db_option();
-    let snapshot = SpatialTreeSnapshotV3 {
+    let snapshot = SpatialTreeSnapshot {
         format_version: SNAPSHOT_FORMAT_VERSION,
         project: db_option.project_name.clone(),
         namespace: db_option.surreal_ns.clone(),
-        epoch,
-        db_epoch_updated_at,
+        epoch: fingerprint.epoch,
+        db_epoch_updated_at: fingerprint.db_epoch_updated_at,
+        watermarks: fingerprint.watermarks,
         // 树按协议镜像 usable 指针（重建换树、增量同步都在串行锁内成对推进），
         // 发布时刻的 usable 口径就是条目数本身；invalid 是最近一次全量扫描的观测值。
         entries,
         usable_pointer_rows: entries,
         invalid_pointer_rows: stats.invalid_pointer_rows.unwrap_or(0),
-        published_version: manifest.published_version,
-        published_input_files: manifest.file_count,
-        published_input_sha256: manifest.sha256,
         tree_sha256: sha256_hex(&tree_bytes),
         saved_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -572,19 +484,22 @@ async fn persist_project_tree_now_with_manifest(
             .unwrap_or(0),
         tree_bytes,
     };
-    write_file_atomic(&project_snapshot_file(), &encode_snapshot_v3(&snapshot)?)?;
+    write_file_atomic(&project_snapshot_file(), &encode_snapshot(&snapshot)?)?;
     record_snapshot_header(snapshot.header());
     remove_legacy_tree_files();
     Ok(())
 }
 
 /// 脏则写回项目树文件（worker 空闲轮收尾调用），返回是否真的写了。
+///
+/// 落盘时机就是这里（ADR-072 计划 R3「任务收尾置脏 + 空闲轮落盘」）：任务内的落库后收敛
+/// 只置脏，不在关键路径上写 17MB 的文件。
 pub async fn persist_aabb_tree_if_dirty() -> anyhow::Result<bool> {
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     persist_aabb_tree_if_dirty_locked().await
 }
 
-/// 已持空间串行锁的版本（重放收敛等持锁调用方用，锁不可重入）。
+/// 已持空间串行锁的版本（持锁调用方用，锁不可重入）。
 ///
 /// 两道保留脏标记的分支，方向相同——变更不能静默丢在内存里：
 /// - 发布门（方案 §3 / D5）：树内容不可信的状态（加载中 / 重建扫描窗口 /
@@ -592,41 +507,6 @@ pub async fn persist_aabb_tree_if_dirty() -> anyhow::Result<bool> {
 ///   后补写。这取代了旧的「空树进程靠脏位门控躲过覆盖」的单薄防线。
 /// - 落盘失败时**保留**脏标记，下一轮重试——清掉的话一次磁盘抖动就把变更永远留在内存里。
 pub(crate) async fn persist_aabb_tree_if_dirty_locked() -> anyhow::Result<bool> {
-    if !AABB_TREE_DIRTY.load(Ordering::SeqCst) {
-        return Ok(false);
-    }
-    let manifest = crate::data_interface::side_effect_pending::SideEffectCompensator::
-        current_published_input_manifest()
-    .await?;
-    persist_aabb_tree_if_dirty_locked_with_manifest(manifest).await
-}
-
-pub(crate) async fn persist_aabb_tree_if_dirty_locked_for_publication(
-    jobs: &[crate::data_interface::side_effect_pending::PublishedRoundIdentity],
-) -> anyhow::Result<bool> {
-    let manifest = crate::data_interface::side_effect_pending::SideEffectCompensator::
-        candidate_published_input_manifest(jobs)
-    .await?;
-    let state = crate::fast_model::spatial_state::current_state();
-    if !state.allows_snapshot_publish() {
-        AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
-        println!(
-            "空间树状态 {} 不允许发布文件快照，保留脏标记等状态收敛",
-            state.as_str()
-        );
-        return Ok(false);
-    }
-    if let Err(error) = persist_project_tree_now_with_manifest(manifest).await {
-        AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
-        return Err(error);
-    }
-    AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
-    Ok(true)
-}
-
-async fn persist_aabb_tree_if_dirty_locked_with_manifest(
-    manifest: crate::data_interface::side_effect_pending::PublishedInputManifestStamp,
-) -> anyhow::Result<bool> {
     if !AABB_TREE_DIRTY.swap(false, Ordering::SeqCst) {
         return Ok(false);
     }
@@ -639,7 +519,7 @@ async fn persist_aabb_tree_if_dirty_locked_with_manifest(
         );
         return Ok(false);
     }
-    if let Err(error) = persist_project_tree_now_with_manifest(manifest).await {
+    if let Err(error) = persist_project_tree_now().await {
         AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
         return Err(error);
     }
@@ -691,33 +571,23 @@ fn force_spatial_rebuild_flag(value: Option<&std::ffi::OsStr>) -> bool {
     }
 }
 
-/// 启动装载动作（方案 2026-08-12 一致性闭环 §2；纯判据，IO 全在调用方）。
+/// 启动装载动作（方案 2026-08-12 一致性闭环 §2，ADR-072 D4 收成两档；纯判据，IO 全在调用方）。
+///
+/// 没有第三档：publish 阶段与 `spatial_reconcile` 意图行退役之后，「快照 + 待重放意图」
+/// 这一形态不存在了；文件级已发布输入清单也随之退，清单不匹配曾经落 `DegradedBlocked`
+/// 停掉空间消费者——现在任何不等都只是「文件比库旧」，答案是重建，不是停摆。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupAction {
-    /// 快照可用、指纹一致且无待重放意图：直接复用（快路径）。
+    /// 快照可用且两半指纹（epoch 章 + 各库水位数对）都与库一致：直接复用（快路径）。
     Reuse,
-    /// 快照可用且有待重放意图：复用快照并**立即**重放收敛（D2）。
-    /// 意图行只在树落盘之后才销账（`reconcile_spatial_pending` 的顺序），
-    /// 「可读快照 + 待重放意图」对暂存路径是完备集；指纹相等 + pending 则是
-    /// 「发布成功、销账前崩溃」，重放幂等追认。
-    Replay,
-    /// 快照缺失/损坏（完备集论证不成立，无论有没有 pending），或指纹失配且
-    /// 无意图可解释（直写崩溃 / 换文件 / 回滚库）：只读指针重建。
+    /// 快照缺失/损坏/旧版本，或任一半指纹与库不等（任务中途崩溃、直写崩溃、回退到水位、
+    /// 换文件、回滚库）：只读指针重建。
     Rebuild,
 }
 
-/// 纯判据。顺序即优先级：快照不可用一律重建（D2——重放需要可读快照才完备）；
-/// 快照可用时 pending 优先于指纹；两者都没有才看指纹。
-fn startup_action(
-    snapshot_usable: bool,
-    fingerprint_matches: bool,
-    has_pending_spatial_work: bool,
-) -> StartupAction {
-    if !snapshot_usable {
-        StartupAction::Rebuild
-    } else if has_pending_spatial_work {
-        StartupAction::Replay
-    } else if fingerprint_matches {
+/// 纯判据：快照可用**且**指纹一致才复用，其余一律重建。
+fn startup_action(snapshot_usable: bool, fingerprint_matches: bool) -> StartupAction {
+    if snapshot_usable && fingerprint_matches {
         StartupAction::Reuse
     } else {
         StartupAction::Rebuild
@@ -731,20 +601,21 @@ fn record_startup_verdict(verdict: &'static str) {
     let _ = STARTUP_VERDICT.set(verdict);
 }
 
-/// 启动加载（方案 2026-08-12 一致性闭环 §2，取代 2026-08-11 分层判据）：
+/// 启动加载（方案 2026-08-12 一致性闭环 §2，判据按 ADR-072 D4 改）：
 ///
 /// 0. 显式夹具标记 + 内存树非空 → preloaded（仅测试装载模式；生产入口一律校验，
 ///    旧的「内存树非空即 preloaded」盲信短路已删除）；
 /// 1. `AIOS_FORCE_SPATIAL_REBUILD` 为真值 → 指针重建；
-/// 2. 树文件缺失/损坏 → 指针重建（无论有没有 pending：完备集论证只对可读文件成立）；
-/// 3. 文件可读：
-///    3a. 读库指纹失败 → DegradedReuse 降级复用 + 门禁消费者，revalidator 复检；
-///    3b. 有待重放意图（读失败按有算）→ ReplayRequired：复用文件并**立即**重放，
-///        成功晋升 Ready，失败留态给 worker 出队门重试（D2）；
-///    3c. 指纹双字段一致 → Ready 复用（快路径）；
-///    3d. 失配且无意图 → 指针重建。
+/// 2. 快照缺失/损坏/旧版本 → 指针重建；
+/// 3. 快照可读：
+///    3a. 读库侧指纹（epoch 章 / 各库水位数对）失败 → DegradedReuse 降级复用 + 门禁消费者，
+///        revalidator 复检；
+///    3b. epoch 双字段一致**且**各库 `(applied_sesno, model_sesno)` 与登记表逐库相等 → Ready 复用；
+///    3c. 任一半不等 → 指针重建（不再有 `DegradedBlocked`：文件比库旧不是故障，是重建的理由）。
 ///
-/// 整个装载持空间串行锁，与写路径/收敛/落盘串行。
+/// 不再问 `spatial_reconcile` 意图行、文件轮次、已发布输入清单——三者随 publish 阶段退役
+/// （计划 R3 / R4），定义本身由退役第二条异步账的那一步删。整个装载持空间串行锁，
+/// 与写路径/收敛/落盘串行。
 pub async fn load_project_tree_verified() -> anyhow::Result<()> {
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     load_project_tree_verified_locked().await
@@ -755,10 +626,9 @@ async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
 
     // 同进程重复装载短路（启动链 run_app 与 run_cli 各调一次装载，快照 3.5-21MB 的
     // 读盘+解码白付一遍）。判据是 [`startup_action`] 的 Reuse 那组原样：本进程已
-    // 收敛到 Ready/ReadyEmpty、库侧指纹与进程内缓存的快照头一致、且无待重放意图
-    // ——不是「内存树非空即信」的盲信短路，指纹与意图两问一个不少；另要求状态与
-    // 树条目自洽（崩溃模拟测试会清树不清状态，两者矛盾时走完整装载）。任何一问
-    // 读不到（指纹/意图查询失败、头缺失）都不短路；强制重建与夹具预载优先级更高。
+    // 收敛到 Ready/ReadyEmpty、库侧两半指纹与进程内缓存的快照头一致——不是「内存树
+    // 非空即信」的盲信短路；另要求状态与树条目自洽（崩溃模拟测试会清树不清状态，
+    // 两者矛盾时走完整装载）。指纹读不到、头缺失都不短路；强制重建与夹具预载优先级更高。
     let short_circuit_state = spatial_state::current_state();
     if !force_spatial_rebuild_enabled()
         && !spatial_state::fixture_preload_requested()
@@ -766,36 +636,17 @@ async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
     {
         let entries = GLOBAL_AABB_TREE.read().await.size();
         let state_matches_tree = (entries > 0) == (short_circuit_state == SpatialTreeState::Ready);
-        if state_matches_tree {
-            if let Some(header) = snapshot_header() {
-                if let Ok((db_epoch, db_epoch_updated_at)) = read_db_spatial_epoch_stamp().await {
-                    let has_pending = crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
-                        .await
-                        .unwrap_or(true);
-                    let has_collecting = crate::data_interface::side_effect_pending::SideEffectCompensator::has_collecting_file_rounds()
-                        .await
-                        .unwrap_or(true);
-                    let manifest_matches = crate::data_interface::side_effect_pending::
-                        SideEffectCompensator::acceptable_published_input_manifests()
-                    .await
-                    .is_ok_and(|manifests| {
-                        manifests
-                            .iter()
-                            .any(|manifest| published_input_manifest_matches(&header, manifest))
-                    });
-                    if !has_pending
-                        && manifest_matches
-                        && (has_collecting
-                            || (header.epoch == db_epoch
-                                && header.db_epoch_updated_at == db_epoch_updated_at))
-                    {
-                        println!(
-                            "空间树本进程已装载且库侧指纹一致（{entries} 条，epoch {db_epoch}），跳过重复装载"
-                        );
-                        return Ok(());
-                    }
-                }
-            }
+        if state_matches_tree
+            && let Some(header) = snapshot_header()
+            && let Ok(db) = read_db_spatial_fingerprint().await
+            && header.matches(&db)
+        {
+            println!(
+                "空间树本进程已装载且库侧指纹一致（{entries} 条，epoch {}，{} 个库的水位数对相等），跳过重复装载",
+                db.epoch,
+                db.watermarks.len()
+            );
+            return Ok(());
         }
     }
 
@@ -812,31 +663,22 @@ async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
     }
 
     let db_option = aios_core::get_db_option();
-    let (tree, header, migrating_from_legacy, verify_published_input) =
+    let (snapshot, tree) =
         match read_snapshot_for_startup(&db_option.project_name, &db_option.surreal_ns) {
-            SnapshotReadOutcome::V3(decoded) => {
-                let (snapshot, tree) = *decoded;
-                let header = snapshot.header();
-                (tree, Some(header), false, true)
-            }
-            SnapshotReadOutcome::Legacy { tree, meta } => {
-                let header = meta.as_ref().map(TreeFileMeta::header);
-                (tree, header, true, false)
-            }
+            SnapshotReadOutcome::Usable(decoded) => *decoded,
             SnapshotReadOutcome::Unusable(reason) => {
                 eprintln!("空间树快照不可用（{reason}），从库指针自动重建");
                 return rebuild_at_startup_locked().await;
             }
         };
+    let header = snapshot.header();
     let entries = tree.size();
 
-    let (db_epoch, db_epoch_updated_at) = match read_db_spatial_epoch_stamp().await {
-        Ok(stamp) => stamp,
+    let db = match read_db_spatial_fingerprint().await {
+        Ok(db) => db,
         Err(error) => {
             *GLOBAL_AABB_TREE.write().await = tree;
-            if let Some(header) = header {
-                record_snapshot_header(header);
-            }
+            record_snapshot_header(header);
             record_startup_verdict("degraded");
             spatial_state::set_state(SpatialTreeState::DegradedReuse);
             spatial_state::record_error(&format!("读取库侧空间指纹失败: {error:#}"));
@@ -847,195 +689,46 @@ async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let has_pending = match crate::data_interface::side_effect_pending::SideEffectCompensator::
-        has_pending_spatial_work()
-    .await
-    {
-        Ok(pending) => pending,
-        Err(error) => {
-            // 判不了就按「可能有意图」处理：复用快照 + 立即重放的方向，比把一次
-            // 诊断抖动放大成全量重建更稳（与 D2 同向）。
-            eprintln!("读取待重放空间意图失败（{error:#}），按存在意图的方向处理");
-            true
-        }
-    };
-    if verify_published_input {
-        let acceptable = match crate::data_interface::side_effect_pending::SideEffectCompensator::
-            acceptable_published_input_manifests()
-        .await
-        {
-            Ok(acceptable) => acceptable,
-            Err(error) => {
-                *GLOBAL_AABB_TREE.write().await = tree;
-                if let Some(header) = header {
-                    record_snapshot_header(header);
-                }
-                record_startup_verdict("degraded");
-                spatial_state::set_state(SpatialTreeState::DegradedReuse);
-                spatial_state::record_error(&format!(
-                    "读取已发布空间输入清单失败: {error:#}"
-                ));
-                eprintln!(
-                    "读取已发布空间输入清单失败（{error:#}），降级保留快照（{entries} 条）；空间消费者被门禁"
-                );
-                return Ok(());
-            }
-        };
-        let matches = header.as_ref().is_some_and(|header| {
-            acceptable
-                .iter()
-                .any(|manifest| published_input_manifest_matches(header, manifest))
-        });
-        if !matches {
-            let actual = header.as_ref().map_or_else(
-                || "头缺失".to_string(),
-                |header| {
-                    format!(
-                        "version={:?} files={:?} sha256={:?}",
-                        header.published_version,
-                        header.published_input_files,
-                        header.published_input_sha256
-                    )
-                },
-            );
-            let expected = acceptable
-                .iter()
-                .map(|manifest| {
-                    format!(
-                        "version={} files={} sha256={}",
-                        manifest.published_version, manifest.file_count, manifest.sha256
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("；");
-            let message =
-                format!("空间快照的已发布输入清单不匹配：快照 {actual}，数据库可接受 [{expected}]");
-            *GLOBAL_AABB_TREE.write().await = tree;
-            if let Some(header) = header {
-                record_snapshot_header(header);
-            }
-            record_startup_verdict("published_input_mismatch");
-            spatial_state::set_state(SpatialTreeState::DegradedBlocked);
-            spatial_state::record_error(&message);
-            eprintln!("{message}；停止空间与房间消费者，不从实时指针兜底重建");
-            return Ok(());
-        }
-    }
-    let has_collecting = crate::data_interface::side_effect_pending::SideEffectCompensator::
-        has_collecting_file_rounds()
-    .await
-    .unwrap_or(true);
-    let fingerprint_matches = header.as_ref().is_some_and(|header| {
-        header.epoch == db_epoch && header.db_epoch_updated_at == db_epoch_updated_at
-    });
 
-    // Data/model writes of an unfinished file may already have advanced the
-    // physical pointer epoch. The collecting journal is the durable proof that
-    // those writes are still private, so retain the last published snapshot
-    // instead of rebuilding from the live half-finished pointer set.
-    if has_collecting && !has_pending {
-        *GLOBAL_AABB_TREE.write().await = tree;
-        if let Some(header) = header {
-            record_snapshot_header(header);
-        }
-        record_startup_verdict("file_round_private");
-        spatial_state::set_ready_by_entries(entries);
-        println!(
-            "检测到未完成文件轮次，复用最后成功发布的空间快照（{entries} 条），不从实时指针重建"
-        );
-        return Ok(());
-    }
-
-    // 旧格式一次性迁移（方案 §3 / D3）：只有「双指纹匹配且无 pending」才封装发布
-    // V3 并删除旧文件；其余情况一律重建——迁移矩阵保持最小，不跨格式版本信任
-    // 重放完备性。
-    if migrating_from_legacy {
-        if fingerprint_matches && !has_pending {
-            *GLOBAL_AABB_TREE.write().await = tree;
-            record_startup_verdict("migrated");
-            spatial_state::set_ready_by_entries(entries);
-            match persist_project_tree_now().await {
-                Ok(()) => println!(
-                    "旧格式空间树文件校验通过，已迁移为 V3 快照 {}（{entries} 条）",
-                    project_snapshot_file()
-                ),
-                Err(error) => {
-                    // 树内容已由指纹校验背书，照常 Ready；发布留给空闲轮补
-                    // （脏标记），旧文件保留到 V3 发布成功那一刻才删。
-                    mark_aabb_tree_dirty();
-                    spatial_state::record_error(&format!("V3 迁移发布失败: {error:#}"));
-                    eprintln!("V3 迁移发布失败（{error:#}）：先按旧文件内容运行，空闲轮重试发布");
-                }
-            }
-            return Ok(());
-        }
-        println!(
-            "旧格式空间树文件不满足迁移条件（指纹匹配 {fingerprint_matches} / 待重放意图 {has_pending}），\
-             从库指针重建"
-        );
-        return rebuild_at_startup_locked().await;
-    }
-
-    match startup_action(true, fingerprint_matches, has_pending) {
+    match startup_action(true, header.matches(&db)) {
         StartupAction::Reuse => {
             *GLOBAL_AABB_TREE.write().await = tree;
-            if let Some(header) = header {
-                record_snapshot_header(header);
-            }
+            println!(
+                "空间树复用快照 {}（{entries} 条，epoch {} @ {} 与库一致，{} 个库的水位数对相等）",
+                project_snapshot_file(),
+                db.epoch,
+                db.db_epoch_updated_at,
+                db.watermarks.len()
+            );
+            record_snapshot_header(header);
             record_startup_verdict("reused");
             spatial_state::set_ready_by_entries(entries);
-            println!(
-                "空间树复用 V3 快照 {}（{entries} 条，指纹 epoch {db_epoch} @ {db_epoch_updated_at} 与库一致）",
-                project_snapshot_file()
-            );
-        }
-        StartupAction::Replay => {
-            *GLOBAL_AABB_TREE.write().await = tree;
-            if let Some(header) = header.clone() {
-                record_snapshot_header(header);
-            }
-            record_startup_verdict("replayed");
-            spatial_state::set_state(SpatialTreeState::ReplayRequired);
-            println!(
-                "存在已提交待重放的空间意图（快照 epoch {}，库 epoch {db_epoch} @ {db_epoch_updated_at}）：\
-                 复用快照（{entries} 条），立即重放收敛",
-                header
-                    .as_ref()
-                    .map(|header| header.epoch.to_string())
-                    .unwrap_or_else(|| "缺失".to_string())
-            );
-            // D2：启动立即重放，不等 worker 派发门——queue_paused / autorun 关闭的
-            // 部署下派发门可能永远不来，Ready 也就永远不来。失败保持 ReplayRequired
-            // （空间消费者持续被门禁），派发门与空闲轮带着重试，启动本身不因此失败。
-            match crate::data_interface::side_effect_pending::SideEffectCompensator::
-                reconcile_spatial_pending_locked()
-            .await
-            {
-                Ok(done) => println!("启动空间意图重放完成（{done} 个任务）"),
-                Err(error) => {
-                    spatial_state::record_error(&format!("启动空间意图重放失败: {error:#}"));
-                    eprintln!(
-                        "启动空间意图重放失败（{error:#}）：空间消费者保持门禁，worker 出队门继续重试"
-                    );
-                }
-            }
         }
         StartupAction::Rebuild => {
             println!(
-                "空间树快照指纹与库不一致且无待重放意图（快照 {}，库 epoch {db_epoch} @ {db_epoch_updated_at}）：\
-                 无法解释的漂移（直写崩溃 / 换文件 / 回滚库），从库指针重建",
-                header
-                    .as_ref()
-                    .map(|header| format!(
-                        "epoch {} @ {}",
-                        header.epoch, header.db_epoch_updated_at
-                    ))
-                    .unwrap_or_else(|| "头缺失".to_string())
+                "空间树快照与库不一致（快照 epoch {} @ {} / {}；库 epoch {} @ {} / {}）：\
+                 文件比库旧（任务中途崩溃 / 回退到水位 / 直写崩溃 / 换文件 / 回滚库），从库指针重建",
+                header.epoch,
+                header.db_epoch_updated_at,
+                describe_watermark_pairs(&header.watermarks),
+                db.epoch,
+                db.db_epoch_updated_at,
+                describe_watermark_pairs(&db.watermarks)
             );
             return rebuild_at_startup_locked().await;
         }
     }
     Ok(())
+}
+
+/// 日志用：`{dbnum:(applied,model), …}`。
+fn describe_watermark_pairs(pairs: &WatermarkPairs) -> String {
+    let body = pairs
+        .iter()
+        .map(|(dbnum, (applied, model))| format!("{dbnum}:({applied},{model})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("水位数对 {{{body}}}")
 }
 
 /// 启动路径的指针重建外壳：成功才记 `rebuilt`，失败记 `degraded` 并原样上抛
@@ -1063,15 +756,11 @@ async fn rebuild_at_startup_locked() -> anyhow::Result<()> {
 pub async fn spatial_tree_status() -> serde_json::Value {
     let entries = GLOBAL_AABB_TREE.read().await.size();
     let header = snapshot_header();
-    let db = read_db_spatial_epoch_stamp().await;
-    let pending = crate::data_interface::side_effect_pending::SideEffectCompensator::
-        count_pending_spatial_work()
-    .await;
+    let db = read_db_spatial_fingerprint().await;
     render_spatial_tree_status(
         entries,
         header.as_ref(),
         &db,
-        &pending,
         STARTUP_VERDICT.get().copied().unwrap_or("unknown"),
         &crate::fast_model::spatial_state::snapshot(),
     )
@@ -1079,29 +768,32 @@ pub async fn spatial_tree_status() -> serde_json::Value {
 
 /// /health `spatial_tree` 的纯渲染半边。
 ///
-/// 十八个键是对外承诺（台账 G-02 契约迁移：取代旧九键形状，2026-08-12 方案 §7）：
-/// 指纹**双字段都相等**才算无漂移（防「快照回滚撞回同一计数」）；`pending` 是
-/// `spatial_reconcile.pending` 的同源镜像（权威仍在那边）；任何一侧读不出来都
-/// 如实报 null、`drift` 置 true、原因并入 `last_error`——降级分支不许缩键。
-/// `format_version` / `snapshot_sha256`：旧格式迁移前报 1 / null，V3 报 3 / 哈希。
+/// 十六个键是对外承诺（台账 G-02 契约迁移的十八键形状按 ADR-072 收：`pending` 与
+/// `published_*` 三格随 publish 阶段 / 意图行退役消失，`snapshot_watermarks` / `db_watermarks`
+/// 两格进来，2026-09-10 计划 §7「文件轮次 / pending 格消失」）。
+/// `drift`：epoch **双字段都相等**（防「快照回滚撞回同一计数」）**且**各库水位数对逐库相等
+/// 才算无漂移；任何一侧读不出来都如实报 null、`drift` 置 true、原因并入 `last_error`
+/// ——降级分支不许缩键。水位数对渲成 `{ "<dbnum>": [applied, model] }`。
 fn render_spatial_tree_status(
     entries: usize,
     header: Option<&SnapshotHeaderInfo>,
-    db: &anyhow::Result<(u64, String)>,
-    pending: &anyhow::Result<usize>,
+    db: &anyhow::Result<DbSpatialFingerprint>,
     startup_verdict: &'static str,
     state: &crate::fast_model::spatial_state::SpatialStateSnapshot,
 ) -> serde_json::Value {
-    let drift = !matches!(
-        (header, db),
-        (Some(header), Ok((db_epoch, db_updated_at)))
-            if header.epoch == *db_epoch && header.db_epoch_updated_at == *db_updated_at
-    );
+    let drift = !matches!((header, db), (Some(header), Ok(db)) if header.matches(db));
     let last_error = state
         .last_error
         .clone()
-        .or_else(|| db.as_ref().err().map(|error| format!("{error:#}")))
-        .or_else(|| pending.as_ref().err().map(|error| format!("{error:#}")));
+        .or_else(|| db.as_ref().err().map(|error| format!("{error:#}")));
+    let render_pairs = |pairs: &WatermarkPairs| {
+        pairs
+            .iter()
+            .map(|(dbnum, (applied, model))| {
+                (dbnum.to_string(), serde_json::json!([applied, model]))
+            })
+            .collect::<serde_json::Map<_, _>>()
+    };
     serde_json::json!({
         "state": state.state.as_str(),
         "ready": state.state.is_ready(),
@@ -1110,14 +802,12 @@ fn render_spatial_tree_status(
         "entries": entries,
         "usable_pointer_rows": state.usable_pointer_rows,
         "invalid_pointer_rows": state.invalid_pointer_rows,
-        "pending": pending.as_ref().ok().copied(),
         "file_epoch": header.map(|header| header.epoch),
-        "db_epoch": db.as_ref().ok().map(|(epoch, _)| *epoch),
+        "db_epoch": db.as_ref().ok().map(|db| db.epoch),
         "drift": drift,
-        "published_version": header.and_then(|header| header.published_version),
-        "published_input_files": header.and_then(|header| header.published_input_files),
-        "published_input_sha256": header.and_then(|header| header.published_input_sha256.clone()),
-        "snapshot_sha256": header.and_then(|header| header.tree_sha256.clone()),
+        "snapshot_watermarks": header.map(|header| render_pairs(&header.watermarks)),
+        "db_watermarks": db.as_ref().ok().map(|db| render_pairs(&db.watermarks)),
+        "snapshot_sha256": header.map(|header| header.tree_sha256.clone()),
         "last_verified_at": state.last_verified_at_unix,
         "last_rebuild_attempts": state.last_rebuild_attempts,
         "last_error": last_error,
@@ -1460,12 +1150,12 @@ mod tests {
         let source = include_str!("aabb_tree.rs");
         let body = source
             .split_once(concat!(
-                "async fn ",
-                "persist_aabb_tree_if_dirty_locked_with_manifest("
+                "pub(crate) async fn ",
+                "persist_aabb_tree_if_dirty_locked("
             ))
-            .expect("persist_aabb_tree_if_dirty_locked_with_manifest must exist")
+            .expect("persist_aabb_tree_if_dirty_locked must exist")
             .1
-            .split_once(concat!("pub async fn ", "persist_aabb_tree("))
+            .split_once("/// 无条件写回并清脏标记")
             .expect("unconditional persist must follow")
             .0;
         // 发布门分支：状态不可信 → 恢复脏标记且不落盘。
@@ -1514,29 +1204,45 @@ mod tests {
         assert!(AABB_TREE_DIRTY.swap(false, Ordering::SeqCst));
     }
 
-    /// /health `spatial_tree` 的十八键契约（台账 G-02 契约迁移，取代旧九键形状）。
+    fn pairs(entries: &[(u32, i32, i32)]) -> WatermarkPairs {
+        entries
+            .iter()
+            .map(|&(dbnum, applied, model)| (dbnum, (applied, model)))
+            .collect()
+    }
+
+    fn header_with(epoch: u64, at: &str, watermarks: WatermarkPairs) -> SnapshotHeaderInfo {
+        SnapshotHeaderInfo {
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            epoch,
+            db_epoch_updated_at: at.into(),
+            entries: 42,
+            watermarks,
+            tree_sha256: "abc123".into(),
+            saved_at_unix: 1_755_000_000,
+        }
+    }
+
+    fn db_with(epoch: u64, at: &str, watermarks: WatermarkPairs) -> DbSpatialFingerprint {
+        DbSpatialFingerprint {
+            epoch,
+            db_epoch_updated_at: at.into(),
+            watermarks,
+        }
+    }
+
+    /// /health `spatial_tree` 的十六键契约（台账 G-02 的十八键按 ADR-072 收：`pending` /
+    /// `published_*` 三格退，`snapshot_watermarks` / `db_watermarks` 进）。
     ///
-    /// 指纹双字段（epoch + 库侧 bump 时刻）都相等才算无漂移——计数撞值的
-    /// 快照回滚必须按漂移报；诊断失败的降级分支键一个不少、file_* 如实为
-    /// null、`last_error` 说得出原因；`pending` 是 `spatial_reconcile.pending`
-    /// 的同源镜像。
+    /// 指纹双字段（epoch + 库侧 bump 时刻）都相等**且**各库水位数对相等才算无漂移——
+    /// 计数撞值的快照回滚、某个库水位前进了而快照没跟上，都必须按漂移报；诊断失败的
+    /// 降级分支键一个不少、file_* 如实为 null、`last_error` 说得出原因。
     #[test]
-    fn spatial_tree_status_keeps_its_eighteen_key_shape_in_both_branches() {
+    fn spatial_tree_status_keeps_its_sixteen_key_shape_in_both_branches() {
         use crate::fast_model::spatial_state::{SpatialStateSnapshot, SpatialTreeState};
 
-        let header = SnapshotHeaderInfo {
-            format_version: 3,
-            epoch: 7,
-            db_epoch_updated_at: "d'2026-08-12T00:00:00Z'".into(),
-            entries: 42,
-            published_version: Some(11),
-            published_input_files: Some(3),
-            published_input_sha256: Some("published123".into()),
-            tree_sha256: Some("abc123".into()),
-            saved_at_unix: 1_755_000_000,
-        };
-        let db = Ok((7u64, "d'2026-08-12T00:00:00Z'".to_string()));
-        let pending = Ok(0usize);
+        let header = header_with(7, "d'2026-08-12T00:00:00Z'", pairs(&[(7997, 163, 163)]));
+        let db = Ok(db_with(7, "d'2026-08-12T00:00:00Z'", pairs(&[(7997, 163, 163)])));
         let state = SpatialStateSnapshot {
             state: SpatialTreeState::Ready,
             last_error: None,
@@ -1554,65 +1260,56 @@ mod tests {
             "entries",
             "usable_pointer_rows",
             "invalid_pointer_rows",
-            "pending",
             "file_epoch",
             "db_epoch",
             "drift",
-            "published_version",
-            "published_input_files",
-            "published_input_sha256",
+            "snapshot_watermarks",
+            "db_watermarks",
             "snapshot_sha256",
             "last_verified_at",
             "last_rebuild_attempts",
             "last_error",
         ];
-        let healthy =
-            render_spatial_tree_status(42, Some(&header), &db, &pending, "reused", &state);
+        let healthy = render_spatial_tree_status(42, Some(&header), &db, "reused", &state);
         let object = healthy.as_object().expect("形状必须是对象");
         assert_eq!(object.len(), keys.len(), "键数漂移: {healthy}");
         for key in keys {
             assert!(object.contains_key(key), "缺键 {key}: {healthy}");
+        }
+        for retired in ["pending", "published_version", "published_input_files", "published_input_sha256"] {
+            assert!(!object.contains_key(retired), "退役格 {retired} 不许回来: {healthy}");
         }
         assert_eq!(healthy["state"], "ready");
         assert_eq!(healthy["ready"], true);
         assert_eq!(healthy["drift"], false);
         assert_eq!(healthy["last_error"], serde_json::Value::Null);
         assert_eq!(healthy["startup_verdict"], "reused");
-        assert_eq!(healthy["format_version"], 3);
+        assert_eq!(healthy["format_version"], SNAPSHOT_FORMAT_VERSION);
         assert_eq!(healthy["snapshot_sha256"], "abc123");
-        assert_eq!(healthy["published_version"], 11);
-        assert_eq!(healthy["published_input_files"], 3);
-        assert_eq!(healthy["published_input_sha256"], "published123");
         assert_eq!(healthy["file_epoch"], 7);
         assert_eq!(healthy["db_epoch"], 7);
-        assert_eq!(healthy["pending"], 0);
         assert_eq!(healthy["usable_pointer_rows"], 42);
+        assert_eq!(
+            healthy["snapshot_watermarks"],
+            serde_json::json!({ "7997": [163, 163] }),
+            "水位数对渲成 dbnum → [applied, model]: {healthy}"
+        );
+        assert_eq!(healthy["db_watermarks"], serde_json::json!({ "7997": [163, 163] }));
 
         // 计数相等而库侧时刻不同 = 快照回滚撞回同一计数，必须按漂移报。
-        let rolled_back = Ok((7u64, "d'2026-08-11T00:00:00Z'".to_string()));
-        let drifted =
-            render_spatial_tree_status(42, Some(&header), &rolled_back, &pending, "reused", &state);
+        let rolled_back = Ok(db_with(7, "d'2026-08-11T00:00:00Z'", pairs(&[(7997, 163, 163)])));
+        let drifted = render_spatial_tree_status(42, Some(&header), &rolled_back, "reused", &state);
         assert_eq!(drifted["drift"], true, "指纹双字段必须都相等: {drifted}");
 
-        // 旧格式迁移前的头（format_version 1，无哈希）：sha 如实 null。
-        let legacy_header = SnapshotHeaderInfo {
-            format_version: 1,
-            published_version: None,
-            published_input_files: None,
-            published_input_sha256: None,
-            tree_sha256: None,
-            ..header.clone()
-        };
-        let legacy =
-            render_spatial_tree_status(42, Some(&legacy_header), &db, &pending, "reused", &state);
-        assert_eq!(legacy["format_version"], 1);
-        assert_eq!(legacy["snapshot_sha256"], serde_json::Value::Null);
-        assert_eq!(legacy["published_version"], serde_json::Value::Null);
+        // epoch 一致而某个库的水位前进了：快照没跟上，同样是漂移。
+        let advanced = Ok(db_with(7, "d'2026-08-12T00:00:00Z'", pairs(&[(7997, 165, 163)])));
+        let drifted = render_spatial_tree_status(42, Some(&header), &advanced, "reused", &state);
+        assert_eq!(drifted["drift"], true, "水位数对不等必须按漂移报: {drifted}");
 
         // 诊断失败/头缺失：键一个不少，快照侧如实为 null，last_error 报得出原因，
         // ready 只由状态机决定。
         let degraded_state = SpatialStateSnapshot {
-            state: SpatialTreeState::DegradedBlocked,
+            state: SpatialTreeState::DegradedReuse,
             last_error: None,
             last_rebuild_attempts: 3,
             last_verified_at_unix: None,
@@ -1622,8 +1319,7 @@ mod tests {
         let broken = render_spatial_tree_status(
             0,
             None,
-            &db,
-            &Err(anyhow::anyhow!("读取 pending 失败")),
+            &Err(anyhow::anyhow!("读取各库水位数对失败")),
             "unknown",
             &degraded_state,
         );
@@ -1633,19 +1329,21 @@ mod tests {
             keys.len(),
             "降级分支不许缩键: {broken}"
         );
-        assert_eq!(broken["state"], "degraded_blocked");
+        assert_eq!(broken["state"], "degraded_reuse");
         assert_eq!(broken["ready"], false);
         assert_eq!(broken["format_version"], serde_json::Value::Null);
         assert_eq!(broken["file_epoch"], serde_json::Value::Null);
+        assert_eq!(broken["db_epoch"], serde_json::Value::Null);
         assert_eq!(broken["snapshot_sha256"], serde_json::Value::Null);
-        assert_eq!(broken["pending"], serde_json::Value::Null);
+        assert_eq!(broken["snapshot_watermarks"], serde_json::Value::Null);
+        assert_eq!(broken["db_watermarks"], serde_json::Value::Null);
         assert_eq!(broken["last_rebuild_attempts"], 3);
         assert_eq!(broken["drift"], true, "读不出指纹必须按漂移报: {broken}");
         assert!(
             broken["last_error"]
                 .as_str()
                 .expect("降级必须报出错误原因")
-                .contains("读取 pending 失败")
+                .contains("读取各库水位数对失败")
         );
 
         // 状态簿记里的错误优先曝光（重建失败原因比诊断读失败更接近根因）。
@@ -1656,8 +1354,7 @@ mod tests {
         let prioritized = render_spatial_tree_status(
             0,
             None,
-            &db,
-            &Err(anyhow::anyhow!("读取 pending 失败")),
+            &Err(anyhow::anyhow!("读取各库水位数对失败")),
             "degraded",
             &with_state_error,
         );
@@ -1670,31 +1367,111 @@ mod tests {
         );
     }
 
-    /// 提交后收敛不得重算几何、不得写库：窗口 journal 重放已经把刷新层的计算结果
-    /// 落成主库真值，收敛只许「按指针把树追上库」。此前这里复跑
-    /// `update_inst_relate_aabbs_by_refnos(.., true)`，把几何 AABB 整个重算并重写
-    /// 一遍——跑在阻断出队的关键路径上。回退即红。
+    /// 落库后收敛只认内存投影（ADR-072 D4）：不读库、不写库、不重算几何。此前这里
+    /// 按已提交指针 `select … aabb.d from inst_relate` 回读一遍，再往前则复跑
+    /// `update_inst_relate_aabbs_by_refnos(.., true)` 把几何整个重算重写——两条路都
+    /// 跑在任务的关键路径上，也都违反「任务内不回读库」。回退即红。
     #[test]
-    fn post_commit_reconcile_syncs_pointers_instead_of_recomputing() {
+    fn post_persist_convergence_takes_boxes_from_the_projection_not_the_database() {
         let source = include_str!("aabb_tree.rs");
         let body = source
-            .split_once(concat!(
-                "pub(crate) async fn ",
-                "apply_deferred_spatial_mutations("
-            ))
-            .expect("apply_deferred_spatial_mutations must exist")
+            .split_once(concat!("pub(crate) fn ", "projected_tree_entry("))
+            .expect("projected_tree_entry must exist")
             .1
-            .split_once(concat!("\n", "/// `(refno, noun, aabb 指针值)`"))
-            .expect("PointerRow doc must follow")
+            .split_once(concat!("\n", "/// 空间树自上次写回"))
+            .expect("dirty-flag doc must follow")
             .0;
         assert!(
-            body.contains("sync_tree_from_committed_pointers"),
-            "refresh 分支必须走指针同步: {body}"
+            body.contains("record.world_bounds[0].into()")
+                && body.contains("record.world_bounds[1].into()"),
+            "盒必须直接取投影记录的 world_bounds: {body}"
         );
         assert!(
-            !body.contains("update_inst_relate_aabbs_by_refnos"),
-            "提交后收敛不得重算几何/写库: {body}"
+            body.contains("tree.sync_refnos(boxes)") && body.contains("tree.remove_by_refnos(&evict)"),
+            "收敛 = sync_refnos 换新 + remove_by_refnos 摘旧: {body}"
         );
+        assert!(
+            body.contains("refresh_ready_kind(entries)"),
+            "动过树要把 Ready/ReadyEmpty 那一格对齐条目数: {body}"
+        );
+        for forbidden in [
+            "SUL_DB",
+            ".query(",
+            "inst_relate",
+            "get_inst_relate_keys",
+            concat!("sync_tree_from_", "committed_pointers"),
+            "update_inst_relate_aabbs_by_refnos",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "落库后收敛不得回读库 / 重算几何（{forbidden}）: {body}"
+            );
+        }
+        // 全文件不许再有那个按指针回读的函数——验收 ② 的源码钉。
+        assert!(
+            !source
+                .split(concat!("#[cfg(test)]\n", "mod tests"))
+                .next()
+                .expect("production half")
+                .contains(concat!("sync_tree_from_", "committed_pointers")),
+            "按已提交指针回读库的树同步已退役，不得回来"
+        );
+    }
+
+    /// 投影记录 → 树条目的口径：管身不进树；NaN / Inf / 反向盒按无可用盒；正常记录的
+    /// 盒、refno、noun 逐字进树。
+    #[test]
+    fn projected_tree_entry_mirrors_world_bounds_and_skips_tubes_and_invalid_boxes() {
+        use crate::fast_model::model_memory_store::{ProjectedShape, ProjectedTube};
+        use e3d_io::refno::RefNo;
+        use e3d_model::elmodl::GeometryId;
+
+        let record = ProjectedGeometry {
+            record_id: "24383_73948".into(),
+            geometry_id: GeometryId::Element {
+                refno: "24383/73948".into(),
+            },
+            source_refno: RefNo::new(24383, 73948),
+            dbnum: 7997,
+            source_sesno: 3,
+            noun: "BOX".into(),
+            mesh_id: "mesh".into(),
+            world_transform: glam::DMat4::IDENTITY,
+            world_bounds: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            ancestors: vec![],
+            shape: ProjectedShape::Baked,
+            tube: None,
+        };
+        let entry = projected_tree_entry(&record).expect("正常记录进树");
+        assert_eq!(
+            entry.refno,
+            crate::data_interface::generation_root::refno_from_e3d(record.source_refno).refno()
+        );
+        assert_eq!(entry.noun, "BOX");
+        assert_eq!(entry.aabb.mins, parry3d::math::Point::new(1.0, 2.0, 3.0));
+        assert_eq!(entry.aabb.maxs, parry3d::math::Point::new(4.0, 5.0, 6.0));
+
+        let tube = ProjectedGeometry {
+            tube: Some(ProjectedTube {
+                route_ordinal: 0,
+                from: RefNo::new(24383, 1),
+                to: RefNo::new(24383, 2),
+                invalid: false,
+            }),
+            ..record.clone()
+        };
+        assert!(projected_tree_entry(&tube).is_none(), "隐式管身不进树");
+
+        let reversed = ProjectedGeometry {
+            world_bounds: [[4.0, 2.0, 3.0], [1.0, 5.0, 6.0]],
+            ..record.clone()
+        };
+        assert!(projected_tree_entry(&reversed).is_none(), "反向盒是空集语义");
+        let nan = ProjectedGeometry {
+            world_bounds: [[f32::NAN, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            ..record
+        };
+        assert!(projected_tree_entry(&nan).is_none(), "NaN 盒不进树");
     }
 
     /// 启动重建只许读库：`rebuild_tree_from_pointers` 是 epoch 不匹配时的兜底，
@@ -1720,12 +1497,14 @@ mod tests {
         );
     }
 
-    /// 启动装载（方案 2026-08-12 一致性闭环 §2）：整个装载持空间串行锁；快路径必须
-    /// 比双字段指纹；pending 优先且**立即**重放（D2）；文件缺失/损坏必须自动重建；
-    /// 强制重建只认真值解析；生产入口不得再有「内存树非空即 preloaded」的盲信短路；
-    /// 默认路径仍不得触发条数对账或几何重算重写。
+    /// 启动装载（方案 2026-08-12 一致性闭环 §2，判据按 ADR-072 D4）：整个装载持空间串行锁；
+    /// 必须读两半指纹（epoch 章 + 各库水位数对）并交给纯判据；快照缺失/损坏/旧版本与任一半
+    /// 指纹不等都必须自动重建；**不许再问**意图行 / 文件轮次 / 已发布输入清单，也不许再落
+    /// `DegradedBlocked`（清单不匹配曾经停掉空间消费者——现在不等只是重建的理由）；强制重建
+    /// 只认真值解析；生产入口不得再有「内存树非空即 preloaded」的盲信短路；默认路径仍不得触发
+    /// 条数对账或几何重算重写。验收 ④ 的源码钉。
     #[test]
-    fn startup_layers_fingerprint_replay_then_rebuild() {
+    fn startup_compares_the_snapshot_header_with_the_watermark_pairs_then_rebuilds() {
         let source = include_str!("aabb_tree.rs");
         let wrapper = source
             .split_once(concat!("pub async fn ", "load_project_tree_verified("))
@@ -1751,42 +1530,53 @@ mod tests {
         );
         assert!(
             body.contains("read_snapshot_for_startup("),
-            "默认启动必须先尝试快照（V3 优先、旧格式仅作迁移候选）: {body}"
+            "默认启动必须先尝试快照: {body}"
         );
         assert!(
-            body.contains("read_db_spatial_epoch_stamp()"),
-            "启动必须读库侧指纹（epoch 值 + updated_at）: {body}"
+            body.contains("read_db_spatial_fingerprint().await"),
+            "启动必须读库侧完整指纹（epoch 章 + 各库水位数对）: {body}"
         );
         assert!(
-            body.contains("has_pending_spatial_work()"),
-            "必须问待重放意图，pending 优先于指纹: {body}"
+            body.contains("header.matches(&db)"),
+            "快照头必须与库侧指纹整体比对: {body}"
         );
         assert!(
             body.contains("force_spatial_rebuild_enabled()") && !body.contains(".is_ok()"),
             "强制重建必须走真值解析，不得回到 is_ok 判定: {body}"
         );
-        let pending_at = body
-            .find("has_pending_spatial_work()")
+        let fingerprint_at = body
+            .find("read_db_spatial_fingerprint().await")
             .expect("checked above");
         let verdict_at = body
-            .find("match startup_action(")
+            .rfind("match startup_action(")
             .expect("裁决必须由纯判据函数给出");
         assert!(
-            pending_at < verdict_at,
-            "意图查询必须发生在裁决之前: {body}"
+            fingerprint_at < verdict_at,
+            "指纹读取必须发生在裁决之前: {body}"
         );
-        // D2：Replay 分支必须立即重放，不等 worker 派发门。
-        assert!(
-            body.contains("reconcile_spatial_pending_locked()"),
-            "ReplayRequired 必须立即重放收敛: {body}"
-        );
+        for retired in [
+            "has_pending_spatial_work",
+            "has_collecting_file_rounds",
+            "acceptable_published_input_manifests",
+            "published_file_input",
+            "reconcile_spatial_pending",
+            "side_effect_pending",
+            "SpatialTreeState::DegradedBlocked",
+            "SpatialTreeState::ReplayRequired",
+            "published_input_mismatch",
+            "file_round_private",
+        ] {
+            assert!(
+                !body.contains(retired),
+                "启动判据不得再问已退役的 {retired}（ADR-072 D4/D5）: {body}"
+            );
+        }
         assert!(
             !body.contains("sync_aabb_tree_with_db") && !body.contains("manual_update_aabbs"),
             "默认启动不得触发条数对账或几何重算重写: {body}"
         );
 
-        // 快照缺失/损坏分支必须走自动重建（决策 D1/D2），不再空树等人工，
-        // 且无论有没有 pending（完备集论证只对可读快照成立）。
+        // 快照缺失/损坏/旧版本分支必须走自动重建（决策 D1/D2），不再空树等人工。
         let unusable_branch = body
             .split_once("SnapshotReadOutcome::Unusable(")
             .expect("必须处理快照不可用分支")
@@ -1795,50 +1585,69 @@ mod tests {
             unusable_branch.contains("return rebuild_at_startup_locked().await"),
             "快照不可用必须自动指针重建: {body}"
         );
-
-        // 旧格式一次性迁移（D3）：仅「指纹匹配 + 无 pending」封装发布 V3，
-        // 其余一律重建；发布动作必须在迁移分支内。
-        let migration_branch = body
-            .split_once("if migrating_from_legacy {")
-            .expect("必须有旧格式迁移分支")
-            .1
-            .split_once("match startup_action(")
-            .expect("迁移分支在常规裁决之前")
-            .0;
+        // 指纹不等的那一臂必须是重建，而不是任何一种降级停摆。
+        let rebuild_arm = body
+            .split_once("StartupAction::Rebuild =>")
+            .expect("必须有重建臂")
+            .1;
         assert!(
-            migration_branch.contains("fingerprint_matches && !has_pending"),
-            "迁移条件必须是双指纹匹配且无 pending: {migration_branch}"
+            rebuild_arm.contains("return rebuild_at_startup_locked().await"),
+            "快照头与水位数对不等必须走指针重建: {rebuild_arm}"
         );
-        assert!(
-            migration_branch.contains("persist_project_tree_now().await"),
-            "迁移必须当场发布 V3: {migration_branch}"
+        // 读不到库侧指纹是唯一的降级分支，且只许 DegradedReuse（revalidator 复检）。
+        assert_eq!(
+            body.matches("SpatialTreeState::Degraded").count(),
+            1,
+            "启动只剩一处降级（读不到指纹 → DegradedReuse）: {body}"
         );
-        assert!(
-            migration_branch.contains("record_startup_verdict(\"migrated\")"),
-            "迁移裁决必须记 migrated: {migration_branch}"
-        );
-        assert!(
-            migration_branch.contains("return rebuild_at_startup_locked().await"),
-            "不满足迁移条件必须重建: {migration_branch}"
-        );
+        assert!(body.contains("SpatialTreeState::DegradedReuse"));
     }
 
-    /// 启动动作真值表（纯函数，方案 §2，含 D2 交叉项）。
+    /// 启动动作真值表（纯函数，ADR-072 D4 之后只剩两档）。
     #[test]
     fn startup_action_truth_table() {
-        // 快照可用、指纹一致、无 pending → 复用（快路径）。
-        assert_eq!(startup_action(true, true, false), StartupAction::Reuse);
-        // D2 交叉项 1：指纹一致 + pending（发布成功、销账前崩溃）→ 重放优先。
-        assert_eq!(startup_action(true, true, true), StartupAction::Replay);
-        // 失配 + pending → 复用快照立即重放（旧 HealByReplay 的完备集场景）。
-        assert_eq!(startup_action(true, false, true), StartupAction::Replay);
-        // 失配 + 无 pending → 无法解释的漂移，重建。
-        assert_eq!(startup_action(true, false, false), StartupAction::Rebuild);
-        // D2 交叉项 2：快照不可用时 pending 不改变裁决——完备集论证只对可读
-        // 快照成立，在空树上重放增量是缺陷，必须整树重建。
-        assert_eq!(startup_action(false, false, true), StartupAction::Rebuild);
-        assert_eq!(startup_action(false, false, false), StartupAction::Rebuild);
-        assert_eq!(startup_action(false, true, true), StartupAction::Rebuild);
+        // 快照可用、两半指纹一致 → 复用（快路径）。
+        assert_eq!(startup_action(true, true), StartupAction::Reuse);
+        // 快照可用、任一半指纹不等 → 重建，不是降级停摆。
+        assert_eq!(startup_action(true, false), StartupAction::Rebuild);
+        // 快照不可用 → 无论指纹如何一律重建。
+        assert_eq!(startup_action(false, false), StartupAction::Rebuild);
+        assert_eq!(startup_action(false, true), StartupAction::Rebuild);
+    }
+
+    /// 快照头与库侧指纹的整体比对（验收 ④ 的纯函数半边）：epoch 双字段与各库水位数对
+    /// **三者都相等**才算一致；某个库 applied 或 model 前进、多一个库、少一个库、epoch 计数
+    /// 撞值而时刻不同——每一种都必须判不等，进而落到 [`StartupAction::Rebuild`]。
+    #[test]
+    fn a_header_matches_only_when_epoch_and_every_watermark_pair_agree() {
+        let header = header_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40)]));
+        assert!(header.matches(&db_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40)]))));
+        assert_eq!(
+            startup_action(
+                true,
+                header.matches(&db_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40)])))
+            ),
+            StartupAction::Reuse
+        );
+
+        let mismatches: [(&str, DbSpatialFingerprint); 6] = [
+            ("数据水位前进", db_with(7, "t7", pairs(&[(7997, 165, 163), (8000, 40, 40)]))),
+            ("模型水位前进", db_with(7, "t7", pairs(&[(7997, 163, 165), (8000, 40, 40)]))),
+            ("回退到水位", db_with(7, "t7", pairs(&[(7997, 160, 160), (8000, 40, 40)]))),
+            ("多了一个库", db_with(7, "t7", pairs(&[(7997, 163, 163), (8000, 40, 40), (8001, 1, 1)]))),
+            ("少了一个库", db_with(7, "t7", pairs(&[(7997, 163, 163)]))),
+            ("epoch 撞值时刻不同", db_with(7, "t-old", pairs(&[(7997, 163, 163), (8000, 40, 40)]))),
+        ];
+        for (why, db) in mismatches {
+            assert!(!header.matches(&db), "{why} 必须判不等");
+            assert_eq!(
+                startup_action(true, header.matches(&db)),
+                StartupAction::Rebuild,
+                "{why} 必须落到指针重建，而不是 DegradedBlocked"
+            );
+        }
+        // 全新库（无 epoch 记录、无登记）+ 与之匹配的空头 → 一致。
+        assert!(header_with(0, "", pairs(&[])).matches(&db_with(0, "", pairs(&[]))));
     }
 
     /// 扫描 SQL 的口径钉（D1 current-only + D8 record-range）。两引擎的执行语义
@@ -1949,26 +1758,20 @@ mod tests {
         );
     }
 
-    /// 指纹判定保持双字段口径（方案 2026-08-11 遗留不变量，由装载器内联计算）。
+    /// 指纹判定保持 epoch 双字段口径（方案 2026-08-11 遗留不变量，现在是
+    /// [`SnapshotHeaderInfo::matches`] 的一半）。
     #[test]
-    fn fingerprint_match_requires_both_fields() {
-        let meta = |epoch: u64, at: &str| TreeFileMeta {
-            epoch,
-            db_epoch_updated_at: at.to_string(),
-            entries: 1,
-            saved_at_unix: 0,
-        };
-        let matches = |meta: &TreeFileMeta, db_epoch: u64, db_at: &str| {
-            meta.epoch == db_epoch && meta.db_epoch_updated_at == db_at
-        };
+    fn fingerprint_match_requires_both_epoch_fields() {
+        let header = |epoch: u64, at: &str| header_with(epoch, at, pairs(&[]));
+        let db = |epoch: u64, at: &str| db_with(epoch, at, pairs(&[]));
         // 双字段都相等才算一致。
-        assert!(matches(&meta(3, "t3"), 3, "t3"));
+        assert!(header(3, "t3").matches(&db(3, "t3")));
         // 数值相等、时间戳不等（库快照回滚恰好撞回同一计数）→ 失配。
-        assert!(!matches(&meta(3, "t-old"), 3, "t3"));
-        // 旧版 sidecar（无时间戳字段，缺省空串）→ 一律失配。
-        assert!(!matches(&meta(3, ""), 3, "t3"));
-        // 全新库（无 epoch 记录 → (0, "")）+ 与之匹配的 sidecar → 一致。
-        assert!(matches(&meta(0, ""), 0, ""));
+        assert!(!header(3, "t-old").matches(&db(3, "t3")));
+        // 时刻缺失（空串）永不等于库侧真实时刻 → 失配。
+        assert!(!header(3, "").matches(&db(3, "t3")));
+        // 全新库（无 epoch 记录 → (0, "")）+ 与之匹配的头 → 一致。
+        assert!(header(0, "").matches(&db(0, "")));
     }
 
     /// `AIOS_FORCE_SPATIAL_REBUILD` 只认明确真值：旧的 `is_ok()` 判定下，部署
@@ -1998,8 +1801,8 @@ mod tests {
         }
     }
 
-    /// 盖章指纹必须在写文件之前读：并发 bump 只许把 sidecar 盖旧（下次多做一次
-    /// 重建，方向保守），不许把新章盖在旧内容上。
+    /// 盖章指纹（epoch 章 + 各库水位数对）必须在序列化树、写文件之前读：并发 bump / 盖水位
+    /// 只许把快照头盖旧（下次多做一次重建，方向保守），不许把新章盖在旧内容上。
     #[test]
     fn fingerprint_is_read_before_the_file_is_written() {
         let source = include_str!("aabb_tree.rs");
@@ -2011,37 +1814,79 @@ mod tests {
             .expect("dirty persist must follow")
             .0;
         let stamp_at = body
-            .find("read_db_spatial_epoch_stamp()")
-            .expect("盖章前必须读库侧指纹");
+            .find("read_db_spatial_fingerprint().await")
+            .expect("盖章前必须读库侧完整指纹");
+        let serialize_at = body
+            .find("GLOBAL_AABB_TREE.read().await")
+            .expect("必须序列化内存树");
         let write_at = body.find("write_file_atomic(").expect("必须原子写快照文件");
-        assert!(stamp_at < write_at, "指纹必须在写文件之前读: {body}");
+        assert!(
+            stamp_at < serialize_at && serialize_at < write_at,
+            "指纹必须在序列化树、写文件之前读: {body}"
+        );
+        assert!(
+            body.contains("watermarks: fingerprint.watermarks"),
+            "快照头必须记下各库水位数对: {body}"
+        );
         // D3：发布成功后才清旧格式文件，顺序不能反。
         let legacy_cleanup_at = body
             .find("remove_legacy_tree_files()")
-            .expect("V3 发布后必须清旧格式文件");
+            .expect("发布后必须清旧格式文件");
         assert!(
             write_at < legacy_cleanup_at,
-            "旧文件只能在 V3 写成之后删: {body}"
+            "旧文件只能在快照写成之后删: {body}"
         );
     }
 
-    /// 树的口径是「镜像已提交指针」：指针已消失的 refresh 目标必须摘除树条目，
-    /// 而不是跳过——跳过会让旧盒一直留在树上当房间候选，直到下一次指针重建
-    /// 才自愈。回退即红。
-    #[test]
-    fn pointer_sync_evicts_targets_whose_pointer_vanished() {
-        let source = include_str!("aabb_tree.rs");
-        let body = source
-            .split_once(concat!("async fn ", "sync_tree_from_committed_pointers("))
-            .expect("sync_tree_from_committed_pointers must exist")
-            .1
-            .split_once(concat!("\n", "/// 空间树自上次写回"))
-            .expect("dirty-flag doc must follow")
-            .0;
-        assert!(
-            body.contains("remove_by_refnos"),
-            "指针消失的 refresh 目标必须摘除树条目: {body}"
-        );
+    /// 树的口径是「镜像投影里可用的盒」：刷新来源在投影里一条可用盒都没有时必须摘除树条目，
+    /// 而不是跳过——跳过会让旧盒一直留在树上当房间候选，直到下一次指针重建才自愈。
+    /// 用真树跑一遍：三个来源，一个换新盒、一个变成无效盒、一个被对账掉。
+    #[tokio::test]
+    async fn convergence_evicts_sources_without_a_usable_box_and_reconciled_sources() {
+        fn bbox(seq: u32, min: f32, max: f32) -> RStarBoundingBox {
+            RStarBoundingBox::new(
+                parry3d::bounding_volume::Aabb::new(
+                    parry3d::math::Point::new(min, min, min),
+                    parry3d::math::Point::new(max, max, max),
+                ),
+                RefnoEnum::from(format!("4000000009/{seq}").as_str()),
+                "BOX".to_string(),
+            )
+        }
+        let refno = |seq: u32| RefnoEnum::from(format!("4000000009/{seq}").as_str());
+        // 本用例独占这一组 refno（4000000009/*），与同进程其它用例不撞。
+        {
+            let mut tree = GLOBAL_AABB_TREE.write().await;
+            tree.sync_refnos(vec![bbox(1, 0.0, 1.0), bbox(2, 0.0, 1.0), bbox(3, 0.0, 1.0)]);
+        }
+        AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
+
+        // 1 换了新盒；2 是刷新来源但投影里没有可用盒（盒无效被 projected_tree_entry 滤掉）；
+        // 3 被对账掉。
+        let synced = converge_tree_after_persist(
+            &[refno(1), refno(2)],
+            vec![bbox(1, 10.0, 11.0)],
+            &[refno(3)],
+        )
+        .await;
+        assert_eq!(synced, 1);
+        assert!(AABB_TREE_DIRTY.load(Ordering::SeqCst), "动过树必须置脏");
+
+        let tree = GLOBAL_AABB_TREE.read().await;
+        let entries_of = |seq: u32| {
+            tree.iter()
+                .filter(|entry| entry.refno == refno(seq).refno())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(entries_of(1), vec![bbox(1, 10.0, 11.0)], "换新盒，旧盒不堆叠");
+        assert!(entries_of(2).is_empty(), "没有可用盒的刷新来源必须摘树");
+        assert!(entries_of(3).is_empty(), "被对账掉的来源必须摘树");
+        drop(tree);
+        GLOBAL_AABB_TREE
+            .write()
+            .await
+            .remove_by_refnos(&HashSet::from([refno(1).refno()]));
     }
 
     /// R3 的安全前提：绕开 rs-core 的 `deserialize_from_bin_file`（它私有地重建
@@ -2068,10 +1913,11 @@ mod tests {
         assert_eq!(restored.size(), 2, "同一 refno 不允许堆叠历史包围盒");
     }
 
-    /// V3 快照编解码矩阵：round-trip 全过；截断、错项目、错 namespace、哈希/载荷
-    /// 篡改、条目数篡改、格式版本不符——任何一环失败都必须整体拒绝（调用方走重建）。
+    /// 快照编解码矩阵：round-trip 全过（含各库水位数对）；截断、错项目、错 namespace、
+    /// 哈希/载荷篡改、条目数篡改、格式版本不符（含上一代 V3）——任何一环失败都必须整体
+    /// 拒绝（调用方走重建）。
     #[test]
-    fn snapshot_v3_validation_matrix() {
+    fn snapshot_validation_matrix() {
         fn bbox(seq: u64, min: f32, max: f32) -> RStarBoundingBox {
             RStarBoundingBox::new(
                 parry3d::bounding_volume::Aabb::new(
@@ -2084,42 +1930,45 @@ mod tests {
         }
         let tree = AccelerationTree::load(vec![bbox(1, 0.0, 10.0), bbox(2, 20.0, 30.0)]);
         let tree_bytes = bincode::serialize(&tree).expect("serialize tree");
-        let snapshot = SpatialTreeSnapshotV3 {
+        let snapshot = SpatialTreeSnapshot {
             format_version: SNAPSHOT_FORMAT_VERSION,
             project: "AMS".into(),
             namespace: "1516".into(),
             epoch: 42,
             db_epoch_updated_at: "d'2026-08-12T00:00:00Z'".into(),
+            watermarks: pairs(&[(7997, 163, 163), (8000, 40, 38)]),
             entries: 2,
             usable_pointer_rows: 2,
             invalid_pointer_rows: 0,
-            published_version: 9,
-            published_input_files: 2,
-            published_input_sha256: sha256_hex(b"published inputs"),
             tree_sha256: sha256_hex(&tree_bytes),
             saved_at_unix: 1_755_000_000,
             tree_bytes,
         };
-        let bytes = encode_snapshot_v3(&snapshot).expect("encode");
+        let bytes = encode_snapshot(&snapshot).expect("encode");
 
-        let (decoded, restored) = decode_snapshot_v3(&bytes, "AMS", "1516").expect("round-trip");
+        let (decoded, restored) = decode_snapshot(&bytes, "AMS", "1516").expect("round-trip");
         assert_eq!(decoded.epoch, 42);
         assert_eq!(decoded.db_epoch_updated_at, "d'2026-08-12T00:00:00Z'");
+        assert_eq!(
+            decoded.watermarks,
+            pairs(&[(7997, 163, 163), (8000, 40, 38)]),
+            "各库水位数对必须原样往返"
+        );
         assert_eq!(restored.size(), 2, "树载荷必须完整还原");
 
         assert!(
-            decode_snapshot_v3(&bytes[..bytes.len() / 2], "AMS", "1516").is_err(),
+            decode_snapshot(&bytes[..bytes.len() / 2], "AMS", "1516").is_err(),
             "截断文件必须拒绝"
         );
         assert!(
-            decode_snapshot_v3(&bytes, "OTHER", "1516")
+            decode_snapshot(&bytes, "OTHER", "1516")
                 .err()
                 .expect("错项目必须拒绝")
                 .to_string()
                 .contains("项目"),
         );
         assert!(
-            decode_snapshot_v3(&bytes, "AMS", "9999")
+            decode_snapshot(&bytes, "AMS", "9999")
                 .err()
                 .expect("错 namespace 必须拒绝")
                 .to_string()
@@ -2128,9 +1977,9 @@ mod tests {
 
         let mut hash_tamper = snapshot.clone();
         hash_tamper.tree_sha256 = sha256_hex(b"not the payload");
-        let tampered = encode_snapshot_v3(&hash_tamper).expect("encode tampered");
+        let tampered = encode_snapshot(&hash_tamper).expect("encode tampered");
         assert!(
-            decode_snapshot_v3(&tampered, "AMS", "1516")
+            decode_snapshot(&tampered, "AMS", "1516")
                 .err()
                 .expect("哈希失配必须拒绝")
                 .to_string()
@@ -2139,72 +1988,42 @@ mod tests {
 
         let mut payload_tamper = snapshot.clone();
         payload_tamper.tree_bytes[0] ^= 0xFF;
-        let tampered = encode_snapshot_v3(&payload_tamper).expect("encode tampered");
+        let tampered = encode_snapshot(&payload_tamper).expect("encode tampered");
         assert!(
-            decode_snapshot_v3(&tampered, "AMS", "1516").is_err(),
+            decode_snapshot(&tampered, "AMS", "1516").is_err(),
             "载荷被翻位必须拒绝（哈希兜底）"
         );
 
         let mut entries_tamper = snapshot.clone();
         entries_tamper.entries = 3;
-        let tampered = encode_snapshot_v3(&entries_tamper).expect("encode tampered");
+        let tampered = encode_snapshot(&entries_tamper).expect("encode tampered");
         assert!(
-            decode_snapshot_v3(&tampered, "AMS", "1516")
+            decode_snapshot(&tampered, "AMS", "1516")
                 .err()
                 .expect("条目数失配必须拒绝")
                 .to_string()
                 .contains("条目数"),
         );
 
-        let mut version_tamper = snapshot.clone();
-        version_tamper.format_version = 1;
-        let tampered = encode_snapshot_v3(&version_tamper).expect("encode tampered");
-        assert!(
-            decode_snapshot_v3(&tampered, "AMS", "1516")
-                .err()
-                .expect("格式版本不符必须拒绝")
-                .to_string()
-                .contains("版本"),
-        );
+        for stale_version in [1, 3] {
+            let mut version_tamper = snapshot.clone();
+            version_tamper.format_version = stale_version;
+            let tampered = encode_snapshot(&version_tamper).expect("encode tampered");
+            assert!(
+                decode_snapshot(&tampered, "AMS", "1516")
+                    .err()
+                    .expect("格式版本不符必须拒绝")
+                    .to_string()
+                    .contains("版本"),
+                "上一代快照（V{stale_version}）没有水位数对，必须按不可用重建"
+            );
+        }
     }
 
+    /// 快照校验失败 / 缺失：一律 Unusable（走重建），**不回落**旧「bin + sidecar」格式——
+    /// 它的头没有水位数对，在 ADR-072 的判据下永远对不上。回退即红。
     #[test]
-    fn snapshot_header_requires_the_same_published_input_identity() {
-        use crate::data_interface::side_effect_pending::PublishedInputManifestStamp;
-
-        let header = SnapshotHeaderInfo {
-            format_version: 3,
-            epoch: 7,
-            db_epoch_updated_at: "t7".into(),
-            entries: 2,
-            published_version: Some(9),
-            published_input_files: Some(2),
-            published_input_sha256: Some("manifest".into()),
-            tree_sha256: Some("tree".into()),
-            saved_at_unix: 1,
-        };
-        let stamp = PublishedInputManifestStamp {
-            published_version: 9,
-            file_count: 2,
-            sha256: "manifest".into(),
-        };
-        assert!(published_input_manifest_matches(&header, &stamp));
-
-        let mut wrong = stamp.clone();
-        wrong.sha256 = "other".into();
-        assert!(!published_input_manifest_matches(&header, &wrong));
-        let mut wrong = stamp.clone();
-        wrong.published_version += 1;
-        assert!(!published_input_manifest_matches(&header, &wrong));
-        let mut wrong = stamp;
-        wrong.file_count += 1;
-        assert!(!published_input_manifest_matches(&header, &wrong));
-    }
-
-    /// V3 在场但校验失败：一律 Unusable（走重建），**不回落**旧格式——旧文件自
-    /// 迁移起冻结，回落它就是引入陈旧。回退即红。
-    #[test]
-    fn corrupt_v3_snapshot_never_falls_back_to_legacy() {
+    fn an_unusable_snapshot_never_falls_back_to_the_legacy_files() {
         let source = include_str!("aabb_tree.rs");
         let body = source
             .split_once("fn read_snapshot_for_startup(")
@@ -2213,63 +2032,23 @@ mod tests {
             .split_once("库侧空间版本号所在的固定记录")
             .expect("epoch 段随后")
             .0;
-        let ok_arm = body
-            .split_once("Ok(bytes) =>")
-            .expect("V3 读取成功分支")
-            .1
-            .split_once("ErrorKind::NotFound")
-            .expect("NotFound 分支随后")
-            .0;
         assert!(
-            ok_arm.contains("SnapshotReadOutcome::Unusable"),
-            "V3 校验失败必须判不可用: {ok_arm}"
+            body.contains("SnapshotReadOutcome::Unusable"),
+            "校验失败必须判不可用: {body}"
         );
+        for legacy in ["read_project_tree_file", "read_tree_meta", "TreeFileMeta", "Legacy"] {
+            assert!(
+                !body.contains(legacy),
+                "不得再读旧格式树文件（{legacy}）: {body}"
+            );
+        }
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
         assert!(
-            !ok_arm.contains("read_project_tree_file"),
-            "V3 损坏不得回落旧格式: {ok_arm}"
-        );
-        // 旧格式只在 V3 **缺失**时作为迁移候选。
-        let legacy_arm = body
-            .split_once("ErrorKind::NotFound")
-            .expect("checked above")
-            .1;
-        assert!(
-            legacy_arm.contains("read_project_tree_file()"),
-            "V3 缺失才读旧格式: {legacy_arm}"
-        );
-    }
-
-    /// sidecar 元数据的编解码往返（含指纹时间戳字段）。
-    #[test]
-    fn tree_meta_roundtrip() {
-        let meta = TreeFileMeta {
-            epoch: 42,
-            db_epoch_updated_at: "2026-08-11T07:00:00Z".into(),
-            entries: 906,
-            saved_at_unix: 1_754_000_000,
-        };
-        let bytes = serde_json::to_vec(&meta).expect("encode");
-        let back: TreeFileMeta = serde_json::from_slice(&bytes).expect("decode");
-        assert_eq!(back.epoch, 42);
-        assert_eq!(back.db_epoch_updated_at, "2026-08-11T07:00:00Z");
-        assert_eq!(back.entries, 906);
-    }
-
-    /// 旧版 sidecar（无 `db_epoch_updated_at` 字段）必须能解析且缺省空串——
-    /// 空串永不等于库侧真实时刻，于是老文件自动落入失配分支、一次自愈后补齐。
-    #[test]
-    fn legacy_tree_meta_without_timestamp_parses_as_mismatch() {
-        let back: TreeFileMeta =
-            serde_json::from_slice(br#"{"epoch":42,"entries":906,"saved_at_unix":1}"#)
-                .expect("decode legacy sidecar");
-        assert_eq!(back.epoch, 42);
-        assert_eq!(back.db_epoch_updated_at, "");
-        let fingerprint_matches =
-            back.epoch == 42 && back.db_epoch_updated_at == "2026-08-11T00:00:00Z";
-        assert_eq!(
-            startup_action(true, fingerprint_matches, false),
-            StartupAction::Rebuild,
-            "旧版 sidecar 不得凭数值相等直接放行"
+            production.contains("fn remove_legacy_tree_files()"),
+            "旧格式文件仍要在快照发布后清掉"
         );
     }
 
@@ -2326,8 +2105,6 @@ mod tests {
             "fast_model/aabb_refresh.rs",
             // 启动加载/指针重建与提交后收敛：本身即自愈动作，落盘自带盖章。
             "fast_model/aabb_tree.rs",
-            // 房间测试夹具（#[cfg(test)]，不在生产路径）。
-            "fast_model/room_fixture.rs",
         ]
         .iter()
         .map(|path| path.to_string())

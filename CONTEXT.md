@@ -1,6 +1,6 @@
 # 增量模型生成（Incremental Model Generation）
 
-本上下文描述：当 E3D/PDMS 设计数据发生增量变化（新增 / 修改 / 删除 / 搬迁）后，如何以**尽量小而正确**的范围重新生成受影响的三维模型，而不是全量重算。术语在此统一，实现见 `src/data_interface/`（数据面、队列、模型面状态）、`src/fast_model/`（发布、空间树、房间归属）与 `vendor/e3d-model`（模型面纯函数层，经 `e3d-io` 直读库文件）。
+本上下文描述：当 E3D/PDMS 设计数据发生增量变化（新增 / 修改 / 删除 / 搬迁）后，如何以**尽量小而正确**的范围重新生成受影响的三维模型，而不是全量重算。术语在此统一，实现见 `src/data_interface/`（数据面、队列、模型面状态）、`src/fast_model/`（空间树、房间几何筛选）与 `vendor/e3d-model`（模型面纯函数层，经 `e3d-io` 直读库文件）。
 
 > 本文件仅为词汇表（glossary），不含实现决策与流程；决策见 `docs/adr/`，规格见 `docs/specs/`，计划见 `docs/plans/`。
 
@@ -11,24 +11,24 @@
 _Avoid_: 局部更新、局部刷新
 
 **增量阶段控制 (Increment Stage Control)**：
-分别许可数据增量、模型增量、房间增量三个顺序阶段执行的调试配置。控制的是消费，不是发现或删队列：上游关闭时下游不得越过，重新开启后从 durable 工作继续。
-_Avoid_: 流水线模式、跳步开关、增量总开关
+分别许可数据增量、模型增量两个顺序阶段执行的调试配置（`data_incremental` / `model_incremental`）。控制的是消费，不是发现或删队列：上游关闭时下游不得越过，重新开启后从水位继续。房间归属不是第三个阶段：`room_membership` 只决定每个模型根持久化时是否顺带计算、写入房间边；关闭不阻断模型根与 `model_sesno`，重新开启也不会按模型水位发现历史房间欠账，需显式模型重建。原阶段开关 `room_incremental` / `AIOS_ROOM_INCREMENTAL` 已随房间流程退役（ADR-073 D7）。
+_Avoid_: 流水线模式、跳步开关、增量总开关、把 `room_membership` 当模型消费门、三阶段
 
 **生成根 (Generation Root)**：
-一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 Ref0 库归属映射得到，`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
+一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 RefNo 位解码得到（见「RefNo 库归属」），`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
 _Avoid_: 重生成根、regen root、目标根
 
-**Ref0 库归属 (Ref0 Database Affiliation)**：
-项目内每个 Ref0 唯一归属一个 `dbnum`，而一个 `dbnum` 可以拥有多个 Ref0；因此 `dbnum → Ref0` 是一对多关系，`Ref0 → dbnum` 可唯一反查，但 Ref0 本身不是 `dbnum`。同一 Ref0 出现在不同 `dbnum` 中属于库归属冲突，不存在可自动选择的有效归属。
-_Avoid_: Ref0 数据库号、把 Ref0 当作 dbnum
+**RefNo 库归属 (RefNo Database Affiliation)**：
+一个合法 refno 属于哪个 `dbnum`，由它自己的 `word0` **按位解出**：`w0 & 0x1FFF | (w0 >> 13) & 0x3E000`（`vendor/e3d-io` `RefNo::dbno()`，与 core.dll `DB_Element::dbno` / `sub_5B05260` 同式，2.1 / 3.1 一致；证据 `docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md`）。bits 13..25 是 extent 号，所以同一库每个 extent 一个不同的 `word0`——`word0` 不是 `dbnum`，但也**不需要任何表**来反查。gen-model 里唯一的解法是 `data_interface::refno_route::refno_dbnum()`（`tests/refno_native_guards.rs` 守着，位公式别处不得再写）；解不出（`word1` 为负、dbno 为 0）是 `InvalidRefNo`，与「不在 MDB」分开报。
+_Avoid_: Ref0 库归属、ref0 反查、ref0 → dbnum 表、把 word0 当作 dbnum、逐库试查
 
-**Ref0 库归属缺失 (Unresolved Ref0 Affiliation)**：
-一个合法 Ref0 当前没有可用的 `dbnum` 归属。它表示模型依赖暂时无法定位，不等同于元素不存在，也不表示该依赖可以跳过。
-_Avoid_: Refno 不存在、忽略的外部引用
+**dbnum 路由目录 (dbnum Route Directory)**：
+`dbnum → 文件`的那张表（`data_interface::mdb_route_directory::MdbRouteDirectory`），只从当前 MDB 的 SYS/CURD 成员清单与每个成员文件的 60 字节头造（`from_membership`），再并入依赖项目（`included_projects`）的 CATA / PROP 文件头（`add_dependency_dir`），**不读任何元素**。它回答的是「这个 dbnum 的文件在哪、是什么类型、用哪份模板」（`pin` / `pin_for(preferred_project)`，`sesno: None` = 开库时冻最新），不回答「这个 refno 在哪个库」——那是位解码的事。同号跨项目按 `preferred_project` 选同类型副本并核头，MDB 声明路径胜出，落选的只记 `shadowed`。属性服务、树服务、探针三处的定位器都从它造；解出的 dbnum 不在目录里是 `DbNotInMdb`（声明了没文件是 `NoFileForDbnum`），**不回退扫描**。
+_Avoid_: 定位器（泛指时）、ref0 定位器、`InMemoryCataLocator`（生产路径）、骨架的 `locator_parts()`
 
-**Ref0 库归属冲突 (Conflicting Ref0 Affiliation)**：
-同一 Ref0 在项目文件索引中同时归属多个 `dbnum`，违反 Ref0 可唯一反查的不变量。系统不得猜选其中一个归属；只阻断命中该 Ref0 的工作，其他无冲突 Ref0 继续可用。
-_Avoid_: 重复 Ref0、任选一个 dbnum
+**跨库属性 (Cross-database Attribute)**：
+引用类属性（`SPRE` / `CATR` / `LSTU` / `PSPE` / `HSTU`、`OWNER`）的值是一个裸 refno；「跨库」不发生在取值那一步（取值只拷两个 word，零 I/O），而发生在**顺着它去读目标元素**那一步：位解码得 dbnum → 路由目录给文件 → 开库核头（文件自报 `db_mark` 必须等于解出的 dbnum，否则 `DbNumberMismatch`）→ 在目标库自己的索引上点查。跨库 `OWNER` 上溯（ZONE → SITE）与生成根定库（`model_source::dbnum_of_root`：解码 + 核成员是 DESI / ISOD + 只在那一个库点查一次）走同一条路。成本与 MDB 元素总数无关：读一个属性只开触达的库。真库对账口径是 `direct_attmap_probe --owner-climb` 的「解码 = 文件自报」账本（ams8000：1313/1313）。
+_Avoid_: 跨库引用解析（当指建表时）、换库反查、CATA 闭包（那是生成期把目录依赖**落库**的另一件事）
 
 **最小交付单元 (Minimum Delivery Unit, MDU)**：
 一类**具备独立成败与独立交付语义**的模型单元类型。类型集合由项目配置决定：默认 `BRAN / HANG / SUPPO / EQUI`，`delivery_unit_types` 可完全取代默认集合、`append_delivery_unit_types` 可在默认集合上追加；层级容器 `WORL/WORLD/SITE/ZONE` 与管件 `FTUB` 恒被拒绝。当变化元素自身或其最近祖先命中该类型时，以该单元为生成根；`FTUB` 及其子件在正常颗粒路径中也必须继续上溯，不能成为生成根。
@@ -103,7 +103,7 @@ _Avoid_: 水位、sesno 水位（泛指时）
 _Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
 
 **模型水位 (Model Watermark)**：
-某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、该库无未安定 `gen_root` 行、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。永不超过应用水位；房间任务、按需 `ensure`、启动退化窗口生成的根都**不推进**它。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（死信或 `http_422`，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
+某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、该库无未安定 `gen_root` 行、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（死信或 `http_422`，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
 _Avoid_: 模型凭证下限（那是它的校验者 `settled_floor`）、生成水位、模型进度、把它当「模型有多新」的答案、拿它当同步点
 
 **数据支撑 (Data Backing)**：
@@ -127,19 +127,19 @@ _Avoid_: 凭证不一致、模型水位漂移、把 `settled_floor` 当第二枚
 _Avoid_: 幽灵水位（那是数据面的）、模型缺失、按幽灵水位那套处置
 
 **兼容接管 (Legacy Adoption)**：
-对「已有数据的库」做兼容初始化时，模型 / 房间水位那一半的缺省处置（ADR-060 D10，用户 2026-09-10 拍板「模型水位 + 房间水位默认按数据水位保持一致」）：`applied_sesno > 0`、`model_sesno` 从未写过、且旧管线留有模型投影（`inst_relate` / `tubi_relate`）的库，启动时把 `model_sesno` 与 `room_sesno` **填成** `applied_sesno`（只填空、不贴时刻），此后在对账里是一致、在启动核对里按 `legacy_adopted` **跳过恢复 Task**——不再为「兼容一个已有模型的库」付一次全库模型重建。数据在、模型一行没有的库不接管：显式记 `model_sesno = 0`，照旧由模型面生成。它是数据面 pe 兼容播种（ADR-001）在模型面的对偶，排在索引与 `anc/dbnum` 回填之后、启动模型核对之前。`NONE` 与显式 `0` 分开：后者是判定，播种不改写。
+对「已有数据的库」做兼容初始化时，模型水位那一半的缺省处置（ADR-060 D10，用户 2026-09-10 拍板「模型水位 + 房间水位默认按数据水位保持一致」；其中房间那半句随 `room_sesno` 退役，接管本身保留，ADR-073 D7）：`applied_sesno > 0`、`model_sesno` 从未写过、且旧管线留有模型投影（`inst_relate` / `tubi_relate`）的库，启动时把 `model_sesno` **填成** `applied_sesno`（只填空、不贴时刻），此后在对账里是一致、在启动核对里按 `legacy_adopted` **跳过恢复 Task**——不再为「兼容一个已有模型的库」付一次全库模型重建。数据在、模型一行没有的库不接管：显式记 `model_sesno = 0`，照旧由模型面生成。它是数据面 pe 兼容播种（ADR-001）在模型面的对偶，排在索引与 `anc/dbnum` 回填之后、启动模型核对之前。`NONE` 与显式 `0` 分开：后者是判定，播种不改写。
 _Avoid_: 模型水位播种（只说了接管那一格）、把接管当成盖章 / 完成凭据、把数据在模型无的库也接管、把显式 0 当成没写过
 
 **库一致性判决 (Dbnum Consistency Verdict)**：
-对一个 `dbnum` 回答「此刻数据与模型是否一致」的**单点结论**，三态：**一致**（应用水位已建立、模型水位与之相等、且没有「还在赶」的根，ADR-060 D4）／**落后**（前述任一不成立，附四格计数）／**不判**（没有可判等的水位对：读透形态下数据面不摄入、应用水位恒 0；或摄入形态下数据水位尚未建立）。「不判」是中性陈述，不是落后、不是告警。结论由同一行上的两枚水位与该库生成根的实时四格（已追平 / 还在赶 / 已放弃 / 没生成过）合成；「已放弃」与「没生成过」不否决结论，但必须与它**并排陈述**（ADR-060 D5）。它是读者（面板、健康页、批次回执、启动日志）唯一该消费的一致性口径——任何读者都不得自己拿水位列、凭证下限或队列计数重新拼一个。房间归属不在它的承诺范围内。
+对一个 `dbnum` 回答「此刻数据与模型是否一致」的**单点结论**，三态：**一致**（应用水位已建立、模型水位与之相等、且没有「还在赶」的根，ADR-060 D4）／**落后**（前述任一不成立，附四格计数）／**不判**（没有可判等的水位对：读透形态下数据面不摄入、应用水位恒 0；或摄入形态下数据水位尚未建立）。「不判」是中性陈述，不是落后、不是告警。结论由同一行上的两枚水位与该库生成根的实时四格（已追平 / 还在赶 / 已放弃 / 没生成过）合成；「已放弃」与「没生成过」不否决结论，但必须与它**并排陈述**（ADR-060 D5）。它是读者（面板、健康页、批次回执、启动日志）唯一该消费的一致性口径——任何读者都不得自己拿水位列、凭证下限或队列计数重新拼一个。房间归属只在 `room_membership=true` 时属于这项承诺；关闭时“一致”仅指数据与模型几何，读者必须同时展示 `room_membership=false`，不得把它解释成房间也一致。
 _Avoid_: 模型追平（只说了一半）、`model_caught_up`（行内那一半的名字）、把 `settled_floor` 露出来当判决、面板自己算一致、把「不判」画成落后
 
 **重建批次 (Reinit Batch)**：
-检出文件回退后入队的数据批次，按首次导入形状（窗口 `1..file_latest_sesno`）排进同一条数据批次队列。扫描只分类入队、不删数据；worker 出队后在冻结点复核仍判回退，才执行 `wipe_dbnum_for_reinit` 整库清空（水位行清值不删行、spatial epoch 同阶段递增），随后按首次导入重新解析，应用水位随重建归零再重新建立。
+检出文件回退、发现残留写入标记（见「未完成写入重初始化」，ADR-073 D3）或人工点名重新解析（`POST …/data/reinitialize`，ADR-073 D5）后入队的数据批次，按首次导入形状（窗口 `1..file_latest_sesno`）排进同一条数据批次队列。扫描只分类入队、不删数据；worker 出队后在冻结点复核（回退仍成立 / 标记确在 / 人工请求且无身份歧义），才执行 `wipe_dbnum_for_reinit` 整库清空（水位行清值不删行、两枚水位归零、spatial epoch 同阶段递增），随后按首次导入重新解析，应用水位随重建归零再重新建立。它是**唯一**的恢复形态：没有按 sesno 的部分回退（ADR-073 D3）。
 _Avoid_: 重建任务、对齐批次、realign 批次
 
 **本期执行范围 (Update Scope)**：
-增量摄入认哪些库的**唯一 MDB 口径**（`update_scope.rs`）：当前 MDB 的 CURD 里 STYP=DESI/ISOD 的库号，取**声明口径**而不是「已解析出 SITE 的库」——MDB 列了却从没导入过的库正是 `initialization_required` 那一档，该出现在范围里等人确认。库侧 `MDB` 表为空（全新命名空间）时回落到 `init_mdb` 已 `install` 的文件侧成员名单（同一判据 `DESI_STYP | ISOD_STYP`）。SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受它门控——成员名单本身就存在这些库里，挡掉它们范围定义会自己冻住。`manual_db_nums` / `exclude_db_nums` 自 2026-08-06 起不再参与这个判定（issue #10），只供全量模型生成与按需基线解析。它与**监听限定域**是**叠加**关系，不是二选一：数据批次入队走 `in_scope_with` 四道门串联（外项目运行态 sys 永不进 → 监听限定 → 调试限定 → MDB 范围），`[库一致性]`、模型凭证核对、`/health` 与按需 `sync_and_seed_model_coverage` 同样套监听门，所以**增量数据面的有效范围 = MDB 声明的 DESI ∩ watch_dbnums**（2026-09-08 共识 d-25）。限定时 `[init] N 个库被 watch_dbnums 监听限定跳过`、`[库一致性]` 只出域内几行，是**预期输出而非缺陷**；审核与改动都不得拿「MDB 全量」去要求数据面（那是常驻房间模型 P3-init 自己的原则，源码钉 `room_files_never_consult_the_watch_scope`）。已知且允许的残余：范围之内声明了、盘上却没有文件的设计库，文件驱动的 `sweep_dirs` 在三个「跳过」桶里都不会碰到它，只在整面重扫收尾点名一句（「没有解析到文件」，不记 blocker、不改范围定义），此外只有骨架装载的 `problems` 与手动预览的 `not_in_project` 看得见它。
+增量摄入认哪些库的**唯一 MDB 口径**（`update_scope.rs`）：当前 MDB 的 CURD 里 STYP=DESI/ISOD 的库号，取**声明口径**而不是「已解析出 SITE 的库」——MDB 列了却从没导入过的库正是 `initialization_required` 那一档，该出现在范围里等人确认。库侧 `MDB` 表为空（全新命名空间）时回落到 `init_mdb` 已 `install` 的文件侧成员名单（同一判据 `DESI_STYP | ISOD_STYP`）。SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受它门控——成员名单本身就存在这些库里，挡掉它们范围定义会自己冻住。`manual_db_nums` / `exclude_db_nums` 自 2026-08-06 起不再参与这个判定（issue #10），只供全量模型生成与按需基线解析。它与**监听限定域**是**叠加**关系，不是二选一：数据批次入队走 `in_scope_with` 四道门串联（外项目运行态 sys 永不进 → 监听限定 → 调试限定 → MDB 范围），`[库一致性]`、模型凭证核对、`/health` 与按需 `sync_and_seed_model_coverage` 同样套监听门，所以**增量数据面的有效范围 = MDB 声明的 DESI ∩ watch_dbnums**（2026-09-08 共识 d-25）。限定时 `[init] N 个库被 watch_dbnums 监听限定跳过`、`[库一致性]` 只出域内几行，是**预期输出而非缺陷**；审核与改动都不得拿「MDB 全量」去要求数据面。已知且允许的残余：范围之内声明了、盘上却没有文件的设计库，文件驱动的 `sweep_dirs` 在三个「跳过」桶里都不会碰到它，只在整面重扫收尾点名一句（「没有解析到文件」，不记 blocker、不改范围定义），此外只有骨架装载的 `problems` 与手动预览的 `not_in_project` 看得见它。
 _Avoid_: 增量范围（泛指时）、MDB 范围（当指监听限定域时）、按 MDB 全量核对数据面、把 `watch_dbnums` 当范围定义、把 `manual_db_nums` 当范围
 
 **监听限定域 (Watch Scope)**：
@@ -163,7 +163,7 @@ _Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时
 _Avoid_: 新库自动初始化开关（当指这道门时，词条以此为准）、初始化白名单、冷启动开关、把 `startup_autorun` 当它用、把它当范围定义
 
 **模型增量类型限定 (Model Incremental Type Scope)**：
-把**模型增量的消费**圈到指定类型生成根的调试开关（`DbOption.toml` 的 `model_incremental_types = ["BRAN", "EQUI"]`，环境变量 `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI` 压过它；不写 / 空表 = 不限类型，判定与引入前逐位相同）。它是**消费门，不是计划门**：`model_update_pending` 里只有 `regen_root` / `delete_cleanup` 两种行按 `noun` 放行，名单外类型的根照常规划、照常入队、`gen_root` 照常标 stale，只是留在队列里不被本进程认领——因此凭证不前移、重启后随退化窗口重排、名单一撤即照常消费；在计划层摘掉工作项反而是错的（不标 stale = 下一窗给陈旧几何前移凭证，且永不回补）。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）一律不受影响；`Transform`、`CascadeExpand`、`PostRegenAabb`、房间任务、按需 `ensure` 与 noun 未知（空）的行不看名单。与**监听限定域**（按库圈数据批次与模型工作单，动数据面）、**最小交付单元**配置 `delivery_unit_types`（决定生成根怎么选，改变根的归并）三者互不代替。护栏与监听限定同一套：启动横幅、`/health` 的 `model_incremental_types` 栏与 `model_update_pending.held_by_model_incremental_types` 计数、preview / execute 回执 `warnings`、数据窗口计划 `warnings` 按类型点名本窗暂扣的根、worker 空闲轮首次一句，都点名配置键与来源，且措辞与监听限定 / MDB 范围判定无交集。
+把**模型增量的消费**圈到指定类型生成根的调试开关（`DbOption.toml` 的 `model_incremental_types = ["BRAN", "EQUI"]`，环境变量 `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI` 压过它；不写 / 空表 = 不限类型，判定与引入前逐位相同）。它是**消费门，不是计划门**：任务的单元清单里只有 `regen_root` / `delete_cleanup` 两种单元按 `noun` 放行，名单外类型的根照常规划、照常进清单、`gen_root` 照常标 stale，只是本进程不生成它——因此凭证不前移、重启后随退化窗口重排、名单一撤即照常生成（判据 `model_type_scope::admits`；模型意图队列表随 ADR-072 D5 退役后，放行点从「领行」改到任务执行该单元那一刻）；在计划层摘掉工作项反而是错的（不标 stale = 下一窗给陈旧几何前移凭证，且永不回补）。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）一律不受影响；`Transform`、`CascadeExpand`、`PostRegenAabb`、按需 `ensure` 与 noun 未知（空）的行不看名单；房间归属随根算，没有单独的房间行（ADR-073 D1）。与**监听限定域**（按库圈数据批次与模型工作单，动数据面）、**最小交付单元**配置 `delivery_unit_types`（决定生成根怎么选，改变根的归并）三者互不代替。护栏与监听限定同一套：启动横幅、`/health` 的 `model_incremental_types` 栏、preview / execute 回执 `warnings`、数据窗口计划 `warnings` 按类型点名本窗暂扣的根、worker 空闲轮首次一句，都点名配置键与来源，且措辞与监听限定 / MDB 范围判定无交集。
 _Avoid_: 模型类型过滤、noun 白名单、类型筛选、MDU 限定（指 `delivery_unit_types` 时）、模型范围（指监听限定域时）
 
 **候选库文件 (Candidate Database File)**：
@@ -177,10 +177,6 @@ _Avoid_: 文件事件、变更消息、notify 事件
 **登记文件身份 (Registered File Identity)**：
 系统为一个 `dbnum` 认可的数据库类型与物理文件身份。它只在首次登记或确认唯一、同类型且水位不回退的路径迁移时改变；阻断异常中的候选文件不是新的登记身份。
 _Avoid_: 最近扫描文件、观察到的文件身份
-
-**待重试单元 (Pending Model Unit)**：
-持久化保存的独立模型任务：按需生成的保护记录、跨窗口派生工作与房间任务积压。稳态增量窗口内成功完成的生成根不会成为待重试单元；只有窗口未收敛的工作随尾事务持久化。任务以动作与目标为唯一身份，新触发以 revision 收口。
-_Avoid_: 重试任务、pending task
 
 **冻结吸收 (Freeze-time Absorption)**：
 数据批次在执行起点重扫得到更高上界时，将该上界已经覆盖的后继排队区间并入当前运行批次。完全覆盖的后继任务以“已被当前批次吸收”成功终止，部分覆盖的后继区间从冻结上界之后继续。
@@ -219,23 +215,35 @@ _Avoid_: 模型元数据、gen_root 表（当指概念时）、模型缓存
 ## 模型生成执行（Model Generation Execution）
 
 **dbnum 任务 (Dbnum Task)**：
-一个 `dbnum` 的一次增量就是一个任务：数据窗口、模型重算、房间重算、凭证前移与模型水位收尾在同一个任务里一气做完（ADR-065 D1）；「欠什么」不另记账，只由应用水位与模型水位两枚水位回答。稳态任务跨库并行、同库串行；初始化意图的任务按入队先后串行。它同时是**隔离单元**：同一 `dbnum` 的库行在任一时刻只有它的任务一个写者，所以写库不需要 CAS、ACK 或收口（ADR-071 D1）。
+一个 `dbnum` 的一次增量就是一个任务：数据窗口、模型重算（`room_membership=true` 时每根算完几何紧接着算房间归属，关闭时跳过房间，ADR-073 D1）、凭证前移与模型水位收尾在同一个任务里一气做完（ADR-065 D1）；任务末没有整库房间段。模型欠账由应用水位与模型水位回答，关闭期间的房间欠账不进水位，靠开关状态与显式模型重建处置。稳态任务跨库并行、同库串行；初始化意图的任务按入队先后串行。它同时是**隔离单元**：同一 `dbnum` 的库行在任一时刻只有它的任务一个写者，所以写库不需要 CAS、ACK 或收口（ADR-071 D1）。
 _Avoid_: 数据批次（当指含模型与房间的整个执行体时）、模型 drain、pending 任务、模型积压
 
 **任务内序列化 (In-Task Serialization)**：
-dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、房间边与三枚水位**同步**写进 SurrealDB；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务与库之间没有队列（ADR-071）。模型行按事务上限跨根合块写；数据水位在数据尾事务写，模型水位与房间水位在任务收尾的一笔事务写。
-_Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS
+dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与它同一笔。
+_Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS、发布阶段、文件轮次、房间水位、任务末房间段
+
+**写入标记 (Write Marker)**：
+一个 `dbnum` 在库里的一行写入状态：任务第一笔写库前置 `writing{S,T}`，任务收尾那一笔与水位同事务置 `finished`。它回答「这个库有没有一次没写完的任务」，不回答「欠什么」——欠什么仍由两枚水位回答（ADR-072 D1 / ADR-073 D2）。见到它停在 `writing` 的唯一处置是整库重初始化（见「未完成写入重初始化」，ADR-073 D3）；正常收尾的 `Partial` 也置 `finished`，不算没写完。
+_Avoid_: attempt 行、增量尝试记录、pending 状态、锁
+
+**未完成写入重初始化 (Unfinished-Write Reinitialization)**：
+启动水化段或任务开工前见到某库的写入标记停在 `writing{S,T}`（五类意图一律），对该库**只有一种处置**：本批就地转 `Reinitialize`——`wipe_dbnum_for_reinit` 整库清空（数据、模型、房间边、`gen_root`、两枚水位归零、`state_revision + 1`、spatial epoch 递增），再按首次导入重新解析当前文件、整库重生成模型（含逐根房间归属）；进程内同时作废该库的水位镜像、`GeometryBaseline`、一致性普查缓存与模型投影，空间树置脏（ADR-073 D3）。不按 `(dbnum, sesno > S)` 谓词删痕迹、不排 S→T 重放、不分面。它与「重建批次」是同一条 worker 路（清库仍只在冻结点，ADR-021 §3），差别只在触发源是残留标记而不是文件回退。正常收尾的 `Partial`（标记已置 `finished`、某一面水位没盖）**不**算未完成写入，照 ADR-071 D3 由下一次任务重做。
+_Avoid_: 回退到水位、按 sesno 回退、部分回滚、分面回退、还原到快照、把 `Partial` 当成未完成写入
+
+**库读白名单 (Database Read Allow-list)**：
+对 SurrealDB 的读只允许水位 / sesno / 写入状态这类控制面信息、启动水化一次、字典一次；其余对库的一切操作是写或删。「先删后插」的删那一半也是谓词删，不是查出全集再点名（ADR-072 D5）。
+_Avoid_: 对账读（泛指时）、回读确认、探针
 
 **内存镜像 (In-Memory Mirror)**：
-进程内每个 `dbnum` 一份的三水位、`gen_root` 凭证下限、安定根集与失败根集的工作副本：启动时从库反序列化一次，任务收尾写库成功后更新；运行期一切比对（要不要开窗、S 是多少、哪些根安定、房间前提、四格）都读它，不再逐次查库（ADR-071 D5 / D7）。真值仍在库里，镜像只是它在内存中的等价物。
+进程内每个 `dbnum` 一份的两枚水位、`gen_root` 凭证下限、安定根集与失败根集的工作副本：启动时从库反序列化一次，任务收尾写库成功后更新；运行期一切比对（要不要开窗、S 是多少、哪些根安定、四格）都读它，不再逐次查库（ADR-071 D5 / D7，ADR-073 D2）。真值仍在库里，镜像只是它在内存中的等价物。
 _Avoid_: 本地账本、缓存（泛指时）、第二份真值、水位探针
 
 **ModelOnly 任务 (ModelOnly Task)**：
-只有模型半边、没有数据半边的 dbnum 任务：起点是该库的安定凭证下限、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。
-_Avoid_: 模型恢复批次、退化窗口任务、全库过期入队、model drain 页
+只有模型半边、没有数据半边的 dbnum 任务：起点是该库的安定凭证下限、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；`room_membership=true` 时模型半边含每根房间归属，关闭时只生成模型。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。重新打开房间开关不会制造模型水位缺口，历史房间欠账需显式 `model/rebuild`。同族的 **`RoomOnly`** 是生成路径上的**内部**意图：同一条逐根路径、跳过几何生成，用已有几何对该库全部根重算房间归属并重写两张边；它只在面板（房间定义）自身变化时由本窗变更集触发（d-819，见「逐根房间归属」），不是对外契约、不引入房间水位，失败语义同逐根。
+_Avoid_: 模型恢复批次、退化窗口任务、全库过期入队、model drain 页、房间任务、`rooms/rebuild` 对外口
 
 **联动更新 (Cascade Update)**：
-元素 A 变了、**A 自己以外**的模型也必须跟着重算的那些边。全仓一共十一类（容器位姿→子树、删除→子孙、改挂→新旧两根、CATA→引用它的 DESI、连接/邻居、派生几何单元、房间归属、空间树/AABB，加上明确不做的 UDA 依赖递归与 XRPNTR、以及在案未做的 `graphicsBehaviour` 中间祖先）。**唯一索引是 `docs/2026-09-04_model-cascade-update-inventory.md` §1 那张表**——新增或改动任何一条联动边，先改那张表。它不是「一次变更要重算多少东西」（那是扇出），也不是「谁是生成根」（那是上卷）。core 侧的对应物是 `change/EVALAT` 那张 noun × 属性 → 目标的规则表（`docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md`）：owner 链上卷那一半我们全有，**引用类联动（结构连接 `CREF`↔`JOIS`/`JOIE`、孔洞反向引用）在 direct 文件窗口路径上缺**，真库普查坐实其中结构连接是洞（清单 #12，对齐计划 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md` C2）；0907 结构连接那一半已接线——`src/data_interface/structural_connection.rs` 从变更元素正向读、核对回指、把对端的生成根并进 `touched`（开关 `model_structural_connection_cascade` 默认关）；孔洞那一半 core 自己也只看 owner 子树成员（`DFIND` 是 dabacon 成员导航，`EVALAT` 自己没有反向引用调用），整根重生成构造性覆盖、不接；core 侧仅剩的反向尾巴是电缆两条——`CWBRAN` 的 `CLIST`、`EQUI`/`ELCONN` 的 `ELCXRF` 都是伪属性、底下是引用表反向查 `STAREF`/`ENDREF` 指向的 `CABLE`（0907 C6，证据 §8.6），同日 C8 同库版接线——`src/data_interface/cable_endpoint.rs` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用者、把电缆的生成根并进 `touched`（开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），电缆几何落地前几何上不显。
+元素 A 变了、**A 自己以外**的模型也必须跟着重算的那些边。全仓一共十一类（容器位姿→子树、删除→子孙、改挂→新旧两根、CATA→引用它的 DESI、连接/邻居、派生几何单元、房间定义→该库全部根的房间归属、空间树/AABB，加上明确不做的 UDA 依赖递归与 XRPNTR、以及在案未做的 `graphicsBehaviour` 中间祖先）。房间那一类的现行形态（ADR-073 D1，d-819）：构件自己的归属随它的根一起算、不是联动边；面板 / 房间节点的增、删、改名、换属主出现在本窗变更集里时，给该库排一条内部 `RoomOnly`，用已有几何对该库全部根重算归属——不重建结构触发账本、不另设待办行。**唯一索引是 `docs/2026-09-04_model-cascade-update-inventory.md` §1 那张表**——新增或改动任何一条联动边，先改那张表。它不是「一次变更要重算多少东西」（那是扇出），也不是「谁是生成根」（那是上卷）。core 侧的对应物是 `change/EVALAT` 那张 noun × 属性 → 目标的规则表（`docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md`）：owner 链上卷那一半我们全有，**引用类联动（结构连接 `CREF`↔`JOIS`/`JOIE`、孔洞反向引用）在 direct 文件窗口路径上缺**，真库普查坐实其中结构连接是洞（清单 #12，对齐计划 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md` C2）；0907 结构连接那一半已接线——`src/data_interface/structural_connection.rs` 从变更元素正向读、核对回指、把对端的生成根并进 `touched`（开关 `model_structural_connection_cascade` 默认关）；孔洞那一半 core 自己也只看 owner 子树成员（`DFIND` 是 dabacon 成员导航，`EVALAT` 自己没有反向引用调用），整根重生成构造性覆盖、不接；core 侧仅剩的反向尾巴是电缆两条——`CWBRAN` 的 `CLIST`、`EQUI`/`ELCONN` 的 `ELCXRF` 都是伪属性、底下是引用表反向查 `STAREF`/`ENDREF` 指向的 `CABLE`（0907 C6，证据 §8.6），同日 C8 同库版接线——`src/data_interface/cable_endpoint.rs` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用者、把电缆的生成根并进 `touched`（开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），电缆几何落地前几何上不显。
 _Avoid_: 级联（泛指时）、扇出、反查、依赖传播
 
 **图形行为 (Graphics Behaviour)**：
@@ -243,7 +251,7 @@ noun 字典字段 `graphicsBehaviour`（字段号 5099119，`DB_Noun` 偏移 180
 _Avoid_: gb 标志（当指语义时）、图形忽略位、XGEOMETRY
 
 **模型生成结果 (Model Generation Outcome)**：
-某个生成根最近一次成功完成的生成结论，包括存在可绘制模型或确定没有可绘制几何。它是已经发生的成功事实，不是待重试单元；生成失败不会用失败结果覆盖它。
+某个生成根最近一次成功完成的生成结论，包括存在可绘制模型或确定没有可绘制几何。它是已经发生的成功事实，不是任何待办或重试记录；生成失败不会用失败结果覆盖它。
 _Avoid_: 生成任务状态、pending 终态、实例计数
 
 **分支原子替换 (Branch-Atomic Replacement)**：
@@ -270,10 +278,6 @@ _Avoid_: 保存方案、写计划、保存脚本
 实例保存的路径区分：`TargetedReplace` 保留定向 scoped cascade delete；`FullBuild` 不预删。定向与全量共用同一保存 receiver 与去重规则。
 _Avoid_: 保存策略、写模式、保存档位
 
-**revision 收口 (Revision-safe Settlement)**：
-以待重试单元行的队列内部单调 `revision` 为条件完成删除或标记失败。revision 对不上意味着该任务已因新工作重新入队，本次执行结果不足以清除它；来源 `dbnum/sesno` 只用于追踪，不参与 revision、跨库排序、去重或复活判断。
-_Avoid_: 收尾、结算、settle
-
 **切片流水线 (Slice Pipeline)**：
 基线初始化的并行形态。并行单位是**生成根**——它本来就有 per-根锁这一现成粒度；切片（ZONE）只决定「一次把多少数据拉进来」，是内存分片单位，不决定几件事同时做（按片并行要整片等最慢的根，长尾吃掉加速比）。一片一个 `mem://` 实例，片内的根共享本片实例。根级与根内 fan-out 共用同一个几何并发闸，额度默认等于物理核数，不再各自写死宽度。
 _Avoid_: ZONE 并行、按片并行、分片并发
@@ -297,7 +301,7 @@ _Avoid_: 平表清扫、缓存刷新、sweep（泛指时）
 ## 数据窗口写回（Window Write-back）
 
 **稳态增量窗口 (Steady-state Increment Window)**：
-在已有基线之上按会话区间推进的常规数据批次（dbnum × 会话区间）；它走数据窗口直写，也是模型凭证前移与模型窗口意图的适用范围。基线 / 冷启动 / 全量生成路径不是稳态窗口（见「分块解析基线」）。
+在已有基线之上按会话区间推进的常规数据批次（dbnum × 会话区间）；它走数据窗口直写，也是模型凭证前移的适用范围。基线 / 冷启动 / 全量生成路径不是稳态窗口（见「分块解析基线」）。
 _Avoid_: 增量批次（泛指时）、暂存窗口
 
 **冻结源 (Frozen Source)**：
@@ -324,16 +328,8 @@ _Avoid_: 软删（当指「只翻 pe.deleted、别的行不动」的旧写法时
 数据窗口 S→T 提交后，对 e3d-model `plan_update(S→T)` 判定**未被触到**、已安定且落后于 T 的生成根，一条语句批量把 `gen_root.source_end_sesno` 推到 T（行上记 `credential_advanced_from`），不重生成、不动几何 / manifest / revision。护栏：候选数超过索引键数的 30%，或 `plan_update` 报 `unresolved` 非空，即整窗放弃前移、全部根照旧过期，回执记 `credential_advance_degraded`。它动的是**根级**凭证，与库级的**模型水位**（ADR-060）不是一回事：前移只说「这份几何到 T 为止仍然有效」，水位说「整库到 T 为止已经追平」。
 _Avoid_: 凭证刷新、水位前移、跳过生成、与模型水位混用
 
-**模型窗口意图 (Model Window Intent)**：
-数据窗口尾事务与应用水位同事务写下的模型侧工作声明：本窗口受影响根集（`plan_update` 经 `touches_roots` 判定，含搬迁两端根与被删根的 `DeleteCleanup`）及其 revision，随尾事务 upsert 进 `model_update_pending`（进程本地账本，ADR-050）。它只说「这一窗要生成什么」，不承诺已生成；eager 生成的范围就是它，其余根前移凭证后懒生成、等按需 `ensure`（ADR-056 D9）。
-_Avoid_: 模型任务（泛指时）、全库过期入队、模型计划（当指 e3d-model 的 `UpdatePlan` 时）
-
-**提交后收敛 (Post-commit Reconciliation)**：
-水位与派生意图已经共同提交，但全局空间状态尚未持久化完成的过渡阶段。该阶段可跨重启恢复，并在完成前阻止下一数据批次进入。
-_Avoid_: 普通积压、空闲轮副作用
-
 **窗口阻断 (Window Block)**：
-稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败**不阻断窗口**（ADR-056 D1）：根级失败进 `model_update_pending` 重试账，水位照常推进。
+稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败**不阻断数据窗口**（ADR-056 D1）：根级失败只留痕、不排队（ADR-065 D4），数据水位照常推进。房间归属开启时算不出会让该根成为模型失败；房间开关关闭时不运行计算，因此不产生这类失败。
 _Avoid_: 死信降级、跳过坏根、模型阻断
 
 **pe_owner 边 (Owner Edge)**：
@@ -351,6 +347,21 @@ _Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（�
 - **提交单元 (Commit Unit)**、**暂存库 (Staging Database)**、**暂存工作集 (Staged Working Set)**、**语句日志 (Statement Journal)**、**水位门控写回 (Watermark-gated Write-back)**、**commit-time-only 语句 (Commit-time-only Statement)**——ADR-017 kv-mem 暂存窗口的构件，随暂存层退役；现行口径见上方「数据窗口直写」。
 - **窗口阻断的模型侧含义**（生成根重试穷尽 → 整窗口水位停止、持久层零痕迹）——被 ADR-056 D1 取代，模型失败与水位解耦。
 - **成员关系仲裁补删 (ADR-036 Membership Reconciliation)**、**幽灵新增丢弃**——old-pdms-io 净窗口收集器在索引差分之外按成员表补判的删除 / 丢弃；2026-09-03 收集器换成 e3d-io 底座后随之退役（两根索引差分即终态，`membership_deleted` 恒 0）。现行口径见上方「净窗口收集器」。
+- **模型窗口意图 (Model Window Intent)**——数据窗口尾事务写进 `model_update_pending` 的模型侧工作声明；2026-09-10 随 `model_update_pending` 整体退役（ADR-071 D9 / ADR-072 D6），任务的计划只在内存。
+- **提交后收敛 (Post-commit Reconciliation)**——「水位已提交、空间状态尚未持久化完成、阻止下一批进入」的过渡阶段，就是 publish 屏障的名字；2026-09-10 随发布阶段退役（ADR-072 D4），空间树随模型行提交就地收敛。
+
+### 已退役词条（retired，ADR-065 / ADR-071 / ADR-073）
+
+以下词条只为读 2026-07-27 ～ 2026-09-12 之间的 ADR / 计划 / 证据时对照使用，**现行代码与文档不得再用**（现行口径见「逐根房间归属」「未完成写入重初始化」「任务内序列化」「RefNo 库归属」）：
+
+- **回退到水位 (Rollback to Watermark)**——见到 `writing{S,T}` 按 `(dbnum, sesno > S)` 谓词删痕迹、三水位退回 S、排 S→T 重放（ADR-072 D2，含 d-570「不删 `pe` 顶点」）；2026-09-10 随「任何未完成写入 → 整库重初始化」退役（ADR-073 D3），连同 `DELETE …/data/above/{watermark}` 那半个运维端点（ADR-073 D5；GET 半边保留）。「三水位」「房间水位」两个说法随之一并退。
+- **房间增量 (Room Increment)**——「从文件更新轮次发布到 `RoomRecalcPanel` / `RoomRecalcElement` 结算」的整条流程，含几何目标 + 结构触发、发布屏障、消费与结算；随房间流程整套退役（ADR-073 D1）。硬验收「增量收敛 == 全量重建，逐边」不退，挂在「逐根房间归属」上。
+- **已发布房间几何 (Published Room Geometry)**——`room_published_inst` 里由 `published_file_input` 清单选中的版本化行，房间增量的两条分支只读它；三表已 `REMOVE TABLE`（ADR-072 R5 / D6，ADR-073 D6）。
+- **同轮吸收 (Same-round Absorption)**——同一轮内整间分支已覆盖某构件时跳过其元素任务的省算优化；没有「轮」也没有元素任务（ADR-073 D1）。
+- **房间重建要求 (Room Rebuild Requirement)**——结构面板枚举失败时随数据水位写入 `room_build:main` 的持久降级标志、只由下一次成功的启动全量房间重建清除（ADR-040 D5）；结构触发账本与启动全量房间重建都退（ADR-073 D1；ADR-040 作废）。
+- **文件更新轮次 (File Update Round)**、**已发布派生输入 (Published Derivation Input)**、**空间发布版本 (Published Spatial Version)**——ADR-062 文件轮次屏障 / 发布视图 / manifest 的三个构件（冻结终点 `T` 的更新单位；空间树与房间算法可消费的最后成功文件版本集合；候选空间变更经意图重放、快照落盘、切树后的可消费版本）；ADR-065 D8 起退役、ADR-072 R3 删除。空间树今天随模型块提交就地收敛，快照头记各库 `(applied_sesno, model_sesno)`（ADR-072 D4，ADR-073 D1）。
+- **待重试单元 (Pending Model Unit)**、**revision 收口 (Revision-safe Settlement)**——`model_update_pending` 里持久化保存的独立模型任务（按需生成保护记录、跨窗口派生工作、房间任务积压，以动作 + 目标为身份）与「以该行队列内部单调 `revision` 为条件完成删除 / 标记失败」的收口规则；表与 drain 随 ADR-065 D3 / ADR-071 D9 / ADR-072 D6 整体退役（ADR-065 实施约束 4 点名的搬家），失败只留痕不排队（ADR-065 D4）。
+- **Ref0 库归属 (Ref0 Database Affiliation)**、**Ref0 库归属缺失 (Unresolved Ref0 Affiliation)**、**Ref0 库归属冲突 (Conflicting Ref0 Affiliation)**——「项目内每个 Ref0 唯一归属一个 `dbnum`、`Ref0 → dbnum` 靠全库扫描建表反查、同一 Ref0 落两库即冲突」那套说法；2026-09-12 随 RefNo 原生路由退役（母计划 `docs/plans/2026-09-12-refno-native-routing-and-lazy-mdb-plan.md`，切片 W1–W7 提交 `bb16105d2` / `5cc5e3e04` / `425ca98d8` / `7f501ab0d`）：dbnum 从 refno 位里解，core.dll 里从来没有这张表；「缺失」变成 `InvalidRefNo` / `DbNotInMdb` / `NoFileForDbnum` 三种明确错误，「冲突」在位解码下不存在（同号跨项目的文件歧义由「dbnum 路由目录」的 `preferred_project` 与 `initialization_phase` blocker 处置）。现行口径见上方「RefNo 库归属」「dbnum 路由目录」「跨库属性」。`DirectStoreError::UnresolvedRef0`、`model_source::DBNUM_BY_REF0`、`InMemoryCataLocator::build_for_project` 生产依赖已删；`MdbMemoryStore.affiliations` 本体留母计划阶段 6 删。
 
 ## 依赖入库（Dependency Ingestion）——2026-09-06 起，CATA 按 DESI 依赖入库
 
@@ -431,35 +442,39 @@ _Avoid_: 索引建表、index-first
 ## 房间归属（Room Membership）
 
 **房间归属 (Room Membership)**：
-构件与房间的从属关系，经面板物化为两类边：`room_relate`（面板→构件，带 `inside_count`/`center_dist` 排序字段）与 `room_panel_relate`（房间→面板）。材料表 surql 经 `fn::room_code` / `fn::room_num_of` 消费；是可事后重建的派生数据。
+构件与房间的从属关系，经面板物化为两类边：`room_relate`（面板→构件，带 `inside_count`/`center_dist` 排序字段）与 `room_panel_relate`（房间→面板）。材料表 surql 经 `fn::room_code` / `fn::room_num_of` 消费；是可事后重建的派生数据。写者只有生成路径：每根模型算完紧接着算它的归属，边与该根的模型行同事务落库（见「逐根房间归属」，ADR-073 D1）。两张表的定义与 `fn::room_code`（hd / hh 两版）/ `fn::room_relate_of` / `fn::room_num_of` / `get_room_nodes.surql` 一律不动（ADR-073 D4）。
 _Avoid_: 房间关系、房间隶属
 
-**房间增量 (Room Increment)**：
-从一个文件更新轮次发布，到该轮全部房间目标（`RoomRecalcPanel` / `RoomRecalcElement`）结算为 `room_relate` / `room_panel_relate` 边的整条链，含触发（几何目标 + 结构触发）、发布屏障、消费与结算。它是**过程**；「房间归属」是它的**结果数据**。唯一硬验收是「增量收敛结果 == 全量重建结果，逐边对拍」。
-_Avoid_: 房间增量更新（口语可用，词条以此为准）、房间刷新、房间同步
+**逐根房间归属 (Per-root Room Membership)**：
+房间归属的现行算法形态（ADR-073 D1 / D2）：一个生成根的完成 = 生成最终几何 → 用当前候选面板做点包含筛选、算出该根下每个构件属于哪些面板 → 模型行与 `room_relate` / `room_panel_relate` 边在同一笔事务写入。房间不是独立阶段：没有房间目标、房间轮、发布 / 结果目录、常驻模型换代、结构触发账本与房间水位；任务末没有整库房间段。某根的归属算不出来或写不进去 = 该根本轮未完成（非安定、凭证不前移、`model_sesno` 不越过），不排队、不自动重试。面板自身的变化（FRMW/SBFR 改名命中关键字、PANE 换属主、CWALL/CFLOOR 搬迁）不改几何、逐根路径点不着：按 d-819 由本窗变更集触发，给该库排一条内部 `RoomOnly`（见「ModelOnly 任务」），用已有几何对该库全部根重算归属并重写两张边，不重生成几何。硬验收沿用 ADR-010 §9：一组增量收敛后的两张边与同一份数据从零初始化的结果逐边相等。
+_Avoid_: 房间增量（流程含义，已退役）、房间任务、房间阶段、房间收尾、房间刷新、房间同步
 
-**已发布房间几何 (Published Room Geometry)**：
-`room_published_inst` 里由 `published_file_input` 当前清单选中的那一片版本化行（内联 refno、世界 AABB、世界变换与不可变 mesh 引用）。房间增量的两条分支只读它，不读实时 `inst_relate` / `inst_geo`；候选片可以先落库，清单切换前不可见。启动全量重建今天仍读实时行，两侧口径不同是已登记的缺口，不是设计。
-_Avoid_: 房间快照、房间几何缓存、实时几何（指本词时）
+**模型发布策略 (Model Publication Policy)**：
+与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 spawned/embedded kv-mem 虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。
+_Avoid_: 模型读路由（那只回答读取源）、把 kv-mem process store 叫持久库、memory-only 等于 projection-only
+
+**完整根发布确认 (Root Publication ACK)**：
+当前进程内对“候选几何已经完整发布”的确认：源会话、几何条数、房间开关、resident generation 与介质必须匹配。`RootReceipt` 只证明几何候选投影存在；模型行/房间边/process-store 回执事务成功后才写 ACK。几何重生成、删除、源换代或 resident 换代先使旧 ACK 失效。ACK 不落控制面、不推进水位、进程退出即丢，因此不是第三枚房间水位。
+_Avoid_: 根回执（候选几何）、房间水位、durable ACK、发布队列
+
+**kv-mem 房间启动屏障 (Kv-mem Room Bootstrap Barrier)**：
+`room_membership=true` 时 spawned/embedded kv-mem 每次冷启动从空结果库开始，先冻结 resident generation，再按 dbnum 顺序覆盖 MDB 全部可读 DESI 的模型根与逐根房间发布，全部成功后才置 `model_ready` / `features.room.available`。它不受 `watch_dbnums`、`startup_autorun` 限制；失败保留 health 与诊断服务，但模型完整产出入口不放行。`room_membership=false` 保持快速路径。
+_Avoid_: 房间阶段、房间队列、启动预热（只说 resident）、把 watch 范围当 MDB 完整性范围
 
 **面板 (Panel / PANE)**：
 房间的几何载体：`FRMW/SBFR 房间节点 → CWALL/CFLOOR → PANE` 层级中带盒状 mesh 的 PANE 元素。归属判定以面板 mesh 为容器做点包含检查；房间节点自身不参与几何判定。
 _Avoid_: 板、墙板（泛指时）
 
 **整间分支 (Panel Branch)**：
-房间重算的粗粒度分支：面板自身变化时重算**该面板的全部成员**（先删面板全部 `room_relate` 出边、再整批写回）。对应 `RoomRecalcPanel` / `recalc_panel_membership`；成员元素的包围盒取自空间树。
+房间归属的粗粒度算法口径：给定一块面板，拿它的世界盒去空间树捞候选成员、逐个做点包含判定，得到**该面板的全部成员**（先删面板全部 `room_relate` 出边、再整批写回）；成员元素的包围盒取自空间树。它不再是一种调度单位——面板自身变化按 d-819 走该库整库 `RoomOnly`（ADR-073 D1）；作为算法条目的去留随 ADR-010 的处置一并定（ADR-073 §未决 U2）。
 _Avoid_: 面板分支、全房重算
 
 **元素分支 (Element Branch)**：
-房间重算的细粒度分支：单个构件变化时只重算该构件自己的归属。候选面板来自当前数据库中的在册面板索引，构件包围盒同样取自数据库。
+房间归属的细粒度算法口径，也是逐根路径实际走的那条：一个构件生成完，只算它自己属于哪些面板（先删它的全部 `room_relate` 入边、再写回本次算出的边），与它的模型行同事务落库（ADR-073 D1）。候选面板与构件包围盒都来自任务手里的内存几何——任务内不回读库（ADR-071 D1 / ADR-072 D5）；候选面板集的驻留形态见 ADR-073 §未决 U3。
 _Avoid_: 构件分支、反向分支
 
-**同轮吸收 (Same-round Absorption)**：
-同一轮计算内整间分支已经覆盖某构件时，跳过该构件元素任务的省算优化。只有构件现存面板与当前在册面板候选都已由本轮覆盖时才允许吸收。
-_Avoid_: 任务吸收、任务去重（此场景）
-
 **空间树 (Spatial Tree)**：
-全库元素世界包围盒的进程级 R\* 树（`GLOBAL_AABB_TREE`），房间候选查询与整间分支的成员盒都取自它。带脏标记（`AABB_TREE_DIRTY`）：AABB 刷新与删除清理置位，空闲轮收尾或文件轮次发布时原子写回 V3 单文件快照 `accel_tree_{project}.snapshot`，头部记空间发布版本、已发布文件数与冻结输入清单 SHA-256。启动时快照头与库侧「当前清单 + 待重放前缀」之一相符才复用；错配进空间门禁而不从实时指针兜底；存在未完成文件轮次时复用最后成功发布的快照。指针重建只在没有已发布清单可对时才是兜底路径。
+全库元素世界包围盒的进程级 R\* 树（`GLOBAL_AABB_TREE`），房间候选查询与整间分支的成员盒都取自它。带脏标记（`AABB_TREE_DIRTY`）：模型块提交后按内存投影的世界盒就地收敛并置位、删除清理置位（ADR-072 D4），空闲轮收尾原子写回 V3 单文件快照 `accel_tree_{project}.snapshot`，头部记各库的 `(applied_sesno, model_sesno)` 数对。启动时快照头与水位镜像逐库相等才复用；不等即从 `inst_relate.aabb` 指针重建——没有发布清单、文件轮次或空间门禁那一档（ADR-072 D4，ADR-073 D1）。
 _Avoid_: R 树（泛指时）、AABB 树、加速树、树文件 `.bin`（V1 旧格式，已迁移删除）
 
 **refno 反查 (Refno Lookup)**：
@@ -467,7 +482,7 @@ _Avoid_: R 树（泛指时）、AABB 树、加速树、树文件 `.bin`（V1 旧
 _Avoid_: 遍历树查找、tree.iter() 找、自建 refno 索引
 
 **空间版本号 (Spatial Epoch)**：
-库侧单调递增的空间提交计数：每条携带空间意图的尾事务与水位、意图同事务 +1。树文件 sidecar 记录落盘时刻的版本号；启动时与库侧不相等即判文件陈旧、改从库指针重建。只比相等、不表达次数，重复递增无害。
+库侧单调递增的空间提交计数：每笔改变「树该有什么」的已提交事务（模型块提交、删除清理、整库清空）同事务 +1，没有单独的空间意图行（ADR-071 D9）。快照头记录落盘时刻的版本号；启动时与库侧不相等即判文件陈旧、改从库指针重建。只比相等、不表达次数，重复递增无害。
 _Avoid_: 树版本、时间戳校验
 
 **指针重建 (Pointer Rebuild)**：
@@ -475,12 +490,8 @@ _Avoid_: 树版本、时间戳校验
 _Avoid_: 全量重算（此场景）、树重建（泛指时）
 
 **AABB 变更集 (AABB Change Set)**：
-包围盒刷新时与空间树旧值比对产出的空间差异集合。普通全量/维护刷新只按它触发；定向增量还会保守纳入实际重写/变换的几何目标。面板层级、房间命名等变化由独立结构触发源补充。首次进入空间树也视为变化。
+包围盒刷新时与空间树旧值比对产出的空间差异集合。普通全量/维护刷新只按它触发；定向增量还会保守纳入实际重写/变换的几何目标。面板层级、房间命名等不改几何的变化不经它：按 d-819 给该库排一条内部 `RoomOnly` 整库重算归属（ADR-073 D1）。首次进入空间树也视为变化。
 _Avoid_: 包围盒差异、aabb diff
-
-**房间重建要求 (Room Rebuild Requirement)**：
-结构面板枚举失败后随数据水位原子写入 `room_build:main` 的持久降级标志。它表示已提交数据上的增量面板目标不完备，下一次成功的全量房间重建必须覆盖并清除此标志；当前进程内不承诺自动启动全量重建。
-_Avoid_: 普通 warning、在线重建任务
 
 ## 实机端到端测试（Live E2E Testing）
 
@@ -504,7 +515,7 @@ _Avoid_: 数据校验（泛指时）、一致性检查（泛指时）
 初始化不是一条链，是**两条并行链**：模型面在文件身份解析完成后即可开工，数据面走
 Meta（SYS/DICT）→ Design（DESI）。Catalogue 阶段已取消——CATA 不入持久层，模型面从文件读；
 模型面也不再等 `data_ready`，串行那一版的唯一理由是「生成器要读 `pe`」，那个理由已经不在了。
-房间仍排在模型之后。阶段完成以 manifest、水位和数据支撑为准，不以队列暂时为空为准。
+房间归属随每个根的生成一起算，不是模型之后的一段（ADR-073 D1）。阶段完成以 manifest、水位和数据支撑为准，不以队列暂时为空为准。
 
 实施状态（2026-09-03）：**门的部分已落地**（`model_generation_allowed` 不再看 `data_ready`，
 `install_manifest` 装好清单即开模型门，启动模型复核排在数据等待之前）；**尚未落地**的是
@@ -556,31 +567,13 @@ coordinator，保证旧纪元任务不会越过新纪元激活边界。
 
 _Avoid_: 初始化锁、队列锁（泛指时）。
 
-# 文件更新轮次（File Update Round）
-
-一个数据库文件从已应用水位推进到冻结终点 `T` 的完整更新单位。轮次持久保存冻结源令牌，拆窗、重试和重启都沿用同一终点；只有数据窗口、模型任务、PostRegenAabb 与候选派生输入全部成功，轮次才可发布。
-
-_Avoid_: 单批次、当前队列、文件最新版本（这些说法不能表达固定终点和完成屏障）。
-
-# 已发布派生输入（Published Derivation Input）
-
-空间树与房间算法可以消费的最后成功文件版本集合。文件轮次处理中的模型指针、AABB 和房间目标属于候选输入；在发布屏障前不得替换该文件的已发布输入。房间几何按冻结令牌写入版本化的 `room_published_inst`，房间—面板分组按全部文件令牌的规范摘要写入 `room_published_topology`；两者只由 `published_file_input` 当前清单选择，候选可以提前落库，但清单切换前不可见。跨文件视图允许由 A 的旧成功版本与 B 的新成功版本组成。
-
-_Avoid_: 实时模型表、当前文件、最新指针。
-
-# 空间发布版本（Published Spatial Version）
-
-一次文件候选空间变更通过持久意图完成重放、快照落盘并切换内存树后的可消费版本。它与数据写入阶段推进的物理 `spatial_epoch` 含义不同；V3 空间快照用该版本、已发布文件数和冻结输入清单 SHA-256 证明树对应的逻辑输入。房间任务只能在其要求的空间版本已经发布后认领，完成后在目标版本账本记录实际计算版本。更高的实际计算版本覆盖较早要求。
-
-_Avoid_: 数据空间写入计数、AABB 更新时间。
-
 ## 本地发布（Local Release）
 
 > 面向「把已发布的服务端 + Web 打成一个可分发压缩包」这件事的词汇；实现见 `scripts/New-LocalRelease.ps1`，口径见 `docs/adr/ADR-068`。
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。程序档只含程序（现有 `ams-local-0.1.19`）；`-full` 档再把运行所需依赖资源装进包根 `workspace\`（一体化，`Start-AMS.ps1` 默认 `-Workspace` 指向包内）。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=embedded-mem`：kv-mem 在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，需要外部 SQL / 探针时可显式切回 `spawned-mem`。房间兼容页仍是直连库的保留功能，embedded 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂默认 `spawned-rocksdb + incremental-overlay + room_membership=true`，无需手改配置选择持久模式；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -592,9 +585,21 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验，**三腿**（ADR-069 D8 + ADR-070 D6）：A 腿以出厂配置起包内服务，`/health` 报 `mode:"setup"` 且 `/setup.html` 含向导标记才算过（考「新机器解压第一步」）；B 腿以本机真配置全启动，`health` 200 + 首页含 plant-ui 或向导页才算过（默认 `spawned-mem`，自带内存库、不依赖外部 8010）；C 腿以本机配置副本改 `spawned-rocksdb`@18010 全启动，`/health` 报 `medium:"spawned-rocksdb"` + `durable:true` 且 `workspace\.surreal\` 目录真落盘才算过（考「自带持久库」主路，绝不碰真 8010）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `embedded-mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="embedded-mem"` 且后端没有 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 以出厂默认 `spawned-rocksdb` 全启动；C 用隔离端口 `spawned-rocksdb`@18010，要求 `medium:"spawned-rocksdb"`、`durable:true` 且 `workspace\.surreal\` 真落盘。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
+
+# HTTP 监听地址 (HTTP Bind Address)
+
+`DbOption.toml` 的 `http_api_addr`：服务实际绑定的 socket 地址。`0.0.0.0:<端口>` 表示全部 IPv4 接口；它不应该被当作浏览器链接展示。
+
+_Avoid_: 对外地址、分享地址、把 `0.0.0.0` 当成可导航主机名
+
+# HTTP 对外展示地址 (HTTP Public Address)
+
+`DbOption.toml` 的 `http_public_addr`：日志、自动打开与分享链接使用的可导航地址，不参与 socket 绑定。留空时从监听地址派生；首跑向导与重启轮询始终使用回环地址，不消费本键。
+
+_Avoid_: 监听地址、绑定地址、反向代理监听
 
 # 配置向导 (Setup Wizard)
 
@@ -604,7 +609,7 @@ _Avoid_: 安装向导（没有安装动作）、配置中心 / 配置页（真�
 
 # 设置模式 (Setup Mode)
 
-启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或需要端点的档位——`external` / `spawned-rocksdb` / `spawned-mem`——`v_ip` 空 / `v_port=0` 哨兵；ADR-070 把后两档并进来：spawn 档空地址是必坏形状，bind 端口 0）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
+启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或需要端点的档位——`external` / `spawned-rocksdb` / `spawned-mem`——`v_ip` 空 / `v_port=0`）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；kv-mem 地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
 
 _Avoid_: 安全模式 / 降级模式（正常启动链的失败语义没改）、维护模式（没有这一档）。
 
@@ -622,6 +627,6 @@ _Avoid_: 内嵌库（有真端口，别的进程连得上）、外置库 / exter
 
 # 引导子集 (Guided Subset)
 
-配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
+配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
 
 _Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。

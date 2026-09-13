@@ -1,0 +1,80 @@
+{
+  "repo": "D:\\work\\plant-code\\old\\gen-model-refactor",
+  "ams_dir": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000",
+  "sources_before": {
+    "ams8000_0001": {
+      "sha256": "e2f5df011423eea12e0de1a698d2c7d532e9e9f1807112eae2705d5dd226a55b",
+      "bytes": 25481216,
+      "mtime_ns": 1789141960552831300
+    },
+    "ams7998_0001": {
+      "sha256": "85787f99b454d495d264c142133330d841cdcc9340940d2aa1645cfb93f8a646",
+      "bytes": 81920,
+      "mtime_ns": 1789141960527826700
+    }
+  },
+  "runs": [
+    {
+      "label": "synthetic",
+      "command": [
+        "cargo",
+        "test",
+        "--test",
+        "shared_read_view_invalidation",
+        "--",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "exit_status": 0,
+      "elapsed_ms": 34891,
+      "test_result": [
+        "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s"
+      ],
+      "counters": [
+        "[synthetic] parse hit=0 shared=4 miss=4 3ms | extract hit=0 shared=0 miss=0 0ms | attr lookups=0 | db opens=4 scans=0 scanned elements=0 point lookups=4"
+      ]
+    },
+    {
+      "label": "ams-copies",
+      "command": [
+        "cargo",
+        "test",
+        "--test",
+        "shared_read_view_invalidation",
+        "--",
+        "--ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "exit_status": 0,
+      "elapsed_ms": 36531,
+      "test_result": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.31s"
+      ],
+      "counters": [
+        "[ams] source ams8000_0001 sha256=e2f5df011423eea12e0de1a698d2c7d532e9e9f1807112eae2705d5dd226a55b",
+        "[ams] source ams7998_0001 sha256=85787f99b454d495d264c142133330d841cdcc9340940d2aa1645cfb93f8a646",
+        "[ams] 8000 sesno=444 element=24384_23257; 7998 element=WORL 16190_0",
+        "[ams:descriptor pages overwritten] new view 8000 element error (DbElementError::Open): open C:\\Users\\dpc\\AppData\\Local\\Temp\\.tmpIEghMi\\ams8000_0001: open at None: C:\\Users\\dpc\\AppData\\Local\\Temp\\.tmpIEghMi\\ams8000_0001: header word at 0x34 says 4294967295 four-byte words, which is not a usable page size (word count overflows a byte count)",
+        "[ams:file truncated to 1 KiB] new view 8000 element error (DbElementError::Open): open C:\\Users\\dpc\\AppData\\Local\\Temp\\.tmpIEghMi\\ams8000_0001: open at None: I/O error on C:\\Users\\dpc\\AppData\\Local\\Temp\\.tmpIEghMi\\ams8000_0001: extent 1 page 0 ended after 1024 of 2048 bytes",
+        "[ams] source ams8000_0001 sha256=e2f5df011423eea12e0de1a698d2c7d532e9e9f1807112eae2705d5dd226a55b (unchanged)",
+        "[ams] source ams7998_0001 sha256=85787f99b454d495d264c142133330d841cdcc9340940d2aa1645cfb93f8a646 (unchanged)",
+        "[ams] parse hit=2 shared=16 miss=8 2ms | extract hit=0 shared=0 miss=2 0ms | attr lookups=0 | db opens=6 scans=0 scanned elements=0 point lookups=6"
+      ]
+    }
+  ],
+  "sources_after": {
+    "ams8000_0001": {
+      "sha256": "e2f5df011423eea12e0de1a698d2c7d532e9e9f1807112eae2705d5dd226a55b",
+      "bytes": 25481216,
+      "mtime_ns": 1789141960552831300
+    },
+    "ams7998_0001": {
+      "sha256": "85787f99b454d495d264c142133330d841cdcc9340940d2aa1645cfb93f8a646",
+      "bytes": 81920,
+      "mtime_ns": 1789141960527826700
+    }
+  },
+  "sources_unchanged": true,
+  "passed": true
+}

@@ -54,13 +54,15 @@ def capture(label: str) -> None:
     target_session = source_session()
     deadline = time.monotonic() + 180
     while True:
-        watermark = e.sql("SELECT applied_sesno FROM dbnum_watermark:8000;")[0][0]
-        pending = e.sql("SELECT id FROM model_update_pending WHERE dbnum=8000;")[0]
+        # 模型欠账由双水位回答（ADR-072 D5 之后没有队列表可数）：任务收尾把 model_sesno
+        # 盖到 applied_sesno 才算这一版的模型落完。
+        watermark = e.sql("SELECT applied_sesno, model_sesno FROM dbnum_watermark:8000;")[0][0]
+        settled = watermark.get("model_sesno") == watermark.get("applied_sesno")
         records = e.api("model/records", {"generation_root": ROOT})
         vector_session = next(
             row["sesno"] for row in records["session_vector"] if row["dbnum"] == 8000
         )
-        if watermark.get("applied_sesno") == target_session and not pending and vector_session == target_session:
+        if watermark.get("applied_sesno") == target_session and settled and vector_session == target_session:
             break
         if time.monotonic() > deadline:
             e.save(
@@ -68,11 +70,10 @@ def capture(label: str) -> None:
                 {
                     "target_session": target_session,
                     "watermark": watermark,
-                    "pending": pending,
                     "records": records,
                 },
             )
-            raise TimeoutError((target_session, watermark, pending, vector_session))
+            raise TimeoutError((target_session, watermark, vector_session))
         time.sleep(2)
 
     e.save(folder / "records.json", records)

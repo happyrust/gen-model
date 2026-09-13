@@ -1,6 +1,6 @@
 //! 模型生成写路由：task-local 上下文在场时写活动窗口，否则沿用持久层路径。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -23,11 +23,12 @@ pub(crate) struct StagingWriteContext {
     root_locks: Arc<Mutex<HeldRootLocks>>,
 }
 
+/// 本窗口寄存的空间树变更。房间那一格（`room_changes`：位姿变了要排房间重算的目标）随
+/// 房间轮退役（ADR-073 D1）——房间归属在生成根落库时就地算完，不再有「窗口提交后收一轮」。
 #[derive(Clone, Default)]
 pub(crate) struct DeferredSpatialMutations {
     pub refresh: HashSet<aios_core::RefnoEnum>,
     pub remove: HashSet<aios_core::RefnoEnum>,
-    pub room_changes: HashMap<aios_core::RefnoEnum, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -97,18 +98,6 @@ impl StagingWriteContext {
     /// 本窗口已经决定要从空间树上摘掉、但要等提交后才真摘的那些 refno。
     pub async fn deferred_spatial_removals(&self) -> HashSet<aios_core::RefnoEnum> {
         self.spatial.lock().await.remove.clone()
-    }
-
-    pub async fn defer_room_changes(
-        &self,
-        changes: &[crate::fast_model::aabb_refresh::AabbChange],
-    ) {
-        let mut spatial = self.spatial.lock().await;
-        for change in changes {
-            spatial
-                .room_changes
-                .insert(change.refno, change.noun.clone());
-        }
     }
 
     pub async fn register_finalize(&self, finalize: StagedFinalize) -> anyhow::Result<()> {
@@ -493,33 +482,6 @@ mod tests {
                 .await
         );
         assert!(window.take_deferred_mysql_changes().await.is_some());
-        window.drop_database().await.expect("cleanup");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn changed_aabbs_are_kept_for_the_staged_room_round() {
-        let instance = connect("mem://").await.expect("mem boots");
-        let window = create_window_on(&instance, 7987, 2, 3, ResourceThresholds::default())
-            .await
-            .expect("window");
-        let target = aios_core::RefnoEnum::from("4000000001/20");
-
-        window
-            .scope(async {
-                active_staging_writes()
-                    .expect("context")
-                    .defer_room_changes(&[crate::fast_model::aabb_refresh::AabbChange {
-                        refno: target,
-                        noun: "EQUI".into(),
-                    }])
-                    .await;
-            })
-            .await;
-
-        assert_eq!(
-            window.deferred_spatial().await.room_changes.get(&target),
-            Some(&"EQUI".to_string())
-        );
         window.drop_database().await.expect("cleanup");
     }
 }

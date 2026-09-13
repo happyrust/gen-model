@@ -1,0 +1,25 @@
+{
+  "binary": "D:\\Rust\\target\\debug\\build\\aios-database\\2b187cd22ab829f9\\out\\aios_database-2b187cd22ab829f9.exe",
+  "sha256": "6862dbfeae5eb2ee11c9f40852d5f1203ed700c0311b984dfe7d7aefd6b82173",
+  "runs": [
+    {
+      "command": [
+        "D:\\Rust\\target\\debug\\build\\aios-database\\2b187cd22ab829f9\\out\\aios_database-2b187cd22ab829f9.exe",
+        "--test-threads=1"
+      ],
+      "exit_status": 0,
+      "log": "uda-provider-lib-regression.log"
+    },
+    {
+      "command": [
+        "D:\\Rust\\target\\debug\\build\\aios-database\\2b187cd22ab829f9\\out\\aios_database-2b187cd22ab829f9.exe",
+        "ams_dictionary_copy_reload_failure_and_restore",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_status": 0,
+      "log": "uda-provider-ams-copy.log"
+    }
+  ]
+}

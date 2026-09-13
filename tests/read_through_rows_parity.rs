@@ -344,15 +344,10 @@ async fn write_through_is_bounded_to_the_database_and_idempotent() {
         "same session and same content must not advance cache epoch"
     );
     assert_eq!(count(&db, "pe").await, requested as i64, "重写不许多出一行");
-    let mut stats = db
-        .query("SELECT math::sum(count) AS n FROM dbnum_info_table GROUP ALL;")
-        .await
-        .unwrap();
-    let rows: Vec<serde_json::Value> = stats.take(0).unwrap();
     assert_eq!(
-        rows[0]["n"].as_i64(),
-        Some(requested as i64),
-        "读透重放必须原子维护 PE 统计"
+        count(&db, "dbnum_info_table").await,
+        0,
+        "读透写入不在任务尾，不能自行维护 dbnum 统计"
     );
     assert_eq!(count(&db, "pe_owner").await, edges_before, "边也不许翻倍");
     assert_eq!(

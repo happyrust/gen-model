@@ -33,12 +33,3 @@ def preview_manual_update(
     project: str | None = None, mdb: str | None = None
 ) -> dict[str, Any]:
     """手动更新只读预览（POST /update/preview 同源）。"""
-
-def pending_model_units() -> list[dict[str, Any]]:
-    """全部模型待重试任务（含死信）。"""
-
-def window_blocks() -> list[dict[str, Any]]:
-    """全部窗口阻断状态。"""
-
-def root_attempts(dbnum: int) -> dict[str, Any]:
-    """一个库全部生成根的失败记录。"""

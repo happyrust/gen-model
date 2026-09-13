@@ -100,8 +100,8 @@ body{
 .lane-name{font-size:10.5px;font-weight:600;letter-spacing:1.4px;color:var(--t3)}
 .lanes .verdict-line{font-size:20px;line-height:28px}
 .lanes .verdict-timer .val{font-size:24px}
-/* 房间接在模型面下面而不是自成一列：它吃的是模型产物，同级摆三列等于说它与两枚
-   凭证一样是根判据，而它只是派生。 */
+/* 面板尾巴上的补充段（不自成一列）：同级摆成第三列等于说它与两枚凭证一样是根判据，
+   而它只是派生。房间边如今随模型块落库，已无独立一段（ADR-073 D2）。 */
 .seg{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
   display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .seg .l{flex:0 0 auto;font-size:10.5px;font-weight:600;letter-spacing:1.4px;color:var(--t3)}
@@ -231,8 +231,8 @@ body{
 .acts-row .hint{font-size:11.5px;color:var(--t3);line-height:17px}
 a.jump{text-decoration:none}
 .jump.mut{color:var(--t3)}
-/* 每库三枚水位：数据提交、模型发布、房间发布分别显示。 */
-.w-tbl{grid-template-columns:72px minmax(90px,112px) 64px 72px minmax(132px,1fr) minmax(150px,1fr) minmax(150px,1fr) minmax(170px,260px)}
+/* 每库两枚水位：数据提交、模型落库分别显示；房间边随模型块同事务落库（ADR-073 D2），不单列。 */
+.w-tbl{grid-template-columns:72px minmax(90px,112px) 64px 72px minmax(132px,1fr) minmax(150px,1fr) minmax(170px,260px)}
 .w-tbl>.r{height:52px}
 .w-tbl .stk{display:flex;flex-direction:column;justify-content:center;gap:3px;min-width:0;
   font-size:11.5px;line-height:15px}
@@ -373,7 +373,7 @@ a.jump{text-decoration:none}
 .dbsummary>div:nth-child(n+4){display:none}
 .dbsummary .l{font-size:12px;color:var(--t2)}.dbsummary .v{font-size:25px;margin:12px 0 8px;letter-spacing:-.5px}.dbsummary .s{font-size:12px}
 .dbsummary>div::after{position:absolute;right:20px;top:19px;color:var(--t3);font:11px var(--mono)}
-.dbsummary>div:nth-child(1)::after{content:'01 / DATA'}.dbsummary>div:nth-child(2)::after{content:'02 / MODEL'}.dbsummary>div:nth-child(3)::after{content:'03 / ROOM'}
+.dbsummary>div:nth-child(1)::after{content:'01 / DATA'}.dbsummary>div:nth-child(2)::after{content:'02 / MODEL'}.dbsummary>div:nth-child(3)::after{content:'03 / QUEUE'}
 .verdict{padding:24px 28px;border-left-width:4px}.verdict-line{font-size:27px;line-height:1.4;margin-top:10px}
 .lanes>.verdict{flex:1 1 auto;padding:24px 28px}.lanes .verdict-line{font-size:24px;line-height:1.5}
 .verdict-detail{line-height:1.7}.verdict-body{min-width:0}.verdict-meta{flex-wrap:wrap}
@@ -483,16 +483,9 @@ button:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible{
         </div>
         <div id="f-body"></div>
       </div>
-      <div class="panel">
-        <div class="panel-head" style="align-items:flex-start">
-          <div style="min-width:0">
-            <div style="display:flex;align-items:baseline"><span class="t">窗口阻断 · 数据侧终态</span><span class="n" id="sw-count">—</span></div>
-            <div class="sub">同一右端连撞 MAX_ATTEMPTS 次同一堵墙 = 这一窗的失败是确定性的，落一条带原始错误的终态（ADR-056 D1）。它在持久层，跨重启、跨机器都还在——连败账本清空之后，这里是唯一还说得出话的证据。</div>
-          </div>
-          <span class="src">GET /health → window_blocks</span>
-        </div>
-        <div id="sw-body"></div>
-      </div>
+      <!-- 「窗口阻断 · 数据侧终态」与「暂存窗口」两张卡随 staging/attempts.rs 与 kv-mem 暂存窗口退役
+           （ADR-072 R4，spec §4.7.1）：/health 不再有 window_blocks / staging_windows / staging_commit。
+           写了一半的库看 /dbnums 每行的 write_state（KPI「写入中 / 未写完」）。 -->
       <div class="panel">
         <div class="panel-head" style="align-items:flex-start">
           <div style="min-width:0">
@@ -554,8 +547,8 @@ button:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible{
   <div class="panel">
     <div class="panel-head" style="align-items:flex-start">
       <div style="min-width:0">
-        <div style="display:flex;align-items:baseline"><span class="t">每库三枚水位</span></div>
-        <div class="sub">数据、模型、房间水位按阶段推进；房间同时核对内存模型与房间定义版本。三者及版本凭证一致时才表示完整收敛。</div>
+        <div style="display:flex;align-items:baseline"><span class="t">每库两枚水位</span></div>
+        <div class="sub">数据、模型水位按阶段推进；房间归属随每个生成根算出、与模型行同一事务落库，模型水位追平即含房间边（ADR-073 D2）。两枚一致时才表示完整收敛。</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
         <span class="src">GET /api/v1/dbnums</span>
@@ -593,7 +586,7 @@ const SLOW_EVERY = 3;            // /dbnums 每 3 个周期拉一次
 // publish recovery it can legitimately take more than eight seconds; aborting
 // it made the focused page lose its dbnum and fall back to a global action.
 const REQ_TIMEOUT = 20000;
-const MAX_ATTEMPTS = 5;          // model_update_pending::MAX_ATTEMPTS
+const MAX_ATTEMPTS = 5;          // batch_worker::MAX_ATTEMPTS —— 进程内连败账的停跑上限（模型重试账随 ADR-072 D5 退了）
 
 const WRITE = !qs.has("readonly");
 
@@ -716,7 +709,7 @@ function projOf(row){
 }
 const ANOMALY = { rollback:"回退", path_migrated:"路径迁移", type_changed:"类型变更", duplicate:"重复文件", missing:"文件缺失" };
 
-// 稳定英文子阶段（batch_worker::set_active_task_stage 与 model_update_pending 写入）。
+// 稳定英文子阶段（batch_worker::set_active_task_stage 写入）。
 // 认不出的原样显示：后端加一个新阶段名不该让这一格变空白。
 //
 // `stage_apply` 这个键是暂存时代起的名字，后端没改（落盘的分步账里全是它）；它此刻做
@@ -778,9 +771,9 @@ const ACTIONS = {
             hint:"全范围扫描 + 入队数据批次，顺带清掉连败账；推的是应用水位，不承诺模型追平",
             run:async () => enqueueReceipt(await post("/update/execute", {})) },
   initialize:{ label:"初始化该库", req:"POST /api/v1/update/execute", cls:"go",
-            hint:"只初始化当前选中的新 dbnum；数据、模型和房间阶段依次推进",
+            hint:"只初始化当前选中的新 dbnum；数据、模型阶段依次推进（房间归属随根算）",
             resolve:async (dbnum) => ({
-              note:`初始化 dbnum ${dbnum}：只提交该库，数据完成后继续模型发布与实时房间计算。`,
+              note:`初始化 dbnum ${dbnum}：只提交该库，数据完成后继续模型生成（房间边随模型块落库）。`,
               body:{ dbnums:[Number(dbnum)] } }),
             run:async (ctx) => enqueueReceipt(await post("/update/execute", ctx.body)) },
   initializeBatch:{ label:"初始化所选库", req:"POST /api/v1/update/execute", cls:"go",
@@ -812,8 +805,8 @@ const ACTIONS = {
   // 人会以为按钮没生效。
   //
   // 它推的只是数据那一枚凭证。模型那一枚（生成源版本）在窗口尾事务之后靠凭证前移
-  // 与按需 ensure 追（ADR-056 D9），这个按钮不承诺、也管不到；模型面自己的出口是
-  // 「重试模型死信」。两面分开说，否则人点完看模型那栏还落后，会以为没生效。
+  // 与按需 ensure 追（ADR-056 D9），这个按钮不承诺、也管不到。两面分开说，否则人点完
+  // 看模型那栏还落后，会以为没生效。
   rerun:{  label:"重扫这个库", req:"POST /api/v1/update/execute", cls:"warn",
             hint:"只推这一个 dbnum 的应用水位；顺带清掉它的连败账，park 立即解除；不承诺模型追平",
             resolve:async (dbnum) => ({
@@ -823,26 +816,9 @@ const ACTIONS = {
                  + `它只推应用水位，模型那一枚凭证要等窗口尾事务之后的前移与按需 ensure，这里不承诺。`,
               body:{ dbnums:[Number(dbnum)] } }),
             run:async (ctx) => enqueueReceipt(await post("/update/execute", ctx.body)) },
-  retry:  { label:"重试模型死信", req:"POST /api/v1/update/pending-units/retry", cls:"warn",
-            hint:"model_update_pending：一次复活一行；目标从 /pending-units 取，不猜",
-            // 确认前先把真实目标取回来。retry 的 SQL 是 `WHERE target_refno = '…'`
-            // 字面匹配，所以这里必须把 root_refno 原样透传、一个字符都不许转换。
-            // （别信「health 给下划线、这儿给 PDMS a/b」那套说法：真机上两边都是
-            // `24381_145800`。用这个端点的真正理由是 blocking_samples 只是样例，
-            // 而且 health 那一段一超时就整段读不出来，这儿不吃那 2 秒预算。）
-            resolve:async () => {
-              const units = (await get("/update/pending-units"))?.units || [];
-              const dead = units.filter(u => (u.attempts ?? 0) >= MAX_ATTEMPTS);
-              if(!dead.length) throw new Error(`/pending-units 里没有 attempts ≥ ${MAX_ATTEMPTS} 的行，没有可复活的死信`);
-              const u = dead[0];
-              return { target_refno:u.root_refno,
-                       note:`${dead.length} 条死信，先复活 ${u.root_refno}（${u.noun || "?"} · dbnum ${u.dbnum} · attempts ${u.attempts}）`,
-                       body:{ target_refno:u.root_refno } };
-            },
-            run:async (ctx) => {
-              const r = await post("/update/pending-units/retry", ctx.body);
-              return `已复活 ${r.target_refno}（action = ${r.action ?? "regen_root"}，status = ${r.status}）。revision +1、attempts 归零，等 worker 捡走。`;
-            } },
+  // 「重试模型死信」按钮随第二条异步账退役（2026-09-10，ADR-072 D5）：模型随 dbnum 任务
+  // 同步生成、没有队列死信可复活，`POST /update/pending-units/retry` 端点已删；一个根生成
+  // 失败到顶记在 /dbnums 的 model_dead_roots 里，要重来就「重扫这个库」。
   // 「复活副作用死信」按钮随非空间副作用补偿队列一起退役（2026-09-10，ADR-071 D9）：
   // SYST 派生 / ref_rev 补偿不再排队，`POST /update/side-effects/retry` 端点已删。
 };
@@ -905,7 +881,6 @@ function renderActions(m){
       + `<button class="btn" data-act="cancel">取消</button>`;
   }else{
     const paused = !!(m.h && m.h.queue_paused);
-    const dead = Number(m.mup.dead_letters || 0);
     const live = !!m.h && !S.act.busy;
     const focused = FOCUS_DBNUM == null ? null : m.byDb.get(FOCUS_DBNUM);
     const manualInit = !!(focused && focused.awaiting_manual_initialization);
@@ -917,7 +892,7 @@ function renderActions(m){
     const currentDbButton = manualInit
       ? `<button class="btn ${ACTIONS.initialize.cls}" data-act="initialize" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="${esc(ACTIONS.initialize.req + " — " + ACTIONS.initialize.hint)}">${esc(ACTIONS.initialize.label)}</button>`
       : (focused
-        ? `<button class="btn go" data-act="rerun" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="只重新检查当前 dbnum 的数据、模型和房间缺口">重新检查该库</button>`
+        ? `<button class="btn go" data-act="rerun" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="只重新检查当前 dbnum 的数据、模型缺口（房间边随模型块补）">重新检查该库</button>`
         // 自动初始化关闭且有新库等待时，隐藏无子集的全范围执行。空 body 是显式操作员
         // 指令，会把所有新库一并放行；跟旁边的精确多选同时出现很容易点错。
         : (waitingInit.length ? "" : btn("execute", live)));
@@ -926,10 +901,6 @@ function renderActions(m){
       + (FOCUS_DBNUM == null && waitingInit.length
           ? `<button class="btn go" type="button" data-init-open${live ? "" : " disabled"} title="多选等待手动初始化的 dbnum；不会收窄监听范围">选择初始化库 <span class="hint">${waitingInit.length}</span></button>`
           : "")
-      // 死信数读不出来时按钮照亮：它不靠这个数干活，点下去先拉一轮 /pending-units
-      // （另一个端点，不吃 health 的 2 秒预算）把真目标摆到确认行上；真没有可复活的，
-      // resolve 会自己报「没有 attempts ≥ 5 的行」。
-      + btn("retry", live && (dead > 0 || m.mupBlind), dead > 1 ? ` <span class="hint">${dead}</span>` : "")
       + `<span class="hint">${S.act.busy ? "处理中…" : "点一下亮出请求，再点确认才发"}</span>`;
   }
   // 回执留 25 秒，别在墙上一直挂着。
@@ -983,6 +954,8 @@ async function cycle(){
     if(st && S.startedAt && st !== S.startedAt) S.blockedSince = 0;
     S.startedAt = st || S.startedAt;
     S.health = h.value; S.lastOk = Date.now(); S.errSince = 0; S.lastErr = "";
+    // 读透形态（spawned-mem / embedded-mem）不推水位，库表那一格按它画「不判」。
+    S.dataFace = h.value?.data_face || "";
   }else{
     S.lastErr = String(h.reason?.message || h.reason || "请求失败");
     if(!S.errSince) S.errSince = Date.now();
@@ -1156,7 +1129,7 @@ function model(){
     if(h && h.project && projOf(held) !== h.project && projOf(r) === h.project) byDb.set(r.dbnum, r);
   }
 
-  // 水位（dbnum_watermark:N）、重试记录（increment_update_attempt:N）与连败账本
+  // 水位（dbnum_watermark:N）、写入标记（dbnum_write_state:N）与连败账本
   // 三个键都只认号。撞号候选全部留着：当前项目一个都对不上时，把它们按 file_path
   // 摆出来让人自己认，那时替人挑一个就是替引擎编一个答案。
   const dbsByNum = new Map();
@@ -1215,35 +1188,18 @@ function model(){
   const blockedBy = (init.blocked_by || (S.queue && S.queue.blockers) || [])
     .filter(b => FOCUS_DBNUM == null || b.dbnum == null || Number(b.dbnum) === FOCUS_DBNUM);
 
-  const mup = (h && h.model_update_pending) || {};
-  // health 给每个分项 2 秒预算，超了就回一份零 + error。那时 0 是「没读到」，不是
-  // 「没有」。真机上就撞过：7997 的两条死信把模型门焊着，health 却报 0/0——判决从
-  // 降级那一级滑过去、复活按钮跟着变灰，而那个按钮偏偏是死信唯一的出口。
+  // `model_update_pending`（待重试 / 死信）、`window_blocks` / `staging_window_blocks`、
+  // `staging_windows` / `staging_commit`、`spatial_reconcile` 这几格随第二条异步账与 publish
+  // 阶段一起从 /health 消失了（ADR-072 D4/D5，spec §4.7.1）——不再读、不再兜底。
   //
-  // 但同一台机器下一轮又把 60,098/2 读回来了，error 照旧挂着：超时是断续的，回来的
-  // 数是真的。所以只在「读不出来 + 死信看着是 0」时才认未知——那才是会骗人的那种零。
-  // 死信数一旦为正，它就是实数，照常显示、照常触发降级判决。
-  const mupDegraded = !!mup.error
-    || ((h && h.degraded_sections) || []).includes("model_update_pending");
-  const mupBlind = mupDegraded && !(Number(mup.dead_letters) > 0);
-
-  // 窗口阻断：数据侧确定性失败的终态（ADR-056 D1），落库、跨重启活着。键 2026-09-04 起叫
-  // `window_blocks`（spec 035 T301）；P1 到 T301 之间的 exe 叫 `staging_window_blocks`，形状
-  // 一样，两个名字都认、但记下读的是哪个。这里**故意不给 `|| []` 兜底**：字段缺席（老 exe
-  // 不报这一栏）与空数组（没有阻断）处置完全不同，兜一下两者就长成同一个空白。
-  const wbKey = !h ? null
-    : ("window_blocks" in h ? "window_blocks" : ("staging_window_blocks" in h ? "staging_window_blocks" : null));
-  const allWindowBlocks = wbKey ? h[wbKey] : undefined;
-  const windowBlocks = Array.isArray(allWindowBlocks) && FOCUS_DBNUM != null
-    ? allWindowBlocks.filter(b => Number(b.dbnum) === FOCUS_DBNUM) : allWindowBlocks;
-  // 阻断记录读库，读不出来会走 health 的降级形状（空数组 + 记进 degraded_sections）。
-  // 那时的「0 条」是没读到，不是没有。
-  const windowBlocksBlind = ((h && h.degraded_sections) || [])
-    .some(s => s === "window_blocks" || s === "staging_window_blocks");
-  const wbByDb = new Map((Array.isArray(windowBlocks) ? windowBlocks : []).map(b => [b.dbnum, b]));
-  const allStaging = h && Array.isArray(h.staging_windows) ? h.staging_windows : (h ? h.staging_windows : null);
-  const staging = Array.isArray(allStaging) && FOCUS_DBNUM != null
-    ? allStaging.filter(w => Number(w.dbnum) === FOCUS_DBNUM) : allStaging;
+  // 写入标记（ADR-072 D1，spec §4.7）：/dbnums 每行一格可选的 `write_state`。`writing` 且这个
+  // 库在队列的运行行里 = 正在写库；`writing` 而队列里没有它 = 上一次死在写库中途，下一次
+  // 启动或该库下一次任务开工前会回退到 start_sesno 再重跑。整格缺失 = 从没被任务写过，或
+  // 回退刚删了标记——那一档留空，不许退回 finished 画绿灯。
+  const runningDbnums = new Set(running.map(r => Number(r.dbnum)));
+  const writing = inScope.filter(r => r.write_state && r.write_state.status === "writing");
+  const writingStalled = writing.filter(r => !runningDbnums.has(Number(r.dbnum)))
+    .sort((a, b) => Number(a.dbnum) - Number(b.dbnum));
 
   // 模型状态只消费服务端的三态判决，客户端不再用根凭证下限重拼。
   const modelLagging = inScope.filter(r => r.model_verdict === "lagging")
@@ -1254,10 +1210,8 @@ function model(){
   PHASES = phaseKeys(init);
   return { h, init, rows, tasks, dbs, allRows, allTasks, allDbs, byTask, byDb, dbsByNum, failedByDb,
            failures, parked, inScope, lagging,
-           running, queued, held, blockedPhase, blockedRows, blockedBy, mup, mupBlind,
-           wbKey, windowBlocks, windowBlocksBlind, wbByDb,
-           staging, stagingBlocks:windowBlocks, stagingBlocksBlind:windowBlocksBlind,
-           stagingCommit:h && h.staging_commit,
+           running, queued, held, blockedPhase, blockedRows, blockedBy,
+           writing, writingStalled,
            modelLagging, modelNotJudged, modelBlind, phaseKeys:PHASES };
 }
 
@@ -1269,18 +1223,19 @@ function culpritOf(m, phase){
   return (m.blockedBy || []).find(b => b && b.dbnum != null && (!phase || b.phase === phase)) || null;
 }
 
-// 判决副标题里那半句。读不出来时不许说「0 条」——死信正是靠这半句被人看见的。
-function mupPhrase(m){
-  return m.mupBlind
-    ? "待重试 / 死信这一段 health 读不出来（分项超 2 秒），当前是未知不是零 —— 真要确认就点「重试模型死信」，它会拉一轮 /pending-units 把实数摆出来。"
-    : `待重试 ${n(m.mup.retryable)} 条、死信 ${n(m.mup.dead_letters)} 条。`;
+// 判决副标题里那半句：放弃了多少根。它读 /dbnums 每行的 model_dead_roots（任务收尾写进
+// 水位行、镜像读出来），没有 /dbnums 时不许说「0 根」。
+function deadRootsPhrase(m){
+  if(!S.dbnums) return "放弃根数未读到（/dbnums 读取失败）。";
+  const dead = m.inScope.reduce((sum, r) => sum + Number(r.model_dead_roots || 0), 0);
+  return dead ? `有 ${dead} 个根生成失败到顶被放弃（model_dead_roots），要重来就「重扫这个库」。` : "没有被放弃的根。";
 }
 
 // 队列行的入队时刻只在 /tasks 里，靠 task_id 对回来。
 function enqueuedAt(m, row){ return ts(m.byTask.get(row.task_id)?.created_at); }
 
 /* ── verdicts ───────────────────────────────────────────── */
-// 三段判决：共享前置（halt）→ 数据面 → 模型面，房间挂在模型面尾巴上。每一段都是一把
+// 三段判决：共享前置（halt）→ 数据面 → 模型面（房间边随模型块落库，不单列）。每一段都是一把
 // 「上一级成立就不看下一级」的梯子；两面互不压制——ADR-056 D1 之后模型失败不再阻断
 // 应用水位，D2 又把「水位齐、模型没追平」定成承认且可观测的常态，压成一条梯子那个常态
 // 只能被讲成「进行中」或者被数据面盖掉。
@@ -1382,29 +1337,16 @@ function dataLane(m){
       detail:"标志持久化在 queue_control:main，活过重启。恢复：POST /api/v1/queue/resume。",
       timer:null };
   }
-  // 空间对账不重试，一次失败即死信（status=dead），原因落 logs/batch-failures-*.jsonl
-  // （event=side_effect_dead_letter，「错误日志」卡能看到），修好原因后 UPDATE 该行
-  // status='pending' 才会重放。读库失败那一支把 stalled 立成真、dead_letters 留 0 —— 那时
-  // 「有没有死信」是未知，不能当成「没有」。（非空间的副作用补偿队列与它的死信 / 复活按钮
-  // 2026-09-10 随 ADR-071 D9 退役，/health 不再有 side_effect_pending 这一格。）
-  const spatial = m.h.spatial_reconcile || {};
-  const spatialDead = Number(spatial.dead_letters || 0);
-  if(spatial.stalled){
-    const why = e => e ? `最近一条：${e}。` : "";
-    const line = spatialDead > 0
-      ? `空间对账有 ${spatialDead} 条死信（不重试）—— 该文件轮次的空间/房间发布停在上一次成功版本`
-      : "空间对账状态暂时未知 —— 状态读取失败，不代表任务已失败";
-    const detail = spatialDead > 0
-      ? `${why(spatial.last_error)}空间对账不自动重试：全文原因在「错误日志」卡（event=side_effect_dead_letter）；修好之后 UPDATE incr_side_effect_pending 该行 status='pending' 即重放。`
-      : `${why(spatial.last_error)}等待下一轮状态读取；当前没有可据此复活的死信。`;
-    return { lv:"warn", chip:["amber", spatialDead === 0 ? "状态未知" : "停摆"], path, line, detail:esc(detail), timer:null };
-  }
-  const dl = Number(m.mup.dead_letters || 0);
-  if(dl > 0){
-    const sample = (m.mup.blocking_samples || [])[0];
-    return { lv:"warn", chip:["amber","降级"], path,
-      line:`模型持久工作有 ${dl} 条死信（attempts ≥ ${MAX_ATTEMPTS}），模型门关着`,
-      detail:esc(sample ? `样例 ${sample.action} ${sample.target_refno}：${sample.last_error}` : (m.h.blocking_conditions || []).join(" · ")),
+  // 空间对账意图行与模型死信那两级判决随第二条异步账退役（ADR-072 D4/D5）：空间树随模型行
+  // 提交就地收敛，模型随任务同步生成。取而代之的是写入标记——`writing` 而队列里没有这个库，
+  // 就是上一次死在写库中途（spec §4.7）；它会在下一次启动 / 该库下一次任务开工前被回退重跑，
+  // 这里先把它说出口，因为它是「这个库的水位为什么会往回走」的唯一出处。
+  if(m.writingStalled.length){
+    const w = m.writingStalled[0], ws = w.write_state;
+    return { lv:"warn", chip:["amber","未写完"], path,
+      line:`${m.writingStalled.length} 个库的上一次任务死在写库中途（write_state = writing，队列里没有它）`,
+      detail:esc(`${w.dbnum}：${ws.intent} ${ws.start_sesno} → ${ws.end_sesno}，开工于 ${ws.started_at ? stamp(ws.started_at) : "?"}。`
+        + `下一次启动或该库下一次任务开工前会回退到 ${ws.start_sesno} 再从头重跑；期间三枚水位往回走不是数据丢失。`),
       timer:null };
   }
   if(m.running.length){
@@ -1427,6 +1369,35 @@ function dataLane(m){
       detail:"held 行不会被派发，它只是把「这个库有欠账」记在明面上。",
       timer:null };
   }
+  // kv-mem 房间启动屏障（spec §4.1 `initialization.room_bootstrap`）：`room_membership=true`
+  // 的读透进程在 resident 之后要把 MDB 全部 DESI 的模型根、房间归属与逐根发布走完，才放
+  // `model_ready`。这一段 data_ready=true、model_in_flight=false、model_ready=false——落到
+  // 下面那条「模型工作单还没收敛」会把几十个库的整库生成讲成 AABB 收口，而进度明明就在
+  // health 里。idle = 本形态没有这道屏障；ready = 已放行，两档都不在这里说话。
+  const rb = m.init.room_bootstrap;
+  if(rb && rb.status && rb.status !== "idle" && rb.status !== "ready"){
+    const t0 = ts(m.h.started_at);
+    const roots = `根 ${n(rb.roots_ready)}/${n(rb.roots_total)}${rb.roots_failed ? `（失败 ${n(rb.roots_failed)}）` : ""}`;
+    const edges = `房间边 ${n(rb.room_edges_written)}`;
+    const cost = `已耗时 ${dur(Number(rb.elapsed_ms))}${rb.rss_mib != null ? `，RSS ${n(rb.rss_mib)} MiB` : ""}${rb.max_transaction_bytes ? `，最大单根事务 ${n(rb.max_transaction_bytes)} B` : ""}。`;
+    if(rb.status === "initializing"){
+      const at = rb.current_dbnum != null
+        ? `正在做第 ${n(rb.dbnums_done + 1)}/${n(rb.dbnums_total)} 个库（dbnum ${rb.current_dbnum}）`
+        : `已完成 ${n(rb.dbnums_done)}/${n(rb.dbnums_total)} 个库，正在切下一个`;
+      return { lv:"run", chip:["blue","房间初始化"], path,
+        line:`房间启动屏障未放行：${at} —— ${roots}，${edges}`,
+        detail:esc(`room_membership=true 的 kv-mem 冷启动先把 MDB 全部可读 DESI 的模型根生成、逐根房间归属与模型行 + 房间边 + 回执的逐根事务走完，才置 model_ready、才把 features.room 报成 available；范围不受 watch_dbnums 限定。${cost}`
+          + "期间 memory 路由库的 /model/ensure（单根与整库）和 /model/rebuild 回 503 room_bootstrap_in_progress；树、属性、搜索这些直读接口照常。"),
+        timer:t0 ? { label:"已初始化", val:dur(now - t0), since:clock(t0), cls:"blue" } : null };
+    }
+    const samples = (rb.failure_samples || []).slice(0, 3);
+    return { lv:"bad", chip:["red", rb.status === "blocked" ? "房间屏障阻断" : "房间屏障部分失败"], path,
+      line:`房间启动屏障 ${rb.status}：${n(rb.dbnums_failed)} 个库 / ${n(rb.roots_failed)} 个根失败，model_ready 不放行`,
+      detail:esc(`${n(rb.dbnums_done)}/${n(rb.dbnums_total)} 个库已过，${roots}，${edges}。${cost}`
+        + (samples.length ? `失败样本：${samples.join("；")}` : "health 没给失败样本。")
+        + " 成功的根保留，失败的根没有完整回执；服务保持可诊断，修正来源后重启进程重跑这道屏障。"),
+      timer:t0 ? { label:"已初始化", val:dur(now - t0), since:clock(t0), cls:"red" } : null };
+  }
   // 水位齐、队列空，引擎却还没收口。模型阶段不进 /queue，上面那些判据一个都碰不到
   // 它，落到绿灯就成了「全好了」。两个信号要分开看：in_flight / model_running 是
   // 「正在生成」；而 end_full_model() 一跑就把 in_flight 抹掉、status 退回 data_ready，
@@ -1441,8 +1412,8 @@ function dataLane(m){
         : `水位已齐，模型阶段还没收口 —— ${m.inScope.length} 个库全部追平，但模型工作单还没收敛`,
       detail:(gen
         ? "模型阶段不进 /queue、也没有自己的进度接口，这一行的依据只有 initialization.status。"
-        : "全量模型那一趟跑完了（model_in_flight 已落回 false），但持久模型工作单与 AABB 阶段还没收敛，model_ready 仍是 false —— 启动线程还等在这一步上。")
-        + `到顶的死信会一直把这道门焊着：它们被 attempts 上限挡在自动 drain 外，只能人工复活。${mupPhrase(m)}`,
+        : "全量模型那一趟跑完了（model_in_flight 已落回 false），但模型工作单与 AABB 阶段还没收敛，model_ready 仍是 false —— 启动线程还等在这一步上。")
+        + deadRootsPhrase(m),
       timer:null };
   }
   if(m.modelLagging.length){
@@ -1464,7 +1435,7 @@ function dataLane(m){
   }
   return { lv:"ok", chip:["green","已追平"], path,
     line:`范围内 ${m.inScope.length} 个库的数据已齐，已判定的模型均一致`,
-    detail:`${mupPhrase(m)}一致判据为 model_sesno == applied_sesno 且没有根仍在追赶；不判的库单独显示。`,
+    detail:`${deadRootsPhrase(m)}一致判据为 model_sesno == applied_sesno 且没有根仍在追赶；不判的库单独显示。`,
     timer:null };
 }
 
@@ -1515,7 +1486,6 @@ function render(){
   renderKpi(m);
   renderQueue(m, now);
   renderFailures(m);
-  renderStaging(m);
   renderBatchFailures();
   renderTasks(m, now);
   renderEvents();
@@ -1571,15 +1541,10 @@ function renderDbnumEntry(m){
     : r.model_verdict === "lagging" ? `${r.model_sesno || 0} · 追赶中` : "不判";
   const recent = m.tasks.slice().sort((a,b) => ts(b.started_at || b.created_at) - ts(a.started_at || a.created_at))[0];
   const logs = ((S.batchFailures && S.batchFailures.records) || []).filter(x => Number(x.dbnum) === FOCUS_DBNUM);
-  const roomKnown = Object.prototype.hasOwnProperty.call(r, "room_sesno");
-  const roomInputMatch = roomKnown && r.room_input_version && r.room_required_input
-    && JSON.stringify(r.room_input_version) === JSON.stringify(r.room_required_input);
-  const roomText = !roomKnown ? "后端未提供"
-    : `${r.room_sesno ?? 0}${Number(r.room_sesno ?? 0) === Number(r.model_sesno ?? 0) && roomInputMatch && r.room_result_version ? " · 一致" : " · 待补"}`;
+  // 房间边随模型块同事务落库（ADR-073 D1/D2）：没有第三枚水位，模型一致就是房间一致。
   summary.innerHTML = `
     <div><span class="l">数据水位</span><span class="v">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span><span class="s">已保存 / 文件最新</span></div>
-    <div><span class="l">模型水位</span><span class="v">${esc(modelText)}</span><span class="s">追赶 ${esc(r.model_chasing_roots || 0)} · 放弃 ${esc(r.model_dead_roots || 0)} · 懒生成 ${esc(r.model_lazy_roots || 0)}</span></div>
-    <div><span class="l">房间水位</span><span class="v">${esc(roomText)}</span><span class="s" title="${esc(r.room_result_version || "")}">${roomInputMatch ? "输入版本匹配" : "等待房间输入凭证"}</span></div>
+    <div><span class="l">模型水位</span><span class="v">${esc(modelText)}</span><span class="s">追赶 ${esc(r.model_chasing_roots || 0)} · 放弃 ${esc(r.model_dead_roots || 0)} · 懒生成 ${esc(r.model_lazy_roots || 0)}（含房间边）</span></div>
     <div><span class="l">当前队列</span><span class="v">${m.rows.length ? esc(m.rows.map(x => x.state).join(" · ")) : "空"}</span><span class="s">${m.rows.length ? esc(m.rows.map(x => `${x.start_sesno}–${x.end_sesno}`).join("；")) : "没有待应用的数据批次"}</span></div>
     <div><span class="l">最近任务 / 落盘错误</span><span class="v">${recent ? esc(recent.state) : "无任务"} · ${logs.length} 条</span><span class="s" title="${esc(recent && recent.task_id || "")}">${recent ? esc(recent.task_id) : "当前进程没有该库任务"}</span></div>`;
 }
@@ -1615,12 +1580,14 @@ function renderKpi(m){
   const lag = m.lagging[0];
   const worst = m.parked[0] || m.failures[0];
   const focused = FOCUS_DBNUM == null ? null : m.byDb.get(FOCUS_DBNUM);
+  // 没聚焦时这一格报写入标记（ADR-072 D1）：正在写库的库数 / 上一次死在写库中途的库数。
+  // /dbnums 读不到就是未知，不是 0。
   const pendingValue = focused
     ? `${n(focused.model_chasing_roots)} / ${n(focused.model_dead_roots)}`
-    : (m.mupBlind ? "? / ?" : `${n(m.mup.retryable)} / ${n(m.mup.dead_letters)}`);
+    : (!S.dbnums ? "? / ?" : `${m.writing.length - m.writingStalled.length} / ${m.writingStalled.length}`);
   const pendingClass = focused
     ? (Number(focused.model_dead_roots || 0) ? "red" : (Number(focused.model_chasing_roots || 0) ? "amber" : "mut"))
-    : (m.mupBlind ? "amber" : (Number(m.mup.dead_letters || 0) ? "red" : (Number(m.mup.retryable || 0) ? "amber" : "mut")));
+    : (!S.dbnums ? "amber" : (m.writingStalled.length ? "red" : (m.writing.length ? "blue" : "mut")));
   $("kpi").innerHTML =
     kpiCell("队列积压", m.rows.length || 0,
       m.rows.length ? (m.blockedRows.length ? "red" : "amber") : "mut",
@@ -1633,8 +1600,8 @@ function renderKpi(m){
     kpiCell("水位落后", S.dbnums ? (m.lagging.length || 0) : "?",
       !S.dbnums ? "amber" : (m.lagging.length ? "amber" : "green"),
       !S.dbnums ? `状态读取失败：${S.dbnumsErr || "未知原因"}` : (lag ? `${lag.dbnum} ${lag.applied_sesno} → ${lag.file_latest_sesno}` : `${m.inScope.length} 个库在范围内`)) +
-    kpiCell(focused ? "追赶根 / 放弃根" : "待重试 / 死信", pendingValue, pendingClass,
-      focused ? `dbnum ${FOCUS_DBNUM} 模型根` : (m.mupBlind ? "这一段读不出来，不是 0" : "model_update_pending"));
+    kpiCell(focused ? "追赶根 / 放弃根" : "写入中 / 未写完", pendingValue, pendingClass,
+      focused ? `dbnum ${FOCUS_DBNUM} 模型根` : (!S.dbnums ? "/dbnums 读不出来，不是 0" : "/dbnums → write_state"));
 }
 
 const Q_STATE = {
@@ -1775,118 +1742,6 @@ const SW_BAND = {
 function bandText(band){
   const hit = SW_BAND[String(band || "").toLowerCase()];
   return hit ? hit.txt : (band || "—");
-}
-
-/// 字节按量纲收，别让 1.6 GB 显示成十位数字——这一栏是用来一眼看出「窗口涨疯了」的。
-/// 零也带单位：光一个「0」在一列 MB/GB 中间会被当成截断或读数失败。
-function mib(bytes){
-  const b = Number(bytes || 0);
-  if(!(b > 0)) return "0 B";
-  if(b < 1024) return `${b} B`;
-  if(b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
-  if(b < 1073741824) return `${(b / 1048576).toFixed(1)} MB`;
-  return `${(b / 1073741824).toFixed(2)} GB`;
-}
-
-/// 暂存窗口（ADR-017）：一段会话先攒进独立的 `mem://` 实例，整段提交才落库。
-///
-/// 这张卡回答 8191 现场那一问——**失败之后窗口回滚了还是残留着**。它决定重跑会不会
-/// 撞同一堵墙，也是资源泄漏的第一现场。数据一直都在 `/health` 里
-/// （`staging::lifecycle::resource_snapshots()`），此前只是没画出来（ISSUE-025 §四 4a）。
-///
-/// 三件事必须说出口，否则这一屏会骗人：
-///
-/// - **空不等于干净**。「没有批次在跑」「这一批走直写没建窗口」「窗口刚被废弃」在
-///   这一栏上长成同一个空白，谁也不许被默认读成前者；
-/// - **这一份活在进程内**，重启即清空。重启之后它必然为空，那时问「窗口回收没有」
-///   已经没有意义——该问的是那段会话有没有落库，答案只在水位表里；
-/// - **档位阈值来自环境变量**（`AIOS_STAGING_*`），面板不知道阈值是多少，所以只报
-///   档位、不画进度条。编一个百分比出来比不画更糟。
-function renderStaging(m){
-  const rows = m.staging;
-  const blocks = m.stagingBlocks;
-  const commit = m.stagingCommit;
-
-  // 落库的窗口阻断：它活得过重启，所以内存窗口空了之后，这一段才是唯一还说得出话
-  // 的证据。读不到（分项超预算）与真的没有必须分开。
-  const blockBody = m.stagingBlocksBlind
-    ? `<div class="sw-note"><b>staging_window_blocks 这一分项 health 没读出来</b>（超 2 秒预算，见 degraded_sections）——`
-      + `此刻是未知不是零。要确认就直接查库里的 increment_update_attempt（kind = 'window_block'）。</div>`
-    : (Array.isArray(blocks) && blocks.length
-        // end_sesno 是 Option：`record_window_block_on`（issue #10 那条加节点路径）记的
-        // 阻断不带会话号。直接内插会渲染成「停在  号会话」——一个空格坑，读起来像掉了字，
-        // 而它其实是「这条阻断没绑到某一号会话上」，得说出口。
-        ? `<div class="sw-note">另有 <b>${blocks.length} 条落库的窗口阻断</b>（increment_update_attempt / window_block，`
-          + `跨重启活着）：${blocks.map(b =>
-              `dbnum ${esc(b.dbnum)} ${b.end_sesno == null
-                ? "（没记会话号）" : `停在 ${esc(b.end_sesno)} 号会话`} —— ${esc(b.reason || "未记原因")}`
-              + (b.first_blocked_at ? `（首次 ${esc(stamp(b.first_blocked_at))}）` : "")).join("；")}</div>`
-        : "");
-
-  // 上次提交的耗时与重试跟窗口不共存亡：窗口提交完就没了，这两个数还在。所以它
-  // 摆在脚注而不是表里——摆进表里会被读成「还有一个窗口」。
-  //
-  // 耗时为 0 是「本进程还没提交过任何窗口」，不是「提交是瞬时的」。这两件事在
-  // `dur()` 下都渲染成 00:00，而前者恰恰是「窗口一直没收口」的旁证。
-  const commitMs = commit ? Number(commit.last_duration_ms || 0) : 0;
-  const foot = commit
-    ? `<div class="sw-foot">
-         <span>上次提交耗时 <span class="v">${commitMs > 0 ? dur(commitMs) : "—"}</span>${
-           commitMs > 0 ? "" : "（本进程还没提交过窗口）"}</span>
-         <span>重试 <span class="v">${n(commit.last_retries)}</span> 次</span>
-         <span>/health → staging_commit</span>
-       </div>`
-    : "";
-
-  if(!m.h){ $("sw-count").textContent = "—"; $("sw-body").innerHTML = `<div class="empty">读不到 /health</div>`; return; }
-  // 字段缺席 = 这版后端还不报这一栏。把它说成「没有窗口」，等于替一个答不出这个
-  // 问题的服务编了一个答案。
-  if(rows == null){
-    $("sw-count").textContent = "—";
-    $("sw-body").innerHTML = `<div class="empty">这版后端不报 staging_windows —— 不是「没有窗口」，是这一栏问不出来。<br>`
-      + `升级后端，或直接看控制台里「使用 kv-mem 暂存窗口 …」那几行。</div>` + blockBody + foot;
-    return;
-  }
-
-  $("sw-count").textContent = `${rows.length} 个`;
-  if(!rows.length){
-    $("sw-body").innerHTML = `<div class="empty">当前没有窗口挂着。<br>`
-      + `<span style="color:var(--amber)">这不等于「窗口都回收干净了」</span> —— 没有批次在跑、这一批走直写路径根本没建窗口、`
-      + `以及窗口刚被废弃，在这一栏上是同一个空白；而且它活在进程内，重启之后必然为空。<br>`
-      + `那段会话到底落库没有，只有水位表答得出。</div>` + blockBody + foot;
-    return;
-  }
-
-  $("sw-body").innerHTML = `<div class="tbl s-tbl">
-    <div class="r h"><span>dbnum</span><span>窗口 · 会话区间</span><span>档位</span><span>体量</span></div>`
-    + rows.map(w => {
-      const band = SW_BAND[String(w.band || "").toLowerCase()]
-        || { cls:"mut", dot:"t3", txt:w.band || "—" };
-      const stalled = w.state === "writeback_stalled";
-      // 合计才是配额的判据（暂存 SQL 字节 + journal 字节），所以主数报合计，
-      // 两个分量放 title 里——分开报会让人拿单个分量去对阈值。
-      const total = Number(w.staged_sql_bytes || 0) + Number(w.journal_bytes || 0);
-      const detail = `staged_sql_bytes=${n(w.staged_sql_bytes)} · journal_bytes=${n(w.journal_bytes)}`
-        + ` · statements=${n(w.staged_statements)} · journal_entries=${n(w.journal_entries)}`
-        + ` · est_rows=${n(w.estimated_write_rows)}`;
-      const note = stalled
-        ? `<div class="sw-msg"><span class="l">state = writeback_stalled —— 写回卡住，窗口没放掉</span>
-             <span class="v">${esc(w.writeback_error || "（没记下原话）")}</span></div>`
-        : "";
-      return `<div class="r${note ? " wmsg" : ""}">
-        <span class="dbn">${esc(w.dbnum)}</span>
-        <span class="stk mono sec" title="window_id=${esc(w.window_id ?? "?")}"><b>${
-          esc(w.label || w.window_id || "—")}</b><i>${esc(w.start_sesno)}..=${esc(w.end_sesno)}</i></span>
-        <span class="state"><i class="dot" style="width:5px;height:5px;background:var(--${
-          stalled ? "red" : band.dot})"></i><span class="mono ${
-          stalled ? "red" : band.cls}" style="font-size:11.5px">${esc(stalled ? "写回卡住" : band.txt)}</span></span>
-        <span class="stk mono sec" title="${esc(detail)}"><b>${esc(mib(total))}</b><i>${esc(n(w.estimated_write_rows))} 行</i></span>
-      </div>` + note;
-    }).join("") + `</div>`
-    + `<div class="sw-note">窗口还挂着 ≠ 出了事：正常跑批时它本来就在。`
-    + `真正要看的是<b>失败之后它还在不在</b> —— 在，说明那一段没回滚干净，重跑多半撞同一堵墙。`
-    + `档位阈值由 AIOS_STAGING_* 环境变量定，面板不知道具体数值，所以只报档位。</div>`
-    + blockBody + foot;
 }
 
 // 摊到多少条为止。失败卡含原因、窗口、告警，四条就占满一屏；停滞行只占一行，
@@ -2383,7 +2238,7 @@ function renderWatermark(m){
     $("w-body").innerHTML = `<div class="empty">${S.dbnums ? "范围内没有库 —— 当前 MDB 没有声明任何 DESI。" : `读不到 /dbnums：${esc(S.dbnumsErr || "请求失败")}`}</div>`;
     return;
   }
-  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>房间水位</span><span>数据进度</span><span>标记</span></div>`;
+  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>数据进度</span><span>标记</span></div>`;
   const body = list.map(r => {
     const lag = r.file_latest_sesno - r.applied_sesno;
     const isRun = running.has(r.dbnum);
@@ -2411,17 +2266,6 @@ function renderWatermark(m){
         : r.model_verdict === "not_judged"
           ? `<span class="chip sm mut" title="${esc(r.model_verdict_reason || "")}">不判</span>`
           : `<span class="mut">未知</span>`;
-    const roomKnown = Object.prototype.hasOwnProperty.call(r, "room_sesno");
-    const roomInputMatch = roomKnown && r.room_input_version && r.room_required_input
-      && JSON.stringify(r.room_input_version) === JSON.stringify(r.room_required_input);
-    const roomComplete = roomKnown
-      && Number(r.room_sesno ?? 0) === Number(r.model_sesno ?? 0)
-      && roomInputMatch && !!r.room_result_version;
-    const roomCell = !roomKnown ? `<span class="mut">未提供</span>`
-      : roomComplete
-        ? `<span class="mono">${esc(r.room_sesno)}</span> <span class="chip sm green" title="${esc(r.room_settled_at ? `房间追平 ${stamp(r.room_settled_at)}` : "房间已一致")}">一致</span>`
-        : `<span class="mono">${esc(r.room_sesno || 0)}</span> <span class="chip sm amber" title="${esc(roomInputMatch ? "房间水位落后模型" : "房间输入版本不匹配")}">待补</span>`;
-
     const pk = parked.get(r.dbnum);
     const note = pk ? `park · ${pk.reason || "连败到上限"}`
       : isRun ? "worker 执行中"
@@ -2440,7 +2284,6 @@ function renderWatermark(m){
       <span class="mono mut" style="font-size:11.5px">${esc(phaseOf(r.db_type))}</span>
       <span class="mono sec" style="font-size:12.5px">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span>
       <span>${modelCell}</span>
-      <span>${roomCell}</span>
       <span>${S.dataFace === "read-through" ? `<span class="mut">不判</span>` : `<span class="track"><i class="${cls}" style="width:${(meaningful ? pct(r.applied_sesno, r.file_latest_sesno) : 0).toFixed(1)}%"></i></span>`}</span>
       <span class="marks">${chips.join("")}<span class="note" title="${esc(note)}">${esc(note)}</span></span>
     </div>`;
@@ -2609,7 +2452,7 @@ function setupMonitorLayout(){
   panel("q-body").querySelector(".t").textContent = "等待处理";
   fold("history-fold", "历史错误", "查看记录与筛选", [panel("bf-body")]);
   fold("events-fold", "实时事件", "连接状态与事件明细", [panel("e-body")]);
-  fold("diagnostic-fold", "高级诊断", "阻断原因 · 水位明细 · 服务状态", [$("kpi"),panel("f-body"),panel("sw-body"),panel("w-body"),$("sysbar"),document.querySelector(".foot")]);
+  fold("diagnostic-fold", "高级诊断", "阻断原因 · 水位明细 · 服务状态", [$("kpi"),panel("f-body"),panel("w-body"),$("sysbar"),document.querySelector(".foot")]);
   if(FOCUS_DBNUM == null) document.querySelector(".mid").before(panel("w-body"));
   $("db-picker").addEventListener("change", e => { location.href = dbHref(e.target.value || null); });
 }

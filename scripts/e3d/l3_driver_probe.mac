@@ -2,7 +2,7 @@
 -- 不改任何数据、不 SAVEWORK、不 QUIT——收尾由 runner 的 wrapper 负责。
 -- 按名寻址：refno 随元素增删漂移，写死只能钉住某一刻的快照。
 
-ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/l3_driver_probe.log" OVER
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/l3_driver_probe.log" OVER
 $P L3-PROBE-ALIVE
 Q PROJ
 Q MDB

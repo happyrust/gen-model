@@ -1,0 +1,1798 @@
+//! `/api/v1/spatial/*` 的查询流水线（spec §4.13；计划
+//! `plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md` §3.2）。
+//!
+//! 候选只来自进程内的 `GLOBAL_AABB_TREE`：拿**读锁**、在锁内只把候选 `collect()` 成一个 `Vec`，
+//! 随即放锁；不取空间串行锁、不写树（写点白名单测试 `tree_write_sites_stay_on_the_audited_whitelist`
+//! 只认三个文件，本文件不在其中）。dbnum / name 这些属性都在锁外补——补属性要回元素记录读盘，
+//! 不该压在树的读锁下拖慢写侧收敛。
+//!
+//! 与 HTTP 解耦：入参是已经拆成字串的 [`RawSpatialQuery`]（解析在 [`SpatialQueryParams::parse`]，
+//! 不依赖 axum 的类型推断，所以 `radius=5000` 这类数字在 `serde(flatten)` 下也不会被 urlencoded 解成
+//! 字串再报错），出参是 serde 结构体，错误是 [`SpatialQueryError`]；`web_service::handlers` 只负责
+//! 身份校验、拿 `DirectTreeService` 与状态码映射。
+//!
+//! 覆盖面（`coverage = "global-tree"`，§5-5 按 (a)）：只有进过全局树的盒——也就是「已经生成过模型」
+//! 的构件——才会成为候选；`ModelMemoryStore`-only（`ProjectionOnly` / memory-only 库）的盒第一版不扫。
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::str::FromStr;
+
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES;
+use aios_core::room::room::GLOBAL_AABB_TREE;
+use aios_core::{RefU64, RefnoEnum};
+use parry3d::bounding_volume::Aabb;
+use parry3d::math::{Point, Vector};
+use serde::{Deserialize, Serialize};
+
+use crate::data_interface::direct_tree::DirectTreeService;
+use crate::data_interface::generation_root::{refno_from_e3d, refno_to_e3d};
+use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+use crate::fast_model::spatial_state::{self, SpatialTreeState};
+
+/// `per_page` 缺省值。
+pub const DEFAULT_PER_PAGE: usize = 500;
+/// `per_page` 上限（超出钳位，不报错）。
+pub const MAX_PER_PAGE: usize = 1000;
+/// 半径上限（mm）：100 m。再大就是整库扫描，不是「邻近」。
+pub const MAX_RADIUS_MM: f32 = 100_000.0;
+/// 一次查询最多从树上取多少候选；超出置 `truncated_candidates`。
+pub const CANDIDATE_CAP: usize = 200_000;
+/// `/nearby/refnos` 最多返回多少条 refno；超出置 `truncated_results`。
+pub const RESULT_CAP: usize = 100_000;
+/// 响应里 `coverage` 的字面值（§5-5 按 (a)）。
+pub const COVERAGE: &str = "global-tree";
+/// 树未就绪时 `Retry-After` 的秒数。
+pub const RETRY_AFTER_SECS: u32 = 5;
+
+/// query 串原文：全部 `Option<String>`，由 [`SpatialQueryParams::parse`] 负责解析与报错。
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct RawSpatialQuery {
+    pub refno: Option<String>,
+    pub x: Option<String>,
+    pub y: Option<String>,
+    pub z: Option<String>,
+    pub radius: Option<String>,
+    pub shape: Option<String>,
+    pub nouns: Option<String>,
+    pub keyword: Option<String>,
+    pub sort: Option<String>,
+    pub include_self: Option<String>,
+    pub include_negative: Option<String>,
+    pub dbnums: Option<String>,
+    pub page: Option<String>,
+    pub per_page: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Sphere,
+    Cube,
+}
+
+impl Shape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sphere => "sphere",
+            Self::Cube => "cube",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortBy {
+    /// 距离升序；同距按 dbnum、refno 兜底。
+    Distance,
+    /// 名字序。名字只对本页解（§5-2 按 (a)），全集上用 noun、refno 作近似序。
+    Name,
+}
+
+/// 查询中心：点，或某个构件（含子树）的并集盒。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Target {
+    Position(Point<f32>),
+    Refno(RefU64),
+}
+
+/// 校验过的查询参数。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialQueryParams {
+    pub target: Target,
+    pub radius: f32,
+    pub shape: Shape,
+    /// 大写。空 = 不筛。
+    pub nouns: BTreeSet<String>,
+    /// 大写。
+    pub keyword: Option<String>,
+    pub sort: SortBy,
+    pub include_self: bool,
+    pub include_negative: bool,
+    /// `None` = 不限库。
+    pub dbnums: Option<BTreeSet<u32>>,
+    /// 从 1 起。
+    pub page: usize,
+    /// `1..=MAX_PER_PAGE`。
+    pub per_page: usize,
+}
+
+fn parse_flag(name: &str, raw: Option<&str>, default: bool) -> Result<bool, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(format!("{name} 只接受 true/false（收到 {other}）")),
+    }
+}
+
+fn parse_f32(name: &str, raw: &str) -> Result<f32, String> {
+    let value: f32 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{name} 必须是数字（收到 {raw}）"))?;
+    if !value.is_finite() {
+        return Err(format!("{name} 必须是有限数（收到 {raw}）"));
+    }
+    Ok(value)
+}
+
+fn split_csv(raw: Option<&str>) -> impl Iterator<Item = &str> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+}
+
+impl SpatialQueryParams {
+    /// 解析并校验 query 串。错误信息直接作为 400 `bad_request` 的 `message`。
+    pub fn parse(raw: &RawSpatialQuery) -> Result<Self, String> {
+        let refno = raw
+            .refno
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let coords = [("x", &raw.x), ("y", &raw.y), ("z", &raw.z)];
+        let given = coords
+            .iter()
+            .filter(|(_, v)| v.as_deref().is_some_and(|s| !s.trim().is_empty()))
+            .count();
+        let target = match (refno, given) {
+            (Some(_), n) if n > 0 => {
+                return Err("refno 与 x,y,z 二选一，不能同时给".to_string());
+            }
+            (Some(text), _) => {
+                let refno = RefU64::from_str(text)
+                    .ok()
+                    .filter(RefU64::is_valid)
+                    .ok_or_else(|| format!("refno 格式非法（应为 a/b 或 a_b）: {text}"))?;
+                Target::Refno(refno)
+            }
+            (None, 0) => return Err("缺少查询中心：给 refno 或 x,y,z".to_string()),
+            (None, 3) => {
+                let mut values = [0.0f32; 3];
+                for (slot, (name, value)) in values.iter_mut().zip(coords.iter()) {
+                    *slot = parse_f32(name, value.as_deref().unwrap_or_default())?;
+                }
+                Target::Position(Point::new(values[0], values[1], values[2]))
+            }
+            (None, _) => return Err("x,y,z 必须三个一起给".to_string()),
+        };
+
+        let radius_raw = raw
+            .radius
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "缺少 radius（mm）".to_string())?;
+        let radius = parse_f32("radius", radius_raw)?;
+        if !(radius > 0.0 && radius <= MAX_RADIUS_MM) {
+            return Err(format!(
+                "radius 必须在 (0, {MAX_RADIUS_MM}] mm 之内（收到 {radius_raw}）"
+            ));
+        }
+
+        let shape = match raw
+            .shape
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => Shape::Sphere,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "sphere" => Shape::Sphere,
+                "cube" => Shape::Cube,
+                other => return Err(format!("shape 只接受 sphere/cube（收到 {other}）")),
+            },
+        };
+        let sort = match raw.sort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => SortBy::Distance,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "distance" => SortBy::Distance,
+                "name" => SortBy::Name,
+                other => return Err(format!("sort 只接受 distance/name（收到 {other}）")),
+            },
+        };
+        let nouns = split_csv(raw.nouns.as_deref())
+            .map(str::to_ascii_uppercase)
+            .collect::<BTreeSet<_>>();
+        let keyword = raw
+            .keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_uppercase);
+        let include_self = parse_flag("include_self", raw.include_self.as_deref(), false)?;
+        let include_negative =
+            parse_flag("include_negative", raw.include_negative.as_deref(), false)?;
+        let dbnums = {
+            let items = split_csv(raw.dbnums.as_deref())
+                .map(|item| {
+                    item.parse::<u32>()
+                        .map_err(|_| format!("dbnums 必须是逗号分隔的库号（收到 {item}）"))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            (!items.is_empty()).then_some(items)
+        };
+        let page = match raw.page.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => 1,
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|page| *page >= 1)
+                .ok_or_else(|| format!("page 必须是从 1 起的整数（收到 {value}）"))?,
+        };
+        let per_page = match raw
+            .per_page
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => DEFAULT_PER_PAGE,
+            Some(value) => value
+                .parse::<usize>()
+                .map_err(|_| format!("per_page 必须是整数（收到 {value}）"))?
+                .clamp(1, MAX_PER_PAGE),
+        };
+
+        Ok(Self {
+            target,
+            radius,
+            shape,
+            nouns,
+            keyword,
+            sort,
+            include_self,
+            include_negative,
+            dbnums,
+            page,
+            per_page,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum SpatialQueryError {
+    /// 参数问题（400）。
+    BadRequest(String),
+    /// refno 模式的中心构件在投影与树里都没有盒（404）。
+    NotFound(String),
+    /// 空间树不在 Ready / ReadyEmpty（503 + `Retry-After`）。
+    NotReady(SpatialTreeState),
+    Internal(anyhow::Error),
+}
+
+impl std::fmt::Display for SpatialQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(message) | Self::NotFound(message) => f.write_str(message),
+            Self::NotReady(state) => write!(
+                f,
+                "{}: 空间树状态为 {}，范围查询暂不可用",
+                spatial_state::SPATIAL_TREE_NOT_READY,
+                state.as_str()
+            ),
+            Self::Internal(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+/// 候选补属性的来源：生产是 [`DirectTreeService`]，单测用查表实现。
+pub trait ElementAttributes: Sync {
+    /// 库号：答不出为 `None`（Ref0 非法、或其库不在本 MDB 路由目录）。
+    fn dbnum_of(&self, refno: RefU64) -> Option<u32>;
+    /// `NAME`：没有名字或读不出记录为 `None`。只对本页调（§5-2 按 (a)）。
+    fn name_of(&self, refno: RefU64) -> Option<String>;
+}
+
+impl ElementAttributes for DirectTreeService {
+    fn dbnum_of(&self, refno: RefU64) -> Option<u32> {
+        DirectTreeService::dbnum_of(self, refno)
+    }
+
+    fn name_of(&self, refno: RefU64) -> Option<String> {
+        DirectTreeService::name_of(self, refno)
+    }
+}
+
+/// 同一 refno 在一次查询里只问一次库号。
+struct DbnumMemo<'a> {
+    attrs: &'a dyn ElementAttributes,
+    cache: HashMap<RefU64, Option<u32>>,
+}
+
+impl DbnumMemo<'_> {
+    fn dbnum_of(&mut self, refno: RefU64) -> Option<u32> {
+        *self
+            .cache
+            .entry(refno)
+            .or_insert_with(|| self.attrs.dbnum_of(refno))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 距离
+// ---------------------------------------------------------------------------
+
+/// AABB 到 AABB 的最小表面距离：逐轴 `max(0, a.min - b.max, b.min - a.max)` 的欧氏范数；相交为 0。
+pub fn aabb_min_distance(a: &Aabb, b: &Aabb) -> f32 {
+    let mut sum = 0.0f32;
+    for axis in 0..3 {
+        let gap = (a.mins[axis] - b.maxs[axis])
+            .max(b.mins[axis] - a.maxs[axis])
+            .max(0.0);
+        sum += gap * gap;
+    }
+    sum.sqrt()
+}
+
+/// AABB 到点的最小表面距离，点在盒内为 0。与 rstar `PointDistance::distance_2`（`locate_within_distance`
+/// 的判据）是同一个量的平方根，也与前端本地扫描的 `aabbMinDistanceToPoint` 同口径。
+pub fn aabb_point_distance(a: &Aabb, p: &Point<f32>) -> f32 {
+    let mut sum = 0.0f32;
+    for axis in 0..3 {
+        let gap = (a.mins[axis] - p[axis])
+            .max(p[axis] - a.maxs[axis])
+            .max(0.0);
+        sum += gap * gap;
+    }
+    sum.sqrt()
+}
+
+fn usable_bounds(bounds: [[f32; 3]; 2]) -> Option<Aabb> {
+    let [mins, maxs] = bounds;
+    let finite = mins.iter().chain(maxs.iter()).all(|v| v.is_finite());
+    let ordered = (0..3).all(|axis| mins[axis] <= maxs[axis]);
+    (finite && ordered).then(|| Aabb::new(mins.into(), maxs.into()))
+}
+
+fn merge(union: Option<Aabb>, aabb: Aabb) -> Aabb {
+    match union {
+        None => aabb,
+        Some(existing) => {
+            let mut mins = existing.mins;
+            let mut maxs = existing.maxs;
+            for axis in 0..3 {
+                mins[axis] = mins[axis].min(aabb.mins[axis]);
+                maxs[axis] = maxs[axis].max(aabb.maxs[axis]);
+            }
+            Aabb::new(mins, maxs)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 中心与候选（读锁内）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CenterSource {
+    Position,
+    RefnoAabbCenter,
+}
+
+impl CenterSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Position => "position",
+            Self::RefnoAabbCenter => "refno_aabb_center",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Center {
+    pub point: Point<f32>,
+    pub source: CenterSource,
+    /// refno 模式下目标（含子树）的并集盒；点模式为 `None`。
+    pub target_box: Option<Aabb>,
+    /// refno 模式下 `include_self=false` 要剔除的来源：目标自身 + 投影里祖先链含目标的记录的来源。
+    pub subtree: HashSet<RefU64>,
+}
+
+/// 解中心（计划 §3.2 步骤 3）。refno 模式先看内存投影（与 `query_service::spatial_bounds` 的 subtree
+/// 口径逐字相同：来源是目标或祖先链含目标、`mesh_id` 非空、盒可用），投影里没有再看树上该 refno 自己的
+/// 条目（[`AccelerationTree::entries_of`]，P0），两处都没有 → `NotFound`。
+pub fn resolve_center(
+    params: &SpatialQueryParams,
+    memory: &ModelMemoryStore,
+    tree: &AccelerationTree,
+) -> Result<Center, SpatialQueryError> {
+    match params.target {
+        Target::Position(point) => Ok(Center {
+            point,
+            source: CenterSource::Position,
+            target_box: None,
+            subtree: HashSet::new(),
+        }),
+        Target::Refno(refno) => {
+            let source = refno_to_e3d(RefnoEnum::from(refno));
+            let packed = refno.0 as i64;
+            let mut union: Option<Aabb> = None;
+            let mut subtree = HashSet::from([refno]);
+            for record in memory.records_of_root(ProjectionScope::Current, source) {
+                let in_scope = record.source_refno == source || record.ancestors.contains(&packed);
+                if !in_scope || record.mesh_id.is_empty() {
+                    continue;
+                }
+                let Some(aabb) = usable_bounds(record.world_bounds) else {
+                    continue;
+                };
+                subtree.insert(refno_from_e3d(record.source_refno).refno());
+                union = Some(merge(union, aabb));
+            }
+            if union.is_none() {
+                for entry in tree.entries_of(refno).iter() {
+                    union = Some(merge(union, entry.aabb));
+                }
+            }
+            let target = union.ok_or_else(|| {
+                SpatialQueryError::NotFound(format!(
+                    "构件 {} 在模型投影与空间树里都没有包围盒（还没生成过模型）",
+                    RefnoEnum::from(refno).to_pdms_str()
+                ))
+            })?;
+            Ok(Center {
+                point: target.center(),
+                source: CenterSource::RefnoAabbCenter,
+                target_box: Some(target),
+                subtree,
+            })
+        }
+    }
+}
+
+/// 一条从树上取下来的候选：条目的克隆 + 到中心的最小表面距离。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub entry: RStarBoundingBox,
+    pub distance: f32,
+}
+
+fn take_capped<'a>(
+    iter: impl Iterator<Item = (&'a RStarBoundingBox, f32)>,
+) -> (Vec<Candidate>, bool) {
+    let mut iter = iter;
+    let mut out = Vec::new();
+    for (entry, distance) in iter.by_ref().take(CANDIDATE_CAP) {
+        out.push(Candidate {
+            entry: entry.clone(),
+            distance,
+        });
+    }
+    let truncated = iter.next().is_some();
+    (out, truncated)
+}
+
+/// 候选（计划 §3.2 步骤 4）。只读树、只 `collect()`；返回 `(候选, 是否截断)`。
+///
+/// - 点 + sphere：rstar `locate_within_distance(p, r²)`，判据是盒到点的最小距离 ≤ r；
+/// - 点 + cube：与 `center ± r` 的盒相交；
+/// - refno 目标：与目标盒外扩 r 相交，sphere 再按盒到盒最小距离 ≤ r 过滤。
+pub fn collect_candidates(
+    tree: &AccelerationTree,
+    center: &Center,
+    params: &SpatialQueryParams,
+) -> (Vec<Candidate>, bool) {
+    let radius = params.radius;
+    let point = center.point;
+    match (center.target_box, params.shape) {
+        (None, Shape::Sphere) => take_capped(
+            tree.locate_within_distance([point.x, point.y, point.z], radius * radius)
+                .map(|entry| (entry, aabb_point_distance(&entry.aabb, &point))),
+        ),
+        (None, Shape::Cube) => {
+            let probe = Aabb::new(
+                point - Vector::repeat(radius),
+                point + Vector::repeat(radius),
+            );
+            take_capped(
+                tree.locate_intersecting_bounds(&probe)
+                    .map(|entry| (entry, aabb_point_distance(&entry.aabb, &point))),
+            )
+        }
+        (Some(target), shape) => {
+            let probe = Aabb::new(
+                target.mins - Vector::repeat(radius),
+                target.maxs + Vector::repeat(radius),
+            );
+            take_capped(
+                tree.locate_intersecting_bounds(&probe)
+                    .map(|entry| (entry, aabb_min_distance(&entry.aabb, &target)))
+                    .filter(|(_, distance)| shape == Shape::Cube || *distance <= radius),
+            )
+        }
+    }
+}
+
+/// 读锁内那一段的产物：状态、中心、候选。之后的过滤 / 排序 / 分页 / 补属性都在锁外。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scan {
+    pub state: SpatialTreeState,
+    pub center: Center,
+    pub candidates: Vec<Candidate>,
+    pub truncated_candidates: bool,
+}
+
+/// 门禁 + 解中心 + 取候选（计划 §3.2 步骤 2-4）。`state` 由调用方传入：生产传
+/// `spatial_state::current_state()`，单测可以直接给 `Rebuilding` / `ReadyEmpty`。
+pub fn scan_tree(
+    tree: &AccelerationTree,
+    state: SpatialTreeState,
+    params: &SpatialQueryParams,
+    memory: &ModelMemoryStore,
+) -> Result<Scan, SpatialQueryError> {
+    if !state.is_ready() {
+        return Err(SpatialQueryError::NotReady(state));
+    }
+    let center = resolve_center(params, memory, tree)?;
+    let (candidates, truncated_candidates) = if state == SpatialTreeState::ReadyEmpty {
+        (Vec::new(), false)
+    } else {
+        collect_candidates(tree, &center, params)
+    };
+    Ok(Scan {
+        state,
+        center,
+        candidates,
+        truncated_candidates,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 过滤 / 排序 / 分组 / 分页（读锁外）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hit {
+    pub refno: RefU64,
+    pub noun: String,
+    pub aabb: Aabb,
+    pub distance: f32,
+    pub dbnum: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NounOption {
+    pub value: String,
+    pub count: usize,
+    pub is_negative: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct FilterOptions {
+    pub nouns: Vec<NounOption>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filtered {
+    pub hits: Vec<Hit>,
+    pub filter_options: FilterOptions,
+}
+
+/// 负实体 noun（`TOTAL_NEG_NOUN_NAMES`），大小写不敏感。
+pub fn is_negative_noun(noun: &str) -> bool {
+    TOTAL_NEG_NOUN_NAMES
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(noun.trim()))
+}
+
+/// `GET /spatial/negative-nouns` 的清单：`TOTAL_NEG_NOUN_NAMES` 去重、保持原序（原表里
+/// `NSBO` / `NLCY` / `NSCY` 各出现两次）。
+pub fn negative_nouns() -> Vec<&'static str> {
+    let mut seen = HashSet::new();
+    TOTAL_NEG_NOUN_NAMES
+        .iter()
+        .copied()
+        .filter(|name| seen.insert(*name))
+        .collect()
+}
+
+fn keyword_matches(keyword_upper: &str, refno: RefU64, noun_upper: &str) -> bool {
+    noun_upper.contains(keyword_upper)
+        || refno.to_string().contains(keyword_upper)
+        || RefnoEnum::from(refno).to_pdms_str().contains(keyword_upper)
+}
+
+/// 过滤（计划 §3.2 步骤 5，顺序固定）：`include_self` → 负实体 → `dbnums` → 记 `filter_options.nouns`
+/// 计数 → `nouns` → `keyword`。noun 计数落在 `nouns` / `keyword` 之前：它是给筛选器画可选项用的，
+/// 选中一个 noun 不能让别的 noun 从清单上消失。
+pub fn filter_candidates(
+    candidates: Vec<Candidate>,
+    params: &SpatialQueryParams,
+    center: &Center,
+    attrs: &dyn ElementAttributes,
+) -> Filtered {
+    let mut memo = DbnumMemo {
+        attrs,
+        cache: HashMap::new(),
+    };
+    let exclude_subtree = !params.include_self && center.target_box.is_some();
+    let mut noun_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut hits = Vec::new();
+    for Candidate { entry, distance } in candidates {
+        if exclude_subtree && center.subtree.contains(&entry.refno) {
+            continue;
+        }
+        let noun_upper = entry.noun.trim().to_ascii_uppercase();
+        if !params.include_negative && is_negative_noun(&noun_upper) {
+            continue;
+        }
+        let dbnum = memo.dbnum_of(entry.refno);
+        if let Some(allowed) = &params.dbnums
+            && !dbnum.is_some_and(|dbnum| allowed.contains(&dbnum))
+        {
+            continue;
+        }
+        *noun_counts.entry(noun_upper.clone()).or_default() += 1;
+        if !params.nouns.is_empty() && !params.nouns.contains(&noun_upper) {
+            continue;
+        }
+        if let Some(keyword) = &params.keyword
+            && !keyword_matches(keyword, entry.refno, &noun_upper)
+        {
+            continue;
+        }
+        hits.push(Hit {
+            refno: entry.refno,
+            noun: entry.noun,
+            aabb: entry.aabb,
+            distance,
+            dbnum,
+        });
+    }
+    let mut nouns = noun_counts
+        .into_iter()
+        .map(|(value, count)| NounOption {
+            is_negative: is_negative_noun(&value),
+            value,
+            count,
+        })
+        .collect::<Vec<_>>();
+    nouns.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    Filtered {
+        hits,
+        filter_options: FilterOptions { nouns },
+    }
+}
+
+/// 排序（计划 §3.2 步骤 7）。`Distance`：距离升序，同距按 dbnum、refno；`Name`：名字只对本页解，
+/// 全集用 noun、refno 作近似序（spec §4.13）。两种都是全序，翻页稳定。
+pub fn sort_hits(hits: &mut [Hit], sort: SortBy) {
+    match sort {
+        SortBy::Distance => hits.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.dbnum.cmp(&b.dbnum))
+                .then_with(|| a.refno.cmp(&b.refno))
+        }),
+        SortBy::Name => hits.sort_by(|a, b| {
+            a.noun
+                .to_ascii_uppercase()
+                .cmp(&b.noun.to_ascii_uppercase())
+                .then_with(|| a.refno.cmp(&b.refno))
+        }),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DbnumGroup {
+    pub dbnum: u32,
+    pub count: usize,
+}
+
+/// 全集按库分组计数（不受分页影响）。答不出库号的条目不进分组。
+pub fn group_by_dbnum(hits: &[Hit]) -> Vec<DbnumGroup> {
+    let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for dbnum in hits.iter().filter_map(|hit| hit.dbnum) {
+        *counts.entry(dbnum).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(dbnum, count)| DbnumGroup { dbnum, count })
+        .collect()
+}
+
+/// 切页：返回本页条目与 `has_more`。`page` 从 1 起。
+pub fn paginate<T>(items: Vec<T>, page: usize, per_page: usize) -> (Vec<T>, bool) {
+    let total = items.len();
+    let start = page.saturating_sub(1).saturating_mul(per_page).min(total);
+    let end = start.saturating_add(per_page).min(total);
+    let page_items = items.into_iter().skip(start).take(end - start).collect();
+    (page_items, end < total)
+}
+
+// ---------------------------------------------------------------------------
+// 响应
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BoxJson {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl From<&Aabb> for BoxJson {
+    fn from(aabb: &Aabb) -> Self {
+        Self {
+            min: [aabb.mins.x, aabb.mins.y, aabb.mins.z],
+            max: [aabb.maxs.x, aabb.maxs.y, aabb.maxs.z],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CenterJson {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub source: &'static str,
+}
+
+impl From<&Center> for CenterJson {
+    fn from(center: &Center) -> Self {
+        Self {
+            x: center.point.x,
+            y: center.point.y,
+            z: center.point.z,
+            source: center.source.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NearbyItem {
+    /// `a_b`。
+    pub refno: String,
+    /// 答不出为 `null`（与 §4.10 树节点的 `dbnum` 同义：不是 0 号库）。
+    pub dbnum: Option<u32>,
+    pub noun: String,
+    /// 只对本页补；没有名字为 `null`。
+    pub name: Option<String>,
+    pub aabb: BoxJson,
+    /// 到中心（点或目标盒）的最小表面距离，mm。
+    pub distance: f32,
+    /// `distance <= radius`。sphere 下恒真；cube 下角上的候选可能为假。
+    pub within_radius: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NearbyResponse {
+    pub results: Vec<NearbyItem>,
+    pub center: CenterJson,
+    pub radius: f32,
+    pub shape: &'static str,
+    pub total_count: usize,
+    pub returned_count: usize,
+    pub page: usize,
+    pub per_page: usize,
+    pub has_more: bool,
+    pub candidate_count: usize,
+    pub truncated_candidates: bool,
+    pub candidate_cap: usize,
+    pub groups: Vec<DbnumGroup>,
+    pub filter_options: FilterOptions,
+    pub spatial_state: &'static str,
+    pub coverage: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NearbyRefnosResponse {
+    /// `a_b`，按距离序，上限 `result_cap`。
+    pub refnos: Vec<String>,
+    pub by_dbnum: BTreeMap<String, Vec<String>>,
+    pub total_count: usize,
+    pub truncated_results: bool,
+    pub result_cap: usize,
+    pub center: CenterJson,
+    pub radius: f32,
+    pub shape: &'static str,
+    pub spatial_state: &'static str,
+    pub coverage: &'static str,
+}
+
+/// 锁外的后半程（步骤 5-7 + 切页 + 只给本页补 name）。
+pub fn assemble_nearby(
+    scan: Scan,
+    params: &SpatialQueryParams,
+    attrs: &dyn ElementAttributes,
+) -> NearbyResponse {
+    let candidate_count = scan.candidates.len();
+    let Filtered {
+        mut hits,
+        filter_options,
+    } = filter_candidates(scan.candidates, params, &scan.center, attrs);
+    sort_hits(&mut hits, params.sort);
+    let groups = group_by_dbnum(&hits);
+    let total_count = hits.len();
+    let (page_hits, has_more) = paginate(hits, params.page, params.per_page);
+    let results = page_hits
+        .into_iter()
+        .map(|hit| NearbyItem {
+            refno: hit.refno.to_string(),
+            dbnum: hit.dbnum,
+            name: attrs.name_of(hit.refno),
+            noun: hit.noun,
+            aabb: BoxJson::from(&hit.aabb),
+            distance: hit.distance,
+            within_radius: hit.distance <= params.radius,
+        })
+        .collect::<Vec<_>>();
+    NearbyResponse {
+        returned_count: results.len(),
+        results,
+        center: CenterJson::from(&scan.center),
+        radius: params.radius,
+        shape: params.shape.as_str(),
+        total_count,
+        page: params.page,
+        per_page: params.per_page,
+        has_more,
+        candidate_count,
+        truncated_candidates: scan.truncated_candidates,
+        candidate_cap: CANDIDATE_CAP,
+        groups,
+        filter_options,
+        spatial_state: scan.state.as_str(),
+        coverage: COVERAGE,
+    }
+}
+
+/// `/nearby/refnos` 的后半程：同样的过滤与距离序，不分页、不补 name，上限 [`RESULT_CAP`]。
+pub fn assemble_nearby_refnos(
+    scan: Scan,
+    params: &SpatialQueryParams,
+    attrs: &dyn ElementAttributes,
+) -> NearbyRefnosResponse {
+    let Filtered { mut hits, .. } = filter_candidates(scan.candidates, params, &scan.center, attrs);
+    sort_hits(&mut hits, SortBy::Distance);
+    let total_count = hits.len();
+    let truncated_results = total_count > RESULT_CAP;
+    hits.truncate(RESULT_CAP);
+    let mut by_dbnum: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut refnos = Vec::with_capacity(hits.len());
+    for hit in &hits {
+        let text = hit.refno.to_string();
+        if let Some(dbnum) = hit.dbnum {
+            by_dbnum
+                .entry(dbnum.to_string())
+                .or_default()
+                .push(text.clone());
+        }
+        refnos.push(text);
+    }
+    NearbyRefnosResponse {
+        refnos,
+        by_dbnum,
+        total_count,
+        truncated_results,
+        result_cap: RESULT_CAP,
+        center: CenterJson::from(&scan.center),
+        radius: params.radius,
+        shape: params.shape.as_str(),
+        spatial_state: scan.state.as_str(),
+        coverage: COVERAGE,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 入口（全局树 + 进程状态）
+// ---------------------------------------------------------------------------
+
+async fn scan_global_tree(params: &SpatialQueryParams) -> Result<Scan, SpatialQueryError> {
+    // 读锁只罩住「解中心 + 取候选」，中间没有 await；候选 `collect()` 完即放锁。
+    let tree = GLOBAL_AABB_TREE.read().await;
+    scan_tree(
+        &tree,
+        spatial_state::current_state(),
+        params,
+        ModelMemoryStore::global(),
+    )
+}
+
+/// `GET /api/v1/spatial/nearby`。
+pub async fn nearby(
+    params: &SpatialQueryParams,
+    attrs: &dyn ElementAttributes,
+) -> Result<NearbyResponse, SpatialQueryError> {
+    let scan = scan_global_tree(params).await?;
+    Ok(assemble_nearby(scan, params, attrs))
+}
+
+/// `GET /api/v1/spatial/nearby/refnos`。
+pub async fn nearby_refnos(
+    params: &SpatialQueryParams,
+    attrs: &dyn ElementAttributes,
+) -> Result<NearbyRefnosResponse, SpatialQueryError> {
+    let scan = scan_global_tree(params).await?;
+    Ok(assemble_nearby_refnos(scan, params, attrs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fast_model::model_memory_store::{
+        ProjectedGeometry, ProjectedShape, ProjectionCommit, packed_refno,
+    };
+    use e3d_model::elmodl::GeometryId;
+
+    /// 本文件的用例独占 `4000000011/*` 这一组 refno；树都是本地 `AccelerationTree`，不碰全局树。
+    fn refno(seq: u32) -> RefU64 {
+        RefU64::from_two_nums(4_000_000_011, seq)
+    }
+
+    fn cube(min: [f32; 3], max: [f32; 3]) -> Aabb {
+        Aabb::new(min.into(), max.into())
+    }
+
+    fn entry(seq: u32, noun: &str, min: [f32; 3], max: [f32; 3]) -> RStarBoundingBox {
+        RStarBoundingBox::new(
+            cube(min, max),
+            RefnoEnum::from(refno(seq)),
+            noun.to_string(),
+        )
+    }
+
+    fn raw(pairs: &[(&str, &str)]) -> RawSpatialQuery {
+        let mut raw = RawSpatialQuery::default();
+        for (key, value) in pairs {
+            let slot = match *key {
+                "refno" => &mut raw.refno,
+                "x" => &mut raw.x,
+                "y" => &mut raw.y,
+                "z" => &mut raw.z,
+                "radius" => &mut raw.radius,
+                "shape" => &mut raw.shape,
+                "nouns" => &mut raw.nouns,
+                "keyword" => &mut raw.keyword,
+                "sort" => &mut raw.sort,
+                "include_self" => &mut raw.include_self,
+                "include_negative" => &mut raw.include_negative,
+                "dbnums" => &mut raw.dbnums,
+                "page" => &mut raw.page,
+                "per_page" => &mut raw.per_page,
+                other => panic!("unknown query key {other}"),
+            };
+            *slot = Some(value.to_string());
+        }
+        raw
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> SpatialQueryParams {
+        SpatialQueryParams::parse(&raw(pairs)).expect("params parse")
+    }
+
+    #[derive(Default)]
+    struct TableAttrs {
+        dbnums: HashMap<RefU64, u32>,
+        names: HashMap<RefU64, String>,
+    }
+
+    impl ElementAttributes for TableAttrs {
+        fn dbnum_of(&self, refno: RefU64) -> Option<u32> {
+            self.dbnums.get(&refno).copied()
+        }
+
+        fn name_of(&self, refno: RefU64) -> Option<String> {
+            self.names.get(&refno).cloned()
+        }
+    }
+
+    fn attrs(dbnums: &[(u32, u32)]) -> TableAttrs {
+        TableAttrs {
+            dbnums: dbnums
+                .iter()
+                .map(|(seq, dbnum)| (refno(*seq), *dbnum))
+                .collect(),
+            names: HashMap::new(),
+        }
+    }
+
+    fn scan_local(tree: &AccelerationTree, params: &SpatialQueryParams) -> Scan {
+        scan_tree(
+            tree,
+            SpatialTreeState::Ready,
+            params,
+            &ModelMemoryStore::default(),
+        )
+        .expect("scan")
+    }
+
+    fn refnos_of(items: &[NearbyItem]) -> Vec<String> {
+        items.iter().map(|item| item.refno.clone()).collect()
+    }
+
+    // ---- 距离 ----
+
+    #[test]
+    fn aabb_min_distance_is_zero_when_intersecting_and_euclidean_otherwise() {
+        let a = cube([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        assert_eq!(
+            aabb_min_distance(&a, &cube([5.0, 5.0, 5.0], [20.0, 20.0, 20.0])),
+            0.0
+        );
+        assert_eq!(
+            aabb_min_distance(&a, &cube([10.0, 0.0, 0.0], [12.0, 1.0, 1.0])),
+            0.0,
+            "贴面算相交"
+        );
+        // 只在 x 轴分离 3。
+        assert_eq!(
+            aabb_min_distance(&a, &cube([13.0, 2.0, 2.0], [14.0, 3.0, 3.0])),
+            3.0
+        );
+        // 三轴各分离 3 / 4 / 12 → 13。
+        let b = cube([13.0, 14.0, 22.0], [20.0, 20.0, 30.0]);
+        assert!((aabb_min_distance(&a, &b) - 13.0).abs() < 1e-5);
+        assert_eq!(aabb_min_distance(&a, &b), aabb_min_distance(&b, &a), "对称");
+    }
+
+    #[test]
+    fn aabb_point_distance_is_zero_inside_and_surface_distance_outside() {
+        let a = cube([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        assert_eq!(aabb_point_distance(&a, &Point::new(5.0, 5.0, 5.0)), 0.0);
+        assert_eq!(
+            aabb_point_distance(&a, &Point::new(10.0, 10.0, 10.0)),
+            0.0,
+            "面上为 0"
+        );
+        assert_eq!(aabb_point_distance(&a, &Point::new(-4.0, 5.0, 5.0)), 4.0);
+        // 角外 (3, 4, 12) → 13。
+        assert!((aabb_point_distance(&a, &Point::new(13.0, 14.0, 22.0)) - 13.0).abs() < 1e-5);
+    }
+
+    // ---- 参数 ----
+
+    #[test]
+    fn params_take_defaults_and_accept_both_refno_spellings() {
+        let by_refno = params(&[("refno", "24383/71586"), ("radius", "5000")]);
+        assert_eq!(
+            by_refno.target,
+            Target::Refno(RefU64::from_two_nums(24383, 71586))
+        );
+        assert_eq!(by_refno.radius, 5000.0);
+        assert_eq!(by_refno.shape, Shape::Sphere);
+        assert_eq!(by_refno.sort, SortBy::Distance);
+        assert!(by_refno.nouns.is_empty());
+        assert_eq!(by_refno.keyword, None);
+        assert!(!by_refno.include_self);
+        assert!(!by_refno.include_negative);
+        assert_eq!(by_refno.dbnums, None);
+        assert_eq!((by_refno.page, by_refno.per_page), (1, DEFAULT_PER_PAGE));
+
+        let underscore = params(&[("refno", "24383_71586"), ("radius", "1")]);
+        assert_eq!(underscore.target, by_refno.target);
+
+        let by_point = params(&[
+            ("x", "1.5"),
+            ("y", "-2"),
+            ("z", "3e2"),
+            ("radius", "100000"),
+            ("shape", "CUBE"),
+            ("sort", "name"),
+            ("nouns", " pipe, Bran ,,"),
+            ("keyword", "val"),
+            ("include_self", "true"),
+            ("include_negative", "1"),
+            ("dbnums", "24381, 24383"),
+            ("page", "3"),
+            ("per_page", "5000"),
+        ]);
+        assert_eq!(
+            by_point.target,
+            Target::Position(Point::new(1.5, -2.0, 300.0))
+        );
+        assert_eq!(by_point.shape, Shape::Cube);
+        assert_eq!(by_point.sort, SortBy::Name);
+        assert_eq!(
+            by_point.nouns,
+            BTreeSet::from(["PIPE".to_string(), "BRAN".to_string()])
+        );
+        assert_eq!(by_point.keyword.as_deref(), Some("VAL"));
+        assert!(by_point.include_self && by_point.include_negative);
+        assert_eq!(by_point.dbnums, Some(BTreeSet::from([24381, 24383])));
+        assert_eq!(by_point.page, 3);
+        assert_eq!(by_point.per_page, MAX_PER_PAGE, "per_page 钳位而不是报错");
+    }
+
+    #[test]
+    fn params_reject_bad_input_with_a_readable_message() {
+        let bad = |pairs: &[(&str, &str)]| SpatialQueryParams::parse(&raw(pairs)).unwrap_err();
+        assert!(bad(&[("radius", "5")]).contains("缺少查询中心"));
+        assert!(bad(&[("x", "1"), ("y", "2"), ("radius", "5")]).contains("三个一起"));
+        assert!(
+            bad(&[
+                ("refno", "1/2"),
+                ("x", "1"),
+                ("y", "2"),
+                ("z", "3"),
+                ("radius", "5")
+            ])
+            .contains("二选一")
+        );
+        assert!(bad(&[("refno", "abc"), ("radius", "5")]).contains("refno 格式非法"));
+        assert!(
+            bad(&[("refno", "0/5"), ("radius", "5")]).contains("refno 格式非法"),
+            "ref0 = 0 不是合法引用"
+        );
+        assert!(bad(&[("refno", "1/2")]).contains("缺少 radius"));
+        assert!(bad(&[("refno", "1/2"), ("radius", "0")]).contains("radius 必须在"));
+        assert!(bad(&[("refno", "1/2"), ("radius", "100000.5")]).contains("radius 必须在"));
+        assert!(bad(&[("refno", "1/2"), ("radius", "NaN")]).contains("有限数"));
+        assert!(bad(&[("refno", "1/2"), ("radius", "5"), ("shape", "box")]).contains("shape"));
+        assert!(bad(&[("refno", "1/2"), ("radius", "5"), ("sort", "spec")]).contains("sort"));
+        assert!(
+            bad(&[("refno", "1/2"), ("radius", "5"), ("include_self", "maybe")])
+                .contains("include_self")
+        );
+        assert!(
+            bad(&[("refno", "1/2"), ("radius", "5"), ("dbnums", "24381,x")]).contains("dbnums")
+        );
+        assert!(bad(&[("refno", "1/2"), ("radius", "5"), ("page", "0")]).contains("page"));
+        assert!(
+            bad(&[("refno", "1/2"), ("radius", "5"), ("per_page", "many")]).contains("per_page")
+        );
+    }
+
+    // ---- 门禁 ----
+
+    #[test]
+    fn scan_is_gated_by_the_spatial_state() {
+        let tree = AccelerationTree::load(vec![entry(1, "BOX", [0.0; 3], [1.0; 3])]);
+        let query = params(&[("x", "0"), ("y", "0"), ("z", "0"), ("radius", "10")]);
+        for blocked in [
+            SpatialTreeState::Uninitialized,
+            SpatialTreeState::Loading,
+            SpatialTreeState::ReplayRequired,
+            SpatialTreeState::Rebuilding,
+            SpatialTreeState::DegradedReuse,
+            SpatialTreeState::DegradedBlocked,
+        ] {
+            match scan_tree(&tree, blocked, &query, &ModelMemoryStore::default()) {
+                Err(SpatialQueryError::NotReady(state)) => assert_eq!(state, blocked),
+                other => panic!("{blocked:?} 必须被门禁: {other:?}"),
+            }
+        }
+        let empty = scan_tree(
+            &tree,
+            SpatialTreeState::ReadyEmpty,
+            &query,
+            &ModelMemoryStore::default(),
+        )
+        .expect("ReadyEmpty 放行");
+        assert!(empty.candidates.is_empty(), "ReadyEmpty 直接回空，不扫树");
+        assert_eq!(empty.state, SpatialTreeState::ReadyEmpty);
+        let ready = scan_local(&tree, &query);
+        assert_eq!(ready.candidates.len(), 1);
+    }
+
+    // ---- 候选 ----
+
+    fn sphere_vs_cube_tree() -> AccelerationTree {
+        AccelerationTree::load(vec![
+            // 盒到原点最小距离 sqrt(3·25) ≈ 8.66 < 10：球与方都命中。
+            entry(1, "BOX", [5.0, 5.0, 5.0], [6.0, 6.0, 6.0]),
+            // 盒到原点最小距离 sqrt(3·64) ≈ 13.9 > 10，但与 [-10,10]³ 相交：只有方命中。
+            entry(2, "BOX", [8.0, 8.0, 8.0], [9.0, 9.0, 9.0]),
+            // 贴在球面上：距离恰好 10（只在 x 轴分离）。
+            entry(3, "PIPE", [10.0, -1.0, -1.0], [11.0, 1.0, 1.0]),
+            // 远处：都不命中。
+            entry(4, "BOX", [50.0, 50.0, 50.0], [60.0, 60.0, 60.0]),
+        ])
+    }
+
+    #[test]
+    fn point_sphere_and_cube_differ_at_the_corners() {
+        let tree = sphere_vs_cube_tree();
+        let sphere = scan_local(
+            &tree,
+            &params(&[("x", "0"), ("y", "0"), ("z", "0"), ("radius", "10")]),
+        );
+        let mut sphere_hits = sphere
+            .candidates
+            .iter()
+            .map(|c| c.entry.refno)
+            .collect::<Vec<_>>();
+        sphere_hits.sort();
+        assert_eq!(sphere_hits, vec![refno(1), refno(3)]);
+        for candidate in &sphere.candidates {
+            assert!(
+                candidate.distance <= 10.0,
+                "球模式的候选距离都 ≤ r: {candidate:?}"
+            );
+        }
+        assert_eq!(sphere.center.source, CenterSource::Position);
+        assert_eq!(sphere.center.target_box, None);
+
+        let cube = scan_local(
+            &tree,
+            &params(&[
+                ("x", "0"),
+                ("y", "0"),
+                ("z", "0"),
+                ("radius", "10"),
+                ("shape", "cube"),
+            ]),
+        );
+        let mut cube_hits = cube
+            .candidates
+            .iter()
+            .map(|c| c.entry.refno)
+            .collect::<Vec<_>>();
+        cube_hits.sort();
+        assert_eq!(cube_hits, vec![refno(1), refno(2), refno(3)]);
+        let corner = cube
+            .candidates
+            .iter()
+            .find(|c| c.entry.refno == refno(2))
+            .unwrap();
+        assert!(corner.distance > 10.0, "方模式角上的候选距离可以超过 r");
+    }
+
+    #[test]
+    fn refno_target_measures_box_to_box_and_excludes_its_own_subtree_by_default() {
+        let target = entry(10, "EQUI", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        let tree = AccelerationTree::load(vec![
+            target.clone(),
+            // 与目标盒相距 5（x 轴）。
+            entry(11, "PIPE", [15.0, 0.0, 0.0], [16.0, 1.0, 1.0]),
+            // 与目标盒相距 sqrt(3·100) ≈ 17.3 > 12，但与目标盒外扩 12 相交：只有 cube 命中。
+            entry(12, "PIPE", [20.0, 20.0, 20.0], [21.0, 21.0, 21.0]),
+            entry(13, "PIPE", [100.0; 3], [101.0; 3]),
+        ]);
+        let query = params(&[
+            ("refno", &RefnoEnum::from(refno(10)).to_pdms_str()),
+            ("radius", "12"),
+        ]);
+        let scan = scan_local(&tree, &query);
+        assert_eq!(scan.center.source, CenterSource::RefnoAabbCenter);
+        assert_eq!(scan.center.point, Point::new(5.0, 5.0, 5.0));
+        assert_eq!(scan.center.target_box, Some(target.aabb));
+        assert_eq!(
+            scan.center.subtree,
+            HashSet::from([refno(10)]),
+            "投影里没有记录时子树只有自己"
+        );
+        let mut hits = scan
+            .candidates
+            .iter()
+            .map(|c| c.entry.refno)
+            .collect::<Vec<_>>();
+        hits.sort();
+        assert_eq!(
+            hits,
+            vec![refno(10), refno(11)],
+            "候选阶段自身还在，剔除在过滤阶段"
+        );
+
+        let filtered =
+            filter_candidates(scan.candidates.clone(), &query, &scan.center, &attrs(&[]));
+        assert_eq!(
+            filtered.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(11)]
+        );
+        assert_eq!(filtered.hits[0].distance, 5.0, "盒到盒的最小表面距离");
+
+        let with_self = params(&[
+            ("refno", &RefnoEnum::from(refno(10)).to_pdms_str()),
+            ("radius", "12"),
+            ("include_self", "true"),
+        ]);
+        let kept = filter_candidates(
+            scan.candidates.clone(),
+            &with_self,
+            &scan.center,
+            &attrs(&[]),
+        );
+        assert_eq!(kept.hits.len(), 2);
+        assert_eq!(
+            kept.hits
+                .iter()
+                .find(|h| h.refno == refno(10))
+                .unwrap()
+                .distance,
+            0.0
+        );
+
+        let cube = scan_local(
+            &tree,
+            &params(&[
+                ("refno", &RefnoEnum::from(refno(10)).to_pdms_str()),
+                ("radius", "12"),
+                ("shape", "cube"),
+            ]),
+        );
+        let mut cube_hits = cube
+            .candidates
+            .iter()
+            .map(|c| c.entry.refno)
+            .collect::<Vec<_>>();
+        cube_hits.sort();
+        assert_eq!(cube_hits, vec![refno(10), refno(11), refno(12)]);
+    }
+
+    #[test]
+    fn refno_target_without_any_box_is_not_found() {
+        let tree = AccelerationTree::load(vec![entry(1, "BOX", [0.0; 3], [1.0; 3])]);
+        let query = params(&[
+            ("refno", &RefnoEnum::from(refno(99)).to_pdms_str()),
+            ("radius", "12"),
+        ]);
+        match scan_tree(
+            &tree,
+            SpatialTreeState::Ready,
+            &query,
+            &ModelMemoryStore::default(),
+        ) {
+            Err(SpatialQueryError::NotFound(message)) => {
+                assert!(message.contains("4000000011/99"), "{message}");
+                assert!(message.contains("还没生成过模型"), "{message}");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    fn projected(
+        seq: u32,
+        ancestors: &[u32],
+        dbnum: u32,
+        min: [f32; 3],
+        max: [f32; 3],
+    ) -> ProjectedGeometry {
+        let source = refno_to_e3d(RefnoEnum::from(refno(seq)));
+        ProjectedGeometry {
+            record_id: format!("spatial-query-test-{seq}"),
+            geometry_id: GeometryId::Element {
+                refno: RefnoEnum::from(refno(seq)).to_pdms_str(),
+            },
+            source_refno: source,
+            dbnum,
+            source_sesno: 1,
+            noun: "BOX".into(),
+            mesh_id: format!("mesh-{seq}"),
+            world_transform: glam::DMat4::IDENTITY,
+            world_bounds: [min, max],
+            ancestors: std::iter::once(seq)
+                .chain(ancestors.iter().copied())
+                .map(|seq| packed_refno(refno_to_e3d(RefnoEnum::from(refno(seq)))))
+                .collect(),
+            shape: ProjectedShape::Baked,
+            tube: None,
+        }
+    }
+
+    /// refno 模式的中心先看内存投影：目标（EQUI 20）自己没有几何，子树里两个 BOX 有；中心盒是两者
+    /// 并集，`include_self=false` 连子树成员一起剔除——树上它们各自都是候选。
+    #[test]
+    fn refno_center_comes_from_the_memory_projection_and_covers_the_subtree() {
+        let memory = ModelMemoryStore::default();
+        memory.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![
+                    projected(21, &[20], 7997, [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]),
+                    projected(22, &[20], 7997, [20.0, 0.0, 0.0], [30.0, 10.0, 10.0]),
+                    // 无 mesh 的记录不参与中心。
+                    {
+                        let mut ghost = projected(23, &[20], 7997, [500.0; 3], [600.0; 3]);
+                        ghost.mesh_id.clear();
+                        ghost
+                    },
+                    // 别的根名下的记录不算子树。
+                    projected(31, &[30], 7997, [-1000.0; 3], [-900.0; 3]),
+                ],
+                ..Default::default()
+            }],
+        );
+        let tree = AccelerationTree::load(vec![
+            entry(21, "BOX", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]),
+            entry(22, "BOX", [20.0, 0.0, 0.0], [30.0, 10.0, 10.0]),
+            // 与并集盒 [0,30]×[0,10]² 相距 5。
+            entry(41, "PIPE", [0.0, 15.0, 0.0], [5.0, 16.0, 1.0]),
+        ]);
+        let query = params(&[
+            ("refno", &RefnoEnum::from(refno(20)).to_pdms_str()),
+            ("radius", "8"),
+        ]);
+        let scan = scan_tree(&tree, SpatialTreeState::Ready, &query, &memory).expect("scan");
+        assert_eq!(
+            scan.center.target_box,
+            Some(cube([0.0, 0.0, 0.0], [30.0, 10.0, 10.0])),
+            "中心盒是子树可用盒的并集（无 mesh 的 23 不算）"
+        );
+        assert_eq!(scan.center.point, Point::new(15.0, 5.0, 5.0));
+        assert_eq!(
+            scan.center.subtree,
+            HashSet::from([refno(20), refno(21), refno(22)])
+        );
+
+        let filtered = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]));
+        assert_eq!(
+            filtered.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(41)]
+        );
+        assert_eq!(filtered.hits[0].distance, 5.0);
+    }
+
+    // ---- 过滤 / 排序 / 分页 ----
+
+    fn filter_tree() -> AccelerationTree {
+        AccelerationTree::load(vec![
+            entry(1, "PIPE", [1.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
+            entry(2, "NBOX", [2.0, 0.0, 0.0], [3.0, 1.0, 1.0]),
+            entry(3, "BRAN", [3.0, 0.0, 0.0], [4.0, 1.0, 1.0]),
+            entry(4, "PIPE", [4.0, 0.0, 0.0], [5.0, 1.0, 1.0]),
+            entry(5, "valv", [5.0, 0.0, 0.0], [6.0, 1.0, 1.0]),
+        ])
+    }
+
+    fn origin_query(extra: &[(&str, &str)]) -> SpatialQueryParams {
+        let mut pairs = vec![("x", "0"), ("y", "0"), ("z", "0"), ("radius", "100")];
+        pairs.extend_from_slice(extra);
+        params(&pairs)
+    }
+
+    #[test]
+    fn negative_nouns_are_dropped_unless_asked_for_and_counts_precede_noun_filters() {
+        let tree = filter_tree();
+        let table = attrs(&[(1, 24381), (2, 24381), (3, 24383), (4, 24383), (5, 24383)]);
+
+        let default = origin_query(&[]);
+        let scan = scan_local(&tree, &default);
+        let filtered = filter_candidates(scan.candidates.clone(), &default, &scan.center, &table);
+        assert_eq!(
+            filtered
+                .hits
+                .iter()
+                .map(|h| h.refno)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([refno(1), refno(3), refno(4), refno(5)]),
+            "NBOX 默认剔除"
+        );
+        assert_eq!(
+            filtered.filter_options.nouns,
+            vec![
+                NounOption {
+                    value: "PIPE".into(),
+                    count: 2,
+                    is_negative: false
+                },
+                NounOption {
+                    value: "BRAN".into(),
+                    count: 1,
+                    is_negative: false
+                },
+                NounOption {
+                    value: "VALV".into(),
+                    count: 1,
+                    is_negative: false
+                },
+            ],
+            "noun 清单大写、按计数降序再按名字"
+        );
+
+        let with_negative = origin_query(&[("include_negative", "true"), ("nouns", "nbox")]);
+        let kept = filter_candidates(
+            scan.candidates.clone(),
+            &with_negative,
+            &scan.center,
+            &table,
+        );
+        assert_eq!(
+            kept.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(2)]
+        );
+        assert_eq!(
+            kept.filter_options
+                .nouns
+                .iter()
+                .map(|n| (n.value.as_str(), n.count, n.is_negative))
+                .collect::<Vec<_>>(),
+            vec![
+                ("PIPE", 2, false),
+                ("BRAN", 1, false),
+                ("NBOX", 1, true),
+                ("VALV", 1, false)
+            ],
+            "nouns 筛选不影响清单计数"
+        );
+
+        let by_keyword = origin_query(&[("keyword", "_4")]);
+        let hits = filter_candidates(scan.candidates.clone(), &by_keyword, &scan.center, &table);
+        assert_eq!(
+            hits.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(4)],
+            "keyword 匹配 refno 的 a_b 形式"
+        );
+        let by_slash = origin_query(&[("keyword", "4000000011/3")]);
+        let hits = filter_candidates(scan.candidates.clone(), &by_slash, &scan.center, &table);
+        assert_eq!(
+            hits.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(3)],
+            "也匹配 a/b 形式"
+        );
+        let by_noun = origin_query(&[("keyword", "val")]);
+        let hits = filter_candidates(scan.candidates.clone(), &by_noun, &scan.center, &table);
+        assert_eq!(
+            hits.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(5)],
+            "keyword 大小写不敏感匹配 noun"
+        );
+
+        let by_dbnum = origin_query(&[("dbnums", "24383")]);
+        let hits = filter_candidates(scan.candidates.clone(), &by_dbnum, &scan.center, &table);
+        assert_eq!(
+            hits.hits.iter().map(|h| h.refno).collect::<BTreeSet<_>>(),
+            BTreeSet::from([refno(3), refno(4), refno(5)])
+        );
+        assert_eq!(
+            hits.filter_options
+                .nouns
+                .iter()
+                .map(|n| (n.value.as_str(), n.count))
+                .collect::<Vec<_>>(),
+            vec![("BRAN", 1), ("PIPE", 1), ("VALV", 1)],
+            "dbnums 在 noun 计数之前生效"
+        );
+        // 答不出库号的条目在限定库时一律剔除。
+        let hits = filter_candidates(
+            scan.candidates.clone(),
+            &by_dbnum,
+            &scan.center,
+            &attrs(&[]),
+        );
+        assert!(hits.hits.is_empty());
+    }
+
+    #[test]
+    fn nearby_response_sorts_groups_pages_and_names_only_the_page() {
+        let tree = filter_tree();
+        let mut table = attrs(&[(1, 24381), (3, 24383), (4, 24383), (5, 24383)]);
+        table.names.insert(refno(1), "/P-1".into());
+        table.names.insert(refno(3), "/B-3".into());
+        table.names.insert(refno(4), "/P-4".into());
+        table.names.insert(refno(5), "/V-5".into());
+
+        let query = origin_query(&[("per_page", "2")]);
+        let first = assemble_nearby(scan_local(&tree, &query), &query, &table);
+        assert_eq!(
+            refnos_of(&first.results),
+            vec![refno(1).to_string(), refno(3).to_string()]
+        );
+        assert_eq!(first.results[0].refno, "4000000011_1", "refno 用 a_b 形式");
+        assert_eq!(first.results[0].name.as_deref(), Some("/P-1"));
+        assert_eq!(first.results[0].dbnum, Some(24381));
+        assert_eq!(first.results[0].noun, "PIPE");
+        assert_eq!(
+            first.results[0].aabb,
+            BoxJson {
+                min: [1.0, 0.0, 0.0],
+                max: [2.0, 1.0, 1.0]
+            }
+        );
+        assert_eq!(first.results[0].distance, 1.0);
+        assert!(first.results[0].within_radius);
+        assert_eq!((first.total_count, first.returned_count), (4, 2));
+        assert_eq!((first.page, first.per_page, first.has_more), (1, 2, true));
+        assert_eq!(first.candidate_count, 5, "候选数含被过滤掉的 NBOX");
+        assert!(!first.truncated_candidates);
+        assert_eq!(first.candidate_cap, CANDIDATE_CAP);
+        assert_eq!(
+            first.groups,
+            vec![
+                DbnumGroup {
+                    dbnum: 24381,
+                    count: 1
+                },
+                DbnumGroup {
+                    dbnum: 24383,
+                    count: 3
+                }
+            ],
+            "分组是全集计数，不受分页影响"
+        );
+        assert_eq!(
+            first.center,
+            CenterJson {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                source: "position"
+            }
+        );
+        assert_eq!((first.radius, first.shape), (100.0, "sphere"));
+        assert_eq!((first.spatial_state, first.coverage), ("ready", COVERAGE));
+
+        let last = origin_query(&[("per_page", "2"), ("page", "2")]);
+        let second = assemble_nearby(scan_local(&tree, &last), &last, &table);
+        assert_eq!(
+            refnos_of(&second.results),
+            vec![refno(4).to_string(), refno(5).to_string()]
+        );
+        assert!(!second.has_more);
+        let beyond = origin_query(&[("per_page", "2"), ("page", "9")]);
+        let empty = assemble_nearby(scan_local(&tree, &beyond), &beyond, &table);
+        assert!(empty.results.is_empty());
+        assert_eq!(empty.total_count, 4);
+        assert!(!empty.has_more);
+
+        // sort=name：名字只对本页解，全集按 noun / refno 近似。
+        let by_name = origin_query(&[("sort", "name")]);
+        let named = assemble_nearby(scan_local(&tree, &by_name), &by_name, &table);
+        assert_eq!(
+            refnos_of(&named.results),
+            vec![refno(3), refno(1), refno(4), refno(5)]
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            "BRAN < PIPE < VALV，同 noun 按 refno"
+        );
+    }
+
+    #[test]
+    fn distance_sort_breaks_ties_by_dbnum_then_refno() {
+        let mut hits = vec![
+            Hit {
+                refno: refno(3),
+                noun: "PIPE".into(),
+                aabb: cube([0.0; 3], [1.0; 3]),
+                distance: 1.0,
+                dbnum: Some(24383),
+            },
+            Hit {
+                refno: refno(2),
+                noun: "PIPE".into(),
+                aabb: cube([0.0; 3], [1.0; 3]),
+                distance: 1.0,
+                dbnum: Some(24381),
+            },
+            Hit {
+                refno: refno(1),
+                noun: "PIPE".into(),
+                aabb: cube([0.0; 3], [1.0; 3]),
+                distance: 1.0,
+                dbnum: Some(24383),
+            },
+            Hit {
+                refno: refno(9),
+                noun: "PIPE".into(),
+                aabb: cube([0.0; 3], [1.0; 3]),
+                distance: 0.5,
+                dbnum: None,
+            },
+        ];
+        sort_hits(&mut hits, SortBy::Distance);
+        assert_eq!(
+            hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(9), refno(2), refno(1), refno(3)]
+        );
+    }
+
+    #[test]
+    fn nearby_refnos_returns_the_whole_set_grouped_by_dbnum() {
+        let tree = filter_tree();
+        let table = attrs(&[(1, 24381), (3, 24383), (4, 24383)]);
+        let query = origin_query(&[("per_page", "1"), ("page", "7")]);
+        let response = assemble_nearby_refnos(scan_local(&tree, &query), &query, &table);
+        assert_eq!(
+            response.refnos,
+            vec![refno(1), refno(3), refno(4), refno(5)]
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            "忽略分页、按距离序"
+        );
+        assert_eq!(
+            response.by_dbnum,
+            BTreeMap::from([
+                ("24381".to_string(), vec![refno(1).to_string()]),
+                (
+                    "24383".to_string(),
+                    vec![refno(3).to_string(), refno(4).to_string()]
+                ),
+            ]),
+            "答不出库号的 5 不进 by_dbnum，但在 refnos 里"
+        );
+        assert_eq!(response.total_count, 4);
+        assert!(!response.truncated_results);
+        assert_eq!(response.result_cap, RESULT_CAP);
+        assert_eq!(response.center.source, "position");
+        assert_eq!(
+            (response.spatial_state, response.coverage),
+            ("ready", COVERAGE)
+        );
+    }
+
+    #[test]
+    fn candidate_cap_marks_truncation() {
+        let tree = AccelerationTree::load(vec![
+            entry(1, "BOX", [0.0; 3], [1.0; 3]),
+            entry(2, "BOX", [0.0; 3], [1.0; 3]),
+        ]);
+        let query = origin_query(&[]);
+        let center = resolve_center(&query, &ModelMemoryStore::default(), &tree).unwrap();
+        let (candidates, truncated) = collect_candidates(&tree, &center, &query);
+        assert_eq!(candidates.len(), 2);
+        assert!(!truncated);
+        // 用 take_capped 直接验证截断判定（CANDIDATE_CAP 太大，不值得真造 20 万个盒）。
+        let boxes = (0..3)
+            .map(|seq| entry(seq, "BOX", [0.0; 3], [1.0; 3]))
+            .collect::<Vec<_>>();
+        let (capped, more) = take_capped(boxes.iter().map(|b| (b, 0.0)).take(CANDIDATE_CAP + 1));
+        assert_eq!(capped.len(), 3);
+        assert!(!more);
+        let (paged, has_more) = paginate((0..5).collect::<Vec<_>>(), 2, 2);
+        assert_eq!((paged, has_more), (vec![2, 3], true));
+        let (tail, has_more) = paginate((0..5).collect::<Vec<_>>(), 3, 2);
+        assert_eq!((tail, has_more), (vec![4], false));
+    }
+
+    #[test]
+    fn negative_noun_list_is_deduplicated_and_complete() {
+        let list = negative_nouns();
+        let unique = list.iter().collect::<HashSet<_>>();
+        assert_eq!(list.len(), unique.len(), "去重");
+        for name in TOTAL_NEG_NOUN_NAMES {
+            assert!(list.contains(&name), "{name} 必须在清单里");
+            assert!(is_negative_noun(name));
+            assert!(is_negative_noun(&name.to_ascii_lowercase()));
+        }
+        assert!(!is_negative_noun("PIPE"));
+        assert_eq!(list[0], "NBOX", "保持原序");
+    }
+
+    /// 源码钉：本模块对树只读——不写树、不取空间串行锁（计划 P1 验收）。
+    #[test]
+    fn spatial_query_never_writes_the_tree_or_takes_the_serial_lock() {
+        let source = include_str!("spatial_query.rs");
+        let body = source
+            .split_once("#[cfg(test)]")
+            .expect("tests module follows the implementation")
+            .0;
+        for forbidden in [
+            concat!("GLOBAL_AABB_TREE", ".write()"),
+            concat!("lock_spatial", "_serial"),
+            concat!("SPATIAL_STATE", "_SERIAL"),
+            concat!("DATA_COMMIT", "_SERIAL"),
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "spatial_query.rs 不得出现 {forbidden}"
+            );
+        }
+        assert_eq!(
+            body.matches(".read().await").count(),
+            1,
+            "树的读锁只在 scan_global_tree 拿一次"
+        );
+        let guarded = body
+            .split_once("let tree = GLOBAL_AABB_TREE.read().await;")
+            .expect("read guard")
+            .1
+            .split_once("\n}")
+            .expect("fn end")
+            .0;
+        assert!(!guarded.contains(".await"), "读锁期间不得 await: {guarded}");
+    }
+}

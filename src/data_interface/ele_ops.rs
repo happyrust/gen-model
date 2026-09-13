@@ -933,13 +933,21 @@ mod terminal_render_guard_tests {
             "引用型 UDA 值走 to_pe_key: {uda}"
         );
         assert!(keys.take_misses().is_empty());
-        // 批里它就是 ATT_UDA 那一条 INSERT 的内容。
+        // 批里它就是 ATT_UDA 那一条 INSERT 的内容，外加回退谓词要的 `dbnum` / `sesno`
+        // 两列（计划 §9-6，`element_batch::stamp_owner_columns` 统一补）。CONTENT 本体
+        // 仍与 legacy 逐字节同形——补列只在开头那个 `{` 后面插两格。
+        let stamped =
+            crate::data_interface::element_batch::stamp_owner_columns(&expected, DBNUM, 42);
         let sql = batch_sql(&[change(PersistElementState::Add(ele), refno)], &keys);
         assert!(
             sql.contains(&format!(
-                "INSERT IGNORE INTO ATT_UDA [{expected}] RETURN NONE;"
+                "INSERT IGNORE INTO ATT_UDA [{stamped}] RETURN NONE;"
             )),
             "{sql}"
+        );
+        assert!(
+            stamped.contains(expected.trim_start_matches('{')),
+            "补列不得改动 CONTENT 本体: {stamped}"
         );
     }
 

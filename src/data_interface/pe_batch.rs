@@ -241,7 +241,13 @@ mod tests {
             assert!(render(8000, &[bad.to_string()], writes).is_err(), "{bad}");
         }
         let source = include_str!("pe_batch.rs");
-        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        let render_body = source
+            .split_once("pub fn render(")
+            .expect("render")
+            .1
+            .split_once("pub fn transaction(")
+            .expect("transaction follows render")
+            .0;
         for retired in [
             "LET $before_",
             "LET $after_",
@@ -250,7 +256,7 @@ mod tests {
             "dbnum_info_table",
         ] {
             assert!(
-                !production.contains(retired),
+                !render_body.contains(retired),
                 "逐笔观测块已退，不得回来: {retired}"
             );
         }
@@ -281,8 +287,8 @@ mod tests {
             .split_once("pub async fn execute_on(")
             .expect("execute_on")
             .1
-            .split_once("\n}\n")
-            .expect("body")
+            .split_once("pub fn insert_ignore_batches(")
+            .expect("insert_ignore_batches follows execute_on")
             .0;
         assert!(
             !execute.contains("require_no_event_on"),

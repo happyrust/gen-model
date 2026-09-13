@@ -20,7 +20,7 @@ pytestmark = pytest.mark.offline
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG = Path(__file__).resolve().parents[1] / "pysrc" / "aios_db"
-SUBMODULES = ["db", "fixture", "incr", "model", "parse", "room", "spatial", "sync"]
+SUBMODULES = ["db", "incr", "model", "parse", "room", "spatial", "sync"]
 
 
 def _stub_functions(pyi: Path) -> set[str]:

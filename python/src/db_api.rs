@@ -331,45 +331,9 @@ pub fn preview_manual_update(
     pythonized(py, &preview)
 }
 
-/// 全部模型待重试任务（检查视图，含死信；`GET /update/pending-units` 同源）。
-#[pyfunction]
-pub fn pending_model_units(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    ensure_connected()?;
-    let units = py
-        .detach(|| {
-            runtime()
-                .block_on(aios_database::data_interface::manual_update::load_pending_model_units())
-        })
-        .map_err(anyhow_to_py)?;
-    pythonized(py, &units)
-}
-
-/// 全部窗口阻断状态（阻断的库为什么不动，唯一出处）。
-#[pyfunction]
-pub fn window_blocks(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    ensure_connected()?;
-    let blocks = py
-        .detach(|| {
-            runtime()
-                .block_on(aios_database::data_interface::staging::attempts::load_window_blocks())
-        })
-        .map_err(anyhow_to_py)?;
-    pythonized(py, &blocks)
-}
-
-/// 一个库全部生成根的失败记录（root_refno → 记录）。
-#[pyfunction]
-pub fn root_attempts(py: Python<'_>, dbnum: u32) -> PyResult<Py<PyAny>> {
-    ensure_connected()?;
-    let attempts = py
-        .detach(|| {
-            runtime().block_on(
-                aios_database::data_interface::staging::attempts::load_root_attempts(dbnum),
-            )
-        })
-        .map_err(anyhow_to_py)?;
-    pythonized(py, &attempts)
-}
+// `db.pending_model_units` / `db.window_blocks` / `db.root_attempts` 随第二条异步账退役
+// （ADR-072 D5）：模型待重试行、窗口阻断记录、逐根失败记录三张账都没有了——任务的计划
+// 只在内存，失败根集看 `/dbnums` 的镜像字段（`db.dbnum_statuses`），崩溃残留看写入标记。
 
 pub fn register(py: Python<'_>, db: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = py;
@@ -382,8 +346,5 @@ pub fn register(py: Python<'_>, db: &Bound<'_, PyModule>) -> PyResult<()> {
     db.add_function(wrap_pyfunction!(watermark, db)?)?;
     db.add_function(wrap_pyfunction!(dbnum_statuses, db)?)?;
     db.add_function(wrap_pyfunction!(preview_manual_update, db)?)?;
-    db.add_function(wrap_pyfunction!(pending_model_units, db)?)?;
-    db.add_function(wrap_pyfunction!(window_blocks, db)?)?;
-    db.add_function(wrap_pyfunction!(root_attempts, db)?)?;
     Ok(())
 }

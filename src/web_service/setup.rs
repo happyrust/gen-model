@@ -6,10 +6,8 @@
 //! 1. **配置真值是 `DbOption.toml` 文件**，本模块只是它的 HTTP 读写口。写盘走 `toml_edit`
 //!    外科手术式改键——注释是决策史、未知键可能是别的版本的键，两者都原样保留；写前
 //!    先落 `DbOption.toml.bak`。
-//! 2. **setup API 按 TCP 对端判回环**（仅 127.0.0.1/::1 放行，不认 `X-Forwarded-For` 这类
-//!    代理头）。出厂监听是 `0.0.0.0`（Q16），按监听地址判会把包括本机在内的所有人一起
-//!    拒掉；按对端判，应用面局域网可达、setup 面仍只许本机。对外暴露 setup 面必须另加
-//!    认证（ADR-069 硬边界）。
+//! 2. **setup 与应用面均允许远程访问**，默认监听所有网卡。部署方应使用可信网络、
+//!    防火墙或认证代理限制管理入口的访问。
 //! 3. **两个判据各管一件事**：设置模式（启动臂）= 配置无效（`project_path` 缺/不存在，或
 //!    需要端点的档位——除 embedded-mem 外——`v_ip`/`v_port` 留空）；哨兵
 //!    [`FIRST_RUN_MARKER`] 只管首页 302 到向导，
@@ -102,8 +100,8 @@ pub fn setup_mode_reason(option: &aios_core::options::DbOption) -> Option<String
 /// [`setup_mode_reason`] 的纯函数体，store 形态从参数来，测试不必碰进程级 OnceLock。
 ///
 /// `v_port` 在 `DbOption` 里是 `u16`（toml 写字符串也会被 config 层折成数），所以
-/// 「未设置」的哨兵值是 **0**——出厂模板写 `v_port = "0"`；写空串会让整份配置
-/// 反序列化失败，连设置模式都起不来。
+/// 「未设置」的哨兵值是 **0**；当前出厂模板已经为 kv-mem 预填 8009，手改为 0
+/// 仍会进入设置模式。写空串会让整份配置反序列化失败，连设置模式都起不来。
 pub(crate) fn setup_mode_reason_for(
     store: crate::options::StoreMode,
     project_path: &str,
@@ -119,7 +117,7 @@ pub(crate) fn setup_mode_reason_for(
     }
     if store != crate::options::StoreMode::EmbeddedMem && (v_ip.trim().is_empty() || v_port == 0) {
         return Some(format!(
-            "store_mode={} 需要 v_ip / v_port，当前未设置（v_port=0 即出厂哨兵值）",
+            "store_mode={} 需要 v_ip / v_port，当前未设置（v_port=0 是未设置哨兵值）",
             store.as_str()
         ));
     }
@@ -141,23 +139,56 @@ pub fn clear_first_run_marker(workspace: &Path) -> std::io::Result<bool> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 回环闸
-// ---------------------------------------------------------------------------
-
-/// setup API 的准入：TCP 对端必须是回环地址。判据只有对端 IP 一个——不看监听地址
-/// （全 0 监听下那会拒掉所有人），也不看任何请求头（代理头伪造不设防线就是设错了防线）。
-fn require_loopback(peer: SocketAddr) -> Result<(), ApiError> {
-    if peer.ip().is_loopback() {
-        return Ok(());
+/// 删除首跑哨兵前的最后一道后端闸。
+///
+/// `ctx.mode` 证明当前进程已经用有效配置完成过一次正常启动；再读当前文件，是为了挡住
+/// normal 进程里把配置改坏、却尚未重启就直接点「完成」的窗口。
+fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()> {
+    if mode != "normal" {
+        anyhow::bail!("当前仍处于设置模式；请先在第④步保存配置并等待服务自动重启成功");
     }
-    Err(ApiError {
-        status: StatusCode::FORBIDDEN,
-        code: "loopback_only",
-        message: format!(
-            "setup 面只许服务器本机访问（对端 {peer}）。请在服务器上用 http://127.0.0.1:<端口>/setup.html 打开向导。"
-        ),
-    })
+    let text = std::fs::read_to_string(config_path)
+        .map_err(|error| anyhow::anyhow!("读配置 {} 失败：{error}", config_path.display()))?;
+    let document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| anyhow::anyhow!("解析配置 {} 失败：{error}", config_path.display()))?;
+    let values = subset_values(&document);
+    let text_value = |key: &str| {
+        values
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let store_name = text_value("store_mode")
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let store = match store_name.as_str() {
+        "" | "spawned-mem" | "kv-mem" => crate::options::StoreMode::SpawnedMem,
+        "external" | "rocksdb" => crate::options::StoreMode::External,
+        "spawned-rocksdb" => crate::options::StoreMode::SpawnedRocks,
+        "embedded-mem" => crate::options::StoreMode::EmbeddedMem,
+        other => anyhow::bail!("store_mode 无效：{other:?}"),
+    };
+    let v_port = values
+        .get("v_port")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        })
+        .and_then(|port| u16::try_from(port).ok())
+        .unwrap_or_default();
+    if let Some(reason) = setup_mode_reason_for(
+        store,
+        &text_value("project_path"),
+        &text_value("v_ip"),
+        v_port,
+    ) {
+        anyhow::bail!("配置尚未就绪：{reason}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +210,7 @@ pub struct SetupConfigPatch {
     pub v_ip: Option<String>,
     pub v_port: Option<String>,
     pub http_api_addr: Option<String>,
+    pub http_public_addr: Option<String>,
     pub gen_model: Option<bool>,
     pub gen_mesh: Option<bool>,
     pub watch_dbnums: Option<Vec<u32>>,
@@ -211,6 +243,14 @@ fn validate_patch(patch: &SetupConfigPatch) -> Vec<String> {
     {
         problems.push(format!(
             "http_api_addr 不是 <IP>:<端口> 形态（如 0.0.0.0:9099）：{addr:?}"
+        ));
+    }
+    if let Some(addr) = patch.http_public_addr.as_deref()
+        && !addr.trim().is_empty()
+        && addr.trim().parse::<SocketAddr>().is_err()
+    {
+        problems.push(format!(
+            "http_public_addr 不是 <IP>:<端口> 形态（如 192.168.1.9:9099）：{addr:?}"
         ));
     }
     problems
@@ -275,6 +315,9 @@ fn apply_patch(
     }
     if let Some(addr) = &patch.http_api_addr {
         set(document, "http_api_addr", value(addr.as_str()));
+    }
+    if let Some(addr) = &patch.http_public_addr {
+        set(document, "http_public_addr", value(addr.as_str()));
     }
     if let Some(gen_model) = patch.gen_model {
         set(document, "gen_model", value(gen_model));
@@ -399,6 +442,7 @@ fn subset_values(document: &toml_edit::DocumentMut) -> serde_json::Value {
         "v_ip",
         "v_port",
         "http_api_addr",
+        "http_public_addr",
         "gen_model",
         "gen_mesh",
         "save_db",
@@ -615,25 +659,24 @@ fn probe_port(bound_port: Option<u16>, addr: &str) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 async fn setup_state(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     let workspace = ctx.workspace_dir();
     Ok(Json(json!({
         "mode": ctx.mode,
         "first_run_pending": first_run_pending_at(&workspace),
         "config_path": ctx.config_path.display().to_string(),
         "workspace_dir": workspace.display().to_string(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::build_info::VERSION,
+        "build_id": crate::build_info::BUILD_ID,
     })))
 }
 
 async fn setup_get_config(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     let text = std::fs::read_to_string(&ctx.config_path).map_err(|error| {
         ApiError::precondition(format!(
             "读配置 {} 失败：{error}",
@@ -658,11 +701,10 @@ async fn setup_get_config(
 }
 
 async fn setup_put_config(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
     Json(patch): Json<SetupConfigPatch>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     let problems = validate_patch(&patch);
     if !problems.is_empty() {
         return Err(ApiError::bad_request(problems.join("；")));
@@ -683,20 +725,18 @@ async fn setup_put_config(
 }
 
 async fn setup_probe_project(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     Json(request): Json<ProjectProbeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     Ok(Json(scan_project_path(Path::new(
         request.project_path.trim(),
     ))))
 }
 
 async fn setup_probe_store(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     Json(request): Json<StoreProbeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     if request.v_ip.trim().is_empty() || request.v_port.trim().is_empty() {
         return Err(ApiError::bad_request("v_ip / v_port 不能为空"));
     }
@@ -706,19 +746,17 @@ async fn setup_probe_store(
 }
 
 async fn setup_probe_port(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
     Json(request): Json<PortProbeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     Ok(Json(probe_port(ctx.bound_port, &request.http_api_addr)))
 }
 
 async fn setup_restart(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Response, ApiError> {
-    require_loopback(peer)?;
     let poll_hint = restart_poll_hint(&ctx.config_path);
     println!("[setup] 收到重启请求，300ms 后交接给新进程（{poll_hint}）");
     tokio::spawn(async move {
@@ -740,8 +778,8 @@ async fn setup_restart(
         .into_response())
 }
 
-/// 重启后向导该去轮询的地址：读**文件里**（刚保存的）`http_api_addr`，`0.0.0.0` 映射成
-/// `127.0.0.1`（浏览器导航不了全 0）。读不出就让前端用自己手上的表单值。
+/// 重启轮询保留配置中的监听地址；浏览器将通配地址映射为当前访问主机。
+/// 读不出就让前端用自己手上的表单值。
 fn restart_poll_hint(config_path: &Path) -> String {
     let addr = std::fs::read_to_string(config_path)
         .ok()
@@ -753,7 +791,7 @@ fn restart_poll_hint(config_path: &Path) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    browser_facing(&addr)
+    addr.trim().to_string()
 }
 
 /// `0.0.0.0:9099` → `127.0.0.1:9099`；空值原样回去（前端自己兜）。
@@ -776,10 +814,11 @@ fn spawn_replacement() -> anyhow::Result<u32> {
 }
 
 async fn setup_complete(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
+    ensure_completion_ready(ctx.mode, &ctx.config_path)
+        .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
     let workspace = ctx.workspace_dir();
     let removed = clear_first_run_marker(&workspace).map_err(|error| {
         ApiError::precondition(format!(
@@ -861,7 +900,7 @@ pub async fn bind_with_handoff(addr: &str) -> anyhow::Result<tokio::net::TcpList
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     continue;
                 }
-                return Err(anyhow::anyhow!("绑定 {addr} 失败：{error}"));
+                return Err(anyhow::Error::new(error).context(format!("绑定 {addr} 失败")));
             }
         }
     }
@@ -886,10 +925,10 @@ async fn setup_mode_health(State(reason): State<&'static str>) -> Json<serde_jso
 /// restart 口交接之后，新进程走正常启动，这里就再也进不来了。
 pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
     let ext = crate::get_db_option_ext();
-    let addr = ext
-        .http_api_addr
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1:9099".to_string());
+    let addr = super::effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
+    let automatic = ext.http_api_addr.as_deref().is_none_or(|value| value.trim().is_empty());
+    let listener = super::bind_http_address(&addr, automatic).await?;
+    let addr = listener.local_addr()?.to_string();
     let ui_root = PathBuf::from(
         std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
     );
@@ -906,12 +945,12 @@ pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
         .route("/", get(|| async { Redirect::temporary("/setup.html") }))
         .fallback(get(|| async { Redirect::temporary("/setup.html") }));
 
-    let listener = bind_with_handoff(&addr).await?;
     println!("*** 设置模式：{reason_static} ***");
+    let setup_url = format!("http://{}/setup.html", browser_facing(&addr));
     println!(
-        "*** 配置向导：http://{}/setup.html （库、扫描、监听一概没起；配置保存并重启后进入正常服务）***",
-        browser_facing(&addr)
+        "*** 配置向导：{setup_url} （库、扫描、监听一概没起；配置保存并重启后进入正常服务）***"
     );
+    super::maybe_open_plant_ui(&setup_url);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -965,43 +1004,28 @@ mod tests {
         assert!(setup_mode_reason_for(StoreMode::EmbeddedMem, real, "", 0).is_none());
     }
 
-    /// 回环闸真值表：判据只有对端 IP。v4/v6 回环放行，内网 / 公网一律 403——
-    /// 出厂监听是 0.0.0.0（Q16），这道闸是 setup 面唯一的防线。
-    #[test]
-    fn the_loopback_gate_admits_loopback_peers_only() {
-        for allowed in ["127.0.0.1:5000", "127.8.8.8:1", "[::1]:9099"] {
-            let peer: SocketAddr = allowed.parse().unwrap();
-            assert!(require_loopback(peer).is_ok(), "{allowed} 该放行");
+    #[tokio::test]
+    async fn remote_clients_can_read_setup_state_and_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("DbOption.toml");
+        std::fs::write(&config_path, "http_api_addr = \"0.0.0.0:2001\"\n").unwrap();
+        let ctx = SetupCtx { mode: "setup", config_path,
+            ui_root: dir.path().join("web"), bound_port: Some(2001) };
+        for address in ["10.30.230.42:41234", "[2001:db8::1]:41234"] {
+            let peer = address.parse().unwrap();
+            assert!(setup_state(ConnectInfo(peer), State(ctx.clone())).await.is_ok());
+            assert!(setup_get_config(ConnectInfo(peer), State(ctx.clone())).await.is_ok());
         }
-        for denied in [
-            "192.168.1.5:5000",
-            "10.0.0.7:80",
-            "8.8.8.8:443",
-            "[fe80::1]:9099",
-            "[2001:db8::1]:80",
-        ] {
-            let peer: SocketAddr = denied.parse().unwrap();
-            let error = require_loopback(peer).expect_err(denied);
-            assert_eq!(error.status, StatusCode::FORBIDDEN);
-            assert_eq!(error.code, "loopback_only");
-        }
-    }
-
-    /// 闸的判据必须**只有**对端地址：签名收的就是 `SocketAddr`，且整个模块不读请求头
-    /// ——代理头（forwarded 族）是伪造得了的东西，按它放行等于没有闸。
-    #[test]
-    fn the_gate_never_reads_forwarded_headers() {
-        let source = include_str!("setup.rs");
-        assert!(
-            source.contains("fn require_loopback(peer: SocketAddr) -> Result<(), ApiError>"),
-            "回环闸的入参只能是 TCP 对端地址"
-        );
-        // 拼出来找，免得这句测试自己先匹配上自己。
-        let header_reader = format!("Header{}", "Map");
-        assert!(
-            !source.contains(&header_reader),
-            "setup 模块不许读请求头（{header_reader}）——回环闸只认 TCP 对端"
-        );
+        assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2001");
+        let saved = setup_put_config(
+            ConnectInfo("10.30.230.42:41234".parse().unwrap()), State(ctx.clone()),
+            Json(SetupConfigPatch { http_api_addr: Some("0.0.0.0:2002".into()),
+                ..Default::default() }),
+        ).await;
+        assert!(saved.is_ok());
+        assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2002");
+        std::fs::copy(backup_path(&ctx.config_path), &ctx.config_path).unwrap();
+        assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2001");
     }
 
     /// 首跑哨兵：建了就 pending，删一次真删，再删幂等。
@@ -1014,6 +1038,75 @@ mod tests {
         assert!(clear_first_run_marker(dir.path()).unwrap());
         assert!(!first_run_pending_at(dir.path()));
         assert!(!clear_first_run_marker(dir.path()).unwrap());
+    }
+
+    /// 回归：配置仍为空时，哪怕前端误把人送到了第⑤步，也不能让「完成向导」
+    /// 删除哨兵并制造假完成。设置模式与「normal 进程里刚写入无效配置、尚未重启」
+    /// 两种入口都必须由后端兜底拒绝。
+    #[tokio::test]
+    async fn completion_refuses_setup_mode_and_an_invalid_current_config() {
+        for mode in ["setup", "normal"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = dir.path().join("DbOption.toml");
+            std::fs::write(
+                &config,
+                "project_path = \"\"\nstore_mode = \"spawned-mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
+            )
+            .unwrap();
+            let marker = dir.path().join(FIRST_RUN_MARKER);
+            std::fs::write(&marker, "pending").unwrap();
+            let ctx = SetupCtx {
+                mode,
+                config_path: config,
+                ui_root: dir.path().join("web"),
+                bound_port: Some(9099),
+            };
+            let result =
+                setup_complete(ConnectInfo("10.30.230.42:41234".parse().unwrap()), State(ctx)).await;
+            assert!(result.is_err(), "mode={mode} 不得完成无效配置");
+            assert!(marker.is_file(), "拒绝完成时不得删除首跑哨兵");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().join("projects");
+        std::fs::create_dir(&project_root).unwrap();
+        let config = dir.path().join("DbOption.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "project_path = {:?}\nstore_mode = \"spawned-mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
+                project_root.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let marker = dir.path().join(FIRST_RUN_MARKER);
+        std::fs::write(&marker, "pending").unwrap();
+        let result = setup_complete(
+            ConnectInfo("10.30.230.42:41234".parse().unwrap()),
+            State(SetupCtx {
+                mode: "normal",
+                config_path: config,
+                ui_root: dir.path().join("web"),
+                bound_port: Some(9099),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "normal + 有效配置应允许完成：{result:?}");
+        assert!(!marker.exists(), "完成成功后应删除首跑哨兵");
+    }
+
+    /// 前端两道门：`?resume=init` 只有 normal 模式能进入第⑤步；完成按钮还要现场
+    /// 复核一次状态，不能仅凭旧页面内存把 setup 模式画成「完成」。
+    #[test]
+    fn the_wizard_never_resumes_or_completes_initialization_in_setup_mode() {
+        assert!(
+            SETUP_PANEL_EMBEDDED.contains(r#"state.mode === "normal" && (resume === "init""#),
+            "resume=init 必须受 normal 模式约束"
+        );
+        assert!(
+            SETUP_PANEL_EMBEDDED.contains(r#"if (state.mode !== "normal")"#),
+            "finish() 必须重新读取状态并拒绝 setup 模式"
+        );
     }
 
     // ---------- 写盘 ----------
@@ -1034,6 +1127,7 @@ v_ip = "127.0.0.1"
 v_port = "8010"
 
 http_api_addr = "127.0.0.1:9099"
+http_public_addr = ""
 gen_model = true
 gen_mesh = true
 watch_dbnums = []
@@ -1055,6 +1149,7 @@ room_key_word = ["-RM"]
             v_ip: Some("192.168.0.10".into()),
             v_port: Some("8010".into()),
             http_api_addr: Some("0.0.0.0:9099".into()),
+            http_public_addr: Some("192.168.1.9:9099".into()),
             gen_model: Some(false),
             gen_mesh: Some(false),
             watch_dbnums: Some(vec![7997, 8000]),
@@ -1070,6 +1165,7 @@ room_key_word = ["-RM"]
                 "v_ip",
                 "v_port",
                 "http_api_addr",
+                "http_public_addr",
                 "gen_model",
                 "gen_mesh",
                 "watch_dbnums",
@@ -1185,21 +1281,23 @@ room_key_word = ["-RM"]
         );
     }
 
-    /// PUT 的形状校验：store_mode 拼错、v_port 非数字、http_api_addr 不成形都拦在写盘前。
+    /// PUT 的形状校验：store_mode 拼错、v_port 非数字、监听/展示地址不成形都拦在写盘前。
     #[test]
     fn patch_validation_rejects_malformed_values() {
         let bad = SetupConfigPatch {
             store_mode: Some("rocksdb".into()),
             v_port: Some("eight".into()),
             http_api_addr: Some("9099".into()),
+            http_public_addr: Some("host:9099".into()),
             ..Default::default()
         };
         let problems = validate_patch(&bad);
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 4, "{problems:?}");
         let good = SetupConfigPatch {
             store_mode: Some("external".into()),
             v_port: Some("8010".into()),
             http_api_addr: Some("0.0.0.0:9099".into()),
+            http_public_addr: Some("192.168.1.9:9099".into()),
             ..Default::default()
         };
         assert!(validate_patch(&good).is_empty());
@@ -1234,6 +1332,25 @@ room_key_word = ["-RM"]
             SETUP_PANEL_EMBEDDED.contains("ams-setup-wizard"),
             "web/setup.html 必须含 id=\"ams-setup-wizard\" 标记"
         );
+    }
+
+    /// runtime 出厂配置默认 embedded-mem；向导必须能原样显示并保存这一档，不能因
+    /// 没有对应 radio 而静默回写成 spawned-mem、再次引入数据库端口冲突。
+    #[test]
+    fn the_wizard_preserves_the_embedded_runtime_store_mode() {
+        for needle in [
+            r#"id="store-embedded" value="embedded-mem""#,
+            r#"v.store_mode === "embedded-mem""#,
+            r#"return "embedded-mem""#,
+            r#"tier === "embedded-mem""#,
+            r#"id="f-http_public_addr""#,
+            r#"http_public_addr: val("f-http_public_addr")"#,
+        ] {
+            assert!(
+                SETUP_PANEL_EMBEDDED.contains(needle),
+                "web/setup.html 缺 embedded-mem 接线：{needle}"
+            );
+        }
     }
 
     /// 路由面源码钉：mod.rs 必须把 setup 路由 merge 进主 app、把 `/` 交给 root_gate——

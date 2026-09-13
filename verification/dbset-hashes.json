@@ -1,0 +1,14 @@
+[
+  {
+    "path": "src/db_element.rs",
+    "original": "dbset-original/db_element.rs",
+    "original_sha256": "512003637ae10f35fed0285ca665ce3fd838f4dea9d58ff440481f7706198f61",
+    "modified_sha256": "043e9e03f70cecbc58378d725dc197a9b84f603dac0378b1394440b91db0753d"
+  },
+  {
+    "path": "tests/dbset_generations.rs",
+    "original": null,
+    "original_sha256": null,
+    "modified_sha256": "a7229313c31c9359d7ded1b16c841cc2954020a0720d800ac79cba371a41f467"
+  }
+]

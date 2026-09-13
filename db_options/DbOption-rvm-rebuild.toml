@@ -186,7 +186,8 @@ debug_refno_types = ["LOOP", "PRIM"]
 manual_db_nums = [1112, 8000]
 #【新增 2026-08-25】watch_dbnums：增量摄入只收这两个库。
 # 按 ADR-048，声明限定域本身就是「本次跑就要这几个库」的上弦信号——重扫排出的行
-# 不再挂起、`model_update_pending` 的持久积压启动即消化。此前这份配置靠
+# 不再挂起、启动即开工（模型工作随 dbnum 任务在内存里算，ADR-072 D5 之后库里没有
+# 持久积压这回事）。此前这份配置靠
 # `AIOS_STARTUP_AUTORUN=0` 挡住整库自动开工，而当时还有个 sync_live=false 把 watcher
 # 也关了，解封条件永不成立，7655 行积压卡死（见 ADR-048 背景）。那个开关 2026-09-07
 # 随 ADR-058 D8 退役，watcher 从此无条件起，这一半的坑不会再有。

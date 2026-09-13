@@ -104,7 +104,9 @@ function Read-Current {
 
 function Get-Dbnums {
     param([int]$Port)
-    Invoke-RestMethod "http://127.0.0.1:$Port/api/v1/dbnums" -TimeoutSec 10
+    # 无查询参数的 /dbnums 是启动骨架摘要，不包含持久水位。live 验收必须
+    # 显式请求当前 AMS /ALL 身份，否则 baseline-wait 会永远看不到 applied/model。
+    Invoke-RestMethod "http://127.0.0.1:$Port/api/v1/dbnums?project=AvevaMarineSample&mdb=ALL&namespace=1516" -TimeoutSec 30
 }
 
 function Get-Health {
@@ -152,7 +154,8 @@ switch ($Phase) {
         if (-not (Test-Path -LiteralPath $base)) { throw "基础配置不存在：$base" }
         $text = Get-Content -LiteralPath $base -Raw
 
-        # 只改这几格，其余与 7997 初始化夹具逐字相同（那份已显式 store_mode=external / data_face=ingest）。
+        # 只改这几格，其余与 7997 初始化夹具保持一致。external 的数据面由
+        # store_mode 派生，派生配置不保留旧的 data_face 声明。
         $text = [regex]::Replace($text, '(?m)^v_port\s*=\s*\d+', "v_port = $SurrealPort")
         $text = [regex]::Replace($text, '(?m)^kv_port\s*=\s*"\d+"', "kv_port = `"$($SurrealPort + 1)`"")
         $text = [regex]::Replace($text, '(?m)^#\s*http_api_addr\s*=.*$', "http_api_addr = `"127.0.0.1:$HttpPort`"")
@@ -161,9 +164,10 @@ switch ($Phase) {
         }
         $watchList = ($WatchDbnums | ForEach-Object { $_ }) -join ', '
         $text = [regex]::Replace($text, '(?m)^manual_db_nums\s*=.*$', "manual_db_nums = [$watchList]")
-        foreach ($key in @('store_mode', 'data_face')) {
-            if ($text -notmatch "(?m)^$key\s*=") { throw "基础配置缺 $key，护栏本该拦住它：$base" }
+        if ($text -notmatch '(?m)^store_mode\s*=') {
+            throw "基础配置缺 store_mode，护栏本该拦住它：$base"
         }
+        $text = [regex]::Replace($text, '(?m)^data_face\s*=.*(?:\r?\n)?', '')
         $text += @"
 
 # ── external 稳态增量 live（scripts/Run-ExternalIncrementLive.ps1 派生，$stamp）──
@@ -217,10 +221,10 @@ room_resident_model = false
         $surreal = Get-NetTCPConnection -LocalPort $current.surreal_port -State Listen -ErrorAction SilentlyContinue
         if (-not $surreal) { throw "SurrealDB 端口 $($current.surreal_port) 上没人监听：先跑终端 A 那条 Start-Surreal8009.ps1" }
 
-        # 显式写死形态，不靠默认（默认翻过两次）；与 Start-AiosDatabaseManual.ps1 同一纪律。
+        # 介质形态显式为 external；数据面由 store_mode 自动派生。
         $env:DB_OPTION_FILE = $current.config_env
         $env:AIOS_STORE_MODE = 'external'
-        $env:AIOS_DATA_FACE = 'ingest'
+        Remove-Item Env:AIOS_DATA_FACE -ErrorAction SilentlyContinue
         $env:RUST_MIN_STACK = '134217728'
         $env:RUST_BACKTRACE = '1'
         $log = Join-Path $current.run_dir 'serve.log'

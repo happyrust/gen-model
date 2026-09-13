@@ -24,6 +24,71 @@
 
 ## 2026-09-10
 
+### ADR-072 R3 / R4 收尾：房间侧过渡壳删净、退役表名只剩迁移清单（W4 源码钉）、`/dbnums` 出 `write_state`、ops.html 退发布时代的格
+
+分支 `refactor/retire-publish-stage` 到 `042ce26ea` 时 R1–R5 的主体已落（下表），这一刀收 R3 / R4 的残留，并把
+ADR-072 W4「退役表名只在迁移里」钉成源码钉。
+
+| 步 | 状态 | 落点 |
+|---|---|---|
+| R1 写入标记 + 回退 | 已落 | `8391fba0a` → `3f24cac56` → `54795e2e6`（d-570 不删 pe）→ `9e02ec077`（ModelOnly / RoomOnly 只退对应面；d-732 追认，ADR-072 D3 随 `183c4664c` 改写）→ `d127e336a`（mem:// 崩溃点重放） |
+| R2 任务内去回读 | 已落 | `f2bdaa21c`（空间树就地收敛）、`1ac2d0f89`（房间门读任务结果）、`0025edaa4`（`model_complete` / `CompletionReceipt` / `verdict_for` 出执行体）；对账读 `existing_geometry_for_window` 按 §9-7 (a) 保留（d-568） |
+| R3 删 publish | 已落 + 本条收尾 | `0025edaa4`；本条删 `room_topology.rs` 三个过渡壳 |
+| R4 删第二条账 + 退表 | 已落 + 本条收尾 | `0025edaa4` / `042ce26ea`；本条补 W4 源码钉与它拓出的残留 |
+| R5 退 `room_published_*` | 已落 | `1ac2d0f89` / `3deaa1f30` |
+| R6 文档 | 大半 | ADR-072 / ADR-062 作废 / ADR-071 修订 / CONTEXT.md / spec §4.7 已落；spec §4.7.1 `window_blocks` 行「本轮不删」已过时（文件此刻在 t-704 手里，未改） |
+
+- **R3 残留**：`room_topology.rs` 里为发布路保编译的 `render_stage_published_room_topology` /
+  `stage_candidate_room_topology` / `ensure_published_room_topology` 三个 no-op 壳删，源码钉
+  `room_topology_has_no_published_view_and_never_queries_the_database` 把三个名字加进禁用清单。分支
+  `c2/retire-room-shells` 的 `47faa7f1e` 做的是同一件事，但它还改 `side_effect_pending.rs`（refactor 上已整删），
+  并不进来——在 refactor 上重做，那条提交作废。
+- **R4 W4 源码钉**（`lib.rs` 末尾 `retired_table_names_pin`）：扫 `src/` 下每个 `.rs` 的生产部分——`#[cfg(test)]`
+  条目按花括号配对整段摘掉、整行注释去掉、父模块以 `#[cfg(test)] mod x;` 声明的整文件测试模块跳过——六张退役表名
+  （`model_update_pending` / `incr_side_effect_pending` / `published_file_input` / `increment_update_attempt` /
+  `room_published_inst` / `room_published_topology`）只许出现在 `retire_publish_run_tables` 的 RETIRED 清单里。
+  `room_topology_source` 不在名单：那个名字同时是磁盘分片模块（d-89），表退了、模块留着。钉拓出并收掉的残留：
+  - `dbnum_state.rs` 启动 `DEFINE TABLE` 仍建 `increment_update_attempt` / `model_update_pending` /
+    `incr_side_effect_pending` 三张（`REMOVE` 完又 `DEFINE` 回来）——三行删；
+  - `bin/l3_suite.rs` + `bin/l3_suite/fixture.rs` 四处 SQL：首次导入后的「积压重置」删（模型随任务同步生成，没有积压）；
+    `wait_fixture_pending` 改读 `dbnum_watermark` + `dbnum_write_state`（不 `writing` 且 `model_sesno == applied_sesno`
+    连续两次即收敛，证据落 `{phase}-settlement.json`）；快照 SQL 去 `pending` / `room_pending` 子查询，I-2「模型欠账」改按
+    双水位判；`wait_model_drain_settlement` 不再问已删的 `/update/pending-units`；
+  - `model_type_scope.rs` / `watch_scope.rs` 两条日志文案里的「留在 model_update_pending 里不消费」「遗留的
+    model_update_pending 已清理」改成任务口径。
+- **编译面**：HEAD 上 `cargo check --bins --tests` 编不过——`bin/node_gen_room_probe.rs` 与
+  `tests/issue7_e2e_increment.rs` 仍 `use model_update_pending::drain_rooms`。探针去掉 drain 路（房间归属由该库任务的
+  房间段整库算，探针只汇报库里现有的归属边）；issue7 e2e 整文件删（它驱动的就是 drain 路）。这三处 21:04 已以未署名 WIP
+  躺在共享工作树里，随本条一起提交。
+- **契约 §7 / Q13**：`/dbnums` 每行加 `write_state`——`DbnumStatus.write_state: Option<WriteStateColumns>`
+  （`status / start_sesno / end_sesno / intent / started_at / finished_at`，`skip_serializing_if` 缺失即整格不出、不写
+  `null`）；取数 `write_state::load_all()` 整表一趟（§4.5 白名单里 `dbnum_write_state` 那一格的读法），读不到只记
+  warning、整格留空。钉：`the_dbnum_row_carries_the_write_marker_as_one_optional_cell`。
+- **ops.html**（spec §4.7.1 / 附录 C.1「对应格删」）：删「窗口阻断 · 数据侧终态」卡与 `renderStaging`
+  （`/health` 已无 `window_blocks` / `staging_windows` / `staging_commit`）、删「重试模型死信」按钮与
+  `model_update_pending` 读取、删 `spatial_reconcile` / 模型死信两级判决与 `mupPhrase`。换上写入标记读法：判决多一档
+  「未写完」（`write_state = writing` 且该库不在运行行 = 上一次死在写库中途，点名 intent / S→T / 开工时刻），KPI
+  「待重试 / 死信」改「写入中 / 未写完」（`/dbnums` 读不到报 `? / ?`，不报 0）；`MAX_ATTEMPTS` 注释改指
+  `batch_worker` 的进程内连败账。
+- 验证：`cargo check --lib --bins --tests` 0 error（aios-database 0 warning）；全量 `cargo test --lib -- --skip damaged_`
+  **1803 passed / 5 failed / 115 ignored**——5 红 = 基线既有（`pe_batch`×2、`window_root_plan`×3），无新增
+  （HEAD `0025edaa4` 自报 1802 / 5 / 115）；`cargo test --bin l3_suite` 的 4 条 payload 归一化用例过；ops.html 两段
+  `<script>` `node --check` 语法过；rustfmt 本条改动的 hunk 干净（这些文件里既有的 4 处偏差不动）。**未验证**：live 7997
+  移动 / 恢复重放（计划 §6-3，R5 后一次）；ops.html 在真服务上的渲染。
+- **未收**：`l3_suite` 的 I-3 仍按 `model_drain` 任务判——那一族任务随 drain 退了，L3 套件的模型断言要按任务模型重基，
+  不在 R4 内；`9e02ec077` 自报的 `requeue_after_rollback` 用 `report.target_watermark` 填 `applied_sesno`（ModelOnly 回退
+  后应读库里的 applied）仍待对齐。
+
+### ADR-072 已接受：发布阶段退役——任务写库带写入标记，中断按 sesno 回退到水位重做（计划已批准；R1–R6 进度见上一条）
+
+grill-with-docs 两轮（Q1–Q15 全按推荐，共识 d-441）+ Plannotator 批准。口径：一个 dbnum 任务跑完把内存结果**同步**写库、最后盖水位；
+写库期间 `dbnum_write_state:{dbnum} = writing{S,T}`，收尾那一笔与水位同事务置 `finished`；启动 / 开工见 `writing` → 按 `(dbnum, sesno > S)`
+谓词删除整库回退到 S → 排 S→T 从头跑（初始化 S=0 即 wipe）。publish 九子步、任务内四处回读库、`model_update_pending` /
+`side_effect_pending` / `model_publish_queue` / `model_completion`、`room_published_*` 三表一次清干净；对库的读只剩水位 / sesno / 写入状态
+与启动水化。文档：`docs/adr/ADR-072-…`、`docs/plans/2026-09-10-retire-publish-stage-and-write-marker-plan.md`；ADR-062 作废、ADR-071 S3 / D4 / D9
+修订；CONTEXT.md 新增「写入标记」「回退到水位」「库读白名单」，改写「任务内序列化」，退役「模型窗口意图」「提交后收敛」。
+worktree `gen-model-refactor` / 分支 `refactor/retire-publish-stage`，基线 `6f0813f6b`（e3d-direct 上 ADR-071 S1–S6 在途的整份 WIP 提交）。
+
 ### S4（目录级联那一块）：反查命中的根改排带明确根名单的 ModelOnly 任务，目录版本核对搬进 `model_coverage.rs`（ADR-071 D1 / S4）
 
 目录级联（`reconcile_catalogue_versions` 点名 → 收窗 → 反查 → 排工）此前的「排工」是把命中的根写成

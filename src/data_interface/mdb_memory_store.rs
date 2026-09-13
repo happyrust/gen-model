@@ -40,7 +40,6 @@ use std::time::Instant;
 use aios_core::RefU64;
 use anyhow::Context;
 use e3d_io::refno::RefNo;
-use e3d_io::uda_catalog::UdaCatalog;
 use e3d_io::{ReadOnlyEngine, ScanTier};
 
 use super::mdb_membership::MdbMembership;
@@ -81,7 +80,6 @@ pub struct MdbMemoryStore {
     project: String,
     mdb: String,
     membership: Arc<MdbMembership>,
-    uda_catalog: Arc<UdaCatalog>,
     databases: Vec<LoadedDb>,
     /// `ref0 → dbnum`。**不是** `RefU64::get_0()`——那只是 ref0，不是库号。
     affiliations: HashMap<u32, u32>,
@@ -100,14 +98,11 @@ impl MdbMemoryStore {
     /// 「这个 refno 不存在」，跟「这个元素真的被删了」长得一模一样。
     pub fn load(project: &str, mdb: &str, membership: &MdbMembership) -> anyhow::Result<Self> {
         let started = Instant::now();
-        let schema = super::direct_store::DirectSchema::open_from_env()?;
-        let uda_catalog = super::element_attributes::load_uda_catalog(membership, &schema)?;
         let mut store = Self {
             epoch: 0,
             project: project.to_string(),
             mdb: format!("/{}", mdb.trim_start_matches('/')),
             membership: Arc::new(membership.clone()),
-            uda_catalog: Arc::new(uda_catalog),
             databases: Vec::new(),
             affiliations: HashMap::new(),
             elements: HashMap::new(),
@@ -227,10 +222,6 @@ impl MdbMemoryStore {
 
     pub fn membership(&self) -> Arc<MdbMembership> {
         self.membership.clone()
-    }
-
-    pub fn uda_catalog(&self) -> Arc<UdaCatalog> {
-        self.uda_catalog.clone()
     }
 
     pub fn mdb(&self) -> &str {
@@ -503,7 +494,6 @@ mod tests {
             project: "P".into(),
             mdb: "/ALL".into(),
             membership: Arc::new(MdbMembership::default()),
-            uda_catalog: Arc::new(UdaCatalog::default()),
             databases: Vec::new(),
             affiliations: HashMap::from([(1, 7000), (2, 8000)]),
             elements: HashMap::from([

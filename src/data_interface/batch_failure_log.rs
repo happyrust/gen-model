@@ -282,7 +282,7 @@ pub fn record(failure: &BatchFailure<'_>) {
 fn to_record(failure: &BatchFailure<'_>, now: DateTime<Local>) -> Value {
     // 这一条是不是压垮它的那一次。翻文件的人第一个要分的就是「还会自己再试」与
     // 「从此不动了」——只给一个 streak 数字，等于要他自己去记 MAX_ATTEMPTS 是几。
-    let max_attempts = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+    let max_attempts = crate::data_interface::batch_worker::MAX_ATTEMPTS;
     let parked = failure.streak.is_some_and(|streak| streak >= max_attempts);
     json!({
         "event": "batch_failure",
@@ -547,7 +547,7 @@ mod tests {
     /// 种状态的处置完全不同——前者等下一个对账周期就行，后者不动手就永远停在那儿。
     #[test]
     fn a_record_says_whether_the_engine_will_still_retry_on_its_own() {
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let cap = crate::data_interface::batch_worker::MAX_ATTEMPTS;
 
         let mut third = failure("t", 8191, "boom");
         third.streak = Some(3);

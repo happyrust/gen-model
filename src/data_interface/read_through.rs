@@ -474,8 +474,14 @@ pub(crate) fn spool_write_through(
 ) -> anyhow::Result<ReadThroughReceipt> {
     let started = Instant::now();
     let option = aios_core::get_db_option();
-    let snapshot = super::mdb_memory_store::ensure(&option.project_name, &option.mdb_name)?;
-    let catalog = snapshot.uda_catalog();
+    let membership = super::mdb_membership::get(&option.project_name, &option.mdb_name)
+        .map(Ok).unwrap_or_else(|| super::mdb_membership::resolve(
+            option, &option.project_name, &option.mdb_name).map(Arc::new))?;
+    let schema = Arc::new(super::direct_store::DirectSchema::open_from_env()?);
+    let provider = super::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema);
+    // Dictionary epoch and the source (dbnum, sesno) below describe this job;
+    // rendering its UDA definitions does not require an MDB element snapshot.
+    let (snapshot_epoch, catalog) = provider.snapshot()?;
     let keys = UdaKeyMap::from_catalog(&catalog);
     let prerequisites = catalog
         .definitions()
@@ -492,7 +498,6 @@ pub(crate) fn spool_write_through(
         &option.project_name,
         &option.mdb_name,
     )?;
-    let snapshot_epoch = snapshot.epoch();
     spool.persist(
         snapshot_epoch,
         vec![(source.dbnum, source.sesno)],

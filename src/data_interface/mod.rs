@@ -1,12 +1,14 @@
 /// CATA 依赖闭包按需入库：每一批 DESI 写回都把它依赖的目录元素一起写进库（plan 2026-09-06 §3 D5–D7）。
 pub mod cata_dependency;
+pub mod uda_catalog_provider;
+pub mod mdb_read_store;
 pub mod db_model;
 pub mod dbnum_stats;
-/// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
-pub mod pe_batch;
 /// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
 /// rocksdb 形态下基线与增量唯一的写法出口。
 pub mod element_batch;
+/// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
+pub mod pe_batch;
 /// 数据面事务切块上限（plan 2026-09-06 §3 D3）：2 MiB / 5000 行 / 1000 元素，可配。
 pub mod tx_limits;
 // pub mod spatial_model;
@@ -41,6 +43,9 @@ pub mod window_repair;
 
 pub mod model_refresh;
 
+/// memory-routed 库的整库即时生成：冻结根快照、任务 single-flight 与 ready-roots 对账。
+pub mod model_dbnum_ensure;
+
 pub mod model_impact;
 
 pub mod sesno_range;
@@ -57,11 +62,15 @@ pub mod uda_keys;
 /// 库文件头 / 会话页读法（e3d-io 版，替代 `DbPageBasicInfo` / `PdmsIO`）。
 pub mod db_file_header;
 
+/// 按 dbnum 的文件世代账本：`(FileIdentity, latest_sesno)` 任一变化 +1，区分会话前进 / 回滚 / 换文件
+/// （母计划不变量 7；阶段 4/5 切片接线，本模块纯内存）。
+pub mod db_generation;
+
+/// 项目内全部数据库的 DAB session tag 启动聚合，以及 `/health` 的有界只读快照。
+pub mod dabacon_tag_summary;
+
 /// 冻结源：收集时冻住的文件世代与目标会话（替代 `SnapshotToken` / `DabaconSnapshot`）。
 pub mod frozen_source;
-pub(crate) mod model_completion;
-pub(crate) mod room_completion;
-pub(crate) mod room_delta;
 
 /// dbnum 任务收尾的一笔控制面事务：模型 / 房间水位 + Ref0 统计，事实全来自任务内存
 /// （ADR-071 D3 / D6）。
@@ -117,8 +126,6 @@ pub mod mirror_spool;
 /// `gen_root` 凭证的只读取数（凭证命中 / 启动下限 / 模型门 / 目录落款；原 `model_update_pending`，
 /// ADR-071 S7 搬出）。
 pub mod model_coverage;
-/// 只剩根发布信封；随文件轮次那一刀（ADR-071 S3 后半）整目录删。
-pub mod model_publish_queue;
 /// Ref0 统计快照的生产者：目标索引 `DbSet@T` 按 Ref0 数活元素（ADR-071 D6）。
 pub mod ref0_snapshot;
 /// 数据窗口的内存产物 + 同步落库口（原 `model_publish_queue/{structured_data_sink,
@@ -133,11 +140,14 @@ pub(crate) mod on_demand_db;
 
 pub mod sync_publisher;
 
-pub mod side_effect_pending;
-
 pub mod helper;
 
 pub mod cata_closure;
+
+/// dbnum → 文件的路由目录，从 SYS/CURD 成员清单造，不含逐元素表（母计划 §5.1 / 切片 W2）。
+pub mod mdb_route_directory;
+/// RefNo → dbnum 的唯一解法：位解码（母计划 2026-09-12 refno 原生路由，不变量 1）。
+pub mod refno_route;
 
 /// ADR-053 direct 模式的取数底座：按 dbnum 池化 e3d-io 引擎、钉在各库
 /// `applied_sesno` 上，直接从 db 文件取元素属性，不经 SurrealDB。
@@ -159,6 +169,8 @@ pub mod geom_error;
 pub mod embedded_surql;
 
 pub mod generation_root;
+pub(crate) mod room_read_through;
+pub(crate) mod generation_flight;
 
 /// Core3D 粒度/去重规则的可执行参考模型。**不在生产路径上**——它是给
 /// `generation_root` / `model_update_plan` 当契约的，见模块头。
@@ -177,11 +189,6 @@ pub mod rigid_motion;
 /// 正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指，把对端的生成根并进 `touched`。开关默认关。
 pub mod structural_connection;
 
-/// 房间结构触发（ADR-010 D12 / ADR-040 §4 在 direct 窗口规划器上的落点，2026-09-07 审核 F-A）：
-/// 窗口里 FRMW/SBFR 改名命中关键字、PANE / CWALL / CFLOOR 换属主 → 折成 `RoomRecalcPanel`。
-/// 全部读 S / T 两端 DbSet，不读 `pe`；没有开关。
-pub(crate) mod room_structural_trigger;
-
 /// 电缆端点 / 路由反向级联（core 规则 F `ELCXRF` / E `CLIST` 同形，联动对齐计划 C8 同库版）：窗口里的
 /// `EQUI` / `ELCONN` / `CWBRAN` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用它的电缆，
 /// 把电缆的生成根并进 `touched`。只查本库；开关默认关。
@@ -196,10 +203,14 @@ pub mod cata_cascade_window;
 /// （2026-09-06 计划 P3；共识 d-635 / d-665）。文件侧纯函数，不碰库。
 pub mod reverse_reference;
 
-/// 数据窗口的崩溃恢复记录（`increment_update_attempt`）与收口尾事务。ADR-065 D3 判
-/// `model_update_pending` 整体退役时点名**保留**的正是这两样——它们是数据面的，不是
-/// 模型欠账；S5a 把它们从那个文件里搬出来，好让 T5 退表不必连着水位一起删。
+/// 数据窗口的收口尾事务（ADR-071 D4：数据行 + `applied_sesno` 那一笔原子提交）。崩溃恢复
+/// 记录 `increment_update_attempt` 随 ADR-072 D1 退役，位置让给 [`write_state`]。
 pub mod increment_tail;
+
+/// 写入标记 `dbnum_write_state:{dbnum}` 与「回退到水位」（ADR-072 D1 / D2 / D3）：任务第一笔
+/// 写库前置 `writing{S,T}`，收尾那一笔置 `finished`；见到 `writing` 就删掉 `sesno > S` 的痕迹、
+/// 三水位退回 S、排 S→T 重跑。
+pub mod write_state;
 
 /// 模型水位（ADR-060）：探针、Task 收尾盖章、对账。ADR-065 D2 让「欠什么」只由两枚水位
 /// 回答，同一份 ADR 的 D3 又判 `model_update_pending` 退役——退的是队列表，水位是留下的
@@ -209,8 +220,6 @@ pub mod model_watermark;
 /// 启动期模型覆盖复核：凭证 ↔ 文件最新会话对齐，缺口开退化窗口（ADR-058 D4）。ADR-050
 /// 清空队列之后「这个库欠到哪」只剩 `gen_root` 凭证一个说法，这里就是读那个说法的地方。
 pub mod startup_reconcile;
-
-pub mod model_update_pending;
 
 pub mod model_concurrency;
 

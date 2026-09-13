@@ -15,9 +15,6 @@ use crate::data_interface::manual_update::{generate_unit_model, generation_root_
 use crate::data_interface::model_coverage::{
     generation_root_cache_current, generation_roots_cache_current,
 };
-use crate::data_interface::model_update_pending::{
-    ensure_regen_pending_current, settle_regen_work,
-};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +64,8 @@ impl AiosDBManager {
 
         if crate::options::data_face().is_read_through() {
             let root = crate::data_interface::generation_root::refno_to_e3d(requested_refno);
+            let _generation_guard =
+                crate::fast_model::e3d_model_service::lock_db_generation(root.dbno()).await;
             let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
             let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
             let records = store.records_of_root(scope, root);
@@ -144,14 +143,13 @@ impl AiosDBManager {
                 vec![transaction],
             )?;
 
-            store.commit(
-                scope,
-                vec![crate::fast_model::model_memory_store::ProjectionCommit {
+            crate::fast_model::model_write_behind::publish(vec![
+                crate::fast_model::model_memory_store::ProjectionCommit {
                     tube_branch_resets: tube_branches,
                     removals: record_ids.into_iter().collect(),
                     ..Default::default()
-                }],
-            );
+                },
+            ])?;
             for affected in affected_roots {
                 store.invalidate_receipt(scope, affected);
             }
@@ -244,6 +242,43 @@ impl AiosDBManager {
         root_noun: &str,
         force: bool,
     ) -> anyhow::Result<OnDemandModelResult> {
+        // Detached producers must never lose an active transaction or frozen window.
+        if super::batch_worker::active_data_window().is_some()
+            || super::staging::write_context::active_staging_writes().is_some()
+        {
+            return self.ensure_exact_generation_root_inner(requested_refno, root, root_noun, force).await;
+        }
+        static FLIGHTS: std::sync::OnceLock<super::generation_flight::Flights<OnDemandModelResult>> = std::sync::OnceLock::new();
+        let version = generation_source_identity(root).await?;
+        let memory_scope = super::model_read_route::memory_only_scope();
+        let key = format!("{}|{}|{}|{}|{}|{:?}", self.db_option.project_name,
+            self.db_option.mdb_name, root.to_pdms_str(), force, version, memory_scope);
+        let manager = self.clone();
+        let noun = root_noun.to_string();
+        let future = FLIGHTS.get_or_init(Default::default).run(key, async move {
+            let work = manager.ensure_exact_generation_root_inner(root, root, &noun, force);
+            match memory_scope {
+                Some(dbnum) => super::model_read_route::scope_memory_only(dbnum, work).await,
+                None => work.await,
+            }
+        });
+        let mut result = tokio::time::timeout(std::time::Duration::from_secs(110), future).await
+            .map_err(|_| ModelGenerationInProgress { root_refno: root.to_pdms_str() })??;
+        anyhow::ensure!(generation_source_identity(root).await? == version,
+            ModelGenerationInProgress { root_refno: root.to_pdms_str() });
+        anyhow::ensure!(memory_root_current(root).await?,
+            ModelGenerationInProgress { root_refno: root.to_pdms_str() });
+        result.requested_refno = requested_refno.to_pdms_str();
+        Ok(result)
+    }
+
+    async fn ensure_exact_generation_root_inner(
+        &self,
+        requested_refno: RefnoEnum,
+        root: RefnoEnum,
+        root_noun: &str,
+        force: bool,
+    ) -> anyhow::Result<OnDemandModelResult> {
         crate::data_interface::model_rebuild::reject_ensure_during_rebuild(root).await?;
         let root_refno = root.to_pdms_str();
         let _guard = try_generation_root(&root_refno)?;
@@ -258,9 +293,9 @@ impl AiosDBManager {
         // A durable credential survives restart, but /model/records serves the
         // process projection: a root only counts as cached once the projection holds it.
         let cache_current = if memory_only || crate::options::data_face().is_read_through() {
-            memory_root_current(root)
+            memory_root_current(root).await?
         } else {
-            generation_root_cache_current(&root_refno).await? && memory_root_current(root)
+            generation_root_cache_current(&root_refno).await? && memory_root_current(root).await?
         };
         if !force && cache_current {
             // 计数只问进程内投影（S4 之后 legacy「读 inst_relate 表数实例」那条路退役）。
@@ -282,25 +317,10 @@ impl AiosDBManager {
             crate::data_interface::initialization_phase::require_model_generation()?;
         }
 
-        // 先落 durable pending 再生成（spec §4.5 / 2026-07-30 审计 C1）。曾经这里只
-        // 读现有行的 revision：表里本来没有这个根时收口是 no-op，进程在生成中途崩溃，
-        // 这次工作就没有任何持久痕迹，没有 drain 会捡它，只能靠人再点一次。落行失败
-        // 直接返回错误、不跑生成——durable 语义必须先于工作本身成立。
-        let pending_revision = if memory_only || crate::options::data_face().is_read_through() {
-            None
-        } else {
-            Some(ensure_regen_pending_current(&root_refno, root_noun).await?)
-        };
-        let outcome = generate_unit_model(self, &root_refno).await;
-        let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-        if !memory_only
-            && !crate::options::data_face().is_read_through()
-            && let Err(error) =
-                settle_regen_work(&root_refno, pending_revision, generation_error.as_deref()).await
-        {
-            log::error!("收口模型 pending 失败 root={root_refno}: {error:#}");
-        }
-        outcome?;
+        // 不再先落 durable pending 行再生成（ADR-072 D5）：`/model/ensure` 是任务之外按根串行的
+        // 第二个写者（ADR-071 D5），生成完就地合块落库、盖根凭证；进程在生成中途崩溃，这一根
+        // 的凭证没盖，下一次点它（或该库任务的规划器按凭证缺口）照常重生成——没有第二本账要收。
+        generate_unit_model(self, &root_refno).await?;
 
         let counts = memory_counts(&[root]);
         let status = post_generation_status(counts);
@@ -381,12 +401,18 @@ impl AiosDBManager {
         let current_roots = if force {
             std::collections::HashSet::new()
         } else if memory_only || crate::options::data_face().is_read_through() {
-            root_refnos
-                .iter()
-                .copied()
-                .filter(|root| memory_root_current(*root))
-                .map(|root| root.to_pdms_str())
-                .collect()
+            // 整批只借一次阻塞线程：一个作用域有几百个根，逐根 `spawn_blocking` 就是
+            // 几百次调度往返，而每根要做的只是几次 stat。
+            let pinned = pinned_data_window();
+            let candidates = root_refnos.clone();
+            tokio::task::spawn_blocking(move || {
+                candidates
+                    .into_iter()
+                    .filter(|root| memory_root_current_on_thread(*root, pinned))
+                    .map(|root| root.to_pdms_str())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .await?
         } else {
             generation_roots_cache_current(
                 &roots
@@ -406,7 +432,9 @@ impl AiosDBManager {
             // only misses need the generation path and its per-root counts.
             // A durable credential survives restart, but /model/records serves the
             // process projection. Rebuild a missing resident root before calling it cached.
-            if current_roots.contains(&root.root.to_pdms_str()) && memory_root_current(root.root) {
+            if current_roots.contains(&root.root.to_pdms_str())
+                && memory_root_current(root.root).await?
+            {
                 cached_root_count += 1;
                 continue;
             }
@@ -534,7 +562,21 @@ fn describe(
     }
 }
 
-fn memory_root_current(root: RefnoEnum) -> bool {
+/// Frozen-window and staging scopes are task-locals: they must be read on the calling
+/// task, because they do not follow a closure onto a blocking thread.
+fn pinned_data_window() -> bool {
+    super::batch_worker::active_data_window().is_some()
+        || super::staging::write_context::active_staging_writes().is_some()
+}
+
+/// 核对源文件身份要做文件 stat，不能占着 runtime 线程；判「窗口已钉」的那两个
+/// task-local 由调用方在自己的任务上读好再传进来。
+async fn memory_root_current(root: RefnoEnum) -> anyhow::Result<bool> {
+    let pinned = pinned_data_window();
+    Ok(tokio::task::spawn_blocking(move || memory_root_current_on_thread(root, pinned)).await?)
+}
+
+fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool) -> bool {
     crate::fast_model::e3d_model_service::parse_refno(&root.to_pdms_str())
         .ok()
         .and_then(|root| {
@@ -543,7 +585,23 @@ fn memory_root_current(root: RefnoEnum) -> bool {
                 root,
             )
         })
-        .is_some()
+        .is_some_and(|receipt| {
+            // Frozen/task-local callers retain their pinned-window cache semantics.
+            if pinned_window {
+                return true;
+            }
+            receipt.model_target.as_ref().is_some_and(|target|
+                super::room_read_through::target_current(target).unwrap_or(false))
+        })
+}
+
+async fn generation_source_identity(root: RefnoEnum) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let native = super::generation_root::refno_to_e3d(root);
+        let version = super::model_source::root_source_version(native)?;
+        let source = super::frozen_source::FrozenSource::capture(version.file)?;
+        source.commit_token_json()
+    }).await?
 }
 
 fn memory_counts(roots: &[RefnoEnum]) -> InstanceCounts {
@@ -706,36 +764,6 @@ mod tests {
         );
     }
 
-    /// durable pending 必须先于生成成立（spec §4.5 / 2026-07-30 审计 C1）。
-    ///
-    /// 只读现有行（`current_regen_revision`）的话，表里本来没有这个根时收口是
-    /// no-op：进程在生成中途崩溃，这次工作没有任何持久痕迹，没有 drain 会捡它。
-    #[test]
-    fn a_durable_pending_row_is_written_before_generation_runs() {
-        let source = include_str!("on_demand_model.rs");
-        let body = source
-            .split_once("pub async fn ensure_model_generated(")
-            .expect("ensure entrypoint must exist")
-            .1
-            .split_once("#[derive(Debug, Clone, PartialEq, Eq)]")
-            .expect("ensure implementation must end before its error type")
-            .0;
-        let pending_at = body
-            .find("ensure_regen_pending")
-            .expect("ensure 必须先写 durable pending 行");
-        let generate_at = body
-            .find("generate_unit_model")
-            .expect("ensure 必须执行生成");
-        assert!(
-            pending_at < generate_at,
-            "pending 行必须写在生成之前，崩溃才有 drain 能捡的痕迹"
-        );
-        assert!(
-            !body.contains("current_regen_revision"),
-            "ensure 不得再走只读旧行的路——那条路对『表里没有行』的情形收口是 no-op"
-        );
-    }
-
     /// A subtree that generated rows but nothing drawable must settle instead of
     /// asking for another generation run: that is the case the viewer hits on
     /// every single show of an EQUI whose only child is an ELCONN.
@@ -868,8 +896,10 @@ mod tests {
         }
     }
 
+    /// 初始化门排在「复用已有模型」之后、生成之前；生成前不再落 durable pending 行
+    /// （ADR-072 D5），生成完也没有 pending 行要收口。
     #[test]
-    fn initialization_gate_precedes_pending_creation_but_follows_existing_model_reuse() {
+    fn initialization_gate_precedes_generation_but_follows_existing_model_reuse() {
         let source = include_str!("on_demand_model.rs");
         let body = source
             .split_once("pub async fn ensure_model_generated(")
@@ -880,8 +910,11 @@ mod tests {
             .0;
         let reuse = body.find("generation_root_cache_current").unwrap();
         let gate = body.find("require_model_generation()").unwrap();
-        let pending = body.find("ensure_regen_pending_current(").unwrap();
-        assert!(reuse < gate && gate < pending);
+        let generate = body.find("generate_unit_model(self, &root_refno)").unwrap();
+        assert!(reuse < gate && gate < generate);
+        for retired in ["ensure_regen_pending_current", "settle_regen_work"] {
+            assert!(!body.contains(retired), "pending 行不得回来 `{retired}`");
+        }
     }
 
     #[test]

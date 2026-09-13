@@ -10,12 +10,14 @@ param(
     [string]$Output,
     # 隔离环境（test-increment）按自己的 BuildProfile 解析 l3_suite 后传进来。
     # 不给时保持原来的「兄弟 target\debug 优先、回落 D:\Rust\target\debug」。
-    [string]$L3Exe
+    [string]$L3Exe,
+    # 允许复用隔离环境已经安装 aios_db 的 Python；默认仍用本仓 python\.venv。
+    [string]$PythonExe
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$python = Join-Path $repo 'python\.venv\Scripts\python.exe'
+$python = if ($PythonExe) { $PythonExe } else { Join-Path $repo 'python\.venv\Scripts\python.exe' }
 $l3 = $L3Exe
 if (-not $l3) {
     $l3 = Join-Path (Split-Path $repo -Parent) 'target\debug\l3_suite.exe'
