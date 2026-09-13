@@ -127,6 +127,7 @@ struct TraceArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+    aios_database::process_diagnostics::install_panic_hook();
     use clap::Parser;
 
     let cli = Cli::parse();

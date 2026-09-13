@@ -966,6 +966,7 @@ impl E3dModelService {
         roots: &[String],
         failure_policy: GeometryFailurePolicy,
     ) -> anyhow::Result<E3dPersistReport> {
+        crate::native_runtime::ensure_geometry_runtime()?;
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
         let produce = async move {
             let outcome = self

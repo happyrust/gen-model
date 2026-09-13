@@ -183,6 +183,8 @@ impl ModelRefreshPolicy {
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
         // ADR-071 D1：没有初始化 run、不等 ACK、不等别的写者——同一 dbnum 只有本任务一个写者，
         // 生成完就地把行写进库。冻结源在手（任务窗口内）就钉它那一版文件，否则取文件最新。
+        let mut diagnostic = crate::process_diagnostics::Operation::begin("model.source.begin",
+            format!("dbnum={dbnum} roots={roots:?} frozen={}", explicit_source.is_some()));
         let service = match explicit_source {
             Some(source) => {
                 anyhow::ensure!(
@@ -204,9 +206,14 @@ impl ModelRefreshPolicy {
                 None => E3dModelService::from_current().await?,
             },
         };
+        diagnostic.stage("model.geometry.begin", format!("dbnum={dbnum} roots={roots:?}"));
         let persisted = service
             .generate_and_persist_roots(dbnum, roots, failure_policy)
-            .await?;
+            .await.map_err(|error| {
+                diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
+                error
+            })?;
+        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}", persisted.failed, persisted.failed_roots));
         let generation_failures = persisted
             .failed_roots
             .iter()
@@ -399,6 +406,7 @@ impl ModelRefreshPolicy {
                     .map(|(_, refno)| *refno)
                     .collect::<Vec<_>>();
                 let started = std::time::Instant::now();
+                diagnostic.stage("model.publish.begin", format!("dbnum={dbnum} roots={refnos:?}"));
                 let batched = match &rooms {
                     Ok(rooms) => {
                         crate::fast_model::model_db_adapter::persist_roots_batched(
@@ -420,6 +428,7 @@ impl ModelRefreshPolicy {
                         }
                     }
                 };
+                diagnostic.stage("model.publish.done", format!("dbnum={dbnum} failed={:?} elapsed_ms={}", batched.failed, started.elapsed().as_millis()));
                 if let Some(rows) = batched.rows.as_ref() {
                     room_edges_written = batched.room_edges;
                     rows_upserted = rows.upserted;
@@ -462,8 +471,11 @@ impl ModelRefreshPolicy {
             report.rows_upserted = rows_upserted;
             report.commits = commits;
             report.max_transaction_bytes = max_transaction_bytes;
+            diagnostic.finish(format!("dbnum={dbnum} completed={:?} failures={:?} rows={} commits={} room_edges={}",
+                report.completed, report.failures, report.rows_upserted, report.commits, report.room_edges_written));
             Ok(report)
         } else {
+            diagnostic.finish(format!("dbnum={dbnum} geometry_failed={} roots={roots:?}", persisted.failed));
             Ok(TargetedGenerationReport {
                 completed: Vec::new(),
                 failures: roots

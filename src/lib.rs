@@ -11,6 +11,9 @@
 #![recursion_limit = "256"]
 
 use crate::data_interface::tidb_manager::AiosDBManager;
+pub mod process_diagnostics;
+pub mod native_runtime;
+mod increment_diagnostics;
 use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 use crate::fast_model::spatial_state::SpatialTreeState;
 use crate::versioned_db::database::*;
@@ -1888,6 +1891,15 @@ async fn targeted_model_refresh(
         change.to.generation,
         change.path.display()
     );
+    let mut diagnostic = crate::process_diagnostics::Operation::begin("increment.detected",
+        format!("dbnum={} kind={:?} from={:?} to={:?} path={}", change.dbnum, change.kind, change.from, change.to, change.path.display()));
+    let delta_change = change.clone();
+    let operation = diagnostic.id();
+    match tokio::task::spawn_blocking(move || crate::increment_diagnostics::report(&delta_change, operation)).await {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => diagnostic.stage("increment.delta.failed", format!("{error:#}；明细未知，不当成零变化；继续失效/模型处理")),
+        Err(error) => diagnostic.stage("increment.delta.failed", format!("任务异常: {error}；继续失效/模型处理")),
+    }
     let mut refresh = TargetedRefresh {
         dbnum: change.dbnum,
         db_type: change.db_type.clone(),
@@ -1904,16 +1916,19 @@ async fn targeted_model_refresh(
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or_default(),
     };
+    diagnostic.stage("increment.invalidate.begin", "refresh source view and cached handles");
     let option = aios_core::get_db_option();
     if let Err(error) = crate::data_interface::mdb_read_store::invalidate_cached(
         &option.project_name, &option.mdb_name, change.dbnum,
     ) {
         refresh.outcome = format!("read_view_refresh_failed: {error:#}");
+        diagnostic.finish(&refresh.outcome);
         record_targeted_refresh(refresh);
         return;
     }
     if !crate::data_interface::model_source::is_element_db(&change.db_type) {
         refresh.outcome = "catalogue_change_recorded_only".to_string();
+        diagnostic.finish(&refresh.outcome);
         record_targeted_refresh(refresh);
         return;
     }
@@ -1936,6 +1951,7 @@ async fn targeted_model_refresh(
         refresh.roots_seen
     );
     if roots.is_empty() {
+        diagnostic.finish(&refresh.outcome);
         record_targeted_refresh(refresh);
         return;
     }
@@ -1946,6 +1962,7 @@ async fn targeted_model_refresh(
         .map(|root| refno_from_e3d(*root).refno())
         .collect();
     let path = change.path.clone();
+    diagnostic.stage("increment.presence.begin", format!("roots={} invalidated={}", refresh.roots_seen, refresh.receipts_invalidated));
     let presence = match tokio::task::spawn_blocking(move || {
         crate::data_interface::db_file_header::snapshot_presence(&path, &requested)
     })
@@ -1958,7 +1975,8 @@ async fn targeted_model_refresh(
                 change.dbnum
             );
             refresh.outcome = format!("presence_check_failed: {error:#}");
-            record_targeted_refresh(refresh);
+            diagnostic.finish(&refresh.outcome);
+        record_targeted_refresh(refresh);
             return;
         }
         Err(error) => {
@@ -1967,7 +1985,8 @@ async fn targeted_model_refresh(
                 change.dbnum
             );
             refresh.outcome = format!("presence_check_task_failed: {error}");
-            record_targeted_refresh(refresh);
+            diagnostic.finish(&refresh.outcome);
+        record_targeted_refresh(refresh);
             return;
         }
     };
@@ -1975,12 +1994,15 @@ async fn targeted_model_refresh(
         .into_iter()
         .partition(|root| presence.contains(&refno_from_e3d(*root).refno()));
 
+    diagnostic.stage("increment.presence.done", format!("live={} retired={}", live.len(), retired.len()));
     for root in retired {
         let requested = refno_from_e3d(root);
+        diagnostic.stage("increment.delete.begin", format!("refno={requested}"));
         match manager.delete_model_subtree(requested).await {
             Ok(()) => {
                 model_store.forget_retired_root(ProjectionScope::Current, root);
                 refresh.roots_retired += 1;
+                diagnostic.stage("increment.delete.done", format!("refno={requested}"));
                 log::info!(
                     "[route-poll] dbnum={} retired deleted model root {requested} from the current projection",
                     change.dbnum
@@ -1992,6 +2014,7 @@ async fn targeted_model_refresh(
                     change.dbnum
                 );
                 refresh.outcome = format!("retire_failed: {error:#}");
+                diagnostic.stage("increment.delete.failed", format!("refno={requested} error={error:#}"));
             }
         }
     }
@@ -2000,6 +2023,7 @@ async fn targeted_model_refresh(
             .iter()
             .map(|root| format!("{}/{}", root.word0, root.word1))
             .collect::<Vec<_>>();
+        diagnostic.stage("increment.generate.begin", format!("roots={root_names:?}"));
         match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
             manager,
             &root_names,
@@ -2033,7 +2057,8 @@ async fn targeted_model_refresh(
             }
         }
     }
-    record_targeted_refresh(refresh);
+    diagnostic.finish(&refresh.outcome);
+        record_targeted_refresh(refresh);
 }
 
 /// File/memory-first service path.  No database operation is allowed before
@@ -2129,8 +2154,12 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     let refresh_directory = directory.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        crate::process_diagnostics::event(0, "increment.watch", "每 2 秒检测库文件/session；无变化每 30 秒输出心跳；变化立即处理");
+        let mut round = 0u64;
         loop {
             interval.tick().await;
+            round = round.wrapping_add(1);
+            let poll_started = Instant::now();
             let polled = {
                 let directory = refresh_directory.clone();
                 tokio::task::spawn_blocking(move || directory.poll_generations()).await
@@ -2138,10 +2167,16 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             let changes = match polled {
                 Ok(changes) => changes,
                 Err(error) => {
+                    crate::process_diagnostics::event(0, "increment.poll.failed", &format!("round={round} error={error}；下一轮重试"));
                     log::error!("[route-poll] 轮询任务异常结束，下一拍重试：{error}");
                     continue;
                 }
             };
+            if round % 15 == 1 || !changes.is_empty() {
+                crate::process_diagnostics::event(0, "increment.poll", &format!(
+                    "round={round} changed_dbnums={:?} elapsed_ms={}；仅检查文件/session，不遍历元素",
+                    changes.iter().map(|change| change.dbnum).collect::<Vec<_>>(), poll_started.elapsed().as_millis()));
+            }
             for change in changes {
                 targeted_model_refresh(&refresh_manager, &change).await;
             }
