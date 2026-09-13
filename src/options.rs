@@ -173,6 +173,16 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub store_mode: Option<String>,
 
+    /// Durable model projection read policy: `memory-first` (default) or
+    /// `database-first`. This is intentionally independent from [`StoreMode`].
+    #[serde(default)]
+    pub model_cache_mode: Option<String>,
+
+    /// Maximum resident bytes used by the process-local model projection cache.
+    /// The default is 2 GiB. It is only enforced for durable store modes.
+    #[serde(default)]
+    pub model_cache_max_bytes: Option<u64>,
+
     /// 旧数据面配置，保留用于冲突提示；实际备份范围由 `store_mode` 决定。
     #[serde(default)]
     pub data_face: Option<String>,
@@ -283,6 +293,8 @@ impl From<DbOption> for DbOptionExt {
             data_tx_elements: None,
             in_memory_db: None,
             store_mode: None,
+            model_cache_mode: None,
+            model_cache_max_bytes: None,
             data_face: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
@@ -369,6 +381,10 @@ struct DbOptionExtFields {
     in_memory_db: Option<bool>,
     #[serde(default)]
     store_mode: Option<String>,
+    #[serde(default)]
+    model_cache_mode: Option<String>,
+    #[serde(default)]
+    model_cache_max_bytes: Option<u64>,
     #[serde(default)]
     data_face: Option<String>,
     #[serde(default)]
@@ -573,6 +589,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         data_tx_elements: ext.data_tx_elements,
         in_memory_db: ext.in_memory_db,
         store_mode: ext.store_mode.clone(),
+        model_cache_mode: ext.model_cache_mode.clone(),
+        model_cache_max_bytes: ext.model_cache_max_bytes,
         data_face: ext.data_face.clone(),
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
@@ -701,6 +719,55 @@ fn effective_in_memory_db(configured: Option<bool>, env_override: Option<&str>) 
 
 /// 环境变量名：一次性覆盖 [`store_mode`]，不必改配置文件。
 pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
+
+/// Environment override for [`model_cache_mode`].
+pub const MODEL_CACHE_MODE_ENV: &str = "AIOS_MODEL_CACHE_MODE";
+
+/// Environment override for [`model_cache_max_bytes`].
+pub const MODEL_CACHE_MAX_BYTES_ENV: &str = "AIOS_MODEL_CACHE_MAX_BYTES";
+
+/// Read policy for the process-local model projection cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelCacheMode {
+    /// Serve a resident root first and load only cache misses from RocksDB.
+    MemoryFirst,
+    /// Refresh a requested root from RocksDB before serving it.
+    DatabaseFirst,
+}
+
+impl ModelCacheMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryFirst => "memory-first",
+            Self::DatabaseFirst => "database-first",
+        }
+    }
+}
+
+fn parse_model_cache_mode(raw: Option<&str>) -> Option<ModelCacheMode> {
+    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "memory-first" => Some(ModelCacheMode::MemoryFirst),
+        "database-first" => Some(ModelCacheMode::DatabaseFirst),
+        _ => None,
+    }
+}
+
+pub fn model_cache_mode() -> ModelCacheMode {
+    parse_model_cache_mode(std::env::var(MODEL_CACHE_MODE_ENV).ok().as_deref())
+        .or_else(|| parse_model_cache_mode(load_ext_fields().model_cache_mode.as_deref()))
+        .unwrap_or(ModelCacheMode::MemoryFirst)
+}
+
+pub fn model_cache_max_bytes() -> usize {
+    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
+    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .or(load_ext_fields().model_cache_max_bytes)
+        .unwrap_or(DEFAULT)
+        .clamp(1, usize::MAX as u64) as usize
+}
 
 /// 持久层的介质，外加「谁负责把它拉起来」。
 ///
@@ -2210,6 +2277,21 @@ mod tests {
             StoreMode::External,
             "外置库仍然可显式选择"
         );
+    }
+
+    #[test]
+    fn model_cache_policy_defaults_to_memory_first_and_accepts_env_spelling() {
+        assert_eq!(parse_model_cache_mode(None), None);
+        assert_eq!(
+            parse_model_cache_mode(Some(" memory_first ")),
+            Some(ModelCacheMode::MemoryFirst)
+        );
+        assert_eq!(
+            parse_model_cache_mode(Some("DATABASE-FIRST")),
+            Some(ModelCacheMode::DatabaseFirst)
+        );
+        assert_eq!(parse_model_cache_mode(Some("write-behind")), None);
+        assert_eq!(ModelCacheMode::MemoryFirst.as_str(), "memory-first");
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。

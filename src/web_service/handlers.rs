@@ -198,6 +198,17 @@ fn health_status(
     }
 }
 
+fn model_cache_health(store_reachable: bool) -> Value {
+    let mut health = json!(
+        crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats()
+    );
+    health["store_reachable"] = json!(store_reachable);
+    health["degraded_read_only"] = json!(
+        crate::options::store_mode().is_durable() && !store_reachable
+    );
+    health
+}
+
 /// 运维面板的内嵌副本。
 ///
 /// 内嵌是为了部署：一个 exe 拷到现场就有面板，不必再同步一个目录，也不会出现
@@ -777,6 +788,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "model_incremental_types": model_incremental_types,
             "model_incremental_types_origin": model_incremental_types_origin,
             "in_memory_db": !crate::options::store_mode().is_durable(),
+            "model_cache": model_cache_health(false),
         }));
     }
     // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
@@ -892,6 +904,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 与 model_sesno 照常推进，只跳过房间边重算；重新打开不自动补历史欠账。这个字段让
         // 客户端知道「模型一致」是否包含房间归属。
         "room_membership": crate::options::room_membership(),
+        "model_cache": model_cache_health(true),
         // 本项目此刻生效的最小交付单元名词表。客户端要按元素归并生成根时只能靠它
         // ——`delivery_unit_types` 能整体替换默认值、`append_delivery_unit_types`
         // 能扩充，硬编码那四个默认名词在改过配置的项目上会静默算错。进程内

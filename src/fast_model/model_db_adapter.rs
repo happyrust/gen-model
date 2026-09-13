@@ -73,7 +73,8 @@
 //!   （`file_round`）分两条路：窗口内寄进 `spatial_reconcile` 意图行等 publish 阶段重放，
 //!   窗口外按已提交指针回读——publish 阶段退役，两条路收成一条。
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aios_core::RefnoEnum;
 use anyhow::Context;
@@ -1250,6 +1251,147 @@ impl std::error::Error for ProjectionRestoreConflict {}
 
 /// 读库镜像撞上并发提交时原地重读几次。再撞就不占着收口这一轮了。
 const RESTORE_ATTEMPTS: usize = 3;
+
+static ROOT_LOAD_LOCKS: OnceLock<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+fn root_load_lock(root: RefNo) -> Arc<tokio::sync::Mutex<()>> {
+    ROOT_LOAD_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(packed_refno(root))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Ensure a single durable generation root is resident. Durable modes never
+/// hydrate a whole dbnum: a memory-first hit returns immediately and a miss is
+/// loaded through the `anc` indexes. Database-first refreshes the requested root.
+pub async fn ensure_root_cached(root: RefNo) -> anyhow::Result<bool> {
+    if !crate::options::store_mode().is_durable() {
+        return Ok(ModelMemoryStore::global()
+            .receipt(ProjectionScope::Current, root)
+            .is_some());
+    }
+    ensure_root_cached_on(&aios_core::SUL_DB, ModelMemoryStore::global(), root).await
+}
+
+pub async fn ensure_root_cached_on(
+    db: &Surreal<Any>,
+    store: &ModelMemoryStore,
+    root: RefNo,
+) -> anyhow::Result<bool> {
+    let memory_first = matches!(
+        crate::options::model_cache_mode(),
+        crate::options::ModelCacheMode::MemoryFirst
+    );
+    if memory_first && store.receipt(ProjectionScope::Current, root).is_some() {
+        store.note_cache_lookup(true);
+        return Ok(true);
+    }
+    store.note_cache_lookup(false);
+    let lock = root_load_lock(root);
+    let _guard = lock.lock().await;
+    if memory_first && store.receipt(ProjectionScope::Current, root).is_some() {
+        store.note_cache_lookup(true);
+        return Ok(true);
+    }
+
+    for _ in 0..RESTORE_ATTEMPTS {
+        let epoch = store.commit_epoch(root.dbno());
+        store.note_cache_load_started();
+        let loaded = read_published_root_on(db, root).await;
+        store.note_cache_load_finished(loaded.is_ok());
+        let Some((records, receipt)) = loaded? else {
+            if !memory_first {
+                store.drop_cached_root(root);
+            }
+            return Ok(false);
+        };
+        if store.restore_root(root, records, receipt, epoch) {
+            return Ok(true);
+        }
+    }
+    Err(ProjectionRestoreConflict {
+        dbnum: root.dbno(),
+        attempts: RESTORE_ATTEMPTS,
+    }
+    .into())
+}
+
+/// Load exactly one complete committed root. Both geometry predicates are backed
+/// by `idx_*_anc`; `gen_root` is a point lookup. An incomplete durable root fails
+/// closed instead of becoming a cache entry.
+async fn read_published_root_on(
+    db: &Surreal<Any>,
+    root: RefNo,
+) -> anyhow::Result<Option<(Vec<ProjectedGeometry>, RootReceipt)>> {
+    #[derive(serde::Deserialize)]
+    struct ReceiptRow {
+        source_end_sesno: u32,
+        published_model_target: Option<ModelTarget>,
+        published_manifest_hash: String,
+        published_geometry_count: usize,
+    }
+    let root_id = format!("{}_{}", root.word0, root.word1);
+    let mut response = db
+        .query(
+            "SELECT source_end_sesno,published_model_target,published_manifest_hash,\
+             published_geometry_count FROM type::thing('gen_root', $root_id) \
+             WHERE publication_status = 'ready';",
+        )
+        .bind(("root_id", root_id))
+        .await?
+        .check()?;
+    let Some(row) = response.take::<Option<ReceiptRow>>(0)? else {
+        return Ok(None);
+    };
+    let receipt = RootReceipt {
+        source_sesno: row.source_end_sesno,
+        model_target: row.published_model_target,
+        manifest_hash: row.published_manifest_hash,
+        geometry_count: row.published_geometry_count,
+        published_via: crate::fast_model::model_memory_store::default_published_via(),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct GeometryRow {
+        memory_projection: ProjectedGeometry,
+    }
+    let packed = packed_refno(root);
+    let mut records = Vec::new();
+    for table in ["inst_relate", "tubi_relate"] {
+        let sql = root_projection_sql(table, root);
+        let rows: Vec<GeometryRow> = db.query(sql).await?.check()?.take(0)?;
+        records.extend(rows.into_iter().map(|row| row.memory_projection));
+    }
+    anyhow::ensure!(
+        records.len() == receipt.geometry_count,
+        "durable root {root} is incomplete: receipt expects {}, indexed rows returned {}",
+        receipt.geometry_count,
+        records.len()
+    );
+    anyhow::ensure!(
+        records.iter().all(|record| {
+            record.dbnum == root.dbno()
+                && record.source_sesno == receipt.source_sesno
+                && record.ancestors.contains(&packed)
+        }),
+        "durable root {root} contains rows outside its receipt scope"
+    );
+    Ok(Some((records, receipt)))
+}
+
+fn root_projection_sql(table: &str, root: RefNo) -> String {
+    debug_assert!(matches!(table, "inst_relate" | "tubi_relate"));
+    format!(
+        "SELECT memory_projection FROM {table} WHERE anc CONTAINS {} \
+         AND dbnum = {} AND memory_projection != NONE;",
+        packed_refno(root),
+        root.dbno()
+    )
+}
 
 /// 用库里已提交的行整体换掉某个库的进程内投影。
 ///
@@ -2781,6 +2923,107 @@ mod tests {
             records.len(),
             "failed recovery must preserve the previous image"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_projection_cache_loads_only_the_requested_root() {
+        let db = surreal_mem().await;
+        let requested_root = RefNo::new(7997, 73948);
+        let other_root = RefNo::new(7997, 70000);
+        let mut requested = baked_record();
+        requested.ancestors = vec![packed_refno(requested_root)];
+        let mut unrelated = other_canonical_record();
+        unrelated.ancestors = vec![packed_refno(other_root)];
+        db.query(render_records(&[requested.clone(), unrelated], WriteMode::Initial).unwrap())
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.query("CREATE gen_root:7997_73948 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='requested', published_geometry_count=1; CREATE gen_root:7997_70000 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='other', published_geometry_count=1;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let probe: Vec<Value> = db
+            .query(format!(
+                "SELECT anc,dbnum,memory_projection != NONE AS structured FROM inst_relate WHERE anc CONTAINS {};",
+                packed_refno(requested_root)
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(probe.len(), 1, "root lookup fixture: {probe:?}");
+
+        let store = ModelMemoryStore::with_cache_limit(1024 * 1024);
+        assert!(
+            ensure_root_cached_on(&db, &store, requested_root)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.records(ProjectionScope::Current),
+            vec![requested],
+            "an indexed root miss must not hydrate its dbnum sibling"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, other_root)
+                .is_none()
+        );
+        let stats = store.cache_stats();
+        assert_eq!((stats.misses, stats.loads), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_missing_durable_root_is_not_negative_cached() {
+        let db = surreal_mem().await;
+        let store = ModelMemoryStore::with_cache_limit(1024);
+        let root = RefNo::new(7997, 999);
+        assert!(!ensure_root_cached_on(&db, &store, root).await.unwrap());
+        assert!(!ensure_root_cached_on(&db, &store, root).await.unwrap());
+        let stats = store.cache_stats();
+        assert_eq!((stats.misses, stats.loads), (2, 2));
+        assert_eq!(stats.resident_roots, 0);
+    }
+
+    #[tokio::test]
+    async fn root_cache_queries_are_planned_through_ancestor_indexes() {
+        let db = surreal_mem().await;
+        db.query(
+            "DEFINE INDEX idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\
+             DEFINE INDEX idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let root = RefNo::new(7997, 1);
+        for (table, index) in [
+            ("inst_relate", "idx_inst_relate_anc"),
+            ("tubi_relate", "idx_tubi_relate_anc"),
+        ] {
+            let explain = format!(
+                "{} EXPLAIN FULL;",
+                root_projection_sql(table, root).trim_end_matches(';')
+            );
+            let plan: Vec<Value> = db
+                .query(explain)
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take(0)
+                .unwrap();
+            let text = serde_json::to_string(&plan).unwrap();
+            assert!(
+                text.contains(index),
+                "root cache query must use {index}, plan: {text}"
+            );
+        }
     }
 
     #[tokio::test]

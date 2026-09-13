@@ -1034,6 +1034,14 @@ impl E3dModelService {
                     continue;
                 }
             };
+            if let Err(error) = crate::fast_model::model_db_adapter::ensure_root_cached(root).await
+            {
+                report.fallbacks.push((
+                    root_refno.clone(),
+                    format!("durable projection cache load failed: {error:#}"),
+                ));
+                continue;
+            }
             // 前置：投影完整（记录数与回执相符、mesh 文件都在）且有旧回执可前移。
             if !store.root_projection_complete(ProjectionScope::Current, root, mesh_dir) {
                 report
@@ -1262,6 +1270,11 @@ impl E3dModelService {
         mut memory_snapshots: Option<&mut Vec<(RefNo, BakedSnapshot)>>,
     ) -> anyhow::Result<E3dPersistReport> {
         let store = ModelMemoryStore::global();
+        for &root in roots {
+            crate::fast_model::model_db_adapter::ensure_root_cached(root)
+                .await
+                .with_context(|| format!("load durable projection root {root}"))?;
+        }
         let mut total = E3dPersistReport {
             source_sesno: Some(source_sesno),
             ..E3dPersistReport::default()

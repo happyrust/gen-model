@@ -620,47 +620,6 @@ pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
     }
 }
 
-/// 启动水化（ADR-071 D7）：把每个已落过模型的库（`model_sesno > 0`）的模型投影从库整体反序列化进
-/// 进程内 `ModelMemoryStore`。这是「库 = 内存结果的序列化」的正当读法，取代了此前只对「有发布
-/// run 清单的库」做的 `recover_before_cleanup`。失败只出声不拦启动：投影缺席时按需生成会自己补
-/// （`/model/ensure` 对内存里没有的根按凭证重建），不会读到错的东西。
-///
-/// `states` 是同一水化段里刚读回的水位镜像（`list_registered`）——排在 ADR-060 D10 的兼容播种
-/// **之后**，接管的历史库才会带着 `model_sesno > 0` 进来。
-async fn hydrate_model_projections(states: &[crate::data_interface::dbnum_state::DbnumState]) {
-    if !crate::options::store_mode().is_durable() {
-        return;
-    }
-    let started = Instant::now();
-    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-    let (mut hydrated, mut failed) = (0usize, 0usize);
-    for state in states
-        .iter()
-        .filter(|state| state.model_sesno > 0 && state.db_type.eq_ignore_ascii_case("DESI"))
-    {
-        match crate::fast_model::model_db_adapter::restore_projection_on(
-            &aios_core::SUL_DB,
-            store,
-            state.dbnum,
-        )
-        .await
-        {
-            Ok(()) => hydrated += 1,
-            Err(error) => {
-                failed += 1;
-                eprintln!(
-                    "模型投影启动水化 dbnum={} 失败（按需生成会自行重建）：{error:#}",
-                    state.dbnum
-                );
-            }
-        }
-    }
-    println!(
-        "模型投影启动水化完成：{hydrated} 个库已读回进程内投影，{failed} 个失败，耗时 {}",
-        fmt_elapsed(started.elapsed())
-    );
-}
-
 /// 一次性迁移（ADR-071 S6 / ADR-072 D5）：没有写者的表存量库里若还留着就丢掉。
 /// `REMOVE TABLE IF EXISTS` 幂等，每次启动跑一遍也只是空转；失败只出声不拦启动——这些表不参与
 /// 任何读路。ADR-072 W4：退役表名在 `src/` 里**只许**出现在这份清单里。
@@ -931,13 +890,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             fmt_elapsed(step_started.elapsed())
         );
     }
-    // ---- 统一水化段（ADR-071 D7 / S6）：库 → 进程内，一次，排在全部播种之后、任何 worker /
-    // watcher 之前。① 三水位镜像：`hydrate_watermark_mirror` 一次读全（水位行 + info 表旧水位）
-    // 并单次替换发布，读者看不到半张快照——运行期的 `list_registered` 不再碰镜像，整表替换只在
-    // 这个没有写者的时刻做；② 模型投影 + `gen_root` 根凭证回执：每个已落过模型的库整体读回
-    // `ModelMemoryStore`（`restore_projection_on` 一并带回每根的 `RootReceipt`）；③ 一次性迁移：
-    // 删掉已退役的发布 run 表。`gen_root` 凭证的整库口径（安定下限 / 未安定根）不另建镜像——
-    // 启动核对与规划器按需读库里刚落的那一份（d-227 的镜像口径只覆盖水位行）。
+    // ---- 统一水化段：启动只水化小型控制面。模型投影不再按 dbnum 整库读回；持久模式
+    // 在真实 root 请求处通过 `ensure_root_cached` 走索引 cache-aside，避免启动扫描和无界常驻。
     let step_started = Instant::now();
     crate::data_interface::dbnum_state::DbnumState::enable_watermark_mirror();
     let hydrated_states =
@@ -947,7 +901,6 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         hydrated_states.len(),
         fmt_elapsed(step_started.elapsed())
     );
-    hydrate_model_projections(&hydrated_states).await;
     retire_publish_run_tables().await;
     // 存量行平表副本清扫（P4 写时物化；幂等——pre-P4 库首轮付清，之后空转即返回。
     // 崩溃在空闲轮清扫前留下的 NONE 行也在这里自愈）
@@ -2397,7 +2350,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // cleanup error is fatal: continuing would replay a prior process snapshot.
     //
     // 初始化发布 run 的 journal 恢复（`recover_before_cleanup`）已退役（ADR-071 S5，d-300）；
-    // 模型投影的启动水化在 `run_cli` 的统一水化段里（ADR-071 D7 / S6）。启动清理
+    // 模型投影不在启动期水化；持久模式在 root 请求处按索引读透。启动清理
     // `model_update_pending` 也没有了（ADR-072 D5）：那张表随第二条异步账退役，`run_cli` 的
     // 水化段用 `REMOVE TABLE IF EXISTS` 一次收掉；崩溃残留的出路是写入标记回退。
 

@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
@@ -249,6 +249,9 @@ pub fn packed_refno(refno: RefNo) -> i64 {
 struct ScopeState {
     /// record_id → 记录。
     geometries: BTreeMap<String, ProjectedGeometry>,
+    /// Approximate serialized bytes of each resident geometry and their total.
+    geometry_bytes: BTreeMap<String, usize>,
+    resident_bytes: usize,
     /// 打包祖先 → 挂在它下面的 record_id。旧 `anc CONTAINS <packed>` 的索引形态。
     by_ancestor: BTreeMap<i64, BTreeSet<String>>,
     /// 管段来源 → 管身记录。重置管段不应遍历其它根的全部几何。
@@ -446,15 +449,39 @@ impl ScopeState {
             .or_insert(record.source_sesno);
         *sesno = (*sesno).max(record.source_sesno);
         let member = packed_refno(record.source_refno);
-        self.geometries.insert(record.record_id.clone(), record);
+        let record_id = record.record_id.clone();
+        let bytes = serde_json::to_vec(&record).map_or(0, |encoded| encoded.len());
+        self.geometries.insert(record_id.clone(), record);
+        self.geometry_bytes.insert(record_id, bytes);
+        self.resident_bytes = self.resident_bytes.saturating_add(bytes);
         self.room_spatial_dirty.insert((dbnum, member));
         self.bump_epoch(dbnum);
     }
 
     fn remove(&mut self, record_id: &str) -> Option<ProjectedGeometry> {
+        self.remove_internal(record_id, true)
+    }
+
+    /// Remove cache residency without turning it into a model delta. Indexes and
+    /// the resident spatial view still change, but room publication must not see
+    /// cache pressure as a source-model deletion.
+    fn evict(&mut self, record_id: &str) -> Option<ProjectedGeometry> {
+        self.remove_internal(record_id, false)
+    }
+
+    fn remove_internal(
+        &mut self,
+        record_id: &str,
+        observe_change: bool,
+    ) -> Option<ProjectedGeometry> {
         let previous = self.geometries.get(record_id)?.clone();
-        self.observe_member(&previous);
+        if observe_change {
+            self.observe_member(&previous);
+        }
         let record = self.geometries.remove(record_id)?;
+        if let Some(bytes) = self.geometry_bytes.remove(record_id) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+        }
         self.toggle_digest(&record);
         let key = (record.dbnum, packed_refno(record.source_refno));
         if let Some(ids) = self.by_source.get_mut(&key) {
@@ -531,11 +558,52 @@ impl ScopeState {
     }
 }
 
-/// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
-/// 只读它。
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCacheStats {
+    pub mode: &'static str,
+    pub max_bytes: Option<usize>,
+    pub resident_bytes: usize,
+    pub resident_roots: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub loads: u64,
+    pub load_failures: u64,
+    pub evictions: u64,
+    pub oversize_bypasses: u64,
+    pub inflight: usize,
+}
+
 #[derive(Debug, Default)]
+struct CacheControl {
+    clock: u64,
+    last_access: BTreeMap<i64, u64>,
+    hits: u64,
+    misses: u64,
+    loads: u64,
+    load_failures: u64,
+    evictions: u64,
+    oversize_bypasses: u64,
+    inflight: usize,
+}
+
+/// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
+/// 只读它。持久模式下 `current_max_bytes` 使它成为按根淘汰的 cache-aside 投影；未收到
+/// durable ACK 的候选根不会被淘汰，确保失败后仍可重试发布。
+#[derive(Debug)]
 pub struct ModelMemoryStore {
     scopes: RwLock<HashMap<ScopeKey, ScopeState>>,
+    current_max_bytes: Option<usize>,
+    cache: Mutex<CacheControl>,
+}
+
+impl Default for ModelMemoryStore {
+    fn default() -> Self {
+        Self {
+            scopes: RwLock::new(HashMap::new()),
+            current_max_bytes: None,
+            cache: Mutex::new(CacheControl::default()),
+        }
+    }
 }
 
 static STORE: OnceLock<ModelMemoryStore> = OnceLock::new();
@@ -669,7 +737,80 @@ impl ModelMemoryStore {
         true
     }
     pub fn global() -> &'static Self {
-        STORE.get_or_init(Self::default)
+        STORE.get_or_init(|| {
+            if crate::options::store_mode().is_durable() {
+                Self::with_cache_limit(crate::options::model_cache_max_bytes())
+            } else {
+                Self::default()
+            }
+        })
+    }
+
+    pub fn with_cache_limit(max_bytes: usize) -> Self {
+        Self {
+            scopes: RwLock::new(HashMap::new()),
+            current_max_bytes: Some(max_bytes.max(1)),
+            cache: Mutex::new(CacheControl::default()),
+        }
+    }
+
+    fn cache_control(&self) -> std::sync::MutexGuard<'_, CacheControl> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn touch_root(&self, root: RefNo) {
+        if self.current_max_bytes.is_none() {
+            return;
+        }
+        let mut cache = self.cache_control();
+        cache.clock = cache.clock.wrapping_add(1);
+        let clock = cache.clock;
+        cache.last_access.insert(packed_refno(root), clock);
+    }
+
+    pub(crate) fn note_cache_lookup(&self, hit: bool) {
+        let mut cache = self.cache_control();
+        if hit {
+            cache.hits += 1;
+        } else {
+            cache.misses += 1;
+        }
+    }
+
+    pub(crate) fn note_cache_load_started(&self) {
+        let mut cache = self.cache_control();
+        cache.inflight += 1;
+    }
+
+    pub(crate) fn note_cache_load_finished(&self, success: bool) {
+        let mut cache = self.cache_control();
+        cache.inflight = cache.inflight.saturating_sub(1);
+        if success {
+            cache.loads += 1;
+        } else {
+            cache.load_failures += 1;
+        }
+    }
+
+    pub fn cache_stats(&self) -> ModelCacheStats {
+        let scopes = self.read();
+        let current = scopes.get(&ScopeKey::Current);
+        let cache = self.cache_control();
+        ModelCacheStats {
+            mode: crate::options::model_cache_mode().as_str(),
+            max_bytes: self.current_max_bytes,
+            resident_bytes: current.map_or(0, |state| state.resident_bytes),
+            resident_roots: current.map_or(0, |state| state.receipts.len()),
+            hits: cache.hits,
+            misses: cache.misses,
+            loads: cache.loads,
+            load_failures: cache.load_failures,
+            evictions: cache.evictions,
+            oversize_bypasses: cache.oversize_bypasses,
+            inflight: cache.inflight,
+        }
     }
 
     fn read(&self) -> RwLockReadGuard<'_, HashMap<ScopeKey, ScopeState>> {
@@ -772,6 +913,136 @@ impl ModelMemoryStore {
         true
     }
 
+    /// Install one complete durable root without replacing any other resident root.
+    /// The caller must have validated the receipt/count and must pass the dbnum epoch
+    /// observed before its database read. A concurrent generation commit wins and
+    /// makes this load retry instead of allowing an older disk image to overwrite it.
+    #[must_use = "a stale root load must be retried"]
+    pub fn restore_root(
+        &self,
+        root: RefNo,
+        records: Vec<ProjectedGeometry>,
+        receipt: RootReceipt,
+        expected_epoch: u64,
+    ) -> bool {
+        let dbnum = root.dbno();
+        let packed = packed_refno(root);
+        let mut scopes = self.write();
+        let state = scopes.entry(ScopeKey::Current).or_default();
+        if state.commit_epochs.get(&dbnum).copied().unwrap_or(0) != expected_epoch {
+            return false;
+        }
+
+        let loaded_ids = records
+            .iter()
+            .map(|record| record.record_id.clone())
+            .collect::<BTreeSet<_>>();
+        let stale = state
+            .record_ids_under(root)
+            .into_iter()
+            .filter(|id| !loaded_ids.contains(id))
+            .collect::<Vec<_>>();
+        for id in stale {
+            let shared = state.geometries.get(&id).is_some_and(|record| {
+                state
+                    .receipts
+                    .keys()
+                    .any(|other| *other != packed && record.ancestors.contains(other))
+            });
+            if !shared {
+                state.evict(&id);
+            }
+        }
+        for record in records {
+            state.insert(record);
+        }
+        state.room_baselines.remove(&dbnum);
+        state.invalidated_roots.remove(&packed);
+        state.receipts.insert(packed, receipt);
+        state.flush_room_spatial();
+        drop(scopes);
+        self.touch_root(root);
+        true
+    }
+
+    fn enforce_current_cache_limit(&self, protected: RefNo) {
+        let Some(max_bytes) = self.current_max_bytes else {
+            return;
+        };
+        let protected = packed_refno(protected);
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
+            return;
+        };
+        let mut cache = self.cache_control();
+        let protected_bytes = state
+            .record_ids_under(RefNo::new((protected >> 32) as u32, protected as u32))
+            .into_iter()
+            .filter_map(|id| state.geometry_bytes.get(&id))
+            .sum::<usize>();
+        if protected_bytes > max_bytes {
+            cache.oversize_bypasses += 1;
+        }
+        while state.resident_bytes > max_bytes {
+            let Some(candidate) = state
+                .publication_acks
+                .keys()
+                .copied()
+                .filter(|root| *root != protected || protected_bytes > max_bytes)
+                .min_by_key(|root| cache.last_access.get(root).copied().unwrap_or(0))
+            else {
+                break;
+            };
+            state.publication_acks.remove(&candidate);
+            state.receipts.remove(&candidate);
+            state.invalidated_roots.remove(&candidate);
+            cache.last_access.remove(&candidate);
+            let root = RefNo::new((candidate >> 32) as u32, candidate as u32);
+            let ids = state.record_ids_under(root);
+            for id in ids {
+                let shared = state.geometries.get(&id).is_some_and(|record| {
+                    state
+                        .receipts
+                        .keys()
+                        .any(|other| record.ancestors.contains(other))
+                });
+                if !shared {
+                    state.evict(&id);
+                }
+            }
+            cache.evictions += 1;
+        }
+        state.flush_room_spatial();
+    }
+
+    /// Drop one resident cache entry because the durable point lookup says it no
+    /// longer exists. Shared nested-root records remain owned by their other
+    /// resident receipts. This is cache state, not a generated removal delta.
+    pub(crate) fn drop_cached_root(&self, root: RefNo) {
+        let packed = packed_refno(root);
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
+            return;
+        };
+        state.receipts.remove(&packed);
+        state.publication_acks.remove(&packed);
+        state.invalidated_roots.remove(&packed);
+        for id in state.record_ids_under(root) {
+            let shared = state.geometries.get(&id).is_some_and(|record| {
+                state
+                    .receipts
+                    .keys()
+                    .any(|other| record.ancestors.contains(other))
+            });
+            if !shared {
+                state.evict(&id);
+            }
+        }
+        state.flush_room_spatial();
+        drop(scopes);
+        self.cache_control().last_access.remove(&packed);
+    }
+
     /// A whole-dbnum reinitialize invalidates the process projection immediately.
     /// The epoch bump also prevents an in-flight database snapshot from restoring
     /// the pre-wipe image after this point.
@@ -835,15 +1106,22 @@ impl ModelMemoryStore {
         scope: ProjectionScope<'_>,
         root: RefNo,
     ) -> Vec<ProjectedGeometry> {
-        let scopes = self.read();
-        let Some(state) = scopes.get(&scope.key()) else {
-            return Vec::new();
+        let current = matches!(scope, ProjectionScope::Current);
+        let records = {
+            let scopes = self.read();
+            let Some(state) = scopes.get(&scope.key()) else {
+                return Vec::new();
+            };
+            state
+                .record_ids_under(root)
+                .into_iter()
+                .filter_map(|record_id| state.geometries.get(&record_id).cloned())
+                .collect()
         };
-        state
-            .record_ids_under(root)
-            .into_iter()
-            .filter_map(|record_id| state.geometries.get(&record_id).cloned())
-            .collect()
+        if current {
+            self.touch_root(root);
+        }
+        records
     }
 
     /// 整个投影域的记录，按 record_id 排序。历史快照查询与落库适配器用它。
@@ -903,12 +1181,19 @@ impl ModelMemoryStore {
     }
 
     pub fn receipt(&self, scope: ProjectionScope<'_>, root: RefNo) -> Option<RootReceipt> {
-        let scopes = self.read();
-        scopes
-            .get(&scope.key())?
-            .receipts
-            .get(&packed_refno(root))
-            .cloned()
+        let current = matches!(scope, ProjectionScope::Current);
+        let receipt = {
+            let scopes = self.read();
+            scopes
+                .get(&scope.key())?
+                .receipts
+                .get(&packed_refno(root))
+                .cloned()
+        };
+        if current {
+            self.touch_root(root);
+        }
+        receipt
     }
 
     pub fn publication_ack(
@@ -931,11 +1216,17 @@ impl ModelMemoryStore {
         root: RefNo,
         ack: RootPublicationAck,
     ) {
+        let current = matches!(scope, ProjectionScope::Current);
+        let durable = ack.medium.is_durable();
         self.write()
             .entry(scope.key())
             .or_default()
             .publication_acks
             .insert(packed_refno(root), ack);
+        if current && durable {
+            self.touch_root(root);
+            self.enforce_current_cache_limit(root);
+        }
     }
 
     pub fn invalidate_publication_ack(&self, scope: ProjectionScope<'_>, root: RefNo) {
@@ -1858,5 +2149,57 @@ mod tests {
             "记录数与回执对不上同样不算完整"
         );
         std::fs::remove_dir_all(mesh_dir).unwrap();
+    }
+
+    #[test]
+    fn the_byte_limit_evicts_only_durably_acked_roots() {
+        let store = ModelMemoryStore::with_cache_limit(1);
+        let root_a = RefNo::new(7997, 100);
+        let root_b = RefNo::new(7997, 200);
+        let receipt = |name: &str| RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: name.into(),
+            geometry_count: 1,
+            published_via: "regen".into(),
+        };
+        store.commit(
+            ProjectionScope::Current,
+            vec![
+                ProjectionCommit {
+                    upserts: vec![record("a", RefNo::new(7997, 1), root_a, 7997)],
+                    receipt: Some((root_a, receipt("a"))),
+                    ..Default::default()
+                },
+                ProjectionCommit {
+                    upserts: vec![record("b", RefNo::new(7997, 2), root_b, 7997)],
+                    receipt: Some((root_b, receipt("b"))),
+                    ..Default::default()
+                },
+            ],
+        );
+        let ack = |root: RefNo| RootPublicationAck {
+            dbnum: root.dbno(),
+            source_sesno: 42,
+            geometry_count: 1,
+            room_membership: false,
+            room_generation: None,
+            medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
+        };
+
+        store.record_publication_ack(ProjectionScope::Current, root_a, ack(root_a));
+        assert!(store.receipt(ProjectionScope::Current, root_a).is_none());
+        assert!(
+            store.receipt(ProjectionScope::Current, root_b).is_some(),
+            "an unacknowledged candidate must survive cache pressure"
+        );
+        assert_eq!(store.cache_stats().evictions, 1);
+
+        store.record_publication_ack(ProjectionScope::Current, root_b, ack(root_b));
+        assert!(store.receipt(ProjectionScope::Current, root_b).is_none());
+        let stats = store.cache_stats();
+        assert_eq!(stats.evictions, 2);
+        assert_eq!(stats.resident_bytes, 0);
+        assert_eq!(stats.oversize_bypasses, 2);
     }
 }
