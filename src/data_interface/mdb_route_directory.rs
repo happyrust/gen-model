@@ -590,6 +590,7 @@ impl MdbRouteDirectory {
             let (latest_sesno, base_sesno, crossed_backtrack) = match previous {
                 Some(old) if old.identity == identity => (old.latest_sesno, old.base_sesno, false),
                 _ => {
+                    let read_started = std::time::Instant::now();
                     let observed = (|| -> anyhow::Result<_> {
                         let mut view = e3d_io::session::DbView::open(&route.path)?;
                         let chain = view.walk_sessions()?;
@@ -600,6 +601,11 @@ impl MdbRouteDirectory {
                         }));
                         Ok((latest.sesno, latest.tail.as_ref().map(|tail| tail.base_sesno), crossed))
                     })();
+                    if read_started.elapsed() >= std::time::Duration::from_millis(250) {
+                        println!("[route-poll] slow-session dbnum={} elapsed_ms={} initial={} ok={} path={}",
+                            route.dbnum, read_started.elapsed().as_millis(), previous.is_none(),
+                            observed.is_ok(), route.path.display());
+                    }
                     match observed {
                         Ok(value) => value,
                         Err(error) => {

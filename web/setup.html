@@ -231,12 +231,6 @@ function note(el, cls, html) { el.innerHTML = '<div class="note ' + cls + '">' +
 
 async function api(path, options) {
   const response = await fetch(path, Object.assign({ cache: "no-store" }, options || {}));
-  if (response.status === 403) {
-    document.body.innerHTML = '<main id="ams-setup-wizard" style="max-width:640px;margin:80px auto;font-family:system-ui">' +
-      '<h1>只能在服务器本机打开</h1><p>配置向导的接口只接受来自 127.0.0.1 的请求。' +
-      '请到运行本服务的那台机器上，用浏览器打开 <code>http://127.0.0.1:&lt;端口&gt;/setup.html</code>。</p></main>';
-    throw new Error("loopback_only");
-  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.message || (path + " -> " + response.status));
   return body;
@@ -262,7 +256,9 @@ function intsOf(id) {
 }
 function browserFacing(addr) {
   addr = (addr || "").trim();
-  return addr.startsWith("0.0.0.0:") ? "127.0.0.1:" + addr.slice(8) : addr;
+  const port = addr.startsWith("0.0.0.0:") ? addr.slice(8)
+    : addr.startsWith("[::]:") ? addr.slice(5) : null;
+  return port === null ? addr : location.hostname + ":" + port;
 }
 
 // ---------- 装载 ----------
@@ -642,7 +638,7 @@ $("next-3").addEventListener("click", async () => {
 });
 $("back-4").addEventListener("click", () => goto(3));
 
-boot().catch((e) => { if (e.message !== "loopback_only") note($("banner"), "bad", "向导装载失败：" + e.message); });
+boot().catch((e) => { note($("banner"), "bad", "向导装载失败：" + e.message); });
 </script>
 </body>
 </html>

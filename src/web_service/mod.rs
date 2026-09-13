@@ -1,8 +1,8 @@
 //! Web 服务（REST + WebSocket），面向前端提供触发生成与增量更新信息。
 //!
 //! 设计与评审结论见 `docs/specs/web-service-api.md`：
-//! - 监听地址优先取 `http_api_addr`，缺失时兼容 `server_release_ip`，两者都空时只监听本机
-//!   `127.0.0.1:9099`；
+//! - 监听地址优先取 `http_api_addr`，缺失时兼容 `server_release_ip`，两者都空时监听所有网卡
+//!   `0.0.0.0:9099`；
 //! - 领域结构体 JSON 原样透传，服务层零领域逻辑；
 //! - 任务进度经 WebSocket 广播，任务记录仅内存保留（durable 语义由水位 + pending 表承担）。
 
@@ -31,13 +31,13 @@ use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::query_service::{QueryError, QueryService};
 
-const DEFAULT_HTTP_API_ADDR: &str = "127.0.0.1:9099";
+const DEFAULT_HTTP_API_ADDR: &str = "0.0.0.0:9099";
 
 /// HTTP 监听地址的兼容解析。
 ///
 /// `http_api_addr` 是当前配置键；老现场只有 `server_release_ip`。服务进程不能因为新键
 /// 缺失而让 Web task 立即成功返回——read-through 主流程会随之正常退出，看起来既不像
-/// 配置错也不像崩溃。两项都没给时只开放回环默认值，不意外扩大网络暴露面。
+/// 配置错也不像崩溃。两项都没给时监听所有网卡，允许远程访问配置向导与应用。
 pub(crate) fn effective_http_api_addr(configured: Option<&str>, server_release_ip: &str) -> String {
     configured
         .map(str::trim)

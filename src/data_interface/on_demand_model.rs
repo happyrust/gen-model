@@ -265,7 +265,7 @@ impl AiosDBManager {
             .map_err(|_| ModelGenerationInProgress { root_refno: root.to_pdms_str() })??;
         anyhow::ensure!(generation_source_identity(root).await? == version,
             ModelGenerationInProgress { root_refno: root.to_pdms_str() });
-        anyhow::ensure!(tokio::task::spawn_blocking(move || memory_root_current(root)).await?,
+        anyhow::ensure!(memory_root_current(root).await?,
             ModelGenerationInProgress { root_refno: root.to_pdms_str() });
         result.requested_refno = requested_refno.to_pdms_str();
         Ok(result)
@@ -292,9 +292,9 @@ impl AiosDBManager {
         // A durable credential survives restart, but /model/records serves the
         // process projection: a root only counts as cached once the projection holds it.
         let cache_current = if memory_only || crate::options::data_face().is_read_through() {
-            memory_root_current(root)
+            memory_root_current(root).await?
         } else {
-            generation_root_cache_current(&root_refno).await? && memory_root_current(root)
+            generation_root_cache_current(&root_refno).await? && memory_root_current(root).await?
         };
         if !force && cache_current {
             // 计数只问进程内投影（S4 之后 legacy「读 inst_relate 表数实例」那条路退役）。
@@ -400,12 +400,18 @@ impl AiosDBManager {
         let current_roots = if force {
             std::collections::HashSet::new()
         } else if memory_only || crate::options::data_face().is_read_through() {
-            root_refnos
-                .iter()
-                .copied()
-                .filter(|root| memory_root_current(*root))
-                .map(|root| root.to_pdms_str())
-                .collect()
+            // 整批只借一次阻塞线程：一个作用域有几百个根，逐根 `spawn_blocking` 就是
+            // 几百次调度往返，而每根要做的只是几次 stat。
+            let pinned = pinned_data_window();
+            let candidates = root_refnos.clone();
+            tokio::task::spawn_blocking(move || {
+                candidates
+                    .into_iter()
+                    .filter(|root| memory_root_current_on_thread(*root, pinned))
+                    .map(|root| root.to_pdms_str())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .await?
         } else {
             generation_roots_cache_current(
                 &roots
@@ -425,7 +431,9 @@ impl AiosDBManager {
             // only misses need the generation path and its per-root counts.
             // A durable credential survives restart, but /model/records serves the
             // process projection. Rebuild a missing resident root before calling it cached.
-            if current_roots.contains(&root.root.to_pdms_str()) && memory_root_current(root.root) {
+            if current_roots.contains(&root.root.to_pdms_str())
+                && memory_root_current(root.root).await?
+            {
                 cached_root_count += 1;
                 continue;
             }
@@ -553,7 +561,21 @@ fn describe(
     }
 }
 
-fn memory_root_current(root: RefnoEnum) -> bool {
+/// Frozen-window and staging scopes are task-locals: they must be read on the calling
+/// task, because they do not follow a closure onto a blocking thread.
+fn pinned_data_window() -> bool {
+    super::batch_worker::active_data_window().is_some()
+        || super::staging::write_context::active_staging_writes().is_some()
+}
+
+/// 核对源文件身份要做文件 stat，不能占着 runtime 线程；判「窗口已钉」的那两个
+/// task-local 由调用方在自己的任务上读好再传进来。
+async fn memory_root_current(root: RefnoEnum) -> anyhow::Result<bool> {
+    let pinned = pinned_data_window();
+    Ok(tokio::task::spawn_blocking(move || memory_root_current_on_thread(root, pinned)).await?)
+}
+
+fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool) -> bool {
     crate::fast_model::e3d_model_service::parse_refno(&root.to_pdms_str())
         .ok()
         .and_then(|root| {
@@ -564,8 +586,7 @@ fn memory_root_current(root: RefnoEnum) -> bool {
         })
         .is_some_and(|receipt| {
             // Frozen/task-local callers retain their pinned-window cache semantics.
-            if super::batch_worker::active_data_window().is_some()
-                || super::staging::write_context::active_staging_writes().is_some() {
+            if pinned_window {
                 return true;
             }
             receipt.model_target.as_ref().is_some_and(|target|

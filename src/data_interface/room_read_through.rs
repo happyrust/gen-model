@@ -30,9 +30,8 @@ pub(crate) fn target_current(target: &ModelTarget) -> anyhow::Result<bool> {
             return Ok(false);
         }
     }
-    let schema = super::direct_store::DirectSchema::open_from_env()?;
-    Ok(model_file_identity_digest(&schema.template_dir().join("attlib.dat"), 0)?
-        == target.template_attlib_digest)
+    let attlib = super::direct_store::DirectSchema::template_dir_from_env()?.join("attlib.dat");
+    Ok(model_file_identity_digest(&attlib, 0)? == target.template_attlib_digest)
 }
 
 pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> anyhow::Result<Value> {
@@ -98,6 +97,22 @@ pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `target_current` 逐根跑（`on_demand_model::memory_root_current`），只为取一个
+    /// 模板目录就重载整套 schema 会把按需生成拖垮——`DbOption` 与 schema root 在一个
+    /// 进程里不变，取缓存那一份。
+    #[test]
+    fn identity_checks_do_not_reload_the_schema_for_a_template_path() {
+        let body = include_str!("room_read_through.rs")
+            .split_once("pub(crate) fn target_current(")
+            .expect("target_current exists")
+            .1
+            .split_once("pub(crate) async fn lookup(")
+            .expect("target_current end")
+            .0;
+        assert!(body.contains("template_dir_from_env()"), "{body}");
+        assert!(!body.contains("open_from_env()"), "{body}");
+    }
+
     #[test]
     fn changes_to_any_room_input_reject_the_result() {
         for model in [false, true] { for source in [false, true] { for rooms in [false, true] {

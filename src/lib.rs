@@ -1421,6 +1421,20 @@ fn startup_data_wait_is_stalled(
 #[cfg(test)]
 mod startup_data_wait_tests {
     #[test]
+    fn read_through_startup_reports_each_waiting_stage() {
+        let source = include_str!("lib.rs");
+        let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
+            .split_once("pub async fn run_app(").unwrap().0;
+        for stage in ["store", "mdb", "http", "route-directory", "spatial-room", "session-baseline"] {
+            let begin = body.find(&format!("stage={stage} event=begin")).unwrap();
+            let done = body.find(&format!("stage={stage} event=done elapsed_ms=")).unwrap();
+            assert!(begin < done, "{stage} must bracket its operation");
+        }
+        assert!(body.find("stage=http event=done").unwrap()
+            < body.find("stage=session-baseline event=begin").unwrap());
+    }
+
+    #[test]
     fn read_through_startup_never_generates_the_whole_mdb() {
         let source = include_str!("lib.rs");
         let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
@@ -2027,11 +2041,17 @@ async fn targeted_model_refresh(
 /// in the background.
 #[cfg(feature = "ws")]
 async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
+    let startup_started = Instant::now();
+    let stage_started = Instant::now();
+    println!("[startup] stage=store event=begin");
     // 内存库承载模型发布，必须在接受模型请求前就绪；属性始终从文件读取。
     if !crate::options::store_mode().is_durable() {
         ensure_store_connected(&db_option, crate::store_process::StoreStartup::Spawn).await?;
         crate::data_interface::embedded_surql::define_embedded_functions().await?;
     }
+    println!("[startup] stage=store event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    let stage_started = Instant::now();
+    println!("[startup] stage=mdb event=begin");
     let mut manager = AiosDBManager::init_form_config().await?;
     manager
         .init_mdb(
@@ -2047,12 +2067,16 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             )
         })?;
     let manager = Arc::new(manager);
+    println!("[startup] stage=mdb event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    let stage_started = Instant::now();
+    println!("[startup] stage=http event=begin enabled={}", cfg!(feature = "http_api"));
     #[cfg(feature = "http_api")]
     let web_task = crate::web_service::start_configured(manager.clone()).await?;
-    // 不再预热元素骨架（lazy-startup L3）：HTTP 已经 spawn，这里只造 dbnum 路由目录打横幅
-    // ——零元素 I/O，初始化三步紧跟其后，不等任何元素读取。属性 / 树服务各自按需开库；树服务
-    // 剩下的骨架用途（WORL 枚举、noun / owner）由它第一次被用到时自建，L5 换掉。
+    println!("[startup] stage=http event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    // HTTP 已就绪；这里只建立 dbnum 路由目录，不读取元素。
+    // 属性与树服务按目标 RefNo 惰性访问，不建立全 MDB 元素骨架。
     let step_started = Instant::now();
+    println!("[startup] stage=route-directory event=begin");
     let directory = startup_route_directory(&db_option).map_err(|error| {
         anyhow!(
             "build dbnum route directory for MDB {}: {error:#}",
@@ -2060,6 +2084,7 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
         )
     })?;
     print_route_directory_banner(&directory, step_started);
+    println!("[startup] stage=route-directory event=done elapsed_ms={}", step_started.elapsed().as_millis());
 
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
@@ -2071,7 +2096,10 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     if rooms_required {
         initialization.begin_startup_rooms();
     }
+    let stage_started = Instant::now();
+    println!("[startup] stage=spatial-room event=begin room_membership={rooms_required}");
     prepare_room_resident_at_startup(&db_option).await;
+    println!("[startup] stage=spatial-room event=done elapsed_ms={}", stage_started.elapsed().as_millis());
     let room_bootstrap_ready = !rooms_required
         || crate::fast_model::room_resident::current_for_calculation().is_ok();
     if rooms_required {
@@ -2091,7 +2119,11 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     // 此前这里是 `refresh_if_stale`——任一库的会话号一变就重解 MDB 成员、整份重扫全 MDB 重建
     // 元素骨架，再把**全部**发布回执作废；一个 DESI 的 SAVEWORK = 重扫 AMS 28 库 / JEU 417 库。
     // 先叫一次把每个库的基线记进账本：第一次见只记不报，之后每轮返回的才是「自上次以来变了的库」。
+    let stage_started = Instant::now();
+    println!("[startup] stage=session-baseline event=begin");
     let seeded = directory.poll_generations();
+    println!("[startup] stage=session-baseline event=done elapsed_ms={} total_ms={}",
+        stage_started.elapsed().as_millis(), startup_started.elapsed().as_millis());
     debug_assert!(seeded.is_empty(), "第一次轮询只记基线，不该报变化");
     let refresh_manager = manager.clone();
     let refresh_directory = directory.clone();
