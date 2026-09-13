@@ -929,7 +929,7 @@ pub async fn bind_with_handoff(addr: &str) -> anyhow::Result<tokio::net::TcpList
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     continue;
                 }
-                return Err(anyhow::anyhow!("绑定 {addr} 失败：{error}"));
+                return Err(anyhow::Error::new(error).context(format!("绑定 {addr} 失败")));
             }
         }
     }
@@ -955,6 +955,9 @@ async fn setup_mode_health(State(reason): State<&'static str>) -> Json<serde_jso
 pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
     let ext = crate::get_db_option_ext();
     let addr = super::effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
+    let automatic = ext.http_api_addr.as_deref().is_none_or(|value| value.trim().is_empty());
+    let listener = super::bind_http_address(&addr, automatic).await?;
+    let addr = listener.local_addr()?.to_string();
     let ui_root = PathBuf::from(
         std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
     );
@@ -971,7 +974,6 @@ pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
         .route("/", get(|| async { Redirect::temporary("/setup.html") }))
         .fallback(get(|| async { Redirect::temporary("/setup.html") }));
 
-    let listener = bind_with_handoff(&addr).await?;
     println!("*** 设置模式：{reason_static} ***");
     let setup_url = format!("http://{}/setup.html", browser_facing(&addr));
     println!(

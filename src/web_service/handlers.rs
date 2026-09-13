@@ -597,7 +597,7 @@ fn require_room_bootstrap_ready() -> Result<(), ApiError> {
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let web_options = crate::get_db_option_ext();
-    let http_bind_addr = super::effective_http_api_addr(
+    let http_bind_addr = super::runtime_http_api_addr(
         web_options.http_api_addr.as_deref(),
         &web_options.server_release_ip,
     );
