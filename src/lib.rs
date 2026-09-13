@@ -1731,7 +1731,8 @@ async fn ensure_own_store(
             // 少这一条不是「偶尔漏一个」，是**每一次 Ctrl+C 都漏**。
             tokio::spawn(async {
                 if tokio::signal::ctrl_c().await.is_ok() {
-                    println!("收到 Ctrl+C，先收掉自带存储再退出…");
+                    println!("收到 Ctrl+C，停止模型落盘并关闭自带存储…");
+                    crate::fast_model::model_write_behind::shutdown_now();
                     shutdown_spawned_store();
                 }
                 std::process::exit(130);

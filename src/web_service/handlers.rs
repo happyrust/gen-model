@@ -201,6 +201,7 @@ fn health_status(
 fn model_cache_health(store_reachable: bool) -> Value {
     let mut health =
         json!(crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats());
+    health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
     health["store_reachable"] = json!(store_reachable);
     health["degraded_read_only"] =
         json!(crate::options::store_mode().is_durable() && !store_reachable);
@@ -2641,79 +2642,6 @@ pub(crate) fn page_records_across_roots<T>(
     }
 }
 
-/// 进程内投影的一条记录 → `GeomInstQuery`（与从库里读出来的同一形状；`owner` 填生成根）。
-fn projection_record_to_query(
-    record: crate::fast_model::model_memory_store::ProjectedGeometry,
-    root: e3d_io::refno::RefNo,
-) -> aios_core::GeomInstQuery {
-    // Ordinary canonical primitives keep their placement separate from
-    // the element world transform. Tubes already fold it into world.
-    let local_transform = match (&record.shape, &record.tube) {
-        (
-            crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                local_transform,
-                ..
-            },
-            None,
-        ) => *local_transform,
-        _ => glam::DMat4::IDENTITY,
-    };
-    let (local_scale, local_rotation, local_translation) =
-        local_transform.to_scale_rotation_translation();
-    let (scale, rotation, translation) = record.world_transform.to_scale_rotation_translation();
-    let world_trans = bevy_transform::components::Transform {
-        translation: glam::Vec3::new(
-            translation.x as f32,
-            translation.y as f32,
-            translation.z as f32,
-        ),
-        rotation: glam::Quat::from_xyzw(
-            rotation.x as f32,
-            rotation.y as f32,
-            rotation.z as f32,
-            rotation.w as f32,
-        ),
-        scale: glam::Vec3::new(scale.x as f32, scale.y as f32, scale.z as f32),
-    };
-    let source = RefnoEnum::from(RefU64::from_two_nums(
-        record.source_refno.word0,
-        record.source_refno.word1,
-    ));
-    let owner = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-    aios_core::GeomInstQuery {
-        refno: source,
-        old_refno: None,
-        owner,
-        world_aabb: parry3d::bounding_volume::Aabb::new(
-            parry3d::math::Point::new(
-                record.world_bounds[0][0],
-                record.world_bounds[0][1],
-                record.world_bounds[0][2],
-            ),
-            parry3d::math::Point::new(
-                record.world_bounds[1][0],
-                record.world_bounds[1][1],
-                record.world_bounds[1][2],
-            ),
-        ),
-        world_trans,
-        insts: vec![aios_core::ModelHashInst {
-            geo_hash: record.mesh_id,
-            transform: bevy_transform::components::Transform {
-                translation: local_translation.as_vec3(),
-                rotation: local_rotation.as_quat(),
-                scale: local_scale.as_vec3(),
-            },
-            is_tubi: record.tube.is_some(),
-            is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
-        }],
-        has_neg: false,
-        generic: record.noun,
-        pts: None,
-        date: None,
-    }
-}
-
 /// POST /api/v1/model/records — 按生成根分页取模型记录：单根（原有形状）或
 /// `generation_roots[]` 多根批量（spec §4.5.2，决策 d-181）。
 pub async fn model_records(
@@ -2802,18 +2730,11 @@ pub async fn model_records(
         // to be served directly by RocksDB.
         let memory_overlay = store.receipt(scope, *root).is_some();
         memory_overlay_used |= memory_overlay;
-        let records = if route.is_database() && !memory_overlay {
-            let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        let records =
             crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
                 .await
-                .map_err(ApiError::from_domain)?
-        } else {
-            store
-                .records_of_root(scope, *root)
-                .into_iter()
-                .map(|record| projection_record_to_query(record, *root))
-                .collect()
-        };
+                .map_err(ApiError::from_domain)?;
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);

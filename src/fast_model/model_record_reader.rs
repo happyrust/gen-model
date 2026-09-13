@@ -1,8 +1,38 @@
-//! Read the published durable projection without regenerating process-local caches.
-use aios_core::{GeomInstQuery, RefnoEnum};
+//! Select one complete root from the process overlay or the durable baseline.
+//!
+//! A resident receipt shadows RocksDB for the whole root. Durable reads are
+//! returned directly and never hydrate kv-mem.
+use aios_core::{GeomInstQuery, RefU64, RefnoEnum};
 use surrealdb::{Surreal, engine::any::Any};
 
+use super::model_memory_store::{
+    ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope,
+};
+
 pub async fn records_of_root(
+    db: &Surreal<Any>,
+    root: RefnoEnum,
+) -> anyhow::Result<Vec<GeomInstQuery>> {
+    let packed = root.refno().0 as u64;
+    let e3d_root = e3d_io::refno::RefNo::new((packed >> 32) as u32, packed as u32);
+    let store = ModelMemoryStore::global();
+    if let Some(receipt) = store.receipt(ProjectionScope::Current, e3d_root) {
+        let records = store.records_of_root(ProjectionScope::Current, e3d_root);
+        anyhow::ensure!(
+            records.len() == receipt.geometry_count,
+            "memory overlay root {e3d_root} is incomplete: receipt expects {}, store has {}",
+            receipt.geometry_count,
+            records.len()
+        );
+        return Ok(records
+            .into_iter()
+            .map(|record| projection_record_to_query(record, e3d_root))
+            .collect());
+    }
+    durable_records_of_root(db, root).await
+}
+
+async fn durable_records_of_root(
     db: &Surreal<Any>,
     root: RefnoEnum,
 ) -> anyhow::Result<Vec<GeomInstQuery>> {
@@ -39,6 +69,56 @@ pub async fn records_of_root(
     Ok(records)
 }
 
+fn projection_record_to_query(
+    record: ProjectedGeometry,
+    root: e3d_io::refno::RefNo,
+) -> GeomInstQuery {
+    let local_transform = match (&record.shape, &record.tube) {
+        (
+            ProjectedShape::Canonical {
+                local_transform, ..
+            },
+            None,
+        ) => *local_transform,
+        _ => glam::DMat4::IDENTITY,
+    };
+    let (local_scale, local_rotation, local_translation) =
+        local_transform.to_scale_rotation_translation();
+    let (scale, rotation, translation) = record.world_transform.to_scale_rotation_translation();
+    let source = RefnoEnum::from(RefU64::from_two_nums(
+        record.source_refno.word0,
+        record.source_refno.word1,
+    ));
+    GeomInstQuery {
+        refno: source,
+        old_refno: None,
+        owner: RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1)),
+        world_aabb: parry3d::bounding_volume::Aabb::new(
+            record.world_bounds[0].into(),
+            record.world_bounds[1].into(),
+        ),
+        world_trans: bevy_transform::components::Transform {
+            translation: translation.as_vec3(),
+            rotation: rotation.as_quat(),
+            scale: scale.as_vec3(),
+        },
+        insts: vec![aios_core::ModelHashInst {
+            geo_hash: record.mesh_id,
+            transform: bevy_transform::components::Transform {
+                translation: local_translation.as_vec3(),
+                rotation: local_rotation.as_quat(),
+                scale: local_scale.as_vec3(),
+            },
+            is_tubi: record.tube.is_some(),
+            is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
+        }],
+        has_neg: false,
+        generic: record.noun,
+        pts: None,
+        date: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -60,7 +140,7 @@ mod tests {
           CREATE tubi_relate:tube SET in=pe:⟨24384_26611⟩,anc=[{packed}],
             out=inst_geo:tube,aabb=aabb:box,world_trans=trans:world,invalid=true;
         "#)).await.unwrap().check().unwrap();
-        let records = super::records_of_root(&db, root).await.unwrap();
+        let records = super::durable_records_of_root(&db, root).await.unwrap();
         assert_eq!(records.len(), 3);
         assert!(records.iter().all(|r| r.owner == root));
         let canonical = records.iter().find(|r| r.generic == "BOX").unwrap();

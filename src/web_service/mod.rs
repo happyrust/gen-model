@@ -243,7 +243,16 @@ impl ApiError {
     /// 用 [`ApiError::precondition`]，别再回到按文本猜的路上。
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
-        if matches!(
+        if error
+            .downcast_ref::<crate::fast_model::model_memory_store::OverlayBackpressure>()
+            .is_some()
+        {
+            Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "overlay_backpressure",
+                message,
+            }
+        } else if matches!(
             error.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
             Some(
                 crate::data_interface::direct_store::DirectStoreError::NoSuchElement { .. }
@@ -264,12 +273,21 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry_after =
+            self.status == StatusCode::SERVICE_UNAVAILABLE && self.code == "overlay_backpressure";
         let body = serde_json::json!({
             "code": self.code,
             "message": self.message,
             "detail": null,
         });
-        (self.status, axum::Json(body)).into_response()
+        let mut response = (self.status, axum::Json(body)).into_response();
+        if retry_after {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_static("2"),
+            );
+        }
+        response
     }
 }
 
@@ -886,6 +904,23 @@ mod tests {
         assert_eq!(error.status, StatusCode::NOT_FOUND);
         assert_eq!(error.code, "not_found");
         assert!(error.message.contains("24384_26291"));
+    }
+
+    #[test]
+    fn overlay_backpressure_is_retryable_service_unavailable() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::fast_model::model_memory_store::OverlayBackpressure {
+                projected_bytes: 11,
+                max_bytes: 10,
+            },
+        ));
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "overlay_backpressure");
+        let response = error.into_response();
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("2"))
+        );
     }
 
     /// `tree/children?refno=1/1`（dbnum 1 不在本 MDB）曾回 500 `internal`：解出的库不在
