@@ -2064,6 +2064,17 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
     assert_eq!(watermarks["applied_sesno"], 43);
     assert_eq!(watermarks["model_sesno"], 42);
 
+    let probe = crate::data_interface::model_watermark::read_model_watermark_probe(&db_b, 7997)
+        .await
+        .expect("read authoritative durable recovery evidence after restart");
+    let recovery =
+        crate::data_interface::startup_reconcile::startup_model_recovery_plan(43, &probe, None)
+            .expect(
+                "the restarted process must schedule the durable watermark gap as ModelOnly work",
+            );
+    assert_eq!(recovery.model_start_sesno, 42);
+    assert_eq!(recovery.reason, "model_watermark_behind");
+
     let store_b = ModelMemoryStore::with_cache_limit(16 * 1024);
     assert_eq!(store_b.current_counts(), (0, 0));
     assert!(store_b.roots(ProjectionScope::Current).is_empty());

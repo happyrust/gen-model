@@ -25,6 +25,52 @@ use crate::data_interface::model_coverage::{
 };
 use crate::data_interface::model_watermark::reconcile_model_watermarks;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StartupModelRecoveryPlan {
+    pub model_start_sesno: i32,
+    pub reason: &'static str,
+    pub credential_behind: bool,
+}
+
+/// Reduce the durable startup evidence to the one decision the scheduler
+/// needs.  Keeping this rule independent from MDB/file discovery lets the
+/// RocksDB restart test exercise the same decision used by production without
+/// constructing process globals or hydrating kv-mem.
+pub(crate) fn startup_model_recovery_plan(
+    applied_sesno: i32,
+    probe: &crate::data_interface::model_watermark::ModelWatermarkProbe,
+    floor: Option<&StartupCoverageFloor>,
+) -> Option<StartupModelRecoveryPlan> {
+    if applied_sesno <= 0 || probe.legacy_adopted() {
+        return None;
+    }
+    let credential_behind = floor.is_some_and(|floor| {
+        floor.unsettled_roots > 0
+            || floor
+                .settled_floor
+                .is_none_or(|settled| settled < applied_sesno)
+    });
+    let completion_covers = probe.supported() >= applied_sesno;
+    if probe.recorded >= applied_sesno && !credential_behind && completion_covers {
+        return None;
+    }
+    Some(StartupModelRecoveryPlan {
+        model_start_sesno: model_recovery_base(
+            probe.recorded,
+            floor.and_then(|floor| floor.settled_floor),
+            false,
+        ),
+        reason: if !probe.has_roots {
+            "empty_inventory_unverified"
+        } else if credential_behind {
+            "root_credential_behind"
+        } else {
+            "model_watermark_behind"
+        },
+        credential_behind,
+    })
+}
+
 /// 启动期把生成根凭证与**文件最新会话**对齐——[`clear_stale_at_process_start`]（ADR-050）
 /// 的补偿路径。清空之后，凭证（`gen_root.source_end_sesno[_time]`）是上一进程模型进度唯一
 /// 活下来的记录；不在这里核对，重启就会把「积压被清掉」静默判成「模型完整」。
@@ -164,9 +210,7 @@ fn schedule_reinitialize(
     );
     format!(
         "dbnum={} 已排整库重建 intent={} task={}",
-        marker.dbnum,
-        outcome.info.intent,
-        outcome.info.task_id
+        marker.dbnum, outcome.info.intent, outcome.info.task_id
     )
 }
 
@@ -436,34 +480,21 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
                 continue;
             }
         };
-        // 一级过滤：安定凭证已不早于文件最新，且没有未安定的行 —— 这个库连窗都不用开。
-        let credential_behind = floors.get(&dbnum).is_some_and(|floor| {
-            floor.unsettled_roots > 0
-                || floor
-                    .settled_floor
-                    .is_none_or(|settled| settled < state.applied_sesno)
-        });
-        // 「完成收据覆盖到 T」那一格随 `CompletionReceipt` 退了（ADR-072 D4）：库级完成态就是
-        // 任务收尾盖的 `model_sesno`（`probe.recorded`），凭证那一半由 `supported()` 说。
-        let completion_covers = probe.supported() >= state.applied_sesno;
-        let behind =
-            probe.recorded < state.applied_sesno || credential_behind || !completion_covers;
-        if !behind {
+        // 一级过滤：权威 RocksDB 水位与根凭证共同决定是否需要 ModelOnly。这个纯决策也由
+        // 真实停机重启测试直接调用，避免生产规则与测试里的手写判据漂移。
+        let Some(recovery) =
+            startup_model_recovery_plan(state.applied_sesno, probe, floors.get(&dbnum))
+        else {
             continue;
-        }
+        };
         println!(
             "[model-completion] dbnum={dbnum} applied={} model={} floor={:?} \
-            reason={} credential_behind={credential_behind}",
+            reason={} credential_behind={}",
             state.applied_sesno,
             probe.recorded,
             probe.settled_floor,
-            if !probe.has_roots {
-                "empty_inventory_unverified"
-            } else if credential_behind {
-                "root_credential_behind"
-            } else {
-                "model_watermark_behind"
-            }
+            recovery.reason,
+            recovery.credential_behind,
         );
         if source.sesno < state.applied_sesno as u32 {
             unreadable += 1;
@@ -480,11 +511,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         // Taking `min(floor, recorded)` turns that local completion correction
         // into a full-history model rebuild even though the per-root evidence
         // still proves a much newer base.
-        let model_start_sesno = model_recovery_base(
-            probe.recorded,
-            floors.get(&dbnum).and_then(|floor| floor.settled_floor),
-            false,
-        );
+        let model_start_sesno = recovery.model_start_sesno;
         let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
             project: state.owner_project.clone(),
             dbnum,
@@ -562,4 +589,56 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         catalogue_dependency_refresh,
     };
     coverage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_interface::model_watermark::ModelWatermarkProbe;
+
+    fn probe(recorded: i32, applied_sesno: i32) -> ModelWatermarkProbe {
+        ModelWatermarkProbe {
+            blockers: Vec::new(),
+            abandoned: 0,
+            settled_floor: Some(recorded),
+            applied_sesno,
+            recorded,
+            has_roots: true,
+            has_attributes: true,
+            has_model_projection: true,
+        }
+    }
+
+    #[test]
+    fn durable_watermark_gap_becomes_model_only_recovery_window() {
+        let plan = startup_model_recovery_plan(43, &probe(42, 43), None)
+            .expect("a durable model watermark gap must be rebuilt after restart");
+        assert_eq!(plan.model_start_sesno, 42);
+        assert_eq!(plan.reason, "model_watermark_behind");
+        assert!(!plan.credential_behind);
+    }
+
+    #[test]
+    fn aligned_durable_watermark_and_credentials_do_not_requeue() {
+        let floor = StartupCoverageFloor {
+            settled_floor: Some(43),
+            settled_roots: 1,
+            unsettled_roots: 0,
+        };
+        assert!(startup_model_recovery_plan(43, &probe(43, 43), Some(&floor)).is_none());
+    }
+
+    #[test]
+    fn credential_gap_uses_the_settled_root_floor_as_recovery_base() {
+        let floor = StartupCoverageFloor {
+            settled_floor: Some(40),
+            settled_roots: 1,
+            unsettled_roots: 1,
+        };
+        let plan = startup_model_recovery_plan(43, &probe(43, 43), Some(&floor))
+            .expect("an unsettled root must keep startup recovery open");
+        assert_eq!(plan.model_start_sesno, 40);
+        assert_eq!(plan.reason, "root_credential_behind");
+        assert!(plan.credential_behind);
+    }
 }
