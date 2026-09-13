@@ -335,16 +335,15 @@ impl ScopeState {
 
     fn flush_room_spatial(&mut self) {
         let dirty = std::mem::take(&mut self.room_spatial_dirty);
-        let cold: BTreeSet<_> = dirty
-            .iter()
-            .map(|(dbnum, _)| *dbnum)
-            .filter(|dbnum| !self.room_spatial.contains_key(dbnum))
-            .collect();
-        for dbnum in &cold {
+        let dbnums = dirty
+            .into_iter()
+            .map(|(dbnum, _)| dbnum)
+            .collect::<BTreeSet<_>>();
+        for dbnum in dbnums {
             use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
             let boxes = self
                 .by_source
-                .range((*dbnum, i64::MIN)..=(*dbnum, i64::MAX))
+                .range((dbnum, i64::MIN)..=(dbnum, i64::MAX))
                 .flat_map(|(_, ids)| ids)
                 .filter_map(|id| self.geometries.get(id))
                 .map(|row| {
@@ -359,38 +358,7 @@ impl ScopeState {
                 })
                 .collect();
             self.room_spatial
-                .insert(*dbnum, AccelerationTree::load(boxes));
-        }
-        for (dbnum, member) in dirty {
-            if !cold.contains(&dbnum) {
-                self.refresh_room_spatial(dbnum, member);
-            }
-        }
-    }
-    fn refresh_room_spatial(&mut self, dbnum: u32, member: i64) {
-        use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
-        let rows: Vec<_> = self
-            .by_source
-            .get(&(dbnum, member))
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.geometries.get(id))
-            .map(|row| {
-                RStarBoundingBox::new(
-                    parry3d::bounding_volume::Aabb::new(
-                        row.world_bounds[0].into(),
-                        row.world_bounds[1].into(),
-                    ),
-                    crate::data_interface::generation_root::refno_from_e3d(row.source_refno),
-                    row.noun.clone(),
-                )
-            })
-            .collect();
-        let tree = self.room_spatial.entry(dbnum).or_default();
-        if rows.is_empty() {
-            tree.remove_by_refnos(&[aios_core::RefU64(member as u64)].into_iter().collect());
-        } else {
-            tree.sync_refnos(rows);
+                .insert(dbnum, AccelerationTree::load(boxes));
         }
     }
     fn toggle_digest(&mut self, record: &ProjectedGeometry) {
@@ -2042,6 +2010,39 @@ mod tests {
             store.room_snapshot(7997, false).1,
             digest,
             "content digest is history independent"
+        );
+    }
+
+    #[test]
+    fn room_spatial_accepts_large_incremental_pipe_like_cohorts() {
+        let store = store();
+        let root = RefNo::new(24384, 1);
+        let make = |index: u32| {
+            let member = RefNo::new(24384, 100_000 + index);
+            let angle = index as f32 * 0.173;
+            let radius = 8_000.0 + (index % 53) as f32 * 97.0;
+            let x = radius * angle.cos();
+            let y = radius * angle.sin();
+            let z = (index % 17) as f32 * 250.0;
+            let mut row = record(&format!("pipe-{index}"), member, root, 8000);
+            row.noun = if index % 2 == 0 { "FTUB" } else { "BEND" }.into();
+            row.world_bounds = [[x, y, z], [x + 50.0, y + 100.0, z + 30.0]];
+            row
+        };
+        for range in [0..441, 441..800, 800..1_150, 1_150..1_512] {
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: range.map(make).collect(),
+                    ..Default::default()
+                }],
+            );
+        }
+        assert_eq!(
+            store
+                .room_members_intersecting(8000, &[[[-20_000.0; 3], [20_000.0; 3]]])
+                .len(),
+            1_512
         );
     }
 
