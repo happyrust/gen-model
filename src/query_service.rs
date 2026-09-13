@@ -289,9 +289,10 @@ impl QueryService {
                 // second time and fail with `Already connected`. Standalone
                 // MCP/query binaries still fall through to normal init.
                 //
-                // 独立那一条走 `attach_store_connected`（只附着、不拉起）而不是裸
-                // `init_surreal`：配成 spawned-mem 时 MCP 探针会自己拉一台空库、再在
-                // 上面回答查询，是「答得出话但全是空」——最难查的那一类。
+                // 独立那一条走 `attach_store_connected` 而不是裸 `init_surreal`：
+                // 它按 `store_mode` 连——`rocksdb` 连配置指的那台；`mem` 连的只能是
+                // 本进程自己的一份空库（服务手上那个库在别的进程里，谁也连不到），
+                // 「答得出话但全是空」是那一档独立探针的固有形状，不是故障。
                 if SUL_DB.query("RETURN 1;").await.is_err() {
                     crate::attach_store_connected().await?;
                 }
@@ -305,7 +306,7 @@ impl QueryService {
     /// 随模型水位推进的派生面发布状态三元组
     /// `(published_version, stale, publication_status)`。
     ///
-    /// 读透形态（`data_face = read-through`，spawned-mem / embedded-mem 的默认）没有数据批次，
+    /// 读透形态（`data_face = read-through`，`store_mode = mem` 派生出的那一档）没有数据批次，
     /// 房间任务读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
     /// 「stale」——读透不承诺文件级发布语义，所以两格回 `null`、状态回 `unsupported`（审核 F-B）。
     ///

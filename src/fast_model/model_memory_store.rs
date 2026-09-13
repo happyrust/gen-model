@@ -1705,7 +1705,7 @@ mod tests {
             model_target: None,
             room_membership: false,
             room_generation: None,
-            medium: crate::fast_model::model_db_adapter::PersistMedium::EmbeddedMem,
+            medium: crate::fast_model::model_db_adapter::PersistMedium::Mem,
         };
         store.record_publication_ack(ProjectionScope::Current, root_8000, ack(8_000, 37));
         store.record_publication_ack(ProjectionScope::Current, root_7998, ack(7_998, 5));
@@ -1794,7 +1794,7 @@ mod tests {
             model_target: None,
             room_membership: true,
             room_generation: Some("rooms-v1".into()),
-            medium: crate::fast_model::model_db_adapter::PersistMedium::EmbeddedMem,
+            medium: crate::fast_model::model_db_adapter::PersistMedium::Mem,
         };
         store.record_publication_ack(ProjectionScope::Current, root, ack.clone());
         assert_eq!(

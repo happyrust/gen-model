@@ -450,7 +450,7 @@ _Avoid_: 房间关系、房间隶属
 _Avoid_: 房间增量（流程含义，已退役）、房间任务、房间阶段、房间收尾、房间刷新、房间同步
 
 **模型发布策略 (Model Publication Policy)**：
-与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 spawned/embedded kv-mem 虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。
+与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 `mem` 档虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。
 _Avoid_: 模型读路由（那只回答读取源）、把 kv-mem process store 叫持久库、memory-only 等于 projection-only
 
 **完整根发布确认 (Root Publication ACK)**：
@@ -458,7 +458,7 @@ _Avoid_: 模型读路由（那只回答读取源）、把 kv-mem process store �
 _Avoid_: 根回执（候选几何）、房间水位、durable ACK、发布队列
 
 **kv-mem 房间启动屏障 (Kv-mem Room Bootstrap Barrier)**：
-`room_membership=true` 时 spawned/embedded kv-mem 每次冷启动从空结果库开始，先冻结 resident generation，再按 dbnum 顺序覆盖 MDB 全部可读 DESI 的模型根与逐根房间发布，全部成功后才置 `model_ready` / `features.room.available`。它不受 `watch_dbnums`、`startup_autorun` 限制；失败保留 health 与诊断服务，但模型完整产出入口不放行。`room_membership=false` 保持快速路径。
+`room_membership=true` 时 `mem` 档每次冷启动从空结果库开始，先冻结 resident generation，再按 dbnum 顺序覆盖 MDB 全部可读 DESI 的模型根与逐根房间发布，全部成功后才置 `model_ready` / `features.room.available`。它不受 `watch_dbnums`、`startup_autorun` 限制；失败保留 health 与诊断服务，但模型完整产出入口不放行。`room_membership=false` 保持快速路径。
 _Avoid_: 房间阶段、房间队列、启动预热（只说 resident）、把 watch 范围当 MDB 完整性范围
 
 **面板 (Panel / PANE)**：
@@ -573,7 +573,7 @@ _Avoid_: 初始化锁、队列锁（泛指时）。
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=embedded-mem`：kv-mem 在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，需要外部 SQL / 探针时可显式切回 `spawned-mem`。房间兼容页仍是直连库的保留功能，embedded 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂默认 `spawned-rocksdb + incremental-overlay + room_membership=true`，无需手改配置选择持久模式；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=mem`：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、再把配置切到 `rocksdb`（服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再在向导改选 `rocksdb`；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -585,7 +585,7 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `embedded-mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="embedded-mem"` 且后端没有 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 以出厂默认 `spawned-rocksdb` 全启动；C 用隔离端口 `spawned-rocksdb`@18010，要求 `medium:"spawned-rocksdb"`、`durable:true` 且 `workspace\.surreal\` 真落盘。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（默认 `mem`，`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
 
@@ -603,13 +603,13 @@ _Avoid_: 监听地址、绑定地址、反向代理监听
 
 # 配置向导 (Setup Wizard)
 
-exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（三档：连已有库带连通 + 版本硬闸 / 新建本机持久库带端口预检 / 试用内存库）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
+exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（两档：`mem` 内存库不用地址 / `rocksdb` 连已有库带连通 + 版本硬闸）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
 
 _Avoid_: 安装向导（没有安装动作）、配置中心 / 配置页（真值在文件，不在服务里）、首跑向导（向导也服务于日常改配置）。
 
 # 设置模式 (Setup Mode)
 
-启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或需要端点的档位——`external` / `spawned-rocksdb` / `spawned-mem`——`v_ip` 空 / `v_port=0`）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；kv-mem 地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
+启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或 `store_mode=rocksdb` 而 `v_ip` 空 / `v_port=0`；`mem` 不看地址）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；库地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
 
 _Avoid_: 安全模式 / 降级模式（正常启动链的失败语义没改）、维护模式（没有这一档）。
 
@@ -619,11 +619,11 @@ workspace 里的 `.first-run-pending` 文件：在场 = 向导没走完，首页
 
 _Avoid_: 锁文件（不互斥任何东西）、初始化标记（初始化完成与否由库水位说了算，不由它）。
 
-# 自带持久库 (Spawned RocksDB Store)
+# 存储形态 (Store Mode)
 
-`store_mode = "spawned-rocksdb"`（ADR-070）：服务每次启动用包内 surreal（fork 2.1.x，版本闸不放宽）在 `v_ip:v_port` 拉起一台 **rocksdb 后端**的库，数据落 `workspace\.surreal\<project_code>`（换代号 = 新目录新库，旧目录留盘人工清），退出收尸只杀进程、**数据活得过重启**；署名 / 心跳 / 四格裁决 / 孤儿回收与 `spawned-mem` 同一套。「创建数据库实例」= 向导第②步选这一档填参数，不是一次性管理动作——一次性动作起的实例没有属主，机器重启后就没了。`v_ip=0.0.0.0` 允许（局域网共库），凭据默认 root/root、暴露前必须改。
+`DbOption.toml` 的 `store_mode`，**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。默认 `mem`。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：仍认，但启动时大声告警说清换成了什么；向导只写新名。
 
-_Avoid_: 内嵌库（有真端口，别的进程连得上）、外置库 / external（那档不由本进程拉起）、创建实例接口（没有这个口，它是一档配置）。
+_Avoid_: 自带持久库 / 自带存储 / spawned-*（服务不再拉库，那一套署名 / 心跳 / 四格裁决 / 孤儿回收随 `store_process.rs` 整个删除）、external（已更名 rocksdb）、embedded-mem / kv-mem（已更名 mem）、创建数据库实例（没有这个动作，库由人起、服务只连）。
 
 # 引导子集 (Guided Subset)
 

@@ -655,12 +655,11 @@ fn start_fixture_stack(
                     .current_dir(run_dir)
                     .env("DB_OPTION_FILE", &config_no_ext)
                     // 套件自己在 18048 上起了一台 rocksdb surreal（上面那一段）：
-                    // 服务必须连它，不许自己再拉一台 memory 库——那样整套断言会对着
+                    // 服务必须连它，不许落到进程内嵌的 mem——那样整套断言会对着
                     // 一个空库跑，症状是「莫名其妙全查不到数据」而不是一条报错。
-                    // `store_mode` 的默认翻过两次（2026-09-04 → spawned-mem，
-                    // 2026-09-07 → 翻回 external），套件不押在它现在指着哪一档上：
-                    // 运行期配置里写了 external，这一行是第二道。
-                    .env("AIOS_STORE_MODE", "external")
+                    // `store_mode` 的默认是 mem（2026-09-13 起两档），套件不押在默认上：
+                    // 运行期配置里写了 rocksdb，这一行是第二道。
+                    .env("AIOS_STORE_MODE", "rocksdb")
                     // 同理，数据面必须是摄入形态：套件的断言建立在「基线真的跑了、pe
                     // 真的进了」之上，而读透形态不做基线。数据面是从 `store_mode` 派生的，
                     // 所以真正定它的是上面那一行；这一行只是把意图写出来，与介质给出的

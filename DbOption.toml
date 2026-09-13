@@ -105,7 +105,7 @@ v_user = "root"
 v_password = "root"
 #【变更 2026-09-11】默认使用自带 kv-mem：服务自行拉起 memory SurrealDB，
 # 进程退出数据即消失；需要外置/持久库时显式改为 external 或 spawned-rocksdb。
-store_mode = "spawned-mem"
+store_mode = "mem"
 # RocksDB/external durable modes keep only newly generated root overlays in kv-mem.
 # Cold roots are queried directly from RocksDB and never hydrated into kv-mem.
 model_cache_mode = "incremental-overlay"

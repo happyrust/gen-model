@@ -1,12 +1,20 @@
 <#
 .SYNOPSIS
-  Bounded live gate for room-enabled read-through spawned-mem startup.
+  [已退役 2026-09-13] Bounded live gate for room-enabled read-through spawned-mem startup.
 
 .DESCRIPTION
-  Copies the backend and resources to a throwaway directory, starts it on isolated
-  HTTP/Surreal ports, waits for the whole-MDB room bootstrap, verifies positive and
-  negative room lookups, exercises memory rebuild, then repeats a cold restart.
-  Every owned process is stopped in finally.
+  **这条门跑不起来了，留档待改写。** 它建立在 `spawned-mem` 之上：服务自己拉一台有端口的
+  memory SurrealDB，脚本再对着那个端口发 SQL（`Invoke-SurrealSql`）去挑正例 / 反例 refno。
+  存储收成 mem / rocksdb 两档（ADR-074）之后，读透形态只剩 `mem`——库在服务进程里、没有
+  端口，脚本发不了 SQL；而 `rocksdb` 档的数据面是 ingest，不是这条门要考的读透形态。
+
+  要把它救回来，得把「挑正例 / 反例」那两条 SQL 换成走服务的 HTTP 面（例如按房间 / 面板
+  的查询接口），其余流程（隔离目录、房间冷启动屏障、rebuild、冷重启两轮）都还成立。
+  改写之前，它一跑就在下面这一行明确报错，而不是跑到一半对着连不上的端口超时。
+
+  原始流程：Copies the backend and resources to a throwaway directory, starts it on
+  isolated HTTP/Surreal ports, waits for the whole-MDB room bootstrap, verifies positive
+  and negative room lookups, exercises memory rebuild, then repeats a cold restart.
 #>
 [CmdletBinding()]
 param(
@@ -23,6 +31,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+throw @"
+Run-KvMemRoomBootstrap.ps1 已退役（2026-09-13，ADR-074）：它依赖服务自己拉起、带端口的 spawned-mem，
+而存储只剩 mem（进程内、无端口）/ rocksdb（连配置指的那台）两档。读透形态（mem）的库连不上 SQL，
+脚本里 Invoke-SurrealSql 那两条查询无处可发。要恢复这条门，先把正例 / 反例的挑选改成走服务 HTTP 面。
+"@
 $repo = Split-Path -Parent $PSScriptRoot
 $out = Join-Path $repo $Output
 New-Item -ItemType Directory -Force $out | Out-Null

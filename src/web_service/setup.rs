@@ -9,7 +9,7 @@
 //! 2. **setup 与应用面均允许远程访问**，默认监听所有网卡。部署方应使用可信网络、
 //!    防火墙或认证代理限制管理入口的访问。
 //! 3. **两个判据各管一件事**：设置模式（启动臂）= 配置无效（`project_path` 缺/不存在，或
-//!    需要端点的档位——除 embedded-mem 外——`v_ip`/`v_port` 留空）；哨兵
+//!    `rocksdb` 档的 `v_ip`/`v_port` 留空）；哨兵
 //!    [`FIRST_RUN_MARKER`] 只管首页 302 到向导，
 //!    不影响启动臂——向导在 ④→⑤ 之间要重启一次，重启后必须**正常启动**（初始化要全
 //!    服务）但向导还没走完，哨兵若也决定启动臂就死锁在设置模式里。库地址填了但连不上
@@ -83,11 +83,9 @@ fn workspace_of(config_path: &Path) -> PathBuf {
 
 /// 配置无效 → 设置模式的理由；`None` = 正常启动。
 ///
-/// 只认两条：`project_path` 缺/不存在，需要端点的档位（external / spawned-rocksdb /
-/// spawned-mem，即除 embedded-mem 外的全部）库地址留空——external 空地址是出厂形态
-/// （Q15），spawn 两档空地址是「写进去必然坏」的手改形状（bind 端口 0 / `ws://:0`，
-/// ADR-070 扩的这一条）。**填了地址但连不上不算**——判据只看配置文件自身，
-/// 不做网络探测，理由见模块 doc。
+/// 只认两条：`project_path` 缺/不存在；`rocksdb` 档的库地址留空（`mem` 档不需要地址）。
+/// 空地址是出厂形态（Q15），回设置模式是安全的逃生门。**填了地址但连不上不算**
+/// ——判据只看配置文件自身，不做网络探测，理由见模块 doc。
 pub fn setup_mode_reason(option: &aios_core::options::DbOption) -> Option<String> {
     setup_mode_reason_for(
         crate::options::store_mode(),
@@ -100,8 +98,8 @@ pub fn setup_mode_reason(option: &aios_core::options::DbOption) -> Option<String
 /// [`setup_mode_reason`] 的纯函数体，store 形态从参数来，测试不必碰进程级 OnceLock。
 ///
 /// `v_port` 在 `DbOption` 里是 `u16`（toml 写字符串也会被 config 层折成数），所以
-/// 「未设置」的哨兵值是 **0**；当前出厂模板已经为 kv-mem 预填 8009，手改为 0
-/// 仍会进入设置模式。写空串会让整份配置反序列化失败，连设置模式都起不来。
+/// 「未设置」的哨兵值是 **0**；出厂模板预填了 8009，手改为 0 仍会进入设置模式。
+/// 写空串会让整份配置反序列化失败，连设置模式都起不来。
 pub(crate) fn setup_mode_reason_for(
     store: crate::options::StoreMode,
     project_path: &str,
@@ -115,7 +113,7 @@ pub(crate) fn setup_mode_reason_for(
     if !Path::new(project_path).is_dir() {
         return Some(format!("project_path 不存在或不是目录：{project_path}"));
     }
-    if store != crate::options::StoreMode::EmbeddedMem && (v_ip.trim().is_empty() || v_port == 0) {
+    if store != crate::options::StoreMode::Mem && (v_ip.trim().is_empty() || v_port == 0) {
         return Some(format!(
             "store_mode={} 需要 v_ip / v_port，当前未设置（v_port=0 是未设置哨兵值）",
             store.as_str()
@@ -161,15 +159,14 @@ fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()>
             .trim()
             .to_string()
     };
-    let store_name = text_value("store_mode")
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    let store = match store_name.as_str() {
-        "" | "spawned-mem" | "kv-mem" => crate::options::StoreMode::SpawnedMem,
-        "external" | "rocksdb" => crate::options::StoreMode::External,
-        "spawned-rocksdb" => crate::options::StoreMode::SpawnedRocks,
-        "embedded-mem" => crate::options::StoreMode::EmbeddedMem,
-        other => anyhow::bail!("store_mode 无效：{other:?}"),
+    // 字面值的解析只有一份（`options::parse_store_mode`，含退役别名）；这里不再抄一遍
+    // 别名表——抄两份的下场是一边认、一边不认。没写 = 默认 mem，与 `options::store_mode` 同。
+    let store_name = text_value("store_mode");
+    let store = if store_name.is_empty() {
+        crate::options::StoreMode::Mem
+    } else {
+        crate::options::parse_store_mode(Some(&store_name))
+            .ok_or_else(|| anyhow::anyhow!("store_mode 无效：{store_name:?}"))?
     };
     let v_port = values
         .get("v_port")
@@ -220,15 +217,12 @@ pub struct SetupConfigPatch {
 /// 写盘前的形状校验。只拦「写进去必然坏」的：值域交给探测口与正常启动去说。
 fn validate_patch(patch: &SetupConfigPatch) -> Vec<String> {
     let mut problems = Vec::new();
+    // 向导只写新名。退役写法在 `options::parse_store_mode` 那边照常认（带告警），
+    // 但没有理由让向导**新写**一个退役值出去。
     if let Some(mode) = patch.store_mode.as_deref()
-        && !matches!(
-            mode,
-            "external" | "spawned-rocksdb" | "spawned-mem" | "embedded-mem"
-        )
+        && !matches!(mode, "mem" | "rocksdb")
     {
-        problems.push(format!(
-            "store_mode 只认 external / spawned-rocksdb / spawned-mem / embedded-mem，收到 {mode:?}"
-        ));
+        problems.push(format!("store_mode 只认 mem / rocksdb，收到 {mode:?}"));
     }
     if let Some(port) = patch.v_port.as_deref()
         && !port.trim().is_empty()
@@ -350,40 +344,11 @@ fn u32_array(values: &[u32]) -> toml_edit::Array {
     array
 }
 
-/// 合并后的整份文档还满足「写进去不会必然坏」吗？目前只有一条：自带两档
-/// （`spawned-mem` / `spawned-rocksdb`）必须带真实本机地址——`resolve_bind` 对空 `v_ip`
-/// 会兜成 127.0.0.1，但 `v_port=0`（未设置哨兵）会把库绑到端口 0，下一次**正常启动**
-/// 必然死在连库上（external 留空则只是进设置模式，安全，不拦——出厂形态正是它）。
-/// 逐补丁校验（[`validate_patch`]）看不到文件里的旧值，这一条只能在合并后判。
-fn merged_document_problem(document: &toml_edit::DocumentMut) -> Option<String> {
-    let key_str = |key: &str| -> Option<String> {
-        let item = document.get(key)?;
-        if let Some(text) = item.as_str() {
-            return Some(text.trim().to_string());
-        }
-        item.as_integer().map(|number| number.to_string())
-    };
-    let store = key_str("store_mode").unwrap_or_default();
-    let default_port = match store.as_str() {
-        "spawned-mem" => Some("8009"),
-        "spawned-rocksdb" => Some("8010"),
-        _ => None,
-    };
-    if let Some(default_port) = default_port {
-        let ip_blank = key_str("v_ip").unwrap_or_default().is_empty();
-        let port = key_str("v_port")
-            .and_then(|port| port.parse::<u16>().ok())
-            .unwrap_or(0);
-        if ip_blank || port == 0 {
-            return Some(format!(
-                "store_mode={store}（自带存储）也要一个真实本机地址来放库：\
-                 v_ip / v_port 不能留空（向导默认 127.0.0.1:{default_port}）。落盘的话下一次\
-                 启动会把库绑到端口 0 而必然失败，所以拦在写盘前，一个字都没写。"
-            ));
-        }
-    }
-    None
-}
+// 合并后的整份文档校验（`merged_document_problem`）随自带存储两档一起退役。
+//
+// 它拦的是「自带两档 + 空地址」：那会让下一次启动把库**绑**到端口 0 而必然失败。
+// 本进程从此一台库都不拉，没有 bind 这回事了；`rocksdb` 档空地址只会安全地回设置
+// 模式（见 [`setup_mode_reason_for`]），那是出厂形态，本来就不该拦。
 
 /// 读文档 → 应用补丁 → 合并后校验 → `.bak` → 原路写回。返回动过的键。
 fn write_config(config_path: &Path, patch: &SetupConfigPatch) -> anyhow::Result<Vec<&'static str>> {
@@ -395,9 +360,6 @@ fn write_config(config_path: &Path, patch: &SetupConfigPatch) -> anyhow::Result<
     let changed = apply_patch(&mut document, patch);
     if changed.is_empty() {
         return Ok(changed);
-    }
-    if let Some(problem) = merged_document_problem(&document) {
-        anyhow::bail!(problem);
     }
     let backup = backup_path(config_path);
     std::fs::copy(config_path, &backup).map_err(|error| {
@@ -965,10 +927,9 @@ mod tests {
 
     // ---------- 判据 ----------
 
-    /// 设置模式判据真值表：只有「project_path 缺/不存在」与「需要端点的档位地址留空」
-    /// 两条。embedded-mem 不需要地址；spawn 两档空地址是必坏形状（bind 端口 0 /
-    /// `ws://:0`），进设置模式当逃生门（ADR-070）；地址填了但连不上不在判据里
-    /// （那是运行期的事）。
+    /// 设置模式判据真值表：只有「project_path 缺/不存在」与「rocksdb 档地址留空」
+    /// 两条。`mem` 不需要地址；`rocksdb` 空地址连不出去，进设置模式当逃生门；
+    /// 地址填了但连不上不在判据里（那是运行期的事）。
     #[test]
     fn setup_mode_triggers_on_missing_project_path_or_blank_endpoint_address() {
         use crate::options::StoreMode;
@@ -976,32 +937,21 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let real = dir.path().to_str().expect("utf8 路径");
 
-        // project_path 缺/不存在：任何 store 形态都进设置模式。
-        for store in [
-            StoreMode::External,
-            StoreMode::SpawnedRocks,
-            StoreMode::SpawnedMem,
-            StoreMode::EmbeddedMem,
-        ] {
+        // project_path 缺/不存在：两档都进设置模式。
+        for store in [StoreMode::RocksDb, StoreMode::Mem] {
             assert!(setup_mode_reason_for(store, "", "127.0.0.1", 8010).is_some());
             assert!(setup_mode_reason_for(store, "   ", "127.0.0.1", 8010).is_some());
             assert!(
                 setup_mode_reason_for(store, "Z:/does/not/exist-9f2c", "127.0.0.1", 8010).is_some()
             );
         }
-        // 需要端点的三档 + 地址未设置（v_ip 空或 v_port=0 哨兵）= 设置模式；补齐即正常。
-        for store in [
-            StoreMode::External,
-            StoreMode::SpawnedRocks,
-            StoreMode::SpawnedMem,
-        ] {
-            assert!(setup_mode_reason_for(store, real, "", 0).is_some());
-            assert!(setup_mode_reason_for(store, real, "127.0.0.1", 0).is_some());
-            assert!(setup_mode_reason_for(store, real, "", 8010).is_some());
-            assert!(setup_mode_reason_for(store, real, "127.0.0.1", 8010).is_none());
-        }
+        // rocksdb 档 + 地址未设置（v_ip 空或 v_port=0 哨兵）= 设置模式；补齐即正常。
+        assert!(setup_mode_reason_for(StoreMode::RocksDb, real, "", 0).is_some());
+        assert!(setup_mode_reason_for(StoreMode::RocksDb, real, "127.0.0.1", 0).is_some());
+        assert!(setup_mode_reason_for(StoreMode::RocksDb, real, "", 8010).is_some());
+        assert!(setup_mode_reason_for(StoreMode::RocksDb, real, "127.0.0.1", 8010).is_none());
         // 进程内嵌那一档不需要外部地址。
-        assert!(setup_mode_reason_for(StoreMode::EmbeddedMem, real, "", 0).is_none());
+        assert!(setup_mode_reason_for(StoreMode::Mem, real, "", 0).is_none());
     }
 
     #[tokio::test]
@@ -1050,7 +1000,7 @@ mod tests {
             let config = dir.path().join("DbOption.toml");
             std::fs::write(
                 &config,
-                "project_path = \"\"\nstore_mode = \"spawned-mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
+                "project_path = \"\"\nstore_mode = \"mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
             )
             .unwrap();
             let marker = dir.path().join(FIRST_RUN_MARKER);
@@ -1074,7 +1024,7 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "project_path = {:?}\nstore_mode = \"spawned-mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
+                "project_path = {:?}\nstore_mode = \"mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
                 project_root.to_string_lossy().replace('\\', "/")
             ),
         )
@@ -1218,74 +1168,54 @@ room_key_word = ["-RM"]
         assert!(!backup.exists(), "没改键就不该碰盘");
     }
 
-    /// 试用模式（spawned-mem）+ 空地址是「写进去必然坏」的形态：下次正常启动会把内存库
-    /// 绑到端口 0。合并后校验拦下（文件一字不动、不落备份）；补上真实地址即放行。
-    /// external + 空地址不拦——那是出厂形态，只会安全地回设置模式。
+    /// 空地址不再是「写进去必然坏」的形态：本进程一台库都不拉，没有 bind 这回事，
+    /// 空地址只会安全地回设置模式。所以两档都放行、文件照写。
     #[test]
-    fn write_config_refuses_spawned_mem_with_a_blank_address() {
+    fn write_config_accepts_a_blank_address_in_either_mode() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("DbOption.toml");
-        let factory_shape = "# 出厂注释\nproject_path = \"D:/X\"\nstore_mode = \"external\"\nv_ip = \"\"\nv_port = \"0\"\n";
+        let factory_shape = "# 出厂注释\nproject_path = \"D:/X\"\nstore_mode = \"rocksdb\"\nv_ip = \"\"\nv_port = \"0\"\n";
         std::fs::write(&path, factory_shape).unwrap();
 
-        let broken = SetupConfigPatch {
-            store_mode: Some("spawned-mem".into()),
+        let mem = SetupConfigPatch {
+            store_mode: Some("mem".into()),
             ..Default::default()
         };
-        let error = write_config(&path, &broken).expect_err("空地址的试用模式必须被拦");
-        assert!(error.to_string().contains("spawned-mem"), "{error:#}");
         assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            factory_shape,
-            "拦下时文件一字不动"
+            write_config(&path, &mem).expect("mem 档放行"),
+            vec!["store_mode"]
         );
-        assert!(
-            !dir.path().join("DbOption.toml.bak").exists(),
-            "拦下时不留备份"
-        );
-
-        let fixed = SetupConfigPatch {
-            store_mode: Some("spawned-mem".into()),
-            v_ip: Some("127.0.0.1".into()),
-            v_port: Some("8009".into()),
-            ..Default::default()
-        };
-        let changed = write_config(&path, &fixed).expect("带地址的试用模式放行");
-        assert_eq!(changed, vec!["store_mode", "v_ip", "v_port"]);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains(r#"store_mode = "spawned-mem""#));
-        assert!(text.contains(r#"v_port = "8009""#));
-        assert!(text.contains("# 出厂注释"));
+        assert!(text.contains(r#"store_mode = "mem""#));
+        assert!(text.contains("# 出厂注释"), "出厂注释不许被改写掉");
 
-        // 自带持久档同律（ADR-070）：空地址拦下、错误里带它自己的默认 8010；补齐放行。
-        let broken_rocks = SetupConfigPatch {
-            store_mode: Some("spawned-rocksdb".into()),
-            v_ip: Some("".into()),
-            v_port: Some("".into()),
-            ..Default::default()
-        };
-        let error = write_config(&path, &broken_rocks).expect_err("空地址的持久档必须被拦");
-        assert!(error.to_string().contains("spawned-rocksdb"), "{error:#}");
-        assert!(error.to_string().contains("8010"), "{error:#}");
-        let fixed_rocks = SetupConfigPatch {
-            store_mode: Some("spawned-rocksdb".into()),
+        let rocks = SetupConfigPatch {
+            store_mode: Some("rocksdb".into()),
             v_ip: Some("127.0.0.1".into()),
             v_port: Some("8010".into()),
             ..Default::default()
         };
-        write_config(&path, &fixed_rocks).expect("带地址的持久档放行");
-        assert!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .contains(r#"store_mode = "spawned-rocksdb""#)
+        assert_eq!(
+            write_config(&path, &rocks).expect("rocksdb 档放行"),
+            vec!["store_mode", "v_ip", "v_port"]
         );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#"store_mode = "rocksdb""#));
+        assert!(text.contains(r#"v_port = "8010""#));
+
+        // 向导不许**新写**一个退役值出去：认得出不等于该继续产出。
+        let retired = SetupConfigPatch {
+            store_mode: Some("spawned-rocksdb".into()),
+            ..Default::default()
+        };
+        assert_eq!(validate_patch(&retired).len(), 1, "退役写法必须被形状校验拦下");
     }
 
     /// PUT 的形状校验：store_mode 拼错、v_port 非数字、监听/展示地址不成形都拦在写盘前。
     #[test]
     fn patch_validation_rejects_malformed_values() {
         let bad = SetupConfigPatch {
-            store_mode: Some("rocksdb".into()),
+            store_mode: Some("embedded-mem".into()),
             v_port: Some("eight".into()),
             http_api_addr: Some("9099".into()),
             http_public_addr: Some("host:9099".into()),
@@ -1294,7 +1224,7 @@ room_key_word = ["-RM"]
         let problems = validate_patch(&bad);
         assert_eq!(problems.len(), 4, "{problems:?}");
         let good = SetupConfigPatch {
-            store_mode: Some("external".into()),
+            store_mode: Some("rocksdb".into()),
             v_port: Some("8010".into()),
             http_api_addr: Some("0.0.0.0:9099".into()),
             http_public_addr: Some("192.168.1.9:9099".into()),
@@ -1334,21 +1264,43 @@ room_key_word = ["-RM"]
         );
     }
 
-    /// runtime 出厂配置默认 embedded-mem；向导必须能原样显示并保存这一档，不能因
-    /// 没有对应 radio 而静默回写成 spawned-mem、再次引入数据库端口冲突。
+    /// 向导第②步只有两档、只写新名（2026-09-13 拍板）：`mem` 是默认且不用地址，
+    /// `rocksdb` 连配置指的那台。退役的四个字面值一个都不许再从向导写出去——
+    /// 页面上唯一允许出现它们的地方是读盘时把旧配置折到两档的那张表。
     #[test]
-    fn the_wizard_preserves_the_embedded_runtime_store_mode() {
+    fn the_wizard_offers_exactly_the_two_store_modes_and_writes_only_new_names() {
         for needle in [
-            r#"id="store-embedded" value="embedded-mem""#,
-            r#"v.store_mode === "embedded-mem""#,
-            r#"return "embedded-mem""#,
-            r#"tier === "embedded-mem""#,
+            r#"id="store-mem" value="mem" checked"#,
+            r#"id="store-rocksdb" value="rocksdb""#,
+            r#"return $("store-mem").checked ? "mem" : "rocksdb";"#,
+            r#"store_mode: tier,"#,
             r#"id="f-http_public_addr""#,
             r#"http_public_addr: val("f-http_public_addr")"#,
         ] {
             assert!(
                 SETUP_PANEL_EMBEDDED.contains(needle),
-                "web/setup.html 缺 embedded-mem 接线：{needle}"
+                "web/setup.html 缺两档接线：{needle}"
+            );
+        }
+        // 退役字面值只许作为「读旧配置」的输入出现（storeTierOf 那一行），不许当 value、
+        // 不许在 return / 比较里出现——那几处一回来，向导就又会把退役值写进配置。
+        for forbidden in [
+            r#"value="embedded-mem""#,
+            r#"value="spawned-mem""#,
+            r#"value="spawned-rocksdb""#,
+            r#"value="external""#,
+            r#"return "embedded-mem""#,
+            r#"return "spawned-"#,
+            r#"return "external""#,
+            r#"tier === "embedded-mem""#,
+            r#"tier === "spawned-"#,
+            r#"tier === "external""#,
+            "btn-precheck-store",
+            "rocks-dir",
+        ] {
+            assert!(
+                !SETUP_PANEL_EMBEDDED.contains(forbidden),
+                "web/setup.html 不许再出现退役接线：{forbidden}"
             );
         }
     }
