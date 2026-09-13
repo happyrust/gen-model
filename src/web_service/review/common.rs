@@ -1892,4 +1892,162 @@ mod tests {
             );
         }
     }
+
+    // ========================================================================
+    // 分页 / 排序默认值与 id 线上形制（2026-09-13 R5 复核，计划 §7「形状走样」）
+    // ========================================================================
+
+    /// 分页与排序默认值不写在响应结构体里，所以 §2 那轮结构体逐字对比覆盖不到它们：
+    /// 换掉一个 `ORDER BY` 方向或一个 `unwrap_or`，响应键集一字不变，前端却会拿到
+    /// 顺序相反的列表或凭空多出来的一页——正是计划 §7 说的「静默失效」。
+    ///
+    /// 每条右边是旧端出处（`plant-model-gen` 只读基线，sha256 见
+    /// `docs/evidence/2026-09-13-plant-model-gen-baseline-sha256.md`）。
+    #[test]
+    fn review_pagination_and_sort_defaults_are_pinned_verbatim() {
+        // (新端文件, 出现次数, 字面量, 旧端出处)
+        const PINS: &[(&str, usize, &str, &str)] = &[
+            // 列表分页：两端都是 limit 缺省 100 / offset 缺省 0，页内 created_at 倒序。
+            (
+                "tasks.rs",
+                1,
+                "let limit = query.limit.unwrap_or(100);",
+                "review_api.rs:2251",
+            ),
+            (
+                "tasks.rs",
+                1,
+                "let offset = query.offset.unwrap_or(0);",
+                "review_api.rs:2252",
+            ),
+            (
+                "common.rs",
+                1,
+                "SELECT * FROM review_tasks {} ORDER BY created_at DESC LIMIT {} START {}",
+                "review_api.rs:1123",
+            ),
+            // 工作流历史：history 倒序、workflow 正序，两条方向相反且都被前端渲染。
+            (
+                "tasks.rs",
+                1,
+                "SELECT * FROM review_workflow_history WHERE task_id = $task_id ORDER BY timestamp DESC",
+                "review_api.rs:2923",
+            ),
+            ("tasks.rs", 1, "ORDER BY timestamp ASC", "review_api.rs:5644"),
+            // 驳回重流转列表。
+            (
+                "tasks.rs",
+                1,
+                "ORDER BY updated_at DESC",
+                "review_api.rs:4794",
+            ),
+            // 确认记录与评论。
+            (
+                "records.rs",
+                1,
+                "SELECT * FROM review_records WHERE task_id = $task_id ORDER BY confirmed_at DESC",
+                "review_api.rs:3592",
+            ),
+            (
+                "comments.rs",
+                1,
+                "SELECT * FROM review_comments WHERE {} ORDER BY created_at ASC",
+                "review_api.rs:3948",
+            ),
+            (
+                "comments.rs",
+                1,
+                "SELECT * FROM review_records WHERE {} ORDER BY confirmed_at DESC",
+                "review_api.rs:4333",
+            ),
+            // 批注处理状态：三条分支（仅 form_id / form_id+task_id / 回退）同款倒序。
+            (
+                "annotation_state.rs",
+                3,
+                "ORDER BY updated_at DESC",
+                "review_annotation_state.rs:472,477,483",
+            ),
+            // 导出的三条硬上限，换一个数就是「导出悄悄少了一截」。
+            (
+                "sync.rs",
+                2,
+                "SELECT * FROM review_tasks WHERE (deleted IS NONE OR deleted = false) ORDER BY created_at DESC LIMIT 100",
+                "review_api.rs:6547,6558",
+            ),
+            (
+                "sync.rs",
+                1,
+                "SELECT * FROM review_comments ORDER BY created_at ASC LIMIT 10000",
+                "review_api.rs:6623",
+            ),
+            (
+                "sync.rs",
+                1,
+                "SELECT * FROM review_records WHERE task_id IN $task_ids ORDER BY confirmed_at ASC LIMIT 10000",
+                "review_api.rs:6658",
+            ),
+        ];
+
+        let sources: [(&str, &str); 6] = [
+            ("tasks.rs", include_str!("tasks.rs")),
+            ("records.rs", include_str!("records.rs")),
+            ("comments.rs", include_str!("comments.rs")),
+            ("annotation_state.rs", include_str!("annotation_state.rs")),
+            ("sync.rs", include_str!("sync.rs")),
+            ("common.rs", include_str!("common.rs")),
+        ];
+
+        let mut failures = Vec::new();
+        for (file, expected, needle, legacy) in PINS {
+            let (_, source) = sources
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("{file} 不在扫描清单里"));
+            // 本测试自己这张表也在 common.rs 里，扫 common.rs 时会把表项数进去；
+            // 剥掉本函数体之后再数（针在 `PINS` 里，不在被扫的 handler 代码中）。
+            let body = strip_comments(source);
+            let scanned = match body.split_once("const PINS: &[(&str, usize, &str, &str)] = &[") {
+                Some((before, after)) => match after.split_once("\n        ];") {
+                    Some((_, tail)) => format!("{before}{tail}"),
+                    None => body.clone(),
+                },
+                None => body.clone(),
+            };
+            let hits = scanned.matches(needle).count();
+            if hits != *expected {
+                failures.push(format!(
+                    "{file}: 期望 {expected} 处、实际 {hits} 处 —— 旧端出处 {legacy}\n    {needle}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "分页 / 排序默认值与旧端不再逐字一致（响应键集不变，前端会静默拿到错序或错页）：\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// `get_comments_by_annotation` / `get_task_history` / `sync export` 三处把行主键写成
+    /// `format!("{:?}", r.id.id)`，这个字符串**直接进响应体**，前端再拿它回头调
+    /// `DELETE|PATCH /api/review/comments/item/{comment_id}`。
+    ///
+    /// 旧端同位是 `r.id.key`（3.x fork 的 `RecordIdKey`，`crates/types/src/value/record_id/key.rs:18`
+    /// 起 `#[derive(Debug)]`，变体名 `String` / `Number`）；本仓 2.1.4 fork 是
+    /// `sql::Id`（`crates/core/src/sql/id/mod.rs:31` 起同样 `#[derive(Debug)]`，变体名也是
+    /// `String` / `Number`）。字段名换了、Debug 输出没换——这条断言就是钉住「没换」，
+    /// 哪天 SDK 给 `Id` 加了自定义 `Display`/`Debug`，前端的评论 id 会整体变形。
+    #[test]
+    fn record_id_debug_shape_matches_the_legacy_sdk() {
+        use surrealdb::sql::{Id, Thing};
+
+        let string_key = Thing::from(("review_comments", "cmt-1"));
+        assert_eq!(
+            format!("{:?}", string_key.id),
+            "String(\"cmt-1\")",
+            "字符串主键的线上形制变了，前端按 id 回调的删改评论会 404"
+        );
+
+        let number_key = Thing::from(("review_comments", Id::Number(7)));
+        assert_eq!(format!("{:?}", number_key.id), "Number(7)");
+    }
 }
