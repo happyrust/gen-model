@@ -471,6 +471,24 @@ impl DirectSchema {
         &self.template_dir
     }
 
+    /// 模板目录，按进程缓存一次。
+    ///
+    /// [`Self::open_from_env`] 为了交出这个路径，要重解 schema root、重开 schema pack
+    /// 清单、重载 attlib，还要打几行 `[E3D schema]` 日志。只要路径的调用方在热路径上
+    /// （`model_target` 身份核对是逐根跑的），那份加载就是纯浪费。
+    ///
+    /// 缓存是安全的：解析只依赖 DbOption 的 `e3d_version`、[`SCHEMA_ROOT_ENV`]、
+    /// [`TEMPLATE_DIR_ENV`] 与项目路径，四者在一个进程里都不变——设置模式改完配置是
+    /// **重启**进程，不是就地重解。
+    pub(crate) fn template_dir_from_env() -> anyhow::Result<&'static Path> {
+        static TEMPLATE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        if let Some(dir) = TEMPLATE_DIR.get() {
+            return Ok(dir);
+        }
+        let schema = Self::open_from_env()?;
+        Ok(TEMPLATE_DIR.get_or_init(|| schema.template_dir))
+    }
+
     /// The release named by the schema pack this schema was opened from
     /// (DbOption `e3d_version`). Explicit [`Self::open`] overrides return
     /// `None` because a directory of `.dat` files does not identify its own
@@ -1155,6 +1173,24 @@ mod tests {
         fn file_of(&self, _dbnum: u32) -> Option<(String, PathBuf)> {
             None
         }
+    }
+
+    /// 模板目录的热路径取法必须命中缓存，而不是每次重跑一遍 schema 加载：
+    /// `model_target` 身份核对是逐根做的，一个作用域有几百个根。
+    #[test]
+    fn the_template_directory_is_resolved_once_and_matches_a_full_schema_load() {
+        let first = DirectSchema::template_dir_from_env().expect("E3D template directory");
+        let second = DirectSchema::template_dir_from_env().expect("E3D template directory");
+        assert!(
+            std::ptr::eq(first, second),
+            "第二次取应该命中缓存，不该再加载一次 schema"
+        );
+        assert_eq!(
+            first,
+            DirectSchema::open_from_env()
+                .expect("E3D template directory")
+                .template_dir()
+        );
     }
 
     #[test]

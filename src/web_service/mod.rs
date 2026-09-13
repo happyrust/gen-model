@@ -1,8 +1,8 @@
 //! Web 服务（REST + WebSocket），面向前端提供触发生成与增量更新信息。
 //!
 //! 设计与评审结论见 `docs/specs/web-service-api.md`：
-//! - 监听地址优先取 `http_api_addr`，缺失时兼容 `server_release_ip`，两者都空时只监听本机
-//!   `127.0.0.1:9099`；
+//! - 监听地址优先取 `http_api_addr`，缺失时兼容 `server_release_ip`，两者都空时监听所有网卡
+//!   `0.0.0.0:9099`；
 //! - 领域结构体 JSON 原样透传，服务层零领域逻辑；
 //! - 任务进度经 WebSocket 广播，任务记录仅内存保留（durable 语义由水位 + pending 表承担）。
 
@@ -31,13 +31,13 @@ use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::query_service::{QueryError, QueryService};
 
-const DEFAULT_HTTP_API_ADDR: &str = "127.0.0.1:9099";
+const DEFAULT_HTTP_API_ADDR: &str = "0.0.0.0:9099";
 
 /// HTTP 监听地址的兼容解析。
 ///
 /// `http_api_addr` 是当前配置键；老现场只有 `server_release_ip`。服务进程不能因为新键
 /// 缺失而让 Web task 立即成功返回——read-through 主流程会随之正常退出，看起来既不像
-/// 配置错也不像崩溃。两项都没给时只开放回环默认值，不意外扩大网络暴露面。
+/// 配置错也不像崩溃。两项都没给时监听所有网卡，允许远程访问配置向导与应用。
 pub(crate) fn effective_http_api_addr(configured: Option<&str>, server_release_ip: &str) -> String {
     configured
         .map(str::trim)
@@ -48,6 +48,30 @@ pub(crate) fn effective_http_api_addr(configured: Option<&str>, server_release_i
         })
         .unwrap_or(DEFAULT_HTTP_API_ADDR)
         .to_owned()
+}
+
+static BOUND_HTTP_ADDR: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+pub(crate) fn runtime_http_api_addr(configured: Option<&str>, legacy: &str) -> String {
+    BOUND_HTTP_ADDR.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone().unwrap_or_else(|| effective_http_api_addr(configured, legacy))
+}
+
+/// Keep the successful socket open: probing and rebinding would race another process.
+async fn bind_http_address(addr: &str, automatic: bool) -> anyhow::Result<tokio::net::TcpListener> {
+    match setup::bind_with_handoff(addr).await {
+        Ok(listener) => Ok(listener),
+        Err(error) if automatic && error.downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::AddrInUse) => {
+            let mut endpoint = tokio::net::lookup_host(addr).await?
+                .next().ok_or_else(|| anyhow::anyhow!("HTTP address has no resolved endpoint: {addr}"))?;
+            endpoint.set_port(0);
+            let listener = tokio::net::TcpListener::bind(endpoint).await?;
+            println!("HTTP 默认端口 {addr} 已占用，自动选择 {}", listener.local_addr()?);
+            Ok(listener)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The immutable project identity served by this process.
@@ -211,6 +235,7 @@ impl ApiError {
         let (status, code) = match error.code {
             "INVALID_ARGUMENT" => (StatusCode::BAD_REQUEST, "invalid_argument"),
             "NOT_FOUND" => (StatusCode::NOT_FOUND, "not_found"),
+            "UPDATING" => (StatusCode::CONFLICT, "updating"),
             "NO_RENDERABLE_GEOMETRY" => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "no_renderable_geometry")
             }
@@ -327,8 +352,11 @@ async fn serve_configured(
             println!("http_api_addr 未配置，兼容使用 server_release_ip 监听 {addr}");
         }
     }
+    let automatic = ext.http_api_addr.as_deref().is_none_or(|value| value.trim().is_empty());
+    let listener = bind_http_address(&addr, automatic).await?;
+    let addr = listener.local_addr()?.to_string();
     let public_addr = public_http_addr(&addr, ext.http_public_addr.as_deref());
-    serve_with_ready(mgr, &addr, &public_addr, ext.http_api_cors.clone(), ready).await
+    serve_with_ready(mgr, &addr, &public_addr, ext.http_api_cors.clone(), ready, Some(listener)).await
 }
 
 /// 在 `addr` 上启动服务并阻塞运行（正常情况下不返回）。
@@ -338,7 +366,7 @@ pub async fn serve(
     public_addr: &str,
     cors_origins: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
-    serve_with_ready(mgr, addr, public_addr, cors_origins, None).await
+    serve_with_ready(mgr, addr, public_addr, cors_origins, None, None).await
 }
 
 async fn serve_with_ready(
@@ -347,7 +375,14 @@ async fn serve_with_ready(
     public_addr: &str,
     cors_origins: Option<Vec<String>>,
     ready: Option<tokio::sync::oneshot::Sender<()>>,
+    bound_listener: Option<tokio::net::TcpListener>,
 ) -> anyhow::Result<()> {
+    let listener = match bound_listener {
+        Some(listener) => listener,
+        None => setup::bind_with_handoff(addr).await?,
+    };
+    *BOUND_HTTP_ADDR.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(listener.local_addr()?.to_string());
     let db_option = aios_core::get_db_option();
     let ui_root = PathBuf::from(
         std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
@@ -512,7 +547,6 @@ async fn serve_with_ready(
     )));
 
     // 交接窗口内重试绑定：restart 口的父进程还有零点几秒才交出端口。
-    let listener = setup::bind_with_handoff(addr).await?;
     if let Some(ready) = ready {
         let _ = ready.send(());
     }
@@ -871,11 +905,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn automatic_http_port_skips_an_occupied_address_without_releasing_the_socket() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let requested = occupied.local_addr().unwrap();
+        let selected = bind_http_address(&requested.to_string(), true).await.unwrap();
+        let actual = selected.local_addr().unwrap();
+        assert_eq!(actual.ip(), requested.ip());
+        assert_ne!(actual.port(), requested.port());
+        assert_ne!(actual.port(), 0);
+        assert!(tokio::net::TcpListener::bind(actual).await.is_err());
+        let connection = tokio::net::TcpStream::connect(actual).await.unwrap();
+        let _accepted = selected.accept().await.unwrap();
+        drop(connection);
+    }
+
+    #[tokio::test]
+    async fn explicit_http_port_remains_strict() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let error = bind_http_address(&occupied.local_addr().unwrap().to_string(), false)
+            .await.unwrap_err();
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn automatic_http_binding_does_not_hide_invalid_addresses() {
+        assert!(bind_http_address("127.0.0.1:not-a-port", true).await.is_err());
+    }
+
     #[test]
     fn query_errors_have_stable_http_statuses() {
         for (code, status) in [
             ("INVALID_ARGUMENT", StatusCode::BAD_REQUEST),
             ("NOT_FOUND", StatusCode::NOT_FOUND),
+            ("UPDATING", StatusCode::CONFLICT),
             ("ATTR_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
             ("CHAIN_INCOMPLETE", StatusCode::UNPROCESSABLE_ENTITY),
             ("DB_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),

@@ -61,7 +61,7 @@ const RUNTIME_STACK_SIZE: usize = 64 * 1024 * 1024;
 #[derive(clap::Parser)]
 #[command(
     name = "aios-database",
-    version,
+    version = aios_database::build_info::display_version(),
     about = "AVEVA E3D 增量解析与几何生成服务"
 )]
 struct Cli {
@@ -170,10 +170,11 @@ fn print_version(args: &VersionArgs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&info)?);
     } else {
         println!(
-            "{} {} (release {}, git {}{}, target {}, profile {})",
+            "{} {} (release {}, built {}, git {}{}, target {}, profile {})",
             info.product,
             info.build_id,
             info.version,
+            info.build_time,
             info.git_commit,
             if info.git_dirty { ", dirty" } else { "" },
             info.target,

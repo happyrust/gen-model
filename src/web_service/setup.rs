@@ -6,10 +6,8 @@
 //! 1. **配置真值是 `DbOption.toml` 文件**，本模块只是它的 HTTP 读写口。写盘走 `toml_edit`
 //!    外科手术式改键——注释是决策史、未知键可能是别的版本的键，两者都原样保留；写前
 //!    先落 `DbOption.toml.bak`。
-//! 2. **setup API 按 TCP 对端判回环**（仅 127.0.0.1/::1 放行，不认 `X-Forwarded-For` 这类
-//!    代理头）。出厂监听是 `0.0.0.0`（Q16），按监听地址判会把包括本机在内的所有人一起
-//!    拒掉；按对端判，应用面局域网可达、setup 面仍只许本机。对外暴露 setup 面必须另加
-//!    认证（ADR-069 硬边界）。
+//! 2. **setup 与应用面均允许远程访问**，默认监听所有网卡。部署方应使用可信网络、
+//!    防火墙或认证代理限制管理入口的访问。
 //! 3. **两个判据各管一件事**：设置模式（启动臂）= 配置无效（`project_path` 缺/不存在，或
 //!    需要端点的档位——除 embedded-mem 外——`v_ip`/`v_port` 留空）；哨兵
 //!    [`FIRST_RUN_MARKER`] 只管首页 302 到向导，
@@ -191,25 +189,6 @@ fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()>
         anyhow::bail!("配置尚未就绪：{reason}");
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// 回环闸
-// ---------------------------------------------------------------------------
-
-/// setup API 的准入：TCP 对端必须是回环地址。判据只有对端 IP 一个——不看监听地址
-/// （全 0 监听下那会拒掉所有人），也不看任何请求头（代理头伪造不设防线就是设错了防线）。
-fn require_loopback(peer: SocketAddr) -> Result<(), ApiError> {
-    if peer.ip().is_loopback() {
-        return Ok(());
-    }
-    Err(ApiError {
-        status: StatusCode::FORBIDDEN,
-        code: "loopback_only",
-        message: format!(
-            "setup 面只许服务器本机访问（对端 {peer}）。请在服务器上用 http://127.0.0.1:<端口>/setup.html 打开向导。"
-        ),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -680,10 +659,9 @@ fn probe_port(bound_port: Option<u16>, addr: &str) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 async fn setup_state(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     let workspace = ctx.workspace_dir();
     Ok(Json(json!({
         "mode": ctx.mode,
@@ -696,10 +674,9 @@ async fn setup_state(
 }
 
 async fn setup_get_config(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     let text = std::fs::read_to_string(&ctx.config_path).map_err(|error| {
         ApiError::precondition(format!(
             "读配置 {} 失败：{error}",
@@ -724,11 +701,10 @@ async fn setup_get_config(
 }
 
 async fn setup_put_config(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
     Json(patch): Json<SetupConfigPatch>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     let problems = validate_patch(&patch);
     if !problems.is_empty() {
         return Err(ApiError::bad_request(problems.join("；")));
@@ -749,20 +725,18 @@ async fn setup_put_config(
 }
 
 async fn setup_probe_project(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     Json(request): Json<ProjectProbeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     Ok(Json(scan_project_path(Path::new(
         request.project_path.trim(),
     ))))
 }
 
 async fn setup_probe_store(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     Json(request): Json<StoreProbeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     if request.v_ip.trim().is_empty() || request.v_port.trim().is_empty() {
         return Err(ApiError::bad_request("v_ip / v_port 不能为空"));
     }
@@ -772,19 +746,17 @@ async fn setup_probe_store(
 }
 
 async fn setup_probe_port(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
     Json(request): Json<PortProbeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     Ok(Json(probe_port(ctx.bound_port, &request.http_api_addr)))
 }
 
 async fn setup_restart(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Response, ApiError> {
-    require_loopback(peer)?;
     let poll_hint = restart_poll_hint(&ctx.config_path);
     println!("[setup] 收到重启请求，300ms 后交接给新进程（{poll_hint}）");
     tokio::spawn(async move {
@@ -806,8 +778,8 @@ async fn setup_restart(
         .into_response())
 }
 
-/// 重启后向导该去轮询的地址：读**文件里**（刚保存的）`http_api_addr`，`0.0.0.0` 映射成
-/// `127.0.0.1`（浏览器导航不了全 0）。读不出就让前端用自己手上的表单值。
+/// 重启轮询保留配置中的监听地址；浏览器将通配地址映射为当前访问主机。
+/// 读不出就让前端用自己手上的表单值。
 fn restart_poll_hint(config_path: &Path) -> String {
     let addr = std::fs::read_to_string(config_path)
         .ok()
@@ -819,7 +791,7 @@ fn restart_poll_hint(config_path: &Path) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    browser_facing(&addr)
+    addr.trim().to_string()
 }
 
 /// `0.0.0.0:9099` → `127.0.0.1:9099`；空值原样回去（前端自己兜）。
@@ -842,10 +814,9 @@ fn spawn_replacement() -> anyhow::Result<u32> {
 }
 
 async fn setup_complete(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_loopback(peer)?;
     ensure_completion_ready(ctx.mode, &ctx.config_path)
         .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
     let workspace = ctx.workspace_dir();
@@ -929,7 +900,7 @@ pub async fn bind_with_handoff(addr: &str) -> anyhow::Result<tokio::net::TcpList
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     continue;
                 }
-                return Err(anyhow::anyhow!("绑定 {addr} 失败：{error}"));
+                return Err(anyhow::Error::new(error).context(format!("绑定 {addr} 失败")));
             }
         }
     }
@@ -955,6 +926,9 @@ async fn setup_mode_health(State(reason): State<&'static str>) -> Json<serde_jso
 pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
     let ext = crate::get_db_option_ext();
     let addr = super::effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
+    let automatic = ext.http_api_addr.as_deref().is_none_or(|value| value.trim().is_empty());
+    let listener = super::bind_http_address(&addr, automatic).await?;
+    let addr = listener.local_addr()?.to_string();
     let ui_root = PathBuf::from(
         std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
     );
@@ -971,7 +945,6 @@ pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
         .route("/", get(|| async { Redirect::temporary("/setup.html") }))
         .fallback(get(|| async { Redirect::temporary("/setup.html") }));
 
-    let listener = bind_with_handoff(&addr).await?;
     println!("*** 设置模式：{reason_static} ***");
     let setup_url = format!("http://{}/setup.html", browser_facing(&addr));
     println!(
@@ -1031,43 +1004,28 @@ mod tests {
         assert!(setup_mode_reason_for(StoreMode::EmbeddedMem, real, "", 0).is_none());
     }
 
-    /// 回环闸真值表：判据只有对端 IP。v4/v6 回环放行，内网 / 公网一律 403——
-    /// 出厂监听是 0.0.0.0（Q16），这道闸是 setup 面唯一的防线。
-    #[test]
-    fn the_loopback_gate_admits_loopback_peers_only() {
-        for allowed in ["127.0.0.1:5000", "127.8.8.8:1", "[::1]:9099"] {
-            let peer: SocketAddr = allowed.parse().unwrap();
-            assert!(require_loopback(peer).is_ok(), "{allowed} 该放行");
+    #[tokio::test]
+    async fn remote_clients_can_read_setup_state_and_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("DbOption.toml");
+        std::fs::write(&config_path, "http_api_addr = \"0.0.0.0:2001\"\n").unwrap();
+        let ctx = SetupCtx { mode: "setup", config_path,
+            ui_root: dir.path().join("web"), bound_port: Some(2001) };
+        for address in ["10.30.230.42:41234", "[2001:db8::1]:41234"] {
+            let peer = address.parse().unwrap();
+            assert!(setup_state(ConnectInfo(peer), State(ctx.clone())).await.is_ok());
+            assert!(setup_get_config(ConnectInfo(peer), State(ctx.clone())).await.is_ok());
         }
-        for denied in [
-            "192.168.1.5:5000",
-            "10.0.0.7:80",
-            "8.8.8.8:443",
-            "[fe80::1]:9099",
-            "[2001:db8::1]:80",
-        ] {
-            let peer: SocketAddr = denied.parse().unwrap();
-            let error = require_loopback(peer).expect_err(denied);
-            assert_eq!(error.status, StatusCode::FORBIDDEN);
-            assert_eq!(error.code, "loopback_only");
-        }
-    }
-
-    /// 闸的判据必须**只有**对端地址：签名收的就是 `SocketAddr`，且整个模块不读请求头
-    /// ——代理头（forwarded 族）是伪造得了的东西，按它放行等于没有闸。
-    #[test]
-    fn the_gate_never_reads_forwarded_headers() {
-        let source = include_str!("setup.rs");
-        assert!(
-            source.contains("fn require_loopback(peer: SocketAddr) -> Result<(), ApiError>"),
-            "回环闸的入参只能是 TCP 对端地址"
-        );
-        // 拼出来找，免得这句测试自己先匹配上自己。
-        let header_reader = format!("Header{}", "Map");
-        assert!(
-            !source.contains(&header_reader),
-            "setup 模块不许读请求头（{header_reader}）——回环闸只认 TCP 对端"
-        );
+        assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2001");
+        let saved = setup_put_config(
+            ConnectInfo("10.30.230.42:41234".parse().unwrap()), State(ctx.clone()),
+            Json(SetupConfigPatch { http_api_addr: Some("0.0.0.0:2002".into()),
+                ..Default::default() }),
+        ).await;
+        assert!(saved.is_ok());
+        assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2002");
+        std::fs::copy(backup_path(&ctx.config_path), &ctx.config_path).unwrap();
+        assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2001");
     }
 
     /// 首跑哨兵：建了就 pending，删一次真删，再删幂等。
@@ -1104,7 +1062,7 @@ mod tests {
                 bound_port: Some(9099),
             };
             let result =
-                setup_complete(ConnectInfo("127.0.0.1:41234".parse().unwrap()), State(ctx)).await;
+                setup_complete(ConnectInfo("10.30.230.42:41234".parse().unwrap()), State(ctx)).await;
             assert!(result.is_err(), "mode={mode} 不得完成无效配置");
             assert!(marker.is_file(), "拒绝完成时不得删除首跑哨兵");
         }
@@ -1124,7 +1082,7 @@ mod tests {
         let marker = dir.path().join(FIRST_RUN_MARKER);
         std::fs::write(&marker, "pending").unwrap();
         let result = setup_complete(
-            ConnectInfo("127.0.0.1:41234".parse().unwrap()),
+            ConnectInfo("10.30.230.42:41234".parse().unwrap()),
             State(SetupCtx {
                 mode: "normal",
                 config_path: config,

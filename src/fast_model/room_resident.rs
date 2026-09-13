@@ -2215,6 +2215,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "real AMS 8000 model and room calculation parity; isolated DB_OPTION_FILE required"]
+    async fn ams_8000_models_and_rooms_without_database() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(Some(8000), true).await
+    }
+
+    #[tokio::test]
     #[ignore = "real AMS 7022 model and room initialization after route repair"]
     async fn ams_7022_models_and_rooms_without_database() -> anyhow::Result<()> {
         measure_ams_memory_rooms(Some(7022), false).await

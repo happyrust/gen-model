@@ -102,8 +102,12 @@ impl DirectTreeService {
         Ok(metadata)
     }
 
-    fn is_current(&self) -> bool {
+    pub(crate) fn is_current(&self) -> bool {
         self.reader.view().is_ok_and(|view| Arc::ptr_eq(&self.store, &view))
+    }
+
+    pub(crate) fn source_metadata(&self, dbnum: u32) -> anyhow::Result<e3d_io::db_element::DbMetadata> {
+        Ok(self.store.metadata(dbnum)?)
     }
 
     pub fn project(&self) -> &str {
@@ -178,6 +182,22 @@ impl DirectTreeService {
         root: RefU64,
         unit_types: &[String],
     ) -> anyhow::Result<Vec<GenerationRoot>> {
+        let requested = RefnoEnum::from(root);
+        if let Some(ancestor) = self.generation_root_of(root, unit_types)?
+            && ancestor.root != requested
+        {
+            return Ok(vec![ancestor]);
+        }
+        generation_roots_in_subtree_on(self.store.as_ref(), root, unit_types)
+    }
+
+    /// Resolve the requested element's owning generation root by OWNER point reads.
+    /// Unlike subtree enumeration, a container never selects its first descendant.
+    pub fn generation_root_of(
+        &self,
+        root: RefU64,
+        unit_types: &[String],
+    ) -> anyhow::Result<Option<GenerationRoot>> {
         self.store.element_snapshot(root)?;
         let requested = RefnoEnum::from(root);
         let nodes = self
@@ -199,13 +219,9 @@ impl DirectTreeService {
                 ))
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
-        if let Some(ancestor) = resolve_element_generation_root(requested, unit_types, |refno| {
+        Ok(resolve_element_generation_root(requested, unit_types, |refno| {
             nodes.get(&refno).cloned()
-        }) && ancestor.root != requested
-        {
-            return Ok(vec![ancestor]);
-        }
-        generation_roots_in_subtree_on(self.store.as_ref(), root, unit_types)
+        }))
     }
 
     /// Self -> OWNER -> ... chain, matching Plant UI's existing contract.

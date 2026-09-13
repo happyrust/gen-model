@@ -1373,6 +1373,33 @@ fn startup_data_wait_is_stalled(
 
 #[cfg(test)]
 mod startup_data_wait_tests {
+    #[test]
+    fn read_through_startup_reports_each_waiting_stage() {
+        let source = include_str!("lib.rs");
+        let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
+            .split_once("pub async fn run_app(").unwrap().0;
+        for stage in ["store", "mdb", "http", "route-directory", "spatial-room", "session-baseline"] {
+            let begin = body.find(&format!("stage={stage} event=begin")).unwrap();
+            let done = body.find(&format!("stage={stage} event=done elapsed_ms=")).unwrap();
+            assert!(begin < done, "{stage} must bracket its operation");
+        }
+        assert!(body.find("stage=http event=done").unwrap()
+            < body.find("stage=session-baseline event=begin").unwrap());
+    }
+
+    #[test]
+    fn read_through_startup_never_generates_the_whole_mdb() {
+        let source = include_str!("lib.rs");
+        let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
+            .split_once("pub async fn run_app(").unwrap().0;
+        for forbidden in ["model_dbnum_ensure::start_and_wait", "scan_index(",
+            "scan_elements(", "bootstrap_read_through_rooms("] {
+            assert!(!body.contains(forbidden), "startup contains {forbidden}");
+        }
+        assert!(body.contains("initialization.configure_model_bootstrap(false)"));
+        assert!(body.contains("targeted_model_refresh(&refresh_manager, &change).await"));
+    }
+
     use super::*;
 
     fn snapshot(
@@ -1785,196 +1812,6 @@ pub async fn attach_store_connected() -> anyhow::Result<()> {
     ensure_store_connected(&db_option, crate::store_process::StoreStartup::AttachOnly).await
 }
 
-#[cfg(feature = "ws")]
-async fn bootstrap_read_through_rooms(
-    manager: Arc<AiosDBManager>,
-    db_option: &DbOption,
-    directory: &crate::data_interface::mdb_route_directory::MdbRouteDirectory,
-) -> bool {
-    use crate::data_interface::task_registry::TaskState;
-
-    let initialization =
-        crate::data_interface::initialization_phase::InitializationCoordinator::global();
-    let started = std::time::Instant::now();
-    let room_generation = match crate::fast_model::model_db_adapter::required_room_generation() {
-        Ok(Some(generation)) => generation,
-        Ok(None) => {
-            initialization.fail_startup_rooms(
-                "blocked",
-                "room_membership=true but no resident generation was frozen",
-            );
-            return false;
-        }
-        Err(error) => {
-            initialization.fail_startup_rooms(
-                "blocked",
-                format!("room resident is unavailable: {error:#}"),
-            );
-            return false;
-        }
-    };
-    // 这里要的只是 dbnum 清单，不是元素表：从路由目录（CURD 成员清单，零元素 I/O）取 MDB 全部
-    // DESI，按 dbnum 升序覆盖（CONTEXT.md「kv-mem 房间启动屏障」）。每库的整库扫描在
-    // `model_dbnum_ensure` 自己的 `scan_index` 里，那是显式全量操作，允许。
-    let mut dbnums = directory
-        .element_databases()
-        .filter(|route| route.db_type.eq_ignore_ascii_case("DESI"))
-        .map(|route| route.dbnum)
-        .collect::<Vec<_>>();
-    dbnums.sort_unstable();
-    dbnums.dedup();
-    let dbnums_total = dbnums.len();
-    initialization.set_startup_room_totals(dbnums_total, 0);
-
-    let mut dbnums_done = 0usize;
-    let mut dbnums_failed = 0usize;
-    let mut roots_total = 0usize;
-    let mut roots_ready = 0usize;
-    let mut roots_failed = 0usize;
-    let mut room_edges_written = 0usize;
-    let mut failures = Vec::new();
-    let mut peak_rss_mib = crate::data_interface::model_concurrency::process_rss_bytes()
-        .map(|bytes| bytes / (1024 * 1024));
-    for dbnum in dbnums {
-        if let Some(current) = crate::data_interface::model_concurrency::process_rss_bytes()
-            .map(|bytes| bytes / (1024 * 1024))
-        {
-            peak_rss_mib = Some(peak_rss_mib.unwrap_or_default().max(current));
-        }
-        initialization.record_startup_room_progress(
-            dbnums_done,
-            dbnums_failed,
-            roots_ready,
-            roots_failed,
-            Some(dbnum),
-            "model_and_room_publication",
-            room_edges_written,
-            started.elapsed().as_millis(),
-            peak_rss_mib,
-        );
-        match crate::data_interface::model_dbnum_ensure::start_and_wait(
-            manager.clone(),
-            &db_option.project_name,
-            dbnum,
-            room_generation.clone(),
-        )
-        .await
-        {
-            Ok(entry) => {
-                let total = entry.total_units.unwrap_or_default() as usize;
-                let ready = entry.units_done.unwrap_or_default() as usize;
-                let failed = entry
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("failed"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_else(|| total.saturating_sub(ready) as u64)
-                    as usize;
-                let room_edges = entry
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("room_edges_written"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_default() as usize;
-                let max_transaction_bytes = entry
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("max_transaction_bytes"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_default() as usize;
-                roots_total += total;
-                roots_ready += ready;
-                roots_failed += failed;
-                room_edges_written += room_edges;
-                initialization.observe_startup_room_transaction_bytes(max_transaction_bytes);
-                println!(
-                    "[room-bootstrap] dbnum={dbnum} state={} roots={ready}/{total} failed={failed} room_edges={room_edges} max_transaction_bytes={max_transaction_bytes} elapsed_ms={}",
-                    entry.state.as_str(),
-                    started.elapsed().as_millis()
-                );
-                dbnums_done += 1;
-                if entry.state != TaskState::Succeeded {
-                    dbnums_failed += 1;
-                    failures.push(format!(
-                        "dbnum={dbnum} task={} state={} ready={ready}/{total} failed={failed}",
-                        entry.task_id,
-                        entry.state.as_str()
-                    ));
-                }
-
-                #[test]
-                fn read_through_room_bootstrap_finishes_before_model_ready() {
-                    let source = include_str!("lib.rs").replace("\r\n", "\n");
-                    let body = source
-                        .split_once("async fn run_read_through_core(")
-                        .expect("read-through core")
-                        .1
-                        .split_once("#[cfg(not(feature = \"ws\"))]")
-                        .expect("read-through core end")
-                        .0;
-                    let begin = body
-                        .find("initialization.begin_startup_rooms()")
-                        .expect("room barrier begins");
-                    let resident = body
-                        .find("prepare_room_resident_at_startup(&db_option).await")
-                        .expect("resident initialization");
-                    let bootstrap = body
-                        .find("bootstrap_read_through_rooms(manager.clone()")
-                        .expect("whole-MDB model+room bootstrap");
-                    let ready = body
-                        .find("initialization.mark_model_ready()")
-                        .expect("model ready");
-                    assert!(begin < resident && resident < bootstrap && bootstrap < ready);
-
-                    let bootstrap_body = source
-                        .split_once("async fn bootstrap_read_through_rooms(")
-                        .expect("bootstrap helper")
-                        .1
-                        .split_once("/// File/memory-first service path")
-                        .expect("bootstrap helper end")
-                        .0;
-                    assert!(bootstrap_body.contains(".element_databases()"));
-                    assert!(bootstrap_body.contains("dbnums.sort_unstable()"));
-                    assert!(bootstrap_body.contains("model_dbnum_ensure::start_and_wait("));
-                    assert!(
-                        !bootstrap_body.contains("watch_scope::"),
-                        "startup room initialization covers the whole MDB, not only watch_dbnums"
-                    );
-                }
-            }
-            Err(error) => {
-                dbnums_done += 1;
-                dbnums_failed += 1;
-                failures.push(format!("dbnum={dbnum}: {error:#}"));
-            }
-        }
-        if let Some(current) = crate::data_interface::model_concurrency::process_rss_bytes()
-            .map(|bytes| bytes / (1024 * 1024))
-        {
-            peak_rss_mib = Some(peak_rss_mib.unwrap_or_default().max(current));
-        }
-        initialization.set_startup_room_totals(dbnums_total, roots_total);
-        initialization.record_startup_room_progress(
-            dbnums_done,
-            dbnums_failed,
-            roots_ready,
-            roots_failed,
-            None,
-            "between_dbnums",
-            room_edges_written,
-            started.elapsed().as_millis(),
-            peak_rss_mib,
-        );
-    }
-    if failures.is_empty() {
-        initialization.settle_startup_rooms();
-        true
-    } else {
-        initialization.fail_startup_rooms("partial", failures.join("; "));
-        false
-    }
-}
-
 /// 一个库的文件变了（会话前进 / 回滚 / 换文件）：只动**这个 dbnum** 的模型
 /// （`docs/plans/2026-09-12-lazy-startup-dev-plan.md` L4 / §3.4，母计划不变量 7）。
 ///
@@ -2158,11 +1995,17 @@ async fn targeted_model_refresh(
 /// in the background.
 #[cfg(feature = "ws")]
 async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
+    let startup_started = Instant::now();
+    let stage_started = Instant::now();
+    println!("[startup] stage=store event=begin");
     // 内存库承载模型发布，必须在接受模型请求前就绪；属性始终从文件读取。
     if !crate::options::store_mode().is_durable() {
         ensure_store_connected(&db_option, crate::store_process::StoreStartup::Spawn).await?;
         crate::data_interface::embedded_surql::define_embedded_functions().await?;
     }
+    println!("[startup] stage=store event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    let stage_started = Instant::now();
+    println!("[startup] stage=mdb event=begin");
     let mut manager = AiosDBManager::init_form_config().await?;
     manager
         .init_mdb(
@@ -2178,12 +2021,16 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             )
         })?;
     let manager = Arc::new(manager);
+    println!("[startup] stage=mdb event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    let stage_started = Instant::now();
+    println!("[startup] stage=http event=begin enabled={}", cfg!(feature = "http_api"));
     #[cfg(feature = "http_api")]
     let web_task = crate::web_service::start_configured(manager.clone()).await?;
-    // 不再预热元素骨架（lazy-startup L3）：HTTP 已经 spawn，这里只造 dbnum 路由目录打横幅
-    // ——零元素 I/O，初始化三步紧跟其后，不等任何元素读取。属性 / 树服务各自按需开库；树服务
-    // 剩下的骨架用途（WORL 枚举、noun / owner）由它第一次被用到时自建，L5 换掉。
+    println!("[startup] stage=http event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    // HTTP 已就绪；这里只建立 dbnum 路由目录，不读取元素。
+    // 属性与树服务按目标 RefNo 惰性访问，不建立全 MDB 元素骨架。
     let step_started = Instant::now();
+    println!("[startup] stage=route-directory event=begin");
     let directory = startup_route_directory(&db_option).map_err(|error| {
         anyhow!(
             "build dbnum route directory for MDB {}: {error:#}",
@@ -2191,18 +2038,31 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
         )
     })?;
     print_route_directory_banner(&directory, step_started);
+    println!("[startup] stage=route-directory event=done elapsed_ms={}", step_started.elapsed().as_millis());
 
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
     let rooms_required = crate::options::room_membership();
-    initialization.configure_model_bootstrap(rooms_required);
+    // Startup prepares reference inputs only. Whole-database generation is an
+    // explicit model/rebuild operation, never implied by enabling room queries.
+    initialization.configure_model_bootstrap(false);
     initialization.mark_data_ready_without_manifest();
     if rooms_required {
         initialization.begin_startup_rooms();
     }
+    let stage_started = Instant::now();
+    println!("[startup] stage=spatial-room event=begin room_membership={rooms_required}");
     prepare_room_resident_at_startup(&db_option).await;
+    println!("[startup] stage=spatial-room event=done elapsed_ms={}", stage_started.elapsed().as_millis());
     let room_bootstrap_ready = !rooms_required
-        || bootstrap_read_through_rooms(manager.clone(), &db_option, &directory).await;
+        || crate::fast_model::room_resident::current_for_calculation().is_ok();
+    if rooms_required {
+        if room_bootstrap_ready {
+            initialization.settle_startup_rooms();
+        } else {
+            initialization.fail_startup_rooms("blocked", "room reference model is unavailable");
+        }
+    }
     if room_bootstrap_ready {
         let _ = initialization.open_model_phase();
         let _ = initialization.mark_model_ready();
@@ -2213,7 +2073,11 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     // 此前这里是 `refresh_if_stale`——任一库的会话号一变就重解 MDB 成员、整份重扫全 MDB 重建
     // 元素骨架，再把**全部**发布回执作废；一个 DESI 的 SAVEWORK = 重扫 AMS 28 库 / JEU 417 库。
     // 先叫一次把每个库的基线记进账本：第一次见只记不报，之后每轮返回的才是「自上次以来变了的库」。
+    let stage_started = Instant::now();
+    println!("[startup] stage=session-baseline event=begin");
     let seeded = directory.poll_generations();
+    println!("[startup] stage=session-baseline event=done elapsed_ms={} total_ms={}",
+        stage_started.elapsed().as_millis(), startup_started.elapsed().as_millis());
     debug_assert!(seeded.is_empty(), "第一次轮询只记基线，不该报变化");
     let refresh_manager = manager.clone();
     let refresh_directory = directory.clone();

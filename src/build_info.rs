@@ -17,12 +17,29 @@ pub const TARGET: &str = env!("AIOS_BUILD_TARGET");
 pub const PROFILE: &str = env!("AIOS_BUILD_PROFILE");
 pub const RUSTC: &str = env!("AIOS_RUSTC_VERSION");
 
+/// Format the embedded build timestamp, never the process startup time.
+pub fn build_time() -> &'static str {
+    static TIME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TIME.get_or_init(|| {
+        let epoch = BUILD_EPOCH.parse::<i64>().expect("valid embedded build epoch");
+        let utc = chrono::DateTime::from_timestamp(epoch, 0).expect("valid build timestamp");
+        utc.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .format("%Y-%m-%d %H:%M:%S %:z").to_string()
+    })
+}
+
+pub fn display_version() -> &'static str {
+    static VERSION_TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION_TEXT.get_or_init(|| format!("{VERSION} (built {})", build_time()))
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct BuildInfo {
     pub product: &'static str,
     pub version: &'static str,
     pub build_id: &'static str,
     pub build_epoch: &'static str,
+    pub build_time: &'static str,
     pub git_commit: &'static str,
     pub git_dirty: bool,
     pub target: &'static str,
@@ -36,6 +53,7 @@ pub fn current() -> BuildInfo {
         version: VERSION,
         build_id: BUILD_ID,
         build_epoch: BUILD_EPOCH,
+        build_time: build_time(),
         git_commit: GIT_COMMIT,
         git_dirty: GIT_DIRTY_TEXT == "true",
         target: TARGET,
@@ -56,5 +74,8 @@ mod tests {
         assert!(info.build_id.starts_with(info.version));
         assert!(!info.git_commit.is_empty());
         assert!(!info.target.is_empty());
+        let parsed = chrono::DateTime::parse_from_str(info.build_time, "%Y-%m-%d %H:%M:%S %:z").unwrap();
+        assert_eq!(parsed.timestamp().to_string(), BUILD_EPOCH);
+        assert!(display_version().starts_with(&format!("{VERSION} (built ")));
     }
 }

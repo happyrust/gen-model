@@ -2260,7 +2260,7 @@ fn local_generated_mesh(element: &GeneratedElement) -> PlantMesh {
     mesh
 }
 
-fn model_file_identity_digest(path: &Path, session: u32) -> anyhow::Result<String> {
+pub(crate) fn model_file_identity_digest(path: &Path, session: u32) -> anyhow::Result<String> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("read model target identity {}", path.display()))?;
     let modified = metadata

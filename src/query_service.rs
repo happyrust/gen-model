@@ -581,6 +581,21 @@ impl QueryService {
 
     async fn room(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        if crate::options::data_face().is_read_through() && crate::options::room_membership() {
+            let tree = self.direct_tree.get().await
+                .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
+            return crate::data_interface::room_read_through::lookup(refno, tree).await
+                .map_err(|error| {
+                    let code = if error.is::<crate::data_interface::room_read_through::RoomNotReady>() {
+                        "UPDATING"
+                    } else if error.chain().any(|cause| matches!(
+                        cause.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
+                        Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { refno: missing, .. })
+                            if missing == &refno.to_string() || missing == &refno.to_pdms_str()
+                    )) { "NOT_FOUND" } else { "SOURCE_UNAVAILABLE" };
+                    QueryError::new(code, error)
+                });
+        }
         Self::ensure_model_db().await?;
         let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
         #[derive(Deserialize)]
@@ -589,11 +604,8 @@ impl QueryService {
             #[serde(default)]
             room_num: Option<String>,
         }
-        // A REFNO's first word is a project-local Ref0, not the database number.
-        // Resolve it through the MDB skeleton just like the tree HTTP handlers do;
-        // using `get_0()` here silently queried an unrelated dbnum and made every
-        // valid room membership look empty in plant-ui (for example Ref0 17496 is
-        // owned by dbnum 1112 in the AMS /ALL MDB).
+        // Decode the database through the shared native RefNo route. MDB membership
+        // selects the project-local file; no element skeleton is needed.
         let tree = self
             .direct_tree
             .get()
@@ -610,16 +622,12 @@ impl QueryService {
             )
         })?;
         let generation_root = tree
-            .generation_roots_in_subtree(
+            .generation_root_of(
                 refno.refno(),
                 &crate::data_interface::generation_root::configured_delivery_unit_types(),
             )
             .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?
-            .into_iter()
-            .next()
-            .and_then(|root| {
-                crate::fast_model::e3d_model_service::parse_refno(&root.root.to_pdms_str()).ok()
-            });
+            .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root));
         let edges = read_room_memberships(&SUL_DB, &refno.to_string())
             .await
             .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;
@@ -1114,6 +1122,8 @@ mod tests {
         }
         assert!(room.contains("read_room_memberships(&SUL_DB"), "{room}");
         assert!(room.contains("tree.dbnum_of(refno.refno())"), "{room}");
+        assert!(room.contains(".generation_root_of("), "{room}");
+        assert!(!room.contains(".generation_roots_in_subtree("), "{room}");
         assert!(
             !room.contains("let dbnum = refno.refno().get_0()"),
             "ref0 is not a dbnum: {room}"
