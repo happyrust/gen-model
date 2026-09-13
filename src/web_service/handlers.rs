@@ -588,25 +588,10 @@ fn require_room_bootstrap_ready() -> Result<(), ApiError> {
     if !crate::options::room_membership() || !crate::options::data_face().is_read_through() {
         return Ok(());
     }
-    let bootstrap =
-        crate::data_interface::initialization_phase::InitializationCoordinator::global()
-            .snapshot()
-            .room_bootstrap;
-    if bootstrap.status == "ready" {
-        return Ok(());
-    }
-    let code = if matches!(bootstrap.status, "idle" | "initializing" | "") {
-        "room_bootstrap_in_progress"
-    } else {
-        "room_bootstrap_unavailable"
-    };
-    Err(ApiError::service_unavailable(
-        code,
-        format!(
-            "room-enabled read-through model publication is {}; inspect /health.initialization.room_bootstrap",
-            bootstrap.status
-        ),
-    ))
+    // Point generation needs the room geometry, not publication of every MDB root.
+    crate::fast_model::room_resident::current_for_calculation()
+        .map(|_| ())
+        .map_err(|error| ApiError::service_unavailable("room_reference_unavailable", error.to_string()))
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {

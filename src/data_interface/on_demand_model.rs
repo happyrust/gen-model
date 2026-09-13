@@ -242,20 +242,24 @@ impl AiosDBManager {
         force: bool,
     ) -> anyhow::Result<OnDemandModelResult> {
         // Detached producers must never lose an active transaction or frozen window.
-        if super::model_read_route::memory_only_scope().is_some()
-            || super::batch_worker::active_data_window().is_some()
+        if super::batch_worker::active_data_window().is_some()
             || super::staging::write_context::active_staging_writes().is_some()
         {
             return self.ensure_exact_generation_root_inner(requested_refno, root, root_noun, force).await;
         }
         static FLIGHTS: std::sync::OnceLock<super::generation_flight::Flights<OnDemandModelResult>> = std::sync::OnceLock::new();
         let version = generation_source_identity(root).await?;
-        let key = format!("{}|{}|{}|{}|{}", self.db_option.project_name,
-            self.db_option.mdb_name, root.to_pdms_str(), force, version);
+        let memory_scope = super::model_read_route::memory_only_scope();
+        let key = format!("{}|{}|{}|{}|{}|{:?}", self.db_option.project_name,
+            self.db_option.mdb_name, root.to_pdms_str(), force, version, memory_scope);
         let manager = self.clone();
         let noun = root_noun.to_string();
         let future = FLIGHTS.get_or_init(Default::default).run(key, async move {
-            manager.ensure_exact_generation_root_inner(root, root, &noun, force).await
+            let work = manager.ensure_exact_generation_root_inner(root, root, &noun, force);
+            match memory_scope {
+                Some(dbnum) => super::model_read_route::scope_memory_only(dbnum, work).await,
+                None => work.await,
+            }
         });
         let mut result = tokio::time::timeout(std::time::Duration::from_secs(110), future).await
             .map_err(|_| ModelGenerationInProgress { root_refno: root.to_pdms_str() })??;
@@ -560,8 +564,7 @@ fn memory_root_current(root: RefnoEnum) -> bool {
         })
         .is_some_and(|receipt| {
             // Frozen/task-local callers retain their pinned-window cache semantics.
-            if super::model_read_route::memory_only_scope().is_some()
-                || super::batch_worker::active_data_window().is_some()
+            if super::batch_worker::active_data_window().is_some()
                 || super::staging::write_context::active_staging_writes().is_some() {
                 return true;
             }
