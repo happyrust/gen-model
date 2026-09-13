@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
+use crate::fast_model::spatial_query;
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
@@ -1256,6 +1257,116 @@ pub async fn tree_ancestors(
         "source": "direct",
         "refnos": refnos,
     })))
+}
+
+/// `GET /api/v1/spatial/nearby[/refnos]` 的 query 串：身份三格 + 查询参数原文。
+///
+/// 查询参数全部按字串收、由 `spatial_query::SpatialQueryParams::parse` 解析：`serde(flatten)`
+/// 之下 urlencoded 会把每个值先缓冲成字串，数字字段直接标 `f32` / `usize` 会在反序列化时报
+/// 「invalid type: string」；自己解还能给出中文错误信息。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialNearbyReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_query::RawSpatialQuery,
+}
+
+/// `spatial/*` 的错误：`ApiError` 之外多一档「空间树未就绪」（spec §4.13）。它要带
+/// `Retry-After` 与非空的 `detail.state`，而 `ApiError` 的信封把 `detail` 写死为 `null`、也不带
+/// 响应头（spec §3），所以单独成型，不去改动统一信封与它的十几处构造点。
+#[derive(Debug)]
+pub enum SpatialApiError {
+    Api(ApiError),
+    NotReady(crate::fast_model::spatial_state::SpatialTreeState),
+}
+
+impl From<ApiError> for SpatialApiError {
+    fn from(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+}
+
+impl From<spatial_query::SpatialQueryError> for SpatialApiError {
+    fn from(error: spatial_query::SpatialQueryError) -> Self {
+        use spatial_query::SpatialQueryError;
+        match error {
+            SpatialQueryError::BadRequest(message) => Self::Api(ApiError::bad_request(message)),
+            SpatialQueryError::NotFound(message) => Self::Api(ApiError::not_found(message)),
+            SpatialQueryError::NotReady(state) => Self::NotReady(state),
+            SpatialQueryError::Internal(error) => Self::Api(ApiError::from_domain(error)),
+        }
+    }
+}
+
+impl IntoResponse for SpatialApiError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Api(error) => error.into_response(),
+            Self::NotReady(state) => {
+                let retry_after = spatial_query::RETRY_AFTER_SECS;
+                let body = json!({
+                    "code": "spatial_not_ready",
+                    "message": format!(
+                        "空间树状态为 {}，范围查询暂不可用；{retry_after} 秒后重试",
+                        state.as_str()
+                    ),
+                    "detail": { "state": state.as_str() },
+                });
+                let mut response =
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    header::HeaderValue::from(retry_after),
+                );
+                response
+            }
+        }
+    }
+}
+
+/// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页
+/// （spec §4.13）。只读树、不取空间串行锁；树不在 Ready / ReadyEmpty 回 503 `spatial_not_ready`。
+pub async fn spatial_nearby(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialNearbyReq>,
+) -> Result<Json<spatial_query::NearbyResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby(&params, service.as_ref()).await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。
+pub async fn spatial_nearby_refnos(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialNearbyReq>,
+) -> Result<Json<spatial_query::NearbyRefnosResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_refnos(&params, service.as_ref()).await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/negative-nouns — 负实体 noun 清单（`TOTAL_NEG_NOUN_NAMES` 去重）。
+pub async fn spatial_negative_nouns(
+    State(state): State<AppState>,
+    Query(identity): Query<ProjectReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &identity)?;
+    Ok(Json(json!({ "nouns": spatial_query::negative_nouns() })))
 }
 
 /// POST /api/v1/update/preview — 映射 `preview_manual_update`（spec §4.2）。

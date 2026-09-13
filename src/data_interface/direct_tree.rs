@@ -417,6 +417,18 @@ impl DirectTreeProvider {
     }
 }
 
+impl DirectTreeService {
+    /// 这个元素的 `NAME`（去掉首尾空白）；没有名字、或读不出记录都回 `None`。
+    ///
+    /// 与 [`Self::noun_of`] 同一来源、同一代价（回元素记录读一次），所以同样**只按页调**：
+    /// `/api/v1/spatial/nearby` 只给本页（≤ 1000 条）补名字（spec §4.13；计划 §5-2 按 (a)）。
+    pub fn name_of(&self, refno: RefU64) -> Option<String> {
+        let attrs = self.store.named_attmap(refno).ok()?;
+        let name = attrs.get_as_string("NAME")?.trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
 #[cfg(test)]
 mod lazy_live_tests {
     use super::*;
