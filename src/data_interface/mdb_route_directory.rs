@@ -577,6 +577,7 @@ impl MdbRouteDirectory {
                 Ok(identity) => identity,
                 Err(error) => {
                     if state.unreadable.insert(route.dbnum) {
+                        crate::process_diagnostics::event(0, "increment.file.failed", &format!("dbnum={} path={} error={error}", route.dbnum, route.path.display()));
                         log::warn!(
                             "[route-poll] dbnum {} 的文件 {} stat 不到，本轮跳过：{error}",
                             route.dbnum,
@@ -609,7 +610,9 @@ impl MdbRouteDirectory {
                     match observed {
                         Ok(value) => value,
                         Err(error) => {
-                            state.unreadable.insert(route.dbnum);
+                            if state.unreadable.insert(route.dbnum) {
+                                crate::process_diagnostics::event(0, "increment.file.failed", &format!("dbnum={} session error={error:#}", route.dbnum));
+                            }
                             log::warn!("[route-poll] dbnum {} session read failed: {error:#}", route.dbnum);
                             continue;
                         }
@@ -617,6 +620,7 @@ impl MdbRouteDirectory {
                 }
             };
             if state.unreadable.remove(&route.dbnum) {
+                crate::process_diagnostics::event(0, "increment.file.recovered", &format!("dbnum={} path={}", route.dbnum, route.path.display()));
                 log::info!(
                     "[route-poll] dbnum {} 的文件 {} 又能读了",
                     route.dbnum,

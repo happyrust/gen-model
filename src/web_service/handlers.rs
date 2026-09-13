@@ -1624,6 +1624,8 @@ pub async fn model_ensure(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.ensure",
+        format!("refno={} force={}", req.refno, req.force));
     resolve_identity(&state, &req.identity)?;
     let Ok(refu) = RefU64::from_str(&req.refno) else {
         return Err(ApiError::bad_request(format!(
@@ -1668,7 +1670,11 @@ pub async fn model_ensure(
     let worker_refno = req.refno.clone();
     let direct_tree = state.direct_tree.clone();
     let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
+        let mut worker_log = crate::process_diagnostics::Operation::begin("model.worker.begin",
+            format!("refno={worker_refno} dbnum={memory_only_dbnum:?} force={force}"));
         let generate = async move {
+            let mut root_log = crate::process_diagnostics::Operation::begin("model.roots.begin",
+                format!("refno={refno}"));
             // 范围下的生成根由 e3d-io 骨架给（唯一路：legacy 那条经 SurrealDB `pe` 子树上溯的
             // `ensure_model_scope_generated` 随 db 读路由于 2026-09-08 退役）。
             let tree = direct_tree.get().await?;
@@ -1680,6 +1686,7 @@ pub async fn model_ensure(
             })
             .await
             .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
+            root_log.finish(format!("refno={refno} generation_roots={}", roots.len()));
             mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
                 .await
         };
@@ -1690,7 +1697,10 @@ pub async fn model_ensure(
             None => generate.await,
         };
         if let Err(error) = &result {
+            worker_log.finish(format!("failed refno={worker_refno} error={error:#}"));
             log::error!("按需生成后台失败 refno={worker_refno}: {error:#}");
+        } else {
+            worker_log.finish(format!("success refno={worker_refno}"));
         }
         result
     })
@@ -1704,9 +1714,14 @@ pub async fn model_ensure(
     })?;
     let result = task_result
         .map_err(|error| {
+            diagnostic.finish(format!("worker_join_failed: {error}"));
             ApiError::from_domain(anyhow::anyhow!("按需生成后台任务异常结束: {error}"))
         })?
-        .map_err(ensure_error)?;
+        .map_err(|error| {
+            diagnostic.finish(format!("generation_failed: {error:#}"));
+            ensure_error(error)
+        })?;
+    diagnostic.finish(format!("generated refno={} available={}", req.refno, result.model_available));
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
     if let Some(route) = route {
         let object = payload.as_object_mut().ok_or_else(|| {
