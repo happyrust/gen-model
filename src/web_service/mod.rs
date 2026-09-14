@@ -269,12 +269,12 @@ impl ApiError {
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
         if error
-            .downcast_ref::<crate::fast_model::model_memory_store::OverlayBackpressure>()
+            .downcast_ref::<crate::fast_model::model_memory_store::OverlayRejected>()
             .is_some()
         {
             Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "overlay_backpressure",
+                code: "overlay_rejected",
                 message,
             }
         } else if matches!(
@@ -299,7 +299,7 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let retry_after =
-            self.status == StatusCode::SERVICE_UNAVAILABLE && self.code == "overlay_backpressure";
+            self.status == StatusCode::SERVICE_UNAVAILABLE && self.code == "overlay_rejected";
         let body = serde_json::json!({
             "code": self.code,
             "message": self.message,
@@ -1005,15 +1005,12 @@ mod tests {
     }
 
     #[test]
-    fn overlay_backpressure_is_retryable_service_unavailable() {
+    fn overlay_rejection_is_retryable_service_unavailable() {
         let error = ApiError::from_domain(anyhow::Error::new(
-            crate::fast_model::model_memory_store::OverlayBackpressure {
-                projected_bytes: 11,
-                max_bytes: 10,
-            },
+            crate::fast_model::model_memory_store::OverlayRejected,
         ));
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.code, "overlay_backpressure");
+        assert_eq!(error.code, "overlay_rejected");
         let response = error.into_response();
         assert_eq!(
             response.headers().get(axum::http::header::RETRY_AFTER),

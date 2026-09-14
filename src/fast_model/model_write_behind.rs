@@ -20,8 +20,7 @@ use super::model_db_adapter::{
     frozen_room_calculator, persist_roots_batched_unacked,
 };
 use super::model_memory_store::{
-    ModelMemoryStore, OverlayBackpressure, ProjectionCommit, ProjectionScope, RootReceipt,
-    packed_refno,
+    ModelMemoryStore, OverlayRejected, ProjectionCommit, ProjectionScope, RootReceipt, packed_refno,
 };
 
 const ROOTS_PER_FLUSH: usize = 512;
@@ -59,7 +58,6 @@ enum PendingStatus {
 struct PendingRoot {
     root: RefNo,
     identity: RootIdentity,
-    pending_bytes: usize,
     attempts: u32,
     next_retry_at: Instant,
     status: PendingStatus,
@@ -340,7 +338,6 @@ pub(crate) struct WriteBehindSnapshot {
     pub ack_mismatches: u64,
     pub last_attempt_at: Option<String>,
     pub pending_unique_roots: usize,
-    pub pending_bytes: usize,
     pub in_flight_roots: usize,
     pub retrying_roots: usize,
     pub blocked_roots: usize,
@@ -439,7 +436,6 @@ fn snapshot_for(controller: &ModelWriteBehind) -> WriteBehindSnapshot {
         ack_mismatches: state.ack_mismatches,
         last_attempt_at: state.last_attempt_at.clone(),
         pending_unique_roots: state.pending.len(),
-        pending_bytes: state.pending.values().map(|root| root.pending_bytes).sum(),
         in_flight_roots: state
             .pending
             .values()
@@ -475,15 +471,48 @@ fn snapshot_for(controller: &ModelWriteBehind) -> WriteBehindSnapshot {
     }
 }
 
+/// 一个库此刻还压在队列里的根。
+pub(crate) struct FlushState {
+    /// 还没拿到 durable ACK 的根数：在飞的、待重试的、被判死的都算。
+    pub pending: usize,
+    /// 被判死的那些根与原因。它们不会自己好，等下去只会等到超时。
+    pub blocked: Vec<(RefNo, String)>,
+}
+
+/// 这个库在这道缝上还剩什么。给一次性工具等队列排空用
+/// （[`super::model_db_adapter::wait_until_model_rows_are_durable`]）；生产不看它，
+/// 交出去就算交完。
+pub(crate) fn flush_state(dbnum: u32) -> FlushState {
+    let state = ModelWriteBehind::global().state();
+    let mut flush = FlushState {
+        pending: 0,
+        blocked: Vec::new(),
+    };
+    for root in state
+        .pending
+        .values()
+        .filter(|root| root.root.dbno() == dbnum)
+    {
+        flush.pending += 1;
+        if root.status == PendingStatus::Blocked {
+            flush.blocked.push((
+                root.root,
+                root.last_error.clone().unwrap_or_else(|| "无原因".into()),
+            ));
+        }
+    }
+    flush
+}
+
 /// Atomically publish a current projection cohort to memory and register every
 /// root receipt with the process-local durability state machine.
-pub(crate) fn publish(commits: Vec<ProjectionCommit>) -> Result<MemoryReady, OverlayBackpressure> {
+pub(crate) fn publish(commits: Vec<ProjectionCommit>) -> Result<MemoryReady, OverlayRejected> {
     if !crate::options::store_mode().is_durable() {
         let roots = commits
             .iter()
             .filter_map(|commit| commit.receipt.as_ref().map(|(root, _)| *root))
             .collect();
-        ModelMemoryStore::global().try_commit_current(commits)?;
+        ModelMemoryStore::global().try_commit_current(commits);
         return Ok(MemoryReady { roots });
     }
     ModelWriteBehind::global().publish_commits(commits)
@@ -493,7 +522,7 @@ impl ModelWriteBehind {
     fn publish_commits(
         &'static self,
         commits: Vec<ProjectionCommit>,
-    ) -> Result<MemoryReady, OverlayBackpressure> {
+    ) -> Result<MemoryReady, OverlayRejected> {
         let receipts = commits
             .iter()
             .filter_map(|commit| {
@@ -506,12 +535,9 @@ impl ModelWriteBehind {
         let now = Instant::now();
         let mut state = self.state();
         if !state.accepting {
-            return Err(OverlayBackpressure {
-                projected_bytes: self.store.cache_stats().resident_bytes.saturating_add(1),
-                max_bytes: self.store.cache_stats().resident_bytes,
-            });
+            return Err(OverlayRejected);
         }
-        self.store.try_commit_current(commits)?;
+        self.store.try_commit_current(commits);
         for (root, receipt) in receipts.values() {
             state.next_submission_epoch = state.next_submission_epoch.wrapping_add(1).max(1);
             let submission_epoch = state.next_submission_epoch;
@@ -520,7 +546,6 @@ impl ModelWriteBehind {
                 root.dbno(),
                 *root,
                 RootIdentity::from(receipt),
-                self.store.resident_bytes_of_root(*root),
                 now,
                 Some(submission_epoch),
             );
@@ -803,9 +828,11 @@ async fn settle(controller: &ModelWriteBehind, dbnum: u32, settlement: Settlemen
     let mut state = controller.state();
     match outcome {
         Ok(()) => {
-            if state.settlements.get(&dbnum).is_some_and(|current| {
-                current.target_sesno <= settlement.target_sesno
-            }) {
+            if state
+                .settlements
+                .get(&dbnum)
+                .is_some_and(|current| current.target_sesno <= settlement.target_sesno)
+            {
                 state.settlements.remove(&dbnum);
             }
             state
@@ -842,8 +869,7 @@ fn reconcile_untracked_roots(controller: &ModelWriteBehind, dbnum: u32) {
             continue;
         };
         let identity = RootIdentity::from(&receipt);
-        let pending_bytes = store.resident_bytes_of_root(root);
-        upsert_pending(&mut state, dbnum, root, identity, pending_bytes, now, None);
+        upsert_pending(&mut state, dbnum, root, identity, now, None);
     }
 }
 
@@ -852,14 +878,12 @@ fn upsert_pending(
     dbnum: u32,
     root: RefNo,
     identity: RootIdentity,
-    pending_bytes: usize,
     now: Instant,
     submission_epoch: Option<u64>,
 ) {
     let key = (dbnum, packed_refno(root));
     match state.pending.get_mut(&key) {
         Some(entry) if entry.identity == identity => {
-            entry.pending_bytes = pending_bytes;
             if let Some(submission_epoch) = submission_epoch {
                 entry.submission_epoch = submission_epoch;
                 entry.attempts = 0;
@@ -881,7 +905,6 @@ fn upsert_pending(
         PendingRoot {
             root,
             identity,
-            pending_bytes,
             attempts: 0,
             next_retry_at: now,
             status: PendingStatus::Pending,
@@ -1076,11 +1099,10 @@ mod tests {
         let mut state = State::default();
         let root = RefNo::new(7997, 100);
         let now = Instant::now();
-        for bytes in 0..10_000 {
-            upsert_pending(&mut state, 7997, root, identity("same"), bytes, now, None);
+        for _ in 0..10_000 {
+            upsert_pending(&mut state, 7997, root, identity("same"), now, None);
         }
         assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending.values().next().unwrap().pending_bytes, 9_999);
         assert_eq!(state.superseded_submissions, 0);
     }
 
@@ -1089,11 +1111,11 @@ mod tests {
         let mut state = State::default();
         let root = RefNo::new(7997, 100);
         let now = Instant::now();
-        upsert_pending(&mut state, 7997, root, identity("old"), 10, now, None);
+        upsert_pending(&mut state, 7997, root, identity("old"), now, None);
         let entry = state.pending.values_mut().next().unwrap();
         entry.status = PendingStatus::Blocked;
         entry.attempts = 7;
-        upsert_pending(&mut state, 7997, root, identity("new"), 20, now, None);
+        upsert_pending(&mut state, 7997, root, identity("new"), now, None);
         let entry = state.pending.values().next().unwrap();
         assert_eq!(entry.identity.manifest_hash, "new");
         assert_eq!(entry.status, PendingStatus::Pending);
@@ -1113,12 +1135,12 @@ mod tests {
         let mut state = State::default();
         let root = RefNo::new(7997, 101);
         let now = Instant::now();
-        upsert_pending(&mut state, 7997, root, identity("same"), 10, now, Some(1));
+        upsert_pending(&mut state, 7997, root, identity("same"), now, Some(1));
         let entry = state.pending.values_mut().next().unwrap();
         entry.status = PendingStatus::Blocked;
         entry.attempts = 3;
 
-        upsert_pending(&mut state, 7997, root, identity("same"), 11, now, Some(2));
+        upsert_pending(&mut state, 7997, root, identity("same"), now, Some(2));
         let entry = state.pending.values().next().unwrap();
         assert_eq!(entry.status, PendingStatus::Pending);
         assert_eq!(entry.attempts, 0);
@@ -1142,7 +1164,7 @@ mod tests {
                 ..Default::default()
             },
         ]));
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
         controller
@@ -1178,7 +1200,7 @@ mod tests {
                 ..Default::default()
             },
         ]));
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
         controller
@@ -1205,7 +1227,7 @@ mod tests {
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
 
         for _ in 0..10_000 {
@@ -1244,7 +1266,7 @@ mod tests {
                 ..Default::default()
             },
         ]));
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(16 * 1024)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
 
         controller
@@ -1292,7 +1314,7 @@ mod tests {
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
         controller
@@ -1319,7 +1341,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             root,
         });
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
         controller
@@ -1357,7 +1379,10 @@ mod tests {
             next_retry_at: Instant::now(),
             last_error: None,
         };
-        let new = Settlement { target_sesno: 42, ..old.clone() };
+        let new = Settlement {
+            target_sesno: 42,
+            ..old.clone()
+        };
         // The worker already captured 41 when another request queued 42.
         controller.state().settlements.insert(7996, new.clone());
         settle(&controller, 7996, old).await;
@@ -1376,7 +1401,7 @@ mod tests {
             acknowledged: vec![ack(root, "race")],
             ..Default::default()
         }]));
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
         let generation_guard = super::super::e3d_model_service::lock_db_generation(7997).await;
@@ -1420,7 +1445,7 @@ mod tests {
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
-        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
 
         controller

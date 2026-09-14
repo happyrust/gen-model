@@ -72,14 +72,6 @@ pub mod coverage_audit;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
-#[cfg(feature = "legacy_model")]
-pub mod legacy {
-    use aios_core::options::DbOption;
-
-    pub async fn generate_dbnums(dbnums: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
-        super::gen_model::process_meshes_by_dbnos(dbnums, db_option).await
-    }
-}
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 pub use query::*;

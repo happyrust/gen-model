@@ -1982,7 +1982,7 @@ mod tests {
             );
         }
 
-        // e3d 侧：`DbSet` 钉同一会话，WORL 根取自 `scan_index`（生产 `generate_dbnum` 同源）。
+        // e3d 侧：`DbSet` 钉同一会话，WORL 根取自 `scan_index`（生产 `generation_roots_of` 同源）。
         let set = Arc::new(
             DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
         );

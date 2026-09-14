@@ -1121,27 +1121,23 @@ impl E3dModelService {
         Ok(report)
     }
 
-    pub async fn generate_dbnum(
-        &self,
-        dbnum: u32,
-        failure_policy: GeometryFailurePolicy,
-    ) -> anyhow::Result<E3dPersistReport> {
-        let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
+    /// 这个库当前会话下的全部生成根（文件侧枚举，一行库都不读）。
+    ///
+    /// 整库重生成用它把根取齐，再交给 [`Self::generate_and_persist_roots`]——**与生产
+    /// 同一条路**。此前这里有一个 `generate_dbnum` 自己取根再直落 [`Self::generate_refs`]，
+    /// 那是逐根串行、不过几何并发闸的老形态；生产（`model_refresh`）从来不走它，只有烟测
+    /// 在用，于是烟测量出来的「生成耗时」一直是串行那条路的数，跟生产对不上。已退役。
+    pub async fn generation_roots_of(&self, dbnum: u32) -> anyhow::Result<Vec<String>> {
         let pin = self.pin(dbnum)?;
         let source_sesno = self.source_session(pin)?;
         ensure_not_older_than_persisted(dbnum, source_sesno).await?;
         let input = generation_input(self, dbnum, source_sesno)?;
-        self.generate_refs(
-            dbnum,
-            source_sesno,
-            &input.set,
-            &input.index,
-            &input.index.roots,
-            failure_policy,
-            &input.dependency_sessions,
-            None,
-        )
-        .await
+        Ok(input
+            .index
+            .roots
+            .iter()
+            .map(|root| format!("{}/{}", root.word0, root.word1))
+            .collect())
     }
 
     /// Generate one root at an exact source session without reading or writing
@@ -3315,7 +3311,7 @@ mod tests {
             .split_once("pub async fn generate_and_persist_roots(")
             .expect("generation pipeline")
             .1
-            .split_once("pub async fn generate_dbnum(")
+            .split_once("pub(crate) async fn republish_roots_by_rigid_motion(")
             .expect("generation pipeline end")
             .0;
         assert!(
@@ -3336,6 +3332,34 @@ mod tests {
         assert!(
             !production_half(source).contains("fn generate_dbnum_in_memory("),
             "producing a whole dbnum into one batch is the unbounded shape ADR-041 §8 rejected"
+        );
+    }
+
+    /// 整库那一档只剩一条入口：[`E3dModelService::generation_roots_of`] 取根，再交给
+    /// `generate_and_persist_roots`。并排那个 `generate_dbnum` 自己取根、逐根串行直落
+    /// `generate_refs`，**不过几何并发闸**（闸利用率实测 0.0%）；生产从不走它，只有烟测在用，
+    /// 于是烟测量出来的「生成耗时」一直是串行那条路的数。取根这一步必须保持纯枚举——它一旦
+    /// 自己生成起来，那条串行路就原样回来了，而且照样没人发现。
+    #[test]
+    fn a_whole_dbnum_generates_only_through_the_parallel_producer() {
+        let source = service_source();
+        let source = source.as_str();
+        assert!(
+            !production_half(source).contains("fn generate_dbnum("),
+            "the serial whole-dbnum entry is retired; a whole dbnum enters through \
+             generation_roots_of + generate_and_persist_roots"
+        );
+        let enumerate = source
+            .split_once("pub async fn generation_roots_of(")
+            .expect("root enumeration")
+            .1
+            .split_once("\n    }\n")
+            .expect("root enumeration end")
+            .0;
+        assert!(
+            !enumerate.contains("generate_refs("),
+            "enumerating roots stays a pure file-side read; generating here rebuilds the \
+             serial entry that was retired"
         );
     }
 

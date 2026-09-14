@@ -79,7 +79,6 @@ v_port = "8009"
 store_mode = "spawned-rocksdb"
 # 持久模式：kv-mem 只保存新生成的 root overlay，冷 root 直接查 RocksDB，不回填。
 model_cache_mode = "incremental-overlay"
-model_cache_max_bytes = 2147483648
 
 #服务器启动配置 —— 向导第③步；0.0.0.0 = 局域网可访问（配置向导页仍只许本机打开）
 server_release_ip = "0.0.0.0:9099"

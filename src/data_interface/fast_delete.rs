@@ -257,7 +257,7 @@ impl RollbackRender {
     }
 }
 
-/// 模型面按 `direct_model.sesno` 谓词删的三张表（`gen_root` 用 `source_end_sesno`，另渲染）。
+/// 模型面按 `model_sesno` 谓词删的三张表（`gen_root` 用 `source_end_sesno`，另渲染）。
 const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 
 /// §4.3 的 2–6：全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT` 都没有（W3）。
@@ -330,7 +330,7 @@ pub(crate) fn render_rollback(
     if model_face {
         for table in MODEL_FACE_TABLES {
             deletes.push(format!(
-                "DELETE {table} WHERE dbnum = {dbnum} AND direct_model.sesno > {target_watermark};"
+                "DELETE {table} WHERE dbnum = {dbnum} AND model_sesno > {target_watermark};"
             ));
         }
         deletes.push(format!(
@@ -734,7 +734,6 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
     crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
-    crate::fast_model::model_db_adapter::invalidate_geometry_baseline();
     crate::data_interface::dbnum_consistency::invalidate_census();
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
@@ -1150,7 +1149,7 @@ mod tests {
         for table in MODEL_FACE_TABLES {
             assert!(
                 sql.contains(&format!(
-                    "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
+                    "DELETE {table} WHERE dbnum = 7997 AND model_sesno > 41;"
                 )),
                 "ModelOnly 仍退模型面 {table}: {sql}"
             );
@@ -1179,7 +1178,9 @@ mod tests {
             .join("\n");
         assert!(
             !sql.contains("DELETE EQUI")
-                && !sql.contains("direct_model.sesno")
+                && MODEL_FACE_TABLES
+                    .iter()
+                    .all(|table| !sql.contains(&format!("DELETE {table} ")))
                 && !sql.contains("gen_root"),
             "RoomOnly 只退房间面: {sql}"
         );
@@ -1239,7 +1240,7 @@ mod tests {
         at("DELETE ATT_UDA WHERE dbnum = 7997 AND sesno > 41;");
         for table in MODEL_FACE_TABLES {
             at(&format!(
-                "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
+                "DELETE {table} WHERE dbnum = 7997 AND model_sesno > 41;"
             ));
         }
         at("DELETE gen_root WHERE dbnum = 7997 AND source_end_sesno > 41;");

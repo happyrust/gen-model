@@ -876,9 +876,9 @@ async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone
             format!(
                 "INSERT INTO inst_relate [\
                    {{ id: inst_relate:old, in: {equi}, out: inst_info:old, dbnum: {DBNUM}, \
-                      direct_model: {{ source: 'e3d-model', sesno: {BASE_SESNO} }} }},\
+                      model_sesno: {BASE_SESNO} }},\
                    {{ id: inst_relate:new, in: {equi}, out: inst_info:new, dbnum: {DBNUM}, \
-                      direct_model: {{ source: 'e3d-model', sesno: {END_SESNO} }} }}];"
+                      model_sesno: {END_SESNO} }}];"
             ),
             format!(
                 "INSERT INTO gen_root [\
@@ -1099,7 +1099,7 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
 // （S = 模型水位）、Initialize（S = 0，回退 = 整库 wipe）。
 //
 // 数据块与两笔尾事务是真实渲染 / 真实入口；模型块与房间提交是**合成行**——生成器要 e3d 几何，
-// mem:// 上摆不出来，但回退删的正是这些行的 `dbnum` / `direct_model.sesno` / `source_end_sesno`
+// mem:// 上摆不出来，但回退删的正是这些行的 `dbnum` / `model_sesno` / `source_end_sesno`
 // / `in.dbnum` 列，行形状照生产写（`the_rollback_takes_every_face_back_to_s_…` 同一套）。
 
 /// 一个 dbnum 任务写库时间线上的一步。`Data` / `Model` / `Rooms` 各是一笔独立提交。
@@ -1174,16 +1174,16 @@ async fn run_steps(db: &Surreal<Any>, steps: &[Step]) {
     }
 }
 
-/// 一根的模型面产物：几何行 `inst_relate` / `inst_info`（`dbnum` + `direct_model.sesno`）与
+/// 一根的模型面产物：几何行 `inst_relate` / `inst_info`（`dbnum` + `model_sesno`）与
 /// 凭证 `gen_root`（`dbnum` + `source_end_sesno`），record id 与生产同形（`<ref0>_<ref1>`）。
 fn model_block(root: RefU64, sesno: i32) -> String {
     let key = root.to_string();
     format!(
         "BEGIN TRANSACTION;\n\
          INSERT INTO inst_info [{{ id: inst_info:⟨{key}⟩, dbnum: {DBNUM}, \
-           direct_model: {{ source: 'e3d-model', sesno: {sesno} }} }}];\n\
+           model_sesno: {sesno} }}];\n\
          INSERT INTO inst_relate [{{ id: inst_relate:⟨{key}⟩, in: pe:⟨{key}⟩, out: inst_info:⟨{key}⟩, \
-           dbnum: {DBNUM}, direct_model: {{ source: 'e3d-model', sesno: {sesno} }} }}];\n\
+           dbnum: {DBNUM}, model_sesno: {sesno} }}];\n\
          INSERT INTO gen_root [{{ id: gen_root:⟨{key}⟩, dbnum: {DBNUM}, pe: pe:⟨{key}⟩, \
            status: 'ready', source_end_sesno: {sesno} }}];\n\
          COMMIT TRANSACTION;"
@@ -1354,7 +1354,7 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
             &db,
             format!(
                 "SELECT VALUE record::id(id) FROM inst_relate WHERE dbnum = {DBNUM} \
-                 AND direct_model.sesno > {BASE_SESNO};"
+                 AND model_sesno > {BASE_SESNO};"
             ),
         )
         .await;
@@ -1391,7 +1391,7 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
 ///
 /// 回退按标记记的 S = 模型水位走，但**不动数据面**（t-664 ⑥，`fast_delete::render_rollback`）：
 /// 这类任务没写过数据，退数据面只会把上一窗已收口的 (S, applied] 数据行删掉、而重排的 ModelOnly
-/// 又不补数据。所以回退只删 `direct_model.sesno > S` 的模型行、`source_end_sesno > S` 的凭证、
+/// 又不补数据。所以回退只删 `model_sesno > S` 的模型行、`source_end_sesno > S` 的凭证、
 /// 整库房间边，`model_sesno` 退到 S、`applied_sesno` 原地不动；重跑就是同意图的
 /// ModelOnly S→T（模型 + 开关开启时的房间 + 收尾），终态与一次成功逐表相等。
 #[tokio::test(flavor = "multi_thread")]

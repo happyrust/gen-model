@@ -106,6 +106,10 @@ fn fork_executable() -> PathBuf {
 }
 
 fn spawn_fork_server_in(case: &str, dir: PathBuf) -> Option<SpawnedFork> {
+    spawn_fork_server_at(case, dir, free_port())
+}
+
+fn spawn_fork_server_at(case: &str, dir: PathBuf, port: u16) -> Option<SpawnedFork> {
     let exe = fork_executable();
     if !exe.exists() {
         if compat_require() {
@@ -117,7 +121,6 @@ fn spawn_fork_server_in(case: &str, dir: PathBuf) -> Option<SpawnedFork> {
         );
         return None;
     }
-    let port = free_port();
     std::fs::create_dir_all(&dir).expect("create compat temp dir");
     let child = Command::new(&exe)
         .args([
@@ -192,6 +195,58 @@ async fn connect_fork(ws_url: &str, db: &str) -> Surreal<Any> {
         .await
         .expect("fork use_ns/use_db");
     handle
+}
+
+/// A real transport failure must not leave the original production-configured
+/// SDK handle permanently unusable after the same RocksDB endpoint recovers.
+#[tokio::test]
+#[ignore = "requires fork SurrealDB executable"]
+async fn fork_ws_original_handle_recovers_after_restart() {
+    let Some(mut server) = spawn_fork_server("ws-recovery") else {
+        return;
+    };
+    let db = connect_fork(&server.ws_url, "ws_recovery").await;
+    db.query("CREATE recovery:one SET value = 1;")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let port: u16 = server.ws_url.rsplit(':').next().unwrap().parse().unwrap();
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    let interrupted = tokio::time::timeout(Duration::from_secs(2), db.query("RETURN 1;")).await;
+    assert!(
+        !matches!(interrupted, Ok(Ok(_))),
+        "must observe transport interruption"
+    );
+    let dir = server.stop_preserving();
+    let _restarted = spawn_fork_server_at("ws-recovery", dir, port).unwrap();
+    // A fresh handle proves that the endpoint and persisted baseline are ready.
+    let fresh = connect_fork(&format!("ws://127.0.0.1:{port}"), "ws_recovery").await;
+    let mut baseline = fresh
+        .query("SELECT VALUE value FROM recovery:one;")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(baseline.take::<Option<i64>>(0).unwrap(), Some(1));
+    let recovered = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(response) = db.query("SELECT VALUE value FROM recovery:one;").await {
+                if let Ok(mut response) = response.check() {
+                    if response.take::<Option<i64>>(0).ok().flatten() == Some(1) {
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        recovered.is_ok(),
+        "original SDK handle must recover, including namespace/database/auth state"
+    );
 }
 
 /// fork 侧连接的生命周期守卫：自起进程要杀、外部服务器不归我们管。
@@ -2006,22 +2061,20 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
         .expect("seed root transport")
         .check()
         .expect("seed root");
-    let store_a = ModelMemoryStore::with_cache_limit(16 * 1024);
-    store_a
-        .try_commit_current(vec![ProjectionCommit {
-            receipt: Some((
-                root,
-                RootReceipt {
-                    source_sesno: 42,
-                    model_target: None,
-                    manifest_hash: "restart-proof".into(),
-                    geometry_count: 0,
-                    published_via: "regen".into(),
-                },
-            )),
-            ..Default::default()
-        }])
-        .expect("memory publish");
+    let store_a = ModelMemoryStore::default();
+    store_a.try_commit_current(vec![ProjectionCommit {
+        receipt: Some((
+            root,
+            RootReceipt {
+                source_sesno: 42,
+                model_target: None,
+                manifest_hash: "restart-proof".into(),
+                geometry_count: 0,
+                published_via: "regen".into(),
+            },
+        )),
+        ..Default::default()
+    }]);
 
     let durable = persist_roots_batched_unacked(
         PersistTarget::new(&db_a, PersistMedium::RocksDb),
@@ -2075,7 +2128,7 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
     assert_eq!(recovery.model_start_sesno, 42);
     assert_eq!(recovery.reason, "model_watermark_behind");
 
-    let store_b = ModelMemoryStore::with_cache_limit(16 * 1024);
+    let store_b = ModelMemoryStore::default();
     assert_eq!(store_b.current_counts(), (0, 0));
     assert!(store_b.roots(ProjectionScope::Current).is_empty());
 }

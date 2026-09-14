@@ -200,8 +200,12 @@ fn health_status(
 }
 
 fn model_cache_health(store_reachable: bool) -> Value {
-    let mut health =
-        json!(crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats());
+    let (resident_records, resident_roots) =
+        crate::fast_model::model_memory_store::ModelMemoryStore::global().current_counts();
+    let mut health = json!({
+        "resident_records": resident_records,
+        "resident_roots": resident_roots,
+    });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
     health["store_reachable"] = json!(store_reachable);
     health["degraded_read_only"] =

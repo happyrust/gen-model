@@ -178,11 +178,6 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_cache_mode: Option<String>,
 
-    /// Maximum resident bytes used by the process-local model projection cache.
-    /// The default is 2 GiB. It is only enforced for durable store modes.
-    #[serde(default)]
-    pub model_cache_max_bytes: Option<u64>,
-
     /// 旧数据面配置，保留用于冲突提示；实际备份范围由 `store_mode` 决定。
     #[serde(default)]
     pub data_face: Option<String>,
@@ -294,7 +289,6 @@ impl From<DbOption> for DbOptionExt {
             in_memory_db: None,
             store_mode: None,
             model_cache_mode: None,
-            model_cache_max_bytes: None,
             data_face: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
@@ -383,8 +377,6 @@ struct DbOptionExtFields {
     store_mode: Option<String>,
     #[serde(default)]
     model_cache_mode: Option<String>,
-    #[serde(default)]
-    model_cache_max_bytes: Option<u64>,
     #[serde(default)]
     data_face: Option<String>,
     #[serde(default)]
@@ -590,7 +582,6 @@ pub fn get_db_option_ext() -> DbOptionExt {
         in_memory_db: ext.in_memory_db,
         store_mode: ext.store_mode.clone(),
         model_cache_mode: ext.model_cache_mode.clone(),
-        model_cache_max_bytes: ext.model_cache_max_bytes,
         data_face: ext.data_face.clone(),
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
@@ -723,9 +714,6 @@ pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
 /// Environment override for [`model_cache_mode`].
 pub const MODEL_CACHE_MODE_ENV: &str = "AIOS_MODEL_CACHE_MODE";
 
-/// Environment override for [`model_cache_max_bytes`].
-pub const MODEL_CACHE_MAX_BYTES_ENV: &str = "AIOS_MODEL_CACHE_MAX_BYTES";
-
 /// Policy for the process-local incremental model overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -755,16 +743,6 @@ pub fn model_cache_mode() -> ModelCacheMode {
     parse_model_cache_mode(std::env::var(MODEL_CACHE_MODE_ENV).ok().as_deref())
         .or_else(|| parse_model_cache_mode(load_ext_fields().model_cache_mode.as_deref()))
         .unwrap_or(ModelCacheMode::IncrementalOverlay)
-}
-
-pub fn model_cache_max_bytes() -> usize {
-    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
-    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .or(load_ext_fields().model_cache_max_bytes)
-        .unwrap_or(DEFAULT)
-        .clamp(1, usize::MAX as u64) as usize
 }
 
 /// 持久层的介质，外加「谁负责把它拉起来」。

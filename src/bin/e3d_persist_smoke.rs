@@ -1,7 +1,16 @@
 //! 一次性烟测：整库生成一遍，落进库，再按 Plant UI 的读法查回来。
 //!
-//! 它走的就是生产那两步（`E3dModelService::generate_dbnum` → `model_db_adapter::persist_dbnum`），
-//! 中间没有别的路子，所以它绿了就说明这条链是通的。
+//! **生成那一步走的就是生产那条路**：`generation_roots_of` 取根 →
+//! `E3dModelService::generate_and_persist_roots`（`model_refresh` 用的并行生产者 + 串行
+//! 消费者）。此前它走的是已退役的 `generate_dbnum`，那条逐根串行、不过几何并发闸，量出来
+//! 的生成耗时跟生产对不上（闸利用率实测 0.0%，换过来之后 6.2%）。
+//!
+//! **落库那一步是「等」，不是「写」**：持久介质上 durable 行只过 write-behind 那道缝
+//! （ADR-071），投影一提交后台 worker 就在刷了，所以这里只
+//! `model_db_adapter::wait_until_model_rows_are_durable` 等它刷完——一次性命令跑完就退，
+//! 不等这一下进程一没行只落一半。此前这里直接调 `persist_dbnum`，那是第二个写者，跟后台
+//! worker 抢同一批行，热跑 5 次挂 2 次（`read or write conflict` 整笔回退）。内存介质那一档
+//! 没有 write-behind，由那个函数自己补落，抢不起来。
 //!
 //! **介质由配置说了算，本程序不自己挑**（`in_memory_db` / `AIOS_IN_MEMORY_DB`，与 `run_app`
 //! 同一个开关）：开着就接进程内嵌 kv-mem、跑完即消失、不碰任何外部库；关着就连
@@ -12,8 +21,6 @@
 //! $env:AIOS_IN_MEMORY_DB="1"; cargo run --release --bin e3d_persist_smoke -- --dbnum 7997
 //! ```
 //!
-//! `--chunk <n>` 拨落库的事务块大小（默认 `PERSIST_CHUNK`，`0` = 整根一笔的对照组）。
-//!
 //! `--root <a/b>` 换成**定向那一档**（`generate_and_persist_roots` → `persist_root`，
 //! `model_refresh` 的生产路径），整库那一档整个跳过。两档在落库上不是同一个口径：定向按
 //! `RoomEffectPolicy::Directed` 排房间重算，整库按 ADR-010 §4 收窄 1 只清边——只跑整库那一档，
@@ -21,7 +28,7 @@
 //!
 //! 它是**有尽头的一次性命令**，不驻留、不监听。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use surrealdb::Surreal;
@@ -33,7 +40,6 @@ use aios_database::fast_model::model_db_adapter;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let mut dbnum = 7997u32;
-    let mut chunk = model_db_adapter::PERSIST_CHUNK;
     let mut root: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -45,20 +51,11 @@ async fn main() -> anyhow::Result<()> {
                     .parse()
                     .context("--dbnum 不是数字")?;
             }
-            "--chunk" => {
-                let value: usize = args
-                    .next()
-                    .context("--chunk 少了取值")?
-                    .parse()
-                    .context("--chunk 不是数字")?;
-                // 0 = 不切，整根一笔——量切块买到了什么，得有个对照组。
-                chunk = if value == 0 { usize::MAX } else { value };
-            }
             "--root" => {
                 root = Some(args.next().context("--root 少了取值")?);
             }
             other => {
-                anyhow::bail!("认不得的参数 {other}；只有 --dbnum <n>、--chunk <n> 与 --root <a/b>")
+                anyhow::bail!("认不得的参数 {other}；只有 --dbnum <n> 与 --root <a/b>")
             }
         }
     }
@@ -89,18 +86,28 @@ async fn main() -> anyhow::Result<()> {
     let service = E3dModelService::from_current()
         .await
         .context("打开生成服务")?;
+    // 几何并发闸的利用率：生成慢是「一根太肥、并行不起来」还是「根本不在几何上」，
+    // 这一对快照的差值直接答得出来，不必另外插桩。
+    let roots = service
+        .generation_roots_of(dbnum)
+        .await
+        .with_context(|| format!("枚举 {dbnum} 的生成根"))?;
+    let gate_before = aios_database::fast_model::concurrency::snapshot();
     let report = service
-        .generate_dbnum(
+        .generate_and_persist_roots(
             dbnum,
+            &roots,
             aios_database::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
         )
         .await
         .with_context(|| format!("生成 {dbnum}"))?;
     let generated_at = started.elapsed();
+    let gate_after = aios_database::fast_model::concurrency::snapshot();
 
-    let persisted = model_db_adapter::persist_dbnum_in_chunks(dbnum, chunk)
-        .await
-        .with_context(|| format!("落库 {dbnum}"))?;
+    let flushed =
+        model_db_adapter::wait_until_model_rows_are_durable(dbnum, Duration::from_secs(600))
+            .await
+            .with_context(|| format!("落库 {dbnum}"))?;
     let persisted_at = started.elapsed();
 
     println!(
@@ -114,28 +121,34 @@ async fn main() -> anyhow::Result<()> {
         generated_at,
     );
     println!(
-        "PERSIST 介质={:?} 可持久={} 块大小={} 事务={} 落行={} 对账删={} 盖章={} 用时={:?}",
-        persisted.medium,
-        persisted.medium.is_durable(),
-        if chunk == usize::MAX {
-            "整根一笔".to_string()
-        } else {
-            chunk.to_string()
-        },
-        persisted.commits,
-        persisted.upserted,
-        persisted.removed,
-        persisted.receipts,
+        "GATE 额度={} 几何段利用率={} 等许可={:?}",
+        gate_after.quota,
+        gate_after
+            .utilization_since(&gate_before)
+            .map_or("n/a".to_string(), |value| format!("{:.1}%", value * 100.0)),
+        Duration::from_micros(
+            gate_after
+                .permit_wait_micros
+                .saturating_sub(gate_before.permit_wait_micros)
+        ),
+    );
+    // 这个「用时」是**生成收尾之后还要等的那一截**，不是落库总耗时：持久介质上
+    // write-behind 在生成还没跑完时就已经在刷了，那一部分被生成盖住、量不出来。
+    println!(
+        "PERSIST 介质={:?} 可持久={} 根={} 收尾用时={:?}",
+        flushed.medium,
+        flushed.medium.is_durable(),
+        flushed.roots,
         persisted_at - generated_at,
     );
 
     read_back(dbnum).await
 }
 
-/// 定向那一档：一根，走 `model_refresh` 的生产两步（生成进投影 → [`model_db_adapter::persist_root`]）。
+/// 定向那一档：只把一根交给同一条生产路径，落库照旧等 write-behind。
 ///
-/// 与整库那一档的区别不只是范围：定向落库按 `RoomEffectPolicy::Directed` 排房间重算，整库落库按
-/// ADR-010 §4 收窄 1 只清边。房间那一支只有这条路走得到。
+/// 与整库那一档的差别只剩范围。两档落库曾经不同口径（定向按 `RoomEffectPolicy::Directed` 排
+/// 房间重算），但那两个形参在房间流程退役时就成了空壳、现已删除，今天两档走的是同一套清边。
 async fn directed(dbnum: u32, root: &str) -> anyhow::Result<()> {
     let started = Instant::now();
     let roots = vec![root.to_string()];
@@ -152,21 +165,18 @@ async fn directed(dbnum: u32, root: &str) -> anyhow::Result<()> {
         .with_context(|| format!("生成根 {root}"))?;
     let generated_at = started.elapsed();
 
-    let refno = aios_database::fast_model::e3d_model_service::parse_refno(root)?;
-    let persisted = model_db_adapter::persist_root(refno)
-        .await
-        .with_context(|| format!("落库根 {root}"))?;
+    let flushed =
+        model_db_adapter::wait_until_model_rows_are_durable(dbnum, Duration::from_secs(600))
+            .await
+            .with_context(|| format!("落库根 {root}"))?;
     println!(
         "GENERATE root={root} dbnum={dbnum} upserted={} removed={} failed={} 用时={:?}",
         report.upserted, report.removed, report.failed, generated_at,
     );
     println!(
-        "PERSIST 介质={:?} 事务={} 落行={} 对账删={} 盖章={} 用时={:?}",
-        persisted.medium,
-        persisted.commits,
-        persisted.upserted,
-        persisted.removed,
-        persisted.receipts,
+        "PERSIST 介质={:?} 根={} 收尾用时={:?}",
+        flushed.medium,
+        flushed.roots,
         started.elapsed() - generated_at,
     );
     Ok(())
@@ -178,9 +188,9 @@ async fn read_back(dbnum: u32) -> anyhow::Result<()> {
     let db: &Surreal<Any> = &aios_core::SUL_DB;
     let mut response = db
         .query(format!(
-            "RETURN array::len((SELECT VALUE id FROM inst_relate WHERE dbnum={dbnum} AND direct_model.source='e3d-model'));\
-             RETURN array::len((SELECT VALUE id FROM tubi_relate WHERE dbnum={dbnum} AND direct_model.source='e3d-model'));\
-             RETURN array::len((SELECT VALUE id FROM inst_relate WHERE dbnum={dbnum} AND direct_model.source='e3d-model' AND aabb_d != NONE AND world_trans_d != NONE AND insts_flat != NONE));\
+            "RETURN array::len((SELECT VALUE id FROM inst_relate WHERE dbnum={dbnum} AND model_sesno != NONE));\
+             RETURN array::len((SELECT VALUE id FROM tubi_relate WHERE dbnum={dbnum} AND model_sesno != NONE));\
+             RETURN array::len((SELECT VALUE id FROM inst_relate WHERE dbnum={dbnum} AND model_sesno != NONE AND aabb_d != NONE AND world_trans_d != NONE AND insts_flat != NONE));\
              RETURN array::len((SELECT VALUE id FROM geo_relate WHERE transform != NONE));\
              RETURN array::len((SELECT VALUE id FROM inst_geo));"
         ))
