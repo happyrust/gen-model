@@ -129,6 +129,9 @@ export function matchContractRoute(method, pathname) {
 }
 
 /** 某一步（u1/u2/u3）预期会打到的契约条目。 */
-export function expectedRoutesFor(step) {
-  return CONTRACT_ROUTES.filter((r) => r.walkthrough.includes(step));
+export function expectedRoutesFor(step, decision = 'approve') {
+  return CONTRACT_ROUTES.filter((r) => r.walkthrough.includes(step)
+    && !(step === 'u2' && r.path.endsWith(decision === 'approve' ? '/return' : '/approve'))
+    // Token minting and health preflight run in Node, outside browser capture.
+    && r.path !== '/api/auth/token' && r.path !== '/api/review/health');
 }

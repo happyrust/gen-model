@@ -47,6 +47,7 @@ export class Capture {
     /** @type {Array<object>} */
     this.pageErrors = [];
     this.step = 'init';
+    this.attached = new WeakSet();
     this.backendOrigin = new URL(cfg.backendBaseUrl).origin;
     this.webOrigin = new URL(cfg.webBaseUrl).origin;
   }
@@ -57,6 +58,8 @@ export class Capture {
 
   /** 给一个 page 或 iframe 所属的 page 装监听；嵌入页要单独调一次。 */
   attach(page, label) {
+    if (this.attached.has(page)) return;
+    this.attached.add(page);
     page.on('console', (msg) => {
       let text;
       try {
@@ -71,8 +74,8 @@ export class Capture {
         page: label,
         level: msg.type(),
         kind,
-        text,
-        location: safeLocation(msg),
+        text: redact(text),
+        location: redact(safeLocation(msg)),
       });
     });
 
@@ -81,8 +84,8 @@ export class Capture {
         at: new Date().toISOString(),
         step: this.step,
         page: label,
-        message: String(err?.message || err),
-        stack: String(err?.stack || ''),
+        message: redact(String(err?.message || err)),
+        stack: redact(String(err?.stack || '')),
       });
     });
 
@@ -102,7 +105,8 @@ export class Capture {
         step: this.step,
         page: label,
         method,
-        url: res.url(),
+        url: redact(res.url()),
+        responseBody: res.status() >= 400 ? redact(await res.text().catch(() => '<unavailable>')).slice(0, 4096) : undefined,
         origin: url.origin,
         pathname: url.pathname,
         status: res.status(),
@@ -132,7 +136,7 @@ export class Capture {
         step: this.step,
         page: label,
         method: req.method(),
-        url: req.url(),
+        url: redact(req.url()),
         origin: url.origin,
         pathname: url.pathname,
         status: null,
@@ -169,6 +173,14 @@ export class Capture {
       badRequests: this.badRequests().length,
     };
   }
+}
+
+export function redact(value) {
+  if (value == null) return value;
+  return String(value)
+    .replace(/([?&](?:user_token|token|access_token)=)[^&#\s]*/gi, '$1<REDACTED>')
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>')
+    .replace(/("(?:token|user_token|access_token|password|secret)"\s*:\s*")[^"]*(")/gi, '$1<REDACTED>$2');
 }
 
 function safeLocation(msg) {

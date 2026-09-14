@@ -66,7 +66,7 @@ export function loadConfig(argv = []) {
     projectId: str('REVIEW_PROJECT_ID', 'AvevaMarineSample'),
     designerId: str('REVIEW_SJ_USER', 'SJ'),
     designerName: str('REVIEW_SJ_NAME', '设计'),
-    checkerId: str('REVIEW_JD_USER', 'JD'),
+    checkerId: str('REVIEW_JD_USER', 'JH'),
     checkerName: str('REVIEW_JD_NAME', '校核'),
     // u2 最后一下：approve（通过）还是 return（驳回带原因）。两条都在契约表里。
     u2Decision: str('REVIEW_U2_DECISION', 'approve'),

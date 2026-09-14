@@ -30,6 +30,7 @@ param(
     [int]    $ApiPort = 8022,
     [int]    $DbPort = 8009,
     [string] $LegacyBaseUrl = 'http://127.0.0.1:3100',
+    [string] $LegacySourceEvidence = '',
     [string] $Exe = 'D:\Rust\target-review-port\debug\aios-database.exe',
     [string] $SurrealExe = 'D:\work\plant-code\old\gen-model\bin\surreal.exe',
     [string] $BashExe = 'E:\Program Files\Git\bin\bash.exe',
@@ -265,7 +266,8 @@ try {
     $healthBody = $healthRes.Content
     $healthKeys = ($healthBody | ConvertFrom-Json).PSObject.Properties.Name | Sort-Object
     $legacyProbe = Invoke-Api -Url "$LegacyBaseUrl/api/review/health" -TimeoutSec 5
-    $legacyUp = ($legacyProbe.Status -eq 200)
+    # 仅端口可达不能证明运行的是批准的旧端；须显式提供启动/版本留痕路径。
+    $legacyUp = ($legacyProbe.Status -eq 200 -and $LegacySourceEvidence -and (Test-Path -LiteralPath $LegacySourceEvidence))
     if ($legacyUp) {
         $legacyKeys = ($legacyProbe.Body | ConvertFrom-Json).PSObject.Properties.Name | Sort-Object
         $same = -not (Compare-Object $healthKeys $legacyKeys)
@@ -283,40 +285,8 @@ try {
     & $BashExe './scripts/review/test_review_api.sh' $apiBase 'routes' *>&1 | Tee-Object -FilePath $a3Log | Out-Null
     $a3Text = (Get-Content $a3Log -Raw -ErrorAction SilentlyContinue)
     $a3Tail = ($a3Text -split "`r?`n" | Select-Object -Last 8) -join "`n"
-    $a3Ok = ($a3Text -match '失败\s*:\s*0') -or ($a3Text -match 'FAILED\s*:\s*0')
-
-    # 脚本把「HTTP 404」一律判成未注册，但 `/tasks/{id}` 这类 handler 对不存在的
-    # probe-id 回 404 本来就是契约（规范 §3：不存在 → 404 {success:false}）。
-    # 所以对它报 FAIL 的每一条再打一次，按**响应体**二次判：
-    #   有校审信封（success / error_message）→ 路由在，handler 说资源不存在，不算失败；
-    #   空体 / 非 JSON               → axum 的兜底 404，路由真的没注册，才是失败。
-    $a3Adjudicated = @()
-    $a3RealMiss = @()
-    foreach ($line in ($a3Text -split "`r?`n")) {
-        $clean = $line -replace "`e\[[0-9;]*m", ''
-        if ($clean -notmatch '路由:\s*([A-Z]+)\s+(\S+)\s*\.\.\.\s*.*FAIL.*HTTP\s+404') { continue }
-        $m = $Matches[1]; $path = $Matches[2]
-        $re = Invoke-Api -Url "$apiBase$path" -Method $m -Token $token
-        $hasEnvelope = ($re.Body -match '"success"') -or ($re.Body -match 'error_message')
-        # 只有「404 且没有校审信封」才是 axum 的兜底 404（路由真没注册）。
-        # 非 404（422 的 body 反序列化拒绝等）说明路由匹配上了，只是没走到 handler。
-        $registered = ($re.Status -ne 404) -or $hasEnvelope
-        $why = if ($re.Status -ne 404) { "路由在（HTTP $($re.Status)，没走到 handler）" }
-        elseif ($hasEnvelope) { '路由在（handler 说资源不存在）' }
-        else { '兜底 404 —— 路由缺失' }
-        $a3Adjudicated += "{0,-6} {1,-52} HTTP {2}  {3}" -f $m, $path, $re.Status, $why
-        if (-not $registered) { $a3RealMiss += "$m $path" }
-    }
-    $a3Verdict = ($a3Ok -or $a3RealMiss.Count -eq 0) ? 'PASS' : 'FAIL'
-    $a3Note = if ($a3Ok) {
-        '38 条探针全部非 404'
-    } elseif ($a3RealMiss.Count -eq 0) {
-        "脚本报 $($a3Adjudicated.Count) 条 404，二次判定后全部是 handler 级「资源不存在」，路由都在册"
-    } else {
-        "真正缺失 $($a3RealMiss.Count) 条：$($a3RealMiss -join '；')"
-    }
-    Set-Result 'A3' $a3Verdict "bash ./scripts/review/test_review_api.sh $apiBase routes（+ runner 对 404 的二次判定）" `
-        ("$a3Tail`n--- 404 二次判定 ---`n" + ($a3Adjudicated -join "`n")) $a3Note
+    $a3Verdict = if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'FAIL' }
+    Set-Result 'A3' $a3Verdict "bash ./scripts/review/test_review_api.sh $apiBase routes" $a3Tail '路由判据由脚本统一实现；非零退出码不再由 runner 覆盖。'
 
     # ── A4 下载半边 ───────────────────────────────────────────────────────
     Write-Step 'A4 附件 multipart 上传 → 静态地址回读'
@@ -354,9 +324,9 @@ try {
             $headersText = Get-Content $dlHeaders -Raw -ErrorAction SilentlyContinue
             $disp = ($headersText -split "`r?`n" | Where-Object { $_ -match '(?i)^content-disposition:' }) -join ''
             $ok = ($dlCode -eq '200' -and $bytes -gt 0)
-            Set-Result 'A4' ($ok ? 'PASS' : 'FAIL') "curl -F file=@a4.png .../api/review/attachments ；curl $apiBase$attUrl" `
+            Set-Result 'A4' ($ok ? 'PARTIAL' : 'FAIL') "curl -F file=@a4.png .../api/review/attachments ；curl $apiBase$attUrl" `
                 "upload HTTP $upCode → $attUrl`ndownload HTTP $dlCode，$bytes 字节`n$($disp ? $disp : 'Content-Disposition: <未返回>')" `
-                ($ok ? "上传成功且静态地址回读 $bytes 字节" : "静态回读失败（HTTP $dlCode）")
+                ($ok ? "上传成功且静态地址回读 $bytes 字节；浏览器走查须另验，A4 尚未完整通过" : "静态回读失败（HTTP $dlCode）")
         }
         $script:A6TaskId = $taskId
     }
@@ -365,16 +335,19 @@ try {
     Write-Step 'A5 401/403 文本（test_review_api.sh auth）'
     $a5Log = Join-Path $logDir 'a5-auth.log'
     & $BashExe './scripts/review/test_review_api.sh' $apiBase 'auth' *>&1 | Tee-Object -FilePath $a5Log | Out-Null
+    $a5Exit = $LASTEXITCODE
     $a5Text = Get-Content $a5Log -Raw -ErrorAction SilentlyContinue
     $a5Tail = ($a5Text -split "`r?`n" | Select-Object -Last 10) -join "`n"
     if ($legacyUp) {
         $a5LegacyLog = Join-Path $logDir 'a5-auth-legacy.log'
         & $BashExe './scripts/review/test_review_api.sh' $LegacyBaseUrl 'auth' *>&1 | Tee-Object -FilePath $a5LegacyLog | Out-Null
-        $diff = Compare-Object (Get-Content $a5Log) (Get-Content $a5LegacyLog)
+        $a5LegacyExit = $LASTEXITCODE
+        $diff = Compare-Object @(Get-Content $a5Log | Where-Object { $_ -match 'HTTP|error_message|401|403' }) @(Get-Content $a5LegacyLog | Where-Object { $_ -match 'HTTP|error_message|401|403' })
+        if ($a5Exit -ne 0 -or $a5LegacyExit -ne 0) { $diff = @('auth script failed') }
         Set-Result 'A5' ($diff ? 'FAIL' : 'PASS') "bash ./scripts/review/test_review_api.sh <base> auth（两端）" $a5Tail `
             ($diff ? "两端 auth 输出有 $($diff.Count) 处差异，见 a5-auth*.log" : '两端 auth 输出逐行相同')
     } else {
-        Set-Result 'A5' 'PARTIAL' "bash ./scripts/review/test_review_api.sh $apiBase auth" $a5Tail `
+        Set-Result 'A5' ($a5Exit -eq 0 ? 'PARTIAL' : 'FAIL') "bash ./scripts/review/test_review_api.sh $apiBase auth" $a5Tail `
             "gen-model 单边已跑；旧端不可达，两端 diff NOT RUN（文本逐字断言由 auth.rs 的护栏测试兜着）"
     }
 
@@ -402,17 +375,19 @@ try {
     $auxOkShape = ($auxCode -eq '200' -and $auxBody -match '"code"\s*:\s*200' -and $auxBody -match '"data"')
     $collOkShape = ($coll.Status -eq 200 -and $coll.Body -match '"success"\s*:\s*true' -and $coll.Body -match '"reason"')
     $a10Ok = $auxOkShape -and $collOkShape
-    Set-Result 'A10' ($a10Ok ? ($legacyUp ? 'PASS' : 'PARTIAL') : 'FAIL') `
+    Set-Result 'A10' ($a10Ok ? 'PARTIAL' : 'FAIL') `
         "curl -H 'UCode: $ucode' -H '$ukeyHeader' --data-binary @a10-aux-request.json $apiBase/api/review/aux-data ；curl '$apiBase/api/review/collision-data?project_id=$ProjectId&limit=10'" `
         "aux-data HTTP $($auxCode)：$(Head $auxBody 3)`ncollision-data HTTP $($coll.Status)：$(Head $coll.Body 3)" `
-        ($a10Ok ? "gen-model 半边形状对（aux-data {code,message,page,page_size,total,data}；collision-data 显式空集带 reason）$($legacyUp ? '' : '；旧端不可达，两端 diff NOT RUN')" : "形状不符：aux-data $auxCode / collision-data $($coll.Status)")
+        ($a10Ok ? 'gen-model 半边形状对；尚未执行旧端逐字段对拍，不能由旧端 health 可达推断 PASS' : "形状不符：aux-data $auxCode / collision-data $($coll.Status)")
 
     # ── A6 重启后复读 ─────────────────────────────────────────────────────
     Write-Step 'A6 重启 gen-model 与 SurrealDB 后复读'
     if (-not $script:A6TaskId) {
         Set-Result 'A6' 'NOT RUN' '' '' '前面没建成任务，没有可复读的行'
     } else {
-        $before = Invoke-Api -Url "$apiBase/api/review/tasks/$($script:A6TaskId)" -Token $token
+        $persistenceState = Join-Path $script:WorkDir 'persistence.json'
+        $seedLog = @(& node "$PSScriptRoot/persistence.mjs" seed $apiBase $persistenceState 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "A6 seed failed: $($seedLog -join [Environment]::NewLine)" }
         Stop-Tracked $api
         Stop-Tracked $surreal
         $script:Spawned = @()
@@ -431,58 +406,62 @@ try {
         if (-not $back) {
             Set-Result 'A6' 'FAIL' '' '' "重启后 ${HealthTimeoutSec}s 内没恢复 health"
         } else {
-            $after = Invoke-Api -Url "$apiBase/api/review/tasks/$($script:A6TaskId)" -Token $token
-            $ok = ($after.Status -eq 200 -and $after.Body -match [regex]::Escape($script:A6TaskId))
-            Set-Result 'A6' ($ok ? 'PASS' : 'FAIL') "GET $apiBase/api/review/tasks/$($script:A6TaskId)（重启前后各一次）" `
-                "before HTTP $($before.Status)：$(Head $before.Body 3)`nafter  HTTP $($after.Status)：$(Head $after.Body 3)" `
-                ($ok ? "任务 $($script:A6TaskId) 跨 gen-model + SurrealDB 重启仍可读" : "重启后读不到（HTTP $($after.Status)）")
+            $verifyLog = @(& node "$PSScriptRoot/persistence.mjs" verify $apiBase $persistenceState 2>&1)
+            $ok = $LASTEXITCODE -eq 0
+            Set-Result 'A6' ($ok ? 'PASS' : 'FAIL') "node scripts/review/persistence.mjs seed|verify <base> <state>（双重启前后）" `
+                (($seedLog + $verifyLog) -join [Environment]::NewLine) '任务、记录、评论、批注状态、历史、工作流、附件字节哈希均非空且完全一致'
+
         }
     }
 
-    # ── A9 内存介质响亮拒绝 ───────────────────────────────────────────────
-    Write-Step 'A9 内存介质拒绝启用校审模块'
+    # ── A9 两种内存介质：拒绝校审，模型健康与树接口仍可服务 ──
     Stop-AllTracked
-    Start-Sleep -Seconds 1
-    $a9Port = Get-FreePort ($ApiPort + 1) 8222
-    $a9Dir = Join-Path $script:WorkDir 'a9'
-    New-Item -ItemType Directory -Force -Path $a9Dir | Out-Null
-    foreach ($res in @('resource', 'rs_surreal')) {
-        $src = Join-Path $script:RepoRoot $res
-        if (Test-Path $src) { Copy-Item -Recurse -Force $src (Join-Path $a9Dir $res) }
+    $a9Results = @()
+    foreach ($mode in @('embedded-mem', 'spawned-mem')) {
+        Write-Step "A9 $mode"
+        $a9Port = Get-FreePort ($ApiPort + 1) 8222
+        $a9DbPort = Get-FreePort ($DbPort + 1) 8223
+        $a9Dir = Join-Path $script:WorkDir "a9-$mode"
+        New-Item -ItemType Directory -Force -Path $a9Dir | Out-Null
+        foreach ($res in @('resource', 'rs_surreal')) {
+            $src = Join-Path $script:RepoRoot $res
+            if (Test-Path $src) { Copy-Item -Recurse -Force $src (Join-Path $a9Dir $res) }
+        }
+        $a9Option = $optionText -replace '(?m)^http_api_addr\s*=.*$', "http_api_addr = `"127.0.0.1:$a9Port`""
+        $a9Option = $a9Option -replace '(?m)^v_port\s*=.*$', "v_port = $a9DbPort"
+        Set-Content (Join-Path $a9Dir 'DbOption.toml') $a9Option -Encoding UTF8
+        $a9Out = Join-Path $logDir "a9-$mode.out.log"
+        $a9Err = Join-Path $logDir "a9-$mode.err.log"
+        $proc = Start-Tracked -FilePath $Exe -WorkingDirectory $a9Dir -StdOut $a9Out -StdErr $a9Err `
+            -Env @{ AIOS_STORE_MODE = $mode; AIOS_SURREAL_EXE = $SurrealExe; PLANT_REVIEW_ALLOW_EPHEMERAL_STORE = '' }
+        $base = "http://127.0.0.1:$a9Port"
+        $null = Wait-Http "$base/api/review/health" $StepTimeoutSec 503
+        $checks = @()
+        foreach ($path in @('/api/review/health', '/api/users', '/api/auth/token', '/files/review_attachments/probe.png')) {
+            $r = Invoke-Api "$base$path"
+            $checks += ($r.Status -eq 503 -and $r.Body -match 'review.persistence.refused')
+        }
+        $modelOk = $false
+        $modelDeadline = (Get-Date).AddSeconds($StepTimeoutSec)
+        do {
+            $model = Invoke-Api "$base/api/v1/health"
+            if ($model.Status -eq 200) {
+                $m = $model.Body | ConvertFrom-Json
+                $modelOk = $m.status -eq 'ok' -and $m.project -and $m.mdb
+            }
+            if (!$modelOk) { Start-Sleep -Seconds 1 }
+        } while (!$modelOk -and (Get-Date) -lt $modelDeadline -and !$proc.HasExited)
+        $log = (Get-Content $a9Out -Raw) + (Get-Content $a9Err -Raw)
+        $banner = $log -match '拒绝启用'
+        $ok = $banner -and $modelOk -and ($checks -notcontains $false)
+        $item = [ordered]@{ mode = $mode; passed = $ok; refusedPrefixes = $checks; banner = $banner; modelHttp = $model.Status; modelHealthy = $modelOk; exited = $proc.HasExited }
+        $a9Results += $item
+        $model.Body | Set-Content (Join-Path $logDir "a9-$mode-model-health.json")
+        Stop-AllTracked
     }
-    $a9Option = $optionText -replace '(?m)^http_api_addr\s*=.*$', "http_api_addr = `"127.0.0.1:$a9Port`""
-    Set-Content -Path (Join-Path $a9Dir 'DbOption.toml') -Value $a9Option -Encoding UTF8
-    $a9Out = Join-Path $logDir 'a9.out.log'
-    $a9Err = Join-Path $logDir 'a9.err.log'
-    # AIOS_STORE_MODE 压过配置里的 store_mode；不设逃生门，就该被拒。
-    $a9Proc = Start-Tracked -FilePath $Exe -ArgumentList @() -WorkingDirectory $a9Dir -StdOut $a9Out -StdErr $a9Err `
-        -Env @{ AIOS_STORE_MODE = 'embedded-mem'; PLANT_REVIEW_ALLOW_EPHEMERAL_STORE = '' }
-    $a9Base = "http://127.0.0.1:$a9Port"
-    $null = Wait-Http -Url "$a9Base/api/review/health" -TimeoutSec $StepTimeoutSec -ExpectStatus 503
-    $a9Body = Invoke-Api -Url "$a9Base/api/review/health"
-    $a9Log = ((Get-Content $a9Out -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content $a9Err -Raw -ErrorAction SilentlyContinue))
-    $hasBanner = ($a9Log -match '拒绝启用')
-    $has503 = ($a9Body.Status -eq 503 -and $a9Body.Body -match 'review\.persistence\.refused')
-    $bannerExcerpt = (($a9Log -split "`r?`n" | Select-String -Pattern '拒绝启用' -Context 0, 14 | Select-Object -First 1) | Out-String)
-    if (-not $bannerExcerpt.Trim()) { $bannerExcerpt = ($a9Log -split "`r?`n" | Select-Object -Last 12) -join "`n" }
-
-    if ($hasBanner -and $has503) {
-        Set-Result 'A9' 'PASS' "AIOS_STORE_MODE=embedded-mem 起服务 ；curl $a9Base/api/review/health" `
-            "$bannerExcerpt`n--- 503 body ---`nHTTP $($a9Body.Status)：$(Head $a9Body.Body 4)" '多行横幅在场且四前缀 503 + code'
-    } elseif ($a9Proc.HasExited -and -not $hasBanner) {
-        # 进程在走到校审闸之前就退了——不是 A9 不成立，是这台机器缺它路上的前提
-        # （内存两档 data_face 变 read-through，启动要先从源文件解析 MDB）。
-        # 照实记 NOT RUN + 退出原因，别把环境问题写成判据失败。
-        $why = (($a9Log -split "`r?`n" | Where-Object { $_ -match '^Error:' } | Select-Object -Last 1))
-        Set-Result 'A9' 'NOT RUN' "AIOS_STORE_MODE=embedded-mem 起服务（进程 exit $($a9Proc.ExitCode)）" `
-            "$bannerExcerpt" `
-            "进程在校审持久化闸之前就退了：$why —— 与校审域无关的启动前提缺失，实跑半边本机复现不了"
-    } else {
-        Set-Result 'A9' 'FAIL' "AIOS_STORE_MODE=embedded-mem 起服务 ；curl $a9Base/api/review/health" `
-            "$bannerExcerpt`n--- 503 body ---`nHTTP $($a9Body.Status)：$(Head $a9Body.Body 4)" `
-            ("横幅 $($hasBanner ? '在' : '缺')；503+code $($has503 ? '在' : '缺')")
-    }
-    Stop-AllTracked
+    $a9Ok = @($a9Results | Where-Object { !$_.passed }).Count -eq 0
+    Set-Result 'A9' ($a9Ok ? 'PASS' : 'FAIL') 'embedded-mem + spawned-mem: review four prefixes 503 and model health 200/ok' `
+        ($a9Results | ConvertTo-Json -Depth 6) '两种介质分别验证；前置配置失败不得记为通过'
 
     # ── A1 / A7：cargo 计数（本 runner 只记指引，不在这里跑）──────────────
     Set-Result 'A1' 'NOT RUN' 'cargo check --features http_api' '' '本 runner 只做实跑探测；cargo 计数由交付方单独跑并附尾行 + 耗时 + HEAD'
@@ -502,7 +481,10 @@ try {
     if (-not $KeepWorkDir) {
         $keep = Join-Path $script:RepoRoot ".tmp-acceptance-logs-$script:RunId"
         Copy-Item -Recurse -Force (Join-Path $script:WorkDir 'logs') $keep -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force $script:WorkDir -ErrorAction SilentlyContinue
+        $resolvedWork = [IO.Path]::GetFullPath($script:WorkDir)
+        $tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
+        if (!$resolvedWork.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or !(Split-Path $resolvedWork -Leaf).StartsWith('review-acceptance-')) { throw 'Unsafe cleanup path' }
+        Remove-Item -LiteralPath $resolvedWork -Recurse -Force -ErrorAction SilentlyContinue
         Write-Info "数据目录已删；日志留在 $keep（不入库）"
     } else {
         Write-Info "工作目录保留：$script:WorkDir"

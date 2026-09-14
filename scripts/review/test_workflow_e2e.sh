@@ -12,6 +12,8 @@
 #   计划：docs/plans/2026-09-12-review-backend-port-plan.md §6 A8。
 # ============================================================================
 set -uo pipefail
+PYTHON="${PYTHON:-python}"
+"$PYTHON" --version >/dev/null 2>&1 || { echo 'Python runtime unavailable'; exit 2; }
 
 SERVER="${SERVER_URL:-http://localhost:8022}"
 PROJECT_ID="${PROJECT_ID:-AvevaMarineSample}"
@@ -64,7 +66,7 @@ assert_not_empty() {
 }
 
 jf() {
-    python3 -c "
+    "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 path = sys.argv[1].split('.')
@@ -80,7 +82,7 @@ print(v)
 }
 
 jlen() {
-    python3 -c "
+    "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 path = sys.argv[1].split('.')
@@ -112,7 +114,7 @@ if [ -z "$PLATFORM_TOKEN" ] && [ -n "$PLATFORM_DEBUG_TOKEN" ]; then
 fi
 if [ -z "$PLATFORM_TOKEN" ]; then
     echo "  platform_token 未显式提供，尝试调用 /api/auth/token 生成本地联调 JWT"
-    PLATFORM_SEED=$(post "/api/auth/token" "{\"username\":\"platform-e2e\",\"project\":\"${PROJECT_ID}\",\"role\":\"sj\",\"workflow_mode\":\"manual\"}")
+    PLATFORM_SEED=$(post "/api/auth/token" "{\"user_id\":\"SJ\",\"user_name\":\"设计\",\"project_id\":\"${PROJECT_ID}\",\"role\":\"sj\"}")
     PLATFORM_TOKEN="$(jf "$PLATFORM_SEED" "data.token")"
 fi
 if [ -z "$PLATFORM_TOKEN" ] || [ "$PLATFORM_TOKEN" = "null" ]; then

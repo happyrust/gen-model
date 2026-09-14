@@ -6,8 +6,8 @@
 //
 // 跑：node selftest.mjs   （退出码 0 全过 / 1 有失败）
 
-import { CONTRACT_ROUTES, isReviewDomainPath, matchContractRoute } from './contract.mjs';
-import { classifyConsoleText, isFallbackClass } from './capture.mjs';
+import { CONTRACT_ROUTES, isReviewDomainPath, matchContractRoute, expectedRoutesFor } from './contract.mjs';
+import { classifyConsoleText, isFallbackClass, redact, Capture } from './capture.mjs';
 import { loadConfig } from './config.mjs';
 
 let passed = 0;
@@ -130,6 +130,15 @@ throws('非法 wiring 要报错', () => {
 }, /只能是 query\|env/);
 
 // ── 汇总 ──────────────────────────────────────────────────────────────
+check('approve 场景不要求 return', expectedRoutesFor('u2', 'approve').some(r => r.path.endsWith('/return')), false);
+check('return 场景不要求 approve', expectedRoutesFor('u2', 'return').some(r => r.path.endsWith('/approve')), false);
+check('脱敏 URL token', redact('http://example/?user_token=private&form_id=f'), 'http://example/?user_token=<REDACTED>&form_id=f');
+check('脱敏 JSON token', redact('{"token":"private"}'), '{"token":"<REDACTED>"}');
+const c = new Capture({ backendBaseUrl: 'http://localhost:8122', webBaseUrl: 'http://localhost:3102' });
+let listeners = 0;
+const fakePage = { on() { listeners++; } };
+c.attach(fakePage, 'main'); c.attach(fakePage, 'duplicate');
+check('同一页面只挂一套监听', listeners, 4);
 console.log(`selftest: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   for (const f of failures) console.error(`  FAIL ${f}`);

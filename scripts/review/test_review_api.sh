@@ -135,11 +135,22 @@ probe_route() {
     local method="$1"
     local endpoint="$2"
     echo -n "  路由: $method $endpoint ... "
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" \
+    local output body registered=1
+    output=$(curl --max-time 20 -s -w '\n%{http_code}' -X "$method" \
         -H "Content-Type: application/json" "${AUTH_HEADER[@]}" -d '{}' \
-        "${BASE_URL}${endpoint}" 2>/dev/null || echo "000")
+        "${BASE_URL}${endpoint}" 2>/dev/null || printf '\n000')
+    http_code=$(printf '%s' "$output" | tail -n1)
+    body=$(printf '%s' "$output" | sed '$d')
+    if [ "$http_code" = '404' ]; then
+        printf '%s' "$body" | python -c 'import json,sys; v=json.load(sys.stdin); sys.exit(0 if isinstance(v,dict) and (v.get("success") is False or "error_message" in v) else 1)' 2>/dev/null || registered=0
+    fi
     case "$http_code" in
-        404|405|000)
+        405|000)
+            registered=0
+            ;;
+    esac
+    case "$registered" in
+        0)
             echo -e "${RED}❌ FAIL${NC} (HTTP $http_code)"
             FAILED=$((FAILED + 1))
             ;;
@@ -174,11 +185,11 @@ summarize() {
 # routes 模式：计划 §1.2「鉴权/用户/任务/记录/评论·批注状态/附件/同步/健康」八行
 #
 # 逐条数下来是 37 条方法·路径（含前端未调用但旧端一直注册的 returned / batch-reactivate）
-# 外加 1 条静态挂载，共 38 个探针；计划 §6 A3 与本脚本旧注释里的「42 条」是计数笔误，
+# 外加 1 条静态挂载，再加 PMS 6 条与集成 2 条，共 46 个探针；计划 §6 A3 与本脚本旧注释里的「42 条」是计数笔误，
 # 清单以 `src/web_service/review/common.rs` 的 `REVIEW_CONTRACT_ROUTES` 护栏为准（两处一一对应）。
 # ==================================================
 if [ "$MODE" = "routes" ]; then
-    echo -e "${YELLOW}📋 契约方法·路径非 404 探针（37 条路由 + 1 条静态挂载）${NC}"
+    echo -e "${YELLOW}📋 契约方法·路径非 404 探针（37 条核心 + 1 条静态 + 6 条 PMS + 2 条集成）${NC}"
     # 鉴权 2
     probe_route POST   /api/auth/token
     probe_route POST   /api/auth/verify
@@ -220,13 +231,25 @@ if [ "$MODE" = "routes" ]; then
     probe_route POST   /api/review/attachments
     probe_route DELETE /api/review/attachments/probe-id
     echo -n "  静态: GET /files/review_attachments/ ... "
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/files/review_attachments/__probe__.bin" 2>/dev/null || echo "000")
-    if [ "$http_code" = "000" ]; then echo -e "${RED}❌ FAIL${NC} (连接失败)"; FAILED=$((FAILED + 1)); else echo -e "${GREEN}✅ 已应答${NC} (HTTP $http_code，缺文件 404 属正常)"; PASSED=$((PASSED + 1)); fi
+    if REVIEW_TOKEN="$REVIEW_TOKEN" node "$(dirname "$0")/probe-attachment.mjs" "$BASE_URL"; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+    fi
     # 同步 2
     probe_route POST   /api/review/sync/export
     probe_route POST   /api/review/sync/import
     # 健康 1
     probe_route GET    /api/review/health
+    # PMS 六接口 + 模型侧集成两接口；总计 46。
+    probe_route POST   /api/review/workflow/sync
+    probe_route POST   /api/review/workflow/verify
+    probe_route POST   /api/review/delete
+    probe_route POST   /api/review/embed-url
+    probe_route POST   /api/review/annotations/check
+    probe_route POST   /api/review/cache/preload
+    probe_route POST   /api/review/aux-data
+    probe_route GET    /api/review/collision-data
     summarize
 fi
 
@@ -302,9 +325,11 @@ if [ "$MODE" = "auth" ]; then
                 "${BASE_URL}/api/review/tasks/${probe_task}" 2>/dev/null || true
         else
             echo -e "  他人改任务 ... ${YELLOW}跳过${NC}（建探针任务或换第二个 token 失败）"
+            FAILED=$((FAILED + 1))
         fi
     else
         echo -e "  他人改任务 ... ${YELLOW}跳过${NC}（没有 Bearer；review_auth.enabled=true 才跑得了）"
+        FAILED=$((FAILED + 1))
     fi
 
     summarize

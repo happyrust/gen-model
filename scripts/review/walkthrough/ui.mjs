@@ -87,6 +87,22 @@ export async function waitForHook(page, hookName, { timeoutMs, panelHint }) {
   }
 }
 
+/**
+ * 钩子已在就直接用，不在才去点 ribbon 把面板打开。
+ * 嵌入落地（user_token 进来）会按角色自动打开面板，此时再点 ribbon 是 **toggle**，会把刚开的
+ * 面板关掉（DockLayout「Panel review exists, closing it」，2026-09-13 实跑撞到）。
+ */
+export async function ensureHook(page, hookName, ribbonLabel, { timeoutMs, panelHint }) {
+  try {
+    await waitForHook(page, hookName, { timeoutMs: Math.min(3_000, timeoutMs), panelHint });
+    return 'already-open';
+  } catch {
+    await openReviewPanel(page, ribbonLabel, { timeoutMs });
+    await waitForHook(page, hookName, { timeoutMs, panelHint });
+    return 'opened-via-ribbon';
+  }
+}
+
 /** 在页面里调钩子上的一个方法，返回它的返回值。 */
 export function callHook(page, hookName, method, args = []) {
   return page.evaluate(

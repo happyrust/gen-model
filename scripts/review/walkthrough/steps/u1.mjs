@@ -2,7 +2,7 @@
 // （选构件、填说明、上传附件）→ 提交到下一节点 jd → 工作流历史出现一行 submit。
 
 import { buildWebUrl } from '../config.mjs';
-import { RIBBON, callHook, mintToken, openReviewPanel, seedAuthToken, shot, waitForHook, waitForOperator } from '../ui.mjs';
+import { RIBBON, callHook, ensureHook, mintToken, seedAuthToken, shot, waitForOperator } from '../ui.mjs';
 
 export const id = 'u1';
 export const title = 'U1 设计人员（sj）发起提资单';
@@ -23,7 +23,20 @@ export async function run({ page, cfg, capture, log, state }) {
   notes.push(`form_id=${auth.formId}`);
 
   await seedAuthToken(page, auth.token);
-  await page.goto(buildWebUrl(cfg, '/'), { waitUntil: 'domcontentloaded', timeout: cfg.stepTimeoutMs });
+  // 以 PMS 嵌入入口进入（`user_token + form_id`，embedRoleLanding.ts:109-137）：只有嵌入模式下
+  // InitiateReviewPanel.handleSubmit 才会把 form_id 写进 POST /api/review/tasks
+  // （InitiateReviewPanel.vue:785-812 `requestFormId`），否则任务的 formId 由后端另生成，
+  // U2 用同一 form_id 进来就找不到这条单（2026-09-13 实跑：`[embed][form-restore] … taskId: null`）。
+  // sj 落地只开 viewer（embedRoleLanding.ts:304-306），「发起编校审」面板仍要点 ribbon 打开。
+  // `output_project` 让 App.vue 跳过项目选择页（/api/projects 不在校审域，gen-model 不提供）。
+  await page.goto(
+    buildWebUrl(cfg, '/', { user_token: auth.token, form_id: auth.formId, output_project: cfg.projectId }),
+    { waitUntil: 'domcontentloaded', timeout: cfg.stepTimeoutMs },
+  );
+  await page
+    .locator('[data-testid="embed-bootstrap-loading"]')
+    .waitFor({ state: 'hidden', timeout: cfg.stepTimeoutMs })
+    .catch(() => {});
   await shot(page, cfg, 'u1-01-app-loaded');
 
   if (cfg.manual) {
@@ -36,9 +49,8 @@ export async function run({ page, cfg, capture, log, state }) {
     return { ok: true, detail: notes.join('；') };
   }
 
-  // ② 打开「发起编校审」面板，等它的自动化钩子。
-  await openReviewPanel(page, RIBBON.initiateReview, { timeoutMs: cfg.actionTimeoutMs });
-  await waitForHook(page, '__plant3dInitiateReviewE2E', {
+  // ② 打开「发起编校审」面板，等它的自动化钩子（已自动开着就不再点 ribbon，点了是 toggle）。
+  await ensureHook(page, '__plant3dInitiateReviewE2E', RIBBON.initiateReview, {
     timeoutMs: cfg.actionTimeoutMs,
     panelHint: '「发起编校审」',
   });
@@ -51,6 +63,17 @@ export async function run({ page, cfg, capture, log, state }) {
   await callHook(page, '__plant3dInitiateReviewE2E', 'addMockComponent', [refno, `BRAN/${refno}`]);
   log(`构件已入列 refno=${refno}`);
   notes.push(`refno=${refno}`);
+
+  // ③b 数据包名称是 validateForm() 的必填项（InitiateReviewPanel.vue:655-663），空着时
+  //    handleSubmit() 直接 return、一条请求都不发、getLastCreateResult() 永远是 null
+  //    （2026-09-13 首次实跑就卡在这儿）。钩子没有 setter，只能照占位符填输入框
+  //    （模板 :1134-1135，占位符「输入编校审数据包名称...」）。
+  const packageName = `A4 走查 ${cfg.runId}`;
+  await page
+    .getByPlaceholder('输入编校审数据包名称')
+    .first()
+    .fill(packageName, { timeout: cfg.actionTimeoutMs });
+  notes.push(`packageName=${packageName}`);
   await shot(page, cfg, 'u1-03-component-added');
 
   // ④ 提交 = 建提资单（POST /api/review/tasks）。
@@ -58,14 +81,30 @@ export async function run({ page, cfg, capture, log, state }) {
   const created = await waitForCreateResult(page, cfg);
   state.taskId = created?.taskId ?? created?.id ?? null;
   if (!state.taskId) {
+    // 把面板上可见的校验错误一并带出来，下次卡住不用再开截图猜。
+    const visibleErrors = await page
+      .locator('p.text-xs')
+      .allTextContents()
+      .then((all) => all.map((t) => t.trim()).filter(Boolean))
+      .catch(() => []);
     return {
       ok: false,
-      detail: `提交后 getLastCreateResult() 没给出 taskId：${JSON.stringify(created)?.slice(0, 300)}`,
+      detail: `提交后 getLastCreateResult() 没给出 taskId：${JSON.stringify(created)?.slice(0, 300)}`
+        + (visibleErrors.length ? `；面板校验提示：${visibleErrors.join(' / ')}` : ''),
     };
   }
   log(`提资单已建 task_id=${state.taskId}`);
   notes.push(`task_id=${state.taskId}`);
   await shot(page, cfg, 'u1-04-task-created');
+
+  // Explicit account assignment: jd is a role, JH is the default PMS account.
+  const assigned = await apiFromPage(page, cfg, 'PATCH', `/api/review/tasks/${state.taskId}`, auth.token, {
+    checkerId: cfg.checkerId, checkerName: cfg.checkerName,
+    reviewerId: cfg.checkerId, reviewerName: cfg.checkerName,
+  });
+  if (!assigned.ok || assigned.json?.success !== true) {
+    return { ok: false, detail: `配置校核负责人失败：${assigned.status} ${assigned.bodyText.slice(0, 300)}` };
+  }
 
   // ⑤ 附件：走后端的 multipart 面（A4 明确要 multipart 成功 + 静态地址能打开）。
   //    从浏览器上下文里发，请求才会被 capture 抓到、才算「前端打的」。

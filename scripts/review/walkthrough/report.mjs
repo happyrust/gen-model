@@ -14,9 +14,9 @@ function jsonl(rows) {
  * 把实际抓到的请求勾回契约表。
  * @returns {{ rows: Array<object>, missing: Array<object> }}
  */
-export function buildChecklist(capture, steps) {
+export function buildChecklist(capture, steps, decision = 'approve') {
   const expected = new Set();
-  for (const step of steps) for (const r of expectedRoutesFor(step)) expected.add(`${r.method} ${r.path}`);
+  for (const step of steps) for (const r of expectedRoutesFor(step, decision)) expected.add(`${r.method} ${r.path}`);
 
   const rows = CONTRACT_ROUTES.map((route) => {
     const key = `${route.method} ${route.path}`;
@@ -42,7 +42,7 @@ export function writeArtifacts({ cfg, capture, steps, stepResults, preflightChec
   mkdirSync(cfg.outDir, { recursive: true });
   mkdirSync(cfg.screenshotDir, { recursive: true });
 
-  const { rows, missing } = buildChecklist(capture, steps);
+  const { rows, missing } = buildChecklist(capture, steps, cfg.u2Decision);
   const fallbackHits = capture.fallbackHits();
   const badRequests = capture.badRequests();
   const unexpectedOrigins = capture.unexpectedOrigins();

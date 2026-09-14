@@ -1,6 +1,6 @@
 {
-  "username": "platform-e2e",
-  "project": "AvevaMarineSample",
-  "role": "sj",
-  "workflow_mode": "manual"
+  "user_id": "platform-e2e",
+  "user_name": "设计",
+  "project_id": "AvevaMarineSample",
+  "role": "sj"
 }

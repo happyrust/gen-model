@@ -255,3 +255,11 @@ CollisionItem = { ObjectOneLoc, ObjectOne, ObjectTowLoc, ObjectTow,   // "Tow" �
 ## 12. 变更记录
 
 - 2026-09-13 · 初版（T4 / T5 文档半边）。§1–§7、§10 按 T2 已落地代码；§8 按旧端 `platform_api/types.rs` 与 T3 在途实现，T3 交付后如有出入以代码为准并回写本节；§9 为 T4 落地形状（`reason` 新增，Q4）。
+
+### 2026-09-14 闭环验收补充
+
+- 角色 `jd` 与账号 ID 分离；夹具校核账号为 `JH`，任务 checkerId/reviewerId 必须与 JWT user_id 一致。未恢复任务、当前节点不符或缺少负责人时，走查直接失败，保留 403 正文并脱敏。
+- `embed-url` 的 `data.url` 与 `data.query` 配合使用；按前端 `buildTokenPrimaryEmbedUrl` 将 `query.form_id` 加入 URL，JWT 不包含 form_id。
+- `annotations/check` 使用 `success/data` 信封；未闭环批注使 `workflow/verify` 返回 HTTP 200 且 `data.passed=false`，不是 HTTP 409。
+- A3 清单共 46 条：37 核心方法·路径、1 静态附件挂载、6 PMS、2 集成。资源 404 必须检查业务错误体，不能当作路由未注册，也不能仅凭非 404 宣称业务通过。
+- 完整重启验收由 `scripts/review/persistence.mjs seed|verify` 比较 7 组非空快照，包含附件文件 SHA256；任务元数据复读不等同于完整持久化通过。

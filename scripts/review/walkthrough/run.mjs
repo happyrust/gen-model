@@ -15,7 +15,7 @@ import path from 'node:path';
 import { loadConfig, webServerEnv } from './config.mjs';
 import { Capture } from './capture.mjs';
 import { formatChecks, preflight } from './preflight.mjs';
-import { writeArtifacts } from './report.mjs';
+import { writeArtifacts, buildChecklist } from './report.mjs';
 
 const EXIT = { ok: 0, failed: 1, preflight: 2, timeout: 3, badEnv: 4 };
 
@@ -137,13 +137,17 @@ async function main() {
   }
 
   // ── 5. 判定 ──────────────────────────────────────────────────────────
-  const stepsOk = stepResults.length > 0 && stepResults.every((s) => s.ok);
+  for (const step of cfg.steps) {
+    if (!stepResults.some(s => s.step === step)) stepResults.push({ step, ok: false, elapsedMs: 0, detail: '前置步骤失败，未执行' });
+  }
+  const stepsOk = stepResults.length === cfg.steps.length && stepResults.every((s) => s.ok);
+  const missing = buildChecklist(capture, cfg.steps, cfg.u2Decision).missing;
   const fallbackHits = capture.fallbackHits();
   const badRequests = capture.badRequests();
   const unexpected = capture.unexpectedOrigins();
   const verdict = timedOut
     ? 'TIMEOUT'
-    : stepsOk && fallbackHits.length === 0 && badRequests.length === 0 && unexpected.length === 0
+    : stepsOk && missing.length === 0 && fallbackHits.length === 0 && badRequests.length === 0 && unexpected.length === 0 && capture.pageErrors.length === 0
       ? 'PASS'
       : 'FAIL';
 
@@ -223,11 +227,12 @@ async function ensureWebServer(cfg) {
   }
 
   console.log(`\n[web] 起 Vite dev：${cfg.webRepo} → ${cfg.webBaseUrl}`);
-  const child = spawn('npm', ['run', 'dev'], {
+  const child = spawn('npm', ['run', 'dev', '--', '--port', String(portOf(cfg.webBaseUrl)), '--strictPort'], {
     cwd: cfg.webRepo,
     env: webServerEnv(cfg),
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32', // Windows 上 npm 是 npm.cmd
+    windowsHide: true,
   });
   child.stdout.on('data', (b) => process.env.REVIEW_WEB_LOG === '1' && process.stdout.write(`[vite] ${b}`));
   child.stderr.on('data', (b) => process.stderr.write(`[vite:err] ${b}`));
