@@ -83,7 +83,12 @@ fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
     // 新鲜度只经共享读视图比 Arc 身份：两个服务的 `is_current` 都不读文件头、不开库、不问骨架。
     for source in [ELEMENT_ATTRIBUTES, DIRECT_TREE] {
         let code = production(source);
-        let current = function_body(&code, "fn is_current(");
+        let signature = if source == DIRECT_TREE {
+            "pub(crate) fn is_current("
+        } else {
+            "fn is_current("
+        };
+        let current = function_body(&code, signature);
         assert!(current.contains("self.reader.view()"));
         assert!(current.contains("Arc::ptr_eq("));
         for forbidden in ["DbFileHeader::read(", "ReadOnlyEngine::open(", "mdb_memory_store::"] {
@@ -322,32 +327,20 @@ fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 /// lazy-startup L3（`docs/plans/2026-09-12-lazy-startup-dev-plan.md` §3.3）：启动链不再预热元素骨架。
-/// `run_cli` / `run_read_through_core` / `bootstrap_read_through_rooms` 三段里没有
+/// `run_cli` / `run_read_through_core` / `prepare_room_resident_at_startup` 三段里没有
 /// `mdb_memory_store::ensure(`、没有 `scan_elements(`；两条启动链都经 `startup_route_directory` 打
 /// 路由目录横幅（零元素 I/O + 核头），房间屏障的 dbnum 清单来自路由目录而不是元素表。
 /// 2 s 循环的 `refresh_if_stale` / `get` 是 L4 的活，这里不禁。
 #[test]
 fn startup_chain_does_not_prewarm_the_element_skeleton() {
     let code = LIB.replace("\r\n", "\n");
-    let run_cli = section(
-        &code,
-        "pub async fn run_cli(",
-        "\nfn print_startup_complete_banner(",
-    );
-    let core = section(
-        &code,
-        "async fn run_read_through_core(",
-        "\npub async fn run_app(",
-    );
-    let rooms = section(
-        &code,
-        "async fn bootstrap_read_through_rooms(",
-        "/// File/memory-first service path",
-    );
+    let run_cli = function_body(&code, "pub async fn run_cli(");
+    let core = function_body(&code, "async fn run_read_through_core(");
+    let rooms = function_body(&code, "async fn prepare_room_resident_at_startup(");
     for (name, body) in [
         ("run_cli", run_cli),
         ("run_read_through_core", core),
-        ("bootstrap_read_through_rooms", rooms),
+        ("prepare_room_resident_at_startup", rooms),
     ] {
         assert!(
             !body.contains("mdb_memory_store::ensure("),
@@ -361,10 +354,7 @@ fn startup_chain_does_not_prewarm_the_element_skeleton() {
     }
     assert!(run_cli.contains("startup_route_directory(&db_option)"));
     assert!(core.contains("startup_route_directory(&db_option)"));
-    assert!(
-        rooms.contains(".element_databases()"),
-        "房间屏障的 dbnum 清单来自路由目录"
-    );
+    assert!(core.contains("prepare_room_resident_at_startup(&db_option).await"));
 
     let directory = function_body(&code, "fn startup_route_directory(");
     assert!(directory.contains("MdbRouteDirectory::from_membership("));
