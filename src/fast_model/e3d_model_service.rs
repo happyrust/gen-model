@@ -110,6 +110,30 @@ pub(crate) struct SourceIndex {
     pub(crate) owners: Arc<BTreeMap<(u32, u32), RefNo>>,
 }
 
+/// Typed failures of [`E3dModelService::generate_snapshot_source`] that a caller
+/// must be able to distinguish without parsing message text.  Everything else
+/// that path returns is a plain `anyhow` error meaning "geometry could not be
+/// generated"; downcast to this type to recognise the source-side cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotSourceError {
+    /// The session's element index has no entry for the requested root: at that
+    /// session the refno simply did not exist (yet, or any more).
+    RootNotInSession { root: RefNo, dbnum: u32, sesno: u32 },
+}
+
+impl std::fmt::Display for SnapshotSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RootNotInSession { root, dbnum, sesno } => write!(
+                f,
+                "refno {root} is not in the element index of dbnum {dbnum} at session {sesno}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotSourceError {}
+
 /// Pure, session-pinned generation result.  It contains no database handle and
 /// is safe to route either to the current projection or to the historical
 /// in-memory projection.
@@ -548,6 +572,36 @@ impl DbFileResolver for E3dDbResolver {
 }
 
 impl E3dModelService {
+    /// Check the same immutable target and mesh completeness as generation.
+    /// Receipt existence alone is not freshness: SAVEWORK, replacement/rollback,
+    /// catalogue dependencies and schema changes can all invalidate it.
+    pub(crate) fn current_cached_roots(&self, roots: &[RefNo]) -> anyhow::Result<std::collections::HashSet<RefNo>> {
+        let store = ModelMemoryStore::global();
+        let mut current = std::collections::HashSet::new();
+        for &root in roots {
+            let Some(receipt) = store.receipt(ProjectionScope::Current, root) else {
+                continue;
+            };
+            // Keep each root's real dependency set separate; combining unrelated
+            // roots would invalidate otherwise-current targets on every request.
+            let sessions = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+            self.hydrate_published_dependencies(&receipt, &sessions)?;
+            let source_sesno = self.source_session(self.pin(root.dbno())?)?;
+            let publication = RootPublication {
+                root,
+                model_target: Some(self.model_target(root.dbno(), source_sesno, &sessions)?),
+                published: Some(receipt),
+                projection_complete: false,
+            };
+            if cached_root_target_matches(&publication, source_sesno)
+                && store.root_projection_complete(ProjectionScope::Current, root, &self.mesh_dir)
+            {
+                current.insert(root);
+            }
+        }
+        Ok(current)
+    }
+
     /// The current projection (ADR-054): source files come from the MDB
     /// declaration, and every pin is left unpinned so that generation resolves
     /// the target database's **latest file session** at the moment it runs
@@ -825,7 +879,8 @@ impl E3dModelService {
                         slice.failures.push((root, format!("{error:#}")));
                     }
                     Err(error) => {
-                        return Err(error).with_context(|| format!("generate root {root}"));
+                        return Err(classify_required_root_error(root, error))
+                            .with_context(|| format!("generate root {root}"));
                     }
                 }
                 if slice.is_full(root_budget, element_budget)
@@ -1219,6 +1274,11 @@ impl E3dModelService {
 
     /// Generate one root at an exact source session without reading or writing
     /// the persisted model projection.
+    ///
+    /// A root that the session's element index does not contain fails **before**
+    /// geometry evaluation with [`SnapshotSourceError::RootNotInSession`], so a
+    /// caller can tell "this refno did not exist at that session" apart from
+    /// "its geometry could not be generated" by type instead of by message text.
     pub async fn generate_snapshot_source(
         &self,
         dbnum: u32,
@@ -1228,6 +1288,14 @@ impl E3dModelService {
     ) -> anyhow::Result<GeneratedSnapshot> {
         let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
         let input = generation_input(self, dbnum, source_sesno)?;
+        if !input.index.owners.contains_key(&(root.word0, root.word1)) {
+            return Err(SnapshotSourceError::RootNotInSession {
+                root,
+                dbnum,
+                sesno: source_sesno,
+            }
+            .into());
+        }
         let mut cache = CatalogueMeshCache::default();
         let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, &mut cache)?;
         if !snapshot.report.failed.is_empty()
@@ -1858,6 +1926,42 @@ fn styp_name(value: i64) -> Option<&'static str> {
         14 => Some("SCHE"),
         _ => None,
     }
+}
+
+/// The requested root itself is absent from the generator's pinned source.
+/// A missing catalogue/owner dependency is deliberately not this outcome.
+#[derive(Debug)]
+pub(crate) struct GenerationRootMissing {
+    pub root: RefNo,
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for GenerationRootMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "generation root {} is absent from db {} session {}",
+            self.root, self.dbnum, self.source_sesno)
+    }
+}
+impl std::error::Error for GenerationRootMissing {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn classify_required_root_error(root: RefNo, error: anyhow::Error) -> anyhow::Error {
+    let absent = error.chain().find_map(|cause| {
+        match cause.downcast_ref::<e3d_io::db_element::DbElementError>() {
+            Some(e3d_io::db_element::DbElementError::NotFound { refno, dbno, sesno })
+                if *refno == root => Some((*dbno, *sesno)),
+            _ => None,
+        }
+    });
+    if let Some((dbnum, source_sesno)) = absent {
+        return GenerationRootMissing { root, dbnum, source_sesno, source: error }.into();
+    }
+    error
 }
 
 fn generate_snapshot_from_set(
@@ -3232,6 +3336,42 @@ mod tests {
     }
 
     #[test]
+    fn read_through_receipt_is_invalidated_by_each_target_identity_change() {
+        let file = ModelFileTarget {
+            dbnum: 8000, db_type: "DESI".into(), file: "design.db".into(),
+            session: 459, digest: "generation-a".into(),
+        };
+        let target = ModelTarget {
+            project: "fixture".into(), design: file.clone(),
+            catalogue: vec![ModelFileTarget { dbnum: 7000, db_type: "CATA".into(), ..file }],
+            template_attlib_digest: "schema-a".into(),
+            generator_fingerprint: "generator-a".into(), tessellation_profile: "profile-a".into(),
+        };
+        let mut publication = RootPublication {
+            root: RefNo::new(24384, 1), model_target: Some(target.clone()),
+            published: Some(RootReceipt {
+                source_sesno: 459, model_target: Some(target.clone()),
+                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(),
+            }), projection_complete: true,
+        };
+        assert!(cached_root_target_matches(&publication, 459));
+        for change in 0..7 {
+            let mut changed = target.clone();
+            match change {
+                0 => changed.design.session = 461, // SAVEWORK
+                1 => changed.design.session = 457, // rollback
+                2 => changed.design.digest = "generation-b".into(), // replacement
+                3 => changed.catalogue[0].session += 1,
+                4 => changed.catalogue[0].file = "other-project.db".into(),
+                5 => changed.template_attlib_digest = "schema-b".into(),
+                _ => changed.generator_fingerprint = "generator-b".into(),
+            }
+            publication.model_target = Some(changed);
+            assert!(!cached_root_target_matches(&publication, 459), "change {change}");
+        }
+    }
+
+    #[test]
     fn model_file_target_digest_pins_file_identity_and_session() {
         let path = std::env::temp_dir().join(format!("e3d-model-target-{}.db", std::process::id()));
         std::fs::write(&path, b"fixture-v1").expect("write fixture");
@@ -3647,6 +3787,34 @@ mod tests {
         assert!(
             body.contains("Arc::clone(&index.owners)") && !body.contains("index.owners.clone()"),
             "每个快照复制一份整库 owner 表，一页就是百 MB 级的纯重复"
+        );
+    }
+
+    /// 单根快照路：根不在那一会话的元素索引里，要在求几何**之前**以类型化错误退出。
+    /// 判在后面（或只靠消息文本）就是 2026-09-13 live 用例 3 那种「根不存在却报几何失败、
+    /// 消息里还没原因」。
+    #[test]
+    fn snapshot_source_rejects_a_root_missing_from_the_session_index_before_generating() {
+        let source = service_source();
+        let body = source
+            .split_once("pub async fn generate_snapshot_source(")
+            .expect("snapshot source")
+            .1
+            .split_once("pub(crate) fn source_file(")
+            .expect("snapshot source end")
+            .0;
+        let index_gate = body
+            .find("input.index.owners.contains_key(&(root.word0, root.word1))")
+            .expect("the session index gate");
+        let typed_error = body
+            .find("SnapshotSourceError::RootNotInSession")
+            .expect("the typed not-in-session error");
+        let generation = body
+            .find("generate_snapshot_from_set(")
+            .expect("snapshot generation");
+        assert!(
+            index_gate < generation && typed_error < generation,
+            "the index gate and its typed error must come before geometry evaluation"
         );
     }
 

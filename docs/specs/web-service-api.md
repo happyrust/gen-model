@@ -823,6 +823,95 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns}` — 进程内空间树的邻近查询
+
+出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
+§5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
+`model-source/genModelV1/spatialSource.ts`（抽屉「按范围查找」在 `?model_source=gen-model-v1` 下走这三条，legacy 源仍走旧后端
+`/api/sqlite-spatial/*`）。
+
+- **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
+  随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
+  `spatial_query_never_writes_the_tree_or_takes_the_serial_lock` 另钉一道源码扫描）。dbnum / name 都在锁外补——补属性要回
+  元素记录读盘，不该压在树的读锁下拖慢写侧收敛。三条都只读、都是 GET，可选 `?project=&mdb=&namespace=`，与 §4.10 同一道
+  身份门（不一致 422 `identity_mismatch`）。
+- **覆盖面 = 「已生成过模型的构件」**（响应 `coverage: "global-tree"`）：树里只有经 `converge_tree_after_persist` 进过树的盒；
+  没 `ensure` 过的构件、隐式管身 `tube`、`ModelMemoryStore`-only（`ProjectionOnly` / memory-only 库）的盒第一版都不是候选
+  （计划 §5-5 按 (a)）。客户端在结果区提示「结果仅含已生成过模型的构件」，要更全就先 `/model/ensure` 或整库生成。
+- **门禁**：`spatial_state::current_state()` 不在 `Ready` / `ReadyEmpty` → **503 `spatial_not_ready`**，带 `Retry-After: 5`，
+  `detail.state` 是状态字面值（`uninitialized` / `loading` / `rebuilding` / `replay_required` / `degraded_reuse` /
+  `degraded_blocked`）。这是 §3 统一信封之外唯一一处 `detail` 非 `null`、带响应头的错误（`handlers::SpatialApiError`
+  单独成型，不改 `ApiError` 的十几处构造点）——客户端按 `code` 分型重试，不要当 500。`ReadyEmpty` 放行、直接回空结果
+  （`spatial_state: "ready_empty"`）；`AIOS_SPATIAL_COMPUTE=0` 的进程恒回 503。
+
+`GET /spatial/nearby` 的 query 参数（全部按字串收、服务端自己解；错误直接是 400 `bad_request`，`message` 直说哪一格错）：
+
+| 参数 | 说明 |
+|---|---|
+| `refno` \| `x,y,z` | 二选一，同时给 400。`refno` 收 `a/b` 与 `a_b`；`x,y,z` 三个一起给，f32、mm、E3D 世界坐标 |
+| `radius` | 必填，mm，`0 < r ≤ 100000`（100 m；再大就是整库扫描，不是「邻近」） |
+| `shape` | `sphere`（默认）\| `cube` |
+| `nouns` | 逗号分隔，大小写不敏感（服务端按大写比较） |
+| `keyword` | 分页前过滤，大小写不敏感；只匹配 refno（`a_b` / `a/b` 两种写法）与 noun，**不匹配 name**（计划 §5-2 按 (a)） |
+| `sort` | `distance`（默认：距离升序，同距按 dbnum、refno 兜底）\| `name`（名字只对本页解，全集按 noun、refno 作近似序）；两种都是全序，翻页稳定 |
+| `include_self` | 默认 `false`：refno 模式剔除目标自身与祖先链含目标的整个子树；点模式无意义 |
+| `include_negative` | 默认 `false`：按 `aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES` 剔除负实体（NBOX / NCYL …） |
+| `dbnums` | 逗号分隔 u32，限定库；给了它时答不出库号的条目一律剔除 |
+| `page` / `per_page` | `page` 从 1 起；`per_page` 默认 500、夹在 `1..=1000`（超出钳位，不报错） |
+
+- **中心**：点模式 `center.source = "position"`。refno 模式先在 `ModelMemoryStore` 里并「来源是目标或祖先链含目标、`mesh_id`
+  非空、盒可用」的记录（与 `/api/v1/query` 的 `model.spatial.bounds` subtree 口径逐字相同），投影里没有再看树上该 refno 自己的
+  条目（`AccelerationTree::entries_of`，只读、不触发索引重建），两处都没有 → **404 `not_found`**（消息「…还没生成过模型」；
+  客户端提示先显示该构件，接口内**不**隐式 `ensure`——把生成塞进查询会让一次 GET 挂 120 s，计划 §5-3 按 (a)）。
+  解出来的是目标含子树的并集盒，`center.source = "refno_aabb_center"`。
+- **距离口径**（与前端本地扫描 `aabbMinDistanceToPoint` 同口径，两条纯函数有单测钉住）：点模式是候选盒到点的最小表面距离
+  （盒内为 0；sphere 走 rstar `locate_within_distance(p, r²)`，即 `sqrt(distance_2)`；cube 是与 `center ± r` 的盒相交）；
+  refno 模式是候选盒到目标并集盒的最小表面距离（逐轴 `max(0, a.min − b.max, b.min − a.max)` 的欧氏范数；sphere 再按 `≤ r`
+  过滤，cube 只要与目标盒外扩 r 相交）。`within_radius = distance ≤ radius`，cube 下角落上的条目可以是 `false`。
+- **过滤顺序固定**：`include_self` → 负实体 → `dbnums` → 记 `filter_options.nouns` 计数 → `nouns` → `keyword`。noun 计数落在
+  `nouns` / `keyword` 之前：它是给筛选器画可选项用的，选中一个 noun 不能让别的 noun 从清单上消失。
+- **上限**：读锁内最多取 `candidate_cap = 200000` 条候选，超出置 `truncated_candidates: true`（`candidate_count` 是过滤前的
+  候选数）。`groups`（按 dbnum 计数）与 `total_count` 都是**过滤后的全集**、不受分页影响；答不出库号的条目不进 `groups`。
+  不做服务端扫描快照缓存，每页重扫（rstar 查询 ms 级，计划 §5-6 按 (a)）。
+
+响应（200）：
+
+```json
+{ "results": [{ "refno": "24383_71586", "dbnum": 24383, "noun": "PIPE", "name": "/P-1001",
+                "aabb": { "min": [x, y, z], "max": [x, y, z] }, "distance": 123.4, "within_radius": true }],
+  "center": { "x": 0, "y": 0, "z": 0, "source": "position | refno_aabb_center" },
+  "radius": 5000, "shape": "sphere",
+  "total_count": 0, "returned_count": 0, "page": 1, "per_page": 500, "has_more": false,
+  "candidate_count": 0, "truncated_candidates": false, "candidate_cap": 200000,
+  "groups": [{ "dbnum": 24383, "count": 0 }],
+  "filter_options": { "nouns": [{ "value": "PIPE", "count": 0, "is_negative": false }] },
+  "spatial_state": "ready", "coverage": "global-tree" }
+```
+
+- `refno` 一律 `a_b`；`dbnum` 先取投影记录，缺则 `DirectTreeService::dbnum_of`，两处都答不出为 `null`（与 §4.10 同义：
+  「答不出」，不是 0 号库）；`name` **只对本页补**（`DirectTreeService::name_of`，回元素记录读一次 `NAME`，≤ 1000 条），
+  没有名字为 `null`；`aabb` 是 mm、Z-up 的世界坐标盒；`filter_options.nouns` 按 count 降序、同 count 按 noun 字典序。
+  **没有专业（`spec_value`）维度**——v1 链路里根本没有它，前端在这一源下隐藏专业筛选、改按 `groups` 的 dbnum 分组
+  （计划 §5-1 按 (a)；按 noun 派生专业要产品口径，另起切片）。
+
+`GET /spatial/nearby/refnos`：同参、忽略 `page` / `per_page` / `sort`，按距离序给完整命中集、不补 `name`，上限
+`result_cap = 100000`（超出置 `truncated_results: true`，`total_count` 仍是全集数；`by_dbnum` 只收答得出库号的条目）：
+
+```json
+{ "refnos": ["24383_71586"], "by_dbnum": { "24383": ["24383_71586"] }, "total_count": 1,
+  "truncated_results": false, "result_cap": 100000,
+  "center": { "x": 0, "y": 0, "z": 0, "source": "position" }, "radius": 5000, "shape": "sphere",
+  "spatial_state": "ready", "coverage": "global-tree" }
+```
+
+`GET /spatial/negative-nouns` → `{ "nouns": ["NBOX", "NCYL", …] }`：`TOTAL_NEG_NOUN_NAMES` 去重、保持原序；只过身份门，
+不看空间树状态。
+
+错误一览：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒）、422 `identity_mismatch`（§3）、
+503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档）；其余暂时故障（`DirectTreeService` 取不到等）
+按 §3 统一信封 500。
+> 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`、`/files/review_attachments/*`；plant3d-web 写死的契约路径，不在 `/api/v1` 下，响应沿用旧端 `{success,…}` 信封而非 §3 的 `ApiError`）另见 `docs/specs/review-api.md`（自 plant-model-gen `:3100` 移植，`docs/plans/2026-09-12-review-backend-port-plan.md` Q10）。
+
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
 ### 5.1 信封

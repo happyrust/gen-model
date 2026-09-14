@@ -1,0 +1,53 @@
+{
+  "task_id": "model-history-20260913-223603-000007",
+  "kind": "model_history",
+  "state": "succeeded",
+  "project": "AvevaMarineSample",
+  "created_at": "2026-09-13T22:36:03.678339500+08:00",
+  "started_at": "2026-09-13T22:36:03.678339500+08:00",
+  "finished_at": "2026-09-13T22:36:03.78472+08:00",
+  "dbnum": 8000,
+  "db_type": "DESI",
+  "units_done": 1,
+  "total_units": 1,
+  "events_seen": 1,
+  "current_stage": "historical_generation",
+  "stage_started_at": "2026-09-13T22:36:03.678339500+08:00",
+  "stage_last_progress_at": "2026-09-13T22:36:03.784639800+08:00",
+  "detail": {
+    "refno": "=24384/24776",
+    "sesno": 556,
+    "time": null
+  },
+  "result": {
+    "snapshot_key": "24384_24776@556",
+    "dbnum": 8000,
+    "refno": "24384/24776",
+    "resolved_session": {
+      "requested": "sesno:556",
+      "sesno": 556,
+      "session_time": "2026-09-13T11:15:07+08:00"
+    },
+    "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "source_fingerprint": "28875ec96daa7719c1b1f12a5492ff96ade289cebdc050d230cc6144f420f3c2",
+    "visited": 3,
+    "generated": 2,
+    "failed": 0,
+    "skipped": 0,
+    "upserted": 2,
+    "shared_instances": 2,
+    "baked_instances": 0,
+    "mesh_written": 0,
+    "mesh_reused": 2,
+    "unique_meshes": 1,
+    "elapsed_ms": 104
+  },
+  "steps": [
+    {
+      "name": "historical_generation",
+      "at": "2026-09-13T22:36:03.678339500+08:00",
+      "ms": 106,
+      "ok": true
+    }
+  ]
+}

@@ -657,25 +657,23 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // （/health 不报库端点），同名工程的隔离沙箱一律被误伤；有了这个键，探测端
     // 能放行「同工程、不同库」，只拦真共享一个库的（探测端做 localhost↔127.0.0.1
     // 归一，这里不做）。
-    // `embedded-mem` 报的是 `embedded:mem` 而不是配置里那对 v_ip:v_port：库在进程里，
-    // 那个地址根本没被连过。照抄配置会把这一栏变成谎话，而互踩探测正是照它决定
-    // 「要不要拦」——一个谁都不共享的进程内库反而会被当成共享库拦下别人。
+    // `mem` 报的是 `embedded:mem` 而不是配置里那对 v_ip:v_port：库在进程里，那个地址
+    // 根本没被连过。照抄配置会把这一栏变成谎话，而互踩探测正是照它决定「要不要拦」
+    // ——一个谁都不共享的进程内库反而会被当成共享库拦下别人。
     //
-    // 反过来 `spawned-mem` **必须报真地址**：那台库是本进程拉起来的，但端口是真的、
-    // 别人连得上，报 `embedded:mem` 会让互踩探测放行两个抢同一个端口的实例。
-    // 「是不是本进程自己起的」「活不活得过重启」由下面 `medium` / `durable` 两栏回答，
-    // 不压进这一栏——它的读者（跨部署探测）只认地址。
+    // 判据从前是 `has_endpoint()`，与 `is_durable()` 是两个问题（当年 `spawned-mem`
+    // 不 durable 却有真端口）。自带存储两档退役之后两个问题合一，这里直接问 durable。
     {
         let db_option = aios_core::get_db_option();
         let mode = crate::options::store_mode();
-        sul_db["endpoint"] = if mode.has_endpoint() {
+        sul_db["endpoint"] = if mode.is_durable() {
             json!(format!("{}:{}", db_option.v_ip, db_option.v_port))
         } else {
             json!("embedded:mem")
         };
-        // external / spawned-mem / embedded-mem
+        // mem / rocksdb
         sul_db["medium"] = json!(mode.as_str());
-        // 行活不活得过进程重启。只有 external 可能为真。
+        // 行活不活得过进程重启。只有 rocksdb 为真。
         sul_db["durable"] = json!(mode.is_durable());
     }
     // 调试限定常驻一栏（D7 护栏三的第二个落点）：跛着的服务必须一眼看得出来，
@@ -968,10 +966,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 不受影响。`model_incremental_types_origin` 说清是配置写的还是环境变量给的。
         "model_incremental_types": model_incremental_types,
         "model_incremental_types_origin": model_incremental_types_origin,
-        // true = 持久层不落盘，库随进程消失（`spawned-mem` 与 `embedded-mem` 都算）。
+        // true = 持久层不落盘，库随进程消失（`mem`）。
         // 这一栏必须在场：看见数据「不见了」的人得能一眼分清是没写进去还是根本没落盘。
-        // **它不回答「连不连得上」**——`spawned-mem` 是易失的但端口是真的，那个问题
-        // 由 `sul_db.endpoint` 与 `sul_db.medium` 回答。老客户端只认得这一栏，所以留着。
+        // 它只说落盘：端点与介质由 `sul_db.endpoint` 与 `sul_db.medium` 回答（自带存储
+        // 两档退役之后两个答案恰好一致，但别把这一栏当成端点判据来读）。老客户端只认得
+        // 这一栏，所以留着。
         "in_memory_db": !crate::options::store_mode().is_durable(),
     }))
 }
@@ -3579,19 +3578,19 @@ mod tests {
         assert!(body.contains("\"only_ready\": only_ready"));
     }
 
-    /// **`spawned-mem` 的 `endpoint` 必须是真地址。**
+    /// **只有 `mem` 报占位地址。**
     ///
-    /// 那台库是本进程拉起来的，但端口是真的、别人连得上；报 `embedded:mem` 会让
-    /// `aios_db.full_init` 的跨部署互踩探测**放行两个抢同一个端口的实例**。
-    /// 只有 `embedded-mem`（库在进程里、外面根本没被连过）才回那个占位串。
-    /// 判据钉在 `has_endpoint()` 上，不许退回按 `in_memory_db` 这个两态开关分叉。
+    /// `rocksdb` 那台库别人连得上，报 `embedded:mem` 会让 `aios_db.full_init` 的跨部署
+    /// 互踩探测**放行两个抢同一个端口的实例**；反过来 `mem` 的库在进程里、配置那对
+    /// 地址根本没被连过，照抄配置会把这一栏变成谎话，一个谁都不共享的进程内库反而
+    /// 会被当成共享库拦下别人。判据钉在 `is_durable()` 上，不许退回按 `in_memory_db`
+    /// 这个两态开关分叉。
     #[test]
     fn only_the_embedded_store_reports_a_placeholder_endpoint() {
         use crate::options::StoreMode;
 
-        assert!(StoreMode::SpawnedMem.has_endpoint());
-        assert!(StoreMode::External.has_endpoint());
-        assert!(!StoreMode::EmbeddedMem.has_endpoint());
+        assert!(StoreMode::RocksDb.is_durable());
+        assert!(!StoreMode::Mem.is_durable());
 
         let source = include_str!("handlers.rs");
         let body = source
@@ -3602,8 +3601,8 @@ mod tests {
             .expect("health 之后是 update_preview")
             .0;
         assert!(
-            body.contains("mode.has_endpoint()"),
-            "endpoint 的分叉判据必须是 has_endpoint()，不许按 in_memory_db 那个两态开关走: {body}"
+            body.contains("mode.is_durable()"),
+            "endpoint 的分叉判据必须是 is_durable()，不许按 in_memory_db 那个两态开关走: {body}"
         );
         assert!(
             !body.contains("crate::options::in_memory_db()"),
@@ -3918,5 +3917,60 @@ mod tests {
             route < memory && route < durable,
             "route selection must happen before either executor is admitted: {body}"
         );
+    }
+
+    /// spec §4.13：树不在 Ready / ReadyEmpty 时 `spatial/*` 回 503 `spatial_not_ready`，带
+    /// `Retry-After: 5` 与非空的 `detail.state`（状态字面值）——统一信封（§3）之外唯一一处，
+    /// 客户端按它分型重试而不是当 500。另外三档（400 / 404 / 500）仍走 `ApiError` 的信封。
+    #[tokio::test]
+    async fn spatial_not_ready_is_a_503_with_retry_after_and_the_state_in_detail() {
+        use crate::fast_model::spatial_state::SpatialTreeState;
+
+        for state in [
+            SpatialTreeState::Uninitialized,
+            SpatialTreeState::Loading,
+            SpatialTreeState::ReplayRequired,
+            SpatialTreeState::Rebuilding,
+            SpatialTreeState::DegradedReuse,
+            SpatialTreeState::DegradedBlocked,
+        ] {
+            let error: SpatialApiError = spatial_query::SpatialQueryError::NotReady(state).into();
+            let response = error.into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{state:?}"
+            );
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&header::HeaderValue::from(spatial_query::RETRY_AFTER_SECS)),
+                "{state:?}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("503 body is readable");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("503 body is JSON");
+            assert_eq!(body["code"], "spatial_not_ready", "{state:?}");
+            assert_eq!(body["detail"]["state"], state.as_str(), "{state:?}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(state.as_str()),
+                "{state:?}: {body}"
+            );
+        }
+
+        let bad: SpatialApiError =
+            spatial_query::SpatialQueryError::BadRequest("radius".into()).into();
+        let response = bad.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("400 body is readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("400 body is JSON");
+        assert_eq!(body["code"], "bad_request");
+        assert!(body["detail"].is_null(), "{body}");
     }
 }

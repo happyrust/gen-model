@@ -113,19 +113,17 @@ async fn main() -> anyhow::Result<()> {
 
     let db_option = aios_core::get_db_option();
     let store = aios_database::options::store_mode();
-    if matches!(store, aios_database::options::StoreMode::EmbeddedMem) {
+    if matches!(store, aios_database::options::StoreMode::Mem) {
         aios_core::SUL_DB.connect("mem://").await?;
         aios_core::SUL_DB
             .use_ns(&db_option.surreal_ns)
             .use_db(&db_option.project_name)
             .await?;
-        println!("介质：进程内嵌 kv-mem（embedded-mem，跑完即消失）");
+        println!("介质：进程内嵌 kv-mem（mem，跑完即消失）");
     } else {
-        // 自带两档（`spawned-mem` / `spawned-rocksdb`）由 `ensure_store_connected` 按配置
-        // 拉起本进程负责的 surreal 子进程再连上去，与 `run_app` 同一条路；`external` 那档
-        // 它只连不拉。**介质由配置说了算，本程序不自己挑**——此前这里只认旧的
-        // `in_memory_db`，自带两档会被当成「外部库」直连一个没人拉起的端口。
-        aios_database::ensure_store_connected(&db_option, aios_database::store_process::StoreStartup::Spawn)
+        // `rocksdb` 那档由 `ensure_store_connected` 连配置指的那台 surreal，与 `run_app`
+        // 同一条路——本进程一台库都不拉（ADR-074）。**介质由配置说了算，本程序不自己挑**。
+        aios_database::ensure_store_connected(&db_option)
             .await
             .with_context(|| format!("按 {} 备好存储", store.as_str()))?;
         println!(

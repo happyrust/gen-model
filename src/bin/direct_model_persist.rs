@@ -285,8 +285,8 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     let db = if args.persist {
-        // 只附着、不拉起（配成 spawned-mem 时才有得拉）：取证探针要落进服务手上
-        // 那个库，自己拉一台空库落完就随进程消失，证据等于没留。
+        // 按配置连库：取证要落进服务手上那个库，所以只在 store_mode=rocksdb 下有意义
+        // ——mem 档连到的是本进程自己的一份空库，落完就随进程消失，证据等于没留。
         aios_database::attach_store_connected()
             .await
             .context("连接兼容目标 SurrealDB")?;

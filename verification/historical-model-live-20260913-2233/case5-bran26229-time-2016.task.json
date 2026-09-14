@@ -1,0 +1,33 @@
+{
+  "task_id": "model-history-20260913-223508-000004",
+  "kind": "model_history",
+  "state": "failed",
+  "project": "AvevaMarineSample",
+  "created_at": "2026-09-13T22:35:08.907788900+08:00",
+  "started_at": "2026-09-13T22:35:08.907788900+08:00",
+  "finished_at": "2026-09-13T22:35:08.943427400+08:00",
+  "dbnum": 8000,
+  "db_type": "DESI",
+  "units_done": 0,
+  "total_units": 1,
+  "events_seen": 0,
+  "current_stage": "historical_generation",
+  "stage_started_at": "2026-09-13T22:35:08.907788900+08:00",
+  "detail": {
+    "refno": "=24384/26229",
+    "sesno": null,
+    "time": "2016-06-01T00:00:00+08:00"
+  },
+  "result": {
+    "code": "TIME_BEFORE_OLDEST_SESSION",
+    "message": "2016-06-01T00:00:00+08:00"
+  },
+  "steps": [
+    {
+      "name": "historical_generation",
+      "at": "2026-09-13T22:35:08.907788900+08:00",
+      "ms": 35,
+      "ok": false
+    }
+  ]
+}

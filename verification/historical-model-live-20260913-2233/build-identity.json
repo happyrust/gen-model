@@ -1,0 +1,1 @@
+{"product":"aios-database","version":"0.1.23","build_id":"0.1.23+gdec2c67d83b9.1789309834.dirty","build_epoch":"1789309834","build_time":"2026-09-13 22:30:34 +08:00","git_commit":"dec2c67d83b9","git_dirty":true,"target":"x86_64-pc-windows-msvc","profile":"debug","rustc":"rustc 1.99.0-nightly (1a98b1e13 2026-08-07)"}

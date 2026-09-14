@@ -59,6 +59,9 @@ struct Verification {
     direct_nodes: usize,
     parents_compared: usize,
     mismatch_count: usize,
+    /// Members whose identity matched but whose TTY noun was a UDET
+    /// (`:SDS_Pole`) instead of the base noun. Counted, not hidden.
+    udet_members: usize,
     mismatches: Vec<Mismatch>,
     direct_exit_status: i32,
     tty_exit_status: i32,
@@ -106,13 +109,14 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(args.out.join("tty-query.mac.body"), &body)?;
     let raw = E3dDriver::from_env(&repo)?.run_source(&repo, "direct-tree-parity", &body)?;
     std::fs::write(args.out.join("tty-raw.log"), &raw)?;
-    let mismatches = compare_tty(&parents, &raw)?;
+    let (mismatches, udet_members) = compare_tty(&parents, &raw)?;
     let verification = Verification {
         baseline_command: "E3D TTY: =<parent>; Q MEMBERS (one read-only session)".into(),
         modified_command: "direct_tree_tty_compare --tty (e3d-io DirectStore)".into(),
         direct_nodes: direct.node_count,
         parents_compared: parents.len(),
         mismatch_count: mismatches.len(),
+        udet_members,
         mismatches,
         direct_exit_status: 0,
         tty_exit_status: 0,
@@ -123,9 +127,10 @@ fn main() -> anyhow::Result<()> {
         serde_json::to_vec_pretty(&verification)?,
     )?;
     println!(
-        "TTY_COMPARE parents={} mismatches={} out={}",
+        "TTY_COMPARE parents={} mismatches={} udet_members={} out={}",
         verification.parents_compared,
         verification.mismatch_count,
+        verification.udet_members,
         verification_path.display()
     );
     anyhow::ensure!(
@@ -249,11 +254,31 @@ fn signature(noun: &str, name: &str, refno: Option<&str>) -> String {
     }
 }
 
+/// `Q MEMBERS` prints the **UDET** (user-defined element type, spelled with a
+/// leading colon: `:SDS_Pole`, `:SDS_Supp`, …) for elements that carry one,
+/// while direct read reports the base noun it is built on (`SCTN`, `ZONE`).
+/// Both name the same element, and the base noun cannot be recovered from the
+/// UDET string, so a leading colon means "noun not comparable here" — identity
+/// still is, and identity is what a member-order check is about.
+fn same_member(direct: &str, tty: &str) -> bool {
+    if direct == tty {
+        return true;
+    }
+    let Some((_, direct_identity)) = direct.split_once('|') else {
+        return false;
+    };
+    let Some((tty_noun, tty_identity)) = tty.split_once('|') else {
+        return false;
+    };
+    tty_noun.starts_with(':') && direct_identity == tty_identity
+}
+
 fn compare_tty(
     parents: &BTreeMap<RefU64, Vec<EleTreeNode>>,
     raw: &str,
-) -> anyhow::Result<Vec<Mismatch>> {
+) -> anyhow::Result<(Vec<Mismatch>, usize)> {
     let mut mismatches = Vec::new();
+    let mut udet_members = 0usize;
     for (index, (parent, children)) in parents.iter().enumerate() {
         let section = marker_section(raw, index)?;
         let wrapped = format!("MCP-MEMBERS-BEGIN\n{section}\nMCP-MEMBERS-END\n");
@@ -274,7 +299,11 @@ fn compare_tty(
             .iter()
             .map(|row| signature(&row.noun, &row.value, row.refno.as_deref()))
             .collect();
-        if direct != tty {
+        let aligned = direct.len() == tty.len()
+            && std::iter::zip(&direct, &tty).all(|(d, t)| same_member(d, t));
+        if aligned {
+            udet_members += std::iter::zip(&direct, &tty).filter(|(d, t)| d != t).count();
+        } else {
             mismatches.push(Mismatch {
                 parent: RefnoEnum::from(*parent).to_pdms_str(),
                 direct,
@@ -282,7 +311,7 @@ fn compare_tty(
             });
         }
     }
-    Ok(mismatches)
+    Ok((mismatches, udet_members))
 }
 
 #[allow(dead_code)]

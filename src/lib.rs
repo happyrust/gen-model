@@ -185,21 +185,20 @@ static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
 
 /// 这一趟要不要拿锁；不拿时返回那句给人看的理由。
 ///
-/// **只有 `embedded-mem` 不拿。** 锁挡的是「两个进程驱动同一份持久状态」，而
+/// **只有 `mem` 不拿。** 锁挡的是「两个进程驱动同一份持久状态」，而
 /// `mem://` 那一档持久层就在进程里：两个实例各连各的 kv-mem，谁也读不到谁写的
 /// 字节，锁没有保护对象。放开它正是为了让两个实例并排跑起来。
 ///
-/// `spawned-mem` **照常拿锁**（ADR 计划 Q4）。它的库有真端口、别人连得上，
-/// 两个 gen-model 配同一份 `DbOption.toml` 就是冲着同一个端口去的——「不共享库」
-/// 这个理由在那一档不成立。
+/// `rocksdb` **照常拿锁**。那台库别人也连得上，两个 gen-model 配同一份
+/// `DbOption.toml` 就是冲着同一个端口去的——「不共享库」这个理由在那一档不成立。
 ///
 /// 放开不是白送的。盘上还有东西是共享的：`meshes_path` 指的网格目录首当其冲——
 /// 增量路径内部会强制落网格，`gen_mesh=false` 拦不住它。运行目录相对的那些
 /// （`accel_tree` 快照、日志、`cata_dep_cache.bin`）天然分开，绝对路径的不会。
 /// 所以并排跑之前得先让两份配置的 `meshes_path` 分家。
 fn instance_lock_skip_reason(store_mode: crate::options::StoreMode) -> Option<&'static str> {
-    matches!(store_mode, crate::options::StoreMode::EmbeddedMem).then_some(
-        "store_mode=embedded-mem，持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
+    matches!(store_mode, crate::options::StoreMode::Mem).then_some(
+        "store_mode=mem，持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
     )
 }
 
@@ -300,7 +299,7 @@ fn acquire_database_writer_lock(db_option: &DbOption) -> Result<(), String> {
             wanted
         )),
         (Ok(None), Some(wanted)) => Err(format!(
-            "本进程以 embedded-mem 起过、没有写者锁，不能再以 {} {}/{} 写库",
+            "本进程以 store_mode=mem 起过、没有写者锁，不能再以 {} {}/{} 写库",
             wanted.endpoint, wanted.namespace, wanted.database
         )),
         (Err(error), _) => Err(error.clone()),
@@ -362,25 +361,20 @@ mod process_instance_lock_tests {
         );
     }
 
-    /// **只有进程内嵌那一档不拿锁。** `spawned-mem` 的库有真端口、别人连得上，
-    /// 两个 gen-model 配同一份 `DbOption.toml` 就是冲着同一个端口去的——「不共享库」
-    /// 这个理由在那一档不成立（计划 Q4）。翻回「凡内存模式都不拿」这条就红。
+    /// **只有进程内嵌那一档不拿锁。** `rocksdb` 那台库别人也连得上，两个 gen-model
+    /// 配同一份 `DbOption.toml` 就是冲着同一个端口去的——「不共享库」这个理由在那一档
+    /// 不成立。翻回「凡内存模式都不拿」这条就红。
     #[test]
     fn only_the_embedded_store_needs_no_single_instance_lock() {
         use crate::options::StoreMode;
 
         assert!(
-            instance_lock_skip_reason(StoreMode::External).is_none(),
+            instance_lock_skip_reason(StoreMode::RocksDb).is_none(),
             "持久层在进程外时锁仍有保护对象，不许跳过"
         );
+        let reason = instance_lock_skip_reason(StoreMode::Mem).expect("不拿锁必须说出为什么");
         assert!(
-            instance_lock_skip_reason(StoreMode::SpawnedMem).is_none(),
-            "自带存储有真端口，两个实例会抢同一个，锁不许跳过"
-        );
-        let reason =
-            instance_lock_skip_reason(StoreMode::EmbeddedMem).expect("不拿锁必须说出为什么");
-        assert!(
-            reason.contains("embedded-mem"),
+            reason.contains("mem"),
             "理由要点名是哪一档放开的，否则日志里只是一句没有出处的「不拿锁」：{reason}"
         );
     }
@@ -571,7 +565,6 @@ pub mod fast_model;
 /// （`.planning/2026-09-06-plant-mbd-pipe-dimension`）。
 pub mod mbd;
 
-pub mod store_process;
 pub mod surreal_retry;
 
 pub mod versioned_db;
@@ -1613,29 +1606,15 @@ fn print_startup_complete_banner(
         println!("  *** {notice}");
     }
     match crate::options::store_mode() {
-        crate::options::StoreMode::EmbeddedMem => println!(
-            "  *** 内存模式（store_mode=embedded-mem）：持久层是进程内嵌 kv-mem，\
+        crate::options::StoreMode::Mem => println!(
+            "  *** 内存模式（store_mode=mem）：持久层是进程内嵌 kv-mem，\
              进程一退整库即消失，外部无端口可连"
         ),
-        crate::options::StoreMode::SpawnedMem => println!(
-            "  存储介质：memory（store_mode=spawned-mem，本进程自带的 {}）——\
-             进程一退整库即消失，但端口是真的",
-            crate::store_process::spawned_endpoint()
-                .unwrap_or_else(|| db_option.get_version_db_conn_str())
-        ),
-        crate::options::StoreMode::SpawnedRocks => println!(
-            "  存储介质：rocksdb（store_mode=spawned-rocksdb，本进程自带的 {}，数据落 {}）——\
-             活得过重启；退出收尸只杀进程，下次启动重新拉起即接上",
-            crate::store_process::spawned_endpoint()
-                .unwrap_or_else(|| db_option.get_version_db_conn_str()),
-            crate::store_process::default_rocksdb_dir(
-                &db_option.project_code,
-                &db_option.project_name
+        crate::options::StoreMode::RocksDb => {
+            println!(
+                "  存储介质：rocksdb（store_mode=rocksdb，连配置指的 {}——本进程不拉起它）",
+                db_option.get_version_db_conn_str()
             )
-            .display()
-        ),
-        crate::options::StoreMode::External => {
-            println!("  存储介质：{}", db_option.get_version_db_conn_str())
         }
     }
     match crate::options::data_face() {
@@ -1692,14 +1671,16 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
     );
     println!(
         "*** 进程一退整库即消失，外部没有端口可连（rvm_verify / /sql 探针 / \
-         Capture-*Evidence 都够不着）。要留证据请改 store_mode = \"spawned-mem\"。"
+         Capture-*Evidence 与 plant-ui 的「库供数」读面都够不着）。\
+         要留证据请改 store_mode = \"rocksdb\" 并把 v_ip:v_port 指到一台真在跑的库。"
     );
     Ok(())
 }
 
-/// 连配置里那台 SurrealDB（`external` 与 `spawned-mem` 走同一条）。
+/// 连配置里 `v_ip:v_port` 上那台 SurrealDB。
 ///
-/// 两档的分别只在「那台服务是谁起的」——到这一步它已经在监听了，连接语句一个字不差。
+/// **本进程只连，不拉起。** 端口上没东西就是连不上——自己起一台空库再在上面作业，
+/// 失败会一声不响，现象是「查了半天什么都没有」，最难查的那一类。
 #[cfg(feature = "ws")]
 async fn connect_configured_store(db_option: &DbOption) -> anyhow::Result<()> {
     // 此前只 `dbg!` 一下就继续跑：连接失败被吞掉，进程一直走到后面第一次真正用库
@@ -1718,101 +1699,25 @@ async fn connect_configured_store(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `spawned-mem` / `spawned-rocksdb`：让配置里那对 `v_ip:v_port` 上有一台**本进程负责的**
-/// SurrealDB（memory 或 rocksdb 后端，由 `datastore` 说了算——两档只差这一个位置参数）。
-///
-/// 端口上已经有东西时按 `store_process::judge_port` 那张表行事（附着 / 收孤儿 / 拒绝）。
-/// 自己起的那一台登记进程内单例，正常退出、`Ctrl+C` 与 panic 三条路都收尸；
-/// 附着到的那一台**不收**——它不是我们的。rocksdb 档收尸杀的只是进程，数据在盘上，
-/// 下次启动重新拉起即接上（ADR-070）。
-#[cfg(feature = "ws")]
-async fn ensure_own_store(
-    db_option: &DbOption,
-    startup: crate::store_process::StoreStartup,
-    datastore: &crate::store_process::SpawnDatastore,
-) -> anyhow::Result<()> {
-    use crate::store_process::{
-        DEFAULT_READY_TIMEOUT, StoreHandle, StoreIdentity, ensure_spawned_store,
-        install_spawned_store, shutdown_spawned_store,
-    };
-
-    let identity = StoreIdentity {
-        project: db_option.project_name.clone(),
-        namespace: db_option.surreal_ns.clone(),
-        data_face: crate::options::data_face().as_str().to_owned(),
-    };
-    let handle = ensure_spawned_store(
-        &db_option.v_ip,
-        db_option.v_port,
-        &db_option.v_user,
-        &db_option.v_password,
-        &identity,
-        startup,
-        DEFAULT_READY_TIMEOUT,
-        datastore,
-    )
-    .await?;
-    match handle {
-        StoreHandle::Attached(_) => {}
-        StoreHandle::Spawned(store) => {
-            install_spawned_store(store);
-            // `Drop` 兜正常退出与 panic，兜不住 `Ctrl+C`——那一路 tokio 直接结束进程，
-            // 析构不跑，留下的孤儿会占着端口，而下一次启动只能靠署名把它认出来。
-            // 少这一条不是「偶尔漏一个」，是**每一次 Ctrl+C 都漏**。
-            tokio::spawn(async {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    println!("收到 Ctrl+C，停止模型落盘并关闭自带存储…");
-                    crate::fast_model::model_write_behind::shutdown_now();
-                    shutdown_spawned_store();
-                }
-                std::process::exit(130);
-            });
-        }
-    }
-    Ok(())
-}
-
-/// **连上持久层的唯一入口。** 三档介质、一条下游：`SUL_DB` 是 `Surreal<Any>`，
+/// **连上持久层的唯一入口。** 两档介质、一条下游：`SUL_DB` 是 `Surreal<Any>`，
 /// 引擎选择对上层不可见，所以初始化解析、增量窗口写回、模型与房间派生数据全部照原路走。
 ///
-/// `startup` 决定这一次有没有资格把库拉起来——**只有服务主进程给 `Spawn`**。
-/// 探针、一次性工具与 python 调试入口给 `AttachOnly`：它们要读的是服务手上那个库，
-/// 端口空着时正确的反应是响亮地说「服务没起」，而不是自己拉一台空库在上面作业。
+/// 没有 `startup` 这个参数了。它原本回答「这一次有没有资格把库拉起来」——本进程从此
+/// 一台库都不拉，那个问题不存在了；`store_process.rs`（端口探针 / 署名 / 心跳 /
+/// 孤儿回收 / 收尸）随之整个删除。
 #[cfg(feature = "ws")]
-pub async fn ensure_store_connected(
-    db_option: &DbOption,
-    startup: crate::store_process::StoreStartup,
-) -> anyhow::Result<()> {
+pub async fn ensure_store_connected(db_option: &DbOption) -> anyhow::Result<()> {
     match crate::options::store_mode() {
-        crate::options::StoreMode::EmbeddedMem => connect_in_memory_store(db_option).await,
-        crate::options::StoreMode::SpawnedMem => {
-            ensure_own_store(
-                db_option,
-                startup,
-                &crate::store_process::SpawnDatastore::Memory,
-            )
-            .await?;
-            connect_configured_store(db_option).await
-        }
-        crate::options::StoreMode::SpawnedRocks => {
-            let datastore = crate::store_process::SpawnDatastore::RocksDb(
-                crate::store_process::default_rocksdb_dir(
-                    &db_option.project_code,
-                    &db_option.project_name,
-                ),
-            );
-            ensure_own_store(db_option, startup, &datastore).await?;
-            connect_configured_store(db_option).await
-        }
-        crate::options::StoreMode::External => connect_configured_store(db_option).await,
+        crate::options::StoreMode::Mem => connect_in_memory_store(db_option).await,
+        crate::options::StoreMode::RocksDb => connect_configured_store(db_option).await,
     }
 }
 
-/// 旁路入口（探针 / 一次性工具 / python 调试）用的那一档：读配置、只附着、不拉起。
+/// 旁路入口（探针 / 一次性工具 / python 调试）：读配置、连上去。
 #[cfg(feature = "ws")]
 pub async fn attach_store_connected() -> anyhow::Result<()> {
     let db_option = get_db_option_ext().inner;
-    ensure_store_connected(&db_option, crate::store_process::StoreStartup::AttachOnly).await
+    ensure_store_connected(&db_option).await
 }
 
 /// 一个库的文件变了（会话前进 / 回滚 / 换文件）：只动**这个 dbnum** 的模型
@@ -2025,7 +1930,7 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     println!("[startup] stage=store event=begin");
     // 内存库承载模型发布，必须在接受模型请求前就绪；属性始终从文件读取。
     if !crate::options::store_mode().is_durable() {
-        ensure_store_connected(&db_option, crate::store_process::StoreStartup::Spawn).await?;
+        ensure_store_connected(&db_option).await?;
         crate::data_interface::embedded_surql::define_embedded_functions().await?;
     }
     println!("[startup] stage=store event=done elapsed_ms={}", stage_started.elapsed().as_millis());
@@ -2144,9 +2049,7 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             return;
         }
         loop {
-            match ensure_store_connected(&mirror_option, crate::store_process::StoreStartup::Spawn)
-                .await
-            {
+            match ensure_store_connected(&mirror_option).await {
                 Ok(()) => {
                     if let Err(error) =
                         crate::data_interface::embedded_surql::define_embedded_functions().await
@@ -2234,8 +2137,8 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     #[cfg(feature = "ws")]
     {
         // 服务主进程是唯一给 `Spawn` 的调用方：只有它有资格把库拉起来、收自己的孤儿。
-        // 三档介质的分派全在 `ensure_store_connected` 里，旁路入口共用同一条。
-        ensure_store_connected(&db_option, crate::store_process::StoreStartup::Spawn).await?;
+        // 两档介质的分派全在 `ensure_store_connected` 里，旁路入口共用同一条。
+        ensure_store_connected(&db_option).await?;
     }
 
     crate::data_interface::data_face_signature::validate_or_claim(

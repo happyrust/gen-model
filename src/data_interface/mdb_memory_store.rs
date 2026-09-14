@@ -33,6 +33,11 @@
 //! 它跟 `DirectStore` 冻住的那个会话是同一个，两边一起旧，不会一半新一半旧。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static ELEMENT_SCAN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn element_scan_count() -> usize { ELEMENT_SCAN_COUNT.load(Ordering::Relaxed) }
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -151,6 +156,7 @@ impl MdbMemoryStore {
         db_type: &str,
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
+        ELEMENT_SCAN_COUNT.fetch_add(1, Ordering::Relaxed);
         let header = super::db_file_header::DbFileHeader::read(path)?;
         // 名字挑出来的文件与它自报的库号不符，就没有哪一个值可以拿来建归属：
         // 按声明记，跨库 owner 上溯会去错库；按自报记，MDB 的成员名单就对不上了。

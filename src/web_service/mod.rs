@@ -11,6 +11,9 @@ mod handlers;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
+/// 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`），自 plant-model-gen 移植；
+/// 契约路径由 plant3d-web 写死，不在 `/api/v1` 下（`docs/plans/2026-09-12-review-backend-port-plan.md`）。
+pub mod review;
 /// 配置向导（`/setup.html` + `/api/v1/setup/*`）与「设置模式」最小启动臂。
 pub mod setup;
 mod ws;
@@ -19,10 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::data_interface::direct_tree::DirectTreeProvider;
@@ -407,6 +412,27 @@ async fn serve_with_ready(
         log::warn!("{message}");
         println!("[warn] {message}");
     }
+    // 校审数据的落点在挂路由之前先判一次（ADR-075 / 判据 A9）：介质活不过重启时整个
+    // 校审域换成 503 拒绝路由，并在启动日志响亮说明——而不是让它先跑起来，等运维
+    // 重启一次才发现一天的校审意见没了（宪法 III：静默失效是最高级别缺陷）。
+    let review_persistence = review::db::review_persistence();
+    let review_attachments_dir = crate::options::review_attachments_dir();
+    match &review_persistence {
+        review::db::ReviewPersistence::Ready { .. } => {
+            println!("{}", review_persistence.startup_line());
+            println!(
+                "  校审附件目录：{}（经 {REVIEW_ATTACHMENTS_URL_PREFIX}/ 公开）",
+                review_attachments_dir.display()
+            );
+            prepare_review_attachments_dir(&asset_root, &review_attachments_dir);
+        }
+        review::db::ReviewPersistence::Refused(refusal) => {
+            let banner = refusal.banner();
+            log::error!("{banner}");
+            println!("{banner}");
+        }
+    }
+
     let identity = ServiceIdentity::new(
         db_option.project_name.clone(),
         &db_option.mdb_name,
@@ -532,6 +558,20 @@ async fn serve_with_ready(
         // MBD 管道尺寸标注：路径是 plant3d-web `mbdV2Api.ts` 写死的契约（不在 /api/v1 下），
         // 返回冻结的 V2 `MbdV2PipeData`；状态语义见 `web_service::mbd`。
         .route("/api/mbd/v2/pipe/{refno}", get(mbd::mbd_v2_pipe))
+        // 三维校审域：同样是 plant3d-web 写死的契约路径（reviewApi.ts），响应沿用旧端
+        // `{success,…}` 信封而不是本服务的 ApiError；路由清单与鉴权在 `web_service::review` 内。
+        // 必须在 `.layer(...)` 之前合入，CORS / trace 才会覆盖到它。
+        //
+        // 两条臂而不是一条：落点活不过重启时挂的是拒绝路由（同样四个前缀，一律 503 +
+        // 原因），业务路由与附件静态服务都不上——「拒绝启用」要真的拒绝，但不能变成
+        // 404 那种分不清「没移植」和「配置不让跑」的沉默（ADR-075）。
+        .merge(match &review_persistence {
+            review::db::ReviewPersistence::Ready { .. } => review::router().nest_service(
+                REVIEW_ATTACHMENTS_URL_PREFIX,
+                review_attachments_service(&review_attachments_dir),
+            ),
+            review::db::ReviewPersistence::Refused(refusal) => review::db::refusal_router(refusal),
+        })
         // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
         // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
         .route("/ops.html", get(handlers::ops_panel))
@@ -659,27 +699,162 @@ fn open_system_browser(url: &str) -> std::io::Result<()> {
 }
 
 fn resolve_asset_root() -> PathBuf {
-    if let Some(configured) = std::env::var_os("PLANT_ASSET_ROOT")
-        .filter(|path| !path.to_string_lossy().trim().is_empty())
-    {
-        return configured.into();
+    // 解析规则住在 `options` 里：校审附件目录（`options::review_attachments_dir`）要跟
+    // `/assets` 指向同一个根，两处各写一遍迟早会分家——那种分家的症状是附件传得上去、
+    // 下不来，而两条路径各自都「成功」了。
+    crate::options::asset_root()
+}
+
+/// 校审附件的静态 URL 前缀。plant3d-web 写死了它，落库的 `download_url` 里也带着它
+/// （旧端 `web_server/mod.rs:1434`），**逐字不可变**，因此是常量不是配置项。
+const REVIEW_ATTACHMENTS_URL_PREFIX: &str = "/files/review_attachments";
+
+/// 附件目录不存在就先建出来，让「上传前先下载一次」这种顺序也拿得到 404 而不是 500。
+///
+/// 只在资源根已经存在时建：资源根缺失本身是一种降级（`static_assets = false`，`/health`
+/// 会说），在这里顺手把它造出来会把那个降级悄悄抹掉，下次重启 `/health` 就变了脸。
+fn prepare_review_attachments_dir(asset_root: &Path, attachments_dir: &Path) {
+    if attachments_dir.is_dir() {
+        return;
     }
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(executable_dir) = executable.parent()
-    {
-        let packaged = executable_dir
-            .parent()
-            .map(|root| root.join("backend/assets"));
-        for candidate in [Some(executable_dir.join("assets")), packaged]
-            .into_iter()
-            .flatten()
-        {
-            if candidate.is_dir() {
-                return candidate;
+    if !asset_root.is_dir() && attachments_dir.starts_with(asset_root) {
+        log::warn!(
+            "校审附件目录 {} 的上级资源目录不存在，先不创建；首次上传时由上传路径自己建",
+            attachments_dir.display()
+        );
+        return;
+    }
+    if let Err(error) = std::fs::create_dir_all(attachments_dir) {
+        log::warn!(
+            "创建校审附件目录 {} 失败（上传时会再试一次）：{error}",
+            attachments_dir.display()
+        );
+    }
+}
+
+/// `/files/review_attachments/*` 的静态服务。
+///
+/// 形态照抄旧端（`web_server/mod.rs:1433-1437`）：`ServeDir` 外面压一层响应头中间件。
+/// 那一层不是装饰——`ServeDir` 只认磁盘文件名，而磁盘文件名是 `att-<uuid>.<ext>`，
+/// 原始文件名只存在数据库里。没有这一层，用户点开附件下到的是一串 uuid。
+fn review_attachments_service(dir: &Path) -> Router {
+    Router::new()
+        .fallback_service(ServeDir::new(dir))
+        .layer(middleware::from_fn(attachment_response_headers))
+}
+
+/// 附件响应头：恒定 `nosniff`，成功时按查询串补 `Content-Disposition`（旧端
+/// `attachment_response_headers_middleware`）。
+async fn attachment_response_headers(
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    let uri = request.uri().clone();
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+
+    if response.status().is_success() {
+        let stored_name = uri.path().rsplit('/').next().unwrap_or_default();
+        if !stored_name.is_empty() {
+            let disposition =
+                build_attachment_content_disposition(stored_name, uri.query().unwrap_or_default());
+            if let Ok(value) = HeaderValue::from_str(&disposition) {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_DISPOSITION, value);
             }
         }
     }
-    "assets".into()
+
+    response
+}
+
+/// 附件显示名长度上限（字符数）；超长的一律回退到磁盘文件名。
+const ATTACHMENT_DISPLAY_NAME_MAX_CHARS: usize = 120;
+
+/// `ServeDir` 会忽略查询串，这里自行取出并做百分号解码（`+` 按表单编码约定还原为空格）。
+fn attachment_query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name != key {
+            return None;
+        }
+        urlencoding::decode(&value.replace('+', " "))
+            .ok()
+            .map(|decoded| decoded.into_owned())
+    })
+}
+
+fn attachment_extension_lower(name: &str) -> Option<String> {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+/// 解析客户端请求的显示文件名。
+///
+/// 该值来自查询串，必须清洗后才能进响应头：控制字符与路径分隔符替换掉（防响应头注入
+/// 与路径歧义），长度设上限，且扩展名必须与磁盘文件一致——否则回退磁盘文件名，
+/// 避免用真实附件的字节冒充另一种类型的文件下发。
+fn resolve_attachment_display_name(stored_name: &str, requested: Option<&str>) -> String {
+    let Some(raw) = requested else {
+        return stored_name.to_string();
+    };
+
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| match c {
+            '/' | '\\' | '"' => '_',
+            other => other,
+        })
+        .collect();
+    let cleaned = cleaned.trim();
+
+    if cleaned.is_empty() || cleaned.chars().count() > ATTACHMENT_DISPLAY_NAME_MAX_CHARS {
+        return stored_name.to_string();
+    }
+    if attachment_extension_lower(cleaned) != attachment_extension_lower(stored_name) {
+        return stored_name.to_string();
+    }
+
+    cleaned.to_string()
+}
+
+/// 组装 `Content-Disposition`：ASCII 回退名 + RFC 5987 的 `filename*`，兼顾中文名与老浏览器。
+fn build_attachment_content_disposition(stored_name: &str, query: &str) -> String {
+    let force_download = matches!(
+        attachment_query_param(query, "download").as_deref(),
+        Some("1") | Some("true")
+    );
+    let display_name =
+        resolve_attachment_display_name(stored_name, attachment_query_param(query, "name").as_deref());
+
+    let ascii_fallback: String = display_name
+        .chars()
+        .map(|c| {
+            if c == ' ' || (c.is_ascii_graphic() && c != '"' && c != '\\') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    format!(
+        "{}; filename=\"{}\"; filename*=UTF-8''{}",
+        if force_download {
+            "attachment"
+        } else {
+            "inline"
+        },
+        ascii_fallback,
+        urlencoding::encode(&display_name)
+    )
 }
 
 /// CORS 策略：未配置或包含 `*` 时放开（开发期）；否则按 origin 白名单。
@@ -907,6 +1082,169 @@ mod tests {
             .find(".fallback(get(handlers::plant_ui_web))")
             .expect("plant-ui web fallback must exist");
         assert!(api < fallback, "API routes must win over the web fallback");
+    }
+
+    /// 校审域整棵路由靠 `serve` 里那一句 `.merge` 进主 Router（计划 §6 A3 护栏的挂载半边）。
+    /// 它必须在 `.layer(...)` 之前——axum 的 `layer` 只包已注册的路由，合在后面 CORS 就
+    /// 覆盖不到 `/api/review/*`，浏览器端的预检会静默失败；也必须在静态兜底之前。
+    #[test]
+    fn review_router_is_merged_before_layers_and_the_web_fallback() {
+        let serve = serve_body();
+        let review = serve
+            .find("review::router()")
+            .expect("review router must be merged into the app");
+        let cors = serve
+            .find(".layer(build_cors(cors_origins))")
+            .expect("cors layer must exist");
+        let fallback = serve
+            .find(".fallback(get(handlers::plant_ui_web))")
+            .expect("plant-ui web fallback must exist");
+        assert!(review < cors, "review router must be merged before the CORS layer");
+        assert!(review < fallback, "review router must be merged before the web fallback");
+    }
+
+    fn serve_body() -> &'static str {
+        include_str!("mod.rs")
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0
+    }
+
+    /// 附件静态服务的挂载点（计划 §1.4 第 4 条 / 判据 A4 的「下得来」半边）。
+    ///
+    /// 三件事一起钉：URL 前缀逐字不变（plant3d-web 写死，且落库的 `download_url` 里
+    /// 带着它）、目录来自与 `/assets` 同一个解析口、挂在 CORS 之前。
+    /// 前缀写错一个字符的症状是 404，而附件记录看起来一切正常。
+    #[test]
+    fn review_attachments_are_served_under_the_frozen_url_prefix() {
+        assert_eq!(REVIEW_ATTACHMENTS_URL_PREFIX, "/files/review_attachments");
+
+        let serve = serve_body();
+        let nest = serve
+            .find("REVIEW_ATTACHMENTS_URL_PREFIX,")
+            .expect("附件 ServeDir 必须挂进主 Router");
+        assert!(
+            serve.contains("review_attachments_service(&review_attachments_dir)"),
+            "附件目录必须来自 options::review_attachments_dir，不许在这里另写一份路径：{serve}"
+        );
+        assert!(
+            serve.contains("crate::options::review_attachments_dir()"),
+            "附件目录解析只有一个出处：{serve}"
+        );
+        let cors = serve
+            .find(".layer(build_cors(cors_origins))")
+            .expect("cors layer must exist");
+        assert!(nest < cors, "附件静态服务也要被 CORS 覆盖");
+    }
+
+    /// A9 的挂载半边：落点活不过重启时，挂的必须是拒绝路由，而不是照常挂业务路由。
+    ///
+    /// 这条测试盯的是「两条臂都在」——有人把 match 化简回单臂时（比如「先让它跑起来」），
+    /// 拒绝就消失了，而消失得一声不响，正是宪法 III 要拦的那种改动。
+    #[test]
+    fn the_review_domain_is_refused_when_the_store_cannot_survive_a_restart() {
+        let serve = serve_body();
+        assert!(
+            serve.contains("let review_persistence = review::db::review_persistence();"),
+            "挂路由之前必须先判一次落点：{serve}"
+        );
+        assert!(
+            serve.contains("review::db::ReviewPersistence::Refused(refusal) => review::db::refusal_router(refusal)"),
+            "拒绝那一臂必须挂拒绝路由（503 + 原因），不许退化成照常挂业务路由：{serve}"
+        );
+        assert!(
+            serve.contains("log::error!(\"{banner}\")"),
+            "拒绝必须进日志，不能只打在 stdout：{serve}"
+        );
+    }
+
+    /// 附件下载的两个响应头（旧端 `attachment_response_headers_middleware`）：
+    /// 恒定 `nosniff`，以及把磁盘上的 `att-<uuid>.<ext>` 还原成原始文件名。
+    /// 少了后者，用户点开附件下到的是一串 uuid。
+    #[tokio::test]
+    async fn serving_an_attachment_restores_its_display_name_and_blocks_sniffing() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("temp attachment dir");
+        std::fs::write(dir.path().join("att-1.pdf"), b"%PDF-1.7 probe").expect("write fixture");
+        let service = review_attachments_service(dir.path());
+
+        let response = service
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/att-1.pdf?name=%E7%8E%B0%E5%9C%BA%E4%BA%91%E7%BA%BF.pdf")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("service answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        let disposition = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .expect("Content-Disposition");
+        assert!(disposition.starts_with("inline;"), "{disposition}");
+        assert!(
+            disposition.contains("filename*=UTF-8''"),
+            "中文名要靠 RFC 5987 那一格带出去：{disposition}"
+        );
+
+        let missing = service
+            .oneshot(
+                Request::builder()
+                    .uri("/att-nope.pdf")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("service answers");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 显示名来自查询串，等于来自外部输入：扩展名对不上就回退磁盘名（别让 .pdf 的
+    /// 字节冒充 .exe 下发），超长与空白同理；`download=1` 才强制下载。
+    #[test]
+    fn the_attachment_display_name_is_sanitised_before_it_reaches_the_header() {
+        let disposition = build_attachment_content_disposition("att-1.pdf", "name=%E5%9B%BE.pdf");
+        assert!(disposition.starts_with("inline;"), "{disposition}");
+        assert!(disposition.contains("filename*=UTF-8''%E5%9B%BE.pdf"), "{disposition}");
+
+        let forced = build_attachment_content_disposition("att-1.pdf", "download=1&name=a.pdf");
+        assert!(forced.starts_with("attachment;"), "{forced}");
+
+        assert_eq!(
+            resolve_attachment_display_name("att-1.pdf", Some("payload.exe")),
+            "att-1.pdf",
+            "扩展名对不上必须回退磁盘名"
+        );
+        assert_eq!(
+            resolve_attachment_display_name("att-1.pdf", Some("  ")),
+            "att-1.pdf"
+        );
+        assert_eq!(
+            resolve_attachment_display_name("att-1.pdf", Some(&format!("{}.pdf", "x".repeat(200)))),
+            "att-1.pdf"
+        );
+        assert_eq!(
+            resolve_attachment_display_name("att-1.pdf", Some("a/b\\c\".pdf")),
+            "a_b_c_.pdf",
+            "路径分隔符与引号要被换掉，防响应头注入"
+        );
+        assert_eq!(resolve_attachment_display_name("att-1.pdf", None), "att-1.pdf");
     }
 
     #[test]

@@ -210,6 +210,47 @@ fn vec3_buffers_bit_equal(actual: &[glam::Vec3], expected: &[glam::Vec3]) -> boo
 mod tests {
     use super::*;
 
+    #[test]
+    fn checked_mesh_reader_preserves_legacy_archive_bytes_and_rejects_corruption() {
+        #[derive(rkyv::Archive, rkyv::Serialize)]
+        struct LegacyMesh {
+            indices: Vec<u32>, vertices: Vec<glam::Vec3>, normals: Vec<glam::Vec3>,
+            wire_vertices: Vec<Vec<glam::Vec3>>, aabb: Option<parry3d::bounding_volume::Aabb>,
+        }
+        let mut mesh = box_mesh();
+        mesh.wire_vertices = vec![vec![glam::Vec3::new(-0.0, 2.5, -3.0)], vec![]];
+        for with_aabb in [false, true] {
+            let legacy = LegacyMesh {
+                indices: mesh.indices.clone(), vertices: mesh.vertices.clone(), normals: mesh.normals.clone(),
+                wire_vertices: mesh.wire_vertices.clone(), aabb: if with_aabb { mesh.aabb.clone() } else { None },
+            };
+            let mut current = mesh.clone(); current.aabb = legacy.aabb.clone();
+            let bytes = rkyv::to_bytes::<_, 1024>(&legacy).unwrap();
+            assert_eq!(bytes.as_slice(), current.ser_to_bytes(), "existing .mesh byte format must not change");
+            let loaded = PlantMesh::des_from_bytes(&bytes).unwrap();
+            assert_eq!(loaded.indices, current.indices);
+            assert!(vec3_buffers_bit_equal(&loaded.vertices, &current.vertices));
+            assert_eq!(loaded.wire_vertices, current.wire_vertices);
+            for end in 0..bytes.len() {
+                // A prefix may accidentally form a different valid archive;
+                // validation may accept it, but must never read outside input.
+                let _ = PlantMesh::des_from_bytes(&bytes[..end]);
+            }
+            let mut unaligned = vec![0u8]; unaligned.extend_from_slice(&bytes);
+            assert_eq!(PlantMesh::des_from_bytes(&unaligned[1..]).unwrap().indices, current.indices);
+        }
+        for bytes in [b"".as_slice(), b"damaged", &[255u8; 256]] {
+            assert!(PlantMesh::des_from_bytes(bytes).is_err());
+        }
+        let mut invalid_index = mesh.clone();
+        invalid_index.indices[0] = u32::MAX;
+        assert!(PlantMesh::des_from_bytes(&invalid_index.ser_to_bytes()).is_err());
+        let mut invalid_offsets = mesh.ser_to_bytes();
+        let root_start = invalid_offsets.len() - std::mem::size_of::<aios_core::shape::pdms_shape::ArchivedPlantMesh>();
+        invalid_offsets[root_start..].fill(255);
+        assert!(PlantMesh::des_from_bytes(&invalid_offsets).is_err());
+    }
+
     fn box_mesh() -> PlantMesh {
         let solid =
             e3d_model::primitive_instance::canonical_primitive_mesh(PrimitiveMeshKey::BoxV1)

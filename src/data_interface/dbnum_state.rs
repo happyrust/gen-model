@@ -1379,8 +1379,9 @@ impl DbnumState {
         let option = crate::options::get_db_option_ext().inner;
         let store_mode = crate::options::store_mode();
         mirror::enable(mirror::Identity {
-            endpoint: if matches!(store_mode, crate::options::StoreMode::EmbeddedMem) {
-                "embedded-mem".to_owned()
+            endpoint: if matches!(store_mode, crate::options::StoreMode::Mem) {
+                // 与 `/health.sul_db.endpoint` 同一个字面值：库在进程里，没有地址可写。
+                "embedded:mem".to_owned()
             } else {
                 format!("{}:{}", option.v_ip.trim(), option.v_port)
             },

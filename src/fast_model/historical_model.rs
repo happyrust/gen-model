@@ -21,7 +21,7 @@ use tokio::sync::OnceCell;
 
 use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::fast_model::e3d_model_service::{
-    E3dModelService, apply_geometry_delta_on, current_mdb_sources,
+    E3dModelService, SnapshotSourceError, apply_geometry_delta_on, current_mdb_sources,
 };
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope,
@@ -320,15 +320,7 @@ pub async fn generate_historical(
             request.failure_policy,
         )
         .await
-        .map_err(|e| {
-            let message = e.to_string();
-            let code = if message.contains("索引") || message.contains("not found") {
-                "REFNO_NOT_FOUND_AT_SESSION"
-            } else {
-                "GEOMETRY_GENERATION_FAILED"
-            };
-            HistoricalModelError::new(code, message)
-        })?;
+        .map_err(classify_generation_error)?;
     if generated.report.visited > MAX_HISTORY_ELEMENTS {
         return Err(HistoricalModelError::new(
             "GENERATION_LIMIT_EXCEEDED",
@@ -394,6 +386,23 @@ pub async fn generate_historical(
         report.elapsed_ms
     );
     Ok(report)
+}
+
+/// 把 `generate_snapshot_source` 的失败分成两个错误码。**按类型分，不按消息文本分。**
+///
+/// 此前靠 `message.contains("索引") || message.contains("not found")`，而 `message` 又是
+/// `e.to_string()`——anyhow 只给最外层那句 `generate root …`，底下的原因整条被吃掉，
+/// 于是「根在那一会话根本不存在」永远落成 `GEOMETRY_GENERATION_FAILED`，消息里还没有原因
+/// （2026-09-13 live 回执 `verification/historical-model-live-20260913-2233` 用例 3）。
+/// 现在源侧用 [`SnapshotSourceError`] 说话，这里 downcast；其余一律是几何失败，消息用
+/// `{:#}` 带全整条因果链。
+fn classify_generation_error(error: anyhow::Error) -> HistoricalModelError {
+    let code = match error.downcast_ref::<SnapshotSourceError>() {
+        Some(SnapshotSourceError::RootNotInSession { .. }) => "REFNO_NOT_FOUND_AT_SESSION",
+        None => "GEOMETRY_GENERATION_FAILED",
+    };
+    // `{:#}` 才带整条因果链；`to_string()` 只给最外层那句 context。
+    HistoricalModelError::new(code, format!("{error:#}"))
 }
 
 fn source_service() -> anyhow::Result<E3dModelService> {
@@ -592,6 +601,50 @@ mod tests {
                 .unwrap_err()
                 .code,
             "INVALID_SELECTOR"
+        );
+    }
+
+    /// 根在那一会话不存在 = `REFNO_NOT_FOUND_AT_SESSION`，判据是类型，不是消息里有没有某个词；
+    /// 外面再包几层 context 也认得出来。
+    #[test]
+    fn a_root_missing_from_the_session_index_is_not_a_geometry_failure() {
+        let error = anyhow::Error::from(SnapshotSourceError::RootNotInSession {
+            root: RefNo::new(24384, 26229),
+            dbnum: 8000,
+            sesno: 100,
+        })
+        .context("generate root 24384/26229");
+        let classified = classify_generation_error(error);
+        assert_eq!(classified.code, "REFNO_NOT_FOUND_AT_SESSION");
+        assert!(
+            classified.message.contains("24384/26229")
+                && classified.message.contains("8000")
+                && classified.message.contains("100"),
+            "消息要点名根、库、会话：{}",
+            classified.message
+        );
+    }
+
+    /// 其余失败是几何失败，而且消息要带全因果链——只给最外层那句 `generate root …`
+    /// 等于没说原因（改回 `e.to_string()` 这一条立刻变红）。
+    #[test]
+    fn other_generation_failures_keep_the_whole_cause_chain() {
+        let error = anyhow::anyhow!("catalogue SPRE /X missing")
+            .context("evaluate element 24384/26230")
+            .context("generate root 24384/26229");
+        let classified = classify_generation_error(error);
+        assert_eq!(classified.code, "GEOMETRY_GENERATION_FAILED");
+        assert!(
+            classified.message.contains("generate root 24384/26229")
+                && classified.message.contains("catalogue SPRE /X missing"),
+            "{}",
+            classified.message
+        );
+        // 字面上撞到旧的关键词也不再改判：分类不看文本。
+        let text_only = anyhow::anyhow!("element not found in 索引");
+        assert_eq!(
+            classify_generation_error(text_only).code,
+            "GEOMETRY_GENERATION_FAILED"
         );
     }
 

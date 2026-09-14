@@ -954,7 +954,7 @@ async function cycle(){
     if(st && S.startedAt && st !== S.startedAt) S.blockedSince = 0;
     S.startedAt = st || S.startedAt;
     S.health = h.value; S.lastOk = Date.now(); S.errSince = 0; S.lastErr = "";
-    // 读透形态（spawned-mem / embedded-mem）不推水位，库表那一格按它画「不判」。
+    // 读透形态（store_mode=mem 派生）不推水位，库表那一格按它画「不判」。
     S.dataFace = h.value?.data_face || "";
   }else{
     S.lastErr = String(h.reason?.message || h.reason || "请求失败");

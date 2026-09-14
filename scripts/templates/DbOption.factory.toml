@@ -4,8 +4,8 @@
 # 这份是「还没配置」的形态：project_path 留空，因此服务会进「设置模式」——
 # 只起 HTTP 供 http://127.0.0.1:9099/setup.html 配置向导，配好保存并重启后进入正常服务。
 # 不想用向导的，直接改本文件再重启也一样：真值永远是这份文件。
-# New-LocalRelease 对 runtime 档会把 store_mode 外科改成 embedded-mem；带 workspace
-# 的档位保留本模板的 spawned-rocksdb。这里只维护两档共用的其余出厂键。
+# runtime 与带 workspace 两档共用这一份、原样进包：出厂都是 store_mode = "mem"（库在后端
+# 进程里，零依赖，解压即跑）。要数据活过重启的现场在向导第②步改选 rocksdb 并连一台已在跑的库。
 # ============================================================================
 
 #同步文件配置（缺省形态，向导不管这几项）
@@ -23,8 +23,9 @@ sync_chunk_size = 100_0000
 
 #项目设置 —— 向导第①步填这里
 # 手动指定模板版本后跳过自动识别，优先于 AIOS_E3D_TEMPLATE_DIR。
-# 支持 e3d31 / e3d210；删除此项后仍优先采用 AIOS_E3D_TEMPLATE_DIR，
-# 环境目录也未设置时使用产品默认 e3d210（不是从数据库二进制自动识别）。
+# 支持 e3d31 / e3d210；本 AMS 发布模板使用 E3D 3.1，部署 2.10 时显式改为 e3d210。
+# 删除此项后仍优先采用 AIOS_E3D_TEMPLATE_DIR，环境目录也未设置时使用产品默认
+# e3d210（不是从数据库二进制自动识别）。
 e3d_version = "e3d31"
 # E3D 项目根目录（装着各项目子目录的那一层），如 "D:/AVEVA/Projects/E3D3.1"
 project_path = ""
@@ -68,17 +69,20 @@ port = "3306"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100
 
-#版本服务配置（SurrealDB）—— 默认 kv-mem，向导第②步可改
+#版本服务配置（SurrealDB）—— 向导第②步可改。只有两档：mem（库在进程里）/ rocksdb（连下面这台）
 v_ip = "127.0.0.1"
 v_user = "root"
 v_password = "root"
-# 自带 memory SurrealDB 的默认端口；这一格是数字，不能写空串。
+# 切到 rocksdb 档时要连的那台 SurrealDB 的端口；这一格是数字，不能写空串。mem 档不用它，
+# 预填 8009 只为切档时少填一格。
 v_port = "8009"
-# full / workspace 档默认 spawned-rocksdb：服务自行拉起持久库，数据跨重启保留。
-# 只需临时内存库可改 spawned-mem（别名 kv-mem）；连接既有库则改 external。
-store_mode = "spawned-rocksdb"
+# 出厂 mem：数据库在后端进程内，无子进程、无 Surreal TCP 端口，进程一退数据即清空。
+# 要数据活过重启改 rocksdb，并把 v_ip:v_port 指到一台真在跑的 SurrealDB（rocksdb 后端）——
+# 本服务不拉起它，先用包内 Start-Surreal.ps1 / bin\surreal.exe 起一台。
+store_mode = "mem"
 # 持久模式：kv-mem 只保存新生成的 root overlay，冷 root 直接查 RocksDB，不回填。
 model_cache_mode = "incremental-overlay"
+model_cache_max_bytes = 2147483648
 
 #服务器启动配置 —— 向导第③步；0.0.0.0 = 局域网可访问（配置向导页仍只许本机打开）
 server_release_ip = "0.0.0.0:9099"

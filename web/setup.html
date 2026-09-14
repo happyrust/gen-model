@@ -120,28 +120,18 @@
   <!-- ② 存储 -->
   <section class="card" id="step2" hidden>
     <h2>② 存储：模型数据放哪</h2>
+    <!-- 只有两档（2026-09-13 拍板）：本服务从不拉起任何数据库进程——内存就在进程里，
+         落盘就连配置指的那台。旧的 spawned-* 两档已退役，向导不再产出它们。 -->
     <label class="radio-line">
-      <input type="radio" name="store" id="store-external" value="external">
-      <div><b>连接已有 SurrealDB（external）</b><br>
-        <span class="hint">连一台已经在跑的库。必须是本套发布配套的 SurrealDB 2.1.x（包内 workspace\bin\surreal.exe），不能用官方 3.x。</span>
+      <input type="radio" name="store" id="store-mem" value="mem" checked>
+      <div><b>内存库（mem，默认）</b><br>
+        <span class="hint">数据库直接嵌在后端进程中，<b>无数据库子进程、无数据库端口</b>；数据不落盘，重启即清空。浏览器、树、属性和模型均走本服务同源 API。</span>
       </div>
     </label>
     <label class="radio-line">
-      <input type="radio" name="store" id="store-rocks" value="spawned-rocksdb">
-      <div><b>新建本机持久库（spawned-rocksdb）</b><br>
-        <span class="hint">服务启动时自动用包内 SurrealDB 在下方地址起一台落盘库，<b>数据活得过重启</b>；数据目录 <code id="rocks-dir">workspace\.surreal\&lt;项目代号&gt;</code>（换项目代号 = 新目录新库，旧目录留在盘上）。</span>
-      </div>
-    </label>
-    <label class="radio-line">
-      <input type="radio" name="store" id="store-embedded" value="embedded-mem" checked>
-      <div><b>runtime 默认 kv-mem（embedded-mem）</b><br>
-        <span class="hint">内存库直接嵌在后端进程中，<b>无数据库子进程、无数据库端口冲突</b>；数据不落盘，重启即清空。浏览器通过本服务 API 访问。</span>
-      </div>
-    </label>
-    <label class="radio-line">
-      <input type="radio" name="store" id="store-spawned" value="spawned-mem">
-      <div><b>可外部诊断的 kv-mem（spawned-mem）</b><br>
-        <span class="hint">服务自己拉一台内存 SurrealDB，外部 SQL / 探针可以连接；<b>数据不落盘，重启即清空</b>，默认使用本机 8009 端口。</span>
+      <input type="radio" name="store" id="store-rocksdb" value="rocksdb">
+      <div><b>连接 SurrealDB 持久库（rocksdb）</b><br>
+        <span class="hint">连一台<b>已经在跑</b>的 SurrealDB（rocksdb 后端），<b>数据活得过重启</b>。本服务只连、不拉起：地址上没有库就是启动失败。必须是本套发布配套的 SurrealDB 2.1.x（包内 bin\surreal.exe），不能用官方 3.x。</span>
       </div>
     </label>
     <div class="row" style="margin-top:12px">
@@ -149,7 +139,6 @@
       <div><label id="lbl-v_port">端口 v_port</label><input type="text" id="f-v_port" placeholder="8010"></div>
       <div style="flex:0 0 auto; align-self:flex-end">
         <button id="btn-probe-store">测试连接</button>
-        <button id="btn-precheck-store" hidden>端口预检</button>
       </div>
     </div>
     <div id="probe-store-out"></div>
@@ -283,10 +272,16 @@ async function boot() {
     $("init-note").innerHTML = '<div class="note warn">设置模式下没法初始化：先走完 ①—④ 保存并重启。</div>';
   }
 }
+// 配置文件里的 store_mode 字面值 → 向导的两档。旧写法（external / spawned-* / embedded-mem）
+// 只在**读**盘上现有配置时折到对应那档；向导写出去的永远只有 mem / rocksdb。
+function storeTierOf(raw) {
+  const s = String(raw || "").trim().toLowerCase().replace(/_/g, "-");
+  return (s === "rocksdb" || s === "external" || s === "spawned-rocksdb") ? "rocksdb" : "mem";
+}
 function haveCoreConfig() {
   const v = S.cfg;
   return v && v.project_path &&
-    (v.store_mode === "embedded-mem" || v.store_mode === "spawned-mem" || (v.v_ip && v.v_port));
+    (storeTierOf(v.store_mode) === "mem" || (v.v_ip && v.v_port));
 }
 function fillForm(v) {
   const put = (id, x) => { if (x !== null && x !== undefined) $(id).value = Array.isArray(x) ? x.join(",") : x; };
@@ -302,11 +297,8 @@ function fillForm(v) {
   put("f-http_public_addr", v.http_public_addr);
   put("f-watch_dbnums", v.watch_dbnums);
   put("f-manual_db_nums", v.manual_db_nums);
-  if (v.store_mode === "embedded-mem") $("store-embedded").checked = true;
-  else if (v.store_mode === "spawned-mem") $("store-spawned").checked = true;
-  else if (v.store_mode === "spawned-rocksdb") $("store-rocks").checked = true;
-  else if (v.store_mode === "external") $("store-external").checked = true;
-  else $("store-embedded").checked = true;
+  if (storeTierOf(v.store_mode) === "rocksdb") $("store-rocksdb").checked = true;
+  else $("store-mem").checked = true;
   updateStoreUi();
   if (v.gen_model === true || v.gen_mesh === true) $("tier-full").checked = true; else $("tier-data").checked = true;
   renderProjects((v.included_projects || []).map((name) => ({ name, e3d_shape: true, db_files: null })), v.included_projects || [], v.project_name);
@@ -314,59 +306,23 @@ function fillForm(v) {
 
 // ---------- ② 档位联动 ----------
 function storeTier() {
-  if ($("store-embedded").checked) return "embedded-mem";
-  if ($("store-rocks").checked) return "spawned-rocksdb";
-  if ($("store-spawned").checked) return "spawned-mem";
-  return "external";
-}
-function rocksDirHint() {
-  const code = val("f-project_code");
-  $("rocks-dir").textContent = "workspace\\.surreal\\" + (code && code !== "0" ? code : (val("f-project_name") || "<项目代号>"));
+  return $("store-mem").checked ? "mem" : "rocksdb";
 }
 function updateStoreUi() {
   const tier = storeTier();
-  const embedded = tier === "embedded-mem";
-  rocksDirHint();
-  $("btn-probe-store").hidden = tier !== "external";
-  $("btn-precheck-store").hidden = tier === "external" || embedded;
-  $("f-v_ip").disabled = embedded;
-  $("f-v_port").disabled = embedded;
-  $("lbl-v_ip").textContent = embedded ? "地址 v_ip（embedded-mem 不使用）" :
-    tier === "external" ? "地址 v_ip（连接目标）" : "绑定地址 v_ip（库建在哪）";
-  $("lbl-v_port").textContent = embedded ? "端口 v_port（embedded-mem 不使用）" : "端口 v_port";
-  $("f-v_port").placeholder = tier === "spawned-mem" ? "8009" : "8010";
-  if (embedded) {
-    $("store-note").innerHTML = '<div class="note">浏览器、树、属性和模型均走本服务同源 API。外部 <code>surreal sql</code> / rvm_verify 无法直连进程内库；需要这类诊断时改选 spawned-mem。</div>';
-  } else if (tier === "external") {
-    $("store-note").innerHTML = '<div class="note">还没有库？选上面「新建本机持久库」最省事；或用包里带的脚本手动起一台（数据落在 workspace）：<br>' +
-      "<code>powershell -ExecutionPolicy Bypass -File .\\workspace\\Start-Surreal.ps1</code></div>";
-  } else if (tier === "spawned-rocksdb") {
-    $("store-note").innerHTML = '<div class="note warn">地址留空 = 127.0.0.1:8010（只许本机连）。填 <code>0.0.0.0</code> 会把库暴露给局域网——' +
-      "库的凭据默认 root/root，<b>先在 DbOption.toml 里改 v_user / v_password 再暴露</b>。</div>";
+  const mem = tier === "mem";
+  $("btn-probe-store").hidden = mem;
+  $("f-v_ip").disabled = mem;
+  $("f-v_port").disabled = mem;
+  $("lbl-v_ip").textContent = mem ? "地址 v_ip（mem 不使用）" : "地址 v_ip（连接目标）";
+  $("lbl-v_port").textContent = mem ? "端口 v_port（mem 不使用）" : "端口 v_port（连接目标）";
+  if (mem) {
+    $("store-note").innerHTML = '<div class="note">库在后端进程里，外部 <code>surreal sql</code> / rvm_verify / plant-ui 的「库供数」读面都<b>连不到</b>它；需要这类诊断或要数据活过重启，改选 rocksdb 并连一台真在跑的库。</div>';
   } else {
-    $("store-note").innerHTML = "";
+    $("store-note").innerHTML = '<div class="note">本服务<b>不会</b>自己把库拉起来。还没有库？用包里带的脚本先起一台（数据落在脚本所在目录的 <code>.surreal\\</code>），再回来点「测试连接」：<br>' +
+      "<code>powershell -ExecutionPolicy Bypass -File .\\workspace\\Start-Surreal.ps1</code><br>" +
+      "库的凭据默认 root/root；要让局域网连它，<b>先在 DbOption.toml 里改 v_user / v_password</b>。</div>";
   }
-}
-async function precheckStore() {
-  const tier = storeTier();
-  if (tier === "embedded-mem") {
-    return note($("probe-store-out"), "ok", "embedded-mem 不占数据库端口，无需预检。");
-  }
-  const ip = val("f-v_ip") || "127.0.0.1";
-  const port = val("f-v_port") || (tier === "spawned-mem" ? "8009" : "8010");
-  note($("probe-store-out"), "", "预检中…");
-  try {
-    const probeIp = ip === "0.0.0.0" ? "127.0.0.1" : ip;
-    const out = await api("/api/v1/setup/probe/port", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ http_api_addr: probeIp + ":" + port }),
-    });
-    if (out.verdict === "invalid") return note($("probe-store-out"), "bad", "地址不成形：" + ip + ":" + port);
-    if (out.verdict === "occupied") {
-      return note($("probe-store-out"), "warn", "端口 " + out.port + " 被占着。若是上次服务自家的库，启动时会按署名自动收编或收尸，可继续；若是别的程序，请换端口。");
-    }
-    note($("probe-store-out"), "ok", "端口 " + out.port + " 空闲，启动时将在这里建库。");
-  } catch (e) { note($("probe-store-out"), "bad", e.message); }
 }
 
 // ---------- ① 项目探测 ----------
@@ -466,11 +422,6 @@ function gatherPatch() {
   const code = val("f-project_code");
   if (code) patch.project_code = parseInt(code, 10);
   if (!patch.included_projects.length && patch.project_name) patch.included_projects = [patch.project_name];
-  if (tier === "spawned-mem" || tier === "spawned-rocksdb") {
-    // spawned 两档不逼用户填地址，但库要有真实端口放（v_port=0 会让下次启动绑死在端口 0）。
-    if (!patch.v_ip) patch.v_ip = "127.0.0.1";
-    if (!patch.v_port || patch.v_port === "0") patch.v_port = tier === "spawned-mem" ? "8009" : "8010";
-  }
   return patch;
 }
 async function saveAndRestart() {
@@ -600,10 +551,8 @@ async function finish() {
 // ---------- 接线 ----------
 $("btn-probe-project").addEventListener("click", probeProject);
 $("btn-probe-store").addEventListener("click", probeStore);
-$("btn-precheck-store").addEventListener("click", precheckStore);
-["store-external", "store-rocks", "store-embedded", "store-spawned"].forEach((id) =>
+["store-mem", "store-rocksdb"].forEach((id) =>
   $(id).addEventListener("change", () => { $("probe-store-out").innerHTML = ""; updateStoreUi(); }));
-$("f-project_code").addEventListener("input", rocksDirHint);
 $("btn-probe-port").addEventListener("click", probePort);
 $("btn-save").addEventListener("click", saveAndRestart);
 $("btn-load-dbnums").addEventListener("click", () => loadDbnums().catch((e) => note($("dbnums-out"), "bad", e.message)));
@@ -620,14 +569,12 @@ $("next-1").addEventListener("click", () => {
 });
 $("back-2").addEventListener("click", () => goto(1));
 $("next-2").addEventListener("click", () => {
-  const tier = storeTier();
-  if (tier === "external") {
-    if (!val("f-v_ip") || !val("f-v_port")) return alert("external 模式要填 v_ip / v_port");
+  if (storeTier() === "rocksdb") {
+    // 本服务只连不拉起：地址空着或连不上，起来就是失败，所以这里是闸不是建议。
+    if (!val("f-v_ip") || !val("f-v_port")) return alert("rocksdb 模式要填 v_ip / v_port（要连的那台库）");
     if (!S.storeTestOk) return alert("先点「测试连接」并通过（连通 + 版本 2.1.x）再往下走");
   }
-  // embedded 不用地址；spawned 两档地址可留空（保存时自动补 127.0.0.1:8010 / :8009）。
-  // spawned 端口预检是建议不是闸——
-  // 被占着的可能正是上次自家的库，启动时按署名收编。
+  // mem 不用地址。
   goto(3);
 });
 $("back-3").addEventListener("click", () => goto(2));

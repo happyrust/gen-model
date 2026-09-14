@@ -10,7 +10,7 @@ RUN.mkdir(parents=True, exist_ok=True)
 config = (ROOT / 'DbOption.toml').read_text(encoding='utf-8-sig')
 overrides = {
     'project_path': 'D:/AVEVA/Projects/E3D3.1',
-    'store_mode': 'embedded-mem', 'data_face': 'read-through',
+    'store_mode': 'mem', 'data_face': 'read-through',
     'http_api_addr': '127.0.0.1:18206',
     'meshes_path': (RUN / 'meshes').as_posix(),
     'surreal_ns': 'strt_cpv_ui_20260905',

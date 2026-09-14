@@ -162,13 +162,13 @@ pub struct DbOptionExt {
     /// 旧开关：持久层换成进程内嵌的 kv-mem 引擎。显式 `false` 仍表示 external；
     /// 两个形态键都不写时的新默认由 [`store_mode`] 决定。详见 [`in_memory_db`]。
     ///
-    /// **已被 [`store_mode`] 取代**：它只表达得了 `embedded-mem` 那一档。保留是因为
+    /// **已被 [`store_mode`] 取代**：它只表达得了 `mem` 那一档。保留是因为
     /// 它散在环境变量、`/health`、`PersistTarget` 与两份 ADR 里，一次性删的面太大。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
 
-    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-rocksdb` /
-    /// `spawned-mem` / `embedded-mem`。
+    /// 持久层的介质：`mem`（进程内嵌）/ `rocksdb`（连配置指的那台）。退役的
+    /// `external` / `spawned-rocksdb` / `spawned-mem` / `embedded-mem` 仍认、但会告警。
     /// 详见 [`store_mode`]。
     #[serde(default)]
     pub store_mode: Option<String>,
@@ -235,6 +235,228 @@ pub struct DbOptionExt {
     /// 详见 [`model_design_reference_cascade`]。
     #[serde(default)]
     pub model_design_reference_cascade: Option<bool>,
+
+    /// `[review_auth]`：三维校审接口的 JWT 鉴权。详见 [`ReviewAuthSection`]。
+    #[serde(default)]
+    pub review_auth: Option<ReviewAuthSection>,
+
+    /// `[platform_auth]`：PMS 平台入站（S2S）。详见 [`PlatformAuthSection`]。
+    #[serde(default)]
+    pub platform_auth: Option<PlatformAuthSection>,
+
+    /// `[review_attachments]`：校审附件落盘位置。详见 [`ReviewAttachmentsSection`]。
+    #[serde(default)]
+    pub review_attachments: Option<ReviewAttachmentsSection>,
+}
+
+/// `[review_auth]` —— 三维校审接口的 JWT 鉴权（移植自 plant-model-gen
+/// `src/web_api/jwt_auth.rs::ReviewAuthConfig`，旧配置在它的
+/// `db_options/DbOption.toml:239-245`）。
+///
+/// 四个键都可以不写；缺省值与旧端 `ReviewAuthConfig::default()` **逐字相同**，这样
+/// 「把后端地址从 :3100 换到 :8022」不需要同时搬配置（移植计划 G4）。
+///
+/// ```toml
+/// [review_auth]
+/// enabled = false              # 本地联调可临时关；上线前改回 true
+/// debug_project_id = "debug-project"
+/// debug_user_id = "designer_001"
+/// debug_role = "sj"            # sj / jd / sh / pz
+/// ```
+///
+/// 注意 JWT 密钥**不在这里**：它仍是 `JWT_SECRET` 环境变量与 `[model_center].token_secret`
+/// 那一路（旧端 `JwtConfig::from_config_file`），本次移植不改它的取值口径。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReviewAuthSection {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub debug_project_id: Option<String>,
+    #[serde(default)]
+    pub debug_user_id: Option<String>,
+    #[serde(default)]
+    pub debug_role: Option<String>,
+}
+
+/// `[platform_auth]` —— PMS 平台入站（S2S）鉴权，与 [`ReviewAuthSection`] 分离。
+///
+/// 影响面就是 PMS 入站那六条（`embed-url` / `workflow/sync` / `workflow/verify` /
+/// `annotations/check` / `cache/preload` / `delete`），旧端那段配置的注释写的也是这句话。
+///
+/// ```toml
+/// [platform_auth]
+/// enabled = true
+/// debug_token = ""                                  # enabled = false 时允许的调试 token
+/// review_web_base_url = "http://123.57.182.243"     # 见下
+/// ```
+///
+/// `review_web_base_url` 是本次移植新增的一格（计划 Q5）：旧端 `embed_url.rs:464` 靠
+/// `web_server::managed_project_sites::get_site(site_id)` 去站点注册表里取 viewer 地址，
+/// 而 gen-model 没有那张表。它落在本段而不是另开一节，是因为它正是 `embed-url` 回给 PMS
+/// 的那个地址——与本段其余键同一个影响面。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PlatformAuthSection {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub debug_token: Option<String>,
+    #[serde(default)]
+    pub review_web_base_url: Option<String>,
+}
+
+/// `[review_attachments]` —— 校审附件落哪儿。
+///
+/// ```toml
+/// [review_attachments]
+/// dir = "review_attachments"   # asset_root 下的子目录名；写绝对路径则原样使用
+/// ```
+///
+/// **URL 前缀 `/files/review_attachments/` 与 50MB 单文件上限不是配置项**，也不打算变成
+/// 配置项：前者是 plant3d-web 写死的契约（`reviewApi.ts`，落库的 `download_url` 里也带着
+/// 它），后者连错误文案「文件超过 50MB 上限」一起被判据 A4/A5 钉住。能配的只有「文件放在
+/// 磁盘哪个目录」这一件与契约无关的事。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReviewAttachmentsSection {
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+/// `[review_auth]` 缺省值，逐字取自旧端 `jwt_auth.rs::ReviewAuthConfig::default()`。
+/// 注意 `debug_user_id` 是 `designer_001` 而不是旧配置文件里那个 `debug-user`：
+/// 代码里的缺省才是「没配置时实际生效」的那一个，移植要对齐的也是它。
+pub const DEFAULT_REVIEW_DEBUG_PROJECT_ID: &str = "debug-project";
+pub const DEFAULT_REVIEW_DEBUG_USER_ID: &str = "designer_001";
+pub const DEFAULT_REVIEW_DEBUG_ROLE: &str = "sj";
+/// `[review_attachments].dir` 缺省值；与旧端 `assets/review_attachments` 的末段同名，
+/// 于是默认部署（`PLANT_ASSET_ROOT` 未设、工作目录是仓根）下落盘位置与旧端逐字相同。
+pub const DEFAULT_REVIEW_ATTACHMENTS_DIR: &str = "review_attachments";
+
+/// 空白串按「没配」处理：TOML 里留一对空引号是「我还没填」，不是「我要一个空值」。
+fn non_blank(value: Option<&String>) -> Option<&str> {
+    value.map(String::as_str).map(str::trim).filter(|value| !value.is_empty())
+}
+
+impl ReviewAuthSection {
+    /// 缺省开启。关掉鉴权是联调用的**显式**动作，不能靠漏写一行达成。
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn debug_project_id(&self) -> &str {
+        non_blank(self.debug_project_id.as_ref()).unwrap_or(DEFAULT_REVIEW_DEBUG_PROJECT_ID)
+    }
+
+    pub fn debug_user_id(&self) -> &str {
+        non_blank(self.debug_user_id.as_ref()).unwrap_or(DEFAULT_REVIEW_DEBUG_USER_ID)
+    }
+
+    pub fn debug_role(&self) -> &str {
+        non_blank(self.debug_role.as_ref()).unwrap_or(DEFAULT_REVIEW_DEBUG_ROLE)
+    }
+}
+
+impl PlatformAuthSection {
+    /// 缺省开启（同旧端 `PlatformAuthConfig::default()`）。
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    /// 缺省空串；空串的语义是「即使 `enabled = false` 也仍旧拒绝」，与旧端一致。
+    pub fn debug_token(&self) -> &str {
+        self.debug_token.as_deref().unwrap_or_default()
+    }
+
+    /// 校审 Web 基址（计划 Q5）。不做尾斜杠归一——归一规则在 `embed_url` 那边，
+    /// 与旧端 `normalize_frontend_base_url` 同一份，这里只负责「配没配」。
+    pub fn review_web_base_url(&self) -> Option<&str> {
+        non_blank(self.review_web_base_url.as_ref())
+    }
+}
+
+impl ReviewAttachmentsSection {
+    /// 相对名（默认 `review_attachments`）或绝对路径，原样交给 [`review_attachments_dir`] 解析。
+    pub fn dir(&self) -> &str {
+        non_blank(self.dir.as_ref()).unwrap_or(DEFAULT_REVIEW_ATTACHMENTS_DIR)
+    }
+}
+
+/// `[review_auth]` 的取值（没写就是一整段缺省）。
+pub fn review_auth() -> ReviewAuthSection {
+    load_ext_fields().review_auth.clone().unwrap_or_default()
+}
+
+/// `[platform_auth]` 的取值（没写就是一整段缺省）。
+pub fn platform_auth() -> PlatformAuthSection {
+    load_ext_fields().platform_auth.clone().unwrap_or_default()
+}
+
+/// `[review_attachments]` 的取值（没写就是一整段缺省）。
+pub fn review_attachments() -> ReviewAttachmentsSection {
+    load_ext_fields().review_attachments.clone().unwrap_or_default()
+}
+
+/// 环境变量名：明知校审数据活不过重启也要启用校审域。
+///
+/// 逃生门只给演示与联调。它是**环境变量**而不是配置键，正是因为这不该是一个能躺在
+/// `DbOption.toml` 里过一个月的决定——环境变量进程一停就没了。开着时启动横幅每次都会
+/// 点名它（`web_service::review::db::ReviewPersistence::startup_line`）。
+pub const REVIEW_ALLOW_EPHEMERAL_STORE_ENV: &str = "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE";
+
+/// 是否显式放行「校审数据落在活不过重启的介质上」。取值规则同 [`STARTUP_AUTORUN_ENV`]
+/// （认 `1/true/yes/on` 与 `0/false/no/off`，认不出的值当没设）。
+pub fn review_allow_ephemeral_store() -> bool {
+    std::env::var(REVIEW_ALLOW_EPHEMERAL_STORE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_flag)
+        .unwrap_or(false)
+}
+
+/// 运行期模型资源根：`/assets` 与 `/files/review_attachments` 公开的都是它底下的东西。
+///
+/// 顺序：`PLANT_ASSET_ROOT` → exe 同级 `assets` → exe 上一级 `backend/assets`（发布包形态）
+/// → 相对工作目录的 `assets`。`web_service::serve` 与 [`review_attachments_dir`] 都从这里取，
+/// 两处必须是同一个答案——否则附件传得上去、下不来。
+pub fn asset_root() -> PathBuf {
+    if let Some(configured) = std::env::var_os("PLANT_ASSET_ROOT")
+        .filter(|path| !path.to_string_lossy().trim().is_empty())
+    {
+        return configured.into();
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(executable_dir) = executable.parent()
+    {
+        let packaged = executable_dir
+            .parent()
+            .map(|root| root.join("backend/assets"));
+        for candidate in [Some(executable_dir.join("assets")), packaged]
+            .into_iter()
+            .flatten()
+        {
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+    "assets".into()
+}
+
+/// 校审附件的落盘目录 —— **上传落盘与 `/files/review_attachments` 静态服务的唯一出处**。
+///
+/// 上传 handler（`web_service::review::attachments`）与 ServeDir 挂载点必须都走这一个
+/// 函数。此前上传那侧写死的是相对路径 `assets/review_attachments`：`PLANT_ASSET_ROOT`
+/// 一设，两边就指向不同目录，症状是「传得上去、下不来」，而且两条路径各自都「成功」了
+/// ——正是宪法 III 说的那种静默失效。
+pub fn review_attachments_dir() -> PathBuf {
+    review_attachments_dir_under(&asset_root(), review_attachments().dir())
+}
+
+fn review_attachments_dir_under(asset_root: &Path, dir: &str) -> PathBuf {
+    let dir = Path::new(dir.trim());
+    if dir.is_absolute() {
+        return dir.to_path_buf();
+    }
+    asset_root.join(dir)
 }
 
 impl Deref for DbOptionExt {
@@ -298,6 +520,9 @@ impl From<DbOption> for DbOptionExt {
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
             model_design_reference_cascade: None,
+            review_auth: None,
+            platform_auth: None,
+            review_attachments: None,
         }
     }
 }
@@ -395,6 +620,12 @@ struct DbOptionExtFields {
     model_cable_endpoint_cascade: Option<bool>,
     #[serde(default)]
     model_design_reference_cascade: Option<bool>,
+    #[serde(default)]
+    review_auth: Option<ReviewAuthSection>,
+    #[serde(default)]
+    platform_auth: Option<PlatformAuthSection>,
+    #[serde(default)]
+    review_attachments: Option<ReviewAttachmentsSection>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -539,6 +770,9 @@ pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
 }
 
 /// 严格读取模板版本，配置解析失败时禁止静默回落自动识别。
+///
+/// `Some` 就是手动选择：调用方不得再跑数据库探针或做“冲突阻断”。
+/// `None` 交给共享加载器（`DirectSchema::open_from_env`）决定后续路径。
 pub(crate) fn configured_e3d_version() -> Result<Option<String>, String> {
     Ok(read_ext_fields(std::env::var_os("DB_OPTION_FILE"))?.e3d_version)
 }
@@ -591,6 +825,9 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
         model_design_reference_cascade: ext.model_design_reference_cascade,
+        review_auth: ext.review_auth.clone(),
+        platform_auth: ext.platform_auth.clone(),
+        review_attachments: ext.review_attachments.clone(),
     }
 }
 
@@ -745,66 +982,73 @@ pub fn model_cache_mode() -> ModelCacheMode {
         .unwrap_or(ModelCacheMode::IncrementalOverlay)
 }
 
-/// 持久层的介质，外加「谁负责把它拉起来」。
+pub fn model_cache_max_bytes() -> usize {
+    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
+    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .or(load_ext_fields().model_cache_max_bytes)
+        .unwrap_or(DEFAULT)
+        .clamp(1, usize::MAX as u64) as usize
+}
+
+/// 持久层的介质。**只有两档**（2026-09-13 用户拍板）。
 ///
-/// [`in_memory_db`] 只分得出两态，而实际上有四种：外置落盘、自带落盘、自带内存、
-/// 进程内嵌内存。自带两档（[`StoreMode::SpawnedRocks`] / [`StoreMode::SpawnedMem`]）
-/// 的库都有真端口，plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上，只是那个 surreal
-/// 由本进程负责拉起与收尸（`docs/plans/2026-09-04-spawned-memory-store-out-of-box.md`；
-/// 持久档见 `docs/plans/2026-09-09-spawned-rocksdb-store-and-create-instance.md` / ADR-070）。
+/// 此前有四档，多出来的那两档（`spawned-mem` / `spawned-rocksdb`）不是第三第四种介质，
+/// 而是同样那两种介质外加「**本进程负责把那台 surreal 拉起来并收尸**」。为此背着
+/// `store_process.rs` 一整套端口探针、署名、心跳与孤儿回收——1800 行全在管一个子进程
+/// 的命，与「数据放哪儿」一个字的关系都没有。两档退役之后那个文件整个删掉。
+///
+/// 现在的分工干净了：**内存就在进程里，落盘就在配置指的那台服务器上。**
+/// 本进程不再拉起任何数据库。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreMode {
-    /// 连 `v_ip:v_port` 上那台已经在跑的 SurrealDB。
-    External,
-    /// 本进程拉起一个 **rocksdb 后端**的 surreal 子进程，绑到 `v_ip:v_port`，数据落
-    /// `workspace\.surreal\<project_code>`——**活得过重启**（配置向导「新建本机持久库」
-    /// 选的就是这档）。进程退出照常收尸，数据在盘上，下次启动重新拉起即接上。
-    SpawnedRocks,
-    /// 本进程拉起一个 `--memory` 后端的 surreal 子进程，绑到 `v_ip:v_port`。
-    /// 进程一退整库消失，但**端口是真的**。
-    SpawnedMem,
-    /// 进程内嵌 `mem://`：没有端口，只有本进程读得到。探针与单测用。
-    EmbeddedMem,
+    /// 进程内嵌 `mem://`：没有端口、活不过重启，只有本进程读得到。
+    ///
+    /// 「读不到」是真的读不到：`/sql` 探针、`rvm_verify`、`Capture-*Evidence.ps1`
+    /// 与 plant-ui 的「库供数」读面在这一档全都够不着。plant-ui 的主启动序列不受影响
+    /// ——它早就不直连库了，能力缺失那一路它自己会降级。
+    Mem,
+    /// 连配置里 `v_ip:v_port` 上那台 SurrealDB（rocksdb 后端）。
+    ///
+    /// **本进程只连，不拉起。** 端口上没东西就是连不上，报错退出——而不是自己起一台
+    /// 空库然后在上面作业，那种失败一声不响。
+    RocksDb,
 }
 
 impl StoreMode {
-    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这四个。
+    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这两个。
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::External => "external",
-            Self::SpawnedRocks => "spawned-rocksdb",
-            Self::SpawnedMem => "spawned-mem",
-            Self::EmbeddedMem => "embedded-mem",
+            Self::Mem => "mem",
+            Self::RocksDb => "rocksdb",
         }
     }
 
-    /// 这一档的行能不能活过进程重启。外置与自带落盘两档为真。
+    /// 这一档的行能不能活过进程重启。
+    ///
+    /// 两档退役之后，它与「别的进程连不连得上」合并成了同一个问题：进程内嵌那一档
+    /// 既不持久也没有端口，配置指的那台既持久又连得上。原来的 `has_endpoint()`
+    /// 因此删掉——留着两个恒等的谓词，只会让下一个人以为它们还能分开。
     pub fn is_durable(self) -> bool {
-        matches!(self, Self::External | Self::SpawnedRocks)
-    }
-
-    /// 别的进程连不连得上这个库。`embedded-mem` 是唯一的「连不上」。
-    pub fn has_endpoint(self) -> bool {
-        !matches!(self, Self::EmbeddedMem)
+        matches!(self, Self::RocksDb)
     }
 }
 
 /// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
 /// [`STORE_MODE_ENV`] 压过它）。
 ///
-/// **默认 `spawned-mem`**（2026-09-11 用户拍板）：服务自行拉起 `v_ip:v_port` 上的
-/// memory SurrealDB，进程退出后数据消失。需要外置持久库的现场配置必须显式写
-/// `store_mode = "external"`；仓内夹具均由
-/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 护栏钉住，不依赖默认值。
+/// **默认 `mem`**：不配任何东西就能起来，库在进程里。要落盘的现场必须显式写
+/// `store_mode = "rocksdb"` 并把 `v_ip:v_port` 指到一台真在跑的 SurrealDB 上；
+/// 仓内夹具均由 `every_db_option_fixture_declares_its_store_mode_and_data_face`
+/// 护栏钉住，不依赖默认值。
 ///
-/// 这个默认同时决定 [`data_face`]（`external` → `ingest`，两档内存 → `read-through`），
-/// 所以漏写这一项换掉的不只是介质，还有整个数据面；`db_options/` 下的夹具由护栏
-/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 逼着显式声明。
+/// 这个默认同时决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），
+/// 所以漏写这一项换掉的不只是介质，还有整个数据面。
 ///
-/// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `embedded-mem`，与那个旧开关
-/// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的同样回
-/// `external`——即使默认已经翻成 `spawned-mem`，这句显式的 `false` 仍然是人的意图，
-/// 不能被新默认覆盖。两个键都没写时才采用 `spawned-mem`。
+/// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `mem`，与那个旧开关今天的行为
+/// 逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的回 `rocksdb`——那句显式的
+/// `false` 是人的意图，不能被默认覆盖。两个键都没写时才采用 `mem`。
 /// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
 /// 认不出的值当没设，同样出声。
 pub fn store_mode() -> StoreMode {
@@ -827,26 +1071,50 @@ fn effective_store_mode(
         return mode;
     }
     // 没写 `store_mode` 时先尊重旧开关，语义与它今天的两态逐字相同：
-    // `true` = 库在进程里，`false` = 过外置库。两个键都没写才走新默认 spawned-mem。
+    // `true` = 库在进程里，`false` = 过配置指的那台库。两个键都没写才走默认 mem。
     match in_memory_db_env
         .and_then(parse_bool_flag)
         .or(configured_in_memory_db)
     {
-        Some(true) => StoreMode::EmbeddedMem,
-        Some(false) => StoreMode::External,
-        None => StoreMode::SpawnedMem,
+        Some(true) => StoreMode::Mem,
+        Some(false) => StoreMode::RocksDb,
+        None => StoreMode::Mem,
     }
 }
 
 /// `Some(mode)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值
 /// （后者要出声，见 [`store_mode_notice`]）。
-fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
-    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-        // "rocksdb" 是 external 的历史别名（rocksdb 在对端服务器侧），不是自带落盘档。
-        "external" | "rocksdb" => Some(StoreMode::External),
-        "spawned-rocksdb" => Some(StoreMode::SpawnedRocks),
-        "spawned-mem" | "kv-mem" => Some(StoreMode::SpawnedMem),
-        "embedded-mem" => Some(StoreMode::EmbeddedMem),
+///
+/// 退役的两档仍然解析得出来，但**落到的介质变了**：`spawned-mem` 从「有端口的内存库」
+/// 变成进程内嵌的 `mem`，`spawned-rocksdb` 从「自己拉一台」变成「连配置指的那台」。
+/// 让它们静默改道是不行的——现场配置照抄了好几年，[`retired_store_mode_notice`]
+/// 负责在启动时把这件事说出来。
+pub(crate) fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
+    match normalized_store_mode(raw)?.as_str() {
+        "mem" | "embedded-mem" | "kv-mem" | "spawned-mem" | "memory" => Some(StoreMode::Mem),
+        "rocksdb" | "external" | "spawned-rocksdb" => Some(StoreMode::RocksDb),
+        _ => None,
+    }
+}
+
+fn normalized_store_mode(raw: Option<&str>) -> Option<String> {
+    Some(raw?.trim().to_ascii_lowercase().replace('_', "-"))
+}
+
+/// 退役的四个旧字面值各自换了什么含义。`None` = 不是旧字面值。
+fn retired_store_mode_meaning(raw: &str) -> Option<&'static str> {
+    match raw {
+        "spawned-mem" | "kv-mem" => Some(
+            "本进程不再拉起 memory SurrealDB 子进程，改用进程内嵌 mem://：\
+             库还在、但**没有端口了**，/sql 探针、rvm_verify、Capture-*Evidence \
+             与 plant-ui 的「库供数」读面在这一档都够不着",
+        ),
+        "spawned-rocksdb" => Some(
+            "本进程不再拉起 rocksdb 后端的 surreal 子进程，改为**连** v_ip:v_port 上那台：\
+             请确认那台服务已经在跑，否则启动就会连不上",
+        ),
+        "external" => Some("已更名为 rocksdb，行为不变（连 v_ip:v_port 上那台）"),
+        "embedded-mem" => Some("已更名为 mem，行为不变（进程内嵌 mem://）"),
         _ => None,
     }
 }
@@ -874,26 +1142,35 @@ fn store_mode_notice_for(
             continue;
         }
         return Some(format!(
-            "⚠ {source} = {raw:?} 认不出来（只认 external / spawned-rocksdb / spawned-mem / \
-             embedded-mem），按未设置处理"
+            "⚠ {source} = {raw:?} 认不出来（只认 mem / rocksdb），按未设置处理"
+        ));
+    }
+    // 旧字面值：仍然认，但落到的介质变了，必须当场说清楚换成了什么。
+    for (source, raw) in [(STORE_MODE_ENV, env_override), ("store_mode", configured)] {
+        let Some(normalized) = normalized_store_mode(raw) else {
+            continue;
+        };
+        let Some(meaning) = retired_store_mode_meaning(&normalized) else {
+            continue;
+        };
+        let declared = parse_store_mode(raw).map_or("?", StoreMode::as_str);
+        return Some(format!(
+            "⚠ {source} = {normalized:?} 是退役写法，已按 {declared:?} 生效：{meaning}。\
+             请把配置改成 store_mode = {declared:?}"
         ));
     }
     // 两个键都写、且说的不是同一件事：以 `store_mode` 为准，但不许静默。
     let declared = parse_store_mode(env_override).or_else(|| parse_store_mode(configured))?;
     match configured_in_memory_db {
-        Some(true) if declared != StoreMode::EmbeddedMem => Some(format!(
+        Some(true) if declared != StoreMode::Mem => Some(format!(
             "⚠ 配置同时写了 in_memory_db = true 与 store_mode = {:?}：以 store_mode 为准。\
-             in_memory_db 是 store_mode 之前的旧开关，只表达得了 embedded-mem 那一档",
+             in_memory_db 是 store_mode 之前的旧开关，只表达得了 mem 那一档",
             declared.as_str()
         )),
-        // `in_memory_db = false` 说的是「持久层不在进程内存里」——external 与自带落盘
-        // 两档都与它相容，只有两档内存形态才算打架。
-        Some(false) if !matches!(declared, StoreMode::External | StoreMode::SpawnedRocks) => {
-            Some(format!(
-                "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
-                declared.as_str()
-            ))
-        }
+        Some(false) if declared != StoreMode::RocksDb => Some(format!(
+            "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
+            declared.as_str()
+        )),
         _ => None,
     }
 }
@@ -2038,6 +2315,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_e3d_version_is_read_from_the_selected_toml() {
+        let (_dir, path) = write_probe_config("custom.toml", "e3d_version = \"e3d210\"\n");
+        let fields = read_ext_fields(Some(path.into())).unwrap();
+        assert_eq!(fields.e3d_version.as_deref(), Some("e3d210"));
+        let (_dir, path) = write_probe_config("missing-key.toml", "startup_autorun = false\n");
+        assert!(read_ext_fields(Some(path.into()))
+            .unwrap()
+            .e3d_version
+            .is_none());
+        let (_dir, path) = write_probe_config("bad.toml", "e3d_version = []\n");
+        assert!(read_ext_fields(Some(path.into())).is_err());
+    }
+
+    #[test]
     fn data_batch_worker_limit_defaults_and_clamps_to_supported_range() {
         assert_eq!(effective_data_batch_workers(None), 1);
         assert_eq!(effective_data_batch_workers(Some(0)), 1);
@@ -2264,18 +2555,15 @@ mod tests {
         assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
-    /// **默认是自带 kv-mem**（2026-09-11 拍板）：两个形态键都没写 = `spawned-mem`。
-    /// 外置库部署必须显式写 `external`，不能让旧现场配置靠一个会变化的默认值决定介质。
+    /// **默认是 `mem`**：两个形态键都没写 = 进程内嵌，不配任何东西就能起来。
+    /// 落盘部署必须显式写 `rocksdb`，不能让现场配置靠一个会变化的默认值决定介质。
     #[test]
-    fn the_default_store_mode_is_spawned_mem() {
+    fn the_default_store_mode_is_mem() {
+        assert_eq!(effective_store_mode(None, None, None, None), StoreMode::Mem);
         assert_eq!(
-            effective_store_mode(None, None, None, None),
-            StoreMode::SpawnedMem
-        );
-        assert_eq!(
-            effective_store_mode(Some("external"), None, None, None),
-            StoreMode::External,
-            "外置库仍然可显式选择"
+            effective_store_mode(Some("rocksdb"), None, None, None),
+            StoreMode::RocksDb,
+            "落盘库仍然可显式选择"
         );
     }
 
@@ -2298,120 +2586,131 @@ mod tests {
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
-    /// `in_memory_db = false` 必须继续得到 external，不能被新的 spawned-mem 默认盖掉。
     #[test]
     fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
         assert_eq!(
             effective_store_mode(None, None, Some(true), None),
-            StoreMode::EmbeddedMem
+            StoreMode::Mem
         );
         assert_eq!(
             effective_store_mode(None, None, Some(false), None),
-            StoreMode::External
+            StoreMode::RocksDb
         );
         // 旧开关的环境变量压过它自己的配置值，与 `in_memory_db()` 同一规则。
         assert_eq!(
             effective_store_mode(None, None, Some(false), Some("1")),
-            StoreMode::EmbeddedMem
+            StoreMode::Mem
         );
     }
 
-    /// 环境变量压过配置，配置压过旧开关；下划线与大小写都认（`SPAWNED_MEM` 是
-    /// 环境变量里最自然的写法，认不出它只会让人以为开关没生效）。
+    /// 环境变量压过配置，配置压过旧开关；下划线与大小写都认（`ROCKSDB` 是环境变量里
+    /// 最自然的写法，认不出它只会让人以为开关没生效）。
     #[test]
     fn the_store_mode_env_override_wins_over_config_and_the_legacy_flag() {
         assert_eq!(
-            effective_store_mode(Some("external"), Some("spawned-mem"), Some(false), None),
-            StoreMode::SpawnedMem
+            effective_store_mode(Some("rocksdb"), Some("mem"), Some(false), None),
+            StoreMode::Mem
         );
         assert_eq!(
-            effective_store_mode(Some("spawned-mem"), None, Some(true), None),
-            StoreMode::SpawnedMem
+            effective_store_mode(Some("mem"), None, Some(true), None),
+            StoreMode::Mem
         );
         assert_eq!(
-            effective_store_mode(None, Some("SPAWNED_MEM"), Some(false), None),
-            StoreMode::SpawnedMem
+            effective_store_mode(None, Some("ROCKSDB"), Some(true), None),
+            StoreMode::RocksDb
         );
         assert_eq!(
-            effective_store_mode(Some(" Embedded-Mem "), None, None, None),
-            StoreMode::EmbeddedMem
+            effective_store_mode(Some(" Mem "), None, None, None),
+            StoreMode::Mem
         );
     }
 
     /// 拼错的值当没设 —— 但必须出声。静默换掉持久层介质是本仓最贵的那类沉默：
-    /// 一个 `spawn-mem` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
+    /// 一个 `memm` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
     #[test]
     fn an_unrecognised_store_mode_is_ignored_but_never_silent() {
         assert_eq!(
-            effective_store_mode(Some("spawn-mem"), None, Some(false), None),
-            StoreMode::External
+            effective_store_mode(Some("memm"), None, Some(false), None),
+            StoreMode::RocksDb
         );
-        let notice = store_mode_notice_for(Some("spawn-mem"), None, None)
-            .expect("认不出的 store_mode 必须出声");
-        assert!(notice.contains("spawn-mem"), "{notice}");
-        assert!(notice.contains("external"), "{notice}");
-        assert!(store_mode_notice_for(Some("external"), None, None).is_none());
+        let notice =
+            store_mode_notice_for(Some("memm"), None, None).expect("认不出的 store_mode 必须出声");
+        assert!(notice.contains("memm"), "{notice}");
+        assert!(notice.contains("mem / rocksdb"), "{notice}");
+        assert!(store_mode_notice_for(Some("rocksdb"), None, None).is_none());
         assert!(store_mode_notice_for(None, None, None).is_none());
+    }
+
+    /// 退役的四个旧字面值仍然解析得出来，但**落到的介质变了**，不许静默改道。
+    ///
+    /// 最危险的是 `spawned-rocksdb`：它以前会自己把库拉起来，现在只连。照抄了几年的
+    /// 现场配置如果一声不响地改道，现象是启动就连不上，而没有任何一行说出为什么。
+    #[test]
+    fn a_retired_store_mode_still_parses_but_says_what_it_became() {
+        assert_eq!(
+            parse_store_mode(Some("spawned-mem")),
+            Some(StoreMode::Mem),
+            "有端口的内存库退役，落到进程内嵌那一档"
+        );
+        assert_eq!(
+            parse_store_mode(Some("SPAWNED_ROCKSDB")),
+            Some(StoreMode::RocksDb),
+            "自带落盘退役，落到「连配置指的那台」"
+        );
+        assert_eq!(parse_store_mode(Some("external")), Some(StoreMode::RocksDb));
+        assert_eq!(parse_store_mode(Some("embedded-mem")), Some(StoreMode::Mem));
+        assert_eq!(parse_store_mode(Some("kv-mem")), Some(StoreMode::Mem));
+
+        let notice = store_mode_notice_for(Some("spawned-rocksdb"), None, None)
+            .expect("退役写法必须出声");
+        assert!(notice.contains("spawned-rocksdb"), "{notice}");
+        assert!(notice.contains("rocksdb"), "{notice}");
+        assert!(
+            notice.contains("不再拉起"),
+            "必须说出行为变了，不能只说改名：{notice}"
+        );
+        let notice =
+            store_mode_notice_for(Some("spawned-mem"), None, None).expect("退役写法必须出声");
+        assert!(
+            notice.contains("没有端口"),
+            "丢端口这件事必须当场说：{notice}"
+        );
+        // 新写法不吵。
+        assert!(store_mode_notice_for(Some("mem"), None, None).is_none());
+        assert!(store_mode_notice_for(Some("rocksdb"), None, None).is_none());
     }
 
     /// 两个键打架时以 `store_mode` 为准，但不许静默——旧配置里那句
     /// `in_memory_db = true` 会让读配置的人得出相反的结论。
     #[test]
     fn a_contradicting_legacy_flag_is_named_not_swallowed() {
-        let notice = store_mode_notice_for(Some("external"), None, Some(true))
+        let notice = store_mode_notice_for(Some("rocksdb"), None, Some(true))
             .expect("store_mode 与 in_memory_db 打架时必须出声");
         assert!(notice.contains("in_memory_db"), "{notice}");
-        assert!(notice.contains("external"), "{notice}");
+        assert!(notice.contains("rocksdb"), "{notice}");
         // 说的是同一件事就不必吵。
-        assert!(store_mode_notice_for(Some("embedded-mem"), None, Some(true)).is_none());
-        assert!(store_mode_notice_for(Some("external"), None, Some(false)).is_none());
+        assert!(store_mode_notice_for(Some("mem"), None, Some(true)).is_none());
+        assert!(store_mode_notice_for(Some("rocksdb"), None, Some(false)).is_none());
     }
 
-    /// 外置与自带落盘两档的行活得过进程重启；只有进程内嵌那一档别人连不上。
-    /// 这两句话是 `/health` 与回执的介质口径的唯一来源。
+    /// `rocksdb` 的行活得过进程重启，`mem` 的活不过。
+    ///
+    /// 「别人连不连得上」原本是另一个谓词（`has_endpoint()`）：自带存储两档在时它与
+    /// durable 分得开。两档退役之后两个问题合一，谓词只剩一个——**再加回第二个恒等的
+    /// 谓词就是退步**，下一个人会以为它们还能分开。
     #[test]
-    fn only_the_disk_backed_stores_are_durable_and_only_the_embedded_one_has_no_port() {
-        assert!(StoreMode::External.is_durable());
-        assert!(StoreMode::SpawnedRocks.is_durable());
-        assert!(!StoreMode::SpawnedMem.is_durable());
-        assert!(!StoreMode::EmbeddedMem.is_durable());
-        assert!(StoreMode::External.has_endpoint());
-        assert!(StoreMode::SpawnedRocks.has_endpoint());
-        assert!(StoreMode::SpawnedMem.has_endpoint());
-        assert!(!StoreMode::EmbeddedMem.has_endpoint());
-        assert_eq!(StoreMode::SpawnedRocks.as_str(), "spawned-rocksdb");
-        // 自带落盘档只在写全名时给；别名 "rocksdb" 属于 external（对端服务器侧的 rocksdb）。
-        assert_eq!(
-            parse_store_mode(Some("spawned-rocksdb")),
-            Some(StoreMode::SpawnedRocks)
-        );
-        assert_eq!(
-            parse_store_mode(Some("SPAWNED_ROCKSDB")),
-            Some(StoreMode::SpawnedRocks)
-        );
+    fn only_the_disk_backed_store_is_durable() {
+        assert!(StoreMode::RocksDb.is_durable());
+        assert!(!StoreMode::Mem.is_durable());
+        assert_eq!(StoreMode::RocksDb.as_str(), "rocksdb");
+        assert_eq!(StoreMode::Mem.as_str(), "mem");
     }
 
-    /// 两个内存部署形式都不摄入属性；持久部署（外置与自带落盘）必须做完整基线与增量备份。
+    /// 内存形态不摄入属性；落盘部署必须做完整基线与增量备份。
     #[test]
     fn data_face_follows_storage_backup_scope() {
-        assert_eq!(data_face_for_store(StoreMode::External), DataFace::Ingest);
-        assert_eq!(
-            data_face_for_store(StoreMode::SpawnedRocks),
-            DataFace::Ingest
-        );
-        assert_eq!(
-            data_face_for_store(StoreMode::SpawnedMem),
-            DataFace::ReadThrough
-        );
-        assert_eq!(
-            data_face_for_store(StoreMode::EmbeddedMem),
-            DataFace::ReadThrough
-        );
-        assert_eq!(parse_store_mode(Some("rocksdb")), Some(StoreMode::External));
-        assert_eq!(
-            parse_store_mode(Some("kv-mem")),
-            Some(StoreMode::SpawnedMem)
-        );
+        assert_eq!(data_face_for_store(StoreMode::RocksDb), DataFace::Ingest);
+        assert_eq!(data_face_for_store(StoreMode::Mem), DataFace::ReadThrough);
         assert!(DataFace::ReadThrough.is_read_through());
         assert!(!DataFace::Ingest.is_read_through());
         assert_eq!(DataFace::Ingest.as_str(), "ingest");
@@ -2453,10 +2752,10 @@ mod tests {
     /// 漏写的症状一律不是报错，而是「测试莫名其妙全查不到数据」「开机后 `pe` 一行都不进」
     /// ——看上去像解析坏了，实际是配置少了一行。
     ///
-    /// 默认值本身翻过三次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
-    /// `external`，2026-09-11 再改为 `spawned-mem`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
-    /// （它是从 `store_mode` 派生的）。护栏守的正是「不许有配置去依赖那个会变的默认」，
-    /// 所以它与默认值当前指向哪一档无关。
+    /// 默认值本身翻过四次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
+    /// `external`，2026-09-11 再改为 `spawned-mem`，2026-09-13 两档化后定为 `mem`），每一次都会让
+    /// 没写这一项的配置静默换介质、连带换掉 `data_face`（它是从 `store_mode` 派生的）。
+    /// 护栏守的正是「不许有配置去依赖那个会变的默认」，所以它与默认值当前指向哪一档无关。
     ///
     /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
     #[test]
@@ -3222,6 +3521,133 @@ mod tests {
         );
         assert_eq!(ext_config_name(Some(OsString::from("  "))), "DbOption");
         assert_eq!(ext_config_name(None), "DbOption");
+    }
+
+    /// 三段校审配置必须读得动，而且键名就是 TOML 里那几个字。
+    /// 读不动会整张扩展表一起回落（[`loaded_from`]），届时 `http_api_addr` 一并失效
+    /// ——所以这三段的解析要单独钉一次。
+    #[test]
+    fn the_three_review_sections_parse_from_their_toml_tables() {
+        let fields: DbOptionExtFields = toml::from_str(
+            r#"
+http_api_addr = "0.0.0.0:8022"
+
+[review_auth]
+enabled = false
+debug_project_id = "p-1"
+debug_user_id = "u-1"
+debug_role = "jd"
+
+[platform_auth]
+enabled = false
+debug_token = "dev-token"
+review_web_base_url = "http://123.57.182.243"
+
+[review_attachments]
+dir = "review_attachments"
+"#,
+        )
+        .expect("三段配置必须解析得动");
+
+        assert_eq!(fields.http_api_addr.as_deref(), Some("0.0.0.0:8022"));
+        let review_auth = fields.review_auth.expect("[review_auth]");
+        assert!(!review_auth.enabled());
+        assert_eq!(review_auth.debug_project_id(), "p-1");
+        assert_eq!(review_auth.debug_user_id(), "u-1");
+        assert_eq!(review_auth.debug_role(), "jd");
+        let platform_auth = fields.platform_auth.expect("[platform_auth]");
+        assert!(!platform_auth.enabled());
+        assert_eq!(platform_auth.debug_token(), "dev-token");
+        assert_eq!(
+            platform_auth.review_web_base_url(),
+            Some("http://123.57.182.243")
+        );
+        assert_eq!(
+            fields.review_attachments.expect("[review_attachments]").dir(),
+            "review_attachments"
+        );
+    }
+
+    /// 没写这三段时的取值必须与旧端 `jwt_auth.rs` 的 `Default` 逐字相同——
+    /// 前端只换一个后端地址就该照常登录（移植计划 G4）。鉴权**缺省开启**这一条尤其
+    /// 不能松：漏写一段配置就等于把校审接口敞开，属于配置层的静默失效。
+    #[test]
+    fn missing_review_sections_fall_back_to_the_legacy_defaults() {
+        let review_auth = ReviewAuthSection::default();
+        assert!(review_auth.enabled(), "缺省必须是开着的");
+        assert_eq!(review_auth.debug_project_id(), "debug-project");
+        assert_eq!(review_auth.debug_user_id(), "designer_001");
+        assert_eq!(review_auth.debug_role(), "sj");
+
+        let platform_auth = PlatformAuthSection::default();
+        assert!(platform_auth.enabled(), "缺省必须是开着的");
+        assert_eq!(platform_auth.debug_token(), "");
+        assert_eq!(platform_auth.review_web_base_url(), None);
+
+        assert_eq!(
+            ReviewAttachmentsSection::default().dir(),
+            "review_attachments"
+        );
+    }
+
+    /// 空串 / 纯空白是「还没填」，不是「填了一个空值」。尤其 `review_web_base_url`：
+    /// 当成配了会让 `embed-url` 回给 PMS 一个空地址，而那一级本该继续往下回退。
+    #[test]
+    fn blank_review_settings_are_treated_as_unset() {
+        let section = PlatformAuthSection {
+            review_web_base_url: Some("   ".to_string()),
+            debug_token: None,
+            enabled: None,
+        };
+        assert_eq!(section.review_web_base_url(), None);
+
+        let attachments = ReviewAttachmentsSection {
+            dir: Some(String::new()),
+        };
+        assert_eq!(attachments.dir(), "review_attachments");
+    }
+
+    /// 上传落盘与 `/files/review_attachments` 静态服务共用这一个解析：相对名挂在
+    /// asset_root 下，绝对路径原样用（附件盘与模型资源分开部署的现场）。
+    #[test]
+    fn attachment_dir_resolves_under_the_asset_root_unless_absolute() {
+        let asset_root = Path::new(r"C:\plant\assets");
+        assert_eq!(
+            review_attachments_dir_under(asset_root, "review_attachments"),
+            asset_root.join("review_attachments")
+        );
+        assert_eq!(
+            review_attachments_dir_under(asset_root, " review_attachments "),
+            asset_root.join("review_attachments")
+        );
+        let absolute = if cfg!(windows) {
+            r"D:\review-files"
+        } else {
+            "/srv/review-files"
+        };
+        assert_eq!(
+            review_attachments_dir_under(asset_root, absolute),
+            PathBuf::from(absolute)
+        );
+    }
+
+    /// 逃生门必须是**显式**的：没设、设成空、设成拼错的值，一律不放行。
+    /// 放行条件写宽一格，就等于默认允许校审数据落在重启即空的库上（判据 A9）。
+    #[test]
+    fn the_ephemeral_store_escape_hatch_only_opens_on_an_explicit_yes() {
+        assert_eq!(parse_bool_flag("1"), Some(true));
+        assert_eq!(parse_bool_flag("true"), Some(true));
+        assert_eq!(parse_bool_flag("on"), Some(true));
+        assert_eq!(parse_bool_flag("0"), Some(false));
+        assert_eq!(parse_bool_flag("off"), Some(false));
+        assert_eq!(parse_bool_flag(""), None, "没设不是放行");
+        assert_eq!(parse_bool_flag("ture"), None, "拼错不是放行");
+        assert_eq!(parse_bool_flag("yes please"), None);
+        assert_eq!(
+            REVIEW_ALLOW_EPHEMERAL_STORE_ENV,
+            "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
+            "变量名进了 ADR-075 与启动横幅，改名要三处一起改"
+        );
     }
 }
 

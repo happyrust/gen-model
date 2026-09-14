@@ -103,16 +103,16 @@ v_ip = "localhost"
 v_port = 8009
 v_user = "root"
 v_password = "root"
-#【变更 2026-09-11】默认使用自带 kv-mem：服务自行拉起 memory SurrealDB，
-# 进程退出数据即消失；需要外置/持久库时显式改为 external 或 spawned-rocksdb。
-#【变更 2026-09-14】本机开发档取 "rocksdb"——它是 external 的别名（docs/database-storage-modes.md）：
-# 连 v_ip:v_port 上那台**以 RocksDB 后端起的** surreal，本进程只连不拉。落盘的是对端服务，
-# 不是 spawned-rocksdb 那种自带子进程。配合下面的 incremental-overlay：kv-mem 只留新生成的
-# root overlay，冷 root 直接查 RocksDB。
+#【修订 2026-09-13，ADR-074】默认 mem：数据库在服务进程内，退出即消失。
+# 需要持久化时先启动外部 SurrealDB，再显式改成 rocksdb；服务只连接、不拉起数据库。
+#【本机开发档 2026-09-14】这里取 rocksdb：连 v_ip:v_port 上那台**以 RocksDB 后端起的**
+# surreal（scripts/Start-Surreal8009.ps1），本进程只连不拉。配合下面的 incremental-overlay：
+# kv-mem 只留新生成的 root overlay，冷 root 直接查 RocksDB。
 store_mode = "rocksdb"
-# RocksDB/external durable modes keep only newly generated root overlays in kv-mem.
+# RocksDB durable mode keeps only newly generated root overlays in kv-mem.
 # Cold roots are queried directly from RocksDB and never hydrated into kv-mem.
 model_cache_mode = "incremental-overlay"
+model_cache_max_bytes = 2147483648
 
 #【新增 2026-08-27】in_memory_db —— 已被 store_mode 取代的兼容开关；默认不写 = 由上面的
 # store_mode 决定。只有未写 store_mode 时，显式 true 才选 embedded-mem、false 选 external。

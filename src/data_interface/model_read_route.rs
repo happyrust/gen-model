@@ -419,20 +419,16 @@ mod tests {
         use crate::options::StoreMode;
 
         assert_eq!(
-            publication_policy_for(false, DataFace::Ingest, StoreMode::External),
+            publication_policy_for(false, DataFace::Ingest, StoreMode::RocksDb),
             ModelPublicationPolicy::ProcessStore { durable: true }
         );
         assert_eq!(
-            publication_policy_for(true, DataFace::Ingest, StoreMode::External),
+            publication_policy_for(true, DataFace::Ingest, StoreMode::RocksDb),
             ModelPublicationPolicy::ProjectionOnly,
             "an ingest fallback must not compete with the durable database writer"
         );
         assert_eq!(
-            publication_policy_for(true, DataFace::ReadThrough, StoreMode::SpawnedMem),
-            ModelPublicationPolicy::ProcessStore { durable: false }
-        );
-        assert_eq!(
-            publication_policy_for(true, DataFace::ReadThrough, StoreMode::EmbeddedMem),
+            publication_policy_for(true, DataFace::ReadThrough, StoreMode::Mem),
             ModelPublicationPolicy::ProcessStore { durable: false }
         );
     }

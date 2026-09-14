@@ -152,33 +152,26 @@ pub enum PersistMedium {
     /// 不带 `ws` 的 `local` 构建走进程内嵌的 `rocksdb://<project>.rdb`。
     /// 两者的共同点、也是这一档唯一要紧的性质：**行活得过进程重启**。
     RocksDb,
-    /// 本进程拉起的 memory 后端 SurrealDB（`store_mode = "spawned-mem"`）。
-    /// 行随进程消失，**但端口是真的**——别的进程读得到这一批。
-    SpawnedMem,
-    /// 进程内嵌 kv-mem（`store_mode = "embedded-mem"`）。行落在进程里：
+    /// 进程内嵌 kv-mem（`store_mode = "mem"`）。行落在进程里：
     /// 进程一退整库就没了，外面也没有端口可连。
-    EmbeddedMem,
+    Mem,
 }
 
 impl PersistMedium {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RocksDb => "rocksdb",
-            Self::SpawnedMem => "spawned-mem",
-            Self::EmbeddedMem => "embedded-mem",
+            Self::Mem => "mem",
         }
     }
 
-    /// 这一批行能不能活过进程重启。两档内存介质都活不过——回执里点名它，免得把
+    /// 这一批行能不能活过进程重启。内存介质活不过——回执里点名它，免得把
     /// 「落库了」当成「留下来了」。
+    ///
+    /// 它同时也回答「别的进程读不读得到」。原来那是两个问题（`spawned-mem` 不 durable
+    /// 但读得到），自带存储两档退役之后两个问题合一，`is_reachable()` 跟着删了。
     pub fn is_durable(self) -> bool {
         matches!(self, Self::RocksDb)
-    }
-
-    /// 别的进程读不读得到这一批。`embedded-mem` 是唯一的「读不到」——
-    /// 它与 [`Self::is_durable`] 问的不是同一件事：`spawned-mem` 不 durable，但读得到。
-    pub fn is_reachable(self) -> bool {
-        !matches!(self, Self::EmbeddedMem)
     }
 }
 
@@ -205,12 +198,8 @@ impl PersistTarget<'_> {
     pub fn process() -> PersistTarget<'static> {
         let medium = if cfg!(feature = "ws") {
             match crate::options::store_mode() {
-                // 自带落盘档归 RocksDb：这枚枚举要紧的是「活得过重启」，不是「在不在外面」。
-                crate::options::StoreMode::External | crate::options::StoreMode::SpawnedRocks => {
-                    PersistMedium::RocksDb
-                }
-                crate::options::StoreMode::SpawnedMem => PersistMedium::SpawnedMem,
-                crate::options::StoreMode::EmbeddedMem => PersistMedium::EmbeddedMem,
+                crate::options::StoreMode::RocksDb => PersistMedium::RocksDb,
+                crate::options::StoreMode::Mem => PersistMedium::Mem,
             }
         } else {
             PersistMedium::RocksDb
@@ -3931,14 +3920,14 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         let first = persist_root_on(target, &store, root)
             .await
             .expect("persist");
         assert_eq!(first.upserted, 3);
         assert_eq!(first.removed, 0);
         assert_eq!(first.commits, 1, "三条记录装得下一块，就只发一笔");
-        assert_eq!(first.medium, PersistMedium::EmbeddedMem);
+        assert_eq!(first.medium, PersistMedium::Mem);
         assert!(!first.medium.is_durable(), "内存模式的行活不过进程重启");
         assert_eq!(count(&db, "inst_relate").await, 2);
         assert_eq!(count(&db, "tubi_relate").await, 1);
@@ -3990,7 +3979,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         persist_root_on(target, &full, ancestor_root)
             .await
             .expect("persist ancestor");
@@ -4017,7 +4006,7 @@ mod tests {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
 
         let full = ModelMemoryStore::default();
         full.commit(
@@ -4082,7 +4071,7 @@ mod tests {
             }],
         );
 
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         let rows = persist_root_on(target, &store, root)
             .await
             .expect("persist");
@@ -4169,7 +4158,7 @@ mod tests {
             }],
         );
 
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         let batched = persist_roots_batched(
             target,
             &store,
@@ -4182,7 +4171,7 @@ mod tests {
         assert!(batched.failed.is_empty(), "{:?}", batched.failed);
         assert_eq!(batched.groups, 1);
         let rows = batched.rows.expect("rows");
-        assert_eq!(rows.medium, PersistMedium::EmbeddedMem);
+        assert_eq!(rows.medium, PersistMedium::Mem);
         assert_eq!(
             rows.upserted, 4,
             "祖先根 3 条 + 嵌套根自己的 1 条；重复 id 由库内幂等收敛"
@@ -4225,7 +4214,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         let first = persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
             .await
             .expect("first batch");
@@ -4284,7 +4273,7 @@ mod tests {
             source_refno: RefNo::new(24383, 9999),
             ..baked_record()
         };
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
 
         store.commit(
             ProjectionScope::Current,
@@ -4361,7 +4350,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::converging_for_test(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::converging_for_test(&db, PersistMedium::Mem);
         let sources = [
             refno_from_e3d(BRANCH),
             refno_from_e3d(RefNo::new(24383, 500)),
@@ -4557,7 +4546,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         let batched = persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
             .await
             .expect("batched persist");
@@ -4579,7 +4568,7 @@ mod tests {
     async fn batched_persist_refuses_roots_of_another_dbnum() {
         let db = surreal_mem().await;
         let store = ModelMemoryStore::default();
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         let error = persist_roots_batched(
             target,
             &store,
@@ -4660,7 +4649,7 @@ mod tests {
         .check()
         .expect("seed live pointer statements");
 
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         sweep_legacy_prefixes(target).await.expect("sweep");
         assert_eq!(count(&db, "aabb").await, 1, "还有人指着，不许删");
         assert_eq!(count(&db, "inst_info").await, 1);
@@ -4700,7 +4689,7 @@ mod tests {
         .check()
         .expect("seed statements");
 
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         sweep_legacy_prefixes(target).await.expect("sweep");
 
         assert_eq!(count(&db, "geo_relate").await, 0, "旧关系行不该拦住自己");
@@ -4726,7 +4715,7 @@ mod tests {
     async fn the_legacy_sweep_runs_once_per_database() {
         let db = surreal_mem().await;
         seed_legacy_namespace(&db).await;
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
 
         sweep_legacy_prefixes(target).await.expect("sweep");
         assert_eq!(count(&db, "inst_info").await, 0, "旧命名空间该被扫走");
@@ -4778,7 +4767,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         assert!(persist_root_on(target, &store, root).await.is_err());
         assert_eq!(
             publication_status(&db).await,
@@ -4819,7 +4808,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         persist_root_on(target, &store, root)
             .await
             .expect("persist");
@@ -4852,7 +4841,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         persist_root_on(target, &store, root)
             .await
             .expect("persist");
@@ -5041,7 +5030,7 @@ mod tests {
         )]);
 
         let batched = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A],
@@ -5069,7 +5058,7 @@ mod tests {
         assert_eq!(ack.geometry_count, 1);
         assert!(ack.room_membership);
         assert_eq!(ack.room_generation.as_deref(), Some("rooms-fixture"));
-        assert_eq!(ack.medium, PersistMedium::EmbeddedMem);
+        assert_eq!(ack.medium, PersistMedium::Mem);
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
@@ -5089,7 +5078,7 @@ mod tests {
         ]);
 
         let batched = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A, ROOM_ROOT_B],
@@ -5162,7 +5151,7 @@ mod tests {
         ]);
 
         let batched = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A, ROOM_ROOT_B],
@@ -5192,7 +5181,7 @@ mod tests {
 
         // B 单独再落一轮：它的行与边同一笔出现。
         let retried = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_B],
@@ -5244,7 +5233,7 @@ mod tests {
         ]);
 
         let batched = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ancestor_root, nested_root],
@@ -5295,7 +5284,7 @@ mod tests {
             roots: &[RefNo],
         ) -> BatchedPersist {
             let batched = persist_roots_batched(
-                PersistTarget::new(db, PersistMedium::EmbeddedMem),
+                PersistTarget::new(db, PersistMedium::Mem),
                 store,
                 BATCH_DBNUM,
                 roots,
@@ -5395,7 +5384,7 @@ mod tests {
             vec![room_record(ROOM_ROOT_A, 100., 200.)],
         )]);
         let batched = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A],
@@ -5464,7 +5453,7 @@ mod tests {
         };
         assert!(disabled_rooms.is_none());
         let without_rooms = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A],
@@ -5507,7 +5496,7 @@ mod tests {
             assert!(crate::options::room_membership());
         }
         let retried = persist_roots_batched(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A],
@@ -5678,7 +5667,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
         persist_root_on(target, &store, ancestor_root)
             .await
             .expect("persist ancestor");
@@ -5884,7 +5873,7 @@ mod tests {
             }],
         );
         persist_root_on(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             RefNo::new(24383, 1),
         )

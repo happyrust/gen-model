@@ -1,0 +1,33 @@
+{
+  "task_id": "model-history-20260913-231749-000003",
+  "kind": "model_history",
+  "state": "failed",
+  "project": "AvevaMarineSample",
+  "created_at": "2026-09-13T23:17:49.240968500+08:00",
+  "started_at": "2026-09-13T23:17:49.240968500+08:00",
+  "finished_at": "2026-09-13T23:17:49.286709400+08:00",
+  "dbnum": 8000,
+  "db_type": "DESI",
+  "units_done": 0,
+  "total_units": 1,
+  "events_seen": 0,
+  "current_stage": "historical_generation",
+  "stage_started_at": "2026-09-13T23:17:49.240968500+08:00",
+  "detail": {
+    "refno": "=24384/26229",
+    "sesno": 99999,
+    "time": null
+  },
+  "result": {
+    "code": "SESSION_NOT_FOUND",
+    "message": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001: no session 99999; newest is 574; the nearest retained session is 574, below it"
+  },
+  "steps": [
+    {
+      "name": "historical_generation",
+      "at": "2026-09-13T23:17:49.240968500+08:00",
+      "ms": 45,
+      "ok": false
+    }
+  ]
+}
