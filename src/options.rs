@@ -3620,7 +3620,7 @@ dir = "review_attachments"
         assert_eq!(
             REVIEW_ALLOW_EPHEMERAL_STORE_ENV,
             "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
-            "变量名进了 ADR-072 与启动横幅，改名要三处一起改"
+            "变量名进了 ADR-075 与启动横幅，改名要三处一起改"
         );
     }
 }

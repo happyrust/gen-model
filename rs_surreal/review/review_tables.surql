@@ -17,7 +17,7 @@
 --      本文件初版就漏了它那条唯一索引（复核见 `docs/evidence/2026-09-13-review-schema-parity.md`
 --      §7 P1-1）。往后核对三处都要走一遍。
 -- 移植计划 `docs/plans/2026-09-12-review-backend-port-plan.md` §1.3 末行、
--- 落点决定见 `docs/adr/ADR-072-review-data-persistence.md`。
+-- 落点决定见 `docs/adr/ADR-075-review-data-persistence.md`。
 --
 -- 由此产生的四处「与旧端不同」，都是有意的：
 --   1. review_attachment 是 **SCHEMALESS**。旧 SCHEMAFULL 版没有 file_name / file_size /
@@ -29,11 +29,11 @@
 --   3. 显式 `DEFINE TABLE IF NOT EXISTS … SCHEMALESS`。旧端靠首次 CREATE 隐式建表，
 --      于是「表在不在」取决于有没有人写过；这里让首启后 `INFO FOR DB` 就是完整清单。
 --      `IF NOT EXISTS` 不动既有定义：从旧端 SCHEMAFULL 库整体迁移过来的场景不在本次
---      范围（ADR-072「未决」一节）。
+--      范围（ADR-075「未决」一节）。
 --   4. review_forms 取 **SCHEMALESS**，不照出处 C 那样 SCHEMAFULL + 13 个 DEFINE FIELD。
 --      写入路径不依赖 DB 侧 DEFAULT（`platform/review_form.rs:148-161` 的 CREATE 把 12 个
 --      字段全显式写出，三处 UPDATE 也显式写 deleted / updated_at），丢的是类型约束不是
---      数据；其余 9 张表一律 SCHEMALESS，单独把这张改回去会让 ADR-072「旧库整体迁入」
+--      数据；其余 9 张表一律 SCHEMALESS，单独把这张改回去会让 ADR-075「旧库整体迁入」
 --      更难办。但 **`idx_form_id ... UNIQUE` 必须照搬**——那是行为，不是口径，见下方第 2 节。
 --
 -- 执行方：`src/web_service/review/schema.rs::ensure_review_schema`（`include_str!` 冻进

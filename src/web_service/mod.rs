@@ -412,7 +412,7 @@ async fn serve_with_ready(
         log::warn!("{message}");
         println!("[warn] {message}");
     }
-    // 校审数据的落点在挂路由之前先判一次（ADR-072 / 判据 A9）：介质活不过重启时整个
+    // 校审数据的落点在挂路由之前先判一次（ADR-075 / 判据 A9）：介质活不过重启时整个
     // 校审域换成 503 拒绝路由，并在启动日志响亮说明——而不是让它先跑起来，等运维
     // 重启一次才发现一天的校审意见没了（宪法 III：静默失效是最高级别缺陷）。
     let review_persistence = review::db::review_persistence();
@@ -564,7 +564,7 @@ async fn serve_with_ready(
         //
         // 两条臂而不是一条：落点活不过重启时挂的是拒绝路由（同样四个前缀，一律 503 +
         // 原因），业务路由与附件静态服务都不上——「拒绝启用」要真的拒绝，但不能变成
-        // 404 那种分不清「没移植」和「配置不让跑」的沉默（ADR-072）。
+        // 404 那种分不清「没移植」和「配置不让跑」的沉默（ADR-075）。
         .merge(match &review_persistence {
             review::db::ReviewPersistence::Ready { .. } => review::router().nest_service(
                 REVIEW_ATTACHMENTS_URL_PREFIX,

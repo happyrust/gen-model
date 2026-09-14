@@ -1,7 +1,7 @@
 # 校审域 schema / DDL 逐表对照复核（旧端 plant-model-gen → 新端 gen-model）
 
 - 日期：2026-09-13
-- 范围：计划 [`docs/plans/2026-09-12-review-backend-port-plan.md`](../plans/2026-09-12-review-backend-port-plan.md) §1.3「两份 surql 有重叠且不一致，需先定以哪份为真」；落点口径见 [`docs/adr/ADR-072-review-data-persistence.md`](../adr/ADR-072-review-data-persistence.md) D1–D6
+- 范围：计划 [`docs/plans/2026-09-12-review-backend-port-plan.md`](../plans/2026-09-12-review-backend-port-plan.md) §1.3「两份 surql 有重叠且不一致，需先定以哪份为真」；落点口径见 [`docs/adr/ADR-075-review-data-persistence.md`](../adr/ADR-075-review-data-persistence.md) D1–D6
 - 性质：复核为只读；查出的 P1 经决策卡 q-228 拍板（选项 a）临时放开归属后**由本人代改并已提交**，见 §15
 - 结论：12/12 张表有结论。**P1 一条（已修，commit `987faa2fc`）**、P2 七条、其余逐字一致
 
@@ -104,7 +104,7 @@ D 与 E 互相打架（同名表一个 SCHEMAFULL 一个 SCHEMALESS、字段集�
 - 建议（已全部落地，见 §15）：
   1. 在 `rs_surreal/review/review_tables.surql` 补 `DEFINE INDEX IF NOT EXISTS idx_form_id ON TABLE review_forms FIELDS form_id UNIQUE;`，并在 `schema.rs` 的索引护栏表里加上 `review_forms → idx_form_id`（原护栏 `every_query_index_from_the_legacy_runtime_ddl_is_created` 只照着 `review_db.rs` 那 12 条抄，**结构上不可能发现这一条**，因为它来自出处 C）
   2. 顺带在 `review_tables.surql` 文件头的「以哪份为真」里把出处 C 补进去，否则下一个人还会照着「只有 review_db.rs 两段」的口径复核
-  3. 是否同时补回 13 个 `DEFINE FIELD`（即回到 SCHEMAFULL）建议**不做**：新端其余 9 张表一律 SCHEMALESS，单独把这张改回 SCHEMAFULL 会让「旧库整体迁入」这个 ADR-072 未决项更难办；类型约束的收益也不抵风险
+  3. 是否同时补回 13 个 `DEFINE FIELD`（即回到 SCHEMAFULL）建议**不做**：新端其余 9 张表一律 SCHEMALESS，单独把这张改回 SCHEMAFULL 会让「旧库整体迁入」这个 ADR-075 未决项更难办；类型约束的收益也不抵风险
 
 ## 8. review_form_model
 
@@ -114,7 +114,7 @@ D 与 E 互相打架（同名表一个 SCHEMAFULL 一个 SCHEMALESS、字段集�
 - 新端：`review_tables.surql:38` SCHEMALESS；索引 `:60` 取运行时那一条
 - 差异（P2-5）：史料 E 想要的 `(form_id, model_refno)` 唯一索引两端都没有
 - 影响：与旧端**一致**，不是移植引入的。写入方（新 `tasks.rs:720-724`、`sync.rs:364`；旧 `review_api.rs:2109`、`:6834`，两端同为 `CREATE ONLY ... SET form_id, model_refno, created_at`）只在单次请求内用 `HashSet` 去重（`tasks.rs:710`），跨请求重复调用会累积重复行；下游 `workflow_sync.rs:2207` 的 `SELECT VALUE model_refno` 会把重复项一并返回
-- 建议：不在本次移植里改（改了就不是逐字兼容）。作为已知的继承问题记到 ADR-072「未决」，需要时单独立项
+- 建议：不在本次移植里改（改了就不是逐字兼容）。作为已知的继承问题记到 ADR-075「未决」，需要时单独立项
 
 ## 9. review_opinion
 
@@ -165,7 +165,7 @@ D 与 E 互相打架（同名表一个 SCHEMAFULL 一个 SCHEMALESS、字段集�
 - 新端：无 DDL，**也不读**。`integration.rs:168` 的 `COLLISION_SOURCE_UNAVAILABLE_REASON` 直接回显式空集 + 原因，`:208` 恒为 `CollisionSource::Unavailable`
 - 差异（P2-7）：新端不查表
 - 影响：与计划 Q4「无碰撞数据源时显式空集 + reason，不回落 mock」一致。gen-model 的数据面（e3d-direct / RocksDB）本来就没有同形表，加 DDL 只会建出一张永远空的表，把「没有数据源」伪装成「查到零条」
-- 建议：保持。接入方案记在 ADR-072「未决 · 碰撞数据源待接」
+- 建议：保持。接入方案记在 ADR-075「未决 · 碰撞数据源待接」
 
 ## 14. 差异汇总
 
@@ -218,9 +218,9 @@ commit `987faa2fc` 改了 `rs_surreal/review/review_tables.surql` 与 `src/web_s
 
 ## 17. 给 R8 的可粘文字
 
-> 以下两段可直接贴进 `docs/adr/ADR-072-review-data-persistence.md`「偏离 / 未决」与计划 `§11`，不必改写。
+> 以下两段可直接贴进 `docs/adr/ADR-075-review-data-persistence.md`「偏离 / 未决」与计划 `§11`，不必改写。
 
-**贴 ADR-072「偏离」：**
+**贴 ADR-075「偏离」：**
 
 > **D7（2026-09-13 补）· `review_forms` 取 SCHEMALESS，但保留唯一索引。** 旧端运行时对 `review_forms` 建的是 SCHEMAFULL + 13 个 `DEFINE FIELD` + `idx_form_id ... UNIQUE`（出处 `src/web_api/platform_api/review_form.rs:37-50`，由 `src/web_server/mod.rs:568` 的 `warm_review_forms_schema()` 在启动时执行——这是旧端第三处运行时 DDL，不在 `review_db.rs` 里，移植初版整块漏掉）。本仓取舍：**字段定义不移植，唯一索引必须移植**。字段定义不移植是因为写入路径不依赖 DB 侧 `DEFAULT`（`platform/review_form.rs:148-161` 的 `CREATE` 把 12 个字段全显式写出，三处 `UPDATE` 也显式写 `deleted` / `updated_at`），丢的是类型约束而非数据；且其余 9 张表一律 SCHEMALESS，单独把这张改回 SCHEMAFULL 会让「旧库整体迁入」更难办。唯一索引必须移植是因为它承担行为而非口径：`ensure_review_form_stub` 是无事务的「先 SELECT 再 CREATE」，并发下靠它挡住第二条 `CREATE`；缺失时不报错，只静默多出一行读不到的影子主单据。落地见 commit `987faa2fc`，复核见 `docs/evidence/2026-09-13-review-schema-parity.md`。
 
@@ -231,5 +231,5 @@ commit `987faa2fc` 改了 `rs_surreal/review/review_tables.surql` 与 `src/web_s
 ## 18. 本次复核没覆盖的
 
 - 未起库实跑对拍：两端各建一个空库跑各自 DDL、再 `INFO FOR DB` / `INFO FOR TABLE` 逐张 diff，是比读源码更硬的证据。本任务原约束「不跑服务、不跑 cargo」，**NOT RUN**。（§15 的 cargo 跑动是 q-228 拍板后为验证修复而开的口子，只覆盖新端自己的 DDL，不是两端对拍）
-- 未覆盖「旧库整体迁入」场景：旧库里 `review_forms` 已是 SCHEMAFULL，新端的 `DEFINE TABLE IF NOT EXISTS` 不会把它改回 SCHEMALESS，两边形态会不一致。该场景 ADR-072 明列为「未决」，不在本次范围
+- 未覆盖「旧库整体迁入」场景：旧库里 `review_forms` 已是 SCHEMAFULL，新端的 `DEFINE TABLE IF NOT EXISTS` 不会把它改回 SCHEMALESS，两边形态会不一致。该场景 ADR-075 明列为「未决」，不在本次范围
 - 字段级类型对拍只做到「DDL 声明 vs handler 写入」，未核「handler 读出时的 serde 类型与 DDL 类型是否处处吻合」——那属于 R8 的接口规范核对
