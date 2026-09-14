@@ -194,7 +194,7 @@ fn add_geometry(accum: &mut MeshAccum, geometry: &rvm_rs::store::geometry::Geome
     // RVM 顶点是米；1e-3 m = 1mm 弦容差，原语细分足够密，FacetGroup 忽略该参数。
     let tol = 1.0e-3_f32;
     let cols = geometry.transform.to_cols_array();
-    let tri = match &geometry.kind {
+    let mut tri = match &geometry.kind {
         GeometryKind::FacetGroup(fg) => fg.tessellate(tol, scale),
         GeometryKind::Cylinder(g) => g.tessellate(tol, scale),
         GeometryKind::Sphere(g) => g.tessellate(tol, scale),
@@ -207,7 +207,60 @@ fn add_geometry(accum: &mut MeshAccum, geometry: &rvm_rs::store::geometry::Geome
         GeometryKind::Snout(g) => g.tessellate(tol, scale),
         GeometryKind::Line(_) => return,
     };
+    let bl = &geometry.bbox_local;
+    undo_pyramid_shift(
+        &geometry.kind,
+        &[bl.min.x, bl.min.y, bl.min.z, bl.max.x, bl.max.y, bl.max.z],
+        &mut tri,
+    );
     accum.add_local_triangulation(&tri, &cols);
+}
+
+/// rvm-rs 的 `Pyramid::tessellate` 把 XOFF/YOFF **整个**记到顶面（底面心钉在原点）；
+/// E3D 是两端各摊一半——libgm.dll `GM_Pyramid::calcFacets`（0x10094b10）底面四点取
+/// ±xbot/2 − xoff/2、±ybot/2 − yoff/2，顶面取 ±xtop/2 + xoff/2、±ytop/2 + yoff/2。
+/// 形状相同，只差一个整体平移 (+ox/2, +oy/2)，减掉就回到记录帧；不减则棱台整体错
+/// |off|/2，表面距离照这个数虚高（`/TEMP_EQUIP` PIPE 2 的弯头是 25 mm）。
+///
+/// 只在减完确实更贴近 `record`（PRIM 记录自带的局部 bbox）时才动手：上游修好后这一条
+/// 自动不生效，本文件不用跟着改。同款做法见 `e3d-model` 的 `examples/rvm_facets_dump.rs`。
+fn undo_pyramid_shift(
+    kind: &rvm_rs::store::geometry::GeometryKind,
+    record: &[f32; 6],
+    tri: &mut rvm_rs::export::Triangulation,
+) {
+    use rvm_rs::store::geometry::GeometryKind;
+
+    let GeometryKind::Pyramid(pyramid) = kind else {
+        return;
+    };
+    let [ox, oy] = pyramid.offset;
+    if ox == 0.0 && oy == 0.0 {
+        return;
+    }
+    let shift = [ox / 2.0, oy / 2.0, 0.0];
+    let gap = |shift: &[f32; 3]| {
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for position in tri.vertices.chunks_exact(3) {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(position[axis] - shift[axis]);
+                hi[axis] = hi[axis].max(position[axis] - shift[axis]);
+            }
+        }
+        (0..3).fold(0.0_f32, |worst, axis| {
+            worst
+                .max((lo[axis] - record[axis]).abs())
+                .max((hi[axis] - record[axis + 3]).abs())
+        })
+    };
+    if gap(&shift) >= gap(&[0.0; 3]) {
+        return;
+    }
+    for position in tri.vertices.chunks_exact_mut(3) {
+        position[0] -= shift[0];
+        position[1] -= shift[1];
+    }
 }
 
 // ─────────────────── gen 侧（版本库 + 生产三角化） ───────────────────
