@@ -5,9 +5,9 @@
 ## 基线与集成范围
 
 - 校审执行基线：`feature/review-backend-port@4400d8bab`（起始 `b0fd1561c`）。
-- 主线基线：`e3d-direct@02d445ba4`。
-- 重构基线：`gen-model-refactor@54a7c8b9d`；仅合入已提交 HEAD，原工作树 28 个已修改文件及未跟踪文件未改动，状态和补丁保存在 `verification/review-closure-20260914/refactor-preexisting-*`。
-- 隔离集成分支：`codex/review-backend-closure`；合并提交为 `2d672bf5c`（校审）和 `8537a9c3f`（重构）。
+- e3d-direct 基线：`e3d-direct@02d445ba4`（该分支 2026-09-14 已删，兜底标签 `archive/e3d-direct-20260914`；其 8 个提交全部经本分支进主线，此后不再以它为基线——d-412）。
+- 主线基线：`gen-model-refactor@54a7c8b9d`（唯一主线，也是本分支的合入目标）；仅合入已提交 HEAD，原工作树 28 个已修改文件及未跟踪文件未改动，状态和补丁保存在 `verification/review-closure-20260914/refactor-preexisting-*`。
+- 隔离集成分支：`codex/review-backend-closure`；合并提交为 `2d672bf5c`（校审）和 `8537a9c3f`（重构）。合入前收尾（落主线计划 P0）：`e9eb9033c` ADR 引用 072→075 改号 16 处、`0d3c27799` `db.rs` 行尾归一 LF、`15584c412` 持久化闸在单测里活着（d-410，校审域 152/152），以及 changelog 倒序、`DbOption.toml` 注释对齐主线、本文改口。
 - 前端：`../plant3d-web`，未修改业务代码；浏览器验收使用现有 Vite/Playwright 能力。
 - 运行数据库、日志、JWT、截图和 JSON 证据保存在 `verification/review-closure-20260914/`，不纳入源码提交。
 
@@ -41,10 +41,10 @@ U3 先建真实任务并使用 form_id 恢复。`annotations/check` 单独校验
 
 报告按通过/退回场景选择必需接口，前置失败后的步骤明确未执行；响应错误正文脱敏。路由判据区分资源 404 与路由未注册，静态附件通过实际上传和字节回读确认。
 
-## 尚未完成的门槛
+## 门槛处置
 
-- A2/A5/A10：真正的旧 `plant-model-gen` 无法在独立端口构建。它引用的本地 path patch `D:/work/plant-code/pdms-io-fork/crates/parse_pdms_db` 不含所需 package；当前 `:3100` 的 `plant-web-server` 不作旧端来源，因此继续 PARTIAL。
-- 正式代理配置尚未部署验证。`scripts/review/nginx-review-split.conf` 已按路径分流，仍需部署方合入实际 server 配置并运行 `nginx -t` 与同源浏览器验收。
+- A2/A5/A10（与旧端逐字对拍）：真正的旧 `plant-model-gen` 无法在独立端口构建——它引用的本地 path patch `D:/work/plant-code/pdms-io-fork/crates/parse_pdms_db` 不含所需 package；当前 `:3100` 的 `plant-web-server` 不作旧端来源。2026-09-14 拍板（d-408，落主线计划 §7 Q1）改用替代判据：`2026-09-13-review-shape-parity.md` 的静态逐字对照（37/37 路由、21 个响应结构体、状态码集合逐条）+ gen-model 单边实跑（`integrated-acceptance.json` A3 46/46）= **PASS-静态**；不再要求复活旧端。
+- 正式代理配置尚未部署验证。`scripts/review/nginx-review-split.conf` 已按路径分流，仍需部署方合入实际 server 配置并运行 `nginx -t` 与同源浏览器验收——部署方的活，不是合入门槛。
 - 真实碰撞生产数据源按批准范围保留 P2，不影响本轮校审闭环代码验收。
 
-由于验收规则明确规定 PARTIAL 不计完成，在补齐真正旧端运行对拍前，不将隔离集成分支合入 `e3d-direct`。切换前备份新端校审库与附件，旧端保留一个发布周期；回滚先暂停写入并保留新端新增数据。不迁移项目管理，不建设 review WebSocket。
+A2/A5/A10 按 d-408 改判之后，本分支不再有未完成的合入门槛。合入目标是唯一主线 `gen-model-refactor`（d-412；`e3d-direct` 已删），步骤、验收与落地记录见 `docs/plans/2026-09-14-review-closure-landing-plan.md`。切换生产代理前备份新端校审库与附件，旧端保留一个发布周期；回滚先暂停写入并保留新端新增数据。不迁移项目管理，不建设 review WebSocket。
