@@ -221,9 +221,9 @@ room_resident_model = false
         $surreal = Get-NetTCPConnection -LocalPort $current.surreal_port -State Listen -ErrorAction SilentlyContinue
         if (-not $surreal) { throw "SurrealDB 端口 $($current.surreal_port) 上没人监听：先跑终端 A 那条 Start-Surreal8009.ps1" }
 
-        # 介质形态显式为 external；数据面由 store_mode 自动派生。
+        # 介质形态显式为 rocksdb（连终端 A 起的那台）；数据面由 store_mode 自动派生。
         $env:DB_OPTION_FILE = $current.config_env
-        $env:AIOS_STORE_MODE = 'external'
+        $env:AIOS_STORE_MODE = 'rocksdb'
         Remove-Item Env:AIOS_DATA_FACE -ErrorAction SilentlyContinue
         $env:RUST_MIN_STACK = '134217728'
         $env:RUST_BACKTRACE = '1'

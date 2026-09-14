@@ -3,7 +3,7 @@
     校审移植验收 runner：起真服务，把计划 §6 里不依赖浏览器的判据实跑一遍并留痕。
 
 .DESCRIPTION
-    依据 docs/plans/2026-09-12-review-backend-port-plan.md §6 与 docs/adr/ADR-072-review-data-persistence.md。
+    依据 docs/plans/2026-09-12-review-backend-port-plan.md §6 与 docs/adr/ADR-075-review-data-persistence.md。
 
     这是一个**有尽头**的脚本：起 SurrealDB + gen-model → 等 health → 逐项探 → 停再起复读（A6）
     → 用内存介质再起一次看拒绝横幅（A9）→ 收掉全部自己起的子进程 → 打印汇总后退出。
@@ -31,7 +31,7 @@ param(
     [int]    $DbPort = 8009,
     [string] $LegacyBaseUrl = 'http://127.0.0.1:3100',
     [string] $LegacySourceEvidence = '',
-    [string] $Exe = 'D:\Rust\target-review-port\debug\aios-database.exe',
+    [string] $Exe = '',
     [string] $SurrealExe = 'D:\work\plant-code\old\gen-model\bin\surreal.exe',
     [string] $BashExe = 'E:\Program Files\Git\bin\bash.exe',
     [string] $OptionTemplate = 'db_options\DbOption-e2e-8009.toml',
@@ -52,6 +52,7 @@ $script:Results = [ordered]@{} # 判据 → @{ verdict; command; excerpt; note }
 $script:A6TaskId = $null       # StrictMode 下先声明，失败早退时 finally 才读得到
 $script:RunId = (Get-Date).ToString('yyyy-MM-ddTHH-mm-ss')
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$Exe = if ($Exe) { $Exe } elseif ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR 'debug\aios-database.exe' } else { Join-Path $script:RepoRoot 'target\debug\aios-database.exe' }
 $script:WorkDir = Join-Path $env:TEMP "review-acceptance-$script:RunId"
 
 function Write-Step($text) { Write-Host "`n── $text ──" -ForegroundColor Cyan }
@@ -414,10 +415,10 @@ try {
         }
     }
 
-    # ── A9 两种内存介质：拒绝校审，模型健康与树接口仍可服务 ──
+    # ── A9 canonical mem：拒绝校审，模型健康仍可服务 ──
     Stop-AllTracked
     $a9Results = @()
-    foreach ($mode in @('embedded-mem', 'spawned-mem')) {
+    foreach ($mode in @('mem')) {
         Write-Step "A9 $mode"
         $a9Port = Get-FreePort ($ApiPort + 1) 8222
         $a9DbPort = Get-FreePort ($DbPort + 1) 8223
@@ -433,7 +434,7 @@ try {
         $a9Out = Join-Path $logDir "a9-$mode.out.log"
         $a9Err = Join-Path $logDir "a9-$mode.err.log"
         $proc = Start-Tracked -FilePath $Exe -WorkingDirectory $a9Dir -StdOut $a9Out -StdErr $a9Err `
-            -Env @{ AIOS_STORE_MODE = $mode; AIOS_SURREAL_EXE = $SurrealExe; PLANT_REVIEW_ALLOW_EPHEMERAL_STORE = '' }
+            -Env @{ AIOS_STORE_MODE = $mode; PLANT_REVIEW_ALLOW_EPHEMERAL_STORE = '' }
         $base = "http://127.0.0.1:$a9Port"
         $null = Wait-Http "$base/api/review/health" $StepTimeoutSec 503
         $checks = @()
@@ -460,8 +461,8 @@ try {
         Stop-AllTracked
     }
     $a9Ok = @($a9Results | Where-Object { !$_.passed }).Count -eq 0
-    Set-Result 'A9' ($a9Ok ? 'PASS' : 'FAIL') 'embedded-mem + spawned-mem: review four prefixes 503 and model health 200/ok' `
-        ($a9Results | ConvertTo-Json -Depth 6) '两种介质分别验证；前置配置失败不得记为通过'
+    Set-Result 'A9' ($a9Ok ? 'PASS' : 'FAIL') 'mem: review four prefixes 503 and model health 200/ok' `
+        ($a9Results | ConvertTo-Json -Depth 6) 'ADR-074 收敛后的唯一内存介质；前置配置失败不得记为通过'
 
     # ── A1 / A7：cargo 计数（本 runner 只记指引，不在这里跑）──────────────
     Set-Result 'A1' 'NOT RUN' 'cargo check --features http_api' '' '本 runner 只做实跑探测；cargo 计数由交付方单独跑并附尾行 + 耗时 + HEAD'

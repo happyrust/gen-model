@@ -24,7 +24,7 @@
    时间：`ReviewTask.createdAt/updatedAt/dueDate`、`WorkflowStep.timestamp`、`AnnotationComment.createdAt`、
    任务 history 的 `timestamp` 序列化为**北京时间字符串** `YYYY-MM-DD HH:MM:SS`；`ReviewAttachment.uploadedAt`、
    `ConfirmedRecordWithMeta.confirmedAt`、`AnnotationStateView.updatedAt` 是毫秒时间戳整数。
-4. **持久化。** 本域数据落 SurrealDB（宪法 I），连接与介质、内存介质时的响亮拒绝由 `docs/adr/ADR-072-review-data-persistence.md`
+4. **持久化。** 本域数据落 SurrealDB（宪法 I），连接与介质、内存介质时的响亮拒绝由 `docs/adr/ADR-075-review-data-persistence.md`
    定（计划 Q6、A9：落点 = `SUL_DB` 同一 ns·db；介质不 durable 时四个前缀一律 503 并打多行横幅）；本文不重复。
 5. **护栏（宪法 VI）。** 路由清单以源码文本护栏钉住：`review/common.rs::REVIEW_CONTRACT_ROUTES`（§1–§7、§10 共 **37 条**方法·路径；计划 §6 A3 写的「42」是计数笔误，见计划 §11 R3 条）、
    `review/mod.rs` 的 merge 顺序护栏、`review/integration.rs::integration_routes_are_registered_verbatim`（§9 两条）、
@@ -231,7 +231,7 @@ CollisionItem = { ObjectOneLoc, ObjectOne, ObjectTowLoc, ObjectTow,   // "Tow" �
 - `reason` 是本仓相对旧端**唯一新增**的键；有数据源时不序列化，键集与旧端逐字相同（`integration.rs::legacy_shapes_are_preserved_when_a_source_exists`）。
 - 数据源接缝是 `integration::CollisionSource`（今天只有 `Unavailable`）。接入时（候选：PMS `/HD/QueryAssistReview` 代理——前端注释
   「后端代理 → PMS」即此方向；或 gen-model 自带碰撞结果落 SurrealDB `collision_events`）只加一个变体并把 `AppState.queries` 穿进
-  `collision_source()`，两条 handler 形状不动。「碰撞数据源待接」记在 `docs/adr/ADR-072-review-data-persistence.md` §未决。
+  `collision_source()`，两条 handler 形状不动。「碰撞数据源待接」记在 `docs/adr/ADR-075-review-data-persistence.md` §未决。
 
 ## 10. 健康（`review/mod.rs`）
 

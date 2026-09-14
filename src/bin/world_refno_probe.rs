@@ -5,7 +5,8 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 只附着、不拉起（配成 spawned-mem 时才有得拉）：探针要看的是服务手上那个库。
+    // 按配置连库：探针要看的是服务手上那个库，所以这只在 store_mode=rocksdb 下有意义
+    // ——mem 档的库在服务进程里，这里连到的只会是本进程自己的一份空库。
     aios_database::attach_store_connected().await?;
 
     let mdb = "/ALL".to_string();

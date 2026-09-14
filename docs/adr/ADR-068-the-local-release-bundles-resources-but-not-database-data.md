@@ -1,6 +1,10 @@
 # ADR-068：本地发布包带全资源、但不带库数据与源模型
 
 状态：**已接受，2026-09-13 修订为 runtime 默认 embedded-mem、带 workspace 档默认 spawned-rocksdb**（完整包以跨重启持久化为默认，同时保留 kv-mem 增量 overlay。）
+**2026-09-13 再修订（ADR-074）**：存储只剩 `mem` / `rocksdb` 两档、服务从不拉库，**两种包出厂都是 `mem`**（上一句里
+「带 workspace 档默认 spawned-rocksdb」作废）。下文凡 `embedded-mem` 读作 `mem`；凡 `spawned-rocksdb` / `external` 读作
+`rocksdb`——但 `rocksdb` 档**服务只连不拉起**，要持久的现场先跑包内 `Start-Surreal.ps1` 再在向导改选；`spawned-mem` 一档
+不复存在。D6 的冒烟腿按 ADR-074「后果」一节读：B 腿默认 `mem`，C 腿由脚本起库、服务连它。
 日期：2026-09-09
 落地：`scripts/New-LocalRelease.ps1`（全链路组包）、`docs/release-notes/<版本>.md`（后端提炼稿）、产物 `releases/ams-local-0.1.19-full.zip`。
 关联：

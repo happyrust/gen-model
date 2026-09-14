@@ -28,18 +28,17 @@ pub const LOCK_DIR_ENV: &str = "AIOS_WRITER_LOCK_DIR";
 /// 要写的是哪台库的哪个 namespace / database。三元组任一不同就是不同的库，互不相干。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WriterIdentity {
-    /// `host:port`。`spawned-*` 形态下也是本进程拉起的那台绑的地址——两个运行目录都想在同一个
-    /// 端口上拉库，同样只能有一个写者。
+    /// `host:port`，配置里那对 `v_ip:v_port`。
     pub endpoint: String,
     pub namespace: String,
     pub database: String,
 }
 
 impl WriterIdentity {
-    /// 从运行配置解出身份。`embedded-mem` 的持久层在进程内、没有第二个写者可言，回 None
+    /// 从运行配置解出身份。`mem` 的持久层在进程内、没有第二个写者可言，回 None
     /// （与 lib.rs `instance_lock_skip_reason` 同一条例外）。
     pub fn from_db_option(option: &DbOption, store_mode: StoreMode) -> Option<Self> {
-        if matches!(store_mode, StoreMode::EmbeddedMem) {
+        if matches!(store_mode, StoreMode::Mem) {
             return None;
         }
         Some(Self {
@@ -167,7 +166,7 @@ pub fn acquire(
     acquire_in(&lock_dir(), identity, holder)
 }
 
-/// 便捷入口：按运行配置与存储形态拿锁；`embedded-mem` 回 `Ok(None)`（不需要锁）。
+/// 便捷入口：按运行配置与存储形态拿锁；`mem` 回 `Ok(None)`（库在进程里，不需要锁）。
 pub fn acquire_for(
     option: &DbOption,
     store_mode: StoreMode,
@@ -403,7 +402,7 @@ mod tests {
         );
     }
 
-    /// `embedded-mem` 的库在进程内，没有第二个写者可言，不拿锁；其余形态都拿，端点是
+    /// `mem` 的库在进程内，没有第二个写者可言，不拿锁；`rocksdb` 拿，端点是
     /// `v_ip:v_port`、database 是 `project_name`（`use_db` 用的就是它）。
     #[test]
     fn only_the_embedded_store_needs_no_writer_lock() {
@@ -412,17 +411,12 @@ mod tests {
         option.v_port = 8000;
         option.surreal_ns = "plant".to_owned();
         option.project_name = "AMS".to_owned();
-        assert!(WriterIdentity::from_db_option(&option, StoreMode::EmbeddedMem).is_none());
-        for mode in [
-            StoreMode::External,
-            StoreMode::SpawnedRocks,
-            StoreMode::SpawnedMem,
-        ] {
-            let identity = WriterIdentity::from_db_option(&option, mode).expect("要拿锁");
-            assert_eq!(identity.endpoint, "127.0.0.1:8000");
-            assert_eq!(identity.namespace, "plant");
-            assert_eq!(identity.database, "AMS");
-        }
+        assert!(WriterIdentity::from_db_option(&option, StoreMode::Mem).is_none());
+        let identity =
+            WriterIdentity::from_db_option(&option, StoreMode::RocksDb).expect("要拿锁");
+        assert_eq!(identity.endpoint, "127.0.0.1:8000");
+        assert_eq!(identity.namespace, "plant");
+        assert_eq!(identity.database, "AMS");
     }
 
     /// 缺省目录不在运行目录也不在项目目录：那两处正是这把锁要绕开的地方。

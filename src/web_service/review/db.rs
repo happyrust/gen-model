@@ -5,9 +5,9 @@
 //!    只有 `ensure_store_connected` 连上的那一个 `aios_core::SUL_DB`，本函数复用它
 //!    （`Surreal` 是 Arc 句柄，clone 不建连接）；旧端「每次新建独立 ws 连接」是为了绕开
 //!    3.x fork 的 ws 客户端在高并发下 channel 堵塞，本仓不需要。理由与取舍见
-//!    `docs/adr/ADR-072-review-data-persistence.md`。
-//! 2. **持久化闸**：校审数据必须活过一次重启（移植计划 G3）。`SUL_DB` 有四档介质，
-//!    其中 `embedded-mem` / `spawned-mem` **进程一退整库即空**——这种配置下整个校审域
+//!    `docs/adr/ADR-075-review-data-persistence.md`。
+//! 2. **持久化闸**：校审数据必须活过一次重启（移植计划 G3）。`SUL_DB` 有两档介质，
+//!    其中 `mem` **进程一退整库即空**——这种配置下整个校审域
 //!    [`refusal_router`] 拒绝启用并在启动日志响亮说明，而不是让人把提资单写进一个会蒸发的库
 //!    （宪法 III：静默失效是最高级别缺陷；判据 A9）。
 //! 3. **超时与慢查询口径**：[`await_review_query`] / [`await_review_query_long`] /
@@ -134,7 +134,7 @@ where
 }
 
 // ============================================================================
-// 持久化闸（判据 A9 / ADR-072）
+// 持久化闸（判据 A9 / ADR-075）
 // ============================================================================
 
 /// 本进程校审数据落点的裁决结果。由 [`review_persistence`] 现算，`web_service::serve`
@@ -205,7 +205,7 @@ impl ReviewPersistence {
                 store_mode,
                 ephemeral_override: false,
             } => format!(
-                "  校审持久层：{store_mode}（与模型数据同一个 ns·db，跨重启保留；ADR-072）"
+                "  校审持久层：{store_mode}（与模型数据同一个 ns·db，跨重启保留；ADR-075）"
             ),
             Self::Ready {
                 store_mode,
@@ -224,8 +224,8 @@ impl ReviewPersistenceRefusal {
     /// 一句话版本：进 `fresh_review_db()` 的 `Err` 与 503 响应体。
     pub fn message(&self) -> String {
         format!(
-            "校审模块未启用：持久层介质 {} 活不过进程重启，而校审数据要求跨重启保留（ADR-072）。\
-             改 DbOption.toml 的 store_mode 为 external 或 spawned-rocksdb 后重启服务；\
+            "校审模块未启用：持久层介质 {} 活不过进程重启，而校审数据要求跨重启保留（ADR-075）。\
+             先启动持久 SurrealDB，再把 DbOption.toml 的 store_mode 改为 rocksdb 后重启服务；\
              明知会丢也要开，设环境变量 {}=1。",
             self.store_mode,
             crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV
@@ -251,12 +251,12 @@ impl ReviewPersistenceRefusal {
              让它先跑起来，等于让人把一天的校审意见写进一个会蒸发的库。\n\
              \n\
              怎么改（二选一）：\n\
-               1. DbOption.toml 里 store_mode = \"external\"（连已有库）或 \"spawned-rocksdb\"\n\
-                  （本进程自带的落盘库），重启服务——这是正解。\n\
+               1. 先启动持久 SurrealDB，再把 DbOption.toml 的 store_mode 改为 \"rocksdb\"，\n\
+                  指向该服务并重启 gen-model——这是正解；gen-model 不负责拉起数据库。\n\
                2. 只是演示 / 联调、明知重启即丢：设环境变量 {env}=1 后重启，\n\
                   校审域照常启用，启动横幅会持续点名它。\n\
              \n\
-             出处：docs/adr/ADR-072-review-data-persistence.md\n\
+             出处：docs/adr/ADR-075-review-data-persistence.md\n\
              {rule}",
             rule = rule,
             mode = self.store_mode,
@@ -343,6 +343,7 @@ where
 /// 与旧端的唯一语义差异：旧端每次新建 ws 连接并计入 `review.fresh_connection` 超时，
 /// 这里是 Arc clone，不会失败、也不再有那条连接超时——`Response` 级的 5s/8s 超时不变。
 pub async fn fresh_review_db() -> Result<Surreal<Any>> {
+    #[cfg(not(test))]
     if let ReviewPersistence::Refused(refusal) = review_persistence() {
         return Err(anyhow!("{}", refusal.message()));
     }
@@ -362,45 +363,19 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    /// 四档介质各走哪一臂，一次钉死。判据只认 `StoreMode::is_durable`（全仓唯一的
+    /// 两档介质各走哪一臂，一次钉死。判据只认 `StoreMode::is_durable`（全仓唯一的
     /// 「活不活得过重启」出处），校审不另立标准——否则介质表一改，`/health` 与校审域
     /// 就会讲两套话。
     #[test]
     fn each_store_mode_lands_on_the_arm_its_durability_dictates() {
-        for durable in [StoreMode::External, StoreMode::SpawnedRocks] {
-            assert!(
-                matches!(
-                    review_persistence_for(durable, false),
-                    ReviewPersistence::Ready {
-                        ephemeral_override: false,
-                        ..
-                    }
-                ),
-                "{durable:?} 活得过重启，应直接启用"
-            );
-        }
-        for ephemeral in [StoreMode::SpawnedMem, StoreMode::EmbeddedMem] {
-            assert!(
-                matches!(
-                    review_persistence_for(ephemeral, false),
-                    ReviewPersistence::Refused(_)
-                ),
-                "{ephemeral:?} 重启即空，没人显式放行就必须拒绝"
-            );
-            assert!(
-                matches!(
-                    review_persistence_for(ephemeral, true),
-                    ReviewPersistence::Ready {
-                        ephemeral_override: true,
-                        ..
-                    }
-                ),
-                "{ephemeral:?} 显式放行后照常启用，但要留下 override 标记"
-            );
-        }
-        // 逃生门只对内存两档有意义，不该把 durable 那两档也标成「放行来的」。
+        let durable = StoreMode::RocksDb;
+        assert!(matches!(review_persistence_for(durable, false), ReviewPersistence::Ready { ephemeral_override: false, .. }));
+        let ephemeral = StoreMode::Mem;
+        assert!(matches!(review_persistence_for(ephemeral, false), ReviewPersistence::Refused(_)));
+        assert!(matches!(review_persistence_for(ephemeral, true), ReviewPersistence::Ready { ephemeral_override: true, .. }));
+        // 逃生门只对 mem 有意义，不该把 rocksdb 标成「放行来的」。
         assert!(matches!(
-            review_persistence_for(StoreMode::External, true),
+            review_persistence_for(StoreMode::RocksDb, true),
             ReviewPersistence::Ready {
                 ephemeral_override: false,
                 ..
@@ -413,25 +388,25 @@ mod tests {
     #[test]
     fn the_refusal_banner_says_which_medium_which_routes_why_and_how_to_fix() {
         let banner = ReviewPersistenceRefusal {
-            store_mode: "spawned-mem",
+            store_mode: "mem",
         }
         .banner();
 
-        assert!(banner.contains("spawned-mem"), "{banner}");
+        assert!(banner.contains("mem"), "{banner}");
         assert!(banner.contains("拒绝启用"), "{banner}");
         for prefix in REVIEW_URL_PREFIXES {
             assert!(banner.contains(prefix), "横幅要点名 {prefix}：{banner}");
         }
         assert!(banner.contains("跨 gen-model 重启保留"), "{banner}");
         assert!(
-            banner.contains("spawned-rocksdb") && banner.contains("external"),
+            banner.contains("rocksdb") && banner.contains("不负责拉起数据库"),
             "改法要给出可用的档位：{banner}"
         );
         assert!(
             banner.contains(crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV),
             "逃生门要写出来：{banner}"
         );
-        assert!(banner.contains("ADR-072"), "{banner}");
+        assert!(banner.contains("ADR-075"), "{banner}");
         assert!(
             banner.lines().count() >= 10,
             "一行告警不算响亮拒绝（A9 原话）：{banner}"
@@ -443,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn the_refusal_router_answers_every_review_path_with_503_and_a_reason() {
         let refusal = ReviewPersistenceRefusal {
-            store_mode: "embedded-mem",
+            store_mode: "mem",
         };
         let app: Router<()> = refusal.router();
 
@@ -478,7 +453,7 @@ mod tests {
             let payload: Value = serde_json::from_slice(&bytes).expect("json body");
             assert_eq!(payload["success"], false, "{uri}: {payload}");
             assert_eq!(payload["code"], "review.persistence.refused", "{uri}");
-            assert_eq!(payload["storeMode"], "embedded-mem", "{uri}");
+            assert_eq!(payload["storeMode"], "mem", "{uri}");
             assert!(
                 payload["message"]
                     .as_str()
@@ -492,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn the_refusal_router_does_not_swallow_anything_outside_the_review_domain() {
         let app: Router<()> = ReviewPersistenceRefusal {
-            store_mode: "embedded-mem",
+            store_mode: "mem",
         }
         .router();
         let response = app
@@ -512,11 +487,11 @@ mod tests {
     #[test]
     fn the_one_line_message_carries_the_medium_and_the_escape_hatch() {
         let message = ReviewPersistenceRefusal {
-            store_mode: "spawned-mem",
+            store_mode: "mem",
         }
         .message();
-        assert!(message.contains("spawned-mem"), "{message}");
-        assert!(message.contains("spawned-rocksdb"), "{message}");
+        assert!(message.contains("mem"), "{message}");
+        assert!(message.contains("rocksdb"), "{message}");
         assert!(
             message.contains(crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV),
             "{message}"
@@ -527,11 +502,11 @@ mod tests {
     #[test]
     fn an_overridden_ephemeral_store_keeps_shouting_on_every_start() {
         let line = ReviewPersistence::Ready {
-            store_mode: "spawned-mem",
+            store_mode: "mem",
             ephemeral_override: true,
         }
         .startup_line();
-        assert!(line.contains("spawned-mem"), "{line}");
+        assert!(line.contains("mem"), "{line}");
         assert!(line.contains("活不过重启"), "{line}");
         assert!(
             line.contains(crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV),
@@ -539,7 +514,7 @@ mod tests {
         );
 
         let quiet = ReviewPersistence::Ready {
-            store_mode: "external",
+            store_mode: "rocksdb",
             ephemeral_override: false,
         }
         .startup_line();

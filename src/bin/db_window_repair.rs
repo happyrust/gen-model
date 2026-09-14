@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
     let option = aios_core::get_db_option().clone();
     aios_database::acquire_process_instance_lock(&option)
         .context("维护纠正要求 aios-database 服务已停止")?;
-    // 只附着、不拉起：配成 spawned-mem 时会自己拉一台，而一台自己拉的空库上
-    // 「纠正」等于什么都没做，且一声不响。
+    // 按配置连库：纠正只对 store_mode=rocksdb 有意义——mem 档连到的是本进程自己的
+    // 一份空库，「纠正」等于什么都没做，且一声不响。
     aios_database::attach_store_connected().await?;
 
     println!(

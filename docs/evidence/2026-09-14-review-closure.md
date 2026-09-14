@@ -38,7 +38,7 @@ U3 必须先建真实任务，使用 form_id 恢复；embed URL 按前端现有�
 
 ## 尚未完成的门槛
 
-- A9：两种内存介质均已出现拒绝横幅，review/users/auth/files 四类路径全部 503；首次模型 health 为 200/degraded，新增初始化等待后复跑。
+- A9：在合入 ADR-074 前，两种旧内存字面值均已出现拒绝横幅且四类路径 503；合入后收敛为唯一 canonical `mem`，须按新脚本复跑并等待模型 health 就绪。
 - A2/A5/A10：真正的 `plant-model-gen` 尚未在独立端口实跑。`:3100` 的 `plant-web-server` 不作对拍来源；继续 PARTIAL。
 - 隔离主线集成、合并后的构建/测试/业务验收尚待执行。
 - 真实模型显示与正式代理配置验证尚待执行。路径分流示例见 `scripts/review/nginx-review-split.conf`，需部署方合入既有 server 配置并运行 nginx -t；未部署。

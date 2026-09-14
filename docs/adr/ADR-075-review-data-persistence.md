@@ -1,4 +1,4 @@
-# ADR-072：校审数据落在 `SUL_DB` 的同一个 ns·db 上，并且只在 durable 介质上启用校审域
+# ADR-075：校审数据落在 `SUL_DB` 的同一个 ns·db 上，并且只在 durable 介质上启用校审域
 
 状态：**已接受**（移植计划 Q6「跨重启保留是硬约束；a/b 由工程在 T1 以 ADR 定」已于 2026-09-12 由 Plannotator
 批准，本 ADR 是那一格的落地：**取 (a)**）。**号到提交时复核**——本仓 ADR-004 / 006 / 008 / 060 都撞过号。
@@ -8,7 +8,7 @@
 `src/options.rs`（`[review_auth]` / `[platform_auth]` / `[review_attachments]` 三段 + `PLANT_REVIEW_ALLOW_EPHEMERAL_STORE`）、
 `src/web_service/mod.rs`（两条挂载臂 + `/files/review_attachments` 的 ServeDir）。
 关联：
-- **沿用** 宪法 I「持久层唯一是 SurrealDB」与 ADR-070（`spawned-rocksdb` 让「本机持久库」成为一档配置）：校审不引入第二种存储，
+- **沿用** 宪法 I「持久层唯一是 SurrealDB」，并按 ADR-074 修订为 `mem` / `rocksdb` 两档：校审不引入第二种存储，
   也不引入第二条 Surreal 连接。
 - **沿用** 宪法 III「静默失效是最高级别缺陷」：介质活不过重启时**拒绝启用**整个校审域，而不是先跑起来等人重启一次才发现。
 - **不动** ADR-071（库是 dbnum 任务内存结果的同步序列化）：那条讲的是**模型数据面**的写法。校审数据不是任何任务算出来的中间结果，
@@ -21,15 +21,13 @@
 是绕障：旧端锁的 SurrealDB fork（github happyrust dev-3.1）的 ws 客户端在高并发下 channel 会堵。它依赖的
 `aios_core::{use_ns_db_compat, options::DbConnMode}` 在本仓的 old-aios-core 里**根本不存在**（计划 §1.3 那一行标的「难」就是这个）。
 
-gen-model 这侧只有一个持久层入口：`ensure_store_connected` 连上的 `aios_core::SUL_DB: Surreal<Any>`，介质有四档
+gen-model 这侧只有一个持久层入口：`ensure_store_connected` 连上的 `aios_core::SUL_DB: Surreal<Any>`。ADR-074 合入后介质只有两档
 （`src/options.rs` 的 `StoreMode`）：
 
 | 介质 | 活过重启 | 别人连得上 |
 | --- | --- | --- |
-| `external`（连已有库） | 是 | 是 |
-| `spawned-rocksdb`（本进程拉起的落盘库，ADR-070） | 是 | 是 |
-| `spawned-mem`（本进程拉起的 `--memory` 库） | **否** | 是 |
-| `embedded-mem`（进程内嵌 `mem://`） | **否** | 否 |
+| `rocksdb`（连已由外部启动的持久库） | 是 | 是 |
+| `mem`（进程内嵌 `mem://`） | **否** | 否 |
 
 移植计划 G3 要求校审数据（提资单、确认记录、评论、批注状态、附件元数据、工作流历史）**跨 gen-model 重启保留**。
 而模型数据面在内存两档下是**有意**可丢的——它随时能从 e3d 重新解析出来（ADR-071 D7 的「启动水化 = 反序列化」）。
@@ -43,9 +41,8 @@ Q6 把选择交给工程：(a) 复用 `SUL_DB` 但要求 durable 介质，还是
 `fresh_review_db()` 返回 `aios_core::SUL_DB.clone()`。`Surreal` 是 Arc 句柄，clone 不建连接，也就没有「连接超时」这一类失败；
 ns·db 就是 `ensure_store_connected` 已经 `use_ns(surreal_ns) / use_db(mdb_name)` 的那一个，校审表与模型表同库，靠 `review_` 表名前缀分辨。
 
-**为什么不取 (b)。** 独立连接意味着在 gen-model 里再造一份 store 生命周期：`embedded-mem` 那一档**没有端口**，(b) 在那一档下要么
-自己拉一个 surreal 子进程（端口、实例锁、收尸——ADR-070 那一整套重来一遍），要么退化成第二个进程内 `mem://`，那连「持久」都没做到；
-`external` 那一档则要多一份地址、多一份凭据、多一份备份策略，而运维在屏幕上看到的「库在哪儿」会有两个答案。
+**为什么不取 (b)。** 独立连接意味着在 gen-model 里再造一份 store 生命周期：`mem` 那一档**没有端口**，只能再连一台外部库；
+`rocksdb` 那一档则要多一份地址、多一份凭据、多一份备份策略，而运维在屏幕上看到的「库在哪儿」会有两个答案。
 校审数据量小（人手填的单子与批注，不是百万级元素行），同库不构成容量或争用理由。宪法 I 说的是「持久层唯一是 SurrealDB」，
 (b) 没有违反字面，但它违反了那条规则想要的东西——**一个库、一份备份、一句「数据在哪儿」**。
 
@@ -54,7 +51,7 @@ ns·db 就是 `ensure_store_connected` 已经 `use_ns(surreal_ns) / use_db(mdb_n
 ### D2　持久化闸：介质不 durable 就拒绝启用整个校审域
 
 判据只有一条 `StoreMode::is_durable()`——全仓「这一档活不活得过重启」的唯一出处（护栏
-`only_the_disk_backed_stores_are_durable_and_only_the_embedded_one_has_no_port`）。校审**不另立标准**，否则介质表一改，
+`only_rocksdb_is_durable` 一类 StoreMode 护栏）。校审**不另立标准**，否则介质表一改，
 `/health` 与校审域就会讲两套话。
 
 `web_service::serve` 在挂路由**之前**判一次（`review::db::review_persistence()`），两条臂：
@@ -70,7 +67,7 @@ ns·db 就是 `ensure_store_connected` 已经 `use_ns(surreal_ns) / use_db(mdb_n
 
 ### D3　逃生门是环境变量，不是配置键
 
-`PLANT_REVIEW_ALLOW_EPHEMERAL_STORE=1` 时，内存两档照常启用校审域，但启动横幅**每次都点名它**（`startup_line` 的 `***` 那一行）。
+`PLANT_REVIEW_ALLOW_EPHEMERAL_STORE=1` 时，`mem` 照常启用校审域，但启动横幅**每次都点名它**（`startup_line` 的 `***` 那一行）。
 
 它是环境变量而不是 `DbOption.toml` 里的一格，正因为这不该是一个能躺在配置文件里过一个月的决定：环境变量进程一停就没了，
 下一个人起服务时它不会替他做决定。用途只有演示与联调。
@@ -123,7 +120,7 @@ URL 前缀 `/files/review_attachments/` 与 50MB 单文件上限**不是配置�
 
 ## 实施约束（源码钉）
 
-1. `db.rs` 的 `review_persistence_for` 只以 `StoreMode::is_durable()` 为判据；四档介质各走哪一臂由
+1. `db.rs` 的 `review_persistence_for` 只以 `StoreMode::is_durable()` 为判据；两档介质各走哪一臂由
    `each_store_mode_lands_on_the_arm_its_durability_dictates` 钉死。
 2. 拒绝路由对四个前缀下的任意方法/路径回 503、且**不吞**校审域之外的路径（`/api/v1/*` 仍是 404）——两条测试分别看着。
 3. `web_service/mod.rs` 的 ServeDir 目录必须来自 `crate::options::review_attachments_dir()`，源码文本护栏
@@ -135,10 +132,9 @@ URL 前缀 `/files/review_attachments/` 与 50MB 单文件上限**不是配置�
 
 ## 后果
 
-- 默认部署（`DbOption.toml` 未写 `store_mode` → `external`）下校审域直接可用，配置零改动；判据 A6「CREATE 一条 → 重启 → 仍读得到」
-  由外置库本身保证。
-- 用 `spawned-mem` / `embedded-mem` 起服务的场景（本仓不少探针与本地脚本是这么起的）**默认没有校审接口**。这是有意的代价：
-  要它就把 `store_mode` 换成 `spawned-rocksdb`，或者显式设逃生门。
+- ADR-074 后默认 `store_mode=mem`，因此默认部署只提供模型服务，校审域明确返回 503。生产启用校审前必须先启动持久 SurrealDB，
+  再显式配置 `store_mode=rocksdb`；判据 A6「CREATE 一条 → 两进程重启 → 仍读得到」由该外置持久库保证。
+- 用 `mem` 起服务的场景**默认没有校审接口**。这是有意的代价：要它就改为 `rocksdb`，或者仅在演示/联调时显式设逃生门。
 - 校审表进了模型库的同一个 ns·db：备份、导出、`REMOVE TABLE` 一类运维动作要知道这个库里现在有两类数据。
   **凡是整库级的清理动作（换项目、重建库）都会把校审数据一起带走**，而它没有第二个来源。
 - 旧端那条「每次新建 ws 连接」的并发绕障随 fork 一起留在旧端；本仓若将来在 2.1.4 fork 上撞到同形状的 channel 堵塞，

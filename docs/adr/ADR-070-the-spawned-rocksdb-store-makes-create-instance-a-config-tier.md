@@ -1,6 +1,11 @@
 # ADR-070：「创建数据库实例」是一档配置（spawned-rocksdb），不是一次性动作
 
-状态：**已接受**（2026-09-09 用户一轮 6 问全按推荐拍板。**号到提交时复核**——ADR-060 曾撞号两次）。
+状态：**已作废（2026-09-13，被 ADR-074 取代）**——`store_mode` 收成 `mem` / `rocksdb` 两档，**本进程从不拉起数据库**，
+`spawned-rocksdb` 一档与它依赖的 `store_process.rs`（署名 / 心跳 / 四格裁决 / 收尸）整个删除。下文 D1–D6 全部失效，
+只作历史记录保留；「新机器要一台落盘库」的现行路径是：先跑包内 `Start-Surreal.ps1`，再在向导第②步选 `rocksdb` 连它。
+旧配置里写着 `spawned-rocksdb` 的，启动时按 `rocksdb` 生效并大声告警（ADR-074 D4）。
+
+（原状态：**已接受**——2026-09-09 用户一轮 6 问全按推荐拍板。**号到提交时复核**——ADR-060 曾撞号两次。）
 日期：2026-09-09
 落地：`src/options.rs`（`StoreMode::SpawnedRocks`）、`src/store_process.rs`（`SpawnDatastore` 参数化 +
 `default_rocksdb_dir`）、`src/lib.rs`（分派臂 + 横幅）、`src/web_service/setup.rs`（判据与写口扩档）、

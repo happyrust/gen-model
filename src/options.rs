@@ -162,13 +162,13 @@ pub struct DbOptionExt {
     /// 旧开关：持久层换成进程内嵌的 kv-mem 引擎。显式 `false` 仍表示 external；
     /// 两个形态键都不写时的新默认由 [`store_mode`] 决定。详见 [`in_memory_db`]。
     ///
-    /// **已被 [`store_mode`] 取代**：它只表达得了 `embedded-mem` 那一档。保留是因为
+    /// **已被 [`store_mode`] 取代**：它只表达得了 `mem` 那一档。保留是因为
     /// 它散在环境变量、`/health`、`PersistTarget` 与两份 ADR 里，一次性删的面太大。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
 
-    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-rocksdb` /
-    /// `spawned-mem` / `embedded-mem`。
+    /// 持久层的介质：`mem`（进程内嵌）/ `rocksdb`（连配置指的那台）。退役的
+    /// `external` / `spawned-rocksdb` / `spawned-mem` / `embedded-mem` 仍认、但会告警。
     /// 详见 [`store_mode`]。
     #[serde(default)]
     pub store_mode: Option<String>,
@@ -1004,66 +1004,63 @@ pub fn model_cache_max_bytes() -> usize {
         .clamp(1, usize::MAX as u64) as usize
 }
 
-/// 持久层的介质，外加「谁负责把它拉起来」。
+/// 持久层的介质。**只有两档**（2026-09-13 用户拍板）。
 ///
-/// [`in_memory_db`] 只分得出两态，而实际上有四种：外置落盘、自带落盘、自带内存、
-/// 进程内嵌内存。自带两档（[`StoreMode::SpawnedRocks`] / [`StoreMode::SpawnedMem`]）
-/// 的库都有真端口，plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上，只是那个 surreal
-/// 由本进程负责拉起与收尸（`docs/plans/2026-09-04-spawned-memory-store-out-of-box.md`；
-/// 持久档见 `docs/plans/2026-09-09-spawned-rocksdb-store-and-create-instance.md` / ADR-070）。
+/// 此前有四档，多出来的那两档（`spawned-mem` / `spawned-rocksdb`）不是第三第四种介质，
+/// 而是同样那两种介质外加「**本进程负责把那台 surreal 拉起来并收尸**」。为此背着
+/// `store_process.rs` 一整套端口探针、署名、心跳与孤儿回收——1800 行全在管一个子进程
+/// 的命，与「数据放哪儿」一个字的关系都没有。两档退役之后那个文件整个删掉。
+///
+/// 现在的分工干净了：**内存就在进程里，落盘就在配置指的那台服务器上。**
+/// 本进程不再拉起任何数据库。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreMode {
-    /// 连 `v_ip:v_port` 上那台已经在跑的 SurrealDB。
-    External,
-    /// 本进程拉起一个 **rocksdb 后端**的 surreal 子进程，绑到 `v_ip:v_port`，数据落
-    /// `workspace\.surreal\<project_code>`——**活得过重启**（配置向导「新建本机持久库」
-    /// 选的就是这档）。进程退出照常收尸，数据在盘上，下次启动重新拉起即接上。
-    SpawnedRocks,
-    /// 本进程拉起一个 `--memory` 后端的 surreal 子进程，绑到 `v_ip:v_port`。
-    /// 进程一退整库消失，但**端口是真的**。
-    SpawnedMem,
-    /// 进程内嵌 `mem://`：没有端口，只有本进程读得到。探针与单测用。
-    EmbeddedMem,
+    /// 进程内嵌 `mem://`：没有端口、活不过重启，只有本进程读得到。
+    ///
+    /// 「读不到」是真的读不到：`/sql` 探针、`rvm_verify`、`Capture-*Evidence.ps1`
+    /// 与 plant-ui 的「库供数」读面在这一档全都够不着。plant-ui 的主启动序列不受影响
+    /// ——它早就不直连库了，能力缺失那一路它自己会降级。
+    Mem,
+    /// 连配置里 `v_ip:v_port` 上那台 SurrealDB（rocksdb 后端）。
+    ///
+    /// **本进程只连，不拉起。** 端口上没东西就是连不上，报错退出——而不是自己起一台
+    /// 空库然后在上面作业，那种失败一声不响。
+    RocksDb,
 }
 
 impl StoreMode {
-    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这四个。
+    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这两个。
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::External => "external",
-            Self::SpawnedRocks => "spawned-rocksdb",
-            Self::SpawnedMem => "spawned-mem",
-            Self::EmbeddedMem => "embedded-mem",
+            Self::Mem => "mem",
+            Self::RocksDb => "rocksdb",
         }
     }
 
-    /// 这一档的行能不能活过进程重启。外置与自带落盘两档为真。
+    /// 这一档的行能不能活过进程重启。
+    ///
+    /// 两档退役之后，它与「别的进程连不连得上」合并成了同一个问题：进程内嵌那一档
+    /// 既不持久也没有端口，配置指的那台既持久又连得上。原来的 `has_endpoint()`
+    /// 因此删掉——留着两个恒等的谓词，只会让下一个人以为它们还能分开。
     pub fn is_durable(self) -> bool {
-        matches!(self, Self::External | Self::SpawnedRocks)
-    }
-
-    /// 别的进程连不连得上这个库。`embedded-mem` 是唯一的「连不上」。
-    pub fn has_endpoint(self) -> bool {
-        !matches!(self, Self::EmbeddedMem)
+        matches!(self, Self::RocksDb)
     }
 }
 
 /// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
 /// [`STORE_MODE_ENV`] 压过它）。
 ///
-/// **默认 `spawned-mem`**（2026-09-11 用户拍板）：服务自行拉起 `v_ip:v_port` 上的
-/// memory SurrealDB，进程退出后数据消失。需要外置持久库的现场配置必须显式写
-/// `store_mode = "external"`；仓内夹具均由
-/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 护栏钉住，不依赖默认值。
+/// **默认 `mem`**：不配任何东西就能起来，库在进程里。要落盘的现场必须显式写
+/// `store_mode = "rocksdb"` 并把 `v_ip:v_port` 指到一台真在跑的 SurrealDB 上；
+/// 仓内夹具均由 `every_db_option_fixture_declares_its_store_mode_and_data_face`
+/// 护栏钉住，不依赖默认值。
 ///
-/// 这个默认同时决定 [`data_face`]（`external` → `ingest`，两档内存 → `read-through`），
-/// 所以漏写这一项换掉的不只是介质，还有整个数据面；`db_options/` 下的夹具由护栏
-/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 逼着显式声明。
+/// 这个默认同时决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），
+/// 所以漏写这一项换掉的不只是介质，还有整个数据面。
 ///
-/// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `embedded-mem`，与那个旧开关
-/// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的同样回
-/// `external`——即使默认已经翻成 `spawned-mem`，这句显式的 `false` 仍然是人的意图，
-/// 不能被新默认覆盖。两个键都没写时才采用 `spawned-mem`。
+/// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `mem`，与那个旧开关今天的行为
+/// 逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的回 `rocksdb`——那句显式的
+/// `false` 是人的意图，不能被默认覆盖。两个键都没写时才采用 `mem`。
 /// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
 /// 认不出的值当没设，同样出声。
 pub fn store_mode() -> StoreMode {
@@ -1086,26 +1083,50 @@ fn effective_store_mode(
         return mode;
     }
     // 没写 `store_mode` 时先尊重旧开关，语义与它今天的两态逐字相同：
-    // `true` = 库在进程里，`false` = 过外置库。两个键都没写才走新默认 spawned-mem。
+    // `true` = 库在进程里，`false` = 过配置指的那台库。两个键都没写才走默认 mem。
     match in_memory_db_env
         .and_then(parse_bool_flag)
         .or(configured_in_memory_db)
     {
-        Some(true) => StoreMode::EmbeddedMem,
-        Some(false) => StoreMode::External,
-        None => StoreMode::SpawnedMem,
+        Some(true) => StoreMode::Mem,
+        Some(false) => StoreMode::RocksDb,
+        None => StoreMode::Mem,
     }
 }
 
 /// `Some(mode)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值
 /// （后者要出声，见 [`store_mode_notice`]）。
-fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
-    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-        // "rocksdb" 是 external 的历史别名（rocksdb 在对端服务器侧），不是自带落盘档。
-        "external" | "rocksdb" => Some(StoreMode::External),
-        "spawned-rocksdb" => Some(StoreMode::SpawnedRocks),
-        "spawned-mem" | "kv-mem" => Some(StoreMode::SpawnedMem),
-        "embedded-mem" => Some(StoreMode::EmbeddedMem),
+///
+/// 退役的两档仍然解析得出来，但**落到的介质变了**：`spawned-mem` 从「有端口的内存库」
+/// 变成进程内嵌的 `mem`，`spawned-rocksdb` 从「自己拉一台」变成「连配置指的那台」。
+/// 让它们静默改道是不行的——现场配置照抄了好几年，[`retired_store_mode_notice`]
+/// 负责在启动时把这件事说出来。
+pub(crate) fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
+    match normalized_store_mode(raw)?.as_str() {
+        "mem" | "embedded-mem" | "kv-mem" | "spawned-mem" | "memory" => Some(StoreMode::Mem),
+        "rocksdb" | "external" | "spawned-rocksdb" => Some(StoreMode::RocksDb),
+        _ => None,
+    }
+}
+
+fn normalized_store_mode(raw: Option<&str>) -> Option<String> {
+    Some(raw?.trim().to_ascii_lowercase().replace('_', "-"))
+}
+
+/// 退役的四个旧字面值各自换了什么含义。`None` = 不是旧字面值。
+fn retired_store_mode_meaning(raw: &str) -> Option<&'static str> {
+    match raw {
+        "spawned-mem" | "kv-mem" => Some(
+            "本进程不再拉起 memory SurrealDB 子进程，改用进程内嵌 mem://：\
+             库还在、但**没有端口了**，/sql 探针、rvm_verify、Capture-*Evidence \
+             与 plant-ui 的「库供数」读面在这一档都够不着",
+        ),
+        "spawned-rocksdb" => Some(
+            "本进程不再拉起 rocksdb 后端的 surreal 子进程，改为**连** v_ip:v_port 上那台：\
+             请确认那台服务已经在跑，否则启动就会连不上",
+        ),
+        "external" => Some("已更名为 rocksdb，行为不变（连 v_ip:v_port 上那台）"),
+        "embedded-mem" => Some("已更名为 mem，行为不变（进程内嵌 mem://）"),
         _ => None,
     }
 }
@@ -1133,26 +1154,35 @@ fn store_mode_notice_for(
             continue;
         }
         return Some(format!(
-            "⚠ {source} = {raw:?} 认不出来（只认 external / spawned-rocksdb / spawned-mem / \
-             embedded-mem），按未设置处理"
+            "⚠ {source} = {raw:?} 认不出来（只认 mem / rocksdb），按未设置处理"
+        ));
+    }
+    // 旧字面值：仍然认，但落到的介质变了，必须当场说清楚换成了什么。
+    for (source, raw) in [(STORE_MODE_ENV, env_override), ("store_mode", configured)] {
+        let Some(normalized) = normalized_store_mode(raw) else {
+            continue;
+        };
+        let Some(meaning) = retired_store_mode_meaning(&normalized) else {
+            continue;
+        };
+        let declared = parse_store_mode(raw).map_or("?", StoreMode::as_str);
+        return Some(format!(
+            "⚠ {source} = {normalized:?} 是退役写法，已按 {declared:?} 生效：{meaning}。\
+             请把配置改成 store_mode = {declared:?}"
         ));
     }
     // 两个键都写、且说的不是同一件事：以 `store_mode` 为准，但不许静默。
     let declared = parse_store_mode(env_override).or_else(|| parse_store_mode(configured))?;
     match configured_in_memory_db {
-        Some(true) if declared != StoreMode::EmbeddedMem => Some(format!(
+        Some(true) if declared != StoreMode::Mem => Some(format!(
             "⚠ 配置同时写了 in_memory_db = true 与 store_mode = {:?}：以 store_mode 为准。\
-             in_memory_db 是 store_mode 之前的旧开关，只表达得了 embedded-mem 那一档",
+             in_memory_db 是 store_mode 之前的旧开关，只表达得了 mem 那一档",
             declared.as_str()
         )),
-        // `in_memory_db = false` 说的是「持久层不在进程内存里」——external 与自带落盘
-        // 两档都与它相容，只有两档内存形态才算打架。
-        Some(false) if !matches!(declared, StoreMode::External | StoreMode::SpawnedRocks) => {
-            Some(format!(
-                "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
-                declared.as_str()
-            ))
-        }
+        Some(false) if declared != StoreMode::RocksDb => Some(format!(
+            "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
+            declared.as_str()
+        )),
         _ => None,
     }
 }
@@ -2513,18 +2543,15 @@ mod tests {
         assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
-    /// **默认是自带 kv-mem**（2026-09-11 拍板）：两个形态键都没写 = `spawned-mem`。
-    /// 外置库部署必须显式写 `external`，不能让旧现场配置靠一个会变化的默认值决定介质。
+    /// **默认是 `mem`**：两个形态键都没写 = 进程内嵌，不配任何东西就能起来。
+    /// 落盘部署必须显式写 `rocksdb`，不能让现场配置靠一个会变化的默认值决定介质。
     #[test]
-    fn the_default_store_mode_is_spawned_mem() {
+    fn the_default_store_mode_is_mem() {
+        assert_eq!(effective_store_mode(None, None, None, None), StoreMode::Mem);
         assert_eq!(
-            effective_store_mode(None, None, None, None),
-            StoreMode::SpawnedMem
-        );
-        assert_eq!(
-            effective_store_mode(Some("external"), None, None, None),
-            StoreMode::External,
-            "外置库仍然可显式选择"
+            effective_store_mode(Some("rocksdb"), None, None, None),
+            StoreMode::RocksDb,
+            "落盘库仍然可显式选择"
         );
     }
 
@@ -2547,120 +2574,131 @@ mod tests {
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
-    /// `in_memory_db = false` 必须继续得到 external，不能被新的 spawned-mem 默认盖掉。
     #[test]
     fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
         assert_eq!(
             effective_store_mode(None, None, Some(true), None),
-            StoreMode::EmbeddedMem
+            StoreMode::Mem
         );
         assert_eq!(
             effective_store_mode(None, None, Some(false), None),
-            StoreMode::External
+            StoreMode::RocksDb
         );
         // 旧开关的环境变量压过它自己的配置值，与 `in_memory_db()` 同一规则。
         assert_eq!(
             effective_store_mode(None, None, Some(false), Some("1")),
-            StoreMode::EmbeddedMem
+            StoreMode::Mem
         );
     }
 
-    /// 环境变量压过配置，配置压过旧开关；下划线与大小写都认（`SPAWNED_MEM` 是
-    /// 环境变量里最自然的写法，认不出它只会让人以为开关没生效）。
+    /// 环境变量压过配置，配置压过旧开关；下划线与大小写都认（`ROCKSDB` 是环境变量里
+    /// 最自然的写法，认不出它只会让人以为开关没生效）。
     #[test]
     fn the_store_mode_env_override_wins_over_config_and_the_legacy_flag() {
         assert_eq!(
-            effective_store_mode(Some("external"), Some("spawned-mem"), Some(false), None),
-            StoreMode::SpawnedMem
+            effective_store_mode(Some("rocksdb"), Some("mem"), Some(false), None),
+            StoreMode::Mem
         );
         assert_eq!(
-            effective_store_mode(Some("spawned-mem"), None, Some(true), None),
-            StoreMode::SpawnedMem
+            effective_store_mode(Some("mem"), None, Some(true), None),
+            StoreMode::Mem
         );
         assert_eq!(
-            effective_store_mode(None, Some("SPAWNED_MEM"), Some(false), None),
-            StoreMode::SpawnedMem
+            effective_store_mode(None, Some("ROCKSDB"), Some(true), None),
+            StoreMode::RocksDb
         );
         assert_eq!(
-            effective_store_mode(Some(" Embedded-Mem "), None, None, None),
-            StoreMode::EmbeddedMem
+            effective_store_mode(Some(" Mem "), None, None, None),
+            StoreMode::Mem
         );
     }
 
     /// 拼错的值当没设 —— 但必须出声。静默换掉持久层介质是本仓最贵的那类沉默：
-    /// 一个 `spawn-mem` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
+    /// 一个 `memm` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
     #[test]
     fn an_unrecognised_store_mode_is_ignored_but_never_silent() {
         assert_eq!(
-            effective_store_mode(Some("spawn-mem"), None, Some(false), None),
-            StoreMode::External
+            effective_store_mode(Some("memm"), None, Some(false), None),
+            StoreMode::RocksDb
         );
-        let notice = store_mode_notice_for(Some("spawn-mem"), None, None)
-            .expect("认不出的 store_mode 必须出声");
-        assert!(notice.contains("spawn-mem"), "{notice}");
-        assert!(notice.contains("external"), "{notice}");
-        assert!(store_mode_notice_for(Some("external"), None, None).is_none());
+        let notice =
+            store_mode_notice_for(Some("memm"), None, None).expect("认不出的 store_mode 必须出声");
+        assert!(notice.contains("memm"), "{notice}");
+        assert!(notice.contains("mem / rocksdb"), "{notice}");
+        assert!(store_mode_notice_for(Some("rocksdb"), None, None).is_none());
         assert!(store_mode_notice_for(None, None, None).is_none());
+    }
+
+    /// 退役的四个旧字面值仍然解析得出来，但**落到的介质变了**，不许静默改道。
+    ///
+    /// 最危险的是 `spawned-rocksdb`：它以前会自己把库拉起来，现在只连。照抄了几年的
+    /// 现场配置如果一声不响地改道，现象是启动就连不上，而没有任何一行说出为什么。
+    #[test]
+    fn a_retired_store_mode_still_parses_but_says_what_it_became() {
+        assert_eq!(
+            parse_store_mode(Some("spawned-mem")),
+            Some(StoreMode::Mem),
+            "有端口的内存库退役，落到进程内嵌那一档"
+        );
+        assert_eq!(
+            parse_store_mode(Some("SPAWNED_ROCKSDB")),
+            Some(StoreMode::RocksDb),
+            "自带落盘退役，落到「连配置指的那台」"
+        );
+        assert_eq!(parse_store_mode(Some("external")), Some(StoreMode::RocksDb));
+        assert_eq!(parse_store_mode(Some("embedded-mem")), Some(StoreMode::Mem));
+        assert_eq!(parse_store_mode(Some("kv-mem")), Some(StoreMode::Mem));
+
+        let notice = store_mode_notice_for(Some("spawned-rocksdb"), None, None)
+            .expect("退役写法必须出声");
+        assert!(notice.contains("spawned-rocksdb"), "{notice}");
+        assert!(notice.contains("rocksdb"), "{notice}");
+        assert!(
+            notice.contains("不再拉起"),
+            "必须说出行为变了，不能只说改名：{notice}"
+        );
+        let notice =
+            store_mode_notice_for(Some("spawned-mem"), None, None).expect("退役写法必须出声");
+        assert!(
+            notice.contains("没有端口"),
+            "丢端口这件事必须当场说：{notice}"
+        );
+        // 新写法不吵。
+        assert!(store_mode_notice_for(Some("mem"), None, None).is_none());
+        assert!(store_mode_notice_for(Some("rocksdb"), None, None).is_none());
     }
 
     /// 两个键打架时以 `store_mode` 为准，但不许静默——旧配置里那句
     /// `in_memory_db = true` 会让读配置的人得出相反的结论。
     #[test]
     fn a_contradicting_legacy_flag_is_named_not_swallowed() {
-        let notice = store_mode_notice_for(Some("external"), None, Some(true))
+        let notice = store_mode_notice_for(Some("rocksdb"), None, Some(true))
             .expect("store_mode 与 in_memory_db 打架时必须出声");
         assert!(notice.contains("in_memory_db"), "{notice}");
-        assert!(notice.contains("external"), "{notice}");
+        assert!(notice.contains("rocksdb"), "{notice}");
         // 说的是同一件事就不必吵。
-        assert!(store_mode_notice_for(Some("embedded-mem"), None, Some(true)).is_none());
-        assert!(store_mode_notice_for(Some("external"), None, Some(false)).is_none());
+        assert!(store_mode_notice_for(Some("mem"), None, Some(true)).is_none());
+        assert!(store_mode_notice_for(Some("rocksdb"), None, Some(false)).is_none());
     }
 
-    /// 外置与自带落盘两档的行活得过进程重启；只有进程内嵌那一档别人连不上。
-    /// 这两句话是 `/health` 与回执的介质口径的唯一来源。
+    /// `rocksdb` 的行活得过进程重启，`mem` 的活不过。
+    ///
+    /// 「别人连不连得上」原本是另一个谓词（`has_endpoint()`）：自带存储两档在时它与
+    /// durable 分得开。两档退役之后两个问题合一，谓词只剩一个——**再加回第二个恒等的
+    /// 谓词就是退步**，下一个人会以为它们还能分开。
     #[test]
-    fn only_the_disk_backed_stores_are_durable_and_only_the_embedded_one_has_no_port() {
-        assert!(StoreMode::External.is_durable());
-        assert!(StoreMode::SpawnedRocks.is_durable());
-        assert!(!StoreMode::SpawnedMem.is_durable());
-        assert!(!StoreMode::EmbeddedMem.is_durable());
-        assert!(StoreMode::External.has_endpoint());
-        assert!(StoreMode::SpawnedRocks.has_endpoint());
-        assert!(StoreMode::SpawnedMem.has_endpoint());
-        assert!(!StoreMode::EmbeddedMem.has_endpoint());
-        assert_eq!(StoreMode::SpawnedRocks.as_str(), "spawned-rocksdb");
-        // 自带落盘档只在写全名时给；别名 "rocksdb" 属于 external（对端服务器侧的 rocksdb）。
-        assert_eq!(
-            parse_store_mode(Some("spawned-rocksdb")),
-            Some(StoreMode::SpawnedRocks)
-        );
-        assert_eq!(
-            parse_store_mode(Some("SPAWNED_ROCKSDB")),
-            Some(StoreMode::SpawnedRocks)
-        );
+    fn only_the_disk_backed_store_is_durable() {
+        assert!(StoreMode::RocksDb.is_durable());
+        assert!(!StoreMode::Mem.is_durable());
+        assert_eq!(StoreMode::RocksDb.as_str(), "rocksdb");
+        assert_eq!(StoreMode::Mem.as_str(), "mem");
     }
 
-    /// 两个内存部署形式都不摄入属性；持久部署（外置与自带落盘）必须做完整基线与增量备份。
+    /// 内存形态不摄入属性；落盘部署必须做完整基线与增量备份。
     #[test]
     fn data_face_follows_storage_backup_scope() {
-        assert_eq!(data_face_for_store(StoreMode::External), DataFace::Ingest);
-        assert_eq!(
-            data_face_for_store(StoreMode::SpawnedRocks),
-            DataFace::Ingest
-        );
-        assert_eq!(
-            data_face_for_store(StoreMode::SpawnedMem),
-            DataFace::ReadThrough
-        );
-        assert_eq!(
-            data_face_for_store(StoreMode::EmbeddedMem),
-            DataFace::ReadThrough
-        );
-        assert_eq!(parse_store_mode(Some("rocksdb")), Some(StoreMode::External));
-        assert_eq!(
-            parse_store_mode(Some("kv-mem")),
-            Some(StoreMode::SpawnedMem)
-        );
+        assert_eq!(data_face_for_store(StoreMode::RocksDb), DataFace::Ingest);
+        assert_eq!(data_face_for_store(StoreMode::Mem), DataFace::ReadThrough);
         assert!(DataFace::ReadThrough.is_read_through());
         assert!(!DataFace::Ingest.is_read_through());
         assert_eq!(DataFace::Ingest.as_str(), "ingest");
@@ -2702,10 +2740,10 @@ mod tests {
     /// 漏写的症状一律不是报错，而是「测试莫名其妙全查不到数据」「开机后 `pe` 一行都不进」
     /// ——看上去像解析坏了，实际是配置少了一行。
     ///
-    /// 默认值本身翻过三次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
-    /// `external`，2026-09-11 再改为 `spawned-mem`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
-    /// （它是从 `store_mode` 派生的）。护栏守的正是「不许有配置去依赖那个会变的默认」，
-    /// 所以它与默认值当前指向哪一档无关。
+    /// 默认值本身翻过四次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
+    /// `external`，2026-09-11 再改为 `spawned-mem`，2026-09-13 两档化后定为 `mem`），每一次都会让
+    /// 没写这一项的配置静默换介质、连带换掉 `data_face`（它是从 `store_mode` 派生的）。
+    /// 护栏守的正是「不许有配置去依赖那个会变的默认」，所以它与默认值当前指向哪一档无关。
     ///
     /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
     #[test]

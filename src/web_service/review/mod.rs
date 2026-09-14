@@ -129,12 +129,12 @@ pub async fn health() -> Response {
 /// 对校审数据落点做一次最小查询。
 ///
 /// 落点是进程唯一的持久层连接 `aios_core::SUL_DB`（`ensure_store_connected` 连上的那一个），
-/// 与 [`db::fresh_review_db`] 取的是同一个句柄——ADR-072 D1 定的就是它，校审不另开连接。
+/// 与 [`db::fresh_review_db`] 取的是同一个句柄——ADR-075 D1 定的就是它，校审不另开连接。
 /// 这里直接探 `SUL_DB` 而不绕 `fresh_review_db()`，是为了把「库答不答话」与「建表建索引
 /// 做完没有」分开问：schema 预热失败只该退化成慢查询，不该让健康探针报库挂了。
 ///
 /// 介质活不过重启时本函数根本不会被调到：`web_service::serve` 在挂路由前就把整个校审域
-/// 换成了拒绝路由，`/api/review/health` 一并回 503（ADR-072 D2）。
+/// 换成了拒绝路由，`/api/review/health` 一并回 503（ADR-075 D2）。
 ///
 /// `/api/v1/health` 的断连账本（`surreal_retry::record_sul_db_disconnect`）不在这里记：
 /// 那本账归站点探针，校审探针被外部轮询时不该给它灌水。

@@ -20,7 +20,7 @@
 //!   原因是常量 [`COLLISION_SOURCE_UNAVAILABLE_REASON`]；
 //! - 没有数据源时返回**显式空集 + `reason` 字段**：两端点各多出一个 `reason: Option<String>`，
 //!   有数据源时不序列化，键集与旧端逐字相同；
-//! - **不造假的数据面、不返回 mock**。`collision_events` 的接入记在 `docs/adr/ADR-072-review-data-persistence.md` §未决「碰撞数据源待接」，
+//! - **不造假的数据面、不返回 mock**。`collision_events` 的接入记在 `docs/adr/ADR-075-review-data-persistence.md` §未决「碰撞数据源待接」，
 //!   接的时候只换 [`collision_source`] 的实现（把 `AppState.queries` 穿进来），两条 handler 的形状不动。
 //!
 //! 文件归 T4（`docs/plans/2026-09-12-review-backend-port-plan.md` §5）；规范 `docs/specs/review-api.md` §9。
@@ -165,7 +165,7 @@ pub struct CollisionDataResponse {
 /// 碰撞数据源不可用时写进 `reason` 的固定说明。
 ///
 /// 以稳定 token `collision_source_unavailable` 开头，便于脚本判别；后面是给人看的原因与出处。
-pub const COLLISION_SOURCE_UNAVAILABLE_REASON: &str = "collision_source_unavailable: gen-model 的模型数据面（e3d-direct/RocksDB）没有 collision_events 同形表，也没有碰撞事件生产者；碰撞数据源待接（docs/plans/2026-09-12-review-backend-port-plan.md Q4；docs/adr/ADR-072-review-data-persistence.md §未决）。本响应是显式空集，不是「查到了零条」。";
+pub const COLLISION_SOURCE_UNAVAILABLE_REASON: &str = "collision_source_unavailable: gen-model 的模型数据面（e3d-direct/RocksDB）没有 collision_events 同形表，也没有碰撞事件生产者；碰撞数据源待接（docs/plans/2026-09-12-review-backend-port-plan.md Q4；docs/adr/ADR-075-review-data-persistence.md §未决）。本响应是显式空集，不是「查到了零条」。";
 
 /// 「碰撞数据从哪来」的接缝。
 ///

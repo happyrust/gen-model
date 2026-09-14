@@ -22,6 +22,55 @@
   与本次发布文件无关的既有源码契约失败（1989 passed / 136 ignored），
   未把它们写成“全绿”。
 
+## 2026-09-13
+
+### ADR-074：`store_mode` 收成 `mem` / `rocksdb` 两档，本进程从不拉起数据库；`store_process.rs` 整删
+
+用户拍板（1a + 2a + 默认 mem）：**内存就在进程里，落盘就连配置指的那台；本进程不再拉起任何数据库。**
+四档（`embedded-mem` / `spawned-mem` / `spawned-rocksdb` / `external`）里后三档的连接语句本来一个字不差，区别只在
+「那台 surreal 是谁拉起的」——为此背着的 `store_process.rs`（约 1800 行：端口探针 / 署名 / 心跳 / 四格裁决 / 孤儿回收 /
+收尸）随两档退役整个删除。
+
+- **`options.rs`**：`StoreMode { Mem, RocksDb }`，字面值 `mem` / `rocksdb`，默认 `mem`；旧写法全部当别名认
+  （`embedded-mem` / `kv-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`）但 `store_mode_notice`
+  启动时大声说清换成了什么——`spawned-rocksdb` 必点名「本进程不再拉起，请确认那台库已在跑」。`has_endpoint()` 删：
+  「持久」与「别的进程连得上」两档下是同一个问题（`PersistMedium::is_reachable()` 同理并入 `is_durable()`）。
+- **`lib.rs`**：`ensure_store_connected` 两分支——`connect_in_memory_store`（`mem://`，不 signin）/
+  `connect_configured_store`（`init_surreal` 连 `v_ip:v_port`，连不上就地退出）；`ensure_own_store` 与 `startup` 参数删。
+  单实例锁与机器级写者锁只有 `mem` 不拿。
+- **向导** `web/setup.html` 第②步四档 → 两档：`mem` 默认、不用地址；`rocksdb` 须填地址并通过「测试连接」（连通 + 2.1.x）。
+  「端口预检」按钮与 `workspace\.surreal\<代号>` 目录提示随 spawn 两档删除；读旧配置时把退役字面值折到两档显示，
+  写出去只有新名（`validate_patch` 拒收退役值）。源码钉 `the_wizard_offers_exactly_the_two_store_modes_and_writes_only_new_names`
+  同时钉「退役 value / return / 比较一处不留」。`ensure_completion_ready` 不再抄一份别名表，复用 `options::parse_store_mode`。
+- **`/health.sul_db`**：`medium` 报 `mem` / `rocksdb`；`endpoint` 在 `mem` 下报 `embedded:mem`；`durable` 只对 `rocksdb` 为真；
+  `in_memory_db` 栏为老客户端保留。水位镜像身份的 `endpoint` 同步改用 `embedded:mem`。
+- **配置**：仓内全部 `DbOption*.toml` 夹具与出厂模板 `scripts/templates/DbOption.factory.toml` 改写新名
+  （`external` → `rocksdb`，`embedded-mem` / `spawned-mem` → `mem`）。
+- **脚本**：`New-LocalRelease.ps1` **两种包出厂都是 `mem`**（用户追加拍板「两档都真正解压即跑」）：出厂模板原样进包，
+  runtime 档那三条按档位改写 `store_mode` / 注释的正则随四档退役；README 改说「要持久先跑 `Start-Surreal.ps1` 再在向导改选
+  rocksdb」。冒烟 B 腿默认 `mem` 且断言服务没拉 surreal 子进程，C 腿改为**脚本**用包内 `surreal.exe` 在 18010 起 rocksdb 库、
+  服务以 `rocksdb` 连它（凭据从配置 `v_user` / `v_password` 读）；生成的 `Start-AMS.ps1` 不再递 `AIOS_SURREAL_EXE`。`Verify-OutOfBox.ps1` 改考
+  「一台库都不拉」（`medium=mem` + `endpoint=embedded:mem` + 无 surreal 子进程）。`Start-Surreal8009.ps1` 头部口径改两档。
+  各 live 脚本 `AIOS_STORE_MODE=external` → `rocksdb`；`strt_plant_ui_runtime.py` / `Start-StrtPlantUiValidation.ps1`
+  `embedded-mem` → `mem`。**`Run-KvMemRoomBootstrap.ps1` 退役**（开头直接报错说明）：它对着 `spawned-mem` 的端口发 SQL
+  挑正例 / 反例，读透形态只剩没端口的 `mem`——要救回来须把挑选改走服务 HTTP 面。
+- **文档**：新 ADR-074；ADR-070 作废；ADR-068 / ADR-069 状态行加修订指向；CONTEXT.md「本地发布包」「冒烟门」「设置模式」
+  「配置向导」改写，「自带持久库」词条换成「存储形态 (Store Mode)」；`docs/database-storage-modes.md` 重写为两档 + 退役对照表。
+- **后果要知道的**：`mem` 档没有端口——`/sql` 探针、`rvm_verify`、`Capture-*Evidence.ps1` 与 plant-ui「库供数」读面在这一档
+  都够不着（plant-ui 按 `mirror.endpoint = "embedded:mem"` 自己降级）；要外部诊断就用 `rocksdb` 档。两种发布包出厂都不持久，
+  要数据活过重启得自己起库再改选 `rocksdb`。
+- 验证：`cargo check --lib --all-targets` 干净；`cargo test --lib -- options:: web_service::setup web_service::handlers
+  data_interface::dbnum_state data_interface::database_writer_lock instance_lock` 156 passed；全量 `cargo test --lib`
+  **1874 passed / 2 failed / 107 ignored**——两条失败均与本条无关、是工作树里别的在途改动
+  （`model_refresh::one_bad_generation_root_does_not_charge_every_sibling_in_the_dbnum` 的 `failures_are_attributed` 重构
+  没改源码扫描测试；`model_memory_store::room_spatial_accepts_large_incremental_pipe_like_cohorts` 的
+  `room_spatial_rows_rebuilt` 改成累加后期望值没跟），未动。plant-ui 侧 `data::tests::embedded_mirror_never_falls_through_to_a_configured_tcp_store`
+  等 2 条通过。全部改动脚本经 PowerShell 语法解析通过。**发布冒烟实跑通过**：用当前源码 release 构建
+  （build `0.1.23+release.20260913165955.g86f4a0b9417f.dirty`）跑 `New-LocalRelease.ps1 -SkipBuild -IncludeWorkspace`，
+  A 腿 `mode=setup` + 向导标记 ✓；B 腿 `medium=mem + durable=false + 服务没拉 surreal 子进程` ✓；C 腿包内 `surreal.exe`
+  在 18010 起库 → 服务以 `rocksdb` 连上 → `medium=rocksdb + durable=true` + 数据目录落 7 个文件 ✓；`release.json.smoke`
+  三腿全 `passed`，跑完 9099 / 18010 / 18011 均空、临时冒烟目录已清。
+
 ## 2026-09-10
 
 ### ADR-072 R3 / R4 收尾：房间侧过渡壳删净、退役表名只剩迁移清单（W4 源码钉）、`/dbnums` 出 `write_state`、ops.html 退发布时代的格

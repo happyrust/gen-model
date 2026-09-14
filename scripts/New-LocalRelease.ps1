@@ -11,7 +11,7 @@
         <包根>\
           aios-database.exe            后端（gen-model）
           web\                         plant-ui Web 静态资源（wasm/字体/贴图；不含冗余 meshes）
-          bin\surreal.exe              可切回 spawned-mem 的 SurrealDB 2.1.x
+          bin\surreal.exe              切到 rocksdb 档时用来起库的 SurrealDB 2.1.x
           resource\surreal\*.surql     连接后初始化数据库函数所需的同版脚本
           schema\e3d210|e3d31\         e3d_version 选择的 attlib / *vir.dat（未配置默认 e3d210）
           DbOption.toml                不带本机路径的出厂配置（默认运行包）
@@ -32,13 +32,16 @@
     CHANGELOG 找不到当版条目时只警告、不中止。releases 目录不自动清理旧构建，
     让后续二进制 patch 始终有精确的源包可取。
 
-    runtime 出厂配置默认 embedded-mem（无 Surreal TCP 端口）；-IncludeWorkspace 形态继续使用
-    spawned-rocksdb@127.0.0.1:8009。两档都保留 .first-run-pending 首跑哨兵，自动进入配置向导。
+    存储只有两档（2026-09-13 拍板，ADR-074）：**两种包出厂都是 mem**（库在后端进程内，无 Surreal
+    TCP 端口，真正解压即跑）。要数据活过重启的现场在向导第②步改选 rocksdb——**服务只连、不拉起**
+    那台库，包内附 bin\surreal.exe 与（带 workspace 时）Start-Surreal.ps1 让人先把它起起来。两档都
+    保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
-    health + 首页；C 腿本机配置改 spawned-rocksdb@18010 考「自带持久库」（ADR-070：
-    medium/durable + .surreal 目录落盘）。端口被占或起不来则跳过/失败并在 release.json /
-    产物名旁标「未冒烟」，不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
+    health + 首页 + medium；C 腿（带 workspace 时）由脚本用包内 surreal.exe 在 18010 起一台
+    rocksdb 库、服务以 store_mode=rocksdb 连它，考 medium=rocksdb + durable=true + 数据目录
+    真落盘——这一腿验的是「包内二进制起得来、服务连得上」。端口被占或起不来则跳过/失败并在
+    release.json / 产物名旁标「未冒烟」，不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
 
     资源不进包的部分（见 ADR-068）：SurrealDB 数据目录与源模型不打入 zip。
 
@@ -72,7 +75,8 @@
     Workspace 路径自动寻找。runtime 放包根 bin\，带 workspace 的档位放 workspace\bin\。
 
 .PARAMETER SmokeStoreMode
-    冒烟时后端的存储形态。省略时 runtime 用 embedded-mem，带 workspace 的档位用 spawned-mem。
+    B 腿冒烟时后端的存储形态（mem / rocksdb）。省略时两档都用 mem；给 rocksdb 时脚本会先用
+    包内 surreal.exe 在 18011 起一台库给服务连（服务自己不拉库）。
 
 .PARAMETER BackendTargetDir
     可选的独立 Cargo target 目录；机器上已有 release exe 正在运行、Windows 锁住默认输出时使用。
@@ -105,7 +109,7 @@ param(
     [switch]$SkipSmoke,
     [switch]$IncludeWorkspace,
     [switch]$ExcludeMeshes,
-    [ValidateSet('embedded-mem', 'spawned-mem', 'spawned-rocksdb', 'external')][string]$SmokeStoreMode,
+    [ValidateSet('mem', 'rocksdb')][string]$SmokeStoreMode,
     [int]$SmokeTimeoutSeconds = 90,
     [ValidateRange(1, 65535)][int]$SmokeHttpPort = 9099,
     [switch]$StrictSmoke,
@@ -215,7 +219,7 @@ if (-not $SurrealExe) {
     $SurrealExe = $surrealCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 if (-not $SurrealExe -or -not (Test-Path -LiteralPath $SurrealExe -PathType Leaf)) {
-    throw "找不到本仓 fork 的 surreal.exe；spawned-mem 发布包无法解压即跑。请用 -SurrealExe 显式指定。"
+    throw "找不到本仓 fork 的 surreal.exe；发布包要带它给 rocksdb 档起库（Start-Surreal.ps1）。请用 -SurrealExe 显式指定。"
 }
 $surrealVersion = (& $SurrealExe version 2>&1) -join ' '
 if ($LASTEXITCODE -ne 0 -or
@@ -312,8 +316,9 @@ elseif ($ExcludeMeshes) {
 else {
     'full'
 }
-$defaultStoreMode = if ($IncludeWorkspace) { 'spawned-rocksdb' } else { 'embedded-mem' }
-if (-not $SmokeStoreMode) { $SmokeStoreMode = $defaultStoreMode }
+# B 腿默认 mem：服务不拉库，mem 是唯一不需要脚本先起一台库就能全启动的档；
+# rocksdb 档由 C 腿（带 workspace）或显式 -SmokeStoreMode rocksdb 来考。
+if (-not $SmokeStoreMode) { $SmokeStoreMode = 'mem' }
 if (-not $Name) {
     $Name = "ams-local-$(ConvertTo-FileToken $BuildId)-$packageTier"
 }
@@ -538,7 +543,7 @@ if (-not (Test-Path -LiteralPath $factoryConfig)) { throw "缺出厂配置模板
 if ($IncludeWorkspace) {
 Write-Step "组装 workspace\ 依赖资源（assets 延后直灌）"
 # 出厂配置模板 + 首跑哨兵：包不再带本机配置快照。
-# 模板是「设置模式」形态（project_path 空、默认 spawned-rocksdb@127.0.0.1:8009、监听 0.0.0.0:9099），
+# 模板是「设置模式」形态（project_path 空、store_mode=mem、监听 0.0.0.0:9099），
 # 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
 Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $wsStage 'DbOption.toml')
 Set-Content -LiteralPath (Join-Path $wsStage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
@@ -566,28 +571,9 @@ if ($snapCount -eq 0) { Write-Warn2 "没找到 accel_tree_*.snapshot" }
 }
 else {
     Write-Step "跳过 workspace\：根目录保留 DbOption.toml、bin\surreal.exe、SurrealQL 与 E3D schema（其他资源外接）"
-    $runtimeConfigPath = Join-Path $stage 'DbOption.toml'
-    $runtimeConfig = Get-Content -LiteralPath $factoryConfig -Raw
-    $runtimeConfig = [regex]::Replace(
-        $runtimeConfig,
-        '(?m)^# 自带 memory SurrealDB 的默认端口；这一格是数字，不能写空串。\r?\n',
-        "# runtime 默认 embedded-mem，不使用 v_ip/v_port；保留 8009 便于手工切回 spawned-mem。`r`n"
-    )
-    $runtimeConfig = [regex]::Replace(
-        $runtimeConfig,
-        '(?m)^# full / workspace 档默认 spawned-rocksdb：.*\r?\n# 只需临时内存库可改 spawned-mem（别名 kv-mem）；连接既有库则改 external。\r?\n',
-        "# runtime 默认 embedded-mem：数据库在后端进程内，无子进程、无 Surreal TCP 端口。`r`n# 需要外部诊断可改 spawned-mem；需要持久化可改 spawned-rocksdb / external。`r`n"
-    )
-    $runtimeConfig = [regex]::Replace(
-        $runtimeConfig,
-        '(?m)^store_mode\s*=\s*["''][^"'']+["'']\s*$',
-        'store_mode = "embedded-mem"'
-    )
-    [System.IO.File]::WriteAllText(
-        $runtimeConfigPath,
-        $runtimeConfig,
-        [System.Text.UTF8Encoding]::new($false)
-    )
+    # 两档出厂都是 mem（ADR-074 之后模板本身就是），runtime 档不再对模板做任何外科改写——原样进包。
+    # 以前这里按档位把 store_mode 改成 embedded-mem 并重写两行注释，那套正则随四档一起退役。
+    Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $stage 'DbOption.toml')
     Set-Content -LiteralPath (Join-Path $stage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
 }
 $surrealBinDir = if ($IncludeWorkspace) { Join-Path $wsStage 'bin' } else { Join-Path $stage 'bin' }
@@ -656,8 +642,7 @@ if ($existing) {
     $env:PLANT_UI_WEB_ROOT = Join-Path $root 'web'
     $env:PLANT_ASSET_ROOT = Join-Path $Workspace 'assets'
     $env:AIOS_E3D_SCHEMA_ROOT = Join-Path $root 'schema'
-    $surreal = Join-Path $Workspace 'bin\surreal.exe'
-    if (Test-Path -LiteralPath $surreal) { $env:AIOS_SURREAL_EXE = $surreal }
+    # 服务不拉库（ADR-074）：rocksdb 档要先自己跑 Start-Surreal.ps1，这里不再递 AIOS_SURREAL_EXE。
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $process = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $Workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logRoot "$stamp.stdout.log") -RedirectStandardError (Join-Path $logRoot "$stamp.stderr.log")
     @{ pid=$process.Id; start_time=$process.StartTime.ToString('o'); executable=$exe } | ConvertTo-Json | Set-Content (Join-Path $root 'process.json')
@@ -707,9 +692,9 @@ Set-Content -LiteralPath (Join-Path $stage 'Rollback.ps1') -Value $rollback -Enc
 
 if ($IncludeWorkspace) {
 $startSurreal = @'
-# 用包内 surreal.exe（本仓 fork 的 2.1.x）手动起一台本地库。多数情况不必用它：
-# 配置向导第②步「新建本机持久库（spawned-rocksdb）」由服务自己拉起并管生命周期。
-# 只有 external 部署（库独立于本服务起停）才需要本脚本。
+# 用包内 surreal.exe（本仓 fork 的 2.1.x）起一台本地持久库（rocksdb 后端）。
+# 服务**不会**自己拉库：配置向导第②步选「rocksdb」之前，先跑这个脚本把库起起来，
+# 服务只连 DbOption.toml 里 v_ip:v_port 指的这台。选「mem」则完全不需要它。
 # 注意：本包不含既有库数据；这台是空库，属性/搜索/补齐/更新仍需连回原始库或先导入数据。
 param(
     [int]$Port,
@@ -733,7 +718,12 @@ $ver = (& $exe version) -join ' '
 if ($ver -notmatch '(\d+)\.(\d+)\.(\d+)' -or [int]$Matches[1] -ne 2) {
     throw "surreal 版本不对：$ver（本仓客户端是 fork 2.1.x；别用 PATH 上 cargo install 的 3.x）"
 }
-Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore"
+# fork 默认的响应缓冲定时器在 Windows 上给每次顺序 RPC 加 ~15 ms；服务以前自己拉库时替你设成 0，
+# 现在库由这个脚本起，这一行不能丢——否则模型顺序发布与初始化会明显变慢。显式设过的不覆盖。
+if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
+    $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = '0'
+}
+Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buffer $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE"
 & $exe start --user $User --pass $Password --bind "127.0.0.1:$Port" $Datastore
 '@
 Set-Content -LiteralPath (Join-Path $wsStage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
@@ -759,20 +749,20 @@ $startupInstruction = if ($IncludeWorkspace) {
     '解压后双击 **Start-AMS.cmd**（或运行 Start-AMS.ps1）。服务就绪后自动打开 http://127.0.0.1:9099/ 。'
 }
 else {
-    '本包默认不带 workspace，``store_mode=embedded-mem``：kv-mem 在后端进程内，无 Surreal 子进程或数据库端口。根目录仍带 ``bin\surreal.exe``，需要外部诊断时可切回 spawned-mem。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
+    '本包默认不带 workspace，``store_mode=mem``：数据库在后端进程内，无 Surreal 子进程或数据库端口。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、再把配置改成 ``store_mode=rocksdb``（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
 }
 $rootSurrealLayoutLine = if ($IncludeWorkspace) {
     ''
 }
 else {
-    '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切换 spawned-mem / spawned-rocksdb 时使用'
+    '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切到 rocksdb 档、需要自己起一台库时使用'
 }
 $workspaceLayoutLines = if ($IncludeWorkspace) {
 @"
 - ``workspace\`` —— 运行所需依赖资源，Start-AMS 未传参时自动使用
   - ``DbOption.toml`` / ``config\`` / ``resource\`` / ``search-index\`` / ``accel_tree_*.snapshot``
   $assetLayoutLine
-  - ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；``Start-Surreal.ps1`` 起一台本地库
+  - ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；``Start-Surreal.ps1`` 起一台本地库（rocksdb 档要先起它，服务不拉库）
 "@
 }
 else {
@@ -791,10 +781,10 @@ else {
     '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
 }
 $storeRuntimeNote = if ($IncludeWorkspace) {
-    '- **SurrealDB 数据与源模型不打入包。** 附带配置默认 ``store_mode=spawned-rocksdb``，服务会用 workspace 内二进制自行拉起持久库；新数据写入 ``workspace\.surreal\``。'
+    '- **SurrealDB 数据与源模型不打入包。** 附带配置出厂 ``store_mode=mem``（库在后端进程内，解压即跑，进程一退数据即清空）。要数据活过重启：先跑 ``workspace\Start-Surreal.ps1`` 起一台 rocksdb 库（数据落 ``workspace\.surreal\``），再在向导第②步改选 rocksdb 连它——服务**只连**、不拉起。'
 }
 else {
-    '- **workspace 默认不打入包。** runtime 默认使用进程内 ``embedded-mem``；``bin\surreal.exe`` 作为切换到 spawned 档的备用文件保留。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
+    '- **workspace 默认不打入包。** runtime 默认使用进程内 ``mem``；``bin\surreal.exe`` 留给切到 rocksdb 档时自己起库用。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
 }
 $readme = @"
 # AMS 本地发布包（-$packageTier）：gen-model $BackendVersion + plant-ui $WebVersion（Web）
@@ -810,7 +800,7 @@ $startupInstruction
 ## 首跑：配置向导
 $firstRunNote
 进入配置向导后（浏览器首页跳到 ``/setup.html``）：
-①选 E3D 项目目录与项目 → ②确认默认本机持久 RocksDB，或改用临时/外置 SurrealDB → ③定监听端口
+①选 E3D 项目目录与项目 → ②选存储：mem（库在进程里，零依赖）或 rocksdb（连一台已在跑的 SurrealDB）→ ③定监听端口
 → ④选「只导数据 / 一步到位」并保存重启 → ⑤勾库初始化。向导页只许在**本机**打开
 （局域网访问应用没问题，但改配置的接口只收 127.0.0.1 的请求）。
 不想用向导：直接改 ``workspace\DbOption.toml`` 后重启，并删掉 ``workspace\.first-run-pending``。
@@ -831,8 +821,8 @@ $workspaceLayoutLines
 ## 运行依赖（不在包内 —— 见 ADR-068）
 $storeRuntimeNote
   $meshRuntimeNote
-  - full / workspace 档默认 ``spawned-rocksdb``：kv-mem 保存增量 overlay，RocksDB 保存持久基线；runtime 档仍默认 ``embedded-mem``。
-- **切换到 spawned / external 时，SurrealDB 必须是本仓 fork 的 2.1.x**（包内 ``bin\surreal.exe``）。别用 PATH 上 ``cargo install`` 装的 3.x：
+  - 两种包出厂都是 ``mem``；切到 ``rocksdb`` 后 kv-mem 保存增量 overlay、RocksDB 保存持久基线。服务在任何档位都**不拉起**数据库进程。
+- **rocksdb 档连的 SurrealDB 必须是本仓 fork 的 2.1.x**（包内 ``bin\surreal.exe``）。别用 PATH 上 ``cargo install`` 装的 3.x：
   它会要求对数据做不可逆迁移、且与 2.1.4 客户端握不上手。
 
 ## 回退
@@ -895,6 +885,52 @@ function Set-SmokeHttpPort([string]$ConfigText, [int]$Port) {
     return $ConfigText + "`r`nhttp_api_addr = `"127.0.0.1:$Port`"`r`n"
 }
 
+# 两档之后服务不再拉库：冒烟要考 rocksdb 档，就得由**脚本**先用包内 surreal.exe 起一台
+# （rocksdb 后端、隔离端口、临时数据目录），服务只连它。这同时验了包内二进制起得来。
+# 返回起好的进程；起不来直接 throw，调用方按「腿失败」记账。
+function Get-ConfigCredential([string]$ConfigText, [string]$Key, [string]$Default) {
+    $m = [regex]::Match($ConfigText, "(?m)^\s*$([regex]::Escape($Key))\s*=\s*[`"']([^`"']*)[`"']")
+    if ($m.Success -and $m.Groups[1].Value) { return $m.Groups[1].Value }
+    return $Default
+}
+
+function Start-SmokeSurreal([string]$SurrealBin, [int]$Port, [string]$DataDir, [string]$User = 'root', [string]$Password = 'root') {
+    if (-not (Test-Path -LiteralPath $SurrealBin -PathType Leaf)) { throw "冒烟缺 surreal.exe：$SurrealBin" }
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($listener) { throw "$Port 被 PID $($listener.OwningProcess) 占用" }
+    New-Item -ItemType Directory -Force $DataDir | Out-Null
+    # 与包内 Start-Surreal.ps1 同一条纪律：响应缓冲设 0（退役的 spawner 以前替服务设的），显式设过的不覆盖。
+    if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
+        $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = '0'
+    }
+    $proc = Start-Process -FilePath $SurrealBin -WindowStyle Hidden -PassThru `
+        -ArgumentList @('start', '--user', $User, '--pass', $Password, '--bind', "127.0.0.1:$Port", "rocksdb:$DataDir")
+    $deadline = (Get-Date).AddSeconds(30)
+    $up = $null
+    do {
+        Start-Sleep -Milliseconds 500
+        $proc.Refresh()
+        if ($proc.HasExited) { throw "包内 surreal.exe 起不来（exit $($proc.ExitCode)）" }
+        $up = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    } while (-not $up -and (Get-Date) -lt $deadline)
+    if (-not $up) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        throw "包内 surreal.exe 30s 内没在 $Port 上监听"
+    }
+    return $proc
+}
+
+function Stop-SmokeSurreal($proc, [int]$Port) {
+    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    # 保险：按端口再收一遍，别让隔离端口被上一轮的库占着。
+    $left = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($left) { Stop-Process -Id $left.OwningProcess -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500
+}
+
+# B 腿考 rocksdb 时给服务连的那台库绑的端口（避开真 8009 / 8010 与 C 腿的 18010）。
+$smokeStorePort = 18011
+
 function Invoke-Smoke {
     $exe = Join-Path $stage 'aios-database.exe'
     $listener = Get-NetTCPConnection -LocalPort $SmokeHttpPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -927,6 +963,22 @@ function Invoke-Smoke {
     else {
         $smokeConfig += "`r`nstore_mode = `"$SmokeStoreMode`"`r`n"
     }
+    # rocksdb 档：服务只连不拉，所以脚本先在隔离端口起一台，再把配置指过去。
+    $smokeSurrealProc = $null
+    $smokeSurrealData = Join-Path $smokeWs '.surreal-smoke'
+    if ($SmokeStoreMode -eq 'rocksdb') {
+        try {
+            # 凭据跟本机配置走：服务拿配置里的 v_user / v_password 登录，库就得用同一对起。
+            $smokeSurrealProc = Start-SmokeSurreal (Join-Path $smokeWs 'bin\surreal.exe') $smokeStorePort $smokeSurrealData `
+                (Get-ConfigCredential $smokeConfig 'v_user' 'root') (Get-ConfigCredential $smokeConfig 'v_password' 'root')
+        }
+        catch {
+            Remove-Item -LiteralPath $smokeWs -Recurse -Force -ErrorAction SilentlyContinue
+            return [ordered]@{ status = 'failed'; reason = "起冒烟用的 rocksdb 库失败：$($_.Exception.Message)"; url = $smoke.url; store_mode = $SmokeStoreMode }
+        }
+        $smokeConfig = $smokeConfig -replace '(?m)^(\s*v_ip\s*=\s*).*$', '$1"127.0.0.1"'
+        $smokeConfig = $smokeConfig -replace '(?m)^(\s*v_port\s*=\s*).*$', "`$1`"$smokeStorePort`""
+    }
     $smokeConfig = Set-SmokeHttpPort $smokeConfig $SmokeHttpPort
     [System.IO.File]::WriteAllText($smokeConfigPath, $smokeConfig, [System.Text.UTF8Encoding]::new($false))
     Remove-Item -LiteralPath (Join-Path $smokeWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
@@ -936,15 +988,9 @@ function Invoke-Smoke {
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
     $env:PLANT_ASSET_ROOT = Join-Path $Workspace 'assets'
     $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
-    $smokeSurreal = Join-Path $smokeWs 'bin\surreal.exe'
-    if (Test-Path -LiteralPath $smokeSurreal) {
-        $env:AIOS_SURREAL_EXE = $smokeSurreal
-    }
-    else { Remove-Item Env:AIOS_SURREAL_EXE -ErrorAction SilentlyContinue }
     $env:AIOS_STORE_MODE = $SmokeStoreMode
     $env:AIOS_STARTUP_AUTORUN = '0'
     $env:RUST_MIN_STACK = '134217728'
-    $surrealBefore = @(Get-CimInstance Win32_Process -Filter "Name='surreal.exe'" | Select-Object -ExpandProperty ProcessId)
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $smokeWs -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $logDir 'smoke.stdout.log') -RedirectStandardError (Join-Path $logDir 'smoke.stderr.log')
     $result = [ordered]@{ status = 'failed'; reason = 'readiness timeout'; url = $smoke.url; store_mode = $SmokeStoreMode }
@@ -957,14 +1003,14 @@ function Invoke-Smoke {
                 $h = Invoke-WebRequest -Uri ($smoke.url + 'api/v1/health') -UseBasicParsing -TimeoutSec 3
                 $p = Invoke-WebRequest -Uri $smoke.url -UseBasicParsing -TimeoutSec 3
                 $health = $h.Content | ConvertFrom-Json
+                # 服务在任何档位都不许拉起 surreal 子进程——两档之后这是硬约束，不再按档放宽。
                 $childStore = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -eq 'surreal.exe' } | Select-Object -First 1
                 $modeOk = $health.sul_db.medium -eq $SmokeStoreMode
-                $childOk = $SmokeStoreMode -ne 'embedded-mem' -or -not $childStore
-                if ($h.StatusCode -eq 200 -and $p.Content.Contains('plant_ui_app.js') -and $modeOk -and $childOk) {
+                $durableOk = [bool]$health.sul_db.durable -eq ($SmokeStoreMode -eq 'rocksdb')
+                if ($h.StatusCode -eq 200 -and $p.Content.Contains('plant_ui_app.js') -and $modeOk -and $durableOk -and -not $childStore) {
                     $result.status = 'passed'
-                    $result.reason = "health 200 + 首页含 plant_ui_app.js + medium=$SmokeStoreMode" +
-                        $(if ($SmokeStoreMode -eq 'embedded-mem') { ' + 无 surreal 子进程' } else { '' })
+                    $result.reason = "health 200 + 首页含 plant_ui_app.js + medium=$SmokeStoreMode + durable=$($health.sul_db.durable) + 服务没拉 surreal 子进程"
                     break
                 }
             }
@@ -974,10 +1020,7 @@ function Invoke-Smoke {
     }
     finally {
         if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 }
-        $surrealAfter = @(Get-CimInstance Win32_Process -Filter "Name='surreal.exe'" | Select-Object -ExpandProperty ProcessId)
-        foreach ($spid in ($surrealAfter | Where-Object { $_ -notin $surrealBefore })) {
-            Stop-Process -Id $spid -Force -ErrorAction SilentlyContinue
-        }
+        if ($smokeSurrealProc) { Stop-SmokeSurreal $smokeSurrealProc $smokeStorePort }
         Remove-Item -LiteralPath $smokeWs -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $result
@@ -1042,24 +1085,38 @@ function Invoke-SetupSmoke {
     return $result
 }
 
-# 冒烟第三腿（ADR-070）：本机配置副本改成 spawned-rocksdb（v_port=18010，避开真 8010），
-# 考「自带持久库」主路——正常模式起来、/health 报 medium=spawned-rocksdb + durable=true、
-# rocksdb 数据目录真的落在 workspace\.surreal\。surreal 用暂存包里那只（顺带验包内二进制）。
+# 冒烟第三腿（ADR-074，取代 ADR-070 的「自带持久库」腿）：带 workspace 的包要能走通
+# 「包内 surreal.exe 起一台 rocksdb 库 → 服务以 store_mode=rocksdb 连它」这条主路。
+# 脚本用暂存包里那只 surreal.exe 在 18010 起库（避开真 8010）、数据目录落在临时 workspace 的
+# .surreal\ 下，再让服务连过去：正常模式起来、/health 报 medium=rocksdb + durable=true、
+# 数据目录真落盘、且服务自己没拉任何 surreal 子进程。
+$rocksSmokeStorePort = 18010
 function Invoke-RocksSmoke {
     $exe = Join-Path $stage 'aios-database.exe'
-    foreach ($port in $SmokeHttpPort, 18010) {
+    foreach ($port in $SmokeHttpPort, $rocksSmokeStorePort) {
         $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($listener) { return [ordered]@{ status = 'skipped'; reason = "$port 被 PID $($listener.OwningProcess) 占用" } }
     }
     # 与 B 腿同底：整份包 workspace 拷过去（resource\surreal 的 surql、bin\surreal 都要在），
-    # 再换配置——本机真配置改档 spawned-rocksdb + 端口挪 18010，摘掉首跑哨兵。
+    # 再换配置——本机真配置改档 rocksdb + 端口指到脚本起的 18010，摘掉首跑哨兵。
     $rocksWs = Join-Path $env:TEMP ("ams-rocks-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
     Copy-Item -LiteralPath $wsStage -Destination $rocksWs -Recurse
     Remove-Item -LiteralPath (Join-Path $rocksWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
+    $rocksData = Join-Path $rocksWs '.surreal\smoke'
     $cfg = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw
+    $surrealProc = $null
+    try {
+        $surrealProc = Start-SmokeSurreal (Join-Path $rocksWs 'bin\surreal.exe') $rocksSmokeStorePort $rocksData `
+            (Get-ConfigCredential $cfg 'v_user' 'root') (Get-ConfigCredential $cfg 'v_password' 'root')
+    }
+    catch {
+        Remove-Item -LiteralPath $rocksWs -Recurse -Force -ErrorAction SilentlyContinue
+        return [ordered]@{ status = 'failed'; reason = "包内 surreal.exe 起库失败：$($_.Exception.Message)" }
+    }
     $cfg = $cfg -replace '(?m)^\s*store_mode\s*=.*$', ''
-    $cfg = $cfg -replace '(?m)^(\s*v_port\s*=\s*).*$', '$1"18010"'
-    $cfg = $cfg + "`r`nstore_mode = `"spawned-rocksdb`"`r`n"
+    $cfg = $cfg -replace '(?m)^(\s*v_ip\s*=\s*).*$', '$1"127.0.0.1"'
+    $cfg = $cfg -replace '(?m)^(\s*v_port\s*=\s*).*$', "`$1`"$rocksSmokeStorePort`""
+    $cfg = $cfg + "`r`nstore_mode = `"rocksdb`"`r`n"
     $cfg = Set-SmokeHttpPort $cfg $SmokeHttpPort
     Set-Content -LiteralPath (Join-Path $rocksWs 'DbOption.toml') -Value $cfg -Encoding utf8
     $logDir = Join-Path $stage 'smoke-logs'
@@ -1067,7 +1124,6 @@ function Invoke-RocksSmoke {
     $env:DB_OPTION_FILE = Join-Path $rocksWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
     $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
-    $env:AIOS_SURREAL_EXE = Join-Path $rocksWs 'bin\surreal.exe'
     Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $rocksWs -WindowStyle Hidden -PassThru `
@@ -1080,11 +1136,16 @@ function Invoke-RocksSmoke {
             if ($proc.HasExited) { $result.reason = "backend exited $($proc.ExitCode)"; break }
             try {
                 $h = Invoke-WebRequest -Uri "http://127.0.0.1:$SmokeHttpPort/api/v1/health" -UseBasicParsing -TimeoutSec 3
-                if ($h.StatusCode -eq 200 -and $h.Content.Contains('"medium":"spawned-rocksdb"') -and $h.Content.Contains('"durable":true')) {
-                    if (Test-Path -LiteralPath (Join-Path $rocksWs '.surreal')) {
-                        $result.status = 'passed'; $result.reason = 'medium=spawned-rocksdb + durable=true + .surreal 目录真落盘'; break
+                if ($h.StatusCode -eq 200 -and $h.Content.Contains('"medium":"rocksdb"') -and $h.Content.Contains('"durable":true')) {
+                    $childStore = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -eq 'surreal.exe' } | Select-Object -First 1
+                    if ($childStore) { $result.reason = '服务自己拉起了 surreal 子进程——两档之后不许'; break }
+                    # 目录是脚本自己建的，不算证据；rocksdb 一打开就会落 CURRENT / MANIFEST / LOCK，数文件才算真落盘。
+                    $rocksFiles = @(Get-ChildItem -LiteralPath $rocksData -Recurse -File -ErrorAction SilentlyContinue).Count
+                    if ($rocksFiles -gt 0) {
+                        $result.status = 'passed'; $result.reason = "包内 surreal 起库 + 服务连上 + medium=rocksdb + durable=true + 数据目录落了 $rocksFiles 个文件"; break
                     }
-                    $result.reason = 'health 对了但 workspace\.surreal 目录没出现'; break
+                    $result.reason = 'health 对了但 rocksdb 数据目录里一个文件都没有'; break
                 }
             }
             catch {}
@@ -1093,10 +1154,7 @@ function Invoke-RocksSmoke {
     }
     finally {
         if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
-        # 强杀后端不走析构，自带 surreal 会留在 18010 上——按端口收掉。
-        $orphan = Get-NetTCPConnection -LocalPort 18010 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($orphan) { Stop-Process -Id $orphan.OwningProcess -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
-        Remove-Item Env:AIOS_SURREAL_EXE -ErrorAction SilentlyContinue
+        Stop-SmokeSurreal $surrealProc $rocksSmokeStorePort
         Remove-Item -LiteralPath $rocksWs -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $result
@@ -1129,7 +1187,7 @@ else {
         }
     }
     if ($IncludeWorkspace) {
-        Write-Step "冒烟门 C：自带持久库（spawned-rocksdb@18010，超时 ${SmokeTimeoutSeconds}s）"
+        Write-Step "冒烟门 C：包内 surreal 起 rocksdb 库 + 服务连它（rocksdb@$rocksSmokeStorePort，超时 ${SmokeTimeoutSeconds}s）"
         $rocksSmoke = Invoke-RocksSmoke
         switch ($rocksSmoke.status) {
             'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }
