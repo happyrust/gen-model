@@ -1,5 +1,7 @@
 # 三维校审后台移植 · 实跑验收留痕（T5a）
 
+> **历史阶段快照。** 本报告原有 PASS/PARTIAL 判定只反映 2026-09-13 当时的运行范围，不能作为合入结论。脚本假成功、A4/A6 覆盖不足及合并后复验均已在 `2026-09-14-review-closure.md` 中修正；最终门槛以该记录为准。下文的校审持久化 ADR-072 引用在主线集成后对应 ADR-075。
+
 - 依据：`docs/plans/2026-09-12-review-backend-port-plan.md` §6（判据 A1–A11）、`docs/adr/ADR-072-review-data-persistence.md`。
 - 跑法：`. .\scripts\review\env.ps1` 之后 `pwsh -NoProfile -File .\scripts\review\acceptance.ps1 -JsonOut .\.tmp-acceptance.json`。
 - 本轮 run `2026-09-13T15-12-53`，HEAD **`af818aaa5`**，runner 退出码 0，耗时 119s。
