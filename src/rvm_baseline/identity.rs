@@ -53,7 +53,14 @@ pub fn named_owner_from_desc(desc: &str) -> Option<&str> {
 /// SUPPORT 的站点库形态是 SUPPO（5 字，`delivery_unit_types` 默认集合里就有），
 /// 截 4 会得到 join 不上的 SUPP。这类例外必须进显式映射表。
 /// 有 ATT 时以其 TYPE 为权威，这里只是无 ATT 的退化路径。
+///
+/// 用户自定义元素类型（`:` 开头）整串留着：它们本来就没有短名词，截了还会撞车——
+/// `/石楼装卸车-SUPP1` 里 `:SDS_Pole` / `:SDS_Plate` / `:SDS_Entity` 一截全成 `:SDS`，
+/// 同一属主同一序号下三件挤成一个键，整个 ZONE 的对拍判不下去。
 pub fn full_noun_to_short(full: &str) -> String {
+    if full.starts_with(':') {
+        return full.to_string();
+    }
     match full.to_ascii_uppercase().as_str() {
         "FLANGE" => "FLAN",
         "ELBOW" => "ELBO",
@@ -159,6 +166,20 @@ mod tests {
         assert_eq!(full_noun_to_short("FLANGE"), "FLAN");
         assert_eq!(full_noun_to_short("TEE"), "TEE");
         assert_eq!(full_noun_to_short("Unknown"), "UNKN");
+    }
+
+    /// 用户自定义元素类型整串进键：截成四字会把同一属主下的三种支撑件挤成一个。
+    #[test]
+    fn user_defined_element_types_keep_their_full_name() {
+        assert_eq!(full_noun_to_short(":SDS_Pole"), ":SDS_Pole");
+        assert_ne!(
+            full_noun_to_short(":SDS_Pole"),
+            full_noun_to_short(":SDS_Plate")
+        );
+        assert_ne!(
+            full_noun_to_short(":SDS_Plate"),
+            full_noun_to_short(":SDS_Entity")
+        );
     }
 
     /// 同输入必须同 id（可复跑的根基）；dbnum 或路径任一不同 id 就不同；
