@@ -51,6 +51,10 @@ static ENGINE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 /// 只往引擎的 channel 上发消息，跨 runtime 收发没有问题。
 async fn ensure_test_db() {
     TEST_DB.get_or_init(|| {
+        // 夹具就是一台会蒸发的 `mem://`；ADR-074 之后未配置的 store_mode 默认为 `mem`，
+        // 持久化闸（ADR-075）会拒掉它。这里显式声明「知道会丢」，走测试专用开关而不是 set_var（d-410）。
+        super::super::db::TEST_ALLOW_EPHEMERAL_STORE
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         // `Runtime::block_on` 不允许在 runtime 线程上调，借一条普通线程把引擎起起来。
         std::thread::spawn(|| {
             ENGINE_RUNTIME

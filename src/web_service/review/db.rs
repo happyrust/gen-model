@@ -173,10 +173,25 @@ const REVIEW_URL_PREFIXES: [&str; 4] = [
 /// 出处（`options.rs`，护栏 `only_the_disk_backed_stores_are_durable_and_only_the_embedded_one_has_no_port`），
 /// 校审不另立标准——否则介质表一改，这里就会和 `/health` 讲两套话。
 pub fn review_persistence() -> ReviewPersistence {
-    review_persistence_for(
-        crate::options::store_mode(),
-        crate::options::review_allow_ephemeral_store(),
-    )
+    review_persistence_for(crate::options::store_mode(), allow_ephemeral_store())
+}
+
+/// 测试专用逃生门（d-410）：`platform::tests` 把 `SUL_DB` 接到进程内 `mem://` 夹具上实跑六条
+/// handler，ADR-074 之后未配置的 `store_mode` 默认就是 `mem`，闸会把它当成「会蒸发的库」拒掉。
+/// lib 测试是一个多线程进程，不能 `std::env::set_var`（`options.rs` 同一条纪律），所以给一个
+/// 只在 `cfg(test)` 下存在的进程级开关，由夹具显式置位、声明「知道会丢」；生产路径只认环境变量
+/// [`crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV`]。闸本身在单测里照常活着——不许用
+/// `#[cfg(not(test))]` 把它编掉，那样「Refused → [`fresh_review_db`] 回 Err」这条路就永远测不到。
+#[cfg(test)]
+pub(crate) static TEST_ALLOW_EPHEMERAL_STORE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn allow_ephemeral_store() -> bool {
+    #[cfg(test)]
+    if TEST_ALLOW_EPHEMERAL_STORE.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    crate::options::review_allow_ephemeral_store()
 }
 
 fn review_persistence_for(mode: StoreMode, allow_ephemeral: bool) -> ReviewPersistence {
@@ -343,8 +358,14 @@ where
 /// 与旧端的唯一语义差异：旧端每次新建 ws 连接并计入 `review.fresh_connection` 超时，
 /// 这里是 Arc clone，不会失败、也不再有那条连接超时——`Response` 级的 5s/8s 超时不变。
 pub async fn fresh_review_db() -> Result<Surreal<Any>> {
-    #[cfg(not(test))]
-    if let ReviewPersistence::Refused(refusal) = review_persistence() {
+    fresh_review_db_under(review_persistence()).await
+}
+
+/// [`fresh_review_db`] 的主体，落点裁决由调用方给：生产路径永远是 [`review_persistence`]；
+/// 单测拿它钉「Refused 必须回 Err」这条路（d-410），不必碰进程级开关、也不会和
+/// `platform::tests` 夹具的置位互相干扰。
+async fn fresh_review_db_under(persistence: ReviewPersistence) -> Result<Surreal<Any>> {
+    if let ReviewPersistence::Refused(refusal) = persistence {
         return Err(anyhow!("{}", refusal.message()));
     }
     let db = aios_core::SUL_DB.clone();
@@ -519,5 +540,36 @@ mod tests {
         }
         .startup_line();
         assert!(!quiet.contains("***"), "正常档位不该喊：{quiet}");
+    }
+
+    /// d-410：闸在单测里必须活着。`mem` 且未放行 → 取句柄那条路必须在碰 `SUL_DB` 之前就回 Err，
+    /// 且错误文案与 503 的 message、横幅共用同一份事实（介质名 + 逃生门）。裁决由参数给，
+    /// 不经进程级开关，所以与 `platform::tests` 夹具把开关置为 true 互不影响。
+    #[tokio::test]
+    async fn a_refused_store_makes_fresh_review_db_return_err_before_touching_the_db() {
+        let refused = review_persistence_for(StoreMode::Mem, false);
+        assert!(matches!(refused, ReviewPersistence::Refused(_)));
+        let error = fresh_review_db_under(refused)
+            .await
+            .expect_err("mem 未放行时不能拿到校审库句柄");
+        let text = format!("{error}");
+        assert!(text.contains("mem"), "{text}");
+        assert!(text.contains("rocksdb"), "要给出可用的档位：{text}");
+        assert!(
+            text.contains(crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV),
+            "逃生门要写出来：{text}"
+        );
+    }
+
+    /// 放行来的裁决（`rocksdb`，或 `mem` 显式放行）不该在闸上被挡；这里只钉「闸不拦」，
+    /// 库句柄本身在 `platform::tests` 的 `mem://` 夹具上实跑。
+    #[test]
+    fn a_ready_verdict_is_never_refused_by_the_gate() {
+        for verdict in [
+            review_persistence_for(StoreMode::RocksDb, false),
+            review_persistence_for(StoreMode::Mem, true),
+        ] {
+            assert!(matches!(verdict, ReviewPersistence::Ready { .. }), "{verdict:?}");
+        }
     }
 }
