@@ -14,6 +14,15 @@
 //! GENSEC 只接直 SPINE（一段 `POINSP → POINSP`）；含弧的 SPINE 在 E3D 里是 `arc()` 不是 `line()`，
 //! 这里回空并说明原因。
 //!
+//! **Significant Snap Points**（E3D Pick Settings「Sections & Walls」的 Fittings / Joints / Nodes 三档）：
+//! `EDGPLINE.snapLine` 在 `intermediates` 开着时 `COLLECT ALL (FITT | SJOI SUBJ | SNOD) FOR sctn`，把每个成员的
+//! `position` 用 `LINE.near` 投到 p-line 上、按到起点的距离排序，Snap / Distance / Proportion / Fraction 只作用在
+//! 光标所在的那一小段。分不分段、哪几类算，是前端 Pick Settings 的事；这里只把**成员与它的位置**给出来
+//! （`snap_points`）：SNOD 的 `ZDIS` 是沿轴离 `POSS` 的距离，位置取对齐线（`JUSL`）上 z = ZDIS 的点；SJOI / SUBJ
+//! 自己没有 ZDIS，位置随属主链上最近的 SNOD（E3D 的关节挂在节点上）；FITT 的位置走 `section_fitting_placement`
+//! （Core3D GFIORG：POSL 线上 z = ZDIS 再加 `DELP`），与画出来的配件同一处。只 SCTN 给——E3D 的 GENSEC 分支
+//! （`snap()` GENSEC）不调 `snapLine`，GENSEC 一律空表。
+//!
 //! 响应形状（mm，世界系）：
 //!
 //! ```json
@@ -23,6 +32,8 @@
 //!   "justification_line": "NA",
 //!   "plines": [{ "key": "NA", "offset": [0.0, 0.0], "start": [x,y,z], "end": [x,y,z],
 //!                "dir": [x,y,z], "length": 3000.0, "start_cut": [x,y,z], "end_cut": [x,y,z] }],
+//!   "snap_points": [{ "refno": "24381/177316", "noun": "SNOD", "kind": "node", "zdis": 435.56, "position": [x,y,z] },
+//!                   { "refno": "24381/177317", "noun": "SJOI", "kind": "joint", "zdis": 435.56, "position": [x,y,z] }],
 //!   "reason": null,
 //!   "notes": []
 //! }
@@ -43,7 +54,7 @@ use e3d_io::refno::RefNo;
 use e3d_model::section::{
     SectionChain, SectionCutPlane, SectionCuts, SectionError, SectionPlacement, SectionProfile,
     evaluate_section_profile, placement_between, section_catalogue, section_cut_planes,
-    section_placement, spine_path,
+    section_fitting_placement, section_placement, spine_path,
 };
 use glam::{DMat4, DVec3};
 use serde::{Deserialize, Serialize};
@@ -83,6 +94,23 @@ pub struct PlineDto {
     pub end_cut: Option<[f64; 3]>,
 }
 
+/// E3D Pick Settings「Significant Snap Points」的一个分段点来源：SCTN 名下的 FITT / SJOI / SUBJ / SNOD
+/// （`EDGPLINE.snapLine` 的 `COLLECT ALL (FITT | SJOI SUBJ | SNOD) FOR sctn`）。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SectionSnapPointDto {
+    /// `a/b`
+    pub refno: String,
+    /// `FITT` / `SJOI` / `SUBJ` / `SNOD`
+    pub noun: String,
+    /// Pick Settings 的三档：`fitting`（FITT）/ `joint`（SJOI、SUBJ）/ `node`（SNOD）。
+    pub kind: &'static str,
+    /// 沿轴离 `POSS` 的距离（mm）：自己的 `ZDIS`，SJOI / SUBJ 取属主链上最近的 SNOD 的。
+    pub zdis: f64,
+    /// 世界系位置（mm）：SNOD / SJOI / SUBJ 是对齐线上 z = ZDIS 的点，FITT 是它的目录标架原点
+    /// （`section_fitting_placement`）。前端按 E3D `LINE.near` 投到各 p-line 上得到分段点。
+    pub position: [f64; 3],
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ElementPlinesResponse {
     pub source: &'static str,
@@ -96,6 +124,8 @@ pub struct ElementPlinesResponse {
     pub justification_line: Option<String>,
     /// `PSTR` 成员原序。
     pub plines: Vec<PlineDto>,
+    /// SCTN 名下的 FITT / SJOI / SUBJ / SNOD，按 `zdis` 升序；GENSEC 与没有 p-line 时为空。
+    pub snap_points: Vec<SectionSnapPointDto>,
     /// `plines` 为空时的原因（E3D 同样没有 p-line 可拾）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -162,6 +192,7 @@ fn element_dto(element: &DbElement) -> Result<ElementPlinesResponse, SectionErro
         unit: "mm",
         justification_line: None,
         plines: Vec::new(),
+        snap_points: Vec::new(),
         reason: None,
         notes: Vec::new(),
     };
@@ -225,8 +256,122 @@ fn element_dto(element: &DbElement) -> Result<ElementPlinesResponse, SectionErro
     }
     if response.plines.is_empty() {
         response.reason = Some(format!("PSTR {} 里没有 PLIN", ptss.refno()));
+        return Ok(response);
+    }
+    // E3D `snapLine` 只在 SCTN 分支收 FITT / SJOI / SUBJ / SNOD；GENSEC 的 `snap()` 不分段。
+    if noun == "SCTN" {
+        let section_world = e3d_model::transform::world_matrix(element)?;
+        collect_snap_points(
+            element,
+            element,
+            None,
+            section_world,
+            world,
+            &mut response.snap_points,
+            &mut response.notes,
+        )?;
+        sort_snap_points(&mut response.snap_points);
     }
     Ok(response)
+}
+
+/// Pick Settings 三档对 noun 的归类（`EDGPLINE.snapLine` 的 `searchList`：
+/// fitting → `FITT`，joint → `SJOI SUBJ`，node → `SNOD`）；其余成员不是分段点。
+fn snap_point_kind(noun: &str) -> Option<&'static str> {
+    match noun {
+        "FITT" => Some("fitting"),
+        "SJOI" | "SUBJ" => Some("joint"),
+        "SNOD" => Some("node"),
+        _ => None,
+    }
+}
+
+/// E3D 按到起点的距离排（`distances.sortedIndices()`）；同一 ZDIS 上节点在前、关节在后（关节挂在节点上），
+/// 再按 refno 稳定。
+fn sort_snap_points(points: &mut [SectionSnapPointDto]) {
+    points.sort_by(|a, b| {
+        a.zdis
+            .total_cmp(&b.zdis)
+            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| a.refno.cmp(&b.refno))
+    });
+}
+
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "node" => 0,
+        "joint" => 1,
+        _ => 2,
+    }
+}
+
+/// `COLLECT ALL (FITT SJOI SUBJ SNOD) FOR sctn` 的递归：走遍 SCTN 名下全部后代，
+/// `inherited_zdis` 是属主链上最近的 `ZDIS`（SNOD → SJOI → SUBJ 一路带下去）。
+/// `section_world` 是 SCTN 的世界矩阵（FITT 标架在属主局部系），`jusl_world` 是对齐线标架
+/// （`world_matrix × placement.local`，z 沿轴、原点在 `POSS` 平面）。
+fn collect_snap_points(
+    section: &DbElement,
+    owner: &DbElement,
+    inherited_zdis: Option<f64>,
+    section_world: DMat4,
+    jusl_world: DMat4,
+    out: &mut Vec<SectionSnapPointDto>,
+    notes: &mut Vec<String>,
+) -> Result<(), SectionError> {
+    for member in owner.members()? {
+        let noun = member.element_type()?;
+        // SNOD / FITT 自己带 ZDIS；SJOI / SUBJ / LNKS … 的模板里根本没有这个属性——那不是错，
+        // 沿属主链继承（实机 24381/177317 SJOI、24381/177362 LNKS 曾把整条响应打成 500）。
+        let own_zdis = match member.get_double("ZDIS") {
+            Ok(value) => value.filter(|value| value.is_finite()),
+            Err(DbElementError::UnknownAttribute { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let zdis = own_zdis.or(inherited_zdis);
+        if let Some(kind) = snap_point_kind(&noun) {
+            match zdis {
+                Some(zdis) => {
+                    let position = if noun == "FITT" {
+                        match section_fitting_placement(section, &member) {
+                            Ok(placement) => {
+                                (section_world * placement).transform_point3(DVec3::ZERO)
+                            }
+                            Err(error) => {
+                                notes.push(format!(
+                                    "FITT {} 的目录标架算不出（{error}），分段点退到对齐线 z = ZDIS",
+                                    member.refno()
+                                ));
+                                jusl_world.transform_point3(DVec3::new(0.0, 0.0, zdis))
+                            }
+                        }
+                    } else {
+                        jusl_world.transform_point3(DVec3::new(0.0, 0.0, zdis))
+                    };
+                    out.push(SectionSnapPointDto {
+                        refno: pdms_refno(member.refno()),
+                        noun: noun.clone(),
+                        kind,
+                        zdis,
+                        position: position.to_array(),
+                    });
+                }
+                None => notes.push(format!(
+                    "{noun} {} 自身与属主链都没有 ZDIS，不作 Significant Snap 分段点",
+                    member.refno()
+                )),
+            }
+        }
+        collect_snap_points(
+            section,
+            &member,
+            zdis,
+            section_world,
+            jusl_world,
+            out,
+            notes,
+        )?;
+    }
+    Ok(())
 }
 
 /// SCTN：`POSS → POSE` 标架 + 两端切面；GENSEC：直 SPINE 的两端 + `BANG`，含弧的不接。
@@ -528,6 +673,13 @@ mod tests {
                 start_cut: None,
                 end_cut: None,
             }],
+            snap_points: vec![SectionSnapPointDto {
+                refno: "24381/177316".into(),
+                noun: "SNOD".into(),
+                kind: "node",
+                zdis: 435.56,
+                position: [0.0, 0.0, 435.56],
+            }],
             reason: None,
             notes: Vec::new(),
         };
@@ -535,14 +687,52 @@ mod tests {
         assert_eq!(json["source"], "e3d-model");
         assert_eq!(json["plines"][0]["key"], "NA");
         assert!(json["plines"][0].get("start_cut").is_none());
+        assert_eq!(json["snap_points"][0]["kind"], "node");
+        assert_eq!(json["snap_points"][0]["zdis"], 435.56);
         assert!(json.get("reason").is_none());
         let empty = ElementPlinesResponse {
             plines: Vec::new(),
+            snap_points: Vec::new(),
             reason: Some("无 SPRE".into()),
             ..response
         };
         let json = serde_json::to_value(&empty).unwrap();
         assert_eq!(json["reason"], "无 SPRE");
         assert_eq!(json["plines"].as_array().unwrap().len(), 0);
+        assert_eq!(json["snap_points"].as_array().unwrap().len(), 0);
+    }
+
+    /// `EDGPLINE.snapLine` 的 `searchList`：Fittings → FITT，Joints → SJOI + SUBJ，Nodes → SNOD；
+    /// 其它成员（PJOI / SCOJ / 属性型节点…）不是分段点。
+    #[test]
+    fn snap_point_kinds_follow_the_e3d_search_list() {
+        assert_eq!(snap_point_kind("FITT"), Some("fitting"));
+        assert_eq!(snap_point_kind("SJOI"), Some("joint"));
+        assert_eq!(snap_point_kind("SUBJ"), Some("joint"));
+        assert_eq!(snap_point_kind("SNOD"), Some("node"));
+        assert_eq!(snap_point_kind("SCOJ"), None);
+        assert_eq!(snap_point_kind("PJOI"), None);
+        assert_eq!(snap_point_kind("PLIN"), None);
+    }
+
+    /// 按沿轴距离升序；同一 ZDIS 上节点先于挂在它上面的关节，再按 refno 稳定。
+    #[test]
+    fn snap_points_sort_along_the_axis() {
+        let point = |refno: &str, noun: &str, kind: &'static str, zdis: f64| SectionSnapPointDto {
+            refno: refno.into(),
+            noun: noun.into(),
+            kind,
+            zdis,
+            position: [0.0, 0.0, zdis],
+        };
+        let mut points = vec![
+            point("24381/9", "SJOI", "joint", 435.56),
+            point("24381/8", "SNOD", "node", 435.56),
+            point("24381/3", "FITT", "fitting", 120.0),
+            point("24381/5", "SNOD", "node", 0.0),
+        ];
+        sort_snap_points(&mut points);
+        let order: Vec<_> = points.iter().map(|p| p.refno.as_str()).collect();
+        assert_eq!(order, ["24381/5", "24381/3", "24381/8", "24381/9"]);
     }
 }

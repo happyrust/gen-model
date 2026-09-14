@@ -751,15 +751,30 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
       { "key": "TOS", "offset": [0.0, 150.0], "start": [x, y, z], "end": [x, y, z], "dir": [x, y, z], "length": 3000.0,
         "start_cut": [x, y, z], "end_cut": [x, y, z] }
     ],
+    "snap_points": [
+      { "refno": "24381/177316", "noun": "SNOD", "kind": "node",  "zdis": 435.56, "position": [x, y, z] },
+      { "refno": "24381/177317", "noun": "SJOI", "kind": "joint", "zdis": 435.56, "position": [x, y, z] }
+    ],
     "notes": []
   }
   ```
 
   `start` / `end` 是 E3D `PLSTART pline` / `PLEND pline`：p-line 在 `POSS` / `POSE` 两个截面平面上的点
   （`EDGPLINE.line` 缺省 `cut = false` 取的就是这两个），**不**按 `DRNS` / `DRNE` 斜切；斜切后的端点
-  `PLSTCUT / PLENCUT` 另给在 `start_cut` / `end_cut`，只在端面不垂直于轴时出现。`offset` 是 p-line 在截面
-  平面里、`JUSL` 对齐与 `LMIRR` 镜像之后的位置（`JUSL` 那条线恒为 `[0, 0]`，它就是 `POSS → POSE`）。
-  `plines` 按 `PSTR` 成员原序；`notes` 是截面求值 / SPINE 建路径的非致命记录（与实体生成的 notes 同源）。
+  `PLSTCUT / PLENCUT` 另给在 `start_cut` / `end_cut`，只在端面不垂直于轴时出现（E3D Pick Settings「Pline End
+  Position = Cut」时前端拿它当端点）。`offset` 是 p-line 在截面平面里、`JUSL` 对齐与 `LMIRR` 镜像之后的位置
+  （`JUSL` 那条线恒为 `[0, 0]`，它就是 `POSS → POSE`）。`plines` 按 `PSTR` 成员原序；`notes` 是截面求值 / SPINE
+  建路径的非致命记录（与实体生成的 notes 同源）。
+- `snap_points`（2026-09-14 起）：E3D Pick Settings「Significant Snap Points」（Fittings / Joints / Nodes 三档）
+  的分段点来源——`EDGPLINE.snapLine` 在 Significant Snaps 开着时 `COLLECT ALL (FITT | SJOI SUBJ | SNOD) FOR sctn`，
+  把每个成员的位置 `LINE.near` 投到 p-line 上，Snap / Distance / Proportion / Fraction 只作用在光标所在的那一小段。
+  这里只给**成员与它的位置**（分不分段、哪几档算是前端 Pick Settings 的事）：走遍 SCTN 名下全部后代，
+  `kind` 按 noun 归档（`FITT` → `fitting`，`SJOI` / `SUBJ` → `joint`，`SNOD` → `node`；PJOI / SCOJ 等其余成员不算），
+  `zdis` 是沿轴离 `POSS` 的距离（自己的 `ZDIS`；SJOI / SUBJ 的模板没有 ZDIS，取属主链上最近 SNOD 的——E3D 的关节挂在
+  节点上），`position` 是世界系 mm：SNOD / SJOI / SUBJ 取对齐线（`JUSL`）上 z = ZDIS 的点，FITT 取它的目录标架原点
+  （`section_fitting_placement`，与画出来的配件同一处）。按 `zdis` 升序、同一 ZDIS 节点先于关节。
+  **只 SCTN 给**——E3D 的 GENSEC 分支不调 `snapLine`，GENSEC 与 `plines` 为空时一律 `[]`。老构建没有这一格，
+  前端按空处理。
 - GENSEC 只接**直 SPINE**（一段 `POINSP → POINSP`，两端 + `BANG` 走 `placement_between`）；含弧的 SPINE 在 E3D
   里是 `edgPline.arc()` 不是 `line()`，回空并在 `reason` 说明。GENSEC 的 `DRNS / DRNE` 在 SPINE 上，本期不给 cut 端点。
 - 状态：`200` 构件存在——不是 SCTN / GENSEC、没有 `SPRE`、目录链断、SPRF 无 `PSTR`、GENSEC 含弧 →
