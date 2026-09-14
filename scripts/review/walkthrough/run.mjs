@@ -94,7 +94,10 @@ async function main() {
     // ── 4. dev server：需要才起，起了就负责 kill（纪律③ 不留长驻进程）──
     webServer = await ensureWebServer(cfg);
 
-    browser = await chromium.launch({ headless: cfg.headless });
+    const launchOptions = { headless: cfg.headless };
+    // 指定 channel（如 'chrome'）时用系统安装的对应浏览器；留空则用 Playwright 自带 Chromium。
+    if (cfg.browserChannel) launchOptions.channel = cfg.browserChannel;
+    browser = await chromium.launch(launchOptions);
     const context = await browser.newContext({
       viewport: { width: 1600, height: 1000 },
       ignoreHTTPSErrors: true,

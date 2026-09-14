@@ -72,6 +72,8 @@ export function loadConfig(argv = []) {
     u2Decision: str('REVIEW_U2_DECISION', 'approve'),
 
     headless: bool('REVIEW_HEADLESS', true),
+    // 浏览器通道：留空 = Playwright 自带 Chromium（默认，离线可跑）；'chrome' = 系统安装的 Google Chrome。
+    browserChannel: str('REVIEW_BROWSER_CHANNEL', ''),
     // 人工接管：浏览器打开后脚本不点任何东西，只录制控制台与请求，等你手动走完再回车。
     manual: bool('REVIEW_MANUAL', false),
 
