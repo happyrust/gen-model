@@ -1,27 +1,5 @@
 # 变更记录
 
-## 2026-09-11
-
-### 本地发布 0.1.22：后端重建、Web 复用、E3D 版本显式配置
-
-- 后端 `0.1.22` 构建自 `b1e4c878e`，路径依赖 e3d-io
-  `2c6f11d23d`；plant-ui 保持 `0.1.10`，从三腿冒烟全过的
-  `ams-local-0.1.21-full.zip` 复用 12 个 `web/` 文件，逐文件 SHA-256
-  对拍无差异。发布清单新增后端/e3d-io 提交与 Web 来源整包哈希。
-- SchemaPack 版本只认 `DbOption.toml.e3d_version`。`UPGDNO` 两版相同，
-  `Saving Meta Data.` 只是会话注释，`COMM.VERS` 又会被 `clearComm`
-  在客户端退出时清空；三者都只作诊断，不再猜偏移。
-- `New-LocalRelease.ps1 -ReuseWebFromZip` 支持只重建后端，并强制校验来源
-  release.json 的 plant-ui 版本、三腿冒烟状态与 zip SHA-256，避免把
-  plant-ui 工作树的未提交内容夹进旧版本号。
-- 严格冒烟 A（设置模式）、B（spawned-mem 正常模式）、C
-  （spawned-rocksdb 持久模式）全部通过；端口与本轮临时目录已清理。
-- 产物 `releases/ams-local-0.1.22-full.zip`，485,739,832 bytes，
-  SHA-256 `c2c3c44a56a0c24241916634c0e1a63afb4b9772f4a59beac8f5bf3969f666cb`。
-- 定向版本测试、`cargo check --lib` 与 Clippy 通过；全量 lib 仍有 9 个
-  与本次发布文件无关的既有源码契约失败（1989 passed / 136 ignored），
-  未把它们写成“全绿”。
-
 ## 2026-09-13
 
 ### ADR-074：`store_mode` 收成 `mem` / `rocksdb` 两档，本进程从不拉起数据库；`store_process.rs` 整删
@@ -70,6 +48,28 @@
   A 腿 `mode=setup` + 向导标记 ✓；B 腿 `medium=mem + durable=false + 服务没拉 surreal 子进程` ✓；C 腿包内 `surreal.exe`
   在 18010 起库 → 服务以 `rocksdb` 连上 → `medium=rocksdb + durable=true` + 数据目录落 7 个文件 ✓；`release.json.smoke`
   三腿全 `passed`，跑完 9099 / 18010 / 18011 均空、临时冒烟目录已清。
+
+## 2026-09-11
+
+### 本地发布 0.1.22：后端重建、Web 复用、E3D 版本显式配置
+
+- 后端 `0.1.22` 构建自 `b1e4c878e`，路径依赖 e3d-io
+  `2c6f11d23d`；plant-ui 保持 `0.1.10`，从三腿冒烟全过的
+  `ams-local-0.1.21-full.zip` 复用 12 个 `web/` 文件，逐文件 SHA-256
+  对拍无差异。发布清单新增后端/e3d-io 提交与 Web 来源整包哈希。
+- SchemaPack 版本只认 `DbOption.toml.e3d_version`。`UPGDNO` 两版相同，
+  `Saving Meta Data.` 只是会话注释，`COMM.VERS` 又会被 `clearComm`
+  在客户端退出时清空；三者都只作诊断，不再猜偏移。
+- `New-LocalRelease.ps1 -ReuseWebFromZip` 支持只重建后端，并强制校验来源
+  release.json 的 plant-ui 版本、三腿冒烟状态与 zip SHA-256，避免把
+  plant-ui 工作树的未提交内容夹进旧版本号。
+- 严格冒烟 A（设置模式）、B（spawned-mem 正常模式）、C
+  （spawned-rocksdb 持久模式）全部通过；端口与本轮临时目录已清理。
+- 产物 `releases/ams-local-0.1.22-full.zip`，485,739,832 bytes，
+  SHA-256 `c2c3c44a56a0c24241916634c0e1a63afb4b9772f4a59beac8f5bf3969f666cb`。
+- 定向版本测试、`cargo check --lib` 与 Clippy 通过；全量 lib 仍有 9 个
+  与本次发布文件无关的既有源码契约失败（1989 passed / 136 ignored），
+  未把它们写成“全绿”。
 
 ## 2026-09-10
 

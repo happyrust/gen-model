@@ -1,3 +1,5 @@
+# 手动选择模板版本，跳过自动识别（e3d31 / e3d210）。
+e3d_version = "e3d31"
 #同步文件配置
 # ── 配置变更追踪 ─────────────────────────────────────────────────────────────
 # 与最后一次提交基线（7bba5fd4，2025-06-30）的完整差异清单见
@@ -24,11 +26,6 @@ enable_index = false
 sync_chunk_size = 10_0000
 
 #项目设置
-#【新增 2026-09-11】手动选择 E3D 模板版本：e3d210 / e3d31，设置后跳过数据库版本识别，
-# 优先于 AIOS_E3D_TEMPLATE_DIR。数据库中尚无已证实的持久产品版本字段：不读取目录名、
-# 文件时间、文件大小、UPGDNO、Saving Meta Data. 或 COMM.VERS 猜版本；两者都缺时用
-# 产品默认 e3d210 并在启动日志以 mode=default 出声（见 docs/release-notes/0.1.23.md）。
-e3d_version = "e3d31"
 #【变更 2026-07-27】E3D2.1→E3D3.1：AMS 样例工程迁移到 E3D3.1 项目目录。
 project_path = "D:/AVEVA/Projects/E3D3.1"
 # project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
