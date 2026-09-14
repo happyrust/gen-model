@@ -40,11 +40,10 @@ use crate::data_interface::frozen_source::FrozenSource;
 use crate::data_interface::uda_keys::UdaKeyMap;
 use crate::versioned_db::baseline::{render_baseline_batches, source_for_file};
 
-/// 有界队列容量：解析最多领先写者这么多笔事务。
-pub(crate) const QUEUE_CAPACITY: usize = 100;
-/// 写者每次从队列取出的事务数。必须小于 [`QUEUE_CAPACITY`]：单写者 `chunks(N)` 要等到 N 条才
-/// 交出，而生产者在 [`QUEUE_CAPACITY`] 条时阻塞——N ≥ 容量就是一个确定性的死锁。
-pub(crate) const WRITE_WINDOW: usize = 20;
+/// 队列、单写者与它们那三条纪律都在 [`sql_write_queue`] 里，增量那一路用的是同一份。
+pub(crate) use crate::data_interface::sql_write_queue::{
+    OnWriteError, QUEUE_CAPACITY, WRITE_WINDOW, WriterOutcome, drain_writer, spawn_writer,
+};
 /// `sync_chunk_size` 没写时一块的元素数（与 legacy 同值：对绝大多数库等于整文件一块）。
 const DEFAULT_CHUNK_ELEMENTS: usize = 10_0000;
 
@@ -69,22 +68,6 @@ pub struct DependencySummary {
     pub rows: usize,
     pub catalogue_dbnums: usize,
     pub missing: usize,
-}
-
-/// 写者任务的收尾账：失败次数与前几条样例（错误文本进日志与回执）。
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct WriterOutcome {
-    pub errors: usize,
-    pub samples: Vec<String>,
-}
-
-impl WriterOutcome {
-    fn record(&mut self, context: &str, error: anyhow::Error) {
-        self.errors += 1;
-        if self.samples.len() < 3 {
-            self.samples.push(format!("{context}: {error}"));
-        }
-    }
 }
 
 /// 冻结源反哈希出的库身份必须与调用方点名的一致。
@@ -224,7 +207,8 @@ async fn ingest_frozen(
 
     // 从这里起有写者在跑：之后的任何失败都要先排空、再清库。
     let (sender, receiver) = flume::bounded::<String>(QUEUE_CAPACITY);
-    let writer = spawn_writer(receiver);
+    // 整库基线：一笔坏批不该让其余几万行也进不去，失败最后由 `wipe_after_failure` 整库清掉重来。
+    let writer = spawn_writer(receiver, "element batch", OnWriteError::Continue);
 
     // CATA 依赖 seed：流式收集时顺手攒本库每个 DESI 元素的目录链引用，文件收尾一次闭包，
     // 经同一条写者队列入库（单写者不变），排在调用方的 `finalize_baseline` 之前。
@@ -425,45 +409,6 @@ async fn persist_dependency_closure(
         );
     }
     Ok(summary)
-}
-
-/// 单写者：按 [`WRITE_WINDOW`] 条一窗从队列取事务，逐笔 `execute_on`（含冲突重试）。
-/// 一笔失败只记账、继续消费——队列必须被排空，否则生产者卡在 `send` 上永远收不了尾；
-/// 账在 [`drain_writer`] 之后由 [`failure_summary`] 裁决。
-fn spawn_writer(receiver: flume::Receiver<String>) -> tokio::task::JoinHandle<WriterOutcome> {
-    tokio::task::spawn(async move {
-        let mut stream = receiver.into_stream().chunks(WRITE_WINDOW);
-        let mut outcome = WriterOutcome::default();
-        while let Some(window) = stream.next().await {
-            for sql in window {
-                if let Err(error) =
-                    crate::data_interface::pe_batch::execute_on(&SUL_DB, &sql).await
-                {
-                    outcome.record("element batch", error);
-                }
-            }
-        }
-        outcome
-    })
-}
-
-/// 收尾写入管线：先关闭 sender、等写者把队列排空，再把账交出去。
-///
-/// 顺序是关键。解析失败时如果提前返回，已经解析好的数据会连同没人消费的通道一起被丢弃，
-/// 而写者可能还在往库里写——清库要等它停下来才算得上「清」。
-pub(crate) async fn drain_writer(
-    sender: flume::Sender<String>,
-    writer: tokio::task::JoinHandle<WriterOutcome>,
-) -> WriterOutcome {
-    drop(sender);
-    match writer.await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let mut outcome = WriterOutcome::default();
-            outcome.record("writer task join failed", anyhow::anyhow!("{error}"));
-            outcome
-        }
-    }
 }
 
 /// 失败收尾：清掉这个 dbnum 的全部行（水位清值不删行，下一轮按首次导入重来）。

@@ -49,7 +49,7 @@ async fn durable_records_of_root(
             r#"
         SELECT id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner,
           generic, aabb.d AS world_aabb, world_trans.d AS world_trans,
-          out.ptset.d.pt AS pts, booled_id != NONE AS has_neg, dt AS date,
+          out.ptset.d.pt AS pts, booled_id != NONE AS has_neg,
           IF booled_id != NONE {{ [{{geo_hash: booled_id}}] }}
           ELSE {{ insts_flat ?? (SELECT transform ?? trans.d AS transform,
               record::id(out) AS geo_hash FROM out->geo_relate

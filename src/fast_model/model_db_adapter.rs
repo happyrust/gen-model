@@ -84,11 +84,17 @@ use e3d_model::elmodl::GeometryId;
 use serde_json::{Value, json};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
+use surrealdb::sql::{
+    Array as SurArray, Id as SurId, Number as SurNumber, Object as SurObject, Thing as SurThing,
+    Value as SurValue,
+};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::e3d_mesh_store::geometry_record_id;
-use crate::fast_model::e3d_model_service::{ModelTarget, geometry_source_refno, transform_value};
+use crate::fast_model::e3d_model_service::{
+    ModelTarget, f32_values, geometry_source_refno, transform_value,
+};
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope, RootReceipt, packed_refno,
 };
@@ -381,7 +387,9 @@ pub async fn wait_until_model_rows_are_durable(
     let roots = crate::fast_model::model_write_behind::flush_state(dbnum).pending;
     loop {
         let flush = crate::fast_model::model_write_behind::flush_state(dbnum);
-        if !flush.blocked.is_empty() {
+        // 还有根在飞就接着等：先撞上的那一根被判死不代表别的也落不下去，等到**没有一根
+        // 还能往前走**才收工——那时报出来的是完整名单，一次就看得全。
+        if flush.pending > 0 && flush.blocked.len() == flush.pending {
             anyhow::bail!(
                 "dbnum {dbnum} 有 {} 根被 write-behind 判死：{}",
                 flush.blocked.len(),
@@ -425,8 +433,148 @@ pub async fn persist_root_on(
 /// 写库失败的赔付边界是根：同组其它根继续独立提交。
 pub const BATCHED_PERSIST_ROOTS_PER_GROUP: usize = 512;
 
-/// 单条几何记录渲成语句之后的硬上限（与 [`persist_root_chunks_impl`] 同值）。
+/// 一笔发布事务最多装这么多条几何记录。
+///
+/// **按条数装块，不按字节。** 字节量随几何复杂度浮动，同一个数字在不同库上差一个量级，
+/// 调的人没有参照；条数是调用方数得出来的那个量。一根装不下就发好几笔——2026-09-14 之前
+/// 这里是「一根一笔、装不下整根失败」，AMS 7997 的 `16189/0` 一个人装着全部 52,373 件、
+/// 渲成 66 MB，于是那个库根本初始化不了。
+pub const PERSIST_CHUNK: usize = 2_000;
+
+/// 一笔事务渲成语句之后的硬上限。**不是装块的判据**（那是 [`PERSIST_CHUNK`]），是兜底：
+/// 按条数切出来的块仍然超过它，就对半劈开重渲；劈到单条还超，那一条本身有问题，报错。
 const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
+
+/// 同时在飞的根级写者数。**定死为 1**（512 根合块、单写者）；环境变量 `AIOS_MODEL_PERSIST_WRITERS`
+/// 只是实验开关，> 1 时出声告警。
+///
+/// 2026-09-14 实测（AMS 7997，142 个 ZONE 根，52,373 件，`e3d_persist_smoke --batched`，每轮全新空库）：
+///
+/// | 介质 | 1 写者 | 4 写者 | 8 写者 |
+/// | --- | --- | --- | --- |
+/// | kv-mem 内嵌 | 16.3 s | 17.4 s | 21.9 s |
+/// | RocksDB（fork surreal，ws） | 19.6 s | 47.5 s | 85.2 s |
+///
+/// 提交耗时合计随写者数线性放大（kv-mem 15.7 → 60.8 → 118 s；RocksDB 18.6 → 166 → 626 s）：
+/// 一台 SurrealDB 的提交本来就是串行的——kv-mem 一把全局写锁，RocksDB 乐观事务在提交点互撞、
+/// 再被逐笔冲突重试放大（单笔最长 27–55 s）。多写者抢不到并行，只多付锁等待与重试。
+/// 并发该花在生成侧（ZONE 根让几何闸利用率 6% → 39%）和生成与落库的重叠上，不在写者数上。
+/// 想让多写者有落点，得是多个 datastore / 分片，那不是这个开关能给的。
+///
+/// > 1 时 [`persist_roots_batched_unacked_impl`] 不再把根合成一组，而是每根自己一串事务、最多这么多根
+/// 同时提交（见 [`persist_shares_concurrently`]）。根之间的行按 `anc` 天然不相交，会撞的只有
+/// 每笔都带的 `spatial_epoch:current` 与内容寻址的共享 `inst_geo` / 共享本地盒——那是乐观事务的
+/// 「read or write conflict」，由 [`commit_publication_transaction`] 逐笔重试吸收，不升级成整根失败。
+pub fn persist_writers() -> usize {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let writers = std::env::var("AIOS_MODEL_PERSIST_WRITERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 64);
+    if writers > 1 {
+        WARNED.call_once(|| {
+            log::warn!(
+                "AIOS_MODEL_PERSIST_WRITERS={writers}：多写者是实验开关，2026-09-14 实测在 kv-mem 与 RocksDB 上都比单写者慢（RocksDB 4 写者 2.4×、8 写者 4.4×），生产请留默认 1"
+            );
+        });
+    }
+    writers
+}
+
+/// 提交一笔发布事务（`BEGIN … COMMIT`），只对写冲突按指数退避重试。
+///
+/// 整笔原子：冲突时一行都没落，原样重发是安全的。别的错误（语句错、超上限、传输断）原样返回，
+/// 由调用方按根归因。多写者并发时这里是唯一的撞点处理，不要在外面再包一层整根重试。
+async fn commit_publication_transaction(
+    db: &Surreal<Any>,
+    statements: &str,
+    context: &str,
+) -> anyhow::Result<()> {
+    let sql = publication_transaction(statements);
+    crate::surreal_retry::retry_surreal_write_operation(context, || {
+        // 每次尝试拷一份 `String` 进 future：借 `&str` 进去会让整条 async 链的 `Send` 推断卡在
+        // 「对某个具体生命周期才成立」上（写库进程里这段跑在 spawn 出去的任务上）。
+        // 一笔 2–3 MB、提交本身几百毫秒，这一拷不值一提。
+        let sql = sql.clone();
+        async move {
+            db.query(sql)
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(check_publication_response)
+        }
+    })
+    .await
+}
+
+/// 把一批记录按 [`PERSIST_CHUNK`] 条切开渲染，返回 `(条数, SQL)`。
+///
+/// 管身槽位的发号表（`tube_slots`）跨块延续，所以劈开之后 id 不会撞；劈半重渲时先在副本上
+/// 试，成了才写回去，不然半次失败的渲染会把号段吃掉。
+fn render_record_chunks(
+    records: &[ProjectedGeometry],
+    mode: WriteMode,
+    tube_slots: &mut BTreeMap<(u32, u32), usize>,
+) -> anyhow::Result<Vec<(usize, String)>> {
+    let mut rendered = Vec::new();
+    let mut pending = VecDeque::from_iter(records.chunks(PERSIST_CHUNK.max(1)));
+    while let Some(chunk) = pending.pop_front() {
+        let mut slots = tube_slots.clone();
+        let sql = render_chunk(chunk, mode, &mut slots)?;
+        if sql.len() > PUBLICATION_STATEMENT_HARD_CAP && chunk.len() > 1 {
+            let (left, right) = chunk.split_at(chunk.len() / 2);
+            pending.push_front(right);
+            pending.push_front(left);
+            continue;
+        }
+        anyhow::ensure!(
+            sql.len() <= PUBLICATION_STATEMENT_HARD_CAP,
+            "single geometry record renders to {} bytes, over the {PUBLICATION_STATEMENT_HARD_CAP} byte transaction cap",
+            sql.len()
+        );
+        *tube_slots = slots;
+        rendered.push((chunk.len(), sql));
+    }
+    Ok(rendered)
+}
+
+/// 把渲好的块按条数装进一串事务：`prelude`（分支重置 / 整片删 / 清边）进第一笔，
+/// `epilogue`（回执）进最后一笔。
+///
+/// **顺序是这套切块敢成立的全部理由**：删在第一笔、章在最后一笔，中途崩就是「有行没回执」
+/// ——那根不是 [`RootShare::reconciliation_ready`]，下一轮不敢整片删、只 upsert，直到重新
+/// 盖上章；而窗口规划器眼里它仍未发布，会重生成。空事务不发。
+fn pack_publication_transactions(
+    prelude: &str,
+    pieces: &[(usize, String)],
+    epilogue: &str,
+    bump_spatial_epoch: bool,
+) -> Vec<String> {
+    let mut transactions = Vec::new();
+    let mut current = String::from(prelude);
+    let mut packed = 0usize;
+    for (records, sql) in pieces {
+        if packed > 0 && packed + records > PERSIST_CHUNK {
+            transactions.push(std::mem::take(&mut current));
+            packed = 0;
+        }
+        current.push_str(sql);
+        packed += records;
+    }
+    current.push_str(epilogue);
+    transactions.push(current);
+    transactions.retain(|statements| !statements.is_empty());
+    if bump_spatial_epoch {
+        // 「凡是改变了树应有内容的已提交变更，都在同一事务内把 epoch +1」——落库改的正是树
+        // 镜像的那些 `inst_relate.aabb` 指针，所以每一笔都要带，不能只带最后一笔。多 bump
+        // 几次无害：这个号只与 sidecar 比相等，至多让下次启动多做一次指针重建。
+        for statements in &mut transactions {
+            statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
+            statements.push('\n');
+        }
+    }
+    transactions
+}
 
 /// 一次合块落库的账（ADR-071 / ADR-073 D1）。
 #[derive(Debug, Clone, Default)]
@@ -807,7 +955,30 @@ async fn persist_roots_batched_unacked_impl(
     let mut boxes_all = Vec::<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>::new();
     let mut cleared_all = Vec::<aios_core::RefnoEnum>::new();
 
-    for group in shares.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
+    // 多写者（`AIOS_MODEL_PERSIST_WRITERS` > 1）：每根一个写者、并发提交，不合块、不二分。
+    // 单写者走下面原来的 512 根合块 + 二分重试那一路，行为不变。
+    let writers = persist_writers();
+    let concurrent_groups = if writers > 1 {
+        persist_shares_concurrently(
+            db,
+            dbnum,
+            target.medium,
+            rooms,
+            &shares,
+            writers,
+            &mut total,
+            &mut out,
+            &mut refresh_all,
+            &mut boxes_all,
+            &mut cleared_all,
+        )
+        .await;
+        &shares[shares.len()..]
+    } else {
+        &shares[..]
+    };
+
+    for group in concurrent_groups.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
         out.groups += 1;
         // 房间关卡在写库之前、按根（ADR-073 D1 / D2）：算不出来的根就地记失败，
         // 剩下的根才进本组的事务。
@@ -916,6 +1087,81 @@ struct GroupOutcome {
     boxes: Vec<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>,
     /// 整片删掉之后这一轮不再有几何的来源：房间边清掉、树条目摘掉。
     cleared: Vec<aios_core::RefnoEnum>,
+}
+
+/// 多写者那一路：**一根一个写者**，最多 `writers` 根同时在飞，每根自己一串事务（整片删进第一笔、
+/// 回执进最后一笔，见 [`persist_group`]）。
+///
+/// 根之间按 `anc` 不相交，所以不需要合块也不需要二分——一根失败就是这一根的失败，赔付边界天然
+/// 是根。房间关卡仍在写库之前、按根过（ADR-073 D1 / D2）。账（`out` / `total` / 收敛名单）在
+/// 本任务里按完成顺序收，不跨任务共享可变状态。
+///
+/// 并发是同一个 tokio 任务上的 `buffer_unordered`：提交（IO）互相重叠，渲染（CPU）仍是串行
+/// 穿插——写者的瓶颈在库那一侧，这一版先不把渲染搬去阻塞池。
+#[allow(clippy::too_many_arguments)]
+async fn persist_shares_concurrently(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    medium: PersistMedium,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+    shares: &[RootShare],
+    writers: usize,
+    total: &mut PersistedRows,
+    out: &mut BatchedPersist,
+    refresh_all: &mut Vec<aios_core::RefnoEnum>,
+    boxes_all: &mut Vec<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>,
+    cleared_all: &mut Vec<aios_core::RefnoEnum>,
+) {
+    use futures::StreamExt as _;
+
+    let (live, room_failed) = room_stage(shares, rooms);
+    for (root, error) in room_failed {
+        out.push_failure(root, PersistFailureKind::Blocked, error);
+    }
+    if live.is_empty() {
+        return;
+    }
+    let create_missing_receipts = !medium.is_durable();
+    log::info!(
+        "model publication fan-out: roots={} writers={} dbnum={dbnum}",
+        live.len(),
+        writers.min(live.len())
+    );
+    // 用 for 循环把每根的 future 先攒成 Vec，而不是 `iter().map(|one| async move …)`：
+    // 闭包参数是引用时，返回的 async 块会带上高阶生命周期，整条链的 `Send` 就推不出来
+    // （「implementation of Send is not general enough」）。
+    let mut pending = Vec::with_capacity(live.len());
+    for (index, one) in live.iter().enumerate() {
+        pending.push(async move {
+            let outcome =
+                persist_group(db, std::slice::from_ref(one), create_missing_receipts).await;
+            (index, outcome)
+        });
+    }
+    let mut settled = futures::stream::iter(pending).buffer_unordered(writers);
+    while let Some((index, outcome)) = settled.next().await {
+        out.groups += 1;
+        let one = &live[index..index + 1];
+        match outcome {
+            Ok(outcome) => accept_group_outcome(
+                one,
+                dbnum,
+                medium,
+                rooms,
+                outcome,
+                total,
+                out,
+                refresh_all,
+                boxes_all,
+                cleared_all,
+            ),
+            Err(error) => out.push_failure(
+                one[0].share.root,
+                publication_failure_kind(&error),
+                format!("{error:#}"),
+            ),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1029,10 +1275,11 @@ async fn persist_group(
         .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
-    // 几何段：**逐根**完整渲染。这一根的两张房间边紧跟在它的几何后面
-    // （ADR-073 D1 / W2：模型在前、房间在后，同一笔事务）；只有回执没有几何的根（删干净了）
-    // 没有边可写，它的旧边由上面的清边那一半处理。
-    let mut geometry = String::new();
+    // 几何段：**逐根**渲染，每根再按 [`PERSIST_CHUNK`] 条切块。这一根的两张房间边紧跟在
+    // 它**最后一块**几何后面（ADR-073 D1 / W2：模型在前、房间在后；根跨多笔时边跟着它的
+    // 末块走，中途崩就是没章的半截，下一轮重来）；只有回执没有几何的根（删干净了）没有边
+    // 可写，它的旧边由上面的清边那一半处理。
+    let mut pieces: Vec<(usize, String)> = Vec::new();
     let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
     for live in group {
         // 整片删已经把这一根名下的行清干净了，`Incremental` 那组按 id 的删除就是纯重复——
@@ -1044,30 +1291,26 @@ async fn persist_group(
         } else {
             WriteMode::Incremental
         };
-        let mut piece = if live.claimed.is_empty() {
-            String::new()
-        } else {
-            render_chunk(&live.claimed, mode, &mut tube_slots)
-                .context(DeterministicPublicationFailure)?
-        };
-        piece.push_str(&live.room_statements);
-        // 一段本身就超上限时，后面拼什么都救不回来。这里就判掉，一次库都不碰——
-        // 本地载荷有问题不该先去读一遍再发现（`oversized_local_publication_is_blocked_before_database_io`）。
-        if piece.len() > PUBLICATION_STATEMENT_HARD_CAP {
-            return Err(anyhow::anyhow!(
-                "root {} exceeds publication transaction hard cap ({} > {} bytes)",
-                live.share.root,
-                piece.len(),
-                PUBLICATION_STATEMENT_HARD_CAP
-            )
-            .context(DeterministicPublicationFailure));
+        // 渲染是本地的：这一根切不开、单条记录就超上限，后面拼什么都救不回来。这里就判掉，
+        // 一次库都不碰——本地载荷有问题不该先去读一遍再发现
+        // （`oversized_local_publication_is_blocked_before_database_io`）。
+        let mut rendered = render_record_chunks(&live.claimed, mode, &mut tube_slots)
+            .with_context(|| format!("render root {}", live.share.root))
+            .context(DeterministicPublicationFailure)?;
+        if !live.room_statements.is_empty() {
+            match rendered.last_mut() {
+                Some((_, sql)) => sql.push_str(&live.room_statements),
+                None => rendered.push((0, live.room_statements.clone())),
+            }
         }
-        geometry.push_str(&piece);
+        pieces.extend(rendered);
     }
 
     // 本地载荷到这里已经全部过关，才轮到碰库。整片删之前库里有过的来源：行不靠它删
     // （谓词删，见 [`render_slice_delete`]），它只喂房间清边与空间树摘条目。
+    let slice_read_started = std::time::Instant::now();
     let slice_sources = slice_sources_on(db, &sliced_roots).await?;
+    let slice_read_elapsed = slice_read_started.elapsed();
     let cleared_room_edges = room_edges_to_clear(
         records.iter().map(|record| {
             (
@@ -1116,21 +1359,21 @@ async fn persist_group(
     // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份）。
     let room_edge_count = group.iter().map(|live| live.room_edges).sum::<usize>();
 
-    // **一组一笔事务。** 删整片、插整片、房间边、盖章全在里面，成不成是一个字
-    // ——没有「模型已提交、回执稍后提交」这种中间态，于是也不再需要把 `publishing`
-    // 标到凭证行上给读侧避让。装不下就整组失败（调用方二分重试），不拆。
-    let mut statements = String::new();
+    // **一组一串事务，按条数装块。** 删整片与清边进第一笔，盖章进最后一笔；中途崩就是
+    // 「有行没回执」，那几根下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位
+    // （`settle` 只在这个库一根不剩时才推进 `dbnum_watermark.model_sesno`）。
+    let mut prelude = String::new();
     for &(word0, word1) in &branches {
-        append_tube_branch_reset(&mut statements, RefNo::new(word0, word1));
+        append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    statements.push_str(&render_slice_delete(&sliced_roots));
+    prelude.push_str(&render_slice_delete(&sliced_roots));
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
-    statements.push_str(&render_room_edge_clear(&cleared_room_edges));
-    let touches_geometry = !geometry.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
-    statements.push_str(&geometry);
-    statements.push_str(&receipt_header);
-    statements.push_str(&receipt_body);
-    if statements.is_empty() {
+    prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
+    let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
+    let epilogue = format!("{receipt_header}{receipt_body}");
+    let transactions =
+        pack_publication_transactions(&prelude, &pieces, &epilogue, touches_geometry);
+    if transactions.is_empty() {
         return Ok(GroupOutcome {
             upserted: 0,
             removed: 0,
@@ -1143,31 +1386,49 @@ async fn persist_group(
             cleared: Vec::new(),
         });
     }
-    if touches_geometry {
-        statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-        statements.push('\n');
-    }
-    if statements.len() > PUBLICATION_STATEMENT_HARD_CAP {
-        return Err(anyhow::anyhow!(
-            "root {} exceeds publication transaction hard cap ({} > {} bytes)",
-            group[0].share.root,
+    let mut max_transaction_bytes = 0usize;
+    let mut commits = 0usize;
+    for (index, statements) in transactions.iter().enumerate() {
+        max_transaction_bytes = max_transaction_bytes.max(statements.len());
+        let commit_started = std::time::Instant::now();
+        let committed =
+            commit_publication_transaction(db, statements, "model publication group").await;
+        // 一笔一行的落库账：验收第二条（「读与单笔事务耗时都不随已落库量增长」）就靠连续
+        // 落 N 组之后比这几列的头尾。读与提交分开计时——整片删的谓词收不收敛，看的是 `read`
+        // 那一列随 `n` 平不平；`read` 只在第一笔算数，后面几笔是同一次读摊下来的。
+        log::info!(
+            "model publication group settled: roots={} records={} sliced_roots={} slice_sources={} read={:.1}ms tx={}/{} sql_bytes={} commit={:.1}ms ok={}",
+            group.len(),
+            records.len(),
+            sliced_roots.len(),
+            slice_sources.len(),
+            if index == 0 {
+                slice_read_elapsed.as_secs_f64() * 1000.0
+            } else {
+                0.0
+            },
+            index + 1,
+            transactions.len(),
             statements.len(),
-            PUBLICATION_STATEMENT_HARD_CAP
-        )
-        .context(DeterministicPublicationFailure));
+            commit_started.elapsed().as_secs_f64() * 1000.0,
+            committed.is_ok(),
+        );
+        committed.with_context(|| {
+            format!(
+                "persist {} projected root(s)（第 {} / {} 笔）",
+                group.len(),
+                index + 1,
+                transactions.len()
+            )
+        })?;
+        commits += 1;
     }
-    let max_transaction_bytes = statements.len();
-    db.query(publication_transaction(&statements))
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(check_publication_response)
-        .with_context(|| format!("persist {} projected root(s)", group.len()))?;
 
     Ok(GroupOutcome {
         upserted: records.len(),
         removed: cleared_room_edges.len(),
         receipts: receipted.len(),
-        commits: 1,
+        commits,
         room_edges: room_edge_count,
         max_transaction_bytes,
         refresh: deferred_refresh,
@@ -1287,7 +1548,9 @@ async fn persist_root_impl(
     // e3d-model 接管生成之后断了一段时间；现在从投影记录上重新折出来：
     // 拿到新几何的来源排一次房间重算，整片删掉之后不再有几何的来源两个方向的房间边一并清掉。
     // `legacy_sources` 空着——那是 pre-e3d 清理路径才有的名单，落库这一侧没有。
+    let slice_read_started = std::time::Instant::now();
     let slice_sources = slice_sources_on(db, &sliced_roots).await?;
+    let slice_read_elapsed = slice_read_started.elapsed();
     let cleared_room_edges = room_edges_to_clear(
         records.iter().map(|record| {
             (
@@ -1320,55 +1583,62 @@ async fn persist_root_impl(
         .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
-    // **一根一笔事务。** 删整片、插整片、房间边、盖章全在里面。
-    //
-    // 此前这里按记录数切块、渲染超 2 MiB 再劈半，靠「先删后插 + 回执最后盖」让半途而废
-    // 自愈：一块失败就没有章，这根在窗口规划器眼里仍未发布，下一轮重生成。代价是「行已
-    // 落、章未盖」这个中间态真的存在，得靠 `publication_status='publishing'` 让读侧避让。
-    // 收成一笔之后中间态不存在了，那道栅栏也跟着退役。装不下就整根失败，不拆。
-    let geometry = if records.is_empty() {
-        String::new()
-    } else {
+    // **一根一串事务，按 [`PERSIST_CHUNK`] 条装块。** 删整片与清边进第一笔、盖章进最后
+    // 一笔，靠「先删后插 + 回执最后盖」让半途而废自愈：一笔失败就没有章，这根在窗口规划器
+    // 眼里仍未发布，下一轮重生成，而下一轮的整片删会把这一轮留下的半截行收干净。
+    let mode = if reconciliation_ready {
         // 整片删覆盖得到的根不必再按 id 删一遍（见 `persist_group` 里同一处的说明）。
-        let mode = if reconciliation_ready {
-            WriteMode::Initial
-        } else {
-            WriteMode::Incremental
-        };
-        let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
-        render_chunk(&records, mode, &mut tube_slots)?
+        WriteMode::Initial
+    } else {
+        WriteMode::Incremental
     };
+    let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
+    let pieces = render_record_chunks(&records, mode, &mut tube_slots)?;
 
-    let mut statements = String::new();
+    let mut prelude = String::new();
     for &(word0, word1) in &branches {
-        append_tube_branch_reset(&mut statements, RefNo::new(word0, word1));
+        append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    statements.push_str(&render_slice_delete(&sliced_roots));
+    prelude.push_str(&render_slice_delete(&sliced_roots));
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
-    statements.push_str(&render_room_edge_clear(&cleared_room_edges));
-    statements.push_str(&geometry);
-    if let Some(receipt) = receipt.as_ref() {
-        statements.push_str(&render_receipt_version(root, receipt, None)?);
-    }
-    let commits = if statements.is_empty() { 0 } else { 1 };
-    if commits > 0 {
-        // 「凡是改变了树应有内容的已提交变更，都在同一事务内把 epoch +1」——落库改的
-        // 正是树镜像的那些 `inst_relate.aabb` 指针。重试多 bump 几次无害：这个号只与
-        // sidecar 比相等，至多让下次启动多做一次指针重建。
-        if !geometry.is_empty() || !sliced_roots.is_empty() || !branches.is_empty() {
-            statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-            statements.push('\n');
-        }
-        anyhow::ensure!(
-            statements.len() <= PUBLICATION_STATEMENT_HARD_CAP,
-            "root {root} exceeds publication transaction hard cap ({} > {PUBLICATION_STATEMENT_HARD_CAP} bytes)",
+    prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
+    let epilogue = match receipt.as_ref() {
+        Some(receipt) => render_receipt_version(root, receipt, None)?,
+        None => String::new(),
+    };
+    let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
+    let transactions =
+        pack_publication_transactions(&prelude, &pieces, &epilogue, touches_geometry);
+    let mut commits = 0usize;
+    for (index, statements) in transactions.iter().enumerate() {
+        let commit_started = std::time::Instant::now();
+        let committed =
+            commit_publication_transaction(db, statements, "model publication root").await;
+        // 与 `persist_group` 同一张账（那里是合块那一路，这里是逐根那一路）。
+        log::info!(
+            "model publication group settled: roots=1 records={} sliced_roots={} slice_sources={} read={:.1}ms tx={}/{} sql_bytes={} commit={:.1}ms ok={}",
+            records.len(),
+            sliced_roots.len(),
+            slice_sources.len(),
+            if index == 0 {
+                slice_read_elapsed.as_secs_f64() * 1000.0
+            } else {
+                0.0
+            },
+            index + 1,
+            transactions.len(),
             statements.len(),
+            commit_started.elapsed().as_secs_f64() * 1000.0,
+            committed.is_ok(),
         );
-        db.query(publication_transaction(&statements))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(check_publication_response)
-            .with_context(|| format!("persist projected root {root}"))?;
+        committed.with_context(|| {
+            format!(
+                "persist projected root {root}（第 {} / {} 笔）",
+                index + 1,
+                transactions.len()
+            )
+        })?;
+        commits += 1;
     }
 
     // 行已经提交，进程内空间树还停在旧盒上——就地收敛：盒是刚落库那批记录的 `world_bounds`
@@ -1711,8 +1981,8 @@ fn collect_record(
 
     let world_bounds = format!(
         "{{mins:{},maxs:{}}}",
-        sql_value(&json!(record.world_bounds[0])),
-        sql_value(&json!(record.world_bounds[1])),
+        sql_value(&f32_values(record.world_bounds[0])),
+        sql_value(&f32_values(record.world_bounds[1])),
     );
     batch.aabb.push(format!(
         "{{id:type::thing('aabb',{id_sql}),d:{world_bounds}}}"
@@ -1730,8 +2000,8 @@ fn collect_record(
     if let ProjectedShape::Canonical { local_bounds, .. } = &record.shape {
         batch.aabb.push(format!(
             "{{id:type::thing('aabb',{mesh_id_sql}),d:{{mins:{},maxs:{}}}}}",
-            sql_value(&json!(local_bounds[0])),
-            sql_value(&json!(local_bounds[1])),
+            sql_value(&f32_values(local_bounds[0])),
+            sql_value(&f32_values(local_bounds[1])),
         ));
         batch.inst_geo.insert(mesh_id.to_owned(), format!(
             "{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false,aabb:type::thing('aabb',{mesh_id_sql})}}"
@@ -1776,6 +2046,288 @@ fn collect_record(
             batch.inst_relate.push(format!(
                 "{{id:type::thing('inst_relate',{id_sql}),in:type::thing('pe',{source_id_sql}),booled_id:{mesh_id_sql},booled:true,bad_bool:false,solid:true,generic:{noun},dbnum:{dbnum},anc:{anc},aabb:type::thing('aabb',{id_sql}),world_trans:type::thing('trans',{id_sql}),{flat_copies},insts_flat:[{{geo_hash:{mesh_id_sql}}}],model_sesno:{source_sesno}}}"
             ));
+        }
+    }
+    Ok(())
+}
+
+/// 同一批行的**参数形态**：不渲成 SurrealQL 文本，直接铸成 SurrealDB 的值，由调用方
+/// `.bind()` 挂到 `INSERT [RELATION] IGNORE INTO <表> $rows` 上。
+///
+/// 表、顺序、字段与 [`render_records`] 逐项对齐，差别只有一处：**谁来解析**。文本那条路
+/// 客户端先把整串 `syn::parse` 解析成 AST（`db.query(String)` 内部就做这一下）、再
+/// `Display` 回字符串发出去，服务端第三次解析；参数这条路两头都不解析，值以二进制过线。
+///
+/// 今天只服务基准（`e3d_persist_smoke --bindbench`）。生产写入仍走 [`render_records`]：
+/// 发布事务里还有整片删、回执、盖章那些语句，换形态是整条路一起换的事，不是换一个渲染器。
+pub fn bind_records(records: &[ProjectedGeometry]) -> anyhow::Result<Vec<BoundTable>> {
+    let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
+    let mut batch = BoundBatch::default();
+    for record in records {
+        collect_bound_record(&mut batch, record, &mut tube_slots)?;
+    }
+    Ok(batch.finish())
+}
+
+/// 一张表的一批行，对应文本那条路的一条 `INSERT … INTO <表> [ … ]`。
+#[derive(Debug, Clone)]
+pub struct BoundTable {
+    pub table: &'static str,
+    /// 要不要 `RELATION` 关键字；与 [`RowBatch::render`] 里同一张表的答案相同。
+    pub relation: bool,
+    pub rows: Vec<SurValue>,
+}
+
+impl BoundTable {
+    /// 这一张表的那条语句（行本身走 `$<param>` 参数，不进文本）。
+    pub fn statement(&self, param: &str) -> String {
+        let keyword = if self.relation {
+            "INSERT RELATION IGNORE INTO"
+        } else {
+            "INSERT IGNORE INTO"
+        };
+        format!("{keyword} {} ${param} RETURN NONE;\n", self.table)
+    }
+}
+
+/// [`RowBatch`] 的值版：同样按表攒行，同样的表间顺序。
+#[derive(Debug, Default)]
+struct BoundBatch {
+    aabb: Vec<SurValue>,
+    trans: Vec<SurValue>,
+    inst_geo: BTreeMap<String, SurValue>,
+    inst_info: Vec<SurValue>,
+    geo_relate: Vec<SurValue>,
+    inst_relate: Vec<SurValue>,
+    tubi_relate: Vec<SurValue>,
+}
+
+impl BoundBatch {
+    fn finish(self) -> Vec<BoundTable> {
+        let shared_meshes = self.inst_geo.into_values().collect::<Vec<_>>();
+        [
+            ("aabb", self.aabb, false),
+            ("trans", self.trans, false),
+            ("inst_geo", shared_meshes, false),
+            ("inst_info", self.inst_info, false),
+            ("geo_relate", self.geo_relate, true),
+            ("inst_relate", self.inst_relate, false),
+            ("tubi_relate", self.tubi_relate, true),
+        ]
+        .into_iter()
+        .filter(|(_, rows, _)| !rows.is_empty())
+        .map(|(table, rows, relation)| BoundTable {
+            table,
+            relation,
+            rows,
+        })
+        .collect()
+    }
+}
+
+/// `<表>:<id>`，id 段是字符串——与文本那条路的 `type::thing('<表>','<id>')` 同一个记录。
+fn sur_thing(table: &str, id: &str) -> SurValue {
+    SurValue::Thing(SurThing::from((
+        table.to_owned(),
+        SurId::String(id.to_owned()),
+    )))
+}
+
+/// 复合键那两张表的 id（`geo_relate:[…,…]` / `tubi_relate:[…,…]`）。
+fn sur_keyed_thing(table: &str, key: Vec<SurValue>) -> SurValue {
+    SurValue::Thing(SurThing::from((
+        table.to_owned(),
+        SurId::Array(SurArray::from(key)),
+    )))
+}
+
+fn sur_int(value: u32) -> SurValue {
+    SurValue::Number(SurNumber::Int(i64::from(value)))
+}
+
+/// 一个 JSON 值搬进 SurrealDB 的值域。
+///
+/// 数值一律落 `Number::Float`。文本那条路是把同一个字面量交给 SurrealQL 词法器，**两边
+/// 未必判成同一个类型**——正是基准要对出来的东西，所以这里不迁就，照 f64 直落。
+fn sur_json(value: Value) -> anyhow::Result<SurValue> {
+    surrealdb::sql::to_value(value).context("JSON 值搬进 SurrealDB 值域")
+}
+
+fn sur_object<const N: usize>(fields: [(&str, SurValue); N]) -> SurValue {
+    SurValue::Object(SurObject::from(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect::<BTreeMap<String, SurValue>>(),
+    ))
+}
+
+/// [`collect_record`] 的值版。改那边就得改这边——两边渲的是同一批行，基准靠逐行比对
+/// 两个库的内容把跑偏的字段抓出来（`--bindbench` 的 `BINDBENCH-VERIFY` 那一行）。
+fn collect_bound_record(
+    batch: &mut BoundBatch,
+    record: &ProjectedGeometry,
+    tube_slots: &mut BTreeMap<(u32, u32), usize>,
+) -> anyhow::Result<()> {
+    let id = bracketed_id(record.record_id.as_str())?;
+    let source_id = refno_key(record.source_refno);
+    let mesh_id = bracketed_id(record.mesh_id.as_str())?;
+    let noun = SurValue::from(record.noun.clone());
+    let dbnum = sur_int(record.dbnum);
+    let source_sesno = sur_int(record.source_sesno);
+    let anc = sur_json(json!(record.ancestors))?;
+    let world_transform = sur_json(transform_value(record.world_transform))?;
+    let world_bounds = sur_json(json!({
+        "mins": f32_values(record.world_bounds[0]),
+        "maxs": f32_values(record.world_bounds[1]),
+    }))?;
+
+    batch.aabb.push(sur_object([
+        ("id", sur_thing("aabb", id)),
+        ("d", world_bounds.clone()),
+    ]));
+    batch.trans.push(sur_object([
+        ("id", sur_thing("trans", id)),
+        ("d", world_transform.clone()),
+    ]));
+
+    if let ProjectedShape::Canonical { local_bounds, .. } = &record.shape {
+        batch.aabb.push(sur_object([
+            ("id", sur_thing("aabb", mesh_id)),
+            (
+                "d",
+                sur_json(json!({
+                    "mins": f32_values(local_bounds[0]),
+                    "maxs": f32_values(local_bounds[1]),
+                }))?,
+            ),
+        ]));
+        batch.inst_geo.insert(
+            mesh_id.to_owned(),
+            sur_object([
+                ("id", sur_thing("inst_geo", mesh_id)),
+                ("meshed", SurValue::Bool(true)),
+                ("visible", SurValue::Bool(true)),
+                ("bad", SurValue::Bool(false)),
+                ("aabb", sur_thing("aabb", mesh_id)),
+            ]),
+        );
+    }
+
+    if let Some(tube) = record.tube.as_ref() {
+        let slot = next_tube_relation_slot(tube_slots, record.source_refno);
+        if matches!(record.shape, ProjectedShape::Baked) {
+            batch.inst_geo.insert(
+                mesh_id.to_owned(),
+                sur_object([
+                    ("id", sur_thing("inst_geo", mesh_id)),
+                    ("meshed", SurValue::Bool(true)),
+                    ("visible", SurValue::Bool(true)),
+                    ("bad", SurValue::Bool(false)),
+                ]),
+            );
+        }
+        batch.tubi_relate.push(sur_object([
+            (
+                "id",
+                sur_keyed_thing(
+                    "tubi_relate",
+                    vec![
+                        sur_thing("pe", &source_id),
+                        SurValue::Number(SurNumber::Int(slot as i64)),
+                    ],
+                ),
+            ),
+            ("in", sur_thing("pe", &source_id)),
+            ("out", sur_thing("inst_geo", mesh_id)),
+            ("leave", sur_thing("pe", &refno_key(tube.from))),
+            ("arrive", sur_thing("pe", &refno_key(tube.to))),
+            ("aabb", sur_thing("aabb", id)),
+            ("world_trans", sur_thing("trans", id)),
+            ("bore_size", SurValue::Number(SurNumber::Int(0))),
+            ("invalid", SurValue::Bool(tube.invalid)),
+            ("anc", anc),
+            ("dbnum", dbnum),
+            ("model_sesno", source_sesno),
+        ]));
+        return Ok(());
+    }
+
+    match &record.shape {
+        ProjectedShape::Canonical {
+            local_transform, ..
+        } => {
+            let local_transform = sur_json(transform_value(*local_transform))?;
+            batch.inst_info.push(sur_object([
+                ("id", sur_thing("inst_info", id)),
+                ("dbnum", dbnum.clone()),
+                ("noun", noun.clone()),
+                ("model_sesno", source_sesno.clone()),
+            ]));
+            batch.geo_relate.push(sur_object([
+                (
+                    "id",
+                    sur_keyed_thing(
+                        "geo_relate",
+                        vec![sur_thing("inst_info", id), sur_thing("inst_geo", mesh_id)],
+                    ),
+                ),
+                ("in", sur_thing("inst_info", id)),
+                ("out", sur_thing("inst_geo", mesh_id)),
+                ("geom_refno", sur_thing("pe", &source_id)),
+                ("transform", local_transform.clone()),
+                ("visible", SurValue::Bool(true)),
+                ("geo_type", SurValue::from("Pos")),
+            ]));
+            batch.inst_relate.push(sur_object([
+                ("id", sur_thing("inst_relate", id)),
+                ("in", sur_thing("pe", &source_id)),
+                ("out", sur_thing("inst_info", id)),
+                ("booled_id", SurValue::None),
+                ("booled", SurValue::Bool(false)),
+                ("bad_bool", SurValue::Bool(false)),
+                ("solid", SurValue::Bool(true)),
+                ("generic", noun),
+                ("dbnum", dbnum),
+                ("anc", anc),
+                ("aabb", sur_thing("aabb", id)),
+                ("world_trans", sur_thing("trans", id)),
+                ("aabb_d", world_bounds),
+                ("world_trans_d", world_transform),
+                (
+                    "insts_flat",
+                    SurValue::Array(SurArray::from(vec![sur_object([
+                        ("geo_hash", SurValue::from(mesh_id.to_owned())),
+                        ("transform", local_transform),
+                    ])])),
+                ),
+                ("model_sesno", source_sesno),
+            ]));
+        }
+        ProjectedShape::Baked => {
+            batch.inst_relate.push(sur_object([
+                ("id", sur_thing("inst_relate", id)),
+                ("in", sur_thing("pe", &source_id)),
+                ("booled_id", SurValue::from(mesh_id.to_owned())),
+                ("booled", SurValue::Bool(true)),
+                ("bad_bool", SurValue::Bool(false)),
+                ("solid", SurValue::Bool(true)),
+                ("generic", noun),
+                ("dbnum", dbnum),
+                ("anc", anc),
+                ("aabb", sur_thing("aabb", id)),
+                ("world_trans", sur_thing("trans", id)),
+                ("aabb_d", world_bounds),
+                ("world_trans_d", world_transform),
+                (
+                    "insts_flat",
+                    SurValue::Array(SurArray::from(vec![sur_object([(
+                        "geo_hash",
+                        SurValue::from(mesh_id.to_owned()),
+                    )])])),
+                ),
+                ("model_sesno", source_sesno),
+            ]));
         }
     }
     Ok(())
@@ -2467,6 +3019,100 @@ mod tests {
                 invalid: false,
             }),
             ..baked_record()
+        }
+    }
+
+    /// 值那条路（[`bind_records`]）与文本那条路渲的必须是**同一批行**：表与表序对得上，
+    /// 真写进两个库之后逐行逐字段相同。`--bindbench` 量的是这两条路的耗时差，而差值只有在
+    /// 「落下去的东西一模一样」这个前提下才读得出意思——这一条钉的就是那个前提。
+    #[tokio::test]
+    async fn bound_rows_land_exactly_what_the_rendered_text_lands() {
+        let records = vec![
+            canonical_record(),
+            other_canonical_record(),
+            nested_root_record(),
+            tube_record(0, TUBE_A),
+            tube_record(1, TUBE_B),
+        ];
+        let text = render_records(&records, WriteMode::Initial).expect("render");
+        let bound = bind_records(&records).expect("bind");
+        let text_tables = text
+            .lines()
+            .filter_map(|line| {
+                let relation = line.starts_with("INSERT RELATION IGNORE INTO ");
+                line.strip_prefix("INSERT RELATION IGNORE INTO ")
+                    .or_else(|| line.strip_prefix("INSERT IGNORE INTO "))
+                    .and_then(|rest| rest.split(' ').next())
+                    .map(|table| (table, relation))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text_tables,
+            bound
+                .iter()
+                .map(|table| (table.table, table.relation))
+                .collect::<Vec<_>>(),
+            "两条路的表、表序与 RELATION 关键字必须一致"
+        );
+
+        let mut dumps = Vec::new();
+        for bind in [false, true] {
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("bound_rows")
+                .use_db(if bind { "bind" } else { "text" })
+                .await
+                .unwrap();
+            if bind {
+                let statements = bound
+                    .iter()
+                    .enumerate()
+                    .map(|(index, table)| table.statement(&format!("p{index}")))
+                    .collect::<String>();
+                let mut query = db.query(publication_transaction(&statements));
+                for (index, table) in bound.iter().enumerate() {
+                    query = query.bind((
+                        format!("p{index}"),
+                        SurValue::Array(SurArray::from(table.rows.clone())),
+                    ));
+                }
+                query.await.unwrap().check().unwrap();
+            } else {
+                db.query(publication_transaction(&text))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            let mut tables = Vec::new();
+            for table in &bound {
+                // 取成 SurrealDB 自己的值（不是 JSON）：两条路的差可能只在类型上
+                // （同一个 `0.1` 一边是 Float 一边是 Decimal），JSON 会把它抹平。
+                let dumped = db
+                    .query(format!("SELECT * FROM {} ORDER BY id;", table.table))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap()
+                    .take::<surrealdb::Value>(0)
+                    .unwrap()
+                    .into_inner();
+                let SurValue::Array(rows) = dumped else {
+                    panic!("{} 的查询结果不是数组", table.table);
+                };
+                assert!(!rows.0.is_empty(), "{} 一行都没落下去", table.table);
+                tables.push(rows.0);
+            }
+            dumps.push(tables);
+        }
+        for (table, (left, right)) in bound.iter().zip(dumps[0].iter().zip(&dumps[1])) {
+            assert_eq!(left.len(), right.len(), "{} 行数不一致", table.table);
+            for (index, (left, right)) in left.iter().zip(right).enumerate() {
+                assert_eq!(
+                    left, right,
+                    "{} 第 {index} 行：文本与参数两条路落下去的不是同一行",
+                    table.table
+                );
+            }
         }
     }
 
@@ -4882,8 +5528,8 @@ mod tests {
 
     /// 源码钉（ADR-073 D1 / D2 / W2，d-932）：房间归属在写库**之前**、按根算（[`room_stage`]，输入只有
     /// 该根的内存投影与任务开工时冻住的计算器），算不出来的根在进组事务之前就剔掉；每根的边紧跟它
-    /// 自己的几何段（`live.room_statements`），段按字节装块、段不拆、块进事务——所以「模型行已提交、
-    /// 房间边稍后单独提交」这条路在源码里不存在。落库路径不回读库、不走整库房间算法
+    /// 自己的几何——一根按条数切成几块时跟着它的**末块**走，落在同一笔事务里，所以「这一根的模型行
+    /// 已提交、它的房间边稍后单独提交」这条路在源码里不存在。落库路径不回读库、不走整库房间算法
     /// （`SUL_DB` / `query_room_insts` / `cal_room_refnos`）；两个生产调用方都在任务开工时冻一次
     /// 计算器递进来。
     #[test]
@@ -4914,7 +5560,7 @@ mod tests {
             stage_at < failed_at && failed_at < group_call_at,
             "顺序：逐根算房间 → 算不出来的根剔出组 → 组事务"
         );
-        // 根内：几何段渲好 → 边拼入 → 回执并入 → 单笔提交。
+        // 根内：几何按条数切块渲好 → 边拼进这一根的末块 → 回执进收尾段 → 逐笔提交。
         let group = production
             .split_once("async fn persist_group(")
             .expect("persist_group exists")
@@ -4923,20 +5569,40 @@ mod tests {
             .expect("publication request helpers follow")
             .0;
         let render_at = group
-            .find("render_chunk(&live.claimed, mode, &mut tube_slots)")
-            .expect("几何段渲染");
+            .find("render_record_chunks(&live.claimed, mode, &mut tube_slots)")
+            .expect("几何段按条数切块渲染");
         let attach_at = group
-            .find("piece.push_str(&live.room_statements)")
-            .expect("房间边拼进这一根");
+            .find("sql.push_str(&live.room_statements)")
+            .expect("房间边拼进这一根的末块");
         let receipt_at = group
-            .find("statements.push_str(&receipt_body)")
-            .expect("回执并进同一笔事务");
+            .find("let epilogue = format!(\"{receipt_header}{receipt_body}\")")
+            .expect("回执进收尾段");
+        // 提交走 `commit_publication_transaction`（整笔原子 + 冲突重试），钉它的调用处。
         let commit_at = group
-            .find("db.query(publication_transaction(&statements))")
+            .find("commit_publication_transaction(db, statements")
             .expect("提交");
         assert!(
             render_at < attach_at && attach_at < receipt_at && receipt_at < commit_at,
-            "顺序：渲几何 → 房间边 → 回执 → 单笔提交"
+            "顺序：渲几何 → 房间边 → 回执 → 提交"
+        );
+        // 装块纪律：删在第一笔、章在最后一笔。反过来就是「章盖了、行还没写完」，
+        // 中途崩掉的那一根会被当成已发布，再也没人回来补。
+        let packer = production
+            .split_once("fn pack_publication_transactions(")
+            .expect("packer exists")
+            .1
+            .split_once("\n}\n")
+            .expect("packer end")
+            .0;
+        let prelude_at = packer
+            .find("String::from(prelude)")
+            .expect("prelude 起头第一笔");
+        let epilogue_at = packer
+            .find("current.push_str(epilogue)")
+            .expect("epilogue 收尾最后一笔");
+        assert!(
+            prelude_at < epilogue_at,
+            "整片删进第一笔、盖章进最后一笔，顺序不能对调"
         );
         // 房间关卡 + 落库路径：一句库不读，不走整间分支的算法。
         let stage = production

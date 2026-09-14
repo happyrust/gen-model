@@ -9,6 +9,8 @@ pub mod dbnum_stats;
 pub mod element_batch;
 /// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
 pub mod pe_batch;
+/// 解析侧共用的写入队列：有界通道 + 后台单写者 + 按窗批写（基线与增量同一份）。
+pub(crate) mod sql_write_queue;
 /// 数据面事务切块上限（plan 2026-09-06 §3 D3）：2 MiB / 5000 行 / 1000 元素，可配。
 pub mod tx_limits;
 // pub mod spatial_model;

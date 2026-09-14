@@ -90,7 +90,7 @@ pub(crate) async fn query_valid_insts_on(
                             FROM out->geo_relate
                             WHERE visible && out.meshed && trans.d != NONE && geo_type = 'Pos') }}
                    AS insts,
-                   booled_id != NONE AS has_neg, dt AS date
+                   booled_id != NONE AS has_neg
                FROM {keys}
                WHERE aabb.d != NONE AND world_trans.d != NONE;
                SELECT
@@ -102,7 +102,7 @@ pub(crate) async fn query_valid_insts_on(
                             FROM out->geo_relate
                             WHERE visible && out.meshed && trans.d != NONE && geo_type = 'Pos') }}
                    AS insts,
-                   booled_id != NONE AS has_neg, dt AS date
+                   booled_id != NONE AS has_neg
                FROM inst_relate
                WHERE in IN [{derived_inputs}] AND id NOT IN [{keys}]
                  AND aabb.d != NONE AND world_trans.d != NONE"#,

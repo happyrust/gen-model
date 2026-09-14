@@ -998,7 +998,7 @@ async fn dual_inst_relate_flat_materialization_agrees() {
     let create_normal = format!(
         "INSERT RELATION INTO inst_relate [{{id: inst_relate:⟨24383_100⟩, in: pe:24383_1, \
          out: inst_info:i1, world_trans: trans:t1, world_trans_d: {wt_a}, generic: 'BOX', \
-         anc: [42], dbnum: 7997, dt: NONE, has_cata_neg: false, solid: true}}];"
+         anc: [42], dbnum: 7997, has_cata_neg: false, solid: true}}];"
     );
     let create_tubi = format!(
         "INSERT RELATION INTO inst_relate [{{id: inst_relate:⟨24383_101⟩, in: pe:24383_1, \
@@ -1452,7 +1452,7 @@ async fn bench_anc_contains_vs_deep_traversal() {
          aabb.d as world_aabb, world_trans.d as world_trans, out.ptset.d.pt as pts, \
          (select trans.d as transform, record::id(out) as geo_hash from out->geo_relate \
           where visible && out.meshed && trans.d != none && geo_type='Pos') as insts, \
-         booled_id != none as has_neg, dt as date";
+         booled_id != none as has_neg";
 
     // 结果行 → refno 文本集合（serde 外部标签形制：{"Array":[{"Object":{"refno":{"Thing":…}}}]}）。
     fn refno_set(rows: &serde_json::Value) -> Vec<String> {
