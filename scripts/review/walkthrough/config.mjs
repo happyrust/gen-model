@@ -115,8 +115,8 @@ function parseSteps(argv) {
   const flag = argv.find((a) => a.startsWith('--steps='));
   const raw = flag ? flag.slice('--steps='.length) : process.env.REVIEW_STEPS || 'u1,u2,u3';
   const steps = raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  const unknown = steps.filter((s) => !['u1', 'u2', 'u3'].includes(s));
-  if (unknown.length) throw new Error(`未知步骤 ${unknown.join(',')}；只有 u1 / u2 / u3`);
+  const unknown = steps.filter((s) => !['u1', 'u2', 'u3', 'u4'].includes(s));
+  if (unknown.length) throw new Error(`未知步骤 ${unknown.join(',')}；只有 u1 / u2 / u3 / u4`);
   if (!steps.length) throw new Error('--steps 至少要一个步骤');
   return steps;
 }

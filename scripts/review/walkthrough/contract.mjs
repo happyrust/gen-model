@@ -48,14 +48,14 @@ export const CONTRACT_ROUTES = [
   // ── 批注记录（reviewApi.ts:1410-1455）─────────────────────────────────
   { method: 'POST', path: '/api/review/records', group: 'records', walkthrough: ['u2'] },
   { method: 'GET', path: '/api/review/records/by-task/{task_id}', group: 'records', walkthrough: ['u2'] },
-  { method: 'DELETE', path: '/api/review/records/item/{record_id}', group: 'records', walkthrough: ['optional'] },
-  { method: 'DELETE', path: '/api/review/records/clear-task/{task_id}', group: 'records', walkthrough: ['optional'] },
+  { method: 'DELETE', path: '/api/review/records/item/{record_id}', group: 'records', walkthrough: ['u4'] },
+  { method: 'DELETE', path: '/api/review/records/clear-task/{task_id}', group: 'records', walkthrough: ['u4'] },
 
   // ── 评论（reviewApi.ts:1493-1556）─────────────────────────────────────
   { method: 'POST', path: '/api/review/comments', group: 'comments', walkthrough: ['u2'] },
   { method: 'GET', path: '/api/review/comments/by-annotation/{annotation_id}', group: 'comments', walkthrough: ['u2'] },
-  { method: 'DELETE', path: '/api/review/comments/item/{comment_id}', group: 'comments', walkthrough: ['optional'] },
-  { method: 'PATCH', path: '/api/review/comments/item/{comment_id}', group: 'comments', walkthrough: ['optional'] },
+  { method: 'DELETE', path: '/api/review/comments/item/{comment_id}', group: 'comments', walkthrough: ['u4'] },
+  { method: 'PATCH', path: '/api/review/comments/item/{comment_id}', group: 'comments', walkthrough: ['u4'] },
 
   // ── 批注轻量字段与严重度（reviewApi.ts:1585-1637）─────────────────────
   { method: 'PATCH', path: '/api/review/annotations/{annotation_id}', group: 'annotations', walkthrough: ['u2'] },
