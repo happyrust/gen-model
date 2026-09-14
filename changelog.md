@@ -1,5 +1,29 @@
 # 变更记录
 
+## 2026-09-14
+
+### 三维校审后台移植合入主线（ADR-075；plan 2026-09-12 T1–T5 · 落主线计划 2026-09-14 P1）
+
+- `codex/review-backend-closure@1283e8856` 以 `--no-ff` 合入（`afa0ecb69`）：来源 `feature/review-backend-port@4400d8bab`
+  × `e3d-direct@02d445ba4` × 主线 `54a7c8b9d`，外加合入前收尾 6 个提交（ADR 引用 072→075 改号 16 处、
+  `review/db.rs` 行尾归一 LF、持久化闸在单测里活着、changelog 倒序、`DbOption.toml` 注释对齐主线、闭环记录改口）。
+- 校审域四前缀 `/api/review` `/api/users` `/api/auth` `/files/review_attachments` 进 gen-model；37/37 条路由、
+  21 个响应结构体与旧端逐字对照，前端零改动；10 张 `review_*` 表同住 `SUL_DB`（ADR-075 D1）。
+- 持久化闸（d-398）：判据只认 `StoreMode::is_durable()`；出厂默认 `mem` 下四前缀一律 503
+  `review.persistence.refused` + 启动横幅，生产启用校审前先起持久 SurrealDB 并改 `store_mode = "rocksdb"`；
+  逃生门 `PLANT_REVIEW_ALLOW_EPHEMERAL_STORE=1` 只给演示。闸在单测里照常活着（d-410）：`platform::tests`
+  夹具用 `cfg(test)` 进程级开关显式声明「知道会丢」，撤掉了 `#[cfg(not(test))]`。
+- A2 / A5 / A10 与旧端对拍改用替代判据（d-408）：静态逐字对照 + gen-model 单边实跑 = PASS-静态；
+  不再要求复活旧 `plant-model-gen`。
+- `e3d-direct` 分支退场（d-412）：本地已删，兜底标签 `archive/e3d-direct-20260914 → 02d445ba4`，其 8 个提交
+  （`New-LocalRelease.ps1 -ReuseWebFromZip`、回灌 8 处模型改动等）经本次合入进主线；主线唯一是
+  `gen-model-refactor`，远端 `e3d-direct` 随落主线计划 P4.3 删除。
+- 验证（合入树与 `1283e8856` 逐字节相同）：`cargo check --all-targets --features http_api` 干净；
+  `cargo test --lib --features http_api` 2037 passed / 0 failed / 107 ignored；校审域 152 / 152；
+  `integrated-acceptance.json`（`8537a9c3f`）A3 46/46、A6 PASS、A9 PASS；走查 U1 / U2 / U3 PASS；
+  真模型 AMS 8000 `24384_22402` 在前端能开。
+- 主线工作树 28 个非校审在途改动为合入暂存又即刻回放（3-way 零冲突），另存分支 `wip/mainwt-stash-20260914`（Q3）。
+
 ## 2026-09-13
 
 ### ADR-074：`store_mode` 收成 `mem` / `rocksdb` 两档，本进程从不拉起数据库；`store_process.rs` 整删

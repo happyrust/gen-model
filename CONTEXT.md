@@ -630,3 +630,23 @@ _Avoid_: 自带持久库 / 自带存储 / spawned-*（服务不再拉库，那�
 配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
 
 _Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。
+
+## 三维校审（Review）
+
+# 校审域 (Review Domain)
+
+gen-model 从旧端 `plant-model-gen` 移植过来的三维校审后台（2026-09-14 随 `codex/review-backend-closure` 合入主线 `afa0ecb69`，ADR-075，plan 2026-09-12 T1–T5，落主线计划 `docs/plans/2026-09-14-review-closure-landing-plan.md`）：**四个 URL 前缀** `/api/review`、`/api/users`、`/api/auth`、`/files/review_attachments`；37/37 条路由与 21 个响应结构体同旧端逐字对照（`docs/evidence/2026-09-13-review-shape-parity.md`），契约以旧端为准、前端零改动。10 张 `review_*` 表与模型行同住 `SUL_DB` 的同一个 ns·db（ADR-075 D1），建表建索引在首次 `fresh_review_db()` 时预热；接口规范 `docs/specs/review-api.md`。旧端 `:3100` 保留一个发布周期。
+
+_Avoid_: 审核 / 审批（那是校审流程里的节点动作，不是这个域）、review WebSocket（`/ws/review*` 不移植）、碰撞生产数据源（无生产者，留 P2）。
+
+# 持久化闸 (Review Persistence Gate)
+
+校审域挂路由之前对**落点**的一次裁决（`src/web_service/review/db.rs::review_persistence`，ADR-075 × ADR-074，d-398）。判据只有一条 `StoreMode::is_durable()`——全仓「这一档活不活得过重启」的唯一出处，校审不另立标准，否则会与 `/health.sul_db.durable` 讲两套话。`rocksdb` → 挂业务路由；`mem`（出厂默认，d-368）且未放行 → 四个前缀整体换成拒绝路由：任意路径、任意方法一律 **503** + `code=review.persistence.refused`（不是 404——404 分不清「没移植」和「配置不让跑」），启动打多行横幅点名介质、四个前缀、原因与改法；`fresh_review_db()` 同样先过闸再取句柄。三处文案（横幅 / 503 正文 / Err）共用同一份事实 `ReviewPersistenceRefusal`。闸在单测里照常活着（d-410）：`platform::tests` 的 `mem://` 夹具用 `cfg(test)` 进程级开关 `TEST_ALLOW_EPHEMERAL_STORE` 显式声明「知道会丢」，不许用 `#[cfg(not(test))]` 把闸编掉。生产启用校审的路径是先起持久 SurrealDB（`scripts/Start-Surreal8009.ps1`）、再把 `store_mode` 改成 `rocksdb`。
+
+_Avoid_: 校审开关 / 功能开关（它不是配置项，是介质派生的裁决）、降级 / 只读模式（拒绝就是整域 503，没有半开档）、`mem` 下静默放行（那是判据 A9 要禁的一行告警式失效）。
+
+# 逃生门 (Ephemeral Store Override)
+
+环境变量 `PLANT_REVIEW_ALLOW_EPHEMERAL_STORE=1`：在 `mem` 档下**显式**放行校审域，只给演示 / 联调 / 走查——数据随进程消失，启动横幅每次都继续喊「活不过重启」（`ephemeral_override=true`）。对 `rocksdb` 无意义（不会把它标成「放行来的」）。plant3d-web 开发者用出厂 `mem` 起 gen-model 时校审面表现为 `mock-disabled`，是预期行为，不是故障（d-398 边界）。
+
+_Avoid_: 写进出厂配置或发布包（d-398 明令）、当成「`mem` 下也持久」的办法（要那个得另立决策，不得靠松闸实现）、`AIOS_STORE_MODE`（那是换介质，不是放行）。
