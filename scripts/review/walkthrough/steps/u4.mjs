@@ -79,8 +79,26 @@ export async function run({ page, cfg, log, state }) {
   notes.push(`DELETE 200${commentGone ? '（复读已无该条）' : '（软删，复读仍列出）'}`);
 
   // ── B. 确认记录：建一条 → DELETE 单条 → clear-task 清空 → 复读为 0 ────────
-  //   当前节点 jd、jd==负责人，才建得了确认记录（否则 403）。空快照按 #[serde(default)] 允许。
-  const rec = await apiFromPage(page, cfg, 'POST', '/api/review/records', token, {
+  //   create_record 强校验 operator==当前节点负责人（records.rs::current_node_owner_for_task_context）：
+  //   sj→requester、jd→checker、sh/pz→approver。所以先读当前节点，用该节点负责人的身份建记录——
+  //   单跑 u1,u4 时任务停在 jd；接在 u1,u2(return) 之后时任务已回到 sj。
+  const taskDetail = await apiFromPage(page, cfg, 'GET', `/api/review/tasks/${encodeURIComponent(state.taskId)}`, token);
+  const node = String(taskDetail.json?.task?.currentNode ?? 'jd');
+  const task = taskDetail.json?.task ?? {};
+  let recordToken = token;
+  let recordActor = 'jd';
+  if (node === 'sj') {
+    const sj = state.sj || await mintToken(cfg, { userId: cfg.designerId, userName: cfg.designerName, role: 'sj', formId: state.formId });
+    recordToken = sj.token; recordActor = `sj(${cfg.designerId})`;
+  } else if (node === 'sh' || node === 'pz') {
+    const approverId = String(task.approverId || '').trim();
+    if (approverId) {
+      const sh = await mintToken(cfg, { userId: approverId, userName: approverId, role: node, formId: state.formId });
+      recordToken = sh.token; recordActor = `${node}(${approverId})`;
+    }
+  }
+  notes.push(`当前节点 ${node}，以 ${recordActor} 建记录`);
+  const rec = await apiFromPage(page, cfg, 'POST', '/api/review/records', recordToken, {
     taskId: state.taskId, formId: state.formId, type: 'batch',
     annotations: [], cloudAnnotations: [], rectAnnotations: [], measurements: [],
     note: 'A4 探针确认记录（待删）',
