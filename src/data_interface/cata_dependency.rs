@@ -1139,8 +1139,9 @@ mod tests {
         assert!(
             baseline.contains("cata_dependency::resolve_dependency_rows(")
                 && baseline.contains("cata_dependency::render_dependency_transactions(")
-                && baseline.contains(".send_async(sql.clone())"),
-            "基线必须经同一条写者队列入库 CATA 依赖（单写者不变）"
+                && baseline.contains(".send_async(WriteJob::new(")
+                && baseline.contains("sql.clone(),"),
+            "基线必须经同一条属性 lane 入库 CATA 依赖（单写者不变，ADR-077 D2）"
         );
         let publish = include_str!("model_refresh.rs");
         assert!(

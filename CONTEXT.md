@@ -222,6 +222,18 @@ _Avoid_: 数据批次（当指含模型与房间的整个执行体时）、模�
 dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与它同一笔。
 _Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS、发布阶段、文件轮次、房间水位、任务末房间段
 
+**落盘写者 (Persist Writer)**：
+任务内拥有的、按 lane 单写者的有界队列写库部件（`data_interface::persist_writer`，ADR-077 D2）：收的是已包好 `BEGIN … COMMIT` 的事务文本加一个只给失败样例归因的标签（`WriteJob { sql, label }`），逐笔取、逐笔写、不攒窗，每笔带期限（30 s + 8 s/MiB，≤180 s）与乐观冲突退避重试，账上记事务数 / 字节 / 冲突重试 / 超时。它不认识根、不认识表：合块与拆分在渲染侧做完。写者的拥有者必须是能看见全部 lane 的那一层——「先排空再清库」只有在那一层做得对。2026-09-14 从基线摄入的 `sql_write_queue` 抬出并泛化。
+_Avoid_: 写者队列、后台写库（它不跨任务）、write-behind（那是增量路上按根去重 / 退避 / 死信的另一台机器）、`WRITE_WINDOW`（随攒窗一并退役）
+
+**写入 lane (Write Lane)**：
+一条有界 channel + 一个单写者（`persist_writer::Lane`）。属性面、模型面各一条：**不同 lane 并发、同 lane 串行**。并发的前提是两面写的表 / 键集合不相交、模型边不检查 `pe` 顶点（生产 schema 里 `inst_relate` / `tubi_relate` 没有 `ENFORCED`）；2026-09-14 在全新 RocksDB 上实测两 lane 零冲突。同一面开第二个写者是另一件事，实测更慢（zone-partitioned plan）。属性 lane 上界 100 笔，模型 lane 深度 2 片，都是常量不做配置。
+_Avoid_: 多写者（指同一面）、并发写者（泛指时）、写者数配置
+
+**初始化双 lane (Dual-lane Initialization)**：
+初始化 dbnum 任务的现行形态（`data_interface::dbnum_initialize`，ADR-077）：解析（e3d-io 流式 → 元素批）与生成（`produce_slices` 并行生产者 → 切片 → 渲成 `Initial` 行 + 房间边 + `UPSERT` 回执）并发进行，各走一条写入 lane 直写 RocksDB；模型根从文件枚举（不读 `pe`）、不进模型投影、不登记 write-behind；两 lane 排空、属性面计数核对之后，收尾**一笔**盖 `applied_sesno` + `model_sesno` + 写入标记 `finished` + Ref0 统计（`task_end::TaskEnd::data`）。失败两档：lane 失败（解析器 / 闭包出错、任一写者有失败事务）→ 两 lane 排空 → 整库清 → Err；单根死信 / 模型半边自己的错 → 属性照落、`Partial`、`model_sesno` 不盖。增量路不在其内。
+_Avoid_: 基线 + 全量生成根（旧形态：数据先落、读 `pe` 枚举根、再交任务生成）、初始化走投影、先推 applied 再生成、`BaselineOutcome::units`
+
 **写入标记 (Write Marker)**：
 一个 `dbnum` 在库里的一行写入状态：任务第一笔写库前置 `writing{S,T}`，任务收尾那一笔与水位同事务置 `finished`。它回答「这个库有没有一次没写完的任务」，不回答「欠什么」——欠什么仍由两枚水位回答（ADR-072 D1 / ADR-073 D2）。见到它停在 `writing` 的唯一处置是整库重初始化（见「未完成写入重初始化」，ADR-073 D3）；正常收尾的 `Partial` 也置 `finished`，不算没写完。
 _Avoid_: attempt 行、增量尝试记录、pending 状态、锁

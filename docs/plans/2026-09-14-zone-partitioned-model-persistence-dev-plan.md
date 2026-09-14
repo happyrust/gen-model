@@ -258,6 +258,7 @@ release 构建、真写 RocksDB（fork surreal，全新空数据目录）。2,65
 **已转正（2026-09-14）**：`E3dModelService::build_set` 默认开池级元素缓存，取值走 `options::model_element_cache()`——**默认开**，只留一个环境变量的关位 `AIOS_MODEL_ELEMENT_CACHE=false`（拼错当没设，回默认开；钉在 `the_element_cache_is_on_unless_someone_spells_the_switch_right`）。默认态复测：1112 wall 5.6 s / 生成 1.43 s，7997 wall 25.3 s / 生成 7.18 s，7999 wall 10.7 s / 生成 3.68 s；关位复测 1112 回到生成 2.66 s、点查 170,445、`shared=0`。两态 `READBACK` 六项逐字相同——它换的只是时间与内存，不是产物。
 
 **还没做的那一半**：`build_set` 也给增量规划（`DbSet@S` / `DbSet@T`）用，而 `GENERATION_INPUT_CACHE` 会把生成用的 `DbSet` 按 dbnum 留着（只淘汰同 dbnum 的旧条目）。单库一轮有界，**多库长驻会按 dbnum 累加**——真撞上内存墙的处置今天只有那个关位，淘汰策略（或跑完即弃）还没定。
+**2026-09-15**：初始化那条路已跑完即弃（`dbnum_initialize::model_half` 结束就 `forget_generation_input`，7997 上模型半边收工驻留 ~1.35 GB → ~420 MB，峰值不变）；有界化的候选与要先量的数见 `2026-09-14-dual-lane-initialization-dev-plan.md`「元素缓存」一节。
 
 原始输出：`out/measure-{1112,7997,7999}-{phases,elcache2,base-rss,default-on}-rocks.txt`、`out/measure-1112-killswitch-rocks.txt`；关位跑法加 `-NoElementCache`。
 

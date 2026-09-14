@@ -200,6 +200,19 @@ pub struct GeneratedMemoryBatch {
     pub(crate) failures: Vec<(RefNo, String)>,
 }
 
+/// 一片切片按初始化口径折成的投影（ADR-077 D5）：逐根的 [`ProjectionCommit`]（带回执）与死信。
+/// 没有进过 `ModelMemoryStore`，也不会进——它只是渲 SQL 的输入。
+pub(crate) struct InitialSliceProjection {
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    /// 成功折出来的根：`(根, 提交, 这一根的账)`。零几何的根也在这里（回执 `geometry_count = 0`）。
+    pub commits: Vec<(RefNo, ProjectionCommit, E3dPersistReport)>,
+    /// 死信：生产端硬错 + 有失败元素的根。
+    pub failures: Vec<(RefNo, String)>,
+    /// 每个成功根 e3d-model DFS 访问到的子树元素名单（观测用，初始化不写透）。
+    pub visited_by_root: HashMap<RefNo, Vec<RefNo>>,
+}
+
 /// An initialization producer outcome. Success is a frozen projection, not a
 /// database completion and not a mutation of the process Current projection.
 pub struct FrozenGeneration {
@@ -813,7 +826,7 @@ impl E3dModelService {
     /// receipts that lock protects.  What each slice carries out of here is the
     /// pinned `source_sesno`; the consumer re-checks it under the lock before it
     /// commits anything.
-    async fn produce_slices(
+    pub(crate) async fn produce_slices(
         &self,
         dbnum: u32,
         roots: &[String],
@@ -1070,6 +1083,77 @@ impl E3dModelService {
         Ok(total)
     }
 
+    /// 初始化直写（ADR-077 D4 / D5）的**投影半边**：把生产端交出的一片切片逐根折成
+    /// [`ProjectionCommit`]（带回执、无 removals），**不碰** `ModelMemoryStore`、不登记 write-behind、
+    /// 不读任何回执——初始化前库里没有旧行，也没有上一轮可比。渲成 SQL、交模型 lane 是
+    /// `model_initial_persist` 与 `dbnum_initialize` 的事。
+    ///
+    /// 与 [`Self::generate_refs`] 同一套死信口径：单根有失败元素 / 生产端硬错 = 该根死信，
+    /// 不拦同片的其他根（`BestEffortFallback`）；`Required` 才整片报错。
+    pub(crate) fn project_slice_for_initialization(
+        &self,
+        batch: GeneratedMemoryBatch,
+        failure_policy: GeometryFailurePolicy,
+    ) -> anyhow::Result<InitialSliceProjection> {
+        let GeneratedMemoryBatch {
+            dbnum,
+            source_sesno,
+            index,
+            dependency_sessions,
+            snapshots,
+            failures,
+            ..
+        } = batch;
+        // 目标里带着每个 CATA 依赖的文件身份；这一片生成完之后算一次、全片共用。
+        let model_target = self.model_target(dbnum, source_sesno, &dependency_sessions)?;
+        let mut projection = InitialSliceProjection {
+            dbnum,
+            source_sesno,
+            commits: Vec::with_capacity(snapshots.len()),
+            failures,
+            visited_by_root: HashMap::new(),
+        };
+        for (root, snapshot) in snapshots {
+            let root_failed = snapshot.report.failed.len();
+            if root_failed > 0 {
+                if matches!(failure_policy, GeometryFailurePolicy::Required) {
+                    bail!("e3d-model root {root} has {root_failed} failed element(s)");
+                }
+                log::error!(
+                    "e3d-model root {root} produced an incomplete candidate ({root_failed} failure(s)): {:?}",
+                    snapshot.report.failed
+                );
+                projection.failures.push((
+                    root,
+                    format!(
+                        "{root_failed} geometry element(s) failed: {:?}",
+                        snapshot.report.failed
+                    ),
+                ));
+                continue;
+            }
+            let publication = RootPublication {
+                root,
+                model_target: Some(model_target.clone()),
+                published: None,
+                projection_complete: false,
+            };
+            let (commit, mut report) = project_geometry_delta(
+                dbnum,
+                source_sesno,
+                snapshot.elements,
+                Vec::new(),
+                Some(&publication),
+                &index.owners,
+            )?;
+            report.skipped += snapshot.report.skipped.len();
+            report.generation_report = serde_json::to_value(&snapshot.report)?;
+            projection.visited_by_root.insert(root, snapshot.visited);
+            projection.commits.push((root, commit, report));
+        }
+        Ok(projection)
+    }
+
     /// 刚体前移执行体（ADR-066 B6）的**存储半边**：把「只动摆放」的根从整根重算改成「投影记录左乘
     /// Δ + 前移回执到 T」，只左乘并提交进内存投影——**生成服务不碰数据库**（登记 / durable flush 由
     /// 调用方在 batch_worker 里做，见 `run_rigid_motion_units`）。**保守优先**：任一前置不满足就把这根
@@ -1212,6 +1296,30 @@ impl E3dModelService {
             !roots.is_empty(),
             "dbnum {dbnum} 在会话 {source_sesno} 里没有 ZONE 元素，按 ZONE 分组无根可取（不上溯 SITE）"
         );
+        Ok(roots)
+    }
+
+    /// 初始化（ADR-077 D6）的交付单元根：**从文件枚举**，一行库都不读。
+    ///
+    /// 与 `model_dbnum_ensure::capture_snapshot` 同一条路（`enumerate_generation_roots` 从文件顶层
+    /// 元素往下走、按配置的交付单元类型收根），只是 `DbSet` / 索引复用本服务的生成输入缓存——随后
+    /// `produce_slices` 读的就是同一份。此前 `manual_update::load_baseline_nodes` 分页读 `pe` 表来
+    /// 枚举，那是初始化里属性面与模型面唯一的串行点。
+    pub(crate) fn initialization_roots(
+        &self,
+        dbnum: u32,
+    ) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
+        let pin = self.pin(dbnum)?;
+        let source_sesno = self.source_session(pin)?;
+        let input = generation_input(self, dbnum, source_sesno)?;
+        let mut roots = crate::data_interface::generation_root::enumerate_generation_roots(
+            &input.set,
+            &input.index.roots,
+            &crate::data_interface::generation_root::configured_delivery_unit_types(),
+        )?;
+        // 共享遍历本就唯一；留这道护栏，畸形成员图不至于让任务总数与真正生成的集合对不上。
+        let mut seen = std::collections::HashSet::new();
+        roots.retain(|root| seen.insert(root.root.to_pdms_str()));
         Ok(roots)
     }
 
@@ -3046,6 +3154,9 @@ mod tests {
             name: None,
             solid: manifold_csg::Manifold::compose(&parts),
             parts: Some(parts),
+            part_catalogue_nouns: Vec::new(),
+            degenerate_parts: Vec::new(),
+            part_record_repeats: Vec::new(),
             world,
             primitive_instance: None,
             negatives_applied: 0,
@@ -3085,6 +3196,9 @@ mod tests {
                 name: None,
                 solid: manifold_csg::Manifold::compose(&parts),
                 parts: Some(parts),
+                part_catalogue_nouns: Vec::new(),
+                degenerate_parts: Vec::new(),
+                part_record_repeats: Vec::new(),
                 world,
                 primitive_instance: None,
                 negatives_applied: 0,

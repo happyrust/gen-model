@@ -982,16 +982,6 @@ pub fn model_cache_mode() -> ModelCacheMode {
         .unwrap_or(ModelCacheMode::IncrementalOverlay)
 }
 
-pub fn model_cache_max_bytes() -> usize {
-    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
-    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .or(load_ext_fields().model_cache_max_bytes)
-        .unwrap_or(DEFAULT)
-        .clamp(1, usize::MAX as u64) as usize
-}
-
 /// 持久层的介质。**只有两档**（2026-09-13 用户拍板）。
 ///
 /// 此前有四档，多出来的那两档（`spawned-mem` / `spawned-rocksdb`）不是第三第四种介质，

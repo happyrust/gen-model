@@ -229,6 +229,7 @@ impl PersistencePort for ProcessPersistence {
                 &crate::data_interface::task_end::TaskEnd {
                     dbnum,
                     target_sesno,
+                    data: None,
                     target_time,
                     model: Some(crate::data_interface::task_end::TaskModelOutcome {
                         all_roots_ok: true,

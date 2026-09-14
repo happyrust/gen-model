@@ -112,7 +112,6 @@ store_mode = "rocksdb"
 # RocksDB durable mode keeps only newly generated root overlays in kv-mem.
 # Cold roots are queried directly from RocksDB and never hydrated into kv-mem.
 model_cache_mode = "incremental-overlay"
-model_cache_max_bytes = 2147483648
 
 #【新增 2026-08-27】in_memory_db —— 已被 store_mode 取代的兼容开关；默认不写 = 由上面的
 # store_mode 决定。只有未写 store_mode 时，显式 true 才选 embedded-mem、false 选 external。

@@ -1152,6 +1152,7 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
                 &crate::data_interface::task_end::TaskEnd {
                     dbnum: DBNUM,
                     target_sesno: END_SESNO,
+                    data: None,
                     target_time: None,
                     model: Some(crate::data_interface::task_end::TaskModelOutcome {
                         all_roots_ok: true,
@@ -1723,6 +1724,7 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
     let mut end = crate::data_interface::task_end::TaskEnd {
         dbnum: DBNUM,
         target_sesno: END_SESNO,
+        data: None,
         target_time: None,
         model: Some(crate::data_interface::task_end::TaskModelOutcome {
             all_roots_ok: true,

@@ -656,6 +656,10 @@ pub struct DataBatchTaskResult {
     /// 仅在模型已追平时出现，取自 `dbnum_watermark.model_settled_at`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_caught_up_at: Option<String>,
+    /// 初始化双 lane 编排（ADR-077）已在任务内直写模型、一笔收尾并收了写入标记：
+    /// 执行体的收尾段（Ref0 统计、模型水位、写入标记兜底）跳过。不进回执。
+    #[serde(skip)]
+    pub initialization_closed_task: bool,
 }
 
 /// 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
@@ -1028,6 +1032,7 @@ async fn run_one_batch(
                                     )],
                                     model_verdict: None,
                                     model_caught_up_at: None,
+                                    initialization_closed_task: false,
                                 };
                             }
                         }
@@ -1132,6 +1137,7 @@ async fn run_one_batch(
                         warnings: std::mem::take(&mut warnings),
                         model_verdict: None,
                         model_caught_up_at: None,
+                        initialization_closed_task: false,
                     }
                 }
             }
@@ -1495,7 +1501,11 @@ async fn execute_frozen_batch(
     // 与模型 / 房间无关，所以排在模型那一段之前、也不等它：模型失败不该让统计停在上一版。
     // ModelOnly 不动数据行，不做。失败只留痕、标 Partial：数据行与水位不受影响，这一版的统计等
     // 下一次该库任务再序列化。
-    if job.intent != crate::data_interface::batch_queue::BatchIntent::ModelOnly
+    // 初始化双 lane 编排（ADR-077 D7）已经在自己那一笔里写了 Ref0 统计、两枚水位与写入标记：
+    // 这里的三段收尾（统计、模型水位、标记兜底）全部跳过，别在收过的标记后面再写库。
+    let initialization_closed_task = result.initialization_closed_task;
+    if !initialization_closed_task
+        && job.intent != crate::data_interface::batch_queue::BatchIntent::ModelOnly
         && let Some(committed_end_sesno) = committed_end_sesno
         && committed_end_sesno > 0
     {
@@ -1519,6 +1529,7 @@ async fn execute_frozen_batch(
                     &crate::data_interface::task_end::TaskEnd {
                         dbnum: job.dbnum,
                         target_sesno: committed_end_sesno,
+                        data: None,
                         target_time,
                         model: None,
                         info: Some(snapshot),
@@ -1571,13 +1582,14 @@ async fn execute_frozen_batch(
     let round_complete = work_round_complete;
     // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔盖得上就是它收的；
     // 收不上（这一轮没追平、模型没全成、收尾事务本身失败）由函数末尾那一笔兜底。
-    let mut write_marker_closed = false;
+    // 初始化双 lane 编排自己那一笔已经收了（ADR-077 D7）。
+    let mut write_marker_closed = initialization_closed_task;
 
     // 模型收尾盖 model_sesno。持久模式下根生成只说明 kv-mem 增量层已经就绪，不能据此
     // 提前承诺 RocksDB 已经追平；因此把整库水位作为 FIFO 栅栏交给 write-behind worker。
     // worker 会先补齐这个 dbnum 所有未获精确 ACK 的根，再在 RocksDB 上盖 model_sesno。
     // 非持久 process store 沿用同步收尾。只有 DESI 才有模型可收。
-    if round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
+    if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
         let end_time = result
             .batch
             .as_ref()
@@ -1614,6 +1626,7 @@ async fn execute_frozen_batch(
                 &crate::data_interface::task_end::TaskEnd {
                     dbnum: job.dbnum,
                     target_sesno: file_latest_sesno,
+                    data: None,
                     target_time: end_time,
                     model: Some(model_outcome),
                     info: None,
@@ -1647,6 +1660,7 @@ async fn execute_frozen_batch(
             &crate::data_interface::task_end::TaskEnd {
                 dbnum: job.dbnum,
                 target_sesno: file_latest_sesno,
+                data: None,
                 target_time: None,
                 model: None,
                 info: None,
@@ -1737,6 +1751,7 @@ async fn execute_model_only_body(
                 warnings: std::mem::take(warnings),
                 model_verdict: None,
                 model_caught_up_at: None,
+                initialization_closed_task: false,
             };
         }
     };
@@ -1792,6 +1807,7 @@ async fn execute_model_only_body(
         warnings: std::mem::take(warnings),
         model_verdict: None,
         model_caught_up_at: None,
+        initialization_closed_task: false,
     }
 }
 
@@ -1958,12 +1974,33 @@ async fn run_model_side_actions(
 /// 被看见。`noun` 只填空——已有行上的值是生成器写的，比这里的更可信。写不进去只喊一句：
 /// 这条是恢复用的痕迹，不能反过来把本批再拖失败一次。
 async fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
-    use std::str::FromStr;
-    let Ok(refno) = aios_core::RefU64::from_str(root_refno) else {
+    let Some(statement) = render_generation_failed(dbnum, root_refno, noun, error) else {
         return;
     };
+    if let Err(error) = aios_core::SUL_DB
+        .query(statement)
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|response| response.check().map_err(anyhow::Error::from))
+    {
+        log::error!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
+        eprintln!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
+    }
+}
+
+/// 失败根在 `gen_root` 上留痕的那一句（`status = 'failed'`，`last_error` 截 2000 字）。
+/// 增量路当场执行（[`mark_generation_failed`]），初始化路把它交给模型 lane（ADR-077 D5）。
+/// `root_refno` 解析不出来返回 `None`。
+pub(crate) fn render_generation_failed(
+    dbnum: u32,
+    root_refno: &str,
+    noun: &str,
+    error: &str,
+) -> Option<String> {
+    use std::str::FromStr;
+    let refno = aios_core::RefU64::from_str(root_refno).ok()?;
     let key = format!("{}_{}", refno.get_0(), refno.get_1());
-    let statement = format!(
+    Some(format!(
         "UPSERT type::thing('gen_root', {key}) SET dbnum = {dbnum}, \
          pe = type::thing('pe', {key}), noun = noun ?? {noun}, \
          status = 'failed', last_error = {error}, updated_at = time::now();",
@@ -1981,16 +2018,7 @@ async fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error:
                 &error.chars().take(2000).collect::<String>()
             )
         ),
-    );
-    if let Err(error) = aios_core::SUL_DB
-        .query(statement)
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|response| response.check().map_err(anyhow::Error::from))
-    {
-        log::error!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
-        eprintln!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
-    }
+    ))
 }
 
 /// 根生成成功后，把被改判的原始位姿目标送回统一 AABB 变更链（`PostRegenAabb`，
@@ -2112,6 +2140,7 @@ fn failed_window_result(
         warnings: std::mem::take(warnings),
         model_verdict: None,
         model_caught_up_at: None,
+        initialization_closed_task: false,
     }
 }
 
@@ -2124,6 +2153,11 @@ async fn execute_frozen_batch_body(
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
     let mut side_actions: Vec<ModelWorkItem> = Vec::new();
+    // 初始化双 lane 编排（ADR-077）的回执：模型已在 `execute_one_dbnum` 里随属性面一起直写，
+    // 收尾一笔已盖两枚水位、收了写入标记。`Some` 时本函数把它的逐根回执并进 `units`，
+    // 收尾段（`execute_frozen_batch`）按 `initialization_closed_task` 跳过自己那一笔。
+    let mut initialization: Option<crate::data_interface::dbnum_initialize::InitializationOutcome> =
+        None;
     let (batch, mut new_units) = {
         let _data_write = crate::data_interface::batch_scheduler::BatchScheduler::global()
             .begin_data_write(job.dbnum);
@@ -2137,6 +2171,7 @@ async fn execute_frozen_batch_body(
             progress,
             warnings,
             &mut side_actions,
+            &mut initialization,
         )
         .await
     };
@@ -2181,7 +2216,7 @@ async fn execute_frozen_batch_body(
     }
 
     // 本批新单元 + 明确要重算的根 + 级联展开出来的根并成一张工作单（同根只留最新一条）。
-    let (units, mut settlement_failed) = if defer_model_phase {
+    let (mut units, mut settlement_failed) = if defer_model_phase {
         registry.set_unit_totals(&job.task_id, 0);
         // 这句过去无条件打，失败批次照样宣告「已收口」——2026-08-18 现场
         // ams7351 数据批次 failed，日志里却先说收口、下一行才说失败记账，排查
@@ -2219,6 +2254,16 @@ async fn execute_frozen_batch_body(
         registry.set_unit_totals(&job.task_id, 0);
         (Vec::new(), true)
     };
+    // 初始化的模型单元已经在编排里直写完成：逐根回执并进本任务的单元清单（面板 / 判决 / 聚合状态
+    // 都从这份清单读），总数按它对齐。
+    let initialization_closed_task = initialization.is_some();
+    if let Some(init) = initialization.take() {
+        registry.set_unit_totals(&job.task_id, init.units.len() as u32);
+        for _ in &init.units {
+            registry.bump_units_done(&job.task_id);
+        }
+        units.extend(init.units);
+    }
 
     // A pose target inside BRAN/HANG is deliberately removed from the cheap Transform
     // worklist and promoted to root regeneration.  Some root generators replace the
@@ -2262,6 +2307,7 @@ async fn execute_frozen_batch_body(
         warnings: std::mem::take(warnings),
         model_verdict: None,
         model_caught_up_at: None,
+        initialization_closed_task,
     }
 }
 
@@ -3346,7 +3392,9 @@ mod tests {
     fn durable_model_watermark_is_owned_by_the_write_behind_barrier() {
         let source = include_str!("batch_worker.rs");
         let settlement = source
-            .split_once("if round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")")
+            .split_once(
+                "if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")",
+            )
             .expect("DESI settlement gate")
             .1
             .split_once("// ── 写入标记的兜底收口")
@@ -3382,6 +3430,7 @@ mod tests {
             warnings: Vec::new(),
             model_verdict: Some("in_sync".into()),
             model_caught_up_at: Some("2026-09-05T17:01:43Z".into()),
+            initialization_closed_task: false,
         };
         let json = serde_json::to_value(receipt).expect("task receipt serializes");
         assert_eq!(json["model_verdict"], "in_sync");

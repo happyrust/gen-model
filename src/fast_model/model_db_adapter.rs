@@ -432,7 +432,7 @@ pub const PERSIST_CHUNK: usize = 2_000;
 
 /// 一笔事务渲成语句之后的硬上限。**不是装块的判据**（那是 [`PERSIST_CHUNK`]），是兜底：
 /// 按条数切出来的块仍然超过它，就对半劈开重渲；劈到单条还超，那一条本身有问题，报错。
-const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
+pub(crate) const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
 
 /// 同时在飞的根级写者数。**定死为 1**（512 根合块、单写者）；环境变量 `AIOS_MODEL_PERSIST_WRITERS`
 /// 只是实验开关，> 1 时出声告警。
@@ -2437,7 +2437,7 @@ fn render_receipt_version(
 }
 
 /// 回执里 `ModelTarget` 的 SurrealQL 字面量；没有目标就是 `NONE`。
-fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String> {
+pub(crate) fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String> {
     Ok(receipt
         .model_target
         .as_ref()
@@ -2449,7 +2449,7 @@ fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String>
 
 /// 回执本体：`model_target` 由调用方给表达式（`NONE`、字面量或一个已 `LET` 好的变量）。
 /// 跨根合块（[`persist_roots_batched`]）把同一份清单绑一次、几百根共用一个变量，就是靠这一层。
-fn render_receipt_with_target(
+pub(crate) fn render_receipt_with_target(
     root: RefNo,
     receipt: &RootReceipt,
     frozen: Option<(u64, u32)>,
@@ -5473,6 +5473,7 @@ mod tests {
             &crate::data_interface::task_end::TaskEnd {
                 dbnum: BATCH_DBNUM,
                 target_sesno: 42,
+                data: None,
                 target_time: None,
                 model: Some(crate::data_interface::task_end::TaskModelOutcome {
                     all_roots_ok: true,

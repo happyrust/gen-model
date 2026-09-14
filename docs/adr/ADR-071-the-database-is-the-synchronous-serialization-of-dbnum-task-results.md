@@ -15,6 +15,13 @@ D3/D6 的执行体，`read_model_watermark_probe` 已退出任务收尾热路径
 **被 ADR-072 修订（2026-09-10）**：S3 崩溃语义改为「行幂等 + 水位最后 + 写入标记回退」；D4 加崩溃例外（崩在模型 / 房间中途时
 `applied_sesno` 一并退回 S）；D9 退役清单补 `model_completion` / `room_published_*` / `room_topology_source` / `increment_update_attempt`；
 S3 后半「去文件轮次」与 S7–S8 由 ADR-072 计划 R3–R5 接管。D1 的「同步」不变。
+**被 [ADR-076](ADR-076-the-increment-task-ends-when-rocksdb-has-it-and-freshness-comes-from-the-model-projection.md) 修订
+（2026-09-14）**：D4 的任务收尾事务改排在**本库 RocksDB 刷盘栅栏之后**——持久档下 `batch_worker.rs` 一度把模型水位交给
+write-behind worker 在后台盖（`enqueue_model_watermark_write_behind`，任务置 `stage = durable_pending` 即返回），
+该分工取消，三枚水位重新由收尾那一笔控制面事务同时盖（ADR-076 D5），于是「任务完成 ≡ RocksDB 里有 ≡ 三枚水位到位」
+（ADR-076 D2 按 dbnum 设栅栏、D7 `durable_pending` 降为任务内阶段）。刷盘用尽任务内重试预算仍失败：转 `Partial`、
+写入标记不收，按 ADR-072 整窗重来（ADR-076 D6）。**D1 不动**——异步严格关在任务内部（属性写走 `sql_write_queue`、
+收尾等队列排空，ADR-076 D4），跨任务仍是同步序列化、同库仍严格串行（ADR-076 D3）。
 日期：2026-09-10
 计划：`docs/plans/2026-09-10-finalization-loop-and-pe-statistics-plan.md`（v3，含实测起因、实施步骤 S1–S8 与 S1 的落地出入）。
 关联：

@@ -14,7 +14,15 @@
 **2026-09-10 四轮追记 D10**（用户拍板「模型水位 + 房间水位默认按数据水位保持一致」）：已有数据的库兼容播种时，
 有旧管线模型投影的库把 `model_sesno` / `room_sesno` 填成 `applied_sesno`、启动核对按 `legacy_adopted` 跳过恢复 Task，
 数据在模型无的库显式记 0；**已实施**（`dbnum_state::seed_legacy_model_watermarks_on`、
-`ModelWatermarkProbe::legacy_adopted`、`lib.rs` 启动序列一句）
+`ModelWatermarkProbe::legacy_adopted`、`lib.rs` 启动序列一句）；
+**被 [ADR-076](ADR-076-the-increment-task-ends-when-rocksdb-has-it-and-freshness-comes-from-the-model-projection.md) 修订
+（2026-09-14）**：D5 / M1 的**所有权与触发点**表述改口径——持久档下模型水位不再由 write-behind worker 在后台盖，
+`model_sesno` 与另两枚水位一起，由 dbnum 任务 `await` 本库 RocksDB 刷盘栅栏之后的那一笔收尾事务同时盖
+（ADR-076 D5，回到 ADR-071 D1 的形状；一枚控制面事实只能有一个写者）。
+**本 ADR 的水位语义不动**：M1「承诺须有产物落库支撑」正是 ADR-076 要收紧的那一条，D4 一致判据、
+M2 单调与上界、M7「水位是仪表不是闸门」、D6–D8 的回退与对账照旧。
+（ADR-076 关联段原写「ADR-060 D5 / N3」；本 ADR 的不变量编号是 M1–M8，`N3` 属 ADR-056「模型发布根级原子」，
+按本意应读作 M1，已在 ADR-076 就地改正。）
 日期：2026-09-04（状态行 2026-09-10 更新）
 关联：
 - **修订** ADR-056 N5（「两枚凭证表达读者一致性」从「库级数据水位 + 根级模型凭证」升为**两枚同粒度库级水位**）、
