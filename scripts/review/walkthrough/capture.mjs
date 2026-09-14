@@ -37,6 +37,15 @@ export function isFallbackClass(kind) {
   return kind === 'mock-used' || kind === 'mock-disabled';
 }
 
+/**
+ * 客户端在页面导航（page.goto）时取消的在途请求：Playwright 记为 requestfailed，
+ * errorText 为 net::ERR_ABORTED。这是浏览器行为、不是服务端失败（服务端根本没拒），
+ * 也不代表接口没通——不计入 A4 的「非 2xx/3xx」，契约判定里也从命中中剔除、只留痕。
+ */
+export function isClientAbort(r) {
+  return !!r && r.status === null && /ERR_ABORTED/i.test(r.failure || '');
+}
+
 export class Capture {
   constructor(cfg) {
     this.cfg = cfg;
@@ -153,9 +162,14 @@ export class Capture {
     return this.console.filter((c) => isFallbackClass(c.kind));
   }
 
-  /** 非 2xx / 3xx 的校审请求。 */
+  /** 非 2xx / 3xx 的校审请求；客户端导航 abort（net::ERR_ABORTED）不算失败。 */
   badRequests() {
-    return this.requests.filter((r) => r.status === null || r.status >= 400);
+    return this.requests.filter((r) => (r.status === null || r.status >= 400) && !isClientAbort(r));
+  }
+
+  /** 页面导航时被客户端取消的在途请求（net::ERR_ABORTED），仅供留痕/统计，不判 A4。 */
+  clientAborts() {
+    return this.requests.filter((r) => isClientAbort(r));
   }
 
   unexpectedOrigins() {

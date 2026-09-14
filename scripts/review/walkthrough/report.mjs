@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { CONTRACT_ROUTES, expectedRoutesFor } from './contract.mjs';
+import { isClientAbort } from './capture.mjs';
 
 function jsonl(rows) {
   return rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : '');
@@ -21,16 +22,18 @@ export function buildChecklist(capture, steps, decision = 'approve') {
   const rows = CONTRACT_ROUTES.map((route) => {
     const key = `${route.method} ${route.path}`;
     const hits = capture.requests.filter((r) => r.contractPath === route.path && r.method === route.method);
+    // 客户端导航 abort（net::ERR_ABORTED）既不算命中、也不算失败：从判定里剔掉，只在状态列留痕。
+    const realHits = hits.filter((h) => !isClientAbort(h));
     const statuses = [...new Set(hits.map((h) => (h.status === null ? `FAILED(${h.failure || '?'})` : h.status)))];
-    const ok = hits.length > 0 && hits.every((h) => h.status !== null && h.status < 400);
+    const ok = realHits.length > 0 && realHits.every((h) => h.status !== null && h.status < 400);
     return {
       method: route.method,
       path: route.path,
       group: route.group,
       expectedThisRun: expected.has(key),
-      hitCount: hits.length,
+      hitCount: realHits.length,
       statuses,
-      verdict: hits.length === 0 ? (expected.has(key) ? 'MISS' : 'NOT EXERCISED') : ok ? 'PASS' : 'FAIL',
+      verdict: realHits.length === 0 ? (expected.has(key) ? 'MISS' : 'NOT EXERCISED') : ok ? 'PASS' : 'FAIL',
       note: route.note ?? '',
     };
   });
@@ -64,6 +67,8 @@ export function writeArtifacts({ cfg, capture, steps, stepResults, preflightChec
       failedReviewRequests: badRequests.length,
       unexpectedOrigins: unexpectedOrigins.length,
       contractMissing: missing.length,
+      // 导航中途被客户端取消的在途请求：浏览器行为，非服务端失败，已排除在上面三项之外（仅留痕）。
+      clientAborts: capture.clientAborts().length,
     },
     contractChecklist: rows,
   };
@@ -123,6 +128,11 @@ function renderReport(report, capture) {
   L.push(`| 请求打到预期之外的 origin | ${report.a4.unexpectedOrigins} | ${report.a4.unexpectedOrigins === 0 ? 'PASS' : 'FAIL'} |`);
   L.push(`| 本次应打却没打到的契约条目 | ${report.a4.contractMissing} | ${report.a4.contractMissing === 0 ? 'PASS' : 'FAIL'} |`);
   L.push('');
+  if (report.a4.clientAborts) {
+    L.push(`> 另有 ${report.a4.clientAborts} 条请求在页面导航时被客户端取消（\`net::ERR_ABORTED\`）——浏览器行为、非服务端失败，`);
+    L.push('> 已按约定排除在以上判据之外（仍记入 `requests.jsonl`，状态列标 `FAILED(net::ERR_ABORTED)`）。');
+    L.push('');
+  }
 
   if (report.a4.fallbackDetail.length) {
     L.push('### fallback 告警明细');
