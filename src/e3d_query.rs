@@ -1,6 +1,6 @@
 //! Read-only E3D TTY queries shared by the L3 runner and the MCP server.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -460,6 +460,11 @@ pub fn parse_members(raw: &str) -> Result<Vec<MemberRow>> {
         return Ok(Vec::new());
     };
     let mut rows = Vec::new();
+    // The number E3D prints after the noun counts that **noun** inside this
+    // member list, not the row: `40 GASK 12=…` / `41 FLAN 12/12` are the 12th
+    // GASK and the 12th FLAN of the same parent.  The two only coincide on the
+    // first row, which is where the old `1 SITE 1 /NAME` reading came from.
+    let mut noun_ordinals: HashMap<String, u32> = HashMap::new();
     for line in text.lines().map(str::trim) {
         if line.eq_ignore_ascii_case("Members") {
             continue;
@@ -469,25 +474,31 @@ pub fn parse_members(raw: &str) -> Result<Vec<MemberRow>> {
             continue;
         };
         let noun = parts.next().context("member noun missing")?.to_string();
+        let ordinal = {
+            let seen = noun_ordinals
+                .entry(noun.to_ascii_uppercase())
+                .or_insert(0u32);
+            *seen += 1;
+            *seen
+        };
         let mut values = parts.map(str::to_string).collect::<Vec<_>>();
-        // E3D 3.1's `Q MEMBERS` repeats the row number after the noun in
-        // ordinary TTY output (`1 SITE 1 /NAME`).  Marker-based query output
-        // and older captures may omit it, so remove it only when it matches.
+        // Marker-based query output and older captures may omit that per-noun
+        // ordinal, so remove it only when it is actually there.
         if values.first().and_then(|v| v.parse::<u32>().ok()).is_some() {
             values.remove(0);
         }
         if let Some(first) = values.first_mut() {
             let prefix = first.bytes().take_while(|b| b.is_ascii_digit()).count();
             let suffix = &first[prefix..];
-            // The fixed-width listing can glue the repeated row number to a
-            // slash-prefixed name: row 13 and name /31 becomes `13/31`.  That
-            // spelling also happens to be a valid RefNo, so validation alone
-            // cannot disambiguate it.  A prefix equal to this row's index is
-            // the repeated ordinal; remove it before looking for RefNos.
-            let glued_repeated_index = prefix > 0
+            // The fixed-width listing can glue that ordinal to a slash-prefixed
+            // name: the 12th FLAN named `/12` becomes `12/12`.  That spelling
+            // also happens to be a valid RefNo, so validation alone cannot
+            // disambiguate it — only a prefix equal to the ordinal can.  Older
+            // fixtures are matched against the row number for the same reason.
+            let glued_ordinal = prefix > 0
                 && suffix.starts_with('/')
-                && first[..prefix].parse::<u32>().ok() == Some(index);
-            if glued_repeated_index
+                && matches!(first[..prefix].parse::<u32>(), Ok(value) if value == ordinal || value == index);
+            if glued_ordinal
                 || (validate_refno(first.trim_start_matches('=')).is_err()
                     && prefix > 0
                     && (suffix.starts_with('/') || suffix.starts_with('=')))
@@ -701,6 +712,82 @@ mod tests {
         let rows = parse_members(raw).unwrap();
         assert_eq!(rows[0].value, "/31");
         assert_eq!(rows[0].refno, None);
+    }
+
+    /// Verbatim `Q MEMBERS` of YCYK-E3D `/SLYK` BRANCH `38293/277`
+    /// (`output/e3d-mcp/query-64648-20260913224510689381`).  The column after
+    /// the noun counts that noun, and at two digits the fixed-width listing
+    /// glues it to the value — see row 41.
+    const MEMBERS_38293_277: &str = "\
+Members
+ 1 ELBO 1 =38293/278
+ 2 TEE 1 =38293/279
+ 3 FLAN 1 =38293/280
+ 4 GASK 1 =38293/281
+ 5 VALV 1 /GV0308
+ 6 GASK 2 =38293/283
+ 7 FLAN 2 =38293/284
+ 8 FLAN 3 =38293/286
+ 9 GASK 3 =38293/287
+10 VALV 2 /CV0308
+11 GASK 4 =38293/289
+12 FLAN 4 =38293/290
+13 TEE 2 =38293/291
+14 TEE 3 =38293/292
+15 TEE 4 =38293/293
+16 FLAN 5 =38293/294
+17 GASK 5 =38293/295
+18 FILT 1 /FQ0308
+19 GASK 6 =38293/297
+20 FLAN 6 =38293/298
+21 TEE 5 =38293/299
+22 FLAN 7 =38293/300
+23 GASK 7 =38293/301
+24 INST 1 /FT-0308
+25 GASK 8 =38293/303
+26 FLAN 8 =38293/304
+27 TEE 6 =38293/305
+28 TEE 7 =38293/306
+29 FLAN 9 =38293/307
+30 GASK 9 =38293/308
+31 VALV 3 /FV-0308
+32 GASK 10=38293/310
+33 FLAN 10=38293/311
+34 TEE 8 =38293/312
+35 ELBO 2 =38293/313
+36 ELBO 3 =38293/314
+37 FLAN 11=38293/315
+38 GASK 11=38293/316
+39 VALV 4 /BV0308
+40 GASK 12=38293/318
+41 FLAN 12/12
+42 FLAN 13=38293/320
+43 GASK 13=38293/321
+44 PCOM 1 /LA-0308
+45 GASK 14=38293/323
+46 FLAN 14=38293/324";
+
+    /// Row 41 is the 12th FLAN and is **named** `/12`, so the glued column
+    /// spells `12/12` — itself a valid RefNo.  Reading that number as the row
+    /// number left the glue in place and invented a phantom member `12/12`,
+    /// which showed up as the only real-looking mismatch in a 37601-parent
+    /// direct-vs-TTY run.
+    #[test]
+    fn members_split_glued_per_noun_ordinal_that_reads_as_a_refno() {
+        let raw = format!("MCP-MEMBERS-BEGIN\n{MEMBERS_38293_277}\nMCP-MEMBERS-END");
+        let rows = parse_members(&raw).unwrap();
+        assert_eq!(rows.len(), 46);
+
+        let glued = &rows[40];
+        assert_eq!(glued.index, 41);
+        assert_eq!(glued.noun, "FLAN");
+        assert_eq!(glued.value, "/12");
+        assert_eq!(glued.refno, None);
+
+        // Its neighbours — one glued `=refno`, one spaced name — stay put.
+        assert_eq!(rows[39].refno.as_deref(), Some("38293/318"));
+        assert_eq!(rows[38].value, "/BV0308");
+        assert_eq!(rows[41].refno.as_deref(), Some("38293/320"));
     }
 
     #[test]
