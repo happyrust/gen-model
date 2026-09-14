@@ -49,6 +49,10 @@
     复用现成程序产物（本次 0.1.19 发布走这条：Q1=A 用已随发布验证的包内那份 exe/web），
     从 -SourcePackage 取 aios-database.exe 与 web\（自动剔除冗余的 web\assets\meshes）。
 
+.PARAMETER ReuseWebFromZip
+    正常重建后端，但从一份既有、三腿冒烟全过的 -full zip 复用 web\。
+    适合后端单独发版，避免把 plant-ui 工作树中的未提交改动夹进同一版本号。
+
 .PARAMETER BuildId
     本次后端二进制的唯一构建号。正常构建默认生成
     <Cargo版本>+release.<UTC时间戳>.g<提交>[.dirty]，写入 EXE ProductVersion、
@@ -83,6 +87,9 @@
 .EXAMPLE
     # 本次 0.1.19：复用包内 exe/web，自带内存库冒烟
     ./scripts/New-LocalRelease.ps1 -SkipBuild
+
+    # 只重建后端，复用上一版已验证 Web
+    ./scripts/New-LocalRelease.ps1 -ReuseWebFromZip releases\ams-local-0.1.21-full.zip -StrictSmoke
 #>
 [CmdletBinding()]
 param(
@@ -98,6 +105,7 @@ param(
     [string]$OutDir,
     [string]$Name,
     [switch]$SkipBuild,
+    [string]$ReuseWebFromZip,
     [switch]$SkipSmoke,
     [switch]$IncludeWorkspace,
     [switch]$ExcludeMeshes,
@@ -109,12 +117,48 @@ param(
     [switch]$Force
 )
 
+function Get-Sha256Compat([string]$LiteralPath) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        try { return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Warn2([string]$msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
+
+function Copy-WebFromReleaseZip([string]$ZipPath, [string]$Destination) {
+    if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) {
+        throw "复用 Web 的发布包不存在：$ZipPath"
+    }
+    New-Item -ItemType Directory -Force $Destination | Out-Null
+    $resolvedZip = (Resolve-Path -LiteralPath $ZipPath).Path
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($resolvedZip)
+    $copied = 0
+    try {
+        foreach ($entry in $archive.Entries) {
+            if (-not $entry.FullName.StartsWith('web/', [StringComparison]::OrdinalIgnoreCase)) { continue }
+            if (-not $entry.Name) { continue }
+            if ($entry.FullName -match '^web/assets/meshes/') { continue }
+            $relative = $entry.FullName.Substring(4).Replace('/', [IO.Path]::DirectorySeparatorChar)
+            $target = Join-Path $Destination $relative
+            New-Item -ItemType Directory -Force (Split-Path -Parent $target) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+            $copied++
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+    if ($copied -eq 0) { throw "$ZipPath 中没有可复用的 web/ 文件" }
+    return $copied
+}
 
 function Get-CargoVersion([string]$cargoToml) {
     if (-not (Test-Path -LiteralPath $cargoToml)) { throw "找不到 Cargo.toml：$cargoToml" }
@@ -186,6 +230,44 @@ if ($LASTEXITCODE -ne 0 -or
 if (-not $BackendVersion) { $BackendVersion = Get-CargoVersion (Join-Path $RepoRoot 'Cargo.toml') }
 if (-not $WebVersion) { $WebVersion = Get-CargoVersion (Join-Path $PlantUiRoot 'Cargo.toml') }
 if (-not $SourcePackage) { $SourcePackage = Join-Path $OutDir "ams-local-$BackendVersion" }
+$backendGitCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $backendGitCommit) { $backendGitCommit = 'unknown' }
+else { $backendGitCommit = $backendGitCommit.Trim() }
+$e3dIoRoot = Join-Path (Split-Path -Parent $RepoRoot) 'vendor\e3d-io'
+$e3dIoGitCommit = (& git -C $e3dIoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $e3dIoGitCommit) { $e3dIoGitCommit = 'unknown' }
+else { $e3dIoGitCommit = $e3dIoGitCommit.Trim() }
+if ($SkipBuild -and $ReuseWebFromZip) {
+    throw "-SkipBuild 与 -ReuseWebFromZip 互斥：前者复用 exe+web，后者只复用 web"
+}
+
+$webSource = 'built-from-plant-ui'
+$webSourceSha256 = $null
+if ($ReuseWebFromZip) {
+    $ReuseWebFromZip = (Resolve-Path -LiteralPath $ReuseWebFromZip -ErrorAction Stop).Path
+    if ($ReuseWebFromZip -notmatch '(?i)\.zip$') {
+        throw "-ReuseWebFromZip 必须指向 .zip：$ReuseWebFromZip"
+    }
+    $priorManifestPath = [regex]::Replace($ReuseWebFromZip, '(?i)\.zip$', '.release.json')
+    if (-not (Test-Path -LiteralPath $priorManifestPath -PathType Leaf)) {
+        throw "复用 Web 前必须有同名发布清单：$priorManifestPath"
+    }
+    $priorManifest = Get-Content -LiteralPath $priorManifestPath -Raw | ConvertFrom-Json
+    if ($priorManifest.plant_ui_version -ne $WebVersion) {
+        throw "复用包 plant-ui=$($priorManifest.plant_ui_version)，当前声明=$WebVersion；拒绝错标版本"
+    }
+    $priorSmoke = $priorManifest.smoke
+    if ($priorSmoke.status -ne 'passed' -or
+        $priorSmoke.setup_leg.status -ne 'passed' -or
+        $priorSmoke.rocks_leg.status -ne 'passed') {
+        throw "复用包三腿冒烟未全部通过，不能作为 Web 来源：$priorManifestPath"
+    }
+    $webSourceSha256 = Get-Sha256Compat $ReuseWebFromZip
+    if ($priorManifest.zip.sha256 -and $priorManifest.zip.sha256 -ne $webSourceSha256) {
+        throw "复用包 SHA-256 与发布清单不一致：$ReuseWebFromZip"
+    }
+    $webSource = "reused-from:$([IO.Path]::GetFileName($ReuseWebFromZip))"
+}
 
 $buildEpoch = $null
 if ($SkipBuild) {
@@ -245,6 +327,7 @@ $stage = Join-Path $OutDir $Name
 $zip = Join-Path $OutDir "$Name.zip"
 
 Write-Step "版本：backend $BackendVersion / build $BuildId / plant-ui $WebVersion"
+Write-Step "Web 来源：$webSource"
 Write-Step "输出：$zip"
 
 # ── 1. 版本纪律：拒绝覆盖（Q8） ──────────────────────────────────────────────
@@ -286,13 +369,20 @@ if ($SkipBuild) {
     if ($skipped -gt 0) { Write-Step "web 剔除冗余 meshes $skipped 个（后端从 workspace\assets 供数）" }
 }
 else {
-    Write-Step "构建 web(wasm)：$PlantUiRoot"
-    Push-Location $PlantUiRoot
-    try {
-        & (Join-Path $PlantUiRoot 'scripts\build-wasm.ps1')
-        if ($LASTEXITCODE) { throw "build-wasm 失败（exit $LASTEXITCODE）" }
+    if ($ReuseWebFromZip) {
+        Write-Step "复用已验证 Web：$ReuseWebFromZip"
+        $copiedWeb = Copy-WebFromReleaseZip $ReuseWebFromZip $webStage
+        Write-Step "Web 复用完成：$copiedWeb 个文件"
     }
-    finally { Pop-Location }
+    else {
+        Write-Step "构建 web(wasm)：$PlantUiRoot"
+        Push-Location $PlantUiRoot
+        try {
+            & (Join-Path $PlantUiRoot 'scripts\build-wasm.ps1')
+            if ($LASTEXITCODE) { throw "build-wasm 失败（exit $LASTEXITCODE）" }
+        }
+        finally { Pop-Location }
+    }
     Write-Step "构建 backend：$RepoRoot"
     Push-Location $RepoRoot
     $previousTargetDir = $env:CARGO_TARGET_DIR
@@ -324,13 +414,15 @@ else {
     }
     if (-not (Test-Path -LiteralPath $builtExe)) { throw "构建后找不到 aios-database.exe" }
     Copy-Item -LiteralPath $builtExe -Destination (Join-Path $stage 'aios-database.exe')
-    $pub = Join-Path $PlantUiRoot 'web\public'
-    Get-ChildItem -LiteralPath $pub -Recurse -File | ForEach-Object {
-        if ($_.FullName -match '\\assets\\meshes\\') { return }
-        $rel = $_.FullName.Substring($pub.Length + 1)
-        $dest = Join-Path $webStage $rel
-        New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $dest
+    if (-not $ReuseWebFromZip) {
+        $pub = Join-Path $PlantUiRoot 'web\public'
+        Get-ChildItem -LiteralPath $pub -Recurse -File | ForEach-Object {
+            if ($_.FullName -match '\\assets\\meshes\\') { return }
+            $rel = $_.FullName.Substring($pub.Length + 1)
+            $dest = Join-Path $webStage $rel
+            New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $dest
+        }
     }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $webStage 'pkg\plant_ui_app_bg.wasm'))) {
@@ -712,6 +804,8 @@ $firstRunNote
 → ④选「只导数据 / 一步到位」并保存重启 → ⑤勾库初始化。向导页只许在**本机**打开
 （局域网访问应用没问题，但改配置的接口只收 127.0.0.1 的请求）。
 不想用向导：直接改 ``workspace\DbOption.toml`` 后重启，并删掉 ``workspace\.first-run-pending``。
+出厂配置显式使用 ``e3d_version="e3d31"``；若项目来自 E3D 2.10，请在初始化前改成
+``e3d_version="e3d210"``。服务不会按目录名或数据库会话字段猜版本。
 
 ## 包内布局（一体化，解压即跑）
 - ``aios-database.exe`` —— 后端服务（gen-model $BackendVersion）
@@ -1143,7 +1237,7 @@ try {
         $rel = $_.FullName.Substring($stage.Length + 1)
         $entry = ($rel -replace '\\', '/')
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entry, $cl) | Out-Null
-        $h = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower()
+        $h = Get-Sha256Compat $_.FullName
         [void]$files.Add([ordered]@{ path = $entry; sha256 = $h; bytes = $_.Length })
     }
     # 6b. assets 从源直灌到 workspace/assets/*（不进暂存、不逐一 hash，按目录汇总）
@@ -1192,7 +1286,10 @@ try {
         backend_git_dirty  = [bool]$backendBuildInfo.git_dirty
         backend_sha256   = $backendFile[0].sha256
         backend_bytes    = $backendFile[0].bytes
+        e3d_io_git_commit = $e3dIoGitCommit
         plant_ui_version = $WebVersion
+        web_source       = $webSource
+        web_source_sha256 = $webSourceSha256
         created          = (Get-Date).ToString('o')
         smoke            = $smoke
         files            = $files
@@ -1208,7 +1305,7 @@ finally {
 }
 
 # ── 7. 整包 sha256 + sibling release.json ────────────────────────────────────
-$zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+$zipHash = Get-Sha256Compat $zip
 $zipBytes = (Get-Item -LiteralPath $zip).Length
 "$Name.zip  sha256=$zipHash  bytes=$zipBytes" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
 $manifest.zip = [ordered]@{ name = "$Name.zip"; bytes = $zipBytes; sha256 = $zipHash }

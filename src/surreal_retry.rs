@@ -282,6 +282,28 @@ fn only_transport_failures_match_the_disconnect_classifier() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_response_channel_is_retried_and_recorded() {
+    // The health ledger is process-wide: unrelated parallel tests legitimately
+    // record disconnects too. Exercise the real public retry/ledger path in an
+    // isolated test process rather than weakening its exact-count assertion.
+    const ISOLATED: &str = "AIOS_TEST_RETRY_LEDGER_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "surreal_retry::closed_response_channel_is_retried_and_recorded",
+                "--nocapture",
+            ])
+            .env(ISOLATED, "1")
+            .output()
+            .expect("launch isolated retry ledger test");
+        assert!(
+            output.status.success(),
+            "isolated retry ledger test failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

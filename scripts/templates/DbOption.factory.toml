@@ -23,8 +23,9 @@ sync_chunk_size = 100_0000
 
 #项目设置 —— 向导第①步填这里
 # 手动指定模板版本后跳过自动识别，优先于 AIOS_E3D_TEMPLATE_DIR。
-# 支持 e3d31 / e3d210；删除此项后仍优先采用 AIOS_E3D_TEMPLATE_DIR，
-# 环境目录也未设置时使用产品默认 e3d210（不是从数据库二进制自动识别）。
+# 支持 e3d31 / e3d210；本 AMS 发布模板使用 E3D 3.1，部署 2.10 时显式改为 e3d210。
+# 删除此项后仍优先采用 AIOS_E3D_TEMPLATE_DIR，环境目录也未设置时使用产品默认
+# e3d210（不是从数据库二进制自动识别）。
 e3d_version = "e3d31"
 # E3D 项目根目录（装着各项目子目录的那一层），如 "D:/AVEVA/Projects/E3D3.1"
 project_path = ""

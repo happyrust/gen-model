@@ -441,7 +441,8 @@ pub(crate) async fn startup_coverage_floors_on(
     let mut response = db
         .query(format!(
             "SELECT dbnum, math::min(source_end_sesno ?: 0) AS floor, count() AS roots \
-             FROM gen_root WHERE dbnum != NONE AND ({settled}) GROUP BY dbnum;\
+             FROM gen_root WHERE dbnum != NONE AND ({settled}) \
+             AND (source_end_sesno ?: 0) > 0 GROUP BY dbnum;\
              SELECT dbnum, count() AS roots FROM gen_root WHERE dbnum != NONE \
              AND NOT ({settled}) \
              GROUP BY dbnum;"

@@ -562,6 +562,36 @@ impl DbFileResolver for E3dDbResolver {
 }
 
 impl E3dModelService {
+    /// Check the same immutable target and mesh completeness as generation.
+    /// Receipt existence alone is not freshness: SAVEWORK, replacement/rollback,
+    /// catalogue dependencies and schema changes can all invalidate it.
+    pub(crate) fn current_cached_roots(&self, roots: &[RefNo]) -> anyhow::Result<std::collections::HashSet<RefNo>> {
+        let store = ModelMemoryStore::global();
+        let mut current = std::collections::HashSet::new();
+        for &root in roots {
+            let Some(receipt) = store.receipt(ProjectionScope::Current, root) else {
+                continue;
+            };
+            // Keep each root's real dependency set separate; combining unrelated
+            // roots would invalidate otherwise-current targets on every request.
+            let sessions = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+            self.hydrate_published_dependencies(&receipt, &sessions)?;
+            let source_sesno = self.source_session(self.pin(root.dbno())?)?;
+            let publication = RootPublication {
+                root,
+                model_target: Some(self.model_target(root.dbno(), source_sesno, &sessions)?),
+                published: Some(receipt),
+                projection_complete: false,
+            };
+            if cached_root_target_matches(&publication, source_sesno)
+                && store.root_projection_complete(ProjectionScope::Current, root, &self.mesh_dir)
+            {
+                current.insert(root);
+            }
+        }
+        Ok(current)
+    }
+
     /// The current projection (ADR-054): source files come from the MDB
     /// declaration, and every pin is left unpinned so that generation resolves
     /// the target database's **latest file session** at the moment it runs
@@ -839,7 +869,8 @@ impl E3dModelService {
                         slice.failures.push((root, format!("{error:#}")));
                     }
                     Err(error) => {
-                        return Err(error).with_context(|| format!("generate root {root}"));
+                        return Err(classify_required_root_error(root, error))
+                            .with_context(|| format!("generate root {root}"));
                     }
                 }
                 if slice.is_full(root_budget, element_budget)
@@ -1811,6 +1842,42 @@ fn styp_name(value: i64) -> Option<&'static str> {
         14 => Some("SCHE"),
         _ => None,
     }
+}
+
+/// The requested root itself is absent from the generator's pinned source.
+/// A missing catalogue/owner dependency is deliberately not this outcome.
+#[derive(Debug)]
+pub(crate) struct GenerationRootMissing {
+    pub root: RefNo,
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for GenerationRootMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "generation root {} is absent from db {} session {}",
+            self.root, self.dbnum, self.source_sesno)
+    }
+}
+impl std::error::Error for GenerationRootMissing {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn classify_required_root_error(root: RefNo, error: anyhow::Error) -> anyhow::Error {
+    let absent = error.chain().find_map(|cause| {
+        match cause.downcast_ref::<e3d_io::db_element::DbElementError>() {
+            Some(e3d_io::db_element::DbElementError::NotFound { refno, dbno, sesno })
+                if *refno == root => Some((*dbno, *sesno)),
+            _ => None,
+        }
+    });
+    if let Some((dbnum, source_sesno)) = absent {
+        return GenerationRootMissing { root, dbnum, source_sesno, source: error }.into();
+    }
+    error
 }
 
 fn generate_snapshot_from_set(
@@ -3141,6 +3208,42 @@ mod tests {
             !cached_root_target_matches(&publication, 42),
             "本轮算不出目标就不能声称命中"
         );
+    }
+
+    #[test]
+    fn read_through_receipt_is_invalidated_by_each_target_identity_change() {
+        let file = ModelFileTarget {
+            dbnum: 8000, db_type: "DESI".into(), file: "design.db".into(),
+            session: 459, digest: "generation-a".into(),
+        };
+        let target = ModelTarget {
+            project: "fixture".into(), design: file.clone(),
+            catalogue: vec![ModelFileTarget { dbnum: 7000, db_type: "CATA".into(), ..file }],
+            template_attlib_digest: "schema-a".into(),
+            generator_fingerprint: "generator-a".into(), tessellation_profile: "profile-a".into(),
+        };
+        let mut publication = RootPublication {
+            root: RefNo::new(24384, 1), model_target: Some(target.clone()),
+            published: Some(RootReceipt {
+                source_sesno: 459, model_target: Some(target.clone()),
+                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(),
+            }), projection_complete: true,
+        };
+        assert!(cached_root_target_matches(&publication, 459));
+        for change in 0..7 {
+            let mut changed = target.clone();
+            match change {
+                0 => changed.design.session = 461, // SAVEWORK
+                1 => changed.design.session = 457, // rollback
+                2 => changed.design.digest = "generation-b".into(), // replacement
+                3 => changed.catalogue[0].session += 1,
+                4 => changed.catalogue[0].file = "other-project.db".into(),
+                5 => changed.template_attlib_digest = "schema-b".into(),
+                _ => changed.generator_fingerprint = "generator-b".into(),
+            }
+            publication.model_target = Some(changed);
+            assert!(!cached_root_target_matches(&publication, 459), "change {change}");
+        }
     }
 
     #[test]

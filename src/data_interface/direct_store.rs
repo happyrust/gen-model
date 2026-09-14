@@ -1154,6 +1154,63 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn explicit_e3d_version_overrides_legacy_directory_in_shared_loader() {
+        const CHILD: &str = "AIOS_TEST_EXPLICIT_E3D_VERSION";
+        if std::env::var_os(CHILD).is_some() {
+            let schema = DirectSchema::open_from_env().unwrap();
+            assert!(schema.template_dir().ends_with("e3d210/binaries"));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("DbOption.toml");
+        std::fs::write(&config, "e3d_version = \"e3d210\"\n").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "data_interface::direct_store::tests::explicit_e3d_version_overrides_legacy_directory_in_shared_loader",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("DB_OPTION_FILE", config)
+            .env("AIOS_E3D_TEMPLATE_DIR", dir.path().join("missing-templates"))
+            .env_remove("E3D210_SCHEMA_DIR")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    /// 手动版本不读工程、不读数据库，直接打开那一版的整套模板（e3d-direct 0.1.22 的
+    /// 约束，接到 gen-model-refactor 的 `open_explicit_version` 上）。
+    #[test]
+    fn explicit_e3d_version_opens_templates_without_a_database() {
+        for version in ["e3d210", "e3d31"] {
+            let schema =
+                DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), version)
+                    .unwrap();
+            let template = schema.template_file("DESI").unwrap();
+            let mut provider = TemplateProvider::open(template, None).unwrap();
+            assert!(
+                provider
+                    .template_for(e3d_attlib::db1_hash("BRAN"))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    /// 拼错的版本号是配置错误，不回落到任何默认版本。
+    #[test]
+    fn explicit_e3d_version_typo_does_not_fall_back() {
+        for version in ["e3d99", "", "auto"] {
+            let error =
+                DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), version)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("e3d_version"), "{error}");
+        }
+    }
+
     #[derive(Default)]
     struct FakeLocator {
         ref0_to_dbnum: BTreeMap<u32, u32>,
