@@ -60,7 +60,17 @@ surreal_v2 = []
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
-http_api = ["dep:axum", "dep:tower-http", "dep:toml_edit"]            #前端Web服务(REST+WebSocket)
+#前端Web服务(REST+WebSocket)。jsonwebtoken / base64 / uuid 是三维校审域（`web_service::review`，
+# docs/plans/2026-09-12-review-backend-port-plan.md §5 T1）的 JWT 签发校验与表单/附件 id 生成所需，
+# 只跟着 http_api 走，不进核心库。
+http_api = [
+    "dep:axum",
+    "dep:tower-http",
+    "dep:toml_edit",
+    "dep:jsonwebtoken",
+    "dep:base64",
+    "dep:uuid",
+]
 rvm_verify = ["dep:rvm-rs"]                                           #RVM 基准对拍（rvm_verify 探针）
 
 [[bin]]
@@ -233,8 +243,16 @@ rand = "0.9.0"
 toml = "0.8.19"
 pollster = "0.4.0"
 async-std = "1.13.1"
-axum = { version = "0.8.9", features = ["ws"], optional = true }
+# `multipart`：校审附件上传 `POST /api/review/attachments`（旧端 50MB 上限，路由单独放宽 body 限制；
+# docs/plans/2026-09-12-review-backend-port-plan.md §1.4 第 3 条）。
+axum = { version = "0.8.9", features = ["ws", "multipart"], optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = true }
+# 三维校审域依赖（同上 plan §5 T1；版本与旧端 plant-model-gen 对齐，Cargo.lock 里已有同版传递依赖，不引入新包）：
+# jsonwebtoken —— `[review_auth]` / `[platform_auth]` JWT 签发与校验；
+# base64 —— JWT debug 直通与 URL-safe 编解码；uuid —— form_id / 附件 stored_name 生成。
+jsonwebtoken = { version = "9.0", optional = true }
+base64 = { version = "0.22", optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
 # 配置向导（/api/v1/setup）的写盘口：外科手术式改键，注释与未知键原样保留
 # （docs/plans/2026-09-09-setup-wizard-web-frontend.md Q12）。普通 `toml` 做不到——
 # 它 round-trip 会丢注释，而 DbOption.toml 的注释是决策史。
@@ -273,6 +291,11 @@ aios_core = { path = "../vendor/old-aios-core" }
 # 曾经还有第四路：parse_pdms_db → pdmsdb_engine_v2（git = pdms-io.git）。它是
 # old-pdms-io 那个仓留在依赖图里的最后一条尾巴，2026-09-04 随 parse_pdms_db 一起断了，
 # 手动 patch 那两行注释也一并删除——图里没有这个包，patch 无处可打。
+
+[dev-dependencies]
+# 校审域 handler 级单测用 `tower::ServiceExt::oneshot` 直接打 Router（旧端 82 个单测同一写法，
+# docs/plans/2026-09-12-review-backend-port-plan.md §6 A7）；tower 本就是 axum 的传递依赖，这里只是显式化。
+tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

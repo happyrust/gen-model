@@ -21,6 +21,8 @@ sync_chunk_size = 10_0000
 
 #项目设置
 #【变更 2026-07-27】E3D2.1→E3D3.1：AMS 样例工程迁移到 E3D3.1 项目目录。
+# 验收样例明确采用 E3D 3.1 模板；缺省会在到达校审闸前启动失败。
+e3d_version = "e3d31"
 project_path = "D:/AVEVA/Projects/E3D3.1"
 # project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]

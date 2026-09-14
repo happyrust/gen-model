@@ -910,6 +910,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 错误一览：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒）、422 `identity_mismatch`（§3）、
 503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档）；其余暂时故障（`DirectTreeService` 取不到等）
 按 §3 统一信封 500。
+> 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`、`/files/review_attachments/*`；plant3d-web 写死的契约路径，不在 `/api/v1` 下，响应沿用旧端 `{success,…}` 信封而非 §3 的 `ApiError`）另见 `docs/specs/review-api.md`（自 plant-model-gen `:3100` 移植，`docs/plans/2026-09-12-review-backend-port-plan.md` Q10）。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
