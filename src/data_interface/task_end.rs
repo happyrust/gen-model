@@ -647,6 +647,50 @@ mod tests {
         assert_eq!(vanished.count, Some(0), "快照里没有的 Ref0 清零留行");
     }
 
+    /// ADR-076 D5（增量路计划 S2）：增量任务收尾只有这一笔——`model_sesno`、写入标记 `finished`、
+    /// Ref0 统计落在**同一个** `state_revision` 上；中途那笔 Ref0 事务并进来之后，`state_revision`
+    /// 一个任务只前进一格。
+    #[tokio::test]
+    async fn model_sesno_finished_and_ref0_land_in_one_state_revision() {
+        let db = database().await;
+        super::super::write_state::mark_writing_on(
+            &db,
+            8000,
+            25,
+            26,
+            super::super::write_state::WriteIntent::ApplyWindow,
+        )
+        .await
+        .unwrap();
+        db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=25, state_revision=7;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let receipt = commit_task_end_on(&db, &end()).await.unwrap();
+        assert_eq!(receipt.model_sesno, Some(26));
+        assert_eq!(receipt.info_rows, Some(1));
+
+        let row = watermark(&db, 8000).await;
+        assert_eq!(row.model_sesno, Some(26), "模型水位盖上");
+        assert_eq!(row.state_revision, Some(8), "一个任务只前进一格 state_revision");
+        let status: Option<String> = db
+            .query("SELECT VALUE status FROM ONLY dbnum_write_state:8000;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(status.as_deref(), Some("finished"), "写入标记同一笔收");
+        assert_eq!(
+            info(&db, 24384).await.expect("ref0 row").count,
+            Some(3),
+            "Ref0 统计同一笔落"
+        );
+    }
+
     #[tokio::test]
     async fn the_data_gate_holds_back_the_model_watermark_but_not_the_statistics() {
         let db = database().await;

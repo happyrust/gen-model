@@ -3,6 +3,10 @@
 //! The durable store is never read into this module. Root identities and rows
 //! come only from [`ModelMemoryStore`]; RocksDB is an output and cold-read
 //! baseline, never a cache-fill source.
+//!
+//! 这里只刷**根**，不盖水位（ADR-076 D5 / 增量路计划 D5）：`model_sesno` 由任务自己在收尾那一笔
+//! 里盖，任务用 [`await_roots_durable`] 等本批根的 ACK。曾经排在全部根后面、由 worker 代盖水位的
+//! `settle` 那条路已退役——两个写者写同一格水位，任务说完了库里还没有，正是它造出来的形状。
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -66,25 +70,14 @@ struct PendingRoot {
     submission_epoch: u64,
 }
 
-#[derive(Debug, Clone)]
-struct Settlement {
-    target_sesno: i32,
-    target_time: Option<String>,
-    attempts: u32,
-    next_retry_at: Instant,
-    last_error: Option<String>,
-}
-
 #[derive(Debug)]
 struct State {
     accepting: bool,
     pending: BTreeMap<(u32, i64), PendingRoot>,
-    settlements: BTreeMap<u32, Settlement>,
     superseded_submissions: u64,
     stale_jobs_dropped: u64,
     last_success_at: Option<String>,
     last_error: Option<String>,
-    durable_target_by_dbnum: BTreeMap<u32, i32>,
     next_submission_epoch: u64,
     worker_restarts: u64,
     persist_attempts: u64,
@@ -99,12 +92,10 @@ impl Default for State {
         Self {
             accepting: true,
             pending: BTreeMap::new(),
-            settlements: BTreeMap::new(),
             superseded_submissions: 0,
             stale_jobs_dropped: 0,
             last_success_at: None,
             last_error: None,
-            durable_target_by_dbnum: BTreeMap::new(),
             next_submission_epoch: 0,
             worker_restarts: 0,
             persist_attempts: 0,
@@ -125,13 +116,6 @@ trait PersistencePort: Send + Sync {
         dbnum: u32,
         roots: Vec<RefNo>,
     ) -> PortFuture<'a, DurableBatchResult>;
-
-    fn settle<'a>(
-        &'a self,
-        dbnum: u32,
-        target_sesno: i32,
-        target_time: Option<String>,
-    ) -> PortFuture<'a, anyhow::Result<i32>>;
 }
 
 #[derive(Debug, Default)]
@@ -216,40 +200,16 @@ impl PersistencePort for ProcessPersistence {
             }
         })
     }
-
-    fn settle<'a>(
-        &'a self,
-        dbnum: u32,
-        target_sesno: i32,
-        target_time: Option<String>,
-    ) -> PortFuture<'a, anyhow::Result<i32>> {
-        Box::pin(async move {
-            let receipt = crate::data_interface::task_end::commit_task_end_on(
-                &aios_core::SUL_DB,
-                &crate::data_interface::task_end::TaskEnd {
-                    dbnum,
-                    target_sesno,
-                    data: None,
-                    target_time,
-                    model: Some(crate::data_interface::task_end::TaskModelOutcome {
-                        all_roots_ok: true,
-                        dead_roots: 0,
-                    }),
-                    info: None,
-                    closes_task: false,
-                },
-            )
-            .await?;
-            receipt.model_sesno.ok_or_else(|| {
-                anyhow::anyhow!("durable model watermark was blocked by the data watermark")
-            })
-        })
-    }
 }
 
 struct ModelWriteBehind {
     state: Mutex<State>,
+    /// 叫醒 worker 的：`notify_one`，有活了。
     notify: tokio::sync::Notify,
+    /// 叫醒等刷盘的任务的：`notify_waiters`，每次根的状态迁移（ACK / Retryable / Blocked /
+    /// 放弃）之后广播一次。跟 `notify` 分开——`notify_one` 只叫一个，混在一起会把 worker 的
+    /// 那一下叫到任务头上。
+    durable: tokio::sync::Notify,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     store: &'static ModelMemoryStore,
     persistence: Arc<dyn PersistencePort>,
@@ -260,6 +220,7 @@ impl ModelWriteBehind {
         Self {
             state: Mutex::new(State::default()),
             notify: tokio::sync::Notify::new(),
+            durable: tokio::sync::Notify::new(),
             worker: Mutex::new(None),
             store,
             persistence,
@@ -319,15 +280,9 @@ pub(crate) struct BlockedRootSample {
     pub error: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct SettlementSnapshot {
-    pub dbnum: u32,
-    pub memory_target: i32,
-    pub durable_target: Option<i32>,
-    pub state: &'static str,
-    pub last_error: Option<String>,
-}
-
+/// `/health` 上的 write-behind 账。只有根级账：水位不在这里（任务收尾那一笔盖，
+/// `/dbnums` 读镜像），原先的 `settlements` / `durable_target_by_dbnum` /
+/// `settlement_state_by_dbnum` / `memory_target_by_dbnum` 四格随 `settle` 退役。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct WriteBehindSnapshot {
     pub accepting: bool,
@@ -347,10 +302,6 @@ pub(crate) struct WriteBehindSnapshot {
     pub oldest_pending_ms: Option<u64>,
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
-    pub memory_target_by_dbnum: BTreeMap<u32, i32>,
-    pub durable_target_by_dbnum: BTreeMap<u32, i32>,
-    pub settlement_state_by_dbnum: BTreeMap<u32, &'static str>,
-    pub settlements: Vec<SettlementSnapshot>,
     pub blocked_samples: Vec<BlockedRootSample>,
 }
 
@@ -379,53 +330,6 @@ fn snapshot_for(controller: &ModelWriteBehind) -> WriteBehindSnapshot {
             })
         })
         .take(BLOCKED_SAMPLE_LIMIT)
-        .collect();
-    let settlements = state
-        .settlements
-        .iter()
-        .map(|(dbnum, settlement)| SettlementSnapshot {
-            dbnum: *dbnum,
-            memory_target: settlement.target_sesno,
-            durable_target: state.durable_target_by_dbnum.get(dbnum).copied(),
-            state: if state
-                .pending
-                .values()
-                .any(|root| root.root.dbno() == *dbnum && root.status == PendingStatus::Blocked)
-            {
-                "blocked"
-            } else {
-                "pending"
-            },
-            last_error: settlement.last_error.clone(),
-        })
-        .collect();
-    let memory_target_by_dbnum = state
-        .settlements
-        .iter()
-        .map(|(dbnum, settlement)| (*dbnum, settlement.target_sesno))
-        .collect();
-    let durable_target_by_dbnum = state.durable_target_by_dbnum.clone();
-    let settlement_state_by_dbnum = state
-        .settlements
-        .keys()
-        .chain(state.durable_target_by_dbnum.keys())
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|dbnum| {
-            let status = if state
-                .pending
-                .values()
-                .any(|root| root.root.dbno() == dbnum && root.status == PendingStatus::Blocked)
-            {
-                "blocked"
-            } else if state.settlements.contains_key(&dbnum) {
-                "pending"
-            } else {
-                "durable"
-            };
-            (dbnum, status)
-        })
         .collect();
     WriteBehindSnapshot {
         accepting: state.accepting,
@@ -464,45 +368,189 @@ fn snapshot_for(controller: &ModelWriteBehind) -> WriteBehindSnapshot {
             .max(),
         last_success_at: state.last_success_at.clone(),
         last_error: state.last_error.clone(),
-        memory_target_by_dbnum,
-        durable_target_by_dbnum,
-        settlement_state_by_dbnum,
-        settlements,
         blocked_samples,
     }
 }
 
-/// 一个库此刻还压在队列里的根。
-pub(crate) struct FlushState {
-    /// 还没拿到 durable ACK 的根数：在飞的、待重试的、被判死的都算。
-    pub pending: usize,
-    /// 被判死的那些根与原因。它们不会自己好，等下去只会等到超时。
-    pub blocked: Vec<(RefNo, String)>,
-}
-
-/// 这个库在这道缝上还剩什么。给一次性工具等队列排空用
-/// （[`super::model_db_adapter::wait_until_model_rows_are_durable`]）；生产不看它，
-/// 交出去就算交完。
-pub(crate) fn flush_state(dbnum: u32) -> FlushState {
-    let state = ModelWriteBehind::global().state();
-    let mut flush = FlushState {
-        pending: 0,
-        blocked: Vec::new(),
-    };
-    for root in state
+/// 一个库此刻还压在队列里的根（在飞的、待重试的、被判死的都算）。给一次性工具用
+/// （[`super::model_db_adapter::wait_until_model_rows_are_durable`] 拿它当 [`await_roots_durable`]
+/// 的点名清单）；生产任务等的是自己单元清单里的根，不看它。
+pub(crate) fn pending_roots(dbnum: u32) -> Vec<RefNo> {
+    ModelWriteBehind::global()
+        .state()
         .pending
         .values()
         .filter(|root| root.root.dbno() == dbnum)
-    {
-        flush.pending += 1;
-        if root.status == PendingStatus::Blocked {
-            flush.blocked.push((
-                root.root,
-                root.last_error.clone().unwrap_or_else(|| "无原因".into()),
-            ));
+        .map(|root| root.root)
+        .collect()
+}
+
+/// 任务等本批根刷盘的预算（ADR-076 增量路计划 D2）。两项都是常量，不进配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlushBudget {
+    /// 一根最多试几次：`attempts` 到这个数就归 `exhausted`，不再等它的下一次退避。
+    pub max_attempts_per_root: u32,
+    /// 整批的期限：到点把还在 pending 的全部归 `exhausted`——worker 卡死时别让任务永远挂着。
+    pub deadline: Duration,
+}
+
+/// [`await_roots_durable`] 的判决：点名的每一根恰好落在三格之一。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RootsFlushOutcome {
+    /// 拿到 durable ACK 的——或本来就不在队列里的（非持久档从不登记）。
+    pub acked: Vec<RefNo>,
+    /// 判死的：确定性失败，等下去也不会好。
+    pub blocked: Vec<(RefNo, String)>,
+    /// Retryable 次数用尽、或到期限还没 ACK 的。
+    pub exhausted: Vec<(RefNo, String)>,
+}
+
+impl RootsFlushOutcome {
+    /// 一根都没放弃：收尾那一笔可以盖 `model_sesno`。
+    pub(crate) fn all_acked(&self) -> bool {
+        self.blocked.is_empty() && self.exhausted.is_empty()
+    }
+
+    /// 要放弃的那批（`blocked ∪ exhausted`），交给 [`abandon_roots`] 与投影逐出。
+    pub(crate) fn abandoned(&self) -> Vec<RefNo> {
+        self.blocked
+            .iter()
+            .chain(self.exhausted.iter())
+            .map(|(root, _)| *root)
+            .collect()
+    }
+}
+
+/// 等**点名的这批根**拿到 durable ACK（ADR-076 增量路计划 D1）。
+///
+/// 只看 `roots`：同库别的根（`/model/ensure` 按需生成登记进来的）不是本任务的账，在飞也不等。
+/// 不在队列里 = 已 ACK——非持久档的 [`publish`] 从不登记，于是立刻全 `acked`，两档走同一段代码。
+/// `Blocked` 立刻归 `blocked`，不等期限；`attempts >= max_attempts_per_root` 归 `exhausted`；
+/// 到 `deadline` 把还在 pending 的全部归 `exhausted`。醒来靠 worker 每次状态迁移后的广播，不轮询。
+///
+/// 回执只是判决，不改队列：把 `blocked ∪ exhausted` 摘掉是调用方的事（[`abandon_roots`]）。
+pub(crate) async fn await_roots_durable(
+    dbnum: u32,
+    roots: &[RefNo],
+    budget: FlushBudget,
+) -> RootsFlushOutcome {
+    await_roots_durable_with_progress(dbnum, roots, budget, |_, _| {}).await
+}
+
+/// 同 [`await_roots_durable`]，每次醒来多喊一声 `on_progress(已 ACK, 共几根)`——给任务登记表
+/// 打「刷盘 n / N」用（增量路计划 D6）。喊的是判决那一刻的数，不是承诺。
+pub(crate) async fn await_roots_durable_with_progress(
+    dbnum: u32,
+    roots: &[RefNo],
+    budget: FlushBudget,
+    on_progress: impl FnMut(usize, usize),
+) -> RootsFlushOutcome {
+    ModelWriteBehind::global()
+        .await_roots_reporting(dbnum, roots, budget, on_progress)
+        .await
+}
+
+/// 把这批根从队列摘掉、不再重试：预算用尽 / 判死后的处置（D3）。
+///
+/// 只摘队列条目，不碰投影：投影里那份没落成的几何、`gen_root` 上的痕都归调用方。在飞的那一次
+/// 之后回来时条目已不在，ACK 被丢弃——durable 与否以本模块的账为准，`root_needs_persist` 照旧为真。
+pub(crate) fn abandon_roots(dbnum: u32, roots: &[RefNo]) {
+    ModelWriteBehind::global().abandon(dbnum, roots)
+}
+
+impl ModelWriteBehind {
+    async fn await_roots(
+        &self,
+        dbnum: u32,
+        roots: &[RefNo],
+        budget: FlushBudget,
+    ) -> RootsFlushOutcome {
+        self.await_roots_reporting(dbnum, roots, budget, |_, _| {})
+            .await
+    }
+
+    async fn await_roots_reporting(
+        &self,
+        dbnum: u32,
+        roots: &[RefNo],
+        budget: FlushBudget,
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> RootsFlushOutcome {
+        let deadline = Instant::now() + budget.deadline;
+        let named = roots
+            .iter()
+            .map(|root| (packed_refno(*root), *root))
+            .collect::<BTreeMap<_, _>>();
+        loop {
+            // 先登记再判：`Notified` 一造出来就收得到 `notify_waiters`，判与等之间的迁移丢不掉。
+            let woken = self.durable.notified();
+            let (outcome, still_waiting) = self.judge_roots(dbnum, &named, budget, deadline);
+            on_progress(outcome.acked.len(), named.len());
+            if !still_waiting {
+                return outcome;
+            }
+            tokio::select! {
+                _ = woken => {}
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
         }
     }
-    flush
+
+    /// 对点名的根各判一格；`true` = 还有根既没 ACK 也没到放弃的条件，得接着等。
+    fn judge_roots(
+        &self,
+        dbnum: u32,
+        named: &BTreeMap<i64, RefNo>,
+        budget: FlushBudget,
+        deadline: Instant,
+    ) -> (RootsFlushOutcome, bool) {
+        let now = Instant::now();
+        let state = self.state();
+        let mut outcome = RootsFlushOutcome::default();
+        let mut still_waiting = false;
+        for (packed, root) in named {
+            let Some(entry) = state.pending.get(&(dbnum, *packed)) else {
+                outcome.acked.push(*root);
+                continue;
+            };
+            let last_error = || entry.last_error.clone().unwrap_or_else(|| "无原因".into());
+            if entry.status == PendingStatus::Blocked {
+                outcome.blocked.push((*root, last_error()));
+            } else if entry.attempts >= budget.max_attempts_per_root {
+                outcome.exhausted.push((
+                    *root,
+                    format!("{} attempts used up: {}", entry.attempts, last_error()),
+                ));
+            } else if !state.accepting {
+                outcome.exhausted.push((
+                    *root,
+                    "model write-behind is shutting down".to_owned(),
+                ));
+            } else if now >= deadline {
+                outcome.exhausted.push((
+                    *root,
+                    format!(
+                        "still not durable after {:?} ({} attempts): {}",
+                        budget.deadline,
+                        entry.attempts,
+                        last_error()
+                    ),
+                ));
+            } else {
+                still_waiting = true;
+            }
+        }
+        (outcome, still_waiting)
+    }
+
+    fn abandon(&self, dbnum: u32, roots: &[RefNo]) {
+        let mut state = self.state();
+        for root in roots {
+            state.pending.remove(&(dbnum, packed_refno(*root)));
+        }
+        drop(state);
+        self.durable.notify_waiters();
+    }
 }
 
 /// Atomically publish a current projection cohort to memory and register every
@@ -560,54 +608,6 @@ impl ModelWriteBehind {
     }
 }
 
-pub(crate) async fn request_settlement(
-    dbnum: u32,
-    target_sesno: i32,
-    target_time: Option<String>,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        crate::options::store_mode().is_durable(),
-        "model watermark write-behind requires a durable process store"
-    );
-    ModelWriteBehind::global().queue_settlement(dbnum, target_sesno, target_time)
-}
-
-impl ModelWriteBehind {
-    fn queue_settlement(
-        &'static self,
-        dbnum: u32,
-        target_sesno: i32,
-        target_time: Option<String>,
-    ) -> anyhow::Result<()> {
-        self.ensure_worker()?;
-        reconcile_untracked_roots(self, dbnum);
-        let mut state = self.state();
-        anyhow::ensure!(state.accepting, "model write-behind is shutting down");
-        let now = Instant::now();
-        state
-            .settlements
-            .entry(dbnum)
-            .and_modify(|current| {
-                if target_sesno >= current.target_sesno {
-                    current.target_sesno = target_sesno;
-                    current.target_time =
-                        target_time.clone().or_else(|| current.target_time.clone());
-                }
-                current.next_retry_at = now;
-            })
-            .or_insert(Settlement {
-                target_sesno,
-                target_time,
-                attempts: 0,
-                next_retry_at: now,
-                last_error: None,
-            });
-        drop(state);
-        self.notify.notify_one();
-        Ok(())
-    }
-}
-
 pub(crate) fn shutdown_now() {
     let controller = ModelWriteBehind::global();
     controller.stop_now();
@@ -617,6 +617,7 @@ impl ModelWriteBehind {
     fn stop_now(&self) {
         self.state().accepting = false;
         self.notify.notify_waiters();
+        self.durable.notify_waiters();
         if let Some(worker) = self
             .worker
             .lock()
@@ -635,10 +636,6 @@ async fn worker_loop(controller: &'static ModelWriteBehind) {
         }
         if let Some((dbnum, roots)) = take_due_roots(controller) {
             persist_batch(controller, dbnum, roots).await;
-            continue;
-        }
-        if let Some((dbnum, settlement)) = take_due_settlement(controller) {
-            settle(controller, dbnum, settlement).await;
             continue;
         }
         tokio::select! {
@@ -765,113 +762,9 @@ async fn persist_batch(controller: &ModelWriteBehind, dbnum: u32, jobs: Vec<Pers
         }
         state.last_error = Some(error);
     }
+    drop(state);
     controller.notify.notify_one();
-}
-
-fn take_due_settlement(controller: &ModelWriteBehind) -> Option<(u32, Settlement)> {
-    let now = Instant::now();
-    let state = controller.state();
-    state
-        .settlements
-        .iter()
-        .find(|(dbnum, settlement)| {
-            settlement.next_retry_at <= now
-                && !state
-                    .pending
-                    .values()
-                    .any(|root| root.root.dbno() == **dbnum)
-        })
-        .map(|(dbnum, settlement)| (*dbnum, settlement.clone()))
-}
-
-async fn settle(controller: &ModelWriteBehind, dbnum: u32, settlement: Settlement) {
-    reconcile_untracked_roots(controller, dbnum);
-    if controller
-        .state()
-        .pending
-        .values()
-        .any(|root| root.root.dbno() == dbnum)
-    {
-        return;
-    }
-    let outcome = async {
-        let _guard = super::e3d_model_service::lock_db_generation(dbnum).await;
-        reconcile_untracked_roots(controller, dbnum);
-        anyhow::ensure!(
-            !controller
-                .state()
-                .pending
-                .values()
-                .any(|root| root.root.dbno() == dbnum),
-            "new model roots appeared while settling"
-        );
-        let store = controller.store;
-        let epoch = store.commit_epoch(dbnum);
-        let model_sesno = controller
-            .persistence
-            .settle(
-                dbnum,
-                settlement.target_sesno,
-                settlement.target_time.clone(),
-            )
-            .await?;
-        anyhow::ensure!(
-            store.commit_epoch(dbnum) == epoch,
-            "model commit epoch changed during settlement"
-        );
-        anyhow::ensure!(
-            model_sesno == settlement.target_sesno,
-            "durable model watermark was blocked by the data watermark"
-        );
-        anyhow::Ok(())
-    }
-    .await;
-    let mut state = controller.state();
-    match outcome {
-        Ok(()) => {
-            if state
-                .settlements
-                .get(&dbnum)
-                .is_some_and(|current| current.target_sesno <= settlement.target_sesno)
-            {
-                state.settlements.remove(&dbnum);
-            }
-            state
-                .durable_target_by_dbnum
-                .insert(dbnum, settlement.target_sesno);
-            state.last_success_at = Some(chrono::Utc::now().to_rfc3339());
-        }
-        Err(error) => {
-            let text = format!("{error:#}");
-            if let Some(current) = state.settlements.get_mut(&dbnum) {
-                current.attempts = current.attempts.saturating_add(1);
-                current.next_retry_at = Instant::now() + retry_delay(current.attempts);
-                current.last_error = Some(text.clone());
-            }
-            state.last_error = Some(text);
-        }
-    }
-}
-
-fn reconcile_untracked_roots(controller: &ModelWriteBehind, dbnum: u32) {
-    let store = controller.store;
-    let now = Instant::now();
-    let roots = store.pending_roots_of_dbnum(dbnum);
-    let live = roots
-        .iter()
-        .map(|root| packed_refno(*root))
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut state = controller.state();
-    state
-        .pending
-        .retain(|(candidate_dbnum, packed), _| *candidate_dbnum != dbnum || live.contains(packed));
-    for root in roots {
-        let Some(receipt) = store.receipt(ProjectionScope::Current, root) else {
-            continue;
-        };
-        let identity = RootIdentity::from(&receipt);
-        upsert_pending(&mut state, dbnum, root, identity, now, None);
-    }
+    controller.durable.notify_waiters();
 }
 
 fn upsert_pending(
@@ -929,7 +822,6 @@ mod tests {
     struct ScriptedPersistence {
         outcomes: Mutex<VecDeque<DurableBatchResult>>,
         calls: AtomicUsize,
-        settle_calls: AtomicUsize,
     }
 
     struct BlockingFirstPersistence {
@@ -959,15 +851,6 @@ mod tests {
                     .unwrap_or_default()
             })
         }
-
-        fn settle<'a>(
-            &'a self,
-            _dbnum: u32,
-            target_sesno: i32,
-            _target_time: Option<String>,
-        ) -> PortFuture<'a, anyhow::Result<i32>> {
-            Box::pin(async move { Ok(target_sesno) })
-        }
     }
 
     struct PanickingPersistence {
@@ -992,15 +875,6 @@ mod tests {
                 }
             })
         }
-
-        fn settle<'a>(
-            &'a self,
-            _dbnum: u32,
-            target_sesno: i32,
-            _target_time: Option<String>,
-        ) -> PortFuture<'a, anyhow::Result<i32>> {
-            Box::pin(async move { Ok(target_sesno) })
-        }
     }
 
     impl ScriptedPersistence {
@@ -1008,7 +882,6 @@ mod tests {
             Self {
                 outcomes: Mutex::new(outcomes.into()),
                 calls: AtomicUsize::new(0),
-                settle_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -1027,18 +900,6 @@ mod tests {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
                     .unwrap_or_default()
-            })
-        }
-
-        fn settle<'a>(
-            &'a self,
-            _dbnum: u32,
-            target_sesno: i32,
-            _target_time: Option<String>,
-        ) -> PortFuture<'a, anyhow::Result<i32>> {
-            Box::pin(async move {
-                self.settle_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(target_sesno)
             })
         }
     }
@@ -1083,6 +944,40 @@ mod tests {
                 medium: super::super::model_db_adapter::PersistMedium::RocksDb,
             },
         }
+    }
+
+    fn acked(root: RefNo, manifest: &str) -> DurableBatchResult {
+        DurableBatchResult {
+            acknowledged: vec![ack(root, manifest)],
+            ..Default::default()
+        }
+    }
+
+    fn failed(root: RefNo, kind: PersistFailureKind, error: &str) -> DurableBatchResult {
+        DurableBatchResult {
+            failures: vec![RootPersistFailure {
+                root,
+                kind,
+                error: error.into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn budget(max_attempts_per_root: u32, deadline_secs: u64) -> FlushBudget {
+        FlushBudget {
+            max_attempts_per_root,
+            deadline: Duration::from_secs(deadline_secs),
+        }
+    }
+
+    fn blocking_persistence(outcomes: Vec<DurableBatchResult>) -> Arc<BlockingFirstPersistence> {
+        Arc::new(BlockingFirstPersistence {
+            outcomes: Mutex::new(outcomes.into()),
+            calls: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
     }
 
     async fn wait_until(mut predicate: impl FnMut() -> bool) {
@@ -1368,67 +1263,26 @@ mod tests {
         controller.notify.notify_waiters();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn completed_settlement_preserves_a_newer_queued_target() {
-        let store = Box::leak(Box::new(ModelMemoryStore::default()));
-        let adapter = Arc::new(ScriptedPersistence::new(vec![]));
-        let controller = ModelWriteBehind::new(store, adapter.clone());
-        let old = Settlement {
-            target_sesno: 41,
-            target_time: None,
-            attempts: 0,
-            next_retry_at: Instant::now(),
-            last_error: None,
-        };
-        let new = Settlement {
-            target_sesno: 42,
-            ..old.clone()
-        };
-        // The worker already captured 41 when another request queued 42.
-        controller.state().settlements.insert(7996, new.clone());
-        settle(&controller, 7996, old).await;
-        assert_eq!(controller.state().settlements[&7996].target_sesno, 42);
-        assert_eq!(controller.state().durable_target_by_dbnum[&7996], 41);
-        settle(&controller, 7996, new).await;
-        assert!(controller.state().settlements.is_empty());
-        assert_eq!(controller.state().durable_target_by_dbnum[&7996], 42);
-        assert_eq!(adapter.settle_calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn settlement_rechecks_pending_after_the_generation_guard() {
-        let root = RefNo::new(7997, 107);
-        let adapter = Arc::new(ScriptedPersistence::new(vec![DurableBatchResult {
-            acknowledged: vec![ack(root, "race")],
-            ..Default::default()
-        }]));
-        let store = Box::leak(Box::new(ModelMemoryStore::default()));
-        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
-
-        let generation_guard = super::super::e3d_model_service::lock_db_generation(7997).await;
-        controller.queue_settlement(7997, 42, None).unwrap();
-        tokio::task::yield_now().await;
-        controller
-            .publish_commits(vec![commit(root, "race")])
-            .unwrap();
-        drop(generation_guard);
-
-        tokio::time::advance(POLL_INTERVAL).await;
-        wait_until(|| adapter.calls.load(Ordering::SeqCst) == 1).await;
-        assert_eq!(
-            adapter.settle_calls.load(Ordering::SeqCst),
-            0,
-            "a settlement waiting at the final guard must observe the new root"
-        );
-        wait_until(|| snapshot_for(controller).pending_unique_roots == 0).await;
-        tokio::time::advance(Duration::from_secs(2)).await;
-        wait_until(|| adapter.settle_calls.load(Ordering::SeqCst) == 1).await;
-        assert_eq!(
-            snapshot_for(controller).durable_target_by_dbnum.get(&7997),
-            Some(&42)
-        );
-        controller.state().accepting = false;
-        controller.notify.notify_waiters();
+    /// ADR-076 D5：这个模块只刷根，不盖水位——`model_sesno` 全库只有任务收尾那一笔写。
+    #[test]
+    fn the_write_behind_never_touches_the_model_watermark() {
+        let production = include_str!("model_write_behind.rs")
+            .split_once("#[cfg(test)]")
+            .expect("tests follow")
+            .0;
+        for forbidden in [
+            "commit_task_end_on",
+            "TaskModelOutcome",
+            "request_settlement",
+            "fn settle",
+            "lock_db_generation",
+            "model_sesno = ",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "write-behind 不许再碰 `{forbidden}`：水位是任务收尾那一笔的"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1470,6 +1324,254 @@ mod tests {
                 .manifest_hash,
             "shutdown"
         );
+    }
+
+    // ---- ADR-076 增量路 S1：任务等本批根刷盘的栅栏 ----
+
+    #[tokio::test(start_paused = true)]
+    async fn awaiting_roots_returns_when_every_named_root_is_acked() {
+        let first = RefNo::new(7997, 120);
+        let second = RefNo::new(7997, 121);
+        let adapter = blocking_persistence(vec![DurableBatchResult {
+            acknowledged: vec![ack(first, "both"), ack(second, "both")],
+            ..Default::default()
+        }]);
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller: &'static ModelWriteBehind =
+            Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(first, "both"), commit(second, "both")])
+            .unwrap();
+        wait_until(|| adapter.calls.load(Ordering::SeqCst) == 1).await;
+        let waiter = tokio::spawn(async move {
+            controller
+                .await_roots(7997, &[first, second], budget(5, 600))
+                .await
+        });
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !waiter.is_finished(),
+            "the task must sit in the barrier while the batch is still in flight"
+        );
+
+        adapter.release.notify_one();
+        let outcome = waiter.await.unwrap();
+        assert_eq!(outcome.acked, vec![first, second]);
+        assert!(outcome.all_acked());
+        assert!(outcome.abandoned().is_empty());
+        assert!(!store.root_needs_persist(first));
+        assert!(!store.root_needs_persist(second));
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_root_is_reported_at_once_instead_of_waiting_for_the_deadline() {
+        let root = RefNo::new(7997, 122);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![failed(
+            root,
+            PersistFailureKind::Blocked,
+            "room calculator unavailable",
+        )]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller.publish_commits(vec![commit(root, "dead")]).unwrap();
+        let started = Instant::now();
+        let outcome = controller.await_roots(7997, &[root], budget(5, 600)).await;
+        assert_eq!(
+            outcome.blocked,
+            vec![(root, "room calculator unavailable".to_owned())]
+        );
+        assert!(outcome.acked.is_empty());
+        assert!(outcome.exhausted.is_empty());
+        assert_eq!(outcome.abandoned(), vec![root]);
+        assert!(
+            started.elapsed() < Duration::from_secs(600),
+            "a deterministic failure must not wait for the deadline"
+        );
+        assert_eq!(
+            snapshot_for(controller).blocked_roots,
+            1,
+            "judging leaves the entry alone; abandon_roots removes it"
+        );
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_fifth_retryable_failure_exhausts_the_root() {
+        let root = RefNo::new(7997, 123);
+        let mut outcomes = (1..=5)
+            .map(|attempt| {
+                failed(
+                    root,
+                    PersistFailureKind::Retryable,
+                    &format!("timeout {attempt}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        outcomes.push(acked(root, "late"));
+        let adapter = Arc::new(ScriptedPersistence::new(outcomes));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller.publish_commits(vec![commit(root, "late")]).unwrap();
+        let outcome = controller.await_roots(7997, &[root], budget(5, 600)).await;
+        assert_eq!(outcome.exhausted.len(), 1, "{outcome:?}");
+        let (exhausted, reason) = &outcome.exhausted[0];
+        assert_eq!(*exhausted, root);
+        assert!(
+            reason.contains("5 attempts") && reason.contains("timeout 5"),
+            "{reason}"
+        );
+        assert!(outcome.acked.is_empty());
+        assert!(outcome.blocked.is_empty());
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            5,
+            "the sixth, late ACK was never asked for before the verdict"
+        );
+        assert!(store.root_needs_persist(root));
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_exhausts_whatever_is_still_pending() {
+        let root = RefNo::new(7997, 124);
+        let adapter = blocking_persistence(Vec::new());
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller.publish_commits(vec![commit(root, "stuck")]).unwrap();
+        wait_until(|| adapter.calls.load(Ordering::SeqCst) == 1).await;
+        let started = Instant::now();
+        let outcome = controller.await_roots(7997, &[root], budget(5, 3)).await;
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert_eq!(outcome.exhausted.len(), 1, "{outcome:?}");
+        let (exhausted, reason) = &outcome.exhausted[0];
+        assert_eq!(*exhausted, root);
+        assert!(reason.contains("3s") && reason.contains("0 attempts"), "{reason}");
+        assert_eq!(
+            snapshot_for(controller).in_flight_roots,
+            1,
+            "the verdict does not touch the in-flight entry"
+        );
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_the_named_roots_are_awaited_even_when_the_dbnum_has_other_pending_roots() {
+        let named = RefNo::new(7997, 125);
+        let other = RefNo::new(7997, 126);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![DurableBatchResult {
+            acknowledged: vec![ack(named, "named")],
+            failures: vec![RootPersistFailure {
+                root: other,
+                kind: PersistFailureKind::Retryable,
+                error: "timeout".into(),
+            }],
+        }]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
+
+        controller
+            .publish_commits(vec![commit(named, "named"), commit(other, "other")])
+            .unwrap();
+        let outcome = controller.await_roots(7997, &[named], budget(5, 600)).await;
+        assert_eq!(outcome.acked, vec![named]);
+        assert!(outcome.all_acked());
+        assert_eq!(snapshot_for(controller).pending_unique_roots, 1);
+        assert!(!store.root_needs_persist(named));
+        assert!(store.root_needs_persist(other));
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abandoned_roots_are_never_persisted_again() {
+        let root = RefNo::new(7997, 127);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![
+            failed(root, PersistFailureKind::Retryable, "timeout"),
+            acked(root, "abandoned"),
+        ]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(root, "abandoned")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).retrying_roots == 1).await;
+        controller.abandon(7997, &[root]);
+        assert_eq!(snapshot_for(controller).pending_unique_roots, 0);
+
+        tokio::time::advance(Duration::from_secs(64)).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            1,
+            "the scripted ACK stays unconsumed: the worker never picks the root up again"
+        );
+        assert!(
+            store.root_needs_persist(root),
+            "abandoning does not fake durability; the projection eviction is the caller's (S3)"
+        );
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_non_durable_store_acks_immediately_because_nothing_is_pending() {
+        let first = RefNo::new(7996, 128);
+        let second = RefNo::new(7996, 129);
+        let adapter = Arc::new(ScriptedPersistence::new(Vec::new()));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        // 非持久档的 `publish` 只写投影、不登记 write-behind（见 `publish` 里的 `is_durable` 分叉）。
+        store.try_commit_current(vec![commit(first, "mem"), commit(second, "mem")]);
+        let started = Instant::now();
+        let outcome = controller
+            .await_roots(7996, &[first, second], budget(5, 600))
+            .await;
+        assert_eq!(outcome.acked, vec![first, second]);
+        assert!(outcome.all_acked());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tasks_on_different_dbnums_do_not_wait_for_each_other() {
+        // 7996 排在 7997 前面（队列按 (dbnum, refno) 有序），worker 先碰它、它一直失败。
+        let slow = RefNo::new(7996, 130);
+        let quick = RefNo::new(7997, 131);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![
+            failed(slow, PersistFailureKind::Retryable, "timeout"),
+            acked(quick, "quick"),
+        ]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller: &'static ModelWriteBehind =
+            Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
+
+        controller.publish_commits(vec![commit(slow, "slow")]).unwrap();
+        controller.publish_commits(vec![commit(quick, "quick")]).unwrap();
+        let slow_waiter = tokio::spawn(async move {
+            controller.await_roots(7996, &[slow], budget(5, 600)).await
+        });
+        let outcome = controller.await_roots(7997, &[quick], budget(5, 600)).await;
+        assert_eq!(outcome.acked, vec![quick]);
+        assert!(outcome.all_acked());
+        tokio::task::yield_now().await;
+        assert!(
+            !slow_waiter.is_finished(),
+            "7996 is still retrying; the 7997 task did not wait for it"
+        );
+        assert_eq!(snapshot_for(controller).pending_unique_roots, 1);
+        assert!(store.root_needs_persist(slow));
+        assert!(!store.root_needs_persist(quick));
+        slow_waiter.abort();
+        controller.stop_now();
     }
 
     #[test]

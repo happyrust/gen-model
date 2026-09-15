@@ -274,19 +274,6 @@ pub async fn persist_root(root: RefNo) -> anyhow::Result<PersistedRows> {
     persist_root_on(PersistTarget::process(), ModelMemoryStore::global(), root).await
 }
 
-/// Queue the durable database watermark behind all root writes already handed
-/// to this FIFO. The worker also reconciles any still-pending memory roots
-/// before advancing `dbnum_watermark.model_sesno`, so a retry can never leave
-/// the durable watermark ahead of RocksDB model rows.
-pub(crate) async fn enqueue_model_watermark_write_behind(
-    dbnum: u32,
-    target_sesno: i32,
-    target_time: Option<String>,
-) -> anyhow::Result<()> {
-    crate::fast_model::model_write_behind::request_settlement(dbnum, target_sesno, target_time)
-        .await
-}
-
 /// 跑一次旧 `direct_*` 命名空间的清扫（[`render_legacy_prefix_sweep_once`]）。
 ///
 /// [`persist_dbnum`] 的收尾自己会调它，这条另外露出来是给运维口：一个库已经整库重生成过
@@ -341,14 +328,11 @@ pub struct DurableFlush {
     pub waited: Duration,
 }
 
-/// 等队列排空时的轮询间隔。只有一次性工具会走到这里，节奏取快的那一档。
-const DURABLE_FLUSH_POLL: Duration = Duration::from_millis(25);
-
 /// 一次性工具的收尾：等这个库的模型行**真的**落进库。
 ///
-/// 生产不需要它——数据管线把根交给 write-behind 就算交完，durable flush 由后台 worker
-/// 独立收尾（ADR-071），谁也不等谁。但一次性命令（烟测、运维口）跑完就退，进程一没
-/// 后台 worker 跟着没，行只落了一半。
+/// 生产任务不用它——任务在收尾前用 [`model_write_behind::await_roots_durable`] 等**自己那批根**
+/// （ADR-076 D2），这里等的是该库此刻压在队列里的**全部**根：一次性命令（烟测、运维口）跑完就退，
+/// 进程一没后台 worker 跟着没，行只落了一半。
 ///
 /// **持久介质上它一行都不写**，只是等那道缝把已经交出去的根刷完。别改成在这里调
 /// [`persist_dbnum`]：那是第二个写者，跟后台 worker 抢同一批行，热库上实测会撞
@@ -358,11 +342,16 @@ const DURABLE_FLUSH_POLL: Duration = Duration::from_millis(25);
 /// write-behind（那里没有「后来会落」这回事），所以这一档由本函数补一次 [`persist_dbnum`]
 /// ——此时没有第二个写者，抢不起来。
 ///
-/// 被判死（`Blocked`）的根不会自己好，碰上立刻返回错误，不耗到超时。
+/// 被判死（`Blocked`）的根不会自己好；等到没有一根还能往前走才收工，报出来的是完整名单。
+/// 重试次数不设上限——工具等的是「落完」，期限只有 `timeout` 一道。
+///
+/// [`model_write_behind::await_roots_durable`]: crate::fast_model::model_write_behind::await_roots_durable
 pub async fn wait_until_model_rows_are_durable(
     dbnum: u32,
     timeout: Duration,
 ) -> anyhow::Result<DurableFlush> {
+    use crate::fast_model::model_write_behind::{FlushBudget, await_roots_durable, pending_roots};
+
     let started = Instant::now();
     let medium = PersistTarget::process().medium;
     if !crate::options::store_mode().is_durable() {
@@ -373,37 +362,38 @@ pub async fn wait_until_model_rows_are_durable(
             waited: started.elapsed(),
         });
     }
-    let roots = crate::fast_model::model_write_behind::flush_state(dbnum).pending;
-    loop {
-        let flush = crate::fast_model::model_write_behind::flush_state(dbnum);
-        // 还有根在飞就接着等：先撞上的那一根被判死不代表别的也落不下去，等到**没有一根
-        // 还能往前走**才收工——那时报出来的是完整名单，一次就看得全。
-        if flush.pending > 0 && flush.blocked.len() == flush.pending {
-            anyhow::bail!(
-                "dbnum {dbnum} 有 {} 根被 write-behind 判死：{}",
-                flush.blocked.len(),
-                flush
-                    .blocked
-                    .iter()
-                    .map(|(root, error)| format!("{root} {error}"))
-                    .collect::<Vec<_>>()
-                    .join("；")
-            );
-        }
-        if flush.pending == 0 {
-            return Ok(DurableFlush {
-                medium,
-                roots,
-                waited: started.elapsed(),
-            });
-        }
-        anyhow::ensure!(
-            started.elapsed() < timeout,
-            "等 dbnum {dbnum} 的模型行落库超过 {timeout:?}，还剩 {} 根",
-            flush.pending
+    let roots = pending_roots(dbnum);
+    let outcome = await_roots_durable(
+        dbnum,
+        &roots,
+        FlushBudget {
+            max_attempts_per_root: u32::MAX,
+            deadline: timeout,
+        },
+    )
+    .await;
+    if !outcome.blocked.is_empty() {
+        anyhow::bail!(
+            "dbnum {dbnum} 有 {} 根被 write-behind 判死：{}",
+            outcome.blocked.len(),
+            outcome
+                .blocked
+                .iter()
+                .map(|(root, error)| format!("{root} {error}"))
+                .collect::<Vec<_>>()
+                .join("；")
         );
-        tokio::time::sleep(DURABLE_FLUSH_POLL).await;
     }
+    anyhow::ensure!(
+        outcome.exhausted.is_empty(),
+        "等 dbnum {dbnum} 的模型行落库超过 {timeout:?}，还剩 {} 根",
+        outcome.exhausted.len()
+    );
+    Ok(DurableFlush {
+        medium,
+        roots: roots.len(),
+        waited: started.elapsed(),
+    })
 }
 
 /// [`persist_root`] 的可注入形态：落库目标与存储都由调用方给。一根一笔事务。

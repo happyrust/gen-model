@@ -1498,22 +1498,20 @@ async fn execute_frozen_batch(
     // Ref0 统计快照（ADR-071 D6）：数据批次一应用到 `committed_end_sesno`，就按那一版的目标索引
     // `DbSet@end` 数每个 Ref0 的活元素，经 `task_end` 那一笔按绝对值覆盖 `dbnum_info_table`——
     // `count` 从此只有这一个写者（逐笔 ±1 观测块已退）。库类型不限（CATA / SYST 的统计也在这张表里），
-    // 与模型 / 房间无关，所以排在模型那一段之前、也不等它：模型失败不该让统计停在上一版。
-    // ModelOnly 不动数据行，不做。失败只留痕、标 Partial：数据行与水位不受影响，这一版的统计等
-    // 下一次该库任务再序列化。
+    // 与模型 / 房间无关：模型失败不该让统计停在上一版，所以收尾那一笔不管模型成败都带着它。
+    // 快照在这里取、在内存里等到收尾那一笔一起落（ADR-076 D5：中途那一笔已并进收尾，一个任务只写
+    // 一次 `task_end`）。ModelOnly 不动数据行，不做。取不到只留痕、标 Partial：数据行与水位不受影响，
+    // 这一版的统计等下一次该库任务再序列化。
     // 初始化双 lane 编排（ADR-077 D7）已经在自己那一笔里写了 Ref0 统计、两枚水位与写入标记：
-    // 这里的三段收尾（统计、模型水位、标记兜底）全部跳过，别在收过的标记后面再写库。
+    // 这里的收尾（栅栏、收尾一笔、标记兜底）全部跳过，别在收过的标记后面再写库。
     let initialization_closed_task = result.initialization_closed_task;
+    let mut ref0_snapshot: Option<crate::data_interface::task_end::Ref0Snapshot> = None;
     if !initialization_closed_task
         && job.intent != crate::data_interface::batch_queue::BatchIntent::ModelOnly
         && let Some(committed_end_sesno) = committed_end_sesno
         && committed_end_sesno > 0
     {
         registry.set_stage(&job.task_id, "ref0_snapshot");
-        let target_time = result
-            .batch
-            .as_ref()
-            .and_then(|batch| batch.end_sesno_time.clone());
         let source = snapshot_source.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
             crate::data_interface::ref0_snapshot::snapshot_at(&source, committed_end_sesno as u32)
@@ -1523,35 +1521,12 @@ async fn execute_frozen_batch(
         .and_then(|snapshot| snapshot);
         match snapshot {
             Ok(snapshot) => {
-                let rows = snapshot.rows.len();
-                match crate::data_interface::task_end::commit_task_end_on(
-                    &aios_core::SUL_DB,
-                    &crate::data_interface::task_end::TaskEnd {
-                        dbnum: job.dbnum,
-                        target_sesno: committed_end_sesno,
-                        data: None,
-                        target_time,
-                        model: None,
-                        info: Some(snapshot),
-                        // 中途那一笔：模型还没写，不许宣告本任务的写库结束了。
-                        closes_task: false,
-                    },
-                )
-                .await
-                {
-                    Ok(_) => println!(
-                        "Ref0 统计已按会话 {committed_end_sesno} 的索引序列化 dbnum={} Ref0={rows}",
-                        job.dbnum
-                    ),
-                    Err(error) => {
-                        result.status = ManualUpdateStatus::Partial;
-                        result.warnings.push(format!(
-                            "Ref0 统计快照未落库（数据行与水位不受影响，下次任务再序列化） dbnum={} \
-                             sesno={committed_end_sesno}: {error:#}",
-                            job.dbnum
-                        ));
-                    }
-                }
+                println!(
+                    "Ref0 统计已按会话 {committed_end_sesno} 的索引序列化 dbnum={} Ref0={}（随收尾那一笔落库）",
+                    job.dbnum,
+                    snapshot.rows.len()
+                );
+                ref0_snapshot = Some(snapshot);
             }
             Err(error) => {
                 result.status = ManualUpdateStatus::Partial;
@@ -1580,68 +1555,84 @@ async fn execute_frozen_batch(
             )
         };
     let round_complete = work_round_complete;
-    // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔盖得上就是它收的；
-    // 收不上（这一轮没追平、模型没全成、收尾事务本身失败）由函数末尾那一笔兜底。
+    // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔落地就是它收的；
+    // 落不下去（收尾事务本身失败）由函数末尾那一笔兜底。
     // 初始化双 lane 编排自己那一笔已经收了（ADR-077 D7）。
     let mut write_marker_closed = initialization_closed_task;
 
-    // 模型收尾盖 model_sesno。持久模式下根生成只说明 kv-mem 增量层已经就绪，不能据此
-    // 提前承诺 RocksDB 已经追平；因此把整库水位作为 FIFO 栅栏交给 write-behind worker。
-    // worker 会先补齐这个 dbnum 所有未获精确 ACK 的根，再在 RocksDB 上盖 model_sesno。
-    // 非持久 process store 沿用同步收尾。只有 DESI 才有模型可收。
+    // 模型收尾（ADR-076 D2 / D5 / D6；增量路计划 D1–D3）：本任务单元清单里的根**全部拿到 durable
+    // ACK**，`model_sesno` 才随写入标记 `finished`、Ref0 统计在同一笔里盖上——任务说完了，库里就有。
+    // 栅栏按根不按库：同库别的根（`/model/ensure` 按需生成的）不是本任务的账；非持久档的根从不登记
+    // write-behind，栅栏立刻放行，两档走同一段代码。刷不进去有预算（[`DURABLE_FLUSH_BUDGET`]）：
+    // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、`gen_root` 留痕，任务 Partial、
+    // 水位不盖。任务只等，不替 worker 写（第二个写者在热库上实测撞冲突）。只有 DESI 才有模型可收。
+    let mut model_outcome: Option<crate::data_interface::task_end::TaskModelOutcome> = None;
+    let mut end_time: Option<String> = None;
+    let mut flush_note = String::new();
     if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
-        let end_time = result
+        end_time = result
             .batch
             .as_ref()
             .and_then(|batch| batch.end_sesno_time.clone());
-        if crate::options::store_mode().is_durable() {
-            registry.set_stage(&job.task_id, "durable_pending");
-            match crate::fast_model::model_db_adapter::enqueue_model_watermark_write_behind(
-                job.dbnum,
-                file_latest_sesno,
-                end_time,
-            )
-            .await
-            {
-                // The foreground fallback below still closes the write marker,
-                // without a model stamp. The background job owns only the
-                // durable model waterline so the next increment need not wait.
-                Ok(()) => {}
-                Err(error) => {
-                    result.status = ManualUpdateStatus::Partial;
+        registry.set_stage(&job.task_id, "durable_pending");
+        let flush_started = Instant::now();
+        let flush = await_units_durable(registry, job, &result.units).await;
+        if !flush.all_acked() {
+            abandon_undurable_roots(job.dbnum, &flush, &mut result).await;
+        }
+        flush_note = format!(
+            " 刷盘={}/{} 放弃={} 等待={}ms",
+            flush.acked.len(),
+            flush.acked.len() + flush.blocked.len() + flush.exhausted.len(),
+            flush.blocked.len() + flush.exhausted.len(),
+            flush_started.elapsed().as_millis()
+        );
+        model_outcome = Some(model_outcome_of(&flush));
+    }
+
+    // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
+    // 一个写者、一笔事务。`applied_sesno` 不在这里——它由数据尾事务在模型阶段之前盖（ADR-056 D1 /
+    // ADR-025 §7），`requeue_window_remainder` 与凭证前移都读它。模型没跑（这一轮没追平、非 DESI）
+    // 时 `model` 为 `None`，没全成时 `all_roots_ok: false`：这一笔只收标记、落统计、记根观测，
+    // 水位那一格原地。ModelOnly 与 `mem` 档走的也是这一段。
+    if !initialization_closed_task {
+        registry.set_stage(&job.task_id, "task_end");
+        let ref0_rows = ref0_snapshot.as_ref().map(|snapshot| snapshot.rows.len());
+        match crate::data_interface::task_end::commit_task_end_on(
+            &aios_core::SUL_DB,
+            &crate::data_interface::task_end::TaskEnd {
+                dbnum: job.dbnum,
+                target_sesno: file_latest_sesno,
+                data: None,
+                target_time: end_time,
+                model: model_outcome,
+                info: ref0_snapshot,
+                closes_task: true,
+            },
+        )
+        .await
+        {
+            Ok(receipt) => {
+                write_marker_closed = true;
+                if let Some(rows) = ref0_rows {
+                    println!(
+                        "Ref0 统计已随收尾那一笔落库 dbnum={} Ref0={rows}",
+                        job.dbnum
+                    );
+                }
+                if receipt.blocked_by_data {
                     result.warnings.push(format!(
-                        "持久模型水位未进入后台流水线 dbnum={}: {error:#}",
+                        "模型水位被数据水位闸挡下（applied_sesno < {file_latest_sesno}），这一版 model_sesno 未盖 dbnum={}",
                         job.dbnum
                     ));
                 }
             }
-        } else {
-            let model_outcome = crate::data_interface::task_end::TaskModelOutcome {
-                all_roots_ok: true,
-                dead_roots: 0,
-            };
-            registry.set_stage(&job.task_id, "task_end");
-            match crate::data_interface::task_end::commit_task_end_on(
-                &aios_core::SUL_DB,
-                &crate::data_interface::task_end::TaskEnd {
-                    dbnum: job.dbnum,
-                    target_sesno: file_latest_sesno,
-                    data: None,
-                    target_time: end_time,
-                    model: Some(model_outcome),
-                    info: None,
-                    closes_task: true,
-                },
-            )
-            .await
-            {
-                Ok(_) => write_marker_closed = true,
-                Err(error) => {
-                    result.status = ManualUpdateStatus::Partial;
-                    result
-                        .warnings
-                        .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
-                }
+            Err(error) => {
+                result.status = ManualUpdateStatus::Partial;
+                result.warnings.push(format!(
+                    "任务收尾那一笔未落（模型水位、Ref0 统计随之未落，下次任务再序列化） dbnum={}: {error:#}",
+                    job.dbnum
+                ));
             }
         }
     }
@@ -1700,12 +1691,156 @@ async fn execute_frozen_batch(
         .filter(|unit| unit.status == UnitGenStatus::Generated)
         .count();
     println!(
-        "数据批次 阶段耗时 dbnum={} 交付单元={}（生成成功 {generated}）告警={}: 数据应用+模型生成={body_ms}ms",
+        "数据批次 阶段耗时 dbnum={} 交付单元={}（生成成功 {generated}）告警={}: 数据应用+模型生成={body_ms}ms{flush_note}",
         job.dbnum,
         result.units.len(),
         result.warnings.len()
     );
     result
+}
+
+/// ADR-076 增量路计划 D2：任务等本批根刷盘的预算。每根 [`MAX_ATTEMPTS`] 次——沿用进程内连败账的
+/// 上限：退避 1+2+4+8+16 = 31 s 加五次写的时间，盖得住 RocksDB 的瞬时冲突风暴，再多就是库不健康，
+/// 等下去只是把这个库的槽位占着；加一道任务级 10 min 期限当护栏——worker 卡死时别让任务永远挂在
+/// `durable_pending`。两个都是常量，不进 `DbOption`（仓里「都是常量不做配置」的纪律）。
+const DURABLE_FLUSH_BUDGET: crate::fast_model::model_write_behind::FlushBudget =
+    crate::fast_model::model_write_behind::FlushBudget {
+        max_attempts_per_root: MAX_ATTEMPTS,
+        deadline: Duration::from_secs(10 * 60),
+    };
+
+/// 本任务单元清单里生成成功的根，解成 `RefNo`。`Regen` 与 `Transform` 都经 `publish` 登记
+/// write-behind，一并等；解不出来的 refno 不等——它也不可能被登记过。
+fn generated_roots(units: &[ModelUnitResult]) -> Vec<e3d_io::refno::RefNo> {
+    units
+        .iter()
+        .filter(|unit| unit.status == UnitGenStatus::Generated)
+        .filter_map(|unit| {
+            crate::fast_model::e3d_model_service::parse_refno(&unit.root_refno).ok()
+        })
+        .collect()
+}
+
+/// 等本任务的根拿到 durable ACK（增量路计划 D1）。每次醒来把「刷盘 n / N」打到任务登记表（D6）：
+/// 复用依赖进度那几格（`dependency_refnos_total / parsed`），不另开面板字段；喊一次进度就是一次
+/// 实质进展，`stall_deadline` 随之重新起算——worker 真卡住了，面板上这一档会先红。
+async fn await_units_durable(
+    registry: &'static TaskRegistry,
+    job: &FrozenBatch,
+    units: &[ModelUnitResult],
+) -> crate::fast_model::model_write_behind::RootsFlushOutcome {
+    let roots = generated_roots(units);
+    let dbnum = job.dbnum;
+    let task_id = job.task_id.as_str();
+    crate::fast_model::model_write_behind::await_roots_durable_with_progress(
+        dbnum,
+        &roots,
+        DURABLE_FLUSH_BUDGET,
+        |acked, total| {
+            registry.set_dependency_progress(
+                task_id,
+                "durable_pending",
+                Some(dbnum),
+                None,
+                total as u64,
+                acked as u64,
+                0,
+                DEPENDENCY_STALL_TIMEOUT.as_secs() as i64,
+            );
+        },
+    )
+    .await
+}
+
+/// 增量路计划 D3：预算用尽 / 判死的根的处置，四件一起——从 write-behind 队列摘掉（不再原地无限重试）、
+/// 逐出投影（durable 才是真值，投影里那份没落成的新几何不该继续对外，读路落回库里的旧行）、
+/// 单元记 `Failed`、`gen_root` 留痕（凭证不前移，下次该库任务 / 启动核对按缺口重排，ADR-076 D8）；
+/// 任务 `Partial`。收尾那一笔照样落、写入标记照收（§8 Q1）：数据行与 `applied_sesno` 早已同步落库、
+/// 模型行按根幂等、没 ACK 的根没有 `gen_root` 回执——收标记不会掩盖任何「没写完」。
+async fn abandon_undurable_roots(
+    dbnum: u32,
+    flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
+    result: &mut DataBatchTaskResult,
+) {
+    let verdicts = flush_verdicts(flush);
+    let roots = verdicts
+        .iter()
+        .map(|(root, _, _)| *root)
+        .collect::<Vec<_>>();
+    crate::fast_model::model_write_behind::abandon_roots(dbnum, &roots);
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    for root in &roots {
+        store.drop_cached_root(*root);
+    }
+    for (root_refno, noun, error) in mark_units_undurable(&verdicts, &mut result.units) {
+        mark_generation_failed(dbnum, &root_refno, &noun, &error).await;
+    }
+    result.status = ManualUpdateStatus::Partial;
+    result.warnings.push(format!(
+        "dbnum={dbnum} {} 根没能刷进持久库（判死 {} / 预算用尽 {}），已放弃并逐出投影，这一版 model_sesno 不盖：{}",
+        roots.len(),
+        flush.blocked.len(),
+        flush.exhausted.len(),
+        verdicts
+            .iter()
+            .map(|(root, kind, error)| format!("{root} [{kind}] {error}"))
+            .collect::<Vec<_>>()
+            .join("；")
+    ));
+}
+
+/// 把栅栏的判决摊平成 `(根, blocked | exhausted, 原因)`。
+fn flush_verdicts(
+    flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
+) -> Vec<(e3d_io::refno::RefNo, &'static str, String)> {
+    flush
+        .blocked
+        .iter()
+        .map(|(root, error)| (*root, "blocked", error.clone()))
+        .chain(
+            flush
+                .exhausted
+                .iter()
+                .map(|(root, error)| (*root, "exhausted", error.clone())),
+        )
+        .collect()
+}
+
+/// 放弃的根对应的单元记 `Failed`、`message` 以 `durable flush:` 开头（回执逐根点名）。返回要在
+/// `gen_root` 留痕的 `(root_refno, noun, error)`。单元清单是任务手里的事实，不回问库。
+fn mark_units_undurable(
+    verdicts: &[(e3d_io::refno::RefNo, &'static str, String)],
+    units: &mut [ModelUnitResult],
+) -> Vec<(String, String, String)> {
+    let mut failed = Vec::new();
+    for unit in units.iter_mut() {
+        if unit.status != UnitGenStatus::Generated {
+            continue;
+        }
+        let Ok(root) = crate::fast_model::e3d_model_service::parse_refno(&unit.root_refno) else {
+            continue;
+        };
+        let Some((_, kind, error)) = verdicts.iter().find(|(candidate, _, _)| *candidate == root)
+        else {
+            continue;
+        };
+        let message = format!("durable flush: [{kind}] {error}");
+        unit.status = UnitGenStatus::Failed;
+        unit.message = Some(message.clone());
+        failed.push((unit.root_refno.clone(), unit.noun.clone(), message));
+    }
+    failed
+}
+
+/// 收尾那一笔的模型半边：一根都没放弃才盖 `model_sesno`；`dead_roots` 只数判死的（确定性失败），
+/// 预算用尽的不算死——库健康了下一次任务还会再试。
+fn model_outcome_of(
+    flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
+) -> crate::data_interface::task_end::TaskModelOutcome {
+    crate::data_interface::task_end::TaskModelOutcome {
+        all_roots_ok: flush.all_acked(),
+        dead_roots: flush.blocked.len(),
+    }
 }
 
 async fn execute_model_only_body(
@@ -3388,10 +3523,13 @@ mod tests {
         );
     }
 
+    /// ADR-076 D2 / D5（增量路计划 S2）：持久档不再把水位交给 write-behind 代盖——任务先等自己那批根
+    /// 的 durable ACK，再在收尾那一笔里连 `finished`、Ref0 统计一起盖 `model_sesno`。持久 / 非持久
+    /// 的二分消失：非持久档的根从不登记，栅栏立刻放行，两档同一段代码。
     #[test]
-    fn durable_model_watermark_is_owned_by_the_write_behind_barrier() {
+    fn the_task_stamps_model_sesno_only_after_its_roots_are_durable() {
         let source = include_str!("batch_worker.rs");
-        let settlement = source
+        let tail = source
             .split_once(
                 "if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")",
             )
@@ -3400,24 +3538,234 @@ mod tests {
             .split_once("// ── 写入标记的兜底收口")
             .expect("settlement boundary")
             .0;
-        let durable = settlement
-            .split_once("if crate::options::store_mode().is_durable()")
-            .expect("durable branch")
-            .1
-            .split_once("} else {")
-            .expect("non-durable branch")
-            .0;
+        let (barrier, closing) = tail
+            .split_once("registry.set_stage(&job.task_id, \"task_end\")")
+            .expect("closing tail follows the barrier");
 
-        assert!(durable.contains("enqueue_model_watermark_write_behind("));
-        assert!(durable.contains("durable_pending"));
         assert!(
-            !durable.contains("commit_task_end_on("),
-            "foreground durable branch must not advance RocksDB model_sesno: {durable}"
+            barrier.contains("await_units_durable("),
+            "任务先等本批根刷盘: {barrier}"
+        );
+        assert!(barrier.contains("\"durable_pending\""));
+        assert!(
+            !barrier.contains("commit_task_end_on("),
+            "等完之前不许写库: {barrier}"
         );
         assert!(
-            settlement.contains("commit_task_end_on("),
-            "non-durable mode keeps its synchronous settlement"
+            closing.contains("commit_task_end_on("),
+            "等完才是收尾那一笔: {closing}"
         );
+        for fact in ["closes_task: true", "info: ref0_snapshot", "model: model_outcome"] {
+            assert!(
+                closing.contains(fact),
+                "收尾一笔 = model_sesno + finished + Ref0，少了 `{fact}`: {closing}"
+            );
+        }
+        for retired in [
+            "enqueue_model_watermark_write_behind",
+            "request_settlement",
+            "store_mode().is_durable()",
+            "so the next increment need not wait",
+        ] {
+            assert!(
+                !tail.contains(retired),
+                "持久 / 非持久二分已消失，`{retired}` 不许回来: {tail}"
+            );
+        }
+    }
+
+    /// ADR-076 D5（增量路计划 D4）：一个任务只调一次 `commit_task_end_on`——中途那笔 Ref0 统计已并进
+    /// 收尾。兜底那一笔（W1）只在收尾失败时才走，是同一件事的重试，不是第二个写点。
+    #[test]
+    fn commit_task_end_is_called_once_per_task() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch exists")
+            .1
+            .split_once("async fn execute_model_only_body(")
+            .expect("execute_frozen_batch end")
+            .0;
+        let (before, fallback) = body
+            .split_once("// ── 写入标记的兜底收口")
+            .expect("W1 marker");
+        assert_eq!(
+            before.matches("commit_task_end_on(").count(),
+            1,
+            "收尾之前恰一处写点: {before}"
+        );
+        assert_eq!(
+            fallback.matches("commit_task_end_on(").count(),
+            1,
+            "兜底恰一处: {fallback}"
+        );
+        assert!(
+            fallback.contains("if !write_marker_closed"),
+            "兜底只在收尾那一笔没落时才走: {fallback}"
+        );
+        assert_eq!(
+            body.matches("closes_task: false").count(),
+            0,
+            "中途那一笔已并进收尾，不许再有不收标记的写点: {body}"
+        );
+    }
+
+    /// ADR-076 D5：`model_sesno` 只有任务一个写者——write-behind 与适配层都不再碰收尾事务。
+    #[test]
+    fn nothing_outside_the_task_writes_model_sesno() {
+        for (name, source) in [
+            (
+                "model_write_behind.rs",
+                include_str!("../fast_model/model_write_behind.rs"),
+            ),
+            (
+                "model_db_adapter.rs",
+                include_str!("../fast_model/model_db_adapter.rs"),
+            ),
+        ] {
+            let production = source
+                .split_once("#[cfg(test)]")
+                .map_or(source, |(production, _)| production);
+            for forbidden in [
+                "commit_task_end_on",
+                "request_settlement",
+                "enqueue_model_watermark_write_behind",
+            ] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{name} 不许出现 `{forbidden}`：水位是任务收尾那一笔的"
+                );
+            }
+        }
+    }
+
+    fn unit(root: &str, status: UnitGenStatus) -> ModelUnitResult {
+        ModelUnitResult {
+            dbnum: 8000,
+            root_refno: root.into(),
+            noun: "EQUI".into(),
+            status,
+            attempts: 1,
+            message: None,
+            old_owner: None,
+            new_owner: None,
+            kind: UnitKind::Regen,
+            transform_fallback_reason: None,
+        }
+    }
+
+    /// 增量路计划 D3：判死的根记进 `dead_roots`、对应单元记 Failed 带 `durable flush:`，收尾那一笔
+    /// 不盖 `model_sesno` 但照收标记；预算用尽的同样放弃、同样不盖，但不算死。全 ACK 才盖。
+    #[test]
+    fn an_abandoned_root_leaves_the_task_partial_the_watermark_unstamped_and_the_marker_finished()
+    {
+        use crate::data_interface::task_end::{TaskEnd, TaskModelOutcome, render_task_end_tail};
+        use crate::fast_model::model_write_behind::RootsFlushOutcome;
+        use e3d_io::refno::RefNo;
+
+        let blocked = RefNo::new(8000, 7);
+        let fine = RefNo::new(8000, 8);
+        let flush = RootsFlushOutcome {
+            acked: vec![fine],
+            blocked: vec![(blocked, "room calculator unavailable".into())],
+            exhausted: Vec::new(),
+        };
+        let outcome = model_outcome_of(&flush);
+        assert_eq!(
+            outcome,
+            TaskModelOutcome {
+                all_roots_ok: false,
+                dead_roots: 1,
+            }
+        );
+        let sql = render_task_end_tail(&TaskEnd {
+            dbnum: 8000,
+            target_sesno: 26,
+            data: None,
+            target_time: None,
+            model: Some(outcome),
+            info: None,
+            closes_task: true,
+        });
+        assert!(!sql.contains("model_sesno = math::max"), "水位不盖: {sql}");
+        assert!(sql.contains("status = 'finished'"), "标记照收: {sql}");
+        assert!(sql.contains("model_dead_roots = 1"), "{sql}");
+
+        let mut units = vec![
+            unit("8000/7", UnitGenStatus::Generated),
+            unit("8000/8", UnitGenStatus::Generated),
+        ];
+        let failed = mark_units_undurable(&flush_verdicts(&flush), &mut units);
+        assert_eq!(units[0].status, UnitGenStatus::Failed);
+        assert!(
+            units[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("durable flush:")
+                    && message.contains("room calculator unavailable")),
+            "{:?}",
+            units[0].message
+        );
+        assert_eq!(units[1].status, UnitGenStatus::Generated);
+        assert_eq!(units[1].message, None);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, "8000/7");
+        assert_eq!(failed[0].1, "EQUI");
+
+        let exhausted = RootsFlushOutcome {
+            acked: Vec::new(),
+            blocked: Vec::new(),
+            exhausted: vec![(blocked, "5 attempts used up: timeout".into())],
+        };
+        assert_eq!(
+            model_outcome_of(&exhausted),
+            TaskModelOutcome {
+                all_roots_ok: false,
+                dead_roots: 0,
+            },
+            "预算用尽的放弃但不算死"
+        );
+        assert_eq!(
+            model_outcome_of(&RootsFlushOutcome {
+                acked: vec![fine, blocked],
+                ..Default::default()
+            }),
+            TaskModelOutcome {
+                all_roots_ok: true,
+                dead_roots: 0,
+            },
+            "全 ACK 才盖"
+        );
+        assert_eq!(generated_roots(&units), vec![fine], "只等生成成功的根");
+    }
+
+    /// D3 的副作用在源码上钉住：放弃 = 摘队列 + 逐出投影 + `gen_root` 留痕 + Partial，四件一起。
+    #[test]
+    fn an_abandoned_root_is_evicted_from_the_projection_and_marked_failed_in_gen_root() {
+        let source = include_str!("batch_worker.rs");
+        let helper = source
+            .split_once("async fn abandon_undurable_roots(")
+            .expect("D3 helper")
+            .1
+            .split_once("\n}\n")
+            .expect("helper end")
+            .0;
+        for needle in [
+            "abandon_roots(",
+            "drop_cached_root(",
+            "mark_generation_failed(",
+            "ManualUpdateStatus::Partial",
+        ] {
+            assert!(
+                helper.contains(needle),
+                "放弃的根少了一步 `{needle}`: {helper}"
+            );
+        }
+        assert_eq!(
+            DURABLE_FLUSH_BUDGET.max_attempts_per_root, MAX_ATTEMPTS,
+            "预算沿用进程内连败账的上限"
+        );
+        assert_eq!(DURABLE_FLUSH_BUDGET.deadline, Duration::from_secs(600));
     }
 
     #[test]
@@ -3721,10 +4069,11 @@ mod tests {
             2,
             "收口写点恰好两处（收尾 + 兜底）: {body}"
         );
+        // 中途那一笔（Ref0 统计）已并进收尾（ADR-076 D5）：不再有不收标记的写点。
         assert_eq!(
             body.matches("closes_task: false").count(),
-            1,
-            "中途那一笔（Ref0 统计）不许收标记: {body}"
+            0,
+            "一个任务只写一次 task_end: {body}"
         );
     }
 
