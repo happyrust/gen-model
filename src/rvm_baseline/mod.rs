@@ -14,6 +14,7 @@ pub mod compare;
 pub mod identity;
 pub mod import;
 pub mod mesh_compare;
+pub mod resolve;
 pub mod snapshot;
 
 pub use compare::{CompareOptions, CompareSummary, default_report_path};

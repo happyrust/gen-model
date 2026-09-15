@@ -70,13 +70,17 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
-    /// 快照 vs SurrealDB 生成数据的三层对拍
+    /// 快照 vs SurrealDB 生成数据的分层对拍
     ///
-    /// 当前 world rotation 与 TUBI join 尚未实现，报告会列出并返回失败。
+    /// 给了 `--rvm` 才做 L4 表面对拍（世界姿态的判据）；不给就把 `world_rotation`
+    /// 留在未支持名单上并返回失败——没量到不等于通过。
     Compare {
         /// import 产出的快照 JSON
         #[arg(long)]
         snapshot: PathBuf,
+        /// 快照对应的 RVM 原件。给了才做 L4 双向表面距离（快照里只有 AABB，没有面）。
+        #[arg(long)]
+        rvm: Option<PathBuf>,
         #[arg(long, default_value = "ws://127.0.0.1:8009")]
         url: String,
         #[arg(long, default_value = "1516")]
@@ -93,6 +97,14 @@ enum Command {
         /// AABB 各分量容差（mm）
         #[arg(long, default_value_t = 1.0)]
         tol_aabb_mm: f64,
+        /// 双向表面距离的 p95 容差（mm）。不是 1mm：两侧都是有限三角化，E3D
+        /// FacetGroup 的弦误差就是判定地板。12 取自 `mesh_wall_live` 的实测门限。
+        #[arg(long, default_value_t = 12.0)]
+        tol_surface_p95_mm: f64,
+        /// 双向表面距离的 Hausdorff 容差（mm）。p95 管整体贴不贴，这一格管「有没有
+        /// 一处离谱」——开孔或多出一块板只影响极少数采样点，p95 看不见。
+        #[arg(long, default_value_t = 30.0)]
+        tol_surface_hausdorff_mm: f64,
         /// 报告输出路径，默认 output/rvm-verify/<root>-<时间戳>.json
         #[arg(long)]
         report: Option<PathBuf>,
@@ -131,6 +143,7 @@ async fn main() -> Result<()> {
         }
         Command::Compare {
             snapshot,
+            rvm,
             url,
             ns,
             db,
@@ -138,6 +151,8 @@ async fn main() -> Result<()> {
             password,
             tol_translation_mm,
             tol_aabb_mm,
+            tol_surface_p95_mm,
+            tol_surface_hausdorff_mm,
             report,
             verbose,
         } => {
@@ -157,6 +172,9 @@ async fn main() -> Result<()> {
                 password,
                 tol_translation_mm,
                 tol_aabb_mm,
+                rvm_path: rvm,
+                tol_surface_p95_mm,
+                tol_surface_hausdorff_mm,
                 report_path,
                 verbose,
             };

@@ -1,20 +1,21 @@
 {
   "meta": {
-    "version": 2,
+    "version": 1,
     "dbnum": 7999,
     "root_name": "/1RX07-LCT",
-    "rvm_file": "test_data/rvm/1RX07-LCT.rvm",
+    "rvm_file": "test_data\\rvm\\1RX07-LCT.rvm",
     "att_files": [],
-    "imported_at": "2026-08-27 18:39:12",
+    "imported_at": "2026-09-15 12:40:14",
     "member_count": 159,
     "geometry_count": 137,
-    "resolved": 1,
-    "unresolved": 158,
+    "resolved": 0,
+    "unresolved": 159,
     "export_scope": "narrow",
     "geo_type_counts": {
       "Primitive": 137
     },
-    "degenerate_bbox_count": 0
+    "degenerate_bbox_count": 0,
+    "facet_aabb_from_vertices": 28
   },
   "members": [
     {
@@ -43,9 +44,9 @@
       "noun": null,
       "owner_desc": null,
       "ordinal": null,
-      "refno": "24383/91690",
-      "identity_source": "cli_root",
-      "resolved": true,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
       "stable_id": 3058932407889671204,
       "parent_stable_id": 14214635582734210225,
       "translation_mm": [
