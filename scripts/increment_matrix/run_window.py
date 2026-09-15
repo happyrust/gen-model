@@ -13,6 +13,7 @@ import sys
 from verify import read_json, verify_delta, verify_rvm
 
 REPO = Path(__file__).resolve().parents[2]
+PYTHON = (REPO / "python/.venv/Scripts/python.exe") if (REPO / "python/.venv/Scripts/python.exe").is_file() else Path(sys.executable)
 
 
 def fingerprint(path):
@@ -40,7 +41,7 @@ def run_case(case, out, tools):
 
     try:
         result["database_before"] = fingerprint(case["db"])
-        command(str(REPO / "python/.venv/Scripts/python.exe"),
+        command(str(PYTHON),
                 [REPO / "scripts/increment_matrix/net_window.py",
                  case["db"], case["base"] + 1, case["target"], out / "net-window.json"], "net-window")
         net = read_json(out / "net-window.json")["summary"]

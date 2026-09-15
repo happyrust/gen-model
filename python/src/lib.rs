@@ -223,7 +223,7 @@ fn sessions_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
                 "end_pgno": session.end_pgno,
                 "index_root_pageno": session.index_root_pgno,
                 "claim_pageno": serde_json::Value::Null,
-                "computer_name": session.machine,
+                "computer_name": session.user,
                 "comments": session.comment,
                 "date": session.rfc3339(),
             })

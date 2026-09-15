@@ -622,9 +622,11 @@ pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
             let service =
                 aios_database::fast_model::e3d_model_service::E3dModelService::from_current()
                     .await?;
+            let roots = service.generation_roots_of(dbnum).await?;
             service
-                .generate_dbnum(
+                .generate_and_persist_roots(
                     dbnum,
+                    &roots,
                     aios_database::data_interface::geom_error::GeometryFailurePolicy::Required,
                 )
                 .await?;
