@@ -4,6 +4,11 @@
 > `included_projects` 现表示 `project_path` 下的文件夹名；`project_dirs` 不再覆盖、扩大
 > 或在空名单时替代扫描范围。本文后续关于 `project_dirs` 物理位置覆盖的内容仅保留为
 > 历史背景。
+>
+> **2026-09-15 修订（ADR-078）**：项目集合改由 MDB 派生，项目目录在搜索根里按 `<code>000`
+> 找，`included_projects` 退役。§三「配置纳入的项目」一律读作「MDB 声明的项目」：
+> 项目依赖数据可以跨项目进入、项目运行态数据不能，这条边界不变；MDB 声明的外部 DESI
+> （如 6003 SCBDESI）是本 MDB 的成员，照旧按「MDB ∩ watch_dbnums」摄入（d-25）。
 
 状态：Accepted（2026-08-04）
 
@@ -183,6 +188,12 @@ UNC 反斜杠直指 `ams000` + 一台不可达主机）跑 `watch_dirs_probe`：
   应为 `FILE_ID_INFO` → `canonicalize` → 字面路径，不可颠倒。
 
 ## 后续变更
+
+**2026-09-15 — 项目集合由 MDB 派生（ADR-078）。** `project_paths::plan_watch_dirs` /
+`resolve_project_root` 改由 `mdb_closure` 给出：主项目按 `project_name` 在搜索根里定位，
+外部项目按 SYS `PROJ` 项目码在 `[project_path] ++ project_search_paths` 里找 `<code>000`。
+本 ADR 的逐项目容错（掉线的共享盘只让它自己缺席、每个根的结论要报出来）原样沿用到搜索根；
+§三的「配置纳入」改说成「MDB 声明」，边界不变。
 
 **2026-08-06 — 摄入范围门收敛为「MDB 声明的 DESI」。** 本 ADR 写的时候，范围门是
 `in_scope = should_process_database && UpdateScope::admits`，前者串着类型白名单、

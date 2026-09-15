@@ -283,8 +283,15 @@ fn named_attr_value_kind(value: &NamedAttrValue) -> &'static str {
 }
 
 /// Read `<project>`'s SYS database and resolve `mdb`'s declaration.
+///
+/// Which projects the declared files may come from is the MDB closure
+/// (ADR-078): the declaration is read once (cached by
+/// [`crate::data_interface::mdb_closure::declaration`]), every declared
+/// project code is located in the configured search roots, and only then is
+/// each declaration bound to a file inside its own project's directories.
 pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result<MdbMembership> {
-    let plan = crate::data_interface::project_paths::plan_watch_dirs(db_option);
+    let closure = crate::data_interface::mdb_closure::resolve_for(db_option);
+    let plan = closure.watch_dir_plan();
     let own_dirs: Vec<PathBuf> = plan
         .projects
         .iter()
@@ -292,7 +299,10 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         .flat_map(|entry| entry.db_dirs.iter().cloned())
         .collect();
     if own_dirs.is_empty() {
-        anyhow::bail!("项目 {project} 没有解析出任何库目录，无从读取它的 SYS 库");
+        anyhow::bail!(
+            "项目 {project} 没有解析出任何库目录，无从读取它的 SYS 库；监控目录解析：{}",
+            plan.problems().join(" / ")
+        );
     }
     // Kept per project rather than flattened into one directory list: a dbnum
     // is unique inside a project only, so "which file" cannot be answered
@@ -300,29 +310,71 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
     let projects: Vec<(String, Vec<PathBuf>)> = plan
         .projects
         .iter()
+        .filter(|entry| !entry.db_dirs.is_empty())
         .map(|entry| (entry.project.clone(), entry.db_dirs.clone()))
         .collect();
-    let mut problems = Vec::new();
-    let wanted = format!("/{}", mdb.trim_start_matches('/'));
+    let declaration = crate::data_interface::mdb_closure::declaration(&own_dirs, project, mdb)?;
+    let databases = bind_declared(&declaration.databases, &projects, project)?;
+    let mut problems = declaration.problems.clone();
+    for db in databases.iter().filter(|db| db.path.is_none()) {
+        let reason = db
+            .declared_project_code
+            .as_deref()
+            .and_then(|code| {
+                closure
+                    .unresolved
+                    .iter()
+                    .find(|unresolved| unresolved.code.eq_ignore_ascii_case(code))
+                    .map(|unresolved| unresolved.reason.clone())
+            })
+            .unwrap_or_else(|| "项目目录已定位，但里面没有这个 dbnum 的文件".to_string());
+        problems.push(format!(
+            "MDB {}: dbnum={} ({}) 属于项目 {}，没有绑定到文件：{reason}；不拿别的项目里同号的文件顶替",
+            declaration.mdb,
+            db.dbnum,
+            db.name,
+            db.declared_project_code.as_deref().unwrap_or(project)
+        ));
+    }
+    Ok(MdbMembership {
+        mdb: declaration.mdb.clone(),
+        project: project.to_string(),
+        databases,
+        problems,
+    })
+}
 
+/// A declaration read from SYS with nothing bound yet: every entry's `path` /
+/// `project` / `shadowed` is empty. The MDB closure only needs the project
+/// codes; binding happens in [`resolve`] once the closure has located the
+/// project directories.
+pub struct UnboundDeclaration {
+    pub sys: PathBuf,
+    pub databases: Vec<MdbDatabase>,
+    pub problems: Vec<String>,
+}
+
+/// Find the SYS file among `own_dirs` that declares `mdb` and read the
+/// declaration without binding files. The error on a miss lists every MDB
+/// name the SYS files do declare, so a misspelled `mdb_name` is diagnosable.
+pub(crate) fn read_unbound_declaration(
+    own_dirs: &[PathBuf],
+    project: &str,
+    mdb: &str,
+) -> anyhow::Result<UnboundDeclaration> {
+    let wanted = format!("/{}", mdb.trim_start_matches('/'));
     let mut tried = Vec::new();
     let mut candidate_names = BTreeSet::new();
     let mut candidate_scan_errors = Vec::new();
     let mut declaration_errors = Vec::new();
-    for sys in sys_candidates(&own_dirs) {
+    let mut problems = Vec::new();
+    for sys in sys_candidates(own_dirs) {
         tried.push(sys.display().to_string());
-        match read_declaration(&sys, project, &wanted, &projects) {
+        match read_declaration(&sys, project, &wanted, &[]) {
             Ok(Some((databases, expansion_problems))) => {
                 problems.extend(expansion_problems);
-                for db in databases.iter().filter(|db| db.path.is_none()) {
-                    problems.push(format!(
-                        "MDB {wanted}: dbnum={} ({}) declared project {} has no matching configured source; same-dbnum foreign fallback disabled",
-                        db.dbnum, db.name, db.declared_project_code.as_deref().unwrap_or(project)
-                    ));
-                }
-                return Ok(MdbMembership {
-                    mdb: wanted,
-                    project: project.to_string(),
+                return Ok(UnboundDeclaration {
+                    sys,
                     databases,
                     problems,
                 });
@@ -384,6 +436,46 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
     );
     println!("[warn] {message}");
     anyhow::bail!(message)
+}
+
+/// Bind an unbound declaration to files: each entry is looked up only inside
+/// the project its `PROJ` names (`None` = `declaring`), through
+/// [`locate_declared`]. Entries whose project has no directory in `projects`
+/// stay unbound (`path: None`) and are reported by the caller; a same-numbered
+/// file in another project is never substituted.
+pub(crate) fn bind_declared(
+    databases: &[MdbDatabase],
+    projects: &[(String, Vec<PathBuf>)],
+    declaring: &str,
+) -> anyhow::Result<Vec<MdbDatabase>> {
+    let mut bound = Vec::with_capacity(databases.len());
+    for db in databases {
+        let located = locate_declared(
+            projects,
+            declaring,
+            db.declared_project_code.as_deref(),
+            db.dbnum,
+        )
+        .with_context(|| {
+            format!(
+                "定位 MDB 声明 dbnum={}（{}，项目 {}）的文件失败",
+                db.dbnum,
+                db.name,
+                db.declared_project_code.as_deref().unwrap_or(declaring)
+            )
+        })?;
+        bound.push(MdbDatabase {
+            dbnum: db.dbnum,
+            styp: db.styp,
+            proj: db.proj,
+            declared_project_code: db.declared_project_code.clone(),
+            name: db.name.clone(),
+            path: located.as_ref().map(|found| found.path.clone()),
+            project: located.as_ref().map(|found| found.project.clone()),
+            shadowed: located.map(|found| found.shadowed).unwrap_or_default(),
+        });
+    }
+    Ok(bound)
 }
 
 /// Files whose name ends in `sys`, which is how E3D names the SYSTEM database

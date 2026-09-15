@@ -1125,10 +1125,10 @@ impl E3dModelService {
                 );
                 projection.failures.push((
                     root,
-                    format!(
+                    crate::data_interface::mdb_route_directory::explain_unregistered_dbs(&format!(
                         "{root_failed} geometry element(s) failed: {:?}",
                         snapshot.report.failed
-                    ),
+                    )),
                 ));
                 continue;
             }
@@ -1610,9 +1610,13 @@ impl E3dModelService {
                 bail!("e3d-model root {root} has {root_failed} failed element(s)");
             }
             if root_failed > 0 {
-                let failure = format!(
-                    "{root_failed} geometry element(s) failed: {:?}",
-                    snapshot.report.failed
+                // e3d-io 的「db N 没注册进这个 DbSet」补上路由目录知道的原因（ADR-078 D5）：
+                // 现场人看到的才是「项目 ACP 的目录没定位到」，不是一个库号。
+                let failure = crate::data_interface::mdb_route_directory::explain_unregistered_dbs(
+                    &format!(
+                        "{root_failed} geometry element(s) failed: {:?}",
+                        snapshot.report.failed
+                    ),
                 );
                 eprintln!(
                     "e3d-model root {root} failed geometry details: {:?}",

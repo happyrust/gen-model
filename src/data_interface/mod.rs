@@ -26,6 +26,13 @@ pub mod db_manager;
 
 pub mod project_paths;
 
+/// 项目定位器（ADR-078 D2）：项目码 → 库目录，只在人指定的搜索根里按 `<code>000` 找。
+pub mod project_locator;
+
+/// MDB 闭包（ADR-078 D1）：要开哪些项目由主项目 SYS 里该 MDB 的 CURD 声明按项目码派生，
+/// 每个码交给 `project_locator` 定位；`included_projects` 不再参与。
+pub mod mdb_closure;
+
 pub mod extract_family;
 
 pub mod debug_scope;

@@ -2,6 +2,46 @@
 
 ## 2026-09-15
 
+### 项目集合由 MDB 派生、项目目录在搜索根里按 `<code>000` 找；`included_projects` 退役（ADR-078，取代 ADR-046）
+
+- 起因：部署实例 `_runs\ams-0.1.25` 只勾了 `AvevaMarineSample`，AMS `/ALL` 声明的 41 个外部库
+  （ACP 34 / SCB 4 / APS 2 / ZDJ 1）全部落空——启动 stderr 40 条「声明了 dbnum … 没有它的文件」，
+  「显示模型」按需生成报「db 7001 没注册进这个 DbSet」；开发机那份写了四个项目的名单同样漏了 APS。
+  core.dll 没有「项目名单」：`DB_DB::makeDirectoryName`（`0x590b4a0`）拿声明自带的项目码拼
+  `/%<PROJ>000%`，项目全集就是环境变量（`DLL_PDMSProject::BuildProjectsList`，`0x5840b80`）。
+- 新模块 `data_interface::project_locator`（D2）：在搜索根 `[project_path] ++ project_search_paths`
+  里按 `set_project_evars.bat` 文档化的三种摆法找 `<code>000`；同根同码两处 = 冲突不选，跨根先到的根赢、
+  其余记影子；每个根独立线程 + 15 s 超时，掉线的共享盘只让自己缺席；不读环境变量、不解析 evars、不开库文件。
+- 新模块 `data_interface::mdb_closure`（D1）：主项目按 `project_name` 在搜索根里定位（文件夹名，兜底当
+  项目码），它的 SYS 里该 MDB 的 CURD 按 `PROJ` 分组，每个外部项目码交给定位器；声明按 `(project, mdb)`
+  读一次缓存在进程内，`latest()` 留最近一份闭包。`project_paths::plan_watch_dirs / resolve_project_root`
+  与新的 `project_names` 都改由它给；`mdb_membership::resolve` 拆成「读未绑定声明」+「按闭包目录绑定文件」。
+- `included_projects` 不再参与任何解析：`DbOption` 字段保留（aios-core 加 `serde(default)`，删掉键也能装），
+  非空时启动打一句「已忽略，本次由 MDB 派生：AMS(主) / ACP→AvevaCatalogue / …」。新扩展键
+  `project_search_paths`（默认空）进 `DbOptionExt` 与出厂模板。`catalogue_project_priority` 保留，校验对象改为闭包项目名。
+- 缺口可见（D5 / D6）：路由目录的 `declared_without_file` 带项目码，`RouteError::NoFileForDbnum` 加
+  `project_code`，措辞变成「项目 ACP … 搜索根里没有 acp000 …加进 project_search_paths」；启动横幅把逐库
+  eprintln 归并成按项目码一段 + 每个未定位项目一句 + 搜索根清单，另打一句闭包摘要；`/health.mdb_closure`
+  `{ roots, projects, seen_projects, unresolved, problems, declaration_error }`，有缺口时进
+  `degraded_sections`（不拒绝启动）；按需生成的失败消息与 `/model/ensure` 的错误尾巴追加
+  `explain_unregistered_dbs` 给出的路由目录原因。
+- 向导第①步（D7）：去掉项目勾选框，改成「主搜索根 + 其它搜索根（一行一个，本地或 UNC）+ 主项目单选 + MDB →
+  看闭包」；新探测 `POST /api/v1/setup/probe/mdb` 直接跑闭包（不依赖运行中的服务），页面画成
+  项目码 / 目录 / 所在根 / 库数 / 影子的表，未定位项目码与不可达根红字；保存前有缺口要确认。
+  `SetupConfigPatch` 不再写 `included_projects`（旧页面带过来也不落盘），改写 `project_search_paths`。
+- 顺手：出厂模板 `room_membership = true` → `false`（与代码默认一致；开着时缺一个 DESI 整批模型根判死，
+  向导又不暴露这个键），单测 `factory_template_room_membership_matches_code_default` 钉住。
+- 补一刀：`project_locator::subdirs` 原先用 `entry.file_type().is_dir()` 判子目录，而 Windows 的目录联接（junction）
+  与目录符号链接在这里报 symlink 不报 dir——搜索根里的项目目录只要是联接，整个根就扫成空。现在跟一步
+  `path.is_dir()`，新钉 `a_project_folder_behind_a_junction_is_still_scanned`。
+- 验证：隔离 worktree（`cfed5fcce` + 本批改动）`cargo test --lib` **2110 passed / 0 failed / 109 ignored**
+  （含新钉 18 条：定位器 9、闭包 6、路由目录 2、向导探测 1），`cargo check --all-targets` 绿；
+  `watch_dirs_probe` 对真盘 `D:\AVEVA\Projects\E3D3.1` 的闭包结果见 `docs/plans/2026-09-15-mdb-project-closure-and-room-default-dev-plan.md` 状态行。
+  真部署（§5.3 三条）已在 `_runs\ams-0.1.25` 上跑过——换本批 release 二进制、删掉 `included_projects` 之后：
+  声明落空 **40 → 0**、闭包 5 个项目 40/40 定位、1112 的「显示模型」（`17496/8518`）直接出 1,731 个实例；
+  缺 ACP 时 `unresolved` 带 34 个 dbnum、`degraded_sections` 含 `mdb_closure`、按需生成的错误里点名「项目 ACP」；
+  第二个搜索根命中 ACP@根#2；掉线 UNC（`\\10.255.255.1\...`）下启动 28 s 就绪不卡死。逐条见计划 §5.4。
+
 ### 本地发布 0.1.25：增量以落盘为边界、初始化双写道、CATA 闭包缓存与 ZONE 取根
 
 - 后端 `0.1.25` 构建自 `0c6c62b3b5`（**干净树**，build_id 不带 `.dirty`），路径依赖 e3d-io

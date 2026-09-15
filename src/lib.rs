@@ -720,10 +720,52 @@ fn print_route_directory_banner(
     for problem in directory.problems() {
         eprintln!("*** MDB 路由目录：{problem} ***");
     }
-    for (dbnum, name) in directory.declared_without_file() {
+    // 声明落空的库按项目码归并成一段（ADR-078 D6）：部署首启那 41 条逐库 eprintln 到现场只剩
+    // 一屏库号，而它们其实就是「ACP 34 / SCB 4 / APS 2 / ZDJ 1 四个项目没定位到」。
+    let missing = directory.declared_without_file_by_project();
+    if !missing.is_empty() {
+        let total: usize = missing.values().map(Vec::len).sum();
+        let groups = missing
+            .iter()
+            .map(|(code, dbnums)| {
+                format!(
+                    "{}({}: {})",
+                    code.as_deref().unwrap_or("本项目"),
+                    dbnums.len(),
+                    crate::data_interface::mdb_closure::summarize_dbnums(dbnums)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" / ");
         eprintln!(
-            "*** MDB 路由目录：声明了 dbnum {dbnum}（{name}），配置的项目目录里却没有它的文件 ***"
+            "*** MDB 路由目录：MDB {} 声明的 {total} 个库没有文件，按项目归并：{groups} ***",
+            directory.mdb()
         );
+        if let Some(closure) = crate::data_interface::mdb_closure::latest() {
+            for unresolved in &closure.unresolved {
+                eprintln!(
+                    "*** MDB 路由目录：项目 {} 未定位——{}；把装着 {}000 的目录（本地或 \\\\服务器\\共享）加进 project_search_paths ***",
+                    unresolved.code,
+                    unresolved.reason,
+                    unresolved.code.to_ascii_lowercase()
+                );
+            }
+            eprintln!(
+                "*** MDB 路由目录：搜索根：{} ***",
+                closure
+                    .roots
+                    .iter()
+                    .map(|root| {
+                        if root.reachable {
+                            root.path.display().to_string()
+                        } else {
+                            format!("{}（不可达）", root.path.display())
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；")
+            );
+        }
     }
     for error in directory.verify_all_headers() {
         eprintln!("*** MDB 路由目录：{error} ***");

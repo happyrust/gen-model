@@ -23,8 +23,20 @@ _Avoid_: 重生成根、regen root、目标根
 _Avoid_: Ref0 库归属、ref0 反查、ref0 → dbnum 表、把 word0 当作 dbnum、逐库试查
 
 **dbnum 路由目录 (dbnum Route Directory)**：
-`dbnum → 文件`的那张表（`data_interface::mdb_route_directory::MdbRouteDirectory`），只从当前 MDB 的 SYS/CURD 成员清单与每个成员文件的 60 字节头造（`from_membership`），再并入依赖项目（`included_projects`）的 CATA / PROP 文件头（`add_dependency_dir`），**不读任何元素**。它回答的是「这个 dbnum 的文件在哪、是什么类型、用哪份模板」（`pin` / `pin_for(preferred_project)`，`sesno: None` = 开库时冻最新），不回答「这个 refno 在哪个库」——那是位解码的事。同号跨项目按 `preferred_project` 选同类型副本并核头，MDB 声明路径胜出，落选的只记 `shadowed`。属性服务、树服务、探针三处的定位器都从它造；解出的 dbnum 不在目录里是 `DbNotInMdb`（声明了没文件是 `NoFileForDbnum`），**不回退扫描**。
+`dbnum → 文件`的那张表（`data_interface::mdb_route_directory::MdbRouteDirectory`），只从当前 MDB 的 SYS/CURD 成员清单与每个成员文件的 60 字节头造（`from_membership`），再并入依赖项目（MDB 闭包里的每个项目，ADR-078）的 CATA / PROP 文件头（`add_dependency_dir`），**不读任何元素**。它回答的是「这个 dbnum 的文件在哪、是什么类型、用哪份模板」（`pin` / `pin_for(preferred_project)`，`sesno: None` = 开库时冻最新），不回答「这个 refno 在哪个库」——那是位解码的事。同号跨项目按 `preferred_project` 选同类型副本并核头，MDB 声明路径胜出，落选的只记 `shadowed`。属性服务、树服务、探针三处的定位器都从它造；解出的 dbnum 不在目录里是 `DbNotInMdb`（声明了没文件是 `NoFileForDbnum`），**不回退扫描**。
 _Avoid_: 定位器（泛指时）、ref0 定位器、`InMemoryCataLocator`（生产路径）、骨架的 `locator_parts()`
+
+**MDB 闭包 (MDB Closure)**：
+这个服务要开哪些项目——由主项目 SYS 里该 MDB 的 CURD 声明按项目码（SYS `PROJ` 字符向量，空 = 主项目）分组得出（`data_interface::mdb_closure::ClosurePlan`，ADR-078 D1）。闭包从 SYS 现算、只缓存在进程内（声明按 `(project, mdb)` 记一次；`latest()` 留最近一份给 `/health.mdb_closure` 与启动横幅），配置文件里不写第二份真值。core.dll 同形：`DB_DB::makeDirectoryName` 拿声明自带的项目码拼 `/%<PROJ>000%`，没有「项目名单」这回事。声明了却没定位到目录的项目码进 `unresolved`（带 dbnum 清单与找过的根），进 `degraded_sections`，**不拒绝启动**。
+_Avoid_: `included_projects`（已退役，字段只为旧配置不炸；非空时启动打一句已忽略）、`project_dirs`、纳入的项目、勾选项目、项目名单。
+
+**搜索根 (Search Root)**：
+人指定的、装着项目目录的地方：`[project_path] ++ project_search_paths`（本地路径或 UNC，`normalize_path_input` 归一，顺序即优先级；ADR-078 D2）。范围仍由人定（搜索根外不进扫描），只是「哪些项目」由 MDB 定。每个根在独立线程里扫、带超时（`project_locator::DEFAULT_ROOT_SCAN_TIMEOUT` 15 s），掉线的共享盘只让它自己缺席并报出来。
+_Avoid_: 项目根目录（那是主项目自己的目录）、`<CODE>000` 环境变量 / evars 脚本（不读、不解析、不执行，d-682 第 3 条）。
+
+**项目定位器 (Project Locator)**：
+项目码 → 库目录（`data_interface::project_locator`）：在每个搜索根里按 `set_project_evars.bat` 文档化的三种摆法找 `<code>000`（`root\<code>000` / `root\<P>\<code>000` / `root\<P>\<x>\<code>000`），目录名不区分大小写，判据沿用 `ends_with_db_suffix`（`000` 前一位不是数字）。同一根里同码两处 = 冲突，该根对此码不给答案；跨根同码先到的根赢、其余记影子（`shadowed`）；三处都没有 → `LocateFailure::NotFound`，按码点名，不猜。只看目录名、不开库文件——文件自证仍归 dbnum 路由目录。主项目按 `project_name` 的文件夹名找，找不到再当项目码找。
+_Avoid_: 猜目录、按 dbnum 找项目、把同号别项目的文件当回退。
 
 **跨库属性 (Cross-database Attribute)**：
 引用类属性（`SPRE` / `CATR` / `LSTU` / `PSPE` / `HSTU`、`OWNER`）的值是一个裸 refno；「跨库」不发生在取值那一步（取值只拷两个 word，零 I/O），而发生在**顺着它去读目标元素**那一步：位解码得 dbnum → 路由目录给文件 → 开库核头（文件自报 `db_mark` 必须等于解出的 dbnum，否则 `DbNumberMismatch`）→ 在目标库自己的索引上点查。跨库 `OWNER` 上溯（ZONE → SITE）与生成根定库（`model_source::dbnum_of_root`：解码 + 核成员是 DESI / ISOD + 只在那一个库点查一次）走同一条路。成本与 MDB 元素总数无关：读一个属性只开触达的库。真库对账口径是 `direct_attmap_probe --owner-climb` 的「解码 = 文件自报」账本（ams8000：1313/1313）。
@@ -647,7 +659,7 @@ _Avoid_: 自带持久库 / 自带存储 / spawned-*（服务不再拉库，那�
 
 # 引导子集 (Guided Subset)
 
-配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
+配置向导管的那部分 `DbOption.toml` 键：`project_path` / `project_search_paths`（ADR-078，取代退役的 `included_projects`；向导第①步改成「搜索根 + 主项目 + MDB → 看闭包」，`POST /api/v1/setup/probe/mdb`） / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
 
 _Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。
 

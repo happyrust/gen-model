@@ -3415,10 +3415,13 @@ impl AiosDBManager {
 
         let mut selected = HashSet::new();
         let mut cata_dependencies = Vec::new();
+        // 选主的项目集合是 MDB 闭包（ADR-078），不再是人手勾的 `included_projects`。
+        let closure_projects =
+            crate::data_interface::project_paths::project_names(&self.db_option);
         for (db_type, phase) in [("DICT", DataPhase::Meta), ("CATA", DataPhase::Catalogue)] {
             let result = select_catalogue_candidates(
                 by_type.remove(db_type).unwrap_or_default(),
-                &self.db_option.included_projects,
+                &closure_projects,
                 &crate::options::catalogue_project_priority(),
             );
             if result.blockers.is_empty() {
@@ -3678,8 +3681,8 @@ impl AiosDBManager {
         if watch_dirs.is_empty() {
             let msg = format!(
                 "[{origin}] 监控目录列表为空：没有解析出任何 *000 库目录，本轮不会发现任何库；\
-                 检查 DbOption.toml 的 project_path / included_projects，\
-                 启动日志「监控目录解析」一段列出了逐项目原因"
+                 检查 DbOption.toml 的 project_path / project_search_paths / project_name（ADR-078：\
+                 项目集合由 MDB 派生），启动日志「监控目录解析」一段列出了逐项目原因"
             );
             log::error!("{msg}");
             eprintln!("{msg}");
@@ -4691,7 +4694,7 @@ impl AiosDBManager {
             let selection =
                 crate::data_interface::initialization_phase::select_catalogue_candidates(
                     candidates,
-                    &self.db_option.included_projects,
+                    &crate::data_interface::project_paths::project_names(&self.db_option),
                     &crate::options::catalogue_project_priority(),
                 );
             let selected = selection
@@ -4992,7 +4995,7 @@ impl AiosDBManager {
             // 「三个共享盘全掉线」报的是同一句话。
             let detail = if watch_dirs.is_empty() {
                 "监控目录列表为空：配置里没有解析出任何 *000 库目录。检查 DbOption.toml 的 \
-                 project_path / included_projects（included_projects 必须是 project_path 下的文件夹名），\
+                 project_path / project_search_paths / project_name（项目集合由 MDB 派生，ADR-078），\
                  启动日志「监控目录解析」一段列出了逐项目原因"
                     .to_string()
             } else {

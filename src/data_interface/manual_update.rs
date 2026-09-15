@@ -3838,7 +3838,8 @@ impl AiosDBManager {
         Vec<ShadowedCandidate>,
         Vec<crate::data_interface::initialization_phase::PhaseBlocker>,
     ) {
-        let mut projects = self.db_option.included_projects.clone();
+        // 候选项目 = MDB 闭包（ADR-078），不再是人手勾的 `included_projects`。
+        let mut projects = crate::data_interface::project_paths::project_names(&self.db_option);
         if !projects
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(requested_project))
@@ -3850,7 +3851,7 @@ impl AiosDBManager {
         for candidate_project in projects {
             let Some(candidate_dir) = resolve_project_root(&self.db_option, &candidate_project)
             else {
-                let message = format!("无法解析 included project 目录: {candidate_project}");
+                let message = format!("无法解析闭包项目目录（不在 MDB 闭包里或未定位）: {candidate_project}");
                 warnings.push(message.clone());
                 blockers.push(
                     crate::data_interface::initialization_phase::PhaseBlocker::new(
@@ -3862,7 +3863,7 @@ impl AiosDBManager {
                 continue;
             };
             if !candidate_dir.exists() {
-                let message = format!("included project 目录不存在: {}", candidate_dir.display());
+                let message = format!("闭包项目目录不存在: {}", candidate_dir.display());
                 warnings.push(message.clone());
                 blockers.push(
                     crate::data_interface::initialization_phase::PhaseBlocker::new(
@@ -3914,7 +3915,7 @@ impl AiosDBManager {
             let selection =
                 crate::data_interface::initialization_phase::select_catalogue_candidates(
                     candidates,
-                    &self.db_option.included_projects,
+                    &crate::data_interface::project_paths::project_names(&self.db_option),
                     &crate::options::catalogue_project_priority(),
                 );
             let selection_blocked = !selection.blockers.is_empty();

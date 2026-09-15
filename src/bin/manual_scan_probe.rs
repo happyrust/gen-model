@@ -13,7 +13,6 @@ async fn main() -> anyhow::Result<()> {
     aios_core::init_test_surreal().await?;
     let mut option = aios_core::get_db_option().clone();
     option.project_name = project.clone();
-    option.included_projects = vec![project.clone()];
     if args.get(1).is_some_and(|value| value == "sessions") {
         let project_dir =
             aios_database::data_interface::project_paths::resolve_project_root(&option, &project)

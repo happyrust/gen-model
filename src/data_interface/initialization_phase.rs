@@ -938,12 +938,13 @@ pub struct CatalogueSelection {
 /// written.  Same-project duplicates always block; cross-project collisions are
 /// decided by project rank.
 ///
-/// Rank is `catalogue_project_priority` first, then every remaining
-/// `included_projects` entry in the order it is written.  The explicit list is
+/// Rank is `catalogue_project_priority` first, then every remaining project of
+/// the MDB closure (`included_projects`; ADR-078: the main project first, then
+/// the declared projects in CURD order) in that order.  The explicit list is
 /// an override layer, not the whole ranking: leaving a project out of it means
 /// "no opinion", not "unrankable".  `versioned_db::database` already builds its
 /// full-sync project order exactly this way, and the config changelog has
-/// documented this key's default as "same order as `included_projects`" since
+/// documented this key's default as "same order as the project list" since
 /// it was introduced.  While this function alone treated an unlisted project as
 /// unrankable, one name missing from the list blocked the whole Catalogue phase
 /// — and with it every Design batch behind the barrier.
@@ -995,7 +996,7 @@ pub fn select_catalogue_candidates(
             if !included.contains(&project_key) {
                 blockers.push(
                     CatalogueBlocker::new(format!(
-                        "元件库候选归属项目不在 included_projects: {} dbnum={}",
+                        "元件库候选归属项目不在 MDB 闭包里: {} dbnum={}",
                         candidate.project, candidate.dbnum
                     ))
                     .with_dbnum(candidate.dbnum)
@@ -1109,7 +1110,7 @@ pub fn select_catalogue_candidates(
             blockers.push(
                 CatalogueBlocker::new(format!(
                     "跨项目 CATA/DICT dbnum={dbnum} 冲突，但候选归属项目名为空，\
-                     排不进 included_projects 顺序"
+                     排不进闭包项目顺序"
                 ))
                 .with_dbnum(dbnum),
             );

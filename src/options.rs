@@ -119,6 +119,14 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
 
+    /// `project_path` 之外的搜索根（本地路径或 UNC，顺序即优先级；ADR-078 D2）。
+    ///
+    /// MDB 声明的外部项目按项目码在 `[project_path] ++ project_search_paths` 里找 `<code>000`
+    /// 库目录；远程项目（`\\server\share\Projects`）填这里。默认空 = 只看 `project_path`。
+    /// 取代退役的 `included_projects` 名单（见 [`project_search_paths`]）。
+    #[serde(default)]
+    pub project_search_paths: Option<Vec<String>>,
+
     /// **调试用**：把增量摄入的数据批次圈到这些 dbnum（默认空 = 全范围）。
     ///
     /// 命令行 `serve --watch-dbnum` 压过它；SYS meta 不受限。它与
@@ -495,6 +503,7 @@ impl From<DbOption> for DbOptionExt {
             model_incremental_types: None,
             room_membership: None,
             catalogue_project_priority: None,
+            project_search_paths: None,
             watch_dbnums: None,
             block_file_identity_conflicts: None,
             model_concurrency_mode: None,
@@ -571,6 +580,8 @@ struct DbOptionExtFields {
     room_membership: Option<bool>,
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
+    #[serde(default)]
+    project_search_paths: Option<Vec<String>>,
     #[serde(default)]
     watch_dbnums: Option<Vec<u32>>,
     #[serde(default)]
@@ -800,6 +811,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_incremental_types: ext.model_incremental_types.clone(),
         room_membership: ext.room_membership,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
+        project_search_paths: ext.project_search_paths.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
         block_file_identity_conflicts: ext.block_file_identity_conflicts,
         model_concurrency_mode: ext.model_concurrency_mode.clone(),
@@ -1283,6 +1295,15 @@ fn normalise_watch_dbnums(configured: Option<&[u32]>) -> Vec<u32> {
 pub fn catalogue_project_priority() -> Vec<String> {
     load_ext_fields()
         .catalogue_project_priority
+        .clone()
+        .unwrap_or_default()
+}
+
+/// `project_path` 之外的搜索根（ADR-078 D2），配置里写什么就给什么；归一与去重在
+/// [`crate::data_interface::mdb_closure::search_roots`]。默认空。
+pub fn project_search_paths() -> Vec<String> {
+    load_ext_fields()
+        .project_search_paths
         .clone()
         .unwrap_or_default()
 }
@@ -2885,6 +2906,35 @@ mod tests {
                 .any(|name| name == "room_membership"),
             "配置读坏时的告警名单从结构体导出，新键得在里面"
         );
+    }
+
+    /// 出厂模板（`scripts/templates/DbOption.factory.toml`，向导与本地发布的起点）写的
+    /// `room_membership` 必须与代码默认一致。2026-09-15 部署事故：模板写 `true`、代码默认
+    /// `false`、向导又不管这个键，房间输入不全时整批模型根被判死而现场无从发现。
+    /// 顺带钉住 ADR-078 的 `project_search_paths` 键在模板里。
+    #[test]
+    fn factory_template_room_membership_matches_code_default() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/templates/DbOption.factory.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("出厂模板可读");
+        let document = toml::from_str::<toml::Value>(&text).expect("出厂模板是合法 TOML");
+        let table = document.as_table().expect("顶层是表");
+        let configured = table
+            .get("room_membership")
+            .and_then(toml::Value::as_bool)
+            .expect("模板写了 room_membership");
+        assert_eq!(
+            configured,
+            effective_room_membership(None, None),
+            "出厂模板的 room_membership 与代码默认（缺键时的取值）分叉了"
+        );
+        let search_paths = table
+            .get("project_search_paths")
+            .and_then(toml::Value::as_array)
+            .expect("模板写了 project_search_paths（ADR-078）");
+        assert!(search_paths.is_empty(), "出厂模板的搜索根应为空数组");
     }
 
     /// 测试覆盖两个方向都得能摁住，且离开作用域即恢复「按配置来」。

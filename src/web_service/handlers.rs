@@ -738,6 +738,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "project": state.identity.project,
             "mdb": state.identity.mdb,
             "namespace": state.identity.namespace,
+            "mdb_closure": crate::data_interface::mdb_closure::latest()
+                .map(|plan| plan.health_json())
+                .unwrap_or(Value::Null),
             "dabacon_tags": dabacon_tags.clone(),
             "http": http_addresses.clone(),
             // 读路由只剩 direct（2026-09-08 S4）；键留着给老客户端对形态，值是常量。
@@ -814,6 +817,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         &mut degraded,
         || Value::Null,
     );
+    // MDB 闭包（ADR-078 D6）：进程内最近一份，不扫盘、不读 SYS。声明落空 / 根不可达 /
+    // 主项目没定位 / SYS 读不到都算降级——已定位项目的数据面照常，但缺口要在这里看得见。
+    let mdb_closure = crate::data_interface::mdb_closure::latest();
+    if mdb_closure.as_ref().is_some_and(|plan| plan.is_degraded()) {
+        degraded.push("mdb_closure");
+    }
+    let mdb_closure = mdb_closure
+        .map(|plan| plan.health_json())
+        .unwrap_or(Value::Null);
     // 房间流程退役（t-678）：全量重建的盖章 / 对账那一格随 `room_model` 的 StartupRoomBuild
     // 一族没了，启动对比的 `reference` / `startup_compare` 随 `room_startup` 没了。这一格
     // 只剩常驻房间模型自己的统计——无几何的在册面板按库点名，限定域之外的库单独成一句
@@ -857,6 +869,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "project": state.identity.project,
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
+        "mdb_closure": mdb_closure,
         "dabacon_tags": dabacon_tags,
         "http": http_addresses,
         // 数据面读路由只剩 direct（legacy db 读路由 2026-09-08 随 refactor plan S4 退役）。
