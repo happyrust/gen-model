@@ -26,6 +26,22 @@
 - 验证口径写清楚：本轮跑的是 `cargo check --features http_api,rvm_verify`（干净）与发布脚本的
   三腿冒烟；**没有**跑全量 `cargo test --lib`，别把这次当成「全绿」。
 
+### `parse.sessions` 的会话用户键改叫 `user`；`computer_name` 留作别名，**下一版（0.1.26）删**
+
+- 那一格是 core.dll 的会话属性 `USER`（写这一会话的登录名，`+0x7C`，长度在 `+0x78`），从来不是
+  机器名：rs-core 时代叫 `get_computer_name`，e3d-io 叫过 `machine`，2026-09-12 `c7cc6c8` 对照
+  core.dll 改正为 `user`——只是有些登录名长得像主机名（`pdms-bj-c103-47`）。`8e86aa3af` 里
+  `session.machine → session.user` 是跟着改名，输出的字节一个没变；一直叫错的是键名。
+- Python 绑定 `aios_db.parse.sessions` 每行新增 `user`；`computer_name` 同值保留。`parse.pyi` 与
+  `sessions()` 文档写明来历；`smoke_m1.py` 改读 `user`。仓内其余读者（`test_extract_tree_offline` /
+  `testbed/spatial_tree_8000.py` / `run_full_loop.py`）只取 `sesno`，不受影响。钉
+  `test_session_user_is_named_user_and_computer_name_is_its_alias`（issue-019 三份快照逐行
+  `computer_name == user`）。
+- **预告：`computer_name` 别名在下一个本地发布（0.1.26）删除**，之后会话页只剩 `user`；仓外脚本读
+  `row["computer_name"]` 的请在此之前改成 `row["user"]`。
+- 验证：`cargo check --manifest-path python/Cargo.toml` 干净；`maturin develop` 重建扩展后
+  `pytest tests/test_parse_offline.py` 13 passed（12 旧 + 1 新）。
+
 ### 按 dbnum 点名的入口不受 `watch_dbnums` / `--debug-dbnum` 两道监听门管
 
 - 那两道门收窄的是 watcher 自己扫出来的活；点名的库是调用方指定的，再关着只会把点名挡掉，
