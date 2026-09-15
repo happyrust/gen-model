@@ -8,8 +8,13 @@
   `6431ee7120`；前端 plant-ui 升到 `0.1.11` 并**重建 wasm**，未复用旧包的 Web
   （`web_source = built-from-plant-ui`）。产物
   `releases/ams-local-0.1.25_release.20260915063626.g0c6c62b3b521-runtime-workspace.zip`，
-  222,426,591 bytes，SHA-256
-  `98807349c8d912069eef30a84c4209672a9ab28a45ca4e59d6a61df2b1f5d923`。
+  SHA-256 `490c3c4b1b241e44ac7a541c89fc2e2a5c5b947764d87aba3e1fe6e004ba68ba`。
+  **这份 zip 出过两次**：首次打包（14:47，zip 哈希 `98807349c8d9…`）之后那个文件被本机另一路
+  会话取走并删掉，只在 `releases/` 留下一个剥掉 `web\` 与 `workspace\` 的
+  `aios-database-0.1.25.zip`。第二次用 `-SkipBuild` 从那份剥壳包里取回 `aios-database.exe`
+  重新组包：exe 的 SHA-256 与首版清单逐位相同（`b3638d9f39ee…`）、`build_id` 不变，
+  11 个 `web/` 文件也与首版清单逐位相同，**只有 zip 容器本身的哈希变了**（条目时间戳不同）。
+  发布身份以 `build_id` 与 exe 哈希为准，两次是同一个二进制。
 - 包型 `runtime-workspace`（带 `workspace\`、不带 `assets\meshes`），与 0.1.24 同档：
   assets 灌入 165 个文件 / 115.6 MB，meshes 排除 83,130 个文件 / 1,142.4 MB。
 - 覆盖 0.1.24（`80bee35e65f2`，2026-09-14 出包）之后的 27 个提交。用户可见的四条主线写在
