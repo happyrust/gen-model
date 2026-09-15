@@ -646,11 +646,57 @@ async fn surface_check(
     // 极少数采样点，p95 完全看不见（GWALL 实测 p95 0.001 mm 而 Hausdorff 2,010 mm）。
     if distance.p95 as f64 > tol_p95_mm || distance.hausdorff as f64 > tol_hausdorff_mm {
         summary.surface_mismatch += 1;
+        let mut payload = payload;
+        payload["where"] = locate_difference(rvm_mesh, &gen_mesh);
         item["surface_mismatch"] = payload;
     } else {
         item["surface"] = payload;
     }
     Ok(())
+}
+
+/// 差在哪一块：**方向**说的是「谁多了面」，坐标说的是「多在什么位置」。
+///
+/// 双向合并会把方向信息抹掉，而方向正是要问的那件事：
+/// - `rvm_to_gen` 大 = RVM 有面而生成侧没有 → 我们**少了材料**（多切了一个洞 / 少了一块板）。
+/// - `gen_to_rvm` 大 = 生成侧有面而 RVM 没有 → 我们**多了材料**（该切的洞没切 / 多了一块板）。
+///
+/// 再给最远的几个点与它们在对侧的最近点：同一处的一簇点说明是**一块**局部差异
+/// （开孔、一块板），散在整面上才是姿态或尺寸问题。
+#[cfg(feature = "manifold")]
+fn locate_difference(
+    rvm_mesh: &parry3d::shape::TriMesh,
+    gen_mesh: &parry3d::shape::TriMesh,
+) -> serde_json::Value {
+    use crate::fast_model::shared::{farthest_surface_pairs, one_way_surface_distance};
+
+    let side = |d: Option<crate::fast_model::shared::SurfaceDistance>| match d {
+        Some(d) => json!({ "p95_mm": d.p95, "hausdorff_mm": d.hausdorff, "mean_mm": d.mean }),
+        None => serde_json::Value::Null,
+    };
+    let r2g = one_way_surface_distance(rvm_mesh, gen_mesh, 4_000);
+    let g2r = one_way_surface_distance(gen_mesh, rvm_mesh, 4_000);
+    let verdict = match (
+        r2g.as_ref().map(|d| d.hausdorff).unwrap_or(0.0),
+        g2r.as_ref().map(|d| d.hausdorff).unwrap_or(0.0),
+    ) {
+        (r, g) if r > g * 2.0 => "gen_missing_material",
+        (r, g) if g > r * 2.0 => "gen_extra_material",
+        _ => "both_sides",
+    };
+    let worst = |from: &parry3d::shape::TriMesh, to: &parry3d::shape::TriMesh| {
+        farthest_surface_pairs(from, to, 4_000, 5)
+            .into_iter()
+            .map(|(at, nearest, dist)| json!({ "at_mm": at, "nearest_mm": nearest, "dist_mm": dist }))
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "verdict": verdict,
+        "rvm_to_gen": side(r2g),
+        "gen_to_rvm": side(g2r),
+        "worst_rvm_points_without_gen_surface": worst(rvm_mesh, gen_mesh),
+        "worst_gen_points_without_rvm_surface": worst(gen_mesh, rvm_mesh),
+    })
 }
 
 #[cfg(not(feature = "manifold"))]

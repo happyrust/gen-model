@@ -284,17 +284,29 @@ impl<'a> Resolver<'a> {
 
     /// 属主成员表里第 `ordinal` 个该名词的成员。
     ///
-    /// **名词有两种拼法，一次只认一种。** PDMS 短名词并不一律 4 字，站点库里存的也不总是
-    /// 短的：1112 的 CWALL 下实测是 `GWALL` / `STWALL` / `WALL` 的**全称**，
-    /// `full_noun_to_short` 截出来的 `GWAL` / `STWA` 一个都对不上——1RS-WF03 的 118 个
-    /// `GWALL n of CWALL /…` 就是这么全数解不出来的（2026-09-15 实测）。
-    /// 先看这个属主下有没有全称拼法的成员，有就按全称数；没有才退回短名词。
-    /// 两种拼法混在一起数会把序号数歪，所以是「二选一」不是「两个都要」。
+    /// **同一个名词在站点库里有三种拼法，一次只认一种。** 2026-09-15 在 1112 上逐个量过：
+    ///
+    /// | RVM 全称 | `pe.noun` | 规律 |
+    /// | --- | --- | --- |
+    /// | `GWALL` / `CWALL` / `FIXING` / `STWALL` | 原样 | 本来就不超 6 字 |
+    /// | `PLDATUM` / `JLDATUM` | `PLDATU` / `JLDATU` | **截到 6 字** |
+    /// | `FTUBE` / `ELBOW` / `BRANCH` | `FTUB` / `ELBO` / `BRAN` | 字典短名词（4 字为主） |
+    ///
+    /// 只按 `full_noun_to_short`（4 字 + 例外表）数，前两行一个都对不上：1RS-WF03 的
+    /// 118 个 `GWALL n of CWALL /…` 与 38 个 `PLDATUM 1 of JLDATUM /…` 就是这么全数
+    /// 解不出来的。三种拼法**按序试**，哪一种在这个属主下有成员就用哪一种数完为止——
+    /// 混在一起数会把序号数歪，所以是「三选一」不是「都要」。
     fn nth_child_of_noun(&self, owner: &str, noun_full: &str, ordinal: usize) -> Option<String> {
         let full = noun_full.to_ascii_uppercase();
+        let six: String = full.chars().take(6).collect();
         let short = full_noun_to_short(noun_full);
         let children = self.index.children_of(owner);
-        for spelling in [full.as_str(), short.as_str()] {
+        let mut tried: Vec<&str> = Vec::with_capacity(3);
+        for spelling in [full.as_str(), six.as_str(), short.as_str()] {
+            if tried.contains(&spelling) {
+                continue;
+            }
+            tried.push(spelling);
             let mut matching = children
                 .iter()
                 .filter(|child| self.index.noun_of(child) == Some(spelling));
@@ -519,9 +531,44 @@ mod tests {
         );
     }
 
+    /// 三种拼法都认，一次只认一种：全称（`GWALL`）、截 6 字（`PLDATUM` → `PLDATU`）、
+    /// 字典短名词（`FTUBE` → `FTUB`）。2026-09-15 在 1112 上逐个量过，三种都真实存在。
+    #[test]
+    fn a_noun_capped_at_six_characters_still_resolves() {
+        let mut index = fixture();
+        index.by_name.insert("/JL".into(), "1112/20".into());
+        index.elements.insert(
+            "1112/20".into(),
+            PeElement {
+                name: "/JL".into(),
+                noun: "JLDATU".into(),
+            },
+        );
+        index.elements.insert(
+            "1112/21".into(),
+            PeElement {
+                name: String::new(),
+                noun: "PLDATU".into(),
+            },
+        );
+        index
+            .children
+            .insert("1112/20".into(), vec!["1112/21".into()]);
+
+        let mut resolver = Resolver::new(&index);
+        assert_eq!(
+            resolver.resolve("PLDATUM 1 of JLDATUM /JL"),
+            Some((
+                Resolved::Element("1112/21".into()),
+                ResolvedFrom::DefaultName
+            )),
+            "站点库把 PLDATUM 截成 6 字的 PLDATU，全称与 4 字短名词都对不上"
+        );
+    }
+
     /// 站点库里存的名词可能是**全称**（1112 的 CWALL 下实测是 GWALL / STWALL / WALL），
     /// 截成 4 字的 GWAL / STWA 一个都对不上——1RS-WF03 的 118 个 `GWALL n of CWALL /…`
-    /// 就是这么全数解不出来的。两种拼法都认，但一次只认一种。
+    /// 就是这么全数解不出来的。三种拼法都认，但一次只认一种。
     #[test]
     fn a_noun_stored_in_full_resolves_just_like_a_shortened_one() {
         let mut index = fixture();
