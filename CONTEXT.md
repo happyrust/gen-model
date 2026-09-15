@@ -385,6 +385,14 @@ _Avoid_: 按需解析 CATA（旧章的词，指惰性兜底那条路）、CATA �
 `cata_dependency_state:{dbnum} { sesno, rows }`——这个目录库的依赖行是按哪一版目录文件渲的、累计送入了多少行（`rows` 是量级：`Fresh` 命中也计、前移重渲不计；精确数查 `pe … dependency = true`）。**不是水位**：不进 `dbnum_watermark`、不参与 ADR-021 的判据；`/dbnums` 露成 `dependency_rows` / `dependency_sesno`（没有依赖行的库整格不写）。目录文件前移时（文件最新 > `sesno`，只对本批闭包碰到的目录库、排在本批 `Fresh` 之前）由 `cata_cascade_window` 差分出变动目录件，与已入库依赖行求交，被改的 `Replace` 重渲、被删的落墓碑，然后推进 `sesno`；差分不可用（会话不在链上 / 候选超 20,000）退化成该库全部依赖行重渲，回执点名 `cata_dependency_full_refresh`。
 _Avoid_: CATA 水位、`applied_sesno`（那是 DESI 的）
 
+**依赖闭包缓存 (Dependency Closure Cache)**：
+依赖闭包**解析产物**的进程级缓存（`data_interface::cata_closure_cache`，plan `docs/plans/2026-09-15-cata-dependency-closure-cache-dev-plan.md`）：一个目录元素在一个进程里只解析一次。键 `(project, 目录 dbnum, refno)`，值是元素的**原始事实**（完整属性表 + 成员 + 出向边 + owner / noun），不是闭包结果——扩边规则（容器白名单 / 排除库 / owner 链 / 只收 CATA）仍由本次 `resolve()` 按**本次** cfg 施加，四个调用点 cfg 的差别不会污染缓存。每个目录库盖一份身份戳（文件指纹 `size:mtime` + 目录会话号），戳变了整库条目作废，**不做**「更早 sesno 兼容」（元素在两个会话之间有没有变是「依赖状态」前移刷新那条差分的活）。接线只在 `CataClosureResolver::resolve()` 一处，基线 / 数据窗口 / 模型根 / 惰性兜底四条路自动吃到：每轮每库先查缓存，命中的不开会话、不碰文件，与解析出来的元素走**同一段**扩边（`expand_into`）；未命中的过本库那把闸、重查一次再解析，只有解析成功的才写入——库里没有（`Ok(None)`）、解析失败、打不开文件一律不记。条目 + 字节双上限（固定 200,000 条 / 256 MiB，≈ 整份 AMS 目录闭包 × 6）、LRU 淘汰；**没有运行时开关**（2026-09-15 用户拍板：不加配置键，保持默认；`CacheLimits` 任一为 `0` 即关只是留给单测的内部能力）；缓存永远不是任务失败的原因。RocksDB 仍是唯一事实：它省的只是重复的 open + parse（ams8000 同一批 seeds 冷 456 ms → 热 57 ms），开 / 关两态闭包逐位相同；它省不了一个字节的 SQL——那是「已落库记忆」的事。**不是**旧章的 `CataDepCache`（那是惰性兜底路上「哪些 refno 已入库」的存在性缓存，2026-09-07 随 ADR-064 Q2 删除）。
+_Avoid_: CATA 缓存（泛指时）、解析缓存（泛指时）、依赖缓存上下文（旧章的词）、把它当第二份真值、闭包结果缓存
+
+**已落库记忆 (Persisted Dependency Memo)**：
+进程级「这一行这一版已经落过库」的记忆（`cata_dependency::PersistedDependencyMemo`，`(目录 dbnum, refno) → sesno`，plan 2026-09-15 D6）。渲依赖事务之前把同库、同 sesno 已落的元素摘掉——不渲、不发，回执记 `skipped_persisted`；闭包账（`elements` / `missing`、「依赖状态」的 `rows`）**不摘**：「这一批依赖多少行」与「这一批写了多少行」是两笔账；摘光的库连状态行也不发。纪律与 `CataSeedMemo` 同源（ADR-071 D1：任务是这个库唯一的写者，**它知道自己写了什么**）：只在那一库的事务**全部执行成功之后**才记；目录版本前移（`refresh_moved_catalogues_on`）与整库 `wipe_dbnum_for_reinit` 两处作废；进程重启自然消失；基线 lane 是异步单写者、等不到「写成功那一刻」，第一阶段只查不记。`Fresh` = `INSERT IGNORE`，行在（任何 sesno）本来就是 no-op——记忆只是把这个 no-op 提前到进程里，省的是渲染、SQL 字节与 lane 事务，语义不变。它只可能错在「以为在、其实不在」这一种，「别的进程动了这个库」本来就在 ADR-071 D1 之外。与依赖闭包缓存一样没有运行时开关。
+_Avoid_: 依赖去重（泛指时）、CATA 水位、把它当「库里有什么」的真值、持久化缓存
+
 ## 按需解析元件库（On-demand CATA）——旧章（retired，ADR-058 D1；2026-09-06 由「依赖入库」接替）
 
 > 2026-09-03 ～ 2026-09-06 之间 CATA 不解析进持久层：模型面经 `E3dDbResolver` 从文件读，级联判据用 CATA 文件的

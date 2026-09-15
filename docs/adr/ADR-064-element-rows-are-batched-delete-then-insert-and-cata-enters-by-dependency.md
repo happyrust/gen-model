@@ -82,6 +82,10 @@ plant-ui 对它要么等、要么拿到错误。
   `cata_cascade_window` 差分出变动目录件，与已入库依赖行求交，被改的 `Replace` 重渲、被删的落墓碑，然后推进 `sesno`，
   再做本批的 `Fresh`（顺序不能反：`Fresh` 已有行赢，会把旧版本留下）；差分不可用退化为该库全部依赖行重渲，回执点名
   `cata_dependency_full_refresh`。没被任何 DESI 批碰到的目录库不主动刷——它的依赖行没有读者在等新版本。
+- **实施注记（2026-09-15，plan `docs/plans/2026-09-15-cata-dependency-closure-cache-dev-plan.md`）**：闭包的解析产物
+  （属性表 / 成员 / 出向边）可在进程内缓存（`cata_closure_cache`，按目录文件指纹 + 会话号盖戳，戳变整库作废），已落过库的
+  行可按进程记忆（`PersistedDependencyMemo`，只在写成功之后记、版本前移与整库 wipe 作废）不再重渲重发；**落库出口不变**——
+  仍只有 `cata_dependency` 一个、`pe.dependency = true` 只在那里打（E4），缓存 / 记忆开与关两态落库结果逐行一致。
 
 ### D6　`inst_geo` 降为 `INSERT IGNORE`
 

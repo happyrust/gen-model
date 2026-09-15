@@ -734,6 +734,11 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
     crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+    // D6：行刚被清空，「这一版已经落过库」的记忆整份作废——被清的是 DESI 库时，它的目录链
+    // 依赖行也一起没了，按目录库分不出哪些该留。
+    crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
+        crate::data_interface::cata_dependency::ForgetScope::Everything,
+    );
     crate::data_interface::dbnum_consistency::invalidate_census();
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，

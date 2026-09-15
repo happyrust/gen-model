@@ -73,6 +73,17 @@ pub struct DependencySummary {
     pub rows: usize,
     pub catalogue_dbnums: usize,
     pub missing: usize,
+    /// S0 取证（plan 2026-09-15）：解析 / 渲染拆项与送进 lane 的 SQL 字节。
+    pub resolve_ms: u128,
+    pub render_ms: u128,
+    pub sql_bytes: usize,
+    pub parse_requests: usize,
+    pub parsed: usize,
+    /// S2：解析缓存命中 / 未命中的元素数。
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    /// S3（D6）：这一版已经落过库、因此没有再送进 lane 的元素数。
+    pub skipped_persisted: usize,
 }
 
 /// 一个冻结源流进属性 lane 之后的账——解析那一半；写者那一半在 lane 的 [`WriterOutcome`] 上。
@@ -436,20 +447,23 @@ async fn persist_dependency_closure(
 ) -> anyhow::Result<DependencySummary> {
     use crate::data_interface::cata_dependency;
     let rows = cata_dependency::resolve_dependency_rows(project, dbnum, seeds).await?;
-    let batches = cata_dependency::render_dependency_transactions(
+    let render_started = std::time::Instant::now();
+    // D6：只查不记（plan Q3 第一阶段）——这条 lane 是异步单写者，成功要等 drain，
+    // 记不了「写成功之后」那一刻；已经被同步出口落过的行照样不必再发一遍。
+    let batches = cata_dependency::render_dependency_transactions_unpersisted(
         &rows,
         uda_keys,
         crate::data_interface::element_batch::WriteMode::Fresh,
     )?;
-    for (cata_dbnum, sqls) in &batches {
-        let elements = rows.by_dbnum.get(cata_dbnum).map(Vec::len).unwrap_or(0);
-        let sesno = rows
-            .by_dbnum
-            .get(cata_dbnum)
-            .and_then(|elements| elements.first())
-            .map(|(sesno, _)| *sesno)
-            .unwrap_or(0);
-        for (index, sql) in sqls.iter().enumerate() {
+    let render_ms = render_started.elapsed().as_millis();
+    let sql_bytes: usize = batches
+        .by_dbnum
+        .iter()
+        .flat_map(|(_, batch)| batch.transactions.iter())
+        .map(String::len)
+        .sum();
+    for (cata_dbnum, batch) in &batches.by_dbnum {
+        for (index, sql) in batch.transactions.iter().enumerate() {
             sender
                 .send_async(WriteJob::new(
                     sql.clone(),
@@ -460,7 +474,11 @@ async fn persist_dependency_closure(
         }
         sender
             .send_async(WriteJob::new(
-                cata_dependency::render_dependency_state(*cata_dbnum, sesno, elements),
+                cata_dependency::render_dependency_state(
+                    *cata_dbnum,
+                    batch.sesno,
+                    batch.refnos.len(),
+                ),
                 format!("cata dependency state dbnum={dbnum} cata={cata_dbnum}"),
             ))
             .await
@@ -471,10 +489,29 @@ async fn persist_dependency_closure(
         rows: rows.elements(),
         catalogue_dbnums: rows.by_dbnum.len(),
         missing: rows.manifest.missing,
+        resolve_ms: rows.account.resolve_ms,
+        render_ms,
+        sql_bytes,
+        parse_requests: rows.account.closure.parse_requests,
+        parsed: rows.account.closure.parsed,
+        cache_hits: rows.account.closure.cache_hits,
+        cache_misses: rows.account.closure.cache_misses,
+        skipped_persisted: batches.skipped,
     };
     println!(
-        "{file_name}: CATA 依赖闭包 seeds={} → {} 行 / {} 库，缺失 {}",
-        summary.seeds, summary.rows, summary.catalogue_dbnums, summary.missing
+        "{file_name}: CATA 依赖闭包 seeds={} → {} 行 / {} 库，缺失 {}（resolve {} ms · render {} ms · SQL {} KB · parse {} 次 / {} 成功 · 缓存 {} 命中 / {} 未命中 · 已落库跳过 {}）",
+        summary.seeds,
+        summary.rows,
+        summary.catalogue_dbnums,
+        summary.missing,
+        summary.resolve_ms,
+        summary.render_ms,
+        summary.sql_bytes / 1024,
+        summary.parse_requests,
+        summary.parsed,
+        summary.cache_hits,
+        summary.cache_misses,
+        summary.skipped_persisted,
     );
     if summary.missing > 0 {
         log::warn!(

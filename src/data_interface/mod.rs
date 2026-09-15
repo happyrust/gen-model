@@ -147,6 +147,8 @@ pub mod sync_publisher;
 pub mod helper;
 
 pub mod cata_closure;
+/// 依赖闭包的进程级解析缓存（plan 2026-09-15）：目录元素解析一次、跨调用复用；RocksDB 仍是唯一事实。
+pub(crate) mod cata_closure_cache;
 
 /// dbnum → 文件的路由目录，从 SYS/CURD 成员清单造，不含逐元素表（母计划 §5.1 / 切片 W2）。
 pub mod mdb_route_directory;
