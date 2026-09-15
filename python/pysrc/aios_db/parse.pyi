@@ -21,9 +21,8 @@ def parent_gap_refno_count(leaf: str, parent: str) -> int:
 def sessions(path: str) -> list[dict[str, Any]]:
     """全部会话页（升序）：sesno / pgno / end_pgno / index_root_pageno / user / comments / date。
 
-    user 是 core.dll 的会话属性 USER（写这一会话的登录名）；computer_name 是它的旧名别名、
-    值相同（rs-core 时代的误称，2026-09-12 对照 core.dll 改正），新代码读 user。
-    computer_name 别名下一个本地发布（0.1.26）删除。"""
+    user 是 core.dll 的会话属性 USER（写这一会话的登录名），不是机器名——rs-core 时代的误称
+    computer_name 曾作别名保留，已于 0.1.26 删除（0.1.25 的 changelog 预告过）。"""
 
 def net_window(
     path: str, start: int, end: int, detail: bool = False

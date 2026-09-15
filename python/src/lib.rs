@@ -207,11 +207,10 @@ fn parent_gap_refno_count(leaf: PathBuf, parent: PathBuf) -> PyResult<usize> {
 
 /// 列出库文件的全部会话页（升序）：会话号 / 页号 / 索引根 / 用户名 / 注释 / 时刻。
 ///
-/// `user` 是 core.dll 的会话属性 `USER`（写这一会话的登录名，`+0x7C`）。`computer_name`
-/// 是它的**旧名别名、值相同**：老 rs-core 把这一格叫 `get_computer_name`，e3d-io 又叫过
-/// `machine`，2026-09-12 对照 core.dll 改正为 `user`——那一格从来不是机器名，只是有些登录名
-/// 长得像主机名（`pdms-bj-c103-47`）。读 `user`；`computer_name` 只为老脚本留着，
-/// **下一个本地发布（0.1.26）删**（changelog 2026-09-15 已预告）。
+/// `user` 是 core.dll 的会话属性 `USER`（写这一会话的登录名，`+0x7C`）。那一格从来不是机器名，
+/// 只是有些登录名长得像主机名（`pdms-bj-c103-47`）：老 rs-core 把它叫 `get_computer_name`，
+/// e3d-io 又叫过 `machine`，2026-09-12 对照 core.dll 改正为 `user`。旧名别名 `computer_name`
+/// 已于 0.1.26 删除（0.1.25 的 changelog 预告过），读 `user`。
 #[pyfunction]
 fn sessions(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
     let value = py.detach(|| sessions_impl(&path)).map_err(anyhow_to_py)?;
@@ -230,8 +229,6 @@ fn sessions_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
                 "index_root_pageno": session.index_root_pgno,
                 "claim_pageno": serde_json::Value::Null,
                 "user": session.user,
-                // 旧名别名（见 `sessions` 的文档）：键名是 rs-core 时代的误称，值一直是 USER；0.1.26 删。
-                "computer_name": session.user,
                 "comments": session.comment,
                 "date": session.rfc3339(),
             })
