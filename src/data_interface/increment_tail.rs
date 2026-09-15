@@ -16,13 +16,16 @@
 //! 工作项由任务就地执行（`batch_worker::run_model_side_actions`）；空间意图行、per-root
 //! attempts 与 `window_block` 也随第二条异步账一起退了。尾事务现在只剩：房间全量重建要求
 //! （ADR-040）、懒生成根观察值、水位推进。
+//!
+//! **2026-09-15（ADR-079）**：水位之后那一步「未触根凭证前移」（P2-2，`UPDATE gen_root SET
+//! source_end_sesno = T`）随 `gen_root` 表退役——「这份几何到 T 仍有效」由任务收尾盖到 T 的
+//! `model_sesno` 一并承诺，库里没有任何一行要为它改；前移名单只进回执。
 
 use aios_core::SUL_DB;
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_plan::ModelUpdatePlan;
-use crate::data_interface::window_root_plan::CredentialAdvanceOutcome;
 
 /// The monotonic watermark advance for one `dbnum`. Rendered in one place so
 /// the window and baseline transactions cannot drift apart.
@@ -205,20 +208,16 @@ pub(crate) fn render_confirmed_empty_baseline(
 /// prevent — a lost status write was unrepairable because no later window
 /// revisits an element that did not change again.
 ///
-/// After the tail commits, `plan.credential_advance` (ADR-056 P2-2) moves the
-/// untouched roots' `gen_root` credentials to `end_sesno` on a best-effort
-/// basis — outside the transaction on purpose, so a model-side failure can
-/// neither roll back nor block the watermark (N4).
-///
-/// 返回那次前移的账（名单为空则 `None`）：它只是回执材料（`DataBatchResult.credential_advance`，
-/// plant-ui 计划 G3），前移失败也不是错误——账上 `advanced = 0`，日志里说了原因。
+/// `plan.credential_advance`（ADR-056 P2-2 的未触根名单）在这里**不再有动作**（ADR-079）：
+/// 那些根到 T 仍有效，由任务收尾盖到 T 的 `model_sesno` 一并承诺；名单只进回执
+/// （`CredentialAdvanceReceipt::from_plan`）。
 pub async fn finalize_attempt(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
-) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
+) -> anyhow::Result<()> {
     let render = render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements);
     for (index, batch) in render.window_batches.iter().enumerate() {
         SUL_DB
@@ -250,36 +249,8 @@ pub async fn finalize_attempt(
         .map_err(|error| {
             anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
         })?;
-
-    let outcome = if plan.credential_advance.is_empty() {
-        None
-    } else {
-        let requested = plan.credential_advance.len();
-        Some(
-            match crate::data_interface::window_root_plan::advance_root_credentials_on(
-                &SUL_DB,
-                dbnum,
-                end_sesno,
-                end_sesno_time,
-                &plan.credential_advance,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    log::warn!(
-                        "credential advance degraded after watermark commit dbnum={dbnum} end_sesno={end_sesno}: {error:#}"
-                    );
-                    CredentialAdvanceOutcome {
-                        requested,
-                        advanced: 0,
-                    }
-                }
-            },
-        )
-    };
     crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
-    Ok(outcome)
+    Ok(())
 }
 
 /// Advance an already-baselined `dbnum`'s watermark (idempotent re-run only).

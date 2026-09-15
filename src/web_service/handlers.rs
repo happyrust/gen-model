@@ -684,10 +684,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (watch_dbnums, watch_origin) = crate::data_interface::watch_scope::resolved();
     let watch_dbnums_origin = (!watch_dbnums.is_empty()).then(|| watch_origin.describe());
     // 模型增量类型限定同栏（`model_incremental_types` / `AIOS_MODEL_INCREMENTAL_TYPES`）。
-    // 它收窄的是模型消费而不是数据摄入：名单外类型的 regen_root / delete_cleanup 行
-    // 照常入队、留在 model_update_pending 里不被本进程认领——「HANG 的数据都进来了，
-    // 模型怎么一直不出」在面板上问一次就该有答案，被扣住的行数在
-    // `model_update_pending.held_by_model_incremental_types`。空列表 = 不限类型。
+    // 它收窄的是模型生成而不是数据摄入：库初始化时名单外类型的根不生成（`dbnum_initialize`
+    // 是这道门今天唯一的调用点，增量路不扣根）——「HANG 的数据都进来了，模型怎么一直不出」
+    // 在面板上问一次就该有答案。空列表 = 不限类型。
     let (model_incremental_types, model_type_origin) =
         crate::data_interface::model_type_scope::resolved();
     let model_incremental_types_origin =
@@ -974,9 +973,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // `watch_dbnums_origin` 说清是配置写的还是这次命令行给的。
         "watch_dbnums": watch_dbnums,
         "watch_dbnums_origin": watch_dbnums_origin,
-        // 非空 = 本进程的模型增量只生成 / 清理这些类型的生成根（`model_incremental_types`
-        // / `AIOS_MODEL_INCREMENTAL_TYPES`），其余类型的行留在队列里不消费；数据增量
-        // 不受影响。`model_incremental_types_origin` 说清是配置写的还是环境变量给的。
+        // 非空 = 本进程库初始化时只生成这些类型的生成根（`model_incremental_types`
+        // / `AIOS_MODEL_INCREMENTAL_TYPES`），其余类型的根不生成；数据增量与增量路的
+        // 模型生成不受影响。`model_incremental_types_origin` 说清是配置写的还是环境变量给的。
         "model_incremental_types": model_incremental_types,
         "model_incremental_types_origin": model_incremental_types_origin,
         // true = 持久层不落盘，库随进程消失（`mem`）。
@@ -1915,64 +1914,79 @@ pub async fn model_ensure(
     Ok(Json(payload))
 }
 
+/// `/model/ensure` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
+///
+/// 来源两处、都在进程内：投影里有这根的落库 ACK 就是 `ready`，有回执没 ACK 是 `stale`（与退役前
+/// `gen_root.publication_status` 同一口径）；投影里什么都没有时看进程内账本——失败 / 永久放弃的根
+/// 带 `status` 与 `last_error`，账本也没有的按 `model_available` 说 `ready` / `empty`。
+/// 逐根的 revision / target 那几格随 `gen_root` 一起退了，回执上不再出现。
+fn publication_state_of(generation_root: &str, model_available: bool) -> serde_json::Value {
+    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+    let mut summary = serde_json::json!({ "root_refno": generation_root });
+    let parsed = crate::fast_model::e3d_model_service::parse_refno(
+        generation_root.trim_start_matches('='),
+    )
+    .ok();
+    let store = ModelMemoryStore::global();
+    let projection = parsed.and_then(|root| {
+        let receipt = store.receipt(ProjectionScope::Current, root)?;
+        let acked = store.publication_ack(ProjectionScope::Current, root).is_some();
+        Some((receipt, acked))
+    });
+    let ledger = parsed.and_then(|root| {
+        crate::data_interface::model_root_ledger::entry(
+            root.dbno(),
+            crate::data_interface::generation_root::refno_from_e3d(root),
+        )
+    });
+    let fallback = if model_available { "ready" } else { "empty" };
+    let publication_status = match (&projection, &ledger) {
+        (Some((_, true)), _) => "ready",
+        (Some((_, false)), _) => "stale",
+        (None, Some(entry)) if !entry.is_settled() => "stale",
+        _ => fallback,
+    };
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("publication_status".into(), serde_json::json!(publication_status));
+        if let Some((receipt, _)) = &projection {
+            object.insert("source_sesno".into(), serde_json::json!(receipt.source_sesno));
+            object.insert(
+                "published_via".into(),
+                serde_json::json!(receipt.published_via),
+            );
+            object.insert(
+                "published_geometry_count".into(),
+                serde_json::json!(receipt.geometry_count),
+            );
+        }
+        if let Some(entry) = &ledger {
+            object.insert("status".into(), serde_json::json!(entry.status_label()));
+            if let Some(error) = entry.error() {
+                object.insert("last_error".into(), serde_json::json!(error));
+            }
+        }
+    }
+    summary
+}
+
 async fn append_publication_state(
     payload: &mut serde_json::Value,
     generation_root: &str,
 ) -> anyhow::Result<()> {
-    let root_id = generation_root.trim_start_matches('=').replace('/', "_");
-    let mut response = aios_core::SUL_DB
-        .query(format!(
-            "SELECT desired_revision, published_revision, desired_target, published_target, \
-                    publication_status, last_error \
-             FROM ONLY type::thing('gen_root', '{}');",
-            root_id.replace('\\', "\\\\").replace('\'', "\\'")
-        ))
-        .await?
-        .check()?;
-    let state: Option<serde_json::Value> = response.take(0)?;
     let object = payload
         .as_object_mut()
         .context("model ensure response is not an object")?;
-    let mut summary = state.unwrap_or_else(|| serde_json::json!({}));
-    let summary_object = summary
-        .as_object_mut()
-        .context("generation root state is not an object")?;
-    summary_object.insert(
-        "root_refno".into(),
-        serde_json::Value::String(generation_root.to_string()),
-    );
-    let fallback = if object
+    let model_available = object
         .get("model_available")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        "ready"
-    } else {
-        "empty"
-    };
-    let publication_status = summary_object
-        .get("publication_status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(fallback)
-        .to_string();
-    summary_object.insert(
-        "publication_status".into(),
-        serde_json::Value::String(publication_status.clone()),
-    );
-    for field in [
-        "desired_revision",
-        "published_revision",
-        "desired_target",
-        "published_target",
-        "last_error",
-    ] {
-        if let Some(value) = summary_object.get(field).cloned() {
-            object.insert(field.into(), value);
-        }
+        .unwrap_or(false);
+    let summary = publication_state_of(generation_root, model_available);
+    if let Some(error) = summary.get("last_error").cloned() {
+        object.insert("last_error".into(), error);
     }
     object.insert(
         "publication_status".into(),
-        serde_json::Value::String(publication_status),
+        summary["publication_status"].clone(),
     );
     object.insert("root_summaries".into(), serde_json::json!([summary]));
     Ok(())

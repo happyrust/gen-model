@@ -134,9 +134,12 @@ pub mod digest;
 /// 属性不在里面——那一档实测 1.29 GiB，见模块头。
 pub mod mdb_memory_store;
 pub mod mirror_spool;
-/// `gen_root` 凭证的只读取数（凭证命中 / 启动下限 / 模型门 / 目录落款；原 `model_update_pending`，
-/// ADR-071 S7 搬出）。
+/// 模型覆盖的只读取数（模型门 / 目录落款核对与反向级联排工；原 `model_update_pending`，
+/// ADR-071 S7 搬出）。`gen_root` 表退役后（ADR-079）它只读水位行与进程内账本。
 pub mod model_coverage;
+/// 进程内的生成根账本（ADR-079）：逐根成败只活在内存，库里模型面唯一的持久事实是
+/// `dbnum_watermark.model_sesno`；进程终止账本消失，重启由两枚水位与写入标记决定欠什么。
+pub mod model_root_ledger;
 /// Ref0 统计快照的生产者：目标索引 `DbSet@T` 按 Ref0 数活元素（ADR-071 D6）。
 pub mod ref0_snapshot;
 /// 数据窗口的内存产物 + 同步落库口（原 `model_publish_queue/{structured_data_sink,
@@ -225,13 +228,12 @@ pub mod increment_tail;
 /// 三水位退回 S、排 S→T 重跑。
 pub mod write_state;
 
-/// 模型水位（ADR-060）：探针、Task 收尾盖章、对账。ADR-065 D2 让「欠什么」只由两枚水位
-/// 回答，同一份 ADR 的 D3 又判 `model_update_pending` 退役——退的是队列表，水位是留下的
-/// 那一半。S5a 把它搬出来，免得 T5 删表时连着水位一起删。
-pub mod model_watermark;
+// `model_watermark`（ADR-060 D6 / D7 的启动对账：探针读 `gen_root` 凭证算「有证据支撑的模型水位」、
+// 比行上记的高就下调）随 `gen_root` 表退役（ADR-079）：库里没有逐根的证据可拿来对水位，
+// `model_sesno` 就是承诺本身，上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做。
 
-/// 启动期模型覆盖复核：凭证 ↔ 文件最新会话对齐，缺口开退化窗口（ADR-058 D4）。ADR-050
-/// 清空队列之后「这个库欠到哪」只剩 `gen_root` 凭证一个说法，这里就是读那个说法的地方。
+/// 启动期模型覆盖复核：模型水位 ↔ 数据水位对齐，落后的库排 `model_sesno → 文件最新` 的
+/// ModelOnly（ADR-058 D4 / ADR-079）。「这个库欠到哪」只有两枚水位一个说法。
 pub mod startup_reconcile;
 
 pub mod model_concurrency;

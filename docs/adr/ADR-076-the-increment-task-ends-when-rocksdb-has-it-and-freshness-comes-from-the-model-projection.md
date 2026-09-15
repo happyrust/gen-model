@@ -9,7 +9,10 @@ rocksdb 落盘。如果是增量更新，就可以按 kv-mem 提供内存数据�
 解析的为准，这里属性的数据保存，直接按 e3d-io 的解析流程，然后保存到 rocksdb 数据库即可」「还需要考虑初始化 dbnum 时它的模型
 生成，生成之后直接进 rocksdb」。**号到提交时复核**——本仓 ADR-060 曾撞号两次，ADR-067/068/069/070 亦有此注；ADR-074 / ADR-075
 落盘时尚在暂存区。）
-日期：2026-09-14
+**被 [ADR-079](ADR-079-generation-root-outcomes-live-in-process-and-the-model-watermark-is-the-only-durable-model-fact.md)
+修订（2026-09-15）**：`gen_root` 表退役——D6 / D8 里「`gen_root` 记 `failed`、按凭证缺口排 ModelOnly」改为「进程内生成根账本记
+`failed`、按**水位**缺口排 ModelOnly」；任务边界、栅栏、预算、收尾一笔不动。
+日期：2026-09-14（状态行 2026-09-15 更新）
 关联：
 - **修订** ADR-071 D4 的收口点：模型水位不再由 write-behind worker 在后台盖，回到「任务收尾一笔事务盖三枚水位」（本文 D5）。
   ADR-071 D1「任务自己同步写、任务是隔离单元」**不动**——本文把异步严格关在**任务内部**，跨任务仍是同步序列化。

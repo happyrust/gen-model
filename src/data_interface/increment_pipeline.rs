@@ -979,13 +979,6 @@ impl IncrementPipeline {
         // 重生成会拿旧成员表静默漏算。计划层刚算出生成根，失效按根补齐。
         cache_refnos.extend(model_plan.regen_root_refnos());
         warnings.extend(model_plan.warnings.iter().cloned());
-        // 模型类型限定（`model_incremental_types`）：本窗规划出来、但本进程不会生成的根
-        // 按类型点名。工作项一个不摘、照常入队——摘掉它就是不标 stale、下一窗给陈旧
-        // 几何前移凭证（`model_type_scope` 模块文档「消费门，不是计划门」）。
-        warnings.extend(crate::data_interface::model_type_scope::window_plan_notice(
-            dbnum,
-            &model_plan.work_items,
-        ));
 
         // CATA 依赖块排在 DESI 块与水位**之前**（plan 2026-09-06 §3 D6 (a) / Q3）：本窗口写回的 DESI 元素
         // 所依赖的目录链元素先入库，缺依赖的窗口不算落地。闭包解析失败（locator / 文件 I/O）拦水位，
@@ -1141,7 +1134,7 @@ impl IncrementPipeline {
         // model phase runs after the watermark (ADR-025 §7 / ADR-056 D1), so
         // stripping roots here would advance the data watermark while
         // permanently losing the only durable request to generate them.
-        let credential_advance = StageTimings::measure(
+        StageTimings::measure(
             &mut timings.finalize,
             crate::data_interface::increment_tail::finalize_attempt(
                 dbnum,
@@ -1152,11 +1145,10 @@ impl IncrementPipeline {
             ),
         )
         .await?;
-        // 前移的账只是回执材料（`DataBatchResult.credential_advance`）：水位已经落了，
-        // 这里成败都不回头；名单为空且规划器没退化时整格没有。
+        // 前移那一格只剩回执材料（`DataBatchResult.credential_advance`，ADR-079）：名单上的根
+        // 由任务收尾盖到 T 的 `model_sesno` 承诺，库里没有行要改；名单为空且规划器没退化时整格没有。
         let credential_advance =
-            crate::data_interface::window_root_plan::CredentialAdvanceReceipt::from_window(
-                credential_advance,
+            crate::data_interface::window_root_plan::CredentialAdvanceReceipt::from_plan(
                 &model_plan,
             );
 

@@ -4530,6 +4530,7 @@ impl AiosDBManager {
             // 回退检出的重建：不是人点的（人工重新解析走 manual_update 那条入队路）。
             reinit_requested: false,
             regen_roots: Vec::new(),
+            catalogue_stamps: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4637,6 +4638,7 @@ impl AiosDBManager {
                 file_latest_sesno_time,
                 reinit_requested: false,
                 regen_roots: Vec::new(),
+                catalogue_stamps: std::collections::BTreeMap::new(),
             },
         ))
     }

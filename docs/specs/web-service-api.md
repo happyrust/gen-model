@@ -336,8 +336,8 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - HTTP 层从 e3d-io direct tree 枚举请求子树的生成根，再交给同一模型执行层。
 - 每根所属库先经 `model_read_route::route_for(dbnum)`；读源与发布目标分开判：
   ingest 中尚未完成的 durable 库使用 `ProjectionOnly`，read-through 的 spawned/embedded
-  kv-mem 使用 `ProcessStore{durable:false}`，会把模型行、可选房间边与 `gen_root` 回执逐根同事务
-  写入本进程 store。
+  kv-mem 使用 `ProcessStore{durable:false}`，会把模型行与可选房间边逐根同事务写入本进程 store
+  （逐根回执不落库，记进进程内的生成根账本，ADR-079）。
 - 请求：`{ "refno": "24381/100677" }`，可选 `"force": true`。
 - 响应 200：`OnDemandModelResult` 原样，含 `generation_root`、`model_instance_count`（画得出来的实例数）与 `generated_instance_count`（生成写出的实例数，含画不出来的）。`status` 三种：
   - `AlreadyAvailable` — 已经有画得出来的实例，没跑生成；
@@ -807,7 +807,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   模型水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
 - **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列。ingest 的临时
   memory 路由只写进程内投影；read-through 则把同一候选投影逐根事务发布到 spawned/embedded
-  kv-mem（仍不落 rocksdb），连同房间边和 `gen_root` 回执。回执多四格：
+  kv-mem（仍不落 rocksdb），连同房间边（逐根回执不落库，ADR-079）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
   不是“没有写 process store”）；`publication_status` 取 `ready` / `empty`。
 - **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里

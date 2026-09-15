@@ -1,21 +1,21 @@
 //! 模型增量类型限定：`DbOption.toml` 的 `model_incremental_types` 与环境变量
 //! `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI`。
 //!
-//! 它只干一件事：把**模型增量的消费**圈到指定类型的生成根——`model_update_pending`
-//! 里 `regen_root` / `delete_cleanup` 两种行，只有 `noun` 在名单内的才会被本进程领取、
-//! 执行、烧 attempts。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）、模型工作的
-//! 规划与入队、凭证前移，一律照旧；`Transform`（老规划器的便宜路径，noun 为空）、
-//! `CascadeExpand`、`PostRegenAabb` 与房间任务不受限。
+//! 它只干一件事：把**模型生成的消费**圈到指定类型的生成根。这道门今天只有一个调用点——
+//! 初始化路（`dbnum_initialize::model_half_inner`）按 [`admits`] 把枚举出来的根分成放行 /
+//! 暂扣两堆，暂扣的一根不生成。**增量路没有这道门**：数据窗口规划出来的工作项不看名单、
+//! 全部交给任务生成，所以窗口回执里也没有「本窗 N 个根暂扣」那一句——它曾经是
+//! `window_plan_notice`，报的是一件实际没发生的事，2026-09-15 删掉。数据增量（窗口收集、
+//! `pe` / `ATT_*` 写回、水位推进）一律照旧；`Transform`（noun 为空）、`CascadeExpand`、
+//! `PostRegenAabb` 与房间任务不受限。
 //!
 //! # 为什么是消费门，不是计划门
 //!
-//! 直觉的做法是在规划器里把名单外的根从 `work_items` 里摘掉。那是错的：`RegenRoot`
-//! 入队时会顺手把 `gen_root` 标成 `publication_status = stale`、抬高 `desired_revision`
-//! （`model_update_pending::render_upsert` 尾段），而凭证前移（`window_root_plan::
-//! render_credential_advance`）只放过 `ready ∧ desired == published` 的行。摘掉工作项
-//! = 不标 stale = 下一窗把它当「未被波及」前移凭证 = 给陈旧几何盖新章，而且此后没有
-//! 任何路径会回补它。留下工作项、只是不领取，`gen_root` 上的 stale 标记就守住了
-//! 这个根：后续窗口不前移、重启的退化窗口把它当未安定行无条件重排、名单一撤就照常
+//! 直觉的做法是在规划器里把名单外的根从 `work_items` 里摘掉。那是错的：暂扣的根没生成，
+//! 这一版的根就没有「全部落库」，任务收尾不盖 `model_sesno`（`task_end` 守着 `all_roots_ok`），
+//! 下一窗 / 重启的启动核对按水位缺口把它重排（ADR-079：库里没有逐根的行可标 stale，水位不盖
+//! 就是它在库里的全部说法）。摘掉工作项 = 假装这一窗没有它 = 水位照盖 = 给陈旧几何盖新章，
+//! 而且此后没有任何路径会回补它。留下工作项、只是不领取，水位就守住了这个根：名单一撤就照常
 //! 消费。这与 `model_incremental = false`「只停消费、不删 durable 工作」是同一条纪律。
 //!
 //! # 与别的限定的分界
@@ -32,9 +32,9 @@
 //! # 有多大声
 //!
 //! 与 `watch_dbnums` 同一套护栏（它们的形状一样，坑也一样——配置里的名单能躺一个月）：
-//! 启动横幅、`/health` 的 `model_incremental_types` 栏与 `model_update_pending.held_by_model_incremental_types`
-//! 计数、每份 preview / execute 回执的 `warnings`（[`mode_notice`]）、数据窗口计划的 warnings
-//! 点名本窗被暂扣的根、worker 空闲轮首次一句。每一句都点名 [`MODEL_TYPE_CONFIG_KEY`] 与来源。
+//! 启动横幅、`/health` 的 `model_incremental_types` 栏、每份 preview / execute 回执的
+//! `warnings`（[`mode_notice`]）、初始化路暂扣根数的那一行日志、worker 空闲轮首次一句。
+//! 每一句都点名 [`MODEL_TYPE_CONFIG_KEY`] 与来源。
 
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
@@ -43,13 +43,6 @@ pub const MODEL_TYPE_CONFIG_KEY: &str = "model_incremental_types";
 
 /// 环境变量名。同上。
 pub const MODEL_TYPE_ENV: &str = crate::options::MODEL_INCREMENTAL_TYPES_ENV;
-
-/// 只有这两种行按 noun 放行；其余动作不看名单。与 `render_automatic_type_filter`
-/// 的 SQL 谓词同一份名单，别在两处各写一遍。
-pub const GATED_ACTIONS: [crate::data_interface::model_update_plan::ModelWorkAction; 2] = [
-    crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
-    crate::data_interface::model_update_plan::ModelWorkAction::DeleteCleanup,
-];
 
 /// 名单从哪儿来。回执与横幅必须说出来：环境变量是这一次跑的意图，配置文件是
 /// 可能已经躺了一个月的意图，两者的处置完全不同。
@@ -128,14 +121,12 @@ pub fn active() -> bool {
 /// 这个类型的生成根允不允许被本进程生成 / 清理。
 ///
 /// **未限定时恒为 `true`**：没写配置、没给环境变量，判定就必须与本特性引入前逐位相同。
-/// **noun 未知（空串）时也放行**：老规划器的 `Transform` / `DeleteCleanup` 行不带 noun，
-/// 挡不准的东西不挡——静默漏做比多做一次贵得多。判定与 SQL 谓词
-/// `render_automatic_type_filter` 同一口径。
+/// **noun 未知（空串）时也放行**：挡不准的东西不挡——静默漏做比多做一次贵得多。
 pub fn admits(noun: &str) -> bool {
     admits_with(&nouns(), noun)
 }
 
-/// [`admits`] 的纯函数形态，供渲染 SQL 谓词的一侧与计划告警共用同一判据。
+/// [`admits`] 的纯函数形态：名单显式传入，不碰进程级状态，用例不必先装载配置。
 pub fn admits_with(allowed: &[String], noun: &str) -> bool {
     let noun = noun.trim();
     allowed.is_empty()
@@ -168,7 +159,7 @@ pub fn mode_notice() -> Option<String> {
         format!(
             "本进程处于模型类型限定模式：模型增量只生成 / 清理 {MODEL_TYPE_CONFIG_KEY} [{}] 里的\
              生成根类型，其余类型的生成根在本任务里暂扣不生成\
-             （凭证不前移、随下一窗重排、名单一撤即照常生成）；数据增量、Transform、\
+             （模型水位不盖、随下一窗重排、名单一撤即照常生成）；数据增量、Transform、\
              CascadeExpand、房间任务与按需 ensure 不受限。限定来自{}——这是被显式收窄的范围，\
              不是完整运行状态。",
             render_nouns(&types),
@@ -180,61 +171,6 @@ pub fn mode_notice() -> Option<String> {
 /// `BRAN,EQUI`——回执与日志里的名单写法。
 pub fn render_nouns(nouns: &[String]) -> String {
     nouns.join(",")
-}
-
-/// 一份模型计划里会被本进程暂扣的工作项，按类型计数（类型名按字典序，输出稳定）。
-///
-/// 只数 [`GATED_ACTIONS`] 两种行且 noun 不在名单内的；`Transform` / `CascadeExpand` /
-/// `PostRegenAabb` / 房间任务与 noun 为空的行不算——它们本来就不受限，算进去就是
-/// 谎报。判据是 [`admits_with`]，与 SQL 谓词同一口径。未限定时恒为空表。
-pub fn held_counts_with(
-    allowed: &[String],
-    items: &[crate::data_interface::model_update_plan::ModelWorkItem],
-) -> std::collections::BTreeMap<String, usize> {
-    let mut counts = std::collections::BTreeMap::new();
-    if allowed.is_empty() {
-        return counts;
-    }
-    for item in items {
-        if !GATED_ACTIONS.contains(&item.action) {
-            continue;
-        }
-        let noun = item.noun.trim();
-        if admits_with(allowed, noun) {
-            continue;
-        }
-        *counts.entry(noun.to_ascii_uppercase()).or_insert(0) += 1;
-    }
-    counts
-}
-
-/// 数据窗口计划的 warnings 里那一句：本窗规划出来、但本进程不会生成 / 清理的根，
-/// 按类型点名。
-///
-/// 工作项本身**原样入队**，这里只是把「入队了但不会动」说出来——摘掉工作项就是给
-/// 陈旧几何前移凭证（见模块文档「为什么是消费门，不是计划门」）。未限定、或本窗一个
-/// 都没扣住时返回 `None`，回执一个字都不多。
-pub fn window_plan_notice(
-    dbnum: u32,
-    items: &[crate::data_interface::model_update_plan::ModelWorkItem],
-) -> Option<String> {
-    let (types, origin) = resolved();
-    let held = held_counts_with(&types, items);
-    if held.is_empty() {
-        return None;
-    }
-    let total: usize = held.values().sum();
-    let breakdown = held
-        .iter()
-        .map(|(noun, count)| format!("{noun}×{count}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "dbnum={dbnum}: 本窗 {total} 个生成根因 {MODEL_TYPE_CONFIG_KEY} [{}] 暂扣不生成（{breakdown}；\
-         来自{}）——行照常入队、gen_root 标 stale、凭证不前移，名单一撤即照常消费；数据增量不受影响",
-        render_nouns(&types),
-        origin.describe()
-    ))
 }
 
 #[cfg(test)]
@@ -251,21 +187,9 @@ pub(crate) fn clear_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
 
     fn owned(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
-    }
-
-    fn item(action: ModelWorkAction, noun: &str) -> ModelWorkItem {
-        ModelWorkItem {
-            dbnum: 8000,
-            db_type: "DESI".into(),
-            source_end_sesno: 7,
-            action,
-            target_refno: "8000/1".into(),
-            noun: noun.into(),
-        }
     }
 
     /// 拿下串行闸并清空进程级状态；闸随返回值的生命周期持有到用例结束。
@@ -332,74 +256,6 @@ mod tests {
             assert!(reason.contains(needle), "暂扣理由要点名来源: {reason}");
             assert!(reason.contains("HANG"), "暂扣理由要点名类型: {reason}");
         }
-        clear_for_tests();
-    }
-
-    /// 窗口计划的暂扣计数只数受限的两种行、只数名单外的 noun，且与放行判定同一口径：
-    /// Transform / CascadeExpand / 房间任务 / 空 noun 一个都不算，算进去就是谎报。
-    #[test]
-    fn the_plan_holdback_counts_only_gated_rows_outside_the_scope() {
-        let allowed = owned(&["BRAN", "EQUI"]);
-        let items = vec![
-            item(ModelWorkAction::RegenRoot, "BRAN"),
-            item(ModelWorkAction::RegenRoot, "HANG"),
-            item(ModelWorkAction::RegenRoot, "hang"),
-            item(ModelWorkAction::DeleteCleanup, "SUPPO"),
-            item(ModelWorkAction::DeleteCleanup, ""),
-            item(ModelWorkAction::Transform, "HANG"),
-            item(ModelWorkAction::CascadeExpand, "HANG"),
-            item(ModelWorkAction::PostRegenAabb, "HANG"),
-            item(ModelWorkAction::RoomRecalcPanel, "PANE"),
-        ];
-        let held = held_counts_with(&allowed, &items);
-        assert_eq!(
-            held.into_iter().collect::<Vec<_>>(),
-            vec![("HANG".to_string(), 2), ("SUPPO".to_string(), 1)]
-        );
-        assert!(
-            held_counts_with(&[], &items).is_empty(),
-            "未限定时不得报任何暂扣"
-        );
-    }
-
-    /// 窗口 warnings 那一句：未限定或一个都没扣住时一个字都不多；扣住了就点名库号、
-    /// 总数、按类型的分项、名单与来源，并说清行仍在队列里、数据增量不受影响。
-    #[test]
-    fn the_window_plan_notice_names_what_this_window_will_not_generate() {
-        let _lease = fresh();
-        set_types_for_tests(owned(&["BRAN"]), Origin::Env);
-        let only_admitted = vec![
-            item(ModelWorkAction::RegenRoot, "BRAN"),
-            item(ModelWorkAction::Transform, "HANG"),
-        ];
-        assert_eq!(window_plan_notice(8000, &only_admitted), None);
-        assert_eq!(window_plan_notice(8000, &[]), None);
-
-        let held = vec![
-            item(ModelWorkAction::RegenRoot, "HANG"),
-            item(ModelWorkAction::RegenRoot, "HANG"),
-            item(ModelWorkAction::DeleteCleanup, "EQUI"),
-        ];
-        let notice = window_plan_notice(8000, &held).expect("扣住了就必须出声");
-        for needle in [
-            "dbnum=8000",
-            "3 个生成根",
-            "EQUI×1",
-            "HANG×2",
-            MODEL_TYPE_CONFIG_KEY,
-            MODEL_TYPE_ENV,
-            "照常入队",
-            "数据增量不受影响",
-        ] {
-            assert!(notice.contains(needle), "缺 {needle:?}: {notice}");
-        }
-
-        set_types_for_tests(Vec::new(), Origin::Config);
-        assert_eq!(
-            window_plan_notice(8000, &held),
-            None,
-            "未限定时回执一个字都不该多"
-        );
         clear_for_tests();
     }
 

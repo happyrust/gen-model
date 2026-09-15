@@ -452,7 +452,7 @@ pub(crate) async fn await_roots_durable_with_progress(
 
 /// 把这批根从队列摘掉、不再重试：预算用尽 / 判死后的处置（D3）。
 ///
-/// 只摘队列条目，不碰投影：投影里那份没落成的几何、`gen_root` 上的痕都归调用方。在飞的那一次
+/// 只摘队列条目，不碰投影：投影里那份没落成的几何、进程内账本上的失败记录都归调用方。在飞的那一次
 /// 之后回来时条目已不在，ACK 被丢弃——durable 与否以本模块的账为准，`root_needs_persist` 照旧为真。
 pub(crate) fn abandon_roots(dbnum: u32, roots: &[RefNo]) {
     ModelWriteBehind::global().abandon(dbnum, roots)

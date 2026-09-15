@@ -3732,7 +3732,7 @@ impl AiosDBManager {
                 }
             }
             Err(error) => report.warnings.push(format!(
-                "读不到库一致性判决（双水位或 gen_root 普查失败），本次不报模型状态\
+                "读不到库一致性判决（双水位读取失败），本次不报模型状态\
                  ——这是取数失败，不是 not_judged: {error:#}"
             )),
         }
@@ -4713,6 +4713,7 @@ impl AiosDBManager {
                     first_pending_sesno_time,
                     file_latest_sesno_time,
                     regen_roots: Vec::new(),
+                    catalogue_stamps: std::collections::BTreeMap::new(),
                 },
                 // 人按下的执行永不挂起：回执刚告诉他「已入队」，行却不动，是
                 // 最难自查的一种失望。它同时放行这个 dbnum 启动时挂起的积压。

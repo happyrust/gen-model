@@ -3,7 +3,7 @@
 //! ```text
 //!              ┌─ 解析 spawn_blocking ──► 元素批 SQL ──► [属性 lane: flume(100) → 单写者] ─┐
 //! initialize ──┤                                                                          ├─► drain ×2 → 核对 → task_end（一笔）
-//!              └─ produce_slices ──► mpsc(1) ──► 渲染(Initial + 房间边 + UPSERT 回执) ──► [模型 lane: flume(2) → 单写者] ─┘
+//!              └─ produce_slices ──► mpsc(1) ──► 渲染(Initial + 房间边) ──► [模型 lane: flume(2) → 单写者] ─┘
 //!                                                 └─ 盒子攒着 → 排空成功后收敛一次
 //! ```
 //!
@@ -13,7 +13,8 @@
 //!   （`E3dModelService::produce_slices` + `project_slice_for_initialization` + `model_initial_persist::render_slice`）
 //!   只往 lane 里流，不碰写者、不清库、不推水位。
 //! * **投影不参与。** 初始化的模型行不进 `ModelMemoryStore`、不登记 `ModelWriteBehind`（ADR-076 D11 / ADR-077 D5）；
-//!   根回执随行同一笔 `UPSERT` 进 `gen_root`，空间树的盒子在内存里攒着、两 lane 都排空成功后收敛一次。
+//!   根回执**不落库**（ADR-079：`gen_root` 退役）——两 lane 排空成功后逐根成败进进程内账本
+//!   （`model_root_ledger`），空间树的盒子在内存里攒着、同一刻收敛一次。
 //! * **水位一个写者。** `applied_sesno` + `model_sesno` + 写入标记 `finished` + Ref0 统计在收尾那**一笔**
 //!   （`task_end::TaskEnd::data`，ADR-077 D7）。这一笔之前库里有行没水位，崩了就是写入标记 `writing` →
 //!   下次整库重来（ADR-073 D3）。
@@ -99,6 +100,9 @@ struct ModelHalfReport {
     /// 排空成功后进空间树的盒子与它们的来源。
     tree_boxes: Vec<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>,
     refreshed: Vec<aios_core::RefnoEnum>,
+    /// 本次生成照的目录版本（CATA dbnum → 会话，取最旧）：整库都成时随 `model_sesno` 盖成库级
+    /// 目录落款（ADR-079）。
+    catalogue_sessions: std::collections::BTreeMap<u32, u32>,
     /// 模型半边自己的错（服务打不开、枚举失败、`Required` 报错…）：不是 lane 失败，进 warnings。
     failure: Option<String>,
 }
@@ -119,6 +123,8 @@ impl ModelHalfReport {
     }
 
     /// 收尾那一笔要写的模型结论：跑了才有；跑了而一根没成 / 半边报错 = `all_roots_ok: false`。
+    /// 整库都成才连库级目录落款一起盖（ADR-079）：初始化生成的是这个库的**每一个**根，它们照的
+    /// 目录版本就是整个库的目录版本。
     fn outcome(&self) -> Option<TaskModelOutcome> {
         if self.skipped.is_some() {
             return None;
@@ -128,10 +134,32 @@ impl ModelHalfReport {
             .iter()
             .filter(|unit| unit.status == UnitGenStatus::Failed)
             .count();
+        let all_roots_ok = self.failure.is_none() && dead_roots == 0;
         Some(TaskModelOutcome {
-            all_roots_ok: self.failure.is_none() && dead_roots == 0,
+            all_roots_ok,
             dead_roots,
+            catalogue_sessions: all_roots_ok.then(|| self.catalogue_sessions.clone()),
         })
+    }
+
+    /// 两 lane 排空成功之后，把逐根成败记进进程内账本（ADR-079：`gen_root` 回执 / 死信留痕的替身）。
+    /// 排在收尾那一笔之前：账本是本进程的工作记录，收尾盖不盖章都要记。
+    fn record_in_ledger(&self, dbnum: u32, source_end_sesno: i32) {
+        use crate::data_interface::model_root_ledger as ledger;
+        for unit in &self.units {
+            match unit.status {
+                UnitGenStatus::Generated => {
+                    ledger::record_generated_str(dbnum, &unit.root_refno, &unit.noun, source_end_sesno)
+                }
+                _ => ledger::record_failed_str(
+                    dbnum,
+                    &unit.root_refno,
+                    &unit.noun,
+                    source_end_sesno,
+                    unit.message.as_deref().unwrap_or("initialization root failed"),
+                ),
+            }
+        }
     }
 }
 
@@ -210,6 +238,8 @@ pub(crate) async fn initialize(
         return wipe_and_bail(dbnum, request.file_name, writer_failures.join("；")).await;
     }
     data.leaf.acknowledge(started);
+    // 模型 lane 排空成功 = 交出去的每一笔都在库里了：逐根成败进进程内账本（ADR-079）。
+    model.record_in_ledger(dbnum, request.file_latest_sesno);
 
     // ── 核对（ADR-077 D11）：属性面照旧数两次 `pe`；模型面不数库，任务手里的清单就是证据 ────
     crate::data_interface::batch_worker::set_active_task_stage("verify");
@@ -499,6 +529,23 @@ async fn model_half_inner(
                 .into_iter()
                 .map(|(root, commit, _)| (root, commit))
                 .collect::<Vec<_>>();
+            // 这一片的根照哪一版目录算出来的（回执里的 `ModelTarget.catalogue`）：整库初始化完、
+            // 收尾盖 `model_sesno` 时一并盖成库级目录落款（ADR-079，取最旧那一版）。
+            for (_, commit) in &commits {
+                if let Some(target) = commit
+                    .receipt
+                    .as_ref()
+                    .and_then(|(_, receipt)| receipt.model_target.as_ref())
+                {
+                    for file in &target.catalogue {
+                        report
+                            .catalogue_sessions
+                            .entry(file.dbnum)
+                            .and_modify(|kept| *kept = (*kept).min(file.session))
+                            .or_insert(file.session);
+                    }
+                }
+            }
             let rendered = crate::fast_model::model_initial_persist::render_slice(
                 dbnum,
                 &commits,
@@ -527,24 +574,8 @@ async fn model_half_inner(
             {
                 log::error!("dbnum={dbnum} 初始化根 {root} 失败：{reason}");
                 let noun = nouns.get(&root).cloned().unwrap_or_default();
-                if let Some(statement) = crate::data_interface::batch_worker::render_generation_failed(
-                    dbnum,
-                    &format!("{}/{}", root.word0, root.word1),
-                    &noun,
-                    &reason,
-                ) {
-                    sender
-                        .send_async(WriteJob::new(
-                            crate::fast_model::model_db_adapter::publication_transaction(&format!(
-                                "{statement}\n"
-                            )),
-                            format!("model dead letter dbnum={dbnum} root={}/{}", root.word0, root.word1),
-                        ))
-                        .await
-                        .map_err(|_| {
-                            anyhow::anyhow!("model lane closed before the dead letter was queued")
-                        })?;
-                }
+                // 死信不再往库里写痕（`gen_root` 退役，ADR-079）：失败只进进程内账本
+                // （收尾时随单元清单一起记），`model_sesno` 不盖就是它在库里的全部说法。
                 report.units.push(failed_unit(dbnum, root, &noun, &reason));
             }
         }

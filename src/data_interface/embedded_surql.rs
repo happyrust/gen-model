@@ -1,11 +1,13 @@
 //! 内置 SurrealDB 函数集：`resource/surreal/` 的**编译期快照**。
 //!
 //! 部署包的 `resource/surreal/` 是随包拷贝的，会漂移：现场 test-worklspace 的
-//! bin 停在 2025-06——`gen_root.surql` 整个缺失、`common.surql` 差 3KB，活库
-//! （1516/AvevaMarineSample）因此缺 `fn::room_relate_of` / `fn::room_num_of` 与
-//! 全部 12 个 `fn::gen_root_*`，`fn::room_code` 一直是旧语义。更糟的是旧 exe 每次
+//! bin 停在 2025-06——`common.surql` 差 3KB，活库（1516/AvevaMarineSample）因此缺
+//! `fn::room_relate_of` / `fn::room_num_of`，`fn::room_code` 一直是旧语义。更糟的是旧 exe 每次
 //! 启动都把旧函数体再灌一遍（`define_common_functions` 无条件加载 CWD 脚本），
 //! 手工灌一次新的、下次重启又被打回去。
+//!
+//! `gen_root.surql`（`gen_root` 表的索引与 12 个 `fn::gen_root_*` 巡检函数）随 `gen_root` 表退役
+//! （ADR-079）从快照里摘掉；存量库里的表与函数由 `retire_publish_run_tables` 一次性删。
 //!
 //! 这里把仓库的脚本按 `include_str!` 冻进二进制，启动序列在磁盘加载**之后**再灌
 //! 一遍内置版：站点自有的额外脚本继续生效，但与仓库同名的函数以内置版为准，
@@ -39,10 +41,6 @@ pub const EMBEDDED_SURQL: &[(&str, &str)] = &[
         include_str!("../../resource/surreal/fn_query_room_code_hh.surql"),
     ),
     (
-        "gen_root.surql",
-        include_str!("../../resource/surreal/gen_root.surql"),
-    ),
-    (
         "get_room_nodes.surql",
         include_str!("../../resource/surreal/get_room_nodes.surql"),
     ),
@@ -62,14 +60,10 @@ pub const EMBEDDED_SURQL: &[(&str, &str)] = &[
 
 /// 「新环境适配」的核验面：这几个函数只存在于 2026 版脚本里，旧部署的磁盘文件
 /// 不含它们——内置灌入之后还缺，说明引擎拒绝了新脚本（语句错误被按惯例吞掉），
-/// 房间语义与 gen-root 巡检会退化。收口硬前置（`fn::anc_u64` 等）不在这里：
+/// 房间语义会退化。收口硬前置（`fn::anc_u64` 等）不在这里：
 /// 那是 `selfcheck_surreal_functions` 的硬门，缺了直接拒绝启动。
-const MARQUEE_FUNCTIONS: &[&str] = &[
-    "room_relate_of",
-    "room_num_of",
-    "gen_root_of",
-    "gen_roots_todo",
-];
+/// （`gen_root_of` / `gen_roots_todo` 随 `gen_root.surql` 退役，ADR-079。）
+const MARQUEE_FUNCTIONS: &[&str] = &["room_relate_of", "room_num_of"];
 
 /// 把内置函数集灌进指定库。磁盘脚本加载**之后**调用，同名函数以内置版收尾。
 pub async fn define_embedded_functions_on(db: &Surreal<Any>) -> anyhow::Result<()> {
@@ -148,7 +142,7 @@ mod tests {
     }
 
     /// 老运行环境的现场重演：库里已经站着一个旧语义的 `fn::room_code`（部署 exe
-    /// 每次启动都会把它灌回去），内置灌入之后必须（1）核验面四个新函数全部就位，
+    /// 每次启动都会把它灌回去），内置灌入之后必须（1）核验面的新函数全部就位，
     /// （2）`fn::room_code` 被抬到当前语义——hd 构建读 `fn::room_relate_of` 的
     /// 排序边，hh 构建读 `fn::room_num_of`。
     #[tokio::test]

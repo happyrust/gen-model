@@ -323,7 +323,7 @@ pub struct DbnumState {
     /// 模型水位（ADR-060 D1）：模型已经追平到哪一版**数据窗口**。`0` = 从未追平。
     ///
     /// 与 `applied_sesno` 是两枚**同粒度**的水位，写在同一行上，一次读出。它记的不是
-    /// 「模型有多新」（那是根级凭证 `gen_root.source_end_sesno` 的事，按 ADR-054 走文件
+    /// 「模型有多新」（那是投影回执 `RootReceipt::source_sesno` 的事，按 ADR-054 走文件
     /// 刻度）而是「到哪一版数据为止，数据与模型是一致的」，因此 `model_sesno <= applied_sesno`
     /// 恒成立（M2）。落后是常态、不是告警（ADR-056 D1/N4）。
     #[serde(default)]
@@ -348,9 +348,23 @@ pub struct DbnumState {
     /// 上面两个计数是在哪一版数据窗口右端观察到的；同样 `None` = 未观察。
     #[serde(default)]
     pub model_roots_observed_at: Option<i32>,
+    /// 库级目录落款（ADR-079）：`CATA dbnum → 会话`，「这个库的整份模型与该目录到这一版一致」。
+    /// 随 `model_sesno` 由任务收尾那一笔合并写（`task_end::render_catalogue_stamp_merge`），只在
+    /// 整库重生成 / 目录级联全部命中根重算成之后才前移；目录版本核对
+    /// （`model_coverage::reconcile_catalogue_versions`）读它判哪些库还落在旧目录上。
+    /// 空 = 这个库还没有任何目录落款（没生成过，或旧行）——不算过期，也不参与核对。
+    #[serde(default)]
+    pub model_catalogue_sessions: Vec<CatalogueStampRow>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
+}
+
+/// `model_catalogue_sessions` 里的一条：`{ dbnum, session }`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CatalogueStampRow {
+    pub dbnum: u32,
+    pub session: u32,
 }
 
 impl DbnumState {
@@ -371,8 +385,8 @@ impl DbnumState {
 
     /// 两枚水位这一半的判据（ADR-060 D4 的前两项）：数据已建立，且模型追平到同一版。
     ///
-    /// **它不是完整的 `model_in_sync`**——D4 还要求「无未安定根」，那是一个实时的
-    /// `gen_root` 计数，不在这一行上。露给读者的那个字段要在两者都成立时才为真；
+    /// **它不是完整的 `model_in_sync`**——D4 还要求「无未安定根」，那是进程内账本
+    /// （`model_root_ledger`）的实时计数，不在这一行上。露给读者的那个字段要在两者都成立时才为真；
     /// 这里只回答行内能回答的那一半，绝不替另一半打包票。
     pub fn model_caught_up(&self) -> bool {
         self.applied_sesno > 0 && self.model_sesno == self.applied_sesno
@@ -432,6 +446,9 @@ struct StateRow {
     model_dead_roots: Option<u32>,
     #[serde(default)]
     model_roots_observed_at: Option<i32>,
+    /// 库级目录落款（ADR-079）；旧行没有这一列 → 空。
+    #[serde(default)]
+    model_catalogue_sessions: Option<Vec<CatalogueStampRow>>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
@@ -441,7 +458,7 @@ struct StateRow {
 const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
      IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
      model_lazy_roots, \
-     model_dead_roots, model_roots_observed_at";
+     model_dead_roots, model_roots_observed_at, model_catalogue_sessions";
 
 #[derive(Debug, Deserialize)]
 struct DatabaseWatermark {
@@ -1305,6 +1322,7 @@ impl DbnumState {
                     model_lazy_roots: row.model_lazy_roots,
                     model_dead_roots: row.model_dead_roots,
                     model_roots_observed_at: row.model_roots_observed_at,
+                    model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
                     initialized: effective.is_some(),
                 })
             })
@@ -1463,6 +1481,7 @@ impl DbnumState {
             model_lazy_roots: row.model_lazy_roots,
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
+            model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
             initialized: applied.is_some(),
         }))
     }

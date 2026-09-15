@@ -29,6 +29,35 @@
 - 验证口径：打包前在同一棵隔离 worktree 上跑过 `cargo test --lib` **2110 passed / 0 failed / 109 ignored**
   与 `cargo check --all-targets`（绿）；python 绑定 `maturin develop` 后 `pytest tests/test_parse_offline.py`
   13 passed；ADR-078 的真部署三条用例见 `docs/evidence/2026-09-15-adr078-mdb-project-closure.md`。
+### `gen_root` 表退役：生成根的成败只活在进程里，模型面只留水位（ADR-079）
+
+- 起因：用户拍板——生成根的信息不该存表，放内存就够，进程终止就消失；库的同步以水位为准，同步了一半的清理掉重新增量 / 初始化。
+  `gen_root` 一表五用（回执 / 失败留痕 / 规划输入 / 启动证据 / 目录落款），全 AMS 12 万根时一致性普查整表一扫 4–6 s 每 30 s 一次、
+  水位探针 avg 5.5 s、每根落库多一笔 `UPSERT`，而 ADR-071 / 072 / 076 之后这五个角色没有一个需要持久化。
+- 新模块 `data_interface::model_root_ledger`：进程内账本，每根一条 `Generated | Failed{error} | Refused{error}` + `source_end_sesno`，
+  一把 `RwLock`。写者：落库适配器（全部笔提交后记成功，只对写全局库的 `PersistTarget`）、任务执行体（失败）、初始化双 lane（排空后逐根）、
+  `DeleteCleanup` / 删子树（`forget_root`）、回退 / 整库清空 / 删库（`forget_dbnum`）。读者：窗口规划器、启动 / ModelOnly 规划、一致性判决、
+  `/model/ensure` 回执、按需 ensure 凭证判据。
+- 模型面唯一的持久事实是 `dbnum_watermark.model_sesno`：窗口规划器的 `roots_S` = `DbSet@model_sesno` 枚举、不读任何凭证行；
+  「未触根凭证前移」（ADR-056 P2-2）退役，`advance` 名单只进回执（`CredentialAdvanceReceipt::from_plan`，形状不动）；
+  启动核对只比两枚水位（`startup_model_recovery_plan(applied, model)`：`model < applied` 才排 ModelOnly，左端 `model`，0 = 整库）；
+  `model_watermark.rs`（ADR-060 D6 / D7 的探针、下调、幽灵清零、`legacy_adopted`）整个模块删除；`startup_coverage_floors` /
+  `backfill_gen_root_dbnum_on` / `coverage_tracked_dbnums` 删。
+- 目录落款收成库级一份 `dbnum_watermark.model_catalogue_sessions = [{dbnum, session}]`，任务收尾随 `model_sesno` 合并写
+  （`task_end::render_catalogue_stamp_merge`，只在 `all_roots_ok`）；有资格盖的任务：初始化 / 起点 0 的 ModelOnly（从回执取最旧）、
+  目录级联排的任务（`DiscoveredBatch::catalogue_stamps`，名单全成才盖，不从回执反推）。目录版本核对的过滤器改为**库级**
+  （`libraries_behind_catalogue`）：命中根所在库落款仍旧才排，落款仍旧却没被波及的库排一条只带落款的空任务（`CatalogueCascadeReport.stamp_only`），
+  退化目录库波及的库整库重排；`lazy_roots` 恒 0。`/model/rebuild` 改排起点 0 的 ModelOnly（不再随身带全量名单）。
+- 一致性判决：四格读账本（零 I/O，20 s 普查缓存与 `invalidate_census` 退）；`NotJudgedReason::NoGenerationRoots` 退役——水位不等就是落后。
+  `/model/ensure` 回执的 `publication_status` 改由投影 ACK（`ready` / `stale`）与账本（失败带 `last_error`）合成，逐根 revision / target 四格不再出现。
+  `/health.startup.no_credential_dbnums` = 模型水位从没盖过的 DESI 库。
+- 存量库：`retire_publish_run_tables` 追加 `gen_root` / `root_dependency` 两表与 12 个 `fn::gen_root_*` / `fn::sync_*` 函数的
+  `REMOVE … IF EXISTS`（幂等）；`resource/surreal/gen_root.surql` 删除、内置快照与核验面摘掉。回退 / 清库 / 删库不再点名 `gen_root`。
+- 验证：`cargo check --all-targets` 绿，`cargo clippy --lib` 本仓零告警，`cargo test --lib` **2114 passed / 0 failed / 109 ignored**
+  （含账本 3、凭证判据 1、库级落款过滤 1、模型门源码钉 2、调度器落款并入 1、任务失败进账本 1、启动决策 4；`direct_window_replay_parity`
+  夹具去 `gen_root` 并新增「落库不再建 `gen_root` 表」断言）。**未验证**：真库重启一次看删表与启动核对排队；plant-ui 对 `/model/ensure`
+  少掉四格的消费。见 ADR-079 与 `docs/plans/2026-09-15-retire-gen-root-table-dev-plan.md`。
+
 ### 项目集合由 MDB 派生、项目目录在搜索根里按 `<code>000` 找；`included_projects` 退役（ADR-078，取代 ADR-046）
 
 - 起因：部署实例 `_runs\ams-0.1.25` 只勾了 `AvevaMarineSample`，AMS `/ALL` 声明的 41 个外部库

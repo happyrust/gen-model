@@ -1564,8 +1564,8 @@ async fn execute_frozen_batch(
     // ACK**，`model_sesno` 才随写入标记 `finished`、Ref0 统计在同一笔里盖上——任务说完了，库里就有。
     // 栅栏按根不按库：同库别的根（`/model/ensure` 按需生成的）不是本任务的账；非持久档的根从不登记
     // write-behind，栅栏立刻放行，两档走同一段代码。刷不进去有预算（[`DURABLE_FLUSH_BUDGET`]）：
-    // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、`gen_root` 留痕，任务 Partial、
-    // 水位不盖。任务只等，不替 worker 写（第二个写者在热库上实测撞冲突）。只有 DESI 才有模型可收。
+    // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、账本记失败（ADR-079），任务
+    // Partial、水位不盖。任务只等，不替 worker 写（第二个写者在热库上实测撞冲突）。只有 DESI 才有模型可收。
     let mut model_outcome: Option<crate::data_interface::task_end::TaskModelOutcome> = None;
     let mut end_time: Option<String> = None;
     let mut flush_note = String::new();
@@ -1587,7 +1587,10 @@ async fn execute_frozen_batch(
             flush.blocked.len() + flush.exhausted.len(),
             flush_started.elapsed().as_millis()
         );
-        model_outcome = Some(model_outcome_of(&flush));
+        // 库级目录落款（ADR-079）：只有目录级联排的 / 整库重排的 ModelOnly 有资格说，随收尾那一笔
+        // 与 `model_sesno` 同盖；单元清单是任务手里的事实，不回问库。
+        let catalogue_sessions = task_catalogue_stamps(job, &result.units);
+        model_outcome = Some(model_outcome_of(&flush, catalogue_sessions));
     }
 
     // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
@@ -1754,9 +1757,10 @@ async fn await_units_durable(
 
 /// 增量路计划 D3：预算用尽 / 判死的根的处置，四件一起——从 write-behind 队列摘掉（不再原地无限重试）、
 /// 逐出投影（durable 才是真值，投影里那份没落成的新几何不该继续对外，读路落回库里的旧行）、
-/// 单元记 `Failed`、`gen_root` 留痕（凭证不前移，下次该库任务 / 启动核对按缺口重排，ADR-076 D8）；
-/// 任务 `Partial`。收尾那一笔照样落、写入标记照收（§8 Q1）：数据行与 `applied_sesno` 早已同步落库、
-/// 模型行按根幂等、没 ACK 的根没有 `gen_root` 回执——收标记不会掩盖任何「没写完」。
+/// 单元记 `Failed`、进程内账本记失败（ADR-079：下一窗把它并进 regen；`model_sesno` 不盖，重启后按
+/// 水位缺口重排，ADR-076 D8）；任务 `Partial`。收尾那一笔照样落、写入标记照收（§8 Q1）：数据行与
+/// `applied_sesno` 早已同步落库、模型行按根幂等、没 ACK 的根账本上不是 `Generated`——收标记不会掩盖
+/// 任何「没写完」。
 async fn abandon_undurable_roots(
     dbnum: u32,
     flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
@@ -1773,7 +1777,7 @@ async fn abandon_undurable_roots(
         store.drop_cached_root(*root);
     }
     for (root_refno, noun, error) in mark_units_undurable(&verdicts, &mut result.units) {
-        mark_generation_failed(dbnum, &root_refno, &noun, &error).await;
+        mark_generation_failed(dbnum, &root_refno, &noun, &error);
     }
     result.status = ManualUpdateStatus::Partial;
     result.warnings.push(format!(
@@ -1806,8 +1810,8 @@ fn flush_verdicts(
         .collect()
 }
 
-/// 放弃的根对应的单元记 `Failed`、`message` 以 `durable flush:` 开头（回执逐根点名）。返回要在
-/// `gen_root` 留痕的 `(root_refno, noun, error)`。单元清单是任务手里的事实，不回问库。
+/// 放弃的根对应的单元记 `Failed`、`message` 以 `durable flush:` 开头（回执逐根点名）。返回要记进
+/// 账本的 `(root_refno, noun, error)`。单元清单是任务手里的事实，不回问库。
 fn mark_units_undurable(
     verdicts: &[(e3d_io::refno::RefNo, &'static str, String)],
     units: &mut [ModelUnitResult],
@@ -1833,14 +1837,72 @@ fn mark_units_undurable(
 }
 
 /// 收尾那一笔的模型半边：一根都没放弃才盖 `model_sesno`；`dead_roots` 只数判死的（确定性失败），
-/// 预算用尽的不算死——库健康了下一次任务还会再试。
+/// 预算用尽的不算死——库健康了下一次任务还会再试。`catalogue_sessions` 是本任务有资格盖的库级
+/// 目录落款（[`task_catalogue_stamps`]），一根没成就不盖（`task_end` 那边也守着 `all_roots_ok`）。
 fn model_outcome_of(
     flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
+    catalogue_sessions: Option<std::collections::BTreeMap<u32, u32>>,
 ) -> crate::data_interface::task_end::TaskModelOutcome {
+    let all_roots_ok = flush.all_acked();
     crate::data_interface::task_end::TaskModelOutcome {
-        all_roots_ok: flush.all_acked(),
+        all_roots_ok,
         dead_roots: flush.blocked.len(),
+        catalogue_sessions: catalogue_sessions.filter(|_| all_roots_ok),
     }
+}
+
+/// 本任务成了要盖的库级目录落款（ADR-079：随 `gen_root` 退役，逐根的 `published_model_target.catalogue`
+/// 收成每库一份，写在水位行上）。两种任务有资格说「这个库的整份模型与该目录到这一版一致」：
+///
+/// - 带着落款入队的任务（目录级联排的 ModelOnly，[`FrozenBatch::catalogue_stamps`]；并进一条排队中的
+///   ApplyWindow 时名单与落款一起随行）：随行名单上的根全部在本任务重算成了，落款就是入队时定的那几个
+///   `CATA dbnum → 会话`——**不**从回执反推，免得把同期也前移了、却还没核对过的另一个目录库一并盖掉；
+///   名单上有一根没在本任务生成成功（模型工作被跳过、失败），这句就说不了；
+/// - 整库重排的 ModelOnly（起点模型水位为 0 / 缺席：启动核对「从没追平过」、`/model/rebuild`）：
+///   `DbSet@T` 上的每一个根都重算了，它们照的目录版本就是整个库的目录版本——从生成成功的根的投影
+///   回执取 `ModelTarget.catalogue`，同一目录库取**最旧**（与初始化 `dbnum_initialize` 同一口径）。
+///
+/// 普通增量窗口只重算被触到的根，说不了这句，给 `None`；初始化的落款由双 lane 编排自己盖。
+fn task_catalogue_stamps(
+    job: &FrozenBatch,
+    units: &[ModelUnitResult],
+) -> Option<std::collections::BTreeMap<u32, u32>> {
+    use crate::data_interface::batch_queue::BatchIntent;
+    if !job.catalogue_stamps.is_empty() {
+        let explicit_roots_generated = job.regen_roots.iter().all(|root| {
+            units.iter().any(|unit| {
+                unit.root_refno == root.refno && unit.status == UnitGenStatus::Generated
+            })
+        });
+        return explicit_roots_generated.then(|| job.catalogue_stamps.clone());
+    }
+    if job.intent != BatchIntent::ModelOnly {
+        return None;
+    }
+    let whole_library = job.model_start_sesno.is_none_or(|floor| floor <= 0);
+    if !whole_library {
+        return None;
+    }
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let mut stamps = std::collections::BTreeMap::new();
+    for root in generated_roots(units) {
+        let Some(target) = store
+            .receipt(
+                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                root,
+            )
+            .and_then(|receipt| receipt.model_target)
+        else {
+            continue;
+        };
+        for file in &target.catalogue {
+            stamps
+                .entry(file.dbnum)
+                .and_modify(|kept: &mut u32| *kept = (*kept).min(file.session))
+                .or_insert(file.session);
+        }
+    }
+    Some(stamps)
 }
 
 async fn execute_model_only_body(
@@ -2052,20 +2114,13 @@ async fn run_model_side_actions(
             ModelWorkAction::DeleteCleanup => {
                 // 两面都退：读透形态下 Plant UI 的权威投影在 ModelMemoryStore，只删 Surreal
                 // 那份会让 `/model/records` 继续供一棵幽灵子树直到重启。
-                match mgr.delete_model_subtree(refno).await {
-                    Ok(()) if item.noun.trim().is_empty() => {
-                        let key = item.target_refno.replace('/', "_");
-                        aios_core::SUL_DB
-                            .query(format!(
-                                "DELETE gen_root:{key} WHERE pe = NONE AND noun = NONE;"
-                            ))
-                            .await
-                            .map_err(anyhow::Error::from)
-                            .and_then(|response| response.check().map_err(anyhow::Error::from))
-                            .map(|_| ())
-                    }
-                    other => other,
+                let outcome = mgr.delete_model_subtree(refno).await;
+                if outcome.is_ok() {
+                    // 这根不再是根 / 已被删：账本里那一条一起摘掉（ADR-079），别让它以「还欠着」
+                    // 的身份被下一窗当成 regen 候选。
+                    crate::data_interface::model_root_ledger::forget_root(item.dbnum, refno);
                 }
+                outcome
             }
             ModelWorkAction::Transform => {
                 mgr.update_world_transforms(&std::collections::HashSet::from([refno]))
@@ -2096,64 +2151,25 @@ async fn run_model_side_actions(
     (derived, failures)
 }
 
-/// 把生成失败写到根凭证上：`gen_root:{root} SET status = 'failed', last_error = …`。
+/// 把生成失败记进进程内的生成根账本（ADR-079：`gen_root` 表退役，失败根不再往库里写痕）。
 ///
-/// 这是 pending 表退役（ADR-072 D5）后「这根还欠着」唯一的库内痕迹：`status` 不在安定集里
-/// （`window_root_plan::SETTLED_ROOT_STATUSES`），于是
+/// 这是 pending 表退役（ADR-072 D5）后「这根还欠着」唯一的记录，只活在本进程里：
 ///
-/// - 数据尾事务的凭证前移（`render_credential_advance` 的 SQL 守卫）不会把它推到 T；
-/// - 下一窗的规划器（`carry_unsettled_generation`）把它并进 regen；
-/// - 启动核对（`startup_coverage_floors` 的 `unsettled_roots`）把它算进缺口、排恢复任务。
+/// - 下一窗的规划器（`carry_unsettled_generation`）把它并进 regen、从前移与懒生成名单里摘掉；
+/// - 一致性判决（`dbnum_consistency`）把它数进「还在赶」，库的灯不绿；
+/// - `model_sesno` 不盖（`task_end` 守着 `all_roots_ok`）就是它在库里的全部说法。
 ///
-/// 从没生成过的根也造一行（`UPSERT`）：没有行的根在规划器眼里是「懒生成」，失败一次就该
-/// 被看见。`noun` 只填空——已有行上的值是生成器写的，比这里的更可信。写不进去只喊一句：
-/// 这条是恢复用的痕迹，不能反过来把本批再拖失败一次。
-async fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
-    let Some(statement) = render_generation_failed(dbnum, root_refno, noun, error) else {
+/// 进程终止它就消失，这是有意的：重启后 `model_sesno` 若没盖到 T，启动核对排的 `model_sesno → T`
+/// 那一窗本来就把这根重排（它在差分里）；不需要任何一行留痕。判死的根（确定性失败）也记 `failed`
+/// ——ADR-076 D6 / D8 的口径：放弃、水位不盖、下一次该库任务再试；「永久放弃」那一格
+/// （`RootOutcome::Refused`）留给服务端判它解析不出合法生成根的那类判定。解析不出来的 refno 只记日志。
+fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
+    use crate::data_interface::model_root_ledger as ledger;
+    let Some(root) = ledger::parse_root(root_refno) else {
+        log::warn!("生成失败的根 `{root_refno}` 不是 a/b refno，账本不记 dbnum={dbnum}");
         return;
     };
-    if let Err(error) = aios_core::SUL_DB
-        .query(statement)
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|response| response.check().map_err(anyhow::Error::from))
-    {
-        log::error!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
-        eprintln!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
-    }
-}
-
-/// 失败根在 `gen_root` 上留痕的那一句（`status = 'failed'`，`last_error` 截 2000 字）。
-/// 增量路当场执行（[`mark_generation_failed`]），初始化路把它交给模型 lane（ADR-077 D5）。
-/// `root_refno` 解析不出来返回 `None`。
-pub(crate) fn render_generation_failed(
-    dbnum: u32,
-    root_refno: &str,
-    noun: &str,
-    error: &str,
-) -> Option<String> {
-    use std::str::FromStr;
-    let refno = aios_core::RefU64::from_str(root_refno).ok()?;
-    let key = format!("{}_{}", refno.get_0(), refno.get_1());
-    Some(format!(
-        "UPSERT type::thing('gen_root', {key}) SET dbnum = {dbnum}, \
-         pe = type::thing('pe', {key}), noun = noun ?? {noun}, \
-         status = 'failed', last_error = {error}, updated_at = time::now();",
-        key = format!(
-            "'{}'",
-            crate::data_interface::dbnum_state::escape_surql_str(&key)
-        ),
-        noun = format!(
-            "'{}'",
-            crate::data_interface::dbnum_state::escape_surql_str(noun.trim())
-        ),
-        error = format!(
-            "'{}'",
-            crate::data_interface::dbnum_state::escape_surql_str(
-                &error.chars().take(2000).collect::<String>()
-            )
-        ),
-    ))
+    ledger::record_failed(dbnum, root, noun, 0, error);
 }
 
 /// 根生成成功后，把被改判的原始位姿目标送回统一 AABB 变更链（`PostRegenAabb`，
@@ -2213,6 +2229,7 @@ fn window_remainder_batch(
         // 续跑的冻结点若仍判无异常也不会再清——applied 已非 0，走的是增量分支）。
         reinit_requested: job.reinit_requested,
         regen_roots: job.regen_roots.clone(),
+        catalogue_stamps: job.catalogue_stamps.clone(),
     }
 }
 
@@ -2493,7 +2510,7 @@ async fn run_single_unit(
     let settlement_failed = false;
     let _ = warnings;
     if let Some(error) = generation_error.as_deref() {
-        mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error).await;
+        mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error);
     }
     let (status, attempts, message) = match outcome {
         Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
@@ -2929,7 +2946,7 @@ async fn run_unit_worklist(
                 });
                 let success = message.is_none();
                 if let Some(error) = message.as_deref() {
-                    mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error).await;
+                    mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error);
                 }
                 if !success {
                     settlement_failed = true;
@@ -3403,6 +3420,7 @@ async fn schedule_frozen_source_replacement(
         // 文件被替换：这是检出的重建，不是人点的。
         reinit_requested: false,
         regen_roots: Vec::new(),
+        catalogue_stamps: std::collections::BTreeMap::new(),
     };
     let outcome = scheduler.enqueue(registry, &found, false);
     scheduler.record_frozen_source(job.dbnum, false, replacement.commit_token_json()?);
@@ -3670,13 +3688,16 @@ mod tests {
             blocked: vec![(blocked, "room calculator unavailable".into())],
             exhausted: Vec::new(),
         };
-        let outcome = model_outcome_of(&flush);
+        let stamps = Some(std::collections::BTreeMap::from([(7000, 13)]));
+        let outcome = model_outcome_of(&flush, stamps.clone());
         assert_eq!(
             outcome,
             TaskModelOutcome {
                 all_roots_ok: false,
                 dead_roots: 1,
-            }
+                catalogue_sessions: None,
+            },
+            "一根没成，库级目录落款也不盖（ADR-079）"
         );
         let sql = render_task_end_tail(&TaskEnd {
             dbnum: 8000,
@@ -3718,30 +3739,35 @@ mod tests {
             exhausted: vec![(blocked, "5 attempts used up: timeout".into())],
         };
         assert_eq!(
-            model_outcome_of(&exhausted),
+            model_outcome_of(&exhausted, None),
             TaskModelOutcome {
                 all_roots_ok: false,
                 dead_roots: 0,
+                catalogue_sessions: None,
             },
             "预算用尽的放弃但不算死"
         );
         assert_eq!(
-            model_outcome_of(&RootsFlushOutcome {
-                acked: vec![fine, blocked],
-                ..Default::default()
-            }),
+            model_outcome_of(
+                &RootsFlushOutcome {
+                    acked: vec![fine, blocked],
+                    ..Default::default()
+                },
+                stamps.clone()
+            ),
             TaskModelOutcome {
                 all_roots_ok: true,
                 dead_roots: 0,
+                catalogue_sessions: stamps,
             },
-            "全 ACK 才盖"
+            "全 ACK 才盖，落款随之"
         );
         assert_eq!(generated_roots(&units), vec![fine], "只等生成成功的根");
     }
 
-    /// D3 的副作用在源码上钉住：放弃 = 摘队列 + 逐出投影 + `gen_root` 留痕 + Partial，四件一起。
+    /// D3 的副作用在源码上钉住：放弃 = 摘队列 + 逐出投影 + 账本记失败（ADR-079）+ Partial，四件一起。
     #[test]
-    fn an_abandoned_root_is_evicted_from_the_projection_and_marked_failed_in_gen_root() {
+    fn an_abandoned_root_is_evicted_from_the_projection_and_marked_failed_in_the_ledger() {
         let source = include_str!("batch_worker.rs");
         let helper = source
             .split_once("async fn abandon_undurable_roots(")
@@ -3766,6 +3792,39 @@ mod tests {
             "预算沿用进程内连败账的上限"
         );
         assert_eq!(DURABLE_FLUSH_BUDGET.deadline, Duration::from_secs(600));
+    }
+
+    /// ADR-079：生成失败只进进程内账本——记 `failed`（拦水位、下一窗重排），带原话；
+    /// 库里一行都不写；解析不出来的 refno 不记。
+    #[test]
+    fn a_generation_failure_is_recorded_in_the_process_ledger_not_in_a_table() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let dbnum = 994_100;
+        ledger::forget_dbnum(dbnum);
+        mark_generation_failed(dbnum, "24384/7", "BRAN", "manifold boolean failed");
+        mark_generation_failed(dbnum, "garbage", "EQUI", "ignored");
+        let census = ledger::census(dbnum);
+        assert_eq!((census.chasing, census.abandoned, census.settled), (1, 0, 0));
+        let root = ledger::parse_root("24384/7").unwrap();
+        assert_eq!(
+            ledger::chasing_roots(dbnum),
+            std::collections::BTreeSet::from([root])
+        );
+        let entry = ledger::entry(dbnum, root).unwrap();
+        assert_eq!(entry.status_label(), "failed");
+        assert_eq!(entry.error(), Some("manifold boolean failed"));
+        assert_eq!(entry.noun, "BRAN");
+        ledger::forget_dbnum(dbnum);
+
+        let source = include_str!("batch_worker.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
+        assert!(
+            !production.contains("type::thing('gen_root'") && !production.contains("gen_root:"),
+            "任务执行体不许再写逐根凭证行（ADR-079）"
+        );
     }
 
     #[test]
@@ -3852,6 +3911,7 @@ mod tests {
             frozen_source_token: Some("round-token".into()),
             reinit_requested: false,
             regen_roots: Vec::new(),
+            catalogue_stamps: std::collections::BTreeMap::new(),
         };
         let found = window_remainder_batch(&job, 60, 90);
         assert_eq!(found.applied_sesno, 60, "左端 = 刚提交的水位");
@@ -4101,6 +4161,7 @@ mod tests {
             frozen_source_token: None,
             reinit_requested: false,
             regen_roots: Vec::new(),
+            catalogue_stamps: std::collections::BTreeMap::new(),
         };
 
         assert_eq!(

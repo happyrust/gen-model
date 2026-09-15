@@ -148,15 +148,16 @@ impl PhaseBlocker {
 pub struct StartupCoverage {
     /// `watch` = 本进程被监听限定域收窄，只核对了名单内的库；`all` = 全范围。
     pub scope: &'static str,
-    /// 真正逐库核对过的库数（有凭证记录、且在本进程范围内）。
+    /// 真正逐库核对过的库数（当前 MDB 的 DESI 成员、且在本进程范围内）。
     pub in_scope: usize,
-    /// `gen_root` 里有凭证记录的库数，不分范围。
+    /// 当前 MDB 声明的 DESI 库数，不分范围（ADR-079 之前是 `gen_root` 里有凭证记录的库数）。
     pub candidates: usize,
-    /// 启动那一刻登记了、却一条凭证记录都没有的库（ADR-058 D6：这些根等按需
-    /// ensure，启动一根不排）。
+    /// 启动那一刻当前 MDB 声明了、模型水位却从没盖过（`model_sesno <= 0`）的 DESI 库
+    /// （ADR-079：库里没有逐根凭证可数，「没凭证」= 没有模型水位；这些库的模型由启动排的
+    /// ModelOnly 整库生成，或随数据初始化一起做）。
     ///
-    /// `null` = 这次连登记表都没读到，说不出有没有——它与空列表（每个登记库都有
-    /// 凭证）是两句话，合成一句就是拿「不知道」冒充绿灯。
+    /// `null` = 这次连登记表 / MDB 成员都没读到，说不出有没有——它与空列表（每个库都盖过
+    /// 模型水位）是两句话，合成一句就是拿「不知道」冒充绿灯。
     pub no_credential_dbnums: Option<Vec<u32>>,
     pub reconcile: StartupReconcile,
 }
@@ -174,9 +175,9 @@ pub struct StartupReconcile {
     pub result: &'static str,
     /// 取不到文件最新会话（stat / 解会话失败、成员名单读不到）、按「未确认」跳过的库数。
     pub unreadable: usize,
-    /// `gen_root` 里有凭证记录、却**不在当前 MDB** 的库数（换过 MDB 之后留下的历史行，
-    /// 09-04 审核 #7）。它们没有文件可核，只能点名；此前与 `unreadable` 混在一栏，
-    /// 留着一行历史库 `result` 就一辈子出不来 `ok`。
+    /// 当前 MDB 声明了、却没有登记行或**不在成员文件里**的库数（09-04 审核 #7；ADR-079 之前
+    /// 这一栏数的是 `gen_root` 里有凭证却不在当前 MDB 的历史行）。它们没有文件可核，只能点名；
+    /// 此前与 `unreadable` 混在一栏，留着一行历史库 `result` 就一辈子出不来 `ok`。
     pub not_in_mdb: usize,
     /// 开了退化窗口但收口失败的库数。人工出口是
     /// `POST /api/v1/dbnums/{dbnum}/model/rebuild`。

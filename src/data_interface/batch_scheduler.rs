@@ -8,7 +8,7 @@
 //! 队列不持久（ADR-011 §4）：durable 语义在水位与 `model_update_pending` 表上，
 //! 重启后由 `init_watcher` 重扫水位把队列重建出来。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -66,6 +66,12 @@ pub struct DiscoveredBatch {
     /// [`FrozenBatch::regen_roots`]，任务体把它并进本任务的工作单——此前这份名单是写成
     /// `model_update_pending` 行等 drain 领的，那张队列表随 ADR-071 退役。
     pub regen_roots: Vec<RegenRoot>,
+    /// **这条任务成了就盖的库级目录落款**（ADR-079）：`CATA dbnum → 会话`。目录级联排的任务带着它
+    /// ——反查命中的根全部重算成了，「这个库的整份模型与该目录到这一版一致」就成立，收尾那一笔
+    /// 随 `model_sesno` 合并写进 `dbnum_watermark.model_catalogue_sessions`；下一次目录版本核对
+    /// 才不会把同一批根再排一遍。空 = 本任务没资格说这句话（绝大多数入队）。并入已排队行时取并集，
+    /// 同一目录库取**较新**的会话。
+    pub catalogue_stamps: BTreeMap<u32, u32>,
 }
 
 /// 一个明确要重算的生成根（`a/b` 拼法 + noun）。
@@ -73,6 +79,16 @@ pub struct DiscoveredBatch {
 pub struct RegenRoot {
     pub refno: String,
     pub noun: String,
+}
+
+/// 库级目录落款并入：同一目录库取较新的会话（两次核对先后排的都要盖到，盖到更新的那一版
+/// 自然覆盖旧的那句话）。
+pub(crate) fn merge_catalogue_stamps(into: &mut BTreeMap<u32, u32>, from: &BTreeMap<u32, u32>) {
+    for (&dbnum, &session) in from {
+        into.entry(dbnum)
+            .and_modify(|kept| *kept = (*kept).max(session))
+            .or_insert(session);
+    }
 }
 
 /// 端点对得上才把时刻贴上去。
@@ -102,6 +118,8 @@ struct RowMeta {
     frozen_source_token: Option<String>,
     /// 见 [`DiscoveredBatch::regen_roots`]；并入时取并集、去重。
     regen_roots: Vec<RegenRoot>,
+    /// 见 [`DiscoveredBatch::catalogue_stamps`]；并入时同库取较新会话。
+    catalogue_stamps: BTreeMap<u32, u32>,
 }
 
 /// 冻结出队后交给 worker 的一份快照。
@@ -129,6 +147,8 @@ pub struct FrozenBatch {
     pub reinit_requested: bool,
     /// 明确要重算的根（见 [`DiscoveredBatch::regen_roots`]），任务体并进工作单。
     pub regen_roots: Vec<RegenRoot>,
+    /// 本任务成了就盖的库级目录落款（见 [`DiscoveredBatch::catalogue_stamps`]）。
+    pub catalogue_stamps: BTreeMap<u32, u32>,
 }
 
 /// `Reinitialize` 行是谁排的：`manual`（人工重新解析）/ `rollback`（回退检出）；
@@ -381,10 +401,11 @@ impl BatchScheduler {
                 found.phase,
                 found.epoch_id,
             );
-            // 带明确根名单的 ModelOnly（目录级联）不能被「区间已覆盖」吞掉：运行中的批次不会
-            // 重算这几根（它的工作单在冻结时就定了），排队行又不存在时，给它排一条退化区间
-            // `[end, end]` 的 ModelOnly 行接在运行行之后——区间语义上什么都不用做，名单才是活。
-            if !found.regen_roots.is_empty()
+            // 带明确根名单 / 库级目录落款的 ModelOnly（目录级联）不能被「区间已覆盖」吞掉：运行中的
+            // 批次不会重算这几根（它的工作单在冻结时就定了）、也不会盖那份落款，排队行又不存在时，
+            // 给它排一条退化区间 `[end, end]` 的 ModelOnly 行接在运行行之后——区间语义上什么都不用做，
+            // 名单与落款才是活。
+            if (!found.regen_roots.is_empty() || !found.catalogue_stamps.is_empty())
                 && found.intent == BatchIntent::ModelOnly
                 && outcome == Enqueued::AlreadyCovered
                 && !state
@@ -490,6 +511,11 @@ impl BatchScheduler {
                                     meta.regen_roots.sort();
                                     meta.regen_roots.dedup();
                                 }
+                                // 库级目录落款同理取并集，同一目录库取较新的会话。
+                                merge_catalogue_stamps(
+                                    &mut meta.catalogue_stamps,
+                                    &found.catalogue_stamps,
+                                );
                             }
                             if outcome == Enqueued::Merged {
                                 registry.replace_queued_range(
@@ -549,6 +575,7 @@ impl BatchScheduler {
                                     file_name: found.file_name.clone(),
                                     frozen_source_token: None,
                                     regen_roots: found.regen_roots.clone(),
+                                    catalogue_stamps: found.catalogue_stamps.clone(),
                                 },
                             );
                             task_id
@@ -688,6 +715,7 @@ impl BatchScheduler {
                 frozen_source_token: meta.frozen_source_token,
                 reinit_requested: row.reinit_requested,
                 regen_roots: meta.regen_roots,
+                catalogue_stamps: meta.catalogue_stamps,
             },
             exclusive,
         };
@@ -1031,6 +1059,7 @@ mod tests {
             file_latest_sesno_time: at(latest),
             reinit_requested: false,
             regen_roots: Vec::new(),
+            catalogue_stamps: BTreeMap::new(),
         }
     }
 
@@ -1096,6 +1125,40 @@ mod tests {
             scheduler.enqueue_live(&registry, &plain).outcome,
             Enqueued::AlreadyCovered
         );
+    }
+
+    /// ADR-079：目录级联排的 ModelOnly 带着「成了就盖」的库级目录落款。名单为空、落款非空
+    /// （反查精确、这个库一根都没被波及）也要排一条行——不排，落款永远盖不上，下次核对又点名；
+    /// 并进已排队行时同库取较新会话；冻结时整份落款进 `FrozenBatch`。
+    #[test]
+    fn catalogue_stamps_survive_coverage_merge_and_freeze() {
+        let (scheduler, registry) = fresh();
+        let stamp_only = DiscoveredBatch {
+            intent: BatchIntent::ModelOnly,
+            model_start_sesno: Some(50),
+            catalogue_stamps: BTreeMap::from([(7000, 13)]),
+            ..found(7997, 50, 50)
+        };
+        let outcome = scheduler.enqueue_live(&registry, &stamp_only);
+        assert_eq!(outcome.outcome, Enqueued::New, "已覆盖也要为落款排一条行");
+        let later = DiscoveredBatch {
+            catalogue_stamps: BTreeMap::from([(7000, 12), (5052, 185)]),
+            regen_roots: vec![regen("24384/5", "EQUI")],
+            ..stamp_only.clone()
+        };
+        let merged = scheduler.enqueue_live(&registry, &later);
+        assert_eq!(merged.info.task_id, outcome.info.task_id);
+        let frozen = scheduler.freeze_next(&registry).expect("running row");
+        assert_eq!(
+            frozen.catalogue_stamps,
+            BTreeMap::from([(7000, 13), (5052, 185)]),
+            "同库取较新会话，别的库并进来"
+        );
+        assert_eq!(frozen.regen_roots, vec![regen("24384/5", "EQUI")]);
+
+        let mut into = BTreeMap::from([(1, 5)]);
+        merge_catalogue_stamps(&mut into, &BTreeMap::from([(1, 4), (2, 1)]));
+        assert_eq!(into, BTreeMap::from([(1, 5), (2, 1)]));
     }
 
     /// 契约 C2 / C4：人工重新解析的标记从发现行进队列、再进冻结批与快照 / 回执 / 任务详情。
