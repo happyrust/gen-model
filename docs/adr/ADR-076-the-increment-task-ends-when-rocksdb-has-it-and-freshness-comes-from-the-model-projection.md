@@ -24,6 +24,12 @@ rocksdb 落盘。如果是增量更新，就可以按 kv-mem 提供内存数据�
   D4 提到的 `WRITE_WINDOW < QUEUE_CAPACITY` 那条纪律随攒窗一并退役）、收尾一笔盖两枚水位（D5 的形状，`TaskEnd::data`）、
   初始化模型直写 RocksDB 不进投影（D11；「`gen_root` 0 行」实为回执渲成 `UPDATE` 不建行，持久档改 `UPSERT` 即落）。
   增量路的 S1–S7 仍归本文。
+- **增量路 S1–S3 由 `docs/plans/2026-09-15-increment-task-durable-boundary-dev-plan.md` 落实**（2026-09-15，提交 `8adec7169`）：
+  任务等**本批根**的 durable ACK（D2 的「本库栅栏」收窄为「本任务单元清单里的根」，同库别的根不是本任务的账）、收尾一笔盖
+  `model_sesno` + 写入标记 `finished` + Ref0 统计（D5；`applied_sesno` 留在数据尾事务，见 ADR-071 D4 的落地注）、预算用尽 /
+  判死转 `Partial`（D6，**修订为写入标记照收**，见 D6 修订注）、`durable_pending` 成任务内阶段并带「刷盘 n / N」进度（D7）、
+  write-behind 的 `settle` 整条退役——`model_sesno` 从此只有任务一个写者。S4（属性 lane）、S5（plant-ui 读口径）、S7（D12 逐出；
+  D13 全仓已无该符号）仍欠。
 
 ## 背景
 
@@ -113,6 +119,15 @@ ADR-074 的 `mem` 档已经把这一条定了一半（库在进程内、没有�
 write-behind 现有的退避与死信照用，但重试预算归任务。用尽仍失败：任务转 `Partial`、**写入标记不收**，下一轮按 ADR-072
 整窗重来（行幂等 + 水位在最后）。不原地无限重试——那会把一个库的队列永久堵死，而且外面看不见。
 
+> **修订（2026-09-15，增量路计划 §8 Q1，用户拍板）：写入标记照收。** 本条写「不收」时依据的是 ADR-072 的按 sesno 回退；
+> 那条路已被 ADR-073 D3 取代——今天标记停在 `writing` 的唯一处置是**整库 Reinitialize**。按字面做，一个确定性 `Blocked` 的根
+> （载荷超硬顶、房间计算器缺）会变成「每次启动整库重建 → 同一根再 Blocked → 标记又不收」的跨重启活锁，正是本条自己要避免的
+> 东西。落地形态：预算用尽 / 判死的根从队列摘掉（`abandon_roots`）、逐出投影（`drop_cached_root`，durable 才是真值）、单元记
+> `Failed`（`message` 以 `durable flush:` 开头）、`gen_root` 留痕（`status = 'failed'`），任务 `Partial`；收尾那一笔照落、标记收成
+> `finished`、`model_sesno` **不盖**、`model_dead_roots` 记判死数——走 D8「标记已收而只有模型水位没盖 → 启动核对按凭证缺口排
+> `ModelOnly`」那条现成的路。收标记不掩盖任何「没写完」：数据行与 `applied_sesno` 早已同步落库、模型行按根幂等、没 ACK 的根没有
+> `gen_root` 回执。预算 = 每根 `batch_worker::MAX_ATTEMPTS`（5）次 + 任务级 10 min 期限，常量不配置。
+
 ### D7　`durable_pending` 保留为任务内阶段
 
 这个 stage 今天的意思是「任务已结束、刷盘还在飞」，本 ADR 之后那个状态不存在了。**名字留着，语义改成任务内的一个阶段**，
@@ -171,10 +186,17 @@ write-behind 现有的退避与死信照用，但重试预算归任务。用尽�
 ## 实施步骤
 
 - **S1**　任务边界：`batch_worker` 的持久分支改为 `await` 本库栅栏，`durable_pending` 降为任务内阶段（D2 / D5 / D7）。
+  **✅ 已落**（2026-09-15，`8adec7169`）：栅栏按**根**不按库——`model_write_behind::await_roots_durable(本任务单元清单里的根)`，
+  持久 / 非持久的二分消失（非持久档的根从不登记，栅栏立刻放行）。
 - **S2**　水位所有权：撤掉 `enqueue_model_watermark_write_behind` 的水位职责，三枚水位并回 `task_end` 那一笔（D5）；
   源码钉 `durable_model_watermark_is_owned_by_the_write_behind_barrier` 随之改口径。
+  **✅ 已落**：钉翻成 `the_task_stamps_model_sesno_only_after_its_roots_are_durable`；`settle` 整条退役、`/health` 少
+  `settlements` / `durable_target_by_dbnum` / `settlement_state_by_dbnum` / `memory_target_by_dbnum` 四格（plant-ui 零读者）；
+  中途那笔 Ref0 事务并进收尾，一个任务只写一次 `task_end`。「三枚」落成两枚 + 标记：`applied_sesno` 仍由数据尾事务在模型阶段
+  之前盖（ADR-056 D1 / ADR-025 §7，`requeue_window_remainder` 与凭证前移都读它），收尾一笔 = `model_sesno` + `finished` + Ref0。
 - **S3**　失败与恢复：任务内重试预算 + `Partial` + 写入标记不收（D6）；启动侧不动（D8），补一条重启后「标记在 → 整窗重来」的
   真进程用例。
+  **✅ 已落**（预算与放弃；D6 修订为**标记照收**，恢复走 D8 的 `ModelOnly`）。真进程 kill-重启用例归计划 S5，**未跑**。
 - **S4**　属性写接 `sql_write_queue`，收尾排空（D4）。
 - **S5**　读口径：清点 plant-ui 直连读，把热路迁到服务 API（D1）——跨仓，单独排期。
 - **S6**　初始化直写：生成侧按 D11 分出「初始化直写 / 增量过投影」两条落点；同批把根回执写成 durable `gen_root` 行，

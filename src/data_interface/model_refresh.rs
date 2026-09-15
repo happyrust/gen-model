@@ -5,10 +5,13 @@
 //! `pe.deleted` 状态清理被删元素旧几何的入口
 //! （[`ModelRefreshPolicy::cleanup_deleted_by_pe_state`]）。
 //!
-//! 三条生产链路各自选完根后汇入这里：自动路径 `IncrementPipeline::apply` →
-//! `build_model_update_plan` → `model_update_pending::drain`；手动路径
-//! `manual_update::generate_unit_model`；补偿路径 `side_effect_pending::drain`。
-//! 「变更元素 → 生成根」的归一策略只有一份，在 `generation_root.rs`。
+//! 生产链路各自选完根后汇入这里：dbnum 任务的模型半边 `batch_worker::run_unit_worklist`
+//! →（每单元）[`ModelRefreshPolicy::generate_roots_report`]；手动路径
+//! `manual_update::generate_unit_model`；整库模型就绪 `model_dbnum_ensure`；`lib.rs` 的
+//! 定向重生成入口。`model_update_pending::drain` / `side_effect_pending::drain` 那两条
+//! 队列链路已退役（ADR-065 D3 / ADR-072 D5）——模型重算在任务内同步完成，生成出的根经
+//! `model_write_behind::publish` 进投影并登记刷盘，任务收尾前等它们拿到 durable ACK
+//! （ADR-076 D2）。「变更元素 → 生成根」的归一策略只有一份，在 `generation_root.rs`。
 
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::*;

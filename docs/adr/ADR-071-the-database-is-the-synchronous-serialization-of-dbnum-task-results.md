@@ -22,6 +22,10 @@ write-behind worker 在后台盖（`enqueue_model_watermark_write_behind`，任�
 （ADR-076 D2 按 dbnum 设栅栏、D7 `durable_pending` 降为任务内阶段）。刷盘用尽任务内重试预算仍失败：转 `Partial`、
 写入标记不收，按 ADR-072 整窗重来（ADR-076 D6）。**D1 不动**——异步严格关在任务内部（属性写走 `sql_write_queue`、
 收尾等队列排空，ADR-076 D4），跨任务仍是同步序列化、同库仍严格串行（ADR-076 D3）。
+**增量路已落地（2026-09-15，提交 `8adec7169`，计划 `docs/plans/2026-09-15-increment-task-durable-boundary-dev-plan.md`）**：
+栅栏按**根**不按库（`await_roots_durable(本任务的根)`）；收尾一笔 = `model_sesno` + `finished` + Ref0 统计，`applied_sesno`
+仍在数据尾事务（D4 那句「三枚全部挪到任务末……故不取」照旧成立）；预算用尽 / 判死改为**写入标记照收**、`model_sesno` 不盖、
+走 ADR-076 D8 的 `ModelOnly` 恢复（ADR-076 D6 修订注）；write-behind 的 `settle` 退役，`model_sesno` 只有任务一个写者。
 日期：2026-09-10
 计划：`docs/plans/2026-09-10-finalization-loop-and-pe-statistics-plan.md`（v3，含实测起因、实施步骤 S1–S8 与 S1 的落地出入）。
 关联：
@@ -90,6 +94,12 @@ CAS 退役。
 `applied_sesno`（+ 未触根凭证前移）仍在数据尾事务写——它是 ADR-001 / ADR-021 的数据支撑承诺，也是 `increment_update_attempt`
 崩溃恢复的边界。`model_sesno`（本任务全部根成功才推）与 `room_sesno`（房间成功才推）在**任务收尾的一笔控制面事务**里写，同一事务带
 `dbnum_info_table`（D6）与 `state_revision`。三枚全部挪到任务末会让模型失败拦住数据水位，违背 ADR-056 D1，故不取。
+
+**2026-09-15 落地注（ADR-076 增量路 S1–S3）**：增量路的模型水位写点回到这一笔——持久档下 `batch_worker` 曾一度把它交给
+write-behind worker 在全部根之后代盖（`enqueue_model_watermark_write_behind` → `settle`），现在任务先等**本批根**拿到 RocksDB 的
+durable ACK（`model_write_behind::await_roots_durable`，阶段 `durable_pending`），再与写入标记 `finished`、`dbnum_info_table`
+统计同一笔盖 `model_sesno`；write-behind 只刷根、不盖水位，`model_sesno` 只有任务一个写者。`applied_sesno` 的写点不变。
+`room_sesno` 已随 ADR-073 退役，这一笔只剩两枚水位。
 
 ### D5　运行期比对读内存镜像
 
