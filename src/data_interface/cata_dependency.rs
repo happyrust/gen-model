@@ -1663,8 +1663,8 @@ mod tests {
         assert_eq!(rows.manifest.missing, 3, "缺失账也不摘");
     }
 
-    /// 两处作废都接上了：目录版本前移刷新（那一库）、整库 wipe 重来（全部）。
-    /// 少一处，记忆就会在库已经变了之后继续说「写过了」。
+    /// 三处作废都接上了：目录版本前移刷新（那一库）、整库 wipe 重来（全部）、运维口整库删除
+    /// `delete_dbnum_fast`（全部）。少一处，记忆就会在库已经变了之后继续说「写过了」。
     #[test]
     fn a_moved_catalogue_and_a_wipe_both_forget_the_memo() {
         let _guard = memo_test_guard();
@@ -1705,6 +1705,24 @@ mod tests {
             wipe.contains("forget_persisted_catalogue_rows(")
                 && wipe.contains("ForgetScope::Everything"),
             "清库之后必须整份忘掉"
+        );
+        // 运维口 `DELETE /dbnums/{dbnum}`：同样清行，同样得忘——删的若是目录库，别的任务会因
+        // memo 跳过它的依赖行不发；投影里那个库的根也一并清掉。
+        let delete = include_str!("fast_delete.rs")
+            .split_once("pub async fn delete_dbnum_fast(")
+            .expect("delete_dbnum_fast 还在")
+            .1
+            .split_once("pub(crate) async fn wipe_dbnum_for_reinit(")
+            .expect("delete_dbnum_fast 排在 wipe 之前")
+            .0;
+        assert!(
+            delete.contains("forget_persisted_catalogue_rows(")
+                && delete.contains("ForgetScope::Everything"),
+            "整库删除之后必须整份忘掉: {delete}"
+        );
+        assert!(
+            delete.contains(".clear_dbnum(dbnum)"),
+            "整库删除之后投影里那个库也得清: {delete}"
         );
     }
 

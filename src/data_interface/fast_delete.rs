@@ -716,8 +716,18 @@ async fn execute_transactional_phase(
 ///
 /// The HTTP caller stops dispatch first. These locks additionally serialize
 /// against staged commit and scan-observation writes for internal callers.
+///
+/// 库里的行没了，进程里记着「这个库有什么」的两份记忆也得跟着作废——与 [`wipe_dbnum_for_reinit`]
+/// 同一条纪律：模型投影 `clear_dbnum`；CATA 已落库 memo（plan 2026-09-15 D6）整份忘掉。删的若是
+/// 目录库，它的依赖行正是别的任务会因 memo 跳过不发的那些；删的是 DESI 库时按目录库分不出哪些该留。
+/// 不作废的话这个进程剩下的任务都当那些行还在，缺行要等到重启才补得回来。
 pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
-    wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await
+    let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await?;
+    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+    crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
+        crate::data_interface::cata_dependency::ForgetScope::Everything,
+    );
+    Ok(result)
 }
 
 /// 回退整库重建的清库半边（ADR-021）：数据、派生行、noun 行、统计与队列残留
