@@ -153,87 +153,71 @@ pub struct AppState {
 }
 
 /// 统一错误响应：`{ "code": ..., "message": ..., "detail": null }`（spec §3）。
+///
+/// `detail` 常态是 `null`：`code` 分型、`message` 给人看，够用。它只在客户端需要
+/// **照着做点什么**的时候才有值——比如跨库依赖取不到时点名是哪个库（见
+/// [`ApiError::from_domain`]），免得客户端去 `message` 里抠数字。
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
+    pub detail: Option<serde_json::Value>,
 }
 
 impl ApiError {
-    pub fn bad_request(message: impl Into<String>) -> Self {
+    fn coded(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "bad_request",
+            status,
+            code,
             message: message.into(),
+            detail: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::NOT_FOUND, "not_found", message)
     }
 
     pub fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "conflict",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::CONFLICT, "conflict", message)
     }
 
     pub fn initialization_not_ready(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "initialization_not_ready",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::CONFLICT, "initialization_not_ready", message)
     }
 
     pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code,
-            message: message.into(),
-        }
+        Self::coded(StatusCode::SERVICE_UNAVAILABLE, code, message)
     }
 
     pub fn timeout(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            code: "timeout",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::GATEWAY_TIMEOUT, "timeout", message)
     }
 
     /// 容器（WORL / SITE / ZONE）不能做生成根。单列一个 code 是给客户端用的：
     /// 它拿到这条该展开一层、对子节点逐个 ensure，而不是把这次显示当成失败。
     pub fn container(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            code: "container",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "container", message)
     }
 
     /// 请求本身没错，是数据的前置条件不满足。
     pub fn precondition(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            code: "precondition",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "precondition", message)
     }
 
     pub fn identity_mismatch(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            code: "identity_mismatch",
-            message: message.into(),
-        }
+        Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "identity_mismatch", message)
     }
 
     pub fn from_query(error: QueryError) -> Self {
@@ -252,11 +236,7 @@ impl ApiError {
             "PARSE_ERROR" => (StatusCode::INTERNAL_SERVER_ERROR, "parse_error"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
-        Self {
-            status,
-            code,
-            message: error.message,
-        }
+        Self::coded(status, code, error.message)
     }
 
     /// 领域层 `anyhow::Error` 的统一映射：元素不存在归为 404，其余 500。
@@ -271,17 +251,16 @@ impl ApiError {
     /// 曾经还有一支按错误文本里有没有 `sync_live` 判 422 的——那个开关 2026-09-07 随
     /// ADR-058 D8 退役，没有任何一处再产出这种文本，分支跟着删了。真要报前置条件不满足，
     /// 用 [`ApiError::precondition`]，别再回到按文本猜的路上。
+    ///
+    /// 「取不到某个库」另有三种（见 [`dependency_unavailable`]）：它们以前一律落进
+    /// 500 `internal`，客户端既不知道是哪个库，也不知道该重试还是该去修项目。
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
         if error
             .downcast_ref::<crate::fast_model::model_memory_store::OverlayBackpressure>()
             .is_some()
         {
-            Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "overlay_backpressure",
-                message,
-            }
+            Self::service_unavailable("overlay_backpressure", message)
         } else if matches!(
             error.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
             Some(
@@ -291,24 +270,95 @@ impl ApiError {
             )
         ) {
             Self::not_found(message)
+        } else if let Some(classified) = error
+            .downcast_ref::<crate::data_interface::direct_store::DirectStoreError>()
+            .and_then(|error| dependency_unavailable(error, &message))
+        {
+            classified
         } else {
-            Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "internal",
-                message,
-            }
+            Self::coded(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
         }
     }
 }
 
+/// 跨库依赖取不到时，把「等一等就有」和「等不来」分开。
+///
+/// 一个 DESI 库要读它依赖的 CATA；那个 CATA 还在入库、文件根本不在、或者路径上那份
+/// 文件自报的是别的库号——三件事以前一律落进 500 `internal`，客户端看见的只有一句
+/// 服务端故障。而三者的出路完全不同：**等**、**去 MDB 里补这个库或修路径**、
+/// **换文件**。压成同一码就等于把这个判断推给人去读日志。
+///
+/// `detail.dbnum` 点名那个库，客户端不必从 `message` 里抠数字；`detail.ingest` 是
+/// 判据本身（见 [`DbnumIngestState`]），让「为什么说它还在入库」这句话可被复核。
+///
+/// 判据只问进程内已有的两本账，不读库、不碰磁盘——错误映射这一层不该为了分型再做
+/// 一次 I/O，那会把一次失败的请求变成两次。
+fn dependency_unavailable(
+    error: &crate::data_interface::direct_store::DirectStoreError,
+    message: &str,
+) -> Option<ApiError> {
+    use crate::data_interface::batch_scheduler::{DbnumIngestState, dbnum_ingest_state};
+    use crate::data_interface::direct_store::DirectStoreError;
+
+    let detail = |dbnum: i32, ingest: Option<&DbnumIngestState>| {
+        serde_json::json!({ "dbnum": dbnum, "ingest": ingest })
+    };
+    match error {
+        // 定位器登记不出文件。数据面还在动 = 还没轮到它；已经收敛 = 它真的不在。
+        DirectStoreError::NoFileForDbnum { dbnum } => {
+            let ingest = dbnum_ingest_state(*dbnum as u32);
+            Some(match ingest {
+                DbnumIngestState::Settled => ApiError::coded(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "dependency_file_missing",
+                    message,
+                ),
+                _ => ApiError::service_unavailable("dependency_db_initializing", message),
+            }
+            .with_detail(detail(*dbnum, Some(&ingest))))
+        }
+        // 文件在，但它自报的库号不是这个：重试多少次都是同一份文件。
+        DirectStoreError::DbNumberMismatch {
+            dbnum,
+            actual,
+            file,
+        } => Some(
+            ApiError::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "dependency_file_mismatch",
+                message,
+            )
+            .with_detail(serde_json::json!({
+                "dbnum": dbnum,
+                "actual_dbnum": actual,
+                "file": file.display().to_string(),
+            })),
+        ),
+        // 开库 / 读库失败：可能是文件被占、损坏或权限，交给客户端重试一次再说。
+        DirectStoreError::Session { dbnum, .. } => Some(
+            ApiError::service_unavailable("dependency_db_unreadable", message)
+                .with_detail(detail(*dbnum, None)),
+        ),
+        _ => None,
+    }
+}
+
+/// 这几个 503 是「等一等再来」，值得给客户端一个退避时长；别的 503 是「现在不行」，
+/// 不承诺什么时候行，给了反而像承诺。
+const RETRY_AFTER_CODES: [&str; 3] = [
+    "overlay_backpressure",
+    "dependency_db_initializing",
+    "dependency_db_unreadable",
+];
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let retry_after =
-            self.status == StatusCode::SERVICE_UNAVAILABLE && self.code == "overlay_backpressure";
+        let retry_after = self.status == StatusCode::SERVICE_UNAVAILABLE
+            && RETRY_AFTER_CODES.contains(&self.code);
         let body = serde_json::json!({
             "code": self.code,
             "message": self.message,
-            "detail": null,
+            "detail": self.detail,
         });
         let mut response = (self.status, axum::Json(body)).into_response();
         if retry_after {
@@ -1374,6 +1424,55 @@ mod tests {
         assert!(error.message.contains("dbnum 1"), "{}", error.message);
     }
 
+    /// 依赖库取不到时，「等一等就有」与「等不来」必须是两个 code。
+    ///
+    /// 两者以前同为 500 `internal`：客户端既不知道是哪个库，也不知道该重试还是该去
+    /// 修项目。判据是进程内的入库账（[`DbnumIngestState`]），所以这里靠它的两种取值
+    /// 分叉——测试进程里队列是空的、初始化也没跑过，取到的是 `DataFaceInitializing`。
+    #[test]
+    fn a_dependency_database_still_being_ingested_is_retryable_not_internal() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::NoFileForDbnum { dbnum: 6001 },
+        ));
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "dependency_db_initializing");
+        assert_eq!(
+            error.detail.as_ref().and_then(|detail| detail["dbnum"].as_i64()),
+            Some(6001),
+            "点名是哪个库，客户端不必从 message 里抠数字"
+        );
+        let response = error.into_response();
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("2"))
+        );
+    }
+
+    /// 路径上那份文件自报的是别的库号：重试多少次都是同一份文件，不许给 `Retry-After`。
+    #[test]
+    fn a_dependency_file_of_the_wrong_database_is_not_retryable() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::DbNumberMismatch {
+                dbnum: 6001,
+                actual: 6002,
+                file: std::path::PathBuf::from("/p/cata6001"),
+            },
+        ));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "dependency_file_mismatch");
+        let detail = error.detail.clone().expect("带 detail");
+        assert_eq!(detail["dbnum"].as_i64(), Some(6001));
+        assert_eq!(detail["actual_dbnum"].as_i64(), Some(6002));
+        assert!(
+            error
+                .into_response()
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none(),
+            "确定性失败不许承诺一个重试时刻"
+        );
+    }
+
     /// 非法 refno（`0/0`、word1 为负）同样是确定性的「没有这个元素」，404 而不是 500。
     #[test]
     fn an_invalid_refno_is_not_found_not_an_internal_server_error() {
@@ -1386,17 +1485,24 @@ mod tests {
         assert_eq!(error.code, "not_found");
     }
 
-    /// 其余 `DirectStoreError`（会话 / 文件被换 / 库号不符 / 锁毒化…）仍是 500：它们不是「不存在」，
-    /// 是服务端或部署出了状况。
+    /// 其余 `DirectStoreError`（文件被换 / 抽取失败 / 锁毒化…）仍是 500：它们不是「不存在」，
+    /// 也不是「某个库取不到」，是服务端或部署出了状况，客户端做不了任何事。
+    ///
+    /// 名单上原本还有 `NoFileForDbnum` 与 `DbNumberMismatch`：它们回答的是「哪个库
+    /// 取不到、为什么」，客户端对这两种各有出路，已分型到
+    /// [`dependency_unavailable`]，不再走这里。
     #[test]
     fn other_direct_store_errors_stay_internal() {
         for error in [
-            crate::data_interface::direct_store::DirectStoreError::NoFileForDbnum { dbnum: 8000 },
-            crate::data_interface::direct_store::DirectStoreError::DbNumberMismatch {
+            crate::data_interface::direct_store::DirectStoreError::FileReplaced {
                 dbnum: 8000,
-                actual: 8001,
                 file: std::path::PathBuf::from("ams8000_0001"),
             },
+            crate::data_interface::direct_store::DirectStoreError::Extract {
+                refno: "24384_42".into(),
+                detail: "unexpected page".into(),
+            },
+            crate::data_interface::direct_store::DirectStoreError::Poisoned { slot: "sessions" },
         ] {
             let error = ApiError::from_domain(anyhow::Error::new(error));
             assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);

@@ -4731,6 +4731,10 @@ impl AiosDBManager {
                 outcome.info.position
             );
         }
+        // 本轮没再扫到、却还排在队里的行（别的发现轮排的，典型是 `/update/execute` 排的
+        // 从未初始化库，而本轮 auto_initialize_new_dbnums 关着不入队）：盖成本轮 epoch，
+        // 否则它们 blocked_by_phase 到下一次周期重扫。仍在活动闸内，没有并发发现轮。
+        crate::data_interface::batch_scheduler::adopt_stale_rows_into(origin, epoch_id);
     }
 
     /// 重扫排出来的行要不要挂起：`startup_autorun` 开着就是历史行为（不挂起）。

@@ -21,7 +21,7 @@
 //!   `gen_root` 的 revision CAS 没有跟过来：那把锁护的是多个进程抢同一个库行，进程内投影
 //!   没有那个竞争。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
@@ -267,6 +267,89 @@ fn receipt_resident_bytes(root: RefNo, receipt: &RootReceipt) -> usize {
         .saturating_add(serde_json::to_vec(receipt).map_or(0, |encoded| encoded.len()))
 }
 
+/// 生成根 → 回执，外加一份增量维护的字节总和。
+///
+/// 内层的表刻意不对外：每一次增删都从这里过，总和才不会漂。过去
+/// [`ScopeState::total_resident_bytes`] 每调用一次就把整张表重新
+/// `serde_json::to_vec` 一遍，而准入检查每个 cohort 都要调它——一次整库生成
+/// 因此退化成二次复杂度（7997 实测 424 个 cohort × 最多 6772 条回执）。
+#[derive(Default)]
+struct Receipts {
+    entries: BTreeMap<i64, RootReceipt>,
+    bytes: BTreeMap<i64, usize>,
+    resident_bytes: usize,
+}
+
+impl Receipts {
+    fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    /// 这一根回执自己占的字节。没有这根回执时是 0。
+    fn bytes_of(&self, packed: &i64) -> usize {
+        self.bytes.get(packed).copied().unwrap_or_default()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn get(&self, packed: &i64) -> Option<&RootReceipt> {
+        self.entries.get(packed)
+    }
+
+    fn contains_key(&self, packed: &i64) -> bool {
+        self.entries.contains_key(packed)
+    }
+
+    fn iter(&self) -> std::collections::btree_map::Iter<'_, i64, RootReceipt> {
+        self.entries.iter()
+    }
+
+    fn keys(&self) -> std::collections::btree_map::Keys<'_, i64, RootReceipt> {
+        self.entries.keys()
+    }
+
+    fn insert(&mut self, packed: i64, receipt: RootReceipt) -> Option<RootReceipt> {
+        let root = RefNo::new((packed >> 32) as u32, packed as u32);
+        let bytes = receipt_resident_bytes(root, &receipt);
+        if let Some(previous) = self.bytes.insert(packed, bytes) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous);
+        }
+        self.resident_bytes = self.resident_bytes.saturating_add(bytes);
+        self.entries.insert(packed, receipt)
+    }
+
+    fn remove(&mut self, packed: &i64) -> Option<RootReceipt> {
+        if let Some(bytes) = self.bytes.remove(packed) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+        }
+        self.entries.remove(packed)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes.clear();
+        self.resident_bytes = 0;
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&i64, &mut RootReceipt) -> bool) {
+        let mut dropped = Vec::new();
+        self.entries.retain(|packed, receipt| {
+            let keep = keep(packed, receipt);
+            if !keep {
+                dropped.push(*packed);
+            }
+            keep
+        });
+        for packed in dropped {
+            if let Some(bytes) = self.bytes.remove(&packed) {
+                self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+            }
+        }
+    }
+}
+
 /// 把 refno 打包成旧 `anc` 数组里那个 i64。
 pub fn packed_refno(refno: RefNo) -> i64 {
     (((refno.word0 as u64) << 32) | refno.word1 as u64) as i64
@@ -283,8 +366,8 @@ struct ScopeState {
     by_ancestor: BTreeMap<i64, BTreeSet<String>>,
     /// 管段来源 → 管身记录。重置管段不应遍历其它根的全部几何。
     by_tube_branch: BTreeMap<i64, BTreeSet<String>>,
-    /// 生成根 → 回执。
-    receipts: BTreeMap<i64, RootReceipt>,
+    /// 生成根 → 回执，带增量维护的字节总和。
+    receipts: Receipts,
     /// Roots remain discoverable after failed refresh, including empty roots.
     invalidated_roots: BTreeSet<i64>,
     /// 生成根 → 当前进程的完整发布确认。任何候选几何变动都先使它失效。
@@ -326,53 +409,91 @@ pub(crate) struct GeometryChange {
 
 impl ScopeState {
     fn total_resident_bytes(&self) -> usize {
-        self.resident_bytes.saturating_add(
-            self.receipts
-                .iter()
-                .map(|(packed, receipt)| {
-                    let root = RefNo::new((*packed >> 32) as u32, *packed as u32);
-                    receipt_resident_bytes(root, receipt)
-                })
-                .sum::<usize>(),
-        )
+        self.resident_bytes
+            .saturating_add(self.receipts.resident_bytes())
     }
 
+    /// 有回执但没有同源 ACK 的根占住的常驻字节，也就是淘汰挑不走的那一部分。
+    ///
+    /// 共享几何挂在多个根下时会被重复计数，于是这个数偏大。压力判断上偏大是安全的
+    /// 方向：宁可早一点收手，不能等撞上硬上限才发现让不出位子。
+    fn unevictable_bytes(&self) -> usize {
+        self.receipts
+            .iter()
+            .filter(|(packed, receipt)| {
+                !self
+                    .publication_acks
+                    .get(*packed)
+                    .is_some_and(|ack| ack.matches(receipt))
+            })
+            .map(|(packed, _)| {
+                let root = RefNo::new((*packed >> 32) as u32, *packed as u32);
+                self.record_ids_under(root)
+                    .into_iter()
+                    .filter_map(|id| self.geometry_bytes.get(&id))
+                    .sum::<usize>()
+                    .saturating_add(self.receipts.bytes_of(packed))
+            })
+            .sum()
+    }
+
+    /// 把脏成员同步进各库的空间树。
+    ///
+    /// 脏集合本来就精确到 `(dbnum, member)`，所以这里只碰这几个成员：`sync_refnos`
+    /// 的语义正是「这些 refno 的现状就是这批盒子」，删旧插新一步到位；一个成员的行
+    /// 全没了（删除 / 淘汰）则走 `remove_by_refnos`。
+    ///
+    /// 每个 cohort 把整库 `bulk_load` 一遍在整库生成上是二次的：7997 实测 424 个
+    /// cohort 累计重建 1531 万行、31.8 s，而终态只有 6.6 万行。
     fn flush_room_spatial(&mut self) {
         let dirty = std::mem::take(&mut self.room_spatial_dirty);
-        let dbnums = dirty
-            .into_iter()
-            .map(|(dbnum, _)| dbnum)
-            .collect::<BTreeSet<_>>();
-        for dbnum in dbnums {
-            use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-            let started_at = Instant::now();
-            let boxes = self
-                .by_source
-                .range((dbnum, i64::MIN)..=(dbnum, i64::MAX))
-                .flat_map(|(_, ids)| ids)
-                .filter_map(|id| self.geometries.get(id))
-                .map(|row| {
-                    RStarBoundingBox::new(
-                        parry3d::bounding_volume::Aabb::new(
-                            row.world_bounds[0].into(),
-                            row.world_bounds[1].into(),
-                        ),
-                        crate::data_interface::generation_root::refno_from_e3d(row.source_refno),
-                        row.noun.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let row_count = boxes.len() as u64;
-            self.room_spatial
-                .insert(dbnum, AccelerationTree::load(boxes));
-            self.room_spatial_rebuild_count = self.room_spatial_rebuild_count.saturating_add(1);
-            self.room_spatial_rows_rebuilt = self
-                .room_spatial_rows_rebuilt
-                .saturating_add(row_count);
-            self.room_spatial_rebuild_duration_ms = self
-                .room_spatial_rebuild_duration_ms
-                .saturating_add(started_at.elapsed().as_millis() as u64);
+        if dirty.is_empty() {
+            return;
         }
+        use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
+        let started_at = Instant::now();
+        let mut by_dbnum: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        for (dbnum, member) in dirty {
+            by_dbnum.entry(dbnum).or_default().push(member);
+        }
+        for (dbnum, members) in by_dbnum {
+            let mut upserts: Vec<RStarBoundingBox> = Vec::new();
+            let mut vanished: HashSet<aios_core::RefU64> = HashSet::new();
+            for member in members {
+                let before = upserts.len();
+                upserts.extend(
+                    self.by_source
+                        .get(&(dbnum, member))
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| self.geometries.get(id))
+                        .map(|row| {
+                            RStarBoundingBox::new(
+                                parry3d::bounding_volume::Aabb::new(
+                                    row.world_bounds[0].into(),
+                                    row.world_bounds[1].into(),
+                                ),
+                                crate::data_interface::generation_root::refno_from_e3d(
+                                    row.source_refno,
+                                ),
+                                row.noun.clone(),
+                            )
+                        }),
+                );
+                if upserts.len() == before {
+                    vanished.insert(aios_core::RefU64(member as u64));
+                }
+            }
+            let rows = upserts.len() as u64;
+            let tree = self.room_spatial.entry(dbnum).or_default();
+            tree.remove_by_refnos(&vanished);
+            tree.update_aabbs(upserts);
+            self.room_spatial_rebuild_count = self.room_spatial_rebuild_count.saturating_add(1);
+            self.room_spatial_rows_rebuilt = self.room_spatial_rows_rebuilt.saturating_add(rows);
+        }
+        self.room_spatial_rebuild_duration_ms = self
+            .room_spatial_rebuild_duration_ms
+            .saturating_add(started_at.elapsed().as_millis() as u64);
     }
     fn toggle_digest(&mut self, record: &ProjectedGeometry) {
         use sha2::{Digest, Sha256};
@@ -594,12 +715,62 @@ pub struct ModelCacheStats {
     pub pending_roots: usize,
     /// Resident roots whose exact candidate identity is confirmed by RocksDB.
     pub durable_roots: usize,
-    /// Number of per-dbnum overlay spatial bulk rebuilds in this process.
+    /// 这些 pending 根占住的常驻字节：淘汰救不回来的那一部分。
+    pub unevictable_bytes: usize,
+    /// 上一格相对硬上限的档位，调度端据此降速（见 [`OverlayPressure`]）。
+    pub pressure: OverlayPressure,
+    /// Number of per-dbnum overlay spatial index syncs in this process.
     pub room_spatial_rebuild_count: u64,
-    /// Cumulative resident rows fed into those bulk rebuilds.
+    /// Cumulative rows re-inserted by those syncs — dirty members only, not
+    /// the whole resident set.
     pub room_spatial_rows_rebuilt: u64,
     /// Cumulative foreground time spent collecting and rebuilding, in milliseconds.
     pub room_spatial_rebuild_duration_ms: u64,
+}
+
+/// 不可淘汰字节占硬上限到这两档时，调度端分别降到单车道、停派新批次。
+///
+/// 档位按「淘汰救不回来的那部分」算，所以 60/85 不是内存水位线：常驻字节可以长期
+/// 贴着上限跑而压力仍是 `Normal`，只要那些根都已经有同源 ACK、随时让得出位子。
+const SOFT_PRESSURE_PERCENT: usize = 60;
+const HARD_PRESSURE_PERCENT: usize = 85;
+
+/// 内存投影相对硬上限的压力档。
+///
+/// 它只看**淘汰救不回来的那部分**——已经有同源 ACK 的根随时可以让位，占多少字节都
+/// 不构成压力；真正把上限顶死的是还没落盘、因而不可淘汰的根。两者不分开看的话，
+/// 一个装满 durable 根的健康缓存与一个塞满待写根的濒死缓存读出同一个数。
+///
+/// 它是**给调度用的**：让生成端在撞上硬上限之前慢下来。撞上之后由 HTTP 层回 503
+/// 是没有出路的——客户端重试只会再造一批不可淘汰的根，把自己推得更深。
+/// [`OverlayBackpressure`] 仍在，但它从此是最后一道闸，不是限流手段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayPressure {
+    Normal,
+    Soft,
+    Hard,
+}
+
+impl OverlayPressure {
+    fn of(unevictable_bytes: usize, max_bytes: usize) -> Self {
+        if max_bytes == 0 {
+            return Self::Hard;
+        }
+        match unevictable_bytes.saturating_mul(100) / max_bytes {
+            percent if percent >= HARD_PRESSURE_PERCENT => Self::Hard,
+            percent if percent >= SOFT_PRESSURE_PERCENT => Self::Soft,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Soft => "soft",
+            Self::Hard => "hard",
+        }
+    }
 }
 
 /// The current overlay cannot accept another atomic projection cohort without
@@ -864,6 +1035,7 @@ impl ModelMemoryStore {
                     }
                 })
         });
+        let unevictable_bytes = current.map_or(0, ScopeState::unevictable_bytes);
         ModelCacheStats {
             mode: crate::options::model_cache_mode().as_str(),
             max_bytes: self.current_max_bytes,
@@ -878,6 +1050,12 @@ impl ModelMemoryStore {
             inflight: cache.inflight,
             pending_roots,
             durable_roots,
+            unevictable_bytes,
+            pressure: self
+                .current_max_bytes
+                .map_or(OverlayPressure::Normal, |max_bytes| {
+                    OverlayPressure::of(unevictable_bytes, max_bytes)
+                }),
             room_spatial_rebuild_count: current.map_or(0, |state| {
                 state.room_spatial_rebuild_count
             }),
@@ -977,14 +1155,7 @@ impl ModelMemoryStore {
                 .collect::<BTreeMap<_, _>>();
             let removed_receipt_bytes = final_receipts
                 .keys()
-                .filter_map(|root| {
-                    state.receipts.get(root).map(|receipt| {
-                        receipt_resident_bytes(
-                            RefNo::new((*root >> 32) as u32, *root as u32),
-                            receipt,
-                        )
-                    })
-                })
+                .map(|root| state.receipts.bytes_of(root))
                 .sum::<usize>();
             let added_receipt_bytes = final_receipts
                 .values()
@@ -1213,12 +1384,7 @@ impl ModelMemoryStore {
             .into_iter()
             .filter_map(|id| state.geometry_bytes.get(&id))
             .sum::<usize>()
-            .saturating_add(state.receipts.get(&protected).map_or(0, |receipt| {
-                receipt_resident_bytes(
-                    RefNo::new((protected >> 32) as u32, protected as u32),
-                    receipt,
-                )
-            }));
+            .saturating_add(state.receipts.bytes_of(&protected));
         if protected_bytes > max_bytes {
             cache.oversize_bypasses += 1;
         }
@@ -1377,12 +1543,7 @@ impl ModelMemoryStore {
             .into_iter()
             .filter_map(|id| state.geometry_bytes.get(&id))
             .sum::<usize>()
-            .saturating_add(
-                state
-                    .receipts
-                    .get(&packed_refno(root))
-                    .map_or(0, |receipt| receipt_resident_bytes(root, receipt)),
-            )
+            .saturating_add(state.receipts.bytes_of(&packed_refno(root)))
     }
 
     /// 整个投影域的记录，按 record_id 排序。历史快照查询与落库适配器用它。
@@ -1502,6 +1663,19 @@ impl ModelMemoryStore {
             self.enforce_current_cache_limit(root);
         }
         accepted
+    }
+
+    /// 当前投影的压力档。没有配硬上限的形态（kv-mem）恒为 `Normal`：那里内存就是
+    /// 真身，既不淘汰也不背压，降速救不了任何东西。
+    pub fn overlay_pressure(&self) -> OverlayPressure {
+        let Some(max_bytes) = self.current_max_bytes else {
+            return OverlayPressure::Normal;
+        };
+        let scopes = self.read();
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return OverlayPressure::Normal;
+        };
+        OverlayPressure::of(state.unevictable_bytes(), max_bytes)
     }
 
     /// Whether this root has a memory overlay newer or different from the exact
@@ -1686,6 +1860,80 @@ mod tests {
 
     fn store() -> ModelMemoryStore {
         ModelMemoryStore::default()
+    }
+
+    /// 压力看的是「让不出来的位子」，不是「占了多少位子」。
+    ///
+    /// 一个贴着上限跑但每根都有同源 ACK 的缓存是健康的：淘汰随时能腾地方。按常驻
+    /// 字节读压力会把它误判成濒死，于是好端端地把派发停掉。
+    #[test]
+    fn pressure_counts_only_the_roots_eviction_cannot_reclaim() {
+        let root = RefNo::new(7997, 100);
+        let row = record("a", RefNo::new(7997, 1), root, 7997);
+        let receipt = RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: "manifest".into(),
+            geometry_count: 1,
+            published_via: default_published_via(),
+        };
+        let occupied = serde_json::to_vec(&row).unwrap().len()
+            + receipt_resident_bytes(root, &receipt);
+        // 这一根一个人就占满上限：按常驻字节算，两种情形都是 100%。
+        let store = ModelMemoryStore::with_cache_limit(occupied);
+        store
+            .try_commit_current(vec![ProjectionCommit {
+                upserts: vec![row],
+                receipt: Some((root, receipt.clone())),
+                ..Default::default()
+            }])
+            .expect("cohort fits exactly");
+
+        assert_eq!(store.overlay_pressure(), OverlayPressure::Hard);
+
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            root,
+            RootPublicationAck {
+                dbnum: 7997,
+                source_sesno: receipt.source_sesno,
+                geometry_count: receipt.geometry_count,
+                manifest_hash: receipt.manifest_hash.clone(),
+                model_target: None,
+                room_membership: false,
+                room_generation: None,
+                medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
+            },
+        ));
+        let stats = store.cache_stats();
+        assert_eq!(stats.unevictable_bytes, 0, "落了盘就让得出位子");
+        assert_eq!(stats.pressure, OverlayPressure::Normal);
+    }
+
+    /// 没配硬上限的形态（kv-mem）恒为 `Normal`：那里内存就是真身，降速救不了谁。
+    #[test]
+    fn an_unbounded_overlay_never_reports_pressure() {
+        let store = store();
+        let root = RefNo::new(7997, 101);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("a", RefNo::new(7997, 1), root, 7997)],
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: "manifest".into(),
+                        geometry_count: 1,
+                        published_via: default_published_via(),
+                    },
+                )),
+                ..Default::default()
+            }],
+        );
+        assert!(store.cache_stats().unevictable_bytes > 0);
+        assert_eq!(store.overlay_pressure(), OverlayPressure::Normal);
     }
 
     /// lazy-startup L4：一个库保存了，只作废**它自己**的回执与 ACK（含第二个 extent 的根——

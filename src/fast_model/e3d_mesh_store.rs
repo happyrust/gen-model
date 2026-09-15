@@ -41,6 +41,11 @@ pub struct E3dPersistReport {
     /// 不把同批所有兄弟一起判死。
     #[serde(skip)]
     pub failed_roots: Vec<(RefNo, String)>,
+    /// **部分发布**的根：有元素没算出来，但这个根此前什么都没发布过，所以能画的那些照发。
+    /// 它不是失败——模型行已经落库、回执已经盖上；`failed` 里那几笔仍按元素数计。上层靠它
+    /// 把「这一批的失败已经落到具体的根上了」与「失败没有归属、只能整批判死」区分开。
+    #[serde(skip)]
+    pub partial_roots: Vec<(RefNo, String)>,
     /// 每个**新生成**（非缓存命中）的根：e3d-model DFS 访问到的子树元素名单
     /// （`GenerationOutcome::visited`）。生成服务只报名单、不写库（ADR-057）；把它们写透进
     /// `pe` / `ATT_*` 是编排层 `model_refresh::generate_roots_report` 在发布模型行之前做的事。

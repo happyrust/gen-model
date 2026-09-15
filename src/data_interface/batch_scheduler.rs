@@ -160,6 +160,47 @@ pub struct EnqueuedBatchInfo {
     pub end_sesno: i32,
 }
 
+/// [`BatchScheduler::adopt_stale_rows`] 改了章的一条排队行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptedRow {
+    pub dbnum: u32,
+    pub task_id: String,
+    pub phase: DataPhase,
+    pub held: bool,
+    pub from_epoch: u64,
+}
+
+/// 收养过期排队行的公共尾巴：改章 + 协调器记账 + 一行日志。两条发现路（启动 / 周期重扫、
+/// 人工执行）装完清单、排完自己的行之后各调一次；worker 每次 drain 开头再调一次兜底
+/// （不等 300 s 周期重扫）。调用方须已持有 [`epoch_activation_guard`]，或处在没有并发
+/// 发现轮的上下文里。返回收养的行数。
+pub(crate) fn adopt_stale_rows_into(origin: &str, epoch_id: u64) -> usize {
+    let adopted = BatchScheduler::global().adopt_stale_rows(epoch_id);
+    if adopted.is_empty() {
+        return 0;
+    }
+    let counted = InitializationCoordinator::global()
+        .adopt_rows(epoch_id, adopted.iter().map(|row| (row.phase, row.held)));
+    let listed = adopted
+        .iter()
+        .map(|row| {
+            format!(
+                "dbnum={}({}{})",
+                row.dbnum,
+                row.phase.as_str(),
+                if row.held { "，挂起" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    println!(
+        "[{origin}] 收养 {} 条别的发现轮排的排队行进 epoch={epoch_id}（协调器记账 {counted} 条）：{listed}——\
+         不收养它们会 blocked_by_phase 到下一次周期重扫",
+        adopted.len()
+    );
+    adopted.len()
+}
+
 /// 一次入队的结果：落点 + 对应任务行。
 #[derive(Debug, Clone)]
 pub struct EnqueueOutcome {
@@ -702,6 +743,41 @@ impl BatchScheduler {
         outcome
     }
 
+    /// 把仍在排队、却盖着过期 epoch 的行改盖成 `epoch_id`，返回它们的身份供协调器记账与日志。
+    ///
+    /// 后一轮发现装清单只认自己扫到的行；前一轮排的、后一轮没再扫到的行就带着旧 epoch 留在
+    /// 队里，`allows()` 一律不放行——它们不是「已完成」（那一档由 [`Self::retire_covered_window`]
+    /// 按持久水位判），只是没人再给它们盖章。这里只改**排队**行：运行中的行带着自己的 epoch
+    /// 跑完，`finish` 按当前 epoch 对账；`epoch_id == 0` 的行是旁路 / 测试行，不动。
+    ///
+    /// 调用方拿回执去 `InitializationCoordinator::adopt_rows`：改章与记账分两步是因为两把锁
+    /// 各归各的模块，队列锁不能在协调器锁里面拿。
+    pub fn adopt_stale_rows(&self, epoch_id: u64) -> Vec<AdoptedRow> {
+        if epoch_id == 0 {
+            return Vec::new();
+        }
+        let mut state = self.queue();
+        let QueueState { queue, meta, .. } = &mut *state;
+        let mut adopted = Vec::new();
+        for row in queue.iter_mut() {
+            if row.state != BatchState::Queued || row.epoch_id == 0 || row.epoch_id == epoch_id {
+                continue;
+            }
+            adopted.push(AdoptedRow {
+                dbnum: row.dbnum,
+                task_id: meta
+                    .get(&(row.dbnum, false))
+                    .map(|meta| meta.task_id.clone())
+                    .unwrap_or_default(),
+                phase: row.phase,
+                held: row.held,
+                from_epoch: row.epoch_id,
+            });
+            row.epoch_id = epoch_id;
+        }
+        adopted
+    }
+
     /// A delayed discovery may arrive after its window committed and survive a
     /// manifest change. Retire it only with a matching durable applied watermark;
     /// epoch mismatch alone is never evidence that its work is complete.
@@ -998,6 +1074,44 @@ impl BatchScheduler {
     }
 }
 
+/// 一个 dbnum 此刻在数据面上的处境。
+///
+/// 它回答的是一句很窄的话：**这个库现在拿不到，等一等会不会有？** 依赖库还在入库
+/// 与依赖库根本不在这个项目里，对调用方是两件事——前者重试，后者去修项目——而两者
+/// 在错误里长得一模一样。
+///
+/// 判据只用进程内已有的两本账：批次队列与初始化阶段。**不读库、不碰磁盘**，所以
+/// 同步可调，错误映射那一层用得起；代价是它只知道「有没有在途工作」，不知道那份
+/// 工作会不会成功，这一点由调用方在措辞上负责。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DbnumIngestState {
+    /// 队列里有它的行。`state` 是 [`QueueRow::state`] 那三个字面值之一。
+    Queued { state: &'static str },
+    /// 队列里没它，但整个数据面还没收敛：它的文件可能只是还没轮到。
+    DataFaceInitializing { phase: Option<&'static str> },
+    /// 数据面已经收敛，队列里也没有它：拿不到就是确定性的拿不到。
+    Settled,
+}
+
+pub fn dbnum_ingest_state(dbnum: u32) -> DbnumIngestState {
+    if let Some(row) = BatchScheduler::global()
+        .snapshot()
+        .into_iter()
+        .find(|row| row.dbnum == dbnum)
+    {
+        return DbnumIngestState::Queued { state: row.state };
+    }
+    let initialization = InitializationCoordinator::global().snapshot();
+    if initialization.data_ready {
+        DbnumIngestState::Settled
+    } else {
+        DbnumIngestState::DataFaceInitializing {
+            phase: initialization.current_phase,
+        }
+    }
+}
+
 #[cfg(test)]
 impl BatchScheduler {
     /// 测试里的「真实触发」入队：不挂起，与 watch 事件 / 人工执行同口径。
@@ -1257,6 +1371,85 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
         holder.join().unwrap();
         freezer.join().unwrap();
+    }
+
+    /// 2026-09-14 ams7997 那 5 分钟的队列侧：收养只改**排队**行的章。运行中的行带着自己的
+    /// epoch 跑完（`finish` 按当前 epoch 对账）；epoch 0 是旁路 / 测试行，不动；已经盖着
+    /// 目标 epoch 的不重复收；目标 epoch 为 0 什么都不收。回执带上 dbnum / 相 / 挂起位 /
+    /// 任务号 / 原 epoch，协调器记账与日志都只靠它。
+    #[test]
+    fn adopting_stale_rows_restamps_only_queued_rows_from_other_epochs() {
+        let (scheduler, registry) = fresh();
+        let stamped = |dbnum: u32, epoch_id: u64, phase: DataPhase| DiscoveredBatch {
+            epoch_id,
+            phase,
+            ..found(dbnum, 0, 5)
+        };
+        // epoch 1：人按的执行排了三条（一条 meta、两条 design），其中一条 design 已在跑。
+        scheduler.enqueue_live(&registry, &stamped(7997, 1, DataPhase::Design));
+        scheduler.enqueue_live(&registry, &stamped(1112, 1, DataPhase::Meta));
+        // 重扫排的挂起行：收养要把「挂起」原样带回给协调器。
+        scheduler.enqueue(&registry, &stamped(8000, 1, DataPhase::Design), true);
+        // 旁路行与已经盖着目标 epoch 的行都不该出现在回执里。
+        scheduler.enqueue_live(&registry, &stamped(8010, 0, DataPhase::Design));
+        scheduler.enqueue_live(&registry, &stamped(8020, 2, DataPhase::Design));
+        {
+            // 7997 那条正在跑。出队要过协调器的 `allows`，这里不为一条单测去拨全局协调器的
+            // epoch，直接把行置成运行态——收养判的只是 `state`，不是它怎么进的运行态。
+            let mut state = scheduler.queue();
+            let running = state
+                .queue
+                .iter_mut()
+                .find(|row| row.dbnum == 7997)
+                .expect("7997 已入队");
+            running.state = BatchState::Running;
+        }
+
+        assert!(
+            scheduler.adopt_stale_rows(0).is_empty(),
+            "epoch 0 不是可收养的目标"
+        );
+
+        let mut adopted = scheduler.adopt_stale_rows(2);
+        adopted.sort_by_key(|row| row.dbnum);
+        assert_eq!(
+            adopted
+                .iter()
+                .map(|row| (row.dbnum, row.phase, row.held, row.from_epoch))
+                .collect::<Vec<_>>(),
+            vec![
+                (1112, DataPhase::Meta, false, 1),
+                (8000, DataPhase::Design, true, 1),
+            ],
+            "只有排队、盖着别的非零 epoch 的行被收养"
+        );
+        assert!(
+            adopted.iter().all(|row| !row.task_id.is_empty()),
+            "回执要带任务号，日志与协调器记账靠它对上任务行"
+        );
+
+        let epoch_of = |dbnum: u32| {
+            scheduler
+                .snapshot()
+                .into_iter()
+                .find(|row| row.dbnum == dbnum)
+                .map(|row| (row.epoch_id, row.state))
+                .expect("行还在队里")
+        };
+        assert_eq!(epoch_of(1112), (2, "queued"));
+        assert_eq!(epoch_of(8000), (2, "held"), "收养不改挂起位");
+        assert_eq!(
+            epoch_of(7997),
+            (1, "running"),
+            "运行中的行带着自己的 epoch 跑完"
+        );
+        assert_eq!(epoch_of(8010), (0, "queued"), "旁路行不动");
+        assert_eq!(epoch_of(8020), (2, "queued"));
+
+        assert!(
+            scheduler.adopt_stale_rows(2).is_empty(),
+            "第二次再收：没有过期行了"
+        );
     }
 
     #[test]

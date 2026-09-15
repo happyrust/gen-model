@@ -1402,6 +1402,10 @@ impl E3dModelService {
                 prepared_reports.push(E3dPersistReport::default());
                 continue;
             }
+            let incomplete = incomplete_root_policy(
+                publication.published.is_some(),
+                !prior[root_index].is_empty(),
+            );
             let snapshot = if let Some(snapshots) = memory_snapshots.as_deref_mut() {
                 let index = snapshots
                     .iter()
@@ -1428,27 +1432,41 @@ impl E3dModelService {
             if root_failed > 0 && matches!(failure_policy, GeometryFailurePolicy::Required) {
                 bail!("e3d-model root {root} has {root_failed} failed element(s)");
             }
-            if root_failed > 0 {
-                let failure = format!(
-                    "{root_failed} geometry element(s) failed: {:?}",
-                    snapshot.report.failed
-                );
+            let failure = (root_failed > 0).then(|| {
                 eprintln!(
                     "e3d-model root {root} failed geometry details: {:?}",
                     snapshot.report.failed
                 );
-                // Best-effort generation may report successful siblings next to
-                // failed elements. Publishing that partial manifest would delete
-                // the missing GeometryIds, so retain the previous complete root.
-                let root_skipped = snapshot.report.skipped.len();
-                generation.merge(snapshot.report);
-                total.failed += root_failed;
-                total.failed_roots.push((root, failure));
-                total.skipped += root_skipped;
-                log::error!(
-                    "e3d-model root {root} produced an incomplete candidate ({root_failed} failure(s)); preserving published snapshot"
+                format!(
+                    "{root_failed} geometry element(s) failed: {:?}",
+                    snapshot.report.failed
+                )
+            });
+            if let Some(failure) = failure {
+                if incomplete == IncompleteRoot::Discard {
+                    // Best-effort generation may report successful siblings next
+                    // to failed elements. Publishing that partial manifest would
+                    // delete the missing GeometryIds, so retain the previous
+                    // complete root.
+                    let root_skipped = snapshot.report.skipped.len();
+                    generation.merge(snapshot.report);
+                    total.failed += root_failed;
+                    total.failed_roots.push((root, failure));
+                    total.skipped += root_skipped;
+                    log::error!(
+                        "e3d-model root {root} produced an incomplete candidate ({root_failed} failure(s)); preserving published snapshot"
+                    );
+                    continue;
+                }
+                // Published partial: the root lands with the elements that did
+                // evaluate, and says so.  `failed` still counts every element
+                // that did not, so `/health` and the ensure receipt keep the
+                // omission on the books instead of calling this a clean root.
+                log::warn!(
+                    "e3d-model root {root} publishing {} element(s) of an incomplete candidate; {root_failed} did not evaluate",
+                    snapshot.elements.len()
                 );
-                continue;
+                total.partial_roots.push((root, failure));
             }
             let root_skipped = snapshot.report.skipped.len();
             // 子树访问名单只报出去，不在这里写库：读透形态下编排层拿它在发布模型行之前
@@ -2027,18 +2045,48 @@ fn bake_elements(
         .collect()
 }
 
+/// What a root whose elements did not all evaluate is worth publishing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IncompleteRoot {
+    /// Throw the whole candidate away.  Publishing a partial manifest deletes
+    /// the GeometryIds it omits, so a root that already published keeps what it
+    /// has; the baked survivors become orphans for the reachability GC.
+    Discard,
+    /// Publish whatever evaluated.  Only for a root with nothing published to
+    /// lose: there the discard preserves an empty snapshot, which is how one
+    /// dangling catalogue item hides an entire branch.
+    Publish,
+}
+
+/// A partial manifest deletes the GeometryIds it omits, so publishing one is
+/// only safe for a root with nothing to lose: no publication receipt **and** no
+/// geometry rows.  Everywhere else the incomplete candidate is dropped and the
+/// established snapshot stands.
+///
+/// The cold case is not a corner: on a read-through store every first display is
+/// cold, and dropping the candidate there preserves an empty snapshot — which is
+/// how one dangling catalogue item hides a whole branch (SLYK `21491/17101`: one
+/// FLAN whose `Spref` points at a catalogue element the project never had, and
+/// the other 16 members of the branch never reach the viewport).
+fn incomplete_root_policy(published: bool, has_geometry_rows: bool) -> IncompleteRoot {
+    if published || has_geometry_rows {
+        IncompleteRoot::Discard
+    } else {
+        IncompleteRoot::Publish
+    }
+}
+
 /// Bake a generated root for publication.
 ///
-/// An incomplete root is not baked at all.  Publishing a partial manifest would
-/// delete the GeometryIds that failed, so the consumer keeps the previously
-/// published snapshot instead — baking those meshes would only leave orphans
-/// for the reachability GC.
+/// An incomplete root is baked like any other: whether its survivors are worth
+/// publishing is [`incomplete_root_policy`]'s call, and that needs publication
+/// state the producer half of the memory pipeline deliberately cannot see
+/// (`memory_generation_reads_only_the_e3d_source_projection`).  Baking here and
+/// deciding there costs a discarded candidate its triangulation — its meshes
+/// are content-addressed, so a root that published before rewrites nothing —
+/// and it is the only order in which both halves can reach the same verdict.
 fn bake_snapshot(snapshot: GeneratedSnapshot, mesh_dir: &Path) -> anyhow::Result<BakedSnapshot> {
-    let elements = if snapshot.report.failed.is_empty() {
-        bake_elements(snapshot.elements, mesh_dir)?
-    } else {
-        Vec::new()
-    };
+    let elements = bake_elements(snapshot.elements, mesh_dir)?;
     Ok(BakedSnapshot {
         elements,
         report: snapshot.report,
@@ -2058,6 +2106,7 @@ impl E3dPersistReport {
         self.mesh_written += other.mesh_written;
         self.mesh_ids.extend(other.mesh_ids);
         self.failed_roots.extend(other.failed_roots);
+        self.partial_roots.extend(other.partial_roots);
         self.unique_meshes = self.mesh_ids.len();
         self.source_sesno = self.source_sesno.or(other.source_sesno);
         self.visited_by_root.extend(other.visited_by_root);
@@ -2569,6 +2618,40 @@ mod tests {
         assert_eq!(
             total.failed_roots,
             vec![(root, "three geometry incidents".into())]
+        );
+    }
+
+    #[test]
+    fn only_a_root_with_nothing_to_lose_publishes_a_partial_manifest() {
+        // Cold root: the discard would "preserve" an empty snapshot.
+        assert_eq!(incomplete_root_policy(false, false), IncompleteRoot::Publish);
+        // A receipt, geometry rows, or both — all of them can lose something.
+        assert_eq!(incomplete_root_policy(true, false), IncompleteRoot::Discard);
+        assert_eq!(incomplete_root_policy(false, true), IncompleteRoot::Discard);
+        assert_eq!(incomplete_root_policy(true, true), IncompleteRoot::Discard);
+    }
+
+    /// 生产端烘的是「算出来的那些」，丢不丢由消费端定——它看不见发布状态
+    /// （`memory_generation_reads_only_the_e3d_source_projection` 钉的正是这条）。
+    /// 让生产端自己判一次，按需生成那条路就只拿得到一个空候选：SLYK
+    /// `21491/17101` 一个缺目录件把整根 17 个构件全按下去，就是这么来的。
+    #[test]
+    fn the_producer_bakes_every_survivor_and_leaves_the_verdict_to_the_consumer() {
+        let source = service_source();
+        let worker = source
+            .split_once("fn spawn_generation_worker(")
+            .expect("generation worker")
+            .1
+            .split_once("\n}\n")
+            .expect("generation worker end")
+            .0;
+        assert!(
+            !worker.contains("IncompleteRoot"),
+            "发布状态在消费端，生产端判不了这根丢不丢"
+        );
+        assert!(
+            production_half(&source).contains("if incomplete == IncompleteRoot::Discard {"),
+            "丢弃不完整候选只能发生在拿得到发布回执的那一侧"
         );
     }
 

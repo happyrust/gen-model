@@ -563,9 +563,23 @@ _Avoid_: 最新会话缓存、活动窗口缓存。
 # 纪元激活门 (Epoch Activation Gate)
 
 manifest/epoch 安装与任务冻结共用的短临界区；固定锁序为 activation gate → scheduler queue →
-coordinator，保证旧纪元任务不会越过新纪元激活边界。
+coordinator，保证旧纪元任务不会越过新纪元激活边界。两条发现路（启动 / 周期重扫在
+`increment_manager`，人工执行在 `manual_update`）开 epoch → 装清单 → 入队都在这一把闸内一口气做完，
+中间没有 `.await`；人工执行的逐库裁决（读水位、落观察）在闸外做完再进闸。
 
 _Avoid_: 初始化锁、队列锁（泛指时）。
+
+# 过期排队行收养 (Stale Queued-Row Adoption)
+
+后一轮发现装清单只认自己扫到的行；前一轮排进队列、后一轮没再扫到的**排队**行（典型：`/update/execute`
+排的从未初始化库，紧跟其后的启动重扫因 `auto_initialize_new_dbnums=false` 一条都不排）带着旧 epoch 留在队里，
+`allows()` 不放行，只能等下一次周期重扫（300 s）重盖章。收养把这些行改盖成当前 epoch 并向协调器补记阶段
+计数（`BatchScheduler::adopt_stale_rows` → `InitializationCoordinator::adopt_rows`，`adopt_stale_rows_into`
+一处收口）：两条发现路装完清单各收一次，worker 每次 drain 开头再收一次兜底。只收排队行——运行中的行带着自己的
+epoch 跑完；epoch 0 的旁路 / 测试行不动；全是挂起行时不替人上弦。它不是放行：被阻断的相收养后仍是 blocked，
+水位已覆盖的迟到行仍由 `retire_covered_window` 收口。
+
+_Avoid_: 重盖章（泛指时）、迁移 epoch、队列重建（那是周期重扫整队重排，收养不重排）。
 
 ## 本地发布（Local Release）
 

@@ -17,7 +17,7 @@
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -821,6 +821,17 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
             ),
         }
     }
+    // 水位没覆盖、却盖着过期 epoch 的排队行：当场收养进当前 epoch，不等 300 s 的周期重扫
+    // 再来盖章。两条发现路装完清单都会收养一次，这里是兜底——发现轮与入队之间仍可能有
+    // 别的入队口（回退检出、余量回排）盖着上一轮的章。活动闸内做：发现轮此刻不在装清单。
+    {
+        let _activation = crate::data_interface::batch_scheduler::epoch_activation_guard();
+        let epoch_id =
+            crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                .snapshot()
+                .epoch_id;
+        crate::data_interface::batch_scheduler::adopt_stale_rows_into("worker", epoch_id);
+    }
     // 三阶段的第一道门必须放在共享 drain 内：watcher、手动执行、初始化重扫和测试
     // 探针都从这里领取，放在任一调用方都会制造绕过路径。关闭只是不领取，队列行
     // 原样保留，发现/入队仍继续。
@@ -836,7 +847,7 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     }
     let scheduler = BatchScheduler::global();
     let registry = TaskRegistry::global();
-    let slots = crate::options::data_batch_workers();
+    let configured_slots = crate::options::data_batch_workers();
     // 每个 future 把自己的车道类别带回。独占任务按规则只会在池空时启动，因而
     // 理论上任何完成事件都足以放平旗子；仍按完成任务自己的类别收口，避免以后
     // 调整派发循环时悄悄重新引入单 worker 假设。
@@ -844,6 +855,8 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     let mut exclusive_in_flight = false;
     let mut ran = 0usize;
     loop {
+        // 每圈重算：写盘追上来之后同一次 drain 就能自己提速回去。
+        let slots = overlay_throttled_slots(configured_slots);
         // 出队前不再有「提交后空间收敛」那道门（ADR-017 §9 的留存条款随 ADR-072 D4 退）：
         // 空间树在 `persist_roots_batched` 落完那一刻就地收敛，库里没有 pending 的空间意图行可等。
         while !exclusive_in_flight && in_flight.len() < slots {
@@ -880,6 +893,72 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
         }
     }
     ran
+}
+
+/// 内存投影顶上来时的派发车道数：软压降到单车道，硬压这一轮一个批次都不派。
+///
+/// 生成端撞上投影硬上限那一下是 `OverlayBackpressure` → HTTP 503，而 503 对这个
+/// 故障毫无帮助：客户端重试只会再造一批还没落盘、因而不可淘汰的根，越重试越深。
+/// 出路只有让写盘追上来，所以刹车必须踩在派发这一端。
+///
+/// 硬压下返回 0 意味着这一轮不派新批次：**队列行原样留着**，主循环随后在
+/// `IDLE_WAKE` 上退避 30 秒再来问一次——那也是这条路唯一需要的退避，不必另起
+/// 一套等待。`data_batch_workers` 本身不改，压力退了下一圈就恢复到配置值。
+fn overlay_throttled_slots(configured: usize) -> usize {
+    let pressure =
+        crate::fast_model::model_memory_store::ModelMemoryStore::global().overlay_pressure();
+    announce_overlay_pressure(pressure);
+    throttled_slots(configured, pressure)
+}
+
+fn throttled_slots(
+    configured: usize,
+    pressure: crate::fast_model::model_memory_store::OverlayPressure,
+) -> usize {
+    use crate::fast_model::model_memory_store::OverlayPressure;
+    match pressure {
+        OverlayPressure::Normal => configured,
+        OverlayPressure::Soft => configured.min(1),
+        OverlayPressure::Hard => 0,
+    }
+}
+
+/// 压力换档时说一句，同一档不重复刷屏。
+///
+/// 降速与停派在外面看起来都只是「队列不动了」，不说这一句，现场只能看见吞吐掉到
+/// 零而找不到原因——那正是 `/health` 的 `model_cache.pressure` 想回答的问题，但
+/// 日志里也得有一行对得上的时间点。
+fn announce_overlay_pressure(pressure: crate::fast_model::model_memory_store::OverlayPressure) {
+    use crate::fast_model::model_memory_store::OverlayPressure;
+    static LAST: AtomicU8 = AtomicU8::new(u8::MAX);
+    let code = match pressure {
+        OverlayPressure::Normal => 0,
+        OverlayPressure::Soft => 1,
+        OverlayPressure::Hard => 2,
+    };
+    if LAST.swap(code, Ordering::Relaxed) == code {
+        return;
+    }
+    if pressure == OverlayPressure::Normal {
+        println!("模型投影压力回到 normal：数据批次派发恢复到配置车道数");
+        return;
+    }
+    let stats = crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats();
+    let message = format!(
+        "模型投影压力 {}：未落盘的 {} 个根占住 {} 字节（硬上限 {:?}），数据批次派发{}；\
+         写盘追上来即自动恢复",
+        pressure.as_str(),
+        stats.pending_roots,
+        stats.unevictable_bytes,
+        stats.max_bytes,
+        if pressure == OverlayPressure::Hard {
+            "本轮暂停"
+        } else {
+            "降为单车道"
+        }
+    );
+    println!("{message}");
+    log::warn!("{message}");
 }
 
 /// 独占批次判定（ADR-011 2026-08-09 修订；ADR-056 / spec 035 D10-A）：数据批次
@@ -3547,6 +3626,37 @@ mod tests {
             body.contains("batch_needs_exclusive_lane(&batch.db_type, batch.start_sesno)"),
             "独占车道判定必须在出队时生效: {body}"
         );
+    }
+
+    /// 背压踩在派发这一端，而不是等生成端撞上硬上限由 HTTP 回 503。
+    ///
+    /// 派发循环每圈重算车道数，所以压力退了同一次 drain 就提速回去；硬压返回 0 是
+    /// 「这一轮不派」，队列行原样留着，退避交给主循环的 `IDLE_WAKE`。
+    #[test]
+    fn overlay_pressure_throttles_dispatch_before_the_hard_limit_rejects_writes() {
+        let body = include_str!("batch_worker.rs")
+            .split_once("pub async fn drain_queue_until_empty(")
+            .expect("queue drain must exist")
+            .1
+            .split_once("/// 内存投影顶上来时的派发车道数")
+            .expect("throttle helper follows the drain")
+            .0;
+        assert!(
+            body.contains("let slots = overlay_throttled_slots(configured_slots);"),
+            "车道数必须每圈按压力重算，不能在循环外定死一次: {body}"
+        );
+        assert!(
+            body.find("let slots = overlay_throttled_slots(configured_slots);")
+                < body.find("next_dispatch(registry"),
+            "限流必须早于出队: {body}"
+        );
+
+        use crate::fast_model::model_memory_store::OverlayPressure;
+        assert_eq!(throttled_slots(8, OverlayPressure::Normal), 8);
+        assert_eq!(throttled_slots(8, OverlayPressure::Soft), 1);
+        assert_eq!(throttled_slots(8, OverlayPressure::Hard), 0);
+        // 配置本来就是单车道时，软压不许把它抬上去。
+        assert_eq!(throttled_slots(1, OverlayPressure::Soft), 1);
     }
 
     #[test]

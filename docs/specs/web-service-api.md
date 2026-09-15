@@ -73,8 +73,21 @@
 | 409 | `ref0_affiliation_conflict` | 同一 Ref0 同时归属多个 dbnum；需修正项目文件 |
 | 503 | `ref0_affiliation_unavailable` | 合法 Ref0 当前无法解析到所属 dbnum；模型任务保留待重试 |
 | 503 | `model_dependency_unavailable` | 数据库查询、项目文件读取或 locator 临时不可用；可重试 |
+| 503 | `dependency_db_initializing` | 依赖库（典型是 CATA）还在入库：队列里有它的行，或数据面尚未收敛。`detail { dbnum, ingest }`，带 `Retry-After: 2` |
+| 503 | `dependency_db_unreadable` | 依赖库的文件开不开 / 读不动（占用、损坏、权限）。`detail { dbnum }`，带 `Retry-After: 2` |
+| 422 | `dependency_file_missing` | 数据面已收敛、队列里也没有它：这个 dbnum 在项目里就是没有文件。**重试无用**，去 MDB 补这个库或修路径。`detail { dbnum, ingest }` |
+| 422 | `dependency_file_mismatch` | 路径上那份文件自报的是别的库号。**重试无用**，换文件或改定位。`detail { dbnum, actual_dbnum, file }` |
 | 500 | `generation_failed` | 确定性的解析、数据损坏或模型生成失败；pending 保留 |
 | 500 | `internal` | 未分类的服务端缺陷 |
+
+- 上面四条 `dependency_*` 是 2026-09-13 从 500 `internal` 里分出来的：依赖库还在入库、
+  文件根本不在、文件是别的库——三者以前长得一模一样，而出路分别是**等**、**改项目**、
+  **换文件**。`detail.dbnum` 点名是哪个库，客户端不必从 `message` 里抠数字；
+  `detail.ingest` 是判据本身（`queued` / `data_face_initializing` / `settled`），
+  让「为什么说它还在入库」可被复核。判据只问进程内的批次队列与初始化阶段，不额外读库。
+- `Retry-After: 2` 只给「等一等就有」的那几档（`overlay_backpressure`、
+  `dependency_db_initializing`、`dependency_db_unreadable`）。确定性失败不给——给了
+  就是承诺一个并不存在的重试时刻。
 
 > 旧的通用 409 `conflict` 与「`sync_live=true` 拒手动」的 422 随 ADR-011 §12 退役：数据批次
 > 由派发器统一出队（默认单 worker 串行，ADR-011 2026-08-09 修订），执行请求一律 202 入队
@@ -840,8 +853,9 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   （计划 §5-5 按 (a)）。客户端在结果区提示「结果仅含已生成过模型的构件」，要更全就先 `/model/ensure` 或整库生成。
 - **门禁**：`spatial_state::current_state()` 不在 `Ready` / `ReadyEmpty` → **503 `spatial_not_ready`**，带 `Retry-After: 5`，
   `detail.state` 是状态字面值（`uninitialized` / `loading` / `rebuilding` / `replay_required` / `degraded_reuse` /
-  `degraded_blocked`）。这是 §3 统一信封之外唯一一处 `detail` 非 `null`、带响应头的错误（`handlers::SpatialApiError`
-  单独成型，不改 `ApiError` 的十几处构造点）——客户端按 `code` 分型重试，不要当 500。`ReadyEmpty` 放行、直接回空结果
+  `degraded_blocked`）。`handlers::SpatialApiError` 仍单独成型，但理由只剩退避时长与统一信封那个固定的 2 秒不同
+  （`detail` 与 `Retry-After` 自 2026-09-13 起统一信封也带得动，见 §3 的 `dependency_*`）——客户端按 `code` 分型重试，
+  不要当 500。`ReadyEmpty` 放行、直接回空结果
   （`spatial_state: "ready_empty"`）；`AIOS_SPATIAL_COMPUTE=0` 的进程恒回 503。
 
 `GET /spatial/nearby` 的 query 参数（全部按字串收、服务端自己解；错误直接是 400 `bad_request`，`message` 直说哪一格错）：

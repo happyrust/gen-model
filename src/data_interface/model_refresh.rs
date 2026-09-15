@@ -226,7 +226,12 @@ impl ModelRefreshPolicy {
             .iter()
             .map(|failure| failure.root.clone())
             .collect::<std::collections::HashSet<_>>();
-        if persisted.failed == 0 || !generation_failures.is_empty() {
+        // `failed` 是元素计数，说不出是谁坏的；整批判死只在**没有一个根认领**那些失败时才成立。
+        // 部分发布的根自己认领了它们（`partial_roots`），模型行已经落库，不能反过来把同批
+        // 兄弟一起判死。
+        let failures_are_attributed =
+            !generation_failures.is_empty() || !persisted.partial_roots.is_empty();
+        if persisted.failed == 0 || failures_are_attributed {
             // 读透形态（`data_face = read-through`）：新生成的每根在**发布模型行之前**先把
             // 子树（DFS 访问名单 ∪ 祖先链）的数据面终态写透进 `pe` / `ATT_*` / `pe_owner`
             // ——plant-ui 拿到 ensure 回执后读模型行时 `in.owner` 已经在。生成服务只报名单

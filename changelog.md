@@ -24,6 +24,46 @@
   真模型 AMS 8000 `24384_22402` 在前端能开。
 - 主线工作树 28 个非校审在途改动为合入暂存又即刻回放（3-way 零冲突），另存分支 `wip/mainwt-stash-20260914`（Q3）。
 
+### 修：启动竞态——别的发现轮排下的排队行被新 epoch 遗弃，干等 300 s 周期重扫才动
+
+ams7997 冷初始化实测（`verification/init-timing/run-7997-two-tier.py`，A 轮）：`/health` 一答话
+（`initialization.status=discovering`）就 POST `/update/execute`，14 条行入队盖着 epoch 1；紧跟着启动序列自己的
+发现轮 `begin_discovery()` 把共享 epoch 拨到 2、装上它自己的清单——`auto_initialize_new_dbnums=false`，从未初始化的库
+它一条都不排（视时序，这份清单可以干脆是空的）。`allows()` 要 `epoch_id == 当前`，没被它再扫到的行从此
+`blocked_by_phase:manifest`，worker 空转（看门狗 60 s 报 14 条 `AIOS-QUEUE-STALL`），直到 300 s 后
+`[reconcile] 重扫（重建队列）` 重新盖章才开工：入队→开工 313 s，基线 12 s。plant-ui 上「服务刚起来就点执行」原样撞上。
+
+- **收养（`batch_scheduler.rs` / `initialization_phase.rs`）**：`BatchScheduler::adopt_stale_rows(epoch)` 把仍在
+  **排队**、盖着别的非零 epoch 的行改盖成当前 epoch，回执带 dbnum / 相 / 挂起位 / 任务号 / 原 epoch；
+  `InitializationCoordinator::adopt_rows` 按回执补阶段 total / pending、重算当前相，有一条不是挂起的就拨到 `Running`
+  （全是重扫排的挂起行则停在 `AwaitingTrigger`，不替人上弦），被阻断的相收养后仍 `Blocked`。两步分开是锁序
+  （activation gate → queue → coordinator）的要求；`adopt_stale_rows_into(origin, epoch)` 一处收口并打一行日志。
+  运行中的行不动（带着自己的 epoch 跑完，`finish` 按当前 epoch 对账），epoch 0 的旁路 / 测试行不动，目标 epoch 为 0 不收。
+- **三处调用**：启动 / 周期重扫（`increment_manager`）与人工执行（`manual_update`）装完清单、排完自己的行各收一次；
+  worker 每次 `drain_queue_until_empty` 开头再收一次兜底（活动闸内、在 `retire_covered_window` 收口迟到行之后、
+  第一处出队之前）——出现错配当场重盖章，不等 300 s。
+- **人工执行的 epoch 挪进活动闸（`manual_update.rs`）**：此前 `begin_discovery()` 开在逐库裁决那一圈之前、行边裁决
+  边入队、圈后才 `install_manifest`——那一圈读水位、落观察带 `.await`，启动重扫只要插在中间，已排出去的行全盖着过期章，
+  随后的 `install_manifest` 又因 epoch 对不上被整轮拒收。现在圈里只裁决、只收集（行先盖 `epoch_id: 0`），
+  开 epoch → 装清单 → 入队 → 收养挪到圈后同一把活动闸内一口气做完，没有 `.await`，与 `increment_manager` 同序同形。
+  副作用是好的：人工扫描期间协调器不再被拨到 `Discovering`，旧 epoch 的行照常出队。
+- **测试**：`initialization_phase` 三条（收养重开数据相并即刻放行 / 全挂起行不上弦、混有真实触发则 `running` /
+  epoch 对不上与 epoch 0 不收、阻断相收养后仍 blocked）；`batch_scheduler::adopting_stale_rows_restamps_only_queued_rows_from_other_epochs`
+  （只改排队行、运行中 / 旁路 / 已是当前 epoch 的不动、挂起位原样带回、二次收养为空）；源码钉
+  `manual_update::a_manual_execute_opens_its_epoch_inside_the_activation_gate_and_stale_rows_are_adopted`
+  （收集 → 闸 → 开 epoch → 装清单 → 入队 → 收养的顺序、闸内无 `.await`、圈里不入队；重扫装完清单收养且闸内无 `.await`；
+  worker 收养早于出队）。
+- **文档**：CONTEXT.md「纪元激活门」补两条发现路的形状，新词条「过期排队行收养」。
+- 验证：`cargo test --lib -- data_interface::initialization_phase data_interface::batch_scheduler data_interface::batch_worker`
+  + 上述 `manual_update` 三条 **92 passed / 0 failed**。**复现轮实跑**（`run-7997-two-tier.py`，`INIT_WAIT_SETTLED=0`：
+  `/health` 一答话 1.0 s 后就 POST execute，rocksdb 档，工作树二进制 `g54a7c8b9de64.dirty`）：入队→`initial_load`
+  **12 s**（修前同形 A 轮 313 s；等启动收敛再执行的 B 轮 13 s），`AIOS-QUEUE-STALL` **0 条**（A 轮 14 条），
+  `server.log` 一行 `[init] 收养 3 条别的发现轮排的排队行进 epoch=2：dbnum=7997(design)、8190(meta)、8191(meta)`——
+  另 11 条 DICT / MISC 文件启动重扫自己也扫到、按「已覆盖」并入时顺手改了章，这 3 条正是
+  `auto_initialize_new_dbnums=false` 挡在重扫清单外、修前干等 300 s 的那几条；任务 322 s / 全程 385 s，
+  与 B 轮（304 / 369）、基线（349 / 382）同一噪声带，`succeeded`，无残留进程。结果目录
+  `verification/init-timing/ams7997-rocksdb-race-fixed-20260914-031218`。
+
 ## 2026-09-13
 
 ### ADR-074：`store_mode` 收成 `mem` / `rocksdb` 两档，本进程从不拉起数据库；`store_process.rs` 整删

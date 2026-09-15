@@ -561,6 +561,69 @@ impl InitializationCoordinator {
         }
     }
 
+    /// 把别的发现轮排进队列、本轮清单没再扫到的行收进当前 epoch。
+    ///
+    /// 两条发现路各自 `begin_discovery()`：启动 / 周期重扫在 `increment_manager`，人工执行在
+    /// `manual_update`。后一轮装清单只认自己扫到的行；前一轮排进队列、后一轮没再扫到的
+    /// （典型：`/update/execute` 排的 14 条从未初始化的库，紧跟其后的启动重扫因
+    /// `auto_initialize_new_dbnums=false` 不入队）就带着旧 epoch 留在队里——[`Self::allows`]
+    /// 要 epoch 相等，它们从此 `blocked_by_phase`，直到 300 s 后的周期重扫再盖一次章。
+    /// 2026-09-14 ams7997 冷初始化实测：`/health` 一答话就 POST execute，14 条行干等了 5 分钟。
+    ///
+    /// 调用方先用 `BatchScheduler::adopt_stale_rows` 把行改盖成新 epoch，再把它们的
+    /// `(phase, held)` 交到这里记账：阶段 total / pending 各加一，重算当前相；有一条
+    /// 不是挂起的就把状态拨到 `Running`（人按的执行本来就已上弦），全是挂起行才保留
+    /// `AwaitingTrigger`。清单期（`epoch_id` 对不上）什么都不动，返回 0。
+    pub fn adopt_rows(
+        &self,
+        epoch_id: u64,
+        rows: impl IntoIterator<Item = (DataPhase, bool)>,
+    ) -> usize {
+        let mut state = self.state();
+        if epoch_id == 0 || epoch_id != state.epoch_id {
+            return 0;
+        }
+        let mut adopted = 0usize;
+        let mut any_unheld = false;
+        for (phase, held) in rows {
+            let counts = state.phases.entry(phase).or_default();
+            counts.total += 1;
+            counts.pending += 1;
+            any_unheld |= !held;
+            adopted += 1;
+        }
+        if adopted == 0 {
+            return 0;
+        }
+        state.current_phase = state
+            .phases
+            .iter()
+            .find_map(|(phase, counts)| ((counts.pending + counts.running) > 0).then_some(*phase))
+            .into_iter()
+            .chain(state.blockers.iter().map(|blocker| blocker.phase))
+            .min();
+        state.data_ready = state.current_phase.is_none();
+        if !state.data_ready {
+            state.model_ready = false;
+        }
+        let current_is_blocked = state.current_phase.is_some_and(|current| {
+            state
+                .blockers
+                .iter()
+                .any(|blocker| blocker.phase == current)
+        });
+        state.status = if current_is_blocked {
+            InitializationStatus::Blocked
+        } else if state.data_ready {
+            state.status
+        } else if any_unheld || state.status == InitializationStatus::Running {
+            InitializationStatus::Running
+        } else {
+            InitializationStatus::AwaitingTrigger
+        };
+        adopted
+    }
+
     pub fn data_ready(&self) -> bool {
         self.state().data_ready
     }
@@ -1167,6 +1230,111 @@ mod tests {
         assert_eq!(DataPhase::of_db_type("MISC"), DataPhase::Meta);
         assert_eq!(DataPhase::of_db_type("CATA"), DataPhase::Catalogue);
         assert_eq!(DataPhase::of_db_type("DESI"), DataPhase::Design);
+    }
+
+    /// 2026-09-14 ams7997 冷初始化那 5 分钟：`/update/execute` 排的行盖着 epoch 1，启动重扫
+    /// 紧跟着开了 epoch 2、装了一份空清单（auto_initialize 关着，它自己一条都不排）——
+    /// 协调器于是 data_ready、往模型相走，那 14 条行 `allows()` 永远为假。收养之后：阶段
+    /// 计数补上、当前相回到 meta、状态回到 Running，`allows(meta)` 立刻为真。
+    #[test]
+    fn adopting_rows_from_a_superseded_epoch_reopens_the_data_phase() {
+        let coordinator = coordinator();
+        let stale = coordinator.begin_discovery();
+        coordinator.install_manifest(stale, [DataPhase::Meta, DataPhase::Design], false, []);
+        let current = coordinator.begin_discovery();
+        coordinator.install_manifest(current, [], false, []);
+        let before = coordinator.snapshot();
+        assert!(
+            before.data_ready,
+            "空清单：数据链直接就绪，正是把旧行晾在一边的形状"
+        );
+        assert!(
+            !coordinator.allows(DataPhase::Meta, stale),
+            "旧 epoch 的行不放行"
+        );
+
+        let adopted = coordinator.adopt_rows(
+            current,
+            [
+                (DataPhase::Meta, false),
+                (DataPhase::Meta, false),
+                (DataPhase::Design, false),
+            ],
+        );
+        assert_eq!(adopted, 3);
+        let after = coordinator.snapshot();
+        assert_eq!(after.status, "running");
+        assert_eq!(after.current_phase, Some("meta"));
+        assert!(!after.data_ready);
+        assert_eq!(after.phases["meta"].total, 2);
+        assert_eq!(after.phases["meta"].pending, 2);
+        assert_eq!(after.phases["design"].total, 1);
+        assert!(coordinator.allows(DataPhase::Meta, current));
+        assert!(
+            !coordinator.allows(DataPhase::Design, current),
+            "design 仍排在 meta 之后"
+        );
+        // 收养的是排队行，随后照常出队对账：meta 清零后当前相前移，走既有的屏障重扫。
+        coordinator.reconcile_pending(current, [(DataPhase::Design, false)]);
+        assert_eq!(coordinator.snapshot().current_phase, Some("design"));
+        assert!(coordinator.take_rescan_requested());
+    }
+
+    /// 全是挂起行（重扫排的）被收养时不许替人上弦：状态停在 awaiting_trigger，等真实触发。
+    /// 有一条不是挂起的（人按的执行）就拨到 running——那条行入队时本来就已经上过弦。
+    #[test]
+    fn adopting_only_held_rows_keeps_the_trigger_gate_closed() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [], false, []);
+        assert_eq!(
+            coordinator.adopt_rows(epoch, [(DataPhase::Design, true)]),
+            1
+        );
+        assert_eq!(coordinator.snapshot().status, "awaiting_trigger");
+        assert!(!coordinator.allows(DataPhase::Design, epoch));
+        coordinator.arm();
+        assert!(coordinator.allows(DataPhase::Design, epoch));
+
+        let mixed = self::coordinator();
+        let epoch = mixed.begin_discovery();
+        mixed.install_manifest(epoch, [], false, []);
+        assert_eq!(
+            mixed.adopt_rows(
+                epoch,
+                [(DataPhase::Design, true), (DataPhase::Design, false)]
+            ),
+            2
+        );
+        assert_eq!(mixed.snapshot().status, "running");
+    }
+
+    /// 清单期（epoch 对不上）与 epoch 0 都不收：收进去的行会被下一次 `install_manifest`
+    /// 清零，计数只会错。被阻断的相收养后仍是 blocked——收养不是放行。
+    #[test]
+    fn adoption_refuses_stale_epochs_and_respects_blockers() {
+        let coordinator = coordinator();
+        assert_eq!(coordinator.adopt_rows(0, [(DataPhase::Meta, false)]), 0);
+        let old = coordinator.begin_discovery();
+        let current = coordinator.begin_discovery();
+        coordinator.install_manifest(current, [], false, []);
+        assert_eq!(coordinator.adopt_rows(old, [(DataPhase::Meta, false)]), 0);
+        assert!(
+            coordinator.snapshot().data_ready,
+            "对不上号的收养不许改任何状态"
+        );
+
+        let blocked = self::coordinator();
+        let epoch = blocked.begin_discovery();
+        blocked.install_manifest(
+            epoch,
+            [],
+            false,
+            [PhaseBlocker::new(DataPhase::Meta, "DICT unreadable")],
+        );
+        assert_eq!(blocked.adopt_rows(epoch, [(DataPhase::Meta, false)]), 1);
+        assert_eq!(blocked.snapshot().status, "blocked");
+        assert!(!blocked.allows(DataPhase::Meta, epoch));
     }
 
     #[test]

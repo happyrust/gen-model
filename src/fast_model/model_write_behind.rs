@@ -28,6 +28,16 @@ const ROOTS_PER_FLUSH: usize = 512;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const BLOCKED_SAMPLE_LIMIT: usize = 8;
 
+/// 判定为 `Blocked` 的根多久再试一次。
+///
+/// 它曾经是一年，且 [`take_due_roots`] 还按 `status` 把 `Blocked` 整个滤掉——两者
+/// 合起来等于**永不再试**。而一个不再试的根同时也**永不可淘汰**（淘汰只挑有同源
+/// ACK 的根），于是它占的内存留到进程退出为止。房间定义一时取不到这类整批
+/// `Blocked` 的成因本来会自愈，代价却是把一大片内存钉死，最后所有写入撞硬上限回
+/// 503。所以这里是「很慢地重试」，不是终态：确定性失败每 10 分钟白试一次不值几个
+/// 钱，而可恢复的那些从此自己走得出来。
+const BLOCKED_RETRY: Duration = Duration::from_secs(600);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RootIdentity {
     source_sesno: u32,
@@ -625,20 +635,17 @@ async fn worker_loop(controller: &'static ModelWriteBehind) {
 fn take_due_roots(controller: &ModelWriteBehind) -> Option<(u32, Vec<PersistJob>)> {
     let now = Instant::now();
     let mut state = controller.state();
+    // 到点就试，`Blocked` 也一样：它的到点在 [`BLOCKED_RETRY`] 之后，不是永不。
     let dbnum = state
         .pending
         .values()
-        .find(|root| root.status != PendingStatus::Blocked && root.next_retry_at <= now)?
+        .find(|root| root.next_retry_at <= now)?
         .root
         .dbno();
     let roots = state
         .pending
         .values_mut()
-        .filter(|root| {
-            root.root.dbno() == dbnum
-                && root.status != PendingStatus::Blocked
-                && root.next_retry_at <= now
-        })
+        .filter(|root| root.root.dbno() == dbnum && root.next_retry_at <= now)
         .take(ROOTS_PER_FLUSH)
         .map(|root| {
             root.status = PendingStatus::Persisting;
@@ -731,7 +738,7 @@ async fn persist_batch(controller: &ModelWriteBehind, dbnum: u32, jobs: Vec<Pers
                 PendingStatus::Retryable
             };
             entry.next_retry_at = if blocked {
-                now + Duration::from_secs(365 * 24 * 3600)
+                now + BLOCKED_RETRY
             } else {
                 now + retry_delay(entry.attempts)
             };
@@ -1119,6 +1126,47 @@ mod tests {
         assert_eq!(entry.status, PendingStatus::Pending);
         assert_eq!(entry.attempts, 0);
         assert_eq!(entry.submission_epoch, 2);
+    }
+
+    /// `Blocked` 是「很慢地重试」，不是终态。
+    ///
+    /// 从前它两头都被钉死：退避一年，而 [`take_due_roots`] 还按 `status` 把它整个
+    /// 滤掉。不再重试的根同时也永不可淘汰（淘汰只挑有同源 ACK 的根），那份内存于
+    /// 是留到进程退出——房间定义一时取不到这类会自愈的成因，代价却是缓存被钉死，
+    /// 最后所有写入撞硬上限回 503。
+    #[test]
+    fn a_blocked_root_becomes_due_again_after_the_blocked_backoff() {
+        let store = Box::leak(Box::new(ModelMemoryStore::with_cache_limit(4096)));
+        let adapter = Arc::new(ScriptedPersistence::new(Vec::new()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
+        let root = RefNo::new(7997, 113);
+        let now = Instant::now();
+        {
+            let mut state = controller.state();
+            upsert_pending(&mut state, 7997, root, identity("same"), 10, now, Some(1));
+            let entry = state.pending.values_mut().next().unwrap();
+            entry.status = PendingStatus::Blocked;
+            entry.next_retry_at = now + BLOCKED_RETRY;
+        }
+        assert!(
+            take_due_roots(controller).is_none(),
+            "退避没走完之前不重试"
+        );
+
+        controller
+            .state()
+            .pending
+            .values_mut()
+            .next()
+            .unwrap()
+            .next_retry_at = Instant::now();
+        let (dbnum, jobs) = take_due_roots(controller).expect("到点的 Blocked 根要重新进批");
+        assert_eq!(dbnum, 7997);
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            BLOCKED_RETRY <= Duration::from_secs(3600),
+            "退避必须是个人等得起的数，否则与永不重试无异"
+        );
     }
 
     #[tokio::test(start_paused = true)]

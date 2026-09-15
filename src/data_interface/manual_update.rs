@@ -4685,7 +4685,14 @@ impl AiosDBManager {
         let registry = TaskRegistry::global();
         let coordinator =
             crate::data_interface::initialization_phase::InitializationCoordinator::global();
-        let epoch_id = coordinator.begin_discovery();
+        // epoch **不在这里开**。下面这一圈逐库裁决要读水位、落观察（`.await`），几百毫秒到
+        // 几秒；此前 `begin_discovery()` 开在圈前、行边裁决边入队、圈后才 `install_manifest`，
+        // 启动重扫（increment_manager，在活动闸内一口气开新 epoch + 装清单）只要插在中间，
+        // 这里已经排出去的行就全盖着过期章，随后的 `install_manifest` 又因 epoch 对不上被
+        // 协调器整轮拒收——14 条行从此 blocked_by_phase，等 300 s 周期重扫（2026-09-14
+        // ams7997 实测）。现在圈里只裁决、只收集，开 epoch / 装清单 / 入队三件事挪到圈后
+        // 同一把活动闸里一口气做完，与 increment_manager 同一形状。
+        let mut to_enqueue: Vec<DiscoveredBatch> = Vec::new();
         // 「仅记录并跳过」的库要从阶段总数里摘掉——watcher 路径靠 `manifest_totals.retain`
         // 做同一件事（increment_manager），这里不摘的话 /health 的阶段 total 会为一个
         // 永远不会来的批次虚高一格。同号多文件在收集时按 `len() == 1` 过滤，身份异常
@@ -4893,57 +4900,33 @@ impl AiosDBManager {
             // 否则回执说「已入队」，跑完失败后重扫又把它按回 park，人只会看到
             // 「我点了执行它还是不动」。
             crate::data_interface::batch_worker::reset_batch_failure(dbnum);
-            let outcome = scheduler.enqueue(
-                registry,
-                &DiscoveredBatch {
-                    project: cand.project.clone(),
-                    dbnum,
-                    db_type: cand.db_type.clone(),
-                    phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                        &cand.db_type,
-                    ),
-                    epoch_id,
-                    intent,
-                    model_start_sesno: (intent
-                        == crate::data_interface::batch_queue::BatchIntent::Reinitialize)
-                        .then_some(0),
-                    path: cand.path.clone(),
-                    file_name: cand.file_name.clone(),
-                    applied_sesno: applied,
-                    file_latest_sesno: cand.file_latest_sesno,
-                    reinit_requested,
-                    previous_observed_sesno,
-                    first_pending_sesno_time,
-                    file_latest_sesno_time,
-                    regen_roots: Vec::new(),
-                },
-                // 人按下的执行永不挂起：回执刚告诉他「已入队」，行却不动，是
-                // 最难自查的一种失望。它同时放行这个 dbnum 启动时挂起的积压。
-                false,
-            );
+            to_enqueue.push(DiscoveredBatch {
+                project: cand.project.clone(),
+                dbnum,
+                db_type: cand.db_type.clone(),
+                phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                    &cand.db_type,
+                ),
+                // 圈后开了 epoch 再盖章。
+                epoch_id: 0,
+                intent,
+                model_start_sesno: (intent
+                    == crate::data_interface::batch_queue::BatchIntent::Reinitialize)
+                    .then_some(0),
+                path: cand.path.clone(),
+                file_name: cand.file_name.clone(),
+                applied_sesno: applied,
+                file_latest_sesno: cand.file_latest_sesno,
+                reinit_requested,
+                previous_observed_sesno,
+                first_pending_sesno_time,
+                file_latest_sesno_time,
+                regen_roots: Vec::new(),
+            });
             manifest_phases.push(
                 crate::data_interface::initialization_phase::DataPhase::of_db_type(&cand.db_type),
             );
-            // `previous_observed_sesno` 是 `merged_sesnos` 的基线，入队时冻结、随
-            // 队列行传给 worker，此后只活在内存里。2026-08-17 的九场景全红就是栽在
-            // 看不见它（计划 §2 现场 A）。
-            debug_scope::trace(debug_scope::TracePoint::Enqueue, dbnum, || {
-                serde_json::json!({
-                    "intent": format!("{intent:?}"),
-                    "applied_sesno": applied,
-                    "file_latest_sesno": cand.file_latest_sesno,
-                    "previous_observed_sesno": previous_observed_sesno,
-                    "epoch_id": epoch_id,
-                    "outcome": format!("{:?}", outcome.outcome),
-                })
-            });
-            match outcome.outcome {
-                Enqueued::New | Enqueued::BehindRunning => receipt.enqueued.push(outcome.info),
-                Enqueued::Merged => receipt.merged.push(outcome.info),
-                Enqueued::AlreadyCovered => receipt.already_covered.push(dbnum),
-            }
         }
-        coordinator.install_manifest(epoch_id, manifest_phases, false, phase_blockers);
         let manifest_totals = by_dbnum
             .iter()
             .filter(|(dbnum, candidates)| {
@@ -4957,20 +4940,55 @@ impl AiosDBManager {
                 )
             })
             .collect::<Vec<_>>();
-        coordinator.set_phase_totals(epoch_id, manifest_totals);
-        coordinator.set_shadowed(
-            epoch_id,
-            receipt
-                .shadowed
-                .iter()
-                .map(|item| {
-                    format!(
-                        "{}:{}:{}->{}",
-                        item.dbnum, item.project, item.file_path, item.selected_project
-                    )
-                })
-                .collect(),
-        );
+        let shadowed = receipt
+            .shadowed
+            .iter()
+            .map(|item| {
+                format!(
+                    "{}:{}:{}->{}",
+                    item.dbnum, item.project, item.file_path, item.selected_project
+                )
+            })
+            .collect::<Vec<_>>();
+        {
+            // 开 epoch → 装清单 → 入队 → 收养，一把活动闸、没有 `.await`：与启动 / 周期重扫
+            // 互斥，两边谁也插不进对方中间；先装清单再入队与 increment_manager 同序。
+            let _activation = crate::data_interface::batch_scheduler::epoch_activation_guard();
+            let epoch_id = coordinator.begin_discovery();
+            coordinator.install_manifest(epoch_id, manifest_phases, false, phase_blockers);
+            coordinator.set_phase_totals(epoch_id, manifest_totals);
+            coordinator.set_shadowed(epoch_id, shadowed);
+            for mut found in to_enqueue {
+                found.epoch_id = epoch_id;
+                let dbnum = found.dbnum;
+                // 人按下的执行永不挂起：回执刚告诉他「已入队」，行却不动，是
+                // 最难自查的一种失望。它同时放行这个 dbnum 启动时挂起的积压。
+                let outcome = scheduler.enqueue(registry, &found, false);
+                // `previous_observed_sesno` 是 `merged_sesnos` 的基线，入队时冻结、随
+                // 队列行传给 worker，此后只活在内存里。2026-08-17 的九场景全红就是栽在
+                // 看不见它（计划 §2 现场 A）。
+                debug_scope::trace(debug_scope::TracePoint::Enqueue, dbnum, || {
+                    serde_json::json!({
+                        "intent": format!("{:?}", found.intent),
+                        "applied_sesno": found.applied_sesno,
+                        "file_latest_sesno": found.file_latest_sesno,
+                        "previous_observed_sesno": found.previous_observed_sesno,
+                        "epoch_id": epoch_id,
+                        "outcome": format!("{:?}", outcome.outcome),
+                    })
+                });
+                match outcome.outcome {
+                    Enqueued::New | Enqueued::BehindRunning => receipt.enqueued.push(outcome.info),
+                    Enqueued::Merged => receipt.merged.push(outcome.info),
+                    Enqueued::AlreadyCovered => receipt.already_covered.push(dbnum),
+                }
+            }
+            // 启动 / 周期重扫排下、本次没勾到的行：盖成本轮 epoch，别让它们等下一次重扫。
+            crate::data_interface::batch_scheduler::adopt_stale_rows_into(
+                "update-execute",
+                epoch_id,
+            );
+        }
         scheduler.wake();
         receipt
     }
@@ -6784,6 +6802,95 @@ mod tests {
             1,
             "执行体里清库只有一处调用"
         );
+    }
+
+    /// 2026-09-14 ams7997 冷初始化那 5 分钟（`/health` 一答话就 POST execute，14 条行盖着
+    /// epoch 1；紧跟着的启动重扫开 epoch 2、装空清单，它们从此 `blocked_by_phase`，等 300 s
+    /// 周期重扫再盖章）的三道钉：
+    ///
+    /// 1. 人工执行的 epoch 在逐库裁决（带 `.await`）**之后**、活动闸**之内**开：收集 → 活动闸
+    ///    → 开 epoch → 装清单 → 入队 → 收养一口气做完，中间没有 `.await`，启动 / 周期重扫插
+    ///    不进来；圈里只收集、不入队，行先盖 0、圈后统一改章。
+    /// 2. 两条发现路（人工执行、启动 / 周期重扫）装完清单都收养别的发现轮排下、本轮没再扫到
+    ///    的排队行。
+    /// 3. worker 每次 drain 开头再收养一次兜底，且早于出队——不等下一次周期重扫。
+    #[test]
+    fn a_manual_execute_opens_its_epoch_inside_the_activation_gate_and_stale_rows_are_adopted() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub async fn enqueue_manual_update_with(")
+            .expect("enqueue_manual_update_with must exist")
+            .1
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum follows")
+            .0;
+        assert_eq!(
+            body.matches(".begin_discovery()").count(),
+            1,
+            "人工执行只开一次 epoch: {body}"
+        );
+        let gate = body
+            .find("epoch_activation_guard();")
+            .expect("开 epoch 要在活动闸内");
+        let begin = body.find(".begin_discovery()").expect("开 epoch");
+        let last_collect = body
+            .rfind("to_enqueue.push(DiscoveredBatch {")
+            .expect("圈里只收集");
+        let install = body.find(".install_manifest(").expect("装清单");
+        let enqueue = body
+            .find("scheduler.enqueue(registry, &found, false)")
+            .expect("入队");
+        let adopt = body.find("adopt_stale_rows_into(").expect("收养");
+        assert!(
+            last_collect < gate
+                && gate < begin
+                && begin < install
+                && install < enqueue
+                && enqueue < adopt,
+            "顺序必须是 收集 → 活动闸 → 开 epoch → 装清单 → 入队 → 收养: {body}"
+        );
+        assert!(
+            !body[gate..adopt].contains(".await"),
+            "活动闸内不得有 .await：那道闸是 std Mutex，跨 await 会把 worker 出队与重扫一起挂住: {}",
+            &body[gate..adopt]
+        );
+        assert!(
+            body[..gate].contains("epoch_id: 0,"),
+            "圈里收集的行先盖 0，圈后统一改章: {body}"
+        );
+        assert!(
+            !body[..gate].contains("scheduler.enqueue("),
+            "圈里（活动闸外、带 .await）不得入队: {body}"
+        );
+
+        // 启动 / 周期重扫：装完清单、排完自己的行，同一把活动闸内收养。
+        let scan_side = include_str!("increment_manager.rs");
+        let sweep_install = scan_side
+            .find("coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);")
+            .expect("重扫装清单");
+        let sweep_adopt = scan_side
+            .find("adopt_stale_rows_into(origin, epoch_id);")
+            .expect("重扫装完清单也要收养");
+        assert!(sweep_install < sweep_adopt, "重扫先装清单再收养");
+        let sweep_gate = scan_side[..sweep_install]
+            .rfind("epoch_activation_guard();")
+            .expect("重扫的开 epoch / 装清单在活动闸内");
+        assert!(
+            !scan_side[sweep_gate..sweep_adopt].contains(".await"),
+            "重扫活动闸内不得有 .await: {}",
+            &scan_side[sweep_gate..sweep_adopt]
+        );
+
+        // worker：每次 drain 开头兜底收养，早于第一处出队。
+        let drain = include_str!("batch_worker.rs")
+            .split_once("pub async fn drain_queue_until_empty(")
+            .expect("queue drain must exist")
+            .1;
+        let worker_adopt = drain
+            .find("adopt_stale_rows_into(\"worker\", epoch_id);")
+            .expect("worker 每次 drain 开头收养过期行");
+        let first_dispatch = drain.find("next_dispatch(registry").expect("出队");
+        assert!(worker_adopt < first_dispatch, "收养必须早于出队: {drain}");
     }
 
     /// A baseline used to advance its watermark and queue nothing, so every root

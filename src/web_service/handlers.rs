@@ -102,23 +102,23 @@ pub async fn element_ensure(
     let response = service.ensure(refno, req.depth).await.map_err(|error| {
         let message = format!("{error:#}");
         if message.contains("DATA_FACE_INGEST_OWNS_CACHE") {
-            ApiError {
-                status: StatusCode::CONFLICT,
-                code: "DATA_FACE_INGEST_OWNS_CACHE",
+            ApiError::coded(
+                StatusCode::CONFLICT,
+                "DATA_FACE_INGEST_OWNS_CACHE",
                 message,
-            }
+            )
         } else if message.contains("CATALOGUE_NOT_PERSISTED") {
-            ApiError {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "CATALOGUE_NOT_PERSISTED",
+            ApiError::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "CATALOGUE_NOT_PERSISTED",
                 message,
-            }
+            )
         } else if message.contains("ENSURE_SCOPE_TOO_LARGE") {
-            ApiError {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "ENSURE_SCOPE_TOO_LARGE",
+            ApiError::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ENSURE_SCOPE_TOO_LARGE",
                 message,
-            }
+            )
         } else {
             ApiError::from_domain(error)
         }
@@ -1271,9 +1271,11 @@ pub struct SpatialNearbyReq {
     pub query: spatial_query::RawSpatialQuery,
 }
 
-/// `spatial/*` 的错误：`ApiError` 之外多一档「空间树未就绪」（spec §4.13）。它要带
-/// `Retry-After` 与非空的 `detail.state`，而 `ApiError` 的信封把 `detail` 写死为 `null`、也不带
-/// 响应头（spec §3），所以单独成型，不去改动统一信封与它的十几处构造点。
+/// `spatial/*` 的错误：`ApiError` 之外多一档「空间树未就绪」（spec §4.13）。
+///
+/// 统一信封从此也能带 `detail` 与 `Retry-After`（跨库依赖分型要用），所以当初单独
+/// 成型的两条理由只剩一条：这一档的退避时长是 `spatial_query::RETRY_AFTER_SECS`，
+/// 不是统一信封那个固定的 2 秒。要合回去就得先让 `ApiError` 带得动自己的时长。
 #[derive(Debug)]
 pub enum SpatialApiError {
     Api(ApiError),
@@ -1549,11 +1551,7 @@ fn historical_error(error: crate::fast_model::historical_model::HistoricalModelE
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    ApiError {
-        status,
-        code: error.code,
-        message: error.message,
-    }
+    ApiError::coded(status, error.code, error.message)
 }
 
 /// POST /api/v1/model/history/generate — rebuild one source session into kv-mem.
