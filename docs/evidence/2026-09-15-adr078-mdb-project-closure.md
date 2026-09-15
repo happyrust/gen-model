@@ -121,3 +121,29 @@ let is_dir = match entry.file_type() {
 - 部署实例留在**用例①的配置**（真根、无 `included_projects`、`project_search_paths = []`）上跑着，9099 在听；末次 `ensure … force` 复核仍是 `Generated · 1,731 实例`。
 - 想回 0.1.25 的旧二进制：先把 `DbOption.toml.bak-adr078-*` 还回去（旧二进制的 `aios_core::DbOption` 里 `included_projects` 是必填字段，没有 `serde(default)`，读删掉这一行的新配置会炸），再把 `aios-database.exe.bak-0.1.25` / `web\setup.html.bak-0.1.25` 换回来。
 - `D:\adr078-verify\`：`rootA` / `rootB` 两组目录联接 + `run-case.ps1`（几 KB，没有数据副本），真盘没动过。
+
+## 9. 追记（2026-09-16）：掉线根等的不是我们的 15 s，是 `canonicalize` 在调用方线程上兑 OS 超时——已修
+
+§5 里「28 s 就绪 … `read_dir` 快速失败、不是 15 s 超时那条路」归因不对。2026-09-16 00:1x 用现场服务器
+`\\10.181.11.245\PDM`（SCB `custom_evars.bat` 里的地址，此刻 445 不通）对 `POST /api/v1/setup/probe/mdb` 重测：
+
+- **修前**（HEAD `9ea9f0bcc`，9099 那台）：wall **21,083 ms**，可 `roots[1].scan_ms = 0`、problem 是 OS 的
+  `os error 53`——扫描线程根本没等，等的是线程起来**之前**：`mdb_closure::search_roots`（根去重）、`plan_key`
+  （最近闭包的 key）、`setup.rs` 探测的根去重三处都对每个根调 `project_paths::path_identity` →
+  `std::fs::canonicalize`，它在掉线 UNC 上阻塞到 OS 自己放弃为止（PowerShell `[IO.Directory]::Exists` 同一路径
+  同样 21 s）。`scan_roots` 每根独立线程 + 15 s 的上限被整个绕过；Windows 网络名负缓存在时紧接着的第二次只要
+  73 ms，缓存过期又回到 21 s。§5 的 28 s 也是这一条。`project_paths.rs` 里 `MountState` 的注释早写过同一个警告。
+- **修法**：根的去重与闭包 key 改用字面 `project_paths::path_key`（斜杠方向 / 大小写 / 末尾分隔符 / 引号归一，
+  **不碰文件系统**），三处收口成 `mdb_closure::collect_search_roots`，向导探测与启动同一套；`path_identity`
+  只留给扫到之后确知可达的目录。代价：联接与其目标、8.3 短名这类「字面不同、实为一处」的根不再合并，各扫一遍、
+  后到的列 `shadowed`（UNC 与本地同一目录本来 `canonicalize` 也认不成一处，P2 一直就这么报）。顺带堵上
+  「同一个根在线 / 掉线算出两个 key、共享盘每抖一次 `latest_for` 白重扫一遍」。
+- **修后**（`cc5c0e342` + 本批，dev 构建以设置态起在 19101 跑同一个探测，负缓存已过期）：wall **15,557 ms**，
+  `roots[1].reachable = false`、`scan_ms = 15000`、problem =「扫描 15 s 未答，按不可达处理（共享盘掉线时 read_dir
+  会挂很久）；重挂轮会再试」；其余 5 项目 40/40 照常，`status = degraded`。跨根（rootA 缺 ACP + 本机 SMB 回环
+  UNC 全集 → ACP@根#2）、影子（真盘 + UNC 同内容 → UNC 5 份全 `shadowed`）、重复写法（`D:/AVEVA/Projects/E3D3.1/`
+  与 `D:\AVEVA\Projects\E3D3.1` 合成一个根）三例与修前逐项相同；同一路径三种写法（末尾 `\`、大小写、正斜杠）合成
+  1 个根。
+- 钉住：`search_roots_are_deduplicated_literally_and_in_order`（Windows）、
+  `plan_key_does_not_depend_on_whether_the_root_is_reachable`（根删掉前后 key 相同——`canonicalize` 版在线时给
+  `\\?\` 前缀、掉线退回字面量，对不上）。

@@ -30,7 +30,9 @@ use super::project_locator::{
     DEFAULT_ROOT_SCAN_TIMEOUT, LocateFailure, ProjectLocation, RootScan, locate_code,
     locate_project_folder, scan_roots,
 };
-use super::project_paths::{ProjectWatchDirs, WatchDirPlan, normalize_path_input, path_identity};
+use super::project_paths::{
+    ProjectWatchDirs, WatchDirPlan, normalize_path_input, path_identity, path_key,
+};
 
 /// 主项目 SYS 里一个 MDB 的声明，**未绑定文件**：每条 `MdbDatabase` 的 `path` / `project` /
 /// `shadowed` 都是空的，只有 dbnum / 名字 / STYP / 项目码。
@@ -654,19 +656,39 @@ pub fn summarize_dbnums(dbnums: &[u32]) -> String {
     }
 }
 
-/// 搜索根 = `[project_path] ++ project_search_paths`，逐项 [`normalize_path_input`]，
-/// 去掉空项与重复项（写法不同、指向同一处的按 [`path_identity`] 去重）。顺序即优先级。
+/// 搜索根 = `[project_path] ++ project_search_paths`，整理规则见 [`collect_search_roots`]。
 pub fn search_roots(db_option: &DbOption) -> Vec<PathBuf> {
+    collect_search_roots(
+        std::iter::once(db_option.project_path.clone())
+            .chain(crate::options::project_search_paths()),
+    )
+}
+
+/// 把配置 / 向导页面上写的几个根整理成扫描用的列表：逐项 [`normalize_path_input`]，空项跳过，
+/// 写法不同但字面上是同一处的（斜杠方向、大小写、末尾分隔符）按 [`path_key`] 去重，
+/// 先写的在前——顺序即优先级。
+///
+/// 这里**只看字面、不碰文件系统**。根可能是掉线的 UNC：`path_identity` 走 `canonicalize`，
+/// 会在调用方线程上阻塞到 OS 自己放弃（2026-09-16 用现场服务器 `\\10.181.11.245\PDM` 实测 21 s），
+/// 把 [`scan_roots`] 每根独立线程 + 15 s 的上限整个绕过——启动、重扫、向导「看闭包」每个掉线根
+/// 都要多等一个 OS 超时，而且报出来的是 OS 的 error 53 而不是「扫描 15 s 未答」。
+/// 代价是联接 / 符号链接与它的目标、8.3 短名这类「字面不同、实为一处」的写法不再合并：
+/// 它们会被当成两个根各扫一遍，后到的那份在闭包里列为 `shadowed`，不阻断也不算冲突
+/// （UNC 与本地同一目录本来 `canonicalize` 也认不成一处，一直就是这么报的）。
+pub fn collect_search_roots<I>(candidates: I) -> Vec<PathBuf>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let mut roots = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let candidates = std::iter::once(db_option.project_path.clone())
-        .chain(crate::options::project_search_paths());
     for raw in candidates {
+        let raw = raw.as_ref();
         if raw.trim().trim_matches('"').is_empty() {
             continue;
         }
-        let path = normalize_path_input(&raw);
-        if seen.insert(path_identity(&path)) {
+        let path = normalize_path_input(raw);
+        if seen.insert(path_key(&path)) {
             roots.push(path);
         }
     }
@@ -705,8 +727,12 @@ fn latest_slot() -> &'static RwLock<LatestPlan> {
     LATEST.get_or_init(|| RwLock::new(None))
 }
 
+/// 最近一份闭包的 key。根用字面 [`path_key`]，不用 `path_identity`：后者走 `canonicalize`，
+/// 掉线的根会让每次 [`latest_for`] 都在调用方线程上等一个 OS 超时，而且同一个根在线 / 掉线
+/// 两个时刻算出的值不同（见 [`super::project_paths::MountState`]），共享盘每抖一次缓存就
+/// 白失效一次、多重扫一遍。
 fn plan_key(roots: &[PathBuf], project_name: &str, mdb: &str) -> Vec<String> {
-    let mut key: Vec<String> = roots.iter().map(|root| path_identity(root)).collect();
+    let mut key: Vec<String> = roots.iter().map(|root| path_key(root)).collect();
     key.push(project_name.trim().to_ascii_lowercase());
     key.push(normalize_mdb(mdb));
     key
@@ -985,5 +1011,50 @@ mod tests {
         assert!(notice.contains("未定位 SCB"), "{notice}");
         option.included_projects.clear();
         assert!(included_projects_notice(&option, &plan).is_none());
+    }
+
+    /// 搜索根按字面去重：斜杠方向、大小写、末尾分隔符、两侧引号都不算差异；空项跳过；
+    /// 先写的在前、保留第一种写法。不存在的根照样收下——存在与否是扫描线程的事。
+    #[cfg(windows)]
+    #[test]
+    fn search_roots_are_deduplicated_literally_and_in_order() {
+        let roots = collect_search_roots([
+            "D:/AVEVA/Projects/E3D3.1/",
+            "",
+            r#"  ""  "#,
+            r"d:\aveva\projects\e3d3.1",
+            r#""\\nas01\PDM""#,
+            "//nas01/pdm/",
+            r"\\10.181.11.245\PDM\PDM000",
+        ]);
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from(r"D:\AVEVA\Projects\E3D3.1"),
+                PathBuf::from(r"\\nas01\PDM"),
+                PathBuf::from(r"\\10.181.11.245\PDM\PDM000"),
+            ]
+        );
+    }
+
+    /// 最近闭包的 key 不随根的可达性变：同一个根在线时与掉线后算出的 key 必须一样，
+    /// 否则共享盘每抖一次 `latest_for` 就白重扫一遍；而且算 key 不能去碰文件系统
+    /// （掉线 UNC 上 `canonicalize` 会把调用方阻塞到 OS 超时）。
+    #[test]
+    fn plan_key_does_not_depend_on_whether_the_root_is_reachable() {
+        let fixture = Fixture::new("plan-key");
+        let literal = fixture.root.to_string_lossy().into_owned();
+        let roots = collect_search_roots([literal.as_str()]);
+        assert_eq!(roots, vec![fixture.root.clone()]);
+        let online = plan_key(&roots, "Main", "ALL");
+
+        std::fs::remove_dir_all(&fixture.root).expect("模拟根掉线");
+        assert!(!fixture.root.exists());
+        let offline = plan_key(&roots, "Main", "ALL");
+
+        assert_eq!(online, offline, "根掉线不该换 key");
+        assert_eq!(online.len(), 3, "根 + 主项目 + MDB");
+        assert_eq!(online[1], "main");
+        assert_eq!(online[2], "/ALL");
     }
 }

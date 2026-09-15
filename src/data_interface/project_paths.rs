@@ -227,7 +227,13 @@ pub fn path_identity(path: &Path) -> String {
 }
 
 /// 路径比较用的归一 key：Windows 下大小写与分隔符都不该影响「是不是同一个目录」。
-fn path_key(path: &Path) -> String {
+///
+/// 只看字面、**不碰文件系统**——这是它与 [`path_identity`] 的分界：identity 走 `canonicalize`，
+/// 路径落在掉线的 UNC 上时会在调用方线程阻塞到 OS 自己放弃（实测 21 s），且同一个目录在线 /
+/// 掉线两个时刻会算出两个不同的值。凡是**在起扫描线程之前**就要对搜索根算 key 的地方
+/// （根的去重、闭包缓存的 key）必须用这个，不能用 identity；identity 留给已经扫到、确知可达
+/// 的目录（联接与目标、8.3 短名这类字面不同实为一处的写法只有它认得出）。
+pub fn path_key(path: &Path) -> String {
     let mut text = path.to_string_lossy().to_string();
     if cfg!(windows) {
         text = text.replace('/', "\\").to_ascii_lowercase();

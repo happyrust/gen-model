@@ -563,7 +563,7 @@ pub struct MdbProbeRequest {
 /// 声明缓存先忘掉再算：向导里 `project_path` 换来换去，同名主项目 + 同名 MDB 在另一棵目录树里
 /// 是另一份 SYS，不能拿上一次探测的声明顶。
 fn probe_mdb_closure(request: &MdbProbeRequest) -> serde_json::Value {
-    use crate::data_interface::{mdb_closure, project_locator, project_paths};
+    use crate::data_interface::{mdb_closure, project_locator};
 
     let mdb = request
         .mdb_name
@@ -572,17 +572,10 @@ fn probe_mdb_closure(request: &MdbProbeRequest) -> serde_json::Value {
         .filter(|mdb| !mdb.is_empty())
         .unwrap_or("ALL");
     let project_name = request.project_name.trim();
-    let mut roots: Vec<PathBuf> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for raw in std::iter::once(&request.project_path).chain(request.project_search_paths.iter()) {
-        if raw.trim().trim_matches('"').is_empty() {
-            continue;
-        }
-        let path = project_paths::normalize_path_input(raw);
-        if seen.insert(project_paths::path_identity(&path)) {
-            roots.push(path);
-        }
-    }
+    // 与启动同一套整理规则（字面去重、不碰文件系统——掉线 UNC 的等待要留给扫描线程的 15 s 上限）。
+    let roots = mdb_closure::collect_search_roots(
+        std::iter::once(&request.project_path).chain(request.project_search_paths.iter()),
+    );
     if roots.is_empty() {
         return json!({ "ok": false, "error": "project_path 不能为空" });
     }
