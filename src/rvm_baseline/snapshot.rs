@@ -90,6 +90,13 @@ pub struct SnapshotMeta {
     /// AABB 还是老口径，可能多转了一次旋转」，对拍侧据此决定要不要信。
     #[serde(default)]
     pub facet_aabb_from_vertices: usize,
+    /// FacetGroup 里被判为**亚容差壳**、不参与成员 AABB 的连通分量数（见
+    /// [`super::import`] 的 `facet_group_shell_components`）。E3D 在共壁接缝上会留下
+    /// 塌成零厚度的面片（1RS-WF03 的 GWALL 13：两个 xy 点、四个顶点、体积 0），生成侧
+    /// 同一处按 `2·V/A < RES_TOL_MM` 丢掉了对应的针——尺子两边同一把，这里也按同一条
+    /// 规则不让它定包围盒。0 就是这份基准里没有这种退化。
+    #[serde(default)]
+    pub subresolution_shell_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,5 +213,6 @@ impl RvmSnapshot {
             "  AABB 面片实算  : {} / {}",
             m.facet_aabb_from_vertices, m.geometry_count
         );
+        println!("  亚容差壳(不定 AABB): {}", m.subresolution_shell_count);
     }
 }
