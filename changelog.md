@@ -2,6 +2,33 @@
 
 ## 2026-09-15
 
+### 本地发布 0.1.26：项目集合由 MDB 派生、`computer_name` 别名删除
+
+- 后端 `0.1.26` 构建自 `f0369365e8a2`（**干净树**，build_id 不带 `.dirty`——打包跑在隔离 worktree
+  `gen-model-adr078` 上，主工作树里另外几路会话的在途改动一个字节都没进包），路径依赖 e3d-io
+  `6431ee7120`；前端 plant-ui 保持 `0.1.11` 并**复用 0.1.25 那份已验证 Web**
+  （`web_source = reused-from:ams-local-0.1.25…-runtime-workspace.zip`，13 个文件，脚本校验了来源包哈希），
+  只有 `web\setup.html` 按脚本约定从仓里覆盖成本版的向导页。plant-ui 工作树当时也有在途改动，
+  为此另开干净 worktree `plant-ui-0.1.11-clean` 取 `index.html` 与版本号。
+- 产物 `releases/ams-local-0.1.26_release.20260915133913.gf0369365e8a2-runtime-workspace.zip`
+  （209.3 MB / 219,485,672 B），SHA-256
+  `195b4280657c85e5d27621414754565e0557d6f5374de642cbefb6f15c0cf1f3`；包内 `aios-database.exe`
+  SHA-256 `f6f3c20a014f7510241f2ae1f5ead39893bcb719b940aa3ab53195aea5b696aa`。
+- 包型 `runtime-workspace`（带 `workspace\`、不带 `assets\meshes`），与 0.1.24 / 0.1.25 同档：
+  assets 灌入 165 个文件 / 115.6 MB，meshes 排除 83,130 个文件 / 1,142.4 MB。先误打过一份 `-full`
+  （465.3 MB，把本机 1.26 GB 的 meshes 也灌了进去），已删，`releases/` 里只留 runtime-workspace 这一份。
+- 覆盖 0.1.25（`0c6c62b3b5`，2026-09-15 出包）之后的 5 个提交。用户可见的两条主线写在
+  `docs/release-notes/0.1.26.md`：项目集合由 MDB 派生、项目目录在人指定的搜索根里按 `<code>000` 找
+  （ADR-078 取代 ADR-046，`included_projects` 退役、新键 `project_search_paths`、向导第①步重排、
+  出厂模板 `room_membership` 改 `false`）；`aios_db.parse.sessions` 的 `computer_name` 别名按
+  0.1.25 的预告删除（**破坏性**：仓外脚本读 `row["computer_name"]` 会 `KeyError`）。
+- 三腿冒烟全过：A 出厂配置起服务 `mode=setup` + 向导标记；B 本机配置全启动 `medium=mem` +
+  `durable=false` + 服务没拉 surreal 子进程；C 包内 `surreal.exe` 在 18010 起 rocksdb 库、服务连上
+  `medium=rocksdb` + `durable=true` + 数据目录落 7 个文件。冒烟口改用 19099——9099 上还挂着本轮
+  ADR-078 的真部署验证。
+- 验证口径：打包前在同一棵隔离 worktree 上跑过 `cargo test --lib` **2110 passed / 0 failed / 109 ignored**
+  与 `cargo check --all-targets`（绿）；python 绑定 `maturin develop` 后 `pytest tests/test_parse_offline.py`
+  13 passed；ADR-078 的真部署三条用例见 `docs/evidence/2026-09-15-adr078-mdb-project-closure.md`。
 ### 项目集合由 MDB 派生、项目目录在搜索根里按 `<code>000` 找；`included_projects` 退役（ADR-078，取代 ADR-046）
 
 - 起因：部署实例 `_runs\ams-0.1.25` 只勾了 `AvevaMarineSample`，AMS `/ALL` 声明的 41 个外部库
