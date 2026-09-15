@@ -332,8 +332,7 @@ mod gen_side {
         // flat projection 同口径。旧数据未遵守此身份时再兼容出边，不做 `WHERE in`
         // 整表扫。
         let relation_key = pe_key.replacen("pe:", "inst_relate:", 1);
-        let columns =
-            "world_trans.d AS wt, insts_flat, booled_id, direct_model.source AS model_source";
+        let columns = "world_trans.d AS wt, insts_flat, booled_id, model_sesno";
         let mut resp = db
             .query(format!("SELECT {columns} FROM {relation_key};"))
             .await
@@ -349,11 +348,10 @@ mod gen_side {
         let Some(row) = rows.into_iter().next() else {
             return Ok(None);
         };
-        let model_source = row.get("model_source").and_then(|value| value.as_str());
+        // 模型面写下的行才带 `model_sesno`；属性面独有的行没有它。
         anyhow::ensure!(
-            model_source == Some("e3d-model"),
-            "{pe_key} geometry source is {:?}, RVM acceptance only admits e3d-model output",
-            model_source
+            row.get("model_sesno").is_some_and(|value| !value.is_null()),
+            "{pe_key} is not a model-face row, RVM acceptance only admits e3d-model output"
         );
         let wt = mat_from_trans(row.get("wt").unwrap_or(&serde_json::Value::Null));
         let booled_id = row.get("booled_id").and_then(|v| v.as_str());

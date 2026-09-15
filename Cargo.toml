@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.1.24"
+version = "0.1.25"
 edition = "2024"
 description = "AVEVA E3D incremental parsing and geometry service"
 build = "build.rs"
@@ -42,10 +42,12 @@ manifold = ["dep:manifold-csg"]
 # 夹具、`scripts/e3d/Test-TtyNetWindow.ps1`、`scripts/e3d/verify_db8000_bran_window.ps1`）。
 # `pdms_io` 不许再出现在任何 manifest / 源码里——`scripts/Check-LegacyPdmsIo.ps1` +
 # `data_interface::mod.rs::legacy_pdms_io_guard` 两道护栏钉死。
-# 只有 OCC/gen_model 的可运行入口受 `legacy_model` 控制。
+# 只有 OCC/gen_model 的可运行入口受 `legacy_model` 控制。`legacy_model_gen` 2026-09-14
+# 随 `direct_model.source` 谓词一起退役——它是 `source='legacy'` 的唯一写入点，删掉之后
+# 全库只剩 e3d-model 一个模型来源，那道「哪些行是我的」的篱笆不再需要。
 legacy_model = []
-# Historical developer probes are deliberately not unlocked by
-# `legacy_model`; that feature exposes only `legacy_model_gen`.
+# Historical developer probes are deliberately not unlocked by `legacy_model`;
+# they additionally require this feature.
 legacy_diagnostics = []
 # old-parse-pdms-db（`parse_pdms_db`）已整体退出本仓（2026-09-04，第二张退役清单
 # `docs/plans/2026-09-04-parse-pdms-db-retirement-inventory.md` 的 B9；B1–B7 先把生产路径搬走：
@@ -82,11 +84,6 @@ required-features = ["rvm_verify"]
 name = "rvm_generated_obj_compare"
 path = "src/bin/rvm_generated_obj_compare.rs"
 required-features = ["rvm_verify"]
-
-[[bin]]
-name = "legacy_model_gen"
-path = "src/bin/legacy_model_gen.rs"
-required-features = ["legacy_model"]
 
 [[bin]]
 name = "performance_test"

@@ -200,6 +200,19 @@ pub struct GeneratedMemoryBatch {
     pub(crate) failures: Vec<(RefNo, String)>,
 }
 
+/// 一片切片按初始化口径折成的投影（ADR-077 D5）：逐根的 [`ProjectionCommit`]（带回执）与死信。
+/// 没有进过 `ModelMemoryStore`，也不会进——它只是渲 SQL 的输入。
+pub(crate) struct InitialSliceProjection {
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    /// 成功折出来的根：`(根, 提交, 这一根的账)`。零几何的根也在这里（回执 `geometry_count = 0`）。
+    pub commits: Vec<(RefNo, ProjectionCommit, E3dPersistReport)>,
+    /// 死信：生产端硬错 + 有失败元素的根。
+    pub failures: Vec<(RefNo, String)>,
+    /// 每个成功根 e3d-model DFS 访问到的子树元素名单（观测用，初始化不写透）。
+    pub visited_by_root: HashMap<RefNo, Vec<RefNo>>,
+}
+
 /// An initialization producer outcome. Success is a frozen projection, not a
 /// database completion and not a mutation of the process Current projection.
 pub struct FrozenGeneration {
@@ -339,8 +352,18 @@ fn spawn_generation_worker(
             // the mesh file write are the rest of this root's CPU cost, and
             // doing them here is what lets the `Manifold` die on this thread
             // instead of riding into the serial publication step.
-            let outcome = generate_snapshot_from_set(&set, &index, root, &mut cache)
-                .and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir));
+            let started = std::time::Instant::now();
+            let evaluated = generate_snapshot_from_set(&set, &index, root, &mut cache);
+            let evaluate_micros = started.elapsed().as_micros();
+            let outcome = evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir));
+            // 一根一行的生成账：整库那一档的墙钟压在哪几根上、是取数+几何还是烘焙，
+            // 只有按根记才看得出来——按批记会把长尾摊平（7999 上 25 根里几根就占了 80%）。
+            log::info!(
+                "model root generated: root={root} slot={slot} elements={} evaluate={:.1}ms bake={:.1}ms",
+                outcome.as_ref().map_or(0, |snapshot| snapshot.elements.len()),
+                evaluate_micros as f64 / 1000.0,
+                (started.elapsed().as_micros().saturating_sub(evaluate_micros)) as f64 / 1000.0,
+            );
             queue.store(slot, outcome);
         }
         return_cache(&caches, cache);
@@ -803,7 +826,7 @@ impl E3dModelService {
     /// receipts that lock protects.  What each slice carries out of here is the
     /// pinned `source_sesno`; the consumer re-checks it under the lock before it
     /// commits anything.
-    async fn produce_slices(
+    pub(crate) async fn produce_slices(
         &self,
         dbnum: u32,
         roots: &[String],
@@ -1060,6 +1083,77 @@ impl E3dModelService {
         Ok(total)
     }
 
+    /// 初始化直写（ADR-077 D4 / D5）的**投影半边**：把生产端交出的一片切片逐根折成
+    /// [`ProjectionCommit`]（带回执、无 removals），**不碰** `ModelMemoryStore`、不登记 write-behind、
+    /// 不读任何回执——初始化前库里没有旧行，也没有上一轮可比。渲成 SQL、交模型 lane 是
+    /// `model_initial_persist` 与 `dbnum_initialize` 的事。
+    ///
+    /// 与 [`Self::generate_refs`] 同一套死信口径：单根有失败元素 / 生产端硬错 = 该根死信，
+    /// 不拦同片的其他根（`BestEffortFallback`）；`Required` 才整片报错。
+    pub(crate) fn project_slice_for_initialization(
+        &self,
+        batch: GeneratedMemoryBatch,
+        failure_policy: GeometryFailurePolicy,
+    ) -> anyhow::Result<InitialSliceProjection> {
+        let GeneratedMemoryBatch {
+            dbnum,
+            source_sesno,
+            index,
+            dependency_sessions,
+            snapshots,
+            failures,
+            ..
+        } = batch;
+        // 目标里带着每个 CATA 依赖的文件身份；这一片生成完之后算一次、全片共用。
+        let model_target = self.model_target(dbnum, source_sesno, &dependency_sessions)?;
+        let mut projection = InitialSliceProjection {
+            dbnum,
+            source_sesno,
+            commits: Vec::with_capacity(snapshots.len()),
+            failures,
+            visited_by_root: HashMap::new(),
+        };
+        for (root, snapshot) in snapshots {
+            let root_failed = snapshot.report.failed.len();
+            if root_failed > 0 {
+                if matches!(failure_policy, GeometryFailurePolicy::Required) {
+                    bail!("e3d-model root {root} has {root_failed} failed element(s)");
+                }
+                log::error!(
+                    "e3d-model root {root} produced an incomplete candidate ({root_failed} failure(s)): {:?}",
+                    snapshot.report.failed
+                );
+                projection.failures.push((
+                    root,
+                    format!(
+                        "{root_failed} geometry element(s) failed: {:?}",
+                        snapshot.report.failed
+                    ),
+                ));
+                continue;
+            }
+            let publication = RootPublication {
+                root,
+                model_target: Some(model_target.clone()),
+                published: None,
+                projection_complete: false,
+            };
+            let (commit, mut report) = project_geometry_delta(
+                dbnum,
+                source_sesno,
+                snapshot.elements,
+                Vec::new(),
+                Some(&publication),
+                &index.owners,
+            )?;
+            report.skipped += snapshot.report.skipped.len();
+            report.generation_report = serde_json::to_value(&snapshot.report)?;
+            projection.visited_by_root.insert(root, snapshot.visited);
+            projection.commits.push((root, commit, report));
+        }
+        Ok(projection)
+    }
+
     /// 刚体前移执行体（ADR-066 B6）的**存储半边**：把「只动摆放」的根从整根重算改成「投影记录左乘
     /// Δ + 前移回执到 T」，只左乘并提交进内存投影——**生成服务不碰数据库**（登记 / durable flush 由
     /// 调用方在 batch_worker 里做，见 `run_rigid_motion_units`）。**保守优先**：任一前置不满足就把这根
@@ -1176,27 +1270,114 @@ impl E3dModelService {
         Ok(report)
     }
 
-    pub async fn generate_dbnum(
+    /// 这个库当前会话下的全部生成根：**每个 ZONE 一根**（文件侧枚举，一行库都不读）。
+    ///
+    /// 整库重生成用它把根取齐，再交给 [`Self::generate_and_persist_roots`]。根只到 ZONE，
+    /// **不上溯 SITE**（2026-09-14 定）：SITE 只拥有 ZONE，几何都在某个 ZONE 之下，上溯只会造出
+    /// 一个罩住别的 ZONE 根的 SITE 根——它那一片的整片删会把邻居刚落一半的行抹掉。文件顶层
+    /// （WORL）曾是这里的根：7997 上一个 WORL 装着全部 52,373 件，生成并行度为 0、渲成 66 MB
+    /// 撞事务硬顶；按 ZONE 取 142 根之后生成快 1.5–1.9×（几何闸利用率 6% → 39%），最大一根只占
+    /// 10%，回读逐字相同（`docs/plans/2026-09-14-zone-partitioned-model-persistence-dev-plan.md`）。
+    /// 想量文件顶层那一档，用 [`Self::top_level_roots_of`]。
+    ///
+    /// 库里一个 ZONE 都没有（不是 DESI 库、或空设计库）按错误上抛，不静默生成零根。
+    /// 此前并排有一个 `generate_dbnum` 自己取根再直落 [`Self::generate_refs`]，那是逐根串行、
+    /// 不过几何并发闸的老形态；生产（`model_refresh`）从来不走它，只有烟测在用。已退役。
+    pub async fn generation_roots_of(&self, dbnum: u32) -> anyhow::Result<Vec<String>> {
+        let pin = self.pin(dbnum)?;
+        let source_sesno = self.source_session(pin)?;
+        ensure_not_older_than_persisted(dbnum, source_sesno).await?;
+        let roots = self
+            .elements_with_noun(dbnum, "ZONE")?
+            .into_iter()
+            .map(|root| format!("{}/{}", root.word0, root.word1))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !roots.is_empty(),
+            "dbnum {dbnum} 在会话 {source_sesno} 里没有 ZONE 元素，按 ZONE 分组无根可取（不上溯 SITE）"
+        );
+        Ok(roots)
+    }
+
+    /// 初始化（ADR-077 D6）的交付单元根：**从文件枚举**，一行库都不读。
+    ///
+    /// 与 `model_dbnum_ensure::capture_snapshot` 同一条路（`enumerate_generation_roots` 从文件顶层
+    /// 元素往下走、按配置的交付单元类型收根），只是 `DbSet` / 索引复用本服务的生成输入缓存——随后
+    /// `produce_slices` 读的就是同一份。此前 `manual_update::load_baseline_nodes` 分页读 `pe` 表来
+    /// 枚举，那是初始化里属性面与模型面唯一的串行点。
+    pub(crate) fn initialization_roots(
         &self,
         dbnum: u32,
-        failure_policy: GeometryFailurePolicy,
-    ) -> anyhow::Result<E3dPersistReport> {
-        let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
+    ) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
+        let pin = self.pin(dbnum)?;
+        let source_sesno = self.source_session(pin)?;
+        let input = generation_input(self, dbnum, source_sesno)?;
+        let mut roots = crate::data_interface::generation_root::enumerate_generation_roots(
+            &input.set,
+            &input.index.roots,
+            &crate::data_interface::generation_root::configured_delivery_unit_types(),
+        )?;
+        // 共享遍历本就唯一；留这道护栏，畸形成员图不至于让任务总数与真正生成的集合对不上。
+        let mut seen = std::collections::HashSet::new();
+        roots.retain(|root| seen.insert(root.root.to_pdms_str()));
+        Ok(roots)
+    }
+
+    /// 这个库当前会话的文件顶层元素（owner 缺席 / 指向自身 / 不在索引里——通常就是 WORL，
+    /// 外加 MNUM / DBMETA 这类簿记根）。
+    ///
+    /// 这是 [`Self::generation_roots_of`] 2026-09-14 之前的取根口径，只留给烟测对照
+    /// （`e3d_persist_smoke --roots file`）：一个 WORL 一根意味着整库一笔生成、零并行。
+    pub async fn top_level_roots_of(&self, dbnum: u32) -> anyhow::Result<Vec<String>> {
         let pin = self.pin(dbnum)?;
         let source_sesno = self.source_session(pin)?;
         ensure_not_older_than_persisted(dbnum, source_sesno).await?;
         let input = generation_input(self, dbnum, source_sesno)?;
-        self.generate_refs(
-            dbnum,
-            source_sesno,
-            &input.set,
-            &input.index,
-            &input.index.roots,
-            failure_policy,
-            &input.dependency_sessions,
-            None,
-        )
-        .await
+        Ok(input
+            .index
+            .roots
+            .iter()
+            .map(|root| format!("{}/{}", root.word0, root.word1))
+            .collect())
+    }
+
+    /// 当前源会话里 noun 为 `noun` 的全部元素，按文件扫描序。
+    ///
+    /// 只读文件头（`ScanTier::Header`），按 noun hash 比对，不为每个元素反查名字——整库 17 万个
+    /// 元素扫一遍只为挑出一百多个 ZONE。[`Self::generation_roots_of`] 与烟测的 `--roots site`
+    /// 共用这一段。
+    pub fn elements_with_noun(&self, dbnum: u32, noun: &str) -> anyhow::Result<Vec<RefNo>> {
+        let pin = self.pin(dbnum)?;
+        let source_sesno = self.source_session(pin)?;
+        let wanted = e3d_attlib::db1_hash(noun);
+        let mut engine = ReadOnlyEngine::open_at(&pin.file, source_sesno)?;
+        let mut picked = Vec::new();
+        for element in engine.scan_elements(ScanTier::Header)? {
+            let element = element?;
+            if element.noun_hash == wanted {
+                picked.push(element.refno);
+            }
+        }
+        Ok(picked)
+    }
+
+    /// 解析侧的层级快照：这个库当前源会话里每个元素的 `(refno, owner, noun)`。
+    ///
+    /// 只读文件头（`ScanTier::Header`），不生成、不碰库。给 `e3d_persist_smoke --analyze` 做
+    /// 「按哪一层分组落库」的数据分析用——投影记录只带祖先 refno 链，不带祖先的 noun，
+    /// 要知道链上哪一个是 SITE / ZONE 只能回文件问。
+    pub fn hierarchy_of(&self, dbnum: u32) -> anyhow::Result<Vec<(RefNo, RefNo, String)>> {
+        let pin = self.pin(dbnum)?;
+        let source_sesno = self.source_session(pin)?;
+        let mut engine = ReadOnlyEngine::open_at(&pin.file, source_sesno)?;
+        let mut elements = Vec::new();
+        for element in engine.scan_elements(ScanTier::Header)? {
+            let element = element?;
+            let noun = e3d_attlib::db1_dehash(element.noun_hash)
+                .unwrap_or_else(|| format!("0x{:08X}", element.noun_hash));
+            elements.push((element.refno, element.owner, noun));
+        }
+        Ok(elements)
     }
 
     /// Generate one root at an exact source session without reading or writing
@@ -1736,7 +1917,7 @@ impl E3dModelService {
             .locator
             .file_of(target_dbnum)
             .map(|(project, _)| project);
-        let set = Arc::new(DbSet::with_attlib_file_and_resolver(
+        let set = DbSet::with_attlib_file_and_resolver(
             self.schema.template_dir().join("attlib.dat"),
             Box::new(E3dDbResolver {
                 locator: self.locator.clone(),
@@ -1746,7 +1927,18 @@ impl E3dModelService {
                 template_dir: self.schema.template_dir().to_path_buf(),
                 sessions: self.dependency_sessions.clone(),
             }),
-        )?);
+        )?;
+        // 池级元素缓存（[`crate::options::model_element_cache`]，**默认开**）。
+        // `DbSet::element` 每次造新句柄，于是 owner 链上溯与目录链走查会把同一批祖先、
+        // 同一批目录件反复查索引反复解析（AMS 7999 实测：15,968 个元素跑出 537 万次点查、
+        // 264 s，占生成 CPU 的 85%；开着之后生成 71.0 → 3.84 s）。关掉只是慢回去，
+        // 落下去的行逐字不变——它换的是内存（7997 峰值 768 MB → 1.55 GB），所以留了关位。
+        let set = if crate::options::model_element_cache() {
+            set.with_element_cache()
+        } else {
+            set
+        };
+        let set = Arc::new(set);
         for pin in &self.pins {
             // CATA identity belongs to the project-aware locator.  Preloading a
             // watermark path here can shadow the resolver with a same-dbnum file
@@ -2586,12 +2778,31 @@ fn ancestor_chain(refno: RefNo, owners: &BTreeMap<(u32, u32), RefNo>) -> anyhow:
     Ok(chain)
 }
 
+/// 一个 f32 进 JSON 数值，**不放大精度**。
+///
+/// `json!` 走的是 `From<f32> for Value`，而它做的是 `value as f64`：`0.1f32` 于是印成
+/// `0.10000000149011612`——20 个字符里 12 个是 f32 根本没有的位数。这些位不是精度，是
+/// 二进制展开的尾巴，读侧一位都用不上，却要按字节付钱：落库时间几乎全按 SQL 字节走
+/// （2026-09-14 AMS 7997 真写 RocksDB 实测 `commit(ms) ≈ 37.5 + 0.231 × sql_KB`，R²=0.84）。
+///
+/// 这里先把 f32 印成**它自己的最短往返写法**，再解回 f64。代价是存下来的 f64 不再逐位
+/// 等于 `value as f64`，差一个 f32 ULP 以内——几何本来就只有 f32 这一份真值，
+/// 拿它跟现算的 f32 做逐位比对的地方不该存在。非有限值照旧落 `null`，与 `json!` 一致。
+pub(crate) fn f32_value(value: f32) -> Value {
+    json!(value.to_string().parse::<f64>().unwrap_or(value as f64))
+}
+
+/// [`f32_value`] 的定长数组版：坐标、包围盒角点、四元数都走它。
+pub(crate) fn f32_values<const N: usize>(values: [f32; N]) -> Value {
+    Value::Array(values.into_iter().map(f32_value).collect())
+}
+
 pub(crate) fn transform_value(matrix: DMat4) -> Value {
     let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
     json!({
-        "translation": [translation.x as f32, translation.y as f32, translation.z as f32],
-        "rotation": [rotation.x as f32, rotation.y as f32, rotation.z as f32, rotation.w as f32],
-        "scale": [scale.x as f32, scale.y as f32, scale.z as f32]
+        "translation": f32_values([translation.x as f32, translation.y as f32, translation.z as f32]),
+        "rotation": f32_values([rotation.x as f32, rotation.y as f32, rotation.z as f32, rotation.w as f32]),
+        "scale": f32_values([scale.x as f32, scale.y as f32, scale.z as f32])
     })
 }
 
@@ -2604,6 +2815,28 @@ mod tests {
     use super::*;
     use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
+
+    /// f32 印进 SQL 时只许带 f32 有的那几位。`json!` 的 `value as f64` 会把二进制展开的
+    /// 尾巴一起印出来，而落库时间几乎全按字节走——这条钉住的是**字节**，不是数值。
+    #[test]
+    fn a_f32_renders_with_only_the_digits_it_actually_has() {
+        assert_eq!(f32_value(0.1).to_string(), "0.1");
+        assert_eq!(json!(0.1_f32).to_string(), "0.10000000149011612");
+        assert_eq!(f32_value(1.0).to_string(), "1.0");
+        assert_eq!(f32_values([0.1_f32, -2.5, 0.0]).to_string(), "[0.1,-2.5,0.0]");
+        // 解回来还是同一个 f32：短的只是写法，不是精度。
+        for value in [0.1_f32, -12345.678, 1.0e-7, f32::MAX, f32::MIN_POSITIVE] {
+            let rendered = f32_value(value).to_string();
+            assert_eq!(
+                rendered.parse::<f64>().expect("finite") as f32,
+                value,
+                "{rendered} 必须往返回同一个 f32"
+            );
+        }
+        // 非有限值与 `json!` 今天一样落 null，不会渲出 `NaN` 这种 SurrealQL 认不得的字面量。
+        assert_eq!(f32_value(f32::NAN).to_string(), "null");
+        assert_eq!(f32_value(f32::INFINITY).to_string(), "null");
+    }
 
     #[test]
     fn persist_report_merge_keeps_failed_root_identity() {
@@ -3004,8 +3237,12 @@ mod tests {
             name: None,
             solid: manifold_csg::Manifold::compose(&parts),
             parts: Some(parts),
+            part_catalogue_nouns: Vec::new(),
+            degenerate_parts: Vec::new(),
+            part_record_repeats: Vec::new(),
             world,
             primitive_instance: None,
+            analytic_primitive: None,
             negatives_applied: 0,
             negatives_skipped: vec![],
             notes: vec![],
@@ -3043,8 +3280,12 @@ mod tests {
                 name: None,
                 solid: manifold_csg::Manifold::compose(&parts),
                 parts: Some(parts),
+                part_catalogue_nouns: Vec::new(),
+                degenerate_parts: Vec::new(),
+                part_record_repeats: Vec::new(),
                 world,
                 primitive_instance: None,
+                analytic_primitive: None,
                 negatives_applied: 0,
                 negatives_skipped: vec![],
                 notes: vec![],
@@ -3538,7 +3779,7 @@ mod tests {
             .split_once("pub async fn generate_and_persist_roots(")
             .expect("generation pipeline")
             .1
-            .split_once("pub async fn generate_dbnum(")
+            .split_once("pub(crate) async fn republish_roots_by_rigid_motion(")
             .expect("generation pipeline end")
             .0;
         assert!(
@@ -3559,6 +3800,34 @@ mod tests {
         assert!(
             !production_half(source).contains("fn generate_dbnum_in_memory("),
             "producing a whole dbnum into one batch is the unbounded shape ADR-041 §8 rejected"
+        );
+    }
+
+    /// 整库那一档只剩一条入口：[`E3dModelService::generation_roots_of`] 取根，再交给
+    /// `generate_and_persist_roots`。并排那个 `generate_dbnum` 自己取根、逐根串行直落
+    /// `generate_refs`，**不过几何并发闸**（闸利用率实测 0.0%）；生产从不走它，只有烟测在用，
+    /// 于是烟测量出来的「生成耗时」一直是串行那条路的数。取根这一步必须保持纯枚举——它一旦
+    /// 自己生成起来，那条串行路就原样回来了，而且照样没人发现。
+    #[test]
+    fn a_whole_dbnum_generates_only_through_the_parallel_producer() {
+        let source = service_source();
+        let source = source.as_str();
+        assert!(
+            !production_half(source).contains("fn generate_dbnum("),
+            "the serial whole-dbnum entry is retired; a whole dbnum enters through \
+             generation_roots_of + generate_and_persist_roots"
+        );
+        let enumerate = source
+            .split_once("pub async fn generation_roots_of(")
+            .expect("root enumeration")
+            .1
+            .split_once("\n    }\n")
+            .expect("root enumeration end")
+            .0;
+        assert!(
+            !enumerate.contains("generate_refs("),
+            "enumerating roots stays a pure file-side read; generating here rebuilds the \
+             serial entry that was retired"
         );
     }
 

@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use aios_core::SUL_DB;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, get_db_option};
@@ -29,6 +29,9 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
+use crate::data_interface::cata_closure_cache::{
+    CachedCataElement, CatalogueIdentity, closure_cache,
+};
 use crate::data_interface::dbnum_state::WATERMARK_TABLE;
 use crate::data_interface::increment_pipeline::wrap_in_transaction;
 use crate::data_interface::on_demand_db::OnDemandDbSession;
@@ -900,10 +903,12 @@ async fn parse_refnos_with_session(
                 let merged = ele.att;
                 let outbound = outbound_refs_of(&merged);
                 let children = dedupe_members(refno, &ele.children);
-                if let Some(sink) = attmap_sink.as_deref_mut() {
-                    sink.insert(refno, (merged.clone(), children.clone()));
-                }
                 let noun_name = merged.get_type_str().trim().to_uppercase();
+                // 属性表交给 sink 就不再用了——`noun_name` 已经取过，这里搬走而不是复制一份
+                // （闭包一轮上万个元素，多一次 `NamedAttrMap` 深拷贝就是白花的内存与时间）。
+                if let Some(sink) = attmap_sink.as_deref_mut() {
+                    sink.insert(refno, (merged, children.clone()));
+                }
                 out.insert(
                     refno,
                     ParsedCataEle {
@@ -1038,6 +1043,118 @@ impl CataClosureConfig {
     }
 }
 
+/// 一次闭包的拆项账（plan 2026-09-15 S0 取证：解析缓存落地前先量「哪一步在重复、重复多少」）。
+/// **只记账，不改行为**——每一格都是 `resolve()` 本来就要做的事的计时 / 计数。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClosureAccount {
+    /// 解析缓存命中的 refno 数（这些元素没有碰文件）。
+    pub cache_hits: usize,
+    /// 查了缓存但没命中的 refno 数（缓存关着 / 说不清库身份时不计）。
+    pub cache_misses: usize,
+    /// 请求解析的 refno 数（`parse_element` 的调用次数）。
+    pub parse_requests: usize,
+    /// 解析成功的 refno 数。
+    pub parsed: usize,
+    /// 打开的库会话数（每库每次 resolve 一次 `OnDemandDbSession::open`；全命中的库不开）。
+    pub sessions_opened: usize,
+    /// 取库身份（文件指纹 + 目录会话号，每库每次 resolve 一次）累计。
+    pub identity_ms: u128,
+    /// 打开会话（`ReadOnlyEngine::open`，含 extract 父文件）累计。
+    pub open_ms: u128,
+    /// 逐 refno `parse_element` 累计。
+    pub parse_ms: u128,
+    /// 扩边（outbound / owner / children → 下一轮 frontier）累计。
+    pub expand_ms: u128,
+}
+
+/// 一个目录库此刻的身份（plan 2026-09-15 D2）：文件指纹 + 目录会话号。两者都取得到才敢复用
+/// 上一次的解析结果——指纹取不到（文件没了 / 读不到元数据）或文件头读不出会话号时回 `None`，
+/// 该库这一轮既不查缓存也不写缓存，照旧解析。
+fn catalogue_identity(path: &Path) -> Option<CatalogueIdentity> {
+    let fingerprint = locator_fingerprint(path);
+    if fingerprint.is_empty() {
+        return None;
+    }
+    let target_sesno = crate::data_interface::frozen_source::FrozenSource::capture(path)
+        .ok()?
+        .target_sesno();
+    Some(CatalogueIdentity {
+        fingerprint,
+        target_sesno,
+    })
+}
+
+/// 每库一把闸（plan 2026-09-15 D4-3）：同库并发的 resolver 在「重查缓存 → 解析 → 写缓存」这一段
+/// 排队，异库并行。排到的先重查一遍缓存，重复解析就只剩「同一批同时 miss」这一种。
+static CATALOGUE_GATES: Lazy<std::sync::Mutex<HashMap<(String, u32), Arc<TokioMutex<()>>>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn catalogue_gate(project: &str, dbnum: u32) -> Arc<TokioMutex<()>> {
+    let mut gates = CATALOGUE_GATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    gates
+        .entry((project.to_string(), dbnum))
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
+
+/// 一个元素的出向边 / owner / 容器子树 → 下一轮 frontier。
+///
+/// **命中路与解析路共用这一段**（plan 2026-09-15 D4-1）：缓存里存的是元素的原始事实，扩边规则
+/// （容器白名单 / owner 链 / 只收 CATA）由本次 `cfg` 现施加——两份扩边逻辑一旦分家，缓存命中的
+/// 那一半就会悄悄按另一套规则走。
+fn expand_into(
+    ele: &ParsedCataEle,
+    include_owner: bool,
+    follow_children: bool,
+    container_allow: Option<&HashSet<String>>,
+    next: &mut Vec<RefU64>,
+) {
+    next.extend(ele.outbound.iter().copied());
+    if include_owner && is_valid_ref0(ele.owner.get_0()) {
+        next.push(ele.owner);
+    }
+    if follow_children {
+        let expand_children = match container_allow {
+            None => true,
+            Some(allow) => allow.contains(&ele.noun_name),
+        };
+        if expand_children {
+            next.extend(ele.children.iter().copied());
+        }
+    }
+}
+
+/// 在解析缓存里过一遍这一批 refno：回「命中表 + 未命中名单 + 这次是否真查了缓存」。
+/// 缓存关着或说不清库身份时回 `(空, 全量, false)`——`cache_misses` 只统计真查过的那些。
+fn take_cached(
+    scope: Option<&(String, CatalogueIdentity)>,
+    dbnum: u32,
+    wanted: &[RefU64],
+) -> (HashMap<RefU64, Arc<CachedCataElement>>, Vec<RefU64>, bool) {
+    let Some((project, identity)) = scope else {
+        return (HashMap::new(), wanted.to_vec(), false);
+    };
+    let mut cache = closure_cache();
+    if !cache.enabled() {
+        return (HashMap::new(), wanted.to_vec(), false);
+    }
+    // 登记本次看到的库身份：与缓存里记的不一致就整库作废，之后的 get / insert 都以这份为准。
+    cache.begin_catalogue(project, dbnum, identity);
+    let mut hits = HashMap::new();
+    let mut misses = Vec::new();
+    for refno in wanted {
+        match cache.get(project, dbnum, *refno) {
+            Some(entry) => {
+                hits.insert(*refno, entry);
+            }
+            None => misses.push(*refno),
+        }
+    }
+    (hits, misses, true)
+}
+
 /// 闭包结果：每个 CATA dbnum 需解析的 refno 集合 + 统计。
 #[derive(Debug, Clone, Default)]
 pub struct CataClosureManifest {
@@ -1053,6 +1170,20 @@ pub struct CataClosureManifest {
     pub missing: usize,
     /// 缺失样例，供现场区分定位失败、清单缺失和选中文件内不存在。
     pub missing_samples: Vec<String>,
+    /// 拆项账（S0 取证）。
+    pub account: ClosureAccount,
+}
+
+/// 一轮里交给一个库去解析的 refno 名单：滤掉已 visited 的，再去掉**本轮自身的重复**，保持首次出现的顺序。
+///
+/// 上一轮 `next` 里同一个 refno 被几个父元素各指一次、`frontier.push` 不去重，本轮它就在 `refs` 里出现几次；
+/// 只滤 visited 拦不住它，`parse_refnos_with_session` 会逐条真解、到 `HashMap` 收敛时才合成一个。
+/// 7997 实测（plan 2026-09-15 S0）：21,592 次 `parse_element` 里 6,088 次是这种白解（28 %），8000 是 9.5 %。
+fn round_parse_list(refs: Vec<RefU64>, visited: &HashSet<RefU64>) -> Vec<RefU64> {
+    let mut seen_this_round = HashSet::with_capacity(refs.len());
+    refs.into_iter()
+        .filter(|r| !visited.contains(r) && seen_this_round.insert(*r))
+        .collect()
 }
 
 /// refno 级 CATA 引用闭包引擎（BFS）。
@@ -1069,6 +1200,11 @@ pub struct CataClosureResolver<'a, L: CataDbLocator> {
     retain_attmaps: bool,
     /// `retain_attmaps` 开启时收集：refno -> (完整属性表, children)。
     attmaps: HashMap<RefU64, (NamedAttrMap, Vec<RefU64>)>,
+    /// 本次 resolve 里每库的解析缓存作用域 `(project, 身份)`，每库只算一次；`None` = 这库不走缓存。
+    catalogue_scopes: HashMap<u32, Option<(String, CatalogueIdentity)>>,
+    /// 库身份怎么取：默认读真文件（[`catalogue_identity`]）。单测换成桩，好在没有真 dabacon
+    /// 文件的情况下走完「查缓存 → 命中扩边」这条路。
+    identity_probe: fn(&Path) -> Option<CatalogueIdentity>,
 }
 
 impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
@@ -1081,6 +1217,8 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
             sessions: HashMap::new(),
             retain_attmaps: false,
             attmaps: HashMap::new(),
+            catalogue_scopes: HashMap::new(),
+            identity_probe: catalogue_identity,
         }
     }
 
@@ -1093,6 +1231,35 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
     /// 取走保留的属性表（`retain_attmaps` 开启时在 `resolve()` 后调用）。
     pub fn take_attmaps(&mut self) -> HashMap<RefU64, (NamedAttrMap, Vec<RefU64>)> {
         std::mem::take(&mut self.attmaps)
+    }
+
+    /// 单测用：把库身份的取法换成桩（仓里没有可解析的 dabacon 夹具，真文件那一步走不通）。
+    #[cfg(test)]
+    pub(crate) fn with_identity_probe(
+        mut self,
+        probe: fn(&Path) -> Option<CatalogueIdentity>,
+    ) -> Self {
+        self.identity_probe = probe;
+        self
+    }
+
+    /// 这一库的缓存作用域 `(project, 身份)`——每次 resolve 每库只算一次（要读一次文件头）。
+    fn catalogue_scope(
+        &mut self,
+        dbnum: u32,
+        file: Option<&(String, PathBuf)>,
+        spent: &mut std::time::Duration,
+    ) -> Option<(String, CatalogueIdentity)> {
+        if let Some(known) = self.catalogue_scopes.get(&dbnum) {
+            return known.clone();
+        }
+        let started = std::time::Instant::now();
+        let scope = file.and_then(|(project, path)| {
+            (self.identity_probe)(path).map(|identity| (project.clone(), identity))
+        });
+        *spent += started.elapsed();
+        self.catalogue_scopes.insert(dbnum, scope.clone());
+        scope
     }
 
     /// 播种：把从 DESI 收集到的出向引用作为闭包起点。非 CATA 的种子会在收口阶段被丢弃。
@@ -1122,6 +1289,12 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
         let mut rounds = 0usize;
         // 缺 db_type 的登记行每库只告警一次（frontier 里同库引用成百上千）。
         let mut warned_untyped: HashSet<u32> = HashSet::new();
+        // S0 取证的拆项账：耗时先攒 Duration，收尾再折成 ms（逐批折会把亚毫秒的批全折成 0）。
+        let mut account = ClosureAccount::default();
+        let mut identity_spent = std::time::Duration::ZERO;
+        let mut open_spent = std::time::Duration::ZERO;
+        let mut parse_spent = std::time::Duration::ZERO;
+        let mut expand_spent = std::time::Duration::ZERO;
 
         while !self.frontier.is_empty() && rounds < max_rounds {
             rounds += 1;
@@ -1174,109 +1347,185 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
             }
 
             for (dbnum, refs) in by_db {
-                let to_parse: Vec<RefU64> = refs
-                    .into_iter()
-                    .filter(|r| !self.visited.contains(r))
-                    .collect();
+                let to_parse = round_parse_list(refs, &self.visited);
                 if to_parse.is_empty() {
                     continue;
                 }
 
+                let file = self.locator.file_of(dbnum);
                 crate::data_interface::batch_worker::note_dependency_location(
                     "dependency_closure",
                     Some(dbnum),
-                    self.locator
-                        .file_of(dbnum)
-                        .map(|(_, path)| path.display().to_string()),
+                    file.as_ref().map(|(_, path)| path.display().to_string()),
                     seed_count as u64,
                 );
 
-                // 确保该库会话已打开（一次性 open + 建索引；后续轮复用）。
-                if !self.sessions.contains_key(&dbnum) {
-                    let Some((project, path)) = self.locator.file_of(dbnum) else {
-                        missing += to_parse.len();
-                        for r in &to_parse {
-                            if missing_samples.len() < 32 {
-                                missing_samples
-                                    .push(format!("{r:?}: dbnum={dbnum} has no selected file"));
-                            }
-                            self.visited.insert(*r); // 无文件信息也标记，避免无限重试
-                        }
-                        continue;
+                // 1. 先查解析缓存（plan 2026-09-15 D4）：全命中的库连文件都不用打开。
+                let scope = self.catalogue_scope(dbnum, file.as_ref(), &mut identity_spent);
+                let (mut cached, mut misses, consulted) =
+                    take_cached(scope.as_ref(), dbnum, &to_parse);
+                account.cache_hits += cached.len();
+                if consulted {
+                    account.cache_misses += misses.len();
+                }
+
+                // 2. 没命中的照旧解析：同库并发的 resolver 在这一段排队，排到的先重查一遍缓存。
+                let mut parsed: HashMap<RefU64, ParsedCataEle> = HashMap::new();
+                if !misses.is_empty() {
+                    let gate = match (consulted, scope.as_ref()) {
+                        (true, Some((project, _))) => Some(catalogue_gate(project, dbnum)),
+                        _ => None,
                     };
-                    match open_db_session(&project, &path) {
-                        Ok(sess) => {
-                            self.sessions.insert(dbnum, sess);
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "[cata_closure] 打开闭包依赖库失败: dbnum={} path={} error={}",
-                                dbnum,
-                                path.display(),
-                                e
-                            );
-                            missing += to_parse.len();
-                            for r in &to_parse {
-                                if missing_samples.len() < 32 {
-                                    missing_samples.push(format!(
-                                        "{r:?}: dbnum={dbnum} selected file open failed: {e}"
-                                    ));
+                    let held = match gate.as_ref() {
+                        Some(gate) => Some(gate.lock().await),
+                        None => None,
+                    };
+                    if held.is_some() {
+                        // 等闸期间同库的另一个 resolver 可能已经把这一批解进缓存了。
+                        let (late, still_missing, _) = take_cached(scope.as_ref(), dbnum, &misses);
+                        account.cache_hits += late.len();
+                        account.cache_misses -= late.len();
+                        cached.extend(late);
+                        misses = still_missing;
+                    }
+
+                    // 确保该库会话已打开（一次性 open + 建索引；后续轮复用）。
+                    let session_ready = !misses.is_empty()
+                        && match (self.sessions.contains_key(&dbnum), file.as_ref()) {
+                            (true, _) => true,
+                            (false, None) => {
+                                missing += misses.len();
+                                for r in &misses {
+                                    if missing_samples.len() < 32 {
+                                        missing_samples.push(format!(
+                                            "{r:?}: dbnum={dbnum} has no selected file"
+                                        ));
+                                    }
+                                    self.visited.insert(*r); // 无文件信息也标记，避免无限重试
                                 }
-                                self.visited.insert(*r);
+                                false
                             }
-                            continue;
+                            (false, Some((project, path))) => {
+                                let open_started = std::time::Instant::now();
+                                let opened = open_db_session(project, path);
+                                open_spent += open_started.elapsed();
+                                match opened {
+                                    Ok(sess) => {
+                                        account.sessions_opened += 1;
+                                        self.sessions.insert(dbnum, sess);
+                                        true
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "[cata_closure] 打开闭包依赖库失败: dbnum={} path={} error={}",
+                                            dbnum,
+                                            path.display(),
+                                            e
+                                        );
+                                        missing += misses.len();
+                                        for r in &misses {
+                                            if missing_samples.len() < 32 {
+                                                missing_samples.push(format!(
+                                                    "{r:?}: dbnum={dbnum} selected file open failed: {e}"
+                                                ));
+                                            }
+                                            self.visited.insert(*r);
+                                        }
+                                        false
+                                    }
+                                }
+                            }
+                        };
+
+                    if session_ready {
+                        // 属性表：`retain_attmaps` 要，写缓存也要（缓存存的是元素的原始事实）。
+                        let mut fresh_atts: HashMap<RefU64, (NamedAttrMap, Vec<RefU64>)> =
+                            HashMap::new();
+                        account.parse_requests += misses.len();
+                        parsed = {
+                            let session =
+                                self.sessions.get_mut(&dbnum).expect("session just ensured");
+                            let attmap_sink = if self.retain_attmaps || scope.is_some() {
+                                Some(&mut fresh_atts)
+                            } else {
+                                None
+                            };
+                            let parse_started = std::time::Instant::now();
+                            let parsed =
+                                parse_refnos_with_session(session, &misses, attmap_sink).await?;
+                            parse_spent += parse_started.elapsed();
+                            parsed
+                        };
+                        account.parsed += parsed.len();
+
+                        // 3. 解析成功的写回缓存。`Ok(None)`（库里没有）与 `Err`（解析失败）
+                        //    根本不在 `parsed` 里，天然不会被记住——下一次仍然照解。
+                        if let Some((project, identity)) = scope.as_ref() {
+                            let mut cache = closure_cache();
+                            cache.begin_catalogue(project, dbnum, identity);
+                            for (refno, ele) in &parsed {
+                                let Some((att, children)) = fresh_atts.remove(refno) else {
+                                    continue;
+                                };
+                                if self.retain_attmaps {
+                                    self.attmaps.insert(*refno, (att.clone(), children));
+                                }
+                                cache.insert(
+                                    project,
+                                    dbnum,
+                                    CachedCataElement::new(ele.clone(), att),
+                                );
+                            }
+                        } else if self.retain_attmaps {
+                            self.attmaps.extend(fresh_atts.drain());
                         }
                     }
                 }
 
-                let parsed = {
-                    let session = self.sessions.get_mut(&dbnum).expect("session just ensured");
-                    let attmap_sink = if self.retain_attmaps {
-                        Some(&mut self.attmaps)
-                    } else {
-                        None
-                    };
-                    parse_refnos_with_session(session, &to_parse, attmap_sink).await?
-                };
+                // 命中的元素也要交出属性表——渲染那一侧分不出这一行是解出来的还是缓存来的。
+                if self.retain_attmaps {
+                    for (refno, entry) in &cached {
+                        self.attmaps.insert(
+                            *refno,
+                            (entry.att.clone(), entry.parsed.children.clone()),
+                        );
+                    }
+                }
+
                 crate::data_interface::batch_worker::note_dependency_progress(
                     "dependency_closure",
                     Some(dbnum),
-                    self.locator
-                        .file_of(dbnum)
-                        .map(|(_, path)| path.display().to_string()),
+                    file.as_ref().map(|(_, path)| path.display().to_string()),
                     seed_count as u64,
-                    parsed.len() as u64,
+                    (parsed.len() + cached.len()) as u64,
                     missing as u64,
                 );
 
+                let expand_started = std::time::Instant::now();
                 let mut next: Vec<RefU64> = Vec::new();
                 for r in &to_parse {
                     if !self.visited.insert(*r) {
                         continue;
                     }
-                    match parsed.get(r) {
+                    match parsed
+                        .get(r)
+                        .or_else(|| cached.get(r).map(|entry| &entry.parsed))
+                    {
                         Some(ele) => {
                             by_dbnum.entry(dbnum).or_default().insert(*r);
-                            next.extend(ele.outbound.iter().copied());
-                            if include_owner && is_valid_ref0(ele.owner.get_0()) {
-                                next.push(ele.owner);
-                            }
-                            if follow_children {
-                                let expand_children = match &container_allow {
-                                    None => true,
-                                    Some(allow) => allow.contains(&ele.noun_name),
-                                };
-                                if expand_children {
-                                    next.extend(ele.children.iter().copied());
-                                }
-                            }
+                            expand_into(
+                                ele,
+                                include_owner,
+                                follow_children,
+                                container_allow.as_ref(),
+                                &mut next,
+                            );
                         }
                         None => {
                             missing += 1; // 请求了但本库未找到 / 解析失败
                             if missing_samples.len() < 32 {
-                                let path = self
-                                    .locator
-                                    .file_of(dbnum)
+                                let path = file
+                                    .as_ref()
                                     .map(|(_, path)| path.display().to_string())
                                     .unwrap_or_else(|| "<none>".to_string());
                                 missing_samples
@@ -1290,12 +1539,17 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
                         self.frontier.push(n);
                     }
                 }
+                expand_spent += expand_started.elapsed();
             }
         }
 
         if missing > 0 {
             eprintln!("[cata_closure] 闭包缺失明细: missing={missing} samples={missing_samples:?}");
         }
+        account.identity_ms = identity_spent.as_millis();
+        account.open_ms = open_spent.as_millis();
+        account.parse_ms = parse_spent.as_millis();
+        account.expand_ms = expand_spent.as_millis();
         Ok(CataClosureManifest {
             by_dbnum,
             seed_count,
@@ -1303,6 +1557,7 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
             rounds,
             missing,
             missing_samples,
+            account,
         })
     }
 }
@@ -1652,6 +1907,199 @@ mod tests {
         assert!(
             message.contains("pe:24381_34109"),
             "错误必须带重复 child: {message}"
+        );
+    }
+
+    /// S1a（plan 2026-09-15）：同一轮里同一个 refno 被几个父元素各推进 frontier 一次，只能 `parse_element` 一次；
+    /// 已 visited 的不解；名单保持首次出现的顺序（`parse_refnos_with_session` 的告警 / 留痕顺序不因去重打乱）。
+    #[test]
+    fn a_round_parses_each_refno_once_even_when_several_parents_point_at_it() {
+        let a = RefU64((5052u64 << 32) | 1);
+        let b = RefU64((5052u64 << 32) | 2);
+        let c = RefU64((5052u64 << 32) | 3);
+        let visited = HashSet::from([c]);
+        assert_eq!(
+            round_parse_list(vec![a, b, a, c, b, a, c], &visited),
+            vec![a, b],
+            "重复的只留第一次，visited 的一个不留"
+        );
+        assert_eq!(round_parse_list(vec![c, c], &visited), Vec::<RefU64>::new());
+        assert_eq!(round_parse_list(Vec::new(), &visited), Vec::<RefU64>::new());
+
+        // 源码钉：`resolve()` 的 to_parse 必须经这一个口子——退回「只滤 visited」就是把 28 % 的白解请回来。
+        assert!(
+            resolve_body().contains("let to_parse = round_parse_list(refs, &self.visited);"),
+            "resolve() 的本轮解析名单必须经 round_parse_list 去重"
+        );
+    }
+
+    /// `resolve()` 的函数体（源码钉取材用）：函数签名到 Phase 3 分隔线之间，不含本测试模块。
+    fn resolve_body() -> String {
+        include_str!("cata_closure.rs")
+            .replace("\r\n", "\n")
+            .split_once("pub async fn resolve(&mut self)")
+            .expect("resolve 还在")
+            .1
+            .split_once("\n// ──")
+            .expect("resolve 之后是 Phase 3 分隔线")
+            .0
+            .to_string()
+    }
+
+    /// S2 单测夹具：一个目录元素的原始事实（属性表只放 NAME，够认出是哪一条）。
+    fn cata_element(dbnum: u32, n: u64, outbound: Vec<RefU64>) -> CachedCataElement {
+        let refno = RefU64(((dbnum as u64) << 32) | n);
+        let mut att = NamedAttrMap::default();
+        att.map.insert(
+            "NAME".into(),
+            NamedAttrValue::StringType(format!("/S2-{dbnum}-{n}")),
+        );
+        CachedCataElement::new(
+            ParsedCataEle {
+                refno,
+                owner: RefU64(0), // 无效 ref0：不让 owner 链把闭包引到别处去
+                noun: 1,
+                noun_name: "SCOM".into(),
+                outbound,
+                children: Vec::new(),
+            },
+            att,
+        )
+    }
+
+    fn cata_locator(project: &str, dbnum: u32, path: &str) -> InMemoryCataLocator {
+        InMemoryCataLocator::from_parts(
+            HashMap::from([(dbnum, dbnum)]),
+            HashMap::from([(
+                dbnum,
+                (
+                    "CATA".to_string(),
+                    project.to_string(),
+                    PathBuf::from(path),
+                ),
+            )]),
+        )
+    }
+
+    /// S2（plan 2026-09-15 D4）：缓存命中的元素不碰文件——连库会话都不开——但照样进 `by_dbnum`、
+    /// 照样按本次 cfg 扩边、照样交出属性表。定位器指向一个不存在的文件：真去开就必然失败，
+    /// `missing=0` 才说明这一轮一个字节都没读。
+    #[tokio::test]
+    async fn a_cached_element_expands_and_lands_without_opening_the_catalogue_file() {
+        const PROJECT: &str = "s2-hit";
+        const DBNUM: u32 = 5052;
+        fn probe(_path: &Path) -> Option<CatalogueIdentity> {
+            Some(CatalogueIdentity {
+                fingerprint: "s2-hit:1".to_string(),
+                target_sesno: 7,
+            })
+        }
+
+        let head = RefU64(((DBNUM as u64) << 32) | 1);
+        let tail = RefU64(((DBNUM as u64) << 32) | 2);
+        {
+            let mut cache = closure_cache();
+            cache.begin_catalogue(PROJECT, DBNUM, &probe(Path::new("x")).unwrap());
+            cache.insert(PROJECT, DBNUM, cata_element(DBNUM, 1, vec![tail]));
+            cache.insert(PROJECT, DBNUM, cata_element(DBNUM, 2, Vec::new()));
+        }
+
+        let locator = cata_locator(PROJECT, DBNUM, "no-such-catalogue.db");
+        let mut resolver = CataClosureResolver::new(&locator, CataClosureConfig::default())
+            .with_retain_attmaps(true)
+            .with_identity_probe(probe);
+        resolver.seed([head]);
+        let manifest = resolver.resolve().await.expect("resolve");
+
+        assert_eq!(
+            manifest.by_dbnum,
+            BTreeMap::from([(DBNUM, BTreeSet::from([head, tail]))]),
+            "命中的元素照样落进 manifest，且 head 的出向边要被扩出来"
+        );
+        assert_eq!(manifest.missing, 0, "一个都没去文件里找");
+        assert_eq!(manifest.account.cache_hits, 2);
+        assert_eq!(manifest.account.cache_misses, 0);
+        assert_eq!(manifest.account.parse_requests, 0, "命中路不许调 parse_element");
+        assert_eq!(manifest.account.sessions_opened, 0, "全命中的库不开会话");
+
+        let attmaps = resolver.take_attmaps();
+        assert_eq!(attmaps.len(), 2, "命中的元素也要交出属性表");
+        let name = attmaps
+            .get(&tail)
+            .and_then(|(att, _)| att.map.get("NAME"))
+            .cloned();
+        assert!(
+            matches!(name, Some(NamedAttrValue::StringType(ref s)) if s == "/S2-5052-2"),
+            "交出来的是缓存里那一份: {name:?}"
+        );
+    }
+
+    /// S2：解析不出来的元素**不许**进缓存——打不开文件 / 库里没有 / 解析失败都一样。
+    /// 同一批连解两次，第二次照旧是 miss（缓存里若留了空壳，第二次就会变成命中的假数据）。
+    #[tokio::test]
+    async fn a_catalogue_that_cannot_be_opened_leaves_nothing_behind_to_hit() {
+        const PROJECT: &str = "s2-open-fail";
+        const DBNUM: u32 = 5053;
+        fn probe(_path: &Path) -> Option<CatalogueIdentity> {
+            Some(CatalogueIdentity {
+                fingerprint: "s2-open-fail:1".to_string(),
+                target_sesno: 3,
+            })
+        }
+
+        let seed = RefU64(((DBNUM as u64) << 32) | 1);
+        let locator = cata_locator(PROJECT, DBNUM, "no-such-catalogue.db");
+        for attempt in 1..=2 {
+            let mut resolver = CataClosureResolver::new(&locator, CataClosureConfig::default())
+                .with_identity_probe(probe);
+            resolver.seed([seed]);
+            let manifest = resolver.resolve().await.expect("resolve");
+            assert_eq!(manifest.missing, 1, "第 {attempt} 次：打不开就是缺失");
+            assert!(manifest.by_dbnum.is_empty(), "第 {attempt} 次：没有行");
+            assert_eq!(manifest.account.cache_hits, 0, "第 {attempt} 次：不该有命中");
+            assert_eq!(manifest.account.cache_misses, 1, "第 {attempt} 次：查了缓存、没有");
+        }
+    }
+
+    /// S2（D4-3）：一库一把闸，同库并发的 resolver 在「重查缓存 → 解析 → 写缓存」这一段排队，
+    /// 异库、异项目照样并行。
+    #[tokio::test]
+    async fn one_gate_per_catalogue_queues_the_same_dbnum_and_lets_the_others_through() {
+        let gate = catalogue_gate("s2-gate", 6000);
+        let same = catalogue_gate("s2-gate", 6000);
+        let other_dbnum = catalogue_gate("s2-gate", 6001);
+        let other_project = catalogue_gate("s2-gate-b", 6000);
+        assert!(Arc::ptr_eq(&gate, &same), "同项目同库共用一把闸");
+        assert!(!Arc::ptr_eq(&gate, &other_dbnum), "异库各一把");
+        assert!(!Arc::ptr_eq(&gate, &other_project), "异项目各一把");
+
+        let held = gate.lock().await;
+        assert!(same.try_lock().is_err(), "同库的第二个 resolver 要等");
+        assert!(other_dbnum.try_lock().is_ok(), "异库不受影响");
+        drop(held);
+        assert!(same.try_lock().is_ok(), "放开就轮到它");
+    }
+
+    /// 源码钉（plan 2026-09-15 D4）：命中路与解析路只能有一段扩边逻辑；解析前必须先过闸、
+    /// 过完闸再重查一次缓存——少了哪一步，同库并发就会把同一批元素各解一遍。
+    #[test]
+    fn the_hit_path_and_the_parse_path_share_one_expansion_behind_one_gate() {
+        let body = resolve_body();
+        assert_eq!(
+            body.matches("expand_into(").count(),
+            1,
+            "resolve() 里只许有一处扩边（命中路与解析路共用）"
+        );
+        let gate_at = body.find("catalogue_gate(").expect("解析前要取本库那把闸");
+        let recheck_at = body[gate_at..]
+            .find("take_cached(")
+            .expect("过闸之后要重查一次缓存");
+        let parse_at = body[gate_at..]
+            .find("parse_refnos_with_session(")
+            .expect("过闸之后才解析");
+        assert!(
+            recheck_at < parse_at,
+            "重查缓存必须排在解析之前，否则等闸期间别人解好的又白解一遍"
         );
     }
 

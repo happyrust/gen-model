@@ -1797,7 +1797,9 @@ pub(crate) struct ElementRoomEdge {
 
 /// Fixed room-definition view. Construction and calculation have no database
 /// handle, global spatial tree or historical-membership dependency.
-pub(crate) struct MemoryRoomCalculator {
+// `pub`：它出现在 `model_db_adapter::frozen_room_calculator` / `persist_roots_batched` 的公开签名里，
+// `e3d_persist_smoke --batched` 要拿着它传；字段仍然私有。
+pub struct MemoryRoomCalculator {
     panels: PanelIndex,
     definition_version: String,
 }

@@ -178,11 +178,6 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_cache_mode: Option<String>,
 
-    /// Maximum resident bytes used by the process-local model projection cache.
-    /// The default is 2 GiB. It is only enforced for durable store modes.
-    #[serde(default)]
-    pub model_cache_max_bytes: Option<u64>,
-
     /// 旧数据面配置，保留用于冲突提示；实际备份范围由 `store_mode` 决定。
     #[serde(default)]
     pub data_face: Option<String>,
@@ -516,7 +511,6 @@ impl From<DbOption> for DbOptionExt {
             in_memory_db: None,
             store_mode: None,
             model_cache_mode: None,
-            model_cache_max_bytes: None,
             data_face: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
@@ -608,8 +602,6 @@ struct DbOptionExtFields {
     store_mode: Option<String>,
     #[serde(default)]
     model_cache_mode: Option<String>,
-    #[serde(default)]
-    model_cache_max_bytes: Option<u64>,
     #[serde(default)]
     data_face: Option<String>,
     #[serde(default)]
@@ -824,7 +816,6 @@ pub fn get_db_option_ext() -> DbOptionExt {
         in_memory_db: ext.in_memory_db,
         store_mode: ext.store_mode.clone(),
         model_cache_mode: ext.model_cache_mode.clone(),
-        model_cache_max_bytes: ext.model_cache_max_bytes,
         data_face: ext.data_face.clone(),
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
@@ -960,9 +951,6 @@ pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
 /// Environment override for [`model_cache_mode`].
 pub const MODEL_CACHE_MODE_ENV: &str = "AIOS_MODEL_CACHE_MODE";
 
-/// Environment override for [`model_cache_max_bytes`].
-pub const MODEL_CACHE_MAX_BYTES_ENV: &str = "AIOS_MODEL_CACHE_MAX_BYTES";
-
 /// Policy for the process-local incremental model overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -992,16 +980,6 @@ pub fn model_cache_mode() -> ModelCacheMode {
     parse_model_cache_mode(std::env::var(MODEL_CACHE_MODE_ENV).ok().as_deref())
         .or_else(|| parse_model_cache_mode(load_ext_fields().model_cache_mode.as_deref()))
         .unwrap_or(ModelCacheMode::IncrementalOverlay)
-}
-
-pub fn model_cache_max_bytes() -> usize {
-    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
-    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .or(load_ext_fields().model_cache_max_bytes)
-        .unwrap_or(DEFAULT)
-        .clamp(1, usize::MAX as u64) as usize
 }
 
 /// 持久层的介质。**只有两档**（2026-09-13 用户拍板）。
@@ -1974,6 +1952,30 @@ fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&
         .unwrap_or(false)
 }
 
+/// 环境变量名：一次性关掉 [`model_element_cache`]，不必改配置文件。
+pub const MODEL_ELEMENT_CACHE_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE";
+
+/// 生成用 `DbSet` 的**池级元素缓存**开不开（**默认开**，2026-09-14）。
+///
+/// `DbSet::element` 每次造新句柄，句柄级 `OnceLock` 只挡得住同一个句柄上的重复；owner 链上溯
+/// 与目录链走查（`SPRE→SPCO→CATR→SCOM→GMRE`）会把同一批祖先、同一批目录件反复查索引反复解析。
+/// AMS 实测（`2026-09-14-zone-partitioned-model-persistence-dev-plan.md`）：7999 的 15,968 个元素
+/// 跑出 **537 万次点查、264 s**，占生成 CPU 的 85%；开着之后点查 4.6 万次、生成 71.0 → 3.84 s。
+/// 7997 是 18.2 → 7.19 s，1112 是 2.4 → 1.45 s。
+///
+/// **代价是内存**：缓存不淘汰，随这一轮真读到的元素数增长（7997 峰值 768 MB → 1.55 GB）。
+/// 整库生成一轮是有界的，所以默认开；长驻进程按库全量读不是，真撞上内存墙就用
+/// [`MODEL_ELEMENT_CACHE_ENV`]`=false` 关掉它——关掉只是慢回去，产物逐字不变
+/// （三个库的 `READBACK` 六项开关两态逐字相同）。
+pub fn model_element_cache() -> bool {
+    effective_model_element_cache(std::env::var(MODEL_ELEMENT_CACHE_ENV).ok().as_deref())
+}
+
+/// 只认环境变量的默认开开关：拼错了当没设（回默认开），理由同 [`effective_startup_autorun`]。
+fn effective_model_element_cache(env_override: Option<&str>) -> bool {
+    env_override.and_then(parse_bool_flag).unwrap_or(true)
+}
+
 /// 单测里摁住 [`model_xgeometry_gate`] 的进程内覆盖（0 = 按配置来）。
 /// 两条分支都得有用例走到，而 lib 测试是一个多线程进程，`std::env::set_var` 在 2024 edition
 /// 起就是 unsafe 的（并发读环境是数据竞争）；覆盖整段挂在 `cfg(test)` 下，发布二进制里
@@ -2926,6 +2928,20 @@ mod tests {
         assert!(effective_default_off_switch(None, Some("yes")));
         assert!(effective_default_off_switch(Some(true), Some("ture")));
         assert!(!effective_default_off_switch(None, Some("ture")));
+    }
+
+    /// 池级元素缓存默认开，只留一个环境变量的关位：没设、设空、拼错都算「没说话」，
+    /// 回默认开——拼错的 `AIOS_MODEL_ELEMENT_CACHE=flase` 不该悄悄把它关掉，
+    /// 那是一场慢 19 倍的生成。
+    #[test]
+    fn the_element_cache_is_on_unless_someone_spells_the_switch_right() {
+        assert!(effective_model_element_cache(None));
+        assert!(effective_model_element_cache(Some("")));
+        assert!(effective_model_element_cache(Some("flase")));
+        assert!(effective_model_element_cache(Some("1")));
+        assert!(!effective_model_element_cache(Some("false")));
+        assert!(!effective_model_element_cache(Some("0")));
+        assert!(!effective_model_element_cache(Some("off")));
     }
 
     /// 测试覆盖守卫的两个方向都要真的压得住取值函数，且离开作用域即恢复。

@@ -1,5 +1,53 @@
 # 变更记录
 
+## 2026-09-15
+
+### 本地发布 0.1.25：增量以落盘为边界、初始化双写道、CATA 闭包缓存与 ZONE 取根
+
+- 后端 `0.1.25` 构建自 `0c6c62b3b5`（**干净树**，build_id 不带 `.dirty`），路径依赖 e3d-io
+  `6431ee7120`；前端 plant-ui 升到 `0.1.11` 并**重建 wasm**，未复用旧包的 Web
+  （`web_source = built-from-plant-ui`）。产物
+  `releases/ams-local-0.1.25_release.20260915063626.g0c6c62b3b521-runtime-workspace.zip`，
+  222,426,591 bytes，SHA-256
+  `98807349c8d912069eef30a84c4209672a9ab28a45ca4e59d6a61df2b1f5d923`。
+- 包型 `runtime-workspace`（带 `workspace\`、不带 `assets\meshes`），与 0.1.24 同档：
+  assets 灌入 165 个文件 / 115.6 MB，meshes 排除 83,130 个文件 / 1,142.4 MB。
+- 覆盖 0.1.24（`80bee35e65f2`，2026-09-14 出包）之后的 27 个提交。用户可见的四条主线写在
+  `docs/release-notes/0.1.25.md`：增量任务以落盘为边界（ADR-076 S1–S3）、初始化双写道
+  （ADR-077）、CATA 依赖闭包进程内缓存、ZONE 取根与池级元素缓存转正。**`/health` 因 `settle`
+  整条退役少掉四格**（`settlements` / `settlement_state_by_dbnum` / `durable_target_by_dbnum` /
+  `memory_target_by_dbnum`），读它们的脚本要改。
+- 三腿冒烟全过：A 出厂配置起服务 `mode=setup` + 向导标记；B 本机配置全启动
+  `medium=mem` + `durable=false` + 服务没拉 surreal 子进程；C 包内 `surreal.exe` 在 18010 起
+  rocksdb 库、服务连上 `medium=rocksdb` + `durable=true` + 数据目录落 7 个文件。跑完
+  9099 / 18010 / 18011 三个端口均空、临时冒烟目录已清。
+- 打包前把工作树里两批在途改动提交掉（下面两条），并把一批只改了行尾（CRLF）的文件还原成
+  索引里的 LF 版本，没有把行尾扰动带进历史。
+- 验证口径写清楚：本轮跑的是 `cargo check --features http_api,rvm_verify`（干净）与发布脚本的
+  三腿冒烟；**没有**跑全量 `cargo test --lib`，别把这次当成「全绿」。
+
+### 按 dbnum 点名的入口不受 `watch_dbnums` / `--debug-dbnum` 两道监听门管
+
+- 那两道门收窄的是 watcher 自己扫出来的活；点名的库是调用方指定的，再关着只会把点名挡掉，
+  报出来的还是「未找到 dbnum」——2026-09-15 现场：1112 不在 `watch_dbnums` 里，
+  `initialize_project_dbnum_baseline` 找不到它，配置里因此多了一条把 1112 写进名单的绕法。
+- `in_scope_with` 对 `UpdateScope::is_unrestricted()` 跳过监听 / 调试两道门；跨项目那两道过滤
+  照旧生效（那是数据域，不是口味）。点名入口的「未找到」改成说得出现场：目录下扫到几个库、
+  列前 24 个、带上扫描告警。`DbOption.toml` 撤回 1112，仍是 `[7998, 8000]`；CONTEXT.md
+  「监听限定域」词条写明点名入口不在此列。钉
+  `a_named_initialization_bypasses_the_watch_and_debug_gates`。
+
+### RVM 基线对拍：面差报「谁多了面、多在哪」；名词第三种拼法（截 6 字）也认
+
+- `surface_mismatch` 的 payload 加一格 `where`：双向合并会把方向抹掉，而方向正是要问的那件事——
+  `rvm_to_gen` 大 = 我们少了材料，`gen_to_rvm` 大 = 我们多了材料；再给两侧最远的 5 个点与它们在
+  对侧的最近点，成簇是一块局部差异、散开才是姿态或尺寸问题。
+- `pe.noun` 实测有三种形态（2026-09-15 在 1112 上逐个量过）：原样（`GWALL`）、截到 6 字
+  （`PLDATUM` → `PLDATU`）、字典短名词（`FTUBE` → `FTUB`）。只按 `full_noun_to_short` 数，
+  前两种一个都对不上——1RS-WF03 的 118 个 `GWALL n of CWALL /…` 与 38 个
+  `PLDATUM 1 of JLDATUM /…` 就是这么全数解不出来的。三种按序试、一次只认一种。钉
+  `a_noun_capped_at_six_characters_still_resolves`。
+
 ## 2026-09-14
 
 ### 三维校审后台移植合入主线（ADR-075；plan 2026-09-12 T1–T5 · 落主线计划 2026-09-14 P1）

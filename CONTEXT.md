@@ -143,7 +143,7 @@ _Avoid_: 重建任务、对齐批次、realign 批次
 _Avoid_: 增量范围（泛指时）、MDB 范围（当指监听限定域时）、按 MDB 全量核对数据面、把 `watch_dbnums` 当范围定义、把 `manual_db_nums` 当范围
 
 **监听限定域 (Watch Scope)**：
-把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。它叠在**本期执行范围**之上而不是替代它：有效范围是两者的交集（d-25），域外的库在 sweep 里落「监听限定跳过」那个桶，**不**进「不在 MDB 声明名单里」也**不**进「声明了却没解析到文件」那两句——它们不是没文件、不是不在名单，是本轮没有问过。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
+把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。按 dbnum **点名**的初始化入口（`initialize_project_dbnum` / `initialize_project_dbnum_baseline`，`UpdateScope::unrestricted`；`bin/initialize_ams_dbnums`、Python 绑定与 l3 套件走它）不在此列：那个库是调用方指定的、不是 watcher 扫出来的，`in_scope_with` 对它只留跨项目那两道数据域过滤，监听 / 调试两道门都不管（2026-09-15 起；此前 1112 不在名单里被挡、报的却是「未找到 dbnum」，`DbOption.toml` 里那条把它写进名单的绕法已撤）。它叠在**本期执行范围**之上而不是替代它：有效范围是两者的交集（d-25），域外的库在 sweep 里落「监听限定跳过」那个桶，**不**进「不在 MDB 声明名单里」也**不**进「声明了却没解析到文件」那两句——它们不是没文件、不是不在名单，是本轮没有问过。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
 _Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时）、watch 名单、服务边界（它不是）
 
 **初始化准入门 (Initialization Admission Gate)**：
@@ -215,12 +215,24 @@ _Avoid_: 模型元数据、gen_root 表（当指概念时）、模型缓存
 ## 模型生成执行（Model Generation Execution）
 
 **dbnum 任务 (Dbnum Task)**：
-一个 `dbnum` 的一次增量就是一个任务：数据窗口、模型重算（`room_membership=true` 时每根算完几何紧接着算房间归属，关闭时跳过房间，ADR-073 D1）、凭证前移与模型水位收尾在同一个任务里一气做完（ADR-065 D1）；任务末没有整库房间段。模型欠账由应用水位与模型水位回答，关闭期间的房间欠账不进水位，靠开关状态与显式模型重建处置。稳态任务跨库并行、同库串行；初始化意图的任务按入队先后串行。它同时是**隔离单元**：同一 `dbnum` 的库行在任一时刻只有它的任务一个写者，所以写库不需要 CAS、ACK 或收口（ADR-071 D1）。
+一个 `dbnum` 的一次增量就是一个任务：数据窗口、模型重算（`room_membership=true` 时每根算完几何紧接着算房间归属，关闭时跳过房间，ADR-073 D1）、凭证前移、**等本批根刷进 RocksDB**（持久档下任务在 `durable_pending` 阶段等自己单元清单里的根拿到 durable ACK，`model_write_behind::await_roots_durable`，ADR-076 D2；同库别的根不是它的账）与模型水位收尾在同一个任务里一气做完（ADR-065 D1）；任务末没有整库房间段。模型欠账由应用水位与模型水位回答，关闭期间的房间欠账不进水位，靠开关状态与显式模型重建处置。稳态任务跨库并行、同库串行；初始化意图的任务按入队先后串行。它同时是**隔离单元**：同一 `dbnum` 的库行在任一时刻只有它的任务一个写者，所以写库不需要 CAS、ACK 或收口（ADR-071 D1）。
 _Avoid_: 数据批次（当指含模型与房间的整个执行体时）、模型 drain、pending 任务、模型积压
 
 **任务内序列化 (In-Task Serialization)**：
-dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与它同一笔。
+dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与 Ref0 统计与它同一笔（一个任务只写一次 `task_end`；持久档下这一笔排在本批根的 RocksDB ACK 之后，ADR-076 D5——write-behind 只刷根，不盖水位）。刷盘预算用尽 / 判死的根：放弃、逐出投影、`gen_root` 记 `failed`，任务 `Partial`、标记照收、模型水位不盖，由启动核对按凭证缺口排 `ModelOnly`（ADR-076 D6 修订 / D8）。
 _Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS、发布阶段、文件轮次、房间水位、任务末房间段
+
+**落盘写者 (Persist Writer)**：
+任务内拥有的、按 lane 单写者的有界队列写库部件（`data_interface::persist_writer`，ADR-077 D2）：收的是已包好 `BEGIN … COMMIT` 的事务文本加一个只给失败样例归因的标签（`WriteJob { sql, label }`），逐笔取、逐笔写、不攒窗，每笔带期限（30 s + 8 s/MiB，≤180 s）与乐观冲突退避重试，账上记事务数 / 字节 / 冲突重试 / 超时。它不认识根、不认识表：合块与拆分在渲染侧做完。写者的拥有者必须是能看见全部 lane 的那一层——「先排空再清库」只有在那一层做得对。2026-09-14 从基线摄入的 `sql_write_queue` 抬出并泛化。
+_Avoid_: 写者队列、后台写库（它不跨任务）、write-behind（那是增量路上按根去重 / 退避 / 死信的另一台机器）、`WRITE_WINDOW`（随攒窗一并退役）
+
+**写入 lane (Write Lane)**：
+一条有界 channel + 一个单写者（`persist_writer::Lane`）。属性面、模型面各一条：**不同 lane 并发、同 lane 串行**。并发的前提是两面写的表 / 键集合不相交、模型边不检查 `pe` 顶点（生产 schema 里 `inst_relate` / `tubi_relate` 没有 `ENFORCED`）；2026-09-14 在全新 RocksDB 上实测两 lane 零冲突。同一面开第二个写者是另一件事，实测更慢（zone-partitioned plan）。属性 lane 上界 100 笔，模型 lane 深度 2 片，都是常量不做配置。
+_Avoid_: 多写者（指同一面）、并发写者（泛指时）、写者数配置
+
+**初始化双 lane (Dual-lane Initialization)**：
+初始化 dbnum 任务的现行形态（`data_interface::dbnum_initialize`，ADR-077）：解析（e3d-io 流式 → 元素批）与生成（`produce_slices` 并行生产者 → 切片 → 渲成 `Initial` 行 + 房间边 + `UPSERT` 回执）并发进行，各走一条写入 lane 直写 RocksDB；模型根从文件枚举（不读 `pe`）、不进模型投影、不登记 write-behind；两 lane 排空、属性面计数核对之后，收尾**一笔**盖 `applied_sesno` + `model_sesno` + 写入标记 `finished` + Ref0 统计（`task_end::TaskEnd::data`）。失败两档：lane 失败（解析器 / 闭包出错、任一写者有失败事务）→ 两 lane 排空 → 整库清 → Err；单根死信 / 模型半边自己的错 → 属性照落、`Partial`、`model_sesno` 不盖。增量路不在其内。
+_Avoid_: 基线 + 全量生成根（旧形态：数据先落、读 `pe` 枚举根、再交任务生成）、初始化走投影、先推 applied 再生成、`BaselineOutcome::units`
 
 **写入标记 (Write Marker)**：
 一个 `dbnum` 在库里的一行写入状态：任务第一笔写库前置 `writing{S,T}`，任务收尾那一笔与水位同事务置 `finished`。它回答「这个库有没有一次没写完的任务」，不回答「欠什么」——欠什么仍由两枚水位回答（ADR-072 D1 / ADR-073 D2）。见到它停在 `writing` 的唯一处置是整库重初始化（见「未完成写入重初始化」，ADR-073 D3）；正常收尾的 `Partial` 也置 `finished`，不算没写完。
@@ -372,6 +384,14 @@ _Avoid_: 按需解析 CATA（旧章的词，指惰性兜底那条路）、CATA �
 **依赖状态 (Dependency State)**：
 `cata_dependency_state:{dbnum} { sesno, rows }`——这个目录库的依赖行是按哪一版目录文件渲的、累计送入了多少行（`rows` 是量级：`Fresh` 命中也计、前移重渲不计；精确数查 `pe … dependency = true`）。**不是水位**：不进 `dbnum_watermark`、不参与 ADR-021 的判据；`/dbnums` 露成 `dependency_rows` / `dependency_sesno`（没有依赖行的库整格不写）。目录文件前移时（文件最新 > `sesno`，只对本批闭包碰到的目录库、排在本批 `Fresh` 之前）由 `cata_cascade_window` 差分出变动目录件，与已入库依赖行求交，被改的 `Replace` 重渲、被删的落墓碑，然后推进 `sesno`；差分不可用（会话不在链上 / 候选超 20,000）退化成该库全部依赖行重渲，回执点名 `cata_dependency_full_refresh`。
 _Avoid_: CATA 水位、`applied_sesno`（那是 DESI 的）
+
+**依赖闭包缓存 (Dependency Closure Cache)**：
+依赖闭包**解析产物**的进程级缓存（`data_interface::cata_closure_cache`，plan `docs/plans/2026-09-15-cata-dependency-closure-cache-dev-plan.md`）：一个目录元素在一个进程里只解析一次。键 `(project, 目录 dbnum, refno)`，值是元素的**原始事实**（完整属性表 + 成员 + 出向边 + owner / noun），不是闭包结果——扩边规则（容器白名单 / 排除库 / owner 链 / 只收 CATA）仍由本次 `resolve()` 按**本次** cfg 施加，四个调用点 cfg 的差别不会污染缓存。每个目录库盖一份身份戳（文件指纹 `size:mtime` + 目录会话号），戳变了整库条目作废，**不做**「更早 sesno 兼容」（元素在两个会话之间有没有变是「依赖状态」前移刷新那条差分的活）。接线只在 `CataClosureResolver::resolve()` 一处，基线 / 数据窗口 / 模型根 / 惰性兜底四条路自动吃到：每轮每库先查缓存，命中的不开会话、不碰文件，与解析出来的元素走**同一段**扩边（`expand_into`）；未命中的过本库那把闸、重查一次再解析，只有解析成功的才写入——库里没有（`Ok(None)`）、解析失败、打不开文件一律不记。条目 + 字节双上限（固定 200,000 条 / 256 MiB，≈ 整份 AMS 目录闭包 × 6）、LRU 淘汰；**没有运行时开关**（2026-09-15 用户拍板：不加配置键，保持默认；`CacheLimits` 任一为 `0` 即关只是留给单测的内部能力）；缓存永远不是任务失败的原因。RocksDB 仍是唯一事实：它省的只是重复的 open + parse（ams8000 同一批 seeds 冷 456 ms → 热 57 ms），开 / 关两态闭包逐位相同；它省不了一个字节的 SQL——那是「已落库记忆」的事。**不是**旧章的 `CataDepCache`（那是惰性兜底路上「哪些 refno 已入库」的存在性缓存，2026-09-07 随 ADR-064 Q2 删除）。
+_Avoid_: CATA 缓存（泛指时）、解析缓存（泛指时）、依赖缓存上下文（旧章的词）、把它当第二份真值、闭包结果缓存
+
+**已落库记忆 (Persisted Dependency Memo)**：
+进程级「这一行这一版已经落过库」的记忆（`cata_dependency::PersistedDependencyMemo`，`(目录 dbnum, refno) → sesno`，plan 2026-09-15 D6）。渲依赖事务之前把同库、同 sesno 已落的元素摘掉——不渲、不发，回执记 `skipped_persisted`；闭包账（`elements` / `missing`、「依赖状态」的 `rows`）**不摘**：「这一批依赖多少行」与「这一批写了多少行」是两笔账；摘光的库连状态行也不发。纪律与 `CataSeedMemo` 同源（ADR-071 D1：任务是这个库唯一的写者，**它知道自己写了什么**）：只在那一库的事务**全部执行成功之后**才记；目录版本前移（`refresh_moved_catalogues_on`）与整库 `wipe_dbnum_for_reinit` 两处作废；进程重启自然消失；基线 lane 是异步单写者、等不到「写成功那一刻」，第一阶段只查不记。`Fresh` = `INSERT IGNORE`，行在（任何 sesno）本来就是 no-op——记忆只是把这个 no-op 提前到进程里，省的是渲染、SQL 字节与 lane 事务，语义不变。它只可能错在「以为在、其实不在」这一种，「别的进程动了这个库」本来就在 ADR-071 D1 之外。与依赖闭包缓存一样没有运行时开关。
+_Avoid_: 依赖去重（泛指时）、CATA 水位、把它当「库里有什么」的真值、持久化缓存
 
 ## 按需解析元件库（On-demand CATA）——旧章（retired，ADR-058 D1；2026-09-06 由「依赖入库」接替）
 

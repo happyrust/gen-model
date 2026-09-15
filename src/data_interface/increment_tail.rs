@@ -157,25 +157,38 @@ pub(crate) fn render_finalize_tail(
 }
 
 /// Render the transaction that closes a freshly parsed baseline: watermark + the
-/// confirmed-empty marker. 基线的全量生成根不落库（ADR-072 D5），随
-/// `manual_update::BaselineOutcome` 交给本任务生成；基线的写入标记（`writing{0,T}`，
-/// `baseline_ingest::ingest_file` 开头落）同样不在这一笔里收——收它的是任务收尾（ADR-072 D1）。
+/// confirmed-empty marker. 2026-09-14 起（ADR-077 D7）首次初始化不再走这一笔——它的 applied
+/// 与模型水位、写入标记并进 `task_end::TaskEnd::data` 那一笔；这里只剩「已有基线、重复点名」
+/// 的幂等收口（`manual_update::initialize_dbnum_baseline` 的尾巴）。基线的写入标记（`writing{0,T}`）
+/// 同样不在这一笔里收——收它的是任务收尾（ADR-072 D1）。
 pub(crate) fn render_baseline_finalize(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     confirmed_empty: bool,
 ) -> FinalizeRender {
-    let mut tail = Vec::new();
-    tail.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
-    tail.push(if confirmed_empty {
-        format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
-    } else {
-        format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = NONE;")
-    });
+    let tail = vec![
+        render_watermark_advance(dbnum, end_sesno, end_sesno_time),
+        render_confirmed_empty_baseline(dbnum, end_sesno, confirmed_empty),
+    ];
     FinalizeRender {
         window_batches: Vec::new(),
         tail: tail.join("\n"),
+    }
+}
+
+/// 空基线凭据那一句（ADR-021）：合法空库把 `confirmed_empty_baseline_sesno` 钉在这一版，
+/// 非空基线清掉它。初始化收尾那一笔（`task_end::TaskEnd::data`，ADR-077 D7）与
+/// [`render_baseline_finalize`] 共用这一句。
+pub(crate) fn render_confirmed_empty_baseline(
+    dbnum: u32,
+    end_sesno: i32,
+    confirmed_empty: bool,
+) -> String {
+    if confirmed_empty {
+        format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
+    } else {
+        format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = NONE;")
     }
 }
 
@@ -269,12 +282,11 @@ pub async fn finalize_attempt(
     Ok(outcome)
 }
 
-/// Advance a freshly parsed `dbnum`'s watermark.
+/// Advance an already-baselined `dbnum`'s watermark (idempotent re-run only).
 ///
-/// A baseline full-parse writes element data but no geometry. 全量生成根由本任务随即生成
-/// （`manual_update::BaselineOutcome::units`），不落库：任务死在生成中途时写入标记
-/// `writing{0,T}` 让下一次启动整库 wipe 重排初始化（ADR-072 D2），所以「水位推上去、库里
-/// 一个模型都没有、而且此后永远不会有」这条路不存在。
+/// 首次初始化的 applied 不在这里推（ADR-077 D7：并进 `dbnum_initialize` 收尾那一笔，与模型水位、
+/// 写入标记同生同死）。这里只服务「库里已有行、水位也在、又被点名一次」那条路：单调 `math::max`，
+/// 幂等，不动模型。
 pub async fn finalize_baseline(
     dbnum: u32,
     end_sesno: i32,

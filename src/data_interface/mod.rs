@@ -9,6 +9,10 @@ pub mod dbnum_stats;
 pub mod element_batch;
 /// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
 pub mod pe_batch;
+/// 落盘写者（ADR-077）：按 lane 的有界通道 + 后台单写者，属性 / 模型各一条 lane，不同 lane 并发、同 lane 串行。
+pub mod persist_writer;
+/// 一个 dbnum 初始化的编排（ADR-077）：解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾。
+pub mod dbnum_initialize;
 /// 数据面事务切块上限（plan 2026-09-06 §3 D3）：2 MiB / 5000 行 / 1000 元素，可配。
 pub mod tx_limits;
 // pub mod spatial_model;
@@ -143,6 +147,8 @@ pub mod sync_publisher;
 pub mod helper;
 
 pub mod cata_closure;
+/// 依赖闭包的进程级解析缓存（plan 2026-09-15）：目录元素解析一次、跨调用复用；RocksDB 仍是唯一事实。
+pub(crate) mod cata_closure_cache;
 
 /// dbnum → 文件的路由目录，从 SYS/CURD 成员清单造，不含逐元素表（母计划 §5.1 / 切片 W2）。
 pub mod mdb_route_directory;

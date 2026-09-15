@@ -609,6 +609,35 @@ mod tests {
         watch_scope::clear_for_tests();
     }
 
+    /// 按 dbnum 点名的入口（`UpdateScope::unrestricted`）不受 `watch_dbnums` / `--debug-dbnum`
+    /// 两道监听门管：那两道门收窄的是 watcher 扫出来的活，点名的库是调用方定的。
+    /// 2026-09-15 现场：1112 不在 `watch_dbnums` 里，`initialize_project_dbnum_baseline`
+    /// 报的却是「未找到 dbnum=1112」，于是配置里多了一条绕法。MDB 声明的正常范围照旧受两道门管；
+    /// 跨项目那两道过滤对点名也照旧生效。
+    #[test]
+    fn a_named_initialization_bypasses_the_watch_and_debug_gates() {
+        let _lease = watch_scope::test_guard();
+        watch_scope::set_dbnums_for_tests(vec![7998, 8000], watch_scope::Origin::Config);
+        debug_scope::set_dbnums(vec![8000]);
+        let mut option = DbOption::default();
+        option.project_name = "Main".to_string();
+
+        let named = UpdateScope::unrestricted();
+        assert!(
+            in_scope_with(&option, &named, "Main", "DESI", 1112),
+            "点名的库不该被 watch_dbnums / --debug-dbnum 挡住"
+        );
+        let declared = UpdateScope::for_tests("/ALL", &[1112, 8000]);
+        assert!(
+            !in_scope_with(&option, &declared, "Main", "DESI", 1112),
+            "watcher 自己扫出来的活照旧受监听限定"
+        );
+        assert!(in_scope_with(&option, &declared, "Main", "DESI", 8000));
+
+        debug_scope::set_dbnums(Vec::new());
+        watch_scope::clear_for_tests();
+    }
+
     /// D7 护栏二：没给 `--debug-dbnum`，入范围判定必须与本特性引入前逐位相同。
     ///
     /// 它拦的是「默认值写错成某个库」这类低级但致命的错——一旦发生，服务看起来
@@ -2846,11 +2875,18 @@ pub(crate) fn in_scope_with(
         log::debug!("忽略非主项目的设计库: project={project} db_type={db_type} dbnum={db_num}");
         return false;
     }
-    if !watch_scope_admits(db_type, db_num) {
-        return false;
-    }
-    if !debug_scope_admits(db_type, db_num) {
-        return false;
+    // 监听限定与调试限定收窄的是 watcher **自己扫出来**的活。按 dbnum 点名的入口
+    // （`UpdateScope::unrestricted`）不是扫出来的——调用方已经指定了要哪个库，这两道门
+    // 再关着就只会把点名挡掉，而且报出来的还是「未找到 dbnum」（2026-09-15 现场：1112
+    // 不在 `watch_dbnums` 名单里，`initialize_project_dbnum_baseline` 找不到它）。
+    // 跨项目那两道过滤（上面）照旧：那不是口味，是数据域。
+    if !scope.is_unrestricted() {
+        if !watch_scope_admits(db_type, db_num) {
+            return false;
+        }
+        if !debug_scope_admits(db_type, db_num) {
+            return false;
+        }
     }
     scope.admits(db_type, db_num)
 }

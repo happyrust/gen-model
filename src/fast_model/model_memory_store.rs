@@ -256,100 +256,6 @@ impl ProjectionCommit {
     }
 }
 
-// BTree nodes, the packed root key and the receipt allocation all remain
-// resident even when a generated root contains no geometry.  This deliberately
-// stable estimate is an admission-control unit, not an allocator measurement.
-const ROOT_RECEIPT_OVERHEAD_BYTES: usize = 128;
-
-fn receipt_resident_bytes(root: RefNo, receipt: &RootReceipt) -> usize {
-    ROOT_RECEIPT_OVERHEAD_BYTES
-        .saturating_add(std::mem::size_of_val(&root))
-        .saturating_add(serde_json::to_vec(receipt).map_or(0, |encoded| encoded.len()))
-}
-
-/// 生成根 → 回执，外加一份增量维护的字节总和。
-///
-/// 内层的表刻意不对外：每一次增删都从这里过，总和才不会漂。过去
-/// [`ScopeState::total_resident_bytes`] 每调用一次就把整张表重新
-/// `serde_json::to_vec` 一遍，而准入检查每个 cohort 都要调它——一次整库生成
-/// 因此退化成二次复杂度（7997 实测 424 个 cohort × 最多 6772 条回执）。
-#[derive(Default)]
-struct Receipts {
-    entries: BTreeMap<i64, RootReceipt>,
-    bytes: BTreeMap<i64, usize>,
-    resident_bytes: usize,
-}
-
-impl Receipts {
-    fn resident_bytes(&self) -> usize {
-        self.resident_bytes
-    }
-
-    /// 这一根回执自己占的字节。没有这根回执时是 0。
-    fn bytes_of(&self, packed: &i64) -> usize {
-        self.bytes.get(packed).copied().unwrap_or_default()
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn get(&self, packed: &i64) -> Option<&RootReceipt> {
-        self.entries.get(packed)
-    }
-
-    fn contains_key(&self, packed: &i64) -> bool {
-        self.entries.contains_key(packed)
-    }
-
-    fn iter(&self) -> std::collections::btree_map::Iter<'_, i64, RootReceipt> {
-        self.entries.iter()
-    }
-
-    fn keys(&self) -> std::collections::btree_map::Keys<'_, i64, RootReceipt> {
-        self.entries.keys()
-    }
-
-    fn insert(&mut self, packed: i64, receipt: RootReceipt) -> Option<RootReceipt> {
-        let root = RefNo::new((packed >> 32) as u32, packed as u32);
-        let bytes = receipt_resident_bytes(root, &receipt);
-        if let Some(previous) = self.bytes.insert(packed, bytes) {
-            self.resident_bytes = self.resident_bytes.saturating_sub(previous);
-        }
-        self.resident_bytes = self.resident_bytes.saturating_add(bytes);
-        self.entries.insert(packed, receipt)
-    }
-
-    fn remove(&mut self, packed: &i64) -> Option<RootReceipt> {
-        if let Some(bytes) = self.bytes.remove(packed) {
-            self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
-        }
-        self.entries.remove(packed)
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.bytes.clear();
-        self.resident_bytes = 0;
-    }
-
-    fn retain(&mut self, mut keep: impl FnMut(&i64, &mut RootReceipt) -> bool) {
-        let mut dropped = Vec::new();
-        self.entries.retain(|packed, receipt| {
-            let keep = keep(packed, receipt);
-            if !keep {
-                dropped.push(*packed);
-            }
-            keep
-        });
-        for packed in dropped {
-            if let Some(bytes) = self.bytes.remove(&packed) {
-                self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
-            }
-        }
-    }
-}
-
 /// 把 refno 打包成旧 `anc` 数组里那个 i64。
 pub fn packed_refno(refno: RefNo) -> i64 {
     (((refno.word0 as u64) << 32) | refno.word1 as u64) as i64
@@ -359,15 +265,12 @@ pub fn packed_refno(refno: RefNo) -> i64 {
 struct ScopeState {
     /// record_id → 记录。
     geometries: BTreeMap<String, ProjectedGeometry>,
-    /// Approximate serialized bytes of each resident geometry and their total.
-    geometry_bytes: BTreeMap<String, usize>,
-    resident_bytes: usize,
     /// 打包祖先 → 挂在它下面的 record_id。旧 `anc CONTAINS <packed>` 的索引形态。
     by_ancestor: BTreeMap<i64, BTreeSet<String>>,
     /// 管段来源 → 管身记录。重置管段不应遍历其它根的全部几何。
     by_tube_branch: BTreeMap<i64, BTreeSet<String>>,
-    /// 生成根 → 回执，带增量维护的字节总和。
-    receipts: Receipts,
+    /// 生成根 → 回执。
+    receipts: BTreeMap<i64, RootReceipt>,
     /// Roots remain discoverable after failed refresh, including empty roots.
     invalidated_roots: BTreeSet<i64>,
     /// 生成根 → 当前进程的完整发布确认。任何候选几何变动都先使它失效。
@@ -408,92 +311,41 @@ pub(crate) struct GeometryChange {
 }
 
 impl ScopeState {
-    fn total_resident_bytes(&self) -> usize {
-        self.resident_bytes
-            .saturating_add(self.receipts.resident_bytes())
-    }
-
-    /// 有回执但没有同源 ACK 的根占住的常驻字节，也就是淘汰挑不走的那一部分。
-    ///
-    /// 共享几何挂在多个根下时会被重复计数，于是这个数偏大。压力判断上偏大是安全的
-    /// 方向：宁可早一点收手，不能等撞上硬上限才发现让不出位子。
-    fn unevictable_bytes(&self) -> usize {
-        self.receipts
-            .iter()
-            .filter(|(packed, receipt)| {
-                !self
-                    .publication_acks
-                    .get(*packed)
-                    .is_some_and(|ack| ack.matches(receipt))
-            })
-            .map(|(packed, _)| {
-                let root = RefNo::new((*packed >> 32) as u32, *packed as u32);
-                self.record_ids_under(root)
-                    .into_iter()
-                    .filter_map(|id| self.geometry_bytes.get(&id))
-                    .sum::<usize>()
-                    .saturating_add(self.receipts.bytes_of(packed))
-            })
-            .sum()
-    }
-
-    /// 把脏成员同步进各库的空间树。
-    ///
-    /// 脏集合本来就精确到 `(dbnum, member)`，所以这里只碰这几个成员：`sync_refnos`
-    /// 的语义正是「这些 refno 的现状就是这批盒子」，删旧插新一步到位；一个成员的行
-    /// 全没了（删除 / 淘汰）则走 `remove_by_refnos`。
-    ///
-    /// 每个 cohort 把整库 `bulk_load` 一遍在整库生成上是二次的：7997 实测 424 个
-    /// cohort 累计重建 1531 万行、31.8 s，而终态只有 6.6 万行。
     fn flush_room_spatial(&mut self) {
         let dirty = std::mem::take(&mut self.room_spatial_dirty);
-        if dirty.is_empty() {
-            return;
-        }
-        use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
-        let started_at = Instant::now();
-        let mut by_dbnum: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
-        for (dbnum, member) in dirty {
-            by_dbnum.entry(dbnum).or_default().push(member);
-        }
-        for (dbnum, members) in by_dbnum {
-            let mut upserts: Vec<RStarBoundingBox> = Vec::new();
-            let mut vanished: HashSet<aios_core::RefU64> = HashSet::new();
-            for member in members {
-                let before = upserts.len();
-                upserts.extend(
-                    self.by_source
-                        .get(&(dbnum, member))
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|id| self.geometries.get(id))
-                        .map(|row| {
-                            RStarBoundingBox::new(
-                                parry3d::bounding_volume::Aabb::new(
-                                    row.world_bounds[0].into(),
-                                    row.world_bounds[1].into(),
-                                ),
-                                crate::data_interface::generation_root::refno_from_e3d(
-                                    row.source_refno,
-                                ),
-                                row.noun.clone(),
-                            )
-                        }),
-                );
-                if upserts.len() == before {
-                    vanished.insert(aios_core::RefU64(member as u64));
-                }
-            }
-            let rows = upserts.len() as u64;
-            let tree = self.room_spatial.entry(dbnum).or_default();
-            tree.remove_by_refnos(&vanished);
-            tree.update_aabbs(upserts);
+        let dbnums = dirty
+            .into_iter()
+            .map(|(dbnum, _)| dbnum)
+            .collect::<BTreeSet<_>>();
+        for dbnum in dbnums {
+            use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+            let started_at = Instant::now();
+            let boxes = self
+                .by_source
+                .range((dbnum, i64::MIN)..=(dbnum, i64::MAX))
+                .flat_map(|(_, ids)| ids)
+                .filter_map(|id| self.geometries.get(id))
+                .map(|row| {
+                    RStarBoundingBox::new(
+                        parry3d::bounding_volume::Aabb::new(
+                            row.world_bounds[0].into(),
+                            row.world_bounds[1].into(),
+                        ),
+                        crate::data_interface::generation_root::refno_from_e3d(row.source_refno),
+                        row.noun.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let row_count = boxes.len() as u64;
+            self.room_spatial
+                .insert(dbnum, AccelerationTree::load(boxes));
             self.room_spatial_rebuild_count = self.room_spatial_rebuild_count.saturating_add(1);
-            self.room_spatial_rows_rebuilt = self.room_spatial_rows_rebuilt.saturating_add(rows);
+            self.room_spatial_rows_rebuilt =
+                self.room_spatial_rows_rebuilt.saturating_add(row_count);
+            self.room_spatial_rebuild_duration_ms = self
+                .room_spatial_rebuild_duration_ms
+                .saturating_add(started_at.elapsed().as_millis() as u64);
         }
-        self.room_spatial_rebuild_duration_ms = self
-            .room_spatial_rebuild_duration_ms
-            .saturating_add(started_at.elapsed().as_millis() as u64);
     }
     fn toggle_digest(&mut self, record: &ProjectedGeometry) {
         use sha2::{Digest, Sha256};
@@ -590,10 +442,7 @@ impl ScopeState {
         *sesno = (*sesno).max(record.source_sesno);
         let member = packed_refno(record.source_refno);
         let record_id = record.record_id.clone();
-        let bytes = serde_json::to_vec(&record).map_or(0, |encoded| encoded.len());
-        self.geometries.insert(record_id.clone(), record);
-        self.geometry_bytes.insert(record_id, bytes);
-        self.resident_bytes = self.resident_bytes.saturating_add(bytes);
+        self.geometries.insert(record_id, record);
         self.room_spatial_dirty.insert((dbnum, member));
         self.bump_epoch(dbnum);
     }
@@ -602,9 +451,8 @@ impl ScopeState {
         self.remove_internal(record_id, true)
     }
 
-    /// Remove cache residency without turning it into a model delta. Indexes and
-    /// the resident spatial view still change, but room publication must not see
-    /// cache pressure as a source-model deletion.
+    /// 只把这条记录从驻留视图里摘掉，不记成模型删除。索引与空间视图照常变，但
+    /// 房间发布不能把「库里本来就没有了」当成源模型的一次删除。
     fn evict(&mut self, record_id: &str) -> Option<ProjectedGeometry> {
         self.remove_internal(record_id, false)
     }
@@ -619,9 +467,6 @@ impl ScopeState {
             self.observe_member(&previous);
         }
         let record = self.geometries.remove(record_id)?;
-        if let Some(bytes) = self.geometry_bytes.remove(record_id) {
-            self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
-        }
         self.toggle_digest(&record);
         let key = (record.dbnum, packed_refno(record.source_refno));
         if let Some(ids) = self.by_source.get_mut(&key) {
@@ -698,133 +543,23 @@ impl ScopeState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelCacheStats {
-    pub mode: &'static str,
-    pub max_bytes: Option<usize>,
-    pub resident_bytes: usize,
-    pub resident_roots: usize,
-    pub hits: u64,
-    pub misses: u64,
-    pub loads: u64,
-    pub load_failures: u64,
-    pub evictions: u64,
-    pub oversize_bypasses: u64,
-    pub inflight: usize,
-    /// Memory candidates whose exact content identity is not durable yet.
-    pub pending_roots: usize,
-    /// Resident roots whose exact candidate identity is confirmed by RocksDB.
-    pub durable_roots: usize,
-    /// 这些 pending 根占住的常驻字节：淘汰救不回来的那一部分。
-    pub unevictable_bytes: usize,
-    /// 上一格相对硬上限的档位，调度端据此降速（见 [`OverlayPressure`]）。
-    pub pressure: OverlayPressure,
-    /// Number of per-dbnum overlay spatial index syncs in this process.
-    pub room_spatial_rebuild_count: u64,
-    /// Cumulative rows re-inserted by those syncs — dirty members only, not
-    /// the whole resident set.
-    pub room_spatial_rows_rebuilt: u64,
-    /// Cumulative foreground time spent collecting and rebuilding, in milliseconds.
-    pub room_spatial_rebuild_duration_ms: u64,
-}
-
-/// 不可淘汰字节占硬上限到这两档时，调度端分别降到单车道、停派新批次。
-///
-/// 档位按「淘汰救不回来的那部分」算，所以 60/85 不是内存水位线：常驻字节可以长期
-/// 贴着上限跑而压力仍是 `Normal`，只要那些根都已经有同源 ACK、随时让得出位子。
-const SOFT_PRESSURE_PERCENT: usize = 60;
-const HARD_PRESSURE_PERCENT: usize = 85;
-
-/// 内存投影相对硬上限的压力档。
-///
-/// 它只看**淘汰救不回来的那部分**——已经有同源 ACK 的根随时可以让位，占多少字节都
-/// 不构成压力；真正把上限顶死的是还没落盘、因而不可淘汰的根。两者不分开看的话，
-/// 一个装满 durable 根的健康缓存与一个塞满待写根的濒死缓存读出同一个数。
-///
-/// 它是**给调度用的**：让生成端在撞上硬上限之前慢下来。撞上之后由 HTTP 层回 503
-/// 是没有出路的——客户端重试只会再造一批不可淘汰的根，把自己推得更深。
-/// [`OverlayBackpressure`] 仍在，但它从此是最后一道闸，不是限流手段。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OverlayPressure {
-    Normal,
-    Soft,
-    Hard,
-}
-
-impl OverlayPressure {
-    fn of(unevictable_bytes: usize, max_bytes: usize) -> Self {
-        if max_bytes == 0 {
-            return Self::Hard;
-        }
-        match unevictable_bytes.saturating_mul(100) / max_bytes {
-            percent if percent >= HARD_PRESSURE_PERCENT => Self::Hard,
-            percent if percent >= SOFT_PRESSURE_PERCENT => Self::Soft,
-            _ => Self::Normal,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Soft => "soft",
-            Self::Hard => "hard",
-        }
-    }
-}
-
-/// The current overlay cannot accept another atomic projection cohort without
-/// exceeding its configured hard memory limit.  No part of the rejected cohort
-/// has been installed when this error is returned.
+/// 写后台控制器当前不收件，这一批投影原样退回。没有任何一部分被装进 overlay。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayBackpressure {
-    pub projected_bytes: usize,
-    pub max_bytes: usize,
-}
+pub struct OverlayRejected;
 
-impl std::fmt::Display for OverlayBackpressure {
+impl std::fmt::Display for OverlayRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "model overlay backpressure: projected {} bytes exceeds hard limit {} bytes",
-            self.projected_bytes, self.max_bytes
-        )
+        f.write_str("model write-behind controller is not accepting new projections")
     }
 }
 
-impl std::error::Error for OverlayBackpressure {}
-
-#[derive(Debug, Default)]
-struct CacheControl {
-    clock: u64,
-    last_access: BTreeMap<i64, u64>,
-    hits: u64,
-    misses: u64,
-    loads: u64,
-    load_failures: u64,
-    evictions: u64,
-    oversize_bypasses: u64,
-    inflight: usize,
-}
+impl std::error::Error for OverlayRejected {}
 
 /// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
-/// 只读它。持久模式下 `current_max_bytes` 使它成为按根淘汰的有界增量 overlay；未收到
-/// durable ACK 的候选根不会被淘汰，确保失败后仍可重试发布。
-#[derive(Debug)]
+/// 只读它。**无界**：不记字节、不淘汰——一个根进来就一直在，直到显式失效或整库清空。
+#[derive(Debug, Default)]
 pub struct ModelMemoryStore {
     scopes: RwLock<HashMap<ScopeKey, ScopeState>>,
-    current_max_bytes: Option<usize>,
-    cache: Mutex<CacheControl>,
-}
-
-impl Default for ModelMemoryStore {
-    fn default() -> Self {
-        Self {
-            scopes: RwLock::new(HashMap::new()),
-            current_max_bytes: None,
-            cache: Mutex::new(CacheControl::default()),
-        }
-    }
 }
 
 static STORE: OnceLock<ModelMemoryStore> = OnceLock::new();
@@ -958,113 +693,21 @@ impl ModelMemoryStore {
         true
     }
     pub fn global() -> &'static Self {
-        STORE.get_or_init(|| {
-            if crate::options::store_mode().is_durable() {
-                Self::with_cache_limit(crate::options::model_cache_max_bytes())
-            } else {
-                Self::default()
-            }
-        })
+        STORE.get_or_init(Self::default)
     }
 
-    pub fn with_cache_limit(max_bytes: usize) -> Self {
-        Self {
-            scopes: RwLock::new(HashMap::new()),
-            current_max_bytes: Some(max_bytes.max(1)),
-            cache: Mutex::new(CacheControl::default()),
-        }
-    }
-
-    fn cache_control(&self) -> std::sync::MutexGuard<'_, CacheControl> {
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn touch_root(&self, root: RefNo) {
-        if self.current_max_bytes.is_none() {
-            return;
-        }
-        let mut cache = self.cache_control();
-        cache.clock = cache.clock.wrapping_add(1);
-        let clock = cache.clock;
-        cache.last_access.insert(packed_refno(root), clock);
-    }
-
-    pub(crate) fn note_cache_lookup(&self, hit: bool) {
-        let mut cache = self.cache_control();
-        if hit {
-            cache.hits += 1;
-        } else {
-            cache.misses += 1;
-        }
-    }
-
-    pub(crate) fn note_cache_load_started(&self) {
-        let mut cache = self.cache_control();
-        cache.inflight += 1;
-    }
-
-    pub(crate) fn note_cache_load_finished(&self, success: bool) {
-        let mut cache = self.cache_control();
-        cache.inflight = cache.inflight.saturating_sub(1);
-        if success {
-            cache.loads += 1;
-        } else {
-            cache.load_failures += 1;
-        }
-    }
-
-    pub fn cache_stats(&self) -> ModelCacheStats {
-        let scopes = self.read();
-        let current = scopes.get(&ScopeKey::Current);
-        let cache = self.cache_control();
-        let (pending_roots, durable_roots) = current.map_or((0, 0), |state| {
-            state
-                .receipts
-                .iter()
-                .fold((0, 0), |(pending, durable), (root, receipt)| {
-                    let caught_up = state
-                        .publication_acks
-                        .get(root)
-                        .is_some_and(|ack| ack.matches(receipt));
-                    if caught_up {
-                        (pending, durable + 1)
-                    } else {
-                        (pending + 1, durable)
-                    }
-                })
-        });
-        let unevictable_bytes = current.map_or(0, ScopeState::unevictable_bytes);
-        ModelCacheStats {
-            mode: crate::options::model_cache_mode().as_str(),
-            max_bytes: self.current_max_bytes,
-            resident_bytes: current.map_or(0, ScopeState::total_resident_bytes),
-            resident_roots: current.map_or(0, |state| state.receipts.len()),
-            hits: cache.hits,
-            misses: cache.misses,
-            loads: cache.loads,
-            load_failures: cache.load_failures,
-            evictions: cache.evictions,
-            oversize_bypasses: cache.oversize_bypasses,
-            inflight: cache.inflight,
-            pending_roots,
-            durable_roots,
-            unevictable_bytes,
-            pressure: self
-                .current_max_bytes
-                .map_or(OverlayPressure::Normal, |max_bytes| {
-                    OverlayPressure::of(unevictable_bytes, max_bytes)
-                }),
-            room_spatial_rebuild_count: current.map_or(0, |state| {
-                state.room_spatial_rebuild_count
-            }),
-            room_spatial_rows_rebuilt: current
-                .map_or(0, |state| state.room_spatial_rows_rebuilt),
-            room_spatial_rebuild_duration_ms: current.map_or(0, |state| {
-                state.room_spatial_rebuild_duration_ms
-            }),
-        }
+    /// 房间 overlay 按库整体重建的次数、喂进去的行数、以及前台累计耗时（毫秒）。
+    /// 重建是已知的前台开销热点，这三个数是它唯一的哨兵。
+    pub(crate) fn room_spatial_rebuild_stats(&self) -> (u64, u64, u64) {
+        self.read()
+            .get(&ScopeKey::Current)
+            .map_or((0, 0, 0), |state| {
+                (
+                    state.room_spatial_rebuild_count,
+                    state.room_spatial_rows_rebuilt,
+                    state.room_spatial_rebuild_duration_ms,
+                )
+            })
     }
 
     fn read(&self) -> RwLockReadGuard<'_, HashMap<ScopeKey, ScopeState>> {
@@ -1100,115 +743,14 @@ impl ModelMemoryStore {
         state.flush_room_spatial();
     }
 
-    /// Atomically admit and commit a current-overlay cohort. Exact durable roots
-    /// may be evicted first; pending roots are never eviction candidates.
-    pub fn try_commit_current(
-        &self,
-        commits: Vec<ProjectionCommit>,
-    ) -> Result<(), OverlayBackpressure> {
-        let Some(max_bytes) = self.current_max_bytes else {
-            self.commit(ProjectionScope::Current, commits);
-            return Ok(());
-        };
+    /// 把一批 current overlay 的改动整体装进去。overlay 无界，不存在装不下这回事，
+    /// 所以这里没有准入判断——只是 [`Self::commit`] 钉死在 `Current` 作用域上的形态。
+    pub fn try_commit_current(&self, commits: Vec<ProjectionCommit>) {
         if commits.iter().all(ProjectionCommit::is_empty) {
-            return Ok(());
+            return;
         }
-
-        let protected = commits
-            .iter()
-            .filter_map(|commit| commit.receipt.as_ref().map(|(root, _)| packed_refno(*root)))
-            .collect::<BTreeSet<_>>();
         let mut scopes = self.write();
         let state = scopes.entry(ScopeKey::Current).or_default();
-        let mut cache = self.cache_control();
-
-        loop {
-            let mut replaced = BTreeSet::new();
-            for commit in &commits {
-                replaced.extend(commit.removals.iter().cloned());
-                for branch in &commit.tube_branch_resets {
-                    if let Some(ids) = state.by_tube_branch.get(&packed_refno(*branch)) {
-                        replaced.extend(ids.iter().cloned());
-                    }
-                }
-                replaced.extend(commit.upserts.iter().map(|row| row.record_id.clone()));
-            }
-            let removed_bytes = replaced
-                .iter()
-                .filter_map(|id| state.geometry_bytes.get(id))
-                .sum::<usize>();
-            // A cohort has final-write semantics.  Counting every intermediate
-            // upsert can reject a batch whose installed state is within budget.
-            let final_upserts = commits
-                .iter()
-                .flat_map(|commit| &commit.upserts)
-                .map(|row| (row.record_id.as_str(), row))
-                .collect::<BTreeMap<_, _>>();
-            let added_bytes = final_upserts
-                .values()
-                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len()))
-                .sum::<usize>();
-            let final_receipts = commits
-                .iter()
-                .filter_map(|commit| commit.receipt.as_ref())
-                .map(|(root, receipt)| (packed_refno(*root), (*root, receipt)))
-                .collect::<BTreeMap<_, _>>();
-            let removed_receipt_bytes = final_receipts
-                .keys()
-                .map(|root| state.receipts.bytes_of(root))
-                .sum::<usize>();
-            let added_receipt_bytes = final_receipts
-                .values()
-                .map(|(root, receipt)| receipt_resident_bytes(*root, receipt))
-                .sum::<usize>();
-            let projected_bytes = state
-                .total_resident_bytes()
-                .saturating_sub(removed_bytes)
-                .saturating_sub(removed_receipt_bytes)
-                .saturating_add(added_bytes)
-                .saturating_add(added_receipt_bytes);
-            if projected_bytes <= max_bytes {
-                break;
-            }
-
-            let candidate = state
-                .publication_acks
-                .iter()
-                .filter(|(root, ack)| {
-                    !protected.contains(root)
-                        && state
-                            .receipts
-                            .get(root)
-                            .is_some_and(|receipt| ack.matches(receipt))
-                })
-                .map(|(root, _)| *root)
-                .min_by_key(|root| cache.last_access.get(root).copied().unwrap_or(0));
-            let Some(candidate) = candidate else {
-                cache.oversize_bypasses += 1;
-                return Err(OverlayBackpressure {
-                    projected_bytes,
-                    max_bytes,
-                });
-            };
-
-            state.publication_acks.remove(&candidate);
-            state.receipts.remove(&candidate);
-            state.invalidated_roots.remove(&candidate);
-            cache.last_access.remove(&candidate);
-            let root = RefNo::new((candidate >> 32) as u32, candidate as u32);
-            for id in state.record_ids_under(root) {
-                let shared = state.geometries.get(&id).is_some_and(|record| {
-                    state
-                        .receipts
-                        .keys()
-                        .any(|other| record.ancestors.contains(other))
-                });
-                if !shared {
-                    state.evict(&id);
-                }
-            }
-            cache.evictions += 1;
-        }
 
         for commit in &commits {
             state.invalidate_publication_acks_for(commit);
@@ -1218,7 +760,6 @@ impl ModelMemoryStore {
             state.apply_upserts_and_receipt(commit);
         }
         state.flush_room_spatial();
-        Ok(())
     }
 
     pub fn current_counts(&self) -> (usize, usize) {
@@ -1364,60 +905,7 @@ impl ModelMemoryStore {
         state.invalidated_roots.remove(&packed);
         state.receipts.insert(packed, receipt);
         state.flush_room_spatial();
-        drop(scopes);
-        self.touch_root(root);
         true
-    }
-
-    fn enforce_current_cache_limit(&self, protected: RefNo) {
-        let Some(max_bytes) = self.current_max_bytes else {
-            return;
-        };
-        let protected = packed_refno(protected);
-        let mut scopes = self.write();
-        let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
-            return;
-        };
-        let mut cache = self.cache_control();
-        let protected_bytes = state
-            .record_ids_under(RefNo::new((protected >> 32) as u32, protected as u32))
-            .into_iter()
-            .filter_map(|id| state.geometry_bytes.get(&id))
-            .sum::<usize>()
-            .saturating_add(state.receipts.bytes_of(&protected));
-        if protected_bytes > max_bytes {
-            cache.oversize_bypasses += 1;
-        }
-        while state.total_resident_bytes() > max_bytes {
-            let Some(candidate) = state
-                .publication_acks
-                .keys()
-                .copied()
-                .filter(|root| *root != protected || protected_bytes > max_bytes)
-                .min_by_key(|root| cache.last_access.get(root).copied().unwrap_or(0))
-            else {
-                break;
-            };
-            state.publication_acks.remove(&candidate);
-            state.receipts.remove(&candidate);
-            state.invalidated_roots.remove(&candidate);
-            cache.last_access.remove(&candidate);
-            let root = RefNo::new((candidate >> 32) as u32, candidate as u32);
-            let ids = state.record_ids_under(root);
-            for id in ids {
-                let shared = state.geometries.get(&id).is_some_and(|record| {
-                    state
-                        .receipts
-                        .keys()
-                        .any(|other| record.ancestors.contains(other))
-                });
-                if !shared {
-                    state.evict(&id);
-                }
-            }
-            cache.evictions += 1;
-        }
-        state.flush_room_spatial();
     }
 
     /// Drop one resident cache entry because the durable point lookup says it no
@@ -1444,8 +932,6 @@ impl ModelMemoryStore {
             }
         }
         state.flush_room_spatial();
-        drop(scopes);
-        self.cache_control().last_access.remove(&packed);
     }
 
     /// A whole-dbnum reinitialize invalidates the process projection immediately.
@@ -1507,7 +993,27 @@ impl ModelMemoryStore {
             .collect()
     }
 
-    /// 一个生成根名下的全部记录，按库分组。按需删除路径用它。
+    /// 在同一读锁下复制整根回执与几何，避免发布或淘汰把两个版本拼在一起。
+    pub fn root_snapshot(
+        &self,
+        scope: ProjectionScope<'_>,
+        root: RefNo,
+    ) -> Option<(RootReceipt, Vec<ProjectedGeometry>)> {
+        let snapshot = {
+            let scopes = self.read();
+            let state = scopes.get(&scope.key())?;
+            let receipt = state.receipts.get(&packed_refno(root))?.clone();
+            let records = state
+                .record_ids_under(root)
+                .into_iter()
+                .filter_map(|id| state.geometries.get(&id).cloned())
+                .collect();
+            (receipt, records)
+        };
+        Some(snapshot)
+    }
+
+    /// 一个生成根名下的全部记录。按需删除路径用它。
     pub fn records_of_root(
         &self,
         scope: ProjectionScope<'_>,
@@ -1525,25 +1031,7 @@ impl ModelMemoryStore {
                 .filter_map(|record_id| state.geometries.get(&record_id).cloned())
                 .collect()
         };
-        if current {
-            self.touch_root(root);
-        }
         records
-    }
-
-    /// Approximate serialized bytes retained for one complete root overlay.
-    /// Shared records are counted once for this root's admission estimate.
-    pub(crate) fn resident_bytes_of_root(&self, root: RefNo) -> usize {
-        let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else {
-            return 0;
-        };
-        state
-            .record_ids_under(root)
-            .into_iter()
-            .filter_map(|id| state.geometry_bytes.get(&id))
-            .sum::<usize>()
-            .saturating_add(state.receipts.bytes_of(&packed_refno(root)))
     }
 
     /// 整个投影域的记录，按 record_id 排序。历史快照查询与落库适配器用它。
@@ -1614,9 +1102,6 @@ impl ModelMemoryStore {
                 .get(&packed_refno(root))
                 .cloned()
         };
-        if current {
-            self.touch_root(root);
-        }
         receipt
     }
 
@@ -1658,24 +1143,7 @@ impl ModelMemoryStore {
             state.publication_acks.insert(packed_refno(root), ack);
             true
         };
-        if accepted && current && durable {
-            self.touch_root(root);
-            self.enforce_current_cache_limit(root);
-        }
         accepted
-    }
-
-    /// 当前投影的压力档。没有配硬上限的形态（kv-mem）恒为 `Normal`：那里内存就是
-    /// 真身，既不淘汰也不背压，降速救不了任何东西。
-    pub fn overlay_pressure(&self) -> OverlayPressure {
-        let Some(max_bytes) = self.current_max_bytes else {
-            return OverlayPressure::Normal;
-        };
-        let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else {
-            return OverlayPressure::Normal;
-        };
-        OverlayPressure::of(state.unevictable_bytes(), max_bytes)
     }
 
     /// Whether this root has a memory overlay newer or different from the exact
@@ -1862,78 +1330,97 @@ mod tests {
         ModelMemoryStore::default()
     }
 
-    /// 压力看的是「让不出来的位子」，不是「占了多少位子」。
-    ///
-    /// 一个贴着上限跑但每根都有同源 ACK 的缓存是健康的：淘汰随时能腾地方。按常驻
-    /// 字节读压力会把它误判成濒死，于是好端端地把派发停掉。
     #[test]
-    fn pressure_counts_only_the_roots_eviction_cannot_reclaim() {
-        let root = RefNo::new(7997, 100);
-        let row = record("a", RefNo::new(7997, 1), root, 7997);
-        let receipt = RootReceipt {
-            source_sesno: 42,
-            model_target: None,
-            manifest_hash: "manifest".into(),
-            geometry_count: 1,
-            published_via: default_published_via(),
-        };
-        let occupied = serde_json::to_vec(&row).unwrap().len()
-            + receipt_resident_bytes(root, &receipt);
-        // 这一根一个人就占满上限：按常驻字节算，两种情形都是 100%。
-        let store = ModelMemoryStore::with_cache_limit(occupied);
-        store
-            .try_commit_current(vec![ProjectionCommit {
-                upserts: vec![row],
-                receipt: Some((root, receipt.clone())),
-                ..Default::default()
-            }])
-            .expect("cohort fits exactly");
-
-        assert_eq!(store.overlay_pressure(), OverlayPressure::Hard);
-
-        assert!(store.record_publication_ack(
-            ProjectionScope::Current,
-            root,
-            RootPublicationAck {
-                dbnum: 7997,
-                source_sesno: receipt.source_sesno,
-                geometry_count: receipt.geometry_count,
-                manifest_hash: receipt.manifest_hash.clone(),
-                model_target: None,
-                room_membership: false,
-                room_generation: None,
-                medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
-            },
-        ));
-        let stats = store.cache_stats();
-        assert_eq!(stats.unevictable_bytes, 0, "落了盘就让得出位子");
-        assert_eq!(stats.pressure, OverlayPressure::Normal);
+    fn concurrent_root_snapshots_never_mix_receipts_and_geometry() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                barrier.wait();
+                for version in 0..2_000 {
+                    let count = version % 2 + 1;
+                    store.commit(
+                        ProjectionScope::Current,
+                        vec![ProjectionCommit {
+                            removals: vec!["one".into(), "two".into()],
+                            upserts: ["one", "two"]
+                                .into_iter()
+                                .take(count)
+                                .map(|id| {
+                                    let mut row = record(id, root, root, 7997);
+                                    row.mesh_id = version.to_string();
+                                    row
+                                })
+                                .collect(),
+                            receipt: Some((
+                                root,
+                                RootReceipt {
+                                    source_sesno: 42,
+                                    model_target: None,
+                                    manifest_hash: version.to_string(),
+                                    geometry_count: count,
+                                    published_via: default_published_via(),
+                                },
+                            )),
+                            ..Default::default()
+                        }],
+                    );
+                }
+            });
+            barrier.wait();
+            for _ in 0..2_000 {
+                if let Some((receipt, records)) =
+                    store.root_snapshot(ProjectionScope::Current, root)
+                {
+                    assert_eq!(records.len(), receipt.geometry_count);
+                    assert!(
+                        records
+                            .iter()
+                            .all(|row| row.mesh_id == receipt.manifest_hash)
+                    );
+                }
+                std::thread::yield_now();
+            }
+        });
     }
 
-    /// 没配硬上限的形态（kv-mem）恒为 `Normal`：那里内存就是真身，降速救不了谁。
     #[test]
-    fn an_unbounded_overlay_never_reports_pressure() {
+    fn root_snapshot_keeps_receipt_and_records_from_one_commit() {
         let store = store();
-        let root = RefNo::new(7997, 101);
-        store.commit(
-            ProjectionScope::Current,
-            vec![ProjectionCommit {
-                upserts: vec![record("a", RefNo::new(7997, 1), root, 7997)],
-                receipt: Some((
-                    root,
-                    RootReceipt {
-                        source_sesno: 42,
-                        model_target: None,
-                        manifest_hash: "manifest".into(),
-                        geometry_count: 1,
-                        published_via: default_published_via(),
-                    },
-                )),
-                ..Default::default()
-            }],
+        let root = RefNo::new(7997, 1);
+        let publish = |manifest: &str| {
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: vec![record("one", root, root, 7997)],
+                    receipt: Some((
+                        root,
+                        RootReceipt {
+                            source_sesno: 42,
+                            model_target: None,
+                            manifest_hash: manifest.into(),
+                            geometry_count: 1,
+                            published_via: default_published_via(),
+                        },
+                    )),
+                    ..Default::default()
+                }],
+            )
+        };
+        publish("old");
+        let (receipt, records) = store.root_snapshot(ProjectionScope::Current, root).unwrap();
+        publish("new");
+        assert_eq!(receipt.manifest_hash, "old");
+        assert_eq!(records.len(), receipt.geometry_count);
+        assert_eq!(
+            store
+                .root_snapshot(ProjectionScope::Current, root)
+                .unwrap()
+                .0
+                .manifest_hash,
+            "new"
         );
-        assert!(store.cache_stats().unevictable_bytes > 0);
-        assert_eq!(store.overlay_pressure(), OverlayPressure::Normal);
     }
 
     /// lazy-startup L4：一个库保存了，只作废**它自己**的回执与 ACK（含第二个 extent 的根——
@@ -2399,9 +1886,9 @@ mod tests {
         assert!((0..100).all(|index| {
             !remaining.contains(&packed_refno(RefNo::new(24384, 100_000 + index)))
         }));
-        let stats = store.cache_stats();
-        assert_eq!(stats.room_spatial_rebuild_count, 5);
-        assert_eq!(stats.room_spatial_rows_rebuilt, 5_315);
+        let (rebuild_count, rows_rebuilt, _) = store.room_spatial_rebuild_stats();
+        assert_eq!(rebuild_count, 5);
+        assert_eq!(rows_rebuilt, 5_315);
     }
 
     #[test]
@@ -2864,203 +2351,8 @@ mod tests {
     }
 
     #[test]
-    fn the_byte_limit_evicts_only_durably_acked_roots() {
-        let store = ModelMemoryStore::with_cache_limit(1);
-        let root_a = RefNo::new(7997, 100);
-        let root_b = RefNo::new(7997, 200);
-        let receipt = |name: &str| RootReceipt {
-            source_sesno: 42,
-            model_target: None,
-            manifest_hash: name.into(),
-            geometry_count: 1,
-            published_via: "regen".into(),
-        };
-        store.commit(
-            ProjectionScope::Current,
-            vec![
-                ProjectionCommit {
-                    upserts: vec![record("a", RefNo::new(7997, 1), root_a, 7997)],
-                    receipt: Some((root_a, receipt("a"))),
-                    ..Default::default()
-                },
-                ProjectionCommit {
-                    upserts: vec![record("b", RefNo::new(7997, 2), root_b, 7997)],
-                    receipt: Some((root_b, receipt("b"))),
-                    ..Default::default()
-                },
-            ],
-        );
-        let ack = |root: RefNo| RootPublicationAck {
-            dbnum: root.dbno(),
-            source_sesno: 42,
-            geometry_count: 1,
-            manifest_hash: if root == root_a { "a" } else { "b" }.into(),
-            model_target: None,
-            room_membership: false,
-            room_generation: None,
-            medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
-        };
-
-        store.record_publication_ack(ProjectionScope::Current, root_a, ack(root_a));
-        assert!(store.receipt(ProjectionScope::Current, root_a).is_none());
-        assert!(
-            store.receipt(ProjectionScope::Current, root_b).is_some(),
-            "an unacknowledged candidate must survive cache pressure"
-        );
-        assert_eq!(store.cache_stats().evictions, 1);
-
-        store.record_publication_ack(ProjectionScope::Current, root_b, ack(root_b));
-        assert!(store.receipt(ProjectionScope::Current, root_b).is_none());
-        let stats = store.cache_stats();
-        assert_eq!(stats.evictions, 2);
-        assert_eq!(stats.resident_bytes, 0);
-        assert_eq!(stats.oversize_bypasses, 2);
-    }
-
-    #[test]
-    fn hard_limit_rejects_pending_cohort_before_installing_it() {
-        let root = RefNo::new(7997, 100);
-        let row = record("too-large", RefNo::new(7997, 1), root, 7997);
-        let store = ModelMemoryStore::with_cache_limit(1);
-        let error = store
-            .try_commit_current(vec![ProjectionCommit {
-                upserts: vec![row],
-                receipt: Some((
-                    root,
-                    RootReceipt {
-                        source_sesno: 42,
-                        model_target: None,
-                        manifest_hash: "large".into(),
-                        geometry_count: 1,
-                        published_via: "regen".into(),
-                    },
-                )),
-                ..Default::default()
-            }])
-            .expect_err("a pending root may not exceed the hard limit");
-        assert_eq!(error.max_bytes, 1);
-        assert!(error.projected_bytes > error.max_bytes);
-        assert_eq!(store.current_counts(), (0, 0));
-        assert_eq!(store.commit_epoch(7997), 0);
-    }
-
-    #[test]
-    fn hard_limit_charges_nonzero_residency_for_empty_roots() {
-        let store = ModelMemoryStore::with_cache_limit(1);
-        let root = RefNo::new(7997, 101);
-        let error = store
-            .try_commit_current(vec![ProjectionCommit {
-                receipt: Some((
-                    root,
-                    RootReceipt {
-                        source_sesno: 42,
-                        model_target: None,
-                        manifest_hash: "empty".into(),
-                        geometry_count: 0,
-                        published_via: "regen".into(),
-                    },
-                )),
-                ..Default::default()
-            }])
-            .expect_err("an empty root still consumes receipt and identity memory");
-        assert!(error.projected_bytes > 1);
-        assert_eq!(store.current_counts(), (0, 0));
-        assert_eq!(store.commit_epoch(7997), 0);
-    }
-
-    #[test]
-    fn admission_counts_only_the_final_upsert_for_a_record_id() {
-        let root = RefNo::new(7997, 102);
-        let first = record("same", RefNo::new(7997, 1), root, 7997);
-        let mut last = first.clone();
-        last.noun = "LAST".into();
-        let receipt = RootReceipt {
-            source_sesno: 42,
-            model_target: None,
-            manifest_hash: "final-write".into(),
-            geometry_count: 1,
-            published_via: "regen".into(),
-        };
-        let exact_limit =
-            serde_json::to_vec(&last).unwrap().len() + receipt_resident_bytes(root, &receipt);
-        let store = ModelMemoryStore::with_cache_limit(exact_limit);
-        store
-            .try_commit_current(vec![ProjectionCommit {
-                upserts: vec![first, last],
-                receipt: Some((root, receipt)),
-                ..Default::default()
-            }])
-            .expect("final-write accounting must not double-charge duplicate ids");
-        assert_eq!(store.current_counts(), (1, 1));
-        assert!(store.cache_stats().resident_bytes <= exact_limit);
-    }
-
-    #[test]
-    fn hard_limit_evicts_a_clean_root_to_admit_a_new_pending_root() {
-        let root_a = RefNo::new(7997, 100);
-        let root_b = RefNo::new(7997, 200);
-        let row_a = record("a", RefNo::new(7997, 1), root_a, 7997);
-        let row_b = record("b", RefNo::new(7997, 2), root_b, 7997);
-        let receipt = |manifest: &str| RootReceipt {
-            source_sesno: 42,
-            model_target: None,
-            manifest_hash: manifest.into(),
-            geometry_count: 1,
-            published_via: "regen".into(),
-        };
-        let max_bytes = (serde_json::to_vec(&row_a).unwrap().len()
-            + receipt_resident_bytes(root_a, &receipt("a")))
-        .max(
-            serde_json::to_vec(&row_b).unwrap().len()
-                + receipt_resident_bytes(root_b, &receipt("b")),
-        );
-        let store = ModelMemoryStore::with_cache_limit(max_bytes);
-        store
-            .try_commit_current(vec![ProjectionCommit {
-                upserts: vec![row_a],
-                receipt: Some((root_a, receipt("a"))),
-                ..Default::default()
-            }])
-            .unwrap();
-        assert!(store.record_publication_ack(
-            ProjectionScope::Current,
-            root_a,
-            RootPublicationAck {
-                dbnum: 7997,
-                source_sesno: 42,
-                geometry_count: 1,
-                manifest_hash: "a".into(),
-                model_target: None,
-                room_membership: false,
-                room_generation: None,
-                medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
-            },
-        ));
-        assert_eq!(
-            store.room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]]),
-            BTreeSet::from([packed_refno(RefNo::new(7997, 1))])
-        );
-
-        store
-            .try_commit_current(vec![ProjectionCommit {
-                upserts: vec![row_b],
-                receipt: Some((root_b, receipt("b"))),
-                ..Default::default()
-            }])
-            .unwrap();
-        assert!(store.receipt(ProjectionScope::Current, root_a).is_none());
-        assert!(store.receipt(ProjectionScope::Current, root_b).is_some());
-        assert!(store.root_needs_persist(root_b));
-        assert_eq!(store.cache_stats().evictions, 1);
-        assert_eq!(
-            store.room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]]),
-            BTreeSet::from([packed_refno(RefNo::new(7997, 2))])
-        );
-    }
-
-    #[test]
     fn an_old_same_session_ack_cannot_advance_the_durable_watermark() {
-        let store = ModelMemoryStore::with_cache_limit(1024);
+        let store = ModelMemoryStore::default();
         let root = RefNo::new(7997, 300);
         store.commit(
             ProjectionScope::Current,
@@ -3095,8 +2387,6 @@ mod tests {
         assert!(!accepted);
         assert!(store.root_needs_persist(root));
         assert_eq!(store.pending_roots_of_dbnum(root.dbno()), vec![root]);
-        let stats = store.cache_stats();
-        assert_eq!((stats.pending_roots, stats.durable_roots), (1, 0));
 
         assert!(store.record_publication_ack(
             ProjectionScope::Current,

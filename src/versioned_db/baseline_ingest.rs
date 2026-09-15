@@ -8,18 +8,24 @@
 //! |---|---|
 //! | 收集 | [`e3d_collector::stream_baseline`]（与 `collect_net_window` 同一套枚举 / 读取 / 失败闸） |
 //! | 渲染 | [`baseline::render_baseline_batches`] → `element_batch`（`Fresh`，事务不带统计观测） |
-//! | 执行 | [`pe_batch::execute_on`] → `surreal_retry`（乐观冲突指数退避重试） |
-//! | CATA 依赖 | [`cata_dependency`]（seed 流式攒、文件收尾一次闭包、同一条写者队列） |
+//! | 执行 | [`persist_writer`]（落盘写者：有界队列 → 单写者，含期限与乐观冲突退避重试） |
+//! | CATA 依赖 | [`cata_dependency`]（seed 流式攒、文件收尾一次闭包、同一条 lane） |
 //! | 统计 | **不在这里**：`dbnum_info_table` 由 dbnum 任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`，ADR-071 D6），基线与增量同一笔 |
 //!
 //! 形状：`spawn_blocking` 里流式收集 → 每块渲成若干笔事务（每条队列消息 = 一笔事务 SQL）→
-//! 有界队列（[`QUEUE_CAPACITY`]）→ **单写者**（SurrealDB 2.1 乐观事务下多写者在共享表 / 索引键上
-//! 持续互撞，7997 真库曾耗尽重试预算）。解析与写入重叠：5525 实测写者才是瓶颈（排空 7.4s > 解析 4.25s）。
+//! 属性 lane（[`QUEUE_CAPACITY`] 有界队列 → **单写者**；SurrealDB 2.1 乐观事务下同一面多写者在共享表 /
+//! 索引键上持续互撞，7997 真库曾耗尽重试预算）。解析与写入重叠：5525 实测写者才是瓶颈（排空 7.4s > 解析 4.25s）。
+//!
+//! 两个入口（ADR-077）：
+//! * [`stream_frozen_into`]——**只往给定的属性 lane 流**：不落写入标记、不起写者、不排空、不清库。
+//!   写者的拥有者是能看见两条 lane 的那一层（`data_interface::dbnum_initialize`），否则「先排空再清库」
+//!   在双 lane 下立不住。
+//! * [`ingest_file`]——单 lane 版：自己起属性 lane、自己排空、自己清库，给不带模型半边的调用方
+//!   （手动 live 用例）用；语义与 2026-09-14 之前一致。
 //!
 //! 纪律：
-//! * **不动水位**。`applied_sesno` 与模型计划的收口是调用方（`manual_update::initialize_dbnum_baseline`
-//!   → `increment_tail::finalize_baseline`）的事，本模块只回「写了多少」。
-//! * **任何失败先清库再 Err**（解析 / 写者 / 闭包 / 统计对不上）：`fast_delete::wipe_dbnum_for_reinit`
+//! * **不动水位**。`applied_sesno` 的收口是调用方的事，本模块只回「写了多少」。
+//! * **任何失败先排空再清库再 Err**（解析 / 写者 / 闭包）：`fast_delete::wipe_dbnum_for_reinit`
 //!   把这个 dbnum 的行清干净，下一轮从 `applied_sesno = 0` 重来，不留半写的库。
 //! * **`Fresh` 只插不删、已有行赢**：父层补缺（`replace_dbs = false`）把 extract 母库整库再摄入进同一个
 //!   dbnum 时，叶子 extract 里正在改的版本不许被母库的旧版本覆盖。
@@ -30,21 +36,19 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use aios_core::RefU64;
 use aios_core::options::DbOption;
-use aios_core::{RefU64, SUL_DB};
 use anyhow::Context;
-use futures::StreamExt;
 
 use crate::data_interface::e3d_collector::{BaselineChunk, BaselineStats, stream_baseline};
 use crate::data_interface::frozen_source::FrozenSource;
 use crate::data_interface::uda_keys::UdaKeyMap;
 use crate::versioned_db::baseline::{render_baseline_batches, source_for_file};
 
-/// 有界队列容量：解析最多领先写者这么多笔事务。
-pub(crate) const QUEUE_CAPACITY: usize = 100;
-/// 写者每次从队列取出的事务数。必须小于 [`QUEUE_CAPACITY`]：单写者 `chunks(N)` 要等到 N 条才
-/// 交出，而生产者在 [`QUEUE_CAPACITY`] 条时阻塞——N ≥ 容量就是一个确定性的死锁。
-pub(crate) const WRITE_WINDOW: usize = 20;
+/// 队列、单写者与它们的纪律都在 [`persist_writer`] 里，模型 lane 用的是同一份。
+pub(crate) use crate::data_interface::persist_writer::{
+    Lane, OnWriteError, QUEUE_CAPACITY, WriteJob, WriterOutcome,
+};
 /// `sync_chunk_size` 没写时一块的元素数（与 legacy 同值：对绝大多数库等于整文件一块）。
 const DEFAULT_CHUNK_ELEMENTS: usize = 10_0000;
 
@@ -69,21 +73,58 @@ pub struct DependencySummary {
     pub rows: usize,
     pub catalogue_dbnums: usize,
     pub missing: usize,
+    /// S0 取证（plan 2026-09-15）：解析 / 渲染拆项与送进 lane 的 SQL 字节。
+    pub resolve_ms: u128,
+    pub render_ms: u128,
+    pub sql_bytes: usize,
+    pub parse_requests: usize,
+    pub parsed: usize,
+    /// S2：解析缓存命中 / 未命中的元素数。
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    /// S3（D6）：这一版已经落过库、因此没有再送进 lane 的元素数。
+    pub skipped_persisted: usize,
 }
 
-/// 写者任务的收尾账：失败次数与前几条样例（错误文本进日志与回执）。
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct WriterOutcome {
-    pub errors: usize,
-    pub samples: Vec<String>,
+/// 一个冻结源流进属性 lane 之后的账——解析那一半；写者那一半在 lane 的 [`WriterOutcome`] 上。
+#[derive(Debug, Clone)]
+pub(crate) struct StreamedBaseline {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub file_name: String,
+    pub target_sesno: u32,
+    pub stats: BaselineStats,
+    /// CATA 依赖闭包的账；DESI 之外为 `None`。
+    pub dependency: Option<DependencySummary>,
+    /// `UdaKeyMap` 查不到的键（有就记一句告警）。
+    uda_misses_warning: Option<String>,
 }
 
-impl WriterOutcome {
-    fn record(&mut self, context: &str, error: anyhow::Error) {
-        self.errors += 1;
-        if self.samples.len() < 3 {
-            self.samples.push(format!("{context}: {error}"));
+impl StreamedBaseline {
+    /// 裁决通过之后的收尾：销掉旧进程可能留下的 ATTRS 账、打解析回执。
+    ///
+    /// 新路没有「属性残、拓扑在」的中间态（Q3 甲）：走到这里就是这一文件的完整属性都解出来并落了库。
+    pub(crate) fn acknowledge(&self, started: Instant) {
+        crate::data_interface::parse_error::note_attrs_success(&self.file_name);
+        if let Some(warning) = &self.uda_misses_warning {
+            log::warn!("{}: {warning}", self.file_name);
+            println!("{}: {warning}", self.file_name);
         }
+        if self.stats.ignored > 0 {
+            println!(
+                "{}: {} 条字典无属性 schema 的系统记录跳过（已记进解析失败账本）",
+                self.file_name, self.stats.ignored
+            );
+        }
+        println!(
+            "解析任务完成, 耗时: {} s, 总数量: {}（索引 {} 条，WORL {} 个，{} 块，读页 {}）",
+            started.elapsed().as_secs_f32(),
+            self.stats.elements,
+            self.stats.indexed,
+            self.stats.worlds,
+            self.stats.chunks,
+            self.stats.pages_read
+        );
     }
 }
 
@@ -134,14 +175,28 @@ pub(crate) fn failure_summary(
     (!parts.is_empty()).then(|| parts.join("；"))
 }
 
-/// 把一个库文件按 `Fresh` 整库写进当前 SurrealDB。
+/// 按路径冻结一个库文件并核对身份。
 ///
 /// * `target_sesno`：`Some` = 冻结在这一会话（叶子基线传 `file_latest_sesno`，与本轮文件身份复核
 ///   同一个会话）；`None` = 文件最新（父层补缺）。
 /// * 冻结源优先复用数据批次 worker 手里的活动文件轮次（`active_frozen_source`），与
 ///   `source_for_file` 的规则一致。
-///
-/// 不推进水位；失败先清库（见模块注释）。
+pub(crate) fn frozen_source_for(
+    path: &Path,
+    dbnum: u32,
+    db_type: &str,
+    target_sesno: Option<u32>,
+) -> anyhow::Result<FrozenSource> {
+    let active = crate::data_interface::batch_worker::active_frozen_source()?;
+    let frozen = source_for_file(path, target_sesno, active.as_ref())
+        .with_context(|| format!("打开基线冻结源失败 {}", path.display()))?;
+    check_identity(frozen.dbnum(), frozen.db_type(), dbnum, db_type)?;
+    Ok(frozen)
+}
+
+/// 把一个库文件按 `Fresh` 整库写进当前 SurrealDB——**单 lane 版**：自己起属性 lane、自己排空、
+/// 自己清库。不推进水位。给不带模型半边的调用方用；双 lane 初始化走
+/// `data_interface::dbnum_initialize`（它自己拿 [`stream_frozen_into`]）。
 pub async fn ingest_file(
     db_option: &DbOption,
     project: &str,
@@ -150,23 +205,97 @@ pub async fn ingest_file(
     db_type: &str,
     target_sesno: Option<u32>,
 ) -> anyhow::Result<BaselineIngest> {
-    let active = crate::data_interface::batch_worker::active_frozen_source()?;
-    let frozen = source_for_file(path, target_sesno, active.as_ref())
-        .with_context(|| format!("打开基线冻结源失败 {}", path.display()))?;
-    check_identity(frozen.dbnum(), frozen.db_type(), dbnum, db_type)?;
-    ingest_frozen(db_option, project, &frozen).await
+    let frozen = frozen_source_for(path, dbnum, db_type, target_sesno)?;
+    let started = Instant::now();
+    // 写入标记 `writing{0, T}`（ADR-072 D1 / 计划 §4.2-1）：基线的起点恒为 0——库里没有
+    // 「S 版本」可退，崩在中途的回退就是整库 wipe 再重排（D2 第 1 条）。
+    mark_initialization_writing(dbnum, frozen.target_sesno()).await?;
+
+    // 从这里起有写者在跑：之后的任何失败都要先排空、再清库。
+    let lane = Lane::spawn("element batch", QUEUE_CAPACITY, OnWriteError::Continue);
+    let sender = lane.sender();
+    let streamed = stream_frozen_into(db_option, project, &frozen, &sender).await;
+    drop(sender);
+    let writer = lane.drain().await;
+    // 解析任务是 spawn 出去的，攒下的属性解析失败在这里落库（见 `note_attrs_failure`）。
+    // 排在裁决之前：解析失败恰恰是最需要留痕的那一次。
+    if let Err(error) = crate::data_interface::parse_error::flush().await {
+        log::warn!("{error:#}");
+    }
+    let streamed = match judge_streamed(streamed, &writer) {
+        Ok(streamed) => streamed,
+        Err(summary) => {
+            let file_name = file_name_of(&frozen);
+            log::error!("baseline failed: file={file_name} dbnum={dbnum}: {summary}");
+            println!("{file_name}: 基线失败，清库后重来（dbnum={dbnum}）: {summary}");
+            wipe_after_failure(dbnum).await?;
+            anyhow::bail!("dbnum={dbnum} 基线摄入失败: {summary}");
+        }
+    };
+    streamed.acknowledge(started);
+    Ok(BaselineIngest {
+        dbnum: streamed.dbnum,
+        db_type: streamed.db_type,
+        file_name: streamed.file_name,
+        elements: streamed.stats.elements,
+        stats: streamed.stats,
+        dependency: streamed.dependency,
+    })
 }
 
-/// [`ingest_file`] 的摄入主体：身份复核过之后，dbnum / db_type / 目标会话一律以冻结源为准。
+/// 基线 / 初始化开工的写入标记 `writing{0, T}`（ADR-072 D1）。
 ///
-/// 不单独对外：`ingest_file` 是唯一入口，点名与文件头必须先对上（[`check_identity`]）。
-/// 2026-09-07 之前 `bootstrap_sys_metadata` 直接从这里进来——它按目录扫、手里没有点名的身份，
-/// 于是文件头就是身份；那条空库引导已随 `bin/sync_sys_only` 退役。
-async fn ingest_frozen(
+/// 数据批次 worker 在冻结点已经落过一次标记，这里**重写**是为了把 S 与 intent 修正成初始化那一档：
+/// 走到基线说明冻结点重解窗口判了「按首次导入」，worker 那一刻按队列行算出来的 S 可能不是 0
+/// （回退检出的 `Reinitialize` 行尤其如此）。标记只有一行，重写即纠正。
+pub(crate) async fn mark_initialization_writing(dbnum: u32, target_sesno: u32) -> anyhow::Result<()> {
+    crate::data_interface::write_state::mark_writing(
+        dbnum,
+        0,
+        target_sesno as i32,
+        crate::data_interface::write_state::WriteIntent::Initialize,
+    )
+    .await
+    .with_context(|| format!("基线写入标记未落 dbnum={dbnum}：没有标记就没有崩溃出路"))
+}
+
+/// 解析结果 × 写者的账 → 干净就交出解析账，否则合成一句失败原因。
+pub(crate) fn judge_streamed(
+    streamed: anyhow::Result<StreamedBaseline>,
+    writer: &WriterOutcome,
+) -> Result<StreamedBaseline, String> {
+    match streamed {
+        Ok(streamed) => match failure_summary(None, None, writer) {
+            None => Ok(streamed),
+            Some(summary) => Err(summary),
+        },
+        Err(error) => {
+            // 解析器与闭包的错误在 [`stream_frozen_into`] 里已经各自带了前缀，这里只并上写者的账。
+            Err(failure_summary(Some(&error), None, writer).expect("an error is a failure"))
+        }
+    }
+}
+
+fn file_name_of(frozen: &FrozenSource) -> String {
+    frozen
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<non-utf8>")
+        .to_owned()
+}
+
+/// 把一个冻结源的元素批与 CATA 依赖闭包**流进给定的属性 lane**。
+///
+/// 不落写入标记、不起写者、不排空、不清库、不推进水位——这些都归拥有 lane 的那一层。
+/// 身份复核过之后，dbnum / db_type / 目标会话一律以冻结源为准。返回 `Err` = 解析器或闭包出错
+/// （各自带前缀）；已经送进 lane 的事务照常会被写者消费，调用方排空之后自己裁决、自己清库。
+pub(crate) async fn stream_frozen_into(
     db_option: &DbOption,
     project: &str,
     frozen: &FrozenSource,
-) -> anyhow::Result<BaselineIngest> {
+    sender: &flume::Sender<WriteJob>,
+) -> anyhow::Result<StreamedBaseline> {
     anyhow::ensure!(
         db_option.is_save_db(),
         "save_db = false 下不做基线：基线的唯一产出就是库里的行"
@@ -186,27 +315,9 @@ async fn ingest_frozen(
         target_sesno > 0,
         "dbnum={dbnum} 文件 {file_name} 没有会话，基线不执行"
     );
-    let started = Instant::now();
     println!(
         "开始基线摄入 {project} dbnum={dbnum} db_type={db_type} file={file_name} target_sesno={target_sesno}"
     );
-
-    // 写入标记 `writing{0, T}`（ADR-072 D1 / 计划 §4.2-1）：基线的起点恒为 0——库里没有
-    // 「S 版本」可退，崩在中途的回退就是整库 wipe 再重排（D2 第 1 条）。
-    //
-    // 数据批次 worker 在冻结点已经落过一次标记，这里**重写**是为了把 S 与 intent 修正成
-    // 初始化那一档：走到基线说明冻结点重解窗口判了「按首次导入」，worker 那一刻按队列行
-    // 算出来的 S 可能不是 0（回退检出的 `Reinitialize` 行尤其如此）。标记只有一行，重写即纠正。
-    crate::data_interface::write_state::mark_writing(
-        dbnum,
-        0,
-        target_sesno as i32,
-        crate::data_interface::write_state::WriteIntent::Initialize,
-    )
-    .await
-    .with_context(|| {
-        format!("基线写入标记未落 dbnum={dbnum} file={file_name}：没有标记就没有崩溃出路")
-    })?;
 
     // 老库摘 legacy 事件；`execute_on` 里的 `require_no_event_on` 是硬闸，这一步让老库能过闸。
     crate::versioned_db::database::retire_dbnum_event().await?;
@@ -222,12 +333,8 @@ async fn ingest_frozen(
         .unwrap_or(DEFAULT_CHUNK_ELEMENTS);
     let is_design = db_type.eq_ignore_ascii_case("DESI");
 
-    // 从这里起有写者在跑：之后的任何失败都要先排空、再清库。
-    let (sender, receiver) = flume::bounded::<String>(QUEUE_CAPACITY);
-    let writer = spawn_writer(receiver);
-
     // CATA 依赖 seed：流式收集时顺手攒本库每个 DESI 元素的目录链引用，文件收尾一次闭包，
-    // 经同一条写者队列入库（单写者不变），排在调用方的 `finalize_baseline` 之前。
+    // 经同一条 lane 入库（单写者不变），排在调用方的收尾之前。
     let dependency_seeds = Arc::new(Mutex::new(BTreeSet::<RefU64>::new()));
     let parser = {
         let frozen = frozen.clone();
@@ -251,84 +358,41 @@ async fn ingest_frozen(
         })
         .await
     };
-    let parser: anyhow::Result<BaselineStats> = match parser {
-        Ok(Ok(stats)) => Ok(stats),
-        Ok(Err(error)) => Err(error),
-        Err(join_error) => Err(anyhow::anyhow!("baseline task panicked: {join_error}")),
+    let stats = match parser {
+        Ok(Ok(stats)) => stats,
+        Ok(Err(error)) => return Err(error.context("基线收集失败")),
+        Err(join_error) => anyhow::bail!("基线收集失败: baseline task panicked: {join_error}"),
     };
 
     // 闭包缺失（库不在 MDB / 元素不在）只出声；解析器本身出错按基线失败处理（缺依赖的基线
-    // 不算落地，与稳态窗口同纪律）。解析已失败就不跑——半个文件的 seed 没有意义。
+    // 不算落地，与稳态窗口同纪律）。
     let seeds = std::mem::take(
         &mut *dependency_seeds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    let dependency: anyhow::Result<Option<DependencySummary>> = match &parser {
-        Ok(_) if is_design && !seeds.is_empty() => {
-            persist_dependency_closure(project, dbnum, &file_name, &seeds, &uda_keys, &sender)
+    let dependency = if is_design && !seeds.is_empty() {
+        Some(
+            persist_dependency_closure(project, dbnum, &file_name, &seeds, &uda_keys, sender)
                 .await
-                .map(Some)
-        }
-        _ => Ok(None),
+                .context("CATA 依赖闭包失败")?,
+        )
+    } else {
+        None
     };
 
-    let writer = drain_writer(sender, writer).await;
-    // 解析任务是 spawn 出去的，攒下的属性解析失败在这里落库（见 `note_attrs_failure`）。
-    // 排在裁决之前：解析失败恰恰是最需要留痕的那一次。
-    if let Err(error) = crate::data_interface::parse_error::flush().await {
-        log::warn!("{error:#}");
-    }
-
-    if let Some(summary) =
-        failure_summary(parser.as_ref().err(), dependency.as_ref().err(), &writer)
-    {
-        log::error!("baseline failed: file={file_name} dbnum={dbnum}: {summary}");
-        println!("{file_name}: 基线失败，清库后重来（dbnum={dbnum}）: {summary}");
-        wipe_after_failure(dbnum).await?;
-        anyhow::bail!("dbnum={dbnum} 基线摄入失败: {summary}");
-    }
-    let stats = parser.expect("failure_summary 为空即解析成功");
-    let dependency = dependency.expect("failure_summary 为空即闭包成功");
-
-    // 新路没有「属性残、拓扑在」的中间态（Q3 甲）：跑到这里就是这一文件的完整属性都解出来了，
-    // 销掉旧进程可能留下的 ATTRS 账。
-    crate::data_interface::parse_error::note_attrs_success(&file_name);
-    if let Some(warning) = uda_keys.misses_warning(dbnum) {
-        log::warn!("{file_name}: {warning}");
-        println!("{file_name}: {warning}");
-    }
-    if stats.ignored > 0 {
-        println!(
-            "{file_name}: {} 条字典无属性 schema 的系统记录跳过（已记进解析失败账本）",
-            stats.ignored
-        );
-    }
-    println!(
-        "解析任务完成, 耗时: {} s, 总数量: {}（索引 {} 条，WORL {} 个，{} 块，读页 {}）",
-        started.elapsed().as_secs_f32(),
-        stats.elements,
-        stats.indexed,
-        stats.worlds,
-        stats.chunks,
-        stats.pages_read
-    );
-
-    // 统计不在这里收尾（ADR-071 D6，2026-09-10）：`dbnum_info_table` 由 dbnum 任务在数据批次应用
-    // 之后从目标索引序列化，基线与增量同一笔（`batch_worker` 的 `ref0_snapshot` → `task_end`）。
-    // 此前这里 `rebuild_on` 一次再核 `pe_count == info_count`，那是逐笔观测块时代的对账。
-
-    Ok(BaselineIngest {
+    Ok(StreamedBaseline {
         dbnum,
         db_type,
         file_name,
-        elements: stats.elements,
+        target_sesno,
+        uda_misses_warning: uda_keys.misses_warning(dbnum),
         stats,
         dependency,
     })
 }
 
-/// 一块基线元素 → 若干笔事务 → 队列。队列满 / 写者退出以 `Err` 冒出 sink，让 `stream_baseline`
+/// 一块基线元素 → 若干笔事务 → lane。队列满 / 写者退出以 `Err` 冒出 sink，让 `stream_baseline`
 /// 中止并归因到本库；这里不许 panic（panic 绕过失败裁决，会留下一个半写的库）。
 fn dispatch_chunk(
     chunk: &BaselineChunk,
@@ -336,7 +400,7 @@ fn dispatch_chunk(
     is_design: bool,
     uda_keys: &UdaKeyMap,
     dependency_seeds: &Mutex<BTreeSet<RefU64>>,
-    sender: &flume::Sender<String>,
+    sender: &flume::Sender<WriteJob>,
 ) -> anyhow::Result<()> {
     for ignored in &chunk.ignored {
         crate::data_interface::parse_error::note_element_failure(
@@ -355,15 +419,23 @@ fn dispatch_chunk(
     }
     // 与增量路同一个渲染器（`element_batch`，Fresh）：每笔事务就是一条消息，切块按 `tx_limits`。
     let (transactions, _report) = render_baseline_batches(chunk, dbnum as i32, uda_keys)?;
-    for sql in transactions {
+    let first = chunk
+        .elements
+        .first()
+        .map(|(_, element)| element.refno.to_string())
+        .unwrap_or_default();
+    for (index, sql) in transactions.into_iter().enumerate() {
         sender
-            .send(sql)
+            .send(WriteJob::new(
+                sql,
+                format!("element batch dbnum={dbnum} chunk-first={first} tx#{index}"),
+            ))
             .map_err(|error| anyhow::anyhow!("baseline dispatch failed: {error}"))?;
     }
     Ok(())
 }
 
-/// 文件收尾的 CATA 依赖闭包：本库 DESI 元素依赖的目录链元素经同一条写者队列 `Fresh` 入库，
+/// 文件收尾的 CATA 依赖闭包：本库 DESI 元素依赖的目录链元素经同一条 lane `Fresh` 入库，
 /// 每个目录库再补一行 `cata_dependency_state`（不是水位）。
 async fn persist_dependency_closure(
     project: &str,
@@ -371,34 +443,43 @@ async fn persist_dependency_closure(
     file_name: &str,
     seeds: &BTreeSet<RefU64>,
     uda_keys: &UdaKeyMap,
-    sender: &flume::Sender<String>,
+    sender: &flume::Sender<WriteJob>,
 ) -> anyhow::Result<DependencySummary> {
     use crate::data_interface::cata_dependency;
     let rows = cata_dependency::resolve_dependency_rows(project, dbnum, seeds).await?;
-    let batches = cata_dependency::render_dependency_transactions(
+    let render_started = std::time::Instant::now();
+    // D6：只查不记（plan Q3 第一阶段）——这条 lane 是异步单写者，成功要等 drain，
+    // 记不了「写成功之后」那一刻；已经被同步出口落过的行照样不必再发一遍。
+    let batches = cata_dependency::render_dependency_transactions_unpersisted(
         &rows,
         uda_keys,
         crate::data_interface::element_batch::WriteMode::Fresh,
     )?;
-    for (cata_dbnum, sqls) in &batches {
-        let elements = rows.by_dbnum.get(cata_dbnum).map(Vec::len).unwrap_or(0);
-        let sesno = rows
-            .by_dbnum
-            .get(cata_dbnum)
-            .and_then(|elements| elements.first())
-            .map(|(sesno, _)| *sesno)
-            .unwrap_or(0);
-        for sql in sqls {
+    let render_ms = render_started.elapsed().as_millis();
+    let sql_bytes: usize = batches
+        .by_dbnum
+        .iter()
+        .flat_map(|(_, batch)| batch.transactions.iter())
+        .map(String::len)
+        .sum();
+    for (cata_dbnum, batch) in &batches.by_dbnum {
+        for (index, sql) in batch.transactions.iter().enumerate() {
             sender
-                .send_async(sql.clone())
+                .send_async(WriteJob::new(
+                    sql.clone(),
+                    format!("cata dependency dbnum={dbnum} cata={cata_dbnum} tx#{index}"),
+                ))
                 .await
                 .map_err(|error| anyhow::anyhow!("dependency dispatch failed: {error}"))?;
         }
         sender
-            .send_async(cata_dependency::render_dependency_state(
-                *cata_dbnum,
-                sesno,
-                elements,
+            .send_async(WriteJob::new(
+                cata_dependency::render_dependency_state(
+                    *cata_dbnum,
+                    batch.sesno,
+                    batch.refnos.len(),
+                ),
+                format!("cata dependency state dbnum={dbnum} cata={cata_dbnum}"),
             ))
             .await
             .map_err(|error| anyhow::anyhow!("dependency state dispatch failed: {error}"))?;
@@ -408,10 +489,29 @@ async fn persist_dependency_closure(
         rows: rows.elements(),
         catalogue_dbnums: rows.by_dbnum.len(),
         missing: rows.manifest.missing,
+        resolve_ms: rows.account.resolve_ms,
+        render_ms,
+        sql_bytes,
+        parse_requests: rows.account.closure.parse_requests,
+        parsed: rows.account.closure.parsed,
+        cache_hits: rows.account.closure.cache_hits,
+        cache_misses: rows.account.closure.cache_misses,
+        skipped_persisted: batches.skipped,
     };
     println!(
-        "{file_name}: CATA 依赖闭包 seeds={} → {} 行 / {} 库，缺失 {}",
-        summary.seeds, summary.rows, summary.catalogue_dbnums, summary.missing
+        "{file_name}: CATA 依赖闭包 seeds={} → {} 行 / {} 库，缺失 {}（resolve {} ms · render {} ms · SQL {} KB · parse {} 次 / {} 成功 · 缓存 {} 命中 / {} 未命中 · 已落库跳过 {}）",
+        summary.seeds,
+        summary.rows,
+        summary.catalogue_dbnums,
+        summary.missing,
+        summary.resolve_ms,
+        summary.render_ms,
+        summary.sql_bytes / 1024,
+        summary.parse_requests,
+        summary.parsed,
+        summary.cache_hits,
+        summary.cache_misses,
+        summary.skipped_persisted,
     );
     if summary.missing > 0 {
         log::warn!(
@@ -427,47 +527,8 @@ async fn persist_dependency_closure(
     Ok(summary)
 }
 
-/// 单写者：按 [`WRITE_WINDOW`] 条一窗从队列取事务，逐笔 `execute_on`（含冲突重试）。
-/// 一笔失败只记账、继续消费——队列必须被排空，否则生产者卡在 `send` 上永远收不了尾；
-/// 账在 [`drain_writer`] 之后由 [`failure_summary`] 裁决。
-fn spawn_writer(receiver: flume::Receiver<String>) -> tokio::task::JoinHandle<WriterOutcome> {
-    tokio::task::spawn(async move {
-        let mut stream = receiver.into_stream().chunks(WRITE_WINDOW);
-        let mut outcome = WriterOutcome::default();
-        while let Some(window) = stream.next().await {
-            for sql in window {
-                if let Err(error) =
-                    crate::data_interface::pe_batch::execute_on(&SUL_DB, &sql).await
-                {
-                    outcome.record("element batch", error);
-                }
-            }
-        }
-        outcome
-    })
-}
-
-/// 收尾写入管线：先关闭 sender、等写者把队列排空，再把账交出去。
-///
-/// 顺序是关键。解析失败时如果提前返回，已经解析好的数据会连同没人消费的通道一起被丢弃，
-/// 而写者可能还在往库里写——清库要等它停下来才算得上「清」。
-pub(crate) async fn drain_writer(
-    sender: flume::Sender<String>,
-    writer: tokio::task::JoinHandle<WriterOutcome>,
-) -> WriterOutcome {
-    drop(sender);
-    match writer.await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let mut outcome = WriterOutcome::default();
-            outcome.record("writer task join failed", anyhow::anyhow!("{error}"));
-            outcome
-        }
-    }
-}
-
 /// 失败收尾：清掉这个 dbnum 的全部行（水位清值不删行，下一轮按首次导入重来）。
-async fn wipe_after_failure(dbnum: u32) -> anyhow::Result<()> {
+pub(crate) async fn wipe_after_failure(dbnum: u32) -> anyhow::Result<()> {
     crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum)
         .await
         .map(|wiped| {
@@ -480,11 +541,6 @@ async fn wipe_after_failure(dbnum: u32) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    #[test]
-    fn writer_window_is_smaller_than_bounded_queue() {
-        assert!(WRITE_WINDOW < QUEUE_CAPACITY);
-    }
 
     /// I3：文件头身份与调用方点名不符就不落行。
     #[test]
@@ -534,63 +590,34 @@ mod tests {
         );
     }
 
+    /// 裁决：解析成功 + 写者干净 = 通过；写者有账 / 解析出错 = 一句合成的失败原因。
     #[test]
-    fn writer_outcome_keeps_only_three_samples() {
-        let mut writer = WriterOutcome::default();
-        for i in 0..5 {
-            writer.record("element batch", anyhow::anyhow!("error {i}"));
-        }
-        assert_eq!(writer.errors, 5);
-        assert_eq!(writer.samples.len(), 3);
-    }
-
-    /// 解析失败时也要先排空写者：不等待就返回的实现会把已解析的数据连同通道一起丢掉，
-    /// 而清库会在写者还在写的时候发生。
-    #[tokio::test]
-    async fn drain_writer_waits_for_the_writer_to_consume_everything() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        const MESSAGES: usize = 8;
-        let (sender, receiver) = flume::bounded::<String>(MESSAGES);
-        for i in 0..MESSAGES {
-            sender
-                .send(format!(
-                    "BEGIN TRANSACTION; INSERT IGNORE INTO pe [{{ id: pe:1_{i} }}] RETURN NONE; COMMIT TRANSACTION;"
-                ))
-                .unwrap();
-        }
-        let consumed = Arc::new(AtomicUsize::new(0));
-        let writer_consumed = consumed.clone();
-        let writer = tokio::task::spawn(async move {
-            // 先歇一会儿：不等待 writer 就返回的实现，此刻计数一定还是 0。
-            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-            let mut seen = 0usize;
-            while receiver.recv_async().await.is_ok() {
-                seen += 1;
+    fn judging_a_stream_folds_parser_and_writer_into_one_verdict() {
+        fn streamed() -> StreamedBaseline {
+            StreamedBaseline {
+                dbnum: 7999,
+                db_type: "DESI".into(),
+                file_name: "ams7999_0001".into(),
+                target_sesno: 30,
+                stats: BaselineStats::default(),
+                dependency: None,
+                uda_misses_warning: None,
             }
-            writer_consumed.store(seen, Ordering::SeqCst);
-            WriterOutcome::default()
-        });
+        }
+        let clean = WriterOutcome::default();
+        assert!(judge_streamed(Ok(streamed()), &clean).is_ok());
 
-        let outcome = drain_writer(sender, writer).await;
-        assert_eq!(outcome, WriterOutcome::default());
-        assert_eq!(consumed.load(Ordering::SeqCst), MESSAGES, "写者必须被排空");
-    }
+        let mut writer = WriterOutcome::default();
+        writer.record("element batch", anyhow::anyhow!("statement failed"));
+        let summary = judge_streamed(Ok(streamed()), &writer).unwrap_err();
+        assert!(summary.contains("1 time(s)"), "{summary}");
 
-    #[tokio::test]
-    async fn drain_writer_reports_a_panicked_writer_as_a_failure() {
-        let (sender, receiver) = flume::bounded::<String>(1);
-        let writer = tokio::task::spawn(async move {
-            drop(receiver);
-            panic!("writer died");
-        });
-        let outcome = drain_writer(sender, writer).await;
-        assert_eq!(outcome.errors, 1);
-        assert!(
-            outcome.samples[0].contains("writer task join failed"),
-            "{:?}",
-            outcome.samples
-        );
+        let summary = judge_streamed(
+            Err(anyhow::anyhow!("boom").context("基线收集失败")),
+            &clean,
+        )
+        .unwrap_err();
+        assert!(summary.contains("基线收集失败"), "{summary}");
     }
 
     fn crate_root() -> PathBuf {
@@ -677,38 +704,60 @@ mod tests {
         }
     }
 
-    /// I4：清库只发生在写者排空之后，且排在成功回执之前的每条失败路上。
+    /// 流那一半不拥有写者：它不落写入标记、不起 lane、不排空、不清库、不推水位（ADR-077 D8：
+    /// 「先排空再清库」只有拥有两条 lane 的那一层做得对）。
     #[test]
-    fn cleanup_happens_after_the_writer_drained_and_before_success() {
+    fn the_streaming_half_owns_no_writer_and_no_cleanup() {
         let source = include_str!("baseline_ingest.rs");
         let body = source
-            .split_once("async fn ingest_frozen(")
-            .expect("ingest_frozen")
+            .split_once("pub(crate) async fn stream_frozen_into(")
+            .expect("stream_frozen_into")
             .1
             .split_once("fn dispatch_chunk(")
             .expect("dispatch follows")
             .0;
-        let drain = body
-            .find("drain_writer(sender, writer).await")
-            .expect("writer drain");
-        let judge = body.find("failure_summary(").expect("failure judgement");
+        for forbidden in [
+            "Lane::spawn",
+            "spawn_writer",
+            "drain(",
+            "wipe_after_failure(",
+            "mark_writing(",
+            "mark_initialization_writing(",
+            "finalize_baseline(",
+            "render_watermark_advance(",
+        ] {
+            assert!(
+                code_lines_mentioning(body, forbidden).is_empty(),
+                "stream_frozen_into 不许 `{forbidden}`：写者与清库归拥有两条 lane 的编排层"
+            );
+        }
+    }
+
+    /// I4（单 lane 版）：清库只发生在写者排空之后，且排在成功回执之前。
+    #[test]
+    fn cleanup_happens_after_the_writer_drained_and_before_success() {
+        let source = include_str!("baseline_ingest.rs");
+        let body = source
+            .split_once("pub async fn ingest_file(")
+            .expect("ingest_file")
+            .1
+            .split_once("pub(crate) async fn mark_initialization_writing(")
+            .expect("marker helper follows")
+            .0;
+        let drain = body.find("lane.drain().await").expect("writer drain");
+        let judge = body.find("judge_streamed(").expect("failure judgement");
         let wipe = body
             .find("wipe_after_failure(dbnum).await?")
             .expect("failure cleanup");
         let success = body.find("Ok(BaselineIngest {").expect("success receipt");
         assert!(
             drain < judge && judge < wipe && wipe < success,
-            "顺序必须是 排空写者 → 裁决 → 清库 → 成功回执（统计收尾已随 ADR-071 D6 退出这里）"
+            "顺序必须是 排空写者 → 裁决 → 清库 → 成功回执"
         );
         assert_eq!(
             body.matches("wipe_after_failure(dbnum).await?").count(),
             1,
-            "裁决失败那条路要清库；统计收尾那条已经没有了"
-        );
-        assert_eq!(
-            body.matches(".expect(").count(),
-            2,
-            "摄入主体只允许在裁决之后解包两次（解析 / 闭包结果），别的地方不许 panic"
+            "裁决失败那条路要清库，且只有这一处"
         );
     }
 }

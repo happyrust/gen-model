@@ -609,6 +609,10 @@ pub(crate) async fn probe_booled_flat_regression_after_migration_on(
 /// `fn::ses_date` 的形态**内联在 journal 字面量里**：窗口内对暂存求值一遍、
 /// 写回重放时对持久层**再求值一遍**——重放硬依赖持久层灌了这些函数（与
 /// issue #16 同族的故障面）。现在渲染时解一次、写死固定值，journal 变成纯数据。
+///
+/// `dt`（`fn::ses_date(pe)` 那一列）2026-09-14 随行一起退役：读侧全链路无人消费
+/// （内存投影那条路本来就给 `date: None`），而为了写它，每批行都要多问一趟
+/// `ses:[dbnum, sesno].date`（暂存一趟、回落持久层再一趟）。要日期就现查 `fn::ses_date`。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResolvedInstMeta {
     /// 自身 → 顶的祖先链 RefU64 打包值（含自身）——与 `fn::anc_u64(pe)` 同义，
@@ -618,8 +622,6 @@ pub(crate) struct ResolvedInstMeta {
     pub anc: Vec<u64>,
     /// `pe.dbnum`。
     pub dbnum: Option<i64>,
-    /// `fn::ses_date(pe)` 的渲染就绪字面量（`d'…'` / NONE）。
-    pub dt_literal: Option<String>,
 }
 
 impl ResolvedInstMeta {
@@ -639,27 +641,19 @@ impl ResolvedInstMeta {
             .map(|dbnum| dbnum.to_string())
             .unwrap_or_else(|| "NONE".into())
     }
-
-    pub(crate) fn dt_literal(&self) -> &str {
-        self.dt_literal.as_deref().unwrap_or("NONE")
-    }
 }
 
 /// 生产入口：经读路由解析（暂存窗口内查暂存——W1 已保证生成根的子树与祖先都在；
-/// 直写模式查持久层）。`ses` 行是 append-only 历史：暂存里只有本窗口的新会话，
-/// 旧会话的日期回落持久层点查——单写者下「暂存新态 + 持久层旧态」的合成恰等于
-/// 写回重放后的持久层，也就是老字面量在重放时求值看到的同一个世界。
+/// 直写模式查持久层）。
 pub(crate) async fn resolve_inst_meta(
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<HashMap<RefU64, ResolvedInstMeta>> {
     let db = crate::data_interface::staging::active_data_db();
-    let ses_fallback = aios_core::staging::active_staging_reads().map(|_| SUL_DB.clone());
-    resolve_inst_meta_on(&db, ses_fallback.as_ref(), refnos).await
+    resolve_inst_meta_on(&db, refnos).await
 }
 
 pub(crate) async fn resolve_inst_meta_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    ses_fallback: Option<&surrealdb::Surreal<surrealdb::engine::any::Any>>,
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<HashMap<RefU64, ResolvedInstMeta>> {
     use crate::data_interface::cata_closure::is_valid_ref0;
@@ -674,11 +668,9 @@ pub(crate) async fn resolve_inst_meta_on(
         owner: Option<RefnoEnum>,
         #[serde(default)]
         dbnum: Option<i64>,
-        #[serde(default)]
-        sesno: Option<i64>,
     }
-    /// (owner, dbnum, sesno)。
-    type PeMeta = (Option<RefU64>, Option<i64>, Option<i64>);
+    /// (owner, dbnum)。
+    type PeMeta = (Option<RefU64>, Option<i64>);
 
     let mut seeds: Vec<RefU64> = refnos
         .iter()
@@ -710,7 +702,7 @@ pub(crate) async fn resolve_inst_meta_on(
                 .join(",");
             let mut response = db
                 .query(format!(
-                    "SELECT id, owner, dbnum, sesno FROM [{keys}] WHERE record::exists(id);"
+                    "SELECT id, owner, dbnum FROM [{keys}] WHERE record::exists(id);"
                 ))
                 .await?
                 .check()?;
@@ -728,7 +720,7 @@ pub(crate) async fn resolve_inst_meta_on(
                 {
                     next.push(owner);
                 }
-                cache.insert(refno, Some((owner, row.dbnum, row.sesno)));
+                cache.insert(refno, Some((owner, row.dbnum)));
             }
             for refno in chunk {
                 if !found.contains(refno) {
@@ -742,14 +734,13 @@ pub(crate) async fn resolve_inst_meta_on(
         frontier = next;
     }
 
-    // 2) 逐 seed 出链：anc / dbnum / sesno。
+    // 2) 逐 seed 出链：anc / dbnum。
     let mut out: HashMap<RefU64, ResolvedInstMeta> = HashMap::new();
-    let mut ses_pairs: std::collections::BTreeSet<(i64, i64)> = std::collections::BTreeSet::new();
     for &seed in &seeds {
         let Some(Some(seed_meta)) = cache.get(&seed).cloned() else {
             // 行不在：与旧字面量对缺行的求值语义一致（fn:: 全 NONE / 空数组）。
             println!(
-                "生成行元数据解析：{} 的 pe 行不在当前世界，anc/dbnum/dt 按空态渲染",
+                "生成行元数据解析：{} 的 pe 行不在当前世界，anc/dbnum 按空态渲染",
                 seed.to_pe_key()
             );
             out.insert(seed, ResolvedInstMeta::default());
@@ -792,90 +783,13 @@ pub(crate) async fn resolve_inst_meta_on(
                 None => break,
             }
         }
-        if let (Some(dbnum), Some(sesno)) = (seed_meta.1, seed_meta.2) {
-            ses_pairs.insert((dbnum, sesno));
-        }
         out.insert(
             seed,
             ResolvedInstMeta {
                 anc: chain,
                 dbnum: seed_meta.1,
-                dt_literal: None, // 下面按 (dbnum, sesno) 批量补
             },
         );
-    }
-
-    // 3) 会话日期：`ses:[dbnum, sesno].date`。先问当前世界（暂存窗口内含本窗口
-    //    新会话），miss 再回落持久层（旧会话的历史行）。
-    let mut ses_dates: HashMap<(i64, i64), String> = HashMap::new();
-    let pairs = ses_pairs.into_iter().collect::<Vec<_>>();
-    for chunk in pairs.chunks(CHUNK) {
-        let probes = chunk
-            .iter()
-            .map(|(dbnum, sesno)| format!("ses:[{dbnum}, {sesno}].date"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut response = db.query(format!("RETURN [{probes}];")).await?.check()?;
-        let values: surrealdb::Value = response.take(0)?;
-        let surrealdb::sql::Value::Array(values) = values.into_inner() else {
-            anyhow::bail!("会话日期探针返回了非数组结果");
-        };
-        for (pair, value) in chunk.iter().zip(values.iter()) {
-            if !matches!(
-                value,
-                surrealdb::sql::Value::None | surrealdb::sql::Value::Null
-            ) {
-                ses_dates.insert(
-                    *pair,
-                    crate::data_interface::staging::preload::render_preload_value(value),
-                );
-            }
-        }
-    }
-    if let Some(fallback) = ses_fallback {
-        let missing = pairs
-            .iter()
-            .filter(|pair| !ses_dates.contains_key(pair))
-            .copied()
-            .collect::<Vec<_>>();
-        for chunk in missing.chunks(CHUNK) {
-            if chunk.is_empty() {
-                continue;
-            }
-            let probes = chunk
-                .iter()
-                .map(|(dbnum, sesno)| format!("ses:[{dbnum}, {sesno}].date"))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut response = fallback
-                .query(format!("RETURN [{probes}];"))
-                .await?
-                .check()?;
-            let values: surrealdb::Value = response.take(0)?;
-            let surrealdb::sql::Value::Array(values) = values.into_inner() else {
-                anyhow::bail!("会话日期回落探针返回了非数组结果");
-            };
-            for (pair, value) in chunk.iter().zip(values.iter()) {
-                if !matches!(
-                    value,
-                    surrealdb::sql::Value::None | surrealdb::sql::Value::Null
-                ) {
-                    ses_dates.insert(
-                        *pair,
-                        crate::data_interface::staging::preload::render_preload_value(value),
-                    );
-                }
-            }
-        }
-    }
-    for &seed in &seeds {
-        if let Some(Some(seed_meta)) = cache.get(&seed)
-            && let (Some(dbnum), Some(sesno)) = (seed_meta.1, seed_meta.2)
-            && let Some(date) = ses_dates.get(&(dbnum, sesno))
-            && let Some(meta) = out.get_mut(&seed)
-        {
-            meta.dt_literal = Some(date.clone());
-        }
     }
 
     Ok(out)
@@ -1166,7 +1080,7 @@ fn build_canonical_save_plan(
             )?;
             let meta = inst_meta.get(&refno.refno()).unwrap_or(&missing_meta);
             let rendered = format!(
-                "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {10}, generic: '{4}', anc: {5}, dbnum: {6}, dt: {7}, has_cata_neg: {8}, solid: {9}}}",
+                "{{id: {0}, in: {1}, out: inst_info:⟨{2}⟩, world_trans: trans:⟨{3}⟩, world_trans_d: {9}, generic: '{4}', anc: {5}, dbnum: {6}, has_cata_neg: {7}, solid: {8}}}",
                 refno.to_inst_relate_key(),
                 refno.to_pe_key(),
                 info.id_str(),
@@ -1174,7 +1088,6 @@ fn build_canonical_save_plan(
                 info.generic_type,
                 meta.anc_literal(),
                 meta.dbnum_literal(),
-                meta.dt_literal(),
                 info.has_cata_neg,
                 info.is_solid,
                 transform_json,
@@ -3286,11 +3199,11 @@ mod tests {
              INSERT RELATION INTO inst_relate [\
                 {{ id: inst_relate:⟨20260823_101⟩, in: pe:20260823_1, out: inst_info:zzflat_a, \
                    world_trans: trans:zzflat_t, world_trans_d: {wt}, aabb: aabb:zzflat_box, \
-                   aabb_d: {box_aabb}, generic: 'BOX', anc: [42], dbnum: 7997, dt: NONE, \
+                   aabb_d: {box_aabb}, generic: 'BOX', anc: [42], dbnum: 7997, \
                    has_cata_neg: false, solid: true }}, \
                 {{ id: inst_relate:⟨20260823_102⟩, in: pe:20260823_2, out: inst_info:zzflat_b, \
                    world_trans: trans:zzflat_t, world_trans_d: {wt}, aabb: aabb:zzflat_box, \
-                   aabb_d: {box_aabb}, generic: 'BOX', anc: [42], dbnum: 7997, dt: NONE, \
+                   aabb_d: {box_aabb}, generic: 'BOX', anc: [42], dbnum: 7997, \
                    has_cata_neg: false, solid: true }}\
              ];"
         );
@@ -3325,7 +3238,7 @@ mod tests {
         let b_row = format!(
             "{{id: inst_relate:⟨20260823_102⟩, in: pe:20260823_2, out: inst_info:zzflat_b, \
              world_trans: trans:zzflat_t, world_trans_d: {wt}, generic: 'BOX', anc: [42], \
-             dbnum: 7997, dt: NONE, has_cata_neg: false, solid: true}}"
+             dbnum: 7997, has_cata_neg: false, solid: true}}"
         );
         let replace =
             render_inst_relate_replace(&[("inst_relate:⟨20260823_102⟩".to_string(), b_row)]);
@@ -3529,26 +3442,22 @@ mod inst_meta_tests {
     async fn resolved_literals_equal_the_retired_fn_evaluations() {
         let db = seeded_db("fn_parity").await;
         let equi = RefnoEnum::from(refu(786004));
-        let metas = resolve_inst_meta_on(&db, None, &[equi])
-            .await
-            .expect("resolve");
+        let metas = resolve_inst_meta_on(&db, &[equi]).await.expect("resolve");
         let meta = metas.get(&refu(786004)).expect("meta for equi");
 
         let pe = equi.to_pe_key();
         let mut response = db
             .query(format!(
                 "RETURN {} == fn::anc_u64({pe});\
-                 RETURN {} == {pe}.dbnum;\
-                 RETURN {} == fn::ses_date({pe});",
+                 RETURN {} == {pe}.dbnum;",
                 meta.anc_literal(),
                 meta.dbnum_literal(),
-                meta.dt_literal(),
             ))
             .await
             .expect("parity transport")
             .check()
             .expect("parity query");
-        for (index, field) in ["anc", "dbnum", "dt"].iter().enumerate() {
+        for (index, field) in ["anc", "dbnum"].iter().enumerate() {
             let equal: Option<bool> = response.take(index).expect("take flag");
             assert_eq!(
                 equal,
@@ -3566,7 +3475,6 @@ mod inst_meta_tests {
             ],
             "anc = 自身 → 顶（含自身）"
         );
-        assert_eq!(meta.dt_literal(), "d'2026-08-07T00:00:00Z'");
     }
 
     /// P3 读侧便捷层：`fn::zone_u64` / `fn::site_u64` 从 anc 尾部定位，判据与
@@ -3600,7 +3508,7 @@ mod inst_meta_tests {
         let zone = refu(786022).0;
         let equi = refu(786023).0;
 
-        let metas = resolve_inst_meta_on(&db, None, &[RefnoEnum::from(refu(786023))])
+        let metas = resolve_inst_meta_on(&db, &[RefnoEnum::from(refu(786023))])
             .await
             .expect("resolve");
         let meta = metas.get(&refu(786023)).expect("meta for equi");
@@ -3650,48 +3558,31 @@ mod inst_meta_tests {
         }
     }
 
-    /// `ses` 行是 append-only 历史：当前世界（暂存）miss 时回落持久层——
-    /// 未变更元素的 dt 才不会被烘成 NONE。
+    /// 生成行元数据只读 `pe`：`ses` 那一趟（`dt` 的日期探针，连同它在持久层的
+    /// 回落）2026-09-14 随 `dt` 列一起退役，解析器再不碰 `ses` 表。
     #[tokio::test(flavor = "multi_thread")]
-    async fn session_dates_fall_back_to_the_persistent_history() {
-        let staging = connect("mem://").await.expect("mem boots");
-        staging
-            .use_ns("inst_meta")
-            .use_db("ses_fallback_staging")
+    async fn resolving_meta_never_touches_the_session_table() {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("inst_meta")
+            .use_db("no_ses_reads")
             .await
             .expect("use db");
-        staging
-            .query(
-                "UPSERT pe:24379_786011 CONTENT { noun: 'ZONE' };\
-                 UPSERT pe:24379_786012 CONTENT { noun: 'EQUI', owner: pe:24379_786011, dbnum: 7997, sesno: 7 };",
-            )
-            .await
-            .expect("staging seed transport")
-            .check()
-            .expect("staging seeded");
+        db.query(
+            "UPSERT pe:24379_786011 CONTENT { noun: 'ZONE' };\
+             UPSERT pe:24379_786012 CONTENT { noun: 'EQUI', owner: pe:24379_786011, dbnum: 7997, sesno: 7 };",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seeded");
 
-        let persistent = connect("mem://").await.expect("mem boots");
-        persistent
-            .use_ns("inst_meta")
-            .use_db("ses_fallback_persistent")
+        // `ses` 行一条都不播：旧解析器会在这里点查 `ses:[7997, 7].date`。
+        let metas = resolve_inst_meta_on(&db, &[RefnoEnum::from(refu(786012))])
             .await
-            .expect("use db");
-        persistent
-            .query("UPSERT ses:[7997, 7] CONTENT { date: d'2025-01-02T03:04:05Z' };")
-            .await
-            .expect("persistent seed transport")
-            .check()
-            .expect("persistent seeded");
-
-        let equi = RefnoEnum::from(refu(786012));
-        let metas = resolve_inst_meta_on(&staging, Some(&persistent), &[equi])
-            .await
-            .expect("resolve");
-        assert_eq!(
-            metas.get(&refu(786012)).expect("meta").dt_literal(),
-            "d'2025-01-02T03:04:05Z'",
-            "旧会话的日期必须从持久层历史回落解出"
-        );
+            .expect("没有 ses 行也必须解得出来");
+        let meta = metas.get(&refu(786012)).expect("meta");
+        assert_eq!(meta.dbnum_literal(), "7997");
+        assert_eq!(meta.anc, vec![refu(786012).0, refu(786011).0]);
     }
 
     /// 断链（owner 指向的行不存在）→ 响亮失败：宁可生成任务进重试，也不烘一个
@@ -3711,7 +3602,7 @@ mod inst_meta_tests {
         .check()
         .expect("seeded");
 
-        let error = resolve_inst_meta_on(&db, None, &[RefnoEnum::from(refu(786022))])
+        let error = resolve_inst_meta_on(&db, &[RefnoEnum::from(refu(786022))])
             .await
             .expect_err("断链必须失败");
         assert!(error.to_string().contains("断裂"), "{error:#}");
@@ -3733,7 +3624,7 @@ mod inst_meta_tests {
         .expect("seeded");
 
         let bend = RefnoEnum::from(RefU64((24384u64 << 32) | 23823));
-        let meta = resolve_inst_meta_on(&db, None, &[bend])
+        let meta = resolve_inst_meta_on(&db, &[bend])
             .await
             .expect("省略的 WORL 行必须按全量入库契约到顶")
             .remove(&bend.refno())
@@ -3742,7 +3633,7 @@ mod inst_meta_tests {
     }
 
     /// 与旧 fn:: 对缺行的语义一致：seed 自己的行不在 → 空态渲染
-    /// （anc [] / dbnum NONE / dt NONE），不报错。
+    /// （anc [] / dbnum NONE），不报错。
     #[tokio::test(flavor = "multi_thread")]
     async fn a_missing_seed_renders_the_empty_shapes_the_fns_produced() {
         let db = connect("mem://").await.expect("mem boots");
@@ -3751,13 +3642,12 @@ mod inst_meta_tests {
             .await
             .expect("use db");
 
-        let metas = resolve_inst_meta_on(&db, None, &[RefnoEnum::from(refu(786031))])
+        let metas = resolve_inst_meta_on(&db, &[RefnoEnum::from(refu(786031))])
             .await
             .expect("resolve");
         let meta = metas.get(&refu(786031)).expect("meta");
         assert_eq!(meta.anc_literal(), "[]");
         assert_eq!(meta.dbnum_literal(), "NONE");
-        assert_eq!(meta.dt_literal(), "NONE");
     }
 
     /// 「回退即红」源码钉（W4/D6）：生成写入路径的字面量必须是纯数据——

@@ -52,12 +52,23 @@ pub(crate) struct Ref0Snapshot {
     pub rows: Vec<Ref0Stats>,
 }
 
+/// 本任务数据阶段的结果（ADR-077 D7）：初始化把 `applied_sesno` 的推进并进收尾这一笔，
+/// 不再在摄入一完就先推。`None` = 数据水位已由数据尾事务盖过（稳态增量窗口），这一笔不碰它。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TaskDataOutcome {
+    /// 一次成功的全量基线解析为合法空库（ADR-021「空基线凭据」）。
+    pub confirmed_empty: bool,
+}
+
 /// 一个 dbnum 任务收尾时要落的全部控制面事实。
 #[derive(Debug, Clone)]
 pub(crate) struct TaskEnd {
     pub dbnum: u32,
     /// 本任务冻结的目标会话号。
     pub target_sesno: i32,
+    /// `Some` = 这一笔同时把 `applied_sesno` 推到 `target_sesno`（排在写入标记与模型水位之前，
+    /// 于是模型水位那句的数据水位闸在同一笔里成立）。
+    pub data: Option<TaskDataOutcome>,
     /// 目标那一版的保存时刻。号对不上就别传——宁可让界面说「无记录」，
     /// 也不拿 A 的时刻标注 B（ADR-060 M1）。
     pub target_time: Option<String>,
@@ -182,6 +193,25 @@ fn render_info_snapshot(dbnum: u32, snapshot: &Ref0Snapshot) -> String {
 /// ——闸挡下水位说的是「这一版没盖成」，而本任务的写库确实结束了。位置也有讲究：
 /// [`commit_task_end_on`] 按 `num_statements() - 1` 取水位那一条的回执，水位必须是最后一句。
 pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
+    // 数据水位（初始化并进来的那一半，ADR-077 D7）排最前：它是 `UPSERT`，建行；后面的模型水位
+    // 那句是 `UPDATE … WHERE applied_sesno >= T`，同一笔里读到的就是刚推上去的值。
+    let data = end
+        .data
+        .as_ref()
+        .map(|data| {
+            let advance = super::increment_tail::render_watermark_advance(
+                end.dbnum,
+                end.target_sesno,
+                end.target_time.as_deref(),
+            );
+            let empty = super::increment_tail::render_confirmed_empty_baseline(
+                end.dbnum,
+                end.target_sesno,
+                data.confirmed_empty,
+            );
+            format!("{advance}\n{empty}\n")
+        })
+        .unwrap_or_default();
     let info = end
         .info
         .as_ref()
@@ -193,7 +223,7 @@ pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
         String::new()
     };
     format!(
-        "BEGIN TRANSACTION;\n{info}{finished}{}\nCOMMIT TRANSACTION;",
+        "BEGIN TRANSACTION;\n{data}{info}{finished}{}\nCOMMIT TRANSACTION;",
         render_watermark_update(end)
     )
 }
@@ -266,6 +296,7 @@ mod tests {
         TaskEnd {
             dbnum: 8000,
             target_sesno: 26,
+            data: None,
             target_time: Some("2026-09-10T09:00:00+08:00".to_owned()),
             model: Some(TaskModelOutcome {
                 all_roots_ok: true,
@@ -483,6 +514,99 @@ mod tests {
         assert!(sql.contains("THEN 't\\'; THROW \\'y'"), "{sql}");
     }
 
+    /// ADR-077 D7：初始化收尾一笔——库里还没有水位行，`data` 那一半先 `UPSERT` 出 `applied_sesno`，
+    /// 写入标记与模型水位跟在同一笔里，模型水位那句的数据闸在同一笔里就成立。
+    #[tokio::test]
+    async fn an_initialization_tail_lands_applied_model_and_finished_in_one_write() {
+        let db = database().await;
+        // 只有写入标记行（任务开工时落的 `writing`），没有水位行——这正是首次初始化的形状。
+        super::super::write_state::mark_writing_on(
+            &db,
+            8000,
+            0,
+            26,
+            super::super::write_state::WriteIntent::Initialize,
+        )
+        .await
+        .unwrap();
+
+        let mut init_end = end();
+        init_end.data = Some(TaskDataOutcome {
+            confirmed_empty: false,
+        });
+        let sql = render_task_end_tail(&init_end);
+        let applied = sql
+            .find("applied_sesno = math::max([applied_sesno?:0, 26])")
+            .expect("applied advance");
+        let empty = sql
+            .find("confirmed_empty_baseline_sesno = NONE")
+            .expect("empty credential cleared");
+        let finished = sql.find("status = 'finished'").expect("marker closed");
+        let model = sql
+            .find("model_sesno = math::max([model_sesno ?: 0, 26])")
+            .expect("model stamp");
+        assert!(
+            applied < empty && empty < finished && finished < model,
+            "顺序：applied → 空基线凭据 → 写入标记 → 模型水位: {sql}"
+        );
+
+        let receipt = commit_task_end_on(&db, &init_end).await.unwrap();
+        assert_eq!(receipt.model_sesno, Some(26), "数据闸在同一笔里成立");
+        assert!(!receipt.blocked_by_data);
+
+        #[derive(Debug, serde::Deserialize)]
+        struct Row {
+            applied_sesno: Option<i32>,
+            model_sesno: Option<i32>,
+            confirmed_empty_baseline_sesno: Option<i32>,
+        }
+        let row: Option<Row> = db
+            .query(format!("SELECT * FROM ONLY {WATERMARK_TABLE}:8000;"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let row = row.expect("watermark row created by the tail");
+        assert_eq!(row.applied_sesno, Some(26));
+        assert_eq!(row.model_sesno, Some(26));
+        assert_eq!(row.confirmed_empty_baseline_sesno, None);
+        let status: Option<String> = db
+            .query("SELECT VALUE status FROM ONLY dbnum_write_state:8000;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(status.as_deref(), Some("finished"));
+
+        // 空库那一档：凭据钉在这一版。
+        let mut empty_end = TaskEnd {
+            dbnum: 8001,
+            ..end()
+        };
+        empty_end.model = None;
+        empty_end.info = None;
+        empty_end.data = Some(TaskDataOutcome {
+            confirmed_empty: true,
+        });
+        commit_task_end_on(&db, &empty_end).await.unwrap();
+        let row: Option<Row> = db
+            .query(format!("SELECT * FROM ONLY {WATERMARK_TABLE}:8001;"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let row = row.expect("watermark row");
+        assert_eq!(row.applied_sesno, Some(26));
+        assert_eq!(row.confirmed_empty_baseline_sesno, Some(26));
+        assert_eq!(row.model_sesno, None, "没跑模型就不盖模型水位");
+    }
+
     #[tokio::test]
     async fn a_whole_task_tail_lands_three_facts_in_one_write() {
         let db = database().await;
@@ -521,6 +645,50 @@ mod tests {
         assert_eq!(touched.file_name.as_deref(), Some("ams"));
         let vanished = info(&db, 24390).await.expect("historical ref0 row");
         assert_eq!(vanished.count, Some(0), "快照里没有的 Ref0 清零留行");
+    }
+
+    /// ADR-076 D5（增量路计划 S2）：增量任务收尾只有这一笔——`model_sesno`、写入标记 `finished`、
+    /// Ref0 统计落在**同一个** `state_revision` 上；中途那笔 Ref0 事务并进来之后，`state_revision`
+    /// 一个任务只前进一格。
+    #[tokio::test]
+    async fn model_sesno_finished_and_ref0_land_in_one_state_revision() {
+        let db = database().await;
+        super::super::write_state::mark_writing_on(
+            &db,
+            8000,
+            25,
+            26,
+            super::super::write_state::WriteIntent::ApplyWindow,
+        )
+        .await
+        .unwrap();
+        db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=25, state_revision=7;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let receipt = commit_task_end_on(&db, &end()).await.unwrap();
+        assert_eq!(receipt.model_sesno, Some(26));
+        assert_eq!(receipt.info_rows, Some(1));
+
+        let row = watermark(&db, 8000).await;
+        assert_eq!(row.model_sesno, Some(26), "模型水位盖上");
+        assert_eq!(row.state_revision, Some(8), "一个任务只前进一格 state_revision");
+        let status: Option<String> = db
+            .query("SELECT VALUE status FROM ONLY dbnum_write_state:8000;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(status.as_deref(), Some("finished"), "写入标记同一笔收");
+        assert_eq!(
+            info(&db, 24384).await.expect("ref0 row").count,
+            Some(3),
+            "Ref0 统计同一笔落"
+        );
     }
 
     #[tokio::test]

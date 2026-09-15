@@ -1003,7 +1003,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // has already compared file_latest_sesno with applied_sesno and queued only
     // first-load/reinit/increment windows; let those batches create the exact
     // model work for this process. Explicit full-build tools enter through
-    // `E3dModelService::generate_dbnum`.
+    // `E3dModelService::generation_roots_of` + `generate_and_persist_roots`.
     initialization.configure_model_bootstrap(false);
     // 清单就绪会自动打开模型门，worker 第一圈空闲轮随即可能宣告 model_ready。
     // 启动凭证复核必须先占住这道完成门，再允许唯一消费者起来。

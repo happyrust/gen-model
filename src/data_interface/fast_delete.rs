@@ -257,7 +257,7 @@ impl RollbackRender {
     }
 }
 
-/// 模型面按 `direct_model.sesno` 谓词删的三张表（`gen_root` 用 `source_end_sesno`，另渲染）。
+/// 模型面按 `model_sesno` 谓词删的三张表（`gen_root` 用 `source_end_sesno`，另渲染）。
 const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 
 /// §4.3 的 2–6：全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT` 都没有（W3）。
@@ -330,7 +330,7 @@ pub(crate) fn render_rollback(
     if model_face {
         for table in MODEL_FACE_TABLES {
             deletes.push(format!(
-                "DELETE {table} WHERE dbnum = {dbnum} AND direct_model.sesno > {target_watermark};"
+                "DELETE {table} WHERE dbnum = {dbnum} AND model_sesno > {target_watermark};"
             ));
         }
         deletes.push(format!(
@@ -716,8 +716,18 @@ async fn execute_transactional_phase(
 ///
 /// The HTTP caller stops dispatch first. These locks additionally serialize
 /// against staged commit and scan-observation writes for internal callers.
+///
+/// 库里的行没了，进程里记着「这个库有什么」的两份记忆也得跟着作废——与 [`wipe_dbnum_for_reinit`]
+/// 同一条纪律：模型投影 `clear_dbnum`；CATA 已落库 memo（plan 2026-09-15 D6）整份忘掉。删的若是
+/// 目录库，它的依赖行正是别的任务会因 memo 跳过不发的那些；删的是 DESI 库时按目录库分不出哪些该留。
+/// 不作废的话这个进程剩下的任务都当那些行还在，缺行要等到重启才补得回来。
 pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
-    wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await
+    let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await?;
+    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+    crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
+        crate::data_interface::cata_dependency::ForgetScope::Everything,
+    );
+    Ok(result)
 }
 
 /// 回退整库重建的清库半边（ADR-021）：数据、派生行、noun 行、统计与队列残留
@@ -734,7 +744,11 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
     crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
-    crate::fast_model::model_db_adapter::invalidate_geometry_baseline();
+    // D6：行刚被清空，「这一版已经落过库」的记忆整份作废——被清的是 DESI 库时，它的目录链
+    // 依赖行也一起没了，按目录库分不出哪些该留。
+    crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
+        crate::data_interface::cata_dependency::ForgetScope::Everything,
+    );
     crate::data_interface::dbnum_consistency::invalidate_census();
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
@@ -1150,7 +1164,7 @@ mod tests {
         for table in MODEL_FACE_TABLES {
             assert!(
                 sql.contains(&format!(
-                    "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
+                    "DELETE {table} WHERE dbnum = 7997 AND model_sesno > 41;"
                 )),
                 "ModelOnly 仍退模型面 {table}: {sql}"
             );
@@ -1179,7 +1193,9 @@ mod tests {
             .join("\n");
         assert!(
             !sql.contains("DELETE EQUI")
-                && !sql.contains("direct_model.sesno")
+                && MODEL_FACE_TABLES
+                    .iter()
+                    .all(|table| !sql.contains(&format!("DELETE {table} ")))
                 && !sql.contains("gen_root"),
             "RoomOnly 只退房间面: {sql}"
         );
@@ -1239,7 +1255,7 @@ mod tests {
         at("DELETE ATT_UDA WHERE dbnum = 7997 AND sesno > 41;");
         for table in MODEL_FACE_TABLES {
             at(&format!(
-                "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
+                "DELETE {table} WHERE dbnum = 7997 AND model_sesno > 41;"
             ));
         }
         at("DELETE gen_root WHERE dbnum = 7997 AND source_end_sesno > 41;");

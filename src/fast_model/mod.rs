@@ -8,6 +8,8 @@ pub mod model_db_adapter;
 pub mod model_memory_store;
 pub mod model_record_reader;
 pub(crate) mod model_write_behind;
+/// 初始化直写的模型侧渲染（ADR-077 D4 / D5）：切片 → 逐根 SQL（Initial + 房间边 + UPSERT 回执）→ 按 8 MiB 装笔。
+pub(crate) mod model_initial_persist;
 
 pub mod concurrency;
 
@@ -72,14 +74,6 @@ pub mod coverage_audit;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
-#[cfg(feature = "legacy_model")]
-pub mod legacy {
-    use aios_core::options::DbOption;
-
-    pub async fn generate_dbnums(dbnums: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
-        super::gen_model::process_meshes_by_dbnos(dbnums, db_option).await
-    }
-}
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 pub use query::*;

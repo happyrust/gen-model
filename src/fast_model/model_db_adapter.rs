@@ -75,6 +75,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use aios_core::RefnoEnum;
 use anyhow::Context;
@@ -83,11 +84,17 @@ use e3d_model::elmodl::GeometryId;
 use serde_json::{Value, json};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
+use surrealdb::sql::{
+    Array as SurArray, Id as SurId, Number as SurNumber, Object as SurObject, Thing as SurThing,
+    Value as SurValue,
+};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::e3d_mesh_store::geometry_record_id;
-use crate::fast_model::e3d_model_service::{ModelTarget, geometry_source_refno, transform_value};
+use crate::fast_model::e3d_model_service::{
+    ModelTarget, f32_values, geometry_source_refno, transform_value,
+};
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope, RootReceipt, packed_refno,
 };
@@ -104,11 +111,15 @@ const ROOM_EDGE_DELETE_CHUNK: usize = 300;
 /// `let _ = (policy, room_incremental);`），一并去掉。
 ///
 /// 拿到新几何的来源不清边——重算自己先清后写，两个名单互不相交。
+///
+/// `slice_sources` 是这一片**删之前**库里有过的来源（[`slice_sources_on`]）。整片删掉之后
+/// 它们的边一律清，本次投影里还在的那些由 `upserts` 挑回来（重算先清后写，用不着这里再清
+/// 一遍）。差集正好是「这一轮不再有几何的来源」。
 fn room_edges_to_clear<'a>(
     upserts: impl IntoIterator<Item = (&'a GeometryId, RefNo, &'a str)>,
-    removals: &[GeometryId],
+    slice_sources: &[RefnoEnum],
     legacy_sources: &BTreeSet<RefnoEnum>,
-) -> anyhow::Result<Vec<RefnoEnum>> {
+) -> Vec<RefnoEnum> {
     let mut kept: BTreeSet<RefnoEnum> = BTreeSet::new();
     for (geometry_id, refno, _noun) in upserts {
         if matches!(geometry_id, GeometryId::Element { .. }) {
@@ -116,15 +127,9 @@ fn room_edges_to_clear<'a>(
         }
     }
     let mut cleared: BTreeSet<RefnoEnum> = legacy_sources.clone();
-    for geometry_id in removals {
-        if let GeometryId::Element { refno } = geometry_id {
-            let refno = crate::fast_model::e3d_model_service::parse_refno(refno)
-                .with_context(|| format!("removed geometry {geometry_id}"))?;
-            cleared.insert(refno_from_e3d(refno));
-        }
-    }
+    cleared.extend(slice_sources.iter().cloned());
     cleared.retain(|refno| !kept.contains(refno));
-    Ok(cleared.into_iter().collect())
+    cleared.into_iter().collect()
 }
 
 /// 渲染成落库事务里的清边语句。名单为空时渲染成空串。
@@ -233,20 +238,15 @@ impl PersistTarget<'_> {
     }
 }
 
-/// 一根切成几块提交，每块最多这么多条几何记录。
-///
-/// 一整根一笔事务在大根上是个几万件的报文（7997 那两根各约 2.6 万件）；切块把单笔报文压到
-/// 可预期的量级。代价是这一根不再是一个原子边界——见 [`persist_root_on`] 里那三条顺序，
-/// 半途而废靠「先删后插 + 回执最后盖」自愈，中间态由 [`render_publication_fence`] 在凭证行
-/// 上标出来。
-pub const PERSIST_CHUNK: usize = 5_000;
-
-/// 一次落库落了多少行、落在哪。行数口径与旧 `E3dPersistReport` 的 `upserted` / `removed`
-/// 相同：数的是几何记录，不是语句条数。
+/// 一次落库落了多少行、落在哪。行数口径与旧 `E3dPersistReport` 的 `upserted` 相同：
+/// 数的是几何记录，不是语句条数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistedRows {
     pub medium: PersistMedium,
     pub upserted: usize,
+    /// **这一轮掉了几何的来源数**，不是删掉的行数。整片删走谓词，库不回报删了几行
+    /// （[`render_slice_delete`]）；能数的只有「整片删之前有、这一轮投影里没有」的那些来源
+    /// ——房间边与空间树条目也正是按它们摘的。
     pub removed: usize,
     pub receipts: usize,
     /// 真正发出去的事务笔数（切块之后一根不再等于一笔）。空块不发也不计。
@@ -274,19 +274,6 @@ pub async fn persist_root(root: RefNo) -> anyhow::Result<PersistedRows> {
     persist_root_on(PersistTarget::process(), ModelMemoryStore::global(), root).await
 }
 
-/// Queue the durable database watermark behind all root writes already handed
-/// to this FIFO. The worker also reconciles any still-pending memory roots
-/// before advancing `dbnum_watermark.model_sesno`, so a retry can never leave
-/// the durable watermark ahead of RocksDB model rows.
-pub(crate) async fn enqueue_model_watermark_write_behind(
-    dbnum: u32,
-    target_sesno: i32,
-    target_time: Option<String>,
-) -> anyhow::Result<()> {
-    crate::fast_model::model_write_behind::request_settlement(dbnum, target_sesno, target_time)
-        .await
-}
-
 /// 跑一次旧 `direct_*` 命名空间的清扫（[`render_legacy_prefix_sweep_once`]）。
 ///
 /// [`persist_dbnum`] 的收尾自己会调它，这条另外露出来是给运维口：一个库已经整库重生成过
@@ -301,19 +288,16 @@ pub async fn sweep_legacy_prefixes(target: PersistTarget<'_>) -> anyhow::Result<
     Ok(())
 }
 
-/// 把一个库当前投影里的每一根都对齐进库，一根切成若干块提交。
+/// 把一个库当前投影里的每一根都对齐进库，一根一笔事务。
 ///
 /// 整库生成之后用它收尾：生成侧只写进程内投影，这一步才让 Plant UI 看得见。逐根落而不是
 /// 一整批落，是为了让一根的失败只赔掉那一根。
+///
+/// **持久介质上别直接调它。** 那一档 durable 行只过 write-behind 那道缝（ADR-071），后台
+/// worker 一拿到根就开始刷；这时再调本函数就是第二个写者，跟它抢同一批行，热库上实测会撞
+/// `read or write conflict` 把整笔推掉。要等行落下来用
+/// [`wait_until_model_rows_are_durable`]，它自己会挑对那一档该走哪边。
 pub async fn persist_dbnum(dbnum: u32) -> anyhow::Result<PersistedRows> {
-    persist_dbnum_in_chunks(dbnum, PERSIST_CHUNK).await
-}
-
-/// [`persist_dbnum`] 的可调块大小形态。给量报文规模的烟测用；生产走 [`PERSIST_CHUNK`]。
-pub async fn persist_dbnum_in_chunks(
-    dbnum: u32,
-    chunk_size: usize,
-) -> anyhow::Result<PersistedRows> {
     let target = PersistTarget::process();
     let store = ModelMemoryStore::global();
     let mut total = PersistedRows::none(target.medium);
@@ -323,7 +307,7 @@ pub async fn persist_dbnum_in_chunks(
         }
         // 全库生成只清房间边、不逐元素排重算（ADR-010 §4 收窄 1：整库以启动全量房间
         // 重建收尾，给每个元素排一次重算等于把那件事做两遍）。
-        let rows = persist_root_in_chunks(target, store, root, chunk_size).await?;
+        let rows = persist_root_on(target, store, root).await?;
         total.upserted += rows.upserted;
         total.removed += rows.removed;
         total.receipts += rows.receipts;
@@ -335,26 +319,90 @@ pub async fn persist_dbnum_in_chunks(
     Ok(total)
 }
 
-/// [`persist_root`] 的可注入形态：落库目标与存储都由调用方给。
+/// [`wait_until_model_rows_are_durable`] 的结局。
+#[derive(Debug, Clone, Copy)]
+pub struct DurableFlush {
+    pub medium: PersistMedium,
+    /// 持久介质：开始等的时候还有几根没落。内存介质：本函数自己落了几根。
+    pub roots: usize,
+    pub waited: Duration,
+}
+
+/// 一次性工具的收尾：等这个库的模型行**真的**落进库。
+///
+/// 生产任务不用它——任务在收尾前用 [`model_write_behind::await_roots_durable`] 等**自己那批根**
+/// （ADR-076 D2），这里等的是该库此刻压在队列里的**全部**根：一次性命令（烟测、运维口）跑完就退，
+/// 进程一没后台 worker 跟着没，行只落了一半。
+///
+/// **持久介质上它一行都不写**，只是等那道缝把已经交出去的根刷完。别改成在这里调
+/// [`persist_dbnum`]：那是第二个写者，跟后台 worker 抢同一批行，热库上实测会撞
+/// `read or write conflict` 把整笔推掉。
+///
+/// 两档内存介质走的是另一半：`publish` 在非持久 store 上只提交内存投影、根本不登记
+/// write-behind（那里没有「后来会落」这回事），所以这一档由本函数补一次 [`persist_dbnum`]
+/// ——此时没有第二个写者，抢不起来。
+///
+/// 被判死（`Blocked`）的根不会自己好；等到没有一根还能往前走才收工，报出来的是完整名单。
+/// 重试次数不设上限——工具等的是「落完」，期限只有 `timeout` 一道。
+///
+/// [`model_write_behind::await_roots_durable`]: crate::fast_model::model_write_behind::await_roots_durable
+pub async fn wait_until_model_rows_are_durable(
+    dbnum: u32,
+    timeout: Duration,
+) -> anyhow::Result<DurableFlush> {
+    use crate::fast_model::model_write_behind::{FlushBudget, await_roots_durable, pending_roots};
+
+    let started = Instant::now();
+    let medium = PersistTarget::process().medium;
+    if !crate::options::store_mode().is_durable() {
+        let rows = persist_dbnum(dbnum).await?;
+        return Ok(DurableFlush {
+            medium,
+            roots: rows.commits,
+            waited: started.elapsed(),
+        });
+    }
+    let roots = pending_roots(dbnum);
+    let outcome = await_roots_durable(
+        dbnum,
+        &roots,
+        FlushBudget {
+            max_attempts_per_root: u32::MAX,
+            deadline: timeout,
+        },
+    )
+    .await;
+    if !outcome.blocked.is_empty() {
+        anyhow::bail!(
+            "dbnum {dbnum} 有 {} 根被 write-behind 判死：{}",
+            outcome.blocked.len(),
+            outcome
+                .blocked
+                .iter()
+                .map(|(root, error)| format!("{root} {error}"))
+                .collect::<Vec<_>>()
+                .join("；")
+        );
+    }
+    anyhow::ensure!(
+        outcome.exhausted.is_empty(),
+        "等 dbnum {dbnum} 的模型行落库超过 {timeout:?}，还剩 {} 根",
+        outcome.exhausted.len()
+    );
+    Ok(DurableFlush {
+        medium,
+        roots: roots.len(),
+        waited: started.elapsed(),
+    })
+}
+
+/// [`persist_root`] 的可注入形态：落库目标与存储都由调用方给。一根一笔事务。
 pub async fn persist_root_on(
     target: PersistTarget<'_>,
     store: &ModelMemoryStore,
     root: RefNo,
 ) -> anyhow::Result<PersistedRows> {
-    // 逐根那条路也写 `inst_relate` / `tubi_relate`（`/model/ensure`、未退役的文件轮次），
-    // 它一动，合块那边的任务基线快照就不再等于库——作废，下一次重读。
-    invalidate_geometry_baseline();
-    persist_root_in_chunks(target, store, root, PERSIST_CHUNK).await
-}
-
-/// [`persist_root_on`] 的可调块大小形态。块大小只有测试才需要拨。
-async fn persist_root_in_chunks(
-    target: PersistTarget<'_>,
-    store: &ModelMemoryStore,
-    root: RefNo,
-    chunk_size: usize,
-) -> anyhow::Result<PersistedRows> {
-    persist_root_chunks_impl(target, store, root, chunk_size).await
+    persist_root_impl(target, store, root).await
 }
 
 /// 一组最多装这么多根（[`persist_roots_batched`]）：ADR-071 D2 的跨根合块（d-932 保留），
@@ -364,8 +412,148 @@ async fn persist_root_in_chunks(
 /// 写库失败的赔付边界是根：同组其它根继续独立提交。
 pub const BATCHED_PERSIST_ROOTS_PER_GROUP: usize = 512;
 
-/// 单条几何记录渲成语句之后的硬上限（与 [`persist_root_chunks_impl`] 同值）。
-const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
+/// 一笔发布事务最多装这么多条几何记录。
+///
+/// **按条数装块，不按字节。** 字节量随几何复杂度浮动，同一个数字在不同库上差一个量级，
+/// 调的人没有参照；条数是调用方数得出来的那个量。一根装不下就发好几笔——2026-09-14 之前
+/// 这里是「一根一笔、装不下整根失败」，AMS 7997 的 `16189/0` 一个人装着全部 52,373 件、
+/// 渲成 66 MB，于是那个库根本初始化不了。
+pub const PERSIST_CHUNK: usize = 2_000;
+
+/// 一笔事务渲成语句之后的硬上限。**不是装块的判据**（那是 [`PERSIST_CHUNK`]），是兜底：
+/// 按条数切出来的块仍然超过它，就对半劈开重渲；劈到单条还超，那一条本身有问题，报错。
+pub(crate) const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
+
+/// 同时在飞的根级写者数。**定死为 1**（512 根合块、单写者）；环境变量 `AIOS_MODEL_PERSIST_WRITERS`
+/// 只是实验开关，> 1 时出声告警。
+///
+/// 2026-09-14 实测（AMS 7997，142 个 ZONE 根，52,373 件，`e3d_persist_smoke --batched`，每轮全新空库）：
+///
+/// | 介质 | 1 写者 | 4 写者 | 8 写者 |
+/// | --- | --- | --- | --- |
+/// | kv-mem 内嵌 | 16.3 s | 17.4 s | 21.9 s |
+/// | RocksDB（fork surreal，ws） | 19.6 s | 47.5 s | 85.2 s |
+///
+/// 提交耗时合计随写者数线性放大（kv-mem 15.7 → 60.8 → 118 s；RocksDB 18.6 → 166 → 626 s）：
+/// 一台 SurrealDB 的提交本来就是串行的——kv-mem 一把全局写锁，RocksDB 乐观事务在提交点互撞、
+/// 再被逐笔冲突重试放大（单笔最长 27–55 s）。多写者抢不到并行，只多付锁等待与重试。
+/// 并发该花在生成侧（ZONE 根让几何闸利用率 6% → 39%）和生成与落库的重叠上，不在写者数上。
+/// 想让多写者有落点，得是多个 datastore / 分片，那不是这个开关能给的。
+///
+/// > 1 时 [`persist_roots_batched_unacked_impl`] 不再把根合成一组，而是每根自己一串事务、最多这么多根
+/// 同时提交（见 [`persist_shares_concurrently`]）。根之间的行按 `anc` 天然不相交，会撞的只有
+/// 每笔都带的 `spatial_epoch:current` 与内容寻址的共享 `inst_geo` / 共享本地盒——那是乐观事务的
+/// 「read or write conflict」，由 [`commit_publication_transaction`] 逐笔重试吸收，不升级成整根失败。
+pub fn persist_writers() -> usize {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let writers = std::env::var("AIOS_MODEL_PERSIST_WRITERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 64);
+    if writers > 1 {
+        WARNED.call_once(|| {
+            log::warn!(
+                "AIOS_MODEL_PERSIST_WRITERS={writers}：多写者是实验开关，2026-09-14 实测在 kv-mem 与 RocksDB 上都比单写者慢（RocksDB 4 写者 2.4×、8 写者 4.4×），生产请留默认 1"
+            );
+        });
+    }
+    writers
+}
+
+/// 提交一笔发布事务（`BEGIN … COMMIT`），只对写冲突按指数退避重试。
+///
+/// 整笔原子：冲突时一行都没落，原样重发是安全的。别的错误（语句错、超上限、传输断）原样返回，
+/// 由调用方按根归因。多写者并发时这里是唯一的撞点处理，不要在外面再包一层整根重试。
+async fn commit_publication_transaction(
+    db: &Surreal<Any>,
+    statements: &str,
+    context: &str,
+) -> anyhow::Result<()> {
+    let sql = publication_transaction(statements);
+    crate::surreal_retry::retry_surreal_write_operation(context, || {
+        // 每次尝试拷一份 `String` 进 future：借 `&str` 进去会让整条 async 链的 `Send` 推断卡在
+        // 「对某个具体生命周期才成立」上（写库进程里这段跑在 spawn 出去的任务上）。
+        // 一笔 2–3 MB、提交本身几百毫秒，这一拷不值一提。
+        let sql = sql.clone();
+        async move {
+            db.query(sql)
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(check_publication_response)
+        }
+    })
+    .await
+}
+
+/// 把一批记录按 [`PERSIST_CHUNK`] 条切开渲染，返回 `(条数, SQL)`。
+///
+/// 管身槽位的发号表（`tube_slots`）跨块延续，所以劈开之后 id 不会撞；劈半重渲时先在副本上
+/// 试，成了才写回去，不然半次失败的渲染会把号段吃掉。
+fn render_record_chunks(
+    records: &[ProjectedGeometry],
+    mode: WriteMode,
+    tube_slots: &mut BTreeMap<(u32, u32), usize>,
+) -> anyhow::Result<Vec<(usize, String)>> {
+    let mut rendered = Vec::new();
+    let mut pending = VecDeque::from_iter(records.chunks(PERSIST_CHUNK.max(1)));
+    while let Some(chunk) = pending.pop_front() {
+        let mut slots = tube_slots.clone();
+        let sql = render_chunk(chunk, mode, &mut slots)?;
+        if sql.len() > PUBLICATION_STATEMENT_HARD_CAP && chunk.len() > 1 {
+            let (left, right) = chunk.split_at(chunk.len() / 2);
+            pending.push_front(right);
+            pending.push_front(left);
+            continue;
+        }
+        anyhow::ensure!(
+            sql.len() <= PUBLICATION_STATEMENT_HARD_CAP,
+            "single geometry record renders to {} bytes, over the {PUBLICATION_STATEMENT_HARD_CAP} byte transaction cap",
+            sql.len()
+        );
+        *tube_slots = slots;
+        rendered.push((chunk.len(), sql));
+    }
+    Ok(rendered)
+}
+
+/// 把渲好的块按条数装进一串事务：`prelude`（分支重置 / 整片删 / 清边）进第一笔，
+/// `epilogue`（回执）进最后一笔。
+///
+/// **顺序是这套切块敢成立的全部理由**：删在第一笔、章在最后一笔，中途崩就是「有行没回执」
+/// ——那根不是 [`RootShare::reconciliation_ready`]，下一轮不敢整片删、只 upsert，直到重新
+/// 盖上章；而窗口规划器眼里它仍未发布，会重生成。空事务不发。
+fn pack_publication_transactions(
+    prelude: &str,
+    pieces: &[(usize, String)],
+    epilogue: &str,
+    bump_spatial_epoch: bool,
+) -> Vec<String> {
+    let mut transactions = Vec::new();
+    let mut current = String::from(prelude);
+    let mut packed = 0usize;
+    for (records, sql) in pieces {
+        if packed > 0 && packed + records > PERSIST_CHUNK {
+            transactions.push(std::mem::take(&mut current));
+            packed = 0;
+        }
+        current.push_str(sql);
+        packed += records;
+    }
+    current.push_str(epilogue);
+    transactions.push(current);
+    transactions.retain(|statements| !statements.is_empty());
+    if bump_spatial_epoch {
+        // 「凡是改变了树应有内容的已提交变更，都在同一事务内把 epoch +1」——落库改的正是树
+        // 镜像的那些 `inst_relate.aabb` 指针，所以每一笔都要带，不能只带最后一笔。多 bump
+        // 几次无害：这个号只与 sidecar 比相等，至多让下次启动多做一次指针重建。
+        for statements in &mut transactions {
+            statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
+            statements.push('\n');
+        }
+    }
+    transactions
+}
 
 /// 一次合块落库的账（ADR-071 / ADR-073 D1）。
 #[derive(Debug, Clone, Default)]
@@ -413,116 +601,6 @@ impl BatchedPersist {
     fn push_failure(&mut self, root: RefNo, kind: PersistFailureKind, error: String) {
         self.failed.push((root, error.clone()));
         self.failures.push(RootPersistFailure { root, kind, error });
-    }
-}
-
-/// 库里既有的一条 e3d-model 几何身份及其祖先链（对账用，一库一次取回）。
-#[derive(Debug, serde::Deserialize)]
-struct ExistingGeometry {
-    geometry_id: GeometryId,
-    /// 祖先链；历史行可能没有（`NONE`），那样的行不归任何根、也不会被当陈旧行删。
-    #[serde(default)]
-    anc: Option<Vec<i64>>,
-}
-
-impl Clone for ExistingGeometry {
-    fn clone(&self) -> Self {
-        Self {
-            geometry_id: self.geometry_id.clone(),
-            anc: self.anc.clone(),
-        }
-    }
-}
-
-impl ExistingGeometry {
-    fn under(&self, packed_root: i64) -> bool {
-        self.anc
-            .as_deref()
-            .is_some_and(|anc| anc.contains(&packed_root))
-    }
-}
-
-/// 任务范围内的「库里现有几何身份」快照。
-///
-/// 对账读原先**每调一次 [`persist_roots_batched`] 就整库扫一遍**。7997 那一轮实测：68 组
-/// 累计读约 180 万行，单笔事务从头 400 ms 涨到尾 1,280 ms——写入行数一路没变，涨的全是这个读。
-/// 典型的 O(N²)：读的是「这个库**至今为止**的全部几何身份」，而写的人正是自己。
-///
-/// ADR-071 D1 说得明白：任务是这个 dbnum 唯一的写者，**它知道自己写了什么**。所以一个任务
-/// 读一次基线，之后每组落完把自己写的那部分就地更新进来——快照始终等于「现在再读一次会得到
-/// 的东西」，不是近似。
-///
-/// 作用域绑在**数据窗口**上（`active_data_window()`）：换窗即失效；窗口不在（`/model/ensure`
-/// 那类一根一调的路）就不缓存，照旧每次读。任一组落库失败 → 整份作废（那一组可能已经提交了
-/// 前几块，快照不再可信）。
-struct GeometryBaseline {
-    window: (u32, i32),
-    dbnums: BTreeSet<u32>,
-    rows: Vec<ExistingGeometry>,
-}
-
-static GEOMETRY_BASELINE: std::sync::Mutex<Option<GeometryBaseline>> = std::sync::Mutex::new(None);
-
-fn geometry_baseline() -> std::sync::MutexGuard<'static, Option<GeometryBaseline>> {
-    GEOMETRY_BASELINE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// 别的写者动过 `inst_relate` / `tubi_relate` 之后调：快照不再等于库。
-pub(crate) fn invalidate_geometry_baseline() {
-    *geometry_baseline() = None;
-}
-
-/// 取这一轮的对账依据：命中窗口且覆盖了要的库就用内存那份，否则读一次并存下。
-async fn existing_geometry_for_window(
-    db: &Surreal<Any>,
-    dbnums: &BTreeSet<u32>,
-    window: Option<(u32, i32)>,
-) -> anyhow::Result<Vec<ExistingGeometry>> {
-    let Some(window) = window else {
-        return existing_geometry_of_dbnums_on(db, dbnums).await;
-    };
-    if let Some(cached) = geometry_baseline().as_ref()
-        && cached.window == window
-        && dbnums.is_subset(&cached.dbnums)
-    {
-        return Ok(cached.rows.clone());
-    }
-    let rows = existing_geometry_of_dbnums_on(db, dbnums).await?;
-    *geometry_baseline() = Some(GeometryBaseline {
-        window,
-        dbnums: dbnums.clone(),
-        rows: rows.clone(),
-    });
-    Ok(rows)
-}
-
-/// 一组落成之后把快照推到「刚写完」的状态：这些根名下的旧身份换成刚投影的那批。
-///
-/// 只对**做过对账**的根动手（`reconciliation_ready`）——没回执的根本来就不参与对账，
-/// 它在库里的行也没被这一组动过。只传真落进去的根（房间关卡剔掉的根没动库，快照不该跟着动）。
-fn advance_geometry_baseline(window: Option<(u32, i32)>, group: &[LiveShare<'_>]) {
-    let Some(window) = window else {
-        return;
-    };
-    let mut baseline = geometry_baseline();
-    let Some(cached) = baseline.as_mut().filter(|cached| cached.window == window) else {
-        return;
-    };
-    for share in group
-        .iter()
-        .map(|live| live.share)
-        .filter(|share| share.reconciliation_ready())
-    {
-        let packed_root = packed_refno(share.root);
-        cached.rows.retain(|row| !row.under(packed_root));
-        cached
-            .rows
-            .extend(share.records.iter().map(|record| ExistingGeometry {
-                geometry_id: record.geometry_id.clone(),
-                anc: Some(record.ancestors.clone()),
-            }));
     }
 }
 
@@ -628,52 +706,101 @@ fn room_stage<'a>(
     (live, failed)
 }
 
-/// 库里这些 dbnum 名下、由 e3d-model 写过的全部几何身份，**一条查询**取回（两张表各一句）。
-/// 各根在客户端按祖先链分摊——比 [`projected_geometry_ids_on`] 每根一问少几千个往返。
-/// 只认带 `dbnum` 列的行：没有它的历史行由启动回填（`backfill_inst_relate_anc`）补上。
-async fn existing_geometry_of_dbnums_on(
+/// 一批生成根名下、模型面已经落过的来源元素（去重、按 refno 排序）。
+///
+/// 这**不是**对账：它不取几何身份、不与投影比身份、也不缓存。它只回答一个问题——
+/// 「这一片里有哪些来源元素」，因为两件下游拿不到谓词：房间边要按来源清
+/// （[`room_edges_to_clear`]），进程内空间树要按来源摘
+/// （[`crate::fast_model::aabb_tree::converge_tree_after_persist`]）。**行本身不靠它删**，
+/// 删整片走 [`render_slice_delete`] 的谓词，一个 id 都不用点名。
+///
+/// 读的大小由**这一批根**决定，不再由「库里至今攒了多少」决定。旧的整库基线读在 7997 上
+/// 68 组累计约 180 万行、单笔事务从 400 ms 涨到 1,280 ms，就是因为它读的是自己刚写进去的
+/// 东西——那是 O(N²)。走 `idx_inst_relate_anc`。
+///
+/// 管身不在其中：隐式管身的来源是 BRAN，房间边与树条目都不按它记
+/// （[`room_edges_to_clear`] 同样只认 `GeometryId::Element`）。
+async fn slice_sources_on(
     db: &Surreal<Any>,
-    dbnums: &BTreeSet<u32>,
-) -> anyhow::Result<Vec<ExistingGeometry>> {
-    if dbnums.is_empty() {
+    packed_roots: &[i64],
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    if packed_roots.is_empty() {
         return Ok(Vec::new());
     }
-    let dbnums = dbnums
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut response = db
-        .query(format!(
-            "SELECT direct_model.geometry_id AS geometry_id, anc FROM inst_relate \
-             WHERE dbnum IN [{dbnums}] AND direct_model.source = 'e3d-model' \
-             AND direct_model.geometry_id != NONE;\
-             SELECT direct_model.geometry_id AS geometry_id, anc FROM tubi_relate \
-             WHERE dbnum IN [{dbnums}] AND direct_model.source = 'e3d-model' \
-             AND direct_model.geometry_id != NONE;"
-        ))
-        .await?
-        .check()?;
-    let mut rows: Vec<ExistingGeometry> = response.take(0)?;
-    rows.extend(response.take::<Vec<ExistingGeometry>>(1)?);
-    Ok(rows)
+    let keys: Vec<String> = db
+        .query(
+            "SELECT VALUE record::id(in) FROM inst_relate \
+             WHERE anc CONTAINSANY $roots AND model_sesno != NONE;",
+        )
+        .bind(("roots", packed_roots.to_vec()))
+        .await
+        .context("read model slice sources")?
+        .check()?
+        .take(0)?;
+    let mut sources = BTreeSet::new();
+    for key in keys {
+        let refno = crate::fast_model::e3d_model_service::parse_refno(&key)
+            .with_context(|| format!("model slice source {key}"))?;
+        sources.insert(refno_from_e3d(refno));
+    }
+    Ok(sources.into_iter().collect())
 }
 
-/// 多根一条的可见性栅栏（[`render_publication_fence`] 的批量形态）：`UPDATE a, b, c SET …`，
-/// 每条最多点名 `per_statement` 根。
-fn render_publication_fence_batch(roots: &[RefNo], per_statement: usize) -> String {
-    let mut statements = String::new();
-    for chunk in roots.chunks(per_statement.max(1)) {
-        let targets = chunk
-            .iter()
-            .map(|root| format!("type::thing('gen_root', {})", sql_string(&refno_key(*root))))
-            .collect::<Vec<_>>()
-            .join(", ");
-        statements.push_str(&format!(
-            "UPDATE {targets} SET publication_status='publishing', updated_at=time::now();\n"
-        ));
+/// 一批生成根名下模型面**整片**的删除：不先读、不点名 id，谓词直接圈。
+///
+/// 谓词与 [`collect_record`] 写行时的作用域同构（`anc` 里有这个打包根、且这行是模型面写下
+/// 的），所以「删整片 + 插整片」写的行数与旧的「对账出陈旧行再删」完全一样——存活的行反正
+/// 要被重插一遍。换来的是那条整库对账读整个消失。
+///
+/// `model_sesno != NONE` 是护栏：属性面独有的行（`pdms_inst` 写的、从没被模型碰过的）不带
+/// 这一列，谓词碰不到它们。
+///
+/// 形状上照着 [`render_spooled_scope_cleanup`]，但**删的那几句一律点名记录、不下谓词**：
+/// 先把关系行的 id 与 `out` 捞进变量，再把 `aabb` / `trans` 的记录 id 直接拼出来
+/// （它们与关系行同名），`DELETE $数组` 是逐条点删，不扫表。
+///
+/// 谓词形态在这里是个陷阱，AMS 8000 实测过：`DELETE aabb WHERE record::id(id) IN $ids`
+/// 里 `record::id(id)` 是**列上的函数**，优化器整条放弃索引退回 `Iterate Table`，然后对
+/// 扫到的每一行再去 2,500 项的数组里线性找一遍——两张表两句 OR，一次发布两千多件就是
+/// 上千万次数组比较。同一类坑 `fast_delete` 的文档里写过（列上套 `<int>` 也会丢索引）。
+fn render_slice_delete(packed_roots: &[i64]) -> String {
+    if packed_roots.is_empty() {
+        return String::new();
     }
-    statements
+    let roots = packed_roots
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    // `inst_info` / `aabb` / `trans` 与关系行**同键**（`collect_record` 就是这么写的，
+    // `append_geometry_removal` 也是这么删的），所以直接拼记录，不从 `out` 上取——
+    // 烘焙实体那一行根本没有 `out`（网格挂在 `booled_id` 上），取出来是一串 NONE，
+    // `DELETE` 见到 NONE 会整笔事务失败。
+    //
+    // 管身**不同键**：`tubi_relate` 的 id 是分支槽位数组 `[pe:⟨branch⟩, n]`，而它的盒与变换
+    // 按几何记录 id（摘要）落在 `aabb:⟨digest⟩` / `trans:⟨digest⟩`（`collect_record` 的管身
+    // 那一行）——从槽位 id 拼 `aabb:[pe, n]` 拼出来的是一个不存在的记录，删了等于没删，
+    // 管身一消失盒与变换就成了孤儿行。只能顺着行上的 `aabb` / `world_trans` 指针删；护栏
+    // 保证圈到的都是模型面写的行，两个指针恒在，不会出 NONE。
+    //
+    // `geo_relate` 是唯一一句带谓词的：它的 id 是 `[inst_info, inst_geo]` 数组、从 `inst_info`
+    // 一侧拼不出来，只能按 `in` 找——走 `idx_geo_relate_in`，且照 [`append_geometry_removal`]
+    // 的路子先 `SELECT` 出 id 再 `DELETE`（部署引擎上 `DELETE … WHERE` 不走索引）。
+    format!(
+        "LET $slice_keys = SELECT VALUE record::id(id) FROM inst_relate \
+         WHERE anc CONTAINSANY [{roots}] AND model_sesno != NONE;\n\
+         LET $slice_tubes = SELECT id, aabb, world_trans FROM tubi_relate \
+         WHERE anc CONTAINSANY [{roots}] AND model_sesno != NONE;\n\
+         LET $slice_infos = $slice_keys.map(|$key| type::thing('inst_info', $key));\n\
+         DELETE (SELECT VALUE id FROM geo_relate WHERE in IN $slice_infos);\n\
+         DELETE $slice_infos;\n\
+         DELETE $slice_keys.map(|$key| type::thing('inst_relate', $key));\n\
+         DELETE $slice_tubes.map(|$row| $row.id);\n\
+         DELETE $slice_keys.map(|$key| type::thing('aabb', $key));\n\
+         DELETE $slice_tubes.map(|$row| $row.aabb);\n\
+         DELETE $slice_keys.map(|$key| type::thing('trans', $key));\n\
+         DELETE $slice_tubes.map(|$row| $row.world_trans);\n"
+    )
 }
 
 /// ADR-071 D1 / D11 × ADR-073 D1：一个 dbnum 任务把本轮全部成功根的模型行合块、同步写进库，
@@ -685,7 +812,7 @@ fn render_publication_fence_batch(roots: &[RefNo], per_statement: usize) -> Stri
 ///
 /// 1. 一组 ≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根，共享对账读取与房间预计算；持久化时每根的
 ///    几何行、房间边和回执合成一笔事务。软字节上限不得拆根，超过数据库硬上限则整根失败；
-/// 2. 对账读一次：整库 e3d-model 几何身份一条查询取回，各根在客户端按祖先链分摊，不再每根一问；
+/// 2. 对账身份分页读取：窗口内复用库级基线；窗口外只查询本批 root，各根按祖先链分摊；
 /// 3. 没有 durable per-root queue。事务成功后返回精确 ACK 候选；同步调用方立即接受，
 ///    write-behind 调用方则在自己的 submission epoch 栅栏后接受，进程退出即丢。
 ///
@@ -729,16 +856,7 @@ pub(crate) async fn persist_roots_batched_unacked(
     roots: &[RefNo],
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
-    let limits = crate::data_interface::tx_limits::data_tx_limits();
-    persist_roots_batched_with_chunk_bytes_unacked(
-        target,
-        store,
-        dbnum,
-        roots,
-        limits.max_bytes.max(64 * 1024),
-        rooms,
-    )
-    .await
+    persist_roots_batched_unacked_impl(target, store, dbnum, roots, rooms).await
 }
 
 /// 任务开工时冻一份房间计算器（ADR-073 D1，硬约束：预加载房间模型只能是开工时冻结的不可变引用，
@@ -773,40 +891,11 @@ pub fn required_room_generation() -> anyhow::Result<Option<String>> {
     ))
 }
 
-/// [`persist_roots_batched`] 的显式块字节上限形态（测试把它压到 1 让每条记录自成一块）。
-pub(crate) async fn persist_roots_batched_with_chunk_bytes(
+async fn persist_roots_batched_unacked_impl(
     target: PersistTarget<'_>,
     store: &ModelMemoryStore,
     dbnum: u32,
     roots: &[RefNo],
-    chunk_bytes: usize,
-    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
-) -> anyhow::Result<BatchedPersist> {
-    let result = persist_roots_batched_with_chunk_bytes_unacked(
-        target,
-        store,
-        dbnum,
-        roots,
-        chunk_bytes,
-        rooms,
-    )
-    .await?;
-    for candidate in &result.acknowledged {
-        let _ = store.record_publication_ack(
-            ProjectionScope::Current,
-            candidate.root,
-            candidate.ack.clone(),
-        );
-    }
-    Ok(result)
-}
-
-async fn persist_roots_batched_with_chunk_bytes_unacked(
-    target: PersistTarget<'_>,
-    store: &ModelMemoryStore,
-    dbnum: u32,
-    roots: &[RefNo],
-    chunk_bytes: usize,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
     let mut out = BatchedPersist::default();
@@ -821,9 +910,6 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
         );
     }
     let db = target.db;
-    // 只给对账基线快照当作用域键（[`GeometryBaseline`]：换窗即失效）。它**不再**分叉任何写法：
-    // 清边 / 空间收敛在窗口内外一律就地做（ADR-072 D4）。
-    let baseline_window = crate::data_interface::batch_worker::active_data_window();
 
     // 去重后的根序（同一根点两次只落一次）。
     let mut seen = BTreeSet::new();
@@ -843,26 +929,35 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
         return Ok(out);
     }
 
-    // 对账读一次（只有有回执的根才拿得起自己的全集）。行上的 `dbnum` 是投影记录写下的那个，
-    // 与根的 `dbno()` 在生产上同值；两者都问，夹具或历史行的口径差异不会让陈旧行漏网。
-    let mut reconciliation_dbnums = BTreeSet::from([dbnum]);
-    reconciliation_dbnums.extend(
-        shares
-            .iter()
-            .flat_map(|share| share.records.iter().map(|record| record.dbnum)),
-    );
-    let existing = if shares.iter().any(RootShare::reconciliation_ready) {
-        existing_geometry_for_window(db, &reconciliation_dbnums, baseline_window).await?
-    } else {
-        Vec::new()
-    };
-
     let mut total = PersistedRows::none(target.medium);
     let mut refresh_all = Vec::<aios_core::RefnoEnum>::new();
     let mut boxes_all = Vec::<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>::new();
     let mut cleared_all = Vec::<aios_core::RefnoEnum>::new();
 
-    for group in shares.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
+    // 多写者（`AIOS_MODEL_PERSIST_WRITERS` > 1）：每根一个写者、并发提交，不合块、不二分。
+    // 单写者走下面原来的 512 根合块 + 二分重试那一路，行为不变。
+    let writers = persist_writers();
+    let concurrent_groups = if writers > 1 {
+        persist_shares_concurrently(
+            db,
+            dbnum,
+            target.medium,
+            rooms,
+            &shares,
+            writers,
+            &mut total,
+            &mut out,
+            &mut refresh_all,
+            &mut boxes_all,
+            &mut cleared_all,
+        )
+        .await;
+        &shares[shares.len()..]
+    } else {
+        &shares[..]
+    };
+
+    for group in concurrent_groups.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
         out.groups += 1;
         // 房间关卡在写库之前、按根（ADR-073 D1 / D2）：算不出来的根就地记失败，
         // 剩下的根才进本组的事务。
@@ -876,21 +971,12 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
         // 正常路径把最多 512 根合进同一笔原子事务，避免大库退化成几万次网络往返。
         // 若 SQL 硬上限、数据事件或传输错误让整组失败，事务本身零提交；随后二分重试，
         // 直到定位到单根。于是成功路径保留合块吞吐，异常路径仍以根为赔付边界。
-        match persist_group(
-            db,
-            &live,
-            &existing,
-            chunk_bytes,
-            !target.medium.is_durable(),
-        )
-        .await
-        {
+        match persist_group(db, &live, !target.medium.is_durable()).await {
             Ok(outcome) => accept_group_outcome(
                 &live,
                 dbnum,
                 target.medium,
                 rooms,
-                baseline_window,
                 outcome,
                 &mut total,
                 &mut out,
@@ -899,15 +985,13 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
                 &mut cleared_all,
             ),
             Err(error) if live.len() == 1 => {
-                invalidate_geometry_baseline();
                 out.push_failure(
                     live[0].share.root,
-                    PersistFailureKind::Retryable,
+                    publication_failure_kind(&error),
                     format!("{error:#}"),
                 );
             }
             Err(error) => {
-                invalidate_geometry_baseline();
                 log::warn!(
                     "model publication group of {} roots failed; bisecting to preserve the per-root failure boundary: {error:#}",
                     live.len()
@@ -918,26 +1002,12 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
                 retries.push_back((middle, live.len()));
                 while let Some((start, end)) = retries.pop_front() {
                     let retry = &live[start..end];
-                    let current = if retry.iter().any(|root| root.share.reconciliation_ready()) {
-                        existing_geometry_of_dbnums_on(db, &reconciliation_dbnums).await?
-                    } else {
-                        Vec::new()
-                    };
-                    match persist_group(
-                        db,
-                        retry,
-                        &current,
-                        chunk_bytes,
-                        !target.medium.is_durable(),
-                    )
-                    .await
-                    {
+                    match persist_group(db, retry, !target.medium.is_durable()).await {
                         Ok(outcome) => accept_group_outcome(
                             retry,
                             dbnum,
                             target.medium,
                             rooms,
-                            baseline_window,
                             outcome,
                             &mut total,
                             &mut out,
@@ -946,15 +1016,13 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
                             &mut cleared_all,
                         ),
                         Err(error) if retry.len() == 1 => {
-                            invalidate_geometry_baseline();
                             out.push_failure(
                                 retry[0].share.root,
-                                PersistFailureKind::Retryable,
+                                publication_failure_kind(&error),
                                 format!("{error:#}"),
                             );
                         }
                         Err(error) => {
-                            invalidate_geometry_baseline();
                             log::warn!(
                                 "model publication subgroup of {} roots failed; bisecting again: {error:#}",
                                 retry.len()
@@ -996,8 +1064,83 @@ struct GroupOutcome {
     refresh: Vec<aios_core::RefnoEnum>,
     /// `refresh` 的投影世界盒（[`crate::fast_model::aabb_tree::projected_tree_entry`]）。
     boxes: Vec<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>,
-    /// 被对账掉、房间边也一并清掉的来源。
+    /// 整片删掉之后这一轮不再有几何的来源：房间边清掉、树条目摘掉。
     cleared: Vec<aios_core::RefnoEnum>,
+}
+
+/// 多写者那一路：**一根一个写者**，最多 `writers` 根同时在飞，每根自己一串事务（整片删进第一笔、
+/// 回执进最后一笔，见 [`persist_group`]）。
+///
+/// 根之间按 `anc` 不相交，所以不需要合块也不需要二分——一根失败就是这一根的失败，赔付边界天然
+/// 是根。房间关卡仍在写库之前、按根过（ADR-073 D1 / D2）。账（`out` / `total` / 收敛名单）在
+/// 本任务里按完成顺序收，不跨任务共享可变状态。
+///
+/// 并发是同一个 tokio 任务上的 `buffer_unordered`：提交（IO）互相重叠，渲染（CPU）仍是串行
+/// 穿插——写者的瓶颈在库那一侧，这一版先不把渲染搬去阻塞池。
+#[allow(clippy::too_many_arguments)]
+async fn persist_shares_concurrently(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    medium: PersistMedium,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+    shares: &[RootShare],
+    writers: usize,
+    total: &mut PersistedRows,
+    out: &mut BatchedPersist,
+    refresh_all: &mut Vec<aios_core::RefnoEnum>,
+    boxes_all: &mut Vec<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>,
+    cleared_all: &mut Vec<aios_core::RefnoEnum>,
+) {
+    use futures::StreamExt as _;
+
+    let (live, room_failed) = room_stage(shares, rooms);
+    for (root, error) in room_failed {
+        out.push_failure(root, PersistFailureKind::Blocked, error);
+    }
+    if live.is_empty() {
+        return;
+    }
+    let create_missing_receipts = !medium.is_durable();
+    log::info!(
+        "model publication fan-out: roots={} writers={} dbnum={dbnum}",
+        live.len(),
+        writers.min(live.len())
+    );
+    // 用 for 循环把每根的 future 先攒成 Vec，而不是 `iter().map(|one| async move …)`：
+    // 闭包参数是引用时，返回的 async 块会带上高阶生命周期，整条链的 `Send` 就推不出来
+    // （「implementation of Send is not general enough」）。
+    let mut pending = Vec::with_capacity(live.len());
+    for (index, one) in live.iter().enumerate() {
+        pending.push(async move {
+            let outcome =
+                persist_group(db, std::slice::from_ref(one), create_missing_receipts).await;
+            (index, outcome)
+        });
+    }
+    let mut settled = futures::stream::iter(pending).buffer_unordered(writers);
+    while let Some((index, outcome)) = settled.next().await {
+        out.groups += 1;
+        let one = &live[index..index + 1];
+        match outcome {
+            Ok(outcome) => accept_group_outcome(
+                one,
+                dbnum,
+                medium,
+                rooms,
+                outcome,
+                total,
+                out,
+                refresh_all,
+                boxes_all,
+                cleared_all,
+            ),
+            Err(error) => out.push_failure(
+                one[0].share.root,
+                publication_failure_kind(&error),
+                format!("{error:#}"),
+            ),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1006,7 +1149,6 @@ fn accept_group_outcome(
     dbnum: u32,
     medium: PersistMedium,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
-    baseline_window: Option<(u32, i32)>,
     outcome: GroupOutcome,
     total: &mut PersistedRows,
     out: &mut BatchedPersist,
@@ -1041,17 +1183,36 @@ fn accept_group_outcome(
     refresh_all.extend(outcome.refresh);
     boxes_all.extend(outcome.boxes);
     cleared_all.extend(outcome.cleared);
-    advance_geometry_baseline(baseline_window, group);
 }
 
-/// 一组过了房间关卡的根：渲块 → 逐块提交。任一块失败即返回 Err，调用方把这一组记成失败。
-/// 每根的顺序定死（ADR-073 D1，用户原话「放到模型计算后面」）：最终几何已在投影里 → 房间归属已在
-/// [`room_stage`] 算好 → 写模型行与房间边（同一块同一事务，模型在前）→ 盖章。
+/// Typed context for failures that retrying the same local payload cannot fix.
+#[derive(Debug)]
+struct DeterministicPublicationFailure;
+
+impl std::fmt::Display for DeterministicPublicationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid local publication payload")
+    }
+}
+
+impl std::error::Error for DeterministicPublicationFailure {}
+
+fn publication_failure_kind(error: &anyhow::Error) -> PersistFailureKind {
+    if error
+        .downcast_ref::<DeterministicPublicationFailure>()
+        .is_some()
+    {
+        PersistFailureKind::Blocked
+    } else {
+        PersistFailureKind::Retryable
+    }
+}
+
+/// 一组过了房间关卡的根：渲一笔、发一笔。失败即返回 Err，调用方把这一组记成失败。
+/// 每根的顺序：最终几何 → 房间归属 → 同事务写模型行、房间边与回执。
 async fn persist_group(
     db: &Surreal<Any>,
     group: &[LiveShare<'_>],
-    existing: &[ExistingGeometry],
-    chunk_bytes: usize,
     create_missing_receipts: bool,
 ) -> anyhow::Result<GroupOutcome> {
     // 本根要渲的完整记录；跨根重复由数据库幂等语义收敛。
@@ -1060,50 +1221,25 @@ async fn persist_group(
         .flat_map(|live| live.claimed.iter().cloned())
         .collect::<Vec<_>>();
 
-    // 对账：每根自己的全集 vs 库里挂在它祖先链下的身份；库里有、存储里没有的就是陈旧行。
-    let mut removals = Vec::<String>::new();
-    let mut removed_ids = BTreeSet::<String>::new();
-    let mut removed_geometry = Vec::<GeometryId>::new();
-    let mut branches = BTreeSet::<(u32, u32)>::new();
-    for share in group
+    // 有回执的根才拿得起自己的全集，也才敢把它名下整片推掉（[`RootShare::reconciliation_ready`]）。
+    // 没回执的根只 upsert 自己那几行，库里既有的不动。
+    let sliced_roots = group
         .iter()
         .map(|live| live.share)
         .filter(|share| share.reconciliation_ready())
-    {
-        let packed_root = packed_refno(share.root);
-        let projected = share
-            .records
-            .iter()
-            .map(|record| record.record_id.as_str())
-            .collect::<BTreeSet<_>>();
-        for record in share.records.iter().filter(|record| record.tube.is_some()) {
-            branches.insert((record.source_refno.word0, record.source_refno.word1));
-        }
-        for row in existing.iter().filter(|row| row.under(packed_root)) {
-            let source = geometry_source_refno(&row.geometry_id)?;
-            let record_id = geometry_record_id(&row.geometry_id, source);
-            if projected.contains(record_id.as_str()) || !removed_ids.insert(record_id.clone()) {
-                continue;
-            }
-            if matches!(row.geometry_id, GeometryId::ImpliedTube { .. }) {
-                branches.insert((source.word0, source.word1));
-            }
-            removals.push(record_id);
-            removed_geometry.push(row.geometry_id.clone());
-        }
-    }
+        .map(|share| packed_refno(share.root))
+        .collect::<Vec<_>>();
 
-    let cleared_room_edges = room_edges_to_clear(
-        records.iter().map(|record| {
-            (
-                &record.geometry_id,
-                record.source_refno,
-                record.noun.as_str(),
-            )
-        }),
-        &removed_geometry,
-        &BTreeSet::new(),
-    )?;
+    // 一个 BRAN 的隐式管身是整段重写的：这一轮碰到的分支先清空，再插存储里的那几段。
+    // 整片删已经覆盖了带 `anc` 的管身行，这一条兜的是 `anc` 缺失的历史行。
+    let branches = group
+        .iter()
+        .map(|live| live.share)
+        .filter(|share| share.reconciliation_ready())
+        .flat_map(|share| share.records.iter())
+        .filter(|record| record.tube.is_some())
+        .map(|record| (record.source_refno.word0, record.source_refno.word1))
+        .collect::<BTreeSet<_>>();
 
     let deferred_refresh = records
         .iter()
@@ -1118,95 +1254,105 @@ async fn persist_group(
         .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
-    // 几何段：**逐根**完整渲染，不因软块上限拆分。这一根的两张房间边
-    // 紧跟在它最后一段几何后面（ADR-073 D1 / W2：模型在前、房间在后，同一段 = 同一块 = 同一笔事务）；
-    // 只有回执没有几何的根（删干净了）没有边可写，它的旧边由上面的清边那一半处理。
-    let mut pieces = Vec::<String>::new();
+    // 几何段：**逐根**渲染，每根再按 [`PERSIST_CHUNK`] 条切块。这一根的两张房间边紧跟在
+    // 它**最后一块**几何后面（ADR-073 D1 / W2：模型在前、房间在后；根跨多笔时边跟着它的
+    // 末块走，中途崩就是没章的半截，下一轮重来）；只有回执没有几何的根（删干净了）没有边
+    // 可写，它的旧边由上面的清边那一半处理。
+    let mut pieces: Vec<(usize, String)> = Vec::new();
     let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
     for live in group {
-        let mut piece = if live.claimed.is_empty() {
-            String::new()
+        // 整片删已经把这一根名下的行清干净了，`Incremental` 那组按 id 的删除就是纯重复——
+        // 而它不便宜：一根两千多件时那是四个各两千多项的 `type::thing()` 数组，AMS 8000
+        // 实测整条落库从 16.7 s 涨到 50.3 s，涨的全是这一段。没被整片删覆盖的根（没有回执，
+        // 不敢推整片）照旧走 `Incremental`。
+        let mode = if live.share.reconciliation_ready() {
+            WriteMode::Initial
         } else {
-            render_chunk(&live.claimed, WriteMode::Incremental, &mut tube_slots)?
+            WriteMode::Incremental
         };
-        piece.push_str(&live.room_statements);
-        if !piece.is_empty() {
-            pieces.push(piece);
+        // 渲染是本地的：这一根切不开、单条记录就超上限，后面拼什么都救不回来。这里就判掉，
+        // 一次库都不碰——本地载荷有问题不该先去读一遍再发现
+        // （`oversized_local_publication_is_blocked_before_database_io`）。
+        let mut rendered = render_record_chunks(&live.claimed, mode, &mut tube_slots)
+            .with_context(|| format!("render root {}", live.share.root))
+            .context(DeterministicPublicationFailure)?;
+        if !live.room_statements.is_empty() {
+            match rendered.last_mut() {
+                Some((_, sql)) => sql.push_str(&live.room_statements),
+                None => rendered.push((0, live.room_statements.clone())),
+            }
         }
-    }
-    // 几何块：相邻的段按字节装进同一块（合块允许跨根），一段不拆——一根的行与边始终在同一块里。
-    let mut geometry_chunks = Vec::<String>::new();
-    for piece in pieces {
-        match geometry_chunks.last_mut() {
-            Some(last) if last.len() + piece.len() <= chunk_bytes => last.push_str(&piece),
-            _ => geometry_chunks.push(piece),
-        }
+        pieces.extend(rendered);
     }
 
-    // 回执块：同一份 ModelTarget 只 `LET` 一次，几百根共用；按字节切成若干块。
+    // 本地载荷到这里已经全部过关，才轮到碰库。整片删之前库里有过的来源：行不靠它删
+    // （谓词删，见 [`render_slice_delete`]），它只喂房间清边与空间树摘条目。
+    let slice_read_started = std::time::Instant::now();
+    let slice_sources = slice_sources_on(db, &sliced_roots).await?;
+    let slice_read_elapsed = slice_read_started.elapsed();
+    let cleared_room_edges = room_edges_to_clear(
+        records.iter().map(|record| {
+            (
+                &record.geometry_id,
+                record.source_refno,
+                record.noun.as_str(),
+            )
+        }),
+        &slice_sources,
+        &BTreeSet::new(),
+    );
+
+    // 回执：同一份 ModelTarget 只 `LET` 一次，几百根共用。
     let receipted = group
         .iter()
         .map(|live| live.share)
         .filter_map(|share| share.receipt.as_ref().map(|receipt| (share.root, receipt)))
         .collect::<Vec<_>>();
-    let mut receipt_chunks = Vec::<String>::new();
+    let mut receipt_header = String::new();
+    let mut receipt_body = String::new();
     {
         let mut targets = BTreeMap::<String, usize>::new();
-        let mut header = String::new();
-        let mut body = String::new();
-        let flush = |header: &mut String, body: &mut String, out: &mut Vec<String>| {
-            if !body.is_empty() {
-                out.push(format!("{header}{body}"));
-            }
-            header.clear();
-            body.clear();
-        };
         for (root, receipt) in &receipted {
-            let literal = receipt_model_target_literal(receipt)?;
+            let literal =
+                receipt_model_target_literal(receipt).context(DeterministicPublicationFailure)?;
             let expression = if literal == "NONE" {
                 literal
             } else {
                 let next = targets.len();
                 let index = *targets.entry(literal.clone()).or_insert(next);
                 if index == next {
-                    header.push_str(&format!("LET $mt{index} = {literal};\n"));
+                    receipt_header.push_str(&format!("LET $mt{index} = {literal};\n"));
                 }
                 format!("$mt{index}")
             };
-            body.push_str(&render_receipt_with_target(
+            receipt_body.push_str(&render_receipt_with_target(
                 *root,
                 receipt,
                 None,
                 &expression,
                 create_missing_receipts,
             ));
-            if header.len() + body.len() > chunk_bytes {
-                flush(&mut header, &mut body, &mut receipt_chunks);
-                targets.clear();
-            }
         }
-        flush(&mut header, &mut body, &mut receipt_chunks);
-    }
-
-    // 每根不可拆的几何/房间段与全部回执合成**一笔**事务。整组超过数据库硬上限时，
-    // 调用方会在发出任何写之前收到 Err 并二分重试；软块上限只帮助渲染期组装，不再制造
-    // “模型已提交、回执稍后提交”的中间态。
-    let mut root_statement = geometry_chunks.drain(..).collect::<String>();
-    for receipt in receipt_chunks.drain(..) {
-        root_statement.push_str(&receipt);
-    }
-    if !root_statement.is_empty() {
-        geometry_chunks.push(root_statement);
     }
 
     // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份）。
     let room_edge_count = group.iter().map(|live| live.room_edges).sum::<usize>();
 
-    let chunk_count = geometry_chunks.len() + receipt_chunks.len();
-    let has_preamble =
-        !removals.is_empty() || !branches.is_empty() || !cleared_room_edges.is_empty();
-    let statement_count = chunk_count.max(usize::from(has_preamble));
-    if statement_count == 0 {
+    // **一组一串事务，按条数装块。** 删整片与清边进第一笔，盖章进最后一笔；中途崩就是
+    // 「有行没回执」，那几根下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位
+    // （`settle` 只在这个库一根不剩时才推进 `dbnum_watermark.model_sesno`）。
+    let mut prelude = String::new();
+    for &(word0, word1) in &branches {
+        append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
+    }
+    prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
+    prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
+    let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
+    let epilogue = format!("{receipt_header}{receipt_body}");
+    let transactions =
+        pack_publication_transactions(&prelude, &pieces, &epilogue, touches_geometry);
+    if transactions.is_empty() {
         return Ok(GroupOutcome {
             upserted: 0,
             removed: 0,
@@ -1219,73 +1365,47 @@ async fn persist_group(
             cleared: Vec::new(),
         });
     }
-    let fenced = statement_count > 1 && !receipted.is_empty();
-    let fence_roots = receipted.iter().map(|(root, _)| *root).collect::<Vec<_>>();
-
-    let mut commits = 0usize;
     let mut max_transaction_bytes = 0usize;
-    for index in 0..statement_count {
-        let mut statements = String::new();
-        let is_first = index == 0;
-        let is_last = index + 1 == statement_count;
-        if is_first {
-            // 多块时把中间态标在凭证行上。
-            if fenced {
-                statements.push_str(&render_publication_fence_batch(&fence_roots, 500));
-            }
-            for &(word0, word1) in &branches {
-                append_tube_branch_reset(&mut statements, RefNo::new(word0, word1));
-            }
-            append_geometry_removals(
-                &mut statements,
-                &removals.iter().map(String::as_str).collect::<Vec<_>>(),
-            );
-            // 清边跟着删几何那一块走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
-            statements.push_str(&render_room_edge_clear(&cleared_room_edges));
-        }
-        let touches_geometry;
-        if index < geometry_chunks.len() {
-            statements.push_str(&geometry_chunks[index]);
-            touches_geometry = true;
-        } else {
-            touches_geometry = is_first && (!removals.is_empty() || !branches.is_empty());
-            if let Some(receipt_chunk) = receipt_chunks.get(index - geometry_chunks.len()) {
-                statements.push_str(receipt_chunk);
-            }
-        }
-        if is_last {}
-        if touches_geometry {
-            statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-            statements.push('\n');
-        }
-        if statements.is_empty() {
-            continue;
-        }
-        anyhow::ensure!(
-            statements.len() <= PUBLICATION_STATEMENT_HARD_CAP,
-            "root {} exceeds publication transaction hard cap ({} > {} bytes)",
-            group[0].share.root,
-            statements.len(),
-            PUBLICATION_STATEMENT_HARD_CAP
-        );
+    let mut commits = 0usize;
+    for (index, statements) in transactions.iter().enumerate() {
         max_transaction_bytes = max_transaction_bytes.max(statements.len());
-        db.query(publication_transaction(&statements))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(check_publication_response)
-            .with_context(|| {
-                format!(
-                    "persist {} projected root(s)（第 {} / {statement_count} 块）",
-                    group.len(),
-                    index + 1
-                )
-            })?;
+        let commit_started = std::time::Instant::now();
+        let committed =
+            commit_publication_transaction(db, statements, "model publication group").await;
+        // 一笔一行的落库账：验收第二条（「读与单笔事务耗时都不随已落库量增长」）就靠连续
+        // 落 N 组之后比这几列的头尾。读与提交分开计时——整片删的谓词收不收敛，看的是 `read`
+        // 那一列随 `n` 平不平；`read` 只在第一笔算数，后面几笔是同一次读摊下来的。
+        log::info!(
+            "model publication group settled: roots={} records={} sliced_roots={} slice_sources={} read={:.1}ms tx={}/{} sql_bytes={} commit={:.1}ms ok={}",
+            group.len(),
+            records.len(),
+            sliced_roots.len(),
+            slice_sources.len(),
+            if index == 0 {
+                slice_read_elapsed.as_secs_f64() * 1000.0
+            } else {
+                0.0
+            },
+            index + 1,
+            transactions.len(),
+            statements.len(),
+            commit_started.elapsed().as_secs_f64() * 1000.0,
+            committed.is_ok(),
+        );
+        committed.with_context(|| {
+            format!(
+                "persist {} projected root(s)（第 {} / {} 笔）",
+                group.len(),
+                index + 1,
+                transactions.len()
+            )
+        })?;
         commits += 1;
     }
 
     Ok(GroupOutcome {
         upserted: records.len(),
-        removed: removals.len(),
+        removed: cleared_room_edges.len(),
         receipts: receipted.len(),
         commits,
         room_edges: room_edge_count,
@@ -1327,33 +1447,6 @@ pub(crate) async fn publication_request_with_timeout<T>(
         .map_err(|_| anyhow::anyhow!("model publication database request timed out; retain result and reconcile database ACK before replay"))?
 }
 
-/// 读库镜像与换进内存之间被并发提交插了队：镜像已旧，重读 [`RESTORE_ATTEMPTS`] 次仍撞上
-/// 就抛这个，交给调用方推迟（收口每轮都会重新驱动）。
-#[cfg(test)]
-#[derive(Debug)]
-pub struct ProjectionRestoreConflict {
-    pub dbnum: u32,
-    pub attempts: usize,
-}
-
-#[cfg(test)]
-impl std::fmt::Display for ProjectionRestoreConflict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "model projection restore for dbnum {} lost the race with concurrent memory projection commits {} times; the database image was stale and was not swapped in",
-            self.dbnum, self.attempts
-        )
-    }
-}
-
-#[cfg(test)]
-impl std::error::Error for ProjectionRestoreConflict {}
-
-/// 读库镜像撞上并发提交时原地重读几次。再撞就不占着收口这一轮了。
-#[cfg(test)]
-const RESTORE_ATTEMPTS: usize = 3;
-
 /// Check whether a root is available in either layer without hydrating kv-mem.
 /// A memory receipt means an incremental overlay exists; otherwise RocksDB is
 /// queried only for availability and remains the cold-data provider.
@@ -1372,237 +1465,21 @@ pub async fn ensure_root_cached_on(
     root: RefNo,
 ) -> anyhow::Result<bool> {
     if store.receipt(ProjectionScope::Current, root).is_some() {
-        store.note_cache_lookup(true);
         return Ok(true);
-    }
-    store.note_cache_lookup(false);
-    store.note_cache_load_started();
-    let root_id = format!("{}_{}", root.word0, root.word1);
-    let result = db
-        .query("SELECT VALUE publication_status = 'ready' FROM type::thing('gen_root', $root_id);")
-        .bind(("root_id", root_id))
-        .await
-        .and_then(|response| response.check());
-    store.note_cache_load_finished(result.is_ok());
-    let mut response = result?;
-    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
-}
-
-/// Load exactly one complete committed root. Both geometry predicates are backed
-/// by `idx_*_anc`; `gen_root` is a point lookup. An incomplete durable root fails
-/// closed instead of becoming a cache entry.
-#[cfg(test)]
-async fn read_published_root_on(
-    db: &Surreal<Any>,
-    root: RefNo,
-) -> anyhow::Result<Option<(Vec<ProjectedGeometry>, RootReceipt)>> {
-    #[derive(serde::Deserialize)]
-    struct ReceiptRow {
-        source_end_sesno: u32,
-        published_model_target: Option<ModelTarget>,
-        published_manifest_hash: String,
-        published_geometry_count: usize,
     }
     let root_id = format!("{}_{}", root.word0, root.word1);
     let mut response = db
-        .query(
-            "SELECT source_end_sesno,published_model_target,published_manifest_hash,\
-             published_geometry_count FROM type::thing('gen_root', $root_id) \
-             WHERE publication_status = 'ready';",
-        )
+        .query("SELECT VALUE publication_status = 'ready' FROM type::thing('gen_root', $root_id);")
         .bind(("root_id", root_id))
-        .await?
-        .check()?;
-    let Some(row) = response.take::<Option<ReceiptRow>>(0)? else {
-        return Ok(None);
-    };
-    let receipt = RootReceipt {
-        source_sesno: row.source_end_sesno,
-        model_target: row.published_model_target,
-        manifest_hash: row.published_manifest_hash,
-        geometry_count: row.published_geometry_count,
-        published_via: crate::fast_model::model_memory_store::default_published_via(),
-    };
-
-    #[derive(serde::Deserialize)]
-    struct GeometryRow {
-        memory_projection: ProjectedGeometry,
-    }
-    let packed = packed_refno(root);
-    let mut records = Vec::new();
-    for table in ["inst_relate", "tubi_relate"] {
-        let sql = root_projection_sql(table, root);
-        let rows: Vec<GeometryRow> = db.query(sql).await?.check()?.take(0)?;
-        records.extend(rows.into_iter().map(|row| row.memory_projection));
-    }
-    anyhow::ensure!(
-        records.len() == receipt.geometry_count,
-        "durable root {root} is incomplete: receipt expects {}, indexed rows returned {}",
-        receipt.geometry_count,
-        records.len()
-    );
-    anyhow::ensure!(
-        records.iter().all(|record| {
-            record.dbnum == root.dbno()
-                && record.source_sesno == receipt.source_sesno
-                && record.ancestors.contains(&packed)
-        }),
-        "durable root {root} contains rows outside its receipt scope"
-    );
-    Ok(Some((records, receipt)))
+        .await
+        .and_then(|response| response.check())?;
+    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
 }
 
-#[cfg(test)]
-fn root_projection_sql(table: &str, root: RefNo) -> String {
-    debug_assert!(matches!(table, "inst_relate" | "tubi_relate"));
-    format!(
-        "SELECT memory_projection FROM {table} WHERE anc CONTAINS {} \
-         AND dbnum = {} AND memory_projection != NONE;",
-        packed_refno(root),
-        root.dbno()
-    )
-}
-
-/// 用库里已提交的行整体换掉某个库的进程内投影。
-///
-/// 读镜像要翻很多页、页与页之间全是 await，而「只写内存」的按需生成同时还在往同一个库
-/// 提交（`model_read_route` R2）。所以取镜像**之前**先记下提交纪元，换进去时由
-/// [`ModelMemoryStore::restore_dbnum`] 校验：纪元变了就重读，不拿旧镜像盖掉那些只在内存
-/// 里的记录。
-#[cfg(test)]
-async fn restore_projection_on(
-    db: &Surreal<Any>,
-    store: &ModelMemoryStore,
-    dbnum: u32,
-) -> anyhow::Result<()> {
-    for _ in 0..RESTORE_ATTEMPTS {
-        let epoch = store.commit_epoch(dbnum);
-        let (records, receipts) = read_published_projection_on(db, dbnum).await?;
-        if store.restore_dbnum(dbnum, records, receipts, epoch) {
-            return Ok(());
-        }
-    }
-    Err(ProjectionRestoreConflict {
-        dbnum,
-        attempts: RESTORE_ATTEMPTS,
-    }
-    .into())
-}
-
-/// Rehydrate only committed structured rows; no E3D reads and no SQL writes.
-/// Primary-key ranges keep both result frames and work per page bounded.
-#[cfg(test)]
-async fn read_published_projection_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-) -> anyhow::Result<(Vec<ProjectedGeometry>, Vec<(RefNo, RootReceipt)>)> {
-    #[derive(serde::Deserialize)]
-    struct GeometryRow {
-        id: surrealdb::RecordId,
-        memory_projection: ProjectedGeometry,
-    }
-    let mut records = Vec::new();
-    for table in ["inst_relate", "tubi_relate"] {
-        let mut cursor: Option<String> = None;
-        loop {
-            let from = cursor
-                .as_ref()
-                .map(|id| format!("{id}.."))
-                .unwrap_or_else(|| table.to_owned());
-            let index = if cursor.is_none() { "WITH NOINDEX" } else { "" };
-            let after = cursor
-                .as_ref()
-                .map(|id| format!("AND id != {id}"))
-                .unwrap_or_default();
-            let sql = format!(
-                "SELECT id,memory_projection FROM {from} {index} WHERE dbnum={dbnum} AND memory_projection != NONE {after} LIMIT 512;"
-            );
-            let rows: Vec<GeometryRow> = db.query(sql).await?.check()?.take(0)?;
-            if rows.is_empty() {
-                break;
-            }
-            let next = rows.last().unwrap().id.to_string();
-            anyhow::ensure!(
-                cursor.as_ref() != Some(&next),
-                "projection recovery cursor did not advance"
-            );
-            cursor = Some(next);
-            for row in rows {
-                anyhow::ensure!(
-                    row.memory_projection.dbnum == dbnum,
-                    "projection recovery database mismatch"
-                );
-                records.push(row.memory_projection);
-            }
-        }
-        let missing: Vec<surrealdb::RecordId> = db.query(format!("SELECT VALUE id FROM {table} WHERE dbnum={dbnum} AND direct_model.source='e3d-model' AND memory_projection = NONE LIMIT 1;"))
-            .await?.check()?.take(0)?;
-        anyhow::ensure!(
-            missing.is_empty(),
-            "committed projection is missing structured recovery data in {table}"
-        );
-    }
-    #[derive(serde::Deserialize)]
-    struct ReceiptRow {
-        id: surrealdb::RecordId,
-        source_end_sesno: u32,
-        published_model_target: Option<crate::fast_model::e3d_model_service::ModelTarget>,
-        published_manifest_hash: String,
-        published_geometry_count: usize,
-    }
-    let mut receipts = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let from = cursor
-            .as_ref()
-            .map(|id| format!("{id}.."))
-            .unwrap_or_else(|| "gen_root".to_owned());
-        let index = if cursor.is_none() { "WITH NOINDEX" } else { "" };
-        let after = cursor
-            .as_ref()
-            .map(|id| format!("AND id != {id}"))
-            .unwrap_or_default();
-        let rows: Vec<ReceiptRow> = db.query(format!("SELECT id,source_end_sesno,published_model_target,published_manifest_hash,published_geometry_count FROM {from} {index} WHERE dbnum={dbnum} AND publication_status='ready' {after} LIMIT 256;"))
-            .await?.check()?.take(0)?;
-        if rows.is_empty() {
-            break;
-        }
-        let next = rows.last().unwrap().id.to_string();
-        anyhow::ensure!(
-            cursor.as_ref() != Some(&next),
-            "receipt recovery cursor did not advance"
-        );
-        cursor = Some(next);
-        for row in rows {
-            let root_key = row
-                .id
-                .key()
-                .to_string()
-                .trim_matches('⟨')
-                .trim_matches('⟩')
-                .replace('_', "/");
-            let root = crate::fast_model::e3d_model_service::parse_refno(&root_key)?;
-            receipts.push((
-                root,
-                RootReceipt {
-                    source_sesno: row.source_end_sesno,
-                    model_target: row.published_model_target,
-                    manifest_hash: row.published_manifest_hash,
-                    geometry_count: row.published_geometry_count,
-                    // 内部对账用的旧回执，不再发布，published_via 取默认即可。
-                    published_via: crate::fast_model::model_memory_store::default_published_via(),
-                },
-            ));
-        }
-    }
-    Ok((records, receipts))
-}
-
-async fn persist_root_chunks_impl(
+async fn persist_root_impl(
     target: PersistTarget<'_>,
     store: &ModelMemoryStore,
     root: RefNo,
-    chunk_size: usize,
 ) -> anyhow::Result<PersistedRows> {
     let db = target.db;
     let scope = ProjectionScope::Current;
@@ -1627,11 +1504,6 @@ async fn persist_root_chunks_impl(
     } else {
         false
     };
-    let projected = records
-        .iter()
-        .map(|record| record.record_id.as_str())
-        .collect::<BTreeSet<_>>();
-
     // 一个 BRAN 的隐式管身是整段重写的：这一轮碰到的分支先清空，再插存储里的那几段。
     let mut branches = records
         .iter()
@@ -1644,30 +1516,20 @@ async fn persist_root_chunks_impl(
         // branches or derive database deletions from this projection.
         branches.clear();
     }
-    let mut removals = Vec::new();
-    let mut removed_geometry = Vec::new();
-    let projected_geometry_ids = if !reconciliation_ready {
-        Vec::new()
+    // 有回执才敢把这根名下整片推掉；没回执只 upsert 自己那几行。
+    let sliced_roots = if reconciliation_ready {
+        vec![packed_refno(root)]
     } else {
-        projected_geometry_ids_on(db, root).await?
+        Vec::new()
     };
-    for geometry_id in projected_geometry_ids {
-        let source = geometry_source_refno(&geometry_id)?;
-        let record_id = geometry_record_id(&geometry_id, source);
-        if projected.contains(record_id.as_str()) {
-            continue;
-        }
-        if matches!(geometry_id, GeometryId::ImpliedTube { .. }) {
-            branches.insert((source.word0, source.word1));
-        }
-        removals.push(record_id);
-        removed_geometry.push(geometry_id);
-    }
 
     // 房间派生面（ADR-010 §4 / ADR-040 §3）。旧发布事务把这两笔挂在同一条事务上，
     // e3d-model 接管生成之后断了一段时间；现在从投影记录上重新折出来：
-    // 拿到新几何的来源排一次房间重算，被移除的来源两个方向的房间边一并清掉。
+    // 拿到新几何的来源排一次房间重算，整片删掉之后不再有几何的来源两个方向的房间边一并清掉。
     // `legacy_sources` 空着——那是 pre-e3d 清理路径才有的名单，落库这一侧没有。
+    let slice_read_started = std::time::Instant::now();
+    let slice_sources = slice_sources_on(db, &sliced_roots).await?;
+    let slice_read_elapsed = slice_read_started.elapsed();
     let cleared_room_edges = room_edges_to_clear(
         records.iter().map(|record| {
             (
@@ -1676,9 +1538,9 @@ async fn persist_root_chunks_impl(
                 record.noun.as_str(),
             )
         }),
-        &removed_geometry,
+        &slice_sources,
         &BTreeSet::new(),
-    )?;
+    );
     // 清边跟着删除走、排重算跟着回执走，两笔不能对调：
     //
     // - 清边排在**删几何那一块**。删了行却把清边留到后面的块，中途失败就留下一批指着
@@ -1700,89 +1562,61 @@ async fn persist_root_chunks_impl(
         .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
-    // 大根切块提交（一块一个事务）。整根一笔在 7997 上是两笔各 2.6 万件的大报文——
-    // 内存介质无所谓，ws 连出去就不一定了。
-    //
-    // 切开之后**这三条顺序是有讲究的**：
-    //
-    // - 分支重置与对账删除只进第一块。重置若排在后面的块，会把前面的块刚插进去的同分支
-    //   管身删掉；管身槽位的发号表跨块延续，所以 id 也不会撞。
-    // - 回执排在最后一块。一块失败就没有章，这根在窗口规划器眼里仍未发布，下一轮重生成，
-    //   而下一轮的对账会把这一轮留下的半截行收干净——**先删后插 + 回执最后盖，让半途而废
-    //   能自愈**，这也是敢切块的全部理由。
-    // - 混源会话守卫发两次：第一块发一次是为了在写任何东西之前就失败，最后一块再发一次是
-    //   为了与盖章在同一个事务里（check-then-write 不能跨事务）。
-    // Keep geometry messages bounded by their rendered size, including the
-    // structured restart projection. Record count alone cannot bound large roots.
-    let mut chunks = Vec::new();
+    // **一根一串事务，按 [`PERSIST_CHUNK`] 条装块。** 删整片与清边进第一笔、盖章进最后
+    // 一笔，靠「先删后插 + 回执最后盖」让半途而废自愈：一笔失败就没有章，这根在窗口规划器
+    // 眼里仍未发布，下一轮重生成，而下一轮的整片删会把这一轮留下的半截行收干净。
+    let mode = if reconciliation_ready {
+        // 整片删覆盖得到的根不必再按 id 删一遍（见 `persist_group` 里同一处的说明）。
+        WriteMode::Initial
+    } else {
+        WriteMode::Incremental
+    };
     let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
-    let mut pending = std::collections::VecDeque::from_iter(records.chunks(chunk_size.max(1)));
-    while let Some(chunk) = pending.pop_front() {
-        let mut slots = tube_slots.clone();
-        let rendered = render_chunk(chunk, WriteMode::Incremental, &mut slots)?;
-        if rendered.len() > 2 * 1024 * 1024 && chunk.len() > 1 {
-            let (left, right) = chunk.split_at(chunk.len() >> 1);
-            pending.push_front(right);
-            pending.push_front(left);
-            continue;
-        }
-        anyhow::ensure!(
-            rendered.len() <= 8 * 1024 * 1024,
-            "single geometry exceeds publication byte budget"
-        );
-        tube_slots = slots;
-        chunks.push((chunk, rendered));
+    let pieces = render_record_chunks(&records, mode, &mut tube_slots)?;
+
+    let mut prelude = String::new();
+    for &(word0, word1) in &branches {
+        append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    let chunk_count = chunks.len().max(1);
-    let fenced = chunk_count > 1 && receipt.is_some();
+    prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
+    prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
+    let epilogue = match receipt.as_ref() {
+        Some(receipt) => render_receipt_version(root, receipt, None)?,
+        None => String::new(),
+    };
+    let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
+    let transactions =
+        pack_publication_transactions(&prelude, &pieces, &epilogue, touches_geometry);
     let mut commits = 0usize;
-    for index in 0..chunk_count {
-        let chunk = chunks.get(index).map(|(chunk, _)| *chunk).unwrap_or(&[]);
-        let mut statements = String::new();
-        if index == 0 {
-            if fenced {
-                statements.push_str(&render_publication_fence(root));
-            }
-            for &(word0, word1) in &branches {
-                append_tube_branch_reset(&mut statements, RefNo::new(word0, word1));
-            }
-            append_geometry_removals(
-                &mut statements,
-                &removals.iter().map(String::as_str).collect::<Vec<_>>(),
-            );
-            // 清边跟着删几何那一块走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
-            statements.push_str(&render_room_edge_clear(&cleared_room_edges));
-        }
-        if let Some((_, rendered)) = chunks.get(index) {
-            statements.push_str(rendered);
-        }
-        if index + 1 == chunk_count {
-            if let Some(receipt) = receipt.as_ref() {
-                statements.push_str(&render_receipt_version(root, receipt, None)?);
-            }
-        }
-        // 「凡是改变了树应有内容的已提交变更，都在同一事务内把 epoch +1」——落库改的
-        // 正是树镜像的那些 `inst_relate.aabb` 指针。分块或重试多 bump 几次无害：这个
-        // 号只与 sidecar 比相等，至多让下次启动多做一次指针重建。
-        let touches_geometry =
-            !chunk.is_empty() || (index == 0 && !(removals.is_empty() && branches.is_empty()));
-        if touches_geometry {
-            statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-            statements.push('\n');
-        }
-        if statements.is_empty() {
-            continue;
-        }
-        db.query(publication_transaction(&statements))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(check_publication_response)
-            .with_context(|| {
-                format!(
-                    "persist projected root {root}（第 {} / {chunk_count} 块）",
-                    index + 1
-                )
-            })?;
+    for (index, statements) in transactions.iter().enumerate() {
+        let commit_started = std::time::Instant::now();
+        let committed =
+            commit_publication_transaction(db, statements, "model publication root").await;
+        // 与 `persist_group` 同一张账（那里是合块那一路，这里是逐根那一路）。
+        log::info!(
+            "model publication group settled: roots=1 records={} sliced_roots={} slice_sources={} read={:.1}ms tx={}/{} sql_bytes={} commit={:.1}ms ok={}",
+            records.len(),
+            sliced_roots.len(),
+            slice_sources.len(),
+            if index == 0 {
+                slice_read_elapsed.as_secs_f64() * 1000.0
+            } else {
+                0.0
+            },
+            index + 1,
+            transactions.len(),
+            statements.len(),
+            commit_started.elapsed().as_secs_f64() * 1000.0,
+            committed.is_ok(),
+        );
+        committed.with_context(|| {
+            format!(
+                "persist projected root {root}（第 {} / {} 笔）",
+                index + 1,
+                transactions.len()
+            )
+        })?;
         commits += 1;
     }
 
@@ -1801,7 +1635,7 @@ async fn persist_root_chunks_impl(
     Ok(PersistedRows {
         medium: target.medium,
         upserted: records.len(),
-        removed: removals.len(),
+        removed: cleared_room_edges.len(),
         receipts: usize::from(receipt.is_some()),
         commits,
     })
@@ -1987,27 +1821,44 @@ pub fn render_spooled_scope_deletion(
     publication_transaction(&statements)
 }
 
+/// 镜像 spool / 墓碑那一路的整片删：一根名下模型面的全部行。
+///
+/// 作用域比 [`render_slice_delete`] 多一路 `in = $mirror_owner`——兜的是 `anc` 缺失的历史行
+/// （根自己的几何 `in` 就是根）。两路**分开读、再 `array::union`**，不写成一条 `… OR …`：
+/// 优化器碰到 `anc CONTAINS … OR in = $参数` 整条放弃索引退回 `Iterate Table`（mem 引擎
+/// EXPLAIN 实测，`spooled_cleanup_predicates_are_planned_through_indexes` 钉住），拆开之后
+/// 各自是一次单索引查（`idx_*_anc` / `idx_*_in`），并集在库端算、体量由这一根决定。
+/// 回放时谓词由 SurrealDB 现算，替换行早在源纪元就渲好了。
+///
+/// **删的那几句与 [`render_slice_delete`] 同一套纪律**：一律 `DELETE $数组` 直接点名、不下谓词
+/// （部署引擎上 `DELETE … WHERE` 不走索引，列上套函数更是任何引擎都扫表）；`inst_info` /
+/// `aabb` / `trans` 与关系行同键直接拼；管身的盒与变换按几何摘要另键、只能顺行上的
+/// `aabb` / `world_trans` 指针删——从槽位 id 拼出来的是不存在的记录，删了等于没删。
+/// `geo_relate` 是唯一一句带谓词的删：先按 `in` 走 `idx_geo_relate_in` 选出 id 再删。
 fn render_spooled_scope_cleanup(root: RefNo) -> String {
     let packed = packed_refno(root);
     let owner = sql_string(&refno_key(root));
-    // Capture relation and info ids before deleting the relation rows.  All
-    // predicates are evaluated by SurrealDB at replay time; replacement rows
-    // are already fully rendered from the source epoch.
     format!(
         "LET $mirror_owner = type::thing('pe',{owner});\n\
-         LET $mirror_rels = SELECT id, out FROM inst_relate \
-         WHERE direct_model.source='e3d-model' AND (anc CONTAINS {packed} OR in = $mirror_owner);\n\
-         LET $mirror_tubes = SELECT id FROM tubi_relate \
-         WHERE direct_model.source='e3d-model' AND (anc CONTAINS {packed} OR in = $mirror_owner);\n\
-         LET $mirror_ids = $mirror_rels.map(|$row| record::id($row.id));\n\
-         LET $mirror_tube_ids = $mirror_tubes.map(|$row| record::id($row.id));\n\
-         LET $mirror_infos = $mirror_rels.map(|$row| $row.out);\n\
-         DELETE geo_relate WHERE in IN $mirror_infos;\n\
-         DELETE inst_info WHERE id IN $mirror_infos;\n\
-         DELETE inst_relate WHERE id IN $mirror_rels.id;\n\
-         DELETE tubi_relate WHERE id IN $mirror_tubes.id;\n\
-         DELETE aabb WHERE record::id(id) IN $mirror_ids OR record::id(id) IN $mirror_tube_ids;\n\
-         DELETE trans WHERE record::id(id) IN $mirror_ids OR record::id(id) IN $mirror_tube_ids;\n"
+         LET $mirror_keys_by_anc = SELECT VALUE record::id(id) FROM inst_relate \
+         WHERE anc CONTAINS {packed} AND model_sesno != NONE;\n\
+         LET $mirror_keys_by_owner = SELECT VALUE record::id(id) FROM inst_relate \
+         WHERE in = $mirror_owner AND model_sesno != NONE;\n\
+         LET $mirror_keys = array::union($mirror_keys_by_anc, $mirror_keys_by_owner);\n\
+         LET $mirror_tubes_by_anc = SELECT id, aabb, world_trans FROM tubi_relate \
+         WHERE anc CONTAINS {packed} AND model_sesno != NONE;\n\
+         LET $mirror_tubes_by_owner = SELECT id, aabb, world_trans FROM tubi_relate \
+         WHERE in = $mirror_owner AND model_sesno != NONE;\n\
+         LET $mirror_tubes = array::union($mirror_tubes_by_anc, $mirror_tubes_by_owner);\n\
+         LET $mirror_infos = $mirror_keys.map(|$key| type::thing('inst_info', $key));\n\
+         DELETE (SELECT VALUE id FROM geo_relate WHERE in IN $mirror_infos);\n\
+         DELETE $mirror_infos;\n\
+         DELETE $mirror_keys.map(|$key| type::thing('inst_relate', $key));\n\
+         DELETE $mirror_tubes.map(|$row| $row.id);\n\
+         DELETE $mirror_keys.map(|$key| type::thing('aabb', $key));\n\
+         DELETE $mirror_tubes.map(|$row| $row.aabb);\n\
+         DELETE $mirror_keys.map(|$key| type::thing('trans', $key));\n\
+         DELETE $mirror_tubes.map(|$row| $row.world_trans);\n"
     )
 }
 
@@ -2071,10 +1922,10 @@ impl RowBatch {
                 continue;
             }
             // `inst_geo` 与别的表一样走 `INSERT IGNORE`（plan 2026-09-06 Q4，2026-09-06 降级）：它是内容寻址的，
-            // 同 id 必同内容（ADR-060 N3 的第一种前提）；此前那条 `ON DUPLICATE KEY UPDATE direct_model, aabb`
-            // 是为「修正旧渲染器留下的描述符」而设——`direct_model` 是来源账、读侧不消费，`aabb` 只在
-            // 标准图元行上有而同一 mesh id 不会既是烘焙又是标准图元，所以它实际改不了任何读者看得见的东西。
-            // 模型面从此零 UPDATE。旧格式描述符照旧留着，与 `inst_geo` 只增不删（ADR-060 D2）同一口径。
+            // 同 id 必同内容（ADR-060 N3 的第一种前提）。此前那条 `ON DUPLICATE KEY UPDATE` 是为
+            // 「修正旧渲染器留下的描述符」而设，而 `aabb` 只在标准图元行上有、同一 mesh id 不会既是
+            // 烘焙又是标准图元，所以它实际改不了任何读者看得见的东西。模型面从此零 UPDATE。
+            // 旧行照旧留着，与 `inst_geo` 只增不删（ADR-060 D2）同一口径。
             let keyword = if relation {
                 "INSERT RELATION IGNORE INTO"
             } else {
@@ -2099,8 +1950,6 @@ fn collect_record(
     let id_sql = sql_string(bracketed_id(id)?);
     let source_id = refno_key(record.source_refno);
     let source_id_sql = sql_string(&source_id);
-    let geometry_json = sql_value(&serde_json::to_value(&record.geometry_id)?);
-    let memory_projection = sql_value(&serde_json::to_value(record)?);
     let anc = sql_value(&json!(record.ancestors));
     let world_transform = sql_value(&transform_value(record.world_transform));
     let mesh_id = bracketed_id(record.mesh_id.as_str())?;
@@ -2111,8 +1960,8 @@ fn collect_record(
 
     let world_bounds = format!(
         "{{mins:{},maxs:{}}}",
-        sql_value(&json!(record.world_bounds[0])),
-        sql_value(&json!(record.world_bounds[1])),
+        sql_value(&f32_values(record.world_bounds[0])),
+        sql_value(&f32_values(record.world_bounds[1])),
     );
     batch.aabb.push(format!(
         "{{id:type::thing('aabb',{id_sql}),d:{world_bounds}}}"
@@ -2125,46 +1974,31 @@ fn collect_record(
     // 缺任一件就整行退回 `query_insts_slim` 现值兜底。**只买速度，不影响正确性**——
     // 实库 53,582 行上那两档解引用与子查询约 10.7s，平表读约 0.7s。
     // 管身不需要：`query_tubi_insts_by_brans` 走的是 `aabb.d` / `world_trans.d` 解引用。
-    let flat_copies = format!(
-        "aabb_d:{world_bounds},world_trans_d:{world_transform},memory_projection:{memory_projection}"
-    );
+    let flat_copies = format!("aabb_d:{world_bounds},world_trans_d:{world_transform}");
 
-    if let ProjectedShape::Canonical {
-        key, local_bounds, ..
-    } = &record.shape
-    {
-        let key = sql_value(&serde_json::to_value(key)?);
+    if let ProjectedShape::Canonical { local_bounds, .. } = &record.shape {
         batch.aabb.push(format!(
             "{{id:type::thing('aabb',{mesh_id_sql}),d:{{mins:{},maxs:{}}}}}",
-            sql_value(&json!(local_bounds[0])),
-            sql_value(&json!(local_bounds[1])),
+            sql_value(&f32_values(local_bounds[0])),
+            sql_value(&f32_values(local_bounds[1])),
         ));
         batch.inst_geo.insert(mesh_id.to_owned(), format!(
-            "{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false,aabb:type::thing('aabb',{mesh_id_sql}),direct_model:{{source:'e3d-model',format:'canonical-primitive-v1',primitive_key:{key}}}}}"
+            "{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false,aabb:type::thing('aabb',{mesh_id_sql})}}"
         ));
     }
 
     if let Some(tube) = record.tube.as_ref() {
         // 隐式管身只向 Plant UI 暴露一个变换，标准图元的本地摆放在投影时就折进世界变换里
         // 了，所以这里既不写本地变换，也不写 `inst_info` / `inst_relate`。
-        let (format_name, primitive_key) = match &record.shape {
-            ProjectedShape::Canonical { key, .. } => (
-                "canonical-primitive-v1",
-                Some(sql_value(&serde_json::to_value(key)?)),
-            ),
-            ProjectedShape::Baked => ("baked-v2", None),
-        };
-        let primitive_field = primitive_key
-            .map(|key| format!(",primitive_key:{key}"))
-            .unwrap_or_default();
         let slot = next_tube_relation_slot(tube_slots, record.source_refno);
         if matches!(record.shape, ProjectedShape::Baked) {
-            batch.inst_geo.insert(mesh_id.to_owned(), format!(
-                "{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false,direct_model:{{source:'e3d-model',format:'{format_name}'{primitive_field}}}}}"
-            ));
+            batch.inst_geo.insert(
+                mesh_id.to_owned(),
+                format!("{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false}}"),
+            );
         }
         batch.tubi_relate.push(format!(
-            "{{id:tubi_relate:[pe:⟨{source_id}⟩,{slot}],in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,aabb:aabb:⟨{id}⟩,world_trans:trans:⟨{id}⟩,bore_size:0,invalid:{},anc:{anc},dbnum:{dbnum},memory_projection:{memory_projection},direct_model:{{source:'e3d-model',format:'{format_name}',sesno:{source_sesno},geometry_id:{geometry_json},mesh_id:{mesh_id_sql}{primitive_field}}}}}",
+            "{{id:tubi_relate:[pe:⟨{source_id}⟩,{slot}],in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,aabb:aabb:⟨{id}⟩,world_trans:trans:⟨{id}⟩,bore_size:0,invalid:{},anc:{anc},dbnum:{dbnum},model_sesno:{source_sesno}}}",
             tube.from.word0, tube.from.word1, tube.to.word0, tube.to.word1,
             tube.invalid,
         ));
@@ -2173,27 +2007,306 @@ fn collect_record(
 
     match &record.shape {
         ProjectedShape::Canonical {
-            key,
-            local_transform,
-            ..
+            local_transform, ..
         } => {
             let local_transform = sql_value(&transform_value(*local_transform));
-            let key = sql_value(&serde_json::to_value(key)?);
 
             batch.inst_info.push(format!(
-                "{{id:type::thing('inst_info',{id_sql}),dbnum:{dbnum},noun:{noun},direct_model:{{source:'e3d-model',sesno:{source_sesno},geometry_id:{geometry_json}}}}}"
+                "{{id:type::thing('inst_info',{id_sql}),dbnum:{dbnum},noun:{noun},model_sesno:{source_sesno}}}"
             ));
             batch.geo_relate.push(format!(
                 "{{id:geo_relate:[type::thing('inst_info',{id_sql}),inst_geo:⟨{mesh_id}⟩],in:type::thing('inst_info',{id_sql}),out:inst_geo:⟨{mesh_id}⟩,geom_refno:type::thing('pe',{source_id_sql}),transform:{local_transform},visible:true,geo_type:'Pos'}}"
             ));
             batch.inst_relate.push(format!(
-                "{{id:type::thing('inst_relate',{id_sql}),in:type::thing('pe',{source_id_sql}),out:type::thing('inst_info',{id_sql}),booled_id:NONE,booled:false,bad_bool:false,solid:true,generic:{noun},dbnum:{dbnum},anc:{anc},aabb:type::thing('aabb',{id_sql}),world_trans:type::thing('trans',{id_sql}),{flat_copies},insts_flat:[{{geo_hash:{mesh_id_sql},transform:{local_transform}}}],direct_model:{{source:'e3d-model',format:'canonical-primitive-v1',sesno:{source_sesno},geometry_id:{geometry_json},mesh_id:{mesh_id_sql},primitive_key:{key}}}}}"
+                "{{id:type::thing('inst_relate',{id_sql}),in:type::thing('pe',{source_id_sql}),out:type::thing('inst_info',{id_sql}),booled_id:NONE,booled:false,bad_bool:false,solid:true,generic:{noun},dbnum:{dbnum},anc:{anc},aabb:type::thing('aabb',{id_sql}),world_trans:type::thing('trans',{id_sql}),{flat_copies},insts_flat:[{{geo_hash:{mesh_id_sql},transform:{local_transform}}}],model_sesno:{source_sesno}}}"
             ));
         }
         ProjectedShape::Baked => {
             batch.inst_relate.push(format!(
-                "{{id:type::thing('inst_relate',{id_sql}),in:type::thing('pe',{source_id_sql}),booled_id:{mesh_id_sql},booled:true,bad_bool:false,solid:true,generic:{noun},dbnum:{dbnum},anc:{anc},aabb:type::thing('aabb',{id_sql}),world_trans:type::thing('trans',{id_sql}),{flat_copies},insts_flat:[{{geo_hash:{mesh_id_sql}}}],direct_model:{{source:'e3d-model',format:'baked-v2',sesno:{source_sesno},geometry_id:{geometry_json},mesh_id:{mesh_id_sql}}}}}"
+                "{{id:type::thing('inst_relate',{id_sql}),in:type::thing('pe',{source_id_sql}),booled_id:{mesh_id_sql},booled:true,bad_bool:false,solid:true,generic:{noun},dbnum:{dbnum},anc:{anc},aabb:type::thing('aabb',{id_sql}),world_trans:type::thing('trans',{id_sql}),{flat_copies},insts_flat:[{{geo_hash:{mesh_id_sql}}}],model_sesno:{source_sesno}}}"
             ));
+        }
+    }
+    Ok(())
+}
+
+/// 同一批行的**参数形态**：不渲成 SurrealQL 文本，直接铸成 SurrealDB 的值，由调用方
+/// `.bind()` 挂到 `INSERT [RELATION] IGNORE INTO <表> $rows` 上。
+///
+/// 表、顺序、字段与 [`render_records`] 逐项对齐，差别只有一处：**谁来解析**。文本那条路
+/// 客户端先把整串 `syn::parse` 解析成 AST（`db.query(String)` 内部就做这一下）、再
+/// `Display` 回字符串发出去，服务端第三次解析；参数这条路两头都不解析，值以二进制过线。
+///
+/// 今天只服务基准（`e3d_persist_smoke --bindbench`）。生产写入仍走 [`render_records`]：
+/// 发布事务里还有整片删、回执、盖章那些语句，换形态是整条路一起换的事，不是换一个渲染器。
+pub fn bind_records(records: &[ProjectedGeometry]) -> anyhow::Result<Vec<BoundTable>> {
+    let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
+    let mut batch = BoundBatch::default();
+    for record in records {
+        collect_bound_record(&mut batch, record, &mut tube_slots)?;
+    }
+    Ok(batch.finish())
+}
+
+/// 一张表的一批行，对应文本那条路的一条 `INSERT … INTO <表> [ … ]`。
+#[derive(Debug, Clone)]
+pub struct BoundTable {
+    pub table: &'static str,
+    /// 要不要 `RELATION` 关键字；与 [`RowBatch::render`] 里同一张表的答案相同。
+    pub relation: bool,
+    pub rows: Vec<SurValue>,
+}
+
+impl BoundTable {
+    /// 这一张表的那条语句（行本身走 `$<param>` 参数，不进文本）。
+    pub fn statement(&self, param: &str) -> String {
+        let keyword = if self.relation {
+            "INSERT RELATION IGNORE INTO"
+        } else {
+            "INSERT IGNORE INTO"
+        };
+        format!("{keyword} {} ${param} RETURN NONE;\n", self.table)
+    }
+}
+
+/// [`RowBatch`] 的值版：同样按表攒行，同样的表间顺序。
+#[derive(Debug, Default)]
+struct BoundBatch {
+    aabb: Vec<SurValue>,
+    trans: Vec<SurValue>,
+    inst_geo: BTreeMap<String, SurValue>,
+    inst_info: Vec<SurValue>,
+    geo_relate: Vec<SurValue>,
+    inst_relate: Vec<SurValue>,
+    tubi_relate: Vec<SurValue>,
+}
+
+impl BoundBatch {
+    fn finish(self) -> Vec<BoundTable> {
+        let shared_meshes = self.inst_geo.into_values().collect::<Vec<_>>();
+        [
+            ("aabb", self.aabb, false),
+            ("trans", self.trans, false),
+            ("inst_geo", shared_meshes, false),
+            ("inst_info", self.inst_info, false),
+            ("geo_relate", self.geo_relate, true),
+            ("inst_relate", self.inst_relate, false),
+            ("tubi_relate", self.tubi_relate, true),
+        ]
+        .into_iter()
+        .filter(|(_, rows, _)| !rows.is_empty())
+        .map(|(table, rows, relation)| BoundTable {
+            table,
+            relation,
+            rows,
+        })
+        .collect()
+    }
+}
+
+/// `<表>:<id>`，id 段是字符串——与文本那条路的 `type::thing('<表>','<id>')` 同一个记录。
+fn sur_thing(table: &str, id: &str) -> SurValue {
+    SurValue::Thing(SurThing::from((
+        table.to_owned(),
+        SurId::String(id.to_owned()),
+    )))
+}
+
+/// 复合键那两张表的 id（`geo_relate:[…,…]` / `tubi_relate:[…,…]`）。
+fn sur_keyed_thing(table: &str, key: Vec<SurValue>) -> SurValue {
+    SurValue::Thing(SurThing::from((
+        table.to_owned(),
+        SurId::Array(SurArray::from(key)),
+    )))
+}
+
+fn sur_int(value: u32) -> SurValue {
+    SurValue::Number(SurNumber::Int(i64::from(value)))
+}
+
+/// 一个 JSON 值搬进 SurrealDB 的值域。
+///
+/// 数值一律落 `Number::Float`。文本那条路是把同一个字面量交给 SurrealQL 词法器，**两边
+/// 未必判成同一个类型**——正是基准要对出来的东西，所以这里不迁就，照 f64 直落。
+fn sur_json(value: Value) -> anyhow::Result<SurValue> {
+    surrealdb::sql::to_value(value).context("JSON 值搬进 SurrealDB 值域")
+}
+
+fn sur_object<const N: usize>(fields: [(&str, SurValue); N]) -> SurValue {
+    SurValue::Object(SurObject::from(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect::<BTreeMap<String, SurValue>>(),
+    ))
+}
+
+/// [`collect_record`] 的值版。改那边就得改这边——两边渲的是同一批行，基准靠逐行比对
+/// 两个库的内容把跑偏的字段抓出来（`--bindbench` 的 `BINDBENCH-VERIFY` 那一行）。
+fn collect_bound_record(
+    batch: &mut BoundBatch,
+    record: &ProjectedGeometry,
+    tube_slots: &mut BTreeMap<(u32, u32), usize>,
+) -> anyhow::Result<()> {
+    let id = bracketed_id(record.record_id.as_str())?;
+    let source_id = refno_key(record.source_refno);
+    let mesh_id = bracketed_id(record.mesh_id.as_str())?;
+    let noun = SurValue::from(record.noun.clone());
+    let dbnum = sur_int(record.dbnum);
+    let source_sesno = sur_int(record.source_sesno);
+    let anc = sur_json(json!(record.ancestors))?;
+    let world_transform = sur_json(transform_value(record.world_transform))?;
+    let world_bounds = sur_json(json!({
+        "mins": f32_values(record.world_bounds[0]),
+        "maxs": f32_values(record.world_bounds[1]),
+    }))?;
+
+    batch.aabb.push(sur_object([
+        ("id", sur_thing("aabb", id)),
+        ("d", world_bounds.clone()),
+    ]));
+    batch.trans.push(sur_object([
+        ("id", sur_thing("trans", id)),
+        ("d", world_transform.clone()),
+    ]));
+
+    if let ProjectedShape::Canonical { local_bounds, .. } = &record.shape {
+        batch.aabb.push(sur_object([
+            ("id", sur_thing("aabb", mesh_id)),
+            (
+                "d",
+                sur_json(json!({
+                    "mins": f32_values(local_bounds[0]),
+                    "maxs": f32_values(local_bounds[1]),
+                }))?,
+            ),
+        ]));
+        batch.inst_geo.insert(
+            mesh_id.to_owned(),
+            sur_object([
+                ("id", sur_thing("inst_geo", mesh_id)),
+                ("meshed", SurValue::Bool(true)),
+                ("visible", SurValue::Bool(true)),
+                ("bad", SurValue::Bool(false)),
+                ("aabb", sur_thing("aabb", mesh_id)),
+            ]),
+        );
+    }
+
+    if let Some(tube) = record.tube.as_ref() {
+        let slot = next_tube_relation_slot(tube_slots, record.source_refno);
+        if matches!(record.shape, ProjectedShape::Baked) {
+            batch.inst_geo.insert(
+                mesh_id.to_owned(),
+                sur_object([
+                    ("id", sur_thing("inst_geo", mesh_id)),
+                    ("meshed", SurValue::Bool(true)),
+                    ("visible", SurValue::Bool(true)),
+                    ("bad", SurValue::Bool(false)),
+                ]),
+            );
+        }
+        batch.tubi_relate.push(sur_object([
+            (
+                "id",
+                sur_keyed_thing(
+                    "tubi_relate",
+                    vec![
+                        sur_thing("pe", &source_id),
+                        SurValue::Number(SurNumber::Int(slot as i64)),
+                    ],
+                ),
+            ),
+            ("in", sur_thing("pe", &source_id)),
+            ("out", sur_thing("inst_geo", mesh_id)),
+            ("leave", sur_thing("pe", &refno_key(tube.from))),
+            ("arrive", sur_thing("pe", &refno_key(tube.to))),
+            ("aabb", sur_thing("aabb", id)),
+            ("world_trans", sur_thing("trans", id)),
+            ("bore_size", SurValue::Number(SurNumber::Int(0))),
+            ("invalid", SurValue::Bool(tube.invalid)),
+            ("anc", anc),
+            ("dbnum", dbnum),
+            ("model_sesno", source_sesno),
+        ]));
+        return Ok(());
+    }
+
+    match &record.shape {
+        ProjectedShape::Canonical {
+            local_transform, ..
+        } => {
+            let local_transform = sur_json(transform_value(*local_transform))?;
+            batch.inst_info.push(sur_object([
+                ("id", sur_thing("inst_info", id)),
+                ("dbnum", dbnum.clone()),
+                ("noun", noun.clone()),
+                ("model_sesno", source_sesno.clone()),
+            ]));
+            batch.geo_relate.push(sur_object([
+                (
+                    "id",
+                    sur_keyed_thing(
+                        "geo_relate",
+                        vec![sur_thing("inst_info", id), sur_thing("inst_geo", mesh_id)],
+                    ),
+                ),
+                ("in", sur_thing("inst_info", id)),
+                ("out", sur_thing("inst_geo", mesh_id)),
+                ("geom_refno", sur_thing("pe", &source_id)),
+                ("transform", local_transform.clone()),
+                ("visible", SurValue::Bool(true)),
+                ("geo_type", SurValue::from("Pos")),
+            ]));
+            batch.inst_relate.push(sur_object([
+                ("id", sur_thing("inst_relate", id)),
+                ("in", sur_thing("pe", &source_id)),
+                ("out", sur_thing("inst_info", id)),
+                ("booled_id", SurValue::None),
+                ("booled", SurValue::Bool(false)),
+                ("bad_bool", SurValue::Bool(false)),
+                ("solid", SurValue::Bool(true)),
+                ("generic", noun),
+                ("dbnum", dbnum),
+                ("anc", anc),
+                ("aabb", sur_thing("aabb", id)),
+                ("world_trans", sur_thing("trans", id)),
+                ("aabb_d", world_bounds),
+                ("world_trans_d", world_transform),
+                (
+                    "insts_flat",
+                    SurValue::Array(SurArray::from(vec![sur_object([
+                        ("geo_hash", SurValue::from(mesh_id.to_owned())),
+                        ("transform", local_transform),
+                    ])])),
+                ),
+                ("model_sesno", source_sesno),
+            ]));
+        }
+        ProjectedShape::Baked => {
+            batch.inst_relate.push(sur_object([
+                ("id", sur_thing("inst_relate", id)),
+                ("in", sur_thing("pe", &source_id)),
+                ("booled_id", SurValue::from(mesh_id.to_owned())),
+                ("booled", SurValue::Bool(true)),
+                ("bad_bool", SurValue::Bool(false)),
+                ("solid", SurValue::Bool(true)),
+                ("generic", noun),
+                ("dbnum", dbnum),
+                ("anc", anc),
+                ("aabb", sur_thing("aabb", id)),
+                ("world_trans", sur_thing("trans", id)),
+                ("aabb_d", world_bounds),
+                ("world_trans_d", world_transform),
+                (
+                    "insts_flat",
+                    SurValue::Array(SurArray::from(vec![sur_object([(
+                        "geo_hash",
+                        SurValue::from(mesh_id.to_owned()),
+                    )])])),
+                ),
+                ("model_sesno", source_sesno),
+            ]));
         }
     }
     Ok(())
@@ -2314,7 +2427,7 @@ fn render_receipt_version(
 }
 
 /// 回执里 `ModelTarget` 的 SurrealQL 字面量；没有目标就是 `NONE`。
-fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String> {
+pub(crate) fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String> {
     Ok(receipt
         .model_target
         .as_ref()
@@ -2326,7 +2439,7 @@ fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String>
 
 /// 回执本体：`model_target` 由调用方给表达式（`NONE`、字面量或一个已 `LET` 好的变量）。
 /// 跨根合块（[`persist_roots_batched`]）把同一份清单绑一次、几百根共用一个变量，就是靠这一层。
-fn render_receipt_with_target(
+pub(crate) fn render_receipt_with_target(
     root: RefNo,
     receipt: &RootReceipt,
     frozen: Option<(u64, u32)>,
@@ -2385,23 +2498,9 @@ fn render_receipt_with_target(
     statements
 }
 
-/// 多块发布期间盖在 `gen_root` 上的可见性栅栏（P5）。
-///
-/// 一根切成几块之后它不再是一个原子边界：块与块之间库里躺着一个只更新了一半的根，
-/// 而 `inst_relate` 的读者看不出这件事。栅栏把它写在凭证行上——`publication_status` 一旦
-/// 不是 `ready`，凭证前移（`window_root_plan::render_credential_advance`）就不认这根，
-/// 别的读者也能据此判断「这根正在被重写，别拿它当已发布的几何」。
-///
-/// 由最后一块的回执（[`render_receipt`]）解除，所以**只在会盖章的多块发布上写**：
-/// 没有回执就没人把它翻回 `ready`，那时写栅栏等于把这根永久钉住；只有一块时事务本身
-/// 就是原子的，中间态根本不存在。
-fn render_publication_fence(root: RefNo) -> String {
-    format!(
-        "UPDATE type::thing('gen_root', {}) SET publication_status='publishing', \
-         updated_at=time::now();\n",
-        sql_string(&refno_key(root))
-    )
-}
+// 多块发布期间盖在 `gen_root` 上的可见性栅栏（`publication_status='publishing'`，P5）随
+// 切块一起退役了：一根 / 一组收成一笔事务之后，「行已落、章未盖」这个中间态不再存在，
+// 没有东西需要读侧避让。`publication_status` 本身留着——`ready` / `stale` 照旧。
 
 // 「同一根不许被两个源会话混着发布」那道守卫（`render_publication_guard`，读凭证行上的
 // `desired_target.source_end_sesno` 与回执比）随 pending 表退了（ADR-072 D5）：`desired_target`
@@ -2535,32 +2634,6 @@ fn render_legacy_prefix_sweep_once() -> String {
     )
 }
 
-/// 库里这根名下、由 e3d-model 写过的几何身份。对账用它：库里有、存储里没有的就是陈旧行。
-fn projected_geometry_ids_query(root: RefNo) -> String {
-    let packed = packed_refno(root);
-    format!(
-        "SELECT VALUE direct_model.geometry_id FROM inst_relate \
-         WHERE direct_model.source='e3d-model' \
-         AND direct_model.geometry_id != NONE AND anc CONTAINS {packed};\
-         SELECT VALUE direct_model.geometry_id FROM tubi_relate \
-         WHERE direct_model.source='e3d-model' \
-         AND direct_model.geometry_id != NONE AND anc CONTAINS {packed};"
-    )
-}
-
-async fn projected_geometry_ids_on(
-    db: &Surreal<Any>,
-    root: RefNo,
-) -> anyhow::Result<Vec<GeometryId>> {
-    let mut response = db
-        .query(projected_geometry_ids_query(root))
-        .await?
-        .check()?;
-    let mut ids: Vec<GeometryId> = response.take(0)?;
-    ids.extend(response.take::<Vec<GeometryId>>(1)?);
-    Ok(ids)
-}
-
 fn refno_key(refno: RefNo) -> String {
     format!("{}_{}", refno.word0, refno.word1)
 }
@@ -2599,6 +2672,146 @@ fn bracketed_id(id: &str) -> anyhow::Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 整片删只圈模型面写下的行（`model_sesno != NONE`），属性面独有的行碰不到；
+    /// 多根一条 `CONTAINSANY`，不随根数展开成一堆语句。
+    #[test]
+    fn slice_delete_is_one_predicate_block_guarded_by_the_model_column() {
+        assert!(render_slice_delete(&[]).is_empty());
+        let sql = render_slice_delete(&[42, 43]);
+        assert_eq!(
+            sql.matches("model_sesno != NONE").count(),
+            2,
+            "两张关系表各一道护栏: {sql}"
+        );
+        assert_eq!(
+            sql.matches("anc CONTAINSANY [42,43]").count(),
+            2,
+            "多根合成一条谓词: {sql}"
+        );
+        assert!(
+            !sql.contains("inst_geo"),
+            "内容寻址的共享网格不分区、只增不删（ADR-060 D2）: {sql}"
+        );
+        // 删的那几句一律点名记录。列上套函数的谓词形态会丢索引退回全表扫，
+        // 然后对每一行再去几千项的数组里线性找一遍——AMS 8000 上就是这一句把
+        // 一次发布从 13 s 拖到 51 s。
+        assert!(
+            !sql.contains("DELETE aabb WHERE") && !sql.contains("DELETE trans WHERE"),
+            "aabb / trans 必须按记录点删，不许下谓词: {sql}"
+        );
+        for target in [
+            "DELETE $slice_infos;",
+            "type::thing('inst_relate', $key)",
+            "type::thing('aabb', $key)",
+            "type::thing('trans', $key)",
+            // 管身的盒与变换按几何摘要另键，只能顺指针删，不能从槽位 id 拼。
+            "DELETE $slice_tubes.map(|$row| $row.id);",
+            "DELETE $slice_tubes.map(|$row| $row.aabb);",
+            "DELETE $slice_tubes.map(|$row| $row.world_trans);",
+        ] {
+            assert!(sql.contains(target), "{target} 也要跟着整片走: {sql}");
+        }
+        assert!(
+            !sql.contains("type::thing('aabb', record::id(") && !sql.contains("$slice_tube_keys"),
+            "管身的 aabb / trans 不能从 tubi_relate 的槽位 id 拼——那不是它们的键: {sql}"
+        );
+    }
+
+    /// 整片删在库里到底删了什么：六张表里这一片的**全部表示**都要没，别的一行不动。
+    ///
+    /// 三种行形状各放一条——标准图元（`inst_relate` + `inst_info` + `geo_relate` + 同键
+    /// `aabb` / `trans`）、烘焙实体（没有 `out`，只有 `inst_relate` + 同键 `aabb` / `trans`）、
+    /// 隐式管身（`tubi_relate:[pe, 槽位]`，盒与变换按几何摘要另键）；再放三样不许动的——
+    /// 邻根的行、属性面独有的行（`model_sesno = NONE`）、内容寻址的 `inst_geo` 与它的本地盒。
+    /// 管身那一对是这条测试的由头：按槽位 id 拼 `aabb:[pe, n]` 删的是不存在的记录，
+    /// 六张表里会剩两行孤儿，只看语句形状看不出来。
+    #[tokio::test]
+    async fn slice_delete_removes_every_representation_of_the_slice_and_nothing_else() {
+        let db = surreal_mem().await;
+        let packed = packed_refno(RefNo::new(7997, 10));
+        let other = packed_refno(RefNo::new(7997, 20));
+        db.query(format!(
+            "INSERT INTO aabb [{{id:aabb:c1,d:1}},{{id:aabb:b1,d:1}},{{id:aabb:tube1digest,d:1}},\
+                              {{id:aabb:n1,d:1}},{{id:aabb:mesh1,d:1}}];\n\
+             INSERT INTO trans [{{id:trans:c1,d:1}},{{id:trans:b1,d:1}},{{id:trans:tube1digest,d:1}},\
+                               {{id:trans:n1,d:1}}];\n\
+             INSERT INTO inst_geo [{{id:inst_geo:mesh1,aabb:aabb:mesh1}}];\n\
+             INSERT INTO inst_info [{{id:inst_info:c1,model_sesno:5}},{{id:inst_info:n1,model_sesno:5}}];\n\
+             INSERT RELATION INTO geo_relate [\
+                {{id:geo_relate:[inst_info:c1,inst_geo:mesh1],in:inst_info:c1,out:inst_geo:mesh1}},\
+                {{id:geo_relate:[inst_info:n1,inst_geo:mesh1],in:inst_info:n1,out:inst_geo:mesh1}}];\n\
+             INSERT INTO inst_relate [\
+                {{id:inst_relate:c1,in:pe:⟨7997_11⟩,out:inst_info:c1,anc:[{packed}],\
+                  aabb:aabb:c1,world_trans:trans:c1,model_sesno:5}},\
+                {{id:inst_relate:b1,in:pe:⟨7997_12⟩,booled_id:'mesh1',booled:true,anc:[{packed}],\
+                  aabb:aabb:b1,world_trans:trans:b1,model_sesno:5}},\
+                {{id:inst_relate:n1,in:pe:⟨7997_21⟩,out:inst_info:n1,anc:[{other}],\
+                  aabb:aabb:n1,world_trans:trans:n1,model_sesno:5}},\
+                {{id:inst_relate:legacy,in:pe:⟨7997_13⟩,anc:[{packed}],generic:'EQUI'}}];\n\
+             INSERT RELATION INTO tubi_relate [\
+                {{id:tubi_relate:[pe:⟨7997_14⟩,0],in:pe:⟨7997_14⟩,out:inst_geo:mesh1,\
+                  aabb:aabb:tube1digest,world_trans:trans:tube1digest,anc:[{packed}],model_sesno:5}}];"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        db.query(publication_transaction(&render_slice_delete(&[packed])))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let survivors: Vec<String> = db
+            .query(
+                "SELECT VALUE <string>id FROM aabb, trans, inst_geo, inst_info, geo_relate, \
+                 inst_relate, tubi_relate;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let survivors = survivors.into_iter().collect::<BTreeSet<_>>();
+        let expected = [
+            "aabb:n1",
+            "aabb:mesh1",
+            "trans:n1",
+            "inst_geo:mesh1",
+            "inst_info:n1",
+            "geo_relate:[inst_info:n1, inst_geo:mesh1]",
+            "inst_relate:n1",
+            "inst_relate:legacy",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            survivors, expected,
+            "整片删之后只许剩下邻根、属性面独有的行与内容寻址的网格"
+        );
+    }
+
+    /// 整片删掉之后，本次投影里还在的来源不清房间边（重算自己先清后写），
+    /// 只剩下的那些才清。
+    #[test]
+    fn room_edges_clear_only_the_sources_that_lost_their_geometry() {
+        let kept = GeometryId::Element {
+            refno: "24383/1".into(),
+        };
+        let kept_refno = RefNo::new(24383, 1);
+        let gone = refno_from_e3d(RefNo::new(24383, 2));
+        let cleared = room_edges_to_clear(
+            [(&kept, kept_refno, "EQUI")],
+            &[refno_from_e3d(kept_refno), gone],
+            &BTreeSet::new(),
+        );
+        assert_eq!(cleared, vec![gone]);
+    }
+
     use e3d_model::primitive_instance::PrimitiveMeshKey;
     use glam::DMat4;
 
@@ -2611,6 +2824,29 @@ mod tests {
     /// 派生几何的记录 id 就是身份摘要，形状如此（真值是 64 位，夹具截短）。
     const TUBE_A: &str = "a1b2c3d4";
     const TUBE_B: &str = "e5f60718";
+
+    #[tokio::test]
+    async fn oversized_local_publication_is_blocked_before_database_io() {
+        let mut record = baked_record();
+        record.mesh_id = "x".repeat(PUBLICATION_STATEMENT_HARD_CAP + 1);
+        let shares = vec![RootShare {
+            root: BRANCH,
+            records: vec![record],
+            receipt: Some(test_receipt(BRANCH, 1).1),
+        }];
+        let (live, failed) = room_stage(&shares, None);
+        assert!(failed.is_empty());
+        let db = Surreal::<Any>::init();
+        let error = persist_group(&db, &live, true).await.err().unwrap();
+        assert_eq!(
+            publication_failure_kind(&error),
+            PersistFailureKind::Blocked
+        );
+        assert_eq!(
+            publication_failure_kind(&anyhow::anyhow!("unknown database failure")),
+            PersistFailureKind::Retryable
+        );
+    }
 
     fn baked_record() -> ProjectedGeometry {
         ProjectedGeometry {
@@ -2658,8 +2894,8 @@ mod tests {
 
     /// 共享原型行（`inst_geo:<mesh id>`）与发布顺序无关；而且它**只增不删、已有行赢**
     /// （ADR-060 N2 / N3 第一种前提；plan 2026-09-06 Q4 把此前那条修旧描述符的
-    /// `ON DUPLICATE KEY UPDATE direct_model, aabb` 降成了 `INSERT IGNORE`）——
-    /// 一行被手改过之后再次发布同一原型，不会被"修回来"，读侧也不消费被改的那几个字段。
+    /// `ON DUPLICATE KEY UPDATE` 降成了 `INSERT IGNORE`）——一行被手改过之后再次发布
+    /// 同一原型，不会被"修回来"，读侧也不消费被改的那几个字段。
     #[tokio::test]
     async fn shared_prototype_is_identical_in_both_publication_orders_and_existing_rows_win() {
         let mut tube = tube_record(0, TUBE_A);
@@ -2680,18 +2916,20 @@ mod tests {
                     .check()
                     .unwrap();
             }
-            let value:Vec<serde_json::Value>=db.query("SELECT <string>id AS id, <string>aabb AS aabb, meshed, visible, bad, direct_model FROM inst_geo;").await.unwrap().check().unwrap().take(0).unwrap();
+            let value:Vec<serde_json::Value>=db.query("SELECT <string>id AS id, <string>aabb AS aabb, meshed, visible, bad FROM inst_geo;").await.unwrap().check().unwrap().take(0).unwrap();
             states.push(value);
-            db.query("UPDATE inst_geo:⟨123456789⟩ SET visible=false,aabb=NONE,direct_model={source:'e3d-model',format:'canonical-primitive-v1'};").await.unwrap().check().unwrap();
+            db.query("UPDATE inst_geo:⟨123456789⟩ SET visible=false,aabb=NONE;")
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
             db.query(render_records(&[tube.clone()], WriteMode::Initial).unwrap())
                 .await
                 .unwrap()
                 .check()
                 .unwrap();
             let kept: Vec<serde_json::Value> = db
-                .query(
-                    "SELECT visible, aabb != NONE AS has_aabb, direct_model FROM inst_geo:⟨123456789⟩;",
-                )
+                .query("SELECT visible, aabb != NONE AS has_aabb FROM inst_geo:⟨123456789⟩;")
                 .await
                 .unwrap()
                 .check()
@@ -2703,11 +2941,6 @@ mod tests {
             assert_eq!(
                 kept[0]["has_aabb"], false,
                 "INSERT IGNORE 撞上已有 id 必须原样保留旧行：{}",
-                kept[0]
-            );
-            assert!(
-                kept[0]["direct_model"].get("primitive_key").is_none(),
-                "已有行赢，不再修旧描述符：{}",
                 kept[0]
             );
         }
@@ -2768,6 +3001,100 @@ mod tests {
         }
     }
 
+    /// 值那条路（[`bind_records`]）与文本那条路渲的必须是**同一批行**：表与表序对得上，
+    /// 真写进两个库之后逐行逐字段相同。`--bindbench` 量的是这两条路的耗时差，而差值只有在
+    /// 「落下去的东西一模一样」这个前提下才读得出意思——这一条钉的就是那个前提。
+    #[tokio::test]
+    async fn bound_rows_land_exactly_what_the_rendered_text_lands() {
+        let records = vec![
+            canonical_record(),
+            other_canonical_record(),
+            nested_root_record(),
+            tube_record(0, TUBE_A),
+            tube_record(1, TUBE_B),
+        ];
+        let text = render_records(&records, WriteMode::Initial).expect("render");
+        let bound = bind_records(&records).expect("bind");
+        let text_tables = text
+            .lines()
+            .filter_map(|line| {
+                let relation = line.starts_with("INSERT RELATION IGNORE INTO ");
+                line.strip_prefix("INSERT RELATION IGNORE INTO ")
+                    .or_else(|| line.strip_prefix("INSERT IGNORE INTO "))
+                    .and_then(|rest| rest.split(' ').next())
+                    .map(|table| (table, relation))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text_tables,
+            bound
+                .iter()
+                .map(|table| (table.table, table.relation))
+                .collect::<Vec<_>>(),
+            "两条路的表、表序与 RELATION 关键字必须一致"
+        );
+
+        let mut dumps = Vec::new();
+        for bind in [false, true] {
+            let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+            db.use_ns("bound_rows")
+                .use_db(if bind { "bind" } else { "text" })
+                .await
+                .unwrap();
+            if bind {
+                let statements = bound
+                    .iter()
+                    .enumerate()
+                    .map(|(index, table)| table.statement(&format!("p{index}")))
+                    .collect::<String>();
+                let mut query = db.query(publication_transaction(&statements));
+                for (index, table) in bound.iter().enumerate() {
+                    query = query.bind((
+                        format!("p{index}"),
+                        SurValue::Array(SurArray::from(table.rows.clone())),
+                    ));
+                }
+                query.await.unwrap().check().unwrap();
+            } else {
+                db.query(publication_transaction(&text))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap();
+            }
+            let mut tables = Vec::new();
+            for table in &bound {
+                // 取成 SurrealDB 自己的值（不是 JSON）：两条路的差可能只在类型上
+                // （同一个 `0.1` 一边是 Float 一边是 Decimal），JSON 会把它抹平。
+                let dumped = db
+                    .query(format!("SELECT * FROM {} ORDER BY id;", table.table))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap()
+                    .take::<surrealdb::Value>(0)
+                    .unwrap()
+                    .into_inner();
+                let SurValue::Array(rows) = dumped else {
+                    panic!("{} 的查询结果不是数组", table.table);
+                };
+                assert!(!rows.0.is_empty(), "{} 一行都没落下去", table.table);
+                tables.push(rows.0);
+            }
+            dumps.push(tables);
+        }
+        for (table, (left, right)) in bound.iter().zip(dumps[0].iter().zip(&dumps[1])) {
+            assert_eq!(left.len(), right.len(), "{} 行数不一致", table.table);
+            for (index, (left, right)) in left.iter().zip(right).enumerate() {
+                assert_eq!(
+                    left, right,
+                    "{} 第 {index} 行：文本与参数两条路落下去的不是同一行",
+                    table.table
+                );
+            }
+        }
+    }
+
     /// 初始化那一档整段钉死：**没有 UPDATE / UPSERT**，一张表一条批量 `INSERT IGNORE`，
     /// 烘焙实体的 `booled_id` 直接指内容寻址的网格，`anc` 是打包祖先链。
     #[test]
@@ -2777,16 +3104,9 @@ mod tests {
         let expected = format!(
             "INSERT IGNORE INTO aabb [{{id:type::thing('aabb','24383_73948'),d:{{mins:[0.0,0.0,0.0],maxs:[1.0,2.0,3.0]}}}}];\n\
              INSERT IGNORE INTO trans [{{id:type::thing('trans','24383_73948'),d:{world}}}];\n\
-             INSERT IGNORE INTO inst_relate [{{id:type::thing('inst_relate','24383_73948'),in:type::thing('pe','24383_73948'),booled_id:'e3d_baked_v2_deadbeef',booled:true,bad_bool:false,solid:true,generic:'EQUI',dbnum:7997,anc:[104724187652316,104724187578369],aabb:type::thing('aabb','24383_73948'),world_trans:type::thing('trans','24383_73948'),aabb_d:{{mins:[0.0,0.0,0.0],maxs:[1.0,2.0,3.0]}},world_trans_d:{world},insts_flat:[{{geo_hash:'e3d_baked_v2_deadbeef'}}],direct_model:{{source:'e3d-model',format:'baked-v2',sesno:42,geometry_id:{{\"kind\":\"element\",\"refno\":\"24383/73948\"}},mesh_id:'e3d_baked_v2_deadbeef'}}}}];\n"
+             INSERT IGNORE INTO inst_relate [{{id:type::thing('inst_relate','24383_73948'),in:type::thing('pe','24383_73948'),booled_id:'e3d_baked_v2_deadbeef',booled:true,bad_bool:false,solid:true,generic:'EQUI',dbnum:7997,anc:[104724187652316,104724187578369],aabb:type::thing('aabb','24383_73948'),world_trans:type::thing('trans','24383_73948'),aabb_d:{{mins:[0.0,0.0,0.0],maxs:[1.0,2.0,3.0]}},world_trans_d:{world},insts_flat:[{{geo_hash:'e3d_baked_v2_deadbeef'}}],model_sesno:42}}];\n"
         );
-        let projection = format!(
-            ",memory_projection:{}",
-            sql_value(&serde_json::to_value(baked_record()).unwrap())
-        );
-        assert_eq!(
-            sql.replace(&projection, ""),
-            expected.replace("];\n", "] RETURN NONE;\n")
-        );
+        assert_eq!(sql, expected.replace("];\n", "] RETURN NONE;\n"));
     }
 
     /// 增量那一档在同一批前面多一组按 id 的删除——`INSERT IGNORE` 撞上已有 id 会保留旧行，
@@ -2822,7 +3142,7 @@ mod tests {
             "trans 表一个元素只占一行：本地变换写在 geo_relate 边上"
         );
         assert!(sql.contains(
-            "{id:inst_geo:⟨123456789⟩,meshed:true,visible:true,bad:false,aabb:type::thing('aabb','123456789'),direct_model:{source:'e3d-model',format:'canonical-primitive-v1',primitive_key:{\"family\":\"cylinder_v3\",\"segments\":32}}}"
+            "{id:inst_geo:⟨123456789⟩,meshed:true,visible:true,bad:false,aabb:type::thing('aabb','123456789')}"
         ));
         assert!(sql.contains(&format!(
             "{{id:geo_relate:[type::thing('inst_info','24383_73948'),inst_geo:⟨123456789⟩],in:type::thing('inst_info','24383_73948'),out:inst_geo:⟨123456789⟩,geom_refno:type::thing('pe','24383_73948'),transform:{local},visible:true,geo_type:'Pos'}}"
@@ -2831,7 +3151,6 @@ mod tests {
             "insts_flat:[{{geo_hash:'123456789',transform:{local}}}]"
         )));
         assert!(sql.contains("booled_id:NONE,booled:false"));
-        assert!(sql.contains("primitive_key:{\"family\":\"cylinder_v3\",\"segments\":32}"));
     }
 
     /// 管身不经 `inst_relate`：一条 `pe → inst_geo` 的关系边自带两端。
@@ -2906,8 +3225,7 @@ mod tests {
         assert!(!sql.contains(".mesh"));
     }
 
-    /// 行 id 一律就是记录 id。这一条盯的是渲染出来的整段正文：五种旧前缀一个都不许出现，
-    /// 而 `direct_model` 那个**字段**名不在此列。
+    /// 行 id 一律就是记录 id。这一条盯的是渲染出来的整段正文：五种旧前缀一个都不许出现。
     #[test]
     fn no_row_id_carries_a_prefix() {
         let sql = render_records(
@@ -2931,70 +3249,6 @@ mod tests {
         ] {
             assert!(!sql.contains(marker), "行 id 里还留着 {marker}");
         }
-        assert!(
-            sql.contains("direct_model:{source:'e3d-model'"),
-            "字段名照旧"
-        );
-    }
-
-    #[tokio::test]
-    async fn structured_projection_recovers_multiple_pages_and_empty_root_receipts() {
-        let db = surreal_mem().await;
-        let mut records = Vec::new();
-        for i in 0..1030 {
-            let r = RefNo::new(24383, 1000 + i);
-            records.push(ProjectedGeometry {
-                record_id: format!("24383_{}", 1000 + i),
-                geometry_id: GeometryId::Element {
-                    refno: format!("24383/{}", 1000 + i),
-                },
-                source_refno: r,
-                ancestors: vec![packed_refno(BRANCH)],
-                ..baked_record()
-            });
-        }
-        records.push(tube_record(1, TUBE_A));
-        records.push(tube_record(2, TUBE_B));
-        db.query(render_records(&records, WriteMode::Initial).unwrap())
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        db.query("CREATE gen_root:24383_73948 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='manifest', published_geometry_count=1032; CREATE gen_root:24383_1 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='empty', published_geometry_count=0;").await.unwrap().check().unwrap();
-        let store = ModelMemoryStore::default();
-        restore_projection_on(&db, &store, 7997).await.unwrap();
-        assert_eq!(store.records(ProjectionScope::Current).len(), records.len());
-        assert_eq!(store.roots(ProjectionScope::Current).len(), 2);
-        assert_eq!(
-            store
-                .receipt(ProjectionScope::Current, BRANCH)
-                .unwrap()
-                .manifest_hash,
-            "manifest"
-        );
-        let mut expected = records
-            .iter()
-            .map(|r| serde_json::to_string(r).unwrap())
-            .collect::<Vec<_>>();
-        let mut actual = store
-            .records(ProjectionScope::Current)
-            .iter()
-            .map(|r| serde_json::to_string(r).unwrap())
-            .collect::<Vec<_>>();
-        expected.sort();
-        actual.sort();
-        assert_eq!(actual, expected);
-        db.query("UPDATE inst_relate SET memory_projection=NONE WHERE dbnum=7997;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert!(restore_projection_on(&db, &store, 7997).await.is_err());
-        assert_eq!(
-            store.records(ProjectionScope::Current).len(),
-            records.len(),
-            "failed recovery must preserve the previous image"
-        );
     }
 
     #[tokio::test]
@@ -3019,7 +3273,7 @@ mod tests {
 
         let probe: Vec<Value> = db
             .query(format!(
-                "SELECT anc,dbnum,memory_projection != NONE AS structured FROM inst_relate WHERE anc CONTAINS {};",
+                "SELECT anc,dbnum,model_sesno != NONE AS structured FROM inst_relate WHERE anc CONTAINS {};",
                 packed_refno(requested_root)
             ))
             .await
@@ -3030,7 +3284,7 @@ mod tests {
             .unwrap();
         assert_eq!(probe.len(), 1, "root lookup fixture: {probe:?}");
 
-        let store = ModelMemoryStore::with_cache_limit(1024 * 1024);
+        let store = ModelMemoryStore::default();
         assert!(
             ensure_root_cached_on(&db, &store, requested_root)
                 .await
@@ -3050,56 +3304,196 @@ mod tests {
                 .receipt(ProjectionScope::Current, other_root)
                 .is_none()
         );
-        let stats = store.cache_stats();
-        assert_eq!((stats.misses, stats.loads), (1, 1));
     }
 
     #[tokio::test]
     async fn a_missing_durable_root_is_not_negative_cached() {
         let db = surreal_mem().await;
-        let store = ModelMemoryStore::with_cache_limit(1024);
+        let store = ModelMemoryStore::default();
         let root = RefNo::new(7997, 999);
         assert!(!ensure_root_cached_on(&db, &store, root).await.unwrap());
         assert!(!ensure_root_cached_on(&db, &store, root).await.unwrap());
-        let stats = store.cache_stats();
-        assert_eq!((stats.misses, stats.loads), (2, 2));
-        assert_eq!(stats.resident_roots, 0);
+        assert_eq!(store.current_counts(), (0, 0));
     }
 
-    #[tokio::test]
-    async fn root_cache_queries_are_planned_through_ancestor_indexes() {
-        let db = surreal_mem().await;
-        db.query(
-            "DEFINE INDEX idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\
-             DEFINE INDEX idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let root = RefNo::new(7997, 1);
-        for (table, index) in [
-            ("inst_relate", "idx_inst_relate_anc"),
-            ("tubi_relate", "idx_tubi_relate_anc"),
-        ] {
-            let explain = format!(
-                "{} EXPLAIN FULL;",
-                root_projection_sql(table, root).trim_end_matches(';')
-            );
-            let plan: Vec<Value> = db
-                .query(explain)
-                .await
-                .unwrap()
-                .check()
-                .unwrap()
-                .take(0)
-                .unwrap();
-            let text = serde_json::to_string(&plan).unwrap();
+    /// 一块删除语句逐句过：带谓词的 EXPLAIN 必须落在对应索引上、计划里不许出现
+    /// `Iterate Table`；其余一律是 `LET` 或 `DELETE $数组` 直接点名，一个 `WHERE` 都不许有。
+    /// 返回带谓词的那几条，调用方钉数量——语句多一条少一条都要露出来，免得下次往块里加一句
+    /// 谓词删、没人来 EXPLAIN 它。
+    ///
+    /// 谓词里引用的 `$参数` 照生产的样子先 `LET` 再用（值从 `bindings` 里取），测的是
+    /// 「参数数组 + IN」「参数记录 + =」这些真实形状，不是内联字面量。计划里带记录 id
+    /// （`geo_relate` 那句的 `value` 是一串 `inst_info:…`）过不了 `serde_json::Value`，
+    /// 所以按 `surrealdb::Value` 取、用它的 Display 当文本比对。
+    async fn assert_delete_block_never_iterates_a_table(
+        db: &Surreal<Any>,
+        sql: &str,
+        bindings: &[(&str, &str)],
+    ) -> Vec<String> {
+        // 按「读哪张表、按哪一列圈」定该落的索引：`anc CONTAINS…` 走 `idx_<表>_anc`，
+        // `in = …` / `in IN …` 走 `idx_<表>_in`——两组都在 `INST_RELATE_INDEX_SQL` 里。
+        fn expected_index(select: &str) -> String {
+            let table = select
+                .split(" FROM ")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .unwrap_or_else(|| panic!("delete block reads no table: {select}"));
             assert!(
-                text.contains(index),
-                "root cache query must use {index}, plan: {text}"
+                matches!(table, "inst_relate" | "tubi_relate" | "geo_relate"),
+                "delete block reads an unexpected table {table}: {select}"
             );
+            let (_, predicate) = select
+                .split_once(" WHERE ")
+                .unwrap_or_else(|| panic!("a predicated read without WHERE: {select}"));
+            if predicate.starts_with("in = ") || predicate.starts_with("in IN ") {
+                format!("idx_{table}_in")
+            } else if predicate.starts_with("anc CONTAINS") {
+                format!("idx_{table}_anc")
+            } else {
+                panic!("a predicated read that no index answers: {select}")
+            }
         }
+
+        async fn explain(db: &Surreal<Any>, select: &str, bindings: &[(&str, &str)]) -> String {
+            let prelude = bindings
+                .iter()
+                .filter(|(name, _)| select.contains(name))
+                .map(|(name, value)| format!("LET {name} = {value};\n"))
+                .collect::<Vec<_>>();
+            let sql = format!("{}{select} EXPLAIN FULL;", prelude.concat());
+            let mut response = db.query(sql).await.unwrap().check().unwrap();
+            let plan: surrealdb::Value = response.take(prelude.len()).unwrap();
+            plan.to_string()
+        }
+
+        let mut predicated = Vec::new();
+        for statement in sql
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.trim_end_matches(';'))
+        {
+            let select = if let Some((_, select)) = statement.split_once(" = SELECT ") {
+                Some(format!("SELECT {select}"))
+            } else {
+                statement
+                    .strip_prefix("DELETE (")
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .map(str::to_owned)
+            };
+            match select {
+                Some(select) => {
+                    let plan = explain(db, &select, bindings).await;
+                    let index = expected_index(&select);
+                    assert!(
+                        !plan.contains("Iterate Table") && plan.contains(&index),
+                        "{statement} must be planned through {index}, plan: {plan}"
+                    );
+                    predicated.push(statement.to_owned());
+                }
+                None => {
+                    assert!(
+                        statement.starts_with("LET $") || statement.starts_with("DELETE $"),
+                        "every other statement is a LET or a direct-target DELETE: {statement}"
+                    );
+                    assert!(
+                        !statement.contains(" WHERE ") && !statement.contains("SELECT"),
+                        "direct-target statements must not carry a predicate: {statement}"
+                    );
+                }
+            }
+        }
+        predicated
+    }
+
+    /// 整片删的**每一条**语句都不许扫表——它是这次改动的全部依仗：读侧的作用域从「整库」
+    /// 收成「这一片」之后，走不走索引决定它是 O(片) 还是 O(库)。回退成 `Iterate Table`
+    /// 就等于把刚拆掉的 O(N²) 原样装了回来，只是从「传回客户端」换成「库端扫」。
+    ///
+    /// 索引用生产那份 [`INST_RELATE_INDEX_SQL`]，测的是启动序列真会建出来的那组。
+    /// 带谓词的只许三条：两条 `anc CONTAINSANY` 读与 `geo_relate` 按 `in` 的那句。
+    ///
+    /// [`INST_RELATE_INDEX_SQL`]: crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL
+    #[tokio::test]
+    async fn slice_predicates_are_planned_through_ancestor_indexes() {
+        let db = surreal_mem().await;
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let sql = render_slice_delete(&[
+            packed_refno(RefNo::new(7997, 1)),
+            packed_refno(RefNo::new(7997, 2)),
+        ]);
+        assert_eq!(
+            sql.lines().filter(|line| !line.trim().is_empty()).count(),
+            11,
+            "块的形状变了就来更新这条测试: {sql}"
+        );
+        let predicated = assert_delete_block_never_iterates_a_table(
+            &db,
+            &sql,
+            &[("$slice_infos", "[inst_info:a, inst_info:b]")],
+        )
+        .await;
+        assert_eq!(
+            predicated.len(),
+            3,
+            "exactly the two anc reads and the geo_relate lookup carry predicates: {predicated:?}"
+        );
+        assert!(
+            predicated[2].contains("FROM geo_relate WHERE in IN $slice_infos"),
+            "{predicated:?}"
+        );
+    }
+
+    /// 镜像 spool / 墓碑那一路的整片删（[`render_spooled_scope_cleanup`]）同一条纪律。
+    /// 它的作用域多一路 `in = $mirror_owner`（兜 `anc` 缺失的历史行），必须与 `anc` 那一路
+    /// **分开读**各走各的索引再并——写成一条 `anc CONTAINS … OR in = $参数` 时优化器整条退回
+    /// `Iterate Table`（改写前这条测试就是这样红的），那是 spool 回放里的整表扫。
+    #[tokio::test]
+    async fn spooled_cleanup_predicates_are_planned_through_indexes() {
+        let db = surreal_mem().await;
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let sql = render_spooled_scope_cleanup(RefNo::new(7997, 1));
+        assert_eq!(
+            sql.lines().filter(|line| !line.trim().is_empty()).count(),
+            16,
+            "块的形状变了就来更新这条测试: {sql}"
+        );
+        assert!(
+            !sql.contains(" OR "),
+            "两路作用域不许合成一条 OR 谓词——优化器会整条退回扫表: {sql}"
+        );
+        let predicated = assert_delete_block_never_iterates_a_table(
+            &db,
+            &sql,
+            &[
+                ("$mirror_owner", "type::thing('pe','7997_1')"),
+                ("$mirror_infos", "[inst_info:a, inst_info:b]"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            predicated.len(),
+            5,
+            "two anc reads, two owner reads and the geo_relate lookup carry predicates: {predicated:?}"
+        );
+        assert_eq!(
+            predicated
+                .iter()
+                .filter(|statement| statement.contains("WHERE in = $mirror_owner"))
+                .count(),
+            2,
+            "the spool scope must keep the anc-less fallback by owner on both relation tables: {predicated:?}"
+        );
     }
 
     #[tokio::test]
@@ -3271,8 +3665,17 @@ mod tests {
         );
         let sql = render_spooled_root(&store, root).expect("spool rendering");
         assert!(sql.starts_with("BEGIN TRANSACTION;"));
-        assert!(sql.contains("LET $mirror_rels = SELECT id, out FROM inst_relate"));
-        assert!(sql.contains("DELETE inst_relate WHERE id IN $mirror_rels.id"));
+        assert!(
+            sql.contains("LET $mirror_keys_by_anc = SELECT VALUE record::id(id) FROM inst_relate")
+        );
+        assert!(sql.contains(
+            "LET $mirror_keys = array::union($mirror_keys_by_anc, $mirror_keys_by_owner);"
+        ));
+        assert!(sql.contains("DELETE $mirror_keys.map(|$key| type::thing('inst_relate', $key));"));
+        assert!(
+            !sql.contains("DELETE inst_relate WHERE") && !sql.contains("DELETE aabb WHERE"),
+            "spool 清理与整片删同一套纪律：点名删，不下谓词: {sql}"
+        );
         assert!(sql.contains("INSERT IGNORE INTO inst_relate"));
         assert!(sql.contains("publication_status='ready'"));
         assert!(sql.ends_with("COMMIT TRANSACTION;\n"));
@@ -3331,13 +3734,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_spooled_tombstone_deletes_durable_rows_without_memory_projection() {
+    async fn a_spooled_tombstone_deletes_durable_rows_of_the_whole_slice() {
         let db = surreal_mem().await;
         let root = RefNo::new(24383, 1);
         let packed = packed_refno(root);
         db.query(format!(
             "CREATE inst_relate:durable_only SET in=pe:durable_only, anc=[{packed}], \
-             out=inst_info:durable_only, direct_model={{source:'e3d-model'}};"
+             out=inst_info:durable_only, model_sesno=42;"
         ))
         .await
         .unwrap()
@@ -3345,10 +3748,85 @@ mod tests {
         .unwrap();
 
         let tombstone = render_spooled_scope_deletion(root, &[root], &[]);
-        assert!(tombstone.contains("DELETE tubi_relate WHERE id IN $mirror_tubes.id"));
+        assert!(tombstone.contains("DELETE $mirror_tubes.map(|$row| $row.id);"));
         db.query(tombstone).await.unwrap().check().unwrap();
 
         assert_eq!(count(&db, "inst_relate").await, 0);
+    }
+
+    /// 墓碑那一路与整片删同一套点名删：三种行形状（标准图元、无 `out` 的烘焙行、按摘要另键
+    /// 盒与变换的管身）连同 `anc` 缺失、只靠 `in = 根` 兜住的历史行一起没；邻根、属性面独有
+    /// 的行与内容寻址的网格不动。
+    #[tokio::test]
+    async fn a_spooled_tombstone_removes_every_representation_of_the_root_and_nothing_else() {
+        let db = surreal_mem().await;
+        let root = RefNo::new(7997, 10);
+        let packed = packed_refno(root);
+        let other = packed_refno(RefNo::new(7997, 20));
+        db.query(format!(
+            "INSERT INTO aabb [{{id:aabb:c1,d:1}},{{id:aabb:b1,d:1}},{{id:aabb:tube1digest,d:1}},\
+                              {{id:aabb:own,d:1}},{{id:aabb:n1,d:1}},{{id:aabb:mesh1,d:1}}];\n\
+             INSERT INTO trans [{{id:trans:c1,d:1}},{{id:trans:b1,d:1}},{{id:trans:tube1digest,d:1}},\
+                               {{id:trans:own,d:1}},{{id:trans:n1,d:1}}];\n\
+             INSERT INTO inst_geo [{{id:inst_geo:mesh1,aabb:aabb:mesh1}}];\n\
+             INSERT INTO inst_info [{{id:inst_info:c1,model_sesno:5}},{{id:inst_info:n1,model_sesno:5}}];\n\
+             INSERT RELATION INTO geo_relate [\
+                {{id:geo_relate:[inst_info:c1,inst_geo:mesh1],in:inst_info:c1,out:inst_geo:mesh1}},\
+                {{id:geo_relate:[inst_info:n1,inst_geo:mesh1],in:inst_info:n1,out:inst_geo:mesh1}}];\n\
+             INSERT INTO inst_relate [\
+                {{id:inst_relate:c1,in:pe:⟨7997_11⟩,out:inst_info:c1,anc:[{packed}],\
+                  aabb:aabb:c1,world_trans:trans:c1,model_sesno:5}},\
+                {{id:inst_relate:b1,in:pe:⟨7997_12⟩,booled_id:'mesh1',booled:true,anc:[{packed}],\
+                  aabb:aabb:b1,world_trans:trans:b1,model_sesno:5}},\
+                {{id:inst_relate:own,in:pe:⟨7997_10⟩,booled_id:'mesh1',booled:true,\
+                  aabb:aabb:own,world_trans:trans:own,model_sesno:5}},\
+                {{id:inst_relate:n1,in:pe:⟨7997_21⟩,out:inst_info:n1,anc:[{other}],\
+                  aabb:aabb:n1,world_trans:trans:n1,model_sesno:5}},\
+                {{id:inst_relate:legacy,in:pe:⟨7997_13⟩,anc:[{packed}],generic:'EQUI'}}];\n\
+             INSERT RELATION INTO tubi_relate [\
+                {{id:tubi_relate:[pe:⟨7997_14⟩,0],in:pe:⟨7997_14⟩,out:inst_geo:mesh1,\
+                  aabb:aabb:tube1digest,world_trans:trans:tube1digest,anc:[{packed}],model_sesno:5}}];"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        db.query(render_spooled_scope_deletion(root, &[root], &[]))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let survivors: Vec<String> = db
+            .query(
+                "SELECT VALUE <string>id FROM aabb, trans, inst_geo, inst_info, geo_relate, \
+                 inst_relate, tubi_relate;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let survivors = survivors.into_iter().collect::<BTreeSet<_>>();
+        let expected = [
+            "aabb:n1",
+            "aabb:mesh1",
+            "trans:n1",
+            "inst_geo:mesh1",
+            "inst_info:n1",
+            "geo_relate:[inst_info:n1, inst_geo:mesh1]",
+            "inst_relate:n1",
+            "inst_relate:legacy",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            survivors, expected,
+            "墓碑之后只许剩下邻根、属性面独有的行与内容寻址的网格"
+        );
     }
 
     /// 渲染出来的语句真能在库里跑通，落进的是旧那几张表：烘焙实体只占 `inst_relate`，
@@ -3457,9 +3935,16 @@ mod tests {
             .await
             .expect("persist");
         assert_eq!(second.upserted, 1);
-        assert_eq!(second.removed, 2, "陈旧元素与上一轮的管身都要对账掉");
+        assert_eq!(
+            second.removed, 1,
+            "掉了几何的来源只有陈旧那一件；管身那一段的来源 BRAN 自己还有几何，不算"
+        );
         assert_eq!(count(&db, "inst_relate").await, 1);
-        assert_eq!(count(&db, "tubi_relate").await, 0);
+        assert_eq!(
+            count(&db, "tubi_relate").await,
+            0,
+            "上一轮的管身行跟着整片一起没"
+        );
     }
 
     /// 不完整投影没有根回执时，缺席不能被解释成孤儿。
@@ -3553,11 +4038,11 @@ mod tests {
         assert_eq!(count(&db, "inst_relate").await, 0);
     }
 
-    /// 切块提交的三条顺序：分支重置只在第一块（否则后一块把前一块的管身删掉）、管身槽位
-    /// 跨块延续（否则同分支的 id 互撞）、回执在最后一块（一块失败就没有章）。
-    /// 块大小拨到 1，三条一次全押上。
+    /// 一根一笔事务：三条记录（一件几何 + 同一分支的两段管身）与回执一起进同一笔，
+    /// 分支重置排在插入之前、管身槽位在这一笔里连号。切块退役之前这三条是靠「重置只进
+    /// 第一块、发号表跨块延续、回执在最后一块」维持的，现在由事务本身维持。
     #[tokio::test]
-    async fn chunked_commits_reset_once_number_across_chunks_and_stamp_last() {
+    async fn one_root_is_one_transaction_with_its_tubes_and_receipt() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
@@ -3577,18 +4062,18 @@ mod tests {
         );
 
         let target = PersistTarget::new(&db, PersistMedium::Mem);
-        let rows = persist_root_in_chunks(target, &store, root, 1)
+        let rows = persist_root_on(target, &store, root)
             .await
             .expect("persist");
         assert_eq!(rows.upserted, 3);
         assert_eq!(rows.receipts, 1);
-        assert_eq!(rows.commits, 3, "块大小 1、三条记录，就该发三笔事务");
+        assert_eq!(rows.commits, 1, "一根就是一笔事务，多少条记录都不拆");
 
         assert_eq!(count(&db, "inst_relate").await, 1);
         assert_eq!(
             count(&db, "tubi_relate").await,
             2,
-            "同分支两段分在两块里，前一块的那段不能被后一块的重置删掉"
+            "同分支两段共用一张发号表，后一段不能盖掉前一段"
         );
         let mut response = db
             .query("SELECT VALUE publication_status FROM type::thing('gen_root','24383_1');")
@@ -3743,89 +4228,75 @@ mod tests {
         assert!(second.failed.is_empty());
         let rows = second.rows.expect("rows");
         assert_eq!(rows.upserted, 1);
-        assert_eq!(rows.removed, 2, "陈旧元素与上一轮的管身都要对账掉");
+        assert_eq!(
+            rows.removed, 1,
+            "掉了几何的来源只有陈旧那一件；管身那一段的来源 BRAN 自己还有几何，不算"
+        );
         assert_eq!(count(&db, "inst_relate").await, 1);
-        assert_eq!(count(&db, "tubi_relate").await, 0);
+        assert_eq!(
+            count(&db, "tubi_relate").await,
+            0,
+            "上一轮的管身行跟着整片一起没"
+        );
         assert_eq!(publication_status_of(&db, root).await, "ready");
     }
 
-    /// 同一个数据窗口里连着落两批：第二批吃的是**内存里的基线快照**（对账读一个任务只做一次，
-    /// 见 [`GeometryBaseline`]），对账结果必须与每批都重读一遍完全一样。
+    /// 连落两批：第二批把上一批的一件几何从投影里拿掉，库里那一行必须跟着消失——
+    /// **而且整个过程一次对账读都没有**。
     ///
-    /// 这一条钉的是 2026-09-10 那次 O(N²) 修复：7997 实测 68 组累计读 180 万行、单笔事务从
-    /// 400 ms 涨到 1,280 ms。快照要是没跟着任务自己的写更新，陈旧行就会漏删——那是数据错，
-    /// 不是慢。
+    /// 旧写法靠「整库对账读 + 任务级快照」找出这一行，2026-09-10 那次 O(N²) 修复
+    /// （7997 实测 68 组累计读 180 万行、单笔事务从 400 ms 涨到 1,280 ms）就是在给那个读
+    /// 做性能抢救。现在整片删掉再整片插回，陈旧行没有机会存活，那个读也就不必存在。
     #[tokio::test]
-    async fn a_task_reads_the_reconciliation_baseline_once_and_still_clears_stale_rows() {
-        /// 同一个窗口里连落两批；`refetch = true` 时在第二批之前把快照丢掉（等价于旧行为，
-        /// 每批都重读一次库），`false` 时吃上一批就地更新出来的快照。两者的终态必须一样。
-        async fn two_batches(refetch: bool) -> (usize, i64, i64) {
-            let db = surreal_mem().await;
-            seed_pe(&db).await;
-            let root = RefNo::new(24383, 1);
-            seed_gen_roots(&db, &[root]).await;
-            invalidate_geometry_baseline();
+    async fn a_second_batch_clears_the_rows_the_projection_dropped() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        seed_gen_roots(&db, &[root]).await;
 
-            let store = ModelMemoryStore::default();
-            let stale = ProjectedGeometry {
-                record_id: "24383_9999".into(),
-                geometry_id: GeometryId::Element {
-                    refno: "24383/9999".into(),
-                },
-                source_refno: RefNo::new(24383, 9999),
-                ..baked_record()
-            };
-            let target = PersistTarget::new(&db, PersistMedium::Mem);
+        let store = ModelMemoryStore::default();
+        let stale = ProjectedGeometry {
+            record_id: "24383_9999".into(),
+            geometry_id: GeometryId::Element {
+                refno: "24383/9999".into(),
+            },
+            source_refno: RefNo::new(24383, 9999),
+            ..baked_record()
+        };
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
 
-            crate::data_interface::batch_worker::with_active_data_window_for_test(
-                BATCH_DBNUM,
-                7,
-                async {
-                    store.commit(
-                        ProjectionScope::Current,
-                        vec![ProjectionCommit {
-                            upserts: vec![baked_record(), stale.clone(), tube_record(0, TUBE_A)],
-                            receipt: Some(test_receipt(root, 3)),
-                            ..ProjectionCommit::default()
-                        }],
-                    );
-                    persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
-                        .await
-                        .expect("first batch");
-
-                    store.commit(
-                        ProjectionScope::Current,
-                        vec![ProjectionCommit {
-                            removals: vec![stale.record_id.clone()],
-                            tube_branch_resets: vec![BRANCH],
-                            receipt: Some(test_receipt(root, 1)),
-                            ..ProjectionCommit::default()
-                        }],
-                    );
-                    if refetch {
-                        invalidate_geometry_baseline();
-                    }
-                    let second = persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
-                        .await
-                        .expect("second batch");
-                    (
-                        second.rows.expect("rows").removed,
-                        count(&db, "inst_relate").await,
-                        count(&db, "tubi_relate").await,
-                    )
-                },
-            )
-            .await
-        }
-
-        let cached = two_batches(false).await;
-        let refetched = two_batches(true).await;
-        invalidate_geometry_baseline();
-        assert_eq!(
-            cached, refetched,
-            "对账基线收成一个任务读一次之后，终态必须与每批都重读一遍完全一样\
-             （左：吃内存快照；右：每批重读）"
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), stale.clone(), tube_record(0, TUBE_A)],
+                receipt: Some(test_receipt(root, 3)),
+                ..ProjectionCommit::default()
+            }],
         );
+        persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
+            .await
+            .expect("first batch");
+        assert_eq!(count(&db, "inst_relate").await, 2);
+        assert_eq!(count(&db, "tubi_relate").await, 1);
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec![stale.record_id.clone()],
+                tube_branch_resets: vec![BRANCH],
+                receipt: Some(test_receipt(root, 1)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
+            .await
+            .expect("second batch");
+        assert_eq!(
+            count(&db, "inst_relate").await,
+            1,
+            "投影里没有的行跟着整片一起消失，不需要先读出来点名"
+        );
+        assert_eq!(count(&db, "tubi_relate").await, 0);
     }
 
     /// ADR-072 D4（验收 ③）：合块落库提交之后，全局空间树**就地**追上投影——每条非管身记录
@@ -3843,7 +4314,6 @@ mod tests {
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
         seed_gen_roots(&db, &[root]).await;
-        invalidate_geometry_baseline();
 
         let stale = ProjectedGeometry {
             record_id: "24383_9999".into(),
@@ -3937,13 +4407,9 @@ mod tests {
             .await
             .expect("second batch");
         assert!(second.failed.is_empty(), "{:?}", second.failed);
-        // 9999 被对账掉；夹具管身的 record_id 不是真摘要，每轮都会被当陈旧行对账掉再插回
+        // 9999 掉了几何；夹具管身的来源 BRAN 自己还有几何，不算进这个数
         //（与 `batched_persist_reconciles_stale_rows_from_one_database_read` 同一口径）。
-        assert_eq!(
-            second.rows.expect("rows").removed,
-            2,
-            "9999 与夹具管身被对账掉"
-        );
+        assert_eq!(second.rows.expect("rows").removed, 1, "9999 掉了几何");
         assert_eq!(count(&db, "inst_relate").await, 2, "库里只剩 73948 与 500");
         {
             let tree = GLOBAL_AABB_TREE.read().await;
@@ -3971,7 +4437,6 @@ mod tests {
         assert_eq!(landed, Some(expect_box(&moved_again)));
 
         crate::fast_model::aabb_tree::evict_tree_entries_for_test(&sources).await;
-        invalidate_geometry_baseline();
     }
 
     /// ADR-072 D4 的源码钉（验收 ②）：`persist_roots_batched` / `persist_root_chunks_impl` 提交之后的
@@ -3998,7 +4463,7 @@ mod tests {
             );
         }
         let batched = production
-            .split_once("pub(crate) async fn persist_roots_batched_with_chunk_bytes(")
+            .split_once("async fn persist_roots_batched_unacked_impl(")
             .expect("batched persist exists")
             .1
             .split_once("struct GroupOutcome")
@@ -4033,7 +4498,7 @@ mod tests {
             "persist_group 不再认识数据窗口: {group}"
         );
         let per_root = production
-            .split_once("async fn persist_root_chunks_impl(")
+            .split_once("async fn persist_root_impl(")
             .expect("per-root persist exists")
             .1
             .split_once("/// 写入口径：**没有 UPDATE，也没有 UPSERT**。")
@@ -4050,9 +4515,9 @@ mod tests {
         );
     }
 
-    /// 软块上限不能拆开一个根：几何、房间边和回执必须是一笔事务。
+    /// 合块那一路同样是一笔：几何、房间边和回执不许分开提交。
     #[tokio::test]
-    async fn batched_persist_keeps_one_root_in_one_transaction_even_above_soft_chunk_limit() {
+    async fn batched_persist_keeps_one_root_in_one_transaction() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
@@ -4072,19 +4537,18 @@ mod tests {
             }],
         );
         let target = PersistTarget::new(&db, PersistMedium::Mem);
-        let batched =
-            persist_roots_batched_with_chunk_bytes(target, &store, BATCH_DBNUM, &[root], 1, None)
-                .await
-                .expect("batched persist");
+        let batched = persist_roots_batched(target, &store, BATCH_DBNUM, &[root], None)
+            .await
+            .expect("batched persist");
         assert!(batched.failed.is_empty(), "{:?}", batched.failed);
         let rows = batched.rows.expect("rows");
         assert_eq!(rows.upserted, 3);
-        assert_eq!(rows.commits, 1, "软字节上限不得拆开一个根");
+        assert_eq!(rows.commits, 1, "一组就是一笔事务");
         assert_eq!(count(&db, "inst_relate").await, 1);
         assert_eq!(
             count(&db, "tubi_relate").await,
             2,
-            "同分支两段分在两块里，前一块的那段不能被后一块的重置删掉"
+            "同分支两段共用一张发号表，后一段不能盖掉前一段"
         );
         assert_eq!(publication_status_of(&db, root).await, "ready");
     }
@@ -4267,18 +4731,18 @@ mod tests {
         .expect("seed legacy statements");
     }
 
-    /// 切块之后一根不再是原子边界，所以多块发布先在凭证行上盖一道栅栏：中途失败时
-    /// `publication_status` 停在 `publishing`，凭证前移与窗口规划器都不会再把这根当成
-    /// 已发布的几何。解除它的只有最后一块那张回执。
+    /// 一根一笔事务之后就没有「写了一半」这回事了：中途失败 = 一行都没落、凭证一个字
+    /// 没动。此前这里要靠 `publication_status='publishing'` 把中间态标出来给读侧避让，
+    /// 现在中间态根本不存在，栅栏跟着切块一起退役。
     #[tokio::test]
-    async fn a_half_written_root_stays_fenced_until_the_receipt() {
+    async fn a_failed_publication_leaves_neither_rows_nor_a_touched_credential() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         seed_gen_root(&db).await;
         let root = RefNo::new(24383, 1);
 
-        // 第二块数据库提交失败；预渲染验证已经完成，第一块必须保留发布栅栏。
-        db.query("DEFINE EVENT reject_second_chunk ON TABLE inst_relate WHEN $after.generic = 'REJECT' THEN { THROW 'injected second chunk failure'; };").await.unwrap().check().unwrap();
+        // 这一笔里有一条会被库拒收，整笔事务因此回滚。
+        db.query("DEFINE EVENT reject_row ON TABLE inst_relate WHEN $after.generic = 'REJECT' THEN { THROW 'injected publication failure'; };").await.unwrap().check().unwrap();
         let doomed = ProjectedGeometry {
             record_id: "zzbad".into(),
             noun: "REJECT".into(),
@@ -4294,14 +4758,15 @@ mod tests {
             }],
         );
         let target = PersistTarget::new(&db, PersistMedium::Mem);
-        assert!(
-            persist_root_in_chunks(target, &store, root, 1)
-                .await
-                .is_err()
+        assert!(persist_root_on(target, &store, root).await.is_err());
+        assert_eq!(
+            publication_status(&db).await,
+            "stale",
+            "失败的那一笔不许在凭证行上留下任何痕迹"
         );
-        assert_eq!(publication_status(&db).await, "publishing");
+        assert_eq!(count(&db, "inst_relate").await, 0, "整笔回滚，一行都不留");
 
-        // 换成两条都渲染得出来的记录重跑，最后一块的回执把栅栏解除。
+        // 换成两条都渲染得出来的记录重跑，同一笔事务里盖章。
         let store = ModelMemoryStore::default();
         store.commit(
             ProjectionScope::Current,
@@ -4311,16 +4776,15 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        persist_root_in_chunks(target, &store, root, 1)
+        persist_root_on(target, &store, root)
             .await
             .expect("persist");
         assert_eq!(publication_status(&db).await, "ready");
     }
 
-    /// 没有回执就没人把栅栏翻回 `ready`，那时盖栅栏等于把这根永久钉死。所以栅栏只跟着
-    /// 回执走：没章的落库一个字都不许动凭证行。
+    /// 没有回执的落库一个字都不许动凭证行。
     #[tokio::test]
-    async fn a_publish_without_a_receipt_never_fences_the_credential() {
+    async fn a_publish_without_a_receipt_never_touches_the_credential() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         seed_gen_root(&db).await;
@@ -4335,7 +4799,7 @@ mod tests {
             }],
         );
         let target = PersistTarget::new(&db, PersistMedium::Mem);
-        persist_root_in_chunks(target, &store, root, 1)
+        persist_root_on(target, &store, root)
             .await
             .expect("persist");
         assert_eq!(publication_status(&db).await, "stale");
@@ -4999,6 +5463,7 @@ mod tests {
             &crate::data_interface::task_end::TaskEnd {
                 dbnum: BATCH_DBNUM,
                 target_sesno: 42,
+                data: None,
                 target_time: None,
                 model: Some(crate::data_interface::task_end::TaskModelOutcome {
                     all_roots_ok: true,
@@ -5043,8 +5508,8 @@ mod tests {
 
     /// 源码钉（ADR-073 D1 / D2 / W2，d-932）：房间归属在写库**之前**、按根算（[`room_stage`]，输入只有
     /// 该根的内存投影与任务开工时冻住的计算器），算不出来的根在进组事务之前就剔掉；每根的边紧跟它
-    /// 自己的几何段（`live.room_statements`），段按字节装块、段不拆、块进事务——所以「模型行已提交、
-    /// 房间边稍后单独提交」这条路在源码里不存在。落库路径不回读库、不走整库房间算法
+    /// 自己的几何——一根按条数切成几块时跟着它的**末块**走，落在同一笔事务里，所以「这一根的模型行
+    /// 已提交、它的房间边稍后单独提交」这条路在源码里不存在。落库路径不回读库、不走整库房间算法
     /// （`SUL_DB` / `query_room_insts` / `cal_room_refnos`）；两个生产调用方都在任务开工时冻一次
     /// 计算器递进来。
     #[test]
@@ -5056,7 +5521,7 @@ mod tests {
             .expect("production half");
         // 调用方：房间关卡排在组事务之前，算不出来的根记失败、不进 `live`。
         let batched = production
-            .split_once("pub(crate) async fn persist_roots_batched_with_chunk_bytes(")
+            .split_once("async fn persist_roots_batched_unacked_impl(")
             .expect("batched persist exists")
             .1
             .split_once("struct GroupOutcome")
@@ -5075,7 +5540,7 @@ mod tests {
             stage_at < failed_at && failed_at < group_call_at,
             "顺序：逐根算房间 → 算不出来的根剔出组 → 组事务"
         );
-        // 根内：几何段渲好 → 边拼入 → 回执并入 → 单笔提交。
+        // 根内：几何按条数切块渲好 → 边拼进这一根的末块 → 回执进收尾段 → 逐笔提交。
         let group = production
             .split_once("async fn persist_group(")
             .expect("persist_group exists")
@@ -5084,20 +5549,40 @@ mod tests {
             .expect("publication request helpers follow")
             .0;
         let render_at = group
-            .find("render_chunk(&live.claimed, WriteMode::Incremental")
-            .expect("几何段渲染");
+            .find("render_record_chunks(&live.claimed, mode, &mut tube_slots)")
+            .expect("几何段按条数切块渲染");
         let attach_at = group
-            .find("piece.push_str(&live.room_statements)")
-            .expect("房间边拼进这一根");
+            .find("sql.push_str(&live.room_statements)")
+            .expect("房间边拼进这一根的末块");
         let receipt_at = group
-            .find("root_statement.push_str(&receipt)")
-            .expect("回执并进同一根事务");
+            .find("let epilogue = format!(\"{receipt_header}{receipt_body}\")")
+            .expect("回执进收尾段");
+        // 提交走 `commit_publication_transaction`（整笔原子 + 冲突重试），钉它的调用处。
         let commit_at = group
-            .find("db.query(publication_transaction(&statements))")
+            .find("commit_publication_transaction(db, statements")
             .expect("提交");
         assert!(
             render_at < attach_at && attach_at < receipt_at && receipt_at < commit_at,
-            "顺序：渲几何 → 房间边 → 回执 → 单笔提交"
+            "顺序：渲几何 → 房间边 → 回执 → 提交"
+        );
+        // 装块纪律：删在第一笔、章在最后一笔。反过来就是「章盖了、行还没写完」，
+        // 中途崩掉的那一根会被当成已发布，再也没人回来补。
+        let packer = production
+            .split_once("fn pack_publication_transactions(")
+            .expect("packer exists")
+            .1
+            .split_once("\n}\n")
+            .expect("packer end")
+            .0;
+        let prelude_at = packer
+            .find("String::from(prelude)")
+            .expect("prelude 起头第一笔");
+        let epilogue_at = packer
+            .find("current.push_str(epilogue)")
+            .expect("epilogue 收尾最后一笔");
+        assert!(
+            prelude_at < epilogue_at,
+            "整片删进第一笔、盖章进最后一笔，顺序不能对调"
         );
         // 房间关卡 + 落库路径：一句库不读，不走整间分支的算法。
         let stage = production

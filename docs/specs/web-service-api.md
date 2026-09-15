@@ -85,7 +85,7 @@
   **换文件**。`detail.dbnum` 点名是哪个库，客户端不必从 `message` 里抠数字；
   `detail.ingest` 是判据本身（`queued` / `data_face_initializing` / `settled`），
   让「为什么说它还在入库」可被复核。判据只问进程内的批次队列与初始化阶段，不额外读库。
-- `Retry-After: 2` 只给「等一等就有」的那几档（`overlay_backpressure`、
+- `Retry-After: 2` 只给「等一等就有」的那几档（`overlay_rejected`、
   `dependency_db_initializing`、`dependency_db_unreadable`）。确定性失败不给——给了
   就是承诺一个并不存在的重试时刻。
 

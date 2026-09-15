@@ -2431,14 +2431,6 @@ pub(crate) fn emit(progress: &Option<ManualUpdateProgress>, event: ManualUpdateE
     }
 }
 
-/// 一次基线建立交回任务的东西：解析了多少元素、以及要由**本任务**随即生成的全量生成根
-/// （DESI 才有；SYS meta / CATA 为空）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct BaselineOutcome {
-    pub elements: usize,
-    pub units: Vec<UnitTask>,
-}
-
 /// One model delivery-unit generation task inside an execution run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitTask {
@@ -2983,90 +2975,22 @@ fn baseline_has_uncommitted_rows(pe_count: usize, applied_sesno: i32) -> bool {
     pe_count > 0 && applied_sesno == 0
 }
 
-fn baseline_parse_matches(pe_count: usize, root_count: usize, parsed_count: usize) -> bool {
+pub(crate) fn baseline_parse_matches(
+    pe_count: usize,
+    root_count: usize,
+    parsed_count: usize,
+) -> bool {
     pe_count.checked_sub(root_count) == Some(parsed_count)
 }
 
 /// `Some(0)` plus no persisted rows beyond the explicitly counted WORL root is
 /// a legitimate empty baseline. `None` still means no successful parse ran.
-fn baseline_parse_confirmed_empty(
+pub(crate) fn baseline_parse_confirmed_empty(
     parsed_count: Option<usize>,
     pe_count: usize,
     root_count: usize,
 ) -> bool {
     parsed_count == Some(0) && baseline_parse_matches(pe_count, root_count, 0)
-}
-
-/// Turn a freshly baselined dbnum's active ownership graph into durable,
-/// fine-grained generation work (pure).
-///
-/// Only DESI carries generation roots: CATA holds catalogue definitions and SYS
-/// meta holds project structure, so neither gets model work here — matching
-/// [`crate::data_interface::model_update_plan::build_model_update_plan`], which
-/// plans nothing but deferred cascades for those types.
-fn baseline_work_items(
-    dbnum: u32,
-    db_type: &str,
-    end_sesno: i32,
-    nodes: &HashMap<RefnoEnum, OwnerNode>,
-    unit_types: &[String],
-) -> anyhow::Result<ModelUpdatePlan> {
-    if db_type != "DESI" {
-        return Ok(ModelUpdatePlan::default());
-    }
-    // Resolving every node's owner independently invents extra normal roots
-    // (including ancestors of real delivery units). The next steady window
-    // retires those extras and can delete unchanged descendant geometry.
-    // Traverse the ownership forest with the same authority as roots_T.
-    let mut members: HashMap<RefnoEnum, Vec<RefnoEnum>> = HashMap::new();
-    let mut top = Vec::new();
-    for (&refno, node) in nodes {
-        if let Some(owner) = node
-            .owner
-            .filter(|owner| *owner != refno && nodes.contains_key(owner))
-        {
-            members.entry(owner).or_default().push(refno);
-        } else {
-            top.push(refno);
-        }
-    }
-    top.sort_unstable();
-    for children in members.values_mut() {
-        children.sort_unstable();
-    }
-    let mut roots = BTreeMap::new();
-    for top_root in top {
-        for root in crate::data_interface::generation_root::enumerate_generation_roots_in_subtree(
-            top_root,
-            unit_types,
-            |candidate| {
-                let node = nodes.get(&candidate).ok_or_else(|| {
-                    anyhow::anyhow!("baseline ownership graph is missing {candidate}")
-                })?;
-                Ok(crate::data_interface::generation_root::SubtreeElement {
-                    noun: node.noun.clone(),
-                    name: node.name.clone(),
-                    members: members.get(&candidate).cloned().unwrap_or_default(),
-                })
-            },
-        )? {
-            roots.entry(root.root.to_pdms_str()).or_insert(root);
-        }
-    }
-    Ok(ModelUpdatePlan {
-        work_items: roots
-            .into_iter()
-            .map(|(target_refno, root)| ModelWorkItem {
-                dbnum,
-                db_type: db_type.to_string(),
-                source_end_sesno: end_sesno,
-                action: ModelWorkAction::RegenRoot,
-                target_refno,
-                noun: root.noun,
-            })
-            .collect(),
-        ..Default::default()
-    })
 }
 
 #[derive(Deserialize)]
@@ -3077,74 +3001,6 @@ struct BaselineNodeRow {
     noun: String,
     #[serde(default)]
     name: String,
-}
-
-async fn load_baseline_nodes(dbnum: u32) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
-    const PAGE_SIZE: usize = 5_000;
-    let mut nodes = HashMap::new();
-    loop {
-        let offset = nodes.len();
-        let mut response = SUL_DB
-            .query(format!(
-                "SELECT id, owner, noun, name FROM pe \
-                 WHERE dbnum = {dbnum} AND deleted != true \
-                 ORDER BY id LIMIT {PAGE_SIZE} START {offset};"
-            ))
-            .await
-            .map_err(|error| anyhow::anyhow!("读取 dbnum={dbnum} 基线 PE 图失败: {error}"))?
-            .check()
-            .map_err(|error| anyhow::anyhow!("读取 dbnum={dbnum} 基线 PE 图语句失败: {error}"))?;
-        let rows = response
-            .take::<Vec<BaselineNodeRow>>(0)
-            .map_err(|error| anyhow::anyhow!("解码 dbnum={dbnum} 基线 PE 图失败: {error}"))?;
-        let page_len = rows.len();
-        for row in rows {
-            let refno = pe_thing_to_refno(row.id)?;
-            let owner = row
-                .owner
-                .map(RefnoEnum::from)
-                .filter(|owner| owner.is_valid() && *owner != refno);
-            nodes.insert(
-                refno,
-                OwnerNode {
-                    owner,
-                    noun: row.noun,
-                    name: row.name,
-                },
-            );
-        }
-        if page_len < PAGE_SIZE {
-            return Ok(nodes);
-        }
-    }
-}
-
-/// Model work for a `dbnum` that has just established its baseline.
-///
-/// The baseline full-parse produces data only, and incremental windows after it
-/// regenerate nothing but the roots they themselves touched — so without this
-/// the elements that are never edited again would have no geometry, ever.
-///
-/// Traverse the active ownership forest with the same root enumeration used by
-/// incremental windows, preserving delivery-unit boundaries and normal granularity.
-async fn baseline_model_plan(
-    dbnum: u32,
-    db_type: &str,
-    end_sesno: i32,
-) -> anyhow::Result<ModelUpdatePlan> {
-    if db_type != "DESI" {
-        return Ok(ModelUpdatePlan::default());
-    }
-    let nodes = load_baseline_nodes(dbnum).await.map_err(|error| {
-        anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
-    })?;
-    baseline_work_items(
-        dbnum,
-        db_type,
-        end_sesno,
-        &nodes,
-        &configured_delivery_unit_types(),
-    )
 }
 
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
@@ -3307,6 +3163,26 @@ impl AiosDBManager {
         project: &str,
         dbnum: u32,
     ) -> anyhow::Result<usize> {
+        // 规格工具那条路不起 worker：基线的全量生成根不在这里生成，留给启动核对
+        // （`startup_reconcile`）按凭证缺口排 ModelOnly 恢复任务。
+        self.initialize_project_dbnum(
+            project,
+            dbnum,
+            crate::data_interface::dbnum_initialize::ModelHalf::Skip,
+        )
+        .await
+        .map(|outcome| outcome.elements)
+    }
+
+    /// [`Self::initialize_project_dbnum_baseline`] 带模型半边的形态（ADR-077）：`ModelHalf::Generate`
+    /// 时属性面与整库模型在同一个初始化里双 lane 直写、收尾一笔盖两枚水位——`bin/initialize_ams_dbnums
+    /// --with-model` 用它在真库上量 ADR-077 D3 那道门。
+    pub async fn initialize_project_dbnum(
+        &self,
+        project: &str,
+        dbnum: u32,
+        model: crate::data_interface::dbnum_initialize::ModelHalf,
+    ) -> anyhow::Result<crate::data_interface::dbnum_initialize::InitializationOutcome> {
         // Direct initializers do not run the automatic watcher's sweep. Install
         // the same full Catalogue/identity manifests first; watch_dbnums only
         // chooses DESI work and must not remove dependencies of that work.
@@ -3316,19 +3192,49 @@ impl AiosDBManager {
         let mut warnings = Vec::new();
         let mut duplicate_paths = BTreeMap::new();
         // 按 dbnum 点名的入口不设范围门：调用方已经自己决定了要哪个库，
-        // 再套一层 MDB 门只会把点名挡掉。
-        let candidates = self
-            .scan_project_candidates(
-                project,
-                &project_dir,
-                &UpdateScope::unrestricted(),
-                &mut warnings,
-                // 不设限的点名入口没有「范围外」一说，这份清单必然为空。
-                &mut Vec::new(),
-                &mut duplicate_paths,
+        // 再套一层 MDB 门只会把点名挡掉；`watch_dbnums` / `--debug-dbnum` 两道监听门
+        // 同理不生效（`in_scope_with` 对 unrestricted 放行）。
+        let mut scanned = self.scan_project_candidates(
+            project,
+            &project_dir,
+            &UpdateScope::unrestricted(),
+            &mut warnings,
+            // 不设限的点名入口没有「范围外」一说，这份清单必然为空。
+            &mut Vec::new(),
+            &mut duplicate_paths,
+        );
+        let candidates = scanned.shift_remove(&dbnum).ok_or_else(|| {
+            // 门都不设了还找不到，只剩三种成因：目录里没这个文件、它属于别的项目
+            // （跨项目过滤，数据域不是口味）、文件头读不出来（在 warnings 里）。把现场
+            // 一起报出来，别让人又去翻配置名单。
+            let mut seen = scanned.keys().copied().collect::<Vec<_>>();
+            seen.sort_unstable();
+            const LISTED: usize = 24;
+            let listed = seen
+                .iter()
+                .take(LISTED)
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = seen.len().saturating_sub(LISTED);
+            anyhow::anyhow!(
+                "项目 {project} 未找到 dbnum={dbnum}：目录 {} 下扫到 {} 个库{}{}",
+                project_dir.display(),
+                seen.len(),
+                if seen.is_empty() {
+                    String::new()
+                } else if more > 0 {
+                    format!("（{listed} …还有 {more} 个）")
+                } else {
+                    format!("（{listed}）")
+                },
+                if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!("；扫描告警：{}", warnings.join("；"))
+                }
             )
-            .shift_remove(&dbnum)
-            .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
+        })?;
         if candidates.len() != 1 {
             anyhow::bail!(
                 "项目 {project} 的 dbnum={dbnum} 候选文件数量为 {}",
@@ -3336,8 +3242,6 @@ impl AiosDBManager {
             );
         }
         let cand = &candidates[0];
-        // 规格工具那条路不起 worker：基线的全量生成根不在这里生成，留给启动核对
-        // （`startup_reconcile`）按凭证缺口排 ModelOnly 恢复任务。
         self.initialize_dbnum_baseline(
             project,
             cand.db_num,
@@ -3346,9 +3250,9 @@ impl AiosDBManager {
             cand.extract_parent.as_deref(),
             &cand.db_type,
             cand.file_latest_sesno,
+            model,
         )
         .await
-        .map(|outcome| outcome.elements)
     }
 
     /// 把项目的 SYS 元数据库（SYST / COMM / MISC / GLB / GLOB 与 DICT）里**还没建立水位的**那些
@@ -3399,6 +3303,7 @@ impl AiosDBManager {
                     cand.extract_parent.as_deref(),
                     &cand.db_type,
                     cand.file_latest_sesno,
+                    crate::data_interface::dbnum_initialize::ModelHalf::Skip,
                 )
                 .await
                 .map(|outcome| outcome.elements)
@@ -3427,6 +3332,11 @@ impl AiosDBManager {
     /// 才不会各自长出一套。`file_path` 单独传是为了读那一页会话页——基线也要把
     /// 「已应用保存的写入时刻」存进水位表（plant-ui ADR-0019 Q6），否则一个刚建基线
     /// 就被换回旧文件的库，阻断卡上永远只有「应用时刻无记录」。
+    ///
+    /// 2026-09-14 起（ADR-077）这里只剩薄壳：身份门、半截基线清理、路由到
+    /// [`dbnum_initialize::initialize`]（解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾）。
+    /// `model` 说要不要随初始化生成整库模型：dbnum 任务那条路 `Generate`；规格工具 / SYS meta
+    /// 那条路 `Skip`（模型留给启动核对按凭证缺口排 ModelOnly）。
     pub(crate) async fn initialize_dbnum_baseline(
         &self,
         project: &str,
@@ -3436,34 +3346,11 @@ impl AiosDBManager {
         extract_parent: Option<&std::path::Path>,
         db_type: &str,
         file_latest_sesno: i32,
-    ) -> anyhow::Result<BaselineOutcome> {
-        #[derive(Deserialize)]
-        struct CountRow {
-            count: usize,
-        }
-
-        async fn scalar_count(sql: String) -> anyhow::Result<usize> {
-            let rows = SUL_DB.query(sql).await?.check()?.take::<Vec<CountRow>>(0)?;
-            Ok(rows.first().map(|row| row.count).unwrap_or_default())
-        }
-
-        /// pe 行数与 WORL 根数。`dbnum_info_table` 不再参与基线完整性判定（ADR-071 D6：统计由
-        /// 任务收尾从目标索引序列化，`count` 是活元素数，与「pe 行数」本就不是同一口径）。
-        async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)> {
-            let pe_count = scalar_count(format!(
-                "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL"
-            ))
-            .await?;
-            // 走 `pe_dbnum_noun` 整键索引（common.surql）：`string::uppercase(noun)` 会让计划器
-            // 整体回退成全表扫（58 万行 2.8 s，每库两次），而 `ElementRows::render` 落的 noun
-            // 就是 PDMS 大写类型名（全量实测 0 行 `noun != string::uppercase(noun)`）。
-            let root_count = scalar_count(format!(
-                "SELECT count() AS count FROM pe \
-                 WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
-            ))
-            .await?;
-            Ok((pe_count, root_count))
-        }
+        model: crate::data_interface::dbnum_initialize::ModelHalf,
+    ) -> anyhow::Result<crate::data_interface::dbnum_initialize::InitializationOutcome> {
+        use crate::data_interface::dbnum_initialize::{
+            InitializationOutcome, InitializationRequest, baseline_counts, initialize,
+        };
 
         // 基线也要留下文件身份（file_path / db_type / file_name / 观察值）：
         // `dbnum_watermark` 既是回退/迁移检测的登记基准，也是按需 CATA 闭包
@@ -3494,7 +3381,7 @@ impl AiosDBManager {
         }
 
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
-        let (mut count, mut root_count) = baseline_counts(dbnum).await?;
+        let (mut count, root_count) = baseline_counts(dbnum).await?;
         if baseline_has_uncommitted_rows(count, applied_sesno) {
             // 半截基线只有一种清法（ADR-071 S5，d-300）：没有「预备中的初始化 run」可认领它。
             let wiped = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?;
@@ -3502,135 +3389,44 @@ impl AiosDBManager {
                 "dbnum={dbnum} 清理未提交基线残留 PE={}，从水位 0 重新解析",
                 wiped.pe_rows
             );
-            (count, root_count) = baseline_counts(dbnum).await?;
+            count = 0;
         }
-        let mut parsed_count = None;
-        if baseline_needs_full_parse(count, applied_sesno) {
-            // 单文件基线摄入（`Fresh` 整库写，不动水位；失败先清库再 Err）。冻结在本轮复核过的
-            // `file_latest_sesno` 上，与模型面的冻结源同一个会话；文件头 dbnum / db_type 与这里
-            // 点名的不符就一行都不落。
-            let ingested = crate::versioned_db::baseline_ingest::ingest_file(
-                &self.db_option,
-                project,
-                file_path,
-                dbnum,
-                db_type,
-                Some(u32::try_from(file_latest_sesno)?),
-            )
-            .await?;
-            parsed_count = Some(ingested.elements);
-            (count, root_count) = baseline_counts(dbnum).await?;
-            let parent = extract_parent
-                .map(std::path::Path::to_path_buf)
-                .or_else(|| crate::data_interface::extract_family::parent_path_of(file_path))
-                .filter(|path| path.is_file() && path != file_path);
-            if let Some(parent) = parent {
-                match crate::data_interface::extract_family::parent_gap_refno_count(
-                    file_path, &parent,
-                ) {
-                    Ok(0) => {}
-                    Ok(gap) => {
-                        println!(
-                            "dbnum={dbnum} 父层有 {gap} 个叶子缺号，补解析 {}",
-                            parent.display()
-                        );
-                        // 母库整库再摄入进同一个 dbnum：`Fresh` 已有行赢，叶子 extract 里正在改的
-                        // 版本不会被母库的旧版本覆盖；目标会话取母库最新。单文件入口没有「清单里
-                        // 没这个文件」的静默空转——打不开、身份不符、没有会话都是显式 Err。
-                        crate::versioned_db::baseline_ingest::ingest_file(
-                            &self.db_option,
-                            project,
-                            &parent,
-                            dbnum,
-                            db_type,
-                            None,
-                        )
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "dbnum={dbnum} 父层补解析失败 {}；不推进 applied_sesno: {error:#}",
-                                parent.display()
-                            )
-                        })?;
-                        (count, root_count) = baseline_counts(dbnum).await?;
-                        parsed_count = None;
-                    }
-                    Err(error) => anyhow::bail!(
-                        "dbnum={dbnum} 父层缺号探测失败 {}: {error:#}",
-                        parent.display()
-                    ),
-                }
-            }
-        }
-        // `pe_count == info_count` 那道对账 2026-09-10 随 ADR-071 D6 退了：统计不再由写事务逐笔
-        // 维护、也不在基线收尾重建，而是任务收尾从目标索引序列化，口径是活元素数——拿它跟 pe 行数
-        // 对账既不成立也没必要（序列化没有漂移可抓）。基线完整性只看 `baseline_parse_matches`。
         // 与增量收口同一把尺子：水位落在 `file_latest_sesno` 上，就存那一条保存的写入时刻。
-        let applied_sesno_time = session_time_rfc3339(project, file_path, file_latest_sesno);
-        if baseline_parse_confirmed_empty(parsed_count, count, root_count) {
-            // 空库（无 PE 或仅 WORL 根）：全量解析成功但确实没有业务元素。
-            crate::data_interface::increment_tail::finalize_baseline(
-                dbnum,
-                file_latest_sesno,
-                applied_sesno_time.as_deref(),
-                true,
+        let target_time = session_time_rfc3339(project, file_path, file_latest_sesno);
+        if baseline_needs_full_parse(count, applied_sesno) {
+            // 解析 ∥ 生成 ∥ 两条写入 lane → 核对 → 一笔收尾（applied + model + 写入标记）。
+            // 失败先清库再 Err；核对不过 Err 不清库（下一轮按半截基线清）。
+            return initialize(
+                &self.db_option,
+                InitializationRequest {
+                    project,
+                    dbnum,
+                    db_type,
+                    file_path,
+                    file_name,
+                    extract_parent,
+                    file_latest_sesno,
+                    target_time,
+                    model,
+                },
             )
-            .await?;
-            return Ok(BaselineOutcome::default());
+            .await;
         }
-        if count == 0 {
-            anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", dbnum);
-        }
-        if let Some(parsed_count) = parsed_count
-            && !baseline_parse_matches(count, root_count, parsed_count)
-        {
-            anyhow::bail!(
-                "dbnum={} 基线不完整: PE={} WORL={} 本次成功解析={}; 不推进 applied_sesno",
-                dbnum,
-                count,
-                root_count,
-                parsed_count
-            );
-        }
-
-        // 全量生成根先枚举、再推水位：枚举失败就整体不推进，下一轮重来（applied
-        // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
-        // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
-        // 初始化发布 run 已退役（ADR-071 S5，d-300），pending 行也退了（ADR-072 D5）：基线的
-        // 全量生成根**随返回值交给本 dbnum 任务**自己生成、合块落库；库里只留水位。
-        let plan = baseline_model_plan(dbnum, db_type, file_latest_sesno).await?;
-        let units: Vec<UnitTask> = plan
-            .work_items
-            .iter()
-            .filter(|item| item.action == ModelWorkAction::RegenRoot)
-            .map(|item| UnitTask {
-                dbnum,
-                root_refno: item.target_refno.clone(),
-                noun: item.noun.clone(),
-                source_end_sesno: item.source_end_sesno,
-                attempts: 0,
-                old_owner: None,
-                new_owner: None,
-                transform: None,
-            })
-            .collect();
+        // 已有行、水位也在——只有规格工具重复点名一个已建基线的库才走到这里：不重解析、不动模型，
+        // 只把这一版的水位与空基线凭据再收口一次（单调 `math::max`，幂等）。
         crate::data_interface::increment_tail::finalize_baseline(
             dbnum,
             file_latest_sesno,
-            applied_sesno_time.as_deref(),
+            target_time.as_deref(),
             false,
         )
         .await?;
-        if !units.is_empty() {
-            println!(
-                "dbnum={} 基线已建立，{} 个全量生成根随本任务生成",
-                dbnum,
-                units.len()
-            );
-        }
-        Ok(BaselineOutcome {
+        println!(
+            "dbnum={dbnum} 已有基线（PE={count} WORL={root_count} applied_sesno={applied_sesno}），未重解析"
+        );
+        Ok(InitializationOutcome {
             elements: count,
-            units,
+            ..InitializationOutcome::default()
         })
     }
 
@@ -5034,6 +4830,7 @@ impl AiosDBManager {
         progress: &Option<ManualUpdateProgress>,
         warnings: &mut Vec<String>,
         side_actions: &mut Vec<ModelWorkItem>,
+        initialization: &mut Option<crate::data_interface::dbnum_initialize::InitializationOutcome>,
     ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
         let dbnum = cand.db_num;
         let obs = FileObservation {
@@ -5268,7 +5065,9 @@ impl AiosDBManager {
             })
         });
         if initial_load {
-            Self::stage(dbnum, "initial_load", "首次按需初始化（全量基线）");
+            Self::stage(dbnum, "initial_load", "首次按需初始化（全量基线 + 整库模型，双 lane 直写）");
+            // ADR-077：属性面与模型面在 `dbnum_initialize` 里并发直写、收尾一笔盖两枚水位并收写入标记。
+            // 模型单元的回执与「任务已收尾」经 `initialization` 交回 batch body，本函数不再回传 UnitTask。
             return match self
                 .initialize_dbnum_baseline(
                     project,
@@ -5278,37 +5077,49 @@ impl AiosDBManager {
                     cand.extract_parent.as_deref(),
                     &cand.db_type,
                     cand.file_latest_sesno,
+                    crate::data_interface::dbnum_initialize::ModelHalf::Generate,
                 )
                 .await
             {
-                Ok(BaselineOutcome {
-                    elements: count,
-                    units,
-                }) => (
-                    Some(DataBatchResult {
-                        dbnum,
-                        db_type: cand.db_type.clone(),
-                        file_path: cand.path.display().to_string(),
-                        start_sesno: 0,
-                        end_sesno: cand.file_latest_sesno,
-                        // 首次初始化没有保存窗口（左端为 0），两端都不摆：只有右端
-                        // 的一格时刻更像半个窗口，比留空更容易被误读。
-                        start_sesno_time: None,
-                        end_sesno_time: None,
-                        status: BatchStatus::Applied,
-                        message: Some(format!(
-                            "首次按需初始化完成：解析 {count} 个元素、建立增量水位，{} 个全量生成根随本任务生成",
-                            units.len()
-                        )),
-                        merged_sesnos: Vec::new(),
-                        merged_sesno_times: Vec::new(),
-                        changed_elements: count,
-                        added_elements: 0,
-                        modified_elements: 0,
-                        deleted_elements: 0,
-                    }),
-                    units,
-                ),
+                Ok(outcome) => {
+                    let count = outcome.elements;
+                    let generated = outcome
+                        .units
+                        .iter()
+                        .filter(|unit| unit.status == UnitGenStatus::Generated)
+                        .count();
+                    let failed = outcome.units.len() - generated;
+                    let message = match &outcome.model {
+                        Some(_) => format!(
+                            "首次按需初始化完成：解析 {count} 个元素、整库模型 {generated} 根已直写（失败 {failed}），水位与写入标记一笔收口"
+                        ),
+                        None => format!("首次按需初始化完成：解析 {count} 个元素、建立增量水位（本库无模型半边）"),
+                    };
+                    warnings.extend(outcome.warnings.iter().cloned());
+                    *initialization = Some(outcome);
+                    (
+                        Some(DataBatchResult {
+                            dbnum,
+                            db_type: cand.db_type.clone(),
+                            file_path: cand.path.display().to_string(),
+                            start_sesno: 0,
+                            end_sesno: cand.file_latest_sesno,
+                            // 首次初始化没有保存窗口（左端为 0），两端都不摆：只有右端
+                            // 的一格时刻更像半个窗口，比留空更容易被误读。
+                            start_sesno_time: None,
+                            end_sesno_time: None,
+                            status: BatchStatus::Applied,
+                            message: Some(message),
+                            merged_sesnos: Vec::new(),
+                            merged_sesno_times: Vec::new(),
+                            changed_elements: count,
+                            added_elements: 0,
+                            modified_elements: 0,
+                            deleted_elements: 0,
+                        }),
+                        Vec::new(),
+                    )
+                }
                 Err(error) => (
                     Some(DataBatchResult {
                         dbnum,
@@ -6895,9 +6706,11 @@ mod tests {
 
     /// A baseline used to advance its watermark and queue nothing, so every root
     /// the user never edited again stayed modelless forever (incremental windows
-    /// only revisit what changed). Design baselines must therefore hand back
-    /// generation work; catalogue and SYS meta baselines legitimately hand back
-    /// none, since neither holds generation roots.
+    /// only revisit what changed). Design baselines must therefore generate the
+    /// whole database's roots — since ADR-077 D6 they come from the file through
+    /// the same `enumerate_generation_roots_in_subtree` walk (deduplicated,
+    /// delivery-unit granularity, never a WORL / SITE / ZONE), no longer from a
+    /// paged read of `pe`.
     #[test]
     fn a_design_baseline_uses_deduplicated_fine_grained_roots() {
         let r = |n| RefnoEnum::from(RefU64((7997u64 << 32) | n));
@@ -6912,25 +6725,33 @@ mod tests {
             (r(8), owner_node(Some(r(7)), "GENSEC")),
             (r(9), owner_node(Some(r(3)), "EQUI")),
         ]);
+        let mut members: HashMap<RefnoEnum, Vec<RefnoEnum>> = HashMap::new();
+        for (&refno, node) in &nodes {
+            if let Some(owner) = node.owner {
+                members.entry(owner).or_default().push(refno);
+            }
+        }
+        let roots = crate::data_interface::generation_root::enumerate_generation_roots_in_subtree(
+            r(1),
+            &resolve_delivery_unit_types(&[]),
+            |candidate| {
+                let node = nodes.get(&candidate).expect("graph node");
+                Ok(crate::data_interface::generation_root::SubtreeElement {
+                    noun: node.noun.clone(),
+                    name: node.name.clone(),
+                    members: members.get(&candidate).cloned().unwrap_or_default(),
+                })
+            },
+        )
+        .unwrap();
 
-        let plan = baseline_work_items(7997, "DESI", 76, &nodes, &resolve_delivery_unit_types(&[]))
-            .unwrap();
-
-        assert_eq!(plan.work_items.len(), 3);
-        assert!(
-            plan.work_items
-                .iter()
-                .all(|item| item.action == ModelWorkAction::RegenRoot
-                    && item.dbnum == 7997
-                    && item.source_end_sesno == 76)
-        );
-        let roots = plan
-            .work_items
+        assert_eq!(roots.len(), 3);
+        let picked = roots
             .iter()
-            .map(|item| (item.target_refno.clone(), item.noun.clone()))
+            .map(|root| (root.root.to_pdms_str(), root.noun.clone()))
             .collect::<HashSet<_>>();
         assert_eq!(
-            roots,
+            picked,
             HashSet::from([
                 (r(4).to_pdms_str(), "BRAN".to_string()),
                 (r(7).to_pdms_str(), "STRU".to_string()),
@@ -6938,16 +6759,15 @@ mod tests {
             ])
         );
         assert!(
-            plan.work_items
+            roots
                 .iter()
-                .all(|item| !matches!(item.noun.as_str(), "WORL" | "SITE" | "ZONE"))
+                .all(|root| !matches!(root.noun.as_str(), "WORL" | "SITE" | "ZONE"))
         );
-
+        // 只有 DESI 有模型半边：非 DESI 库的初始化不枚举根（`dbnum_initialize::model_half` 直接跳过）。
+        let source = include_str!("dbnum_initialize.rs");
         assert!(
-            baseline_work_items(7997, "CATA", 76, &nodes, &resolve_delivery_unit_types(&[]))
-                .unwrap()
-                .work_items
-                .is_empty()
+            source.contains("if !db_type.eq_ignore_ascii_case(\"DESI\")"),
+            "非 DESI 的初始化必须跳过模型半边"
         );
     }
 
@@ -6999,47 +6819,64 @@ mod tests {
 
     /// 基线只吃**点名的那一个文件**：叶子基线冻结在本轮复核过的 `file_latest_sesno`，父层补缺
     /// 取母库最新（`None`）。legacy 时代靠一份受限配置（`included_db_files = [本文件]`）去约束
-    /// 全量同步壳；壳退役后这条纪律直接长在入参上——这里钉两个调用点的形状。
+    /// 全量同步壳；壳退役后这条纪律直接长在入参上。2026-09-14 起（ADR-077）两个摄入点住在
+    /// `dbnum_initialize::data_half`（都只往属性 lane 流），薄壳这里只剩身份门与路由。
     #[test]
     fn on_demand_baseline_ingests_exactly_the_named_file() {
-        let source = include_str!("manual_update.rs");
-        let body = source
+        let shell = include_str!("manual_update.rs")
             .split_once("pub(crate) async fn initialize_dbnum_baseline(")
             .expect("initialize_dbnum_baseline 必须存在")
             .1
             .split_once("pub async fn preview_manual_update(")
             .expect("preview follows baseline")
             .0;
+        assert!(
+            !shell.contains("baseline_ingest::ingest_file(")
+                && !shell.contains("stream_frozen_into("),
+            "薄壳不自己摄入：解析归 dbnum_initialize 的数据半边: {shell}"
+        );
+        assert!(
+            shell.contains("file_path,") && shell.contains("file_latest_sesno,") && shell.contains("initialize("),
+            "薄壳把点名的文件与本轮复核过的 file_latest_sesno 原样交给编排: {shell}"
+        );
+        assert!(
+            !shell.contains("included_db_files") && !shell.contains("manual_db_nums"),
+            "基线不再经受限配置绑清单: {shell}"
+        );
+
+        let body = include_str!("dbnum_initialize.rs")
+            .split_once("async fn data_half(")
+            .expect("data_half")
+            .1
+            .split_once("async fn model_half(")
+            .expect("model_half follows")
+            .0;
         assert_eq!(
-            body.matches("baseline_ingest::ingest_file(").count(),
+            body.matches("baseline_ingest::stream_frozen_into(").count(),
             2,
             "叶子基线 + 父层补缺，恰好两个摄入调用点: {body}"
         );
         let leaf = body
-            .split_once("baseline_ingest::ingest_file(")
+            .split_once("baseline_ingest::stream_frozen_into(")
             .unwrap()
             .1
             .split_once(".await")
             .unwrap()
             .0;
         assert!(
-            leaf.contains("file_path,") && leaf.contains("Some(u32::try_from(file_latest_sesno)?)"),
-            "叶子基线必须冻结在本轮复核过的 file_latest_sesno: {leaf}"
+            leaf.contains("frozen,") && leaf.contains("&sender"),
+            "叶子基线用编排冻好的源（本轮复核过的 file_latest_sesno）、流进属性 lane: {leaf}"
         );
         let parent = body
-            .rsplit_once("baseline_ingest::ingest_file(")
+            .rsplit_once("baseline_ingest::frozen_source_for(")
             .unwrap()
             .1
-            .split_once(".await")
+            .split_once(")?")
             .unwrap()
             .0;
         assert!(
             parent.contains("&parent,") && parent.contains("None,"),
             "父层补缺摄入母库文件、目标会话取母库最新: {parent}"
-        );
-        assert!(
-            !body.contains("included_db_files") && !body.contains("manual_db_nums"),
-            "基线不再经受限配置绑清单: {body}"
         );
     }
 
@@ -7053,10 +6890,10 @@ mod tests {
         assert!(!baseline_needs_full_parse(34_653, 83));
         // `pe_count == info_count` 那道对账随 ADR-071 D6 退役：基线分支不许再读 dbnum_info_table。
         let baseline = include_str!("manual_update.rs")
-            .split_once("async fn baseline_counts(dbnum: u32)")
-            .expect("baseline_counts")
+            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .expect("initialize_dbnum_baseline")
             .1
-            .split_once("Ok(BaselineOutcome {\n            elements: count,")
+            .split_once("pub async fn preview_manual_update(")
             .expect("baseline branch end")
             .0;
         assert!(
@@ -7066,14 +6903,23 @@ mod tests {
             "基线完整性不再拿 dbnum_info_table 对账、也不在这里重建统计（ADR-071 D6）"
         );
 
-        let source = include_str!("manual_update.rs");
-        let cleanup = source
+        let cleanup = baseline
             .find("if baseline_has_uncommitted_rows(count, applied_sesno)")
             .expect("baseline must detect uncommitted rows");
-        let parse = source
-            .find("baseline_ingest::ingest_file(")
-            .expect("baseline must invoke the single-file ingest");
+        let parse = baseline
+            .find("if baseline_needs_full_parse(count, applied_sesno)")
+            .expect("baseline must route the full parse into the orchestration");
         assert!(cleanup < parse, "stale rows must be wiped before replay");
+        // 水位不再在摄入一完就先推（ADR-077 D7 / D12）：全量解析那条路上没有 `finalize_baseline`，
+        // 它只剩「已有基线、不重解析」那条幂等路。
+        let full_parse = &baseline[parse..];
+        let idempotent = full_parse
+            .find("// 已有行、水位也在")
+            .expect("idempotent tail");
+        assert!(
+            !full_parse[..idempotent].contains("finalize_baseline("),
+            "全量解析那条路的 applied 由 dbnum_initialize 的收尾一笔盖"
+        );
     }
 
     /// 回退整库重建（live，ADR-021）：`wipe_dbnum_for_reinit` 一次做对四件事——

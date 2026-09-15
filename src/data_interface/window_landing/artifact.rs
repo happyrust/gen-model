@@ -486,7 +486,12 @@ impl From<&WireCataDependencyRows> for CataDependencyRows {
         manifest.by_dbnum = manifest_by_dbnum;
         manifest.missing = rows.missing;
         manifest.missing_samples = rows.missing_samples.clone();
-        Self { by_dbnum, manifest }
+        // 解析账不过线：落库侧只有渲染 / 字节那一半的账（`CataDependencyReport` 里零值不序列化）。
+        Self {
+            by_dbnum,
+            manifest,
+            account: Default::default(),
+        }
     }
 }
 

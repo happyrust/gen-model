@@ -257,10 +257,10 @@ impl ApiError {
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
         if error
-            .downcast_ref::<crate::fast_model::model_memory_store::OverlayBackpressure>()
+            .downcast_ref::<crate::fast_model::model_memory_store::OverlayRejected>()
             .is_some()
         {
-            Self::service_unavailable("overlay_backpressure", message)
+            Self::service_unavailable("overlay_rejected", message)
         } else if matches!(
             error.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
             Some(
@@ -346,7 +346,7 @@ fn dependency_unavailable(
 /// 这几个 503 是「等一等再来」，值得给客户端一个退避时长；别的 503 是「现在不行」，
 /// 不承诺什么时候行，给了反而像承诺。
 const RETRY_AFTER_CODES: [&str; 3] = [
-    "overlay_backpressure",
+    "overlay_rejected",
     "dependency_db_initializing",
     "dependency_db_unreadable",
 ];
@@ -1393,15 +1393,12 @@ mod tests {
     }
 
     #[test]
-    fn overlay_backpressure_is_retryable_service_unavailable() {
+    fn overlay_rejection_is_retryable_service_unavailable() {
         let error = ApiError::from_domain(anyhow::Error::new(
-            crate::fast_model::model_memory_store::OverlayBackpressure {
-                projected_bytes: 11,
-                max_bytes: 10,
-            },
+            crate::fast_model::model_memory_store::OverlayRejected,
         ));
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.code, "overlay_backpressure");
+        assert_eq!(error.code, "overlay_rejected");
         let response = error.into_response();
         assert_eq!(
             response.headers().get(axum::http::header::RETRY_AFTER),

@@ -11,7 +11,7 @@ import re
 import subprocess
 import uuid
 
-from run_window import REPO, run_case
+from run_window import REPO, PYTHON, run_case
 from verify import read_json, elements_by_id, same_geometry, business_residuals
 
 PROJECT = Path("D:/AVEVA/Projects/E3D3.1/AvevaMarineSample")
@@ -159,7 +159,7 @@ def main():
                 last = read_json(out / "07-cleanup.json")["target"]
                 merged = out / "merged-net-window.json"
                 with (out / "merged-net-window.log").open("w", encoding="utf-8") as log:
-                    subprocess.run([str(REPO / "python/.venv/Scripts/python.exe"),
+                    subprocess.run([str(PYTHON),
                         str(REPO / "scripts/increment_matrix/net_window.py"),
                         str(db), str(first + 1), str(last), str(merged)], check=True, stdout=log, stderr=log)
                 summary["business_residuals"] = business_residuals(read_json(merged)["summary"])

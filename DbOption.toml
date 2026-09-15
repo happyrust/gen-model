@@ -105,11 +105,13 @@ v_user = "root"
 v_password = "root"
 #【修订 2026-09-13，ADR-074】默认 mem：数据库在服务进程内，退出即消失。
 # 需要持久化时先启动外部 SurrealDB，再显式改成 rocksdb；服务只连接、不拉起数据库。
-store_mode = "mem"
+#【本机开发档 2026-09-14】这里取 rocksdb：连 v_ip:v_port 上那台**以 RocksDB 后端起的**
+# surreal（scripts/Start-Surreal8009.ps1），本进程只连不拉。配合下面的 incremental-overlay：
+# kv-mem 只留新生成的 root overlay，冷 root 直接查 RocksDB。
+store_mode = "rocksdb"
 # RocksDB durable mode keeps only newly generated root overlays in kv-mem.
 # Cold roots are queried directly from RocksDB and never hydrated into kv-mem.
 model_cache_mode = "incremental-overlay"
-model_cache_max_bytes = 2147483648
 
 #【新增 2026-08-27】in_memory_db —— 已被 store_mode 取代的兼容开关；默认不写 = 由上面的
 # store_mode 决定。只有未写 store_mode 时，显式 true 才选 embedded-mem、false 选 external。
@@ -221,6 +223,10 @@ room_membership = false
 #【变更 2026-09-09】暂时改回 [7998, 8000]：7997 的清单行与房间分片已在 09-08 晚的全监听启动里
 # 建到 155（覆盖校验仍全 MDB 过关），而 7997 的文件轮两次复现「collecting 后失锁死等」
 #（root 24381/100817，已交增量线排查）；监听它只会把队列再堵死。等 stall 修好再扩回全集。
+#【变更 2026-09-15】曾为 1112 加过一条：按 dbnum 点名的初始化入口（`initialize_project_dbnum_baseline`）
+# 一度被这道监听门挡住、还报成「未找到 dbnum=1112」。同日已修在代码里——点名入口
+#（`UpdateScope::unrestricted()`）不再受 `watch_dbnums` / `--debug-dbnum` 两道监听门管，
+# 名单只圈 watcher 自己扫出来的活，于是撤回，仍是 [7998, 8000]。
 watch_dbnums = [7998, 8000]
 
 #【新增 2026-09-03】model_incremental_types —— 模型增量类型限定，默认不写 = 不限类型
