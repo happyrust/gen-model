@@ -11,6 +11,10 @@ mod handlers;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
+/// 型材 PLINE 线端点（`POST /api/v1/element/plines`），plant3d-web 测量拾取层 Pline 过滤器的来源。
+pub mod plines;
+/// 构件目录 P 点集端点（`POST /api/v1/element/ptset`），plant3d-web 测量捕捉的 P-Point 来源。
+pub mod ptset;
 /// 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`），自 plant-model-gen 移植；
 /// 契约路径由 plant3d-web 写死，不在 `/api/v1` 下（`docs/plans/2026-09-12-review-backend-port-plan.md`）。
 pub mod review;
@@ -538,6 +542,10 @@ async fn serve_with_ready(
             post(handlers::element_attributes),
         )
         .route("/api/v1/element/ensure", post(handlers::element_ensure))
+        // 构件目录 P 点集（E3D PTSET）：直读 dabacon，不经投影；语义见 `web_service::ptset`。
+        .route("/api/v1/element/ptset", post(ptset::element_ptset))
+        // 型材 PLINE 线（E3D `PLSTART / PLEND pline`）：复用建型材实体的截面链；语义见 `web_service::plines`。
+        .route("/api/v1/element/plines", post(plines::element_plines))
         .route(
             "/api/v1/model/history/generate",
             post(handlers::model_history_generate),

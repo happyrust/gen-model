@@ -804,6 +804,99 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   几何时，参数须与它们对齐，见 `web_service::mesh_glb` 的
   `repository_unit_meshes_convert_end_to_end`（`cargo test -- --nocapture` 打印包围盒）。
 
+### 4.11.1 `POST /api/v1/element/ptset` — 构件目录 P 点集（E3D `PTSET`）
+
+给 plant3d-web 测量捕捉（P-Point 吸附、点→线垂距的轴线）用。此前浏览器端的 P-Point 只有
+legacy 模型包的 `ptsets.parquet` 或旧后端 `:3100` `/api/pdms/ptset/{refno}` 两条来源，
+gen-model-v1 读透形态两样都没有（投影只存网格与世界矩阵，`ptset` 从未落库）。这条端点**不经
+投影、不连库**：与 `element/attributes` 同一口径直读 dabacon 文件，用 e3d-model 的目录链
+`SPRE → SCOM → PTRE → PTSE`（`e3d_model::catalogue_point_set`）解出整个点集——与隐式管身两端
+所用的 P 点是同一份求值环境算出来的数字（`web_service::ptset`）。
+
+- 请求：`{ "refno": "24381/145031", "include_members": false }`（`refno` 收 `a/b` / `a_b` /
+  带 `=` 前缀；身份三元组可选，同 §3）。`include_members=true` 一并解**直属成员**的点集：
+  BRAN / EQUI 这类容器自身没有 `SPRE`，测量悬停在容器上时要显示的是成员的 P 点（E3D 元素级
+  捕捉的等价口径），前端用这一发代替逐成员请求。
+- 响应（构件字段平铺；`members` 仅 `include_members=true` 时出现）：
+
+  ```json
+  {
+    "source": "e3d-model",
+    "refno": "24381/145031", "dbnum": 7997, "noun": "ELBO", "name": null,
+    "catalogue": { "component": "24380/1234", "point_set": "24380/1235" },
+    "world_transform": [16 个数], "unit": "mm",
+    "points": [{ "number": 1, "noun": "PTAX", "pt": [x, y, z], "dir": [x, y, z], "bore": 100.0 }],
+    "unresolved": [{ "number": 3, "reason": "P3（PTCA）方向解不出" }],
+    "members": [ …同形，每个直属成员一条… ]
+  }
+  ```
+
+  `pt` / `dir` 在**构件局部系**（mm，`dir` 已归一化）；`world_transform` 是局部→世界的列主序
+  16 元素矩阵（THREE `Matrix4.fromArray` 布局，平移在 12–14，mm），与 `model/records` 的
+  `world_trans` 同一折叠（`e3d_model::transform::world_matrix`）。`points` 按 `PTSE` 成员原序；
+  `unresolved` 是 `PTSE` 里有、但位置 / 方向表达式求不出的点，`reason` 区分「点不在 PTSET」
+  与「解码缺口」。
+- 状态：`200` 构件存在（没有 `SPRE` 链或目录件没有 `PTRE` → `catalogue: null`、`points: []`，
+  那是「这个构件没有 P 点」，E3D 也不画，不是错）；`400 bad_request` refno 写法不对；
+  `404 not_found` refno 在所钉会话里不存在；`500 internal` 读库出错。
+- 数据时点同 `/api/mbd/v2/pipe`：目标库按 ADR-054 取**文件最新会话**（每次请求新开 `DbSet`），
+  MDB 视图进程内只建一次。
+
+### 4.11.2 `POST /api/v1/element/plines` — 型材 PLINE 线（E3D `PLSTART / PLEND pline`）
+
+给 plant3d-web 测量拾取层的 **Pline 过滤器**用（E3D `EDGPLINE.line(dbRef, pline)`：Snap 吸最近端、
+Mid-Point / Fraction / Proportion / Distance 沿线派生、Intersect 当 LINE、Perpendicular to 取这条线）。
+gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（PTSS）里的二维 p-line（`PLIN`：`PKEY` /
+`PX` / `PY`），从未落库，前端从网格上也认不出「哪条棱是 NA」。这条端点**不经投影、不连库**：与
+`element/ptset` 同一口径直读 dabacon，复用 e3d-model 建型材实体的那条链
+（`section_catalogue → evaluate_section_profile → section_placement | spine_path`，`web_service::plines`），
+把每条 p-line 放进截面标架再乘世界矩阵——与画出来的梁是同一份 `JUSL` 对齐、`LMIRR` 镜像、`BANG` 与
+中性轴旋转，所以线一定落在梁的实体上。
+
+- 请求：`{ "refno": "24381/177301" }`（`refno` 收 `a/b` / `a_b` / 带 `=` 前缀；身份三元组可选，同 §3）。
+- 响应（世界系，mm）：
+
+  ```json
+  {
+    "source": "e3d-model",
+    "refno": "24381/177301", "dbnum": 7997, "noun": "SCTN", "name": "/COL-1", "unit": "mm",
+    "justification_line": "NA",
+    "plines": [
+      { "key": "NA",  "offset": [0.0, 0.0],   "start": [x, y, z], "end": [x, y, z], "dir": [x, y, z], "length": 3000.0 },
+      { "key": "TOS", "offset": [0.0, 150.0], "start": [x, y, z], "end": [x, y, z], "dir": [x, y, z], "length": 3000.0,
+        "start_cut": [x, y, z], "end_cut": [x, y, z] }
+    ],
+    "snap_points": [
+      { "refno": "24381/177316", "noun": "SNOD", "kind": "node",  "zdis": 435.56, "position": [x, y, z] },
+      { "refno": "24381/177317", "noun": "SJOI", "kind": "joint", "zdis": 435.56, "position": [x, y, z] }
+    ],
+    "notes": []
+  }
+  ```
+
+  `start` / `end` 是 E3D `PLSTART pline` / `PLEND pline`：p-line 在 `POSS` / `POSE` 两个截面平面上的点
+  （`EDGPLINE.line` 缺省 `cut = false` 取的就是这两个），**不**按 `DRNS` / `DRNE` 斜切；斜切后的端点
+  `PLSTCUT / PLENCUT` 另给在 `start_cut` / `end_cut`，只在端面不垂直于轴时出现（E3D Pick Settings「Pline End
+  Position = Cut」时前端拿它当端点）。`offset` 是 p-line 在截面平面里、`JUSL` 对齐与 `LMIRR` 镜像之后的位置
+  （`JUSL` 那条线恒为 `[0, 0]`，它就是 `POSS → POSE`）。`plines` 按 `PSTR` 成员原序；`notes` 是截面求值 / SPINE
+  建路径的非致命记录（与实体生成的 notes 同源）。
+- `snap_points`（2026-09-14 起）：E3D Pick Settings「Significant Snap Points」（Fittings / Joints / Nodes 三档）
+  的分段点来源——`EDGPLINE.snapLine` 在 Significant Snaps 开着时 `COLLECT ALL (FITT | SJOI SUBJ | SNOD) FOR sctn`，
+  把每个成员的位置 `LINE.near` 投到 p-line 上，Snap / Distance / Proportion / Fraction 只作用在光标所在的那一小段。
+  这里只给**成员与它的位置**（分不分段、哪几档算是前端 Pick Settings 的事）：走遍 SCTN 名下全部后代，
+  `kind` 按 noun 归档（`FITT` → `fitting`，`SJOI` / `SUBJ` → `joint`，`SNOD` → `node`；PJOI / SCOJ 等其余成员不算），
+  `zdis` 是沿轴离 `POSS` 的距离（自己的 `ZDIS`；SJOI / SUBJ 的模板没有 ZDIS，取属主链上最近 SNOD 的——E3D 的关节挂在
+  节点上），`position` 是世界系 mm：SNOD / SJOI / SUBJ 取对齐线（`JUSL`）上 z = ZDIS 的点，FITT 取它的目录标架原点
+  （`section_fitting_placement`，与画出来的配件同一处）。按 `zdis` 升序、同一 ZDIS 节点先于关节。
+  **只 SCTN 给**——E3D 的 GENSEC 分支不调 `snapLine`，GENSEC 与 `plines` 为空时一律 `[]`。老构建没有这一格，
+  前端按空处理。
+- GENSEC 只接**直 SPINE**（一段 `POINSP → POINSP`，两端 + `BANG` 走 `placement_between`）；含弧的 SPINE 在 E3D
+  里是 `edgPline.arc()` 不是 `line()`，回空并在 `reason` 说明。GENSEC 的 `DRNS / DRNE` 在 SPINE 上，本期不给 cut 端点。
+- 状态：`200` 构件存在——不是 SCTN / GENSEC、没有 `SPRE`、目录链断、SPRF 无 `PSTR`、GENSEC 含弧 →
+  `plines: []` 且带 `reason`（E3D 同样没有 p-line 可拾，不是错）；`400 bad_request` refno 写法不对；
+  `404 not_found` refno 在所钉会话里不存在（含其 db 不在项目 / MDB 里）；`500 internal` 读库出错。
+- 数据时点同 §4.11.1。
+
 ### 4.12 模型取数源路由（`model_source`）——未初始化的库由 API 供数，已初始化的以 rocksdb 为准
 
 出处：`docs/plans/2026-09-06-rocksdb-batch-write-and-cata-dependency-plan.md` §8（共识 d-29）；
