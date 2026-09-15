@@ -223,10 +223,11 @@ room_membership = false
 #【变更 2026-09-09】暂时改回 [7998, 8000]：7997 的清单行与房间分片已在 09-08 晚的全监听启动里
 # 建到 155（覆盖校验仍全 MDB 过关），而 7997 的文件轮两次复现「collecting 后失锁死等」
 #（root 24381/100817，已交增量线排查）；监听它只会把队列再堵死。等 stall 修好再扩回全集。
-#【变更 2026-09-15】加 1112：按 dbnum 点名的初始化入口（`initialize_project_dbnum_baseline`）
-# 用的是 `UpdateScope::unrestricted()`，它只越过 MDB 那道门，`watch_scope_admits` 这道门照样
-# 关着——1112 不在名单里，候选扫描就扫不出它，报的却是「项目 AvevaMarineSample 未找到 dbnum=1112」。
-watch_dbnums = [7998, 8000, 1112]
+#【变更 2026-09-15】曾为 1112 加过一条：按 dbnum 点名的初始化入口（`initialize_project_dbnum_baseline`）
+# 一度被这道监听门挡住、还报成「未找到 dbnum=1112」。同日已修在代码里——点名入口
+#（`UpdateScope::unrestricted()`）不再受 `watch_dbnums` / `--debug-dbnum` 两道监听门管，
+# 名单只圈 watcher 自己扫出来的活，于是撤回，仍是 [7998, 8000]。
+watch_dbnums = [7998, 8000]
 
 #【新增 2026-09-03】model_incremental_types —— 模型增量类型限定，默认不写 = 不限类型
 # 把「模型增量」圈到这几种最小交付单元类型的生成根，例如

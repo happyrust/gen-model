@@ -3192,19 +3192,49 @@ impl AiosDBManager {
         let mut warnings = Vec::new();
         let mut duplicate_paths = BTreeMap::new();
         // 按 dbnum 点名的入口不设范围门：调用方已经自己决定了要哪个库，
-        // 再套一层 MDB 门只会把点名挡掉。
-        let candidates = self
-            .scan_project_candidates(
-                project,
-                &project_dir,
-                &UpdateScope::unrestricted(),
-                &mut warnings,
-                // 不设限的点名入口没有「范围外」一说，这份清单必然为空。
-                &mut Vec::new(),
-                &mut duplicate_paths,
+        // 再套一层 MDB 门只会把点名挡掉；`watch_dbnums` / `--debug-dbnum` 两道监听门
+        // 同理不生效（`in_scope_with` 对 unrestricted 放行）。
+        let mut scanned = self.scan_project_candidates(
+            project,
+            &project_dir,
+            &UpdateScope::unrestricted(),
+            &mut warnings,
+            // 不设限的点名入口没有「范围外」一说，这份清单必然为空。
+            &mut Vec::new(),
+            &mut duplicate_paths,
+        );
+        let candidates = scanned.shift_remove(&dbnum).ok_or_else(|| {
+            // 门都不设了还找不到，只剩三种成因：目录里没这个文件、它属于别的项目
+            // （跨项目过滤，数据域不是口味）、文件头读不出来（在 warnings 里）。把现场
+            // 一起报出来，别让人又去翻配置名单。
+            let mut seen = scanned.keys().copied().collect::<Vec<_>>();
+            seen.sort_unstable();
+            const LISTED: usize = 24;
+            let listed = seen
+                .iter()
+                .take(LISTED)
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = seen.len().saturating_sub(LISTED);
+            anyhow::anyhow!(
+                "项目 {project} 未找到 dbnum={dbnum}：目录 {} 下扫到 {} 个库{}{}",
+                project_dir.display(),
+                seen.len(),
+                if seen.is_empty() {
+                    String::new()
+                } else if more > 0 {
+                    format!("（{listed} …还有 {more} 个）")
+                } else {
+                    format!("（{listed}）")
+                },
+                if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!("；扫描告警：{}", warnings.join("；"))
+                }
             )
-            .shift_remove(&dbnum)
-            .ok_or_else(|| anyhow::anyhow!("项目 {project} 未找到 dbnum={dbnum}"))?;
+        })?;
         if candidates.len() != 1 {
             anyhow::bail!(
                 "项目 {project} 的 dbnum={dbnum} 候选文件数量为 {}",

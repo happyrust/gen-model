@@ -329,7 +329,10 @@ impl UpdateScope {
     }
 
     /// 不设限。按 dbnum 点名的入口用它——回归工具与按需初始化的调用方已经自己
-    /// 决定了要哪个库，再套一层 MDB 门只会把点名挡掉。
+    /// 决定了要哪个库，再套一层 MDB 门只会把点名挡掉。同理，`watch_dbnums` /
+    /// `--debug-dbnum` 那两道**监听**门对它也不生效（`in_scope_with` 按
+    /// [`UpdateScope::is_unrestricted`] 放行）：那两道门收窄的是 watcher 自己扫出来的活，
+    /// 点名的库不是扫出来的。
     pub fn unrestricted() -> Self {
         Self {
             mdb: String::new(),
@@ -337,6 +340,11 @@ impl UpdateScope {
             unrestricted: true,
             warning: None,
         }
+    }
+
+    /// 这是不是按 dbnum 点名的那种不设限范围（[`UpdateScope::unrestricted`]）。
+    pub fn is_unrestricted(&self) -> bool {
+        self.unrestricted
     }
 
     /// 范围没解出设计库名单时的那句话，调用方要原样放进自己的 warnings。
