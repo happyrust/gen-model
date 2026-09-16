@@ -680,8 +680,7 @@ if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
 Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buffer $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE"
 & $exe start --user $User --pass $Password --bind "127.0.0.1:$Port" $Datastore
 '@
-Set-Content -LiteralPath (Join-Path $wsStage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
-}
+Set-Content -LiteralPath (Join-Path $stage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
 
 # README
 $assetLayoutLine = if ($ExcludeMeshes) {
@@ -1054,7 +1053,7 @@ function Invoke-RocksSmoke {
     # 与 B 腿同底：整份包 workspace 拷过去（resource\surreal 的 surql、bin\surreal 都要在），
     # 再换配置——本机真配置改档 rocksdb + 端口指到脚本起的 18010，摘掉首跑哨兵。
     $rocksWs = Join-Path $env:TEMP ("ams-rocks-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
-    Copy-Item -LiteralPath $wsStage -Destination $rocksWs -Recurse
+    Copy-Item -LiteralPath $stage -Destination $rocksWs -Recurse
     Remove-Item -LiteralPath (Join-Path $rocksWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
     $rocksData = Join-Path $rocksWs '.surreal\smoke'
     $cfg = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw
