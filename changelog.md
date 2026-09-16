@@ -1,5 +1,28 @@
 # 变更记录
 
+## 2026-09-16
+
+### 修：搜索根去重与闭包 key 改用字面 `path_key`，掉线 UNC 不再绕过扫描线程的 15 s 上限（ADR-078 追记）
+
+- 起因：用现场服务器 `\\10.181.11.245\PDM`（445 不通）实测 `POST /api/v1/setup/probe/mdb`：wall **21,083 ms**，
+  可 `roots[1].scan_ms = 0`、problem 报的是 OS 的 `os error 53` 而不是「扫描 15 s 未答」——等的不是扫描线程，
+  是线程起来**之前**调用方就对每个根调了 `project_paths::path_identity` → `std::fs::canonicalize`，它在掉线 UNC
+  上把调用方线程阻塞到 OS 自己放弃（PowerShell `[IO.Directory]::Exists` 同一路径同样 21 s）。三处：
+  `mdb_closure::search_roots` 的去重、`plan_key`（最近闭包的 key）、`setup.rs` 探测的根去重。上一条里
+  「掉线 UNC 下启动 28 s 就绪」也是这一条兑的 OS 超时，不是我们的 15 s。
+- 修法：`project_paths::path_key` 转 `pub`（斜杠方向 / 大小写 / 末尾分隔符归一，**不碰文件系统**），注释写清与
+  `path_identity` 的分界——起扫描线程之前对根算 key 的地方只能用它；新 `mdb_closure::collect_search_roots`
+  把三处收口成一处，向导探测与启动同一套规则，`search_roots` 只负责拼 `[project_path] ++ project_search_paths`；
+  `plan_key` 同样改字面，同一个根在线 / 掉线两个时刻不再算出两个 key，共享盘抖一次 `latest_for` 不再白重扫一遍。
+- 代价：联接与其目标、8.3 短名这类「字面不同、实为一处」的根不再合并，各扫一遍、后到的列 `shadowed`（不阻断、
+  不算冲突）；UNC 与本地同一目录本来 `canonicalize` 也认不成一处，实际行为差异很小。
+- 验证：dev 构建以设置态起在 19101，负缓存过期后同一探测 wall **15,557 ms**、`roots[1].reachable = false`、
+  `scan_ms = 15000`、problem =「扫描 15 s 未答，按不可达处理…」，其余 5 项目 40/40 照常；跨根 / 影子 / 重复写法
+  三例与修前逐项相同，同一路径三种写法合成 1 个根。新钉 `search_roots_are_deduplicated_literally_and_in_order`、
+  `plan_key_does_not_depend_on_whether_the_root_is_reachable`；`cargo test --lib` **2119 passed**（唯一 1 failed 是
+  `window_root_plan` 另一路会话的在途改动）。evidence 追记 `docs/evidence/2026-09-15-adr078-mdb-project-closure.md` §9。
+  **未进 0.1.26 包**（出包在 `f0369365e`，本修 `e0742aab3` 在其后），要到现场得等下一版。
+
 ## 2026-09-15
 
 ### 本地发布 0.1.26：项目集合由 MDB 派生、`computer_name` 别名删除
