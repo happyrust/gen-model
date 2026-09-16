@@ -502,11 +502,27 @@ fn plcf_flagged_names() -> &'static HashSet<String> {
 /// [`tests::the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`] 逐个点名钉住，名单变了就得重新问
 /// 「新名字真的没人读吗」。
 ///
-/// `CACHID` 不在字典快照里（`raw_dchc_code` 回 `None`）：字典没投票，这里回 `false`——它照旧
-/// 上卷重算。它是项目 UDA，字典按构造就不会收它，所以这一票不是「还没补上」而是**永远不会有**：
-/// 要放行只能改判据，不能等字典。`UDA:<id>` 与任何字典没有的名字同理。
+/// **戳是第一票的唯一例外**（2026-09-17 Q6，用户拍板）：`CACHID` 不在字典快照里（`raw_dchc_code` 回
+/// `None`）——它是 3.1 运行库 schema 里的项目 UDA，字典按构造就不会收它，这一票不是「还没补上」而是
+/// **永远不会有**。它的第一票由戳表 [`attribute_is_cache_stamp`]（e3d-model
+/// `element_diff::PLACEMENT_STAMP_ATTRIBUTES`，两仓守卫钉住逐名相等）给：写方语义已坐实——Design 应用随每次
+/// 图形重建写下的缓存 `+1` 计数（S8 普查 453 库 2961 窗 13724 次跳动全是 `+1`），core 自己的图形变化管理
+/// 不看它（0831 取证 `changesBetweenSessions` 的 `DDES_GraphicsMngr` 一路），S4 对拍把它剔出比较集后 108 根
+/// 两态全等 0 红。第二票照旧问读取集合（守卫 `stamp_literals ∩ names = ∅`）。`UDA:<id>` 与任何别的字典
+/// 没有的名字仍不放行：例外只认那张表。
 pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
-    raw_dchc_code(raw_name) == Some(0) && !generation_reads_attribute(raw_name)
+    (raw_dchc_code(raw_name) == Some(0) || attribute_is_cache_stamp(raw_name))
+        && !generation_reads_attribute(raw_name)
+}
+
+/// 这个名字是不是**戳**（e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES`，今天只有 `CACHID`）：
+/// 应用随图形重建写的缓存计数，不是设计变更。归一化后按名查；名单只有 e3d-model 那一份，
+/// 读取集合产物的 `stamp_literals` 与它逐名相等（守卫钉两边）。
+pub fn attribute_is_cache_stamp(raw_name: &str) -> bool {
+    let name = normalize_attribute_name(raw_name);
+    e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+        .iter()
+        .any(|stamp| *stamp == name)
 }
 
 /// 老名单（2026-09-08 至 S6 之前的元数据门）：效果表 [`AttributeEffect::DataOnly`] **且** 字典 DCHC = 0，
@@ -521,15 +537,22 @@ pub fn attribute_is_curated_metadata(raw_name: &str) -> bool {
 
 /// 一次改动的全部属性名过元数据门的结论：`None` = 至少一个属性没拿到两票（或一个属性都没有），
 /// 照常上卷；`Some(档)` = 全部放行，档位按 [`attribute_is_curated_metadata`] 分——全在老名单里是
-/// [`NoModelTier::MetadataOnly`]，否则 [`NoModelTier::UnreadAttribute`]。
+/// [`NoModelTier::MetadataOnly`]，否则 [`NoModelTier::UnreadAttribute`]。戳（[`attribute_is_cache_stamp`]）
+/// 放行但**不改档**——跟着 `NAME` 记老档、跟着 `DUTY` 记新档；一次改动里**只有**戳跳了（2026-09-17 Q6）
+/// 才记第三档 [`NoModelTier::CacheStamp`]。
 ///
 /// 这是 `window_root_plan::change_metadata_tier` 与 [`classify_operation_effects`] 共问的那一份名单
 /// （0908 纪律：预览与执行同一谓词）；结构条件（类型 / 属主 / 成员 / opaque）在调用方判。
 pub fn metadata_only_tier<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<NoModelTier> {
     let mut tier: Option<NoModelTier> = None;
+    let mut any = false;
     for name in names {
         if !attribute_is_metadata_only(name) {
             return None;
+        }
+        any = true;
+        if attribute_is_cache_stamp(name) {
+            continue;
         }
         tier = Some(match tier {
             Some(NoModelTier::UnreadAttribute) => NoModelTier::UnreadAttribute,
@@ -537,7 +560,7 @@ pub fn metadata_only_tier<'a>(names: impl IntoIterator<Item = &'a str>) -> Optio
             _ => NoModelTier::UnreadAttribute,
         });
     }
-    tier
+    any.then(|| tier.unwrap_or(NoModelTier::CacheStamp))
 }
 
 /// 属性是否命中「已知会影响模型」的分类——除 `DataOnly` 与 `Unknown` 之外的一切。
@@ -582,7 +605,7 @@ fn collect_modified_attribute_names(modified: &ModifiedElement) -> Vec<String> {
 /// - `Add` / `Deleted` → 需重生成（结构/成员效果）；
 /// - `Modified`：逐属性先问元数据门 [`attribute_is_metadata_only`]（字典 DCHC=0 ∧ 生成器不读）——
 ///   拿到两票的记 `DataOnly`、不排工作，哪怕手写表把它登记在别处；没拿到的按效果表归类：
-///   `DataOnly`（只有效果表一票的，如 `CACHID`）保守重生成；`TransformOnly` 记位姿；其余
+///   `DataOnly`（只有效果表一票的——2026-09-17 Q6 起 `CACHID` 由戳表补上第一票，不再落这里）保守重生成；`TransformOnly` 记位姿；其余
 ///   （DirectGeometry/DependencyCascade/StructuralMembership/Unknown，含 `UDA:*`）记重生成；
 ///   `children` 变化、或检测不到任何属性差异（如非 detail 解析）时保守记重生成；
 /// - `None` → 无动作。
@@ -637,8 +660,8 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
                     dchc = Some(dchc.map_or(code, |c| c.max(code)));
                 }
                 match effect {
-                    // 效果表说是元数据、两票却没拿全的（`CACHID`：字典没投票）规划器照旧上卷
-                    // 整根重算，这里就不能报「不影响模型」。
+                    // 效果表说是元数据、两票却没拿全的，规划器照旧上卷整根重算，这里就不能报
+                    // 「不影响模型」。（`CACHID` 曾在这里——字典没投票；2026-09-17 Q6 起戳表给它第一票。）
                     AttributeEffect::DataOnly if !attribute_is_metadata_only(name) => {
                         summary.impact_regen = true;
                     }
@@ -2617,7 +2640,8 @@ mod tests {
 
     /// S6 真值表（开发计划 2026-09-15 D2）：元数据门要两票——字典 DCHC=0 **且** 生成器不读。
     /// 任一票缺席就照旧重算：读取集合里的 DCHC=0 属性不放行；`NAME` 等老五个仍放行；
-    /// UDA / 字典没收的名字 / 效果表 DataOnly 却没有字典票的 `CACHID` 不放行。
+    /// UDA / 字典没收的名字不放行。**唯一例外**是戳（2026-09-17 Q6）：`CACHID` 字典按构造收不到，
+    /// 第一票由 e3d-model 的戳表给，第二票照旧问读取集合——放行，但不是老名单。
     #[test]
     fn metadata_only_needs_dchc_zero_and_an_unread_attribute() {
         // 老五个照旧放行（S5 钉过：生成器一个都不读），归一化后同答。
@@ -2650,10 +2674,8 @@ mod tests {
             assert_ne!(raw_dchc_code(name), Some(0), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
         }
-        // 字典没投票（快照里没有）：不放行。`CACHID` 效果表虽判 DataOnly，它是项目 UDA，
-        // 字典按构造收不到它——这一票不会等来；`UDA:<id>`、伪属性、结构属性、写错的长名同理。
+        // 字典没投票（快照里没有）：不放行。`UDA:<id>`、伪属性、结构属性、写错的长名同理。
         for name in [
-            "CACHID",
             "UDA:42",
             "OWNER",
             "FUNCTION",
@@ -2662,13 +2684,24 @@ mod tests {
             "INTUBE",
         ] {
             assert_ne!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!attribute_is_cache_stamp(name), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        // 戳（Q6，2026-09-17）：字典按构造收不到 `CACHID`（项目 UDA），第一票由 e3d-model 的戳表给、
+        // 第二票读取集合守卫钉住它不是读点——放行；效果表判它 DataOnly，但它不是老名单（不是业务元数据）。
+        for stamp in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
+            assert_eq!(raw_dchc_code(stamp), None, "{stamp} 进了字典快照？那就不该再走戳这条例外");
+            assert!(attribute_is_cache_stamp(stamp), "{stamp}");
+            assert!(attribute_is_cache_stamp(&stamp.to_ascii_lowercase()), "{stamp}");
+            assert!(!generation_reads_attribute(stamp), "{stamp} 是戳却在读取集合里");
+            assert!(attribute_is_metadata_only(stamp), "{stamp}");
+            assert!(!attribute_is_curated_metadata(stamp), "{stamp}");
         }
         assert_eq!(
             classify_attribute_effect("CACHID"),
             AttributeEffect::DataOnly
         );
-        assert!(!attribute_is_curated_metadata("CACHID"));
+        assert!(!attribute_is_cache_stamp("NAME") && !attribute_is_cache_stamp("POS"));
         // 老名单恰好五个，且是新门的子集。
         let curated: Vec<&str> = DATA_ONLY_ATTR_NAMES
             .iter()

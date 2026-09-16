@@ -23,8 +23,16 @@
   33 过 10 ignored（探针）；rustfmt 本轮新增行无差异（文件里剩的三处差异都不是本轮的）；CRLF 未翻（e3d-model `ledger.rs`
   本就是 LF）。本轮与 codex/model-projection-cache 的合并撞在一起：改动先被另一路会话按 wip 落进 8eabda89a、随 56e1b47ea
   合入，单测在 8eabda89a 的独立 worktree 上先跑过一遍、合并落地后在共享工作树复跑。
-- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关 `model_transform_cheap_path`
-  默认仍关。e3d-model 的 `dispositions()` 访问器只在 vendor 工作树里、**未提交**——gen-model HEAD 已经依赖它。
+- **量了一下还剩什么挡路**（新探针 `probe_transform_classification_for_window`，`#[ignore]`：钉一窗、`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`
+  跑生产同款 `collect → impact → plan_window_roots → rigid_motion`，候选表按类 + 每根判决打出来，只读文件、不下断言）：
+  - aps250110 **32→33**（STRFLT `BY E 300`，窗 C）：16 候选 = 5 rolled_up + 11 **no_model**（10 个 TREAD 只 `CACHID`、MNUM `MAPEXS`）
+    ——这 11 个改前全是 `Other`、改后不挡路；剩下挡路的：STRFLT 锚点本身按 P23 排除（设计如此，6 根全因它 rejected），以及
+    **4 个只 `CACHID` 的 GENSEC / HANDRA**（模型单元，rolled_up，Q6 那一档）。所以窗 C 上规则 2 只是把路让出一半，要打通得 Q6。
+  - ams8000 **195→196**（EQUI 位姿）：1 候选 = 合格锚点，**transform=1 rejected=0**——生产同款分桶在自然 EQUI 挪位上真走了便宜路。
+  - ams8000 **267→268**（BRAN `BY U 2000`）：BRAN 自己 `CACHID / HPOS / TPOS`、FTUB `POS / SPAMAP` 都是 `Other`，BEND 在路由容器内被排除
+    → regen，与 D1 规则 3 一致。
+- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动——上面窗 C 的 4 件就是它的账；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关
+  `model_transform_cheap_path` 默认仍关。e3d-model 的 `dispositions()` 访问器只在 vendor 工作树里、**未提交**——gen-model HEAD 已经依赖它。
 
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 

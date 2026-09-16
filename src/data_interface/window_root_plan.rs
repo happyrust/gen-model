@@ -2113,7 +2113,9 @@ mod tests {
         .expect("collect");
         let label = format!(
             "{} {base_sesno}→{target_sesno}",
-            file.file_name().and_then(|name| name.to_str()).unwrap_or("?")
+            file.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("?")
         );
         println!(
             "{label}: switch model_transform_cheap_path={} | {}",
@@ -2138,8 +2140,7 @@ mod tests {
             let (class, detail) = match &candidate.kind {
                 CandidateKind::Anchor { rigid: Ok(()), .. } => ("锚点·合格", String::new()),
                 CandidateKind::Anchor {
-                    rigid: Err(reason),
-                    ..
+                    rigid: Err(reason), ..
                 } => ("锚点·被排除", reason.clone()),
                 CandidateKind::NoModel(detail) => ("no_model（不挡路）", detail.clone()),
                 CandidateKind::Other(detail) if detail == "AttributesModified: CACHID 变了" => {
