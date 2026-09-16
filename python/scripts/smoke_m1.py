@@ -47,7 +47,7 @@ def main() -> None:
     sessions = aios_db.parse.sessions(db_file)
     print(f"  共 {len(sessions)} 个会话页，最早 {sessions[0]['sesno']}，最新 {sessions[-1]['sesno']}")
     for row in sessions[-3:]:
-        print(f"  sesno={row['sesno']} date={row['date']} user={row['computer_name']!r}")
+        print(f"  sesno={row['sesno']} date={row['date']} user={row['user']!r}")
     # 一致性：文件头的最新会话号 == 会话页里最大的会话号
     assert sessions[-1]["sesno"] == header["latest_sesno"], "header 与会话页的最新会话号不一致"
 

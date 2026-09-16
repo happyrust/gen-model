@@ -336,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let directory_started = Instant::now();
     let mut directory = MdbRouteDirectory::from_membership(&membership, schema.template_dir());
-    for dependency_project in &db_option.included_projects {
+    for dependency_project in &project_paths::project_names(&db_option) {
         let Some(project_root) =
             project_paths::resolve_project_root(&db_option, dependency_project)
         else {

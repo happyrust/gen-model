@@ -6,8 +6,12 @@
 在 P1 落地前，ADR-017 描述的仍是**运行中**的行为）；
 **追记（2026-09-02 二轮）**：同日「增量是否还依赖提前解析 / 提前生成模型」分析后用户拍板补 **D9**（eager 生成只对受影响根）
 与 **N7**（模型面不以 `pe` 行为前置），并把 `prepare_required_dependencies` 的摘除从 P2 提前到 P1、选根根集改为从文件枚举
-（计划文档 F10 / P2-1 / P2-7 / 附二）；共识已 `record_decision` 登记为 **d-58**，与 d-38 并列
-日期：2026-09-02
+（计划文档 F10 / P2-1 / P2-7 / 附二）；共识已 `record_decision` 登记为 **d-58**，与 d-38 并列；
+**被 [ADR-079](ADR-079-generation-root-outcomes-live-in-process-and-the-model-watermark-is-the-only-durable-model-fact.md)
+修订（2026-09-15）**：`gen_root` 表退役——P2-2「未触根凭证前移」（`UPDATE gen_root SET source_end_sesno = T`）不再写库，`advance`
+去向只进回执，「到 T 仍有效」由任务收尾盖到 T 的 `model_sesno` 承诺；P2-1 选根的 `roots_S` 改为 `DbSet@model_sesno` 枚举；
+D9 / N7 与实施约束 5 的护栏不动
+日期：2026-09-02（状态行 2026-09-15 更新）
 关联：
 - **取代** ADR-017（kv-mem 暂存 + 整窗口写回，含其 2026-08-06 / 08-07 / 08-12 / 08-14 / 08-19 全部修订）、
   ADR-038（有界暂存写回）、ADR-017 2026-08-19 修订二的「触顶收窄拆窗」；

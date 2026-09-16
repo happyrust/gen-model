@@ -119,6 +119,14 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
 
+    /// `project_path` 之外的搜索根（本地路径或 UNC，顺序即优先级；ADR-078 D2）。
+    ///
+    /// MDB 声明的外部项目按项目码在 `[project_path] ++ project_search_paths` 里找 `<code>000`
+    /// 库目录；远程项目（`\\server\share\Projects`）填这里。默认空 = 只看 `project_path`。
+    /// 取代退役的 `included_projects` 名单（见 [`project_search_paths`]）。
+    #[serde(default)]
+    pub project_search_paths: Option<Vec<String>>,
+
     /// **调试用**：把增量摄入的数据批次圈到这些 dbnum（默认空 = 全范围）。
     ///
     /// 命令行 `serve --watch-dbnum` 压过它；SYS meta 不受限。它与
@@ -211,6 +219,12 @@ pub struct DbOptionExt {
     /// 详见 [`model_skip_metadata_only_changes`]。
     #[serde(default)]
     pub model_skip_metadata_only_changes: Option<bool>,
+
+    /// 元数据门的第二档（S6，**默认关**，2026-09-15）：除老名单那五个名字外，再放行
+    /// 「字典 DCHC=0 ∧ 生成侧没有一处按名字读它」的属性。`true` 才开；关着时门的宽窄与
+    /// 2026-09-08 逐位相同。详见 [`model_skip_unread_attribute_changes`]。
+    #[serde(default)]
+    pub model_skip_unread_attribute_changes: Option<bool>,
 
     /// 刚体前移便宜路径（ADR-066，**默认关**，2026-09-08）：一窗里只动了 `POS / ORI` 的锚点名下、
     /// 已安定的生成根不整根重算，改为对投影记录左乘刚体增量并按 regen 同款发布一次。
@@ -501,6 +515,7 @@ impl From<DbOption> for DbOptionExt {
             model_incremental_types: None,
             room_membership: None,
             catalogue_project_priority: None,
+            project_search_paths: None,
             watch_dbnums: None,
             block_file_identity_conflicts: None,
             model_concurrency_mode: None,
@@ -522,6 +537,7 @@ impl From<DbOption> for DbOptionExt {
             model_significant_over_point: None,
             model_entry_drop_no_geometry: None,
             model_skip_metadata_only_changes: None,
+            model_skip_unread_attribute_changes: None,
             model_transform_cheap_path: None,
             model_unit_level_publish: None,
             model_structural_connection_cascade: None,
@@ -579,6 +595,8 @@ struct DbOptionExtFields {
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
+    project_search_paths: Option<Vec<String>>,
+    #[serde(default)]
     watch_dbnums: Option<Vec<u32>>,
     #[serde(default)]
     block_file_identity_conflicts: Option<bool>,
@@ -619,6 +637,8 @@ struct DbOptionExtFields {
     model_entry_drop_no_geometry: Option<bool>,
     #[serde(default)]
     model_skip_metadata_only_changes: Option<bool>,
+    #[serde(default)]
+    model_skip_unread_attribute_changes: Option<bool>,
     #[serde(default)]
     model_transform_cheap_path: Option<bool>,
     #[serde(default)]
@@ -809,6 +829,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_incremental_types: ext.model_incremental_types.clone(),
         room_membership: ext.room_membership,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
+        project_search_paths: ext.project_search_paths.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
         block_file_identity_conflicts: ext.block_file_identity_conflicts,
         model_concurrency_mode: ext.model_concurrency_mode.clone(),
@@ -830,6 +851,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_significant_over_point: ext.model_significant_over_point,
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
+        model_skip_unread_attribute_changes: ext.model_skip_unread_attribute_changes,
         model_transform_cheap_path: ext.model_transform_cheap_path,
         model_unit_level_publish: ext.model_unit_level_publish,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
@@ -1293,6 +1315,15 @@ fn normalise_watch_dbnums(configured: Option<&[u32]>) -> Vec<u32> {
 pub fn catalogue_project_priority() -> Vec<String> {
     load_ext_fields()
         .catalogue_project_priority
+        .clone()
+        .unwrap_or_default()
+}
+
+/// `project_path` 之外的搜索根（ADR-078 D2），配置里写什么就给什么；归一与去重在
+/// [`crate::data_interface::mdb_closure::search_roots`]。默认空。
+pub fn project_search_paths() -> Vec<String> {
+    load_ext_fields()
+        .project_search_paths
         .clone()
         .unwrap_or_default()
 }
@@ -1828,6 +1859,44 @@ fn effective_model_skip_metadata_only_changes(
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`model_skip_unread_attribute_changes`]，不必改配置文件。
+pub const MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV: &str =
+    "AIOS_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES";
+
+/// 元数据门的第二档（`DbOption.toml` 的 `model_skip_unread_attribute_changes`，**默认 false**，
+/// S6，2026-09-15）。
+///
+/// 老名单那一档（[`model_skip_metadata_only_changes`]）问的是「效果表说 DataOnly ∧ 字典 DCHC=0」，
+/// 手写的效果表只认下五个名字。这一档换一张更机械的第二票：**字典 DCHC=0**（core 自己不为它重画）
+/// **∧ 生成侧没有一处按名字读它**（`model_impact::generator_reads_attribute`，两份机扫产物之并——
+/// e3d-model 的 `reads_attribute` 加本仓 `generation_read_set.json`）。够两票的候选记
+/// `no_model`、不上卷不级联，计数落在 `IncrementReport::unread_attribute` 那一格。
+///
+/// **默认关，而且不该轻易翻。** 它一开，放行面从 5 个名字跳到三千多个：第二票的把握全押在
+/// 「读点都以大写字面量的形状出现在源码里」这条扫描规则上，漏收一个名字就是一张停在旧形状上的
+/// 网格，而且不报错。`NGMR` 就是活样本——e3d-model 那半扫不到它，是本仓这半把它捞回来的。
+/// 翻默认前要先有一次实测对拍。环境变量 [`MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV`] 压过配置，
+/// 取值规则同 [`startup_autorun`]。它在 [`model_skip_metadata_only_changes`] 之内：门整个关掉时
+/// 这一档也无从谈起。
+pub fn model_skip_unread_attribute_changes() -> bool {
+    effective_model_skip_unread_attribute_changes(
+        load_ext_fields().model_skip_unread_attribute_changes,
+        std::env::var(MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn effective_model_skip_unread_attribute_changes(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
 }
 
 /// 环境变量名：一次性覆盖 [`model_transform_cheap_path`]，不必改配置文件。
@@ -2880,6 +2949,29 @@ mod tests {
         ));
     }
 
+    /// 元数据门第二档默认关（S6：放行面从 5 个名字跳到三千多个，翻默认前要有一次实测对拍），
+    /// 配置能开、环境变量两个方向都能压，拼错的值退回配置值。
+    #[test]
+    fn the_unread_attribute_tier_is_off_by_default_and_can_be_turned_on() {
+        assert!(!effective_model_skip_unread_attribute_changes(None, None));
+        assert!(effective_model_skip_unread_attribute_changes(
+            Some(true),
+            None
+        ));
+        assert!(effective_model_skip_unread_attribute_changes(
+            Some(false),
+            Some("1")
+        ));
+        assert!(!effective_model_skip_unread_attribute_changes(
+            Some(true),
+            Some("off")
+        ));
+        assert!(effective_model_skip_unread_attribute_changes(
+            Some(true),
+            Some("maybe")
+        ));
+    }
+
     /// 刚体前移便宜路径默认关（ADR-066 D7：少算方向、尚无实证），配置能开、环境变量两个方向
     /// 都能压，拼错的值退回配置值。
     #[test]
@@ -2938,6 +3030,35 @@ mod tests {
                 .any(|name| name == "room_membership"),
             "配置读坏时的告警名单从结构体导出，新键得在里面"
         );
+    }
+
+    /// 出厂模板（`scripts/templates/DbOption.factory.toml`，向导与本地发布的起点）写的
+    /// `room_membership` 必须与代码默认一致。2026-09-15 部署事故：模板写 `true`、代码默认
+    /// `false`、向导又不管这个键，房间输入不全时整批模型根被判死而现场无从发现。
+    /// 顺带钉住 ADR-078 的 `project_search_paths` 键在模板里。
+    #[test]
+    fn factory_template_room_membership_matches_code_default() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/templates/DbOption.factory.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("出厂模板可读");
+        let document = toml::from_str::<toml::Value>(&text).expect("出厂模板是合法 TOML");
+        let table = document.as_table().expect("顶层是表");
+        let configured = table
+            .get("room_membership")
+            .and_then(toml::Value::as_bool)
+            .expect("模板写了 room_membership");
+        assert_eq!(
+            configured,
+            effective_room_membership(None, None),
+            "出厂模板的 room_membership 与代码默认（缺键时的取值）分叉了"
+        );
+        let search_paths = table
+            .get("project_search_paths")
+            .and_then(toml::Value::as_array)
+            .expect("模板写了 project_search_paths（ADR-078）");
+        assert!(search_paths.is_empty(), "出厂模板的搜索根应为空数组");
     }
 
     /// 测试覆盖两个方向都得能摁住，且离开作用域即恢复「按配置来」。

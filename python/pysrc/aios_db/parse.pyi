@@ -19,7 +19,10 @@ def parent_gap_refno_count(leaf: str, parent: str) -> int:
     """父层索引独有、叶子没有的 refno 个数（基线只在 gap>0 时补缺）。"""
 
 def sessions(path: str) -> list[dict[str, Any]]:
-    """全部会话页（升序）：sesno / pgno / computer_name / comments / date。"""
+    """全部会话页（升序）：sesno / pgno / end_pgno / index_root_pageno / user / comments / date。
+
+    user 是 core.dll 的会话属性 USER（写这一会话的登录名），不是机器名——rs-core 时代的误称
+    computer_name 曾作别名保留，已于 0.1.26 删除（0.1.25 的 changelog 预告过）。"""
 
 def net_window(
     path: str, start: int, end: int, detail: bool = False

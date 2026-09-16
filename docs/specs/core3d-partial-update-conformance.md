@@ -299,6 +299,8 @@ ModelToUpdate(e, state):
 类别 1/2 只 `COLRES`。即 **core 的 3D 侧确有「只动方位」的便宜路径**——它就是我方刚体前移（ADR-066）的 oracle，例外名单（P23 noun、
 管件两侧隐含管段、`EVALAT` 规则 M/J/P/R/S 转成类别 4 落到属主）见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §4。
 DRAFT 侧丢第三个字的取证本身不变。
+★0916 `UPGRPH` 的分派骨架与 P23 的 23 个常量已逐指令核（同文 §9.4）；DCHC 的第一道门其实在更上游的 `descases/VDESPT`（`0x101F33A9`，
+`DB_Element::putAtt` → `DESDRA_SCPlugs::PostSetAttribute` 的落点）——DCHC=0 的属性在那里就不进 `EVALAT`，逐指令见同文 §9.2。
 
 ★0906 那个「上游」找到了：**`change/EVALAT`**（Core3D `0x1022C679`），DCHC 的读点是 `change/IDCHNG`（`0x1022E302`）
 → core.dll `ATAINT(属性)`；类别 0 根本不进队列（= R13「双假丢弃」的上游），类别 1 = INTUBE 还会连带前一个元件。

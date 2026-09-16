@@ -19,6 +19,8 @@
 //! `WHERE (applied_sesno ?: 0) >= T` 是数据水位的第二道闸（M2）。闸挡下来不是错误，
 //! 回执里 [`TaskEndReceipt::blocked_by_data`] 说明这一次没盖章。
 
+use std::collections::BTreeMap;
+
 use anyhow::Context;
 use surrealdb::{Surreal, engine::any::Any};
 
@@ -32,6 +34,27 @@ pub(crate) struct TaskModelOutcome {
     pub all_roots_ok: bool,
     /// 永久放弃的根数（写进 `model_dead_roots`，供 `/dbnums` 观测）。
     pub dead_roots: usize,
+    /// 库级目录落款（ADR-079：随 `gen_root` 退役，逐根的 `published_model_target.catalogue` 收成
+    /// 每库一份）：`CATA dbnum → 会话`，「这个库的整份模型与该目录到这一版一致」。`Some` 只在
+    /// 本任务有资格说这句话时给——整库重生成（初始化 / 从 0 重排）、或目录级联任务把该目录
+    /// 变动波及的根全部重算成了；普通增量窗口只重算被触到的根，说不了这句，给 `None`。
+    /// 写法是**合并**：只改点名的目录，其余目录的落款原样保留。`all_roots_ok` 为假时不写。
+    pub catalogue_sessions: Option<BTreeMap<u32, u32>>,
+    /// durable 侧的房间就绪承诺（ADR-073 D14）：`model_room_generation` 这一格怎么动。与
+    /// `catalogue_sessions` 同一条纪律——只有能替整库说话的任务才 `Aligned`，`all_roots_ok` 为假时不写。
+    pub room_generation: RoomGenerationStamp,
+}
+
+/// 收尾那一笔对 `dbnum_watermark.model_room_generation` 的处置（ADR-073 D14）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum RoomGenerationStamp {
+    /// 本任务说不了「整库的房间边对齐到哪一代」（普通增量窗口只重算被触到的根）：那一格原样。
+    #[default]
+    Untouched,
+    /// `room_membership=false` 下盖模型水位：水位此刻只承诺几何，durable 侧的房间就绪承诺随之清空。
+    Cleared,
+    /// 整库的房间边对齐到这一代常驻模型（初始化 / 整库重排 / 本任务跑过整库房间重算），随 `model_sesno` 同盖。
+    Aligned(String),
 }
 
 /// 目标索引里一个 Ref0 的元素统计（`count` = 该 Ref0 在 `T` 上的**活**元素数）。
@@ -138,6 +161,23 @@ fn render_watermark_update(end: &TaskEnd) -> String {
                 "model_sesno = math::max([model_sesno ?: 0, {target_sesno}])"
             ));
             sets.push("model_settled_at = time::now()".to_owned());
+            if let Some(stamps) = model
+                .catalogue_sessions
+                .as_ref()
+                .filter(|stamps| !stamps.is_empty())
+            {
+                sets.push(render_catalogue_stamp_merge(stamps));
+            }
+            match &model.room_generation {
+                RoomGenerationStamp::Untouched => {}
+                RoomGenerationStamp::Cleared => {
+                    sets.push("model_room_generation = NONE".to_owned());
+                }
+                RoomGenerationStamp::Aligned(generation) => sets.push(format!(
+                    "model_room_generation = '{}'",
+                    escape_surql_str(generation)
+                )),
+            }
         }
         // 根观测是现场记录，不是承诺：失败的那一版也要留下痕迹。
         sets.push(format!("model_dead_roots = {}", model.dead_roots));
@@ -157,6 +197,27 @@ fn render_watermark_update(end: &TaskEnd) -> String {
     format!(
         "UPDATE {WATERMARK_TABLE}:{dbnum} SET {}{guard} RETURN id;",
         sets.join(", ")
+    )
+}
+
+/// 库级目录落款那一句（ADR-079）：`model_catalogue_sessions` 是 `[{ dbnum, session }, …]`，
+/// 合并写——先把点名的目录从旧数组里摘掉，再把新落款并进去；没点名的目录原样保留。
+/// 行上没有这一列（旧行）时从空数组起。
+pub(crate) fn render_catalogue_stamp_merge(stamps: &BTreeMap<u32, u32>) -> String {
+    let dbnums = stamps
+        .keys()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let entries = stamps
+        .iter()
+        .map(|(dbnum, session)| format!("{{ dbnum: {dbnum}, session: {session} }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "model_catalogue_sessions = array::concat(\
+         (model_catalogue_sessions ?? []).filter(|$stamp| $stamp.dbnum NOT IN [{dbnums}]), \
+         [{entries}])"
     )
 }
 
@@ -228,7 +289,7 @@ pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
     )
 }
 
-/// 落一笔收尾事务，成功后作废这个 dbnum 的镜像格与一致性普查缓存。
+/// 落一笔收尾事务，成功后作废这个 dbnum 的镜像格（一致性普查读进程内账本，没有缓存要作废，ADR-079）。
 pub(crate) async fn commit_task_end_on(
     db: &Surreal<Any>,
     end: &TaskEnd,
@@ -278,7 +339,6 @@ pub(crate) async fn commit_task_end_on(
     let stamped = !touched.is_empty();
 
     DbnumState::invalidate_mirrored_on(db, end.dbnum);
-    super::dbnum_consistency::invalidate_census();
 
     let wanted_stamp = end.model_stamps();
     Ok(TaskEndReceipt {
@@ -301,6 +361,8 @@ mod tests {
             model: Some(TaskModelOutcome {
                 all_roots_ok: true,
                 dead_roots: 0,
+                catalogue_sessions: None,
+                room_generation: RoomGenerationStamp::Untouched,
             }),
             info: Some(Ref0Snapshot {
                 file_name: "ams".to_owned(),
@@ -375,8 +437,21 @@ mod tests {
             sql.contains("WHERE (applied_sesno ?: 0) >= 26"),
             "数据水位闸（M2）必须在：{sql}"
         );
-        // ADR-073 W3：行上只有两枚水位，收尾不写任何房间格。
-        assert!(!sql.contains("room_"), "收尾没有房间那一枚可盖：{sql}");
+        // ADR-073 W3 / 钉 2：行上只有两枚水位，收尾不写房间那一枚的任何格（`model_room_generation`
+        // 是模型水位的属性——「边对齐到哪一代」——不是第三枚水位，D14）。
+        for retired in [
+            "room_sesno",
+            "room_settled_at",
+            "room_input_version",
+            "room_required_input",
+            "room_result_version",
+        ] {
+            assert!(!sql.contains(retired), "收尾没有房间那一枚可盖（{retired}）：{sql}");
+        }
+        assert!(
+            !sql.contains("model_room_generation"),
+            "说不了整库对齐的任务不碰 model_room_generation：{sql}"
+        );
         // 时刻子句排在赋值之前（SurrealDB 的 SET 顺序求值）。
         let model_time = sql
             .find("model_sesno_time = IF")
@@ -434,6 +509,8 @@ mod tests {
         end.model = Some(TaskModelOutcome {
             all_roots_ok: false,
             dead_roots: 3,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Untouched,
         });
         let sql = render_task_end_tail(&end);
         assert!(sql.contains("status = 'finished'"), "{sql}");
@@ -459,10 +536,16 @@ mod tests {
         end.model = Some(TaskModelOutcome {
             all_roots_ok: false,
             dead_roots: 2,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Aligned("gen-not-stamped".to_owned()),
         });
         let sql = render_task_end_tail(&end);
         assert!(!sql.contains("model_sesno = math::max"), "{sql}");
         assert!(!sql.contains("model_sesno_time = IF"), "{sql}");
+        assert!(
+            !sql.contains("model_room_generation"),
+            "模型没成，房间对齐代号也不盖（D14 与 catalogue 落款同一条纪律）：{sql}"
+        );
         assert!(sql.contains("model_dead_roots = 2"), "{sql}");
         assert!(sql.contains("model_roots_observed_at = 26"), "{sql}");
         // 模型没盖成就没有任何一枚水位要盖：数据水位闸随之不带。
@@ -607,6 +690,193 @@ mod tests {
         assert_eq!(row.model_sesno, None, "没跑模型就不盖模型水位");
     }
 
+    /// ADR-079：库级目录落款随 `model_sesno` 同一笔盖，写法是合并——点名的目录换新值、其余原样留；
+    /// 没点名（`None` / 空）的任务一个字不碰它；模型没成的任务也不碰。
+    #[tokio::test]
+    async fn catalogue_stamps_merge_into_the_watermark_row_only_when_the_model_stamps() {
+        let db = database().await;
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20, \
+             model_catalogue_sessions=[{ dbnum: 7000, session: 11 }, { dbnum: 5052, session: 180 }];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+        struct Stamp {
+            dbnum: u32,
+            session: u32,
+        }
+        async fn stamps_of(db: &Surreal<Any>, dbnum: u32) -> Vec<Stamp> {
+            // `SELECT VALUE <数组列> FROM ONLY` 回的就是那个数组本身，按 `Vec` 取。
+            let mut rows: Vec<Stamp> = db
+                .query(format!(
+                    "SELECT VALUE model_catalogue_sessions ?? [] FROM ONLY dbnum_watermark:{dbnum};"
+                ))
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take::<Vec<Stamp>>(0)
+                .unwrap();
+            rows.sort();
+            rows
+        }
+        async fn stamps(db: &Surreal<Any>) -> Vec<Stamp> {
+            stamps_of(db, 8000).await
+        }
+
+        // 只点名 7000：换成 12，5052 原样。
+        let mut stamped = end();
+        stamped.model = Some(TaskModelOutcome {
+            all_roots_ok: true,
+            dead_roots: 0,
+            catalogue_sessions: Some(BTreeMap::from([(7000, 12)])),
+            room_generation: RoomGenerationStamp::Untouched,
+        });
+        let sql = render_task_end_tail(&stamped);
+        assert!(
+            sql.contains("$stamp.dbnum NOT IN [7000]") && sql.contains("{ dbnum: 7000, session: 12 }"),
+            "{sql}"
+        );
+        commit_task_end_on(&db, &stamped).await.unwrap();
+        assert_eq!(
+            stamps(&db).await,
+            vec![
+                Stamp { dbnum: 5052, session: 180 },
+                Stamp { dbnum: 7000, session: 12 },
+            ]
+        );
+
+        // 没点名：不碰。
+        commit_task_end_on(&db, &end()).await.unwrap();
+        assert_eq!(stamps(&db).await.len(), 2);
+        assert_eq!(stamps(&db).await[1].session, 12);
+
+        // 模型没成：即便带着落款也不写。
+        db.query("UPDATE dbnum_watermark:8000 SET model_sesno = 20;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut failed = stamped.clone();
+        failed.model = Some(TaskModelOutcome {
+            all_roots_ok: false,
+            dead_roots: 1,
+            catalogue_sessions: Some(BTreeMap::from([(7000, 13), (9000, 1)])),
+            room_generation: RoomGenerationStamp::Untouched,
+        });
+        let sql = render_task_end_tail(&failed);
+        assert!(!sql.contains("model_catalogue_sessions"), "{sql}");
+        commit_task_end_on(&db, &failed).await.unwrap();
+        assert_eq!(stamps(&db).await[1].session, 12);
+
+        // 新目录追加：9000 进来、旧的都留着。
+        let mut more = stamped.clone();
+        more.model = Some(TaskModelOutcome {
+            all_roots_ok: true,
+            dead_roots: 0,
+            catalogue_sessions: Some(BTreeMap::from([(9000, 1)])),
+            room_generation: RoomGenerationStamp::Untouched,
+        });
+        commit_task_end_on(&db, &more).await.unwrap();
+        assert_eq!(
+            stamps(&db).await,
+            vec![
+                Stamp { dbnum: 5052, session: 180 },
+                Stamp { dbnum: 7000, session: 12 },
+                Stamp { dbnum: 9000, session: 1 },
+            ]
+        );
+
+        // 旧行没有这一列：从空数组起。
+        db.query("CREATE dbnum_watermark:8001 SET dbnum=8001, applied_sesno=26, model_sesno=20;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        // Ref0 统计快照是 8000 的（`end()` 夹具），换库要摘掉，否则撞 Ref0 归属守卫。
+        let fresh = TaskEnd {
+            dbnum: 8001,
+            info: None,
+            ..stamped.clone()
+        };
+        commit_task_end_on(&db, &fresh).await.unwrap();
+        assert_eq!(
+            stamps_of(&db, 8001).await,
+            vec![Stamp { dbnum: 7000, session: 12 }]
+        );
+    }
+
+    /// ADR-073 D14：`model_room_generation` 随 `model_sesno` 同盖、同一条纪律——能替整库说话的
+    /// 任务 `Aligned` 写代号，关着开关盖章 `Cleared` 清空，普通增量窗口 `Untouched` 原样不动，
+    /// 模型没成一律不写。
+    #[tokio::test]
+    async fn the_room_generation_stamp_follows_the_model_watermark() {
+        let db = database().await;
+        db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        async fn stamp(db: &Surreal<Any>) -> Option<String> {
+            db.query("SELECT VALUE model_room_generation FROM ONLY dbnum_watermark:8000;")
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take::<Option<String>>(0)
+                .unwrap()
+        }
+
+        let mut aligned = end();
+        aligned.model = Some(TaskModelOutcome {
+            all_roots_ok: true,
+            dead_roots: 0,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Aligned("efd4'ebe1".to_owned()),
+        });
+        let sql = render_task_end_tail(&aligned);
+        assert!(
+            sql.contains("model_room_generation = 'efd4\\'ebe1'"),
+            "代号按字符串转义写入：{sql}"
+        );
+        commit_task_end_on(&db, &aligned).await.unwrap();
+        assert_eq!(stamp(&db).await.as_deref(), Some("efd4'ebe1"));
+
+        // 普通增量窗口：那一格原样。
+        commit_task_end_on(&db, &end()).await.unwrap();
+        assert_eq!(stamp(&db).await.as_deref(), Some("efd4'ebe1"));
+
+        // 模型没成：带着代号也不写（水位那一枚同样不动）。
+        let mut failed = aligned.clone();
+        failed.model = Some(TaskModelOutcome {
+            all_roots_ok: false,
+            dead_roots: 1,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Aligned("newer".to_owned()),
+        });
+        commit_task_end_on(&db, &failed).await.unwrap();
+        assert_eq!(stamp(&db).await.as_deref(), Some("efd4'ebe1"));
+
+        // 关着开关盖章：清空——模型水位此刻只承诺几何。
+        let mut cleared = aligned.clone();
+        cleared.model = Some(TaskModelOutcome {
+            all_roots_ok: true,
+            dead_roots: 0,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Cleared,
+        });
+        assert!(
+            render_task_end_tail(&cleared).contains("model_room_generation = NONE"),
+            "{}",
+            render_task_end_tail(&cleared)
+        );
+        commit_task_end_on(&db, &cleared).await.unwrap();
+        assert_eq!(stamp(&db).await, None);
+    }
+
     #[tokio::test]
     async fn a_whole_task_tail_lands_three_facts_in_one_write() {
         let db = database().await;
@@ -729,6 +999,8 @@ mod tests {
         end.model = Some(TaskModelOutcome {
             all_roots_ok: false,
             dead_roots: 1,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Untouched,
         });
         let receipt = commit_task_end_on(&db, &end).await.unwrap();
         assert_eq!(

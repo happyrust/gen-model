@@ -1,6 +1,6 @@
-//! 指定 dbnum 全量模型重建：把该库**全部**权威生成根装进一条 `ModelOnly` 任务的名单
-//! （`DiscoveredBatch::regen_roots`）排进共享队列，由数据批次 worker 按普通任务执行——
-//! 生成、合块落库、空间树就地收敛、房间段、收尾盖章全在那条任务里（ADR-071 / ADR-072）。
+//! 指定 dbnum 全量模型重建：排一条起点为 0 的 `ModelOnly` 任务进共享队列（「从没追平过」那一档，
+//! 任务按 `DbSet@T` 枚举出该库**全部**权威生成根重算，ADR-079），由数据批次 worker 按普通任务执行——
+//! 生成、合块落库、空间树就地收敛、房间段、收尾盖章（含库级目录落款）全在那条任务里（ADR-071 / ADR-072）。
 //!
 //! 它原先「先作废 `model_update_pending` 旧队列、再把根 seed 进去、另起一个监视器数
 //! pending 行」；第二条异步账退了（ADR-072 D5），重建就是一条任务，进度看 `/tasks` 里
@@ -77,7 +77,9 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         return Ok(receipt);
     }
 
-    // 权威根清单来自文件最新会话的 `DbSet@T`（与增量窗口、启动恢复同一枚举）。
+    // 权威根清单来自文件最新会话的 `DbSet@T`（与增量窗口、启动恢复同一枚举）。名单仍随身带：并进一条
+    // 排队中的 ApplyWindow 时靶子不丢（那条任务按名单重算）；单独成 ModelOnly 时起点 0 让规划器按
+    // 「从没追平过」那一档自己枚举，两份名单按 `(dbnum, root)` 去重合一。
     let version = tokio::task::spawn_blocking(move || {
         crate::data_interface::model_source::latest_source_version(dbnum)
     })
@@ -93,8 +95,9 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         phase: crate::data_interface::initialization_phase::DataPhase::Design,
         epoch_id: 0,
         intent: crate::data_interface::batch_queue::BatchIntent::ModelOnly,
-        // 下限 = 目标：规划器不开窗，进工作单的就是这份全量名单（加本就未安定的根）。
-        model_start_sesno: Some(latest),
+        // 起点 0 = 整库重排（ADR-079）：任务按「从没追平过」那一档把 `DbSet@T` 上的每个根都重算，
+        // 收尾时把这一版照的目录版本盖成库级目录落款（`batch_worker::task_catalogue_stamps`）。
+        model_start_sesno: Some(0),
         file_name: version
             .file
             .file_name()
@@ -107,13 +110,8 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         first_pending_sesno_time: None,
         file_latest_sesno_time: version.session_time.clone(),
         reinit_requested: false,
-        regen_roots: roots
-            .iter()
-            .map(|root| crate::data_interface::batch_scheduler::RegenRoot {
-                refno: root.root.to_pdms_str(),
-                noun: root.noun.clone(),
-            })
-            .collect(),
+        regen_roots: Vec::new(),
+        catalogue_stamps: std::collections::BTreeMap::new(),
     };
     let outcome = crate::data_interface::batch_scheduler::BatchScheduler::global().enqueue(
         crate::data_interface::task_registry::TaskRegistry::global(),

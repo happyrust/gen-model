@@ -68,7 +68,7 @@ use crate::data_interface::increment_manager::{
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
-    classify_operation_impact, owner_change,
+    classify_operation_impact_with, owner_change,
 };
 use crate::data_interface::model_type_scope;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
@@ -291,6 +291,7 @@ pub fn merge_net_change_details(
     merge_net_change_details_with(
         range_eles,
         crate::options::model_skip_metadata_only_changes(),
+        crate::options::model_skip_unread_attribute_changes(),
     )
 }
 
@@ -302,12 +303,17 @@ pub fn merge_net_change_details(
 ///
 /// `model_affecting` 报的是**执行侧会不会为它排模型工作**，所以它得跟着 direct 窗口
 /// 规划器的元数据门走（`metadata_gate` = [`crate::options::model_skip_metadata_only_changes`]）：
-/// 门开着时判据落回 [`classify_operation_impact`]，它与门共用同一道双票；门关上时规划器
-/// 对任何一次属性变化都整根重算，于是这里也不许再有 `Skip`——否则预览会说「不影响模型」，
-/// 而执行照样重算那个根。
+/// 门开着时判据落回 [`classify_operation_impact_with`]，它与门共用同一个
+/// `model_impact::attribute_no_model_tier`；门关上时规划器对任何一次属性变化都整根重算，
+/// 于是这里也不许再有 `Skip`——否则预览会说「不影响模型」，而执行照样重算那个根。
+///
+/// `unread_gate` = [`crate::options::model_skip_unread_attribute_changes`]，第二档
+/// （S6，默认关）：它决定判据认不认「字典 DCHC=0 ∧ 生成侧不读」那一档，所以必须与规划器
+/// 那一侧读同一个开关，两个 `bool` 少传一个就是两句话。
 pub fn merge_net_change_details_with(
     range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
     metadata_gate: bool,
+    unread_gate: bool,
 ) -> Vec<NetChangeDetail> {
     // refno -> (net op, any contributing op affected the model)
     let mut acc: IndexMap<RefU64, (NetOp, bool)> = IndexMap::new();
@@ -316,7 +322,7 @@ pub fn merge_net_change_details_with(
             let Some(kind) = IncomingKind::from_op(op) else {
                 continue;
             };
-            let affected = match classify_operation_impact(op) {
+            let affected = match classify_operation_impact_with(op, unread_gate) {
                 OperationImpact::Skip => !metadata_gate,
                 OperationImpact::Regen | OperationImpact::TransformOnly => true,
             };
@@ -2816,6 +2822,25 @@ pub struct DbnumStatus {
     /// 删掉、下一次任务还没开工；客户端按「没有这一格」处理，不许退回 `finished` 画绿灯。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_state: Option<WriteStateColumns>,
+    /// durable 侧的房间就绪承诺（ADR-073 D14，spec §4.7）：这个库的房间边整库对齐到哪一代。
+    /// 它是「`e3d.room.lookup` 为什么对这个库回 `not_computed`」的唯一出处——库上没盖过那一格、
+    /// 或盖的是上一代，冷重启后（进程内没有根 ACK）就只能回 `not_computed`。
+    /// 整格缺失 = 非 DESI 行，或读不到水位行。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_alignment: Option<RoomAlignmentColumns>,
+}
+
+/// `/dbnums` 每行 `room_alignment` 格的形状（spec §4.7；ADR-073 D14）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RoomAlignmentColumns {
+    /// 库上那一格（`dbnum_watermark.model_room_generation`）。`null` = 从没整库对齐过
+    /// （旧行、关着开关生成的、或一路只有普通增量窗口——它们按 D14 不盖这一格）。
+    pub generation: Option<String>,
+    /// 此刻本进程常驻房间模型这一代。`null` = 房间体制此刻说不出代号（开关关着 / 还在装 / `Blocked`）。
+    pub resident_generation: Option<String>,
+    /// 两者同一代且形态落盘——为真时 `e3d.room.lookup` 对这个库的根答得出 `ready_*`，
+    /// 哪怕进程内一条 ACK 都没有。判据与那一层共用一处（`query_service`）。
+    pub current: bool,
 }
 
 /// `/dbnums` 每行 `write_state` 格的形状（spec §4.7 的字段表）。`dbnum` 是行主键、不重复出；
@@ -3631,6 +3656,11 @@ impl AiosDBManager {
         );
         let registered = DbnumState::list_registered().await?;
         let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
+        // durable 侧的房间就绪承诺（ADR-073 D14）：与两枚水位同一行读回，逐行贴在下面。
+        let room_generations: HashMap<u32, Option<String>> = registered
+            .iter()
+            .map(|state| (state.dbnum, state.model_room_generation.clone()))
+            .collect();
         let project_prefix = format!(
             "{}\\",
             project_dir
@@ -3693,6 +3723,7 @@ impl AiosDBManager {
                 not_in_project: false,
                 model: None,
                 write_state: None,
+                room_alignment: None,
             });
         }
 
@@ -3724,6 +3755,7 @@ impl AiosDBManager {
                 not_in_project: false,
                 model: None,
                 write_state: None,
+                room_alignment: None,
             });
         }
 
@@ -3763,9 +3795,27 @@ impl AiosDBManager {
                 }
             }
             Err(error) => report.warnings.push(format!(
-                "读不到库一致性判决（双水位或 gen_root 普查失败），本次不报模型状态\
+                "读不到库一致性判决（双水位读取失败），本次不报模型状态\
                  ——这是取数失败，不是 not_judged: {error:#}"
             )),
+        }
+
+        // durable 侧房间就绪承诺逐行贴上（ADR-073 D14）：库上那一格、此刻常驻这一代、以及
+        // 「`e3d.room.lookup` 的第 2 层此刻成不成立」。最后那一句走 `query_service` 那一处判据，
+        // 不在这里另写一遍——各写一遍就会出现面板说「对齐了」而同一个库的查询回 `not_computed`。
+        let resident_room_generation = crate::query_service::resident_room_generation();
+        for row in &mut report.dbnums {
+            if !row.db_type.eq_ignore_ascii_case("DESI") {
+                continue;
+            }
+            let generation = room_generations.get(&row.dbnum).cloned().flatten();
+            row.room_alignment = Some(RoomAlignmentColumns {
+                current: crate::query_service::library_room_alignment_is_current(
+                    generation.as_deref(),
+                ),
+                generation,
+                resident_generation: resident_room_generation.clone(),
+            });
         }
 
         // 写入标记一趟整表读回（计划 §4.5 白名单里的 `dbnum_write_state` 控制面读），逐行贴上
@@ -3869,7 +3919,8 @@ impl AiosDBManager {
         Vec<ShadowedCandidate>,
         Vec<crate::data_interface::initialization_phase::PhaseBlocker>,
     ) {
-        let mut projects = self.db_option.included_projects.clone();
+        // 候选项目 = MDB 闭包（ADR-078），不再是人手勾的 `included_projects`。
+        let mut projects = crate::data_interface::project_paths::project_names(&self.db_option);
         if !projects
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(requested_project))
@@ -3881,7 +3932,7 @@ impl AiosDBManager {
         for candidate_project in projects {
             let Some(candidate_dir) = resolve_project_root(&self.db_option, &candidate_project)
             else {
-                let message = format!("无法解析 included project 目录: {candidate_project}");
+                let message = format!("无法解析闭包项目目录（不在 MDB 闭包里或未定位）: {candidate_project}");
                 warnings.push(message.clone());
                 blockers.push(
                     crate::data_interface::initialization_phase::PhaseBlocker::new(
@@ -3893,7 +3944,7 @@ impl AiosDBManager {
                 continue;
             };
             if !candidate_dir.exists() {
-                let message = format!("included project 目录不存在: {}", candidate_dir.display());
+                let message = format!("闭包项目目录不存在: {}", candidate_dir.display());
                 warnings.push(message.clone());
                 blockers.push(
                     crate::data_interface::initialization_phase::PhaseBlocker::new(
@@ -3945,7 +3996,7 @@ impl AiosDBManager {
             let selection =
                 crate::data_interface::initialization_phase::select_catalogue_candidates(
                     candidates,
-                    &self.db_option.included_projects,
+                    &crate::data_interface::project_paths::project_names(&self.db_option),
                     &crate::options::catalogue_project_priority(),
                 );
             let selection_blocked = !selection.blockers.is_empty();
@@ -4749,6 +4800,7 @@ impl AiosDBManager {
                 first_pending_sesno_time,
                 file_latest_sesno_time,
                 regen_roots: Vec::new(),
+                catalogue_stamps: std::collections::BTreeMap::new(),
             });
             manifest_phases.push(
                 crate::data_interface::initialization_phase::DataPhase::of_db_type(&cand.db_type),
@@ -5582,7 +5634,12 @@ mod metadata_gate_caliber_tests {
     }
 
     fn affecting(attr_names: &[&str], metadata_gate: bool) -> bool {
-        let details = merge_net_change_details_with(&window(attr_names), metadata_gate);
+        affecting_with(attr_names, metadata_gate, false)
+    }
+
+    fn affecting_with(attr_names: &[&str], metadata_gate: bool, unread_gate: bool) -> bool {
+        let details =
+            merge_net_change_details_with(&window(attr_names), metadata_gate, unread_gate);
         assert_eq!(details.len(), 1);
         details[0].model_affecting
     }
@@ -5623,6 +5680,28 @@ mod metadata_gate_caliber_tests {
         assert!(affecting(&["POS"], true));
     }
 
+    /// 第二档没有自己的开关（S6 定稿）：门开着它就在，判据与规划器那一侧同名同源——
+    /// `SUPP` / `ACDATE` 字典说 0、生成侧没人按名字读它，一律不影响模型；读取集合里的
+    /// `DIR` 照旧重算。`unread_gate` 这个形参今天不改变任何答案，两个取值必须同一句话。
+    #[test]
+    fn the_unread_attribute_tier_needs_no_switch_of_its_own() {
+        for name in ["SUPP", "ACDATE"] {
+            for unread_gate in [false, true] {
+                assert!(
+                    !affecting_with(&[name], true, unread_gate),
+                    "{name}: 门开着第二档就该放行（unread_gate={unread_gate}）"
+                );
+            }
+        }
+        assert!(affecting_with(&["DIR"], true, true));
+        assert!(affecting_with(&["SUPP", "DIR"], true, true));
+        assert!(affecting_with(&["SUPP", "DIAM"], true, true));
+        // 老名单那一档与第二档同去向。
+        assert!(!affecting_with(&["NAME"], true, true));
+        // 整个门关上时，第二档无从谈起——它在门之内。
+        assert!(affecting_with(&["SUPP"], false, true));
+    }
+
     /// 门关上：规划器逐位回到「任何属性变了就整根重算」，于是这里一条 `Skip` 都不许剩，
     /// 否则关掉开关反而让预览开始说谎。
     #[test]
@@ -5646,6 +5725,10 @@ mod metadata_gate_caliber_tests {
             shell.contains("crate::options::model_skip_metadata_only_changes()"),
             "薄壳必须读窗口规划器那同一个开关: {shell}"
         );
+        assert!(
+            shell.contains("crate::options::model_skip_unread_attribute_changes()"),
+            "第二档也得读同一个开关，少读一个预览就与执行分了口径: {shell}"
+        );
     }
 
     /// 整条链上钉一次，而不是两头各钉半条：`units` 的 `will_generate` 是
@@ -5653,8 +5736,9 @@ mod metadata_gate_caliber_tests {
     /// 只有把一窗真的走完才看得见。计数不受门影响——门管的是生成不生成，不是数不数。
     #[test]
     fn the_details_verdict_and_the_unit_verdict_are_one_sentence() {
-        let verdicts = |attr_names: &[&str], metadata_gate: bool| {
-            let details = merge_net_change_details_with(&window(attr_names), metadata_gate);
+        let verdicts = |attr_names: &[&str], metadata_gate: bool, unread_gate: bool| {
+            let details =
+                merge_net_change_details_with(&window(attr_names), metadata_gate, unread_gate);
             let (units, no_generation, warnings) =
                 build_unit_rollup(&snapshot(), &details, &resolve_delivery_unit_types(&[]));
             assert_eq!(details.len(), 1);
@@ -5665,15 +5749,19 @@ mod metadata_gate_caliber_tests {
         };
 
         // 门开着：拿到两票的名字两边都说「不生成」。
-        assert_eq!(verdicts(&["NAME"], true), (false, false));
-        assert_eq!(verdicts(&["NAME", "DESC"], true), (false, false));
-        assert_eq!(verdicts(&["NAME", "FUNC"], true), (false, false));
+        assert_eq!(verdicts(&["NAME"], true, false), (false, false));
+        assert_eq!(verdicts(&["NAME", "DESC"], true, false), (false, false));
+        assert_eq!(verdicts(&["NAME", "FUNC"], true, false), (false, false));
         // 字典没投票的、以及混进一个几何属性的，两边都说「要生成」。
-        assert_eq!(verdicts(&["CACHID"], true), (true, true));
-        assert_eq!(verdicts(&["NAME", "CACHID"], true), (true, true));
-        assert_eq!(verdicts(&["NAME", "DIAM"], true), (true, true));
+        assert_eq!(verdicts(&["CACHID"], true, false), (true, true));
+        assert_eq!(verdicts(&["NAME", "CACHID"], true, false), (true, true));
+        assert_eq!(verdicts(&["NAME", "DIAM"], true, false), (true, true));
         // 门关上：规划器整根重算，两句话一起翻面。
-        assert_eq!(verdicts(&["NAME"], false), (true, true));
+        assert_eq!(verdicts(&["NAME"], false, false), (true, true));
+        // 第二档也是整条链一句话，而且它没有自己的开关：`SUPP` 两边一起说「不生成」。
+        assert_eq!(verdicts(&["SUPP"], true, false), (false, false));
+        assert_eq!(verdicts(&["SUPP"], true, true), (false, false));
+        assert_eq!(verdicts(&["SUPP", "DIR"], true, true), (true, true));
     }
 }
 
@@ -6299,6 +6387,57 @@ mod tests {
         assert!(
             report.contains("write_state::load_all().await"),
             "写入标记整表一趟读回、逐行贴上: {report}"
+        );
+    }
+
+    /// `/dbnums` 每行的 `room_alignment` 格（ADR-073 D14，spec §4.7）：三格整格出——库上那一格、
+    /// 此刻常驻这一代、以及「`e3d.room.lookup` 的第 2 层此刻成不成立」；没有这一格的行不写 `null`。
+    /// 取数与两枚水位同一趟（`list_registered` 那一次），不逐库回问库；而那句「成不成立」必须走
+    /// `query_service` 那一处判据——在这里另写一遍，面板就会说「对齐了」而同一个库的查询回
+    /// `not_computed`。
+    #[test]
+    fn the_dbnum_row_carries_the_durable_room_alignment_as_one_optional_cell() {
+        let aligned = DbnumStatus {
+            dbnum: 7997,
+            room_alignment: Some(RoomAlignmentColumns {
+                generation: Some("efd4ebe1".to_owned()),
+                resident_generation: Some("efd4ebe1".to_owned()),
+                current: true,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&aligned).unwrap();
+        assert_eq!(
+            json.get("room_alignment").expect("room_alignment cell"),
+            &serde_json::json!({
+                "generation": "efd4ebe1",
+                "resident_generation": "efd4ebe1",
+                "current": true,
+            })
+        );
+        assert!(
+            serde_json::to_value(DbnumStatus::default())
+                .unwrap()
+                .get("room_alignment")
+                .is_none(),
+            "没有这一格的行整格缺失，不写 null"
+        );
+
+        let source = include_str!("manual_update.rs");
+        let report = source
+            .split_once("pub async fn dbnum_statuses(")
+            .expect("dbnum_statuses 必须存在")
+            .1
+            .split_once("\n    /// 这个库进不进本期执行范围")
+            .expect("函数体到下一个条目为止")
+            .0;
+        assert!(
+            report.contains("state.model_room_generation.clone()"),
+            "库上那一格与两枚水位同一趟读回，不另开一趟: {report}"
+        );
+        assert!(
+            report.contains("query_service::library_room_alignment_is_current("),
+            "「第 2 层成不成立」只许有一处判据: {report}"
         );
     }
 

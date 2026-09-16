@@ -660,6 +660,11 @@ pub struct DataBatchTaskResult {
     /// 执行体的收尾段（Ref0 统计、模型水位、写入标记兜底）跳过。不进回执。
     #[serde(skip)]
     pub initialization_closed_task: bool,
+    /// 本任务要在本批根刷盘之后、收尾之前用现有几何重算本库全部根的房间边（`RoomOnly`，
+    /// d-819 / ADR-073 D13）：`Some(原因)`——本窗变更集碰到房间定义族 / 开工前对齐换了房间代号。
+    /// 执行体内部的接力，不进回执（收尾那一段的结果进 `warnings` / `units`）。
+    #[serde(skip)]
+    pub room_recompute: Option<String>,
 }
 
 /// 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
@@ -1044,6 +1049,7 @@ async fn run_one_batch(
                                     model_verdict: None,
                                     model_caught_up_at: None,
                                     initialization_closed_task: false,
+                                    room_recompute: None,
                                 };
                             }
                         }
@@ -1149,6 +1155,7 @@ async fn run_one_batch(
                         model_verdict: None,
                         model_caught_up_at: None,
                         initialization_closed_task: false,
+                        room_recompute: None,
                     }
                 }
             }
@@ -1575,8 +1582,8 @@ async fn execute_frozen_batch(
     // ACK**，`model_sesno` 才随写入标记 `finished`、Ref0 统计在同一笔里盖上——任务说完了，库里就有。
     // 栅栏按根不按库：同库别的根（`/model/ensure` 按需生成的）不是本任务的账；非持久档的根从不登记
     // write-behind，栅栏立刻放行，两档走同一段代码。刷不进去有预算（[`DURABLE_FLUSH_BUDGET`]）：
-    // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、`gen_root` 留痕，任务 Partial、
-    // 水位不盖。任务只等，不替 worker 写（第二个写者在热库上实测撞冲突）。只有 DESI 才有模型可收。
+    // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、账本记失败（ADR-079），任务
+    // Partial、水位不盖。任务只等，不替 worker 写（第二个写者在热库上实测撞冲突）。只有 DESI 才有模型可收。
     let mut model_outcome: Option<crate::data_interface::task_end::TaskModelOutcome> = None;
     let mut end_time: Option<String> = None;
     let mut flush_note = String::new();
@@ -1598,7 +1605,31 @@ async fn execute_frozen_batch(
             flush.blocked.len() + flush.exhausted.len(),
             flush_started.elapsed().as_millis()
         );
-        model_outcome = Some(model_outcome_of(&flush));
+        // 整库房间重算（`RoomOnly`，d-819 / ADR-073 D13）：本窗碰了房间定义族 / 开工前对齐换了房间代号
+        // → 用本库全部根的现有几何重写两张房间边。放在刷盘之后：本批根的模型行与边已在库里，此刻本库
+        // 没有第二个写者；放在收尾之前：算不出的根按 D2 记失败、`model_sesno` 不盖。刷盘没齐就不跑
+        // ——那一批根已经判死，水位本来就不盖。
+        let room_recompute = result.room_recompute.clone();
+        let recomputed_whole_library = room_recompute.is_some() && flush.all_acked();
+        let rooms_ok = match room_recompute {
+            Some(reason) if flush.all_acked() => {
+                registry.set_stage(&job.task_id, "rooms");
+                run_room_only_recompute(job, &reason, &mut result).await
+            }
+            _ => true,
+        };
+        // 库级目录落款（ADR-079）：只有目录级联排的 / 整库重排的 ModelOnly 有资格说，随收尾那一笔
+        // 与 `model_sesno` 同盖；单元清单是任务手里的事实，不回问库。
+        let catalogue_sessions = task_catalogue_stamps(job, &result.units);
+        let room_generation = task_room_generation_stamp(job, recomputed_whole_library && rooms_ok);
+        let mut outcome = model_outcome_of(&flush, catalogue_sessions, room_generation);
+        if !rooms_ok {
+            outcome.all_roots_ok = false;
+            outcome.catalogue_sessions = None;
+            outcome.room_generation =
+                crate::data_interface::task_end::RoomGenerationStamp::Untouched;
+        }
+        model_outcome = Some(outcome);
     }
 
     // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
@@ -1765,9 +1796,10 @@ async fn await_units_durable(
 
 /// 增量路计划 D3：预算用尽 / 判死的根的处置，四件一起——从 write-behind 队列摘掉（不再原地无限重试）、
 /// 逐出投影（durable 才是真值，投影里那份没落成的新几何不该继续对外，读路落回库里的旧行）、
-/// 单元记 `Failed`、`gen_root` 留痕（凭证不前移，下次该库任务 / 启动核对按缺口重排，ADR-076 D8）；
-/// 任务 `Partial`。收尾那一笔照样落、写入标记照收（§8 Q1）：数据行与 `applied_sesno` 早已同步落库、
-/// 模型行按根幂等、没 ACK 的根没有 `gen_root` 回执——收标记不会掩盖任何「没写完」。
+/// 单元记 `Failed`、进程内账本记失败（ADR-079：下一窗把它并进 regen；`model_sesno` 不盖，重启后按
+/// 水位缺口重排，ADR-076 D8）；任务 `Partial`。收尾那一笔照样落、写入标记照收（§8 Q1）：数据行与
+/// `applied_sesno` 早已同步落库、模型行按根幂等、没 ACK 的根账本上不是 `Generated`——收标记不会掩盖
+/// 任何「没写完」。
 async fn abandon_undurable_roots(
     dbnum: u32,
     flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
@@ -1784,7 +1816,7 @@ async fn abandon_undurable_roots(
         store.drop_cached_root(*root);
     }
     for (root_refno, noun, error) in mark_units_undurable(&verdicts, &mut result.units) {
-        mark_generation_failed(dbnum, &root_refno, &noun, &error).await;
+        mark_generation_failed(dbnum, &root_refno, &noun, &error);
     }
     result.status = ManualUpdateStatus::Partial;
     result.warnings.push(format!(
@@ -1798,6 +1830,99 @@ async fn abandon_undurable_roots(
             .collect::<Vec<_>>()
             .join("；")
     ));
+}
+
+/// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：拿开工时同一台计算器，对本库
+/// 全部有回执的根按投影里的现有几何重算归属、重写两张边（[`recompute_dbnum_room_edges`]）。
+///
+/// 返回「本库这一版的房间归属齐了没有」：算不出的根按 D2 记失败（账本 `failed`，下一窗重排；
+/// 单元清单补一条 `Failed` 让回执看得见）、任务 `Partial`、水位不盖；整批提交失败同样 `false`。
+/// 开关关着（`Ok(None)`）= 没有房间可算，如实记一句、按齐了算；计算器冻不出（`Blocked`）= 本库
+/// 这一版的房间算不了，`false`。
+///
+/// [`recompute_dbnum_room_edges`]: crate::fast_model::model_db_adapter::recompute_dbnum_room_edges
+async fn run_room_only_recompute(
+    job: &FrozenBatch,
+    reason: &str,
+    result: &mut DataBatchTaskResult,
+) -> bool {
+    use crate::fast_model::model_db_adapter::{
+        PersistTarget, frozen_room_calculator, recompute_dbnum_room_edges,
+    };
+    let dbnum = job.dbnum;
+    let rooms = match frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) => {
+            result.warnings.push(format!(
+                "dbnum={dbnum} 整库房间重算跳过：room_membership=false（触发：{reason}）"
+            ));
+            return true;
+        }
+        Err(error) => {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 整库房间重算冻不出计算器（触发：{reason}），这一版 model_sesno 不盖: {error:#}"
+            ));
+            return false;
+        }
+    };
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    match recompute_dbnum_room_edges(PersistTarget::process(), store, dbnum, &rooms).await {
+        Ok(report) => {
+            println!(
+                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{} 重算、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
+                report.recomputed,
+                report.roots,
+                report.room_edges,
+                report.commits,
+                report.max_transaction_bytes,
+                report.acks_refreshed,
+                report.failed.len(),
+                report.elapsed_ms
+            );
+            if report.failed.is_empty() {
+                return true;
+            }
+            for (root, error) in &report.failed {
+                let root_refno =
+                    crate::data_interface::generation_root::refno_from_e3d(*root).to_pdms_str();
+                mark_generation_failed(dbnum, &root_refno, "", error);
+                result.units.push(ModelUnitResult {
+                    dbnum,
+                    root_refno,
+                    noun: String::new(),
+                    status: UnitGenStatus::Failed,
+                    attempts: 1,
+                    message: Some(error.clone()),
+                    old_owner: None,
+                    new_owner: None,
+                    kind: UnitKind::Regen,
+                    transform_fallback_reason: None,
+                    unit_fallback_reason: None,
+                });
+            }
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 整库房间重算有 {} 根算不出归属（边原样留着，下一窗重排），这一版 model_sesno 不盖：{}",
+                report.failed.len(),
+                report
+                    .failed
+                    .iter()
+                    .take(5)
+                    .map(|(root, error)| format!("{root} {error}"))
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ));
+            false
+        }
+        Err(error) => {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 整库房间重算写库失败（触发：{reason}；已提交的事务照样有效、下一次触发重来），这一版 model_sesno 不盖: {error:#}"
+            ));
+            false
+        }
+    }
 }
 
 /// 把栅栏的判决摊平成 `(根, blocked | exhausted, 原因)`。
@@ -1817,8 +1942,8 @@ fn flush_verdicts(
         .collect()
 }
 
-/// 放弃的根对应的单元记 `Failed`、`message` 以 `durable flush:` 开头（回执逐根点名）。返回要在
-/// `gen_root` 留痕的 `(root_refno, noun, error)`。单元清单是任务手里的事实，不回问库。
+/// 放弃的根对应的单元记 `Failed`、`message` 以 `durable flush:` 开头（回执逐根点名）。返回要记进
+/// 账本的 `(root_refno, noun, error)`。单元清单是任务手里的事实，不回问库。
 fn mark_units_undurable(
     verdicts: &[(e3d_io::refno::RefNo, &'static str, String)],
     units: &mut [ModelUnitResult],
@@ -1844,14 +1969,122 @@ fn mark_units_undurable(
 }
 
 /// 收尾那一笔的模型半边：一根都没放弃才盖 `model_sesno`；`dead_roots` 只数判死的（确定性失败），
-/// 预算用尽的不算死——库健康了下一次任务还会再试。
+/// 预算用尽的不算死——库健康了下一次任务还会再试。`catalogue_sessions` 是本任务有资格盖的库级
+/// 目录落款（[`task_catalogue_stamps`]），一根没成就不盖（`task_end` 那边也守着 `all_roots_ok`）。
 fn model_outcome_of(
     flush: &crate::fast_model::model_write_behind::RootsFlushOutcome,
+    catalogue_sessions: Option<std::collections::BTreeMap<u32, u32>>,
+    room_generation: crate::data_interface::task_end::RoomGenerationStamp,
 ) -> crate::data_interface::task_end::TaskModelOutcome {
+    use crate::data_interface::task_end::RoomGenerationStamp;
+    let all_roots_ok = flush.all_acked();
     crate::data_interface::task_end::TaskModelOutcome {
-        all_roots_ok: flush.all_acked(),
+        all_roots_ok,
         dead_roots: flush.blocked.len(),
+        catalogue_sessions: catalogue_sessions.filter(|_| all_roots_ok),
+        room_generation: if all_roots_ok {
+            room_generation
+        } else {
+            RoomGenerationStamp::Untouched
+        },
     }
+}
+
+/// 本任务对 durable 侧房间就绪承诺 `dbnum_watermark.model_room_generation` 的处置（ADR-073 D14）。
+///
+/// 与库级目录落款（[`task_catalogue_stamps`]）同一条纪律：只有能替**整库**说话的任务才盖。
+/// 两种任务说得了「这个库的房间边整库对齐到这一代」：
+///
+/// - 本任务跑过整库房间重算（D13 的 `RoomOnly`：本库全部有回执的根按现有几何重写了两张边）；
+/// - 整库重排的 ModelOnly（起点模型水位为 0 / 缺席）：`DbSet@T` 上的每一个根都在本任务重算了，
+///   它们的边都是这一代算的——与目录落款那一半同一个论证。
+///
+/// 普通增量窗口只重算被触到的根，面板那一侧没动过的根的边仍是上一代算的，说不了这句 → `Untouched`。
+/// 房间开关关着 → `Cleared`：这一版 `model_sesno` 只承诺几何（ADR-073 2026-09-11 修订），
+/// durable 侧的房间就绪承诺随之清空，免得关掉开关跑过一轮之后那一格还替旧边说话。
+///
+/// 代号取此刻的 [`required_room_generation`]，与 `/model/ensure` 准入判「这根的 ACK 够不够新」
+/// 用的是同一个字串；取不到（常驻模型 `Blocked`）时不盖——那种局面下本批根本来也没几根落得下去。
+///
+/// [`required_room_generation`]: crate::fast_model::model_db_adapter::required_room_generation
+fn task_room_generation_stamp(
+    job: &FrozenBatch,
+    recomputed_whole_library: bool,
+) -> crate::data_interface::task_end::RoomGenerationStamp {
+    room_generation_stamp_of(
+        crate::fast_model::model_db_adapter::required_room_generation(),
+        recomputed_whole_library || whole_library_model_only(job),
+    )
+}
+
+/// 判据的纯函数形态，逐格钉住（[`task_room_generation_stamp`]）。
+fn room_generation_stamp_of(
+    room_generation: anyhow::Result<Option<String>>,
+    speaks_for_library: bool,
+) -> crate::data_interface::task_end::RoomGenerationStamp {
+    use crate::data_interface::task_end::RoomGenerationStamp;
+    match room_generation {
+        // 开关关着：这一版水位只承诺几何，库上那一格随之清空。
+        Ok(None) => RoomGenerationStamp::Cleared,
+        Ok(Some(generation)) if speaks_for_library => RoomGenerationStamp::Aligned(generation),
+        Ok(Some(_)) | Err(_) => RoomGenerationStamp::Untouched,
+    }
+}
+
+/// 「整库重排的 ModelOnly」：起点模型水位为 0 / 缺席，`DbSet@T` 上的每一个根都在本任务重算。
+/// 库级目录落款（ADR-079）与 durable 侧房间就绪承诺（ADR-073 D14）共用这一句资格判定。
+fn whole_library_model_only(job: &FrozenBatch) -> bool {
+    job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
+        && job.model_start_sesno.is_none_or(|floor| floor <= 0)
+}
+
+/// 本任务成了要盖的库级目录落款（ADR-079：随 `gen_root` 退役，逐根的 `published_model_target.catalogue`
+/// 收成每库一份，写在水位行上）。两种任务有资格说「这个库的整份模型与该目录到这一版一致」：
+///
+/// - 带着落款入队的任务（目录级联排的 ModelOnly，[`FrozenBatch::catalogue_stamps`]；并进一条排队中的
+///   ApplyWindow 时名单与落款一起随行）：随行名单上的根全部在本任务重算成了，落款就是入队时定的那几个
+///   `CATA dbnum → 会话`——**不**从回执反推，免得把同期也前移了、却还没核对过的另一个目录库一并盖掉；
+///   名单上有一根没在本任务生成成功（模型工作被跳过、失败），这句就说不了；
+/// - 整库重排的 ModelOnly（起点模型水位为 0 / 缺席：启动核对「从没追平过」、`/model/rebuild`）：
+///   `DbSet@T` 上的每一个根都重算了，它们照的目录版本就是整个库的目录版本——从生成成功的根的投影
+///   回执取 `ModelTarget.catalogue`，同一目录库取**最旧**（与初始化 `dbnum_initialize` 同一口径）。
+///
+/// 普通增量窗口只重算被触到的根，说不了这句，给 `None`；初始化的落款由双 lane 编排自己盖。
+fn task_catalogue_stamps(
+    job: &FrozenBatch,
+    units: &[ModelUnitResult],
+) -> Option<std::collections::BTreeMap<u32, u32>> {
+    if !job.catalogue_stamps.is_empty() {
+        let explicit_roots_generated = job.regen_roots.iter().all(|root| {
+            units.iter().any(|unit| {
+                unit.root_refno == root.refno && unit.status == UnitGenStatus::Generated
+            })
+        });
+        return explicit_roots_generated.then(|| job.catalogue_stamps.clone());
+    }
+    if !whole_library_model_only(job) {
+        return None;
+    }
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let mut stamps = std::collections::BTreeMap::new();
+    for root in generated_roots(units) {
+        let Some(target) = store
+            .receipt(
+                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                root,
+            )
+            .and_then(|receipt| receipt.model_target)
+        else {
+            continue;
+        };
+        for file in &target.catalogue {
+            stamps
+                .entry(file.dbnum)
+                .and_modify(|kept: &mut u32| *kept = (*kept).min(file.session))
+                .or_insert(file.session);
+        }
+    }
+    Some(stamps)
 }
 
 async fn execute_model_only_body(
@@ -1898,6 +2131,7 @@ async fn execute_model_only_body(
                 model_verdict: None,
                 model_caught_up_at: None,
                 initialization_closed_task: false,
+                room_recompute: None,
             };
         }
     };
@@ -1954,6 +2188,7 @@ async fn execute_model_only_body(
         model_verdict: None,
         model_caught_up_at: None,
         initialization_closed_task: false,
+        room_recompute: None,
     }
 }
 
@@ -2067,20 +2302,13 @@ async fn run_model_side_actions(
             ModelWorkAction::DeleteCleanup => {
                 // 两面都退：读透形态下 Plant UI 的权威投影在 ModelMemoryStore，只删 Surreal
                 // 那份会让 `/model/records` 继续供一棵幽灵子树直到重启。
-                match mgr.delete_model_subtree(refno).await {
-                    Ok(()) if item.noun.trim().is_empty() => {
-                        let key = item.target_refno.replace('/', "_");
-                        aios_core::SUL_DB
-                            .query(format!(
-                                "DELETE gen_root:{key} WHERE pe = NONE AND noun = NONE;"
-                            ))
-                            .await
-                            .map_err(anyhow::Error::from)
-                            .and_then(|response| response.check().map_err(anyhow::Error::from))
-                            .map(|_| ())
-                    }
-                    other => other,
+                let outcome = mgr.delete_model_subtree(refno).await;
+                if outcome.is_ok() {
+                    // 这根不再是根 / 已被删：账本里那一条一起摘掉（ADR-079），别让它以「还欠着」
+                    // 的身份被下一窗当成 regen 候选。
+                    crate::data_interface::model_root_ledger::forget_root(item.dbnum, refno);
                 }
+                outcome
             }
             ModelWorkAction::Transform => {
                 mgr.update_world_transforms(&std::collections::HashSet::from([refno]))
@@ -2111,64 +2339,25 @@ async fn run_model_side_actions(
     (derived, failures)
 }
 
-/// 把生成失败写到根凭证上：`gen_root:{root} SET status = 'failed', last_error = …`。
+/// 把生成失败记进进程内的生成根账本（ADR-079：`gen_root` 表退役，失败根不再往库里写痕）。
 ///
-/// 这是 pending 表退役（ADR-072 D5）后「这根还欠着」唯一的库内痕迹：`status` 不在安定集里
-/// （`window_root_plan::SETTLED_ROOT_STATUSES`），于是
+/// 这是 pending 表退役（ADR-072 D5）后「这根还欠着」唯一的记录，只活在本进程里：
 ///
-/// - 数据尾事务的凭证前移（`render_credential_advance` 的 SQL 守卫）不会把它推到 T；
-/// - 下一窗的规划器（`carry_unsettled_generation`）把它并进 regen；
-/// - 启动核对（`startup_coverage_floors` 的 `unsettled_roots`）把它算进缺口、排恢复任务。
+/// - 下一窗的规划器（`carry_unsettled_generation`）把它并进 regen、从前移与懒生成名单里摘掉；
+/// - 一致性判决（`dbnum_consistency`）把它数进「还在赶」，库的灯不绿；
+/// - `model_sesno` 不盖（`task_end` 守着 `all_roots_ok`）就是它在库里的全部说法。
 ///
-/// 从没生成过的根也造一行（`UPSERT`）：没有行的根在规划器眼里是「懒生成」，失败一次就该
-/// 被看见。`noun` 只填空——已有行上的值是生成器写的，比这里的更可信。写不进去只喊一句：
-/// 这条是恢复用的痕迹，不能反过来把本批再拖失败一次。
-async fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
-    let Some(statement) = render_generation_failed(dbnum, root_refno, noun, error) else {
+/// 进程终止它就消失，这是有意的：重启后 `model_sesno` 若没盖到 T，启动核对排的 `model_sesno → T`
+/// 那一窗本来就把这根重排（它在差分里）；不需要任何一行留痕。判死的根（确定性失败）也记 `failed`
+/// ——ADR-076 D6 / D8 的口径：放弃、水位不盖、下一次该库任务再试；「永久放弃」那一格
+/// （`RootOutcome::Refused`）留给服务端判它解析不出合法生成根的那类判定。解析不出来的 refno 只记日志。
+fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
+    use crate::data_interface::model_root_ledger as ledger;
+    let Some(root) = ledger::parse_root(root_refno) else {
+        log::warn!("生成失败的根 `{root_refno}` 不是 a/b refno，账本不记 dbnum={dbnum}");
         return;
     };
-    if let Err(error) = aios_core::SUL_DB
-        .query(statement)
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|response| response.check().map_err(anyhow::Error::from))
-    {
-        log::error!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
-        eprintln!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
-    }
-}
-
-/// 失败根在 `gen_root` 上留痕的那一句（`status = 'failed'`，`last_error` 截 2000 字）。
-/// 增量路当场执行（[`mark_generation_failed`]），初始化路把它交给模型 lane（ADR-077 D5）。
-/// `root_refno` 解析不出来返回 `None`。
-pub(crate) fn render_generation_failed(
-    dbnum: u32,
-    root_refno: &str,
-    noun: &str,
-    error: &str,
-) -> Option<String> {
-    use std::str::FromStr;
-    let refno = aios_core::RefU64::from_str(root_refno).ok()?;
-    let key = format!("{}_{}", refno.get_0(), refno.get_1());
-    Some(format!(
-        "UPSERT type::thing('gen_root', {key}) SET dbnum = {dbnum}, \
-         pe = type::thing('pe', {key}), noun = noun ?? {noun}, \
-         status = 'failed', last_error = {error}, updated_at = time::now();",
-        key = format!(
-            "'{}'",
-            crate::data_interface::dbnum_state::escape_surql_str(&key)
-        ),
-        noun = format!(
-            "'{}'",
-            crate::data_interface::dbnum_state::escape_surql_str(noun.trim())
-        ),
-        error = format!(
-            "'{}'",
-            crate::data_interface::dbnum_state::escape_surql_str(
-                &error.chars().take(2000).collect::<String>()
-            )
-        ),
-    ))
+    ledger::record_failed(dbnum, root, noun, 0, error);
 }
 
 /// 根生成成功后，把被改判的原始位姿目标送回统一 AABB 变更链（`PostRegenAabb`，
@@ -2186,6 +2375,13 @@ async fn refresh_post_regen_aabbs_for(items: &[ModelWorkItem]) -> anyhow::Result
 
 /// 这一轮跑完了：把冻结右端追平、数据事务成功、交付单元全部生成——三件事同时成立，
 /// 才盖模型水位（ADR-072 D4；文件轮次的完成屏障退了，判据只剩这一份）。
+///
+/// 第三件在 `units` 为空时**故意**成立：选根全落在 `advance` / `lazy` 的窗口一根都不重生成，
+/// 它照样是一轮完整的追平，`model_sesno` 该盖到 T——ADR-079 之后的凭证前移就只剩这一枚水位
+/// 在承诺「未触根到 T 仍有效」。这里加一句 `!units.is_empty()` 就会把「这一窗省掉了 N 根重
+/// 生成」悄悄变成「这一窗不算数」，两枚水位从此一直分叉。同款空集真在
+/// [`crate::fast_model::model_write_behind::RootsFlushOutcome::all_acked`]，整条链钉在
+/// `tests::a_window_with_no_model_work_still_stamps_the_model_watermark`。
 fn batch_round_complete(
     committed_end_sesno: Option<i32>,
     file_latest_sesno: i32,
@@ -2228,6 +2424,7 @@ fn window_remainder_batch(
         // 续跑的冻结点若仍判无异常也不会再清——applied 已非 0，走的是增量分支）。
         reinit_requested: job.reinit_requested,
         regen_roots: job.regen_roots.clone(),
+        catalogue_stamps: job.catalogue_stamps.clone(),
     }
 }
 
@@ -2291,6 +2488,7 @@ fn failed_window_result(
         model_verdict: None,
         model_caught_up_at: None,
         initialization_closed_task: false,
+        room_recompute: None,
     }
 }
 
@@ -2334,6 +2532,19 @@ async fn execute_frozen_batch_body(
     // the dbnum slot. Reinitialization follows the same rule; the scheduler already
     // makes that intent exclusive.
     let defer_model_phase = model_phase_is_deferred(model_incremental, applied);
+
+    // 模型半边开工前把常驻房间模型对齐到此刻的文件版本（ADR-073 D12）：本窗的几何按这一版文件算，
+    // 房间归属的候选面板也得是这一版的。composite 没变一次探针、零重建；变了才按文件重建；重建失败
+    // 留旧代继续算、缺口进 /health。冻计算器的那几处（位姿便宜路、单元工作单 → write-behind）都在它后面。
+    // 回执留着：换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
+    let room_reference = if defer_model_phase {
+        None
+    } else {
+        Some(
+            crate::fast_model::model_db_adapter::refresh_room_reference_before_task(job.dbnum)
+                .await,
+        )
+    };
 
     // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
     // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
@@ -2444,6 +2655,18 @@ async fn execute_frozen_batch_body(
         publish_sync(mgr, job, end_sesno).await;
     }
 
+    // 整库房间重算的接力（`RoomOnly`，d-819 / ADR-073 D13）：规划器排了 `RoomOnly` 工作项（本窗碰了
+    // 房间定义族），或开工前对齐换了房间代号。真跑在执行体收尾段——本批根刷盘之后（那时本库没有
+    // 第二个写者），这里只把「要不要、为什么」交出去。模型半边没跑 / 本批没收口就不跑。
+    let room_recompute = if defer_model_phase || settlement_failed {
+        None
+    } else {
+        crate::data_interface::room_recompute::request_for_task(
+            &side_actions,
+            room_reference.as_ref(),
+        )
+    };
+
     let batch_slice: Vec<DataBatchResult> = batch.clone().into_iter().collect();
     let status = include_model_side_effect_failure(
         aggregate_manual_status(&batch_slice, &units),
@@ -2458,6 +2681,7 @@ async fn execute_frozen_batch_body(
         model_verdict: None,
         model_caught_up_at: None,
         initialization_closed_task,
+        room_recompute,
     }
 }
 
@@ -2508,7 +2732,7 @@ async fn run_single_unit(
     let settlement_failed = false;
     let _ = warnings;
     if let Some(error) = generation_error.as_deref() {
-        mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error).await;
+        mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error);
     }
     let (status, attempts, message) = match outcome {
         Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
@@ -3181,7 +3405,7 @@ async fn run_unit_worklist(
                 });
                 let success = message.is_none();
                 if let Some(error) = message.as_deref() {
-                    mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error).await;
+                    mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error);
                 }
                 if !success {
                     settlement_failed = true;
@@ -3665,6 +3889,7 @@ async fn schedule_frozen_source_replacement(
         // 文件被替换：这是检出的重建，不是人点的。
         reinit_requested: false,
         regen_roots: Vec::new(),
+        catalogue_stamps: std::collections::BTreeMap::new(),
     };
     let outcome = scheduler.enqueue(registry, &found, false);
     scheduler.record_frozen_source(job.dbnum, false, replacement.commit_token_json()?);
@@ -3762,6 +3987,57 @@ mod tests {
                 &[unit(UnitGenStatus::Generated), unit(UnitGenStatus::Failed)]
             ),
             "一根失败单元就把这一轮留在 collecting"
+        );
+    }
+
+    /// 零模型工作量的窗口照样盖 `model_sesno`：选根全落在 `advance` / `lazy` 时一根都不重生成，
+    /// 而「未触根到 T 仍有效」在 ADR-079 之后没有别的载体——`gen_root` 退役了，库里一行都不改，
+    /// 全靠这一枚水位承诺。整条链由两处空集真接起来，任一处被加上 `!is_empty()` 之类的守卫，
+    /// 凭证前移就静默失效：两枚水位一直分叉，启动核对每次都排一条什么都不做的 ModelOnly，
+    /// 而现有测试一个都不会红。
+    #[test]
+    fn a_window_with_no_model_work_still_stamps_the_model_watermark() {
+        use crate::data_interface::task_end::{
+            RoomGenerationStamp, TaskEnd, TaskModelOutcome, render_task_end_tail,
+        };
+        use crate::fast_model::model_write_behind::RootsFlushOutcome;
+
+        // 空集真其一：没有交付单元 = 每个单元都生成了。
+        assert!(
+            batch_round_complete(Some(42), 42, ManualUpdateStatus::Success, &[]),
+            "regen 为空的窗口也是一轮完整的追平"
+        );
+        // 空集真其二：一根都没点名 = 一根都没放弃。
+        let flush = RootsFlushOutcome::default();
+        assert!(flush.all_acked(), "空的刷盘判决就是全 ACK");
+        let outcome = model_outcome_of(&flush, None, RoomGenerationStamp::Untouched);
+        assert_eq!(
+            outcome,
+            TaskModelOutcome {
+                all_roots_ok: true,
+                dead_roots: 0,
+                catalogue_sessions: None,
+                room_generation: RoomGenerationStamp::Untouched,
+            },
+            "没有根要等，模型半边就是全成"
+        );
+        // 两处接起来：收尾那一笔照盖水位，且走的还是 M2 那条带数据闸的语句。
+        let sql = render_task_end_tail(&TaskEnd {
+            dbnum: 8000,
+            target_sesno: 26,
+            data: None,
+            target_time: None,
+            model: Some(outcome),
+            info: None,
+            closes_task: true,
+        });
+        assert!(
+            sql.contains("model_sesno = math::max([model_sesno ?: 0, 26])"),
+            "零根重生成 ≠ 水位不动: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE (applied_sesno ?: 0) >= 26"),
+            "前移仍受数据水位闸约束（M2）: {sql}"
         );
     }
 
@@ -3923,7 +4199,9 @@ mod tests {
     #[test]
     fn an_abandoned_root_leaves_the_task_partial_the_watermark_unstamped_and_the_marker_finished()
     {
-        use crate::data_interface::task_end::{TaskEnd, TaskModelOutcome, render_task_end_tail};
+        use crate::data_interface::task_end::{
+            RoomGenerationStamp, TaskEnd, TaskModelOutcome, render_task_end_tail,
+        };
         use crate::fast_model::model_write_behind::RootsFlushOutcome;
         use e3d_io::refno::RefNo;
 
@@ -3934,13 +4212,21 @@ mod tests {
             blocked: vec![(blocked, "room calculator unavailable".into())],
             exhausted: Vec::new(),
         };
-        let outcome = model_outcome_of(&flush);
+        let stamps = Some(std::collections::BTreeMap::from([(7000, 13)]));
+        let outcome = model_outcome_of(
+            &flush,
+            stamps.clone(),
+            RoomGenerationStamp::Aligned("gen-not-stamped".to_owned()),
+        );
         assert_eq!(
             outcome,
             TaskModelOutcome {
                 all_roots_ok: false,
                 dead_roots: 1,
-            }
+                catalogue_sessions: None,
+                room_generation: RoomGenerationStamp::Untouched,
+            },
+            "一根没成，库级目录落款与 durable 侧房间就绪承诺都不盖（ADR-079 / ADR-073 D14）"
         );
         let sql = render_task_end_tail(&TaskEnd {
             dbnum: 8000,
@@ -3982,30 +4268,98 @@ mod tests {
             exhausted: vec![(blocked, "5 attempts used up: timeout".into())],
         };
         assert_eq!(
-            model_outcome_of(&exhausted),
+            model_outcome_of(&exhausted, None, RoomGenerationStamp::Untouched),
             TaskModelOutcome {
                 all_roots_ok: false,
                 dead_roots: 0,
+                catalogue_sessions: None,
+                room_generation: RoomGenerationStamp::Untouched,
             },
             "预算用尽的放弃但不算死"
         );
         assert_eq!(
-            model_outcome_of(&RootsFlushOutcome {
-                acked: vec![fine, blocked],
-                ..Default::default()
-            }),
+            model_outcome_of(
+                &RootsFlushOutcome {
+                    acked: vec![fine, blocked],
+                    ..Default::default()
+                },
+                stamps.clone(),
+                RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
+            ),
             TaskModelOutcome {
                 all_roots_ok: true,
                 dead_roots: 0,
+                catalogue_sessions: stamps,
+                room_generation: RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
             },
-            "全 ACK 才盖"
+            "全 ACK 才盖，落款与 durable 侧房间就绪承诺随之"
         );
         assert_eq!(generated_roots(&units), vec![fine], "只等生成成功的根");
     }
 
-    /// D3 的副作用在源码上钉住：放弃 = 摘队列 + 逐出投影 + `gen_root` 留痕 + Partial，四件一起。
+    /// ADR-073 D14：durable 侧的房间就绪承诺只有能替**整库**说话的任务才盖——本任务跑过整库房间
+    /// 重算，或是整库重排的 ModelOnly。普通增量窗口只重算被触到的根，面板那一侧没动过的根的边仍是
+    /// 上一代算的，盖了就是替它们说了谎；开关关着要**清空**那一格，不是原样留着替旧边说话；
+    /// 常驻模型此刻取不到代号（`Blocked`）时什么都不盖。
     #[test]
-    fn an_abandoned_root_is_evicted_from_the_projection_and_marked_failed_in_gen_root() {
+    fn only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation() {
+        use crate::data_interface::task_end::RoomGenerationStamp;
+
+        let generation = || Ok(Some("efd4ebe1".to_owned()));
+        assert_eq!(
+            room_generation_stamp_of(generation(), true),
+            RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
+            "整库对齐过的任务盖这一代"
+        );
+        assert_eq!(
+            room_generation_stamp_of(generation(), false),
+            RoomGenerationStamp::Untouched,
+            "普通增量窗口说不了整库的话，那一格原样"
+        );
+        // 开关关着：两种任务都清空——`model_sesno` 这一版只承诺几何（ADR-073 2026-09-11 修订）。
+        for speaks_for_library in [true, false] {
+            assert_eq!(
+                room_generation_stamp_of(Ok(None), speaks_for_library),
+                RoomGenerationStamp::Cleared
+            );
+            assert_eq!(
+                room_generation_stamp_of(Err(anyhow::anyhow!("blocked")), speaks_for_library),
+                RoomGenerationStamp::Untouched,
+                "代号取不到就不盖，不拿空字串冒充一代"
+            );
+        }
+    }
+
+    /// 资格判定只有一处：库级目录落款与 durable 侧房间就绪承诺共用 [`whole_library_model_only`]，
+    /// 两边不许各写一遍「起点为 0 的 ModelOnly」——写岔了就会出现「落款盖了、房间代号没盖」这种
+    /// 半截承诺，而它在库上看不出来。
+    #[test]
+    fn the_whole_library_eligibility_is_decided_in_one_place() {
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        assert_eq!(
+            source.matches("model_start_sesno.is_none_or").count(),
+            1,
+            "「起点为 0 的 ModelOnly」这句判据只许有一处定义"
+        );
+        for caller in ["fn task_catalogue_stamps", "fn task_room_generation_stamp"] {
+            let body = source
+                .split_once(caller)
+                .unwrap_or_else(|| panic!("{caller} exists"))
+                .1;
+            let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+            assert!(
+                body.contains("whole_library_model_only"),
+                "{caller} 要走同一句资格判定：{body}"
+            );
+        }
+    }
+
+    /// D3 的副作用在源码上钉住：放弃 = 摘队列 + 逐出投影 + 账本记失败（ADR-079）+ Partial，四件一起。
+    #[test]
+    fn an_abandoned_root_is_evicted_from_the_projection_and_marked_failed_in_the_ledger() {
         let source = include_str!("batch_worker.rs");
         let helper = source
             .split_once("async fn abandon_undurable_roots(")
@@ -4032,6 +4386,39 @@ mod tests {
         assert_eq!(DURABLE_FLUSH_BUDGET.deadline, Duration::from_secs(600));
     }
 
+    /// ADR-079：生成失败只进进程内账本——记 `failed`（拦水位、下一窗重排），带原话；
+    /// 库里一行都不写；解析不出来的 refno 不记。
+    #[test]
+    fn a_generation_failure_is_recorded_in_the_process_ledger_not_in_a_table() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let dbnum = 994_100;
+        ledger::forget_dbnum(dbnum);
+        mark_generation_failed(dbnum, "24384/7", "BRAN", "manifold boolean failed");
+        mark_generation_failed(dbnum, "garbage", "EQUI", "ignored");
+        let census = ledger::census(dbnum);
+        assert_eq!((census.chasing, census.abandoned, census.settled), (1, 0, 0));
+        let root = ledger::parse_root("24384/7").unwrap();
+        assert_eq!(
+            ledger::chasing_roots(dbnum),
+            std::collections::BTreeSet::from([root])
+        );
+        let entry = ledger::entry(dbnum, root).unwrap();
+        assert_eq!(entry.status_label(), "failed");
+        assert_eq!(entry.error(), Some("manifold boolean failed"));
+        assert_eq!(entry.noun, "BRAN");
+        ledger::forget_dbnum(dbnum);
+
+        let source = include_str!("batch_worker.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
+        assert!(
+            !production.contains("type::thing('gen_root'") && !production.contains("gen_root:"),
+            "任务执行体不许再写逐根凭证行（ADR-079）"
+        );
+    }
+
     #[test]
     fn task_receipt_exposes_the_final_model_verdict_and_caught_up_time() {
         let receipt = DataBatchTaskResult {
@@ -4043,6 +4430,7 @@ mod tests {
             model_verdict: Some("in_sync".into()),
             model_caught_up_at: Some("2026-09-05T17:01:43Z".into()),
             initialization_closed_task: false,
+            room_recompute: None,
         };
         let json = serde_json::to_value(receipt).expect("task receipt serializes");
         assert_eq!(json["model_verdict"], "in_sync");
@@ -4116,6 +4504,7 @@ mod tests {
             frozen_source_token: Some("round-token".into()),
             reinit_requested: false,
             regen_roots: Vec::new(),
+            catalogue_stamps: std::collections::BTreeMap::new(),
         };
         let found = window_remainder_batch(&job, 60, 90);
         assert_eq!(found.applied_sesno, 60, "左端 = 刚提交的水位");
@@ -4365,6 +4754,7 @@ mod tests {
             frozen_source_token: None,
             reinit_requested: false,
             regen_roots: Vec::new(),
+            catalogue_stamps: std::collections::BTreeMap::new(),
         };
 
         assert_eq!(

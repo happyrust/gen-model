@@ -200,13 +200,17 @@ pub struct CatalogueCascadeReport {
     pub point_queries: usize,
     /// 记录头读不出的目录件数。
     pub unreadable: usize,
-    /// 反查命中、且 `gen_root` 落款仍在旧目录上、被排进 `RegenRoot` 的根数，按设计库。
+    /// 反查命中、且所在设计库的**库级**目录落款仍在旧目录上（ADR-079）、被排进 `RegenRoot` 的根数，按设计库。
     pub enqueued: BTreeMap<u32, usize>,
-    /// 退化目录库的依赖根被排进 `RegenRoot` 的数，按设计库（与上一栏不重复计）。
+    /// 退化目录库波及的设计库被整库排进 `RegenRoot` 的根数，按设计库（与上一栏不重复计）。
     pub enqueued_degraded: BTreeMap<u32, usize>,
-    /// 反查命中、但 `gen_root` 落款已在新目录上（重启前已经重算过）的根数——不重排。
+    /// 反查命中、但所在设计库的落款已在新目录上（重启前 / 上一次核对已经重算过）的根数——不重排。
     pub already_current: usize,
-    /// 反查命中、却没有 `gen_root` 行的根数：从未生成过，按需懒生成（ADR-058 D6），启动不排。
+    /// 落款仍旧、却一根都没被命中的设计库：只排一条盖落款的空名单 ModelOnly（ADR-079），升序。
+    #[serde(default)]
+    pub stamp_only: Vec<u32>,
+    /// 2026-09-15 之前：反查命中、却没有 `gen_root` 行的根数（从未生成过，懒生成）。逐根行随 ADR-079
+    /// 退役后这一格分不出来了，恒 0；字段留着不动 `/health` 的形状。
     pub lazy_roots: usize,
     /// 命中却因监听限定域 / 发布队列阻断而跳过的根数。
     pub skipped_out_of_scope: usize,
@@ -286,8 +290,15 @@ impl CatalogueCascadeReport {
         }
         if self.already_current > 0 {
             line.push_str(&format!(
-                "，{} 根落款已在新目录上不重排",
+                "，{} 根所在库落款已在新目录上不重排",
                 self.already_current
+            ));
+        }
+        if !self.stamp_only.is_empty() {
+            line.push_str(&format!(
+                "，{} 个库没被波及、只排盖落款的空任务 {:?}",
+                self.stamp_only.len(),
+                self.stamp_only
             ));
         }
         if self.lazy_roots > 0 {
@@ -1087,7 +1098,7 @@ mod tests {
     /// `ams7000_0001` 链上只留了 5 个会话（1 / 237 / 238 / 262 / 263，MERGE CHANGES 折过），
     /// 262→263 零变更、其余都是几万件的导入级窗——找不到精确窗就退到 C8 / P4 live 门的同一手法：
     /// 从某个 DESI 的 `SPRE` 反向表里拿一条指向 7000 的边，把那个 SPCO 当**假定的变更源**，
-    /// 反查回来的引用者必须包含那条边的 referrer。DB 那一半（`roots_behind_catalogue_on` / 排工）
+    /// 反查回来的引用者必须包含那条边的 referrer。DB 那一半（`libraries_behind_catalogue` / 排工）
     /// 由 mem:// 单测钉，这里只走文件半边。
     #[test]
     #[ignore = "manual live: walks the ams7000_0001 session chain and opens every DESI in ams000"]
@@ -1394,11 +1405,20 @@ mod tests {
             "{line}"
         );
         assert!(line.contains("排 RegenRoot 1 根 [命中 8000:1]"), "{line}");
-        assert!(line.contains("1 根落款已在新目录上不重排"), "{line}");
+        assert!(line.contains("1 根所在库落款已在新目录上不重排"), "{line}");
         assert!(line.contains("1 个引用者上卷不到根"), "{line}");
         assert!(line.contains("1 个目录件记录头读不出"), "{line}");
         assert!(!line.contains("懒生成"), "{line}");
+        assert!(!line.contains("盖落款的空任务"), "{line}");
         assert!(!line.contains("退化"), "{line}");
+
+        // ADR-079：落款仍旧却没被波及的库只排盖落款的空任务，横幅点名它。
+        report.stamp_only = vec![8002];
+        let line = report.banner_line();
+        assert!(
+            line.contains("1 个库没被波及、只排盖落款的空任务 [8002]"),
+            "{line}"
+        );
 
         report.degraded.insert(7351, "零表".into());
         report.enqueued_degraded.insert(8001, 40);

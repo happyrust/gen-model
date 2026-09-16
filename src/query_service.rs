@@ -69,21 +69,35 @@ async fn read_room_memberships(
     Ok(response.take(1)?)
 }
 
+/// `e3d.room.lookup` 的 `calculation_status`：空 `memberships` 到底是「算过、不属于任何房间」
+/// 还是「还没算」。就绪判据有两层，先问进程、再问库：
+///
+/// 1. **进程内的根 ACK**（ADR-073 2026-09-11 / d-381）：这根的模型行与房间边在本进程里完整提交过，
+///    且 ACK 的房间代号就是此刻常驻模型这一代。最强的一句话，但它不持久（ADR-079：逐根成败只活
+///    在进程里）——rocksdb 形态下冷重启后一条 ACK 都没有，而库里的边还在。
+/// 2. **库上的整库对齐承诺**（ADR-073 D14）：`dbnum_watermark.model_room_generation` ——「这个库的
+///    房间边整库对齐到哪一代」，由能替整库说话的任务随 `model_sesno` 同盖。第 1 层够不着时问它。
+///
+/// 两层用的是同一个代号（`ResidentRoomModel::input_version`），所以判据也是同一句：房间 / 面板
+/// 真变过 → 代号变 → 两层同时作废，回 `not_computed` 而不是拿上一代的边冒充这一版的结论。
 fn room_calculation_status(
     memberships: usize,
     dbnum: u32,
     generation_root: Option<e3d_io::refno::RefNo>,
+    library_room_generation: Option<&str>,
 ) -> &'static str {
     use crate::fast_model::room_resident::ResidentLifecycle;
 
     if !crate::options::room_membership() {
         return "disabled";
     }
+    // `Degraded` 的模型照常算房间（ADR-073 D10）：缺几何的面板在保护集里、缺文件的库不在册，
+    // 这一条查询的结论仍由该根的 ACK 决定。
     let generation = match crate::fast_model::room_resident::lifecycle() {
-        ResidentLifecycle::Ready { generation, .. } => generation,
+        ResidentLifecycle::Ready { generation, .. }
+        | ResidentLifecycle::Degraded { generation, .. } => generation,
         ResidentLifecycle::Loading { .. } => return "initializing",
-        ResidentLifecycle::Degraded { .. }
-        | ResidentLifecycle::Blocked { .. }
+        ResidentLifecycle::Blocked { .. }
         | ResidentLifecycle::Unsupported { .. }
         | ResidentLifecycle::Disabled { .. } => return "failed",
     };
@@ -105,11 +119,23 @@ fn room_calculation_status(
         crate::fast_model::model_memory_store::ProjectionScope::Current,
         root,
     );
-    if !ack.is_some_and(|ack| {
+    let published_here = ack.is_some_and(|ack| {
         ack.dbnum == dbnum
             && ack.room_membership
             && ack.room_generation.as_deref() == Some(generation.as_str())
-    }) {
+    });
+    // 本进程试过这根、没成（ADR-079 账本里还悬着）：库上那一版边是上一版的，库级承诺也救不了它
+    // ——与 `model_coverage::root_credential_covers` 的一票否决同一条纪律。
+    let chasing_here = crate::data_interface::model_root_ledger::entry(
+        dbnum,
+        crate::data_interface::generation_root::refno_from_e3d(root),
+    )
+    .is_some_and(|entry| !entry.is_settled());
+    if !room_edges_ready(
+        published_here,
+        chasing_here,
+        library_room_alignment_is_current(library_room_generation),
+    ) {
         return "not_computed";
     }
     if memberships == 0 {
@@ -117,6 +143,43 @@ fn room_calculation_status(
     } else {
         "ready_nonempty"
     }
+}
+
+/// 两层判据合成的那一句（[`room_calculation_status`]）：本进程完整发布过这根，或库上整库对齐这一层
+/// 此刻成立、且本进程没有替这根欠着账。
+fn room_edges_ready(published_here: bool, chasing_here: bool, aligned_on_store: bool) -> bool {
+    published_here || (!chasing_here && aligned_on_store)
+}
+
+/// 此刻常驻房间模型这一代（`ResidentRoomModel::input_version`，ADR-073 D12）；`None` = 房间体制
+/// 此刻说不出代号（开关关着 / 还在装 / `Blocked`）。`/dbnums` 行上的 `room_alignment` 也报它。
+pub fn resident_room_generation() -> Option<String> {
+    use crate::fast_model::room_resident::ResidentLifecycle;
+    match crate::fast_model::room_resident::lifecycle() {
+        ResidentLifecycle::Ready { generation, .. }
+        | ResidentLifecycle::Degraded { generation, .. } => Some(generation),
+        ResidentLifecycle::Loading { .. }
+        | ResidentLifecycle::Blocked { .. }
+        | ResidentLifecycle::Unsupported { .. }
+        | ResidentLifecycle::Disabled { .. } => None,
+    }
+}
+
+/// 库上那一格（`dbnum_watermark.model_room_generation`）此刻替不替得了没有 ACK 的根说话
+/// （ADR-073 D14 的第 2 层）。`e3d.room.lookup` 与 `/dbnums` 行上的 `room_alignment.current`
+/// 共用这一句——两处各写一遍的话，面板会出现「对齐了」而同一个库的查询回 `not_computed`。
+pub fn library_room_alignment_is_current(library_room_generation: Option<&str>) -> bool {
+    room_alignment_current(
+        crate::options::store_mode().is_durable(),
+        library_room_generation,
+        resident_room_generation().as_deref(),
+    )
+}
+
+/// 上面那句的纯函数形态。`durable` 那一格不是多余的：进程内嵌 `mem://` 活不过重启，库与水位行
+/// 一起消失，那一格不能替没落地的边说话（d-381 的启动屏障要的是本进程逐根算完那一句）。
+fn room_alignment_current(durable: bool, library: Option<&str>, resident: Option<&str>) -> bool {
+    durable && library.is_some() && library == resident
 }
 
 #[derive(Clone)]
@@ -344,6 +407,30 @@ impl QueryService {
             json!(stale),
             if stale { "updating" } else { "current" },
         ))
+    }
+
+    /// durable 侧「这个库的房间边整库对齐到哪一代」（ADR-073 D14）：水位行上的
+    /// `model_room_generation`，由能替整库说话的任务（初始化 / 整库重排的 ModelOnly /
+    /// 跑过整库房间重算的任务）随 `model_sesno` 同一笔盖。
+    ///
+    /// 只在**落盘**形态下作数：进程内嵌 `mem://` 那一档活不过重启，库与水位行一起消失，这一格
+    /// 替不了没落地的边说话——那一档的就绪判据仍只有进程内的根 ACK（d-381 的启动屏障要的就是
+    /// 本进程逐根算完那一句）。水位一次都没盖过（`model_sesno = 0`）时同样不作数：那一格此刻
+    /// 要么是旧行留下的，要么根本没写过。读不出来按「没有承诺」处理，不拿异常冒充就绪。
+    async fn library_room_generation(dbnum: u32) -> Option<String> {
+        if !crate::options::store_mode().is_durable() {
+            return None;
+        }
+        match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
+            Ok(Some(state)) if state.model_sesno > 0 => state.model_room_generation,
+            Ok(_) => None,
+            Err(error) => {
+                log::debug!(
+                    "e3d.room.lookup: dbnum={dbnum} 读不出 durable 侧房间就绪承诺，按未计算处理: {error:#}"
+                );
+                None
+            }
+        }
     }
 
     /// 房间查询在总开关关闭时不能拿 `model_sesno` 冒充房间版本：模型水位此时只承诺
@@ -657,7 +744,13 @@ impl QueryService {
         }
         let (published_version, stale, publication_status) =
             Self::room_derivation_status(dbnum).await?;
-        let calculation_status = room_calculation_status(memberships.len(), dbnum, generation_root);
+        let library_room_generation = Self::library_room_generation(dbnum).await;
+        let calculation_status = room_calculation_status(
+            memberships.len(),
+            dbnum,
+            generation_root,
+            library_room_generation.as_deref(),
+        );
         Ok(json!({
             "refno": refno.to_string(),
             "memberships": memberships,
@@ -1146,6 +1239,68 @@ mod tests {
         assert_eq!(version, Value::Null);
         assert_eq!(stale, Value::Null);
         assert_eq!(status, "disabled");
+    }
+
+    /// ADR-073 D14：进程内没有这根的 ACK 时（rocksdb 冷重启后这是常态）由库上那一格接住；
+    /// 本进程知道这根还欠着时，库级承诺也救不了它（ADR-079 的一票否决）。
+    #[test]
+    fn the_durable_alignment_answers_for_roots_this_process_never_published() {
+        // 进程内有 ACK：库上那一层说什么都不影响结论。
+        for aligned in [false, true] {
+            assert!(room_edges_ready(true, false, aligned));
+        }
+        // 没有 ACK：库上整库对齐这一层成立就够了——边与模型行同事务落库（D1），水位盖过就都在库里。
+        assert!(room_edges_ready(false, false, true));
+        assert!(!room_edges_ready(false, false, false));
+        // 本进程试过这根、没成：那一版边是上一版的，两层都不算数。
+        assert!(!room_edges_ready(false, true, true));
+    }
+
+    /// 第 2 层自己的判据：落盘形态 + 库上那一格与此刻常驻模型同一代。代号对不上 = 房间 / 面板
+    /// 真变过（D12），那一版边是上一代的结论；`mem://` 那一档整层不作数（库与水位行一起消失）。
+    #[test]
+    fn the_durable_layer_needs_a_persistent_store_and_the_same_generation() {
+        let generation = Some("efd4ebe1");
+        assert!(room_alignment_current(true, generation, generation));
+        assert!(!room_alignment_current(true, Some("older"), generation));
+        assert!(!room_alignment_current(true, None, generation));
+        assert!(
+            !room_alignment_current(true, None, None),
+            "两边都说不出代号不是「对齐」"
+        );
+        assert!(
+            !room_alignment_current(false, generation, generation),
+            "mem:// 重启后库本身就没了，那一格不能替没落地的边说话"
+        );
+    }
+
+    /// 两层判据都要真的接在 `calculation_status` 那一格上：ACK 那一层是进程内的、库上那一层由
+    /// `room()` 现读水位行喂进来。任一层被摘掉，rocksdb 冷重启后的 `ready_nonempty` 会静默退回
+    /// `not_computed`（F2 那一版的现场），而现有测试一个都不会红。
+    #[test]
+    fn the_room_status_reads_both_the_process_ack_and_the_durable_alignment() {
+        let source = include_str!("query_service.rs");
+        let status = source
+            .split_once("fn room_calculation_status(")
+            .expect("status helper exists")
+            .1
+            .split_once("\n}\n")
+            .expect("status helper end")
+            .0;
+        assert!(status.contains("publication_ack("), "{status}");
+        assert!(status.contains("room_edges_ready("), "{status}");
+        assert!(status.contains("model_root_ledger::entry("), "{status}");
+        let room = source
+            .split_once("async fn room(&self")
+            .expect("room query exists")
+            .1
+            .split_once("async fn generation_root")
+            .expect("room query boundary")
+            .0;
+        assert!(
+            room.contains("Self::library_room_generation(dbnum).await"),
+            "库上那一层要按本次查询的库现读，不许用启动时的快照: {room}"
+        );
     }
 
     #[test]

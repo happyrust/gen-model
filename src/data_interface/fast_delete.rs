@@ -257,7 +257,8 @@ impl RollbackRender {
     }
 }
 
-/// 模型面按 `model_sesno` 谓词删的三张表（`gen_root` 用 `source_end_sesno`，另渲染）。
+/// 模型面按 `model_sesno` 谓词删的三张表。逐根凭证行不在其中（`gen_root` 退役，ADR-079）：
+/// 回退 / 清库时进程内账本那一页由调用方 `model_root_ledger::forget_dbnum` 作废。
 const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 
 /// §4.3 的 2–6：全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT` 都没有（W3）。
@@ -333,9 +334,6 @@ pub(crate) fn render_rollback(
                 "DELETE {table} WHERE dbnum = {dbnum} AND model_sesno > {target_watermark};"
             ));
         }
-        deletes.push(format!(
-            "DELETE gen_root WHERE dbnum = {dbnum} AND source_end_sesno > {target_watermark};"
-        ));
     }
     // 房间面整库删（房间本来就是整库重算，边上不带 sesno）。谓词落在 `in` 而不是 `dbnum`：
     // `room_model::render_room_edge_row` / `render_room_panel_relate_write` 写出的边只有
@@ -489,9 +487,11 @@ pub async fn rollback_to_watermark(
 
     let report = rollback_to_watermark_on(&SUL_DB, dbnum, target_watermark, intent).await?;
 
-    // 进程内那一半（§4.3-7）：镜像格作废（下一次读回填）、空间树置脏，启动判据落到指针重建。
+    // 进程内那一半（§4.3-7）：镜像格作废（下一次读回填）、空间树置脏，启动判据落到指针重建；
+    // 生成根账本这一页整页作废（ADR-079）——S 之后生成的根的「成了 / 失败了」都随痕迹一起退，
+    // 由 S→T 重放重记。
     crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
-    crate::data_interface::dbnum_consistency::invalidate_census();
+    crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
 
     Ok(RollbackReport {
@@ -615,17 +615,13 @@ fn render_delete_phases(
     // 第二条异步账的三张表（模型意图队列 / 恢复记录 / 副作用队列）不再逐库清：它们整体退役
     // （ADR-072 D5），随 `retire_publish_run_tables` 的 `REMOVE TABLE IF EXISTS` 一次删掉，
     // 清库路上再点名它们只是给退役表续命。
+    // 逐根凭证行不再有（`gen_root` 退役，ADR-079）：整库 wipe / 删库之后「这根已经生成到 T」的旧说法
+    // 只可能活在进程内账本里，由调用方 `model_root_ledger::forget_dbnum` 一页作废（`wipe_dbnum_for_reinit`
+    // 的调用方与删库口都做）。
     let mut metadata = vec![
         format!("DELETE dbnum_info_table WHERE dbnum = {dbnum};"),
         format!("DELETE dbnum_stats_state:{dbnum};"),
     ];
-    if watermark != WatermarkDisposal::RestartInitializationData {
-        // 凭证行 `gen_root:<ref0>_<ref1>` 带 dbnum 却不在 Ref0 区间清单里（区间只圈几何行）。
-        // 整库 wipe / 删库之后把它留下，重排的初始化会读到「这根已经生成到 T」的旧凭证——
-        // ADR-072 §4.3-1/-3：回退到 0 就是凭证全退（初始化在第 k 块 kill → wipe → 重排的
-        // mem:// 对拍 `an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch` 钉它）。
-        metadata.push(format!("DELETE gen_root WHERE dbnum = {dbnum};"));
-    }
     match watermark {
         WatermarkDisposal::DropRow => {
             metadata.push(format!("DELETE dbnum_watermark:{dbnum};"));
@@ -724,6 +720,8 @@ async fn execute_transactional_phase(
 pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::DropRow).await?;
     crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+    // 生成根账本这一页随库一起没了（ADR-079）：库里没有逐根的行，进程里也不该再记着它们。
+    crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
         crate::data_interface::cata_dependency::ForgetScope::Everything,
     );
@@ -749,7 +747,9 @@ pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDele
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
         crate::data_interface::cata_dependency::ForgetScope::Everything,
     );
-    crate::data_interface::dbnum_consistency::invalidate_census();
+    // 生成根账本整页作废（ADR-079）：整库清空之后「这根已经生成到 T」的旧说法只可能活在这里，
+    // 留着它，重排的初始化会把失败根当欠账、把成功根当追平。
+    crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
     // 按需请求改由进程内投影供数，直到重建的初始化任务跑完。
@@ -1169,7 +1169,10 @@ mod tests {
                 "ModelOnly 仍退模型面 {table}: {sql}"
             );
         }
-        assert!(sql.contains("DELETE gen_root WHERE dbnum = 7997 AND source_end_sesno > 41;"));
+        assert!(
+            !sql.contains("gen_root"),
+            "逐根凭证行随 gen_root 退役（ADR-079），回退没有它要删: {sql}"
+        );
         assert!(sql.contains("DELETE room_relate WHERE in.dbnum = 7997;"));
         let watermark = &model_only.control[0];
         assert!(
@@ -1258,7 +1261,10 @@ mod tests {
                 "DELETE {table} WHERE dbnum = 7997 AND model_sesno > 41;"
             ));
         }
-        at("DELETE gen_root WHERE dbnum = 7997 AND source_end_sesno > 41;");
+        assert!(
+            !sql.contains("gen_root"),
+            "逐根凭证行随 gen_root 退役（ADR-079）:\n{sql}"
+        );
         // 列上套 `<int>` 会让优化器整条放弃索引（证据页 §3.1），一处都不许有。
         assert!(
             !sql.contains("<int>"),

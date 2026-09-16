@@ -1,16 +1,17 @@
 REMOVE FUNCTION fn::room_code;
 DEFINE FUNCTION fn::room_code($pe:record) {
     let $noun = $pe.refno.TYPE;
-    let $id = return
+    // SurrealDB 2.x：块的值是块内最后一条语句的值，而 `$id = …;` 这种赋值语句的值是 NONE，
+    // 所以每个分支只放一个表达式，不在块里再赋值。
     // First handle different entity types
-    if ($noun == 'EQUI' || $noun == 'STRU' || $noun == 'REST') {
-        $id = array::flatten([$pe<-pe_owner.in.id, $pe<-pe_owner.in<-pe_owner.in.id])[0];
+    let $id = if ($noun == 'EQUI' || $noun == 'STRU' || $noun == 'REST') {
+        array::flatten([$pe<-pe_owner.in.id, $pe<-pe_owner.in<-pe_owner.in.id])[0]
     } else if ($noun == 'BRAN') {
-        $id = $pe<-pe_owner.in.id;
+        $pe<-pe_owner.in.id
     } else if ($noun == 'SUPPO' || $noun == 'ZONE') {
-        $id = array::flatten($pe<-pe_owner.in<-pe_owner.in<-pe_owner.in.id)[0];
+        array::flatten($pe<-pe_owner.in<-pe_owner.in<-pe_owner.in.id)[0]
     } else {
-        $id = $pe;
+        $pe
     };
 
     // Then check room relation
@@ -21,14 +22,13 @@ DEFINE FUNCTION fn::room_code($pe:record) {
     };
 
     let $prefix = string::split(string::slice($res.in.owner.name, 1), '-')[0];
-    let $code =
     // Handle room number formatting
-    if (string::len($res.room_num) == 4) {
-        $code = $res.room_num;
+    let $code = if (string::len($res.room_num) == 4) {
+        $res.room_num
     } else if (string::len($res.room_num) == 5) {
-        $code = string::concat(string::slice($res.room_num, 0, 1), string::slice($res.room_num, 2));
+        string::concat(string::slice($res.room_num, 0, 1), string::slice($res.room_num, 2))
     } else {
-        $code = none;
+        none
     };
 
     // Return the formatted room code

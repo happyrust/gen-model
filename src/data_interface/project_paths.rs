@@ -1,8 +1,11 @@
 //! 项目目录与监控目录（watch dirs）的唯一解析口径。
 //!
-//! 当期扫描范围由 `included_projects` 唯一限定；当 `project_dirs` 存在时，它按相同
-//! 下标提供 `project_path` 下的真实文件夹名。它只改变名单内项目的目录映射，不能把
-//! 名单外项目加入扫描范围。
+//! 当期扫描范围 = **MDB 闭包**（ADR-078）：主项目 `project_name` 在搜索根
+//! （`[project_path] ++ project_search_paths`）里按文件夹名找到，它的 SYS 里该 MDB 的 CURD
+//! 声明按项目码分组，每个外部项目码再到搜索根里按 `<code>000` 定位——闭包本身在
+//! [`super::mdb_closure`]，目录定位在 [`super::project_locator`]，这里只是把它们折成监控目录
+//! 计划与「路径 → 项目」归属。`included_projects` 不再参与解析（字段保留只为旧配置不炸），
+//! `project_dirs` 同样。
 //!
 //! 这里取代 `aios_core::file_helper::collect_db_dirs`。那个实现把整批项目
 //! `collect::<io::Result<Vec<_>>>()`，于是**任何一个**项目 `read_dir` 失败
@@ -14,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use aios_core::options::DbOption;
@@ -48,46 +51,20 @@ pub fn is_absolute_input(raw: &str) -> bool {
         || normalize_path_input(trimmed).is_absolute()
 }
 
-/// 配置值是否是 `project_path` 下的单个文件夹名。
-fn is_project_folder_name(raw: &str) -> bool {
-    let trimmed = raw.trim().trim_matches('"');
-    if trimmed.is_empty()
-        || trimmed == "."
-        || trimmed == ".."
-        || trimmed.contains(['/', '\\'])
-        || is_absolute_input(trimmed)
-    {
-        return false;
-    }
-    let normalized = normalize_path_input(trimmed);
-    let mut components = normalized.components();
-    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+/// 闭包里一个项目的目录：主项目（`project_name`）或 MDB 声明的外部项目，按项目名
+/// （文件夹名）或项目码找，都不区分大小写。不在闭包里的项目、没定位到的项目码返回 `None`
+/// ——即使 `project_path` 下真有那个文件夹也不扫描（ADR-078：范围由 MDB 定）。
+///
+/// 读的是这份配置最近一次算出的闭包（[`super::mdb_closure::latest_for`]），没算过才现算；
+/// 它被每次手动扫描、基线导入都问一遍，不该每问一次就扫一遍共享盘。
+pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathBuf> {
+    super::mdb_closure::latest_for(db_option).root_of_project(project)
 }
 
-/// 解析当期名单中的项目根目录。
-///
-/// `included_projects` 是逻辑项目名单；`project_dirs` 存在时按同一位置提供实际文件夹
-/// 名，不存在时逻辑项目名同时也是文件夹名。名单外项目、空值、绝对路径、多段相对
-/// 路径以及两份列表长度不匹配都返回 `None`。大小写不敏感地确认成员，但拼路径时
-/// 保留配置中的真实文件夹名。
-pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathBuf> {
-    let index = db_option
-        .included_projects
-        .iter()
-        .position(|name| name.trim().eq_ignore_ascii_case(project.trim()))?;
-    let logical_name = &db_option.included_projects[index];
-    if !is_project_folder_name(logical_name) {
-        return None;
-    }
-    let folder = match db_option.project_dirs.as_ref() {
-        Some(project_dirs) => project_dirs.get(index)?,
-        None => logical_name,
-    };
-    if !is_project_folder_name(folder) {
-        return None;
-    }
-    let base = normalize_path_input(&db_option.project_path);
-    Some(base.join(normalize_path_input(folder)))
+/// 闭包里的项目名，主项目在前、其余按 CURD 里首次出现的顺序——过去直接读
+/// `db_option.included_projects` 的地方（目录库选主、依赖目录扫描）改读它。
+pub fn project_names(db_option: &DbOption) -> Vec<String> {
+    super::mdb_closure::latest_for(db_option).project_names()
 }
 
 /// 这个目录名是不是库目录（`ams000` / `acp000` / `ZDJ000`）。
@@ -99,7 +76,7 @@ pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathB
 /// 代号本身以数字结尾的项目会被这条挡掉，那种命名没在现场见过；真出现了，判据要
 /// 换成更硬的证据（比如目录里有没有 `<代号><库号>_0001` 形状的文件），而不是把这
 /// 条放宽回去。
-fn ends_with_db_suffix(path: &Path) -> bool {
+pub(crate) fn ends_with_db_suffix(path: &Path) -> bool {
     let Some(name) = path.file_name() else {
         return false;
     };
@@ -225,59 +202,13 @@ impl WatchDirPlan {
     }
 }
 
-/// 按配置解析出全部监控目录。
+/// 按配置解析出全部监控目录：现算一次 MDB 闭包（搜索根重扫，掉线的共享盘回来了要能看见），
+/// 折成逐项目的计划。
 ///
-/// 逐项目独立解析：一个共享盘掉线只让它自己缺席，其余项目照常监听。
+/// 逐项目独立解析：一个共享盘掉线只让它自己缺席，其余项目照常监听；没定位到的项目码、
+/// 读不到的 SYS 声明各占一条带 `problem` 的条目，启动日志与重挂轮都能看见。
 pub fn plan_watch_dirs(db_option: &DbOption) -> WatchDirPlan {
-    let names = db_option.included_projects.clone();
-
-    let mut plan = WatchDirPlan::default();
-    // 两个项目指到同一个目录时只监听一次：`duplicate_dbnums_across_watch_dirs`
-    // 会把重复目录里的同一个库看成「同 dbnum 两个文件」而整库阻断。
-    let mut seen: HashSet<String> = HashSet::new();
-
-    for name in names {
-        let Some(root) = resolve_project_root(db_option, &name) else {
-            plan.projects.push(ProjectWatchDirs {
-                project: name,
-                root: None,
-                db_dirs: Vec::new(),
-                problem: Some(
-                    "included_projects 与同位置 project_dirs 条目必须是 project_path 下的单个文件夹名"
-                        .to_string(),
-                ),
-            });
-            continue;
-        };
-
-        let (db_dirs, problem) = match collect_db_dirs_in(&root) {
-            Ok(dirs) if dirs.is_empty() => (
-                Vec::new(),
-                Some(format!("目录可读但下面没有 *{DB_DIR_SUFFIX} 库目录")),
-            ),
-            Ok(dirs) => (dirs, None),
-            Err(error) => (
-                Vec::new(),
-                Some(format!(
-                    "目录不可读（共享盘掉线 / 路径写错 / 无权限）: {error}"
-                )),
-            ),
-        };
-
-        let db_dirs: Vec<PathBuf> = db_dirs
-            .into_iter()
-            .filter(|dir| seen.insert(path_identity(dir)))
-            .collect();
-
-        plan.projects.push(ProjectWatchDirs {
-            project: name,
-            root: Some(root),
-            db_dirs,
-            problem,
-        });
-    }
-
-    plan
+    super::mdb_closure::resolve_for(db_option).watch_dir_plan()
 }
 
 #[cfg(windows)]
@@ -296,7 +227,13 @@ pub fn path_identity(path: &Path) -> String {
 }
 
 /// 路径比较用的归一 key：Windows 下大小写与分隔符都不该影响「是不是同一个目录」。
-fn path_key(path: &Path) -> String {
+///
+/// 只看字面、**不碰文件系统**——这是它与 [`path_identity`] 的分界：identity 走 `canonicalize`，
+/// 路径落在掉线的 UNC 上时会在调用方线程阻塞到 OS 自己放弃（实测 21 s），且同一个目录在线 /
+/// 掉线两个时刻会算出两个不同的值。凡是**在起扫描线程之前**就要对搜索根算 key 的地方
+/// （根的去重、闭包缓存的 key）必须用这个，不能用 identity；identity 留给已经扫到、确知可达
+/// 的目录（联接与目标、8.3 短名这类字面不同实为一处的写法只有它认得出）。
+pub fn path_key(path: &Path) -> String {
     let mut text = path.to_string_lossy().to_string();
     if cfg!(windows) {
         text = text.replace('/', "\\").to_ascii_lowercase();
@@ -555,22 +492,27 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// 每个用例一个独立的临时项目根，`Drop` 时清掉。
+    /// 每个用例一个独立的临时搜索根与一个独立的 MDB 名（闭包声明缓存按 `(project, mdb)` 记，
+    /// 用例并行跑时不能互相看见），`Drop` 时清掉目录。
     struct Fixture {
         root: PathBuf,
+        mdb: String,
     }
 
     impl Fixture {
         fn new(name: &str) -> Self {
             static SEQ: AtomicU32 = AtomicU32::new(0);
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
-                "aios-watchdirs-{name}-{}-{}",
-                std::process::id(),
-                SEQ.fetch_add(1, Ordering::Relaxed)
+                "aios-watchdirs-{name}-{}-{seq}",
+                std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("create fixture root");
-            Self { root }
+            Self {
+                root,
+                mdb: format!("FIX{}-{seq}", std::process::id()),
+            }
         }
 
         /// 造一个目录（相对 fixture 根），返回它的绝对路径。
@@ -580,14 +522,25 @@ mod tests {
             path
         }
 
-        /// 以这个 fixture 为 `project_path` 的配置。
-        fn options(&self, projects: &[&str], overrides: Option<&[&str]>) -> DbOption {
+        /// 以这个 fixture 为 `project_path`、`main` 为主项目的配置；`included_projects` 留空——
+        /// 它已不参与解析。
+        fn options(&self, main: &str) -> DbOption {
             let mut option = aios_core::get_db_option().clone();
             option.project_path = self.root.to_string_lossy().into_owned();
-            option.included_projects = projects.iter().map(|name| name.to_string()).collect();
-            option.project_dirs =
-                overrides.map(|dirs| dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>());
+            option.project_name = main.to_string();
+            option.mdb_name = self.mdb.clone();
+            option.included_projects = Vec::new();
+            option.project_dirs = None;
             option
+        }
+
+        /// 把 MDB 声明喂进闭包缓存：`codes` 是外部项目码（每个码一条声明），主项目自己另有一条。
+        fn declare(&self, main: &str, codes: &[&str]) {
+            let mut entries: Vec<(Option<&str>, u32, &str)> = vec![(None, 8000, "/MAIN-DESI")];
+            for (offset, code) in codes.iter().enumerate() {
+                entries.push((Some(code), 7000 + offset as u32, "/EXTERNAL"));
+            }
+            super::super::mdb_closure::seed_declaration(main, &self.mdb, &entries);
         }
     }
 
@@ -601,68 +554,34 @@ mod tests {
         dirs.iter().map(|dir| path_identity(dir)).collect()
     }
 
-    /// 这是本次故障的形状：一个项目的目录读不动，其余项目必须照常解析出来。
-    ///
-    /// 旧口径（`aios_core::file_helper::collect_db_dirs`）把整批 collect 成一个
-    /// `io::Result`，坏掉的那个让整批变 `Err`，调用点再 `unwrap_or_default()`
-    /// 吞成空列表——于是「三个本地库目录都在，看门狗却一个都没监听」。
+    /// 这是共享盘故障的形状：一个外部项目的目录不在（掉线），其余项目必须照常解析出来，
+    /// 而且缺的那个要按码点名。
     #[test]
-    fn one_unreadable_project_does_not_erase_the_others() {
+    fn one_missing_project_does_not_erase_the_others() {
         let fixture = Fixture::new("offline-share");
-        let good = fixture.dir("Good/good000");
-        let also_good = fixture.dir("AlsoGood/alsogood000");
-        // Offline 这个项目根压根不存在，等价于共享盘掉线。
-        let option = fixture.options(&["Good", "Offline", "AlsoGood"], None);
+        let main = fixture.dir("Main/mai000");
+        let also_good = fixture.dir("AlsoGood/als000");
+        // `off000` 压根不存在，等价于装着它的共享盘掉线。
+        fixture.declare("Main", &["ALS", "OFF"]);
+        let option = fixture.options("Main");
 
         let plan = plan_watch_dirs(&option);
 
         assert_eq!(
             identities(&plan.dirs()),
-            identities(&[good, also_good]),
-            "掉线项目不能带走其余项目的监控目录"
+            identities(&[main, also_good]),
+            "缺席项目不能带走其余项目的监控目录"
         );
         let problems = plan.problems();
-        assert_eq!(problems.len(), 1, "只该有掉线那一个项目报错: {problems:?}");
+        assert_eq!(problems.len(), 1, "只该有缺席那一个项目报错: {problems:?}");
         assert!(
-            problems[0].contains("Offline"),
-            "失败原因必须点名是哪个项目: {problems:?}"
+            problems[0].contains("OFF") && problems[0].contains("off000"),
+            "失败原因必须点名是哪个项目码、缺哪个目录: {problems:?}"
         );
-    }
-
-    /// `project_dirs` 按下标提供名单内项目的真实文件夹名，但不能扩大项目名单。
-    #[test]
-    fn project_dirs_select_the_folder_name_without_expanding_scope() {
-        let fixture = Fixture::new("scope-root");
-        fixture.dir("Allowed/ignored000");
-        let selected = fixture.dir("PhysicalFolder/selected000");
-        let option = fixture.options(&["LogicalProject"], Some(&["PhysicalFolder"]));
-
-        let plan = plan_watch_dirs(&option);
-
-        assert_eq!(identities(&plan.dirs()), identities(&[selected]));
         assert_eq!(
-            resolve_project_root(&option, "logicalproject"),
-            Some(fixture.root.join("PhysicalFolder"))
-        );
-        assert!(resolve_project_root(&option, "PhysicalFolder").is_none());
-        assert!(plan.problems().is_empty(), "{:?}", plan.problems());
-    }
-
-    /// 映射表缺项必须有声失败，不能越界 panic，也不能悄悄退回逻辑项目名。
-    #[test]
-    fn a_short_project_dirs_list_is_reported_instead_of_falling_back() {
-        let fixture = Fixture::new("short-project-dirs");
-        fixture.dir("Second/second000");
-        let option = fixture.options(&["First", "Second"], Some(&["FirstFolder"]));
-
-        assert!(resolve_project_root(&option, "Second").is_none());
-        let plan = plan_watch_dirs(&option);
-        assert!(plan.dirs().is_empty());
-        assert_eq!(plan.problems().len(), 2, "{:?}", plan.problems());
-        assert!(
-            plan.problems()[1].contains("project_dirs"),
-            "{:?}",
-            plan.problems()
+            project_names(&option),
+            vec!["Main".to_string(), "AlsoGood".to_string()],
+            "闭包里的项目名：主项目在前，外部项目用文件夹名"
         );
     }
 
@@ -683,18 +602,26 @@ mod tests {
         }
     }
 
-    /// 名单外项目没有项目根，即使 project_path 下真的存在同名文件夹也不扫描。
+    /// 不在闭包里的项目没有项目根，即使 project_path 下真的存在那个文件夹也不扫描
+    /// （ADR-078：范围由 MDB 定，不由目录里有什么定）。
     #[test]
-    fn a_project_outside_included_projects_has_no_root() {
+    fn a_project_outside_the_closure_has_no_root() {
         let fixture = Fixture::new("outside-scope");
-        fixture.dir("Excluded/excluded000");
-        let option = fixture.options(&["Included"], None);
+        let included = fixture.dir("Included/inc000");
+        fixture.dir("Excluded/exc000");
+        fixture.declare("Included", &[]);
+        let option = fixture.options("Included");
 
         assert!(resolve_project_root(&option, "Excluded").is_none());
-        assert!(plan_watch_dirs(&option).dirs().is_empty());
+        assert!(resolve_project_root(&option, "EXC").is_none());
+        assert_eq!(
+            resolve_project_root(&option, "included").as_deref(),
+            Some(fixture.root.join("Included").as_path())
+        );
+        assert_eq!(identities(&plan_watch_dirs(&option).dirs()), identities(&[included]));
     }
 
-    /// 一个项目下有多个 `*000` 时全部收下。
+    /// 主项目目录下有多个 `*000` 时全部收下。
     ///
     /// 旧实现 `.next()` 只取第一个，剩下的既监听不到也摄入不了——数据落库之后
     /// 此后永不更新，面板上却一直显示得很新鲜。
@@ -704,7 +631,8 @@ mod tests {
         let first = fixture.dir("Proj/aaa000");
         let second = fixture.dir("Proj/bbb000");
         fixture.dir("Proj/notadb");
-        let option = fixture.options(&["Proj"], None);
+        fixture.declare("Proj", &[]);
+        let option = fixture.options("Proj");
 
         assert_eq!(
             identities(&plan_watch_dirs(&option).dirs()),
@@ -712,40 +640,20 @@ mod tests {
         );
     }
 
-    /// 空 included_projects 就是空扫描范围，不得拿 project_dirs 扩大它。
+    /// SYS 读不到（这里：没喂声明、目录里也没有 SYS 文件）时主项目照常监听，外部项目
+    /// 无从派生，且计划里要有一条说清楚——不能静默退成「只有主项目」。
     #[test]
-    fn an_empty_project_list_does_not_fall_back_to_project_dirs() {
-        let fixture = Fixture::new("empty-scope");
-        fixture.dir("Proj/aaa000");
-        let option = fixture.options(&[], Some(&["Proj"]));
+    fn an_unreadable_declaration_keeps_the_main_project_and_says_so() {
+        let fixture = Fixture::new("no-sys");
+        let main = fixture.dir("Main/mai000");
+        fixture.dir("Cat/cat000");
+        let option = fixture.options("Main");
 
-        assert!(resolve_project_root(&option, "Proj").is_none());
         let plan = plan_watch_dirs(&option);
-        assert!(plan.dirs().is_empty());
-        assert!(plan.problems().is_empty(), "{:?}", plan.problems());
-    }
-
-    /// included_projects 里只能写 project_path 下的一层文件夹名。
-    #[test]
-    fn invalid_project_folder_names_are_reported_and_not_scanned() {
-        let fixture = Fixture::new("invalid-folder-name");
-        for invalid in [
-            "",
-            ".",
-            "..",
-            "Nested/Project",
-            r"C:\outside",
-            r"\\host\share",
-        ] {
-            let option = fixture.options(&[invalid], None);
-            assert!(
-                resolve_project_root(&option, invalid).is_none(),
-                "{invalid}"
-            );
-            let plan = plan_watch_dirs(&option);
-            assert!(plan.dirs().is_empty(), "{invalid}: {:?}", plan.dirs());
-            assert_eq!(plan.problems().len(), 1, "{invalid}: {:?}", plan.problems());
-        }
+        assert_eq!(identities(&plan.dirs()), identities(&[main]));
+        let problems = plan.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("读不到声明"), "{problems:?}");
     }
 
     /// `ams1000` 不是库目录。
@@ -758,7 +666,8 @@ mod tests {
         let real = fixture.dir("Proj/ams000");
         fixture.dir("Proj/ams1000");
         fixture.dir("Proj/2000");
-        let option = fixture.options(&["Proj"], None);
+        fixture.declare("Proj", &[]);
+        let option = fixture.options("Proj");
 
         assert_eq!(
             identities(&plan_watch_dirs(&option).dirs()),
@@ -770,13 +679,15 @@ mod tests {
         assert!(!ends_with_db_suffix(Path::new("ams")));
     }
 
-    /// 共享盘上常把库目录本身单独共享出来（`\\host\share\ams000`），此时项目根
-    /// 就是库目录，不该再往下找一层。
+    /// 共享盘上常把库目录本身单独共享出来（`\\host\share\ams000`），此时 `project_path`
+    /// 就是库目录、也是项目目录，不该再往下找一层。
     #[test]
     fn a_root_that_is_itself_a_db_dir_is_used_directly() {
         let fixture = Fixture::new("root-is-db-dir");
         let db_dir = fixture.dir("ams000");
-        let option = fixture.options(&["ams000"], None);
+        let mut option = fixture.options("ams000");
+        option.project_path = db_dir.to_string_lossy().into_owned();
+        super::super::mdb_closure::seed_declaration("ams000", &fixture.mdb, &[(None, 8000, "/D")]);
 
         assert_eq!(
             identities(&plan_watch_dirs(&option).dirs()),
@@ -784,32 +695,37 @@ mod tests {
         );
     }
 
-    /// 同一个目录被两个项目指到时只监听一次。
+    /// 主项目自己的码被 MDB 显式声明（`PROJ = AMS`）时指到同一个目录，只监听一次。
     ///
     /// 列两次不是「多轮询一遍」：`duplicate_dbnums_across_watch_dirs` 会在两份
     /// 列举里看到同一个库的两份候选，判成同 dbnum 重复而**整库阻断**。
     #[test]
-    fn a_directory_listed_twice_is_watched_once() {
+    fn a_directory_reached_twice_is_watched_once() {
         let fixture = Fixture::new("duplicate-dir");
-        let db_dir = fixture.dir("Proj/proj000");
-        let option = fixture.options(&["Proj", "proj"], None);
+        fixture.dir("Proj/proj000");
+        fixture.declare("Proj", &["PROJ"]);
+        let option = fixture.options("Proj");
 
-        assert_eq!(plan_watch_dirs(&option).dirs().len(), 1);
+        let plan = plan_watch_dirs(&option);
+        assert_eq!(plan.dirs().len(), 1, "{}", plan.describe());
+        assert_eq!(plan.projects.len(), 1, "{}", plan.describe());
     }
 
-    /// 项目可读但没有库目录，与「目录不可读」是两回事，都要报且都不能阻断其他项目。
+    /// 主项目文件夹在、但下面没有库目录：与「目录不可读」是两回事，都要报且都不能阻断。
+    /// 定位器按 `<code>000` 认项目，所以这时主项目就是「没定位到」，原因要说到文件夹名。
     #[test]
-    fn a_project_without_db_dirs_is_reported_not_silent() {
+    fn a_main_project_without_db_dirs_is_reported_not_silent() {
         let fixture = Fixture::new("no-db-dir");
         fixture.dir("Empty/nothing-here");
-        let option = fixture.options(&["Empty"], None);
+        fixture.declare("Empty", &[]);
+        let option = fixture.options("Empty");
 
         let plan = plan_watch_dirs(&option);
         assert!(plan.is_empty());
         assert!(
             plan.problems()
                 .iter()
-                .any(|problem| problem.contains("没有 *000")),
+                .any(|problem| problem.contains("主项目") && problem.contains("Empty")),
             "{:?}",
             plan.problems()
         );
@@ -839,7 +755,8 @@ mod tests {
         }
     }
 
-    /// 文件的归属项目来自它所在的监控目录，而不是配置里的主项目名。
+    /// 文件的归属项目来自它所在的监控目录，而不是配置里的主项目名；外部项目的名字
+    /// 是它的文件夹名（`Catalogue`），不是项目码。
     ///
     /// 记错的代价是实测过的：`acp000\acp7006_0001` 被记成主项目 `AvevaMarineSample`，
     /// 执行侧就拿这个名字去 `ams000` 里找它，必然找不到，批次每轮 failed 一次。
@@ -848,7 +765,8 @@ mod tests {
         let fixture = Fixture::new("owner-attribution");
         fixture.dir("Marine/ams000");
         fixture.dir("Catalogue/acp000");
-        let option = fixture.options(&["Marine", "Catalogue"], None);
+        fixture.declare("Marine", &["ACP"]);
+        let option = fixture.options("Marine");
 
         record_watch_dir_owners(&plan_watch_dirs(&option));
 
@@ -865,6 +783,11 @@ mod tests {
             None,
             "监控目录之外的路径判不出归属，由调用方决定怎么兜底"
         );
+        assert_eq!(
+            resolve_project_root(&option, "acp").as_deref(),
+            Some(fixture.root.join("Catalogue").as_path()),
+            "按项目码也能找到外部项目的目录"
+        );
     }
 
     /// 已挂目录中途掉线：必须降级成「失联」，否则 `missing()` 一直认为它在被监听，
@@ -876,7 +799,8 @@ mod tests {
 
         let fixture = Fixture::new("mount-health");
         let dir = fixture.dir("Proj/proj000");
-        let option = fixture.options(&["Proj"], None);
+        fixture.declare("Proj", &[]);
+        let option = fixture.options("Proj");
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut watcher = PollWatcher::new(
@@ -911,15 +835,16 @@ mod tests {
         assert!(mounted.missing(plan_watch_dirs(&option).dirs()).is_empty());
     }
 
-    /// 重挂轮的两步：共享盘恢复后**重新解析**（启动时列不出来的 `*000` 此刻才有），
+    /// 重挂轮的两步：共享盘恢复后**重新解析**（启动时定位不到的外部项目此刻才有），
     /// 以及只补挂缺席的那些（重复 `watch()` 同一个目录会把库判成同号重复）。
     #[test]
     fn a_share_that_comes_back_is_replanned_and_mounted_once() {
         use notify::{Config, PollWatcher};
 
         let fixture = Fixture::new("remount");
-        fixture.dir("Early/early000");
-        let option = fixture.options(&["Early", "Late"], None);
+        fixture.dir("Early/ear000");
+        fixture.declare("Early", &["LAT"]);
+        let option = fixture.options("Early");
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut watcher = PollWatcher::new(
@@ -931,14 +856,18 @@ mod tests {
         .expect("create poll watcher");
         let mut mounted = MountState::new();
 
-        // 启动：Late 还不在线。
-        mounted.mount(&mut watcher, &plan_watch_dirs(&option).dirs());
+        // 启动：LAT 的共享盘还不在线，闭包里它是未定位项目。
+        let boot = plan_watch_dirs(&option);
+        assert_eq!(boot.problems().len(), 1, "{:?}", boot.problems());
+        mounted.mount(&mut watcher, &boot.dirs());
         assert_eq!(mounted.len(), 1);
 
         // 共享盘恢复。
-        let late = fixture.dir("Late/late000");
+        let late = fixture.dir("Late/lat000");
 
-        let missing = mounted.missing(plan_watch_dirs(&option).dirs());
+        let replanned = plan_watch_dirs(&option);
+        assert!(replanned.problems().is_empty(), "{:?}", replanned.problems());
+        let missing = mounted.missing(replanned.dirs());
         assert_eq!(
             identities(&missing),
             identities(&[late]),

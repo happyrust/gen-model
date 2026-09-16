@@ -34,8 +34,15 @@ project_path = "D:/AVEVA/Projects/E3D3.1"
 #【变更 2026-09-11】加回 SCB：D:/AVEVA/Projects/E3D3.1/SCB 现已部署（scb6000–scb6003 都在盘上）。MDB /ALL
 # 声明的 6003 (*MASTER/SCBDESI) 属于它——不收进来，开启 room_membership 时常驻房间模型建不起来
 #（room inputs incomplete），之后每个生成根都按「房间算不出来」记失败（ADR-073 D2）。
-# catalogue_project_priority 不动：不在名单里的项目按 included_projects 顺序排在最后。
-included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+#【变更 2026-09-15】included_projects 退役（ADR-078）：项目集合由 MDB /ALL 的 CURD 声明按项目码派生，
+# 每个外部项目到搜索根（project_path + project_search_paths）里按 <code>000 找目录。上面那份四项目名单
+# 其实漏了 APS（/ALL 声明的 2 个库在 AvevaPlantSample\aps000），闭包会自己补上；名单非空只会让启动多打一句
+# 「已忽略」，所以清空（键本身留着：aios_core::DbOption 里它是必填字段，旧二进制读这份配置不能炸）。
+# 远程项目改填 project_search_paths（本地或 UNC，顺序即优先级）。
+# 2026-09-15 前：included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+included_projects = []
+project_search_paths = []
+# catalogue_project_priority 不动：不在名单里的项目按闭包顺序（主项目、再按 CURD 首次出现）排在最后。
 catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
 

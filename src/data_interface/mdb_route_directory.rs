@@ -45,6 +45,63 @@ pub fn active(project: &str, mdb: &str) -> Option<Arc<MdbRouteDirectory>> {
             && directory.mdb().trim_start_matches('/') == mdb.trim_start_matches('/'))
         .cloned()
 }
+
+/// 当前进程登记的那份目录，不问身份——给只拿到一段错误文本、没有 `(project, mdb)` 的读者
+/// （[`explain_unregistered_dbs`]）。
+fn active_any() -> Option<Arc<MdbRouteDirectory>> {
+    ACTIVE_DIRECTORY
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// 给 e3d-io 的「db N 没注册进这个 DbSet，resolver 也给不出它的文件」补上路由目录知道的原因
+/// （ADR-078 D5）：那句话到现场只剩一个库号，而路由目录知道它是「MDB 声明了、项目 ACP 的目录
+/// 没定位到」还是「压根不在 MDB 里」。只加文字、不改任何判定；文本里没有那句话就原样返回。
+pub fn explain_unregistered_dbs(message: &str) -> String {
+    match active_any() {
+        Some(directory) => explain_unregistered_dbs_with(message, &directory),
+        None => message.to_string(),
+    }
+}
+
+/// [`explain_unregistered_dbs`] 的纯函数芯：目录由调用方给。
+pub fn explain_unregistered_dbs_with(message: &str, directory: &MdbRouteDirectory) -> String {
+    const MARKER: &str = " 没注册进这个 DbSet";
+    let mut dbnums = BTreeSet::new();
+    let mut rest = message;
+    while let Some(at) = rest.find(MARKER) {
+        let before = &rest[..at];
+        let digits: String = before
+            .chars()
+            .rev()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if let Ok(dbnum) = digits.parse::<u32>()
+            && before[..before.len() - digits.len()].ends_with("db ")
+        {
+            dbnums.insert(dbnum);
+        }
+        rest = &rest[at + MARKER.len()..];
+    }
+    if dbnums.is_empty() {
+        return message.to_string();
+    }
+    let reasons: Vec<String> = dbnums
+        .into_iter()
+        .filter_map(|dbnum| match directory.route_dbno(dbnum) {
+            Ok(_) => None,
+            Err(error) => Some(format!("dbnum {dbnum}：{error}")),
+        })
+        .collect();
+    if reasons.is_empty() {
+        return message.to_string();
+    }
+    format!("{message}；路由目录给出的原因：{}", reasons.join("；"))
+}
 use super::db_file_header::{DbBasicInfo, DbFileHeader};
 use super::db_generation::{
     DbGeneration, FileIdentity, GenerationChange, GenerationLedger, Observation,
@@ -124,11 +181,14 @@ pub enum RouteError {
     InvalidRefNo { refno: String },
     /// 编号合法，但当前 MDB 与依赖目录都没有这个库。
     DbNotInMdb { dbnum: u32, mdb: String },
-    /// MDB 声明了它，配置的目录下却没有文件——部署问题，要看见。
+    /// MDB 声明了它，搜索根里却没有文件——部署问题，要看见。`project_code` 是 SYS `PROJ`
+    /// 说的它属于哪个项目（`None` = 声明它的主项目自己）；一路带到失败消息里，现场人看到的
+    /// 才是「项目 ACP 的目录没定位到」而不是一个库号（ADR-078 D5）。
     NoFileForDbnum {
         dbnum: u32,
         mdb: String,
         name: String,
+        project_code: Option<String>,
     },
     /// 库类型太短，拼不出 `*vir.dat` 模板名。
     TemplateMissing {
@@ -163,9 +223,25 @@ impl fmt::Display for RouteError {
                     "dbnum {dbnum} 不在 MDB {mdb} 的声明里，也不在依赖项目的目录库里"
                 )
             }
-            Self::NoFileForDbnum { dbnum, mdb, name } => write!(
+            Self::NoFileForDbnum {
+                dbnum,
+                mdb,
+                name,
+                project_code: Some(code),
+            } => write!(
                 f,
-                "MDB {mdb} 声明了 dbnum {dbnum}（{name}），但配置的目录下没有它的文件"
+                "MDB {mdb} 声明了 dbnum {dbnum}（{name}，项目 {code}），搜索根里没有 {}000 库目录或其中没有这个库的文件；\
+                 把装着它的目录（本地或 \\\\服务器\\共享）加进 project_search_paths，详见 /health.mdb_closure",
+                code.to_ascii_lowercase()
+            ),
+            Self::NoFileForDbnum {
+                dbnum,
+                mdb,
+                name,
+                project_code: None,
+            } => write!(
+                f,
+                "MDB {mdb} 声明了 dbnum {dbnum}（{name}，本项目），主项目的库目录里没有它的文件"
             ),
             Self::TemplateMissing {
                 dbnum,
@@ -239,6 +315,13 @@ struct PollState {
     unreadable: BTreeSet<u32>,
 }
 
+/// MDB 声明了、盘上却没有文件的一个成员：名字与它属于哪个项目（`None` = 主项目自己）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingMember {
+    pub name: String,
+    pub project_code: Option<String>,
+}
+
 /// 见模块头。
 #[derive(Debug)]
 pub struct MdbRouteDirectory {
@@ -248,8 +331,8 @@ pub struct MdbRouteDirectory {
     routes: BTreeMap<u32, DbRoute>,
     /// CURD 原序的 dbnum：`routes` 是按号排的，树首页与增量排工要按 CURD 序。
     curd_order: Vec<u32>,
-    /// 声明了但磁盘上没文件的库：`dbnum → SYS 元素名`。报 `NoFileForDbnum`，不混进 `DbNotInMdb`。
-    declared_without_file: BTreeMap<u32, String>,
+    /// 声明了但磁盘上没文件的库：`dbnum → (SYS 元素名, 项目码)`。报 `NoFileForDbnum`，不混进 `DbNotInMdb`。
+    declared_without_file: BTreeMap<u32, MissingMember>,
     /// `(project, dbnum) → 文件`，同号跨项目候选。
     project_files: HashMap<(String, u32), ProjectDbFile>,
     /// 构造期发现、该让人看见的事（CURD 重复声明、认不出的 STYP）。
@@ -316,7 +399,10 @@ impl MdbRouteDirectory {
                 directory
                     .declared_without_file
                     .entry(db.dbnum)
-                    .or_insert_with(|| db.name.clone());
+                    .or_insert_with(|| MissingMember {
+                        name: db.name.clone(),
+                        project_code: db.declared_project_code.clone(),
+                    });
                 continue;
             };
             let source_project = db.project.clone().unwrap_or_else(|| project.to_string());
@@ -480,11 +566,12 @@ impl MdbRouteDirectory {
         if let Some(route) = self.routes.get(&dbnum) {
             return Ok(route);
         }
-        if let Some(name) = self.declared_without_file.get(&dbnum) {
+        if let Some(missing) = self.declared_without_file.get(&dbnum) {
             return Err(RouteError::NoFileForDbnum {
                 dbnum,
                 mdb: self.mdb.clone(),
-                name: name.clone(),
+                name: missing.name.clone(),
+                project_code: missing.project_code.clone(),
             });
         }
         Err(RouteError::DbNotInMdb {
@@ -724,12 +811,24 @@ impl MdbRouteDirectory {
         &self.problems
     }
 
-    /// MDB 声明了、配置的项目目录下却没有文件的库：`(dbnum, SYS 元素名)`，dbnum 升序。
-    /// 启动横幅逐条点名用；查询时它们报 `NoFileForDbnum`，不混进 `DbNotInMdb`。
-    pub fn declared_without_file(&self) -> impl Iterator<Item = (u32, &str)> {
+    /// MDB 声明了、搜索根里却没有文件的库：`(dbnum, 成员)`，dbnum 升序。
+    /// 启动横幅按项目码归并点名用；查询时它们报 `NoFileForDbnum`，不混进 `DbNotInMdb`。
+    pub fn declared_without_file(&self) -> impl Iterator<Item = (u32, &MissingMember)> {
         self.declared_without_file
             .iter()
-            .map(|(dbnum, name)| (*dbnum, name.as_str()))
+            .map(|(dbnum, missing)| (*dbnum, missing))
+    }
+
+    /// 声明落空的库按项目码归并：`项目码（None = 本项目）→ dbnum 升序`。
+    pub fn declared_without_file_by_project(&self) -> BTreeMap<Option<String>, Vec<u32>> {
+        let mut grouped: BTreeMap<Option<String>, Vec<u32>> = BTreeMap::new();
+        for (dbnum, missing) in &self.declared_without_file {
+            grouped
+                .entry(missing.project_code.clone())
+                .or_default()
+                .push(*dbnum);
+        }
+        grouped
     }
 
     pub fn stats(&self) -> RouteDirectoryStats {
@@ -912,7 +1011,8 @@ mod tests {
             Err(RouteError::NoFileForDbnum {
                 dbnum: 7_000,
                 mdb: "/ALL".to_string(),
-                name: "/AMS/CATA2".to_string()
+                name: "/AMS/CATA2".to_string(),
+                project_code: None,
             })
         );
         // 错误文案里必须有 dbnum，排障时靠它对表。
@@ -1534,8 +1634,88 @@ mod tests {
         assert!(!directory.contains_dbnum(999_999));
         assert_eq!(
             directory.declared_without_file().collect::<Vec<_>>(),
-            vec![(7_000, "/AMS/CATA2")]
+            vec![(
+                7_000,
+                &MissingMember {
+                    name: "/AMS/CATA2".to_string(),
+                    project_code: None,
+                }
+            )]
         );
+    }
+
+    /// 声明落空的条目带着项目码一路走到底（ADR-078 D5）：`route_dbno` 的错误点名项目 ACP 与
+    /// `acp000`，本项目自己的库措辞分开；按项目码归并的视图供横幅用。
+    #[test]
+    fn a_declaration_without_file_keeps_its_project_code() {
+        let databases = vec![
+            MdbDatabase {
+                dbnum: 7_001,
+                styp: 2,
+                proj: 3,
+                declared_project_code: Some("ACP".to_string()),
+                name: "*MASTER/STLCATA".to_string(),
+                path: None,
+                project: None,
+                shadowed: Vec::new(),
+            },
+            MdbDatabase {
+                dbnum: 7_009,
+                styp: 2,
+                proj: 3,
+                declared_project_code: Some("ACP".to_string()),
+                name: "/ACP/CATA".to_string(),
+                path: None,
+                project: None,
+                shadowed: Vec::new(),
+            },
+            MdbDatabase {
+                dbnum: 8_100,
+                styp: 1,
+                proj: 0,
+                declared_project_code: None,
+                name: "/AMS/LOST".to_string(),
+                path: None,
+                project: None,
+                shadowed: Vec::new(),
+            },
+        ];
+        let directory = MdbRouteDirectory::from_databases("AvevaMarineSample", "ALL", &databases, "T");
+        let foreign = directory.route_dbno(7_001).unwrap_err().to_string();
+        assert!(foreign.contains("项目 ACP") && foreign.contains("acp000"), "{foreign}");
+        assert!(foreign.contains("project_search_paths"), "{foreign}");
+        let own = directory.route_dbno(8_100).unwrap_err().to_string();
+        assert!(own.contains("本项目") && !own.contains("project_search_paths"), "{own}");
+
+        let grouped = directory.declared_without_file_by_project();
+        assert_eq!(grouped.get(&Some("ACP".to_string())), Some(&vec![7_001, 7_009]));
+        assert_eq!(grouped.get(&None), Some(&vec![8_100]));
+    }
+
+    /// e3d-io 那句「db N 没注册进这个 DbSet」到现场只剩一个库号；补上路由目录的原因后是
+    /// 「项目 ACP 的目录没定位到」。没那句话、或库号其实有路由时原样返回。
+    #[test]
+    fn unregistered_db_messages_get_the_route_directory_reason_appended() {
+        let databases = vec![MdbDatabase {
+            dbnum: 7_001,
+            styp: 2,
+            proj: 3,
+            declared_project_code: Some("ACP".to_string()),
+            name: "*MASTER/STLCATA".to_string(),
+            path: None,
+            project: None,
+            shadowed: Vec::new(),
+        }];
+        let directory = MdbRouteDirectory::from_databases("explain-test", "ALL", &databases, "T");
+        let raw = "14 geometry element(s) failed: [(17496/156982, \"db 7001 没注册进这个 DbSet，resolver 也给不出它的文件\"), (17496/156983, \"db 7001 没注册进这个 DbSet，resolver 也给不出它的文件\")]";
+        let explained = explain_unregistered_dbs_with(raw, &directory);
+        assert!(explained.starts_with(raw), "{explained}");
+        assert!(explained.contains("dbnum 7001：MDB /ALL 声明了 dbnum 7001"), "{explained}");
+        assert!(explained.contains("项目 ACP"), "{explained}");
+        assert_eq!(explained.matches("项目 ACP").count(), 1, "同一个库号只解释一次");
+        assert_eq!(explain_unregistered_dbs_with("nothing to see", &directory), "nothing to see");
+        let not_in_mdb = explain_unregistered_dbs_with("db 9999 没注册进这个 DbSet", &directory);
+        assert!(not_in_mdb.contains("不在 MDB /ALL 的声明里"), "{not_in_mdb}");
     }
 
     /// 真库门（手动）：当前 DbOption 指向的 MDB，目录构造零元素扫描、每条路由的文件头自证一致、

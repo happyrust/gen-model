@@ -27,8 +27,12 @@ sync_chunk_size = 100_0000
 # 删除此项后仍优先采用 AIOS_E3D_TEMPLATE_DIR，环境目录也未设置时使用产品默认
 # e3d210（不是从数据库二进制自动识别）。
 e3d_version = "e3d31"
-# E3D 项目根目录（装着各项目子目录的那一层），如 "D:/AVEVA/Projects/E3D3.1"
+# E3D 项目根目录（装着各项目子目录的那一层），如 "D:/AVEVA/Projects/E3D3.1"。这是第一个搜索根。
 project_path = ""
+# 其它搜索根（本地或 UNC，如 "//server/share/Projects"），顺序即优先级：MDB 声明的外部项目
+# 按项目码在各搜索根里找 <code>000 库目录（ADR-078）。远程项目填这里。
+project_search_paths = []
+# 已退役（ADR-078）：项目集合由 MDB 派生，这一项不再参与解析，非空时启动只打一句提示。
 included_projects = []
 catalogue_project_priority = []
 mdb_name = "ALL"
@@ -122,10 +126,12 @@ puhua_database_password = "root"
 replace_mesh = true
 room_key_word = ["-RM"]
 
-# 数据、模型增量与房间归属计算缺省开启。
+# 数据、模型增量缺省开启；房间归属计算缺省关（与代码默认一致，2026-09-11 起）：
+# 开着时常驻房间要 MDB 声明的全部设计库都在，缺一个库整批模型根都会被判死。
+# 要开用 room_membership = true 或环境变量 AIOS_ROOM_MEMBERSHIP=1（环境变量压过本键）。
 data_incremental = true
 model_incremental = true
-room_membership = true
+room_membership = false
 
 # 文件身份冲突只记录并跳过，不阻断其它库初始化。
 block_file_identity_conflicts = false

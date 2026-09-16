@@ -1,6 +1,12 @@
 # ADR-046：`included_projects` 以项目文件夹名限定扫描范围
 
-- 状态：Accepted
+> **2026-09-15 被 ADR-078 取代**：项目集合改由 MDB 派生（主项目 SYS 里该 MDB 的 CURD 声明按
+> 项目码分组），项目目录在人指定的搜索根 `[project_path] ++ project_search_paths` 里按
+> `<code>000` 找；`included_projects` 退役，字段保留只为旧配置反序列化不炸（同 §5 对
+> `project_dirs` 的处置）。本文的「名单外路径不进扫描」换成「搜索根外路径不进扫描」——范围
+> 仍由人定，只是「哪些项目」由 MDB 定。以下内容保留为历史背景。
+
+- 状态：Superseded by ADR-078（2026-09-15）；原 Accepted 2026-08-24
 - 日期：2026-08-24
 - 修订：ADR-016「监控目录解析与项目数据域」中的 `project_dirs` 路径覆盖约定
 - 引用：ADR-011（单队列与共享派发器）、ADR-016（监控目录解析与项目数据域）

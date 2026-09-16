@@ -1,11 +1,13 @@
 //! 内置 SurrealDB 函数集：`resource/surreal/` 的**编译期快照**。
 //!
 //! 部署包的 `resource/surreal/` 是随包拷贝的，会漂移：现场 test-worklspace 的
-//! bin 停在 2025-06——`gen_root.surql` 整个缺失、`common.surql` 差 3KB，活库
-//! （1516/AvevaMarineSample）因此缺 `fn::room_relate_of` / `fn::room_num_of` 与
-//! 全部 12 个 `fn::gen_root_*`，`fn::room_code` 一直是旧语义。更糟的是旧 exe 每次
+//! bin 停在 2025-06——`common.surql` 差 3KB，活库（1516/AvevaMarineSample）因此缺
+//! `fn::room_relate_of` / `fn::room_num_of`，`fn::room_code` 一直是旧语义。更糟的是旧 exe 每次
 //! 启动都把旧函数体再灌一遍（`define_common_functions` 无条件加载 CWD 脚本），
 //! 手工灌一次新的、下次重启又被打回去。
+//!
+//! `gen_root.surql`（`gen_root` 表的索引与 12 个 `fn::gen_root_*` 巡检函数）随 `gen_root` 表退役
+//! （ADR-079）从快照里摘掉；存量库里的表与函数由 `retire_publish_run_tables` 一次性删。
 //!
 //! 这里把仓库的脚本按 `include_str!` 冻进二进制，启动序列在磁盘加载**之后**再灌
 //! 一遍内置版：站点自有的额外脚本继续生效，但与仓库同名的函数以内置版为准，
@@ -39,10 +41,6 @@ pub const EMBEDDED_SURQL: &[(&str, &str)] = &[
         include_str!("../../resource/surreal/fn_query_room_code_hh.surql"),
     ),
     (
-        "gen_root.surql",
-        include_str!("../../resource/surreal/gen_root.surql"),
-    ),
-    (
         "get_room_nodes.surql",
         include_str!("../../resource/surreal/get_room_nodes.surql"),
     ),
@@ -62,14 +60,10 @@ pub const EMBEDDED_SURQL: &[(&str, &str)] = &[
 
 /// 「新环境适配」的核验面：这几个函数只存在于 2026 版脚本里，旧部署的磁盘文件
 /// 不含它们——内置灌入之后还缺，说明引擎拒绝了新脚本（语句错误被按惯例吞掉），
-/// 房间语义与 gen-root 巡检会退化。收口硬前置（`fn::anc_u64` 等）不在这里：
+/// 房间语义会退化。收口硬前置（`fn::anc_u64` 等）不在这里：
 /// 那是 `selfcheck_surreal_functions` 的硬门，缺了直接拒绝启动。
-const MARQUEE_FUNCTIONS: &[&str] = &[
-    "room_relate_of",
-    "room_num_of",
-    "gen_root_of",
-    "gen_roots_todo",
-];
+/// （`gen_root_of` / `gen_roots_todo` 随 `gen_root.surql` 退役，ADR-079。）
+const MARQUEE_FUNCTIONS: &[&str] = &["room_relate_of", "room_num_of"];
 
 /// 把内置函数集灌进指定库。磁盘脚本加载**之后**调用，同名函数以内置版收尾。
 pub async fn define_embedded_functions_on(db: &Surreal<Any>) -> anyhow::Result<()> {
@@ -148,7 +142,7 @@ mod tests {
     }
 
     /// 老运行环境的现场重演：库里已经站着一个旧语义的 `fn::room_code`（部署 exe
-    /// 每次启动都会把它灌回去），内置灌入之后必须（1）核验面四个新函数全部就位，
+    /// 每次启动都会把它灌回去），内置灌入之后必须（1）核验面的新函数全部就位，
     /// （2）`fn::room_code` 被抬到当前语义——hd 构建读 `fn::room_relate_of` 的
     /// 排序边，hh 构建读 `fn::room_num_of`。
     #[tokio::test]
@@ -201,5 +195,66 @@ mod tests {
             room_code.contains("room_num_of"),
             "非 hd 构建的 room_code 应是 hh 版，实际: {room_code}"
         );
+    }
+
+    /// hd 版 `fn::room_code` 对挂着 `room_relate` 边的构件必须回出「前缀-房间号」。
+    /// 2026-09-16 rocksdb 真库上它对每个构件都回 NONE：函数体用 `{ $code = …; }` 给变量
+    /// 赋值，SurrealDB 2.x 里块的值是最后一条语句的值、赋值语句的值是 NONE，于是
+    /// `$code == NONE → RETURN NONE`。分支改成表达式后这里钉住四字与五字房间号两条路。
+    #[cfg(feature = "project_hd")]
+    #[tokio::test]
+    async fn hd_room_code_returns_prefix_and_room_number_for_a_member_with_an_edge() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("embedded_surql_room_code")
+            .await
+            .expect("select fixture db");
+        define_embedded_functions_on(&db)
+            .await
+            .expect("embedded load succeeds");
+
+        db.query(
+            "CREATE FLOOR:⟨2_72903⟩ SET TYPE = 'FLOOR';
+             CREATE FLOOR:⟨2_72904⟩ SET TYPE = 'FLOOR';
+             CREATE FLOOR:⟨2_72905⟩ SET TYPE = 'FLOOR';
+             CREATE pe:⟨1_1444⟩ SET noun = 'SBFR', name = '/1RX-RM01-R144-VOLU';
+             CREATE pe:⟨1_1445⟩ SET noun = 'PANE', name = '', owner = pe:⟨1_1444⟩;
+             CREATE pe:⟨2_72903⟩ SET noun = 'FLOOR', refno = FLOOR:⟨2_72903⟩;
+             CREATE pe:⟨2_72904⟩ SET noun = 'FLOOR', refno = FLOOR:⟨2_72904⟩;
+             CREATE pe:⟨2_72905⟩ SET noun = 'FLOOR', refno = FLOOR:⟨2_72905⟩;
+             RELATE pe:⟨1_1445⟩->room_relate->pe:⟨2_72903⟩ SET room_num = 'R144', inside_count = 8, center_dist = 2960.4;
+             RELATE pe:⟨1_1445⟩->room_relate->pe:⟨2_72904⟩ SET room_num = 'R0144', inside_count = 8, center_dist = 2960.4;",
+        )
+        .await
+        .expect("fixture reaches db")
+        .check()
+        .expect("fixture rows created");
+
+        let mut response = db
+            .query(
+                "RETURN fn::room_code(pe:⟨2_72903⟩);
+                 RETURN fn::room_code(pe:⟨2_72904⟩);
+                 RETURN fn::room_code(pe:⟨2_72905⟩);",
+            )
+            .await
+            .expect("room_code reaches db")
+            .check()
+            .expect("room_code statements");
+        let four: Option<String> = response.take(0).expect("decode four-char code");
+        let five: Option<String> = response.take(1).expect("decode five-char code");
+        let none: Option<String> = response.take(2).expect("decode member without edge");
+        assert_eq!(
+            four.as_deref(),
+            Some("1RX-R144"),
+            "四字房间号：面板属主名前缀 + 房间号"
+        );
+        assert_eq!(
+            five.as_deref(),
+            Some("1RX-R144"),
+            "五字房间号 R0144 → 去掉第二位"
+        );
+        assert_eq!(none, None, "没有 room_relate 边的构件仍回 NONE");
     }
 }

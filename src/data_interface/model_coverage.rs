@@ -1,18 +1,20 @@
-//! 模型覆盖凭证的**只读取数**（ADR-058 D5 / ADR-054）：`gen_root` 上「这个库 / 这个根的模型是照
-//! 哪一版数据与目录算出来的」怎么读——按需 `ensure` 的凭证命中判据（[`generation_roots_cache_current`]，
-//! 设计会话 + 目录落款两半）、启动一级过滤的凭证下限（[`startup_coverage_floors`]）、空闲轮的模型门
-//! （[`model_coverage_current`]）、已发布根落在哪一版目录上（[`published_catalogue_sessions_on`]）。
-//! 全部**只读 `gen_root`**，一条都不碰 `model_update_pending`。
+//! 模型覆盖的**只读取数**（ADR-058 D5 / ADR-054 / ADR-079）：「这个库的模型是照哪一版数据与目录
+//! 算出来的」怎么读——按需 `ensure` 的凭证命中判据（[`generation_roots_cache_current`]，设计会话 +
+//! 目录落款两半）、空闲轮的模型门（[`model_coverage_current`]）、已发布的模型落在哪一版目录上
+//! （[`published_catalogue_sessions_on`]）。
 //!
-//! 2026-09-10（ADR-071 S7）从 `model_update_pending.rs` 搬出：那张队列表随 S4 后半 / S7 退役，而这里
-//! 是凭证真值（d-227：`gen_root` 凭证留库）的正经读法，与队列无关——**名字与行为不变，只换住址**
-//! （同 S5a 搬 `model_watermark.rs` 的做法）。同日稍后**目录版本核对**（[`reconcile_catalogue_versions`]
+//! `gen_root` 表退役之后（ADR-079）这里读的只有两样：**水位行**（`dbnum_watermark.model_sesno` 是模型面
+//! 唯一的持久事实；`model_catalogue_sessions` 是库级目录落款——逐根的 `published_model_target.catalogue`
+//! 收成每库一份）与**进程内的生成根账本**（[`crate::data_interface::model_root_ledger`]：本进程里哪些根
+//! 失败了、哪些按需生成到了更新的一版）。一条 SurrealDB 逐根凭证行都不读，一条都不碰 `model_update_pending`。
+//!
+//! 2026-09-10（ADR-071 S7）从 `model_update_pending.rs` 搬出。同日稍后**目录版本核对**（[`reconcile_catalogue_versions`]
 //! 点名 → 收窗 → 反查 → 排工，与运行期的 `_after_sweep` / `_now` 两个入口、`/health.catalogue_reconcile`
 //! 快照）也搬了进来：它的排工自 ADR-071 S4 起是**排带明确根名单的 ModelOnly 任务**
-//! （`DiscoveredBatch::regen_roots`），不再写 pending 行，于是不再依赖队列表。还留在隔壁的只有
-//! `sync_and_seed_model_coverage`（`/model/rebuild` 用，把缺凭证的根 `render_upsert` 进 pending），随 S4 改。
+//! （`DiscoveredBatch::regen_roots`），ADR-079 起任务还带着「成了就盖」的库级目录落款
+//! （`DiscoveredBatch::catalogue_stamps`）。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -21,39 +23,22 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
-use crate::data_interface::dbnum_state::escape_surql_str;
-
-/// `SELECT count() … GROUP ALL` 的那一行。
-#[derive(Debug, Deserialize)]
-struct CountRow {
-    count: usize,
-}
-#[derive(Debug, Deserialize)]
-struct RootCompletionCredentialRow {
-    #[serde(default)]
-    publication_status: Option<String>,
-    #[serde(default)]
-    desired_revision: Option<u64>,
-    #[serde(default)]
-    published_revision: Option<u64>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    source_end_sesno: Option<i32>,
-    /// `published_model_target.catalogue`：这份几何是照哪一版**目录**算出来的，每个 CATA
-    /// 依赖一条（H1 (c)，2026-09-08）。此前凭证只比设计库会话，目录改了、设计没改的根
-    /// 在按需 `ensure` 眼里永远「当前」。
-    #[serde(default)]
-    catalogue: Vec<CatalogueStamp>,
-}
-
-/// `gen_root.published_model_target.catalogue[*]` 里与凭证判据有关的两格。
+/// 一条目录落款里与凭证判据有关的两格（库级 `model_catalogue_sessions[*]`，ADR-079）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub(crate) struct CatalogueStamp {
     #[serde(default)]
     pub dbnum: Option<u32>,
     #[serde(default)]
     pub session: Option<u32>,
+}
+
+impl From<crate::data_interface::dbnum_state::CatalogueStampRow> for CatalogueStamp {
+    fn from(row: crate::data_interface::dbnum_state::CatalogueStampRow) -> Self {
+        Self {
+            dbnum: Some(row.dbnum),
+            session: Some(row.session),
+        }
+    }
 }
 
 /// 目录落款是否仍覆盖此刻的目录文件（纯函数，H1 (c)）。
@@ -76,34 +61,64 @@ pub(crate) fn catalogue_stamps_current(
 
 /// 这个生成根的完成凭证是否覆盖当前生成源版本。
 ///
-/// 仅有 `inst_relate` 行不构成缓存命中：它可能属于较早会话。生成根必须处于完成终态，
-/// 且凭证会话号**不早于**文件最新会话（ADR-054 实施约束 4：单调，不判等值）；旧行缺
-/// 会话号按未命中处理。文件被换回更旧版本时凭证会显得「超前」，那是文件异常，由重建
-/// 批次（ADR-021）清凭证，不在这里猜。
+/// 仅有 `inst_relate` 行不构成缓存命中：它可能属于较早会话。凭证会话号**不早于**文件最新会话
+/// 才算覆盖（ADR-054 实施约束 4：单调，不判等值）。文件被换回更旧版本时凭证会显得「超前」，
+/// 那是文件异常，由重建批次（ADR-021）清凭证，不在这里猜。判据见 [`generation_roots_cache_current`]。
 pub async fn generation_root_cache_current(root_refno: &str) -> anyhow::Result<bool> {
     Ok(generation_roots_cache_current(&[root_refno.to_string()])
         .await?
         .contains(root_refno))
 }
 
-fn render_generation_root_credentials(root_refnos: &[String]) -> String {
-    let keys = root_refnos
-        .iter()
-        .map(|root| format!("gen_root:{}", escape_surql_str(&root.replace('/', "_"))))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "SELECT record::id(id) AS root_id, status, source_end_sesno, publication_status, desired_revision, published_revision, \
-         published_model_target.catalogue ?? [] AS catalogue FROM [{keys}];"
-    )
+/// 库级凭证的两半（ADR-079）：这个库的模型追平到哪一版、照的是哪几版目录。`None` = 库上没有水位行。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LibraryCredential {
+    /// `dbnum_watermark.model_sesno`；`0` = 从没追平过。
+    pub model_sesno: i32,
+    /// `dbnum_watermark.model_catalogue_sessions`。
+    pub catalogue: Vec<CatalogueStamp>,
+}
+
+/// 一根的凭证判据（纯函数，ADR-079）：**库级承诺 ∨ 根级按需生成**，且这根在本进程里没有失败悬着。
+///
+/// - 库级：`model_sesno` 不早于这根生成源的文件最新（任务收尾只在这一版的根全部落库时才盖它，
+///   ADR-072 D4，所以它覆盖到的每个根都算追平）∧ 库级目录落款不早于各目录文件最新
+///   （[`catalogue_stamps_current`]，H1 (c)）；
+/// - 根级：账本里这根 `Generated` 且 `source_end_sesno` 不早于文件最新——按需 `ensure` 在库水位之后
+///   生成的根走这一半（它照的目录版本由投影回执那一半核，`on_demand_model::memory_root_current`）；
+/// - 账本里这根还欠着（失败 / 永久放弃）→ 未命中，不管库级承诺说什么：那份几何不可信。
+///
+/// 从没生成过、账本里没有的根，只看库级承诺：库追平了它就追平了（S 时刻每个根都已发布正是水位
+/// 承诺的东西）。
+pub(crate) fn root_credential_covers(
+    library: Option<&LibraryCredential>,
+    ledger_entry: Option<&crate::data_interface::model_root_ledger::RootEntry>,
+    required_sesno: i32,
+    catalogue_latest: impl Fn(u32) -> Option<u32>,
+) -> bool {
+    if ledger_entry.is_some_and(|entry| !entry.is_settled()) {
+        return false;
+    }
+    let library_covers = library.is_some_and(|library| {
+        library.model_sesno > 0
+            && library.model_sesno >= required_sesno
+            && catalogue_stamps_current(&library.catalogue, &catalogue_latest)
+    });
+    let root_covers = ledger_entry.is_some_and(|entry| {
+        crate::data_interface::model_source::credential_covers(
+            Some(entry.source_end_sesno),
+            required_sesno,
+        )
+    });
+    library_covers || root_covers
 }
 
 /// Batch form used by subtree display: resolve file versions off-thread once,
-/// then load every completion credential with one primary-key query.
+/// then judge every root from the watermark mirror and the process ledger — no
+/// per-root table read (ADR-079).
 ///
-/// 命中 = 完成终态 ∧ 设计库凭证不早于文件最新 ∧ **目录落款不早于各目录文件最新**
-/// （[`catalogue_stamps_current`]，H1 (c)）。目录文件最新会话按 dbnum 只读一次
-/// （`latest_source_version` 自己还有按文件戳的缓存），一次子树显示多付的是几个目录库的头。
+/// 命中 = [`root_credential_covers`]。目录文件最新会话按 dbnum 只读一次（`latest_source_version`
+/// 自己还有按文件戳的缓存），一次子树显示多付的是几个目录库的头。
 pub async fn generation_roots_cache_current(
     root_refnos: &[String],
 ) -> anyhow::Result<HashSet<String>> {
@@ -125,29 +140,19 @@ pub async fn generation_roots_cache_current(
     .await
     .map_err(|error| anyhow::anyhow!("resolve model sources task failed: {error}"))??;
 
-    let mut response = SUL_DB
-        .query(render_generation_root_credentials(root_refnos))
-        .await
-        .map_err(|error| anyhow::anyhow!("load model credentials failed: {error}"))?
-        .check()
-        .map_err(|error| anyhow::anyhow!("load model credentials statement failed: {error}"))?;
-    #[derive(Debug, Deserialize)]
-    struct BatchRow {
-        root_id: String,
-        #[serde(flatten)]
-        credential: RootCompletionCredentialRow,
+    let mut libraries: BTreeMap<u32, Option<LibraryCredential>> = BTreeMap::new();
+    for dbnum in versions
+        .iter()
+        .map(|(_, dbnum, _)| *dbnum)
+        .collect::<BTreeSet<_>>()
+    {
+        libraries.insert(dbnum, library_credential_on(&SUL_DB, dbnum).await?);
     }
-    let rows: Vec<BatchRow> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("decode model credentials failed: {error}"))?;
-    let rows = rows
-        .into_iter()
-        .map(|row| (row.root_id, row.credential))
-        .collect::<HashMap<_, _>>();
-    // 目录文件最新会话：这批凭证落款提到的每个目录库问一次。读不到的留 `None`（未知）。
-    let catalogue_dbnums: BTreeSet<u32> = rows
+    // 目录文件最新会话：这批库的落款提到的每个目录库问一次。读不到的留 `None`（未知）。
+    let catalogue_dbnums: BTreeSet<u32> = libraries
         .values()
-        .flat_map(|row| row.catalogue.iter().filter_map(|stamp| stamp.dbnum))
+        .flatten()
+        .flat_map(|library| library.catalogue.iter().filter_map(|stamp| stamp.dbnum))
         .collect();
     let catalogue_latest: BTreeMap<u32, Option<u32>> = if catalogue_dbnums.is_empty() {
         BTreeMap::new()
@@ -166,85 +171,132 @@ pub async fn generation_roots_cache_current(
         .await
         .map_err(|error| anyhow::anyhow!("resolve catalogue versions task failed: {error}"))?
     };
-    let mut covered = BTreeMap::new();
-    for dbnum in versions
-        .iter()
-        .map(|(_, dbnum, _)| *dbnum)
-        .collect::<BTreeSet<_>>()
-    {
-        if let Some(sesno) = library_coverage_on(&SUL_DB, dbnum).await? {
-            covered.insert(dbnum, sesno);
-        }
-    }
     Ok(versions
         .into_iter()
         .filter_map(|(root_refno, dbnum, required_sesno)| {
-            let root_id = root_refno.replace('/', "_");
-            rows.get(&root_id)
-                .is_some_and(|row| {
-                    super::window_root_plan::root_is_settled(
-                        row.status.as_deref(),
-                        row.source_end_sesno,
-                        row.publication_status.as_deref(),
-                        row.desired_revision,
-                        row.published_revision,
-                    ) && (covered
-                        .get(&dbnum)
-                        .is_some_and(|sesno| *sesno >= required_sesno)
-                        || crate::data_interface::model_source::credential_covers(
-                            row.source_end_sesno,
-                            required_sesno,
-                        ))
-                        && catalogue_stamps_current(&row.catalogue, |dbnum| {
-                            catalogue_latest.get(&dbnum).copied().flatten()
-                        })
-                })
-                .then_some(root_refno)
+            let entry = crate::data_interface::model_root_ledger::parse_root(&root_refno)
+                .and_then(|root| crate::data_interface::model_root_ledger::entry(dbnum, root));
+            root_credential_covers(
+                libraries.get(&dbnum).and_then(Option::as_ref),
+                entry.as_ref(),
+                required_sesno,
+                |dbnum| catalogue_latest.get(&dbnum).copied().flatten(),
+            )
+            .then_some(root_refno)
         })
         .collect())
 }
 
-/// 库级模型覆盖：这个库追平到哪一版——就是 `dbnum_watermark.model_sesno`。
+/// 库级凭证：这个库追平到哪一版（`dbnum_watermark.model_sesno`）、照的哪几版目录
+/// （`model_catalogue_sessions`，ADR-079）。
 ///
-/// 任务收尾只在这一版的根**全部**落进去时才盖它（ADR-072 D4 / `task_end::render_task_end_tail`
+/// 任务收尾只在这一版的根**全部**落进去时才盖水位（ADR-072 D4 / `task_end::render_task_end_tail`
 /// 的 `TaskModelOutcome::all_roots_ok` 守卫），所以这一格本身就是凭据；原先另开一张
-/// `CompletionReceipt` 收据再交叉核验的那一路随 publish 阶段退了。`None` = 从没追平过。
+/// `CompletionReceipt` 收据再交叉核验的那一路随 publish 阶段退了。`None` = 库上没有水位行。
 /// 生产库走水位镜像（`DbnumState::read`），测试夹具与旁路连接直查那一行。
-async fn library_coverage_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<Option<i32>> {
+async fn library_credential_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<Option<LibraryCredential>> {
     #[derive(Deserialize)]
     struct Row {
         #[serde(default)]
         model_sesno: Option<i32>,
+        #[serde(default)]
+        model_catalogue_sessions: Option<Vec<crate::data_interface::dbnum_state::CatalogueStampRow>>,
     }
-    let model_sesno = if std::ptr::eq(db, &*SUL_DB) {
-        crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+    if std::ptr::eq(db, &*SUL_DB) {
+        return Ok(crate::data_interface::dbnum_state::DbnumState::read(dbnum)
             .await?
-            .map(|state| state.model_sesno)
-    } else {
-        let row: Option<Row> = db
-            .query(format!(
-                "SELECT model_sesno FROM ONLY dbnum_watermark:{dbnum};"
-            ))
-            .await?
-            .check()?
-            .take(0)?;
-        row.and_then(|row| row.model_sesno)
-    };
-    Ok(model_sesno.filter(|sesno| *sesno > 0))
+            .map(|state| LibraryCredential {
+                model_sesno: state.model_sesno,
+                catalogue: state
+                    .model_catalogue_sessions
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }));
+    }
+    let row: Option<Row> = db
+        .query(format!(
+            "SELECT model_sesno, model_catalogue_sessions FROM ONLY dbnum_watermark:{dbnum};"
+        ))
+        .await?
+        .check()?
+        .take(0)?;
+    Ok(row.map(|row| LibraryCredential {
+        model_sesno: row.model_sesno.unwrap_or_default(),
+        catalogue: row
+            .model_catalogue_sessions
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    }))
 }
 
+/// 库级模型覆盖：这个库追平到哪一版——就是 `dbnum_watermark.model_sesno`。`None` = 从没追平过。
+async fn library_coverage_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<Option<i32>> {
+    Ok(library_credential_on(db, dbnum)
+        .await?
+        .map(|library| library.model_sesno)
+        .filter(|sesno| *sesno > 0))
+}
+
+/// ADR-079：凭证判据 = 库级承诺 ∨ 根级按需生成，账本里悬着的失败一票否决。
 #[cfg(test)]
 #[test]
-fn generation_root_credentials_use_one_primary_key_query() {
-    let query =
-        render_generation_root_credentials(&["24384/26229".to_string(), "24384/23264".to_string()]);
-    assert_eq!(
-        query,
-        "SELECT record::id(id) AS root_id, status, source_end_sesno, publication_status, desired_revision, published_revision, \
-         published_model_target.catalogue ?? [] AS catalogue FROM \
-[gen_root:24384_26229,gen_root:24384_23264];"
-    );
-    assert!(!query.contains(" WHERE "));
+fn a_root_is_current_when_the_library_promise_or_its_own_ledger_entry_covers_the_file() {
+    use crate::data_interface::model_root_ledger::{RootEntry, RootOutcome};
+    let stamp = |dbnum: u32, session: u32| CatalogueStamp {
+        dbnum: Some(dbnum),
+        session: Some(session),
+    };
+    let latest = |dbnum: u32| (dbnum == 7000).then_some(12);
+    let library = LibraryCredential {
+        model_sesno: 26,
+        catalogue: vec![stamp(7000, 12)],
+    };
+    let generated = |sesno: i32| RootEntry {
+        noun: "BRAN".into(),
+        outcome: RootOutcome::Generated,
+        source_end_sesno: sesno,
+    };
+    let failed = RootEntry {
+        noun: "BRAN".into(),
+        outcome: RootOutcome::Failed {
+            error: "boom".into(),
+        },
+        source_end_sesno: 26,
+    };
+    // 库追平到 26、目录落款追平：账本里没有的根命中；要求 27 就不命中。
+    assert!(root_credential_covers(Some(&library), None, 26, latest));
+    assert!(!root_credential_covers(Some(&library), None, 27, latest));
+    // 库级不够，按需生成到了 27：根级那一半命中。
+    assert!(root_credential_covers(Some(&library), Some(&generated(27)), 27, latest));
+    assert!(!root_credential_covers(Some(&library), Some(&generated(26)), 27, latest));
+    // 账本里悬着失败：库级承诺也救不了。
+    assert!(!root_credential_covers(Some(&library), Some(&failed), 26, latest));
+    // 目录落款早于目录文件最新：库级那一半失效，只剩根级。
+    let stale_catalogue = LibraryCredential {
+        model_sesno: 26,
+        catalogue: vec![stamp(7000, 11)],
+    };
+    assert!(!root_credential_covers(Some(&stale_catalogue), None, 26, latest));
+    assert!(root_credential_covers(
+        Some(&stale_catalogue),
+        Some(&generated(26)),
+        26,
+        latest
+    ));
+    // 没有水位行 / 从没追平：只看根级。
+    assert!(!root_credential_covers(None, None, 1, latest));
+    let never = LibraryCredential {
+        model_sesno: 0,
+        catalogue: Vec::new(),
+    };
+    assert!(!root_credential_covers(Some(&never), None, 1, latest));
+    assert!(root_credential_covers(Some(&never), Some(&generated(1)), 1, latest));
 }
 
 /// H1 (c)：凭证判据的目录那一半。设计会话够新、目录落款却早于目录文件最新 → 未命中；
@@ -297,15 +349,16 @@ fn catalogue_stamps_are_current_only_when_no_stamp_is_behind_its_file() {
     ));
 }
 
-/// ADR-025 模型门：这个库的每个生成根是否都有覆盖**文件最新会话**的完成凭证。
+/// ADR-025 模型门：这个库的模型是否追平**文件最新会话**、且本进程里没有根悬着失败。
 ///
 /// 标尺是文件最新，不是 `applied_sesno`（ADR-054：水位只承诺数据落库，不是生成时点；
 /// ADR-058 D4 的启动复核也以文件最新为右端）。两边若不同尺，会出现启动复核刚判定
 /// 「落后、已开窗排队」而空闲轮同一刻判定「覆盖完整、模型就绪」——两个都对，只是
 /// 各拿一把尺。文件读取是同步 I/O（stat + 会话页），扔进阻塞线程。
 ///
-/// 与 [`gen_root_credential_is_current`] 同一口径（ADR-054 实施约束 4）：凭证会话号**不早于**
-/// 标尺即算覆盖，`0`（未认领）永不算；时刻列只记不比。
+/// 判据（ADR-079）：`model_sesno` **不早于**标尺（ADR-054 实施约束 4：单调；`0` = 从没追平，永不算）
+/// ∧ 进程内账本里这个库没有还在赶的根。库里不再有逐根的行可数，也不需要——水位只在这一版的根
+/// 全部落库时才盖，本进程之后又失败的根在账本里。
 pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
     let target = tokio::task::spawn_blocking(move || {
         crate::data_interface::model_source::latest_source_version(dbnum)
@@ -317,211 +370,97 @@ pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
     let covered = library_coverage_on(&SUL_DB, dbnum)
         .await?
         .is_some_and(|sesno| sesno >= target.sesno as i32);
-    let settled = super::model_watermark::settled_root_predicate();
-    let lag = if covered {
-        String::new()
-    } else {
-        format!(
-            " OR (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}",
-            target.sesno
-        )
-    };
-    let started = Instant::now();
-    let coverage_result = SUL_DB
-        .query(format!(
-            "SELECT count() AS count FROM gen_root WHERE dbnum = {dbnum} AND (\
-             NOT ({settled}) {lag}) GROUP ALL;"
-        ))
-        .await;
-    crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
-    let mut response = coverage_result?.check()?;
-    let rows: Vec<CountRow> = response.take(0)?;
-    Ok(covered && rows.first().map_or(0, |row| row.count) == 0)
+    let chasing = crate::data_interface::model_root_ledger::census(dbnum).chasing;
+    Ok(covered && chasing == 0)
 }
 
-#[derive(Debug, Deserialize)]
-struct GenRootDbnumRow {
-    #[serde(default)]
-    dbnum: Option<u32>,
-}
-
-/// 已经有生成根凭证记录的库（`gen_root` 至少一行）。
+/// 每个设计库的库级目录落款（`dbnum_watermark.model_catalogue_sessions`，ADR-079）：
+/// `DESI dbnum → (CATA dbnum → 会话)`。没有落款的库不在里面。
 ///
-/// 一次 GROUP BY 全表——`gen_root` 每根一行，量级远小于 `inst_relate`，且只挂启动
-/// 序列（与 FR-1「全表谓词只许启动序列与人工诊断入口」同一口径）。`dbnum` 缺失的
-/// 历史行没有归属，核对不了也补不了，跳过并由调用方计数报告。
-pub async fn coverage_tracked_dbnums() -> anyhow::Result<Vec<u32>> {
-    coverage_tracked_dbnums_on(&SUL_DB).await
-}
-
-pub(crate) async fn coverage_tracked_dbnums_on(db: &Surreal<Any>) -> anyhow::Result<Vec<u32>> {
-    let mut response = db
-        .query("SELECT dbnum FROM gen_root GROUP BY dbnum;")
-        .await?
-        .check()?;
-    let rows: Vec<GenRootDbnumRow> = response.take(0)?;
-    let mut dbnums: Vec<u32> = rows.into_iter().filter_map(|row| row.dbnum).collect();
-    dbnums.sort_unstable();
-    dbnums.dedup();
-    Ok(dbnums)
-}
-
-/// 每个库的**模型凭证下限**（ADR-058 D5）：安定生成根里最小的 `source_end_sesno`，
-/// 外加没有可用凭证的根数。
-///
-/// 模型那一枚凭证（ADR-056 N5；数据那一枚是 `dbnum_watermark.applied_sesno`）。与
-/// 文件最新会话一比就答得出「这个库的模型按哪一版数据生成」——启动一级过滤、覆盖
-/// 清单与 `/dbnums` 的凭证两列全部照这一份取数，**不另开第二套口径**：同一个库在
-/// 启动日志与接口上给出两个不同的「落后到哪一版」，看的人分不出哪个是真的。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct StartupCoverageFloor {
-    /// 已安定行里最小的 `source_end_sesno`；一条安定行都没有时是 `None`。
-    pub settled_floor: Option<i32>,
-    pub settled_roots: usize,
-    pub unsettled_roots: usize,
-}
-
-/// 把只有嵌套归属的历史 `gen_root` 行补上顶层 `dbnum`，返回补了几行。
-///
-/// `render_upsert` 从 2026-09-03 起在建行时就写顶层 `dbnum`；在那之前由模型队列创建的行只有
-/// `desired_target.dbnum`，顶层是 `NONE`。而启动的凭证下限、覆盖清单与 `/dbnums` 的模型凭证
-/// 下限**全部**按 `WHERE dbnum != NONE` 取数——不补，这些行就一直看不见，而且不会报错，
-/// 只是每一处按库取数的地方都少算（ams 现场实测 2245 行里 2244 行如此）。
-///
-/// 幂等，补完就不再命中。全表谓词，只挂启动序列（与 [`coverage_tracked_dbnums`] 同一口径）。
-/// 失败只告警：它是补齐不是前提，下一次启动还会再试。
-pub(crate) async fn backfill_gen_root_dbnum_on(db: &Surreal<Any>) -> anyhow::Result<usize> {
+/// 一条语句问完全部库的水位行（表很小，每库一行）；不逐库点查。
+pub(crate) async fn library_catalogue_stamps_on(
+    db: &Surreal<Any>,
+) -> anyhow::Result<BTreeMap<u32, BTreeMap<u32, u32>>> {
     #[derive(Debug, Deserialize)]
-    struct Backfilled {
-        #[allow(dead_code)]
-        id: surrealdb::sql::Thing,
+    struct Row {
+        dbnum: u32,
+        #[serde(default)]
+        model_catalogue_sessions: Option<Vec<crate::data_interface::dbnum_state::CatalogueStampRow>>,
     }
+    let started = Instant::now();
     let mut response = db
         .query(
-            "UPDATE gen_root SET dbnum = desired_target.dbnum \
-             WHERE dbnum = NONE AND (desired_target.dbnum ?: 0) > 0 RETURN id;",
+            "SELECT dbnum, model_catalogue_sessions FROM dbnum_watermark \
+             WHERE model_catalogue_sessions != NONE AND array::len(model_catalogue_sessions) > 0;",
         )
         .await?
         .check()?;
-    let rows: Vec<Backfilled> = response.take(0)?;
-    Ok(rows.len())
-}
-
-/// 一次请求两条聚合语句问完全部库——不是逐库点查，更不是逐库开窗（ADR-058 D5）。
-///
-/// 「安定」= 状态在 [`SETTLED_ROOT_STATUSES`] 里且凭证大于 0，与
-/// `window_root_plan::PersistedRootState::is_settled` 同一口径。未安定的行没有可用的凭证，
-/// 它们既进不了下限、也一定要重排，所以单独计数——一个库只要有一行未安定就得开窗，
-/// 哪怕其余凭证全都追平了。
-pub async fn startup_coverage_floors() -> anyhow::Result<BTreeMap<u32, StartupCoverageFloor>> {
-    startup_coverage_floors_on(&SUL_DB).await
-}
-
-pub(crate) async fn startup_coverage_floors_on(
-    db: &Surreal<Any>,
-) -> anyhow::Result<BTreeMap<u32, StartupCoverageFloor>> {
-    #[derive(Debug, Deserialize)]
-    struct SettledRow {
-        #[serde(default)]
-        dbnum: Option<u32>,
-        #[serde(default)]
-        floor: Option<i32>,
-        #[serde(default)]
-        roots: usize,
-    }
-    #[derive(Debug, Deserialize)]
-    struct UnsettledRow {
-        #[serde(default)]
-        dbnum: Option<u32>,
-        #[serde(default)]
-        roots: usize,
-    }
-    let settled = super::model_watermark::settled_root_predicate();
-    let started = Instant::now();
-    let mut response = db
-        .query(format!(
-            "SELECT dbnum, math::min(source_end_sesno ?: 0) AS floor, count() AS roots \
-             FROM gen_root WHERE dbnum != NONE AND ({settled}) \
-             AND (source_end_sesno ?: 0) > 0 GROUP BY dbnum;\
-             SELECT dbnum, count() AS roots FROM gen_root WHERE dbnum != NONE \
-             AND NOT ({settled}) \
-             GROUP BY dbnum;"
-        ))
-        .await?
-        .check()?;
     crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
-    let mut floors: BTreeMap<u32, StartupCoverageFloor> = BTreeMap::new();
-    for row in response.take::<Vec<SettledRow>>(0)? {
-        let Some(dbnum) = row.dbnum else { continue };
-        let entry = floors.entry(dbnum).or_default();
-        entry.settled_floor = row.floor;
-        entry.settled_roots = row.roots;
-    }
-    for row in response.take::<Vec<UnsettledRow>>(1)? {
-        let Some(dbnum) = row.dbnum else { continue };
-        floors.entry(dbnum).or_default().unsettled_roots = row.roots;
-    }
-    for (dbnum, entry) in &mut floors {
-        if entry.unsettled_roots == 0
-            && let Some(sesno) = library_coverage_on(db, *dbnum).await?
-        {
-            entry.settled_floor = Some(sesno);
+    let mut out: BTreeMap<u32, BTreeMap<u32, u32>> = BTreeMap::new();
+    for row in response.take::<Vec<Row>>(0)? {
+        let stamps = row.model_catalogue_sessions.unwrap_or_default();
+        if stamps.is_empty() {
+            continue;
+        }
+        let entry = out.entry(row.dbnum).or_default();
+        for stamp in stamps {
+            entry
+                .entry(stamp.dbnum)
+                .and_modify(|kept| *kept = (*kept).min(stamp.session))
+                .or_insert(stamp.session);
         }
     }
-    Ok(floors)
+    Ok(out)
 }
 
-/// 已发布的根落在哪一版目录上：`CATA dbnum → 记在案的最旧会话`。
+/// 已发布的模型落在哪一版目录上：`CATA dbnum → 记在案的最旧会话`（纯函数，输入是各库的落款）。
 ///
-/// 来源是 `gen_root.published_model_target.catalogue`——`ModelTarget` 的目录段，每个 CATA
-/// 库一条 `{dbnum, db_type, file, session, digest}`。这是**模型面自己**记下的「我是照哪一版
-/// 目录算出来的」，不经 `pe`、不经 `dbnum_watermark`（ADR-056 N7 / ADR-054）。
-///
-/// 同一个 CATA 库会被不同 DESI 库、不同时刻发布的根记成不同会话；取**最小**那个：这里问的
-/// 是「有没有根落在旧目录上」，最旧的那一版说了算。
-///
-/// 一条聚合语句问完全部根（ADR-058 D5），不是逐库点查、更不是把几万行目录段拉回来。
-pub(crate) async fn published_catalogue_sessions_on(
-    db: &Surreal<Any>,
-) -> anyhow::Result<BTreeMap<u32, u32>> {
-    #[derive(Debug, Deserialize)]
-    struct CatalogueEntry {
-        #[serde(default)]
-        dbnum: Option<u32>,
-        #[serde(default)]
-        session: Option<u32>,
-    }
-    #[derive(Debug, Deserialize)]
-    struct CatalogueRow {
-        #[serde(default)]
-        catalogue: Vec<CatalogueEntry>,
-    }
-    // `GROUP BY catalogue` 是**服务端去重**：一个库的全部根共用同一份 `ModelTarget`，
-    // 所以整库几万行在这里塌成个位数行。不要换成 `GROUP ALL` + `array::flatten`——
-    // 聚合函数是**逐行**求值之后才被 GROUP 收集的，那样拿回来的是「数组的数组」，
-    // 而且它不会报错，只会在反序列化那一步变成一句看不出所以然的类型不匹配。
-    let started = Instant::now();
-    let mut response = db
-        .query(
-            "SELECT published_model_target.catalogue AS catalogue FROM gen_root \
-             WHERE published_model_target.catalogue != NONE GROUP BY catalogue;",
-        )
-        .await?
-        .check()?;
-    crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
+/// 同一个 CATA 库会被不同 DESI 库、不同时刻的任务记成不同会话；取**最小**那个：这里问的
+/// 是「有没有库落在旧目录上」，最旧的那一版说了算。
+pub(crate) fn oldest_catalogue_sessions(
+    libraries: &BTreeMap<u32, BTreeMap<u32, u32>>,
+) -> BTreeMap<u32, u32> {
     let mut oldest: BTreeMap<u32, u32> = BTreeMap::new();
-    for row in response.take::<Vec<CatalogueRow>>(0)? {
-        for entry in row.catalogue {
-            let (Some(dbnum), Some(session)) = (entry.dbnum, entry.session) else {
-                continue;
-            };
+    for stamps in libraries.values() {
+        for (&dbnum, &session) in stamps {
             oldest
                 .entry(dbnum)
                 .and_modify(|kept| *kept = (*kept).min(session))
                 .or_insert(session);
         }
     }
-    Ok(oldest)
+    oldest
+}
+
+/// 已发布的模型落在哪一版目录上：`CATA dbnum → 记在案的最旧会话`。
+///
+/// 来源是水位行上的库级目录落款（ADR-079：随 `gen_root` 退役，逐根的 `published_model_target.catalogue`
+/// 收成每库一份）。这是**模型面自己**记下的「我是照哪一版目录算出来的」，不经 `pe`（ADR-056 N7 / ADR-054）。
+pub(crate) async fn published_catalogue_sessions_on(
+    db: &Surreal<Any>,
+) -> anyhow::Result<BTreeMap<u32, u32>> {
+    Ok(oldest_catalogue_sessions(
+        &library_catalogue_stamps_on(db).await?,
+    ))
+}
+
+/// **落款仍在旧目录上**的设计库（纯函数，ADR-079 的库级替身，原 `roots_behind_catalogue_on`）：
+/// 库级落款里记着 `cata_dbnum` 且 `session < target_sesno` 的库。没有该目录落款的库不在名单上
+/// （它的模型没照过这个目录，或从没生成过）。
+pub(crate) fn libraries_behind_catalogue(
+    libraries: &BTreeMap<u32, BTreeMap<u32, u32>>,
+    cata_dbnum: u32,
+    target_sesno: u32,
+) -> BTreeSet<u32> {
+    libraries
+        .iter()
+        .filter(|(_, stamps)| {
+            stamps
+                .get(&cata_dbnum)
+                .is_some_and(|session| *session < target_sesno)
+        })
+        .map(|(dbnum, _)| *dbnum)
+        .collect()
 }
 
 /// 记在案的目录版本与此刻文件上的一比：哪些 CATA 库已经前移了，哪些说不出来。
@@ -1170,9 +1109,9 @@ fn split_catalogue_seeds(
 /// P3 主体：过期目录库的窗口 → 反查 → 排工。返回回执；`None` = 没有过期库。
 ///
 /// 反查在阻塞任务里（纯文件 I/O：MDB 每个 CATA / DESI 库开一次、点查反向表、设计库 owner 链
-/// 上卷）。排工只对**落款仍在旧目录上**的 `gen_root` 行：重启前已按新目录重算过的根不重排
-/// （`already_current`），从未生成过的根不排（懒生成，ADR-058 D6），限定域外 / 被发布队列
-/// 阻断的库跳过。退化库（窗口级的 + 反查自己判的）的依赖根**全部**重排。
+/// 上卷）。排工只对**库级落款仍在旧目录上**的设计库（ADR-079）：落款已到新目录的库不重排
+/// （`already_current`），限定域外 / 被发布队列阻断的库跳过。退化目录库（窗口级的 + 反查自己判的）
+/// 波及的库把全部根重排；落款仍旧却没被命中的库只排一条盖落款的空任务（`stamp_only`）。
 ///
 /// 任何一步没跑成都不中止启动：回执带 `error`、一根不排，受影响的根只剩按需 `ensure` 的目录
 /// 指纹失配兜底——这与 P3 之前的行为逐位相同，只是现在会说出来。
@@ -1227,7 +1166,7 @@ async fn cascade_stale_catalogue_windows(
             report.enqueued = account.enqueued;
             report.enqueued_degraded = account.enqueued_degraded;
             report.already_current = account.already_current;
-            report.lazy_roots = account.lazy_roots;
+            report.stamp_only = account.stamp_only;
             report.skipped_out_of_scope = account.skipped_out_of_scope;
         }
         Err(error) => {
@@ -1277,16 +1216,26 @@ struct CatalogueCascadeEnqueue {
     enqueued: BTreeMap<u32, usize>,
     enqueued_degraded: BTreeMap<u32, usize>,
     already_current: usize,
-    lazy_roots: usize,
+    stamp_only: Vec<u32>,
     skipped_out_of_scope: usize,
 }
 
-/// 把反查命中的根与退化库的依赖根排成**带明确根名单的 ModelOnly 任务**（每个设计库一条）。
+/// 把反查命中的根与退化库排成**带明确根名单与库级目录落款的 ModelOnly 任务**（每个设计库一条）。
 ///
-/// 「落款仍在旧目录上」逐个过期目录库问一次 [`roots_behind_catalogue_on`]（`gen_root` 里
-/// `published_model_target.catalogue` 记着 `dbnum = X 且 session < T` 的行）：命中根只有在这份
-/// 名单里才排，退化库则整份名单都排。任务的目标会话取设计库文件最新（ADR-054：生成时点是文件最新），
-/// `model_start_sesno` 也取它——规划器于是不开窗，只有名单里的根与本就未安定的根进工作单。
+/// 「落款仍在旧目录上」是**库级**判据（ADR-079：随 `gen_root` 退役，逐根落款收成每库一份
+/// `dbnum_watermark.model_catalogue_sessions`）：逐个过期目录库 `X → T_X` 问一次
+/// [`libraries_behind_catalogue`]，落款里记着 `X` 且 `session < T_X` 的设计库才是「还落在旧目录上」。
+///
+/// - 命中根所在的库落款仍旧 → 排它（名单随任务）；库落款已到 `T` → `already_current`
+///   （重启前 / 上一次核对已按新目录重算过整库，再排是白算）；
+/// - 退化的目录库（窗口收不了 / 导入级 / 超阈 / 反查自己判的）→ 落款仍旧的库把 `DbSet@T` 上的
+///   **全部**根都排（宁多算不漏算）；
+/// - 落款仍旧、却一根都没被命中的库（反查精确、这个库没被这一窗波及）→ 排一条**只带落款**的
+///   ModelOnly：名单为空，任务什么都不用算，收尾把落款盖到 `T`——不盖的话下次核对又点名它。
+///
+/// 每条任务随身带 [`DiscoveredBatch::catalogue_stamps`]（该库要盖到的 `X → T_X`），成了才盖
+/// （`batch_worker::task_catalogue_stamps`）。任务的目标会话取设计库文件最新（ADR-054：生成时点是
+/// 文件最新），`model_start_sesno` 也取它——规划器于是不开窗，只有名单里的根与账本里还欠着的根进工作单。
 ///
 /// 2026-09-10（ADR-071 S4）之前这里写的是 `model_update_pending` 行等空闲轮 drain 领；现在名单随
 /// [`DiscoveredBatch::regen_roots`] 进队列行、随冻结进任务，任务体并进自己的工作单——目录级联与
@@ -1297,22 +1246,16 @@ async fn enqueue_catalogue_cascade(
     collected: &[StaleCatalogueWindow],
 ) -> anyhow::Result<CatalogueCascadeEnqueue> {
     let mut account = CatalogueCascadeEnqueue::default();
-    // 设计库 → 落款仍在旧目录上的根（refno 文本 → noun）；退化库那份单独留着。
-    let mut behind: BTreeMap<u32, BTreeMap<String, String>> = BTreeMap::new();
-    let mut behind_degraded: BTreeMap<u32, BTreeMap<String, String>> = BTreeMap::new();
+    let libraries = library_catalogue_stamps_on(&SUL_DB).await?;
+    // 设计库 → 它要盖到的落款 `X → T_X`（只收落款仍旧的那几个目录库）；退化目录库另记一份。
+    let mut behind: BTreeMap<u32, BTreeMap<u32, u32>> = BTreeMap::new();
+    let mut behind_degraded: BTreeSet<u32> = BTreeSet::new();
     for item in collected {
-        let rows =
-            roots_behind_catalogue_on(&SUL_DB, item.report.dbnum, item.report.target_sesno).await?;
-        for (dbnum, roots) in rows {
-            let bucket = behind.entry(dbnum).or_default();
-            for root in &roots {
-                bucket.insert(root.refno.to_pdms_str(), root.noun.clone());
-            }
-            if degraded.contains(&item.report.dbnum) {
-                let bucket = behind_degraded.entry(dbnum).or_default();
-                for root in roots {
-                    bucket.insert(root.refno.to_pdms_str(), root.noun);
-                }
+        let (cata, target) = (item.report.dbnum, item.report.target_sesno);
+        for dbnum in libraries_behind_catalogue(&libraries, cata, target) {
+            behind.entry(dbnum).or_default().insert(cata, target);
+            if degraded.contains(&cata) {
+                behind_degraded.insert(dbnum);
             }
         }
     }
@@ -1327,73 +1270,73 @@ async fn enqueue_catalogue_cascade(
     > = BTreeMap::new();
     let mut versions: BTreeMap<u32, Option<crate::data_interface::model_source::SourceVersion>> =
         BTreeMap::new();
-    // 1. 反查命中的根：落款仍旧的排；其余分「已重算过」（有 gen_root 行）与「从未生成」。
+    // 1. 反查命中的根：所在库落款仍旧的排；库落款已到 T 的算「已重算过」。
     for (dbnum, roots) in &cascade.roots {
         if !in_scope(*dbnum) {
             account.skipped_out_of_scope += roots.len();
             continue;
         }
-        let stale_roots = behind.get(dbnum);
-        let mut misses = Vec::new();
-        for root in roots {
-            if !stale_roots.is_some_and(|stale| stale.contains_key(&root.refno)) {
-                misses.push(root.refno.as_str());
-                continue;
-            }
-            let version = latest_design_version(&mut versions, *dbnum)
-                .await
-                .with_context(|| format!("dbnum {dbnum} 取不到文件最新会话，命中的根排不了"))?;
-            planned
-                .entry(*dbnum)
-                .or_insert_with(|| (version, BTreeMap::new()))
-                .1
-                .insert(root.refno.clone(), root.noun.clone());
-            *account.enqueued.entry(*dbnum).or_default() += 1;
-        }
-        if !misses.is_empty() {
-            let persisted: BTreeSet<String> =
-                crate::data_interface::window_root_plan::load_persisted_root_states(*dbnum)
-                    .await?
-                    .into_iter()
-                    .map(|state| state.root.refno.to_pdms_str())
-                    .collect();
-            for refno in misses {
-                if persisted.contains(refno) {
-                    account.already_current += 1;
-                } else {
-                    account.lazy_roots += 1;
-                }
-            }
-        }
-    }
-    // 2. 退化库的依赖根全部过期（已在 1 里排过的不重复计）。
-    for (dbnum, roots) in behind_degraded {
-        if !in_scope(dbnum) {
-            account.skipped_out_of_scope += roots.len();
+        if !behind.contains_key(dbnum) {
+            account.already_current += roots.len();
             continue;
         }
-        for (refno, noun) in roots {
-            if planned
-                .get(&dbnum)
-                .is_some_and(|(_, planned)| planned.contains_key(&refno))
+        let version = latest_design_version(&mut versions, *dbnum)
+            .await
+            .with_context(|| format!("dbnum {dbnum} 取不到文件最新会话，命中的根排不了"))?;
+        let bucket = &mut planned
+            .entry(*dbnum)
+            .or_insert_with(|| (version, BTreeMap::new()))
+            .1;
+        for root in roots {
+            if bucket
+                .insert(root.refno.clone(), root.noun.clone())
+                .is_none()
             {
-                continue;
+                *account.enqueued.entry(*dbnum).or_default() += 1;
             }
-            let version = latest_design_version(&mut versions, dbnum)
-                .await
-                .with_context(|| {
-                    format!("dbnum {dbnum} 取不到文件最新会话，退化库的依赖根排不了")
-                })?;
-            planned
-                .entry(dbnum)
-                .or_insert_with(|| (version, BTreeMap::new()))
-                .1
-                .insert(refno, noun);
-            *account.enqueued_degraded.entry(dbnum).or_default() += 1;
         }
     }
-    // 3. 每个设计库一条 ModelOnly 任务，名单随行。已有排队行就并进去（名单取并集），同库任务
-    //    在跑就接在它后面——都是 `BatchScheduler::enqueue` 的事。
+    // 2. 退化目录库：落款仍旧的库把 `DbSet@T` 上的全部根都排（已在 1 里排过的不重复计）。
+    for dbnum in behind_degraded {
+        if !in_scope(dbnum) {
+            account.skipped_out_of_scope += 1;
+            continue;
+        }
+        let version = latest_design_version(&mut versions, dbnum)
+            .await
+            .with_context(|| format!("dbnum {dbnum} 取不到文件最新会话，退化库的根排不了"))?;
+        let roots = crate::data_interface::window_root_plan::enumerate_target_roots(
+            dbnum,
+            version.sesno,
+        )
+        .await
+        .with_context(|| format!("dbnum {dbnum} 枚举不出 DbSet@{} 的生成根", version.sesno))?;
+        let bucket = &mut planned
+            .entry(dbnum)
+            .or_insert_with(|| (version, BTreeMap::new()))
+            .1;
+        for root in roots {
+            if bucket
+                .insert(root.root.to_pdms_str(), root.noun.clone())
+                .is_none()
+            {
+                *account.enqueued_degraded.entry(dbnum).or_default() += 1;
+            }
+        }
+    }
+    // 3. 落款仍旧、却一根都没排的库：只为盖落款排一条空名单任务。
+    for dbnum in behind.keys().copied() {
+        if planned.contains_key(&dbnum) || !in_scope(dbnum) {
+            continue;
+        }
+        let Ok(version) = latest_design_version(&mut versions, dbnum).await else {
+            continue;
+        };
+        planned.insert(dbnum, (version, BTreeMap::new()));
+        account.stamp_only.push(dbnum);
+    }
+    // 4. 每个设计库一条 ModelOnly 任务，名单与落款随行。已有排队行就并进去（名单取并集、落款取
+    //    较新），同库任务在跑就接在它后面——都是 `BatchScheduler::enqueue` 的事。
     let project = aios_core::get_db_option().project_name.clone();
     for (dbnum, (version, roots)) in planned {
         let latest = version.sesno as i32;
@@ -1404,7 +1347,7 @@ async fn enqueue_catalogue_cascade(
             phase: crate::data_interface::initialization_phase::DataPhase::Design,
             epoch_id: 0,
             intent: crate::data_interface::batch_queue::BatchIntent::ModelOnly,
-            // 下限 = 目标：规划器不开窗（凭证等于右端即追平），进工作单的只有名单与本就未安定的根。
+            // 下限 = 目标：规划器不开窗（模型水位等于右端即追平），进工作单的只有名单与账本里还欠着的根。
             model_start_sesno: Some(latest),
             file_name: version
                 .file
@@ -1427,6 +1370,7 @@ async fn enqueue_catalogue_cascade(
                     },
                 )
                 .collect(),
+            catalogue_stamps: behind.get(&dbnum).cloned().unwrap_or_default(),
         };
         let outcome = crate::data_interface::batch_scheduler::BatchScheduler::global().enqueue(
             crate::data_interface::task_registry::TaskRegistry::global(),
@@ -1434,15 +1378,15 @@ async fn enqueue_catalogue_cascade(
             false,
         );
         println!(
-            "目录级联已排 ModelOnly 任务 dbnum={dbnum} roots={} target={latest} outcome={:?} task={}",
+            "目录级联已排 ModelOnly 任务 dbnum={dbnum} roots={} stamps={:?} target={latest} outcome={:?} task={}",
             found.regen_roots.len(),
+            found.catalogue_stamps,
             outcome.outcome,
             outcome.info.task_id
         );
     }
     Ok(account)
 }
-
 /// 设计库文件最新会话，同一库只问一次（`latest_source_version` 自己还有按文件戳的缓存）。
 async fn latest_design_version(
     versions: &mut BTreeMap<u32, Option<crate::data_interface::model_source::SourceVersion>>,
@@ -1460,59 +1404,6 @@ async fn latest_design_version(
     versions[&dbnum]
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no readable latest session for dbnum {dbnum}"))
-}
-
-/// `gen_root` 里**落款仍在旧目录上**的根：`published_model_target.catalogue` 记着
-/// `dbnum = cata_dbnum 且 session < target_sesno` 的行，按设计库分。
-///
-/// 这是 P3 排工的过滤器：反查命中的根只有在这份名单里才需要重算——重启前已按新目录
-/// 重算过的根落款已到 `T`，再排一遍是白算；退化库则整份名单都排。一条语句扫全表
-/// （启动一次、每个过期目录库一问），不逐根点查。
-pub(crate) async fn roots_behind_catalogue_on(
-    db: &Surreal<Any>,
-    cata_dbnum: u32,
-    target_sesno: u32,
-) -> anyhow::Result<BTreeMap<u32, Vec<crate::data_interface::window_root_plan::PersistedRoot>>> {
-    #[derive(Debug, Deserialize)]
-    struct Row {
-        pe: surrealdb::sql::Thing,
-        #[serde(default)]
-        dbnum: Option<u32>,
-        #[serde(default)]
-        noun: String,
-    }
-    let started = Instant::now();
-    let mut response = db
-        .query(format!(
-            "SELECT pe ?: type::thing('pe', type::string(record::id(id))) AS pe, dbnum, \
-             noun ?: '' AS noun FROM gen_root WHERE dbnum != NONE AND \
-             array::len(published_model_target.catalogue[WHERE dbnum = {cata_dbnum} \
-             AND session < {target_sesno}] ?? []) > 0;"
-        ))
-        .await
-        .with_context(|| {
-            format!(
-                "load gen_root rows still stamped on catalogue {cata_dbnum} before {target_sesno}"
-            )
-        })?
-        .check()
-        .with_context(|| format!("gen_root catalogue stamp statement for {cata_dbnum}"))?;
-    crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
-    let rows: Vec<Row> = response
-        .take(0)
-        .with_context(|| format!("decode gen_root rows stamped on catalogue {cata_dbnum}"))?;
-    let mut out: BTreeMap<u32, Vec<crate::data_interface::window_root_plan::PersistedRoot>> =
-        BTreeMap::new();
-    for row in rows {
-        let Some(dbnum) = row.dbnum else { continue };
-        out.entry(dbnum).or_default().push(
-            crate::data_interface::window_root_plan::PersistedRoot {
-                refno: crate::data_interface::helper::pe_thing_to_refno(row.pe)?,
-                noun: row.noun,
-            },
-        );
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -1655,91 +1546,91 @@ mod tests {
         assert!(cascade_stale_catalogue_windows(&[]).await.is_none());
     }
 
-    /// 「落款仍在旧目录上」的过滤器真跑一遍：只有 `catalogue` 里记着 `dbnum = X 且 session < T`
-    /// 的根进名单，按设计库分；落款已到 T 的、记的是别的目录库的、没有目录段的都不进。
+    /// 「落款仍在旧目录上」的过滤器（ADR-079：库级）真跑一遍：水位行上 `model_catalogue_sessions`
+    /// 记着 `dbnum = X 且 session < T` 的设计库进名单；落款已到 T 的、记的是别的目录库的、没有落款的都不进。
+    /// 同一行上一个目录库只留最旧的会话；`published_catalogue_sessions_on` 再跨库取最旧。
     #[tokio::test]
-    async fn roots_behind_a_catalogue_are_those_still_stamped_before_its_target() {
+    async fn libraries_behind_a_catalogue_are_those_still_stamped_before_its_target() {
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
         db.use_ns("test")
-            .use_db("roots_behind_catalogue")
+            .use_db("libraries_behind_catalogue")
             .await
             .expect("select fixture db");
         db.query(
-            "CREATE gen_root:8000_10 SET dbnum = 8000, noun = 'BRAN', published_model_target = { \
-               catalogue: [ \
-                 { dbnum: 7000, db_type: 'CATA', file: '/cat7000', session: 184, digest: 'd1' }, \
-                 { dbnum: 7001, db_type: 'CATA', file: '/cat7001', session: 3, digest: 'd2' } \
-               ] };\
-             CREATE gen_root:8000_11 SET dbnum = 8000, noun = 'EQUI', published_model_target = { \
-               catalogue: [ \
-                 { dbnum: 7000, db_type: 'CATA', file: '/cat7000', session: 185, digest: 'd3' } \
-               ] };\
-             CREATE gen_root:8001_12 SET dbnum = 8001, noun = 'BRAN', published_model_target = { \
-               catalogue: [ \
-                 { dbnum: 7000, db_type: 'CATA', file: '/cat7000', session: 100, digest: 'd4' } \
-               ] };\
-             CREATE gen_root:8001_13 SET dbnum = 8001, noun = 'BRAN', published_model_target = { \
-               catalogue: [ \
-                 { dbnum: 7001, db_type: 'CATA', file: '/cat7001', session: 1, digest: 'd5' } \
-               ] };\
-             CREATE gen_root:8001_14 SET dbnum = 8001, status = 'Generated';",
+            "CREATE dbnum_watermark:8000 SET dbnum = 8000, model_sesno = 26, model_catalogue_sessions = [ \
+               { dbnum: 7000, session: 184 }, { dbnum: 7001, session: 3 } ];\
+             CREATE dbnum_watermark:8001 SET dbnum = 8001, model_sesno = 30, model_catalogue_sessions = [ \
+               { dbnum: 7000, session: 100 }, { dbnum: 7001, session: 1 } ];\
+             CREATE dbnum_watermark:8002 SET dbnum = 8002, model_sesno = 12, model_catalogue_sessions = [ \
+               { dbnum: 7000, session: 185 } ];\
+             CREATE dbnum_watermark:8003 SET dbnum = 8003, model_sesno = 5;\
+             CREATE dbnum_watermark:8004 SET dbnum = 8004, model_sesno = 5, model_catalogue_sessions = [];",
         )
         .await
         .expect("seed")
         .check()
         .expect("seed statements");
 
-        let behind = roots_behind_catalogue_on(&db, 7000, 185)
-            .await
-            .expect("query catalogue stamps");
-        let flat: Vec<(u32, String, String)> = behind
-            .iter()
-            .flat_map(|(dbnum, roots)| {
-                roots
-                    .iter()
-                    .map(move |root| (*dbnum, root.refno.to_pdms_str(), root.noun.clone()))
-            })
-            .collect();
+        let libraries = library_catalogue_stamps_on(&db).await.expect("read stamps");
         assert_eq!(
-            flat,
-            vec![
-                (8000, "8000/10".to_string(), "BRAN".to_string()),
-                (8001, "8001/12".to_string(), "BRAN".to_string()),
-            ],
-            "8000/11 已落在 185 上、8001/13 记的是 7001、8001/14 没有目录段——都不在名单里"
+            libraries.keys().copied().collect::<Vec<_>>(),
+            vec![8000, 8001, 8002],
+            "没有落款的库不在里面"
+        );
+        assert_eq!(libraries[&8000], BTreeMap::from([(7000, 184), (7001, 3)]));
+        assert_eq!(
+            oldest_catalogue_sessions(&libraries),
+            BTreeMap::from([(7000, 100), (7001, 1)]),
+            "跨库取最旧"
+        );
+        assert_eq!(
+            published_catalogue_sessions_on(&db).await.expect("oldest"),
+            BTreeMap::from([(7000, 100), (7001, 1)])
+        );
+        assert_eq!(
+            libraries_behind_catalogue(&libraries, 7000, 185),
+            BTreeSet::from([8000, 8001]),
+            "8002 已落在 185 上、8003 / 8004 没有落款——都不在名单里"
         );
         assert!(
-            roots_behind_catalogue_on(&db, 7000, 100)
-                .await
-                .expect("query")
-                .is_empty(),
+            libraries_behind_catalogue(&libraries, 7000, 100).is_empty(),
             "T 不高于任何落款时名单为空"
         );
-        let other = roots_behind_catalogue_on(&db, 7001, 4)
-            .await
-            .expect("query");
-        assert_eq!(other.len(), 2);
-        assert_eq!(other[&8000].len(), 1);
-        assert_eq!(other[&8001].len(), 1);
+        assert_eq!(
+            libraries_behind_catalogue(&libraries, 7001, 4),
+            BTreeSet::from([8000, 8001])
+        );
+        assert_eq!(
+            libraries_behind_catalogue(&libraries, 7002, 4),
+            BTreeSet::new(),
+            "没人照过的目录库没有落后的库"
+        );
     }
 
-    /// 模型门的 SQL 与内存判据必须是同一口径：不早于文件最新会话即覆盖，
-    /// 未认领永不覆盖，时刻不比。
+    /// 模型门与内存判据必须是同一口径：不早于文件最新会话即覆盖，未认领永不覆盖，时刻不比；
+    /// ADR-079 之后它只读水位镜像与进程内账本，一行 `gen_root` 都不问。
     #[test]
-    fn model_gate_sql_is_monotone_and_ignores_the_time_column() {
+    fn model_gate_is_monotone_reads_the_watermark_and_the_ledger_only() {
         let body = include_str!("model_coverage.rs")
             .split_once("pub async fn model_coverage_current(")
             .expect("model gate exists")
             .1
-            .split_once("#[derive(Debug, Deserialize)]")
-            .expect("model gate ends before the next row type")
+            .split_once("pub(crate) async fn library_catalogue_stamps_on(")
+            .expect("model gate ends before the stamps reader")
             .0;
-        assert!(body.contains("(source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}"));
         assert!(
             body.contains("library_coverage_on(&SUL_DB, dbnum)"),
             "库级覆盖读水位镜像，不再问收据"
+        );
+        assert!(
+            body.contains("model_root_ledger::census(dbnum).chasing"),
+            "还在赶的根从账本数（ADR-079）: {body}"
+        );
+        assert!(
+            !body.contains("gen_root") && !body.contains("SELECT"),
+            "模型门不再扫任何一张表（ADR-079）: {body}"
         );
         assert!(
             !body.contains("source_end_sesno_time"),
@@ -1757,5 +1648,21 @@ mod tests {
             !body.contains("applied_sesno"),
             "数据应用水位不代表模型生成时点（ADR-054）: {body}"
         );
+    }
+
+    /// ADR-079：凭证判据不读任何一张逐根表——本文件的生产半边没有一句 `gen_root`。
+    #[test]
+    fn the_coverage_reader_never_touches_a_per_root_table() {
+        let source = include_str!("model_coverage.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
+        for forbidden in ["FROM gen_root", "gen_root:", "type::thing('gen_root'"] {
+            assert!(
+                !production.contains(forbidden),
+                "覆盖取数不许再读逐根凭证行: {forbidden}"
+            );
+        }
     }
 }

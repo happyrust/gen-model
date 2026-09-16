@@ -3,9 +3,11 @@
 //!
 //! 输入只有两类：**文件**（e3d-io `DbSet@S` / `DbSet@T`、e3d-model `plan_update` 的
 //! [`UpdatePlan`] 与它的祖先闭包 [`AffectedClosure`]、[`enumerate_generation_roots`] 在
-//! `DbSet@T` 上枚举出的 `roots_T`）与**模型面自己的状态**（`gen_root` 行 = `roots_S`）。
+//! `DbSet@S` / `DbSet@T` 上枚举出的 `roots_S` / `roots_T`）与**进程内的生成根账本**
+//! （[`crate::data_interface::model_root_ledger`]：上一窗失败、还欠着的根）。
 //! 一行 `pe` 都不读——从未跑过数据增量、`pe` 零行的库对一个窗口也能选根（N7）。
-//! `fn::sync_gen_roots` 不在这条路上（它的 `fn::gen_root_cover` 第一句就是查 `pe`，F10）。
+//! 一行 `gen_root` 也不读（ADR-079）：`S` 是这个库的模型水位 `model_sesno`，「S 时刻每个根都
+//! 已发布」正是那枚水位承诺的东西，所以 `roots_S` 就是 `DbSet@S` 上枚举出的根集本身。
 //!
 //! 候选根 = `roots_S ∪ roots_T`；`touched` = 其中落在闭包里的那些（闭包按祖先封闭，
 //! 「根不在闭包里」＝「它子树里没有任何一件受影响的东西」）。四个去向（D9）：
@@ -14,24 +16,24 @@
 //! |---|---|---|
 //! | `regen`   | `touched ∩ roots_T`             | `RegenRoot`，eager 生成 |
 //! | `delete`  | `roots_S \ roots_T`             | `DeleteCleanup`：根已删，或还在但不再是根（改挂到别的 MDU 之下 / 类型变了）——旧根名下的几何不能留 |
-//! | `advance` | `(roots_S ∩ roots_T) \ touched` | 凭证前移到 T（P2-2 执行；不动几何、manifest、revision） |
+//! | `advance` | `(roots_S ∩ roots_T) \ touched` | 什么都不做：这份几何到 T 仍有效，由任务收尾盖到 T 的 `model_sesno` 一并承诺（ADR-079，原 P2-2 的逐根凭证前移退役） |
 //! | `lazy`    | `(roots_T \ roots_S) \ touched` | 什么都不做：从未生成过又没被波及，等按需 `ensure` |
 //!
 //! 护栏（ADR-056 实施约束 5）：闭包不完整、`plan_update` 报 `unresolved`、或候选数超过
-//! 索引键数的 [`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`] → **放弃前移**：`advance` 清空、
-//! `roots_S ∩ roots_T` 全部进 `regen`（今天「全部根过期」的行为），[`WindowRootPlan::degraded`]
+//! 索引键数的 [`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`] → **不信闭包**：`advance` 清空、
+//! `roots_S ∩ roots_T` 全部进 `regen`（「全部根过期」的行为），[`WindowRootPlan::degraded`]
 //! 记原因，回执字段 `credential_advance_degraded`。`lazy` 在退化时也不动——没生成过的根
 //! 即便波及不明也只需等按需生成，不必 eager。
 //!
-//! 执行端：`RegenRoot` / `DeleteCleanup` 照旧进 `model_update_pending`；`advance` 由本文件
-//! 的 [`advance_root_credentials_on`]（P2-2）在数据尾事务**之后**、模型 drain 之前批量前移
-//! ——`finalize_attempt` 提交完水位就调它，失败只记日志（N4：模型面不拦水位）。
+//! 执行端：`RegenRoot` / `DeleteCleanup` 随计划交回任务在内存里执行（ADR-072 D5）；`advance`
+//! 名单只进回执（`DataBatchResult.credential_advance`：这一窗省掉了多少根的重生成），库里
+//! 没有任何一行要为它改。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use aios_core::{RefnoEnum, SUL_DB};
+use aios_core::RefnoEnum;
 use anyhow::Context;
 use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
@@ -41,9 +43,7 @@ use e3d_model::increment::{
     plan_update_with,
 };
 use e3d_model::ledger::{ChangeKind, ChangeLedger, Disposition};
-use surrealdb::{Surreal, engine::any::Any};
 
-use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::generation_root::{
     GenerationRoot, enumerate_generation_roots, refno_from_e3d, refno_to_e3d,
 };
@@ -59,14 +59,26 @@ use crate::fast_model::e3d_model_service::scan_index;
 #[path = "window_root_plan_matrix_tests.rs"]
 mod recorded_matrix_tests;
 
-/// 候选数占索引键数的比例超过它就放弃凭证前移（ADR-056 实施约束 5、审核 P1-1）。
+/// 候选数占索引键数的比例超过它就不信闭包、全部持久根按过期重排（ADR-056 实施约束 5、审核 P1-1）。
 pub const CREDENTIAL_ADVANCE_CANDIDATE_RATIO: f64 = 0.30;
 
-/// 一条已持久化的 `gen_root` 行（模型面自己的状态）：`roots_S` 的元素。
+/// `roots_S` 的元素：窗口左端 `S`（= 这个库的模型水位）上的一个生成根，由 `DbSet@S` 枚举。
+///
+/// 名字里的「已持久化」说的是模型面的承诺：`model_sesno = S` 意味着 S 时刻的每个根都已生成
+/// 并落库（ADR-060 D4 / ADR-079）。库里不再有逐根的行可读（`gen_root` 退役）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedRoot {
     pub refno: RefnoEnum,
     pub noun: String,
+}
+
+impl From<&GenerationRoot> for PersistedRoot {
+    fn from(root: &GenerationRoot) -> Self {
+        Self {
+            refno: root.root,
+            noun: root.noun.clone(),
+        }
+    }
 }
 
 /// 一窗差分对候选根的波及情况——纯数据，由 [`WindowRootSources::impact`] 从 e3d-model
@@ -156,12 +168,14 @@ impl WindowRootPlan {
         items
     }
 
-    /// 折成数据尾事务要持久化的 [`ModelUpdatePlan`]：工作项 + 前移名单 + 退化告警。
+    /// 折成数据尾事务要持久化的 [`ModelUpdatePlan`]：工作项 + 免重生成名单 + 退化告警。
+    /// `base_roots` = `roots_S` 的根数（观测用）。
     pub fn into_model_update_plan(
         self,
         dbnum: u32,
         db_type: &str,
         end_sesno: i32,
+        base_roots: usize,
         mut warnings: Vec<String>,
     ) -> ModelUpdatePlan {
         let lazy_roots = Some(self.lazy.len() as u32);
@@ -176,6 +190,7 @@ impl WindowRootPlan {
             work_items,
             warnings,
             lazy_roots,
+            base_roots: Some(base_roots as u32),
             credential_advance: self
                 .advance
                 .iter()
@@ -267,6 +282,9 @@ pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
 pub struct WindowRootSources {
     pub base_sesno: u32,
     pub target_sesno: u32,
+    /// `DbSet@S` 上按同一口径枚举出的全部生成根 = `roots_S`（ADR-079：左端是模型水位，
+    /// 「S 时刻每个根都已发布」就是那枚水位的承诺，不再从库里读逐根的行）。
+    pub roots_s: Vec<PersistedRoot>,
     /// `DbSet@T` 上按 MDU / significant 口径枚举出的全部生成根。
     pub roots_t: Vec<GenerationRoot>,
     pub plan: UpdatePlan,
@@ -795,6 +813,20 @@ impl WindowRootSources {
         };
         let (xgeometry_observed, xgeometry_unreadable) =
             observe_xgeometry_candidates(&plan, base, target);
+        // `roots_S`：左端文件上的根集（ADR-079）。左端是模型水位，它承诺 S 时刻的每个根都已发布，
+        // 于是「S 端有哪些根」直接问 `DbSet@S`，与 T 端同一段枚举、同一套 MDU / significant 口径。
+        let base_index = scan_index(file, Some(base_sesno))
+            .with_context(|| format!("scan index of {} at {base_sesno}", file.display()))?;
+        let roots_s = enumerate_generation_roots(base, &base_index.roots, unit_types)
+            .with_context(|| {
+                format!(
+                    "enumerate generation roots of {} at {base_sesno}",
+                    file.display()
+                )
+            })?
+            .iter()
+            .map(PersistedRoot::from)
+            .collect::<Vec<_>>();
         let index = scan_index(file, Some(target_sesno))
             .with_context(|| format!("scan index of {} at {target_sesno}", file.display()))?;
         let roots_t =
@@ -855,6 +887,7 @@ impl WindowRootSources {
         Ok(Self {
             base_sesno,
             target_sesno,
+            roots_s,
             roots_t,
             plan,
             closure,
@@ -882,7 +915,7 @@ impl WindowRootSources {
 
     /// 刚体前移（ADR-066）的分桶，在 [`Self::impact`] 之后调。`expanded` = `impact.touched` 里不是
     /// 闭包直接命中的根（C2 / C8 / P4 加进来的）——它们一律不走便宜路（D1 规则 5）。
-    /// `settled` = `roots_S` 里已发布且安定的根（[`load_persisted_roots_with_settlement`]）。
+    /// `settled` = `roots_S` 里已发布且安定的根（[`settled_base_roots`]：S 端根集减去账本里还欠着的）。
     /// 开关关着时 `self.rigid.enabled == false`，返回默认值。
     pub(crate) fn rigid_motion(
         &self,
@@ -926,118 +959,20 @@ impl WindowRootSources {
     }
 }
 
-/// `roots_S`：这个库已持久化的 `gen_root` 行（凭证 / CAS 状态表）。
-pub async fn load_persisted_roots(dbnum: u32) -> anyhow::Result<Vec<PersistedRoot>> {
-    load_persisted_roots_on(&SUL_DB, dbnum).await
-}
-
-async fn load_persisted_roots_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-) -> anyhow::Result<Vec<PersistedRoot>> {
-    #[derive(serde::Deserialize)]
-    struct Row {
-        pe: surrealdb::sql::Thing,
-        noun: String,
-    }
-    let mut response = db
-        .query(format!(
-            "SELECT pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
-             noun ?: '' AS noun FROM gen_root WHERE dbnum = {dbnum} ORDER BY pe;"
-        ))
-        .await
-        .with_context(|| format!("load gen_root rows of dbnum {dbnum}"))?
-        .check()
-        .with_context(|| format!("gen_root statement for dbnum {dbnum}"))?;
-    let rows: Vec<Row> = response
-        .take(0)
-        .with_context(|| format!("decode gen_root rows of dbnum {dbnum}"))?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(PersistedRoot {
-                refno: crate::data_interface::helper::pe_thing_to_refno(row.pe)?,
-                noun: row.noun,
-            })
-        })
+/// `roots_S` 里「已发布且安定」的根（ADR-079）：S 端根集减去进程内账本里**还欠着**的根
+/// （上一窗失败、尚未重生成成功的，`model_root_ledger::chasing_roots`）。
+///
+/// 左端 S 是模型水位，它已经承诺 S 时刻的每个根都落库了；账本记的是这枚水位盖上之后、
+/// 本进程里又失败过的根——它们的几何不可信，刚体前移（ADR-066 D1 规则 1）与「未触即安定」
+/// 都不对它们开放。重启后账本是空的：那时 `model_sesno` 若没盖到 T，启动核对整窗重排，
+/// 不需要知道上一进程里哪一根曾经失败。
+pub fn settled_base_roots(dbnum: u32, roots_s: &[PersistedRoot]) -> BTreeSet<RefnoEnum> {
+    let chasing = crate::data_interface::model_root_ledger::chasing_roots(dbnum);
+    roots_s
+        .iter()
+        .map(|root| root.refno)
+        .filter(|refno| !chasing.contains(refno))
         .collect()
-}
-
-/// 「已发布且安定」——与 [`render_credential_advance`] 的 SQL 守卫**同一口径**的纯函数版：状态在
-/// [`SETTLED_ROOT_STATUSES`]、凭证 `> 0`、`publication_status` 是 `ready`（旧式行没有这一列，视同
-/// `ready`）、`desired_revision == published_revision`（同上）。刚体前移只对这样的根开放（ADR-066 D1
-/// 规则 1）：在飞 / 失败 / 从没生成过的根没有可前移的记录。
-pub fn root_is_settled(
-    status: Option<&str>,
-    source_end_sesno: Option<i32>,
-    publication_status: Option<&str>,
-    desired_revision: Option<u64>,
-    published_revision: Option<u64>,
-) -> bool {
-    status.is_some_and(|status| SETTLED_ROOT_STATUSES.contains(&status))
-        && source_end_sesno.is_some_and(|sesno| sesno > 0)
-        && publication_status.unwrap_or("ready") == "ready"
-        && desired_revision.unwrap_or(0) == published_revision.unwrap_or(0)
-}
-
-/// [`load_persisted_roots`] 外加「哪些根安定」（[`root_is_settled`]）。刚体前移开着时
-/// [`build_model_update_plan_from_window`] 用它替代前者——同一条 SELECT 多取四列，行数 = 根数。
-pub async fn load_persisted_roots_with_settlement(
-    dbnum: u32,
-) -> anyhow::Result<(Vec<PersistedRoot>, BTreeSet<RefnoEnum>)> {
-    load_persisted_roots_with_settlement_on(&SUL_DB, dbnum).await
-}
-
-async fn load_persisted_roots_with_settlement_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-) -> anyhow::Result<(Vec<PersistedRoot>, BTreeSet<RefnoEnum>)> {
-    #[derive(serde::Deserialize)]
-    struct Row {
-        pe: surrealdb::sql::Thing,
-        noun: String,
-        #[serde(default)]
-        status: Option<String>,
-        #[serde(default)]
-        source_end_sesno: Option<i32>,
-        #[serde(default)]
-        publication_status: Option<String>,
-        #[serde(default)]
-        desired_revision: Option<u64>,
-        #[serde(default)]
-        published_revision: Option<u64>,
-    }
-    let mut response = db
-        .query(format!(
-            "SELECT pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
-             noun ?: '' AS noun, status, source_end_sesno, publication_status, \
-             desired_revision, published_revision FROM gen_root WHERE dbnum = {dbnum} ORDER BY pe;"
-        ))
-        .await
-        .with_context(|| format!("load gen_root rows with settlement of dbnum {dbnum}"))?
-        .check()
-        .with_context(|| format!("gen_root settlement statement for dbnum {dbnum}"))?;
-    let rows: Vec<Row> = response
-        .take(0)
-        .with_context(|| format!("decode gen_root settlement rows of dbnum {dbnum}"))?;
-    let mut roots = Vec::with_capacity(rows.len());
-    let mut settled = BTreeSet::new();
-    for row in rows {
-        let refno = crate::data_interface::helper::pe_thing_to_refno(row.pe)?;
-        if root_is_settled(
-            row.status.as_deref(),
-            row.source_end_sesno,
-            row.publication_status.as_deref(),
-            row.desired_revision,
-            row.published_revision,
-        ) {
-            settled.insert(refno);
-        }
-        roots.push(PersistedRoot {
-            refno,
-            noun: row.noun,
-        });
-    }
-    Ok((roots, settled))
 }
 
 /// 纯函数：把刚体前移的分桶折成计划上的提示——`plan.regen` 里、且过了判据的根，各带锚点。
@@ -1107,7 +1042,7 @@ fn rigid_motion_summary_line(
     )
 }
 
-/// DESI 窗口 S→T 的模型计划，输入全部来自文件与 `gen_root`（P2-1）。
+/// DESI 窗口 S→T 的模型计划，输入全部来自文件与进程内账本（P2-1 / ADR-079）。
 ///
 /// 非 DESI 库返回空计划：CATA 窗口仍走 `build_cata_cascade_plan`（`ref_rev` 反查，P2-3），
 /// SYST / 其它库没有模型面。两端 `DbSet` 由 `E3dModelService::build_set` 给出，其它库钉
@@ -1159,12 +1094,17 @@ pub(crate) async fn build_model_update_plan_from_window(
     })
     .await
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
-    // `roots_S` 连凭证状态一起取（一次 `gen_root` 读，规划输入）：未安定的根要随本窗重排，
-    // 刚体前移那一臂另要「安定」集合。
-    let (roots_s, settled) = load_persisted_roots_with_settlement(dbnum).await?;
+    // `roots_S` 来自 `DbSet@S`（ADR-079）；「哪些根安定」= S 端根集减去账本里还欠着的根。
+    // 欠着的根要随本窗重排，刚体前移那一臂另要「安定」集合。
+    let roots_s = sources.roots_s.clone();
+    let settled = settled_base_roots(dbnum, &roots_s);
     let impact = sources.impact(&roots_s);
     let mut plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
-    carry_unsettled_generation(&roots_s, &settled, &sources.roots_t, &mut plan);
+    carry_unsettled_generation(
+        &crate::data_interface::model_root_ledger::chasing_roots(dbnum),
+        &sources.roots_t,
+        &mut plan,
+    );
     // 分桶在 `carry_unsettled_generation` 之后：带着未完成生成的根不在 `settled` 里，判据本身
     // 就不会把它判成 transform；这里的顺序只是让「提示 ⊆ 最终 regen」一目了然。
     let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
@@ -1189,6 +1129,15 @@ pub(crate) async fn build_model_update_plan_from_window(
              S6 tier); ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
             sources.plan.report.metadata_only + sources.plan.report.unread_attribute,
             sources.plan.report.metadata_only,
+            sources.plan.report.unread_attribute
+        ));
+    }
+    if sources.plan.report.unread_attribute > 0 {
+        warnings.push(format!(
+            "dbnum={dbnum}: unread-attribute gate — {} modified candidate(s) touched at least one \
+             attribute outside the old list that the dictionary rates DCHC=0 and no generator \
+             reads by name, and were not rolled up; ledger and closure seeds unchanged \
+             (model_skip_metadata_only_changes)",
             sources.plan.report.unread_attribute
         ));
     }
@@ -1227,9 +1176,11 @@ pub(crate) async fn build_model_update_plan_from_window(
     // 单元级发布（ADR-078 D9）的窗口基线只在开关开着、且本窗的根规划没退化时带上：退化窗把每个
     // 持久根都判成 regen，那不是「这几件变了」，局部清单没有对应的口径；开关关着时这一格是 `None`，
     // 执行体一次都不被叫到，计划与今天逐位相同（实施约束 9）。选根一个字不改（实施约束 6）。
-    let unit_publish_base_sesno =
-        (crate::options::model_unit_level_publish() && plan.degraded.is_none()).then_some(base_sesno);
-    let mut out = plan.into_model_update_plan(dbnum, db_type, target_sesno as i32, warnings);
+    let unit_publish_base_sesno = (crate::options::model_unit_level_publish()
+        && plan.degraded.is_none())
+    .then_some(base_sesno);
+    let mut out =
+        plan.into_model_update_plan(dbnum, db_type, target_sesno as i32, roots_s.len(), warnings);
     // The queue consumer still speaks in delivery-unit summaries.  The window
     // planner already has the authoritative root list, so carry a minimal
     // summary for each eager root instead of re-running the legacy PE planner.
@@ -1239,6 +1190,24 @@ pub(crate) async fn build_model_update_plan_from_window(
     // `transform_units` 为空，计划与今天逐位相同。
     out.transform_units = transform_units;
     out.unit_publish_base_sesno = unit_publish_base_sesno;
+    // 面板自身的变化（d-819 / ADR-073 D13）：本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL /
+    // CFLOOR）→ 给本库排一条 `RoomOnly`——任务在本批根刷盘之后用现有几何重算本库全部根的两张
+    // 房间边。逐根路径只算「本根在哪些面板里」，面板那一侧变了、它名下别的根点不着，这是那个盲区
+    // 的填法；不解析账本 `detail` 散文，只按 noun 判。
+    if let Some(reason) =
+        crate::data_interface::room_recompute::room_definition_change(sources.plan.ledger.entries())
+    {
+        out.warnings.push(format!(
+            "dbnum={dbnum}: room definition changed — {reason}; a RoomOnly recompute of every \
+             root's room edges runs in this task after the roots are durable (d-819)"
+        ));
+        out.work_items
+            .push(crate::data_interface::room_recompute::room_only_work_item(
+                dbnum,
+                db_type,
+                target_sesno as i32,
+            ));
+    }
     Ok(out)
 }
 
@@ -1247,19 +1216,14 @@ pub(crate) async fn build_model_update_plan_from_window(
 /// update this intent: a root that failed (or was left half-published) in an
 /// earlier window has no valid credential to advance, and nothing else revisits it.
 ///
-/// 「未完成」的判据就是凭证本身（`root_is_settled`），不再是 pending 表里的一行（ADR-072 D5）：
-/// `roots_S` 里在 T 端仍存在、却没有安定凭证的根，并进本窗的 regen，从前移与懒生成名单里摘掉。
-fn carry_unsettled_generation(
-    roots_s: &[PersistedRoot],
-    settled: &BTreeSet<RefnoEnum>,
+/// 「未完成」的判据是进程内账本（`model_root_ledger::chasing_roots`），不再是 pending 表里的一行
+/// （ADR-072 D5）、也不再是库里的凭证行（ADR-079）：账本里还欠着、且在 T 端仍是根的那些，
+/// 并进本窗的 regen，从前移与懒生成名单里摘掉。T 端已不是根的欠账随 `delete` 去向清掉。
+pub(crate) fn carry_unsettled_generation(
+    unsettled: &BTreeSet<RefnoEnum>,
     roots_t: &[GenerationRoot],
     plan: &mut WindowRootPlan,
 ) {
-    let unsettled: BTreeSet<RefnoEnum> = roots_s
-        .iter()
-        .map(|root| root.refno)
-        .filter(|refno| !settled.contains(refno))
-        .collect();
     if unsettled.is_empty() {
         return;
     }
@@ -1303,302 +1267,68 @@ pub(crate) async fn build_effective_model_update_plan(
     }
 }
 
-// ---- P2-2 凭证前移 ----
-
-/// 凭证可以前移的完成态——与 `generation_root_cache_current` 认「已生成」的那一组同一份。
-pub const SETTLED_ROOT_STATUSES: [&str; 3] =
-    ["Generated", "AlreadyAvailable", "NoRenderableGeometry"];
-
-/// 一条前移语句最多点名多少个根（与本仓其它按键批量语句同一块大小）。
-const CREDENTIAL_ADVANCE_CHUNK: usize = 500;
-
-/// 一次凭证前移的账。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CredentialAdvanceOutcome {
-    /// 计划名单上的根数。
-    pub requested: usize,
-    /// 真正改了行的根数。差额是没落到「已发布且安定」态、凭证已不早于 T、或行不存在的
-    /// 根——它们照旧按 ADR-054 的单调判据过期，等按需 `ensure`。
-    pub advanced: usize,
-}
+// ---- 未触根的「前移」：只剩回执（ADR-079）----
 
 /// 回执上「凭证前移」那一格（`DataBatchResult.credential_advance`，plant-ui 计划 G3 / M3b）。
 ///
-/// 三种形状，界面各画一行：
-/// - 名单非空、前移跑过：`requested` / `advanced` 照 [`CredentialAdvanceOutcome`]，`degraded` 空；
-/// - 规划器按护栏放弃前移：`requested = advanced = 0`，`degraded` 是原因——全部持久根按过期处理；
-/// - 老规划器 / CATA / SYST 窗口：**没有这一格**（[`Self::from_window`] 给 `None`，JSON 里整格
+/// 逐根凭证行随 `gen_root` 退役（ADR-079），「未触根到 T 仍有效」由任务收尾盖到 T 的
+/// `model_sesno` 承诺，库里没有任何一行要为它改；这一格于是只剩**账**：这一窗有多少根
+/// 免了重生成。字段名与形状不动——跨仓契约。三种形状，界面各画一行：
+/// - 名单非空：`requested = advanced = |advance|`，`degraded` 空；
+/// - 规划器按护栏不信闭包：`requested = advanced = 0`，`degraded` 是原因——全部持久根按过期重排；
+/// - 老规划器 / CATA / SYST 窗口：**没有这一格**（[`Self::from_plan`] 给 `None`，JSON 里整格
 ///   不出现，客户端 `serde(default)` 收成「服务端没说」而不是「前移了 0 根」）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialAdvanceReceipt {
     /// 计划名单上的根数。
     pub requested: usize,
-    /// 真正改了行的根数。
+    /// 由水位承诺到 T 的根数（= `requested`）。
     pub advanced: usize,
-    /// 放弃前移的原因（`credential_advance_degraded`）；正常前移时不出现。
+    /// 不信闭包的原因（`credential_advance_degraded`）；正常时不出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
 }
 
 impl CredentialAdvanceReceipt {
-    /// 由尾事务的前移账（名单为空时 `None`）与计划上的退化原因折出回执；两者都没有 → `None`。
-    pub fn from_window(
-        outcome: Option<CredentialAdvanceOutcome>,
-        plan: &ModelUpdatePlan,
-    ) -> Option<Self> {
-        match (outcome, &plan.credential_advance_degraded) {
-            (Some(outcome), degraded) => Some(Self {
-                requested: outcome.requested,
-                advanced: outcome.advanced,
+    /// 由计划上的前移名单与退化原因折出回执；两者都没有 → `None`。
+    pub fn from_plan(plan: &ModelUpdatePlan) -> Option<Self> {
+        match (
+            plan.credential_advance.len(),
+            &plan.credential_advance_degraded,
+        ) {
+            (0, None) => None,
+            (advanced, degraded) => Some(Self {
+                requested: advanced,
+                advanced,
                 degraded: degraded.clone(),
             }),
-            (None, Some(reason)) => Some(Self {
-                requested: 0,
-                advanced: 0,
-                degraded: Some(reason.clone()),
-            }),
-            (None, None) => None,
         }
     }
-}
-
-/// 渲染凭证前移语句（每 [`CREDENTIAL_ADVANCE_CHUNK`] 个根一条）。
-///
-/// 只放过**已发布且安定**的行：完成态（[`SETTLED_ROOT_STATUSES`]）、`publication_status`
-/// 是 `ready`（旧式行没有这一列，视同 `ready`）、`desired_revision == published_revision`
-/// （同上）。任何一条不满足都说明这个根还有没落地的工作或上次没成——它的凭证不是
-/// 「S 时刻几何有效」的证明，前移它就是给陈旧几何盖新章：`generation_root_cache_current`
-/// 会判它「当前」，而队里那条旧窗口的 regen 收口时又把凭证写回旧值。
-///
-/// 单调：`0 < source_end_sesno < T` 才动。`0` 是人工强制重试的「未认领」凭证
-/// （`ensure_regen_pending`），永不算覆盖、也永不前移。`source_end_sesno_time` 跟着序号写，
-/// 没有会话时刻就不写那一列（plant-ui ADR-0019：不许拿挂钟顶替）。旧凭证记进
-/// `credential_advanced_from`，让「这个凭证是前移来的还是生成来的」在行上看得出来（D2）。
-///
-/// 不碰几何、manifest、`published_*`、`desired_*`、`status`——前移改的只是「这份几何到
-/// 哪个会话为止仍然有效」这一个事实。
-///
-/// 名单**点在 `UPDATE` 的目标位上**，不是写成 `UPDATE gen_root ... WHERE id IN [...]`。
-/// 后者会让规划器看见 `dbnum` + `status` 就挑 `gen_root_dbnum_status`，把每一批都变成
-/// 一次该库全部安定根的索引段扫描再逐行判名单——名单按 [`CREDENTIAL_ADVANCE_CHUNK`]
-/// 切块之后，同一段索引被重走 `名单/500` 遍，总代价是根数的**平方**。7997 实测
-/// （6767 根 / 14 批）：同谓词同名单的只读对照，段扫描写法库内 2.97 s、点名记录 0.13 s。
-/// `dbnum` 与状态谓词照旧留在 `WHERE` 里当守卫——记录已经取到手，判一下不要钱。
-pub fn render_credential_advance(
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    roots: &[String],
-) -> anyhow::Result<Vec<String>> {
-    use std::str::FromStr;
-
-    let mut ids = Vec::with_capacity(roots.len());
-    for root in roots {
-        let refno = aios_core::RefU64::from_str(root).map_err(|error| {
-            anyhow::anyhow!("credential advance root `{root}` is not an a/b refno: {error}")
-        })?;
-        let root_id = RefnoEnum::from(refno).to_pdms_str().replace('/', "_");
-        ids.push(format!("type::thing('gen_root', '{root_id}')"));
-    }
-    let statuses = SETTLED_ROOT_STATUSES
-        .iter()
-        .map(|status| format!("'{status}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let time_clause = end_sesno_time
-        .map(|time| format!(", source_end_sesno_time = '{}'", escape_surql_str(time)))
-        .unwrap_or_default();
-    Ok(ids
-        .chunks(CREDENTIAL_ADVANCE_CHUNK)
-        .map(|chunk| {
-            format!(
-                "UPDATE {} SET credential_advanced_from = source_end_sesno, \
-                 source_end_sesno = {end_sesno}{time_clause}, \
-                 credential_advanced_at = time::now(), updated_at = time::now() \
-                 WHERE dbnum = {dbnum} \
-                 AND status IN [{statuses}] \
-                 AND (publication_status ?: 'ready') = 'ready' \
-                 AND (desired_revision ?: 0) = (published_revision ?: 0) \
-                 AND (source_end_sesno ?: 0) > 0 AND (source_end_sesno ?: 0) < {end_sesno} \
-                 RETURN id;",
-                chunk.join(", ")
-            )
-        })
-        .collect())
-}
-
-/// 在 `db` 上把名单里安定且落后的根凭证前移到 `end_sesno`（P2-2）。
-///
-/// 调用点在数据尾事务之后：水位已经落了，这里成败都拦不了它；返回的账给日志与
-/// `credential_advance_degraded` 之外的那半观测——「这一窗省掉了多少根的重生成」。
-pub(crate) async fn advance_root_credentials_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    roots: &[String],
-) -> anyhow::Result<CredentialAdvanceOutcome> {
-    #[derive(serde::Deserialize)]
-    struct Advanced {
-        #[allow(dead_code)]
-        id: surrealdb::sql::Thing,
-    }
-    let mut outcome = CredentialAdvanceOutcome {
-        requested: roots.len(),
-        advanced: 0,
-    };
-    for statement in render_credential_advance(dbnum, end_sesno, end_sesno_time, roots)? {
-        let mut response = db
-            .query(statement)
-            .await
-            .with_context(|| {
-                format!("advance gen_root credentials of dbnum {dbnum} to {end_sesno}")
-            })?
-            .check()
-            .with_context(|| format!("credential advance statement of dbnum {dbnum}"))?;
-        let rows: Vec<Advanced> = response
-            .take(0)
-            .with_context(|| format!("decode advanced gen_root ids of dbnum {dbnum}"))?;
-        outcome.advanced += rows.len();
-    }
-    Ok(outcome)
-}
-
-/// 生产入口：在 `SUL_DB` 上前移。
-pub async fn advance_root_credentials(
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    roots: &[String],
-) -> anyhow::Result<CredentialAdvanceOutcome> {
-    advance_root_credentials_on(&SUL_DB, dbnum, end_sesno, end_sesno_time, roots).await
 }
 
 // ---- 启动退化窗口（ADR-058 D4）----
 
-/// 一条 `gen_root` 行连同它的凭证与发布状态。
-///
-/// 稳态窗口只要 `roots_S` 的身份（[`PersistedRoot`]）就够——左端是提交前的水位，与行上的凭证无关。
-/// 启动没有那个水位可用：左端要从行上的凭证里取，而**未安定的行没有可用的凭证**（失败态，或
-/// `source_end_sesno = 0` 的人工强制重试行）。它们既不能当左端，也必须无条件重排——上一进程的
-/// 积压刚被 `clear_stale_at_process_start` 清掉（ADR-050），不排就再没人替它们排。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PersistedRootState {
-    pub root: PersistedRoot,
-    pub status: Option<String>,
-    pub source_end_sesno: Option<i32>,
-    pub publication_status: Option<String>,
-    pub desired_revision: Option<u64>,
-    pub published_revision: Option<u64>,
-}
-
-impl PersistedRootState {
-    /// 已发布且凭证有效。与 [`SETTLED_ROOT_STATUSES`] 和 [`render_credential_advance`] 的 SQL
-    /// 守卫同一口径：只有这样的行的凭证才有资格当窗口左端，也才会被前移。
-    pub fn is_settled(&self) -> bool {
-        root_is_settled(
-            self.status.as_deref(),
-            self.source_end_sesno,
-            self.publication_status.as_deref(),
-            self.desired_revision,
-            self.published_revision,
-        )
-    }
-}
-
-/// `roots_S` 带凭证与状态。字段与 `model_update_pending` 的覆盖查询同一组，少了排序列。
-pub async fn load_persisted_root_states(dbnum: u32) -> anyhow::Result<Vec<PersistedRootState>> {
-    load_persisted_root_states_on(&SUL_DB, dbnum).await
-}
-
-async fn load_persisted_root_states_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-) -> anyhow::Result<Vec<PersistedRootState>> {
-    #[derive(serde::Deserialize)]
-    struct Row {
-        id: surrealdb::sql::Thing,
-        pe: surrealdb::sql::Thing,
-        noun: String,
-        #[serde(default)]
-        status: Option<String>,
-        #[serde(default)]
-        source_end_sesno: Option<i32>,
-        #[serde(default)]
-        publication_status: Option<String>,
-        #[serde(default)]
-        desired_revision: Option<u64>,
-        #[serde(default)]
-        published_revision: Option<u64>,
-    }
-    let started = std::time::Instant::now();
-    let mut rows: Vec<Row> = Vec::new();
-    let mut after = String::new();
-    let mut pages = 0;
-    loop {
-        let mut response = db
-            .query(format!(
-                "SELECT id, pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
-             noun ?: '' AS noun, status, source_end_sesno, publication_status, \
-             desired_revision, published_revision FROM gen_root \
-             WHERE dbnum = {dbnum}{after} ORDER BY id LIMIT 500;"
-            ))
-            .await
-            .with_context(|| format!("load root states dbnum={dbnum} page={pages}"))?
-            .check()?;
-        let page: Vec<Row> = response.take(0)?;
-        pages += 1;
-        let last = page.len() < 500;
-        if let Some(row) = page.last() {
-            after = format!(" AND id > {}", row.id);
-        }
-        rows.extend(page);
-        if last {
-            break;
-        }
-    }
-    // Retain the caller's complete set and original PE ordering; only the
-    // server-side result and sorting collector are bounded by page size.
-    rows.sort_by(|a, b| a.pe.cmp(&b.pe));
-    println!(
-        "[model-query] at={} query=root_states dbnum={dbnum} pages={pages} rows={} elapsed_ms={}",
-        chrono::Utc::now().to_rfc3339(),
-        rows.len(),
-        started.elapsed().as_millis()
-    );
-    rows.into_iter()
-        .map(|row| {
-            Ok(PersistedRootState {
-                root: PersistedRoot {
-                    refno: crate::data_interface::helper::pe_thing_to_refno(row.pe)?,
-                    noun: row.noun,
-                },
-                status: row.status,
-                source_end_sesno: row.source_end_sesno,
-                publication_status: row.publication_status,
-                desired_revision: row.desired_revision,
-                published_revision: row.published_revision,
-            })
-        })
-        .collect()
-}
+/// 启动 / ModelOnly 那条路上不再有逐根凭证可读（ADR-079）：左端是这个库的模型水位
+/// `model_sesno`，「还欠着的根」是进程内账本里失败过的那些（`model_root_ledger::chasing_entries`）。
+/// 重启后账本为空——那时若 `model_sesno` 没盖到 T，窗口 `model_sesno → T` 本身就把上一进程
+/// 没做完的根全部重排（它们都在那一窗的差分里），不需要任何一行留痕。
 
 /// 一次启动退化窗口的账。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartupWindowReport {
     pub dbnum: u32,
-    /// 实际开窗的左端；`None` = 没开窗（没有安定凭证，或凭证已不早于右端）。
+    /// 实际开窗的左端；`None` = 没开窗（模型水位为 0：整库重排；或已不早于右端：只重排欠账）。
     pub base_sesno: Option<u32>,
     pub target_sesno: u32,
-    /// `gen_root` 行数。
+    /// `roots_S` 的根数（`DbSet@S` 枚举；没开窗时为 0）。
     pub roots_s: usize,
-    /// 其中未安定、被无条件重排的行数。
+    /// 账本里还欠着、被无条件重排的根数。
     pub unsettled: usize,
     /// 交回任务的工作项数（`work_items.len()`）。
     pub enqueued: usize,
-    /// 真正被前移的凭证数。
+    /// 由水位承诺到 T、免了重生成的根数（计划的 `advance` 名单，扣掉被强排的）。
     pub advanced: usize,
-    /// 放弃前移 / 开窗失败的原因。
+    /// 不信闭包 / 开窗失败的原因。
     pub degraded: Option<String>,
     /// 这一窗要做的工作项，**直接交给调用方的任务执行**（ADR-072 D5：计划在内存，不再写
     /// `model_update_pending` 行再由任务领回来）。`RegenRoot` 是要重生成的根，其余是就地
@@ -1611,13 +1341,6 @@ pub struct StartupWindowReport {
 pub(crate) fn root_joins_regen_batch(attempts: u32, target_refno: &str) -> bool {
     use std::str::FromStr;
     attempts == 0 && aios_core::RefU64::from_str(target_refno).is_ok()
-}
-
-fn startup_unsettled_action(_root: &PersistedRoot) -> ModelWorkAction {
-    // An unsettled row is generation intent, even when its optional noun was not
-    // persisted yet. Source existence and type belong to the pinned e3d-model
-    // view; an empty projection field must never be interpreted as deletion.
-    ModelWorkAction::RegenRoot
 }
 
 pub(crate) async fn enumerate_target_roots(
@@ -1636,63 +1359,63 @@ pub(crate) async fn enumerate_target_roots(
     .map_err(|error| anyhow::anyhow!("target root enumeration task failed: {error}"))?
 }
 
-/// 启动时对一个库做一次退化窗口：`S` = 该库安定凭证的下限、`T` = 文件最新（ADR-058 D4）。
+/// 纯函数：一窗左端怎么取（ADR-079）。`model_sesno` 是这个库模型面唯一的持久事实：
+/// `0` = 从没追平过 → 不开窗，`DbSet@T` 全部根重排；`>= T` = 已追平 → 不开窗，只重排账本里欠着的；
+/// 其余 → 开 `model_sesno → T` 的窗。
+pub(crate) fn startup_window_base(model_sesno: Option<i32>, target_sesno: u32) -> Option<u32> {
+    model_sesno
+        .filter(|floor| *floor > 0 && (*floor as u32) < target_sesno)
+        .map(|floor| floor as u32)
+}
+
+/// 启动 / ModelOnly 对一个库做一次退化窗口：`S` = 该库的模型水位、`T` = 文件最新（ADR-058 D4 / ADR-079）。
 ///
 /// 选根、分桶、护栏**全部**来自稳态那条路（[`build_model_update_plan_from_window`]）——
 /// 启动没有自己的选根判据（ADR-058 S1），这里只负责三件启动特有的事：
 ///
-/// 1. 左端从凭证取，而不是从 `applied_sesno` 取（ADR-054：生成时点是文件最新，水位只管数据）；
-/// 2. 未安定的行无条件重排（上一进程的积压刚被清掉，ADR-050）；
-/// 3. 结果自己落库（稳态那条由数据尾事务带走，启动没有尾事务）。
+/// 1. 左端从模型水位取，而不是从 `applied_sesno` 取（ADR-054：生成时点是文件最新，水位只管数据）；
+/// 2. 账本里还欠着的根无条件重排（本进程里失败过、还没成的）；
+/// 3. 模型水位为 0 的库（从没追平过、或被清零）整库重排——`DbSet@T` 上枚举出的每一个根。
 ///
-/// 左端取的是**下限**，所以凭证高于下限的根会被一个比它需要的更宽的窗口评判、保守地判成被触到。
-/// 这是有意的：宁可多生成，不可漏。真正失控的那一档由 [`WindowImpact::degraded_reason`] 的比例
-/// 护栏接住。
+/// 重启后账本是空的，第 2 条自然为空；上一进程没做完的根都落在 `model_sesno → T` 这一窗的差分里，
+/// 由第 1 条兜住。真正失控的那一档由 [`WindowImpact::degraded_reason`] 的比例护栏接住。
 pub async fn reconcile_startup_window(
     dbnum: u32,
     db_type: &str,
-    settled_floor: Option<i32>,
+    model_sesno: Option<i32>,
     target: &crate::data_interface::model_source::SourceVersion,
 ) -> anyhow::Result<StartupWindowReport> {
     let target_sesno = target.sesno;
-    let states = load_persisted_root_states(dbnum).await?;
     let mut report = StartupWindowReport {
         dbnum,
         target_sesno,
-        roots_s: states.len(),
         ..Default::default()
     };
-
-    let unsettled_item = |root: &PersistedRoot| ModelWorkItem {
+    let regen_item = |refno: RefnoEnum, noun: &str| ModelWorkItem {
         dbnum,
         db_type: db_type.to_string(),
         source_end_sesno: target_sesno as i32,
-        // Source identity is resolved by e3d-model from the pinned file view. In
-        // particular, a missing noun on an unsettled row is not deletion evidence.
-        action: startup_unsettled_action(root),
-        target_refno: root.refno.to_pdms_str(),
-        noun: root.noun.clone(),
+        action: ModelWorkAction::RegenRoot,
+        target_refno: refno.to_pdms_str(),
+        noun: noun.to_string(),
     };
 
-    // 左端只认「大于 0 且早于右端」的下限。凭证等于或高于右端说明这一批根已经追平；
-    // `0` 是未认领，走下面的未安定分支。
-    let base_sesno = settled_floor
-        .filter(|floor| *floor > 0 && (*floor as u32) < target_sesno)
-        .map(|floor| floor as u32);
+    // 账本里还欠着的根：本进程里失败过、还没成的，无条件重排。
+    let chasing = crate::data_interface::model_root_ledger::chasing_entries(dbnum);
+    report.unsettled = chasing.len();
 
+    let base_sesno = startup_window_base(model_sesno, target_sesno);
     let window = match base_sesno {
         Some(base) => {
             report.base_sesno = Some(base);
             match build_model_update_plan_from_window(dbnum, db_type, base, target_sesno).await {
                 Ok(plan) => Some(plan),
                 Err(error) => {
-                    // 开窗失败（凭证会话不在链上、文件读不了……）不许静默跳过：退到
-                    // 「全部持久根按过期处理」，与比例护栏退化同一个去向（ADR-056 实施约束 5）。
+                    // 开窗失败（水位会话不在链上、文件读不了……）不许静默跳过：退到
+                    // 「全部根按过期处理」，与比例护栏退化同一个去向（ADR-056 实施约束 5）。
                     report.degraded = Some(format!(
                         "startup window {base}→{target_sesno} failed: {error:#}; \
-                         全部 {} 根按过期重排；T 端已删除的根将在生成时失败并进入死信，\
-                         需人工 pending-units/retry 或 model/rebuild",
-                        report.roots_s
+                         全部根按过期重排（DbSet@T 枚举）"
                     ));
                     None
                 }
@@ -1701,37 +1424,19 @@ pub async fn reconcile_startup_window(
         None => None,
     };
     let fell_back = base_sesno.is_some() && window.is_none();
+    let never_caught_up = model_sesno.is_none_or(|floor| floor <= 0);
 
-    let no_settled_roots =
-        settled_floor.is_none() || states.iter().all(|state| !state.is_settled());
-    let mut work_items: Vec<ModelWorkItem> = if no_settled_roots {
-        // The model projection has never published a complete root. Its rows are
-        // intent, not an authoritative root inventory: a previous interrupted
-        // startup may have created only part of the set, and optional noun fields
-        // may still be empty. Rebuild the complete list from DbSet@T.
-        report.unsettled = states.len();
+    let mut work_items: Vec<ModelWorkItem> = if never_caught_up || fell_back {
+        // 从没追平过（或开窗失败）：`DbSet@T` 上的每个根都要生成。账本里的欠账是它的子集。
         enumerate_target_roots(dbnum, target_sesno)
             .await?
             .into_iter()
-            .map(|root| ModelWorkItem {
-                dbnum,
-                db_type: db_type.to_string(),
-                source_end_sesno: target_sesno as i32,
-                action: ModelWorkAction::RegenRoot,
-                target_refno: root.root.to_pdms_str(),
-                noun: root.noun,
-            })
+            .map(|root| regen_item(root.root, &root.noun))
             .collect()
     } else {
-        states
+        chasing
             .iter()
-            .filter(|state| fell_back || !state.is_settled())
-            .inspect(|state| {
-                if !state.is_settled() {
-                    report.unsettled += 1;
-                }
-            })
-            .map(|state| unsettled_item(&state.root))
+            .map(|(refno, entry)| regen_item(*refno, &entry.noun))
             .collect()
     };
     let forced: BTreeSet<String> = work_items
@@ -1739,7 +1444,6 @@ pub async fn reconcile_startup_window(
         .map(|item| item.target_refno.clone())
         .collect();
 
-    let mut advance = Vec::new();
     let mut lazy_roots = None;
     if let Some(plan) = window {
         for warning in &plan.warnings {
@@ -1747,14 +1451,13 @@ pub async fn reconcile_startup_window(
         }
         report.degraded = plan.credential_advance_degraded.clone();
         lazy_roots = plan.lazy_roots;
-        // 被强排的根即便落在 advance 名单上也前移不了（`render_credential_advance` 的状态守卫
-        // 会挡掉），但让两份名单当面不打架比依赖那道守卫清楚。
-        advance = plan
+        report.roots_s = plan.base_roots.unwrap_or_default() as usize;
+        // 被强排的根即便落在 advance 名单上也不算「免了」：两份名单当面不打架。
+        report.advanced = plan
             .credential_advance
             .iter()
             .filter(|root| !forced.contains(*root))
-            .cloned()
-            .collect();
+            .count();
         work_items.extend(plan.work_items);
     }
 
@@ -2000,58 +1703,67 @@ mod tests {
             && item.source_end_sesno == 26));
     }
 
-    /// 「安定」这个判据现在有三处用户：[`PersistedRootState::is_settled`]（挑窗口左端、
-    /// 决定谁被无条件强排）、[`render_credential_advance`] 的 SQL 守卫（谁能被前移）、
-    /// `model_coverage::startup_coverage_floors` 的聚合（一级过滤的下限与未安定计数）。
-    ///
-    /// 状态名单三处共用同一个 [`SETTLED_ROOT_STATUSES`]，漂不了；漂得了的是
-    /// 「凭证必须大于 0」这半条——它在三处各写了一遍字面量。漂开的后果不报错：下限从一条
-    /// 未认领行上取到 0，窗口左端就落到文件开头，整库被判成全被触到。
+    /// 「安定」只有一个判据（ADR-079）：S 端根集减去账本里还欠着的根。账本全局，测试用自己的 dbnum。
     #[test]
-    fn settled_means_the_same_thing_wherever_it_is_judged() {
-        let state = |status: Option<&str>, sesno: Option<i32>| PersistedRootState {
-            root: persisted(5, "BRAN"),
-            status: status.map(str::to_string),
-            source_end_sesno: sesno,
-            publication_status: None,
-            desired_revision: None,
-            published_revision: None,
-        };
-        for status in SETTLED_ROOT_STATUSES {
-            assert!(state(Some(status), Some(106)).is_settled(), "{status}");
-            assert!(
-                !state(Some(status), Some(0)).is_settled(),
-                "{status} 的未认领凭证永不算安定"
-            );
-            assert!(!state(Some(status), None).is_settled(), "{status} 缺凭证");
-        }
-        assert!(!state(Some("Failed"), Some(106)).is_settled());
-        assert!(!state(Some("Pending"), Some(106)).is_settled());
-        assert!(!state(None, Some(106)).is_settled());
-        let mut stale = state(Some("Generated"), Some(106));
-        stale.publication_status = Some("stale".into());
-        stale.desired_revision = Some(2);
-        stale.published_revision = Some(1);
-        assert!(
-            !stale.is_settled(),
-            "启动恢复不得把 stale / revision 落后的根当成安定根"
+    fn settled_base_roots_are_the_base_roots_minus_the_ledgers_chasing_roots() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let dbnum = 980_001;
+        ledger::forget_dbnum(dbnum);
+        let roots_s = vec![
+            persisted(1, "BRAN"),
+            persisted(2, "EQUI"),
+            persisted(3, "BRAN"),
+        ];
+        assert_eq!(
+            settled_base_roots(dbnum, &roots_s),
+            BTreeSet::from([r(1), r(2), r(3)]),
+            "账本为空（重启后的常态）：S 端每个根都由模型水位承诺为安定"
         );
+        ledger::record_failed(dbnum, r(2), "EQUI", 25, "boom");
+        ledger::record_refused(dbnum, r(3), "BRAN", 25, "no root");
+        assert_eq!(
+            settled_base_roots(dbnum, &roots_s),
+            BTreeSet::from([r(1), r(3)]),
+            "失败的根不安定；永久放弃的根不拦（它不会被重排，也不该被当成在飞）"
+        );
+        ledger::record_generated(dbnum, r(2), "EQUI", 26);
+        assert_eq!(
+            settled_base_roots(dbnum, &roots_s),
+            BTreeSet::from([r(1), r(2), r(3)])
+        );
+        ledger::forget_dbnum(dbnum);
+    }
 
-        let advance = render_credential_advance(8000, 200, None, &["24384/5".to_string()])
-            .expect("statement renders")
-            .join("\n");
-        let shared = crate::data_interface::model_watermark::settled_root_predicate();
-        for body in [advance.as_str(), shared.as_str()] {
-            assert!(
-                body.contains("(source_end_sesno ?: 0) > 0"),
-                "「凭证必须大于 0」这半条不能只在一处成立: {body}"
-            );
-        }
-        assert!(
-            include_str!("model_coverage.rs")
-                .contains("super::model_watermark::settled_root_predicate()"),
-            "一级取数必须复用同一安定谓词"
-        );
+    /// 账本里欠着的根并进本窗 regen、从 advance / lazy 里摘掉；T 端已不是根的欠账不进 regen。
+    #[test]
+    fn chasing_roots_are_carried_into_regen_and_removed_from_advance_and_lazy() {
+        let roots_t = vec![
+            root(5, "BRAN", GenerationRootKind::DeliveryUnit),
+            root(8, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(9, "SUPPO", GenerationRootKind::DeliveryUnit),
+        ];
+        let mut plan = WindowRootPlan {
+            regen: vec![],
+            delete: vec![persisted(7, "BRAN")],
+            advance: vec![r(5), r(8)],
+            lazy: vec![root(9, "SUPPO", GenerationRootKind::DeliveryUnit)],
+            degraded: None,
+        };
+        carry_unsettled_generation(&BTreeSet::from([r(8), r(9), r(7)]), &roots_t, &mut plan);
+        assert_eq!(ids(&plan.regen), vec![r(8), r(9)], "7 在 T 端已不是根，随 delete 走");
+        assert_eq!(plan.advance, vec![r(5)]);
+        assert!(plan.lazy.is_empty());
+        assert_eq!(plan.delete, vec![persisted(7, "BRAN")]);
+    }
+
+    /// 左端怎么取（ADR-079）：`model_sesno` 是唯一输入。
+    #[test]
+    fn the_startup_window_base_is_the_model_watermark() {
+        assert_eq!(startup_window_base(None, 30), None, "从没盖过章：整库重排");
+        assert_eq!(startup_window_base(Some(0), 30), None, "清零过：整库重排");
+        assert_eq!(startup_window_base(Some(30), 30), None, "已追平：不开窗");
+        assert_eq!(startup_window_base(Some(31), 30), None, "水位高于文件（回退中）：不开窗");
+        assert_eq!(startup_window_base(Some(12), 30), Some(12));
     }
 
     /// 折成 `ModelUpdatePlan`：前移名单落 `credential_advance`，退化原因进 warnings。
@@ -2064,9 +1776,10 @@ mod tests {
             lazy: vec![],
             degraded: Some("unresolved=2".into()),
         };
-        let out = plan.into_model_update_plan(8000, "DESI", 26, vec!["earlier".into()]);
+        let out = plan.into_model_update_plan(8000, "DESI", 26, 3, vec!["earlier".into()]);
         assert_eq!(out.work_items.len(), 1);
         assert_eq!(out.credential_advance, vec!["24384/8", "24384/1"]);
+        assert_eq!(out.base_roots, Some(3));
         assert_eq!(out.warnings[0], "earlier");
         assert!(
             out.warnings[1].contains("credential_advance_degraded")
@@ -2088,7 +1801,7 @@ mod tests {
             .split_once("pub(crate) async fn build_model_update_plan_from_window(")
             .expect("window planner exists")
             .1
-            .split_once("// ---- P2-2 凭证前移 ----")
+            .split_once("// ---- 未触根的「前移」：只剩回执（ADR-079）----")
             .expect("window planner boundary")
             .0;
         let blocking = body
@@ -2118,7 +1831,7 @@ mod tests {
                     .split_once("pub(crate) async fn build_model_update_plan_from_window(")
                     .expect("window planner exists")
                     .1
-                    .split_once("// ---- P2-2 凭证前移 ----")
+                    .split_once("// ---- 未触根的「前移」：只剩回执（ADR-079）----")
                     .expect("window planner boundary")
                     .0,
             ),
@@ -2170,8 +1883,9 @@ mod tests {
         }
     }
 
+    /// 开窗失败不许静默：退到「全部根按过期重排」，而且要在 `degraded` 里说出原因。
     #[test]
-    fn startup_window_fallback_explains_the_dead_letter_consequence() {
+    fn startup_window_fallback_regenerates_every_target_root_and_says_why() {
         let body = include_str!("window_root_plan.rs")
             .split_once("pub async fn reconcile_startup_window(")
             .expect("startup window exists")
@@ -2180,41 +1894,42 @@ mod tests {
             .expect("startup window boundary")
             .0;
         assert!(
-            body.contains("T 端已删除的根将在生成时失败并进入死信")
-                && body.contains("pending-units/retry")
-                && body.contains("model/rebuild"),
-            "fallback must name both the consequence and recovery exits: {body}"
+            body.contains("全部根按过期重排（DbSet@T 枚举）")
+                && body.contains("if never_caught_up || fell_back"),
+            "fallback must regenerate every target root and record the reason: {body}"
+        );
+        // 左端只从模型水位取；这条路上不许长回任何一句 `gen_root` 读。
+        assert!(
+            !body.contains("gen_root") && body.contains("startup_window_base(model_sesno"),
+            "{body}"
         );
     }
 
-    /// 回执那一格的三种形状（plant-ui 计划 G3）：前移跑过 → 账；规划器退化 → 0/0 + 原因；
-    /// 老规划器 / 非 DESI 窗口 → 整格不出现（JSON 里没有 `credential_advance` 键）。
+    /// 回执那一格的三种形状（plant-ui 计划 G3）：名单非空 → `requested = advanced = |名单|`；
+    /// 规划器退化 → 0/0 + 原因；老规划器 / 非 DESI 窗口 → 整格不出现（JSON 里没有 `credential_advance` 键）。
     #[test]
     fn credential_advance_receipt_has_three_shapes() {
-        let ran = CredentialAdvanceReceipt::from_window(
-            Some(CredentialAdvanceOutcome {
-                requested: 3,
-                advanced: 2,
-            }),
-            &ModelUpdatePlan::default(),
-        )
-        .expect("前移跑过就有回执");
+        let ran = CredentialAdvanceReceipt::from_plan(&ModelUpdatePlan {
+            credential_advance: vec!["24384/1".into(), "24384/2".into(), "24384/3".into()],
+            ..Default::default()
+        })
+        .expect("名单非空就有回执");
         assert_eq!(
             (ran.requested, ran.advanced, ran.degraded.as_deref()),
-            (3, 2, None)
+            (3, 3, None),
+            "库里没有行要改（ADR-079）：名单上的根全部由水位承诺到 T"
         );
         assert_eq!(
             serde_json::to_value(&ran).unwrap(),
-            serde_json::json!({ "requested": 3, "advanced": 2 }),
-            "正常前移时 degraded 不出现"
+            serde_json::json!({ "requested": 3, "advanced": 3 }),
+            "正常时 degraded 不出现"
         );
 
         let degraded_plan = ModelUpdatePlan {
             credential_advance_degraded: Some("unresolved=2".into()),
             ..Default::default()
         };
-        let degraded =
-            CredentialAdvanceReceipt::from_window(None, &degraded_plan).expect("退化也要出声");
+        let degraded = CredentialAdvanceReceipt::from_plan(&degraded_plan).expect("退化也要出声");
         assert_eq!(
             (
                 degraded.requested,
@@ -2225,7 +1940,7 @@ mod tests {
         );
 
         assert_eq!(
-            CredentialAdvanceReceipt::from_window(None, &ModelUpdatePlan::default()),
+            CredentialAdvanceReceipt::from_plan(&ModelUpdatePlan::default()),
             None,
             "老规划器与 CATA / SYST 窗口没有这一格"
         );
@@ -2244,10 +1959,10 @@ mod tests {
         assert!(plan.credential_advance.is_empty());
     }
 
-    // ---- P2-2 凭证前移 ----
+    // ---- 欠账随窗重排 ----
 
-    /// 上一窗没生成成的根（凭证未安定）要随本窗重排，即便这一窗的几何闭包没碰到它：
-    /// 并进 regen、从前移与懒生成名单摘掉；安定的根照旧前移（ADR-072 D5：判据是凭证，不是 pending 行）。
+    /// 上一窗没生成成的根（账本里还欠着）要随本窗重排，即便这一窗的几何闭包没碰到它：
+    /// 并进 regen、从前移与懒生成名单摘掉；安定的根照旧前移（ADR-079：判据是进程内账本，不是库里的行）。
     #[test]
     fn unchanged_window_carries_unsettled_generation_into_regen() {
         let roots = [1, 2, 3, 4, 6]
@@ -2256,9 +1971,9 @@ mod tests {
             .collect::<Vec<_>>();
         let old = (1..=6).map(|id| persisted(id, "BRAN")).collect::<Vec<_>>();
         let mut plan = plan_window_roots(&roots, &old, &impact(&[]));
-        // 1 号根上一窗失败、6 号根半发布：两根凭证都不安定；其余安定。
-        let settled: BTreeSet<RefnoEnum> = [2, 3, 4, 5].into_iter().map(r).collect();
-        carry_unsettled_generation(&old, &settled, &roots, &mut plan);
+        // 1 号根上一窗失败、6 号根半发布：两根都在账本里欠着；其余安定。
+        let unsettled: BTreeSet<RefnoEnum> = [1, 6].into_iter().map(r).collect();
+        carry_unsettled_generation(&unsettled, &roots, &mut plan);
         assert_eq!(
             plan.regen.iter().map(|root| root.root).collect::<Vec<_>>(),
             vec![r(1), r(6)]
@@ -2270,171 +1985,9 @@ mod tests {
         );
         // 全部安定时什么都不动。
         let mut untouched = plan_window_roots(&roots, &old, &impact(&[]));
-        let all: BTreeSet<RefnoEnum> = (1..=6).map(r).collect();
-        carry_unsettled_generation(&old, &all, &roots, &mut untouched);
+        carry_unsettled_generation(&BTreeSet::new(), &roots, &mut untouched);
         assert!(untouched.regen.is_empty());
         assert_eq!(untouched.advance, vec![r(1), r(2), r(3), r(4), r(6)]);
-    }
-
-    fn advance_sql(roots: &[&str], time: Option<&str>) -> Vec<String> {
-        let roots: Vec<String> = roots.iter().map(|root| root.to_string()).collect();
-        render_credential_advance(8000, 26, time, &roots).unwrap()
-    }
-
-    /// 前移语句只碰本库、点名的根；只放过「已发布且安定」的行（完成态、`ready`、
-    /// desired == published）；单调（凭证 < T 才动，`0` 凭证永不前移）；时刻跟着序号走；
-    /// 几何、manifest、revision、publication 状态一个字不碰。
-    #[test]
-    fn credential_advance_statement_is_scoped_settled_and_monotonic() {
-        let sql = advance_sql(&["24384/8", "24384/1"], Some("2026-09-02T10:00:00+08:00"));
-        assert_eq!(sql.len(), 1, "{sql:?}");
-        let sql = &sql[0];
-        for needle in [
-            "UPDATE type::thing('gen_root', '24384_8'), type::thing('gen_root', '24384_1') SET",
-            "credential_advanced_from = source_end_sesno",
-            "source_end_sesno = 26",
-            "source_end_sesno_time = '2026-09-02T10:00:00+08:00'",
-            "WHERE dbnum = 8000",
-            "type::thing('gen_root', '24384_8')",
-            "type::thing('gen_root', '24384_1')",
-            "status IN ['Generated', 'AlreadyAvailable', 'NoRenderableGeometry']",
-            "(publication_status ?: 'ready') = 'ready'",
-            "(desired_revision ?: 0) = (published_revision ?: 0)",
-            "(source_end_sesno ?: 0) > 0",
-            "(source_end_sesno ?: 0) < 26",
-            "RETURN id",
-        ] {
-            assert!(sql.contains(needle), "missing `{needle}` in {sql}");
-        }
-        // 「记旧值」必须排在「写新值」之前，否则记下的就是 T 自己。
-        assert!(
-            sql.find("credential_advanced_from = source_end_sesno")
-                .unwrap()
-                < sql.find("source_end_sesno = 26").unwrap(),
-            "{sql}"
-        );
-        for forbidden in [
-            "published_revision =",
-            "desired_revision =",
-            "published_manifest_hash",
-            "published_target =",
-            "status =",
-            "publication_status =",
-            // 名单回到 `WHERE` 上，规划器就会挑 `gen_root_dbnum_status`，每一批退化成
-            // 一次全库段扫描——见 `render_credential_advance` 的文档。
-            "UPDATE gen_root",
-            "id IN [",
-        ] {
-            assert!(!sql.contains(forbidden), "`{forbidden}` in {sql}");
-        }
-        // 没有会话时刻就不写那一列（不许拿挂钟顶替，plant-ui ADR-0019）。
-        let without = advance_sql(&["24384/8"], None);
-        assert!(
-            !without[0].contains("source_end_sesno_time"),
-            "{}",
-            without[0]
-        );
-    }
-
-    /// 空名单不出语句；名单按 500 分块；不是 `a/b` 的串是规划器的 bug，整体报错。
-    #[test]
-    fn credential_advance_is_chunked_and_rejects_malformed_refnos() {
-        assert!(advance_sql(&[], None).is_empty());
-        let many: Vec<String> = (1..=1001).map(|i| format!("24384/{i}")).collect();
-        let sql = render_credential_advance(8000, 26, None, &many).unwrap();
-        assert_eq!(sql.len(), 3);
-        assert!(sql[0].contains("'24384_1')") && !sql[0].contains("'24384_501')"));
-        assert!(sql[1].contains("'24384_501')") && sql[1].contains("'24384_1000')"));
-        assert!(sql[2].contains("'24384_1001')"));
-        assert!(render_credential_advance(8000, 26, None, &["not-a-refno".to_string()]).is_err());
-    }
-
-    async fn credential_advance_db(name: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem boots");
-        db.use_ns("window_root_plan").use_db(name).await.unwrap();
-        // 1 安定可前移；2 有未发布的 desired（stale）；3 上次失败；4 凭证已经更新；
-        // 5 人工强制重试的 0 凭证；6 旧式行（没有 publication 字段）但完成态；
-        // 7 别的库；9 安定但不在名单上。
-        db.query(
-            "CREATE gen_root:24384_1 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20, \
-               source_end_sesno_time = '2026-09-01T00:00:00+08:00';\
-             CREATE gen_root:24384_2 SET dbnum = 8000, status = 'Generated', publication_status = 'stale', \
-               desired_revision = 4, published_revision = 3, source_end_sesno = 20;\
-             CREATE gen_root:24384_3 SET dbnum = 8000, status = 'Failed', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20;\
-             CREATE gen_root:24384_4 SET dbnum = 8000, status = 'AlreadyAvailable', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 30;\
-             CREATE gen_root:24384_5 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 0;\
-             CREATE gen_root:24384_6 SET dbnum = 8000, status = 'NoRenderableGeometry', source_end_sesno = 20;\
-             CREATE gen_root:24384_7 SET dbnum = 1112, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20;\
-             CREATE gen_root:24384_9 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db
-    }
-
-    /// B7 判据 · settled 门（mem://）：`load_persisted_roots_with_settlement_on` 只把
-    /// 「状态 ∈ SETTLED_ROOT_STATUSES ∧ 凭证>0 ∧ publication ready ∧ desired==published」的根算进
-    /// settled；别的库不加载。刚体前移只对 settled 的根开放（ADR-066 D1 规则 1）。
-    #[tokio::test]
-    async fn the_settlement_gate_marks_only_ready_published_roots() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem boots");
-        db.use_ns("window_root_plan")
-            .use_db("settlement_gate")
-            .await
-            .unwrap();
-        db.query(
-            "CREATE gen_root:24384_1 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20;\
-             CREATE gen_root:24384_2 SET dbnum = 8000, status = 'Generated', publication_status = 'stale', \
-               desired_revision = 4, published_revision = 3, source_end_sesno = 20;\
-             CREATE gen_root:24384_3 SET dbnum = 8000, status = 'Failed', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20;\
-             CREATE gen_root:24384_4 SET dbnum = 8000, status = 'AlreadyAvailable', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 30;\
-             CREATE gen_root:24384_5 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 0;\
-             CREATE gen_root:24384_6 SET dbnum = 8000, status = 'NoRenderableGeometry', source_end_sesno = 20;\
-             CREATE gen_root:24384_7 SET dbnum = 1112, status = 'Generated', publication_status = 'ready', \
-               desired_revision = 3, published_revision = 3, source_end_sesno = 20;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        let (roots, settled) = load_persisted_roots_with_settlement_on(&db, 8000)
-            .await
-            .unwrap();
-        // 只加载本库（8000）的根：7 属别的库，不出现。
-        let loaded: BTreeSet<RefnoEnum> = roots.iter().map(|root| root.refno).collect();
-        assert_eq!(
-            loaded,
-            [1u32, 2, 3, 4, 5, 6]
-                .iter()
-                .map(|id| r(*id))
-                .collect::<BTreeSet<_>>()
-        );
-        // settled = 1（ready）、4（AlreadyAvailable ready）、6（旧式行：无 publication 列视同 ready、凭证>0）。
-        // 2 stale（desired≠published）、3 Failed、5 凭证=0 都不算；7 属别的库根本没加载。
-        assert_eq!(
-            settled,
-            [1u32, 4, 6]
-                .iter()
-                .map(|id| r(*id))
-                .collect::<BTreeSet<_>>()
-        );
     }
 
     /// B7 判据 · 提示装配：`transform_units_for` 只给 `plan.regen` 里、且过了判据（在
@@ -2481,6 +2034,25 @@ mod tests {
         );
         assert_eq!(units[0].anchors.len(), 1);
         assert_eq!(units[0].anchors[0].refno, r(3).to_pdms_str());
+    }
+
+    /// ADR-066 D1 规则 2（2026-09-17 修订）：账本去向折成候选表时，`no_model` 的候选单独成一类
+    /// （[`CandidateKind::NoModel`]，规划器不数它）。只认「只登记了 `no_model`」的 refno：`RolledUp` /
+    /// `Unresolved` 的不算，登记了两种去向的（e3d-model `accounts_for` 会判它违约）也不算——宁可挡路。
+    #[test]
+    fn no_model_candidates_follow_the_ledger_dispositions() {
+        let mut ledger = ChangeLedger::new();
+        ledger.dispose(RefNo::new(24384, 1), Disposition::NoModel);
+        ledger.dispose(RefNo::new(24384, 2), Disposition::RolledUp);
+        ledger.dispose(RefNo::new(24384, 3), Disposition::Unresolved);
+        ledger.dispose(RefNo::new(24384, 4), Disposition::NoModel);
+        ledger.dispose(RefNo::new(24384, 4), Disposition::RolledUp);
+        ledger.dispose(RefNo::new(24384, 5), Disposition::NoModel);
+        assert_eq!(
+            no_model_candidates(&ledger),
+            BTreeSet::from([(24384, 1), (24384, 5)])
+        );
+        assert!(no_model_candidates(&ChangeLedger::new()).is_empty());
     }
 
     /// D1-a（开发计划 2026-09-15 S2 / ADR-066 D1 规则 3 补条）：P23 的 noun 自己挪位不算刚体锚点——
@@ -2825,44 +2397,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn persisted_root_loaders_recover_legacy_rows_without_pe_or_noun() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem boots");
-        db.use_ns("window_root_plan")
-            .use_db("legacy_null_root")
-            .await
-            .unwrap();
-        db.query(
-            "CREATE gen_root:24384_11 SET dbnum = 8000;\
-             CREATE gen_root:24384_12 SET dbnum = 8000, pe = pe:24384_12, noun = 'BRAN', \
-               status = 'Generated', source_end_sesno = 20;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        let roots = load_persisted_roots_on(&db, 8000).await.unwrap();
-        assert_eq!(roots, vec![persisted(11, ""), persisted(12, "BRAN")]);
-
-        let states = load_persisted_root_states_on(&db, 8000).await.unwrap();
-        assert_eq!(states[0].root, persisted(11, ""));
-        assert_eq!(states[0].status, None);
-        assert_eq!(states[0].source_end_sesno, None);
-        assert_eq!(states[1].root, persisted(12, "BRAN"));
-        assert!(states[1].is_settled());
-        assert_eq!(
-            startup_unsettled_action(&states[0].root),
-            ModelWorkAction::RegenRoot
-        );
-        assert_eq!(
-            startup_unsettled_action(&states[1].root),
-            ModelWorkAction::RegenRoot
-        );
-    }
-
     #[test]
     fn effective_increment_planner_has_no_legacy_read_route() {
         let source = include_str!("window_root_plan.rs");
@@ -2870,96 +2404,13 @@ mod tests {
             .split_once("pub(crate) async fn build_effective_model_update_plan(")
             .expect("effective planner")
             .1
-            .split_once("// ---- P2-2")
+            .split_once("// ---- 未触根的「前移」：只剩回执（ADR-079）----")
             .expect("effective planner boundary")
             .0;
         assert!(!dispatch.contains("direct_read_mode"));
         assert!(dispatch.contains("db_type.eq_ignore_ascii_case(\"DESI\")"));
         assert!(dispatch.contains("db_type.eq_ignore_ascii_case(\"CATA\")"));
         assert!(dispatch.contains("Ok(ModelUpdatePlan::default())"));
-    }
-
-    /// `(凭证, 时刻, 前移前的凭证)`，按根 id 排。
-    async fn credential_rows(
-        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    ) -> Vec<(String, Option<i32>, Option<String>, Option<i32>)> {
-        #[derive(serde::Deserialize)]
-        struct Row {
-            key: String,
-            source_end_sesno: Option<i32>,
-            source_end_sesno_time: Option<String>,
-            credential_advanced_from: Option<i32>,
-        }
-        let mut response = db
-            .query(
-                "SELECT type::string(record::id(id)) AS key, source_end_sesno, \
-                 source_end_sesno_time, credential_advanced_from FROM gen_root ORDER BY key;",
-            )
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let rows: Vec<Row> = response.take(0).unwrap();
-        rows.into_iter()
-            .map(|row| {
-                (
-                    row.key,
-                    row.source_end_sesno,
-                    row.source_end_sesno_time,
-                    row.credential_advanced_from,
-                )
-            })
-            .collect()
-    }
-
-    /// 真引擎上跑一遍：只有安定且落后的行前移到 T（记下旧凭证与新时刻），其余原样；
-    /// 名单里不存在的行不算失败。
-    #[tokio::test]
-    async fn credential_advance_moves_only_settled_lagging_roots() {
-        let db = credential_advance_db("moves_settled").await;
-        let roots: Vec<String> = [
-            "24384/1", "24384/2", "24384/3", "24384/4", "24384/5", "24384/6", "24384/7", "24384/8",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-        let time = "2026-09-02T10:00:00+08:00";
-        let outcome = advance_root_credentials_on(&db, 8000, 26, Some(time), &roots)
-            .await
-            .unwrap();
-        assert_eq!(
-            outcome,
-            CredentialAdvanceOutcome {
-                requested: 8,
-                advanced: 2,
-            }
-        );
-        let expected_time = Some(time.to_string());
-        let old_time = Some("2026-09-01T00:00:00+08:00".to_string());
-        assert_eq!(
-            credential_rows(&db).await,
-            vec![
-                (
-                    "24384_1".to_string(),
-                    Some(26),
-                    expected_time.clone(),
-                    Some(20)
-                ),
-                ("24384_2".to_string(), Some(20), None, None),
-                ("24384_3".to_string(), Some(20), None, None),
-                ("24384_4".to_string(), Some(30), None, None),
-                ("24384_5".to_string(), Some(0), None, None),
-                ("24384_6".to_string(), Some(26), expected_time, Some(20)),
-                ("24384_7".to_string(), Some(20), None, None),
-                ("24384_9".to_string(), Some(20), None, None),
-            ],
-            "old time of root 1 was {old_time:?}"
-        );
-        // 幂等：再跑一次一个都不动。
-        let again = advance_root_credentials_on(&db, 8000, 26, Some(time), &roots)
-            .await
-            .unwrap();
-        assert_eq!(again.advanced, 0);
     }
 
     /// P2-1 真库门：ams8000 上四个钉死的窗口，`roots_S` 取 **base 端**枚举（当作 S 时刻
@@ -3283,9 +2734,9 @@ mod tests {
         assert_eq!(change_metadata_tier(&diff(&["DIR"])), None);
         assert_eq!(change_metadata_tier(&diff(&["NAME", "DIR"])), None);
         // 混进一个几何 / 位姿 / 依赖属性就不放行。
-        assert!(!change_is_metadata_only(&diff(&["NAME", "DIAM"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "POS"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "SPRE"])));
+        assert!(change_metadata_tier(&diff(&["NAME", "DIAM"])).is_none());
+        assert!(change_metadata_tier(&diff(&["NAME", "POS"])).is_none());
+        assert!(change_metadata_tier(&diff(&["NAME", "SPRE"])).is_none());
         // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
         assert!(!change_is_metadata_only(&diff(&["CACHID"])));
         assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
@@ -3296,20 +2747,61 @@ mod tests {
         // 结构四条：类型、属主、成员、opaque，任一动了就不放行，哪怕属性只有 NAME。
         let mut typed = diff(&["NAME"]);
         typed.type_changed = Some(("BRAN".into(), "ELBO".into()));
-        assert!(!change_is_metadata_only(&typed));
+        assert!(change_metadata_tier(&typed).is_none());
         let mut reparented = diff(&["NAME"]);
         reparented.owner_changed = Some((Some("24384/2".into()), Some("24384/3".into())));
-        assert!(!change_is_metadata_only(&reparented));
+        assert!(change_metadata_tier(&reparented).is_none());
         let mut members = diff(&["NAME"]);
         members.members = Some(MemberDelta {
             added: vec![],
             removed: vec![],
             reordered: true,
         });
-        assert!(!change_is_metadata_only(&members));
+        assert!(change_metadata_tier(&members).is_none());
         let mut opaque = diff(&["NAME"]);
         opaque.opaque = true;
-        assert!(!change_is_metadata_only(&opaque));
+        assert!(change_metadata_tier(&opaque).is_none());
+    }
+
+    /// 档位是**整个元素**的一句话（S6）：全落老名单才算老档，有一个靠新档过关这一笔就记进
+    /// `unread_attribute`。两档的去向相同，档位只决定这一笔记在回执哪一格。
+    #[test]
+    fn the_element_tier_is_the_widest_tier_any_of_its_attributes_needed() {
+        use e3d_model::element_diff::MemberDelta;
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "ELBO".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        // 全老名单仍是老档；混了一个新档名字，整个元素记新档。
+        assert_eq!(
+            change_metadata_tier(&diff(&["NAME", "DESC"])),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["SUPP"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["NAME", "SUPP", "ACDATE"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        // 一票否决：混进一个生成侧读得到的名字，整个元素照旧上卷。
+        assert!(change_metadata_tier(&diff(&["SUPP", "DIR"])).is_none());
+        assert!(change_metadata_tier(&diff(&["SUPP", "DIAM"])).is_none());
+        assert!(change_metadata_tier(&diff(&["SUPP", "CACHID"])).is_none());
+        // 结构四条对新档一视同仁。
+        let mut members = diff(&["SUPP"]);
+        members.members = Some(MemberDelta {
+            added: vec![],
+            removed: vec![],
+            reordered: true,
+        });
+        assert!(change_metadata_tier(&members).is_none());
     }
 
     /// 接线的形状：`collect` 只在开关开着时经 `plan_update_with` 把 `change_metadata_tier`
@@ -4114,7 +3606,8 @@ mod tests {
         );
 
         // 计划要带着标记走，`apply_one` 才会跳过 old-pdms-io 的存活复核。
-        let out = plan.into_model_update_plan(7999, "DESI", 46, Vec::new());
+        let base_roots = sources.roots_s.len();
+        let out = plan.into_model_update_plan(7999, "DESI", 46, base_roots, Vec::new());
         assert!(
             out.window_planned,
             "窗口规划器的计划必须自报家门，否则 apply_one 还会去跑那条会炸的复核"
@@ -4631,7 +4124,9 @@ mod tests {
             Ok(CandidateKind::Anchor {
                 rigid: Err(reason), ..
             }) => (ProbeVerdict::Regen, Some(reason)),
-            Ok(CandidateKind::Other(reason)) => (ProbeVerdict::Regen, Some(reason)),
+            Ok(CandidateKind::Other(reason) | CandidateKind::NoModel(reason)) => {
+                (ProbeVerdict::Regen, Some(reason))
+            }
             Err(error) => (ProbeVerdict::Regen, Some(error.to_string())),
         }
     }
@@ -6404,7 +5899,9 @@ mod tests {
                     };
                     let (delta, rigid) = match rigid_anchor(&base, &target, refno, &chain_t) {
                         Ok(CandidateKind::Anchor { delta, rigid }) => (delta, rigid),
-                        Ok(CandidateKind::Other(reason)) => (glam::DMat4::IDENTITY, Err(reason)),
+                        Ok(CandidateKind::Other(reason) | CandidateKind::NoModel(reason)) => {
+                            (glam::DMat4::IDENTITY, Err(reason))
+                        }
                         Err(error) => (glam::DMat4::IDENTITY, Err(error.to_string())),
                     };
                     let category = rigid_exclusion_category(&rigid);

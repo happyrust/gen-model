@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.1.25"
+version = "0.1.27"
 edition = "2024"
 description = "AVEVA E3D incremental parsing and geometry service"
 build = "build.rs"

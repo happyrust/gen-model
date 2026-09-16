@@ -1,44 +1,46 @@
 <#
 .SYNOPSIS
-    一键产出 AMS 本地运行包（程序 + Web；按需附带 workspace\ 依赖资源）。
+    一键产出 AMS 本地运行包（程序 + Web；不带 workspace\）。
 
 .DESCRIPTION
     全链路（Q6=本机脚本 / Q7=全链路）：
-        构建 backend + web(wasm)  →  组包（默认仅程序 + Web）  →  组装 CHANGELOG
+        构建 backend + web(wasm)  →  组包（程序 + Web）  →  组装 CHANGELOG
         →  冒烟门（起服务、health + 首页含 plant_ui_app.js）  →  zip + sha256 清单
 
-    默认包内布局：
+    包内布局（只有这一档 runtime）：
         <包根>\
           aios-database.exe            后端（gen-model）
           web\                         plant-ui Web 静态资源（wasm/字体/贴图；不含冗余 meshes）
           bin\surreal.exe              切到 rocksdb 档时用来起库的 SurrealDB 2.1.x
           resource\surreal\*.surql     连接后初始化数据库函数所需的同版脚本
           schema\e3d210|e3d31\         e3d_version 选择的 attlib / *vir.dat（未配置默认 e3d210）
-          DbOption.toml                不带本机路径的出厂配置（默认运行包）
+          DbOption.toml                不带本机路径的出厂配置
+          .first-run-pending           首跑哨兵，向导「完成」时删除
           Start-AMS.ps1 / .cmd         通过 -Workspace / AMS_WORKSPACE 指向外部运行环境
+          Start-Surreal.ps1            用包根 bin\surreal.exe 起一台本地 rocksdb 库
           Rollback.ps1
           CHANGELOG.md                 后端 + 前端两节（Q4=A）
           release.json                 程序文件 sha256 清单 + 资源摘要 + 冒烟结果
 
-    只有显式 -IncludeWorkspace 才增加：
-          workspace\                   运行依赖（Q2=全资源）
-            DbOption.toml, config\, resource\, search-index\, accel_tree_*.snapshot
-            assets\                    模型网格/字体等（PLANT_ASSET_ROOT 指向它）
-            bin\surreal.exe            本仓 fork 的 SurrealDB 2.1.x
-            Start-Surreal.ps1          用包内 surreal 起一台本地库（可选）
+    workspace\ 一律不进包（2026-09-15 起，-IncludeWorkspace / -ExcludeMeshes 两个开关已删）。
+    那套东西是**打包机现场**的运行目录：config\、search-index\、accel_tree_*.snapshot 与
+    assets\ 全都带着本机项目的痕迹（快照按项目名命名、assets 里混着这台机器跑出来的
+    meshes / temp / archives），发出去既撑大 zip 又让现场以为那是自己的数据。运行期资源
+    由目标环境自己提供：Start-AMS.ps1 -Workspace <路径> 或 AMS_WORKSPACE 指过去，不指就用
+    包根（assets 缺失时后端自己在包根下建）。
 
     版本纪律（Q8）：版本号以两仓 Cargo.toml 为准；每次正常构建另生成唯一 build_id，
     默认 ZIP 名同时携带版本号与 build_id。输出 zip 已存在则拒绝执行（-Force 覆盖）；
     CHANGELOG 找不到当版条目时只警告、不中止。releases 目录不自动清理旧构建，
     让后续二进制 patch 始终有精确的源包可取。
 
-    存储只有两档（2026-09-13 拍板，ADR-074）：**两种包出厂都是 mem**（库在后端进程内，无 Surreal
+    存储只有两档（2026-09-13 拍板，ADR-074）：**出厂是 mem**（库在后端进程内，无 Surreal
     TCP 端口，真正解压即跑）。要数据活过重启的现场在向导第②步改选 rocksdb——**服务只连、不拉起**
-    那台库，包内附 bin\surreal.exe 与（带 workspace 时）Start-Surreal.ps1 让人先把它起起来。两档都
+    那台库，包根附 bin\surreal.exe 与 Start-Surreal.ps1 让人先把它起起来。包里
     保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
-    health + 首页 + medium；C 腿（带 workspace 时）由脚本用包内 surreal.exe 在 18010 起一台
+    health + 首页 + medium；C 腿由脚本用包内 surreal.exe 在 18010 起一台
     rocksdb 库、服务以 store_mode=rocksdb 连它，考 medium=rocksdb + durable=true + 数据目录
     真落盘——这一腿验的是「包内二进制起得来、服务连得上」。端口被占或起不来则跳过/失败并在
     release.json / 产物名旁标「未冒烟」，不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
@@ -62,17 +64,14 @@
 .PARAMETER SkipSmoke
     跳过冒烟门，产物标「未冒烟（-SkipSmoke）」。
 
-.PARAMETER IncludeWorkspace
-    显式把数据库运行环境 workspace\ 打进 zip。默认不打包 workspace，但仍会把
-    SurrealExe 放进包根 bin\；其他运行资源通过 Start-AMS.ps1 -Workspace 或 AMS_WORKSPACE 提供。
-
-.PARAMETER ExcludeMeshes
-    与 -IncludeWorkspace 同用：附带 workspace，但不把 workspace\assets\meshes 打进 zip。
-    未指定 -IncludeWorkspace 时 workspace 本就整体不进包，本开关无需设置。
+.PARAMETER Workspace
+    打包机上的现场运行目录。**它的内容一个字节都不进包**，只被三处读：B / C 两腿冒烟拿它的
+    DbOption.toml 当「本机真配置」、B 腿把 PLANT_ASSET_ROOT 指向它的 assets\、Rollback.ps1
+    的默认回退目标。缺它只影响冒烟，不影响产物。
 
 .PARAMETER SurrealExe
-    本仓 fork 的 SurrealDB 2.1.x 路径。所有发布档位都必须提供；未传时按仓库与默认
-    Workspace 路径自动寻找。runtime 放包根 bin\，带 workspace 的档位放 workspace\bin\。
+    本仓 fork 的 SurrealDB 2.1.x 路径。必须提供；未传时按仓库与默认
+    Workspace 路径自动寻找。放进包根 bin\。
 
 .PARAMETER SmokeStoreMode
     B 腿冒烟时后端的存储形态（mem / rocksdb）。省略时两档都用 mem；给 rocksdb 时脚本会先用
@@ -107,8 +106,6 @@ param(
     [switch]$SkipBuild,
     [string]$ReuseWebFromZip,
     [switch]$SkipSmoke,
-    [switch]$IncludeWorkspace,
-    [switch]$ExcludeMeshes,
     [ValidateSet('mem', 'rocksdb')][string]$SmokeStoreMode,
     [int]$SmokeTimeoutSeconds = 90,
     [ValidateRange(1, 65535)][int]$SmokeHttpPort = 9099,
@@ -307,17 +304,10 @@ if (-not $BuildId.StartsWith("$BackendVersion+", [StringComparison]::Ordinal)) {
     }
 }
 
-$packageTier = if (-not $IncludeWorkspace) {
-    'runtime'
-}
-elseif ($ExcludeMeshes) {
-    'runtime-workspace'
-}
-else {
-    'full'
-}
+# 只剩这一档：workspace\ 不再进包，runtime-workspace / full 两档随两个开关一起退役。
+$packageTier = 'runtime'
 # B 腿默认 mem：服务不拉库，mem 是唯一不需要脚本先起一台库就能全启动的档；
-# rocksdb 档由 C 腿（带 workspace）或显式 -SmokeStoreMode rocksdb 来考。
+# rocksdb 档由 C 腿或显式 -SmokeStoreMode rocksdb 来考。
 if (-not $SmokeStoreMode) { $SmokeStoreMode = 'mem' }
 if (-not $Name) {
     $Name = "ams-local-$(ConvertTo-FileToken $BuildId)-$packageTier"
@@ -339,13 +329,9 @@ if (Test-Path -LiteralPath $stage) {
     Remove-Item -LiteralPath $stage -Recurse -Force
 }
 New-Item -ItemType Directory -Force $stage | Out-Null
-$wsStage = Join-Path $stage 'workspace'
-if ($IncludeWorkspace) {
-    New-Item -ItemType Directory -Force $wsStage | Out-Null
-    if (-not (Test-Path -LiteralPath $Workspace)) { throw "找不到资源工作区：$Workspace" }
-}
-elseif ($ExcludeMeshes) {
-    Write-Warn2 "-ExcludeMeshes 已忽略：未指定 -IncludeWorkspace，workspace 默认整体不进包"
+# $Workspace 只供冒烟与 Rollback 默认值使用；缺席不影响出包，到冒烟那一步再说。
+if (-not (Test-Path -LiteralPath $Workspace)) {
+    Write-Warn2 "打包机现场目录不存在：$Workspace（不影响产物；B / C 两腿冒烟会因此跳过）"
 }
 
 # ── 2. 程序产物：构建 或 复用（Q1=A 复用包内已验证那份） ─────────────────────
@@ -537,46 +523,15 @@ foreach ($release in 'e3d210', 'e3d31') {
 }
 Write-Step "E3D schema packs 已就绪：$($schemaSources.Count) 个文件"
 
-# ── 3. workspace\ 小资源（assets 不进暂存，组 zip 时从源直灌，省磁盘） ─────────
+# ── 3. 出厂配置 + 首跑哨兵 + surreal 二进制（都进包根） ──────────────────────
 $factoryConfig = Join-Path $scriptDir 'templates\DbOption.factory.toml'
 if (-not (Test-Path -LiteralPath $factoryConfig)) { throw "缺出厂配置模板：$factoryConfig" }
-if ($IncludeWorkspace) {
-Write-Step "组装 workspace\ 依赖资源（assets 延后直灌）"
-# 出厂配置模板 + 首跑哨兵：包不再带本机配置快照。
+Write-Step "包根：出厂 DbOption.toml + 首跑哨兵 + bin\surreal.exe（workspace\ 不进包）"
 # 模板是「设置模式」形态（project_path 空、store_mode=mem、监听 0.0.0.0:9099），
-# 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
-Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $wsStage 'DbOption.toml')
-Set-Content -LiteralPath (Join-Path $wsStage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
-foreach ($d in 'config', 'resource', 'search-index') {
-    $src = Join-Path $Workspace $d
-    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $wsStage $d) -Recurse }
-    else { Write-Warn2 "workspace 资源缺 $d（跳过）" }
-}
-# SurrealQL/字典资源必须与本次后端源码同版。workspace 提供现场资源全集，仓内 resource
-# 再逐文件覆盖它，避免拿旧工作区里的函数定义配新 exe。
-$repoResource = Join-Path $RepoRoot 'resource'
-if (Test-Path -LiteralPath $repoResource) {
-    Get-ChildItem -LiteralPath $repoResource -Recurse -File | ForEach-Object {
-        $rel = $_.FullName.Substring($repoResource.Length + 1)
-        $dest = Join-Path (Join-Path $wsStage 'resource') $rel
-        New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
-    }
-}
-$snapCount = 0
-Get-ChildItem -LiteralPath $Workspace -Filter 'accel_tree_*.snapshot' -File -ErrorAction SilentlyContinue | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $wsStage $_.Name); $script:snapCount++
-}
-if ($snapCount -eq 0) { Write-Warn2 "没找到 accel_tree_*.snapshot" }
-}
-else {
-    Write-Step "跳过 workspace\：根目录保留 DbOption.toml、bin\surreal.exe、SurrealQL 与 E3D schema（其他资源外接）"
-    # 两档出厂都是 mem（ADR-074 之后模板本身就是），runtime 档不再对模板做任何外科改写——原样进包。
-    # 以前这里按档位把 store_mode 改成 embedded-mem 并重写两行注释，那套正则随四档一起退役。
-    Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $stage 'DbOption.toml')
-    Set-Content -LiteralPath (Join-Path $stage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
-}
-$surrealBinDir = if ($IncludeWorkspace) { Join-Path $wsStage 'bin' } else { Join-Path $stage 'bin' }
+# 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。原样进包，不做外科改写。
+Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $stage 'DbOption.toml')
+Set-Content -LiteralPath (Join-Path $stage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
+$surrealBinDir = Join-Path $stage 'bin'
 New-Item -ItemType Directory -Force $surrealBinDir | Out-Null
 $packagedSurrealExe = Join-Path $surrealBinDir 'surreal.exe'
 Copy-Item -LiteralPath $SurrealExe -Destination $packagedSurrealExe -Force
@@ -690,7 +645,6 @@ Write-Output 'Prior installation restored; files and database were not replaced.
 '@
 Set-Content -LiteralPath (Join-Path $stage 'Rollback.ps1') -Value $rollback -Encoding UTF8
 
-if ($IncludeWorkspace) {
 $startSurreal = @'
 # 用包内 surreal.exe（本仓 fork 的 2.1.x）起一台本地持久库（rocksdb 后端）。
 # 服务**不会**自己拉库：配置向导第②步选「rocksdb」之前，先跑这个脚本把库起起来，
@@ -726,8 +680,7 @@ if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
 Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buffer $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE"
 & $exe start --user $User --pass $Password --bind "127.0.0.1:$Port" $Datastore
 '@
-Set-Content -LiteralPath (Join-Path $wsStage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
-}
+Set-Content -LiteralPath (Join-Path $stage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
 
 # README
 $assetLayoutLine = if ($ExcludeMeshes) {
@@ -1100,7 +1053,7 @@ function Invoke-RocksSmoke {
     # 与 B 腿同底：整份包 workspace 拷过去（resource\surreal 的 surql、bin\surreal 都要在），
     # 再换配置——本机真配置改档 rocksdb + 端口指到脚本起的 18010，摘掉首跑哨兵。
     $rocksWs = Join-Path $env:TEMP ("ams-rocks-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
-    Copy-Item -LiteralPath $wsStage -Destination $rocksWs -Recurse
+    Copy-Item -LiteralPath $stage -Destination $rocksWs -Recurse
     Remove-Item -LiteralPath (Join-Path $rocksWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
     $rocksData = Join-Path $rocksWs '.surreal\smoke'
     $cfg = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw

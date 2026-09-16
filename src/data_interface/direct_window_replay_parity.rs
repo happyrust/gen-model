@@ -881,11 +881,6 @@ async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone
                       model_sesno: {END_SESNO} }}];"
             ),
             format!(
-                "INSERT INTO gen_root [\
-                   {{ id: gen_root:old, dbnum: {DBNUM}, source_end_sesno: {BASE_SESNO} }},\
-                   {{ id: gen_root:new, dbnum: {DBNUM}, source_end_sesno: {END_SESNO} }}];"
-            ),
-            format!(
                 "INSERT RELATION INTO room_relate [\
                    {{ id: room_relate:r1, in: {equi}, out: {gone}, room_num: 'R301' }}];"
             ),
@@ -909,12 +904,6 @@ async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone
         vec!["old".to_string()],
         "只带走 sesno > S 的模型行"
     );
-    let roots = ids(
-        &db,
-        "SELECT VALUE record::id(id) FROM gen_root;".to_string(),
-    )
-    .await;
-    assert_eq!(roots, vec!["old".to_string()], "凭证同理");
     let rooms = ids(
         &db,
         "SELECT VALUE record::id(id) FROM room_relate;".to_string(),
@@ -1157,6 +1146,8 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
                     model: Some(crate::data_interface::task_end::TaskModelOutcome {
                         all_roots_ok: true,
                         dead_roots: 0,
+                        catalogue_sessions: None,
+                        room_generation: Default::default(),
                     }),
                     info: None,
                     closes_task: true,
@@ -1175,8 +1166,8 @@ async fn run_steps(db: &Surreal<Any>, steps: &[Step]) {
     }
 }
 
-/// 一根的模型面产物：几何行 `inst_relate` / `inst_info`（`dbnum` + `model_sesno`）与
-/// 凭证 `gen_root`（`dbnum` + `source_end_sesno`），record id 与生产同形（`<ref0>_<ref1>`）。
+/// 一根的模型面产物：几何行 `inst_relate` / `inst_info`（`dbnum` + `model_sesno`），record id 与
+/// 生产同形（`<ref0>_<ref1>`）。逐根凭证行没有了（`gen_root` 退役，ADR-079）：模型面落库的只有几何行。
 fn model_block(root: RefU64, sesno: i32) -> String {
     let key = root.to_string();
     format!(
@@ -1185,8 +1176,6 @@ fn model_block(root: RefU64, sesno: i32) -> String {
            model_sesno: {sesno} }}];\n\
          INSERT INTO inst_relate [{{ id: inst_relate:⟨{key}⟩, in: pe:⟨{key}⟩, out: inst_info:⟨{key}⟩, \
            dbnum: {DBNUM}, model_sesno: {sesno} }}];\n\
-         INSERT INTO gen_root [{{ id: gen_root:⟨{key}⟩, dbnum: {DBNUM}, pe: pe:⟨{key}⟩, \
-           status: 'ready', source_end_sesno: {sesno} }}];\n\
          COMMIT TRANSACTION;"
     )
 }
@@ -1527,8 +1516,13 @@ async fn an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch() {
     run_steps(&clean, &steps).await;
     let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
     assert!(
-        expected.contains_key("pe") && expected.contains_key("gen_root"),
-        "一次成功的初始化必须真的写了数据面与凭证: {:?}",
+        expected.contains_key("pe") && expected.contains_key("inst_relate"),
+        "一次成功的初始化必须真的写了数据面与模型面: {:?}",
+        expected.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !expected.contains_key("gen_root"),
+        "逐根凭证表随 ADR-079 退役，落库不该再建它: {:?}",
         expected.keys().collect::<Vec<_>>()
     );
 
@@ -1556,7 +1550,6 @@ async fn an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch() {
             "BOX",
             "inst_relate",
             "inst_info",
-            "gen_root",
             "room_relate",
             "room_panel_relate",
         ] {
@@ -1729,6 +1722,8 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
         model: Some(crate::data_interface::task_end::TaskModelOutcome {
             all_roots_ok: true,
             dead_roots: 0,
+            catalogue_sessions: None,
+            room_generation: Default::default(),
         }),
         info: None,
         closes_task: true,

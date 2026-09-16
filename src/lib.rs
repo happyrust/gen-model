@@ -625,12 +625,15 @@ pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
 ///   （副作用补偿 + 文件轮次）/ `published_file_input`（房间输入发布清单）/
 ///   `increment_update_attempt`（固定区间重放的恢复记录，位置让给 `dbnum_write_state`）；
 /// - `room_published_*` 三张：房间输入的发布视图与拓扑源分片，常驻房间模型改从 `inst_relate`
-///   实时行装（d-21）、拓扑分片只进内存与磁盘工件。
+///   实时行装（d-21）、拓扑分片只进内存与磁盘工件；
+/// - 逐根凭证那两张（ADR-079）：`gen_root`（凭证 / 发布状态 / 目录落款，逐根成败改进进程内账本、
+///   目录落款收成水位行上的库级一份）与它旁边的 `root_dependency`（逐根目录依赖）；连同只服务
+///   它们的 `fn::gen_root_*` / `fn::sync_gen_roots` / `fn::sync_root_covers` 函数一起删。
 async fn retire_publish_run_tables() {
     if !crate::options::store_mode().is_durable() {
         return;
     }
-    const RETIRED: [&str; 13] = [
+    const RETIRED: [&str; 15] = [
         "model_publish_run",
         "model_publish_fragment",
         "model_publish_ack",
@@ -644,10 +647,31 @@ async fn retire_publish_run_tables() {
         "room_published_inst",
         "room_published_topology",
         "room_topology_source",
+        "gen_root",
+        "root_dependency",
+    ];
+    const RETIRED_FUNCTIONS: [&str; 12] = [
+        "gen_root_mdu_types",
+        "gen_root_container_types",
+        "gen_root_pointish_types",
+        "gen_root_cover",
+        "sync_gen_roots",
+        "sync_root_covers",
+        "gen_root_of",
+        "gen_root_done_status",
+        "gen_root_terminal_status",
+        "gen_roots_todo",
+        "gen_root_report",
+        "gen_root_progress",
     ];
     let sql = RETIRED
         .iter()
         .map(|table| format!("REMOVE TABLE IF EXISTS {table};"))
+        .chain(
+            RETIRED_FUNCTIONS
+                .iter()
+                .map(|function| format!("REMOVE FUNCTION IF EXISTS fn::{function};")),
+        )
         .collect::<Vec<_>>()
         .join(" ");
     match SUL_DB
@@ -656,8 +680,9 @@ async fn retire_publish_run_tables() {
         .and_then(|response| response.check())
     {
         Ok(_) => println!(
-            "发布阶段与第二条异步账的 {} 张退役表已确认不存在（一次性迁移，幂等）",
-            RETIRED.len()
+            "发布阶段、第二条异步账与逐根凭证的 {} 张退役表（及 {} 个退役函数）已确认不存在（一次性迁移，幂等）",
+            RETIRED.len(),
+            RETIRED_FUNCTIONS.len()
         ),
         Err(error) => eprintln!("清理发布阶段遗留表失败（下次启动重试）: {error:#}"),
     }
@@ -720,10 +745,52 @@ fn print_route_directory_banner(
     for problem in directory.problems() {
         eprintln!("*** MDB 路由目录：{problem} ***");
     }
-    for (dbnum, name) in directory.declared_without_file() {
+    // 声明落空的库按项目码归并成一段（ADR-078 D6）：部署首启那 41 条逐库 eprintln 到现场只剩
+    // 一屏库号，而它们其实就是「ACP 34 / SCB 4 / APS 2 / ZDJ 1 四个项目没定位到」。
+    let missing = directory.declared_without_file_by_project();
+    if !missing.is_empty() {
+        let total: usize = missing.values().map(Vec::len).sum();
+        let groups = missing
+            .iter()
+            .map(|(code, dbnums)| {
+                format!(
+                    "{}({}: {})",
+                    code.as_deref().unwrap_or("本项目"),
+                    dbnums.len(),
+                    crate::data_interface::mdb_closure::summarize_dbnums(dbnums)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" / ");
         eprintln!(
-            "*** MDB 路由目录：声明了 dbnum {dbnum}（{name}），配置的项目目录里却没有它的文件 ***"
+            "*** MDB 路由目录：MDB {} 声明的 {total} 个库没有文件，按项目归并：{groups} ***",
+            directory.mdb()
         );
+        if let Some(closure) = crate::data_interface::mdb_closure::latest() {
+            for unresolved in &closure.unresolved {
+                eprintln!(
+                    "*** MDB 路由目录：项目 {} 未定位——{}；把装着 {}000 的目录（本地或 \\\\服务器\\共享）加进 project_search_paths ***",
+                    unresolved.code,
+                    unresolved.reason,
+                    unresolved.code.to_ascii_lowercase()
+                );
+            }
+            eprintln!(
+                "*** MDB 路由目录：搜索根：{} ***",
+                closure
+                    .roots
+                    .iter()
+                    .map(|root| {
+                        if root.reachable {
+                            root.path.display().to_string()
+                        } else {
+                            format!("{}（不可达）", root.path.display())
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；")
+            );
+        }
     }
     for error in directory.verify_all_headers() {
         eprintln!("*** MDB 路由目录：{error} ***");
@@ -812,7 +879,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         }
     }
     // 内置快照收尾（含 D11 的 hd/hh 矫正，见模块 doc）：部署包的 resource/surreal
-    // 会漂移——现场 bin 停在 2025-06、整个缺 gen_root.surql——磁盘加载之后再灌一遍
+    // 会漂移——现场 bin 停在 2025-06、common.surql 差 3KB——磁盘加载之后再灌一遍
     // 编译期快照，同名函数以内置版为准，旧运行环境被抬到当前函数集。
     let step_started = Instant::now();
     crate::data_interface::embedded_surql::define_embedded_functions().await?;
@@ -942,7 +1009,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     // legacy 全量 / 历史解析（`sync_pdms` 与 `total_sync` / `incr_sync` / `only_sync_sys` /
     // `sync_history` 四个开关）2026-09-07 整条退役（ADR-058 D8）。direct 成为默认形态之后
-    // 那条路一次也没被走到过，而它与水位、模型、`gen_root` 凭证全程脱钩——「解析完了却
+    // 那条路一次也没被走到过，而它与水位、模型全程脱钩——「解析完了却
     // 什么都没建立」这个坑随路一起没了。数据面从此只有一条：watcher 首扫与增量窗口经
     // e3d-io 摄入，首载 / 重建由数据批次 worker 按单个文件调
     // `versioned_db::baseline_ingest::ingest_file`（同日 `sync_total_async_threaded` 壳也退役）。
@@ -1118,9 +1185,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         })
     };
 
-    // 把生成根凭证与**文件最新会话**对齐——run_app 里 ADR-050 那次无条件清空的补偿路径
-    // （ADR-058 D4）：一级取全部库的凭证下限，只有落后的库才开一次退化窗口，选根整条来自
-    // 稳态那条路。它读的是文件与 gen_root，不需要任何数据摄入，所以排在数据等待**之前**
+    // 把模型水位与数据水位对齐——run_app 里 ADR-050 那次无条件清空的补偿路径
+    // （ADR-058 D4 / ADR-079）：一级读全部库的两枚水位，只有落后的库才排一条 ModelOnly，选根整条来自
+    // 稳态那条路。它读的是文件与水位行，不需要任何数据摄入，所以排在数据等待**之前**
     // （ADR-058 D7：模型面不等 data_ready）——此前它压在 Meta → Catalogue → Design 摄完之后，
     // Design 基线跑多久模型面就干等多久。direct 也跑，而且 direct 才是它的主场；此前那道
     // `!direct_read_mode` 让生产形态启动时一根都不核，ADR-050 承诺的「重启靠凭证 vs 文件
@@ -1575,9 +1642,11 @@ fn print_startup_complete_banner(
                 generation,
                 problems,
             } => format!(
-                "开，degraded（代 {}）：{}",
+                "开，degraded（代 {}，{} 条缺口）——房间边照算，缺几何面板的存量边受保护、缺文件的库不在册，\
+                 这些不在 model_sesno 的房间承诺内（ADR-073 D11；明细 /health.features.room.problems）：{}",
                 short(&generation),
-                problems.join("; ")
+                problems.len(),
+                problems.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
             ),
             ResidentLifecycle::Blocked { problems } => {
                 format!(

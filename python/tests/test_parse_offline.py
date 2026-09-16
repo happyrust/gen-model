@@ -86,6 +86,17 @@ def test_sessions_ascend_to_snapshot_sesno(configured, snapshots, by_role):
         assert sesnos[-1] == by_role[role]["sesno"], role
 
 
+def test_session_user_is_named_user_and_the_old_alias_is_gone(configured, snapshots):
+    """会话页的那一格是 core.dll 的 USER（登录名），键只剩 `user`。rs-core 时代的误称
+    `computer_name` 在 0.1.25 留作别名、0.1.26 删掉——它不许回来，不然读者又会以为是机器名。"""
+    for role, path in snapshots.items():
+        rows = configured.parse.sessions(str(path))
+        assert rows, role
+        for row in rows:
+            assert isinstance(row["user"], str), (role, row["sesno"])
+            assert "computer_name" not in row, (role, row["sesno"])
+
+
 def test_parse_exposes_exactly_one_window_entry(configured):
     """old-pdms-io 底座的绑定不许再回来：窗口只剩 `net_window` 一个口径，单元素直读只剩
     e3d-io 底座的 `element`。"""

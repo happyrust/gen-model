@@ -70,10 +70,10 @@ pub fn source_file_of(dbnum: u32) -> anyhow::Result<(String, PathBuf)> {
 }
 
 /// 同上，但把「不在当前 MDB」与「成员名单读不到」分成两个答案：`Ok(None)` 是前者
-/// （多半是换过 MDB 之后留下的历史 `gen_root` 行），`Err` 是后者。
+/// （多半是换过 MDB 之后留下的历史水位行），`Err` 是后者。
 ///
 /// 启动复核（09-04 审核 #7）要把这两栏分开陈述——把「不在 MDB」记进 `unreadable`，
-/// `gen_root` 里只要留着一行历史库，`/health.startup.reconcile.result` 就一辈子出不来 `ok`。
+/// 水位表里只要留着一行历史库，`/health.startup.reconcile.result` 就一辈子出不来 `ok`。
 pub fn source_file_lookup(dbnum: u32) -> anyhow::Result<Option<(String, PathBuf)>> {
     let (pins, _) = current_mdb_sources()?;
     Ok(pins
@@ -172,8 +172,8 @@ pub enum RootDbError {
         actual: u32,
         file: PathBuf,
     },
-    /// 库、会话都对，索引里就是没有它：元素删了，或 refno 写错——典型是换过库之后留下的
-    /// 历史 `gen_root` 行。`sesno` 是查的那个会话，排障时对表用。
+    /// 库、会话都对，索引里就是没有它：元素删了，或 refno 写错——典型是换过库之后客户端
+    /// 还拿着旧的根 refno。`sesno` 是查的那个会话，排障时对表用。
     ElementMissing {
         root: RefNo,
         dbnum: u32,

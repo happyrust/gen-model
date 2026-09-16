@@ -28,9 +28,9 @@
           padding: 20px 22px; margin-bottom: 16px; }
   label { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 13px; }
   .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
-  input[type=text], input[type=number] { width: 100%; padding: 7px 10px; border: 1px solid var(--line);
-          border-radius: 6px; font: inherit; background: #fff; }
-  input[type=text]:focus { outline: 2px solid #bfd3ff; border-color: var(--accent); }
+  input[type=text], input[type=number], textarea { width: 100%; padding: 7px 10px; border: 1px solid var(--line);
+          border-radius: 6px; font: inherit; background: #fff; box-sizing: border-box; }
+  input[type=text]:focus, textarea:focus { outline: 2px solid #bfd3ff; border-color: var(--accent); }
   .row { display: flex; gap: 12px; } .row > div { flex: 1; }
   button { font: inherit; border-radius: 7px; border: 1px solid var(--line); background: #fff;
            padding: 7px 16px; cursor: pointer; }
@@ -82,13 +82,15 @@
   <!-- ① 数据源 -->
   <section class="card" id="step1" hidden>
     <h2>① 数据源：E3D 项目在哪</h2>
-    <label>项目根目录 project_path <span class="hint">装着各项目子目录的那一层，如 D:\AVEVA\Projects\E3D3.1</span></label>
+    <label>主搜索根 project_path <span class="hint">装着各项目子目录的那一层，如 D:\AVEVA\Projects\E3D3.1</span></label>
     <div class="row">
       <div><input type="text" id="f-project_path" placeholder="D:\AVEVA\Projects\E3D3.1"></div>
       <div style="flex:0 0 auto"><button id="btn-probe-project">探测</button></div>
     </div>
     <div id="probe-project-out"></div>
-    <label>纳入的项目 included_projects <span class="hint">探测后勾选；主项目单选</span></label>
+    <label>其它搜索根 project_search_paths <span class="hint">一行一个，本地路径或 \\服务器\共享；MDB 声明的外部项目按项目码到这些根里找 &lt;code&gt;000 目录，顺序即优先级；没有就留空</span></label>
+    <textarea id="f-project_search_paths" rows="2" placeholder="\\10.181.11.245\PDM&#10;E:\Projects\Reference"></textarea>
+    <label>主项目 project_name <span class="hint">探测后点选，或手填文件夹名 / 项目码</span></label>
     <div class="plist" id="plist"></div>
     <div class="row">
       <div>
@@ -104,6 +106,11 @@
         <input type="text" id="f-module" placeholder="DESI">
       </div>
     </div>
+    <div class="row" style="align-items:flex-end">
+      <div><label>MDB 闭包 <span class="hint">这个 MDB 声明了哪些项目、每个项目的目录在哪个根里；不用再勾名单（ADR-078）</span></label></div>
+      <div style="flex:0 0 auto"><button id="btn-probe-mdb">看闭包</button></div>
+    </div>
+    <div id="probe-mdb-out"></div>
     <div class="row">
       <div>
         <label>项目代号 project_code</label>
@@ -301,7 +308,8 @@ function fillForm(v) {
   else $("store-mem").checked = true;
   updateStoreUi();
   if (v.gen_model === true || v.gen_mesh === true) $("tier-full").checked = true; else $("tier-data").checked = true;
-  renderProjects((v.included_projects || []).map((name) => ({ name, e3d_shape: true, db_files: null })), v.included_projects || [], v.project_name);
+  $("f-project_search_paths").value = (v.project_search_paths || []).join("\n");
+  if (v.project_name) renderProjects([{ name: v.project_name, e3d_shape: true, db_files: null }], v.project_name);
 }
 
 // ---------- ② 档位联动 ----------
@@ -339,30 +347,84 @@ async function probeProject() {
     if (out.readable === false) return note($("probe-project-out"), "bad", "目录存在但读不了（权限？）");
     const shaped = (out.projects || []).filter((p) => p.e3d_shape);
     note($("probe-project-out"), shaped.length ? "ok" : "warn",
-      "找到 " + (out.projects || []).length + " 个子目录，其中 " + shaped.length + " 个像 E3D 项目（有 xxx000 库目录）。勾选要纳入的项目：");
-    const keep = new Set(S.cfg.included_projects || []);
-    renderProjects(out.projects || [], [...keep], val("f-project_name") || S.cfg.project_name);
+      "找到 " + (out.projects || []).length + " 个子目录，其中 " + shaped.length + " 个像 E3D 项目（有 xxx000 库目录）。点选主项目，其余项目由 MDB 决定，不用勾：");
+    renderProjects(out.projects || [], val("f-project_name") || S.cfg.project_name);
   } catch (e) { note($("probe-project-out"), "bad", e.message); }
 }
-function renderProjects(list, includedNames, primary) {
+function renderProjects(list, primary) {
   const host = $("plist"); host.innerHTML = "";
-  const included = new Set(includedNames || []);
   list.forEach((p) => {
     const card = document.createElement("label");
     card.className = "pcard" + (p.e3d_shape ? "" : " off");
     const meta = p.db_files === null || p.db_files === undefined ? "" : "库文件 ×" + p.db_files;
+    const codes = (p.code_prefixes || []).map((c) => c.toUpperCase()).join("+");
     card.innerHTML =
-      '<input type="checkbox" data-inc="' + p.name + '"' + (included.has(p.name) ? " checked" : "") + "> " +
-      '<span class="nm">' + p.name + "</span> " +
-      '<input type="radio" name="primary" title="设为主项目" data-primary="' + p.name + '"' + (primary === p.name ? " checked" : "") + ">" +
+      '<input type="radio" name="primary" title="设为主项目" data-primary="' + p.name + '"' + (primary === p.name ? " checked" : "") + "> " +
+      '<span class="nm">' + p.name + "</span>" + (codes ? ' <span class="hint">' + codes + "</span>" : "") +
       '<div class="meta">' + (p.e3d_shape ? meta : "不像 E3D 项目") + "</div>";
     host.appendChild(card);
   });
   host.querySelectorAll("[data-primary]").forEach((r) =>
-    r.addEventListener("change", () => { $("f-project_name").value = r.dataset.primary; }));
+    r.addEventListener("change", () => { $("f-project_name").value = r.dataset.primary; S.closure = null; }));
 }
-function includedProjects() {
-  return [...document.querySelectorAll("#plist [data-inc]:checked")].map((el) => el.dataset.inc);
+function searchPaths() {
+  return $("f-project_search_paths").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---------- ① MDB 闭包（ADR-078）：这个 MDB 声明了哪些项目、目录在哪个根 ----------
+async function probeMdb() {
+  const host = $("probe-mdb-out");
+  S.closure = null;
+  if (!val("f-project_path")) return note(host, "warn", "先填 project_path");
+  if (!val("f-project_name")) return note(host, "warn", "先选主项目 project_name（探测后点选，或手填）");
+  note(host, "", "读主项目 SYS、扫搜索根中…（共享盘掉线时单个根最多等 15 s）");
+  try {
+    const out = await api("/api/v1/setup/probe/mdb", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project_path: val("f-project_path"),
+        project_search_paths: searchPaths(),
+        project_name: val("f-project_name"),
+        mdb_name: val("f-mdb_name") || "ALL",
+      }),
+    });
+    if (!out.ok) return note(host, "bad", out.error || "探测失败");
+    S.closure = out;
+    renderClosure(out);
+  } catch (e) { note(host, "bad", e.message); }
+}
+function renderClosure(out) {
+  const host = $("probe-mdb-out");
+  const rootLabel = (i) => "根#" + (i + 1);
+  let html = "";
+  const badRoots = (out.roots || []).filter((r) => !r.reachable);
+  if (!out.main_located) {
+    html += '<div class="note bad">主项目 <b>' + esc(out.project) + "</b> 没定位到：" +
+      esc((out.problems || []).find((p) => p.startsWith("主项目")) || "搜索根里没有装着 <code>000 的同名文件夹（&lt;code&gt; = 项目码）") + "</div>";
+  }
+  if (out.declaration_error) {
+    html += '<div class="note bad">读不到 MDB ' + esc(out.mdb) + " 的声明，外部项目无从派生：<br><code>" + esc(out.declaration_error) + "</code></div>";
+  }
+  badRoots.forEach((r) => {
+    html += '<div class="note bad">搜索根 ' + esc(r.path) + " 不可达：" + esc(r.problem || "") + "</div>";
+  });
+  html += "<table><tr><th>项目码</th><th>项目目录</th><th>所在根</th><th>MDB 库数</th><th>影子副本</th></tr>";
+  (out.projects || []).forEach((p) => {
+    html += "<tr><td>" + esc((p.codes || []).join("+")) + (p.is_main ? ' <span class="chip">主</span>' : "") + "</td>" +
+      "<td>" + esc(p.project_dir) + "</td><td>" + rootLabel(p.root_index) + "</td>" +
+      "<td>" + (p.dbnums || []).length + "</td><td>" + ((p.shadowed || []).length ? esc(p.shadowed.join(", ")) : "—") + "</td></tr>";
+  });
+  (out.unresolved || []).forEach((u) => {
+    html += '<tr><td><span class="st-bad">' + esc(u.code) + "</span></td>" +
+      '<td colspan="4"><span class="st-bad">未定位</span>：' + esc(u.reason) + "<br>dbnum：" + esc((u.dbnums || []).join(", ")) +
+      "<br><span class='hint'>" + esc(u.hint || "") + "</span></td></tr>";
+  });
+  html += "</table>";
+  const okAll = out.main_located && !out.declaration_error && !(out.unresolved || []).length && !badRoots.length;
+  html = '<div class="note ' + (okAll ? "ok" : "warn") + '">' + esc(out.banner || "") + "</div>" + html;
+  (out.problems || []).filter((p) => !p.startsWith("主项目")).forEach((p) => { html += '<div class="note warn">' + esc(p) + "</div>"; });
+  host.innerHTML = html;
 }
 
 // ---------- ② 存储测试 ----------
@@ -404,7 +466,7 @@ function gatherPatch() {
   const full = $("tier-full").checked;
   const patch = {
     project_path: val("f-project_path"),
-    included_projects: includedProjects(),
+    project_search_paths: searchPaths(),
     project_name: val("f-project_name"),
     mdb_name: val("f-mdb_name") || "ALL",
     module: val("f-module") || "DESI",
@@ -421,11 +483,24 @@ function gatherPatch() {
   };
   const code = val("f-project_code");
   if (code) patch.project_code = parseInt(code, 10);
-  if (!patch.included_projects.length && patch.project_name) patch.included_projects = [patch.project_name];
   return patch;
+}
+// 闭包没看过、或看过但有缺口（主项目没定位 / 声明读不到 / 项目码未定位 / 根不可达）时保存前确认：
+// 少一个项目就是「显示模型」不出图那种事故，不能静默落盘。
+function closureGate() {
+  const c = S.closure;
+  if (!c) return confirm("还没点「看闭包」核对 MDB 声明的项目都能定位到目录。直接保存？");
+  const gaps = [];
+  if (!c.main_located) gaps.push("主项目没定位到");
+  if (c.declaration_error) gaps.push("读不到 MDB 声明");
+  (c.unresolved || []).forEach((u) => gaps.push("项目 " + u.code + " 未定位（" + (u.dbnums || []).length + " 个库）"));
+  (c.roots || []).filter((r) => !r.reachable).forEach((r) => gaps.push("搜索根 " + r.path + " 不可达"));
+  if (!gaps.length) return true;
+  return confirm("MDB 闭包有缺口：\n- " + gaps.join("\n- ") + "\n\n这些项目的库启动后会报「声明了没文件」，它们引用的模型生成不出来。仍然保存？");
 }
 async function saveAndRestart() {
   const patch = gatherPatch();
+  if (!closureGate()) return;
   overlay("正在写入配置…");
   try {
     await api("/api/v1/setup/config", {
@@ -562,6 +637,9 @@ $("btn-finish").addEventListener("click", finish);
 ["f-v_ip", "f-v_port"].forEach((id) => $(id).addEventListener("input", () => { S.storeTestOk = false; }));
 $("f-http_api_addr").addEventListener("input", () => { S.portOk = false; });
 
+$("btn-probe-mdb").addEventListener("click", probeMdb);
+["f-project_path", "f-project_search_paths", "f-project_name", "f-mdb_name"].forEach((id) =>
+  $(id).addEventListener("input", () => { S.closure = null; }));
 $("next-1").addEventListener("click", () => {
   if (!val("f-project_path")) return alert("project_path 还没填");
   if (!val("f-project_name")) return alert("主项目 project_name 还没定（探测后点选，或手填）");

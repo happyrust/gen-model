@@ -249,6 +249,24 @@ pub(crate) fn topology_digest(groups: &[RoomGroup]) -> String {
     hex::encode(digest.finalize())
 }
 
+/// 几何摘要：有几何的在册面板各自的实例（`geo_hash` + 世界矩阵位模式），按面板序。
+/// 它进 [`ResidentRoomModel::input_version`]——面板从有几何那一侧被搬走（`demote_panel`）后要重算，
+/// 否则计算器自报的版本对不上它实际拿到的候选集。
+fn geometry_digest_of(panels: &BTreeMap<RefnoEnum, ResidentPanel>) -> String {
+    let mut geometry = Sha256::new();
+    geometry.update(b"resident-room-geometry-v1");
+    for (panel, value) in panels {
+        geometry.update(panel.to_string().as_bytes());
+        for inst in &value.insts {
+            geometry.update(inst.geo_hash.as_bytes());
+            for bits in inst.matrix.to_cols_array().map(f32::to_bits) {
+                geometry.update(bits.to_le_bytes());
+            }
+        }
+    }
+    hex::encode(geometry.finalize())
+}
+
 /// 关键字过滤 + 命名校验后的在册视图——与 `room_model::load_room_panel_map` 的产物同形。
 pub(crate) fn registered_map(
     groups: &[RoomGroup],
@@ -277,14 +295,20 @@ pub(crate) struct ResidentRoomModel {
     pub map: RoomPanelMap,
     /// 在册且几何可用的面板。
     pub panels: BTreeMap<RefnoEnum, ResidentPanel>,
-    /// 在册却没拿到几何或包围盒不可用的面板（与 `PanelIndex::missing_panels` 同口径、同序）。
+    /// 在册却没有可用几何的面板（与 `PanelIndex::missing_panels` 同口径、同序）：从未生成、
+    /// 启动预生成失败、世界包围盒不可用、`.mesh` 读不出——四种来源同一处置（ADR-073 D9）：
+    /// 不进索引、逐根写边时作为保护集让开、在这里留痕，**不阻断任何根**。
     pub missing_panels: Vec<RefnoEnum>,
-    /// `missing_panels` 里**有几何行、却有一行世界包围盒不可用**的那一部分（共识 D-A (a)，
-    /// 2026-09-08）。另一部分是「一条几何行都没有」（从未生成）——两者对归属计算同样是
-    /// 「判不了就不写」，对**参照**却不同：从未生成的面板没有边可陈旧，几何到来时由发布事务的
-    /// `RoomRecalcPanel` 补算，不挡参照、不入队；有行却不可用说明这块面板的几何不可信、它的存量
-    /// 边可能已经陈旧，挡参照并入队等几何修好。`room_startup::split_recalc_by_geometry` 按它分摊。
+    /// `missing_panels` 里**有几何行、却有一行世界包围盒不可用**的那一部分。只是指标上的细分
+    /// （`/health` 与横幅点名「几何不可信」而不是「还没生成」）；对归属计算与其余缺几何面板
+    /// 一样是保护集。「有行却不可用挡参照」那一档随参照机制作废（ADR-073 2026-09-16 D9）。
     pub unusable_panels: BTreeSet<RefnoEnum>,
+    /// MDB 声明了、搜索根里却没有文件的 DESI `(dbnum, 名字)`（ADR-073 D8）：模型按有的文件建，
+    /// 缺失库里的房间与面板不在册。
+    pub missing_dbnums: Vec<(u32, String)>,
+    /// 这份模型带着的缺口，一条一句（缺库 / 不可用几何 / 预生成失败 / 网格预热失败）。非空 =
+    /// 生命周期 `Degraded { problems }`（D10 仍放行计算器）；`/health.features.room.problems` 原样出。
+    pub problems: Vec<String>,
     pub digest: String,
     pub geometry_digest: String,
     /// 这份拓扑依据的每个文件版本（按 dbnum 序）：两形态都是各 DESI 的冻结令牌。启动参照
@@ -310,6 +334,8 @@ impl fmt::Debug for ResidentRoomModel {
             .field("panels_with_geometry", &self.panels.len())
             .field("missing_panels", &self.missing_panels.len())
             .field("unusable_panels", &self.unusable_panels.len())
+            .field("missing_dbnums", &self.missing_dbnums.len())
+            .field("problems", &self.problems.len())
             .field("digest", &self.digest)
             .finish()
     }
@@ -331,9 +357,12 @@ pub(crate) struct ResidentStats {
     /// 键是文件库号（7997），不是面板 refno 的头一段（24381）：`watch_dbnums`、发布清单、
     /// 水位说的都是文件库号，照 refno 报既写错库号，又会把被监听库的面板诬成「未监听」。
     pub missing_panels_by_dbnum: BTreeMap<u32, usize>,
-    /// `missing_panels` 里有几何行却不可用的那一部分（D-A (a)）：这一部分挡参照，其余（从未
-    /// 生成）不挡。
+    /// `missing_panels` 里有几何行却不可用的那一部分（指标细分，不再挡任何东西，ADR-073 D9）。
     pub unusable_panels: usize,
+    /// MDB 声明了却没有文件的 DESI（ADR-073 D8），按 dbnum 序。
+    pub missing_dbnums: Vec<u32>,
+    /// 这份模型带着的缺口条数（[`ResidentRoomModel::problems`]）；非空 = `Degraded`。
+    pub problems: usize,
     pub meshes_cached: usize,
     pub mesh_keys_expected: usize,
     pub mesh_keys_warmed: usize,
@@ -458,38 +487,72 @@ impl ResidentRoomModel {
             });
         }
         missing_panels.sort_by_key(RefnoEnum::to_string);
-        let mut geometry = Sha256::new();
-        geometry.update(b"resident-room-geometry-v1");
-        for (panel, value) in &panels {
-            geometry.update(panel.to_string().as_bytes());
-            for inst in &value.insts {
-                geometry.update(inst.geo_hash.as_bytes());
-                for bits in inst.matrix.to_cols_array().map(f32::to_bits) {
-                    geometry.update(bits.to_le_bytes());
-                }
-            }
-        }
-        Self {
+        let geometry_digest = geometry_digest_of(&panels);
+        let mut model = Self {
             manifest,
             groups,
             map,
             panels,
             missing_panels,
             unusable_panels: invalid,
+            missing_dbnums: Vec::new(),
+            problems: Vec::new(),
             digest,
-            geometry_digest: hex::encode(geometry.finalize()),
+            geometry_digest,
             source_tokens: Vec::new(),
             expected_dbnums: Vec::new(),
             room_files: BTreeMap::new(),
             built_at: std::time::Instant::now(),
             meshes,
             mesh_warm: MeshWarmStats::default(),
+        };
+        // 有几何行却世界包围盒不可用的面板：留痕成一条缺口（ADR-073 D9），不阻断。
+        let unusable: Vec<RefnoEnum> = model.unusable_panels.iter().copied().collect();
+        for panel in unusable {
+            let dbnum = model.file_of_panel(panel);
+            model.problems.push(format!(
+                "dbnum={dbnum} panel={panel} stage=geometry reason=invalid-geometry"
+            ));
         }
+        model
     }
 
     pub(crate) fn with_source_tokens(mut self, tokens: Vec<String>) -> Self {
         self.source_tokens = tokens;
         self
+    }
+
+    /// MDB 声明了却没有文件的 DESI（ADR-073 D8）：记下来、每个库一条缺口。
+    pub(crate) fn with_missing_dbnums(mut self, mut missing: Vec<(u32, String)>) -> Self {
+        missing.sort();
+        missing.dedup();
+        for (dbnum, name) in &missing {
+            self.problems.push(format!(
+                "dbnum={dbnum} stage=source reason=missing-desi-file name={name}"
+            ));
+        }
+        self.missing_dbnums = missing;
+        self
+    }
+
+    /// 建模路上别处发现的缺口（启动预生成一块面板失败等）：原样追加，不去重、不排序——
+    /// 调用方按发生顺序给。
+    pub(crate) fn with_problems(mut self, problems: impl IntoIterator<Item = String>) -> Self {
+        self.problems.extend(problems);
+        self
+    }
+
+    /// 一块在册面板的几何判不了（`.mesh` 读不出 / 三角化失败）：从有几何那一侧搬到
+    /// `missing_panels`——它此后是保护集的一员，不是候选。几何摘要随之重算。
+    fn demote_panel(&mut self, panel: RefnoEnum) {
+        let removed = self.panels.remove(&panel).is_some();
+        if !self.missing_panels.contains(&panel) {
+            self.missing_panels.push(panel);
+            self.missing_panels.sort_by_key(RefnoEnum::to_string);
+        }
+        if removed {
+            self.geometry_digest = geometry_digest_of(&self.panels);
+        }
     }
 
     fn with_expected_dbnums(mut self, mut dbnums: Vec<u32>) -> Self {
@@ -552,16 +615,16 @@ impl ResidentRoomModel {
     }
 
     /// Materialize every unique geometry/placement used by this generation before it
-    /// becomes visible. A failed key blocks the whole generation; callers retain the
-    /// previously installed generation instead of exposing a partially warm model.
+    /// becomes visible, so that the per-root path never reads a `.mesh` it has not seen.
     ///
-    /// 几何侧的阻断只收**有几何行却不可用**的面板（`unusable_panels`，共识 D-A (a)，与
-    /// `room_startup::split_recalc_by_geometry` 同判）：它们的存量边可能已经陈旧，半份
-    /// 几何整块判不了。**从未生成**（一条几何行都没有）的在册面板不阻代——它没有边可
-    /// 陈旧，留痕（`missing_panels` / `missing_panels_by_dbnum` 指标、归属计算的排除集）
-    /// 即可，几何到来时由发布事务的 `RoomRecalcPanel` 补算（ADR-067 D6「无几何面板不算
-    /// 失败」）。把它们也算进阻断，未监听库的面板会让 `ensure_current` 每轮 Err，整个
-    /// 房间子系统在几何覆盖稀疏的实例上被按死（审核 2026-09-09 W1）。
+    /// **面板级失败不阻代**（ADR-073 D9，2026-09-16）：一块面板的 `.mesh` 读不出 / 三角化失败，
+    /// 这块面板从有几何那一侧搬进 `missing_panels`（[`Self::demote_panel`]）、记一条缺口——
+    /// 它此后是逐根写边的保护集成员，存量边不删不写；同一 `.mesh` 被别的面板共用时它们一并
+    /// 搬走。有几何行却世界包围盒不可用的面板（`unusable_panels`）在 `assemble` 就已留痕，
+    /// 这里不再把它们当阻断。此前这两类都整份 `Err` → resident `Blocked` → 之后每个任务的
+    /// 全部根「room calculator unavailable」判死，与「一处输入缺失」的分量不成比例。
+    /// 只剩一种 `Err`：预热 worker 本身崩了（`JoinError`）——那是进程级故障，受影响的面板集
+    /// 不可知，按「房间体制没起来」处置。
     ///
     /// 并发走几何闸（S3.2）：[`resident_workers`] 个常驻 worker 从共享游标动态领取，
     /// `.mesh` 读取与 `TriMesh` 构建各在一张 [`run_gated_cpu`] 许可之内——预热与生成
@@ -572,10 +635,13 @@ impl ResidentRoomModel {
     /// [`run_gated_cpu`]: crate::fast_model::concurrency::run_gated_cpu
     pub(crate) async fn warm_meshes(&mut self, mesh_dir: &Path) -> Result<(), ResidentBuildError> {
         let mut work: HashMap<MeshKey, (RefnoEnum, String, Mat4)> = HashMap::new();
+        let mut panels_of_key: HashMap<MeshKey, Vec<RefnoEnum>> = HashMap::new();
         for (panel, entry) in &self.panels {
             for inst in &entry.insts {
-                work.entry(MeshKey::new(&inst.geo_hash, inst.matrix))
+                let key = MeshKey::new(&inst.geo_hash, inst.matrix);
+                work.entry(key.clone())
                     .or_insert_with(|| (*panel, inst.geo_hash.clone(), inst.matrix));
+                panels_of_key.entry(key).or_default().push(*panel);
             }
         }
         self.mesh_warm.expected = work.len();
@@ -583,16 +649,7 @@ impl ResidentRoomModel {
         self.mesh_warm.failed = 0;
         self.mesh_warm.bytes = 0;
 
-        let mut failures = self
-            .unusable_panels
-            .iter()
-            .map(|panel| {
-                format!(
-                    "dbnum={} panel={panel} stage=geometry reason=invalid-geometry",
-                    self.file_of_panel(*panel)
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut failures = Vec::<String>::new();
 
         let mut jobs: Vec<(MeshKey, RefnoEnum, String, Mat4)> = work
             .into_iter()
@@ -649,11 +706,25 @@ impl ResidentRoomModel {
         }
         failed.sort_by_key(|(index, ..)| *index);
         self.mesh_warm.failed += failed.len();
-        for (_, panel, geo_hash, reason) in failed {
-            failures.push(format!(
-                "dbnum={} panel={panel} stage=mesh-warm geo_hash={geo_hash} reason={reason}",
-                self.file_of_panel(panel)
-            ));
+        // 面板级失败：搬进保护集、留痕，不阻代（D9）。共用同一份 `.mesh` 的面板一并搬走——
+        // 它们的三角网同样取不到。
+        let mut demoted = BTreeSet::new();
+        for (index, _, geo_hash, reason) in failed {
+            let key = &jobs[index].0;
+            let mut affected = panels_of_key.remove(key).unwrap_or_default();
+            affected.sort_by_key(RefnoEnum::to_string);
+            affected.dedup();
+            for panel in affected {
+                if demoted.insert(panel) {
+                    self.problems.push(format!(
+                        "dbnum={} panel={panel} stage=mesh-warm geo_hash={geo_hash} reason={reason}",
+                        self.file_of_panel(panel)
+                    ));
+                }
+            }
+        }
+        for panel in demoted {
+            self.demote_panel(panel);
         }
         if failures.is_empty() {
             Ok(())
@@ -692,6 +763,12 @@ impl ResidentRoomModel {
                 },
             ),
             unusable_panels: self.unusable_panels.len(),
+            missing_dbnums: self
+                .missing_dbnums
+                .iter()
+                .map(|(dbnum, _)| *dbnum)
+                .collect(),
+            problems: self.problems.len(),
             meshes_cached: self.meshes.len(),
             mesh_keys_expected: self.mesh_warm.expected,
             mesh_keys_warmed: self.mesh_warm.warmed,
@@ -913,16 +990,20 @@ async fn load_file_backed(
     match_room_fn: impl Fn(&str) -> bool,
     meshes: Arc<MeshCache>,
 ) -> anyhow::Result<ResidentRoomModel> {
-    let (composite, tokens, by_file) =
-        crate::fast_model::room_topology::load_room_groups_from_files(hierarchy)
-            .await
-            .map_err(|error| {
-                ResidentBuildError::new(form, None, format!("读文件侧房间分组失败: {error:#}"))
-            })?;
+    let crate::fast_model::room_topology::RoomGroupsFromFiles {
+        composite,
+        tokens,
+        by_file,
+        missing_design,
+    } = crate::fast_model::room_topology::load_room_groups_from_files(hierarchy)
+        .await
+        .map_err(|error| {
+            ResidentBuildError::new(form, None, format!("读文件侧房间分组失败: {error:#}"))
+        })?;
     let room_files = room_files_of(&by_file);
     let groups = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
     let map = registered_map(&groups, room_key_words, match_room_fn);
-    let records = preload_panel_projection(&tokens, &map, &room_files).await?;
+    let preload = preload_panel_projection(&tokens, &map, &room_files).await?;
     let expected_dbnums = tokens
         .iter()
         .filter_map(|token| {
@@ -938,19 +1019,37 @@ async fn load_file_backed(
         },
         groups,
         map,
-        &records,
+        &preload.records,
         meshes,
     )
     .with_source_tokens(tokens)
     .with_expected_dbnums(expected_dbnums)
-    .with_room_files(room_files))
+    .with_room_files(room_files)
+    .with_missing_dbnums(missing_design)
+    .with_problems(preload.problems))
 }
 
+/// [`preload_panel_projection`] 的回执：拿到几何的面板投影行，以及没拿到的那些的缺口记录。
+struct PanelPreload {
+    records: Vec<crate::fast_model::model_memory_store::ProjectedGeometry>,
+    /// 一块面板一条（或一个文件一条，当整个文件的 E3D 服务都起不来时）：
+    /// `dbnum=… panel=… stage=panel-preload reason=…`。没拿到几何的面板在 `assemble` 里
+    /// 自然落进 `missing_panels`（一条几何行都没有），这里只补原因。
+    problems: Vec<String>,
+}
+
+/// 在册面板的几何：磁盘工件命中就用，没命中的按文件调 e3d-model 现生成。
+///
+/// **一块面板生成失败不再整份 Err**（ADR-073 D9，2026-09-16）：记一条缺口、这块面板没有几何行
+/// → `missing_panels` → 保护集；一个文件的 E3D 服务起不来（缺 CATA 依赖等）也只让这个文件的
+/// 全部在册面板缺几何、记一条缺口。此前任一失败都让 `try_join` 整份 Err → resident `Blocked`
+/// → 之后每个任务的全部根判死。仍是 Err 的：MDB 来源枚举不出、令牌重开校验失败、生产者本身
+/// 崩掉（不是逐根的失败回执而是 `generate_frozen_roots` 自己 Err）——房间体制没起来。
 async fn preload_panel_projection(
     tokens: &[String],
     map: &RoomPanelMap,
     room_files: &BTreeMap<RefnoEnum, u32>,
-) -> anyhow::Result<Vec<crate::fast_model::model_memory_store::ProjectedGeometry>> {
+) -> anyhow::Result<PanelPreload> {
     use crate::data_interface::frozen_source::FrozenSource;
     use crate::fast_model::{e3d_model_service::E3dModelService, model_artifact};
     let mesh_dir = aios_core::get_db_option().get_meshes_path();
@@ -974,6 +1073,7 @@ async fn preload_panel_projection(
             .extend(room.panels.iter().copied());
     }
     let mut records = Vec::new();
+    let mut problems = Vec::new();
     for token in tokens {
         let source = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
         let dbnum = source.dbnum() as u32;
@@ -981,7 +1081,19 @@ async fn preload_panel_projection(
             continue;
         };
         let started = Instant::now();
-        let service = E3dModelService::from_initialization_sources(&source, &dependencies).await?;
+        let service = match E3dModelService::from_initialization_sources(&source, &dependencies)
+            .await
+        {
+            Ok(service) => service,
+            Err(error) => {
+                // 这个文件的 E3D 服务起不来：它的在册面板全部缺几何，一条缺口说清原因。
+                problems.push(format!(
+                    "dbnum={dbnum} panels={} stage=panel-preload reason=e3d-service-unavailable: {error:#}",
+                    panels.len()
+                ));
+                continue;
+            }
+        };
         let input = service.initialization_target_hash(dbnum, source.target_sesno())?;
         let mut missing = Vec::new();
         let mut cached = 0;
@@ -996,6 +1108,7 @@ async fn preload_panel_projection(
             }
         }
         let generated = missing.len();
+        let mut failed = Vec::<(String, String)>::new();
         if !missing.is_empty() {
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             let produce = service.generate_frozen_roots(dbnum, &missing, tx);
@@ -1003,11 +1116,18 @@ async fn preload_panel_projection(
                 async {
                     let mut received = BTreeSet::new();
                     while let Some(result) = rx.recv().await {
-                        let commit = result.outcome.map_err(anyhow::Error::msg)?;
                         anyhow::ensure!(
                             received.insert(result.root.to_string()),
                             "duplicate room panel output"
                         );
+                        let commit = match result.outcome {
+                            Ok(commit) => commit,
+                            Err(reason) => {
+                                // 这一块面板算不出几何：留痕、不阻断（D9）。
+                                failed.push((result.root.to_string(), reason.to_string()));
+                                continue;
+                            }
+                        };
                         anyhow::ensure!(
                             commit.upserts.iter().all(|row| row.dbnum == dbnum
                                 && row.source_sesno == source.target_sesno()),
@@ -1016,10 +1136,12 @@ async fn preload_panel_projection(
                         model_artifact::store(&cache_dir, &input, result.root, &commit)?;
                         records.extend(commit.upserts);
                     }
-                    anyhow::ensure!(
-                        received == missing.iter().cloned().collect::<BTreeSet<_>>(),
-                        "incomplete room panel generation"
-                    );
+                    // 生产者没交回执的根同样算失败：没有几何行就是缺几何，原因写「没有回执」。
+                    for root in &missing {
+                        if !received.contains(root) {
+                            failed.push((root.clone(), "no generation receipt".to_string()));
+                        }
+                    }
                     anyhow::Ok(())
                 };
             futures::future::try_join(produce, consume).await?;
@@ -1028,10 +1150,17 @@ async fn preload_panel_projection(
             crate::fast_model::e3d_model_service::forget_generation_input(dbnum);
         }
         source.reopen_verified()?;
+        failed.sort();
+        for (root, reason) in &failed {
+            problems.push(format!(
+                "dbnum={dbnum} panel={root} stage=panel-preload reason={reason}"
+            ));
+        }
         println!(
-            "[ams-phase] phase=room_panel_preload dbnum={dbnum} sesno={} panels={} generated={generated} cached={cached} records={} elapsed_ms={}",
+            "[ams-phase] phase=room_panel_preload dbnum={dbnum} sesno={} panels={} generated={generated} cached={cached} failed={} records={} elapsed_ms={}",
             source.target_sesno(),
             panels.len(),
+            failed.len(),
             records.len() - before,
             started.elapsed().as_millis()
         );
@@ -1043,7 +1172,7 @@ async fn preload_panel_projection(
     for token in &dependencies {
         FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
     }
-    Ok(records)
+    Ok(PanelPreload { records, problems })
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,7 +1495,9 @@ async fn probe_manifest(
 ) -> anyhow::Result<Option<ResidentManifest>> {
     let _ = hierarchy;
     // Both faces use frozen E3D sources, never a database geometry snapshot.
-    let key = crate::fast_model::room_topology::latest_frozen_sources().await?.0;
+    let key = crate::fast_model::room_topology::latest_frozen_sources()
+        .await?
+        .composite;
     Ok(Some(ResidentManifest { form, key }))
 }
 
@@ -1569,8 +1700,24 @@ impl StartupInitOutcome {
                     .join(", ")
             )
         };
+        let missing_dbnums = if stats.missing_dbnums.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " / 缺文件的 DESI {:?}（不在册，ADR-073 D8）",
+                stats.missing_dbnums
+            )
+        };
+        let degraded = if stats.problems == 0 {
+            String::new()
+        } else {
+            format!(
+                " → degraded：{} 条缺口（计算器照常冻，缺几何面板的存量边受保护；明细见 /health.room_build.resident.problems）",
+                stats.problems
+            )
+        };
         format!(
-            "[房间初始化] {} 文件 [{}]{} → {} 间房 / {} 块在册面板 / {} 块有几何 / {} 块无几何{} / 网格 {}/{} 键 {:.1} MB{} 耗时 {}ms",
+            "[房间初始化] {} 文件 [{}]{} → {} 间房 / {} 块在册面板 / {} 块有几何 / {} 块无几何{}{} / 网格 {}/{} 键 {:.1} MB{} 耗时 {}ms{}",
             self.form.as_str(),
             files,
             self.advance_warning
@@ -1582,6 +1729,7 @@ impl StartupInitOutcome {
             stats.panels_with_geometry,
             stats.missing_panels,
             missing,
+            missing_dbnums,
             stats.mesh_keys_warmed,
             stats.mesh_keys_expected,
             stats.mesh_bytes as f64 / (1024.0 * 1024.0),
@@ -1590,7 +1738,8 @@ impl StartupInitOutcome {
             } else {
                 String::new()
             },
-            self.elapsed_ms
+            self.elapsed_ms,
+            degraded
         )
     }
 
@@ -1770,26 +1919,58 @@ pub(crate) fn mark_loading(phase: impl Into<String>) {
     });
 }
 
-fn mark_ready(model: &ResidentRoomModel) {
-    set_lifecycle(ResidentLifecycle::Ready {
-        generation: model.manifest.key.clone(),
-        completed_at: chrono::Local::now().to_rfc3339(),
-    });
+/// 一份装好的模型对应的生命周期（ADR-073 D8–D10）：没有缺口 = `Ready`；带缺口 = `Degraded`
+/// ——模型在、计算器照常冻，只是 `problems` 点名的面板 / 库不在承诺内。纯函数，`/health` 与
+/// 单测直接喂。`generation` 是**计算输入的摘要**（[`ResidentRoomModel::input_version`]，与
+/// `MemoryRoomCalculator::resident_generation` 同一个字串），不是文件版本 composite（D12）。
+pub(crate) fn lifecycle_for(model: &ResidentRoomModel) -> ResidentLifecycle {
+    if model.problems.is_empty() {
+        ResidentLifecycle::Ready {
+            generation: model.input_version(),
+            completed_at: chrono::Local::now().to_rfc3339(),
+        }
+    } else {
+        ResidentLifecycle::Degraded {
+            generation: model.input_version(),
+            problems: model.problems.clone(),
+        }
+    }
 }
 
+/// 重建没成、手上还有上一份时的生命周期（ADR-073 D12）：留着旧的继续算，`Degraded` 里多一条
+/// `stage=refresh` 的缺口——同一条只留最新一次，不随每个任务开工一次次堆。
+pub(crate) fn lifecycle_after_refresh_failure(
+    previous: &ResidentRoomModel,
+    error: &str,
+) -> ResidentLifecycle {
+    let mut problems: Vec<String> = previous
+        .problems
+        .iter()
+        .filter(|problem| !problem.starts_with(REFRESH_PROBLEM_PREFIX))
+        .cloned()
+        .collect();
+    problems.push(format!(
+        "{REFRESH_PROBLEM_PREFIX} reason=resident refresh failed, calculating with the generation built at startup or last refresh: {error}"
+    ));
+    ResidentLifecycle::Degraded {
+        generation: previous.input_version(),
+        problems,
+    }
+}
+
+const REFRESH_PROBLEM_PREFIX: &str = "stage=refresh";
+
+fn mark_ready(model: &ResidentRoomModel) {
+    set_lifecycle(lifecycle_for(model));
+}
+
+/// 建模本体失败 = `Blocked`：没有可信的当前代。`Degraded` 从 2026-09-16 起专指「装好了、带缺口」
+/// （[`lifecycle_for`]），不再兼任「上一代还在、新代没建成」——那一档只有换代点会产生，而换代点
+/// 已无生产调用方；即便有，§4.2 也不许拿旧代为新会话写边，所以这里不看有没有上一代。
 fn mark_failed(error: &anyhow::Error) {
     record_failure(format!("{error:#}"));
-    let previous = resident_rooms()
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .for_membership(crate::options::data_face());
-    let problems = vec![format!("{error:#}")];
-    set_lifecycle(match previous {
-        Some(model) => ResidentLifecycle::Degraded {
-            generation: model.manifest.key.clone(),
-            problems,
-        },
-        None => ResidentLifecycle::Blocked { problems },
+    set_lifecycle(ResidentLifecycle::Blocked {
+        problems: vec![format!("{error:#}")],
     });
 }
 
@@ -1827,25 +2008,25 @@ fn record_failure(reason: String) {
 ///
 /// 开关判定不在调用方（源码钉 `the_full_rebuild_entry_never_takes_the_resident_model`：
 /// `room_model.rs` 不许出现 `room_resident_model()`），而在状态机里：`Disabled` /
-/// `Unsupported` 就是「本进程没有 resident 体制」，放行走今天的路；`Loading` / `Blocked` /
-/// `Degraded` 都是「有体制而这一刻没有可信的当前代」，一律 `UPDATING`。`Degraded` 不放行
-/// 是因为它的模型要么是上一代（新代没建成，§4.2 不得用旧代为新会话写边），要么带着没
-/// 收口的问题；换代点（`ensure_current`）一成功就翻回 `Ready`，门随之开。
+/// `Unsupported` 就是「本进程没有 resident 体制」，放行走今天的路；`Loading` / `Blocked`
+/// 是「有体制而这一刻没有可信的当前代」，`UPDATING`。**`Degraded` 放行**（ADR-073 D10，
+/// 2026-09-16）：它是「装好了、带着已点名的缺口」——缺几何的面板在保护集里、缺文件的库不在册，
+/// 计算器照常冻；此前把它也拦住，一处输入缺失就让之后每个任务的全部根判死。
 pub(crate) fn ensure_ready() -> anyhow::Result<()> {
     match lifecycle() {
         ResidentLifecycle::Disabled { .. }
         | ResidentLifecycle::Unsupported { .. }
-        | ResidentLifecycle::Ready { .. } => Ok(()),
-        state @ (ResidentLifecycle::Loading { .. }
-        | ResidentLifecycle::Degraded { .. }
-        | ResidentLifecycle::Blocked { .. }) => anyhow::bail!(
-            "{RESIDENT_MODEL_UPDATING}: room resident model is not ready ({})",
-            match state {
-                ResidentLifecycle::Loading { phase, .. } => format!("loading:{phase}"),
-                ResidentLifecycle::Degraded { .. } => "degraded".to_string(),
-                _ => "blocked".to_string(),
-            }
-        ),
+        | ResidentLifecycle::Ready { .. }
+        | ResidentLifecycle::Degraded { .. } => Ok(()),
+        state @ (ResidentLifecycle::Loading { .. } | ResidentLifecycle::Blocked { .. }) => {
+            anyhow::bail!(
+                "{RESIDENT_MODEL_UPDATING}: room resident model is not ready ({})",
+                match state {
+                    ResidentLifecycle::Loading { phase, .. } => format!("loading:{phase}"),
+                    _ => "blocked".to_string(),
+                }
+            )
+        }
     }
 }
 
@@ -1923,13 +2104,18 @@ pub(crate) async fn record_startup_init(result: Result<&StartupInitOutcome, &any
         at: chrono::Local::now().to_rfc3339(),
     });
     match result {
-        Ok(outcome) if outcome.advance_warning.is_some() => {
-            set_lifecycle(ResidentLifecycle::Degraded {
-                generation: outcome.model.manifest.key.clone(),
-                problems: vec![outcome.advance_warning.clone().unwrap_or_default()],
-            });
-        }
-        Ok(outcome) => mark_ready(&outcome.model),
+        // 模型带缺口（缺库 / 缺几何面板）= `Degraded`，计算器照常冻（ADR-073 D8–D10）；
+        // `advance_warning` 那一档（清单前进没走完）随分片退役恒为 `None`，留着只是形状。
+        Ok(outcome) => match (lifecycle_for(&outcome.model), &outcome.advance_warning) {
+            (ResidentLifecycle::Ready { generation, .. }, Some(warning)) => {
+                // `generation` 已是计算输入摘要（`lifecycle_for`），这里只是补上清单前进的告警。
+                set_lifecycle(ResidentLifecycle::Degraded {
+                    generation,
+                    problems: vec![warning.clone()],
+                });
+            }
+            (state, _) => set_lifecycle(state),
+        },
         Err(error) => mark_failed(error),
     }
     if let Err(error) = aios_core::SUL_DB
@@ -1940,6 +2126,229 @@ pub(crate) async fn record_startup_init(result: Result<&StartupInitOutcome, &any
         println!(
             "[房间初始化] resident_blocked 没写进 room_build:main（/health 仍按进程内结局报）: {error:#}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 任务开工前对齐（ADR-073 D12，2026-09-16）：常驻模型不再是「启动建一次、进程活多久用多久」。
+// ---------------------------------------------------------------------------
+
+/// 常驻模型的配置输入：层级口径、房间关键字、房间名校验、网格目录。启动段与任务开工前对齐
+/// 共用这一份，免得两处各抄一遍再悄悄分家。`None` = 本进程没有 resident 体制
+/// （`spatial_compute` 关着，或 `project_hd` / `project_hh` 特性都不在）。
+pub(crate) struct ResidentInputs {
+    pub hierarchy: RoomHierarchy,
+    pub room_key_words: Vec<String>,
+    pub match_room_fn: fn(&str) -> bool,
+    pub mesh_dir: PathBuf,
+}
+
+impl ResidentInputs {
+    pub(crate) fn configured() -> Option<Self> {
+        if !crate::options::spatial_compute() {
+            return None;
+        }
+        let hierarchy = RoomHierarchy::configured()?;
+        #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+        let match_room_fn = crate::fast_model::room_model::configured_match_room_fn();
+        #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+        let match_room_fn: fn(&str) -> bool = |_| false;
+        let option = aios_core::get_db_option();
+        Some(Self {
+            hierarchy,
+            room_key_words: option.get_room_key_word(),
+            match_room_fn,
+            mesh_dir: option.get_meshes_path(),
+        })
+    }
+}
+
+/// [`refresh_before_task`] 的回执。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomReferenceRefresh {
+    /// 房间开关关着 / 没有 resident 体制：没什么可对齐。
+    NotApplicable,
+    /// 此刻的文件版本 composite 与装好的那份相同：复用，零重建。
+    Unchanged { key: String },
+    /// 文件版本变了（或此前没建成）→ 按文件重建并装上。`generation_changed` = 计算输入的摘要
+    /// 变了没有——没变时旧 ACK 照旧有效（一个 DESI 前进却没动房间 / 面板是常态）。
+    Rebuilt {
+        previous_key: Option<String>,
+        key: String,
+        generation_changed: bool,
+        /// 与上一份的在册视图之差（`TopologyDiff::summary`）；此前没建成时为 `None`。
+        diff: Option<String>,
+        elapsed_ms: u128,
+    },
+    /// 重建没成：手上有旧的就留着继续算、`Degraded` 记一条 `stage=refresh` 缺口；没有旧的仍 `Blocked`。
+    Failed { error: String, kept_previous: bool },
+}
+
+impl RoomReferenceRefresh {
+    /// 给任务日志的一行；`Unchanged` / `NotApplicable` 不出声——每个任务都打一行就是噪音。
+    pub(crate) fn log_line(&self) -> Option<String> {
+        match self {
+            Self::NotApplicable | Self::Unchanged { .. } => None,
+            Self::Rebuilt {
+                previous_key,
+                key,
+                generation_changed,
+                diff,
+                elapsed_ms,
+            } => Some(format!(
+                "[房间参照] 文件版本变了，常驻房间模型按文件重建：{} → {}，计算输入{}，{}耗时 {elapsed_ms}ms",
+                previous_key
+                    .as_deref()
+                    .map(|key| key.chars().take(12).collect::<String>())
+                    .unwrap_or_else(|| "（此前没建成）".to_string()),
+                key.chars().take(12).collect::<String>(),
+                if *generation_changed {
+                    "变了（此前的根 ACK 作废，e3d.room.lookup 对它们回 not_computed 直到重生成）"
+                } else {
+                    "没变（旧 ACK 照旧有效）"
+                },
+                diff.as_deref()
+                    .map(|diff| format!("在册视图之差 {diff}，"))
+                    .unwrap_or_default(),
+            )),
+            Self::Failed {
+                error,
+                kept_previous,
+            } => Some(format!(
+                "[房间参照] 常驻房间模型重建失败（{}）: {error}",
+                if *kept_previous {
+                    "留着上一份继续算，缺口记进 /health.features.room.problems"
+                } else {
+                    "此前也没建成，仍 blocked：本批根按「房间算不出来」记失败"
+                }
+            )),
+        }
+    }
+}
+
+fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// 任务开工前把常驻房间模型对齐到**此刻的文件版本**（ADR-073 D12）。
+///
+/// 探针便宜（[`crate::fast_model::room_topology::latest_frozen_sources`]：成员清单 + 每个 DESI
+/// 的最新会话 + 令牌，不装 schema、不读拓扑、不读几何），composite 与装好的那份相同就是常路，
+/// 零 I/O 之外零成本；变了才整份重建——两层缓存（`room-groups-v2` 磁盘工件 / GroupCache 按文件令牌、
+/// `room-input-cache` 面板几何按文件的 `initialization_target_hash`）让没变的文件只付重开校验的钱，
+/// 真正重算的只有前进了的那几个文件的拓扑与面板几何。装载在 `lock_spatial_serial` 里整份替换
+/// （[`initialize_file_backed_at_startup`]），已开工的任务手里的 `Arc` 不受影响——D1「任务期间不换代」
+/// 说的是每个任务自己那份引用。
+///
+/// 并发的任务开工共用一把 [`refresh_lock`]：第二个到的等第一个重建完，再探一次 composite、多半直接
+/// `Unchanged`。重建失败**不**让任务失败：留着旧的那份继续算、生命周期 `Degraded` 记一条
+/// `stage=refresh`（[`lifecycle_after_refresh_failure`]）；此前就没建成（启动 `Blocked`）而这次成了，
+/// 就是自愈——启动时的暂时性故障不再要重启才能恢复。
+///
+/// 会话口径：文件**最新**（ADR-054 Q1 未钉住 = 最新），不是本任务的 T——任务排队期间文件又前进了的话，
+/// 常驻里的面板比本窗几何新一版；下一窗任务追上来即合一。与 ADR-067 D3 当年接受的口径相同。
+pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
+    // `Loading` = 启动段正在建：那份归启动段装，这里不抢着再建一份（任务本来也进不来——worker
+    // 排在它之后；读透侧的即时生成由 `require_room_bootstrap_ready` 挡在门外）。
+    if !crate::options::room_membership()
+        || matches!(
+            lifecycle(),
+            ResidentLifecycle::Disabled { .. }
+                | ResidentLifecycle::Unsupported { .. }
+                | ResidentLifecycle::Loading { .. }
+        )
+    {
+        return RoomReferenceRefresh::NotApplicable;
+    }
+    let Some(inputs) = ResidentInputs::configured() else {
+        return RoomReferenceRefresh::NotApplicable;
+    };
+    let _serial_refresh = refresh_lock().lock().await;
+    let face = crate::options::data_face();
+    let installed = resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .for_membership(face);
+    let probe = match crate::fast_model::room_topology::latest_frozen_sources().await {
+        Ok(frozen) => frozen,
+        Err(error) => return refresh_failed(installed.as_deref(), &error),
+    };
+    if let Some(model) = &installed {
+        if model.manifest.key == probe.composite {
+            return RoomReferenceRefresh::Unchanged {
+                key: probe.composite,
+            };
+        }
+    }
+    let started = Instant::now();
+    let rebuilt = initialize_file_backed_at_startup(
+        ResidentForm::for_face(face),
+        inputs.hierarchy,
+        &inputs.room_key_words,
+        inputs.match_room_fn,
+        &inputs.mesh_dir,
+    )
+    .await;
+    match rebuilt {
+        Ok(outcome) => {
+            let previous_generation = installed.as_ref().map(|model| model.input_version());
+            let generation = outcome.model.input_version();
+            let diff = installed
+                .as_ref()
+                .map(|old| TopologyDiff::between(&old.map, &outcome.model.map));
+            set_lifecycle(lifecycle_for(&outcome.model));
+            record_generation_swap(GenerationSwapReport {
+                form: outcome.form.as_str().to_string(),
+                key: outcome.model.manifest.key.chars().take(12).collect(),
+                diff: diff.as_ref().map(TopologyDiff::summary),
+                touched_panels: diff
+                    .as_ref()
+                    .map(|diff| diff.touched_panels().len())
+                    .unwrap_or_default(),
+                matched_targets: 0,
+                round_targets: 0,
+                guard_fired: false,
+                note: Some("task-start refresh (ADR-073 D12)".to_string()),
+                at: chrono::Local::now().to_rfc3339(),
+            });
+            RoomReferenceRefresh::Rebuilt {
+                previous_key: installed.map(|model| model.manifest.key.clone()),
+                key: outcome.model.manifest.key.clone(),
+                generation_changed: previous_generation.as_deref() != Some(generation.as_str()),
+                diff: diff.map(|diff| diff.summary()),
+                elapsed_ms: started.elapsed().as_millis(),
+            }
+        }
+        Err(error) => refresh_failed(installed.as_deref(), &error),
+    }
+}
+
+fn refresh_failed(
+    installed: Option<&ResidentRoomModel>,
+    error: &anyhow::Error,
+) -> RoomReferenceRefresh {
+    record_failure(format!("{error:#}"));
+    match installed {
+        Some(previous) => {
+            set_lifecycle(lifecycle_after_refresh_failure(
+                previous,
+                &format!("{error:#}"),
+            ));
+            RoomReferenceRefresh::Failed {
+                error: format!("{error:#}"),
+                kept_previous: true,
+            }
+        }
+        None => {
+            set_lifecycle(ResidentLifecycle::Blocked {
+                problems: vec![format!("{error:#}")],
+            });
+            RoomReferenceRefresh::Failed {
+                error: format!("{error:#}"),
+                kept_previous: false,
+            }
+        }
     }
 }
 
@@ -2058,6 +2467,14 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
                 serde_json::json!(stat.panels_with_geometry),
             );
             target.insert(
+                "missing_panels".to_string(),
+                serde_json::json!(stat.missing_panels),
+            );
+            target.insert(
+                "missing_dbnums".to_string(),
+                serde_json::json!(stat.missing_dbnums),
+            );
+            target.insert(
                 "mesh_keys_expected".to_string(),
                 serde_json::json!(stat.mesh_keys_expected),
             );
@@ -2122,6 +2539,9 @@ pub(crate) fn resident_health_from(
                 "panels_with_geometry": stat.panels_with_geometry,
                 "missing_panels": stat.missing_panels,
                 "missing_geometry": missing_geometry,
+                "unusable_panels": stat.unusable_panels,
+                "missing_dbnums": stat.missing_dbnums,
+                "problems": stat.problems,
                 "meshes_cached": stat.meshes_cached,
                 "mesh_keys_expected": stat.mesh_keys_expected,
                 "mesh_keys_warmed": stat.mesh_keys_warmed,
@@ -2218,6 +2638,179 @@ mod tests {
     #[ignore = "real AMS 8000 model and room calculation parity; isolated DB_OPTION_FILE required"]
     async fn ams_8000_models_and_rooms_without_database() -> anyhow::Result<()> {
         measure_ams_memory_rooms(Some(8000), true).await
+    }
+
+    /// ADR-073 D12 / 源码钉 16 (c) 的真文件版：装一份键对不上此刻文件版本的「陈旧」模型，第一次任务
+    /// 开工前对齐必须从真 AMS /ALL 文件整份重建并装上（`Rebuilt`，代号换成真值、生命周期 `Ready`、
+    /// `last_swap.note = task-start refresh`）；紧接着第二次对齐 composite 已相同 → `Unchanged`、零重建。
+    /// 只读文件、不连库。跑法：`cargo test --lib -- --ignored --exact <本用例> --nocapture`。
+    #[tokio::test]
+    #[ignore = "real AMS /ALL files: task-start refresh rebuilds the resident from a stale key, then reuses it"]
+    async fn ams_task_start_refresh_rebuilds_from_a_stale_key_and_then_reuses_the_generation()
+    -> anyhow::Result<()> {
+        let option = aios_core::get_db_option();
+        anyhow::ensure!(
+            option.project_name == "AvevaMarineSample"
+                && option.mdb_name.trim_start_matches('/') == "ALL",
+            "requires AMS /ALL"
+        );
+        let _on = crate::options::RoomMembershipOverride::set(true);
+        let restore = lifecycle();
+        let stale = model_of(groups(), vec![], Arc::default());
+        let stale_key = stale.manifest.key.clone();
+        {
+            let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
+            resident_rooms()
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .install(stale);
+        }
+        set_lifecycle(ResidentLifecycle::Ready {
+            generation: "stale".into(),
+            completed_at: String::new(),
+        });
+
+        let started = Instant::now();
+        let first = refresh_before_task().await;
+        let first_ms = started.elapsed().as_millis();
+        let RoomReferenceRefresh::Rebuilt {
+            previous_key,
+            key,
+            generation_changed,
+            ..
+        } = &first
+        else {
+            set_lifecycle(restore);
+            anyhow::bail!("键对不上就该重建，却回了 {first:?}");
+        };
+        anyhow::ensure!(
+            previous_key.as_deref() == Some(stale_key.as_str()),
+            "{first:?}"
+        );
+        anyhow::ensure!(key != &stale_key && *generation_changed, "{first:?}");
+        let current = current_for_calculation()?;
+        let stats = current.stats();
+        anyhow::ensure!(
+            stats.rooms > 0 && stats.registered_panels > 0 && stats.missing_panels == 0,
+            "重建后的模型该是真 AMS：{stats:?}"
+        );
+        anyhow::ensure!(
+            matches!(lifecycle(), ResidentLifecycle::Ready { .. }),
+            "{:?}",
+            lifecycle()
+        );
+        let swap = last_generation_swap().context("重建要记一次换代观测")?;
+        anyhow::ensure!(
+            swap.note.as_deref() == Some("task-start refresh (ADR-073 D12)"),
+            "{swap:?}"
+        );
+
+        let again = Instant::now();
+        let second = refresh_before_task().await;
+        let second_ms = again.elapsed().as_millis();
+        anyhow::ensure!(
+            matches!(&second, RoomReferenceRefresh::Unchanged { key: same } if same == key),
+            "composite 相同就该复用，却回了 {second:?}"
+        );
+        println!(
+            "AMS_ROOM_REFRESH {}",
+            serde_json::json!({
+                "rebuilt_ms": first_ms, "probe_only_ms": second_ms,
+                "rooms": stats.rooms, "registered_panels": stats.registered_panels,
+                "missing_panels": stats.missing_panels, "generation": current.input_version(),
+                "diff": swap.diff,
+            })
+        );
+        set_lifecycle(restore);
+        Ok(())
+    }
+
+    /// ADR-073 D8 / 源码钉 14 (b) 的真文件版：MDB 声明了、搜索根里却没有文件的那个 DESI（环境变量
+    /// `AMS_ROOM_EXPECT_MISSING_DESI`，例如把 SCB 目录从搜索根里拿掉后的 6003）→ 探针把它点进
+    /// `missing_design`、冻结源里没有它；常驻模型**照样建起来**（`load_latest` 不再 Err）、缺口进
+    /// `problems`、生命周期 `Degraded`、计算器照冻、`ensure_ready` 放行。跑法：`DB_OPTION_FILE` 指向一份
+    /// `project_path` 缺那个项目目录的配置，`AMS_ROOM_EXPECT_MISSING_DESI=6003`。
+    #[tokio::test]
+    #[ignore = "real AMS files with one DESI project removed from the search root; needs DB_OPTION_FILE + AMS_ROOM_EXPECT_MISSING_DESI"]
+    async fn ams_missing_desi_degrades_the_room_reference_instead_of_blocking_it()
+    -> anyhow::Result<()> {
+        use crate::fast_model::room_model::MemoryRoomCalculator;
+        let option = aios_core::get_db_option();
+        anyhow::ensure!(
+            option.project_name == "AvevaMarineSample"
+                && option.mdb_name.trim_start_matches('/') == "ALL",
+            "requires AMS /ALL"
+        );
+        let expected: u32 = std::env::var("AMS_ROOM_EXPECT_MISSING_DESI")
+            .context("AMS_ROOM_EXPECT_MISSING_DESI=<dbnum>")?
+            .trim()
+            .parse()?;
+        let frozen = crate::fast_model::room_topology::latest_frozen_sources().await?;
+        anyhow::ensure!(
+            frozen
+                .missing_design
+                .iter()
+                .any(|(dbnum, _)| *dbnum == expected),
+            "探针要把缺文件的 DESI 点进 missing_design: {:?}",
+            frozen.missing_design
+        );
+        anyhow::ensure!(
+            !frozen
+                .sources
+                .iter()
+                .any(|source| source.dbnum() as u32 == expected),
+            "缺文件的 DESI 不在冻结源里"
+        );
+        let started = Instant::now();
+        let mut model = load_latest(
+            RoomHierarchy::configured().context("room hierarchy")?,
+            &option.get_room_key_word(),
+            crate::fast_model::room_model::configured_match_room_fn(),
+            Arc::<MeshCache>::default(),
+        )
+        .await
+        .context("缺一个 DESI 文件时常驻模型必须照样建起来（D8）")?;
+        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        anyhow::ensure!(
+            model
+                .missing_dbnums
+                .iter()
+                .any(|(dbnum, _)| *dbnum == expected),
+            "{:?}",
+            model.missing_dbnums
+        );
+        let problems = model.problems.join("\n");
+        anyhow::ensure!(
+            problems.contains("reason=missing-desi-file")
+                && problems.contains(&expected.to_string()),
+            "{problems}"
+        );
+        let stats = model.stats();
+        anyhow::ensure!(stats.rooms > 0 && stats.registered_panels > 0, "{stats:?}");
+        let state = lifecycle_for(&model);
+        anyhow::ensure!(
+            matches!(state, ResidentLifecycle::Degraded { .. }),
+            "{state:?}"
+        );
+        let generation = model.input_version();
+        let calculator = MemoryRoomCalculator::new(Arc::new(model), option.get_meshes_path())
+            .context("Degraded 的模型照样冻得出计算器（D10）")?;
+        anyhow::ensure!(calculator.resident_generation() == generation);
+        let restore = lifecycle();
+        set_lifecycle(state);
+        let admitted = ensure_ready();
+        set_lifecycle(restore);
+        admitted.context("Degraded 放行（D10）")?;
+        println!(
+            "AMS_ROOM_MISSING_DESI {}",
+            serde_json::json!({
+                "missing_design": frozen.missing_design, "sources": frozen.sources.len(),
+                "rooms": stats.rooms, "registered_panels": stats.registered_panels,
+                "missing_panels": stats.missing_panels, "problems": stats.problems,
+                "build_ms": started.elapsed().as_millis(),
+            })
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -2810,8 +3403,9 @@ mod tests {
         assert_eq!(rooms.stats().len(), 2);
     }
 
+    /// 预热按缓存键去重；`.mesh` 读不出的面板搬进保护集、不阻代（ADR-073 D9）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn eager_mesh_warm_deduplicates_keys_and_fails_the_generation_on_a_missing_mesh() {
+    async fn eager_mesh_warm_deduplicates_keys_and_demotes_a_panel_whose_mesh_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         box_mesh()
             .ser_to_file(&dir.path().join("box.mesh"))
@@ -2838,25 +3432,48 @@ mod tests {
         assert!(stats.mesh_bytes > 0);
         assert_eq!(meshes.len(), 1);
 
+        // `.mesh` 读不出：这块面板搬进保护集、记一条缺口，**不阻代**（ADR-073 D9，源码钉 12）。
         let mut broken = model_of(
-            vec![group(5, "/1RX-RM03-R301", &[7])],
-            vec![inst(7, "missing", 0.0, (0.0, 1.0))],
+            vec![group(5, "/1RX-RM03-R301", &[7, 8])],
+            vec![
+                inst(7, "missing", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (0.0, 1.0)),
+            ],
             meshes,
         );
-        let error = broken
-            .warm_meshes(dir.path())
-            .await
-            .expect_err("missing mesh blocks generation");
-        assert!(error.to_string().contains("stage=mesh-warm"));
+        let before = broken.geometry_digest.clone();
+        broken.warm_meshes(dir.path()).await.expect(
+            "a panel whose mesh cannot be read degrades the generation, it does not block it",
+        );
         assert_eq!(broken.stats().mesh_warm_failed, 1);
+        assert!(
+            broken.panel(r(7)).is_none() && broken.panel(r(8)).is_some(),
+            "7 搬出有几何那一侧，8 照旧"
+        );
+        assert_eq!(broken.missing_panels, vec![r(7)], "7 进保护集");
+        assert_eq!(broken.problems.len(), 1);
+        assert!(
+            broken.problems[0].contains("stage=mesh-warm")
+                && broken.problems[0].contains(&format!("panel={}", r(7))),
+            "{:?}",
+            broken.problems
+        );
+        assert_ne!(
+            broken.geometry_digest, before,
+            "候选集变了，几何摘要（input_version 的一部分）随之重算"
+        );
+        assert!(
+            matches!(lifecycle_for(&broken), ResidentLifecycle::Degraded { .. }),
+            "带缺口的模型 = degraded"
+        );
     }
 
-    /// 几何侧阻断的口径（共识 D-A (a)，审核 2026-09-09 W1）：**有几何行却不可用**的面板
-    /// 阻整代（存量边可能陈旧，半份几何判不了）；**从未生成**的在册面板只留痕不阻代——
-    /// 否则未监听库的面板会把 `ensure_current` 按死，几何覆盖稀疏的实例上整个房间子系统
-    /// 永远 Blocked。
+    /// 几何侧的口径（ADR-073 D9，2026-09-16；取代共识 D-A (a) 的「有行却不可用挡参照」）：
+    /// **从未生成**与**有几何行却不可用**的在册面板一律只留痕、不阻代——它们不进索引、逐根写边
+    /// 时是保护集。此前后者整份 Err → resident `Blocked` → 之后每个任务的全部根判死，
+    /// 一块坏面板换整库房间不算，与「一处输入缺失」的分量不成比例。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn eager_mesh_warm_blocks_on_unusable_geometry_but_not_on_never_generated_panels() {
+    async fn eager_mesh_warm_degrades_on_unusable_geometry_and_never_generated_panels_alike() {
         let dir = tempfile::tempdir().unwrap();
         box_mesh()
             .ser_to_file(&dir.path().join("box.mesh"))
@@ -2887,8 +3504,13 @@ mod tests {
             (1, 1, 0)
         );
         assert_eq!(stats.missing_panels, 2, "留痕照旧：8、9 在指标里点名");
+        assert!(
+            sparse.problems.is_empty()
+                && matches!(lifecycle_for(&sparse), ResidentLifecycle::Ready { .. }),
+            "从未生成不是缺口：没有边可陈旧，几何到来时随它的根算；模型 ready"
+        );
 
-        // 面板 9 有几何行、包围盒不可用（NaN）→ 阻整代，理由点名 stage=geometry。
+        // 面板 9 有几何行、包围盒不可用（NaN）→ 只留痕，理由点名 stage=geometry；不阻代。
         let mut unusable = model_of(
             groups(),
             vec![
@@ -2901,17 +3523,25 @@ mod tests {
             unusable.unusable_panels.contains(&r(9)),
             "夹具前提：9 不可用"
         );
-        let error = unusable
+        unusable
             .warm_meshes(dir.path())
             .await
-            .expect_err("不可用几何阻整代");
-        let message = error.to_string();
+            .expect("不可用几何只留痕，不阻代（ADR-073 D9）");
         assert!(
-            message.contains("stage=geometry")
-                && message.contains("reason=invalid-geometry")
-                && message.contains(&format!("panel={}", r(9))),
-            "{message}"
+            unusable.panel(r(9)).is_none() && unusable.missing_panels.contains(&r(9)),
+            "9 不进有几何那一侧，进保护集"
         );
+        let problems = unusable.problems.join("\n");
+        assert!(
+            problems.contains("stage=geometry")
+                && problems.contains("reason=invalid-geometry")
+                && problems.contains(&format!("panel={}", r(9))),
+            "{problems}"
+        );
+        match lifecycle_for(&unusable) {
+            ResidentLifecycle::Degraded { problems, .. } => assert_eq!(problems.len(), 1),
+            other => panic!("带缺口的模型 = degraded，不是 {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2946,9 +3576,10 @@ mod tests {
     }
 
     /// 完成定义 #5 的业务 ready 门（S1）：初始化未完成时，会写房间边的入口拿不到放行——
-    /// `Loading` / `Blocked` / `Degraded` 一律结构化 `UPDATING`。`Disabled` / `Unsupported`
+    /// `Loading` / `Blocked` 结构化 `UPDATING`。`Disabled` / `Unsupported`
     /// 是「本进程没有 resident 体制」，放行走今天的路：开关判定收在状态机里，
     /// `room_model.rs` 不判开关（源码钉 `the_full_rebuild_entry_never_takes_the_resident_model`）。
+    /// **`Degraded` 放行**（ADR-073 D10，源码钉 13）：装好了、带着已点名的缺口，计算器照常冻。
     ///
     /// 全局 lifecycle 单例，测完复原；本测试二进制里没有别的用例在运行期碰这几个入口。
     #[test]
@@ -2970,11 +3601,11 @@ mod tests {
 
         set_lifecycle(ResidentLifecycle::Degraded {
             generation: "g1".into(),
-            problems: vec!["新代没建成".into()],
+            problems: vec!["dbnum=6003 stage=source reason=missing-desi-file name=SCBDESI".into()],
         });
         assert!(
-            ensure_ready().is_err(),
-            "degraded 的模型要么是旧代（§4.2 不得用旧代为新会话写边）要么带伤，不放行"
+            ensure_ready().is_ok(),
+            "degraded = 装好了、带着已点名的缺口：计算器照常冻，缺口在保护集 / 不在册（ADR-073 D10）"
         );
 
         set_lifecycle(ResidentLifecycle::Ready {
@@ -2990,6 +3621,118 @@ mod tests {
 
         set_lifecycle(restore);
     }
+    /// ADR-073 D12：重建没成时留旧代继续算，`Degraded` 记一条 `stage=refresh` 缺口——同一条只留最新，
+    /// 不随每个任务开工一次次堆；代号是计算输入摘要（与 `lifecycle_for` 同一个字串），模型自带的缺口原样在前。
+    #[test]
+    fn a_failed_refresh_keeps_the_previous_generation_and_exactly_one_refresh_problem() {
+        let mut previous = model_of(
+            groups(),
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            Arc::default(),
+        );
+        previous
+            .problems
+            .push("dbnum=6003 stage=source reason=missing-desi-file name=SCBDESI".into());
+        let ResidentLifecycle::Degraded {
+            generation,
+            problems,
+        } = lifecycle_after_refresh_failure(&previous, "boom 1")
+        else {
+            panic!("留旧代 = degraded");
+        };
+        assert_eq!(generation, previous.input_version());
+        assert_eq!(problems.len(), 2);
+        assert_eq!(
+            problems[0],
+            "dbnum=6003 stage=source reason=missing-desi-file name=SCBDESI"
+        );
+        assert!(
+            problems[1].starts_with("stage=refresh") && problems[1].contains("boom 1"),
+            "{problems:?}"
+        );
+        // 上一次的 refresh 缺口若混进模型缺口里，再失败一次也只留最新那一条。
+        previous.problems = problems;
+        let ResidentLifecycle::Degraded { problems, .. } =
+            lifecycle_after_refresh_failure(&previous, "boom 2")
+        else {
+            panic!("留旧代 = degraded");
+        };
+        assert_eq!(problems.len(), 2, "同一条只留最新一次: {problems:?}");
+        assert!(
+            problems[1].contains("boom 2") && !problems.iter().any(|p| p.contains("boom 1")),
+            "{problems:?}"
+        );
+        match lifecycle_for(&previous) {
+            ResidentLifecycle::Degraded { generation: g, .. } => assert_eq!(g, generation),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 源码钉（ADR-073 D12）：任务开工前对齐接在每一处冻计算器 / 冻代号**之前**——批次执行体的模型半边、
+    /// 初始化双 lane 的模型半边、读透侧 ensure 的准入（启动房间屏障那一档显式带代号，不换）；
+    /// 探针不得起 `E3dModelService`（那一步整套装 schema，每个任务开工付一次就把任务拖垮）。
+    #[test]
+    fn the_task_start_refresh_precedes_every_calculator_freeze_and_stays_cheap() {
+        let worker = include_str!("../data_interface/batch_worker.rs");
+        let body = worker
+            .split_once("async fn execute_frozen_batch_body(")
+            .expect("批次执行体")
+            .1;
+        let refresh = body
+            .find("refresh_room_reference_before_task(job.dbnum)")
+            .expect("批次执行体的模型半边开工前必须对齐常驻房间模型");
+        let side_actions = body
+            .find("run_model_side_actions(mgr, &side_actions)")
+            .expect("位姿 / 删除 / 级联");
+        let worklist = body.find("run_unit_worklist(").expect("单元工作单");
+        assert!(
+            refresh < side_actions && refresh < worklist,
+            "对齐必须早于冻计算器的每一处"
+        );
+
+        let init = include_str!("../data_interface/dbnum_initialize.rs");
+        let half = init
+            .split_once("async fn model_half_inner(")
+            .expect("初始化模型半边")
+            .1;
+        assert!(
+            half.find("refresh_room_reference_before_task(dbnum)")
+                .expect("初始化对齐")
+                < half
+                    .find("frozen_room_calculator()")
+                    .expect("初始化冻计算器"),
+            "初始化双 lane 的模型半边先对齐再冻"
+        );
+
+        let ensure = include_str!("../data_interface/model_dbnum_ensure.rs");
+        let refresh = ensure
+            .find("refresh_room_reference_before_task(dbnum)")
+            .expect("ensure 准入对齐");
+        let generation = ensure
+            .find("required_room_generation()?;")
+            .expect("ensure 准入冻代号");
+        assert!(refresh < generation, "代号在对齐之后冻");
+        assert!(
+            ensure[..refresh].contains("explicit_room_generation().is_none()"),
+            "启动房间屏障那一档不换代"
+        );
+
+        let topology = include_str!("room_topology.rs");
+        let probe = topology
+            .split_once("pub(crate) async fn latest_frozen_sources(")
+            .expect("探针")
+            .1
+            .split_once("\n}\n")
+            .expect("函数总有结尾")
+            .0;
+        assert!(
+            !probe.contains("E3dModelService::from_current")
+                && !probe.contains("from_frozen_sources(")
+                && !probe.contains("open_from_env"),
+            "探针不装 schema、不起 E3D 服务: {probe}"
+        );
+    }
+
     /// 参照行只动 `resident_reference` 一格：空间凭据原样，`room_model` 那种按字段投影的读法
     /// 不受影响；读回来逐字相等。
     #[tokio::test]

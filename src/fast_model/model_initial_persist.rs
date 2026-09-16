@@ -5,13 +5,12 @@
 //!
 //! 一根渲成的东西与增量路那一根**同一份行**（`model_db_adapter::render_records`，`WriteMode::Initial`：
 //! 初始化前库里没有旧行，不做整片删、不读 `slice_sources_on`）+ 这一根的两张房间边（`room_stage` 的
-//! 同一套算法，输入只有内存记录与任务开工冻住的计算器）+ `UPSERT` 回执（`create_missing = true`，
-//! 零几何的根也有回执，否则重启核对把它当「没生成过」重排）。
+//! 同一套算法，输入只有内存记录与任务开工冻住的计算器）。**没有回执行**（ADR-079：`gen_root` 退役）：
+//! 「这个库整库生成完了」由初始化收尾那一笔盖 `model_sesno` 承诺，逐根成败只进进程内账本；零几何的根
+//! 照样进笔（它的空间盒 / 房间边可能为空，但根名单要算进这一笔的账）。
 //!
 //! 装笔：一片一笔；渲出来超 [`PUBLICATION_STATEMENT_HARD_CAP`] 就按根拆成几笔、根不劈；单根超 cap 在这里
-//! 就判死信、不进队列（ADR-077 D4 / D8）。回执里同一份 `ModelTarget` 每笔只 `LET` 一次，几十根共用。
-
-use std::collections::BTreeMap;
+//! 就判死信、不进队列（ADR-077 D4 / D8）。
 
 use aios_core::RefnoEnum;
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
@@ -19,19 +18,17 @@ use e3d_io::refno::RefNo;
 
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::model_db_adapter::{
-    PUBLICATION_STATEMENT_HARD_CAP, WriteMode, publication_transaction,
-    receipt_model_target_literal, render_receipt_with_target, render_records,
+    PUBLICATION_STATEMENT_HARD_CAP, WriteMode, publication_transaction, render_records,
 };
 use crate::fast_model::model_memory_store::{ProjectionCommit, RootReceipt};
 use crate::fast_model::room_model::MemoryRoomCalculator;
 
-/// 一根渲好的份：几何行 + 房间边（`;\n` 收尾，不含回执、不含事务包装）与回执材料。
+/// 一根渲好的份：几何行 + 房间边（`;\n` 收尾，不含事务包装）与回执（只作校验与账，不落库）。
 pub(crate) struct RenderedRoot {
     pub root: RefNo,
     body: String,
-    receipt: RootReceipt,
-    /// 回执里的 `ModelTarget` 字面量（`NONE` 或对象字面量）；装笔时按笔去重成 `LET $mtN`。
-    target_literal: String,
+    /// 这一根的回执：装笔时它的 `source_sesno` 随根名单进账（初始化收尾据此记账本）。
+    pub receipt: RootReceipt,
     pub records: usize,
     pub room_edges: usize,
     /// 这一根的空间树条目（世界盒，隐式管身不进树）。
@@ -41,13 +38,9 @@ pub(crate) struct RenderedRoot {
 }
 
 impl RenderedRoot {
-    /// 装笔时的体量估计：几何行 + 房间边 + 一份带字面量的回执（`$mtN` 只会更短）。
+    /// 装笔时的体量估计：几何行 + 房间边。
     fn estimated_bytes(&self) -> usize {
-        self.body.len() + self.receipt_with(&self.target_literal).len()
-    }
-
-    fn receipt_with(&self, model_target: &str) -> String {
-        render_receipt_with_target(self.root, &self.receipt, None, model_target, true)
+        self.body.len()
     }
 }
 
@@ -55,7 +48,9 @@ impl RenderedRoot {
 pub(crate) struct InitialTransaction {
     pub dbnum: u32,
     pub sql: String,
+    /// 这一笔装的根，与各自回执的源会话号（提交成功后进程内账本记 `Generated` 用，ADR-079）。
     pub roots: Vec<RefNo>,
+    pub root_sesnos: Vec<(RefNo, u32)>,
     pub records: usize,
     pub room_edges: usize,
     pub tree_boxes: Vec<RStarBoundingBox>,
@@ -124,13 +119,10 @@ pub(crate) fn render_root(
         }
         _ => 0,
     };
-    let target_literal = receipt_model_target_literal(receipt)
-        .map_err(|error| format!("render receipt of root {root}: {error:#}"))?;
     let rendered = RenderedRoot {
         root,
         body,
         receipt: receipt.clone(),
-        target_literal,
         records: records.len(),
         room_edges,
         tree_boxes: records
@@ -154,7 +146,8 @@ pub(crate) fn render_root(
     Ok(rendered)
 }
 
-/// 渲一片：逐根渲、按 `cap` 贪心装笔。空的根（零几何、有回执）照样进笔——回执必须落。
+/// 渲一片：逐根渲、按 `cap` 贪心装笔。空的根（零几何、有回执）照样进笔——它要随这一笔的
+/// 根名单进账（ADR-079：账本与初始化收尾的 `model_sesno` 是它「生成过」的唯一说法）。
 pub(crate) fn render_slice(
     dbnum: u32,
     commits: &[(RefNo, ProjectionCommit)],
@@ -198,44 +191,34 @@ fn pack_transactions(dbnum: u32, roots: Vec<RenderedRoot>, cap: usize) -> Vec<In
     transactions
 }
 
-/// 一笔：`LET $mtN` 头 → 各根的几何行 + 房间边 → 各根回执 → `spatial_epoch` +1 → 包上事务。
+/// 一笔：各根的几何行 + 房间边 → `spatial_epoch` +1 → 包上事务。
 ///
-/// 回执排在全部几何之后（ADR-073 W2：模型在前、章在后）；一笔原子，所以「有行没章」的中间态
-/// 不存在。`spatial_epoch` 每笔 +1（ADR-071 D9：凡改变树应有内容的已提交变更都在同一事务里 +1）。
+/// 没有回执行（ADR-079）：一笔原子，行要么全落要么全不落；「这一笔成了」由写者回执说，成了才把
+/// 根名单记进账本。`spatial_epoch` 每笔 +1（ADR-071 D9：凡改变树应有内容的已提交变更都在同一事务里 +1）。
 fn seal(dbnum: u32, roots: Vec<RenderedRoot>) -> InitialTransaction {
-    let mut targets = BTreeMap::<String, usize>::new();
-    let mut header = String::new();
     let mut bodies = String::new();
-    let mut receipts = String::new();
     let mut transaction = InitialTransaction {
         dbnum,
         sql: String::new(),
         roots: Vec::with_capacity(roots.len()),
+        root_sesnos: Vec::with_capacity(roots.len()),
         records: 0,
         room_edges: 0,
         tree_boxes: Vec::new(),
         refreshed: Vec::new(),
     };
     for root in roots {
-        let expression = if root.target_literal == "NONE" {
-            root.target_literal.clone()
-        } else {
-            let next = targets.len();
-            let index = *targets.entry(root.target_literal.clone()).or_insert(next);
-            if index == next {
-                header.push_str(&format!("LET $mt{index} = {};\n", root.target_literal));
-            }
-            format!("$mt{index}")
-        };
         bodies.push_str(&root.body);
-        receipts.push_str(&root.receipt_with(&expression));
         transaction.roots.push(root.root);
+        transaction
+            .root_sesnos
+            .push((root.root, root.receipt.source_sesno));
         transaction.records += root.records;
         transaction.room_edges += root.room_edges;
         transaction.tree_boxes.extend(root.tree_boxes);
         transaction.refreshed.extend(root.refreshed);
     }
-    let mut statements = format!("{header}{bodies}{receipts}");
+    let mut statements = bodies;
     statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     statements.push('\n');
     transaction.sql = publication_transaction(&statements);
@@ -311,34 +294,26 @@ mod tests {
         rows.first().map(|row| row.n).unwrap_or(0)
     }
 
-    /// ADR-077 D5 (a)：空库上发一根，行落了、`gen_root` 恰一行且 `ready`——回执是 `UPSERT`，
-    /// 不再是那句不建行的 `UPDATE`（ADR-076 D11 起草时看到的「整库生成完 `gen_root` 0 行」）。
+    /// ADR-077 D5 (a) / ADR-079：空库上发一根，行落了；库里**没有**逐根回执行（`gen_root` 退役），
+    /// 这一笔的根名单与源会话号随事务交回，提交成功后由编排记进进程内账本。
     #[tokio::test]
-    async fn one_root_on_an_empty_database_lands_rows_and_exactly_one_ready_receipt() {
+    async fn one_root_on_an_empty_database_lands_rows_and_carries_its_root_for_the_ledger() {
         let db = database("one_root").await;
         let slice = render_slice(7997, &[(ROOT, commit(ROOT, 3))], None, default_transaction_cap());
         assert!(slice.dead_letters.is_empty(), "{:?}", slice.dead_letters);
         assert_eq!(slice.transactions.len(), 1);
         let tx = &slice.transactions[0];
         assert_eq!(tx.roots, vec![ROOT]);
+        assert_eq!(tx.root_sesnos, vec![(ROOT, 42)]);
         assert_eq!(tx.records, 3);
         assert_eq!(tx.tree_boxes.len(), 3);
         assert_eq!(tx.refreshed.len(), 3);
         assert!(tx.label().contains("roots=[24383/73948]"), "{}", tx.label());
         assert!(tx.sql.starts_with("BEGIN TRANSACTION;"), "{}", tx.sql);
         assert!(!tx.sql.contains("DELETE"), "初始化不删：{}", tx.sql);
-        assert!(tx.sql.contains("UPSERT type::thing('gen_root'"), "{}", tx.sql);
+        assert!(!tx.sql.contains("gen_root"), "回执不落库（ADR-079）：{}", tx.sql);
         db.query(tx.sql.clone()).await.unwrap().check().unwrap();
         assert_eq!(count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await, 3);
-        assert_eq!(
-            count(
-                &db,
-                "SELECT count() AS n FROM gen_root WHERE publication_status = 'ready' AND status = 'Generated' GROUP ALL;"
-            )
-            .await,
-            1
-        );
-        assert_eq!(count(&db, "SELECT count() AS n FROM gen_root GROUP ALL;").await, 1);
         #[derive(serde::Deserialize)]
         struct Epoch {
             value: u64,
@@ -352,26 +327,21 @@ mod tests {
         assert_eq!(epoch[0].value, 1, "每笔 +1");
     }
 
-    /// 零几何的根也要有回执（`geometry_count = 0`），否则重启核对把它当「没生成过」重排。
+    /// 零几何的根也要进笔、随根名单进账（`geometry_count = 0`）：它没有行可落，但「生成过」这件事
+    /// 要在这一笔提交之后进账本，任务收尾数「一根不剩」时才算得上它。
     #[tokio::test]
-    async fn a_root_without_geometry_still_lands_its_receipt() {
+    async fn a_root_without_geometry_still_rides_a_transaction_for_the_ledger() {
         let db = database("empty_root").await;
         let slice = render_slice(7997, &[(ROOT, commit(ROOT, 0))], None, default_transaction_cap());
         assert!(slice.dead_letters.is_empty());
         assert_eq!(slice.transactions.len(), 1);
+        assert_eq!(slice.transactions[0].roots, vec![ROOT]);
+        assert_eq!(slice.transactions[0].root_sesnos, vec![(ROOT, 42)]);
         db.query(slice.transactions[0].sql.clone())
             .await
             .unwrap()
             .check()
             .unwrap();
-        assert_eq!(
-            count(
-                &db,
-                "SELECT count() AS n FROM gen_root WHERE published_geometry_count = 0 AND publication_status = 'ready' GROUP ALL;"
-            )
-            .await,
-            1
-        );
         assert_eq!(count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await, 0);
     }
 
@@ -427,9 +397,10 @@ mod tests {
         assert!(error.contains("no receipt"), "{error}");
     }
 
-    /// 同一份 `ModelTarget` 一笔里只 `LET` 一次，几根共用 `$mt0`。
+    /// `ModelTarget` 不再进 SQL（ADR-079：它只活在回执 / 账本里）：带目标的两根渲出来的一笔
+    /// 只有几何行与 `spatial_epoch`，一个 `LET $mt` 都没有。
     #[test]
-    fn a_shared_model_target_is_bound_once_per_transaction() {
+    fn a_model_target_never_reaches_the_transaction_text() {
         use crate::fast_model::e3d_model_service::{ModelFileTarget, ModelTarget};
         let target = ModelTarget {
             project: "AMS".into(),
@@ -451,7 +422,9 @@ mod tests {
         b.receipt.as_mut().unwrap().1.model_target = Some(target);
         let slice = render_slice(7997, &[(ROOT, a), (OTHER, b)], None, default_transaction_cap());
         let sql = &slice.transactions[0].sql;
-        assert_eq!(sql.matches("LET $mt0 = ").count(), 1, "{sql}");
-        assert_eq!(sql.matches("desired_model_target=$mt0").count(), 2, "{sql}");
+        for forbidden in ["LET $mt", "desired_model_target", "gen_root", "root_dependency"] {
+            assert!(!sql.contains(forbidden), "{forbidden} in {sql}");
+        }
+        assert_eq!(slice.transactions[0].roots, vec![ROOT, OTHER]);
     }
 }

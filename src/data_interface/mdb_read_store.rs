@@ -116,9 +116,10 @@ impl MdbReadProvider {
             .unwrap_or_else(|| super::mdb_membership::resolve(option, project, mdb).map(Arc::new))?;
         let schema = Arc::new(DirectSchema::open_from_env()?);
         let mut directory = MdbRouteDirectory::from_membership(&membership, schema.template_dir());
-        for project in &option.included_projects {
-            if let Some(root) = super::project_paths::resolve_project_root(option, project) {
-                directory.add_dependency_dir(project, &root);
+        // 依赖目录来自 MDB 闭包里的每个项目（ADR-078 D4），不再是 `included_projects`。
+        for project in super::project_paths::project_names(option) {
+            if let Some(root) = super::project_paths::resolve_project_root(option, &project) {
+                directory.add_dependency_dir(&project, &root);
             }
         }
         anyhow::ensure!(!directory.is_empty(), "MDB {mdb} has no readable routes");

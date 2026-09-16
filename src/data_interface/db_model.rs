@@ -410,6 +410,15 @@ impl AiosDBManager {
             db_paths.len(),
             plan.describe()
         );
+        // 闭包那一句（ADR-078 D6）：搜索根几个、哪个不可达、闭包几个项目、外部库定位了几个。
+        if let Some(closure) = crate::data_interface::mdb_closure::latest() {
+            println!("{}", closure.banner_line());
+            if let Some(notice) =
+                crate::data_interface::mdb_closure::included_projects_notice(db_option, &closure)
+            {
+                println!("{notice}");
+            }
+        }
         for problem in plan.problems() {
             log::warn!("监控目录解析失败: {problem}");
             eprintln!("监控目录解析失败: {problem}");

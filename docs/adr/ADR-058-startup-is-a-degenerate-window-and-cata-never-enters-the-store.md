@@ -13,8 +13,11 @@ DESI 数据」「初始化启动时，也需要限定监听的范围的，也是
 `direct_read_mode_only_selects_the_data_read_route`；**未 live**，db 形态退役 / git tag 未做）；**direct 已是默认读模式**
 （2026-09-04 10:27 用户拍板「AIOS_DATA_READ_MODE=direct 改成默认的，全部默认切换过来」：`AIOS_DATA_READ_MODE` 不设即 direct，
 只有显式 `=db` 才退回 legacy 读路由，认不出的值按未设置处理并出声——Q3 由此部分收口，变量本身留到 db 形态整体退役时一并删）；其余未实施。
-2026-09-04 审核与后续顺序见 `docs/plans/2026-09-04-startup-increment-audit-and-next-plan.md`）
-日期：2026-09-03
+2026-09-04 审核与后续顺序见 `docs/plans/2026-09-04-startup-increment-audit-and-next-plan.md`；
+**被 [ADR-079](ADR-079-generation-root-outcomes-live-in-process-and-the-model-watermark-is-the-only-durable-model-fact.md)
+修订（2026-09-15）**：`gen_root` 表退役——D4 退化窗口的左端从「安定凭证下限」改为该库的模型水位 `model_sesno`（`0` = 整库重排），
+D5 一级过滤从「一次问完全部库的凭证下限」改为比两枚水位；D6「从未生成过的根按需生成」不动）
+日期：2026-09-03（状态行 2026-09-15 更新）
 关联：
 - **承接** ADR-056（N7「模型面不以 `pe` 为前置」、D9「eager 只对受影响根」、实施约束 9「选根根集从文件枚举」
   是本 ADR 的全部前提；本 ADR 把它们从稳态窗口延伸到启动）、ADR-057（模型面纯函数层与状态副作用的 crate 边界）、

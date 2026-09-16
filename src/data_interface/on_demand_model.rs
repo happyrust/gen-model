@@ -199,16 +199,13 @@ impl AiosDBManager {
         }
         crate::data_interface::helper::delete_inst_relate_subtree(&[requested_refno], 300).await?;
 
-        let credentials = lock_roots
-            .iter()
-            .map(|root| format!("type::thing('gen_root', '{}')", root.replace('/', "_")))
-            .collect::<Vec<_>>()
-            .join(",");
-        if !credentials.is_empty() {
-            SUL_DB
-                .query(format!("DELETE {credentials};"))
-                .await?
-                .check()?;
+        // 库里没有逐根凭证行可删（`gen_root` 退役，ADR-079）：这些根在进程内账本上的那一条摘掉，
+        // 别让「上一版成了」的记录把刚删掉的几何当成还在。
+        for root in &lock_roots {
+            if let Some(refno) = crate::data_interface::model_root_ledger::parse_root(root) {
+                let dbnum = crate::data_interface::generation_root::refno_to_e3d(refno).dbno();
+                crate::data_interface::model_root_ledger::forget_root(dbnum, refno);
+            }
         }
         Ok(())
     }

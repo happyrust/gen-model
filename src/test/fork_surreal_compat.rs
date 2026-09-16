@@ -2053,14 +2053,7 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
     };
     let db_a = connect_fork(&server_a.ws_url, "model_write_behind_restart").await;
     let root = RefNo::new(7997, 1);
-    db_a
-        .query(
-            "CREATE type::thing('gen_root', '7997_1') SET dbnum=7997, desired_revision=0, publication_status='pending';",
-        )
-        .await
-        .expect("seed root transport")
-        .check()
-        .expect("seed root");
+    // 库里没有逐根凭证行可预建（`gen_root` 退役，ADR-079）：落库的只有几何行与水位。
     let store_a = ModelMemoryStore::default();
     store_a.try_commit_current(vec![ProjectionCommit {
         receipt: Some((
@@ -2102,29 +2095,22 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
         .expect("restart fork on the same RocksDB directory");
     let db_b = connect_fork(&server_b.ws_url, "model_write_behind_restart").await;
     let mut response = db_b
-        .query(
-            "SELECT count() AS count FROM gen_root GROUP ALL;\
-             SELECT applied_sesno, model_sesno FROM dbnum_watermark:7997;",
-        )
+        .query("SELECT applied_sesno, model_sesno FROM dbnum_watermark:7997;")
         .await
         .expect("restart query transport")
         .check()
         .expect("restart query");
-    let root_rows: Vec<serde_json::Value> = response.take(0).expect("root count");
-    let watermarks: Option<serde_json::Value> = response.take(1).expect("watermark row");
-    assert_eq!(root_rows[0]["count"], 1);
+    let watermarks: Option<serde_json::Value> = response.take(0).expect("watermark row");
     let watermarks = watermarks.expect("watermark persisted");
     assert_eq!(watermarks["applied_sesno"], 43);
     assert_eq!(watermarks["model_sesno"], 42);
 
-    let probe = crate::data_interface::model_watermark::read_model_watermark_probe(&db_b, 7997)
-        .await
-        .expect("read authoritative durable recovery evidence after restart");
-    let recovery =
-        crate::data_interface::startup_reconcile::startup_model_recovery_plan(43, &probe, None)
-            .expect(
-                "the restarted process must schedule the durable watermark gap as ModelOnly work",
-            );
+    // 重启后的恢复决定只看两枚水位（ADR-079）：库里没有逐根的证据，也不需要。
+    let recovery = crate::data_interface::startup_reconcile::startup_model_recovery_plan(
+        watermarks["applied_sesno"].as_i64().unwrap() as i32,
+        watermarks["model_sesno"].as_i64().unwrap() as i32,
+    )
+    .expect("the restarted process must schedule the durable watermark gap as ModelOnly work");
     assert_eq!(recovery.model_start_sesno, 42);
     assert_eq!(recovery.reason, "model_watermark_behind");
 

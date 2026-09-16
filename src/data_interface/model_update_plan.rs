@@ -30,6 +30,10 @@ pub enum ModelWorkAction {
     /// 一块 PANE 或房间节点本身动了 → 整块面板重算（面板一动，成员全变，
     /// 元素级表达不了）。
     RoomRecalcPanel,
+    /// 本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL / CFLOOR）→ 用本库全部根的**现有几何**
+    /// 重算两张房间边，不重生几何（d-819 / ADR-073 D13）。`target_refno` 是 `dbnum=<n>`，一窗最多一条；
+    /// 由 dbnum 任务在本批根刷盘之后、收尾之前就地跑（`batch_worker`），不是对外契约、不入队。
+    RoomOnly,
 }
 
 impl ModelWorkAction {
@@ -42,6 +46,7 @@ impl ModelWorkAction {
             Self::PostRegenAabb => "post_regen_aabb",
             Self::RoomRecalcElement => "room_recalc_element",
             Self::RoomRecalcPanel => "room_recalc_panel",
+            Self::RoomOnly => "room_only",
         }
     }
 
@@ -62,6 +67,7 @@ impl ModelWorkAction {
             "post_regen_aabb" => Self::PostRegenAabb,
             "room_recalc_element" => Self::RoomRecalcElement,
             "room_recalc_panel" => Self::RoomRecalcPanel,
+            "room_only" => Self::RoomOnly,
             _ => return None,
         })
     }
@@ -83,10 +89,13 @@ pub struct ModelWorkItem {
 pub struct ModelUpdatePlan {
     pub work_items: Vec<ModelWorkItem>,
     pub warnings: Vec<String>,
-    /// 窗口规划器在 T 端观察到、但尚无持久 `gen_root` 行的根数。
+    /// 窗口规划器在 T 端观察到、S 端却不存在、又没被波及的根数（`lazy` 去向）。
     /// `None` 表示旧记录或尚未开过窗口，不能解释成零（ADR-060 M5）。
     #[serde(default)]
     pub lazy_roots: Option<u32>,
+    /// 窗口左端 `DbSet@S` 上枚举出的根数（`roots_S`，ADR-079）。`None` = 没开过窗。
+    #[serde(default)]
+    pub base_roots: Option<u32>,
     /// Live design elements touched by the window.  Staged ATT rows are sparse;
     /// these ids are file-parsed before model work to restore unchanged fields.
     #[serde(default)]
@@ -110,13 +119,13 @@ pub struct ModelUpdatePlan {
     pub room_rebuild_required: bool,
     #[serde(default)]
     pub room_rebuild_reason: Option<String>,
-    /// 凭证可以直接前移到窗口右端的生成根（`a/b`）：两端都是根、且 e3d-model 的祖先闭包
-    /// 判它子树这一窗没被波及（ADR-056 P2-2，`window_root_plan`）。不动几何、manifest、
-    /// revision，只 `UPDATE gen_root SET source_end_sesno = T`。旧恢复记录没有该字段。
+    /// 这一窗免了重生成的生成根（`a/b`）：两端都是根、且 e3d-model 的祖先闭包判它子树这一窗
+    /// 没被波及（ADR-056 P2-2 的 `advance` 去向）。库里没有任何一行要为它改（ADR-079：逐根凭证
+    /// 随 `gen_root` 退役，「到 T 仍有效」由任务收尾盖到 T 的 `model_sesno` 承诺）；名单只进回执。
     #[serde(default)]
     pub credential_advance: Vec<String>,
-    /// 规划器放弃凭证前移的原因（`credential_advance_degraded`：候选占比超阈、`unresolved`
-    /// 非空一类护栏）。此时 `credential_advance` 为空、全部持久根按过期处理；回执
+    /// 规划器不信闭包的原因（`credential_advance_degraded`：候选占比超阈、`unresolved`
+    /// 非空一类护栏）。此时 `credential_advance` 为空、全部持久根按过期重排；回执
     /// （`DataBatchResult.credential_advance.degraded`）从这里取，不再从 warnings 文本反解析。
     /// 旧恢复记录没有该字段。
     #[serde(default)]
@@ -848,6 +857,7 @@ fn build_cata_cascade_plan(
         work_items: items.into_values().collect(),
         warnings: Vec::new(),
         lazy_roots: None,
+        base_roots: None,
         design_refnos: Vec::new(),
         units: Vec::new(),
         room_rebuild_required: false,
@@ -857,6 +867,7 @@ fn build_cata_cascade_plan(
         // CATA 反向级联计划走 `ref_rev` 反查，不是文件窗口枚举——存活复核照旧（T412）。
         window_planned: false,
         transform_units: Vec::new(),
+        unit_publish_base_sesno: None,
     }
 }
 
@@ -1073,6 +1084,7 @@ pub(crate) async fn build_model_update_plan(
         work_items,
         warnings,
         lazy_roots: None,
+        base_roots: None,
         design_refnos,
         units,
         room_rebuild_required: room_rebuild_reason.is_some(),
@@ -1083,6 +1095,7 @@ pub(crate) async fn build_model_update_plan(
         // `apply_one` 仍要对它跑 T 端存活复核（T412）。
         window_planned: false,
         transform_units: Vec::new(),
+        unit_publish_base_sesno: None,
     })
 }
 
@@ -1096,7 +1109,7 @@ mod tests {
     /// 送进来会被当成非法参数拒绝——表里躺着行，接口却说没有这种东西。
     #[test]
     fn action_names_roundtrip_through_parse() {
-        const ALL_ACTIONS: [ModelWorkAction; 7] = [
+        const ALL_ACTIONS: [ModelWorkAction; 8] = [
             ModelWorkAction::RegenRoot,
             ModelWorkAction::Transform,
             ModelWorkAction::DeleteCleanup,
@@ -1104,6 +1117,7 @@ mod tests {
             ModelWorkAction::PostRegenAabb,
             ModelWorkAction::RoomRecalcElement,
             ModelWorkAction::RoomRecalcPanel,
+            ModelWorkAction::RoomOnly,
         ];
         for action in ALL_ACTIONS {
             assert_eq!(

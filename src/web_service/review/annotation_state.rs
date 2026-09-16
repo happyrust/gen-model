@@ -630,10 +630,16 @@ async fn lookup_task_node(task_id: &str) -> Result<Option<TaskNodeRow>, String> 
 }
 
 async fn compute_review_round(task_id: &str) -> Result<u32, String> {
+    // 不能写成 `SELECT count() … WHERE task_id = $task_id AND action = 'return' GROUP ALL`：
+    // SurrealDB 2.1.4 对「索引列等值 + count() + GROUP ALL」走 `Iterate Index Count` 捷径
+    // （`idx_workflow_task`），把 `action = 'return'` 整个丢掉，算出来的是该任务全部历史条数
+    //（实测 2026-09-15：一条 submit 也回 1，`action = 'zzz'` 同样回 1，EXPLAIN 可见）。
+    // 于是 active 之后 round 变 2，校核侧 agree / reject 按 `…:2` 找不到设计侧 `…:1` 的状态，
+    // 一律 409「未找到设计处理状态」。改成只按索引列过滤、在聚合里数 action，不再触发那条捷径。
     let sql = r#"
-        SELECT count() as count
+        SELECT count(action = 'return') as count
         FROM review_workflow_history
-        WHERE task_id = $task_id AND action = 'return'
+        WHERE task_id = $task_id
         GROUP ALL
     "#;
 

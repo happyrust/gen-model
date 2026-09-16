@@ -1624,10 +1624,10 @@ impl E3dModelService {
                 );
                 projection.failures.push((
                     root,
-                    format!(
+                    crate::data_interface::mdb_route_directory::explain_unregistered_dbs(&format!(
                         "{root_failed} geometry element(s) failed: {:?}",
                         snapshot.report.failed
-                    ),
+                    )),
                 ));
                 continue;
             }
@@ -2192,10 +2192,12 @@ impl E3dModelService {
                     "e3d-model root {root} failed geometry details: {:?}",
                     snapshot.report.failed
                 );
-                format!(
+                // e3d-io 的「db N 没注册进这个 DbSet」补上路由目录知道的原因（ADR-078 D5）：
+                // 现场人看到的才是「项目 ACP 的目录没定位到」，不是一个库号。
+                crate::data_interface::mdb_route_directory::explain_unregistered_dbs(&format!(
                     "{root_failed} geometry element(s) failed: {:?}",
                     snapshot.report.failed
-                )
+                ))
             });
             if let Some(failure) = failure {
                 if incomplete == IncompleteRoot::Discard {
@@ -5033,9 +5035,8 @@ mod tests {
         let tube_gate = body
             .find("tube_segment_completeness(&delta)")
             .expect("tube segment completeness gate");
-        let publication = body
-            .find("publish(vec![ProjectionCommit {")
-            .expect("publication");
+        // 提交攒成一批、循环结束一次发（D4 的原子边界）。
+        let publication = body.find("publish(commits)?").expect("publication");
         assert!(
             complete < gate
                 && gate < production

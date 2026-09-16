@@ -44,10 +44,11 @@
 //! `表:⟨…⟩` 那种位置没有转义序列可用，所以走 [`bracketed_id`] **拒绝**超出机器 id 字母表的
 //! 东西。裸插值一处都不留——留一处，下一个往行上加字段的人就会照抄它。
 //!
-//! # `gen_root` 回执少了一样东西
+//! # 回执不落库（ADR-079）
 //!
-//! revision CAS 没有跟过来（回执里没有 revision）。「同一根不许被两个源会话混着发布」那条
-//! 守卫仍在，读的是库里的活行；`published_revision` 跟着 `desired_revision` 走。
+//! `gen_root` 表退役：一根落库成功之后没有任何一行章要盖，「这根这一版成了」记进进程内账本
+//! （`model_root_ledger`），库里模型面唯一的持久事实是 `dbnum_watermark.model_sesno`。
+//! 「同一根不许被两个源会话混着发布」由同一 dbnum 只有本任务一个写者与 `generation_root_lock` 守着。
 //!
 //! **两种落库介质，一套行。** 库可以是进程内嵌的 kv-mem（内存模式，`in_memory_db=true`），
 //! 也可以是 rocksdb（默认那台 ws 连的 SurrealDB，rocksdb 在服务器侧；不带 `ws` 的 `local`
@@ -92,9 +93,7 @@ use surrealdb::sql::{
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::e3d_mesh_store::geometry_record_id;
-use crate::fast_model::e3d_model_service::{
-    ModelTarget, f32_values, geometry_source_refno, transform_value,
-};
+use crate::fast_model::e3d_model_service::{f32_values, geometry_source_refno, transform_value};
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope, RootReceipt, packed_refno,
 };
@@ -188,6 +187,11 @@ pub struct PersistTarget<'a> {
     /// 树（`GLOBAL_AABB_TREE`）镜像的是**全局那个库**，所以只有写全局库的目标才该动它：
     /// 自带句柄的目标写的是别处，让它去收敛全局树，就是拿另一个库的指针污染这棵树。
     converge_spatial: bool,
+    /// 提交之后要不要把逐根成败记进进程内的生成根账本（ADR-079）。
+    ///
+    /// 账本与空间树同一条纪律：它镜像的是**全局那个库**的模型面，只有写全局库的目标才该记；
+    /// 自带句柄的目标（测试、旁路库）写的是别处，记进账本就是拿别的库的成败冒充本进程的。
+    record_ledger: bool,
 }
 
 impl PersistTarget<'_> {
@@ -208,6 +212,7 @@ impl PersistTarget<'_> {
             db: &aios_core::SUL_DB,
             medium,
             converge_spatial: true,
+            record_ledger: true,
         }
     }
 
@@ -217,6 +222,7 @@ impl PersistTarget<'_> {
             db,
             medium,
             converge_spatial: false,
+            record_ledger: false,
         }
     }
 
@@ -865,11 +871,18 @@ pub(crate) async fn persist_roots_batched_unacked(
 
 /// 任务开工时冻一份房间计算器（ADR-073 D1，硬约束：预加载房间模型只能是开工时冻结的不可变引用，
 /// 任务期间不换代）。`Ok(None)` 只表示房间归属开关已关闭；开关开启但常驻模型
-/// 不存在、在建、降级或阻塞时是 `Err`——这一轮的根都算不出房间，调用方按
+/// 在建（`Loading`）或建模本体失败（`Blocked`）时是 `Err`——这一轮的根都算不出房间，调用方按
 /// 「房间失败 = 该根失败」记进 `failed`，下一次任务重生成。
+///
+/// **`Degraded` 照常冻**（ADR-073 D8–D10，2026-09-16）：模型在、带着已点名的缺口——缺几何的在册
+/// 面板不进索引、逐根写边时是保护集（[`MemoryRoomCalculator::missing_panels`]），缺文件的 DESI 不在册；
+/// 计算器里没有整体性的「输入齐不齐」判定。此前一块面板缺几何 / 一个 DESI 缺文件就在这里 `Err`，
+/// 整批根「room calculator unavailable」判死（0.1.25 现场）。
 ///
 /// 这里不回读库、不建模型、不换代：[`current_for_calculation`] 只取启动段装好的那份 `Arc`，
 /// 计算器把面板索引建在内存里；任务期间常驻模型换代与否与这份引用无关。
+///
+/// [`MemoryRoomCalculator::missing_panels`]: crate::fast_model::room_model::MemoryRoomCalculator::missing_panels
 ///
 /// [`current_for_calculation`]: crate::fast_model::room_resident::current_for_calculation
 pub fn frozen_room_calculator()
@@ -882,17 +895,130 @@ pub fn frozen_room_calculator()
     crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir).map(Some)
 }
 
+/// 一次整库房间边重算的账（[`recompute_dbnum_room_edges`]）。
+#[derive(Debug, Clone, Default)]
+pub struct RoomEdgeRecompute {
+    /// 本库在投影里有回执的根数。
+    pub roots: usize,
+    /// 真重算并重写了边的根数（有几何的、算得出的）。
+    pub recomputed: usize,
+    /// 重写出的成员边数（`room_relate`）。
+    pub room_edges: usize,
+    pub commits: usize,
+    pub max_transaction_bytes: usize,
+    /// 算不出归属的根与原因：边原样留着（陈旧可恢复），调用方按 D2 记失败。
+    pub failed: Vec<(RefNo, String)>,
+    /// 房间代号对齐到本台计算器的 ACK 数。
+    pub acks_refreshed: usize,
+    pub elapsed_ms: u128,
+}
+
+/// 用本库全部根的**现有几何**重算两张房间边（`RoomOnly`，d-819 / ADR-073 D13）。
+///
+/// 不重生几何、不动模型行、不动空间树、不回读库：每个有回执的根拿它在投影里的记录
+/// → [`MemoryRoomCalculator::calculate_for_root`] → [`MemoryRoomCalculator::render_root_room_edges`]
+/// （按构件先删后插，缺几何面板的边受保护，D9），按 [`PERSIST_CHUNK`] 装块、一串事务提交
+/// ——与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等的硬验收（ADR-010 §9）
+/// 不多一条口径。没有几何的根跳过（它的边由对账删除那一半清过了）；算不出的根边原样留、
+/// 进 `failed`，同批其余根照常。提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器
+/// （只改这一格，几何身份不动），`e3d.room.lookup` 对它们重新回 `ready`。
+///
+/// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——那一刻本库
+/// 没有第二个写者。
+///
+/// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
+/// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
+pub async fn recompute_dbnum_room_edges(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+) -> anyhow::Result<RoomEdgeRecompute> {
+    let started = std::time::Instant::now();
+    let scope = ProjectionScope::Current;
+    let roots: Vec<RefNo> = store
+        .roots(scope)
+        .into_iter()
+        .filter(|root| root.dbno() == dbnum && store.receipt(scope, *root).is_some())
+        .collect();
+    let mut out = RoomEdgeRecompute {
+        roots: roots.len(),
+        ..Default::default()
+    };
+    let mut pieces: Vec<(usize, String)> = Vec::new();
+    let mut recomputed = Vec::new();
+    for root in &roots {
+        let records = store.records_of_root(scope, *root);
+        if records.is_empty() {
+            continue;
+        }
+        match rooms.calculate_for_root(&records) {
+            Ok(edges) => {
+                out.room_edges += edges.len();
+                // 装块按构件数（一构件一句 DELETE、成员边一句 INSERT），不按几何条数。
+                pieces.push((
+                    records.len(),
+                    rooms.render_root_room_edges(&records, &edges),
+                ));
+                recomputed.push(*root);
+            }
+            Err(error) => out.failed.push((
+                *root,
+                format!("room membership of root {root} could not be recomputed: {error:#}"),
+            )),
+        }
+    }
+    let transactions = pack_publication_transactions("", &pieces, "", false);
+    for statements in &transactions {
+        out.max_transaction_bytes = out.max_transaction_bytes.max(statements.len());
+        commit_publication_transaction(target.db, statements, "room membership recompute").await?;
+        out.commits += 1;
+    }
+    for root in &recomputed {
+        if let Some(mut ack) = store.publication_ack(scope, *root) {
+            ack.room_membership = true;
+            ack.room_generation = Some(rooms.resident_generation().to_string());
+            if store.record_publication_ack(scope, *root, ack) {
+                out.acks_refreshed += 1;
+            }
+        }
+    }
+    out.recomputed = recomputed.len();
+    out.elapsed_ms = started.elapsed().as_millis();
+    Ok(out)
+}
+
 /// 任务准入时冻结的 resident generation；房间开关关闭时没有这道完成要求。
+///
+/// 代号是**计算输入的摘要**（`ResidentRoomModel::input_version`，与
+/// [`MemoryRoomCalculator::resident_generation`] 同一个字串），不是文件版本 composite（ADR-073 D12）：
+/// 一个 DESI 前进却没动房间 / 面板时代号不变，此前的根 ACK 照旧有效。
+///
+/// [`MemoryRoomCalculator::resident_generation`]: crate::fast_model::room_model::MemoryRoomCalculator::resident_generation
 pub fn required_room_generation() -> anyhow::Result<Option<String>> {
     if !crate::options::room_membership() {
         return Ok(None);
     }
     Ok(Some(
-        crate::fast_model::room_resident::current_for_calculation()?
-            .manifest
-            .key
-            .clone(),
+        crate::fast_model::room_resident::current_for_calculation()?.input_version(),
     ))
+}
+
+/// 任务开工前把常驻房间模型对齐到此刻的文件版本（ADR-073 D12）——**冻计算器之前**调一次。
+///
+/// 是探针不是重建：文件版本 composite 与装好的那份相同就原样返回；变了才按文件重建
+/// （两层缓存让没变的文件只付重开校验的钱）。重建失败不让任务失败：留旧代继续算、
+/// `/health.features.room` 记 `stage=refresh` 缺口。回执里 `Rebuilt` / `Failed` 打一行任务日志，
+/// `Unchanged` / `NotApplicable` 不出声。任务执行体（`execute_frozen_batch_body` 的模型半边、
+/// 初始化双 lane、读透侧 ensure 准入）经这里调，不直接摸 `room_resident`。
+pub async fn refresh_room_reference_before_task(
+    dbnum: u32,
+) -> crate::fast_model::room_resident::RoomReferenceRefresh {
+    let refresh = crate::fast_model::room_resident::refresh_before_task().await;
+    if let Some(line) = refresh.log_line() {
+        println!("dbnum={dbnum} {line}");
+    }
+    refresh
 }
 
 async fn persist_roots_batched_unacked_impl(
@@ -914,6 +1040,9 @@ async fn persist_roots_batched_unacked_impl(
         );
     }
     let db = target.db;
+    // 提交成功的根记进进程内账本（ADR-079）——只对全局库的目标（[`PersistTarget::record_ledger`]）：
+    // 账本说的是「库里有了」，旁路连接 / 测试夹具上的落库不是。
+    let record_ledger = target.record_ledger;
 
     // 去重后的根序（同一根点两次只落一次）。
     let mut seen = BTreeSet::new();
@@ -947,6 +1076,7 @@ async fn persist_roots_batched_unacked_impl(
             dbnum,
             target.medium,
             rooms,
+            record_ledger,
             &shares,
             writers,
             &mut total,
@@ -975,12 +1105,13 @@ async fn persist_roots_batched_unacked_impl(
         // 正常路径把最多 512 根合进同一笔原子事务，避免大库退化成几万次网络往返。
         // 若 SQL 硬上限、数据事件或传输错误让整组失败，事务本身零提交；随后二分重试，
         // 直到定位到单根。于是成功路径保留合块吞吐，异常路径仍以根为赔付边界。
-        match persist_group(db, &live, !target.medium.is_durable()).await {
+        match persist_group(db, &live).await {
             Ok(outcome) => accept_group_outcome(
                 &live,
                 dbnum,
                 target.medium,
                 rooms,
+                record_ledger,
                 outcome,
                 &mut total,
                 &mut out,
@@ -1006,12 +1137,13 @@ async fn persist_roots_batched_unacked_impl(
                 retries.push_back((middle, live.len()));
                 while let Some((start, end)) = retries.pop_front() {
                     let retry = &live[start..end];
-                    match persist_group(db, retry, !target.medium.is_durable()).await {
+                    match persist_group(db, retry).await {
                         Ok(outcome) => accept_group_outcome(
                             retry,
                             dbnum,
                             target.medium,
                             rooms,
+                            record_ledger,
                             outcome,
                             &mut total,
                             &mut out,
@@ -1087,6 +1219,7 @@ async fn persist_shares_concurrently(
     dbnum: u32,
     medium: PersistMedium,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+    record_ledger: bool,
     shares: &[RootShare],
     writers: usize,
     total: &mut PersistedRows,
@@ -1104,7 +1237,6 @@ async fn persist_shares_concurrently(
     if live.is_empty() {
         return;
     }
-    let create_missing_receipts = !medium.is_durable();
     log::info!(
         "model publication fan-out: roots={} writers={} dbnum={dbnum}",
         live.len(),
@@ -1116,8 +1248,7 @@ async fn persist_shares_concurrently(
     let mut pending = Vec::with_capacity(live.len());
     for (index, one) in live.iter().enumerate() {
         pending.push(async move {
-            let outcome =
-                persist_group(db, std::slice::from_ref(one), create_missing_receipts).await;
+            let outcome = persist_group(db, std::slice::from_ref(one)).await;
             (index, outcome)
         });
     }
@@ -1131,6 +1262,7 @@ async fn persist_shares_concurrently(
                 dbnum,
                 medium,
                 rooms,
+                record_ledger,
                 outcome,
                 total,
                 out,
@@ -1153,6 +1285,7 @@ fn accept_group_outcome(
     dbnum: u32,
     medium: PersistMedium,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+    record_ledger: bool,
     outcome: GroupOutcome,
     total: &mut PersistedRows,
     out: &mut BatchedPersist,
@@ -1162,6 +1295,11 @@ fn accept_group_outcome(
 ) {
     for root in group {
         if let Some(receipt) = root.share.receipt.as_ref() {
+            // 这一组的每一笔都提交了：这根这一版成了，进程内账本记一条（ADR-079，`gen_root`
+            // 回执的替身）。
+            if record_ledger {
+                record_root_generated(root.share.root, &root.share.records, receipt);
+            }
             out.acknowledged.push(ExactAckCandidate {
                 root: root.share.root,
                 ack: crate::fast_model::model_memory_store::RootPublicationAck {
@@ -1213,11 +1351,10 @@ fn publication_failure_kind(error: &anyhow::Error) -> PersistFailureKind {
 }
 
 /// 一组过了房间关卡的根：渲一笔、发一笔。失败即返回 Err，调用方把这一组记成失败。
-/// 每根的顺序：最终几何 → 房间归属 → 同事务写模型行、房间边与回执。
+/// 每根的顺序：最终几何 → 房间归属 → 同事务写模型行与房间边（回执不落库，ADR-079）。
 async fn persist_group(
     db: &Surreal<Any>,
     group: &[LiveShare<'_>],
-    create_missing_receipts: bool,
 ) -> anyhow::Result<GroupOutcome> {
     // 本根要渲的完整记录；跨根重复由数据库幂等语义收敛。
     let records = group
@@ -1306,45 +1443,19 @@ async fn persist_group(
         &BTreeSet::new(),
     );
 
-    // 回执：同一份 ModelTarget 只 `LET` 一次，几百根共用。
+    // 有回执的根数：库里不再有逐根的章可盖（`gen_root` 退役，ADR-079），回执只用来在提交之后
+    // 进进程内账本与 ACK（[`accept_group_outcome`]）。
     let receipted = group
         .iter()
-        .map(|live| live.share)
-        .filter_map(|share| share.receipt.as_ref().map(|receipt| (share.root, receipt)))
-        .collect::<Vec<_>>();
-    let mut receipt_header = String::new();
-    let mut receipt_body = String::new();
-    {
-        let mut targets = BTreeMap::<String, usize>::new();
-        for (root, receipt) in &receipted {
-            let literal =
-                receipt_model_target_literal(receipt).context(DeterministicPublicationFailure)?;
-            let expression = if literal == "NONE" {
-                literal
-            } else {
-                let next = targets.len();
-                let index = *targets.entry(literal.clone()).or_insert(next);
-                if index == next {
-                    receipt_header.push_str(&format!("LET $mt{index} = {literal};\n"));
-                }
-                format!("$mt{index}")
-            };
-            receipt_body.push_str(&render_receipt_with_target(
-                *root,
-                receipt,
-                None,
-                &expression,
-                create_missing_receipts,
-            ));
-        }
-    }
+        .filter(|live| live.share.receipt.is_some())
+        .count();
 
     // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份）。
     let room_edge_count = group.iter().map(|live| live.room_edges).sum::<usize>();
 
-    // **一组一串事务，按条数装块。** 删整片与清边进第一笔，盖章进最后一笔；中途崩就是
-    // 「有行没回执」，那几根下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位
-    // （`settle` 只在这个库一根不剩时才推进 `dbnum_watermark.model_sesno`）。
+    // **一组一串事务，按条数装块。** 删整片与清边进第一笔；中途崩就是「有行没账」，那几根
+    // 下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位（任务收尾只在这个库一根
+    // 不剩时才推进 `dbnum_watermark.model_sesno`）。
     let mut prelude = String::new();
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
@@ -1353,14 +1464,12 @@ async fn persist_group(
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
-    let epilogue = format!("{receipt_header}{receipt_body}");
-    let transactions =
-        pack_publication_transactions(&prelude, &pieces, &epilogue, touches_geometry);
+    let transactions = pack_publication_transactions(&prelude, &pieces, "", touches_geometry);
     if transactions.is_empty() {
         return Ok(GroupOutcome {
             upserted: 0,
             removed: 0,
-            receipts: 0,
+            receipts: receipted,
             commits: 0,
             room_edges: 0,
             max_transaction_bytes: 0,
@@ -1410,7 +1519,7 @@ async fn persist_group(
     Ok(GroupOutcome {
         upserted: records.len(),
         removed: cleared_room_edges.len(),
-        receipts: receipted.len(),
+        receipts: receipted,
         commits,
         room_edges: room_edge_count,
         max_transaction_bytes,
@@ -1471,13 +1580,14 @@ pub async fn ensure_root_cached_on(
     if store.receipt(ProjectionScope::Current, root).is_some() {
         return Ok(true);
     }
-    let root_id = format!("{}_{}", root.word0, root.word1);
+    // 库里没有逐根凭证行可问（`gen_root` 退役，ADR-079）：「可用」就是这根名下落了几何行。
+    // 只问存在性、不取行（`LIMIT 1`），不往投影里灌任何东西。
     let mut response = db
-        .query("SELECT VALUE publication_status = 'ready' FROM type::thing('gen_root', $root_id);")
-        .bind(("root_id", root_id))
+        .query("SELECT VALUE id FROM inst_relate WHERE anc CONTAINS $root LIMIT 1;")
+        .bind(("root", packed_refno(root)))
         .await
         .and_then(|response| response.check())?;
-    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+    Ok(!response.take::<Vec<SurThing>>(0)?.is_empty())
 }
 
 async fn persist_root_impl(
@@ -1568,9 +1678,10 @@ async fn persist_root_impl(
         .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
-    // **一根一串事务，按 [`PERSIST_CHUNK`] 条装块。** 删整片与清边进第一笔、盖章进最后
-    // 一笔，靠「先删后插 + 回执最后盖」让半途而废自愈：一笔失败就没有章，这根在窗口规划器
-    // 眼里仍未发布，下一轮重生成，而下一轮的整片删会把这一轮留下的半截行收干净。
+    // **一根一串事务，按 [`PERSIST_CHUNK`] 条装块。** 删整片与清边进第一笔；库里不再有逐根的章
+    // 可盖（`gen_root` 退役，ADR-079），「这根这一版成了」在全部笔提交之后记进进程内账本
+    // （`model_root_ledger`）。半途而废照样自愈：一笔失败账本就没有这一条，这根在窗口规划器眼里
+    // 仍欠着（或重启后随 `model_sesno → T` 那一窗）重生成，下一轮的整片删把这一轮留下的半截行收干净。
     let mode = if reconciliation_ready {
         // 整片删覆盖得到的根不必再按 id 删一遍（见 `persist_group` 里同一处的说明）。
         WriteMode::Initial
@@ -1587,13 +1698,8 @@ async fn persist_root_impl(
     prelude.push_str(&render_slice_delete(&sliced_roots));
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
-    let epilogue = match receipt.as_ref() {
-        Some(receipt) => render_receipt_version(root, receipt, None)?,
-        None => String::new(),
-    };
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
-    let transactions =
-        pack_publication_transactions(&prelude, &pieces, &epilogue, touches_geometry);
+    let transactions = pack_publication_transactions(&prelude, &pieces, "", touches_geometry);
     let mut commits = 0usize;
     for (index, statements) in transactions.iter().enumerate() {
         let commit_started = std::time::Instant::now();
@@ -1637,6 +1743,13 @@ async fn persist_root_impl(
         )
         .await;
     }
+    // 全部笔都提交了：这根这一版成了，记进进程内账本（ADR-079）。写全局库的目标才记
+    // （[`PersistTarget::record_ledger`]）——账本说的是「库里有了」，旁路连接 / 测试夹具上的落库不是。
+    if let Some(receipt) = receipt.as_ref()
+        && target.record_ledger
+    {
+        record_root_generated(root, &records, receipt);
+    }
 
     Ok(PersistedRows {
         medium: target.medium,
@@ -1645,6 +1758,22 @@ async fn persist_root_impl(
         receipts: usize::from(receipt.is_some()),
         commits,
     })
+}
+
+/// 一根落库成功后进账本的那一笔（ADR-079，`gen_root` 回执的替身）：`noun` 取根元素自己那条记录
+/// 的 noun（容器根 / 只有管身的分支没有这样一条时留空——账本里 `Generated` 的 noun 只作展示）。
+fn record_root_generated(root: RefNo, records: &[ProjectedGeometry], receipt: &RootReceipt) {
+    let noun = records
+        .iter()
+        .find(|record| record.source_refno == root)
+        .map(|record| record.noun.as_str())
+        .unwrap_or_default();
+    crate::data_interface::model_root_ledger::record_generated(
+        root.dbno(),
+        refno_from_e3d(root),
+        noun,
+        receipt.source_sesno as i32,
+    );
 }
 
 /// 写入口径：**没有 UPDATE，也没有 UPSERT**。
@@ -1789,7 +1918,9 @@ fn check_batch_publication_response(
 /// memory projection.
 pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Result<String> {
     let records = store.records_of_root(ProjectionScope::Current, root);
-    let receipt = store
+    // 回执只作前置校验（没回执的根不是一份完整投影，不许渲成整根替换）；库里没有逐根的章
+    // 可盖（`gen_root` 退役，ADR-079）。
+    store
         .receipt(ProjectionScope::Current, root)
         .with_context(|| format!("model root {root} has no publication receipt"))?;
     let mut statements = render_spooled_scope_cleanup(root);
@@ -1800,7 +1931,6 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
         .collect::<Vec<_>>();
     statements.push_str(&render_tube_branch_resets(&branches));
     statements.push_str(&render_records(&records, WriteMode::Initial)?);
-    statements.push_str(&render_receipt(root, &receipt)?);
     statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     statements.push('\n');
     Ok(publication_transaction(&statements))
@@ -1816,12 +1946,9 @@ pub fn render_spooled_scope_deletion(
 ) -> String {
     let mut statements = render_spooled_scope_cleanup(root);
     statements.push_str(&render_tube_branch_resets(tube_branches));
-    for affected in affected_roots {
-        statements.push_str(&format!(
-            "DELETE type::thing('gen_root', {});\n",
-            sql_string(&refno_key(*affected))
-        ));
-    }
+    // 被波及的根不再有库里的凭证行要删（`gen_root` 退役，ADR-079）：它们在进程内账本上的那一条
+    // 由调用方 `model_root_ledger::forget_root` 摘掉。
+    let _ = affected_roots;
     statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     statements.push('\n');
     publication_transaction(&statements)
@@ -2401,149 +2528,11 @@ fn next_tube_relation_slot(slots: &mut BTreeMap<(u32, u32), usize>, source_refno
     current
 }
 
-/// 一根投影完成后盖在 `gen_root` 上的章：窗口规划器认的就是
-/// `publication_status='ready'` 且 `desired_revision == published_revision` 这一对。
-pub fn render_receipt(root: RefNo, receipt: &RootReceipt) -> anyhow::Result<String> {
-    render_receipt_version(root, receipt, None)
-}
-fn render_receipt_version(
-    root: RefNo,
-    receipt: &RootReceipt,
-    frozen: Option<(u64, u32)>,
-) -> anyhow::Result<String> {
-    let model_target = receipt_model_target_literal(receipt)?;
-    // 这份清单是整个 run 的（设计库 + 目录库的身份、会话、摘要），与根无关，而两列恒等。
-    // 写成字面量就是每根把同一串发两遍：AMS 7997 那轮一份 5 952 字节、6 769 根合计 80.5 MB，
-    // 占整批发布 SQL 的 26%。绑一次再引用两次，库里落的东西一字不变。
-    let mut statements = String::new();
-    let model_target = if model_target == "NONE" {
-        model_target
-    } else {
-        statements.push_str(&format!("LET $mt = {model_target};\n"));
-        "$mt".to_string()
-    };
-    statements.push_str(&render_receipt_with_target(
-        root,
-        receipt,
-        frozen,
-        &model_target,
-        false,
-    ));
-    Ok(statements)
-}
-
-/// 回执里 `ModelTarget` 的 SurrealQL 字面量；没有目标就是 `NONE`。
-pub(crate) fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String> {
-    Ok(receipt
-        .model_target
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?
-        .map(|value| sql_value(&value))
-        .unwrap_or_else(|| "NONE".to_string()))
-}
-
-/// 回执本体：`model_target` 由调用方给表达式（`NONE`、字面量或一个已 `LET` 好的变量）。
-/// 跨根合块（[`persist_roots_batched`]）把同一份清单绑一次、几百根共用一个变量，就是靠这一层。
-pub(crate) fn render_receipt_with_target(
-    root: RefNo,
-    receipt: &RootReceipt,
-    frozen: Option<(u64, u32)>,
-    model_target: &str,
-    create_missing: bool,
-) -> String {
-    // 没有人再先写 `desired_target`（模型意图 upsert 随 pending 表退了，ADR-072 D5）：回执自己
-    // 把「想要的」与「发布的」一起写成本次的目标，凭证行上两对字段始终相等。
-    let target_literal = format!(
-        "{{dbnum:{},source_end_sesno:{}}}",
-        root.dbno(),
-        receipt.source_sesno
-    );
-    let (revision, desired_target, published_target) = frozen
-        .map(|(revision, dbnum)| {
-            (
-                revision.to_string(),
-                "desired_target".to_string(),
-                format!(
-                    "{{dbnum:{dbnum},source_end_sesno:{}}}",
-                    receipt.source_sesno
-                ),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                "desired_revision".into(),
-                target_literal.clone(),
-                target_literal.clone(),
-            )
-        });
-    let root_id = sql_string(&refno_key(root));
-    let mut statements = String::new();
-    let verb = if create_missing { "UPSERT" } else { "UPDATE" };
-    let initialize = if create_missing {
-        format!(
-            "dbnum={}, desired_revision=desired_revision ?? 0, ",
-            root.dbno()
-        )
-    } else {
-        String::new()
-    };
-    statements.push_str(&format!(
-        "{verb} type::thing('gen_root', {root_id}) SET \
-         {initialize}status='Generated', publication_status='ready', \
-         published_revision={revision}, desired_target={desired_target}, published_target={published_target}, \
-         desired_model_target={model_target}, published_model_target={model_target}, \
-         published_manifest_hash={}, published_geometry_count={}, \
-         source_end_sesno={}, published_via={}, last_error=NONE, updated_at=time::now();\n",
-        sql_string(&receipt.manifest_hash),
-        receipt.geometry_count,
-        receipt.source_sesno,
-        sql_string(&receipt.published_via),
-    ));
-    append_root_dependency_receipt(&mut statements, root, receipt.model_target.as_ref());
-    statements
-}
-
-// 多块发布期间盖在 `gen_root` 上的可见性栅栏（`publication_status='publishing'`，P5）随
-// 切块一起退役了：一根 / 一组收成一笔事务之后，「行已落、章未盖」这个中间态不再存在，
-// 没有东西需要读侧避让。`publication_status` 本身留着——`ready` / `stale` 照旧。
-
-// 「同一根不许被两个源会话混着发布」那道守卫（`render_publication_guard`，读凭证行上的
-// `desired_target.source_end_sesno` 与回执比）随 pending 表退了（ADR-072 D5）：`desired_target`
-// 原由数据尾事务的模型意图 upsert 抬到 T，现在没有人先写它；而同一 dbnum 只有本任务一个写者
-// （ADR-071 D5）、同一根还有 `generation_root_lock`，守卫没有对手。
-
-fn append_root_dependency_receipt(
-    statements: &mut String,
-    root: RefNo,
-    target: Option<&ModelTarget>,
-) {
-    let Some(target) = target else {
-        return;
-    };
-    let root_refno = sql_string(&root.to_string());
-    // Dependency ids are <word0>_<word1>_<dbnum>. The trailing underscore
-    // keeps root 1 distinct from root 10. A predicate DELETE scans every
-    // other root's dependency inside every publication transaction.
-    statements.push_str(&format!(
-        "DELETE root_dependency:⟨{}_{}_⟩..⟨{}_{}_~⟩;\n",
-        root.word0, root.word1, root.word0, root.word1,
-    ));
-    for dependency in &target.catalogue {
-        statements.push_str(&format!(
-            "UPSERT type::thing('root_dependency',{}) SET \
-             root_refno={root_refno}, dependency_kind='CATA', dependency_dbnum={}, \
-             dependency_session={}, dependency_digest={}, updated_at=time::now();\n",
-            sql_string(&format!(
-                "{}_{}_{}",
-                root.word0, root.word1, dependency.dbnum
-            )),
-            dependency.dbnum,
-            dependency.session,
-            sql_string(&dependency.digest),
-        ));
-    }
-}
+// 逐根回执（`gen_root` 行上的 status / publication / revision / 目标那一组列，与它旁边那张
+// 目录依赖表）随 `gen_root` 表退役（ADR-079）：库里模型面唯一的持久事实是
+// `dbnum_watermark.model_sesno`（任务收尾一笔盖）；「这根这一版成了」在提交之后记进进程内账本
+// （[`record_root_generated`] → `model_root_ledger`）。「同一根不许被两个源会话混着发布」由同一
+// dbnum 只有本任务一个写者（ADR-071 D5）与 `generation_root_lock` 守着，没有对手。
 
 pub fn publication_transaction(statements: &str) -> String {
     format!("BEGIN TRANSACTION;\n{statements}COMMIT TRANSACTION;\n")
@@ -2843,7 +2832,7 @@ mod tests {
         let (live, failed) = room_stage(&shares, None);
         assert!(failed.is_empty());
         let db = Surreal::<Any>::init();
-        let error = persist_group(&db, &live, true).await.err().unwrap();
+        let error = persist_group(&db, &live).await.err().unwrap();
         assert_eq!(
             publication_failure_kind(&error),
             PersistFailureKind::Blocked
@@ -3271,12 +3260,7 @@ mod tests {
             .unwrap()
             .check()
             .unwrap();
-        db.query("CREATE gen_root:7997_73948 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='requested', published_geometry_count=1; CREATE gen_root:7997_70000 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='other', published_geometry_count=1;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-
+        // 库里没有逐根凭证行（ADR-079）：可用性探针问的是这根名下有没有几何行。
         let probe: Vec<Value> = db
             .query(format!(
                 "SELECT anc,dbnum,model_sesno != NONE AS structured FROM inst_relate WHERE anc CONTAINS {};",
@@ -3631,30 +3615,39 @@ mod tests {
         }
     }
 
-    /// 回执盖的就是窗口规划器认的那几列。revision 不在回执里，所以
-    /// `published_revision` 直接跟着行上的 `desired_revision` 走；`desired_target` 与
-    /// `published_target` 由回执一起写成本次目标（没有人再先写「想要的」，ADR-072 D5）。
-    /// 混源发布守卫随之退役：同库单写者 + 根锁，守卫没有对手。
+    /// 回执不再落库（ADR-079）：一根提交成功之后进的是进程内账本，noun 取根元素自己那条记录的
+    /// noun；库里模型面的行只剩几何行本身，没有任何一句 `gen_root` / `root_dependency`。
     #[test]
-    fn a_receipt_settles_the_root_credential() {
-        let sql = render_receipt(RefNo::new(24384, 1), &receipt()).expect("receipt");
-        assert!(sql.contains("UPDATE type::thing('gen_root', '24384_1')"));
-        assert!(sql.contains("publication_status='ready'"));
-        assert!(sql.contains("published_revision=desired_revision"));
-        assert!(
-            sql.contains("desired_target={dbnum:")
-                && sql.contains("published_target={dbnum:")
-                && sql.matches("source_end_sesno:26}").count() == 2,
-            "{sql}"
-        );
-        assert!(sql.contains("published_manifest_hash='abc123'"));
-        assert!(sql.contains("published_geometry_count=2"));
-        assert!(sql.contains("source_end_sesno=26"));
-        assert!(!sql.contains("root_dependency"));
-        assert!(
-            !sql.contains("mixed model target publication"),
-            "混源守卫已随 pending 表退役: {sql}"
-        );
+    fn a_receipt_settles_the_root_in_the_process_ledger_not_in_a_table() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let root = RefNo::new(24384, 1);
+        let dbnum = root.dbno();
+        ledger::forget_dbnum(dbnum);
+        let mut own = baked_record();
+        own.source_refno = root;
+        own.noun = "BRAN".into();
+        record_root_generated(root, &[own], &receipt());
+        let entry = ledger::entry(dbnum, refno_from_e3d(root)).expect("ledger entry");
+        assert!(entry.is_settled());
+        assert_eq!(entry.noun, "BRAN");
+        assert_eq!(entry.source_end_sesno, 26);
+        ledger::forget_dbnum(dbnum);
+
+        let source = include_str!("model_db_adapter.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
+        for forbidden in [
+            "type::thing('gen_root'",
+            "type::thing('root_dependency'",
+            "publication_status='ready'",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "落库适配器不许再写逐根凭证行: {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -3683,7 +3676,10 @@ mod tests {
             "spool 清理与整片删同一套纪律：点名删，不下谓词: {sql}"
         );
         assert!(sql.contains("INSERT IGNORE INTO inst_relate"));
-        assert!(sql.contains("publication_status='ready'"));
+        assert!(
+            !sql.contains("gen_root"),
+            "spool 里没有逐根凭证行可写（ADR-079）: {sql}"
+        );
         assert!(sql.ends_with("COMMIT TRANSACTION;\n"));
     }
 
@@ -3736,7 +3732,7 @@ mod tests {
             db.query(&tombstone).await.unwrap().check().unwrap();
         }
         assert_eq!(count(&db, "inst_relate").await, 0);
-        assert_eq!(count(&db, "gen_root").await, 0);
+        assert!(!tombstone.contains("gen_root"), "{tombstone}");
     }
 
     #[tokio::test]
@@ -4142,51 +4138,25 @@ mod tests {
             2,
             "同分支两段共用一张发号表，后一段不能盖掉前一段"
         );
-        let mut response = db
-            .query("SELECT VALUE publication_status FROM type::thing('gen_root','24383_1');")
-            .await
-            .expect("receipt")
-            .check()
-            .expect("receipt statement");
         assert!(
-            response
-                .take::<Vec<String>>(0)
-                .expect("receipt rows")
-                .is_empty(),
-            "夹具里没有 gen_root 行，UPDATE 是空操作——这一条只要求它不报错"
+            !table_exists(&db, "gen_root").await,
+            "落库不再建任何逐根凭证行（ADR-079）"
         );
     }
 
-    async fn seed_gen_roots(db: &Surreal<Any>, roots: &[RefNo]) {
-        for root in roots {
-            db.query(format!(
-                "CREATE type::thing('gen_root','{}_{}') SET dbnum=7997, status='Generated', \
-                 publication_status='stale', desired_revision=2, published_revision=1;",
-                root.word0, root.word1
-            ))
-            .await
-            .expect("seed gen_root")
-            .check()
-            .expect("seed gen_root statements");
-        }
-    }
-
-    async fn publication_status_of(db: &Surreal<Any>, root: RefNo) -> String {
+    /// 库里有没有这张表（`INFO FOR DB` 的 tables 段）。ADR-079 之后 `gen_root` 不该被任何一笔落库建出来。
+    async fn table_exists(db: &Surreal<Any>, table: &str) -> bool {
         let mut response = db
-            .query(format!(
-                "SELECT VALUE publication_status FROM type::thing('gen_root','{}_{}');",
-                root.word0, root.word1
-            ))
+            .query("INFO FOR DB;")
             .await
-            .expect("publication status")
+            .expect("info")
             .check()
-            .expect("publication status statement");
-        response
-            .take::<Vec<String>>(0)
-            .expect("publication status rows")
-            .into_iter()
-            .next()
-            .unwrap_or_default()
+            .expect("info statement");
+        let info: Option<serde_json::Value> = response.take(0).expect("decode info");
+        info.as_ref()
+            .and_then(|value| value.get("tables"))
+            .and_then(|tables| tables.get(table))
+            .is_some()
     }
 
     /// 嵌套根与祖先根各自携带完整记录、每根各自盖章；重复 id 由幂等写收敛。
@@ -4196,7 +4166,6 @@ mod tests {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let ancestor_root = RefNo::new(24383, 1);
-        seed_gen_roots(&db, &[ancestor_root, NESTED_ROOT]).await;
 
         let store = ModelMemoryStore::default();
         store.commit(
@@ -4241,8 +4210,8 @@ mod tests {
         );
         assert_eq!(count(&db, "inst_relate").await, 2);
         assert_eq!(count(&db, "tubi_relate").await, 1);
-        assert_eq!(publication_status_of(&db, ancestor_root).await, "ready");
-        assert_eq!(publication_status_of(&db, NESTED_ROOT).await, "ready");
+        assert_eq!(publication_status_of(&store, ancestor_root).await, "ready");
+        assert_eq!(publication_status_of(&store, NESTED_ROOT).await, "ready");
     }
 
     /// 对账只读一次库：库里挂在根名下、存储里已经没有的几何在下一批里被删掉，
@@ -4252,7 +4221,6 @@ mod tests {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
-        seed_gen_roots(&db, &[root]).await;
 
         let store = ModelMemoryStore::default();
         let stale = ProjectedGeometry {
@@ -4305,7 +4273,7 @@ mod tests {
             0,
             "上一轮的管身行跟着整片一起没"
         );
-        assert_eq!(publication_status_of(&db, root).await, "ready");
+        assert_eq!(publication_status_of(&store, root).await, "ready");
     }
 
     /// 连落两批：第二批把上一批的一件几何从投影里拿掉，库里那一行必须跟着消失——
@@ -4319,7 +4287,6 @@ mod tests {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
-        seed_gen_roots(&db, &[root]).await;
 
         let store = ModelMemoryStore::default();
         let stale = ProjectedGeometry {
@@ -4380,7 +4347,6 @@ mod tests {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
-        seed_gen_roots(&db, &[root]).await;
 
         let stale = ProjectedGeometry {
             record_id: "24383_9999".into(),
@@ -4588,7 +4554,6 @@ mod tests {
         let db = surreal_mem().await;
         seed_pe(&db).await;
         let root = RefNo::new(24383, 1);
-        seed_gen_roots(&db, &[root]).await;
 
         let store = ModelMemoryStore::default();
         store.commit(
@@ -4617,7 +4582,7 @@ mod tests {
             2,
             "同分支两段共用一张发号表，后一段不能盖掉前一段"
         );
-        assert_eq!(publication_status_of(&db, root).await, "ready");
+        assert_eq!(publication_status_of(&store, root).await, "ready");
     }
 
     /// 一批只属于一个 dbnum（任务是隔离单元）；混进别的库的根整批拒收、一行不写。
@@ -4805,7 +4770,6 @@ mod tests {
     async fn a_failed_publication_leaves_neither_rows_nor_a_touched_credential() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_root(&db).await;
         let root = RefNo::new(24383, 1);
 
         // 这一笔里有一条会被库拒收，整笔事务因此回滚。
@@ -4826,14 +4790,13 @@ mod tests {
         );
         let target = PersistTarget::new(&db, PersistMedium::Mem);
         assert!(persist_root_on(target, &store, root).await.is_err());
-        assert_eq!(
-            publication_status(&db).await,
-            "stale",
-            "失败的那一笔不许在凭证行上留下任何痕迹"
-        );
         assert_eq!(count(&db, "inst_relate").await, 0, "整笔回滚，一行都不留");
+        assert!(
+            !table_exists(&db, "gen_root").await,
+            "失败的那一笔不许在库里留下任何逐根痕迹（ADR-079：库里本就没有凭证行）"
+        );
 
-        // 换成两条都渲染得出来的记录重跑，同一笔事务里盖章。
+        // 换成两条都渲染得出来的记录重跑：行落了，回执只进账（不落库）。
         let store = ModelMemoryStore::default();
         store.commit(
             ProjectionScope::Current,
@@ -4843,18 +4806,18 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        persist_root_on(target, &store, root)
+        let rows = persist_root_on(target, &store, root)
             .await
             .expect("persist");
-        assert_eq!(publication_status(&db).await, "ready");
+        assert_eq!(rows.receipts, 1);
+        assert_eq!(count(&db, "inst_relate").await, 2);
     }
 
-    /// 没有回执的落库一个字都不许动凭证行。
+    /// 没有回执的落库只 upsert 自己那几行，账上 `receipts = 0`（不整片删、不进账本）。
     #[tokio::test]
     async fn a_publish_without_a_receipt_never_touches_the_credential() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_root(&db).await;
         let root = RefNo::new(24383, 1);
 
         let store = ModelMemoryStore::default();
@@ -4866,10 +4829,11 @@ mod tests {
             }],
         );
         let target = PersistTarget::new(&db, PersistMedium::Mem);
-        persist_root_on(target, &store, root)
+        let rows = persist_root_on(target, &store, root)
             .await
             .expect("persist");
-        assert_eq!(publication_status(&db).await, "stale");
+        assert_eq!(rows.receipts, 0);
+        assert_eq!(count(&db, "inst_relate").await, 2);
     }
 
     /// 房间派生面与空间版本号回到发布事务上（ADR-060 P3）：被对账掉的来源两个方向的
@@ -4977,13 +4941,30 @@ mod tests {
     fn room_calculator(
         dir: &std::path::Path,
     ) -> crate::fast_model::room_model::MemoryRoomCalculator {
+        room_calculator_with(dir, 0., None)
+    }
+
+    /// 在册却没几何的第三块面板（房间 R3）：ADR-073 D9 保护集的夹具。
+    const BARE_PANEL_R3: RefNo = RefNo::new(24383, 700);
+
+    /// [`room_calculator`] 的可调版：R1 的盒子沿 x 平移 `r1_shift`（面板搬家的夹具），
+    /// `bare_panel` 是在册却没几何的面板（D9 保护集的夹具）。
+    fn room_calculator_with(
+        dir: &std::path::Path,
+        r1_shift: f32,
+        bare_panel: Option<RefNo>,
+    ) -> crate::fast_model::room_model::MemoryRoomCalculator {
         use crate::fast_model::room_model::{RoomPanelMap, RoomPanels, box_mesh_for_test};
         use crate::fast_model::room_resident::{
             MeshCache, ResidentForm, ResidentManifest, ResidentRoomModel,
         };
-        box_mesh_for_test(glam::Vec3::ZERO, glam::Vec3::splat(1000.))
-            .ser_to_file(&dir.join("panel_r1.mesh"))
-            .unwrap();
+        let r1_mesh = format!("panel_r1_{}", r1_shift as i64);
+        box_mesh_for_test(
+            glam::Vec3::new(r1_shift, 0., 0.),
+            glam::Vec3::new(r1_shift + 1000., 1000., 1000.),
+        )
+        .ser_to_file(&dir.join(format!("{r1_mesh}.mesh")))
+        .unwrap();
         box_mesh_for_test(
             glam::Vec3::new(500., 0., 0.),
             glam::Vec3::new(1500., 1000., 1000.),
@@ -5004,30 +4985,43 @@ mod tests {
         };
         let r1: RefnoEnum = refno_from_e3d(PANEL_R1);
         let r2: RefnoEnum = refno_from_e3d(PANEL_R2);
-        let map = RoomPanelMap {
-            rooms: vec![
-                RoomPanels {
-                    room: "24383_501".into(),
-                    room_num: "R1".into(),
-                    panels: vec![r1],
-                },
-                RoomPanels {
-                    room: "24383_601".into(),
-                    room_num: "R2".into(),
-                    panels: vec![r2],
-                },
-            ],
-            all_panels: std::collections::HashSet::from([r1, r2]),
-        };
+        let mut rooms = vec![
+            RoomPanels {
+                room: "24383_501".into(),
+                room_num: "R1".into(),
+                panels: vec![r1],
+            },
+            RoomPanels {
+                room: "24383_601".into(),
+                room_num: "R2".into(),
+                panels: vec![r2],
+            },
+        ];
+        let mut all_panels = std::collections::HashSet::from([r1, r2]);
+        if let Some(bare) = bare_panel {
+            let r3: RefnoEnum = refno_from_e3d(bare);
+            rooms.push(RoomPanels {
+                room: "24383_701".into(),
+                room_num: "R3".into(),
+                panels: vec![r3],
+            });
+            all_panels.insert(r3);
+        }
+        let map = RoomPanelMap { rooms, all_panels };
         let model = std::sync::Arc::new(ResidentRoomModel::from_projection(
             ResidentManifest {
                 form: ResidentForm::Latest,
-                key: "rooms-fixture".into(),
+                key: format!("rooms-fixture-{}", r1_shift as i64),
             },
             vec![],
             map,
             &[
-                panel(PANEL_R1, "panel_r1", [0.; 3], [1000.; 3]),
+                panel(
+                    PANEL_R1,
+                    &r1_mesh,
+                    [r1_shift, 0., 0.],
+                    [r1_shift + 1000., 1000., 1000.],
+                ),
                 panel(PANEL_R2, "panel_r2", [500., 0., 0.], [1500., 1000., 1000.]),
             ],
             std::sync::Arc::<MeshCache>::default(),
@@ -5107,15 +5101,240 @@ mod tests {
             room_edges(&db).await,
             vec!["pe:24383_500->pe:24383_10".to_string()]
         );
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "ready");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "ready");
         let ack = store
             .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
             .expect("complete publication ACK");
         assert_eq!(ack.source_sesno, 42);
         assert_eq!(ack.geometry_count, 1);
         assert!(ack.room_membership);
-        assert_eq!(ack.room_generation.as_deref(), Some("rooms-fixture"));
+        // 代号是计算输入摘要，不是夹具的文件 composite（"rooms-fixture"）——ADR-073 D12。
+        assert_eq!(
+            ack.room_generation.as_deref(),
+            Some(rooms.resident_generation())
+        );
+        assert_ne!(ack.room_generation.as_deref(), Some("rooms-fixture"));
         assert_eq!(ack.medium, PersistMedium::Mem);
+    }
+
+    /// ADR-073 D9 / 源码钉 14 (a)，`mem://` 真测：在册却没几何的面板 R3 **不阻断**——计算器照冻、根照常落库、
+    /// 没有一根进 `failed`；构件在 R1 里的新边照写，指向 R3 的**存量边原样保留**（保护集），不被
+    /// 「先删后插」当成「算出来是空的」抹掉。此前这一根在 `MemoryRoomCalculator::new` 就被
+    /// `ensure_complete()` 拦成「room calculator unavailable」。
+    #[tokio::test]
+    async fn a_registered_panel_without_geometry_keeps_its_old_edges_and_blocks_no_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator_with(dir.path(), 0., Some(BARE_PANEL_R3));
+        assert_eq!(
+            rooms.missing_panels(),
+            &[refno_from_e3d(BARE_PANEL_R3)],
+            "夹具前提：R3 在册、没几何"
+        );
+        let db = surreal_mem().await;
+        // 上一版留下的、指向 R3 的存量边（与生产同一形状）：本轮判不了它，得留着。
+        db.query(
+            "INSERT RELATION INTO room_relate [{ id: room_relate:24383_700_24383_10, \
+             in: pe:24383_700, out: pe:24383_10, room_num: 'R3', inside_count: 8, center_dist: 0.0 }];",
+        )
+        .await
+        .expect("seed stale R3 edge")
+        .check()
+        .expect("seed statement");
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&rooms),
+        )
+        .await
+        .expect("publish with a bare registered panel");
+
+        assert!(
+            batched.failed.is_empty(),
+            "缺几何的面板不判死任何根: {:?}",
+            batched.failed
+        );
+        assert_eq!(batched.room_edges, 1, "R1 的那条新边照写");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_700->pe:24383_10".to_string(),
+            ],
+            "新边写了、指向 R3 的存量边留着（陈旧可恢复，抹平不可）"
+        );
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "ready");
+    }
+
+    /// ADR-073 D13 / 源码钉 18 (e)，`mem://` 真测：面板搬了家（R1 的盒子沿 x 平移 2000）→ 用**新**计算器对
+    /// 本库现有几何整库重算 → 原来在 R1 里的构件 A 的边被删掉（A 自己一行几何没动、没重生）、ACK 的
+    /// 房间代号换成新台；搬回来再算一次，边又回来——两个方向都是同一条路。
+    #[tokio::test]
+    async fn moving_a_panel_updates_the_other_roots_edges_through_the_library_recompute() {
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A inside R1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()]
+        );
+
+        // 面板搬走：R1 现在占 x 2000–3000，A（x 100–200）不在里面了。
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        assert_ne!(
+            before_move.resident_generation(),
+            after_move.resident_generation(),
+            "面板几何变了 = 房间代号变了（D12）"
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+        )
+        .await
+        .expect("recompute after the panel moved");
+        assert_eq!(
+            (report.recomputed, report.room_edges, report.failed.len()),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        assert!(
+            room_edges(&db).await.is_empty(),
+            "A 不再在任何面板里，它的旧边随重算删掉"
+        );
+        assert_eq!(
+            store
+                .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
+                .expect("ACK stays")
+                .room_generation
+                .as_deref(),
+            Some(after_move.resident_generation())
+        );
+        assert_eq!(
+            count_record(&db, "inst_relate", "24383_10").await,
+            1,
+            "整库房间重算不动模型行"
+        );
+
+        // 搬回来：边回来，代号回到原来那台。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &before_move,
+        )
+        .await
+        .expect("recompute after the panel moved back");
+        assert_eq!((report.recomputed, report.room_edges), (1, 1), "{report:?}");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()]
+        );
+    }
+
+    /// d-819 / ADR-073 D13：整库房间边重算用**现有几何**、走逐根同一套渲染——重算后的边与逐根落库的
+    /// 逐字相同（幂等，ADR-010 §9 的对照物不多一条口径）；算不出的根边原样留、进 `failed`，其余照常；
+    /// 提交全过后 ACK 的房间代号对齐到本台计算器。
+    #[tokio::test]
+    async fn recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator(dir.path());
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&rooms),
+        )
+        .await
+        .expect("seed the library through the per-root path");
+        let before = room_edges(&db).await;
+        assert_eq!(before, vec!["pe:24383_500->pe:24383_10".to_string()]);
+
+        // 模拟「面板那一侧变过、A 的 ACK 还挂着旧代号」：重算后要对齐回来。
+        let mut stale = store
+            .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
+            .expect("seeded ACK");
+        stale.room_generation = Some("old-generation".into());
+        assert!(store.record_publication_ack(ProjectionScope::Current, ROOM_ROOT_A, stale));
+        // 再来一根算不出的（盒子 NaN，`aabb_is_usable` 不认）：边原样（它本来就没有）、进 failed。
+        store.commit(
+            ProjectionScope::Current,
+            vec![root_commit(
+                ROOM_ROOT_B,
+                vec![room_record(ROOM_ROOT_B, f32::NAN, 200.)],
+            )],
+        );
+
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &rooms,
+        )
+        .await
+        .expect("recompute the library's room edges");
+        assert_eq!(
+            (report.roots, report.recomputed, report.room_edges),
+            (2, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(report.failed[0].0, ROOM_ROOT_B);
+        assert!(
+            report.failed[0].1.contains("could not be recomputed"),
+            "{}",
+            report.failed[0].1
+        );
+        assert_eq!(
+            (report.commits, report.acks_refreshed),
+            (1, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            before,
+            "整库重算 == 逐根落库，逐边相等"
+        );
+        let ack = store
+            .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
+            .expect("ACK stays");
+        assert_eq!(
+            ack.room_generation.as_deref(),
+            Some(rooms.resident_generation()),
+            "ACK 的房间代号对齐到本台计算器"
+        );
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, ROOM_ROOT_B)
+                .is_none(),
+            "算不出的根没有 ACK 可对齐"
+        );
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
@@ -5127,7 +5346,6 @@ mod tests {
         let rooms = room_calculator(dir.path());
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_roots(&db, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
         let store = room_store(vec![
             root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
             // 盒子带 NaN（`aabb_is_usable` 不认）：房间算不出来，这一根一行都不能落。
@@ -5174,9 +5392,9 @@ mod tests {
             0,
             "房间失败 = 该根失败：B 的模型行也不落"
         );
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "ready");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "ready");
         assert_eq!(
-            publication_status_of(&db, ROOM_ROOT_B).await,
+            publication_status_of(&store, ROOM_ROOT_B).await,
             "stale",
             "B 没盖章，窗口规划器眼里仍未发布"
         );
@@ -5191,7 +5409,6 @@ mod tests {
         let rooms = room_calculator(dir.path());
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_roots(&db, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
         db.query(
             "DEFINE TABLE inst_relate SCHEMALESS; \
              DEFINE EVENT boom ON TABLE inst_relate WHEN $after.generic = 'BOOM' THEN { THROW 'boom' };",
@@ -5233,8 +5450,8 @@ mod tests {
         );
         assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 0);
         assert_eq!(count_record(&db, "inst_relate", "24383_20").await, 1);
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "stale");
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_B).await, "ready");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "stale");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_B).await, "ready");
 
         // B 单独再落一轮：它的行与边同一笔出现。
         let retried = persist_roots_batched(
@@ -5253,7 +5470,7 @@ mod tests {
             vec!["pe:24383_500->pe:24383_20".to_string()]
         );
         assert_eq!(count_record(&db, "inst_relate", "24383_20").await, 1);
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_B).await, "ready");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_B).await, "ready");
     }
 
     /// 一个祖先根事务失败后，不能把尚未提交的共享记录从随后嵌套根的事务里拿走。
@@ -5268,7 +5485,6 @@ mod tests {
         let db = surreal_mem().await;
         let ancestor_root = RefNo::new(24383, 1);
         let nested_root = RefNo::new(24383, 30);
-        seed_gen_roots(&db, &[ancestor_root, nested_root]).await;
         db.query(
             "DEFINE TABLE inst_relate SCHEMALESS; \
              DEFINE EVENT boom ON TABLE inst_relate WHEN $after.generic = 'BOOM' THEN { THROW 'boom' };",
@@ -5319,8 +5535,8 @@ mod tests {
             vec!["pe:24383_500->pe:24383_30".to_string()],
             "the shared member's room edge must be published with the nested root"
         );
-        assert_eq!(publication_status_of(&db, ancestor_root).await, "stale");
-        assert_eq!(publication_status_of(&db, nested_root).await, "ready");
+        assert_eq!(publication_status_of(&store, ancestor_root).await, "stale");
+        assert_eq!(publication_status_of(&store, nested_root).await, "ready");
     }
 
     /// ADR-073 D1 ③：更新一个根不丢其他根的结果——移动 / 删除 / 空归属 / 多房间归属四条路都走一遍，
@@ -5333,7 +5549,6 @@ mod tests {
         let rooms = room_calculator(dir.path());
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_roots(&db, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
         async fn persist(
             db: &Surreal<Any>,
             rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
@@ -5435,7 +5650,6 @@ mod tests {
     async fn without_a_room_calculator_the_root_still_lands_and_writes_no_edges() {
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_roots(&db, &[ROOM_ROOT_A]).await;
         let store = room_store(vec![root_commit(
             ROOM_ROOT_A,
             vec![room_record(ROOM_ROOT_A, 100., 200.)],
@@ -5490,7 +5704,6 @@ mod tests {
         let rooms = room_calculator(dir.path());
         let db = surreal_mem().await;
         seed_pe(&db).await;
-        seed_gen_roots(&db, &[ROOM_ROOT_A]).await;
         db.query(format!(
             "UPSERT dbnum_watermark:{BATCH_DBNUM} SET dbnum={BATCH_DBNUM}, \
              applied_sesno=42, model_sesno=41;"
@@ -5535,6 +5748,8 @@ mod tests {
                 model: Some(crate::data_interface::task_end::TaskModelOutcome {
                     all_roots_ok: true,
                     dead_roots: 0,
+                    catalogue_sessions: None,
+                    room_generation: Default::default(),
                 }),
                 info: None,
                 closes_task: true,
@@ -5546,7 +5761,7 @@ mod tests {
         assert_eq!(model_sesno_of(&db, BATCH_DBNUM).await, 42);
         assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 1);
         assert!(room_edges(&db).await.is_empty());
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "ready");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "ready");
 
         // 重新打开只启用房间计算，不制造模型水位缺口；运维显式模型重建后才补历史边。
         {
@@ -5570,7 +5785,7 @@ mod tests {
             room_edges(&db).await,
             vec!["pe:24383_500->pe:24383_10".to_string()]
         );
-        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "ready");
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "ready");
     }
 
     /// 源码钉（ADR-073 D1 / D2 / W2，d-932）：房间归属在写库**之前**、按根算（[`room_stage`]，输入只有
@@ -5607,7 +5822,8 @@ mod tests {
             stage_at < failed_at && failed_at < group_call_at,
             "顺序：逐根算房间 → 算不出来的根剔出组 → 组事务"
         );
-        // 根内：几何按条数切块渲好 → 边拼进这一根的末块 → 回执进收尾段 → 逐笔提交。
+        // 根内：几何按条数切块渲好 → 边拼进这一根的末块 → 逐笔提交。回执**不落库**（ADR-079）：
+        // 收尾段是空的，「这根成了」在全部笔提交之后进进程内账本（`accept_group_outcome`）。
         let group = production
             .split_once("async fn persist_group(")
             .expect("persist_group exists")
@@ -5621,16 +5837,31 @@ mod tests {
         let attach_at = group
             .find("sql.push_str(&live.room_statements)")
             .expect("房间边拼进这一根的末块");
-        let receipt_at = group
-            .find("let epilogue = format!(\"{receipt_header}{receipt_body}\")")
-            .expect("回执进收尾段");
+        let pack_at = group
+            .find("pack_publication_transactions(&prelude, &pieces, \"\", touches_geometry)")
+            .expect("装块时收尾段为空：没有逐根的章要盖");
         // 提交走 `commit_publication_transaction`（整笔原子 + 冲突重试），钉它的调用处。
         let commit_at = group
             .find("commit_publication_transaction(db, statements")
             .expect("提交");
         assert!(
-            render_at < attach_at && attach_at < receipt_at && receipt_at < commit_at,
-            "顺序：渲几何 → 房间边 → 回执 → 提交"
+            render_at < attach_at && attach_at < pack_at && pack_at < commit_at,
+            "顺序：渲几何 → 房间边 → 装块 → 提交"
+        );
+        assert!(
+            !group.contains("type::thing('gen_root'") && !group.contains("receipt_body"),
+            "persist_group 不再渲任何逐根回执行（ADR-079）"
+        );
+        let accept = production
+            .split_once("fn accept_group_outcome(")
+            .expect("accept_group_outcome exists")
+            .1
+            .split_once("\n}\n")
+            .expect("accept end")
+            .0;
+        assert!(
+            accept.contains("record_root_generated(root.share.root, &root.share.records, receipt)"),
+            "提交之后逐根成败进进程内账本: {accept}"
         );
         // 装块纪律：删在第一笔、章在最后一笔。反过来就是「章盖了、行还没写完」，
         // 中途崩掉的那一根会被当成已发布，再也没人回来补。
@@ -5869,30 +6100,14 @@ mod tests {
         result.and(cleanup.map_err(Into::into))
     }
 
-    async fn seed_gen_root(db: &Surreal<Any>) {
-        db.query(
-            "CREATE type::thing('gen_root','24383_1') SET dbnum=7997, status='Generated', \
-             publication_status='stale', desired_revision=2, published_revision=1;",
-        )
-        .await
-        .expect("seed gen_root")
-        .check()
-        .expect("seed gen_root statements");
-    }
-
-    async fn publication_status(db: &Surreal<Any>) -> String {
-        let mut response = db
-            .query("SELECT VALUE publication_status FROM type::thing('gen_root','24383_1');")
-            .await
-            .expect("publication status")
-            .check()
-            .expect("publication status statement");
-        response
-            .take::<Vec<String>>(0)
-            .expect("publication status rows")
-            .into_iter()
-            .next()
-            .unwrap_or_default()
+    /// 逐根凭证行退役（ADR-079）之后，「这根这一轮成了没成」看进程内的发布 ACK：
+    /// 有 ACK 是 `ready`，没有是 `stale`——与退役前 `gen_root.publication_status` 同一口径。
+    async fn publication_status_of(store: &ModelMemoryStore, root: RefNo) -> &'static str {
+        if store.publication_ack(ProjectionScope::Current, root).is_some() {
+            "ready"
+        } else {
+            "stale"
+        }
     }
 
     async fn spatial_epoch(db: &Surreal<Any>) -> i64 {

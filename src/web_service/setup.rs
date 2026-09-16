@@ -197,6 +197,10 @@ fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()>
 #[serde(deny_unknown_fields)]
 pub struct SetupConfigPatch {
     pub project_path: Option<String>,
+    /// `project_path` 之外的搜索根（本地或 UNC；ADR-078 D2）。空数组 = 只看 `project_path`。
+    pub project_search_paths: Option<Vec<String>>,
+    /// 已退役（ADR-078）：旧页面还会带这一格，收下但**不写盘**——项目集合由 MDB 派生。
+    #[serde(default)]
     pub included_projects: Option<Vec<String>>,
     pub project_name: Option<String>,
     pub mdb_name: Option<String>,
@@ -270,9 +274,15 @@ fn apply_patch(
     if let Some(project_path) = &patch.project_path {
         set(document, "project_path", value(project_path.as_str()));
     }
-    if let Some(projects) = &patch.included_projects {
-        set(document, "included_projects", value(string_array(projects)));
+    if let Some(roots) = &patch.project_search_paths {
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| root.trim().trim_matches('"').to_string())
+            .filter(|root| !root.is_empty())
+            .collect();
+        set(document, "project_search_paths", value(string_array(&roots)));
     }
+    // `included_projects` 有意不写：它已不参与解析（ADR-078），向导也不再替人勾名单。
     if let Some(name) = &patch.project_name {
         set(document, "project_name", value(name.as_str()));
     }
@@ -394,7 +404,7 @@ fn subset_values(document: &toml_edit::DocumentMut) -> serde_json::Value {
     }
     let keys = [
         "project_path",
-        "included_projects",
+        "project_search_paths",
         "project_name",
         "mdb_name",
         "module",
@@ -534,6 +544,53 @@ fn scan_e3d_shape(project_dir: &Path) -> (Vec<String>, usize) {
     prefixes.sort();
     prefixes.dedup();
     (prefixes, db_files)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MdbProbeRequest {
+    pub project_path: String,
+    #[serde(default)]
+    pub project_search_paths: Vec<String>,
+    pub project_name: String,
+    #[serde(default)]
+    pub mdb_name: Option<String>,
+}
+
+/// MDB 闭包探测（ADR-078 D7）：向导态没有服务、没有全局 `DbOption`，直接拿页面上的四个值跑
+/// 一次 [`crate::data_interface::mdb_closure::resolve`]——就是 E3D 登录时 `BuildProjectsList` +
+/// 打开 MDB 那一下的等价物，只是结论画成一张表而不是写成名单。
+///
+/// 声明缓存先忘掉再算：向导里 `project_path` 换来换去，同名主项目 + 同名 MDB 在另一棵目录树里
+/// 是另一份 SYS，不能拿上一次探测的声明顶。
+fn probe_mdb_closure(request: &MdbProbeRequest) -> serde_json::Value {
+    use crate::data_interface::{mdb_closure, project_locator};
+
+    let mdb = request
+        .mdb_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|mdb| !mdb.is_empty())
+        .unwrap_or("ALL");
+    let project_name = request.project_name.trim();
+    // 与启动同一套整理规则（字面去重、不碰文件系统——掉线 UNC 的等待要留给扫描线程的 15 s 上限）。
+    let roots = mdb_closure::collect_search_roots(
+        std::iter::once(&request.project_path).chain(request.project_search_paths.iter()),
+    );
+    if roots.is_empty() {
+        return json!({ "ok": false, "error": "project_path 不能为空" });
+    }
+    mdb_closure::forget_declaration(project_name, mdb);
+    let plan = mdb_closure::resolve(
+        &roots,
+        project_name,
+        mdb,
+        project_locator::DEFAULT_ROOT_SCAN_TIMEOUT,
+    );
+    let mut out = plan.health_json();
+    out["ok"] = json!(true);
+    out["banner"] = json!(plan.banner_line());
+    out["main_located"] = json!(plan.main.is_some());
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -695,6 +752,22 @@ async fn setup_probe_project(
     ))))
 }
 
+async fn setup_probe_mdb(
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
+    Json(request): Json<MdbProbeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.project_name.trim().is_empty() {
+        return Err(ApiError::bad_request("project_name 不能为空：先选主项目"));
+    }
+    // 扫搜索根会碰共享盘、读 SYS 会开文件，都不能在 runtime 线程上做。
+    let out = tokio::task::spawn_blocking(move || probe_mdb_closure(&request))
+        .await
+        .map_err(|error| {
+            ApiError::from_domain(anyhow::anyhow!("MDB 闭包探测线程失败：{error}"))
+        })?;
+    Ok(Json(out))
+}
+
 async fn setup_probe_store(
     ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     Json(request): Json<StoreProbeRequest>,
@@ -840,6 +913,7 @@ pub fn router(ctx: SetupCtx) -> Router {
             get(setup_get_config).put(setup_put_config),
         )
         .route("/api/v1/setup/probe/project", post(setup_probe_project))
+        .route("/api/v1/setup/probe/mdb", post(setup_probe_mdb))
         .route("/api/v1/setup/probe/store", post(setup_probe_store))
         .route("/api/v1/setup/probe/port", post(setup_probe_port))
         .route("/api/v1/setup/restart", post(setup_restart))
@@ -1094,6 +1168,8 @@ room_key_word = ["-RM"]
         let mut document: toml_edit::DocumentMut = FIXTURE.parse().unwrap();
         let patch = SetupConfigPatch {
             project_path: Some("E:/NEW/Projects/E3D3.1".into()),
+            project_search_paths: Some(vec!["//nas01/e3d/Projects".into(), "  ".into()]),
+            // 退役键：旧页面带过来也不落盘。
             included_projects: Some(vec!["AvevaMarineSample".into(), "ZDJ".into()]),
             surreal_ns: Some("2233".into()),
             v_ip: Some("192.168.0.10".into()),
@@ -1110,7 +1186,7 @@ room_key_word = ["-RM"]
             changed,
             vec![
                 "project_path",
-                "included_projects",
+                "project_search_paths",
                 "surreal_ns",
                 "v_ip",
                 "v_port",
@@ -1127,6 +1203,14 @@ room_key_word = ["-RM"]
         assert!(text.contains("# 版本服务配置（注释也要活下来）"));
         assert!(text.contains("unknown_key_from_future = { nested = [1, 2, 3] }"));
         assert!(text.contains(r#"project_path = "E:/NEW/Projects/E3D3.1""#));
+        assert!(
+            text.contains(r#"project_search_paths = ["//nas01/e3d/Projects"]"#),
+            "空项剔掉、其余原样写：{text}"
+        );
+        assert!(
+            text.contains(r#"included_projects = ["A", "B"]"#),
+            "退役键既不改写也不删：{text}"
+        );
         assert!(
             text.contains("surreal_ns = 2233"),
             "整数键不得漂移成字符串：{text}"
@@ -1341,5 +1425,56 @@ room_key_word = ["-RM"]
         assert_eq!(projects[0]["code_prefixes"], json!(["ams"]));
         assert_eq!(projects[0]["db_files"], json!(2));
         assert_eq!(projects[1]["e3d_shape"], json!(false));
+    }
+
+    /// MDB 闭包探测不靠运行中的服务、不靠全局 `DbOption`（ADR-078 D7）：两个搜索根、主项目按
+    /// 文件夹名定位、第二个根里的项目也列进「盘上见到的」；没有 SYS 时声明读不到要说出来，
+    /// 而不是把闭包画成「只有主项目」。
+    #[test]
+    fn probe_mdb_returns_the_closure_without_a_running_service() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(first.path().join("Main").join("mai000")).unwrap();
+        std::fs::create_dir_all(second.path().join("Cat").join("cat000")).unwrap();
+
+        let out = probe_mdb_closure(&MdbProbeRequest {
+            project_path: first.path().to_string_lossy().into_owned(),
+            project_search_paths: vec![
+                second.path().to_string_lossy().into_owned(),
+                String::new(),
+            ],
+            project_name: "main".into(),
+            mdb_name: None,
+        });
+
+        assert_eq!(out["ok"], json!(true), "{out}");
+        assert_eq!(out["mdb"], json!("/ALL"));
+        assert_eq!(out["roots"].as_array().unwrap().len(), 2, "空项剔掉：{out}");
+        assert_eq!(out["main_located"], json!(true), "{out}");
+        let seen: Vec<&str> = out["seen_projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|seen| seen["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(seen, vec!["Main", "Cat"], "{out}");
+        assert_eq!(out["seen_projects"][1]["root_index"], json!(1));
+        assert_eq!(out["seen_projects"][1]["codes"], json!(["CAT"]));
+        assert_eq!(out["projects"][0]["is_main"], json!(true));
+        assert!(
+            out["declaration_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("找不到名为 /ALL 的 MDB")),
+            "没有 SYS 就要说读不到声明：{out}"
+        );
+        assert_eq!(out["status"], json!("degraded"));
+
+        let empty = probe_mdb_closure(&MdbProbeRequest {
+            project_path: "  ".into(),
+            project_search_paths: Vec::new(),
+            project_name: "main".into(),
+            mdb_name: Some("ALL".into()),
+        });
+        assert_eq!(empty["ok"], json!(false));
     }
 }

@@ -70,6 +70,10 @@ pub mod spatial_state;
 
 pub mod spatial_query;
 
+pub mod spatial_centerline;
+
+pub mod spatial_clearance;
+
 pub mod coverage_audit;
 
 use aios_core::RefU64;

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
-use crate::fast_model::spatial_query;
+use crate::fast_model::{spatial_clearance, spatial_query};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
@@ -538,21 +538,16 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     if !store_connected {
         return json!({"status": "degraded", "reason": "process store unavailable"});
     }
-    let generation = match crate::fast_model::room_resident::lifecycle() {
-        ResidentLifecycle::Ready { generation, .. } => generation,
-        ResidentLifecycle::Loading { phase, .. } => {
-            return json!({"status": "initializing", "reason": phase});
-        }
+    // `Degraded`（ADR-073 D8–D11）：模型在、计算器照常冻，只是 `problems` 点名的面板 / 库不在
+    // 承诺内——它是 available 的一个分档，不是 unavailable；读者判「房间也一致」要并读 `problems`。
+    let (generation, problems) = match crate::fast_model::room_resident::lifecycle() {
+        ResidentLifecycle::Ready { generation, .. } => (generation, Vec::new()),
         ResidentLifecycle::Degraded {
             generation,
             problems,
-        } => {
-            return json!({
-                "status": "unavailable",
-                "reason": "resident degraded",
-                "generation": generation,
-                "problems": problems,
-            });
+        } => (generation, problems),
+        ResidentLifecycle::Loading { phase, .. } => {
+            return json!({"status": "initializing", "reason": phase});
         }
         ResidentLifecycle::Blocked { problems } => {
             return json!({"status": "unavailable", "reason": "resident blocked", "problems": problems});
@@ -592,11 +587,21 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     } else {
         return json!({"status": "unavailable", "reason": "durable room executor unavailable"});
     };
-    json!({
-        "status": "available",
-        "generation": generation,
-        "executor": executor,
-    })
+    if problems.is_empty() {
+        json!({
+            "status": "available",
+            "generation": generation,
+            "executor": executor,
+        })
+    } else {
+        json!({
+            "status": "degraded",
+            "reason": "room inputs incomplete: listed panels / libraries are outside the room promise",
+            "generation": generation,
+            "executor": executor,
+            "problems": problems,
+        })
+    }
 }
 
 fn require_room_bootstrap_ready() -> Result<(), ApiError> {
@@ -684,10 +689,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (watch_dbnums, watch_origin) = crate::data_interface::watch_scope::resolved();
     let watch_dbnums_origin = (!watch_dbnums.is_empty()).then(|| watch_origin.describe());
     // 模型增量类型限定同栏（`model_incremental_types` / `AIOS_MODEL_INCREMENTAL_TYPES`）。
-    // 它收窄的是模型消费而不是数据摄入：名单外类型的 regen_root / delete_cleanup 行
-    // 照常入队、留在 model_update_pending 里不被本进程认领——「HANG 的数据都进来了，
-    // 模型怎么一直不出」在面板上问一次就该有答案，被扣住的行数在
-    // `model_update_pending.held_by_model_incremental_types`。空列表 = 不限类型。
+    // 它收窄的是模型生成而不是数据摄入：库初始化时名单外类型的根不生成（`dbnum_initialize`
+    // 是这道门今天唯一的调用点，增量路不扣根）——「HANG 的数据都进来了，模型怎么一直不出」
+    // 在面板上问一次就该有答案。空列表 = 不限类型。
     let (model_incremental_types, model_type_origin) =
         crate::data_interface::model_type_scope::resolved();
     let model_incremental_types_origin =
@@ -738,6 +742,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "project": state.identity.project,
             "mdb": state.identity.mdb,
             "namespace": state.identity.namespace,
+            "mdb_closure": crate::data_interface::mdb_closure::latest()
+                .map(|plan| plan.health_json())
+                .unwrap_or(Value::Null),
             "dabacon_tags": dabacon_tags.clone(),
             "http": http_addresses.clone(),
             // 读路由只剩 direct（2026-09-08 S4）；键留着给老客户端对形态，值是常量。
@@ -814,6 +821,24 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         &mut degraded,
         || Value::Null,
     );
+    // MDB 闭包（ADR-078 D6）：进程内最近一份，不扫盘、不读 SYS。声明落空 / 根不可达 /
+    // 主项目没定位 / SYS 读不到都算降级——已定位项目的数据面照常，但缺口要在这里看得见。
+    let mdb_closure = crate::data_interface::mdb_closure::latest();
+    if mdb_closure.as_ref().is_some_and(|plan| plan.is_degraded()) {
+        degraded.push("mdb_closure");
+    }
+    let mdb_closure = mdb_closure
+        .map(|plan| plan.health_json())
+        .unwrap_or(Value::Null);
+    // 房间输入不全（ADR-073 D8–D11）：常驻模型装好了、带缺口——房间边照算，但 `problems`
+    // 点名的面板 / 库不在 `model_sesno` 的房间承诺内。与 `mdb_closure` 同一条纪律：数据面与
+    // 模型面照常，缺口要在这里一眼可见，`features.room.problems` 给明细。
+    if matches!(
+        crate::fast_model::room_resident::lifecycle(),
+        crate::fast_model::room_resident::ResidentLifecycle::Degraded { .. }
+    ) {
+        degraded.push("room");
+    }
     // 房间流程退役（t-678）：全量重建的盖章 / 对账那一格随 `room_model` 的 StartupRoomBuild
     // 一族没了，启动对比的 `reference` / `startup_compare` 随 `room_startup` 没了。这一格
     // 只剩常驻房间模型自己的统计——无几何的在册面板按库点名，限定域之外的库单独成一句
@@ -857,6 +882,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "project": state.identity.project,
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
+        "mdb_closure": mdb_closure,
         "dabacon_tags": dabacon_tags,
         "http": http_addresses,
         // 数据面读路由只剩 direct（legacy db 读路由 2026-09-08 随 refactor plan S4 退役）。
@@ -961,9 +987,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // `watch_dbnums_origin` 说清是配置写的还是这次命令行给的。
         "watch_dbnums": watch_dbnums,
         "watch_dbnums_origin": watch_dbnums_origin,
-        // 非空 = 本进程的模型增量只生成 / 清理这些类型的生成根（`model_incremental_types`
-        // / `AIOS_MODEL_INCREMENTAL_TYPES`），其余类型的行留在队列里不消费；数据增量
-        // 不受影响。`model_incremental_types_origin` 说清是配置写的还是环境变量给的。
+        // 非空 = 本进程库初始化时只生成这些类型的生成根（`model_incremental_types`
+        // / `AIOS_MODEL_INCREMENTAL_TYPES`），其余类型的根不生成；数据增量与增量路的
+        // 模型生成不受影响。`model_incremental_types_origin` 说清是配置写的还是环境变量给的。
         "model_incremental_types": model_incremental_types,
         "model_incremental_types_origin": model_incremental_types_origin,
         // true = 持久层不落盘，库随进程消失（`mem`）。
@@ -1330,8 +1356,46 @@ impl IntoResponse for SpatialApiError {
     }
 }
 
+/// `source_mode=bran_centerline` 的预取：BRAN 的真实中心线来自 E3D 库（`mbd::branch_query`，
+/// 与 `/api/mbd/v2/pipe` 同一份成员序 + 隐式管身），读盘要落在 `spawn_blocking` 里、并且必须在
+/// 拿树的读锁**之前**读完——查询流水线整段都在锁内跑，不能在那里等 I/O。
+///
+/// 其它 `source_mode` 直接给 `None`，一次库都不读。
+async fn prepare_centerline(
+    source_mode: spatial_query::SourceMode,
+    branch: Option<RefU64>,
+) -> Result<Option<crate::fast_model::spatial_centerline::BranCenterline>, SpatialApiError> {
+    use crate::fast_model::spatial_centerline::BranCenterline;
+
+    if source_mode != spatial_query::SourceMode::BranCenterline {
+        return Ok(None);
+    }
+    let Some(branch) = branch else {
+        return Err(
+            ApiError::bad_request("source_mode=bran_centerline 要给一条 BRAN 的 refno").into(),
+        );
+    };
+    let text = RefnoEnum::from(branch).to_pdms_str();
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&text)
+        .map_err(|error| ApiError::bad_request(format!("refno `{text}` 无法解析：{error:#}")))?;
+    let set = super::mbd::service()
+        .await?
+        .build_set(refno.dbno(), None)
+        .map_err(ApiError::from_domain)?;
+    let result = tokio::task::spawn_blocking(move || crate::mbd::branch_query(&set, refno))
+        .await
+        .map_err(|join| {
+            ApiError::from_domain(anyhow::anyhow!("centerline task aborted: {join}"))
+        })?
+        .map_err(super::mbd::api_error)?;
+    BranCenterline::from_branch(branch, &result)
+        .map(Some)
+        .map_err(|message| ApiError::precondition(message).into())
+}
+
 /// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页
 /// （spec §4.13）。只读树、不取空间串行锁；树不在 Ready / ReadyEmpty 回 503 `spatial_not_ready`。
+/// `source_mode=bran_centerline` 改沿 BRAN 的真实中心线走廊取候选（计划 §3.1）。
 pub async fn spatial_nearby(
     State(state): State<AppState>,
     Query(request): Query<SpatialNearbyReq>,
@@ -1339,13 +1403,23 @@ pub async fn spatial_nearby(
     resolve_identity(&state, &request.identity)?;
     let params =
         spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
     let service = state
         .direct_tree
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby(&params, service.as_ref()).await?;
+    let response = spatial_query::nearby(&params, centerline.as_ref(), service.as_ref()).await?;
     Ok(Json(response))
+}
+
+/// 目标是 refno 就给它，点模式没有 refno。中心线模式下的「必须给 refno」由参数解析挡，
+/// 这里不重复判。
+fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
+    match params.target {
+        spatial_query::Target::Refno(refno) => Some(refno),
+        spatial_query::Target::Position(_) => None,
+    }
 }
 
 /// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。
@@ -1356,12 +1430,44 @@ pub async fn spatial_nearby_refnos(
     resolve_identity(&state, &request.identity)?;
     let params =
         spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
     let service = state
         .direct_tree
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby_refnos(&params, service.as_ref()).await?;
+    let response =
+        spatial_query::nearby_refnos(&params, centerline.as_ref(), service.as_ref()).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/v1/spatial/nearest-clearance` 的 query 串：身份三格 + 净距参数原文。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialClearanceReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_clearance::RawClearanceQuery,
+}
+
+/// GET /api/v1/spatial/nearest-clearance — 沿 BRAN 中心线（或按源包围盒）找每组最近的目标，
+/// 每条候选带可直接画尺寸的两个端点（计划 §3.2）。与 `/nearby` 同一条只读流水线。
+pub async fn spatial_nearest_clearance(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialClearanceReq>,
+) -> Result<Json<spatial_clearance::ClearanceResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_clearance::ClearanceParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let centerline = prepare_centerline(params.source_mode, Some(params.source)).await?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response =
+        spatial_clearance::nearest_clearance(&params, centerline.as_ref(), service.as_ref())
+            .await?;
     Ok(Json(response))
 }
 
@@ -1900,64 +2006,79 @@ pub async fn model_ensure(
     Ok(Json(payload))
 }
 
+/// `/model/ensure` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
+///
+/// 来源两处、都在进程内：投影里有这根的落库 ACK 就是 `ready`，有回执没 ACK 是 `stale`（与退役前
+/// `gen_root.publication_status` 同一口径）；投影里什么都没有时看进程内账本——失败 / 永久放弃的根
+/// 带 `status` 与 `last_error`，账本也没有的按 `model_available` 说 `ready` / `empty`。
+/// 逐根的 revision / target 那几格随 `gen_root` 一起退了，回执上不再出现。
+fn publication_state_of(generation_root: &str, model_available: bool) -> serde_json::Value {
+    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+    let mut summary = serde_json::json!({ "root_refno": generation_root });
+    let parsed = crate::fast_model::e3d_model_service::parse_refno(
+        generation_root.trim_start_matches('='),
+    )
+    .ok();
+    let store = ModelMemoryStore::global();
+    let projection = parsed.and_then(|root| {
+        let receipt = store.receipt(ProjectionScope::Current, root)?;
+        let acked = store.publication_ack(ProjectionScope::Current, root).is_some();
+        Some((receipt, acked))
+    });
+    let ledger = parsed.and_then(|root| {
+        crate::data_interface::model_root_ledger::entry(
+            root.dbno(),
+            crate::data_interface::generation_root::refno_from_e3d(root),
+        )
+    });
+    let fallback = if model_available { "ready" } else { "empty" };
+    let publication_status = match (&projection, &ledger) {
+        (Some((_, true)), _) => "ready",
+        (Some((_, false)), _) => "stale",
+        (None, Some(entry)) if !entry.is_settled() => "stale",
+        _ => fallback,
+    };
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("publication_status".into(), serde_json::json!(publication_status));
+        if let Some((receipt, _)) = &projection {
+            object.insert("source_sesno".into(), serde_json::json!(receipt.source_sesno));
+            object.insert(
+                "published_via".into(),
+                serde_json::json!(receipt.published_via),
+            );
+            object.insert(
+                "published_geometry_count".into(),
+                serde_json::json!(receipt.geometry_count),
+            );
+        }
+        if let Some(entry) = &ledger {
+            object.insert("status".into(), serde_json::json!(entry.status_label()));
+            if let Some(error) = entry.error() {
+                object.insert("last_error".into(), serde_json::json!(error));
+            }
+        }
+    }
+    summary
+}
+
 async fn append_publication_state(
     payload: &mut serde_json::Value,
     generation_root: &str,
 ) -> anyhow::Result<()> {
-    let root_id = generation_root.trim_start_matches('=').replace('/', "_");
-    let mut response = aios_core::SUL_DB
-        .query(format!(
-            "SELECT desired_revision, published_revision, desired_target, published_target, \
-                    publication_status, last_error \
-             FROM ONLY type::thing('gen_root', '{}');",
-            root_id.replace('\\', "\\\\").replace('\'', "\\'")
-        ))
-        .await?
-        .check()?;
-    let state: Option<serde_json::Value> = response.take(0)?;
     let object = payload
         .as_object_mut()
         .context("model ensure response is not an object")?;
-    let mut summary = state.unwrap_or_else(|| serde_json::json!({}));
-    let summary_object = summary
-        .as_object_mut()
-        .context("generation root state is not an object")?;
-    summary_object.insert(
-        "root_refno".into(),
-        serde_json::Value::String(generation_root.to_string()),
-    );
-    let fallback = if object
+    let model_available = object
         .get("model_available")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        "ready"
-    } else {
-        "empty"
-    };
-    let publication_status = summary_object
-        .get("publication_status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(fallback)
-        .to_string();
-    summary_object.insert(
-        "publication_status".into(),
-        serde_json::Value::String(publication_status.clone()),
-    );
-    for field in [
-        "desired_revision",
-        "published_revision",
-        "desired_target",
-        "published_target",
-        "last_error",
-    ] {
-        if let Some(value) = summary_object.get(field).cloned() {
-            object.insert(field.into(), value);
-        }
+        .unwrap_or(false);
+    let summary = publication_state_of(generation_root, model_available);
+    if let Some(error) = summary.get("last_error").cloned() {
+        object.insert("last_error".into(), error);
     }
     object.insert(
         "publication_status".into(),
-        serde_json::Value::String(publication_status),
+        summary["publication_status"].clone(),
     );
     object.insert("root_summaries".into(), serde_json::json!([summary]));
     Ok(())

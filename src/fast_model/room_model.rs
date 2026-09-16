@@ -1183,26 +1183,6 @@ impl PanelIndex {
         &self.missing
     }
 
-    /// 在册面板几何是否已经齐了。
-    ///
-    /// 这不再是破坏性写入的前置条件——元素分支改为按面板让开替换范围，一块缺几何的
-    /// 面板只影响它自己的边。这里只用来判断缺陷登记该不该销账。
-    pub fn ensure_complete(&self) -> anyhow::Result<()> {
-        if self.missing.is_empty() {
-            return Ok(());
-        }
-        let sample = self
-            .missing
-            .iter()
-            .take(5)
-            .map(RefnoEnum::to_string)
-            .join(", ");
-        anyhow::bail!(
-            "在册面板索引不完整：{} 块面板缺少可用几何（例如 {sample}），不改写构件归属",
-            self.missing.len()
-        )
-    }
-
     fn mesh_dir(&self) -> &Path {
         &self.mesh_dir
     }
@@ -1987,6 +1967,161 @@ mod memory_calculation_tests {
             calc.calculate(7000, model_sesno, &rooms_version, &[outside])
                 .is_err()
         );
+        // 面板齐备：没有保护集绑定、没有排除子句，语句与此前逐字相同。
+        let fully_inside = [record(11, 400., 600.)];
+        let sql = calc.render_root_room_edges(
+            &fully_inside,
+            &calc.calculate_for_root(&fully_inside).unwrap(),
+        );
+        assert!(
+            !sql.contains(ROOM_PROTECTED_PANELS_VAR) && !sql.contains("NOT IN"),
+            "面板齐备时不该出现保护集: {sql}"
+        );
+    }
+
+    /// ADR-073 D9（2026-09-16，源码钉 10）：在册却没几何的面板**不阻断**计算器，逐根写边时作为
+    /// 保护集让开——此前 `new()` 调 `ensure_complete()`，一块面板缺几何就让每个任务冻不出计算器、
+    /// 整批根「room calculator unavailable」判死（0.1.25 现场：1112 `18/18`、7997 `6772/6772`）。
+    /// 保护集一根只绑一次（`LET $room_protected_panels`），每个构件的 `DELETE` 引用它。
+    #[test]
+    fn a_registered_panel_without_geometry_is_protected_not_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh_for_test(Vec3::ZERO, Vec3::splat(1000.))
+            .ser_to_file(&dir.path().join("panel.mesh"))
+            .unwrap();
+        let panel: RefnoEnum = "7000_1".into();
+        let bare: RefnoEnum = "7000_3".into();
+        let map = RoomPanelMap {
+            rooms: vec![
+                RoomPanels {
+                    room: "7000_2".into(),
+                    room_num: "R1".into(),
+                    panels: vec![panel],
+                },
+                RoomPanels {
+                    room: "7000_4".into(),
+                    room_num: "R2".into(),
+                    panels: vec![bare],
+                },
+            ],
+            all_panels: HashSet::from([panel, bare]),
+        };
+        let mut panel_record = record(1, 0., 1000.);
+        panel_record.source_refno = e3d_io::refno::RefNo::new(7000, 1);
+        panel_record.dbnum = 7000;
+        panel_record.world_bounds = [[0.; 3], [1000.; 3]];
+        panel_record.mesh_id = "panel".into();
+        let model = Arc::new(ResidentRoomModel::from_projection(
+            ResidentManifest {
+                form: ResidentForm::Latest,
+                key: "source".into(),
+            },
+            vec![],
+            map,
+            &[panel_record],
+            Arc::<MeshCache>::default(),
+        ));
+        assert_eq!(
+            model.missing_panels,
+            vec![bare],
+            "夹具前提：7000_3 在册、没几何"
+        );
+
+        let calc = MemoryRoomCalculator::new(model, dir.path().to_path_buf())
+            .expect("缺几何的面板不阻断计算器（ADR-073 D9）");
+        assert_eq!(calc.missing_panels(), &[bare]);
+
+        let inside = record(10, 400., 600.);
+        let far = record(20, 5400., 5600.);
+        let records = [inside.clone(), far.clone()];
+        let edges = calc.calculate_for_root(&records).unwrap();
+        assert_eq!(edges.len(), 1, "有几何的面板照常判定");
+
+        let sql = calc.render_root_room_edges(&records, &edges);
+        let binding = format!(
+            "LET {ROOM_PROTECTED_PANELS_VAR} = [{}];\n",
+            bare.to_pe_key()
+        );
+        assert!(sql.starts_with(&binding), "一根一句保护集绑定: {sql}");
+        assert_eq!(
+            sql.matches(&format!("LET {ROOM_PROTECTED_PANELS_VAR}"))
+                .count(),
+            1,
+            "两个构件共用同一句绑定: {sql}"
+        );
+        for record in &records {
+            let element =
+                crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
+            assert!(
+                sql.contains(&format!(
+                    "DELETE {}<-room_relate WHERE in NOT IN {ROOM_PROTECTED_PANELS_VAR};\n",
+                    element.to_pe_key()
+                )),
+                "构件 {element} 的 DELETE 必须让开保护集: {sql}"
+            );
+        }
+        assert!(
+            sql.contains("INSERT RELATION INTO room_relate"),
+            "有几何的面板的边照常写回: {sql}"
+        );
+        assert_eq!(
+            sql.matches(bare.to_pe_key().as_str()).count(),
+            1,
+            "保护集名单只在绑定里出现一次，不逐构件展开: {sql}"
+        );
+    }
+
+    /// ADR-073 D12：代号 = 计算输入的摘要，不是文件版本 composite。同一份拓扑 / 在册 / 几何、
+    /// 不同文件版本 → 同代（一个 DESI 前进却没动房间 / 面板时旧 ACK 照旧有效）；面板几何变了 → 换代。
+    #[test]
+    fn the_resident_generation_follows_the_calculation_input_not_the_file_composite() {
+        let dir = tempfile::tempdir().unwrap();
+        let panel: RefnoEnum = "7000_1".into();
+        let map = || RoomPanelMap {
+            rooms: vec![RoomPanels {
+                room: "7000_2".into(),
+                room_num: "R1".into(),
+                panels: vec![panel],
+            }],
+            all_panels: HashSet::from([panel]),
+        };
+        let mut panel_record = record(1, 0., 1000.);
+        panel_record.source_refno = e3d_io::refno::RefNo::new(7000, 1);
+        panel_record.dbnum = 7000;
+        panel_record.world_bounds = [[0.; 3], [1000.; 3]];
+        panel_record.mesh_id = "panel".into();
+        let build = |key: &str, record: &ProjectedGeometry| {
+            Arc::new(ResidentRoomModel::from_projection(
+                ResidentManifest {
+                    form: ResidentForm::Latest,
+                    key: key.into(),
+                },
+                vec![],
+                map(),
+                std::slice::from_ref(record),
+                Arc::<MeshCache>::default(),
+            ))
+        };
+        let v1 =
+            MemoryRoomCalculator::new(build("files-v1", &panel_record), dir.path().to_path_buf())
+                .unwrap();
+        let v2 =
+            MemoryRoomCalculator::new(build("files-v2", &panel_record), dir.path().to_path_buf())
+                .unwrap();
+        assert_eq!(
+            v1.resident_generation(),
+            v2.resident_generation(),
+            "文件前进但房间 / 面板没变：同代"
+        );
+        let mut moved = panel_record.clone();
+        moved.world_transform = glam::DMat4::from_translation(glam::DVec3::new(10., 0., 0.));
+        let v3 =
+            MemoryRoomCalculator::new(build("files-v2", &moved), dir.path().to_path_buf()).unwrap();
+        assert_ne!(
+            v1.resident_generation(),
+            v3.resident_generation(),
+            "面板几何变了：换代"
+        );
     }
 }
 
@@ -2026,6 +2161,11 @@ impl MemoryRoomCalculator {
         )
     }
 
+    /// 从任务开工时冻住的常驻模型建索引。**在册却没几何的面板不阻断**（ADR-073 D9，2026-09-16）：
+    /// 它们不进索引、留在 [`PanelIndex::missing_panels`]，逐根写边时作为保护集让开——此前这里
+    /// 调 `ensure_complete()`，一块面板缺几何就让每个任务冻不出计算器、整批根判死，与 2026-09-09
+    /// 审核 W1「从未生成的面板不阻代」自相矛盾。真正的 `Err` 只剩 `input_version` 一类不该发生的
+    /// 事；房间体制本身没起来由 [`crate::fast_model::room_resident::ensure_ready`] 在取模型时拦。
     pub(crate) fn new(model: Arc<ResidentRoomModel>, mesh_dir: PathBuf) -> anyhow::Result<Self> {
         let registered: Vec<_> = model
             .map
@@ -2040,11 +2180,16 @@ impl MemoryRoomCalculator {
             ..Default::default()
         };
         fill_panel_index_from_resident(&mut panels, &model.map, &registered, &model);
-        panels.ensure_complete()?;
         Ok(Self {
             panels,
             definition_version: model.input_version(),
         })
+    }
+
+    /// 在册却没进索引的面板（[`PanelIndex::missing_panels`] 同一份）：逐根写边的保护集，
+    /// 也是回执 / 日志点名「这一轮哪些面板没参与判定」的来源。
+    pub(crate) fn missing_panels(&self) -> &[RefnoEnum] {
+        self.panels.missing_panels()
     }
 
     /// `model_sesno`：记录的 `source_sesno` 不得越过它（算的是哪一版模型）；
@@ -2125,15 +2270,12 @@ impl MemoryRoomCalculator {
         })
     }
 
-    /// 这台计算器冻结的 resident generation。完整根 ACK 用它防止旧房间拓扑冒充新代。
+    /// 这台计算器冻结的 resident generation——**计算输入的摘要**（`ResidentRoomModel::input_version`：
+    /// 拓扑 + 在册视图 + 有几何面板的几何），不是文件版本 composite（ADR-073 D12）。完整根 ACK 用它
+    /// 防止旧房间拓扑冒充新代：一个 DESI 前进却没动任何房间 / 面板时摘要不变，旧 ACK 照旧有效；
+    /// 拿文件 composite 当代号会让任一库前进就把全 MDB 的 ACK 作废成 `not_computed`。
     pub(crate) fn resident_generation(&self) -> &str {
-        &self
-            .panels
-            .resident
-            .as_ref()
-            .expect("a memory room calculator is always built from a resident model")
-            .manifest
-            .key
+        &self.definition_version
     }
 
     /// 冻结那一刻的房间 → 面板现状（谁是面板、面板属于哪间在册的房）。
@@ -2154,6 +2296,13 @@ impl MemoryRoomCalculator {
     /// 属于某间在册房间就写回本次的（ADR-073 D4：两张边表的写者都是这条逐根路径）。根里没有几何的
     /// 构件不在 `records` 里，它的边由对账删除那一半清（`model_db_adapter::room_edges_to_clear`）。
     /// 语句以 `;\n` 收尾，直接 `push_str` 进发布事务的语句串。
+    ///
+    /// 在册却没几何的面板（[`Self::missing_panels`]）是**保护集**（ADR-073 D9）：它们不在索引里，本轮
+    /// 必然算不出指向它们的边，`DELETE` 若照样清掉就是拿「没算」当「算出来是空的」。保护集非空时
+    /// 这一根先 `LET $room_protected_panels = [...]` 一句，每个构件的 `DELETE` 带
+    /// `WHERE in NOT IN $room_protected_panels`——一根一份名单，不逐构件重复整张列表（几何覆盖稀疏的
+    /// 实例上缺几何的面板可能有两百多块，逐构件展开会把一根的事务撑大几十倍）。为空时语句与此前
+    /// 逐字相同。
     pub(crate) fn render_root_room_edges(
         &self,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
@@ -2175,8 +2324,16 @@ impl MemoryRoomCalculator {
                 .push(edge.clone());
         }
         let mut out = String::new();
+        let protected = self.missing_panels();
+        let guard = if by_element.is_empty() || protected.is_empty() {
+            None
+        } else {
+            out.push_str(&render_protected_panels_binding(protected));
+            out.push_str(";\n");
+            Some(ROOM_PROTECTED_PANELS_VAR)
+        };
         for (element, edges) in &by_element {
-            let mut statements = render_element_relate_statements(*element, edges, &[]);
+            let mut statements = render_element_relate_statements_guarded(*element, edges, guard);
             if map.all_panels.contains(element) {
                 statements.extend(render_panel_room_topology_statements(
                     *element,
@@ -2331,17 +2488,45 @@ fn render_element_relate_statements(
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> Vec<String> {
-    let element_key = element.to_pe_key();
-    let mut delete = format!("DELETE {element_key}<-room_relate");
-    if !protected_panels.is_empty() {
+    let inline = (!protected_panels.is_empty()).then(|| {
         // 排序是为了让同一份缺陷面板集合每次渲染出逐字相同的语句——journal 重放与
         // 对拍都押在这上面。
-        let keys = protected_panels
-            .iter()
-            .map(RefnoEnum::to_pe_key)
-            .sorted()
-            .join(", ");
-        delete.push_str(&format!(" WHERE in NOT IN [{keys}]"));
+        format!("[{}]", render_protected_panel_keys(protected_panels))
+    });
+    render_element_relate_statements_guarded(element, edges, inline.as_deref())
+}
+
+/// 逐根路径上保护集绑定的变量名（ADR-073 D9）：一根一句 `LET`，构件的 `DELETE` 引用它。
+const ROOM_PROTECTED_PANELS_VAR: &str = "$room_protected_panels";
+
+/// 保护集的记录 id 列表：排序、`pe:` 键，逐字确定。
+fn render_protected_panel_keys(protected_panels: &[RefnoEnum]) -> String {
+    protected_panels
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .sorted()
+        .join(", ")
+}
+
+/// `LET $room_protected_panels = [pe:…, …]`（不带 `;`）：逐根事务里保护集只发一份。
+fn render_protected_panels_binding(protected_panels: &[RefnoEnum]) -> String {
+    format!(
+        "LET {ROOM_PROTECTED_PANELS_VAR} = [{}]",
+        render_protected_panel_keys(protected_panels)
+    )
+}
+
+/// [`render_element_relate_statements`] 的底座：`guard` 是排除子句右手边的**表达式原文**
+/// （内联数组 `[pe:…]` 或变量 `$room_protected_panels`），`None` = 不带排除子句。
+fn render_element_relate_statements_guarded(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    guard: Option<&str>,
+) -> Vec<String> {
+    let element_key = element.to_pe_key();
+    let mut delete = format!("DELETE {element_key}<-room_relate");
+    if let Some(guard) = guard {
+        delete.push_str(&format!(" WHERE in NOT IN {guard}"));
     }
     let mut statements = vec![delete];
 

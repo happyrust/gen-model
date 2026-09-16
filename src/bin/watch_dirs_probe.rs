@@ -68,8 +68,12 @@ fn main() -> anyhow::Result<()> {
 
     let report = json!({
         "project_path": option.project_path,
-        "included_projects": option.included_projects,
-        "project_dirs": option.project_dirs,
+        "project_search_paths": aios_database::options::project_search_paths(),
+        "project_name": option.project_name,
+        "mdb_name": option.mdb_name,
+        // 已退役（ADR-078）：只回显，不参与解析。
+        "included_projects_ignored": option.included_projects,
+        "mdb_closure": aios_database::data_interface::mdb_closure::latest().map(|plan| plan.health_json()),
         "watch_dirs": plan.dirs().iter().map(|dir| dir.display().to_string()).collect::<Vec<_>>(),
         "watch_dir_count": plan.dirs().len(),
         "watchdog_would_start": !plan.is_empty(),
@@ -104,8 +108,16 @@ fn remount_selftest(pretty: bool) -> anyhow::Result<()> {
 
     let mut option = aios_core::get_db_option().clone();
     option.project_path = root.to_string_lossy().into_owned();
-    option.included_projects = vec!["ProjEarly".into(), "ProjLate".into()];
+    option.project_name = "ProjEarly".into();
+    option.mdb_name = "REMOUNT-SELFTEST".into();
+    option.included_projects = Vec::new();
     option.project_dirs = None;
+    // 闭包由 MDB 声明派生（ADR-078）：自检不读 SYS，直接喂一份「ProjEarly 主项目 + 外部项目码 LATE」。
+    aios_database::data_interface::mdb_closure::seed_declaration(
+        "ProjEarly",
+        "REMOUNT-SELFTEST",
+        &[(None, 8000, "/EARLY"), (Some("LATE"), 7000, "/LATE")],
+    );
 
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut watcher = PollWatcher::new(

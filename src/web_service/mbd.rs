@@ -33,12 +33,25 @@ static SERVICE: OnceCell<Arc<E3dModelService>> = OnceCell::const_new();
 
 /// 进程内共享的 MDB 视图；建不起来（DbOption / MDB 成员表 / 模板目录缺）时每次请求重试。
 /// `element/ptset`（[`super::ptset`]）与这里共用同一份视图。
-pub(super) async fn service() -> Result<Arc<E3dModelService>, ApiError> {
+///
+/// `/api/v1/spatial/*` 的 `source_mode=bran_centerline` 也从这里取（同一份视图、同一套目录会话），
+/// 见 `handlers::prepare_centerline`。
+pub(crate) async fn service() -> Result<Arc<E3dModelService>, ApiError> {
     SERVICE
         .get_or_try_init(|| async { E3dModelService::from_current().await.map(Arc::new) })
         .await
         .cloned()
         .map_err(ApiError::from_domain)
+}
+
+/// `BranchQueryError` → 统一信封（404 / 422 / 500）。`mbd_v2_pipe` 的 `RootError` 另走带
+/// `issues` 的 422 响应体——尺寸面板要逐条定位；别的调用方（中心线预取）只要状态码与消息。
+pub(crate) fn api_error(error: BranchQueryError) -> ApiError {
+    match error {
+        BranchQueryError::Db(error) => ApiError::from_domain(error.into()),
+        error @ BranchQueryError::NotFound { .. } => ApiError::not_found(error.to_string()),
+        error => ApiError::precondition(error.to_string()),
+    }
 }
 
 /// GET /api/mbd/v2/pipe/{refno}

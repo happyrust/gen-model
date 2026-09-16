@@ -85,8 +85,8 @@ pub struct TransformClassification {
 ///
 /// - `roots_t`：T 端枚举出的生成根；`root_ancestors_t`：每个根在 T 端的属主链（不含自身），
 ///   锚点在根**之上**（挪 ZONE）时靠它归因。
-/// - `settled`：`roots_S` 里已发布且安定的根（`ready ∧ desired == published ∧ 状态在
-///   `SETTLED_ROOT_STATUSES` ∧ 凭证 > 0`）。
+/// - `settled`：`roots_S` 里已发布且安定的根（`window_root_plan::settled_base_roots`：S 端根集减去
+///   进程内账本里还欠着的根，ADR-079）。
 /// - `touched`：`expand_touched` **之前**的波及集；`expanded`：三条级联扩展（C2 / C8 / P4）加进来
 ///   的根——规则 5，一律 `regen`。
 /// - `degraded`：`WindowImpact::degraded_reason()`，非空则整窗没有便宜路（规则 4）。

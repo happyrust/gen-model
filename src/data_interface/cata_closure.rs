@@ -400,7 +400,8 @@ impl InMemoryCataLocator {
         if manifest.is_empty() {
             let option = get_db_option();
             let mut projects = vec![project.to_string()];
-            projects.extend(option.included_projects.iter().cloned());
+            // 依赖项目 = MDB 闭包（ADR-078），不再是 `included_projects`。
+            projects.extend(crate::data_interface::project_paths::project_names(option));
             projects.sort_unstable();
             projects.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
             for catalogue_project in projects {
