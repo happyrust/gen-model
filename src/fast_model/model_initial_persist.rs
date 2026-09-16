@@ -245,7 +245,9 @@ fn seal(dbnum: u32, roots: Vec<RenderedRoot>) -> InitialTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fast_model::model_memory_store::{ProjectedGeometry, ProjectedShape, packed_refno};
+    use crate::fast_model::model_memory_store::{
+        CommitScope, ProjectedGeometry, ProjectedShape, packed_refno,
+    };
     use e3d_model::GeometryId;
     use glam::DMat4;
     use surrealdb::{Surreal, engine::any::Any};
@@ -289,6 +291,7 @@ mod tests {
                 },
             )),
             upserts,
+            scope: CommitScope::WholeRoot,
         }
     }
 

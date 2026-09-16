@@ -190,6 +190,34 @@ pub fn default_published_via() -> String {
     "regen".to_string()
 }
 
+/// 一笔提交**是不是这根的全集**（ADR-078 D2）。
+///
+/// 它**不改存储的删除行为**：`ScopeState::apply_removals` 一向只删 [`ProjectionCommit::removals`]
+/// 与 [`ProjectionCommit::tube_branch_resets`] 点名的那些，从来不拿「缺席」当删除。
+/// 它管的是**上游有没有资格用缺席推出删除**——今天 `generate_refs` 就是这么算 `removals` 的
+/// （`上一版有的 \ 这一版生成的`），那条推导只有在 `upserts` 确实是这根全集时才成立。
+/// 单元级发布只重建变了的那几件，同一条推导会把没重建的全删掉，而且两边都不报错。
+///
+/// 于是这一格的用处有三个：① 让一笔提交自己说得清它是哪一种，不靠调用点上下文去猜；
+/// ② 给「缺席推删除」那条推导一个能被机器钉住的前提（见 `e3d_model_service::whole_root_removals`）；
+/// ③ 告诉存储这笔提交的回执**该由谁盖章**（ADR-078 D5，见 [`CommitScope::Partial`]）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitScope {
+    /// `upserts` 是这根的全集：缺席 = 删除，上游可以做差。今天所有生产提交都是这一档。
+    /// 回执照调用方写的原样入库——`upserts` 就是整根，调用方在锁外算的章就是对的。
+    #[default]
+    WholeRoot,
+    /// 只点名了这几件：**缺席什么也不证明**，要删什么必须显式写进 `removals`。
+    ///
+    /// 带回执时，回执的 `manifest_hash` / `geometry_count` **由存储在写锁里盖**（ADR-078 D5）：
+    /// `upserts` 只是这根的一角，整根的章只能在 delta 落进去之后、按此刻这根名下的全部记录算；
+    /// 锁外先读 `records_of_root` 再算再提交，读与提交之间还有别的写入者（另一批提交、淘汰、
+    /// 整库清空），算出来的章对的是一个已经不存在的版本。所以调用方在这两格填什么都只是占位，
+    /// 会被覆盖；`source_sesno` / `model_target` / `published_via` 照调用方的。要拿盖完的那份，
+    /// 用 [`ModelMemoryStore::commit`] / [`ModelMemoryStore::try_commit_current`] 的返回值。
+    Partial,
+}
+
 /// 一根（或一次增量）要落进存储的全部改动。攒齐一批再一次提交，一批就是一个原子边界。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectionCommit {
@@ -199,9 +227,15 @@ pub struct ProjectionCommit {
     /// 要删掉的记录 id。
     pub removals: Vec<String>,
     pub upserts: Vec<ProjectedGeometry>,
-    /// 本次投影给某个生成根盖的章。
+    /// 本次投影给某个生成根盖的章。`scope` 是 [`CommitScope::Partial`] 时，`manifest_hash` /
+    /// `geometry_count` 两格由存储在写锁里重算并覆盖（ADR-078 D5），调用方填的只是占位。
     #[serde(with = "receipt_wire")]
     pub receipt: Option<(RefNo, RootReceipt)>,
+    /// 这一笔是整根全集还是局部（ADR-078 D2）。默认 `WholeRoot` = 今天的语义；
+    /// 磁盘上那些没有这一格的旧产物（`model_artifact`）反序列化后也落在 `WholeRoot`，
+    /// 与它们被写下时的语义一致。
+    #[serde(default)]
+    pub scope: CommitScope,
 }
 
 mod refno_wire {
@@ -520,20 +554,47 @@ impl ScopeState {
         }
     }
 
-    fn apply_upserts_and_receipt(&mut self, commit: ProjectionCommit) {
+    /// 落 upserts、盖回执；返回**实际入库**的那份回执。`WholeRoot` 原样入库；`Partial` 的章在
+    /// upserts 落完之后由 [`Self::stamp_partial_receipt`] 就地重算——与落 delta 在同一把写锁里，
+    /// 中间插不进任何别的写入者（ADR-078 D5）。
+    fn apply_upserts_and_receipt(
+        &mut self,
+        commit: ProjectionCommit,
+    ) -> Option<(RefNo, RootReceipt)> {
+        let scope = commit.scope;
         for record in commit.upserts {
             self.insert(record);
         }
-        if let Some((root, receipt)) = commit.receipt {
-            let sesno = self
-                .published_sesno
-                .entry(root.dbno())
-                .or_insert(receipt.source_sesno);
-            *sesno = (*sesno).max(receipt.source_sesno);
-            self.invalidated_roots.remove(&packed_refno(root));
-            self.receipts.insert(packed_refno(root), receipt);
-            self.bump_epoch(root.dbno());
+        let (root, mut receipt) = commit.receipt?;
+        if scope == CommitScope::Partial {
+            self.stamp_partial_receipt(root, &mut receipt);
         }
+        let sesno = self
+            .published_sesno
+            .entry(root.dbno())
+            .or_insert(receipt.source_sesno);
+        *sesno = (*sesno).max(receipt.source_sesno);
+        self.invalidated_roots.remove(&packed_refno(root));
+        self.receipts.insert(packed_refno(root), receipt.clone());
+        self.bump_epoch(root.dbno());
+        Some((root, receipt))
+    }
+
+    /// ADR-078 D5：局部提交的回执按**此刻**这根名下的全部记录盖章。
+    ///
+    /// 只在写锁里、且 `removals` / `tube_branch_resets` / `upserts` 都已落地之后调用——这是
+    /// 「应用 delta + 重算 `manifest_hash` + 盖回执」三步成为一个原子操作的全部依据。记录集合与
+    /// [`ModelMemoryStore::root_projection_complete`] 用同一把尺子（`record_ids_under`），所以盖出来的
+    /// `geometry_count` 正好是它随后要核的那个数；配方与重生成 / 刚体前移同一份
+    /// （`e3d_model_service::manifest_hash_of`），三条路对同一批记录算出同一个章。
+    fn stamp_partial_receipt(&self, root: RefNo, receipt: &mut RootReceipt) {
+        let record_ids = self.record_ids_under(root);
+        let records = record_ids.iter().filter_map(|id| self.geometries.get(id));
+        let (manifest_hash, geometry_count) =
+            crate::fast_model::e3d_model_service::manifest_hash_of(records)
+                .expect("projection is serializable");
+        receipt.manifest_hash = manifest_hash;
+        receipt.geometry_count = geometry_count;
     }
 
     #[cfg(test)]
@@ -724,9 +785,17 @@ impl ModelMemoryStore {
 
     /// 一次提交一批改动。整批在同一把写锁下落地——一个 cohort 是一个原子边界，
     /// 与旧发布事务的 `BEGIN … COMMIT` 同一条纪律。
-    pub fn commit(&self, scope: ProjectionScope<'_>, commits: Vec<ProjectionCommit>) {
+    ///
+    /// 返回这一批**实际入库**的回执，按提交顺序。`WholeRoot` 的就是调用方递进来的那份；
+    /// `Partial` 的 `manifest_hash` / `geometry_count` 是在这把锁里、delta 落完之后重算的
+    /// （ADR-078 D5），调用方手里那份是占位——要登记 durable 身份、要对 ACK，都得拿这里返回的。
+    pub fn commit(
+        &self,
+        scope: ProjectionScope<'_>,
+        commits: Vec<ProjectionCommit>,
+    ) -> Vec<(RefNo, RootReceipt)> {
         if commits.iter().all(ProjectionCommit::is_empty) {
-            return;
+            return Vec::new();
         }
         let mut scopes = self.write();
         let state = scopes.entry(scope.key()).or_default();
@@ -737,17 +806,20 @@ impl ModelMemoryStore {
             state.invalidate_publication_acks_for(commit);
             state.apply_removals(commit);
         }
+        let mut stamped = Vec::new();
         for commit in commits {
-            state.apply_upserts_and_receipt(commit);
+            stamped.extend(state.apply_upserts_and_receipt(commit));
         }
         state.flush_room_spatial();
+        stamped
     }
 
     /// 把一批 current overlay 的改动整体装进去。overlay 无界，不存在装不下这回事，
     /// 所以这里没有准入判断——只是 [`Self::commit`] 钉死在 `Current` 作用域上的形态。
-    pub fn try_commit_current(&self, commits: Vec<ProjectionCommit>) {
+    /// 返回值同 [`Self::commit`]：实际入库的回执。
+    pub fn try_commit_current(&self, commits: Vec<ProjectionCommit>) -> Vec<(RefNo, RootReceipt)> {
         if commits.iter().all(ProjectionCommit::is_empty) {
-            return;
+            return Vec::new();
         }
         let mut scopes = self.write();
         let state = scopes.entry(ScopeKey::Current).or_default();
@@ -756,10 +828,12 @@ impl ModelMemoryStore {
             state.invalidate_publication_acks_for(commit);
             state.apply_removals(commit);
         }
+        let mut stamped = Vec::new();
         for commit in commits {
-            state.apply_upserts_and_receipt(commit);
+            stamped.extend(state.apply_upserts_and_receipt(commit));
         }
         state.flush_room_spatial();
+        stamped
     }
 
     pub fn current_counts(&self) -> (usize, usize) {
@@ -1328,6 +1402,317 @@ mod tests {
 
     fn store() -> ModelMemoryStore {
         ModelMemoryStore::default()
+    }
+
+    /// ADR-078 D2：**未提及 ≠ 删除**。
+    ///
+    /// 存储本来就只删点名的那些，这一条把它钉住——单元级发布正要靠它：一根三件只重建一件，
+    /// 另外两件必须原地不动。同时钉住 `tube_branch_resets` **不受这条约束**：它是整段重写，
+    /// 一碰就清光那条分支的全部管身（D6 的冲突就在这里，不是理论上的）。
+    #[test]
+    fn a_partial_commit_only_removes_what_it_names() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let untouched_a = record("a", RefNo::new(7997, 11), root, 7997);
+        let untouched_b = record("b", RefNo::new(7997, 12), root, 7997);
+        let changed = record("c", RefNo::new(7997, 13), root, 7997);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![untouched_a.clone(), untouched_b.clone(), changed.clone()],
+                ..Default::default()
+            }],
+        );
+
+        // 只重建第三件：另外两件一个字都没提。
+        let mut rebuilt = changed.clone();
+        rebuilt.world_bounds = [[5.0; 3], [6.0; 3]];
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![rebuilt.clone()],
+                scope: CommitScope::Partial,
+                ..Default::default()
+            }],
+        );
+        let after = store.records_of_root(ProjectionScope::Current, root);
+        assert_eq!(after.len(), 3, "没提到的两件不许因为缺席就消失");
+        let bounds = |id: &str| {
+            after
+                .iter()
+                .find(|row| row.record_id == id)
+                .unwrap_or_else(|| panic!("{id} 应当还在"))
+                .world_bounds
+        };
+        assert_eq!(bounds("a"), untouched_a.world_bounds);
+        assert_eq!(bounds("b"), untouched_b.world_bounds);
+        assert_eq!(bounds("c"), rebuilt.world_bounds, "点名那件要真的换掉");
+
+        // 显式点名才删得掉。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec!["b".into()],
+                scope: CommitScope::Partial,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, root).len(),
+            2
+        );
+    }
+
+    /// ADR-078 D6：`tube_branch_resets` 与「未提及 ≠ 删除」是两条相反的规矩，
+    /// 局部提交碰到某条分支的管身就得把它那几段一起带上，否则静默丢管。
+    #[test]
+    fn a_partial_commit_that_resets_a_branch_still_clears_every_segment_of_it() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let branch = RefNo::new(7997, 21);
+        let mut second = tube_record("t2", branch, root);
+        second.record_id = "t2".into();
+        if let GeometryId::ImpliedTube { route_ordinal, .. } = &mut second.geometry_id {
+            *route_ordinal = 1;
+        }
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![tube_record("t1", branch, root), second],
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, root).len(),
+            2
+        );
+
+        // 只补回一段：重置清光两段，另一段就这么没了——这正是 D6 要拦的形状。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                tube_branch_resets: vec![branch],
+                upserts: vec![tube_record("t1", branch, root)],
+                scope: CommitScope::Partial,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, root).len(),
+            1,
+            "整段重写不吃「未提及 ≠ 删除」那条——D6 的管段完整性门要在上游挡住这个形状"
+        );
+    }
+
+    /// ADR-078 D2：磁盘上那些没有 `scope` 这一格的旧 `model_artifact` 反序列化后必须落在
+    /// `WholeRoot`——它们被写下时就是整根全集，读成 `Partial` 会让上游少删该删的。
+    #[test]
+    fn a_commit_serialized_before_the_scope_field_reads_back_as_whole_root() {
+        let legacy = serde_json::json!({
+            "tube_branch_resets": [],
+            "removals": [],
+            "upserts": [],
+            "receipt": null,
+        });
+        let commit: ProjectionCommit = serde_json::from_value(legacy).expect("旧产物仍要读得进来");
+        assert_eq!(commit.scope, CommitScope::WholeRoot);
+    }
+
+    fn shared_recipe(records: &[ProjectedGeometry]) -> (String, usize) {
+        crate::fast_model::e3d_model_service::manifest_hash(records).expect("serializable")
+    }
+
+    /// ADR-078 D5：`Partial` 回执的章是存储在写锁里、delta 落完之后按这根**此刻**的全部记录盖的。
+    ///
+    /// 调用方在 `manifest_hash` / `geometry_count` 里填什么都只是占位；盖出来的必须等于对
+    /// 「提交之后 `records_of_root`」跑一遍共用配方的结果，也必须能过
+    /// `root_projection_complete` 那道「记录数 == geometry_count」的核。别的几格照调用方的。
+    #[test]
+    fn a_partial_receipt_is_stamped_from_the_root_as_it_stands_after_the_delta() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let a = record("a", RefNo::new(7997, 11), root, 7997);
+        let b = record("b", RefNo::new(7997, 12), root, 7997);
+        let c = record("c", RefNo::new(7997, 13), root, 7997);
+        let (whole_hash, whole_count) = shared_recipe(&[a.clone(), b.clone(), c.clone()]);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![a.clone(), b.clone(), c.clone()],
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: whole_hash.clone(),
+                        geometry_count: whole_count,
+                        published_via: "regen".into(),
+                    },
+                )),
+                ..Default::default()
+            }],
+        );
+
+        // 局部提交：删 b、重建 c，a 一个字不提。章由存储盖，这里故意填一份对不上任何东西的占位。
+        let mut rebuilt = c.clone();
+        rebuilt.mesh_id = "mesh_c_rebuilt".into();
+        rebuilt.source_sesno = 43;
+        let stamped = store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec!["b".into()],
+                upserts: vec![rebuilt.clone()],
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 43,
+                        model_target: None,
+                        manifest_hash: "placeholder".into(),
+                        geometry_count: 0,
+                        published_via: "unit".into(),
+                    },
+                )),
+                scope: CommitScope::Partial,
+                ..Default::default()
+            }],
+        );
+
+        let after = store.records_of_root(ProjectionScope::Current, root);
+        assert_eq!(after.len(), 2, "a 留着、b 删了、c 换了");
+        let (expected_hash, expected_count) = shared_recipe(&after);
+        let receipt = store
+            .receipt(ProjectionScope::Current, root)
+            .expect("局部提交也盖章");
+        assert_eq!(
+            receipt.manifest_hash, expected_hash,
+            "章要对得上提交之后这根的全部记录"
+        );
+        assert_eq!(receipt.geometry_count, expected_count);
+        assert_eq!(receipt.geometry_count, after.len());
+        assert_ne!(receipt.manifest_hash, "placeholder", "占位值不许入库");
+        assert_ne!(receipt.manifest_hash, whole_hash, "记录变了，章就得变");
+        let (direct_hash, direct_count) = shared_recipe(&[a.clone(), rebuilt.clone()]);
+        assert_eq!(
+            (receipt.manifest_hash.as_str(), receipt.geometry_count),
+            (direct_hash.as_str(), direct_count),
+            "与不经存储、直接对 [a, c'] 跑配方算出的章逐字相同"
+        );
+        assert_eq!(receipt.source_sesno, 43, "整根前移到 T，照调用方的");
+        assert_eq!(receipt.published_via, "unit", "观测列照调用方的");
+        assert_eq!(
+            stamped,
+            vec![(root, receipt.clone())],
+            "返回值就是入库的那份，调用方靠它登记 durable 身份"
+        );
+    }
+
+    /// ADR-078 实施约束 9：`WholeRoot` 一字不动——回执照调用方写的入库，存储不替它重算。
+    /// 缓存命中（`cached_root_commit`）与「目标变了、清单没变」两条路都靠这一点：它们的
+    /// `upserts` 是空的，替它们重算就是把一根完整的投影盖成空章。
+    #[test]
+    fn a_whole_root_receipt_is_stored_exactly_as_the_caller_wrote_it() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let receipt = RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: "as-written".into(),
+            geometry_count: 9,
+            published_via: "regen".into(),
+        };
+        let stamped = store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("a", RefNo::new(7997, 11), root, 7997)],
+                receipt: Some((root, receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store.receipt(ProjectionScope::Current, root),
+            Some(receipt.clone())
+        );
+        assert_eq!(stamped, vec![(root, receipt)]);
+    }
+
+    /// ADR-078 D5 的「原子」二字：一边不停地发 `Partial` 提交，另一边任何一次 `root_snapshot`
+    /// 读到的回执都必须描述同一次读到的那批记录——章对得上、数对得上。章要是在锁外先算好再
+    /// 提交，读者迟早会撞上「记录已经是 v+1、章还是 v」的一拍。
+    #[test]
+    fn a_partial_receipt_never_describes_a_different_version_than_its_records() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let anchor = record("anchor", RefNo::new(7997, 10), root, 7997);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![anchor],
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: "seed".into(),
+                        geometry_count: 1,
+                        published_via: "regen".into(),
+                    },
+                )),
+                ..Default::default()
+            }],
+        );
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                barrier.wait();
+                for version in 0..2_000u32 {
+                    // 偶数版：重建 one；奇数版：删 one、加 two。anchor 从头到尾没人提。
+                    let (removals, upserts) = if version % 2 == 0 {
+                        let mut one = record("one", RefNo::new(7997, 11), root, 7997);
+                        one.mesh_id = format!("v{version}");
+                        (vec!["two".to_string()], vec![one])
+                    } else {
+                        let mut two = record("two", RefNo::new(7997, 12), root, 7997);
+                        two.mesh_id = format!("v{version}");
+                        (vec!["one".to_string()], vec![two])
+                    };
+                    store.commit(
+                        ProjectionScope::Current,
+                        vec![ProjectionCommit {
+                            removals,
+                            upserts,
+                            receipt: Some((
+                                root,
+                                RootReceipt {
+                                    source_sesno: 43,
+                                    model_target: None,
+                                    manifest_hash: "placeholder".into(),
+                                    geometry_count: 0,
+                                    published_via: "unit".into(),
+                                },
+                            )),
+                            scope: CommitScope::Partial,
+                            ..Default::default()
+                        }],
+                    );
+                }
+            });
+            barrier.wait();
+            let mut observed = 0;
+            for _ in 0..2_000 {
+                if let Some((receipt, records)) =
+                    store.root_snapshot(ProjectionScope::Current, root)
+                {
+                    if receipt.published_via != "unit" {
+                        continue;
+                    }
+                    observed += 1;
+                    assert_eq!(records.len(), receipt.geometry_count);
+                    assert_eq!(receipt.manifest_hash, shared_recipe(&records).0);
+                }
+                std::thread::yield_now();
+            }
+            assert!(observed > 0, "读者至少撞见一次局部提交之后的状态");
+        });
     }
 
     #[test]

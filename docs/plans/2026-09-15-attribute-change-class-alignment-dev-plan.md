@@ -2,16 +2,17 @@
 
 > 来源：`docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（ida-bridge 取证：core 的三条更新通路、
 > DCHC 四档在 `change/UPGRPH` 上的执行语义、我方三档的差距表 §6.2 与计划草案 §7）。本文把 §7 的 P0–P4 写成可开工的切片。
-> 状态：**已批**（2026-09-15，Plannotator 过目；§8 四条 Q 全按推荐项）。**S1 ✅ S2 ✅ S3 ✅ S5 ✅ S6 ✅ S8 ✅ 已落地**（2026-09-15，S1–S5 会话 fable-5-1-21
+> 状态：**已批**（2026-09-15，Plannotator 过目；§8 四条 Q 全按推荐项）。**S1 ✅ S2 ✅ S3 ✅ S5 ✅ S6 ✅ S7 ✅ S8 ✅ 已落地**（2026-09-15，S1–S5 会话 fable-5-1-21
 > 接手 fable-5-1-13 完成，S6 代码会话 fable-5-1-40 接手 fable-5-1-21 完成，S6 全语料门 + 契约 2 改口 + changelog 会话 fable-5-1-44 于 2026-09-16
-> 接手 fable-5-1-40 完成，S8 探针 + 结论会话 fable-5-1-49 于 2026-09-16 接手 fable-5-1-44 完成；见 `changelog.md` 当日条目），**S4 ✅ 两个半程都已落地**
+> 接手 fable-5-1-40 完成，S8 探针 + 结论会话 fable-5-1-49 于 2026-09-16 接手 fable-5-1-44 完成；S7 探针 + 口径纠错附录由协同组 dchc 的 opus-5-74
+> 于 2026-09-16 完成、结论与 ADR 由会话 opus-5-10 于同日收口；见 `changelog.md` 当日条目），**S4 ✅ 两个半程都已落地**
 > （离线半程同会话 fable-5-1-49：对拍门 `probe_rigid_exclusion_windows` 建成、语料里合格锚点两态全等、负体 / 规则 M / 路由容器三条排除坐实有内容；
 > P23 / 开孔 / CWBRAN 等七条排除语料里没有自然窗；E3D 造窗半程 2026-09-16 由 fable-5-1-7 开、fable-5-1-20 收、opus-5-23 补齐 P23 那一窗：NBOX 在 BOX 下造出两窗、
 > 排除坐实有内容；PLOPEN 在 PANE 下在本装机 / db8000 **造不出**，记为结构性不可造；P23 绕道 APS 自然 `STRFLT` 造出**窗 C**（用户已批、事后位精确复原），
-> 两态相等且有判别力 = **这形状上排除保守**——见 §4 ★0916 S4 E3D 结论），S7 待开工。
+> 两态相等且有判别力 = **这形状上排除保守**——见 §4 ★0916 S4 E3D 结论）。
 > 代码事实对到 `gen-model-refactor@1bd2cab4c` + 当日工作树、`vendor/e3d-model@7da42b5` + 当日工作树。
-> 会话 fable-5-1-13 → fable-5-1-21 → fable-5-1-40 → fable-5-1-44 → fable-5-1-49 →（S4 E3D 支线 fable-5-1-7 → fable-5-1-20 → opus-5-23）。
-> S8 之后多两条待拍板（§8 Q5 / Q6）；S4 的对拍给了 Q5 第二票。
+> 会话 fable-5-1-13 → fable-5-1-21 → fable-5-1-40 → fable-5-1-44 → fable-5-1-49 →（S7 支线 fable-5-1-60 / opus-5-74）→ opus-5-10 →（S4 E3D 支线 fable-5-1-7 → fable-5-1-20 → opus-5-23）。
+> S8 之后多两条待拍板（§8 Q5 / Q6）；S4 的对拍给了 Q5 第二票；S7 的结论收口成 **ADR-078**（§8 Q4）。
 
 ## 0. 一句话
 
@@ -171,7 +172,7 @@ D2 是「少算」但两票都是我们自己能验的（字典 + 读取集合 +
 | S4 ✅ | **对拍样本**：~~ams8000 链上~~ ★0916 沿五个目录全语料找只动了摆放的候选（`probe_rigid_exclusion_windows`，`#[ignore]`），逐个过 `rigid_anchor` 分类、按生成根归组做两态对拍；无自然窗的排除按 ADR-066 验收 1 用 `AIOS_PROJAMS_GEOMETRY_FILE` + `AIOS_TRANSFORM_WINDOW` 造一窗 | ~~e3d-model `tests/increment_real.rs`~~ ★0916 gen-model `window_root_plan::tests::probe_rigid_exclusion_windows`（排除判决 `rigid_anchor` 只在 gen-model 一侧；生成用 e3d-model `generate_subtree`，目录库经 `DirectoryDbResolver` 按需补开）、`docs/evidence/2026-09-16-rigid-exclusion-parity.md`（+ `-ignore-cachid.md`，按政策不入库）；E3D 造窗：`scripts/e3d/s4_db8000_*.mac`（l3_suite `--check-driver` 跑，db8000）、`docs/evidence/2026-09-16-rigid-exclusion-e3d-windows.md` | 每个样本两态（Δ 前移 vs T 端整根重算）`GeometryId` 集合相同、体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵 1e-6 内相等；被排除的锚点若照 Δ 前移必须**不等**（证明排除有内容）。★0916 语料结果：合格锚点 27 个有判别力的根全等（0 红）；负体 / 规则 M / 路由容器三条排除各有干净样本坐实不等；P23、开孔在消费属主下、CWBRAN、点环容器、桥架件、剖面、几何集**零个自然窗**。★0916 E3D 造窗：NBOX 在 BOX 下两窗——609→610 六个不变量全同（通孔平移，探针报「无判别力」，**不是**生成器没扣）、614→615 属主链 BOX 三角 / 亏格 / 体积变，**排除有内容**；PLOPEN 在 PANE 下**造不出**（`NEW PLOPEN` 崩 des.exe）；P23 **造不出只动摆放的窗**（HRPOST 无 POS/ORI；带 POS/ORI 的十个在 db8000 建不出带几何的子树）——见 ★0916 S4 E3D 结论 |
 | S5 ✅ | **读取集合产物 + 护栏**（D2 前半） | `output/gen_read_set.py`、`src/data_interface/generation_read_set.json`（嵌入，`model_impact::generation_read_set()`）、e3d-model `data/attribute-read-set.json` + `src/attribute_reads.rs` + `tests/attribute_reads_guard.rs`（推广 `reference_reads_guard.rs`）、gen-model 同款守卫（`model_impact` 三条测试） | 两条护栏绿；集合里 DCHC=0 的成员逐个点名（今天 6 个 + gen-model 侧的 0 个）；`INDIRECT_READ_SITES` 纪律沿用（改成更宽的「全部大写字面量 + 直接读点」扫描，间接读点的名字仍来自某处字面量，无需逐处登记） |
 | S6 ✅ | **元数据门改两票**（D2 后半） | `model_impact::attribute_is_metadata_only`（两票）+ `attribute_is_curated_metadata`（老名单，只分档）+ `metadata_only_tier`；`window_root_plan::change_metadata_tier`（`change_is_metadata_only` 退成布尔包装）；`classify_operation_effects` / `query_service::change_impact` 预览同口径；e3d-model `increment.rs`（`NoModelTier`、`IncrementReport::unread_attribute`、`totals_line`、`accounts_for`）；回执 warning 两档分列 | `metadata_only_needs_dchc_zero_and_an_unread_attribute`（真值表：读取集合里的 DCHC=0 属性不放行；`NAME` 等老 5 个仍放行；UDA / 字典无 / `opaque` 不放行；放行数 = 3941 − 6）；`the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list`；`the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`（D2 ★S6 (1)）；`live_ams8000_metadata_only_gate_never_adds_and_never_shrinks_the_closure`（三条契约抽成 `assert_metadata_gate_two_state`）+ 全语料版 `live_corpus_metadata_only_gate_two_state_over_every_desi_db`：新门放行的窗只多不少、闭包不缩、账本守恒；产出「DCHC=0 属性变化频次表」进证据文档 |
-| S7 | **图元级重建先量**：每窗被重算的根里单元记录与上一版逐字相同的占比（manifest 逐条比） | `window_root_plan` warning 多一格 `unchanged_unit_ratio`；`docs/evidence/…` | 有数即可；>70% 才立 ADR，否则记结论 |
+| S7 ✅ | **图元级重建先量**：每窗被重算的根里单元记录与上一版逐字相同的占比。~~manifest 逐条比~~ ★0916 实际做法是**两端各整根 `generate_subtree` 一次、逐件按 `GeometryId` 配对、比 `ParityInvariants`**（与 S4 对拍门同一把尺子：noun / 体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵，旋转绝对 1e-6、其余相对 1e-6，不比网格顶点） | ~~`window_root_plan` warning 多一格 `unchanged_unit_ratio`~~ ★0916 **只量不接线**（§6「不做」第一条：本轮不做单元级发布，回执不该先长出一个没人消费的字段）：`window_root_plan::tests::probe_unit_level_rebuild_ratio`（`#[ignore]`）+ `docs/evidence/2026-09-16-unit-level-rebuild-measure.md` 与同名 `-addendum.md`（按政策不入库） | 有数即可；>70% 才立 ADR，否则记结论。★0916：按「真·重算」口径 **86.5% > 70%**，故立 **ADR-078**（见 §8 Q4） |
 | S8 ✅ | **`CACHID` 一致性普查**（探针） | ~~e3d-model `tests/increment_real.rs::probe_cachid_consistency`~~ ★0916 落在 gen-model `window_root_plan::tests::probe_cachid_consistency`（`#[ignore]`；DCHC 字典、两票门、`rigid_anchor` 三样都只在 gen-model 一侧，e3d-model 里放不下「DCHC 类别 × 我方判定」两维）；`AIOS_POSREF_DIRS` / `AIOS_CACHID_PROBE_STEPS_PER_DB` / `AIOS_CACHID_PROBE_REPORT` 可改 | 三维交叉表（CACHID 四态 × 除 CACHID 之外的变更类别 × 我方判定）+ 「只 CACHID」成因 + 「忽略 CACHID 再判」位移 + 属性名 × 四态，进 `docs/evidence/2026-09-16-cachid-consistency-corpus.md`（按政策不入库）；结论进取证文档 §4.4 末条；只作结论，不接线 |
 
 依赖：S1 独立；S2 → S3 → S4 顺序；S5 → S6；S7、S8 独立。S2–S4 是开 `model_transform_cheap_path` 的前置；S6 落地后 `model_skip_metadata_only_changes` 语义变宽但开关名不变。
@@ -181,7 +182,9 @@ D2 是「少算」但两票都是我们自己能验的（字典 + 读取集合 +
 (1) `CACHID` 是 `WORD` 型 **`+1` 计数**（13724 次跳动全是 `0→1` 或 `n→n+1`），不是旗标；
 (2) 写方按应用分——带它的 26627 个候选里只有 13753 个非 0，写过的只有 `GENSEC HANG PANE BRAN SUBE EQUI SCTN HANDRA TRNCUR STRFLT GENPRI PNOD SUBS FLOOR TMPL STRU TRNPRI`，
 船体 / `CABLE` / 栏杆件 / `CWBRAN` / `VOLM` 上没写过；
-(3) 语义是**图形缓存版本**（~~顶层件的~~ ★0916 S4 窗 C 现场纠正：**不限顶层件**——APS 挪一个自然 STRFLT 的 `POS`，同窗给锚点和它整棵子树里 14 个带 `CACHID` 的元素各盖一次，容器 STRSTR / TREADS / RPATH 不带这个字、一个没盖）：跳动里 2.7% 伴随本元素 DCHC≠0 / 结构变化、4.5% 伴随只 DCHC=0 / 字典外 / 成员表变化（成员增删 132/132 跳——子树图形变记在属主身上）、
+(3) 语义是**图形缓存版本**（~~顶层件的~~ ★0916 S4 窗 C 现场纠正：**不限顶层件**——APS 挪一个自然 STRFLT 的 `POS`，同窗给锚点自己和它整棵子树里 14 个带 `CACHID` 的元素各盖一次，容器 STRSTR / TREADS / RPATH 不带这个字、一个没盖；
+**这条纠正推不翻 Q6 的账**，已另核：`docs/evidence/2026-09-16-q6-cachid-only-cause-direction.md`——把成因表反向那一格（「祖先在同窗真变了」）全语料判了一遍，12476 个里**一个都没有**，唯一的 56 个全是我们自己造窗造出来的；
+12476 的标签因此从「子树内一个都没变」加固成「上下两个方向都没有真改动」）：跳动里 2.7% 伴随本元素 DCHC≠0 / 结构变化、4.5% 伴随只 DCHC=0 / 字典外 / 成员表变化（成员增删 132/132 跳——子树图形变记在属主身上）、
 **92.8%（12734）只有它变**，其中 12476 连子树里都没有同窗变化，形状是整库扫写（同一会话同 noun 全体 `+1`）；
 (4) 单向 oracle 在有值元素上 **98.9%** 成立（369/373，4 个反例全是 BRAN 头尾类别 1/2），没写过的元素（213 个 DCHC≠0 变化停在 0）是覆盖不是纪律；反向 2.7%，不能当信号；
 (5) 副作用：字典没收它，混进差分就既不放行也不刚——有值元素上 88 次含 `POS`/`ORI` 的变化全部同时跳（84 次若忽略它本可 transform），只 DCHC=0 的 83 次跳动里 67 次从 skip 推成 regen
@@ -217,6 +220,17 @@ FIXTUR / FURNIT / CTSUPP / ELFITT 在 ZONE / STRU / FRMW / SBFR 下一律 "Canno
 (5) 副产品（E3D TTY 行为）：不 SAVEWORK 的 QUIT 也会写一条只改内务 / `CACHID` 戳的会话（612 / 613 / 614 / 617），崩掉的不写；每次 SAVEWORK 之后紧跟一条内务会话（609 / 611 / 616 / 619）；`DELETE BOX` 连带 NBOX 成员的整段收尾腿崩掉，先 `DELETE NBOX` 再 `DELETE BOX` 干净。
 ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只写一个 sesno，SAVEWORK 后不跟内务会话——「一腿两号」是 db8000 的脾气，不是通则；35 / 36 是 fable-5-1-20 与 opus-5-23 两个会话各跑一遍复原腿撞车后的「重复复原 + 纠偏」，一对互逆的纯 POS 窗，36 与 32 位精确相同——取证文档 §4.6）——引用「453 库 / 2961 窗」那份语料总数时，ams8000 多 12 窗、aps250110 多 4 窗。
 
+★0916 S7 结论（`probe_unit_level_rebuild_ratio`，ams8000_0001 整条会话链；报告 `docs/evidence/2026-09-16-unit-level-rebuild-measure.md` + 口径纠错 `-addendum.md`）：
+(1) 规模：**606 窗 / 0 跳过 / 退化窗 4**，regen 根 6122（其中 3153 落在退化窗里），跨 regen 名单**等距抽**实量 978 根（16%，每窗上限 40、十个窗触顶），
+进统计 792 根、T 端单元记录 3672 件、一字没变 2442 件、生成失败 0。三轮重跑跨 65 分钟、跨 Q5 接线，聚合数**逐个一致**——探针确定性，且 Q5 没扰动选根。
+(2) **结论对分母敏感，四个口径两个答案**：真·重算（稳态窗 ∧ S 端已有这根）488 根 / 2670 单元 / 按单元加权 **86.5%（过线）**；再剔整根白算（稳健性检查）233 根 / 1440 单元 / **75.0%（过线）**；
+稳态窗含新根 721 根 / 3366 单元 / 68.6%（不过）；全部合计 792 根 / 3672 单元 / 66.5%（不过）。分歧只在**新根（275 个，S 端没有这棵子树）算不算进分母**——
+它们占比按定义恒 0，而 core 遇新根也得 `REPELE` 整件建、`SEGREP` 本来就省不了它，故**不进分母**。引用这个数**必须带口径**，只写一个数必被后人读反。
+(3) 形状是**双峰不是均摊**：真·重算 488 根里 0% 档 116 根、100% 档 255 根，中间只有 117 根。按单元过线、**按根不过线**（稳健性组按根中位数 50.0%、均值 40.4%，>70% 的根只有 84/233）——
+收益高度集中在少数大根，几乎全是 `BRAN`（380 根扛 2812 单元、75.9%；对比 `EQUI` 256 根才 273 单元）。**ADR 的收益模型要按单元算，按根数拍会拍高。**
+(4) **旁证一条不属于 S7 的账**：整根白算 255/488 根按单元占真·重算总量 **1230/2670（46.1%）**——一件都没变却被整根重算。那是**选根**的题（S6 / §8 Q6），
+单元级发布在这些根上一个图元都不碰、省不到它。它**比 S7 能省的还大**，提示先治选根可能比先治发布粒度更划算，另开一条线。
+(5) 局限：只跑了 ams8000 一条链（全语料 `AIOS_UNIT_PROBE_CORPUS=1` 预计数小时，当时指挥官未批）；抽样 16%；生产行为零改动（回执未加 `unchanged_unit_ratio`，`WindowRootPlan` 一字未动）。
 
 ## 5. 验证与验收
 
@@ -227,7 +241,8 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
 
 ## 6. 不做（本轮）
 
-- 单元级发布（ADR-056 D3 例外）——S7 只量。
+- 单元级发布（ADR-056 D3 例外）——S7 只量。★0916 仍然成立：S7 量完、**ADR-078 已立（草案）**，但**本计划内不实施**——
+  它是独立的架构变更（改 `source_sesno` 语义 + `CommitScope` + 幂等闸），按 ADR-078 自己的 A1–A7 另开切片。
 - `BFORI` 进 `TRANSFORM_ONLY`——只挂 `BPFITT`，不生成。
 - 图形缓存路 / `CACHID` 作判据。
 - `is_placement_only` 扩名单；`PLACEMENT_ATTRIBUTES` 不动。
@@ -247,6 +262,11 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
 - **Q2** S6 变宽用老开关名还是新增 `model_skip_unread_attributes`？推荐：**老名字**（语义就是「只改了不影响模型的属性」，名单怎么来是实现细节），CONTEXT.md 词条改口。★0915 S6 按推荐落地：开关名不变，`options.rs` 文档与 CONTEXT.md「模型影响」词条已改口；灰度靶子是回执里的 `unread_attribute` 计数，不另加开关。
 - **Q3** D3 第六张表是生成产物还是手抄常量？推荐：**生成**（`gen_dchc_fixture.py` 已在，多写一份 JSON 嵌入即可），手抄 213 个名字必漂。
 - **Q4** S7 的阈值 70% 是否合适？推荐：先按 70% 记，数据出来再议；它只决定要不要立 ADR，不决定行为。
+  ★0916 **已收口**：阈值没动，动的是**分母**。同一份探针同一条语料，含新根 68.6% 不过线、剔新根（真·重算）86.5% 过线——
+  新根按定义占比恒 0，而 core 遇新根也走 `REPELE` 整件建、`SEGREP` 省不了它，拿它给 `SEGREP` 记过没道理，故**新根不进分母**。
+  稳健性检查（再剔掉 255 个整根白算的根）仍有 75.0%，说明过线不是被 100% 那一档抬上去的。用户 2026-09-16 拍板：按此口径过线，
+  **立 `docs/adr/ADR-078-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`**（草案，D2 / D3 / D7 / D9 待逐条过目）。
+  Q4 本身到此关闭；单元级发布的后续拍板转到 ADR-078 的 Q1–Q5。
 - **Q5**（★0916 S8 派生，S4 / 开 `model_transform_cheap_path` 的前置）`ElementDiff::is_placement_only` 要不要把 `CACHID` 剔出比较集？语料里有值元素上
   88 次含 `POS`/`ORI` 的变化**全部**同时跳 `CACHID`，不剔则刚体前移在 3.1 真库上几乎永远打不着 EQUI / BRAN / SCTN（今天 79 个 transform 判定全落在
   没有 `CACHID` 的 noun 上）。推荐：**倾向剔**——它不是几何输入（生成器不读，S8 坐实它只是缓存计数），但这是「少算」方向，按纪律要两票：字典没给它投票，
@@ -263,9 +283,14 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
   复验（2026-09-16，接线后**不带** `AIOS_RIGID_PROBE_IGNORE_CACHID` 全语料重跑对拍门，2961 窗 / 488s）：合格锚点由 79 升到 **163**，对拍 139 根、
   108 个有判别力的两态全等、**不等·锚点 0**；两仓 `cargo test --lib`（e3d-model 320 绿 / gen-model 2127 绿）、`increment_real` 两态门、
   `attribute_reads_guard`、`model_impact`、ams8000 九窗两条 live 全绿；`rustfmt --check` 无差异。ADR-066 D1 规则 2 已加同日修订注。
-  ★0916 **第三票（现场版，S4 窗 C 的副产品）**：APS 里挪一个自然 `STRFLT` 的 `POS`，E3D 同窗给**锚点和它整棵子树里 14 个带 `CACHID` 的元素**（2 HANDRA / 2 GENSEC / 9 TREAD + STRFLT 自己）
-  各盖了一次 `CACHID`，容器 STRSTR / TREADS / RPATH 不带这个字、一个没盖——接线前这一窗会被 14 个戳判假、**根本进不了候选**，接线后判成「只动了摆放」并两态全等。
+  ★0916 **第三票（现场版，S4 窗 C 的副产品）**：APS 里挪一个自然 `STRFLT` 的 `POS`，E3D 同窗给**锚点自己和它整棵子树里 14 个带 `CACHID` 的元素**（10 TREAD / 2 GENSEC / 2 HANDRA，连自己共 15 件）
+  各盖了一次 `CACHID`，容器 STRSTR / TREADS / RPATH 不带这个字、一个没盖——接线前 STRFLT 自己那个戳就会让 `is_placement_only` 判假、**这一窗根本进不了候选**，接线后判成「只动了摆放」并两态全等。
   一并修正 S8 的措辞：`CACHID` **不只盖在「顶层件」上，改谁就盖谁整棵子树里每个带这个字的元素**（`docs/evidence/2026-09-16-rigid-exclusion-e3d-windows.md` §4.4–4.5）。
 - **Q6**（★0916 S8 派生）只 `CACHID` 的 12734 个候选（92.8% 的跳动，12476 个子树里同窗无变）今天全部上卷重算——要不要把 `CACHID` 当元数据放进两票门
   （`no_model` 第三档，如 `cache_stamp`）？推荐：**先不动**——写方语义是从形状推的（§8 未证），且探针只看 DESI 窗口、排除不了「被引用的目录件变了」
   这一来源；真要省，先量它今天多花了多少根（S7 同款「先量」），再做 S6 同款两态门 + 造窗对拍，另立切片。
+  ★0916 **成因表反向一格已补判**（`docs/evidence/2026-09-16-q6-cachid-only-cause-direction.md`，S4 窗 C 引出的复核）：S8 只问过「有没有真改动**以我为严格祖先**」（在我**之下**），
+  没问过反向的「我的**祖先**在同窗真变了」。全语料 2977 窗独立重实现判据重跑：12476 个「子树内一个都没变」的候选里**一个都没有**变了的祖先（先滤掉 `WORL` 的 `UPDT`——
+  全库根的每会话时间戳，不滤它这一格恒真），唯一的 56 个全来自我们自己造的那四个 aps250110 窗。**Q6 的账（12734 候选 / 9172 多算根 / 四门）一格不动**，
+  而且多算根按构造就不受成因影响（它是两态各跑一遍规划器的集合差）；12476 那一格的标签可以从「子树内一个都没变」写强成「**上下两个方向都没有真改动**」。
+  往前看一条：语料以后若收进真实设计编辑（而非整库扫写），只戳候选里会出现「子树顺带被盖」的一类——它们的根本来就要 regen，不该记成多算，成因表那时**两个方向都要判**。

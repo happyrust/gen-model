@@ -138,6 +138,12 @@ pub struct ModelUpdatePlan {
     /// 整根重算，一字不差。开关 `model_transform_cheap_path` 关着时恒空；旧恢复记录没有该字段。
     #[serde(default)]
     pub transform_units: Vec<TransformUnit>,
+    /// 单元级发布（ADR-078 D9）的窗口基线 S：开关 `model_unit_level_publish` 开着、且本窗的根规划
+    /// 没有退化时是 `Some(S)`。执行体拿它给 `work_items` 里的每个 `RegenRoot` 切 `plan_update(S→T)`
+    /// 的子计划、拿闸对回执；`None` = 这一窗不走单元级发布（开关关 / 规划退化 / 旧恢复记录），
+    /// 一切照旧整根重算。它与刚体前移提示一样只是**提示**，`work_items` / `units` 一字不改。
+    #[serde(default)]
+    pub unit_publish_base_sesno: Option<u32>,
 }
 
 impl ModelUpdatePlan {

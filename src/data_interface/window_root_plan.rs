@@ -1199,6 +1199,11 @@ pub(crate) async fn build_model_update_plan_from_window(
             ..Default::default()
         })
         .collect();
+    // 单元级发布（ADR-078 D9）的窗口基线只在开关开着、且本窗的根规划没退化时带上：退化窗把每个
+    // 持久根都判成 regen，那不是「这几件变了」，局部清单没有对应的口径；开关关着时这一格是 `None`，
+    // 执行体一次都不被叫到，计划与今天逐位相同（实施约束 9）。选根一个字不改（实施约束 6）。
+    let unit_publish_base_sesno =
+        (crate::options::model_unit_level_publish() && plan.degraded.is_none()).then_some(base_sesno);
     let mut out = plan.into_model_update_plan(dbnum, db_type, target_sesno as i32, warnings);
     // The queue consumer still speaks in delivery-unit summaries.  The window
     // planner already has the authoritative root list, so carry a minimal
@@ -1208,6 +1213,7 @@ pub(crate) async fn build_model_update_plan_from_window(
     // 不认识它的执行体（今天的 drain）照旧整根重算；B6 的分流认它。开关关时分桶已空，
     // `transform_units` 为空，计划与今天逐位相同。
     out.transform_units = transform_units;
+    out.unit_publish_base_sesno = unit_publish_base_sesno;
     Ok(out)
 }
 

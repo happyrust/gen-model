@@ -567,11 +567,11 @@ impl ModelWriteBehind {
 /// root receipt with the process-local durability state machine.
 pub(crate) fn publish(commits: Vec<ProjectionCommit>) -> Result<MemoryReady, OverlayRejected> {
     if !crate::options::store_mode().is_durable() {
-        let roots = commits
-            .iter()
-            .filter_map(|commit| commit.receipt.as_ref().map(|(root, _)| *root))
+        let roots = ModelMemoryStore::global()
+            .try_commit_current(commits)
+            .into_iter()
+            .map(|(root, _)| root)
             .collect();
-        ModelMemoryStore::global().try_commit_current(commits);
         return Ok(MemoryReady { roots });
     }
     ModelWriteBehind::global().publish_commits(commits)
@@ -582,21 +582,20 @@ impl ModelWriteBehind {
         &'static self,
         commits: Vec<ProjectionCommit>,
     ) -> Result<MemoryReady, OverlayRejected> {
-        let receipts = commits
-            .iter()
-            .filter_map(|commit| {
-                commit
-                    .receipt
-                    .as_ref()
-                    .map(|(root, receipt)| (packed_refno(*root), (*root, receipt.clone())))
-            })
-            .collect::<BTreeMap<_, _>>();
         let now = Instant::now();
         let mut state = self.state();
         if !state.accepting {
             return Err(OverlayRejected);
         }
-        self.store.try_commit_current(commits);
+        // 登记的 durable 身份必须是存储**实际盖下**的那份回执：`Partial` 提交的
+        // `manifest_hash` / `geometry_count` 是存储在写锁里、delta 落完之后重算的（ADR-078 D5），
+        // 提交前从 `commits` 里抄走的是占位值——拿它登记，这根的 ACK 永远对不上、永远 pending。
+        let receipts = self
+            .store
+            .try_commit_current(commits)
+            .into_iter()
+            .map(|(root, receipt)| (packed_refno(root), (root, receipt)))
+            .collect::<BTreeMap<_, _>>();
         for (root, receipt) in receipts.values() {
             state.next_submission_epoch = state.next_submission_epoch.wrapping_add(1).max(1);
             let submission_epoch = state.next_submission_epoch;
@@ -1088,6 +1087,69 @@ mod tests {
             BLOCKED_RETRY <= Duration::from_secs(3600),
             "退避必须是个人等得起的数，否则与永不重试无异"
         );
+    }
+
+    /// ADR-078 D5：`Partial` 回执的 `manifest_hash` / `geometry_count` 是存储在写锁里盖的。
+    /// write-behind 登记的 durable 身份必须是**盖完的那份**——从 `commits` 里提前抄走占位值，
+    /// 这根的 ACK 就永远对不上、永远 pending，而且不报错。
+    #[tokio::test(start_paused = true)]
+    async fn a_partial_publish_registers_the_receipt_the_store_actually_stamped() {
+        use super::super::model_memory_store::{CommitScope, ProjectedGeometry, ProjectedShape};
+        let root = RefNo::new(7997, 140);
+        let source = RefNo::new(7997, 141);
+        let adapter = Arc::new(ScriptedPersistence::new(Vec::new()));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
+
+        let placeholder = RootReceipt {
+            source_sesno: 43,
+            model_target: None,
+            manifest_hash: "placeholder".into(),
+            geometry_count: 99,
+            published_via: "unit".into(),
+        };
+        controller
+            .publish_commits(vec![ProjectionCommit {
+                upserts: vec![ProjectedGeometry {
+                    record_id: "unit-record".into(),
+                    geometry_id: e3d_model::elmodl::GeometryId::Element {
+                        refno: source.to_string(),
+                    },
+                    source_refno: source,
+                    dbnum: 7997,
+                    source_sesno: 43,
+                    noun: "BOX".into(),
+                    mesh_id: "mesh".into(),
+                    world_transform: glam::DMat4::IDENTITY,
+                    world_bounds: [[0.0; 3], [1.0; 3]],
+                    ancestors: vec![packed_refno(source), packed_refno(root)],
+                    shape: ProjectedShape::Baked,
+                    tube: None,
+                }],
+                receipt: Some((root, placeholder.clone())),
+                scope: CommitScope::Partial,
+                ..Default::default()
+            }])
+            .unwrap();
+
+        let stamped = store
+            .receipt(ProjectionScope::Current, root)
+            .expect("局部提交也盖章");
+        assert_ne!(stamped.manifest_hash, placeholder.manifest_hash);
+        assert_eq!(stamped.geometry_count, 1);
+        let registered = controller
+            .state()
+            .pending
+            .get(&(7997, packed_refno(root)))
+            .expect("发布即登记")
+            .identity
+            .clone();
+        assert_eq!(
+            registered,
+            RootIdentity::from(&stamped),
+            "登记的身份必须是存储盖完的那份，不是调用方递进来的占位"
+        );
+        controller.stop_now();
     }
 
     #[tokio::test(start_paused = true)]

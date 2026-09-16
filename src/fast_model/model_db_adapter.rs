@@ -624,9 +624,13 @@ impl RootShare {
                 records.len()
             );
             let packed_root = packed_refno(root);
+            // ADR-078 D3：记录上的 `source_sesno` 是「这条记录最后一次真正生成的会话」，
+            // 「这根推进到哪了」由回执单独表达。单元级发布只重建变了的那几件，没动的记录仍停在
+            // 更早的会话上——所以是 `<=` 不是 `==`。比回执**新**的记录仍然是错：那意味着有人把
+            // 几何投进来却没盖章，这根的全集就不是回执说的那一份。
             anyhow::ensure!(
                 records.iter().all(|record| {
-                    record.source_sesno == receipt.source_sesno
+                    record.source_sesno <= receipt.source_sesno
                         && record.ancestors.contains(&packed_root)
                 }),
                 "root {root} projection contains records outside its receipt scope"
@@ -1493,9 +1497,11 @@ async fn persist_root_impl(
             records.len()
         );
         let packed_root = packed_refno(root);
+        // ADR-078 D3：同 [`RootShare::load`] 的那一条——记录带的是自己最后一次生成的会话，
+        // 根推进到哪了看回执。单元级发布之后没动的记录会落在回执之前，比回执新的仍是错。
         anyhow::ensure!(
             records.iter().all(|record| {
-                record.source_sesno == receipt.source_sesno
+                record.source_sesno <= receipt.source_sesno
                     && record.ancestors.contains(&packed_root)
             }),
             "root {root} projection contains records outside its receipt scope"
@@ -4036,6 +4042,67 @@ mod tests {
         let rows = persist_root_on(target, &empty, root).await.unwrap();
         assert_eq!(rows.removed, 2);
         assert_eq!(count(&db, "inst_relate").await, 0);
+    }
+
+    /// ADR-078 D3 / A1：回执之下的记录**可以停在更早的会话**，比回执新的仍然是错。
+    ///
+    /// 单元级发布（ADR-078）只重建变了的那几件，没动的记录留在上一次真正生成它的会话上，
+    /// 而回执整根前移到 T。这一条钉住那道对账从 `==` 放宽成 `<=` 之后的两端。两次都逐字核
+    /// 错误文本：陈旧那次若哪天又被拦下，错误会落在「incomplete」而不是「outside its receipt
+    /// scope」上，只判 `is_err()` 看不出差别。
+    #[tokio::test]
+    async fn a_record_may_lag_its_root_receipt_but_never_lead_it() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
+
+        // 陈旧：回执在 42，没动的那件还停在 41——单元级发布之后的常态，必须放行。
+        let lagging = ModelMemoryStore::default();
+        lagging.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![
+                    baked_record(),
+                    ProjectedGeometry {
+                        source_sesno: 41,
+                        ..nested_root_record()
+                    },
+                ],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &lagging, root)
+            .await
+            .expect("落后于回执的记录是单元级发布的正常产物");
+        assert_eq!(count(&db, "inst_relate").await, 2);
+
+        // 超前：记录比回执新 = 有人把几何投进来却没盖章，这根的全集不再是回执说的那一份。
+        let leading = ModelMemoryStore::default();
+        leading.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![
+                    baked_record(),
+                    ProjectedGeometry {
+                        source_sesno: 43,
+                        ..nested_root_record()
+                    },
+                ],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let error = persist_root_on(target, &leading, root)
+            .await
+            .expect_err("记录比回执新必须拦下")
+            .to_string();
+        assert!(
+            error.contains("outside its receipt scope"),
+            "拦是拦下了，但理由不对：{error}"
+        );
+        assert_eq!(count(&db, "inst_relate").await, 2, "被拦下的那轮不得改库");
     }
 
     /// 一根一笔事务：三条记录（一件几何 + 同一分支的两段管身）与回执一起进同一笔，

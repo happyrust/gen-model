@@ -1975,11 +1975,13 @@ fn explicit_regen_units(
             old_owner: None,
             new_owner: None,
             transform: None,
+            unit_publish: None,
         })
         .collect()
 }
 
-/// 规划器排出来的一条 `RegenRoot` 工作项 → 本任务的一个交付单元（整根重算，无刚体前移提示）。
+/// 规划器排出来的一条 `RegenRoot` 工作项 → 本任务的一个交付单元（整根重算，无刚体前移 /
+/// 单元级发布提示——这些根的回执不在本窗的 S 上，局部清单对不上）。
 fn unit_task_from_regen_item(item: &ModelWorkItem) -> UnitTask {
     UnitTask {
         dbnum: item.dbnum,
@@ -1990,6 +1992,7 @@ fn unit_task_from_regen_item(item: &ModelWorkItem) -> UnitTask {
         old_owner: None,
         new_owner: None,
         transform: None,
+        unit_publish: None,
     }
 }
 
@@ -2009,6 +2012,7 @@ fn unit_task_from_derived_root(
         old_owner: None,
         new_owner: None,
         transform: None,
+        unit_publish: None,
     }
 }
 
@@ -2543,24 +2547,29 @@ async fn run_single_unit(
             new_owner: task.new_owner,
             kind: UnitKind::Regen,
             transform_fallback_reason: None,
+            unit_fallback_reason: None,
         },
         settlement_failed,
     )
 }
 
-/// 刚体前移完成的根**就地**落库（ADR-066 B6 × ADR-072 D4）：投影记录已被执行体左乘 `Δ`，
-/// 这里按 regen 同一条路 `persist_roots_batched` 合块写进库、空间树随之就地收敛。SUL_DB 落在这里
-/// （batch_worker）而不是生成服务——`the_generation_service_never_reaches_for_a_database` 那条钉守着
-/// 生成入口不碰库。「登记进文件轮次、publish 阶段统一刷 durable」那一路随 publish 退了。
+/// 两条便宜路（刚体前移 ADR-066 B6、单元级发布 ADR-078 D9）完成的根**就地**落库（× ADR-072 D4）：
+/// 投影记录已被执行体改好（左乘 `Δ`，或按 `Partial` 清单换了那几件），这里按 regen 同一条路
+/// `persist_roots_batched` 合块写进库、空间树随之就地收敛。SUL_DB 落在这里（batch_worker）而不是
+/// 生成服务——`the_generation_service_never_reaches_for_a_database` 那条钉守着生成入口不碰库。
+/// 「登记进文件轮次、publish 阶段统一刷 durable」那一路随 publish 退了。
 ///
-/// 房间归属与 regen 同一条路（ADR-073 D1 硬约束④：刚体变换也接）：移动过的根按新投影重算它的
+/// 房间归属与 regen 同一条路（ADR-073 D1 硬约束④：刚体变换也接）：动过的根按新投影重算它的
 /// 房间边，随模型行同一笔事务落下；计算器在这里冻一次、本批共用，冻不出来本批每根算失败。
+///
+/// `Partial` 之后整根落盘（ADR-078 D7：第一版不跟着切）：`persist_root_impl` 从 `records_of_root`
+/// 取全量记录，没动的记录停在旧会话上、回执在 T——D3 把对账放宽成 `<=` 接的就是这个形状（A5）。
 ///
 /// 返回没落进去的根与原因（房间算不出来的根写前剔出、一组任一块写失败整组算失败，
 /// 见 [`persist_roots_batched`]）。
 ///
 /// [`persist_roots_batched`]: crate::fast_model::model_db_adapter::persist_roots_batched
-async fn persist_transform_roots(
+async fn persist_republished_roots(
     dbnum: u32,
     roots: &[String],
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
@@ -2572,7 +2581,7 @@ async fn persist_transform_roots(
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
         .collect::<anyhow::Result<Vec<_>>>()?;
     if crate::options::store_mode().is_durable() {
-        // `republish_roots_by_rigid_motion` already crossed the single
+        // Both cheap-path executors already crossed the single
         // ModelWriteBehind::publish seam. Persistence and room calculation are
         // owned by its background worker.
         return Ok(std::collections::HashMap::new());
@@ -2730,7 +2739,7 @@ async fn run_rigid_motion_units(
             .map(|task| task.root_refno.clone())
             .filter(|root| completed.contains(root) || replayed.contains(root))
             .collect();
-        let mut persist_failures = match persist_transform_roots(dbnum, &landed_roots).await {
+        let mut persist_failures = match persist_republished_roots(dbnum, &landed_roots).await {
             Ok(failures) => failures,
             Err(error) => {
                 warnings.push(format!(
@@ -2790,6 +2799,7 @@ async fn run_rigid_motion_units(
                     new_owner: task.new_owner.clone(),
                     kind: UnitKind::Transform,
                     transform_fallback_reason: None,
+                    unit_fallback_reason: None,
                 });
             } else {
                 let reason = fallbacks
@@ -2797,6 +2807,214 @@ async fn run_rigid_motion_units(
                     .unwrap_or_else(|| "executor did not report this root".to_string());
                 fallback_reason.insert(task.root_refno.clone(), reason);
                 task.transform = None;
+                requeue.push(task);
+            }
+        }
+    }
+    (results, requeue, settlement_failed)
+}
+
+/// 单元级发布分流（ADR-078 D9）：把 `task.unit_publish.is_some()` 的单元交给单元级执行体
+/// ([`E3dModelService::republish_roots_by_unit_delta_from_window`])——一窗 `plan_update(S→T)` 算一次，
+/// 逐根切子计划、只重建点名的那几件、以 `Partial` 提交叠在根回执之下发布。按执行体的清单分成三摞，
+/// 与刚体路同款：走成的与「回执已在 T」的重放都记 `Unit` 完成回执（顺带落库、报进度、计一次 done），
+/// 走不成的记下回退原因、清掉提示交回整根重算。返回 `(完成回执, 待重排的 regen 单元, 是否有落库失败)`。
+///
+/// 执行体本身保守（闸 / 完整性前置 / 管段门 / 生产方任一条不成就回退，D8），这里不再判断、只按它的
+/// 分派落结果。同一根的 transform 提示已在这之前被刚体路消费或清掉（实施约束 7：transform 优先、
+/// unit 兜底），所以到这里的单元只剩「单元级还是整根」一个问题。
+async fn run_unit_publish_units(
+    unit_tasks: Vec<crate::data_interface::manual_update::UnitTask>,
+    registry: &'static TaskRegistry,
+    task_id: &str,
+    progress: &Option<ManualUpdateProgress>,
+    fallback_reason: &mut std::collections::HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> (
+    Vec<ModelUnitResult>,
+    Vec<crate::data_interface::manual_update::UnitTask>,
+    bool,
+) {
+    use crate::data_interface::manual_update::emit;
+    let mut results = Vec::new();
+    let mut requeue = Vec::new();
+    let mut settlement_failed = false;
+
+    let service = match crate::fast_model::e3d_model_service::E3dModelService::from_current().await
+    {
+        Ok(service) => service,
+        Err(error) => {
+            warnings.push(format!(
+                "单元级发布取服务失败，{} 个单元全部回退整根重算: {error:#}",
+                unit_tasks.len()
+            ));
+            for mut task in unit_tasks {
+                fallback_reason.insert(
+                    task.root_refno.clone(),
+                    format!("unit-level publish service unavailable: {error:#}"),
+                );
+                task.unit_publish = None;
+                requeue.push(task);
+            }
+            return (results, requeue, settlement_failed);
+        }
+    };
+
+    // 执行体一窗算一份计划：按 (dbnum, 基线 S, 目标 T) 分组（一批通常就是一窗）。
+    let mut by_window: std::collections::BTreeMap<
+        (u32, u32, i32),
+        Vec<crate::data_interface::manual_update::UnitTask>,
+    > = std::collections::BTreeMap::new();
+    for task in unit_tasks {
+        let base = task
+            .unit_publish
+            .map(|hint| hint.source_start_sesno)
+            .unwrap_or_default();
+        by_window
+            .entry((task.dbnum, base, task.source_end_sesno))
+            .or_default()
+            .push(task);
+    }
+
+    for ((dbnum, base_sesno, sesno), group) in by_window {
+        // 与刚体路同一条准入：便宜路只支持「改内存投影后按 regen 同款合块落库」这一种发布模式。
+        // 读透+durable 直落 / 内存库一律回退整根重算（回退永远正确）。
+        let supported = (!crate::options::data_face().is_read_through()
+            || !crate::options::store_mode().is_durable())
+            && !crate::data_interface::model_read_route::memory_only_for(dbnum);
+        if !supported {
+            for mut task in group {
+                fallback_reason.insert(
+                    task.root_refno.clone(),
+                    "unsupported publish mode for unit-level publish (falls back to regen)".into(),
+                );
+                task.unit_publish = None;
+                requeue.push(task);
+            }
+            continue;
+        }
+        let units: Vec<crate::fast_model::e3d_model_service::UnitPublishUnit> = group
+            .iter()
+            .map(|task| crate::fast_model::e3d_model_service::UnitPublishUnit {
+                root_refno: task.root_refno.clone(),
+                source_start_sesno: base_sesno,
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let (completed, replayed, mut fallbacks): (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+            std::collections::HashMap<String, String>,
+        ) = match service
+            .republish_roots_by_unit_delta_from_window(dbnum, base_sesno, sesno as u32, &units)
+            .await
+        {
+            Ok(report) => (
+                report.completed.into_iter().collect(),
+                report.replayed.into_iter().collect(),
+                report.fallbacks.into_iter().collect(),
+            ),
+            Err(error) => {
+                warnings.push(format!(
+                    "dbnum={dbnum} 单元级发布执行体报错，本组 {} 个单元全部回退: {error:#}",
+                    group.len()
+                ));
+                (
+                    std::collections::HashSet::new(),
+                    std::collections::HashSet::new(),
+                    group
+                        .iter()
+                        .map(|task| {
+                            (
+                                task.root_refno.clone(),
+                                format!("executor error: {error:#}"),
+                            )
+                        })
+                        .collect(),
+                )
+            }
+        };
+        println!(
+            "  单元级发布 dbnum={dbnum} 窗口 {base_sesno}→{sesno}：{} 根走成 / {} 根重放 / {} 根回退整根重算（耗时 {}ms）",
+            completed.len(),
+            replayed.len(),
+            fallbacks.len(),
+            started.elapsed().as_millis()
+        );
+        // 走成的与重放的根一起合块落库（重放的投影一字未动，落库幂等；不落的话这根就漏出
+        // 本轮清单）。落库失败 → 退回整根重算（regen 会覆盖投影）。
+        let landed_roots: Vec<String> = group
+            .iter()
+            .map(|task| task.root_refno.clone())
+            .filter(|root| completed.contains(root) || replayed.contains(root))
+            .collect();
+        let mut persist_failures = match persist_republished_roots(dbnum, &landed_roots).await {
+            Ok(failures) => failures,
+            Err(error) => {
+                warnings.push(format!(
+                    "dbnum={dbnum} 单元级发布根落库报错，本组 {} 个单元回退整根重算: {error:#}",
+                    landed_roots.len()
+                ));
+                settlement_failed = true;
+                landed_roots
+                    .iter()
+                    .map(|root| (root.clone(), format!("persist error: {error:#}")))
+                    .collect()
+            }
+        };
+        for mut task in group {
+            let replay = replayed.contains(&task.root_refno);
+            if completed.contains(&task.root_refno) || replay {
+                if let Some(error) = persist_failures.remove(&task.root_refno) {
+                    fallback_reason.insert(
+                        task.root_refno.clone(),
+                        format!("persist unit-published root: {error}"),
+                    );
+                    task.unit_publish = None;
+                    requeue.push(task);
+                    continue;
+                }
+                emit(
+                    progress,
+                    ManualUpdateEvent::ModelUnitStarted {
+                        dbnum: task.dbnum,
+                        root_refno: task.root_refno.clone(),
+                        noun: task.noun.clone(),
+                    },
+                );
+                emit(
+                    progress,
+                    ManualUpdateEvent::ModelUnitFinished {
+                        dbnum: task.dbnum,
+                        root_refno: task.root_refno.clone(),
+                        success: true,
+                        message: None,
+                    },
+                );
+                registry.bump_units_done(task_id);
+                results.push(ModelUnitResult {
+                    dbnum: task.dbnum,
+                    root_refno: task.root_refno.clone(),
+                    noun: task.noun.clone(),
+                    status: UnitGenStatus::Generated,
+                    attempts: task.attempts,
+                    message: replay.then(|| {
+                        "already republished at the target session (window replay); the partial \
+                         manifest was not re-applied"
+                            .to_string()
+                    }),
+                    old_owner: task.old_owner.clone(),
+                    new_owner: task.new_owner.clone(),
+                    kind: UnitKind::Unit,
+                    transform_fallback_reason: None,
+                    unit_fallback_reason: None,
+                });
+            } else {
+                let reason = fallbacks
+                    .remove(&task.root_refno)
+                    .unwrap_or_else(|| "executor did not report this root".to_string());
+                fallback_reason.insert(task.root_refno.clone(), reason);
+                task.unit_publish = None;
                 requeue.push(task);
             }
         }
@@ -2844,6 +3062,29 @@ async fn run_unit_worklist(
         settlement_failed |= transform_settlement_failed;
         worklist.extend(requeue);
         results.append(&mut transform_results);
+    }
+
+    // 单元级发布分流（ADR-078 D9）：排在刚体路**之后**、整根重算**之前**（实施约束 7：transform 优先、
+    // unit 兜底）——刚体路回退下来的单元若带着本窗的基线提示，也在这里再试一次局部清单。走成的记
+    // Unit 回执；走不成的连同回退原因改排整根重算。开关关时计划上没有基线，没有单元带提示。
+    let (unit_tasks, mut worklist): (Vec<_>, Vec<_>) = worklist
+        .into_iter()
+        .partition(|task| task.unit_publish.is_some());
+    let mut unit_fallback_reason: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if !unit_tasks.is_empty() {
+        let (mut unit_results, requeue, unit_settlement_failed) = run_unit_publish_units(
+            unit_tasks,
+            registry,
+            task_id,
+            progress,
+            &mut unit_fallback_reason,
+            warnings,
+        )
+        .await;
+        settlement_failed |= unit_settlement_failed;
+        worklist.extend(requeue);
+        results.append(&mut unit_results);
     }
 
     let (batchable, singles): (Vec<_>, Vec<_>) =
@@ -2970,6 +3211,7 @@ async fn run_unit_worklist(
                     new_owner: task.new_owner,
                     kind: UnitKind::Regen,
                     transform_fallback_reason: None,
+                    unit_fallback_reason: None,
                 });
             }
             drop(guards);
@@ -2989,6 +3231,15 @@ async fn run_unit_worklist(
         for result in &mut results {
             if let Some(reason) = fallback_reason.get(&result.root_refno) {
                 result.transform_fallback_reason = Some(reason.clone());
+            }
+        }
+    }
+    // 同款：带着单元级发布提示、执行期回退整根重算的单元记下原因（ADR-078 D8：回退不静默）——
+    // 走成的 Unit 单元不在这张表里。
+    if !unit_fallback_reason.is_empty() {
+        for result in &mut results {
+            if let Some(reason) = unit_fallback_reason.get(&result.root_refno) {
+                result.unit_fallback_reason = Some(reason.clone());
             }
         }
     }
@@ -3477,6 +3728,7 @@ mod tests {
             new_owner: None,
             kind: crate::data_interface::manual_update::UnitKind::Regen,
             transform_fallback_reason: None,
+            unit_fallback_reason: None,
         };
         assert!(batch_round_complete(
             Some(42),
@@ -3662,6 +3914,7 @@ mod tests {
             new_owner: None,
             kind: UnitKind::Regen,
             transform_fallback_reason: None,
+            unit_fallback_reason: None,
         }
     }
 
@@ -4545,7 +4798,71 @@ mod tests {
             old_owner: None,
             new_owner: None,
             transform: None,
+            unit_publish: None,
         }
+    }
+
+    /// ADR-078 实施约束 7：两条便宜路的优先序定死在代码里、不靠调用顺序碰运气——刚体前移在前、
+    /// 单元级发布在中、整根重算在后；单元级分流只认 `unit_publish` 提示，回退的单元清掉提示交回
+    /// 整根重算并记原因（D8：回退不静默），走成的记 `Unit` 回执，落库走与刚体路同一条 `persist_republished_roots`。
+    #[test]
+    fn transform_precedes_unit_publish_precedes_regen_in_the_worklist() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn run_unit_worklist(")
+            .expect("run_unit_worklist")
+            .1
+            .split_once("fn render_batch_finished_line<")
+            .expect("run_unit_worklist end")
+            .0;
+        let transform = body
+            .find("run_rigid_motion_units(")
+            .expect("rigid-motion stage");
+        let unit = body
+            .find("run_unit_publish_units(")
+            .expect("unit-level publish stage");
+        let regen = body
+            .find("generate_roots_report(")
+            .expect("regen stage");
+        assert!(
+            transform < unit && unit < regen,
+            "顺序必须是 transform → unit → regen（实施约束 7）"
+        );
+        assert!(
+            body.contains(".partition(|task| task.unit_publish.is_some())"),
+            "单元级分流只认 unit_publish 提示"
+        );
+        assert!(
+            body.contains("result.unit_fallback_reason = Some(reason.clone());"),
+            "回退原因要落到回执上"
+        );
+
+        let stage = source
+            .split_once("async fn run_unit_publish_units(")
+            .expect("unit stage")
+            .1
+            .split_once("async fn run_unit_worklist(")
+            .expect("unit stage end")
+            .0;
+        assert!(
+            stage.contains(
+                "republish_roots_by_unit_delta_from_window(dbnum, base_sesno, sesno as u32, &units)"
+            ),
+            "单元级执行体以本窗的基线 S 与目标 T 被叫到"
+        );
+        assert!(stage.contains("kind: UnitKind::Unit,"));
+        assert!(
+            stage.contains("task.unit_publish = None;"),
+            "回退的单元清掉提示再交回整根重算"
+        );
+        assert!(
+            stage.contains("persist_republished_roots(dbnum, &landed_roots)"),
+            "落库与刚体路同一条"
+        );
+        assert!(
+            !stage.contains("records_of_root(") && !stage.contains("manifest_hash("),
+            "分流层不读投影、不自己算章"
+        );
     }
 
     /// 并进批量重生成的只有「首次尝试 + 可解析 refno」的单元；失败过的走逐根路径，

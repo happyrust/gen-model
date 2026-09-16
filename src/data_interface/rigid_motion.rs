@@ -55,6 +55,11 @@ pub enum CandidateKind {
     },
     /// 别的任何改动：新建 / 删除 / 改挂 / 换类型 / 动成员 / 动了别的属性 / opaque / 读不出来。
     Other(String),
+    /// 账本去向 `no_model`（e3d-model `Disposition::NoModel`）：改动全部落在不影响模型的属性上（两票元数据门
+    /// 放行——子元素只改了 `NAME` / `DESC` 那类），或落在没有模型归属的元素上——e3d-model 没把它折进任何单元 /
+    /// 派生容器，没有几何跟着它变。D1 规则 2 不数它（2026-09-17 修订）：既不是锚点，也不把根踢回 `regen`。
+    /// 字串是账本条目，只供 warnings / 探针。
+    NoModel(String),
 }
 
 /// 一个窗口候选连同它在两端的属主链（不含自身）。T 端链来自 `index.owners`；S 端链只有
@@ -85,7 +90,8 @@ pub struct TransformClassification {
 /// - `touched`：`expand_touched` **之前**的波及集；`expanded`：三条级联扩展（C2 / C8 / P4）加进来
 ///   的根——规则 5，一律 `regen`。
 /// - `degraded`：`WindowImpact::degraded_reason()`，非空则整窗没有便宜路（规则 4）。
-/// - `candidates`：账本条目按 refno 去重后的候选。
+/// - `candidates`：账本条目按 refno 去重后的候选。规则 2「子树里另有非锚点候选 → 整根 `regen`」只数账本去向
+///   `RolledUp` 的那些；去向 `no_model` 的（[`CandidateKind::NoModel`]）不是锚点也不挡路。
 /// - `enabled`：开关（`options::model_transform_cheap_path`）。关着返回默认值——`transform` 空、
 ///   `rejected` 也空：关着不是拒绝，是没有这条路。
 pub fn classify_transform_roots(
@@ -154,6 +160,7 @@ fn classify_one(
         return Err("touched, but no candidate could be attributed to it".into());
     }
     let mut anchors = Vec::with_capacity(touching.len());
+    let mut no_model = 0usize;
     for candidate in touching {
         match &candidate.kind {
             CandidateKind::Anchor {
@@ -169,7 +176,17 @@ fn classify_one(
             | CandidateKind::Other(reason) => {
                 return Err(format!("{}: {reason}", candidate.refno.to_pdms_str()));
             }
+            // 规则 2 只数去向 `RolledUp` 的候选（2026-09-17 修订）：去向 `no_model` 的没折进任何单元，
+            // 没有几何跟着变——不是锚点，也不挡路。只数一下，供下面「根里只有这种候选」那条判决用。
+            CandidateKind::NoModel(_) => no_model += 1,
         }
+    }
+    if anchors.is_empty() {
+        // 根被波及只因为 `no_model` 的候选照进了闭包种子（子元素只改了 NAME，别的什么都没动）：没有一个
+        // `Δ` 可乘。零锚点的 `transform`（只推回执、不动记录）是选根的另一道题，这里不开——照今天整根 regen。
+        return Err(format!(
+            "touched only by {no_model} no_model candidate(s): nothing rolled up, no Δ to apply"
+        ));
     }
     Ok(anchors)
 }
@@ -403,6 +420,15 @@ mod tests {
         WindowCandidate {
             refno: r(n),
             kind: CandidateKind::Other(reason.into()),
+            chain_t: Vec::new(),
+            chain_s: Vec::new(),
+        }
+    }
+
+    fn no_model(n: u32, detail: &str) -> WindowCandidate {
+        WindowCandidate {
+            refno: r(n),
+            kind: CandidateKind::NoModel(detail.into()),
             chain_t: Vec::new(),
             chain_s: Vec::new(),
         }

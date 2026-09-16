@@ -583,6 +583,7 @@ fn generated_unit(dbnum: u32, root: RefNo, nouns: &HashMap<RefNo, String>) -> Mo
         new_owner: None,
         kind: UnitKind::Regen,
         transform_fallback_reason: None,
+        unit_fallback_reason: None,
     }
 }
 
@@ -598,6 +599,7 @@ fn failed_unit(dbnum: u32, root: RefNo, noun: &str, reason: &str) -> ModelUnitRe
         new_owner: None,
         kind: UnitKind::Regen,
         transform_fallback_reason: None,
+        unit_fallback_reason: None,
     }
 }
 

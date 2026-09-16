@@ -218,6 +218,12 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_transform_cheap_path: Option<bool>,
 
+    /// 单元级发布（ADR-078 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
+    /// 只重建 `plan_update(S→T)` 点名的那几件，以 `Partial` 提交叠在根回执之下发布。
+    /// `true` 才开；关着时计划与执行体的产物与今天逐位相同。详见 [`model_unit_level_publish`]。
+    #[serde(default)]
+    pub model_unit_level_publish: Option<bool>,
+
     /// 结构连接正向级联（联动对齐计划 C2，默认关闭）：窗口里改了 `SJOI` / `FIXING` / `SCTN` …
     /// 时，把 `CREF` / `JOIS` / `JOIE` / `CFRA` 回指成立的对端的生成根一起重算。
     /// 详见 [`model_structural_connection_cascade`]。
@@ -517,6 +523,7 @@ impl From<DbOption> for DbOptionExt {
             model_entry_drop_no_geometry: None,
             model_skip_metadata_only_changes: None,
             model_transform_cheap_path: None,
+            model_unit_level_publish: None,
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
             model_design_reference_cascade: None,
@@ -614,6 +621,8 @@ struct DbOptionExtFields {
     model_skip_metadata_only_changes: Option<bool>,
     #[serde(default)]
     model_transform_cheap_path: Option<bool>,
+    #[serde(default)]
+    model_unit_level_publish: Option<bool>,
     #[serde(default)]
     model_structural_connection_cascade: Option<bool>,
     #[serde(default)]
@@ -822,6 +831,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
         model_transform_cheap_path: ext.model_transform_cheap_path,
+        model_unit_level_publish: ext.model_unit_level_publish,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
         model_design_reference_cascade: ext.model_design_reference_cascade,
@@ -1854,6 +1864,30 @@ fn effective_model_transform_cheap_path(
         .unwrap_or(false)
 }
 
+/// 环境变量名：一次性覆盖 [`model_unit_level_publish`]，不必改配置文件。
+pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
+
+/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-078 D9，
+/// 2026-09-16）。
+///
+/// 开着时 DESI 窗口规划器在计划上带出本窗的基线 S（`ModelUpdatePlan::unit_publish_base_sesno`），
+/// dbnum Task 里的 regen 单元先交给单元级执行体（`E3dModelService::republish_roots_by_unit_delta_from_window`）：
+/// 只重建 `plan_update(S→T)` 点名的那几件，以 `Partial` 提交叠在根回执之下发布（章由存储在写锁里盖）；
+/// 闸 / 完整性门 / 生产方任一条不成就回退整根重算，回退永远正确。关着时计划上那一格是 `None`、
+/// 执行体一次都不被叫到，与今天逐位相同（实施约束 9）。
+///
+/// 两条便宜路的优先序定死为 **transform 优先、unit 兜底**（实施约束 7）：一根同时判成刚体前移与
+/// 单元级时先走 [`model_transform_cheap_path`] 那一路，它回退下来的才试单元级，再不成才整根重算。
+///
+/// 这是「少算」方向的开关，开门要过 ADR-078 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
+/// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn model_unit_level_publish() -> bool {
+    effective_default_off_switch(
+        load_ext_fields().model_unit_level_publish,
+        std::env::var(MODEL_UNIT_LEVEL_PUBLISH_ENV).ok().as_deref(),
+    )
+}
+
 /// 环境变量名：一次性覆盖 [`model_structural_connection_cascade`]，不必改配置文件。
 pub const MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV: &str =
     "AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE";
@@ -2865,6 +2899,23 @@ mod tests {
             Some(true),
             Some("maybe")
         ));
+    }
+
+    /// 单元级发布默认关（ADR-078 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
+    /// 取值规则；键在扩展字段名单里，配置读坏时的告警点得到它。
+    #[test]
+    fn the_unit_level_publish_switch_is_off_by_default_and_listed_as_an_ext_field() {
+        assert!(
+            !effective_default_off_switch(None, None),
+            "没配置、没环境变量就是关"
+        );
+        assert!(
+            ext_field_names()
+                .iter()
+                .any(|name| name == "model_unit_level_publish"),
+            "新键要进配置读坏时的告警名单"
+        );
+        assert_eq!(MODEL_UNIT_LEVEL_PUBLISH_ENV, "AIOS_MODEL_UNIT_LEVEL_PUBLISH");
     }
 
     /// 房间归属计算默认关：缺配置时不做房间增量更新；配置或环境变量能显式打开，

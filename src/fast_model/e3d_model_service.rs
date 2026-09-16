@@ -17,7 +17,11 @@ use e3d_io::refno::RefNo;
 use e3d_io::session::DbView;
 use e3d_model::catalogue::CatalogueMeshCache;
 use e3d_model::elmodl::{GeneratedElement, GeometryId};
-use e3d_model::increment::{IncrementReport, collect_window, increment_update};
+use e3d_model::increment::{
+    IncrementReport, PlanLimits, UpdatePlan, collect_window, execute_plan, increment_update,
+    plan_update, plan_update_with,
+};
+use e3d_model::ledger::ChangeLedger;
 use e3d_model::pipeline::{Report, generate_subtree_with_cache};
 use e3d_model::primitive_instance::canonical_primitive_mesh;
 use e3d_model::transform::dmat4_to_affine4x3;
@@ -36,8 +40,8 @@ use crate::data_interface::rigid_motion::{
     RepublishGate, TransformAnchor, republish_gate, republish_records,
 };
 use crate::fast_model::model_memory_store::{
-    ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube, ProjectionCommit,
-    ProjectionScope, RootReceipt, packed_refno,
+    CommitScope, ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube,
+    ProjectionCommit, ProjectionScope, RootReceipt, packed_refno,
 };
 
 /// 刚体前移执行体（ADR-066 B6）一轮的结果：哪些根走成便宜路（`completed`），哪些是「回执已在 T」
@@ -58,6 +62,486 @@ pub struct RigidMotionUnit {
     pub root_refno: String,
     pub source_start_sesno: u32,
     pub anchors: Vec<TransformAnchor>,
+}
+
+/// 单元级发布执行体（ADR-078 D4）一轮的结果，与 [`RigidMotionReport`] 同形：`completed` 走成了局部提交，
+/// `replayed` 是「回执已在 T」的窗口重放（投影一字未动、按已完成计），`fallbacks` 回退整根重算（带原因；
+/// D8：任何一件不成都整根回退，回退永远正确、只是不省）。
+#[derive(Debug, Default)]
+pub struct UnitPublishReport {
+    pub completed: Vec<String>,
+    pub replayed: Vec<String>,
+    pub fallbacks: Vec<(String, String)>,
+}
+
+/// 单元级发布执行体一次吃的一根。`source_start_sesno` 是 `plan_update(S→T)` 的窗口基线 S：局部清单只对
+/// 「投影还停在 S」的根成立——回执已在 T 是重放，既不在 S 也不在 T 是半截状态或别的路径动过它，两者
+/// 都不许把局部清单叠上去（[`republish_gate`]，ADR-078 D4）。
+#[derive(Debug, Clone)]
+pub struct UnitPublishUnit {
+    pub root_refno: String,
+    pub source_start_sesno: u32,
+}
+
+/// 单元级发布一根的**局部**产出（ADR-078 D2 的 `Partial`）：只点名这几件，缺席什么也不证明，要删的
+/// 必须写进 `removals`。`scope` 与回执由执行体盖——生产方给不出整根的章（D5：存储在写锁里算），
+/// 也不该替执行体决定这一笔是不是局部。
+#[derive(Debug, Default)]
+pub struct UnitDelta {
+    pub tube_branch_resets: Vec<RefNo>,
+    pub removals: Vec<String>,
+    pub upserts: Vec<ProjectedGeometry>,
+    /// 本轮重算出来的不可变目标（D5：不沿用旧回执的）。
+    pub model_target: Option<ModelTarget>,
+    /// 本次触到的每条路由容器（BRAN）在 T 端**应有**的管段数——生产方按 `route_tubes_of` 另记一账，
+    /// 不从 `upserts` 里数回来。管段完整性门（D6 / 实施约束 4，[`tube_segment_completeness`]）拿它对
+    /// `upserts` 里真带上的段数：`tube_branch_resets` 是整段重写，漏一段就是静默丢管。
+    /// 键是 `(word0, word1)`——`RefNo` 不实现 `Ord`，与 `owners` 表同一约定。
+    pub tube_segments: BTreeMap<(u32, u32), usize>,
+}
+
+/// 管段完整性门（ADR-078 D6 / 实施约束 4）：一次 `Partial` 若触到某条 BRAN 的管身，它的管身按**整段**处理——
+/// 存储那边 `tube_branch_resets` 一碰就清光那条分支的全部旧段，`upserts` 里没带上的段不会有人替它留着，
+/// 而且两边都不报错（`a_partial_commit_that_resets_a_branch_still_clears_every_segment_of_it` 演的就是这个）。
+///
+/// 所以在产出与提交之间核三件事，任一不成就整根回退 regen（D8），**不发**：
+/// 1. `upserts` 里带了 C 的管段，C 就必须在 `tube_branch_resets` 里——不重置，旧段会留在新段旁边成鬼影；
+/// 2. 触到的每条 C（重置的 ∪ 带了段的）都要在 `tube_segments` 里有账——没账就没法核；
+/// 3. `upserts` 里 C 的段数 == 账上的段数——少了是漏段，多了是账错，都不许发。
+///
+/// 只数管段数，不核 `route_ordinal` 连不连续：退化槽位本就不出几何（`execute_plan` 的 `kept` 只收真建成的），
+/// 序号有洞是正常形状。
+pub(crate) fn tube_segment_completeness(delta: &UnitDelta) -> Result<(), String> {
+    let key = |refno: RefNo| (refno.word0, refno.word1);
+    let mut carried = BTreeMap::<(u32, u32), usize>::new();
+    for record in &delta.upserts {
+        if let GeometryId::ImpliedTube {
+            container_refno, ..
+        } = &record.geometry_id
+        {
+            let container = parse_refno(container_refno).map_err(|error| {
+                format!("unparsable tube container {container_refno}: {error:#}")
+            })?;
+            *carried.entry(key(container)).or_default() += 1;
+        }
+    }
+    let resets = delta
+        .tube_branch_resets
+        .iter()
+        .map(|branch| key(*branch))
+        .collect::<BTreeSet<_>>();
+    let touched = carried
+        .keys()
+        .copied()
+        .chain(resets.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for container in touched {
+        let name = RefNo::new(container.0, container.1);
+        let carried = carried.get(&container).copied().unwrap_or(0);
+        if !resets.contains(&container) {
+            return Err(format!(
+                "BRAN {name}: {carried} tube segment(s) upserted without resetting the branch; \
+                 stale segments would survive next to the new ones"
+            ));
+        }
+        let Some(expected) = delta.tube_segments.get(&container).copied() else {
+            return Err(format!(
+                "BRAN {name}: branch reset with {carried} tube segment(s) but no segment count \
+                 declared for it; cannot prove the partial manifest carries every segment"
+            ));
+        };
+        if carried != expected {
+            return Err(format!(
+                "BRAN {name}: partial manifest carries {carried} tube segment(s), plan expects \
+                 {expected}; a reset would silently drop the rest"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-078 D1：单元级发布
+/// **直接吃 `plan_update` 的产出**，不引入第二套变更检测）。`UpdatePlan` 会被 `execute_plan` 整个吃掉、
+/// 又不 `Clone`，所以一窗算一次放在这里，逐根切出子计划再执行。
+struct WindowPlanSets {
+    regenerate: BTreeSet<(u32, u32)>,
+    remove: BTreeSet<(u32, u32)>,
+    regenerate_derived: BTreeSet<(u32, u32)>,
+    derived_stale: BTreeSet<GeometryId>,
+    /// 规划器退化成整库重建的原因（ADR-078 Q4）：非空时四个集合全空，一根都不许走局部——
+    /// 空产出不是「没变」。
+    full_rebuild: Option<String>,
+    /// 计划期就读挂的候选 / 容器数（`unresolved` + `derived_stale_unreadable`）：非零时这一窗的
+    /// 分类不可信，一根都不许走局部（D8）。
+    unreadable: usize,
+}
+
+impl WindowPlanSets {
+    /// 这一窗的计划能不能给局部发布切子计划（ADR-078 D8 ① ②）：退化成整库重建的计划四个集合全空，
+    /// 切出来的子计划执行后是**空产出**，把它当「没变」盖一个 T 章就是静默缺件（Q4）；计划期有读挂的
+    /// 分类不可信，整窗一根都不许走局部。
+    fn admits_partial_publish(&self) -> anyhow::Result<()> {
+        if let Some(reason) = &self.full_rebuild {
+            bail!(
+                "window plan degraded to a full rebuild; a partial manifest would publish an empty \
+                 delta as \"unchanged\": {reason}"
+            );
+        }
+        anyhow::ensure!(
+            self.unreadable == 0,
+            "window plan has {} unreadable candidate(s) / container(s); its classification cannot \
+             back a partial manifest",
+            self.unreadable
+        );
+        Ok(())
+    }
+}
+
+/// 一根子计划里 `execute_plan` 的 `removals` **唯一**许来自的三处（ADR-078 D6 第一条）：
+/// `remove` 的单元（窗里删掉的 + 迁出这根的）、`regenerate` 里画不出 / 画失败而被擦掉的单元、
+/// 派生容器 base 端的旧管段键（要重算的 + 迁出这根而退休的容器，见 [`RootSubplan`]）。
+struct RootPlanSets {
+    regenerate: BTreeSet<(u32, u32)>,
+    remove: BTreeSet<(u32, u32)>,
+    derived_stale: BTreeSet<GeometryId>,
+    /// 迁出这根的路由容器：生产方替它在管段账上记 0，管段门按整段清空放行。
+    retired_containers: BTreeSet<(u32, u32)>,
+}
+
+/// D6 第一条的守卫：产出里每一条 removal 都要能回溯到子计划。回溯不到就是 `execute_plan` 在别处
+/// 又推出了一条删除——局部提交下那就是静默丢件，整根回退（D8）。
+fn removals_trace_back_to_the_plan(
+    sets: &RootPlanSets,
+    removals: &[GeometryId],
+) -> anyhow::Result<()> {
+    for removal in removals {
+        let traced = match removal {
+            GeometryId::Element { refno } => {
+                let unit = parse_refno(refno)?;
+                let unit = (unit.word0, unit.word1);
+                sets.remove.contains(&unit) || sets.regenerate.contains(&unit)
+            }
+            GeometryId::ImpliedTube { .. } => sets.derived_stale.contains(removal),
+        };
+        anyhow::ensure!(
+            traced,
+            "removal {removal:?} does not trace back to the root's plan (neither UpdatePlan.remove / \
+             regenerate nor derived_stale); refusing to publish it as a partial manifest"
+        );
+    }
+    Ok(())
+}
+
+/// 不可变目标在**设计窗之外**的那几格有没有变：项目、设计文件身份、目录依赖（含会话）、模板、
+/// 生成器指纹、细分档。变了就不是一窗 DESI 差分能覆盖的——core 对目录 / 几何集变化走的是 `REPALL`，
+/// 我方对应整根重算；只有 `design.session` / `design.digest` 前移是局部发布该看到的那一格。
+fn same_target_outside_the_design_window(published: &ModelTarget, current: &ModelTarget) -> bool {
+    published.project == current.project
+        && published.design.dbnum == current.design.dbnum
+        && published.design.db_type == current.design.db_type
+        && published.design.file == current.design.file
+        && published.catalogue == current.catalogue
+        && published.template_attlib_digest == current.template_attlib_digest
+        && published.generator_fingerprint == current.generator_fingerprint
+        && published.tessellation_profile == current.tessellation_profile
+}
+
+/// 单元级发布的**真生产方**（ADR-078 D1 / D5 / D6 / D8）：`plan_update(S→T)` 一窗算一次，逐根切出子计划 →
+/// `execute_plan` → 烘焙 → `project_geometry_delta`，管段账与 removals 来源核过之后交给执行体
+/// （[`E3dModelService::republish_roots_by_unit_delta`] 的 `produce`）。
+///
+/// 它替代不了整根重算的几种情形各自 `bail!`，让执行体回退（回退永远正确、只是不省）：
+/// 1. 规划器退化成整库重建（`full_rebuild`，Q4）——空产出不是「没变」；
+/// 2. 计划期有读挂（`unresolved` / `derived_stale_unreadable`）——分类不可信；
+/// 3. 旧回执没带目标、或不可变目标在设计窗之外变了（目录 / 模板 / 生成器 / 细分档）——core 对这类是
+///    `REPALL`，一窗 DESI 差分覆盖不到；
+/// 4. `execute_plan` 报 `regen_failed` / `derived_failed`（D8）；
+/// 5. 产出里有回溯不到子计划的 removal（D6 第一条）。
+///
+/// 管段账（`UnitDelta::tube_segments`）取自 `IncrementReport::tube_segments`——`execute_plan` 在
+/// `route_tubes_of` 返回处逐容器另记的一笔，与 `upserts` 分开；执行体的管段完整性门拿它对真带上的段数。
+pub(crate) struct UnitDeltaProducer<'a> {
+    service: &'a E3dModelService,
+    dbnum: u32,
+    base_sesno: u32,
+    target_sesno: u32,
+    base: GenerationInput,
+    target: GenerationInput,
+    plan: WindowPlanSets,
+}
+
+impl<'a> UnitDeltaProducer<'a> {
+    /// 打开一窗：两端 `DbSet` / 索引（与整根重算共用 `generation_input` 缓存），`plan_update(S→T)` 算一次。
+    /// 计划口径与选根那一步（`WindowRootSources::collect`）**同一份**：元数据门开着就走两票门的
+    /// `plan_update_with`，关着就是裸 `plan_update`——两边口径不同，选出来要局部发布的根与切给它的子计划
+    /// 就对不上。
+    pub(crate) fn open(
+        service: &'a E3dModelService,
+        dbnum: u32,
+        base_sesno: u32,
+        target_sesno: u32,
+    ) -> anyhow::Result<Self> {
+        let pin = service.pin(dbnum)?;
+        let window = collect_window(&pin.file, base_sesno, target_sesno).with_context(|| {
+            format!(
+                "collect window {base_sesno}→{target_sesno} of {}",
+                pin.file.display()
+            )
+        })?;
+        let base = generation_input(service, dbnum, base_sesno)?;
+        let target = generation_input(service, dbnum, target_sesno)?;
+        let plan = if crate::options::model_skip_metadata_only_changes() {
+            plan_update_with(
+                &base.set,
+                &target.set,
+                &window,
+                PlanLimits::default(),
+                crate::data_interface::window_root_plan::change_metadata_tier,
+            )
+        } else {
+            plan_update(&base.set, &target.set, &window)
+        };
+        let UpdatePlan {
+            regenerate,
+            remove,
+            regenerate_derived,
+            derived_stale,
+            ledger: _,
+            full_rebuild,
+            report,
+        } = plan;
+        Ok(Self {
+            service,
+            dbnum,
+            base_sesno,
+            target_sesno,
+            base,
+            target,
+            plan: WindowPlanSets {
+                regenerate,
+                remove,
+                regenerate_derived,
+                derived_stale,
+                full_rebuild,
+                unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
+            },
+        })
+    }
+
+    /// 这一窗的计划规模（调试 / 探针用）：重建单元、删除单元、派生容器。
+    pub(crate) fn planned(&self) -> (usize, usize, usize) {
+        (
+            self.plan.regenerate.len(),
+            self.plan.remove.len(),
+            self.plan.regenerate_derived.len(),
+        )
+    }
+
+    /// 一根的局部产出。执行体已过完幂等闸（回执停在 S）才会叫到这里。
+    pub(crate) fn produce(
+        &mut self,
+        root: RefNo,
+        old_receipt: &RootReceipt,
+    ) -> anyhow::Result<UnitDelta> {
+        self.plan.admits_partial_publish()?;
+        // 不可变目标先算、先核（便宜）：设计窗之外任何一格变了，都不是局部能覆盖的。
+        self.service
+            .hydrate_published_dependencies(old_receipt, &self.target.dependency_sessions)?;
+        let model_target = self.service.model_target(
+            self.dbnum,
+            self.target_sesno,
+            &self.target.dependency_sessions,
+        )?;
+        let Some(published_target) = old_receipt.model_target.as_ref() else {
+            bail!(
+                "cached receipt of root {root} carries no model target; cannot prove a partial \
+                 delta covers the whole root"
+            );
+        };
+        anyhow::ensure!(
+            same_target_outside_the_design_window(published_target, &model_target),
+            "immutable target of root {root} changed outside the design window (catalogue / \
+             template / generator / tessellation); a partial DESI delta cannot cover it"
+        );
+
+        let subplan = restrict_plan_to_root(
+            &self.plan,
+            root,
+            self.base.index.owners.as_ref(),
+            self.target.index.owners.as_ref(),
+        )?;
+        // 选根比 `plan_update` 看得更远（结构连接 / 电缆端点 / 设计引用级联、目录级联、带过来的
+        // 未完成生成）：那些根这一窗没有一个自己的单元变了，几何却可能变了。子计划为空就不是
+        // 「没变」，是局部清单覆盖不到的理由——空 delta 盖一个 T 章正是 Q4 那种静默缺件。
+        anyhow::ensure!(
+            !subplan.is_empty(),
+            "window plan {}→{} names no unit under root {root}; the root was selected for a reason a \
+             partial DESI delta cannot see (cascade / recovery); falling back to regen",
+            self.base_sesno,
+            self.target_sesno
+        );
+        let (plan, sets) = subplan.into_update_plan(self.base_sesno, self.target_sesno);
+        let outcome = execute_plan(&self.target.set, plan);
+        let failed = outcome.report.regen_failed.len() + outcome.report.derived_failed.len();
+        anyhow::ensure!(
+            failed == 0,
+            "execute_plan under root {root}: {failed} unit(s) / container(s) failed ({} regen, {} derived)",
+            outcome.report.regen_failed.len(),
+            outcome.report.derived_failed.len()
+        );
+        removals_trace_back_to_the_plan(&sets, &outcome.removals)?;
+        let mut tube_segments = outcome
+            .report
+            .tube_segments
+            .iter()
+            .map(|(container, count)| {
+                let container = parse_refno(container)?;
+                Ok(((container.word0, container.word1), *count))
+            })
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        // 迁出这根的路由容器：它的新管身归 T 端的新根去建，这根只整段清掉旧的——账上记 0 段，
+        // 管段门按「容器退休的合法整段清空」放行。
+        for container in &sets.retired_containers {
+            tube_segments.entry(*container).or_insert(0);
+        }
+        let baked = bake_elements(outcome.upserts, self.service.mesh_dir.as_path())?;
+        let (commit, _) = project_geometry_delta(
+            self.dbnum,
+            self.target_sesno,
+            baked,
+            outcome.removals,
+            None,
+            &self.target.index.owners,
+        )?;
+        Ok(UnitDelta {
+            tube_branch_resets: commit.tube_branch_resets,
+            removals: commit.removals,
+            upserts: commit.upserts,
+            model_target: Some(model_target),
+            tube_segments,
+        })
+    }
+
+}
+
+/// 一根从一窗计划里切出来的子计划（[`restrict_plan_to_root`] 的产物）。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RootSubplan {
+    /// T 端在这根之下、要重建的单元。
+    regenerate: BTreeSet<(u32, u32)>,
+    /// 这根的投影里要显式删掉的单元：窗里删掉的（只在 S 端有），**加上迁出这根的**（T 端还在、却已不在
+    /// 这根之下）。
+    remove: BTreeSet<(u32, u32)>,
+    /// T 端在这根之下、要整链重算的路由容器；T 端已删、S 端在这根之下的也在这里（`execute_plan` 记 0 段、
+    /// 旧键由差集清）。
+    regenerate_derived: BTreeSet<(u32, u32)>,
+    /// 上面两组容器在 S 端的旧管段键：`execute_plan` 没被本轮建成的都发 Remove。
+    derived_stale: BTreeSet<GeometryId>,
+    /// **迁出**这根的路由容器：T 端还在、却已不在这根之下。它留在这根名下的旧管身要整段清掉
+    /// （旧键进 `derived_stale` → Remove → 存储对该分支 reset），新管身归它在 T 端的新根去建；
+    /// 生产方替它记 0 段的账，管段门按「容器退休的合法整段清空」放行。
+    retired_containers: BTreeSet<(u32, u32)>,
+}
+
+impl RootSubplan {
+    /// 这一窗的计划里没有一件落在这根名下。
+    fn is_empty(&self) -> bool {
+        self.regenerate.is_empty()
+            && self.remove.is_empty()
+            && self.regenerate_derived.is_empty()
+            && self.derived_stale.is_empty()
+            && self.retired_containers.is_empty()
+    }
+
+    /// 折成 `execute_plan` 吃的 [`UpdatePlan`]，连同 D6 守卫要对的三处来源（[`RootPlanSets`]）。
+    fn into_update_plan(self, base_sesno: u32, target_sesno: u32) -> (UpdatePlan, RootPlanSets) {
+        let plan = UpdatePlan {
+            regenerate: self.regenerate.clone(),
+            remove: self.remove.clone(),
+            regenerate_derived: self.regenerate_derived.clone(),
+            derived_stale: self.derived_stale.clone(),
+            ledger: ChangeLedger::new(),
+            full_rebuild: None,
+            report: IncrementReport {
+                base_sesno,
+                target_sesno,
+                units_to_regenerate: self.regenerate.len(),
+                units_to_remove: self.remove.len(),
+                derived_to_regenerate: self.regenerate_derived.len(),
+                ..IncrementReport::default()
+            },
+        };
+        (
+            plan,
+            RootPlanSets {
+                regenerate: self.regenerate,
+                remove: self.remove,
+                derived_stale: self.derived_stale,
+                retired_containers: self.retired_containers,
+            },
+        )
+    }
+}
+
+/// 从一窗的计划里切出 `root` 名下的子计划。归属按祖先链判：活在 T 端的（`regenerate`、还在的派生容器）
+/// 走 T 端属主表，T 端已没有的（`remove`、退休的派生容器）走 S 端属主表；`derived_stale` 跟着它的容器。
+///
+/// **迁出这根的**（S 端在这根之下、T 端不在了——改挂到别的根，或挂到了没有生成根的地方）局部清单必须
+/// 显式点名（D2）：单元进这根的 `remove`，路由容器进 `retired_containers`（旧管段键进 `derived_stale`）。
+/// 不点名的话它的记录留在这根名下成鬼影；整根重算时 `whole_root_removals` 拿缺席推出的正是这一条删除，
+/// 局部清单没有缺席这回事，只能自己写出来。它在 T 端的新根（若有）以同一个 `record_id` 重新 upsert，
+/// 整窗同一批发布里删除先于插入，两边不打架。
+///
+/// 祖先链读挂（回环）按错误上抛——静默把它从子计划里漏掉就是陈旧几何。
+fn restrict_plan_to_root(
+    plan: &WindowPlanSets,
+    root: RefNo,
+    owners_s: &BTreeMap<(u32, u32), RefNo>,
+    owners_t: &BTreeMap<(u32, u32), RefNo>,
+) -> anyhow::Result<RootSubplan> {
+    let packed_root = packed_refno(root);
+    let under = |unit: (u32, u32), owners: &BTreeMap<(u32, u32), RefNo>| {
+        ancestor_chain(RefNo::new(unit.0, unit.1), owners).map(|chain| chain.contains(&packed_root))
+    };
+    let mut subplan = RootSubplan::default();
+    for unit in &plan.regenerate {
+        if under(*unit, owners_t)? {
+            subplan.regenerate.insert(*unit);
+        } else if under(*unit, owners_s)? {
+            subplan.remove.insert(*unit);
+        }
+    }
+    for unit in &plan.remove {
+        if under(*unit, owners_s)? {
+            subplan.remove.insert(*unit);
+        }
+    }
+    for container in &plan.regenerate_derived {
+        if owners_t.contains_key(container) {
+            if under(*container, owners_t)? {
+                subplan.regenerate_derived.insert(*container);
+            } else if under(*container, owners_s)? {
+                subplan.retired_containers.insert(*container);
+            }
+        } else if under(*container, owners_s)? {
+            subplan.regenerate_derived.insert(*container);
+        }
+    }
+    for stale in &plan.derived_stale {
+        if let GeometryId::ImpliedTube {
+            container_refno, ..
+        } = stale
+        {
+            let container = parse_refno(container_refno)?;
+            let container = (container.word0, container.word1);
+            if subplan.regenerate_derived.contains(&container)
+                || subplan.retired_containers.contains(&container)
+            {
+                subplan.derived_stale.insert(stale.clone());
+            }
+        }
+    }
+    Ok(subplan)
 }
 
 /// 一个生成根这一轮的投影决策：现在要投的目标是什么，上一轮投成了什么。
@@ -519,6 +1003,21 @@ fn db_generation_lock(dbnum: u32) -> Arc<Mutex<()>> {
 /// last pending check and the short control-plane transaction.
 pub(crate) async fn lock_db_generation(dbnum: u32) -> tokio::sync::OwnedMutexGuard<()> {
     db_generation_lock(dbnum).lock_owned().await
+}
+
+/// 把一段同步的 CPU 活从 tokio 工作线程上让出去，**借用照常**（不必 `'static`，这是不走
+/// `spawn_blocking` 的原因：单元级发布的生产方借着 `&E3dModelService` 与两端 `DbSet`）。
+///
+/// 多线程运行时走 `block_in_place`：当前工作线程转成阻塞线程、别的任务照跑；`current_thread`
+/// 运行时（`#[tokio::test]`）与运行时之外就地跑——`block_in_place` 在那两处会 panic。
+/// 让出的只是线程，调用方手里的锁（`db_generation_lock`）照握着。
+fn run_blocking<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
 }
 
 pub struct E3dModelService {
@@ -1270,6 +1769,81 @@ impl E3dModelService {
         Ok(report)
     }
 
+    /// 单元级发布执行体（ADR-078 D4 / D5 / D8）：每一根**先过闸，再要局部产出，再以 `Partial` 提交发布**。
+    ///
+    /// 顺序钉死为 闸 → 产出 → 提交（实施约束 5，与 [`Self::republish_roots_by_rigid_motion`] 同序）。
+    /// 局部清单不像 regen 天然幂等——它只对「投影还停在规划基线 S」的根成立：回执已在 T 是窗口重放
+    /// （发布成功但回合没收尾就崩），再叠一次就是把 T 的记录当 S 的去删 / 改；回执既不在 S 也不在 T 是
+    /// 半截状态或别的路径动过它，`plan_update(S→T)` 算出的清单对不上记录。两者都在**读任何记录、
+    /// 求任何几何之前**判掉：前者跳过、按已完成计（`replayed`），后者回退整根 regen（`fallbacks`）。
+    ///
+    /// `produce` 给出这根的局部产出——接上 `execute_plan` 之前由调用方提供，接上之后就是它；报错即
+    /// 回退（D8：任何一件失败 → 整根 regen，记原因，不静默）。回执的 `manifest_hash` / `geometry_count`
+    /// 由存储在写锁里盖（D5），这里只填 `source_sesno = T` / `model_target` / `published_via = "unit"`。
+    /// 与刚体路同一把 `db_generation_lock`、同一道 `ensure_not_older_than_persisted`（D4：不新增锁）。
+    ///
+    /// 执行体与 `produce`（`plan_update` / `execute_plan` / 烘焙）都是同步的 CPU 活，在 [`run_blocking`]
+    /// 里跑：多线程运行时让出当前 tokio 工作线程，锁照握着（同一把 `db_generation_lock` 下只有这一个
+    /// 写者，让出线程不放锁）。生产调用点是 `batch_worker::run_unit_publish_units`（开关
+    /// `model_unit_level_publish`，D9，默认关）。
+    pub(crate) async fn republish_roots_by_unit_delta(
+        &self,
+        dbnum: u32,
+        target_sesno: u32,
+        units: &[UnitPublishUnit],
+        produce: impl FnMut(&UnitPublishUnit, RefNo, &RootReceipt) -> anyhow::Result<UnitDelta>,
+    ) -> anyhow::Result<UnitPublishReport> {
+        let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
+        ensure_not_older_than_persisted(dbnum, target_sesno).await?;
+        run_blocking(|| {
+            republish_roots_by_unit_delta_on(
+                ModelMemoryStore::global(),
+                self.mesh_dir.as_path(),
+                target_sesno,
+                units,
+                produce,
+                |commits| {
+                    super::model_write_behind::publish(commits)?;
+                    Ok(())
+                },
+            )
+        })
+    }
+
+    /// [`Self::republish_roots_by_unit_delta`] 接上真生产方（[`UnitDeltaProducer`]）：一窗 S→T 的
+    /// `plan_update` 算一次，逐根切子计划执行。每个 unit 的 `source_start_sesno` 必须就是这一窗的 S——
+    /// 闸对回执用的基线与生产方切计划用的基线要是同一个，否则闸放行的记录与 delta 对的不是同一版。
+    ///
+    /// 生产方**惰性**打开：第一根过了闸才 `open`（两端 `DbSet` + `plan_update`，同步 CPU 活，随执行体一起
+    /// 在 [`run_blocking`] 里跑）——整窗都是重放 / 回退时一份计划都不算；打开失败的原因记一次、之后每根
+    /// 原样回退（D8），不反复开。生产调用点是 `batch_worker::run_unit_publish_units`（D9）；真库探针
+    /// `probe_unit_publish_one_root_against_regen` 走它的无锁本体。
+    pub(crate) async fn republish_roots_by_unit_delta_from_window(
+        &self,
+        dbnum: u32,
+        base_sesno: u32,
+        target_sesno: u32,
+        units: &[UnitPublishUnit],
+    ) -> anyhow::Result<UnitPublishReport> {
+        let mut producer: Option<Result<UnitDeltaProducer<'_>, String>> = None;
+        self.republish_roots_by_unit_delta(dbnum, target_sesno, units, |unit, root, old| {
+            anyhow::ensure!(
+                unit.source_start_sesno == base_sesno,
+                "root {root} was planned against baseline {} but the window producer is S = {base_sesno}",
+                unit.source_start_sesno
+            );
+            let producer = producer.get_or_insert_with(|| {
+                UnitDeltaProducer::open(self, dbnum, base_sesno, target_sesno)
+                    .map_err(|error| format!("{error:#}"))
+            });
+            match producer {
+                Ok(producer) => producer.produce(root, old),
+                Err(reason) => bail!("window producer {base_sesno}→{target_sesno} failed to open: {reason}"),
+            }
+        })
+        .await
+    }
+
     /// 这个库当前会话下的全部生成根：**每个 ZONE 一根**（文件侧枚举，一行库都不读）。
     ///
     /// 整库重生成用它把根取齐，再交给 [`Self::generate_and_persist_roots`]。根只到 ZONE，
@@ -1653,25 +2227,7 @@ impl E3dModelService {
             // 子树访问名单只报出去，不在这里写库：读透形态下编排层拿它在发布模型行之前
             // 把子树元素写透（`docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md` §3.2）。
             total.visited_by_root.insert(root, snapshot.visited);
-            let generated_ids = snapshot
-                .elements
-                .iter()
-                .map(|element| {
-                    Ok((
-                        serde_json::to_string(&element.geometry_id)?,
-                        element.geometry_id.clone(),
-                    ))
-                })
-                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
-            let existing_ids = &prior[root_index];
-            let removals = existing_ids
-                .iter()
-                .cloned()
-                .filter_map(|geometry_id| {
-                    let key = serde_json::to_string(&geometry_id).ok()?;
-                    (!generated_ids.contains_key(&key)).then_some(geometry_id)
-                })
-                .collect::<BTreeSet<_>>();
+            let removals = whole_root_removals(&prior[root_index], &snapshot.elements)?;
             generation.merge(snapshot.report);
             // Catalogue resolution during generation may have discovered
             // cross-database dependencies that were not in watermark pins.
@@ -1681,7 +2237,7 @@ impl E3dModelService {
                 dbnum,
                 source_sesno,
                 snapshot.elements,
-                removals.into_iter().collect(),
+                removals,
                 Some(&publication),
                 &index.owners,
             )?;
@@ -2325,6 +2881,177 @@ pub async fn apply_geometry_delta(
     .await
 }
 
+/// 「上一版有、这一版没有」= 删掉了——**只有当 `generated` 确实是这根的全集时这句才成立**
+/// （ADR-078 D2，[`CommitScope::WholeRoot`]）。
+///
+/// 这是整个发布链路上**唯一**一处拿缺席推删除的地方，所以单独拎出来命名：单元级发布只重建变了
+/// 的那几件，同一条推导会把没重建的全部删掉，而且投影与库两边都不会报错——静默丢件。
+/// 局部提交要删什么必须显式列出，不得改道走这里。
+fn whole_root_removals(
+    prior: &[GeometryId],
+    generated: &[BakedElement],
+) -> anyhow::Result<Vec<GeometryId>> {
+    let generated_ids = generated
+        .iter()
+        .map(|element| Ok(serde_json::to_string(&element.geometry_id)?))
+        .collect::<anyhow::Result<BTreeSet<String>>>()?;
+    Ok(prior
+        .iter()
+        .cloned()
+        .filter_map(|geometry_id| {
+            let key = serde_json::to_string(&geometry_id).ok()?;
+            (!generated_ids.contains(&key)).then_some(geometry_id)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+/// [`E3dModelService::republish_roots_by_unit_delta`] 的本体；锁与会话闸留在外面。
+///
+/// 拆出来是为了让「闸 → 产出 → 提交」这条顺序能在一个本地存储、一个本地发布口上被测试钉住
+/// （生产的 `publish` 走 write-behind 的全局控制器）。这里**不读任何记录**：删什么、改什么由
+/// `produce` 点名，整根的章由存储在写锁里盖（D5），所以闸后面没有第二个能读到旧状态的窗口。
+///
+/// **整窗一批发布**（D4：一次 `publish(commits)` 是一个原子边界，可以跨多根）：走成的根先攒着，循环
+/// 结束一次发出。一件改挂的单元在旧根的清单里是显式删除、在新根的清单里是同一个 `record_id` 的 upsert
+/// ——存储对一批提交先落全部删除再落全部插入、章按整批落完之后的状态盖，两根谁先谁后都不打架；
+/// 逐根各发一批的话，旧根的删除排在新根的插入之后就把刚插的那件删掉了。
+pub(crate) fn republish_roots_by_unit_delta_on(
+    store: &ModelMemoryStore,
+    mesh_dir: &Path,
+    target_sesno: u32,
+    units: &[UnitPublishUnit],
+    mut produce: impl FnMut(&UnitPublishUnit, RefNo, &RootReceipt) -> anyhow::Result<UnitDelta>,
+    mut publish: impl FnMut(Vec<ProjectionCommit>) -> anyhow::Result<()>,
+) -> anyhow::Result<UnitPublishReport> {
+    let mut report = UnitPublishReport::default();
+    let mut commits = Vec::new();
+    let mut landing = Vec::new();
+    for unit in units {
+        let root_refno = &unit.root_refno;
+        let root = match parse_refno(root_refno) {
+            Ok(root) => root,
+            Err(error) => {
+                report
+                    .fallbacks
+                    .push((root_refno.clone(), format!("unparsable root: {error:#}")));
+                continue;
+            }
+        };
+        // 前置：投影完整（记录数与回执相符、mesh 文件都在）且有旧回执可对。残缺的根没有「S 上的
+        // 全集」可叠——`IncompleteRoot::Discard` 在 `Partial` 下不成立（D2），由整根回退顶上（D8）。
+        if !store.root_projection_complete(ProjectionScope::Current, root, mesh_dir) {
+            report
+                .fallbacks
+                .push((root_refno.clone(), "projection incomplete".into()));
+            continue;
+        }
+        let Some(old_receipt) = store.receipt(ProjectionScope::Current, root) else {
+            report
+                .fallbacks
+                .push((root_refno.clone(), "no cached receipt".into()));
+            continue;
+        };
+        // 幂等闸（D4，实施约束 5）：在要产出、读记录、动几何之前。只有「投影还停在规划基线 S」才许叠局部清单。
+        match republish_gate(
+            old_receipt.source_sesno,
+            unit.source_start_sesno,
+            target_sesno,
+        ) {
+            RepublishGate::Proceed => {}
+            RepublishGate::SkipAlreadyAtTarget => {
+                report.replayed.push(root_refno.clone());
+                continue;
+            }
+            RepublishGate::FallbackBaselineMismatch => {
+                report.fallbacks.push((
+                    root_refno.clone(),
+                    format!(
+                        "projection receipt at sesno {}, but the partial manifest was planned \
+                         against baseline {} (target {}); falling back to regen",
+                        old_receipt.source_sesno, unit.source_start_sesno, target_sesno
+                    ),
+                ));
+                continue;
+            }
+        }
+        let delta = match produce(unit, root, &old_receipt) {
+            Ok(delta) => delta,
+            Err(error) => {
+                report
+                    .fallbacks
+                    .push((root_refno.clone(), format!("{error:#}")));
+                continue;
+            }
+        };
+        // 管段完整性门（D6 / 实施约束 4）：产出与提交之间。触到的 BRAN 少带一段就整根回退，不发。
+        if let Err(reason) = tube_segment_completeness(&delta) {
+            report.fallbacks.push((
+                root_refno.clone(),
+                format!("tube segment completeness: {reason}; falling back to regen"),
+            ));
+            continue;
+        }
+        // D2：一根被删空（最后一件也删了）不走 `Partial`，退回根级路径。执行体不读记录，判据只用
+        // 回执上的记录数与清单本身：带了 upsert 的清单落完必有记录；一件不带、又删了不少于整根记录数
+        // 的 id，或整段清了某条分支的管身（清多少段这里看不见），都可能把这根删空——按可能算，回退。
+        if partial_delta_may_empty_the_root(&delta, old_receipt.geometry_count) {
+            report.fallbacks.push((
+                root_refno.clone(),
+                format!(
+                    "partial manifest carries no upsert and may leave root {root} empty ({} removal(s), \
+                     {} branch reset(s) against {} record(s) on the receipt); an emptied root is the \
+                     root-level path's to publish (D2); falling back to regen",
+                    delta.removals.len(),
+                    delta.tube_branch_resets.len(),
+                    old_receipt.geometry_count
+                ),
+            ));
+            continue;
+        }
+        // 局部提交：`scope` 说明缺席不证明任何事（D2）；回执两格是占位，存储在写锁里按 delta 落完之后的
+        // 整根重算（D5）；`published_via = "unit"` 只作观测，不进任何判据。攒进本窗这一批，循环结束一次发。
+        commits.push(ProjectionCommit {
+            tube_branch_resets: delta.tube_branch_resets,
+            removals: delta.removals,
+            upserts: delta.upserts,
+            receipt: Some((
+                root,
+                RootReceipt {
+                    source_sesno: target_sesno,
+                    model_target: delta.model_target,
+                    manifest_hash: String::new(),
+                    geometry_count: 0,
+                    published_via: "unit".into(),
+                },
+            )),
+            scope: CommitScope::Partial,
+        });
+        landing.push(root_refno.clone());
+    }
+    if !commits.is_empty() {
+        // 一次发布调用 = 一个原子边界（D4）：改挂两端的根一起落地。发布口不收件整轮上抛，与刚体路一致
+        // ——没有一根算走成。
+        publish(commits)?;
+        report.completed = landing;
+    }
+    Ok(report)
+}
+
+/// ADR-078 D2 第二条的判据：一份 `Partial` 清单**可能**把这根删空吗？执行体不读记录，能用的只有回执上
+/// 的记录数（投影完整时就是这根此刻的记录数）与清单本身。
+///
+/// - 带了 upsert → 落完必有记录，不可能删空；
+/// - 一件不带、显式删除的 id 数 ≥ 记录数 → 可能删空（多出来的 id 若是无效 id 就删不到，那是保守多退一次）；
+/// - 一件不带、还整段清了某条分支的管身 → 一条重置清掉几段这里看不见，按可能删空算。
+///
+/// 只在「可能」这一侧保守：判 `false` 的清单落完至少留一条记录，判 `true` 的回退整根重算，回退永远正确。
+fn partial_delta_may_empty_the_root(delta: &UnitDelta, records_on_receipt: usize) -> bool {
+    delta.upserts.is_empty()
+        && (!delta.tube_branch_resets.is_empty() || delta.removals.len() >= records_on_receipt)
+}
+
 /// 目标没变、投影也还完整时这一根的全部改动：只重盖一次章。
 ///
 /// 旧版这里要发一条根凭证的 `published_*` 更新，外加一批依赖收据行；现在收据就是回执本身，
@@ -2388,7 +3115,9 @@ pub(crate) async fn apply_geometry_delta_on(
         ProjectionScope::Current => {
             super::model_write_behind::publish(vec![commit])?;
         }
-        ProjectionScope::Historical(_) => ModelMemoryStore::global().commit(scope, vec![commit]),
+        ProjectionScope::Historical(_) => {
+            ModelMemoryStore::global().commit(scope, vec![commit]);
+        }
     }
     report.unique_meshes = report.mesh_ids.len();
     Ok(report)
@@ -2564,6 +3293,18 @@ pub(crate) fn manifest_entry(record: &ProjectedGeometry) -> anyhow::Result<(Stri
 /// 一根记录的清单摘要与条目数。同一 `geometry_id` 只算一条（后者覆盖前者），与它取代的
 /// 内联实现逐位相同。
 pub(crate) fn manifest_hash(records: &[ProjectedGeometry]) -> anyhow::Result<(String, usize)> {
+    manifest_hash_of(records)
+}
+
+/// [`manifest_hash`] 的借用形——同一份配方、同一个函数体，只是不要求记录连成一片。
+///
+/// 单元级发布（ADR-078 D5）的回执是存储在**写锁里**、delta 落进去之后按这根此刻的全部记录
+/// 盖的；那时记录散在 `BTreeMap` 里，按 record_id 一条条取出来的是借用，整根克隆一遍再喂
+/// `&[ProjectedGeometry]` 就是白扛一次 O(根内记录数) 的复制。三条路（重生成 / 刚体前移 /
+/// 单元级）从这里取的章对同一批记录逐字相同，对拍门比的正是它。
+pub(crate) fn manifest_hash_of<'a>(
+    records: impl IntoIterator<Item = &'a ProjectedGeometry>,
+) -> anyhow::Result<(String, usize)> {
     let mut entries = BTreeMap::<String, Value>::new();
     for record in records {
         let (key, entry) = manifest_entry(record)?;
@@ -3397,6 +4138,946 @@ mod tests {
         );
     }
 
+    fn unit_publish_mesh_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "unit-publish-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 一根**完整**的投影：三件（根号 +5 / +6 / +7，几根并存时记录 id 才不撞）、回执停在 `receipt_sesno`、
+    /// 章是真算的、mesh 文件都在盘上。
+    fn seed_complete_root(
+        store: &ModelMemoryStore,
+        mesh_dir: &Path,
+        root: RefNo,
+        receipt_sesno: u32,
+    ) -> BTreeMap<(u32, u32), RefNo> {
+        let member = |offset: u32| RefNo::new(root.word0, root.word1 + offset);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((member(5).word0, member(5).word1), root),
+            ((member(6).word0, member(6).word1), root),
+            ((member(7).word0, member(7).word1), root),
+        ]);
+        let (mut commit, _) = project_geometry_delta(
+            7997,
+            receipt_sesno,
+            vec![
+                baked_element(member(5), "mesh_five"),
+                baked_element(member(6), "mesh_six"),
+                baked_element(member(7), "mesh_seven"),
+            ],
+            Vec::new(),
+            None,
+            &owners,
+        )
+        .expect("seed projection");
+        for mesh in ["mesh_five", "mesh_six", "mesh_seven", "mesh_six_rebuilt"] {
+            std::fs::write(mesh_dir.join(format!("{mesh}.mesh")), b"fixture").unwrap();
+        }
+        let (manifest, geometry_count) = manifest_hash(&commit.upserts).unwrap();
+        commit.receipt = Some((
+            root,
+            RootReceipt {
+                source_sesno: receipt_sesno,
+                model_target: None,
+                manifest_hash: manifest,
+                geometry_count,
+                published_via: "regen".into(),
+            },
+        ));
+        store.commit(ProjectionScope::Current, vec![commit]);
+        owners
+    }
+
+    /// ADR-078 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执不在规划基线 S 上的根
+    /// **回退**整根 regen 并说明原因；两种都不叫生产方、不发布、投影一字不动。残缺 / 解析不了的根在闸之前
+    /// 就回退；生产方报错的根照 D8 回退并记原因。
+    #[test]
+    fn the_unit_gate_sorts_replays_and_baseline_mismatches_before_anything_is_produced() {
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let replayed = RefNo::new(24383, 100); // 回执已在 T = 43
+        let drifted = RefNo::new(24383, 200); // 回执停在 41，计划却是对着 S = 42 算的
+        let incomplete = RefNo::new(24383, 300); // 回执数与记录数对不上
+        let failing = RefNo::new(24383, 400); // 停在 S，但生产方报错
+        seed_complete_root(&store, &mesh_dir, replayed, 43);
+        seed_complete_root(&store, &mesh_dir, drifted, 41);
+        seed_complete_root(&store, &mesh_dir, incomplete, 42);
+        seed_complete_root(&store, &mesh_dir, failing, 42);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((
+                    incomplete,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: "counts-do-not-match".into(),
+                        geometry_count: 99,
+                        published_via: "regen".into(),
+                    },
+                )),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let roots = [replayed, drifted, incomplete, failing];
+        let before = roots.map(|root| store.root_snapshot(ProjectionScope::Current, root));
+        let mut units = roots
+            .iter()
+            .map(|root| UnitPublishUnit {
+                root_refno: root.to_string(),
+                source_start_sesno: 42,
+            })
+            .collect::<Vec<_>>();
+        units.push(UnitPublishUnit {
+            root_refno: "not-a-refno".into(),
+            source_start_sesno: 42,
+        });
+
+        let mut produced = Vec::new();
+        let mut published = 0;
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            &units,
+            |_, root, _| {
+                produced.push(root);
+                anyhow::bail!("execute_plan: regen_failed for {root}")
+            },
+            |_| {
+                published += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.replayed, vec![replayed.to_string()]);
+        assert_eq!(report.completed, Vec::<String>::new());
+        let reasons = report.fallbacks.into_iter().collect::<BTreeMap<_, _>>();
+        let drifted_reason = &reasons[&drifted.to_string()];
+        assert!(
+            drifted_reason.contains("receipt at sesno 41")
+                && drifted_reason.contains("baseline 42")
+                && drifted_reason.contains("target 43")
+                && drifted_reason.contains("falling back to regen"),
+            "{drifted_reason}"
+        );
+        assert_eq!(reasons[&incomplete.to_string()], "projection incomplete");
+        assert!(reasons[&failing.to_string()].contains("regen_failed"));
+        assert!(reasons["not-a-refno"].contains("unparsable root"));
+        assert_eq!(
+            produced,
+            vec![failing],
+            "只有过了闸的根才会叫生产方；重放、基线不符、残缺的一件几何都不求"
+        );
+        assert_eq!(published, 0, "没有一根走到发布");
+        for (root, snapshot) in roots.into_iter().zip(before) {
+            assert_eq!(
+                store.root_snapshot(ProjectionScope::Current, root),
+                snapshot,
+                "{root}: 没发布的根投影一字不动"
+            );
+        }
+    }
+
+    /// ADR-078 D4 / D5 / A4：回执停在 S 的根走成局部提交——`scope = Partial`、`published_via = "unit"`、
+    /// `source_sesno` 前移到 T、章由存储盖、没点名的那件原地不动（还停在旧会话上，正是 D3 放宽 `<=` 要接住的形状）。
+    /// 同一个计划再提一次：回执已在 T，闸判 `replayed`，生产方一次都不被叫到，投影一字不动。
+    #[test]
+    fn a_unit_root_on_its_baseline_publishes_a_partial_commit_and_replays_idempotently() {
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let root = RefNo::new(24383, 100);
+        let owners = seed_complete_root(&store, &mesh_dir, root, 42);
+        let unit = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: 42,
+        };
+
+        let stamped = std::cell::RefCell::new(Vec::new());
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unit),
+            |_, produced_root, old_receipt| {
+                assert_eq!(produced_root, root);
+                assert_eq!(old_receipt.source_sesno, 42, "生产方拿到的是 S 上的旧回执");
+                // 局部产出：106 重建、107 删掉、105 一个字不提。
+                let (delta, _) = project_geometry_delta(
+                    7997,
+                    43,
+                    vec![baked_element(RefNo::new(24383, 106), "mesh_six_rebuilt")],
+                    vec![GeometryId::Element {
+                        refno: RefNo::new(24383, 107).to_string(),
+                    }],
+                    None,
+                    &owners,
+                )?;
+                Ok(UnitDelta {
+                    tube_branch_resets: delta.tube_branch_resets,
+                    removals: delta.removals,
+                    upserts: delta.upserts,
+                    ..UnitDelta::default()
+                })
+            },
+            |commits| {
+                assert_eq!(commits.len(), 1);
+                let commit = &commits[0];
+                assert_eq!(
+                    commit.scope,
+                    CommitScope::Partial,
+                    "局部提交必须自报 Partial（D2）"
+                );
+                let (_, placeholder) = commit.receipt.as_ref().expect("局部提交也盖章");
+                assert_eq!(placeholder.source_sesno, 43);
+                assert_eq!(placeholder.published_via, "unit");
+                assert!(
+                    placeholder.manifest_hash.is_empty() && placeholder.geometry_count == 0,
+                    "执行体不自己算章，两格留给存储在写锁里盖（D5）"
+                );
+                stamped
+                    .borrow_mut()
+                    .extend(store.try_commit_current(commits));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed, vec![root.to_string()]);
+        assert!(report.replayed.is_empty() && report.fallbacks.is_empty());
+
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        let mut meshes = records
+            .iter()
+            .map(|record| record.mesh_id.as_str())
+            .collect::<Vec<_>>();
+        meshes.sort_unstable();
+        assert_eq!(
+            meshes,
+            vec!["mesh_five", "mesh_six_rebuilt"],
+            "106 换了、107 没了、105 还在"
+        );
+        let untouched = records
+            .iter()
+            .find(|record| record.mesh_id == "mesh_five")
+            .unwrap();
+        assert_eq!(
+            untouched.source_sesno, 42,
+            "没点名的那件停在旧会话上——D3 放宽 `<=` 接的就是它"
+        );
+        let receipt = store
+            .receipt(ProjectionScope::Current, root)
+            .expect("receipt");
+        assert_eq!(
+            (receipt.source_sesno, receipt.published_via.as_str()),
+            (43, "unit")
+        );
+        assert_eq!(
+            (receipt.manifest_hash.clone(), receipt.geometry_count),
+            manifest_hash(&records).unwrap(),
+            "章是存储按提交之后的整根盖的"
+        );
+        assert_eq!(stamped.borrow().as_slice(), &[(root, receipt.clone())]);
+        assert!(
+            store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir),
+            "局部提交之后这根仍是完整的：数对得上、mesh 都在"
+        );
+
+        // A4：同一个计划连提第二次。回执已在 T，闸判重放；生产方与发布口一次都不该被叫到。
+        let before = store.root_snapshot(ProjectionScope::Current, root);
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unit),
+            |_, _, _| panic!("重放不该再要产出"),
+            |_| panic!("重放不该再发布"),
+        )
+        .unwrap();
+        assert_eq!(report.replayed, vec![root.to_string()]);
+        assert!(report.completed.is_empty() && report.fallbacks.is_empty());
+        assert_eq!(
+            store.root_snapshot(ProjectionScope::Current, root),
+            before,
+            "A4：第二次提交投影一字不动"
+        );
+    }
+
+    /// ADR-078 D6 / 实施约束 4 的三条判据，直接对门本身：不重置就带段、重置了没账、账与段数不符，
+    /// 三种都拦；重置 + 有账 + 段数对上才放行。只数段数，`route_ordinal` 有洞不算错（退化槽位本就不出几何）。
+    #[test]
+    fn the_tube_segment_gate_rejects_unreset_unaccounted_and_short_branches() {
+        let root = RefNo::new(24383, 600);
+        let branch = RefNo::new(24383, 621);
+        let branch_key = (branch.word0, branch.word1);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((branch.word0, branch.word1), root),
+        ]);
+        let segments = |ordinals: &[u32]| {
+            project_geometry_delta(
+                7997,
+                43,
+                ordinals
+                    .iter()
+                    .map(|ordinal| baked_tube(branch, *ordinal, &format!("mesh_t{ordinal}")))
+                    .collect(),
+                Vec::new(),
+                None,
+                &owners,
+            )
+            .expect("tube projection")
+            .0
+            .upserts
+        };
+
+        // ① 带了段、没重置：旧段会留在新段旁边。
+        let unreset = UnitDelta {
+            upserts: segments(&[0, 1]),
+            tube_segments: BTreeMap::from([(branch_key, 2)]),
+            ..UnitDelta::default()
+        };
+        let reason = tube_segment_completeness(&unreset).unwrap_err();
+        assert!(reason.contains("without resetting the branch"), "{reason}");
+
+        // ② 重置了、没账：核不了。
+        let unaccounted = UnitDelta {
+            tube_branch_resets: vec![branch],
+            upserts: segments(&[0, 1]),
+            ..UnitDelta::default()
+        };
+        let reason = tube_segment_completeness(&unaccounted).unwrap_err();
+        assert!(reason.contains("no segment count declared"), "{reason}");
+
+        // ③ 重置了、有账、少一段：正是 D6 要拦的静默丢管。只重置不带段（纯删一段）也是这一档。
+        let short = UnitDelta {
+            tube_branch_resets: vec![branch],
+            upserts: segments(&[0]),
+            tube_segments: BTreeMap::from([(branch_key, 2)]),
+            ..UnitDelta::default()
+        };
+        let reason = tube_segment_completeness(&short).unwrap_err();
+        assert!(
+            reason.contains("carries 1 tube segment(s), plan expects 2"),
+            "{reason}"
+        );
+        let reset_only = UnitDelta {
+            tube_branch_resets: vec![branch],
+            tube_segments: BTreeMap::from([(branch_key, 2)]),
+            ..UnitDelta::default()
+        };
+        assert!(
+            tube_segment_completeness(&reset_only)
+                .unwrap_err()
+                .contains("carries 0 tube segment(s), plan expects 2")
+        );
+
+        // ④ 放行：重置 + 有账 + 段数对上。序号 0 / 2 有洞（1 号槽位退化）不算错。
+        let complete = UnitDelta {
+            tube_branch_resets: vec![branch],
+            upserts: segments(&[0, 2]),
+            tube_segments: BTreeMap::from([(branch_key, 2)]),
+            ..UnitDelta::default()
+        };
+        assert_eq!(tube_segment_completeness(&complete), Ok(()));
+        // 没触到任何管身的局部提交与门无关。
+        assert_eq!(tube_segment_completeness(&UnitDelta::default()), Ok(()));
+        // 账上说 0 段（容器在 T 端退休）且只重置不带段：合法的整段清空。
+        let retired = UnitDelta {
+            tube_branch_resets: vec![branch],
+            tube_segments: BTreeMap::from([(branch_key, 0)]),
+            ..UnitDelta::default()
+        };
+        assert_eq!(tube_segment_completeness(&retired), Ok(()));
+    }
+
+    /// ADR-078 A3：构造缺一段的 `Partial`，执行体必须在产出与提交之间回退 regen 并报出原因，**不得**发布——
+    /// 两段旧管身原地不动。补齐那一段再来，同一条 BRAN 就走成局部提交。
+    #[test]
+    fn a_partial_delta_missing_one_tube_segment_falls_back_before_publishing() {
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let root = RefNo::new(24383, 700);
+        let branch = RefNo::new(24383, 721);
+        let branch_key = (branch.word0, branch.word1);
+        let element = RefNo::new(24383, 705);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((branch.word0, branch.word1), root),
+            ((element.word0, element.word1), root),
+        ]);
+        for mesh in ["mesh_e", "mesh_t0", "mesh_t1", "mesh_t0_new", "mesh_t1_new"] {
+            std::fs::write(mesh_dir.join(format!("{mesh}.mesh")), b"fixture").unwrap();
+        }
+        let (mut seed, _) = project_geometry_delta(
+            7997,
+            42,
+            vec![
+                baked_element(element, "mesh_e"),
+                baked_tube(branch, 0, "mesh_t0"),
+                baked_tube(branch, 1, "mesh_t1"),
+            ],
+            Vec::new(),
+            None,
+            &owners,
+        )
+        .expect("seed");
+        let (manifest, geometry_count) = manifest_hash(&seed.upserts).unwrap();
+        seed.receipt = Some((
+            root,
+            RootReceipt {
+                source_sesno: 42,
+                model_target: None,
+                manifest_hash: manifest,
+                geometry_count,
+                published_via: "regen".into(),
+            },
+        ));
+        store.commit(ProjectionScope::Current, vec![seed]);
+        let unit = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: 42,
+        };
+        let rebuilt_segments = |ordinals: &[u32]| -> anyhow::Result<UnitDelta> {
+            let (delta, _) = project_geometry_delta(
+                7997,
+                43,
+                ordinals
+                    .iter()
+                    .map(|ordinal| baked_tube(branch, *ordinal, &format!("mesh_t{ordinal}_new")))
+                    .collect(),
+                Vec::new(),
+                None,
+                &owners,
+            )?;
+            Ok(UnitDelta {
+                tube_branch_resets: delta.tube_branch_resets,
+                removals: delta.removals,
+                upserts: delta.upserts,
+                // 生产方另记的账：这条 BRAN 在 T 端有两段。
+                tube_segments: BTreeMap::from([(branch_key, 2)]),
+                ..UnitDelta::default()
+            })
+        };
+
+        // 只带了 0 号段：门拦下，回退，不发。
+        let before = store.root_snapshot(ProjectionScope::Current, root);
+        let mut published = 0;
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unit),
+            |_, _, _| rebuilt_segments(&[0]),
+            |_| {
+                published += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(report.completed.is_empty() && report.replayed.is_empty());
+        assert_eq!(report.fallbacks.len(), 1);
+        let (fallen, reason) = &report.fallbacks[0];
+        assert_eq!(fallen, &root.to_string());
+        assert!(
+            reason.contains("tube segment completeness")
+                && reason.contains(&format!("BRAN {branch}"))
+                && reason.contains("carries 1 tube segment(s), plan expects 2")
+                && reason.contains("falling back to regen"),
+            "{reason}"
+        );
+        assert_eq!(published, 0, "缺段的局部清单一个字都不许发");
+        assert_eq!(
+            store.root_snapshot(ProjectionScope::Current, root),
+            before,
+            "两段旧管身原地不动，回执还停在 S"
+        );
+
+        // 补齐两段：同一条 BRAN 走成局部提交，旧段被整段换掉，元素没人提、原地不动。
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unit),
+            |_, _, _| rebuilt_segments(&[0, 1]),
+            |commits| {
+                store.try_commit_current(commits);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed, vec![root.to_string()]);
+        let mut meshes = store
+            .records_of_root(ProjectionScope::Current, root)
+            .into_iter()
+            .map(|record| record.mesh_id)
+            .collect::<Vec<_>>();
+        meshes.sort_unstable();
+        assert_eq!(meshes, vec!["mesh_e", "mesh_t0_new", "mesh_t1_new"]);
+        let receipt = store.receipt(ProjectionScope::Current, root).unwrap();
+        assert_eq!((receipt.source_sesno, receipt.geometry_count), (43, 3));
+    }
+
+    /// ADR-078 D6 第一条：产出里每一条 removal 都要回溯到子计划（`remove` / 画不出的 `regenerate` /
+    /// 派生旧键）。多出来的一条就是 `execute_plan` 在别处推出了删除——局部提交下等于静默丢件。
+    #[test]
+    fn a_removal_that_does_not_trace_back_to_the_plan_is_refused() {
+        let branch = RefNo::new(24383, 21);
+        let stale = GeometryId::ImpliedTube {
+            container_refno: branch.to_string(),
+            route_ordinal: 0,
+            from_refno: "24383/10".into(),
+            to_refno: "24383/20".into(),
+        };
+        let sets = RootPlanSets {
+            regenerate: BTreeSet::from([(24383, 5)]),
+            remove: BTreeSet::from([(24383, 6)]),
+            derived_stale: BTreeSet::from([stale.clone()]),
+            retired_containers: BTreeSet::new(),
+        };
+        let element = |n: u32| GeometryId::Element {
+            refno: RefNo::new(24383, n).to_string(),
+        };
+        // 三处合法来源都放行：删除的单元、画不出而被擦掉的重建单元、派生旧键。
+        removals_trace_back_to_the_plan(&sets, &[element(6), element(5), stale.clone()]).unwrap();
+        removals_trace_back_to_the_plan(&sets, &[]).unwrap();
+        // 计划里没提过的单元 / 别的容器的旧键：拒收，原因点名那一条。
+        let err = removals_trace_back_to_the_plan(&sets, &[element(6), element(7)]).unwrap_err();
+        assert!(err.to_string().contains("24383/7"), "{err:#}");
+        let other = GeometryId::ImpliedTube {
+            container_refno: RefNo::new(24383, 22).to_string(),
+            route_ordinal: 0,
+            from_refno: "24383/10".into(),
+            to_refno: "24383/20".into(),
+        };
+        let err = removals_trace_back_to_the_plan(&sets, &[other]).unwrap_err();
+        assert!(err.to_string().contains("24383/22"), "{err:#}");
+    }
+
+    /// ADR-078 D8 ① ② / Q4：退化成整库重建的窗计划切出来的子计划是空产出，不许当「没变」发；计划期有读挂的
+    /// 一窗也不许。两种都在叫 `execute_plan` 之前拦下。
+    #[test]
+    fn a_degraded_or_unreadable_window_plan_admits_no_partial_publish() {
+        let clean = WindowPlanSets {
+            regenerate: BTreeSet::from([(24383, 5)]),
+            remove: BTreeSet::new(),
+            regenerate_derived: BTreeSet::new(),
+            derived_stale: BTreeSet::new(),
+            full_rebuild: None,
+            unreadable: 0,
+        };
+        clean.admits_partial_publish().unwrap();
+
+        let degraded = WindowPlanSets {
+            regenerate: BTreeSet::new(),
+            remove: BTreeSet::new(),
+            regenerate_derived: BTreeSet::new(),
+            derived_stale: BTreeSet::new(),
+            full_rebuild: Some("candidates 30000 > max_candidates 20000".into()),
+            unreadable: 0,
+        };
+        let err = degraded.admits_partial_publish().unwrap_err().to_string();
+        assert!(
+            err.contains("full rebuild") && err.contains("max_candidates"),
+            "{err}"
+        );
+
+        let unreadable = WindowPlanSets {
+            unreadable: 2,
+            ..clean
+        };
+        let err = unreadable.admits_partial_publish().unwrap_err().to_string();
+        assert!(err.contains("2 unreadable"), "{err}");
+    }
+
+    /// ADR-078 生产方守卫 3：只有 `design.session` / `design.digest` 前移是局部发布该看到的那一格；
+    /// 目录会话、模板、生成器指纹、细分档任何一格变了都不是一窗 DESI 差分能覆盖的。
+    #[test]
+    fn a_target_change_outside_the_design_window_disqualifies_a_partial_delta() {
+        let file = |dbnum: u32, db_type: &str, session: u32, digest: &str| ModelFileTarget {
+            dbnum,
+            db_type: db_type.into(),
+            file: format!("{db_type}-{dbnum}"),
+            session,
+            digest: digest.into(),
+        };
+        let published = ModelTarget {
+            project: "AMS".into(),
+            design: file(8000, "DESI", 42, "design@42"),
+            catalogue: vec![file(7000, "CATA", 9, "cata@9")],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "gen-v1".into(),
+            tessellation_profile: "e3d-default-v1".into(),
+        };
+        let mut advanced = published.clone();
+        advanced.design = file(8000, "DESI", 43, "design@43");
+        assert!(
+            same_target_outside_the_design_window(&published, &advanced),
+            "设计文件的会话与摘要前移正是设计窗该带来的变化"
+        );
+        let mut catalogue_moved = advanced.clone();
+        catalogue_moved.catalogue = vec![file(7000, "CATA", 10, "cata@10")];
+        assert!(!same_target_outside_the_design_window(
+            &published,
+            &catalogue_moved
+        ));
+        let mut generator_changed = advanced.clone();
+        generator_changed.generator_fingerprint = "gen-v2".into();
+        assert!(!same_target_outside_the_design_window(
+            &published,
+            &generator_changed
+        ));
+        let mut template_changed = advanced.clone();
+        template_changed.template_attlib_digest = "attlib-2".into();
+        assert!(!same_target_outside_the_design_window(
+            &published,
+            &template_changed
+        ));
+        let mut tessellation_changed = advanced;
+        tessellation_changed.tessellation_profile = "fine".into();
+        assert!(!same_target_outside_the_design_window(
+            &published,
+            &tessellation_changed
+        ));
+    }
+
+    /// ADR-078 真库探针（手动）：一窗 S→T 里挑一根 regen 根，S 端整根重算灌进本地投影当基线（回执停在 S、
+    /// 目标是 S 的），再走单元级发布（真生产方 [`UnitDeltaProducer`] → 执行体），最后与 T 端整根重算比
+    /// **整根 `manifest_hash`**（D9 ①：逐字相同；不等时按 `geometry_id` 逐条报差异）。
+    ///
+    /// 旋钮：`AIOS_UNIT_PUBLISH_PROBE_DBNUM`（默认 8000）、`AIOS_UNIT_PUBLISH_PROBE_WINDOW=S:T`（默认该库
+    /// 最新两个会话）、`AIOS_UNIT_PUBLISH_PROBE_ROOT=a/b`（默认：规划器 regen 名单里第一根 S 端也有的）。
+    /// 要配置好的 MDB（`from_current`）与 E3D 模板目录。烘焙写的是真 mesh 目录（内容寻址，与整根重算同一处）。
+    #[tokio::test]
+    #[ignore = "manual live: needs the configured MDB and the E3D template directory; run with --ignored --nocapture"]
+    async fn probe_unit_publish_one_root_against_regen() -> anyhow::Result<()> {
+        use std::time::Instant;
+
+        use crate::data_interface::generation_root::{
+            enumerate_generation_roots, refno_to_e3d, resolve_delivery_unit_types,
+        };
+        use crate::data_interface::window_root_plan::{
+            PersistedRoot, WindowRootSources, plan_window_roots,
+        };
+        use e3d_io::engine::ReadOnlyEngine;
+
+        let env_u32 = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+        };
+        let dbnum = env_u32("AIOS_UNIT_PUBLISH_PROBE_DBNUM").unwrap_or(8000);
+        let service = E3dModelService::from_current().await?;
+        let pin = service.pin(dbnum)?;
+        let (base_sesno, target_sesno) = match std::env::var("AIOS_UNIT_PUBLISH_PROBE_WINDOW") {
+            Ok(window) => {
+                let (base, target) = window
+                    .split_once(':')
+                    .context("AIOS_UNIT_PUBLISH_PROBE_WINDOW=S:T")?;
+                (base.trim().parse::<u32>()?, target.trim().parse::<u32>()?)
+            }
+            Err(_) => {
+                // 引擎给的是新→旧序：[0] 最新。
+                let sessions: Vec<u32> = ReadOnlyEngine::open(&pin.file)?
+                    .sessions()?
+                    .iter()
+                    .map(|session| session.session_id)
+                    .collect();
+                anyhow::ensure!(
+                    sessions.len() >= 2,
+                    "{} has fewer than two sessions",
+                    pin.file.display()
+                );
+                (sessions[1], sessions[0])
+            }
+        };
+        println!(
+            "probe dbnum={dbnum} file={} window {base_sesno}→{target_sesno}",
+            pin.file.display()
+        );
+
+        let base = generation_input(&service, dbnum, base_sesno)?;
+        let target = generation_input(&service, dbnum, target_sesno)?;
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let sources = WindowRootSources::collect(
+            &pin.file,
+            base_sesno,
+            target_sesno,
+            &base.set,
+            &target.set,
+            &unit_types,
+            &[],
+        )?;
+        let roots_s: Vec<PersistedRoot> =
+            enumerate_generation_roots(&base.set, &base.index.roots, &unit_types)?
+                .into_iter()
+                .map(|root| PersistedRoot {
+                    refno: root.root,
+                    noun: root.noun,
+                })
+                .collect();
+        let impact = sources.impact(&roots_s);
+        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+        println!(
+            "planner: regen roots {} degraded {:?}",
+            plan.regen.len(),
+            plan.degraded
+        );
+        let root = match std::env::var("AIOS_UNIT_PUBLISH_PROBE_ROOT") {
+            Ok(text) => parse_refno(&text)?,
+            Err(_) => {
+                let at_s = roots_s
+                    .iter()
+                    .map(|root| {
+                        let refno = refno_to_e3d(root.refno);
+                        (refno.word0, refno.word1)
+                    })
+                    .collect::<BTreeSet<_>>();
+                plan.regen
+                    .iter()
+                    .map(|root| refno_to_e3d(root.root))
+                    .find(|root| at_s.contains(&(root.word0, root.word1)))
+                    .context(
+                        "no regen root that also exists at S; pass AIOS_UNIT_PUBLISH_PROBE_ROOT",
+                    )?
+            }
+        };
+        let noun = plan
+            .regen
+            .iter()
+            .find(|candidate| refno_to_e3d(candidate.root) == root)
+            .map(|candidate| candidate.noun.clone())
+            .unwrap_or_default();
+        println!("root {root} `{noun}`");
+
+        // 基线：S 端整根重算 → 本地投影，回执停在 S、目标是 S 的（生产方要拿它核设计窗之外没变）。
+        let store = ModelMemoryStore::default();
+        let mesh_dir = service.mesh_dir.clone();
+        let mut cache = CatalogueMeshCache::default();
+        let regen_at = |sesno: u32,
+                        input: &GenerationInput,
+                        cache: &mut CatalogueMeshCache|
+         -> anyhow::Result<(ProjectionCommit, usize)> {
+            let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, cache)?;
+            anyhow::ensure!(
+                snapshot.report.failed.is_empty(),
+                "regen at {sesno} has {} failed element(s)",
+                snapshot.report.failed.len()
+            );
+            let owners = snapshot.owners.clone();
+            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+            let count = baked.elements.len();
+            let (commit, _) =
+                project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
+            Ok((commit, count))
+        };
+        let clock = Instant::now();
+        let (mut seed, seed_count) = regen_at(base_sesno, &base, &mut cache)?;
+        let regen_s_secs = clock.elapsed().as_secs_f64();
+        let (seed_hash, seed_geometry_count) = manifest_hash(&seed.upserts)?;
+        seed.receipt = Some((
+            root,
+            RootReceipt {
+                source_sesno: base_sesno,
+                model_target: Some(service.model_target(
+                    dbnum,
+                    base_sesno,
+                    &base.dependency_sessions,
+                )?),
+                manifest_hash: seed_hash,
+                geometry_count: seed_geometry_count,
+                published_via: "regen".into(),
+            },
+        ));
+        store.commit(ProjectionScope::Current, vec![seed]);
+        anyhow::ensure!(
+            store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir),
+            "seed projection incomplete"
+        );
+        println!(
+            "seed@{base_sesno}: {seed_count} element(s), {seed_geometry_count} manifest entries, {regen_s_secs:.2}s"
+        );
+
+        // 单元路：真生产方 + 执行体（无锁本体；探针自己就是唯一写者）。
+        let clock = Instant::now();
+        let mut producer = UnitDeltaProducer::open(&service, dbnum, base_sesno, target_sesno)?;
+        let plan_secs = clock.elapsed().as_secs_f64();
+        let (planned_regenerate, planned_remove, planned_derived) = producer.planned();
+        println!(
+            "window plan: regenerate {planned_regenerate} remove {planned_remove} derived {planned_derived} ({plan_secs:.2}s)"
+        );
+        let unit = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: base_sesno,
+        };
+        let delta_shape = std::cell::RefCell::new((0usize, 0usize, 0usize));
+        let clock = Instant::now();
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            target_sesno,
+            std::slice::from_ref(&unit),
+            |_, root, old_receipt| producer.produce(root, old_receipt),
+            |commits| {
+                let commit = &commits[0];
+                *delta_shape.borrow_mut() = (
+                    commit.upserts.len(),
+                    commit.removals.len(),
+                    commit.tube_branch_resets.len(),
+                );
+                store.try_commit_current(commits);
+                Ok(())
+            },
+        )?;
+        let unit_secs = clock.elapsed().as_secs_f64();
+        println!(
+            "unit path: completed {:?} replayed {:?} fallbacks {:?} ({unit_secs:.2}s); delta upserts / removals / branch resets = {:?}",
+            report.completed,
+            report.replayed,
+            report.fallbacks,
+            delta_shape.borrow()
+        );
+
+        // 对拍：T 端整根重算的章。
+        let clock = Instant::now();
+        let (regen_t, regen_t_count) = regen_at(target_sesno, &target, &mut cache)?;
+        let regen_t_secs = clock.elapsed().as_secs_f64();
+        let (regen_hash, regen_geometry_count) = manifest_hash(&regen_t.upserts)?;
+        println!(
+            "regen@{target_sesno}: {regen_t_count} element(s), {regen_geometry_count} manifest entries, {regen_t_secs:.2}s"
+        );
+        if report.completed.is_empty() {
+            println!("root did not go the unit path (replayed / fell back); no parity to check");
+            return Ok(());
+        }
+        let receipt = store
+            .receipt(ProjectionScope::Current, root)
+            .context("receipt")?;
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        println!(
+            "unit receipt: sesno {} via {} count {} hash {}",
+            receipt.source_sesno,
+            receipt.published_via,
+            receipt.geometry_count,
+            receipt.manifest_hash
+        );
+        println!("regen hash:   {regen_hash}");
+        if receipt.manifest_hash != regen_hash {
+            let unit_entries = records
+                .iter()
+                .map(manifest_entry)
+                .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+            let regen_entries = regen_t
+                .upserts
+                .iter()
+                .map(manifest_entry)
+                .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+            for key in unit_entries
+                .keys()
+                .chain(regen_entries.keys())
+                .collect::<BTreeSet<_>>()
+            {
+                match (unit_entries.get(key), regen_entries.get(key)) {
+                    (Some(unit), Some(regen)) if unit == regen => {}
+                    (Some(_), Some(_)) => println!("DIFF    {key}"),
+                    (Some(_), None) => println!("EXTRA   {key} (unit path has it, regen does not)"),
+                    (None, Some(_)) => println!("MISSING {key} (regen has it, unit path does not)"),
+                    (None, None) => unreachable!(),
+                }
+            }
+        }
+        assert_eq!(
+            receipt.geometry_count, regen_geometry_count,
+            "geometry_count"
+        );
+        assert_eq!(
+            receipt.manifest_hash, regen_hash,
+            "D9 ①：单元路与 regen 路的整根 manifest_hash 必须逐字相同"
+        );
+        println!(
+            "PARITY OK: unit path == regen@{target_sesno} for root {root} `{noun}` ({} records); unit {unit_secs:.2}s (plan {plan_secs:.2}s) vs regen {regen_t_secs:.2}s",
+            records.len()
+        );
+        Ok(())
+    }
+
+    /// ADR-078 实施约束 5：单元级执行体里闸在产出之前、产出在提交之前，且执行体自己**不读任何记录、
+    /// 不自己算章**——删什么由产出点名，整根的章由存储在写锁里盖（D5）。闸后面要是长出一个
+    /// `records_of_root`，就又多了一个能读到旧状态的窗口。闸与刚体路同一道、同一个枚举，不另造判据。
+    #[test]
+    fn the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records() {
+        let source = service_source();
+        let body = source
+            .split_once("pub(crate) fn republish_roots_by_unit_delta_on(")
+            .expect("unit executor")
+            .1
+            .split_once("\nfn cached_root_commit(")
+            .expect("unit executor end")
+            .0;
+        let complete = body
+            .find("store.root_projection_complete(")
+            .expect("completeness precondition");
+        let gate = body.find("republish_gate(").expect("gate");
+        let production = body
+            .find("produce(unit, root, &old_receipt)")
+            .expect("production");
+        let tube_gate = body
+            .find("tube_segment_completeness(&delta)")
+            .expect("tube segment completeness gate");
+        let publication = body
+            .find("publish(vec![ProjectionCommit {")
+            .expect("publication");
+        assert!(
+            complete < gate
+                && gate < production
+                && production < tube_gate
+                && tube_gate < publication,
+            "顺序必须是 完整性前置 → 闸 → 产出 → 管段完整性门 → 提交"
+        );
+        for forbidden in [
+            "records_of_root(",
+            "geometry_ids_of_root(",
+            "root_snapshot(",
+            "manifest_hash(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "执行体不读记录、不自己算章：{forbidden}"
+            );
+        }
+        assert!(
+            body.contains("RepublishGate::SkipAlreadyAtTarget")
+                && body.contains("RepublishGate::FallbackBaselineMismatch"),
+            "闸的两种否决都要接住，与刚体路同一个枚举"
+        );
+        assert!(
+            body.contains("scope: CommitScope::Partial"),
+            "局部提交必须显式声明 Partial（D2）"
+        );
+        assert!(body.contains("published_via: \"unit\".into()"));
+        let service_method = source
+            .split_once("pub(crate) async fn republish_roots_by_unit_delta(")
+            .expect("service entry")
+            .1
+            .split_once("\n    }\n")
+            .expect("service entry end")
+            .0;
+        assert!(
+            service_method.contains("db_generation_lock(dbnum).lock_owned().await")
+                && service_method.contains("ensure_not_older_than_persisted(dbnum, target_sesno)"),
+            "与刚体路同一把锁、同一道会话闸（D4：不新增锁）"
+        );
+    }
+
     /// 目标变了但这一根看得见的清单逐位没变：只留回执，几何一条都不写。
     #[test]
     fn an_unchanged_manifest_commits_only_the_receipt() {
@@ -4049,6 +5730,47 @@ mod tests {
                 "root loop must consume prefetched state instead of calling {read}"
             );
         }
+    }
+
+    /// ADR-078 D2：拿「缺席」推删除**只许有一处**，就是 [`whole_root_removals`]。
+    ///
+    /// 那条推导（`上一版有的 \ 这一版生成的`）只在 `upserts` 是这根全集时成立。单元级发布
+    /// 只重建变了的那几件，谁要是顺手在别处又写一遍同样的做差，就会把没重建的全删掉——
+    /// 投影与库两边都不报错。所以把它钉成独此一家：`prior` 只许喂给这个函数。
+    #[test]
+    fn only_whole_root_removals_derives_a_deletion_from_absence() {
+        let source = service_source();
+        let body = generate_refs_body(&source);
+        assert!(
+            body.contains("whole_root_removals(&prior[root_index], &snapshot.elements)"),
+            "根循环里的删除必须经由 whole_root_removals"
+        );
+        // 上一版的 id 集合只有两个合法用处：喂给 whole_root_removals 做差，以及
+        // 判空（`incomplete_root_policy` 只问「这根以前有没有东西」，不推删除）。多出第三处就要看一眼。
+        assert_eq!(
+            body.matches("prior[").count(),
+            2,
+            "上一版的 id 集合多了一个用处——是不是又有人在别处做差？"
+        );
+        assert!(
+            body.contains("!prior[root_index].is_empty()"),
+            "另一处应当只是判空"
+        );
+        // 本条测试自己也写着那个谓词，`include_str!` 会把它一起读进来——只数生产代码那一段。
+        let production = production_half(&source);
+        let helper = production
+            .split_once("fn whole_root_removals(")
+            .expect("whole_root_removals")
+            .1;
+        assert!(
+            helper.contains("!generated_ids.contains(&key)"),
+            "做差本体应当在 whole_root_removals 里"
+        );
+        assert_eq!(
+            production.matches("!generated_ids.contains").count(),
+            1,
+            "生产代码里只许有一处「生成物里没有它 ⇒ 删」"
+        );
     }
 
     /// 命中缓存要在求几何之前判掉——判在后面等于白算一遍。
