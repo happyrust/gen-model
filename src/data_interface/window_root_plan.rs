@@ -40,7 +40,7 @@ use e3d_model::increment::{
     AffectedClosure, NoModelTier, PlanLimits, UpdatePlan, collect_window, plan_update,
     plan_update_with,
 };
-use e3d_model::ledger::ChangeKind;
+use e3d_model::ledger::{ChangeKind, ChangeLedger, Disposition};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
@@ -525,9 +525,31 @@ fn rigid_anchor(
     Ok(CandidateKind::Anchor { delta, rigid })
 }
 
+/// 账本里去向 [`Disposition::NoModel`] 的候选（`(word0, word1)` 键）：两票元数据门放行的（只改了 `NAME` /
+/// `DESC` 一类）、或改动落在没有模型归属的元素上的——e3d-model 没把它折进任何单元 / 派生容器，没有几何跟着变。
+/// ADR-066 D1 规则 2（2026-09-17 修订）不数它：既不是锚点，也不把根踢回 `regen`。守恒（每个账上 refno 恰好一条
+/// 去向）由 e3d-model `accounts_for` 判；这里只防御一下：同时还登记了别的去向的 refno 不算，宁可挡路。
+fn no_model_candidates(ledger: &ChangeLedger) -> BTreeSet<(u32, u32)> {
+    let mut no_model: BTreeSet<(u32, u32)> = BTreeSet::new();
+    let mut otherwise: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for (key, disposition) in ledger.dispositions() {
+        match disposition {
+            Disposition::NoModel => {
+                no_model.insert(*key);
+            }
+            Disposition::RolledUp | Disposition::Unresolved => {
+                otherwise.insert(*key);
+            }
+        }
+    }
+    no_model.difference(&otherwise).copied().collect()
+}
+
 /// 把 e3d-model 的账本折成刚体前移的候选表（只在开关开着时调）。每个 refno 一条：账本里只动了
-/// 摆放的（`placement_only`）算 `Anchor`，其余一律 `Other`（新建 / 删除 / 改挂 / 换类型 / 动成员 /
-/// 动了别的属性 / opaque / 读不出来）。删除 / 改挂 / 换类型的候选另走一遍 S 端属主链——旧根只有它说得出。
+/// 摆放的（`placement_only`）算 `Anchor`；去向 `no_model` 的（[`no_model_candidates`]）算 `NoModel`——不是锚点
+/// 也不挡路；其余一律 `Other`（新建 / 删除 / 改挂 / 换类型 / 动成员 / 动了别的属性 / opaque / 读不出来）。
+/// 锚点先于去向：`Δ` 是真的，乘上去永远不错；去向 `no_model` 的锚点名下本就没有单元，也就没有记录可乘。
+/// 删除 / 改挂 / 换类型的候选另走一遍 S 端属主链——旧根只有它说得出。
 fn collect_rigid_motion_sources(
     plan: &UpdatePlan,
     base: &Arc<DbSet>,
@@ -540,6 +562,7 @@ fn collect_rigid_motion_sources(
         ..Default::default()
     };
     let anchors = plan.ledger.placement_only();
+    let no_model = no_model_candidates(&plan.ledger);
     let mut kinds: BTreeMap<(u32, u32), (RefNo, Vec<String>, bool)> = BTreeMap::new();
     for entry in plan.ledger.entries() {
         let slot = kinds
@@ -574,6 +597,8 @@ fn collect_rigid_motion_sources(
                     CandidateKind::Other(format!("placement anchor unreadable: {error:#}"))
                 }
             }
+        } else if no_model.contains(&key) {
+            CandidateKind::NoModel(details.join("; "))
         } else {
             CandidateKind::Other(details.join("; "))
         };

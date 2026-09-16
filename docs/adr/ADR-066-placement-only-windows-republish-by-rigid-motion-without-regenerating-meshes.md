@@ -4,6 +4,8 @@
 D3 的祖孙锚点改取**最内层**、盒的规则改成「纯平移加 t / 含旋转读网格顶点」；D6 的「算不出 Δ」改成规划期判定；Q1 据此关闭。
 **2026-09-15 修订**（会话 fable-5-1-21，属性变化分类对齐 core 计划 S2 / S3）：D1 规则 3 补第四类排除——P23 摆放派生 noun——与第五类
 ——被属主消费的几何（负体 / 剖面数据 / 几何集；非单元在消费型属主下；`EVALAT` 规则 M 结构件的严格祖先），见规则 3 末注。
+**2026-09-17 修订**（会话 fable-5-1-37）：D1 规则 2「子树里另有非锚点候选 → 整根 `regen`」只数账本去向 `RolledUp` 的候选，
+去向 `no_model` 的（两票元数据门放行 / 没有模型归属）不是锚点也不挡路，见规则 2 末注。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
@@ -65,6 +67,14 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    便宜路径打不着 EQUI / BRAN / SCTN。两票都在：生成器不读（读取集合护栏）+ S4 对拍门把它剔出比较集再判，多出 84 个合格锚点、
    139 根对拍、108 个有判别力的两态全等、0 红（`docs/evidence/2026-09-16-rigid-exclusion-parity-ignore-cachid.md`）。
    本条其余四项排除、`placement_input_changed`（戳不是矩阵输入，不触发级联）、`PLACEMENT_ATTRIBUTES` 与开关默认值一律不动。
+   **（2026-09-17 修订 · 会话 fable-5-1-37）** 「子树里任何一个候选不满足」**只数账本去向 `RolledUp` 的候选**。去向 `no_model`
+   的候选（e3d-model `Disposition::NoModel`：两票元数据门放行的——子元素只改了 `NAME` / `DESC` 那类——或改动落在没有模型归属的
+   元素上）e3d-model 没把它折进任何单元 / 派生容器，没有几何跟着它变：它不是锚点，也**不把根踢回 `regen`**
+   （`rigid_motion::CandidateKind::NoModel`，去向由 `ChangeLedger::dispositions` 读出）。不接这一下的代价：真实编辑几乎必带这种
+   候选——「挪 EQUI + 子元素改个名」两件事单独发生分别是 `transform` 与 `skip`，落在同一窗却整根 `regen`。三条边界：
+   根里**只有** `no_model` 候选（没有一个 Δ）照旧 `regen`——零锚点的 `transform`（只推回执不动记录）是选根的另一道题，不在本条；
+   `Unresolved` 照旧挡路（那时窗口本就退化，规则 4）；只 `CACHID` 跳动的子元素今天**不是** `no_model`（计划 §8 Q6 未落地），仍挡路
+   ——E3D 3.1 挪一件会给整棵子树带 `CACHID` 的元素各盖一次戳，所以 ZONE / STRU / 带 SUBE 的 EQUI 挪位要等 Q6 才打得着这条路。
 3. 锚点及其到根的路上**没有路由容器**（e3d-model 上卷规则 1 里「会补管的容器」：BRAN / HANG 等，管段几何由成员两端点派生），
    锚点**不是点 / 环容器下的元素**（`graphicsBehaviour == 1` 那类祖先之下的点：它的 `POS` 是属主网格的输入，e3d-model 上卷规则 1
    本来就把它并进属主单元），也**不在 CWBRAN 子树里**（桥架件的摆放是伪属性，`cable_tray::placement_matrix` 读兄弟，上卷规则 5）。

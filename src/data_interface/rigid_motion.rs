@@ -575,6 +575,84 @@ mod tests {
         );
     }
 
+    /// D1 规则 2（2026-09-17 修订）：同根子元素只改了 NAME——账本去向 `no_model`（两票元数据门放行）——
+    /// 不把根踢回 regen。三种形状同窗：锚点在根之上（挪 ZONE 1，EQUI 10 下的 BOX 11、BRAN 21 下的 ELBO 22
+    /// 各改了名）与锚点即根（EQUI 30 自己挪、SUBE 31 改 DESC）。锚点集只有真锚点，`no_model` 的不混进去。
+    /// 对照：同一个 ELBO 22 若是 `Other`（DIAM 变了）照旧只踢 BRAN 21。
+    #[test]
+    fn a_no_model_candidate_under_the_root_does_not_kick_it_back_to_regen() {
+        let out = classify(
+            &[10, 21, 30],
+            &[],
+            None,
+            &[
+                anchor(1, translation(0.0, 100.0, 0.0)),
+                chain(no_model(11, "AttributesModified: NAME 变了"), &[10, 1]),
+                chain(no_model(22, "AttributesModified: NAME 变了"), &[21, 20, 1]),
+                chain(anchor(30, translation(5.0, 0.0, 0.0)), &[2]),
+                chain(no_model(31, "AttributesModified: DESC 变了"), &[30, 2]),
+            ],
+            true,
+        );
+        assert_eq!(out.rejected, Vec::new());
+        assert_eq!(
+            out.transform.keys().copied().collect::<Vec<_>>(),
+            vec![r(10), r(21), r(30)]
+        );
+        let anchors_of = |root: u32| -> Vec<RefnoEnum> {
+            out.transform[&r(root)]
+                .iter()
+                .map(|anchor| anchor.refno)
+                .collect()
+        };
+        assert_eq!(anchors_of(10), vec![r(1)]);
+        assert_eq!(anchors_of(21), vec![r(1)]);
+        assert_eq!(anchors_of(30), vec![r(30)]);
+
+        let contrast = classify(
+            &[10, 21],
+            &[],
+            None,
+            &[
+                anchor(1, translation(0.0, 100.0, 0.0)),
+                chain(no_model(11, "AttributesModified: NAME 变了"), &[10, 1]),
+                chain(other(22, "DIAM changed"), &[21, 20, 1]),
+            ],
+            true,
+        );
+        assert_eq!(
+            contrast.transform.keys().copied().collect::<Vec<_>>(),
+            vec![r(10)]
+        );
+        assert_eq!(contrast.rejected.len(), 1);
+        assert_eq!(contrast.rejected[0].0, r(21));
+        assert!(contrast.rejected[0].1.contains("DIAM changed"));
+    }
+
+    /// 根里只有 `no_model` 的候选（子元素只改了 NAME，别的什么都没动）：它进 touched 只因为闭包种子照收，
+    /// 没有一个 Δ 可乘——不开零锚点的 transform，照今天整根 regen，原因点名。
+    #[test]
+    fn a_root_touched_only_by_no_model_candidates_stays_regen() {
+        let out = classify(
+            &[10],
+            &[],
+            None,
+            &[chain(
+                no_model(11, "AttributesModified: NAME 变了"),
+                &[10, 1],
+            )],
+            true,
+        );
+        assert!(out.transform.is_empty());
+        assert_eq!(out.rejected.len(), 1);
+        assert_eq!(out.rejected[0].0, r(10));
+        assert!(
+            out.rejected[0].1.contains("only by 1 no_model"),
+            "{}",
+            out.rejected[0].1
+        );
+    }
+
     /// 锚点在 BRAN 之内（挪一个管件）：三条排除之一，位姿变化是几何变化。
     #[test]
     fn an_anchor_inside_a_route_container_sends_the_root_back_to_regen() {
