@@ -1,5 +1,28 @@
 # 变更记录
 
+## 2026-09-17
+
+### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
+
+- **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步
+  （`56e1b47ea`）留下的是 refactor 那一版——`change_metadata_tier` → `model_impact::metadata_only_tier`，
+  「字典 DCHC=0 ∧ 生成侧没有一处按名字读它」是 `attribute_is_metadata_only` 的**定义**，没有独立开关。
+  另一版带来的 `model_skip_unread_attribute_changes` 因此成了空挡：配置里还在、预览薄壳还读它往下传，
+  可谓词根本不看。设成 `false` 的那一份字面意思（只放行老五个名字）与实际行为（两票常开、放行面宽得多）
+  恰好相反——少算方向的静默失效，代价是一张停在旧形状上的网格。
+- **改动**：
+  - `options.rs` 删掉配置字段、`DbOptionExtFields` 那一格、`model_skip_unread_attribute_changes()`
+    与 `effective_…`、环境变量 `AIOS_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES` 的读取，以及那条默认值用例；
+  - 照 ADR-031 的退役纪律**不是一删了之**：新增 `retired_unread_attribute_tier_notice()`，独立读原始 TOML
+    与环境变量，残留设置时在启动期打一条告警（`lib.rs` 与 `retired_net_window_notice()` 并排调用）。
+    `probe_retired_net_window_config` 抽成按键名取值的 `probe_retired_config_key`，两条退役键共用；
+  - `model_impact.rs`：`classify_operation_effects_with(op, unread_gate)` / `classify_operation_impact_with`
+    合回不带开关的 `classify_operation_effects` / `classify_operation_impact`；
+  - `manual_update.rs`：`merge_net_change_details_with(range_eles, metadata_gate)` 少一个形参，
+    预览与窗口规划器天然同口径；源码钉从「薄壳必须读第二个开关」翻成「薄壳不许再读它」。
+- **行为**：逐位不变——第二档本来就已常开，这一刀只是把那个不起作用的旋钮撤掉、并让残留配置出声。
+- **验证**：`cargo check --all-targets` 绿；`cargo test --lib` 2216 passed / 0 failed / 117 ignored。
+
 ## 2026-09-16
 
 ### 属性变化分类对齐 core · S4 探针读法——被属主消费的锚点两态相等报「属主不变量未变」而非「无判别力」

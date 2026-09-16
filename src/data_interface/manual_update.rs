@@ -68,7 +68,7 @@ use crate::data_interface::increment_manager::{
 use crate::data_interface::increment_pipeline::IncrementPipeline;
 use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
-    classify_operation_impact_with, owner_change,
+    classify_operation_impact, owner_change,
 };
 use crate::data_interface::model_type_scope;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
@@ -291,7 +291,6 @@ pub fn merge_net_change_details(
     merge_net_change_details_with(
         range_eles,
         crate::options::model_skip_metadata_only_changes(),
-        crate::options::model_skip_unread_attribute_changes(),
     )
 }
 
@@ -303,17 +302,15 @@ pub fn merge_net_change_details(
 ///
 /// `model_affecting` 报的是**执行侧会不会为它排模型工作**，所以它得跟着 direct 窗口
 /// 规划器的元数据门走（`metadata_gate` = [`crate::options::model_skip_metadata_only_changes`]）：
-/// 门开着时判据落回 [`classify_operation_impact_with`]，它与门共用同一个
-/// `model_impact::attribute_no_model_tier`；门关上时规划器对任何一次属性变化都整根重算，
+/// 门开着时判据落回 [`classify_operation_impact`]，它与门共用同一份两票
+/// （`model_impact::attribute_is_metadata_only`）；门关上时规划器对任何一次属性变化都整根重算，
 /// 于是这里也不许再有 `Skip`——否则预览会说「不影响模型」，而执行照样重算那个根。
 ///
-/// `unread_gate` = [`crate::options::model_skip_unread_attribute_changes`]，第二档
-/// （S6，默认关）：它决定判据认不认「字典 DCHC=0 ∧ 生成侧不读」那一档，所以必须与规划器
-/// 那一侧读同一个开关，两个 `bool` 少传一个就是两句话。
+/// 只有这一个开关：第二档（S6「字典 DCHC=0 ∧ 生成侧不读」）是那份两票的一部分，没有自己的
+/// 旋钮可读（`model_skip_unread_attribute_changes` 已于 2026-09-17 退役）。
 pub fn merge_net_change_details_with(
     range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
     metadata_gate: bool,
-    unread_gate: bool,
 ) -> Vec<NetChangeDetail> {
     // refno -> (net op, any contributing op affected the model)
     let mut acc: IndexMap<RefU64, (NetOp, bool)> = IndexMap::new();
@@ -322,7 +319,7 @@ pub fn merge_net_change_details_with(
             let Some(kind) = IncomingKind::from_op(op) else {
                 continue;
             };
-            let affected = match classify_operation_impact_with(op, unread_gate) {
+            let affected = match classify_operation_impact(op) {
                 OperationImpact::Skip => !metadata_gate,
                 OperationImpact::Regen | OperationImpact::TransformOnly => true,
             };
@@ -5634,12 +5631,7 @@ mod metadata_gate_caliber_tests {
     }
 
     fn affecting(attr_names: &[&str], metadata_gate: bool) -> bool {
-        affecting_with(attr_names, metadata_gate, false)
-    }
-
-    fn affecting_with(attr_names: &[&str], metadata_gate: bool, unread_gate: bool) -> bool {
-        let details =
-            merge_net_change_details_with(&window(attr_names), metadata_gate, unread_gate);
+        let details = merge_net_change_details_with(&window(attr_names), metadata_gate);
         assert_eq!(details.len(), 1);
         details[0].model_affecting
     }
@@ -5680,26 +5672,20 @@ mod metadata_gate_caliber_tests {
         assert!(affecting(&["POS"], true));
     }
 
-    /// 第二档没有自己的开关（S6 定稿）：门开着它就在，判据与规划器那一侧同名同源——
-    /// `SUPP` / `ACDATE` 字典说 0、生成侧没人按名字读它，一律不影响模型；读取集合里的
-    /// `DIR` 照旧重算。`unread_gate` 这个形参今天不改变任何答案，两个取值必须同一句话。
+    /// 第二档没有自己的开关（S6 定稿，2026-09-17 退役了 `model_skip_unread_attribute_changes`）：
+    /// 门开着它就在，判据与规划器那一侧同名同源——`SUPP` / `ACDATE` 字典说 0、生成侧没人按名字
+    /// 读它，一律不影响模型；读取集合里的 `DIR` 照旧重算。整个门关上时它无从谈起。
     #[test]
     fn the_unread_attribute_tier_needs_no_switch_of_its_own() {
         for name in ["SUPP", "ACDATE"] {
-            for unread_gate in [false, true] {
-                assert!(
-                    !affecting_with(&[name], true, unread_gate),
-                    "{name}: 门开着第二档就该放行（unread_gate={unread_gate}）"
-                );
-            }
+            assert!(!affecting(&[name], true), "{name}: 门开着第二档就该放行");
+            assert!(affecting(&[name], false), "{name}: 门关上就没有第二档");
         }
-        assert!(affecting_with(&["DIR"], true, true));
-        assert!(affecting_with(&["SUPP", "DIR"], true, true));
-        assert!(affecting_with(&["SUPP", "DIAM"], true, true));
+        assert!(affecting(&["DIR"], true));
+        assert!(affecting(&["SUPP", "DIR"], true));
+        assert!(affecting(&["SUPP", "DIAM"], true));
         // 老名单那一档与第二档同去向。
-        assert!(!affecting_with(&["NAME"], true, true));
-        // 整个门关上时，第二档无从谈起——它在门之内。
-        assert!(affecting_with(&["SUPP"], false, true));
+        assert!(!affecting(&["NAME"], true));
     }
 
     /// 门关上：规划器逐位回到「任何属性变了就整根重算」，于是这里一条 `Skip` 都不许剩，
@@ -5725,9 +5711,13 @@ mod metadata_gate_caliber_tests {
             shell.contains("crate::options::model_skip_metadata_only_changes()"),
             "薄壳必须读窗口规划器那同一个开关: {shell}"
         );
+        // 门只有这一个开关：第二档退役之后，薄壳再读第二个开关就是给它复活了一半。
         assert!(
-            shell.contains("crate::options::model_skip_unread_attribute_changes()"),
-            "第二档也得读同一个开关，少读一个预览就与执行分了口径: {shell}"
+            !shell.contains(concat!(
+                "crate::options::model_skip_unread_",
+                "attribute_changes()"
+            )),
+            "第二档没有开关可读（2026-09-17 退役）: {shell}"
         );
     }
 
@@ -5736,9 +5726,8 @@ mod metadata_gate_caliber_tests {
     /// 只有把一窗真的走完才看得见。计数不受门影响——门管的是生成不生成，不是数不数。
     #[test]
     fn the_details_verdict_and_the_unit_verdict_are_one_sentence() {
-        let verdicts = |attr_names: &[&str], metadata_gate: bool, unread_gate: bool| {
-            let details =
-                merge_net_change_details_with(&window(attr_names), metadata_gate, unread_gate);
+        let verdicts = |attr_names: &[&str], metadata_gate: bool| {
+            let details = merge_net_change_details_with(&window(attr_names), metadata_gate);
             let (units, no_generation, warnings) =
                 build_unit_rollup(&snapshot(), &details, &resolve_delivery_unit_types(&[]));
             assert_eq!(details.len(), 1);
@@ -5749,19 +5738,18 @@ mod metadata_gate_caliber_tests {
         };
 
         // 门开着：拿到两票的名字两边都说「不生成」。
-        assert_eq!(verdicts(&["NAME"], true, false), (false, false));
-        assert_eq!(verdicts(&["NAME", "DESC"], true, false), (false, false));
-        assert_eq!(verdicts(&["NAME", "FUNC"], true, false), (false, false));
+        assert_eq!(verdicts(&["NAME"], true), (false, false));
+        assert_eq!(verdicts(&["NAME", "DESC"], true), (false, false));
+        assert_eq!(verdicts(&["NAME", "FUNC"], true), (false, false));
         // 字典没投票的、以及混进一个几何属性的，两边都说「要生成」。
-        assert_eq!(verdicts(&["CACHID"], true, false), (true, true));
-        assert_eq!(verdicts(&["NAME", "CACHID"], true, false), (true, true));
-        assert_eq!(verdicts(&["NAME", "DIAM"], true, false), (true, true));
+        assert_eq!(verdicts(&["CACHID"], true), (true, true));
+        assert_eq!(verdicts(&["NAME", "CACHID"], true), (true, true));
+        assert_eq!(verdicts(&["NAME", "DIAM"], true), (true, true));
         // 门关上：规划器整根重算，两句话一起翻面。
-        assert_eq!(verdicts(&["NAME"], false, false), (true, true));
+        assert_eq!(verdicts(&["NAME"], false), (true, true));
         // 第二档也是整条链一句话，而且它没有自己的开关：`SUPP` 两边一起说「不生成」。
-        assert_eq!(verdicts(&["SUPP"], true, false), (false, false));
-        assert_eq!(verdicts(&["SUPP"], true, true), (false, false));
-        assert_eq!(verdicts(&["SUPP", "DIR"], true, true), (true, true));
+        assert_eq!(verdicts(&["SUPP"], true), (false, false));
+        assert_eq!(verdicts(&["SUPP", "DIR"], true), (true, true));
     }
 }
 

@@ -577,12 +577,6 @@ fn collect_modified_attribute_names(modified: &ModifiedElement) -> Vec<String> {
     names
 }
 
-/// [`classify_operation_effects_with`] 在元数据门第二档关着时的样子——`unread_gate = false`
-/// 就是 2026-09-15 之前逐位的行为。探针与默认调用走这一条。
-pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSummary {
-    classify_operation_effects_with(op, false)
-}
-
 /// 汇总一次操作的效果（宁多勿漏），并保留原始 DCHC code。
 ///
 /// - `Add` / `Deleted` → 需重生成（结构/成员效果）；
@@ -593,13 +587,10 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
 ///   `children` 变化、或检测不到任何属性差异（如非 detail 解析）时保守记重生成；
 /// - `None` → 无动作。
 ///
-/// `unread_gate` 必须与窗口规划器那一侧读的是同一个开关
-/// （[`crate::options::model_skip_unread_attribute_changes`]）：预览说 Skip、规划器却整根重算，
-/// 同一份回执里 `details` 与 `units` 就成了两句话。
-pub fn classify_operation_effects_with(
-    op: &EleOperationData,
-    unread_gate: bool,
-) -> OperationEffectSummary {
+/// 两票是谓词自己的判据，不受任何独立开关左右（S6 定稿，2026-09-17：第二档那个
+/// `model_skip_unread_attribute_changes` 已退役）——预览与窗口规划器因此天然同口径，
+/// 不会出现「预览说 Skip、规划器却整根重算」那种同一份回执里两句话。
+pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSummary {
     let mut summary = OperationEffectSummary::default();
     match &op.detail {
         EleOperationDetail::Add(_) | EleOperationDetail::Deleted => {
@@ -676,14 +667,11 @@ pub fn classify_operation_effects_with(
 }
 
 /// 判定一次操作应如何处理模型（宁多勿漏）：由 [`classify_operation_effects`] 归约为三态动作。
+///
+/// 预览那条薄壳（`manual_update::merge_net_change_details`）与窗口规划器的元数据门走的都是
+/// 这一条——两票没有自己的开关，同一个判据不会分出两句话。
 pub fn classify_operation_impact(op: &EleOperationData) -> OperationImpact {
     classify_operation_effects(op).impact()
-}
-
-/// [`classify_operation_impact`] 带上元数据门第二档（S6）。预览那条薄壳
-/// （`manual_update::merge_net_change_details`）走这一条，`unread_gate` 与窗口规划器同源。
-pub fn classify_operation_impact_with(op: &EleOperationData, unread_gate: bool) -> OperationImpact {
-    classify_operation_effects_with(op, unread_gate).impact()
 }
 
 /// Core3D R13 / T2c 第一批：这个已知 noun 的变化只会制造模型队列噪音。
