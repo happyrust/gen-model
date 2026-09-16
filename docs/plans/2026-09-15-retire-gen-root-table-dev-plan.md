@@ -5,8 +5,11 @@
 > 状态：**已落地**（2026-09-15，三段会话接力：fable-5-1-10 → fable-5-1-17 → fable-5-1-23）。代码事实对到 `codex/model-projection-cache@cfed5fcce`
 > + 当日在途改动（同一棵树上还有 ADR-078 的项目闭包改动，互不相干）。
 > 验证：`cargo check --all-targets` 绿、`cargo clippy --lib` 本仓零告警、`cargo test --lib` **2114 passed / 0 failed / 109 ignored**。
-> **未验证**：真库（mem:// 之外的 rocksdb 实例）重启一次看 `retire_publish_run_tables` 删表那一句与启动核对的排队行；plant-ui 对 `/model/ensure`
-> 回执少掉的四格有没有消费者。
+> **已验证**（2026-09-16，fable-5-1-47，0.1.27 二进制 `2cb5de1f1`）：真库（rocksdb）重启一次——`initialize_ams_dbnums --with-model 1112` 真部署一库后，
+> 播下 pre-ADR-079 遗留（`gen_root` / `root_dependency` 两表 + `fn::gen_root_of`/`sync_gen_roots`/`gen_root_cover`）并把 `model_sesno` 压到 100（< `applied` 729）；
+> 起 0.1.27 打「15 张退役表（及 12 个退役函数）已确认不存在（一次性迁移，幂等）」，`INFO FOR DB` 里那两表与三个函数全没；启动核对读水位排 1 项 ModelOnly
+> （`1112 model=100→729`），追平后**再重启一次**迁移那句照打（幂等）、启动核对「核对 1 库，落后 0 库，排队 0 项」。详见 changelog 2026-09-16「本地发布 0.1.27」。
+> **仍未验证**：plant-ui 对 `/model/ensure` 回执少掉的四格有没有消费者（前端）。
 
 ## 0. 一句话
 

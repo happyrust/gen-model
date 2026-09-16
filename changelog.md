@@ -2,6 +2,41 @@
 
 ## 2026-09-16
 
+### 本地发布 0.1.27：ADR-079 `gen_root` 表退役、掉线 UNC 15 s 上限修复（附 ADR-079 真库重启验证）
+
+- 后端 `0.1.27` 构建自 `2cb5de1f112c`（**干净树**，build_id 不带 `.dirty`），复用 0.1.26 那份已验证 Web
+  （plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，13 个文件）。
+- 产物 `releases/ams-local-0.1.27_release.20260916011419.g2cb5de1f112c-runtime.zip`（119.9 MB / 125,720,324 B），
+  SHA-256 `ccc6f12f0be3df075685908c55521b8369c63b56186d517682ea22f787d11ccd`；包内 `aios-database.exe` 自报 0.1.27。
+- 包型 `runtime`（`047dad5af` 起 workspace\ 一律不进包，比 0.1.26 的 runtime-workspace 档小一半）：包根带
+  `aios-database.exe` / `web\` / `bin\surreal.exe` / `resource\surreal\*.surql` / `schema\{e3d210,e3d31}` /
+  出厂 `DbOption.toml`（设置模式）/ `.first-run-pending` / `Start-AMS` / `Start-Surreal` / `Rollback`。
+- 覆盖 0.1.26（`f0369365e`）之后的提交：ADR-079 `gen_root` 表退役（`0247da413`，**破坏性**：存量库首启删
+  `gen_root` / `root_dependency` 两表 + 12 个 `fn::gen_root_*` / `sync_*` 函数，`/model/ensure` 回执少四格）、
+  掉线 UNC 搜索根绕过 15 s 上限修复（`e0742aab3`）、校核回退次数 `count(action='return')`（`2758c434d`）、
+  RVM 基线亚容差壳不定 AABB（`a7d5314ee`）、发布包只出 runtime 一档（`047dad5af`）。用户口径见
+  `docs/release-notes/0.1.27.md`。
+- 冒烟（口 19099）：A 出厂配置起服务=设置模式+向导页、B 本机配置全启动 `medium=mem` / `durable=false` /
+  服务没拉 surreal 子进程——两腿通过；C rocksdb 腿在 runtime 档按设计跳过（不带 workspace）。rocksdb（durable）
+  路径另由下面的 ADR-079 真库验证覆盖，比冒烟 C 腿彻底。
+- **补上 ADR-079「真库重启一次」验证**（`docs/plans/2026-09-15-retire-gen-root-table-dev-plan.md` §3 原列「未验证」）：
+  用本包同源 `2cb5de1f1` 的 0.1.27 二进制，在隔离 rocksdb 库（bundled surreal，`initialize_ams_dbnums --with-model 1112`
+  真部署 30,942 元素 / 18 根 / `model_sesno=729`）上：
+  - 先确认新库不含 `gen_root` / `root_dependency` 与任何 `fn::gen_root_*`（149 表 / 74 函数里都没有）；
+  - 播下 pre-ADR-079 遗留（`gen_root` 2 行 + `root_dependency` + `fn::gen_root_of`/`sync_gen_roots`/`gen_root_cover`），
+    并把 1112 的 `model_sesno` 压到 100（< `applied_sesno` 729）；
+  - 起 0.1.27：stdout 打「…15 张退役表（及 12 个退役函数）已确认不存在（一次性迁移，幂等）」，`INFO FOR DB` 里
+    那两表与三个函数全没了；启动核对读水位「`[model-completion] dbnum=1112 applied=729 model=100
+    reason=model_watermark_behind` → 排 1 项 ModelOnly（`model=100→729`）」，跑完 `model_sesno` 追平 729；
+  - 再重启一次：迁移那句照打（幂等、表仍不在），启动核对「核对 1 库，落后 0 库，排队 0 项」——水位齐平就不排。
+  证实删表迁移与启动核对排队两条都按 ADR-079 设计工作。仍未验：plant-ui 对 `/model/ensure` 少四格的消费（前端）。
+- 构建输入：gen-model 干净树 `2cb5de1f1`；vendor 取各自 committed HEAD（e3d-model `7da42b5` 等），另叠上 0.1.26
+  也在用的两处稳定未提交增量——e3d-io 的 `DbSet::metadata()`（committed e3d-model HEAD 依赖它）与 old-aios-core 的
+  rkyv `validation` 特性（`pdms_shape` 走 `check_archived_root` + 索引下标校验，防损坏 `.mesh` 反序列化溢出）。
+  e3d-model 今日在途的 `increment.rs`（`plan_update_with → Option<NoModelTier>`，与另一路会话 gen-model
+  `window_root_plan` 的在途改配套）**未纳入**——它与本包的 committed gen-model 不配套。`cargo test --lib`
+  **2114 passed / 0 failed / 109 ignored**。
+
 ### 修：搜索根去重与闭包 key 改用字面 `path_key`，掉线 UNC 不再绕过扫描线程的 15 s 上限（ADR-078 追记）
 
 - 起因：用现场服务器 `\\10.181.11.245\PDM`（445 不通）实测 `POST /api/v1/setup/probe/mdb`：wall **21,083 ms**，
