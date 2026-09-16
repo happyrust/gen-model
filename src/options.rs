@@ -220,6 +220,12 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_skip_metadata_only_changes: Option<bool>,
 
+    /// 元数据门的第二档（S6，**默认关**，2026-09-15）：除老名单那五个名字外，再放行
+    /// 「字典 DCHC=0 ∧ 生成侧没有一处按名字读它」的属性。`true` 才开；关着时门的宽窄与
+    /// 2026-09-08 逐位相同。详见 [`model_skip_unread_attribute_changes`]。
+    #[serde(default)]
+    pub model_skip_unread_attribute_changes: Option<bool>,
+
     /// 刚体前移便宜路径（ADR-066，**默认关**，2026-09-08）：一窗里只动了 `POS / ORI` 的锚点名下、
     /// 已安定的生成根不整根重算，改为对投影记录左乘刚体增量并按 regen 同款发布一次。
     /// `true` 才开；关着时窗口规划器的产物与今天逐位相同。详见 [`model_transform_cheap_path`]。
@@ -525,6 +531,7 @@ impl From<DbOption> for DbOptionExt {
             model_significant_over_point: None,
             model_entry_drop_no_geometry: None,
             model_skip_metadata_only_changes: None,
+            model_skip_unread_attribute_changes: None,
             model_transform_cheap_path: None,
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
@@ -623,6 +630,8 @@ struct DbOptionExtFields {
     model_entry_drop_no_geometry: Option<bool>,
     #[serde(default)]
     model_skip_metadata_only_changes: Option<bool>,
+    #[serde(default)]
+    model_skip_unread_attribute_changes: Option<bool>,
     #[serde(default)]
     model_transform_cheap_path: Option<bool>,
     #[serde(default)]
@@ -833,6 +842,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_significant_over_point: ext.model_significant_over_point,
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
+        model_skip_unread_attribute_changes: ext.model_skip_unread_attribute_changes,
         model_transform_cheap_path: ext.model_transform_cheap_path,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
@@ -1837,6 +1847,44 @@ fn effective_model_skip_metadata_only_changes(
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`model_skip_unread_attribute_changes`]，不必改配置文件。
+pub const MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV: &str =
+    "AIOS_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES";
+
+/// 元数据门的第二档（`DbOption.toml` 的 `model_skip_unread_attribute_changes`，**默认 false**，
+/// S6，2026-09-15）。
+///
+/// 老名单那一档（[`model_skip_metadata_only_changes`]）问的是「效果表说 DataOnly ∧ 字典 DCHC=0」，
+/// 手写的效果表只认下五个名字。这一档换一张更机械的第二票：**字典 DCHC=0**（core 自己不为它重画）
+/// **∧ 生成侧没有一处按名字读它**（`model_impact::generator_reads_attribute`，两份机扫产物之并——
+/// e3d-model 的 `reads_attribute` 加本仓 `generation_read_set.json`）。够两票的候选记
+/// `no_model`、不上卷不级联，计数落在 `IncrementReport::unread_attribute` 那一格。
+///
+/// **默认关，而且不该轻易翻。** 它一开，放行面从 5 个名字跳到三千多个：第二票的把握全押在
+/// 「读点都以大写字面量的形状出现在源码里」这条扫描规则上，漏收一个名字就是一张停在旧形状上的
+/// 网格，而且不报错。`NGMR` 就是活样本——e3d-model 那半扫不到它，是本仓这半把它捞回来的。
+/// 翻默认前要先有一次实测对拍。环境变量 [`MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV`] 压过配置，
+/// 取值规则同 [`startup_autorun`]。它在 [`model_skip_metadata_only_changes`] 之内：门整个关掉时
+/// 这一档也无从谈起。
+pub fn model_skip_unread_attribute_changes() -> bool {
+    effective_model_skip_unread_attribute_changes(
+        load_ext_fields().model_skip_unread_attribute_changes,
+        std::env::var(MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn effective_model_skip_unread_attribute_changes(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
 }
 
 /// 环境变量名：一次性覆盖 [`model_transform_cheap_path`]，不必改配置文件。
@@ -2861,6 +2909,29 @@ mod tests {
         ));
         assert!(!effective_model_skip_metadata_only_changes(
             Some(false),
+            Some("maybe")
+        ));
+    }
+
+    /// 元数据门第二档默认关（S6：放行面从 5 个名字跳到三千多个，翻默认前要有一次实测对拍），
+    /// 配置能开、环境变量两个方向都能压，拼错的值退回配置值。
+    #[test]
+    fn the_unread_attribute_tier_is_off_by_default_and_can_be_turned_on() {
+        assert!(!effective_model_skip_unread_attribute_changes(None, None));
+        assert!(effective_model_skip_unread_attribute_changes(
+            Some(true),
+            None
+        ));
+        assert!(effective_model_skip_unread_attribute_changes(
+            Some(false),
+            Some("1")
+        ));
+        assert!(!effective_model_skip_unread_attribute_changes(
+            Some(true),
+            Some("off")
+        ));
+        assert!(effective_model_skip_unread_attribute_changes(
+            Some(true),
             Some("maybe")
         ));
     }

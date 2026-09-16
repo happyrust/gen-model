@@ -40,7 +40,9 @@ use crate::data_interface::manual_update::{ModelUnitResult, UnitGenStatus, UnitK
 use crate::data_interface::persist_writer::{
     Lane, MODEL_LANE_DEPTH, OnWriteError, QUEUE_CAPACITY, WriteJob, WriterOutcome,
 };
-use crate::data_interface::task_end::{TaskDataOutcome, TaskEnd, TaskModelOutcome};
+use crate::data_interface::task_end::{
+    RoomGenerationStamp, TaskDataOutcome, TaskEnd, TaskModelOutcome,
+};
 use crate::versioned_db::baseline_ingest::{self, StreamedBaseline};
 
 /// 模型半边跑不跑。
@@ -103,6 +105,10 @@ struct ModelHalfReport {
     /// 本次生成照的目录版本（CATA dbnum → 会话，取最旧）：整库都成时随 `model_sesno` 盖成库级
     /// 目录落款（ADR-079）。
     catalogue_sessions: std::collections::BTreeMap<u32, u32>,
+    /// 本次逐根算房间用的那台计算器的代号（ADR-073 D14）：初始化生成的是这个库的**每一个**根，
+    /// 它们的边都照这一代算，整库都成时随 `model_sesno` 盖成 `model_room_generation`。
+    /// `None` = 房间开关关着（`frozen_room_calculator` 回 `Ok(None)`），收尾把库上那一格清空。
+    room_generation: Option<String>,
     /// 模型半边自己的错（服务打不开、枚举失败、`Required` 报错…）：不是 lane 失败，进 warnings。
     failure: Option<String>,
 }
@@ -124,7 +130,8 @@ impl ModelHalfReport {
 
     /// 收尾那一笔要写的模型结论：跑了才有；跑了而一根没成 / 半边报错 = `all_roots_ok: false`。
     /// 整库都成才连库级目录落款一起盖（ADR-079）：初始化生成的是这个库的**每一个**根，它们照的
-    /// 目录版本就是整个库的目录版本。
+    /// 目录版本就是整个库的目录版本。durable 侧的房间就绪承诺（ADR-073 D14）同一条纪律、同一个
+    /// 理由：每个根都是这一代算的，所以初始化说得了「整库的边对齐到这一代」。
     fn outcome(&self) -> Option<TaskModelOutcome> {
         if self.skipped.is_some() {
             return None;
@@ -139,6 +146,11 @@ impl ModelHalfReport {
             all_roots_ok,
             dead_roots,
             catalogue_sessions: all_roots_ok.then(|| self.catalogue_sessions.clone()),
+            room_generation: match (all_roots_ok, &self.room_generation) {
+                (false, _) => RoomGenerationStamp::Untouched,
+                (true, Some(generation)) => RoomGenerationStamp::Aligned(generation.clone()),
+                (true, None) => RoomGenerationStamp::Cleared,
+            },
         })
     }
 
@@ -490,6 +502,9 @@ async fn model_half_inner(
         println!("dbnum={dbnum} 初始化：没有交付单元根可生成");
         return Ok(report);
     }
+    // 冻计算器之前先把常驻房间模型对齐到此刻的文件版本（ADR-073 D12）：初始化的库多半就是刚出现 /
+    // 刚前进的那个文件，它自己的房间与面板要进常驻才算得到。
+    crate::fast_model::model_db_adapter::refresh_room_reference_before_task(dbnum).await;
     // 房间计算器任务开工冻一次（ADR-073 D1）；冻不出来 = 本批一根都不落（房间失败 = 该根失败）。
     let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
         Ok(rooms) => rooms,
@@ -584,6 +599,11 @@ async fn model_half_inner(
     let (produced, consumed) = futures::future::join(produce, consume).await;
     let mut report = consumed?;
     produced?;
+    // 这一库的每个根都是这台计算器算的房间（ADR-073 D14）：整库都成时收尾那一笔把代号盖进
+    // `model_room_generation`，冷重启后 `e3d.room.lookup` 靠它替没有 ACK 的根说话。
+    report.room_generation = rooms
+        .as_ref()
+        .map(|calculator| calculator.resident_generation().to_owned());
     // 枚举到了、却既没成也没败的根（生产端提前停了）——如实记失败，别让它们静默消失。
     let seen = report
         .units

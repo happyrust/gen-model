@@ -161,22 +161,17 @@ impl MdbMembership {
         self.databases.iter().filter(|db| db.path.is_none())
     }
 
-    /// A complete room reference frame requires every declared design file.
-    /// An absent file may contain a room or a panel; it is not an empty database.
-    pub(crate) fn require_design_files(&self) -> anyhow::Result<()> {
-        let missing = self
-            .unresolved()
+    /// MDB 声明了、搜索根里却没有文件的 DESI `(dbnum, 名字)`，按声明序。
+    ///
+    /// 一个缺席的文件里可能有房间或面板——它**不是**一个空库，所以要按号点名而不是当成
+    /// 「声明为空」。消费者是常驻房间模型（ADR-073 D8）：按有的文件建、把这份清单带到
+    /// `/health.room_build.resident.missing_dbnums` 与启动横幅、生命周期记 `Degraded`。
+    /// 此前这里是 `require_design_files()`——缺一个就整份 Err，之后每个任务的全部根判死。
+    pub(crate) fn missing_design_files(&self) -> Vec<(u32, String)> {
+        self.unresolved()
             .filter(|db| db.styp == DESI_STYP)
-            .map(|db| format!("{} ({})", db.dbnum, db.name))
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            missing.is_empty(),
-            "MDB {} / {} room inputs incomplete: missing DESI source files: {}",
-            self.project,
-            self.mdb,
-            missing.join(", ")
-        );
-        Ok(())
+            .map(|db| (db.dbnum, db.name.clone()))
+            .collect()
     }
 }
 
@@ -1919,23 +1914,25 @@ mod tests {
         assert_eq!(membership.databases().len(), 4);
     }
 
+    /// ADR-073 D8：缺文件的 DESI 按号点名给常驻房间模型降级用，不再是一句整份 Err；
+    /// 缺字典是另一项检查，权威的空声明也不算缺文件。
     #[test]
-    fn missing_design_file_blocks_complete_room_inputs_but_empty_mdb_is_valid() {
+    fn missing_design_files_are_named_for_degradation_not_thrown() {
         let mut declaration = membership();
         assert!(
-            declaration.require_design_files().is_ok(),
+            declaration.missing_design_files().is_empty(),
             "missing dictionary is a separate check"
         );
         declaration
             .databases
             .push(db(9999, DESI_STYP, "*MASTER/MISSING", false));
-        let error = declaration.require_design_files().unwrap_err().to_string();
-        assert!(
-            error.contains("9999") && error.contains("*MASTER/MISSING") && error.contains("/ALL")
+        assert_eq!(
+            declaration.missing_design_files(),
+            vec![(9999, "*MASTER/MISSING".to_string())]
         );
         declaration.databases.clear();
         assert!(
-            declaration.require_design_files().is_ok(),
+            declaration.missing_design_files().is_empty(),
             "authoritative empty declaration differs from a missing file"
         );
     }

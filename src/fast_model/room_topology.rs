@@ -316,11 +316,37 @@ pub(crate) async fn load_room_panel_map_from_files<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let (_, _, by_file) = load_room_groups_from_files(hierarchy).await?;
+    let by_file = load_room_groups_from_files(hierarchy).await?.by_file;
     Ok(room_panel_map_from_groups(
         room_panel_groups(&flatten_groups_by_file(by_file), room_key_words),
         match_room_fn,
     ))
+}
+
+/// [`latest_frozen_sources`] 的回执：此刻 MDB 里**找得到文件**的全部 DESI，以及找不到的那些。
+pub(crate) struct FrozenDesignSources {
+    /// 这一组文件版本的规范摘要（令牌 JSON 序列化再摘要）——常驻房间模型的身份键，只此一处定义。
+    pub composite: String,
+    /// 各 DESI 的提交令牌，按 dbnum 序。
+    pub tokens: Vec<String>,
+    /// 各 DESI 的冻结源，按 dbnum 序。
+    pub sources: Vec<crate::data_interface::frozen_source::FrozenSource>,
+    /// MDB 声明了、搜索根里却没有文件的 DESI `(dbnum, 名字)`（ADR-073 D8）：不在 `sources` 里。
+    /// 常驻房间模型按有的文件建、把这份清单带到 `/health` 与启动横幅；此前这里是一句
+    /// `require_design_files()?`，缺一个文件就整份 Err、之后每个任务的根全部判死。
+    pub missing_design: Vec<(u32, String)>,
+}
+
+/// [`load_room_groups_from_files`] 的回执。
+pub(crate) struct RoomGroupsFromFiles {
+    /// 见 [`FrozenDesignSources::composite`]。
+    pub composite: String,
+    /// 见 [`FrozenDesignSources::tokens`]。
+    pub tokens: Vec<String>,
+    /// 每个有文件的 DESI 的原始分组（未过关键字），按文件 dbnum 分好。
+    pub by_file: Vec<(u32, Vec<RoomGroup>)>,
+    /// 见 [`FrozenDesignSources::missing_design`]。
+    pub missing_design: Vec<(u32, String)>,
 }
 
 /// 摊平「按文件分好的分组」。房间从哪个文件来只有 `/health` 的点名要（见
@@ -329,18 +355,24 @@ pub(crate) fn flatten_groups_by_file(by_file: Vec<(u32, Vec<RoomGroup>)>) -> Vec
     by_file.into_iter().flat_map(|(_, groups)| groups).collect()
 }
 
-/// 此刻 MDB 全部设计库的冻结源（按 dbnum 序）、各自的提交令牌，以及这一组文件版本的规范
-/// 摘要（令牌 JSON 序列化再摘要）。
+/// 此刻 MDB 全部**有文件的**设计库的冻结源（按 dbnum 序）、各自的提交令牌、这一组文件版本的
+/// 规范摘要（令牌 JSON 序列化再摘要），以及声明了却没有文件的 DESI 清单。
 ///
 /// 摘要只认「有哪些文件、各停在哪个会话」，**不读一个字节的拓扑内容**——常驻房间模型的
 /// 读透侧拿它当换代键（`room_resident::ensure_current` 每轮都要算一次）。它与
 /// [`load_room_groups_from_files`] 算出来的必须是同一个字符串，所以两边共用本函数：
 /// 各写一份的话，键漂一次就是「每轮都以为文件变了、每轮整份重建」，而且不报错。
-pub(crate) async fn latest_frozen_sources() -> anyhow::Result<(
-    String,
-    Vec<String>,
-    Vec<crate::data_interface::frozen_source::FrozenSource>,
-)> {
+///
+/// 缺文件的 DESI **不是** Err（ADR-073 D8，2026-09-16）：它们进 [`FrozenDesignSources::missing_design`]，
+/// 常驻模型按有的文件建、生命周期记 `Degraded`；此前 `require_design_files()?` 让 MDB 缺一个 DESI 就
+/// 把之后每个任务的全部根判死（0.1.25 现场）。Err 只剩「MDB 声明本身读不了」这类房间体制没起来的情形。
+///
+/// **这是探针，得便宜**（ADR-073 D12：每个 dbnum 任务开工前都要探一次）：只走 MDB 成员清单
+/// （进程内缓存）+ 每个 DESI 文件的最新会话（`latest_source_version_of_file`，按文件戳缓存）+
+/// 冻结令牌；**不**起 `E3dModelService`——那一步要 `DirectSchema::open_from_env()` 整套装 schema，
+/// 是重建那一侧的事（[`load_room_groups_from_files`] 自己 `from_frozen_sources`）。会话取法与
+/// `E3dModelService::design_sources` 同一条：钉住的会话优先，没钉住取文件最新（ADR-054 Q1）。
+pub(crate) async fn latest_frozen_sources() -> anyhow::Result<FrozenDesignSources> {
     let option = aios_core::get_db_option();
     let membership =
         crate::data_interface::mdb_membership::get(&option.project_name, &option.mdb_name)
@@ -353,22 +385,40 @@ pub(crate) async fn latest_frozen_sources() -> anyhow::Result<(
                 )
                 .map(crate::data_interface::mdb_membership::install)
             })?;
-    membership.require_design_files()?;
-    let current = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
-    let mut sources = current
-        .design_sources()?
-        .into_iter()
-        .map(|(_, file, sesno)| {
-            crate::data_interface::frozen_source::FrozenSource::capture_at(&file, sesno)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let missing_design = membership.missing_design_files();
+    let (pins, _) = crate::fast_model::e3d_model_service::current_mdb_sources()?;
+    let mut sources = Vec::new();
+    for pin in pins
+        .iter()
+        .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
+    {
+        let sesno = match pin.sesno {
+            Some(sesno) => sesno,
+            None => {
+                crate::data_interface::model_source::latest_source_version_of_file(
+                    pin.dbnum as u32,
+                    &pin.db_type,
+                    &pin.file,
+                )?
+                .sesno
+            }
+        };
+        sources.push(
+            crate::data_interface::frozen_source::FrozenSource::capture_at(&pin.file, sesno)?,
+        );
+    }
     sources.sort_by_key(|source| source.dbnum());
     let tokens = sources
         .iter()
         .map(|source| source.commit_token_json())
         .collect::<anyhow::Result<Vec<_>>>()?;
     let composite = crate::data_interface::digest::digest(&serde_json::to_vec(&tokens)?);
-    Ok((composite, tokens, sources))
+    Ok(FrozenDesignSources {
+        composite,
+        tokens,
+        sources,
+        missing_design,
+    })
 }
 
 /// [`load_room_panel_map_from_files`] 的下半截：当前 MDB 全部设计库文件的**原始**分组
@@ -377,8 +427,14 @@ pub(crate) async fn latest_frozen_sources() -> anyhow::Result<(
 /// 摘要为换代键、以令牌写启动参照、以分组算拓扑摘要，并按文件 dbnum 给「无几何按库」点名。
 pub(crate) async fn load_room_groups_from_files(
     hierarchy: RoomHierarchy,
-) -> anyhow::Result<(String, Vec<String>, Vec<(u32, Vec<RoomGroup>)>)> {
-    let (composite, tokens, sources) = latest_frozen_sources().await?;
+) -> anyhow::Result<RoomGroupsFromFiles> {
+    let frozen = latest_frozen_sources().await?;
+    let FrozenDesignSources {
+        composite,
+        tokens,
+        sources,
+        missing_design,
+    } = frozen;
     let service =
         crate::fast_model::e3d_model_service::E3dModelService::from_frozen_sources(&sources, true)
             .await?;
@@ -451,7 +507,12 @@ pub(crate) async fn load_room_groups_from_files(
         );
         by_file.push((dbnum, cached.as_ref().clone()));
     }
-    Ok((composite, tokens, by_file))
+    Ok(RoomGroupsFromFiles {
+        composite,
+        tokens,
+        by_file,
+        missing_design,
+    })
 }
 
 #[cfg(test)]

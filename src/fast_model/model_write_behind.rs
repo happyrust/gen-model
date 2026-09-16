@@ -407,6 +407,9 @@ pub(crate) struct RootsFlushOutcome {
 
 impl RootsFlushOutcome {
     /// 一根都没放弃：收尾那一笔可以盖 `model_sesno`。
+    ///
+    /// 三格全空（本任务一根都没点名）时同样为真，且是刻意的：零模型工作量的窗口也要盖水位，
+    /// 理由见 `batch_worker::batch_round_complete` 的空集真那一段。
     pub(crate) fn all_acked(&self) -> bool {
         self.blocked.is_empty() && self.exhausted.is_empty()
     }

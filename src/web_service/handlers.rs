@@ -538,21 +538,16 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     if !store_connected {
         return json!({"status": "degraded", "reason": "process store unavailable"});
     }
-    let generation = match crate::fast_model::room_resident::lifecycle() {
-        ResidentLifecycle::Ready { generation, .. } => generation,
-        ResidentLifecycle::Loading { phase, .. } => {
-            return json!({"status": "initializing", "reason": phase});
-        }
+    // `Degraded`（ADR-073 D8–D11）：模型在、计算器照常冻，只是 `problems` 点名的面板 / 库不在
+    // 承诺内——它是 available 的一个分档，不是 unavailable；读者判「房间也一致」要并读 `problems`。
+    let (generation, problems) = match crate::fast_model::room_resident::lifecycle() {
+        ResidentLifecycle::Ready { generation, .. } => (generation, Vec::new()),
         ResidentLifecycle::Degraded {
             generation,
             problems,
-        } => {
-            return json!({
-                "status": "unavailable",
-                "reason": "resident degraded",
-                "generation": generation,
-                "problems": problems,
-            });
+        } => (generation, problems),
+        ResidentLifecycle::Loading { phase, .. } => {
+            return json!({"status": "initializing", "reason": phase});
         }
         ResidentLifecycle::Blocked { problems } => {
             return json!({"status": "unavailable", "reason": "resident blocked", "problems": problems});
@@ -592,11 +587,21 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     } else {
         return json!({"status": "unavailable", "reason": "durable room executor unavailable"});
     };
-    json!({
-        "status": "available",
-        "generation": generation,
-        "executor": executor,
-    })
+    if problems.is_empty() {
+        json!({
+            "status": "available",
+            "generation": generation,
+            "executor": executor,
+        })
+    } else {
+        json!({
+            "status": "degraded",
+            "reason": "room inputs incomplete: listed panels / libraries are outside the room promise",
+            "generation": generation,
+            "executor": executor,
+            "problems": problems,
+        })
+    }
 }
 
 fn require_room_bootstrap_ready() -> Result<(), ApiError> {
@@ -825,6 +830,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mdb_closure = mdb_closure
         .map(|plan| plan.health_json())
         .unwrap_or(Value::Null);
+    // 房间输入不全（ADR-073 D8–D11）：常驻模型装好了、带缺口——房间边照算，但 `problems`
+    // 点名的面板 / 库不在 `model_sesno` 的房间承诺内。与 `mdb_closure` 同一条纪律：数据面与
+    // 模型面照常，缺口要在这里一眼可见，`features.room.problems` 给明细。
+    if matches!(
+        crate::fast_model::room_resident::lifecycle(),
+        crate::fast_model::room_resident::ResidentLifecycle::Degraded { .. }
+    ) {
+        degraded.push("room");
+    }
     // 房间流程退役（t-678）：全量重建的盖章 / 对账那一格随 `room_model` 的 StartupRoomBuild
     // 一族没了，启动对比的 `reference` / `startup_compare` 随 `room_startup` 没了。这一格
     // 只剩常驻房间模型自己的统计——无几何的在册面板按库点名，限定域之外的库单独成一句

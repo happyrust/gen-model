@@ -18,6 +18,7 @@ use std::sync::{LazyLock, OnceLock};
 
 use aios_core::pdms_types::{DbAttributeType, TOTAL_LOOP_NOUN_NAMES, TOTAL_VERT_NOUN_NAMES};
 use aios_core::{NamedAttrValue, RefU64Vec, RefnoEnum};
+use e3d_model::increment::NoModelTier;
 use serde::Deserialize;
 
 use super::ele_ops::{
@@ -310,6 +311,56 @@ pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
         && raw_dchc_code(raw_name) == Some(0)
 }
 
+/// 生成侧**本仓与 e3d-io** 按名字读到的属性（`src/data_interface/generation_read_set.json`，
+/// 由 `output/gen_read_set.py` 机扫入库、编译期嵌入，S6 2026-09-15）。
+///
+/// e3d-model 自己那半（`e3d_model::reads_attribute`）只扫得到它自己的 crate；生成链上还有两处
+/// 读点在它视野之外——本仓 `fast_model/resolve.rs` 直接按 `NGMR` 取负体引用，e3d-io 的目录
+/// 表达式求值环境替生成器读设计侧 `ANGL RADI HEIG DESP` 与目录侧 `DATA.*` / `SELE.*`。
+/// 两份是并集关系，谁也不覆盖谁。
+fn generation_read_set() -> &'static HashSet<String> {
+    static SET: OnceLock<HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| {
+        #[derive(Deserialize)]
+        struct Fixture {
+            names: Vec<String>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!("generation_read_set.json"))
+            .expect("generation_read_set.json 随源码入库，必须是合法 JSON");
+        fixture.names.into_iter().collect()
+    })
+}
+
+/// 生成器读不读这个属性名——「不影响模型」第二档的那一半（S6）。
+///
+/// 两份机扫产物之并：e3d-model 的 [`e3d_model::reads_attribute`] 加本仓
+/// [`generation_read_set`]。**宁宽勿漏**：多收一个名字只是少跳一次重算，漏一个名字就是一张
+/// 停在旧形状上的网格。
+pub fn generator_reads_attribute(raw_name: &str) -> bool {
+    let name = normalize_attribute_name(raw_name);
+    e3d_model::reads_attribute(&name) || generation_read_set().contains(&name)
+}
+
+/// 「这个属性变了，模型一个字都不用动」的分档答案（e3d-model `plan_update_with` 的
+/// [`NoModelTier`]，S6 2026-09-15）。两档的去向完全一样——记 `no_model`、不上卷、不级联——
+/// 档位只决定计数落在 `IncrementReport::metadata_only` 还是 `unread_attribute`。
+///
+/// - [`NoModelTier::MetadataOnly`]：老名单，[`attribute_is_metadata_only`] 那两票
+///   （效果表 DataOnly ∧ 字典 DCHC=0），今天就是 `NAME / DESC / PURP / FUNC / LCHKDA`。
+/// - [`NoModelTier::UnreadAttribute`]：新档，`unread_gate` 开着时才答——字典 DCHC=0
+///   （core 自己不重画）**∧** [`generator_reads_attribute`] 说生成侧没有一处按名字读它。
+///
+/// 老档先问，所以 `NAME` 这类既在老名单、又因为源码里到处是 `"NAME"` 字面量而落进读取集合的
+/// 名字仍归老档——新档只负责老名单**之外**多放行的那些，两档天然互斥。
+/// `unread_gate` 关着时这个函数逐位等于 `attribute_is_metadata_only`。
+pub fn attribute_no_model_tier(raw_name: &str, unread_gate: bool) -> Option<NoModelTier> {
+    if attribute_is_metadata_only(raw_name) {
+        return Some(NoModelTier::MetadataOnly);
+    }
+    (unread_gate && raw_dchc_code(raw_name) == Some(0) && !generator_reads_attribute(raw_name))
+        .then_some(NoModelTier::UnreadAttribute)
+}
+
 /// 属性是否命中「已知会影响模型」的分类——除 `DataOnly` 与 `Unknown` 之外的一切。
 ///
 /// 只表示「命中已知影响集合」；未命中项由 [`classify_attribute_model_impact`] 标为
@@ -347,15 +398,29 @@ fn collect_modified_attribute_names(modified: &ModifiedElement) -> Vec<String> {
     names
 }
 
+/// [`classify_operation_effects_with`] 在元数据门第二档关着时的样子——`unread_gate = false`
+/// 就是 2026-09-15 之前逐位的行为。探针与默认调用走这一条。
+pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSummary {
+    classify_operation_effects_with(op, false)
+}
+
 /// 汇总一次操作的效果（宁多勿漏），并保留原始 DCHC code。
 ///
 /// - `Add` / `Deleted` → 需重生成（结构/成员效果）；
-/// - `Modified`：逐属性归类效果——`DataOnly` **且**过 [`attribute_is_metadata_only`]
-///   （字典 DCHC=0 那第二票）才忽略，只有效果表一票的保守重生成；`TransformOnly` 记位姿；其余
-///   （DirectGeometry/DependencyCascade/StructuralMembership/Unknown，含 `UDA:*`）记重生成；
+/// - `Modified`：逐属性归类效果——过 [`attribute_no_model_tier`]（老档那两票，或
+///   `unread_gate` 开着时「字典 DCHC=0 ∧ 生成侧不读」那一档）才忽略，只有效果表一票的保守
+///   重生成；`TransformOnly` 记位姿；其余（DirectGeometry/DependencyCascade/
+///   StructuralMembership/Unknown，含 `UDA:*`）记重生成；
 ///   `children` 变化、或检测不到任何属性差异（如非 detail 解析）时保守记重生成；
 /// - `None` → 无动作。
-pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSummary {
+///
+/// `unread_gate` 必须与窗口规划器那一侧读的是同一个开关
+/// （[`crate::options::model_skip_unread_attribute_changes`]）：预览说 Skip、规划器却整根重算，
+/// 同一份回执里 `details` 与 `units` 就成了两句话。
+pub fn classify_operation_effects_with(
+    op: &EleOperationData,
+    unread_gate: bool,
+) -> OperationEffectSummary {
     let mut summary = OperationEffectSummary::default();
     match &op.detail {
         EleOperationDetail::Add(_) | EleOperationDetail::Deleted => {
@@ -397,14 +462,15 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
                 }
                 match effect {
                     // 「不影响模型」是**少算**方向，判据与 direct 窗口规划器的元数据门
-                    // （`window_root_plan::change_is_metadata_only`）共用同一道双票：效果表
-                    // 说是元数据、E3D 字典却没投票的（`CACHID`）规划器照旧上卷
-                    // 整根重算，这里就不能报「不影响模型」——同一份回执里的 `details` 与
-                    // `units` 必须是一句话。
-                    AttributeEffect::DataOnly if !attribute_is_metadata_only(name) => {
+                    // （`window_root_plan::change_is_metadata_only`）共用同一个
+                    // `attribute_no_model_tier`：效果表说是元数据、E3D 字典却没投票的
+                    // （`CACHID`）规划器照旧上卷整根重算，这里就不能报「不影响模型」——
+                    // 同一份回执里的 `details` 与 `units` 必须是一句话。门排在效果分类之前，
+                    // 因为新档（DCHC=0 ∧ 生成侧不读）问的根本不是效果表那一票。
+                    _ if attribute_no_model_tier(name, unread_gate).is_some() => {}
+                    AttributeEffect::DataOnly => {
                         summary.impact_regen = true;
                     }
-                    AttributeEffect::DataOnly => {}
                     AttributeEffect::TransformOnly if is_loop_container_noun(&modified.noun) => {
                         // A point/vertex's local POS is an input of its owner's
                         // mesh, not a standalone instance transform.
@@ -431,6 +497,12 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
 /// 判定一次操作应如何处理模型（宁多勿漏）：由 [`classify_operation_effects`] 归约为三态动作。
 pub fn classify_operation_impact(op: &EleOperationData) -> OperationImpact {
     classify_operation_effects(op).impact()
+}
+
+/// [`classify_operation_impact`] 带上元数据门第二档（S6）。预览那条薄壳
+/// （`manual_update::merge_net_change_details`）走这一条，`unread_gate` 与窗口规划器同源。
+pub fn classify_operation_impact_with(op: &EleOperationData, unread_gate: bool) -> OperationImpact {
+    classify_operation_effects_with(op, unread_gate).impact()
 }
 
 /// Core3D R13 / T2c 第一批：这个已知 noun 的变化只会制造模型队列噪音。
@@ -1934,9 +2006,84 @@ mod tests {
         );
         // 源码钉：门那一侧问的是同一个谓词，不是自己抄的名单。
         assert!(
-            include_str!("window_root_plan.rs")
-                .contains("model_impact::attribute_is_metadata_only"),
-            "元数据门必须共用 attribute_is_metadata_only"
+            include_str!("window_root_plan.rs").contains("model_impact::attribute_no_model_tier"),
+            "元数据门必须共用 attribute_no_model_tier"
+        );
+    }
+
+    /// 第二档的两票（S6）：字典 DCHC=0 **∧** 生成侧没有一处按名字读它。开关关着时这个函数
+    /// 逐位等于 [`attribute_is_metadata_only`]，这是「默认关 = 产物不变」那句承诺的落点。
+    #[test]
+    fn the_unread_attribute_tier_needs_dchc_zero_and_nobody_reading_the_name() {
+        // 关着：一个新档都不许开口，答案与老门逐名相同。
+        for name in [
+            "NAME", "DESC", "SUPP", "ACDATE", "NGMR", "DIAM", "POS", "CACHID",
+        ] {
+            let tier = attribute_no_model_tier(name, false);
+            assert_eq!(
+                tier.is_some(),
+                attribute_is_metadata_only(name),
+                "{name}: 门关着时第二档不许改变答案"
+            );
+            assert!(tier != Some(NoModelTier::UnreadAttribute), "{name}");
+        }
+        // 开着：老名单仍归老档——`NAME` 这类名字源码里到处都是字面量，落在读取集合里，
+        // 可它先被老档收走，不会掉进新档。
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA"] {
+            assert_eq!(
+                attribute_no_model_tier(name, true),
+                Some(NoModelTier::MetadataOnly),
+                "{name}"
+            );
+        }
+        // 开着：字典说 0、两份读取集合都不认识的名字进新档。
+        for name in ["SUPP", "ACDATE", "SHOP"] {
+            assert_eq!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!generator_reads_attribute(name), "{name}");
+            assert_eq!(
+                attribute_no_model_tier(name, true),
+                Some(NoModelTier::UnreadAttribute),
+                "{name}"
+            );
+        }
+        // 开着也不放行：生成侧读它。`NGMR`（本仓 `fast_model/resolve.rs` 按名字取负体引用）
+        // 与 `ANGL`（e3d-io 的目录表达式环境替生成器求值）都是 e3d-model 自己那半扫不到、
+        // 靠本仓 `generation_read_set.json` 捞回来的——这一档的安全全押在这里。
+        for name in ["NGMR", "STYP", "ANGL"] {
+            assert!(generator_reads_attribute(name), "{name}");
+            assert_eq!(attribute_no_model_tier(name, true), None, "{name}");
+        }
+        // 开着也不放行：字典没投票（UDA、伪属性、字典外的名字），第一票就缺席。
+        for name in ["CACHID", "UDA:42", "NO_SUCH_ATTR"] {
+            assert_eq!(raw_dchc_code(name), None, "{name}");
+            assert_eq!(attribute_no_model_tier(name, true), None, "{name}");
+        }
+        // 大小写 / 前缀归一化两档同源。
+        assert_eq!(
+            attribute_no_model_tier("att.supp", true),
+            Some(NoModelTier::UnreadAttribute)
+        );
+    }
+
+    /// 第二档与手写效果表不许打架（S6）：凡是效果表**正面声称**会影响模型的名字，只要字典
+    /// 也说 DCHC=0，就必须有人按名字读得到它——否则第二档会绕过效果表把它放行，而放行是
+    /// 「少算」方向，错了就是一张停在旧形状上的网格。
+    ///
+    /// 今天两边零分歧。哪天有人往几何 / 级联表里加一个没人按字面量读的名字，这条先红——
+    /// 要么那个名字该进 `generation_read_set.json`（补上读点），要么它压根不影响模型。
+    #[test]
+    fn the_unread_attribute_tier_never_overrides_the_curated_effect_tables() {
+        let claimed = DIRECT_GEOMETRY_ATTR_NAMES
+            .iter()
+            .chain(DEPENDENCY_CASCADE_ATTR_NAMES)
+            .chain(TRANSFORM_ONLY_ATTR_NAMES);
+        let escaped: Vec<&str> = claimed
+            .copied()
+            .filter(|name| attribute_no_model_tier(name, true) == Some(NoModelTier::UnreadAttribute))
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "效果表说会影响模型、第二档却放行了：{escaped:?}"
         );
     }
 

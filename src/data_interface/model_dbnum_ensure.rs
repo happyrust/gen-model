@@ -442,6 +442,11 @@ async fn start_with_purpose(
 
     let proposed_id = TaskRegistry::new_task_id(&format!("dbnum-model-ensure-{dbnum}"));
     let publication_policy = crate::data_interface::model_read_route::publication_policy(true);
+    // 准入前把常驻房间模型对齐到此刻的文件版本（ADR-073 D12），代号在对齐**之后**冻——启动房间屏障
+    // 那一档（`StartupRoomBootstrap`）显式带着启动时冻的代号，不在这里换代。
+    if purpose.explicit_room_generation().is_none() {
+        crate::fast_model::model_db_adapter::refresh_room_reference_before_task(dbnum).await;
+    }
     let current_room_generation = crate::fast_model::model_db_adapter::required_room_generation()?;
     let room_generation = match purpose.explicit_room_generation() {
         Some(expected) => {

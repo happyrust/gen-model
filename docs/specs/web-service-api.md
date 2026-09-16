@@ -565,6 +565,8 @@ plant-ui 的单根调用零影响。
                    "intent": "apply_window",
                    "started_at": "2026-09-10T17:02:11+08:00",
                    "finished_at": "2026-09-10T17:06:48+08:00" },
+  "room_alignment": { "generation": "efd4ebe1…", "resident_generation": "efd4ebe1…",
+                      "current": true },
   "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
   "blocked": false, "excluded": false }
 ```
@@ -585,6 +587,22 @@ plant-ui 的单根调用零影响。
   **整格缺失 / `status: null` 是同一件事**：这个库从没被任务写过，或上一次回退把标记行删掉了、
   下一次任务还没开工。两种形态客户端都要认，处置一样——那一栏留空，**别退回 `finished` 再据此
   画绿灯**。
+
+- `room_alignment`（2026-09-16，ADR-073 D14）：**这个库的房间边整库对齐到哪一代常驻房间模型**。
+  它是「`e3d.room.lookup` 为什么对这个库回 `not_computed`」的唯一出处：进程内没有该根的发布 ACK 时
+  （ACK 不持久，落盘形态冷重启后一条都没有），那一层就是查询的就绪判据（§4.7.2）。**DESI 行才有**，
+  其余整格缺失。
+
+  | 字段 | 类型 | 取值 / 含义 |
+  |---|---|---|
+  | `generation` | string \| null | 库上那一格（`dbnum_watermark.model_room_generation`）。`null` = 从没整库对齐过：旧行、关着房间开关生成的、或这个库一路只跑过普通增量窗口（它们按 D14 不盖这一格） |
+  | `resident_generation` | string \| null | 此刻本进程常驻房间模型这一代。`null` = 房间体制此刻说不出代号（开关关着 / 还在装 / `Blocked`） |
+  | `current` | bool | 两者同一代且形态落盘。为真时 `e3d.room.lookup` 对这个库的根答得出 `ready_empty` / `ready_nonempty`，哪怕进程内一条 ACK 都没有；为假时那一层不成立，只能靠本进程刚发布过的根 |
+
+  **它不是第三枚水位**：没有自己的推进规则，只随 `model_sesno` 由能替整库说话的任务同一笔盖
+  （初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务），`room_membership=false` 下盖水位时清空。
+  `current: false` 而两枚水位相等是正常状态，不是告警——要点亮它，给该库跑一次
+  `POST /api/v1/dbnums/{dbnum}/model/rebuild` 或重初始化。
 
   `status` 与两枚水位的分工要分清：`finished` 只说「本任务的写库结束了」，**不说这个库追平了**
   ——欠什么仍由 `applied_sesno` / `model_sesno` 回答。一个模型失败的任务照样以
@@ -687,8 +705,19 @@ plant-ui 的单根调用零影响。
 - `calculation_status`：`ready_nonempty|ready_empty|not_computed|initializing|failed|disabled`。
 
 空 `memberships` 只有在 `calculation_status=ready_empty` 时才表示“已经计算且不属于任何房间”；
-`not_computed`、`initializing` 与 `failed` 不能被客户端画成空归属。ready 判据使用当前根的
-`RootPublicationAck`，房间开启时还要求 ACK 匹配当前 resident generation。
+`not_computed`、`initializing` 与 `failed` 不能被客户端画成空归属。
+
+ready 判据有两层，先进程后库上（ADR-073 D14，2026-09-16）：
+
+1. 当前根的 `RootPublicationAck`——房间开启时还要求 ACK 匹配当前 resident generation；
+2. ACK 够不着时（ACK 不持久，rocksdb 冷重启后一条都没有）看库上的整库对齐承诺
+   `dbnum_watermark.model_room_generation`：与当前 resident generation 同一代，且本进程的生成根账本里
+   这根没欠着。落盘形态（`store_mode=rocksdb`）才有这一层；进程内嵌 `mem://` 活不过重启，仍只认第 1 层。
+
+两层用的是同一个代号，所以房间 / 面板真变过时两层一起作废 → `not_computed`。库上那一格由能替**整库**
+说话的任务（初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务）随 `model_sesno` 同盖，
+`room_membership=false` 下盖水位时清空；普通增量窗口不动它。**它不是第三枚水位**，`DbnumStatus`
+的水位仍是两枚。
 
 plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，本服务仍不实现。
 
@@ -1168,7 +1197,11 @@ tokio/serde/serde_json 均已存在，无其他新增。
    - 任务面板的**房间泳道**（`task_queue.rs` 的 `KIND_ROOM_RECALC`）：`room_recalc` 任务
      不再产生，泳道会恒空。请把它摘掉，而不是留一条永远「距上一轮 ∞」的空泳道。
    - `q room` / `q e3d.room.lookup` 命令继续可用；必须消费 `calculation_status`，只有
-     `ready_empty` 才能把空 `memberships` 显示成“不属于任何房间”。
+     `ready_empty` 才能把空 `memberships` 显示成“不属于任何房间”。2026-09-16 起
+     `ready_empty` / `ready_nonempty` 在落盘形态下也回得出来（此前服务重启过就一律
+     `not_computed`，见 §4.7.2 的两层判据）——取值集合与含义一个字没变，只是不再恒假。
+     同日 `/dbnums` 每行多一格可选的 `room_alignment`（§4.7）：`current: false` 就是
+     「这个库此刻只能回 `not_computed`」的解释，别把它画成告警。
    - 你**直连 SurrealDB** 读的 `room_relate` / `room_panel_relate` / `fn::room_code`
      （房间浏览器、材料表 surql）不随本节退役，写者是模型根的 process-store/durable
      发布事务；kv-mem 启动屏障完成前不得把空结果当最终值。

@@ -867,11 +867,18 @@ pub(crate) async fn persist_roots_batched_unacked(
 
 /// 任务开工时冻一份房间计算器（ADR-073 D1，硬约束：预加载房间模型只能是开工时冻结的不可变引用，
 /// 任务期间不换代）。`Ok(None)` 只表示房间归属开关已关闭；开关开启但常驻模型
-/// 不存在、在建、降级或阻塞时是 `Err`——这一轮的根都算不出房间，调用方按
+/// 在建（`Loading`）或建模本体失败（`Blocked`）时是 `Err`——这一轮的根都算不出房间，调用方按
 /// 「房间失败 = 该根失败」记进 `failed`，下一次任务重生成。
+///
+/// **`Degraded` 照常冻**（ADR-073 D8–D10，2026-09-16）：模型在、带着已点名的缺口——缺几何的在册
+/// 面板不进索引、逐根写边时是保护集（[`MemoryRoomCalculator::missing_panels`]），缺文件的 DESI 不在册；
+/// 计算器里没有整体性的「输入齐不齐」判定。此前一块面板缺几何 / 一个 DESI 缺文件就在这里 `Err`，
+/// 整批根「room calculator unavailable」判死（0.1.25 现场）。
 ///
 /// 这里不回读库、不建模型、不换代：[`current_for_calculation`] 只取启动段装好的那份 `Arc`，
 /// 计算器把面板索引建在内存里；任务期间常驻模型换代与否与这份引用无关。
+///
+/// [`MemoryRoomCalculator::missing_panels`]: crate::fast_model::room_model::MemoryRoomCalculator::missing_panels
 ///
 /// [`current_for_calculation`]: crate::fast_model::room_resident::current_for_calculation
 pub fn frozen_room_calculator()
@@ -884,17 +891,130 @@ pub fn frozen_room_calculator()
     crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir).map(Some)
 }
 
+/// 一次整库房间边重算的账（[`recompute_dbnum_room_edges`]）。
+#[derive(Debug, Clone, Default)]
+pub struct RoomEdgeRecompute {
+    /// 本库在投影里有回执的根数。
+    pub roots: usize,
+    /// 真重算并重写了边的根数（有几何的、算得出的）。
+    pub recomputed: usize,
+    /// 重写出的成员边数（`room_relate`）。
+    pub room_edges: usize,
+    pub commits: usize,
+    pub max_transaction_bytes: usize,
+    /// 算不出归属的根与原因：边原样留着（陈旧可恢复），调用方按 D2 记失败。
+    pub failed: Vec<(RefNo, String)>,
+    /// 房间代号对齐到本台计算器的 ACK 数。
+    pub acks_refreshed: usize,
+    pub elapsed_ms: u128,
+}
+
+/// 用本库全部根的**现有几何**重算两张房间边（`RoomOnly`，d-819 / ADR-073 D13）。
+///
+/// 不重生几何、不动模型行、不动空间树、不回读库：每个有回执的根拿它在投影里的记录
+/// → [`MemoryRoomCalculator::calculate_for_root`] → [`MemoryRoomCalculator::render_root_room_edges`]
+/// （按构件先删后插，缺几何面板的边受保护，D9），按 [`PERSIST_CHUNK`] 装块、一串事务提交
+/// ——与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等的硬验收（ADR-010 §9）
+/// 不多一条口径。没有几何的根跳过（它的边由对账删除那一半清过了）；算不出的根边原样留、
+/// 进 `failed`，同批其余根照常。提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器
+/// （只改这一格，几何身份不动），`e3d.room.lookup` 对它们重新回 `ready`。
+///
+/// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——那一刻本库
+/// 没有第二个写者。
+///
+/// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
+/// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
+pub async fn recompute_dbnum_room_edges(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+) -> anyhow::Result<RoomEdgeRecompute> {
+    let started = std::time::Instant::now();
+    let scope = ProjectionScope::Current;
+    let roots: Vec<RefNo> = store
+        .roots(scope)
+        .into_iter()
+        .filter(|root| root.dbno() == dbnum && store.receipt(scope, *root).is_some())
+        .collect();
+    let mut out = RoomEdgeRecompute {
+        roots: roots.len(),
+        ..Default::default()
+    };
+    let mut pieces: Vec<(usize, String)> = Vec::new();
+    let mut recomputed = Vec::new();
+    for root in &roots {
+        let records = store.records_of_root(scope, *root);
+        if records.is_empty() {
+            continue;
+        }
+        match rooms.calculate_for_root(&records) {
+            Ok(edges) => {
+                out.room_edges += edges.len();
+                // 装块按构件数（一构件一句 DELETE、成员边一句 INSERT），不按几何条数。
+                pieces.push((
+                    records.len(),
+                    rooms.render_root_room_edges(&records, &edges),
+                ));
+                recomputed.push(*root);
+            }
+            Err(error) => out.failed.push((
+                *root,
+                format!("room membership of root {root} could not be recomputed: {error:#}"),
+            )),
+        }
+    }
+    let transactions = pack_publication_transactions("", &pieces, "", false);
+    for statements in &transactions {
+        out.max_transaction_bytes = out.max_transaction_bytes.max(statements.len());
+        commit_publication_transaction(target.db, statements, "room membership recompute").await?;
+        out.commits += 1;
+    }
+    for root in &recomputed {
+        if let Some(mut ack) = store.publication_ack(scope, *root) {
+            ack.room_membership = true;
+            ack.room_generation = Some(rooms.resident_generation().to_string());
+            if store.record_publication_ack(scope, *root, ack) {
+                out.acks_refreshed += 1;
+            }
+        }
+    }
+    out.recomputed = recomputed.len();
+    out.elapsed_ms = started.elapsed().as_millis();
+    Ok(out)
+}
+
 /// 任务准入时冻结的 resident generation；房间开关关闭时没有这道完成要求。
+///
+/// 代号是**计算输入的摘要**（`ResidentRoomModel::input_version`，与
+/// [`MemoryRoomCalculator::resident_generation`] 同一个字串），不是文件版本 composite（ADR-073 D12）：
+/// 一个 DESI 前进却没动房间 / 面板时代号不变，此前的根 ACK 照旧有效。
+///
+/// [`MemoryRoomCalculator::resident_generation`]: crate::fast_model::room_model::MemoryRoomCalculator::resident_generation
 pub fn required_room_generation() -> anyhow::Result<Option<String>> {
     if !crate::options::room_membership() {
         return Ok(None);
     }
     Ok(Some(
-        crate::fast_model::room_resident::current_for_calculation()?
-            .manifest
-            .key
-            .clone(),
+        crate::fast_model::room_resident::current_for_calculation()?.input_version(),
     ))
+}
+
+/// 任务开工前把常驻房间模型对齐到此刻的文件版本（ADR-073 D12）——**冻计算器之前**调一次。
+///
+/// 是探针不是重建：文件版本 composite 与装好的那份相同就原样返回；变了才按文件重建
+/// （两层缓存让没变的文件只付重开校验的钱）。重建失败不让任务失败：留旧代继续算、
+/// `/health.features.room` 记 `stage=refresh` 缺口。回执里 `Rebuilt` / `Failed` 打一行任务日志，
+/// `Unchanged` / `NotApplicable` 不出声。任务执行体（`execute_frozen_batch_body` 的模型半边、
+/// 初始化双 lane、读透侧 ensure 准入）经这里调，不直接摸 `room_resident`。
+pub async fn refresh_room_reference_before_task(
+    dbnum: u32,
+) -> crate::fast_model::room_resident::RoomReferenceRefresh {
+    let refresh = crate::fast_model::room_resident::refresh_before_task().await;
+    if let Some(line) = refresh.log_line() {
+        println!("dbnum={dbnum} {line}");
+    }
+    refresh
 }
 
 async fn persist_roots_batched_unacked_impl(
@@ -4754,13 +4874,30 @@ mod tests {
     fn room_calculator(
         dir: &std::path::Path,
     ) -> crate::fast_model::room_model::MemoryRoomCalculator {
+        room_calculator_with(dir, 0., None)
+    }
+
+    /// 在册却没几何的第三块面板（房间 R3）：ADR-073 D9 保护集的夹具。
+    const BARE_PANEL_R3: RefNo = RefNo::new(24383, 700);
+
+    /// [`room_calculator`] 的可调版：R1 的盒子沿 x 平移 `r1_shift`（面板搬家的夹具），
+    /// `bare_panel` 是在册却没几何的面板（D9 保护集的夹具）。
+    fn room_calculator_with(
+        dir: &std::path::Path,
+        r1_shift: f32,
+        bare_panel: Option<RefNo>,
+    ) -> crate::fast_model::room_model::MemoryRoomCalculator {
         use crate::fast_model::room_model::{RoomPanelMap, RoomPanels, box_mesh_for_test};
         use crate::fast_model::room_resident::{
             MeshCache, ResidentForm, ResidentManifest, ResidentRoomModel,
         };
-        box_mesh_for_test(glam::Vec3::ZERO, glam::Vec3::splat(1000.))
-            .ser_to_file(&dir.join("panel_r1.mesh"))
-            .unwrap();
+        let r1_mesh = format!("panel_r1_{}", r1_shift as i64);
+        box_mesh_for_test(
+            glam::Vec3::new(r1_shift, 0., 0.),
+            glam::Vec3::new(r1_shift + 1000., 1000., 1000.),
+        )
+        .ser_to_file(&dir.join(format!("{r1_mesh}.mesh")))
+        .unwrap();
         box_mesh_for_test(
             glam::Vec3::new(500., 0., 0.),
             glam::Vec3::new(1500., 1000., 1000.),
@@ -4781,30 +4918,43 @@ mod tests {
         };
         let r1: RefnoEnum = refno_from_e3d(PANEL_R1);
         let r2: RefnoEnum = refno_from_e3d(PANEL_R2);
-        let map = RoomPanelMap {
-            rooms: vec![
-                RoomPanels {
-                    room: "24383_501".into(),
-                    room_num: "R1".into(),
-                    panels: vec![r1],
-                },
-                RoomPanels {
-                    room: "24383_601".into(),
-                    room_num: "R2".into(),
-                    panels: vec![r2],
-                },
-            ],
-            all_panels: std::collections::HashSet::from([r1, r2]),
-        };
+        let mut rooms = vec![
+            RoomPanels {
+                room: "24383_501".into(),
+                room_num: "R1".into(),
+                panels: vec![r1],
+            },
+            RoomPanels {
+                room: "24383_601".into(),
+                room_num: "R2".into(),
+                panels: vec![r2],
+            },
+        ];
+        let mut all_panels = std::collections::HashSet::from([r1, r2]);
+        if let Some(bare) = bare_panel {
+            let r3: RefnoEnum = refno_from_e3d(bare);
+            rooms.push(RoomPanels {
+                room: "24383_701".into(),
+                room_num: "R3".into(),
+                panels: vec![r3],
+            });
+            all_panels.insert(r3);
+        }
+        let map = RoomPanelMap { rooms, all_panels };
         let model = std::sync::Arc::new(ResidentRoomModel::from_projection(
             ResidentManifest {
                 form: ResidentForm::Latest,
-                key: "rooms-fixture".into(),
+                key: format!("rooms-fixture-{}", r1_shift as i64),
             },
             vec![],
             map,
             &[
-                panel(PANEL_R1, "panel_r1", [0.; 3], [1000.; 3]),
+                panel(
+                    PANEL_R1,
+                    &r1_mesh,
+                    [r1_shift, 0., 0.],
+                    [r1_shift + 1000., 1000., 1000.],
+                ),
                 panel(PANEL_R2, "panel_r2", [500., 0., 0.], [1500., 1000., 1000.]),
             ],
             std::sync::Arc::<MeshCache>::default(),
@@ -4891,8 +5041,233 @@ mod tests {
         assert_eq!(ack.source_sesno, 42);
         assert_eq!(ack.geometry_count, 1);
         assert!(ack.room_membership);
-        assert_eq!(ack.room_generation.as_deref(), Some("rooms-fixture"));
+        // 代号是计算输入摘要，不是夹具的文件 composite（"rooms-fixture"）——ADR-073 D12。
+        assert_eq!(
+            ack.room_generation.as_deref(),
+            Some(rooms.resident_generation())
+        );
+        assert_ne!(ack.room_generation.as_deref(), Some("rooms-fixture"));
         assert_eq!(ack.medium, PersistMedium::Mem);
+    }
+
+    /// ADR-073 D9 / 源码钉 14 (a)，`mem://` 真测：在册却没几何的面板 R3 **不阻断**——计算器照冻、根照常落库、
+    /// 没有一根进 `failed`；构件在 R1 里的新边照写，指向 R3 的**存量边原样保留**（保护集），不被
+    /// 「先删后插」当成「算出来是空的」抹掉。此前这一根在 `MemoryRoomCalculator::new` 就被
+    /// `ensure_complete()` 拦成「room calculator unavailable」。
+    #[tokio::test]
+    async fn a_registered_panel_without_geometry_keeps_its_old_edges_and_blocks_no_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator_with(dir.path(), 0., Some(BARE_PANEL_R3));
+        assert_eq!(
+            rooms.missing_panels(),
+            &[refno_from_e3d(BARE_PANEL_R3)],
+            "夹具前提：R3 在册、没几何"
+        );
+        let db = surreal_mem().await;
+        // 上一版留下的、指向 R3 的存量边（与生产同一形状）：本轮判不了它，得留着。
+        db.query(
+            "INSERT RELATION INTO room_relate [{ id: room_relate:24383_700_24383_10, \
+             in: pe:24383_700, out: pe:24383_10, room_num: 'R3', inside_count: 8, center_dist: 0.0 }];",
+        )
+        .await
+        .expect("seed stale R3 edge")
+        .check()
+        .expect("seed statement");
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&rooms),
+        )
+        .await
+        .expect("publish with a bare registered panel");
+
+        assert!(
+            batched.failed.is_empty(),
+            "缺几何的面板不判死任何根: {:?}",
+            batched.failed
+        );
+        assert_eq!(batched.room_edges, 1, "R1 的那条新边照写");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_700->pe:24383_10".to_string(),
+            ],
+            "新边写了、指向 R3 的存量边留着（陈旧可恢复，抹平不可）"
+        );
+        assert_eq!(publication_status_of(&store, ROOM_ROOT_A).await, "ready");
+    }
+
+    /// ADR-073 D13 / 源码钉 18 (e)，`mem://` 真测：面板搬了家（R1 的盒子沿 x 平移 2000）→ 用**新**计算器对
+    /// 本库现有几何整库重算 → 原来在 R1 里的构件 A 的边被删掉（A 自己一行几何没动、没重生）、ACK 的
+    /// 房间代号换成新台；搬回来再算一次，边又回来——两个方向都是同一条路。
+    #[tokio::test]
+    async fn moving_a_panel_updates_the_other_roots_edges_through_the_library_recompute() {
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A inside R1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()]
+        );
+
+        // 面板搬走：R1 现在占 x 2000–3000，A（x 100–200）不在里面了。
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        assert_ne!(
+            before_move.resident_generation(),
+            after_move.resident_generation(),
+            "面板几何变了 = 房间代号变了（D12）"
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+        )
+        .await
+        .expect("recompute after the panel moved");
+        assert_eq!(
+            (report.recomputed, report.room_edges, report.failed.len()),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        assert!(
+            room_edges(&db).await.is_empty(),
+            "A 不再在任何面板里，它的旧边随重算删掉"
+        );
+        assert_eq!(
+            store
+                .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
+                .expect("ACK stays")
+                .room_generation
+                .as_deref(),
+            Some(after_move.resident_generation())
+        );
+        assert_eq!(
+            count_record(&db, "inst_relate", "24383_10").await,
+            1,
+            "整库房间重算不动模型行"
+        );
+
+        // 搬回来：边回来，代号回到原来那台。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &before_move,
+        )
+        .await
+        .expect("recompute after the panel moved back");
+        assert_eq!((report.recomputed, report.room_edges), (1, 1), "{report:?}");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()]
+        );
+    }
+
+    /// d-819 / ADR-073 D13：整库房间边重算用**现有几何**、走逐根同一套渲染——重算后的边与逐根落库的
+    /// 逐字相同（幂等，ADR-010 §9 的对照物不多一条口径）；算不出的根边原样留、进 `failed`，其余照常；
+    /// 提交全过后 ACK 的房间代号对齐到本台计算器。
+    #[tokio::test]
+    async fn recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator(dir.path());
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&rooms),
+        )
+        .await
+        .expect("seed the library through the per-root path");
+        let before = room_edges(&db).await;
+        assert_eq!(before, vec!["pe:24383_500->pe:24383_10".to_string()]);
+
+        // 模拟「面板那一侧变过、A 的 ACK 还挂着旧代号」：重算后要对齐回来。
+        let mut stale = store
+            .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
+            .expect("seeded ACK");
+        stale.room_generation = Some("old-generation".into());
+        assert!(store.record_publication_ack(ProjectionScope::Current, ROOM_ROOT_A, stale));
+        // 再来一根算不出的（盒子 NaN，`aabb_is_usable` 不认）：边原样（它本来就没有）、进 failed。
+        store.commit(
+            ProjectionScope::Current,
+            vec![root_commit(
+                ROOM_ROOT_B,
+                vec![room_record(ROOM_ROOT_B, f32::NAN, 200.)],
+            )],
+        );
+
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &rooms,
+        )
+        .await
+        .expect("recompute the library's room edges");
+        assert_eq!(
+            (report.roots, report.recomputed, report.room_edges),
+            (2, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(report.failed[0].0, ROOM_ROOT_B);
+        assert!(
+            report.failed[0].1.contains("could not be recomputed"),
+            "{}",
+            report.failed[0].1
+        );
+        assert_eq!(
+            (report.commits, report.acks_refreshed),
+            (1, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            before,
+            "整库重算 == 逐根落库，逐边相等"
+        );
+        let ack = store
+            .publication_ack(ProjectionScope::Current, ROOM_ROOT_A)
+            .expect("ACK stays");
+        assert_eq!(
+            ack.room_generation.as_deref(),
+            Some(rooms.resident_generation()),
+            "ACK 的房间代号对齐到本台计算器"
+        );
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, ROOM_ROOT_B)
+                .is_none(),
+            "算不出的根没有 ACK 可对齐"
+        );
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
@@ -5307,6 +5682,7 @@ mod tests {
                     all_roots_ok: true,
                     dead_roots: 0,
                     catalogue_sessions: None,
+                    room_generation: Default::default(),
                 }),
                 info: None,
                 closes_task: true,

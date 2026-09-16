@@ -6,6 +6,31 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-09-16 room_membership（ADR-073 S0–S4）三条真 AMS 文件用例通过 + 真机跑通**：worktree
+`da461b71f` + S0–S4 在途改动，`cargo test --lib -- --ignored --exact --nocapture --test-threads=1`，
+config `D:\adr078-verify\DbOption-room-verify-{full,noscb}.toml`（暖 meshes 缓存、bundled e3d31 schema）：
+`ams_task_start_refresh_rebuilds_from_a_stale_key_and_then_reuses_the_generation` 2.10s（陈旧键→Rebuilt 215房/230面板/0缺→Unchanged 23ms）、
+`ams_missing_desi_degrades_the_room_reference_instead_of_blocking_it` 2.49s（缺 SCB 6003→Degraded、problems=1）、
+`ams_cached_room_vertex_optimization_parity` 35.52s（1112 18根/6171 room_relate 优化==参照/0失败）。
+真机 `serve`（dev bin、`store_mode=mem` 隔离库、`room_membership=1`、真 /ALL）从空库 `POST /dbnums/1112/model/ensure`
+18/18 根 succeeded、`[model-persist] room_edges=12342 failed_roots=0`、`/health status=ok room=available degraded=[]`。
+证据 `docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md`。**未验**：跨库成员传播（U3）。
+同日下午（同一份证据 §6）**rocksdb 真库（摄入数据面）复跑**：外部 surreal 8049 `rocksdb:D:\adr078-verify\live-rocks` 空目录起步，
+同一枚 dev bin `store_mode=rocksdb` / ingest / `room_membership=1`，1112 → 冷重启不重摄入 → 扩监听 7997 / 8000：三库 7743 根 0 失败、
+`room_relate` 70386（1112 = 6171 与 parity 同数）；`e3d.room.lookup` 三库构件均回**非空**房间号，`/dbnums` 20 行 `finished` / 0 个 `room_sesno*` 键 /
+applied==model，stdout 无房间段耗时行。材料表 `fn::room_num_of` / `fn::get_room_number` 回得出房间号；`fn::room_code`（hd）恒回 NONE 是函数
+自身块值缺陷（§6.5 F1）——同日已修（`fn_query_room_code.surql` 分支改表达式形式 + `embedded_surql` mem:// 钉），重编二进制起在同一座 8049 库上
+`fn::room_code` 回 `1RX-R144 / 1RX-R212 / 1RX-R232 / 1RX-R231`（§6.7），`cargo test --lib` 2152 passed / 0 failed；钉 9 四句全落实。
+F2（durable 下 `calculation_status` 恒 `not_computed`）同日拍并修（ADR-073 追记 D14）：水位行补一格
+`model_room_generation`，`e3d.room.lookup` 的就绪判据从「只认进程内根 ACK」改成两层（ACK ∨ 库上整库对齐同代且账本没欠）。
+同一座 8049 库上复验（§6.8）：`POST /dbnums/1112/model/rebuild` 18 根全成、38s、那一格盖成 `efd4ebe1…`、`room_relate` 仍 6171；
+**冷重启后**（`model_cache.resident_roots=0`，进程内零 ACK）`17496/72903 / 100011 / 105823` → `ready_nonempty`，
+无边的 `17496/121765 / 121728` → `ready_empty`，当时没跑过整库对齐的 7997 / 8000 构件仍 `not_computed`（如实）。
+随后 8000（953 根 46.5s）与 7997（6772 根 570.7s）各 `model/rebuild` 一次把三库都点亮：那一格同为 `efd4ebe1…`，
+**边数逐库与首次从零初始化一字不差**（6171 / 59844 / 4371，合计 70386，ADR-010 §9 在三个真库上再走一遍），
+再冷重启后八个抽样全 `ready_nonempty`（无边的那个 `ready_empty`）、房间号与点亮前逐条相同。
+`cargo test --lib` 2157 passed / 0 failed / 111 ignored。**未验**：跨库成员传播（U3）；F3（`room_panel_relate` 不物化）/ F4 待拍。
+
 **2026-08-27 八条 mesh 级 RVM 对拍复验通过（8 passed / 0 failed，44.1s）**：同库同跑法
 （live 8009 = `.surreal/ams-rvm-rebuild-20260824`，config `db_options/DbOption-rvm-rebuild`，
 `cargo test --lib --no-default-features --features ws,gen_model,manifold,project_hd,rvm_verify mesh_ -- --ignored --nocapture --test-threads=1`）。

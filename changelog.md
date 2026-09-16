@@ -2,6 +2,33 @@
 
 ## 2026-09-16
 
+### core 属性修改 → 模型增量规则取证补全：`putAtt` 到 `descases/VDESPT` 的入口链、DCHC 门之外的四条属性专项规则、QCHGLS 全部写入者（ida-bridge，只改文档）
+
+- 起因：用户 2026-09-16 要求「用 ida-bridge 继续分析完善属性修改导致的模型增量更新的规则、继续完善文档」。0915 那份取证
+  （`docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`，此前只在 `gen-model-refactor` 工作树）把会话内交互路画到
+  `descases/VDESPT` 就停了：没说 C++ 的属性 put 怎么落到它头上、它除 DCHC 门还做什么、QCHGLS 除 `EVALAT` 还有谁写。
+- 落地（E3D 3.1，`core.dll` = `idalib-33060`、`Core3D.dll` = `idalib-49136`）：0915 文档取到本工作树（§0–§8 原样、头注说明出处），**新增 §9**：
+  - §9.1 入口链：`DB_Element::putAtt`（全部重载）→ `internalPutAtt`（**同值 put 直接返回、不发事件**；ref 版写前先发 `PostSetRefAttribute`）→ 写 →
+    `DB_Element::postSetAttribute`（受影响集 = 克隆属性 ? `DB_Clone::getRelatedElements` : 自身；逐个 `DB_ElementChangesPlugger` vtbl+52 `PostSetAttribute`、NAME 另发 +68、
+    受控 UDA 复验、`evaluateRules` 规则引擎）→ 订阅者 **`DESDRA_SCPlugs`**（`Init` 一次订阅 12 个变更钩子 + 16 个 Allowed）按库类型分流：PADD → `dra_scase/*`，其它 → `descases/*`。
+    十二个钩子逐个落到哪个 `descases` 例程、怎么推 QCHGLS 列成一张表；`EVALAT` 8 处调用 5 个函数闭合；入口门第二项 `sub_1050DCA0` = `cacheGetworkChanges` 旗标。
+  - §9.2 `VDESPT` 全文（DCHC 门与 `PLOO.HEIG` 分支逐指令）：**DCHC=0 在 `VDESPT` 就挡住、也不进空间地图包围盒清单 `MLSADD`**；规则 U `PLOO.HEIG` → 当 owner 的变化评估；
+    规则 V `SJOI.JFRE` 翻真 → 位置差折进 `DELP` 写回；规则 W `COCO.CTYP` → 不匹配的 `COCORE` 置空；规则 X `DATA.PPRO/DPRO` → `SCRUSE`；自动着色 `colsel/AUTCO2` 换画列表；`designEvents` 事件。
+  - §9.3 QCHGLS 全部写入者（`EVALCD` 21 处 9 个函数）：属性触发的只有 `VDESPT → EVALAT` 一条；`VDESAC` / `VDESRO` / `VDESR1`（拷贝 / 排序，直接 `EVALCD(·,4)` 不经规则表；
+    `BRAN` 内排序另记前一成员）、`descat/ATTABK` 与 `rac/RACKO` 两个命令处理器、`EVALRF`、`UpdateChangeList`。`maplist` = core 的空间地图（`mapboxlib/MPBOX`）包围盒维护清单，
+    `MLSADD` 按 noun 字段 **`IMAP`（847458）** 路由——就是我方快照 `noun_caps.json` 的 `spatial_map` 列（0906 「无消费者」的那个字段到此有主）。
+  - §9.4 `change/UPGRPH` 分派骨架逐指令核（312 条 cmp/j/test/call）：`cmp 3` / `cmp 4` 分派、**P23 的 23 个常量逐个逆 hash 与 §4 名单同集同序**、三级分叉与每叉调用目标全部对上 §4 伪码 → §8 那条结案。
+  - §9.5 `change/IDCHNG` 全函数逐指令：两次 `ATAINT`（DCHC / PLCF）与旗标对上 §3.2；边角：第二次不检错且出参共用一格（字典外属性早退，实际碰不到）。
+  - §9.6 `PLCDEL` 已读：清 Core3D 一张 100 槽、按 `(DB_Ref, int)` 键、存 3 个 double 的缓存表；`VDESPT` 入口无条件清一次。「p-line 缓存」是四条腿撑的推断，`PLCF` 仍只作报表。
+  - §9.7 ref 属性的另一半：`VDESPF` / `VDESFA` → `structures/BAKREF` / `BREAKF` 维护 back-ref（0007 学习记录「订阅者尚未定位」结案）；`SPCO.PRTREF` 设一次拷七个引用；
+    `PSARFA PSLRFA ALERFA` 不建 back-ref。
+  - §9.8 差距表续 G13–G20：同值早退 ≙ `unchanged`；规则 U ≙ loop 容器上溯；写回类规则解释「一次操作多属性同窗」、不需模拟；`MLSADD` 与 DCHC 门同一个 `if` 给 Skip 档不动 AABB 一票；
+    会话内路对 CATA 元素也进 `EVALAT`（R1 不受影响）。**§5 三张答案表的判词一条没变。**
+  - 同步：`docs/specs/core3d-partial-update-conformance.md` R5 补上 0915 那段「只对 DRAFT 侧成立」（本工作树此前缺）与 0916 一句；`output/show-me-attribute-increment.html`
+    加第 07 节「对着 core 看」（三条路 × 属性判别力 × 我方对应，`VDESPT` 门外做的事，core 三档 vs 我方三档）。
+- 验证：全部地址本轮活桥实读（复查命令在文档附录）；无代码改动，`cargo` 未跑。**未验**：`internalPutAtt` 只读了 ref 版一个重载，其余九个重载「同值早退 / 事件顺序」是推定；
+  `maplist` 的「空间地图包围盒」是从 `mapboxlib` 埋点名推的；`sub_1023190B` 模块码没对到模块名。
+
 ### `/api/v1/spatial/*` 接上 BRAN 真实中心线：`nearby` 加 `source_mode=bran_centerline`（P1）、新增 `GET /api/v1/spatial/nearest-clearance`（P2）
 
 - 起因：「指定 BRAN → 沿真实中心线找周边构件 / 找最近墙柱并给出可画尺寸的两个端点」此前三段会话把后端改动全落在了 legacy
@@ -36,6 +63,207 @@
   **未 live**：计划 §5 那两条真机 GET（`24381_145018`）没跑——起服务是长驻进程。
 - 未动：legacy `plant-model-gen`（D1 留 / 回退未拍板）；SCTN / GENSEC 按姿态判柱（P4）；`surface` 缺省（D4）仍是 `false`；
   精算到目标网格留给前端。
+
+### room_membership 真机跑通 + 六条「未 live」验收逐条落实（S0–S4 的 live 收尾）
+
+- 起因：S0–S4（D8–D13，源码钉 10–18）每一刀结尾都挂着「未 live：源码钉 14 / 16 / 18 的六条 mem:// 真测都没跑」。
+  用户 2026-09-16 拍板：在 ams 上开 room_membership 跑一遍，把这六条（缺 DESI / 缺面板几何 / 文件前进 / 改 PANE）补上。
+- 落实（证据 `docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md`）：
+  - `cargo test --lib` **2142 passed / 0 failed / 111 ignored**，覆盖 (a) 缺面板几何、(d) 前进无房间 DESI 代号不变、
+    (e) 改 PANE 整库重算、(f) 只改 BRAN 不触发这四条合成 mem:// / 单元验收。
+  - 三条真 AMS /ALL 文件用例（`--ignored`，暖 meshes 缓存、bundled e3d31 schema）全过：(b) `ams_missing_desi_degrades…`
+    ——缺 SCB 6003 → 常驻 `Degraded` 不判死；(c) `ams_task_start_refresh…`——陈旧键 → `Rebuilt`（215 房/230 面板/0 缺）→
+    再探 `Unchanged` 23ms；§9 硬验收 `ams_cached_room_vertex_optimization_parity`——1112 6171 条 `room_relate` 优化路 == 参照路逐边相等、0 失败。
+  - 真机 `serve`（dev 二进制、`store_mode=mem` 隔离库不碰任何真库、`room_membership=1`、真 /ALL）从空库把 dbnum 1112 生成一遍：
+    常驻 215 房/230 面板/0 缺、全 29 个 MDB DESI 到位；`POST /dbnums/1112/model/ensure` 18/18 根 succeeded、
+    **`[model-persist] room_edges=12342 … failed_roots=0`**；`/health` `status=ok / room=available / degraded=[]`、
+    `e3d.room.lookup` `calculation_status=computed`。
+- 边界：真机那台是读透 mem 库，没摄入 `pe` 数据面，所以 `room.lookup` 抽样回 `memberships=[]`（读透无 pe 行的既有形态，非房间没算——
+  房间边已落库 12342、正确性由 1112 parity 钉住）；要 `room.lookup` 回出非空房间号需另起摄入数据面的 rocksdb 真库——同日下午补上（下一条）。
+  跨库成员传播（§未决 U3）、S5 死代码仍未动。
+- **rocksdb 真库（摄入数据面）复跑，钉 9 收尾**（证据同一份 §6）：外部 `bin\surreal.exe` 8049 `rocksdb:D:\adr078-verify\live-rocks` 空目录起步，
+  同一枚 dev 二进制 `store_mode=rocksdb` / `data_face=ingest` / `room_membership=1` / 真 /ALL。1112 首次初始化 32s（pe=30942、18 根）→ 冷重启
+  不重摄入（`核对 1 库，落后 0 库`，10.7s）→ 扩 `watch_dbnums=[1112,7997,8000]` 再把面板所在的两个 DESI 初始化：7997 219s（pe=170085、6772 根）、
+  8000 25s（pe=6639、953 根），**三库 7743 根 0 失败根**，库上 `room_relate` **70386**（1112 6171 = parity 那个数 / 7997 59844 / 8000 4371）。
+  `e3d.room.lookup` 对三个库的构件都回出**非空** `memberships`（如 `17496/72903` → R144 / R320 / R101 / R201，与 `fn::room_relate_of` 同序）、
+  `published_version` / `stale=false` / `publication_status=current`；`GET /dbnums?project&mdb` 20 行 `write_state.status=finished`、整份 0 个
+  `room_sesno*` 键、三库 `applied_sesno == model_sesno`；三份 stdout 无房间段耗时行。材料表：`fn::room_num_of` / `fn::get_room_number` 回
+  `R144` 等；**`fn::room_code`（hd 版）恒回 NONE**——不是房间没算，是 `fn_query_room_code.surql` 里 `let $code = if … { $code = …; }` 在
+  SurrealDB 2.1 下块值为 NONE（`RETURN (IF true { LET $x = 5; })` → NONE），同一函数体改成表达式形式在库上直接得 `1RX-R144`；面板库没摄入时它
+  还会报错而非回 NONE。**未改代码**，另三条一并列在 evidence §6.5 待拍：F2 durable 形态下 `calculation_status` 恒 `not_computed`
+  （判据是进程内 `RootPublicationAck`，模型 lane 直写不留投影，`ready_empty`/`ready_nonempty` 不可达）；F3 `room_panel_relate` 新库上不物化
+  （唯一写者 `build_room_panels_relate` 无人调用，CONTEXT「两类边」与 ADR-073 钉 7/8 有漂移）；F4 日志 `房间边=` 计数 ≠ 库上条数。
+  钉 9 四句里三句落实、材料表那一句挂在 F1 上——用户随即拍板修（下一条）。
+
+### 修 `fn::room_code`（hd 版）恒回 NONE：`if` 块改表达式形式（evidence §6.7）
+
+- 起因：上一条 F1。`resource/surreal/fn_query_room_code.surql` 里 `let $code = if (…) { $code = $res.room_num; } else if … { … } else { $code = none; };`
+  在 SurrealDB 2.1 下存成 `{ LET $code = … }`，块的值是块内最后一条语句的值、赋值语句的值是 NONE，于是每个构件都走到 `RETURN NONE`；
+  材料表 20 多个 surql 经它取房间码，全部拿到空。首版 `e43c1d0fd` 起就是这个写法，此前没有任何一条真测调过它。
+- 修法：`$id` 与 `$code` 两处 `if` 块各分支只放一个表达式（`{ $res.room_num }` / `{ string::concat(…) }` / `{ none }`），`let $id = return if …`
+  的 `return` 一并去掉；`$noun` 取法、`fn::room_relate_of($pe)`（ADR-010 §5 排序边）、`$prefix` 取面板属主名首段、四字 / 五字房间号、
+  `string::concat($prefix, '-', $code)` 一字不动；`$id` 仍算完不用（与首版一致，语义不在本笔动）。hh 版走 `fn::room_num_of`，不受影响。
+  函数体是 `include_str!` 进二进制的编译期快照（`embedded_surql`），改文件要重编才落库——旧库不用手工灌，启动一次就抬上去。
+- 钉：`embedded_surql::tests::hd_room_code_returns_prefix_and_room_number_for_a_member_with_an_edge`（`project_hd`，mem://）——
+  SBFR `/1RX-RM01-R144-VOLU` → PANE → `room_relate` → FLOOR：四字 `R144` 与五字 `R0144` 都回 `1RX-R144`，没有边的成员回 NONE；修前红。
+- 验证：先把新函数体整段在 8049 `/sql` 跑一遍 → `1RX-R144 / 1RX-R212 / 1RX-R232 / 1RX-R231`；重编 dev 二进制（42s，`0.1.27+g1dbedf8c347a…dirty`），
+  8049 上先把旧函数体灌回去（复现 NONE）再起新二进制 `serve` → 启动 12.97s、`已灌入内置 surreal 函数集`、`/health status=ok / room=available`，
+  `INFO FOR DB` 的存储体已是表达式形式，同四个构件 `fn::room_code` → `1RX-R144 / 1RX-R212 / 1RX-R232 / 1RX-R231`。
+  `cargo test --lib` **2152 passed / 0 failed / 111 ignored**。钉 9 四句至此全落实；F2 / F3 / F4 仍开着。
+
+### 修 F2：`e3d.room.lookup` 加 durable 侧就绪判据 `model_room_generation`（ADR-073 追记 **D14**，evidence §6.8）
+
+- 起因：上一条 F2。落盘形态下 `calculation_status` 恒 `not_computed`——边、房间号、版本三元组全对，判据却只有**进程内**的
+  `RootPublicationAck`，而 ACK 按 ADR-079 进程终止即消失：库是上一次运行灌的，冷重启后一条 ACK 都没有，
+  `ready_empty` / `ready_nonempty` 在生产存储形态下不可达。缺的不是事实，是够得着的判据字段。用户 2026-09-16 拍板补。
+- 修法（ADR-073 新增 **D14** + 源码钉 19）：水位行上加一格 `dbnum_watermark.model_room_generation` = 「这个库的房间边整库对齐到
+  哪一代常驻模型」，取值就是根 ACK 里那个 `room_generation`（`ResidentRoomModel::input_version`，D12）。
+  - **写**（`task_end::RoomGenerationStamp` 三档 + `batch_worker::task_room_generation_stamp` / `dbnum_initialize`）：随 `model_sesno`
+    由收尾那一笔同盖，与库级目录落款（ADR-079 D4）同一条纪律——只有能替**整库**说话的任务才 `Aligned`：初始化、整库重排的
+    ModelOnly、本任务跑过整库房间重算（D13）；普通增量窗口 `Untouched`（那一格原样）；`room_membership=false` 下盖水位
+    `Cleared`（这一版只承诺几何，不许留着替旧边说话）；`all_roots_ok` 为假一律不写。「起点为 0 的 ModelOnly」这句资格判定
+    抽成 `whole_library_model_only`，落款与房间代号共用一处（源码钉）。
+  - **读**（`query_service::room_edges_ready` + `QueryService::library_room_generation`）：判据变成两层——进程内该根 ACK 命中，
+    **或**库上那一格与此刻常驻模型同一代且进程账本里这根没欠着（ADR-079 的一票否决）。两层同一个代号，所以房间 / 面板真变过
+    时一起作废回 `not_computed`。只在 `store_mode=rocksdb` 下启用第二层：`mem://` 活不过重启，库与水位行一起消失，那一档仍
+    只认 ACK（d-381 的启动屏障要的就是本进程逐根算完那一句）。
+  - **看**（`manual_update::RoomAlignmentColumns`，spec §4.7）：`/dbnums` 每行多一格可选的
+    `room_alignment{generation, resident_generation, current}`（DESI 行才有）——`current: false` 就是「这个库此刻只能回
+    `not_computed`」的解释，是这句话的唯一出处。那句「成不成立」与查询侧共用一处判据
+    （`query_service::library_room_alignment_is_current`），两处各写一遍就会出现面板说「对齐了」而查询回 `not_computed`。
+  - **不是第三枚水位**：没有自己的推进规则、不参与任何放行 / 恢复判决，只是模型水位的一个属性；W3 的 `room_*` 五列一列没回来
+    （`task_end` 那条钉逐个列名守着）。
+- 验证（8049 那座 rocksdb 真库，`D:\adr078-verify\live-rocks`，三库 70386 条边原样）：
+  1. 新二进制起服务先**复现** F2——`17496/72903` 四条边、`published_version=729 / stale=false / current`，`calculation_status=not_computed`
+     （库是旧二进制灌的，那一格还是 `null`）。
+  2. `POST /dbnums/1112/model/rebuild` → `model_only` / `model_start_sesno=0` / 18 根全 `generated` / 38s succeeded →
+     库上 `dbnum_watermark:1112.model_room_generation = efd4ebe1…ad269`，7997 / 8000 那一格仍 `null`（它们没跑过整库对齐，
+     判据如实说不知道）；1112 的 `room_relate` 重算后仍是 **6171** 条（与 parity 那个数逐字相同）。
+  3. **冷重启**（12.33s，`核对 3 库，落后 0 库`，`model_cache.resident_roots=0` = 一条 ACK 都没有）后再查：
+     `17496/72903` → **`ready_nonempty`**（4 条边）、`17496/100011` → `ready_nonempty`（6 条）、`17496/105823` → `ready_nonempty`（3 条）；
+     一根边都没有的 `17496/121765` / `17496/121728` → **`ready_empty`**；此时 7997 / 8000 的构件仍 `not_computed`（那一格还是 `null`，如实）。
+     `/health.features.room.generation` 与库上那一格逐字相同，`dbnum_consistency` 三库 `in_sync`。
+  4. **三库都点亮**：`model/rebuild` 8000（953/953 根、46.5s）与 7997（6772/6772 根、570.7s）各一次，三库那一格现在同为
+     `efd4ebe1…`；**边数逐库与首次从零初始化一字不差**（1112 6171 / 7997 59844 / 8000 4371 / 合计 70386）——ADR-010 §9
+     「整库重算 == 从零初始化，逐边相等」在三个真库上又走一遍。再冷重启后八个抽样全部 `ready_nonempty`
+     （`24381/105161` R232/R332、`24381/72538` R332/R231/R330、`24384/23030` R231/R333/R330…），无边的那个仍 `ready_empty`，
+     房间号与点亮前那一轮逐条相同——变的只有判据那一格。
+  5. `/dbnums` 那一格：46 行里 29 个 DESI 行各带一格 `room_alignment`、非 DESI 行整格缺失；三个点亮过的库
+     `current=true` 且 `generation == resident_generation`，其余 26 个（这座库从没摄入过）`generation=null / current=false`。
+  6. `cargo test --lib` **2159 passed / 0 failed / 111 ignored**（新增 7 条钉：收尾三档落地、只有替整库说话的任务才盖、
+     资格判定只有一处、库上那一层替没有 ACK 的根答话、第 2 层要落盘且同代、两层判据都接在 `calculation_status` 上、
+     `/dbnums` 那一格与两枚水位同一趟读回且判据只有一处）；clippy 对改动文件零告警，rustfmt 新增行干净。
+- 未动：F3（`room_panel_relate` 不物化）、F4（日志 `房间边=` 计数 ≠ 库上条数）、§未决 U3 跨库成员传播；
+  普通增量窗口按 D14 不盖那一格，一个库要回 `ready_*` 得先有一次能替整库说话的任务给它盖上。
+
+### 面板自身的变化 → 本库整库房间边重算（`RoomOnly` 落地 d-819，ADR-073 追记 D13，收 §未决 U1 的库内那一半）
+
+- 起因：逐根路径（ADR-073 D1）只算「本根在哪些面板里」；面板那一侧变了——PANE 的几何 / 属主、FRMW / SBFR 改名、CWALL / CFLOOR
+  搬迁——它名下**别的根**的成员边与 `room_num` 一个都点不着，仪表全绿。d-819 定的填法（本窗变更集触发、给该库排一条内部 `RoomOnly`）
+  此前只有 `WriteIntent::RoomOnly` 枚举与回退渲染，规划器不产出、执行体不执行。用户 2026-09-16 拍板继续 S4。
+- 修法（ADR-073 2026-09-16 那节新增 **D13** + 源码钉 17–18；CONTEXT 新词条「整库房间重算」，「逐根房间归属」「ModelOnly 任务」改口；
+  §未决 U1 标已收）：
+  - 新模块 `data_interface::room_recompute`：`room_definition_change(ledger.entries())`——本窗变更集里碰到 `PANE / FRMW / SBFR / CWALL /
+    CFLOOR` 的任一条目（`Unresolved` 不算；**只按 noun 判，不解析 `detail` 散文**——DESC 之类只改元数据的面板改动多触发一次，接受）→
+    原因一句；`room_only_work_item(dbnum, …)`（`ModelWorkAction::RoomOnly`，`target_refno = dbnum=<n>`，一窗一条）；
+    `request_for_task(side_actions, refresh)`——两条触发合一句：规划器排了 `RoomOnly` / 开工前对齐（D12）换了房间代号。
+  - `model_update_plan.rs`：`ModelWorkAction::RoomOnly`（`room_only`），不进 `is_room_recalc`——`manual_update` 那道「房间重算项不在内」
+    的旧过滤只拦 `RoomRecalc*`，`RoomOnly` 随 `side_actions` 交给任务。
+  - `window_root_plan::build_model_update_plan_from_window` 末尾：命中就 `warnings` 一句 + 工作项一条（另一路会话在途改动的文件，只加了这一段）。
+  - `model_db_adapter::recompute_dbnum_room_edges(target, store, dbnum, rooms)`：本库全部有回执的根，按投影里的现有几何
+    `calculate_for_root` → `render_root_room_edges`（与逐根路径同一套渲染，D9 的保护集照用），按 `PERSIST_CHUNK` 装块、一串事务提交，
+    提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器；没有几何的根跳过，算不出的根边原样进 `failed`。不重生几何、不动
+    模型行、不动空间树。
+  - `batch_worker`：`DataBatchTaskResult` 加 `#[serde(skip)] room_recompute: Option<String>`（执行体内部接力）；`execute_frozen_batch_body`
+    留着开工前对齐的回执、收尾前 `request_for_task`；`execute_frozen_batch` 的 DESI 收尾段在 `await_units_durable` **之后**、`model_outcome_of`
+    **之前**、`flush.all_acked()` 门内跑 `run_room_only_recompute`（stage `rooms`）——那一刻本批根的模型行与边已在库里、本库没有第二个
+    写者；算不出的根按 D2 进账本 `failed` + 单元清单补 `Failed`、任务 `Partial`、`all_roots_ok = false`、`model_sesno` 不盖；开关关
+    （`Ok(None)`）如实记一句按齐了算；计算器冻不出 / 写库失败 → 不盖。刷盘没齐就不跑（那批根已判死）。
+- 没收的那一半：跨库成员（面板在 A、成员在 B）只在 A 变了之后**第一个开工**的库上被第二条触发带到，其余库等自己下一次触发——U3 仍开着。
+- 验证：`cargo test --lib` **2130 passed / 0 failed / 109 ignored**（新钉 6 条：`room_recompute` 5 条——房间定义族 noun 全覆盖 / 原因取样 /
+  工作项目标是库不是根 / 两条触发 / 接线位置（刷盘之后、收尾之前、`all_acked` 门内、旧过滤不拦）；`model_db_adapter`
+  `recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks`——`mem://` 上重算后的边与逐根落库逐字相同、NaN 根进
+  `failed`、ACK 代号对齐；`action_names_roundtrip_through_parse` 收 `room_only`）；`cargo check --all-targets` 绿；`cargo clippy --lib` 本仓零告警；
+  rustfmt 本轮改动的行干净。**已 live**（2026-09-16）：(e) 改 PANE 整库重算 = mem:// `moving_a_panel…` / `recomputing…` 全绿；
+  (f) 只改 BRAN 不触发 = `a_change_to_any_room_definition_noun…` 全绿；真机 1112 生成 12342 边 0 失败。见本节顶「room_membership 真机跑通」与 `docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md`。
+- 未动：S5 死代码（`room_resident.rs` / `room_model.rs` 里 ADR-067 / ADR-010 时代约 3000 行）；`ModelWorkAction::RoomRecalcElement / RoomRecalcPanel`
+  两个无人产出的枚举值也在其中。
+
+### 常驻房间模型在每个任务开工前对齐到此刻的文件版本；房间代号改为计算输入摘要（ADR-073 追记 D12）
+
+- 起因：常驻房间模型启动建一次、进程活多久用多久——换代点 `room_resident::ensure_current` 自 ADR-067 作废后在生产里
+  **零调用方**，新增的 PANE、搬走的面板、前进了的 DESI 都进不了它，逐根算出的归属按启动那一刻的面板集算，且不报错；
+  同时 `required_room_generation` / ACK 的 `room_generation` 拿全 MDB DESI 的文件 composite 当代号，任一库前进本该换代却没人
+  重建，键与实物脱节。用户 2026-09-16 拍板继续 S3。
+- 修法（ADR-073 2026-09-16 那节新增 **D12** + 源码钉 15–16；CONTEXT 新词条「任务开工前对齐」「房间代号」）：
+  - `room_topology::latest_frozen_sources` 改成**便宜的探针**：MDB 成员清单（进程内缓存）+ 每个 DESI 的最新会话
+    （`latest_source_version_of_file`，按文件戳缓存）+ 冻结令牌，不再 `E3dModelService::from_current()`（那一步整套装 schema，
+    每个任务付一次就把任务拖垮）；重建那一侧 `load_room_groups_from_files` 自己 `from_frozen_sources`，行为不变。
+  - `room_resident::refresh_before_task()`：开关关 / 无体制 / `Loading` → `NotApplicable`；探针 composite == 装好的 `manifest.key`
+    → `Unchanged`（常路，零重建）；不等或此前没建成 → 复用 `initialize_file_backed_at_startup` 按文件重建并在
+    `lock_spatial_serial` 里装上（两层按文件的缓存让没变的文件只付重开校验的钱），生命周期 `lifecycle_for(new)`，
+    `/health.room_build.resident.last_swap` 记 `note = task-start refresh` + 与上一份在册视图的 `TopologyDiff`；重建失败 → 留旧代
+    继续算、`Degraded` 多一条 `stage=refresh`（`lifecycle_after_refresh_failure`，同一条只留最新）、没有旧代仍 `Blocked`。并发开工
+    共用一把 `tokio::Mutex`，后到的等完再探。新 `ResidentInputs::configured()` 收口层级 / 关键字 / 校验函数 / 网格目录。
+  - 入口 `model_db_adapter::refresh_room_reference_before_task(dbnum)`（`Rebuilt` / `Failed` 打一行任务日志），接在三处冻计算器 /
+    冻代号**之前**：`batch_worker::execute_frozen_batch_body` 的模型半边（`run_model_side_actions` / `run_unit_worklist` 前）、
+    `dbnum_initialize::model_half_inner` 的 `frozen_room_calculator()` 前、`model_dbnum_ensure` 准入的 `required_room_generation()`
+    前（`StartupRoomBootstrap` 显式带启动代号，不换）。执行体不直接摸 `room_resident`，ADR-073 源码钉 1 照旧。
+  - **代号**：`MemoryRoomCalculator::resident_generation()` 回 `definition_version`（= `ResidentRoomModel::input_version`），
+    `required_room_generation()` 与生命周期的 `generation` 同改——拓扑 + 在册 + 有几何面板的几何的摘要。一个 DESI 前进却没动
+    房间 / 面板 → 代号不变 → 旧 ACK 有效；真变了 → 旧 ACK 作废、`e3d.room.lookup` 回 `not_computed` 直到重生成（d-381 语义）。
+    文件 composite 只留作探针键。
+- 验证：`cargo test --lib` **2124 passed / 0 failed / 109 ignored**（新钉 `the_task_start_refresh_precedes_every_calculator_freeze_and_stays_cheap`、
+  `the_resident_generation_follows_the_calculation_input_not_the_file_composite`、
+  `a_failed_refresh_keeps_the_previous_generation_and_exactly_one_refresh_problem`；`empty_kv_mem_publishes_an_indoor_root_without_attribute_ingestion`
+  的 ACK 代号断言改成 `rooms.resident_generation()`）；`cargo check --all-targets` 绿；`cargo clippy --lib` 本仓零告警；rustfmt 本轮改动的行干净。
+  **已 live**（2026-09-16）：源码钉 16 由真文件 `ams_task_start_refresh_rebuilds_from_a_stale_key_and_then_reuses_the_generation`
+  覆盖——陈旧键 → `Rebuilt`（真 /ALL 215 房/230 面板/0 缺、代号换真值、`note=task-start refresh`）→ 再探 `Unchanged` 23ms（(d) 的真文件侧）；
+  见 `docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md`。
+- 未动：U1 面板自身变化对**其余根**的传播（`RoomOnly`，S4）——本条只保证下一个任务用的是新面板集；死代码清理（S5）。
+
+### 房间输入不全 = 降级，不判死：`room_membership=true` 能开起来不炸（ADR-073 追记 D8–D11）
+
+- 起因：0.1.25 现场把 `room_membership` 开着，MDB 缺 6003 SCBDESI 的文件 → 常驻房间模型 `Blocked` → 每个任务
+  `frozen_room_calculator()` Err → 1112 `18/18`、7997 `6772/6772` 全部根「room calculator unavailable」，`model_sesno`
+  永不前进；当时只把模板改回 `false`，房间门政策留待本条（计划 2026-09-15 §8 Q1）。用户 2026-09-16 拍板：先把「能开起来不炸」
+  做出来，先写 ADR 追记再动代码。源码里两道**整份**闸把一处输入缺失放大成全库瘫痪，都不是 D2 说的逐根：
+  `room_topology::latest_frozen_sources` → `require_design_files()?`（缺一个 DESI 文件整份 Err）；
+  `MemoryRoomCalculator::new` → `PanelIndex::ensure_complete()?`（在册面板任一块没几何就 Err，与 2026-09-09 W1
+  「从未生成不阻代」自相矛盾——`warm_meshes` 放行、`new()` 又拦）。另外 `warm_meshes` 对「有几何行却包围盒不可用」与
+  「`.mesh` 读不出」整份 Err，`preload_panel_projection` 一块面板生成失败 `try_join` 整份 Err。
+- 口径（ADR-073 新增「2026-09-16 修订」一节，D8–D11 + 源码钉 10–14；CONTEXT 新词条「房间输入缺口」）：
+  **D8** 缺 DESI 文件按有的文件建，缺的库记 `missing_dbnums`、不在册；**D9** 在册面板无可用几何（从未生成 / 预生成失败 /
+  包围盒不可用 / `.mesh` 读不出）一律不进索引、逐根写边时作为**保护集**让开、留痕，不阻断；**D10** 生命周期 `Degraded { problems }`
+  放行计算器，`ensure_ready` 只拦 `Loading` / `Blocked`（`Blocked` 仍是「房间体制本身没起来」，维持 D2）；**D11** `Degraded` 下
+  `model_sesno == applied_sesno` 的房间承诺只覆盖在册且有几何的面板，`/health` 必须并排说清。逐根失败（构件包围盒不可用、
+  候选面板网格取不到）不变。
+- 修法：
+  - `room_model.rs`：`MemoryRoomCalculator::new` 删 `ensure_complete()?`（方法一并删除，零调用方），新 `missing_panels()`；
+    `render_root_room_edges` 在保护集非空时先 `LET $room_protected_panels = [pe:…]` 一句（一根一份名单，不逐构件展开——
+    几何覆盖稀疏的实例上缺几何面板可能两百多块），每个构件的 `DELETE {element}<-room_relate` 带
+    `WHERE in NOT IN $room_protected_panels`；为空时语句逐字不变。`render_element_relate_statements` 抽出
+    `_guarded` 底座，旧签名（内联数组）原样保留。
+  - `room_topology.rs`：`latest_frozen_sources` 回 `FrozenDesignSources { composite, tokens, sources, missing_design }`，
+    不再 `require_design_files()?`；`load_room_groups_from_files` 回 `RoomGroupsFromFiles`，把 `missing_design` 带出来。
+    `mdb_membership::require_design_files` → `missing_design_files() -> Vec<(u32, String)>`。
+  - `room_resident.rs`：`ResidentRoomModel` 加 `missing_dbnums` / `problems`；`assemble` 把 `unusable_panels` 记成缺口；
+    `warm_meshes` 面板级失败 `demote_panel`（搬进 `missing_panels`、共用同一 `.mesh` 的面板一并搬、几何摘要重算），
+    只对预热 worker 崩溃 Err；`preload_panel_projection` 单面板失败 / 单文件 E3D 服务起不来只记缺口；新 `lifecycle_for(model)`
+    （无缺口 `Ready`、有缺口 `Degraded`），`record_startup_init` 用它，`mark_failed` 一律 `Blocked`；`ensure_ready` 放行 `Degraded`；
+    `stats` / `/health.room_build.resident` 出 `missing_dbnums` / `problems`；启动横幅一句「degraded：N 条缺口」。
+  - `handlers.rs`：`features.room.status` 新档 `degraded`（带 `generation` / `executor` / `problems`），`/health.degraded_sections`
+    含 `room`；`query_service.rs` `e3d.room.lookup` 的 `calculation_status` 在 `Degraded` 下照 `Ready` 判；`lib.rs` 横幅措辞。
+- 验证：`cargo test --lib` **2121 passed / 0 failed / 109 ignored**（新钉 `a_registered_panel_without_geometry_is_protected_not_blocking`、
+  `eager_mesh_warm_degrades_on_unusable_geometry_and_never_generated_panels_alike`、
+  `eager_mesh_warm_deduplicates_keys_and_demotes_a_panel_whose_mesh_is_missing`、`missing_design_files_are_named_for_degradation_not_thrown`；
+  ready 门的钉改为 `Degraded → Ok`；live 用例 `update_scope` 那条改断言「冻结源 = 声明的 DESI − 缺文件的」）；
+  `cargo check --all-targets` 绿；`cargo clippy --lib` 本仓零告警；rustfmt 在本轮改动的行上干净（各文件其余漂移属别的会话）。
+  **已 live**（2026-09-16）：源码钉 14 (a) 缺面板几何 = mem:// `a_registered_panel_without_geometry…` 全绿；
+  (b) 缺一个 DESI = 真文件 `ams_missing_desi_degrades_the_room_reference_instead_of_blocking_it`——缺 SCB 6003 → 常驻 `Degraded` 不判死；
+  见 `docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md`。
+- 未动（下一刀）：U1 面板自身变化的传播（`RoomOnly` 只有 `WriteIntent` 枚举，规划器不产出）、常驻模型启动后不换代、
+  `room_resident.rs` / `room_model.rs` 里 ADR-067 / ADR-010 时代约 3000 行死代码。
 
 ### 本地发布 0.1.27：ADR-079 `gen_root` 表退役、掉线 UNC 15 s 上限修复（附 ADR-079 真库重启验证）
 

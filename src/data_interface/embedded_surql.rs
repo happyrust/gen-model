@@ -196,4 +196,65 @@ mod tests {
             "非 hd 构建的 room_code 应是 hh 版，实际: {room_code}"
         );
     }
+
+    /// hd 版 `fn::room_code` 对挂着 `room_relate` 边的构件必须回出「前缀-房间号」。
+    /// 2026-09-16 rocksdb 真库上它对每个构件都回 NONE：函数体用 `{ $code = …; }` 给变量
+    /// 赋值，SurrealDB 2.x 里块的值是最后一条语句的值、赋值语句的值是 NONE，于是
+    /// `$code == NONE → RETURN NONE`。分支改成表达式后这里钉住四字与五字房间号两条路。
+    #[cfg(feature = "project_hd")]
+    #[tokio::test]
+    async fn hd_room_code_returns_prefix_and_room_number_for_a_member_with_an_edge() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("embedded_surql_room_code")
+            .await
+            .expect("select fixture db");
+        define_embedded_functions_on(&db)
+            .await
+            .expect("embedded load succeeds");
+
+        db.query(
+            "CREATE FLOOR:⟨2_72903⟩ SET TYPE = 'FLOOR';
+             CREATE FLOOR:⟨2_72904⟩ SET TYPE = 'FLOOR';
+             CREATE FLOOR:⟨2_72905⟩ SET TYPE = 'FLOOR';
+             CREATE pe:⟨1_1444⟩ SET noun = 'SBFR', name = '/1RX-RM01-R144-VOLU';
+             CREATE pe:⟨1_1445⟩ SET noun = 'PANE', name = '', owner = pe:⟨1_1444⟩;
+             CREATE pe:⟨2_72903⟩ SET noun = 'FLOOR', refno = FLOOR:⟨2_72903⟩;
+             CREATE pe:⟨2_72904⟩ SET noun = 'FLOOR', refno = FLOOR:⟨2_72904⟩;
+             CREATE pe:⟨2_72905⟩ SET noun = 'FLOOR', refno = FLOOR:⟨2_72905⟩;
+             RELATE pe:⟨1_1445⟩->room_relate->pe:⟨2_72903⟩ SET room_num = 'R144', inside_count = 8, center_dist = 2960.4;
+             RELATE pe:⟨1_1445⟩->room_relate->pe:⟨2_72904⟩ SET room_num = 'R0144', inside_count = 8, center_dist = 2960.4;",
+        )
+        .await
+        .expect("fixture reaches db")
+        .check()
+        .expect("fixture rows created");
+
+        let mut response = db
+            .query(
+                "RETURN fn::room_code(pe:⟨2_72903⟩);
+                 RETURN fn::room_code(pe:⟨2_72904⟩);
+                 RETURN fn::room_code(pe:⟨2_72905⟩);",
+            )
+            .await
+            .expect("room_code reaches db")
+            .check()
+            .expect("room_code statements");
+        let four: Option<String> = response.take(0).expect("decode four-char code");
+        let five: Option<String> = response.take(1).expect("decode five-char code");
+        let none: Option<String> = response.take(2).expect("decode member without edge");
+        assert_eq!(
+            four.as_deref(),
+            Some("1RX-R144"),
+            "四字房间号：面板属主名前缀 + 房间号"
+        );
+        assert_eq!(
+            five.as_deref(),
+            Some("1RX-R144"),
+            "五字房间号 R0144 → 去掉第二位"
+        );
+        assert_eq!(none, None, "没有 room_relate 边的构件仍回 NONE");
+    }
 }

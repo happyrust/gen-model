@@ -95,7 +95,7 @@ _Avoid_: 单位体、unit solid（当单位几何已定为截面时）
 _Avoid_: 斜切、is_sloped、端面方向（当指属性时）
 
 **模型影响 (Model Impact)**：
-一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。
+一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（属性 put → `DESDRA_SCPlugs::PostSetAttribute` → `descases/VDESPT` 按字典 DCHC 类别进 `change/EVALAT`，在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`VDESPT` 就不进 `EVALAT`，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」两档各要两票：`Skip` = 效果表 DataOnly ∧ 字典 DCHC=0（`attribute_is_metadata_only`），第二档「DCHC=0 ∧ 生成读取集合不含它」由 `attribute_no_model_tier` 在 `model_skip_unread_attribute_changes` 开着时才答（默认关）；`TransformOnly` = 效果表 ∧ DCHC=3。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（§9 为 `putAtt` 入口链与 `VDESPT` 的属性专项规则）。
 _Avoid_: 几何影响、is_geometry_update
 
 **净变化 (Net Change)**：
@@ -115,7 +115,7 @@ _Avoid_: 水位、sesno 水位（泛指时）
 _Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
 
 **模型水位 (Model Watermark)**：
-某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。**它是模型面唯一的持久事实**（ADR-079）：库里不再有逐根的凭证行，重启后「这个库欠到哪」只有它一个说法——落后于 `applied_sesno` 就排 `model_sesno → 文件最新`，`0` 就整库重排；上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做，没有第二个写者对它「对账」。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（`http_422` 一类永久判定，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——前三格来自**生成根账本**（进程内，ADR-079），已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
+某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。**它是模型面唯一的持久事实**（ADR-079）：库里不再有逐根的凭证行，重启后「这个库欠到哪」只有它一个说法——落后于 `applied_sesno` 就排 `model_sesno → 文件最新`，`0` 就整库重排；上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做，没有第二个写者对它「对账」。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败——但承诺只覆盖**在册且有几何**的面板：常驻模型带「房间输入缺口」（缺文件的 DESI、缺几何的面板）时生命周期 `Degraded`，根照常算、边照常写、缺口点名的面板 / 库不在承诺内，`/health.degraded_sections` 含 `room`（ADR-073 2026-09-16 D11）；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（`http_422` 一类永久判定，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——前三格来自**生成根账本**（进程内，ADR-079），已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
 _Avoid_: 模型凭证下限（已退役的校验者 `settled_floor`）、生成水位、模型进度、把它当「模型有多新」的答案、拿它当同步点、模型水位对账（ADR-079 起没有这件事）
 
 **数据支撑 (Data Backing)**：
@@ -149,6 +149,10 @@ _Avoid_: `gen_root`（已退役的表）、根凭证表、把账本持久化、�
 **库级目录落款 (Library Catalogue Stamp)**：
 水位行上的 `model_catalogue_sessions = [{ dbnum, session }, …]`（ADR-079）：「这个库的整份模型与该目录到这一版一致」，逐根 `published_model_target.catalogue` 的库级替身。合并写（点名的目录换新值、其余原样留），只在 `all_roots_ok` 时随 `model_sesno` 同一笔盖；有资格盖的只有整库重生成的任务（初始化、起点 0 的 ModelOnly：从回执取最旧）与目录级联排的任务（入队时定下的 `X → T_X`，随行名单全成才盖，不从回执反推）。目录版本核对读它点名过期目录库、按库过滤排工；按需 `ensure` 的库级凭证判据读它核目录那一半。空 = 这个库还没有任何目录落款，不算过期、不参与核对。
 _Avoid_: 逐根目录落款、`root_dependency`（已退役的表）、目录版本表、把它当第三枚水位
+
+**整库房间对齐代号 (Library Room Alignment)**：
+水位行上的 `model_room_generation`（ADR-073 D14）：「这个库的房间边整库对齐到哪一代常驻模型」，取值与根 ACK 的 `room_generation` 同一个字串（见「房间代号」）。与库级目录落款同一条纪律：只在 `all_roots_ok` 时随 `model_sesno` 同一笔写，有资格写的只有能替**整库**说话的任务——初始化、起点 0 的整库重排 ModelOnly、本任务跑过整库房间重算（D13）；普通增量窗口那一格原样不动，`room_membership=false` 下盖水位时清空。读者两个：`e3d.room.lookup`——进程内没有该根 ACK 时（ACK 不持久，落盘形态冷重启后一条都没有）由它替那根说「算过」，判据仍是同一代 + 进程账本里这根没欠着；以及 `/dbnums` 每行的 `room_alignment` 格（`generation` / `resident_generation` / `current`），它是「这个库为什么回 `not_computed`」的唯一出处，那句「成不成立」与查询侧共用一处判据。`None` = durable 侧没有这句承诺（旧行、从没整库对齐过、关着开关生成的）。**它不是第三枚水位**：没有自己的推进规则，不参与任何放行 / 恢复判决。
+_Avoid_: 房间水位、`room_sesno`（已退役）、房间就绪表、把它当逐根凭证
 
 **库一致性判决 (Dbnum Consistency Verdict)**：
 对一个 `dbnum` 回答「此刻数据与模型是否一致」的**单点结论**，三态：**一致**（应用水位已建立、模型水位与之相等、且没有「还在赶」的根，ADR-060 D4）／**落后**（前述任一不成立，附四格计数）／**不判**（没有可判等的水位对：读透形态下数据面不摄入、应用水位恒 0；或摄入形态下数据水位尚未建立）。「不判」是中性陈述，不是落后、不是告警。结论由同一行上的两枚水位与该库生成根的实时四格（已追平 / 还在赶 / 已放弃 / 没生成过）合成；「已放弃」与「没生成过」不否决结论，但必须与它**并排陈述**（ADR-060 D5）。它是读者（面板、健康页、批次回执、启动日志）唯一该消费的一致性口径——任何读者都不得自己拿水位列、凭证下限或队列计数重新拼一个。房间归属只在 `room_membership=true` 时属于这项承诺；关闭时“一致”仅指数据与模型几何，读者必须同时展示 `room_membership=false`，不得把它解释成房间也一致。
@@ -271,7 +275,7 @@ _Avoid_: 对账读（泛指时）、回读确认、探针
 _Avoid_: 本地账本（那是生成根账本）、缓存（泛指时）、第二份真值、水位探针
 
 **ModelOnly 任务 (ModelOnly Task)**：
-只有模型半边、没有数据半边的 dbnum 任务：起点是该库的模型水位（`0` = 整库重排，ADR-079）、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；`room_membership=true` 时模型半边含每根房间归属，关闭时只生成模型。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。重新打开房间开关不会制造模型水位缺口，历史房间欠账需显式 `model/rebuild`。同族的 **`RoomOnly`** 是生成路径上的**内部**意图：同一条逐根路径、跳过几何生成，用已有几何对该库全部根重算房间归属并重写两张边；它只在面板（房间定义）自身变化时由本窗变更集触发（d-819，见「逐根房间归属」），不是对外契约、不引入房间水位，失败语义同逐根。
+只有模型半边、没有数据半边的 dbnum 任务：起点是该库的模型水位（`0` = 整库重排，ADR-079）、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；`room_membership=true` 时模型半边含每根房间归属，关闭时只生成模型。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。重新打开房间开关不会制造模型水位缺口，历史房间欠账需显式 `model/rebuild`。同族的 **`RoomOnly`** 不是一种任务，是 dbnum 任务**内部**的一步（见「整库房间重算」，ADR-073 D13 已落地）：用已有几何对该库全部根重算房间归属并重写两张边；由本窗变更集碰到房间定义族或开工前对齐换代触发（d-819），不是对外契约、不引入房间水位，失败语义同逐根。
 _Avoid_: 模型恢复批次、退化窗口任务、全库过期入队、model drain 页、房间任务、`rooms/rebuild` 对外口
 
 **联动更新 (Cascade Update)**：
@@ -486,8 +490,24 @@ _Avoid_: 索引建表、index-first
 _Avoid_: 房间关系、房间隶属
 
 **逐根房间归属 (Per-root Room Membership)**：
-房间归属的现行算法形态（ADR-073 D1 / D2）：一个生成根的完成 = 生成最终几何 → 用当前候选面板做点包含筛选、算出该根下每个构件属于哪些面板 → 模型行与 `room_relate` / `room_panel_relate` 边在同一笔事务写入。房间不是独立阶段：没有房间目标、房间轮、发布 / 结果目录、常驻模型换代、结构触发账本与房间水位；任务末没有整库房间段。某根的归属算不出来或写不进去 = 该根本轮未完成（非安定、凭证不前移、`model_sesno` 不越过），不排队、不自动重试。面板自身的变化（FRMW/SBFR 改名命中关键字、PANE 换属主、CWALL/CFLOOR 搬迁）不改几何、逐根路径点不着：按 d-819 由本窗变更集触发，给该库排一条内部 `RoomOnly`（见「ModelOnly 任务」），用已有几何对该库全部根重算归属并重写两张边，不重生成几何。硬验收沿用 ADR-010 §9：一组增量收敛后的两张边与同一份数据从零初始化的结果逐边相等。
+房间归属的现行算法形态（ADR-073 D1 / D2）：一个生成根的完成 = 生成最终几何 → 用当前候选面板做点包含筛选、算出该根下每个构件属于哪些面板 → 模型行与 `room_relate` / `room_panel_relate` 边在同一笔事务写入。房间不是独立阶段：没有房间目标、房间轮、发布 / 结果目录、常驻模型换代（ADR-067 那种按轮换代；开工前把常驻模型对齐到此刻文件版本见「任务开工前对齐」）、结构触发账本与房间水位；任务末没有整库房间段。某根的归属算不出来或写不进去 = 该根本轮未完成（非安定、凭证不前移、`model_sesno` 不越过），不排队、不自动重试。面板自身的变化（FRMW/SBFR 改名命中关键字、PANE 换属主 / 改几何、CWALL/CFLOOR 搬迁）逐根路径点不着：按 d-819 由本窗变更集触发（窗口规划器看 e3d-model 账本里的房间定义族 noun，只按 noun 判），给该库排一条内部 `RoomOnly`（见「整库房间重算」），任务在本批根刷盘之后用已有几何对该库全部根重算归属并重写两张边，不重生成几何（ADR-073 2026-09-16 D13，已落地）。硬验收沿用 ADR-010 §9：一组增量收敛后的两张边与同一份数据从零初始化的结果逐边相等。
 _Avoid_: 房间增量（流程含义，已退役）、房间任务、房间阶段、房间收尾、房间刷新、房间同步
+
+**房间输入缺口 (Room Input Gap)**：
+常驻房间模型建好后带着的、按条点名的输入缺失（ADR-073 2026-09-16 D8–D11）：MDB 声明了却没文件的 DESI（`missing_dbnums`，该库的房间与面板不在册），以及在册却没有可用几何的面板（`missing_panels`——从未生成、启动预生成失败、世界包围盒不可用、`.mesh` 读不出四种来源同一处置）。处置是**降级不判死**：模型生命周期进 `Degraded { problems }`，`frozen_room_calculator` 照常冻计算器（`ensure_ready` 只拦 `Loading` / `Blocked`）；缺几何的面板不进 `PanelIndex`，逐根写边时作为**保护集**——每根一句 `LET $room_protected_panels = [...]`，每个构件的 `DELETE {element}<-room_relate` 带 `WHERE in NOT IN $room_protected_panels`，指向它们的存量边本轮不删不写（陈旧可恢复、抹平不可）。`Degraded` 下 `model_sesno == applied_sesno` 的房间承诺只覆盖在册且有几何的面板，`/health.status = degraded`、`degraded_sections` 含 `room`、`features.room.status = degraded` 带 `problems`，读者判「房间也一致」必须并读。它**不是**逐根失败（构件包围盒不可用、候选面板网格取不到仍 = 该根失败，D2），也**不是** `Blocked`（建模本体没起来：MDB 声明读不了、E3D 服务起不来、预热 worker 崩——那时本批根按「房间算不出来」记失败）。此前这两类缺口都让之后每个任务的全部根「room calculator unavailable」判死（0.1.25 现场：1112 `18/18`、7997 `6772/6772`）。
+_Avoid_: 房间阻断、resident blocked（指缺口时）、面板缺几何算失败、把 `Degraded` 当不可用、有行却不可用挡参照（D-A (a)，已作废）
+
+**任务开工前对齐 (Task-start Room Reference Refresh)**：
+每个 dbnum 任务的模型半边开工前，把常驻房间模型对齐到**此刻的文件版本**的那一步（ADR-073 2026-09-16 D12，入口 `model_db_adapter::refresh_room_reference_before_task`，三处：批次执行体、初始化双 lane、读透侧 ensure 准入）。探针便宜（MDB 成员清单 + 每个 DESI 的最新会话 + 冻结令牌，不装 schema、不起 E3D 服务），文件版本 composite 与装好的那份相同 = 常路、零重建；变了才按文件重建（两层按文件的缓存让没变的文件只付重开校验的钱），在 `lock_spatial_serial` 里整份替换——已开工任务手里的 `Arc` 不受影响，D1「任务期间不换代」说的是每个任务自己那份引用。重建失败留旧代继续算、`Degraded` 记一条 `stage=refresh`；启动 `Blocked` 而这次成了就是自愈。它取代了 ADR-067 那种「每轮 drain 进串行锁后按清单键懒换代」——没有轮、没有参照落款、没有启动对比。会话口径是文件最新，不是本任务的 T。
+_Avoid_: 换代（ADR-067 含义）、房间刷新、常驻模型热更新、把它当房间阶段
+
+**房间代号 (Room Generation)**：
+根 ACK 里的 `room_generation`、`required_room_generation()`、常驻模型生命周期的 `generation`——三处同一个字串：`ResidentRoomModel::input_version`，拓扑 + 在册视图 + 有几何面板的几何的摘要（ADR-073 D12）。**不是**文件版本 composite（那是 `manifest.key`，只当「要不要重建」的探针键）。一个 DESI 前进却没动任何房间 / 面板 → 代号不变 → 旧 ACK 照旧有效；房间 / 面板真变了 → 代号变 → 旧 ACK 作废、`e3d.room.lookup` 对那些根回 `not_computed` 直到重生成（d-381 早已接受的语义），受影响成员的边由 §未决 U1 的 `RoomOnly` 传播补。第四处是水位行上的 `model_room_generation`（见「整库房间对齐代号」，ADR-073 D14）：同一个字串的 durable 副本，ACK 随进程消失后由它替那些根答话——所以「代号变 → 作废」这一句在两层判据上同时成立。
+_Avoid_: resident generation（指文件 composite 时）、房间版本、房间水位
+
+**整库房间重算 (RoomOnly Recompute)**：
+面板自身变化的传播（d-819，ADR-073 2026-09-16 D13）：一个 dbnum 任务在本批根**刷盘之后、收尾之前**，拿开工时同一台计算器，对本库全部有回执的根按投影里的**现有几何**重算归属、重写 `room_relate` / `room_panel_relate`（`model_db_adapter::recompute_dbnum_room_edges`），不重生几何、不动模型行、不动空间树，提交全过后把这些根 ACK 的房间代号对齐。两条触发：① 窗口规划器在本窗变更集（e3d-model `ChangeLedger`）里碰到房间定义族 `PANE / FRMW / SBFR / CWALL / CFLOOR` 的任一条目 → 排一条 `ModelWorkAction::RoomOnly` 工作项（`target_refno = dbnum=<n>`，一窗一条，随 `side_actions` 交给任务）；② 开工前对齐换了房间代号。只按 noun 判、不解析账本散文——只改元数据的面板改动多触发一次，接受。与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等。算不出的根按 D2 记失败、任务 `Partial`、`model_sesno` 不盖；刷盘没齐不跑。它是任务内部的一步，不入队、没有 HTTP 口。跨库成员（面板在 A、成员在 B）只在 A 变了之后第一个开工的库上被 ② 带到，其余库等自己下一次触发（U3）。
+_Avoid_: 房间任务、房间阶段、`rooms/rebuild`、RoomRecalcPanel（ADR-010 那种逐面板目标行，已退役）、房间队列
 
 **模型发布策略 (Model Publication Policy)**：
 与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 `mem` 档虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。

@@ -30,6 +30,10 @@ pub enum ModelWorkAction {
     /// 一块 PANE 或房间节点本身动了 → 整块面板重算（面板一动，成员全变，
     /// 元素级表达不了）。
     RoomRecalcPanel,
+    /// 本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL / CFLOOR）→ 用本库全部根的**现有几何**
+    /// 重算两张房间边，不重生几何（d-819 / ADR-073 D13）。`target_refno` 是 `dbnum=<n>`，一窗最多一条；
+    /// 由 dbnum 任务在本批根刷盘之后、收尾之前就地跑（`batch_worker`），不是对外契约、不入队。
+    RoomOnly,
 }
 
 impl ModelWorkAction {
@@ -42,6 +46,7 @@ impl ModelWorkAction {
             Self::PostRegenAabb => "post_regen_aabb",
             Self::RoomRecalcElement => "room_recalc_element",
             Self::RoomRecalcPanel => "room_recalc_panel",
+            Self::RoomOnly => "room_only",
         }
     }
 
@@ -62,6 +67,7 @@ impl ModelWorkAction {
             "post_regen_aabb" => Self::PostRegenAabb,
             "room_recalc_element" => Self::RoomRecalcElement,
             "room_recalc_panel" => Self::RoomRecalcPanel,
+            "room_only" => Self::RoomOnly,
             _ => return None,
         })
     }
@@ -1095,7 +1101,7 @@ mod tests {
     /// 送进来会被当成非法参数拒绝——表里躺着行，接口却说没有这种东西。
     #[test]
     fn action_names_roundtrip_through_parse() {
-        const ALL_ACTIONS: [ModelWorkAction; 7] = [
+        const ALL_ACTIONS: [ModelWorkAction; 8] = [
             ModelWorkAction::RegenRoot,
             ModelWorkAction::Transform,
             ModelWorkAction::DeleteCleanup,
@@ -1103,6 +1109,7 @@ mod tests {
             ModelWorkAction::PostRegenAabb,
             ModelWorkAction::RoomRecalcElement,
             ModelWorkAction::RoomRecalcPanel,
+            ModelWorkAction::RoomOnly,
         ];
         for action in ALL_ACTIONS {
             assert_eq!(

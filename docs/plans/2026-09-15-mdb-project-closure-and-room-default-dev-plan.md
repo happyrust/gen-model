@@ -260,6 +260,9 @@ root\<Project>\<path2>\<code>000    // 多一层：E3D3.1-slyk-project\YCYK-E3D\
 
 - **Q1** 房间门：`room_membership = true` 且房间输入不全时，改成「模型照生成、房间跳过、health 标黄」还是维持全判死（ADR-073 现状）？
   推荐：另开一条计划评估 ADR-073 的影响面，本计划不动。
+  **已定（2026-09-16，ADR-073 追记 D8–D11）**：取第三种——**降级不判死、房间照算**。缺 DESI 文件按有的文件建（缺的库不在册）；
+  缺几何的在册面板不进索引、逐根写边时作为保护集让开、旧边不删；生命周期 `Degraded` 放行计算器；`/health` 标黄并点名缺口。
+  两道整份闸（`require_design_files()`、`MemoryRoomCalculator::new` 里的 `ensure_complete()`）删除。见 changelog 2026-09-16。
 - **Q2** 依赖目录扫描要不要收紧成「只开 MDB 声明的库」（与 core.dll 一致）？推荐：本轮不收，ADR-078 记为已知差异，留给后续观测。
 - **Q3** `unresolved` 非空或有根不可达时要不要拒绝启动？推荐：不拒绝，只 `degraded_sections`（已定位项目的数据面照常），需要时再加 fail-fast 开关。
 - **Q4** 主项目的 `project_name` 是文件夹名还是项目码？推荐：文件夹名（现状）优先，找不到时按项目码在搜索根里找，两种都支持。

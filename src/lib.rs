@@ -1642,9 +1642,11 @@ fn print_startup_complete_banner(
                 generation,
                 problems,
             } => format!(
-                "开，degraded（代 {}）：{}",
+                "开，degraded（代 {}，{} 条缺口）——房间边照算，缺几何面板的存量边受保护、缺文件的库不在册，\
+                 这些不在 model_sesno 的房间承诺内（ADR-073 D11；明细 /health.features.room.problems）：{}",
                 short(&generation),
-                problems.join("; ")
+                problems.len(),
+                problems.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
             ),
             ResidentLifecycle::Blocked { problems } => {
                 format!(

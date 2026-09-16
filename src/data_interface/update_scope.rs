@@ -416,28 +416,35 @@ mod tests {
             .filter(|db| db.styp == super::super::mdb_membership::DESI_STYP)
             .collect::<Vec<_>>();
         println!("AMS_MDB_DESI declared={} missing={missing:?}", design.len());
-        match crate::fast_model::room_topology::latest_frozen_sources().await {
-            Ok((_, _, room_sources)) => {
-                assert!(missing.is_empty());
-                assert_eq!(
-                    room_sources
-                        .iter()
-                        .map(|source| source.dbnum() as u32)
-                        .collect::<BTreeSet<_>>(),
-                    design,
-                    "room preload must cover precisely all MDB DESI files"
-                );
-            }
-            Err(error) => {
-                assert!(
-                    !missing.is_empty(),
-                    "unexpected room input failure: {error:#}"
-                );
-                for database in missing {
-                    assert!(error.to_string().contains(&database.dbnum.to_string()));
-                }
-                println!("AMS_MDB_ROOM_BLOCKER {error:#}");
-            }
+        // ADR-073 D8：缺文件的 DESI 不再让房间输入整份 Err——它们按号进 `missing_design`，
+        // 冻结源恰好覆盖「声明的 DESI 减去缺文件的」。
+        let frozen = crate::fast_model::room_topology::latest_frozen_sources()
+            .await
+            .expect("missing DESI files degrade the room reference, they do not fail it");
+        let missing_dbnums: BTreeSet<u32> = missing.iter().map(|db| db.dbnum).collect();
+        assert_eq!(
+            frozen
+                .missing_design
+                .iter()
+                .map(|(dbnum, _)| *dbnum)
+                .collect::<BTreeSet<_>>(),
+            missing_dbnums,
+            "every declared DESI without a file is named for degradation"
+        );
+        assert_eq!(
+            frozen
+                .sources
+                .iter()
+                .map(|source| source.dbnum() as u32)
+                .collect::<BTreeSet<_>>(),
+            design
+                .difference(&missing_dbnums)
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            "room preload must cover precisely the MDB DESI files that exist"
+        );
+        if !missing.is_empty() {
+            println!("AMS_MDB_ROOM_DEGRADED missing={missing_dbnums:?}");
         }
         assert!(
             scope.admits("DESI", 7015),

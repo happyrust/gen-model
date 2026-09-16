@@ -355,6 +355,14 @@ pub struct DbnumState {
     /// 空 = 这个库还没有任何目录落款（没生成过，或旧行）——不算过期，也不参与核对。
     #[serde(default)]
     pub model_catalogue_sessions: Vec<CatalogueStampRow>,
+    /// 这个库的房间边整库对齐到哪一代常驻房间模型（ADR-073 D14）：`ResidentRoomModel::input_version`，
+    /// 与根 ACK 的 `room_generation` 同一个字串。随 `model_sesno` 由任务收尾那一笔写，且只有能替
+    /// **整库**说话的任务才写——初始化、整库重排的 ModelOnly、本任务跑过整库房间重算（D13）；普通
+    /// 增量窗口只重算被触到的根，这一格原样不动；`room_membership=false` 下盖模型水位时清空。
+    /// `None` = durable 侧没有房间就绪承诺（旧行、从没整库对齐过、关着开关生成的）。
+    /// `e3d.room.lookup` 在进程内没有该根 ACK 时（rocksdb 直写不留投影、冷重启）拿它当就绪判据。
+    #[serde(default)]
+    pub model_room_generation: Option<String>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
@@ -449,6 +457,9 @@ struct StateRow {
     /// 库级目录落款（ADR-079）；旧行没有这一列 → 空。
     #[serde(default)]
     model_catalogue_sessions: Option<Vec<CatalogueStampRow>>,
+    /// 整库房间边对齐到的常驻代号（ADR-073 D14）；旧行没有这一列 → `None`。
+    #[serde(default)]
+    model_room_generation: Option<String>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
@@ -458,7 +469,7 @@ struct StateRow {
 const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
      IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
      model_lazy_roots, \
-     model_dead_roots, model_roots_observed_at, model_catalogue_sessions";
+     model_dead_roots, model_roots_observed_at, model_catalogue_sessions, model_room_generation";
 
 #[derive(Debug, Deserialize)]
 struct DatabaseWatermark {
@@ -1323,6 +1334,7 @@ impl DbnumState {
                     model_dead_roots: row.model_dead_roots,
                     model_roots_observed_at: row.model_roots_observed_at,
                     model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
+                    model_room_generation: row.model_room_generation,
                     initialized: effective.is_some(),
                 })
             })
@@ -1482,6 +1494,7 @@ impl DbnumState {
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
             model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
+            model_room_generation: row.model_room_generation,
             initialized: applied.is_some(),
         }))
     }

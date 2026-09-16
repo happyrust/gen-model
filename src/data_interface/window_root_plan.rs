@@ -39,7 +39,8 @@ use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
 use e3d_model::element_diff::ElementDiff;
 use e3d_model::increment::{
-    AffectedClosure, PlanLimits, UpdatePlan, collect_window, plan_update, plan_update_with,
+    AffectedClosure, NoModelTier, PlanLimits, UpdatePlan, collect_window, plan_update,
+    plan_update_with,
 };
 use e3d_model::ledger::ChangeKind;
 
@@ -239,26 +240,40 @@ pub fn plan_window_roots(
     plan
 }
 
-/// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08）。
+/// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08；
+/// 2026-09-15 S6 起答案带档位）。
 ///
 /// 四条缺一不可：没换类型、没换属主、成员表没动、记录变了能指出是哪几项（不 `opaque`）；
-/// 且**每一个**变了的属性都过 [`crate::data_interface::model_impact::attribute_is_metadata_only`]
-/// （效果表 DataOnly ∧ E3D 字典 DCHC=0，今天就是 `NAME / DESC / PURP / FUNC / LCHKDA`）。`attributes`
-/// 为空回 `false`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+/// 且**每一个**变了的属性都过
+/// [`crate::data_interface::model_impact::attribute_no_model_tier`]。`attributes`
+/// 为空回 `None`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+///
+/// 档位是整个元素的，不是逐属性的：全部落在老名单里才回 [`NoModelTier::MetadataOnly`]，
+/// **只要有一个**靠新档（字典 DCHC=0 ∧ 生成侧不读）过关就回 [`NoModelTier::UnreadAttribute`]，
+/// 与 e3d-model 那两个横切计数的口径一致。去向两档相同，档位只决定这一笔记在哪一格。
+/// `unread_gate` 关着时新档不开口，谓词逐位回到 2026-09-08。
 ///
 /// 它只决定**上卷**：账本照记、闭包种子照收（凭证前移不因此少收），房间结构触发照读账本
 /// （FRMW 改名命中关键字仍出 `RoomRecalcPanel`）。与 e3d-model 的 `is_placement_only` 是两个
-/// 问题：那个问「除了摆放还动了别的没有」，这个问「动的全是业务元数据吗」。
-pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
-    diff.type_changed.is_none()
-        && diff.owner_changed.is_none()
-        && diff.members.is_none()
-        && !diff.opaque
-        && !diff.attributes.is_empty()
-        && diff
-            .attributes
-            .iter()
-            .all(|name| crate::data_interface::model_impact::attribute_is_metadata_only(name))
+/// 问题：那个问「除了摆放还动了别的没有」，这个问「动的全是不影响模型的属性吗」。
+pub(crate) fn change_is_metadata_only(diff: &ElementDiff, unread_gate: bool) -> Option<NoModelTier> {
+    if diff.type_changed.is_some()
+        || diff.owner_changed.is_some()
+        || diff.members.is_some()
+        || diff.opaque
+        || diff.attributes.is_empty()
+    {
+        return None;
+    }
+    let mut tier = NoModelTier::MetadataOnly;
+    for name in &diff.attributes {
+        match crate::data_interface::model_impact::attribute_no_model_tier(name, unread_gate) {
+            Some(NoModelTier::MetadataOnly) => {}
+            Some(NoModelTier::UnreadAttribute) => tier = NoModelTier::UnreadAttribute,
+            None => return None,
+        }
+    }
+    Some(tier)
 }
 
 /// 文件侧输入：只读两端 `DbSet`，不碰 SurrealDB。生产由
@@ -637,14 +652,12 @@ impl WindowRootSources {
         })?;
         // 元数据门（2026-09-08，默认开）：只改了 NAME / DESC 一类的候选不上卷、不级联。谓词是
         // gen-model 的（效果表 ∧ 字典 DCHC），e3d-model 只收一个闭包；关着时逐位回到 `plan_update`。
+        // 第二档（S6，默认关）再放行「字典 DCHC=0 ∧ 生成侧不读」的属性，关着时门的宽窄不变。
         let plan = if crate::options::model_skip_metadata_only_changes() {
-            plan_update_with(
-                base,
-                target,
-                &window,
-                PlanLimits::default(),
-                change_is_metadata_only,
-            )
+            let unread_gate = crate::options::model_skip_unread_attribute_changes();
+            plan_update_with(base, target, &window, PlanLimits::default(), |diff| {
+                change_is_metadata_only(diff, unread_gate)
+            })
         } else {
             plan_update(base, target, &window)
         };
@@ -977,6 +990,15 @@ pub(crate) async fn build_model_update_plan_from_window(
             sources.plan.report.metadata_only
         ));
     }
+    if sources.plan.report.unread_attribute > 0 {
+        warnings.push(format!(
+            "dbnum={dbnum}: unread-attribute gate — {} modified candidate(s) touched at least one \
+             attribute outside the old list that the dictionary rates DCHC=0 and no generator \
+             reads by name, and were not rolled up; ledger and closure seeds unchanged \
+             (model_skip_unread_attribute_changes)",
+            sources.plan.report.unread_attribute
+        ));
+    }
     warnings.push(format!(
         "dbnum={dbnum}: XGEOMETRY observation only — matched={} unreadable={}; \
          window work and credential advancement were unchanged",
@@ -1024,6 +1046,24 @@ pub(crate) async fn build_model_update_plan_from_window(
     // 不认识它的执行体（今天的 drain）照旧整根重算；B6 的分流认它。开关关时分桶已空，
     // `transform_units` 为空，计划与今天逐位相同。
     out.transform_units = transform_units;
+    // 面板自身的变化（d-819 / ADR-073 D13）：本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL /
+    // CFLOOR）→ 给本库排一条 `RoomOnly`——任务在本批根刷盘之后用现有几何重算本库全部根的两张
+    // 房间边。逐根路径只算「本根在哪些面板里」，面板那一侧变了、它名下别的根点不着，这是那个盲区
+    // 的填法；不解析账本 `detail` 散文，只按 noun 判。
+    if let Some(reason) =
+        crate::data_interface::room_recompute::room_definition_change(sources.plan.ledger.entries())
+    {
+        out.warnings.push(format!(
+            "dbnum={dbnum}: room definition changed — {reason}; a RoomOnly recompute of every \
+             root's room edges runs in this task after the roots are durable (d-819)"
+        ));
+        out.work_items
+            .push(crate::data_interface::room_recompute::room_only_work_item(
+                dbnum,
+                db_type,
+                target_sesno as i32,
+            ));
+    }
     Ok(out)
 }
 
@@ -2147,7 +2187,8 @@ mod tests {
         }
     }
 
-    /// 元数据门谓词的真值表（2026-09-08）：四条结构条件缺一不可，属性全部过双重判据才放行。
+    /// 元数据门谓词的真值表（2026-09-08；2026-09-15 S6 起答案带档位）：四条结构条件缺一不可，
+    /// 属性全部过双重判据才放行，放行时这一侧只答得出 [`NoModelTier::MetadataOnly`] 这一档。
     #[test]
     fn a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved() {
         use e3d_model::element_diff::MemberDelta;
@@ -2160,37 +2201,85 @@ mod tests {
             attributes: attributes.iter().map(|name| name.to_string()).collect(),
             opaque: false,
         };
-        // 五个双票属性，单个或组合都放行。
-        assert!(change_is_metadata_only(&diff(&["NAME"])));
-        assert!(change_is_metadata_only(&diff(&[
-            "DESC", "NAME", "PURP", "FUNC", "LCHKDA"
-        ])));
+        // 五个双票属性，单个或组合都放行，且都落在老名单那一档。
+        assert_eq!(
+            change_is_metadata_only(&diff(&["NAME"]), false),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert_eq!(
+            change_is_metadata_only(&diff(&["DESC", "NAME", "PURP", "FUNC", "LCHKDA"]), false),
+            Some(NoModelTier::MetadataOnly)
+        );
         // 混进一个几何 / 位姿 / 依赖属性就不放行。
-        assert!(!change_is_metadata_only(&diff(&["NAME", "DIAM"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "POS"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "SPRE"])));
+        assert!(change_is_metadata_only(&diff(&["NAME", "DIAM"]), false).is_none());
+        assert!(change_is_metadata_only(&diff(&["NAME", "POS"]), false).is_none());
+        assert!(change_is_metadata_only(&diff(&["NAME", "SPRE"]), false).is_none());
         // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
-        assert!(!change_is_metadata_only(&diff(&["CACHID"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
+        assert!(change_is_metadata_only(&diff(&["CACHID"]), false).is_none());
+        assert!(change_is_metadata_only(&diff(&["NAME", "CACHID"]), false).is_none());
         // 没有属性变化不是「只改了元数据」：那是没变，或只动了结构。
-        assert!(!change_is_metadata_only(&diff(&[])));
+        assert!(change_is_metadata_only(&diff(&[]), false).is_none());
         // 结构四条：类型、属主、成员、opaque，任一动了就不放行，哪怕属性只有 NAME。
         let mut typed = diff(&["NAME"]);
         typed.type_changed = Some(("BRAN".into(), "ELBO".into()));
-        assert!(!change_is_metadata_only(&typed));
+        assert!(change_is_metadata_only(&typed, false).is_none());
         let mut reparented = diff(&["NAME"]);
         reparented.owner_changed = Some((Some("24384/2".into()), Some("24384/3".into())));
-        assert!(!change_is_metadata_only(&reparented));
+        assert!(change_is_metadata_only(&reparented, false).is_none());
         let mut members = diff(&["NAME"]);
         members.members = Some(MemberDelta {
             added: vec![],
             removed: vec![],
             reordered: true,
         });
-        assert!(!change_is_metadata_only(&members));
+        assert!(change_is_metadata_only(&members, false).is_none());
         let mut opaque = diff(&["NAME"]);
         opaque.opaque = true;
-        assert!(!change_is_metadata_only(&opaque));
+        assert!(change_is_metadata_only(&opaque, false).is_none());
+    }
+
+    /// 档位是**整个元素**的一句话（S6）：全落老名单才算老档，有一个靠新档过关这一笔就记进
+    /// `unread_attribute`；新档关着时它一个字都不许改变，包括结构四条那几种。
+    #[test]
+    fn the_element_tier_is_the_widest_tier_any_of_its_attributes_needed() {
+        use e3d_model::element_diff::MemberDelta;
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "ELBO".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        // 关着：新档那些名字照旧不放行，逐位回到 2026-09-08。
+        assert!(change_is_metadata_only(&diff(&["SUPP"]), false).is_none());
+        assert!(change_is_metadata_only(&diff(&["NAME", "SUPP"]), false).is_none());
+        // 开着：全老名单仍是老档；混了一个新档名字，整个元素记新档。
+        assert_eq!(
+            change_is_metadata_only(&diff(&["NAME", "DESC"]), true),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert_eq!(
+            change_is_metadata_only(&diff(&["SUPP"]), true),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            change_is_metadata_only(&diff(&["NAME", "SUPP", "ACDATE"]), true),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        // 开着也要一票否决：混进一个生成侧读得到的名字，整个元素照旧上卷。
+        assert!(change_is_metadata_only(&diff(&["SUPP", "NGMR"]), true).is_none());
+        assert!(change_is_metadata_only(&diff(&["SUPP", "DIAM"]), true).is_none());
+        assert!(change_is_metadata_only(&diff(&["SUPP", "CACHID"]), true).is_none());
+        // 结构四条对新档一视同仁。
+        let mut members = diff(&["SUPP"]);
+        members.members = Some(MemberDelta {
+            added: vec![],
+            removed: vec![],
+            reordered: true,
+        });
+        assert!(change_is_metadata_only(&members, true).is_none());
     }
 
     /// 接线的形状：`collect` 只在开关开着时经 `plan_update_with` 把 `change_is_metadata_only`
@@ -2228,8 +2317,13 @@ mod tests {
             .expect("owner_chain_t follows predicate")
             .0;
         assert!(
-            predicate_body.contains(concat!("attribute_is_", "metadata_only(")),
+            predicate_body.contains(concat!("attribute_no_", "model_tier(")),
             "属性名单只有 model_impact 那一份"
+        );
+        assert!(
+            gate.find(concat!("model_skip_unread_", "attribute_changes()"))
+                .is_some_and(|second| second < off),
+            "第二档的开关也得在这里读，而不是埋进谓词里"
         );
         for structural in ["type_changed", "owner_changed", "members", "opaque"] {
             assert!(
@@ -2327,13 +2421,9 @@ mod tests {
                 }
             };
             let off = plan_update(&base, &target, &window);
-            let on = plan_update_with(
-                &base,
-                &target,
-                &window,
-                PlanLimits::default(),
-                change_is_metadata_only,
-            );
+            let on = plan_update_with(&base, &target, &window, PlanLimits::default(), |diff| {
+                change_is_metadata_only(diff, false)
+            });
             let label = format!("{base_sesno}→{target_sesno}");
             // 1. 只少上卷，不多、不删。
             assert!(
