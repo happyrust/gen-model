@@ -2055,6 +2055,159 @@ mod tests {
         assert!(no_model_candidates(&ChangeLedger::new()).is_empty());
     }
 
+    /// 探针（手动）：钉一窗、开着 `model_transform_cheap_path` 跑一遍**生产同款**选根 + 刚体分桶
+    /// （`WindowRootSources::collect` → `impact` → `plan_window_roots` → `rigid_motion`），把候选表按类
+    /// （合格锚点 / 被排除锚点 / `no_model` / `Other`，`Other` 里单列「只 `CACHID`」）与每个被波及根的判决
+    /// （transform 的锚点 / rejected 的原因）打出来。量的是 ADR-066 D1 规则 2（2026-09-17 修订）之后还剩什么挡路
+    /// ——计划 §8 Q6「先不动、先量」的那一量：真实编辑里子树被盖 `CACHID` 戳的元素挡不挡这根。
+    ///
+    /// 只读文件、不碰库、不下断言（结论是语料的性质）。`AIOS_PROJAMS_GEOMETRY_FILE`（默认 ams8000_0001）+
+    /// `AIOS_TRANSFORM_WINDOW=base:target`（必填）；开关用 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1` 压过配置，
+    /// 没开时候选表为空、这里只报一句。`settled` 按「S 时刻每个根都已发布」取 `roots_S` 全集（探针没有进程内账本）。
+    #[test]
+    #[ignore = "manual live: AIOS_TRANSFORM_WINDOW=base:target on a real DESI file; needs the E3D template directory"]
+    fn probe_transform_classification_for_window() {
+        use std::path::PathBuf;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+
+        let file = PathBuf::from(std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(
+            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into(),
+        ));
+        let (base_sesno, target_sesno): (u32, u32) = {
+            let window = std::env::var("AIOS_TRANSFORM_WINDOW")
+                .expect("AIOS_TRANSFORM_WINDOW=base:target is required");
+            let (base, target) = window
+                .split_once(':')
+                .expect("AIOS_TRANSFORM_WINDOW=base:target");
+            (base.parse().expect("base"), target.parse().expect("target"))
+        };
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let open = |sesno: u32| -> Arc<DbSet> {
+            let set = Arc::new(
+                DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
+            );
+            set.add_db(DbFilePin {
+                file: file.clone(),
+                template: template_file_for(schema.template_dir(), "DESI").expect("DESI template"),
+                db_type: Some("DESI".into()),
+                sesno: Some(sesno),
+            })
+            .expect("pin DESI");
+            set
+        };
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let (base, target) = (open(base_sesno), open(target_sesno));
+        let sources = WindowRootSources::collect(
+            &file,
+            base_sesno,
+            target_sesno,
+            &base,
+            &target,
+            &unit_types,
+            &[],
+        )
+        .expect("collect");
+        let label = format!(
+            "{} {base_sesno}→{target_sesno}",
+            file.file_name().and_then(|name| name.to_str()).unwrap_or("?")
+        );
+        println!(
+            "{label}: switch model_transform_cheap_path={} | {}",
+            sources.rigid.enabled,
+            sources.plan.report.totals_line()
+        );
+        if !sources.rigid.enabled {
+            println!("{label}: 开关关着，候选表为空——用 AIOS_MODEL_TRANSFORM_CHEAP_PATH=1 再跑");
+            return;
+        }
+
+        // 候选表按类。`Other` 的字串是 `format!("{kind:?}: {detail}")` 拼的，「只 CACHID」= 唯一一条且是 CACHID 变了。
+        let noun_of = |refno: RefnoEnum| -> String {
+            target
+                .element(refno_to_e3d(refno))
+                .element_type()
+                .or_else(|_| base.element(refno_to_e3d(refno)).element_type())
+                .unwrap_or_else(|_| "?".into())
+        };
+        let mut by_class: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for candidate in &sources.rigid.candidates {
+            let (class, detail) = match &candidate.kind {
+                CandidateKind::Anchor { rigid: Ok(()), .. } => ("锚点·合格", String::new()),
+                CandidateKind::Anchor {
+                    rigid: Err(reason),
+                    ..
+                } => ("锚点·被排除", reason.clone()),
+                CandidateKind::NoModel(detail) => ("no_model（不挡路）", detail.clone()),
+                CandidateKind::Other(detail) if detail == "AttributesModified: CACHID 变了" => {
+                    ("Other·只 CACHID（挡路，Q6 未落地）", detail.clone())
+                }
+                CandidateKind::Other(detail) => ("Other（挡路）", detail.clone()),
+            };
+            by_class.entry(class).or_default().push(format!(
+                "{} {} chain_t={} {}",
+                candidate.refno.to_pdms_str(),
+                noun_of(candidate.refno),
+                candidate.chain_t.len(),
+                detail
+            ));
+        }
+        for (class, rows) in &by_class {
+            println!("{label}: [{class}] {} 件", rows.len());
+            for row in rows.iter().take(30) {
+                println!("    {}", row.chars().take(200).collect::<String>());
+            }
+            if rows.len() > 30 {
+                println!("    …（还有 {} 件）", rows.len() - 30);
+            }
+        }
+        for note in &sources.rigid.notes {
+            println!("{label}: note: {note}");
+        }
+
+        // 生产同款分桶。`settled` = roots_S 全集（探针假设 S 时刻全部已发布）。
+        let roots_s = sources.roots_s.clone();
+        let settled: BTreeSet<RefnoEnum> = roots_s.iter().map(|root| root.refno).collect();
+        let impact = sources.impact(&roots_s);
+        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+        let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
+        println!(
+            "{label}: roots_S={} roots_T={} touched={} regen={} delete={} advance={} lazy={} degraded={:?} | transform={} rejected={}",
+            roots_s.len(),
+            sources.roots_t.len(),
+            impact.touched.len(),
+            plan.regen.len(),
+            plan.delete.len(),
+            plan.advance.len(),
+            plan.lazy.len(),
+            plan.degraded,
+            rigid.transform.len(),
+            rigid.rejected.len()
+        );
+        for (root, anchors) in &rigid.transform {
+            println!(
+                "{label}: transform {} {} anchors={:?}",
+                root.to_pdms_str(),
+                noun_of(*root),
+                anchors
+                    .iter()
+                    .map(|anchor| anchor.refno.to_pdms_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+        for (root, reason) in &rigid.rejected {
+            println!(
+                "{label}: rejected {} {} — {}",
+                root.to_pdms_str(),
+                noun_of(*root),
+                reason.chars().take(300).collect::<String>()
+            );
+        }
+    }
+
     /// D1-a（开发计划 2026-09-15 S2 / ADR-066 D1 规则 3 补条）：P23 的 noun 自己挪位不算刚体锚点——
     /// [`anchor_noun_exclusion`] 给 `Err`，原因带 `placement-derived`；三种形状（锚点即根 `HRPOST`、
     /// 锚点在根之下 `DOOR` 在 `WALL` 下、锚点即根 `CTSUPP` 与旁边正常的 `EQUI` 锚点并列）经

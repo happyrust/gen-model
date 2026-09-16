@@ -1,5 +1,31 @@
 # 变更记录
 
+## 2026-09-17
+
+### ADR-066 D1 规则 2 · 账本去向 `no_model` 的候选不再把根踢回 regen——「挪 EQUI + 子元素改个名」走得了 transform
+
+- **为什么**：`collect_rigid_motion_sources` 把账本每一条都折成候选，不是锚点的一律 `Other`；`rigid_motion::classify_one`
+  （D1 规则 2，探针注释里叫「规则 4」）在根的子树 / 祖先链上碰到一个 `Other` 就整根 regen。可 e3d-model 是先 `ledger.record`
+  再进元数据门：两票门放行的 `no_model` 候选（子元素只改 `NAME` / `DESC` 那类）照样在账本里，账本也记了去向
+  （`Disposition::NoModel`），gen-model 一处没读。结果「挪 EQUI + 子元素改个名」两件事单独发生分别是 transform 与 skip，
+  落在同一窗却整根 regen——真实编辑几乎必带这种候选，便宜路基本打不着。
+- **改动**：e3d-model `ChangeLedger::dispositions()` 新访问器（原样给出 `(refno, Disposition)` 表，守恒仍由 `accounts_for` 判）；
+  `rigid_motion::CandidateKind` 加 `NoModel(String)`，`classify_one` 对它既不收锚点也不报错、只数——规则 2 从此只数去向
+  `RolledUp` 的候选；根里**只有** `no_model` 候选（没有一个 Δ）照旧 regen，原因「touched only by N no_model candidate(s)」
+  （零锚点的 transform = 只推回执不动记录，是选根的另一道题，这里不开）。`window_root_plan::no_model_candidates(&ledger)`
+  取只登记了 `no_model` 的 refno（同时登记了别的去向的不算，宁可挡路），`collect_rigid_motion_sources` 的非锚点候选按它分
+  `NoModel` / `Other`；锚点先于去向——Δ 是真的，乘上去永远不错。两处探针 `match rigid_anchor(...)` 补 `NoModel` 臂（与 `Other`
+  同判）。ADR-066 状态行 + D1 规则 2 末注记下这条修订与三条边界：`Unresolved` 照旧挡路（那时窗口本就退化）；只 `CACHID`
+  跳动的子元素今天**不是** `no_model`（§8 Q6 未落地），仍挡路——ZONE / STRU / 带 SUBE 的 EQUI 挪位要等 Q6 才打得着这条路。
+- **验证**：新单测 `a_no_model_candidate_under_the_root_does_not_kick_it_back_to_regen`（锚点在根之上 / 锚点即根两种形状同窗、
+  锚点集不混入 no_model、`Other` 对照仍只踢自己那根）、`a_root_touched_only_by_no_model_candidates_stays_regen`、
+  `no_model_candidates_follow_the_ledger_dispositions` 过；`cargo test --lib -- rigid_motion::` 25 过、`window_root_plan::`
+  33 过 10 ignored（探针）；rustfmt 本轮新增行无差异（文件里剩的三处差异都不是本轮的）；CRLF 未翻（e3d-model `ledger.rs`
+  本就是 LF）。本轮与 codex/model-projection-cache 的合并撞在一起：改动先被另一路会话按 wip 落进 8eabda89a、随 56e1b47ea
+  合入，单测在 8eabda89a 的独立 worktree 上先跑过一遍、合并落地后在共享工作树复跑。
+- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关 `model_transform_cheap_path`
+  默认仍关。e3d-model 的 `dispositions()` 访问器只在 vendor 工作树里、**未提交**——gen-model HEAD 已经依赖它。
+
 ## 2026-09-16
 
 ### 属性变化分类对齐 core · S4 探针读法——被属主消费的锚点两态相等报「属主不变量未变」而非「无判别力」
