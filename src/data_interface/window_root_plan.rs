@@ -5654,6 +5654,23 @@ mod tests {
         }
     }
 
+    /// 这一类的锚点**自己没有挂在自己 refno 上的记录**——负体、开孔与其它挂在消费成员的属主下的非单元、剖面 / 路径数据、
+    /// 几何集成员（[`anchor_noun_exclusion`] / [`anchor_owner_exclusion`] 那几条「被属主消费的几何」）：它的挪位只能从**属主**
+    /// 的记录上看出来，锚点子树里由 Δ 前移的记录数（`moved`）恒为 0。两态相等时不该读成「无判别力」（那句像是样本没挑好），
+    /// 而是「属主不变量未变」：体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵 / noun 六个量看不见这一挪——db8000 609→610 NBOX 在 BOX
+    /// 体内平移 200 mm 报相等，可两端 BOX 体积都是 1e9 − 300²×1000、亏格 1，生成器早就扣了；再挪到孔越出 +E 面（614→615）
+    /// 才在属主链 BOX 上判出 triangles / genus / volume 不等。它分不清「属主没消费它」与「不变量看不见这一挪」，所以照旧
+    /// **不算**有判别力的样本；要坐实排除，挑会改属主体积 / 亏格 / 包围盒的挪法（越出体外、通孔变盲孔）。
+    fn category_consumed_by_owner(category: &str) -> bool {
+        matches!(
+            category,
+            "负体（属主 CSG 消费）"
+                | "非单元挂在消费成员的属主下"
+                | "剖面 / 路径数据"
+                | "几何集成员"
+        )
+    }
+
     /// 一个样本两态对拍的结果。
     #[derive(Debug)]
     enum ParityOutcome {
@@ -5687,7 +5704,8 @@ mod tests {
             matches!(self, ParityOutcome::Equal { .. })
         }
 
-        /// 相等但锚点子树里一件生成物都没有——没有判别力。
+        /// 相等但锚点子树里一件生成物都没有——没有判别力。被属主消费的类（[`category_consumed_by_owner`]）`moved` 恒 0 是形状
+        /// 所致，读作「属主不变量未变」，但同样分不清「没消费」与「看不见」，照旧不算有判别力。
         fn is_powerless(&self) -> bool {
             matches!(self, ParityOutcome::Equal { moved: 0, .. })
         }
@@ -5707,10 +5725,21 @@ mod tests {
             matches!(self, ParityOutcome::Differs { .. }) && !self.differs_at_anchor()
         }
 
-        fn summary(&self) -> String {
+        /// 一句话。`consumed_by_owner` = 样本的类别是被属主消费的几何（[`category_consumed_by_owner`]）：相等且 `moved == 0`
+        /// 时报「属主不变量未变」而非「无判别力」——它自己本来就没有记录，相等只说明属主的不变量看不见这一挪。
+        fn summary(&self, consumed_by_owner: bool) -> String {
             let head =
                 |notes: &Vec<String>| notes.iter().take(4).cloned().collect::<Vec<_>>().join("，");
             match self {
+                ParityOutcome::Equal {
+                    elements,
+                    moved: 0,
+                    tubes,
+                } if consumed_by_owner => {
+                    format!(
+                        "两态相等，属主不变量未变（{elements} 件，管身 {tubes}；锚点由属主消费、自己无记录）——分不清「属主没消费它」与「体积 / 三角数 / 亏格 / 包围盒看不见这一挪」，要坐实排除得挑会改属主体积 / 亏格 / 包围盒的挪法"
+                    )
+                }
                 ParityOutcome::Equal {
                     elements,
                     moved: 0,
@@ -6019,6 +6048,14 @@ mod tests {
         elapsed_secs: f64,
     }
 
+    impl RigidParitySample {
+        /// 两态结果的一句话，按类别选读法（被属主消费的类相等时报「属主不变量未变」）。
+        fn summary(&self) -> String {
+            self.outcome
+                .summary(category_consumed_by_owner(self.category))
+        }
+    }
+
     /// `Δ` 的一句话：纯平移 → `|t|`（mm）；否则「含旋转」+ 平移分量。
     fn describe_delta(delta: &glam::DMat4) -> String {
         match crate::data_interface::rigid_motion::pure_translation(delta) {
@@ -6038,6 +6075,52 @@ mod tests {
         fn resolve(&self, dbno: u32) -> Option<e3d_io::db_element::DbFilePin> {
             e3d_io::db_element::DbFileResolver::resolve(&*self.0, dbno)
         }
+    }
+
+    /// 探针读法（S4 E3D 造窗 db8000 609→610 的教训）：被属主消费的类相等且 `moved == 0` 报「属主不变量未变」，
+    /// 别的类照旧报「无判别力」；两种都不算有判别力（`is_powerless`）。
+    #[test]
+    fn consumed_by_owner_equal_reads_as_owner_invariants_unchanged() {
+        for category in [
+            "负体（属主 CSG 消费）",
+            "非单元挂在消费成员的属主下",
+            "剖面 / 路径数据",
+            "几何集成员",
+        ] {
+            assert!(category_consumed_by_owner(category), "{category}");
+        }
+        for category in [
+            "rigid（合格锚点）",
+            "P23 摆放派生 noun",
+            "桥架件（位姿是伪属性）",
+            "规则 M 结构件之下",
+            "路由容器之内",
+        ] {
+            assert!(!category_consumed_by_owner(category), "{category}");
+        }
+        let equal_without_records = ParityOutcome::Equal {
+            elements: 1,
+            moved: 0,
+            tubes: 0,
+        };
+        let consumed = equal_without_records.summary(true);
+        assert!(consumed.contains("属主不变量未变"), "{consumed}");
+        assert!(!consumed.contains("无判别力"), "{consumed}");
+        let plain = equal_without_records.summary(false);
+        assert!(plain.contains("无判别力"), "{plain}");
+        assert!(!plain.contains("属主不变量未变"), "{plain}");
+        assert!(equal_without_records.is_powerless());
+        // 子树里有记录的相等不受类别影响。
+        let equal_with_records = ParityOutcome::Equal {
+            elements: 3,
+            moved: 2,
+            tubes: 0,
+        };
+        assert_eq!(
+            equal_with_records.summary(true),
+            equal_with_records.summary(false)
+        );
+        assert!(!equal_with_records.is_powerless());
     }
 
     /// **S4 探针 / ADR-066 验收 1 的对拍门**（开发计划 2026-09-15 §4 S4，`#[ignore]` 手动）：沿语料每一窗找出**只动了摆放**的候选
@@ -6481,7 +6564,7 @@ mod tests {
                     };
                     println!(
                         "{label}: [{category}] root {root_refno} {root_noun} ({placement}) 锚点 {anchors_note} → {} ({elapsed_secs:.1}s)",
-                        outcome.summary()
+                        outcome.summary(category_consumed_by_owner(category))
                     );
                     // 有判别力 = 真相等（子树里有生成物）或不等且能干净地归到锚点头上；无生成物 / 窗内另改 / 无根 / 生成失败都不算。
                     if (outcome.is_equal() && !outcome.is_powerless())
@@ -6556,8 +6639,10 @@ mod tests {
         report.push_str("## 按判决分类：候选数、抽样与两态结果\n\n");
         report.push_str(
             "「不等·锚点」= 子树内 / 属主链 / 窗内没改过的邻件不一致、且根里没有别的改动；「不等·窗内另改」= 这一窗在根里另有改动（子树里另有非锚点候选、属主挪位、邻件自己改过……生产按 D1 规则 4 整根 regen，样本不作数）；\
-             「无判别力」= 相等但锚点子树里一件生成物都没有；「Δ≈0」= 纯平移且 |t| < 1e-3 mm（重写 POS 的末位噪声），只数不拍。\n\n\
-             | 判决 | 候选 | 其中 Δ≈0（噪声，不拍） | 对拍样本（根） | 两态相等 | 无判别力 | 不等·锚点 | 不等·窗内另改 | 无根 | 生成失败 | 读法 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
+             「无判别力」= 相等但锚点子树里一件生成物都没有——**负体 / 开孔 / 剖面 / 几何集这类被属主消费的锚点自己本来就没有记录、恒落在这一格，读作「属主不变量未变」**：\
+             只说明属主的体积 / 三角数 / 亏格 / 包围盒看不见这一挪，分不清「属主没消费它」与「看不见」，要坐实排除得挑会改这几个量的挪法（越出体外、通孔变盲孔）；\
+             「Δ≈0」= 纯平移且 |t| < 1e-3 mm（重写 POS 的末位噪声），只数不拍。\n\n\
+             | 判决 | 候选 | 其中 Δ≈0（噪声，不拍） | 对拍样本（根） | 两态相等 | 无判别力 / 属主不变量未变 | 不等·锚点 | 不等·窗内另改 | 无根 | 生成失败 | 读法 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
         );
         for category in &categories {
             let rows: Vec<&RigidParitySample> = samples
@@ -6605,6 +6690,8 @@ mod tests {
                 "排除有内容（部分样本上保守）"
             } else if equal > 0 {
                 "保守：这形状上 Δ 前移也对"
+            } else if powerless > 0 && category_consumed_by_owner(category) {
+                "属主不变量未变：分不清「没消费」与「看不见这一挪」，未判——换会改属主体积 / 亏格 / 包围盒的挪法再造窗"
             } else {
                 "未判"
             };
@@ -6654,7 +6741,7 @@ mod tests {
                         .as_ref()
                         .map(|(refno, noun)| format!("{refno} {noun}"))
                         .unwrap_or_default(),
-                    sample.outcome.summary()
+                    sample.summary()
                 ));
             }
         }
@@ -6678,7 +6765,7 @@ mod tests {
                     .map(|(refno, noun)| format!("{refno} `{noun}`"))
                     .unwrap_or_else(|| "—".to_string()),
                 sample.placement,
-                sample.outcome.summary().replace('|', "／"),
+                sample.summary().replace('|', "／"),
                 sample.elapsed_secs
             ));
         }
