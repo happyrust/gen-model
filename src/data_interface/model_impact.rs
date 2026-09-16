@@ -6,7 +6,8 @@
 //!
 //! 新语义（对齐 `plant-model-gen`）：
 //! - 未知属性 / UDA 一律**保守触发**（漏判=正确性 bug；误判=多算一次，成本可控）；
-//! - 只有明确的业务元数据（`NAME`/`DESC`/`PURP`/`FUNC`）判为中性、可跳过；
+//! - 「不影响模型、可跳过」要两票：E3D 字典 DCHC = 0 **且** 生成器不读它
+//!   （[`attribute_is_metadata_only`]，2026-09-15 S6；此前只放行 `NAME`/`DESC`/`PURP`/`FUNC`/`LCHKDA`）；
 //! - noun/类型不再作为分类前置门，只用于最终生成器路由。
 //!
 //! 属性清单来源：AVEVA Everything3D `core.dll` / `Core3D.dll` 逆向（`DCHC/EVALAT`
@@ -18,6 +19,7 @@ use std::sync::{LazyLock, OnceLock};
 
 use aios_core::pdms_types::{DbAttributeType, TOTAL_LOOP_NOUN_NAMES, TOTAL_VERT_NOUN_NAMES};
 use aios_core::{NamedAttrValue, RefU64Vec, RefnoEnum};
+pub use e3d_model::increment::NoModelTier;
 use serde::Deserialize;
 
 use super::ele_ops::{
@@ -170,10 +172,11 @@ pub const DIRECT_GEOMETRY_ATTR_NAMES: &[&str] = &[
     "POSL", "POSS", "POSE", "NPOS", "CPOS", "YDIR", "ZDIR", "BANG",
 ];
 
-/// 属性 → 效果的**唯一**事实源：按效果分组声明，组间顺序不再携带语义。
+/// 属性 → 效果的事实源之一：五张**手写**表，按效果分组声明，组间顺序不再携带语义。
 ///
 /// 以前 `classify_attribute_effect` 用 if-else 链逐张表试，「一个属性归哪一类」由它写在链上
-/// 的位置决定而不是由语义决定。现在合并成一张映射，重名由测试直接报错。
+/// 的位置决定而不是由语义决定。现在合并成一张映射，重名由测试直接报错。第六张表
+/// [`dictionary_change_class_attr_names`] 由字典**生成**，与这五张一起合进 [`attribute_effects`]。
 pub const ATTRIBUTE_EFFECT_TABLES: &[(&[&str], AttributeEffect)] = &[
     (DATA_ONLY_ATTR_NAMES, AttributeEffect::DataOnly),
     (STRUCTURAL_ATTR_NAMES, AttributeEffect::StructuralMembership),
@@ -185,14 +188,71 @@ pub const ATTRIBUTE_EFFECT_TABLES: &[(&[&str], AttributeEffect)] = &[
     (DIRECT_GEOMETRY_ATTR_NAMES, AttributeEffect::DirectGeometry),
 ];
 
-/// 合并后的查找表，懒加载一次。
+/// 第六张效果表：E3D 字典里设计变化码 DCHC ∈ {1, 2, 4}、而上面五张手写表**一个都没登记**的
+/// 全部属性名（2026-09-15：217 个 = DCHC=4 ×213 + DCHC=1/2 的 `HZAXI` `LHEA` `LTAI` `TZAXI`）。
+///
+/// 来源是 core 自己的口径：字典 DCHC 非 0 的属性，Core3D `change/EVALAT` 会为它排重画
+/// （类别 4 → `change/UPGRPH` 走 `REPELE` / `SEGREP` 重建；类别 1 / 2 → 转成类别 4 落到前一元件 /
+/// 自身），见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §3–§4。
+/// 这些名字此前落 `Unknown`——判决方向本来就对（`Unknown` 也是 `Regen`），但回执与
+/// `change_impact` 报表把 213 个 core 明说「会重画」的属性显示成「未知属性」。这张表只消
+/// 那层噪音，**不改任何判决**：
+///
+/// - `dependency_cascade`：DCHC = 1 / 2（元件头 / 尾连通性，与 `HBOR HPOS TPOS …` 同族）以及
+///   运行库 schema 判为 `ELEMENT` 引用的名字（`STAREF ENDREF JOIS JOIE CFRA PFRE …`）。后者此前
+///   经 [`classify_attribute_effect_with_meta`] 的 A2 升级也落 `DependencyCascade`，登记在这一侧
+///   是为了让不带 meta 的 [`classify_attribute_effect`] 给出同一个答案；
+/// - `direct_geometry`：其余 DCHC = 4 的名字（尺寸 / 表示 / 可见性 / 楼梯栏杆桥架族 …）。
+///
+/// 由 `output/gen_dchc_fixture.py` 从字典导出 + 五张表 + 运行库 schema 生成为
+/// `dictionary_change_class_attr_names.json`，随源码入库、编译期嵌入；手抄 217 个名字必漂。
+/// 守卫：[`tests::dictionary_change_class_table_covers_every_unregistered_nonzero_attribute`]
+/// 钉「与字典快照的差集为空」，[`tests::attribute_effect_tables_have_no_duplicate_names`]
+/// 钉它与五张手写表不重名。五张手写表改了名单就重跑生成脚本。
+#[derive(Debug, Deserialize)]
+pub struct DictionaryChangeClassAttrNames {
+    /// DCHC = 1 / 2，或 DCHC = 4 且 schema `att_type == ELEMENT` → [`AttributeEffect::DependencyCascade`]。
+    pub dependency_cascade: Vec<String>,
+    /// 其余 DCHC = 4 → [`AttributeEffect::DirectGeometry`]。
+    pub direct_geometry: Vec<String>,
+}
+
+impl DictionaryChangeClassAttrNames {
+    /// 两侧合起来的 `(名字, 效果)`，供合并进查找表与守卫测试逐名核对。
+    pub fn entries(&self) -> impl Iterator<Item = (&str, AttributeEffect)> + '_ {
+        self.dependency_cascade
+            .iter()
+            .map(|name| (name.as_str(), AttributeEffect::DependencyCascade))
+            .chain(
+                self.direct_geometry
+                    .iter()
+                    .map(|name| (name.as_str(), AttributeEffect::DirectGeometry)),
+            )
+    }
+}
+
+/// 嵌入的第六张表（见 [`DictionaryChangeClassAttrNames`]），懒解析一次。
+pub fn dictionary_change_class_attr_names() -> &'static DictionaryChangeClassAttrNames {
+    static TABLE: OnceLock<DictionaryChangeClassAttrNames> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        serde_json::from_str(include_str!("dictionary_change_class_attr_names.json"))
+            .expect("dictionary_change_class_attr_names.json 随源码入库，必须是合法 JSON")
+    })
+}
+
+/// 合并后的查找表，懒加载一次：五张手写表在前，第六张（字典生成）表只补空位——两边按构造
+/// 不重名（生成脚本剔除了五张表已登记的名字，守卫测试再钉一次），这里的先后只是防御。
 fn attribute_effects() -> &'static HashMap<&'static str, AttributeEffect> {
     static TABLE: OnceLock<HashMap<&'static str, AttributeEffect>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        ATTRIBUTE_EFFECT_TABLES
+        let mut table: HashMap<&'static str, AttributeEffect> = ATTRIBUTE_EFFECT_TABLES
             .iter()
             .flat_map(|(names, effect)| names.iter().map(move |name| (*name, *effect)))
-            .collect()
+            .collect();
+        for (name, effect) in dictionary_change_class_attr_names().entries() {
+            table.entry(name).or_insert(effect);
+        }
+        table
     })
 }
 
@@ -297,17 +357,187 @@ fn dchc_change_classes() -> &'static HashMap<String, i32> {
     })
 }
 
-/// 「只改了这个属性，模型一个字都不用动」的**双重**判据（direct 窗口规划器的元数据门，
-/// 2026-09-08）：我们自己的效果表说它是 [`AttributeEffect::DataOnly`]，**并且** E3D 字典的
-/// 设计变化码说它是 0（core 自己也不为它重画，`IDCHNG` 门）。两票缺一不可——效果表是人手写的、
-/// 字典是 core 的第二意见，「少算」方向的判定只在两边都同意时放行。
+/// E3D 字典 `PLCF` 字段（652066）的快照：`change/IDCHNG`（Core3D `0x1022E302`）在读 DCHC 之后
+/// **再**读它，`== 1` 才置 INTUBE 旗标 `dword_10E98500`，`UPDATD` 收尾时据此调 `PLCDEL` 让隐含
+/// 管段的放置缓存失效（2026-09-15 取证文档 §3.2；0906 把这一下写成「DCHC == 1 时置」，已改正）。
+/// 字典里 58 个属性为 1：位姿三个（`POS ORI BFORI`）、目录 / 规格引用、结构连接与楼梯栏杆桥架的
+/// 尺寸参数，以及一个 DCHC = 0 的 `CLGREF`。
 ///
-/// `CACHID` 不在字典快照里（`raw_dchc_code` 回 `None`）：效果表虽判 DataOnly，字典没投票，
-/// 这里回 `false`——它照旧上卷重算。它是项目 UDA，字典按构造就不会收它，所以这一票不是
-/// 「还没补上」而是**永远不会有**：要放行只能改判据，不能等字典。UDA 与任何未知属性同理。
+/// 只作报表 / 探针：我们没有对应的隐含管段放置缓存，它**不进任何判决**——
+/// [`tests::plcf_is_report_only_and_matches_the_dictionary_snapshot`] 钉住本文件之外没有调用方。
+/// 由 `output/gen_dchc_fixture.py` 与 DCHC 同批导出为 `plcf_flags.json`，随源码入库。
+pub fn raw_plcf(raw_name: &str) -> Option<bool> {
+    let name = normalize_attribute_name(raw_name);
+    dchc_change_classes()
+        .contains_key(&name)
+        .then(|| plcf_flagged_names().contains(name.as_str()))
+}
+
+/// gen-model 侧的模型面读点模块（开发计划 2026-09-15 D2 / S5）：目录求值入口、房间、结构连接、电缆端点、
+/// direct 窗口规划器与刚体前移。生成读取集合的第二半从这些文件里扫（第一半是 e3d-model 整个 `src`，
+/// 由它自己的 `data/attribute-read-set.json` 交付）。与 `output/gen_read_set.py::GEN_MODEL_READ_MODULES`
+/// 一字不差，守卫钉两边相等。
+pub const GEN_MODEL_READ_MODULES: [&str; 11] = [
+    "src/fast_model/cata_model.rs",
+    "src/fast_model/room_model.rs",
+    "src/fast_model/room_topology.rs",
+    "src/fast_model/room_predicate.rs",
+    "src/fast_model/room_resident.rs",
+    "src/data_interface/room_read_through.rs",
+    "src/api/room_code.rs",
+    "src/data_interface/structural_connection.rs",
+    "src/data_interface/cable_endpoint.rs",
+    "src/data_interface/window_root_plan.rs",
+    "src/data_interface/rigid_motion.rs",
+];
+
+/// e3d-io 目录表达式求值环境（`DbElementParamEnv`）——替生成器读属性的第三处，**只作文档、不进判决**
+/// （见 [`generation_read_set`]）。与 `gen_read_set.py::E3D_IO_CATALOGUE_EVAL_FILES` 一字不差。
+pub const E3D_IO_CATALOGUE_EVAL_FILES: [&str; 3] = [
+    "src/db_param_env.rs",
+    "src/record/catalogue_eval.rs",
+    "src/record/catalogue_expr.rs",
+];
+
+/// `generation_read_set.json` 的形状（`output/gen_read_set.py` 生成）。
+#[derive(Debug, Deserialize)]
+pub struct GenerationReadSetFile {
+    /// **戳**（2026-09-16 Q5）：是属性名，但源码提它只为**按名字把它排除掉**——差分层判「只动了摆放」
+    /// 时要忽略的那张表（`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`，今天只有 `CACHID`）。
+    /// 写一句名字不是读，所以扫描把它们从**每一侧**的 `names` 里摘出来；收进去就等于让这条判据
+    /// 自己写的排除名单反过来把它挡住。真被传进 e3d-io 的按名读取口就照旧算读、照旧回到 `names`，
+    /// 守卫随即红。生成脚本的 `STAMP_LITERALS` 与那张表逐名相等（两仓守卫各钉一次）。
+    pub stamp_literals: Vec<String>,
+    /// e3d-model `data/attribute-read-set.json` 的 `names` 原样一份——守卫钉它与
+    /// `e3d_model::attribute_read_set()` 逐名相等，两个仓的产物漂开就红。
+    pub e3d_model: Vec<String>,
+    /// gen-model 模型面模块的读点。
+    pub gen_model: ReadSetSide,
+    /// e3d-io 目录求值环境的读点，`vote == false`。
+    pub e3d_io_catalogue_eval: ReadSetSide,
+    /// **判决用的那一份**：`e3d_model ∪ gen_model.names`。
+    pub names: Vec<String>,
+}
+
+/// 读取集合的一侧：扫了哪些文件、读到哪些属性名、还见到哪些不是属性也不是 noun 的大写字面量。
+#[derive(Debug, Deserialize)]
+pub struct ReadSetSide {
+    /// 是否参与 [`generation_read_set`] 那一票（缺省参与）。
+    #[serde(default = "default_true")]
+    pub vote: bool,
+    /// 相对各自 crate 根的文件路径。
+    pub files: Vec<String>,
+    /// 属性名（在字典 ∪ 运行库 schema 里、或直接传进 e3d-io 读取口的大写字面量），升序。
+    pub names: Vec<String>,
+    /// 既不是属性名也不是字典 noun 的大写字面量，升序（让守卫分清「新冒出的」与「早知道不是属性的」）。
+    pub non_attribute_literals: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 嵌入的 `generation_read_set.json`，懒解析一次。
+pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
+    static FILE: OnceLock<GenerationReadSetFile> = OnceLock::new();
+    FILE.get_or_init(|| {
+        serde_json::from_str(include_str!("generation_read_set.json"))
+            .expect("generation_read_set.json 随源码入库，必须是合法 JSON")
+    })
+}
+
+/// **生成读取集合**（开发计划 2026-09-15 D2 / S5）：模型生成器会读到的属性名——e3d-model 整个 `src`
+/// 出现的属性名字面量 ∪ gen-model 模型面模块（[`GEN_MODEL_READ_MODULES`]）出现的属性名字面量，
+/// 按最宽口径扫（多收只少跳一次、漏收是一张停在旧形状上的网格）。
+///
+/// 它是元数据门的**第二票**：S6 起 [`attribute_is_metadata_only`] 改成「字典 DCHC == 0 ∧ 不在这里」；
+/// 本轮（S5）只交付产物与护栏，判决还没换。2026-09-15：138 个名字，DCHC=0 的恰好六个
+/// `DIR FILL GTYP PKEY UKEY VXREF`（core 不重画、我们却真读的输入，正是第二票要挡的那几个），
+/// 老五个元数据名 `NAME DESC PURP FUNC LCHKDA` 一个都不在。
+///
+/// e3d-io 目录求值环境读到的名字（`e3d_io_catalogue_eval`，`ANGL RADI HEIG DESP UNIPAR` 与目录侧
+/// `DATA.PURP/DKEY/NUMB`、`SELE.QUES/ANSW/MAXA/TANS`）**不进这一票**：设计侧那几个 DCHC ≠ 0 或已在
+/// e3d-model 一侧，DCHC = 0 的那七个全在目录元素上读，而元数据门只跑 DESI 窗口。
+///
+/// 戳（[`GenerationReadSetFile::stamp_literals`]，2026-09-16 Q5）也不在这里：`CACHID` 在运行库 schema 里，
+/// 差分层为了排除它而写下的那个字面量会被这条最宽的扫描当成读点，那是错的——它不是几何输入。
+/// 它不进这一票不代表元数据门放行它：字典压根没收它，[`attribute_is_metadata_only`] 第一票就回 `false`
+/// （只 `CACHID` 变的候选照旧上卷重算，见计划 §8 Q6）。
+pub fn generation_read_set() -> &'static HashSet<String> {
+    static SET: OnceLock<HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| generation_read_set_file().names.iter().cloned().collect())
+}
+
+/// 生成器是否读这个属性名（归一化后查 [`generation_read_set`]）。
+pub fn generation_reads_attribute(raw_name: &str) -> bool {
+    generation_read_set().contains(&normalize_attribute_name(raw_name))
+}
+
+/// `plcf_flags.json` 里 `PLCF == 1` 的属性名集合，懒解析一次。
+fn plcf_flagged_names() -> &'static HashSet<String> {
+    #[derive(Deserialize)]
+    struct PlcfFlags {
+        names: Vec<String>,
+    }
+    static TABLE: OnceLock<HashSet<String>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let flags: PlcfFlags = serde_json::from_str(include_str!("plcf_flags.json"))
+            .expect("plcf_flags.json 随源码入库，必须是合法 JSON");
+        flags.names.into_iter().collect()
+    })
+}
+
+/// 「只改了这个属性，模型一个字都不用动」的**两票**判据（direct 窗口规划器的元数据门，
+/// 2026-09-08 立、2026-09-15 S6 改口径）：E3D 字典的设计变化码说它是 0（core 自己也不为它重画，
+/// `IDCHNG` 门），**并且**生成器不读它（[`generation_read_set`]：e3d-model 整个 `src` 与 gen-model
+/// 模型面模块里一个读点都没有）。两票缺一不放行——字典是 core 的意见，读取集合是我们自己的；
+/// 「少算」方向的判定只在两边都说「与几何无关」时放行。
+///
+/// S6 之前这里问的是「效果表 [`AttributeEffect::DataOnly`] ∧ DCHC = 0」，恰好放行五个名字；
+/// 那张手写表退成报表分类与 `no_model` 的分档依据（[`attribute_is_curated_metadata`]），不再是判决输入。
+/// 字典 3941 个 DCHC = 0 的名字里，读取集合只挡 `DIR FILL GTYP PKEY UKEY VXREF` 六个（core 不重画、
+/// 我们却真拿来生成的输入），其余 3935 个都放行。其中 16 个被手写表登记成几何 / 级联输入
+/// （`HREF TREF PSPE DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `SIZE MAXA NGMR ORRF PTOF`）：
+/// 它们既不是 core 的重画输入、生成器也不读——手写表那一格是当年按语义猜的，判决以两票为准；
+/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`] 逐个点名钉住，名单变了就得重新问
+/// 「新名字真的没人读吗」。
+///
+/// `CACHID` 不在字典快照里（`raw_dchc_code` 回 `None`）：字典没投票，这里回 `false`——它照旧
+/// 上卷重算。它是项目 UDA，字典按构造就不会收它，所以这一票不是「还没补上」而是**永远不会有**：
+/// 要放行只能改判据，不能等字典。`UDA:<id>` 与任何字典没有的名字同理。
 pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
+    raw_dchc_code(raw_name) == Some(0) && !generation_reads_attribute(raw_name)
+}
+
+/// 老名单（2026-09-08 至 S6 之前的元数据门）：效果表 [`AttributeEffect::DataOnly`] **且** 字典 DCHC = 0，
+/// 恰好 `NAME DESC PURP FUNC LCHKDA`。S6 起它不再决定放不放行（那是 [`attribute_is_metadata_only`]），
+/// 只用来把门省下的候选分成两档：全部落在这里的记 `metadata_only`，否则记 `unread_attribute`
+/// （e3d-model [`NoModelTier`]），让「门变宽以后多省了多少」在回执上读得出来。
+/// 按构造是 [`attribute_is_metadata_only`] 的子集（守卫钉）：这五个名字生成器一个都不读。
+pub fn attribute_is_curated_metadata(raw_name: &str) -> bool {
     classify_attribute_effect(raw_name) == AttributeEffect::DataOnly
         && raw_dchc_code(raw_name) == Some(0)
+}
+
+/// 一次改动的全部属性名过元数据门的结论：`None` = 至少一个属性没拿到两票（或一个属性都没有），
+/// 照常上卷；`Some(档)` = 全部放行，档位按 [`attribute_is_curated_metadata`] 分——全在老名单里是
+/// [`NoModelTier::MetadataOnly`]，否则 [`NoModelTier::UnreadAttribute`]。
+///
+/// 这是 `window_root_plan::change_metadata_tier` 与 [`classify_operation_effects`] 共问的那一份名单
+/// （0908 纪律：预览与执行同一谓词）；结构条件（类型 / 属主 / 成员 / opaque）在调用方判。
+pub fn metadata_only_tier<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<NoModelTier> {
+    let mut tier: Option<NoModelTier> = None;
+    for name in names {
+        if !attribute_is_metadata_only(name) {
+            return None;
+        }
+        tier = Some(match tier {
+            Some(NoModelTier::UnreadAttribute) => NoModelTier::UnreadAttribute,
+            _ if attribute_is_curated_metadata(name) => NoModelTier::MetadataOnly,
+            _ => NoModelTier::UnreadAttribute,
+        });
+    }
+    tier
 }
 
 /// 属性是否命中「已知会影响模型」的分类——除 `DataOnly` 与 `Unknown` 之外的一切。
@@ -350,8 +580,9 @@ fn collect_modified_attribute_names(modified: &ModifiedElement) -> Vec<String> {
 /// 汇总一次操作的效果（宁多勿漏），并保留原始 DCHC code。
 ///
 /// - `Add` / `Deleted` → 需重生成（结构/成员效果）；
-/// - `Modified`：逐属性归类效果——`DataOnly` **且**过 [`attribute_is_metadata_only`]
-///   （字典 DCHC=0 那第二票）才忽略，只有效果表一票的保守重生成；`TransformOnly` 记位姿；其余
+/// - `Modified`：逐属性先问元数据门 [`attribute_is_metadata_only`]（字典 DCHC=0 ∧ 生成器不读）——
+///   拿到两票的记 `DataOnly`、不排工作，哪怕手写表把它登记在别处；没拿到的按效果表归类：
+///   `DataOnly`（只有效果表一票的，如 `CACHID`）保守重生成；`TransformOnly` 记位姿；其余
 ///   （DirectGeometry/DependencyCascade/StructuralMembership/Unknown，含 `UDA:*`）记重生成；
 ///   `children` 变化、或检测不到任何属性差异（如非 detail 解析）时保守记重生成；
 /// - `None` → 无动作。
@@ -388,6 +619,12 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
             for name in &changed {
                 let effect = if name.starts_with("UDA:") {
                     AttributeEffect::Unknown
+                } else if attribute_is_metadata_only(name) {
+                    // 「不影响模型」是**少算**方向，判据与 direct 窗口规划器的元数据门
+                    // （`window_root_plan::change_metadata_tier`）共用同一道两票（字典 DCHC=0 ∧
+                    // 生成器不读）：门放行的名字这里也不排工作，哪怕手写表把它登记成几何 /
+                    // 级联输入——同一份回执里的 `details` 与 `units` 必须是一句话。
+                    AttributeEffect::DataOnly
                 } else {
                     // A2：未命中静态清单的引用属性(att_type=ELEMENT)→DependencyCascade（进级联反查）。
                     classify_attribute_effect_with_meta(name, attribute_is_reference(name))
@@ -396,11 +633,8 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
                     dchc = Some(dchc.map_or(code, |c| c.max(code)));
                 }
                 match effect {
-                    // 「不影响模型」是**少算**方向，判据与 direct 窗口规划器的元数据门
-                    // （`window_root_plan::change_is_metadata_only`）共用同一道双票：效果表
-                    // 说是元数据、E3D 字典却没投票的（`CACHID`）规划器照旧上卷
-                    // 整根重算，这里就不能报「不影响模型」——同一份回执里的 `details` 与
-                    // `units` 必须是一句话。
+                    // 效果表说是元数据、两票却没拿全的（`CACHID`：字典没投票）规划器照旧上卷
+                    // 整根重算，这里就不能报「不影响模型」。
                     AttributeEffect::DataOnly if !attribute_is_metadata_only(name) => {
                         summary.impact_regen = true;
                     }
@@ -779,7 +1013,7 @@ mod tests {
 
     #[test]
     fn pipe_spec_reference_regenerates_but_name_only_skips_model_work() {
-        for attr_name in ["SPRE", "SPREF", "PSPREF", "FSPREF"] {
+        for attr_name in ["SPRE", "SPREF", "PSPREF"] {
             let op = modified_operation(attr_name);
             assert_eq!(
                 classify_operation_impact(&op),
@@ -792,6 +1026,16 @@ mod tests {
                 "{attr_name} must participate in reverse-reference cascade"
             );
         }
+        // `FSPREF` 手写表登记在级联侧，但字典 DCHC=0 且生成器不读：S6 起两票放行，预览与执行同口径。
+        assert_eq!(
+            classify_attribute_effect("FSPREF"),
+            AttributeEffect::DependencyCascade
+        );
+        assert!(attribute_is_metadata_only("FSPREF"));
+        assert_eq!(
+            classify_operation_impact(&modified_operation("FSPREF")),
+            OperationImpact::Skip
+        );
 
         assert_eq!(
             classify_operation_impact(&modified_operation("NAME")),
@@ -950,9 +1194,16 @@ mod tests {
                 AttributeEffect::DependencyCascade,
                 "{name}"
             );
+            // S6：字典 DCHC=0 且生成器不读的名字（`HREF TREF PSPE …`）两票放行，手写表那一格只剩报表意义，
+            // 见 `the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`。
+            let expected = if attribute_is_metadata_only(name) {
+                OperationImpact::Skip
+            } else {
+                OperationImpact::Regen
+            };
             assert_eq!(
                 classify_operation_impact(&modified_operation(name)),
-                OperationImpact::Regen,
+                expected,
                 "{name}"
             );
         }
@@ -1718,11 +1969,130 @@ mod tests {
                 }
             }
         }
+        // 第六张（字典生成）表也算：生成脚本按构造剔除了五张表已登记的名字，五张表事后
+        // 加了名却没重跑脚本，就会在这里重名。
+        for (name, effect) in dictionary_change_class_attr_names().entries() {
+            if let Some(previous) = seen.insert(name, effect) {
+                duplicates.push(format!("{name}({previous:?} vs {effect:?} [字典表])"));
+            }
+        }
         assert!(
             duplicates.is_empty(),
             "同一属性出现在多张效果表里：{}",
             duplicates.join(", ")
         );
+    }
+
+    /// 第六张表守卫（开发计划 2026-09-15 S1 / D3）：它必须**恰好**等于「字典快照里 DCHC ∈ {1,2,4}
+    /// 且五张手写表都没登记」的名字集合——两个方向的差集都为空。快照换了、五张表改了名单而
+    /// 没重跑 `output/gen_dchc_fixture.py`，都会在这里红。
+    #[test]
+    fn dictionary_change_class_table_covers_every_unregistered_nonzero_attribute() {
+        let curated: BTreeSet<&str> = ATTRIBUTE_EFFECT_TABLES
+            .iter()
+            .flat_map(|(names, _)| names.iter().copied())
+            .collect();
+        let expected: BTreeSet<&str> = dchc_change_classes()
+            .iter()
+            .filter(|(name, code)| matches!(code, 1 | 2 | 4) && !curated.contains(name.as_str()))
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        let table = dictionary_change_class_attr_names();
+        let actual: BTreeSet<&str> = table.entries().map(|(name, _)| name).collect();
+        let missing: Vec<&str> = expected.difference(&actual).copied().collect();
+        let stale: Vec<&str> = actual.difference(&expected).copied().collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "字典表与快照的差集不为空，重跑 output/gen_dchc_fixture.py：快照有、表没有 {missing:?}；表有、快照没有 {stale:?}"
+        );
+        assert_eq!(
+            actual.len(),
+            table.dependency_cascade.len() + table.direct_geometry.len(),
+            "两侧之间有重名"
+        );
+        // 2026-09-15 的字典快照：213 个 DCHC=4 + 4 个 DCHC=1/2。数字漂了就是快照或五张表换了。
+        assert_eq!(actual.len(), 217, "第六张表条数漂移");
+
+        // 生成产物是规范形：两侧各自有序、无重复，diff 才可读。
+        for side in [&table.dependency_cascade, &table.direct_geometry] {
+            assert!(
+                side.windows(2).all(|pair| pair[0] < pair[1]),
+                "第六张表两侧必须严格升序：{side:?}"
+            );
+        }
+
+        // 分侧规则：DCHC = 1 / 2 一律在级联侧（与 HBOR/HPOS/TPOS 同族），头尾连通的四个显式点名。
+        for name in ["HZAXI", "LHEA", "LTAI", "TZAXI"] {
+            assert!(
+                table.dependency_cascade.iter().any(|n| n == name),
+                "{name} 是 DCHC=1/2 的头尾连通属性，必须在 dependency_cascade 侧"
+            );
+        }
+        for name in &table.direct_geometry {
+            assert_eq!(raw_dchc_code(name), Some(4), "{name} 在几何侧却不是 DCHC=4");
+        }
+        for name in &table.dependency_cascade {
+            assert!(
+                matches!(raw_dchc_code(name), Some(1 | 2 | 4)),
+                "{name} 的 DCHC 不在 {{1,2,4}} 里"
+            );
+        }
+    }
+
+    /// 第六张表逐名落到声明的效果，且动作与此前的 `Unknown` 一样是 `Regen`——这张表只消噪音。
+    #[test]
+    fn dictionary_change_class_table_maps_to_its_declared_effects_and_actions() {
+        for (name, effect) in dictionary_change_class_attr_names().entries() {
+            assert_eq!(classify_attribute_effect(name), effect, "{name}");
+            assert_eq!(
+                classify_operation_impact(&modified_operation(name)),
+                OperationImpact::Regen,
+                "{name}"
+            );
+            // 元数据门对它们一律不放行（DCHC ≠ 0 本来就拿不到字典那一票）。
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+    }
+
+    /// 分侧与运行库 schema 一致：`ELEMENT` 引用一个不落地进级联侧、几何侧一个引用都没有。于是
+    /// 不带 meta 的 [`classify_attribute_effect`] 与带 meta 的 [`classify_attribute_effect_with_meta`]
+    /// 对这 217 个名字给出**同一个**答案——此前引用名靠 A2 升级才落 `DependencyCascade`，现在
+    /// 登记即得；`reference_edge_eligible` 那一侧的建边资格因此逐名不变。
+    #[test]
+    fn dictionary_change_class_table_routes_schema_references_to_the_cascade_side() {
+        if runtime_attribute_names().is_empty() {
+            return; // 无 schema 的环境软跳过
+        }
+        let table = dictionary_change_class_attr_names();
+        for name in &table.direct_geometry {
+            assert!(
+                !attribute_is_reference(name),
+                "{name} 是 schema ELEMENT 引用，却登记在几何侧——重跑生成脚本"
+            );
+        }
+        for name in &table.dependency_cascade {
+            let head_or_tail = matches!(raw_dchc_code(name), Some(1 | 2));
+            assert!(
+                head_or_tail || attribute_is_reference(name),
+                "{name} 既不是 DCHC=1/2 也不是 ELEMENT 引用，不该在级联侧"
+            );
+        }
+        for (name, effect) in table.entries() {
+            assert_eq!(
+                classify_attribute_effect_with_meta(name, attribute_is_reference(name)),
+                effect,
+                "{name}: 带 / 不带 meta 的分类必须同答"
+            );
+        }
+        // 18 个 DCHC=4 的引用名 + 4 个头尾连通名。
+        assert_eq!(table.dependency_cascade.len(), 22);
+        for name in ["STAREF", "ENDREF", "JOIS", "JOIE", "CFRA", "PFRE"] {
+            assert!(
+                table.dependency_cascade.iter().any(|n| n == name),
+                "{name} 是 core EVALAT 规则里点过名的引用属性，应在级联侧"
+            );
+        }
     }
 
     /// 原有的 `curated_attribute_tables_map_to_their_declared_effects_and_actions`
@@ -1735,9 +2105,15 @@ mod tests {
                 AttributeEffect::DirectGeometry,
                 "{name}"
             );
+            // S6：`SIZE MAXA NGMR ORRF PTOF` 字典 DCHC=0 且生成器不读，两票放行；其余照旧重算。
+            let expected = if attribute_is_metadata_only(name) {
+                OperationImpact::Skip
+            } else {
+                OperationImpact::Regen
+            };
             assert_eq!(
                 classify_operation_impact(&modified_operation(name)),
-                OperationImpact::Regen,
+                expected,
                 "{name}"
             );
         }
@@ -1857,58 +2233,535 @@ mod tests {
         assert_eq!(raw_dchc_code("NO_SUCH_ATTR"), None);
     }
 
-    /// 元数据门要两票：效果表 DataOnly **且** 字典 DCHC=0。任一票缺席就照旧重算。
-    #[test]
-    fn metadata_only_needs_both_the_effect_table_and_the_dictionary() {
-        // 两票都在：字典里的五个业务元数据名。
-        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "name", "att.NAME"] {
-            assert!(attribute_is_metadata_only(name), "{name}");
+    // ── 生成读取集合（S5）：与 output/gen_read_set.py 逐字同一条扫描规则 ─────────────────
+
+    /// 截到第一个 cfg(test) 标记（测试模块都在文件尾）。
+    fn strip_test_module(source: &str) -> &str {
+        match source.find("#[cfg(test)]") {
+            Some(cut) => &source[..cut],
+            None => source,
         }
-        // 效果表说 DataOnly、字典没投票（快照里没有）：不放行。`CACHID` 是项目 UDA，
-        // 字典按构造收不到它——这一票不会等来。
-        for name in ["CACHID"] {
-            assert_eq!(classify_attribute_effect(name), AttributeEffect::DataOnly);
-            assert_eq!(raw_dchc_code(name), None);
-            assert!(!attribute_is_metadata_only(name), "{name}");
+    }
+
+    /// 正则 `"([A-Z][A-Z0-9]{1,7})"` 的手写同款：引号、2–8 个大写字母数字（首字母）、引号，不看字串语境。
+    fn uppercase_literals(source: &str, out: &mut BTreeSet<String>) {
+        let bytes = source.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'"' {
+                i += 1;
+                continue;
+            }
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && end - start < 8 {
+                let c = bytes[end];
+                let ok = if end == start {
+                    c.is_ascii_uppercase()
+                } else {
+                    c.is_ascii_uppercase() || c.is_ascii_digit()
+                };
+                if !ok {
+                    break;
+                }
+                end += 1;
+            }
+            if end - start >= 2 && end < bytes.len() && bytes[end] == b'"' {
+                out.insert(source[start..end].to_string());
+                i = end + 1;
+            } else {
+                i += 1;
+            }
         }
-        // 死名不会再从这张表里溜进来：写错的长名两票都拿不到，而真名才是要放行的那个。
-        assert_eq!(
-            classify_attribute_effect("FUNCTION"),
-            AttributeEffect::Unknown
+    }
+
+    /// 直接传进 e3d-io 读取口的字面量（`.get_double("X")` / `.attribute("X")` …）。
+    fn direct_reader_literals(source: &str, out: &mut BTreeSet<String>) {
+        const READERS: &[&str] = &[
+            ".get_string(\"",
+            ".get_integer(\"",
+            ".get_double(\"",
+            ".get_bool(\"",
+            ".get_ref(\"",
+            ".get_integer_array(\"",
+            ".get_double_array(\"",
+            ".get_ref_array(\"",
+            ".get_position(\"",
+            ".get_direction(\"",
+            ".get_orientation(\"",
+            ".get_element(\"",
+            ".get_element_array(\"",
+            ".attribute(\"",
+            ".has_attribute(\"",
+        ];
+        for reader in READERS {
+            let mut from = 0;
+            while let Some(at) = source[from..].find(reader) {
+                let open = from + at + reader.len();
+                let close = source[open..]
+                    .find('"')
+                    .map(|o| open + o)
+                    .expect("closing quote");
+                out.insert(source[open..close].to_string());
+                from = close;
+            }
+        }
+    }
+
+    /// 扫一组文件：`(全部大写字面量, 直接读点字面量)`。
+    fn scan_read_literals(
+        root: &std::path::Path,
+        files: &[String],
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        let mut literals = BTreeSet::new();
+        let mut direct = BTreeSet::new();
+        for file in files {
+            let path = root.join(file);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("读取 {} 失败: {error}", path.display()));
+            let source = strip_test_module(&source);
+            uppercase_literals(source, &mut literals);
+            direct_reader_literals(source, &mut direct);
+        }
+        (literals, direct)
+    }
+
+    /// 与生成脚本 `classify` 同款：属性名 = 在全集里或直接被读，戳除外；非属性 = 其余非 noun 非戳。
+    ///
+    /// 戳只免掉「提了一句名字」，免不掉真读：直接读点无条件算属性名，所以一个戳要是被传进
+    /// e3d-io 的按名读取口，它照旧落进 `names`，守卫那条「戳不许出现在 names」立刻红。
+    fn classify_read_literals(
+        literals: &BTreeSet<String>,
+        direct: &BTreeSet<String>,
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        let universe: BTreeSet<String> = dchc_change_classes()
+            .keys()
+            .cloned()
+            .chain(runtime_attribute_names())
+            .collect();
+        let nouns: BTreeSet<&str> = e3d_model::category::dictionary_noun_names().collect();
+        let stamps: BTreeSet<&str> = e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+            .into_iter()
+            .collect();
+        let names = literals
+            .iter()
+            .filter(|l| {
+                direct.contains(*l) || (universe.contains(*l) && !stamps.contains(l.as_str()))
+            })
+            .cloned()
+            .collect();
+        let other = literals
+            .iter()
+            .filter(|l| {
+                !universe.contains(*l)
+                    && !direct.contains(*l)
+                    && !nouns.contains(l.as_str())
+                    && !stamps.contains(l.as_str())
+            })
+            .cloned()
+            .collect();
+        (names, other)
+    }
+
+    fn sorted_set(list: &[String]) -> BTreeSet<String> {
+        let set: BTreeSet<String> = list.iter().cloned().collect();
+        assert_eq!(set.len(), list.len(), "名单里有重复：{list:?}");
+        assert!(
+            list.windows(2).all(|pair| pair[0] < pair[1]),
+            "名单必须严格升序：{list:?}"
         );
-        assert!(!attribute_is_metadata_only("FUNCTION"));
-        // 字典说 0、效果表不认它是 DataOnly：不放行（`NGMR` 负体引用、`PKEY` 设计表键，
-        // 都是 core 不重画但我们要读的输入）。
-        for name in ["NGMR", "PKEY", "STYP", "ACCREF"] {
-            assert_eq!(raw_dchc_code(name), Some(0), "{name}");
-            assert!(!attribute_is_metadata_only(name), "{name}");
+        set
+    }
+
+    /// S5 护栏（gen-model 半边）：产物的三半与源码逐名相等——`e3d_model` 一半等于 e3d-model 自己嵌入的
+    /// 读取集合（两个仓的产物漂开就红）；`gen_model` 一半等于按同一条规则重扫 [`GEN_MODEL_READ_MODULES`]
+    /// 的结果；判决用的 `names` 恰好是两者之并。任何一处红都只有一个动作：重跑 `output/gen_read_set.py`。
+    #[test]
+    fn the_generation_read_set_mirrors_e3d_model_and_the_model_side_modules() {
+        if runtime_attribute_names().is_empty() {
+            return; // 无 schema 的环境软跳过
         }
-        // 几何 / 位姿 / 结构 / UDA / 未知：一个都不放行。
+        let file = generation_read_set_file();
+        let e3d_model_side = sorted_set(&file.e3d_model);
+        let upstream: BTreeSet<String> = e3d_model::attribute_read_set()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(
+            e3d_model_side, upstream,
+            "generation_read_set.json 的 e3d_model 一半与 e3d-model data/attribute-read-set.json 漂开了，重跑 output/gen_read_set.py"
+        );
+
+        // 戳（2026-09-16 Q5）：三处名单——生成脚本的 STAMP_LITERALS（产物里这一格）、e3d-model 差分层
+        // 那张表、e3d-model 自己那份产物——必须是同一份，漂开就红。
+        assert_eq!(
+            file.stamp_literals,
+            e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES,
+            "stamp_literals 与 element_diff::PLACEMENT_STAMP_ATTRIBUTES 漂开了，重跑 output/gen_read_set.py"
+        );
+        assert_eq!(
+            file.stamp_literals,
+            e3d_model::attribute_reads::attribute_read_set_file().stamp_literals,
+            "两仓产物的 stamp_literals 漂开了，重跑 output/gen_read_set.py"
+        );
+
+        assert!(file.gen_model.vote);
+        assert_eq!(
+            file.gen_model.files,
+            GEN_MODEL_READ_MODULES
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>(),
+            "gen_model.files 与 GEN_MODEL_READ_MODULES 不一致"
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (literals, direct) = scan_read_literals(root, &file.gen_model.files);
+        let (names, other) = classify_read_literals(&literals, &direct);
+        assert_eq!(
+            sorted_set(&file.gen_model.names),
+            names,
+            "gen_model.names 与源码重扫不一致，重跑 output/gen_read_set.py"
+        );
+        assert_eq!(
+            sorted_set(&file.gen_model.non_attribute_literals),
+            other,
+            "gen_model.non_attribute_literals 与源码重扫不一致，重跑 output/gen_read_set.py"
+        );
+        // 2026-09-15：目录参数 + 结构连接五个 + 电缆端点两个。
+        assert_eq!(
+            file.gen_model.names,
+            [
+                "CFRA", "CREF", "ENDREF", "JOIE", "JOIS", "PARA", "PFRE", "STAREF"
+            ]
+        );
+
+        let union: BTreeSet<String> = e3d_model_side.union(&names).cloned().collect();
+        assert_eq!(
+            sorted_set(&file.names),
+            union,
+            "names 必须恰好是 e3d_model ∪ gen_model.names"
+        );
+        assert_eq!(generation_read_set().len(), file.names.len());
+        assert!(generation_reads_attribute("pos") && generation_reads_attribute(" JOIS "));
+
+        // 判决用的那一份里一个戳都不许有：它是差分层的排除名单，不是读点。
+        for stamp in &file.stamp_literals {
+            assert!(
+                !generation_reads_attribute(stamp),
+                "{stamp} 是戳却进了第二票——多半是新加了一处按名读取口，先弄清那处读是不是几何输入"
+            );
+        }
+    }
+
+    /// S5 护栏（e3d-io 半边）：目录求值环境读到的名字如实记录、按同一条规则可重扫，但 `vote == false`——
+    /// 它 DCHC = 0 的七个名字全在目录 `DATA` / `SELE` 行上读（`PSPE` 只是 `ATTRIB … OF PSPE OF PIPE`
+    /// 的属主链 token），设计侧的 `ANGL RADI HEIG DESP` 已在 e3d-model 一侧、`UNIPAR` 不在字典。
+    /// 名单变了就得重新回答「新名字是在设计元素上读的吗」，答是就该改 `vote`。
+    #[test]
+    fn the_e3d_io_catalogue_evaluation_reads_are_documented_but_not_a_vote() {
+        if runtime_attribute_names().is_empty() {
+            return; // 无 schema 的环境软跳过
+        }
+        let file = generation_read_set_file();
+        let side = &file.e3d_io_catalogue_eval;
+        assert!(
+            !side.vote,
+            "e3d-io 目录求值的读点不进第二票（见 generation_read_set 文档）"
+        );
+        assert_eq!(
+            side.files,
+            E3D_IO_CATALOGUE_EVAL_FILES
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/e3d-io");
+        assert!(
+            root.join("Cargo.toml").is_file(),
+            "e3d-io 应在 {}（Cargo.toml 的 path 依赖）",
+            root.display()
+        );
+        let (literals, direct) = scan_read_literals(&root, &side.files);
+        let (names, other) = classify_read_literals(&literals, &direct);
+        assert_eq!(
+            sorted_set(&side.names),
+            names,
+            "重跑 output/gen_read_set.py"
+        );
+        assert_eq!(
+            sorted_set(&side.non_attribute_literals),
+            other,
+            "重跑 output/gen_read_set.py"
+        );
+        let mut zero: Vec<&str> = side
+            .names
+            .iter()
+            .filter(|n| raw_dchc_code(n) == Some(0))
+            .map(String::as_str)
+            .collect();
+        zero.sort_unstable();
+        assert_eq!(
+            zero,
+            ["ANSW", "DKEY", "MAXA", "PSPE", "PURP", "QUES", "TANS"],
+            "e3d-io 目录求值读到的 DCHC=0 名字变了：核一遍新名字是不是在设计元素上读的"
+        );
+        // 它单独读到、而两票之外的名字里，没有一个是设计侧 DCHC=0 的：设计侧那几个要么 DCHC≠0 要么已在 e3d_model。
+        let vote = generation_read_set();
+        for name in &side.names {
+            if !vote.contains(name) {
+                assert!(
+                    raw_dchc_code(name) != Some(0) || zero.contains(&name.as_str()),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天六个，全来自 e3d-model：`DIR` catalogue_point、
+    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron——core 会话内不为它们重画，我们却
+    /// 真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都不在（S6 「`NAME` 等仍放行」的前提）。
+    #[test]
+    fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
+        let mut zero: Vec<&str> = generation_read_set()
+            .iter()
+            .filter(|n| raw_dchc_code(n) == Some(0))
+            .map(String::as_str)
+            .collect();
+        zero.sort_unstable();
+        assert_eq!(zero, ["DIR", "FILL", "GTYP", "PKEY", "UKEY", "VXREF"]);
+        for name in DATA_ONLY_ATTR_NAMES {
+            assert!(
+                !generation_reads_attribute(name),
+                "{name} 被生成器读到了——元数据门第二票会把它关掉，先弄清那处读是不是几何输入"
+            );
+        }
+        // 位姿与几何输入当然在里面。
         for name in [
-            "DIAM",
-            "POS",
-            "ORI",
+            "POS", "ORI", "DIAM", "HEIG", "SPRE", "CATR", "JOIS", "STAREF", "PARA",
+        ] {
+            assert!(generation_reads_attribute(name), "{name}");
+        }
+        // 2026-09-15 的规模：133 + 8 − 重叠 = 138。
+        assert_eq!(generation_read_set().len(), 138, "读取集合条数漂移");
+    }
+
+    /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
+    /// 本文件之外没有任何调用方，它一进判决这条就红。
+    #[test]
+    fn plcf_is_report_only_and_matches_the_dictionary_snapshot() {
+        // 位姿三个都置旗标：POS/ORI 挪了，隐含管段的放置缓存就得失效。
+        for name in ["POS", "ORI", "BFORI", "SPRE", "HEIG", "PARA", "att.pos"] {
+            assert_eq!(raw_plcf(name), Some(true), "{name}");
+        }
+        // 字典里有名、旗标为 0（头尾连通的 HPOS/TPOS 也不置：它们走 INTUBE 强制码那条路）。
+        for name in ["NAME", "DESC", "DIAM", "XLEN", "HPOS", "TPOS", "LEVE"] {
+            assert_eq!(raw_plcf(name), Some(false), "{name}");
+        }
+        // 字典没有的：元素元数据、UDA、伪属性、强制码。
+        for name in [
             "OWNER",
-            "SPRE",
             "UDA:42",
+            "CACHID",
+            "REDRAW",
+            "INTUBE",
             "NO_SUCH_ATTR",
         ] {
+            assert_eq!(raw_plcf(name), None, "{name}");
+        }
+
+        // 快照口径：58 个置位，全在字典里；除 `CLGREF` 外都是 DCHC 3 / 4。
+        let flagged = plcf_flagged_names();
+        assert_eq!(flagged.len(), 58, "PLCF==1 的条数漂移");
+        let mut zero_class: Vec<&str> = flagged
+            .iter()
+            .filter(|name| raw_dchc_code(name) == Some(0))
+            .map(String::as_str)
+            .collect();
+        zero_class.sort_unstable();
+        assert_eq!(zero_class, vec!["CLGREF"]);
+        for name in flagged {
+            assert!(
+                matches!(raw_dchc_code(name), Some(0 | 3 | 4)),
+                "{name}: PLCF==1 却是 DCHC 1/2——头尾连通属性不该置放置缓存旗标"
+            );
+        }
+        let pose: BTreeSet<&str> = dchc_change_classes()
+            .iter()
+            .filter(|(_, code)| **code == 3)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for name in pose {
+            assert_eq!(raw_plcf(name), Some(true), "位姿类 {name} 必须置 PLCF");
+        }
+
+        // 源码钉：不进判决。本文件之外任何 .rs 提到 raw_plcf 都算越界。
+        let src_root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut callers: Vec<String> = Vec::new();
+        each_rs_file(&src_root, &mut |path, text| {
+            if !path.ends_with("model_impact.rs") && text.contains("raw_plcf") {
+                callers.push(path.display().to_string());
+            }
+        });
+        assert!(
+            callers.is_empty(),
+            "PLCF 只作报表 / 探针，不进任何判决（D4）；有人开始消费它了：{callers:?}"
+        );
+    }
+
+    /// S6 真值表（开发计划 2026-09-15 D2）：元数据门要两票——字典 DCHC=0 **且** 生成器不读。
+    /// 任一票缺席就照旧重算：读取集合里的 DCHC=0 属性不放行；`NAME` 等老五个仍放行；
+    /// UDA / 字典没收的名字 / 效果表 DataOnly 却没有字典票的 `CACHID` 不放行。
+    #[test]
+    fn metadata_only_needs_dchc_zero_and_an_unread_attribute() {
+        // 老五个照旧放行（S5 钉过：生成器一个都不读），归一化后同答。
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "name", "att.NAME"] {
+            assert!(attribute_is_metadata_only(name), "{name}");
+            assert!(attribute_is_curated_metadata(name), "{name}");
+        }
+        // 新档：字典 DCHC=0、生成器不读、手写表也不认识（此前落 Unknown 整根重算）。
+        for name in ["DUTY", "PRES", "MATR", "BUIL", "ACCREF", "att.DUTY"] {
+            assert_eq!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!generation_reads_attribute(name), "{name}");
+            assert_eq!(
+                classify_attribute_effect(name),
+                AttributeEffect::Unknown,
+                "{name}"
+            );
+            assert!(attribute_is_metadata_only(name), "{name}");
+            assert!(!attribute_is_curated_metadata(name), "{name}");
+        }
+        // 读取集合那一票：字典说 0、我们却真拿来生成的六个输入，一个都不放行。
+        for name in ["DIR", "FILL", "GTYP", "PKEY", "UKEY", "VXREF", "att.dir"] {
+            assert_eq!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(generation_reads_attribute(name), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
         }
-        // 全部放行的名字都必须真的在两张表里——名单漂移一格就红。
-        let admitted: Vec<&str> = DATA_ONLY_ATTR_NAMES
+        // 字典那一票：DCHC ≠ 0 的几何 / 位姿 / 依赖属性，读不读都不放行。
+        for name in [
+            "DIAM", "POS", "ORI", "SPRE", "HEIG", "HPOS", "LHEA", "TEMP", "STEX",
+        ] {
+            assert_ne!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        // 字典没投票（快照里没有）：不放行。`CACHID` 效果表虽判 DataOnly，它是项目 UDA，
+        // 字典按构造收不到它——这一票不会等来；`UDA:<id>`、伪属性、结构属性、写错的长名同理。
+        for name in [
+            "CACHID",
+            "UDA:42",
+            "OWNER",
+            "FUNCTION",
+            "NO_SUCH_ATTR",
+            "REDRAW",
+            "INTUBE",
+        ] {
+            assert_ne!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        assert_eq!(
+            classify_attribute_effect("CACHID"),
+            AttributeEffect::DataOnly
+        );
+        assert!(!attribute_is_curated_metadata("CACHID"));
+        // 老名单恰好五个，且是新门的子集。
+        let curated: Vec<&str> = DATA_ONLY_ATTR_NAMES
             .iter()
             .copied()
+            .filter(|name| attribute_is_curated_metadata(name))
+            .collect();
+        assert_eq!(curated, vec!["NAME", "DESC", "PURP", "FUNC", "LCHKDA"]);
+        for name in curated {
+            assert!(
+                attribute_is_metadata_only(name),
+                "{name} 老名单必须是新门的子集"
+            );
+        }
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡六个，其余全部放行。
+        let zero: Vec<&String> = dchc_change_classes()
+            .iter()
+            .filter(|(_, code)| **code == 0)
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(zero.len(), 3941, "字典 DCHC=0 条数漂移");
+        let admitted = zero
+            .iter()
+            .filter(|name| attribute_is_metadata_only(name))
+            .count();
+        assert_eq!(
+            admitted,
+            3941 - 6,
+            "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
+        );
+    }
+
+    /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字
+    /// 就是 `UnreadAttribute`（与顺序无关）；一个没拿到两票、或一个属性都没有 → `None`。
+    #[test]
+    fn the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list() {
+        let tier = |names: &[&str]| metadata_only_tier(names.iter().copied());
+        assert_eq!(tier(&["NAME"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(
+            tier(&["DESC", "NAME", "PURP", "FUNC", "LCHKDA"]),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert_eq!(tier(&["DUTY"]), Some(NoModelTier::UnreadAttribute));
+        assert_eq!(tier(&["HREF"]), Some(NoModelTier::UnreadAttribute));
+        assert_eq!(tier(&["NAME", "DUTY"]), Some(NoModelTier::UnreadAttribute));
+        assert_eq!(tier(&["DUTY", "NAME"]), Some(NoModelTier::UnreadAttribute));
+        assert_eq!(tier(&["NAME", "DIR"]), None);
+        assert_eq!(tier(&["NAME", "CACHID"]), None);
+        assert_eq!(tier(&["NAME", "DIAM"]), None);
+        assert_eq!(tier(&["UDA:42"]), None);
+        assert_eq!(tier(&[]), None);
+    }
+
+    /// 两票压过手写表：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字
+    /// **恰好 16 个**，逐个点名。它们是当年按语义猜进表的（`HREF`/`TREF` 分支头尾引用——几何
+    /// 读的是 `HPOS HDIR HBOR …` 这些 DCHC=1/2 的存储属性；`PSPE` 管道规格默认值——元件各有
+    /// 自己的 `SPRE`；`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；`NGMR` 负体几何集引用——负体走
+    /// `GMRE`；其余同理），core 不为它们重画、我们也不读，判决以两票为准，手写表那一格只剩报表
+    /// 意义（`classify_attribute_effect` 照旧回级联 / 几何，建边资格不变）。名单变了就得重新问
+    /// 「新名字真的没人读吗」——多出来一个是读取集合漏了、少一个是有人开始读它了。
+    #[test]
+    fn the_two_votes_override_the_hand_tables_for_exactly_sixteen_names() {
+        let mut overridden: Vec<&str> = ATTRIBUTE_EFFECT_TABLES
+            .iter()
+            .filter(|(_, effect)| *effect != AttributeEffect::DataOnly)
+            .flat_map(|(names, _)| names.iter().copied())
             .filter(|name| attribute_is_metadata_only(name))
             .collect();
-        assert_eq!(admitted, vec!["NAME", "DESC", "PURP", "FUNC", "LCHKDA"]);
+        overridden.sort_unstable();
+        assert_eq!(
+            overridden,
+            [
+                "CURD", "DDPR", "DKEY", "FSPREF", "HREF", "JFRE", "MAXA", "NGMR", "ORRF", "PSPE",
+                "PTOF", "PTYP", "SCREF", "SIZE", "STYP", "TREF",
+            ]
+        );
+        for name in &overridden {
+            assert_eq!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!generation_reads_attribute(name), "{name}");
+            assert!(
+                classify_attribute_effect(name).affects_model(),
+                "{name} 手写表那一格没动"
+            );
+            assert_eq!(
+                classify_operation_impact(&modified_operation(name)),
+                OperationImpact::Skip,
+                "{name}"
+            );
+        }
+        // 第六张（字典生成）表按构造只收 DCHC ≠ 0，一个都不会被压过。
+        for (name, _) in dictionary_change_class_attr_names().entries() {
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
     }
 
     /// 预览与执行同口径（2026-09-08）：`OperationImpact::Skip` 是「执行侧不会为它排模型
     /// 工作」这句承诺，判据必须与 direct 窗口规划器的元数据门逐名一致——两边共问
-    /// [`attribute_is_metadata_only`]，谁也不许自己再列一张名单。字典没投票的
-    /// `CACHID` 因此不是 Skip：规划器对它照旧整根重算，预览再报
-    /// 「不影响模型」，同一份回执里 `details` 与 `units` 就是两句话。
+    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。字典没
+    /// 投票的 `CACHID` 因此不是 Skip：规划器对它照旧整根重算，预览再报「不影响模型」，
+    /// 同一份回执里 `details` 与 `units` 就是两句话。S6 起新档同理：`HREF` 只改了引用，
+    /// 规划器不上卷，预览也不许再说 Regen。
     #[test]
     fn the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate() {
         for name in DATA_ONLY_ATTR_NAMES {
@@ -1932,11 +2785,27 @@ mod tests {
             classify_operation_impact(&modified_operation_with_attrs(&["NAME", "DESC"])),
             OperationImpact::Skip
         );
+        // S6 新档：老名单 + 新档混合是 Skip；混进读取集合里的 DCHC=0 输入就不是。
+        let mixed = classify_operation_effects(&modified_operation_with_attrs(&["NAME", "DUTY"]));
+        assert_eq!(mixed.impact(), OperationImpact::Skip);
+        assert_eq!(mixed.effects, vec![AttributeEffect::DataOnly]);
+        assert_eq!(
+            classify_operation_impact(&modified_operation_with_attrs(&["NAME", "DIR"])),
+            OperationImpact::Regen
+        );
+        assert_eq!(
+            metadata_only_tier(["NAME", "DUTY"]),
+            Some(NoModelTier::UnreadAttribute)
+        );
         // 源码钉：门那一侧问的是同一个谓词，不是自己抄的名单。
+        let gate = include_str!("window_root_plan.rs");
         assert!(
-            include_str!("window_root_plan.rs")
-                .contains("model_impact::attribute_is_metadata_only"),
-            "元数据门必须共用 attribute_is_metadata_only"
+            gate.contains("model_impact::metadata_only_tier"),
+            "元数据门必须共用 metadata_only_tier"
+        );
+        assert!(
+            gate.contains("model_impact::attribute_is_metadata_only"),
+            "元数据门文档必须指回 attribute_is_metadata_only"
         );
     }
 

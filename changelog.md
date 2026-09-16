@@ -1,6 +1,258 @@
 # 变更记录
 
+## 2026-09-16
+
+### 属性变化分类对齐 core · Q5 接线：`is_placement_only` 把 `CACHID` 剔出比较集——`[POS, CACHID]` 算「只动了摆放」，全语料合格锚点 79 → 163、对拍 139 根 108 个有判别力的两态全等 0 红；只 `CACHID` 变照旧整根 regen
+
+- e3d-model `src/element_diff.rs`：新增 `pub const PLACEMENT_STAMP_ATTRIBUTES: [&str; 1] = ["CACHID"]`（**戳**：Design 应用随每次图形重建写下的缓存
+  `+1` 计数，不是几何输入——S8 普查 453 库 2961 窗，13724 次跳动全是 `0→1` / `n→n+1`），`is_placement_only` 由「`!attributes.is_empty()` ∧ 全部 ∈
+  `PLACEMENT_ATTRIBUTES`」改判「**至少一项** ∈ `PLACEMENT_ATTRIBUTES` ∧ 其余只允许戳」。`any` 在空集合上为假，所以「什么都没动」与「**只有戳变了**」
+  照旧回 `false`——摆放一项都没动就不是只动了摆放，那是整库缓存重建的扫写，照旧上卷重算（要不要另给它开一档是计划 §8 Q6，不在本条）。
+- 边界：`is_placement_only` 其余四条排除（换类型 / 改挂 / 成员表 / `opaque`）、`placement_input_changed`（戳不是矩阵输入，不触发级联）、
+  `transform.rs` 的 `PLACEMENT_ATTRIBUTES`、`options.rs` 的 `model_transform_cheap_path` 默认值（仍默认关）、gen-model `metadata_only_tier`
+  （字典没给 `CACHID` 投票，元数据门照旧不放行）一律未动。
+- 读取集合按**有名字的排除口径**处理，不把字面量藏到扫描够不着的地方——名字一消失，守卫就钉不住「它是戳、不是几何输入」这件事：`output/gen_read_set.py`
+  加 `STAMP_LITERALS = {"CACHID"}`，分类时单列进产物的 `stamp_literals`、**永不进任何 `names`**；例外写在脚本里——真被传进 e3d-io 读取口
+  （`.get_integer("CACHID")`）的照旧算读、照旧进 `names`。四条守卫钉住：e3d-model `tests/attribute_reads_guard.rs`（产物 `stamp_literals` ≡
+  `element_diff::PLACEMENT_STAMP_ATTRIBUTES`，且名单不许养闲人——源码里已不提的戳要摘掉），gen-model `src/data_interface/model_impact.rs` 三条
+  （与常量逐名相等、两仓产物逐名相等、戳不许拿到「生成器读它」那一票）。两仓产物 `vendor/e3d-model/data/attribute-read-set.json` 与
+  `src/data_interface/generation_read_set.json` 的 `names` 里都没有 `CACHID`。
+- **复验**（接线后**不带** `AIOS_RIGID_PROBE_IGNORE_CACHID` 全语料重跑对拍门，五个目录 2961 窗 / 跳过 0 / 488s，报告
+  `docs/evidence/2026-09-16-rigid-exclusion-parity.md` 按政策不入库）：rigid 合格锚点候选 **163**（= 接线前 79 + S4 剔掉 `CACHID` 多出的 84，
+  整台 EQUI 挪位为主），对拍 139 根——两态相等 **108**、无判别力 22、**不等·锚点 0**、不等·窗内另改 9（这一窗根里另有改动，生产按 D1 规则 4 整根
+  regen，样本不作数）；三条排除仍有内容：规则 M 结构件之下 62 候选 / 不等·锚点 2，负体 50 / 2，路由容器之内 519 / 5。报告里「仅
+  `IGNORE_CACHID=1` 才多出的候选」= 0，即排除已固化进 `is_placement_only`，环境变量再无额外增量。
+- 验证：真值表单测（`element_diff` 9 绿）覆盖 `[POS]`✓ `[ORI, CACHID]`✓ `[POS, CACHID]`✓ `[POS, ORI, CACHID]`✓ / `[CACHID]`✗ `[POS, NAME]`✗
+  `[POS, HEIG]`✗ `[POS, CACHID, HEIG]`✗ `[CACHID, NAME]`✗ 换类型·改挂·成员表·`opaque`✗ 与空集合✗，`placement_input_changed` 旧用例全绿；两仓
+  `cargo test --lib` 不退（e3d-model 320 绿 / 0 红，gen-model 2127 绿 / 0 红 / 113 ignored）；e3d-model `cargo test --test increment_real
+  an_increment_says_what_two_full_generations_say` 1 绿（1380.70s）；`cargo test --test attribute_reads_guard` 2 绿、gen-model
+  `cargo test --lib model_impact` 48 绿；ams8000 九窗 `live_ams8000_pinned_windows_land_in_the_expected_buckets` 与
+  `live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off` 各 1 绿（桶位不变）；改动文件 `rustfmt --edition 2024 --check`
+  无差异，文档 CRLF / 源码原有换行符保持。未跑服务、未提交。
+- 文档：ADR-066 D1 规则 2 加 2026-09-16 修订注（判「摆放之外还动了别的」时忽略戳、只 `CACHID` 变照旧 regen、不接的代价与两票出处）；
+  计划 §8 Q5 从「第二票已到、剩拍板、本会话只记不动」改口为「已拍板并接线」并记上复验数字。
+
+### 属性变化分类对齐 core · S8：`CACHID` 一致性普查——DESI 全语料 453 库 2961 窗三维交叉表；它是「顶层件图形缓存 `+1` 计数」不是「本元素几何变了」，单向 oracle 98.9% 成立、反向 2.7%；只作结论，不接线
+
+- 新探针 `window_root_plan::tests::probe_cachid_consistency`（`#[ignore]` 手动；与全语料两态门同一份五个项目目录，`AIOS_POSREF_DIRS` /
+  `AIOS_CACHID_PROBE_STEPS_PER_DB` / `AIOS_CACHID_PROBE_REPORT` 可改）：对每个真变了的 Modified 候选记三维——**`CACHID` 四态**（变 / 有值未变 /
+  0·unset 未变（没人写过）/ noun 无此属性）× **除 `CACHID` 之外的变更类别**（换类型改挂 / 含 DCHC 4 / 1·2 / 3 / 字典外 / 只 0 / 只成员表 /
+  只 CACHID / opaque，取最重一档）× **我方判定**（`change_metadata_tier` 放行 = skip、`is_placement_only` ∧ `rigid_anchor` 判刚 = transform、
+  其余 regen；按候选判、不问开关）。另判「只 CACHID」的成因（同窗真变 / 新建 / 删除的元素有没有以它为严格祖先的）、「忽略 CACHID 再判一次」的
+  判定位移、只 DCHC=0 / 只字典外候选上的属性名 × 四态。报告 `docs/evidence/2026-09-16-cachid-consistency-corpus.md`（按政策不入库），耗时 142s。
+  落点从计划里写的 e3d-model `tests/increment_real.rs` 改到 gen-model `window_root_plan` 测试模块——DCHC 字典、两票门、`rigid_anchor` 三样都只在
+  gen-model 一侧，e3d-model 里放不下「DCHC 类别 × 我方判定」两维（计划 §4 S8 记了）。
+- **结论**（取证文档 §4.4 末条 / 计划 §4 S8 ★块）：(1) 值是**计数**不是旗标：13724 次变化全是 `+1`（`0→1` 5241、`n→n+1` 8483），`WORD` 原始字就是
+  计数，`e3d_collector.rs` 记的 `"" → "1"` 其实是 `0 → 1`；(2) 写方按应用分：带 `CACHID` 的 26627 个候选里只有 13753 个非 0，写过的只有
+  `GENSEC HANG PANE BRAN SUBE EQUI SCTN HANDRA TRNCUR STRFLT GENPRI PNOD SUBS FLOOR TMPL STRU TRNPRI` 十七个 noun，船体 / `CABLE` / 栏杆件 /
+  `CWBRAN` / `VOLM` 上一次没写过；(3) 语义是**顶层件的图形缓存版本**：13724 次跳动里 369（2.7%）伴随本元素 DCHC≠0 / 结构变化，621（4.5%）伴随
+  只 DCHC=0 / 字典外 / 成员表变化（成员增删 132/132 跳动——子树图形变记在属主身上），**12734（92.8%）只有它变**，其中 12476 连子树里都没有同窗
+  变化，形状是整库扫写（aps7343 6→7 全部 SCTN / PNOD / GENSEC `0→1`，GENSEC 2794 个 `0→1` 再 2794 个 `1→2`，HANG 1266 × 3 轮）；(4) 单向 oracle
+  成立：有值元素上「有 DCHC≠0 变 ⇒ CACHID 变」369/373 = **98.9%**（4 个反例全是 BRAN 头尾类别 1/2），没写过的元素（213 个 DCHC≠0 变化停在 0）是
+  覆盖不是纪律；反向「CACHID 变 ⇒ 几何变了」2.7%，不能当信号；(5) 副作用：字典没收它，混进差分就既不放行也不刚——有值元素上 88 次含 `POS`/`ORI`
+  的变化全部同时跳动（`is_placement_only` 为假 → regen，84 次若忽略它本可 transform），只 DCHC=0 的 83 次跳动里 67 次从 skip 推成 regen
+  （`LCHKDA` 81/83、`HREF` 4/5、`TREF` 1/1、`NAME` 2/25），12734 个只 CACHID 的候选今天全部上卷重算。两处待拍板记进计划 §8 **Q5**
+  （`is_placement_only` 要不要剔掉 `CACHID`——推荐倾向剔、但等 S4 对拍）/ **Q6**（只 CACHID 要不要放进门——推荐先不动、先量）。
+- 顺带：字典外名字 `SPAMAP` 单独出现在 14289 个真变了的候选上（PANE / GENSEC / SCTN，占 36162 的 40%），有值元素上 406/406 与 `CACHID` 同跳，
+  今天全部 regen；`MAPEXS` 1161 / `MAPCSV` 1027 / `UPDT` 967 / `UPGDNO` 321 / `RATM` `RREF` `RATS` 各 ~195 / `DBMVAL` 190 都在无 `CACHID` 的
+  noun 上。不在 S8 范围，记下备查。
+- 验证：`cargo test --lib --no-run` 干净（新代码无 warning）；探针先在 ams000 目录链末 60 步冒烟（292 库 1246 窗 52s）通过，再全语料跑两遍
+  （第二遍加成因 / 位移 / 属性名表）：453 库 / 2961 窗 / 0 跳过 / 2503710 索引候选 / 36162 真变了的 Modified 候选，与 S6 全语料门的库、窗、候选数
+  逐字相同；`rustfmt --edition 2024 --check window_root_plan.rs` 只剩 1233 / 2234 两处旧差异；CRLF 保持。未改生产代码、未跑服务。
+
+### 属性变化分类对齐 core · S4（离线半程）：刚体前移两态对拍门建成——全语料 710 个只动摆放的候选，合格锚点 27 个有判别力的根两态全等（0 红），负体 / 规则 M / 路由容器三条排除坐实有内容；剔掉 `CACHID` 再判多出 84 个整台 EQUI 挪位、108 根全等（Q5 第二票）；P23 / 开孔 / CWBRAN 等七条排除语料里无自然窗，等 E3D 造窗
+
+- 新探针 `window_root_plan::tests::probe_rigid_exclusion_windows`（`#[ignore]`；ADR-066 验收 1 的对拍门，落点同 S8 改到 gen-model——排除判决
+  `rigid_anchor` 只在这一侧）：沿五个目录每一窗找只动了摆放的候选（`ElementDiff::is_placement_only`），逐个过 `rigid_anchor` 分类（合格 / 十种排除），
+  再**按生成根归组**（一根里所有只动了摆放的候选一起前移，与生产「兄弟锚点各自 Δ、祖孙取最内层」同口径），合格锚点的根全拍、被排除的每类抽 10 个
+  有判别力的根：A = e3d-model `generate_subtree` 在 T 上整根重算，B = 在 S 上整根生成、每件记录左乘最近锚点的 `Δ = W_T·W_S⁻¹`，逐件比 `GeometryId`
+  集合与体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵（1e-6）。不一致的记录按位置归四处——子树内 / 属主链（消费锚点的属主）/ 邻件（窗内未改，被锚点带动）/
+  窗内另改过（自己、祖先或后代在这一窗改过——生产按 D1 规则 4 整根 regen，样本不作数）；相等但锚点子树无生成物 = 无判别力；`Δ` 是 |t| < 1e-3 mm
+  的纯平移 = 重写 POS 的末位噪声，只数不拍。目录库经 `DirectoryDbResolver` 扫五个目录按需补开。`AIOS_PROJAMS_GEOMETRY_FILE` + `AIOS_TRANSFORM_WINDOW`
+  钉造窗；`AIOS_RIGID_PROBE_IGNORE_CACHID=1` 把 `CACHID` 剔出比较集再判；`AIOS_RIGID_PROBE_STRICT=1` 合格锚点一个不等就红；`AIOS_RIGID_PROBE_DUMP=1`
+  逐条印不一致记录的两端矩阵 / 体积 / 包围盒与 L2 差分。报告 `docs/evidence/2026-09-16-rigid-exclusion-parity.md`（+ `-ignore-cachid.md`，按政策不入库）。
+- **结果**（453 库 / 2961 窗，359s）：只动摆放的候选 710 = 合格 79 / 路由容器之内 519 / 规则 M 62（FIXING 51、POINSP 11）/ 负体 50（NCYL）；
+  P23、开孔在消费属主下、CWBRAN、点环容器、桥架件、剖面、几何集**零个自然窗**；51 个 `Δ≈0`。
+  - **门**：合格锚点 56 根——27 个有判别力的两态全等（HANG 下 BWLD / CLEV / EYRD / HROD / SCLA / SLUG / TRNB / VSPR、SUBS 下 CYLI、SVOLM 锚点即根、
+    acw5525 四个 EQUI 各 2–3 个 NOZZ 同根各自 Δ），**0 红**；22 根锚点子树无生成物（ams7997 HVAC 分支的 BEND / ATTA / DAMP、ams8000 的 ELCONN / STRT）、
+    7 根窗内另有改动。
+  - **排除有内容**：负体——同根 5 个 / 2 个 NCYL 挪 200 mm，属主 FLOOR 三角 / 亏格 / 体积变（2 干净样本）；规则 M——7 个 FIXING、2 个 POINSP 挪位，
+    属主 GENSEC 体积 / 包围盒 / 亏格变（2）；路由容器——VALV 挪 500 mm 管身增删、ELBO 挪 25 mm 两根管身变、GASK 转向管身增删（5）；保守的形状也看见了：
+    全是显式 FTUB、没有隐式管身的分支里挪 BEND、单独挪 FTUB，Δ 前移也对（5）。
+  - **Q5 第二票**：剔掉 `CACHID` 多出 84 个合格锚点（整台 EQUI 挪位为主、锚点即根、1–30 件全部由 Δ 前移，另有 FLOOR 一例），对拍 139 根，
+    108 个有判别力的全等、**0 红**。E3D 真实的 EQUI 挪位就是刚体，`CACHID` 只是同一次编辑写下的缓存计数——计划 §8 Q5 推荐从「倾向剔、等 S4」
+    改成「第二票已到，剩拍板」；本会话不动 e3d-model `is_placement_only`（接线）。
+  - 中途两次改口都写进了探针：单锚点拍多锚点根会把兄弟锚点的记录判成「不等」（acw5525 EQUI 里 7 个图元同挪）→ 按根归组；只查「自己 / 祖先改过」
+    会把后代改过的属主（POINSP 挪了的 GENSEC）当成锚点带动的邻件 → 后代也算；剔 `CACHID` 首跑 3 个「红」全是子树里另有 `HEIG` 改动的 CYLI / NOZZ
+    （生产按 D1 规则 4 本就不前移）→ 被挪的记录也过「窗内另改」判定。改口后两遍全语料 0 红。
+- 计划 §4 S4 标 ◐（离线半程）、§8 Q5 补第二票；ADR-066 验收 1 加 2026-09-16 修订注；取证文档 P1-c 加 ★。**未做**：E3D 造窗那一半（`HRPOST` /
+  `PLOPEN` / `NBOX` 等七条排除）；对拍是文件侧生成物的不变量，不是生产投影记录的 `record_id` / `mesh_id`（ADR-066 验收 4 的 `mem://` 真跑另算）。
+- 验证：`cargo test --lib --no-run` 干净；探针 ams000 冒烟后全语料跑五遍（三次改口 + 两种口径），最后两遍 359s / 451s 全过；`cargo test --lib`
+  **2127 绿 / 0 红 / 112 ignored**（+1 ignored = 新探针）；`rustfmt --edition 2024 --check window_root_plan.rs` 只剩 1233 / 2234 两处旧差异；
+  CRLF 保持。未改生产代码、未跑服务。
+
 ## 2026-09-15
+
+### 属性变化分类对齐 core · S6：元数据门改两票——「字典 DCHC=0 ∧ 生成器不读」替掉五个名字，`no_model` 分 `metadata_only` / `unread_attribute` 两档，DESI 全语料两态门 453 库 2961 窗全过
+
+- `model_impact::attribute_is_metadata_only(name)` 改为 `raw_dchc_code(name) == Some(0) && !generation_reads_attribute(name)`（两票缺一不放行；
+  S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME DESC PURP FUNC LCHKDA`）。老名单退成 `attribute_is_curated_metadata`（效果表 DataOnly ∧ DCHC=0，
+  恰好五个、按构造是新门的子集），只作报表分类与分档；`metadata_only_tier(names)` 是唯一一份名单 + 分档：全部放行才有档，全在老名单记
+  `MetadataOnly`，否则 `UnreadAttribute`。字典 3941 个 DCHC=0 的名字里读取集合挡 `DIR FILL GTYP PKEY UKEY VXREF` 六个，其余 3935 个放行
+  （守卫钉 3941 − 6）；UDA / 字典没收的名字（含 `CACHID`）/ `opaque` 照旧不放行。
+- **两票压过手写表**：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字恰好 **16** 个——`DEPENDENCY_CASCADE` 的
+  `HREF TREF PSPE DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `DIRECT_GEOMETRY` 的 `SIZE MAXA NGMR ORRF PTOF`；只改它们 → Skip，表项不动
+  （建边资格、报表分类照旧），守卫 `the_two_votes_override_the_hand_tables_for_exactly_sixteen_names` 逐个点名。取证文档 §1.4「13 + 6 个 DCHC=0
+  却判影响模型的是我们的几何输入」被 S5 的扫描推翻一半：真读的只有 `GTYP PKEY VXREF`。
+- **预览同口径**（0908 纪律）：`classify_operation_effects` 逐属性**先**问 `attribute_is_metadata_only`，放行的记 `DataOnly` 不排工作，哪怕手写表
+  登记在别处；`query_service::change_impact` 的 `action` / `affects_model` 由两票说（`HREF` → skip，`CACHID` / `DIR` → regen），回执多
+  `dchc` / `generator_reads` 两格；`manual_update::merge_net_change_details_with` 不动（本来就问 `classify_operation_impact`）。
+- **e3d-model `increment.rs`**：`plan_update_with` 的谓词从 `Fn(&ElementDiff) -> bool` 改成 `-> Option<NoModelTier>`；`IncrementReport` 多
+  `unread_attribute` 一格（与 `metadata_only` 互斥、都含在 `no_model` 里），`totals_line` 跟着多一格，`accounts_for` 钉两档之和 ≤ `no_model`；
+  `plan_update_bounded` 传 `|_| None`。gen-model `window_root_plan::change_metadata_tier(diff)`（四条结构条件 ∧ `metadata_only_tier`）接进
+  `WindowRootSources::collect`，`change_is_metadata_only` 退成布尔包装（源码钉）；回执 warning 两档分列。开关 `model_skip_metadata_only_changes`
+  名字不变、语义变宽（计划 §8 Q2 按推荐），`options.rs` 文档与 CONTEXT.md「模型影响」词条改口。
+- 守卫：`metadata_only_needs_dchc_zero_and_an_unread_attribute`（真值表 + 放行数 = 3941 − 6）、
+  `the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list`、`the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`、
+  `the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate`（扩到新档）、
+  `query_service::the_impact_preview_skips_exactly_what_the_metadata_gate_admits`、`manual_update` 口径测试扩 `DUTY` / `HREF` / `DIR`；
+  e3d-model `the_two_gate_tiers_are_a_subset_of_no_model_and_both_show_on_the_totals_line`。
+- **两态门**：三条契约抽成 `assert_metadata_gate_two_state`，ams8000 单库门（`live_ams8000_metadata_only_gate_never_adds_and_never_shrinks_the_closure`，
+  `AIOS_PROJAMS_GEOMETRY_FILE` + `AIOS_METADATA_ONLY_WINDOW=base:target` 可钉任意一库一窗）与新的 DESI 全语料门
+  `live_corpus_metadata_only_gate_two_state_over_every_desi_db`（五个项目目录每个 DESI 库整条会话链，`AIOS_POSREF_DIRS` / `AIOS_METADATA_GATE_STEPS_PER_DB`
+  可改）共用；后者顺带出「DCHC=0 属性变化频次表」写到 `docs/evidence/2026-09-15-metadata-gate-two-vote-corpus.md`（按政策不入库）。
+- **全语料门第一次跑撞出契约 2 要改口**（2026-09-16，会话 fable-5-1-44 接手 fable-5-1-40）：aps250514 3→4 / aps250517 3→4 两窗各两个桥架分支候选只改
+  `HCREF` / `TCREF`（DCHC=0、生成器不读，新档放行），关着时 e3d-model 桥架分支**粗级联**（`cascade_cable_tray_branch`：CWBRAN 子树里改了任何东西就整条
+  重建，按 noun 不按属性判）拖进 20 / 27 个 CTRAY，闭包多 42 / 56 个 refno（CTMTRL / CTSTRA / CTTEE / CTRAY）；开着时不上卷不级联，那片单元连同祖先就不进
+  闭包。原文「两态祖先闭包逐字相同」在 ams8000 链上成立只是因为那条链没有这种窗；这是两票该省的（core 不为 `HCREF` 重画、`cable_tray.rs` 也不读它，
+  托盘网格不可能变），不是漏收。契约 2 改成「闭包只少不多 ∧ 账本种子两态逐字相同（候选与祖先链照进闭包，候选所在的根一个都不少收）∧ 少掉的 refno
+  全是少重建的单元或其祖先」，少了别的照红；回执 / 报告多一格 `closure_dropped`。0908「凭证前移那一层不因此少收」相应改口为「候选所在的根不少收；
+  粗级联扇出的根按两票前移」（`increment.rs` / `options.rs` / `change_metadata_tier` 文档），计划 D2 ★S6 (5) 与取证文档 P2.3 记下。
+- 验证：gen-model `cargo test --lib` **2127 绿 / 0 红 / 110 ignored**（+3，+1 ignored）；e3d-model `cargo test --lib` 318 绿（+1）、
+  `--test attribute_reads_guard` 2 绿（`reference_reads_guard` 那条红仍是别人在途的 `catalogue.rs` 改动，未动）；`rustfmt --edition 2024 --check`
+  本次改动无差异（`window_root_plan.rs` / `options.rs` / `manual_update.rs` / `query_service.rs` 剩下的差异用 HEAD 版逐一核过都是旧的，未动）。
+  真库：ams8000 九个钉死窗桶位不变、`regen` 两态逐字相同（3/1/2/0/1/1/1/1/0）；ams7999 45→46 仍 regen 2 / no_model 3；ams8000 链末 40 步两态门全过
+  （无一窗只改了不影响模型的属性）。**DESI 全语料两态门**：453 库 / 2961 窗 / 0 跳过，每窗三条契约全过，耗时 48 分；36162 个真变了的 Modified 候选里
+  门放行 **1057**（`metadata_only` 750 / `unread_attribute` 307），134 窗有放行；`regenerate` 1007907 → 1007782、连派生容器共省 **515** 个单元；
+  闭包少收只在上述两窗（98 个 refno）。频次表头部：`NAME` 799（放行 774）、`LCHKDA` 276（4，几乎总与别的改动同候选）、`AMEMRF` 112 / `LNFA` 88 /
+  `HREF` 68（42）/ `TREF` 66（46）/ `DESC` 32（24）/ `AELRFA` `PPCUTL` 各 19 / `INCO` 13 / `ASSTAR` 12 / `HCON` 12（4）/ `PPMODI` 10 / `BENDMC` 9 /
+  `TCON` 21、`STACOM` 9、`VALREF` 9（都 0，与别的改动同候选）；读取集合里的六个 DCHC=0 名字在语料里一次都没变过。未跑服务。
+
+### 属性变化分类对齐 core · S5：生成读取集合成为受护栏的产物——138 个名字、DCHC=0 恰好六个，元数据门第二票的料备齐
+
+- 新生成脚本 `output/gen_read_set.py`：按一条**宽口径**规则扫生成器源码里的属性读点——全部大写字面量 `"[A-Z][A-Z0-9]{1,7}"` ∩
+  （字典 4270 ∪ 运行库 schema 4478）∪ 直接传进 e3d-io 读取口（`.get_*("X")` / `.attribute("X")`）的字面量；每文件截到第一个
+  cfg(test) 标记，`src/bin` 除外；noun 名自动放行，其余大写字面量记成 `non_attribute_literals` 让守卫分清「新冒出的」与「早知道不是属性的」。
+  间接读点（`get_double(name)`）不必逐处登记：名字总来自某处字面量。多收只少跳一次，漏收是一张停在旧形状上的网格。
+- 两个仓各一份产物 + 守卫：e3d-model `data/attribute-read-set.json`（**133** 名 + 44 个非属性字面量；新模块 `src/attribute_reads.rs`
+  暴露 `attribute_read_set()` / `reads_attribute()`；`tests/attribute_reads_guard.rs` 用逐字相同的规则重扫、与产物逐名相等才绿，另钉直接读点一个不漏；
+  `category::dictionary_noun_names()` 新增给守卫用）。gen-model `src/data_interface/generation_read_set.json`（`e3d_model` 原样一份 + `gen_model` 模型面
+  11 个模块的 **8** 名 `PARA CFRA CREF JOIS JOIE PFRE STAREF ENDREF` + 判决用并集 **138** 名），`model_impact::generation_read_set()` /
+  `generation_reads_attribute()` 嵌入；三条守卫：`the_generation_read_set_mirrors_e3d_model_and_the_model_side_modules`（两仓产物相等、
+  模块重扫相等、并集恰好）、`the_e3d_io_catalogue_evaluation_reads_are_documented_but_not_a_vote`、
+  `the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five`。
+- 集合里 DCHC=0 的成员逐个点名：`DIR FILL GTYP PKEY UKEY VXREF`（全来自 e3d-model：catalogue_point / section / route / udet / polyhedron），
+  gen-model 侧 0 个；老五个元数据名 `NAME DESC PURP FUNC LCHKDA` 一个都不在——S6「`NAME` 等仍放行」的前提已钉。字典没有却被直接读的伪属性 `CPAR` 收进集合。
+- 计划没提、扫出来的第三处读点：**e3d-io 目录求值环境**（`db_param_env.rs` / `record/catalogue_eval.rs` / `record/catalogue_expr.rs`）替生成器读
+  设计侧 `ANGL RADI HEIG DESP UNIPAR ISPE HBOR TBOR PBOR` 与目录侧 `DATA.PURP/DKEY/NUMB/PPRO/DPRO`、`SELE.QUES/ANSW/MAXA/TANS`（23 名）。产物里单列、
+  `vote: false`：设计侧那几个 DCHC≠0 或已在 e3d-model 一侧，DCHC=0 的七个（`ANSW DKEY MAXA PSPE PURP QUES TANS`）全在目录元素上读，而元数据门只跑
+  DESI 窗口（`plan_window_roots` 非 DESI 返回空计划）。守卫把这七个钉死，名单变了就得重新回答「新名字是在设计元素上读的吗」。
+- 验证：gen-model `cargo test --lib` **2124 绿 / 0 红 / 109 ignored**（+3）；e3d-model `cargo test --lib` 317 绿（+1）、`--test attribute_reads_guard`
+  2 绿；`rustfmt --edition 2024 --check` 本次改动的文件干净。**顺带发现**：e3d-model `tests/reference_reads_guard.rs::indirect_reference_reads_are_each_registered_with_their_names`
+  在本轮之前就红（`catalogue.rs`/`catalogue_point.rs` 的 `entry`、`rpath.rs` 的 `name` 三处间接读点没登记、`cable_tray.rs name` 那处已不存在）——
+  stash 掉本轮改动复现，属别人在途的 `catalogue.rs`/`elmodl.rs`/`udet.rs` 改动，未动。判决未换（S6 才换），生产行为逐位不变。未跑服务。
+
+### 属性变化分类对齐 core · S3：刚体前移补「被属主消费的几何」与 `EVALAT` 规则 M 两条排除——G2 正确性缺口关闭
+
+- `window_root_plan::rigid_anchor` 的 noun 级判决全部抽成纯函数 `anchor_lineage_exclusion(refno, noun, lineage)`，自下而上三层：
+  (a) 候选自己（`anchor_noun_exclusion`）：桥架件、P23 之外新加**负体**（`Category::is_negative`，属主正体拿它做 CSG，core 规则 J）、
+  **剖面 / 路径数据**（`ProfileData`：`PLOO PAVE LOOP VERT SPINE CURVE RPATH POINTR`，core 规则 S）、**几何集成员**；
+  (b) 直接属主（`anchor_owner_exclusion`）：候选**不是模型单元**而属主 `consumes_members()`（正体 / 目录件 / 复合件 / `TMPL`）——
+  `PLOPEN`/`WLOPEN`/`BPOPEN` 开孔在 PANE / WALL / BPANEL 下、`CMPF` 负体包、分类表没认领的 noun 在正体下；单元（BOX 在 TMPL 下、NOZZ 在
+  EQUI 下）与 `List` 属主下的非单元（SUBE、ELCONN）不受影响；
+  (c) 严格祖先：`CWBRAN` / 点环容器（原有）+ **规则 M 结构件** `PANE GENSEC SCTN BPANEL`（新）——型钢 / 板上的附件挪位 = 结构件重建。
+  路由容器那条仍要读元素（`derives_implied_tubes`），留在 `rigid_anchor` 里、在 noun 级判决之后。
+- 先核了 `category` 再写（计划 §7 的提醒）：**`FIXING` 是模型单元**（09-14 起 GMRE），计划 D1-b「不是独立单元 ∧ 祖先含结构件」那条接不住它，
+  规则 M 改成对任何锚点看严格祖先、结构件自己挪位不在此列；`PLOPEN`/`WLOPEN`/`BPOPEN` 带 `IPFCOM`、被判 `Composite(Structural)` 非单元，
+  D1-b 把 `Composite` 当纯容器是错的，改成看属主 `consumes_members()`；`PLOO` 的 gb 是 0，`PANE → PLOO → PAVE` 那条老的「gb==1 容器之下」
+  接不住，剖面数据改按自身 noun 排除。三处都记进计划 D1 与 ADR-066 修订注。
+- 守卫：`a_consumed_member_anchor_regenerates_its_owner_unit`（先断言 category 口径：FIXING 单元 / TMPL、NBOX、PLOPEN、PAVE 非单元、
+  PANE / WALL / BPANEL 消费成员；三族纯函数逐名；NBOX 在 BOX 下 / PLOPEN 在 PANE 下 / FIXING 在 SCTN 下三形状经 `classify_transform_roots`
+  都回 regen、BOX 在 EQUI 下照旧 transform）、`a_pure_container_anchor_still_qualifies`（ZONE / SITE / STRU / FRMW / PIPE / EQUI / SUBE / TMPL /
+  BOX / CYLI / NOZZ 各自谱系放行；挪 ZONE 名下两根随同一锚点前移、无 rejected）；S2 那条把 `NBOX` 从「自身不排除」名单移到 S3。
+  `rigid_motion::CandidateKind::Anchor` 文档同步。ADR-066 D1 规则 3 修订注补第五类；取证文档 §6.2 G2 标 ✅；计划 §4 S3 ✅。
+- 验证：`cargo test --lib` 2121 绿 / 0 红 / 109 ignored（+2）；`rustfmt --edition 2024 --check` 本次改动无差异（`window_root_plan.rs` 两处旧差异未动）。
+  真库：九个钉死窗桶位不变、`regen` 两态逐字相同；ams7999 45→46 仍 regen 2 / no_model 3。`model_transform_cheap_path` 仍默认关（D5：
+  S4 对拍样本过了再翻），生产行为逐位不变。未跑服务。
+
+### 属性变化分类对齐 core · S2：刚体前移补 P23 排除——core `UPGRPH` 对 23 个「几何由摆放派生」的 noun 位姿变化也整件重建
+
+- e3d-model `category.rs` 新增 `PLACEMENT_DERIVED_NOUNS`（23 个：`DRAW CLNTIL STRFLT INFITT PLTFRM ELFITT STRLNG HVACFI RAIL DOOR
+  WINDOW FPFITT LINDIM FLRCOV MLABEL FIXTUR HRPOST HRTERM HRGATE HRPANE KICKPL CTSUPP FURNIT`，Core3D `change/UPGRPH` `0x1022EAEE`
+  内联常量逆 hash 解出）与 `is_placement_derived(noun)`。字典里 23 个全是 primitive，14 个带 `IPFCOM`、`CTSUPP` 带 `ICABCO`。
+  守卫 `placement_derived_nouns_are_exactly_the_twenty_three_from_upgrph`：逐个点名、无重复、每个都在 3.1 字典里、大小写 / 空白
+  不敏感，`HANDRA` 容器 / 设备 / 型材 / 桥架件 / 负体 / 开孔不在其中。
+- `window_root_plan::rigid_anchor`：候选自身 noun 的排除抽成纯函数 `anchor_noun_exclusion(refno, noun)`——桥架件（原有）+ P23（新）
+  ——再沿 T 端祖先查路由容器 / 点环容器 / `CWBRAN`（不变）。P23 的原因文本 `placement-derived noun (…) … (P23, 0x1022EAEE)` 原样进
+  `CandidateKind::Anchor { rigid: Err }`，回执 `transform_fallback_reason` 带出。守卫
+  `a_placement_derived_anchor_never_qualifies_for_rigid_motion`：HRPOST（锚点即根）/ DOOR（锚点在 WALL 根之下）/ CTSUPP（锚点即根，
+  与正常 EQUI 锚点并列）三形状经 `classify_transform_roots` 都回 regen、只有 EQUI 走便宜路；开关关着时无 transform 也无 rejected。
+- ADR-066 D1 规则 3 落修订注（第四类排除 = P23；第五类「被属主消费的几何 / 规则 M」归 S3）；取证文档 §6.2 G1 标 ✅；
+  计划 §4 S2 ✅。`model_transform_cheap_path` 仍默认关（D5：S3 补齐 + 对拍门过了再翻）。
+- 验证：gen-model `cargo test --lib` 2119 绿 / 0 红 / 109 ignored（新增 1）；e3d-model `cargo test --lib` 316 绿（新增 1）；
+  两处 `rustfmt --edition 2024 --check` 本次改动无差异（`window_root_plan.rs` 1120 / 2121 两处是 HEAD 就有的旧差异，未动）。
+  真库：`live_ams8000_pinned_windows_land_in_the_expected_buckets` 九窗桶位不变；`live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off`
+  九窗 `regen` 两态逐字相同；`live_ams7999_45_to_46_…` 仍 regen 2 / no_model 3。开关默认关，生产行为逐位不变。未跑服务。
+
+### 属性变化分类对齐 core · S1：字典 DCHC 第六张效果表消掉 213 个 `Unknown`、`PLCF` 随 DCHC 导出、三处取证改正
+
+- `src/data_interface/model_impact.rs` 新增第六张效果表 `dictionary_change_class_attr_names()`（嵌入
+  `dictionary_change_class_attr_names.json`，由 `output/gen_dchc_fixture.py` **生成**，不手抄）：字典 DCHC ∈ {1,2,4} 而五张手写表
+  一个都没登记的 **217** 个名字——DCHC=1/2 的 `HZAXI LHEA LTAI TZAXI` 与 18 个 schema `ELEMENT` 引用（`STAREF ENDREF JOIS JOIE CFRA
+  PFRE CRFA HPREF TPREF POSREF …`）登记 `DependencyCascade`，其余 195 个 `DirectGeometry`。**判决不变**：`Unknown` 与 `DirectGeometry`
+  都是 `Regen`；引用名此前经 A2 升级也是 `DependencyCascade`，建边资格逐名不变；direct 窗口规划器只问 `attribute_is_metadata_only`
+  （未动）。只让回执 / `change_impact` 不再把 core 明说「会重画」的属性显示成「未知属性」。守卫：
+  `dictionary_change_class_table_covers_every_unregistered_nonzero_attribute`（与快照两向差集为空、217 条、两侧严格升序）、
+  `dictionary_change_class_table_maps_to_its_declared_effects_and_actions`、
+  `dictionary_change_class_table_routes_schema_references_to_the_cascade_side`（带 / 不带 meta 对 217 个名字同答）；
+  `attribute_effect_tables_have_no_duplicate_names` 扩到第六张。
+- `PLCF`（字典字段 652066，`change/IDCHNG` 读 DCHC 之后读的第二个字段，`== 1` 才置 INTUBE 旗标）随 DCHC 同批导出为
+  `src/data_interface/plcf_flags.json`：58 个置位——位姿 `POS ORI BFORI`、54 个 DCHC=4（`SPRE HEIG PARA DESP CREF JOIS JOIE CFRA PFRE
+  POSS POSE NPOS YDIR ZDIR PX PY PZ` 与楼梯 / 栏杆 / 桥架尺寸 …）、一个 DCHC=0 的 `CLGREF`；头尾连通的 DCHC=1/2 一个不置。
+  `model_impact::raw_plcf(name)` 三态；**只作报表**，`plcf_is_report_only_and_matches_the_dictionary_snapshot` 钉住本文件之外无调用方。
+- `output/gen_dchc_fixture.py`：字典导出找不到 `output/noun_attr_fields.json` 时回退到 `../vendor/e3d-io/schema/e3d31/catalog/` 的同一份
+  （DCHC 快照重生成后与入库版逐字节相同）；顺手修正它读运行库 schema 的那一段——`all_attr_info.json` 里 `named_attr_info_map` 在盘上
+  是空的（aios_core 载入时才填），改读 `noun_attr_info_map` + `output/noun_layout.json`，此前脚本的「dead-entry 复算」一直在空集合上跑
+  （现在算出的 11 / 37 个 unmatched 与 `curated_tables_are_reconciled_against_the_runtime_schema` 钉的名单一致）。
+- 三处取证改正 + 一条词条：核对表 R5 加注「core 这一层没有 TransformOnly」只对 DRAFT 侧成立，3D 侧 `change/UPGRPH` 类别 3 =
+  `css/STRTRA`/`SEGTRA` 只改段矩阵；0906 `IDCHNG` 行改成 INTUBE 旗标读 `PLCF`（该证据档按政策不入库，从 `gen-model-p3b-verify`
+  快照取回 `docs/evidence/` 本地副本后改）；0831 上下文 §4「`changesBetweenSessions` 完全不看 CACHID」改成只对 `DDES_GraphicsMngr`
+  路成立、`DES_DrawListManager::changesBetweenSessions` 的 `DES_DrawListCompare::attChange` 只看 CACHID；CONTEXT.md「模型影响」
+  词条补三档的 core 对应物（类别 0 / 类别 3 `STRTRA`·`SEGTRA` / 类别 4 `REPELE`·`SEGREP`）与「GETWORK 路 core 不分属性」。
+  开发计划 `docs/plans/2026-09-15-attribute-change-class-alignment-dev-plan.md` 标已批、S1 ✅，D3 记下「引用名归级联侧」这一处收紧。
+- 验证：`cargo test --lib model_impact` 43 绿；`manual_update` 建边资格 / C-REF 上下界 8 绿；全量 `cargo test --lib` 2118 绿 / 0 红 /
+  109 ignored；`rustfmt --edition 2024 --check` 干净。真库：`live_ams8000_pinned_windows_land_in_the_expected_buckets` 九窗桶位不变，
+  `live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off` 九窗 `regen` 两态逐字相同，
+  `live_ams7999_45_to_46_plans_the_new_stru_roots_without_the_legacy_recheck` 仍 regen 2 / no_model 3。未跑服务。
+
+### ida-bridge 取证：core 的 3D 侧确有「只动方位」路径（`change/UPGRPH` 类别 3 → `css/STRTRA`/`SEGTRA` 只改段矩阵），三类属性答案表与刚体前移开门前置
+
+- 新文档 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`：用 `core.dll` = `idalib-33060` /
+  `Core3D.dll` = `idalib-49136` 把「哪些属性触发几何重算 / 只动方位 / 不影响模型」按 core 的三条通路列全——
+  **会话内交互路**按字典 DCHC 四档走 `EVALAT` → QCHGLS → **`change/UPGRPH`（`0x1022EAEE`）**：类别 3（`POS`/`ORI`/`BFORI`）
+  只改图形段矩阵（顶层件 `css/STRTRA`、图元 `css/SEGTRA`、容器 `change/TRASCN` 走子树 TOPF 逐个改矩阵），例外是 23 个
+  「几何由摆放派生」的 noun（`DOOR WINDOW HRPOST … CTSUPP`，逆 hash 解出）与管件两侧隐含管段；类别 4 整件 `add/REPELE`
+  （`TOPDEL` + `ADDDES`）或**单图元** `change/SADREP` → `css/SEGREP`，目录件 `REPALL`；类别 0（3941 个属性）什么都不做。
+  **GETWORK 路**（我们的场景）`DB_RawChanges` 只走 `DB_IndexTableCompare`，记录被重写即整件重画、不分属性；
+  **图形缓存路** `hasTopLevelGraphicsChanged`（逐指令）与 `DES_DrawListCompare::attChange` 只认 `CACHID`，
+  `include*`/`reorder*` 回调全空。核对表 R5「core 这一层没有 TransformOnly」只对 DRAFT 侧成立。
+- 两处改正既有取证：`IDCHNG` 的 INTUBE 旗标读的是第二个字典字段 `PLCF`（652066），不是 `DCHC == 1`；
+  「`changesBetweenSessions` 完全不看 CACHID」只对 `DDES_GraphicsMngr` 那条路成立。
+- 与现状对照（§6）：刚体前移（ADR-066，默认关）缺 core 类别 3 的两族例外——P23 名单、被属主消费的负体 / 开孔 /
+  `PANE·GENSEC·SCTN·BPANEL` 成员（规则 M/J/P/R）——后者是正确性缺口，开门前必补（P1）；「不影响模型」只放行 5 个名字、
+  core 会话内是 3941 个，e3d-model 实际只读 131 个运行库属性（DCHC=0 的 6 个：`DIR FILL GTYP PKEY UKEY VXREF`），
+  建议以「DCHC=0 ∧ 不在生成读取集合」为第二票扩门（P2）；213 个 DCHC=4 属性我方未登记、落 `Unknown`（行为对、报表噪音，P0）。
+- 只写文档、未改代码、未跑服务；伪码级结论在 §8 逐条标「未逐指令核」。
 
 ### 本地发布 0.1.25：增量以落盘为边界、初始化双写道、CATA 闭包缓存与 ZONE 取根
 

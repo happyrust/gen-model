@@ -2,6 +2,8 @@
 
 状态：**已接受（2026-09-08 23:2x，用户按 19:50 修订版拍板）**。**同日 19:50 修订**（会话 fable-5-1-64，读源码后）：D1 加规则 5（级联扩展进来的根不走便宜路）；
 D3 的祖孙锚点改取**最内层**、盒的规则改成「纯平移加 t / 含旋转读网格顶点」；D6 的「算不出 Δ」改成规划期判定；Q1 据此关闭。
+**2026-09-15 修订**（会话 fable-5-1-21，属性变化分类对齐 core 计划 S2 / S3）：D1 规则 3 补第四类排除——P23 摆放派生 noun——与第五类
+——被属主消费的几何（负体 / 剖面数据 / 几何集；非单元在消费型属主下；`EVALAT` 规则 M 结构件的严格祖先），见规则 3 末注。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
@@ -54,10 +56,35 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    没生成过的根没有可前移的记录，照旧 `lazy`；在飞 / 失败的根照旧 `regen`。
 2. 它子树里本窗**全部**候选都是「锚点」：`ElementDiff::is_placement_only`（只有 `POS / ORI` 变，类型 / 属主 / 成员 / `opaque` 都没动），
    或者是锚点的后代（后代自己一个字没动、只是被祖先带着走）。子树里**任何一个**候选不满足 → 整根 `regen`（regen 吞掉 transform）。
+   **（2026-09-16 修订 · 同计划 §8 Q5，两票齐后用户拍板接线）** 判「摆放之外还动了别的」时**忽略戳**——e3d-model
+   `element_diff::PLACEMENT_STAMP_ATTRIBUTES`，今天只有 `CACHID`：它是 Design 应用随每次图形重建写下的图形缓存 `+1` 计数，
+   不是几何输入（S8 普查 453 库 2961 窗，13724 次跳动全是 `0→1` / `n→n+1`；生成器一处不读，读取集合把它单列成 `stamp_literals`，
+   两仓守卫钉住不许混进那一票）。于是 `[POS, CACHID]` / `[ORI, CACHID]` 算「只动了摆放」，**只有 `CACHID` 变**照旧不算
+   （摆放一项都没动，是整库缓存重建的扫写，照旧 `regen`；要不要另给它开一档是计划 §8 Q6，不在本 ADR）。
+   不接这一下的代价：3.1 真库上这条判据几乎永远为假——有值元素上 88 次含 `POS`/`ORI` 的变化**全部**同时跳 `CACHID`，
+   便宜路径打不着 EQUI / BRAN / SCTN。两票都在：生成器不读（读取集合护栏）+ S4 对拍门把它剔出比较集再判，多出 84 个合格锚点、
+   139 根对拍、108 个有判别力的两态全等、0 红（`docs/evidence/2026-09-16-rigid-exclusion-parity-ignore-cachid.md`）。
+   本条其余四项排除、`placement_input_changed`（戳不是矩阵输入，不触发级联）、`PLACEMENT_ATTRIBUTES` 与开关默认值一律不动。
 3. 锚点及其到根的路上**没有路由容器**（e3d-model 上卷规则 1 里「会补管的容器」：BRAN / HANG 等，管段几何由成员两端点派生），
    锚点**不是点 / 环容器下的元素**（`graphicsBehaviour == 1` 那类祖先之下的点：它的 `POS` 是属主网格的输入，e3d-model 上卷规则 1
    本来就把它并进属主单元），也**不在 CWBRAN 子树里**（桥架件的摆放是伪属性，`cable_tray::placement_matrix` 读兄弟，上卷规则 5）。
    这三类里的位姿变化是几何变化，照旧整根 `regen`——issue #5 / ADR-056 D7「生成根不是路由容器」原样保留。
+   **（2026-09-15 修订 · 开发计划 `2026-09-15-attribute-change-class-alignment-dev-plan.md` D1-a / S2）** 第四类：锚点自己的 noun 在
+   **P23**（e3d-model `category::PLACEMENT_DERIVED_NOUNS`：`DRAW CLNTIL STRFLT INFITT PLTFRM ELFITT STRLNG HVACFI RAIL DOOR WINDOW FPFITT
+   LINDIM FLRCOV MLABEL FIXTUR HRPOST HRTERM HRGATE HRPANE KICKPL CTSUPP FURNIT`）里——core 自己的 3D 侧对字典类别 3（`POS`/`ORI`）默认只改
+   图形段矩阵（`css/STRTRA`/`SEGTRA`），**唯独**这 23 个 noun 走 `add/REPELE` 整件重建（Core3D `change/UPGRPH` `0x1022EAEE`，取证
+   `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §4）：几何由摆放派生（门窗开孔、栏杆立柱随相邻件、桥架支架随
+   托盘、标注随被标对象），左乘 Δ 的网格是错的。判在 `window_root_plan::anchor_noun_exclusion`，与桥架件那条同位；名单随 E3D 版本重取。
+   **第五类（同计划 D1-b / S3）：被属主消费的几何。** 三层判，全在 T 端、只看 noun（`window_root_plan::anchor_lineage_exclusion`）：
+   (a) 锚点自己是负体（`Category::is_negative`：`NBOX NCYL NXTR …`，属主正体拿它做 CSG）、剖面 / 路径数据（`ProfileData`：`PLOO PAVE LOOP VERT
+   SPINE CURVE RPATH POINTR`——注意 `PLOO` 的 gb 是 0，原文「gb==1 容器之下」那条接不住 `PANE → PLOO → PAVE`）、几何集成员；
+   (b) 锚点不是模型单元（`is_model_unit` 假）而直接属主消费成员（`Category::consumes_members`：正体 / 目录件 / 复合件 / `TMPL`）——
+   `PLOPEN`/`WLOPEN`/`BPOPEN` 开孔在 PANE / WALL / BPANEL 下、`CMPF` 负体包、分类表没认领的 noun 在正体下；单元（BOX 在 TMPL 下、NOZZ 在 EQUI 下）
+   与纯容器属主之下的非单元（SUBE 在 EQUI 下）不受此条影响；
+   (c) core `EVALAT` 规则 M 的**严格祖先**半边：锚点的 T 端祖先含 `PANE`/`GENSEC`/`SCTN`/`BPANEL` → 那个结构件重建——`FIXING` 今天**是**模型单元
+   （2026-09-14 起走目录构件 GMRE），只有这一条接得住「FIXING 在 SCTN 下挪位」；我们今天不把它的 `TMPL` 负体扣到宿主上，但 core 那一票是「重建」，
+   少算方向两票缺一不放行。结构件**自己**挪位不在此列（它的网格只依赖自身属性 + 目录）。
+   五类排除的原因文本各不相同，回执 `transform_fallback_reason` 原样带出。开关 `model_transform_cheap_path` 仍默认关，S4 对拍样本过了再翻（D7）。
 4. 窗口没有退化（`WindowImpact::degraded_reason() == None`）。退化时一切进 `regen`，与今天一样。
 5. **（19:50 修订）** 它不是由级联扩展（C2 结构连接 / C8 电缆端点 / P4 `POSREF` 反查，`WindowRootSources::impact` 的
    `expand_touched`）加进 `touched` 的——那三条是「别处动了、我这里的几何随之变」，不是刚体运动，照旧 `regen`。
@@ -155,6 +182,13 @@ Baked / Canonical 在这条规则下没有区别，不必补本地盒字段。
 1. **对拍门**（`#[ignore]` 手动，ams8000）：沿会话链逐窗找出 D1 判成 `transform` 的根，对每根算两态——本 ADR 的 `Δ` 前移 vs 在 T 上整根重算——
    `record_id` / `mesh_id` 集合相同，`world_transform` 逐元素 `|Δ| < 1e-6`，`world_bounds` 同容差；语料里若没有自然的纯位姿窗，用
    `AIOS_TRANSFORM_WINDOW=base:target` 指定用户在 E3D 里造的一窗（挪一个 ZONE 的 POS）。
+   **2026-09-16 修订注**（会话 fable-5-1-49，属性变化分类对齐 core 计划 S4）：门建在 gen-model `window_root_plan::tests::probe_rigid_exclusion_windows`
+   （`#[ignore]`），范围从 ams8000 扩到五个目录全语料，判决用 `rigid_anchor`（D1 规则 3 全部排除），对拍是**文件侧**：A = e3d-model `generate_subtree` 在 T 上整根重算，
+   B = 在 S 上整根生成、每件记录左乘最近锚点的 `Δ`（D3 的「祖孙锚点取最内层、兄弟锚点各自 Δ」同口径），比 `GeometryId` 集合与体积 / 三角数 / 亏格 / 包围盒 /
+   世界矩阵（1e-6）；不是生产投影记录的 `record_id` / `mesh_id`——那一半仍是验收 4 的 `mem://` 真跑。首跑（453 库 2961 窗）：合格锚点 56 根，27 个有判别力的
+   两态全等、0 红；被排除的锚点若照 Δ 前移，负体 / 规则 M / 路由容器三条各有干净样本不等（排除有内容）。语料里没有纯位姿窗的排除（P23、开孔、CWBRAN、
+   点环容器、桥架件、剖面、几何集）仍等造窗。另：`AIOS_RIGID_PROBE_IGNORE_CACHID=1` 把 `CACHID` 剔出 `is_placement_only` 再判，多出的 84 个锚点
+   （整台 EQUI 挪位为主）108 根全等——计划 §8 Q5 的第二票。
 2. **live #2**（计划 §5）加一类变化：7997 挪一个 ZONE 的 POS → SAVEWORK → 名下根走 `transform`（日志 / 回执 `units[].kind`）、
    `/dbnums` ≤ 120 s `in_sync`、房间边逐边 == `build_room_relations`、plant-ui 里几何整体平移且网格不重载。
 3. **量**：同一窗关 / 开开关各跑一次，记 Task 时长与生成器 CPU 时间——这是 G5 原本「先量再定」那一步，改在实施后补量；
