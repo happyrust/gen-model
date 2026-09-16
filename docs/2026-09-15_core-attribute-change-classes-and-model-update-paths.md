@@ -12,6 +12,10 @@
   `teach/cases/case-02-transform-only-was-too-wide.md`（DCHC 四档的字典语义）。
 - 我方对照的代码：`src/data_interface/model_impact.rs`（五张效果表 + DCHC 快照）、`src/data_interface/window_root_plan.rs`（direct 窗口规划器：元数据门 / 刚体前移候选）、
   `vendor/e3d-model/src/{element_diff,increment,ledger}.rs`（L2/L3/L4）、ADR-066（刚体前移）。
+- ★0916 本份是 `gen-model-refactor` 工作树同名文件（提交 `898030df2`，S1–S8 已回填）取到 `gen-model-model-cache` 的副本，§0–§8 原样；
+  **本轮新增 §9**（会话内交互路的 C++ 入口 `DESDRA_SCPlugs` 与 `descases/VDESPT` 的属性专项规则、QCHGLS 全部写入者、`UPGRPH` / `IDCHNG` 逐指令核、`PLCDEL`），
+  §8 里被本轮结案的条目就地划掉。引用的 `docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` 与
+  `docs/plans/2026-09-15-attribute-change-class-alignment-dev-plan.md` 仍在 `gen-model-refactor` 工作树（evidence 按政策不入库）。
 
 ---
 
@@ -106,6 +110,11 @@
 ```
 
 三条路的「属性判别力」：交互路 = 字典 DCHC 逐属性；GETWORK 路 = 无（TUBI 四属性门除外）；缓存路 = 只看 `CACHID`。
+
+★0916 交互路左端补齐（§9.1）：`descases/VDESPT` 不是命令层，而是 **`DB_Element::putAtt` → `internalPutAtt`（同值早退）→ 写 →
+`DB_Element::postSetAttribute` → `DB_ElementChangesPlugger::PostSetAttribute`（vtbl+52）→ 订阅者 `DESDRA_SCPlugs::PostSetAttribute`（非 PADD 库）→ `VDESPT`**。
+所以 PML / .NET / 表单 / 规则引擎——任何走 `putAtt` 的属性写都进这条路；`VDESPT` 自己先查一次 DCHC ≠ 0 再进 `EVALAT`，另带一条 `PLOO.HEIG → owner` 的上卷（规则 U）与几笔属性写回。
+QCHGLS 除 `EVALAT` 外还有 8 个写入者，全是结构变化或命令处理器，**属性触发的只有 `VDESPT → EVALAT` 一条**（§9.3）。
 
 ---
 
@@ -397,16 +406,21 @@ P0 独立、随时可做；P1 是开 `model_transform_cheap_path` 的前置（G2
 
 ## 8. 不许当已证
 
-- `UPGRPH`（`0x1022EAEE`）、`TRASCN`、`STRTRA`、`SEGTRA`、`SADREP`、`REPELE`、`IDCHNG`、`EVALST` 是 Hex-Rays 伪码 + `get_dword` 实读常量：调用序、埋点名、常量已核，
+- ~~`UPGRPH`（`0x1022EAEE`）、~~`TRASCN`、`STRTRA`、`SEGTRA`、`SADREP`、`REPELE`、~~`IDCHNG`、~~`EVALST` 是 Hex-Rays 伪码 + `get_dword` 实读常量：调用序、埋点名、常量已核，
   **分支结构未逐指令核**。它们是 Fortran 风格平铺调用（`DGETI`/`DFIND`/`GLSMAT` 走导入表），没有核对表 §1.4 那类 `getField` 出参陷阱，伪码采信；但 `TRASCN` 里 `DDEST(-1)` 的语义
   （推定为「`DFIND NEXT` 自动下钻、不限深度」，与循环里 `DRETUR` 回上层的形状一致）只对了名表（opcode 37 = `DDEST`），**未读体**。
+  ★0916 **`UPGRPH` 与 `IDCHNG` 已逐指令核**（§9.4 / §9.5）：`UPGRPH` 的 `cmp eax,3` / `cmp eax,4` 分派、P23 那 23 个 `cmp eax, imm32` 常量（逐个逆 hash，与 §4 名单同序同集）、
+  `EQREF(top, ref)` / `LPRMTV` / `IPCOMP‖IHCOMP` 三级分叉与每一叉的调用目标全部对上 §4 伪码；`IDCHNG` 两次 `ATAINT` 与 `cmp eax,1 → dword_10E98500 = -1` 对上 §3.2。
+  `TRASCN` / `STRTRA` / `SEGTRA` / `SADREP` / `REPELE` / `EVALST` 仍是伪码级。
 - `hasTopLevelGraphicsChanged` 是逐指令读的（Hex-Rays 把 `attributesChangedBetween` 的出参丢了，伪码恒 `return 0`，不可用）。
 - `DES_DrawListCompare` 十二个回调读的是伪码，但都是 ≤ 10 行的小函数（空函数 / 一次 `set::insert`），可信。
 - 「GETWORK 路不分属性」这句依赖 `DB_RawChanges` 只走 `DB_IndexTableCompare`（`createListBetweenSessions` 伪码）与 `sub_1052F2E0` 传 REDRAW（0906 逐指令）；
   `DB_RawChanges::trim(vector<DB_DB*>&, …)`（`0x5984650`）已读：对四个集合各套一个 `DB_Raw::PredicateDBNumMatch`——**只按库号裁**，没有属性判据；
   `trim(set<DB_Element>&)` / `trim(vector<DB_Element>&)` 两个按元素集合裁的重载没读体。
 - `PLCF` 的语义只知道字段名（逆 hash）与「== 1 置 INTUBE 旗标」；~~字典里哪些属性 `PLCF == 1` **未导出**（P0-5）~~ ★0915 已导出（§3.2，58 个），
-  但「置了旗标之后 `PLCDEL` 到底清哪些缓存」未读体——所以它仍只作报表，不进判决。
+  ~~但「置了旗标之后 `PLCDEL` 到底清哪些缓存」未读体~~ ★0916 `PLCDEL` 已读（§9.6）：清的是 Core3D 里一张 100 槽、按 `(DB_Ref, int)` 键、存 3 个 double 的缓存表
+  （`dword_10E7BCE4`），`VDESPT` 入口也无条件清一次；「p-line 缓存」是四条腿撑着的**推断**（§9.6 末段），字段名 `PLCF` 展开成什么没有字面证据——所以它仍只作报表，不进判决。
+  另一个边角：`IDCHNG` 第二次 `ATAINT` 的出参与第一次共用一格且**不检错**（§9.5），`PLCF` 读失败时比的是残留的 DCHC 值——字典属性都有这一格，只在字典外属性上成立，而那些属性第一次 `ATAINT` 就失败早退了，实际不可达。
 - `CACHID` 的写方不在本机任何 IDB 里。`D:\AVEVA\Everything3D2.10` 全目录（868 个 dll/exe）扫 `CACHID` 字节串 **0 命中，连 2.10 的 core.dll 里都没有这个属性名**
   （同一扫法 `ATT_HPOS` 命中 4 处，方法有效）——`CACHID`（与 `LCHKDA`）是 **3.1 才有的属性**，图形缓存路是 3.1 的新东西；而本机 3.1 只有 core.dll / libgeom / libgm 三个副本，
   Design 应用侧的 DLL 不在。§4.4 「写方在 Design 应用侧」是排除法推的，不是读出来的。
@@ -415,6 +429,226 @@ P0 独立、随时可做；P1 是开 `model_transform_cheap_path` 的前置（G2
   （探针只看 DESI 窗口，不看 CATA）。
 - e3d-model 读取集合 131 个是**正则扫源码**（2–6 位大写字面量 ∩ 运行库属性名 − noun 名）的估算：漏掉 >6 位的长名与经变量传入的读点，也可能把同形常量算进来；P2-1 要用护栏测试把它变成准确的产物。
 - 本文没有跑任何一条联动 / 分类的实测；§6 的 ✅ 是「规则形状同构」，不是本轮复验。
+- ★0916 §9 的读法：`DESDRA_SCPlugs` 十二个钩子、`descases/*` 十一个例程、`DB_Element::internalPutAtt` / `postSetAttribute`、`sub_5992C80` 是 Hex-Rays 伪码 + `get_dword` 实读常量；
+  **`VDESPT` 的 DCHC 门与 `PLOO.HEIG` 分支、`UPGRPH` 分派骨架、`IDCHNG` 全函数**是逐指令读的。`maplist` 只读了 `MLSADD` 与消费者 `VDEMPR` 两个体，「空间地图包围盒」是从
+  `mapboxlib/MPBOX` / `MPBXBR` 的埋点名 + `WSTRAM` 调用推的（`MLSADD` 读的字段 `IMAP` 与快照 `spatial_map` 列的对应是实读常量 + 取值集合对上，`IMAP` 六个取值各自的语义仍是从 noun 成员推的）；`colsel/AUTCO2` 与 `designEvents` 只看了调用序；`sub_1023190B` 的模块码（`Q`→3、`S`→5、`_`→6、ESC→4、其它 1）
+  没有对到模块名。`internalPutAtt` 只读了 ref 版一个重载，「同值早退」「先 `PostSetRefAttribute` 再写再 `postSetAttribute`」这一顺序在其余九个重载上是**推定**。
+
+## 9. ★0916 会话内交互路补全：从 `putAtt` 到 `VDESPT`，属性专项规则与 QCHGLS 的全部写入者
+
+- 手段同 §1：ida-bridge 活桥，`core.dll` = `idalib-33060`、`Core3D.dll` = `idalib-49136`（E3D 3.1）。常量全部 `ida_bytes.get_dword` 实读后 `ENHAS2` 逆解。
+- 起因：§2 的「会话内交互路」只画到 `descases/VDESPT` 这一格，没说 **C++ 的属性 put 是怎么落到它头上的**、`VDESPT` 除了 DCHC 门还做什么、以及 **QCHGLS 除了 `EVALAT` 还有谁写**。
+  这三件事决定「一个属性 put 在 core 里到底触发什么」这句话说得完不完。
+
+### 9.1 从 `DB_Element::putAtt` 到 `descases/VDESPT`：一条属性 put 的完整时序
+
+core.dll 侧（`DB_Element::putAtt` 全部重载 `0x59461a0`–`0x5948a20`、`putAttWithinRuleEngine` `0x5949220`–`0x59495f0` 都只是壳，
+真身是按值类型分的十个 `internalPutAtt` `0x593f220`–`0x5942370`；下面按 ref 版 `0x593f220` 读，其余重载**推定同序**）：
+
+```text
+DB_Element::putAtt(attr, [qualifier,] value)
+  └ internalPutAtt(attr, qualifier, value, evaluateRules = true)
+      0. isDistributedAttribute(attr) → 改道到 XRQELE 成员元素上 putAtt（事件在持有元素上发，不在逻辑元素上）
+      1. getAtt(旧值)；旧值 == 新值 → return true                      ★ 同值 put 什么事件都不发
+      2. DB_PreSetAttributePlugger::PreSet*Attribute                     可否决
+      3. isUDA → isNounAllowed；updateAllowedWithClaim（claim）
+      4. DB_LegalityChecksPlugger vtbl+28  Set*AttributeAllowed          可否决（DESDRA_SCPlugs 也实现了这一族 16 个 Allowed）
+      5. [ref / ref-list 专有，写之前] DB_ElementChangesPlugger vtbl+60 PostSetRefAttribute(el, attr, target)
+                                        / vtbl+64 PostSetRefListAttribute(el, attr, targets[])
+      6. 写：DB_PseudoAttPlugger::put*Att（伪属性）| putUda | dabPutAtt
+      7. DB_Element::postSetAttribute(attr, qualifier, evaluateRules)     0x59453b0
+           受影响集 = isCloneable(attr) ? DB_Clone::getRelatedElements(el) : { el }     sub_5992C80 0x5992c80
+           for e in 受影响集:
+               DB_ElementChangesPlugger vtbl+52  PostSetAttribute(e, attr, qualifier)    ← 主事件
+               attr == ATT_NAME → vtbl+68 PostSetName(e)
+               attr 是 UDA → DB_Uda::GetControlledUdas：受控 UDA 逐个复验，不合法的 clearUda
+               evaluateRules → DB_Element::evaluateRules(e, attr)         ← 规则引擎，可能再 put 别的属性 → 递归本链
+```
+
+`??_7DB_ElementChangesPlugger@@6B@ = 0x5d19234`：+52 `PostSetAttribute(el, attr, qual)` `0x591e5b0`、+56 两参版 `0x591e530`（只是构造空 qualifier 转 +52）、
++60 `PostSetRefAttribute` `0x591e720`、+64 `PostSetRefListAttribute` `0x591e780`、+68 `PostSetName` `0x591e6c0`。广播体都是「过 `DB_Attribute::wnoevt(attr)` 闸门 → 逐订阅者虚调用」
+（0007 记录读过 RefList 版，本轮读 Ref 版同款）。**`wnoevt` 为真的属性不发任何变更事件**——这是 DCHC 之前的又一道门，哪些属性置了它本轮未导。
+
+Core3D 侧，**订阅者就是 `DESDRA_SCPlugs`**（单例 `Instance` `0x10409440`；`Init` `0x10409160` 一次订阅 `DB_LegalityChecksPlugger` 16 项、
+`DB_ElementChangesPlugger` 12 项、`DB_ProjectEventsPlugger::PostOpenProject`、`DB_MDBPlugger::addPlug`）。每个 Post 钩子只按**库类型**分流：
+`DB_DB::type == 7`（PADD / DRAFT）→ `dra_scase/*`，其它一律 → `descases/*`。**没有 DESI 专属门**——CATA 元素的属性 put 也进 `VDESPT` → `EVALAT`
+（这正是会话内改 `SPCO` / `SVER` / `DATA` 走 `UPGRPH` 类别 4 `REPALL` 全部重画的入口，§4.2）；GETWORK 路那道 DESI / ISOD 门在 `sub_1052F2E0`，核对表 R1 不受影响。
+
+| `DESDRA_SCPlugs` 钩子 | 地址 | 非 DRAFT 去向（`descases/*`） | 推进 QCHGLS 的方式 | 其它副作用 |
+|---|---|---|---|---|
+| `PostSetAttribute` | `0x10409A60` | **`VDESPT`** `0x101F33A9`（唯一调用方） | **DCHC ≠ 0 才 `EVALAT`**（§9.2） | 四条属性专项规则、`MLSADD`、自动着色、`designEvents` |
+| `PostSetRefAttribute` | `0x10409BE0` | `VDESPF` `0x101F2A27` | **不推** | `structures/BAKREF` `0x102D4724` 维护 back-ref；`SPCO.PRTREF` 特例（§9.7） |
+| `PostSetRefListAttribute` | `0x10409C50` | `VDESFA` `0x101F2D4B` | **不推** | 新旧列表差分 → `BAKREF` / `structures/BREAKF` `0x102D448F`；`COCO.COCORE` → `CTYP` 同步；`PSARFA` `PSLRFA` `ALERFA` 三个不建 back-ref |
+| `PostSetName` | `0x10409B30` | `VDESNA` `0x101F3BF2` → `change/DEEVNA` `0x1022E275` | **不推** | `UQGRAF` 时 `aids/RMKELE`（只刷标注 / 辅助图元）+ 置 `dword_10E985E0` |
+| `PostCreateElement` | `0x10409710` | `VDESCR` `0x101F1290` | 模块码 ≠ 3 时 `change/EVALNW` → `EVALAT(REDRAW)` | `INGCOM(noun) == 1`（负几何件）且 noun ≠ `NGMS` 先 `BPUTI` 一个缺省值；`MLSADD`；`sub_105016E0` 事件 |
+| `PostIncludeElement` | `0x104097C0` | `VDESIR` `0x101F2755` | `EVALNW`（新位置整件） | `MLSADD` |
+| （include 的删旧端） | `sub_101F23F4` = `VDESI1` | `SCLREM` + `sub_105683C0` + **`SCINC2`** `0x101F2638` | `EVALAT(INTUBE)` 再 `EVALAT(REDRAW)`（0906 §2.2b） | `maplist/MPDEL` |
+| `PostCopyAllElement` | `0x10409610` | `VDESAC` `0x101F1562` | **直接 `EVALCD(el, 4)`，不经 `EVALAT` 规则表** | `PLCDEL`、`GTPINI`、`MLSADD` |
+| `PreDeleteElement` | `0x10409DD0` | CATA（type 2）→ `CDELET`；其它 → `VDESDL` `0x101F1B24` | `EVALAT(INTUBE)` 再 `EVALAT(REDRAW)` | 失败信息 `CopyFromFortran` |
+| `PreReorderElement` | `0x10409F10` | `VDESR1` `0x101F27F2` | `UQGRAF` 时：owner 是 `BRAN` → **前一成员** `EVALCD(prev, 4)`（无前一成员则 `BRAN` 自身）；owner 是 `FLRCOV` → `EVALCD(owner, 4)` | `maplist/MPDEL` |
+| `PostReorderElement` | `0x10409920` | `VDESRO` `0x101F2989` | `EVALCD(el, 4)` | `MLSADD` |
+| `PreIncludeElement` / `PreCopyAllElement` / `PostCopyAllElementMembers` | `0x10409EB0` / `0x10409D60` / `0x10409690` | 未读体 | — | — |
+
+`EVALAT` 的调用方就此闭合（`xrefs → 0x1022C679` 共 8 处 5 个函数）：`VDESDL` ×2、`SCINC2` ×2、`VDESPT` ×2、`EVALNW` ×1、`sub_1052F2E0`（GETWORK）×1。
+`EVALAT` 入口门 `UQGRAF() ‖ sub_1050DCA0()` 的第二项已读：`sub_1050DCA0` = `DES_DrawListManager::instance()` 字节 `+9` ≠ 0，就是 §1.2 的 `cacheGetworkChanges` 旗标——
+**图形关着但缓存模式开着，变更也照样进 QCHGLS**。
+
+### 9.2 `descases/VDESPT(el, noun, attr)`（`0x101F33A9`）：DCHC 门之外的四条属性专项规则
+
+DCHC 门与 `PLOO.HEIG` 分支是逐指令读的（`0x101f3419`–`0x101f3510`），其余伪码 + 常量。常量表 `unk_10B200D8`：
+`596407 DCHC · 10206636 OWNER · 642215 TYPE · 653673 CREF · 643150 JFRE · 855256 DELP · 865137 CTYP · 82139754 COCORE · 275899206 COCDES · 209154153 COCONN`；
+内联字面量 `675926 HEIG · 837961 PLOO · 719812 SJOI · 829281 COCO · 840256 PPRO · 840244 DPRO · 565735 DATA`。
+
+```text
+VDESPT(el, noun, attr):
+    descases/SCSPOL(noun, attr)                       模块码 83('S') 下：按 noun 的 DBTP 表逐项调 sub_106F4D70（未读）；SPLDRG.SFLIMI 另调一次
+    PLCDEL()                                          ★ 无条件清缓存表（§9.6）——不看 DCHC、不看 PLCF
+    catdblib/GTPINI()                                 目录 p-point 缓存重置
+    (dchc, err) = ATAINT(attr, DCHC)                  0x101f343b
+    if dchc != 0:                                     0x101f3449 test eax,eax / 0x101f344b jz → 跳过整段
+        if attr == HEIG and noun == PLOO:             0x101f3456 cmp 0A5056h / 0x101f3466 cmp 0CC949h
+            owner = DGETF(OWNER); DGOTO(owner); t = DGETI(TYPE)
+            EVALAT(owner, t, HEIG)                    ★ 规则 U：PLOO 的 HEIG 当作 owner（PANE / FLOOR）的 HEIG 评估
+            DGOTO(el)
+        else:
+            EVALAT(el, noun, attr)                    §2 / 0906 §2.2 的规则表
+        maplist/MLSADD(el, noun, 0)                   ★ 进空间地图包围盒清单（§9.3）
+    if attr == JFRE and noun == SJOI:                 ★ 规则 V（写回，不进队列）
+        cref = DGETF(CREF); jfre = DGETL(JFRE)
+        if cref 非空 and jfre:                        节点刚被置成「自由」
+            org = pllib/GJDORG(el)                    暂 DPUTL(JFRE, false) 后取 pllib/PICOPS 位置与 pllib/GJTOR0 矩阵
+            DELP += GJTOR0 · (PICOPS − org)           DGETRA/DPUTRA(DELP, 3)，错误 18 清掉
+            DPUTL(JFRE, true); PLCDEL()               ← 让节点留在原地：JFRE 翻真时把位置差折进 DELP
+    if attr == CTYP and noun == COCO:                 ★ 规则 W（目录侧写回）
+        ctyp[2] = DGETIA(CTYP); refs[2] = DGETFA(COCORE)
+        for i: refs[i] 非空 且 GATWR1(refs[i], COCDES, COCONN) != ctyp[i] → NULIFY(refs[i])
+        改过 → DPUTFA(COCORE)                         连接类型改了，不再匹配的 COCORE 引用置空
+    if attr in {PPRO, DPRO} and noun == DATA:         ★ 规则 X：descases/SCRUSE(el)（DATA 元素的属性 / 缺省属性变了 → 规则重用侧）
+    if 全局开关 unk_10FC3B30 & unk_10FC5A78:          ★ 自动着色（colsel/AUTCO2）：属性变了可能换画列表
+        if add/LADDED(el, &old) and AUTCO2(el, 2, &new) and old != new:
+            add/ADDREM(el, old, add/REMELE); add/ADDREM(el, new, add/ADDELE)
+    sub_10501A20(el, attr)                            designEvents::instance_->vfn[1](1, "=<w0>/<w1>", <attr 名>)：C++ 侧「属性变了」事件，消费者不在本 IDB
+```
+
+对本文主题的四点：
+
+1. **DCHC=0 的属性在 `VDESPT` 就被挡了**——比 §3.3「`EVALAT` 入口 `if (v16)`」还早一层，且这一层是逐指令核的：R13 上游的「上游」。但 `PLCDEL` / `GTPINI` / `SCSPOL` /
+   自动着色 / `designEvents` 都在门外——**DCHC=0 不等于 core 什么都不做**，只等于不动几何。
+2. **规则 U 是 §2 规则表（A–T）之外的第 21 条 noun×属性专项规则**，而且它在 `EVALAT` 之前改写了入参：`PLOO.HEIG` 进 `EVALAT` 时元素已经是 owner。
+   我方：`PLOO` 是 `is_loop_container_noun`（`POPF` 位）成员容器，任何属性变化都归属主重算（`resolve_element_generation_root` 跨 loop 容器上溯）——**同构、更粗**；`HEIG` 在 `DIRECT_GEOMETRY` ✅。
+3. **规则 V / W 与 0906 §8.2 的 `RECON0` 同一族：core 在属性 put 的钩子里再写别的属性。** 文件差分看到的是**结果**（同一窗里 `JFRE` 与 `DELP` 一起变、`CTYP` 与 `COCORE` 一起变），
+   我们不需要也不该模拟这些写；它们解释了语料里「一次操作多属性同窗变化」的一部分形状。`SPCO.PRTREF` 拷贝七个属性（§9.7）同理。
+4. **`MLSADD` 与 DCHC 门在同一个 `if` 里**：core 只在 DCHC ≠ 0 时更新元素的空间地图包围盒。这给我方「Skip 档不更新 AABB / 空间树」一票 core 侧的佐证（§9.8）。
+
+### 9.3 QCHGLS 的全部写入者（`xrefs → change/EVALCD 0x1022E020`，21 处 9 个函数）
+
+| 写入者 | 埋点名 / 符号 | 触发源 | 推进的条目 |
+|---|---|---|---|
+| `EVALAT` 内部 11 处 | `change/EVALAT` | §9.1 的五个入口 | 规则表 A–T 的目标，类别按 §3.3 |
+| `EVALRF` ×2 | `change/EVALRF` `0x1022DCAC` | `ADSTCH` 结构连接双向核对命中 | 对端 / 顶层件 |
+| `VDESAC` | `descases/VDESAC` | `PostCopyAllElement` | `(el, 4)` |
+| `VDESRO` | `descases/VDESRO` | `PostReorderElement` | `(el, 4)` |
+| `VDESR1` ×2 | `descases/VDESR1` | `PreReorderElement` | owner 是 `BRAN` → `(前一成员, 4)`；`FLRCOV` → `(owner, 4)` |
+| `ATTABK` ×2 | `descat/ATTABK` `0x101F0DEE` | **命令处理器**（`IGSPBK` 选项 2/3；4 = 当前画列表全部；5 = 指定 `BRAN`，否则错误 177） | 宿主里每个 `ATTA` 成员 `MLSADD(ATTA.REF)` 后 `(宿主, 4)` |
+| `RACKO` | `rac/RACKO` `0x103196F4` | **命令处理器**（分支排序：日志串 `"Branch ordered"`） | `(BRAN, 4)` |
+| `UpdateChangeList` | `DES_DrawListManager::UpdateChangeList` `0x1052B3C0` | `UPDATN` 消费队列时去重后按类别重灌（§8.5） | 原条目 |
+
+即：**属性触发的 QCHGLS 写入只有 `VDESPT → EVALAT` 一条**；其余写入者是结构变化（建 / 删 / 挂 / 排序 / 拷贝）与两个命令处理器。
+`VDESAC` / `VDESRO` / `VDESR1` 直接 `EVALCD`，**绕过 `EVALAT` 规则表**——拷贝或排序一个元件，core 不做上卷 / 联动，只把元素（或前一成员）自己记类别 4，
+交给 `UPGRPH` 按 `FNDTOP` 折到顶层件重建。
+
+`maplist`（`MLSADD` `0x10220F82` → `GLSADD` `0x10221257` 写、`VDEMPR` `0x102208C7` 经 `MLSNXT` 消费）：`MLSADD` 先按 noun 的字典整数字段
+**`IMAP`（`847458`，`0x10221051` / `0x102210f9` / `0x10221198` 三处 `ATNINT` 的常量 `unk_10B22B80` 实读）**路由：0 → 不进；3 → 沿 `OWNER` 上爬到非 3；
+7 → 取 owner（owner 是 2 除外）；`GROU` `GPWL` `WORL` 直接跳过；同一元素连续两次只记一次。`VDEMPR` 对每条：标志 1 → `mapboxlib/MPBOX`；
+`BRAN` 或 `HTCOMP(noun)` → `WSTRAM` 后 `mapboxlib/MPBXBR`；其它再按 `IMAP` 决定要不要算。
+**这是 core 的空间地图（`MAP`）包围盒维护清单**，与我方生成后就地收敛空间树 / AABB 是同一件事；写它的条件是 DCHC ≠ 0（§9.2）或结构变化。
+`IMAP` 就是我方字典快照 `resource/dict/noun_caps.json` 的 **`spatial_map`** 列（`noun_dict.rs:68`）——取值 `{0: 1404, 1: 239, 2: 188, 3: 39, 5: 60, 7: 1}`
+与 `MLSADD` 比的 `3` / `7` / `2` 三个常量对上：3 = `LOOP` `PLOO` `PAVE` 这类点 / 环容器（上爬到 `PANE`=1）、2 = `BRAN` `EQUI` `HANG` `SITE` `ZONE` `GROU` `WORL` 一类容器、
+1 = `ELBO` `TUBI` `ATTA` `NOZZ` `PANE` `FLOOR`、5 = `BOX` `SCTN` `GENSEC` `SJOI`。0906 §2.2a「`847458 = IMAP` 本轮无消费者」到此有了消费者。
+
+### 9.4 `change/UPGRPH`（`0x1022EAEE`，`0xf77` 字节）分派骨架逐指令核 —— §4 伪码成立
+
+只取 `cmp` / `j*` / `test` / `call` 四类指令（312 条）重走一遍，与 §4 逐叉对照：
+
+| §4 的叉 | 指令 | 目标 |
+|---|---|---|
+| `FNDTOP(ref, flag = noun == TUBI)` | `0x1022ecde cmp eax, 0AD7E9h`（`TUBI`）→ `0x1022ed1a call FNDTOP` | — |
+| 「同一顶层件只处理一次」 | `0x1022ed32` / `0x1022ed7b EQREF` → `0x1022edcd jmp loc_1022EBE8`（下一条） | — |
+| `LADDED` + 刷新观察者 | `0x1022ee59 LADDED` → `0x1022ee8e sub_1050D2E0`（`beforeChanged`）→ `0x1022eed9 ADDREM` | — |
+| **`cls == 3`** | `0x1022eee7 cmp eax, 3` / `jnz loc_1022F44E` | — |
+| P23 | `0x1022eef6`–`0x1022f050` **23 条** `cmp eax, imm32; jz loc_1022F05B`，逆 hash 依次 = `DRAW CLNTIL STRFLT INFITT PLTFRM ELFITT STRLNG HVACFI RAIL DOOR WINDOW FPFITT LINDIM FLRCOV MLABEL FIXTUR HRPOST HRTERM HRGATE HRPANE KICKPL CTSUPP FURNIT`（与 §4 名单同集同序） | `0x1022f092 ADDREM`（`REPELE`）+ `0x1022f0f8`–`0x1022f27b` 两层 `DFIND`/`DRETUR` 成员循环各 `RMKELE` |
+| `top == ref` | `0x1022f290 EQREF` | `0x1022f2a2 TRASCN` → `0x1022f2c5 SEGOPN` → `0x1022f2db` / `0x1022f2ef STRTRA` |
+| `LPRMTV(noun)` | `0x1022f306` | `0x1022f331 SEGTRA` → `0x1022f343 IPCOMP` / `0x1022f367 IHCOMP` → `0x1022f37b CRETUR` / `0x1022f38b NATTA` / `0x1022f3a4 DGETF` → `0x1022f3df` / `0x1022f40e SADREP` ×2 |
+| 其余（容器） | `0x1022f444 TRASCN` | — |
+| **`cls == 4`** | `0x1022f454 cmp eax, 4` / `jnz loc_1022F7F8`（→ 直接收尾，**类别 1 / 2 就是走这条**） | — |
+| `REPALL` 条件 | `0x1022f467 ICCOMP` `0x1022f47f IGMCOM` `0x1022f497 INGCOM` `0x1022f4af IG2COM` `0x1022f4c7 IPLCOM` `0x1022f4df IPTCOM` + `0x1022f4fd cmp 0CA78Ch`（`SPCO`）`0x1022f53c cmp 0D9489h`（`SVER`）`0x1022f549 cmp 8A1E7h`（`DATA`） | `0x1022f550 REPALL` |
+| `top == ref ‖ topNoun == TMPL` | `0x1022f56a EQREF` ‖ `0x1022f588 cmp 0BE598h`（`TMPL`） | `0x1022f5ca ADDREM` + `0x1022f60f TRASCN` + `0x1022f624 SEGOPN` / `0x1022f63e STRTRA` |
+| `LPRMTV` | `0x1022f655` → `0x1022f689 IPCOMP` / `0x1022f6b3 IHCOMP` | 管件 `SADREP` ×3（`0x1022f72b` `0x1022f75a` `0x1022f789`），否则 ×1（`0x1022f7ba`） |
+| 其余 | `0x1022f7f3 TRASCN` | — |
+| 收尾 | `0x1022f815 COLRES` → `0x1022f83e RMKELE` + 两层成员循环（`0x1022f867`–`0x1022f9e7`） | — |
+
+§8 里「`UPGRPH` 分支结构未逐指令核」这条结案；P23 的 23 个 noun 不多不少。
+
+### 9.5 `change/IDCHNG`（`0x1022E302`，`0xe5` 字节）全函数逐指令 —— §3.2 成立，外加一个边角
+
+```
+0x1022e35b call ATAINT(attr, [0x10B23D70] = 596407 DCHC, &var_10, &var_C)
+0x1022e363 mov eax,[var_C]; test; jz → 成功
+0x1022e36a   失败: var_8 = 0; jmp 出口                         ← 不读 PLCF、不碰旗标
+0x1022e373 var_8 = var_10                                      ← 类别
+0x1022e398 call ATAINT(attr, [0x10B23D74] = 652066 PLCF, &var_10, &var_C)   ← 出参与第一次同一格
+0x1022e3a0 mov eax,[var_10]; cmp eax,1; jz → var_4 = -1 else 0
+0x1022e3bb mov dword_10E98500, var_4                           ← 旗标
+0x1022e3e2 mov eax,[var_8]; retn                               ← 返回类别
+```
+
+边角：第二次 `ATAINT` 的 `var_C` **不检**，且 `var_10` 与第一次共用——`PLCF` 读失败时比的是残留的 DCHC 值（DCHC == 1 也会置旗标）。字典 4270 条都带 `PLCF`
+（§3.2 导出时 58 个 1、其余 0），字典外属性在第一次 `ATAINT` 就失败早退，所以这条实际上碰不到；记下是为了换版本时别被它咬。
+
+### 9.6 `PLCDEL`（Core3D `0x108e5890`）到底清什么
+
+```
+PLCDEL():
+    t = dword_10E7BCE4            # { count = 100, slots[100], cursor, n }（sub_108E58D0 0x108e58d0 建表）
+    for i < t.count: slots[i] 非空 → slots[i][+24] = 0        # 逐槽置「无效」
+    t[2] = t[3] = 0
+```
+
+槽的形状（读端 `sub_108E4DB0` `0x108e4db0`）：按 `(DB_Ref @+28, int @+40)` 查（`sub_108E5470`），命中且键相等才返回 `+48` 起 24 字节 = 3 个 double。
+读端 / 写端全在 `0x108E4D20`–`0x108E5980` 一段无符号 C++ 里，没有埋点名。
+
+调用方（`xrefs → 0x108e5890`，10 处）：`descases/VDESPT` ×2（入口无条件 + 规则 V 改完 `DELP` 后）、`descases/VDESAC`、`change/UPDATD`（`dword_10E98500` 旗标为真时）、
+`build/DEDRRP`、`csg_gml4/CTCDEL`、`sub_1024AA2D`、`sub_108E5DE0`、`0x10001ddd`、`0x100f3e96`。
+
+**「p-line 位置缓存」是推断**，四条腿：(1) 字段名 `PLCF` 逆 hash 出来就叫 PLCF，`PLCDEL` 与它共用前缀 PLC；(2) 表里存的是按 `(元素, 整数键)` 索引的 3 维向量，
+形状是「某元素第 n 条 p-line 的位置」；(3) `PLCF == 1` 的 58 个属性（`POS ORI BFORI SPRE HEIG PARA JOIS JOIE CFRA PFRE CUTB CUTP …`）恰好都是改了就让型钢 p-line 位置失效的属性；
+(4) 规则 V 在 `pllib/GJDORG` / `PICOPS` / `GJTOR0` 算完节点位置、写完 `DELP` 后紧跟一次 `PLCDEL`。四条都不是字面证据，所以 §8 那句「只作报表、不进判决」不变。
+
+### 9.7 ref 属性 put 的另一半：back-ref 维护（`VDESPF` / `VDESFA`）—— 0007 记录的「订阅者尚未定位」结案
+
+- `VDESPF(el, noun, attr, target)`（`PostSetRefAttribute`，**写之前**发）：先 `structures/BAKREF(el, noun, target, attr, 0, 0)` 记 back-ref；
+  然后一条特例：`noun == SPCO`（829324）且 `attr == PRTREF`（89651464）→ 经 `GATRF1(target, GPART, X)` 从部件读 `CATR DETR DETA MATX CMPR BLTR TMPR` 七个引用，
+  逐个 `BPUTF` 到 SPCO 自己身上（读失败的跳过）。**设 `SPCO.PRTREF` 一次 = 七个属性跟着写**，目录侧写回规则，与 §9.2 规则 V / W 同族。
+- `VDESFA(el, noun, attr, refs[], n)`（`PostSetRefListAttribute`）：`attr ∈ {PSARFA, PSLRFA, ALERFA}` 直接返回（这三个引用数组**不建 back-ref**）；
+  `attr == COCORE` → 对每个非空新引用 `GATWR1(ref, COCDES, COCONN)` 取连接类型写进 `CTYP[i]`（`BPUTIA`），与 §9.2 规则 W 互为反向；
+  其它 → 读旧列表（≤100），新有旧无 → `BAKREF`，旧有新无 → `structures/BREAKF`。
+- 所以 0007 记录问的「`PostSetRefListAttribute` 只广播，真正写 back-ref 的订阅者是谁」：**`DESDRA_SCPlugs::PostSetRefListAttribute` → `descases/VDESFA` → `structures/BAKREF` / `BREAKF`**
+  （Core3D，不在 core.dll）。ADR-003 那条线的 core 对照物到此闭合；对 gen-model 的判词不变（我们自建反向索引挂在落库写引用属性处）。
+
+### 9.8 对 gen-model 的意义（接 §6 差距表）
+
+| # | core 的规则（本节） | 我方现状 | 判 |
+|---|---|---|---|
+| G13 | 同值 put 不发任何事件（§9.1 第 1 步） | `diff_element` 五项逐字相同 → `unchanged`，不进候选 | ✅ 同构；且我们比 core 多挡一层——记录被重写但内容没变也不算 |
+| G14 | `PLOO.HEIG` 当 owner 的变化评估（规则 U） | loop 容器成员的任何变化归属主重算（`is_loop_container_noun` 上溯） | ✅ 同构、更粗 |
+| G15 | 属性 put 钩子里再写别的属性：`SJOI.JFRE` → `DELP`、`COCO.CTYP` ↔ `COCORE`、`SPCO.PRTREF` → 七个引用（规则 V / W / §9.7），与 0906 `RECON0` 同族 | 文件差分看到的是写回后的结果，同一窗里几个属性一起变；各自按效果表归类 | ✅ 不需模拟；解释语料里「一次操作多属性同窗」的一部分 |
+| G16 | 空间地图包围盒只在 DCHC ≠ 0 或结构变化时更新（`MLSADD` 与 DCHC 门同一个 `if`）；进不进、算在谁身上由 noun 字段 `IMAP` 定 | Skip 档不上卷、不重算，空间树 / AABB 不动；`IMAP` 已在快照里（`noun_caps.json.spatial_map`），今天没有消费者 | ✅ core 侧多了一票：DCHC=0 的属性 core 自己也不动包围盒。`spatial_map` 有了语义，可作空间树「该不该给这个 noun 建盒」的字典判据候选（不排期） |
+| G17 | 会话内路对 CATA 元素同样进 `EVALAT`（`DESDRA_SCPlugs` 只按 PADD 分流）：`SPCO` / `SVER` / `DATA` 变了 → `REPALL` | CATA 变更走依赖闭包 / 引用表反查，只重算受影响的 DESI 根（G9） | ✅ 比 core 细；核对表 R1（GETWORK 路只放 DESI / ISOD）不受影响 |
+| G18 | 拷贝 / 排序 / include 直接 `EVALCD(el, 4)` 或 `EVALNW`，不经规则表联动；`BRAN` 内排序另记前一成员 | 结构变化（`Add` / `owner` / `members`）一律整根重算 | ✅ 更粗不漏；`BRAN` 排序两侧管段由整根覆盖 |
+| G19 | `wnoevt` 属性不发变更事件；克隆属性把事件广播到全部克隆元素；分布式属性在持有元素上发 | 无对应概念：文件差分按记录看，写到哪条记录就在哪条记录上看到 | ⚪ 不可比；`wnoevt` 名单未导，若其中有 DCHC ≠ 0 的属性，core 会话内不重画而我们会重算——多算方向，安全 |
+| G20 | 自动着色 / `designEvents` / 标注刷新（`RMKELE`）在 DCHC 门外照做 | 显示属性不在我方范围 | ⚪ |
+
+没有一条改变 §5 三张答案表的判词：**「哪些属性触发几何重算」仍由 DCHC 类别 + `EVALAT` 规则表决定，`VDESPT` 只在它前面加了一道同样的门、一条上卷规则（U）和几笔写回。**
 
 ## 附：复查命令
 
@@ -432,4 +666,20 @@ ida-bridge exec idalib-49136 --sql "SELECT address, disasm FROM instructions WHE
 ida-bridge exec idalib-33060 --sql "SELECT decompile(0x59834b0), decompile(0x5983c30)"
 # noun / 属性 / 字段常量逆 hash（Python）
 python -c "v=985369;n=v-531441;d=[];exec('while n:\n d.append(n%27);n//=27');print(''.join(chr(64+x) if x else ' ' for x in d))"   # DRAW
+
+# ★0916 §9：属性 put 的入口链与 QCHGLS 写入者
+ida-bridge exec idalib-49136 --sql "SELECT hex(from_ea) AS from_ea, name_at(from_func) AS func FROM xrefs WHERE to_ea = 0x1022C679 ORDER BY from_ea"   # EVALAT 的 8 处调用
+ida-bridge exec idalib-49136 --sql "SELECT hex(from_ea) AS from_ea, name_at(from_func) AS func FROM xrefs WHERE to_ea = 0x1022E020 ORDER BY from_ea"   # EVALCD 的 21 处调用 = QCHGLS 全部写入者
+ida-bridge exec idalib-49136 --sql "SELECT hex(start_ea) AS ea, name FROM funcs WHERE name LIKE '%DESDRA_SCPlugs%' ORDER BY start_ea"                  # 订阅者全部方法
+ida-bridge exec idalib-49136 --sql "SELECT decompile(0x10409A60)"          # DESDRA_SCPlugs::PostSetAttribute → type 7 ? dra_scase/VDRSPT : descases/VDESPT
+ida-bridge exec idalib-49136 --sql "SELECT decompile(0x101F33A9)"          # descases/VDESPT（DCHC 门 + 规则 U/V/W/X + 自动着色 + designEvents）
+ida-bridge exec idalib-49136 --sql "SELECT address, disasm FROM instructions WHERE func_ea = 0x101F33A9 AND address BETWEEN 0x101f3419 AND 0x101f3510 ORDER BY address"   # DCHC 门 + PLOO.HEIG 逐指令
+ida-bridge exec idalib-49136 -c "import ida_bytes; _result_={hex(a): ida_bytes.get_dword(a) for a in range(0x10B200D8, 0x10B20110, 4)}"   # VDESPT 常量表
+ida-bridge exec idalib-49136 --sql "SELECT address, disasm FROM instructions WHERE func_ea = 0x1022EAEE AND (disasm LIKE 'cmp%' OR disasm LIKE 'j%' OR disasm LIKE 'call%' OR disasm LIKE 'test%') ORDER BY address"   # UPGRPH 分派骨架（312 条）
+ida-bridge exec idalib-49136 --sql "SELECT address, disasm FROM instructions WHERE func_ea = 0x1022E302 ORDER BY address"   # IDCHNG 全函数
+ida-bridge exec idalib-49136 --sql "SELECT decompile(0x108e5890), decompile(0x108E4DB0), decompile(0x108E58D0)"   # PLCDEL 与缓存表读 / 建
+ida-bridge exec idalib-49136 --sql "SELECT decompile(0x10220F82), decompile(0x102208C7)"                         # maplist/MLSADD 与消费者 VDEMPR
+ida-bridge exec idalib-49136 -c "import ida_bytes; _result_=ida_bytes.get_dword(0x10B22B80)"                      # 847458 = IMAP（MLSADD 读的 noun 字段 = 快照 spatial_map）
+ida-bridge exec idalib-33060 --sql "SELECT decompile(0x593f220), decompile(0x59453b0), decompile(0x5992C80)"   # internalPutAtt(ref) / postSetAttribute / 受影响集
+ida-bridge exec idalib-33060 --sql "SELECT hex(address) AS ea, name FROM names WHERE name LIKE '??_7DB_ElementChangesPlugger@@%'"   # vtable 0x5d19234：+52 PostSetAttribute · +60 PostSetRefAttribute · +64 RefList · +68 PostSetName
 ```
