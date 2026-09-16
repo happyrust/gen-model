@@ -3669,26 +3669,40 @@ mod tests {
     }
 
     /// 源码钉（ADR-073 D12）：任务开工前对齐接在每一处冻计算器 / 冻代号**之前**——批次执行体的模型半边、
-    /// 初始化双 lane 的模型半边、读透侧 ensure 的准入（启动房间屏障那一档显式带代号，不换）；
-    /// 探针不得起 `E3dModelService`（那一步整套装 schema，每个任务开工付一次就把任务拖垮）。
+    /// ModelOnly 执行体（启动追平 `model_sesno → 文件最新` 与 `model/rebuild` 都走它——此前漏了，停机期间
+    /// 新增 / 搬走的面板进不了常驻）、初始化双 lane 的模型半边、读透侧 ensure 的准入（启动房间屏障那一档
+    /// 显式带代号，不换）；探针不得起 `E3dModelService`（那一步整套装 schema，每个任务开工付一次就把任务拖垮）。
     #[test]
     fn the_task_start_refresh_precedes_every_calculator_freeze_and_stays_cheap() {
         let worker = include_str!("../data_interface/batch_worker.rs");
-        let body = worker
-            .split_once("async fn execute_frozen_batch_body(")
-            .expect("批次执行体")
-            .1;
-        let refresh = body
-            .find("refresh_room_reference_before_task(job.dbnum)")
-            .expect("批次执行体的模型半边开工前必须对齐常驻房间模型");
-        let side_actions = body
-            .find("run_model_side_actions(mgr, &side_actions)")
-            .expect("位姿 / 删除 / 级联");
-        let worklist = body.find("run_unit_worklist(").expect("单元工作单");
-        assert!(
-            refresh < side_actions && refresh < worklist,
-            "对齐必须早于冻计算器的每一处"
-        );
+        // 两个执行体各自一段：从函数头到第一个顶格 `}`（LF / CRLF 都认），别让后一个函数的字样替前一个作证。
+        fn function_body<'a>(source: &'a str, start: &str) -> &'a str {
+            let body = source.split_once(start).expect("执行体").1;
+            let end = body
+                .find("\n}\r\n")
+                .or_else(|| body.find("\n}\n"))
+                .expect("函数总有结尾");
+            &body[..end]
+        }
+        for (label, start) in [
+            ("批次执行体", "async fn execute_frozen_batch_body("),
+            ("ModelOnly 执行体", "async fn execute_model_only_body("),
+        ] {
+            let body = function_body(worker, start);
+            let refresh = body
+                .find("refresh_room_reference_before_task(job.dbnum)")
+                .unwrap_or_else(|| panic!("{label}的模型半边开工前必须对齐常驻房间模型: {body}"));
+            let side_actions = body
+                .find("run_model_side_actions(mgr, &side_actions)")
+                .unwrap_or_else(|| panic!("{label}: 位姿 / 删除 / 级联"));
+            let worklist = body
+                .find("run_unit_worklist(")
+                .unwrap_or_else(|| panic!("{label}: 单元工作单"));
+            assert!(
+                refresh < side_actions && refresh < worklist,
+                "{label}: 对齐必须早于冻计算器的每一处"
+            );
+        }
 
         let init = include_str!("../data_interface/dbnum_initialize.rs");
         let half = init
