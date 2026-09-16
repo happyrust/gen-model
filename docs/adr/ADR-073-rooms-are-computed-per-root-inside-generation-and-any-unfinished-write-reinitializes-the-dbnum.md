@@ -102,7 +102,8 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   `room_membership=false` 的伴随信号同一条纪律）。
 - **D12　常驻模型在每个任务开工前对齐到此刻的文件版本；代号 = 计算输入的摘要。** 此前常驻模型启动建一次、进程活多久用多久
   （换代点 `ensure_current` 自 ADR-067 作废后没有生产调用方）：新增的 PANE、搬走的面板、前进了的 DESI 都进不了它，逐根算出的
-  归属按启动那一刻的面板集算，且不报错。现在每个 dbnum 任务的模型半边开工前（批次执行体、初始化双 lane、读透侧 ensure 准入）
+  归属按启动那一刻的面板集算，且不报错。现在每个 dbnum 任务的模型半边开工前（批次执行体、ModelOnly 执行体——启动追平
+  `model_sesno → 文件最新` 与 `model/rebuild` 都走它，2026-09-17 审核补上、初始化双 lane、读透侧 ensure 准入）
   经 `model_db_adapter::refresh_room_reference_before_task` 探一次：`room_topology::latest_frozen_sources` 只走 MDB 成员清单 +
   每个 DESI 文件的最新会话 + 冻结令牌（**不装 schema、不起 E3D 服务**），composite 与装好的那份相同 = 常路、零重建；变了才按文件
   重建（`room-groups-v2` 磁盘工件 / GroupCache 按文件令牌、`room-input-cache` 面板几何按文件的 `initialization_target_hash`，
@@ -168,7 +169,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
 13. `ensure_ready`：`Degraded` → `Ok`。
 14. `mem://` 真测：(a) 在册面板缺几何 → 该面板旧边保留、其余根照常安定、`model_sesno` 前进；(b) 缺一个 DESI → 其余库照常生成，
     `/health.features.room.status = degraded`。
-15. `refresh_room_reference_before_task` 出现在 `execute_frozen_batch_body` 的 `run_model_side_actions` / `run_unit_worklist` 之前、
+15. `refresh_room_reference_before_task` 出现在 `execute_frozen_batch_body` **与 `execute_model_only_body`** 各自的
+    `run_model_side_actions` / `run_unit_worklist` 之前（两个执行体各钉一段，函数体到顶格 `}` 为止，后一个函数的字样不替前一个作证；
+    ModelOnly 那一处 2026-09-17 审核补上——此前启动追平 / `model/rebuild` 拿的是未对齐的常驻）、
     `dbnum_initialize::model_half_inner` 的 `frozen_room_calculator()` 之前、`model_dbnum_ensure` 准入的 `required_room_generation()`
     之前（`explicit_room_generation().is_none()` 门内）；`latest_frozen_sources` 全文不含 `E3dModelService::from_current` /
     `from_frozen_sources(` / `open_from_env`；`resident_generation()` 与 `required_room_generation()` 同为 `input_version`
@@ -179,7 +182,11 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     `/health.room_build.resident.last_swap.note = task-start refresh`、该任务的根对新面板算得出归属；(d) 只前进一个不含房间 /
     面板的 DESI → 重建后代号不变、此前的根 ACK 仍 `ready`。
 17. `build_model_update_plan_from_window` 从 `sources.plan.ledger.entries()` 调 `room_recompute::room_definition_change`、排
-    `room_only_work_item`；`execute_frozen_batch_body` 经 `room_recompute::request_for_task` 交出「要不要」；`execute_frozen_batch`
+    `room_only_work_item`；`execute_frozen_batch_body` 经 `room_recompute::request_for_task` 交出「要不要」；`execute_model_only_body`
+    经同一句交出（`Some(&room_reference)` 两条触发都带；`reconcile_startup_window` 与稳态窗口共用同一条规划入口，`RoomOnly` 工作项
+    随 `side_actions` 进来——此前这里硬编码 `room_recompute: None`，停机期间的 PANE 改动经启动追平进来就被静默吃掉，2026-09-17 审核补上；
+    整库重排（`whole_library_model_only`，起点 0）例外：每一根都刚用对齐后的计算器算过、承诺已由那一句盖上，不再空转一遍；
+    规划失败的早退仍 `None`）；`execute_frozen_batch`
     的 DESI 收尾段里 `run_room_only_recompute` 在 `await_units_durable(` 之后、`model_outcome_of(&flush` 之前、`flush.all_acked()`
     门内，算不齐 `outcome.all_roots_ok = false`；`manual_update` 的 side_actions 过滤只拦 `RoomRecalc*`（`is_room_recalc` 不含
     `RoomOnly`）（钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end`、

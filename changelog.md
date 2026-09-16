@@ -2,6 +2,38 @@
 
 ## 2026-09-17
 
+### ModelOnly 执行体补上开工前对齐与 `RoomOnly` 接力（ADR-073 D12 / D13 的漏接，审核 P1-1）
+
+- **为什么**：审核 `codex/model-projection-cache` 在途实现（会话 fable-5-1-35，2026-09-17）发现
+  `batch_worker::execute_model_only_body` 整条绕开了 D12 与 D13：没有 `refresh_room_reference_before_task`
+  （源码钉 15 与它的测试只钉了 `execute_frozen_batch_body`），回执里 `room_recompute: None` 硬编码。而
+  `window_root_plan::reconcile_startup_window` 与稳态窗口共用 `build_model_update_plan_from_window`，本窗碰了
+  房间定义族时 `RoomOnly` 工作项**确实**随 `plan.work_items` 进了 `side_actions`，然后被 `run_model_side_actions`
+  的白名单过滤掉、无人消费。后果：重启后「落后就排 `model_sesno → 文件最新`」的启动追平任务是 ModelOnly——
+  停机期间改了 PANE / FRMW 改名，起来后这一窗把触发①静默吃掉；`model/rebuild`（起点 0）拿**未对齐**的常驻算全库，
+  再把 `Aligned` 盖上（对那一代诚实，但那一代可能已过期，`room_alignment.current` 跟着报 `true`）。
+- **改动**（代码已随另一路会话的落库进 `d8fc12de7`，本条只补文档）：
+  - `execute_model_only_body` 规划成功后、`pre_generation` 之前调 `refresh_room_reference_before_task(job.dbnum)`，
+    回执留着；收尾 `room_recompute = if failed || whole_library_model_only(job) { None } else
+    { request_for_task(&side_actions, Some(&room_reference)) }`——两条触发都带上；整库重排（起点 0）例外：
+    `DbSet@T` 上每一根都刚用对齐后的计算器算过，再来一遍是 O(本库) 的空转，且 durable 侧的对齐承诺已由
+    `whole_library_model_only` 那一句盖上；规划失败的早退仍 `None`（模型半边没跑）。
+  - 源码钉 15（`room_resident::tests::the_task_start_refresh_precedes_every_calculator_freeze_and_stays_cheap`）
+    改成对两个执行体各钉一段——函数体到顶格 `}` 为止，后一个函数的字样不替前一个作证；源码钉 17
+    （`room_recompute::tests::the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end`）加
+    ModelOnly 那一半：`request_for_task(` + `Some(&room_reference)` 在、`room_recompute: None` 恰一处（早退）、
+    `whole_library_model_only(job)` 在。
+  - ADR-073 D12 正文与钉 15 / 17、CONTEXT「任务开工前对齐」词条（三处 → 四处）同步。
+- **验证**：`cargo test --lib -- room_recompute:: the_task_start_refresh_precedes… the_whole_library_eligibility…
+  nothing_outside_the_task_writes_model_sesno` 8 passed / 0 failed（在 `56e1b47ea` 双向同步之后的树上复跑一遍仍绿）；
+  rustfmt 对本轮新增行无 diff（三个文件里既有的 9 处漂移属别的会话）。**未 live**：停机期间改 PANE → 重启 → 启动追平
+  ModelOnly 任务日志出「整库房间重算完成」这一条真机用例没跑。
+- **审核里同批点出、本条未动**：P1-2 触发是边沿型、没有再武装（拆窗 / 单元失败 / 刷盘没齐 / 重算写库失败时原因被丢，
+  下一窗账本不再含那条 PANE 变更、再探又是 `Unchanged`，边永久陈旧到下一次不相关的 PANE 变化）；P2-3 收尾盖章读的是
+  任务结束那一刻的 `required_room_generation()`，并发 `/model/ensure` 中途换代时 `Aligned` 可能盖上一个边不是它算的代号
+  （`dbnum_initialize` 那一路用 `rooms.resident_generation()` 是对的）；P2-4 ADR D13「拿开工时同一台计算器」与实现
+  「收尾时新冻一台」措辞漂移；F3 / F4 / U3 照旧。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步
