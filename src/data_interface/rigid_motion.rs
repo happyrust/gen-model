@@ -46,8 +46,9 @@ pub struct TransformRoot {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CandidateKind {
     /// 只动了摆放（e3d-model `ElementDiff::is_placement_only`）、两端世界矩阵都算得出。
-    /// `rigid` 是三条排除的判决：`Err(原因)` = 它在路由容器 / 点容器 / `CWBRAN` 之内（或自己是
-    /// 桥架件），位姿变化是几何变化，不刚。
+    /// `rigid` 是排除的判决（ADR-066 D1 规则 3 及 2026-09-15 补条，`window_root_plan::anchor_lineage_exclusion`）：
+    /// `Err(原因)` = 它在路由容器 / 点容器 / `CWBRAN` / 规则 M 结构件之内，或自己是桥架件 / P23 摆放派生 noun /
+    /// 负体 / 剖面数据 / 几何集成员，或不是单元却挂在消费成员的属主下——位姿变化是几何变化，不刚。
     Anchor {
         delta: DMat4,
         rigid: Result<(), String>,

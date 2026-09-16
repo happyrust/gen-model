@@ -362,9 +362,131 @@ fn owner_chain_in_set(set: &Arc<DbSet>, refno: RefNo) -> anyhow::Result<Vec<Refn
     Ok(chain)
 }
 
-/// 一个只动了摆放的候选：`Δ = W_T·W_S⁻¹`（两端世界矩阵都在文件侧算），外加三条排除的判决
-/// （ADR-066 D1 规则 3）——沿 T 端**严格祖先**逐个读：路由容器（`derives_implied_tubes`）、
-/// 点 / 环容器（`graphics_ignored_below`）、`CWBRAN`；候选自己是桥架件也不刚（摆放是伪属性）。
+/// 只看候选**自己的 noun** 就能定的刚体排除（不用读祖先）：
+///
+/// - 桥架件（`CTSTRA` 等七个）：`POS`/`ORI` 是 Core3D 伪属性、按路径现算，不是摆放；
+/// - **P23**（`e3d_model::category::PLACEMENT_DERIVED_NOUNS`，ADR-066 D1 规则 3 的补条 / 开发计划
+///   2026-09-15 S2）：core `change/UPGRPH`（`0x1022EAEE`）对这 23 个 noun 的类别 3 变化不走
+///   `STRTRA`/`SEGTRA` 只改矩阵，而是 `REPELE` 整件重建——几何由摆放派生（门窗开孔、栏杆立柱随相邻件、
+///   桥架支架随托盘 …），左乘 Δ 得到的网格是错的，根回 `regen`；
+/// - **被属主消费的几何**（同计划 S3 / D1-b，按 noun 自己就判得出的三族）：负体（`Category::is_negative`，
+///   属主正体拿它做 CSG 扣减，`elmodl::collect_negatives`）、剖面 / 路径数据（`ProfileData`：`PLOO PAVE LOOP VERT
+///   SPINE CURVE RPATH POINTR POL*`，属主拉伸 / 扫掠的输入——注意 `PLOO` 的 gb 是 0，只靠「gb==1 容器之下」
+///   那条接不住 `PANE → PLOO → PAVE`）、几何集成员（`GeometrySet` / `NegGeometrySet`，整个集合作为一件交付）。
+///   它们自己没有挂在自己 refno 上的记录，挪它 = 属主网格变；core 侧对应 `EVALAT` 规则 J（`HOLC` 孔洞 → 自身类别 4）
+///   与规则 S（`POPF` 点 → `FNDEQP` 所属几何件类别 4）。
+///
+/// 返回 `Err(reason)` 时 reason 原样进 `CandidateKind::Anchor { rigid }`，回执 `transform_fallback_reason` 带出。
+fn anchor_noun_exclusion(refno: RefNo, noun: &str) -> Result<(), String> {
+    let noun = noun.trim().to_ascii_uppercase();
+    if e3d_model::is_cable_tray_element(&noun) {
+        return Err(format!(
+            "anchor {refno} is a cable tray piece ({noun}); its placement is a pseudo attribute"
+        ));
+    }
+    if e3d_model::category::is_placement_derived(&noun) {
+        return Err(format!(
+            "anchor {refno} is a placement-derived noun ({noun}); core UPGRPH rebuilds it on POS/ORI (P23, 0x1022EAEE)"
+        ));
+    }
+    let category = e3d_model::category::classify(&noun);
+    if category.is_negative() {
+        return Err(format!(
+            "anchor {refno} is negative geometry ({noun}); its owner's mesh consumes it (CSG), core EVALAT rule J"
+        ));
+    }
+    if matches!(category, e3d_model::category::Category::ProfileData) {
+        return Err(format!(
+            "anchor {refno} is profile/path data ({noun}); its owner's mesh consumes it, core EVALAT rule S"
+        ));
+    }
+    if matches!(
+        category,
+        e3d_model::category::Category::GeometrySet | e3d_model::category::Category::NegGeometrySet
+    ) {
+        return Err(format!(
+            "anchor {refno} is a geometry-set member ({noun}); the set is delivered as one piece"
+        ));
+    }
+    Ok(())
+}
+
+/// 候选**相对直接属主**的排除（计划 S3 / D1-b 第二条）：候选不是模型单元（没有挂在自己 refno 上的记录，
+/// `is_model_unit` 为假），而直接属主**消费成员**（`Category::consumes_members`：正体 / 目录件 / 复合件 / `TMPL`）
+/// ——那它就是属主网格的输入，挪它 = 属主重算。命中的形状：`PLOPEN` / `WLOPEN` / `BPOPEN` 开孔在 PANE / WALL /
+/// BPANEL 下（core 规则 R：`PLOPEN` → `FNDTOP` 顶层件类别 4）、`CMPF` 负体包在正体下（`collect_negatives_deep`）、
+/// 分类表没认领的 noun 在正体下（说不清就不刚）。
+///
+/// 模型单元**不在此列**：BOX 在 TMPL 下、NOZZ 在 EQUI 下、CTRAY 在 CWAY 下——记录挂在自己 refno 上，跟着 Δ 走就对；
+/// 纯容器属主（`List`：EQUI / SUBE / ZONE …）不消费成员，其下的非单元（SUBE、ELCONN 待建件）照旧放行。
+fn anchor_owner_exclusion(
+    refno: RefNo,
+    noun: &str,
+    owner: RefnoEnum,
+    owner_noun: &str,
+) -> Result<(), String> {
+    let noun = noun.trim().to_ascii_uppercase();
+    if e3d_model::category::is_model_unit(&noun) {
+        return Ok(());
+    }
+    let owner_noun = owner_noun.trim().to_ascii_uppercase();
+    if e3d_model::category::classify(&owner_noun).consumes_members() {
+        return Err(format!(
+            "anchor {refno} ({noun}) is not a model unit and its owner {owner_noun} {owner} consumes its members"
+        ));
+    }
+    Ok(())
+}
+
+/// core `EVALAT` 规则 M 的四个结构件 noun：`CLIMBM({PANE, GENSEC, SCTN, BPANEL})` 成功（自身或祖先是它们之一）
+/// 的任何非 0 类别变化，core 都把**那个结构件**记成类别 4 整件重建（`docs/evidence/2026-09-06-…evalat…` §2.2）。
+/// 我方只取「严格祖先」这一半：型钢 / 板**上的附件**挪位 = 型钢 / 板重建（`FIXING` 的 `TMPL` 负体开在宿主上、
+/// 接头随附件走——我们今天不扣宿主，但 core 那一票是「重建」，「少算」方向两票缺一不放行）；结构件**自己**挪位
+/// 不在此列，它的网格只依赖自身属性 + 目录，左乘 Δ 就对（core 对它自己也记类别 4，那是连接重算 `ADSTCH` 那一支的事，
+/// 连接属性回写会以属性变化的形式另进窗口）。
+const STRUCTURAL_MEMBER_RULE_M_NOUNS: [&str; 4] = ["PANE", "GENSEC", "SCTN", "BPANEL"];
+
+/// 这个祖先 noun 是不是规则 M 的结构件。
+fn is_structural_member_rule_m(noun: &str) -> bool {
+    STRUCTURAL_MEMBER_RULE_M_NOUNS.contains(&noun.trim().to_ascii_uppercase().as_str())
+}
+
+/// 刚体锚点资格里**只看 noun** 就能定的全部判决（ADR-066 D1 规则 3 + 2026-09-15 计划 S2 / S3 的补条），
+/// 自下而上：候选自己（[`anchor_noun_exclusion`]）→ 直接属主（[`anchor_owner_exclusion`]）→ 逐级严格祖先
+/// （`CWBRAN` 子树、点 / 环容器 `graphics_ignored_below`、规则 M 结构件）。`lineage` 是 T 端严格祖先
+/// `(refno, noun)`，自下而上、不含自身。唯一要读元素的那条——路由容器 `derives_implied_tubes`（BRAN 的属主是不是
+/// HVAC）——不在这里，由 [`rigid_anchor`] 在这之后补。
+fn anchor_lineage_exclusion(
+    refno: RefNo,
+    noun: &str,
+    lineage: &[(RefnoEnum, String)],
+) -> Result<(), String> {
+    anchor_noun_exclusion(refno, noun)?;
+    if let Some((owner, owner_noun)) = lineage.first() {
+        anchor_owner_exclusion(refno, noun, *owner, owner_noun)?;
+    }
+    for (ancestor, ancestor_noun) in lineage {
+        if ancestor_noun == "CWBRAN" {
+            return Err(format!("anchor inside CWBRAN {ancestor}"));
+        }
+        if e3d_model::category::graphics_ignored_below(ancestor_noun) {
+            return Err(format!(
+                "anchor under point/loop container {ancestor_noun} {ancestor}"
+            ));
+        }
+        if is_structural_member_rule_m(ancestor_noun) {
+            return Err(format!(
+                "anchor under structural member {ancestor_noun} {ancestor}; core EVALAT rule M rebuilds the member"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 一个只动了摆放的候选：`Δ = W_T·W_S⁻¹`（两端世界矩阵都在文件侧算），外加排除的判决
+/// （ADR-066 D1 规则 3 及其 2026-09-15 补条）——noun 级的全部判决在 [`anchor_lineage_exclusion`]
+/// （候选自己：桥架件 / P23 / 负体 / 剖面数据 / 几何集；直接属主消费成员；祖先：`CWBRAN` / 点环容器 / 规则 M 结构件），
+/// 之后再沿 T 端**严格祖先**读元素查路由容器（`derives_implied_tubes`）。
 fn rigid_anchor(
     base: &Arc<DbSet>,
     target: &Arc<DbSet>,
@@ -380,29 +502,18 @@ fn rigid_anchor(
         .element(refno)
         .element_type()
         .map_err(|error| anyhow::anyhow!("noun of {refno} at T: {error}"))?;
-    let mut rigid = if e3d_model::is_cable_tray_element(&own_noun) {
-        Err(format!(
-            "anchor {refno} is a cable tray piece ({own_noun}); its placement is a pseudo attribute"
-        ))
-    } else {
-        Ok(())
-    };
+    let mut lineage: Vec<(RefnoEnum, String)> = Vec::with_capacity(chain_t.len());
+    for ancestor in chain_t {
+        let noun = target
+            .element(refno_to_e3d(*ancestor))
+            .element_type()
+            .map_err(|error| anyhow::anyhow!("noun of ancestor {ancestor}: {error}"))?;
+        lineage.push((*ancestor, noun));
+    }
+    let mut rigid = anchor_lineage_exclusion(refno, &own_noun, &lineage);
     if rigid.is_ok() {
-        for ancestor in chain_t {
+        for (ancestor, noun) in &lineage {
             let element = target.element(refno_to_e3d(*ancestor));
-            let noun = element
-                .element_type()
-                .map_err(|error| anyhow::anyhow!("noun of ancestor {ancestor}: {error}"))?;
-            if noun == "CWBRAN" {
-                rigid = Err(format!("anchor inside CWBRAN {ancestor}"));
-                break;
-            }
-            if e3d_model::category::graphics_ignored_below(&noun) {
-                rigid = Err(format!(
-                    "anchor under point/loop container {noun} {ancestor}"
-                ));
-                break;
-            }
             if e3d_model::category::derives_implied_tubes(&element)
                 .map_err(|error| anyhow::anyhow!("route check of {ancestor}: {error}"))?
             {
@@ -2339,6 +2450,348 @@ mod tests {
         );
         assert_eq!(units[0].anchors.len(), 1);
         assert_eq!(units[0].anchors[0].refno, r(3).to_pdms_str());
+    }
+
+    /// D1-a（开发计划 2026-09-15 S2 / ADR-066 D1 规则 3 补条）：P23 的 noun 自己挪位不算刚体锚点——
+    /// [`anchor_noun_exclusion`] 给 `Err`，原因带 `placement-derived`；三种形状（锚点即根 `HRPOST`、
+    /// 锚点在根之下 `DOOR` 在 `WALL` 下、锚点即根 `CTSUPP` 与旁边正常的 `EQUI` 锚点并列）经
+    /// `classify_transform_roots` 都把根送回 regen、原因原样进 `rejected`（回执 `transform_fallback_reason`
+    /// 读的就是它）；普通设备 / 容器 / 型材照旧 `Ok`，桥架件那条原有排除不受影响。
+    #[test]
+    fn a_placement_derived_anchor_never_qualifies_for_rigid_motion() {
+        use crate::data_interface::rigid_motion::{
+            CandidateKind, WindowCandidate, classify_transform_roots,
+        };
+        let refno = RefNo::new(24384, 7);
+        for noun in ["HRPOST", "DOOR", "CTSUPP", "hrpost", " door "] {
+            let reason = anchor_noun_exclusion(refno, noun).expect_err(noun);
+            assert!(
+                reason.contains("placement-derived") && reason.contains("P23"),
+                "{noun}: {reason}"
+            );
+        }
+        // 这些 noun 自己不触发排除（`PLOPEN` 的排除在属主那一级，见 S3 那条测试）。
+        for noun in [
+            "EQUI", "BOX", "ZONE", "SCTN", "PANE", "WALL", "HANDRA", "BRAN", "PLOPEN", "FIXING",
+        ] {
+            assert_eq!(anchor_noun_exclusion(refno, noun), Ok(()), "{noun}");
+        }
+        assert!(
+            anchor_noun_exclusion(refno, "CTSTRA")
+                .expect_err("CTSTRA")
+                .contains("cable tray")
+        );
+
+        // 层级：ZONE 1 ─┬─ HRPOST 10（根，自己挪位）
+        //               ├─ WALL 20（根）─── DOOR 21（挪位）
+        //               ├─ CTSUPP 30（根，自己挪位）
+        //               └─ EQUI 40（根，自己挪位：正常锚点）
+        let anchor = |id: u32, noun: &str, chain_t: &[u32]| WindowCandidate {
+            refno: r(id),
+            kind: CandidateKind::Anchor {
+                delta: glam::DMat4::from_translation(glam::DVec3::new(0.0, 0.0, 5.0)),
+                rigid: anchor_noun_exclusion(RefNo::new(24384, id), noun),
+            },
+            chain_t: chain_t.iter().map(|n| r(*n)).collect(),
+            chain_s: Vec::new(),
+        };
+        let roots = vec![
+            root(10, "HRPOST", GenerationRootKind::DeliveryUnit),
+            root(20, "WALL", GenerationRootKind::DeliveryUnit),
+            root(30, "CTSUPP", GenerationRootKind::DeliveryUnit),
+            root(40, "EQUI", GenerationRootKind::DeliveryUnit),
+        ];
+        let root_ids = [10u32, 20, 30, 40];
+        let root_ancestors: BTreeMap<RefnoEnum, Vec<RefnoEnum>> =
+            root_ids.iter().map(|id| (r(*id), vec![r(1)])).collect();
+        let all: BTreeSet<RefnoEnum> = root_ids.iter().map(|id| r(*id)).collect();
+        let out = classify_transform_roots(
+            &roots,
+            &root_ancestors,
+            &all,
+            &all,
+            &BTreeSet::new(),
+            None,
+            &[
+                anchor(10, "HRPOST", &[1]),
+                anchor(21, "DOOR", &[20, 1]),
+                anchor(30, "CTSUPP", &[1]),
+                anchor(40, "EQUI", &[1]),
+            ],
+            true,
+        );
+        assert_eq!(
+            out.transform.keys().copied().collect::<Vec<_>>(),
+            vec![r(40)],
+            "只有普通设备的挪位走便宜路"
+        );
+        let rejected: BTreeMap<RefnoEnum, String> = out.rejected.iter().cloned().collect();
+        assert_eq!(
+            rejected.keys().copied().collect::<Vec<_>>(),
+            vec![r(10), r(20), r(30)]
+        );
+        let shapes = [(10, 10, "HRPOST"), (20, 21, "DOOR"), (30, 30, "CTSUPP")];
+        for (root_id, anchor_id, noun) in shapes {
+            let reason = &rejected[&r(root_id)];
+            assert!(
+                reason.contains("placement-derived")
+                    && reason.contains(noun)
+                    && reason.contains(&r(anchor_id).to_pdms_str()),
+                "root {root_id}: {reason}"
+            );
+        }
+
+        // 开关关着时这条路整个不存在：没有 transform、也没有 rejected（关着不是拒绝）。
+        let off = classify_transform_roots(
+            &roots,
+            &root_ancestors,
+            &all,
+            &all,
+            &BTreeSet::new(),
+            None,
+            &[anchor(10, "HRPOST", &[1])],
+            false,
+        );
+        assert!(off.transform.is_empty() && off.rejected.is_empty());
+    }
+
+    /// 合成一条 T 端谱系 `(refno, noun)`（自下而上、不含自身）。
+    fn lineage(pairs: &[(u32, &str)]) -> Vec<(RefnoEnum, String)> {
+        pairs
+            .iter()
+            .map(|(id, noun)| (r(*id), (*noun).to_string()))
+            .collect()
+    }
+
+    /// D1-b（开发计划 2026-09-15 S3 / ADR-066 D1 规则 3 第五类）：被属主消费的几何挪位 = 属主重算——
+    /// NBOX 在 BOX 下（负体，noun 自己就判得出）、PLOPEN 在 PANE 下（非单元 + 属主消费成员，也命中规则 M）、
+    /// FIXING 在 SCTN 下（FIXING 今天**是**模型单元——2026-09-14 起走目录构件 GMRE 求值——所以只有规则 M 接得住它：
+    /// 型钢上的附件挪位 = 型钢重建，core 那一票是「重建」）。三形状经 `classify_transform_roots` 都把属主根送回
+    /// regen、原因原样进 `rejected`；同一批里 BOX 在 EQUI 下（单元在纯容器下）照旧走便宜路。
+    #[test]
+    fn a_consumed_member_anchor_regenerates_its_owner_unit() {
+        use crate::data_interface::rigid_motion::{
+            CandidateKind, WindowCandidate, classify_transform_roots,
+        };
+        // 先核 category 的口径，别按想象写：FIXING 是单元、TMPL 是图元容器、负体 / 开孔不是单元。
+        assert!(e3d_model::category::is_model_unit("FIXING"));
+        assert!(!e3d_model::category::is_model_unit("TMPL"));
+        assert!(!e3d_model::category::is_model_unit("NBOX"));
+        assert!(!e3d_model::category::is_model_unit("PLOPEN"));
+        assert!(!e3d_model::category::is_model_unit("PAVE"));
+        assert!(e3d_model::category::classify("PANE").consumes_members());
+        assert!(e3d_model::category::classify("WALL").consumes_members());
+        assert!(e3d_model::category::classify("BPANEL").consumes_members());
+        assert!(!e3d_model::category::classify("EQUI").consumes_members());
+
+        let refno = RefNo::new(24384, 7);
+        // 族一：noun 自己就判得出的三类。
+        for (noun, expect) in [
+            ("NBOX", "negative geometry"),
+            ("NCYL", "negative geometry"),
+            ("NXTR", "negative geometry"),
+            ("PAVE", "profile/path data"),
+            ("PLOO", "profile/path data"),
+            ("POINTR", "profile/path data"),
+            ("SPINE", "profile/path data"),
+            ("SBOX", "geometry-set member"),
+        ] {
+            let reason = anchor_noun_exclusion(refno, noun).expect_err(noun);
+            assert!(reason.contains(expect), "{noun}: {reason}");
+        }
+        // 族二：非单元在消费型属主之下。
+        for (noun, owner) in [
+            ("PLOPEN", "PANE"),
+            ("WLOPEN", "WALL"),
+            ("BPOPEN", "BPANEL"),
+            ("CMPF", "BOX"),
+            ("TMPL", "FIXING"),
+            ("NO_SUCH_NOUN", "CYLI"),
+        ] {
+            let reason = anchor_owner_exclusion(refno, noun, r(1), owner).expect_err(noun);
+            assert!(reason.contains("consumes its members"), "{noun}: {reason}");
+        }
+        // 单元在消费型属主下、非单元在纯容器下：都不由这一条排除。
+        for (noun, owner) in [
+            ("BOX", "TMPL"),
+            ("NOZZ", "EQUI"),
+            ("CTRAY", "CWAY"),
+            ("FIXING", "SCTN"),
+            ("SUBE", "EQUI"),
+            ("ELCONN", "EQUI"),
+            ("ZONE", "SITE"),
+        ] {
+            assert_eq!(
+                anchor_owner_exclusion(refno, noun, r(1), owner),
+                Ok(()),
+                "{noun} under {owner}"
+            );
+        }
+        // 族三：规则 M 的四个结构件只认严格祖先。
+        for noun in ["PANE", "GENSEC", "SCTN", "BPANEL", "sctn"] {
+            assert!(is_structural_member_rule_m(noun), "{noun}");
+        }
+        for noun in ["WALL", "STWALL", "FLOOR", "EQUI", "ZONE", "STRU", "FRMW"] {
+            assert!(!is_structural_member_rule_m(noun), "{noun}");
+        }
+        let reason = anchor_lineage_exclusion(
+            refno,
+            "FIXING",
+            &lineage(&[(30, "SCTN"), (3, "FRMW"), (1, "STRU")]),
+        )
+        .expect_err("FIXING under SCTN");
+        assert!(
+            reason.contains("structural member SCTN") && reason.contains("rule M"),
+            "{reason}"
+        );
+        // PAVE 在 PLOO（gb 0）在 PANE 下：老的「gb==1 容器之下」接不住，现在由 noun 自己那条接住。
+        let reason = anchor_lineage_exclusion(
+            refno,
+            "PAVE",
+            &lineage(&[(20, "PLOO"), (2, "PANE"), (1, "ZONE")]),
+        )
+        .expect_err("PAVE under PLOO");
+        assert!(reason.contains("profile/path data"), "{reason}");
+        // 结构件自己挪位不受规则 M 影响。
+        assert_eq!(
+            anchor_lineage_exclusion(refno, "SCTN", &lineage(&[(3, "FRMW"), (1, "STRU")])),
+            Ok(())
+        );
+        assert_eq!(
+            anchor_lineage_exclusion(refno, "PANE", &lineage(&[(1, "ZONE")])),
+            Ok(())
+        );
+
+        // 层级：ZONE 1 ─┬─ BOX 10（根）─── NBOX 11（挪位）
+        //               ├─ PANE 20（根）─── PLOPEN 21（挪位）
+        //               ├─ SCTN 30（根）─── FIXING 31（挪位）
+        //               └─ EQUI 40（根）─── BOX 41（挪位：单元在纯容器下，正常锚点）
+        let anchor = |id: u32, noun: &str, chain: &[(u32, &str)]| WindowCandidate {
+            refno: r(id),
+            kind: CandidateKind::Anchor {
+                delta: glam::DMat4::from_translation(glam::DVec3::new(1.0, 0.0, 0.0)),
+                rigid: anchor_lineage_exclusion(RefNo::new(24384, id), noun, &lineage(chain)),
+            },
+            chain_t: chain.iter().map(|(n, _)| r(*n)).collect(),
+            chain_s: Vec::new(),
+        };
+        let roots = vec![
+            root(10, "BOX", GenerationRootKind::DeliveryUnit),
+            root(20, "PANE", GenerationRootKind::DeliveryUnit),
+            root(30, "SCTN", GenerationRootKind::DeliveryUnit),
+            root(40, "EQUI", GenerationRootKind::DeliveryUnit),
+        ];
+        let root_ids = [10u32, 20, 30, 40];
+        let root_ancestors: BTreeMap<RefnoEnum, Vec<RefnoEnum>> =
+            root_ids.iter().map(|id| (r(*id), vec![r(1)])).collect();
+        let all: BTreeSet<RefnoEnum> = root_ids.iter().map(|id| r(*id)).collect();
+        let out = classify_transform_roots(
+            &roots,
+            &root_ancestors,
+            &all,
+            &all,
+            &BTreeSet::new(),
+            None,
+            &[
+                anchor(11, "NBOX", &[(10, "BOX"), (1, "ZONE")]),
+                anchor(21, "PLOPEN", &[(20, "PANE"), (1, "ZONE")]),
+                anchor(31, "FIXING", &[(30, "SCTN"), (1, "ZONE")]),
+                anchor(41, "BOX", &[(40, "EQUI"), (1, "ZONE")]),
+            ],
+            true,
+        );
+        assert_eq!(
+            out.transform.keys().copied().collect::<Vec<_>>(),
+            vec![r(40)],
+            "只有单元在纯容器下的挪位走便宜路"
+        );
+        let rejected: BTreeMap<RefnoEnum, String> = out.rejected.iter().cloned().collect();
+        let shapes = [
+            (10, 11, "negative geometry"),
+            (20, 21, "consumes its members"),
+            (30, 31, "structural member SCTN"),
+        ];
+        for (root_id, anchor_id, expect) in shapes {
+            let reason = &rejected[&r(root_id)];
+            assert!(
+                reason.contains(expect) && reason.contains(&r(anchor_id).to_pdms_str()),
+                "root {root_id}: {reason}"
+            );
+        }
+    }
+
+    /// 纯容器锚点不受 S3 两条影响（计划 S3 验收）：挪 ZONE，名下每个安定根都进 transform；SUBE 在 EQUI 下、
+    /// BOX 在 EQUI / SUBE 下、TMPL 在 ZONE 下同样放行。
+    #[test]
+    fn a_pure_container_anchor_still_qualifies() {
+        use crate::data_interface::rigid_motion::{
+            CandidateKind, WindowCandidate, classify_transform_roots,
+        };
+        let refno = RefNo::new(24384, 7);
+        for (noun, chain) in [
+            ("ZONE", vec![(2, "SITE")]),
+            ("SITE", vec![]),
+            ("STRU", vec![(1, "ZONE"), (2, "SITE")]),
+            ("FRMW", vec![(3, "STRU"), (1, "ZONE")]),
+            ("PIPE", vec![(1, "ZONE")]),
+            ("EQUI", vec![(1, "ZONE")]),
+            ("SUBE", vec![(40, "EQUI"), (1, "ZONE")]),
+            ("BOX", vec![(40, "EQUI"), (1, "ZONE")]),
+            ("CYLI", vec![(42, "SUBE"), (40, "EQUI"), (1, "ZONE")]),
+            ("TMPL", vec![(1, "ZONE")]),
+            ("NOZZ", vec![(40, "EQUI"), (1, "ZONE")]),
+        ] {
+            assert_eq!(
+                anchor_lineage_exclusion(refno, noun, &lineage(&chain)),
+                Ok(()),
+                "{noun} under {chain:?}"
+            );
+        }
+
+        // 层级：ZONE 1（挪位）─┬─ EQUI 10（根）─── BOX 11
+        //                      └─ PANE 20（根）
+        let zone = WindowCandidate {
+            refno: r(1),
+            kind: CandidateKind::Anchor {
+                delta: glam::DMat4::from_translation(glam::DVec3::new(0.0, 100.0, 0.0)),
+                rigid: anchor_lineage_exclusion(
+                    RefNo::new(24384, 1),
+                    "ZONE",
+                    &lineage(&[(2, "SITE")]),
+                ),
+            },
+            chain_t: vec![r(2)],
+            chain_s: Vec::new(),
+        };
+        let roots = vec![
+            root(10, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(20, "PANE", GenerationRootKind::DeliveryUnit),
+        ];
+        let root_ancestors: BTreeMap<RefnoEnum, Vec<RefnoEnum>> = [10u32, 20]
+            .iter()
+            .map(|id| (r(*id), vec![r(1), r(2)]))
+            .collect();
+        let all: BTreeSet<RefnoEnum> = [r(10), r(20)].into_iter().collect();
+        let out = classify_transform_roots(
+            &roots,
+            &root_ancestors,
+            &all,
+            &all,
+            &BTreeSet::new(),
+            None,
+            &[zone],
+            true,
+        );
+        assert_eq!(out.rejected, Vec::new());
+        assert_eq!(
+            out.transform.keys().copied().collect::<Vec<_>>(),
+            vec![r(10), r(20)],
+            "挪 ZONE：名下两个安定根都随同一个锚点前移"
+        );
+        for anchors in out.transform.values() {
+            assert_eq!(anchors.len(), 1);
+            assert_eq!(anchors[0].refno, r(1));
+        }
     }
 
     #[tokio::test]
