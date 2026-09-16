@@ -4,8 +4,8 @@
 > 此前三段会话（fable-5-1-36 → 45 → 48）把后端改动全部落在了 **`d:\work\plant-code\plant-model-gen`（legacy，`/api/sqlite-spatial/*`，0.3.34）**，
 > 而本仓（`codex/model-projection-cache@da461b71f`，0.1.27）没有 `src/web_server`、没有 SQLite 空间索引、没有 `tubi_relate`，
 > 空间查询走进程内 `GLOBAL_AABB_TREE`（`/api/v1/spatial/*`）。本计划重新对准本仓。
-> 状态：**已落地（P1 / P2 / P3 含 §3.3 ③，2026-09-16）**。契约见 `docs/specs/web-service-api.md` §4.13.1（`source_mode=bran_centerline`）/ §4.13.2
-> （`/nearest-clearance`），变更记 `changelog.md` 2026-09-16，词条见 `CONTEXT.md`「空间邻近查询」。§4 的待拍板项按实现口径定下：
+> 状态：**已落地（P1 / P2 / P3 含 §3.3 ③ ④，2026-09-16）**。契约见 `docs/specs/web-service-api.md` §4.13.1（`source_mode=bran_centerline`）/ §4.13.2
+> （`/nearest-clearance`）/ §4.13.3（`/centerline`，④ 管-管间距纠偏用），变更记 `changelog.md` 2026-09-16，词条见 `CONTEXT.md`「空间邻近查询」。§4 的待拍板项按实现口径定下：
 > D2 保留前端骨架并把 `branCenterline` 翻 true、D3 `include_self` 缺省 **false**、D5 `useSpatialCompute` 内按 kind 分流、D7 与 legacy 同名
 > `/api/v1/spatial/nearest-clearance`、D8 按 P1 → P2 → P3；**仍开着**：D1（legacy 三轮改动留 / 回退）、D4（`surface` 缺省——当前 `false`）、
 > D6（`column` 含 GENSEC——当前含）。真机 e2e（§5 那两条 GET）未跑。
@@ -75,6 +75,23 @@
   （2026-09-11 收敛计划 D2 / PR0.2）；不给落点时保留旧 Toast。顺手修了 `ViewerPanel.syncBranClearanceDimensions` 的坐标换算：
   候选端点是 E3D 世界 mm，Design Space 是同原点的米，应 `/1000`——此前套的是 `designToWorld` 的逆（scene → design），
   对 mm 端点差 1000 倍还带重定心平移，两个后端的 Dock 结果之前都画不到位（真机未验过所以没暴露）。
+- ④ **管-管间距纠偏（用户 2026-09-16 19:06）**：「两个排管的距离测量是指两条 BRAN 的直段之间，如果有平行的部分就可以标注它们的间距」——
+  ③ 里顺手把 `measure_pipe_to_pipe` 也接到同一份结果时，用的还是网格采样的最近点对（任意两个构件表面最近处，比如直管到阀体），
+  答的不是这个问题。改法：
+  - 后端加一条只读 `GET /api/v1/spatial/centerline?refno=` 把 P1 已拼出的走廊线段表原样交出去（每段带成员 noun / `implicit` /
+    外径；spec §4.13.3）。**服务端不算平行**：几何只是几十条线段的配对，而点选上下文（点在哪一段、两根管各是谁）和「结果 → 尺寸」
+    的整条链路都在前端；服务端只做它独有的事——把 E3D 库的成员序 + 隐式管身拼成真实中心线。
+  - 前端 `measure_pipe_to_pipe`：点两根管 → 各自所属 BRAN（DTX 缓存的 `owner_refno` / `owner_noun`）→ 取两条中心线 → 连续共线的段
+    合成**直段**（`implicit` 管身一定直；ELBO / BEND 的到达→离开是弦，剔掉）→ 直段两两配**平行对**（夹角 ≤ 0.5°、沿轴投影区间有重叠）→
+    每对一条**中心距**尺寸：两端都在轴线上、落在重叠区中点（与 D4 当前口径一致：从中心线起算、不扣外径；表里另给扣两侧外径后的净距
+    与重叠长度）。写进「BRAN 中心线最近清距」同一份结果——同一目标 BRAN 可有多条（一对一条），再测同一对整组替换；来源登记
+    `parallel-centerline / exact-centerline`，尺寸文字不带「≈」。没有平行直段就只报状态、不写。
+  - 旧的网格采样管-管路径删掉（`computeApproxNearestBetweenObjects` 留给「构件最近点」工具）。
+  - **真机验出并修掉一处前提错误（2026-09-17）**：点选 → 所属 BRAN 靠 DTX 缓存的 `owner_noun == BRAN`，而真机 `model/records`
+    从不发 `generic=BRAN` 的记录——BRAN 的隐式管身 11 条都挂在它自己的 refno 上、`generic=TUBI`，`instanceMapping.buildNounIndex`
+    照字面收成「这个 refno 是 TUBI」，整条 BRAN 下所有构件的 `owner_noun` 都成了 `TUBI`，点哪根都答「不属于任何 BRAN」。改成
+    `TUBI` 记录只说明「这个 refno 是一条 BRAN」（非 `TUBI` 的 generic 优先），加了真机形状的用例。e2e（:3111 + :8023，`24381_145018 ↔
+    24381_144924`）：6 对平行直段、6 条中心距尺寸（1584 / 1920 / 1980 / 2719 / 1920 / 6829 mm）落在轴线之间；反着再点同一对整组替换仍 6 条。
 
 ### 3.4 明确不做
 

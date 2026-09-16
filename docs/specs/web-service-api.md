@@ -958,14 +958,15 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
-### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns, nearest-clearance}` — 进程内空间树的邻近查询
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns, nearest-clearance, centerline}` — 进程内空间树的邻近查询
 
 出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
 §5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
 `model-source/genModelV1/spatialSource.ts`（抽屉「按范围查找」在 `?model_source=gen-model-v1` 下走这三条，legacy 源仍走旧后端
 `/api/sqlite-spatial/*`）。2026-09-16 起（本仓 `docs/plans/2026-09-16-bran-centerline-nearest-clearance-v1-dev-plan.md` §3.1 / §3.2）
 `nearby` 与 `nearby/refnos` 多一档 `source_mode=bran_centerline`（§4.13.1），并新增第四条 `nearest-clearance`（§4.13.2）；
-四条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
+同日晚再加第五条 `centerline`（§4.13.3：把一条 BRAN 的中心线线段表原样给前端，只读库、不碰树）。
+五条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
 
 - **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
   随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
@@ -1163,10 +1164,52 @@ query 参数（全部按字串收；布尔格都认 `1/true/yes/on` 与 `0/false
 - **未做**（计划 §3.4）：目标侧仍是 AABB，精算到目标网格留给前端；SCTN / GENSEC 不按姿态区分「竖直才算柱」（D6：GENSEC 目前算 `column`）；
   `surface` 缺省是否该为 `1`（D4）未拍板，当前缺省 `false`。
 
-错误一览（四条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
+#### 4.13.3 `GET /api/v1/spatial/centerline` — 一条 BRAN 的中心线线段表：成员到达点→离开点 + 隐式管身，原样给前端（2026-09-16）
+
+出处：同上计划 §3.3 ④（管-管间距纠偏：「两个排管的距离测量是指两条 BRAN 的直段之间，有平行的部分就标注它们的间距」）。
+实现 `fast_model::spatial_centerline::{CenterlineSegmentJson, CenterlineResponse, centerline_response}`（纯函数 + 单测），
+handler `spatial_centerline` 只做身份 / 参数 / 状态码，走廊取法与 §4.13.1 的 `prepare_centerline` **同一个** `query_branch`
+（`mbd::branch_query`，`spawn_blocking` 里读盘）。消费方：plant3d-web `genModelV1Api.genModelV1SpatialCenterline` →
+`useDtxTools.measure_pipe_to_pipe`（点两根管 → 各自所属 BRAN → 两条中心线 → 在前端把连续共线的段合成直段、配平行对、算中心距，
+写进 `useSpatialCompute`「BRAN 中心线最近清距」同一份结果画尺寸）。
+
+**为什么是「原样给线段表」而不是服务端算平行**：前端已经有整套「结果 → 尺寸」的链路与三维里的点选上下文（点在哪一段、
+两根管各是谁），几何只是几十条线段的配对；服务端只负责它独有的事——把 E3D 库里的成员序与隐式管身拼成真实中心线。
+前端从网格猜轴线的老路（`computeApproxNearestBetweenObjects` 网格采样）在管-管场景下作废：它给的是任意两个网格的最近点对，
+不是两条直段之间的间距。
+
+query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
+
+| 参数 | 说明 |
+|---|---|
+| `refno` | **必填**，`a/b` 或 `a_b`，必须是 BRAN（不是 → 422 `precondition`，与 §4.13.1 同映射）。空 / 格式非法 → 400 |
+
+响应（200）：
+
+```json
+{ "refno": "24381_145018", "dbnum": 24381, "segment_count": 21, "outside_diameter_mm": 114.3,
+  "centerline_bbox": { "min": {"x":0,"y":0,"z":0}, "max": {"x":0,"y":0,"z":0} },
+  "segments": [
+    { "refno": "24381_145019", "order": 0, "noun": "ELBO", "implicit": false,
+      "start": {"x":0,"y":0,"z":0}, "end": {"x":0,"y":0,"z":0}, "length_mm": 152.4, "outside_diameter_mm": 114.3 },
+    { "refno": "24381_145019~24381_145020", "order": 1, "noun": "TUBI", "implicit": true,
+      "start": {"x":0,"y":0,"z":0}, "end": {"x":0,"y":0,"z":0}, "length_mm": 2380.0, "outside_diameter_mm": null } ],
+  "warnings": ["7 个成员没有长度（穿过件），不参与走廊"] }
+```
+
+- `segments` **按成员序**排好，一段 = 一个成员的到达点→离开点（E3D 世界 mm，与 §4.13.2 `annotation` 端点同一坐标系）；
+  穿过件（`start == end`）不出现，所以 `segment_count` ≤ 成员数。`implicit = true` 是按 E3D 规则合成的隐式管身
+  （refno `a_b~c_d`，不是构件），`noun` 给 `TUBI`；其余段的 `noun` 是成员自身类型（大写；成员没给 → `UNKNOWN`，不猜）。
+  **前端挑「直段」就靠这两格**：隐式管身一定是直的；ELBO / BEND 的到达→离开是弦不是轴，不能当直段用。
+- `outside_diameter_mm`：段上的是成员自己的外径（隐式管身没有成员，为 `null`，用顶层那格——首个给出外径的成员的外径，
+  §4.13.2 `surface=1` 扣的也是它）。`centerline_bbox` / `warnings` 与走廊一致（§4.13.1）。`refno` 一律 `a_b`。
+- **只读库、不碰空间树**：这条不需要 `GLOBAL_AABB_TREE`，所以**没有** 503 `spatial_not_ready` 一档，也不带 `spatial_state` / `coverage`；
+  库没 ensure 过也答得出（中心线来自 E3D 库的成员序，不依赖生成过模型）。
+
+错误一览（五条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
 找不到这条 refno）、422 `precondition`（中心线模式源不是 BRAN / 路由容器，或一段都拼不出）、422 `identity_mismatch`（§3）、
-503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档）；其余暂时故障（`DirectTreeService` 取不到、
-MBD 服务不可用等）按 §3 统一信封 500。
+503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档；`centerline` 不碰树、没有这一档）；其余暂时故障
+（`DirectTreeService` 取不到、MBD 服务不可用等）按 §3 统一信封 500。
 > 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`、`/files/review_attachments/*`；plant3d-web 写死的契约路径，不在 `/api/v1` 下，响应沿用旧端 `{success,…}` 信封而非 §3 的 `ApiError`）另见 `docs/specs/review-api.md`（自 plant-model-gen `:3100` 移植，`docs/plans/2026-09-12-review-backend-port-plan.md` Q10）。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）

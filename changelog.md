@@ -599,6 +599,34 @@
 - 验证：全部地址本轮活桥实读（复查命令在文档附录）；无代码改动，`cargo` 未跑。**未验**：`internalPutAtt` 只读了 ref 版一个重载，其余九个重载「同值早退 / 事件顺序」是推定；
   `maplist` 的「空间地图包围盒」是从 `mapboxlib` 埋点名推的；`sub_1023190B` 模块码没对到模块名。
 
+### 新增 `GET /api/v1/spatial/centerline`：一条 BRAN 的中心线线段表原样给前端——管-管间距改按「两条 BRAN 平行直段的中心距」算（计划 §3.3 ④）
+
+- 起因：用户纠正「管-管净距」的口径——「两个排管的距离测量是指两条 BRAN 的直段之间，有平行的部分就标注它们的间距」。此前
+  前端 `measure_pipe_to_pipe` 拿的是两个网格采样出的最近点对（任意两个构件表面最近处），在管-管场景下答的不是这个问题。
+  前端要做这件事缺的只有一样：两条 BRAN 的**真实中心线**（隐式管身在网格里没有 refno、ELBO 的到达→离开是弦），而后端 P1 已经
+  拼出了这份走廊（`spatial_centerline::BranCenterline`），只是没有一条路由把线段表原样交出去。
+- 后端（`fast_model::spatial_centerline` + `handlers::spatial_centerline` + 路由）：`GET /api/v1/spatial/centerline?refno=a_b`
+  回 `{refno, dbnum, segment_count, outside_diameter_mm, centerline_bbox, segments[], warnings}`，`segments` 按成员序、每段
+  `{refno, order, noun, implicit, start, end, length_mm, outside_diameter_mm}`（E3D 世界 mm，与 `/nearest-clearance` 的
+  `annotation` 端点同一坐标系）：隐式管身 `implicit=true` / `noun=TUBI`，成员段带自己的 noun（大写；没给 → `UNKNOWN`，不猜）与外径。
+  走廊取法与 `prepare_centerline` 抽成同一个 `query_branch`（`spawn_blocking` 读盘；解析失败 400、库里没有 404、不是 BRAN /
+  一段都拼不出 422，与 §4.13.1 同映射）。**只读库、不碰空间树**——没有 503 `spatial_not_ready` 一档，库没 ensure 过也答得出。
+  路由钉 `spatial_routes_are_read_only_get_endpoints` 收进第五条。契约进 spec §4.13.3。
+- 前端（`plant3d-web`，本仓外）：`genModelV1Api.genModelV1SpatialCenterline`；`measure_pipe_to_pipe` 改成「点两根管 → 各自所属
+  BRAN → 取两条中心线 → 连续共线的段合成直段（ELBO / BEND 不算直段）→ 配平行对（夹角 ≤ 0.5°、沿轴投影有重叠）→ 每对一条
+  中心距尺寸，落在重叠区中点、两端都在轴线上」，写进 Dock「BRAN 中心线最近清距」同一份结果（每对一条候选，可多条同目标；
+  来源登记 `parallel-centerline / exact-centerline`，不带「≈」），表里给中心距、重叠长度与扣两侧外径后的净距。
+  旧的网格采样管-管路径与最后一处「暂不创建尺寸」Toast 一起删掉。顺手修了 `instanceMapping.buildNounIndex`：真机 `model/records`
+  里 BRAN 的隐式管身挂在 BRAN 自己的 refno 上、`generic=TUBI`，照字面收会让整条 BRAN 下构件的 `owner_noun` 变成 `TUBI`，
+  点选认属主全部落空——`TUBI` 记录现在只说明「这个 refno 是一条 BRAN」。
+- 验证：隔离树 `cargo test --lib spatial_centerline` 5 passed（含新用例 `centerline_response_carries_nouns_and_diameters_per_segment`：
+  段序 / 隐式管身标记 / 成员 noun 与外径 / 穿过件不出现 / 没给 noun → UNKNOWN）、路由钉 1 passed；主树此刻因别的会话在途的
+  vendor `e3d-model` 签名变更编不过，本条与那处无关（提交的树在只加一处不提交垫片的隔离 worktree 里编译验证）。
+  真机：隔离树构建的 0.1.27 起在 `:8023`（`embedded-mem`），`/centerline` 对 ZONE 24381_144870 下 165 条 BRAN 全部 200；
+  浏览器 e2e（:3111）点 `24381_145018` 与 `24381_144924` 各一根管：6 对平行直段、6 条中心距尺寸（1584 / 1920 / 1980 / 2719 /
+  1920 / 6829 mm）画在两条轴线之间，反着再点同一对整组替换仍 6 条（2026-09-17）。
+- 未动：`/nearest-clearance` 的量距口径（D4）、legacy 后端；服务端不算平行——几何留在前端（理由见 spec §4.13.3）。
+
 ### `/api/v1/spatial/*` 接上 BRAN 真实中心线：`nearby` 加 `source_mode=bran_centerline`（P1）、新增 `GET /api/v1/spatial/nearest-clearance`（P2）
 
 - 起因：「指定 BRAN → 沿真实中心线找周边构件 / 找最近墙柱并给出可画尺寸的两个端点」此前三段会话把后端改动全落在了 legacy

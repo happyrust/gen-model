@@ -575,7 +575,7 @@ async fn serve_with_ready(
         .route("/api/v1/tree/roots", get(handlers::tree_roots))
         .route("/api/v1/tree/children", get(handlers::tree_children))
         .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
-        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，四条都是 GET。
+        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，五条都是 GET（`centerline` 只读库、不碰树）。
         .route("/api/v1/spatial/nearby", get(handlers::spatial_nearby))
         .route(
             "/api/v1/spatial/nearby/refnos",
@@ -588,6 +588,10 @@ async fn serve_with_ready(
         .route(
             "/api/v1/spatial/nearest-clearance",
             get(handlers::spatial_nearest_clearance),
+        )
+        .route(
+            "/api/v1/spatial/centerline",
+            get(handlers::spatial_centerline),
         )
         // 单位网格的 GLB 形态。与下面 `/assets` 的 ServeDir 是同一份 `.mesh` 的两种口径：
         // 那条给 plant-ui（原生读 rkyv），这条给浏览器（只认 glTF）。
@@ -1039,7 +1043,7 @@ mod tests {
         }
     }
 
-    /// spec §4.13：空间邻近查询三条 + `nearest-clearance`（计划 §3.2）都是只读 GET，且挂在 `/api/v1/spatial/` 下。
+    /// spec §4.13：空间邻近查询三条 + `nearest-clearance`（计划 §3.2）+ `centerline`（§4.13.3）都是只读 GET，且挂在 `/api/v1/spatial/` 下。
     #[test]
     fn spatial_routes_are_read_only_get_endpoints() {
         let source = include_str!("mod.rs");
@@ -1055,6 +1059,7 @@ mod tests {
             "\"/api/v1/spatial/nearby/refnos\",\n            get(handlers::spatial_nearby_refnos)",
             "\"/api/v1/spatial/negative-nouns\",\n            get(handlers::spatial_negative_nouns)",
             "\"/api/v1/spatial/nearest-clearance\",\n            get(handlers::spatial_nearest_clearance)",
+            "\"/api/v1/spatial/centerline\",\n            get(handlers::spatial_centerline)",
         ] {
             assert!(serve.contains(route), "missing spatial GET route: {route}");
         }
