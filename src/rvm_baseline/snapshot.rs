@@ -84,12 +84,23 @@ pub struct SnapshotMeta {
     pub degenerate_bbox_count: usize,
     /// `aabb_world_mm` 由面片顶点实算的几何数（其余取 rvm-rs 的 `bbox_world`）。
     /// PRIM 记录自带的 bbox 有两个帧，FacetGroup 那一档不能直接乘 transform，
-    /// 详见 [`super::import`] 的 `facet_group_world_aabb_mm`。
+    /// 详见 [`super::import`] 的 `facet_group_shell_components`。
     ///
     /// 旧快照没有这个字段，反序列化后落 0——0 就意味着「这份快照的 FacetGroup
     /// AABB 还是老口径，可能多转了一次旋转」，对拍侧据此决定要不要信。
     #[serde(default)]
     pub facet_aabb_from_vertices: usize,
+    /// FacetGroup 里被判为**亚容差壳**、不参与成员 AABB 的连通分量数（见
+    /// [`super::import`] 的 `facet_group_shell_components`）。E3D 在共壁接缝上会留下
+    /// 塌成零厚度的面片（1RS-WF03 的 GWALL 13：从墙顶角挂出去、远端两点只差 0.009 mm 的
+    /// 一片鳍），生成侧同一处按 `2·V/A < RES_TOL_MM` 丢掉了对应的针——尺子两边同一把，
+    /// 这里也按同一条规则不让它定包围盒。每条记录的主分量不参与这一判，所以成员永远有
+    /// AABB。
+    ///
+    /// 旧快照没有这个字段，反序列化后同样落 0，所以 0 分不出「这份基准没有这种退化」
+    /// 与「这份基准是老口径导的」——要判后者看 `facet_aabb_from_vertices`。
+    #[serde(default)]
+    pub subresolution_shell_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,5 +217,6 @@ impl RvmSnapshot {
             "  AABB 面片实算  : {} / {}",
             m.facet_aabb_from_vertices, m.geometry_count
         );
+        println!("  亚容差壳(不定 AABB): {}", m.subresolution_shell_count);
     }
 }
