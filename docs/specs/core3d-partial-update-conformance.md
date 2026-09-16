@@ -293,6 +293,13 @@ ModelToUpdate(e, state):
 **推论**：DCHC 码的全部作用发生在上游——决定元素**进不进** QCHGLS；
 一旦进了，重画范围只由 noun 位决定。**core 这一层没有 `TransformOnly`。**
 
+★0915 **这句只对 DRAFT 侧的 `PartialUpdateDesiMgr` 成立。** 3D 画列表那一侧（`change/UPDATN` → `DES_DrawListManager::updateGraphics`
+→ **`change/UPGRPH`** `0x1022EAEE`）读的是 QCHGLS 的第三个字：类别 3（`POS`/`ORI`/`BFORI`）→ `css/STRTRA` / `css/SEGTRA` / `change/TRASCN`
+**只改图形段矩阵**（`WSTRAM`/`LVTRAM` → `GLSMAT`），类别 4 → `add/REPELE` 整件 / `change/SADREP`→`css/SEGREP` 单图元 / `add/REPALL` 全部重建，
+类别 1/2 只 `COLRES`。即 **core 的 3D 侧确有「只动方位」的便宜路径**——它就是我方刚体前移（ADR-066）的 oracle，例外名单（P23 noun、
+管件两侧隐含管段、`EVALAT` 规则 M/J/P/R/S 转成类别 4 落到属主）见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §4。
+DRAFT 侧丢第三个字的取证本身不变。
+
 ★0906 那个「上游」找到了：**`change/EVALAT`**（Core3D `0x1022C679`），DCHC 的读点是 `change/IDCHNG`（`0x1022E302`）
 → core.dll `ATAINT(属性)`；类别 0 根本不进队列（= R13「双假丢弃」的上游），类别 1 = INTUBE 还会连带前一个元件。
 `EVALAT` 同时是 noun 专项联动规则表（上卷 / owner / ~~正向引用 `CLIST`·`ELCXRF`~~ **伪属性 `CLIST`（CWBRAN）·`ELCXRF`（EQUI/ELCONN），底下是引用表反向查 `STAREF`/`ENDREF` 指向的电缆**（★0907 C6，证据 §8.6；0906 把两个属性写反了） / ~~反向引用 `DFIND`~~ 成员向下 `DFIND`（★0907 实读：`DFIND` = dabacon 成员导航，`EVALAT` 自己没有反向引用调用） / 结构连接 `ADSTCH`），
