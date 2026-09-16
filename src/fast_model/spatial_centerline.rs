@@ -325,6 +325,104 @@ pub fn centerline_aabb_distance(segments: &[CenterlineSegment], aabb: &Aabb) -> 
         .unwrap_or(f32::INFINITY)
 }
 
+/// `GET /api/v1/spatial/centerline` 里的一段：成员的到达点 → 离开点，E3D 世界 mm。
+///
+/// `implicit` = 隐式管身（refno `a_b~c_d`，不是构件；`noun` 给 `TUBI`）；其余段的 `noun` 是成员自身类型
+/// （ELBO / VALV / FLAN …）——前端拿「两条 BRAN 的直段间距」时按它挑直段：隐式管身一定是直的，
+/// ELBO / BEND 的到达→离开是弦不是轴。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CenterlineSegmentJson {
+    pub refno: String,
+    pub order: u32,
+    pub noun: String,
+    pub implicit: bool,
+    pub start: crate::fast_model::spatial_clearance::PointJson,
+    pub end: crate::fast_model::spatial_clearance::PointJson,
+    pub length_mm: f32,
+    /// 这一段成员自己的外径（mm）；隐式管身没有成员，为 `null`，用顶层 `outside_diameter_mm`。
+    pub outside_diameter_mm: Option<f32>,
+}
+
+/// `GET /api/v1/spatial/centerline` 的响应：一条 BRAN 的中心线线段表原样给前端。
+///
+/// 前端侧要用真实直段做几何（管-管平行间距、沿轴取点）时从这里取，不再从网格猜轴线；
+/// 坐标与 `/nearest-clearance` 的 `annotation` 端点同一坐标系（E3D 世界 mm）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CenterlineResponse {
+    /// `a_b`
+    pub refno: String,
+    pub dbnum: Option<u32>,
+    pub segment_count: usize,
+    /// 首个给出外径的成员的外径（mm）；隐式管身按它算半径。
+    pub outside_diameter_mm: Option<f32>,
+    pub centerline_bbox: Option<crate::fast_model::spatial_clearance::AabbJson>,
+    /// 按成员序排好
+    pub segments: Vec<CenterlineSegmentJson>,
+    pub warnings: Vec<String>,
+}
+
+/// 把走廊 + `branch_query` 原结果拼成响应：段的 `noun` / 成员外径从原结果按 refno 对回去
+/// （走廊自己只留几何）。
+pub fn centerline_response(
+    centerline: &BranCenterline,
+    result: &BranchQueryResult,
+    dbnum: Option<u32>,
+) -> CenterlineResponse {
+    let mut noun_by_refno = std::collections::HashMap::with_capacity(result.members.len());
+    let mut od_by_refno = std::collections::HashMap::with_capacity(result.members.len());
+    for member in &result.members {
+        noun_by_refno.insert(member.refno.as_str(), member.noun.clone());
+        od_by_refno.insert(
+            member.refno.as_str(),
+            member
+                .outside_diameter
+                .map(|od| od as f32)
+                .filter(|od| od.is_finite() && *od > 0.0),
+        );
+    }
+    let segments = centerline
+        .segments
+        .iter()
+        .map(|segment| {
+            let implicit = segment.refno.contains('~');
+            let noun = if implicit {
+                "TUBI".to_string()
+            } else {
+                noun_by_refno
+                    .get(segment.refno.as_str())
+                    .cloned()
+                    .flatten()
+                    .map(|noun| noun.trim().to_uppercase())
+                    .filter(|noun| !noun.is_empty())
+                    .unwrap_or_else(|| "UNKNOWN".to_string())
+            };
+            CenterlineSegmentJson {
+                refno: segment.refno.clone(),
+                order: segment.order,
+                noun,
+                implicit,
+                start: segment.start.into(),
+                end: segment.end.into(),
+                length_mm: segment.start.distance(segment.end),
+                outside_diameter_mm: if implicit {
+                    None
+                } else {
+                    od_by_refno.get(segment.refno.as_str()).copied().flatten()
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    CenterlineResponse {
+        refno: centerline.branch_refno.to_string(),
+        dbnum,
+        segment_count: segments.len(),
+        outside_diameter_mm: centerline.outside_diameter_mm,
+        centerline_bbox: centerline.bbox().as_ref().map(Into::into),
+        segments,
+        warnings: centerline.warnings.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +551,60 @@ mod tests {
             ..Default::default()
         };
         assert!(BranCenterline::from_branch(branch, &hollow).is_err());
+    }
+
+    /// `/spatial/centerline` 的响应：段按成员序、隐式管身标 `implicit` + `TUBI`、成员段带自己的 noun 与外径，
+    /// 穿过件不出现；顶层外径 / 盒 / warnings 与走廊一致；refno 是 `a_b`。
+    #[test]
+    fn centerline_response_carries_nouns_and_diameters_per_segment() {
+        let mut elbow = member("1_401", 0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], Some(114.3));
+        elbow.noun = Some("elbo".to_string());
+        let mut valve = member("1_402", 3, [90.0, 0.0, 0.0], [100.0, 0.0, 0.0], None);
+        valve.noun = Some("VALV".to_string());
+        let result = BranchQueryResult {
+            branch_refno: "1_100".to_string(),
+            members: vec![
+                elbow,
+                member("1_401~1_402", 1, [10.0, 0.0, 0.0], [90.0, 0.0, 0.0], None),
+                member("1_777", 2, [50.0, 0.0, 0.0], [50.0, 0.0, 0.0], None),
+                valve,
+            ],
+            ..Default::default()
+        };
+        let branch = RefU64::from_two_nums(1, 100);
+        let centerline = BranCenterline::from_branch(branch, &result).unwrap();
+        let response = centerline_response(&centerline, &result, Some(7997));
+
+        assert_eq!(response.refno, "1_100");
+        assert_eq!(response.dbnum, Some(7997));
+        assert_eq!(response.segment_count, 3);
+        assert_eq!(response.outside_diameter_mm, Some(114.3));
+        assert_eq!(response.warnings, centerline.warnings);
+        assert_eq!(response.centerline_bbox.unwrap().max.x, 100.0);
+        let summary: Vec<_> = response
+            .segments
+            .iter()
+            .map(|s| (s.refno.as_str(), s.order, s.noun.as_str(), s.implicit, s.length_mm, s.outside_diameter_mm))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("1_401", 0, "ELBO", false, 10.0, Some(114.3)),
+                ("1_401~1_402", 1, "TUBI", true, 80.0, None),
+                ("1_402", 3, "VALV", false, 10.0, None),
+            ]
+        );
+        assert_eq!(response.segments[1].start.x, 10.0);
+        assert_eq!(response.segments[1].end.x, 90.0);
+        // 成员没给 noun → UNKNOWN，不猜
+        let mut bare = member("1_401", 0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], None);
+        bare.noun = None;
+        let bare_result = BranchQueryResult {
+            branch_refno: "1_100".to_string(),
+            members: vec![bare],
+            ..Default::default()
+        };
+        let bare_centerline = BranCenterline::from_branch(branch, &bare_result).unwrap();
+        assert_eq!(centerline_response(&bare_centerline, &bare_result, None).segments[0].noun, "UNKNOWN");
     }
 }

@@ -34,6 +34,38 @@
 - **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动——上面窗 C 的 4 件就是它的账；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关
   `model_transform_cheap_path` 默认仍关。e3d-model 的 `dispositions()` 访问器只在 vendor 工作树里、**未提交**——gen-model HEAD 已经依赖它。
 
+### ModelOnly 执行体补上开工前对齐与 `RoomOnly` 接力（ADR-073 D12 / D13 的漏接，审核 P1-1）
+
+- **为什么**：审核 `codex/model-projection-cache` 在途实现（会话 fable-5-1-35，2026-09-17）发现
+  `batch_worker::execute_model_only_body` 整条绕开了 D12 与 D13：没有 `refresh_room_reference_before_task`
+  （源码钉 15 与它的测试只钉了 `execute_frozen_batch_body`），回执里 `room_recompute: None` 硬编码。而
+  `window_root_plan::reconcile_startup_window` 与稳态窗口共用 `build_model_update_plan_from_window`，本窗碰了
+  房间定义族时 `RoomOnly` 工作项**确实**随 `plan.work_items` 进了 `side_actions`，然后被 `run_model_side_actions`
+  的白名单过滤掉、无人消费。后果：重启后「落后就排 `model_sesno → 文件最新`」的启动追平任务是 ModelOnly——
+  停机期间改了 PANE / FRMW 改名，起来后这一窗把触发①静默吃掉；`model/rebuild`（起点 0）拿**未对齐**的常驻算全库，
+  再把 `Aligned` 盖上（对那一代诚实，但那一代可能已过期，`room_alignment.current` 跟着报 `true`）。
+- **改动**（代码已随另一路会话的落库进 `d8fc12de7`，本条只补文档）：
+  - `execute_model_only_body` 规划成功后、`pre_generation` 之前调 `refresh_room_reference_before_task(job.dbnum)`，
+    回执留着；收尾 `room_recompute = if failed || whole_library_model_only(job) { None } else
+    { request_for_task(&side_actions, Some(&room_reference)) }`——两条触发都带上；整库重排（起点 0）例外：
+    `DbSet@T` 上每一根都刚用对齐后的计算器算过，再来一遍是 O(本库) 的空转，且 durable 侧的对齐承诺已由
+    `whole_library_model_only` 那一句盖上；规划失败的早退仍 `None`（模型半边没跑）。
+  - 源码钉 15（`room_resident::tests::the_task_start_refresh_precedes_every_calculator_freeze_and_stays_cheap`）
+    改成对两个执行体各钉一段——函数体到顶格 `}` 为止，后一个函数的字样不替前一个作证；源码钉 17
+    （`room_recompute::tests::the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end`）加
+    ModelOnly 那一半：`request_for_task(` + `Some(&room_reference)` 在、`room_recompute: None` 恰一处（早退）、
+    `whole_library_model_only(job)` 在。
+  - ADR-073 D12 正文与钉 15 / 17、CONTEXT「任务开工前对齐」词条（三处 → 四处）同步。
+- **验证**：`cargo test --lib -- room_recompute:: the_task_start_refresh_precedes… the_whole_library_eligibility…
+  nothing_outside_the_task_writes_model_sesno` 8 passed / 0 failed（在 `56e1b47ea` 双向同步之后的树上复跑一遍仍绿）；
+  rustfmt 对本轮新增行无 diff（三个文件里既有的 9 处漂移属别的会话）。**未 live**：停机期间改 PANE → 重启 → 启动追平
+  ModelOnly 任务日志出「整库房间重算完成」这一条真机用例没跑。
+- **审核里同批点出、本条未动**：P1-2 触发是边沿型、没有再武装（拆窗 / 单元失败 / 刷盘没齐 / 重算写库失败时原因被丢，
+  下一窗账本不再含那条 PANE 变更、再探又是 `Unchanged`，边永久陈旧到下一次不相关的 PANE 变化）；P2-3 收尾盖章读的是
+  任务结束那一刻的 `required_room_generation()`，并发 `/model/ensure` 中途换代时 `Aligned` 可能盖上一个边不是它算的代号
+  （`dbnum_initialize` 那一路用 `rooms.resident_generation()` 是对的）；P2-4 ADR D13「拿开工时同一台计算器」与实现
+  「收尾时新冻一台」措辞漂移；F3 / F4 / U3 照旧。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步
@@ -630,6 +662,34 @@
     加第 07 节「对着 core 看」（三条路 × 属性判别力 × 我方对应，`VDESPT` 门外做的事，core 三档 vs 我方三档）。
 - 验证：全部地址本轮活桥实读（复查命令在文档附录）；无代码改动，`cargo` 未跑。**未验**：`internalPutAtt` 只读了 ref 版一个重载，其余九个重载「同值早退 / 事件顺序」是推定；
   `maplist` 的「空间地图包围盒」是从 `mapboxlib` 埋点名推的；`sub_1023190B` 模块码没对到模块名。
+
+### 新增 `GET /api/v1/spatial/centerline`：一条 BRAN 的中心线线段表原样给前端——管-管间距改按「两条 BRAN 平行直段的中心距」算（计划 §3.3 ④）
+
+- 起因：用户纠正「管-管净距」的口径——「两个排管的距离测量是指两条 BRAN 的直段之间，有平行的部分就标注它们的间距」。此前
+  前端 `measure_pipe_to_pipe` 拿的是两个网格采样出的最近点对（任意两个构件表面最近处），在管-管场景下答的不是这个问题。
+  前端要做这件事缺的只有一样：两条 BRAN 的**真实中心线**（隐式管身在网格里没有 refno、ELBO 的到达→离开是弦），而后端 P1 已经
+  拼出了这份走廊（`spatial_centerline::BranCenterline`），只是没有一条路由把线段表原样交出去。
+- 后端（`fast_model::spatial_centerline` + `handlers::spatial_centerline` + 路由）：`GET /api/v1/spatial/centerline?refno=a_b`
+  回 `{refno, dbnum, segment_count, outside_diameter_mm, centerline_bbox, segments[], warnings}`，`segments` 按成员序、每段
+  `{refno, order, noun, implicit, start, end, length_mm, outside_diameter_mm}`（E3D 世界 mm，与 `/nearest-clearance` 的
+  `annotation` 端点同一坐标系）：隐式管身 `implicit=true` / `noun=TUBI`，成员段带自己的 noun（大写；没给 → `UNKNOWN`，不猜）与外径。
+  走廊取法与 `prepare_centerline` 抽成同一个 `query_branch`（`spawn_blocking` 读盘；解析失败 400、库里没有 404、不是 BRAN /
+  一段都拼不出 422，与 §4.13.1 同映射）。**只读库、不碰空间树**——没有 503 `spatial_not_ready` 一档，库没 ensure 过也答得出。
+  路由钉 `spatial_routes_are_read_only_get_endpoints` 收进第五条。契约进 spec §4.13.3。
+- 前端（`plant3d-web`，本仓外）：`genModelV1Api.genModelV1SpatialCenterline`；`measure_pipe_to_pipe` 改成「点两根管 → 各自所属
+  BRAN → 取两条中心线 → 连续共线的段合成直段（ELBO / BEND 不算直段）→ 配平行对（夹角 ≤ 0.5°、沿轴投影有重叠）→ 每对一条
+  中心距尺寸，落在重叠区中点、两端都在轴线上」，写进 Dock「BRAN 中心线最近清距」同一份结果（每对一条候选，可多条同目标；
+  来源登记 `parallel-centerline / exact-centerline`，不带「≈」），表里给中心距、重叠长度与扣两侧外径后的净距。
+  旧的网格采样管-管路径与最后一处「暂不创建尺寸」Toast 一起删掉。顺手修了 `instanceMapping.buildNounIndex`：真机 `model/records`
+  里 BRAN 的隐式管身挂在 BRAN 自己的 refno 上、`generic=TUBI`，照字面收会让整条 BRAN 下构件的 `owner_noun` 变成 `TUBI`，
+  点选认属主全部落空——`TUBI` 记录现在只说明「这个 refno 是一条 BRAN」。
+- 验证：隔离树 `cargo test --lib spatial_centerline` 5 passed（含新用例 `centerline_response_carries_nouns_and_diameters_per_segment`：
+  段序 / 隐式管身标记 / 成员 noun 与外径 / 穿过件不出现 / 没给 noun → UNKNOWN）、路由钉 1 passed；主树此刻因别的会话在途的
+  vendor `e3d-model` 签名变更编不过，本条与那处无关（提交的树在只加一处不提交垫片的隔离 worktree 里编译验证）。
+  真机：隔离树构建的 0.1.27 起在 `:8023`（`embedded-mem`），`/centerline` 对 ZONE 24381_144870 下 165 条 BRAN 全部 200；
+  浏览器 e2e（:3111）点 `24381_145018` 与 `24381_144924` 各一根管：6 对平行直段、6 条中心距尺寸（1584 / 1920 / 1980 / 2719 /
+  1920 / 6829 mm）画在两条轴线之间，反着再点同一对整组替换仍 6 条（2026-09-17）。
+- 未动：`/nearest-clearance` 的量距口径（D4）、legacy 后端；服务端不算平行——几何留在前端（理由见 spec §4.13.3）。
 
 ### `/api/v1/spatial/*` 接上 BRAN 真实中心线：`nearby` 加 `source_mode=bran_centerline`（P1）、新增 `GET /api/v1/spatial/nearest-clearance`（P2）
 

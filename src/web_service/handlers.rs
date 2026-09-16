@@ -1375,9 +1375,21 @@ async fn prepare_centerline(
             ApiError::bad_request("source_mode=bran_centerline 要给一条 BRAN 的 refno").into(),
         );
     };
+    let (result, _dbnum) = query_branch(branch).await?;
+    BranCenterline::from_branch(branch, &result)
+        .map(Some)
+        .map_err(|message| ApiError::precondition(message).into())
+}
+
+/// 读一条 BRAN 的成员序（`mbd::branch_query`，`spawn_blocking` 里读盘）。回 `(结果, 库号)`；
+/// refno 解析失败 400、库里没有 404、不是 BRAN / 拼不出 422（`mbd::api_error`）。
+async fn query_branch(
+    branch: RefU64,
+) -> Result<(plant_mbd::BranchQueryResult, Option<u32>), SpatialApiError> {
     let text = RefnoEnum::from(branch).to_pdms_str();
     let refno = crate::fast_model::e3d_model_service::parse_refno(&text)
         .map_err(|error| ApiError::bad_request(format!("refno `{text}` 无法解析：{error:#}")))?;
+    let dbnum = u32::try_from(refno.dbno()).ok();
     let set = super::mbd::service()
         .await?
         .build_set(refno.dbno(), None)
@@ -1388,9 +1400,42 @@ async fn prepare_centerline(
             ApiError::from_domain(anyhow::anyhow!("centerline task aborted: {join}"))
         })?
         .map_err(super::mbd::api_error)?;
-    BranCenterline::from_branch(branch, &result)
-        .map(Some)
-        .map_err(|message| ApiError::precondition(message).into())
+    Ok((result, dbnum))
+}
+
+/// `GET /api/v1/spatial/centerline` 的 query 串：身份三格 + `refno`。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialCenterlineReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// BRAN 的 refno，`a_b` / `a/b`
+    pub refno: Option<String>,
+}
+
+/// GET /api/v1/spatial/centerline — 一条 BRAN 的真实中心线线段表（成员到达→离开点 + 隐式管身，
+/// E3D 世界 mm，带成员 noun 与外径），给前端做「两条 BRAN 直段的平行间距」这类要真实轴线的几何
+/// （spec §4.13.3）。只读库、不碰空间树；错误映射同 `source_mode=bran_centerline`。
+pub async fn spatial_centerline(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialCenterlineReq>,
+) -> Result<Json<crate::fast_model::spatial_centerline::CenterlineResponse>, SpatialApiError> {
+    use crate::fast_model::spatial_centerline::{BranCenterline, centerline_response};
+
+    resolve_identity(&state, &request.identity)?;
+    let raw = request
+        .refno
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| ApiError::bad_request("refno 必填：一条 BRAN 的 refno（a_b / a/b）"))?;
+    let branch = RefU64::from_str(raw)
+        .ok()
+        .filter(RefU64::is_valid)
+        .ok_or_else(|| ApiError::bad_request(format!("refno 格式非法（应为 a/b 或 a_b）: {raw}")))?;
+    let (result, dbnum) = query_branch(branch).await?;
+    let centerline = BranCenterline::from_branch(branch, &result)
+        .map_err(|message| SpatialApiError::from(ApiError::precondition(message)))?;
+    Ok(Json(centerline_response(&centerline, &result, dbnum)))
 }
 
 /// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页
