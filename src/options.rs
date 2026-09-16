@@ -220,12 +220,6 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_skip_metadata_only_changes: Option<bool>,
 
-    /// 元数据门的第二档（S6，**默认关**，2026-09-15）：除老名单那五个名字外，再放行
-    /// 「字典 DCHC=0 ∧ 生成侧没有一处按名字读它」的属性。`true` 才开；关着时门的宽窄与
-    /// 2026-09-08 逐位相同。详见 [`model_skip_unread_attribute_changes`]。
-    #[serde(default)]
-    pub model_skip_unread_attribute_changes: Option<bool>,
-
     /// 刚体前移便宜路径（ADR-066，**默认关**，2026-09-08）：一窗里只动了 `POS / ORI` 的锚点名下、
     /// 已安定的生成根不整根重算，改为对投影记录左乘刚体增量并按 regen 同款发布一次。
     /// `true` 才开；关着时窗口规划器的产物与今天逐位相同。详见 [`model_transform_cheap_path`]。
@@ -537,7 +531,6 @@ impl From<DbOption> for DbOptionExt {
             model_significant_over_point: None,
             model_entry_drop_no_geometry: None,
             model_skip_metadata_only_changes: None,
-            model_skip_unread_attribute_changes: None,
             model_transform_cheap_path: None,
             model_unit_level_publish: None,
             model_structural_connection_cascade: None,
@@ -637,8 +630,6 @@ struct DbOptionExtFields {
     model_entry_drop_no_geometry: Option<bool>,
     #[serde(default)]
     model_skip_metadata_only_changes: Option<bool>,
-    #[serde(default)]
-    model_skip_unread_attribute_changes: Option<bool>,
     #[serde(default)]
     model_transform_cheap_path: Option<bool>,
     #[serde(default)]
@@ -851,7 +842,6 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_significant_over_point: ext.model_significant_over_point,
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
-        model_skip_unread_attribute_changes: ext.model_skip_unread_attribute_changes,
         model_transform_cheap_path: ext.model_transform_cheap_path,
         model_unit_level_publish: ext.model_unit_level_publish,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
@@ -1861,44 +1851,6 @@ fn effective_model_skip_metadata_only_changes(
         .unwrap_or(true)
 }
 
-/// 环境变量名：一次性覆盖 [`model_skip_unread_attribute_changes`]，不必改配置文件。
-pub const MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV: &str =
-    "AIOS_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES";
-
-/// 元数据门的第二档（`DbOption.toml` 的 `model_skip_unread_attribute_changes`，**默认 false**，
-/// S6，2026-09-15）。
-///
-/// 老名单那一档（[`model_skip_metadata_only_changes`]）问的是「效果表说 DataOnly ∧ 字典 DCHC=0」，
-/// 手写的效果表只认下五个名字。这一档换一张更机械的第二票：**字典 DCHC=0**（core 自己不为它重画）
-/// **∧ 生成侧没有一处按名字读它**（`model_impact::generator_reads_attribute`，两份机扫产物之并——
-/// e3d-model 的 `reads_attribute` 加本仓 `generation_read_set.json`）。够两票的候选记
-/// `no_model`、不上卷不级联，计数落在 `IncrementReport::unread_attribute` 那一格。
-///
-/// **默认关，而且不该轻易翻。** 它一开，放行面从 5 个名字跳到三千多个：第二票的把握全押在
-/// 「读点都以大写字面量的形状出现在源码里」这条扫描规则上，漏收一个名字就是一张停在旧形状上的
-/// 网格，而且不报错。`NGMR` 就是活样本——e3d-model 那半扫不到它，是本仓这半把它捞回来的。
-/// 翻默认前要先有一次实测对拍。环境变量 [`MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV`] 压过配置，
-/// 取值规则同 [`startup_autorun`]。它在 [`model_skip_metadata_only_changes`] 之内：门整个关掉时
-/// 这一档也无从谈起。
-pub fn model_skip_unread_attribute_changes() -> bool {
-    effective_model_skip_unread_attribute_changes(
-        load_ext_fields().model_skip_unread_attribute_changes,
-        std::env::var(MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV)
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn effective_model_skip_unread_attribute_changes(
-    configured: Option<bool>,
-    env_override: Option<&str>,
-) -> bool {
-    env_override
-        .and_then(parse_bool_flag)
-        .or(configured)
-        .unwrap_or(false)
-}
-
 /// 环境变量名：一次性覆盖 [`model_transform_cheap_path`]，不必改配置文件。
 pub const MODEL_TRANSFORM_CHEAP_PATH_ENV: &str = "AIOS_MODEL_TRANSFORM_CHEAP_PATH";
 
@@ -2332,9 +2284,81 @@ fn retired_net_window_notice_for(
     }
 }
 
-/// 独立读取 DbOption 的原始 TOML。这里故意不复用 [`load_ext_fields`]：任一扩展字段
-/// 类型漂移都不应把退役键的告警一起吞掉。
+/// 已退役的环境变量名（S6 定稿，2026-09-17）。曾经单独开关元数据门的第二档，现在没有档可开关。
+pub const RETIRED_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV: &str =
+    "AIOS_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES";
+
+/// 退役开关探测（S6 定稿）：`model_skip_unread_attribute_changes` 与
+/// [`RETIRED_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV`] 随「两票就是谓词本身」一并退役——
+/// 「字典 DCHC=0 ∧ 生成侧不读」不再是可选的第二档，而是
+/// `model_impact::attribute_is_metadata_only` 的定义，跟着
+/// [`model_skip_metadata_only_changes`] 一起开关。
+///
+/// **为什么不是一删了之**：与 [`retired_net_window_notice`] 同一条理由——配置里残留的
+/// `model_skip_unread_attribute_changes = false` 会被安静吃掉，而它的字面意思（第二档关着、
+/// 只放行老五个名字）与实际行为（两票常开、放行面宽得多）恰好相反。少算方向的静默失效，
+/// 代价是一张停在旧形状上的网格。
+///
+/// 返回 `Some(告警文本)` 时调用方**必须**把它打出来；`None` 表示配置干净。
+pub fn retired_unread_attribute_tier_notice() -> Option<String> {
+    retired_unread_attribute_tier_notice_for(
+        std::env::var_os("DB_OPTION_FILE"),
+        std::env::var_os(RETIRED_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV).as_deref(),
+    )
+}
+
+fn retired_unread_attribute_tier_notice_for(
+    configured_path: Option<OsString>,
+    env_override: Option<&OsStr>,
+) -> Option<String> {
+    let (configured, probe_error) =
+        match probe_retired_config_key(configured_path, "model_skip_unread_attribute_changes") {
+            Ok(configured) => (configured, None),
+            Err(error) => (None, Some(error)),
+        };
+    let mut found = Vec::new();
+    if let Some(value) = configured {
+        found.push(format!(
+            "DbOption 的 model_skip_unread_attribute_changes = {value}"
+        ));
+    }
+    if let Some(value) = env_override {
+        found.push(format!(
+            "环境变量 {RETIRED_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV} = {value:?}"
+        ));
+    }
+    match (found.is_empty(), probe_error) {
+        (true, None) => None,
+        (false, None) => Some(format!(
+            "⚠ 元数据门第二档的开关已退役（S6 定稿 2026-09-17），但仍被设置：{}。\
+             「字典 DCHC=0 ∧ 生成侧不读」现在就是两票谓词本身，跟着 \
+             model_skip_metadata_only_changes 一起开关，该设置不起任何作用——\
+             尤其设成 false 时它的字面意思与实际行为相反。请从配置与环境中移除它。",
+            found.join("；")
+        )),
+        (true, Some(error)) => Some(format!(
+            "⚠ 退役的第二档开关探测失败（S6 定稿）：{error}。\
+             不能确认 DbOption 中是否残留 model_skip_unread_attribute_changes；\
+             请修复配置读取/语法错误。"
+        )),
+        (false, Some(error)) => Some(format!(
+            "⚠ 元数据门第二档的开关已退役（S6 定稿 2026-09-17），但仍被设置：{}；\
+             同时配置探测失败：{error}。该设置不起任何作用；请移除环境变量并修复配置。",
+            found.join("；")
+        )),
+    }
+}
+
+/// 独立读取 DbOption 的原始 TOML，取一个退役键的字面值。这里故意不复用 [`load_ext_fields`]：
+/// 任一扩展字段类型漂移都不应把退役键的告警一起吞掉。
 fn probe_retired_net_window_config(configured: Option<OsString>) -> Result<Option<String>, String> {
+    probe_retired_config_key(configured, "net_window_collection")
+}
+
+fn probe_retired_config_key(
+    configured: Option<OsString>,
+    key: &str,
+) -> Result<Option<String>, String> {
     let candidates = config_path_candidates(configured);
     let path = candidates
         .iter()
@@ -2356,9 +2380,7 @@ fn probe_retired_net_window_config(configured: Option<OsString>) -> Result<Optio
     let table = document
         .as_table()
         .ok_or_else(|| format!("解析 {} 失败：TOML 顶层不是 table", path.display()))?;
-    Ok(table
-        .get("net_window_collection")
-        .map(std::string::ToString::to_string))
+    Ok(table.get(key).map(std::string::ToString::to_string))
 }
 
 fn config_path_candidates(configured: Option<OsString>) -> Vec<PathBuf> {
@@ -2949,29 +2971,6 @@ mod tests {
         ));
     }
 
-    /// 元数据门第二档默认关（S6：放行面从 5 个名字跳到三千多个，翻默认前要有一次实测对拍），
-    /// 配置能开、环境变量两个方向都能压，拼错的值退回配置值。
-    #[test]
-    fn the_unread_attribute_tier_is_off_by_default_and_can_be_turned_on() {
-        assert!(!effective_model_skip_unread_attribute_changes(None, None));
-        assert!(effective_model_skip_unread_attribute_changes(
-            Some(true),
-            None
-        ));
-        assert!(effective_model_skip_unread_attribute_changes(
-            Some(false),
-            Some("1")
-        ));
-        assert!(!effective_model_skip_unread_attribute_changes(
-            Some(true),
-            Some("off")
-        ));
-        assert!(effective_model_skip_unread_attribute_changes(
-            Some(true),
-            Some("maybe")
-        ));
-    }
-
     /// 刚体前移便宜路径默认关（ADR-066 D7：少算方向、尚无实证），配置能开、环境变量两个方向
     /// 都能压，拼错的值退回配置值。
     #[test]
@@ -3521,6 +3520,40 @@ mod tests {
             .expect("非法 TOML 必须显式报告探测失败");
         assert!(notice.contains("探测失败"), "{notice}");
         assert!(notice.contains("解析"), "{notice}");
+    }
+
+    /// 元数据门第二档的开关退役之后（S6 定稿 2026-09-17）不许静默吃掉：设成 `false` 的那一份
+    /// 字面意思与实际行为相反，静默就是一张停在旧形状上的网格。配置与环境变量两个来源都要出声。
+    #[test]
+    fn the_retired_unread_attribute_switch_is_never_swallowed_in_silence() {
+        let (_dir, clean) = write_probe_config("tier-clean.toml", "startup_autorun = true\n");
+        assert_eq!(
+            retired_unread_attribute_tier_notice_for(Some(clean.into()), None),
+            None
+        );
+
+        for value in ["false", "true", "\"false\""] {
+            let (_dir, path) = write_probe_config(
+                &format!("tier-{}.toml", value.trim_matches('"')),
+                &format!("model_skip_unread_attribute_changes = {value}\n"),
+            );
+            let notice = retired_unread_attribute_tier_notice_for(Some(path.into()), None)
+                .expect("退役配置键要出声");
+            assert!(
+                notice.contains("model_skip_unread_attribute_changes"),
+                "{notice}"
+            );
+            assert!(notice.contains(value), "{notice}");
+        }
+
+        let (_dir, path) = write_probe_config("tier-env.toml", "startup_autorun = true\n");
+        let notice =
+            retired_unread_attribute_tier_notice_for(Some(path.into()), Some(OsStr::new("1")))
+                .expect("环境变量也要出声");
+        assert!(
+            notice.contains(RETIRED_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV),
+            "{notice}"
+        );
     }
 
     /// 没配就是「用默认」，两种没配（缺文件 / 缺键）都不许被读成错误：

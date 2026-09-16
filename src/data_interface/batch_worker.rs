@@ -2136,6 +2136,13 @@ async fn execute_model_only_body(
         }
     };
 
+    // 模型半边开工前把常驻房间模型对齐到此刻的文件版本（ADR-073 D12）——ModelOnly 也是 dbnum 任务的
+    // 模型半边：启动追平（`model_sesno → 文件最新`）与 `model/rebuild` 都走这里，停机期间新增 / 搬走的
+    // 面板得先进常驻，下面冻的每一台计算器才算得到它们。与 `execute_frozen_batch_body` 同一处入口、
+    // 同一条纪律；回执留着，换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
+    let room_reference =
+        crate::fast_model::model_db_adapter::refresh_room_reference_before_task(job.dbnum).await;
+
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
     let (regen_items, side_actions): (Vec<_>, Vec<_>) = planned
@@ -2175,6 +2182,21 @@ async fn execute_model_only_body(
         failed = true;
     }
 
+    // 整库房间重算的接力（`RoomOnly`，d-819 / ADR-073 D13）：启动追平窗口的规划器与稳态窗口共用
+    // `build_model_update_plan_from_window`，本窗碰了房间定义族时 `RoomOnly` 工作项就在 `side_actions`
+    // 里（`run_model_side_actions` 不认它，只是带过）；开工前对齐换了房间代号是第二条触发。此前这里
+    // 硬编码 `None`，停机期间的 PANE 改动经启动追平进来就被静默吃掉。真跑在执行体收尾段（刷盘之后）。
+    // 模型半边没收口就不跑。整库重排（起点 0）例外：`DbSet@T` 上每一个根都刚用对齐后的计算器算过，
+    // 再来一遍是 O(本库) 的空转，且 durable 侧的对齐承诺已由 `whole_library_model_only` 那一句盖上。
+    let room_recompute = if failed || whole_library_model_only(job) {
+        None
+    } else {
+        crate::data_interface::room_recompute::request_for_task(
+            &side_actions,
+            Some(&room_reference),
+        )
+    };
+
     DataBatchTaskResult {
         project: job.project.clone(),
         status: if failed {
@@ -2188,7 +2210,7 @@ async fn execute_model_only_body(
         model_verdict: None,
         model_caught_up_at: None,
         initialization_closed_task: false,
-        room_recompute: None,
+        room_recompute,
     }
 }
 

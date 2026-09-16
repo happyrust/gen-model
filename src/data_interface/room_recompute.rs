@@ -225,6 +225,24 @@ mod tests {
             executor.contains("room_recompute::request_for_task("),
             "执行体把「要不要整库重算」交出去: {executor}"
         );
+        // ModelOnly 执行体同样：启动追平窗口与稳态窗口共用同一条规划入口，`RoomOnly` 工作项随
+        // `side_actions` 进来，这里此前硬编码 `room_recompute: None`，停机期间的 PANE 改动被静默吃掉。
+        let model_only = function_body(worker, "async fn execute_model_only_body(");
+        assert!(
+            model_only.contains("room_recompute::request_for_task(")
+                && model_only.contains("Some(&room_reference)"),
+            "ModelOnly 执行体也要把「要不要整库重算」交出去（两条触发都带上）: {model_only}"
+        );
+        // 规划失败的早退（模型半边没跑）仍是 `None`；跑完的那一份回执必须接住上面那句的结果。
+        assert_eq!(
+            model_only.matches("room_recompute: None").count(),
+            1,
+            "只有规划失败的早退才硬编码不重算: {model_only}"
+        );
+        assert!(
+            model_only.contains("whole_library_model_only(job)"),
+            "整库重排（起点 0）每一根都刚算过，不再空转一遍: {model_only}"
+        );
         let tail = worker
             .split_once(
                 "if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")",

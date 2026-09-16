@@ -810,6 +810,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::options::retired_net_window_notice() {
         eprintln!("{notice}");
     }
+    // 退役的元数据门第二档开关（S6 定稿 2026-09-17）：同一条理由——留着
+    // `model_skip_unread_attribute_changes = false` 的部署以为只放行老五个名字，实际两票常开。
+    if let Some(notice) = crate::options::retired_unread_attribute_tier_notice() {
+        eprintln!("{notice}");
+    }
     // 几何并发闸额度（specs/023）：非法值启动失败而非静默回退——额度是唯一的
     // 性能旋钮兼回滚开关（=1 即串行），必须在任何生成路径起跑之前定死。
     let geometry_workers =
