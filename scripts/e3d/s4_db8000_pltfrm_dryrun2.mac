@@ -1,0 +1,89 @@
+-- S4 造窗 · P23 替身 PLTFRM 第二段试探：PLTFRM 到底能拥有什么（**无 SAVEWORK**，末尾 DELETE，QUIT 时不落盘）。
+-- 第一段（s4_db8000_pltfrm_dryrun.mac）证明 STRU 之下能建 PLTFRM、它带 POS/ORI；但 CE=PLTFRM 时 NEW PANE 被 E3D
+-- 挂成了 STRU 的成员（PLTFRM 不直接拥有 PANE）。这里逐个试 SBFR / FRMW / SCTN / GENSEC / FLOOR / PANE，
+-- 每一步先开日志再 NEW，出错继续（ONERROR CONTINUE），靠 Q CE / Q OWNE 看它挂到了谁下面。
+-- 兄弟位建出来的东西末尾按名字逐个删；反正不 SAVEWORK。
+
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_1_start.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-START
+/1RX03-MSUP-E0001
+Q CE
+Q REF
+NEW PLTFRM /CODEX_S4_DRY_PLTFRM
+POS E 0 N 0 U 6000
+Q CE
+Q REF
+Q OWNE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_2_sbfr.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-TRY-SBFR
+/CODEX_S4_DRY_PLTFRM
+NEW SBFR /CODEX_S4_DRY_PLT_SBFR
+Q CE
+Q REF
+Q OWNE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_3_frmw.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-TRY-FRMW
+/CODEX_S4_DRY_PLTFRM
+NEW FRMW /CODEX_S4_DRY_PLT_FRMW
+Q CE
+Q REF
+Q OWNE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_4_sctn.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-TRY-SCTN
+/CODEX_S4_DRY_PLTFRM
+NEW SCTN /CODEX_S4_DRY_PLT_SCTN
+Q CE
+Q REF
+Q OWNE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_5_gensec.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-TRY-GENSEC
+/CODEX_S4_DRY_PLTFRM
+NEW GENSEC /CODEX_S4_DRY_PLT_GENSEC
+Q CE
+Q REF
+Q OWNE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_6_floor.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-TRY-FLOOR
+/CODEX_S4_DRY_PLTFRM
+NEW FLOOR /CODEX_S4_DRY_PLT_FLOOR
+Q CE
+Q REF
+Q OWNE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_7_members.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-MEMBERS
+/CODEX_S4_DRY_PLTFRM
+Q MEMBERS
+/1RX03-MSUP-E0001
+Q MEMBERS
+ALPHA LOG END
+
+/CODEX_S4_DRY_PLT_SBFR
+DELETE SBFR
+/CODEX_S4_DRY_PLT_FRMW
+DELETE FRMW
+/CODEX_S4_DRY_PLT_SCTN
+DELETE SCTN
+/CODEX_S4_DRY_PLT_GENSEC
+DELETE GENSEC
+/CODEX_S4_DRY_PLT_FLOOR
+DELETE FLOOR
+/CODEX_S4_DRY_PLTFRM
+DELETE PLTFRM
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/pltfrm2_dryrun_8_deleted.log" OVER
+$P CODEX-S4-PLTFRM2-DRYRUN-DELETED-NO-SAVE
+/1RX03-MSUP-E0001
+Q MEMBERS
+ALPHA LOG END

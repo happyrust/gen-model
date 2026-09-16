@@ -1,0 +1,9 @@
+-- 直接调 run_ams_c_entrymacro.bat 时的会话包装（纠偏腿）：ALIVE 标记 → 场景宏 → DONE 标记 → QUIT。
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/aps_strflt_fix_alive.log" OVER
+$P S4-APS-ALIVE
+ALPHA LOG END
+$M "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/s4_aps_strflt_fix.mac"
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/aps_strflt_fix_done.log" OVER
+$P S4-APS-DONE
+ALPHA LOG END
+QUIT

@@ -2,6 +2,46 @@
 
 ## 2026-09-16
 
+### 属性变化分类对齐 core · S4 E3D 造窗半程收口：负体排除在 db8000 造出的窗上坐实有内容；开孔造不出；P23 绕道 APS 自然 `STRFLT` 造出窗 C、两态相等 = 这形状上保守，S4 关闭
+
+- **做了什么**（会话 fable-5-1-7 开、fable-5-1-20 接手收口；E3D 3.1 TTY 经 l3_suite `--check-driver` 跑 `scripts/e3d/s4_db8000_*.mac`，
+  全部落在 scratch 库 db8000 = `ams8000_0001`，会话 607→619；探针 `probe_rigid_exclusion_windows` 用 `AIOS_PROJAMS_GEOMETRY_FILE` + `AIOS_TRANSFORM_WINDOW` 钉窗）：
+  EQUI `/1-LNR-Q005-PJ` 下建 BOX 1000³ + 竖穿它的 NBOX 300×300×1400，只挪 NBOX 的 `POS` 两次，最后删掉——db8000 最新状态回到造窗前（45 BOX、无 `CODEX_S4_*`）。
+- **负体在正体下——排除有内容 ✔**：窗 609→610（E 0 → E 200，孔仍整个在体内）探针判「负体（属主 CSG 消费）」、Δ 200 mm，两态相等但报「无判别力」。
+  **不是生成器没扣**：两端 BOX 记录体积都是 9.09999e8（= 1e9 − 300²×1000）、亏格 1、32 三角——`elmodl::collect_negatives` 收直属负体成员——是通孔平移不改体积 / 三角数 / 亏格 / 包围盒，六个不变量全同。
+  于是再挪一窗 614→615（E 200 → E 400，孔越出 +E 面成槛）：两态**不等、落在属主链** `24384/26484 BOX [triangles genus volume]`（体积 9.09999e8 → 9.24999e8、32 → 28 三角、亏格 1 → 0、窗内另改 0）。
+  若把 NBOX 当合格锚点前移，BOX 记录原样不动就是错的——S3 那条负体排除有内容。
+- **开孔在消费属主下——造不出**：SBFR 下 PANE + PLOO(HEIG 12) + 4 PAVE 都正常，CE = PANE 时 `NEW PLOPEN` 让 des.exe 0xC0000005 崩掉（分段试探 `s4_db8000_plopen_dryrun.mac` 把崩点钉在这一行；崩的那次不写会话、不落盘）。
+  五个语料项目里 PLOPEN / WLOPEN / BPOPEN 零实例。`anchor_owner_exclusion` 今天只有单测 `a_consumed_member_anchor_regenerates_its_owner_unit` 护着。
+- **P23——造不出「只动了摆放」的窗**：字典里 `HRPOST`（及 HRTERM / HRGATE / HRPANE / RAIL / KICKPL / CLNTIL）**没有 `POS` / `ORI`**（HR* 四个由 `POSREF` + `ZDIS` 派生，RAIL / KICKPL / CLNTIL 只有 `SPRE`），
+  `is_placement_only` 对它们恒假；带 `POS` / `ORI` 的十个 P23 noun 在 db8000 从零建不出带几何的子树（PLTFRM 能建但拥有不了 SBFR / SCTN / GENSEC / FLOOR / PANE / FRMW；
+  FIXTUR / FURNIT / CTSUPP / ELFITT 在 ZONE / STRU / FRMW / SBFR 下一律 "Cannot create … at this level"；STRFLT 真实实例之下是 ASL 应用生成的 STRSTR / TREADS / RPATH / HANDRA）。
+  剩两条路要拍板：登录 APS 挪自然 STRFLT / CTSUPP（写进语料库，动 S6 / S7 / Q6 的分母），或接受「e3d-model 对 23 个 noun 都没有 builder、P23 排除按构造保守，只有单测护着」。
+- **P23 改道——窗 C 造出来了，这形状上排除保守 ✔**（用户当日批了第一条路；会话 fable-5-1-20 跑 move 腿与首拍、opus-5-23 接手跑复原腿与位精确核对）：
+  绕过 `l3_suite --check-driver`（它把 evar 钉在 AMS），直接 `run_ams_c_entrymacro.bat` + 自写 driver 宏（`L3_E3D_PROJECT=APS`），挪**语料库 `aps250110` 的自然实例** 2013286654/8575
+  `STRFLT /B01_LEVEL_03_ACCESS/SF_001` `BY E 300` —— 窗 C = 32→33。探针判「P23 摆放派生 noun」、Δ 300 mm、锚点即根，**两态相等且有判别力**（锚点子树里两件 HANDRA 记录 984 三角 / 亏格 3，
+  B 态全部由 Δ 前移，与 T 端整根重算逐个不变量相同）。读法：core 遇 P23 改 `POS` 会 `REPELE` 整件重建、我方左乘 Δ 也对，**S2 那条排除的代价是「少算」，方向安全；到今天既没有反例、也没有必须它不可的样本**。
+- **造窗留痕已位精确复原**：复原腿 33→34（`BY W 300`，同一 binade 加减 300 位精确可逆）跑完 `Q POS` 回到 `W 302571mm N 320059mm D 1800mm`，与 move 腿开头打印的基线逐字相同。
+  三层核过（`zz_tmp_s4_census SESDIFF`，`ScanTier::Full`）：32 / 33 / 34 三端都是 26187 件、零增删；32→34 动过的 16 件与 32→33 **是同一批**，`members` 逐字相同；
+  STRFLT 记录 324 字节里 32→33 差 12 字节（页指针 8 + 属性区 2 + **位姿载荷 2**），32→34 只差 10 —— **位姿那两字节消失，回到基线原值**。留痕只剩 `CACHID` 与 append-only 的页指针 / 项目会话计数。
+- **副产品：Q5 的第三票 + S8 措辞纠正**：窗 C 这一挪，E3D 给 STRFLT **和它整棵子树里 14 个带 `CACHID` 的元素**（2 HANDRA / 2 GENSEC / 9 TREAD + 自己）各盖了一次（hash 62869719），
+  容器 STRSTR / TREADS / RPATH 不带这个字、一个没盖。**Q5 接线前 `is_placement_only` 会被这 14 个戳判假、窗 C 根本进不了候选**；接线后才判成「只动了摆放」并两态全等——现场又一票。
+  `CACHID` 因此**不只盖在「顶层件」上，改谁就盖谁整棵子树里每个带这个字的元素**（S8 结论 (3) 与计划 §3 的措辞已同步改）。
+- **窗 C 的账与局限**：aps250110 会话链 32 → 36，引用「453 库 / 2961 窗」时这一库多 4 窗（APS 一腿只写一个 sesno，SAVEWORK 后不跟内务会话——「一腿两号」是 db8000 的脾气，不是通则）。
+  其中 35 / 36 是**两个会话撞车**留下的：交接给 opus-5-23 之后 fable-5-1-20 仍在线、不知道有人接手，复原腿被各跑一遍（34 opus-5-23 20:12:07 正确复原；35 fable-5-1-20 20:13:44 又 `BY W 300`），
+  fable-5-1-20 用会话页的 user / date / comment（e3d-io 例程 `zz_tmp_seslist`）看出 34 带同一条复原注释后，20:21:02 以 `s4_aps_strflt_fix.mac`（`BY E 300`）写 36 纠偏——
+  36 的两件 HANDRA `world.t` 与 32 **逐位相同**，32↔36 显式属性只差 `CACHID`（→ `Integer(4)`）与项目 MNUM 计数（取证文档 §4.6）。两会话不在同一协同组、`send_to` 不通，撞车只能靠用户转达。
+  探针侧复核 20:30 补跑成（那条在途线落地后 lib 又编得过）：钉 **32→36 只动了摆放的候选 0**——复原后的净效果对刚体探针是空操作；钉 33→34 / 34→35 / 35→36 三窗各判 P23、Δ 300 mm、两态相等（2 件 HANDRA 由 Δ 前移），与窗 C 同一结论。
+- **探针读法一条**：负体 / 开孔类锚点自己没有记录，`moved` 恒为 0，两态相等时一律报「无判别力」——它分不清「属主没消费」和「不变量看不见那一挪」；判别力只能来自属主记录的不变量变化，造窗要挑会改体积 / 亏格 / 包围盒的挪法。探针代码未动。
+- **E3D TTY 副产品**：不 SAVEWORK 的 QUIT 也写一条只改内务 / `CACHID` 戳的会话（612 / 613 / 614 / 617），崩掉的不写；每次 SAVEWORK 后紧跟一条内务会话；
+  `DELETE BOX` 连带 NBOX 成员的整段收尾腿崩掉，先 `DELETE NBOX` 再 `DELETE BOX` 干净（`s4_db8000_cleanup.mac` 已改成这个顺序）。ams8000 会话链 607 → 619，引用「453 库 / 2961 窗」时 ams8000 多 12 窗。
+- 文档：计划 §4 S4 行改 ✅、新增「★0916 S4 E3D 造窗结论」（(3) 已按窗 C 改写）、§8 Q5 补第三票、S8 结论 (3) 与 §3 的 `CACHID` 措辞纠正；
+  `docs/evidence/2026-09-16-rigid-exclusion-e3d-windows.md`（按政策不入库）新增 §1.1 APS 会话账、§4.4 窗 C、§4.5 复原核对。
+  验证：探针报告 `output/e3d-s4/probe_window_A_609_610.md` / `probe_window_A2_614_615.md` / `probe_window_C_aps250110_{32_33,32_36,33_34,34_35,35_36}.md`；
+  临时探针 `zz_tmp_s4_gen` 逐端 `generate_subtree` 核了 db8000 六个会话的 BOX 记录不变量与 aps250110 32 / 33 / 34 / 35 / 36 的 HANDRA `world.t`；
+  `zz_tmp_s4_census` 出会话差分 `sesdiff_aps250110_{32_33,33_34,34_35,32_36}.txt`；e3d-io 例程 `zz_tmp_seslist` 读会话页 user / date / comment 定的撞车责任——三个临时探针收尾时**都已删**（用法记在取证文档）。
+  宏新增 `scripts/e3d/s4_aps_strflt_{move,restore,fix}{,_driver}.mac` 六个。生产代码零改动；未跑全量 `cargo test`（本轮没有可退步的东西）。
+
 ### 属性变化分类对齐 core · Q5 接线：`is_placement_only` 把 `CACHID` 剔出比较集——`[POS, CACHID]` 算「只动了摆放」，全语料合格锚点 79 → 163、对拍 139 根 108 个有判别力的两态全等 0 红；只 `CACHID` 变照旧整根 regen
 
 - e3d-model `src/element_diff.rs`：新增 `pub const PLACEMENT_STAMP_ATTRIBUTES: [&str; 1] = ["CACHID"]`（**戳**：Design 应用随每次图形重建写下的缓存

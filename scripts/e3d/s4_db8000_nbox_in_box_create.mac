@@ -1,0 +1,47 @@
+-- S4 E3D 造窗（属性变化分类对齐 core 计划 §4 S4 后半）· 形状「负体在正体之下」的前置：
+-- 在 db8000 EQUI /1-LNR-Q005-PJ 下新建正体 BOX /CODEX_S4_BOX，再在这只 BOX **之下**新建负体
+-- NBOX /CODEX_S4_NBOX（字典允许 BOX 拥有 NBOX；语料 ams5052 等库里 NBOX owner=BOX 有 1700+ 例）。
+-- NBOX 竖穿 BOX 中心（ZLEN 1400 > BOX 的 1000），挪它就是挪孔——两态对拍才有判别力。
+--
+-- 基线（下游 move / cleanup 腿依赖）：
+--   BOX  POS E 0 N 0 U 3000 WRT owner，XLEN/YLEN/ZLEN 1000
+--   NBOX POS E 0 N 0 U 0    WRT BOX，  XLEN 300 YLEN 300 ZLEN 1400
+-- 配对：s4_db8000_nbox_in_box_move.mac（造窗）、s4_db8000_cleanup.mac（删除）。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_db8000_nbox_in_box_create.log" OVER
+ONERROR GOLABEL /fail
+$P CODEX-S4-NBOX-CREATE-ALIVE
+/1-LNR-Q005-PJ
+Q CE
+Q REF
+Q NAME
+NEW BOX /CODEX_S4_BOX
+POS E 0 N 0 U 3000
+XLEN 1000
+YLEN 1000
+ZLEN 1000
+$P CODEX-S4-NBOX-CREATE-BOX-OK
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+NEW NBOX /CODEX_S4_NBOX
+POS E 0 N 0 U 0
+XLEN 300
+YLEN 300
+ZLEN 1400
+$P CODEX-S4-NBOX-CREATE-NBOX-OK
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+SAVEWORK 'CODEX S4 create BOX /CODEX_S4_BOX + NBOX /CODEX_S4_NBOX under EQUI /1-LNR-Q005-PJ'
+$P CODEX-S4-NBOX-CREATE-DONE
+GOLABEL /end
+LABEL /fail
+$P CODEX-S4-NBOX-CREATE-FAILED
+LABEL /end
+ALPHA LOG END

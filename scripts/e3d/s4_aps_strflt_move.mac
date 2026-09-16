@@ -1,0 +1,31 @@
+-- S4 E3D 造窗 · 窗 C「P23 摆放派生 noun 只动了摆放」（用户 2026-09-16 批准：登录 APS 挪一个自然 STRFLT，接受语料库多一窗）。
+-- db8000 里造不出 P23 窗（HRPOST 无 POS/ORI；带 POS/ORI 的十个 noun 从零建不出带几何的子树），改用 APS 自然实例：
+--   aps250110（MDB /ALL）STRFLT /B01_LEVEL_03_ACCESS/SF_001 = 2013286654/8575，owner SBFR /B01_LEVEL_03_ACCESS/STAIRS，
+--   基线 POS E -302570.87 N 320059 U -1800（WRT owner），成员 STRSTR / TREADS / RPATH / HANDRA ×2；
+--   e3d-model 在它子树里生成 2 件 HANDRA 记录（984 三角、亏格 3），STRSTR / TREADS 没有 builder。
+-- 只 BY E 300：差分应当只有 POS——is_placement_only 真、rigid_anchor 按 P23 排除；两态对拍看 HANDRA 记录 Δ 前移 vs T 端重算。
+-- 配对：s4_aps_strflt_restore.mac（BY W 300 复原——同一 binade 内加减 300 精确可逆）。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。跑法：直接调 run_ams_c_entrymacro.bat（L3_E3D_PROJECT=APS …），
+-- 外面包 s4_aps_strflt_move_driver.mac。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_aps_strflt_move.log" OVER
+ONERROR GOLABEL /fail
+$P CODEX-S4-APS-STRFLT-MOVE-ALIVE
+/B01_LEVEL_03_ACCESS/SF_001
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+Q ORI
+Q MEMBERS
+BY E 300
+Q POS
+Q ORI
+SAVEWORK 'CODEX S4 window C (P23): STRFLT /B01_LEVEL_03_ACCESS/SF_001 BY E 300 (POS only)'
+$P CODEX-S4-APS-STRFLT-MOVE-DONE
+GOLABEL /end
+LABEL /fail
+$P CODEX-S4-APS-STRFLT-MOVE-FAILED
+LABEL /end
+ALPHA LOG END

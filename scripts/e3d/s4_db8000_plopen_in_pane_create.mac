@@ -1,0 +1,76 @@
+-- S4 E3D 造窗 · 形状「开孔在消费属主之下」的前置：
+-- 在 db8000 SBFR /Copy-of-1RX-RM12-R972-VOLU 下新建板 PANE /CODEX_S4_PANE（PLOO HEIG 12，2000×1000 矩形环），
+-- 再在这块板**之下**新建开孔 PLOPEN /CODEX_S4_PLOPEN（POS E 600 N 500 U 0 WRT PANE，自带 300×300 的 PLOO 环）。
+-- 语料五个项目里一个 PLOPEN 都没有（S4 离线半程「零个自然窗」），只能造。
+-- 字典：PLOPEN 带 POS / ORI / POSREF / WJUSL / ZDIS，无 SPRE，形状由成员环给；PANE 能不能拥有 PLOPEN由 E3D 裁——
+-- 不允许就在 NEW PLOPEN 这一行出错、跳 /fail、不存盘。
+--
+-- 基线（下游 move / cleanup 腿依赖）：PLOPEN POS E 600 N 500 U 0 WRT PANE。
+-- 配对：s4_db8000_plopen_in_pane_move.mac（造窗）、s4_db8000_cleanup.mac（删除）。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。
+--
+-- ★ 结果（2026-09-16 18:37）：整段跑到 NEW PLOPEN 时 des.exe 以 0xC0000005 崩掉、日志一字没落、不写会话（sesno 609 不变）。
+-- 分段试探 s4_db8000_plopen_dryrun.mac 把崩点钉在 `NEW PLOPEN`（CE = PANE）这一行——PANE / PLOO / PAVE 都正常。
+-- 这版 E3D 3.1 DESIGN TTY 里 PLOPEN 建不出来；本宏与 _move.mac 留档，不要再整段跑。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_db8000_plopen_in_pane_create.log" OVER
+ONERROR GOLABEL /fail
+$P CODEX-S4-PLOPEN-CREATE-ALIVE
+/Copy-of-1RX-RM12-R972-VOLU
+Q CE
+Q REF
+Q NAME
+NEW PANE /CODEX_S4_PANE
+POS E 0 N 0 U 5000
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+NEW PLOO
+HEIG 12
+NEW PAVE
+POS E 0 N 0 U 0
+NEW PAVE
+POS E 2000 N 0 U 0
+NEW PAVE
+POS E 2000 N 1000 U 0
+NEW PAVE
+POS E 0 N 1000 U 0
+$P CODEX-S4-PLOPEN-CREATE-PANE-OK
+/CODEX_S4_PANE
+NEW PLOPEN /CODEX_S4_PLOPEN
+POS E 600 N 500 U 0
+$P CODEX-S4-PLOPEN-CREATE-PLOPEN-OK
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+NEW PLOO
+NEW PAVE
+POS E -150 N -150 U 0
+NEW PAVE
+POS E 150 N -150 U 0
+NEW PAVE
+POS E 150 N 150 U 0
+NEW PAVE
+POS E -150 N 150 U 0
+$P CODEX-S4-PLOPEN-CREATE-LOOP-OK
+/CODEX_S4_PANE
+Q CE
+Q REF
+Q NAME
+Q MEMBERS
+/CODEX_S4_PLOPEN
+Q CE
+Q REF
+Q NAME
+Q MEMBERS
+SAVEWORK 'CODEX S4 create PANE /CODEX_S4_PANE + PLOPEN /CODEX_S4_PLOPEN under SBFR /Copy-of-1RX-RM12-R972-VOLU'
+$P CODEX-S4-PLOPEN-CREATE-DONE
+GOLABEL /end
+LABEL /fail
+$P CODEX-S4-PLOPEN-CREATE-FAILED
+LABEL /end
+ALPHA LOG END

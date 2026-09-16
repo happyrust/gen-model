@@ -1,0 +1,20 @@
+-- S4 E3D 造窗 · 窗 C 的复原腿：把 s4_aps_strflt_move.mac 挪过的 STRFLT /B01_LEVEL_03_ACCESS/SF_001 BY W 300 挪回去。
+-- 会话链 append-only，窗 C 仍在历史里；这一腿只让 aps250110 的最新状态回到造窗前（|POS| 在同一 binade，+300 再 -300 位精确）。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_aps_strflt_restore.log" OVER
+ONERROR GOLABEL /fail
+$P CODEX-S4-APS-STRFLT-RESTORE-ALIVE
+/B01_LEVEL_03_ACCESS/SF_001
+Q CE
+Q REF
+Q POS
+BY W 300
+Q POS
+SAVEWORK 'CODEX S4 window C restore: STRFLT /B01_LEVEL_03_ACCESS/SF_001 BY W 300 (back to baseline)'
+$P CODEX-S4-APS-STRFLT-RESTORE-DONE
+GOLABEL /end
+LABEL /fail
+$P CODEX-S4-APS-STRFLT-RESTORE-FAILED
+LABEL /end
+ALPHA LOG END

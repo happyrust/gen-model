@@ -1,0 +1,41 @@
+-- S4 造窗 · 收尾腿的分段试探（**无 SAVEWORK**，QUIT 时不落盘）。
+-- 整段跑 s4_db8000_cleanup.mac 时 des.exe 以 0xC0000005 崩掉、日志一字没落（sesno 616 不变）。
+-- 这里每一步单独开关一段 ALPHA LOG，先删 NBOX 再删 BOX，最后故意导航到不存在的 PANE 看错误怎么走。
+
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/cleanup_dryrun_1_start.log" OVER
+$P CODEX-S4-CLEANUP-DRYRUN-START
+/CODEX_S4_BOX
+Q CE
+Q REF
+Q MEMBERS
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/cleanup_dryrun_2_nbox.log" OVER
+$P CODEX-S4-CLEANUP-DRYRUN-DELETE-NBOX
+/CODEX_S4_NBOX
+Q CE
+DELETE NBOX
+Q CE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/cleanup_dryrun_3_box.log" OVER
+$P CODEX-S4-CLEANUP-DRYRUN-DELETE-BOX
+/CODEX_S4_BOX
+Q CE
+Q MEMBERS
+DELETE BOX
+Q CE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/cleanup_dryrun_4_pane.log" OVER
+$P CODEX-S4-CLEANUP-DRYRUN-NAVIGATE-MISSING-PANE
+/CODEX_S4_PANE
+Q CE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/cleanup_dryrun_5_end.log" OVER
+$P CODEX-S4-CLEANUP-DRYRUN-END-NO-SAVE
+/1-LNR-Q005-PJ
+Q MEMBERS
+ALPHA LOG END

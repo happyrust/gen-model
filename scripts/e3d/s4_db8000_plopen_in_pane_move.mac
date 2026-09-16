@@ -1,0 +1,25 @@
+-- S4 E3D 造窗 · 窗 B「开孔在消费属主之下、只动了摆放」：
+-- 把 s4_db8000_plopen_in_pane_create.mac 建的 PLOPEN /CODEX_S4_PLOPEN 从 POS E 600 N 500 U 0 挪到 E 1100 N 500 U 0（WRT PANE）。
+-- 这一窗里 PLOPEN 的差分应当只有 POS——is_placement_only 为真、rigid_anchor 按「非单元 ∧ 属主消费成员」排除。
+-- 两态对拍结果本身就是要量的东西：e3d-model 的板生成今天只读 PANE 自己的 PLOO 环（profile.rs），不读 PLOPEN，
+-- 所以预期两态**相等**（排除在这形状上保守）；若不等，说明生成器实际消费了它，反而是新发现。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_db8000_plopen_in_pane_move.log" OVER
+ONERROR GOLABEL /fail
+$P CODEX-S4-PLOPEN-MOVE-ALIVE
+/CODEX_S4_PLOPEN
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+POS E 1100 N 500 U 0
+Q POS
+SAVEWORK 'CODEX S4 window B: PLOPEN /CODEX_S4_PLOPEN POS E 600 -> E 1100 WRT PANE (POS only)'
+$P CODEX-S4-PLOPEN-MOVE-DONE
+GOLABEL /end
+LABEL /fail
+$P CODEX-S4-PLOPEN-MOVE-FAILED
+LABEL /end
+ALPHA LOG END

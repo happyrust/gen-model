@@ -1,0 +1,91 @@
+-- S4 造窗 · PLOPEN 建法的分段试探（**无 SAVEWORK**，末尾 DELETE PANE，QUIT 时不落盘）。
+-- 第一次整段跑 s4_db8000_plopen_in_pane_create.mac 时 des.exe 以 0xC0000005 崩掉、日志一字没落，
+-- 这里每一步都单独开关一段 ALPHA LOG，崩在哪一步就停在哪一段之后。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_1_start.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-START
+/Copy-of-1RX-RM12-R972-VOLU
+Q CE
+Q REF
+ALPHA LOG END
+
+NEW PANE /CODEX_S4_DRY_PANE
+POS E 0 N 0 U 5000
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_2_pane.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-PANE-CREATED
+Q CE
+Q REF
+Q OWNE
+Q POS
+ALPHA LOG END
+
+NEW PLOO
+HEIG 12
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_3_ploo.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-PLOO-CREATED
+Q CE
+Q REF
+Q OWNE
+Q HEIG
+ALPHA LOG END
+
+NEW PAVE
+POS E 0 N 0 U 0
+NEW PAVE
+POS E 2000 N 0 U 0
+NEW PAVE
+POS E 2000 N 1000 U 0
+NEW PAVE
+POS E 0 N 1000 U 0
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_4_pave.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-PAVE-CREATED
+Q CE
+Q REF
+Q OWNE
+Q POS
+/CODEX_S4_DRY_PANE
+Q MEMBERS
+ALPHA LOG END
+
+/CODEX_S4_DRY_PANE
+NEW PLOPEN /CODEX_S4_DRY_PLOPEN
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_5_plopen.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-PLOPEN-CREATED
+Q CE
+Q REF
+Q OWNE
+Q ATT
+ALPHA LOG END
+
+POS E 600 N 500 U 0
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_6_plopen_pos.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-PLOPEN-POSITIONED
+Q POS
+ALPHA LOG END
+
+NEW PLOO
+NEW PAVE
+POS E -150 N -150 U 0
+NEW PAVE
+POS E 150 N -150 U 0
+NEW PAVE
+POS E 150 N 150 U 0
+NEW PAVE
+POS E -150 N 150 U 0
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_7_plopen_loop.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-PLOPEN-LOOP-CREATED
+Q CE
+Q REF
+Q OWNE
+/CODEX_S4_DRY_PLOPEN
+Q MEMBERS
+/CODEX_S4_DRY_PANE
+Q MEMBERS
+ALPHA LOG END
+
+/CODEX_S4_DRY_PANE
+DELETE PANE
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/plopen_dryrun_8_deleted.log" OVER
+$P CODEX-S4-PLOPEN-DRYRUN-DELETED-NO-SAVE
+Q CE
+ALPHA LOG END

@@ -1,0 +1,32 @@
+-- S4 E3D 造窗 · 收尾：删掉 scratch 元素，db8000 回到造窗前的模型状态
+-- （会话链是 append-only，造出的窗仍在历史里、探针照样按 sesno 钉住读；删的只是最新状态）。
+--
+-- 第一版（ONERROR GOLABEL /fail；先 DELETE BOX 连带 NBOX，再去删从未建成的 PANE）整段跑时 des.exe 以
+-- 0xC0000005 崩掉、日志一字没落、sesno 不变（616）。分段试探 s4_db8000_cleanup_dryrun.mac 证明
+-- 「先 DELETE NBOX、再 DELETE BOX、导航到不存在的名字只报 (2,109) Undefined name」全部干净——
+-- 所以这里照那个顺序删，出错继续（ONERROR CONTINUE），PANE 那一半不再碰（它从没建成，见 plopen 试探）。
+-- 恰好一个 SAVEWORK。
+
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_db8000_cleanup.log" OVER
+$P CODEX-S4-CLEANUP-ALIVE
+/CODEX_S4_BOX
+Q CE
+Q REF
+Q NAME
+Q MEMBERS
+/CODEX_S4_NBOX
+Q CE
+DELETE NBOX
+$P CODEX-S4-CLEANUP-NBOX-DELETED
+/CODEX_S4_BOX
+Q CE
+Q MEMBERS
+DELETE BOX
+$P CODEX-S4-CLEANUP-BOX-DELETED
+Q CE
+/1-LNR-Q005-PJ
+Q MEMBERS
+SAVEWORK 'CODEX S4 cleanup: delete scratch NBOX /CODEX_S4_NBOX then BOX /CODEX_S4_BOX under EQUI /1-LNR-Q005-PJ'
+$P CODEX-S4-CLEANUP-DONE
+ALPHA LOG END

@@ -1,0 +1,22 @@
+-- S4 E3D 造窗 · 窗 C 的纠偏腿：把被复原了两次（会话 34 + 35，各 BY W 300）的 STRFLT /B01_LEVEL_03_ACCESS/SF_001
+-- BY E 300 挪回基线 W 302570.87 N 320059 D 1800。会话 34（20:12:07）不是本会话写的，但带的是本仓 s4_aps_strflt_restore.mac
+-- 的 SAVEWORK 注释——别的会话替跑了一遍复原腿；本会话 20:13:44 的复原腿（35）随后又挪了一次。
+-- 跑之前用 e3d-io 核过最新会话（35）里它在 W 302871；跑完用 SESDIFF 32↔36 核 POS 位精确回到基线。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/output/e3d-s4/s4_aps_strflt_fix.log" OVER
+ONERROR GOLABEL /fail
+$P CODEX-S4-APS-STRFLT-FIX-ALIVE
+/B01_LEVEL_03_ACCESS/SF_001
+Q CE
+Q REF
+Q POS
+BY E 300
+Q POS
+SAVEWORK 'CODEX S4 window C fix: STRFLT /B01_LEVEL_03_ACCESS/SF_001 BY E 300 (undo the second restore; back to baseline)'
+$P CODEX-S4-APS-STRFLT-FIX-DONE
+GOLABEL /end
+LABEL /fail
+$P CODEX-S4-APS-STRFLT-FIX-FAILED
+LABEL /end
+ALPHA LOG END
