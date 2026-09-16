@@ -4282,4 +4282,4612 @@ mod tests {
         );
         assert!(windows > 0, "一窗都没量到：语料目录或模板目录不对");
     }
+
+    // ───────────────────── S8：`CACHID` 一致性普查（探针，只作结论、不接线） ─────────────────────
+
+    /// 一个候选上 `CACHID` 的状态（S8 探针的第一维）。四态而不是「变 / 不变」两态：core 3.1 的图形缓存路
+    /// 只认 `CACHID`（取证文档 §4.4），但运行库 1878 个 noun 里只有 204 个带它，带了也未必有人写过——
+    /// 「不变」得先分清是「没这个属性」「从没写过（还是 0）」还是「有值但这一窗没动」，oracle 的分母才是对的。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum CachidState {
+        /// 两端值不同（`CACHID` 在 L2 差分的 `attributes` 里）。
+        Changed,
+        /// noun 带 `CACHID`、至少一端非 0 / unset、两端相同。
+        UnchangedSet,
+        /// noun 带 `CACHID`、两端都是 0 / unset——从没被写过。
+        UnchangedUnset,
+        /// noun 的模板里根本没有 `CACHID`（`DbElementError::UnknownAttribute`）。
+        Absent,
+    }
+
+    impl CachidState {
+        const ALL: [CachidState; 4] = [
+            CachidState::Changed,
+            CachidState::UnchangedSet,
+            CachidState::UnchangedUnset,
+            CachidState::Absent,
+        ];
+
+        fn label(self) -> &'static str {
+            match self {
+                CachidState::Changed => "CACHID 变",
+                CachidState::UnchangedSet => "有值未变",
+                CachidState::UnchangedUnset => "0 / unset 未变",
+                CachidState::Absent => "noun 无 CACHID",
+            }
+        }
+
+        fn index(self) -> usize {
+            CachidState::ALL
+                .iter()
+                .position(|state| *state == self)
+                .expect("state in ALL")
+        }
+
+        /// noun 带 `CACHID`。
+        fn carries(self) -> bool {
+            self != CachidState::Absent
+        }
+
+        /// `CACHID` 被写过（任一端非 0 / unset）——「有人在维护它」的分母。
+        fn maintained(self) -> bool {
+            matches!(self, CachidState::Changed | CachidState::UnchangedSet)
+        }
+    }
+
+    /// 候选除 `CACHID` 之外改了什么（第二维）：按 core 字典类别取「最重」的一档，先结构后属性——
+    /// 一个候选同时改了 `NAME`（0）与 `POS`（3）记 `Dchc3`，同时改了 `POS` 与 `HEIG`（4）记 `Dchc4`。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ProbeChangeClass {
+        /// 换类型 / 改挂（core `dealWithChangeType` / `elementIncluded`：删了重建）。
+        TypeOrOwner,
+        /// 至少一个变更属性 DCHC = 4（core `REPELE` / `SEGREP` 重建）。
+        Dchc4,
+        /// 没有 4，至少一个 DCHC = 1 / 2（core 转成类别 4 落到前一元件 / 自身 / 分支）。
+        Dchc12,
+        /// 没有 4 / 1 / 2，至少一个 DCHC = 3（`POS` / `ORI` / `BFORI`：core 只改段矩阵）。
+        Dchc3,
+        /// 没有 DCHC ≠ 0 的，至少一个字典没收的名字（UDA / 伪属性：core `IDCHNG` 读不到 → 类别 0）。
+        NonDictionary,
+        /// 变的属性全是 DCHC = 0（core 交互路不动）。
+        DchcZeroOnly,
+        /// 只有成员表变了（属主身上的 `ATT_MEMB`），属性一个没变。
+        MembersOnly,
+        /// 除 `CACHID` 之外一个字没变——写 `CACHID` 的那一方单独动了它。
+        CachidOnly,
+        /// 记录字节变了但指不出哪一项。
+        Opaque,
+    }
+
+    impl ProbeChangeClass {
+        const ALL: [ProbeChangeClass; 9] = [
+            ProbeChangeClass::TypeOrOwner,
+            ProbeChangeClass::Dchc4,
+            ProbeChangeClass::Dchc12,
+            ProbeChangeClass::Dchc3,
+            ProbeChangeClass::NonDictionary,
+            ProbeChangeClass::DchcZeroOnly,
+            ProbeChangeClass::MembersOnly,
+            ProbeChangeClass::CachidOnly,
+            ProbeChangeClass::Opaque,
+        ];
+
+        fn label(self) -> &'static str {
+            match self {
+                ProbeChangeClass::TypeOrOwner => "换类型 / 改挂",
+                ProbeChangeClass::Dchc4 => "含 DCHC=4",
+                ProbeChangeClass::Dchc12 => "含 DCHC=1/2（无 4）",
+                ProbeChangeClass::Dchc3 => "含 DCHC=3（无 4/1/2）",
+                ProbeChangeClass::NonDictionary => "含字典外名字（无 DCHC≠0）",
+                ProbeChangeClass::DchcZeroOnly => "只 DCHC=0",
+                ProbeChangeClass::MembersOnly => "只成员表",
+                ProbeChangeClass::CachidOnly => "只 CACHID",
+                ProbeChangeClass::Opaque => "opaque",
+            }
+        }
+
+        /// core 交互路会为这一类重画 / 改矩阵（字典类别 ≠ 0 或结构变化）——「有 DCHC≠0 属性变」那一侧。
+        fn core_redraws(self) -> bool {
+            matches!(
+                self,
+                ProbeChangeClass::TypeOrOwner
+                    | ProbeChangeClass::Dchc4
+                    | ProbeChangeClass::Dchc12
+                    | ProbeChangeClass::Dchc3
+            )
+        }
+
+        /// 除 `CACHID` 之外确有改动、但 core 交互路不重画（类别 0 / 字典外 / 只动成员表）。
+        fn core_silent(self) -> bool {
+            matches!(
+                self,
+                ProbeChangeClass::DchcZeroOnly
+                    | ProbeChangeClass::NonDictionary
+                    | ProbeChangeClass::MembersOnly
+            )
+        }
+    }
+
+    /// 我方三档（第三维）：[`change_metadata_tier`] 放行 = skip；`is_placement_only` 且 [`rigid_anchor`] 判刚 =
+    /// transform；其余 regen。按候选判，不问开关（`model_transform_cheap_path` 关着时 transform 候选在生产里
+    /// 也走 regen——这里量的是分类器，不是执行物）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ProbeVerdict {
+        Skip,
+        Transform,
+        Regen,
+    }
+
+    impl ProbeVerdict {
+        const ALL: [ProbeVerdict; 3] = [
+            ProbeVerdict::Skip,
+            ProbeVerdict::Transform,
+            ProbeVerdict::Regen,
+        ];
+
+        fn label(self) -> &'static str {
+            match self {
+                ProbeVerdict::Skip => "skip",
+                ProbeVerdict::Transform => "transform",
+                ProbeVerdict::Regen => "regen",
+            }
+        }
+    }
+
+    /// 「只 CACHID」的候选，它的 `CACHID` 跳动能不能用同一窗里**子树内**别的变化解释。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CachidOnlyCause {
+        /// 同窗有真变了 / 新建 / 删除的元素以它为严格祖先——写方把子树的图形版本记在了它身上。
+        SubtreeChanged,
+        /// 子树里一个都没变——变化来自子树之外（被引用的目录 / 相连的元素 / 应用自己重估）。
+        NothingBelow,
+        /// 这一窗变的元素太多，没算祖先链。
+        Unjudged,
+    }
+
+    /// 语料里一个 noun 上 `CACHID` 的账（取证文档 §4.4 的开放问题：哪些 noun 上真有值、值的形状）。
+    #[derive(Default)]
+    struct CachidNounTally {
+        /// 真变了的 Modified 候选里 noun 带 `CACHID` 的个数。
+        carrying: usize,
+        /// 其中 `CACHID` 被写过（任一端非 0 / unset）的。
+        maintained: usize,
+        /// 其中 `CACHID` 变了的。
+        changed: usize,
+        /// 其中只有 `CACHID` 变了的。
+        cachid_only: usize,
+        /// 只 `CACHID` 且子树内同窗有变的。
+        cachid_only_explained: usize,
+        /// `CACHID` 变了且 core 会重画（类别 ≠ 0 / 结构变化）的。
+        changed_core_redraws: usize,
+        /// `CACHID` 变了但除它之外 core 不重画（只 DCHC=0 / 字典外 / 成员表）的。
+        changed_core_silent: usize,
+        /// `CACHID` 有值却**没**变、而 core 会重画的（oracle 的反例）。
+        unchanged_core_redraws: usize,
+        /// 值变化（`前 → 后`）的频次。
+        transitions: BTreeMap<String, usize>,
+    }
+
+    /// 一个真变了的 Modified 候选在三维上的落点（一窗先收齐，再定「只 CACHID」的成因）。
+    struct ProbeRow {
+        refno: RefNo,
+        noun: String,
+        state: CachidState,
+        class: ProbeChangeClass,
+        verdict: ProbeVerdict,
+        /// 忽略 `CACHID` 再判一次的结果（只在 `CACHID` 变了且不是「只 CACHID」时有）。
+        verdict_sans_cachid: Option<ProbeVerdict>,
+        /// `CACHID` 变了：`前 → 后`。
+        transition: Option<String>,
+        /// 除 `CACHID` 之外变了的属性名。
+        other_names: Vec<String>,
+        members_changed: bool,
+    }
+
+    /// `CACHID` 的值渲染成一段短文本。它在运行库里是 `WORD` 型、没有反哈希文本——原始字就是那个计数，按整数印。
+    fn render_cachid(value: &Option<e3d_io::record::descriptor::DescriptorValue>) -> String {
+        use e3d_io::record::descriptor::DescriptorValue;
+        match value {
+            None | Some(DescriptorValue::Unset) => "unset".to_string(),
+            Some(DescriptorValue::Text(text)) => format!("{text:?}"),
+            Some(DescriptorValue::Word {
+                text: Some(text), ..
+            }) => format!("{text:?}"),
+            Some(DescriptorValue::Word { raw, text: None }) => raw.to_string(),
+            Some(DescriptorValue::Int(int)) => int.to_string(),
+            Some(other) => format!("{other:?}"),
+        }
+    }
+
+    /// `CACHID` 的值当数看（"1" 是计数还是旗标，要看相邻两值差多少）。
+    fn cachid_number(value: &Option<e3d_io::record::descriptor::DescriptorValue>) -> Option<i64> {
+        use e3d_io::record::descriptor::DescriptorValue;
+        match value {
+            Some(DescriptorValue::Int(int)) => Some(i64::from(*int)),
+            Some(DescriptorValue::Word { raw, text: None }) => Some(i64::from(*raw)),
+            Some(DescriptorValue::Text(text))
+            | Some(DescriptorValue::Word {
+                text: Some(text), ..
+            }) => text.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// 「没写过」：unset、`WORD` 0、空串、整数 0——`CACHID` 是 `WORD` 型计数，0 就是初值。
+    fn cachid_is_blank(value: &Option<e3d_io::record::descriptor::DescriptorValue>) -> bool {
+        use e3d_io::record::descriptor::DescriptorValue;
+        match value {
+            None | Some(DescriptorValue::Unset) => true,
+            Some(DescriptorValue::Word { raw: 0, text: None }) => true,
+            Some(DescriptorValue::Text(text)) => text.trim().is_empty(),
+            Some(DescriptorValue::Int(0)) => true,
+            _ => false,
+        }
+    }
+
+    /// 一次 `CACHID` 值变化的形状。
+    fn cachid_transition_shape(
+        before: &Option<e3d_io::record::descriptor::DescriptorValue>,
+        after: &Option<e3d_io::record::descriptor::DescriptorValue>,
+    ) -> &'static str {
+        match (cachid_number(before), cachid_number(after)) {
+            (_, Some(_)) if cachid_is_blank(before) => "0 / unset → 数字",
+            (Some(a), Some(b)) if b == a + 1 => "数字 → 数字+1",
+            (Some(a), Some(b)) if b > a => "数字 → 更大（非 +1）",
+            (Some(a), Some(b)) if b < a => "数字 → 更小",
+            (Some(_), Some(_)) => "数字 → 同值（存储形态变）",
+            (Some(_), _) if cachid_is_blank(after) => "数字 → 0 / unset",
+            _ => "其它（非数字）",
+        }
+    }
+
+    /// 候选除 `CACHID` 之外改了什么——见 [`ProbeChangeClass`] 的判序。
+    fn probe_change_class(diff: &ElementDiff, cachid_changed: bool) -> ProbeChangeClass {
+        use crate::data_interface::model_impact::raw_dchc_code;
+
+        if diff.type_changed.is_some() || diff.owner_changed.is_some() {
+            return ProbeChangeClass::TypeOrOwner;
+        }
+        let codes: Vec<Option<i32>> = diff
+            .attributes
+            .iter()
+            .filter(|name| name.as_str() != "CACHID")
+            .map(|name| raw_dchc_code(name))
+            .collect();
+        if !codes.is_empty() {
+            if codes.contains(&Some(4)) {
+                return ProbeChangeClass::Dchc4;
+            }
+            if codes.contains(&Some(1)) || codes.contains(&Some(2)) {
+                return ProbeChangeClass::Dchc12;
+            }
+            if codes.contains(&Some(3)) {
+                return ProbeChangeClass::Dchc3;
+            }
+            if codes.contains(&None) {
+                return ProbeChangeClass::NonDictionary;
+            }
+            return ProbeChangeClass::DchcZeroOnly;
+        }
+        if diff.members.is_some() {
+            return ProbeChangeClass::MembersOnly;
+        }
+        if cachid_changed {
+            return ProbeChangeClass::CachidOnly;
+        }
+        ProbeChangeClass::Opaque
+    }
+
+    /// 我方对一个候选的判定；`Some(reason)` = 位姿候选被锚点排除（或算不出）而落 regen 的原因。
+    fn probe_verdict(
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+        refno: RefNo,
+        diff: &ElementDiff,
+    ) -> (ProbeVerdict, Option<String>) {
+        if change_metadata_tier(diff).is_some() {
+            return (ProbeVerdict::Skip, None);
+        }
+        if !diff.is_placement_only() {
+            return (ProbeVerdict::Regen, None);
+        }
+        let chain = match owner_chain_in_set(target, refno) {
+            Ok(chain) => chain,
+            Err(error) => return (ProbeVerdict::Regen, Some(format!("owner chain: {error}"))),
+        };
+        match rigid_anchor(base, target, refno, &chain) {
+            Ok(CandidateKind::Anchor { rigid: Ok(()), .. }) => (ProbeVerdict::Transform, None),
+            Ok(CandidateKind::Anchor {
+                rigid: Err(reason), ..
+            }) => (ProbeVerdict::Regen, Some(reason)),
+            Ok(CandidateKind::Other(reason)) => (ProbeVerdict::Regen, Some(reason)),
+            Err(error) => (ProbeVerdict::Regen, Some(error.to_string())),
+        }
+    }
+
+    /// 三维交叉表的一格：`(类别, 判定)` 行上 `CACHID` 四态各多少。
+    type ProbeCell = [usize; 4];
+
+    fn cell_total(cell: &ProbeCell) -> usize {
+        cell.iter().sum()
+    }
+
+    fn cell_carrying(cell: &ProbeCell) -> usize {
+        cell_total(cell) - cell[CachidState::Absent.index()]
+    }
+
+    fn cell_maintained(cell: &ProbeCell) -> usize {
+        cell[CachidState::Changed.index()] + cell[CachidState::UnchangedSet.index()]
+    }
+
+    fn cell_changed(cell: &ProbeCell) -> usize {
+        cell[CachidState::Changed.index()]
+    }
+
+    /// `n / d` 渲染成百分比；分母 0 给 `—`。
+    fn percent(n: usize, d: usize) -> String {
+        if d == 0 {
+            "—".to_string()
+        } else {
+            format!("{:.1}%", n as f64 * 100.0 / d as f64)
+        }
+    }
+
+    /// 三维交叉表渲染成 Markdown：每行 `(类别, 判定)`，列是 `CACHID` 四态 + 合计 + 「带 CACHID 者里变的占比」+
+    /// 「有值者里变的占比」；每个类别之后一行小计。
+    fn cachid_cross_table(cells: &BTreeMap<(ProbeChangeClass, ProbeVerdict), ProbeCell>) -> String {
+        let mut out = String::from("| 变更类别（除 CACHID） | 我方判定 |");
+        for state in CachidState::ALL {
+            out.push_str(&format!(" {} |", state.label()));
+        }
+        out.push_str(" 合计 | 带 CACHID 者里变的占比 | 有值者里变的占比 |\n|---|---|");
+        for _ in CachidState::ALL {
+            out.push_str("---:|");
+        }
+        out.push_str("---:|---:|---:|\n");
+        let row = |label_class: &str, label_verdict: &str, cell: &ProbeCell| -> String {
+            let mut line = format!("| {label_class} | {label_verdict} |");
+            for value in cell {
+                line.push_str(&format!(" {value} |"));
+            }
+            line.push_str(&format!(
+                " {} | {} | {} |\n",
+                cell_total(cell),
+                percent(cell_changed(cell), cell_carrying(cell)),
+                percent(cell_changed(cell), cell_maintained(cell))
+            ));
+            line
+        };
+        for class in ProbeChangeClass::ALL {
+            let mut subtotal: ProbeCell = [0; 4];
+            let mut any = false;
+            for verdict in ProbeVerdict::ALL {
+                let Some(cell) = cells.get(&(class, verdict)) else {
+                    continue;
+                };
+                any = true;
+                for (slot, value) in subtotal.iter_mut().zip(cell) {
+                    *slot += value;
+                }
+                out.push_str(&row(class.label(), verdict.label(), cell));
+            }
+            if any {
+                out.push_str(&row(
+                    &format!("**{}**", class.label()),
+                    "**小计**",
+                    &subtotal,
+                ));
+            }
+        }
+        out
+    }
+
+    /// 「属性名 × `CACHID` 四态」表（只统计某一类候选，免得被同候选上更重的属性混淆）。
+    fn attribute_state_table(rows: &BTreeMap<String, ProbeCell>, limit: usize) -> String {
+        let mut out = String::from(
+            "| 属性 | 候选数 | CACHID 变 | 有值未变 | 0 / unset 未变 | noun 无 CACHID | 有值者里变的占比 |\n|---|---:|---:|---:|---:|---:|---:|\n",
+        );
+        let mut sorted: Vec<(&String, &ProbeCell)> = rows.iter().collect();
+        sorted.sort_by(|a, b| {
+            cell_total(b.1)
+                .cmp(&cell_total(a.1))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        for (name, cell) in sorted.iter().take(limit) {
+            out.push_str(&format!(
+                "| `{name}` | {} | {} | {} | {} | {} | {} |\n",
+                cell_total(cell),
+                cell[CachidState::Changed.index()],
+                cell[CachidState::UnchangedSet.index()],
+                cell[CachidState::UnchangedUnset.index()],
+                cell[CachidState::Absent.index()],
+                percent(cell_changed(cell), cell_maintained(cell))
+            ));
+        }
+        if sorted.len() > limit {
+            out.push_str(&format!(
+                "| …（另 {} 个名字略） | | | | | | |\n",
+                sorted.len() - limit
+            ));
+        }
+        out
+    }
+
+    /// **S8 探针**（开发计划 2026-09-15 §4 S8 / 取证文档 §7 P4，`#[ignore]` 手动、只作结论不接线）：沿五个项目目录
+    /// （与 [`live_corpus_metadata_only_gate_two_state_over_every_desi_db`] 同一份默认目录，`AIOS_POSREF_DIRS` 可覆盖）
+    /// 每个 DESI 库的整条会话链（`AIOS_CACHID_PROBE_STEPS_PER_DB` 限每库最后 K 步，默认 0 = 整条链），对每一个
+    /// 真变了的 Modified 候选记三维：**`CACHID` 四态**（变 / 有值未变 / 0·unset 未变 / noun 无此属性）×
+    /// **除 `CACHID` 之外的变更类别**（换类型改挂 / 含 DCHC 4 / 1·2 / 3 / 字典外 / 只 0 / 只成员表 / 只 CACHID / opaque）×
+    /// **我方判定**（skip / transform / regen，按候选、不问开关）。
+    ///
+    /// 要回答的（取证文档 §7 P4）：「有 DCHC≠0 属性变 ⇒ `CACHID` 变」在语料上成不成立——成立则 `CACHID` 可作分类器的
+    /// **离线校验 oracle**（不是判据：写它的一方不在 core，缓存模式关着时不一定写）；顺带答 §4.4 的开放问题（哪些 noun 上
+    /// 真有值、"1" 是计数还是旗标），「只 CACHID」的跳动能不能用同窗子树内的变化解释，以及 `CACHID` 混进差分对我方三档的
+    /// 影响（字典没收它 → 混进来就不放行、也不刚）。
+    ///
+    /// 结论是语料的性质，不下数值断言；报告写到 `AIOS_CACHID_PROBE_REPORT`
+    /// （默认 `docs/evidence/2026-09-16-cachid-consistency-corpus.md`，按政策不入库）。
+    #[test]
+    #[ignore = "manual live: walks every DESI database in the sample corpus; needs the E3D template directory"]
+    fn probe_cachid_consistency() {
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        use e3d_io::db_element::{DbElementError, DbFilePin, template_file_for};
+        use e3d_io::engine::ReadOnlyEngine;
+        use e3d_io::index::IndexCandidate;
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        const EXAMPLE_LIMIT: usize = 60;
+        const EXAMPLES_PER_NOUN: usize = 6;
+        /// 一窗变的元素超过这么多就不算祖先链（只 CACHID 的成因记 `Unjudged`）。
+        const ANCESTRY_LIMIT: usize = 5000;
+        /// N2 / t-334 的三分栏（只在额外戳旋钮非空时用到）。
+        const STAMP_TODAY: &str = "只 CACHID（今天的口径）";
+        const STAMP_WITH_CACHID: &str = "CACHID + 额外名字（题 A）";
+        const STAMP_WITHOUT_CACHID: &str = "只额外名字、CACHID 没动（题 B 新增）";
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+        let per_db: usize = std::env::var("AIOS_CACHID_PROBE_STEPS_PER_DB")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        // N2 / t-334：额外当成戳的名字。缺省空——空的时候下面那一段整段不跑、报告也不多一个字。
+        let extra_stamp = extra_stamp_names("AIOS_CACHID_PROBE_EXTRA_STAMP_NAMES");
+        let report_path = PathBuf::from(std::env::var("AIOS_CACHID_PROBE_REPORT").unwrap_or_else(
+            |_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-16-cachid-consistency-corpus.md"
+                )
+                .into()
+            },
+        ));
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi_template =
+            template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+
+        let started = Instant::now();
+        let mut dbs_seen = 0usize;
+        let mut dbs_measured = 0usize;
+        let mut windows = 0usize;
+        let mut windows_skipped = 0usize;
+        let mut windows_with_cachid_change = 0usize;
+        let mut candidates = 0usize;
+        let mut diffed = 0usize;
+        let mut cachid_unreadable = 0usize;
+        let mut placement_excluded = 0usize;
+        let mut cells: BTreeMap<(ProbeChangeClass, ProbeVerdict), ProbeCell> = BTreeMap::new();
+        let mut nouns: BTreeMap<String, CachidNounTally> = BTreeMap::new();
+        let mut shapes: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut transitions: BTreeMap<String, usize> = BTreeMap::new();
+        // 「只 DCHC=0」候选上的属性名 × CACHID 四态；「含字典外名字」候选上的字典外名字 × CACHID 四态。
+        let mut zero_names: BTreeMap<String, ProbeCell> = BTreeMap::new();
+        let mut non_dictionary_names: BTreeMap<String, ProbeCell> = BTreeMap::new();
+        // N2 / t-334：「若额外名字也算戳」的候选级三分栏 + 被挡住的那些是被什么挡的。旋钮空时全程不填。
+        let mut stamp_totals: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut stamp_by_noun: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        let mut stamp_by_db: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        let mut stamp_blocked: BTreeMap<&'static str, usize> = BTreeMap::new();
+        // `CACHID` 混进差分把我方判定从「若忽略它」推到了哪里：`(忽略它的判定, 实际判定)`。
+        let mut verdict_shifts: BTreeMap<(ProbeVerdict, ProbeVerdict), usize> = BTreeMap::new();
+        let mut cachid_only_causes: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut cachid_only_examples: Vec<String> = Vec::new();
+        let mut cachid_only_examples_per_noun: BTreeMap<String, usize> = BTreeMap::new();
+        let mut zero_with_cachid_examples: Vec<String> = Vec::new();
+        let mut silent_change_examples: Vec<String> = Vec::new();
+
+        for dir in &dirs {
+            if !dir.is_dir() {
+                println!("skip dir {}: not a directory", dir.display());
+                continue;
+            }
+            let Ok(sources) = sources_in_dir(dir, &["DESI"]) else {
+                continue;
+            };
+            for source in sources {
+                dbs_seen += 1;
+                let file = source.file.clone();
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let sessions: Vec<u32> = match ReadOnlyEngine::open(&file)
+                    .ok()
+                    .and_then(|mut engine| engine.sessions().ok())
+                {
+                    Some(sessions) => sessions.iter().map(|session| session.session_id).collect(),
+                    None => {
+                        println!("skip {name}: cannot read the session chain");
+                        continue;
+                    }
+                };
+                // 链是新→旧：相邻两项 (older, newer) 就是一步；最后 K 步就是链头的 K 对。
+                let mut picked: Vec<(u32, u32)> = sessions
+                    .windows(2)
+                    .take(if per_db == 0 { usize::MAX } else { per_db })
+                    .map(|pair| (pair[1], pair[0]))
+                    .collect();
+                picked.reverse();
+                if picked.is_empty() {
+                    continue;
+                }
+                dbs_measured += 1;
+                let open = |sesno: u32| -> Option<Arc<DbSet>> {
+                    let set = Arc::new(DbSet::with_attlib_file(&attlib).ok()?);
+                    set.add_db(DbFilePin {
+                        file: file.clone(),
+                        template: desi_template.clone(),
+                        db_type: Some("DESI".into()),
+                        sesno: Some(sesno),
+                    })
+                    .ok()?;
+                    Some(set)
+                };
+                let mut db_cachid_changes = 0usize;
+                for (base_sesno, target_sesno) in picked {
+                    let label = format!("{name} {base_sesno}→{target_sesno}");
+                    let window = match collect_window(&file, base_sesno, target_sesno) {
+                        Ok(window) => window,
+                        Err(error) => {
+                            windows_skipped += 1;
+                            println!("skip {label}: {error}");
+                            continue;
+                        }
+                    };
+                    let (Some(base), Some(target)) = (open(base_sesno), open(target_sesno)) else {
+                        windows_skipped += 1;
+                        println!("skip {label}: cannot pin both ends");
+                        continue;
+                    };
+                    windows += 1;
+                    candidates += window.diff.changes.len();
+
+                    // 第一遍：每个真变了的 Modified 候选记一行；新建 / 删除的只留 refno（给「只 CACHID」找成因用）。
+                    let mut rows: Vec<ProbeRow> = Vec::new();
+                    let mut inserted: Vec<RefNo> = Vec::new();
+                    let mut deleted: Vec<RefNo> = Vec::new();
+                    for candidate in &window.diff.changes {
+                        let refno = match candidate {
+                            IndexCandidate::Inserted { refno, .. } => {
+                                inserted.push(*refno);
+                                continue;
+                            }
+                            IndexCandidate::Deleted { refno, .. } => {
+                                deleted.push(*refno);
+                                continue;
+                            }
+                            IndexCandidate::Modified { refno, .. } => *refno,
+                        };
+                        let Ok(diff) = e3d_model::diff_element(&base, &target, refno) else {
+                            continue;
+                        };
+                        if diff.is_unchanged() {
+                            continue;
+                        }
+                        diffed += 1;
+                        let cachid_changed = diff.attributes.iter().any(|name| name == "CACHID");
+                        let read = |set: &Arc<DbSet>| set.element(refno).attribute("CACHID");
+                        let (state, values) = match (read(&base), read(&target)) {
+                            (Err(DbElementError::UnknownAttribute { .. }), _)
+                            | (_, Err(DbElementError::UnknownAttribute { .. })) => {
+                                (CachidState::Absent, None)
+                            }
+                            (Ok(before), Ok(after)) => {
+                                if cachid_changed {
+                                    (CachidState::Changed, Some((before, after)))
+                                } else if cachid_is_blank(&before) && cachid_is_blank(&after) {
+                                    (CachidState::UnchangedUnset, None)
+                                } else {
+                                    (CachidState::UnchangedSet, None)
+                                }
+                            }
+                            _ => {
+                                cachid_unreadable += 1;
+                                continue;
+                            }
+                        };
+                        let class = probe_change_class(&diff, cachid_changed);
+                        if !extra_stamp.is_empty() {
+                            let bucket = if stamp_only(&diff) {
+                                Some(STAMP_TODAY)
+                            } else if stamp_only_with(&diff, &extra_stamp) {
+                                if cachid_changed {
+                                    Some(STAMP_WITH_CACHID)
+                                } else {
+                                    Some(STAMP_WITHOUT_CACHID)
+                                }
+                            } else {
+                                None
+                            };
+                            match bucket {
+                                Some(bucket) => {
+                                    *stamp_totals.entry(bucket).or_default() += 1;
+                                    *stamp_by_noun
+                                        .entry((bucket, diff.noun.clone()))
+                                        .or_default() += 1;
+                                    *stamp_by_db.entry((bucket, name.clone())).or_default() += 1;
+                                }
+                                // 题 A 的余数：戳与额外名字都跳了、却仍不算「只戳」——记下挡住它的是什么。
+                                None if cachid_changed
+                                    && diff.attributes.iter().any(|attribute| {
+                                        extra_stamp
+                                            .iter()
+                                            .any(|allowed| allowed == attribute.as_str())
+                                    }) =>
+                                {
+                                    let reason = if diff.type_changed.is_some()
+                                        || diff.owner_changed.is_some()
+                                    {
+                                        "换类型 / 改挂"
+                                    } else if diff.members.is_some() {
+                                        "成员表也变了"
+                                    } else if diff.opaque {
+                                        "opaque"
+                                    } else {
+                                        "还动了别的属性"
+                                    };
+                                    *stamp_blocked.entry(reason).or_default() += 1;
+                                }
+                                None => {}
+                            }
+                        }
+                        let (verdict, excluded) = probe_verdict(&base, &target, refno, &diff);
+                        if excluded.is_some() {
+                            placement_excluded += 1;
+                        }
+                        let transition = values.as_ref().map(|(before, after)| {
+                            *shapes
+                                .entry(cachid_transition_shape(before, after))
+                                .or_default() += 1;
+                            format!("{} → {}", render_cachid(before), render_cachid(after))
+                        });
+                        let verdict_sans_cachid =
+                            if cachid_changed && class != ProbeChangeClass::CachidOnly {
+                                // 忽略 `CACHID` 再判一次：差的就是它把我方推到哪儿去了。
+                                let mut sans = diff.clone();
+                                sans.attributes.retain(|name| name != "CACHID");
+                                Some(probe_verdict(&base, &target, refno, &sans).0)
+                            } else {
+                                None
+                            };
+                        rows.push(ProbeRow {
+                            refno,
+                            noun: diff.noun.clone(),
+                            state,
+                            class,
+                            verdict,
+                            verdict_sans_cachid,
+                            transition,
+                            other_names: diff
+                                .attributes
+                                .iter()
+                                .filter(|name| name.as_str() != "CACHID")
+                                .cloned()
+                                .collect(),
+                            members_changed: diff.members.is_some(),
+                        });
+                    }
+
+                    // 「只 CACHID」的成因：同窗别的变化（真变了的 Modified、新建、删除）的严格祖先集合。
+                    let has_cachid_only = rows
+                        .iter()
+                        .any(|row| row.class == ProbeChangeClass::CachidOnly);
+                    let changed_below: Option<BTreeSet<(u32, u32)>> = if !has_cachid_only {
+                        None
+                    } else {
+                        let others: Vec<(RefNo, &Arc<DbSet>)> = rows
+                            .iter()
+                            .filter(|row| row.class != ProbeChangeClass::CachidOnly)
+                            .map(|row| (row.refno, &target))
+                            .chain(inserted.iter().map(|refno| (*refno, &target)))
+                            .chain(deleted.iter().map(|refno| (*refno, &base)))
+                            .collect();
+                        if others.len() > ANCESTRY_LIMIT {
+                            None
+                        } else {
+                            let mut ancestors = BTreeSet::new();
+                            for (refno, set) in others {
+                                if let Ok(chain) = owner_chain_in_set(set, refno) {
+                                    ancestors.extend(chain.iter().map(|ancestor| {
+                                        let ancestor = refno_to_e3d(*ancestor);
+                                        (ancestor.word0, ancestor.word1)
+                                    }));
+                                }
+                            }
+                            Some(ancestors)
+                        }
+                    };
+                    let mut window_other_nouns: BTreeMap<String, usize> = BTreeMap::new();
+                    for row in &rows {
+                        if row.class != ProbeChangeClass::CachidOnly {
+                            *window_other_nouns.entry(row.noun.clone()).or_default() += 1;
+                        }
+                    }
+                    let others_total: usize =
+                        window_other_nouns.values().sum::<usize>() + inserted.len() + deleted.len();
+                    let context = {
+                        let mut by_count: Vec<(&String, &usize)> =
+                            window_other_nouns.iter().collect();
+                        by_count.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                        let mut parts: Vec<String> = by_count
+                            .iter()
+                            .take(6)
+                            .map(|(noun, count)| format!("{noun}×{count}"))
+                            .collect();
+                        if !inserted.is_empty() {
+                            parts.push(format!("新建×{}", inserted.len()));
+                        }
+                        if !deleted.is_empty() {
+                            parts.push(format!("删除×{}", deleted.len()));
+                        }
+                        parts.join(" ")
+                    };
+
+                    // 第二遍：记账。
+                    let mut window_cachid_changes = 0usize;
+                    for row in &rows {
+                        cells.entry((row.class, row.verdict)).or_insert([0; 4])
+                            [row.state.index()] += 1;
+                        if row.class == ProbeChangeClass::DchcZeroOnly {
+                            for name in &row.other_names {
+                                zero_names.entry(name.clone()).or_insert([0; 4])
+                                    [row.state.index()] += 1;
+                            }
+                        }
+                        if row.class == ProbeChangeClass::NonDictionary {
+                            for name in &row.other_names {
+                                if crate::data_interface::model_impact::raw_dchc_code(name)
+                                    .is_none()
+                                {
+                                    non_dictionary_names.entry(name.clone()).or_insert([0; 4])
+                                        [row.state.index()] += 1;
+                                }
+                            }
+                        }
+                        let cause =
+                            (row.class == ProbeChangeClass::CachidOnly).then(
+                                || match &changed_below {
+                                    None => CachidOnlyCause::Unjudged,
+                                    Some(ancestors)
+                                        if ancestors
+                                            .contains(&(row.refno.word0, row.refno.word1)) =>
+                                    {
+                                        CachidOnlyCause::SubtreeChanged
+                                    }
+                                    Some(_) => CachidOnlyCause::NothingBelow,
+                                },
+                            );
+                        if let Some(cause) = cause {
+                            *cachid_only_causes
+                                .entry(match cause {
+                                    CachidOnlyCause::SubtreeChanged => {
+                                        "子树内同窗有变（真变 / 新建 / 删除）"
+                                    }
+                                    CachidOnlyCause::NothingBelow => "子树内一个都没变",
+                                    CachidOnlyCause::Unjudged => "未判（同窗变的元素太多）",
+                                })
+                                .or_default() += 1;
+                        }
+                        if row.state.carries() {
+                            let noun = nouns.entry(row.noun.clone()).or_default();
+                            noun.carrying += 1;
+                            if row.state.maintained() {
+                                noun.maintained += 1;
+                            }
+                            if row.state == CachidState::Changed {
+                                noun.changed += 1;
+                                if row.class == ProbeChangeClass::CachidOnly {
+                                    noun.cachid_only += 1;
+                                    if cause == Some(CachidOnlyCause::SubtreeChanged) {
+                                        noun.cachid_only_explained += 1;
+                                    }
+                                }
+                                if row.class.core_redraws() {
+                                    noun.changed_core_redraws += 1;
+                                } else if row.class.core_silent() {
+                                    noun.changed_core_silent += 1;
+                                }
+                                if let Some(transition) = &row.transition {
+                                    *noun.transitions.entry(transition.clone()).or_default() += 1;
+                                }
+                            } else if row.state == CachidState::UnchangedSet
+                                && row.class.core_redraws()
+                            {
+                                noun.unchanged_core_redraws += 1;
+                            }
+                        }
+                        let Some(transition) = &row.transition else {
+                            continue;
+                        };
+                        window_cachid_changes += 1;
+                        *transitions.entry(transition.clone()).or_default() += 1;
+                        if let Some(sans) = row.verdict_sans_cachid {
+                            if sans != row.verdict {
+                                *verdict_shifts.entry((sans, row.verdict)).or_default() += 1;
+                            }
+                        }
+                        let others_note = if others_total > 0 {
+                            format!("｜ 同窗其它变化 {others_total}（{context}）")
+                        } else {
+                            "｜ 同窗没有别的变化".to_string()
+                        };
+                        match row.class {
+                            ProbeChangeClass::CachidOnly => {
+                                let per_noun = cachid_only_examples_per_noun
+                                    .entry(row.noun.clone())
+                                    .or_default();
+                                if *per_noun < EXAMPLES_PER_NOUN
+                                    && cachid_only_examples.len() < EXAMPLE_LIMIT
+                                {
+                                    *per_noun += 1;
+                                    cachid_only_examples.push(format!(
+                                        "{label}: {} {} `{transition}` ｜ {} {others_note}",
+                                        row.refno,
+                                        row.noun,
+                                        match cause {
+                                            Some(CachidOnlyCause::SubtreeChanged) => "子树内有变",
+                                            Some(CachidOnlyCause::NothingBelow) => "子树内无变",
+                                            _ => "未判",
+                                        }
+                                    ));
+                                }
+                            }
+                            ProbeChangeClass::DchcZeroOnly => {
+                                if zero_with_cachid_examples.len() < EXAMPLE_LIMIT {
+                                    zero_with_cachid_examples.push(format!(
+                                        "{label}: {} {} `{transition}` 其它变更 {:?}{} → 我方 {}（忽略 CACHID 则 {}）{others_note}",
+                                        row.refno,
+                                        row.noun,
+                                        row.other_names,
+                                        if row.members_changed { "（成员表也变了）" } else { "" },
+                                        row.verdict.label(),
+                                        row.verdict_sans_cachid.map(ProbeVerdict::label).unwrap_or("—"),
+                                    ));
+                                }
+                            }
+                            class if class.core_silent() => {
+                                if silent_change_examples.len() < EXAMPLE_LIMIT {
+                                    silent_change_examples.push(format!(
+                                        "{label}: {} {} `{transition}` 其它变更 {:?}{}",
+                                        row.refno,
+                                        row.noun,
+                                        row.other_names,
+                                        if row.members_changed {
+                                            "（成员表也变了）"
+                                        } else {
+                                            ""
+                                        },
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if window_cachid_changes > 0 {
+                        windows_with_cachid_change += 1;
+                        db_cachid_changes += window_cachid_changes;
+                    }
+                }
+                println!(
+                    "{name}: sessions={} windows={} cachid_changes={db_cachid_changes} elapsed={:.1}s",
+                    sessions.len(),
+                    sessions.len().saturating_sub(1),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+
+        // 汇总：oracle 两个方向的分子分母。
+        let sum_cells = |pick: &dyn Fn(ProbeChangeClass, ProbeVerdict) -> bool| -> ProbeCell {
+            let mut total: ProbeCell = [0; 4];
+            for ((class, verdict), cell) in &cells {
+                if pick(*class, *verdict) {
+                    for (slot, value) in total.iter_mut().zip(cell) {
+                        *slot += value;
+                    }
+                }
+            }
+            total
+        };
+        let all = sum_cells(&|_, _| true);
+        let redraws = sum_cells(&|class, _| class.core_redraws());
+        let silent = sum_cells(&|class, _| class.core_silent());
+        let cachid_only = sum_cells(&|class, _| class == ProbeChangeClass::CachidOnly);
+        let cachid_changed_total = cell_changed(&all);
+        let cachid_changed_redraws = cell_changed(&redraws);
+        let cachid_changed_silent = cell_changed(&silent);
+        let cachid_changed_only = cell_changed(&cachid_only);
+
+        let mut report = String::new();
+        report.push_str("# `CACHID` 一致性普查（S8）· DESI 全语料三维交叉表\n\n");
+        report.push_str(&format!(
+            "> 生成：`window_root_plan::tests::probe_cachid_consistency`，{}；目录 {}；每库步数 {}；耗时 {:.0}s。\
+             按政策不入库（`docs/evidence/`）。只作结论，不接线。\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M"),
+            dirs.iter()
+                .map(|dir| format!("`{}`", dir.display()))
+                .collect::<Vec<_>>()
+                .join("、"),
+            if per_db == 0 {
+                "整条链".to_string()
+            } else {
+                per_db.to_string()
+            },
+            started.elapsed().as_secs_f64()
+        ));
+        report.push_str("## 口径\n\n");
+        report.push_str(
+            "每个真变了的 Modified 候选（L2 差分 `is_unchanged` 为假）记三维：**`CACHID` 四态**——两端值不同 / noun 带它且至少一端非 0 \
+             / noun 带它但两端都是 0 或 unset（没人写过） / noun 的模板里没有它（`UnknownAttribute`）；**除 `CACHID` 之外的变更类别**——先结构\
+             （换类型 / 改挂）再按变更属性的字典 DCHC 取最重一档（4 > 1/2 > 3 > 字典外 > 0），属性没变时看成员表，再看是不是只有 `CACHID`，\
+             最后 `opaque`；**我方判定**——`change_metadata_tier` 放行 = skip、`is_placement_only` ∧ `rigid_anchor` 判刚 = transform、其余 regen\
+             （按候选判，不问 `model_transform_cheap_path` 开关）。「core 会重画」= 换类型 / 改挂或含 DCHC ≠ 0 的属性（取证文档 §3–§4 的交互路口径）；\
+             「core 不重画」= 只 DCHC=0 / 只字典外名字 / 只成员表。`CACHID` 是 `WORD` 型、无反哈希文本，原始字按整数印。\
+             「只 CACHID」的候选另判成因：同一窗里真变了 / 新建 / 删除的元素有没有以它为严格祖先的。\n\n",
+        );
+        report.push_str("## 规模\n\n");
+        report.push_str(&format!(
+            "| 项 | 数 |\n|---|---:|\n| DESI 库（目录里认出的） | {dbs_seen} |\n| 有会话链可走的库 | {dbs_measured} |\n\
+             | 跑过的窗 | {windows} |\n| 跳过的窗（窗口收集失败 / 端点钉不住） | {windows_skipped} |\n\
+             | 索引候选总数 | {candidates} |\n| 做了 L2 差分且真变了的 Modified 候选 | {diffed} |\n\
+             | 其中 noun 带 `CACHID` | {} |\n| 其中 `CACHID` 被写过（任一端非 0） | {} |\n| 其中 `CACHID` 变了 | {cachid_changed_total} |\n\
+             | `CACHID` 变过的窗 | {windows_with_cachid_change} |\n| 只有 `CACHID` 变的候选 | {cachid_changed_only} |\n\
+             | 位姿候选被锚点排除（或算不出）而落 regen | {placement_excluded} |\n\
+             | `CACHID` 读不出（两端之一非 `UnknownAttribute` 的读错，未入表） | {cachid_unreadable} |\n\n",
+            cell_carrying(&all),
+            cell_maintained(&all),
+        ));
+        report.push_str("## 三维交叉表：变更类别 × 我方判定 × `CACHID` 四态\n\n");
+        report.push_str(&cachid_cross_table(&cells));
+        report.push_str("\n## Oracle 两个方向\n\n");
+        report.push_str(
+            "「带 CACHID」= noun 的模板里有它；「有值」= 任一端非 0 / unset（有人在维护）。\n\n\
+             | 问题 | 分母（带 CACHID） | 分母（有值） | 分子 | 占比（带 CACHID） | 占比（有值） |\n|---|---:|---:|---:|---:|---:|\n",
+        );
+        report.push_str(&format!(
+            "| **有 DCHC≠0 属性变（或换类型 / 改挂）⇒ `CACHID` 变？** | {} | {} | {} | {} | {} |\n",
+            cell_carrying(&redraws),
+            cell_maintained(&redraws),
+            cachid_changed_redraws,
+            percent(cachid_changed_redraws, cell_carrying(&redraws)),
+            percent(cachid_changed_redraws, cell_maintained(&redraws)),
+        ));
+        report.push_str(&format!(
+            "| 只动了 DCHC=0 / 字典外 / 成员表 ⇒ `CACHID` 变？ | {} | {} | {} | {} | {} |\n\n",
+            cell_carrying(&silent),
+            cell_maintained(&silent),
+            cachid_changed_silent,
+            percent(cachid_changed_silent, cell_carrying(&silent)),
+            percent(cachid_changed_silent, cell_maintained(&silent)),
+        ));
+        report.push_str(&format!(
+            "| 反向：`CACHID` 变了的 {cachid_changed_total} 个候选里 | 数 | 占比 |\n|---|---:|---:|\n\
+             | 除它之外 core 会重画（换类型 / 改挂、DCHC 4 / 1 / 2 / 3） | {cachid_changed_redraws} | {} |\n\
+             | 除它之外 core 不重画（只 DCHC=0 / 字典外 / 成员表） | {cachid_changed_silent} | {} |\n\
+             | 除它之外一个字没变（只 CACHID） | {cachid_changed_only} | {} |\n\n",
+            percent(cachid_changed_redraws, cachid_changed_total),
+            percent(cachid_changed_silent, cachid_changed_total),
+            percent(cachid_changed_only, cachid_changed_total),
+        ));
+        report.push_str("### 按类别看\n\n");
+        report.push_str(
+            "| 变更类别（除 CACHID） | 候选 | 带 CACHID | 有值 | 其中 CACHID 变 | 占比（带 CACHID） | 占比（有值） |\n|---|---:|---:|---:|---:|---:|---:|\n",
+        );
+        for class in ProbeChangeClass::ALL {
+            let cell = sum_cells(&|c, _| c == class);
+            if cell_total(&cell) == 0 {
+                continue;
+            }
+            report.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                class.label(),
+                cell_total(&cell),
+                cell_carrying(&cell),
+                cell_maintained(&cell),
+                cell_changed(&cell),
+                percent(cell_changed(&cell), cell_carrying(&cell)),
+                percent(cell_changed(&cell), cell_maintained(&cell)),
+            ));
+        }
+        report.push_str("\n### 按我方判定看\n\n");
+        report.push_str(
+            "| 我方判定 | 候选 | 带 CACHID | 有值 | 其中 CACHID 变 | 占比（有值） |\n|---|---:|---:|---:|---:|---:|\n",
+        );
+        for verdict in ProbeVerdict::ALL {
+            let cell = sum_cells(&|_, v| v == verdict);
+            report.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                verdict.label(),
+                cell_total(&cell),
+                cell_carrying(&cell),
+                cell_maintained(&cell),
+                cell_changed(&cell),
+                percent(cell_changed(&cell), cell_maintained(&cell)),
+            ));
+        }
+        report.push_str("\n## 「只 CACHID」的成因\n\n");
+        report.push_str(
+            "写 `CACHID` 的那一方单独动了它、元素自己的记录一个字没变。看同一窗里有没有真变了 / 新建 / 删除的元素以它为严格祖先。\n\n\
+             | 成因 | 候选数 |\n|---|---:|\n",
+        );
+        for (cause, count) in &cachid_only_causes {
+            report.push_str(&format!("| {cause} | {count} |\n"));
+        }
+        report.push_str("\n## `CACHID` 混进差分对我方三档的影响\n\n");
+        report.push_str(
+            "字典没收 `CACHID`（`raw_dchc_code` 回 `None`），它一混进差分，元数据门就不放行、`is_placement_only` 也不成立。\
+             下表是「忽略 `CACHID` 再判一次」与实际判定不同的候选数（只 `CACHID` 的候选不在此列——忽略它就是「没变」，实际全 regen）。\n\n",
+        );
+        if verdict_shifts.is_empty() {
+            report.push_str("（无：`CACHID` 从没单独把一个候选从 skip / transform 推到 regen）\n");
+        } else {
+            report.push_str("| 忽略 CACHID 的判定 | 实际判定 | 候选数 |\n|---|---|---:|\n");
+            for ((sans, actual), count) in &verdict_shifts {
+                report.push_str(&format!(
+                    "| {} | {} | {count} |\n",
+                    sans.label(),
+                    actual.label()
+                ));
+            }
+        }
+        report.push_str(&format!(
+            "\n只有 `CACHID` 变的候选 **{cachid_changed_only}** 个今天全部 regen（上卷、级联照走）——若 `CACHID` 不是可靠的几何信号，这是白算；\
+             若它是（写方在 Design 应用侧、我们从文件差分看不见的那次几何变化），这是唯一的线索。\n\n"
+        ));
+        report.push_str("## 按 noun：哪些 noun 上真有 `CACHID`、谁在写它\n\n");
+        report.push_str(
+            "只列真变了的 Modified 候选里 noun 带 `CACHID` 的；「反例」= `CACHID` 有值却没变、而 core 会重画的候选数；\
+             「只 CACHID·子树有变」= 只 `CACHID` 的候选里同窗子树内有变的。\n\n\
+             | noun | 带 CACHID 的候选 | 有值 | CACHID 变 | 只 CACHID | 只 CACHID·子树有变 | 变且 core 重画 | 变但 core 不重画 | 反例 | 常见值变化 |\n\
+             |---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
+        );
+        let mut noun_rows: Vec<(&String, &CachidNounTally)> = nouns.iter().collect();
+        noun_rows.sort_by(|a, b| {
+            b.1.changed
+                .cmp(&a.1.changed)
+                .then_with(|| b.1.maintained.cmp(&a.1.maintained))
+                .then_with(|| b.1.carrying.cmp(&a.1.carrying))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        for (noun, tally) in noun_rows.iter().take(60) {
+            let mut common: Vec<(&String, &usize)> = tally.transitions.iter().collect();
+            common.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+            let common = common
+                .iter()
+                .take(3)
+                .map(|(transition, count)| format!("`{transition}` ×{count}"))
+                .collect::<Vec<_>>()
+                .join("，");
+            report.push_str(&format!(
+                "| `{noun}` | {} | {} | {} | {} | {} | {} | {} | {} | {common} |\n",
+                tally.carrying,
+                tally.maintained,
+                tally.changed,
+                tally.cachid_only,
+                tally.cachid_only_explained,
+                tally.changed_core_redraws,
+                tally.changed_core_silent,
+                tally.unchanged_core_redraws
+            ));
+        }
+        if noun_rows.len() > 60 {
+            report.push_str(&format!(
+                "| …（另 {} 个 noun 略） | | | | | | | | | |\n",
+                noun_rows.len() - 60
+            ));
+        }
+        report.push_str("\n## 值的形状：\"1\" 是计数还是旗标\n\n");
+        report.push_str("| 形状 | 次数 |\n|---|---:|\n");
+        let mut shape_rows: Vec<(&&str, &usize)> = shapes.iter().collect();
+        shape_rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        for (shape, count) in shape_rows {
+            report.push_str(&format!("| {shape} | {count} |\n"));
+        }
+        report.push_str("\n最常见的值变化（前 25）：\n\n| 前 → 后 | 次数 |\n|---|---:|\n");
+        let mut transition_rows: Vec<(&String, &usize)> = transitions.iter().collect();
+        transition_rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        for (transition, count) in transition_rows.iter().take(25) {
+            report.push_str(&format!("| `{transition}` | {count} |\n"));
+        }
+        report.push_str("\n## 「只 DCHC=0」候选上的属性 × `CACHID` 四态\n\n");
+        report.push_str(
+            "这些候选除 `CACHID` 外只改了字典 DCHC=0 的属性（core 交互路不动）。「有值者里变的占比」高的名字，是 E3D 认为改了图形、\
+             而字典与两票门都说不影响模型的——S6 两票门的反向核对就看这一列。\n\n",
+        );
+        report.push_str(&attribute_state_table(&zero_names, 30));
+        report.push_str("\n## 「含字典外名字」候选上的字典外名字 × `CACHID` 四态\n\n");
+        report.push_str(
+            "这些名字 `raw_dchc_code` 回 `None`（UDA / 伪属性 / 字典快照没有的 3.1 新名）：core `IDCHNG` 读不到类别 → 0 → 不重画；\
+             我方两票门也不放行（字典没投票）→ regen。同一列的读法同上。\n\n",
+        );
+        report.push_str(&attribute_state_table(&non_dictionary_names, 30));
+        if !extra_stamp.is_empty() {
+            // 旋钮没给时这一整节不出现：缺省口径下本报告与 S8 那一跑逐字节相同。
+            let joined = extra_stamp.join(" / ");
+            report.push_str(&format!(
+                "\n## N2 / t-334：若 `{joined}` 也算戳（候选级）\n\n"
+            ));
+            report.push_str(&format!(
+                "旋钮 `AIOS_CACHID_PROBE_EXTRA_STAMP_NAMES={joined}`（缺省空 = 本报告其余各节的口径，一字不动）。\
+                 判据与 Q6 共用同一份代码 `stamp_only_with`：记录真变了、没换类型 / 没改挂 / 成员表没动 / 不 `opaque`，\
+                 且**每一个**变了的属性都落在 `PLACEMENT_STAMP_ATTRIBUTES` ∪ 额外名单里。\
+                 分母是「做了 L2 差分且真变了的 Modified 候选」。\n\n"
+            ));
+            report.push_str("| 分栏 | 候选数 | 占真变了的候选 |\n|---|---:|---:|\n");
+            let mut widened = 0usize;
+            for bucket in [STAMP_TODAY, STAMP_WITH_CACHID, STAMP_WITHOUT_CACHID] {
+                let count = stamp_totals.get(bucket).copied().unwrap_or_default();
+                if bucket != STAMP_TODAY {
+                    widened += count;
+                }
+                report.push_str(&format!(
+                    "| {bucket} | {count} | {} |\n",
+                    percent(count, diffed)
+                ));
+            }
+            let today = stamp_totals.get(STAMP_TODAY).copied().unwrap_or_default();
+            report.push_str(&format!(
+                "| **合计（放宽后的 stamp-only）** | **{}** | {} |\n",
+                today + widened,
+                percent(today + widened, diffed)
+            ));
+            report.push_str(&format!(
+                "\n题 A 的余数（`CACHID` 与额外名字都跳了、却仍**不算**只戳的候选，共 {}）按挡住它的原因拆：\n\n",
+                stamp_blocked.values().sum::<usize>()
+            ));
+            report.push_str("| 挡住它的 | 候选数 |\n|---|---:|\n");
+            for (reason, count) in &stamp_blocked {
+                report.push_str(&format!("| {reason} | {count} |\n"));
+            }
+            for (title, rows) in [("按 noun", &stamp_by_noun), ("按库", &stamp_by_db)] {
+                report.push_str(&format!("\n### {title}（每栏前 20）\n\n"));
+                report.push_str("| 分栏 | 键 | 候选数 |\n|---|---|---:|\n");
+                for bucket in [STAMP_TODAY, STAMP_WITH_CACHID, STAMP_WITHOUT_CACHID] {
+                    let mut hits: Vec<(&String, &usize)> = rows
+                        .iter()
+                        .filter(|((slot, _), _)| *slot == bucket)
+                        .map(|((_, key), count)| (key, count))
+                        .collect();
+                    hits.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                    if hits.is_empty() {
+                        report.push_str(&format!("| {bucket} | （无） | 0 |\n"));
+                    }
+                    for (key, count) in hits.into_iter().take(20) {
+                        report.push_str(&format!("| {bucket} | `{key}` | {count} |\n"));
+                    }
+                }
+            }
+        }
+        report.push_str(&format!(
+            "\n## 只有 `CACHID` 变的候选（每 noun 最多 {EXAMPLES_PER_NOUN} 例、共 {EXAMPLE_LIMIT} 例，带成因与同窗上下文）\n\n"
+        ));
+        if cachid_only_examples.is_empty() {
+            report.push_str("（无）\n");
+        } else {
+            for line in &cachid_only_examples {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
+        report.push_str(&format!(
+            "\n## `CACHID` 变了、除它之外只改了 DCHC=0 属性的候选（前 {EXAMPLE_LIMIT} 例）\n\n"
+        ));
+        if zero_with_cachid_examples.is_empty() {
+            report.push_str("（无）\n");
+        } else {
+            for line in &zero_with_cachid_examples {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
+        report.push_str(&format!(
+            "\n## `CACHID` 变了、除它之外只有字典外名字 / 成员表变化的候选（前 {EXAMPLE_LIMIT} 例）\n\n"
+        ));
+        if silent_change_examples.is_empty() {
+            report.push_str("（无）\n");
+        } else {
+            for line in &silent_change_examples {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
+        println!("{report}");
+        if let Some(parent) = report_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&report_path, &report) {
+            Ok(()) => println!("report written to {}", report_path.display()),
+            Err(error) => println!("report NOT written to {}: {error}", report_path.display()),
+        }
+        assert!(windows > 0, "语料里一窗都没跑到——目录或模板目录不对");
+    }
+
+    // ───────────────────── S4：刚体前移两态对拍（探针：合格锚点必须相等，被排除的锚点看排除有没有内容） ─────────────────────
+
+    /// 一件生成物身上拿来对拍的量（与 e3d-model `tests/increment_real.rs` 的 `Invariants` 同一口径）：
+    /// 不比网格顶点，比体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵——既钉得住几何，又不被无害的重排绊倒。
+    #[derive(Debug, Clone)]
+    struct ParityInvariants {
+        noun: String,
+        volume: f64,
+        aabb_min: [f64; 3],
+        aabb_max: [f64; 3],
+        triangles: usize,
+        genus: i32,
+        world: [[f64; 3]; 4],
+    }
+
+    /// 容差：旋转分量按绝对 1e-6，平移 / 包围盒 / 体积按相对 1e-6（`Δ = W_T·W_S⁻¹` 再左乘 `W_S` 只剩浮点末位）。
+    fn parity_close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-6 * a.abs().max(b.abs()).max(1.0)
+    }
+
+    fn parity_triple_close(a: &[f64; 3], b: &[f64; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| parity_close(*x, *y))
+    }
+
+    impl ParityInvariants {
+        /// `delta = Some(Δ)`：这件在锚点子树里，先左乘 `Δ`（Δ 前移那一态）再取量；`None` 原样取量。
+        fn of(generated: &e3d_model::GeneratedElement, delta: Option<glam::DMat4>) -> Self {
+            let (mesh, world) = match delta {
+                Some(delta) => (
+                    e3d_model::TriMesh::from_manifold(
+                        &generated
+                            .solid
+                            .transform(&e3d_model::transform::dmat4_to_affine4x3(delta)),
+                    ),
+                    delta * generated.world,
+                ),
+                None => (
+                    e3d_model::TriMesh::from_manifold(&generated.solid),
+                    generated.world,
+                ),
+            };
+            let (aabb_min, aabb_max) = mesh.aabb().unwrap_or(([0.0; 3], [0.0; 3]));
+            Self {
+                noun: generated.noun.clone(),
+                // 体积 / 亏格是刚体不变量，直接取原件的。
+                volume: generated.solid.volume(),
+                aabb_min,
+                aabb_max,
+                triangles: mesh.triangle_count(),
+                genus: generated.solid.genus(),
+                world: [
+                    world.x_axis.truncate().to_array(),
+                    world.y_axis.truncate().to_array(),
+                    world.z_axis.truncate().to_array(),
+                    world.w_axis.truncate().to_array(),
+                ],
+            }
+        }
+
+        /// 哪几个量不一致（空 = 一致）。
+        fn differences(&self, other: &Self) -> Vec<&'static str> {
+            let mut out = Vec::new();
+            if self.noun != other.noun {
+                out.push("noun");
+            }
+            if self.triangles != other.triangles {
+                out.push("triangles");
+            }
+            if self.genus != other.genus {
+                out.push("genus");
+            }
+            if !parity_close(self.volume, other.volume) {
+                out.push("volume");
+            }
+            if !parity_triple_close(&self.aabb_min, &other.aabb_min)
+                || !parity_triple_close(&self.aabb_max, &other.aabb_max)
+            {
+                out.push("aabb");
+            }
+            if !self
+                .world
+                .iter()
+                .zip(&other.world)
+                .all(|(a, b)| parity_triple_close(a, b))
+            {
+                out.push("world");
+            }
+            out
+        }
+    }
+
+    /// 把 [`rigid_anchor`] 的判决折成一个类别名（排除的原因文本是 `anchor_*_exclusion` 写死的）。
+    fn rigid_exclusion_category(rigid: &Result<(), String>) -> &'static str {
+        let Err(reason) = rigid else {
+            return "rigid（合格锚点）";
+        };
+        if reason.contains("cable tray piece") {
+            "桥架件（位姿是伪属性）"
+        } else if reason.contains("placement-derived") {
+            "P23 摆放派生 noun"
+        } else if reason.contains("negative geometry") {
+            "负体（属主 CSG 消费）"
+        } else if reason.contains("profile/path data") {
+            "剖面 / 路径数据"
+        } else if reason.contains("geometry-set member") {
+            "几何集成员"
+        } else if reason.contains("consumes its members") {
+            "非单元挂在消费成员的属主下"
+        } else if reason.contains("inside CWBRAN") {
+            "CWBRAN 子树"
+        } else if reason.contains("point/loop container") {
+            "点 / 环容器之下"
+        } else if reason.contains("structural member") {
+            "规则 M 结构件之下"
+        } else if reason.contains("route container") {
+            "路由容器之内"
+        } else {
+            "其它（世界矩阵 / 属主链算不出）"
+        }
+    }
+
+    /// 一个样本两态对拍的结果。
+    #[derive(Debug)]
+    enum ParityOutcome {
+        /// 两态逐件一致。`moved == 0` 时锚点子树里没有任何生成物——对合格锚点这一样本没有判别力。`tubes` = 根里隐式管身的记录数
+        /// （路由容器那条排除的内容全在管身上，没有管身的分支上它天然保守）。
+        Equal {
+            elements: usize,
+            moved: usize,
+            tubes: usize,
+        },
+        /// 两态不一致，按不一致的记录在哪儿分四处：`inside` = Δ 前移会挪、T 端却长得不一样；`owner_chain` = 锚点祖先
+        /// （消费它的属主）的记录变了；`induced` = 根里别处、但这一窗**没有**直接改过的元素变了（是锚点挪位引起的，如相邻管段 /
+        /// 邻件）；`dirty` = 根里别处、且这一窗自己也改过的元素变了（样本不干净）。只在一态出现的记录按同一规则归进 `induced` / `dirty`。
+        Differs {
+            elements: usize,
+            moved: usize,
+            tubes: usize,
+            inside: Vec<String>,
+            owner_chain: Vec<String>,
+            induced: Vec<String>,
+            dirty: usize,
+        },
+        /// 锚点上下都找不到生成根。
+        NoRoot,
+        /// 任一端生成失败。
+        GenerationError(String),
+    }
+
+    impl ParityOutcome {
+        fn is_equal(&self) -> bool {
+            matches!(self, ParityOutcome::Equal { .. })
+        }
+
+        /// 相等但锚点子树里一件生成物都没有——没有判别力。
+        fn is_powerless(&self) -> bool {
+            matches!(self, ParityOutcome::Equal { moved: 0, .. })
+        }
+
+        /// 不一致、能归到锚点头上（子树内 / 属主链 / 这一窗没改过的邻件）、**且**这一窗在根里没有别的改动
+        /// = 排除有内容 / 合格锚点的红。根里另有改动的窗生产本来就不前移（D1 规则 4），归因也说不清，不作数。
+        fn differs_at_anchor(&self) -> bool {
+            matches!(
+                self,
+                ParityOutcome::Differs { inside, owner_chain, induced, dirty: 0, .. }
+                    if !inside.is_empty() || !owner_chain.is_empty() || !induced.is_empty()
+            )
+        }
+
+        /// 不一致但这一窗在根里另有改动（样本不干净，不作数）。
+        fn differs_only_dirty(&self) -> bool {
+            matches!(self, ParityOutcome::Differs { .. }) && !self.differs_at_anchor()
+        }
+
+        fn summary(&self) -> String {
+            let head =
+                |notes: &Vec<String>| notes.iter().take(4).cloned().collect::<Vec<_>>().join("，");
+            match self {
+                ParityOutcome::Equal {
+                    elements,
+                    moved: 0,
+                    tubes,
+                } => {
+                    format!("两态相等但锚点子树无生成物（{elements} 件，管身 {tubes}），无判别力")
+                }
+                ParityOutcome::Equal {
+                    elements,
+                    moved,
+                    tubes,
+                } => {
+                    format!("两态相等（{elements} 件，管身 {tubes}，其中 {moved} 件由 Δ 前移）")
+                }
+                ParityOutcome::Differs {
+                    elements,
+                    moved,
+                    tubes,
+                    inside,
+                    owner_chain,
+                    induced,
+                    dirty,
+                } => format!(
+                    "两态不等（{elements} 件，管身 {tubes}，Δ 前移 {moved} 件）：子树内 {}，属主链 {}，邻件（窗内未改） {}，窗内另改过的 {dirty}{}{}{}",
+                    inside.len(),
+                    owner_chain.len(),
+                    induced.len(),
+                    if inside.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；子树内：{}", head(inside))
+                    },
+                    if owner_chain.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；属主链：{}", head(owner_chain))
+                    },
+                    if induced.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；邻件：{}", head(induced))
+                    },
+                ),
+                ParityOutcome::NoRoot => "锚点上下都没有生成根".to_string(),
+                ParityOutcome::GenerationError(error) => format!("生成失败：{error}"),
+            }
+        }
+    }
+
+    /// 一个要按 `Δ` 前移的锚点：refno、T 端严格祖先链、`Δ = W_T·W_S⁻¹`。
+    struct ParityAnchor {
+        refno: RefNo,
+        chain_t: Vec<RefnoEnum>,
+        delta: glam::DMat4,
+    }
+
+    /// 一个根上的两态对拍：A = 在 T 上整根重算；B = 在 S 上整根生成、每件记录左乘**最近的锚点**的 `Δ`（锚点自己或最内层的锚点祖先，
+    /// 与 `rigid_motion::nearest_anchor` 同一口径——兄弟锚点各自 `Δ`、祖孙锚点取最内层）。合格锚点按根一起拍（生产里就是一根多锚点一次前移）；
+    /// 被排除的锚点单个拍（问的是「只把它前移对不对」）。
+    /// `changed_in_window` = 这一窗里真变了 / 新建 / 删除的全部元素（含锚点）——根里别处的不一致靠它分「邻件被带动」与「窗内另改过」：
+    /// 记录没变、但它或它的 T 端某个祖先在这一窗里改过（比如属主挪位、兄弟自己也是候选）= 窗内另改过；否则 = 被锚点带动的邻件。
+    fn rigid_parity_of_root(
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+        root: RefNo,
+        anchors: &[ParityAnchor],
+        changed_in_window: &BTreeSet<(u32, u32)>,
+    ) -> ParityOutcome {
+        let a = match e3d_model::generate_subtree(target.element(root)) {
+            Ok(outcome) => outcome,
+            Err(error) => return ParityOutcome::GenerationError(format!("T 端 {root}：{error}")),
+        };
+        let b = match e3d_model::generate_subtree(base.element(root)) {
+            Ok(outcome) => outcome,
+            Err(error) => return ParityOutcome::GenerationError(format!("S 端 {root}：{error}")),
+        };
+        let key = |refno: RefNo| (refno.word0, refno.word1);
+        let anchor_deltas: BTreeMap<(u32, u32), glam::DMat4> = anchors
+            .iter()
+            .map(|anchor| (key(anchor.refno), anchor.delta))
+            .collect();
+        // 所有锚点的 T 端严格祖先（消费锚点的属主都在这里面）。
+        let ancestors: BTreeSet<(u32, u32)> = anchors
+            .iter()
+            .flat_map(|anchor| {
+                anchor
+                    .chain_t
+                    .iter()
+                    .map(|ancestor| key(refno_to_e3d(*ancestor)))
+            })
+            .collect();
+        // 这一窗另外改过的元素 = 真变了的全部 − 锚点自己。
+        let others_changed: BTreeSet<(u32, u32)> = changed_in_window
+            .iter()
+            .copied()
+            .filter(|refno| !anchor_deltas.contains_key(refno))
+            .collect();
+        // S 端：这件记录挂的元素归哪个锚点前移（自己是锚点，或最近的锚点祖先）。按 refno 记一次。
+        let mut nearest_cache: BTreeMap<(u32, u32), Option<glam::DMat4>> = BTreeMap::new();
+        let mut nearest_delta = |refno: RefNo| -> Option<glam::DMat4> {
+            *nearest_cache.entry(key(refno)).or_insert_with(|| {
+                if let Some(delta) = anchor_deltas.get(&key(refno)) {
+                    return Some(*delta);
+                }
+                owner_chain_in_set(base, refno).ok().and_then(|chain| {
+                    chain.iter().find_map(|ancestor| {
+                        anchor_deltas.get(&key(refno_to_e3d(*ancestor))).copied()
+                    })
+                })
+            })
+        };
+        // 这一窗另外改过的元素的全部祖先（T 端找不到的——删除的——用 S 端）：一个元素的**后代**改了，它的网格也可能跟着变
+        // （POINSP 挪位 → 属主 GENSEC 重算），那不是锚点带动的。变的元素太多就不算，全部按「不干净」处理。
+        const DIRTY_ANCESTRY_LIMIT: usize = 5000;
+        let others_ancestors: Option<BTreeSet<(u32, u32)>> =
+            (others_changed.len() <= DIRTY_ANCESTRY_LIMIT).then(|| {
+                let mut out = BTreeSet::new();
+                for changed in &others_changed {
+                    let refno = RefNo::new(changed.0, changed.1);
+                    let chain = owner_chain_in_set(target, refno)
+                        .ok()
+                        .filter(|chain| !chain.is_empty())
+                        .or_else(|| owner_chain_in_set(base, refno).ok())
+                        .unwrap_or_default();
+                    out.extend(chain.iter().map(|ancestor| key(refno_to_e3d(*ancestor))));
+                }
+                out
+            });
+        // T 端：这件记录挂的元素自己、它的某个祖先、或它的某个后代在这一窗里另外改过没有。按 refno 记一次。
+        let mut dirty_cache: BTreeMap<(u32, u32), bool> = BTreeMap::new();
+        let mut is_dirty = |refno: RefNo| -> bool {
+            *dirty_cache.entry(key(refno)).or_insert_with(|| {
+                let Some(others_ancestors) = &others_ancestors else {
+                    return true;
+                };
+                others_changed.contains(&key(refno))
+                    || others_ancestors.contains(&key(refno))
+                    || owner_chain_in_set(target, refno)
+                        .map(|chain| {
+                            chain.iter().any(|ancestor| {
+                                others_changed.contains(&key(refno_to_e3d(*ancestor)))
+                            })
+                        })
+                        .unwrap_or(false)
+            })
+        };
+        let a_map: BTreeMap<e3d_model::GeometryId, ParityInvariants> = a
+            .elements
+            .iter()
+            .map(|generated| {
+                (
+                    generated.geometry_id.clone(),
+                    ParityInvariants::of(generated, None),
+                )
+            })
+            .collect();
+        let mut moved = 0usize;
+        let mut b_map: BTreeMap<e3d_model::GeometryId, (ParityInvariants, bool)> = BTreeMap::new();
+        for generated in &b.elements {
+            let delta = nearest_delta(generated.refno);
+            if delta.is_some() {
+                moved += 1;
+            }
+            b_map.insert(
+                generated.geometry_id.clone(),
+                (ParityInvariants::of(generated, delta), delta.is_some()),
+            );
+        }
+        let id_label = |id: &e3d_model::GeometryId| -> String {
+            match id {
+                e3d_model::GeometryId::Element { refno } => refno.clone(),
+                e3d_model::GeometryId::ImpliedTube {
+                    container_refno, ..
+                } => {
+                    format!("{container_refno}(tube)")
+                }
+            }
+        };
+        // 这件记录挂的元素（管身 = 它的容器）。
+        let id_refno = |id: &e3d_model::GeometryId| -> Option<RefNo> {
+            let text = match id {
+                e3d_model::GeometryId::Element { refno } => refno,
+                e3d_model::GeometryId::ImpliedTube {
+                    container_refno, ..
+                } => container_refno,
+            };
+            crate::fast_model::e3d_model_service::parse_refno(text).ok()
+        };
+        let (mut inside_bad, mut owner_bad, mut induced, mut dirty) =
+            (Vec::new(), Vec::new(), Vec::new(), 0usize);
+        // 不一致的记录归位：被 Δ 挪过的——自己 / 祖先 / 后代在窗内另改过（子树里另有非锚点候选，生产按 D1 规则 4 整根 regen）→ 不干净，
+        // 否则 → 子树内；没被挪过的——锚点的属主链上 → 属主链；自己 / 祖先 / 后代在窗内另改过 → 不干净；否则 → 被带动的邻件。
+        let mut place = |id: &e3d_model::GeometryId, note: String, moved: bool| {
+            let refno = id_refno(id);
+            if moved {
+                if refno.is_some_and(&mut is_dirty) {
+                    dirty += 1;
+                } else {
+                    inside_bad.push(note);
+                }
+            } else if refno.is_some_and(|refno| ancestors.contains(&key(refno))) {
+                owner_bad.push(note);
+            } else if refno.is_some_and(&mut is_dirty) {
+                dirty += 1;
+            } else {
+                induced.push(note);
+            }
+        };
+        for (id, inv_a) in &a_map {
+            match b_map.get(id) {
+                None => place(
+                    id,
+                    format!("{} {} [只在 T]", id_label(id), inv_a.noun),
+                    false,
+                ),
+                Some((inv_b, is_moved)) => {
+                    let diffs = inv_a.differences(inv_b);
+                    if diffs.is_empty() {
+                        continue;
+                    }
+                    let note = format!("{} {} [{}]", id_label(id), inv_a.noun, diffs.join(" "));
+                    if *is_moved {
+                        if std::env::var("AIOS_RIGID_PROBE_DUMP").is_ok_and(|value| value == "1") {
+                            if let Some(refno) = id_refno(id) {
+                                let diff = e3d_model::diff_element(base, target, refno)
+                                    .map(|diff| {
+                                        format!(
+                                            "attrs={:?} members={} owner={:?} type={:?} opaque={}",
+                                            diff.attributes,
+                                            diff.members.is_some(),
+                                            diff.owner_changed,
+                                            diff.type_changed,
+                                            diff.opaque
+                                        )
+                                    })
+                                    .unwrap_or_else(|error| format!("diff error {error}"));
+                                let ws = e3d_model::transform::world_matrix(&base.element(refno))
+                                    .map(|m| m.w_axis.truncate().to_array());
+                                let wt = e3d_model::transform::world_matrix(&target.element(refno))
+                                    .map(|m| m.w_axis.truncate().to_array());
+                                println!(
+                                    "    DUMP {note}: S 端 {diff}; W_S.t={ws:?} W_T.t={wt:?}; Δ态 t={:?} T态 t={:?}; 体积 Δ态 {:.3} T态 {:.3}; aabb Δ态 {:?}..{:?} T态 {:?}..{:?}",
+                                    inv_b.world[3],
+                                    inv_a.world[3],
+                                    inv_b.volume,
+                                    inv_a.volume,
+                                    inv_b.aabb_min,
+                                    inv_b.aabb_max,
+                                    inv_a.aabb_min,
+                                    inv_a.aabb_max
+                                );
+                            }
+                        }
+                        place(id, note, true);
+                    } else {
+                        place(id, note, false);
+                    }
+                }
+            }
+        }
+        for (id, (inv_b, is_moved)) in &b_map {
+            if a_map.contains_key(id) {
+                continue;
+            }
+            let note = format!("{} {} [只在 Δ 态]", id_label(id), inv_b.noun);
+            place(id, note, *is_moved);
+        }
+        let tubes = a_map
+            .keys()
+            .filter(|id| matches!(id, e3d_model::GeometryId::ImpliedTube { .. }))
+            .count();
+        if inside_bad.is_empty() && owner_bad.is_empty() && induced.is_empty() && dirty == 0 {
+            ParityOutcome::Equal {
+                elements: a_map.len(),
+                moved,
+                tubes,
+            }
+        } else {
+            ParityOutcome::Differs {
+                elements: a_map.len(),
+                moved,
+                tubes,
+                inside: inside_bad,
+                owner_chain: owner_bad,
+                induced,
+                dirty,
+            }
+        }
+    }
+
+    /// 一个样本：一窗里一个只动了摆放的候选，连同它的判决与两态对拍结果。
+    struct RigidParitySample {
+        label: String,
+        /// 锚点（合格锚点按根归组时可能不止一个）。
+        anchors: String,
+        category: &'static str,
+        reason: String,
+        /// 只有把 `CACHID` 从差分里剔掉才算「只动了摆放」（`AIOS_RIGID_PROBE_IGNORE_CACHID=1` 才会出现）。
+        cachid_stripped: bool,
+        /// `Δ` 有多大：纯平移给 `|t|`，含旋转标出来——「两态相等」若只是因为挪了 1e-9，得看得出来。
+        delta_note: String,
+        /// 锚点相对生成根的位置。
+        placement: &'static str,
+        root: Option<(RefNo, String)>,
+        outcome: ParityOutcome,
+        elapsed_secs: f64,
+    }
+
+    /// `Δ` 的一句话：纯平移 → `|t|`（mm）；否则「含旋转」+ 平移分量。
+    fn describe_delta(delta: &glam::DMat4) -> String {
+        match crate::data_interface::rigid_motion::pure_translation(delta) {
+            Some(t) => format!("平移 {:.3} mm", t.length()),
+            None => format!(
+                "含旋转，平移分量 {:.3} mm",
+                delta.w_axis.truncate().length()
+            ),
+        }
+    }
+
+    /// 语料目录里的库都登进一张 dbno → 文件表，目录库按需补开（与 e3d-model `tests/increment_real.rs::shared_resolver` 同款）：
+    /// 生成管件 / 型钢 / 托盘要读 CATA，目录库不在池里两端都建不出，对拍就没有判别力。
+    struct ProbeResolver(Arc<e3d_model::DirectoryDbResolver>);
+
+    impl e3d_io::db_element::DbFileResolver for ProbeResolver {
+        fn resolve(&self, dbno: u32) -> Option<e3d_io::db_element::DbFilePin> {
+            e3d_io::db_element::DbFileResolver::resolve(&*self.0, dbno)
+        }
+    }
+
+    /// **S4 探针 / ADR-066 验收 1 的对拍门**（开发计划 2026-09-15 §4 S4，`#[ignore]` 手动）：沿语料每一窗找出**只动了摆放**的候选
+    /// （`ElementDiff::is_placement_only`；`AIOS_RIGID_PROBE_IGNORE_CACHID=1` 时把 `CACHID` 剔掉再判，见计划 §8 Q5），逐个过
+    /// [`rigid_anchor`]，按判决分类（合格 / 十种排除），再按生成根归组（一根里所有只动了摆放的候选一起前移——生产就是一根多锚点一次
+    /// 前移；被排除的锚点同根几个一起问才分得清谁带动了谁），合格锚点的根全拍（`AIOS_RIGID_PROBE_RIGID_SAMPLES`），被排除的每类抽
+    /// `AIOS_RIGID_PROBE_SAMPLES_PER_CATEGORY`（默认 10）个有判别力的根做**两态对拍**：A = 在 T 上整根重算；B = 在 S 上整根生成、每件记录
+    /// 左乘最近锚点的 `Δ = W_T·W_S⁻¹`——逐件比 `GeometryId` 集合、体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵（容差 1e-6）。
+    ///
+    /// 要回答的：(1) **合格锚点两态必须相等**——这是开 `model_transform_cheap_path` 的门（ADR-066 验收 1）；一个不等就是刚体前移的
+    /// 假设破了或漏了一条排除。(2) **被排除的锚点若照 Δ 前移会不会错**——不等（子树内或属主链上的记录长得不一样）= 这条排除有内容
+    /// （S2 / S3 落地前该样本必红）；相等 = 这条排除在这形状上保守，记下。根里别处也变了的样本不干净，单独记。
+    ///
+    /// 语料里若没有自然的纯位姿窗，`AIOS_PROJAMS_GEOMETRY_FILE` + `AIOS_TRANSFORM_WINDOW=base:target` 指定用户在 E3D 里造的一窗。
+    /// 结论是语料的性质，默认不下断言；`AIOS_RIGID_PROBE_STRICT=1` 时合格锚点有一个不等就红。报告写到 `AIOS_RIGID_PROBE_REPORT`
+    /// （默认 `docs/evidence/2026-09-16-rigid-exclusion-parity.md`，按政策不入库）。总时长 `AIOS_RIGID_PROBE_BUDGET_SECS`（默认 1500）到了
+    /// 就不再开新的对拍，只数不拍。
+    #[test]
+    #[ignore = "manual live: walks the sample corpus and regenerates roots at both ends; needs the E3D template directory"]
+    fn probe_rigid_exclusion_windows() {
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+        use e3d_io::engine::ReadOnlyEngine;
+        use e3d_io::index::IndexCandidate;
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        let env_usize = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+        let per_db = env_usize("AIOS_RIGID_PROBE_STEPS_PER_DB", 0);
+        // 被排除的每类抽几个有判别力的样本；合格锚点是开门的门，默认全拍（对拍一根 0.1–1s）。
+        let per_category = env_usize("AIOS_RIGID_PROBE_SAMPLES_PER_CATEGORY", 10);
+        let rigid_samples = env_usize("AIOS_RIGID_PROBE_RIGID_SAMPLES", usize::MAX);
+        let budget_secs = env_usize("AIOS_RIGID_PROBE_BUDGET_SECS", 1500) as f64;
+        let ignore_cachid =
+            std::env::var("AIOS_RIGID_PROBE_IGNORE_CACHID").is_ok_and(|value| value == "1");
+        let strict = std::env::var("AIOS_RIGID_PROBE_STRICT").is_ok_and(|value| value == "1");
+        let pinned: Option<(PathBuf, u32, u32)> =
+            std::env::var("AIOS_TRANSFORM_WINDOW").ok().map(|window| {
+                let (base, target) = window
+                    .split_once(':')
+                    .expect("AIOS_TRANSFORM_WINDOW=base:target");
+                let file = PathBuf::from(
+                    std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(|_| {
+                        r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
+                    }),
+                );
+                (
+                    file,
+                    base.parse().expect("base"),
+                    target.parse().expect("target"),
+                )
+            });
+        let report_path = PathBuf::from(std::env::var("AIOS_RIGID_PROBE_REPORT").unwrap_or_else(
+            |_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-16-rigid-exclusion-parity.md"
+                )
+                .into()
+            },
+        ));
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi_template =
+            template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let started = Instant::now();
+        let existing: Vec<PathBuf> = dirs.iter().filter(|dir| dir.is_dir()).cloned().collect();
+        let resolver = Arc::new(
+            e3d_model::DirectoryDbResolver::scan(&existing, schema.template_dir())
+                .expect("scan the corpus directories into a dbno → file table"),
+        );
+        println!("{}", resolver.summary());
+        println!("resolver ready in {:.1}s", started.elapsed().as_secs_f64());
+
+        // 一库的会话链最后 K 步（新→旧链取链头 K 对，再倒回旧→新）。
+        let chain_steps = |file: &Path| -> Option<Vec<(u32, u32)>> {
+            let sessions: Vec<u32> = ReadOnlyEngine::open(file)
+                .ok()?
+                .sessions()
+                .ok()?
+                .iter()
+                .map(|session| session.session_id)
+                .collect();
+            let mut picked: Vec<(u32, u32)> = sessions
+                .windows(2)
+                .take(if per_db == 0 { usize::MAX } else { per_db })
+                .map(|pair| (pair[1], pair[0]))
+                .collect();
+            picked.reverse();
+            Some(picked)
+        };
+        let mut jobs: Vec<(PathBuf, Vec<(u32, u32)>)> = Vec::new();
+        match &pinned {
+            Some((file, base, target)) => jobs.push((file.clone(), vec![(*base, *target)])),
+            None => {
+                for dir in &existing {
+                    let Ok(sources) = sources_in_dir(dir, &["DESI"]) else {
+                        continue;
+                    };
+                    for source in sources {
+                        if let Some(steps) = chain_steps(&source.file) {
+                            if !steps.is_empty() {
+                                jobs.push((source.file.clone(), steps));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut windows = 0usize;
+        let mut windows_skipped = 0usize;
+        let mut placement_only = 0usize;
+        let mut placement_only_after_strip = 0usize;
+        let mut by_category: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut by_category_noun: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        let mut negligible_by_category: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut sampled: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut sampled_noun: BTreeMap<(&'static str, String), usize> = BTreeMap::new();
+        let mut samples: Vec<RigidParitySample> = Vec::new();
+        let mut budget_exhausted = false;
+        /// 同一类里同一 noun 最多抽几个有判别力的样本（免得 50 个 NCYL 把名额占满）。
+        const PER_NOUN: usize = 2;
+
+        for (file, steps) in jobs {
+            let name = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let open = |sesno: u32| -> Option<Arc<DbSet>> {
+                let set = Arc::new(
+                    DbSet::with_attlib_file_and_resolver(
+                        &attlib,
+                        Box::new(ProbeResolver(resolver.clone())),
+                    )
+                    .ok()?,
+                );
+                set.add_db(DbFilePin {
+                    file: file.clone(),
+                    template: desi_template.clone(),
+                    db_type: Some("DESI".into()),
+                    sesno: Some(sesno),
+                })
+                .ok()?;
+                Some(set)
+            };
+            for (base_sesno, target_sesno) in steps {
+                let label = format!("{name} {base_sesno}→{target_sesno}");
+                let window = match collect_window(&file, base_sesno, target_sesno) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        windows_skipped += 1;
+                        println!("skip {label}: {error}");
+                        continue;
+                    }
+                };
+                let (Some(base), Some(target)) = (open(base_sesno), open(target_sesno)) else {
+                    windows_skipped += 1;
+                    println!("skip {label}: cannot pin both ends");
+                    continue;
+                };
+                windows += 1;
+                // 先只找候选，找到了才扫索引枚举根。顺手记下这一窗真变了 / 新建 / 删除的全部元素——对拍时分「邻件被带动」与「窗内另改过」。
+                let mut anchors: Vec<(RefNo, ElementDiff, bool)> = Vec::new();
+                let mut changed_in_window: BTreeSet<(u32, u32)> = BTreeSet::new();
+                for candidate in &window.diff.changes {
+                    let refno = match candidate {
+                        IndexCandidate::Modified { refno, .. } => *refno,
+                        IndexCandidate::Inserted { refno, .. }
+                        | IndexCandidate::Deleted { refno, .. } => {
+                            changed_in_window.insert((refno.word0, refno.word1));
+                            continue;
+                        }
+                    };
+                    let Ok(diff) = e3d_model::diff_element(&base, &target, refno) else {
+                        continue;
+                    };
+                    if diff.is_unchanged() {
+                        continue;
+                    }
+                    changed_in_window.insert((refno.word0, refno.word1));
+                    let refno = &refno;
+                    if diff.is_placement_only() {
+                        placement_only += 1;
+                        anchors.push((*refno, diff, false));
+                    } else if ignore_cachid && diff.attributes.iter().any(|name| name == "CACHID") {
+                        let mut sans = diff.clone();
+                        sans.attributes.retain(|name| name != "CACHID");
+                        if sans.is_placement_only() {
+                            placement_only_after_strip += 1;
+                            anchors.push((*refno, sans, true));
+                        }
+                    }
+                }
+                if anchors.is_empty() {
+                    continue;
+                }
+                let roots_t = match scan_index(&file, Some(target_sesno)).and_then(|index| {
+                    enumerate_generation_roots(&target, &index.roots, &unit_types)
+                }) {
+                    Ok(roots) => roots,
+                    Err(error) => {
+                        println!("{label}: cannot enumerate generation roots: {error}");
+                        Vec::new()
+                    }
+                };
+                // 先逐个判决，再按生成根归组：一根里所有只动了摆放的候选一起前移（生产里就是一根多锚点一次前移；被排除的
+                // 锚点问的是「若也把它们前移对不对」，同根几个一起问才分得清是谁带动了谁）。
+                struct Judged {
+                    refno: RefNo,
+                    noun: String,
+                    cachid_stripped: bool,
+                    chain_t: Vec<RefnoEnum>,
+                    delta: glam::DMat4,
+                    rigid: Result<(), String>,
+                }
+                let mut judged: Vec<Judged> = Vec::new();
+                for (refno, diff, cachid_stripped) in anchors {
+                    let chain_t = match owner_chain_in_set(&target, refno) {
+                        Ok(chain) => chain,
+                        Err(error) => {
+                            *by_category
+                                .entry("其它（世界矩阵 / 属主链算不出）")
+                                .or_default() += 1;
+                            println!("{label}: {refno} owner chain: {error}");
+                            continue;
+                        }
+                    };
+                    let (delta, rigid) = match rigid_anchor(&base, &target, refno, &chain_t) {
+                        Ok(CandidateKind::Anchor { delta, rigid }) => (delta, rigid),
+                        Ok(CandidateKind::Other(reason)) => (glam::DMat4::IDENTITY, Err(reason)),
+                        Err(error) => (glam::DMat4::IDENTITY, Err(error.to_string())),
+                    };
+                    let category = rigid_exclusion_category(&rigid);
+                    *by_category.entry(category).or_default() += 1;
+                    *by_category_noun
+                        .entry((category, diff.noun.clone()))
+                        .or_default() += 1;
+                    if category == "其它（世界矩阵 / 属主链算不出）" {
+                        // Δ 都算不出，没法对拍。
+                        continue;
+                    }
+                    // `Δ` 小到看不见（|t| < 1e-3 mm 的纯平移）= 存储噪声（重写 POS 的末位），对拍没有判别力，只数不拍。
+                    if crate::data_interface::rigid_motion::pure_translation(&delta)
+                        .is_some_and(|t| t.length() < 1e-3)
+                    {
+                        *negligible_by_category.entry(category).or_default() += 1;
+                        continue;
+                    }
+                    judged.push(Judged {
+                        refno,
+                        noun: diff.noun.clone(),
+                        cachid_stripped,
+                        chain_t,
+                        delta,
+                        rigid,
+                    });
+                }
+                // 生成根：锚点即根 / 最近的祖先根 / 锚点之上（取它名下最多 3 个根）。
+                let roots_of =
+                    |refno: RefNo, chain_t: &[RefnoEnum]| -> Vec<(RefNo, String, &'static str)> {
+                        let anchor_enum = refno_from_e3d(refno);
+                        let mut out: Vec<(RefNo, String, &'static str)> = Vec::new();
+                        if let Some(root) = roots_t.iter().find(|root| root.root == anchor_enum) {
+                            out.push((refno, root.noun.clone(), "锚点即根"));
+                        } else if let Some(root) = chain_t
+                            .iter()
+                            .find_map(|ancestor| roots_t.iter().find(|root| root.root == *ancestor))
+                        {
+                            out.push((refno_to_e3d(root.root), root.noun.clone(), "锚点在根之下"));
+                        } else {
+                            for root in &roots_t {
+                                if out.len() >= 3 {
+                                    break;
+                                }
+                                let root_refno = refno_to_e3d(root.root);
+                                if owner_chain_in_set(&target, root_refno)
+                                    .map(|chain| chain.contains(&anchor_enum))
+                                    .unwrap_or(false)
+                                {
+                                    out.push((root_refno, root.noun.clone(), "锚点在根之上"));
+                                }
+                            }
+                        }
+                        out
+                    };
+                let anchor_label = |item: &Judged| -> String {
+                    format!(
+                        "{} `{}`{}",
+                        item.refno,
+                        item.noun,
+                        if item.cachid_stripped {
+                            "（剔 CACHID）"
+                        } else {
+                            ""
+                        }
+                    )
+                };
+                let mut groups: BTreeMap<(u32, u32), (RefNo, String, &'static str, Vec<&Judged>)> =
+                    BTreeMap::new();
+                for item in &judged {
+                    let roots_here = roots_of(item.refno, &item.chain_t);
+                    if roots_here.is_empty() {
+                        samples.push(RigidParitySample {
+                            label: label.clone(),
+                            anchors: anchor_label(item),
+                            category: rigid_exclusion_category(&item.rigid),
+                            reason: item.rigid.clone().err().unwrap_or_default(),
+                            cachid_stripped: item.cachid_stripped,
+                            delta_note: describe_delta(&item.delta),
+                            placement: "无根",
+                            root: None,
+                            outcome: ParityOutcome::NoRoot,
+                            elapsed_secs: 0.0,
+                        });
+                        continue;
+                    }
+                    for (root_refno, root_noun, placement) in roots_here {
+                        groups
+                            .entry((root_refno.word0, root_refno.word1))
+                            .or_insert_with(|| (root_refno, root_noun, placement, Vec::new()))
+                            .3
+                            .push(item);
+                    }
+                }
+                for (_, (root_refno, root_noun, placement, items)) in groups {
+                    // 样本的类别：全是合格锚点 → rigid；否则按第一个被排除的锚点算，别的排除类别附注「混合」。
+                    let excluded: Vec<&&Judged> =
+                        items.iter().filter(|item| item.rigid.is_err()).collect();
+                    let category: &'static str = match excluded.first() {
+                        None => "rigid（合格锚点）",
+                        Some(item) => rigid_exclusion_category(&item.rigid),
+                    };
+                    let is_rigid = excluded.is_empty();
+                    let mixed: Vec<&'static str> = {
+                        let mut out: Vec<&'static str> = excluded
+                            .iter()
+                            .map(|item| rigid_exclusion_category(&item.rigid))
+                            .filter(|other| *other != category)
+                            .collect();
+                        out.sort_unstable();
+                        out.dedup();
+                        out
+                    };
+                    let reason = excluded
+                        .first()
+                        .and_then(|item| item.rigid.clone().err())
+                        .unwrap_or_default();
+                    let sample_noun = excluded
+                        .first()
+                        .map(|item| item.noun.clone())
+                        .unwrap_or_default();
+                    // 每类抽样（有判别力的才计数；被排除的类里同一 noun 最多 PER_NOUN 个；合格锚点不限 noun）；预算用完只数不拍。
+                    let taken = sampled.entry(category).or_default();
+                    if *taken
+                        >= if is_rigid {
+                            rigid_samples
+                        } else {
+                            per_category
+                        }
+                    {
+                        continue;
+                    }
+                    let per_noun = sampled_noun.entry((category, sample_noun)).or_default();
+                    if !is_rigid && *per_noun >= PER_NOUN {
+                        continue;
+                    }
+                    if started.elapsed().as_secs_f64() > budget_secs {
+                        budget_exhausted = true;
+                        continue;
+                    }
+                    let parity_anchors: Vec<ParityAnchor> = items
+                        .iter()
+                        .map(|item| ParityAnchor {
+                            refno: item.refno,
+                            chain_t: item.chain_t.clone(),
+                            delta: item.delta,
+                        })
+                        .collect();
+                    let clock = Instant::now();
+                    let outcome = rigid_parity_of_root(
+                        &base,
+                        &target,
+                        root_refno,
+                        &parity_anchors,
+                        &changed_in_window,
+                    );
+                    let elapsed_secs = clock.elapsed().as_secs_f64();
+                    let anchors_note = {
+                        let shown: Vec<String> = items
+                            .iter()
+                            .take(4)
+                            .map(|item| anchor_label(item))
+                            .collect();
+                        let mut note = if items.len() > 4 {
+                            format!("{}（共 {} 个锚点）", shown.join("，"), items.len())
+                        } else {
+                            shown.join("，")
+                        };
+                        if !is_rigid && items.len() > excluded.len() {
+                            note.push_str(&format!(
+                                "（另 {} 个合格锚点同根）",
+                                items.len() - excluded.len()
+                            ));
+                        }
+                        if !mixed.is_empty() {
+                            note.push_str(&format!("（混合排除：{}）", mixed.join(" / ")));
+                        }
+                        note
+                    };
+                    let delta_note = if items.len() == 1 {
+                        describe_delta(&items[0].delta)
+                    } else {
+                        format!(
+                            "{} 个锚点各自 Δ；首个 {}",
+                            items.len(),
+                            describe_delta(&items[0].delta)
+                        )
+                    };
+                    println!(
+                        "{label}: [{category}] root {root_refno} {root_noun} ({placement}) 锚点 {anchors_note} → {} ({elapsed_secs:.1}s)",
+                        outcome.summary()
+                    );
+                    // 有判别力 = 真相等（子树里有生成物）或不等且能干净地归到锚点头上；无生成物 / 窗内另改 / 无根 / 生成失败都不算。
+                    if (outcome.is_equal() && !outcome.is_powerless())
+                        || outcome.differs_at_anchor()
+                    {
+                        *taken += 1;
+                        *per_noun += 1;
+                    }
+                    samples.push(RigidParitySample {
+                        label: label.clone(),
+                        anchors: anchors_note,
+                        category,
+                        reason,
+                        cachid_stripped: items.iter().any(|item| item.cachid_stripped),
+                        delta_note,
+                        placement,
+                        root: Some((root_refno, root_noun)),
+                        outcome,
+                        elapsed_secs,
+                    });
+                }
+            }
+        }
+
+        // 汇总。
+        let categories: Vec<&'static str> = {
+            let mut out: Vec<&'static str> = by_category.keys().copied().collect();
+            out.sort_by_key(|category| (*category != "rigid（合格锚点）", *category));
+            out
+        };
+        // 合格锚点的红：不等且能归到锚点头上（窗内另改过的不算）。
+        let rigid_red: Vec<&RigidParitySample> = samples
+            .iter()
+            .filter(|sample| {
+                sample.category == "rigid（合格锚点）" && sample.outcome.differs_at_anchor()
+            })
+            .collect();
+
+        let mut report = String::new();
+        report.push_str("# 刚体前移两态对拍（S4 / ADR-066 验收 1）· 合格锚点与被排除锚点\n\n");
+        report.push_str(&format!(
+            "> 生成：`window_root_plan::tests::probe_rigid_exclusion_windows`，{}；{}；每库步数 {}；每类样本 {per_category}；\
+             忽略 CACHID {}；耗时 {:.0}s{}。按政策不入库（`docs/evidence/`）。\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M"),
+            match &pinned {
+                Some((file, base, target)) => format!("钉住一窗 `{}` {base}→{target}", file.display()),
+                None => format!(
+                    "目录 {}",
+                    existing.iter().map(|dir| format!("`{}`", dir.display())).collect::<Vec<_>>().join("、")
+                ),
+            },
+            if per_db == 0 { "整条链".to_string() } else { per_db.to_string() },
+            if ignore_cachid { "是" } else { "否" },
+            started.elapsed().as_secs_f64(),
+            if budget_exhausted { "（预算用尽，后面的样本只数不拍）" } else { "" },
+        ));
+        report.push_str("## 口径\n\n");
+        report.push_str(
+            "只动了摆放的候选（`ElementDiff::is_placement_only`：`POS` / `ORI` 之外一个字没动）逐个过 `rigid_anchor`，按判决分类；每类抽样做两态对拍：\
+             **A** = 在 T 上整根重算（`generate_subtree`），**B** = 在 S 上整根生成、锚点子树里（含锚点自己）的记录左乘 `Δ = W_T·W_S⁻¹`；逐件比 \
+             `GeometryId` 集合与体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵（旋转分量绝对 1e-6、其余相对 1e-6）。不一致的记录按位置分三处：**子树内**\
+             （Δ 前移会挪、T 却长得不一样）、**属主链**（消费锚点的属主网格变了——负体 / 开孔 / 剖面那类排除的形状）、**别处**（这一窗另有改动，样本不干净）。\
+             合格锚点两态必须相等；被排除的锚点两态不等 = 排除有内容，相等 = 排除在这形状上保守。\n\n",
+        );
+        report.push_str("## 规模\n\n");
+        report.push_str(&format!(
+            "| 项 | 数 |\n|---|---:|\n| 跑过的窗 | {windows} |\n| 跳过的窗 | {windows_skipped} |\n\
+             | 只动了摆放的候选 | {placement_only} |\n| 剔掉 CACHID 后只动了摆放的候选（仅 `AIOS_RIGID_PROBE_IGNORE_CACHID=1`） | {placement_only_after_strip} |\n\
+             | 对拍过的样本（根） | {} |\n\n",
+            samples.len()
+        ));
+        report.push_str("## 按判决分类：候选数、抽样与两态结果\n\n");
+        report.push_str(
+            "「不等·锚点」= 子树内 / 属主链 / 窗内没改过的邻件不一致、且根里没有别的改动；「不等·窗内另改」= 这一窗在根里另有改动（子树里另有非锚点候选、属主挪位、邻件自己改过……生产按 D1 规则 4 整根 regen，样本不作数）；\
+             「无判别力」= 相等但锚点子树里一件生成物都没有；「Δ≈0」= 纯平移且 |t| < 1e-3 mm（重写 POS 的末位噪声），只数不拍。\n\n\
+             | 判决 | 候选 | 其中 Δ≈0（噪声，不拍） | 对拍样本（根） | 两态相等 | 无判别力 | 不等·锚点 | 不等·窗内另改 | 无根 | 生成失败 | 读法 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n",
+        );
+        for category in &categories {
+            let rows: Vec<&RigidParitySample> = samples
+                .iter()
+                .filter(|sample| sample.category == *category)
+                .collect();
+            let powerless = rows
+                .iter()
+                .filter(|sample| sample.outcome.is_powerless())
+                .count();
+            let equal = rows
+                .iter()
+                .filter(|sample| sample.outcome.is_equal())
+                .count()
+                - powerless;
+            let at_anchor = rows
+                .iter()
+                .filter(|sample| sample.outcome.differs_at_anchor())
+                .count();
+            let dirty_only = rows
+                .iter()
+                .filter(|sample| sample.outcome.differs_only_dirty())
+                .count();
+            let no_root = rows
+                .iter()
+                .filter(|sample| matches!(sample.outcome, ParityOutcome::NoRoot))
+                .count();
+            let failed = rows
+                .iter()
+                .filter(|sample| matches!(sample.outcome, ParityOutcome::GenerationError(_)))
+                .count();
+            let reading = if *category == "rigid（合格锚点）" {
+                if at_anchor > 0 {
+                    "**红**：合格锚点两态不等"
+                } else if equal > 0 {
+                    "✔ 有判别力的样本两态全等"
+                } else if rows.is_empty() {
+                    "没有样本"
+                } else {
+                    "样本无判别力 / 不干净 / 生成失败，未判"
+                }
+            } else if at_anchor > 0 && equal == 0 {
+                "✔ 排除有内容"
+            } else if at_anchor > 0 {
+                "排除有内容（部分样本上保守）"
+            } else if equal > 0 {
+                "保守：这形状上 Δ 前移也对"
+            } else {
+                "未判"
+            };
+            report.push_str(&format!(
+                "| {category} | {} | {} | {} | {equal} | {powerless} | {at_anchor} | {dirty_only} | {no_root} | {failed} | {reading} |\n",
+                by_category.get(category).copied().unwrap_or(0),
+                negligible_by_category.get(category).copied().unwrap_or(0),
+                rows.len()
+            ));
+        }
+        report.push_str("\n### 各判决下的 noun（前 8）\n\n| 判决 | noun × 次数 |\n|---|---|\n");
+        for category in &categories {
+            let mut nouns: Vec<(&String, usize)> = by_category_noun
+                .iter()
+                .filter(|((c, _), _)| c == category)
+                .map(|((_, noun), count)| (noun, *count))
+                .collect();
+            nouns.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            report.push_str(&format!(
+                "| {category} | {} |\n",
+                nouns
+                    .iter()
+                    .take(8)
+                    .map(|(noun, count)| format!("`{noun}`×{count}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+        report.push_str("\n## 门：合格锚点\n\n");
+        if rigid_red.is_empty() {
+            report.push_str(&format!(
+                "合格锚点对拍了 {} 个根，两态全部相等（或无根 / 预算未及）。\n",
+                samples
+                    .iter()
+                    .filter(|sample| sample.category == "rigid（合格锚点）")
+                    .count()
+            ));
+        } else {
+            report.push_str("**红**：下列合格锚点两态不等——刚体前移的假设在这些形状上不成立，或漏了一条排除：\n\n");
+            for sample in &rigid_red {
+                report.push_str(&format!(
+                    "- {}: {} root {} → {}\n",
+                    sample.label,
+                    sample.anchors,
+                    sample
+                        .root
+                        .as_ref()
+                        .map(|(refno, noun)| format!("{refno} {noun}"))
+                        .unwrap_or_default(),
+                    sample.outcome.summary()
+                ));
+            }
+        }
+        report.push_str("\n## 样本明细\n\n");
+        report.push_str("| 窗 | 锚点 | 判决 | 排除原因 | Δ | 根 | 锚点位置 | 两态 | 耗时 |\n|---|---|---|---|---|---|---|---|---:|\n");
+        for sample in &samples {
+            report.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {:.1}s |\n",
+                sample.label,
+                sample.anchors,
+                sample.category,
+                if sample.reason.is_empty() {
+                    "—".to_string()
+                } else {
+                    format!("`{}`", sample.reason)
+                },
+                sample.delta_note,
+                sample
+                    .root
+                    .as_ref()
+                    .map(|(refno, noun)| format!("{refno} `{noun}`"))
+                    .unwrap_or_else(|| "—".to_string()),
+                sample.placement,
+                sample.outcome.summary().replace('|', "／"),
+                sample.elapsed_secs
+            ));
+        }
+        println!("{report}");
+        if let Some(parent) = report_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&report_path, &report) {
+            Ok(()) => println!("report written to {}", report_path.display()),
+            Err(error) => println!("report NOT written to {}: {error}", report_path.display()),
+        }
+        assert!(windows > 0, "语料里一窗都没跑到——目录或模板目录不对");
+        if strict {
+            assert!(
+                rigid_red.is_empty(),
+                "合格锚点两态不等：{}",
+                rigid_red
+                    .iter()
+                    .map(|sample| format!("{} {}", sample.label, sample.anchors))
+                    .collect::<Vec<_>>()
+                    .join("；")
+            );
+        }
+    }
+
+    // ───────────────────── S7：图元级重建占比先量（探针：一根重算里有多少单元其实一字没变） ─────────────────────
+
+    /// 一根重算的计数：T 端这一根生成出来的单元记录，有多少件在 S 端同键存在且一字没变。
+    struct UnitRebuildCount {
+        /// T 端单元记录总数（含隐式管身）。
+        units: usize,
+        /// 其中与 S 端同 `GeometryId`、且 [`ParityInvariants`] 全等的——core 用 `SEGREP` 省下、我方白算的那些。
+        unchanged: usize,
+        /// 只在 T 端有的记录（新件，`SEGREP` 也省不掉）。
+        added: usize,
+        /// 只在 S 端有的记录（删件）。
+        removed: usize,
+        /// S 端这一根整棵子树都不在（新根）：一件都省不下。
+        fresh_root: bool,
+    }
+
+    impl UnitRebuildCount {
+        /// 有单元才有占比；T 端一件都没出的根没有判别力，不进统计。
+        fn ratio(&self) -> Option<f64> {
+            (self.units > 0).then(|| self.unchanged as f64 / self.units as f64)
+        }
+    }
+
+    /// 一个被重算的根量到的一行。
+    struct UnitRebuildRow {
+        window: String,
+        root: RefNo,
+        noun: String,
+        /// 这一窗放弃了凭证前移（护栏，ADR-056 实施约束 5）：`roots_S ∩ roots_T` 整批进 `regen`，
+        /// 里头绝大多数根根本没被波及、天然 100% 白算。它是**根级**的浪费，与 S7 问的**单元级**
+        /// 白算不是一回事，报告里分开统计。
+        degraded: bool,
+        count: UnitRebuildCount,
+        elapsed_secs: f64,
+    }
+
+    /// 一根重算里白算了多少：T 端整根生成 vs S 端整根生成（都走 `generate_subtree`），逐件按
+    /// `GeometryId` 配对，用 [`ParityInvariants`] 判「一字没变」——与 S4 同口径：noun / 体积 / 三角数 /
+    /// 亏格 / 包围盒 / 世界矩阵，旋转分量绝对 1e-6、其余相对 1e-6。
+    ///
+    /// S 端这一根不在索引里 = 新根，不去生成（那边本来就没有这棵子树），直接记 `fresh_root`。
+    fn unit_rebuild_of_root(
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+        root: RefNo,
+    ) -> Result<UnitRebuildCount, String> {
+        let invariants = |outcome: &e3d_model::GenerationOutcome| {
+            outcome
+                .elements
+                .iter()
+                .map(|generated| {
+                    (
+                        generated.geometry_id.clone(),
+                        ParityInvariants::of(generated, None),
+                    )
+                })
+                .collect::<BTreeMap<e3d_model::GeometryId, ParityInvariants>>()
+        };
+        let t_map = invariants(
+            &e3d_model::generate_subtree(target.element(root))
+                .map_err(|error| format!("T 端 {root}：{error}"))?,
+        );
+        let fresh_root = !base.element(root).exists().unwrap_or(false);
+        let s_map = if fresh_root {
+            BTreeMap::new()
+        } else {
+            invariants(
+                &e3d_model::generate_subtree(base.element(root))
+                    .map_err(|error| format!("S 端 {root}：{error}"))?,
+            )
+        };
+        let (mut unchanged, mut added) = (0usize, 0usize);
+        for (id, inv_t) in &t_map {
+            match s_map.get(id) {
+                Some(inv_s) if inv_t.differences(inv_s).is_empty() => unchanged += 1,
+                Some(_) => {}
+                None => added += 1,
+            }
+        }
+        Ok(UnitRebuildCount {
+            units: t_map.len(),
+            unchanged,
+            added,
+            removed: s_map.keys().filter(|id| !t_map.contains_key(id)).count(),
+            fresh_root,
+        })
+    }
+
+    /// 一列占比的中位数（空列给 0）。`values` 必须已按升序排好。
+    fn ratio_median(values: &[f64]) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let mid = values.len() / 2;
+        if values.len() % 2 == 1 {
+            values[mid]
+        } else {
+            (values[mid - 1] + values[mid]) / 2.0
+        }
+    }
+
+    /// **S7 探针**（开发计划 2026-09-15 §4 S7 / §8 Q4，`#[ignore]` 手动）：量「每窗被重算的根里，单元记录
+    /// 与上一版逐字相同的占比」。core 的类别 4 只 `SEGREP` 重建变了的那一个图元，我方按 ADR-056 D3 整根
+    /// 重算——这一条量的就是一根重算里有多少件其实白算了。
+    ///
+    /// 做法：沿会话链逐窗走**生产口径**的选根（`WindowRootSources::collect` → [`plan_window_roots`]，开关按
+    /// 默认；`roots_S` = S 端枚举出的根，即「S 时刻每个根都已发布」，与
+    /// `live_ams8000_pinned_windows_land_in_the_expected_buckets` 同口径），对 `plan.regen` 里的每一根两端各整根
+    /// 生成一次，逐件按 `GeometryId` 配对判等（见 [`unit_rebuild_of_root`]）。
+    ///
+    /// **只量不接线**：回执不加字段、[`WindowRootPlan`] 一字不动。结论（占比是否 > 70%）只决定要不要另立
+    /// 单元级发布的 ADR（计划 §8 Q4），不决定今天的行为。
+    ///
+    /// 默认沿 `AIOS_PROJAMS_GEOMETRY_FILE`（ams8000_0001）整条会话链；`AIOS_UNIT_PROBE_CORPUS=1` 改走全语料
+    /// （目录表 `AIOS_POSREF_DIRS`，与 S4 同口径；目录库无论哪种模式都扫进 resolver 按需补开，不然管件 / 型钢 /
+    /// 托盘两端都建不出、占比没有判别力）。每库步数 `AIOS_UNIT_PROBE_STEPS_PER_DB`（0 = 整条链）；总预算
+    /// `AIOS_UNIT_PROBE_BUDGET_SECS`（默认 2400，到了只数不量——大根一根就能跑十几秒）；明细行数
+    /// `AIOS_UNIT_PROBE_DETAIL_ROWS`（默认 3000）。报告写 `AIOS_UNIT_PROBE_REPORT`
+    /// （默认 `docs/evidence/2026-09-16-unit-level-rebuild-measure.md`，按政策不入库）。
+    ///
+    /// **每窗抽样**：`AIOS_UNIT_PROBE_ROOTS_PER_WINDOW`（默认 40，0 = 全量）。ams8000 链头几窗一窗就有上千个
+    /// regen 根（初装 + 护栏退化），一窗能把整条链的预算吃光，于是**跨 regen 名单等距抽**（不是取前 N，前 N 是
+    /// 存储序的一段子树）。regen 根总数照全量计，只有「量到的根」是抽样。
+    #[test]
+    #[ignore = "manual live: walks the session chain and regenerates every regen root at both ends; needs the E3D template directory"]
+    fn probe_unit_level_rebuild_ratio() {
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+        use e3d_io::engine::ReadOnlyEngine;
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        /// 计划 §8 Q4 的阈值：白算占比过了它才建议另立单元级发布的 ADR。
+        const HIGH_RATIO: f64 = 0.70;
+        /// 占比的分档（左闭右开；最后一档只装恰好 100% 的根）。均值 / 中位数看不出形状——
+        /// 「每根省一半」与「一半的根整根白算、另一半一件都省不下」是两件事，要不要做单元级发布
+        /// 的答案也不同。
+        const RATIO_BUCKETS: [(f64, f64, &str); 7] = [
+            (0.0, 1e-9, "0%（一件都省不下）"),
+            (1e-9, 0.25, "0–25%"),
+            (0.25, 0.50, "25–50%"),
+            (0.50, 0.70, "50–70%"),
+            (0.70, 0.90, "70–90%"),
+            (0.90, 1.0, "90–<100%"),
+            (1.0, f64::INFINITY, "100%（整根白算）"),
+        ];
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        let env_usize = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let per_db = env_usize("AIOS_UNIT_PROBE_STEPS_PER_DB", 0);
+        let budget_secs = env_usize("AIOS_UNIT_PROBE_BUDGET_SECS", 2400) as f64;
+        let detail_rows = env_usize("AIOS_UNIT_PROBE_DETAIL_ROWS", 3000);
+        let roots_per_window = env_usize("AIOS_UNIT_PROBE_ROOTS_PER_WINDOW", 40);
+        let whole_corpus = std::env::var("AIOS_UNIT_PROBE_CORPUS").is_ok_and(|value| value == "1");
+        let report_path =
+            PathBuf::from(std::env::var("AIOS_UNIT_PROBE_REPORT").unwrap_or_else(|_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-16-unit-level-rebuild-measure.md"
+                )
+                .into()
+            }));
+        let pinned_file = PathBuf::from(
+            std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
+            }),
+        );
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi_template =
+            template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let started = Instant::now();
+        let existing: Vec<PathBuf> = dirs.iter().filter(|dir| dir.is_dir()).cloned().collect();
+        let resolver = Arc::new(
+            e3d_model::DirectoryDbResolver::scan(&existing, schema.template_dir())
+                .expect("scan the corpus directories into a dbno → file table"),
+        );
+        println!("{}", resolver.summary());
+        println!("resolver ready in {:.1}s", started.elapsed().as_secs_f64());
+
+        // 一库的会话链最后 K 步（新→旧链取链头 K 对，再倒回旧→新），与 S4 同款。
+        let chain_steps = |file: &Path| -> Option<Vec<(u32, u32)>> {
+            let sessions: Vec<u32> = ReadOnlyEngine::open(file)
+                .ok()?
+                .sessions()
+                .ok()?
+                .iter()
+                .map(|session| session.session_id)
+                .collect();
+            let mut picked: Vec<(u32, u32)> = sessions
+                .windows(2)
+                .take(if per_db == 0 { usize::MAX } else { per_db })
+                .map(|pair| (pair[1], pair[0]))
+                .collect();
+            picked.reverse();
+            Some(picked)
+        };
+        let mut jobs: Vec<(PathBuf, Vec<(u32, u32)>)> = Vec::new();
+        if whole_corpus {
+            for dir in &existing {
+                let Ok(sources) = sources_in_dir(dir, &["DESI"]) else {
+                    continue;
+                };
+                for source in sources {
+                    if let Some(steps) = chain_steps(&source.file) {
+                        if !steps.is_empty() {
+                            jobs.push((source.file.clone(), steps));
+                        }
+                    }
+                }
+            }
+        } else if let Some(steps) = chain_steps(&pinned_file) {
+            jobs.push((pinned_file.clone(), steps));
+        }
+        assert!(
+            !jobs.is_empty(),
+            "一条会话链都没找到——AIOS_PROJAMS_GEOMETRY_FILE / AIOS_POSREF_DIRS 不对"
+        );
+
+        let mut windows = 0usize;
+        let mut windows_skipped = 0usize;
+        let mut windows_degraded = 0usize;
+        let mut windows_with_regen = 0usize;
+        let mut sampled_windows = 0usize;
+        let mut regen_roots = 0usize;
+        let mut degraded_regen_roots = 0usize;
+        let mut over_budget = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        let mut rows: Vec<UnitRebuildRow> = Vec::new();
+        let mut budget_exhausted = false;
+
+        for (file, steps) in jobs {
+            let name = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let open = |sesno: u32| -> Option<Arc<DbSet>> {
+                let set = Arc::new(
+                    DbSet::with_attlib_file_and_resolver(
+                        &attlib,
+                        Box::new(ProbeResolver(resolver.clone())),
+                    )
+                    .ok()?,
+                );
+                set.add_db(DbFilePin {
+                    file: file.clone(),
+                    template: desi_template.clone(),
+                    db_type: Some("DESI".into()),
+                    sesno: Some(sesno),
+                })
+                .ok()?;
+                Some(set)
+            };
+            for (base_sesno, target_sesno) in steps {
+                let label = format!("{name} {base_sesno}→{target_sesno}");
+                let (Some(base), Some(target)) = (open(base_sesno), open(target_sesno)) else {
+                    windows_skipped += 1;
+                    println!("skip {label}: cannot pin both ends");
+                    continue;
+                };
+                let sources = match WindowRootSources::collect(
+                    &file,
+                    base_sesno,
+                    target_sesno,
+                    &base,
+                    &target,
+                    &unit_types,
+                    &[],
+                ) {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        windows_skipped += 1;
+                        println!("skip {label}: {error}");
+                        continue;
+                    }
+                };
+                windows += 1;
+                // roots_S = S 端枚举出的根：「S 时刻每个根都已发布」，凭证前移那一桶才算得对。
+                let roots_s: Vec<PersistedRoot> = match scan_index(&file, Some(base_sesno))
+                    .and_then(|index| enumerate_generation_roots(&base, &index.roots, &unit_types))
+                {
+                    Ok(roots) => roots
+                        .into_iter()
+                        .map(|root| PersistedRoot {
+                            refno: root.root,
+                            noun: root.noun,
+                        })
+                        .collect(),
+                    Err(error) => {
+                        println!("{label}: cannot enumerate base roots: {error}");
+                        Vec::new()
+                    }
+                };
+                let impact = sources.impact(&roots_s);
+                let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+                let degraded = plan.degraded.is_some();
+                if degraded {
+                    windows_degraded += 1;
+                }
+                regen_roots += plan.regen.len();
+                if !plan.regen.is_empty() {
+                    windows_with_regen += 1;
+                }
+                if degraded {
+                    degraded_regen_roots += plan.regen.len();
+                }
+                // 跨 regen 名单等距抽样：一窗上千个根时不让它吃光整条链的预算，又不至于只看存储序的一段子树。
+                let stride = match roots_per_window {
+                    0 => 1,
+                    limit => plan.regen.len().div_ceil(limit.max(1)).max(1),
+                };
+                if stride > 1 {
+                    sampled_windows += 1;
+                }
+                for root in plan.regen.iter().step_by(stride) {
+                    if started.elapsed().as_secs_f64() > budget_secs {
+                        budget_exhausted = true;
+                        over_budget += 1;
+                        continue;
+                    }
+                    let refno = refno_to_e3d(root.root);
+                    let clock = Instant::now();
+                    match unit_rebuild_of_root(&base, &target, refno) {
+                        Ok(count) => {
+                            let elapsed_secs = clock.elapsed().as_secs_f64();
+                            println!(
+                                "{label}: root {refno} `{}` 单元 {} 未变 {}（{:.1}%）新件 {} 删件 {}{} ({elapsed_secs:.1}s)",
+                                root.noun,
+                                count.units,
+                                count.unchanged,
+                                count.ratio().unwrap_or(0.0) * 100.0,
+                                count.added,
+                                count.removed,
+                                if count.fresh_root {
+                                    "，S 端新根"
+                                } else {
+                                    ""
+                                },
+                            );
+                            rows.push(UnitRebuildRow {
+                                window: label.clone(),
+                                root: refno,
+                                noun: root.noun.clone(),
+                                degraded,
+                                count,
+                                elapsed_secs,
+                            });
+                        }
+                        Err(error) => {
+                            println!("{label}: root {refno} `{}` 量不了：{error}", root.noun);
+                            failed.push(format!("{label} {refno} `{}`：{error}", root.noun));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 统计：只有 T 端真出了单元的根才有占比（零件的根既省不下也没什么可算，单列）。
+        let measured: Vec<&UnitRebuildRow> =
+            rows.iter().filter(|row| row.count.units > 0).collect();
+        let empty_roots = rows.len() - measured.len();
+        let fresh_roots = measured.iter().filter(|row| row.count.fresh_root).count();
+        let share = |part: usize, whole: usize| -> f64 {
+            if whole == 0 {
+                0.0
+            } else {
+                part as f64 / whole as f64 * 100.0
+            }
+        };
+
+        /// 一组根上的四个数 + 阈值以上的那一撮。「按根」= 每根一个占比再统计（小根与大根等权）；
+        /// 「按单元加权」= 把每件记录当一票（均值 = 白算件 / 重算件总数；中位数 = 按占比排开、
+        /// 累计单元数过半那一根的占比）。
+        struct RatioStats {
+            roots: usize,
+            units: usize,
+            unchanged: usize,
+            added: usize,
+            removed: usize,
+            root_mean: f64,
+            root_median: f64,
+            unit_mean: f64,
+            unit_median: f64,
+            high_roots: usize,
+            high_units: usize,
+            /// 一件都没变的根：整根重算完全白算，`SEGREP` 在这些根上一个图元都不必碰。
+            whole_roots: usize,
+            /// 占比落在 [`RATIO_BUCKETS`] 各档里的根数。
+            buckets: [usize; RATIO_BUCKETS.len()],
+        }
+
+        let stats_of = |rows: &[&UnitRebuildRow]| -> RatioStats {
+            let units: usize = rows.iter().map(|row| row.count.units).sum();
+            let unchanged: usize = rows.iter().map(|row| row.count.unchanged).sum();
+            let mut sorted: Vec<f64> = rows
+                .iter()
+                .map(|row| row.count.ratio().unwrap_or(0.0))
+                .collect();
+            sorted.sort_by(f64::total_cmp);
+            let mut by_ratio: Vec<&&UnitRebuildRow> = rows.iter().collect();
+            by_ratio.sort_by(|a, b| {
+                a.count
+                    .ratio()
+                    .unwrap_or(0.0)
+                    .total_cmp(&b.count.ratio().unwrap_or(0.0))
+            });
+            let unit_median = {
+                let half = units as f64 / 2.0;
+                let (mut seen, mut out) = (0usize, 0.0);
+                for row in &by_ratio {
+                    seen += row.count.units;
+                    if seen as f64 >= half {
+                        out = row.count.ratio().unwrap_or(0.0);
+                        break;
+                    }
+                }
+                out
+            };
+            let high: Vec<&&UnitRebuildRow> = by_ratio
+                .iter()
+                .copied()
+                .filter(|row| row.count.ratio().unwrap_or(0.0) > HIGH_RATIO)
+                .collect();
+            RatioStats {
+                roots: rows.len(),
+                units,
+                unchanged,
+                added: rows.iter().map(|row| row.count.added).sum(),
+                removed: rows.iter().map(|row| row.count.removed).sum(),
+                root_mean: if rows.is_empty() {
+                    0.0
+                } else {
+                    sorted.iter().sum::<f64>() / rows.len() as f64
+                },
+                root_median: ratio_median(&sorted),
+                unit_mean: if units == 0 {
+                    0.0
+                } else {
+                    unchanged as f64 / units as f64
+                },
+                unit_median,
+                high_roots: high.len(),
+                high_units: high.iter().map(|row| row.count.units).sum(),
+                whole_roots: by_ratio
+                    .iter()
+                    .filter(|row| row.count.unchanged == row.count.units)
+                    .count(),
+                buckets: RATIO_BUCKETS.map(|(low, high, _)| {
+                    sorted
+                        .iter()
+                        .filter(|ratio| **ratio >= low && **ratio < high)
+                        .count()
+                }),
+            }
+        };
+
+        let steady: Vec<&UnitRebuildRow> = measured
+            .iter()
+            .copied()
+            .filter(|row| !row.degraded)
+            .collect();
+        let fallen: Vec<&UnitRebuildRow> = measured
+            .iter()
+            .copied()
+            .filter(|row| row.degraded)
+            .collect();
+        // 真·重算 = 稳态窗里 S 端已经有的根。新根是**头一回**生成、没有「上一版」可比，占比按定义是 0；
+        // 它照样耗机器，但 core 那边也得整件建（`REPELE`），不是 `SEGREP` 能省的，掺进来只会把答案拖低。
+        let rebuilt: Vec<&UnitRebuildRow> = steady
+            .iter()
+            .copied()
+            .filter(|row| !row.count.fresh_root)
+            .collect();
+        // 稳健性的一刀：真·重算里再把**整根白算**（一件都没变）剔掉。那种根这一窗压根不该重算，是选根 /
+        // 元数据门的账（S6 / 计划 §8 Q6）；单元级发布在它们身上也是一个图元都不碰，算进来等于拿另一条线
+        // 的浪费给 `SEGREP` 记功。剩下的才是「确实变了、但大半件没变」——单元级发布唯一能救的形状。
+        // 结论要经得住这一刀：这一撮仍 > 70%，立 ADR 的建议才不是被 100% 那一档抬上去的。
+        let partial: Vec<&UnitRebuildRow> = rebuilt
+            .iter()
+            .copied()
+            .filter(|row| row.count.unchanged < row.count.units)
+            .collect();
+        let all_stats = stats_of(&measured);
+        let steady_stats = stats_of(&steady);
+        let rebuilt_stats = stats_of(&rebuilt);
+        let partial_stats = stats_of(&partial);
+        let degraded_stats = stats_of(&fallen);
+        let mut by_ratio: Vec<&&UnitRebuildRow> = measured.iter().collect();
+        by_ratio.sort_by(|a, b| {
+            a.count
+                .ratio()
+                .unwrap_or(0.0)
+                .total_cmp(&b.count.ratio().unwrap_or(0.0))
+        });
+
+        #[derive(Default)]
+        struct NounTally {
+            roots: usize,
+            units: usize,
+            unchanged: usize,
+            high: usize,
+        }
+        let mut by_noun: BTreeMap<String, NounTally> = BTreeMap::new();
+        for row in &measured {
+            let tally = by_noun.entry(row.noun.clone()).or_default();
+            tally.roots += 1;
+            tally.units += row.count.units;
+            tally.unchanged += row.count.unchanged;
+            if row.count.ratio().unwrap_or(0.0) > HIGH_RATIO {
+                tally.high += 1;
+            }
+        }
+        let mut noun_rows: Vec<(&String, &NounTally)> = by_noun.iter().collect();
+        noun_rows.sort_by(|a, b| {
+            b.1.units
+                .cmp(&a.1.units)
+                .then_with(|| b.1.roots.cmp(&a.1.roots))
+                .then_with(|| a.0.cmp(b.0))
+        });
+
+        // 结论看**稳态窗里真·重算的那些根**：退化窗整批重算 `roots_S ∩ roots_T`，里头的根压根没被波及、
+        // 天然 100% 白算，那是根级护栏的账；新根没有上一版，占比按定义是 0。两头都掺进来，答案量的就
+        // 不是 S7 问的那件事了。没样本时逐级退回。
+        let headline = if rebuilt_stats.roots > 0 {
+            &rebuilt_stats
+        } else if steady_stats.roots > 0 {
+            &steady_stats
+        } else {
+            &all_stats
+        };
+        let verdict = if headline.unit_mean > HIGH_RATIO {
+            "**> 70%**：白算的量够大，建议另立单元级（图元级）发布的 ADR"
+        } else {
+            "**≤ 70%**：白算的量没到阈值，建议**不立** ADR，只把本次结论记进计划 §8 Q4"
+        };
+
+        let mut report = String::new();
+        report
+            .push_str("# 图元级重建占比先量（S7 / 计划 §8 Q4）· 一根重算里有多少单元一字没变\n\n");
+        report.push_str(&format!(
+            "> 生成：`window_root_plan::tests::probe_unit_level_rebuild_ratio`，{}；{}；每库步数 {}；\
+             每窗最多量 {} 个 regen 根（跨名单等距抽）；耗时 {:.0}s{}。只量不接线（回执不加字段）。\
+             按政策不入库（`docs/evidence/`）。\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M"),
+            if whole_corpus {
+                format!(
+                    "全语料 {}",
+                    existing
+                        .iter()
+                        .map(|dir| format!("`{}`", dir.display()))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            } else {
+                format!("整条会话链 `{}`", pinned_file.display())
+            },
+            if per_db == 0 {
+                "整条链".to_string()
+            } else {
+                per_db.to_string()
+            },
+            if roots_per_window == 0 {
+                "全部".to_string()
+            } else {
+                roots_per_window.to_string()
+            },
+            started.elapsed().as_secs_f64(),
+            if budget_exhausted {
+                "（预算用尽，后面的根只数不量）"
+            } else {
+                ""
+            },
+        ));
+        report.push_str("## 口径\n\n");
+        report.push_str(
+            "逐窗走生产口径的选根（`WindowRootSources::collect` → `plan_window_roots`，开关按默认；`roots_S` = S 端枚举出的根 \
+             = 「S 时刻每个根都已发布」），对 `plan.regen` 里的每一根两端各整根生成一次（`generate_subtree`），逐件按 `GeometryId` \
+             配对。**「未变」= 两端同键、且 `ParityInvariants` 全等**——与 S4 对拍门同一口径同一容差：noun / 体积 / 三角数 / 亏格 / \
+             包围盒 / 世界矩阵，**旋转分量绝对 1e-6、平移 / 包围盒 / 体积相对 1e-6**（`parity_close`：`|a−b| ≤ 1e-6·max(|a|,|b|,1)`），\
+             不比网格顶点。占比 = 未变 / T 端单元总数（含隐式管身）。S 端索引里没有的根 = 新根，一件都省不下（占比 0）。\n\n",
+        );
+        report.push_str("## 规模\n\n");
+        report.push_str(&format!(
+            "| 项 | 数 |\n|---|---:|\n\
+             | 跑过的窗 | {windows} |\n\
+             | 跳过的窗 | {windows_skipped} |\n\
+             | 退化窗（放弃凭证前移，`roots_S ∩ roots_T` 全进 regen） | {windows_degraded} |\n\
+             | 有 regen 根的窗 | {windows_with_regen} |\n\
+             | 抽过样的窗（regen 根多于每窗上限） | {sampled_windows} |\n\
+             | regen 根（全量计数） | {regen_roots} |\n\
+             | 其中落在退化窗里的 | {degraded_regen_roots} |\n\
+             | 量到的根（抽样后） | {} |\n\
+             | 其中有单元、进统计的根 | {} |\n\
+             | T 端零单元的根（无判别力） | {empty_roots} |\n\
+             | S 端不存在的新根 | {fresh_roots} |\n\
+             | 预算用尽没量的根 | {over_budget} |\n\
+             | 生成失败的根 | {} |\n\
+             | T 端单元记录合计 | {} |\n\
+             | 其中一字没变（白算） | {} |\n\
+             | 只在 T 端（新件） | {} |\n\
+             | 只在 S 端（删件） | {} |\n\n",
+            rows.len(),
+            measured.len(),
+            failed.len(),
+            all_stats.units,
+            all_stats.unchanged,
+            all_stats.added,
+            all_stats.removed,
+        ));
+        report.push_str("## 占比\n\n");
+        report.push_str(
+            "「按根」= 每根一个占比再统计（小根与大根等权）；「按单元加权」= 把每件记录当一票\
+             （均值 = 白算件 / 重算件总数；中位数 = 按占比排开、累计单元数过半那一根的占比）。\n\n\
+             **三群根要分开看**，掺在一起量的就不是 S7 问的那件事：\n\n\
+             1. **真·重算**（稳态窗 ∧ S 端已有这根）——S7 问的正是它：一个确实被波及、且有「上一版」可比的根里，\
+             有多少件其实没变。**结论读这一段。**\n\
+             2. **新根**（S 端没有这棵子树）——头一回生成，没有上一版，占比按定义 0；core 那边也得整件建\
+             （`REPELE`），不是 `SEGREP` 能省的。\n\
+             3. **退化窗**（护栏收走凭证前移）——`roots_S ∩ roots_T` 整批送进 `regen`，里头绝大多数根这一窗压根\
+             没被波及、天然 100% 白算。那是**根级**护栏的账，单元级发布不是它的解。\n\n\
+             再加**一刀稳健性检查**：真·重算里把整根白算（一件都没变）的根也剔掉。那种根同样是「这一窗不该重算它」\
+             的账，`SEGREP` 在它们身上一个图元都不碰；剩下的「确实变了、但大半件没变」才是单元级发布唯一能救的形状。\
+             结论要经得住这一刀。\n\n",
+        );
+        let ratio_block = |title: &str, stats: &RatioStats| -> String {
+            format!(
+                "### {title}（{} 根 / {} 单元）\n\n\
+                 | 统计 | 按根 | 按单元加权 |\n|---|---:|---:|\n\
+                 | 均值 | {:.1}% | {:.1}% |\n\
+                 | 中位数 | {:.1}% | {:.1}% |\n\n\
+                 占比 **> 70%** 的根：**{} / {}（{:.1}%）**，它们名下的单元记录 {} / {}（{:.1}%）。\n\n",
+                stats.roots,
+                stats.units,
+                stats.root_mean * 100.0,
+                stats.unit_mean * 100.0,
+                stats.root_median * 100.0,
+                stats.unit_median * 100.0,
+                stats.high_roots,
+                stats.roots,
+                share(stats.high_roots, stats.roots),
+                stats.high_units,
+                stats.units,
+                share(stats.high_units, stats.units),
+            )
+        };
+        report.push_str(&ratio_block(
+            "稳态窗 · 真·重算（结论看这一段）",
+            &rebuilt_stats,
+        ));
+        report.push_str(&ratio_block(
+            "稳态窗 · 真·重算 ∧ 非整根白算（稳健性检查）",
+            &partial_stats,
+        ));
+        report.push_str(&ratio_block("稳态窗 · 含新根", &steady_stats));
+        report.push_str(&ratio_block(
+            "退化窗（根级护栏的账，参考）",
+            &degraded_stats,
+        ));
+        report.push_str(&ratio_block("全部合计", &all_stats));
+        report.push_str("### 占比的形状（根数分档）\n\n");
+        report
+            .push_str("| 档 | 真·重算 | 稳态含新根 | 退化窗 | 全部 |\n|---|---:|---:|---:|---:|\n");
+        for (index, (_, _, label)) in RATIO_BUCKETS.iter().enumerate() {
+            report.push_str(&format!(
+                "| {label} | {} | {} | {} | {} |\n",
+                rebuilt_stats.buckets[index],
+                steady_stats.buckets[index],
+                degraded_stats.buckets[index],
+                all_stats.buckets[index],
+            ));
+        }
+        report.push('\n');
+        report.push_str("## 按 noun 的分布（前 10，按单元记录数排）\n\n");
+        report.push_str(
+            "| 根 noun | 根数 | 单元 | 未变 | 占比 | 其中 >70% 的根 |\n|---|---:|---:|---:|---:|---:|\n",
+        );
+        for (noun, tally) in noun_rows.iter().take(10) {
+            report.push_str(&format!(
+                "| `{noun}` | {} | {} | {} | {:.1}% | {} |\n",
+                tally.roots,
+                tally.units,
+                tally.unchanged,
+                share(tally.unchanged, tally.units),
+                tally.high,
+            ));
+        }
+        if noun_rows.len() > 10 {
+            report.push_str(&format!(
+                "| …（另 {} 个 noun 略） | | | | | |\n",
+                noun_rows.len() - 10
+            ));
+        }
+        report.push_str("\n## 结论\n\n");
+        report.push_str(&format!(
+            "真·重算的根上，按单元加权的白算占比 **{:.1}%**（按根中位数 {:.1}%、按根均值 {:.1}%），{}。\n\n",
+            headline.unit_mean * 100.0,
+            headline.root_median * 100.0,
+            headline.root_mean * 100.0,
+            verdict
+        ));
+        report.push_str(&format!(
+            "**答案对「算不算新根」敏感，拍板前先看这一条**：把新根（头一回生成、没有上一版）也算进来，\
+             同一批窗的占比是 {:.1}%；再把退化窗掺进来是 {:.1}%。新根 core 那边也得整件建，\
+             `SEGREP` 省不了它——所以结论取不含新根的那个数。\n\n",
+            steady_stats.unit_mean * 100.0,
+            all_stats.unit_mean * 100.0,
+        ));
+        report.push_str(&format!(
+            "**整根白算**（一件都没变）的根：真·重算 {} / {}（{:.1}%）、全部 {} / {}（{:.1}%）。\
+             这一撮不是 `SEGREP` 的题——单元级发布在这些根上也是一个图元都不碰，问题是\
+             「这一窗根本不该重算这根」，属于选根 / 元数据门那条线（S6 / 计划 §8 Q6），另算。\n",
+            headline.whole_roots,
+            headline.roots,
+            share(headline.whole_roots, headline.roots),
+            all_stats.whole_roots,
+            all_stats.roots,
+            share(all_stats.whole_roots, all_stats.roots),
+        ));
+        report.push_str(&format!(
+            "\n**这一刀之后结论还站得住**：把整根白算的那一撮也剔掉，只看「确实变了、但大半件没变」的 {} 根\
+             （{} 单元），按单元加权的白算占比仍有 **{:.1}%**——所以 > 70% 不是被 100% 那一档抬上去的。\
+             但**按根**看是另一回事：这一撮的按根中位数只有 {:.1}%、均值 {:.1}%，占比 > 70% 的根 {} / {}（{:.1}%），\
+             形状是两头堆（一头一件都省不下、一头几乎整根白算）。单元级发布的收益集中在少数大根上，\
+             写 ADR 时收益模型要按**单元**算，不能按根数拍。\n",
+            partial_stats.roots,
+            partial_stats.units,
+            partial_stats.unit_mean * 100.0,
+            partial_stats.root_median * 100.0,
+            partial_stats.root_mean * 100.0,
+            partial_stats.high_roots,
+            partial_stats.roots,
+            share(partial_stats.high_roots, partial_stats.roots),
+        ));
+        if !failed.is_empty() {
+            report.push_str(&format!("\n## 量不了的根（{} 个）\n\n", failed.len()));
+            for line in failed.iter().take(60) {
+                report.push_str(&format!("- {line}\n"));
+            }
+            if failed.len() > 60 {
+                report.push_str(&format!("- …（另 {} 条略）\n", failed.len() - 60));
+            }
+        }
+        report.push_str(&format!(
+            "\n## 明细：每根一行（占比升序，前 {detail_rows} 行）\n\n"
+        ));
+        report.push_str(
+            "| 窗 | 根 | noun | 单元 | 未变 | 占比 | 新件 | 删件 | 新根 | 退化窗 | 耗时 |\n\
+             |---|---|---|---:|---:|---:|---:|---:|---|---|---:|\n",
+        );
+        for row in by_ratio.iter().take(detail_rows) {
+            report.push_str(&format!(
+                "| {} | {} | `{}` | {} | {} | {:.1}% | {} | {} | {} | {} | {:.1}s |\n",
+                row.window,
+                row.root,
+                row.noun,
+                row.count.units,
+                row.count.unchanged,
+                row.count.ratio().unwrap_or(0.0) * 100.0,
+                row.count.added,
+                row.count.removed,
+                if row.count.fresh_root { "是" } else { "—" },
+                if row.degraded { "是" } else { "—" },
+                row.elapsed_secs,
+            ));
+        }
+        if by_ratio.len() > detail_rows {
+            report.push_str(&format!(
+                "| …（另 {} 根略，调 `AIOS_UNIT_PROBE_DETAIL_ROWS`） | | | | | | | | | | |\n",
+                by_ratio.len() - detail_rows
+            ));
+        }
+        if empty_roots > 0 {
+            report.push_str(&format!(
+                "\n另有 {empty_roots} 个根 T 端一件生成物都没有（容器根 / 全是非几何成员），不进占比统计。\n"
+            ));
+        }
+        println!("{report}");
+        if let Some(parent) = report_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&report_path, &report) {
+            Ok(()) => println!("report written to {}", report_path.display()),
+            Err(error) => println!("report NOT written to {}: {error}", report_path.display()),
+        }
+        assert!(windows > 0, "语料里一窗都没跑到——目录或模板目录不对");
+    }
+
+    // ───── Q6：只 CACHID 候选的根级多算先量（t-49 / 计划 §8 Q6） ─────
+    // 口径按 t-77 `docs/evidence/2026-09-16-q6-cachid-only-cost-metric-design.md`：
+    // A = 今天的生产口径选根；B = 只 CACHID 的候选既不上卷也不做闭包种子。差集就是「多算的根」。
+
+    /// 「只动了戳」的候选（口径 §1.1 五条）：记录真变了，没换类型 / 没改挂 / 成员表没动 / 不 `opaque`，
+    /// 且**每一个**变了的属性都在 [`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`]
+    /// （今天 = `["CACHID"]`，t-47 落地的常量）里。名单只写一份——引用常量，不写字面量。
+    ///
+    /// 与 `ElementDiff::is_placement_only` **互斥**，别混用：那个问「除了摆放还动了别的没有」（戳跟着
+    /// 摆放一起变不算数，Q5 / t-47），要求 `POS`/`ORI` 至少动一项；这个问「除了戳还动了没有」，要求
+    /// 摆放一项都没动。
+    fn stamp_only(diff: &ElementDiff) -> bool {
+        stamp_only_with(diff, &[])
+    }
+
+    /// [`stamp_only`] 的参数化版本：`extra` 里的名字**也**当成戳。`extra` 为空时与 `stamp_only`
+    /// 逐位相同——五条判据只写这一份，缺省路径不另开分支。
+    ///
+    /// 只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问：`extra` 由探针旋钮
+    /// `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 给，缺省空。生产常量 `PLACEMENT_STAMP_ATTRIBUTES` 不动。
+    fn stamp_only_with(diff: &ElementDiff, extra: &[String]) -> bool {
+        !diff.is_unchanged()
+            && diff.type_changed.is_none()
+            && diff.owner_changed.is_none()
+            && diff.members.is_none()
+            && !diff.opaque
+            && !diff.attributes.is_empty()
+            && diff.attributes.iter().all(|name| {
+                e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES.contains(&name.as_str())
+                    || extra.iter().any(|allowed| allowed == name.as_str())
+            })
+    }
+
+    /// 探针旋钮：额外当成戳的属性名（`;` 或 `,` 分隔，自动转大写）。缺省空 = 今天的口径。
+    fn extra_stamp_names(knob: &str) -> Vec<String> {
+        std::env::var(knob)
+            .ok()
+            .map(|value| {
+                value
+                    .split([';', ','])
+                    .map(|name| name.trim().to_ascii_uppercase())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn stamp_only_takes_the_stamp_alone_and_nothing_else() {
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "GENSEC".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        assert!(stamp_only(&diff(&["CACHID"])));
+        // 戳 + 业务元数据：那是 S6 元数据门的地（S8「含戳的只 DCHC=0 候选」），不是只动了戳。
+        assert!(!stamp_only(&diff(&["CACHID", "NAME"])));
+        // 戳 + 摆放：那是 Q5 的地（`is_placement_only` 为真），不是只动了戳。
+        assert!(!stamp_only(&diff(&["POS", "CACHID"])));
+    }
+
+    #[test]
+    fn the_extra_stamp_knob_is_off_unless_it_is_given() {
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "GENSEC".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        let spamap = vec!["SPAMAP".to_string()];
+        // 空名单 = 今天的口径，逐位不变（t-194 的复现靠这一条）。
+        assert!(!stamp_only_with(&diff(&["SPAMAP"]), &[]));
+        assert!(!stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &[]));
+        assert!(stamp_only_with(&diff(&["CACHID"]), &[]));
+        // 给了名单才多放行，而且只多放行名单里的那些。
+        assert!(stamp_only_with(&diff(&["SPAMAP"]), &spamap));
+        assert!(stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &spamap));
+        assert!(!stamp_only_with(&diff(&["SPAMAP", "NAME"]), &spamap));
+    }
+
+    /// 每个多算根量到的一行（T4）。
+    struct StampOnlyRootRow {
+        window: String,
+        db: String,
+        root: RefNo,
+        noun: String,
+        /// B 态里这根的去向：`advance`（S 端已发布，改走凭证前移）/ `lazy`（S 端没有，什么都不做）。
+        destination: &'static str,
+        /// 只有护栏按净候选数再判（B1）才省下的根——B0 里它仍进 regen。
+        b1_only: bool,
+        /// A 态这一窗放弃了凭证前移。
+        degraded_a: bool,
+        /// 种它的只 CACHID 候选数与 noun 分布。
+        seeds: usize,
+        seed_nouns: String,
+        /// `None` = 没量（抽样没抽中 / 预算用尽 / 生成失败）。
+        count: Option<UnitRebuildCount>,
+        elapsed_secs: f64,
+    }
+
+    impl StampOnlyRootRow {
+        /// 安全门的判读（口径 §1.3）：两端逐件全等才是「真白算」。
+        fn verdict(&self) -> &'static str {
+            match &self.count {
+                None => "未量",
+                Some(count) if count.fresh_root => "新根",
+                Some(count) if count.units == 0 => "零单元",
+                Some(count)
+                    if count.unchanged == count.units && count.added == 0 && count.removed == 0 =>
+                {
+                    "绿"
+                }
+                Some(_) => "红",
+            }
+        }
+    }
+
+    /// 每窗一行（T3）。
+    struct StampOnlyWindowRow {
+        label: String,
+        db: String,
+        stamp_only: usize,
+        nothing_below: usize,
+        candidates: usize,
+        index_keys: usize,
+        degraded_a: bool,
+        degraded_b0: bool,
+        degraded_b1: bool,
+        regen_a: usize,
+        regen_b0: usize,
+        over_b0: usize,
+        over_b1_extra: usize,
+        /// `regen_A` 非空 ∧ `regen_B0` 为空：整库缓存重建会话的形状。
+        whole_advance: bool,
+        closure_dropped: usize,
+        saved_units: usize,
+        contracts_ok: bool,
+    }
+
+    #[derive(Default)]
+    struct StampOnlyDbTally {
+        windows: usize,
+        windows_with_stamp_only: usize,
+        regen_a: usize,
+        over_b0: usize,
+        whole_advance: usize,
+    }
+
+    #[derive(Default)]
+    struct StampOnlyNounTally {
+        over_roots: usize,
+        units: usize,
+        seconds: f64,
+        red: usize,
+    }
+
+    /// **Q6 探针**（开发计划 2026-09-15 §8 Q6 / 口径 t-77，`#[ignore]` 手动）：量「只 `CACHID` 变的候选
+    /// 今天让多少个生成根白进了 `regen`」。
+    ///
+    /// 做法是 S6 / S4 同款的**两态**，逐窗各选一次根：
+    /// - **A 态** = 今天的生产口径（`WindowRootSources::collect` → [`plan_window_roots`]，开关按默认，
+    ///   `roots_S` = S 端枚举出的根，与 S7 探针同口径）；
+    /// - **B 态** = 只 `CACHID` 的候选既**不上卷**（谓词回 `Some`，探针里借
+    ///   [`NoModelTier::UnreadAttribute`] 计数，**不动 e3d-model**）也**不做闭包种子**
+    ///   （`affected_closure_filtering_ledger` 把它们从账本种子里过滤掉）。两手缺一不可：
+    ///   只做前一手时候选自己若是单元会留在 `regenerate` 集里，而那三个动作集恒为种子，根级一根都省不下。
+    ///
+    /// `regen_A \ regen_B0` 就是**多算的根**（主指标）。护栏（[`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`]）
+    /// 的分子今天按 `report.candidates` 算（含只 CACHID）：**B0** 照旧、**B1** 按净候选数再判一次，
+    /// 两列并排——回答「接线时护栏分子要不要跟着改」。
+    ///
+    /// 每个多算根再走 S7 的尺子 [`unit_rebuild_of_root`]（两端各整根生成一次、逐件按 `GeometryId` 配对、
+    /// [`ParityInvariants`] 全等，S4 同容差）做**安全自检**：全等 = 绿（确实白算）；不全等 = 红
+    /// （戳单独跳却伴随几何变化，形状推断在这一根上不成立）。红根逐条列出，不摊平。
+    ///
+    /// **只量不接线**：生产 `metadata_only_tier` / `change_metadata_tier` /
+    /// `model_skip_metadata_only_changes` 的语义一字不动，[`WindowRootPlan`] 与回执一字不动。
+    ///
+    /// 旋钮：`AIOS_Q6_PROBE_CORPUS=1` 全语料（缺省只走 `AIOS_PROJAMS_GEOMETRY_FILE`，ams8000_0001 整条链）；
+    /// `AIOS_Q6_PROBE_STEPS_PER_DB`（0 = 整条链）；`AIOS_Q6_PROBE_BUDGET_SECS`（默认 2400，S7 同值）；
+    /// `AIOS_Q6_PROBE_SAMPLES_PER_NOUN_DB`（默认 20，按库 × 根 noun 分层抽样的上限，0 = 全量；出了红根
+    /// 该组上限翻倍再抽一轮）；`AIOS_Q6_PROBE_DETAIL_ROWS`（默认 3000）；`AIOS_Q6_PROBE_STRICT=1` 时红根让
+    /// 测试红（缺省只记）。报告写 `AIOS_Q6_PROBE_REPORT`
+    /// （默认 `docs/evidence/2026-09-16-q6-cachid-only-measure.md`，按政策不入库）。
+    #[test]
+    #[ignore = "manual live: two-state root planning over the session chain plus both-end regeneration of the over-counted roots; needs the E3D template directory"]
+    fn probe_cachid_only_regen_cost() {
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+        use e3d_io::engine::ReadOnlyEngine;
+        use e3d_io::index::IndexCandidate;
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+        use crate::data_interface::model_impact::noun_is_no_geometry_model_entry;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        /// 一窗要走的祖先链超过这么多条就不算（成因记「未判」、归因自检记「未判」）。S8 同值。
+        const ANCESTRY_LIMIT: usize = 5000;
+        /// T4 明细里每根最多列几个种子 noun。
+        const SEED_NOUNS_SHOWN: usize = 4;
+        /// T7 红根最多列几行（全部红根都要列，这里只是正文截断的兜底）。
+        const RED_ROWS_SHOWN: usize = 200;
+
+        let env_usize = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let per_db = env_usize("AIOS_Q6_PROBE_STEPS_PER_DB", 0);
+        let budget_secs = env_usize("AIOS_Q6_PROBE_BUDGET_SECS", 2400) as f64;
+        let detail_rows = env_usize("AIOS_Q6_PROBE_DETAIL_ROWS", 3000);
+        let samples_per_noun_db = env_usize("AIOS_Q6_PROBE_SAMPLES_PER_NOUN_DB", 20);
+        let whole_corpus = std::env::var("AIOS_Q6_PROBE_CORPUS").is_ok_and(|value| value == "1");
+        let strict = std::env::var("AIOS_Q6_PROBE_STRICT").is_ok_and(|value| value == "1");
+        // N2 / t-334：额外当成戳的名字（缺省空 = 与 t-49 那一跑逐位相同）。
+        let extra_stamp = extra_stamp_names("AIOS_Q6_PROBE_EXTRA_STAMP_NAMES");
+        let report_path =
+            PathBuf::from(std::env::var("AIOS_Q6_PROBE_REPORT").unwrap_or_else(|_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-16-q6-cachid-only-measure.md"
+                )
+                .into()
+            }));
+        let pinned_file = PathBuf::from(
+            std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
+            }),
+        );
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+
+        // 开关按默认；B 态只换 `plan` 与 `closure`，其余（roots_t / index_keys / 三条级联的产物）照用 A 的。
+        let skip_metadata = crate::options::model_skip_metadata_only_changes();
+        let drop_no_geometry = crate::options::model_entry_drop_no_geometry();
+        let cheap_path = crate::options::model_transform_cheap_path();
+        let cascade_c2 = crate::options::model_structural_connection_cascade();
+        let cascade_c8 = crate::options::model_cable_endpoint_cascade();
+        let cascade_p4 = crate::options::model_design_reference_cascade();
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi_template =
+            template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let started = Instant::now();
+        let existing: Vec<PathBuf> = dirs.iter().filter(|dir| dir.is_dir()).cloned().collect();
+        let resolver = Arc::new(
+            e3d_model::DirectoryDbResolver::scan(&existing, schema.template_dir())
+                .expect("scan the corpus directories into a dbno → file table"),
+        );
+        println!("{}", resolver.summary());
+        println!("resolver ready in {:.1}s", started.elapsed().as_secs_f64());
+
+        // 一库的会话链最后 K 步（新→旧链取链头 K 对，再倒回旧→新），与 S4 / S7 同款。
+        let chain_steps = |file: &Path| -> Option<Vec<(u32, u32)>> {
+            let sessions: Vec<u32> = ReadOnlyEngine::open(file)
+                .ok()?
+                .sessions()
+                .ok()?
+                .iter()
+                .map(|session| session.session_id)
+                .collect();
+            let mut picked: Vec<(u32, u32)> = sessions
+                .windows(2)
+                .take(if per_db == 0 { usize::MAX } else { per_db })
+                .map(|pair| (pair[1], pair[0]))
+                .collect();
+            picked.reverse();
+            Some(picked)
+        };
+        let mut jobs: Vec<(PathBuf, Vec<(u32, u32)>)> = Vec::new();
+        if whole_corpus {
+            for dir in &existing {
+                let Ok(sources) = sources_in_dir(dir, &["DESI"]) else {
+                    continue;
+                };
+                for source in sources {
+                    if let Some(steps) = chain_steps(&source.file) {
+                        if !steps.is_empty() {
+                            jobs.push((source.file.clone(), steps));
+                        }
+                    }
+                }
+            }
+        } else if let Some(steps) = chain_steps(&pinned_file) {
+            jobs.push((pinned_file.clone(), steps));
+        }
+        assert!(
+            !jobs.is_empty(),
+            "一条会话链都没找到——AIOS_PROJAMS_GEOMETRY_FILE / AIOS_POSREF_DIRS 不对"
+        );
+
+        // T1 规模。
+        let (mut dbs, mut windows, mut windows_skipped) = (0usize, 0usize, 0usize);
+        let mut windows_with_stamp_only = 0usize;
+        let mut windows_with_over = 0usize;
+        let mut windows_whole_advance = 0usize;
+        let (mut degraded_a, mut degraded_b0, mut degraded_b1) = (0usize, 0usize, 0usize);
+        let mut modified_changed = 0usize;
+        let mut stamp_only_total = 0usize;
+        let (mut cause_nothing, mut cause_subtree, mut cause_unjudged) = (0usize, 0usize, 0usize);
+        let (mut ref_zero_dchc, mut ref_placement) = (0usize, 0usize);
+        let (mut regen_a_total, mut regen_b0_total) = (0usize, 0usize);
+        let (mut over_b0_total, mut over_b1_extra_total) = (0usize, 0usize);
+        let (mut over_advance, mut over_lazy) = (0usize, 0usize);
+        let (mut saved_units_total, mut closure_dropped_total) = (0usize, 0usize);
+        let mut closure_dropped_windows = 0usize;
+        // T8 对账与三条契约。
+        let mut red_regen_subset: Vec<String> = Vec::new();
+        let mut red_closure_subset: Vec<String> = Vec::new();
+        let mut red_remove_same: Vec<String> = Vec::new();
+        let mut red_unread_reconcile: Vec<String> = Vec::new();
+        let mut red_attribution: Vec<String> = Vec::new();
+        let mut attribution_unjudged = 0usize;
+        // 明细与成本。
+        let mut rows: Vec<StampOnlyRootRow> = Vec::new();
+        let mut window_rows: Vec<StampOnlyWindowRow> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        let (mut over_budget, mut not_sampled) = (0usize, 0usize);
+        let mut budget_exhausted = false;
+        let mut sampled: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut sample_bonus: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut regen_a_by_noun: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_db: BTreeMap<String, StampOnlyDbTally> = BTreeMap::new();
+        let mut by_noun: BTreeMap<String, StampOnlyNounTally> = BTreeMap::new();
+
+        for (file, steps) in jobs {
+            let name = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            dbs += 1;
+            let open = |sesno: u32| -> Option<Arc<DbSet>> {
+                let set = Arc::new(
+                    DbSet::with_attlib_file_and_resolver(
+                        &attlib,
+                        Box::new(ProbeResolver(resolver.clone())),
+                    )
+                    .ok()?,
+                );
+                set.add_db(DbFilePin {
+                    file: file.clone(),
+                    template: desi_template.clone(),
+                    db_type: Some("DESI".into()),
+                    sesno: Some(sesno),
+                })
+                .ok()?;
+                Some(set)
+            };
+            for (base_sesno, target_sesno) in steps {
+                let label = format!("{name} {base_sesno}→{target_sesno}");
+                let (Some(base), Some(target)) = (open(base_sesno), open(target_sesno)) else {
+                    windows_skipped += 1;
+                    println!("skip {label}: cannot pin both ends");
+                    continue;
+                };
+                // B 态要自己重跑一次 `plan_update_with`，所以窗口差分单独收一份（A 态那一份在
+                // `WindowRootSources::collect` 里面，不外露）。
+                let window = match collect_window(&file, base_sesno, target_sesno) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        windows_skipped += 1;
+                        println!("skip {label}: {error}");
+                        continue;
+                    }
+                };
+                let sources = match WindowRootSources::collect(
+                    &file,
+                    base_sesno,
+                    target_sesno,
+                    &base,
+                    &target,
+                    &unit_types,
+                    &[],
+                ) {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        windows_skipped += 1;
+                        println!("skip {label}: {error}");
+                        continue;
+                    }
+                };
+                windows += 1;
+                by_db.entry(name.clone()).or_default().windows += 1;
+
+                // ── 候选级（口径 §1.1）：只 CACHID 的集合 + 两个参考列 + 别的变化（给成因判定用）。
+                let mut stamp_keys: BTreeSet<(u32, u32)> = BTreeSet::new();
+                let mut stamp_nouns: BTreeMap<(u32, u32), String> = BTreeMap::new();
+                let mut others: Vec<(RefNo, bool)> = Vec::new();
+                for candidate in &window.diff.changes {
+                    let refno = match candidate {
+                        IndexCandidate::Inserted { refno, .. } => {
+                            others.push((*refno, false));
+                            continue;
+                        }
+                        IndexCandidate::Deleted { refno, .. } => {
+                            others.push((*refno, true));
+                            continue;
+                        }
+                        IndexCandidate::Modified { refno, .. } => *refno,
+                    };
+                    let Ok(diff) = e3d_model::diff_element(&base, &target, refno) else {
+                        continue;
+                    };
+                    if diff.is_unchanged() {
+                        continue;
+                    }
+                    modified_changed += 1;
+                    if stamp_only_with(&diff, &extra_stamp) {
+                        stamp_keys.insert((refno.word0, refno.word1));
+                        stamp_nouns.insert((refno.word0, refno.word1), diff.noun.clone());
+                        continue;
+                    }
+                    others.push((refno, false));
+                    // 参考列（不进主口径，各有归属）：戳 + 摆放 → Q5；戳 + 只 DCHC=0 → S6 元数据门。
+                    let carries = diff.attributes.iter().any(|attribute| {
+                        e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+                            .contains(&attribute.as_str())
+                    });
+                    if !carries {
+                        continue;
+                    }
+                    if diff.is_placement_only() {
+                        ref_placement += 1;
+                    } else {
+                        let mut sans = diff.clone();
+                        sans.attributes.retain(|attribute| {
+                            !e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+                                .contains(&attribute.as_str())
+                        });
+                        if change_metadata_tier(&sans).is_some() {
+                            ref_zero_dchc += 1;
+                        }
+                    }
+                }
+                let stamp_here = stamp_keys.len();
+                if stamp_here > 0 {
+                    windows_with_stamp_only += 1;
+                    by_db
+                        .entry(name.clone())
+                        .or_default()
+                        .windows_with_stamp_only += 1;
+                }
+                stamp_only_total += stamp_here;
+
+                // 成因（S8 `CachidOnlyCause` 同款）：同窗别的变化的**严格祖先**集合。
+                let changed_below: Option<BTreeSet<(u32, u32)>> =
+                    if stamp_here == 0 || others.len() > ANCESTRY_LIMIT {
+                        None
+                    } else {
+                        let mut ancestors = BTreeSet::new();
+                        for (refno, from_base) in &others {
+                            let set = if *from_base { &base } else { &target };
+                            if let Ok(chain) = owner_chain_in_set(set, *refno) {
+                                ancestors.extend(chain.iter().map(|ancestor| {
+                                    let ancestor = refno_to_e3d(*ancestor);
+                                    (ancestor.word0, ancestor.word1)
+                                }));
+                            }
+                        }
+                        Some(ancestors)
+                    };
+                let mut nothing_below_here = 0usize;
+                for key in &stamp_keys {
+                    match &changed_below {
+                        None => cause_unjudged += 1,
+                        Some(ancestors) if ancestors.contains(key) => cause_subtree += 1,
+                        Some(_) => {
+                            cause_nothing += 1;
+                            nothing_below_here += 1;
+                        }
+                    }
+                }
+
+                // ── A 态（§2.3）：今天的生产口径，与 S7 逐字同款。
+                let roots_s: Vec<PersistedRoot> = match scan_index(&file, Some(base_sesno))
+                    .and_then(|index| enumerate_generation_roots(&base, &index.roots, &unit_types))
+                {
+                    Ok(roots) => roots
+                        .into_iter()
+                        .map(|root| PersistedRoot {
+                            refno: root.root,
+                            noun: root.noun,
+                        })
+                        .collect(),
+                    Err(error) => {
+                        println!("{label}: cannot enumerate base roots: {error}");
+                        Vec::new()
+                    }
+                };
+                let persisted: BTreeSet<RefnoEnum> =
+                    roots_s.iter().map(|root| root.refno).collect();
+                let impact_a = sources.impact(&roots_s);
+                let plan_a = plan_window_roots(&sources.roots_t, &roots_s, &impact_a);
+
+                // ── B 态（§2.4）：(i) 不上卷不级联 + (ii) 不做闭包种子 + (iii) 护栏两列。
+                let plan_b =
+                    plan_update_with(&base, &target, &window, PlanLimits::default(), |diff| {
+                        if stamp_only_with(diff, &extra_stamp) {
+                            Some(NoModelTier::UnreadAttribute)
+                        } else if skip_metadata {
+                            change_metadata_tier(diff)
+                        } else {
+                            None
+                        }
+                    });
+                let closure_b = plan_b.affected_closure_filtering_ledger(&base, &target, |entry| {
+                    if stamp_keys.contains(&(entry.refno.word0, entry.refno.word1)) {
+                        return false;
+                    }
+                    !drop_no_geometry
+                        || matches!(entry.kind, ChangeKind::Deleted | ChangeKind::TypeChanged)
+                        || !noun_is_no_geometry_model_entry(&entry.noun)
+                });
+                let touched_b: BTreeSet<RefnoEnum> = roots_s
+                    .iter()
+                    .map(|root| root.refno)
+                    .chain(sources.roots_t.iter().map(|root| root.root))
+                    .filter(|refno| closure_b.contains(refno_to_e3d(*refno)))
+                    .collect();
+                let impact_b0 = WindowImpact {
+                    touched: touched_b,
+                    closure_complete: closure_b.is_complete(),
+                    cascade_degraded: impact_a.cascade_degraded.clone(),
+                    unresolved: plan_b.report.unresolved.len(),
+                    candidates: plan_b.report.candidates,
+                    index_keys: sources.index_keys,
+                };
+                let mut impact_b1 = impact_b0.clone();
+                impact_b1.candidates = impact_b0.candidates.saturating_sub(stamp_here);
+                let plan_b0 = plan_window_roots(&sources.roots_t, &roots_s, &impact_b0);
+                let plan_b1 = plan_window_roots(&sources.roots_t, &roots_s, &impact_b1);
+
+                let regen_a: BTreeSet<RefnoEnum> =
+                    plan_a.regen.iter().map(|root| root.root).collect();
+                let regen_b0: BTreeSet<RefnoEnum> =
+                    plan_b0.regen.iter().map(|root| root.root).collect();
+                let regen_b1: BTreeSet<RefnoEnum> =
+                    plan_b1.regen.iter().map(|root| root.root).collect();
+                let over_b0: Vec<&GenerationRoot> = plan_a
+                    .regen
+                    .iter()
+                    .filter(|root| !regen_b0.contains(&root.root))
+                    .collect();
+                let over_b1_extra: Vec<&GenerationRoot> = plan_a
+                    .regen
+                    .iter()
+                    .filter(|root| regen_b0.contains(&root.root) && !regen_b1.contains(&root.root))
+                    .collect();
+
+                regen_a_total += plan_a.regen.len();
+                regen_b0_total += plan_b0.regen.len();
+                over_b0_total += over_b0.len();
+                over_b1_extra_total += over_b1_extra.len();
+                for root in &plan_a.regen {
+                    *regen_a_by_noun.entry(root.noun.clone()).or_default() += 1;
+                }
+                let whole_advance = !plan_a.regen.is_empty() && plan_b0.regen.is_empty();
+                if whole_advance {
+                    windows_whole_advance += 1;
+                }
+                if !over_b0.is_empty() {
+                    windows_with_over += 1;
+                }
+                if plan_a.degraded.is_some() {
+                    degraded_a += 1;
+                }
+                if plan_b0.degraded.is_some() {
+                    degraded_b0 += 1;
+                }
+                if plan_b1.degraded.is_some() {
+                    degraded_b1 += 1;
+                }
+                {
+                    let tally = by_db.entry(name.clone()).or_default();
+                    tally.regen_a += plan_a.regen.len();
+                    tally.over_b0 += over_b0.len();
+                    if whole_advance {
+                        tally.whole_advance += 1;
+                    }
+                }
+
+                // 单元级省下 / 闭包少收（S6 `saved_units` / `closure_dropped` 同款，参考量）。
+                let units_a: BTreeSet<(u32, u32)> = sources
+                    .plan
+                    .regenerate
+                    .union(&sources.plan.regenerate_derived)
+                    .copied()
+                    .collect();
+                let units_b: BTreeSet<(u32, u32)> = plan_b
+                    .regenerate
+                    .union(&plan_b.regenerate_derived)
+                    .copied()
+                    .collect();
+                let saved_units = units_a.len().saturating_sub(units_b.len());
+                let closure_dropped = sources
+                    .closure
+                    .refnos
+                    .len()
+                    .saturating_sub(closure_b.refnos.len());
+                saved_units_total += saved_units;
+                closure_dropped_total += closure_dropped;
+                if closure_dropped > 0 {
+                    closure_dropped_windows += 1;
+                }
+
+                // ── T8 三条契约 + 对账（不 panic，跑完全语料再看）。
+                let mut contracts_ok = true;
+                if !regen_b0.is_subset(&regen_a) {
+                    contracts_ok = false;
+                    red_regen_subset.push(format!(
+                        "{label}: regen_B0 不是 regen_A 的子集（B0 独有 {} 根）",
+                        regen_b0.difference(&regen_a).count()
+                    ));
+                }
+                if !closure_b.refnos.is_subset(&sources.closure.refnos) {
+                    contracts_ok = false;
+                    red_closure_subset.push(format!(
+                        "{label}: closure_B 不是 closure_A 的子集（B 独有 {} 个 refno）",
+                        closure_b.refnos.difference(&sources.closure.refnos).count()
+                    ));
+                }
+                if plan_b.remove != sources.plan.remove {
+                    contracts_ok = false;
+                    red_remove_same.push(format!(
+                        "{label}: 两态 remove 不同（A {} 件 / B {} 件）",
+                        sources.plan.remove.len(),
+                        plan_b.remove.len()
+                    ));
+                }
+                let unread_delta = plan_b.report.unread_attribute as i64
+                    - sources.plan.report.unread_attribute as i64;
+                if unread_delta != stamp_here as i64 {
+                    contracts_ok = false;
+                    red_unread_reconcile.push(format!(
+                        "{label}: unread_attribute 差 {unread_delta} ≠ 只 CACHID 候选 {stamp_here}"
+                    ));
+                }
+
+                // ── 归因自检 (c)：多算根之下不该还有非只 CACHID 的种子。
+                let over_keys: BTreeSet<(u32, u32)> = over_b0
+                    .iter()
+                    .map(|root| {
+                        let refno = refno_to_e3d(root.root);
+                        (refno.word0, refno.word1)
+                    })
+                    .collect();
+                if !over_keys.is_empty() {
+                    let seeds: Vec<&e3d_model::ledger::LedgerEntry> = sources
+                        .plan
+                        .ledger
+                        .entries()
+                        .iter()
+                        .filter(|entry| {
+                            !stamp_keys.contains(&(entry.refno.word0, entry.refno.word1))
+                        })
+                        .collect();
+                    if seeds.len() > ANCESTRY_LIMIT {
+                        attribution_unjudged += 1;
+                    } else {
+                        for entry in seeds {
+                            let key = (entry.refno.word0, entry.refno.word1);
+                            let mut hit: Option<RefnoEnum> = None;
+                            if over_keys.contains(&key) {
+                                hit = Some(refno_from_e3d(entry.refno));
+                            } else {
+                                for set in [&target, &base] {
+                                    let Ok(chain) = owner_chain_in_set(set, entry.refno) else {
+                                        continue;
+                                    };
+                                    if let Some(ancestor) = chain.into_iter().find(|ancestor| {
+                                        let ancestor = refno_to_e3d(*ancestor);
+                                        over_keys.contains(&(ancestor.word0, ancestor.word1))
+                                    }) {
+                                        hit = Some(ancestor);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(root) = hit {
+                                contracts_ok = false;
+                                red_attribution.push(format!(
+                                    "{label}: 多算根 {root} 之下还有非只 CACHID 的种子 {} `{}`（{:?}）",
+                                    entry.refno,
+                                    entry.noun,
+                                    entry.kind
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // ── 候选 → 根的映射（(b₀) 的分子明细）：一根之下几个只 CACHID 的候选、各是什么 noun。
+                let mut seeds_by_root: BTreeMap<RefnoEnum, BTreeMap<String, usize>> =
+                    BTreeMap::new();
+                if !over_keys.is_empty() && stamp_here <= ANCESTRY_LIMIT {
+                    for key in &stamp_keys {
+                        let refno = RefNo::new(key.0, key.1);
+                        let noun = stamp_nouns.get(key).cloned().unwrap_or_else(|| "?".into());
+                        let mut hits: BTreeSet<RefnoEnum> = BTreeSet::new();
+                        if over_keys.contains(key) {
+                            hits.insert(refno_from_e3d(refno));
+                        }
+                        for set in [&target, &base] {
+                            let Ok(chain) = owner_chain_in_set(set, refno) else {
+                                continue;
+                            };
+                            for ancestor in chain {
+                                let key = refno_to_e3d(ancestor);
+                                if over_keys.contains(&(key.word0, key.word1)) {
+                                    hits.insert(ancestor);
+                                }
+                            }
+                        }
+                        for root in hits {
+                            *seeds_by_root
+                                .entry(root)
+                                .or_default()
+                                .entry(noun.clone())
+                                .or_default() += 1;
+                        }
+                    }
+                }
+
+                // ── 成本与安全自检（§2.5）：按库 × 根 noun 分层抽样，红根让该组上限翻倍再抽一轮。
+                for (root, b1_only) in over_b0
+                    .iter()
+                    .map(|root| (*root, false))
+                    .chain(over_b1_extra.iter().map(|root| (*root, true)))
+                {
+                    let destination = if persisted.contains(&root.root) {
+                        "advance"
+                    } else {
+                        "lazy"
+                    };
+                    if !b1_only {
+                        if destination == "advance" {
+                            over_advance += 1;
+                        } else {
+                            over_lazy += 1;
+                        }
+                    }
+                    let seed_map = seeds_by_root.get(&root.root);
+                    let seeds = seed_map.map(|map| map.values().sum()).unwrap_or(0usize);
+                    let seed_nouns = seed_map
+                        .map(|map| {
+                            let mut parts: Vec<(&String, &usize)> = map.iter().collect();
+                            parts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                            parts
+                                .iter()
+                                .take(SEED_NOUNS_SHOWN)
+                                .map(|(noun, count)| format!("{noun}×{count}"))
+                                .collect::<Vec<String>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    let slot = (name.clone(), root.noun.clone());
+                    let limit =
+                        samples_per_noun_db + sample_bonus.get(&slot).copied().unwrap_or_default();
+                    let taken = sampled.get(&slot).copied().unwrap_or_default();
+                    let (count, elapsed_secs) = if samples_per_noun_db > 0 && taken >= limit {
+                        not_sampled += 1;
+                        (None, 0.0)
+                    } else if started.elapsed().as_secs_f64() > budget_secs {
+                        budget_exhausted = true;
+                        over_budget += 1;
+                        (None, 0.0)
+                    } else {
+                        *sampled.entry(slot.clone()).or_default() += 1;
+                        let refno = refno_to_e3d(root.root);
+                        let clock = Instant::now();
+                        match unit_rebuild_of_root(&base, &target, refno) {
+                            Ok(count) => (Some(count), clock.elapsed().as_secs_f64()),
+                            Err(error) => {
+                                println!("{label}: root {refno} `{}` 量不了：{error}", root.noun);
+                                failed.push(format!("{label} {refno} `{}`：{error}", root.noun));
+                                (None, clock.elapsed().as_secs_f64())
+                            }
+                        }
+                    };
+                    let row = StampOnlyRootRow {
+                        window: label.clone(),
+                        db: name.clone(),
+                        root: refno_to_e3d(root.root),
+                        noun: root.noun.clone(),
+                        destination,
+                        b1_only,
+                        degraded_a: plan_a.degraded.is_some(),
+                        seeds,
+                        seed_nouns,
+                        count,
+                        elapsed_secs,
+                    };
+                    if row.verdict() == "红" {
+                        // 红是要追的，不是要摊平的：同库同 noun 的样本上限翻倍再抽一轮。
+                        *sample_bonus.entry(slot).or_default() += samples_per_noun_db;
+                    }
+                    if let Some(count) = &row.count {
+                        println!(
+                            "{label}: 多算根 {} `{}` → {destination} 单元 {} 未变 {} 新件 {} 删件 {} 判 {} ({:.1}s)",
+                            row.root,
+                            row.noun,
+                            count.units,
+                            count.unchanged,
+                            count.added,
+                            count.removed,
+                            row.verdict(),
+                            row.elapsed_secs,
+                        );
+                    }
+                    {
+                        let tally = by_noun.entry(root.noun.clone()).or_default();
+                        if !b1_only {
+                            tally.over_roots += 1;
+                        }
+                        tally.units += row.count.as_ref().map(|c| c.units).unwrap_or(0);
+                        tally.seconds += row.elapsed_secs;
+                        if row.verdict() == "红" {
+                            tally.red += 1;
+                        }
+                    }
+                    rows.push(row);
+                }
+
+                window_rows.push(StampOnlyWindowRow {
+                    label: label.clone(),
+                    db: name.clone(),
+                    stamp_only: stamp_here,
+                    nothing_below: nothing_below_here,
+                    candidates: sources.plan.report.candidates,
+                    index_keys: sources.index_keys,
+                    degraded_a: plan_a.degraded.is_some(),
+                    degraded_b0: plan_b0.degraded.is_some(),
+                    degraded_b1: plan_b1.degraded.is_some(),
+                    regen_a: plan_a.regen.len(),
+                    regen_b0: plan_b0.regen.len(),
+                    over_b0: over_b0.len(),
+                    over_b1_extra: over_b1_extra.len(),
+                    whole_advance,
+                    closure_dropped,
+                    saved_units,
+                    contracts_ok,
+                });
+            }
+        }
+
+        // ── 汇总。
+        let elapsed = started.elapsed().as_secs_f64();
+        let measured: Vec<&StampOnlyRootRow> =
+            rows.iter().filter(|row| row.count.is_some()).collect();
+        let green = measured.iter().filter(|row| row.verdict() == "绿").count();
+        let red: Vec<&&StampOnlyRootRow> = measured
+            .iter()
+            .filter(|row| row.verdict() == "红")
+            .collect();
+        let fresh = measured
+            .iter()
+            .filter(|row| row.verdict() == "新根")
+            .count();
+        let empty = measured
+            .iter()
+            .filter(|row| row.verdict() == "零单元")
+            .count();
+        let over_units: usize = measured
+            .iter()
+            .map(|row| row.count.as_ref().map(|c| c.units).unwrap_or(0))
+            .sum();
+        // `+ 0.0` 不是废话：Rust `impl Sum for f64` 的单位元是 `-0.0`，空集合直接印成 `-0.0s`。
+        let over_seconds: f64 = rows.iter().map(|row| row.elapsed_secs).sum::<f64>() + 0.0;
+        let share = |part: usize, whole: usize| -> String {
+            if whole == 0 {
+                "—".to_string()
+            } else {
+                format!("{:.1}%", part as f64 * 100.0 / whole as f64)
+            }
+        };
+        // 判读（§3.2 四门）——建议值，只决定要不要立接线切片，不决定今天的行为。
+        let gate_safety = red.is_empty();
+        let over_root_share = if regen_a_total == 0 {
+            0.0
+        } else {
+            over_b0_total as f64 / regen_a_total as f64
+        };
+        let whole_advance_rows = rows
+            .iter()
+            .filter(|row| {
+                !row.b1_only
+                    && window_rows
+                        .iter()
+                        .any(|window| window.label == row.window && window.whole_advance)
+            })
+            .count();
+        let gate_shape = if over_b0_total == 0 {
+            0.0
+        } else {
+            whole_advance_rows as f64 / over_b0_total as f64
+        };
+        let gate_guard = if over_b0_total == 0 {
+            0.0
+        } else {
+            over_b1_extra_total as f64 / over_b0_total as f64
+        };
+
+        let mut report = String::new();
+        report.push_str("# 只 `CACHID` 的候选今天多算了多少（Q6 先量 / t-49）· 根级两态差\n\n");
+        report.push_str(&format!(
+            "> 生成：`window_root_plan::tests::probe_cachid_only_regen_cost`，{}；{}；每库步数 {}；\
+             每库 × 根 noun 最多量 {} 根（红根该组翻倍）；预算 {:.0}s；耗时 {:.0}s{}{}。\
+             **只量不接线**：生产 `change_metadata_tier` / `metadata_only_tier` / 开关语义一字不动，\
+             实验谓词只在本探针里。按政策不入库（`docs/evidence/`）。\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M"),
+            if whole_corpus {
+                "全语料（AIOS_POSREF_DIRS 的每个 DESI 库）".to_string()
+            } else {
+                format!("单库 {}", pinned_file.display())
+            },
+            if per_db == 0 {
+                "整条链".to_string()
+            } else {
+                per_db.to_string()
+            },
+            samples_per_noun_db,
+            budget_secs,
+            elapsed,
+            if budget_exhausted {
+                "，**预算用尽**"
+            } else {
+                ""
+            },
+            // 旋钮没给时这一格是空串：缺省口径下报告与 t-49 那一跑逐字节相同。
+            if extra_stamp.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "；**额外戳名字 {}**（N2 / t-334 旋钮，非缺省口径）",
+                    extra_stamp.join(" ")
+                )
+            },
+        ));
+        report.push_str(&format!(
+            "> 开关取值：`model_skip_metadata_only_changes={skip_metadata}`、\
+             `model_entry_drop_no_geometry={drop_no_geometry}`、`model_transform_cheap_path={cheap_path}`、\
+             `model_structural_connection_cascade={cascade_c2}`、`model_cable_endpoint_cascade={cascade_c8}`、\
+             `model_design_reference_cascade={cascade_p4}`。\
+             `PLACEMENT_STAMP_ATTRIBUTES` = {:?}。\n\n",
+            e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES,
+        ));
+        if cascade_c2 || cascade_c8 || cascade_p4 {
+            report.push_str(
+                "> ⚠ 三条级联里有开着的：B 态只重跑了 `plan_update_with` 与闭包，`expand_touched` 沿用 A 态的产物，\
+                 这一窗的 B 态是**上界**（级联本该跟着变窄）。判读时把这些窗单看。\n\n",
+            );
+        }
+        report.push_str(
+            "> **看不见的一半**（口径 §1.3）：探针只开 DESI 窗；两端生成经 `DirectoryDbResolver` 共用**最新**\
+             目录库状态（`DbFilePin.sesno = None`，`db_discovery.rs` 219），所以「绿」只证得了\
+             **这一窗 DESI 侧的改动没让几何变**，证**不了**同一时段被引用的目录件没变。T4 的「目录侧」一列\
+             本轮固定是 `未查`（口径 §2.8 #8 未实现），按此读。\n\n",
+        );
+        report.push_str(
+            "> **三角数（口径 (d′)）本轮 NOT MEASURED**：`unit_rebuild_of_root` 只吐计数，要三角数得在 T 端\
+             再整根生成一遍（每根的生成成本翻一倍）。为不与 S7 的尺子分家、也不把预算花在一个次级代理上，\
+             本轮用**单元数**与**两端秒**两个代理，不出三角列。\n\n",
+        );
+
+        report.push_str("## T1 规模\n\n| 项 | 数 |\n|---|---:|\n");
+        let mut scale = |label: &str, value: String| {
+            report.push_str(&format!("| {label} | {value} |\n"));
+        };
+        scale("库", dbs.to_string());
+        scale("跑过的窗", windows.to_string());
+        scale("跳过的窗", windows_skipped.to_string());
+        scale("有只 CACHID 候选的窗", windows_with_stamp_only.to_string());
+        scale(
+            "真变了的 Modified 候选（分母）",
+            modified_changed.to_string(),
+        );
+        scale("**只 CACHID 候选**", stamp_only_total.to_string());
+        scale(
+            "其中 子树内一个都没变（NothingBelow）",
+            cause_nothing.to_string(),
+        );
+        scale(
+            "其中 子树内同窗有变（SubtreeChanged）",
+            cause_subtree.to_string(),
+        );
+        scale("其中 未判（同窗变的元素太多）", cause_unjudged.to_string());
+        scale(
+            "参考：含戳的只 DCHC=0 候选（S6 门的地）",
+            ref_zero_dchc.to_string(),
+        );
+        scale(
+            "参考：含戳的 POS·ORI 候选（Q5 的地）",
+            ref_placement.to_string(),
+        );
+        scale("`regen_A` 根", regen_a_total.to_string());
+        scale("`regen_B0` 根", regen_b0_total.to_string());
+        scale("**多算根（B0）**", over_b0_total.to_string());
+        scale("多算根占 `regen_A`", share(over_b0_total, regen_a_total));
+        scale(
+            "多算根（B1 护栏净候选数额外省下）",
+            over_b1_extra_total.to_string(),
+        );
+        scale(
+            "多算根去向 advance / lazy",
+            format!("{over_advance} / {over_lazy}"),
+        );
+        scale("有多算根的窗", windows_with_over.to_string());
+        scale(
+            "整窗前移窗（regen_A 非空 ∧ regen_B0 空）",
+            windows_whole_advance.to_string(),
+        );
+        scale(
+            "退化窗 A / B0 / B1",
+            format!("{degraded_a} / {degraded_b0} / {degraded_b1}"),
+        );
+        scale("量到的多算根", measured.len().to_string());
+        scale("其中 **绿**（两端逐件全等 = 真白算）", green.to_string());
+        scale("其中 **红**（戳单跳却伴随几何变化）", red.len().to_string());
+        scale(
+            "其中 新根 / 零单元（无判别力）",
+            format!("{fresh} / {empty}"),
+        );
+        scale("生成失败", failed.len().to_string());
+        scale(
+            "抽样未量 / 预算未量",
+            format!("{not_sampled} / {over_budget}"),
+        );
+        scale("目录侧 已查 / 未查", format!("0 / {}", rows.len()));
+        scale("多算单元记录 Σ（实测）", over_units.to_string());
+        scale("多算两端秒 Σ（实测）", format!("{over_seconds:.1}s"));
+        scale(
+            "单元级省下 Σ（e3d-model 视角，参考）",
+            saved_units_total.to_string(),
+        );
+        scale(
+            "闭包少收 Σ / 窗数",
+            format!("{closure_dropped_total} / {closure_dropped_windows}"),
+        );
+
+        report.push_str("\n## T2 漏斗（候选 → 种子 → 闭包 → 根）\n\n| 级 | 数 | 占该级分母 |\n|---|---:|---:|\n");
+        report.push_str(&format!(
+            "| 只 CACHID 候选 / 真变了的 Modified 候选 | {stamp_only_total} | {} |\n",
+            share(stamp_only_total, modified_changed)
+        ));
+        report.push_str(&format!(
+            "| 其中 NothingBelow / 只 CACHID 候选 | {cause_nothing} | {} |\n",
+            share(cause_nothing, stamp_only_total)
+        ));
+        report.push_str(&format!(
+            "| 闭包少收 refno（合计） | {closure_dropped_total} | — |\n"
+        ));
+        report.push_str(&format!(
+            "| **多算根（B0）/ `regen_A` 根** | {over_b0_total} | {} |\n",
+            share(over_b0_total, regen_a_total)
+        ));
+        report.push_str(&format!(
+            "| 量到的多算根 / 多算根 | {} | {} |\n",
+            measured.len(),
+            share(measured.len(), over_b0_total + over_b1_extra_total)
+        ));
+        report.push_str(&format!(
+            "| 绿 / 量到的多算根 | {green} | {} |\n",
+            share(green, measured.len())
+        ));
+
+        report.push_str(&format!(
+            "\n## T3 每窗明细（有只 CACHID 候选的窗，按多算根降序，前 {detail_rows} 行）\n\n"
+        ));
+        report.push_str(
+            "| 窗 | 只 CACHID | NothingBelow | candidates | index_keys | 退化 A/B0/B1 | regen_A | regen_B0 \
+             | 多算根 B0 | B1 额外 | 整窗前移 | 闭包少收 | 单元省下 | 契约 |\n\
+             |---|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---:|---|\n",
+        );
+        let mut windows_sorted: Vec<&StampOnlyWindowRow> = window_rows
+            .iter()
+            .filter(|row| row.stamp_only > 0)
+            .collect();
+        windows_sorted.sort_by(|a, b| {
+            b.over_b0
+                .cmp(&a.over_b0)
+                .then_with(|| b.stamp_only.cmp(&a.stamp_only))
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        for row in windows_sorted.iter().take(detail_rows) {
+            report.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {}/{}/{} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                row.label,
+                row.stamp_only,
+                row.nothing_below,
+                row.candidates,
+                row.index_keys,
+                if row.degraded_a { "是" } else { "—" },
+                if row.degraded_b0 { "是" } else { "—" },
+                if row.degraded_b1 { "是" } else { "—" },
+                row.regen_a,
+                row.regen_b0,
+                row.over_b0,
+                row.over_b1_extra,
+                if row.whole_advance { "是" } else { "—" },
+                row.closure_dropped,
+                row.saved_units,
+                if row.contracts_ok {
+                    "全过"
+                } else {
+                    "**红**"
+                },
+            ));
+        }
+        if windows_sorted.len() > detail_rows {
+            report.push_str(&format!(
+                "| …（另 {} 窗略，调 `AIOS_Q6_PROBE_DETAIL_ROWS`） | | | | | | | | | | | | | |\n",
+                windows_sorted.len() - detail_rows
+            ));
+        }
+
+        report.push_str(&format!(
+            "\n## T4 每多算根明细（红根置顶，前 {detail_rows} 行）\n\n"
+        ));
+        report.push_str(
+            "| 窗 | 根 | noun | 去向 | 只 B1 | 种子 | 种子 noun×k | 单元 | 未变 | 新件 | 删件 | 判 | 目录侧 | 退化窗 | 两端秒 |\n\
+             |---|---|---|---|---|---:|---|---:|---:|---:|---:|---|---|---|---:|\n",
+        );
+        let mut rows_sorted: Vec<&StampOnlyRootRow> = rows.iter().collect();
+        rows_sorted.sort_by_key(|row| match row.verdict() {
+            "红" => 0,
+            "绿" => 1,
+            "新根" => 2,
+            "零单元" => 3,
+            _ => 4,
+        });
+        for row in rows_sorted.iter().take(detail_rows) {
+            let (units, unchanged, added, removed) = match &row.count {
+                Some(count) => (
+                    count.units.to_string(),
+                    count.unchanged.to_string(),
+                    count.added.to_string(),
+                    count.removed.to_string(),
+                ),
+                None => ("—".into(), "—".into(), "—".into(), "—".into()),
+            };
+            report.push_str(&format!(
+                "| {} | {} | `{}` | {} | {} | {} | {} | {units} | {unchanged} | {added} | {removed} | {} | 未查 | {} | {:.1}s |\n",
+                row.window,
+                row.root,
+                row.noun,
+                row.destination,
+                if row.b1_only { "是" } else { "—" },
+                row.seeds,
+                if row.seed_nouns.is_empty() {
+                    "—"
+                } else {
+                    &row.seed_nouns
+                },
+                row.verdict(),
+                if row.degraded_a { "是" } else { "—" },
+                row.elapsed_secs,
+            ));
+        }
+        if rows_sorted.len() > detail_rows {
+            report.push_str(&format!(
+                "| …（另 {} 根略） | | | | | | | | | | | | | | |\n",
+                rows_sorted.len() - detail_rows
+            ));
+        }
+
+        report.push_str("\n## T5 按根 noun\n\n| 根 noun | 多算根 B0 | 该 noun 的 regen_A 根 | 占比 | 量到的单元 | 两端秒 | 红 |\n|---|---:|---:|---:|---:|---:|---:|\n");
+        let mut noun_rows: Vec<(&String, &StampOnlyNounTally)> = by_noun.iter().collect();
+        noun_rows.sort_by(|a, b| {
+            b.1.over_roots
+                .cmp(&a.1.over_roots)
+                .then_with(|| a.0.cmp(b.0))
+        });
+        for (noun, tally) in noun_rows {
+            let denominator = regen_a_by_noun.get(noun).copied().unwrap_or(0);
+            report.push_str(&format!(
+                "| `{noun}` | {} | {denominator} | {} | {} | {:.1}s | {} |\n",
+                tally.over_roots,
+                share(tally.over_roots, denominator),
+                tally.units,
+                tally.seconds,
+                tally.red,
+            ));
+        }
+
+        report.push_str("\n## T6 按库\n\n| 库 | 窗 | 有只 CACHID 的窗 | regen_A | 多算根 B0 | 占比 | 整窗前移窗 |\n|---|---:|---:|---:|---:|---:|---:|\n");
+        let mut db_rows: Vec<(&String, &StampOnlyDbTally)> = by_db.iter().collect();
+        db_rows.sort_by(|a, b| b.1.over_b0.cmp(&a.1.over_b0).then_with(|| a.0.cmp(b.0)));
+        for (db, tally) in db_rows {
+            report.push_str(&format!(
+                "| {db} | {} | {} | {} | {} | {} | {} |\n",
+                tally.windows,
+                tally.windows_with_stamp_only,
+                tally.regen_a,
+                tally.over_b0,
+                share(tally.over_b0, tally.regen_a),
+                tally.whole_advance,
+            ));
+        }
+
+        report.push_str(&format!("\n## T7 红根（{} 个）\n\n", red.len()));
+        if red.is_empty() {
+            report.push_str("（无——量到的多算根两端逐件全等，安全门这一关过。）\n");
+        } else {
+            for row in red.iter().take(RED_ROWS_SHOWN) {
+                let count = row.count.as_ref().expect("红根必然量过");
+                report.push_str(&format!(
+                    "- {} 根 {} `{}`（{}，库 {}）：单元 {} 未变 {} 新件 {} 删件 {}；种它的只 CACHID 候选 {}（{}）\n",
+                    row.window,
+                    row.root,
+                    row.noun,
+                    row.destination,
+                    row.db,
+                    count.units,
+                    count.unchanged,
+                    count.added,
+                    count.removed,
+                    row.seeds,
+                    if row.seed_nouns.is_empty() {
+                        "—"
+                    } else {
+                        &row.seed_nouns
+                    },
+                ));
+            }
+            if red.len() > RED_ROWS_SHOWN {
+                report.push_str(&format!("- …（另 {} 根略）\n", red.len() - RED_ROWS_SHOWN));
+            }
+        }
+
+        report.push_str("\n## T8 对账与三条契约\n\n| 契约 | 判据 | 结果 |\n|---|---|---|\n");
+        let contract = |reds: &[String]| -> String {
+            if reds.is_empty() {
+                "全过".to_string()
+            } else {
+                format!("**{} 窗红**", reds.len())
+            }
+        };
+        report.push_str(&format!(
+            "| 契约 1 | `regen_B0 ⊆ regen_A`（剔种子只会少进 regen） | {} |\n",
+            contract(&red_regen_subset)
+        ));
+        report.push_str(&format!(
+            "| 契约 2 | `closure_B ⊆ closure_A`（闭包只少不多） | {} |\n",
+            contract(&red_closure_subset)
+        ));
+        report.push_str(&format!(
+            "| 契约 3 | 两态 `remove` 逐位相同（放行只 CACHID 不改删除动作） | {} |\n",
+            contract(&red_remove_same)
+        ));
+        report.push_str(&format!(
+            "| 对账 | `unread_attribute` 两态差 == 只 CACHID 候选数 | {} |\n",
+            contract(&red_unread_reconcile)
+        ));
+        report.push_str(&format!(
+            "| 归因自检 (c) | 多算根之下没有非只 CACHID 的种子（命中数应为 0） | {}（未判 {attribution_unjudged} 窗） |\n",
+            contract(&red_attribution)
+        ));
+        for (title, reds) in [
+            ("契约 1", &red_regen_subset),
+            ("契约 2", &red_closure_subset),
+            ("契约 3", &red_remove_same),
+            ("对账", &red_unread_reconcile),
+            ("归因自检", &red_attribution),
+        ] {
+            if reds.is_empty() {
+                continue;
+            }
+            report.push_str(&format!("\n**{title} 红的窗**（不改契约迁就）：\n\n"));
+            for line in reds.iter().take(60) {
+                report.push_str(&format!("- {line}\n"));
+            }
+            if reds.len() > 60 {
+                report.push_str(&format!("- …（另 {} 条略）\n", reds.len() - 60));
+            }
+        }
+
+        if !failed.is_empty() {
+            report.push_str(&format!("\n## 量不了的根（{} 个）\n\n", failed.len()));
+            for line in failed.iter().take(60) {
+                report.push_str(&format!("- {line}\n"));
+            }
+            if failed.len() > 60 {
+                report.push_str(&format!("- …（另 {} 条略）\n", failed.len() - 60));
+            }
+        }
+
+        report.push_str("\n## 四门判读（建议阈值，只决定要不要立接线切片，不决定今天的行为）\n\n| 门 | 判据 | 实测 | 结论 |\n|---|---|---|---|\n");
+        report.push_str(&format!(
+            "| T-安全（硬） | 红根 = 0 | 红 {} / 量到 {} | {} |\n",
+            red.len(),
+            measured.len(),
+            if measured.is_empty() {
+                "**没量到根，判不了**"
+            } else if gate_safety {
+                "**过**"
+            } else {
+                "**不过 → 不接线**，先按 T7 逐根查"
+            }
+        ));
+        report.push_str(&format!(
+            "| T-收益 | 多算根 / `regen_A` ≥ 10%（< 3% 则记结论不接线） | {:.1}% | {} |\n",
+            over_root_share * 100.0,
+            if over_root_share >= 0.10 {
+                "**过 → 建议立接线切片**"
+            } else if over_root_share < 0.03 {
+                "**不过（< 3%）→ 记结论、不接线**"
+            } else {
+                "夹在中间 → 看 T6 分库"
+            }
+        ));
+        report.push_str(&format!(
+            "| T-形状 | 多算根落在整窗前移窗的占比 ≥ 80% | {:.1}% | {} |\n",
+            gate_shape * 100.0,
+            if gate_shape >= 0.80 {
+                "过 → 接线可先只做「整窗判定」这个最窄的口"
+            } else {
+                "不过 → 还有零散写方形状，接线要按候选做"
+            }
+        ));
+        report.push_str(&format!(
+            "| T-护栏 | B1 比 B0 多省下的根 / 多算根 B0 ≥ 50% | {:.1}% | {} |\n",
+            gate_guard * 100.0,
+            if gate_guard >= 0.50 {
+                "过 → 接线时护栏分子必须改成净候选数"
+            } else {
+                "不过 → 护栏不动"
+            }
+        ));
+
+        report.push_str("\n## 不许当已证\n\n");
+        report.push_str(
+            "- 「只 CACHID 跳动 = 应用侧缓存重建」仍是从形状推的（S8 §8 原话）：绿只证 DESI 侧几何没变，\
+             证不了目录侧（本报告头「看不见的一半」）。\n\
+             - `roots_S` 用 S 端枚举（「每个根都已发布」）比生产的 `gen_root` 行**宽**：生产里没发布过的根本来走 \
+             `lazy`，两态都不 eager——多算根数是生产上界的上界。\n\
+             - 两端秒是探针的 `generate_subtree` × 2，不含落库 / 发布；只能比相对占比，不能当生产耗时。\n\
+             - B 态是「接线后形状」的近似（第三档 + 种子剔除 + B1 护栏净数），三者接线时都要重新两态对拍。\n\
+             - 抽样列（T4「未量」行）的根只进根数、不进单元 / 秒的实测和；本报告**不出外推值**。\n",
+        );
+
+        println!("{report}");
+        if let Some(parent) = report_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&report_path, &report) {
+            Ok(()) => println!("report written to {}", report_path.display()),
+            Err(error) => println!("report NOT written to {}: {error}", report_path.display()),
+        }
+        assert!(windows > 0, "语料里一窗都没跑到——目录或模板目录不对");
+        if strict {
+            assert!(
+                red.is_empty(),
+                "AIOS_Q6_PROBE_STRICT=1：{} 个多算根两端不全等",
+                red.len()
+            );
+        }
+    }
 }
