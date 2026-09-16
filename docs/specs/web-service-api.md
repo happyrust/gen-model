@@ -823,12 +823,14 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
-### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns}` — 进程内空间树的邻近查询
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns, nearest-clearance}` — 进程内空间树的邻近查询
 
 出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
 §5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
 `model-source/genModelV1/spatialSource.ts`（抽屉「按范围查找」在 `?model_source=gen-model-v1` 下走这三条，legacy 源仍走旧后端
-`/api/sqlite-spatial/*`）。
+`/api/sqlite-spatial/*`）。2026-09-16 起（本仓 `docs/plans/2026-09-16-bran-centerline-nearest-clearance-v1-dev-plan.md` §3.1 / §3.2）
+`nearby` 与 `nearby/refnos` 多一档 `source_mode=bran_centerline`（§4.13.1），并新增第四条 `nearest-clearance`（§4.13.2）；
+四条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
 
 - **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
   随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
@@ -858,6 +860,7 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 | `include_negative` | 默认 `false`：按 `aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES` 剔除负实体（NBOX / NCYL …） |
 | `dbnums` | 逗号分隔 u32，限定库；给了它时答不出库号的条目一律剔除 |
 | `page` / `per_page` | `page` 从 1 起；`per_page` 默认 500、夹在 `1..=1000`（超出钳位，不报错） |
+| `source_mode` | `aabb`（默认：源 = 目标含子树的并集盒）\| `bran_centerline`（源 = 这条 BRAN 的真实中心线走廊，见 §4.13.1）；大小写不敏感；只能与 `refno` 搭配，与 `x,y,z` 同给 400 |
 
 - **中心**：点模式 `center.source = "position"`。refno 模式先在 `ModelMemoryStore` 里并「来源是目标或祖先链含目标、`mesh_id`
   非空、盒可用」的记录（与 `/api/v1/query` 的 `model.spatial.bounds` subtree 口径逐字相同），投影里没有再看树上该 refno 自己的
@@ -907,9 +910,127 @@ plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，
 `GET /spatial/negative-nouns` → `{ "nouns": ["NBOX", "NCYL", …] }`：`TOTAL_NEG_NOUN_NAMES` 去重、保持原序；只过身份门，
 不看空间树状态。
 
-错误一览：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒）、422 `identity_mismatch`（§3）、
-503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档）；其余暂时故障（`DirectTreeService` 取不到等）
-按 §3 统一信封 500。
+#### 4.13.1 `source_mode=bran_centerline`（`nearby` / `nearby/refnos`）— 沿 BRAN 真实中心线走廊取候选（2026-09-16）
+
+出处：`docs/plans/2026-09-16-bran-centerline-nearest-clearance-v1-dev-plan.md` §3.1；实现 `fast_model::spatial_centerline`
+（走廊几何，纯函数）+ `spatial_query::{resolve_center, collect_corridor_candidates}` + `handlers::prepare_centerline`。
+消费方：plant3d-web 抽屉「距离查询」的「沿 BRAN 中心线」一档（`GEN_MODEL_V1_SPATIAL_CAPABILITIES.branCenterline = true`，
+`genModelV1/spatialSource.ts` 把 `source_mode` 原样转进 v1 参数）。
+
+- **中心线从哪来**：本仓没有 SurrealDB / `tubi_relate`。走廊来自 `mbd::branch_query(set, refno)`——MBD 管道尺寸
+  （`/api/mbd/v2/pipe/{refno}`）用的同一份成员序：每个成员的到达 / 离开点（世界 mm）成一段 `start → end`，含按 E3D 规则合成的
+  隐式管身 `TUBI`（refno 写作 `a_b~c_d`）；穿过件（`start == end`，只有 `pos`）不成段。handler 在拿树的**读锁之前**
+  `spawn_blocking` 预取走廊（读 E3D 库不能压在树锁下），再走 `/nearby` 原有的读锁内取候选 / 锁外过滤分页流水线。
+- **候选**：读锁内对每一段用「段盒外扩 `radius`」当探针 `locate_intersecting_bounds`，按 refno 去重；距离是**整条走廊到候选盒的
+  精确最小距离**（线段↔AABB 最近点对，从 legacy `sqlite_spatial_api` 移植、有单测），不是到段盒的。`shape=sphere` 再按 `≤ radius`
+  过滤；`cube` 保留探针命中的全部（角落上的 `within_radius` 可为 `false`）。`candidate_cap` 仍是 200000。
+  候选覆盖面不变（仍只有 `GLOBAL_AABB_TREE` 里的盒）；隐式管身自己没有 refno、也不在树里，不会成为候选。
+- **自身**：`include_self=false`（默认）剔除的集合 = §4.13 的投影子树 **∪** `branch_query` 给出的全部成员 refno——BRAN 的隐含管子与
+  成员构件都不算「周边」。`include_self=true` 时两者都放行。
+- **中心与响应**：`center` 是走廊盒的中心、`center.source = "bran_centerline"`；响应多一块 `source`，`warnings` 只在非空时出现，
+  其余字段与默认模式逐字相同（非中心线模式的响应一字不变）：
+
+```json
+{ "center": { "x": 0, "y": 0, "z": 0, "source": "bran_centerline" },
+  "source": { "kind": "bran_centerline", "refno": "24381_145018", "segment_count": 12,
+              "centerline_bbox": { "min": [x, y, z], "max": [x, y, z] }, "outside_diameter_mm": 219.1 },
+  "warnings": ["2 个成员没有长度（穿过件），不参与走廊"],
+  "results": [ … ], "radius": 1500, "shape": "sphere", … }
+```
+
+  `outside_diameter_mm` 是首个给出外径的成员的外径，取不到为 `null`（这里只透传，§4.13.2 的 `surface=1` 扣的就是它的一半）。
+  `nearby/refnos` 同参同实现，只是不分页。
+- **错误**（在 §4.13 那一览之上追加，均在树的读锁之前判定）：`source_mode=bran_centerline` 配 `x,y,z` → 400；`branch_query`
+  找不到这条 refno → **404 `not_found`**；不是派生隐式管身的路由容器（不是 BRAN）或整条 BRAN 一段都拼不出 → **422 `precondition`**
+  （消息直说，与 `/api/mbd/v2/pipe` 同一套映射）。
+
+#### 4.13.2 `GET /api/v1/spatial/nearest-clearance` — BRAN 最近净距：每组最近目标 + 可直接画尺寸的两个端点（2026-09-16）
+
+出处：同上计划 §3.2；实现 `fast_model::spatial_clearance`（参数、量距、分桶全在这一个文件，纯函数 + 本地树夹具单测），
+handler `spatial_nearest_clearance` 只做身份 / 取服务 / 状态码。消费方：plant3d-web `genModelV1Api.genModelV1SpatialNearestClearance`
+→ `useSpatialCompute`「BRAN 中心线最近清距」（按数据源分流：legacy 源仍打旧后端同名路由），结果经 `branExternalDimensions`
+以 `bran-clearance` external source 画进尺寸系统。
+
+**与 legacy `/api/sqlite-spatial/nearest-clearance` 的关系**：入参名、分桶语义、`noun_counts` / `excluded_self_members` /
+`resolved_filters` 的形状同形，前端 `BranNearestClearanceRequest/Response` 一字不改就能吃。两点不同，都是本仓既有约定：
+① 失败走 HTTP 状态码 + §3 信封（legacy 是 200 + `success:false`），成功体里仍带 `success: true`；② 多一个 `surface=1`
+（legacy 没有外径这一列）。
+
+query 参数（全部按字串收；布尔格都认 `1/true/yes/on` 与 `0/false/no/off`；错误 400 `bad_request`，`message` 直说哪一格）：
+
+| 参数 | 说明 |
+|---|---|
+| `source_refno` | **必填**，`a/b` 或 `a_b`。中心线模式必须是 BRAN；`aabb` 模式任意有盒的构件 |
+| `source_mode` | `bran_centerline`（**默认**——与 `/nearby` 相反，这条路由就是为中心线做的）\| `aabb`（别名 `default`：按源含子树的并集盒量距） |
+| `target_groups` | 逗号分隔的预置组，大小写不敏感：`wall` = WALL / PANE / GWALL / STWALL，`column` = COLU / SCTN / GENSEC（与 legacy 逐字相同）；未知组名 400 |
+| `target_nouns` | 直接点名的 NOUN 白名单，合成一桶 `target_nouns`；可与 `target_groups` 并用 |
+| `group_by` | `target_groups`（默认；别名 `group` / `groups`）：一组一桶 \| `noun`（别名 `nouns`）：半径内出现的每个 NOUN 自成一桶。**`target_groups` 下两种目标都不给 → 400**（服务端不补 `wall,column`，legacy 也是 400，前端 `queryBranCenterlineNearestClearance` 自己补）；`noun` 下不给目标 = 半径内全部类型，负几何（`TOTAL_NEG_NOUN_NAMES`）默认剔、显式点名放行 |
+| `exclude_nouns` | 目标过滤**之后**再剔掉的噪声类型（如 `WELD,ATTA`），两种分桶都生效 |
+| `radius` | mm，默认 **5000**，`0 < r ≤ 100000`（同 `/nearby`） |
+| `scope` / `dbnums` | `all_loaded`（默认）\| `same_dbnum`（只看与源同库；答不出源库号 → 不限定 + warning）\| `explicit_dbnums`（必须同时给 `dbnums`）。**给了 `dbnums` 一律按显式限定，`scope` 写什么都不管**（与 legacy 同：dbnums 说了算）；限定下答不出库号的候选剔除 |
+| `max_per_group` | 每桶最多几条，默认 **1**，钳到 `1..=100` |
+| `include_self` | 默认 **false**（净距场景没人要自己）：剔除 投影子树 ∪ BRAN 成员（§4.13.1 同一口径） |
+| `surface` | 默认 `false`。`1` = 距离扣掉 `outside_diameter / 2`（不小于 0），`source_point` 沿连线推到管外表面；**只在中心线模式下生效**——BRAN 没有可用外径 → warning、照中心线口径答；`aabb` 模式下给了 → warning、忽略。`resolved_filters.surface` 回的是**实际生效值** |
+| `debug` | 默认 `false`；`1` 多回 `debug{}` 计数块 |
+
+- **流水线**：借 `/nearby` 同一条 `scan_global_tree`——树的读锁内只解中心 + 取候选（源、模式、半径生效，`shape` 恒 sphere）；
+  NOUN / 库号 / 自身过滤**全部在锁外、本模块里做**，因为每一步都要计数（`excluded_self_members`、`debug`）。锁外顺序固定：
+  `include_self` → NOUN 白名单（或不限 NOUN 时的负几何）→ `exclude_nouns` → 库号 → `distance ≤ radius` → 量距 → 分桶。
+  走廊预取与 §4.13.1 完全相同（读锁之前、`spawn_blocking`）。
+- **量距**：中心线模式 = 走廊到候选盒的精确最近点对——`nearest.source_point` 在中心线上、`target_point` 在候选盒面上，
+  `source_segment_refno` / `source_segment_order` 是命中的那一段（隐式管身 `a_b~c_d`）；`aabb` 模式 = 源盒↔候选盒逐轴取朝向对方的面
+  （某轴重叠取重叠区间中点，标注落在两盒真正贴近处而不是角上），`source_segment_refno` = 源自己、`order` 为 `null`。
+  `intersects = distance_mm ≤ 0`。`annotation{start_point, end_point, label_mm}` 就是同一对端点 + 距离，前端不再算、直接画。
+  `distance_method`：`centerline_aabb_clearance_mm` / `centerline_surface_aabb_clearance_mm`（`surface` 实际生效）/ `aabb_clearance_mm`。
+- **分桶**（与 legacy 同语义）：`target_groups` 一组一桶、桶序照请求里的组序、**空桶保留**并记一条 warning「组 `x` 在半径内没有目标」
+  （「查了但没有」与「压根没查」对前端是两回事）；`noun` 每 NOUN 一桶、桶序按各桶最近距离再按 NOUN 名、没有空桶。桶内距离升序、
+  同距按库号再 refno（与 `/nearby` 同一把尺子）；`max_per_group` 截断。`noun_counts` 是**截断前**、过完全部过滤的按 NOUN 计数，
+  两种分桶都带，前端直接当类型 facet。
+
+响应（200；`nearest_by_group` 是数组形态，一桶一项）：
+
+```json
+{ "success": true,
+  "source": { "kind": "bran_centerline", "refno": "24381_145018", "dbnum": 24381, "aabb": null,
+              "segment_count": 12, "centerline_bbox": { "min": {"x":0,"y":0,"z":0}, "max": {"x":0,"y":0,"z":0} },
+              "outside_diameter_mm": 219.1 },
+  "distance_method": "centerline_aabb_clearance_mm", "unit": "mm",
+  "query_bbox": { "min": {"x":0,"y":0,"z":0}, "max": {"x":0,"y":0,"z":0} },
+  "resolved_filters": { "target_nouns": ["COLU", "GENSEC", "GWALL", "PANE", "SCTN", "STWALL", "WALL"],
+                        "target_groups": [{ "name": "wall", "nouns": ["WALL","PANE","GWALL","STWALL"] },
+                                          { "name": "column", "nouns": ["COLU","SCTN","GENSEC"] }],
+                        "group_by": "target_groups", "exclude_nouns": [], "scope": "all_loaded", "dbnums": null,
+                        "radius": 5000, "max_per_group": 1, "include_self": false, "surface": false },
+  "nearest_by_group": [
+    { "group": "wall", "nouns": ["WALL","PANE","GWALL","STWALL"],
+      "candidates": [{ "refno": "24381_8821", "noun": "WALL", "dbnum": 24381, "distance_mm": 1250.0, "intersects": false,
+                       "aabb": { "min": {"x":0,"y":0,"z":0}, "max": {"x":0,"y":0,"z":0} },
+                       "nearest": { "source_segment_refno": "24381_145123~24381_145124", "source_segment_order": 3,
+                                    "source_point": {"x":0,"y":0,"z":0}, "target_point": {"x":0,"y":0,"z":0},
+                                    "vector": {"dx":0,"dy":0,"dz":0} },
+                       "annotation": { "start_point": {"x":0,"y":0,"z":0}, "end_point": {"x":0,"y":0,"z":0}, "label_mm": 1250.0 } }] },
+    { "group": "column", "nouns": ["COLU","SCTN","GENSEC"], "candidates": [] } ],
+  "noun_counts": { "WALL": 3, "SCTN": 7 },
+  "excluded_self_members": 37,
+  "warnings": ["组 `column` 在半径内没有目标"],
+  "spatial_state": "ready", "coverage": "global-tree",
+  "debug": { "candidate_ids": 0, "rows_examined": 0, "scope_filtered": 0, "noun_filtered": 0, "distance_filtered": 0,
+             "self_filtered": 0, "groups_with_hits": 0, "returned_candidates": 0, "truncated_candidates": false } }
+```
+
+- 这条路由的盒一律是 `{x,y,z}` 对象（前端尺寸系统直接吃），与 `/nearby` 的 `[x,y,z]` 三元组**不同**。`refno` 一律 `a_b`；
+  `dbnum` 答不出为 `null`（本仓没有 `spec_value` 这一列，前端按可选处理）；`source.aabb` 只在 `aabb` 模式下有值，
+  `segment_count` / `centerline_bbox` / `outside_diameter_mm` 只在中心线模式下有值，其余为 `null`；`query_bbox` 是源盒 / 走廊盒外扩
+  `radius`；`debug` 仅 `debug=1` 时出现。`spatial_state` / `coverage` 与 §4.13 同义。
+- **只读**：GET、不取空间串行锁、不写树、不新增表——`spatial_clearance.rs` 里有一道「不碰 `GLOBAL_AABB_TREE`」的源码钉，
+  `aabb_tree.rs` 的写点白名单扫描也不认它。
+- **未做**（计划 §3.4）：目标侧仍是 AABB，精算到目标网格留给前端；SCTN / GENSEC 不按姿态区分「竖直才算柱」（D6：GENSEC 目前算 `column`）；
+  `surface` 缺省是否该为 `1`（D4）未拍板，当前缺省 `false`。
+
+错误一览（四条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
+找不到这条 refno）、422 `precondition`（中心线模式源不是 BRAN / 路由容器，或一段都拼不出）、422 `identity_mismatch`（§3）、
+503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档）；其余暂时故障（`DirectTreeService` 取不到、
+MBD 服务不可用等）按 §3 统一信封 500。
 > 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`、`/files/review_attachments/*`；plant3d-web 写死的契约路径，不在 `/api/v1` 下，响应沿用旧端 `{success,…}` 信封而非 §3 的 `ApiError`）另见 `docs/specs/review-api.md`（自 plant-model-gen `:3100` 移植，`docs/plans/2026-09-12-review-backend-port-plan.md` Q10）。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）

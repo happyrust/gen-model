@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
-use crate::fast_model::spatial_query;
+use crate::fast_model::{spatial_clearance, spatial_query};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
@@ -1340,8 +1340,46 @@ impl IntoResponse for SpatialApiError {
     }
 }
 
+/// `source_mode=bran_centerline` 的预取：BRAN 的真实中心线来自 E3D 库（`mbd::branch_query`，
+/// 与 `/api/mbd/v2/pipe` 同一份成员序 + 隐式管身），读盘要落在 `spawn_blocking` 里、并且必须在
+/// 拿树的读锁**之前**读完——查询流水线整段都在锁内跑，不能在那里等 I/O。
+///
+/// 其它 `source_mode` 直接给 `None`，一次库都不读。
+async fn prepare_centerline(
+    source_mode: spatial_query::SourceMode,
+    branch: Option<RefU64>,
+) -> Result<Option<crate::fast_model::spatial_centerline::BranCenterline>, SpatialApiError> {
+    use crate::fast_model::spatial_centerline::BranCenterline;
+
+    if source_mode != spatial_query::SourceMode::BranCenterline {
+        return Ok(None);
+    }
+    let Some(branch) = branch else {
+        return Err(
+            ApiError::bad_request("source_mode=bran_centerline 要给一条 BRAN 的 refno").into(),
+        );
+    };
+    let text = RefnoEnum::from(branch).to_pdms_str();
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&text)
+        .map_err(|error| ApiError::bad_request(format!("refno `{text}` 无法解析：{error:#}")))?;
+    let set = super::mbd::service()
+        .await?
+        .build_set(refno.dbno(), None)
+        .map_err(ApiError::from_domain)?;
+    let result = tokio::task::spawn_blocking(move || crate::mbd::branch_query(&set, refno))
+        .await
+        .map_err(|join| {
+            ApiError::from_domain(anyhow::anyhow!("centerline task aborted: {join}"))
+        })?
+        .map_err(super::mbd::api_error)?;
+    BranCenterline::from_branch(branch, &result)
+        .map(Some)
+        .map_err(|message| ApiError::precondition(message).into())
+}
+
 /// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页
 /// （spec §4.13）。只读树、不取空间串行锁；树不在 Ready / ReadyEmpty 回 503 `spatial_not_ready`。
+/// `source_mode=bran_centerline` 改沿 BRAN 的真实中心线走廊取候选（计划 §3.1）。
 pub async fn spatial_nearby(
     State(state): State<AppState>,
     Query(request): Query<SpatialNearbyReq>,
@@ -1349,13 +1387,23 @@ pub async fn spatial_nearby(
     resolve_identity(&state, &request.identity)?;
     let params =
         spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
     let service = state
         .direct_tree
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby(&params, service.as_ref()).await?;
+    let response = spatial_query::nearby(&params, centerline.as_ref(), service.as_ref()).await?;
     Ok(Json(response))
+}
+
+/// 目标是 refno 就给它，点模式没有 refno。中心线模式下的「必须给 refno」由参数解析挡，
+/// 这里不重复判。
+fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
+    match params.target {
+        spatial_query::Target::Refno(refno) => Some(refno),
+        spatial_query::Target::Position(_) => None,
+    }
 }
 
 /// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。
@@ -1366,12 +1414,44 @@ pub async fn spatial_nearby_refnos(
     resolve_identity(&state, &request.identity)?;
     let params =
         spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
     let service = state
         .direct_tree
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby_refnos(&params, service.as_ref()).await?;
+    let response =
+        spatial_query::nearby_refnos(&params, centerline.as_ref(), service.as_ref()).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/v1/spatial/nearest-clearance` 的 query 串：身份三格 + 净距参数原文。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialClearanceReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_clearance::RawClearanceQuery,
+}
+
+/// GET /api/v1/spatial/nearest-clearance — 沿 BRAN 中心线（或按源包围盒）找每组最近的目标，
+/// 每条候选带可直接画尺寸的两个端点（计划 §3.2）。与 `/nearby` 同一条只读流水线。
+pub async fn spatial_nearest_clearance(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialClearanceReq>,
+) -> Result<Json<spatial_clearance::ClearanceResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_clearance::ClearanceParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let centerline = prepare_centerline(params.source_mode, Some(params.source)).await?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response =
+        spatial_clearance::nearest_clearance(&params, centerline.as_ref(), service.as_ref())
+            .await?;
     Ok(Json(response))
 }
 

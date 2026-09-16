@@ -2,6 +2,41 @@
 
 ## 2026-09-16
 
+### `/api/v1/spatial/*` 接上 BRAN 真实中心线：`nearby` 加 `source_mode=bran_centerline`（P1）、新增 `GET /api/v1/spatial/nearest-clearance`（P2）
+
+- 起因：「指定 BRAN → 沿真实中心线找周边构件 / 找最近墙柱并给出可画尺寸的两个端点」此前三段会话把后端改动全落在了 legacy
+  `plant-model-gen`（`/api/sqlite-spatial/*`），而前端 `plant3d-web` 用的后端是本仓（`/api/v1/spatial/*`，候选来自进程内
+  `GLOBAL_AABB_TREE`，没有 SurrealDB / `tubi_relate`）。用户 2026-09-16 纠正后按 `docs/plans/2026-09-16-bran-centerline-nearest-clearance-v1-dev-plan.md`
+  重新对准本仓落地；契约进 spec §4.13（新 §4.13.1 / §4.13.2）。legacy 那一路今后不再动。
+- **P1**（`fast_model::spatial_centerline` 新文件 + `spatial_query` + `handlers::prepare_centerline`）：`nearby` / `nearby/refnos` 多一格
+  `source_mode=aabb|bran_centerline`（缺省 `aabb`，只配 `refno`）。中心线来自 `mbd::branch_query`——MBD 管道尺寸用的同一份成员序
+  （到达 / 离开点，含按 E3D 规则合成的隐式管身 `a_b~c_d`），每成员一段、穿过件不成段；handler 在树**读锁之前** `spawn_blocking` 预取
+  （读库不压在树锁下）。候选逐段「段盒外扩 r」探针取、按 refno 去重，距离是整条走廊到候选盒的精确最小距离（线段↔AABB 最近点对，
+  从 legacy 移植、单测钉住）；自身 = 投影子树 ∪ `branch_query` 成员。响应 `center.source = "bran_centerline"`、多 `source{kind,refno,
+  segment_count,centerline_bbox,outside_diameter_mm}` 与非空时的 `warnings`，非中心线响应一字不变。错误：找不到 refno 404、不是 BRAN /
+  一段都拼不出 422（与 `/api/mbd/v2/pipe` 同映射）。
+- **P2**（`fast_model::spatial_clearance` 新文件，handler 只做身份 / 取服务 / 状态码）：`GET /api/v1/spatial/nearest-clearance`，
+  与 legacy 同名同形（入参名、`wall` / `column` 预置组、`group_by=target_groups|noun`、`exclude_nouns`、`noun_counts`、
+  `excluded_self_members`、`resolved_filters`），前端类型一字不改；两点不同——失败走状态码 + 信封（成功体仍 `success:true`），
+  多 `surface=1`（距离扣 `outside_diameter/2`、起点推到管外表面，只在中心线模式生效，`distance_method` 相应变
+  `centerline_surface_aabb_clearance_mm`）。缺省 `source_mode=bran_centerline`、`radius=5000`、`max_per_group=1`（钳 1..100）、
+  **`include_self=false`**；`target_groups` 分桶下两种目标都不给 → 400（不补 `wall,column`，与 legacy 同）；`noun` 分桶不给目标 =
+  半径内全部类型、负几何默认剔。借 `/nearby` 的 `scan_global_tree` 取候选，NOUN / 库号 / 自身过滤全在锁外本模块做（要计数）；
+  每条候选带 `nearest{source_segment_refno,order,source_point,target_point,vector}` 与 `annotation{start_point,end_point,label_mm}`，
+  前端不再算、直接画。`target_groups` 空桶保留 + warning；`noun` 桶序按最近距离。路由钉 `spatial_routes_are_read_only_get_endpoints`
+  收进第四条；`spatial_clearance.rs` 自带「不碰 `GLOBAL_AABB_TREE`」源码钉（被禁字面量用 `concat!` 拼，免得 `aabb_tree.rs`
+  的写点白名单整文件 `contains` 误判——第一版就撞过这一条红）。
+- 前端（`plant3d-web`，本仓外、未提交）：`genModelV1Api.genModelV1SpatialNearestClearance`；`useSpatialCompute` 按数据源分流
+  （legacy 打旧后端同名路由，v1 打这条），请求口径 `group_by=noun&max_per_group=3&exclude_nouns=WELD,ATTA`，Dock 的目标 chips 改成
+  由 `noun_counts` 驱动的类型 facet、每类默认标注最近 1 条；`GEN_MODEL_V1_SPATIAL_CAPABILITIES.branCenterline` 翻 `true`。
+- 验证：`cargo test --lib` **2151 passed / 0 failed / 111 ignored**（含 `spatial_clearance` 9 条：参数解析与拒收、每组最近 + 两端点、
+  空桶保留、`group_by=noun` 分桶与桶序、自身剔除与 `include_self=true` 反例、`surface` 扣径 + aabb 模式下的忽略、盒到盒量距、
+  `dbnums` / `same_dbnum` 限定与答不出时出声、不碰全局树源码钉；`spatial_query` 中心线走廊 / 自身并集 / cube-sphere 用例；
+  `spatial_centerline` 段↔盒最近点纯函数用例）；`cargo clippy --lib --tests` 改动文件零告警；rustfmt 干净。
+  **未 live**：计划 §5 那两条真机 GET（`24381_145018`）没跑——起服务是长驻进程。
+- 未动：legacy `plant-model-gen`（D1 留 / 回退未拍板）；SCTN / GENSEC 按姿态判柱（P4）；`surface` 缺省（D4）仍是 `false`；
+  精算到目标网格留给前端。
+
 ### 本地发布 0.1.27：ADR-079 `gen_root` 表退役、掉线 UNC 15 s 上限修复（附 ADR-079 真库重启验证）
 
 - 后端 `0.1.27` 构建自 `2cb5de1f112c`（**干净树**，build_id 不带 `.dirty`），复用 0.1.26 那份已验证 Web

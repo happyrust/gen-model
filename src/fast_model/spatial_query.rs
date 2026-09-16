@@ -28,6 +28,9 @@ use serde::{Deserialize, Serialize};
 use crate::data_interface::direct_tree::DirectTreeService;
 use crate::data_interface::generation_root::{refno_from_e3d, refno_to_e3d};
 use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+use crate::fast_model::spatial_centerline::{
+    BranCenterline, CenterlineSegment, centerline_aabb_distance, segment_bbox,
+};
 use crate::fast_model::spatial_state::{self, SpatialTreeState};
 
 /// `per_page` 缺省值。
@@ -50,6 +53,7 @@ pub const RETRY_AFTER_SECS: u32 = 5;
 #[serde(default)]
 pub struct RawSpatialQuery {
     pub refno: Option<String>,
+    pub source_mode: Option<String>,
     pub x: Option<String>,
     pub y: Option<String>,
     pub z: Option<String>,
@@ -80,6 +84,24 @@ impl Shape {
     }
 }
 
+/// 源的取法：缺省拿目标的并集盒（或点），`bran_centerline` 拿 BRAN 的真实中心线走廊
+/// （计划 §3.1）。走廊本身要读 E3D 库，由调用方在树的读锁之外预取，见 [`scan_tree`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceMode {
+    #[default]
+    Aabb,
+    BranCenterline,
+}
+
+impl SourceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aabb => "aabb",
+            Self::BranCenterline => "bran_centerline",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortBy {
     /// 距离升序；同距按 dbnum、refno 兜底。
@@ -99,6 +121,7 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpatialQueryParams {
     pub target: Target,
+    pub source_mode: SourceMode,
     pub radius: f32,
     pub shape: Shape,
     /// 大写。空 = 不筛。
@@ -116,7 +139,7 @@ pub struct SpatialQueryParams {
     pub per_page: usize,
 }
 
-fn parse_flag(name: &str, raw: Option<&str>, default: bool) -> Result<bool, String> {
+pub(crate) fn parse_flag(name: &str, raw: Option<&str>, default: bool) -> Result<bool, String> {
     let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default);
     };
@@ -127,7 +150,7 @@ fn parse_flag(name: &str, raw: Option<&str>, default: bool) -> Result<bool, Stri
     }
 }
 
-fn parse_f32(name: &str, raw: &str) -> Result<f32, String> {
+pub(crate) fn parse_f32(name: &str, raw: &str) -> Result<f32, String> {
     let value: f32 = raw
         .trim()
         .parse()
@@ -138,7 +161,7 @@ fn parse_f32(name: &str, raw: &str) -> Result<f32, String> {
     Ok(value)
 }
 
-fn split_csv(raw: Option<&str>) -> impl Iterator<Item = &str> {
+pub(crate) fn split_csv(raw: Option<&str>) -> impl Iterator<Item = &str> {
     raw.unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -179,6 +202,27 @@ impl SpatialQueryParams {
             }
             (None, _) => return Err("x,y,z 必须三个一起给".to_string()),
         };
+
+        let source_mode = match raw
+            .source_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => SourceMode::Aabb,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "aabb" => SourceMode::Aabb,
+                "bran_centerline" => SourceMode::BranCenterline,
+                other => {
+                    return Err(format!(
+                        "source_mode 只接受 aabb/bran_centerline（收到 {other}）"
+                    ));
+                }
+            },
+        };
+        if source_mode == SourceMode::BranCenterline && !matches!(target, Target::Refno(_)) {
+            return Err("source_mode=bran_centerline 要给一条 BRAN 的 refno，不能用 x,y,z".to_string());
+        }
 
         let radius_raw = raw
             .radius
@@ -258,6 +302,7 @@ impl SpatialQueryParams {
 
         Ok(Self {
             target,
+            source_mode,
             radius,
             shape,
             nouns,
@@ -390,6 +435,8 @@ fn merge(union: Option<Aabb>, aabb: Aabb) -> Aabb {
 pub enum CenterSource {
     Position,
     RefnoAabbCenter,
+    /// BRAN 真实中心线走廊的并集盒中心。
+    BranCenterline,
 }
 
 impl CenterSource {
@@ -397,6 +444,7 @@ impl CenterSource {
         match self {
             Self::Position => "position",
             Self::RefnoAabbCenter => "refno_aabb_center",
+            Self::BranCenterline => "bran_centerline",
         }
     }
 }
@@ -405,17 +453,26 @@ impl CenterSource {
 pub struct Center {
     pub point: Point<f32>,
     pub source: CenterSource,
-    /// refno 模式下目标（含子树）的并集盒；点模式为 `None`。
+    /// refno 模式下目标（含子树）的并集盒；中心线模式下是走廊的并集盒；点模式为 `None`。
+    /// 它只用来划候选的粗筛范围与开关自身剔除——中心线模式的距离不走它，见 [`collect_candidates`]。
     pub target_box: Option<Aabb>,
-    /// refno 模式下 `include_self=false` 要剔除的来源：目标自身 + 投影里祖先链含目标的记录的来源。
+    /// refno 模式下 `include_self=false` 要剔除的来源：目标自身 + 投影里祖先链含目标的记录的来源；
+    /// 中心线模式再并上 `branch_query` 给的成员（管子、弯头、焊缝这些在投影里未必挂得上 BRAN）。
     pub subtree: HashSet<RefU64>,
+    /// 中心线模式的走廊；其它模式为 `None`。
+    pub centerline: Option<BranCenterline>,
 }
 
 /// 解中心（计划 §3.2 步骤 3）。refno 模式先看内存投影（与 `query_service::spatial_bounds` 的 subtree
 /// 口径逐字相同：来源是目标或祖先链含目标、`mesh_id` 非空、盒可用），投影里没有再看树上该 refno 自己的
 /// 条目（[`AccelerationTree::entries_of`]，P0），两处都没有 → `NotFound`。
+///
+/// `centerline` 是预取好的走廊（`source_mode=bran_centerline`）：给了就用它当源，**不再**要求目标
+/// 自己在投影 / 树上有盒——中心线来自 E3D 库，没生成过模型的 BRAN 也答得出；投影子树这一遍仍然跑，
+/// 但只贡献自身剔除集。
 pub fn resolve_center(
     params: &SpatialQueryParams,
+    centerline: Option<&BranCenterline>,
     memory: &ModelMemoryStore,
     tree: &AccelerationTree,
 ) -> Result<Center, SpatialQueryError> {
@@ -425,6 +482,7 @@ pub fn resolve_center(
             source: CenterSource::Position,
             target_box: None,
             subtree: HashSet::new(),
+            centerline: None,
         }),
         Target::Refno(refno) => {
             let source = refno_to_e3d(RefnoEnum::from(refno));
@@ -447,6 +505,22 @@ pub fn resolve_center(
                     union = Some(merge(union, entry.aabb));
                 }
             }
+            if let Some(centerline) = centerline {
+                let corridor = centerline.bbox().ok_or_else(|| {
+                    SpatialQueryError::BadRequest(format!(
+                        "BRAN {} 的中心线没有可用线段",
+                        RefnoEnum::from(refno).to_pdms_str()
+                    ))
+                })?;
+                subtree.extend(centerline.member_refnos.iter().copied());
+                return Ok(Center {
+                    point: corridor.center(),
+                    source: CenterSource::BranCenterline,
+                    target_box: Some(corridor),
+                    subtree,
+                    centerline: Some(centerline.clone()),
+                });
+            }
             let target = union.ok_or_else(|| {
                 SpatialQueryError::NotFound(format!(
                     "构件 {} 在模型投影与空间树里都没有包围盒（还没生成过模型）",
@@ -458,6 +532,7 @@ pub fn resolve_center(
                 source: CenterSource::RefnoAabbCenter,
                 target_box: Some(target),
                 subtree,
+                centerline: None,
             })
         }
     }
@@ -485,11 +560,64 @@ fn take_capped<'a>(
     (out, truncated)
 }
 
+/// 同一个盒在多段走廊的探针里会被反复捞到，按「refno + 盒的六个坐标位」去重。
+/// 不按 refno 去重：一个构件在树上可以有多个盒（`entries_of` 返回 Vec），别的模式也是每盒一条候选，
+/// 走廊模式跟着一样，距离才不会取决于先撞上哪一段。
+type EntryKey = (RefU64, [u32; 6]);
+
+fn entry_key(entry: &RStarBoundingBox) -> EntryKey {
+    let aabb = &entry.aabb;
+    (
+        entry.refno,
+        [
+            aabb.mins.x, aabb.mins.y, aabb.mins.z, aabb.maxs.x, aabb.maxs.y, aabb.maxs.z,
+        ]
+        .map(f32::to_bits),
+    )
+}
+
+/// 走廊候选：逐段用「段盒外扩 r」当探针取盒，距离是整条走廊到该盒的最小距离
+/// （[`centerline_aabb_distance`]，不是到段盒的）；sphere 再按 ≤ r 过滤，cube 保留探针命中的全部。
+fn collect_corridor_candidates(
+    tree: &AccelerationTree,
+    segments: &[CenterlineSegment],
+    params: &SpatialQueryParams,
+) -> (Vec<Candidate>, bool) {
+    let radius = params.radius;
+    let mut seen: HashSet<EntryKey> = HashSet::new();
+    let mut candidates = Vec::new();
+    for segment in segments {
+        let bounds = segment_bbox(segment);
+        let probe = Aabb::new(
+            bounds.mins - Vector::repeat(radius),
+            bounds.maxs + Vector::repeat(radius),
+        );
+        for entry in tree.locate_intersecting_bounds(&probe) {
+            if !seen.insert(entry_key(entry)) {
+                continue;
+            }
+            let distance = centerline_aabb_distance(segments, &entry.aabb);
+            if params.shape == Shape::Sphere && distance > radius {
+                continue;
+            }
+            if candidates.len() >= CANDIDATE_CAP {
+                return (candidates, true);
+            }
+            candidates.push(Candidate {
+                entry: entry.clone(),
+                distance,
+            });
+        }
+    }
+    (candidates, false)
+}
+
 /// 候选（计划 §3.2 步骤 4）。只读树、只 `collect()`；返回 `(候选, 是否截断)`。
 ///
 /// - 点 + sphere：rstar `locate_within_distance(p, r²)`，判据是盒到点的最小距离 ≤ r；
 /// - 点 + cube：与 `center ± r` 的盒相交；
-/// - refno 目标：与目标盒外扩 r 相交，sphere 再按盒到盒最小距离 ≤ r 过滤。
+/// - refno 目标：与目标盒外扩 r 相交，sphere 再按盒到盒最小距离 ≤ r 过滤；
+/// - 中心线走廊：逐段探针 + 段到盒的最小距离，见 [`collect_corridor_candidates`]。
 pub fn collect_candidates(
     tree: &AccelerationTree,
     center: &Center,
@@ -497,6 +625,9 @@ pub fn collect_candidates(
 ) -> (Vec<Candidate>, bool) {
     let radius = params.radius;
     let point = center.point;
+    if let Some(centerline) = &center.centerline {
+        return collect_corridor_candidates(tree, &centerline.segments, params);
+    }
     match (center.target_box, params.shape) {
         (None, Shape::Sphere) => take_capped(
             tree.locate_within_distance([point.x, point.y, point.z], radius * radius)
@@ -537,16 +668,20 @@ pub struct Scan {
 
 /// 门禁 + 解中心 + 取候选（计划 §3.2 步骤 2-4）。`state` 由调用方传入：生产传
 /// `spatial_state::current_state()`，单测可以直接给 `Rebuilding` / `ReadyEmpty`。
+///
+/// `centerline` 只有 `source_mode=bran_centerline` 时非空，且**必须在进这里之前取好**：它要读
+/// E3D 库（`branch_query`），而这个函数整段都在树的读锁里跑。
 pub fn scan_tree(
     tree: &AccelerationTree,
     state: SpatialTreeState,
     params: &SpatialQueryParams,
+    centerline: Option<&BranCenterline>,
     memory: &ModelMemoryStore,
 ) -> Result<Scan, SpatialQueryError> {
     if !state.is_ready() {
         return Err(SpatialQueryError::NotReady(state));
     }
-    let center = resolve_center(params, memory, tree)?;
+    let center = resolve_center(params, centerline, memory, tree)?;
     let (candidates, truncated_candidates) = if state == SpatialTreeState::ReadyEmpty {
         (Vec::new(), false)
     } else {
@@ -761,6 +896,37 @@ impl From<&Center> for CenterJson {
     }
 }
 
+/// 中心线模式的源描述；其它模式不出现在响应里。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SourceJson {
+    /// 恒为 `bran_centerline`。
+    pub kind: &'static str,
+    /// BRAN 的 `a_b`。
+    pub refno: String,
+    /// 走廊的段数（含按 E3D 规则合成的隐式管身）。
+    pub segment_count: usize,
+    pub centerline_bbox: BoxJson,
+    /// 首个给出外径的成员的外径（mm）；净距扣径（计划 §3.2）用，这里只透传。
+    pub outside_diameter_mm: Option<f32>,
+}
+
+fn source_json(center: &Center) -> Option<SourceJson> {
+    let centerline = center.centerline.as_ref()?;
+    Some(SourceJson {
+        kind: CenterSource::BranCenterline.as_str(),
+        refno: centerline.branch_refno.to_string(),
+        segment_count: centerline.segments.len(),
+        centerline_bbox: BoxJson::from(&centerline.bbox()?),
+        outside_diameter_mm: centerline.outside_diameter_mm,
+    })
+}
+
+/// 预取走廊时的非致命问题（有成员没成段、refno 解不出）。没有就不出现，老响应一字不变。
+fn source_warnings(center: &Center) -> Option<Vec<String>> {
+    let warnings = &center.centerline.as_ref()?.warnings;
+    (!warnings.is_empty()).then(|| warnings.clone())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NearbyItem {
     /// `a_b`。
@@ -781,6 +947,11 @@ pub struct NearbyItem {
 pub struct NearbyResponse {
     pub results: Vec<NearbyItem>,
     pub center: CenterJson,
+    /// 中心线模式独有；其它模式不出现。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
     pub radius: f32,
     pub shape: &'static str,
     pub total_count: usize,
@@ -806,6 +977,11 @@ pub struct NearbyRefnosResponse {
     pub truncated_results: bool,
     pub result_cap: usize,
     pub center: CenterJson,
+    /// 中心线模式独有；其它模式不出现。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
     pub radius: f32,
     pub shape: &'static str,
     pub spatial_state: &'static str,
@@ -842,6 +1018,8 @@ pub fn assemble_nearby(
     NearbyResponse {
         returned_count: results.len(),
         results,
+        source: source_json(&scan.center),
+        warnings: source_warnings(&scan.center),
         center: CenterJson::from(&scan.center),
         radius: params.radius,
         shape: params.shape.as_str(),
@@ -888,6 +1066,8 @@ pub fn assemble_nearby_refnos(
         total_count,
         truncated_results,
         result_cap: RESULT_CAP,
+        source: source_json(&scan.center),
+        warnings: source_warnings(&scan.center),
         center: CenterJson::from(&scan.center),
         radius: params.radius,
         shape: params.shape.as_str(),
@@ -900,32 +1080,39 @@ pub fn assemble_nearby_refnos(
 // 入口（全局树 + 进程状态）
 // ---------------------------------------------------------------------------
 
-async fn scan_global_tree(params: &SpatialQueryParams) -> Result<Scan, SpatialQueryError> {
+/// 全局树上的那一段（`nearest-clearance` 也走这里：读锁只在本文件拿，别处不碰 `GLOBAL_AABB_TREE`）。
+pub(crate) async fn scan_global_tree(
+    params: &SpatialQueryParams,
+    centerline: Option<&BranCenterline>,
+) -> Result<Scan, SpatialQueryError> {
     // 读锁只罩住「解中心 + 取候选」，中间没有 await；候选 `collect()` 完即放锁。
     let tree = GLOBAL_AABB_TREE.read().await;
     scan_tree(
         &tree,
         spatial_state::current_state(),
         params,
+        centerline,
         ModelMemoryStore::global(),
     )
 }
 
-/// `GET /api/v1/spatial/nearby`。
+/// `GET /api/v1/spatial/nearby`。`centerline` 由 handler 预取（见 [`scan_tree`]）。
 pub async fn nearby(
     params: &SpatialQueryParams,
+    centerline: Option<&BranCenterline>,
     attrs: &dyn ElementAttributes,
 ) -> Result<NearbyResponse, SpatialQueryError> {
-    let scan = scan_global_tree(params).await?;
+    let scan = scan_global_tree(params, centerline).await?;
     Ok(assemble_nearby(scan, params, attrs))
 }
 
 /// `GET /api/v1/spatial/nearby/refnos`。
 pub async fn nearby_refnos(
     params: &SpatialQueryParams,
+    centerline: Option<&BranCenterline>,
     attrs: &dyn ElementAttributes,
 ) -> Result<NearbyRefnosResponse, SpatialQueryError> {
-    let scan = scan_global_tree(params).await?;
+    let scan = scan_global_tree(params, centerline).await?;
     Ok(assemble_nearby_refnos(scan, params, attrs))
 }
 
@@ -959,6 +1146,7 @@ mod tests {
         for (key, value) in pairs {
             let slot = match *key {
                 "refno" => &mut raw.refno,
+                "source_mode" => &mut raw.source_mode,
                 "x" => &mut raw.x,
                 "y" => &mut raw.y,
                 "z" => &mut raw.z,
@@ -1014,6 +1202,7 @@ mod tests {
             tree,
             SpatialTreeState::Ready,
             params,
+            None,
             &ModelMemoryStore::default(),
         )
         .expect("scan")
@@ -1169,7 +1358,7 @@ mod tests {
             SpatialTreeState::DegradedReuse,
             SpatialTreeState::DegradedBlocked,
         ] {
-            match scan_tree(&tree, blocked, &query, &ModelMemoryStore::default()) {
+            match scan_tree(&tree, blocked, &query, None, &ModelMemoryStore::default()) {
                 Err(SpatialQueryError::NotReady(state)) => assert_eq!(state, blocked),
                 other => panic!("{blocked:?} 必须被门禁: {other:?}"),
             }
@@ -1178,6 +1367,7 @@ mod tests {
             &tree,
             SpatialTreeState::ReadyEmpty,
             &query,
+            None,
             &ModelMemoryStore::default(),
         )
         .expect("ReadyEmpty 放行");
@@ -1343,6 +1533,7 @@ mod tests {
             &tree,
             SpatialTreeState::Ready,
             &query,
+            None,
             &ModelMemoryStore::default(),
         ) {
             Err(SpatialQueryError::NotFound(message)) => {
@@ -1415,7 +1606,7 @@ mod tests {
             ("refno", &RefnoEnum::from(refno(20)).to_pdms_str()),
             ("radius", "8"),
         ]);
-        let scan = scan_tree(&tree, SpatialTreeState::Ready, &query, &memory).expect("scan");
+        let scan = scan_tree(&tree, SpatialTreeState::Ready, &query, None, &memory).expect("scan");
         assert_eq!(
             scan.center.target_box,
             Some(cube([0.0, 0.0, 0.0], [30.0, 10.0, 10.0])),
@@ -1433,6 +1624,289 @@ mod tests {
             vec![refno(41)]
         );
         assert_eq!(filtered.hits[0].distance, 5.0);
+    }
+
+    // ---- 中心线走廊 ----
+
+    /// L 形走廊：`(0,0,0) → (1000,0,0) → (1000,1000,0)`；成员集里放一个 ELBO（树上另有条目）。
+    fn corridor(branch: u32) -> BranCenterline {
+        let leg = |order: u32, start: [f32; 3], end: [f32; 3]| CenterlineSegment {
+            refno: refno(order).to_string(),
+            order,
+            start: start.into(),
+            end: end.into(),
+        };
+        BranCenterline {
+            branch_refno: refno(branch),
+            segments: vec![
+                leg(0, [0.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+                leg(1, [1000.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]),
+            ],
+            member_refnos: HashSet::from([refno(53)]),
+            outside_diameter_mm: Some(219.1),
+            warnings: vec!["1 个成员没有长度（穿过件），不参与走廊".to_string()],
+        }
+    }
+
+    fn corridor_tree() -> AccelerationTree {
+        AccelerationTree::load(vec![
+            // BRAN 自己在树上的盒：整条管线的包围盒。
+            entry(100, "BRAN", [0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0]),
+            // 贴着立段，离走廊 50。
+            entry(51, "WALL", [1050.0, 400.0, -50.0], [1150.0, 600.0, 50.0]),
+            // 拐角内侧：在整盒里（整盒模式距离 0），离走廊 400——走廊模式连探针都进不去。
+            entry(52, "COLU", [400.0, 400.0, -50.0], [600.0, 600.0, 50.0]),
+            // BRAN 自己的成员，压在拐角上。
+            entry(53, "ELBO", [950.0, -50.0, -50.0], [1050.0, 50.0, 50.0]),
+            // 同时落在两段的探针里：去重后只该出现一次。
+            entry(55, "WALL", [900.0, -50.0, -50.0], [1100.0, 150.0, 50.0]),
+            // 离走廊 113 > r：球模式剔、方模式留。
+            entry(56, "WALL", [1080.0, 1080.0, -50.0], [1200.0, 1200.0, 50.0]),
+            entry(54, "PIPE", [5000.0, 5000.0, 0.0], [5100.0, 5100.0, 10.0]),
+        ])
+    }
+
+    fn centerline_query(branch: u32, extra: &[(&str, &str)]) -> SpatialQueryParams {
+        let mut pairs = vec![
+            ("refno", RefnoEnum::from(refno(branch)).to_pdms_str()),
+            ("radius", "100".to_string()),
+            ("source_mode", "bran_centerline".to_string()),
+        ];
+        pairs.extend(
+            extra
+                .iter()
+                .map(|(key, value)| (*key, (*value).to_string())),
+        );
+        let borrowed = pairs
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        params(&borrowed)
+    }
+
+    fn scan_corridor(
+        tree: &AccelerationTree,
+        line: &BranCenterline,
+        params: &SpatialQueryParams,
+    ) -> Scan {
+        scan_tree(
+            tree,
+            SpatialTreeState::Ready,
+            params,
+            Some(line),
+            &ModelMemoryStore::default(),
+        )
+        .expect("scan")
+    }
+
+    #[test]
+    fn source_mode_bran_centerline_is_parsed_and_needs_a_refno() {
+        assert_eq!(
+            params(&[("refno", "24383/71586"), ("radius", "5000")]).source_mode,
+            SourceMode::Aabb,
+            "缺省不变"
+        );
+        assert_eq!(
+            params(&[
+                ("refno", "24383/71586"),
+                ("radius", "5000"),
+                ("source_mode", "BRAN_CENTERLINE"),
+            ])
+            .source_mode,
+            SourceMode::BranCenterline
+        );
+        let bad = |pairs: &[(&str, &str)]| SpatialQueryParams::parse(&raw(pairs)).unwrap_err();
+        assert!(
+            bad(&[
+                ("x", "0"),
+                ("y", "0"),
+                ("z", "0"),
+                ("radius", "100"),
+                ("source_mode", "bran_centerline"),
+            ])
+            .contains("要给一条 BRAN 的 refno")
+        );
+        assert!(
+            bad(&[
+                ("refno", "24383/71586"),
+                ("radius", "5000"),
+                ("source_mode", "tubi"),
+            ])
+            .contains("source_mode")
+        );
+    }
+
+    /// 走廊按管子走，不按整盒：拐角内侧那根柱子在整盒里距离 0，沿中心线是 400，出圈。
+    #[test]
+    fn centerline_corridor_follows_the_pipe_instead_of_its_bounding_box() {
+        let tree = corridor_tree();
+        let line = corridor(100);
+        let query = centerline_query(100, &[]);
+        let scan = scan_corridor(&tree, &line, &query);
+        assert_eq!(scan.center.source, CenterSource::BranCenterline);
+        assert_eq!(scan.center.point, Point::new(500.0, 500.0, 0.0));
+        assert_eq!(
+            scan.center.target_box,
+            Some(cube([0.0, 0.0, 0.0], [1000.0, 1000.0, 0.0])),
+            "走廊的并集盒只当粗筛范围用"
+        );
+        assert_eq!(
+            scan.candidates
+                .iter()
+                .filter(|candidate| candidate.entry.refno == refno(55))
+                .count(),
+            1,
+            "同时落在两段探针里的盒只算一条候选"
+        );
+
+        let filtered = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]));
+        let mut hits = filtered
+            .hits
+            .iter()
+            .map(|hit| (hit.refno, hit.distance))
+            .collect::<Vec<_>>();
+        hits.sort_by_key(|(refno, _)| *refno);
+        assert_eq!(
+            hits,
+            vec![(refno(51), 50.0), (refno(55), 0.0)],
+            "拐角内侧的柱子出圈；BRAN 自己与成员 ELBO 都剔了"
+        );
+
+        let by_box = params(&[
+            ("refno", &RefnoEnum::from(refno(100)).to_pdms_str()),
+            ("radius", "100"),
+        ]);
+        let boxed = scan_local(&tree, &by_box);
+        assert_eq!(boxed.center.source, CenterSource::RefnoAabbCenter);
+        let boxed_hits = filter_candidates(boxed.candidates, &by_box, &boxed.center, &attrs(&[]));
+        assert_eq!(
+            boxed_hits
+                .hits
+                .iter()
+                .map(|hit| hit.refno)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([refno(51), refno(52), refno(53), refno(55)]),
+            "整盒模式：拐角内侧的柱子与 BRAN 自己的弯头都算周边"
+        );
+    }
+
+    #[test]
+    fn centerline_self_exclusion_covers_the_branch_and_its_members() {
+        let tree = corridor_tree();
+        let line = corridor(100);
+        let query = centerline_query(100, &[("include_self", "true")]);
+        let scan = scan_corridor(&tree, &line, &query);
+        assert!(
+            scan.center.subtree.is_superset(&HashSet::from([refno(100), refno(53)])),
+            "剔除集 = BRAN 自己 ∪ branch_query 成员: {:?}",
+            scan.center.subtree
+        );
+        let kept = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]));
+        assert_eq!(
+            kept.hits
+                .iter()
+                .map(|hit| hit.refno)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([refno(51), refno(53), refno(55), refno(100)]),
+            "include_self=true 时自身与成员以 0 距离留在结果里"
+        );
+        assert_eq!(
+            kept.hits
+                .iter()
+                .find(|hit| hit.refno == refno(53))
+                .unwrap()
+                .distance,
+            0.0
+        );
+    }
+
+    #[test]
+    fn centerline_cube_keeps_probe_hits_beyond_the_radius() {
+        let tree = corridor_tree();
+        let line = corridor(100);
+        let sphere = centerline_query(100, &[]);
+        let scan = scan_corridor(&tree, &line, &sphere);
+        assert!(
+            !scan
+                .candidates
+                .iter()
+                .any(|candidate| candidate.entry.refno == refno(56)),
+            "球模式：离走廊 113 > r 的盒不是候选"
+        );
+
+        let cube_query = centerline_query(100, &[("shape", "cube")]);
+        let cube_scan = scan_corridor(&tree, &line, &cube_query);
+        let far = cube_scan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.entry.refno == refno(56))
+            .expect("方模式保留探针命中的远盒");
+        assert!((far.distance - 113.137).abs() < 1.0e-2, "{}", far.distance);
+        let response = assemble_nearby(cube_scan, &cube_query, &attrs(&[]));
+        assert!(
+            !response
+                .results
+                .iter()
+                .find(|item| item.refno == refno(56).to_string())
+                .unwrap()
+                .within_radius
+        );
+    }
+
+    /// 中心线来自 E3D 库，不靠投影 / 树上的盒：没生成过模型的 BRAN 照样答得出（不是 404）。
+    #[test]
+    fn centerline_answers_even_when_the_branch_has_no_box_anywhere() {
+        let tree = corridor_tree();
+        let line = corridor(200);
+        let query = centerline_query(200, &[]);
+        let scan = scan_corridor(&tree, &line, &query);
+        assert_eq!(scan.center.source, CenterSource::BranCenterline);
+        assert!(!scan.candidates.is_empty());
+    }
+
+    #[test]
+    fn centerline_response_carries_the_source_block_and_prefetch_warnings() {
+        let tree = corridor_tree();
+        let line = corridor(100);
+        let query = centerline_query(100, &[]);
+        let response = assemble_nearby(scan_corridor(&tree, &line, &query), &query, &attrs(&[]));
+        assert_eq!(response.center.source, "bran_centerline");
+        assert_eq!(
+            response.source,
+            Some(SourceJson {
+                kind: "bran_centerline",
+                refno: refno(100).to_string(),
+                segment_count: 2,
+                centerline_bbox: BoxJson {
+                    min: [0.0, 0.0, 0.0],
+                    max: [1000.0, 1000.0, 0.0],
+                },
+                outside_diameter_mm: Some(219.1),
+            })
+        );
+        assert_eq!(
+            response.warnings,
+            Some(vec!["1 个成员没有长度（穿过件），不参与走廊".to_string()])
+        );
+
+        let refnos =
+            assemble_nearby_refnos(scan_corridor(&tree, &line, &query), &query, &attrs(&[]));
+        assert_eq!(refnos.source, response.source);
+        assert_eq!(refnos.warnings, response.warnings);
+
+        // 其它模式一字不变：两个字段都不序列化。
+        let plain = origin_query(&[]);
+        let plain_response = assemble_nearby(scan_local(&tree, &plain), &plain, &attrs(&[]));
+        assert_eq!((plain_response.source, plain_response.warnings), (None, None));
+        let json = serde_json::to_string(&assemble_nearby(
+            scan_local(&tree, &plain),
+            &plain,
+            &attrs(&[]),
+        ))
+        .unwrap();
+        assert!(!json.contains("\"source\":{"), "不出 source 块");
+        assert!(!json.contains("\"warnings\""));
+        assert!(json.contains("\"source\":\"position\""), "center.source 照旧");
     }
 
     // ---- 过滤 / 排序 / 分页 ----
@@ -1731,7 +2205,7 @@ mod tests {
             entry(2, "BOX", [0.0; 3], [1.0; 3]),
         ]);
         let query = origin_query(&[]);
-        let center = resolve_center(&query, &ModelMemoryStore::default(), &tree).unwrap();
+        let center = resolve_center(&query, None, &ModelMemoryStore::default(), &tree).unwrap();
         let (candidates, truncated) = collect_candidates(&tree, &center, &query);
         assert_eq!(candidates.len(), 2);
         assert!(!truncated);
