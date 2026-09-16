@@ -4,7 +4,7 @@
 > 此前三段会话（fable-5-1-36 → 45 → 48）把后端改动全部落在了 **`d:\work\plant-code\plant-model-gen`（legacy，`/api/sqlite-spatial/*`，0.3.34）**，
 > 而本仓（`codex/model-projection-cache@da461b71f`，0.1.27）没有 `src/web_server`、没有 SQLite 空间索引、没有 `tubi_relate`，
 > 空间查询走进程内 `GLOBAL_AABB_TREE`（`/api/v1/spatial/*`）。本计划重新对准本仓。
-> 状态：**已落地（P1 / P2 / P3，2026-09-16）**。契约见 `docs/specs/web-service-api.md` §4.13.1（`source_mode=bran_centerline`）/ §4.13.2
+> 状态：**已落地（P1 / P2 / P3 含 §3.3 ③，2026-09-16）**。契约见 `docs/specs/web-service-api.md` §4.13.1（`source_mode=bran_centerline`）/ §4.13.2
 > （`/nearest-clearance`），变更记 `changelog.md` 2026-09-16，词条见 `CONTEXT.md`「空间邻近查询」。§4 的待拍板项按实现口径定下：
 > D2 保留前端骨架并把 `branCenterline` 翻 true、D3 `include_self` 缺省 **false**、D5 `useSpatialCompute` 内按 kind 分流、D7 与 legacy 同名
 > `/api/v1/spatial/nearest-clearance`、D8 按 P1 → P2 → P3；**仍开着**：D1（legacy 三轮改动留 / 回退）、D4（`surface` 缺省——当前 `false`）、
@@ -67,7 +67,14 @@
 
 - `genModelV1Api.ts` 新增 `genModelV1SpatialNearestClearance(req)`；`useSpatialCompute.ts:521` 的取数按 `getModelSource().kind` 分流（或把 `nearestClearance` 收进 `SpatialSource` 端口 + 能力 `nearestClearance: boolean`，legacy 委托旧函数、v1 打新路由——**D5**）。
 - Dock「目标 chips」改成由 `noun_counts` 驱动的动态 facet（fable-5-1-36 的 Pencil 设计 `ui/管道标注/bran-nearest-clearance.pen` 画板 02），每类默认画最近 1 条。
-- `useDtxTools.measure_pipe_to_structure` 的 Toast「暂不创建尺寸」改为写入同一份 ClearanceRecord（沿用 2026-09-11 收敛计划 §6 M1）——**可后置**。
+- `useDtxTools.measure_pipe_to_structure` 的 Toast「暂不创建尺寸」改为写入同一份 ClearanceRecord（沿用 2026-09-11 收敛计划 §6 M1）——
+  **已落地（2026-09-16 晚，fable-5-1-9）**：`useDtxTools` 多一个 `recordBranClearance` 落点，`ViewerPanel` 接到
+  `useSpatialCompute.recordInteractiveBranClearance`——点选管件算出的最近点对按 DTX 全局矩阵的逆换回 E3D 世界 mm，落进 BRAN 净距
+  **同一份**结果（同一张表、同一组 facet、同一个 `bran-clearance` external source；目标类型那一桶末尾追加、同一目标就地替换、
+  下一次服务端查询连它一起清），来源登记 `sampled-object / approximate-sampled`，表里标「估算最近距离（网格采样）」、尺寸文字带「≈」
+  （2026-09-11 收敛计划 D2 / PR0.2）；不给落点时保留旧 Toast。顺手修了 `ViewerPanel.syncBranClearanceDimensions` 的坐标换算：
+  候选端点是 E3D 世界 mm，Design Space 是同原点的米，应 `/1000`——此前套的是 `designToWorld` 的逆（scene → design），
+  对 mm 端点差 1000 倍还带重定心平移，两个后端的 Dock 结果之前都画不到位（真机未验过所以没暴露）。
 
 ### 3.4 明确不做
 
