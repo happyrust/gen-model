@@ -13,7 +13,8 @@ use crate::data_interface::generation_root::{
     configured_delivery_unit_types, resolve_live_element_generation_root,
 };
 use crate::data_interface::model_impact::{
-    AttributeEffect, classify_attribute_effect, normalize_attribute_name,
+    AttributeEffect, attribute_is_metadata_only, classify_attribute_effect,
+    generation_reads_attribute, normalize_attribute_name, raw_dchc_code,
 };
 use crate::e3d_query::{
     E3dDriver, QueryField, parse_members, parse_owner_chain, parse_position, render_fields,
@@ -711,16 +712,26 @@ impl QueryService {
         if normalized.is_empty() {
             return Err(QueryError::invalid("attribute is empty"));
         }
+        // 预览与执行同一谓词（0908 纪律）：`skip` 由元数据门的两票说（字典 DCHC=0 ∧ 生成器不读，
+        // S6），不由手写效果表说——`HREF` 那类表里登记成级联、门却放行的名字，这里也得报 skip。
         let effect = classify_attribute_effect(&normalized);
-        let action = match effect {
-            AttributeEffect::DataOnly => "skip",
-            AttributeEffect::TransformOnly => "transform",
-            _ => "regen",
+        let metadata_only = attribute_is_metadata_only(&normalized);
+        let action = if metadata_only {
+            "skip"
+        } else {
+            match effect {
+                // 效果表 DataOnly 却没拿全两票（`CACHID`）：规划器照旧重算。
+                AttributeEffect::DataOnly => "regen",
+                AttributeEffect::TransformOnly => "transform",
+                _ => "regen",
+            }
         };
         Ok(json!({
             "attribute": normalized,
             "effect": snake_debug(effect),
-            "affects_model": effect.affects_model(),
+            "dchc": raw_dchc_code(&normalized),
+            "generator_reads": generation_reads_attribute(&normalized),
+            "affects_model": !metadata_only,
             "action": action,
         }))
     }
@@ -988,6 +999,45 @@ mod tests {
             .unwrap();
         assert_eq!(response.tool, "model.change_impact");
         assert_eq!(response.result["action"], "transform");
+        assert_eq!(response.result["dchc"], 3);
+        assert_eq!(response.result["generator_reads"], true);
+    }
+
+    /// 预览的 `action` 与规划器的元数据门同口径（S6 两票）：`NAME` 与新档 `HREF`（手写表登记成级联、
+    /// 字典 DCHC=0 且生成器不读）都是 skip；字典没投票的 `CACHID` 与读取集合里的 `DIR` 是 regen。
+    #[tokio::test]
+    async fn the_impact_preview_skips_exactly_what_the_metadata_gate_admits() {
+        async fn action(attribute: &str) -> (String, String, bool) {
+            let response = service()
+                .execute("model.change_impact", json!({ "attribute": attribute }))
+                .await
+                .unwrap();
+            (
+                response.result["action"].as_str().unwrap().to_string(),
+                response.result["effect"].as_str().unwrap().to_string(),
+                response.result["affects_model"].as_bool().unwrap(),
+            )
+        }
+        assert_eq!(
+            action("NAME").await,
+            ("skip".into(), "data_only".into(), false)
+        );
+        assert_eq!(
+            action("HREF").await,
+            ("skip".into(), "dependency_cascade".into(), false)
+        );
+        assert_eq!(
+            action("CACHID").await,
+            ("regen".into(), "data_only".into(), true)
+        );
+        assert_eq!(
+            action("DIR").await,
+            ("regen".into(), "unknown".into(), true)
+        );
+        assert_eq!(
+            action("DIAM").await,
+            ("regen".into(), "direct_geometry".into(), true)
+        );
     }
 
     #[tokio::test]

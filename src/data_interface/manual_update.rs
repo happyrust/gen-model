@@ -5571,18 +5571,21 @@ mod metadata_gate_caliber_tests {
         }
     }
 
-    /// 门开着：放行的只有拿到两票的五个名字，与 `change_is_metadata_only` 逐名相同。
-    /// 字典没投票的 `CACHID` 规划器照旧整根重算，预览也得这么说。
+    /// 门开着：放行的只有拿到两票（字典 DCHC=0 ∧ 生成器不读）的名字，与 `change_metadata_tier` 逐名相同——
+    /// 老五个与 S6 新档（`DUTY`；手写表登记在级联侧的 `HREF` 也一样）都不影响模型。字典没投票的 `CACHID`、
+    /// 读取集合里的 `DIR` 规划器照旧整根重算，预览也得这么说。
     #[test]
     fn with_the_gate_on_only_the_double_voted_names_are_not_model_affecting() {
-        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA"] {
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "HREF"] {
             assert!(!affecting(&[name], true), "{name}");
         }
-        for name in ["CACHID"] {
+        for name in ["CACHID", "DIR", "UDA:42"] {
             assert!(affecting(&[name], true), "{name}");
         }
         assert!(!affecting(&["NAME", "DESC"], true));
+        assert!(!affecting(&["NAME", "DUTY"], true));
         assert!(affecting(&["NAME", "CACHID"], true));
+        assert!(affecting(&["NAME", "DIR"], true));
         assert!(affecting(&["NAME", "DIAM"], true));
         // 位姿仍算影响模型：direct 上没有便宜路径，POS 变了那个根照样重算。
         assert!(affecting(&["POS"], true));
@@ -5592,7 +5595,7 @@ mod metadata_gate_caliber_tests {
     /// 否则关掉开关反而让预览开始说谎。
     #[test]
     fn with_the_gate_off_even_a_rename_is_model_affecting() {
-        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA"] {
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "HREF"] {
             assert!(affecting(&[name], false), "{name}");
         }
     }

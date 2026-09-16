@@ -1787,15 +1787,17 @@ pub fn model_entry_drop_no_geometry() -> bool {
 pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA_ONLY_CHANGES";
 
 /// direct 窗口规划器的元数据门（`DbOption.toml` 的 `model_skip_metadata_only_changes`，
-/// **默认 true**，2026-09-08）。
+/// **默认 true**，2026-09-08；2026-09-15 S6 语义变宽、开关名不变）。
 ///
 /// 开着时 `WindowRootSources::collect` 经 e3d-model `plan_update_with` 给规划器一条谓词
-/// （`window_root_plan::change_is_metadata_only`）：一个 Modified 候选的改动**全部**落在
-/// `model_impact::attribute_is_metadata_only` 放行的属性上（效果表 DataOnly **且** E3D 字典
-/// DCHC=0，今天就是 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）、且成员 / 属主 / 类型 / opaque 都没动
-/// → 记 `no_model`、不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收，凭证前移
-/// 与房间结构触发（改名进 `RoomRecalcPanel`）都不受影响。此前 direct 路径对「改了哪个属性」
-/// 一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
+/// （`window_root_plan::change_metadata_tier`）：一个 Modified 候选的改动**全部**落在
+/// `model_impact::attribute_is_metadata_only` 放行的属性上（E3D 字典 DCHC=0 **且** 生成器不读——
+/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）、且成员 /
+/// 属主 / 类型 / opaque 都没动 → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute`
+/// 新档两个计数）、不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收（候选与它的祖先
+/// 链照进闭包），房间结构触发（改名进 `RoomRecalcPanel`）与设计引用级联都不受影响；闭包里能少的只有
+/// 放行候选本来会触发的粗级联扇出（桥架分支「子树里改了任何东西就整条重建」那片单元），它们的根按
+/// 两票前移。此前 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
 ///
 /// 这是「少算」方向的开关，所以留着关的位置：关上就逐位回到 2026-09-08 之前。环境变量
 /// [`MODEL_SKIP_METADATA_ONLY_CHANGES_ENV`] 压过配置，取值规则同 [`startup_autorun`]。

@@ -83,7 +83,7 @@ _Avoid_: 单位体、unit solid（当单位几何已定为截面时）
 _Avoid_: 斜切、is_sloped、端面方向（当指属性时）
 
 **模型影响 (Model Impact)**：
-一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。
+一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（按属性字典 DCHC 类别在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`EVALAT` 直接返回，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」的两档各要两票：`Skip` = 字典 DCHC=0 **∧** 生成读取集合不含它（`attribute_is_metadata_only`，2026-09-15 S6；之前是效果表 DataOnly ∧ DCHC=0 的五个名字，那张手写表退成报表分类与 `no_model` 的 `metadata_only` / `unread_attribute` 分档依据），`TransformOnly` = 效果表 ∧ DCHC=3。预览（`change_impact` / `model_affecting`）与执行（窗口规划器的元数据门）问同一个谓词。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`。
 _Avoid_: 几何影响、is_geometry_update
 
 **净变化 (Net Change)**：

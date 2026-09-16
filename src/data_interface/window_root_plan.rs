@@ -37,7 +37,8 @@ use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
 use e3d_model::element_diff::ElementDiff;
 use e3d_model::increment::{
-    AffectedClosure, PlanLimits, UpdatePlan, collect_window, plan_update, plan_update_with,
+    AffectedClosure, NoModelTier, PlanLimits, UpdatePlan, collect_window, plan_update,
+    plan_update_with,
 };
 use e3d_model::ledger::ChangeKind;
 use surrealdb::{Surreal, engine::any::Any};
@@ -224,26 +225,40 @@ pub fn plan_window_roots(
     plan
 }
 
-/// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08）。
+/// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08；
+/// 2026-09-15 S6 起回答带档）。
 ///
 /// 四条缺一不可：没换类型、没换属主、成员表没动、记录变了能指出是哪几项（不 `opaque`）；
 /// 且**每一个**变了的属性都过 [`crate::data_interface::model_impact::attribute_is_metadata_only`]
-/// （效果表 DataOnly ∧ E3D 字典 DCHC=0，今天就是 `NAME / DESC / PURP / FUNC / LCHKDA`）。`attributes`
-/// 为空回 `false`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+/// （E3D 字典 DCHC=0 ∧ 生成器不读；S6 之前是效果表 DataOnly ∧ DCHC=0 的五个名字）。名单与分档只有
+/// [`crate::data_interface::model_impact::metadata_only_tier`] 那一份：全部落在老名单
+/// `NAME / DESC / PURP / FUNC / LCHKDA` 上回 [`NoModelTier::MetadataOnly`]，否则
+/// [`NoModelTier::UnreadAttribute`]——档位只进回执两个计数，不改去向。`attributes` 为空回 `None`
+/// ——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
 ///
-/// 它只决定**上卷**：账本照记、闭包种子照收（凭证前移不因此少收），房间结构触发照读账本
-/// （FRMW 改名命中关键字仍出 `RoomRecalcPanel`）。与 e3d-model 的 `is_placement_only` 是两个
-/// 问题：那个问「除了摆放还动了别的没有」，这个问「动的全是业务元数据吗」。
+/// 它只决定**上卷与级联**：账本照记、闭包种子照收（候选与它的祖先链照进闭包，候选所在的根凭证前移
+/// 一个都不少收），房间结构触发照读账本（FRMW 改名命中关键字仍出 `RoomRecalcPanel`），设计引用级联照读
+/// 账本。放行的候选不再触发 e3d-model 的粗级联（桥架分支「子树里改了任何东西就整条重建」那类按 noun 不按
+/// 属性判的扇出），那片单元也就不进闭包、它们的根按两票前移——全语料两态门钉「闭包只少不多、少掉的全是
+/// 少重建的单元及其祖先」（`assert_metadata_gate_two_state` 契约 2；aps250514 3→4 的 CWBRAN `HCREF`/`TCREF`
+/// 就是这形状）。与 e3d-model 的 `is_placement_only` 是两个问题：那个问「除了摆放还动了别的没有」，
+/// 这个问「动的全是不影响模型的属性吗」。
+pub(crate) fn change_metadata_tier(diff: &ElementDiff) -> Option<NoModelTier> {
+    if diff.type_changed.is_some()
+        || diff.owner_changed.is_some()
+        || diff.members.is_some()
+        || diff.opaque
+    {
+        return None;
+    }
+    crate::data_interface::model_impact::metadata_only_tier(
+        diff.attributes.iter().map(String::as_str),
+    )
+}
+
+/// [`change_metadata_tier`] 的布尔形态：门放不放行，不问档。
 pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
-    diff.type_changed.is_none()
-        && diff.owner_changed.is_none()
-        && diff.members.is_none()
-        && !diff.opaque
-        && !diff.attributes.is_empty()
-        && diff
-            .attributes
-            .iter()
-            .all(|name| crate::data_interface::model_impact::attribute_is_metadata_only(name))
+    change_metadata_tier(diff).is_some()
 }
 
 /// 文件侧输入：只读两端 `DbSet`，不碰 SurrealDB。生产由
@@ -617,15 +632,16 @@ impl WindowRootSources {
                 file.display()
             )
         })?;
-        // 元数据门（2026-09-08，默认开）：只改了 NAME / DESC 一类的候选不上卷、不级联。谓词是
-        // gen-model 的（效果表 ∧ 字典 DCHC），e3d-model 只收一个闭包；关着时逐位回到 `plan_update`。
+        // 元数据门（2026-09-08，默认开；S6 起两票 = 字典 DCHC=0 ∧ 生成器不读）：只改了 NAME / DESC
+        // 一类、或 core 不重画且我们不读的属性的候选不上卷、不级联。谓词是 gen-model 的
+        // （`change_metadata_tier` → `model_impact`），e3d-model 只收一个闭包并按档计数；关着时逐位回到 `plan_update`。
         let plan = if crate::options::model_skip_metadata_only_changes() {
             plan_update_with(
                 base,
                 target,
                 &window,
                 PlanLimits::default(),
-                change_is_metadata_only,
+                change_metadata_tier,
             )
         } else {
             plan_update(base, target, &window)
@@ -1029,12 +1045,15 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
-    if sources.plan.report.metadata_only > 0 {
+    if sources.plan.report.metadata_only + sources.plan.report.unread_attribute > 0 {
         warnings.push(format!(
             "dbnum={dbnum}: metadata-only gate — {} modified candidate(s) changed nothing but \
-             NAME/DESC/PURP/FUNC/LCHKDA (effect table DataOnly ∧ dictionary DCHC=0) and were not \
-             rolled up; ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
-            sources.plan.report.metadata_only
+             attributes with dictionary DCHC=0 that the generator never reads and were not rolled \
+             up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, unread_attribute={} on the wider \
+             S6 tier); ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
+            sources.plan.report.metadata_only + sources.plan.report.unread_attribute,
+            sources.plan.report.metadata_only,
+            sources.plan.report.unread_attribute
         ));
     }
     warnings.push(format!(
@@ -2738,7 +2757,8 @@ mod tests {
         }
     }
 
-    /// 元数据门谓词的真值表（2026-09-08）：四条结构条件缺一不可，属性全部过双重判据才放行。
+    /// 元数据门谓词的真值表（2026-09-08；S6 两票 + 分档）：四条结构条件缺一不可，属性全部过
+    /// 「字典 DCHC=0 ∧ 生成器不读」才放行；全在老名单上是 `MetadataOnly`，否则 `UnreadAttribute`。
     #[test]
     fn a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved() {
         use e3d_model::element_diff::MemberDelta;
@@ -2751,11 +2771,33 @@ mod tests {
             attributes: attributes.iter().map(|name| name.to_string()).collect(),
             opaque: false,
         };
-        // 五个双票属性，单个或组合都放行。
+        // 老五个，单个或组合都放行，且记老名单那一档。
+        assert_eq!(
+            change_metadata_tier(&diff(&["NAME"])),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["DESC", "NAME", "PURP", "FUNC", "LCHKDA"])),
+            Some(NoModelTier::MetadataOnly)
+        );
         assert!(change_is_metadata_only(&diff(&["NAME"])));
-        assert!(change_is_metadata_only(&diff(&[
-            "DESC", "NAME", "PURP", "FUNC", "LCHKDA"
-        ])));
+        // S6 新档：字典 DCHC=0 且生成器不读的名字（`DUTY`；`HREF` 手写表登记在级联侧也一样）放行，
+        // 记新档；与老名单混合也是新档。
+        assert_eq!(
+            change_metadata_tier(&diff(&["DUTY"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["HREF"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["DUTY", "NAME"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        // 读取集合那一票：DCHC=0 却是我们的几何输入（`DIR`）不放行。
+        assert_eq!(change_metadata_tier(&diff(&["DIR"])), None);
+        assert_eq!(change_metadata_tier(&diff(&["NAME", "DIR"])), None);
         // 混进一个几何 / 位姿 / 依赖属性就不放行。
         assert!(!change_is_metadata_only(&diff(&["NAME", "DIAM"])));
         assert!(!change_is_metadata_only(&diff(&["NAME", "POS"])));
@@ -2763,8 +2805,10 @@ mod tests {
         // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
         assert!(!change_is_metadata_only(&diff(&["CACHID"])));
         assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
+        // UDA 不放行。
+        assert!(!change_is_metadata_only(&diff(&["UDA:42"])));
         // 没有属性变化不是「只改了元数据」：那是没变，或只动了结构。
-        assert!(!change_is_metadata_only(&diff(&[])));
+        assert_eq!(change_metadata_tier(&diff(&[])), None);
         // 结构四条：类型、属主、成员、opaque，任一动了就不放行，哪怕属性只有 NAME。
         let mut typed = diff(&["NAME"]);
         typed.type_changed = Some(("BRAN".into(), "ELBO".into()));
@@ -2784,9 +2828,9 @@ mod tests {
         assert!(!change_is_metadata_only(&opaque));
     }
 
-    /// 接线的形状：`collect` 只在开关开着时经 `plan_update_with` 把 `change_is_metadata_only`
+    /// 接线的形状：`collect` 只在开关开着时经 `plan_update_with` 把 `change_metadata_tier`
     /// 交给 e3d-model，关着时逐位走 `plan_update`；谓词在 `plan_update_with` 之前定义、只读
-    /// `model_impact` 的双重判据，不在本文件另写一份名单。
+    /// `model_impact` 的两票与分档，不在本文件另写一份名单。
     #[test]
     fn the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch() {
         let src = include_str!("window_root_plan.rs");
@@ -2805,22 +2849,22 @@ mod tests {
             .find(concat!("plan_update_", "with("))
             .expect("开着走 plan_update_with");
         let predicate = gate
-            .find(concat!("change_is_", "metadata_only"))
-            .expect("谓词必须是本文件的 change_is_metadata_only");
+            .find(concat!("change_metadata_", "tier,"))
+            .expect("谓词必须是本文件的 change_metadata_tier");
         let off = gate
             .find(concat!("plan_update(", "base, target, &window)"))
             .expect("关着逐位走 plan_update");
         assert!(on < predicate && predicate < off, "开 → 谓词 → 关 的顺序");
         let predicate_body = src
-            .split_once(concat!("pub(crate) fn ", "change_is_metadata_only("))
+            .split_once(concat!("pub(crate) fn ", "change_metadata_tier("))
             .expect("谓词定义")
             .1
             .split_once("pub(crate) fn owner_chain_t(")
             .expect("owner_chain_t follows predicate")
             .0;
         assert!(
-            predicate_body.contains(concat!("attribute_is_", "metadata_only(")),
-            "属性名单只有 model_impact 那一份"
+            predicate_body.contains(concat!("model_impact::metadata_", "only_tier(")),
+            "属性名单与分档只有 model_impact 那一份"
         );
         for structural in ["type_changed", "owner_changed", "members", "opaque"] {
             assert!(
@@ -2832,21 +2876,267 @@ mod tests {
             !predicate_body.contains("\"NAME\""),
             "不许在这里再写一份属性名单"
         );
+        // 布尔形态只是包装，不另判。
+        let boolean = predicate_body
+            .split_once(concat!("pub(crate) fn ", "change_is_metadata_only("))
+            .expect("布尔包装")
+            .1;
+        assert!(
+            boolean.contains(concat!("change_metadata_", "tier(diff).is_some()")),
+            "change_is_metadata_only 必须是 change_metadata_tier 的包装"
+        );
+    }
+
+    /// 两态门一窗的结论（[`assert_metadata_gate_two_state`]）。
+    struct GateWindowOutcome {
+        candidates: usize,
+        metadata_only: usize,
+        unread_attribute: usize,
+        regen_off: usize,
+        regen_on: usize,
+        saved_units: usize,
+        /// 开着比关着少收进祖先闭包的 refno 数——只许是少重建的单元及其祖先（契约 2）。
+        closure_dropped: usize,
+        changes_line: String,
+    }
+
+    impl GateWindowOutcome {
+        fn admitted(&self) -> usize {
+            self.metadata_only + self.unread_attribute
+        }
+    }
+
+    /// 元数据门两态门的三条契约（2026-09-08；S6 起两档合计）对**一窗**断言一遍——ams8000 单库门
+    /// 与 DESI 全语料门共用这一份：
+    ///
+    /// 1. `regenerate_on ⊆ regenerate_off`、`regenerate_derived_on ⊆ regenerate_derived_off`，`remove` 逐字相同
+    ///    （门只少上卷，不多不删；管身不读名字，成员只改名时 BRAN 不必重算管身）；
+    /// 2. 祖先闭包**只许少、不许多**，且**账本种子两态逐字相同**（候选照记 → 每个候选与它的祖先链两态都在
+    ///    闭包里 → 候选所在的根凭证前移一个都不少收）。开着能少掉的只有「关着时被放行候选拖进计划的单元
+    ///    及其祖先」：那是按 noun 不按属性判的**粗级联**扇出——桥架分支「子树里改了任何东西就整条重建」
+    ///    （`cascade_cable_tray_branch`）那类——放行的候选不再触发它，那片单元就不进闭包、它们的根按两票前移
+    ///    （core 不为这属性重画、生成器也不读它，网格不可能变）。少掉的 refno 若不是少重建单元或其祖先就红。
+    ///    2026-09-15 全语料门在 aps250514 3→4 撞出这形状：两个 CWBRAN 只改 `HCREF`/`TCREF`（DCHC=0、不读），
+    ///    关着时整条分支 20 个 CTRAY 重建、闭包多 42 个 refno（CTMTRL / CTSTRA / CTTEE / CTRAY），开着时一个都不重建；
+    ///    此前写的「闭包逐字相同」在 ams8000 链上成立只是因为那条链没有这种窗。
+    /// 3. 两态 `regenerate` 有差 ⇒ 门放行了候选（`metadata_only + unread_attribute > 0`，省下的每一根都
+    ///    归因到一个只改了不影响模型属性的候选）；账本守恒两态都成立；门判掉的候选在关着那一态里要么
+    ///    上卷了、要么本来就 `no_model`（容器改名）、要么上卷失败进了 `unresolved`，所以 `no_model` 只会多、
+    ///    多出来的不超过放行数；`unchanged` 两态逐字相同。
+    fn assert_metadata_gate_two_state(
+        label: &str,
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+        window: &e3d_model::increment::WindowDiff,
+    ) -> GateWindowOutcome {
+        let off = plan_update(base, target, window);
+        let on = plan_update_with(
+            base,
+            target,
+            window,
+            PlanLimits::default(),
+            change_metadata_tier,
+        );
+        // 1. 只少上卷，不多、不删。
+        assert!(
+            on.regenerate.is_subset(&off.regenerate),
+            "{label}: 门开着不许多算：{:?}",
+            on.regenerate
+                .difference(&off.regenerate)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(on.remove, off.remove, "{label}: remove 不受门影响");
+        // 派生容器（BRAN 名下的隐式管身）同样只许少不许多：一个成员只改了 NAME，关着时
+        // 上卷路过 BRAN 把它记进派生集、整链重算管身；开着时那个候选根本不上卷，BRAN 也就
+        // 不进派生集——管身不读名字，少算的这一链是对的（ams8000 304→305 实测就是这形状）。
+        assert!(
+            on.regenerate_derived.is_subset(&off.regenerate_derived),
+            "{label}: 门开着不许多算派生容器：{:?}",
+            on.regenerate_derived
+                .difference(&off.regenerate_derived)
+                .collect::<Vec<_>>()
+        );
+        // 2. 闭包只许少不许多；账本种子逐字相同；少掉的只能是少重建的单元及其祖先（粗级联的扇出）。
+        let closure_on = on.affected_closure(base, target);
+        let closure_off = off.affected_closure(base, target);
+        assert!(
+            closure_on.refnos.is_subset(&closure_off.refnos),
+            "{label}: 门开着不许多收祖先闭包：{:?}",
+            closure_on
+                .refnos
+                .difference(&closure_off.refnos)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            closure_on.unreadable.len(),
+            closure_off.unreadable.len(),
+            "{label}"
+        );
+        let ledger_seeds = |plan: &UpdatePlan| -> BTreeSet<(u32, u32)> {
+            plan.ledger
+                .entries()
+                .iter()
+                .map(|entry| (entry.refno.word0, entry.refno.word1))
+                .collect()
+        };
+        assert_eq!(
+            ledger_seeds(&on),
+            ledger_seeds(&off),
+            "{label}: 账本照记——两态的闭包种子必须逐字相同"
+        );
+        let closure_dropped: BTreeSet<(u32, u32)> = closure_off
+            .refnos
+            .difference(&closure_on.refnos)
+            .copied()
+            .collect();
+        if !closure_dropped.is_empty() {
+            let dropped_units: BTreeSet<(u32, u32)> = off
+                .regenerate
+                .difference(&on.regenerate)
+                .chain(off.regenerate_derived.difference(&on.regenerate_derived))
+                .copied()
+                .collect();
+            assert!(
+                !dropped_units.is_empty(),
+                "{label}: 闭包少了 {} 个 refno 却没有少重建任何单元：{closure_dropped:?}",
+                closure_dropped.len()
+            );
+            let mut allowed: BTreeSet<(u32, u32)> = dropped_units.clone();
+            for unit in &dropped_units {
+                let refno = RefNo::new(unit.0, unit.1);
+                for set in [target, base] {
+                    let chain = owner_chain_in_set(set, refno)
+                        .unwrap_or_else(|error| panic!("{label}: 少重建单元的属主链读挂：{error}"));
+                    allowed.extend(chain.iter().map(|ancestor| {
+                        let ancestor = refno_to_e3d(*ancestor);
+                        (ancestor.word0, ancestor.word1)
+                    }));
+                }
+            }
+            let stray: Vec<_> = closure_dropped.difference(&allowed).collect();
+            assert!(
+                stray.is_empty(),
+                "{label}: 闭包少掉的 refno 必须全是少重建的单元或其祖先（放行候选本来会级联到的那片），\
+                 这些不是：{stray:?}"
+            );
+        }
+        // 3. 账本守恒；no_model 只多不少；有差 ⇒ 有放行。
+        on.accounts_for()
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        off.accounts_for()
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(
+            off.report.metadata_only + off.report.unread_attribute,
+            0,
+            "{label}: 关着的那一态没有门"
+        );
+        let admitted = on.report.metadata_only + on.report.unread_attribute;
+        let saved = off.regenerate.len() - on.regenerate.len()
+            + (off.regenerate_derived.len() - on.regenerate_derived.len());
+        let (no_model_on, no_model_off) = (
+            on.report.no_model.values().sum::<usize>(),
+            off.report.no_model.values().sum::<usize>(),
+        );
+        assert_eq!(on.report.unchanged, off.report.unchanged, "{label}");
+        assert!(
+            no_model_on >= no_model_off && no_model_on - no_model_off <= admitted,
+            "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={} unread_attribute={}",
+            on.report.metadata_only,
+            on.report.unread_attribute
+        );
+        if saved > 0 {
+            assert!(
+                admitted > 0,
+                "{label}: regen 少了 {saved} 个单元却没有任何候选被门放行"
+            );
+        }
+        if !closure_dropped.is_empty() {
+            assert!(
+                admitted > 0 && saved > 0,
+                "{label}: 闭包少收了 {} 个 refno 却没有放行任何候选 / 没有少重建任何单元",
+                closure_dropped.len()
+            );
+        }
+        GateWindowOutcome {
+            candidates: on.report.candidates,
+            metadata_only: on.report.metadata_only,
+            unread_attribute: on.report.unread_attribute,
+            regen_off: off.regenerate.len(),
+            regen_on: on.regenerate.len(),
+            saved_units: saved,
+            closure_dropped: closure_dropped.len(),
+            changes_line: on.report.changes_line(),
+        }
+    }
+
+    /// 语料里一个 DCHC=0 属性名的变化频次（S6 验收要的那张表的一行）。
+    #[derive(Default)]
+    struct DchcZeroTally {
+        /// 这个名字在多少个 Modified 候选上变了（L2 差分说值不同）。
+        changes: usize,
+        /// 其中候选整体被门放行的次数（只改了不影响模型的属性、无结构变化）。
+        admitted: usize,
+        /// 生成器读它（读取集合那一票把它挡住）。
+        read_by_generator: bool,
+        /// 老名单（NAME / DESC / PURP / FUNC / LCHKDA）。
+        curated: bool,
+    }
+
+    /// 逐个 Modified 候选做 L2 差分，把每个变了的 DCHC=0 属性名记进 `tally`；返回
+    /// `(做了差分的候选数, 门放行的候选数)`。
+    fn tally_dchc_zero_attribute_changes(
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+        window: &e3d_model::increment::WindowDiff,
+        tally: &mut BTreeMap<String, DchcZeroTally>,
+    ) -> (usize, usize) {
+        use e3d_io::index::IndexCandidate;
+
+        use crate::data_interface::model_impact::{
+            attribute_is_curated_metadata, generation_reads_attribute, raw_dchc_code,
+        };
+
+        let (mut diffed, mut admitted) = (0usize, 0usize);
+        for candidate in &window.diff.changes {
+            let IndexCandidate::Modified { refno, .. } = candidate else {
+                continue;
+            };
+            let Ok(diff) = e3d_model::diff_element(base, target, *refno) else {
+                continue;
+            };
+            if diff.is_unchanged() {
+                continue;
+            }
+            diffed += 1;
+            let tier = change_metadata_tier(&diff);
+            if tier.is_some() {
+                admitted += 1;
+            }
+            for name in &diff.attributes {
+                if raw_dchc_code(name) != Some(0) {
+                    continue;
+                }
+                let row = tally.entry(name.clone()).or_default();
+                row.changes += 1;
+                if tier.is_some() {
+                    row.admitted += 1;
+                }
+                row.read_by_generator = generation_reads_attribute(name);
+                row.curated = attribute_is_curated_metadata(name);
+            }
+        }
+        (diffed, admitted)
     }
 
     /// 元数据门的两态 live 门（2026-09-08，`#[ignore]` 手动）：沿 ams8000 会话链最后 `K` 步
     /// （默认 40，`AIOS_METADATA_GATE_STEPS` 可改）逐窗算两份计划——开着（`plan_update_with` +
-    /// `change_is_metadata_only`）与关着（`plan_update`）——钉三条契约：
-    ///
-    /// 1. `regenerate_on ⊆ regenerate_off`、`regenerate_derived_on ⊆ regenerate_derived_off`，`remove` 逐字相同
-    ///    （门只少上卷，不多不删；管身不读名字，成员只改名时 BRAN 不必重算管身）；
-    /// 2. 两态的祖先闭包**逐字相同**（账本照记 → 种子照收 → 凭证前移那一层一个根都不少收）；
-    /// 3. 两态 `regenerate` 有差 ⇔ `metadata_only > 0`（省下的每一根都归因到一个只改了元数据的候选）。
+    /// `change_metadata_tier`）与关着（`plan_update`）——钉 [`assert_metadata_gate_two_state`] 的三条契约。
     ///
     /// 语料里有没有「只改名」的自然窗口事先不知道：有就打印出来当证据，没有就如实说
     /// 「本机链上 K 步无一窗只改了元数据」——契约 1/2 在每一窗都成立，不靠有没有那种窗。
     /// 要验自己在 E3D 里造的改名窗，`AIOS_METADATA_ONLY_WINDOW=base:target` 指定那一窗，
-    /// 此时**必须** `metadata_only > 0` 且 `regenerate` 严格变少，否则红。
+    /// 此时**必须**门放行了候选且 `regenerate` 严格变少，否则红。全语料版见
+    /// [`live_corpus_metadata_only_gate_two_state_over_every_desi_db`]。
     #[test]
     #[ignore = "manual live: needs the real ams8000 DESI file and the E3D template directory"]
     fn live_ams8000_metadata_only_gate_never_adds_and_never_shrinks_the_closure() {
@@ -2908,6 +3198,7 @@ mod tests {
         windows.reverse();
         let pinned = std::env::var("AIOS_METADATA_ONLY_WINDOW").is_ok();
         let mut natural = Vec::new();
+        let mut tally: BTreeMap<String, DchcZeroTally> = BTreeMap::new();
         for (base_sesno, target_sesno) in windows {
             let (base, target) = (open(base_sesno), open(target_sesno));
             let window = match collect_window(&file, base_sesno, target_sesno) {
@@ -2917,97 +3208,302 @@ mod tests {
                     continue;
                 }
             };
-            let off = plan_update(&base, &target, &window);
-            let on = plan_update_with(
-                &base,
-                &target,
-                &window,
-                PlanLimits::default(),
-                change_is_metadata_only,
-            );
             let label = format!("{base_sesno}→{target_sesno}");
-            // 1. 只少上卷，不多、不删。
-            assert!(
-                on.regenerate.is_subset(&off.regenerate),
-                "{label}: 门开着不许多算：{:?}",
-                on.regenerate
-                    .difference(&off.regenerate)
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(on.remove, off.remove, "{label}: remove 不受门影响");
-            // 派生容器（BRAN 名下的隐式管身）同样只许少不许多：一个成员只改了 NAME，关着时
-            // 上卷路过 BRAN 把它记进派生集、整链重算管身；开着时那个候选根本不上卷，BRAN 也就
-            // 不进派生集——管身不读名字，少算的这一链是对的（ams8000 304→305 实测就是这形状）。
-            assert!(
-                on.regenerate_derived.is_subset(&off.regenerate_derived),
-                "{label}: 门开着不许多算派生容器：{:?}",
-                on.regenerate_derived
-                    .difference(&off.regenerate_derived)
-                    .collect::<Vec<_>>()
-            );
-            // 2. 闭包逐字相同：账本照记、种子照收。
-            let closure_on = on.affected_closure(&base, &target);
-            let closure_off = off.affected_closure(&base, &target);
-            assert_eq!(
-                closure_on.refnos, closure_off.refnos,
-                "{label}: 元数据门不许改变祖先闭包（凭证前移会少收根）"
-            );
-            assert_eq!(
-                closure_on.unreadable.len(),
-                closure_off.unreadable.len(),
-                "{label}"
-            );
-            // 3. 有差 ⇔ 有只改元数据的候选；账本守恒两态都成立。门判掉的候选在关着那一态里
-            //    要么上卷了、要么本来就 no_model（容器改名）、要么上卷失败进了 unresolved，
-            //    所以 no_model 只会多、多出来的不超过 metadata_only；unchanged 两态逐字相同。
-            on.accounts_for()
-                .unwrap_or_else(|error| panic!("{label}: {error}"));
-            off.accounts_for()
-                .unwrap_or_else(|error| panic!("{label}: {error}"));
-            let saved = off.regenerate.len() - on.regenerate.len()
-                + (off.regenerate_derived.len() - on.regenerate_derived.len());
-            let (no_model_on, no_model_off) = (
-                on.report.no_model.values().sum::<usize>(),
-                off.report.no_model.values().sum::<usize>(),
-            );
-            assert_eq!(on.report.unchanged, off.report.unchanged, "{label}");
-            assert!(
-                no_model_on >= no_model_off
-                    && no_model_on - no_model_off <= on.report.metadata_only,
-                "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={}",
-                on.report.metadata_only
-            );
-            if saved > 0 {
-                assert!(
-                    on.report.metadata_only > 0,
-                    "{label}: regen 少了 {saved} 个单元却没有任何候选被判元数据"
-                );
-            }
+            let outcome = assert_metadata_gate_two_state(&label, &base, &target, &window);
+            tally_dchc_zero_attribute_changes(&base, &target, &window, &mut tally);
             println!(
-                "{label}: candidates={} metadata_only={} regen off={} on={} saved_units={} | {}",
-                on.report.candidates,
-                on.report.metadata_only,
-                off.regenerate.len(),
-                on.regenerate.len(),
-                saved,
-                on.report.changes_line()
+                "{label}: candidates={} metadata_only={} unread_attribute={} regen off={} on={} saved_units={} closure_dropped={} | {}",
+                outcome.candidates,
+                outcome.metadata_only,
+                outcome.unread_attribute,
+                outcome.regen_off,
+                outcome.regen_on,
+                outcome.saved_units,
+                outcome.closure_dropped,
+                outcome.changes_line
             );
-            if on.report.metadata_only > 0 {
-                natural.push((label.clone(), on.report.metadata_only, saved));
+            if outcome.admitted() > 0 {
+                natural.push((
+                    label.clone(),
+                    outcome.metadata_only,
+                    outcome.unread_attribute,
+                    outcome.saved_units,
+                    outcome.closure_dropped,
+                ));
             }
             if pinned {
                 assert!(
-                    on.report.metadata_only > 0 && saved > 0,
-                    "{label}: 指定的改名窗必须有候选被判元数据、且 regen 严格变少（metadata_only={} saved={saved}）",
-                    on.report.metadata_only
+                    outcome.admitted() > 0 && outcome.saved_units > 0,
+                    "{label}: 指定的改名窗必须有候选被门放行、且 regen 严格变少（metadata_only={} unread_attribute={} saved={}）",
+                    outcome.metadata_only,
+                    outcome.unread_attribute,
+                    outcome.saved_units
                 );
             }
         }
         if natural.is_empty() {
-            println!("本机 ams8000 链上这些步里没有一窗只改了元数据（契约 1/2 在每一窗都过）");
+            println!(
+                "本机 ams8000 链上这些步里没有一窗只改了不影响模型的属性（契约 1/2 在每一窗都过）"
+            );
         } else {
-            println!("只改了元数据的窗口（label, metadata_only, saved_units）：{natural:?}");
+            println!(
+                "门放行过候选的窗口（label, metadata_only, unread_attribute, saved_units, closure_dropped）：{natural:?}"
+            );
         }
+        println!("{}", dchc_zero_frequency_table(&tally));
+    }
+
+    /// 频次表渲染成 Markdown：按变化次数降序，读取集合里的与老名单的各标一列。
+    fn dchc_zero_frequency_table(tally: &BTreeMap<String, DchcZeroTally>) -> String {
+        let mut rows: Vec<(&String, &DchcZeroTally)> = tally.iter().collect();
+        rows.sort_by(|a, b| b.1.changes.cmp(&a.1.changes).then_with(|| a.0.cmp(b.0)));
+        let mut out = String::from(
+            "| 属性 | 变化次数（Modified 候选） | 候选被门放行 | 生成器读它 | 老名单 |\n|---|---:|---:|:-:|:-:|\n",
+        );
+        for (name, row) in rows {
+            out.push_str(&format!(
+                "| `{name}` | {} | {} | {} | {} |\n",
+                row.changes,
+                row.admitted,
+                if row.read_by_generator { "是" } else { "" },
+                if row.curated { "是" } else { "" },
+            ));
+        }
+        out
+    }
+
+    /// **S6 验收门**（开发计划 2026-09-15 §4 S6，`#[ignore]` 手动）：元数据门两态门扩到 DESI 全语料——
+    /// 五个项目目录（与 [`live_corpus_nested_root_and_duplicate_coverage_measurement`] 同一份默认目录，
+    /// `AIOS_POSREF_DIRS` 可覆盖）下每一个 DESI 库、会话链最后 `K` 步（`AIOS_METADATA_GATE_STEPS_PER_DB`，
+    /// 默认 0 = 整条链），逐窗跑 [`assert_metadata_gate_two_state`] 的三条契约：新门放行的窗只多不少、
+    /// 闭包不缩、账本守恒。契约在**每一窗**都断言。
+    ///
+    /// 顺带收一张「DCHC=0 属性变化频次表」（[`tally_dchc_zero_attribute_changes`]）：哪些 core 不重画的
+    /// 属性在真实数据里常变、门放行了几次、被读取集合那一票挡了几次——这决定 S6 这一步省多少。频次是
+    /// 语料的性质，不下数值断言；表打印到 stdout（`--nocapture`），并写到 `AIOS_METADATA_GATE_REPORT`
+    /// （默认 `docs/evidence/2026-09-15-metadata-gate-two-vote-corpus.md`，按政策不入库）。
+    #[test]
+    #[ignore = "manual live: walks every DESI database in the sample corpus; needs the E3D template directory"]
+    fn live_corpus_metadata_only_gate_two_state_over_every_desi_db() {
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+        use e3d_io::engine::ReadOnlyEngine;
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+        let per_db: usize = std::env::var("AIOS_METADATA_GATE_STEPS_PER_DB")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let report_path = PathBuf::from(std::env::var("AIOS_METADATA_GATE_REPORT").unwrap_or_else(
+            |_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-15-metadata-gate-two-vote-corpus.md"
+                )
+                .into()
+            },
+        ));
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi_template =
+            template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+
+        let started = Instant::now();
+        let mut dbs_seen = 0usize;
+        let mut dbs_measured = 0usize;
+        let mut windows = 0usize;
+        let mut windows_skipped = 0usize;
+        let mut windows_admitting = 0usize;
+        let mut candidates = 0usize;
+        let mut diffed = 0usize;
+        let mut admitted_candidates = 0usize;
+        let mut metadata_only = 0usize;
+        let mut unread_attribute = 0usize;
+        let mut regen_off = 0usize;
+        let mut regen_on = 0usize;
+        let mut saved_units = 0usize;
+        let mut windows_closure_dropped = 0usize;
+        let mut closure_dropped = 0usize;
+        let mut admitting: Vec<String> = Vec::new();
+        let mut tally: BTreeMap<String, DchcZeroTally> = BTreeMap::new();
+
+        for dir in &dirs {
+            if !dir.is_dir() {
+                println!("skip dir {}: not a directory", dir.display());
+                continue;
+            }
+            let Ok(sources) = sources_in_dir(dir, &["DESI"]) else {
+                continue;
+            };
+            for source in sources {
+                dbs_seen += 1;
+                let file = source.file.clone();
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let sessions: Vec<u32> = match ReadOnlyEngine::open(&file)
+                    .ok()
+                    .and_then(|mut engine| engine.sessions().ok())
+                {
+                    Some(sessions) => sessions.iter().map(|session| session.session_id).collect(),
+                    None => {
+                        println!("skip {name}: cannot read the session chain");
+                        continue;
+                    }
+                };
+                // 链是新→旧：相邻两项 (older, newer) 就是一步；最后 K 步就是链头的 K 对。
+                let mut picked: Vec<(u32, u32)> = sessions
+                    .windows(2)
+                    .take(if per_db == 0 { usize::MAX } else { per_db })
+                    .map(|pair| (pair[1], pair[0]))
+                    .collect();
+                picked.reverse();
+                if picked.is_empty() {
+                    continue;
+                }
+                dbs_measured += 1;
+                let open = |sesno: u32| -> Option<Arc<DbSet>> {
+                    let set = Arc::new(DbSet::with_attlib_file(&attlib).ok()?);
+                    set.add_db(DbFilePin {
+                        file: file.clone(),
+                        template: desi_template.clone(),
+                        db_type: Some("DESI".into()),
+                        sesno: Some(sesno),
+                    })
+                    .ok()?;
+                    Some(set)
+                };
+                let mut db_admitted = 0usize;
+                for (base_sesno, target_sesno) in picked {
+                    let label = format!("{name} {base_sesno}→{target_sesno}");
+                    let window = match collect_window(&file, base_sesno, target_sesno) {
+                        Ok(window) => window,
+                        Err(error) => {
+                            windows_skipped += 1;
+                            println!("skip {label}: {error}");
+                            continue;
+                        }
+                    };
+                    let (Some(base), Some(target)) = (open(base_sesno), open(target_sesno)) else {
+                        windows_skipped += 1;
+                        println!("skip {label}: cannot pin both ends");
+                        continue;
+                    };
+                    let outcome = assert_metadata_gate_two_state(&label, &base, &target, &window);
+                    let (window_diffed, window_admitted) =
+                        tally_dchc_zero_attribute_changes(&base, &target, &window, &mut tally);
+                    windows += 1;
+                    candidates += outcome.candidates;
+                    diffed += window_diffed;
+                    admitted_candidates += window_admitted;
+                    metadata_only += outcome.metadata_only;
+                    unread_attribute += outcome.unread_attribute;
+                    regen_off += outcome.regen_off;
+                    regen_on += outcome.regen_on;
+                    saved_units += outcome.saved_units;
+                    if outcome.closure_dropped > 0 {
+                        windows_closure_dropped += 1;
+                        closure_dropped += outcome.closure_dropped;
+                    }
+                    if outcome.admitted() > 0 {
+                        windows_admitting += 1;
+                        db_admitted += outcome.admitted();
+                        admitting.push(format!(
+                            "{label}: candidates={} metadata_only={} unread_attribute={} regen off={} on={} saved_units={} closure_dropped={} | {}",
+                            outcome.candidates,
+                            outcome.metadata_only,
+                            outcome.unread_attribute,
+                            outcome.regen_off,
+                            outcome.regen_on,
+                            outcome.saved_units,
+                            outcome.closure_dropped,
+                            outcome.changes_line
+                        ));
+                    }
+                }
+                println!(
+                    "{name}: sessions={} windows={} admitted_candidates={db_admitted} elapsed={:.1}s",
+                    sessions.len(),
+                    sessions.len().saturating_sub(1),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+
+        let mut report = String::new();
+        report.push_str("# 元数据门两票（S6）· DESI 全语料两态门与 DCHC=0 属性变化频次\n\n");
+        report.push_str(&format!(
+            "> 生成：`window_root_plan::tests::live_corpus_metadata_only_gate_two_state_over_every_desi_db`，\
+             {}；目录 {}；每库步数 {}；耗时 {:.0}s。按政策不入库（`docs/evidence/`）。\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M"),
+            dirs.iter()
+                .map(|dir| format!("`{}`", dir.display()))
+                .collect::<Vec<_>>()
+                .join("、"),
+            if per_db == 0 {
+                "整条链".to_string()
+            } else {
+                per_db.to_string()
+            },
+            started.elapsed().as_secs_f64()
+        ));
+        report.push_str("## 两态门\n\n");
+        report.push_str(
+            "每一窗都断言：开着 `regenerate` / `regenerate_derived` ⊆ 关着、`remove` 相同、祖先闭包只少不多且账本种子\
+             逐字相同、闭包少掉的 refno 全是少重建的单元或其祖先（放行候选本来会触发的粗级联扇出，如桥架分支整条重建）、\
+             两态账本守恒、`no_model` 只多不少且不超过放行数、`unchanged` 相同、有省下就有放行。\n\n",
+        );
+        report.push_str(&format!(
+            "| 项 | 数 |\n|---|---:|\n| DESI 库（目录里认出的） | {dbs_seen} |\n| 有会话链可走的库 | {dbs_measured} |\n\
+             | 两态跑过的窗 | {windows} |\n| 跳过的窗（窗口收集失败 / 端点钉不住） | {windows_skipped} |\n\
+             | 门放行过候选的窗 | {windows_admitting} |\n| 索引候选总数 | {candidates} |\n\
+             | 做了 L2 差分且真变了的 Modified 候选 | {diffed} |\n| 其中门放行（两档合计） | {admitted_candidates} |\n\
+             | `metadata_only`（老名单） | {metadata_only} |\n| `unread_attribute`（S6 新档） | {unread_attribute} |\n\
+             | 关着 `regenerate` 合计 | {regen_off} |\n| 开着 `regenerate` 合计 | {regen_on} |\n\
+             | 省下的单元（regen + 派生） | {saved_units} |\n\
+             | 闭包少收过 refno 的窗（粗级联扇出被放行候选省掉） | {windows_closure_dropped} |\n\
+             | 闭包少收的 refno 合计 | {closure_dropped} |\n\n"
+        ));
+        report.push_str("## DCHC=0 属性变化频次\n\n");
+        report.push_str(
+            "「变化次数」= 这个名字在多少个真变了的 Modified 候选上值不同；「候选被门放行」= 这些候选里整体过了门的\
+             （全部属性两票放行、无结构变化）；「生成器读它」= 在生成读取集合里（读取集合那一票把它挡住）。\n\n",
+        );
+        report.push_str(&dchc_zero_frequency_table(&tally));
+        report.push_str("\n## 门放行过候选的窗\n\n");
+        if admitting.is_empty() {
+            report.push_str("（无）\n");
+        } else {
+            for line in &admitting {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
+        println!("{report}");
+        if let Some(parent) = report_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&report_path, &report) {
+            Ok(()) => println!("report written to {}", report_path.display()),
+            Err(error) => println!("report NOT written to {}: {error}", report_path.display()),
+        }
+        assert!(windows > 0, "语料里一窗都没跑到——目录或模板目录不对");
     }
 
     /// **T412 验收门**：ams7999 45→46——老收集器读不动、窗口规划器读得动的那一窗。
