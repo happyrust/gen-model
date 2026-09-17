@@ -161,6 +161,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     普通增量窗口只重算被触到的根，别的根的边仍是上一代算的，说不了这句，那一格**原样不动**；`all_roots_ok` 为假一律不写；
     `room_membership=false` 下盖模型水位时**清空**（这一版水位只承诺几何，不能留着替旧边说话）。这一格还是 D13 触发 ③ 的读数：
     与此刻常驻代号不等 = 欠一次整库重算——所以「盖」与「不盖」都要诚实，盖早了 ③ 就哑了。
+    **盖的代号是边真正用的那一代，不是收尾那一刻的常驻代号**（2026-09-17 审核 P2-3）：批次 worker 单消费者，但 `/model/ensure` 与
+    初始化 lane 都会并发调开工前对齐，一个 DESI 前进 + 用户同时点「显示模型」就会在任务中途换代，拿收尾那一刻的
+    `required_room_generation()` 盖，盖上的可能是一个边不是它算的代号。三路各有出处：初始化拿双 lane 开工冻的那台
+    `rooms.resident_generation()`（`dbnum_initialize`，原本就对）；整库房间重算拿**重算那台计算器**的代号
+    （`RoomRecomputeVerdict::WholeLibrary(代号)`，边是它算的、ACK 已对齐到它，此刻常驻是哪一代无关）；整库重排的 ModelOnly 在开工
+    对齐**之后**记一次代号（`DataBatchTaskResult::room_generation_at_start`），收尾与此刻比——相等 = 每次刷盘冻的都是这一代，盖它；
+    不等 = 中途换过代、各批根的边不是同一代算的，`Untouched`（下一个任务由 ③ 补一次整库重算）；开工没记下也不盖。
   - **读**：`e3d.room.lookup` 的就绪判据变成两层——进程内该根的 ACK 命中，**或**库上这一格与此刻常驻模型同一代且本进程的
     账本里这根没欠着（ADR-079 的一票否决）。两层用同一个代号，所以也是同一句判据：房间 / 面板真变过 → 代号变 → 两层同时
     作废 → `not_computed`，不拿上一代的边冒充这一版的结论。只在**落盘**形态下作数：进程内嵌 `mem://` 活不过重启，
@@ -228,7 +235,11 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     面板里的成员边随之更新；(f) 只改 BRAN → 不触发。
 19. D14：`task_end::render_watermark_update` 对 `model_room_generation` 只有三种动作（`Untouched` / `Cleared` / `Aligned`），
     与 `model_sesno` 同在 `all_roots_ok` 门内；「起点为 0 的 ModelOnly」这句资格判定全文只有一处定义
-    （`whole_library_model_only`），库级目录落款与房间代号共用它；`query_service::room_calculation_status` 的函数体里
+    （`whole_library_model_only`），库级目录落款与房间代号共用它；`room_generation_stamp_of(now, LibraryRoomClaim)` 的代号出处：
+    `Recomputed(代号)` 盖载荷（`now` 是什么、取不取得到都不影响）、`Rebuilt { started_at }` 只在 `started_at == now` 时盖 `now`
+    （不等 / 没记下 / 取不到 → `Untouched`）、`Ok(None)` 一律 `Cleared`；`WholeLibrary(rooms.resident_generation().to_string())` 在
+    源码里、ModelOnly 执行体的 `let room_generation_at_start =` 落在开工前对齐之后、`run_unit_worklist(` 之前，收尾从
+    `result.room_generation_at_start.as_deref()` 取（2026-09-17 P2-3，钉 `only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation`）；`query_service::room_calculation_status` 的函数体里
     同时出现 `publication_ack(`、`room_edges_ready(` 与 `model_root_ledger::entry(`，`room()` 里的库上那一层按本次查询的
     dbnum 现读（`Self::library_room_generation(dbnum).await`）。钉
     `the_room_generation_stamp_follows_the_model_watermark`、

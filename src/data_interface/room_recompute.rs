@@ -417,9 +417,9 @@ mod tests {
         // 覆盖面不全（投影里没有本库全部根）只算「触到的根更新了」：durable 侧「整库对齐到这一代」那一格
         // 不许盖——盖了就是替没算过的根说话，正是 D14 要挡的「拿上一代的边冒充这一版」。
         assert!(
-            tail.contains("RoomRecomputeVerdict::speaks_for_library")
+            tail.contains("RoomRecomputeVerdict::library_generation")
                 && tail.contains("RoomRecomputeVerdict::rooms_ok"),
-            "收尾要分开问两句：算齐了没有（水位）、覆盖整库了没有（对齐代号）: {tail}"
+            "收尾要分开问两句：算齐了没有（水位）、覆盖整库了没有、对齐到哪一代（对齐代号）: {tail}"
         );
 
         // 旧过滤（「房间重算项不在内」）不得把 RoomOnly 拦在 side_actions 之外。

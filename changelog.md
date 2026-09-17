@@ -110,9 +110,31 @@
   （`batch_worker.rs` 6 处、`model_db_adapter.rs` 2 处漂移为既有）。**未 live**：「PANE 变化 → 拆窗 / 刷盘没齐丢掉触发 → 下一个任务
   日志出『库上整库房间对齐代号 … ≠ 此刻常驻代号 …』并跑整库重算」与「初始化过的库 → `PartialCoverage` warn 一次、下一个任务不再重复」
   两条真机用例没跑。
-- **未动**：P2-3 收尾盖章读的是任务结束那一刻的 `required_room_generation()`（`run_room_only_recompute` 冻的那台计算器代号没传给
-  盖章）——电平型之后它的分量更重：盖上一个边不是它算的代号，触发 ③ 就哑了；U1 第二半（初始化过的根不在投影里）要么让重算回读
-  库上几何、要么接受滞后到整库重建，另开决策卡；F3 / F4 / U3 照旧。
+- **未动**：P2-3（收尾盖章读的是任务结束那一刻的 `required_room_generation()`）紧接着下一条收掉；U1 第二半（初始化过的根不在投影里）
+  要么让重算回读库上几何、要么接受滞后到整库重建，另开决策卡；F3 / F4 / U3 照旧。
+
+### `model_room_generation` 盖的是边真正用的那一代，不是收尾那一刻的常驻代号（ADR-073 D14，审核 P2-3）
+
+- **为什么**：`task_room_generation_stamp` 此前对两路整库任务都拿收尾那一刻的 `required_room_generation()` 盖 `Aligned`。批次 worker
+  单消费者，但 `/model/ensure` 与初始化 lane 都会并发调开工前对齐（D12）——一个 DESI 前进 + 用户同时点「显示模型」就会在任务中途
+  换代：整库重排的 ModelOnly 各批根由 write-behind 每次刷盘时 `frozen_room_calculator()` 那台算，前半 G1、后半 G2，收尾盖 G2；
+  整库房间重算的边是收尾冻的那台（G1）算的，盖章时常驻已到 G2，也盖 G2。两种都是「拿上一代的边冒充这一版」——D14 要挡的事；
+  电平型触发 ③（上一条）读的正是这一格，盖错了它就哑了。`dbnum_initialize` 那一路用 `rooms.resident_generation()` 本来就对。
+- **改动**：
+  - `RoomRecomputeVerdict::WholeLibrary` 带载荷 = 重算那台计算器的 `resident_generation()`（`speaks_for_library()` →
+    `library_generation() -> Option<&str>`），收尾盖它——边是它算的、ACK 已对齐到它，此刻常驻是哪一代、取不取得到都无关。
+  - `DataBatchTaskResult` 加 `room_generation_at_start`（不进回执）：ModelOnly 执行体在开工前对齐**之后**、生成之前记一次
+    `required_room_generation()`；整库重排收尾拿它与此刻比——相等 = 每次刷盘冻的都是这一代，盖；不等 / 没记下 / 此刻取不到 →
+    `Untouched`，下一个任务由 ③ 补一次整库重算。
+  - 判据收成 `room_generation_stamp_of(now, LibraryRoomClaim { None | Recomputed(代号) | Rebuilt { started_at } })`：`Ok(None)`
+    一律 `Cleared`（开关关着），其余按上两条。ADR-073 D14 写规则加「代号出处」一段、钉 19 扩到它；CONTEXT「整库房间对齐代号」同步。
+- **验证**：`cargo test --lib -- room_recompute:: … only_a_task_that_speaks … a_partial_coverage_recompute …` **23 passed / 0 failed**
+  （`only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation` 重写成三路真值表 + 源码钉：载荷来自
+  `rooms.resident_generation()`、开工代号落在对齐之后 / `run_unit_worklist(` 之前、收尾从回执里取；`a_partial_coverage_recompute…`
+  的四态表改成 `library_generation()`；源码钉 17 的 `tail` 改认 `RoomRecomputeVerdict::library_generation`）。rustfmt 本轮新增行无 diff。
+  **未 live**：任务中途并发 `/model/ensure` 换代 → 整库重排收尾 `Untouched`、下一个任务由 ③ 补整库重算，这条真机用例没跑。
+- **接受的角**：代号 A→B→A 在任务内翻回去（开工 A、中途 B、收尾 A）两路都判不出——整库重排要逐根记刷盘代号才判得出，
+  整库重算不受影响（单台计算器）。面板改动在一个任务里改完又改回，实际不会发生，不为它加逐根记账。
 
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 

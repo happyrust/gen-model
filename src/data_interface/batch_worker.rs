@@ -665,6 +665,11 @@ pub struct DataBatchTaskResult {
     /// 执行体内部的接力，不进回执（收尾那一段的结果进 `warnings` / `units`）。
     #[serde(skip)]
     pub room_recompute: Option<String>,
+    /// 模型半边开工前对齐（ADR-073 D12）**之后**记下的常驻房间代号——整库重排的 ModelOnly 收尾盖
+    /// `model_room_generation` 时拿它与此刻比（审核 P2-3）：不等 = 任务中途换过代，各批根的边不是同一代
+    /// 算的，那一格 `Untouched`。只有 ModelOnly 执行体填；取不到（开关关 / `Blocked`）是 `None`。不进回执。
+    #[serde(skip)]
+    pub room_generation_at_start: Option<String>,
 }
 
 /// 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
@@ -1050,6 +1055,7 @@ async fn run_one_batch(
                                     model_caught_up_at: None,
                                     initialization_closed_task: false,
                                     room_recompute: None,
+                                    room_generation_at_start: None,
                                 };
                             }
                         }
@@ -1156,6 +1162,7 @@ async fn run_one_batch(
                         model_caught_up_at: None,
                         initialization_closed_task: false,
                         room_recompute: None,
+                        room_generation_at_start: None,
                     }
                 }
             }
@@ -1619,13 +1626,20 @@ async fn execute_frozen_batch(
         };
         // 两句分开问：算齐了没有 → 水位；覆盖整库了没有 → durable 侧对齐代号（D14）。投影只装本进程
         // 生成过的根，覆盖不全时那一格不盖，电平型触发让下一个任务再点一次。
-        let rooms_ok = room_verdict.is_none_or(RoomRecomputeVerdict::rooms_ok);
-        let recomputed_whole_library =
-            room_verdict.is_some_and(RoomRecomputeVerdict::speaks_for_library);
+        let rooms_ok = room_verdict
+            .as_ref()
+            .is_none_or(RoomRecomputeVerdict::rooms_ok);
+        let recomputed_library_generation = room_verdict
+            .as_ref()
+            .and_then(RoomRecomputeVerdict::library_generation);
         // 库级目录落款（ADR-079）：只有目录级联排的 / 整库重排的 ModelOnly 有资格说，随收尾那一笔
         // 与 `model_sesno` 同盖；单元清单是任务手里的事实，不回问库。
         let catalogue_sessions = task_catalogue_stamps(job, &result.units);
-        let room_generation = task_room_generation_stamp(job, recomputed_whole_library);
+        let room_generation = task_room_generation_stamp(
+            job,
+            recomputed_library_generation,
+            result.room_generation_at_start.as_deref(),
+        );
         let mut outcome = model_outcome_of(&flush, catalogue_sessions, room_generation);
         if !rooms_ok {
             outcome.all_roots_ok = false;
@@ -1838,10 +1852,12 @@ async fn abandon_undurable_roots(
 
 /// 收尾段整库房间重算（[`run_room_only_recompute`]）的结论：两句话分开答——「算齐了没有」管
 /// `model_sesno`，「覆盖整库了没有」管 durable 侧的对齐代号那一格（ADR-073 D14）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RoomRecomputeVerdict {
-    /// 投影里有本库 `DbSet@T` 的每一根、都算齐了：水位可盖，`model_room_generation` 可盖成本台计算器这一代。
-    WholeLibrary,
+    /// 投影里有本库 `DbSet@T` 的每一根、都算齐了：水位可盖，`model_room_generation` 可盖成**这一代**——
+    /// 载荷就是重算那台计算器的 `resident_generation()`，边是它算的、ACK 也对齐到它；收尾不再回问此刻的
+    /// 常驻（任务中途换了代也不拿新代号冒充，审核 P2-3）。
+    WholeLibrary(String),
     /// 算齐了投影里有的根，但投影不覆盖本库全部根——初始化的模型行不进投影（ADR-077 D5）、落盘形态
     /// 冷重启后投影是空的、根清单枚举不出来也算。触到的根边已更新、水位照盖（本任务的根都成了）；
     /// durable 侧「整库对齐到这一代」**不**盖——那一格替的是没算过的根说话，正是 D14 要挡的事。
@@ -1857,13 +1873,16 @@ enum RoomRecomputeVerdict {
 
 impl RoomRecomputeVerdict {
     /// 这一版 `model_sesno` 能不能盖（房间那一半没拖后腿）。
-    fn rooms_ok(self) -> bool {
+    fn rooms_ok(&self) -> bool {
         !matches!(self, Self::Failed)
     }
 
-    /// 本任务说得了「这个库的房间边整库对齐到这一代」。
-    fn speaks_for_library(self) -> bool {
-        matches!(self, Self::WholeLibrary)
+    /// 本任务说得了「这个库的房间边整库对齐到这一代」——是哪一代（重算那台计算器的代号）；说不了 = `None`。
+    fn library_generation(&self) -> Option<&str> {
+        match self {
+            Self::WholeLibrary(generation) => Some(generation),
+            Self::PartialCoverage | Self::Disabled | Self::Failed => None,
+        }
     }
 }
 
@@ -1971,7 +1990,7 @@ async fn run_room_only_recompute(
                 return match room_recompute_uncovered(expected.as_deref(), &report.covered_roots) {
                     Some(uncovered) if uncovered.is_empty() => {
                         crate::data_interface::room_recompute::rearm_library(dbnum);
-                        RoomRecomputeVerdict::WholeLibrary
+                        RoomRecomputeVerdict::WholeLibrary(rooms.resident_generation().to_string())
                     }
                     Some(uncovered) => {
                         result.warnings.push(format!(
@@ -2120,31 +2139,72 @@ fn model_outcome_of(
 /// 房间开关关着 → `Cleared`：这一版 `model_sesno` 只承诺几何（ADR-073 2026-09-11 修订），
 /// durable 侧的房间就绪承诺随之清空，免得关掉开关跑过一轮之后那一格还替旧边说话。
 ///
-/// 代号取此刻的 [`required_room_generation`]，与 `/model/ensure` 准入判「这根的 ACK 够不够新」
-/// 用的是同一个字串；取不到（常驻模型 `Blocked`）时不盖——那种局面下本批根本来也没几根落得下去。
+/// **盖的是边真正用的那一代**（审核 P2-3，2026-09-17）：批次 worker 单消费者，但 `/model/ensure` 与初始化
+/// lane 都会并发调开工前对齐，一个 DESI 前进 + 用户同时点「显示模型」就会在任务中途换代——收尾若拿此刻的
+/// [`required_room_generation`] 盖，盖上的可能是一个边不是它算的代号，正是 D14 要挡的「拿上一代的边冒充
+/// 这一版」；而电平型触发（D13 ③）读的就是这一格，盖错了它就哑了。所以：
+///
+/// - 整库房间重算那一路拿**重算那台计算器的代号**（`RoomRecomputeVerdict::WholeLibrary` 的载荷）：边是它
+///   算的、ACK 已对齐到它，此刻常驻是哪一代无关；
+/// - 整库重排的 ModelOnly 拿**开工对齐后记下的代号**（[`DataBatchTaskResult::room_generation_at_start`]），
+///   收尾与此刻的 [`required_room_generation`] 比：相等 = 每次刷盘冻的都是这一代，盖它；不等 = 中途换过代、
+///   各批根的边不是同一代算的，`Untouched`，下一个任务由 ③ 补一次整库重算。开工没记下（取不到）也不盖。
+///
+/// 开关关着（此刻取到 `None`）两路都 `Cleared`。
 ///
 /// [`required_room_generation`]: crate::fast_model::model_db_adapter::required_room_generation
 fn task_room_generation_stamp(
     job: &FrozenBatch,
-    recomputed_whole_library: bool,
+    recomputed_library_generation: Option<&str>,
+    room_generation_at_start: Option<&str>,
 ) -> crate::data_interface::task_end::RoomGenerationStamp {
+    let claim = match recomputed_library_generation {
+        Some(generation) => LibraryRoomClaim::Recomputed(generation),
+        None if whole_library_model_only(job) => LibraryRoomClaim::Rebuilt {
+            started_at: room_generation_at_start,
+        },
+        None => LibraryRoomClaim::None,
+    };
     room_generation_stamp_of(
         crate::fast_model::model_db_adapter::required_room_generation(),
-        recomputed_whole_library || whole_library_model_only(job),
+        claim,
     )
 }
 
-/// 判据的纯函数形态，逐格钉住（[`task_room_generation_stamp`]）。
+/// 本任务凭什么替整库说「房间边对齐到这一代」（[`task_room_generation_stamp`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryRoomClaim<'a> {
+    /// 普通增量窗口：说不了。
+    None,
+    /// 本任务的整库房间重算覆盖到了 `DbSet@T` 的每一根，边全是这一代（重算那台计算器）算的。
+    Recomputed(&'a str),
+    /// 整库重排的 ModelOnly：每一根都在本任务算了；`started_at` 是开工对齐后记下的代号（取不到 = `None`）。
+    Rebuilt { started_at: Option<&'a str> },
+}
+
+/// 判据的纯函数形态，逐格钉住（[`task_room_generation_stamp`]）。`now` 是收尾此刻的
+/// `required_room_generation()`：`Ok(None)` = 开关关着。
 fn room_generation_stamp_of(
-    room_generation: anyhow::Result<Option<String>>,
-    speaks_for_library: bool,
+    now: anyhow::Result<Option<String>>,
+    claim: LibraryRoomClaim<'_>,
 ) -> crate::data_interface::task_end::RoomGenerationStamp {
     use crate::data_interface::task_end::RoomGenerationStamp;
-    match room_generation {
+    match (now, claim) {
         // 开关关着：这一版水位只承诺几何，库上那一格随之清空。
-        Ok(None) => RoomGenerationStamp::Cleared,
-        Ok(Some(generation)) if speaks_for_library => RoomGenerationStamp::Aligned(generation),
-        Ok(Some(_)) | Err(_) => RoomGenerationStamp::Untouched,
+        (Ok(None), _) => RoomGenerationStamp::Cleared,
+        (_, LibraryRoomClaim::None) => RoomGenerationStamp::Untouched,
+        // 重算那台计算器的代号：边是它算的，此刻常驻是哪一代（甚至取不取得到）无关。
+        (_, LibraryRoomClaim::Recomputed(generation)) => {
+            RoomGenerationStamp::Aligned(generation.to_owned())
+        }
+        // 整库重排：开工那一代与此刻相同才说得了「每一根都是这一代算的」。
+        (
+            Ok(Some(now)),
+            LibraryRoomClaim::Rebuilt {
+                started_at: Some(started_at),
+            },
+        ) if now == started_at => RoomGenerationStamp::Aligned(now),
+        (Ok(Some(_)) | Err(_), LibraryRoomClaim::Rebuilt { .. }) => RoomGenerationStamp::Untouched,
     }
 }
 
@@ -2249,6 +2309,7 @@ async fn execute_model_only_body(
                 model_caught_up_at: None,
                 initialization_closed_task: false,
                 room_recompute: None,
+                room_generation_at_start: None,
             };
         }
     };
@@ -2259,6 +2320,11 @@ async fn execute_model_only_body(
     // 同一条纪律；回执留着，换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
     let room_reference =
         crate::fast_model::model_db_adapter::refresh_room_reference_before_task(job.dbnum).await;
+    // 对齐之后记一次代号：整库重排（起点 0）收尾盖 `model_room_generation` 时与此刻比——不等 = 任务中途
+    // 换过代，各批根的边不是同一代算的，那一格不盖（审核 P2-3，`task_room_generation_stamp`）。
+    let room_generation_at_start = crate::fast_model::model_db_adapter::required_room_generation()
+        .ok()
+        .flatten();
     // 第三条触发（电平型）：库上 durable 侧的整库对齐代号与此刻（对齐之后）常驻代号不等 = 欠一次整库重算。
     let alignment_owed =
         crate::data_interface::room_recompute::durable_alignment_owed(job.dbnum).await;
@@ -2332,6 +2398,7 @@ async fn execute_model_only_body(
         model_caught_up_at: None,
         initialization_closed_task: false,
         room_recompute,
+        room_generation_at_start,
     }
 }
 
@@ -2632,6 +2699,7 @@ fn failed_window_result(
         model_caught_up_at: None,
         initialization_closed_task: false,
         room_recompute: None,
+        room_generation_at_start: None,
     }
 }
 
@@ -2835,6 +2903,8 @@ async fn execute_frozen_batch_body(
         model_caught_up_at: None,
         initialization_closed_task,
         room_recompute,
+        // 批次执行体没有整库重排那一路（`whole_library_model_only` 只认 ModelOnly），不用记。
+        room_generation_at_start: None,
     }
 }
 
@@ -4452,35 +4522,108 @@ mod tests {
 
     /// ADR-073 D14：durable 侧的房间就绪承诺只有能替**整库**说话的任务才盖——本任务跑过整库房间
     /// 重算，或是整库重排的 ModelOnly。普通增量窗口只重算被触到的根，面板那一侧没动过的根的边仍是
-    /// 上一代算的，盖了就是替它们说了谎；开关关着要**清空**那一格，不是原样留着替旧边说话；
-    /// 常驻模型此刻取不到代号（`Blocked`）时什么都不盖。
+    /// 上一代算的，盖了就是替它们说了谎；开关关着要**清空**那一格，不是原样留着替旧边说话。
+    /// **盖的是边真正用的那一代**（审核 P2-3）：整库重算拿重算那台计算器的代号，此刻常驻是哪一代无关；
+    /// 整库重排拿开工对齐后记下的代号、与此刻相同才盖，中途换过代 / 开工没记下 / 此刻取不到都不盖。
     #[test]
     fn only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation() {
         use crate::data_interface::task_end::RoomGenerationStamp;
 
-        let generation = || Ok(Some("efd4ebe1".to_owned()));
+        let now = || Ok(Some("efd4ebe1".to_owned()));
+        let blocked = || Err(anyhow::anyhow!("blocked"));
+        // 普通增量窗口：说不了整库的话，那一格原样。
         assert_eq!(
-            room_generation_stamp_of(generation(), true),
-            RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
-            "整库对齐过的任务盖这一代"
+            room_generation_stamp_of(now(), LibraryRoomClaim::None),
+            RoomGenerationStamp::Untouched
         );
-        assert_eq!(
-            room_generation_stamp_of(generation(), false),
-            RoomGenerationStamp::Untouched,
-            "普通增量窗口说不了整库的话，那一格原样"
-        );
-        // 开关关着：两种任务都清空——`model_sesno` 这一版只承诺几何（ADR-073 2026-09-11 修订）。
-        for speaks_for_library in [true, false] {
+        // 整库房间重算：盖重算那台计算器的代号——此刻常驻已经换到别的代、甚至取不到，都不影响。
+        for now in [now(), Ok(Some("ffff0000".to_owned())), blocked()] {
             assert_eq!(
-                room_generation_stamp_of(Ok(None), speaks_for_library),
-                RoomGenerationStamp::Cleared
-            );
-            assert_eq!(
-                room_generation_stamp_of(Err(anyhow::anyhow!("blocked")), speaks_for_library),
-                RoomGenerationStamp::Untouched,
-                "代号取不到就不盖，不拿空字串冒充一代"
+                room_generation_stamp_of(now, LibraryRoomClaim::Recomputed("efd4ebe1")),
+                RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
+                "边是重算那台算的，盖它的代号"
             );
         }
+        // 整库重排的 ModelOnly：开工那一代 == 此刻 → 每次刷盘冻的都是这一代，盖；否则不盖。
+        assert_eq!(
+            room_generation_stamp_of(
+                now(),
+                LibraryRoomClaim::Rebuilt {
+                    started_at: Some("efd4ebe1"),
+                },
+            ),
+            RoomGenerationStamp::Aligned("efd4ebe1".to_owned())
+        );
+        assert_eq!(
+            room_generation_stamp_of(
+                now(),
+                LibraryRoomClaim::Rebuilt {
+                    started_at: Some("00aa11bb"),
+                },
+            ),
+            RoomGenerationStamp::Untouched,
+            "任务中途换过代：各批根的边不是同一代算的，不拿新代号冒充"
+        );
+        assert_eq!(
+            room_generation_stamp_of(now(), LibraryRoomClaim::Rebuilt { started_at: None }),
+            RoomGenerationStamp::Untouched,
+            "开工没记下代号，收尾无从比对"
+        );
+        assert_eq!(
+            room_generation_stamp_of(
+                blocked(),
+                LibraryRoomClaim::Rebuilt {
+                    started_at: Some("efd4ebe1"),
+                },
+            ),
+            RoomGenerationStamp::Untouched,
+            "此刻取不到就不盖，不拿空字串冒充一代"
+        );
+        // 开关关着：三种任务都清空——`model_sesno` 这一版只承诺几何（ADR-073 2026-09-11 修订）。
+        for claim in [
+            LibraryRoomClaim::None,
+            LibraryRoomClaim::Recomputed("efd4ebe1"),
+            LibraryRoomClaim::Rebuilt {
+                started_at: Some("efd4ebe1"),
+            },
+        ] {
+            assert_eq!(
+                room_generation_stamp_of(Ok(None), claim),
+                RoomGenerationStamp::Cleared,
+                "{claim:?}"
+            );
+        }
+
+        // 源码钉：两路的代号各有出处——整库重算的载荷来自 `rooms.resident_generation()`，整库重排的
+        // 开工代号在 ModelOnly 执行体里紧跟开工前对齐记下，收尾从回执里取；收尾不再拿此刻的代号直接盖。
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        assert!(
+            source.contains(
+                "RoomRecomputeVerdict::WholeLibrary(rooms.resident_generation().to_string())"
+            ),
+            "整库重算的结论带着重算那台计算器的代号"
+        );
+        let model_only = source
+            .split_once("async fn execute_model_only_body(")
+            .expect("ModelOnly 执行体")
+            .1;
+        let refresh = model_only
+            .find("refresh_room_reference_before_task(job.dbnum)")
+            .expect("开工前对齐");
+        let recorded = model_only
+            .find("let room_generation_at_start =")
+            .expect("对齐之后记一次代号");
+        assert!(
+            refresh < recorded && recorded < model_only.find("run_unit_worklist(").unwrap(),
+            "开工代号在对齐之后、生成之前记下"
+        );
+        assert!(
+            source.contains("result.room_generation_at_start.as_deref()"),
+            "收尾从回执里取开工代号来比"
+        );
     }
 
     /// 整库房间重算的结论分两句答（2026-09-17）：`Failed` 才拖水位；只有 `WholeLibrary` 说得了「整库对齐到这一代」。
@@ -4490,18 +4633,26 @@ mod tests {
     fn a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment() {
         use RoomRecomputeVerdict::*;
         for (verdict, rooms_ok, speaks) in [
-            (WholeLibrary, true, true),
-            (PartialCoverage, true, false),
-            (Disabled, true, false),
-            (Failed, false, false),
+            (WholeLibrary("efd4ebe1".to_owned()), true, Some("efd4ebe1")),
+            (PartialCoverage, true, None),
+            (Disabled, true, None),
+            (Failed, false, None),
         ] {
             assert_eq!(verdict.rooms_ok(), rooms_ok, "{verdict:?}");
-            assert_eq!(verdict.speaks_for_library(), speaks, "{verdict:?}");
+            assert_eq!(
+                verdict.library_generation(),
+                speaks,
+                "只有整库那一档说得了对齐到哪一代——重算那台计算器的代号: {verdict:?}"
+            );
         }
         // 没跑（没触发）= 水位不受房间那一半影响、也说不了整库。
         let none: Option<RoomRecomputeVerdict> = None;
-        assert!(none.is_none_or(RoomRecomputeVerdict::rooms_ok));
-        assert!(!none.is_some_and(RoomRecomputeVerdict::speaks_for_library));
+        assert!(none.as_ref().is_none_or(RoomRecomputeVerdict::rooms_ok));
+        assert!(
+            none.as_ref()
+                .and_then(RoomRecomputeVerdict::library_generation)
+                .is_none()
+        );
 
         use e3d_io::refno::RefNo;
         let a = RefNo::new(8000, 1);
@@ -4630,6 +4781,7 @@ mod tests {
             model_caught_up_at: Some("2026-09-05T17:01:43Z".into()),
             initialization_closed_task: false,
             room_recompute: None,
+            room_generation_at_start: None,
         };
         let json = serde_json::to_value(receipt).expect("task receipt serializes");
         assert_eq!(json["model_verdict"], "in_sync");
