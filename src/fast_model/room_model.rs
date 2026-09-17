@@ -1821,6 +1821,7 @@ impl RoomInput for crate::fast_model::model_memory_store::ProjectedGeometry {
                     ..
                 } => Some(*local_transform),
             },
+            self.tube.is_some(),
         )
     }
 }
@@ -1828,13 +1829,21 @@ impl RoomInput for crate::fast_model::model_memory_store::ProjectedGeometry {
 /// 投影记录的「网格 → 世界」：烘焙实体只有世界变换；标准图元把本地摆放折进去（`world × local`）。
 /// **只有这一处定义**：投影记录（[`RoomInput`] for `ProjectedGeometry`）与 bake 时的同一件几何
 /// （[`BakedRoomInput`]，`e3d_model_service::bake_element`）都经它——两边算出的判定点才逐位相等。
+///
+/// **隐式管身例外**（`implied_tube`）：它存下的世界变换已经把标准图元的本地摆放折进去了
+/// （`e3d_model_service::persisted_world_transform`——隐式管身只向 Plant UI 暴露一个变换），库上
+/// `tubi_relate` 行读回的实例变换也是单位阵（`model_record_reader::projection_record_to_query` /
+/// [`durable_room_inputs`]）。这里若再乘一次本地摆放，标准管身的判定点就落到 Plant UI 画的网格之外，
+/// 与库上回读那条路（整库重算、从零初始化）算出的边也对不上——「增量 == 全量」逐边相等的硬验收
+/// （ADR-010 §9）在跨面板边的标准管身上会破。
 pub(crate) fn projected_mesh_to_world(
     world_transform: DMat4,
     canonical_local: Option<DMat4>,
+    implied_tube: bool,
 ) -> DMat4 {
     match canonical_local {
-        Some(local_transform) => world_transform * local_transform,
-        None => world_transform,
+        Some(local_transform) if !implied_tube => world_transform * local_transform,
+        _ => world_transform,
     }
 }
 
@@ -2469,19 +2478,10 @@ impl MemoryRoomCalculator {
             room_definition_version,
             records,
             |record| {
-                let transform = match &record.shape {
-                    crate::fast_model::model_memory_store::ProjectedShape::Baked => {
-                        record.world_transform
-                    }
-                    crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                        local_transform,
-                        ..
-                    } => record.world_transform * *local_transform,
-                };
                 Ok(crate::fast_model::room_resident::build_tri_mesh(
                     self.panels.mesh_dir(),
                     &record.mesh_id,
-                    transform.as_mat4(),
+                    record.mesh_to_world().as_mat4(),
                 )
                 .map_err(anyhow::Error::msg)?
                 .vertices()

@@ -334,7 +334,10 @@ flush 时算（`model_db_adapter::room_stage`：每次 flush 冻一台计算器�
 整根重生成的生成 worker 在 `e3d_model_service::bake_element` 里、网格还在手上时就按元素算（`MemoryRoomCalculator::edges_for_record`），
 判定点取自**就要写盘的那份网格** × 同一个 f32 变换（`room_model::world_points_of`，与回读路同一个函数——不是为算盒子折出来的
 f64 `world_mesh`，那会差几个 ulp、让贴面板边的点翻面，破 ADR-010 §9「增量 == 全量逐边相等」）；输入配方 `baked_room_input`
-与投影记录同三个函数（`geometry_source_refno` / `geometry_record_id` / `persisted_world_transform`）加 `projected_mesh_to_world`。
+与投影记录同三个函数（`geometry_source_refno` / `geometry_record_id` / `persisted_world_transform`）加 `projected_mesh_to_world`
+（标准图元 = 世界 × 本地；**标准隐式管身不再乘本地**——`persisted_world_transform` 已把它折进存下的世界变换，库上 `tubi_relate`
+行回读的实例变换也是单位阵；此前投影记录与 bake 两侧一致地多乘了一次，跨面板边的标准管身判定点落在网格之外、与回读路算的边对不上，
+2026-09-17 修，钉 `a_canonical_implied_tube_has_the_same_mesh_to_world_on_the_projected_and_durable_paths`）。
 发布前按根收拢（`merge_root_edges`）成 `RootReceipt.room = CarriedRoomEdges { 代号, 构件集, 边 }` 随投影与 `model_artifact` 落盘；
 flush 的 `room_stage` 过三道闸（代号 == 此刻计算器代号、构件集 == 本根投影记录的构件集、计算器在）就只 `render_root_room_edges`，
 任一不过（刚体前移 / 单元级局部发布 / 旧产物 / 中途换代 / 嵌套根共享记录）照旧回读现算——两条路渲出的语句逐字相同，硬验收不多一种

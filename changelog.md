@@ -2,6 +2,20 @@
 
 ## 2026-09-17
 
+### 标准隐式管身的房间判定点不再多乘一次本地摆放（ADR-073 D1 追记 B 的一处修正）
+
+- **为什么**：`persisted_world_transform` 对隐式管身把标准图元的本地摆放折进存下的世界变换（Plant UI 只拿这一个变换摆标准网格），
+  而投影记录的 `ProjectedGeometry::mesh_to_world()` 与 bake 侧 `baked_room_input` 对 `Canonical` 一律再乘 `local_transform`——
+  标准管身就成了 `world × local × local`：跨面板边、真走点检查的那段管身，判定点落在画出来的网格之外；库上 `tubi_relate` 行回读
+  （实例变换单位阵，`durable_room_inputs`）算的是 `world × local`，整库重算 / 从零初始化与逐根路径对同一段管身可能不逐边相等
+  （ADR-010 §9 硬验收）。B/T6 收口时顺手看见、单列一笔。
+- **改动**：`room_model::projected_mesh_to_world(world, canonical_local, implied_tube)` 多一格——隐式管身不乘本地；
+  `ProjectedGeometry::mesh_to_world()` 传 `tube.is_some()`，`baked_room_input` 传 `matches!(geometry_id, ImpliedTube)`；测试助手
+  `calculate_with_component_bvh` 改调 `record.mesh_to_world()`（不再自己复述公式）。
+- **验证**：`bake_time_room_input_matches_the_projected_record` 加一句「三种形状本地摆放都只乘一次」；新钉
+  `model_record_reader::a_canonical_implied_tube_has_the_same_mesh_to_world_on_the_projected_and_durable_paths`（投影记录 vs
+  `projection_record_to_query` → `durable_room_inputs` 回读，标准图元元素与标准管身两例，f32 精度内相同）。
+
 ### 房间归属在 bake 时算、边随根回执走、flush 只渲染；一任务一台房间计算器（ADR-073 D1 / D12 追记 B，六笔）
 
 - **为什么**：ADR-073 D1「模型计算之后用候选面板做点包含筛选」此前落在 write-behind flush 里：每次 flush 冻一台计算器，

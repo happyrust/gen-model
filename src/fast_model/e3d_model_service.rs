@@ -2807,7 +2807,8 @@ fn bake_element(
 /// bake 时这件几何在房间判定眼里的形状——与它随后变成的投影记录**字段相同**（`project_geometry_delta`
 /// 的那一段）：构件 = `geometry_source_refno`（隐式管身挂容器）、标签 = 投影记录 id、世界变换 =
 /// `persisted_world_transform`（隐式管身把标准图元摆放折进去）、「网格 → 世界」= `room_model::projected_mesh_to_world`
-/// （标准图元再乘本地摆放）。两边只许有这一份配方，源码钉 `bake_time_room_input_matches_the_projected_record`。
+/// （标准图元再乘本地摆放；隐式管身**不再乘**——它的本地摆放已经在存下的世界变换里，与库上 `tubi_relate`
+/// 行读回的单位阵实例变换同义）。两边只许有这一份配方，源码钉 `bake_time_room_input_matches_the_projected_record`。
 fn baked_room_input(
     geometry_id: &GeometryId,
     primitive: Option<&e3d_model::primitive_instance::PrimitiveInstance>,
@@ -2825,6 +2826,7 @@ fn baked_room_input(
         mesh_to_world: crate::fast_model::room_model::projected_mesh_to_world(
             world_transform,
             primitive.map(|instance| instance.local_transform),
+            matches!(geometry_id, GeometryId::ImpliedTube { .. }),
         ),
     })
 }
@@ -4044,8 +4046,11 @@ mod tests {
 
     /// B/T2：bake 时房间判定看到的这件几何（`baked_room_input`）与它随后变成的投影记录（`project_geometry_delta`）
     /// 在 `RoomInput` 的五格上**逐字相同**——构件（隐式管身挂容器）、标签（投影记录 id）、世界盒、网格 id、
-    /// 「网格 → 世界」（隐式管身把标准图元摆放折进存下的世界变换，再乘一次本地摆放，与投影记录的
-    /// `mesh_to_world()` 同一条公式）。三种形状各一例：烘焙实体、带标准图元的元素、带标准图元的隐式管身。
+    /// 「网格 → 世界」（与投影记录的 `mesh_to_world()` 同一条公式）。三种形状各一例：烘焙实体、带标准图元的元素、
+    /// 带标准图元的隐式管身。而且那条公式对三种形状都是**本地摆放只乘一次**：烘焙实体 = 世界变换；标准图元元素
+    /// = 世界 × 本地；标准管身的本地摆放已由 `persisted_world_transform` 折进存下的世界变换，`mesh_to_world()`
+    /// 不再乘——此前两边一致地多乘了一次（`world × local × local`），判定点落在 Plant UI 画的网格之外，
+    /// 与库上 `tubi_relate` 行回读（实例变换单位阵）算出的边也对不上（2026-09-17 修）。
     #[test]
     fn bake_time_room_input_matches_the_projected_record() {
         use crate::fast_model::room_model::RoomInput;
@@ -4081,6 +4086,11 @@ mod tests {
 
         for element in [baked, canonical, tube] {
             let shape = format!("{:?}", element.geometry_id);
+            let placed_once = if element.primitive_instance.is_some() {
+                world * local
+            } else {
+                world
+            };
             let input = baked_room_input(
                 &element.geometry_id,
                 element.primitive_instance.as_ref(),
@@ -4101,6 +4111,11 @@ mod tests {
                 input.mesh_to_world().to_cols_array(),
                 record.mesh_to_world().to_cols_array(),
                 "「网格 → 世界」同一条公式: {shape}"
+            );
+            assert_eq!(
+                record.mesh_to_world().to_cols_array(),
+                placed_once.to_cols_array(),
+                "本地摆放只乘一次（标准管身的已折进存下的世界变换）: {shape}"
             );
         }
     }

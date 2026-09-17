@@ -198,6 +198,74 @@ mod tests {
         assert!(!tube.has_neg, "durable tubi_relate rows are never boolean rows");
     }
 
+    /// 房间判定的「网格 → 世界」在两条路上要对得上：投影记录直接算（逐根路径 / 整库重算对投影里的根）与
+    /// 库上行回读（`durable_room_inputs`，整库重算对不在投影里的根；这里用 `projection_record_to_query`
+    /// 折出与库行同形的查询行）。标准图元元素两边都是 `world × local`；**标准隐式管身**存下的世界变换已折进本地
+    /// 摆放、库行实例变换是单位阵，投影记录那一侧也**不许再乘**一次本地摆放——此前多乘了（2026-09-17 修）。
+    /// 库行经 f32 `Transform` 分解再合成，比到 f32 精度。
+    #[test]
+    fn a_canonical_implied_tube_has_the_same_mesh_to_world_on_the_projected_and_durable_paths() {
+        use crate::fast_model::room_model::{RoomInput, durable_room_inputs};
+        use e3d_model::primitive_instance::PrimitiveMeshKey;
+        let root = RefNo::new(24384, 26606);
+        let world = DMat4::from_scale_rotation_translation(
+            glam::DVec3::ONE,
+            glam::DQuat::from_rotation_z(0.7),
+            glam::DVec3::new(10.0, 20.0, 30.0),
+        );
+        let local = DMat4::from_scale(glam::DVec3::new(100.0, 100.0, 3000.0));
+        let canonical = |tube: Option<ProjectedTube>| {
+            let mut record = projected(
+                ProjectedShape::Canonical {
+                    key: PrimitiveMeshKey::CylinderV3 { segments: 32 },
+                    local_transform: local,
+                    local_bounds: [[0.0; 3], [1.0; 3]],
+                },
+                tube,
+            );
+            // 与 `e3d_model_service::persisted_world_transform` 同口径：隐式管身把本地摆放折进存下的世界变换。
+            record.world_transform = if record.tube.is_some() {
+                world * local
+            } else {
+                world
+            };
+            record
+        };
+        let close = |a: DMat4, b: DMat4, what: &str| {
+            for (x, y) in a.to_cols_array().iter().zip(b.to_cols_array()) {
+                assert!(
+                    (x - y).abs() <= 1e-3 * (1.0 + y.abs()),
+                    "{what}: {a:?} vs {b:?}"
+                );
+            }
+        };
+        let tube = Some(ProjectedTube {
+            route_ordinal: 0,
+            from: RefNo::new(24384, 1),
+            to: RefNo::new(24384, 2),
+            invalid: false,
+        });
+        for (record, what) in [
+            (canonical(None), "标准图元元素"),
+            (canonical(tube), "标准隐式管身"),
+        ] {
+            let projected_path = record.mesh_to_world();
+            close(
+                projected_path,
+                world * local,
+                &format!("{what}：本地摆放只乘一次"),
+            );
+            let rows = vec![super::projection_record_to_query(record, root)];
+            let durable = durable_room_inputs(&rows);
+            assert_eq!(durable.len(), 1, "{what}");
+            close(
+                durable[0].mesh_to_world(),
+                projected_path,
+                &format!("{what}：库行回读与投影记录同一个「网格 → 世界」"),
+            );
+        }
+    }
+
     #[tokio::test]
     async fn cold_read_includes_baked_canonical_and_tube_but_not_other_roots() {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
