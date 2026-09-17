@@ -2,6 +2,47 @@
 
 ## 2026-09-17
 
+### 房间归属的反向传播：面板变了拿新旧盒反查成员、只重算命中的根，整库重算降为兜底（ADR-073 D13 追记 D，五笔）
+
+- **为什么**：逐根路径（D1）只答「本根在哪些面板里」；面板那一侧变了（PANE 几何 / 属主、FRMW / SBFR 改名、CWALL / CFLOOR 搬迁），
+  它名下**别的根**的边陈旧，此前唯一的填法是 D13 整库重算——O(本库全部根) 的回读几何 + 点检查，而真正陈旧的只有与那块面板新旧盒
+  相交的几根。用户 2026-09-17 拍板（grill 两轮，五题全按推荐）：拆三类 / 按根 / 全局树 + 不可用退整库 / 先同库、目标跨库工作项 /
+  定向成功即盖 `Aligned`、③ 保留整库。拆单时多出一题 **Q6：隐式管身不在空间树上**（`projected_tree_entry` 对 `tube` 回 `None`，直管穿房
+  两端都不在房里是常态、只查树会漏）→ 按默认「库上 `tubi_relate` 范围查询」办，不动树的契约。
+- **改动（按提交）**：
+  1. `41d9e10b7` 面板变化结构化：`room_resident::PanelDelta { removed, renumbered, recalc: [(面板, 旧盒?, 新盒?)], geometry_changed }`，
+     `ResidentRooms::install()` 对着被换下的那一代与 `TopologyDiff` 同一次算——`recalc` = 拓扑差点到的 ∪ **两边都在册但 `world_aabb` /
+     实例集变了的**（PANE 只动几何时拓扑差是空的）；`PanelBounds` 按位 `Eq`；随 `InstallOutcome.panels` → `StartupInitOutcome.panels` →
+     `RoomReferenceRefresh::Rebuilt { panels, previous_generation }`（上一代的计算摘要，准入要对它）。
+  2. `94c02b346` 反查 `data_interface::room_reverse`：`affected_roots` 先 `ensure_spatial_ready()`（不过 → `TreeUnavailable`），树读锁只罩
+     取候选（`tree_element_hits`，剔 `PANE`、跨盒去重）；`resolve` 合三路——树上元素、投影里本库管身按盒扫、库上 `tubi_relate`
+     `aabb.d` 范围过滤（`durable_tube_hits`，闭区间逐轴谓词）——按 `RefNo::dbno()` 分库（跨库只数 `cross_library`）、树上不在投影里的
+     元素按记录 id 批量取 `anc`（`durable_ancestors`）、`fold_to_roots` 与本库 `DbSet@T` 根清单求交（嵌套根两根都算），折不出根的进
+     `unresolved`。不写树。
+  3. `d32fdc246` 处置：`recompute_dbnum_room_edges(…, library_roots, RootScope)`——`All` 与今天逐字同形；`Targeted { roots, panel_statements }`
+     投影里的按集合筛、回读清单 = 集合 ∖ 投影，`render_panel_delta_statements`（不在册：`DELETE {panel}->room_relate` + 清
+     `room_panel_relate` 入边，`room_model::render_unregistered_panel_statements`；只改号：`render_renumber_statements`）作
+     `pack_publication_transactions` 的 prelude 进第一笔；`RoomEdgeRecompute.panel_statements`。
+  4. `fa97f8758` 分派与盖章：`room_recompute::durable_alignment`（库上那一格 + 常驻代号，一次读；③ 与准入共用）、
+     `RoomRecomputeRequest { reason, scope: WholeLibrary | Targeted(PanelDelta) }`、`scope_for_task` 四条准入（真换了代 + 面板变化非空 +
+     说得出上一代 + 库上正是上一代）；收尾段 `run_room_recompute` 分派——定向 `run_targeted_room_recompute`（根清单 → 反查 → 定向重算），
+     `TreeUnavailable` / `unresolved` 非空 / 根清单枚举不出来 / 覆盖面对不上 → `None` 退 `run_room_only_recompute`；成功
+     `RoomRecomputeVerdict::Targeted(重算那台计算器的代号)` → `LibraryRoomClaim::Recomputed` → `Aligned`；算不出的根两路同走
+     `settle_room_recompute_failures`。`DataBatchTaskResult.room_recompute` 改带 `RoomRecomputeRequest`；`PersistTarget::db()` 访问器。
+  5. 本笔：ADR-073 D13 追记 D、钉 17 更名 / 钉 22、§未决 U1 库内部分关 / U3 记 a 档；CONTEXT「整库房间重算」词条；changelog。
+- **不动的**：③ 电平型触发（重启后 / 从没盖过那一格只整库一次）；`run_room_only_recompute` 一字不改；D1 钉「元素分支不依赖空间树」
+  只钉正向；树的写点白名单三处不变。**代价**：一窗内两个库都有任务时只有先开工的库走定向（库上代号是上一代），后开工的库
+  `Unchanged` 却欠着 → 整库——U3 b 档才收。
+- **验证**：每笔定向 `cargo test --lib` 绿（D1 room_resident 40 / D2 room_reverse 4 / D3 adapter+room 135 / D4 room_recompute+batch_worker 62）；
+  新钉：`install_reports_which_panels_moved_and_where_their_boxes_are`、`hits_fold_to_every_library_root_on_their_ancestor_chain`、
+  `tree_candidates_exclude_panels_and_deduplicate_across_boxes`、`mem://` `resolve_joins_tree_projection_and_durable_tubes_into_library_roots`、
+  `the_box_predicate_is_a_closed_interval_test_per_axis`、`panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only`、
+  `mem://` `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_first`、
+  `a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt`、
+  `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer`。全量 `cargo test --lib`
+  **2257 passed / 5 failed / 118 ignored**——五条红与 B/T6 收口时同一批（`model_impact` ×2、`window_root_plan` ×2、`review::platform` ×1，
+  都不在本轮碰过的文件里）。**未 live**：ams 1112 挪一块 PANE 的那一窗（见 ADR-073 钉 22 的 live 待补）。
+
 ### 标准隐式管身的房间判定点不再多乘一次本地摆放（ADR-073 D1 追记 B 的一处修正）
 
 - **为什么**：`persisted_world_transform` 对隐式管身把标准图元的本地摆放折进存下的世界变换（Plant UI 只拿这一个变换摆标准网格），

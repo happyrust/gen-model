@@ -159,6 +159,29 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   代价：O(本库根数) 次按 `anc` / `in` 索引的库读（每根两条 SELECT），只在真触发时付。仍是内部意图：不入队、没有 HTTP 口（§不做）。
   **没收的一半**：跨库成员（面板在 A、成员在 B）只在 A 变了之后**第一个开工**的库上被 ② 带到，其余库要等自己下一次碰到触发
   （③ 把这一条也接住了：A 变了 → 常驻换代 → 每个库下一个任务都欠）——U3 的跨库那一问仍开着。
+  **2026-09-17 追记（D，反向传播）：整库降为兜底，常路是「面板变了 → 拿它的新旧盒问谁在里面 → 只重算命中的根」。** 用户拍板
+  （grill 两轮，五题全按推荐）：拆三类 / 按根 / 全局树 + 不可用退整库 / 先同库 / 定向成功即盖 `Aligned`。落法：
+  ① **面板变化结构化**——`ResidentRooms::install()` 对着被换下的那一代算 `PanelDelta { removed, renumbered, recalc }`（两代同时在手的
+  唯一时刻）：前两格来自 `TopologyDiff`，`recalc` = 拓扑差点到的 ∪ **两边都在册但几何变了的**（`ResidentPanel.world_aabb` /
+  实例集按位比——PANE 只动几何时拓扑差是空的，而它名下别的根正是这时候陈旧），每块带旧盒 / 新盒（旧盒管「离开的」、新盒管
+  「进来的」）；随 `RoomReferenceRefresh::Rebuilt { panels, previous_generation }` 交给执行体。② **准入**（`room_recompute::scope_for_task`，
+  纯函数）：本任务真换了代 + 带着非空面板变化 + 说得出上一代 + 库上 D14 那一格**正是上一代**——库上的边全部对齐到上一代、中间没欠
+  别的，那么上一代 → 这一代之间面板动了什么就是欠账的全部，定向；缺任一条（库上更早 / 从没盖过、`Unchanged` 却欠着——重启后 /
+  别的库先换的代、面板变化为空、第一代、重建失败）整库。③ **反查**（`data_interface::room_reverse`）：命中源三路——全局空间树
+  `GLOBAL_AABB_TREE::locate_intersecting_bounds`（真实元素、全库；消费者门 `ensure_spatial_ready`，不就绪退整库）、投影里本库的隐式
+  管身记录按盒扫、库上 `tubi_relate` 的 `aabb.d` 范围过滤（**管身不进树**——`projected_tree_entry` 对 `tube.is_some()` 回 `None`，
+  只查树会漏直管穿房的 BRAN，这是拆单时多出来的 Q6，按默认「库上范围查询」办；慢了再给 `tubi_relate` 补 `aabb_d` 平副本）；
+  `noun == PANE` 剔掉；元素 → 根 = `anc` ∪ 自身 ∩ 本库 `DbSet@T` 根清单（嵌套根两根都算，多算一根是幂等重写）；折不出根的元素
+  如实进 `unresolved` → 反查不完整 → 退整库；跨库命中只数不算（U3 a 档，b 档「给别的库排根级工作项」等数据再定）。
+  ④ **处置**：`removed` 清它全部出边（`{panel}->room_relate`）与 `room_panel_relate` 入边、`renumbered` 改列
+  （`render_renumber_statements`）——不查空间、不算几何，渲成 prelude 进第一笔事务（删在第一笔）；`recalc` 命中的根经
+  `recompute_dbnum_room_edges(…, RootScope::Targeted { roots, panel_statements })`：投影里的按集合筛、其余回读库，其余一字不改
+  （同一个判定入口、同一套渲染、同一种装块）。⑤ **盖章**：命中根全算齐 = `RoomRecomputeVerdict::Targeted(重算那台计算器的代号)`
+  → `LibraryRoomClaim::Recomputed` → D14 那一格盖 `Aligned`（不盖的话下一个任务 ③ 看到库上 ≠ 常驻照样整库扫、定向白做）；任一根
+  算不出 / 反查读库失败 / 写库失败 = `Failed`，不盖、③ 再武装、下一个任务整库；树不就绪 / 根清单枚举不出来 / 有折不出根的 / 覆盖面
+  对不上 = 退整库（多算不是漏算）。**不变的**：③ 电平型触发原样（重启后 / 从没盖过那一格只整库一次，盖上就安静）；整库那一路
+  `run_room_only_recompute` 一字不改，是兜底；D1 钉「元素分支不依赖空间树」照旧只钉正向，反查是另一个入口。**代价**：一窗内两个
+  库都有任务时，只有先开工的那个库走定向（它的库上代号是上一代），后开工的库看到库上 ≠ 常驻 且 `Unchanged` → 整库——U3 b 档才收。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -227,10 +250,10 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     经同一句交出（`Some(&room_reference)` 两条触发都带；`reconcile_startup_window` 与稳态窗口共用同一条规划入口，`RoomOnly` 工作项
     随 `side_actions` 进来——此前这里硬编码 `room_recompute: None`，停机期间的 PANE 改动经启动追平进来就被静默吃掉，2026-09-17 审核补上；
     整库重排（`whole_library_model_only`，起点 0）例外：每一根都刚用对齐后的计算器算过、承诺已由那一句盖上，不再空转一遍；
-    规划失败的早退仍 `None`）；两个执行体里触发 ③ 的读数 `room_recompute::durable_alignment_owed(job.dbnum)` 落在
-    `refresh_room_reference_before_task(job.dbnum)` **之后**、`request_for_task(` 之前，并以 `alignment_owed.as_deref()` 真的传进去
-    （对齐之前读到的常驻代号是上一代，比对会白点一次或漏点一次；2026-09-17）；`execute_frozen_batch`
-    的 DESI 收尾段里 `run_room_only_recompute(job, &reason, &mut result, file_latest_sesno)` 在 `await_units_durable(` 之后、
+    规划失败的早退仍 `None`）；两个执行体里触发 ③ 与定向准入共用的读数 `room_recompute::durable_alignment(job.dbnum)`（库上那一格 +
+    此刻常驻代号，一次读）落在 `refresh_room_reference_before_task(job.dbnum)` **之后**、`request_for_task(` 之前，并以
+    `alignment.as_ref(),` 真的传进去（对齐之前读到的常驻代号是上一代，比对会白点一次或漏点一次；2026-09-17）；`execute_frozen_batch`
+    的 DESI 收尾段里 `run_room_recompute(job, &request, &mut result, file_latest_sesno)`（定向 / 整库的分派，D 追记）在 `await_units_durable(` 之后、
     `model_outcome_of(&flush` 之前、`flush.all_acked()` 门内，算不齐 `outcome.all_roots_ok = false`，收尾分开问两句
     `RoomRecomputeVerdict::rooms_ok`（水位）与 `::speaks_for_library`（D14 那一格）；`run_room_only_recompute` 函数体里
     `library_generation_roots(dbnum, target_sesno)` 落在 `recompute_dbnum_room_edges(` **之前**并以 `expected.as_deref()` 真的传进去
@@ -300,6 +323,35 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     - D2 前移：`produce_slices` 非 `Required` 的 `Err` 臂只 `slice.failures.push`、不 `slice.push`
       （钉 `a_root_whose_rooms_cannot_be_computed_is_a_dead_letter_and_never_published`）。
     live 待补：ams 1112 一个增量窗 `[model-write-behind] … room_carried=N room_recomputed=0`，硬验收「增量收敛后两张边 == 从零初始化」照跑。
+22. D13 追记（D，反向传播，2026-09-17）：
+    - 面板变化：`ResidentRooms::install()` 里 `PanelDelta::between(old, &model, &diff)` 对着被换下的那一代算、与 `TopologyDiff` 同一次
+      （生产代码里 `TopologyDiff::between(` 仍恰两处，钉 P3-7 扩）；两个启动装载器把 `InstallOutcome { model, diff, panels }` 接进
+      `StartupInitOutcome`，`refresh_before_task` 把 `outcome.panels` 装进 `Rebuilt { panels, previous_generation }`（钉
+      `install_reports_which_panels_moved_and_where_their_boxes_are`：只动几何 → 拓扑差空、`recalc` 带新旧盒、原样的面板不进；
+      旧代没几何新代有了 → 只有新盒；改号 / 移出在册 → 不反查、`removed` 不带盒）。
+    - 准入：`scope_for_task` 四条同时成立才 `Targeted`（钉 `a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt` 八种
+      整库局面的真值表；三条触发同时点亮仍定向）。
+    - 反查：`room_reverse::affected_roots` 先 `ensure_spatial_ready()`（不过 → `TreeUnavailable`），树读锁只罩取候选；
+      `tree_element_hits` 剔 `PANE`、跨盒去重；`resolve` 合三路命中、按 `RefNo::dbno()` 分库只数、`durable_ancestors` 按记录 id 批量取
+      `anc`、`fold_to_roots` 交根清单（钉 `hits_fold_to_every_library_root_on_their_ancestor_chain`、
+      `tree_candidates_exclude_panels_and_deduplicate_across_boxes`、`mem://`
+      `resolve_joins_tree_projection_and_durable_tubes_into_library_roots`——投影管身 + 库上管身 + 树上不在投影里的元素回库取 `anc`
+      折成四根，别的库按 dbnum 在库里就筛掉，折不出根的进 `unresolved`；`the_box_predicate_is_a_closed_interval_test_per_axis`）。
+      本模块不写树（写点白名单钉照旧只认三处）。
+    - 处置：`recompute_dbnum_room_edges(…, library_roots, RootScope)`——`All` 与今天逐字同形（钉 18 全部照旧）；`Targeted { roots,
+      panel_statements }` 投影里的按集合筛、回读清单 = 集合 ∖ 投影、`panel_statements` 作 `pack_publication_transactions` 的 prelude
+      （钉 `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_first`——`mem://`：A、B 同在 R1，面板搬家
+      只点名 A → A 的边删、ACK 换代，B 的边与 ACK 一字不动，不在册的 777 的出边与 `room_panel_relate` 入边随第一笔清掉；再点名 B →
+      与整库同一终态；`panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only`）。
+    - 分派与盖章：`run_room_recompute` 对 `Targeted(delta)` 先 `run_targeted_room_recompute`，其中 `library_generation_roots(` →
+      `affected_roots(target.db(), store, dbnum, delta, &library_roots)` → `recompute_dbnum_room_edges(` 顺序固定，`TreeUnavailable` /
+      `unresolved` 非空在重算之前 `return None` 退 `run_room_only_recompute`；成功 `Some(RoomRecomputeVerdict::Targeted(generation))`，
+      `library_generation()` 对 `WholeLibrary | Targeted` 同样回代号；算不出的根两路同走 `settle_room_recompute_failures`（钉
+      `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer`、
+      `a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment` 加 `Targeted` 一行）。
+    live 待补：ams 1112 挪一块 PANE → 该窗任务日志「定向房间重算完成 … 反查 roots=N tree_hits=… tube_hits=… cross_library=…」、只有命中的根
+    重写了边、`/dbnums` 的 `room_alignment.current == true`；下一窗不再整库；改一块 PANE 的 DESC → 面板变化为空、由 ① 走整库
+    （只改元数据多算一次，D13 ① 早已接受的代价）。
 
 ## 背景
 
@@ -520,7 +572,9 @@ ADR-011 §8 / §10；ADR-048 D3；ADR-041 §5 与「不做」；CONTEXT.md 词�
   的覆盖面说实了**：D13 只够得着投影里的根，生产落盘形态下初始化过的根不在投影里（ADR-077 D5）。**第二半 2026-09-17 拍板收掉**：
   整库重算对不在投影里的根**回读库上几何**（`model_record_reader::durable_records_of_root` 读 `inst_relate` / `tubi_relate`，
   折成 `room_model::durable_room_inputs`，走同一个 `calculate_for_root` / `render_root_room_edges`），靶子是 `DbSet@T` 的根清单，
-  落盘形态下也说得了「整库」、盖得上 D14 那一格；不选 ④「接受滞后到整库重建」。下面是拍板前的原文。）FRMW/SBFR 改名（房间号 / 进出 `room_key_word`）、PANE 换属主、`project_hd` 下 CWALL/CFLOOR 换属主
+  落盘形态下也说得了「整库」、盖得上 D14 那一格；不选 ④「接受滞后到整库重建」。**2026-09-17 晚 D 追记：库内那一半从「整库」收成
+  「反向传播」**——面板新旧盒查全局树 + 管身范围查询 → 只重算命中的根，整库退成兜底（见 D13 追记 D）。U1 的库内部分至此**关**；
+  跨库那一半仍归 U3——反查已把跨库命中数进了回执，b 档「给别的库排根级工作项」等数据再定。下面是拍板前的原文。）FRMW/SBFR 改名（房间号 / 进出 `room_key_word`）、PANE 换属主、`project_hd` 下 CWALL/CFLOOR 换属主
   三种变化都**不改任何几何**：逐根路径只算「本根在哪些面板里」，面板变了、它名下成员（别的根）的边与 `room_num` 不会被碰到——这是
   逐根路径的天然盲区，而原来填它的结构触发（ADR-010 D12 / ADR-040 D4）已退。已见到的候选形态（只列不选）：① 面板所在根重生成时连带
   重算该面板现有成员（要反查「谁在这块面板里」，读源是内存还是库要过 ADR-072 D5 白名单）；② 结构变化时对该库排一次全库 `ModelOnly`
@@ -533,7 +587,8 @@ ADR-011 §8 / §10；ADR-048 D3；ADR-041 §5 与「不做」；CONTEXT.md 词�
 - **U3　ADR-067 D2「在册面板几何驻留内存」作为算法输入形态留不留。** 逐根筛选需要一份候选面板集（世界 AABB + 网格），来源可以是
   ADR-067 D2 那种驻留的面板索引（去掉换代 / 参照 / 生命周期，只剩「生成 PANE 时就地替换它的几何」）、也可以是 `ModelMemoryStore`
   按 `noun == PANE` 现取、或空间树按 noun 过滤（ADR-010 §6 的形状）。三者的差别在冷启动（PANE 尚未生成时构件先生成怎么办）与跨库
-  （面板在 A 库、成员在 B 库）两处，本文不选。
+  （面板在 A 库、成员在 B 库）两处，本文不选。（2026-09-17 D 追记：跨库那一问现在有数据口——反查回执的 `cross_library` 数的是命中却
+  不属本库的元素；a 档只数不算，b 档「给命中的别的库排根级工作项、由那个库的下一个任务消费」等真库上看见这个数再定。）
 - **U4　「全量重建房间」入口还存不存在。** `AIOS_ROOM_FULL_REBUILD` / `build_room_relations` / ADR-067 D5 六条显式入口 / ADR-048 D3
   「不覆盖启动全量房间重建」——按 D1 它们都没有宿主。若不再有任何全量入口，ADR-010 §9 硬验收的对照物就只能是「同一份数据从零初始化的结果」
   （实施约束 8 暂按此），且「房间算错了想整库重算一次」的运维动作 = 该库整库 Reinitialize；若保留一个只重算房间边的入口，它就是 D1 说的内部
