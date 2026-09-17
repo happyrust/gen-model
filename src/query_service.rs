@@ -1097,7 +1097,8 @@ mod tests {
     }
 
     /// 预览的 `action` 与规划器的元数据门同口径（S6 两票）：`NAME` 与新档 `HREF`（手写表登记成级联、
-    /// 字典 DCHC=0 且生成器不读）都是 skip；字典没投票的 `CACHID` 与读取集合里的 `DIR` 是 regen。
+    /// 字典 DCHC=0 且生成器不读）都是 skip；戳 `CACHID` 2026-09-17 Q6 起第一票由戳表给，也是 skip；
+    /// 读取集合里的 `DIR` 照旧 regen。
     #[tokio::test]
     async fn the_impact_preview_skips_exactly_what_the_metadata_gate_admits() {
         async fn action(attribute: &str) -> (String, String, bool) {
@@ -1121,7 +1122,7 @@ mod tests {
         );
         assert_eq!(
             action("CACHID").await,
-            ("regen".into(), "data_only".into(), true)
+            ("skip".into(), "data_only".into(), false)
         );
         assert_eq!(
             action("DIR").await,

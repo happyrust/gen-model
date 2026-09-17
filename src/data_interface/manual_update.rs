@@ -5653,23 +5653,26 @@ mod metadata_gate_caliber_tests {
     }
 
     /// 门开着：放行的只有拿到两票（字典 DCHC=0 ∧ 生成器不读）的名字，与 `change_metadata_tier` 逐名相同——
-    /// 老五个与 S6 新档（`DUTY`；手写表登记在级联侧的 `HREF` 也一样）都不影响模型。字典没投票的 `CACHID`、
-    /// 读取集合里的 `DIR` 规划器照旧整根重算，预览也得这么说。
+    /// 老五个与 S6 新档（`DUTY`；手写表登记在级联侧的 `HREF` 也一样）都不影响模型。戳 `CACHID` 字典按构造
+    /// 收不到，2026-09-17 Q6 起第一票由戳表给，单独跳、跟着老名单跳都放行；读取集合里的 `DIR` 规划器照旧
+    /// 整根重算，预览也得这么说。
     #[test]
     fn with_the_gate_on_only_the_double_voted_names_are_not_model_affecting() {
-        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "HREF"] {
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "HREF", "CACHID"] {
             assert!(!affecting(&[name], true), "{name}");
         }
-        for name in ["CACHID", "DIR", "UDA:42"] {
+        for name in ["DIR", "UDA:42"] {
             assert!(affecting(&[name], true), "{name}");
         }
         assert!(!affecting(&["NAME", "DESC"], true));
         assert!(!affecting(&["NAME", "DUTY"], true));
-        assert!(affecting(&["NAME", "CACHID"], true));
+        assert!(!affecting(&["NAME", "CACHID"], true));
         assert!(affecting(&["NAME", "DIR"], true));
+        assert!(affecting(&["CACHID", "DIR"], true));
         assert!(affecting(&["NAME", "DIAM"], true));
-        // 位姿仍算影响模型：direct 上没有便宜路径，POS 变了那个根照样重算。
+        // 位姿仍算影响模型：direct 上没有便宜路径，POS 变了那个根照样重算；戳跟着位姿一起变也一样。
         assert!(affecting(&["POS"], true));
+        assert!(affecting(&["POS", "CACHID"], true));
     }
 
     /// 第二档没有自己的开关（S6 定稿，2026-09-17 退役了 `model_skip_unread_attribute_changes`）：
@@ -5741,10 +5744,12 @@ mod metadata_gate_caliber_tests {
         assert_eq!(verdicts(&["NAME"], true), (false, false));
         assert_eq!(verdicts(&["NAME", "DESC"], true), (false, false));
         assert_eq!(verdicts(&["NAME", "FUNC"], true), (false, false));
-        // 字典没投票的、以及混进一个几何属性的，两边都说「要生成」。
-        assert_eq!(verdicts(&["CACHID"], true), (true, true));
-        assert_eq!(verdicts(&["NAME", "CACHID"], true), (true, true));
+        // 戳（Q6，2026-09-17）第一票由戳表给：单独跳记第三档，跟着老名单跳记老档，两边都说「不生成」。
+        assert_eq!(verdicts(&["CACHID"], true), (false, false));
+        assert_eq!(verdicts(&["NAME", "CACHID"], true), (false, false));
+        // 混进一个几何属性、或混进读取集合里的名字，两边都说「要生成」。
         assert_eq!(verdicts(&["NAME", "DIAM"], true), (true, true));
+        assert_eq!(verdicts(&["CACHID", "DIR"], true), (true, true));
         // 门关上：规划器整根重算，两句话一起翻面。
         assert_eq!(verdicts(&["NAME"], false), (true, true));
         // 第二档也是整条链一句话，而且它没有自己的开关：`SUPP` 两边一起说「不生成」。
