@@ -2,6 +2,24 @@
 
 ## 2026-09-17
 
+### ADR-080 A5 补测试：`Partial` 之后 `persist_root` 过 D3 对账，七张表回读与 regen 路逐字相同、只有 `model_sesno` 落后
+
+- **为什么**：A5 是 D9 开门前唯一一条**没有任何测试也没有证据**的验收——`batch_worker.rs` 一句注释说「D3 把对账放宽成 `<=` 接的就是这个形状」，
+  但没人真让一笔 `Partial` 走过 `persist_root_impl`。`a_record_may_lag_its_root_receipt_but_never_lead_it` 钉的是对账两端（手填一条 41 的记录），
+  不是「单元路投出来的投影落库后与 regen 路落的是同一批行」。用户 0917 拍：补一条。
+- **测试**（`model_db_adapter::tests::a_partial_commit_persists_the_same_rows_as_a_regen_commit_and_only_model_sesno_lags`）：两条路各一个 `mem://`
+  库，同一份 S=42 基线（烘焙件 `24383_73948` + 共享图元件 `24383_500` + 一段管身）先落一次；T=43 只有烘焙件换了网格——regen 路整根重投三件全盖 43
+  （带 `tube_branch_resets`），unit 路只以 `CommitScope::Partial` 投那一件、回执两格占位（存储在写锁里盖成 `geometry_count 3` / `source_sesno 43` /
+  `published_via "unit"`，D5 顺手核）。两边再 `persist_root_on` 一次：unit 路**放行**（D3 放宽之前必撞「outside its receipt scope」）；
+  `upserted == 3`（D7：`Partial` 之后落盘仍按整根刷）、`removed == 0`、`commits == 1`；`inst_relate` / `inst_info` / `geo_relate` / `inst_geo` /
+  `aabb` / `trans` / `tubi_relate` 七张表 `SELECT * … ORDER BY id` 取成 SurrealDB 值、剥掉 `model_sesno` 之后逐行逐字相同；`model_sesno` 单独核——
+  regen 路三处表全 43，unit 路只有换了网格那件的 `inst_relate` 是 43、另三行停在 42（一件前移、三行落后，数字钉死）。
+- **mutation**：把 `persist_root_impl` 的 `<=` 改回 `==`，测试红在 `unit 路 T 端落库被拦：root 24383/1 projection contains records outside its receipt scope`，
+  改回后绿。
+- **口径**：A5 的「逐字相同」是**除 `model_sesno` 之外**——那一列就是 D3 放宽的地方，让它落后是设计不是差异；ADR-080 验收表 A5 行按此改 ✅。
+- **验证**：`cargo test --lib -- model_db_adapter::` **66 过 0 败 1 ignored**；整套 `cargo test --lib` **2223 过 0 败 118 ignored**（+1）；
+  `rustfmt --check` 本文件新增段干净（剩 1352 / 6311 两处是 HEAD 上就有的）；`model_db_adapter.rs` LF 未变。
+
 ### ADR-080「后果」段文档收口：ADR-056 N3 改写 + D3 指向 ADR-080、`model_refresh.rs` 过期注释改口、CONTEXT 补「单元级发布 / 局部清单」
 
 - **为什么**：0917 对 ADR-080 做了一遍「是否已实现」审核——D1–D10 机制全部落地且有测试钉住（HEAD `7298ddba6` `cargo test --lib`

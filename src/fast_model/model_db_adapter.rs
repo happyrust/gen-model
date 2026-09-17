@@ -2810,7 +2810,7 @@ mod tests {
     use e3d_model::primitive_instance::PrimitiveMeshKey;
     use glam::DMat4;
 
-    use crate::fast_model::model_memory_store::{ProjectedTube, ProjectionCommit};
+    use crate::fast_model::model_memory_store::{CommitScope, ProjectedTube, ProjectionCommit};
 
     const BRANCH: RefNo = RefNo::new(24383, 73948);
     /// 夹具根 `24383/*` 按 word0 解出的库号（`RefNo::dbno`）；记录上写的 `dbnum: 7997` 是
@@ -4099,6 +4099,214 @@ mod tests {
             "拦是拦下了，但理由不对：{error}"
         );
         assert_eq!(count(&db, "inst_relate").await, 2, "被拦下的那轮不得改库");
+    }
+
+    /// ADR-080 A5：`Partial` 之后整根落盘（D7）过得了 D3 那道对账，库里的几何行与 regen 路逐字相同。
+    ///
+    /// 两条路从同一份 S=42 基线出发（烘焙件 + 共享图元件 + 一段管身，各自先落一次库），T=43 只有
+    /// 烘焙件换了网格：regen 路整根重投三件、全部盖 43；unit 路只以 `Partial` 投那一件，另两件停在 42，
+    /// 回执由存储在写锁里盖到 43（D5）。两边各再 `persist_root` 一次——unit 路**不得**报「outside its
+    /// receipt scope」（D3 放宽成 `<=` 之前它必撞这条）；七张表按 id 回读，除 `model_sesno` 之外
+    /// **逐字相同**。`model_sesno` 那一列正是 D3 放宽的地方，单独核：regen 路三件都是 43，unit 路只有
+    /// 换了网格的那件是 43、另两件停在 42。D7 的账顺手钉住：`Partial` 之后落盘仍写整根三条
+    /// （`upserted == 3`），不是只写变了的那一件。
+    #[tokio::test]
+    async fn a_partial_commit_persists_the_same_rows_as_a_regen_commit_and_only_model_sesno_lags() {
+        const TABLES: [&str; 7] = [
+            "inst_relate",
+            "inst_info",
+            "geo_relate",
+            "inst_geo",
+            "aabb",
+            "trans",
+            "tubi_relate",
+        ];
+        const SESNO_TABLES: [&str; 3] = ["inst_relate", "inst_info", "tubi_relate"];
+        let root = RefNo::new(24383, 1);
+        let baseline = || {
+            vec![
+                baked_record(),
+                other_canonical_record(),
+                tube_record(0, TUBE_A),
+            ]
+        };
+        let rebaked = ProjectedGeometry {
+            source_sesno: 43,
+            mesh_id: "e3d_baked_v2_cafef00d".into(),
+            world_bounds: [[0.0, 0.0, 0.0], [1.5, 2.5, 3.5]],
+            ..baked_record()
+        };
+        let receipt_at = |source_sesno: u32, geometry_count: usize, via: &str| RootReceipt {
+            source_sesno,
+            model_target: None,
+            manifest_hash: format!("test-{geometry_count}"),
+            geometry_count,
+            published_via: via.into(),
+        };
+
+        async fn rows_without_model_sesno(db: &Surreal<Any>, table: &str) -> Vec<SurValue> {
+            let dumped = db
+                .query(format!("SELECT * FROM {table} ORDER BY id;"))
+                .await
+                .expect("dump")
+                .check()
+                .expect("dump statement")
+                .take::<surrealdb::Value>(0)
+                .expect("dump rows")
+                .into_inner();
+            let SurValue::Array(rows) = dumped else {
+                panic!("{table} 的查询结果不是数组");
+            };
+            rows.0
+                .into_iter()
+                .map(|mut row| {
+                    if let SurValue::Object(object) = &mut row {
+                        object.remove("model_sesno");
+                    }
+                    row
+                })
+                .collect()
+        }
+        async fn model_sesno_by_id(db: &Surreal<Any>, table: &str) -> Vec<(String, i64)> {
+            let rows: Vec<serde_json::Value> = db
+                .query(format!(
+                    "SELECT <string>id AS id, model_sesno FROM {table} ORDER BY id;"
+                ))
+                .await
+                .expect("model_sesno")
+                .check()
+                .expect("model_sesno statement")
+                .take(0)
+                .expect("model_sesno rows");
+            rows.iter()
+                .map(|row| {
+                    (
+                        row["id"].as_str().expect("id").to_owned(),
+                        row["model_sesno"].as_i64().expect("model_sesno"),
+                    )
+                })
+                .collect()
+        }
+
+        let mut dumps = Vec::new();
+        let mut sesnos = Vec::new();
+        for unit in [false, true] {
+            let path = if unit { "unit" } else { "regen" };
+            let db = surreal_mem().await;
+            seed_pe(&db).await;
+            let target = PersistTarget::new(&db, PersistMedium::Mem);
+            let store = ModelMemoryStore::default();
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: baseline(),
+                    receipt: Some((root, receipt_at(42, 3, "regen"))),
+                    ..ProjectionCommit::default()
+                }],
+            );
+            persist_root_on(target, &store, root)
+                .await
+                .expect("S 端基线整根落库");
+
+            if unit {
+                // 只投换了网格的那一件；回执两格是占位，存储在写锁里按整根重算（D5）。
+                let stamped = store.commit(
+                    ProjectionScope::Current,
+                    vec![ProjectionCommit {
+                        scope: CommitScope::Partial,
+                        upserts: vec![rebaked.clone()],
+                        receipt: Some((root, receipt_at(43, 0, "unit"))),
+                        ..ProjectionCommit::default()
+                    }],
+                );
+                assert_eq!(stamped.len(), 1);
+                assert_eq!(stamped[0].1.source_sesno, 43);
+                assert_eq!(stamped[0].1.geometry_count, 3, "局部回执由存储按整根盖章");
+                assert_eq!(stamped[0].1.published_via, "unit");
+            } else {
+                store.commit(
+                    ProjectionScope::Current,
+                    vec![ProjectionCommit {
+                        tube_branch_resets: vec![BRANCH],
+                        upserts: baseline()
+                            .into_iter()
+                            .map(|record| {
+                                if record.record_id == rebaked.record_id {
+                                    rebaked.clone()
+                                } else {
+                                    ProjectedGeometry {
+                                        source_sesno: 43,
+                                        ..record
+                                    }
+                                }
+                            })
+                            .collect(),
+                        receipt: Some((root, receipt_at(43, 3, "regen"))),
+                        ..ProjectionCommit::default()
+                    }],
+                );
+            }
+
+            let rows = persist_root_on(target, &store, root)
+                .await
+                .unwrap_or_else(|error| panic!("{path} 路 T 端落库被拦：{error}"));
+            assert_eq!(rows.upserted, 3, "{path} 路：D7 第一版仍按整根刷，三条都写");
+            assert_eq!(rows.removed, 0, "{path} 路：没有来源掉了几何");
+            assert_eq!(rows.commits, 1, "{path} 路：一根一笔事务");
+            assert_eq!(count(&db, "inst_relate").await, 2);
+            assert_eq!(count(&db, "tubi_relate").await, 1);
+
+            let mut tables = Vec::new();
+            for table in TABLES {
+                tables.push((table, rows_without_model_sesno(&db, table).await));
+            }
+            dumps.push(tables);
+            let mut by_table = Vec::new();
+            for table in SESNO_TABLES {
+                by_table.push((table, model_sesno_by_id(&db, table).await));
+            }
+            sesnos.push(by_table);
+        }
+
+        for ((table, regen), (_, unit)) in dumps[0].iter().zip(&dumps[1]) {
+            assert!(!regen.is_empty(), "{table} 一行都没落下去");
+            assert_eq!(regen.len(), unit.len(), "{table} 行数不一致");
+            for (index, (regen, unit)) in regen.iter().zip(unit).enumerate() {
+                assert_eq!(
+                    regen, unit,
+                    "{table} 第 {index} 行：`Partial` 之后落下去的与 regen 路不是同一行"
+                );
+            }
+        }
+
+        for (table, rows) in &sesnos[0] {
+            assert!(!rows.is_empty(), "{table} 没有带 model_sesno 的行");
+            for (id, sesno) in rows {
+                assert_eq!(*sesno, 43, "regen 路整根重投，{table} {id} 该盖 43");
+            }
+        }
+        let mut lagging = 0;
+        let mut advanced = 0;
+        for (table, rows) in &sesnos[1] {
+            for (id, sesno) in rows {
+                let is_rebaked = *table == "inst_relate" && id.contains("24383_73948");
+                if is_rebaked {
+                    assert_eq!(*sesno, 43, "unit 路换了网格的那件要盖 43：{table} {id}");
+                    advanced += 1;
+                } else {
+                    assert_eq!(
+                        *sesno, 42,
+                        "unit 路没动的记录停在上一次真正生成它的会话上（D3）：{table} {id}"
+                    );
+                    lagging += 1;
+                }
+            }
+        }
+        assert_eq!(
+            (advanced, lagging),
+            (1, 3),
+            "一件前移、三行（两件 + 一段管身）停在 42"
+        );
     }
 
     /// 一根一笔事务：三条记录（一件几何 + 同一分支的两段管身）与回执一起进同一笔，
