@@ -660,11 +660,11 @@ pub struct DataBatchTaskResult {
     /// 执行体的收尾段（Ref0 统计、模型水位、写入标记兜底）跳过。不进回执。
     #[serde(skip)]
     pub initialization_closed_task: bool,
-    /// 本任务要在本批根刷盘之后、收尾之前用现有几何重算本库全部根的房间边（`RoomOnly`，
-    /// d-819 / ADR-073 D13）：`Some(原因)`——本窗变更集碰到房间定义族 / 开工前对齐换了房间代号。
-    /// 执行体内部的接力，不进回执（收尾那一段的结果进 `warnings` / `units`）。
+    /// 本任务要在本批根刷盘之后、收尾之前用现有几何重算房间边（`RoomOnly`，d-819 / ADR-073 D13）：
+    /// 为什么（本窗变更集碰到房间定义族 / 开工前对齐换了房间代号 / 库上欠着）与算多大（整库，或反向传播
+    /// 定向到命中的根）。执行体内部的接力，不进回执（收尾那一段的结果进 `warnings` / `units`）。
     #[serde(skip)]
-    pub room_recompute: Option<String>,
+    pub room_recompute: Option<crate::data_interface::room_recompute::RoomRecomputeRequest>,
     /// 模型半边开工前对齐（ADR-073 D12）**之后**记下的常驻房间代号——整库重排的 ModelOnly 收尾盖
     /// `model_room_generation` 时拿它与此刻比（审核 P2-3）：不等 = 任务中途换过代，各批根的边不是同一代
     /// 算的，那一格 `Untouched`。只有 ModelOnly 执行体填；取不到（开关关 / `Blocked`）是 `None`。不进回执。
@@ -1618,9 +1618,9 @@ async fn execute_frozen_batch(
         // ——那一批根已经判死，水位本来就不盖。
         let room_recompute = result.room_recompute.clone();
         let room_verdict = match room_recompute {
-            Some(reason) if flush.all_acked() => {
+            Some(request) if flush.all_acked() => {
                 registry.set_stage(&job.task_id, "rooms");
-                Some(run_room_only_recompute(job, &reason, &mut result, file_latest_sesno).await)
+                Some(run_room_recompute(job, &request, &mut result, file_latest_sesno).await)
             }
             _ => None,
         };
@@ -1859,6 +1859,11 @@ enum RoomRecomputeVerdict {
     /// 边是它算的、投影里的根 ACK 也对齐到它；收尾不再回问此刻的常驻（任务中途换了代也不拿新代号冒充，
     /// 审核 P2-3）。
     WholeLibrary(String),
+    /// 定向（反向传播，ADR-073 D13 反查，2026-09-17）：这一次换代的面板变化就是本库的全部欠账
+    /// （`room_recompute::scope_for_task`），反查命中的每一根都算齐了、面板级处置也写了——库上每条边都与这一代
+    /// 一致，与 `WholeLibrary` 同样盖得上「整库对齐到这一代」（载荷同样是重算那台计算器的代号）。不盖的话下一个
+    /// 任务的电平型触发看到库上代号 ≠ 常驻代号，照样整库扫一遍——定向就白做了。
+    Targeted(String),
     /// 算齐了、但说不了「整库」：`DbSet@T` 的根清单枚举不出来（覆盖面未知，只算了投影里的根——不在投影里的
     /// 根要靶着清单回读库），或点名了却没覆盖到（回读那条路按清单逐根走，这一种本不该出现）。触到的根边已
     /// 更新、水位照盖（本任务的根都成了）；durable 侧「整库对齐到这一代」**不**盖——那一格替的是没算过的根
@@ -1880,7 +1885,7 @@ impl RoomRecomputeVerdict {
     /// 本任务说得了「这个库的房间边整库对齐到这一代」——是哪一代（重算那台计算器的代号）；说不了 = `None`。
     fn library_generation(&self) -> Option<&str> {
         match self {
-            Self::WholeLibrary(generation) => Some(generation),
+            Self::WholeLibrary(generation) | Self::Targeted(generation) => Some(generation),
             Self::PartialCoverage | Self::Disabled | Self::Failed => None,
         }
     }
@@ -2022,37 +2027,7 @@ async fn run_room_only_recompute(
                     None => RoomRecomputeVerdict::PartialCoverage,
                 };
             }
-            for (root, error) in &report.failed {
-                let root_refno =
-                    crate::data_interface::generation_root::refno_from_e3d(*root).to_pdms_str();
-                mark_generation_failed(dbnum, &root_refno, "", error);
-                result.units.push(ModelUnitResult {
-                    dbnum,
-                    root_refno,
-                    noun: String::new(),
-                    status: UnitGenStatus::Failed,
-                    attempts: 1,
-                    message: Some(error.clone()),
-                    old_owner: None,
-                    new_owner: None,
-                    kind: UnitKind::Regen,
-                    transform_fallback_reason: None,
-                    unit_fallback_reason: None,
-                });
-            }
-            result.status = ManualUpdateStatus::Partial;
-            result.warnings.push(format!(
-                "dbnum={dbnum} 整库房间重算有 {} 根算不出归属（边原样留着，下一窗重排），这一版 model_sesno 不盖：{}",
-                report.failed.len(),
-                report
-                    .failed
-                    .iter()
-                    .take(5)
-                    .map(|(root, error)| format!("{root} {error}"))
-                    .collect::<Vec<_>>()
-                    .join("；")
-            ));
-            RoomRecomputeVerdict::Failed
+            settle_room_recompute_failures(dbnum, "整库", &report.failed, result)
         }
         Err(error) => {
             result.status = ManualUpdateStatus::Partial;
@@ -2060,6 +2035,218 @@ async fn run_room_only_recompute(
                 "dbnum={dbnum} 整库房间重算写库 / 回读库失败（触发：{reason}；已提交的事务照样有效、下一次触发重来），这一版 model_sesno 不盖: {error:#}"
             ));
             RoomRecomputeVerdict::Failed
+        }
+    }
+}
+
+/// 房间重算里算不出归属的根按 D2 记失败：账本 `failed`（下一窗重排）、单元清单补一条 `Failed` 让回执看得见、
+/// 任务 `Partial`、水位不盖。整库与定向两路同一处置。
+fn settle_room_recompute_failures(
+    dbnum: u32,
+    label: &str,
+    failed: &[(e3d_io::refno::RefNo, String)],
+    result: &mut DataBatchTaskResult,
+) -> RoomRecomputeVerdict {
+    for (root, error) in failed {
+        let root_refno =
+            crate::data_interface::generation_root::refno_from_e3d(*root).to_pdms_str();
+        mark_generation_failed(dbnum, &root_refno, "", error);
+        result.units.push(ModelUnitResult {
+            dbnum,
+            root_refno,
+            noun: String::new(),
+            status: UnitGenStatus::Failed,
+            attempts: 1,
+            message: Some(error.clone()),
+            old_owner: None,
+            new_owner: None,
+            kind: UnitKind::Regen,
+            transform_fallback_reason: None,
+            unit_fallback_reason: None,
+        });
+    }
+    result.status = ManualUpdateStatus::Partial;
+    result.warnings.push(format!(
+        "dbnum={dbnum} {label}房间重算有 {} 根算不出归属（边原样留着，下一窗重排），这一版 model_sesno 不盖：{}",
+        failed.len(),
+        failed
+            .iter()
+            .take(5)
+            .map(|(root, error)| format!("{root} {error}"))
+            .collect::<Vec<_>>()
+            .join("；")
+    ));
+    RoomRecomputeVerdict::Failed
+}
+
+/// 收尾段房间重算的分派（ADR-073 D13，2026-09-17）：请求说定向就先走反向传播（[`run_targeted_room_recompute`]），
+/// 它说「定不了」（树不就绪 / 根清单枚举不出来 / 有命中却折不出根的元素）就退整库（[`run_room_only_recompute`]）；
+/// 请求说整库直接整库。退整库是**多算**不是漏算：整库那一路本就覆盖定向要算的每一根。
+async fn run_room_recompute(
+    job: &FrozenBatch,
+    request: &crate::data_interface::room_recompute::RoomRecomputeRequest,
+    result: &mut DataBatchTaskResult,
+    target_sesno: i32,
+) -> RoomRecomputeVerdict {
+    use crate::data_interface::room_recompute::RoomRecomputeScope;
+    match &request.scope {
+        RoomRecomputeScope::WholeLibrary => {
+            run_room_only_recompute(job, &request.reason, result, target_sesno).await
+        }
+        RoomRecomputeScope::Targeted(delta) => {
+            match run_targeted_room_recompute(job, &request.reason, delta, result, target_sesno)
+                .await
+            {
+                Some(verdict) => verdict,
+                None => {
+                    let reason = format!("{}；定向反查定不了，退整库", request.reason);
+                    run_room_only_recompute(job, &reason, result, target_sesno).await
+                }
+            }
+        }
+    }
+}
+
+/// 定向房间重算（反向传播，ADR-073 D13 反查，2026-09-17）：面板变化 → 反查命中的根（`room_reverse::affected_roots`）
+/// → 只重算它们 + 面板级处置（`RootScope::Targeted`）。回 `None` = 这一路定不了、调用方退整库：树不就绪、`DbSet@T`
+/// 的根清单枚举不出来（折不出根）、有命中却折不出根的元素（反查不完整）、覆盖面对不上。回 `Some`：
+/// `Targeted(代号)` = 命中根全算齐、盖得上；算不出的根 / 反查失败 / 写库失败 = `Failed`（与整库同一处置，
+/// 下一个任务由电平型触发整库补）。
+async fn run_targeted_room_recompute(
+    job: &FrozenBatch,
+    reason: &str,
+    delta: &crate::fast_model::room_resident::PanelDelta,
+    result: &mut DataBatchTaskResult,
+    target_sesno: i32,
+) -> Option<RoomRecomputeVerdict> {
+    use crate::data_interface::room_reverse::{ReverseLookup, affected_roots};
+    use crate::fast_model::model_db_adapter::{
+        PersistTarget, RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
+        render_panel_delta_statements,
+    };
+    let dbnum = job.dbnum;
+    let rooms = match frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) => {
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算跳过：room_membership=false（触发：{reason}）"
+            ));
+            return Some(RoomRecomputeVerdict::Disabled);
+        }
+        Err(error) => {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算冻不出计算器（触发：{reason}），这一版 model_sesno 不盖: {error:#}"
+            ));
+            return Some(RoomRecomputeVerdict::Failed);
+        }
+    };
+    // 折根要靶着本库的根清单；枚举不出来这一路定不了。
+    let library_roots = match library_generation_roots(dbnum, target_sesno).await {
+        Ok(roots) => roots,
+        Err(error) => {
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算枚举不出 DbSet@{target_sesno} 的根清单，退整库: {error:#}"
+            ));
+            return None;
+        }
+    };
+    let target = PersistTarget::process();
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let affected = match affected_roots(target.db(), store, dbnum, delta, &library_roots).await {
+        Ok(ReverseLookup::Resolved(affected)) => affected,
+        Ok(ReverseLookup::TreeUnavailable(state)) => {
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算的反查用不了空间树（{state}），退整库"
+            ));
+            return None;
+        }
+        Err(error) => {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算的反查读库失败（触发：{reason}），这一版 model_sesno 不盖: {error:#}"
+            ));
+            return Some(RoomRecomputeVerdict::Failed);
+        }
+    };
+    if !affected.unresolved.is_empty() {
+        result.warnings.push(format!(
+            "dbnum={dbnum} 定向房间重算的反查命中 {} 个本库元素折不出根（例如 {}），反查不完整，退整库",
+            affected.unresolved.len(),
+            affected
+                .unresolved
+                .iter()
+                .take(5)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+        return None;
+    }
+    let panel_statements = render_panel_delta_statements(delta);
+    match recompute_dbnum_room_edges(
+        target,
+        store,
+        dbnum,
+        &rooms,
+        None,
+        RootScope::Targeted {
+            roots: &affected.roots,
+            panel_statements: &panel_statements,
+        },
+    )
+    .await
+    {
+        Ok(report) => {
+            println!(
+                "dbnum={dbnum} 定向房间重算完成（触发：{reason}；面板变化 {}；反查 {}）：根 {}/{} 重算（投影里 {}、回读库 {}：读回几何 {} 条、{}ms）、面板级语句 {}、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
+                delta.summary(),
+                affected.summary(),
+                report.recomputed,
+                report.roots,
+                report.projected_roots,
+                report.durable_roots,
+                report.durable_records,
+                report.durable_read_ms,
+                report.panel_statements,
+                report.room_edges,
+                report.commits,
+                report.max_transaction_bytes,
+                report.acks_refreshed,
+                report.failed.len(),
+                report.elapsed_ms
+            );
+            if !report.failed.is_empty() {
+                return Some(settle_room_recompute_failures(
+                    dbnum,
+                    "定向",
+                    &report.failed,
+                    result,
+                ));
+            }
+            // 命中的每一根都要在回执里（点名的根按清单逐根走，对不上本不该出现）；出现了就不敢盖，退整库补齐。
+            // 盖的是重算那台计算器的代号（审核 P2-3），不是收尾此刻的。
+            let generation = rooms.resident_generation().to_string();
+            match room_recompute_uncovered(Some(&affected.roots), &report.covered_roots) {
+                Some(uncovered) if uncovered.is_empty() => {
+                    Some(RoomRecomputeVerdict::Targeted(generation))
+                }
+                _ => {
+                    result.warnings.push(format!(
+                        "dbnum={dbnum} 定向房间重算覆盖到 {} 根、命中 {} 根对不上，退整库补齐",
+                        report.covered_roots.len(),
+                        affected.roots.len()
+                    ));
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算写库 / 回读库失败（触发：{reason}；已提交的事务照样有效、下一次触发重来），这一版 model_sesno 不盖: {error:#}"
+            ));
+            Some(RoomRecomputeVerdict::Failed)
         }
     }
 }
@@ -2331,9 +2518,9 @@ async fn execute_model_only_body(
     let room_generation_at_start = crate::fast_model::model_db_adapter::required_room_generation()
         .ok()
         .flatten();
-    // 第三条触发（电平型）：库上 durable 侧的整库对齐代号与此刻（对齐之后）常驻代号不等 = 欠一次整库重算。
-    let alignment_owed =
-        crate::data_interface::room_recompute::durable_alignment_owed(job.dbnum).await;
+    // 第三条触发（电平型）：库上 durable 侧的整库对齐代号与此刻（对齐之后）常驻代号不等 = 欠一次整库重算；
+    // 同一份读数也给定向准入（库上是不是上一代，`room_recompute::scope_for_task`）。
+    let alignment = crate::data_interface::room_recompute::durable_alignment(job.dbnum).await;
 
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
@@ -2395,7 +2582,7 @@ async fn execute_model_only_body(
         crate::data_interface::room_recompute::request_for_task(
             &side_actions,
             Some(&room_reference),
-            alignment_owed.as_deref(),
+            alignment.as_ref(),
         )
     };
 
@@ -2782,10 +2969,10 @@ async fn execute_frozen_batch_body(
     // = 这个库欠一次整库重算。前两条触发的原因只活在本任务里，拆窗 / 单元失败 / 刷盘没齐都会把它丢掉；
     // 这一条按库上的事实判，直到某个任务把 `Aligned` 盖上才安静——整库重算对不在投影里的根回读库上几何
     // （U1 第二半），落盘形态下也盖得上，所以它在每个库上只多跑一次就安静。
-    let alignment_owed = if defer_model_phase {
+    let alignment = if defer_model_phase {
         None
     } else {
-        crate::data_interface::room_recompute::durable_alignment_owed(job.dbnum).await
+        crate::data_interface::room_recompute::durable_alignment(job.dbnum).await
     };
 
     // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
@@ -2915,7 +3102,7 @@ async fn execute_frozen_batch_body(
         crate::data_interface::room_recompute::request_for_task(
             &side_actions,
             room_reference.as_ref(),
-            alignment_owed.as_deref(),
+            alignment.as_ref(),
         )
     };
 
@@ -4726,6 +4913,8 @@ mod tests {
         use RoomRecomputeVerdict::*;
         for (verdict, rooms_ok, speaks) in [
             (WholeLibrary("efd4ebe1".to_owned()), true, Some("efd4ebe1")),
+            // 定向（反向传播）：命中根全算齐 = 库上每条边都与这一代一致，与整库同样盖得上。
+            (Targeted("efd4ebe1".to_owned()), true, Some("efd4ebe1")),
             (PartialCoverage, true, None),
             (Disabled, true, None),
             (Failed, false, None),

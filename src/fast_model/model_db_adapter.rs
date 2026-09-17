@@ -242,6 +242,11 @@ impl PersistTarget<'_> {
     pub fn medium(&self) -> PersistMedium {
         self.medium
     }
+
+    /// 这个目标写的那个库的句柄（反向传播的反查要拿它读 `tubi_relate` / `inst_relate.anc`，与随后写边的是同一个库）。
+    pub fn db(&self) -> &Surreal<Any> {
+        self.db
+    }
 }
 
 /// 一次落库落了多少行、落在哪。行数口径与旧 `E3dPersistReport` 的 `upserted` 相同：

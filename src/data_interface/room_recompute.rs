@@ -27,6 +27,12 @@
 //! 本库 `DbSet@T` 的根清单，对**投影里**有回执的根按投影里的几何、对清单里**不在投影里**的根按库上读回的
 //! 几何（`model_record_reader::durable_records_of_root`，U1 第二半）重算归属、重写两张边
 //! （`model_db_adapter::recompute_dbnum_room_edges`），不重生几何、不动模型行、不动空间树。
+//!
+//! **定向（反向传播，2026-09-17）**：整库是兜底，不是常路。本任务的开工前对齐真换了代、带着与上一代的面板变化
+//! （`RoomReferenceRefresh::Rebuilt::panels`）、且库上的对齐代号正是上一代（[`scope_for_task`]）——那么上一代 →
+//! 这一代之间面板动了什么就是欠账的全部：不在册的面板清边、只改号的改列（不查空间），几何变了 / 换了房的拿新旧盒
+//! 反查（`room_reverse`：全局树 + 管身范围查询）命中的根，只重算它们（`RootScope::Targeted`）；成功即盖
+//! `Aligned`（命中根算齐 = 库上每条边都与这一代一致）。树不就绪 / 折不出根 / 根清单枚举不出来 → 退整库。
 //! 算不出的根按 D2 记失败、`model_sesno` 不盖。**覆盖面要自证**：投影只装本进程生成过的根——
 //! 初始化的模型行不进投影（ADR-077 D5），落盘形态冷重启后投影是空的——回读库补的正是这一半；重算完
 //! 拿回执里覆盖到的根对一遍清单，每一根都在才说「整库」、durable 侧那一格「整库对齐到这一代」才盖；
@@ -35,7 +41,7 @@
 //! HTTP 触发口」）。
 
 use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
-use crate::fast_model::room_resident::RoomReferenceRefresh;
+use crate::fast_model::room_resident::{PanelDelta, RoomReferenceRefresh};
 
 /// 房间定义族：房间节点（FRMW / SBFR）、`project_hd` 的容器（CWALL / CFLOOR）、面板本体（PANE）。
 /// 与 `room_topology::RoomHierarchy` 两种口径的并集——按 noun 判，不分口径：不在本项目层级里的
@@ -120,11 +126,28 @@ pub(crate) fn library_alignment_owed(
     })
 }
 
+/// 库上 durable 侧的整库对齐代号（`dbnum_watermark.model_room_generation`，D14）与此刻的常驻代号——一次读数，
+/// 第三条触发（[`DurableAlignment::owed`]）与定向准入（[`scope_for_task`]：库上是不是**上一代**）都从它出发。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DurableAlignment {
+    /// 库上那一格；`None` = 旧行 / 从没整库对齐过 / 关着开关生成的。
+    pub library: Option<String>,
+    /// 此刻（开工前对齐之后）的常驻代号。
+    pub resident: String,
+}
+
+impl DurableAlignment {
+    /// 第三条触发（电平型）：库上那一格与常驻代号不等就欠。
+    pub(crate) fn owed(&self) -> Option<String> {
+        library_alignment_owed(self.library.as_deref(), Some(self.resident.as_str()))
+    }
+}
+
 /// 第三条触发的取数：库上那一格与两枚水位同一行（`DbnumState::read`），常驻代号取
 /// `query_service::resident_room_generation`（`Ready` / `Degraded` 才有）。开关关着直接 `None`；
-/// 水位行读不出**不**触发（读错不是「欠着」的证据，只留一句 warn）。任务开工前对齐（D12）之后调，
-/// 拿到的才是此刻这一代。
-pub(crate) async fn durable_alignment_owed(dbnum: u32) -> Option<String> {
+/// 水位行读不出**不**触发（读错不是「欠着」的证据，只留一句 warn）——那一轮也说不出库上是哪一代，定向准入
+/// 随之不成立。任务开工前对齐（D12）之后调，拿到的才是此刻这一代。
+pub(crate) async fn durable_alignment(dbnum: u32) -> Option<DurableAlignment> {
     if !crate::options::room_membership() {
         return None;
     }
@@ -138,17 +161,59 @@ pub(crate) async fn durable_alignment_owed(dbnum: u32) -> Option<String> {
             return None;
         }
     };
-    library_alignment_owed(library.as_deref(), Some(resident.as_str()))
+    Some(DurableAlignment { library, resident })
 }
 
-/// 这个任务要不要跑整库房间重算，以及为什么。三条触发合成一句：规划器排的 `RoomOnly` 工作项
-/// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`library_alignment_owed`]）。
-/// 都没有 = `None`。
+/// 这个任务的房间重算要算多大范围（ADR-073 D13 反查，2026-09-17）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomRecomputeScope {
+    /// 整库：`DbSet@T` 的每一根（今天的 D13）。
+    WholeLibrary,
+    /// 定向（反向传播）：这一次换代的面板变化就是本库的全部欠账——拿它反查命中的根，只重算它们；
+    /// 面板级的两类（不在册 / 只改号）不查空间直接写。
+    Targeted(PanelDelta),
+}
+
+/// 这个任务要跑的房间重算：为什么（三条触发合成一句）与算多大。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoomRecomputeRequest {
+    pub reason: String,
+    pub scope: RoomRecomputeScope,
+}
+
+/// 定向准入（纯函数）。只有「这一次换代的面板变化就是本库全部欠账」时才定向：本任务的开工前对齐**真换了代**
+/// （`Rebuilt { generation_changed: true }`）、带着与上一代的面板变化（`panels` 非空）、说得出上一代是谁
+/// （`previous_generation`），**且**库上 `model_room_generation` 正是那上一代——库上的边全部对齐到上一代，
+/// 中间没欠别的，那么上一代 → 这一代之间面板动了什么，就是欠账的全部。
+///
+/// 其余都整库：库上是更早的代 / 从没盖过（欠的不止这一次换代，diff 说不了）、`Unchanged` 却欠着（重启后 /
+/// 别的库先换的代，本任务手里没有 diff）、`generation_changed` 而面板变化为空（换代另有原因，例如关键字）、
+/// 第一代（没有上一代）。
+pub(crate) fn scope_for_task(
+    refresh: Option<&RoomReferenceRefresh>,
+    library_generation: Option<&str>,
+) -> RoomRecomputeScope {
+    match refresh {
+        Some(RoomReferenceRefresh::Rebuilt {
+            generation_changed: true,
+            previous_generation: Some(previous),
+            panels: Some(delta),
+            ..
+        }) if !delta.is_empty() && library_generation == Some(previous.as_str()) => {
+            RoomRecomputeScope::Targeted(delta.clone())
+        }
+        _ => RoomRecomputeScope::WholeLibrary,
+    }
+}
+
+/// 这个任务要不要跑房间重算、为什么、算多大。三条触发合成一句：规划器排的 `RoomOnly` 工作项
+/// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`DurableAlignment::owed`]）。
+/// 都没有 = `None`。范围由 [`scope_for_task`] 定。
 pub(crate) fn request_for_task(
     side_actions: &[ModelWorkItem],
     refresh: Option<&RoomReferenceRefresh>,
-    alignment_owed: Option<&str>,
-) -> Option<String> {
+    alignment: Option<&DurableAlignment>,
+) -> Option<RoomRecomputeRequest> {
     let mut reasons = Vec::new();
     if side_actions
         .iter()
@@ -169,10 +234,19 @@ pub(crate) fn request_for_task(
                 .unwrap_or_default()
         ));
     }
-    if let Some(owed) = alignment_owed {
-        reasons.push(owed.to_string());
+    if let Some(owed) = alignment.and_then(DurableAlignment::owed) {
+        reasons.push(owed);
     }
-    (!reasons.is_empty()).then(|| reasons.join("；"))
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(RoomRecomputeRequest {
+        reason: reasons.join("；"),
+        scope: scope_for_task(
+            refresh,
+            alignment.and_then(|alignment| alignment.library.as_deref()),
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -307,8 +381,10 @@ mod tests {
                 .find("refresh_room_reference_before_task(job.dbnum)")
                 .unwrap_or_else(|| panic!("{label}: 开工前对齐"));
             let owed = body
-                .find("room_recompute::durable_alignment_owed(job.dbnum)")
-                .unwrap_or_else(|| panic!("{label}: 要读库上的整库对齐代号（第三条触发）: {body}"));
+                .find("room_recompute::durable_alignment(job.dbnum)")
+                .unwrap_or_else(|| {
+                    panic!("{label}: 要读库上的整库对齐代号（第三条触发 / 定向准入）: {body}")
+                });
             let request = body
                 .find("room_recompute::request_for_task(")
                 .unwrap_or_else(|| panic!("{label}: request_for_task"));
@@ -317,8 +393,8 @@ mod tests {
                 "{label}: 对齐 → 读库上那一格 → 合成三条触发，顺序不能乱"
             );
             assert!(
-                body.contains("alignment_owed.as_deref()"),
-                "{label}: 第三条触发要真的传进 request_for_task: {body}"
+                body.contains("alignment.as_ref(),"),
+                "{label}: 库上那一格要真的传进 request_for_task（第三条触发与定向准入都从它出发）: {body}"
             );
         }
         // ModelOnly 执行体同样：启动追平窗口与稳态窗口共用同一条规划入口，`RoomOnly` 工作项随
@@ -350,15 +426,15 @@ mod tests {
             .0;
         let flush = tail.find("await_units_durable(").expect("先等刷盘");
         let rooms = tail
-            .find("run_room_only_recompute(job, &reason, &mut result, file_latest_sesno)")
-            .expect("整库房间重算在收尾段，带着 T 好对 DbSet@T 的根清单自证覆盖面");
+            .find("run_room_recompute(job, &request, &mut result, file_latest_sesno)")
+            .expect("房间重算（定向 / 整库）在收尾段，带着 T 好对 DbSet@T 的根清单自证覆盖面");
         let outcome = tail.find("model_outcome_of(&flush").expect("模型收尾判决");
         assert!(
             flush < rooms && rooms < outcome,
             "刷盘之后、模型收尾判决之前: {tail}"
         );
         assert!(
-            tail.contains("Some(reason) if flush.all_acked()"),
+            tail.contains("Some(request) if flush.all_acked()"),
             "刷盘没齐就不跑（那批根已判死）: {tail}"
         );
         assert!(
@@ -379,6 +455,13 @@ mod tests {
             manual.contains("&& !item.action.is_room_recalc()"),
             "side_actions 的过滤只拦 RoomRecalc*，RoomOnly 经它交给任务"
         );
+    }
+
+    fn alignment(library: Option<&str>, resident: &str) -> DurableAlignment {
+        DurableAlignment {
+            library: library.map(str::to_owned),
+            resident: resident.to_owned(),
+        }
     }
 
     /// 三条触发各自成句，都没有就是 `None`；代号没变的重建不触发。
@@ -407,12 +490,14 @@ mod tests {
             request_for_task(
                 &[],
                 Some(&RoomReferenceRefresh::Unchanged { key: "a".into() }),
-                None,
+                Some(&alignment(Some("g"), "g")),
             )
-            .is_none()
+            .is_none(),
+            "库上与常驻同一代：不欠"
         );
         let planned = request_for_task(std::slice::from_ref(&item), None, None).unwrap();
-        assert!(planned.contains("房间定义族"), "{planned}");
+        assert!(planned.reason.contains("房间定义族"), "{planned:?}");
+        assert_eq!(planned.scope, RoomRecomputeScope::WholeLibrary);
         let swapped = request_for_task(
             &[],
             Some(&RoomReferenceRefresh::Rebuilt {
@@ -428,17 +513,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            swapped.contains("换了房间代号") && swapped.contains("removed=1"),
-            "{swapped}"
+            swapped.reason.contains("换了房间代号") && swapped.reason.contains("removed=1"),
+            "{swapped:?}"
         );
         // 第三条：库上欠着，原因原样带进来；单独一条也触发。
-        let owed = request_for_task(
-            &[],
-            None,
-            Some("库上整库房间对齐代号 old ≠ 此刻常驻代号 new"),
-        )
-        .unwrap();
-        assert!(owed.contains("old ≠ 此刻常驻代号 new"), "{owed}");
+        let owed = request_for_task(&[], None, Some(&alignment(Some("old"), "new"))).unwrap();
+        assert!(owed.reason.contains("old ≠ 此刻常驻代号 new"), "{owed:?}");
+        assert_eq!(owed.scope, RoomRecomputeScope::WholeLibrary);
         let all = request_for_task(
             std::slice::from_ref(&item),
             Some(&RoomReferenceRefresh::Rebuilt {
@@ -450,10 +531,115 @@ mod tests {
                 panels: None,
                 elapsed_ms: 1,
             }),
-            Some("欠一次整库重算"),
+            Some(&alignment(None, "new")),
         )
         .unwrap();
-        assert_eq!(all.matches("；").count(), 2, "三条触发合成一句: {all}");
+        assert_eq!(
+            all.reason.matches("；").count(),
+            2,
+            "三条触发合成一句: {all:?}"
+        );
+    }
+
+    /// 定向准入的真值表（ADR-073 D13 反查，2026-09-17）：只有「真换了代 + 带着非空面板变化 + 说得出上一代 + 库上正是
+    /// 上一代」四条同时成立才定向；缺任何一条整库——库上更早 / 从没盖过、`Unchanged` 却欠着、面板变化为空、
+    /// 没有上一代、开工前对齐失败 / 退避。定向时把面板变化原样带走。
+    #[test]
+    fn a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt() {
+        use crate::fast_model::room_resident::{PanelBounds, PanelMove};
+        use aios_core::{RefU64, RefnoEnum};
+        let panel = RefnoEnum::from(RefU64::from_two_nums(24381, 7));
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel,
+                old: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
+                new: Some(PanelBounds([[5.0; 3], [6.0; 3]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let rebuilt = |generation_changed: bool,
+                       previous_generation: Option<&str>,
+                       panels: Option<PanelDelta>| {
+            RoomReferenceRefresh::Rebuilt {
+                previous_key: Some("k1".into()),
+                key: "k2".into(),
+                generation_changed,
+                previous_generation: previous_generation.map(str::to_owned),
+                diff: None,
+                panels,
+                elapsed_ms: 1,
+            }
+        };
+        assert_eq!(
+            scope_for_task(
+                Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
+                Some("g1")
+            ),
+            RoomRecomputeScope::Targeted(delta.clone()),
+            "四条齐：定向"
+        );
+        for (label, refresh, library) in [
+            (
+                "库上是更早的代",
+                rebuilt(true, Some("g1"), Some(delta.clone())),
+                Some("g0"),
+            ),
+            (
+                "库上从没盖过",
+                rebuilt(true, Some("g1"), Some(delta.clone())),
+                None,
+            ),
+            (
+                "面板变化为空（换代另有原因）",
+                rebuilt(true, Some("g1"), Some(PanelDelta::default())),
+                Some("g1"),
+            ),
+            (
+                "没有上一代",
+                rebuilt(true, None, Some(delta.clone())),
+                Some("g1"),
+            ),
+            ("没带面板变化", rebuilt(true, Some("g1"), None), Some("g1")),
+            (
+                "代号没变",
+                rebuilt(false, Some("g1"), Some(delta.clone())),
+                Some("g1"),
+            ),
+            (
+                "Unchanged 却欠着（重启后 / 别的库先换的代）",
+                RoomReferenceRefresh::Unchanged { key: "k2".into() },
+                Some("g0"),
+            ),
+            (
+                "重建失败留旧代",
+                RoomReferenceRefresh::Failed {
+                    error: "x".into(),
+                    kept_previous: true,
+                },
+                Some("g0"),
+            ),
+        ] {
+            assert_eq!(
+                scope_for_task(Some(&refresh), library),
+                RoomRecomputeScope::WholeLibrary,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            scope_for_task(None, Some("g1")),
+            RoomRecomputeScope::WholeLibrary
+        );
+        // `request_for_task` 把范围带上：定向那一档三条触发同时点亮（规划器 + 换代 + ③），仍是定向。
+        let item = room_only_work_item(7997, "DESI", 163);
+        let request = request_for_task(
+            std::slice::from_ref(&item),
+            Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
+            Some(&alignment(Some("g1"), "g2")),
+        )
+        .unwrap();
+        assert_eq!(request.scope, RoomRecomputeScope::Targeted(delta));
+        assert_eq!(request.reason.matches("；").count(), 2, "{request:?}");
     }
 
     /// 第三条触发的真值表（电平型，2026-09-17）：库上那一格与此刻常驻代号不等就欠——包括库上没有那一格；
@@ -478,6 +664,85 @@ mod tests {
             library_alignment_owed(Some("efd4ebe1"), None).is_none()
                 && library_alignment_owed(None, None).is_none(),
             "常驻说不出代号 = 没有可对齐的目标"
+        );
+    }
+
+    /// 源码钉（ADR-073 D13 反查，2026-09-17）：收尾段的分派——请求说定向先走 `run_targeted_room_recompute`，它回 `None`
+    /// （树不就绪 / 根清单枚举不出来 / 有命中却折不出根 / 覆盖面对不上）就退 `run_room_only_recompute`；定向那一路
+    /// 先枚举根清单、再 `room_reverse::affected_roots`、再以 `RootScope::Targeted` 调 `recompute_dbnum_room_edges`，
+    /// 面板级语句经 `render_panel_delta_statements`；算不出的根与整库同一处置（`settle_room_recompute_failures`）；
+    /// 成功的结论是 `Targeted(重算那台计算器的代号)`，与 `WholeLibrary` 同样说得了「整库对齐到这一代」。
+    #[test]
+    fn the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer()
+     {
+        let worker = include_str!("batch_worker.rs");
+        let dispatch = function_body(worker, "async fn run_room_recompute(");
+        assert!(
+            dispatch.contains("RoomRecomputeScope::WholeLibrary =>")
+                && dispatch.contains("RoomRecomputeScope::Targeted(delta) =>"),
+            "两种范围各走一路: {dispatch}"
+        );
+        assert!(
+            dispatch.contains(
+                "run_targeted_room_recompute(job, &request.reason, delta, result, target_sesno)"
+            ) && dispatch.contains("None =>")
+                && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
+            "定向定不了（None）退整库；整库直接整库: {dispatch}"
+        );
+        let targeted = function_body(worker, "async fn run_targeted_room_recompute(");
+        let enumerate = targeted
+            .find("library_generation_roots(dbnum, target_sesno)")
+            .expect("先枚举 DbSet@T 的根清单（折根的靶子）");
+        let lookup = targeted
+            .find("affected_roots(target.db(), store, dbnum, delta, &library_roots)")
+            .expect("反查命中的根");
+        let recompute = targeted
+            .find("recompute_dbnum_room_edges(")
+            .expect("定向重算");
+        assert!(
+            enumerate < lookup && lookup < recompute,
+            "根清单 → 反查 → 重算，顺序不能乱: {targeted}"
+        );
+        assert!(
+            targeted.contains("RootScope::Targeted {")
+                && targeted.contains("roots: &affected.roots,")
+                && targeted.contains("panel_statements: &panel_statements,")
+                && targeted.contains("render_panel_delta_statements(delta)"),
+            "只重算命中的根，面板级语句作 prelude: {targeted}"
+        );
+        for (fallback, marker) in [
+            ("树不就绪", "Ok(ReverseLookup::TreeUnavailable(state)) =>"),
+            ("有命中却折不出根", "if !affected.unresolved.is_empty() {"),
+        ] {
+            let at = targeted
+                .find(marker)
+                .unwrap_or_else(|| panic!("{fallback}: {targeted}"));
+            let rest = &targeted[at..];
+            let ret = rest.find("return None;").expect("退整库");
+            assert!(
+                ret < rest
+                    .find("recompute_dbnum_room_edges(")
+                    .unwrap_or(usize::MAX),
+                "{fallback} → 在重算之前就退整库（return None）: {rest}"
+            );
+        }
+        assert!(
+            targeted.contains("settle_room_recompute_failures(")
+                && function_body(worker, "async fn run_room_only_recompute(")
+                    .contains("settle_room_recompute_failures("),
+            "算不出的根两路同一处置"
+        );
+        assert!(
+            targeted.contains("let generation = rooms.resident_generation().to_string();")
+                && targeted.contains("Some(RoomRecomputeVerdict::Targeted(generation))"),
+            "定向的结论带着重算那台计算器的代号: {targeted}"
+        );
+        let verdict = function_body(worker, "    fn library_generation(&self) -> Option<&str> {");
+        assert!(
+            verdict.contains(
+                "Self::WholeLibrary(generation) | Self::Targeted(generation) => Some(generation)"
+            ),
+            "定向与整库同样说得了「整库对齐到这一代」: {verdict}"
         );
     }
 
