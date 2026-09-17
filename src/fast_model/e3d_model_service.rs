@@ -2777,15 +2777,14 @@ fn bake_element(
                 world_bounds,
                 &mesh_id,
             )?;
+            // 算不出 = 这一根 Err（D2）：生成 worker 把它记成这一根的死信、不发布；文案带「room membership」，
+            // 与 flush 时 `room_stage` 的同族，账本 / 回执的消费方不用分辨是哪一处算的。
             rooms
                 .edges_for_record(&input, || {
                     crate::fast_model::room_model::world_points_of(&mesh, input.mesh_to_world)
                 })
                 .with_context(|| {
-                    format!(
-                        "room membership of root {} could not be computed",
-                        element.refno
-                    )
+                    format!("room membership of {} could not be computed", input.label)
                 })?
         }
         None => Vec::new(),
@@ -4106,6 +4105,247 @@ mod tests {
         }
     }
 
+    /// B/T2 + T5 端到端（真几何、不连库）：一块 1000³ 的面板，两件 cube——完全在内的与跨在 x=1000 那一面上的；
+    /// `bake_element` 带计算器 → 边随 `BakedElement` 出来（跨边那件真走了点检查，用的是手上的网格），与随后
+    /// 变成的投影记录经 flush 路（`edges_for_record` 回读盘上 `.mesh`）算出的边**逐字相同**；`bake_snapshot`
+    /// 把全部构件与收拢后的边装进 `room`。算不出（面板网格缺）= 这件几何 `Err`、文案带「room membership」
+    /// ——生成 worker 据此把整根记死信、不发布（D2 失败前移）。
+    #[test]
+    fn baking_computes_the_same_room_edges_the_flush_would_and_fails_the_root_when_it_cannot() {
+        use crate::fast_model::room_model::{
+            RoomInput, RoomPanelMap, RoomPanels, box_mesh_for_test,
+        };
+        use crate::fast_model::room_resident::{
+            MeshCache, ResidentForm, ResidentManifest, ResidentRoomModel,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mesh_dir = dir.path().to_path_buf();
+        box_mesh_for_test(glam::Vec3::ZERO, glam::Vec3::splat(1000.))
+            .ser_to_file(&mesh_dir.join("panel.mesh"))
+            .unwrap();
+        let panel_refno = RefNo::new(7000, 1);
+        let panel: RefnoEnum = crate::data_interface::generation_root::refno_from_e3d(panel_refno);
+        let calculator = |panel_mesh: &str| {
+            let map = RoomPanelMap {
+                rooms: vec![RoomPanels {
+                    room: "7000_2".into(),
+                    room_num: "R1".into(),
+                    panels: vec![panel],
+                }],
+                all_panels: std::collections::HashSet::from([panel]),
+            };
+            let panel_record = ProjectedGeometry {
+                record_id: "7000_1".into(),
+                geometry_id: GeometryId::Element {
+                    refno: "7000/1".into(),
+                },
+                source_refno: panel_refno,
+                dbnum: 7000,
+                source_sesno: 1,
+                noun: "PANE".into(),
+                mesh_id: panel_mesh.into(),
+                world_transform: DMat4::IDENTITY,
+                world_bounds: [[0.; 3], [1000.; 3]],
+                ancestors: vec![],
+                shape: ProjectedShape::Baked,
+                tube: None,
+            };
+            let model = Arc::new(ResidentRoomModel::from_projection(
+                ResidentManifest {
+                    form: ResidentForm::Latest,
+                    key: format!("fixture-{panel_mesh}"),
+                },
+                vec![],
+                map,
+                &[panel_record],
+                Arc::<MeshCache>::default(),
+            ));
+            crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir.clone())
+                .expect("calculator")
+        };
+        let element_at = |seq: u32, center: glam::DVec3| {
+            let world = DMat4::from_translation(center) * DMat4::from_rotation_z(0.31);
+            let local = manifold_csg::Manifold::cube(200.0, 200.0, 200.0, true);
+            let parts = vec![local.transform(&dmat4_to_affine4x3(world))];
+            GeneratedElement {
+                geometry_id: GeometryId::Element {
+                    refno: format!("8000/{seq}"),
+                },
+                refno: RefNo::new(8000, seq),
+                noun: "EQUI".into(),
+                is_invalid_tubi: false,
+                name: None,
+                solid: manifold_csg::Manifold::compose(&parts),
+                parts: Some(parts),
+                part_catalogue_nouns: Vec::new(),
+                degenerate_parts: Vec::new(),
+                part_record_repeats: Vec::new(),
+                world,
+                primitive_instance: None,
+                analytic_primitive: None,
+                negatives_applied: 0,
+                negatives_skipped: vec![],
+                notes: vec![],
+            }
+        };
+        let rooms = calculator("panel");
+
+        let inside = bake_element(
+            element_at(10, glam::DVec3::new(500., 500., 500.)),
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake inside");
+        assert_eq!(inside.room_edges.len(), 1, "完全在内：一条边");
+        assert_eq!(inside.room_edges[0].member.inside_count, 8);
+        let straddling = bake_element(
+            element_at(20, glam::DVec3::new(1000., 500., 500.)),
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake straddling");
+        assert_eq!(straddling.room_edges.len(), 1, "跨在面板边上：点检查判进");
+        assert!(straddling.room_edges[0].member.inside_count < 8);
+        let outside = bake_element(
+            element_at(30, glam::DVec3::new(3000., 500., 500.)),
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake outside");
+        assert!(outside.room_edges.is_empty(), "盒都不交：没有边");
+
+        // flush 路：同一件几何折成投影记录、回读盘上 .mesh 取点 → 边逐字相同。
+        let root = RefNo::new(8000, 1);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((8000, 10), root),
+            ((8000, 20), root),
+            ((8000, 30), root),
+        ]);
+        for baked in [&inside, &straddling, &outside] {
+            let expected = baked.room_edges.clone();
+            let clone = BakedElement {
+                geometry_id: baked.geometry_id.clone(),
+                refno: baked.refno,
+                noun: baked.noun.clone(),
+                is_invalid_tubi: baked.is_invalid_tubi,
+                world: baked.world,
+                primitive_instance: baked.primitive_instance.clone(),
+                mesh_id: baked.mesh_id.clone(),
+                mesh_write: MeshWrite::Reused,
+                world_bounds: baked.world_bounds,
+                local_bounds: baked.local_bounds,
+                room_edges: Vec::new(),
+            };
+            let (commit, _) =
+                project_geometry_delta(8000, 1, vec![clone], Vec::new(), None, &owners)
+                    .expect("project");
+            let record = &commit.upserts[0];
+            let from_flush = rooms
+                .calculate_for_root(std::slice::from_ref(record))
+                .unwrap();
+            assert_eq!(
+                crate::fast_model::room_model::merge_root_edges(expected),
+                from_flush,
+                "bake 时的边 == flush 回读算的边: {}",
+                record.label()
+            );
+        }
+
+        // 随根的那一份：全部构件在册、边收拢。
+        let snapshot = bake_snapshot(
+            GeneratedSnapshot {
+                elements: vec![
+                    element_at(10, glam::DVec3::new(500., 500., 500.)),
+                    element_at(30, glam::DVec3::new(3000., 500., 500.)),
+                ],
+                owners: Arc::new(owners.clone()),
+                report: Report::default(),
+                visited: Vec::new(),
+            },
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake snapshot");
+        let room = snapshot.room.expect("带计算器就有随根的边");
+        assert_eq!(room.generation, rooms.resident_generation());
+        assert_eq!(
+            room.elements,
+            vec!["8000_10".to_string(), "8000_30".to_string()]
+        );
+        assert_eq!(room.edges.len(), 1);
+        assert!(
+            bake_snapshot(
+                GeneratedSnapshot {
+                    elements: vec![element_at(10, glam::DVec3::new(500., 500., 500.))],
+                    owners: Arc::new(owners),
+                    report: Report::default(),
+                    visited: Vec::new(),
+                },
+                &mesh_dir,
+                None,
+            )
+            .unwrap()
+            .room
+            .is_none(),
+            "没给计算器 → 不带边，flush 现算"
+        );
+
+        // 算不出 = Err（D2）：面板网格缺、构件盒又与它相交 → 这件几何 Err，文案带「room membership」。
+        let broken = calculator("missing-panel-mesh");
+        let error = bake_element(
+            element_at(40, glam::DVec3::new(500., 500., 500.)),
+            &mesh_dir,
+            Some(&broken),
+        )
+        .err()
+        .expect("面板网格缺就算不出");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("room membership of 8000_40 could not be computed")
+                && text.contains("room panel mesh incomplete"),
+            "{text}"
+        );
+    }
+
+    /// 源码钉（B/T5）：bake 的 `Err`（含房间算不出）在 `produce_slices` 的消费侧是这一根的**死信**——进
+    /// `slice.failures`、不 `slice.push`、不发布（`BestEffortFallback`）；`Required` 才整批上抛。
+    #[test]
+    fn a_root_whose_rooms_cannot_be_computed_is_a_dead_letter_and_never_published() {
+        let source = include_str!("e3d_model_service.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .or_else(|| {
+                include_str!("e3d_model_service.rs").split_once("\r\n#[cfg(test)]\r\nmod tests {")
+            })
+            .expect("production code precedes the inline test module")
+            .0;
+        let produce = source
+            .split_once("pub(crate) async fn produce_slices(")
+            .expect("produce_slices")
+            .1;
+        let produce = &produce[..produce
+            .find("pub async fn persist_memory_batch(")
+            .expect("consumer follows")];
+        let dead_letter = produce
+            .find("Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {")
+            .expect("非 Required 的 Err 臂");
+        let arm = &produce[dead_letter..];
+        let arm = &arm[..arm.find("Err(error) => {").expect("Required 臂紧随")];
+        assert!(
+            arm.contains("slice.failures.push((root, format!(\"{error:#}\")));")
+                && !arm.contains("slice.push("),
+            "bake Err = 这一根的死信，不进切片、不发布: {arm}"
+        );
+        let worker = source
+            .split_once("fn spawn_generation_worker(")
+            .expect("worker")
+            .1;
+        assert!(
+            worker.contains("queue.store(slot, outcome);"),
+            "worker 把 bake 的成败原样交给消费侧"
+        );
+    }
+
     /// 源码钉（B/T3）：随回执走的边只有**整根重生成**这一条路带——`bake_snapshot` 用那台计算器的代号把这一根全部
     /// 构件与收拢后的边装成 `BakedSnapshot::room`，`persist_memory_batch` 把它挂到 `project_geometry_delta` 折出来的
     /// 回执上；刚体前移（`published_via = "transform"`）与单元级局部发布（`"unit"`）的回执 `room: None`——它们没有整根
@@ -4213,8 +4453,8 @@ mod tests {
             "输入配方只有 baked_room_input 一处、结果挂到 BakedElement.room_edges: {bake}"
         );
         assert!(
-            bake.contains("room membership of root {} could not be computed"),
-            "失败文案与 flush 时 room_stage 同形（D2）: {bake}"
+            bake.contains("room membership of {} could not be computed"),
+            "失败文案与 flush 时 room_stage 同族、带「room membership」（D2）: {bake}"
         );
         let recipe = function_body(source, "fn baked_room_input(");
         let projection = function_body(source, "fn project_geometry_delta(");
