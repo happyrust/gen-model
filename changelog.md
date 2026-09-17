@@ -2,13 +2,30 @@
 
 ## 2026-09-17
 
-### ADR-078 D10：「touched 但 0 单元」的根在单元路上只推回执——只被 `no_model` 候选碰到的 regen 根发一份空 `Partial`，不再整根重算
+### ADR 改号：单元级发布那份 ADR-078 → **ADR-080**，104 处引用一起换；MDB 闭包那份仍是 ADR-078
+
+- **为什么**：单元级发布的 ADR 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了 MDB 闭包那份（`ADR-078-projects-come-from-the-mdb…`，
+  Accepted）。两份同号并存了一天，D 编号又互不相干（两边都有 D1–D6，含义完全不同），代码注释里一个 `ADR-078 D5` 既可能是
+  「局部回执在写锁里盖章」也可能是「路由目录带项目码报错」。用户 0917 拍：改号。
+- **怎么分的**：逐行分类，不整仓 `sed`——`grep` 到的 115 处按「提单元级 / `Partial` / `UnitDelta`」与「提 MDB 闭包 / 搜索根 /
+  `included_projects`」两类分开，**104 处改成 ADR-080**、**11 处留在 ADR-078**（`options.rs` 的 `project_search_paths` 四处、
+  `e3d_model_service.rs:2292` 路由目录 D5 一处、`manual_update.rs:3930` 候选项目一处、changelog 0915 五条）。
+- **改到哪**：`docs/adr/ADR-078-unit-level-publish-…md` → `ADR-080-unit-level-publish-…md`（`git mv`，正文标题与★0917 改号记录同步）；
+  gen-model `e3d_model_service.rs`(29) / `model_memory_store.rs`(14) / `manual_update.rs`(7) / `batch_worker.rs`(6) / `window_root_plan.rs`(5) /
+  `options.rs`(5) / `model_db_adapter.rs`(4) / `model_write_behind.rs`(2) / `model_update_plan.rs`(1)；`changelog.md`(18，含 0916–0917 历史条目，
+  **不留双号并存**)；计划 `2026-09-15-attribute-change-class-alignment-dev-plan.md`(11)；vendor **`e3d-model/src/increment.rs`(2)**
+  （管段账那两句注释，随 e3d-model 侧下次提交入库）。
+- **验证**：改完全仓 `rg ADR-078` 只剩 MDB 闭包那一份的引用（外加 ADR-080 正文里点名它的改号记录）；`rg ADR-080` 104 + 6（ADR 正文自述）；
+  `cargo test --lib` **2222 过 0 败 118 ignored**（与改号前同数——`mdb_closure.rs` 里 `assert!(notice.contains("ADR-078"))` 那条断言
+  属于 MDB 闭包那一份，未受影响）。
+
+### ADR-080 D10：「touched 但 0 单元」的根在单元路上只推回执——只被 `no_model` 候选碰到的 regen 根发一份空 `Partial`，不再整根重算
 
 - **为什么**：Q6 第一手（`bf405d5ad` + vendor `5d92b97`）把只跳 `CACHID` 的候选从上卷里摘掉，那些根名下**要重建的单元归零**；
   但三档 `no_model` 候选照旧做闭包种子（不变量「根不在闭包里 ⇒ 子树里什么都没动」靠它守着，第二手 d-365 拍了不动），根仍 `touched`
   → `RegenRoot`，整根重算出来的几何与 S 端逐字相同、只有回执前移。语料里 9172 / 263612 根（3.5%）是这形状，8486 个零单元；
   整库缓存重建的扫写窗（aps7344 108→109、aps250209 16→17）整窗都是它。D9 接线后的单元路对这种根也不省：生产方切出的子计划为空，
-  按「空清单不是没变」（Q4 那条静默缺件的防线）回退整根 regen。用户 0917 拍：「开 ADR-078 那条：RegenRoot 只重建变了的单元，
+  按「空清单不是没变」（Q4 那条静默缺件的防线）回退整根 regen。用户 0917 拍：「开 ADR-080 那条：RegenRoot 只重建变了的单元，
   把『touched 但 0 单元』的根变便宜」。
 - **改动**（会话 fable-5-1-10）：
   - **规划器**（`window_root_plan.rs`）：新分桶 `classify_no_model_only_roots`——`plan.regen` 里的根五条缺一不可才点名：窗口没退化；
@@ -35,7 +52,7 @@
   - **探针**：`probe_unit_publish_one_root_against_regen` 打出 D10 分桶（`AIOS_MODEL_UNIT_LEVEL_PUBLISH=1` 收候选表）、按分桶给 unit
     带提示；新旋钮 `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>` 把 MDB 没声明的语料库挂成额外 DESI pin（Q6 那六个库都不在任何 MDB 里，
     配 `DB_OPTION_FILE=db_options/DbOption-aps.toml` 解目录依赖）。
-  - 文档：ADR-078 状态行（D9 接线 / D10 落地 / **编号撞车**点明）、D10 正文、A8 验收行、Q6 开放问题、「不做」末条改口；
+  - 文档：ADR-080 状态行（D9 接线 / D10 落地 / **编号撞车**点明）、D10 正文、A8 验收行、Q6 开放问题、「不做」末条改口；
     `options.rs` 开关文档；计划 §8 Q6 ★0917 段末补指向。
 - **验证**：
   - 单测：`no_model_only_roots_need_every_one_of_the_five_conditions`、`the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain`、
@@ -66,8 +83,8 @@
   验证：`cargo test --lib` **2222 过 0 败 118 ignored**（+1 源码钉）；rustfmt 本轮新增行无差异；CRLF 未翻。
 - **未做 / 边界**：开关 `model_unit_level_publish` 仍默认关，D10 随它且要三条级联同开。D7（整根落盘）/ A5 / A6 全语料 /
   A7 净收益照旧未做；D10 这类根的落盘代价 = 整根行重写（零记录根 = 只写回执）。**ADR 编号撞车**：本仓另有一份 Accepted 的
-  `ADR-078-projects-come-from-the-mdb…`，两份 D 编号互不相干，改不改号待拍板。ADR 草案文件此前一直**未跟踪**（changelog 0916 条说新增、
-  但没 `git add`），本条随提交入库。
+  `ADR-078-projects-come-from-the-mdb…`，两份 D 编号互不相干，改不改号待拍板（★0917 已拍：单元级那份改号 ADR-080，见同日「ADR 改号」条，
+  本条正文里的 ADR 号已随之改写）。ADR 草案文件此前一直**未跟踪**（changelog 0916 条说新增、但没 `git add`），本条随提交入库。
 
 ### 属性变化分类对齐 core · §8 Q6 落地：只 `CACHID` 跳动的候选进 `no_model` 第三档 `cache_stamp`，窗 C 上 GENSEC / HANDRA 不再挡刚体前移
 
@@ -104,7 +121,7 @@
   一起变不是只戳）。
 - **未做 / 边界**：`model_transform_cheap_path` 默认仍关；P23 排除不动（窗 C 要真走 transform 得另议 STRFLT）；Q6 第二手（只戳候选不做闭包种子）
   **同日拍板不动**——它只在整库扫写窗真省根，而那形状与「被引用的目录件 / 跨根设计引用变了、引用者只被盖戳」在 DESI 窗里分不出来，今天正是戳做种子
-  把后者收住的；收益等 ADR-078（分析与 A / B / C 三条路留在计划 §8 Q6 ★0917 第二手段）；
+  把后者收住的；收益等 ADR-080（分析与 A / B / C 三条路留在计划 §8 Q6 ★0917 第二手段）；
   e3d-model 侧改动已随 vendor `5d92b97` 入库（gen-model `bf405d5ad` 起经 path 依赖用到 `NoModelTier::CacheStamp` / `cache_stamp`，两仓已一起入库）。
 
 ### ADR-066 D1 规则 2 · 账本去向 `no_model` 的候选不再把根踢回 regen——「挪 EQUI + 子元素改个名」走得了 transform
@@ -210,7 +227,7 @@
   `moved > 0` 的相等不受类别影响）；探针钉 db8000 609→610 复跑（`output/e3d-s4/probe_window_A_609_610_reading.md`）：样本行与
   读法列都成了「属主不变量未变」，test ok；`cargo check --lib --tests` 绿；`rustfmt --check` 本文件只剩两处原有的差异；CRLF 未翻。
 
-### ADR-078 D1 / D6 / D8：真生产方 `UnitDeltaProducer` 接进单元级执行体，真库探针 ams8000 五窗五根与整根重算逐字同章
+### ADR-080 D1 / D6 / D8：真生产方 `UnitDeltaProducer` 接进单元级执行体，真库探针 ams8000 五窗五根与整根重算逐字同章
 
 - **生产方**（`e3d_model_service.rs`）：`UnitDeltaProducer::open(service, dbnum, S, T)` 一窗算一次——`collect_window` →
   两端 `generation_input`（与整根重算共用缓存的 `DbSet` / 索引）→ `plan_update`，**计划口径与选根那一步同一份**
@@ -255,7 +272,7 @@
   未接。`produce` 是同步阻塞的 I/O + CPU，今天在 async 执行体里直接调（与刚体路同款），接生产调用点时要放
   `spawn_blocking`。
 
-### ADR-078 D6 / A3：管段完整性门夹在执行体的产出与提交之间——触到的 BRAN 少带一段就整根回退，不发
+### ADR-080 D6 / A3：管段完整性门夹在执行体的产出与提交之间——触到的 BRAN 少带一段就整根回退，不发
 
 - **门**：`e3d_model_service::tube_segment_completeness(&UnitDelta) -> Result<(), String>`，在
   `republish_roots_by_unit_delta_on` 里位于 `produce` 之后、`publish` 之前；不成就 `fallbacks` 一条
@@ -280,7 +297,7 @@
 - **没做**：D6 第一条「`removals` 只许来自 `UpdatePlan.remove` ∪ 派生旧键差集」还没在执行体里核——今天 `UnitDelta::removals`
   是生产方给什么算什么，接上 `execute_plan` 时钉成守卫。仍没有生产调用点（D9 开关未立）。
 
-### ADR-078 D4 / A4：单元级发布执行体骨架——`republish_gate` 当 `Partial` 的幂等闸，闸先于产出，执行体自己不读记录
+### ADR-080 D4 / A4：单元级发布执行体骨架——`republish_gate` 当 `Partial` 的幂等闸，闸先于产出，执行体自己不读记录
 
 - **执行体立起来了**：`E3dModelService::republish_roots_by_unit_delta(dbnum, T, units, produce)`，与刚体路
   `republish_roots_by_rigid_motion` 同形、同一把 `db_generation_lock(dbnum)`、同一道 `ensure_not_older_than_persisted`
@@ -375,7 +392,7 @@
   `zz_tmp_s4_census` 出会话差分 `sesdiff_aps250110_{32_33,33_34,34_35,32_36}.txt`；e3d-io 例程 `zz_tmp_seslist` 读会话页 user / date / comment 定的撞车责任——三个临时探针收尾时**都已删**（用法记在取证文档）。
   宏新增 `scripts/e3d/s4_aps_strflt_{move,restore,fix}{,_driver}.mac` 六个。生产代码零改动；未跑全量 `cargo test`（本轮没有可退步的东西）。
 
-### ADR-078 D5：局部提交的回执由存储在写锁里盖——「应用 delta + 重算 `manifest_hash` + 盖回执」成为一个原子操作
+### ADR-080 D5：局部提交的回执由存储在写锁里盖——「应用 delta + 重算 `manifest_hash` + 盖回执」成为一个原子操作
 
 - **章盖在 `ModelMemoryStore` 的写锁里。** `ScopeState::apply_upserts_and_receipt` 落完 upserts 后，
   `scope == Partial` 且带回执的提交由新加的 `ScopeState::stamp_partial_receipt` 按 `record_ids_under(root)`
@@ -391,13 +408,13 @@
   那道守卫照旧绿。
 - **调用方的分工**：`Partial` 回执里 `manifest_hash` / `geometry_count` 是占位、会被覆盖；`source_sesno` /
   `model_target` / `published_via` 照调用方填的。`CommitScope::Partial` 与 `ProjectionCommit::receipt` 的文档
-  写明了这一条；ADR-078 加实施约束 10。
+  写明了这一条；ADR-080 加实施约束 10。
 - **`commit` / `try_commit_current` 改为返回实际入库的回执**（`Vec<(RefNo, RootReceipt)>`，按提交序）。
   顺手修了一处会静默咬人的地方：`model_write_behind::publish_commits` 原先在**提交前**从 `commits` 抄回执去登记
   durable 身份——对 `Partial` 就是拿占位值登记，ACK 永远对不上、这根永远 pending 且不报错。现改用返回值登记；
   非持久档的 `publish` 也从返回值取根。`apply_geometry_delta_on` 的 Historical 分支加了个分号吞掉返回值，
   别无改动。
-- **`WholeRoot` 一字不动**（ADR-078 实施约束 9）：回执照调用方写的入库，存储不替它算。
+- **`WholeRoot` 一字不动**（ADR-080 实施约束 9）：回执照调用方写的入库，存储不替它算。
   `cached_root_commit` 与「目标变了、清单没变」两条路的 `upserts` 是空的，替它们重算就是把完整投影盖成空章。
 - **护栏四条**：`a_partial_receipt_is_stamped_from_the_root_as_it_stands_after_the_delta`（占位不入库；
   章 == 对提交后 `records_of_root` 跑配方；数 == 记录数；与不经存储、直接对 `[a, c']` 算的逐字相同；
@@ -414,7 +431,7 @@
   D5 那笔 O(根内记录数) 的 digest 账没变（省的只是克隆），Q1 照旧挂着。下一步是 D4 的幂等闸
   （搬 ADR-066 `republish_gate`）或 D6 / 实施约束 4 的管段完整性门。
 
-### ADR-078 D2 / A2：`CommitScope::{WholeRoot, Partial}` 落地——但不变量不在存储里，在上游那条「缺席 ⇒ 删除」的做差上
+### ADR-080 D2 / A2：`CommitScope::{WholeRoot, Partial}` 落地——但不变量不在存储里，在上游那条「缺席 ⇒ 删除」的做差上
 
 - **动手时发现初稿把不变量放错了层。** 存储（`ScopeState::apply_removals`）**本来就只删**
   `ProjectionCommit::removals` 与 `tube_branch_resets` 点名的那些，从来不拿缺席当删除。
@@ -439,17 +456,17 @@
 - **仍然没有打开任何行为**：今天所有生产提交都是 `WholeRoot`，`Partial` 只有测试在构造；
   局部生成、幂等闸、`model_unit_level_publish` 都还没有。
 
-### ADR-078 A1：投影记录与根回执的对账从 `==` 放宽成 `<=`——记录带的是自己最后一次生成的会话，根推进到哪了看回执
+### ADR-080 A1：投影记录与根回执的对账从 `==` 放宽成 `<=`——记录带的是自己最后一次生成的会话，根推进到哪了看回执
 
 - **改的是两处，不是三处。** `model_db_adapter.rs` 的 `RootShare::load` 与 `persist_root_impl` 里那条
   `record.source_sesno == receipt.source_sesno && record.ancestors.contains(&packed_root)` 改判 `<=`；
   越界那一半（祖先链里没有这个根）一字未动。**比回执新的记录仍然报错**——那意味着有人把几何投进来却没盖章，
   这根的全集就不是回执说的那一份。
-- **为什么要动它**：单元级发布（ADR-078）只重建变了的那几件，没动的记录仍停在上一次真正生成它的会话上，
+- **为什么要动它**：单元级发布（ADR-080）只重建变了的那几件，没动的记录仍停在上一次真正生成它的会话上，
   而回执整根前移到 T——落盘那一刻就撞这条等号，现场只看得见一句 "projection contains records outside its
   receipt scope"。顺带解释了一件旧事：**ADR-066 刚体前移明明不重算网格，为什么仍要把整根记录全部 upsert 一遍**
   ——它就是在绕这一条。它省的是生成，不是写入。
-- **ADR-078 初稿 D3 列了三处，动手时核掉一处**：`room_resident.rs` 的
+- **ADR-080 初稿 D3 列了三处，动手时核掉一处**：`room_resident.rs` 的
   `row.source_sesno == source.target_sesno()` **不该改**。它校的是 `generate_frozen_roots` 的产出，
   而产出永远来自一次新鲜生成、每条都盖着 `batch.source_sesno`，根本不经过投影里那些没动的旧记录；
   放宽它只是白削一道还成立的检查。`room_model.rs` 读活投影、本来就是 `<=`，也不动。ADR 的 D3 与 A1 已改口。
@@ -459,9 +476,9 @@
 - 验证：gen-model `cargo test --lib` **2129 绿 / 0 红 / 114 ignored**，e3d-model **320 绿 / 0 红**；
   `rustfmt --edition 2024 --check src/fast_model/model_db_adapter.rs` 干净；该文件行尾 LF，与 HEAD 一致未翻。
 - **本条不打开任何行为**：`CommitScope`、局部清单、`model_unit_level_publish` 一样都还没有，这一步只是
-  把那道等号从单元级发布的必经之路上挪开（ADR-078 实施约束 1：先改语义，后接执行体）。
+  把那道等号从单元级发布的必经之路上挪开（ADR-080 实施约束 1：先改语义，后接执行体）。
 
-### 属性变化分类对齐 core · S7 收口：图元级重建先量出 86.5%（真·重算口径），§8 Q4 关闭，单元级发布立 ADR-078（草案）
+### 属性变化分类对齐 core · S7 收口：图元级重建先量出 86.5%（真·重算口径），§8 Q4 关闭，单元级发布立 ADR-080（草案）
 
 - **S7 探针**（`window_root_plan::tests::probe_unit_level_rebuild_ratio`，`#[ignore]` 手动，工作树内未提交，作者协同组 dchc 的 opus-5-74）：
   沿 ams8000_0001 整条会话链逐窗走生产口径选根，对 `plan.regen` 里的每一根**两端各 `generate_subtree` 一次**，逐件按 `GeometryId` 配对、
@@ -478,7 +495,7 @@
 - **顺带量到一笔不属于 S7 的账**：整根白算 255/488 根，按单元占真·重算总量 **1230/2670（46.1%）**——一件都没变却被整根重算。那是选根的题
   （S6 / 计划 §8 Q6），单元级发布在这些根上一个图元都不碰。它比 S7 能省的还大，另开一条线。
 - **计划 §8 Q4 关闭**：阈值 70% 没动，动的是分母；按真·重算口径过线。用户 2026-09-16 拍板立 ADR。
-- **新增 `docs/adr/ADR-078-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`（草案）**——ADR-056 **D3 末句**留的那个口子
+- **新增 `docs/adr/ADR-080-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`（草案）**——ADR-056 **D3 末句**留的那个口子
   （「单元级落库（`execute_plan` 直写）另立 ADR」），也是 D3 的第二个例外（第一个是 ADR-066）。九条决策，核心三点：
   ① 单元级的**判定与生成早就现成**（`plan_update` / `execute_plan` / `apply_geometry_delta` / `ProjectionCommit` 记录级 / 房间 overlay 记录级），
   缺的是「局部清单怎么在一个根级回执之下安全落地」；② `ProjectionCommit` 加 `CommitScope::{WholeRoot, Partial}`，`Partial` 下**未提及 ≠ 删除**

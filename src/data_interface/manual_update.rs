@@ -2349,7 +2349,7 @@ pub enum UnitGenStatus {
 }
 
 /// 一个交付单元这一轮的发布方式：整根重算（默认）、刚体前移便宜路（ADR-066）或单元级发布
-/// （ADR-078：只重建 `plan_update` 点名的那几件，`Partial` 提交叠在根回执之下，与回执的
+/// （ADR-080：只重建 `plan_update` 点名的那几件，`Partial` 提交叠在根回执之下，与回执的
 /// `published_via = "unit"` 同名）。旧回执没有这一列，反序列化成 `Regen`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2386,7 +2386,7 @@ pub struct ModelUnitResult {
     /// 规划期判 `transform`、执行期回退整根重算时的原因（`Some` 仅此时）。旧回执没有该字段。
     #[serde(default)]
     pub transform_fallback_reason: Option<String>,
-    /// 本窗带着单元级发布提示（ADR-078 D9）、执行期却回退整根重算时的原因（闸 / 完整性门 /
+    /// 本窗带着单元级发布提示（ADR-080 D9）、执行期却回退整根重算时的原因（闸 / 完整性门 /
     /// 生产方哪一条不成，`Some` 仅此时）。走成 `Unit` 的与从没试过单元级的都是 `None`。
     /// 旧回执没有该字段。
     #[serde(default)]
@@ -2462,7 +2462,7 @@ pub struct UnitTask {
     /// `None` = 照旧整根重算。开关关时规划器不产它，恒 `None`。执行体认它才分流，B6 之前的
     /// 执行体忽略它、行为不变。`UnitTask` 只在内存里，不入库，故无需 `serde`。
     pub transform: Option<TransformUnit>,
-    /// 单元级发布（ADR-078 D9）的提示：这个根是本窗规划出来的 regen 根，`source_start_sesno` 是本窗
+    /// 单元级发布（ADR-080 D9）的提示：这个根是本窗规划出来的 regen 根，`source_start_sesno` 是本窗
     /// `plan_update(S→T)` 的基线 S——执行体的幂等闸拿它对回执，生产方拿它切子计划，两处必须是同一个 S。
     /// `None` = 照旧整根重算：开关关着、规划退化、或这根不是本窗产物（级联 / 恢复 / 目录名单来的根，
     /// 它们的回执不在本窗的 S 上，局部清单对不上）。与 `transform` 同时在时 **transform 优先、unit 兜底**
@@ -2470,7 +2470,7 @@ pub struct UnitTask {
     pub unit_publish: Option<UnitPublishHint>,
 }
 
-/// 单元级发布提示（ADR-078 D9）随 [`UnitTask`] 走的那一格：本窗的基线 S，外加 D10 的
+/// 单元级发布提示（ADR-080 D9）随 [`UnitTask`] 走的那一格：本窗的基线 S，外加 D10 的
 /// `no_model_only`——规划器判这根这一窗只被账本去向 `no_model` 的候选碰到（`ModelUpdatePlan::
 /// unit_publish_no_model_only_roots` 点了名），单元路对它切出的空子计划许只推回执；假时空子计划照旧
 /// 回退整根 regen。
@@ -2486,7 +2486,7 @@ pub struct UnitPublishHint {
 /// regenerate it reintroduces a deleted BRAN into the staged generation worklist.
 ///
 /// `unit_publish_base_sesno` 是计划上的 `ModelUpdatePlan::unit_publish_base_sesno`：`Some(S)` 时本窗的
-/// 每个新单元都带单元级发布提示（ADR-078 D9），`None` 时一个都不带、与今天逐位相同。
+/// 每个新单元都带单元级发布提示（ADR-080 D9），`None` 时一个都不带、与今天逐位相同。
 /// `no_model_only_roots` 是计划上的 `unit_publish_no_model_only_roots`（`a/b`）：名单上的根提示里
 /// `no_model_only = true`（D10）；基线为 `None` 时名单不看。
 pub fn collect_unit_tasks(
@@ -2518,7 +2518,7 @@ pub fn collect_unit_tasks(
                 .iter()
                 .find(|hint| hint.root_refno == unit.root_refno)
                 .cloned(),
-            // 单元级发布提示（ADR-078 D9）：开关开着、本窗规划没退化时规划器给出基线 S，本窗的
+            // 单元级发布提示（ADR-080 D9）：开关开着、本窗规划没退化时规划器给出基线 S，本窗的
             // 每个新单元都带；它与 transform 提示可以同时在，执行期 transform 优先（实施约束 7）。
             // D10：规划器点名的「只被 no_model 候选碰到」的根在提示里标 `no_model_only`。
             unit_publish: unit_publish_base_sesno.map(|source_start_sesno| UnitPublishHint {
@@ -9184,7 +9184,7 @@ mod tests {
             "计划上没有单元级发布基线（开关关 / 退化窗）时一个都不带提示，与今天逐位相同"
         );
 
-        // ADR-078 D9：计划带了基线 S，本窗的每个新单元都带单元级发布提示——与 transform 提示可以
+        // ADR-080 D9：计划带了基线 S，本窗的每个新单元都带单元级发布提示——与 transform 提示可以
         // 同时在（执行期 transform 优先，实施约束 7）。D10：只有计划点了名的根提示里才标 `no_model_only`。
         let tasks = collect_unit_tasks(
             &[equi.clone(), bran.clone()],

@@ -630,7 +630,7 @@ impl RootShare {
                 records.len()
             );
             let packed_root = packed_refno(root);
-            // ADR-078 D3：记录上的 `source_sesno` 是「这条记录最后一次真正生成的会话」，
+            // ADR-080 D3：记录上的 `source_sesno` 是「这条记录最后一次真正生成的会话」，
             // 「这根推进到哪了」由回执单独表达。单元级发布只重建变了的那几件，没动的记录仍停在
             // 更早的会话上——所以是 `<=` 不是 `==`。比回执**新**的记录仍然是错：那意味着有人把
             // 几何投进来却没盖章，这根的全集就不是回执说的那一份。
@@ -1607,7 +1607,7 @@ async fn persist_root_impl(
             records.len()
         );
         let packed_root = packed_refno(root);
-        // ADR-078 D3：同 [`RootShare::load`] 的那一条——记录带的是自己最后一次生成的会话，
+        // ADR-080 D3：同 [`RootShare::load`] 的那一条——记录带的是自己最后一次生成的会话，
         // 根推进到哪了看回执。单元级发布之后没动的记录会落在回执之前，比回执新的仍是错。
         anyhow::ensure!(
             records.iter().all(|record| {
@@ -4040,9 +4040,9 @@ mod tests {
         assert_eq!(count(&db, "inst_relate").await, 0);
     }
 
-    /// ADR-078 D3 / A1：回执之下的记录**可以停在更早的会话**，比回执新的仍然是错。
+    /// ADR-080 D3 / A1：回执之下的记录**可以停在更早的会话**，比回执新的仍然是错。
     ///
-    /// 单元级发布（ADR-078）只重建变了的那几件，没动的记录留在上一次真正生成它的会话上，
+    /// 单元级发布（ADR-080）只重建变了的那几件，没动的记录留在上一次真正生成它的会话上，
     /// 而回执整根前移到 T。这一条钉住那道对账从 `==` 放宽成 `<=` 之后的两端。两次都逐字核
     /// 错误文本：陈旧那次若哪天又被拦下，错误会落在「incomplete」而不是「outside its receipt
     /// scope」上，只判 `is_err()` 看不出差别。

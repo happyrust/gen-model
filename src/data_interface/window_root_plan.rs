@@ -314,7 +314,7 @@ pub struct WindowRootSources {
     /// 反查判不了时把原因交给 [`WindowImpact::cascade_degraded`]（放弃凭证前移）。开关
     /// `model_design_reference_cascade` 关着时是 `DesignReferenceCascade::off()`（零 I/O）。
     pub design_reference: crate::data_interface::reverse_reference::DesignReferenceCascade,
-    /// 按根归因的候选表（刚体前移 ADR-066 S4b 与单元级发布 ADR-078 D10 共用）：候选（两端属主链、
+    /// 按根归因的候选表（刚体前移 ADR-066 S4b 与单元级发布 ADR-080 D10 共用）：候选（两端属主链、
     /// 去向；刚体开关开着时另有 `Δ` 与三条排除的判决）与每个根在 T 端的属主链。两个开关
     /// （`model_transform_cheap_path` / `model_unit_level_publish`）都关着时两个集合都空；刚体开关关着时
     /// `enabled = false`、一次 `world_matrix` 都不算——`impact` / `plan_window_roots` 的产物与今天逐位相同。
@@ -1132,7 +1132,7 @@ fn rigid_motion_summary_line(
     )
 }
 
-/// [`classify_no_model_only_roots`] 的产物（ADR-078 D10）。
+/// [`classify_no_model_only_roots`] 的产物（ADR-080 D10）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NoModelOnlyClassification {
     /// 这一窗只被 `no_model` 候选碰到的 regen 根：单元路上切出的空子计划许当「没有一件几何要变」
@@ -1143,7 +1143,7 @@ pub struct NoModelOnlyClassification {
     pub rejected: Vec<(RefnoEnum, String)>,
 }
 
-/// 纯函数（ADR-078 D10）：`regen` 里哪些根这一窗**只被账本去向 `no_model` 的候选碰到**。这样的根在
+/// 纯函数（ADR-080 D10）：`regen` 里哪些根这一窗**只被账本去向 `no_model` 的候选碰到**。这样的根在
 /// 单元路上切出的子计划必然为空——Q6 第一手（元数据门三档：`NAME` 一类 / 生成器不读的属性 / 只跳
 /// `CACHID` 戳）已把它名下要重建的单元归零——今天的执行体把空子计划一律当「选根看得比 `plan_update`
 /// 远」回退整根 regen；对这一类根那一退是白算：整根重算出来的几何与 S 端逐字相同，只有回执前移了。
@@ -1430,7 +1430,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             ..Default::default()
         })
         .collect();
-    // 单元级发布（ADR-078 D9）的窗口基线只在开关开着、且本窗的根规划没退化时带上：退化窗把每个
+    // 单元级发布（ADR-080 D9）的窗口基线只在开关开着、且本窗的根规划没退化时带上：退化窗把每个
     // 持久根都判成 regen，那不是「这几件变了」，局部清单没有对应的口径；开关关着时这一格是 `None`，
     // 执行体一次都不被叫到，计划与今天逐位相同（实施约束 9）。选根一个字不改（实施约束 6）。
     let unit_publish_base_sesno = (crate::options::model_unit_level_publish()
@@ -2331,7 +2331,7 @@ mod tests {
         assert!(no_model_candidates(&ChangeLedger::new()).is_empty());
     }
 
-    /// ADR-078 D10：`regen` 里只被 `no_model` 候选碰到的根才点名——五条缺一不可。
+    /// ADR-080 D10：`regen` 里只被 `no_model` 候选碰到的根才点名——五条缺一不可。
     ///
     /// 层级：ZONE 1 ─┬─ EQUI 10（根）─── BOX 11
     ///               └─ PIPE 20 ─── BRAN 21（根）─── ELBO 22

@@ -12,7 +12,7 @@
 > 两态相等且有判别力 = **这形状上排除保守**——见 §4 ★0916 S4 E3D 结论）。
 > 代码事实对到 `gen-model-refactor@1bd2cab4c` + 当日工作树、`vendor/e3d-model@7da42b5` + 当日工作树。
 > 会话 fable-5-1-13 → fable-5-1-21 → fable-5-1-40 → fable-5-1-44 → fable-5-1-49 →（S7 支线 fable-5-1-60 / opus-5-74）→ opus-5-10 →（S4 E3D 支线 fable-5-1-7 → fable-5-1-20 → opus-5-23）。
-> S8 之后多两条待拍板（§8 Q5 / Q6）；S4 的对拍给了 Q5 第二票；S7 的结论收口成 **ADR-078**（§8 Q4）。
+> S8 之后多两条待拍板（§8 Q5 / Q6）；S4 的对拍给了 Q5 第二票；S7 的结论收口成 **ADR-080**（§8 Q4）。
 
 ## 0. 一句话
 
@@ -172,7 +172,7 @@ D2 是「少算」但两票都是我们自己能验的（字典 + 读取集合 +
 | S4 ✅ | **对拍样本**：~~ams8000 链上~~ ★0916 沿五个目录全语料找只动了摆放的候选（`probe_rigid_exclusion_windows`，`#[ignore]`），逐个过 `rigid_anchor` 分类、按生成根归组做两态对拍；无自然窗的排除按 ADR-066 验收 1 用 `AIOS_PROJAMS_GEOMETRY_FILE` + `AIOS_TRANSFORM_WINDOW` 造一窗 | ~~e3d-model `tests/increment_real.rs`~~ ★0916 gen-model `window_root_plan::tests::probe_rigid_exclusion_windows`（排除判决 `rigid_anchor` 只在 gen-model 一侧；生成用 e3d-model `generate_subtree`，目录库经 `DirectoryDbResolver` 按需补开）、`docs/evidence/2026-09-16-rigid-exclusion-parity.md`（+ `-ignore-cachid.md`，按政策不入库）；E3D 造窗：`scripts/e3d/s4_db8000_*.mac`（l3_suite `--check-driver` 跑，db8000）、`docs/evidence/2026-09-16-rigid-exclusion-e3d-windows.md` | 每个样本两态（Δ 前移 vs T 端整根重算）`GeometryId` 集合相同、体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵 1e-6 内相等；被排除的锚点若照 Δ 前移必须**不等**（证明排除有内容）。★0916 语料结果：合格锚点 27 个有判别力的根全等（0 红）；负体 / 规则 M / 路由容器三条排除各有干净样本坐实不等；P23、开孔在消费属主下、CWBRAN、点环容器、桥架件、剖面、几何集**零个自然窗**。★0916 E3D 造窗：NBOX 在 BOX 下两窗——609→610 六个不变量全同（通孔平移，探针报「无判别力」，**不是**生成器没扣）、614→615 属主链 BOX 三角 / 亏格 / 体积变，**排除有内容**；PLOPEN 在 PANE 下**造不出**（`NEW PLOPEN` 崩 des.exe）；P23 **造不出只动摆放的窗**（HRPOST 无 POS/ORI；带 POS/ORI 的十个在 db8000 建不出带几何的子树）——见 ★0916 S4 E3D 结论 |
 | S5 ✅ | **读取集合产物 + 护栏**（D2 前半） | `output/gen_read_set.py`、`src/data_interface/generation_read_set.json`（嵌入，`model_impact::generation_read_set()`）、e3d-model `data/attribute-read-set.json` + `src/attribute_reads.rs` + `tests/attribute_reads_guard.rs`（推广 `reference_reads_guard.rs`）、gen-model 同款守卫（`model_impact` 三条测试） | 两条护栏绿；集合里 DCHC=0 的成员逐个点名（今天 6 个 + gen-model 侧的 0 个）；`INDIRECT_READ_SITES` 纪律沿用（改成更宽的「全部大写字面量 + 直接读点」扫描，间接读点的名字仍来自某处字面量，无需逐处登记） |
 | S6 ✅ | **元数据门改两票**（D2 后半） | `model_impact::attribute_is_metadata_only`（两票）+ `attribute_is_curated_metadata`（老名单，只分档）+ `metadata_only_tier`；`window_root_plan::change_metadata_tier`（`change_is_metadata_only` 退成布尔包装）；`classify_operation_effects` / `query_service::change_impact` 预览同口径；e3d-model `increment.rs`（`NoModelTier`、`IncrementReport::unread_attribute`、`totals_line`、`accounts_for`）；回执 warning 两档分列 | `metadata_only_needs_dchc_zero_and_an_unread_attribute`（真值表：读取集合里的 DCHC=0 属性不放行；`NAME` 等老 5 个仍放行；UDA / 字典无 / `opaque` 不放行；放行数 = 3941 − 6）；`the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list`；`the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`（D2 ★S6 (1)）；`live_ams8000_metadata_only_gate_never_adds_and_never_shrinks_the_closure`（三条契约抽成 `assert_metadata_gate_two_state`）+ 全语料版 `live_corpus_metadata_only_gate_two_state_over_every_desi_db`：新门放行的窗只多不少、闭包不缩、账本守恒；产出「DCHC=0 属性变化频次表」进证据文档 |
-| S7 ✅ | **图元级重建先量**：每窗被重算的根里单元记录与上一版逐字相同的占比。~~manifest 逐条比~~ ★0916 实际做法是**两端各整根 `generate_subtree` 一次、逐件按 `GeometryId` 配对、比 `ParityInvariants`**（与 S4 对拍门同一把尺子：noun / 体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵，旋转绝对 1e-6、其余相对 1e-6，不比网格顶点） | ~~`window_root_plan` warning 多一格 `unchanged_unit_ratio`~~ ★0916 **只量不接线**（§6「不做」第一条：本轮不做单元级发布，回执不该先长出一个没人消费的字段）：`window_root_plan::tests::probe_unit_level_rebuild_ratio`（`#[ignore]`）+ `docs/evidence/2026-09-16-unit-level-rebuild-measure.md` 与同名 `-addendum.md`（按政策不入库） | 有数即可；>70% 才立 ADR，否则记结论。★0916：按「真·重算」口径 **86.5% > 70%**，故立 **ADR-078**（见 §8 Q4） |
+| S7 ✅ | **图元级重建先量**：每窗被重算的根里单元记录与上一版逐字相同的占比。~~manifest 逐条比~~ ★0916 实际做法是**两端各整根 `generate_subtree` 一次、逐件按 `GeometryId` 配对、比 `ParityInvariants`**（与 S4 对拍门同一把尺子：noun / 体积 / 三角数 / 亏格 / 包围盒 / 世界矩阵，旋转绝对 1e-6、其余相对 1e-6，不比网格顶点） | ~~`window_root_plan` warning 多一格 `unchanged_unit_ratio`~~ ★0916 **只量不接线**（§6「不做」第一条：本轮不做单元级发布，回执不该先长出一个没人消费的字段）：`window_root_plan::tests::probe_unit_level_rebuild_ratio`（`#[ignore]`）+ `docs/evidence/2026-09-16-unit-level-rebuild-measure.md` 与同名 `-addendum.md`（按政策不入库） | 有数即可；>70% 才立 ADR，否则记结论。★0916：按「真·重算」口径 **86.5% > 70%**，故立 **ADR-080**（见 §8 Q4） |
 | S8 ✅ | **`CACHID` 一致性普查**（探针） | ~~e3d-model `tests/increment_real.rs::probe_cachid_consistency`~~ ★0916 落在 gen-model `window_root_plan::tests::probe_cachid_consistency`（`#[ignore]`；DCHC 字典、两票门、`rigid_anchor` 三样都只在 gen-model 一侧，e3d-model 里放不下「DCHC 类别 × 我方判定」两维）；`AIOS_POSREF_DIRS` / `AIOS_CACHID_PROBE_STEPS_PER_DB` / `AIOS_CACHID_PROBE_REPORT` 可改 | 三维交叉表（CACHID 四态 × 除 CACHID 之外的变更类别 × 我方判定）+ 「只 CACHID」成因 + 「忽略 CACHID 再判」位移 + 属性名 × 四态，进 `docs/evidence/2026-09-16-cachid-consistency-corpus.md`（按政策不入库）；结论进取证文档 §4.4 末条；只作结论，不接线 |
 
 依赖：S1 独立；S2 → S3 → S4 顺序；S5 → S6；S7、S8 独立。S2–S4 是开 `model_transform_cheap_path` 的前置；S6 落地后 `model_skip_metadata_only_changes` 语义变宽但开关名不变。
@@ -241,8 +241,8 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
 
 ## 6. 不做（本轮）
 
-- 单元级发布（ADR-056 D3 例外）——S7 只量。★0916 仍然成立：S7 量完、**ADR-078 已立（草案）**，但**本计划内不实施**——
-  它是独立的架构变更（改 `source_sesno` 语义 + `CommitScope` + 幂等闸），按 ADR-078 自己的 A1–A7 另开切片。
+- 单元级发布（ADR-056 D3 例外）——S7 只量。★0916 仍然成立：S7 量完、**ADR-080 已立（草案）**，但**本计划内不实施**——
+  它是独立的架构变更（改 `source_sesno` 语义 + `CommitScope` + 幂等闸），按 ADR-080 自己的 A1–A7 另开切片。
 - `BFORI` 进 `TRANSFORM_ONLY`——只挂 `BPFITT`，不生成。
 - 图形缓存路 / `CACHID` 作判据。
 - `is_placement_only` 扩名单；`PLACEMENT_ATTRIBUTES` 不动。
@@ -265,8 +265,8 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
   ★0916 **已收口**：阈值没动，动的是**分母**。同一份探针同一条语料，含新根 68.6% 不过线、剔新根（真·重算）86.5% 过线——
   新根按定义占比恒 0，而 core 遇新根也走 `REPELE` 整件建、`SEGREP` 省不了它，拿它给 `SEGREP` 记过没道理，故**新根不进分母**。
   稳健性检查（再剔掉 255 个整根白算的根）仍有 75.0%，说明过线不是被 100% 那一档抬上去的。用户 2026-09-16 拍板：按此口径过线，
-  **立 `docs/adr/ADR-078-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`**（草案，D2 / D3 / D7 / D9 待逐条过目）。
-  Q4 本身到此关闭；单元级发布的后续拍板转到 ADR-078 的 Q1–Q5。
+  **立 `docs/adr/ADR-080-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`**（草案，D2 / D3 / D7 / D9 待逐条过目）。
+  Q4 本身到此关闭；单元级发布的后续拍板转到 ADR-080 的 Q1–Q5。
 - **Q5**（★0916 S8 派生，S4 / 开 `model_transform_cheap_path` 的前置）`ElementDiff::is_placement_only` 要不要把 `CACHID` 剔出比较集？语料里有值元素上
   88 次含 `POS`/`ORI` 的变化**全部**同时跳 `CACHID`，不剔则刚体前移在 3.1 真库上几乎永远打不着 EQUI / BRAN / SCTN（今天 79 个 transform 判定全落在
   没有 `CACHID` 的 noun 上）。推荐：**倾向剔**——它不是几何输入（生成器不读，S8 坐实它只是缓存计数），但这是「少算」方向，按纪律要两票：字典没给它投票，
@@ -307,7 +307,7 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
   → `Disposition::NoModel`，ADR-066 D1 规则 2 从此不把它当挡路候选（`CandidateKind::NoModel`）。落点：e3d-model `increment.rs` / `element_diff.rs`（文档），
   gen-model `model_impact.rs` / `window_root_plan.rs` / `options.rs`（文档）；ADR-066 状态行 + 规则 2 末注；本条。验证与窗 C 复跑结果见 changelog 2026-09-17。
   仍开着的：Q6 探针 `probe_cachid_only_regen_cost` 量的从此只剩第二手（只戳候选不做闭包种子能再省多少根）——那是选根的题，另议。
-  ★0917 **第二手已拍：不动**（用户拍板 A：「第二手不动，收益等 ADR-078」；会话 fable-5-1-42 的分析如下，落在这里当依据）。
+  ★0917 **第二手已拍：不动**（用户拍板 A：「第二手不动，收益等 ADR-080」；会话 fable-5-1-42 的分析如下，落在这里当依据）。
   **不变量**：e3d-model `affected_closure` 按祖先封闭，「根 r 不在闭包里 ⇒ r 子树里什么都没动」，`plan_window_roots` 据此把
   `(roots_S ∩ roots_T) \ touched` 直接 `advance`；种子 = 三个动作集 ∪ **账本上每个 L2 真变了的候选**——后一半是 2026-09-02 特意加的
   （只拿单元做种子，落进 `no_model` 的改动——挪了位的 RPATH / POINTR、改了 PKDI 的桥架件、任何今天不认识明天会消费的数据——不在闭包里，
@@ -326,13 +326,13 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
   目录变了它看不见（设计文档 §1.3 原话：只能证 DESI 侧几何没变，证不了目录侧），为此设计的「目录侧」列（#8：窗两端时间戳之间 MDB 内 CATA / PROP
   库有没有新会话）**没实现**，9172 根全「未查」；而且 9172 多算根里 **8486 是零单元**（aps7344 7904 = HANG / SUPPO、aps7343 400 = STRU / FRMW
   下 SCTN、aps250212 118、aps250742 64——e3d-model 没有 builder，两端都生成 0 件，无判别力），真有判别力的绿只有 aps250209 684 + acw5525 2。
-  **收益**：语料 9172 / 263612 根（3.5%），18 窗（16 窗整窗前移）；8486 零单元根本来就只是走一遍 + 回执，有几何的约 686 根；ADR-078（草案）
+  **收益**：语料 9172 / 263612 根（3.5%），18 窗（16 窗整窗前移）；8486 零单元根本来就只是走一遍 + 回执，有几何的约 686 根；ADR-080（草案）
   落地后 `RegenRoot` 只重建变了的单元，这些根的 regen 只剩回执，第二手的收益被它吃掉大半。**拍板 A**：种子不动，戳继续当 core 那句
-  「这件图形重建过」的证词保留；省钱走单元级（第一手已把单元归零，ADR-078 再把「touched 但 0 单元」的根变便宜）；代价是扫写窗的根级回执照跑。
+  「这件图形重建过」的证词保留；省钱走单元级（第一手已把单元归零，ADR-080 再把「touched 但 0 单元」的根变便宜）；代价是扫写窗的根级回执照跑。
   未选的 B（有条件剔：根只被只戳候选碰到 ∧ 目录侧 = 无 ∧ 设计反查未退化；前置是先做 #8 目录侧列量一遍）与 C（无条件剔，不建议：e 类今天就靠它，
   换它的两条级联一条默认关、一条无表就退化）留档，将来要翻案先补 #8 那一列。
-  ★0917 **A 的另一半已落**：ADR-078 D10（会话 fable-5-1-10）——`plan.regen` 里只被 `no_model` 候选碰到的根随计划点名，单元路对它切出的空子计划
+  ★0917 **A 的另一半已落**：ADR-080 D10（会话 fable-5-1-10）——`plan.regen` 里只被 `no_model` 候选碰到的根随计划点名，单元路对它切出的空子计划
   发一份空 `Partial` 只推回执（目录侧由生产方的 `model_target` 核封住，正是 #8 那一列；设计侧跨根引用靠 C2 / C8 / P4 挡——同日拍板
   **写死「级联关着 ⇒ 不分桶」**，三条级联同开才生效）。真库：级联关着时规划器点名 aps7343 6→7 100 / 100、aps250209 16→17 373 / 373、
   15→16 311 / 373——与本节量表的多算根逐个相同；规则写死、级联同开后 26 / 100 与 350 / 373（差掉的是级联判成引用者对端的根）；
-  四根 PARITY OK。开关 `model_unit_level_publish` 仍默认关。详见 ADR-078（单元级）D10 与 changelog 2026-09-17。
+  四根 PARITY OK。开关 `model_unit_level_publish` 仍默认关。详见 ADR-080（单元级）D10 与 changelog 2026-09-17。

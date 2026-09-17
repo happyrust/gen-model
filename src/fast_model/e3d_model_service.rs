@@ -64,10 +64,10 @@ pub struct RigidMotionUnit {
     pub anchors: Vec<TransformAnchor>,
 }
 
-/// 单元级发布执行体（ADR-078 D4）一轮的结果，与 [`RigidMotionReport`] 同形：`completed` 走成了局部提交，
+/// 单元级发布执行体（ADR-080 D4）一轮的结果，与 [`RigidMotionReport`] 同形：`completed` 走成了局部提交，
 /// `replayed` 是「回执已在 T」的窗口重放（投影一字未动、按已完成计），`fallbacks` 回退整根重算（带原因；
 /// D8：任何一件不成都整根回退，回退永远正确、只是不省）。`receipt_only` 是 `completed` 的**子集**——
-/// 局部清单为空、只把回执推到 T 的那几根（ADR-078 D10：只被 `no_model` 候选碰到的根，一件几何都没重建），
+/// 局部清单为空、只把回执推到 T 的那几根（ADR-080 D10：只被 `no_model` 候选碰到的根，一件几何都没重建），
 /// 只作观测。
 #[derive(Debug, Default)]
 pub struct UnitPublishReport {
@@ -79,9 +79,9 @@ pub struct UnitPublishReport {
 
 /// 单元级发布执行体一次吃的一根。`source_start_sesno` 是 `plan_update(S→T)` 的窗口基线 S：局部清单只对
 /// 「投影还停在 S」的根成立——回执已在 T 是重放，既不在 S 也不在 T 是半截状态或别的路径动过它，两者
-/// 都不许把局部清单叠上去（[`republish_gate`]，ADR-078 D4）。
+/// 都不许把局部清单叠上去（[`republish_gate`]，ADR-080 D4）。
 ///
-/// `no_model_only`（ADR-078 D10）：规划器判这根这一窗**只被账本去向 `no_model` 的候选碰到**——闭包直接命中、
+/// `no_model_only`（ADR-080 D10）：规划器判这根这一窗**只被账本去向 `no_model` 的候选碰到**——闭包直接命中、
 /// 不是级联（C2 / C8 / P4）扩进来的、S 端已发布且安定、归到它名下的每个候选都是 `no_model`。只有带着它，
 /// 生产方切出来的**空**子计划才许当「这根名下没有一件几何要变」发一份空的 `Partial`（只推回执）；不带它的
 /// 空子计划照旧回退整根 regen——选根看得比 `plan_update` 远，空清单不是「没变」。
@@ -92,7 +92,7 @@ pub struct UnitPublishUnit {
     pub no_model_only: bool,
 }
 
-/// 单元级发布一根的**局部**产出（ADR-078 D2 的 `Partial`）：只点名这几件，缺席什么也不证明，要删的
+/// 单元级发布一根的**局部**产出（ADR-080 D2 的 `Partial`）：只点名这几件，缺席什么也不证明，要删的
 /// 必须写进 `removals`。`scope` 与回执由执行体盖——生产方给不出整根的章（D5：存储在写锁里算），
 /// 也不该替执行体决定这一笔是不是局部。
 #[derive(Debug, Default)]
@@ -111,13 +111,13 @@ pub struct UnitDelta {
 
 impl UnitDelta {
     /// 一件几何都不动：不插、不删、不整段重写。这样的产出只有一个合法来源——生产方对一根**只被
-    /// `no_model` 候选碰到**的根切出空子计划（ADR-078 D10）；发出去就是「只推回执」。
+    /// `no_model` 候选碰到**的根切出空子计划（ADR-080 D10）；发出去就是「只推回执」。
     pub fn is_empty(&self) -> bool {
         self.upserts.is_empty() && self.removals.is_empty() && self.tube_branch_resets.is_empty()
     }
 }
 
-/// 管段完整性门（ADR-078 D6 / 实施约束 4）：一次 `Partial` 若触到某条 BRAN 的管身，它的管身按**整段**处理——
+/// 管段完整性门（ADR-080 D6 / 实施约束 4）：一次 `Partial` 若触到某条 BRAN 的管身，它的管身按**整段**处理——
 /// 存储那边 `tube_branch_resets` 一碰就清光那条分支的全部旧段，`upserts` 里没带上的段不会有人替它留着，
 /// 而且两边都不报错（`a_partial_commit_that_resets_a_branch_still_clears_every_segment_of_it` 演的就是这个）。
 ///
@@ -177,7 +177,7 @@ pub(crate) fn tube_segment_completeness(delta: &UnitDelta) -> Result<(), String>
     Ok(())
 }
 
-/// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-078 D1：单元级发布
+/// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-080 D1：单元级发布
 /// **直接吃 `plan_update` 的产出**，不引入第二套变更检测）。`UpdatePlan` 会被 `execute_plan` 整个吃掉、
 /// 又不 `Clone`，所以一窗算一次放在这里，逐根切出子计划再执行。
 struct WindowPlanSets {
@@ -185,7 +185,7 @@ struct WindowPlanSets {
     remove: BTreeSet<(u32, u32)>,
     regenerate_derived: BTreeSet<(u32, u32)>,
     derived_stale: BTreeSet<GeometryId>,
-    /// 规划器退化成整库重建的原因（ADR-078 Q4）：非空时四个集合全空，一根都不许走局部——
+    /// 规划器退化成整库重建的原因（ADR-080 Q4）：非空时四个集合全空，一根都不许走局部——
     /// 空产出不是「没变」。
     full_rebuild: Option<String>,
     /// 计划期就读挂的候选 / 容器数（`unresolved` + `derived_stale_unreadable`）：非零时这一窗的
@@ -198,7 +198,7 @@ struct WindowPlanSets {
 }
 
 impl WindowPlanSets {
-    /// 这一窗的计划能不能给局部发布切子计划（ADR-078 D8 ① ②）：退化成整库重建的计划四个集合全空，
+    /// 这一窗的计划能不能给局部发布切子计划（ADR-080 D8 ① ②）：退化成整库重建的计划四个集合全空，
     /// 切出来的子计划执行后是**空产出**，把它当「没变」盖一个 T 章就是静默缺件（Q4）；计划期有读挂的
     /// 分类不可信，整窗一根都不许走局部。
     fn admits_partial_publish(&self) -> anyhow::Result<()> {
@@ -263,7 +263,7 @@ pub(crate) fn root_touched_only_by_no_model_candidates(
     Ok(())
 }
 
-/// 一根子计划里 `execute_plan` 的 `removals` **唯一**许来自的三处（ADR-078 D6 第一条）：
+/// 一根子计划里 `execute_plan` 的 `removals` **唯一**许来自的三处（ADR-080 D6 第一条）：
 /// `remove` 的单元（窗里删掉的 + 迁出这根的）、`regenerate` 里画不出 / 画失败而被擦掉的单元、
 /// 派生容器 base 端的旧管段键（要重算的 + 迁出这根而退休的容器，见 [`RootSubplan`]）。
 struct RootPlanSets {
@@ -312,7 +312,7 @@ fn same_target_outside_the_design_window(published: &ModelTarget, current: &Mode
         && published.tessellation_profile == current.tessellation_profile
 }
 
-/// 单元级发布的**真生产方**（ADR-078 D1 / D5 / D6 / D8）：`plan_update(S→T)` 一窗算一次，逐根切出子计划 →
+/// 单元级发布的**真生产方**（ADR-080 D1 / D5 / D6 / D8）：`plan_update(S→T)` 一窗算一次，逐根切出子计划 →
 /// `execute_plan` → 烘焙 → `project_geometry_delta`，管段账与 removals 来源核过之后交给执行体
 /// （[`E3dModelService::republish_roots_by_unit_delta`] 的 `produce`）。
 ///
@@ -1866,7 +1866,7 @@ impl E3dModelService {
         Ok(report)
     }
 
-    /// 单元级发布执行体（ADR-078 D4 / D5 / D8）：每一根**先过闸，再要局部产出，再以 `Partial` 提交发布**。
+    /// 单元级发布执行体（ADR-080 D4 / D5 / D8）：每一根**先过闸，再要局部产出，再以 `Partial` 提交发布**。
     ///
     /// 顺序钉死为 闸 → 产出 → 提交（实施约束 5，与 [`Self::republish_roots_by_rigid_motion`] 同序）。
     /// 局部清单不像 regen 天然幂等——它只对「投影还停在规划基线 S」的根成立：回执已在 T 是窗口重放
@@ -2981,7 +2981,7 @@ pub async fn apply_geometry_delta(
 }
 
 /// 「上一版有、这一版没有」= 删掉了——**只有当 `generated` 确实是这根的全集时这句才成立**
-/// （ADR-078 D2，[`CommitScope::WholeRoot`]）。
+/// （ADR-080 D2，[`CommitScope::WholeRoot`]）。
 ///
 /// 这是整个发布链路上**唯一**一处拿缺席推删除的地方，所以单独拎出来命名：单元级发布只重建变了
 /// 的那几件，同一条推导会把没重建的全部删掉，而且投影与库两边都不会报错——静默丢件。
@@ -3158,7 +3158,7 @@ pub(crate) fn republish_roots_by_unit_delta_on(
     Ok(report)
 }
 
-/// ADR-078 D2 第二条的判据：一份 `Partial` 清单**可能**把这根删空吗？执行体不读记录，能用的只有回执上
+/// ADR-080 D2 第二条的判据：一份 `Partial` 清单**可能**把这根删空吗？执行体不读记录，能用的只有回执上
 /// 的记录数（投影完整时就是这根此刻的记录数）与清单本身。
 ///
 /// - 带了 upsert → 落完必有记录，不可能删空；
@@ -3422,7 +3422,7 @@ pub(crate) fn manifest_hash(records: &[ProjectedGeometry]) -> anyhow::Result<(St
 
 /// [`manifest_hash`] 的借用形——同一份配方、同一个函数体，只是不要求记录连成一片。
 ///
-/// 单元级发布（ADR-078 D5）的回执是存储在**写锁里**、delta 落进去之后按这根此刻的全部记录
+/// 单元级发布（ADR-080 D5）的回执是存储在**写锁里**、delta 落进去之后按这根此刻的全部记录
 /// 盖的；那时记录散在 `BTreeMap` 里，按 record_id 一条条取出来的是借用，整根克隆一遍再喂
 /// `&[ProjectedGeometry]` 就是白扛一次 O(根内记录数) 的复制。三条路（重生成 / 刚体前移 /
 /// 单元级）从这里取的章对同一批记录逐字相同，对拍门比的正是它。
@@ -4321,7 +4321,7 @@ mod tests {
         owners
     }
 
-    /// ADR-078 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执不在规划基线 S 上的根
+    /// ADR-080 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执不在规划基线 S 上的根
     /// **回退**整根 regen 并说明原因；两种都不叫生产方、不发布、投影一字不动。残缺 / 解析不了的根在闸之前
     /// 就回退；生产方报错的根照 D8 回退并记原因。
     #[test]
@@ -4415,7 +4415,7 @@ mod tests {
         }
     }
 
-    /// ADR-078 D4 / D5 / A4：回执停在 S 的根走成局部提交——`scope = Partial`、`published_via = "unit"`、
+    /// ADR-080 D4 / D5 / A4：回执停在 S 的根走成局部提交——`scope = Partial`、`published_via = "unit"`、
     /// `source_sesno` 前移到 T、章由存储盖、没点名的那件原地不动（还停在旧会话上，正是 D3 放宽 `<=` 要接住的形状）。
     /// 同一个计划再提一次：回执已在 T，闸判 `replayed`，生产方一次都不被叫到，投影一字不动。
     #[test]
@@ -4539,7 +4539,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D10：带 `no_model_only` 提示的根，生产方回一份**空** delta，执行体照样以 `Partial` 发出去
+    /// ADR-080 D10：带 `no_model_only` 提示的根，生产方回一份**空** delta，执行体照样以 `Partial` 发出去
     /// ——一件几何都不动（三条记录原地、`source_sesno` 停在 S），回执推到 T、章按原记录重算逐字不变，
     /// `receipt_only` 点名它；同一份计划再提是重放。不带提示的根回出空 delta 是生产方的 bug：回退、不发。
     #[test]
@@ -4657,7 +4657,7 @@ mod tests {
         assert_eq!(report.replayed, vec![root.to_string()]);
     }
 
-    /// ADR-078 D10 的典型形状——**零记录的根**（HANG / SUPPO 那类没有 builder 的根，Q6 语料里 9172 个多算根有
+    /// ADR-080 D10 的典型形状——**零记录的根**（HANG / SUPPO 那类没有 builder 的根，Q6 语料里 9172 个多算根有
     /// 8486 个是它）：回执 `geometry_count = 0`、投影按定义完整。空 delta 对它**不是**「删空」（D2 那条判据
     /// 只看真删了东西的清单），照样只推回执；显式删除 / 整段重写才按可能删空回退。
     #[test]
@@ -4748,7 +4748,7 @@ mod tests {
         assert!(records.is_empty(), "零记录的根照旧零记录");
     }
 
-    /// ADR-078 D10 生产方守卫 [`root_touched_only_by_no_model_candidates`]：只看两个方向（候选就是根、
+    /// ADR-080 D10 生产方守卫 [`root_touched_only_by_no_model_candidates`]：只看两个方向（候选就是根、
     /// 候选的 T 端 / S 端链经过根），根之上的候选不算；名下候选全是 `no_model` 且至少一个才成立。
     ///
     /// 层级（T 端）：ZONE 1 ─┬─ EQUI 10（根）─── BOX 11 / SUBE 12
@@ -4813,7 +4813,7 @@ mod tests {
         assert!(guard(&[]).is_err());
     }
 
-    /// ADR-078 D6 / 实施约束 4 的三条判据，直接对门本身：不重置就带段、重置了没账、账与段数不符，
+    /// ADR-080 D6 / 实施约束 4 的三条判据，直接对门本身：不重置就带段、重置了没账、账与段数不符，
     /// 三种都拦；重置 + 有账 + 段数对上才放行。只数段数，`route_ordinal` 有洞不算错（退化槽位本就不出几何）。
     #[test]
     fn the_tube_segment_gate_rejects_unreset_unaccounted_and_short_branches() {
@@ -4901,7 +4901,7 @@ mod tests {
         assert_eq!(tube_segment_completeness(&retired), Ok(()));
     }
 
-    /// ADR-078 A3：构造缺一段的 `Partial`，执行体必须在产出与提交之间回退 regen 并报出原因，**不得**发布——
+    /// ADR-080 A3：构造缺一段的 `Partial`，执行体必须在产出与提交之间回退 regen 并报出原因，**不得**发布——
     /// 两段旧管身原地不动。补齐那一段再来，同一条 BRAN 就走成局部提交。
     #[test]
     fn a_partial_delta_missing_one_tube_segment_falls_back_before_publishing() {
@@ -5029,7 +5029,7 @@ mod tests {
         assert_eq!((receipt.source_sesno, receipt.geometry_count), (43, 3));
     }
 
-    /// ADR-078 D6 第一条：产出里每一条 removal 都要回溯到子计划（`remove` / 画不出的 `regenerate` /
+    /// ADR-080 D6 第一条：产出里每一条 removal 都要回溯到子计划（`remove` / 画不出的 `regenerate` /
     /// 派生旧键）。多出来的一条就是 `execute_plan` 在别处推出了删除——局部提交下等于静默丢件。
     #[test]
     fn a_removal_that_does_not_trace_back_to_the_plan_is_refused() {
@@ -5065,7 +5065,7 @@ mod tests {
         assert!(err.to_string().contains("24383/22"), "{err:#}");
     }
 
-    /// ADR-078 D8 ① ② / Q4：退化成整库重建的窗计划切出来的子计划是空产出，不许当「没变」发；计划期有读挂的
+    /// ADR-080 D8 ① ② / Q4：退化成整库重建的窗计划切出来的子计划是空产出，不许当「没变」发；计划期有读挂的
     /// 一窗也不许。两种都在叫 `execute_plan` 之前拦下。
     #[test]
     fn a_degraded_or_unreadable_window_plan_admits_no_partial_publish() {
@@ -5103,7 +5103,7 @@ mod tests {
         assert!(err.contains("2 unreadable"), "{err}");
     }
 
-    /// ADR-078 生产方守卫 3：只有 `design.session` / `design.digest` 前移是局部发布该看到的那一格；
+    /// ADR-080 生产方守卫 3：只有 `design.session` / `design.digest` 前移是局部发布该看到的那一格；
     /// 目录会话、模板、生成器指纹、细分档任何一格变了都不是一窗 DESI 差分能覆盖的。
     #[test]
     fn a_target_change_outside_the_design_window_disqualifies_a_partial_delta() {
@@ -5154,7 +5154,7 @@ mod tests {
         ));
     }
 
-    /// ADR-078 真库探针（手动）：一窗 S→T 里挑一根 regen 根，S 端整根重算灌进本地投影当基线（回执停在 S、
+    /// ADR-080 真库探针（手动）：一窗 S→T 里挑一根 regen 根，S 端整根重算灌进本地投影当基线（回执停在 S、
     /// 目标是 S 的），再走单元级发布（真生产方 [`UnitDeltaProducer`] → 执行体），最后与 T 端整根重算比
     /// **整根 `manifest_hash`**（D9 ①：逐字相同；不等时按 `geometry_id` 逐条报差异）。
     ///
@@ -5459,7 +5459,7 @@ mod tests {
         Ok(())
     }
 
-    /// ADR-078 实施约束 5：单元级执行体里闸在产出之前、产出在提交之前，且执行体自己**不读任何记录、
+    /// ADR-080 实施约束 5：单元级执行体里闸在产出之前、产出在提交之前，且执行体自己**不读任何记录、
     /// 不自己算章**——删什么由产出点名，整根的章由存储在写锁里盖（D5）。闸后面要是长出一个
     /// `records_of_root`，就又多了一个能读到旧状态的窗口。闸与刚体路同一道、同一个枚举，不另造判据。
     #[test]
@@ -6185,7 +6185,7 @@ mod tests {
         }
     }
 
-    /// ADR-078 D2：拿「缺席」推删除**只许有一处**，就是 [`whole_root_removals`]。
+    /// ADR-080 D2：拿「缺席」推删除**只许有一处**，就是 [`whole_root_removals`]。
     ///
     /// 那条推导（`上一版有的 \ 这一版生成的`）只在 `upserts` 是这根全集时成立。单元级发布
     /// 只重建变了的那几件，谁要是顺手在别处又写一遍同样的做差，就会把没重建的全删掉——

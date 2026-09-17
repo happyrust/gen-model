@@ -1,15 +1,19 @@
-# ADR-078：单元级发布——只重建变了的单元，局部清单在**根回执**之下落地
+# ADR-080：单元级发布——只重建变了的单元，局部清单在**根回执**之下落地
 
 状态：**草案**（2026-09-16 用户拍板「那就把它做了：立单元级发布的 ADR，把 CAS / 回执 / scoped delete 设计出来」；
 本文把设计摆出来，**D2 / D3 / D7 / D9 四条要用户逐条过目才算已接受**）；**A1 / A2 / D5 / D4（闸）/ A4 / D6（门 + removals 守卫）/ A3 /
 D1（真生产方 `UnitDeltaProducer`）已落地，真库探针 5 窗 5 根对拍全等；D9 开关与生产分流已接线（默认关，`4ee0000ab` 随另一路会话的
 在途改动落库，未单列 changelog）；D10（只被 `no_model` 候选碰到的根空 `Partial` 只推回执）2026-09-17 落地；D7 / A5 / A6 全语料 / A7 未实施**
 （同日会话 opus-5-10 按用户「按 A1 开工」「接着做 D2」执行；接班会话 fable-5-1-21 按「接着做 D5」「接着做 D4」「接着做 D6 / A3」
-「接真的生产方」执行；fable-5-1-10 按用户 0917「开 ADR-078 那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」做 D10）。
-**编号撞车**：本仓另有一份已接受的 `ADR-078-projects-come-from-the-mdb-and-project-dirs-are-found-in-search-roots.md`（2026-09-15，MDB 闭包）——
-两份 ADR-078 的 D 编号互不相干；代码注释里凡提「单元级 / `Partial` / `UnitDelta`」的 ADR-078 指本文，凡提「MDB 闭包 / 搜索根 / `included_projects`」
-的指那一份。要不要给本文改号（如 ADR-080）待用户拍板，改号要连带 `e3d_model_service.rs` / `model_memory_store.rs` / `batch_worker.rs` /
-`manual_update.rs` / `options.rs` / changelog 里几十处注释一起改。
+「接真的生产方」执行；fable-5-1-10 按用户 0917「开 ADR-078（即本文，今 ADR-080）那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」做 D10）。
+**★0917 改号 ADR-078 → ADR-080**（用户拍板，会话 opus-5-18）：本文 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了
+`ADR-078-projects-come-from-the-mdb-and-project-dirs-are-found-in-search-roots.md`（MDB 闭包，Accepted），两份同号并存了一天。
+改号连带把 gen-model 的 `e3d_model_service.rs` / `model_memory_store.rs` / `model_db_adapter.rs` / `model_write_behind.rs` /
+`batch_worker.rs` / `manual_update.rs` / `window_root_plan.rs` / `model_update_plan.rs` / `options.rs`、`changelog.md`、
+计划 §8，以及 vendor `e3d-model/src/increment.rs` 里 **104 处**引用一起换过来（含 0916–0917 的历史 changelog 条目，不留双号并存）；
+MDB 闭包那一份的 **11 处**引用逐行核过后原样留在 ADR-078（`options.rs` 的 `project_search_paths` 四处、`e3d_model_service.rs`
+路由目录 D5 一处、`manual_update.rs` 候选项目一处、changelog 0915 五条）。此后代码注释里凡提「单元级 / `Partial` / `UnitDelta`」
+的是 ADR-080，凡提「MDB 闭包 / 搜索根 / `included_projects`」的是 ADR-078。
 **两处初稿被动手时的源码推翻，已就地改口**：D3 多列了一处 `room_resident.rs`（它校的是生成器产出，不是投影状态）；
 D2 把不变量放错了层（存储本来就只删点名的，「缺席 = 删除」在上游 `generate_refs`）。理由分别记在 D3 与 D2。
 日期：2026-09-16
@@ -327,8 +331,8 @@ model_target  = 本轮重算出来的（不沿用旧的）
 
 ### D10　「touched 但 0 单元」的根：只被 `no_model` 候选碰到的 regen 根在单元路上发一份**空** `Partial`，只推回执
 
-★0917 落地（会话 fable-5-1-10；用户「开 ADR-078 那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」，
-接计划 §8 Q6 ★0917 第二手拍板 A「种子不动，收益等 ADR-078」，决策库 `d-365`）。
+★0917 落地（会话 fable-5-1-10；用户「开 ADR-078（即本文，今 ADR-080）那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」，
+接计划 §8 Q6 ★0917 第二手拍板 A「种子不动，收益等 ADR-080」，决策库 `d-365`）。
 
 **它接的账**：Q6 第一手（元数据门第三档 `CacheStamp`，e3d-model `5d92b97` + gen-model `bf405d5ad`）把只跳 `CACHID` 的候选
 从上卷里摘掉了——那些根名下**要重建的单元归零**；但两票门三档的候选**照旧做闭包种子**（不变量「根 r 不在闭包里 ⇒ r 子树里

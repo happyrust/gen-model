@@ -2799,7 +2799,7 @@ async fn run_single_unit(
     )
 }
 
-/// 两条便宜路（刚体前移 ADR-066 B6、单元级发布 ADR-078 D9）完成的根**就地**落库（× ADR-072 D4）：
+/// 两条便宜路（刚体前移 ADR-066 B6、单元级发布 ADR-080 D9）完成的根**就地**落库（× ADR-072 D4）：
 /// 投影记录已被执行体改好（左乘 `Δ`，或按 `Partial` 清单换了那几件），这里按 regen 同一条路
 /// `persist_roots_batched` 合块写进库、空间树随之就地收敛。SUL_DB 落在这里（batch_worker）而不是
 /// 生成服务——`the_generation_service_never_reaches_for_a_database` 那条钉守着生成入口不碰库。
@@ -2808,7 +2808,7 @@ async fn run_single_unit(
 /// 房间归属与 regen 同一条路（ADR-073 D1 硬约束④：刚体变换也接）：动过的根按新投影重算它的
 /// 房间边，随模型行同一笔事务落下；计算器在这里冻一次、本批共用，冻不出来本批每根算失败。
 ///
-/// `Partial` 之后整根落盘（ADR-078 D7：第一版不跟着切）：`persist_root_impl` 从 `records_of_root`
+/// `Partial` 之后整根落盘（ADR-080 D7：第一版不跟着切）：`persist_root_impl` 从 `records_of_root`
 /// 取全量记录，没动的记录停在旧会话上、回执在 T——D3 把对账放宽成 `<=` 接的就是这个形状（A5）。
 ///
 /// 返回没落进去的根与原因（房间算不出来的根写前剔出、一组任一块写失败整组算失败，
@@ -3060,7 +3060,7 @@ async fn run_rigid_motion_units(
     (results, requeue, settlement_failed)
 }
 
-/// 单元级发布分流（ADR-078 D9）：把 `task.unit_publish.is_some()` 的单元交给单元级执行体
+/// 单元级发布分流（ADR-080 D9）：把 `task.unit_publish.is_some()` 的单元交给单元级执行体
 /// ([`E3dModelService::republish_roots_by_unit_delta_from_window`])——一窗 `plan_update(S→T)` 算一次，
 /// 逐根切子计划、只重建点名的那几件、以 `Partial` 提交叠在根回执之下发布。按执行体的清单分成三摞，
 /// 与刚体路同款：走成的与「回执已在 T」的重放都记 `Unit` 完成回执（顺带落库、报进度、计一次 done），
@@ -3330,7 +3330,7 @@ async fn run_unit_worklist(
         results.append(&mut transform_results);
     }
 
-    // 单元级发布分流（ADR-078 D9）：排在刚体路**之后**、整根重算**之前**（实施约束 7：transform 优先、
+    // 单元级发布分流（ADR-080 D9）：排在刚体路**之后**、整根重算**之前**（实施约束 7：transform 优先、
     // unit 兜底）——刚体路回退下来的单元若带着本窗的基线提示，也在这里再试一次局部清单。走成的记
     // Unit 回执；走不成的连同回退原因改排整根重算。开关关时计划上没有基线，没有单元带提示。
     let (unit_tasks, mut worklist): (Vec<_>, Vec<_>) = worklist
@@ -3500,7 +3500,7 @@ async fn run_unit_worklist(
             }
         }
     }
-    // 同款：带着单元级发布提示、执行期回退整根重算的单元记下原因（ADR-078 D8：回退不静默）——
+    // 同款：带着单元级发布提示、执行期回退整根重算的单元记下原因（ADR-080 D8：回退不静默）——
     // 走成的 Unit 单元不在这张表里。
     if !unit_fallback_reason.is_empty() {
         for result in &mut results {
@@ -5234,7 +5234,7 @@ mod tests {
         }
     }
 
-    /// ADR-078 实施约束 7：两条便宜路的优先序定死在代码里、不靠调用顺序碰运气——刚体前移在前、
+    /// ADR-080 实施约束 7：两条便宜路的优先序定死在代码里、不靠调用顺序碰运气——刚体前移在前、
     /// 单元级发布在中、整根重算在后；单元级分流只认 `unit_publish` 提示，回退的单元清掉提示交回
     /// 整根重算并记原因（D8：回退不静默），走成的记 `Unit` 回执，落库走与刚体路同一条 `persist_republished_roots`。
     #[test]

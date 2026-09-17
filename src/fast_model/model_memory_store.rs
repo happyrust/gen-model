@@ -190,7 +190,7 @@ pub fn default_published_via() -> String {
     "regen".to_string()
 }
 
-/// 一笔提交**是不是这根的全集**（ADR-078 D2）。
+/// 一笔提交**是不是这根的全集**（ADR-080 D2）。
 ///
 /// 它**不改存储的删除行为**：`ScopeState::apply_removals` 一向只删 [`ProjectionCommit::removals`]
 /// 与 [`ProjectionCommit::tube_branch_resets`] 点名的那些，从来不拿「缺席」当删除。
@@ -200,7 +200,7 @@ pub fn default_published_via() -> String {
 ///
 /// 于是这一格的用处有三个：① 让一笔提交自己说得清它是哪一种，不靠调用点上下文去猜；
 /// ② 给「缺席推删除」那条推导一个能被机器钉住的前提（见 `e3d_model_service::whole_root_removals`）；
-/// ③ 告诉存储这笔提交的回执**该由谁盖章**（ADR-078 D5，见 [`CommitScope::Partial`]）。
+/// ③ 告诉存储这笔提交的回执**该由谁盖章**（ADR-080 D5，见 [`CommitScope::Partial`]）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitScope {
     /// `upserts` 是这根的全集：缺席 = 删除，上游可以做差。今天所有生产提交都是这一档。
@@ -209,7 +209,7 @@ pub enum CommitScope {
     WholeRoot,
     /// 只点名了这几件：**缺席什么也不证明**，要删什么必须显式写进 `removals`。
     ///
-    /// 带回执时，回执的 `manifest_hash` / `geometry_count` **由存储在写锁里盖**（ADR-078 D5）：
+    /// 带回执时，回执的 `manifest_hash` / `geometry_count` **由存储在写锁里盖**（ADR-080 D5）：
     /// `upserts` 只是这根的一角，整根的章只能在 delta 落进去之后、按此刻这根名下的全部记录算；
     /// 锁外先读 `records_of_root` 再算再提交，读与提交之间还有别的写入者（另一批提交、淘汰、
     /// 整库清空），算出来的章对的是一个已经不存在的版本。所以调用方在这两格填什么都只是占位，
@@ -228,10 +228,10 @@ pub struct ProjectionCommit {
     pub removals: Vec<String>,
     pub upserts: Vec<ProjectedGeometry>,
     /// 本次投影给某个生成根盖的章。`scope` 是 [`CommitScope::Partial`] 时，`manifest_hash` /
-    /// `geometry_count` 两格由存储在写锁里重算并覆盖（ADR-078 D5），调用方填的只是占位。
+    /// `geometry_count` 两格由存储在写锁里重算并覆盖（ADR-080 D5），调用方填的只是占位。
     #[serde(with = "receipt_wire")]
     pub receipt: Option<(RefNo, RootReceipt)>,
-    /// 这一笔是整根全集还是局部（ADR-078 D2）。默认 `WholeRoot` = 今天的语义；
+    /// 这一笔是整根全集还是局部（ADR-080 D2）。默认 `WholeRoot` = 今天的语义；
     /// 磁盘上那些没有这一格的旧产物（`model_artifact`）反序列化后也落在 `WholeRoot`，
     /// 与它们被写下时的语义一致。
     #[serde(default)]
@@ -556,7 +556,7 @@ impl ScopeState {
 
     /// 落 upserts、盖回执；返回**实际入库**的那份回执。`WholeRoot` 原样入库；`Partial` 的章在
     /// upserts 落完之后由 [`Self::stamp_partial_receipt`] 就地重算——与落 delta 在同一把写锁里，
-    /// 中间插不进任何别的写入者（ADR-078 D5）。
+    /// 中间插不进任何别的写入者（ADR-080 D5）。
     fn apply_upserts_and_receipt(
         &mut self,
         commit: ProjectionCommit,
@@ -580,7 +580,7 @@ impl ScopeState {
         Some((root, receipt))
     }
 
-    /// ADR-078 D5：局部提交的回执按**此刻**这根名下的全部记录盖章。
+    /// ADR-080 D5：局部提交的回执按**此刻**这根名下的全部记录盖章。
     ///
     /// 只在写锁里、且 `removals` / `tube_branch_resets` / `upserts` 都已落地之后调用——这是
     /// 「应用 delta + 重算 `manifest_hash` + 盖回执」三步成为一个原子操作的全部依据。记录集合与
@@ -788,7 +788,7 @@ impl ModelMemoryStore {
     ///
     /// 返回这一批**实际入库**的回执，按提交顺序。`WholeRoot` 的就是调用方递进来的那份；
     /// `Partial` 的 `manifest_hash` / `geometry_count` 是在这把锁里、delta 落完之后重算的
-    /// （ADR-078 D5），调用方手里那份是占位——要登记 durable 身份、要对 ACK，都得拿这里返回的。
+    /// （ADR-080 D5），调用方手里那份是占位——要登记 durable 身份、要对 ACK，都得拿这里返回的。
     pub fn commit(
         &self,
         scope: ProjectionScope<'_>,
@@ -1404,7 +1404,7 @@ mod tests {
         ModelMemoryStore::default()
     }
 
-    /// ADR-078 D2：**未提及 ≠ 删除**。
+    /// ADR-080 D2：**未提及 ≠ 删除**。
     ///
     /// 存储本来就只删点名的那些，这一条把它钉住——单元级发布正要靠它：一根三件只重建一件，
     /// 另外两件必须原地不动。同时钉住 `tube_branch_resets` **不受这条约束**：它是整段重写，
@@ -1463,7 +1463,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D6：`tube_branch_resets` 与「未提及 ≠ 删除」是两条相反的规矩，
+    /// ADR-080 D6：`tube_branch_resets` 与「未提及 ≠ 删除」是两条相反的规矩，
     /// 局部提交碰到某条分支的管身就得把它那几段一起带上，否则静默丢管。
     #[test]
     fn a_partial_commit_that_resets_a_branch_still_clears_every_segment_of_it() {
@@ -1504,7 +1504,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D2：磁盘上那些没有 `scope` 这一格的旧 `model_artifact` 反序列化后必须落在
+    /// ADR-080 D2：磁盘上那些没有 `scope` 这一格的旧 `model_artifact` 反序列化后必须落在
     /// `WholeRoot`——它们被写下时就是整根全集，读成 `Partial` 会让上游少删该删的。
     #[test]
     fn a_commit_serialized_before_the_scope_field_reads_back_as_whole_root() {
@@ -1522,7 +1522,7 @@ mod tests {
         crate::fast_model::e3d_model_service::manifest_hash(records).expect("serializable")
     }
 
-    /// ADR-078 D5：`Partial` 回执的章是存储在写锁里、delta 落完之后按这根**此刻**的全部记录盖的。
+    /// ADR-080 D5：`Partial` 回执的章是存储在写锁里、delta 落完之后按这根**此刻**的全部记录盖的。
     ///
     /// 调用方在 `manifest_hash` / `geometry_count` 里填什么都只是占位；盖出来的必须等于对
     /// 「提交之后 `records_of_root`」跑一遍共用配方的结果，也必须能过
@@ -1606,7 +1606,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 实施约束 9：`WholeRoot` 一字不动——回执照调用方写的入库，存储不替它重算。
+    /// ADR-080 实施约束 9：`WholeRoot` 一字不动——回执照调用方写的入库，存储不替它重算。
     /// 缓存命中（`cached_root_commit`）与「目标变了、清单没变」两条路都靠这一点：它们的
     /// `upserts` 是空的，替它们重算就是把一根完整的投影盖成空章。
     #[test]
@@ -1635,7 +1635,7 @@ mod tests {
         assert_eq!(stamped, vec![(root, receipt)]);
     }
 
-    /// ADR-078 D5 的「原子」二字：一边不停地发 `Partial` 提交，另一边任何一次 `root_snapshot`
+    /// ADR-080 D5 的「原子」二字：一边不停地发 `Partial` 提交，另一边任何一次 `root_snapshot`
     /// 读到的回执都必须描述同一次读到的那批记录——章对得上、数对得上。章要是在锁外先算好再
     /// 提交，读者迟早会撞上「记录已经是 v+1、章还是 v」的一拍。
     #[test]
