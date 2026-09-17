@@ -1904,9 +1904,11 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 开着时规划器还会把 `regen` 里**只被账本去向 `no_model` 的候选碰到**的根点名
 /// （`ModelUpdatePlan::unit_publish_no_model_only_roots`，ADR-078 D10，2026-09-17）：那种根这一窗名下没有一件
 /// 几何要变（Q6 第一手已把只跳 `CACHID` 戳的候选从上卷里摘掉），单元路对它切出的空子计划发一份空的 `Partial`
-/// 只推回执，不再整根重算。**已知差异**：跨根设计引用的引用者只被盖戳这一形状，今天靠戳做种子整根 regen 收住，
-/// D10 之后靠 C2 / C8 / P4 级联把引用者的根挡在 D10 之外——开这个开关时建议把
-/// [`model_structural_connection_cascade`] / [`model_cable_endpoint_cascade`] 一起开，不开就是接受那条差异。
+/// 只推回执，不再整根重算。**D10 的前置写死**（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：
+/// [`model_structural_connection_cascade`] / [`model_cable_endpoint_cascade`] / [`model_design_reference_cascade`]
+/// 三条**都开着**规划器才分桶——跨根设计引用的引用者只被盖戳这一形状，今天靠戳做种子整根 regen 收住，D10 之后
+/// 只有级联的目标集能把引用者的根挡在桶外；有一条关着，整窗一根都不点名、空子计划照旧回退整根 regen，
+/// 计划 warnings 里报一句为什么。
 ///
 /// 这是「少算」方向的开关，开门要过 ADR-078 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
 /// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。

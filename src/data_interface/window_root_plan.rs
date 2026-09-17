@@ -857,8 +857,13 @@ impl WindowRootSources {
         // 按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用）：两个开关都关 = 候选表空，下游产物
         // 与今天逐位相同。任一开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链一次算完；
         // `Δ` / 三条排除只在刚体开关开着时算（关着一次 `world_matrix` 都不算），执行体从此一个文件都不必读。
+        // D10 那一半还要三条级联都开（`no_model_only_cascades_off`）——有关着的就不分桶，表也不必收。
         let rigid_enabled = crate::options::model_transform_cheap_path();
-        let rigid = if rigid_enabled || crate::options::model_unit_level_publish() {
+        let unit_level_enabled = crate::options::model_unit_level_publish()
+            && crate::options::model_structural_connection_cascade()
+            && crate::options::model_cable_endpoint_cascade()
+            && crate::options::model_design_reference_cascade();
+        let rigid = if rigid_enabled || unit_level_enabled {
             collect_rigid_motion_sources(
                 &plan,
                 base,
@@ -978,9 +983,32 @@ impl WindowRootSources {
         out
     }
 
+    /// D10 的前置（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：三条级联 C2 / C8 / P4 **都开着**
+    /// 才分桶。理由：跨根设计引用（`JOIS` / `JOIE` / `CREF` / `CFRA` / `STAREF` / `ENDREF` / `POSREF`）的引用者
+    /// 只被盖戳这一形状，今天靠戳做种子整根 regen 收住；D10 把它变成只推回执之后，唯一能把引用者的根挡在
+    /// 桶外的就是级联的目标集（条件 ③）——级联关着，那一格是空的，条件 ③ 形同虚设。回 `Some(哪几条关着)`。
+    pub(crate) fn no_model_only_cascades_off(&self) -> Option<String> {
+        let off: Vec<&str> = [
+            (
+                self.structural_connection.enabled,
+                "model_structural_connection_cascade",
+            ),
+            (self.cable_endpoint.enabled, "model_cable_endpoint_cascade"),
+            (
+                self.design_reference.enabled,
+                "model_design_reference_cascade",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, name)| (!enabled).then_some(name))
+        .collect();
+        (!off.is_empty()).then(|| off.join(" / "))
+    }
+
     /// 单元级发布 D10 的分桶，在 [`Self::impact`] 与 `plan_window_roots` 之后调：`plan.regen` 里哪些根这一窗
     /// **只被 `no_model` 候选碰到**（[`classify_no_model_only_roots`]）。候选表随 `model_unit_level_publish`
-    /// 开关收集；关着时表空，每根都判不出候选、一根都不合格。
+    /// 开关（且三条级联都开）收集；关着时表空，每根都判不出候选、一根都不合格；任一级联关着时
+    /// （[`Self::no_model_only_cascades_off`]）整窗一根都不点名。
     pub(crate) fn no_model_only(
         &self,
         roots_s: &[PersistedRoot],
@@ -994,6 +1022,7 @@ impl WindowRootSources {
             &self.directly_touched(roots_s),
             &self.cascaded_roots(),
             impact.degraded_reason().as_deref(),
+            self.no_model_only_cascades_off().as_deref(),
             &self.rigid.candidates,
         )
     }
@@ -1119,6 +1148,9 @@ pub struct NoModelOnlyClassification {
 /// `CACHID` 戳）已把它名下要重建的单元归零——今天的执行体把空子计划一律当「选根看得比 `plan_update`
 /// 远」回退整根 regen；对这一类根那一退是白算：整根重算出来的几何与 S 端逐字相同，只有回执前移了。
 ///
+/// **前置**（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」）：`cascades_off` 非空 = C2 / C8 / P4 里有关着的，
+/// 整窗一根都不点名——条件 3 靠级联目标集挡「引用者只被盖戳」的根，级联关着那一格是空的。
+///
 /// 五条缺一不可，任一不成就留在 `rejected`（照旧整根 regen，回退永远正确）：
 /// 1. 窗口没退化（`degraded`）——退化窗把每个持久根都判成 regen，那不是「这几件变了」；
 /// 2. 根在 `settled` 里：S 端已发布且安定（`settled_base_roots`，ADR-079）——新根 / 上一窗欠着的根
@@ -1140,12 +1172,19 @@ pub(crate) fn classify_no_model_only_roots(
     direct: &BTreeSet<RefnoEnum>,
     cascaded: &BTreeSet<RefnoEnum>,
     degraded: Option<&str>,
+    cascades_off: Option<&str>,
     candidates: &[WindowCandidate],
 ) -> NoModelOnlyClassification {
     let mut out = NoModelOnlyClassification::default();
     for root in regen {
         match classify_no_model_only_root(
-            root.root, settled, direct, cascaded, degraded, candidates,
+            root.root,
+            settled,
+            direct,
+            cascaded,
+            degraded,
+            cascades_off,
+            candidates,
         ) {
             Ok(()) => {
                 out.roots.insert(root.root);
@@ -1162,8 +1201,15 @@ fn classify_no_model_only_root(
     direct: &BTreeSet<RefnoEnum>,
     cascaded: &BTreeSet<RefnoEnum>,
     degraded: Option<&str>,
+    cascades_off: Option<&str>,
     candidates: &[WindowCandidate],
 ) -> Result<(), String> {
+    if let Some(off) = cascades_off {
+        return Err(format!(
+            "cascade(s) off: {off}; D10 needs C2 / C8 / P4 all on so that referrers reached only \
+             through a stamp are kept out of the bucket"
+        ));
+    }
     if let Some(reason) = degraded {
         return Err(format!("window degraded: {reason}"));
     }
@@ -1206,13 +1252,22 @@ fn classify_no_model_only_root(
     Ok(())
 }
 
-/// warnings 里那一行 D10 的账；开关关着时不出这一行（计划与今天逐字相同）。
+/// warnings 里那一行 D10 的账；开关关着时不出这一行（计划与今天逐字相同）。级联关着时只报一句为什么没分桶。
 fn no_model_only_summary_line(
     dbnum: u32,
     classification: &NoModelOnlyClassification,
     regen: usize,
+    cascades_off: Option<&str>,
 ) -> String {
     const SHOWN: usize = 6;
+    if let Some(off) = cascades_off {
+        return format!(
+            "dbnum={dbnum}: unit-level publish (model_unit_level_publish) — no_model_only roots not \
+             classified: cascade(s) off ({off}); D10 needs model_structural_connection_cascade / \
+             model_cable_endpoint_cascade / model_design_reference_cascade all on, every empty \
+             sub-plan falls back to regen"
+        );
+    }
     let shown = classification
         .roots
         .iter()
@@ -1389,6 +1444,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             dbnum,
             &classification,
             plan.regen.len(),
+            sources.no_model_only_cascades_off().as_deref(),
         ));
         classification
             .roots
@@ -2336,6 +2392,7 @@ mod tests {
             &direct,
             &BTreeSet::new(),
             None,
+            None,
             &candidates,
         );
         assert_eq!(out.roots, set(&[10, 30]), "{:?}", out.rejected);
@@ -2353,8 +2410,15 @@ mod tests {
         );
 
         // 条件 3：级联目标集里的根不合格，哪怕它名下的候选全是 no_model。
-        let out =
-            classify_no_model_only_roots(&regen, &settled, &direct, &set(&[10]), None, &candidates);
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &set(&[10]),
+            None,
+            None,
+            &candidates,
+        );
         assert_eq!(out.roots, set(&[30]));
         assert!(
             out.rejected
@@ -2370,6 +2434,7 @@ mod tests {
             &set(&[10]),
             &set(&[30]),
             &BTreeSet::new(),
+            None,
             None,
             &candidates,
         );
@@ -2393,6 +2458,7 @@ mod tests {
             &direct,
             &BTreeSet::new(),
             None,
+            None,
             &[no_model(11, &[10, 1])],
         );
         assert_eq!(out.roots, set(&[10]));
@@ -2411,6 +2477,7 @@ mod tests {
             &direct,
             &BTreeSet::new(),
             Some("unresolved=1"),
+            None,
             &candidates,
         );
         assert!(out.roots.is_empty());
@@ -2418,6 +2485,26 @@ mod tests {
             out.rejected
                 .iter()
                 .all(|(_, reason)| reason.contains("degraded"))
+        );
+
+        // 前置（用户 0917 拍板）：三条级联有一条关着，整窗一根都不点名，原因点名关着的那条。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            Some("model_cable_endpoint_cascade"),
+            &candidates,
+        );
+        assert!(out.roots.is_empty(), "{:?}", out.roots);
+        assert_eq!(out.rejected.len(), regen.len());
+        assert!(
+            out.rejected.iter().all(|(_, reason)| {
+                reason.contains("cascade(s) off: model_cable_endpoint_cascade")
+            }),
+            "{:?}",
+            out.rejected
         );
 
         // 只动了摆放的锚点（RolledUp）也不是 no_model：刚体开关关着时它记成 Other，开着时是 Anchor，两种都挡。
@@ -2436,6 +2523,7 @@ mod tests {
             &direct,
             &BTreeSet::new(),
             None,
+            None,
             &[anchor],
         );
         assert!(out.roots.is_empty());
@@ -2444,6 +2532,43 @@ mod tests {
             "{}",
             out.rejected[0].1
         );
+    }
+
+    /// 源码钉：D10 的前置「级联关着 ⇒ 不分桶」（用户 2026-09-17 拍板）写在三处，缺一处就红——
+    /// `no_model_only_cascades_off` 看齐三条级联的 `enabled`；`no_model_only` 把它喂给分桶；`collect` 收候选表
+    /// 时也按三个开关同开才为单元级收（关着连表都不收，与今天逐位相同）。
+    #[test]
+    fn d10_refuses_to_classify_unless_all_three_cascades_are_on() {
+        // 本文件是 CRLF：先归一成 LF 再按缩进找函数尾。
+        let source = include_str!("window_root_plan.rs").replace("\r\n", "\n");
+        let body = |start: &str| {
+            let rest = source.split_once(start).expect(start).1;
+            &rest[..rest.find("\n    }\n").expect("fn end")]
+        };
+        let off = body("fn no_model_only_cascades_off(&self)");
+        for field in [
+            "self.structural_connection.enabled",
+            "self.cable_endpoint.enabled",
+            "self.design_reference.enabled",
+        ] {
+            assert!(off.contains(field), "级联 {field} 没被 D10 的前置看齐");
+        }
+        let classify = body("pub(crate) fn no_model_only(");
+        assert!(
+            classify.contains("self.no_model_only_cascades_off().as_deref()"),
+            "分桶必须吃级联开关态"
+        );
+        let collect = body("pub fn collect(");
+        for switch in [
+            "crate::options::model_structural_connection_cascade()",
+            "crate::options::model_cable_endpoint_cascade()",
+            "crate::options::model_design_reference_cascade()",
+        ] {
+            assert!(
+                collect.contains(switch),
+                "候选表为单元级收集时必须要求 {switch}"
+            );
+        }
     }
 
     /// 探针（手动）：钉一窗、开着 `model_transform_cheap_path` 跑一遍**生产同款**选根 + 刚体分桶

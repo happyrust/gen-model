@@ -53,9 +53,18 @@
     单元路 0.04 s 只推回执、章 `1c6dc19a…` 与 regen@17（0.86 s）**逐字相同**，**PARITY OK**；**aps250209 15→16**（混合窗）
     `no_model_only 311 of regen 373`（与 Q6 量表 311 多算 / 62 真变逐个相同；`window plan: regenerate 392`），根 `40094` 4 件 PARITY OK。
     ams8000 S4 那几窗（607→614）扫过：只戳的会话（608→609 / 610→611 / 611→612 / 612→613 / 613→614）候选 1、regen 根 0，没有 D10 形状的根。
-- **未做 / 边界**：开关 `model_unit_level_publish` 仍默认关，D10 随它。**已知差异**：跨根设计引用（`JOIS` / `JOIE` / `CREF` / `CFRA` /
-  `STAREF` / `ENDREF` / `POSREF`）的引用者只被盖戳这一形状，今天靠戳做种子整根 regen「碰巧」收住，D10 之后靠 C2 / C8 / P4 把引用者的
-  根挡在 D10 之外——三条级联默认关，开 D9 时建议一起开；要不要写死「级联关着 ⇒ 不分桶」见 ADR Q6。D7（整根落盘）/ A5 / A6 全语料 /
+- **★同日拍板，规则写死**（用户「把『级联关着 ⇒ D10 不分桶』写死成规则（安全优先，默认配置下 D10 不生效）」）：跨根设计引用
+  （`JOIS` / `JOIE` / `CREF` / `CFRA` / `STAREF` / `ENDREF` / `POSREF`）的引用者只被盖戳这一形状，今天靠戳做种子整根 regen「碰巧」收住，
+  D10 之后只有级联目标集能把引用者的根挡在桶外（条件 ③）。于是 `WindowRootSources::no_model_only_cascades_off` 看齐三条级联的
+  `enabled`（`model_structural_connection_cascade` / `model_cable_endpoint_cascade` / `model_design_reference_cascade`），有关着的整窗
+  一根都不点名（`classify_no_model_only_roots` 多一个 `cascades_off` 形参，每根原因「cascade(s) off: …」）、warnings 报一句为什么、
+  `collect` 也只在三个开关同开时为单元级收候选表；源码钉 `d10_refuses_to_classify_unless_all_three_cascades_are_on` 把三处钉住。
+  **级联开着的账**（同一探针，三条级联 `AIOS_MODEL_*_CASCADE=1`）：aps250209 16→17 `no_model_only` 从 373 / 373 降到 **350 / 373**——
+  差掉的 23 根是级联判成引用者对端的（`2013286753/40174` 那根 50 件的 STRU 就在其中，回退原因「target of a cascade expansion」），
+  `40094` 4 件 receipt-only PARITY OK；aps7343 6→7 从 100 / 100 降到 **26 / 100**（SCTN 的 `JOIS` / `JOIE`），`23727/3` PARITY OK；
+  级联关着复跑：`0 / 373`、原因「cascade(s) off: …」、空子计划回退 regen。上面那三跑 373 / 373、100 / 100、311 / 373 是规则写死之前的数。
+  验证：`cargo test --lib` **2222 过 0 败 118 ignored**（+1 源码钉）；rustfmt 本轮新增行无差异；CRLF 未翻。
+- **未做 / 边界**：开关 `model_unit_level_publish` 仍默认关，D10 随它且要三条级联同开。D7（整根落盘）/ A5 / A6 全语料 /
   A7 净收益照旧未做；D10 这类根的落盘代价 = 整根行重写（零记录根 = 只写回执）。**ADR 编号撞车**：本仓另有一份 Accepted 的
   `ADR-078-projects-come-from-the-mdb…`，两份 D 编号互不相干，改不改号待拍板。ADR 草案文件此前一直**未跟踪**（changelog 0916 条说新增、
   但没 `git add`），本条随提交入库。

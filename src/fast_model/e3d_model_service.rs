@@ -5162,7 +5162,9 @@ mod tests {
     /// 最新两个会话）、`AIOS_UNIT_PUBLISH_PROBE_ROOT=a/b`（默认：规划器 regen 名单里第一根 S 端也有的）、
     /// `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>`（MDB 没声明的语料库挂成额外的 DESI pin，目录依赖仍经当前 MDB 解；
     /// Q6 那六个库要配 `DB_OPTION_FILE=db_options/DbOption-aps.toml`）。D10 的分桶随 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`
-    /// 收候选表——不设它候选表为空、`no_model_only` 恒假，空子计划照旧回退。
+    /// **且三条级联同开**（`AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE=1` / `AIOS_MODEL_CABLE_ENDPOINT_CASCADE=1` /
+    /// `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=1`，用户 0917 拍板「级联关着 ⇒ D10 不分桶」）收候选表——缺一个候选表为空、
+    /// `no_model_only` 恒假，空子计划照旧回退。
     /// 要配置好的 MDB（`from_current`）与 E3D 模板目录。烘焙写的是真 mesh 目录（内容寻址，与整根重算同一处）。
     #[tokio::test]
     #[ignore = "manual live: needs the configured MDB and the E3D template directory; run with --ignored --nocapture"]

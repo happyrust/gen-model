@@ -366,12 +366,15 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
 **代价**（这类根一根的账）：`plan_update` 一窗一份（摊）、闸、`model_target` 核、D5 的 O(根内记录数) digest、D7 的整根落盘
 （零记录的根 = 只写回执）。省下的是整根的 DFS + 几何生成 + 整根 upsert。
 
-**已知差异（要开 D9 时一起拍）**：d-365 分析里 (e) 类「被引用的东西变了、引用者只被盖戳」分两半——**目录半边**（目录件 / SPRF 变了）
-由生产方的 `model_target` 核封住；**设计半边**（跨根设计引用 `JOIS` / `JOIE` / `CREF` / `CFRA` / `STAREF` / `ENDREF` / `POSREF` 的引用者
-只被盖戳）今天靠戳做种子整根 regen「碰巧」收住，D10 之后成了只推回执——引用者的几何停在旧版。C2 / C8 / P4 开着时这类根在级联目标集里、
-被条件 ③ 挡在 D10 之外；**关着就是接受这条差异**（与 Q6 选项 C 在这一类根上的暴露同形，但比 C 多了目录半边的封口与逐根的闸 / 完整性前置）。
-建议开 D9 时把 `model_structural_connection_cascade` / `model_cable_endpoint_cascade` 一起开；要不要把「级联关着 ⇒ D10 不分桶」写死成规则，
-见 Q6。
+**前置（用户 0917 拍板「级联关着 ⇒ D10 不分桶」，安全优先）**：d-365 分析里 (e) 类「被引用的东西变了、引用者只被盖戳」分两半——
+**目录半边**（目录件 / SPRF 变了）由生产方的 `model_target` 核封住；**设计半边**（跨根设计引用 `JOIS` / `JOIE` / `CREF` / `CFRA` /
+`STAREF` / `ENDREF` / `POSREF` 的引用者只被盖戳）今天靠戳做种子整根 regen「碰巧」收住，D10 之后只有级联的目标集能把引用者的根挡在桶外
+（条件 ③）。所以**三条级联 `model_structural_connection_cascade` / `model_cable_endpoint_cascade` / `model_design_reference_cascade`
+都开着，规划器才分桶**（`WindowRootSources::no_model_only_cascades_off`；有关着的整窗一根都不点名，warnings 报一句为什么，候选表也不为
+单元级收——默认配置下 D10 不生效，空子计划照旧回退整根 regen）。源码钉 `d10_refuses_to_classify_unless_all_three_cascades_are_on`
+把三处（前置看齐三条 `enabled`、分桶吃它、`collect` 按三个开关收表）钉住。**级联开着时的账**：aps250209 16→17 从 373 / 373 降到
+**350 / 373**、aps7343 6→7 从 100 / 100 降到 **26 / 100**——差掉的正是级联判成引用者对端的根（GENSEC / SCTN 的 `JOIS` / `JOIE`），
+它们照旧整根 regen；`2013286753/40174`（50 件 HANDRA / GENSEC / STRFLT）就在其中。
 
 ## 后果
 
@@ -431,7 +434,7 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
 | A5 | 落盘：`Partial` 之后 `persist_root` 不报「outside its receipt scope」，回读记录逐字等于 regen 路 |
 | A6 ◐ | 对拍门（D9 ①②）全语料全绿。★0916 会话 fable-5-1-21 只跑了**单根探针** `probe_unit_publish_one_root_against_regen`（`#[ignore]`）：ams8000_0001 五窗五根整根 `manifest_hash` 逐字相同——609→610 / 614→615（EQUI `24384/24776`，2 件）、45→46（改挂，新根 EQUI `24384/25803`）、195→196（级联，EQUI `24384/26186`）、249→250（BRAN `24384/26229`，16 件，含管段整段重写）。全语料多根 / 多窗那一档没跑，A6 仍开着。配套单测：`a_removal_that_does_not_trace_back_to_the_plan_is_refused`（D6 第一条三处来源放行、计划外单元 / 别的容器旧键拒收）、`a_target_change_outside_the_design_window_disqualifies_a_partial_delta`（设计会话前移放行；目录 / 生成器 / 模板 / 细分档各变一格都拒）、`a_degraded_or_unreadable_window_plan_admits_no_partial_publish`（Q4）。gen-model `cargo test --lib` **2146 绿 / 0 红 / 115 ignored**、e3d-model **321 绿**（新增 `per_container_tube_segments_must_split_the_tube_upserts`）、e3d-model 真库门 `an_increment_says_what_two_full_generations_say` 等三条 22 min 全绿 |
 | A7 | 净收益（D9 ③）：一窗端到端时延不慢于 regen 路，数字进证据档 |
-| A8 ✅ | D10：只被 `no_model` 候选碰到的根发空 `Partial` 只推回执。规划器 `no_model_only_roots_need_every_one_of_the_five_conditions`（五条各缺一条都不点名；`Other` / `Anchor` / S 端链上的删除都挡；级联目标集里的挡）+ 生产方守卫 `the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain`（两个方向归因、根之上的不算、`RolledUp` / `Unresolved` 点名、归不到一个就拒）+ 执行体 `a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt`（不带提示的空 delta 回退不发；带提示的以 `Partial` 发出：三条记录原地、`source_sesno` 停在 S、回执到 T、章与 S 逐字相同、`receipt_only` 点名、再提是重放）+ `an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root`（D2 判据改口；零记录根走成）+ `merging_the_worklist_keeps_the_unit_publish_hint` / `collect_unit_tasks` 的名单测试；守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records` 多钉一格：空清单守卫在管段门之后、提交之前。把空清单守卫短路 / 把 D2 判据改回旧形，两条行为测试全红（mutation 核过）。★0917 会话 fable-5-1-10：gen-model `cargo test --lib -- e3d_model_service:: window_root_plan:: rigid_motion:: manual_update:: model_update_plan:: batch_worker:: …` **432 过 0 败 31 ignored**。**真库探针**（`probe_unit_publish_one_root_against_regen`，`DB_OPTION_FILE=db_options/DbOption-aps.toml` + `AIOS_UNIT_PUBLISH_PROBE_FILE` 挂文件 + `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`）：aps7343 6→7 规划器 `no_model_only 100 / regen 100`（== Q6 量表的 100 多算根），根 `23727/3` STRU 零单元 receipt-only、章 == regen@7，PARITY OK；aps250209 16→17 `373 / 373`，根 `2013286753/40174` STRU 50 件 receipt-only 0.04 s、章 `1c6dc19a…` 与 regen@17（0.86 s）逐字相同，PARITY OK；aps250209 15→16 混合窗 `311 / 373`（== Q6 的 311 多算 / 62 真变），根 `40094` 4 件 PARITY OK |
+| A8 ✅ | D10：只被 `no_model` 候选碰到的根发空 `Partial` 只推回执。规划器 `no_model_only_roots_need_every_one_of_the_five_conditions`（五条各缺一条都不点名；`Other` / `Anchor` / S 端链上的删除都挡；级联目标集里的挡）+ 生产方守卫 `the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain`（两个方向归因、根之上的不算、`RolledUp` / `Unresolved` 点名、归不到一个就拒）+ 执行体 `a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt`（不带提示的空 delta 回退不发；带提示的以 `Partial` 发出：三条记录原地、`source_sesno` 停在 S、回执到 T、章与 S 逐字相同、`receipt_only` 点名、再提是重放）+ `an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root`（D2 判据改口；零记录根走成）+ `merging_the_worklist_keeps_the_unit_publish_hint` / `collect_unit_tasks` 的名单测试；守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records` 多钉一格：空清单守卫在管段门之后、提交之前。把空清单守卫短路 / 把 D2 判据改回旧形，两条行为测试全红（mutation 核过）。★0917 会话 fable-5-1-10：gen-model `cargo test --lib -- e3d_model_service:: window_root_plan:: rigid_motion:: manual_update:: model_update_plan:: batch_worker:: …` **432 过 0 败 31 ignored**。**真库探针**（`probe_unit_publish_one_root_against_regen`，`DB_OPTION_FILE=db_options/DbOption-aps.toml` + `AIOS_UNIT_PUBLISH_PROBE_FILE` 挂文件 + `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`）：aps7343 6→7 规划器 `no_model_only 100 / regen 100`（== Q6 量表的 100 多算根），根 `23727/3` STRU 零单元 receipt-only、章 == regen@7，PARITY OK；aps250209 16→17 `373 / 373`，根 `2013286753/40174` STRU 50 件 receipt-only 0.04 s、章 `1c6dc19a…` 与 regen@17（0.86 s）逐字相同，PARITY OK；aps250209 15→16 混合窗 `311 / 373`（== Q6 的 311 多算 / 62 真变），根 `40094` 4 件 PARITY OK（以上三跑在「级联关着 ⇒ 不分桶」写死**之前**，级联关着）。**规则写死之后**（三条级联同开）：aps250209 16→17 `350 / 373`，`40174` 被判级联对端、回退 regen（原因「target of a cascade expansion」），`40094` 4 件 receipt-only PARITY OK；aps7343 6→7 `26 / 100`，`23727/3` PARITY OK；级联关着时 `0 / 373`、原因「cascade(s) off: …」、空子计划回退 regen |
 
 ## 不做
 
@@ -461,6 +464,7 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
   e3d-model 那边保留 `increment.rs` 的注释与「空产出 + `degraded_to_full`」的报告形状，不另加门。
 - **Q5** S7 的数只来自 ams8000 一条链、抽样 16%。要不要在动工前先把全语料跑一遍，
   免得 86.5% 是这条链的特例（`BRAN` 占比 380/488）？
-- **Q6**（★0917 D10 派生）D10 对「跨根设计引用的引用者只被盖戳」这一形状的安全靠 C2 / C8 / P4 级联把引用者的根放进目标集
+- ~~**Q6**（★0917 D10 派生）D10 对「跨根设计引用的引用者只被盖戳」这一形状的安全靠 C2 / C8 / P4 级联把引用者的根放进目标集
   （条件 ③）。三条级联今天都默认关。要不要写死「级联关着 ⇒ 规划器不分桶 D10」（安全，但默认配置下 D10 一根都打不着），
-  还是让 D9 开门的三道门里加一条「C2 / C8 同开」，或干脆接受这条已知差异？→ 用户拍板；本文先按「独立开关、文档点明」落。
+  还是让 D9 开门的三道门里加一条「C2 / C8 同开」，或干脆接受这条已知差异？~~ ★0917 **已拍：写死成规则**（用户原话「把『级联关着 ⇒
+  D10 不分桶』写死成规则（安全优先，默认配置下 D10 不生效）」），落在 D10 的「前置」段与 `no_model_only_cascades_off`。
