@@ -850,6 +850,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "bootstrap": crate::data_interface::initialization_phase::InitializationCoordinator::global()
             .snapshot()
             .room_bootstrap,
+        // 反向传播停放给别的库的根级工作项（ADR-073 D13，U3 b 档）：`{dbnum: {entries, elements, oldest_age_ms,
+        // segments}}`，进程内读数；`{}` = 谁也不欠谁。停放物由那个库的下一个任务消费、成功后清空。
+        "parked": crate::data_interface::room_reverse::parked_health(),
     });
     let read_through = state.element_attributes.health().await;
     Json(json!({

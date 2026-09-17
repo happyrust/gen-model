@@ -2093,9 +2093,15 @@ async fn run_room_recompute(
         RoomRecomputeScope::WholeLibrary => {
             run_room_only_recompute(job, &request.reason, result, target_sesno).await
         }
-        RoomRecomputeScope::Targeted(delta) => {
-            match run_targeted_room_recompute(job, &request.reason, delta, result, target_sesno)
-                .await
+        RoomRecomputeScope::Targeted { swap, .. } => {
+            match run_targeted_room_recompute(
+                job,
+                &request.reason,
+                swap.as_ref(),
+                result,
+                target_sesno,
+            )
+            .await
             {
                 Some(verdict) => verdict,
                 None => {
@@ -2112,19 +2118,25 @@ async fn run_room_recompute(
 /// 的根清单枚举不出来（折不出根）、有命中却折不出根的元素（反查不完整）、覆盖面对不上。回 `Some`：
 /// `Targeted(代号)` = 命中根全算齐、盖得上；算不出的根 / 反查失败 / 写库失败 = `Failed`（与整库同一处置，
 /// 下一个任务由电平型触发整库补）。
+///
+/// 结论定为 `Targeted` 之后，反查里别的库的命中连同这一段换代停进那个库的槽（`room_reverse::park_foreign_hits`，
+/// U3 b 档）——由那个库的下一个任务消费；退整库 / `Failed` 不停放。
 async fn run_targeted_room_recompute(
     job: &FrozenBatch,
     reason: &str,
-    delta: &crate::fast_model::room_resident::PanelDelta,
+    swap: Option<&crate::data_interface::room_recompute::PanelSwap>,
     result: &mut DataBatchTaskResult,
     target_sesno: i32,
 ) -> Option<RoomRecomputeVerdict> {
-    use crate::data_interface::room_reverse::{ReverseLookup, affected_roots};
+    use crate::data_interface::room_reverse::{ReverseLookup, affected_roots, park_foreign_hits};
     use crate::fast_model::model_db_adapter::{
         PersistTarget, RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
         render_panel_delta_statements,
     };
     let dbnum = job.dbnum;
+    // 本任务没换代、欠账全在停放链上（U3 b 档）：消费停放物随 U3-4 接进来，此前这一路定不了——退整库不漏算。
+    let swap = swap?;
+    let delta = &swap.panels;
     let rooms = match frozen_room_calculator() {
         Ok(Some(rooms)) => rooms,
         Ok(None) => {
@@ -2229,6 +2241,16 @@ async fn run_targeted_room_recompute(
             let generation = rooms.resident_generation().to_string();
             match room_recompute_uncovered(Some(&affected.roots), &report.covered_roots) {
                 Some(uncovered) if uncovered.is_empty() => {
+                    // 结论定了才停放（U3 b 档）：别的库的命中连同这一段换代（上一代 → 重算那台的代号）进那个库的槽，
+                    // 由它的下一个任务消费。
+                    for line in park_foreign_hits(
+                        dbnum,
+                        &swap.from_generation,
+                        &generation,
+                        &affected.foreign,
+                    ) {
+                        println!("dbnum={dbnum} 定向房间重算：{line}");
+                    }
                     Some(RoomRecomputeVerdict::Targeted(generation))
                 }
                 _ => {

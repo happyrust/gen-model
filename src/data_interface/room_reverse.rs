@@ -18,8 +18,15 @@
 //! - 面板本身不是成员（`noun == PANE` 剔掉，与 `calculate_edges` 同口径）。
 //!
 //! 不写树、不写库、不重算几何：这里只回答「谁」。
+//!
+//! **停放槽**（U3 b 档，2026-09-17，本模块下半）：A 库的任务定向重算成功之后，`foreign` 里 B 库的那一桶连同这一段
+//! 换代（`from → to`）停进 B 的槽（[`park`]），B 的下一个任务开工时取出（[`pending`]）接进准入链、折成 B 的根只重算
+//! 它们，成功后清槽（[`clear`]）。进程内、重启即丢——丢了是**多算不漏算**：③ 电平型触发（库上代号 ≠ 常驻代号）
+//! 兜底整库。要不要落库等 live 看到重启后整库的频率再定。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{PoisonError, RwLock};
+use std::time::Instant;
 
 use aios_core::RefnoEnum;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
@@ -266,6 +273,146 @@ pub(crate) async fn durable_tube_hits(
         .check()?
         .take(0)?;
     Ok(rows_into_pairs(rows))
+}
+
+/// 停放给别的库的根级工作项（U3 b 档）：停放方任务的开工前对齐把常驻从 `from_generation` 换到 `to_generation`
+/// （= 它重算那台计算器的代号），反查里命中的这个库的元素连同祖先链都在 `elements` 里。这个库的任务拿它与自己
+/// `DbSet@T` 的根清单求交（[`fold_to_roots`]）就是要重算的根；折不出根的元素 → 反查不完整 → 退整库。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoomRoots {
+    pub from_generation: String,
+    pub to_generation: String,
+    /// 打包 refno → 祖先链（自身 → 顶层）。
+    pub elements: BTreeMap<i64, Vec<i64>>,
+    /// 停放方（dbnum）。同一段被并进来时保留第一个。
+    pub parked_by: u32,
+    /// 第一次停进来的时刻（`/health` 报年龄）。
+    pub parked_at: Instant,
+}
+
+impl RoomRoots {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} 个元素（{} → {}，dbnum={} 停放）",
+            self.elements.len(),
+            short_generation(&self.from_generation),
+            short_generation(&self.to_generation),
+            self.parked_by
+        )
+    }
+}
+
+fn short_generation(generation: &str) -> String {
+    generation.chars().take(12).collect()
+}
+
+/// 进程内的停放槽：`dbnum → 停放物（按停进来的先后）`。
+static PARKED: RwLock<BTreeMap<u32, Vec<RoomRoots>>> = RwLock::new(BTreeMap::new());
+
+fn parked_read() -> std::sync::RwLockReadGuard<'static, BTreeMap<u32, Vec<RoomRoots>>> {
+    PARKED.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn parked_write() -> std::sync::RwLockWriteGuard<'static, BTreeMap<u32, Vec<RoomRoots>>> {
+    PARKED.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 往 `dbnum` 的槽里停一条。同 `from → to` 的并进已有那条（元素并集、保留最早的时刻与第一个停放方）——
+/// 面板挪回去再挪回来会得到同一对代号，两次命中的是同一批元素。空条不停。回这个库槽里现在的条数。
+pub(crate) fn park(dbnum: u32, entry: RoomRoots) -> usize {
+    if entry.elements.is_empty() {
+        return parked_read().get(&dbnum).map_or(0, Vec::len);
+    }
+    let mut slots = parked_write();
+    let slot = slots.entry(dbnum).or_default();
+    match slot.iter_mut().find(|parked| {
+        parked.from_generation == entry.from_generation
+            && parked.to_generation == entry.to_generation
+    }) {
+        Some(parked) => parked.elements.extend(entry.elements),
+        None => slot.push(entry),
+    }
+    slot.len()
+}
+
+/// `dbnum` 槽里的全部停放物（按停进来的先后），不取走——消费成功才 [`clear`]，失败留着让下一个任务再接。
+pub(crate) fn pending(dbnum: u32) -> Vec<RoomRoots> {
+    parked_read().get(&dbnum).cloned().unwrap_or_default()
+}
+
+/// 清空 `dbnum` 的槽，回清掉的条数。只在这个库的房间重算**成功**之后调（定向 = 链上每一段都算齐；整库 = 覆盖一切），
+/// 或它的库上代号已与常驻相等（停放物说的都是它已经越过的代）。失败不清——③ 兜底整库时再清。
+pub(crate) fn clear(dbnum: u32) -> usize {
+    parked_write().remove(&dbnum).map_or(0, |slot| slot.len())
+}
+
+/// 停放方任务的定向重算**结论定为 `Targeted` 之后**调：反查 `foreign` 的每一桶连同这一段换代（`from` = 它开工前对齐的
+/// 上一代，`to` = 它重算那台计算器的代号）停进那个库的槽。回每个库一句（给日志）。退整库 / `Failed` 不调——那时反查
+/// 说不了完整或本库自己都没算齐，别的库由 ③ 兜底整库。
+pub(crate) fn park_foreign_hits(
+    parked_by: u32,
+    from_generation: &str,
+    to_generation: &str,
+    foreign: &BTreeMap<u32, BTreeMap<i64, Vec<i64>>>,
+) -> Vec<String> {
+    let now = Instant::now();
+    foreign
+        .iter()
+        .filter(|(_, elements)| !elements.is_empty())
+        .map(|(dbnum, elements)| {
+            let entries = park(
+                *dbnum,
+                RoomRoots {
+                    from_generation: from_generation.to_owned(),
+                    to_generation: to_generation.to_owned(),
+                    elements: elements.clone(),
+                    parked_by,
+                    parked_at: now,
+                },
+            );
+            format!(
+                "已为 dbnum={dbnum} 停放 {} 个元素（{} → {}），它的槽里现有 {entries} 段",
+                elements.len(),
+                short_generation(from_generation),
+                short_generation(to_generation)
+            )
+        })
+        .collect()
+}
+
+/// `/health.room_build.parked`：每个有停放物的库一格 `{ entries, elements, oldest_age_ms, segments: ["g1→g2 (dbnum=A)"] }`。
+/// 空槽不出现（`{}` = 谁也不欠谁）。
+pub(crate) fn parked_health() -> serde_json::Value {
+    let slots = parked_read();
+    serde_json::Value::Object(
+        slots
+            .iter()
+            .filter(|(_, slot)| !slot.is_empty())
+            .map(|(dbnum, slot)| {
+                (
+                    dbnum.to_string(),
+                    serde_json::json!({
+                        "entries": slot.len(),
+                        "elements": slot.iter().map(|entry| entry.elements.len()).sum::<usize>(),
+                        "oldest_age_ms": slot
+                            .iter()
+                            .map(|entry| entry.parked_at.elapsed().as_millis() as u64)
+                            .max()
+                            .unwrap_or(0),
+                        "segments": slot
+                            .iter()
+                            .map(|entry| format!(
+                                "{}→{} (dbnum={})",
+                                short_generation(&entry.from_generation),
+                                short_generation(&entry.to_generation),
+                                entry.parked_by
+                            ))
+                            .collect::<Vec<_>>(),
+                    }),
+                )
+            })
+            .collect(),
+    )
 }
 
 /// 树上命中、投影里没有的真实元素：按记录 id（真实元素的 `inst_relate` 记录 id 就是它的 refno）批量取 `anc`。
@@ -519,6 +666,84 @@ mod tests {
             affected.summary(),
             "roots=4 tree_hits=5 tube_hits=4 cross_library=4 foreign_libraries=2 unresolved=1"
         );
+    }
+
+    fn parked(from: &str, to: &str, by: u32, elements: &[(u32, u32)]) -> RoomRoots {
+        RoomRoots {
+            from_generation: from.into(),
+            to_generation: to.into(),
+            elements: elements
+                .iter()
+                .map(|(word0, word1)| (packed(*word0, *word1), vec![packed(*word0, 1)]))
+                .collect(),
+            parked_by: by,
+            parked_at: Instant::now(),
+        }
+    }
+
+    /// 停放槽（U3 b 档）：按库分槽；同一段（同 `from → to`）并成一条（元素并集、保留第一个停放方与最早时刻）、
+    /// 不同段各一条按先后排；空条不停；`pending` 不取走、`clear` 一次清空并回条数；别的库的槽不受影响；
+    /// `/health` 那一格只列有停放物的库。
+    #[test]
+    fn the_parking_slot_merges_the_same_segment_and_clears_per_library() {
+        // 别的用例（以及别的模块的 `mem://` 端到端）也会用槽——这里用只属本用例的 dbnum。
+        let (b, c) = (9_001, 9_002);
+        assert!(pending(b).is_empty());
+        assert_eq!(park(b, parked("g1", "g2", 7_997, &[])), 0, "空条不停");
+        assert_eq!(park(b, parked("g1", "g2", 7_997, &[(24_385, 8)])), 1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(
+            park(b, parked("g1", "g2", 7_999, &[(24_385, 8), (24_385, 9)])),
+            1,
+            "同一段并进已有那条"
+        );
+        assert_eq!(park(b, parked("g2", "g3", 7_999, &[(24_385, 10)])), 2);
+        assert_eq!(park(c, parked("g1", "g2", 7_997, &[(24_386, 8)])), 1);
+
+        let slot = pending(b);
+        assert_eq!(slot.len(), 2);
+        assert_eq!(
+            (
+                slot[0].from_generation.as_str(),
+                slot[0].to_generation.as_str(),
+                slot[0].parked_by,
+                slot[0].elements.keys().copied().collect::<Vec<_>>(),
+            ),
+            (
+                "g1",
+                "g2",
+                7_997,
+                vec![packed(24_385, 8), packed(24_385, 9)]
+            ),
+            "并集、第一个停放方"
+        );
+        assert!(
+            slot[0].parked_at < slot[1].parked_at,
+            "并进来不刷新时刻，先停的排前面"
+        );
+        assert_eq!(slot[0].summary(), "2 个元素（g1 → g2，dbnum=7997 停放）");
+        assert_eq!(pending(b).len(), 2, "pending 不取走");
+
+        let health = parked_health();
+        let mine = &health[b.to_string()];
+        assert_eq!(mine["entries"], 2);
+        assert_eq!(mine["elements"], 3);
+        assert!(mine["oldest_age_ms"].as_u64().is_some());
+        assert_eq!(
+            mine["segments"],
+            serde_json::json!(["g1→g2 (dbnum=7997)", "g2→g3 (dbnum=7999)"])
+        );
+        assert_eq!(health[c.to_string()]["entries"], 1);
+
+        assert_eq!(clear(b), 2);
+        assert!(pending(b).is_empty());
+        assert_eq!(clear(b), 0, "再清是 0，不报错");
+        assert_eq!(pending(c).len(), 1, "别的库的槽不受影响");
+        assert!(
+            parked_health().get(b.to_string()).is_none(),
+            "清空的槽不出现在 /health"
+        );
+        clear(c);
     }
 
     /// 源码钉（U3 b 档）：库上管身的范围查询**不带库过滤**——跨库命中要在这一层就进来，分库在 `resolve` 里按

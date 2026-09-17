@@ -41,6 +41,7 @@
 //! HTTP 触发口」）。
 
 use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
+use crate::data_interface::room_reverse::RoomRoots;
 use crate::fast_model::room_resident::{PanelDelta, RoomReferenceRefresh};
 
 /// 房间定义族：房间节点（FRMW / SBFR）、`project_hd` 的容器（CWALL / CFLOOR）、面板本体（PANE）。
@@ -164,14 +165,28 @@ pub(crate) async fn durable_alignment(dbnum: u32) -> Option<DurableAlignment> {
     Some(DurableAlignment { library, resident })
 }
 
+/// 本任务自己的那一段换代：开工前对齐把常驻从 `from_generation` 换到此刻这一代，面板动了 `panels`。
+/// 反查按 `panels` 的新旧盒问谁在里面；别的库的命中停放出去时这一段就是它们的 `from → to`（`to` = 重算那台计算器的代号）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PanelSwap {
+    pub from_generation: String,
+    pub panels: PanelDelta,
+}
+
 /// 这个任务的房间重算要算多大范围（ADR-073 D13 反查，2026-09-17）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RoomRecomputeScope {
     /// 整库：`DbSet@T` 的每一根（今天的 D13）。
     WholeLibrary,
-    /// 定向（反向传播）：这一次换代的面板变化就是本库的全部欠账——拿它反查命中的根，只重算它们；
+    /// 定向（反向传播）：库上那一代 → 此刻常驻这一代之间面板动了什么就是本库的全部欠账——本任务自己这一段换代的
+    /// 面板变化（`swap`，反查命中的根）加上别的库停放给本库的根级工作项（`parked`，U3 b 档），只重算它们；
     /// 面板级的两类（不在册 / 只改号）不查空间直接写。
-    Targeted(PanelDelta),
+    Targeted {
+        /// 本任务自己换的那一段；`None` = 本任务没换代，欠账全在停放链上（U3 b 档的准入链，随 U3-3 接进来）。
+        swap: Option<PanelSwap>,
+        /// 别的库停放给本库的（按停进来的先后）。随 U3-3 接进准入链、U3-4 消费；此前恒空。
+        parked: Vec<RoomRoots>,
+    },
 }
 
 /// 这个任务要跑的房间重算：为什么（三条触发合成一句）与算多大。
@@ -200,7 +215,13 @@ pub(crate) fn scope_for_task(
             panels: Some(delta),
             ..
         }) if !delta.is_empty() && library_generation == Some(previous.as_str()) => {
-            RoomRecomputeScope::Targeted(delta.clone())
+            RoomRecomputeScope::Targeted {
+                swap: Some(PanelSwap {
+                    from_generation: previous.clone(),
+                    panels: delta.clone(),
+                }),
+                parked: Vec::new(),
+            }
         }
         _ => RoomRecomputeScope::WholeLibrary,
     }
@@ -571,13 +592,20 @@ mod tests {
                 elapsed_ms: 1,
             }
         };
+        let targeted = RoomRecomputeScope::Targeted {
+            swap: Some(PanelSwap {
+                from_generation: "g1".into(),
+                panels: delta.clone(),
+            }),
+            parked: Vec::new(),
+        };
         assert_eq!(
             scope_for_task(
                 Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
                 Some("g1")
             ),
-            RoomRecomputeScope::Targeted(delta.clone()),
-            "四条齐：定向"
+            targeted,
+            "四条齐：定向，带着自己这一段换代（从上一代起）的面板变化"
         );
         for (label, refresh, library) in [
             (
@@ -638,7 +666,7 @@ mod tests {
             Some(&alignment(Some("g1"), "g2")),
         )
         .unwrap();
-        assert_eq!(request.scope, RoomRecomputeScope::Targeted(delta));
+        assert_eq!(request.scope, targeted);
         assert_eq!(request.reason.matches("；").count(), 2, "{request:?}");
     }
 
@@ -679,17 +707,41 @@ mod tests {
         let dispatch = function_body(worker, "async fn run_room_recompute(");
         assert!(
             dispatch.contains("RoomRecomputeScope::WholeLibrary =>")
-                && dispatch.contains("RoomRecomputeScope::Targeted(delta) =>"),
+                && dispatch.contains("RoomRecomputeScope::Targeted { swap, .. } =>"),
             "两种范围各走一路: {dispatch}"
         );
         assert!(
-            dispatch.contains(
-                "run_targeted_room_recompute(job, &request.reason, delta, result, target_sesno)"
-            ) && dispatch.contains("None =>")
+            dispatch.contains("run_targeted_room_recompute(")
+                && dispatch.contains("swap.as_ref(),")
+                && dispatch.contains("None =>")
                 && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
             "定向定不了（None）退整库；整库直接整库: {dispatch}"
         );
         let targeted = function_body(worker, "async fn run_targeted_room_recompute(");
+        // 停放（U3 b 档）只在结论定为 `Targeted` 的那一臂里、盖章之前；退整库 / Failed 的臂里没有。
+        let park = targeted
+            .find("park_foreign_hits(")
+            .expect("定向成功后把别的库的命中停放给它");
+        let decided = targeted
+            .find("Some(uncovered) if uncovered.is_empty() => {")
+            .expect("覆盖面对上的那一臂");
+        let stamped = targeted
+            .find("Some(RoomRecomputeVerdict::Targeted(generation))")
+            .expect("定向的结论");
+        assert!(
+            decided < park && park < stamped,
+            "结论定为 Targeted 之后才停放（覆盖面对上的那一臂里、结论之前）: {targeted}"
+        );
+        assert_eq!(
+            targeted.matches("park_foreign_hits(").count(),
+            1,
+            "只此一处停放"
+        );
+        assert!(
+            !function_body(worker, "async fn run_room_only_recompute(")
+                .contains("park_foreign_hits("),
+            "整库那一路不停放：反查没跑、说不了别的库欠什么"
+        );
         let enumerate = targeted
             .find("library_generation_roots(dbnum, target_sesno)")
             .expect("先枚举 DbSet@T 的根清单（折根的靶子）");
