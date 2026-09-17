@@ -11,13 +11,15 @@
 //! `{booled_id}.mesh` × `world_trans`；隐式管身在 `tubi_relate`（`out` 就是网格键）。叶子集合
 //! 用 `anc CONTAINS <packed refno>` 一次取齐（自身 + 全部后代，`idx_*_anc` 索引）。
 //! **不走** `tessellate_libgm_param`：缺网格文件的叶子记 warning 跳过，一个都没有 → `NoModelMesh`。
+//! 源与目标有祖先关系时两侧叶子会重合（FIXING × 它所在的 WALL），重合叶子从祖先那一侧剔掉再算
+//! （[`split_shared_leaves`]），否则自对必回 0；剔完一侧空了 → `SharedLeavesOnly`（422）。
 //!
 //! **算法**（§4.2–§4.4）：叶子对按 AABB 距离升序，`aabb_distance >= best` 即停；每对调
 //! parry `closest_points(max_dist = best)`（TriMesh × TriMesh 走 composite 嵌套 BVH，精确三角对）；
 //! 命中三角法向给面分类（顶 / 底 / 端 / 侧；弧墙内 / 外），再从源侧最近点沿 −n 打 `cast_ray`
 //! 得垂距。顶点是 f32：世界 mm 量级 1e5 下 ~1e-2 mm 误差，低于弦高容差 0.5 mm。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -687,16 +689,97 @@ pub async fn fetch_leaf_rows(db: &Surreal<Any>, refno: RefU64) -> Result<Vec<Lea
         if row.insts.is_empty() {
             continue;
         }
-        let dedupe = if row.key.is_empty() {
-            format!("{}:{}", row.refno, row.insts[0].0)
-        } else {
-            row.key.clone()
-        };
-        if seen.insert(dedupe) {
+        if seen.insert(leaf_identity(&row)) {
             rows.push(row);
         }
     }
     Ok(rows)
+}
+
+/// 一片叶子行的身份：有 record id 用 record id，旧数据没有时退到「refno + 首个网格键」。
+/// `fetch_leaf_rows` 去重与两侧重合判定用同一把尺。
+fn leaf_identity(row: &LeafRow) -> String {
+    if row.key.is_empty() {
+        format!("{}:{}", row.refno, row.insts[0].0)
+    } else {
+        row.key.clone()
+    }
+}
+
+/// 两侧叶子行有重合时的处置记录（进 warnings / debug）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedLeafReport {
+    /// 重合叶子从哪一侧剔掉了：祖先那一侧。
+    pub trimmed_side: TrimmedSide,
+    /// 剔掉的叶子数。
+    pub removed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimmedSide {
+    Source,
+    Target,
+}
+
+impl TrimmedSide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Target => "target",
+        }
+    }
+}
+
+/// 两侧叶子都按 `anc CONTAINS` 取，源若是目标的后代（门框 FIXING × 它所在的 WALL），目标集合会含源
+/// 自身的行，自对必然回 0 / intersects、把真值盖掉；反过来（源是 owner、目标是它名下的一件）同理。
+/// 处置：重合的叶子从**祖先那一侧**剔掉——问「门框到墙」得到的是门框到墙其余部分的距离，问「BRAN 到
+/// 自己的弯头」得到的是 BRAN 其余部分到弯头的距离。源全部落在目标里 → 剔目标；目标全部落在源里 →
+/// 剔源；两个都不成立的部分重合按 `anc` 的语义不该出现，一律当「源在目标里」剔目标。没有重合原样返回。
+pub fn split_shared_leaves(
+    source_rows: Vec<LeafRow>,
+    target_rows: Vec<LeafRow>,
+) -> (Vec<LeafRow>, Vec<LeafRow>, Option<SharedLeafReport>) {
+    let source_ids: HashSet<String> = source_rows.iter().map(leaf_identity).collect();
+    let target_ids: HashSet<String> = target_rows.iter().map(leaf_identity).collect();
+    let shared: HashSet<String> = source_ids.intersection(&target_ids).cloned().collect();
+    if shared.is_empty() {
+        return (source_rows, target_rows, None);
+    }
+    let target_within_source =
+        target_ids.is_subset(&source_ids) && !source_ids.is_subset(&target_ids);
+    let trimmed_side = if target_within_source {
+        TrimmedSide::Source
+    } else {
+        TrimmedSide::Target
+    };
+    let removed = shared.len();
+    let keep = |row: &LeafRow| !shared.contains(&leaf_identity(row));
+    let (source_rows, target_rows) = match trimmed_side {
+        TrimmedSide::Source => (source_rows.into_iter().filter(keep).collect(), target_rows),
+        TrimmedSide::Target => (source_rows, target_rows.into_iter().filter(keep).collect()),
+    };
+    (
+        source_rows,
+        target_rows,
+        Some(SharedLeafReport {
+            trimmed_side,
+            removed,
+        }),
+    )
+}
+
+/// 剔除重合叶子那一下写进响应 `warnings` 的那句（`code: 说明` 形状，与其它 warning 同）。
+pub fn shared_leaf_warning(report: SharedLeafReport) -> String {
+    match report.trimmed_side {
+        TrimmedSide::Target => format!(
+            "source_within_target: 源是目标的一部分（目标 {} 片叶子与源重合，已从目标侧剔除），结果是源到目标其余部分的距离",
+            report.removed
+        ),
+        TrimmedSide::Source => format!(
+            "target_within_source: 目标是源的一部分（源 {} 片叶子与目标重合，已从源侧剔除），结果是源其余部分到目标的距离",
+            report.removed
+        ),
+    }
 }
 
 fn f_at(v: &serde_json::Value, idx: usize) -> f32 {
@@ -957,6 +1040,12 @@ pub enum SurfaceClearanceError {
         refno: String,
         noun: String,
     },
+    /// 两侧在模型面上是同一批叶子（剔除重合叶子后祖先那一侧空了，如目标名下只有源这一片几何）：422。
+    SharedLeavesOnly {
+        source: String,
+        target: String,
+        trimmed_side: TrimmedSide,
+    },
     Other(anyhow::Error),
 }
 
@@ -1046,6 +1135,18 @@ pub async fn run(
             detail: "没有模型面行（inst_relate / tubi_relate 里 anc 不含它，或 model_sesno 为空）"
                 .to_string(),
         });
+    }
+    // 源是目标的后代（或反过来）时两侧叶子有重合：自对必回 0，先从祖先那一侧剔掉（见 split_shared_leaves）。
+    let (source_rows, target_rows, shared) = split_shared_leaves(source_rows, target_rows);
+    if let Some(report) = shared {
+        pre_warnings.push(shared_leaf_warning(report));
+        if source_rows.is_empty() || target_rows.is_empty() {
+            return Err(SurfaceClearanceError::SharedLeavesOnly {
+                source: params.source.to_string().replace('_', "/"),
+                target: params.target.to_string().replace('_', "/"),
+                trimmed_side: report.trimmed_side,
+            });
+        }
     }
 
     let opts = SurfaceClearanceOptions {
@@ -1582,6 +1683,81 @@ mod tests {
         let row = row_to_leaf(&tube, true).expect("row");
         assert_eq!(row.noun, "TUBI");
         assert_eq!(row.insts, vec![("tube_hash".to_string(), None)]);
+    }
+
+    fn leaf_row(key: &str, refno: &str, noun: &str) -> LeafRow {
+        LeafRow {
+            key: key.to_string(),
+            refno: refno.to_string(),
+            noun: noun.to_string(),
+            world_trans: None,
+            insts: vec![(format!("hash_{refno}"), None)],
+            model_sesno: Some(1),
+        }
+    }
+
+    fn keys(rows: &[LeafRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.key.as_str()).collect()
+    }
+
+    /// 源是目标的后代（门框 FIXING × 它所在的 WALL）：目标集合含源自身，重合叶子从目标侧剔掉，
+    /// warning 以 `source_within_target:` 开头；反过来（BRAN owner × 自己的弯头）从源侧剔掉。
+    #[test]
+    fn shared_leaves_are_trimmed_from_the_ancestor_side() {
+        // FIXING × WALL：目标 = WALL + FIXING（后代），源 = FIXING。
+        let fixing = || leaf_row("17496_137183", "17496_137183", "FIXING");
+        let wall = || leaf_row("17496_105912", "17496_105912", "WALL");
+        let (source, target, report) = split_shared_leaves(vec![fixing()], vec![wall(), fixing()]);
+        assert_eq!(keys(&source), vec!["17496_137183"]);
+        assert_eq!(
+            keys(&target),
+            vec!["17496_105912"],
+            "重合的 FIXING 该从目标（祖先）侧剔掉"
+        );
+        let report = report.expect("有重合就该有记录");
+        assert_eq!(report.trimmed_side, TrimmedSide::Target);
+        assert_eq!(report.removed, 1);
+        assert!(shared_leaf_warning(report).starts_with("source_within_target: "));
+
+        // BRAN owner × 自己的弯头：源 = 三片叶子（含隐式管身），目标 = 弯头那一片。
+        let elbo = || leaf_row("24384_22582", "24384_22582", "ELBO");
+        let tube = || leaf_row("tubi_relate:[pe:⟨24384_22659⟩, 0]", "24384_22659", "TUBI");
+        let flan = || leaf_row("24384_22590", "24384_22590", "FLAN");
+        let (source, target, report) =
+            split_shared_leaves(vec![elbo(), tube(), flan()], vec![elbo()]);
+        assert_eq!(
+            keys(&source),
+            vec!["tubi_relate:[pe:⟨24384_22659⟩, 0]", "24384_22590"]
+        );
+        assert_eq!(keys(&target), vec!["24384_22582"]);
+        let report = report.expect("有重合就该有记录");
+        assert_eq!(report.trimmed_side, TrimmedSide::Source);
+        assert_eq!(report.removed, 1);
+        assert!(shared_leaf_warning(report).starts_with("target_within_source: "));
+
+        // 没有祖先关系：一片不动、不出记录。
+        let (source, target, report) = split_shared_leaves(vec![elbo()], vec![wall(), fixing()]);
+        assert_eq!(keys(&source), vec!["24384_22582"]);
+        assert_eq!(keys(&target), vec!["17496_105912", "17496_137183"]);
+        assert!(report.is_none());
+
+        // 两侧就是同一批叶子（目标名下只有源这一片几何）：剔完目标空了，由 run() 报 SharedLeavesOnly。
+        let (source, target, report) = split_shared_leaves(vec![fixing()], vec![fixing()]);
+        assert_eq!(keys(&source), vec!["17496_137183"]);
+        assert!(target.is_empty());
+        assert_eq!(report.map(|r| r.trimmed_side), Some(TrimmedSide::Target));
+
+        // 旧数据没有 record id：身份退到 refno + 网格键，同样认得出重合。
+        let mut legacy_a = leaf_row("", "1_2", "BOX");
+        legacy_a.insts = vec![("h1".to_string(), None)];
+        let mut legacy_b = leaf_row("", "1_2", "BOX");
+        legacy_b.insts = vec![("h1".to_string(), None)];
+        let owner_extra = leaf_row("1_3", "1_3", "CYLI");
+        let (source, target, report) =
+            split_shared_leaves(vec![legacy_a], vec![owner_extra, legacy_b]);
+        assert_eq!(source.len(), 1);
+        assert_eq!(keys(&target), vec!["1_3"]);
+        assert_eq!(report.map(|r| r.removed), Some(1));
     }
 
     #[test]

@@ -1573,6 +1573,18 @@ pub async fn spatial_surface_clearance(
                     "wall_nouns": surface_clearance::WALL_NOUNS,
                 }))
             }
+            surface_clearance::SurfaceClearanceError::SharedLeavesOnly {
+                source,
+                target,
+                trimmed_side,
+            } => ApiError::precondition(format!(
+                "{source} 与 {target} 在模型面上是同一批叶子（{} 侧剔除与另一侧重合的叶子后为空），没有可比的第二个表面",
+                trimmed_side.as_str()
+            ))
+            .with_detail(serde_json::json!({
+                "reason": "shared_leaves_only", "source": source, "target": target,
+                "trimmed_side": trimmed_side.as_str(),
+            })),
             surface_clearance::SurfaceClearanceError::Other(error) => ApiError::from_domain(error),
         })?;
     Ok(Json(response))
