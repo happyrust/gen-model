@@ -461,8 +461,9 @@ pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
 ///
 /// 戳（[`GenerationReadSetFile::stamp_literals`]，2026-09-16 Q5）也不在这里：`CACHID` 在运行库 schema 里，
 /// 差分层为了排除它而写下的那个字面量会被这条最宽的扫描当成读点，那是错的——它不是几何输入。
-/// 它不进这一票不代表元数据门放行它：字典压根没收它，[`attribute_is_metadata_only`] 第一票就回 `false`
-/// （只 `CACHID` 变的候选照旧上卷重算，见计划 §8 Q6）。
+/// 它不在这里正是元数据门放行它的**第二票**（守卫 `stamp_literals ∩ names = ∅`）；第一票字典给不了
+/// （压根没收它），2026-09-17 Q6 起由戳表 [`attribute_is_cache_stamp`] 给——只 `CACHID` 变的候选记
+/// `no_model` 第三档 [`NoModelTier::CacheStamp`]，不再上卷重算。
 pub fn generation_read_set() -> &'static HashSet<String> {
     static SET: OnceLock<HashSet<String>> = OnceLock::new();
     SET.get_or_init(|| generation_read_set_file().names.iter().cloned().collect())
@@ -2690,10 +2691,20 @@ mod tests {
         // 戳（Q6，2026-09-17）：字典按构造收不到 `CACHID`（项目 UDA），第一票由 e3d-model 的戳表给、
         // 第二票读取集合守卫钉住它不是读点——放行；效果表判它 DataOnly，但它不是老名单（不是业务元数据）。
         for stamp in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
-            assert_eq!(raw_dchc_code(stamp), None, "{stamp} 进了字典快照？那就不该再走戳这条例外");
+            assert_eq!(
+                raw_dchc_code(stamp),
+                None,
+                "{stamp} 进了字典快照？那就不该再走戳这条例外"
+            );
             assert!(attribute_is_cache_stamp(stamp), "{stamp}");
-            assert!(attribute_is_cache_stamp(&stamp.to_ascii_lowercase()), "{stamp}");
-            assert!(!generation_reads_attribute(stamp), "{stamp} 是戳却在读取集合里");
+            assert!(
+                attribute_is_cache_stamp(&stamp.to_ascii_lowercase()),
+                "{stamp}"
+            );
+            assert!(
+                !generation_reads_attribute(stamp),
+                "{stamp} 是戳却在读取集合里"
+            );
             assert!(attribute_is_metadata_only(stamp), "{stamp}");
             assert!(!attribute_is_curated_metadata(stamp), "{stamp}");
         }
@@ -2735,6 +2746,7 @@ mod tests {
 
     /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字
     /// 就是 `UnreadAttribute`（与顺序无关）；一个没拿到两票、或一个属性都没有 → `None`。
+    /// Q6（2026-09-17）：戳放行但不改档，只有戳跳了才是第三档 `CacheStamp`。
     #[test]
     fn the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list() {
         let tier = |names: &[&str]| metadata_only_tier(names.iter().copied());
@@ -2748,10 +2760,30 @@ mod tests {
         assert_eq!(tier(&["NAME", "DUTY"]), Some(NoModelTier::UnreadAttribute));
         assert_eq!(tier(&["DUTY", "NAME"]), Some(NoModelTier::UnreadAttribute));
         assert_eq!(tier(&["NAME", "DIR"]), None);
-        assert_eq!(tier(&["NAME", "CACHID"]), None);
         assert_eq!(tier(&["NAME", "DIAM"]), None);
         assert_eq!(tier(&["UDA:42"]), None);
         assert_eq!(tier(&[]), None);
+        // 戳：单独跳是第三档；跟着谁就记谁的档；跟着没拿到两票的名字照旧 `None`。
+        assert_eq!(tier(&["CACHID"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["cachid"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["NAME", "CACHID"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(tier(&["CACHID", "NAME"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(
+            tier(&["DUTY", "CACHID"]),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            tier(&["CACHID", "NAME", "DUTY"]),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            tier(&["POS", "CACHID"]),
+            None,
+            "只动了摆放是锚点，不是元数据"
+        );
+        assert_eq!(tier(&["CACHID", "DIR"]), None);
+        assert_eq!(tier(&["CACHID", "DIAM"]), None);
+        assert_eq!(tier(&["CACHID", "UDA:42"]), None);
     }
 
     /// 两票压过手写表：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字
@@ -2798,10 +2830,10 @@ mod tests {
 
     /// 预览与执行同口径（2026-09-08）：`OperationImpact::Skip` 是「执行侧不会为它排模型
     /// 工作」这句承诺，判据必须与 direct 窗口规划器的元数据门逐名一致——两边共问
-    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。字典没
-    /// 投票的 `CACHID` 因此不是 Skip：规划器对它照旧整根重算，预览再报「不影响模型」，
-    /// 同一份回执里 `details` 与 `units` 就是两句话。S6 起新档同理：`HREF` 只改了引用，
-    /// 规划器不上卷，预览也不许再说 Regen。
+    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。S6 起新档同理：
+    /// `HREF` 只改了引用，规划器不上卷，预览也不许再说 Regen。Q6（2026-09-17）起 `CACHID` 由戳表拿到
+    /// 第一票：规划器记 `no_model` 第三档，预览同样 Skip——此前它是「字典没投票 → 不是 Skip」的反例，
+    /// 现在两边一起翻。
     #[test]
     fn the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate() {
         for name in DATA_ONLY_ATTR_NAMES {
@@ -2816,9 +2848,22 @@ mod tests {
                 "{name}"
             );
         }
-        // 一次改动里混进一个没拿到第二票的名字，整次操作就不再是 Skip。
+        // 戳跟着老名单一起变照旧 Skip；只有戳跳了也是 Skip（规划器那边记 `CacheStamp`）。
         assert_eq!(
             classify_operation_impact(&modified_operation_with_attrs(&["NAME", "CACHID"])),
+            OperationImpact::Skip
+        );
+        assert_eq!(
+            classify_operation_impact(&modified_operation("CACHID")),
+            OperationImpact::Skip
+        );
+        assert_eq!(
+            metadata_only_tier(["CACHID"]),
+            Some(NoModelTier::CacheStamp)
+        );
+        // 一次改动里混进一个没拿到第二票的名字（读取集合里的 `DIR`），整次操作就不再是 Skip。
+        assert_eq!(
+            classify_operation_impact(&modified_operation_with_attrs(&["CACHID", "DIR"])),
             OperationImpact::Regen
         );
         assert_eq!(

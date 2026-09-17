@@ -294,3 +294,16 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
   全库根的每会话时间戳，不滤它这一格恒真），唯一的 56 个全来自我们自己造的那四个 aps250110 窗。**Q6 的账（12734 候选 / 9172 多算根 / 四门）一格不动**，
   而且多算根按构造就不受成因影响（它是两态各跑一遍规划器的集合差）；12476 那一格的标签可以从「子树内一个都没变」写强成「**上下两个方向都没有真改动**」。
   往前看一条：语料以后若收进真实设计编辑（而非整库扫写），只戳候选里会出现「子树顺带被盖」的一类——它们的根本来就要 regen，不该记成多算，成因表那时**两个方向都要判**。
+  ★0917 **已拍板并接线**（用户 07:37 拍板：「只 CACHID 跳动的候选进 no_model 第三档，按两票口径落字典 + 读取集合守卫，窗 C 复跑看 GENSEC / HANDRA 还挡不挡」；
+  会话 fable-5-1-37 起手、fable-5-1-42 接力收尾）。**第一票**：字典按构造收不到 `CACHID`（3.1 运行库 schema 里的项目 UDA，`raw_dchc_code` 恒 `None`），
+  这一票不是「还没补上」而是永远不会有，改由 e3d-model 的戳表 `element_diff::PLACEMENT_STAMP_ATTRIBUTES` 给——gen-model `model_impact::attribute_is_cache_stamp`，
+  `attribute_is_metadata_only` 变成「(字典 DCHC=0 ∨ 是戳) ∧ 生成器不读」；例外只认那张表，`UDA:<id>` 与别的字典没有的名字照旧不放行。
+  **第二票**照旧问读取集合，守卫钉住：`stamp_literals ∩ names = ∅`（gen-model `the_generation_read_set_mirrors_e3d_model_and_the_model_side_modules`）、
+  三处名单逐名相等（脚本 `STAMP_LITERALS` / 差分层那张表 / e3d-model 产物），`metadata_only_needs_dchc_zero_and_an_unread_attribute`
+  钉戳「不在字典 ∧ 不在读取集合 ∧ 放行 ∧ 不是老名单」——哪天有人真读 `CACHID`，两条一起红。**分档**：`metadata_only_tier` 对戳放行但不改档
+  （跟着 `NAME` 记老档、跟着 `DUTY` 记新档），**只有**戳跳了才记新加的第三档 e3d-model `NoModelTier::CacheStamp`（回执 `cache_stamp`，
+  `accounts_for` 钉三档之和 ≤ `no_model`，`totals_line` 带出）；`[POS, CACHID]` 仍走锚点那条路，不是元数据。预览 `classify_operation_impact`
+  与规划器共问同一谓词，只戳的操作从「字典没投票 → 不是 Skip」翻成 Skip。**去向**：e3d-model `plan_update_with` 对它 `settle(…, false)`
+  → `Disposition::NoModel`，ADR-066 D1 规则 2 从此不把它当挡路候选（`CandidateKind::NoModel`）。落点：e3d-model `increment.rs` / `element_diff.rs`（文档），
+  gen-model `model_impact.rs` / `window_root_plan.rs` / `options.rs`（文档）；ADR-066 状态行 + 规则 2 末注；本条。验证与窗 C 复跑结果见 changelog 2026-09-17。
+  仍开着的：Q6 探针 `probe_cachid_only_regen_cost` 量的从此只剩第二手（只戳候选不做闭包种子能再省多少根）——那是选根的题，另议。

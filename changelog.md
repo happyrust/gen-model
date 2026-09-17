@@ -2,6 +2,42 @@
 
 ## 2026-09-17
 
+### 属性变化分类对齐 core · §8 Q6 落地：只 `CACHID` 跳动的候选进 `no_model` 第三档 `cache_stamp`，窗 C 上 GENSEC / HANDRA 不再挡刚体前移
+
+- **为什么**：E3D 3.1 挪一件会给它整棵子树里每个带 `CACHID` 的元素各盖一次戳（S4 窗 C：STRFLT 自己 + 10 TREAD + 2 GENSEC + 2 HANDRA）。
+  Q5 让戳跟着 `POS` / `ORI` 走时不挡「只动了摆放」，但**只有**戳跳了的候选——挪位时被顺带盖戳的子树成员，或整库缓存重建的扫写
+  （S8：12734 个、92.8% 的跳动）——元数据门不放行：第一票是字典 DCHC=0，而 `CACHID` 是 3.1 运行库 schema 里的项目 UDA，字典按构造
+  收不到它。于是它们照旧上卷重算，是模型单元的（GENSEC / HANDRA）还在 ADR-066 D1 规则 2 里当 `Other` 把根踢回 `regen`——上一条量出的
+  窗 C「路只让出一半」就是这个账。用户 07:37 拍板：进 `no_model` 第三档，按两票口径落字典 + 读取集合守卫，窗 C 复跑。
+- **改动**（会话 fable-5-1-37 起手、fable-5-1-42 接力收尾）：
+  - **第一票**：gen-model `model_impact::attribute_is_metadata_only` 改成「(字典 DCHC=0 **∨** 是戳) ∧ 生成器不读」；「是戳」由新函数
+    `attribute_is_cache_stamp` 按 e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES` 那一份名单判（归一化后按名查）——例外**只认那张表**，
+    `UDA:<id>` 与别的字典没有的名字照旧不放行。**第二票**照旧问读取集合，守卫钉住：`stamp_literals ∩ names = ∅`、三处名单逐名相等
+    （`the_generation_read_set_mirrors_e3d_model_and_the_model_side_modules`），`metadata_only_needs_dchc_zero_and_an_unread_attribute` 钉每个戳
+    「`raw_dchc_code` 为 `None` ∧ 不在读取集合 ∧ 放行 ∧ 不是老名单」——哪天有人真读 `CACHID`，守卫红、门自动关。
+  - **分档**：e3d-model `NoModelTier` 加 `CacheStamp`，`IncrementReport` 加 `cache_stamp` 计数（`accounts_for` 钉三档之和 ≤ `no_model`，
+    `totals_line` 带出 `cache_stamp=`）；gen-model `metadata_only_tier` 对戳放行但**不改档**——跟着 `NAME` 记老档、跟着 `DUTY` 记新档，
+    **只有**戳跳了才记 `CacheStamp`；`[POS, CACHID]` 仍走锚点那条路（`is_placement_only`），这里回 `None`。预览 `classify_operation_impact`
+    与规划器共问同一谓词，只戳的操作从「字典没投票 → 不是 Skip」翻成 Skip（`the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate`）。
+  - **去向**：e3d-model `plan_update_with` 对第三档同样 `settle(…, false)` → `Disposition::NoModel`，不上卷、不级联、账本照记、闭包种子照收；
+    `window_root_plan::no_model_candidates` 因此把它们分进 `CandidateKind::NoModel`，规则 2 不再数它。`build_model_update_plan_from_window`
+    的门警告把三档一起报。两条探针跟上：`probe_transform_classification_for_window` 的「Other·只 CACHID」类改标「Q6 落地后不该再出现」；
+    `probe_cachid_only_regen_cost` 的 B 态谓词改回真档 `CacheStamp`（此前借 `UnreadAttribute` 计数），对账改成「B 态 `cache_stamp` == 只 CACHID
+    候选数」——它量的从此只剩第二手（只戳候选不做闭包种子能再省多少根，选根的题）。
+  - 文档：ADR-066 状态行 + D1 规则 2 末注（含对 Q5 段「只有 `CACHID` 变照旧 `regen`」半句的更正）、计划 §8 Q6 ★0917 落地段、
+    `options.rs` 门开关文档补第三档、e3d-model `increment.rs` / `element_diff.rs` 文档改口。
+- **验证**：e3d-model `cargo test --lib -- increment:: element_diff::` 19 过、`cargo test --test attribute_reads_guard` 2 过；gen-model
+  `cargo test --lib -- model_impact:: window_root_plan:: rigid_motion:: …` **103 过 0 败 11 ignored**（含 `the_metadata_tier_is_curated_only_…`
+  的戳分档 11 条断言、`change_metadata_tier` 对 `[CACHID]` / `[NAME, CACHID]` / `[POS, CACHID]` / `[SUPP, CACHID]` 四种形状）；两仓整套
+  `cargo test --lib`：e3d-model **321 过 0 败**、gen-model **2217 过 0 败 118 ignored**（HEAD `f1398e442` + 本条工作树）；rustfmt 本轮新增行
+  无差异（`window_root_plan.rs` 剩的四处 1233 / 1755 / 1767 / 1985 不是本轮的）；CRLF 未翻。**窗 C 复跑**（`probe_transform_classification_for_window`，aps250110 **32→33**，`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`）：
+  回执 `candidates=16 rolled_up=1 no_model=15 (cache_stamp=14)`——上一条里的 **4 个只 `CACHID` 的 GENSEC / HANDRA 从 `Other（挡路）` 变成
+  `no_model（不挡路）`**，与 10 个 TREAD、1 个 MNUM 同列；候选表里挡路的**只剩 STRFLT 锚点自己**（P23 排除，设计如此），6 根 rejected 的原因全部
+  收敛到这一条。ams8000 对照窗不变：195→196 EQUI 挪位 `transform=1 rejected=0`；267→268 BRAN `BY U 2000` 照旧 regen（`CACHID / HPOS / TPOS`
+  一起变不是只戳）。
+- **未做 / 边界**：`model_transform_cheap_path` 默认仍关；P23 排除不动（窗 C 要真走 transform 得另议 STRFLT）；Q6 探针第二手（闭包种子）没量；
+  e3d-model 侧改动在 vendor 工作树里**未提交**（gen-model 工作树已依赖 `NoModelTier::CacheStamp` / `cache_stamp`，两仓要一起入库）。
+
 ### ADR-066 D1 规则 2 · 账本去向 `no_model` 的候选不再把根踢回 regen——「挪 EQUI + 子元素改个名」走得了 transform
 
 - **为什么**：`collect_rigid_motion_sources` 把账本每一条都折成候选，不是锚点的一律 `Other`；`rigid_motion::classify_one`
@@ -31,7 +67,7 @@
   - ams8000 **195→196**（EQUI 位姿）：1 候选 = 合格锚点，**transform=1 rejected=0**——生产同款分桶在自然 EQUI 挪位上真走了便宜路。
   - ams8000 **267→268**（BRAN `BY U 2000`）：BRAN 自己 `CACHID / HPOS / TPOS`、FTUB `POS / SPAMAP` 都是 `Other`，BEND 在路由容器内被排除
     → regen，与 D1 规则 3 一致。
-- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动——上面窗 C 的 4 件就是它的账；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关
+- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动——上面窗 C 的 4 件就是它的账（**同日上一条已落地**）；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关
   `model_transform_cheap_path` 默认仍关。e3d-model 的 `dispositions()` 访问器只在 vendor 工作树里、**未提交**——gen-model HEAD 已经依赖它。
 
 ### ModelOnly 执行体补上开工前对齐与 `RoomOnly` 接力（ADR-073 D12 / D13 的漏接，审核 P1-1）

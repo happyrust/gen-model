@@ -248,8 +248,9 @@ pub fn plan_window_roots(
 /// （E3D 字典 DCHC=0 ∧ 生成器不读；S6 之前是效果表 DataOnly ∧ DCHC=0 的五个名字）。名单与分档只有
 /// [`crate::data_interface::model_impact::metadata_only_tier`] 那一份：全部落在老名单
 /// `NAME / DESC / PURP / FUNC / LCHKDA` 上回 [`NoModelTier::MetadataOnly`]，否则
-/// [`NoModelTier::UnreadAttribute`]——档位只进回执两个计数，不改去向。`attributes` 为空回 `None`
-/// ——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+/// [`NoModelTier::UnreadAttribute`]；**只有戳**（`CACHID`）跳了回 [`NoModelTier::CacheStamp`]（2026-09-17 Q6：
+/// 戳由 e3d-model 的戳表拿第一票、读取集合守卫拿第二票，跟着别的放行属性时不改档）——档位只进回执三个计数，
+/// 不改去向。`attributes` 为空回 `None`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
 ///
 /// 它只决定**上卷与级联**：账本照记、闭包种子照收（候选与它的祖先链照进闭包，候选所在的根凭证前移
 /// 一个都不少收），房间结构触发照读账本（FRMW 改名命中关键字仍出 `RoomRecalcPanel`），设计引用级联照读
@@ -1121,15 +1122,19 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
-    if sources.plan.report.metadata_only + sources.plan.report.unread_attribute > 0 {
+    let gated = sources.plan.report.metadata_only
+        + sources.plan.report.unread_attribute
+        + sources.plan.report.cache_stamp;
+    if gated > 0 {
         warnings.push(format!(
-            "dbnum={dbnum}: metadata-only gate — {} modified candidate(s) changed nothing but \
-             attributes with dictionary DCHC=0 that the generator never reads and were not rolled \
-             up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, unread_attribute={} on the wider \
-             S6 tier); ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
-            sources.plan.report.metadata_only + sources.plan.report.unread_attribute,
+            "dbnum={dbnum}: metadata-only gate — {gated} modified candidate(s) changed nothing but \
+             attributes with dictionary DCHC=0 that the generator never reads (or only the CACHID \
+             stamp) and were not rolled up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, \
+             unread_attribute={} on the wider S6 tier, cache_stamp={} on the stamp-only Q6 tier); \
+             ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
             sources.plan.report.metadata_only,
-            sources.plan.report.unread_attribute
+            sources.plan.report.unread_attribute,
+            sources.plan.report.cache_stamp
         ));
     }
     if sources.plan.report.unread_attribute > 0 {
@@ -2127,7 +2132,8 @@ mod tests {
             return;
         }
 
-        // 候选表按类。`Other` 的字串是 `format!("{kind:?}: {detail}")` 拼的，「只 CACHID」= 唯一一条且是 CACHID 变了。
+        // 候选表按类。`Other` 的字串是 `format!("{kind:?}: {detail}")` 拼的，「只 CACHID」= 唯一一条且是 CACHID 变了
+        // ——Q6 落地（2026-09-17）后这一类该走 `no_model`（第三档 `CacheStamp`），单列出来是让回归一眼可见。
         let noun_of = |refno: RefnoEnum| -> String {
             target
                 .element(refno_to_e3d(refno))
@@ -2143,9 +2149,10 @@ mod tests {
                     rigid: Err(reason), ..
                 } => ("锚点·被排除", reason.clone()),
                 CandidateKind::NoModel(detail) => ("no_model（不挡路）", detail.clone()),
-                CandidateKind::Other(detail) if detail == "AttributesModified: CACHID 变了" => {
-                    ("Other·只 CACHID（挡路，Q6 未落地）", detail.clone())
-                }
+                CandidateKind::Other(detail) if detail == "AttributesModified: CACHID 变了" => (
+                    "Other·只 CACHID（挡路——Q6 落地后不该再出现）",
+                    detail.clone(),
+                ),
                 CandidateKind::Other(detail) => ("Other（挡路）", detail.clone()),
             };
             by_class.entry(class).or_default().push(format!(
@@ -2891,9 +2898,17 @@ mod tests {
         assert!(change_metadata_tier(&diff(&["NAME", "DIAM"])).is_none());
         assert!(change_metadata_tier(&diff(&["NAME", "POS"])).is_none());
         assert!(change_metadata_tier(&diff(&["NAME", "SPRE"])).is_none());
-        // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
-        assert!(!change_is_metadata_only(&diff(&["CACHID"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
+        // 戳（Q6，2026-09-17）：字典没收 `CACHID`，第一票由戳表给——只有戳跳了记第三档，跟着 NAME 记老档；
+        // 跟着摆放走的是锚点那条路（`is_placement_only`），这里不放行。
+        assert_eq!(
+            change_metadata_tier(&diff(&["CACHID"])),
+            Some(NoModelTier::CacheStamp)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["NAME", "CACHID"])),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert!(change_metadata_tier(&diff(&["POS", "CACHID"])).is_none());
         // UDA 不放行。
         assert!(!change_is_metadata_only(&diff(&["UDA:42"])));
         // 没有属性变化不是「只改了元数据」：那是没变，或只动了结构。
@@ -2947,7 +2962,11 @@ mod tests {
         // 一票否决：混进一个生成侧读得到的名字，整个元素照旧上卷。
         assert!(change_metadata_tier(&diff(&["SUPP", "DIR"])).is_none());
         assert!(change_metadata_tier(&diff(&["SUPP", "DIAM"])).is_none());
-        assert!(change_metadata_tier(&diff(&["SUPP", "CACHID"])).is_none());
+        // 戳跟着新档名字一起跳：记新档，不改档（Q6）。
+        assert_eq!(
+            change_metadata_tier(&diff(&["SUPP", "CACHID"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
         // 结构四条对新档一视同仁。
         let mut members = diff(&["SUPP"]);
         members.members = Some(MemberDelta {
@@ -3022,6 +3041,8 @@ mod tests {
         candidates: usize,
         metadata_only: usize,
         unread_attribute: usize,
+        /// 只有戳跳了的候选（Q6 第三档，2026-09-17）。
+        cache_stamp: usize,
         regen_off: usize,
         regen_on: usize,
         saved_units: usize,
@@ -3032,7 +3053,7 @@ mod tests {
 
     impl GateWindowOutcome {
         fn admitted(&self) -> usize {
-            self.metadata_only + self.unread_attribute
+            self.metadata_only + self.unread_attribute + self.cache_stamp
         }
     }
 
@@ -3156,11 +3177,11 @@ mod tests {
         off.accounts_for()
             .unwrap_or_else(|error| panic!("{label}: {error}"));
         assert_eq!(
-            off.report.metadata_only + off.report.unread_attribute,
+            off.report.metadata_only + off.report.unread_attribute + off.report.cache_stamp,
             0,
             "{label}: 关着的那一态没有门"
         );
-        let admitted = on.report.metadata_only + on.report.unread_attribute;
+        let admitted = on.report.metadata_only + on.report.unread_attribute + on.report.cache_stamp;
         let saved = off.regenerate.len() - on.regenerate.len()
             + (off.regenerate_derived.len() - on.regenerate_derived.len());
         let (no_model_on, no_model_off) = (
@@ -3170,9 +3191,10 @@ mod tests {
         assert_eq!(on.report.unchanged, off.report.unchanged, "{label}");
         assert!(
             no_model_on >= no_model_off && no_model_on - no_model_off <= admitted,
-            "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={} unread_attribute={}",
+            "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={} unread_attribute={} cache_stamp={}",
             on.report.metadata_only,
-            on.report.unread_attribute
+            on.report.unread_attribute,
+            on.report.cache_stamp
         );
         if saved > 0 {
             assert!(
@@ -3191,6 +3213,7 @@ mod tests {
             candidates: on.report.candidates,
             metadata_only: on.report.metadata_only,
             unread_attribute: on.report.unread_attribute,
+            cache_stamp: on.report.cache_stamp,
             regen_off: off.regenerate.len(),
             regen_on: on.regenerate.len(),
             saved_units: saved,
@@ -3465,6 +3488,7 @@ mod tests {
         let mut admitted_candidates = 0usize;
         let mut metadata_only = 0usize;
         let mut unread_attribute = 0usize;
+        let mut cache_stamp = 0usize;
         let mut regen_off = 0usize;
         let mut regen_on = 0usize;
         let mut saved_units = 0usize;
@@ -3545,6 +3569,7 @@ mod tests {
                     admitted_candidates += window_admitted;
                     metadata_only += outcome.metadata_only;
                     unread_attribute += outcome.unread_attribute;
+                    cache_stamp += outcome.cache_stamp;
                     regen_off += outcome.regen_off;
                     regen_on += outcome.regen_on;
                     saved_units += outcome.saved_units;
@@ -3604,8 +3629,9 @@ mod tests {
             "| 项 | 数 |\n|---|---:|\n| DESI 库（目录里认出的） | {dbs_seen} |\n| 有会话链可走的库 | {dbs_measured} |\n\
              | 两态跑过的窗 | {windows} |\n| 跳过的窗（窗口收集失败 / 端点钉不住） | {windows_skipped} |\n\
              | 门放行过候选的窗 | {windows_admitting} |\n| 索引候选总数 | {candidates} |\n\
-             | 做了 L2 差分且真变了的 Modified 候选 | {diffed} |\n| 其中门放行（两档合计） | {admitted_candidates} |\n\
+             | 做了 L2 差分且真变了的 Modified 候选 | {diffed} |\n| 其中门放行（三档合计） | {admitted_candidates} |\n\
              | `metadata_only`（老名单） | {metadata_only} |\n| `unread_attribute`（S6 新档） | {unread_attribute} |\n\
+             | `cache_stamp`（Q6 只戳） | {cache_stamp} |\n\
              | 关着 `regenerate` 合计 | {regen_off} |\n| 开着 `regenerate` 合计 | {regen_on} |\n\
              | 省下的单元（regen + 派生） | {saved_units} |\n\
              | 闭包少收过 refno 的窗（粗级联扇出被放行候选省掉） | {windows_closure_dropped} |\n\
@@ -7449,8 +7475,8 @@ mod tests {
     /// 做法是 S6 / S4 同款的**两态**，逐窗各选一次根：
     /// - **A 态** = 今天的生产口径（`WindowRootSources::collect` → [`plan_window_roots`]，开关按默认，
     ///   `roots_S` = S 端枚举出的根，与 S7 探针同口径）；
-    /// - **B 态** = 只 `CACHID` 的候选既**不上卷**（谓词回 `Some`，探针里借
-    ///   [`NoModelTier::UnreadAttribute`] 计数，**不动 e3d-model**）也**不做闭包种子**
+    /// - **B 态** = 只 `CACHID` 的候选既**不上卷**（谓词回 `Some(`[`NoModelTier::CacheStamp`]`)`；
+    ///   接线前那一档还不存在，探针借 `UnreadAttribute` 计数）也**不做闭包种子**
     ///   （`affected_closure_filtering_ledger` 把它们从账本种子里过滤掉）。两手缺一不可：
     ///   只做前一手时候选自己若是单元会留在 `regenerate` 集里，而那三个动作集恒为种子，根级一根都省不下。
     ///
@@ -7464,6 +7490,8 @@ mod tests {
     ///
     /// **只量不接线**：生产 `metadata_only_tier` / `change_metadata_tier` /
     /// `model_skip_metadata_only_changes` 的语义一字不动，[`WindowRootPlan`] 与回执一字不动。
+    /// **2026-09-17 Q6 第一手已接线**（`change_metadata_tier` 对只戳的候选回 `CacheStamp`，不上卷不级联）：
+    /// A 态从此已含那一手，`regen_A \ regen_B` 量的只剩第二手——「不做闭包种子」能再省多少根（选根的题）。
     ///
     /// 旋钮：`AIOS_Q6_PROBE_CORPUS=1` 全语料（缺省只走 `AIOS_PROJAMS_GEOMETRY_FILE`，ams8000_0001 整条链）；
     /// `AIOS_Q6_PROBE_STEPS_PER_DB`（0 = 整条链）；`AIOS_Q6_PROBE_BUDGET_SECS`（默认 2400，S7 同值）；
@@ -7800,7 +7828,7 @@ mod tests {
                 let plan_b =
                     plan_update_with(&base, &target, &window, PlanLimits::default(), |diff| {
                         if stamp_only_with(diff, &extra_stamp) {
-                            Some(NoModelTier::UnreadAttribute)
+                            Some(NoModelTier::CacheStamp)
                         } else if skip_metadata {
                             change_metadata_tier(diff)
                         } else {
@@ -7931,12 +7959,13 @@ mod tests {
                         plan_b.remove.len()
                     ));
                 }
-                let unread_delta = plan_b.report.unread_attribute as i64
-                    - sources.plan.report.unread_attribute as i64;
-                if unread_delta != stamp_here as i64 {
+                // B 态的谓词对每个只戳候选都回 `CacheStamp`，所以它的 `cache_stamp` 计数就该等于
+                // 这里独立数出来的只 CACHID 候选数（A 态开着门时也一样，关着门时 A 为 0）。
+                let stamp_gated_b = plan_b.report.cache_stamp;
+                if stamp_gated_b != stamp_here {
                     contracts_ok = false;
                     red_unread_reconcile.push(format!(
-                        "{label}: unread_attribute 差 {unread_delta} ≠ 只 CACHID 候选 {stamp_here}"
+                        "{label}: B 态 cache_stamp {stamp_gated_b} ≠ 只 CACHID 候选 {stamp_here}"
                     ));
                 }
 
@@ -8552,7 +8581,7 @@ mod tests {
             contract(&red_remove_same)
         ));
         report.push_str(&format!(
-            "| 对账 | `unread_attribute` 两态差 == 只 CACHID 候选数 | {} |\n",
+            "| 对账 | B 态 `cache_stamp` == 只 CACHID 候选数 | {} |\n",
             contract(&red_unread_reconcile)
         ));
         report.push_str(&format!(
