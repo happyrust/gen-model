@@ -580,6 +580,10 @@ pub struct BatchedPersist {
     pub groups: usize,
     /// 随模型行同事务写下的房间归属边数（ADR-073 D1）。
     pub room_edges: usize,
+    /// 房间边直接用回执带来的（bake 时算好，B/T4）的根数。
+    pub room_carried: usize,
+    /// 房间边在 flush 时用投影记录现算（回读 `.mesh`）的根数——回执没带 / 代号不等 / 构件集不等。
+    pub room_recomputed: usize,
     /// 本批真正提交过的最大一笔 SurrealQL 事务字节数。
     pub max_transaction_bytes: usize,
 }
@@ -668,13 +672,57 @@ struct LiveShare<'a> {
     room_statements: String,
     /// 算出来的成员边数（`room_relate`）。
     room_edges: usize,
+    /// 这一根的边是从哪来的（回执带来的 / 这里现算的 / 没算）。
+    room_source: RoomEdgeSource,
 }
 
-/// 房间关卡（ADR-073 D1 / D2）：写库**之前**逐根算房间归属——输入只有该根的内存投影与任务开工时
-/// 冻住的计算器，一句库不读。算不出来（盒子不可用、面板网格不全）的根在这里就剔出本组、带原因
-/// 记进失败名单，房间失败 = 该根失败；其余根照常往下走。与组大小无关：一组一根或一组几百根都是
-/// 同一条路。`rooms` 为 `None`（房间开关关闭，或显式的底层适配器调用）时不算也不写新边，模型根仍
-/// 往下持久化，只由对账那一半清掉被删来源的旧边。
+/// 一根在 [`room_stage`] 里房间边的来源（B/T4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomEdgeSource {
+    /// bake 时算好、随回执带来的（`RootReceipt::room`），三道闸都过了，这里只渲染。
+    Carried,
+    /// 这里用投影记录现算（回执没带 / 代号不等 / 构件集不等）——回读 `.mesh` 取点。
+    Recomputed,
+    /// 没有计算器（房间开关关 / 底层适配器直调）或这一根没有几何：不算也不写新边。
+    NotComputed,
+}
+
+/// 回执带来的边能不能直接用（B/T4 三道闸，纯函数）：`carried.generation` 与此刻计算器代号相等；
+/// `carried.elements` 与本根记录的构件集**相等**（少一个多一个都不行——渲染对 `claimed` 的每个构件先删后插，
+/// 拿只覆盖部分构件的边去渲，没动的构件的边会被删掉而不补；嵌套根共享记录、局部发布后的整根形状都在
+/// 这里被挡下）；都过了 → `Some(边)`，否则 `None`，调用方现算。
+fn carried_edges_for<G: crate::fast_model::room_model::RoomInput>(
+    carried: Option<&crate::fast_model::model_memory_store::CarriedRoomEdges>,
+    resident_generation: &str,
+    claimed: &[G],
+) -> Option<Vec<crate::fast_model::room_model::ElementRoomEdge>> {
+    let carried = carried?;
+    if carried.generation != resident_generation {
+        return None;
+    }
+    let elements: BTreeSet<String> = claimed
+        .iter()
+        .map(|record| record.element().to_string())
+        .collect();
+    let listed: BTreeSet<&str> = carried.elements.iter().map(String::as_str).collect();
+    if elements.len() != listed.len() || !elements.iter().all(|e| listed.contains(e.as_str())) {
+        return None;
+    }
+    Some(
+        carried
+            .edges
+            .iter()
+            .map(crate::fast_model::room_model::ElementRoomEdge::from_carried)
+            .collect(),
+    )
+}
+
+/// 房间关卡（ADR-073 D1 / D2）：写库**之前**逐根拿到房间归属——输入只有该根的内存投影、任务开工时
+/// 冻住的计算器与回执带来的边，一句库不读。回执带了边且三道闸都过（[`carried_edges_for`]）就只渲染
+/// （B/T4：bake 时已算，不再回读 `.mesh`）；否则用投影记录现算。算不出来（盒子不可用、面板网格不全）的
+/// 根在这里就剔出本组、带原因记进失败名单，房间失败 = 该根失败；其余根照常往下走。与组大小无关：
+/// 一组一根或一组几百根都是同一条路。`rooms` 为 `None`（房间开关关闭，或显式的底层适配器调用）时不算
+/// 也不写新边，模型根仍往下持久化，只由对账那一半清掉被删来源的旧边。
 fn room_stage<'a>(
     group: &'a [RootShare],
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
@@ -684,33 +732,47 @@ fn room_stage<'a>(
     for share in group {
         // 每根事务携带自己的全集。祖先根失败后，随后嵌套根仍能独立写下共享记录与房间边。
         let claimed = share.records.clone();
-        let (room_statements, room_edges) = match rooms {
+        let (room_statements, room_edges, room_source) = match rooms {
             Some(calculator) if !claimed.is_empty() => {
-                match calculator.calculate_for_root(&claimed) {
-                    Ok(edges) => (
-                        calculator.render_root_room_edges(&claimed, &edges),
-                        edges.len(),
-                    ),
-                    Err(error) => {
-                        // 这一根一行都不落；同组更晚的根始终携带自己的完整记录。
-                        failed.push((
-                            share.root,
-                            format!(
-                                "room membership of root {} could not be computed: {error:#}",
-                                share.root
-                            ),
-                        ));
-                        continue;
-                    }
-                }
+                let carried = carried_edges_for(
+                    share
+                        .receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.room.as_ref()),
+                    calculator.resident_generation(),
+                    &claimed,
+                );
+                let (edges, source) = match carried {
+                    Some(edges) => (edges, RoomEdgeSource::Carried),
+                    None => match calculator.calculate_for_root(&claimed) {
+                        Ok(edges) => (edges, RoomEdgeSource::Recomputed),
+                        Err(error) => {
+                            // 这一根一行都不落；同组更晚的根始终携带自己的完整记录。
+                            failed.push((
+                                share.root,
+                                format!(
+                                    "room membership of root {} could not be computed: {error:#}",
+                                    share.root
+                                ),
+                            ));
+                            continue;
+                        }
+                    },
+                };
+                (
+                    calculator.render_root_room_edges(&claimed, &edges),
+                    edges.len(),
+                    source,
+                )
             }
-            _ => (String::new(), 0),
+            _ => (String::new(), 0, RoomEdgeSource::NotComputed),
         };
         live.push(LiveShare {
             share,
             claimed,
             room_statements,
             room_edges,
+            room_source,
         });
     }
     (live, failed)
@@ -1345,6 +1407,9 @@ struct GroupOutcome {
     commits: usize,
     /// 随模型行同事务写下的房间归属边数。
     room_edges: usize,
+    /// 边直接用回执带来的根数 / flush 现算的根数（B/T4）。
+    room_carried: usize,
+    room_recomputed: usize,
     max_transaction_bytes: usize,
     /// 写了新几何的来源（隐式管身不算）。
     refresh: Vec<aios_core::RefnoEnum>,
@@ -1471,6 +1536,8 @@ fn accept_group_outcome(
     total.receipts += outcome.receipts;
     total.commits += outcome.commits;
     out.room_edges += outcome.room_edges;
+    out.room_carried += outcome.room_carried;
+    out.room_recomputed += outcome.room_recomputed;
     out.max_transaction_bytes = out.max_transaction_bytes.max(outcome.max_transaction_bytes);
     refresh_all.extend(outcome.refresh);
     boxes_all.extend(outcome.boxes);
@@ -1600,8 +1667,16 @@ async fn persist_group(
         .filter(|live| live.share.receipt.is_some())
         .count();
 
-    // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份）。
+    // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份），以及边是带来的还是现算的。
     let room_edge_count = group.iter().map(|live| live.room_edges).sum::<usize>();
+    let room_carried = group
+        .iter()
+        .filter(|live| live.room_source == RoomEdgeSource::Carried)
+        .count();
+    let room_recomputed = group
+        .iter()
+        .filter(|live| live.room_source == RoomEdgeSource::Recomputed)
+        .count();
 
     // **一组一串事务，按条数装块。** 删整片与清边进第一笔；中途崩就是「有行没账」，那几根
     // 下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位（任务收尾只在这个库一根
@@ -1622,6 +1697,8 @@ async fn persist_group(
             receipts: receipted,
             commits: 0,
             room_edges: 0,
+            room_carried: 0,
+            room_recomputed: 0,
             max_transaction_bytes: 0,
             refresh: Vec::new(),
             boxes: Vec::new(),
@@ -1672,6 +1749,8 @@ async fn persist_group(
         receipts: receipted,
         commits,
         room_edges: room_edge_count,
+        room_carried,
+        room_recomputed,
         max_transaction_bytes,
         refresh: deferred_refresh,
         boxes: tree_boxes,
@@ -5182,6 +5261,123 @@ mod tests {
             .expect("room calculator")
     }
 
+    /// B/T4 三道闸（纯函数）：代号相等 + 构件集相等 + 回执带了边 → 用带来的；代号不等 / 少一个构件 /
+    /// 多一个构件 / 没带 → `None`（现算）。
+    #[test]
+    fn carried_edges_pass_only_when_generation_and_element_set_both_match() {
+        use crate::fast_model::room_model::{RoomInput, carry_root_edges};
+        let dir = tempfile::tempdir().unwrap();
+        let calculator = room_calculator(dir.path());
+        let records = vec![
+            room_record(ROOM_ROOT_A, 100., 200.),
+            room_record(RefNo::new(24383, 11), 300., 400.),
+        ];
+        let edges = calculator.calculate_for_root(&records).unwrap();
+        assert!(!edges.is_empty(), "夹具前提：两件都在 R1 里");
+        let carried = carry_root_edges(
+            calculator.resident_generation(),
+            records.iter().map(RoomInput::element),
+            edges.clone(),
+        );
+        let generation = calculator.resident_generation();
+
+        assert_eq!(
+            carried_edges_for(Some(&carried), generation, &records).as_deref(),
+            Some(edges.as_slice()),
+            "三道闸都过 → 带来的边逐字回来"
+        );
+        assert!(
+            carried_edges_for(None, generation, &records).is_none(),
+            "没带"
+        );
+        assert!(
+            carried_edges_for(Some(&carried), "other-generation", &records).is_none(),
+            "代号不等（常驻中途换代 / 重启后旧产物）"
+        );
+        assert!(
+            carried_edges_for(Some(&carried), generation, &records[..1]).is_none(),
+            "回执覆盖的构件比本根记录多（局部发布后的整根形状）→ 现算"
+        );
+        let mut more = records.clone();
+        more.push(room_record(RefNo::new(24383, 12), 700., 800.));
+        assert!(
+            carried_edges_for(Some(&carried), generation, &more).is_none(),
+            "本根记录比回执覆盖的多（嵌套根共享记录）→ 现算，否则没动的构件的边会被删而不补"
+        );
+    }
+
+    /// B/T4：`room_stage` 对带边的回执只渲染（`Carried`），渲出的语句与现算（`Recomputed`）**逐字相同**；
+    /// 任一道闸没过就现算；没有计算器 `NotComputed`。
+    #[test]
+    fn room_stage_renders_carried_edges_and_recomputes_when_a_gate_fails() {
+        use crate::fast_model::room_model::{RoomInput, carry_root_edges};
+        let dir = tempfile::tempdir().unwrap();
+        let calculator = room_calculator(dir.path());
+        let records = vec![
+            room_record(ROOM_ROOT_A, 100., 200.),
+            room_record(RefNo::new(24383, 11), 600., 700.),
+        ];
+        let edges = calculator.calculate_for_root(&records).unwrap();
+        let carried = carry_root_edges(
+            calculator.resident_generation(),
+            records.iter().map(RoomInput::element),
+            edges,
+        );
+        let share = |room: Option<crate::fast_model::model_memory_store::CarriedRoomEdges>| {
+            let mut receipt = test_receipt(ROOM_ROOT_A, records.len()).1;
+            receipt.room = room;
+            RootShare {
+                root: ROOM_ROOT_A,
+                records: records.clone(),
+                receipt: Some(receipt),
+            }
+        };
+
+        let carried_share = [share(Some(carried.clone()))];
+        let (with, failed) = room_stage(&carried_share, Some(&calculator));
+        assert!(failed.is_empty());
+        assert_eq!(with[0].room_source, RoomEdgeSource::Carried);
+        let bare_share = [share(None)];
+        let (without, failed) = room_stage(&bare_share, Some(&calculator));
+        assert!(failed.is_empty());
+        assert_eq!(without[0].room_source, RoomEdgeSource::Recomputed);
+        assert_eq!(
+            with[0].room_statements, without[0].room_statements,
+            "带来的边渲出的语句与现算逐字相同（ADR-010 §9 的前提）"
+        );
+        assert_eq!(with[0].room_edges, without[0].room_edges);
+        assert!(
+            with[0]
+                .room_statements
+                .contains("INSERT RELATION INTO room_relate"),
+            "{}",
+            with[0].room_statements
+        );
+
+        let mut stale = carried.clone();
+        stale.generation = "another-generation".into();
+        let stale_share = [share(Some(stale))];
+        let (stale, _) = room_stage(&stale_share, Some(&calculator));
+        assert_eq!(
+            stale[0].room_source,
+            RoomEdgeSource::Recomputed,
+            "代号不等 → 现算"
+        );
+        let mut partial = carried.clone();
+        partial.elements.pop();
+        let partial_share = [share(Some(partial))];
+        let (partial, _) = room_stage(&partial_share, Some(&calculator));
+        assert_eq!(
+            partial[0].room_source,
+            RoomEdgeSource::Recomputed,
+            "构件集不等 → 现算"
+        );
+        let no_calculator = [share(Some(carried))];
+        let (none, _) = room_stage(&no_calculator, None);
+        assert_eq!(none[0].room_source, RoomEdgeSource::NotComputed);
+        assert!(none[0].room_statements.is_empty());
+    }
+
     /// 库里全部房间边，`面板->构件` 形态、按字典序。
     async fn room_edges(db: &Surreal<Any>) -> Vec<String> {
         #[derive(serde::Deserialize)]
@@ -6192,14 +6388,48 @@ mod tests {
                 );
             }
         }
-        for (file, source) in [
+        // B/T4：回执带来的边先过三道闸（`carried_edges_for`：代号相等、构件集相等、带了），过了只渲染；
+        // `calculate_for_root(` 只剩兑底那一臂，渲染仍是同一台 `render_root_room_edges`。
+        assert!(
+            stage.contains("carried_edges_for(")
+                && stage.contains("RoomEdgeSource::Carried")
+                && stage.contains("RoomEdgeSource::Recomputed"),
+            "room_stage 先问回执带来的边，再兑底现算: {stage}"
+        );
+        assert_eq!(
+            stage.matches("calculate_for_root(").count(),
+            1,
+            "现算只剩兑底那一臂: {stage}"
+        );
+        assert_eq!(
+            stage.matches("render_root_room_edges(").count(),
+            1,
+            "带来的与现算的边都经同一台渲染器: {stage}"
+        );
+        let gate = production
+            .split_once("fn carried_edges_for<")
+            .expect("三道闸")
+            .1
+            .split_once("\n}\n")
+            .expect("gate end")
+            .0;
+        assert!(
+            gate.contains("carried.generation != resident_generation")
+                && gate.contains("elements.len() != listed.len()"),
+            "闸：代号相等、构件集相等（少一个多一个都不行）: {gate}"
+        );
+        // 生产调用方：dbnum 任务在开工时冻一次（`TaskRoomCalculator::freeze()`，一任务一台，B/T1）；
+        // 没有任务语境的 process-store 发布仍按组冻一次（`frozen_room_calculator()`）。
+        for (file, source, freeze) in [
             (
                 "model_refresh.rs",
                 include_str!("../data_interface/model_refresh.rs"),
+                "frozen_room_calculator()",
             ),
             (
                 "batch_worker.rs",
                 include_str!("../data_interface/batch_worker.rs"),
+                "TaskRoomCalculator::freeze()",
             ),
         ] {
             let production = source
@@ -6207,8 +6437,8 @@ mod tests {
                 .next()
                 .expect("production half");
             assert!(
-                production.contains("frozen_room_calculator()"),
-                "{file}: 生产调用方要在任务开工时冻一次房间计算器"
+                production.contains(freeze),
+                "{file}: 生产调用方要在任务开工时冻一次房间计算器（{freeze}）"
             );
         }
     }

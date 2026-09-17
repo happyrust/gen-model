@@ -187,6 +187,17 @@ impl PersistencePort for ProcessPersistence {
             .await
             {
                 Ok(report) => {
+                    // 房间边是 bake 时带来的还是这里现算的（B/T4）：稳态下 recomputed 应为 0，
+                    // 非 0 就是回执没带 / 代号不等 / 构件集不等，值得看一眼。
+                    if report.room_carried + report.room_recomputed > 0 {
+                        log::info!(
+                            "[model-write-behind] dbnum={dbnum} flushed roots={} room_edges={} room_carried={} room_recomputed={}",
+                            report.acknowledged.len(),
+                            report.room_edges,
+                            report.room_carried,
+                            report.room_recomputed
+                        );
+                    }
                     deterministic_failures.extend(report.failures);
                     DurableBatchResult {
                         acknowledged: report.acknowledged,

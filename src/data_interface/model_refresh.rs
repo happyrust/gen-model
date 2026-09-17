@@ -505,13 +505,15 @@ impl ModelRefreshPolicy {
                         commits = rows.commits;
                         max_transaction_bytes = batched.max_transaction_bytes;
                         println!(
-                            "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
+                            "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} room_carried={} room_recomputed={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
                             refnos.len(),
                             batched.groups,
                             rows.upserted,
                             rows.removed,
                             rows.receipts,
                             batched.room_edges,
+                            batched.room_carried,
+                            batched.room_recomputed,
                             rows.commits,
                             batched.max_transaction_bytes,
                             batched.failed.len(),
