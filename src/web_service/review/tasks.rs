@@ -234,27 +234,38 @@ async fn apply_internal_workflow_mutation_transaction(
             format!("获取校审数据库独立连接失败: {}", error),
         )
     })?;
-    await_review_query(
-        "review.workflow_mutation",
-        db.query(sql)
-            .bind(("task_id", write.task_id))
-            .bind(("form_id", form_id))
-            .bind(("project_id", write.project_id))
-            .bind(("requester_id", write.requester_id))
-            .bind(("next_node", write.next_node))
-            .bind(("status", write.next_status))
-            .bind(("return_reason", write.return_reason))
-            .bind(("form_status", form_status))
-            .bind(("history_from_node", write.history_from_node))
-            .bind(("history_target_node", write.history_target_node))
-            .bind(("history_action", write.history_action))
-            .bind(("actor_id", write.actor_id))
-            .bind(("actor_role", write.actor_role))
-            .bind(("actor_name", write.actor_name))
-            .bind(("comment", write.comment)),
-    )
+    // 与 workflow_sync 那条同源：乐观事务的写冲突是瞬时的，整段 BEGIN/COMMIT 回滚后
+    // 重跑即可；业务 THROW（任务/主单据不存在）不在重试之列。
+    crate::surreal_retry::retry_surreal_write_operation("review.workflow_mutation", || {
+        let write = &write;
+        let form_id = form_id.clone();
+        let form_status = form_status.clone();
+        let db = &db;
+        async move {
+            await_review_query(
+                "review.workflow_mutation",
+                db.query(sql)
+                    .bind(("task_id", write.task_id.clone()))
+                    .bind(("form_id", form_id))
+                    .bind(("project_id", write.project_id.clone()))
+                    .bind(("requester_id", write.requester_id.clone()))
+                    .bind(("next_node", write.next_node.clone()))
+                    .bind(("status", write.next_status))
+                    .bind(("return_reason", write.return_reason.clone()))
+                    .bind(("form_status", form_status))
+                    .bind(("history_from_node", write.history_from_node.clone()))
+                    .bind(("history_target_node", write.history_target_node.clone()))
+                    .bind(("history_action", write.history_action.clone()))
+                    .bind(("actor_id", write.actor_id.clone()))
+                    .bind(("actor_role", write.actor_role.clone()))
+                    .bind(("actor_name", write.actor_name.clone()))
+                    .bind(("comment", write.comment.clone())),
+            )
+            .await
+            .and_then(|response| response.check().map_err(anyhow::Error::from))
+        }
+    })
     .await
-    .and_then(|response| response.check().map_err(anyhow::Error::from))
     .map_err(|error| {
         let message = error.to_string();
         if message.contains("INTERNAL_WORKFLOW_TASK_NOT_FOUND") {

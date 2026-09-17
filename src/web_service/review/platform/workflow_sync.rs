@@ -366,36 +366,51 @@ async fn apply_workflow_mutation_transaction(
             format!("获取校审数据库独立连接失败: {}", error),
         )
     })?;
-    await_review_query(
-        "workflow_sync.mutation",
-        db.query(sql)
-            .bind(("task_id", write.task_id))
-            .bind(("form_id", write.form_id))
-            .bind(("project_id", write.project_id))
-            .bind(("requester_id", write.requester_id))
-            .bind(("expected_current_node", write.expected_current_node))
-            .bind(("expected_status", write.expected_status))
-            .bind(("next_node", write.next_node))
-            .bind(("status", write.next_status))
-            .bind(("checker_id", write.checker_id))
-            .bind(("checker_name", write.checker_name))
-            .bind(("reviewer_id", write.reviewer_id))
-            .bind(("reviewer_name", write.reviewer_name))
-            .bind(("approver_id", write.approver_id))
-            .bind(("approver_name", write.approver_name))
-            .bind(("return_reason", write.return_reason))
-            .bind(("form_status", form_status))
-            .bind(("form_source", write.form_source))
-            .bind(("history_target_node", write.history_target_node))
-            .bind(("history_action", write.history_action))
-            .bind(("history_actor_id", write.history_actor_id))
-            .bind(("history_actor_name", write.history_actor_name))
-            .bind(("history_actor_role", write.history_actor_role))
-            .bind(("history_source", write.history_source))
-            .bind(("history_comment", write.history_comment)),
-    )
+    // 写冲突要重试：SurrealDB 是乐观事务，另一个写入器碰到同一批 key 时后提交的这笔
+    // 会收到「read or write conflict … can be retried」。整段 BEGIN/COMMIT 要么全提交要么
+    // 全回滚，重跑一遍是安全的；WORKFLOW_STATE_CHANGED 这类业务 THROW 不在重试之列，
+    // 由 is_retryable_surreal_write_error 挡掉后立即上抛。
+    crate::surreal_retry::retry_surreal_write_operation("workflow_sync.mutation", || {
+        let write = &write;
+        let form_status = form_status.clone();
+        let db = &db;
+        async move {
+            await_review_query(
+                "workflow_sync.mutation",
+                db.query(sql)
+                    .bind(("task_id", write.task_id.clone()))
+                    .bind(("form_id", write.form_id.clone()))
+                    .bind(("project_id", write.project_id.clone()))
+                    .bind(("requester_id", write.requester_id.clone()))
+                    .bind((
+                        "expected_current_node",
+                        write.expected_current_node.clone(),
+                    ))
+                    .bind(("expected_status", write.expected_status.clone()))
+                    .bind(("next_node", write.next_node.clone()))
+                    .bind(("status", write.next_status))
+                    .bind(("checker_id", write.checker_id.clone()))
+                    .bind(("checker_name", write.checker_name.clone()))
+                    .bind(("reviewer_id", write.reviewer_id.clone()))
+                    .bind(("reviewer_name", write.reviewer_name.clone()))
+                    .bind(("approver_id", write.approver_id.clone()))
+                    .bind(("approver_name", write.approver_name.clone()))
+                    .bind(("return_reason", write.return_reason.clone()))
+                    .bind(("form_status", form_status))
+                    .bind(("form_source", write.form_source))
+                    .bind(("history_target_node", write.history_target_node.clone()))
+                    .bind(("history_action", write.history_action))
+                    .bind(("history_actor_id", write.history_actor_id.clone()))
+                    .bind(("history_actor_name", write.history_actor_name.clone()))
+                    .bind(("history_actor_role", write.history_actor_role.clone()))
+                    .bind(("history_source", write.history_source.clone()))
+                    .bind(("history_comment", write.history_comment.clone())),
+            )
+            .await
+            .and_then(|response| response.check().map_err(anyhow::Error::from))
+        }
+    })
     .await
-    .and_then(|response| response.check().map_err(anyhow::Error::from))
     .map_err(|error| {
         let message = error.to_string();
         if message.contains("WORKFLOW_STATE_CHANGED") {

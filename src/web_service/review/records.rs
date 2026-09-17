@@ -658,38 +658,66 @@ pub(super) async fn create_record(
     let sync_operator_name = operator_name.clone();
     let sync_role = claims.role.clone().unwrap_or_default();
 
-    match await_review_query(
+    // 语句级失败不再被吞：`await_review_query` 回 Ok 只说明这条查询发出去了，语句自己
+    // 的错误要 `take(0)` 才交出来——旧写法 `unwrap_or_default()` 把它压成空结果，于是
+    // 写冲突一律显示成「数据库未返回确认记录」，真因看不见（RUS-244 驳回前保存就是这么
+    // 丢的）。顺带按 SurrealDB 乐观事务的口径重试冲突：失败的写没有落库，重跑是安全的。
+    let write_outcome = crate::surreal_retry::retry_surreal_write_operation(
         "review.records.write",
-        db.query(write_sql)
-            .bind(("id", record_id.clone()))
-            .bind(("task_id", request.task_id.clone()))
-            .bind(("form_id", form_id))
-            .bind(("type", record_type))
-            .bind(("annotations", request.annotations.clone()))
-            .bind(("cloud_annotations", request.cloud_annotations.clone()))
-            .bind(("rect_annotations", request.rect_annotations.clone()))
-            .bind(("obb_annotations", request.obb_annotations.clone()))
-            .bind(("measurements", request.measurements.clone()))
-            .bind(("dimension_document", request.dimension_document.clone()))
-            .bind((
-                "base_dimension_document_version",
-                base_dimension_document_version,
-            ))
-            .bind((
-                "next_dimension_document_version",
-                next_dimension_document_version,
-            ))
-            .bind(("note", note))
-            .bind(("current_node", current_node))
-            .bind(("operator_id", operator_id))
-            .bind(("operator_name", operator_name))
-            .bind(("slot_key", slot_key))
-            .bind(("snapshot_hash", snapshot_hash)),
+        || {
+            let db = &db;
+            let request = &request;
+            let record_id = record_id.clone();
+            let form_id = form_id.clone();
+            let record_type = record_type.clone();
+            let note = note.clone();
+            let current_node = current_node.clone();
+            let operator_id = operator_id.clone();
+            let operator_name = operator_name.clone();
+            let slot_key = slot_key.clone();
+            let snapshot_hash = snapshot_hash.clone();
+            async move {
+                await_review_query(
+                    "review.records.write",
+                    db.query(write_sql)
+                        .bind(("id", record_id))
+                        .bind(("task_id", request.task_id.clone()))
+                        .bind(("form_id", form_id))
+                        .bind(("type", record_type))
+                        .bind(("annotations", request.annotations.clone()))
+                        .bind(("cloud_annotations", request.cloud_annotations.clone()))
+                        .bind(("rect_annotations", request.rect_annotations.clone()))
+                        .bind(("obb_annotations", request.obb_annotations.clone()))
+                        .bind(("measurements", request.measurements.clone()))
+                        .bind(("dimension_document", request.dimension_document.clone()))
+                        .bind((
+                            "base_dimension_document_version",
+                            base_dimension_document_version,
+                        ))
+                        .bind((
+                            "next_dimension_document_version",
+                            next_dimension_document_version,
+                        ))
+                        .bind(("note", note))
+                        .bind(("current_node", current_node))
+                        .bind(("operator_id", operator_id))
+                        .bind(("operator_name", operator_name))
+                        .bind(("slot_key", slot_key))
+                        .bind(("snapshot_hash", snapshot_hash)),
+                )
+                .await
+                .and_then(|mut response| {
+                    response
+                        .take::<Vec<ReviewRecordRow>>(0)
+                        .map_err(anyhow::Error::from)
+                })
+            }
+        },
     )
-    .await
-    {
-        Ok(mut response) => {
-            let rows: Vec<ReviewRecordRow> = response.take(0).unwrap_or_default();
+    .await;
+
+    match write_outcome {
+        Ok(rows) => {
             if let Some(row) = rows.into_iter().next() {
                 sync_annotation_states_from_snapshot(
                     &sync_form_id,
