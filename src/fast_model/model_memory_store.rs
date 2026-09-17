@@ -1147,6 +1147,20 @@ impl ModelMemoryStore {
             .unwrap_or_default()
     }
 
+    /// 在一把读锁下逐条过一遍这个投影域的记录，**不复制**。全 MDB 的按盒扫（反查 `room_reverse`：管身不进树，
+    /// 每一库的管身记录都要对着面板的新旧盒过一遍）用它——`records()` 那种整域克隆在这里只为筛出几条。
+    /// 闭包里不许 await、不许回头拿这把锁。
+    pub(crate) fn for_each_record(
+        &self,
+        scope: ProjectionScope<'_>,
+        mut visit: impl FnMut(&ProjectedGeometry),
+    ) {
+        let scopes = self.read();
+        if let Some(state) = scopes.get(&scope.key()) {
+            state.geometries.values().for_each(|record| visit(record));
+        }
+    }
+
     /// Immutable file view and its version from one read lock. Room consumers
     /// check this epoch again before committing their results.
     pub(crate) fn snapshot_dbnum(&self, dbnum: u32) -> (u64, Vec<ProjectedGeometry>) {

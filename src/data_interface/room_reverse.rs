@@ -3,15 +3,18 @@
 //! 逐根路径（D1）只答「本根在哪些面板里」；面板那一侧变了，它名下**别的根**的成员边陈旧（§未决 U1），
 //! 此前的填法是整库重算（`RoomOnly`，O(本库全部根)）。这里把「哪些根受影响」算出来，整库降为兜底：
 //!
-//! - **命中源三路**。① 全局空间树（真实元素、全库、`GLOBAL_AABB_TREE::locate_intersecting_bounds`，
-//!   消费者门 [`ensure_spatial_ready`]——不就绪就说不了完整，调用方退整库）；② 投影里本库的隐式管身
-//!   记录（**管身不进树**，`aabb_tree::projected_tree_entry` 对 `tube.is_some()` 回 `None`）；③ 库上
-//!   `tubi_relate` 的 `aabb.d` 范围过滤（不在投影里的根的管身——初始化的、重启前生成的）。
+//! - **命中源三路，都不分库**。① 全局空间树（真实元素、全库、`GLOBAL_AABB_TREE::locate_intersecting_bounds`，
+//!   消费者门 [`ensure_spatial_ready`]——不就绪就说不了完整，调用方退整库）；② 投影里的隐式管身记录按盒扫
+//!   （**管身不进树**，`aabb_tree::projected_tree_entry` 对 `tube.is_some()` 回 `None`；一把读锁过全 MDB，
+//!   不复制）；③ 库上 `tubi_relate` 的 `aabb.d` 范围过滤（不在投影里的根的管身——初始化的、重启前生成的），
+//!   **不带 `dbnum =`**——面板在 A 库、成员在 B 库是常态，按库过滤会把 B 的命中漏在这一层。
 //! - **元素 → 根**：`anc`（投影记录的 `ancestors` / 库行的 `anc`）∪ 自身，与本库 `DbSet@T` 的根清单求交；
 //!   嵌套根共享记录时两根都算（多算一根是同一台计算器下的幂等重写）。折不出根的元素进 `unresolved`——
 //!   调用方按「反查不完整」处置（退整库），不静默丢。
-//! - **跨库命中只数不算**（§未决 U3，a 档）：面板在 A 库、成员在 B 库，任务按库、事务按库，本轮只重算
-//!   本库的根；数进回执，b 档（给别的库排根级工作项）等数据再定。
+//! - **跨库命中按库分桶、存元素不折根**（§未决 U3，b 档，2026-09-17）：任务按库、事务按库，本轮只重算本库的根；
+//!   别的库命中的元素连同祖先链进 [`AffectedRoots::foreign`]，由调用方停放给那个库、它的下一个任务折根
+//!   （根清单在那个库的 `DbSet@T` 上，这里枚举不了；祖先链在这里就带上——管身的来源是 BRAN 那种容器，
+//!   `inst_relate` 里没有它的行，那个库回库也取不到）。`cross_library` 是这些元素的总数。
 //! - 面板本身不是成员（`noun == PANE` 剔掉，与 `calculate_edges` 同口径）。
 //!
 //! 不写树、不写库、不重算几何：这里只回答「谁」。
@@ -26,7 +29,7 @@ use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::generation_root::refno_to_e3d;
-use crate::fast_model::model_memory_store::{ModelMemoryStore, packed_refno};
+use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope, packed_refno};
 use crate::fast_model::room_resident::PanelDelta;
 use crate::fast_model::spatial_state::ensure_spatial_ready;
 
@@ -48,8 +51,12 @@ pub(crate) struct AffectedRoots {
     pub tree_hits: usize,
     /// 命中的隐式管身来源元素（投影 + 库行，按来源去重、含跨库的）。
     pub tube_hits: usize,
-    /// 命中却不属本库的元素数（只数不算，U3 a 档）。
+    /// 命中却不属本库的元素总数（= `foreign` 里元素的总数）。
     pub cross_library: usize,
+    /// 命中却不属本库的元素，按属主库分桶：`dbnum → (打包 refno → 祖先链)`（U3 b 档）。不折根——根清单在那个库的
+    /// `DbSet@T` 上；祖先链在这里带上（投影记录 / 库行 / 回库取），那个库的任务拿它与自己的根清单求交即可。
+    /// 取不到祖先链的元素也留着（空链）：那个库折不出它就退整库，不在这里静默丢。
+    pub foreign: BTreeMap<u32, BTreeMap<i64, Vec<i64>>>,
     /// 本库命中却折不出根的元素（`anc` ∪ 自身与根清单不交）：反查不完整的证据，调用方据此退整库。
     pub unresolved: Vec<RefnoEnum>,
 }
@@ -57,11 +64,12 @@ pub(crate) struct AffectedRoots {
 impl AffectedRoots {
     pub(crate) fn summary(&self) -> String {
         format!(
-            "roots={} tree_hits={} tube_hits={} cross_library={} unresolved={}",
+            "roots={} tree_hits={} tube_hits={} cross_library={} foreign_libraries={} unresolved={}",
             self.roots.len(),
             self.tree_hits,
             self.tube_hits,
             self.cross_library,
+            self.foreign.len(),
             self.unresolved.len()
         )
     }
@@ -105,8 +113,8 @@ pub(crate) fn tree_element_hits(tree: &AccelerationTree, boxes: &[Aabb]) -> BTre
     hits
 }
 
-/// 树的答案之后的那一半：投影里的管身按盒扫、库上管身范围查、不在投影里的元素回库拿 `anc`、分库、折根。
-/// 拆出来是为了不碰全局树也能对着 `mem://` 测。
+/// 树的答案之后的那一半：投影里的管身按盒扫（全 MDB）、库上管身范围查（不分库）、不在投影里的元素回库拿 `anc`、
+/// 按属主库分桶、本库的折根。拆出来是为了不碰全局树也能对着 `mem://` 测。
 pub(crate) async fn resolve(
     db: &Surreal<Any>,
     store: &ModelMemoryStore,
@@ -119,42 +127,33 @@ pub(crate) async fn resolve(
         tree_hits: tree_hits.len(),
         ..Default::default()
     };
-    // 投影里本库的记录：元素 → 祖先链现成；管身记录按盒扫（管身不进树）。
-    let (_, projected) = store.snapshot_dbnum(dbnum);
+    // 投影一把读锁过一遍、不分库、不复制：管身记录按盒扫（管身不进树）；命中的（管身 / 树上点到的）把祖先链带出来
+    // ——别的库的元素也带，停放给那个库时随元素一起交过去，它折根不必再回库。
     let mut ancestors_of: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     let mut tube_hits: BTreeSet<i64> = BTreeSet::new();
-    for record in &projected {
+    store.for_each_record(ProjectionScope::Current, |record| {
         let source = packed_refno(record.source_refno);
-        ancestors_of
-            .entry(source)
-            .or_insert_with(|| record.ancestors.clone());
-        if record.tube.is_some() {
+        let tube_hit = record.tube.is_some() && {
             let aabb = Aabb::new(record.world_bounds[0].into(), record.world_bounds[1].into());
-            if boxes.iter().any(|query| query.intersects(&aabb)) {
-                tube_hits.insert(source);
-            }
+            boxes.iter().any(|query| query.intersects(&aabb))
+        };
+        if tube_hit {
+            tube_hits.insert(source);
         }
-    }
-    // 库上的管身（不在投影里的根的，以及已落库的）：范围过滤，回来源与祖先链。
-    for (source, anc) in durable_tube_hits(db, dbnum, boxes).await? {
+        if tube_hit || tree_hits.contains(&source) {
+            ancestors_of
+                .entry(source)
+                .or_insert_with(|| record.ancestors.clone());
+        }
+    });
+    // 库上的管身（不在投影里的根的，以及已落库的）：范围过滤不带库，回来源与祖先链。
+    for (source, anc) in durable_tube_hits(db, boxes).await? {
         tube_hits.insert(source);
         ancestors_of.entry(source).or_insert(anc);
     }
     out.tube_hits = tube_hits.len();
-
-    // 分库：不属本库的只数。
-    let mut pending: Vec<i64> = Vec::new();
-    for source in tree_hits.iter().chain(tube_hits.iter()) {
-        if e3d_of(*source).dbno() != dbnum {
-            out.cross_library += 1;
-        } else {
-            pending.push(*source);
-        }
-    }
-    pending.sort_unstable();
-    pending.dedup();
-    // 树上命中、投影里没有的元素（重启前生成 / 初始化的）：回库拿 `anc`。
-    let unknown: Vec<i64> = pending
+    // 树上命中、投影里没有的元素（重启前生成 / 初始化的，本库与别的库都有）：回库拿 `anc`。
+    let unknown: Vec<i64> = tree_hits
         .iter()
         .copied()
         .filter(|source| !ancestors_of.contains_key(source))
@@ -162,19 +161,25 @@ pub(crate) async fn resolve(
     for (source, anc) in durable_ancestors(db, &unknown).await? {
         ancestors_of.insert(source, anc);
     }
+
+    // 分库：本库的折根；别的库的按库存下（元素 + 祖先链）不折——根清单在那个库的 T 上，由它的任务折（U3 b 档）。
+    let hits: BTreeSet<i64> = tree_hits.iter().chain(tube_hits.iter()).copied().collect();
+    let mut pending: Vec<(i64, Vec<i64>)> = Vec::new();
+    for source in hits {
+        let anc = ancestors_of.get(&source).cloned().unwrap_or_default();
+        let owner = e3d_of(source).dbno();
+        if owner == dbnum {
+            pending.push((source, anc));
+        } else {
+            out.foreign.entry(owner).or_default().insert(source, anc);
+        }
+    }
+    out.cross_library = out.foreign.values().map(BTreeMap::len).sum();
     let roots: BTreeSet<i64> = library_roots
         .iter()
         .map(|root| packed_refno(*root))
         .collect();
-    let (matched, unresolved) = fold_to_roots(
-        pending.iter().map(|source| {
-            (
-                *source,
-                ancestors_of.get(source).cloned().unwrap_or_default(),
-            )
-        }),
-        &roots,
-    );
+    let (matched, unresolved) = fold_to_roots(pending, &roots);
     out.roots = matched.into_iter().map(e3d_of).collect();
     out.unresolved = unresolved.into_iter().map(refno_of).collect();
     Ok(ReverseLookup::Resolved(out))
@@ -238,10 +243,11 @@ fn box_predicate(aabb: &Aabb) -> String {
     )
 }
 
-/// 库上本库的隐式管身里、世界盒与任一查询盒相交的：来源元素 + 祖先链。O(本库管身行) 的链接解引用，不读几何。
+/// 库上的隐式管身里、世界盒与任一查询盒相交的：来源元素 + 祖先链。**不分库**（面板在 A、管身在 B 是常态，
+/// 按库过滤会把 B 的命中漏掉；分库在 [`resolve`] 里按 `RefNo::dbno()` 做）。O(全部管身行) 的链接解引用，不读几何；
+/// 慢了给 `tubi_relate` 补 `aabb_d` 平副本，不在这里加库过滤。
 pub(crate) async fn durable_tube_hits(
     db: &Surreal<Any>,
-    dbnum: u32,
     boxes: &[Aabb],
 ) -> anyhow::Result<Vec<(i64, Vec<i64>)>> {
     if boxes.is_empty() {
@@ -254,7 +260,7 @@ pub(crate) async fn durable_tube_hits(
         .join(" OR ");
     let rows: Vec<AncestorRow> = db
         .query(format!(
-            "SELECT in AS refno, anc FROM tubi_relate WHERE dbnum = {dbnum} AND aabb.d != NONE AND ({predicate});"
+            "SELECT in AS refno, anc FROM tubi_relate WHERE aabb.d != NONE AND ({predicate});"
         ))
         .await?
         .check()?
@@ -364,7 +370,7 @@ mod tests {
                 refno: format!("{}/{}", source.word0, source.word1),
             },
             source_refno: source,
-            dbnum: 7997,
+            dbnum: source.dbno(),
             source_sesno: 3,
             noun: if tube.is_some() {
                 "TUBI".into()
@@ -390,7 +396,8 @@ mod tests {
     }
 
     /// 树的答案之后那一半（`mem://`，不碰全局树）：投影里的管身按盒扫进来、库上管身范围查进来、树上命中但
-    /// 投影里没有的元素回库拿 `anc`；跨库命中只数；折不出根的进 `unresolved`；三条路折出的根合成一个集合。
+    /// 投影里没有的元素回库拿 `anc`；本库的折成根、折不出根的进 `unresolved`；**别的库的命中三路都进 `foreign`**
+    /// ——按属主库分桶、带祖先链、不折根（U3 b 档）；取不到祖先链的也留着（空链）。
     #[tokio::test]
     async fn resolve_joins_tree_projection_and_durable_tubes_into_library_roots() {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
@@ -401,18 +408,22 @@ mod tests {
         let root_d = RefNo::new(24381, 4);
         let library_roots = [root_a, root_b, root_c, root_d];
         // 库上：不在投影里的元素 24381/300（根 C）带 anc；管身行 24381/400（根 D，盒 [5,6]）与 24381/500
-        // （根 D，盒 [50,51]，不该命中）；另一库 24382/9 的管身盒相交但 dbnum 不同，查询按库、不该进来。
+        // （根 D，盒 [50,51]，不该命中）；另一库（7998）的管身行 24382/9 盒相交——查询不分库，要进 `foreign`；
+        // 另一库树上命中的 24382/8 不在投影里，回库取到 anc。
         db.query(format!(
             r#"
             CREATE aabb:near SET d={{mins:[5,5,5],maxs:[6,6,6]}};
             CREATE aabb:far SET d={{mins:[50,50,50],maxs:[51,51,51]}};
             CREATE inst_relate:⟨24381_300⟩ SET in=pe:⟨24381_300⟩, anc=[{}, {}], dbnum=7997;
+            CREATE inst_relate:⟨24382_8⟩ SET in=pe:⟨24382_8⟩, anc=[{}, {}], dbnum=7998;
             CREATE tubi_relate:⟨t400⟩ SET in=pe:⟨24381_400⟩, anc=[{}], dbnum=7997, aabb=aabb:near;
             CREATE tubi_relate:⟨t500⟩ SET in=pe:⟨24381_500⟩, anc=[{}], dbnum=7997, aabb=aabb:far;
             CREATE tubi_relate:⟨t9⟩ SET in=pe:⟨24382_9⟩, anc=[{}], dbnum=7998, aabb=aabb:near;
             "#,
             packed(24381, 77),
             packed_refno(root_c),
+            packed(24382, 88),
+            packed(24382, 1),
             packed_refno(root_d),
             packed_refno(root_d),
             packed(24382, 1),
@@ -422,7 +433,7 @@ mod tests {
         .check()
         .unwrap();
         // 投影：根 A 的构件 100（盒 [0,1]）与根 B 的管身 200（盒 [4.5,5.5]，与查询盒 [5,6] 相交）；
-        // 根 A 还有一段管身 101 在远处（不相交）。
+        // 根 A 还有一段管身 101 在远处（不相交）；另一库（7998）根 24382/2 的管身 24382/10 也与 [5,6] 相交。
         let store = ModelMemoryStore::default();
         store.commit(
             ProjectionScope::Current,
@@ -449,15 +460,24 @@ mod tests {
                         (4.5, 5.5),
                         Some(tube(201, 202)),
                     ),
+                    record(
+                        "24382_10_tube",
+                        RefNo::new(24382, 10),
+                        RefNo::new(24382, 2),
+                        (5.2, 5.8),
+                        Some(tube(11, 12)),
+                    ),
                 ],
                 ..ProjectionCommit::default()
             }],
         );
-        // 树的答案（模拟）：投影里的 100、库上的 300、跨库的 24382/8、折不出根的 24381/600。
+        // 树的答案（模拟）：投影里的 100、库上的 300、折不出根的 24381/600；别的库的 24382/8（库上有 anc）与
+        // 24383/8（第三个库，哪里都没有它的祖先链）。
         let tree_hits = BTreeSet::from([
             packed(24381, 100),
             packed(24381, 300),
             packed(24382, 8),
+            packed(24383, 8),
             packed(24381, 600),
         ]);
         let boxes = [aabb(0.0, 1.0), aabb(5.0, 6.0)];
@@ -473,19 +493,51 @@ mod tests {
             vec![root_a, root_b, root_c, root_d],
             "{affected:?}"
         );
-        assert_eq!(affected.tree_hits, 4);
+        assert_eq!(affected.tree_hits, 5);
         assert_eq!(
-            affected.tube_hits, 2,
-            "投影里的 200 + 库上的 400；远处的 101 / 500 不算，别的库的管身行（24382/9）按 dbnum 在库里就筛掉"
+            affected.tube_hits, 4,
+            "投影里的 200 与 24382/10 + 库上的 400 与 24382/9；远处的 101 / 500 不算——两路都不分库"
         );
         assert_eq!(
-            affected.cross_library, 1,
-            "树上的 24382/8 只数不算（树是全库的；管身查询按库，跨库管身进不来）"
+            affected.foreign,
+            BTreeMap::from([
+                (
+                    7998,
+                    BTreeMap::from([
+                        (packed(24382, 8), vec![packed(24382, 88), packed(24382, 1)]),
+                        (packed(24382, 9), vec![packed(24382, 1)]),
+                        (packed(24382, 10), vec![packed(24382, 2)]),
+                    ]),
+                ),
+                (7999, BTreeMap::from([(packed(24383, 8), Vec::new())])),
+            ]),
+            "别的库的命中按属主库分桶、带祖先链（树上的回库取、管身行自带、投影记录自带）；取不到的留空链"
         );
+        assert_eq!(affected.cross_library, 4, "= foreign 里元素的总数");
         assert_eq!(affected.unresolved, vec![refno(24381, 600)]);
         assert_eq!(
             affected.summary(),
-            "roots=4 tree_hits=4 tube_hits=2 cross_library=1 unresolved=1"
+            "roots=4 tree_hits=5 tube_hits=4 cross_library=4 foreign_libraries=2 unresolved=1"
+        );
+    }
+
+    /// 源码钉（U3 b 档）：库上管身的范围查询**不带库过滤**——跨库命中要在这一层就进来，分库在 `resolve` 里按
+    /// `RefNo::dbno()` 做。
+    #[test]
+    fn the_durable_tube_query_is_not_filtered_by_library() {
+        let production = include_str!("room_reverse.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test module")
+            .0;
+        let query = production
+            .split_once("pub(crate) async fn durable_tube_hits(")
+            .expect("durable_tube_hits")
+            .1;
+        let query = &query[..query.find("\n}\n").expect("end")];
+        assert!(
+            query.contains("FROM tubi_relate WHERE aabb.d != NONE AND (")
+                && !query.contains("dbnum ="),
+            "{query}"
         );
     }
 
