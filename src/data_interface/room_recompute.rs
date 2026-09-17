@@ -196,44 +196,97 @@ pub(crate) struct RoomRecomputeRequest {
     pub scope: RoomRecomputeScope,
 }
 
-/// 定向准入（纯函数）。只有「这一次换代的面板变化就是本库全部欠账」时才定向：本任务的开工前对齐**真换了代**
-/// （`Rebuilt { generation_changed: true }`）、带着与上一代的面板变化（`panels` 非空）、说得出上一代是谁
-/// （`previous_generation`），**且**库上 `model_room_generation` 正是那上一代——库上的边全部对齐到上一代，
-/// 中间没欠别的，那么上一代 → 这一代之间面板动了什么，就是欠账的全部。
+/// 定向准入（纯函数，链式）。只有「库上那一代 → 此刻常驻这一代之间，面板动了什么本任务**全知道**」时才定向：
+/// 从库上 `model_room_generation` 出发，每一步接一段换代——本任务自己那一段（开工前对齐**真换了代**、说得出上一代、
+/// 带着**非空**面板变化：`previous_generation → 常驻代号`），或别的库停放给本库的一段（`RoomRoots::from → to`，U3 b 档）
+/// ——接到此刻常驻代号就是定向：链上各段的欠账（自己那一段反查、停放的元素折根）加起来就是本库欠账的全部。
 ///
-/// 其余都整库：库上是更早的代 / 从没盖过（欠的不止这一次换代，diff 说不了）、`Unchanged` 却欠着（重启后 /
-/// 别的库先换的代，本任务手里没有 diff）、`generation_changed` 而面板变化为空（换代另有原因，例如关键字）、
-/// 第一代（没有上一代）。
+/// 规则：自己那一段优先（它是此刻对树的新鲜反查；同一对代号的旧停放物是上一轮的答案）；停放物里 `from` 在库上那一代
+/// 之前的一段不要（库上已越过它）；一段都接不上 / 中途断了 / 绕圈 = 整库。今天的四条准入（真换了代 + 面板变化非空 +
+/// 说得出上一代 + 库上正是上一代）是链长 1、只有自己那一段的特例。
+///
+/// 其余都整库：库上从没盖过（欠的不止这几段，diff 说不了）、常驻说不出代号、`Unchanged` 却欠着而槽里接不出链
+/// （重启后停放物已丢 / 别的库先换的代却没停放给本库）、`generation_changed` 而面板变化为空（换代另有原因，例如关键字
+/// ——这一段接不上）、第一代（没有上一代）。
 pub(crate) fn scope_for_task(
     refresh: Option<&RoomReferenceRefresh>,
     library_generation: Option<&str>,
+    resident_generation: Option<&str>,
+    parked: &[RoomRoots],
 ) -> RoomRecomputeScope {
-    match refresh {
+    let (Some(library), Some(resident)) = (library_generation, resident_generation) else {
+        return RoomRecomputeScope::WholeLibrary;
+    };
+    let own = match refresh {
         Some(RoomReferenceRefresh::Rebuilt {
             generation_changed: true,
             previous_generation: Some(previous),
             panels: Some(delta),
             ..
-        }) if !delta.is_empty() && library_generation == Some(previous.as_str()) => {
-            RoomRecomputeScope::Targeted {
-                swap: Some(PanelSwap {
-                    from_generation: previous.clone(),
+        }) if !delta.is_empty() => Some((previous.as_str(), delta)),
+        _ => None,
+    };
+    let mut cursor = library;
+    let mut swap: Option<PanelSwap> = None;
+    let mut used: Vec<RoomRoots> = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
+    while cursor != resident {
+        if !visited.insert(cursor) {
+            // 绕圈（面板挪走又挪回的停放物成环，而常驻已在环外）。
+            return RoomRecomputeScope::WholeLibrary;
+        }
+        if let Some((previous, delta)) = own {
+            if previous == cursor {
+                swap = Some(PanelSwap {
+                    from_generation: previous.to_owned(),
                     panels: delta.clone(),
-                }),
-                parked: Vec::new(),
+                });
+                cursor = resident;
+                continue;
             }
         }
-        _ => RoomRecomputeScope::WholeLibrary,
+        match parked.iter().find(|entry| entry.from_generation == cursor) {
+            Some(entry) => {
+                used.push(entry.clone());
+                cursor = entry.to_generation.as_str();
+            }
+            None => return RoomRecomputeScope::WholeLibrary,
+        }
+    }
+    if swap.is_none() && used.is_empty() {
+        // 库上已是这一代：不欠；问到这里的（规划器排了 `RoomOnly`）按整库办，与今天同。
+        return RoomRecomputeScope::WholeLibrary;
+    }
+    RoomRecomputeScope::Targeted { swap, parked: used }
+}
+
+/// 停放链（U3 b 档）的取数，两个执行体在开工前对齐、读过库上那一格之后调：库上欠着（③）才拿本库槽里的停放物去接
+/// 准入链；库上已与常驻同代——停放物说的都是它已越过的代——顺手清掉（回执一句）；说不出（开关关 / 常驻没就绪 /
+/// 水位读不出）不动槽、也不接链。
+pub(crate) fn parked_for_task(dbnum: u32, alignment: Option<&DurableAlignment>) -> Vec<RoomRoots> {
+    match alignment.map(DurableAlignment::owed) {
+        Some(Some(_)) => crate::data_interface::room_reverse::pending(dbnum),
+        Some(None) => {
+            let cleared = crate::data_interface::room_reverse::clear(dbnum);
+            if cleared > 0 {
+                println!(
+                    "dbnum={dbnum} 库上房间对齐代号已与常驻同代，槽里 {cleared} 段停放物说的都是越过的代，清掉"
+                );
+            }
+            Vec::new()
+        }
+        None => Vec::new(),
     }
 }
 
 /// 这个任务要不要跑房间重算、为什么、算多大。三条触发合成一句：规划器排的 `RoomOnly` 工作项
 /// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`DurableAlignment::owed`]）。
-/// 都没有 = `None`。范围由 [`scope_for_task`] 定。
+/// 都没有 = `None`。范围由 [`scope_for_task`] 定；定向里接了停放链的，原因多一句说停的是谁、多少。
 pub(crate) fn request_for_task(
     side_actions: &[ModelWorkItem],
     refresh: Option<&RoomReferenceRefresh>,
     alignment: Option<&DurableAlignment>,
+    parked: &[RoomRoots],
 ) -> Option<RoomRecomputeRequest> {
     let mut reasons = Vec::new();
     if side_actions
@@ -261,12 +314,27 @@ pub(crate) fn request_for_task(
     if reasons.is_empty() {
         return None;
     }
+    let scope = scope_for_task(
+        refresh,
+        alignment.and_then(|alignment| alignment.library.as_deref()),
+        alignment.map(|alignment| alignment.resident.as_str()),
+        parked,
+    );
+    if let RoomRecomputeScope::Targeted { parked: used, .. } = &scope {
+        if !used.is_empty() {
+            reasons.push(format!(
+                "别的库的面板变化停放到本库 {} 段：{}",
+                used.len(),
+                used.iter()
+                    .map(RoomRoots::summary)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
+    }
     Some(RoomRecomputeRequest {
         reason: reasons.join("；"),
-        scope: scope_for_task(
-            refresh,
-            alignment.and_then(|alignment| alignment.library.as_deref()),
-        ),
+        scope,
     })
 }
 
@@ -406,16 +474,19 @@ mod tests {
                 .unwrap_or_else(|| {
                     panic!("{label}: 要读库上的整库对齐代号（第三条触发 / 定向准入）: {body}")
                 });
+            let parked = body
+                .find("room_recompute::parked_for_task(job.dbnum, alignment.as_ref())")
+                .unwrap_or_else(|| panic!("{label}: 停放链（U3 b 档）按库上那一格取: {body}"));
             let request = body
                 .find("room_recompute::request_for_task(")
                 .unwrap_or_else(|| panic!("{label}: request_for_task"));
             assert!(
-                refresh < owed && owed < request,
-                "{label}: 对齐 → 读库上那一格 → 合成三条触发，顺序不能乱"
+                refresh < owed && owed < parked && parked < request,
+                "{label}: 对齐 → 读库上那一格 → 取停放链 → 合成三条触发，顺序不能乱"
             );
             assert!(
-                body.contains("alignment.as_ref(),"),
-                "{label}: 库上那一格要真的传进 request_for_task（第三条触发与定向准入都从它出发）: {body}"
+                body.contains("alignment.as_ref(),") && body.contains("&parked,"),
+                "{label}: 库上那一格与停放链要真的传进 request_for_task（第三条触发与定向准入都从它出发）: {body}"
             );
         }
         // ModelOnly 执行体同样：启动追平窗口与稳态窗口共用同一条规划入口，`RoomOnly` 工作项随
@@ -489,7 +560,7 @@ mod tests {
     #[test]
     fn a_task_recomputes_rooms_on_either_trigger() {
         let item = room_only_work_item(7997, "DESI", 163);
-        assert!(request_for_task(&[], None, None).is_none());
+        assert!(request_for_task(&[], None, None, &[]).is_none());
         assert!(
             request_for_task(
                 &[],
@@ -503,6 +574,7 @@ mod tests {
                     elapsed_ms: 1,
                 }),
                 None,
+                &[],
             )
             .is_none(),
             "文件前进但房间 / 面板没变：代号不变，不重算"
@@ -512,11 +584,12 @@ mod tests {
                 &[],
                 Some(&RoomReferenceRefresh::Unchanged { key: "a".into() }),
                 Some(&alignment(Some("g"), "g")),
+                &[],
             )
             .is_none(),
             "库上与常驻同一代：不欠"
         );
-        let planned = request_for_task(std::slice::from_ref(&item), None, None).unwrap();
+        let planned = request_for_task(std::slice::from_ref(&item), None, None, &[]).unwrap();
         assert!(planned.reason.contains("房间定义族"), "{planned:?}");
         assert_eq!(planned.scope, RoomRecomputeScope::WholeLibrary);
         let swapped = request_for_task(
@@ -531,6 +604,7 @@ mod tests {
                 elapsed_ms: 1,
             }),
             None,
+            &[],
         )
         .unwrap();
         assert!(
@@ -538,7 +612,7 @@ mod tests {
             "{swapped:?}"
         );
         // 第三条：库上欠着，原因原样带进来；单独一条也触发。
-        let owed = request_for_task(&[], None, Some(&alignment(Some("old"), "new"))).unwrap();
+        let owed = request_for_task(&[], None, Some(&alignment(Some("old"), "new")), &[]).unwrap();
         assert!(owed.reason.contains("old ≠ 此刻常驻代号 new"), "{owed:?}");
         assert_eq!(owed.scope, RoomRecomputeScope::WholeLibrary);
         let all = request_for_task(
@@ -553,6 +627,7 @@ mod tests {
                 elapsed_ms: 1,
             }),
             Some(&alignment(None, "new")),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -602,7 +677,9 @@ mod tests {
         assert_eq!(
             scope_for_task(
                 Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
-                Some("g1")
+                Some("g1"),
+                Some("g2"),
+                &[]
             ),
             targeted,
             "四条齐：定向，带着自己这一段换代（从上一代起）的面板变化"
@@ -649,13 +726,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                scope_for_task(Some(&refresh), library),
+                scope_for_task(Some(&refresh), library, Some("g2"), &[]),
                 RoomRecomputeScope::WholeLibrary,
                 "{label}"
             );
         }
         assert_eq!(
-            scope_for_task(None, Some("g1")),
+            scope_for_task(None, Some("g1"), Some("g2"), &[]),
             RoomRecomputeScope::WholeLibrary
         );
         // `request_for_task` 把范围带上：定向那一档三条触发同时点亮（规划器 + 换代 + ③），仍是定向。
@@ -664,10 +741,213 @@ mod tests {
             std::slice::from_ref(&item),
             Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
             Some(&alignment(Some("g1"), "g2")),
+            &[],
         )
         .unwrap();
         assert_eq!(request.scope, targeted);
         assert_eq!(request.reason.matches("；").count(), 2, "{request:?}");
+    }
+
+    fn parked(from: &str, to: &str, by: u32, elements: &[i64]) -> RoomRoots {
+        RoomRoots {
+            from_generation: from.into(),
+            to_generation: to.into(),
+            elements: elements
+                .iter()
+                .map(|element| (*element, vec![*element + 1]))
+                .collect(),
+            parked_by: by,
+            parked_at: std::time::Instant::now(),
+        }
+    }
+
+    /// 准入链的真值表（U3 b 档，2026-09-17）：从库上那一代出发沿停放物 `from → to` 逐段接，最后一段可以是本任务自己的
+    /// 换代，接到此刻常驻代号就定向——只停放链（本任务 `Unchanged`）/ 停放链 + 自己换代 / 库上已越过的一段不要 /
+    /// 自己那一段优先于同一对代号的旧停放物；链断 / 绕圈 / 库上从没盖过 / 常驻说不出代号 / 自己那一段面板变化为空而链
+    /// 又要靠它 → 整库。`request_for_task` 接了停放链就多一句原因。
+    #[test]
+    fn the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident() {
+        use crate::fast_model::room_resident::{PanelBounds, PanelMove};
+        use aios_core::{RefU64, RefnoEnum};
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: RefnoEnum::from(RefU64::from_two_nums(24381, 7)),
+                old: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
+                new: Some(PanelBounds([[5.0; 3], [6.0; 3]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let own = |previous: &str, panels: PanelDelta| RoomReferenceRefresh::Rebuilt {
+            previous_key: Some("k1".into()),
+            key: "k2".into(),
+            generation_changed: true,
+            previous_generation: Some(previous.to_owned()),
+            diff: None,
+            panels: Some(panels),
+            elapsed_ms: 1,
+        };
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k2".into() };
+        let swap = |from: &str| PanelSwap {
+            from_generation: from.into(),
+            panels: delta.clone(),
+        };
+        let g1_g2 = parked("g1", "g2", 7_997, &[10, 11]);
+        let g2_g3 = parked("g2", "g3", 7_999, &[12]);
+
+        // 只停放链：本任务没换代，库上 g1，停放 g1→g2，常驻 g2。
+        assert_eq!(
+            scope_for_task(Some(&unchanged), Some("g1"), Some("g2"), &[g1_g2.clone()]),
+            RoomRecomputeScope::Targeted {
+                swap: None,
+                parked: vec![g1_g2.clone()],
+            }
+        );
+        // 停放链 + 自己换代：库上 g1，停放 g1→g2，自己 g2→g3（常驻 g3）。
+        assert_eq!(
+            scope_for_task(
+                Some(&own("g2", delta.clone())),
+                Some("g1"),
+                Some("g3"),
+                &[g1_g2.clone()]
+            ),
+            RoomRecomputeScope::Targeted {
+                swap: Some(swap("g2")),
+                parked: vec![g1_g2.clone()],
+            }
+        );
+        // 两段停放接起来：库上 g1，停放 g1→g2、g2→g3（先后无关），常驻 g3；用到的按链的顺序排。
+        assert_eq!(
+            scope_for_task(
+                Some(&unchanged),
+                Some("g1"),
+                Some("g3"),
+                &[g2_g3.clone(), g1_g2.clone()]
+            ),
+            RoomRecomputeScope::Targeted {
+                swap: None,
+                parked: vec![g1_g2.clone(), g2_g3.clone()],
+            }
+        );
+        // 库上已越过的一段不要：库上 g2，停放 g1→g2、g2→g3，常驻 g3。
+        assert_eq!(
+            scope_for_task(
+                Some(&unchanged),
+                Some("g2"),
+                Some("g3"),
+                &[g1_g2.clone(), g2_g3.clone()]
+            ),
+            RoomRecomputeScope::Targeted {
+                swap: None,
+                parked: vec![g2_g3.clone()],
+            }
+        );
+        // 自己那一段优先：库上 g1，槽里有同一对代号的旧停放物 g1→g2，自己也是 g1→g2（常驻 g2）——用新鲜的反查。
+        assert_eq!(
+            scope_for_task(
+                Some(&own("g1", delta.clone())),
+                Some("g1"),
+                Some("g2"),
+                &[g1_g2.clone()]
+            ),
+            RoomRecomputeScope::Targeted {
+                swap: Some(swap("g1")),
+                parked: Vec::new(),
+            }
+        );
+        for (label, refresh, library, resident, slot) in [
+            (
+                "链断：停放 g2→g3，库上 g1",
+                unchanged.clone(),
+                Some("g1"),
+                Some("g3"),
+                vec![g2_g3.clone()],
+            ),
+            (
+                "链断：停放 g1→g2 到不了常驻 g3",
+                unchanged.clone(),
+                Some("g1"),
+                Some("g3"),
+                vec![g1_g2.clone()],
+            ),
+            (
+                "绕圈：g1→g2、g2→g1，常驻 g3",
+                unchanged.clone(),
+                Some("g1"),
+                Some("g3"),
+                vec![g1_g2.clone(), parked("g2", "g1", 7_998, &[13])],
+            ),
+            (
+                "库上从没盖过",
+                unchanged.clone(),
+                None,
+                Some("g2"),
+                vec![g1_g2.clone()],
+            ),
+            (
+                "常驻说不出代号",
+                unchanged.clone(),
+                Some("g1"),
+                None,
+                vec![g1_g2.clone()],
+            ),
+            (
+                "自己那一段面板变化为空而链要靠它：g1→g2 停放、自己 g2→g3 空 delta",
+                own("g2", PanelDelta::default()),
+                Some("g1"),
+                Some("g3"),
+                vec![g1_g2.clone()],
+            ),
+            (
+                "自己那一段的上一代不在链上：库上 g1、停放 g1→g2、自己 g5→g3",
+                own("g5", delta.clone()),
+                Some("g1"),
+                Some("g3"),
+                vec![g1_g2.clone()],
+            ),
+            (
+                "槽空、Unchanged 却欠着（重启后停放物丢了）",
+                unchanged.clone(),
+                Some("g1"),
+                Some("g2"),
+                Vec::new(),
+            ),
+        ] {
+            assert_eq!(
+                scope_for_task(Some(&refresh), library, resident, &slot),
+                RoomRecomputeScope::WholeLibrary,
+                "{label}"
+            );
+        }
+        // 库上已是这一代：不欠；停放物是越过的代（执行体在 `parked_for_task` 里顺手清掉）。
+        assert_eq!(
+            scope_for_task(Some(&unchanged), Some("g2"), Some("g2"), &[g1_g2.clone()]),
+            RoomRecomputeScope::WholeLibrary
+        );
+
+        // `request_for_task`：接了停放链的定向多一句原因，点名停的是谁、多少；③ 那一句照旧。
+        let request = request_for_task(
+            &[],
+            Some(&unchanged),
+            Some(&alignment(Some("g1"), "g3")),
+            &[g1_g2.clone(), g2_g3.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::Targeted {
+                swap: None,
+                parked: vec![g1_g2, g2_g3],
+            }
+        );
+        assert!(
+            request.reason.contains("g1 ≠ 此刻常驻代号 g3")
+                && request.reason.contains(
+                    "别的库的面板变化停放到本库 2 段：2 个元素（g1 → g2，dbnum=7997 停放）、1 个元素（g2 → g3，dbnum=7999 停放）"
+                ),
+            "{}",
+            request.reason
+        );
     }
 
     /// 第三条触发的真值表（电平型，2026-09-17）：库上那一格与此刻常驻代号不等就欠——包括库上没有那一格；
@@ -707,12 +987,13 @@ mod tests {
         let dispatch = function_body(worker, "async fn run_room_recompute(");
         assert!(
             dispatch.contains("RoomRecomputeScope::WholeLibrary =>")
-                && dispatch.contains("RoomRecomputeScope::Targeted { swap, .. } =>"),
+                && dispatch.contains("RoomRecomputeScope::Targeted { swap, parked } =>"),
             "两种范围各走一路: {dispatch}"
         );
         assert!(
             dispatch.contains("run_targeted_room_recompute(")
                 && dispatch.contains("swap.as_ref(),")
+                && dispatch.contains("parked,")
                 && dispatch.contains("None =>")
                 && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
             "定向定不了（None）退整库；整库直接整库: {dispatch}"
@@ -765,6 +1046,8 @@ mod tests {
         for (fallback, marker) in [
             ("树不就绪", "Ok(ReverseLookup::TreeUnavailable(state)) =>"),
             ("有命中却折不出根", "if !affected.unresolved.is_empty() {"),
+            // U3-3：链上有停放物就退整库（消费随 U3-4 接进来）——只算自己那一段就盖章才是漏算。
+            ("链上有停放物（消费未接）", "if !parked.is_empty() {"),
         ] {
             let at = targeted
                 .find(marker)

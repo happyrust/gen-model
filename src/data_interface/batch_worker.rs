@@ -2093,11 +2093,12 @@ async fn run_room_recompute(
         RoomRecomputeScope::WholeLibrary => {
             run_room_only_recompute(job, &request.reason, result, target_sesno).await
         }
-        RoomRecomputeScope::Targeted { swap, .. } => {
+        RoomRecomputeScope::Targeted { swap, parked } => {
             match run_targeted_room_recompute(
                 job,
                 &request.reason,
                 swap.as_ref(),
+                parked,
                 result,
                 target_sesno,
             )
@@ -2125,6 +2126,7 @@ async fn run_targeted_room_recompute(
     job: &FrozenBatch,
     reason: &str,
     swap: Option<&crate::data_interface::room_recompute::PanelSwap>,
+    parked: &[crate::data_interface::room_reverse::RoomRoots],
     result: &mut DataBatchTaskResult,
     target_sesno: i32,
 ) -> Option<RoomRecomputeVerdict> {
@@ -2134,7 +2136,10 @@ async fn run_targeted_room_recompute(
         render_panel_delta_statements,
     };
     let dbnum = job.dbnum;
-    // 本任务没换代、欠账全在停放链上（U3 b 档）：消费停放物随 U3-4 接进来，此前这一路定不了——退整库不漏算。
+    // 链上有停放物（U3 b 档）：消费随 U3-4 接进来，此前这一路定不了——退整库不漏算（只算自己那一段就盖章才是漏算）。
+    if !parked.is_empty() {
+        return None;
+    }
     let swap = swap?;
     let delta = &swap.panels;
     let rooms = match frozen_room_calculator() {
@@ -2543,6 +2548,9 @@ async fn execute_model_only_body(
     // 第三条触发（电平型）：库上 durable 侧的整库对齐代号与此刻（对齐之后）常驻代号不等 = 欠一次整库重算；
     // 同一份读数也给定向准入（库上是不是上一代，`room_recompute::scope_for_task`）。
     let alignment = crate::data_interface::room_recompute::durable_alignment(job.dbnum).await;
+    // 停放链（U3 b 档）：别的库定向重算时停放给本库的根级工作项，库上欠着才取来接准入链。
+    let parked =
+        crate::data_interface::room_recompute::parked_for_task(job.dbnum, alignment.as_ref());
 
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
@@ -2605,6 +2613,7 @@ async fn execute_model_only_body(
             &side_actions,
             Some(&room_reference),
             alignment.as_ref(),
+            &parked,
         )
     };
 
@@ -2996,6 +3005,9 @@ async fn execute_frozen_batch_body(
     } else {
         crate::data_interface::room_recompute::durable_alignment(job.dbnum).await
     };
+    // 停放链（U3 b 档）：别的库定向重算时停放给本库的根级工作项，库上欠着才取来接准入链（`alignment` 为 `None` 时不动槽）。
+    let parked =
+        crate::data_interface::room_recompute::parked_for_task(job.dbnum, alignment.as_ref());
 
     // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
     // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
@@ -3125,6 +3137,7 @@ async fn execute_frozen_batch_body(
             &side_actions,
             room_reference.as_ref(),
             alignment.as_ref(),
+            &parked,
         )
     };
 
