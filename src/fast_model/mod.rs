@@ -74,6 +74,8 @@ pub mod spatial_centerline;
 
 pub mod spatial_clearance;
 
+pub mod surface_clearance;
+
 pub mod coverage_audit;
 
 use aios_core::RefU64;

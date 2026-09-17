@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
-use crate::fast_model::{spatial_clearance, spatial_query};
+use crate::fast_model::{spatial_clearance, spatial_query, surface_clearance};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
@@ -1513,6 +1513,65 @@ pub async fn spatial_nearest_clearance(
     let response =
         spatial_clearance::nearest_clearance(&params, centerline.as_ref(), service.as_ref())
             .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/v1/spatial/surface-clearance` 的 query 串：身份三格 + 参数原文。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialSurfaceClearanceReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: surface_clearance::RawSurfaceClearanceQuery,
+}
+
+/// GET /api/v1/spatial/surface-clearance — 一对构件（典型是选中构件 × 选中的墙）用两侧真实三角
+/// 网格算外表面最近距离与两侧最近点，命中墙主面时附一条沿法向的垂距射线（plant3d-web
+/// `docs/plans/2026-09-17-component-to-wall-surface-clearance-plan.md`，决策 d-428）。
+///
+/// 只读：网格来自磁盘 `.mesh` + `inst_relate` / `tubi_relate` 行，不碰 `GLOBAL_AABB_TREE`。
+/// 404 `not_found`（detail.reason = `no_model_mesh`）：任一侧没有模型面行或网格文件；
+/// 422 `precondition`（detail.reason = `target_not_wall`）：`target_kind=wall` 而目标不在墙族。
+pub async fn spatial_surface_clearance(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialSurfaceClearanceReq>,
+) -> Result<Json<surface_clearance::SurfaceClearanceResponse>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params = surface_clearance::SurfaceClearanceParams::parse(&request.query)
+        .map_err(ApiError::bad_request)?;
+    // TYPE 从属性面读；读不出（零解析库 / 元素不在本 MDB）就给空串，模块里用叶子行的 `generic` 兜底。
+    let nouns = match state.direct_tree.get().await {
+        Ok(service) => (
+            service.noun_of(params.source).unwrap_or_default(),
+            service.noun_of(params.target).unwrap_or_default(),
+        ),
+        Err(_) => (String::new(), String::new()),
+    };
+    let meshes_dir = aios_core::get_db_option().get_meshes_path();
+    let response = surface_clearance::run(&aios_core::SUL_DB, meshes_dir, &params, nouns)
+        .await
+        .map_err(|error| match error {
+            surface_clearance::SurfaceClearanceError::NoModelMesh { refno, detail } => {
+                ApiError::not_found(format!("{refno} 没有可用的模型网格: {detail}"))
+                    .with_detail(serde_json::json!({ "reason": "no_model_mesh", "refno": refno }))
+            }
+            surface_clearance::SurfaceClearanceError::TargetNotWall { refno, noun } => {
+                ApiError::precondition(format!(
+                    "target_kind=wall 要求目标是墙族（{}），{refno} 是 {}",
+                    surface_clearance::WALL_NOUNS.join(" / "),
+                    if noun.is_empty() {
+                        "未知类型"
+                    } else {
+                        noun.as_str()
+                    }
+                ))
+                .with_detail(serde_json::json!({
+                    "reason": "target_not_wall", "refno": refno, "noun": noun,
+                    "wall_nouns": surface_clearance::WALL_NOUNS,
+                }))
+            }
+            surface_clearance::SurfaceClearanceError::Other(error) => ApiError::from_domain(error),
+        })?;
     Ok(Json(response))
 }
 
