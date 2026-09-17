@@ -192,6 +192,48 @@
   新增行无 diff（该文件 100 / 958 / 1250 三处漂移为既有）。**未 live**：「MDB 不可读启动 → 连续任务开工只重建一次、之后日志出『退避中』」
   这条真机用例没跑。
 
+### 整库房间重算对不在投影里的根回读库上几何——「整库」不再只到投影（ADR-073 D13 / D14，U1 第二半）
+
+- **为什么**：D13 的整库重算只遍历投影里有回执的根，而投影只装本进程生成过的根——初始化的模型行不进投影（ADR-077 D5）、
+  落盘形态冷重启后投影是空的。生产形态下面板一变，那些根的边这条路够不着：`e3d.room.lookup` 对它们恒 `not_computed`、D14 那一格
+  永远盖不上，电平型触发 ③ 每个任务都点、每次都 `PartialCoverage`（上午为此还加了一张进程内去重表），点亮只有 `model/rebuild`。
+  用户 2026-09-17 拍板：让重算为不在投影里的根回读库上几何、把边补齐（不选「接受滞后到整库重建」）。
+- **改动**：
+  - `room_model`：房间判定的输入抽成 trait `RoomInput`（构件、世界盒、网格、「网格 → 世界」变换、报错点名），`ProjectedGeometry`
+    实现它；新增 `DurableRoomGeometry` + `durable_room_inputs(&[GeomInstQuery])`——把库上读回的 `inst_relate` / `tubi_relate` 行折成
+    同一形状（一行一条或多条实例、共用该行的世界盒；变换 = 世界 × 实例本地，烘焙 / 管身读回的本地是单位阵，与投影 `Baked` 同义）。
+    `calculate_for_root` / `render_root_room_edges` / `calculate_edges` / `memory_model_world_points` 泛化到 `G: RoomInput`，算法一行
+    没改；`calculate`（读透）仍收 `ProjectedGeometry`。
+  - `model_record_reader::durable_records_of_root` 提成 `pub(crate)`（SQL 不动）。
+  - `model_db_adapter::recompute_dbnum_room_edges(…, library_roots: Option<&[RefNo]>)`：调用方点名 `DbSet@T` 的根清单；投影里有回执的
+    照旧拿投影，清单里不在投影里的（去重、只认本库、按 refno 序）逐根 `durable_records_of_root` → `durable_room_inputs` → **同一个**
+    `calculate_for_root` / `render_root_room_edges`（两种来源共用一段 `recompute_root`），读回零行的算覆盖到、什么都不写；回读失败
+    整轮 `Err`（与写库失败同一处置）。回执加 `projected_roots` / `durable_roots` / `durable_records` / `durable_read_ms`，`covered_roots`
+    = 两种来源之和；ACK 只对投影里的根对齐（回读的根没有进程内 ACK，就绪由 D14 那一格作答）。
+  - `batch_worker::run_room_only_recompute`：根清单**先**枚举、作为靶子传进去；`WholeLibrary` 从此在落盘形态下也成立。`PartialCoverage`
+    只剩「清单枚举不出来、覆盖面未知」（点名了却没覆盖到的臂保留、如实不盖，回读按清单逐根走、理论上不再出现）；任务日志多报
+    「投影里 N、回读库 M：读回几何 K 条、T ms」。
+  - **去重表退役**：`room_recompute::PARTIAL_COVERAGE_SETTLED` / `settle_partial_coverage` / `rearm_library` /
+    `partial_coverage_settled_at` 删掉，`library_alignment_owed(library, resident)` 少一个形参——它的存在理由（同一代下反复点、每次都
+    覆盖不全）随回读消失：③ 在每个库上多跑一次就盖上那一格、自己安静。
+  - 文档：ADR-073 D13 正文（覆盖面那段重写、「没收的两半」收成一半）、D14 写规则、钉 17 / 18、U1 追记「第二半已收」；CONTEXT
+    「整库房间重算」「整库房间对齐代号」「ModelOnly」；spec §4.7 `room_alignment` 的「要点亮」一句改成「下一个任务会自己盖上，不想等再
+    rebuild」。
+- **验证**：新 `mem://` 真测 `a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows`：A 经逐根路径落库后
+  换成空投影、面板搬家 → 点名 `[A]` 回读重算：`(projected, durable, records) = (0, 1, 1)`、`recomputed=1 / room_edges=0 / acks_refreshed=0`，
+  旧边删掉、`inst_relate` 行不动；搬回来 `room_edges=1`、边与逐根落库逐字相同；点名 `[B, A, 别库根]` → `covered_roots=[A, B]`、B 零行算
+  覆盖到。新源码钉 `the_library_recompute_reads_back_the_durable_geometry_of_roots_outside_the_projection`（枚举在重算之前并真的传进去；
+  `recompute_dbnum_room_edges` 签名 / 投影根不回读 / 先读后折 / 两个入口各恰一处；去重表不再定义）；既有
+  `recomputing_a_librarys_room_edges…` 加 `(projected, durable, records) == (2, 0, 0)`；`a_partial_coverage_settles_the_level_trigger…`
+  随表删掉。`cargo test --lib -- room_recompute:: room_model:: model_record_reader:: room_read_through:: model_initial_persist::
+  room_resident:: …` **99 passed / 0 failed / 9 ignored**；全量 `cargo test --lib` **2225 passed / 4 failed / 118 ignored**（4 失败仍是
+  `model_impact` ×2 + `window_root_plan` ×2 那四条 CACHID 元数据档，本条前后同样红）。rustfmt：五个 Rust 文件的漂移数与 HEAD 逐个相等
+  （room_model 0/0、model_db_adapter 2/2、model_record_reader 4/4、batch_worker 6/6、room_recompute 0/0），EOL 未翻。**未 live**：
+  落盘形态冷重启 → 改一块 PANE → 下一个任务日志「整库房间重算完成…回读库 N」且 `/dbnums.room_alignment.current` 翻 `true`、
+  `e3d.room.lookup` 对初始化过的根回 `ready`，这条真机用例没跑。
+- **代价与边界**：回读是 O(本库根数) 次库读（每根两条 SELECT，按 `anc` / `in` 索引），只在真触发时付；跨库那一半（U3）照旧；变换经
+  TRS（f32）往返读回，与 Plant UI 读的是同一份。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步

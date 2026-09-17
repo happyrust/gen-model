@@ -1854,16 +1854,16 @@ async fn abandon_undurable_roots(
 /// `model_sesno`，「覆盖整库了没有」管 durable 侧的对齐代号那一格（ADR-073 D14）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RoomRecomputeVerdict {
-    /// 投影里有本库 `DbSet@T` 的每一根、都算齐了：水位可盖，`model_room_generation` 可盖成**这一代**——
-    /// 载荷就是重算那台计算器的 `resident_generation()`，边是它算的、ACK 也对齐到它；收尾不再回问此刻的
-    /// 常驻（任务中途换了代也不拿新代号冒充，审核 P2-3）。
+    /// 本库 `DbSet@T` 的每一根都算齐了——投影里的按投影几何、不在投影里的按库上读回的几何（U1 第二半）：
+    /// 水位可盖，`model_room_generation` 可盖成**这一代**——载荷就是重算那台计算器的 `resident_generation()`，
+    /// 边是它算的、投影里的根 ACK 也对齐到它；收尾不再回问此刻的常驻（任务中途换了代也不拿新代号冒充，
+    /// 审核 P2-3）。
     WholeLibrary(String),
-    /// 算齐了投影里有的根，但投影不覆盖本库全部根——初始化的模型行不进投影（ADR-077 D5）、落盘形态
-    /// 冷重启后投影是空的、根清单枚举不出来也算。触到的根边已更新、水位照盖（本任务的根都成了）；
-    /// durable 侧「整库对齐到这一代」**不**盖——那一格替的是没算过的根说话，正是 D14 要挡的事。
-    /// 电平型触发（`room_recompute::library_alignment_owed`）对这个库在这一代下**只再点这一次**
-    /// （`room_recompute::settle_partial_coverage`：同一代再点结果逐字相同）；代号变了 / 重启了重新武装。
-    /// 点亮要 `model/rebuild`。
+    /// 算齐了、但说不了「整库」：`DbSet@T` 的根清单枚举不出来（覆盖面未知，只算了投影里的根——不在投影里的
+    /// 根要靶着清单回读库），或点名了却没覆盖到（回读那条路按清单逐根走，这一种本不该出现）。触到的根边已
+    /// 更新、水位照盖（本任务的根都成了）；durable 侧「整库对齐到这一代」**不**盖——那一格替的是没算过的根
+    /// 说话，正是 D14 要挡的事。电平型触发（`room_recompute::library_alignment_owed`）按库上的事实在下一个
+    /// 任务再点一次（枚举失败多是暂时的）。
     PartialCoverage,
     /// 开关关着：没有房间可算，如实记一句；那一格由收尾的 `Cleared` 处置。
     Disabled,
@@ -1887,8 +1887,8 @@ impl RoomRecomputeVerdict {
 }
 
 /// 覆盖面判定的纯函数：`expected` 是 `DbSet@T` 上的全部生成根（`None` = 枚举不出来，按不全处理），
-/// `covered` 是投影里有回执、这一轮算过的根。返回没覆盖到的根（按 `expected` 序）；`None` 表示
-/// 覆盖面未知。空 `Some` = 整库。
+/// `covered` 是这一轮算过的根（投影里有回执的 + 点名回读库的）。返回没覆盖到的根（按 `expected` 序）；
+/// `None` 表示覆盖面未知。空 `Some` = 整库。
 fn room_recompute_uncovered(
     expected: Option<&[e3d_io::refno::RefNo]>,
     covered: &[e3d_io::refno::RefNo],
@@ -1904,8 +1904,8 @@ fn room_recompute_uncovered(
     })
 }
 
-/// 本库 `DbSet@T` 上的全部生成根（e3d-io `RefNo`）：覆盖面自证的对照物，走规划器同一条枚举
-/// （`window_root_plan::enumerate_target_roots`），不回读库。
+/// 本库 `DbSet@T` 上的全部生成根（e3d-io `RefNo`）：覆盖面自证的对照物，也是回读库上几何的靶子
+/// （不在投影里的根从这里点名），走规划器同一条枚举（`window_root_plan::enumerate_target_roots`），不回读库。
 async fn library_generation_roots(
     dbnum: u32,
     target_sesno: i32,
@@ -1921,14 +1921,16 @@ async fn library_generation_roots(
         .collect())
 }
 
-/// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：冻一台计算器，对本库投影里
-/// 全部有回执的根按现有几何重算归属、重写两张边（[`recompute_dbnum_room_edges`]），再拿 `DbSet@T`
-/// 的根清单（`window_root_plan::enumerate_target_roots`）对一遍覆盖面。
+/// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：冻一台计算器，先枚举本库 `DbSet@T`
+/// 的根清单（`window_root_plan::enumerate_target_roots`），再对投影里有回执的根按投影里的几何、对清单里
+/// **不在投影里**的根按库上读回的几何（U1 第二半）重算归属、重写两张边（[`recompute_dbnum_room_edges`]），
+/// 最后拿回执里覆盖到的根对一遍清单。
 ///
 /// 结论见 [`RoomRecomputeVerdict`]：算不出的根按 D2 记失败（账本 `failed`，下一窗重排；单元清单补一条
-/// `Failed` 让回执看得见）、任务 `Partial`、水位不盖；整批提交失败同样 `Failed`。开关关着（`Ok(None)`）
-/// = 没有房间可算，如实记一句；计算器冻不出（`Blocked`）= 本库这一版的房间算不了，`Failed`。
-/// 算齐了还要看覆盖面：投影里没有本库全部根就是 `PartialCoverage`，durable 侧对齐代号不盖。
+/// `Failed` 让回执看得见）、任务 `Partial`、水位不盖；整批提交失败 / 回读库失败同样 `Failed`。开关关着
+/// （`Ok(None)`）= 没有房间可算，如实记一句；计算器冻不出（`Blocked`）= 本库这一版的房间算不了，`Failed`。
+/// 算齐了还要看覆盖面：根清单枚举不出来（只算了投影里的根、覆盖面未知）就是 `PartialCoverage`，durable 侧
+/// 对齐代号不盖；清单齐了、每一根都覆盖到 = `WholeLibrary`。
 ///
 /// [`recompute_dbnum_room_edges`]: crate::fast_model::model_db_adapter::recompute_dbnum_room_edges
 async fn run_room_only_recompute(
@@ -1954,17 +1956,39 @@ async fn run_room_only_recompute(
             result.warnings.push(format!(
                 "dbnum={dbnum} 整库房间重算冻不出计算器（触发：{reason}），这一版 model_sesno 不盖: {error:#}"
             ));
-            crate::data_interface::room_recompute::rearm_library(dbnum);
             return RoomRecomputeVerdict::Failed;
         }
     };
+    // 覆盖面的对照物先取：投影只装本进程生成过的根（初始化的模型行不进投影，落盘形态冷重启后是空的），
+    // 清单里不在投影里的根靶着它回读库上几何。枚举不出来 = 覆盖面未知，只算投影那一半、结论不盖。
+    let expected = match library_generation_roots(dbnum, target_sesno).await {
+        Ok(roots) => Some(roots),
+        Err(error) => {
+            result.warnings.push(format!(
+                "dbnum={dbnum} 整库房间重算枚举不出 DbSet@{target_sesno} 的根清单：只算投影里的根、不在投影里的根这一轮补不上，覆盖面未知、durable 侧对齐代号不盖: {error:#}"
+            ));
+            None
+        }
+    };
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-    match recompute_dbnum_room_edges(PersistTarget::process(), store, dbnum, &rooms).await {
+    match recompute_dbnum_room_edges(
+        PersistTarget::process(),
+        store,
+        dbnum,
+        &rooms,
+        expected.as_deref(),
+    )
+    .await
+    {
         Ok(report) => {
             println!(
-                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{} 重算、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
+                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{} 重算（投影里 {}、回读库 {}：读回几何 {} 条、{}ms）、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
                 report.recomputed,
                 report.roots,
+                report.projected_roots,
+                report.durable_roots,
+                report.durable_records,
+                report.durable_read_ms,
                 report.room_edges,
                 report.commits,
                 report.max_transaction_bytes,
@@ -1973,29 +1997,16 @@ async fn run_room_only_recompute(
                 report.elapsed_ms
             );
             if report.failed.is_empty() {
-                // 覆盖面自证：投影只装本进程生成过的根，对着 `DbSet@T` 的根清单数一遍才知道这一轮
-                // 说得了整库还是只说得了触到的根。枚举不出来按不全处理——说不出就不盖。
-                let expected = match library_generation_roots(dbnum, target_sesno).await {
-                    Ok(roots) => Some(roots),
-                    Err(error) => {
-                        result.warnings.push(format!(
-                            "dbnum={dbnum} 整库房间重算枚举不出 DbSet@{target_sesno} 的根清单，覆盖面未知、durable 侧对齐代号不盖: {error:#}"
-                        ));
-                        None
-                    }
-                };
-                // 结论回灌电平型触发的去重表（`room_recompute::PARTIAL_COVERAGE_SETTLED`）：点了名的覆盖不全
-                // 在这一代下再点结果逐字相同 → settle；整库（那一格随收尾盖上，之后不欠）与覆盖面未知
-                // （枚举失败可能是暂时的）→ rearm，下一个任务按库上的事实重判。
+                // 覆盖面自证：回执里覆盖到的根（投影里的 + 回读库的）对着 `DbSet@T` 的根清单数一遍。
+                // 清单本身枚举不出来 → 说不出就不盖；点名了却没覆盖到本不该出现（回读按清单逐根走），
+                // 出现了也如实不盖，下一个任务由电平型触发再来一次。
                 return match room_recompute_uncovered(expected.as_deref(), &report.covered_roots) {
                     Some(uncovered) if uncovered.is_empty() => {
-                        crate::data_interface::room_recompute::rearm_library(dbnum);
                         RoomRecomputeVerdict::WholeLibrary(rooms.resident_generation().to_string())
                     }
                     Some(uncovered) => {
                         result.warnings.push(format!(
-                            "dbnum={dbnum} 整库房间重算只覆盖到投影里的 {} 根，本库 DbSet@{target_sesno} 还有 {} 根不在投影里（初始化 / 重启前生成的模型行不进投影），\
-                             它们的边没重算、durable 侧「整库对齐」不盖，e3d.room.lookup 对它们仍回 not_computed；要点亮请 POST /api/v1/dbnums/{dbnum}/model/rebuild。例如 {}",
+                            "dbnum={dbnum} 整库房间重算覆盖到 {} 根，本库 DbSet@{target_sesno} 还有 {} 根没覆盖到，durable 侧「整库对齐」不盖、下一个任务再算一次。例如 {}",
                             report.covered_roots.len(),
                             uncovered.len(),
                             uncovered
@@ -2005,16 +2016,9 @@ async fn run_room_only_recompute(
                                 .collect::<Vec<_>>()
                                 .join("、")
                         ));
-                        crate::data_interface::room_recompute::settle_partial_coverage(
-                            dbnum,
-                            rooms.resident_generation(),
-                        );
                         RoomRecomputeVerdict::PartialCoverage
                     }
-                    None => {
-                        crate::data_interface::room_recompute::rearm_library(dbnum);
-                        RoomRecomputeVerdict::PartialCoverage
-                    }
+                    None => RoomRecomputeVerdict::PartialCoverage,
                 };
             }
             for (root, error) in &report.failed {
@@ -2047,15 +2051,13 @@ async fn run_room_only_recompute(
                     .collect::<Vec<_>>()
                     .join("；")
             ));
-            crate::data_interface::room_recompute::rearm_library(dbnum);
             RoomRecomputeVerdict::Failed
         }
         Err(error) => {
             result.status = ManualUpdateStatus::Partial;
             result.warnings.push(format!(
-                "dbnum={dbnum} 整库房间重算写库失败（触发：{reason}；已提交的事务照样有效、下一次触发重来），这一版 model_sesno 不盖: {error:#}"
+                "dbnum={dbnum} 整库房间重算写库 / 回读库失败（触发：{reason}；已提交的事务照样有效、下一次触发重来），这一版 model_sesno 不盖: {error:#}"
             ));
-            crate::data_interface::room_recompute::rearm_library(dbnum);
             RoomRecomputeVerdict::Failed
         }
     }
@@ -2758,8 +2760,8 @@ async fn execute_frozen_batch_body(
     };
     // 第三条触发（电平型，2026-09-17）：库上 durable 侧的整库对齐代号与此刻（对齐之后）常驻代号不等
     // = 这个库欠一次整库重算。前两条触发的原因只活在本任务里，拆窗 / 单元失败 / 刷盘没齐都会把它丢掉；
-    // 这一条按库上的事实判，直到某个任务把 `Aligned` 盖上才安静（同一代下已点过一次、覆盖不全的库进程内
-    // 不重复，`room_recompute::settle_partial_coverage`）。
+    // 这一条按库上的事实判，直到某个任务把 `Aligned` 盖上才安静——整库重算对不在投影里的根回读库上几何
+    // （U1 第二半），落盘形态下也盖得上，所以它在每个库上只多跑一次就安静。
     let alignment_owed = if defer_model_phase {
         None
     } else {
@@ -4627,8 +4629,8 @@ mod tests {
     }
 
     /// 整库房间重算的结论分两句答（2026-09-17）：`Failed` 才拖水位；只有 `WholeLibrary` 说得了「整库对齐到这一代」。
-    /// `PartialCoverage`——投影里没有本库全部根（初始化 / 重启前生成的模型行不进投影）——水位照盖、对齐代号不盖，
-    /// 电平型触发让下一个任务再点一次；盖了就是替没算过的根说话，正是 D14 要挡的事。
+    /// `PartialCoverage`——`DbSet@T` 的根清单枚举不出来（覆盖面未知，不在投影里的根这一轮没靶子回读）——水位照盖、
+    /// 对齐代号不盖，电平型触发让下一个任务再点一次；盖了就是替没算过的根说话，正是 D14 要挡的事。
     #[test]
     fn a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment() {
         use RoomRecomputeVerdict::*;

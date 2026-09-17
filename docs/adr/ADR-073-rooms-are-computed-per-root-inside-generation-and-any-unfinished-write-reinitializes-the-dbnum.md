@@ -138,18 +138,21 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   （`model_db_adapter::recompute_dbnum_room_edges`：与逐根路径同一套渲染 → 「整库重算 == 从零初始化」逐边相等的硬验收不多一条
   口径），不重生几何、不动模型行、不动空间树，提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器。算不出的根按 D2
   记失败（账本 `failed`、单元清单补一条 `Failed`）、任务 `Partial`、`model_sesno` 不盖；刷盘没齐（那批根已判死）就不跑。
-  **覆盖面要自证**（2026-09-17）：投影只装本进程生成过的根——初始化的模型行不进投影（ADR-077 D5）、落盘形态冷重启后投影是空的
-  ——所以「本库全部有回执的根」≠「本库全部根」。重算齐了之后拿 `DbSet@T` 的根清单（`window_root_plan::enumerate_target_roots`，
-  规划器同一条枚举）对一遍回执里的 `covered_roots`：每一根都在 = `WholeLibrary`，D14 那一格可盖；有根不在 = `PartialCoverage`
-  ——触到的根边已更新、`model_sesno` 照盖（本任务的根都成了），但 D14 那一格**不盖**（替没算过的根说话正是 D14 要挡的事），
-  warn 点名前 5 个没覆盖到的根、指向 `model/rebuild`；枚举不出来按不全处理。`PartialCoverage` 下 ③ 对这个库在这一代只再点
-  一次（`room_recompute::settle_partial_coverage`：同一代再点结果逐字相同——投影里的根已对齐、之后进投影的根都是这一代算的、
-  不在投影里的根这条路够不着），代号变了 / 失败过 / 覆盖面未知 / 重启了重新武装；这条去重不是库上的事实，`room_alignment.current`
-  照旧报 `false`。仍是内部意图：不入队、没有 HTTP 口（§不做）。**没收的两半**：跨库成员（面板在 A、成员在 B）只在 A 变了之后
-  **第一个开工**的库上被 ② 带到，其余库要等自己下一次碰到触发（③ 把这一条也接住了：A 变了 → 常驻换代 → 每个库下一个任务都欠）
-  ——U3 的跨库那一问仍开着；以及**生产（落盘）形态下初始化过的根**：它们不在投影里，面板变了之后这条路够不着它们的边，
-  `e3d.room.lookup` 对它们回 `not_computed`、`/dbnums.room_alignment.current=false`，点亮只有 `model/rebuild`——「整库」在
-  这一形态下只到投影，是 U1 还欠着的那一半（要么让重算回读库上的几何，要么接受滞后到整库重建，另开决策卡）。
+  **覆盖面要自证，不在投影里的根回读库上几何**（2026-09-17，U1 第二半）：投影只装本进程生成过的根——初始化的模型行不进投影
+  （ADR-077 D5）、落盘形态冷重启后投影是空的——所以「本库全部有回执的根」≠「本库全部根」。处置分两步：**先**拿 `DbSet@T` 的
+  根清单（`window_root_plan::enumerate_target_roots`，规划器同一条枚举）交给 `recompute_dbnum_room_edges`，清单里投影没有回执的根
+  逐根经 `model_record_reader::durable_records_of_root` 读回库上的 `inst_relate` / `tubi_relate` 行（有世界盒与世界变换的），折成
+  `room_model::durable_room_inputs`（一行一条或多条实例，「网格 → 世界」= 世界变换 × 实例本地变换）、走**同一个**
+  `calculate_for_root` / `render_root_room_edges`（算法只认 `RoomInput` 这几样：构件、世界盒、网格、变换——两种来源同一形状的语句）；
+  读回一行几何都没有的根（从没生成过 / 没有几何）算覆盖到、什么都不写；这些根没有进程内 ACK，就绪由 D14 那一格作答。**再**拿回执里
+  的 `covered_roots`（投影里的 + 回读的）对一遍清单：每一根都在 = `WholeLibrary`，D14 那一格可盖；清单枚举不出来 = 覆盖面未知、
+  `PartialCoverage`——只算了投影那一半，触到的根边已更新、`model_sesno` 照盖（本任务的根都成了），但 D14 那一格**不盖**（替没算过的
+  根说话正是 D14 要挡的事），③ 在下一个任务再点（枚举失败多是暂时的）；点名了却没覆盖到本不该出现（回读按清单逐根走），出现了也
+  如实不盖。回读一根失败（库读不出）与写库失败同一处置：`Failed`、水位不盖。此前为「同一代下反复点、每次都覆盖不全」设的进程内去重
+  （`settle_partial_coverage` / `PARTIAL_COVERAGE_SETTLED`）随之退役：落盘形态下 ③ 在每个库上多跑一次就把那一格盖上、自己安静。
+  代价：O(本库根数) 次按 `anc` / `in` 索引的库读（每根两条 SELECT），只在真触发时付。仍是内部意图：不入队、没有 HTTP 口（§不做）。
+  **没收的一半**：跨库成员（面板在 A、成员在 B）只在 A 变了之后**第一个开工**的库上被 ② 带到，其余库要等自己下一次碰到触发
+  （③ 把这一条也接住了：A 变了 → 常驻换代 → 每个库下一个任务都欠）——U3 的跨库那一问仍开着。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -159,8 +162,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   `room_generation`（`ResidentRoomModel::input_version`，D12）。
   - **写**：随 `model_sesno` 由收尾那一笔同盖，与库级目录落款（ADR-079 D4）同一条纪律——只有能替**整库**说话的任务才盖：
     初始化（每个根都是这台计算器算的）、整库重排的 ModelOnly（起点水位为 0 / 缺席）、本任务跑过整库房间重算（D13）**且覆盖到
-    `DbSet@T` 的每一根**（`batch_worker::RoomRecomputeVerdict::WholeLibrary`，2026-09-17 补：只覆盖到投影里的根是
-    `PartialCoverage`，`model_sesno` 照盖、这一格原样不动——初始化过的根不在投影里，替它们说「对齐到这一代」就是说谎）。
+    `DbSet@T` 的每一根**（`batch_worker::RoomRecomputeVerdict::WholeLibrary`，2026-09-17 补：投影里的根按投影几何、不在投影里的
+    根回读库上几何——落盘形态下也盖得上；根清单枚举不出来、覆盖面未知是 `PartialCoverage`，`model_sesno` 照盖、这一格原样不动
+    ——替没算过的根说「对齐到这一代」就是说谎）。
     普通增量窗口只重算被触到的根，别的根的边仍是上一代算的，说不了这句，那一格**原样不动**；`all_roots_ok` 为假一律不写；
     `room_membership=false` 下盖模型水位时**清空**（这一版水位只承诺几何，不能留着替旧边说话）。这一格还是 D13 触发 ③ 的读数：
     与此刻常驻代号不等 = 欠一次整库重算——所以「盖」与「不盖」都要诚实，盖早了 ③ 就哑了。
@@ -223,17 +227,23 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     的 DESI 收尾段里 `run_room_only_recompute(job, &reason, &mut result, file_latest_sesno)` 在 `await_units_durable(` 之后、
     `model_outcome_of(&flush` 之前、`flush.all_acked()` 门内，算不齐 `outcome.all_roots_ok = false`，收尾分开问两句
     `RoomRecomputeVerdict::rooms_ok`（水位）与 `::speaks_for_library`（D14 那一格）；`run_room_only_recompute` 函数体里
-    `room_recompute::settle_partial_coverage(` 恰一处、落在点了名的 `Some(uncovered) => {` 那一臂，`rearm_library(` 在失败 /
-    覆盖面未知 / 整库三处；`manual_update` 的 side_actions 过滤只拦 `RoomRecalc*`（`is_room_recalc` 不含
+    `library_generation_roots(dbnum, target_sesno)` 落在 `recompute_dbnum_room_edges(` **之前**并以 `expected.as_deref()` 真的传进去
+    （根清单是回读库的靶子），全文不含 `settle_partial_coverage(` / `rearm_library(`，`room_recompute` 生产段不再定义
+    `PARTIAL_COVERAGE_SETTLED`（去重表 2026-09-17 退役）；`manual_update` 的 side_actions 过滤只拦 `RoomRecalc*`（`is_room_recalc` 不含
     `RoomOnly`）（钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end`、
     `a_change_to_any_room_definition_noun_triggers_and_nothing_else_does`、`a_task_recomputes_rooms_on_either_trigger`、
     `the_library_owes_a_recompute_until_its_durable_alignment_matches_the_resident`、
-    `a_partial_coverage_settles_the_level_trigger_for_that_generation_only`）。
-18. `recompute_dbnum_room_edges` 走 `calculate_for_root` + `render_root_room_edges` 同一套渲染：重算后的边与逐根落库逐字相同、
-    算不出的根边原样进 `failed`、ACK 代号对齐；回执 `covered_roots` = 投影里有回执的根（含算不出的那根）按 refno 序，覆盖面由
-    调用方对 `DbSet@T` 判、这里不回读库不枚举文件（钉 `recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks`、
-    `a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment`——`RoomRecomputeVerdict` 四态的两句
-    真值表 + `room_recompute_uncovered` 的顺序无关 / 点名 / 空库 / 未知四例）。
+    `the_library_recompute_reads_back_the_durable_geometry_of_roots_outside_the_projection`）。
+18. `recompute_dbnum_room_edges(…, library_roots: Option<&[RefNo]>)` 走 `calculate_for_root` + `render_root_room_edges` 同一套渲染
+    ——函数体里各恰一处（两种来源共用的那一段）：重算后的边与逐根落库逐字相同、算不出的根边原样进 `failed`、投影里根的 ACK 代号
+    对齐；点名的根里投影有回执的不回读（`!projected_set.contains(&packed_refno(*root))`），其余经
+    `model_record_reader::durable_records_of_root(` 读库、再经 `room_model::durable_room_inputs(&rows)` 折形状（先读后折）；回执
+    `covered_roots` = 投影里有回执的根 + 回读的根，按 refno 序、只认本库；这里不枚举文件（钉
+    `recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks`、
+    `a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows`——`mem://` 真测：A 经逐根路径落库后从投影
+    消失、面板搬家 → 点名 `[A]` 回读重算、旧边删掉、模型行不动、`acks_refreshed == 0`；搬回来边逐字回来；点名里没生成过的根算覆盖
+    到、别的库的根不认；`a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment`——`RoomRecomputeVerdict`
+    四态的两句真值表 + `room_recompute_uncovered` 的顺序无关 / 点名 / 空库 / 未知四例）。
     `mem://` 真测 (e)：改一块 PANE 的 NAME 以外的属性 / 把一块 PANE 换属主 → 该窗任务日志有「整库房间重算完成」、别的根在这块
     面板里的成员边随之更新；(f) 只改 BRAN → 不触发。
 19. D14：`task_end::render_watermark_update` 对 `model_room_generation` 只有三种动作（`Untouched` / `Cleared` / `Aligned`），
@@ -461,8 +471,10 @@ ADR-011 §8 / §10；ADR-048 D3；ADR-041 §5 与「不做」；CONTEXT.md 词�
 
 - **U1　面板自身变化的传播怎么收敛。**（**2026-09-16 由 D13 收**：候选形态 ② 的库内那一半——变更集含房间定义族 / 开工前对齐换代
   → 本库 `RoomOnly` 用现有几何整库重算两张边；跨库那一半仍开着，归 U3。**2026-09-17 补了触发 ③ 电平型再武装、并把「整库」
-  的覆盖面说实了**：D13 只够得着投影里的根，生产落盘形态下初始化过的根不在投影里（ADR-077 D5），面板变了之后它们的边只能靠
-  `model/rebuild`——是 ① 「反查现有成员」要不要为它们回读库上几何、还是 ④ 接受滞后到整库重建，仍欠一张卡。下面是拍板前的原文。）FRMW/SBFR 改名（房间号 / 进出 `room_key_word`）、PANE 换属主、`project_hd` 下 CWALL/CFLOOR 换属主
+  的覆盖面说实了**：D13 只够得着投影里的根，生产落盘形态下初始化过的根不在投影里（ADR-077 D5）。**第二半 2026-09-17 拍板收掉**：
+  整库重算对不在投影里的根**回读库上几何**（`model_record_reader::durable_records_of_root` 读 `inst_relate` / `tubi_relate`，
+  折成 `room_model::durable_room_inputs`，走同一个 `calculate_for_root` / `render_root_room_edges`），靶子是 `DbSet@T` 的根清单，
+  落盘形态下也说得了「整库」、盖得上 D14 那一格；不选 ④「接受滞后到整库重建」。下面是拍板前的原文。）FRMW/SBFR 改名（房间号 / 进出 `room_key_word`）、PANE 换属主、`project_hd` 下 CWALL/CFLOOR 换属主
   三种变化都**不改任何几何**：逐根路径只算「本根在哪些面板里」，面板变了、它名下成员（别的根）的边与 `room_num` 不会被碰到——这是
   逐根路径的天然盲区，而原来填它的结构触发（ADR-010 D12 / ADR-040 D4）已退。已见到的候选形态（只列不选）：① 面板所在根重生成时连带
   重算该面板现有成员（要反查「谁在这块面板里」，读源是内存还是库要过 ADR-072 D5 白名单）；② 结构变化时对该库排一次全库 `ModelOnly`

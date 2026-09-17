@@ -38,7 +38,11 @@ fn sort_overlay_records(records: &mut [ProjectedGeometry]) {
     records.sort_by(|a, b| (a.tube.is_some(), &a.record_id).cmp(&(b.tube.is_some(), &b.record_id)));
 }
 
-async fn durable_records_of_root(
+/// 只读库上的基线：一根名下全部 `inst_relate` / `tubi_relate` 行（有世界盒与世界变换的），不看投影。
+/// 整库房间重算（ADR-073 D13）对**不在投影里**的根——初始化的模型行（ADR-077 D5）、落盘形态重启前
+/// 生成的——从这里读回几何再算归属（`room_model::durable_room_inputs`）；投影里有回执的根不该走这里，
+/// 投影那份才是本进程的现值。
+pub(crate) async fn durable_records_of_root(
     db: &Surreal<Any>,
     root: RefnoEnum,
 ) -> anyhow::Result<Vec<GeomInstQuery>> {

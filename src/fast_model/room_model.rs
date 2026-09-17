@@ -15,7 +15,7 @@ use aios_core::{RefnoEnum, init_test_surreal};
 use bevy_transform::TransformPoint;
 use bevy_transform::components::Transform;
 use dashmap::{DashMap, DashSet};
-use glam::{Mat4, Vec3};
+use glam::{DMat4, Mat4, Vec3};
 use itertools::Itertools;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
@@ -1775,6 +1775,109 @@ pub(crate) struct ElementRoomEdge {
     pub member: RoomMember,
 }
 
+/// 房间归属判定对一件几何的全部要求：挂在哪个构件上、世界盒、网格与「网格 → 世界」的变换。
+///
+/// 两种来源都实现它——投影记录（本进程生成的根，[`crate::fast_model::model_memory_store::ProjectedGeometry`]）
+/// 与库上读回的模型行（初始化 / 重启前生成的根，不在投影里；[`DurableRoomGeometry`]）。判定
+/// （[`MemoryRoomCalculator::calculate_for_root`]）与渲染（[`MemoryRoomCalculator::render_root_room_edges`]）
+/// 只认这几样、不认来源，所以整库重算对两种根走的是同一套算法与同一形状的语句（ADR-073 D13：
+/// 「整库重算 == 从零初始化」逐边相等的硬验收不多一条口径）。
+pub(crate) trait RoomInput {
+    /// 归属挂在哪个构件上（隐式管身挂容器）。
+    fn element(&self) -> RefnoEnum;
+    /// 报错点名用：投影记录 id / 库行的构件与网格。
+    fn label(&self) -> String;
+    fn world_bounds(&self) -> [[f32; 3]; 2];
+    fn mesh_id(&self) -> &str;
+    /// 网格顶点 → 世界：烘焙实体只有世界变换，标准图元把本地摆放折进去。
+    fn mesh_to_world(&self) -> DMat4;
+}
+
+impl RoomInput for crate::fast_model::model_memory_store::ProjectedGeometry {
+    fn element(&self) -> RefnoEnum {
+        crate::data_interface::generation_root::refno_from_e3d(self.source_refno)
+    }
+
+    fn label(&self) -> String {
+        self.record_id.clone()
+    }
+
+    fn world_bounds(&self) -> [[f32; 3]; 2] {
+        self.world_bounds
+    }
+
+    fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+
+    fn mesh_to_world(&self) -> DMat4 {
+        match &self.shape {
+            crate::fast_model::model_memory_store::ProjectedShape::Baked => self.world_transform,
+            crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                local_transform,
+                ..
+            } => self.world_transform * *local_transform,
+        }
+    }
+}
+
+/// 库上读回的一件几何（`model_record_reader::durable_records_of_root` 一行里的一条实例），已折成房间
+/// 判定要的形状。不在投影里的根——初始化的模型行（ADR-077 D5）、落盘形态重启前生成的——只有这一种来源；
+/// 它只活在整库重算这一步里，不进投影、不发布。
+#[derive(Debug, Clone)]
+pub(crate) struct DurableRoomGeometry {
+    element: RefnoEnum,
+    label: String,
+    world_bounds: [[f32; 3]; 2],
+    mesh_id: String,
+    mesh_to_world: DMat4,
+}
+
+impl RoomInput for DurableRoomGeometry {
+    fn element(&self) -> RefnoEnum {
+        self.element
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn world_bounds(&self) -> [[f32; 3]; 2] {
+        self.world_bounds
+    }
+
+    fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+
+    fn mesh_to_world(&self) -> DMat4 {
+        self.mesh_to_world
+    }
+}
+
+/// 把库上的模型行折成房间判定的输入：一行一条或多条实例（`insts_flat`，旧行走 `geo_relate`），每条实例
+/// 一件几何、共用该行的世界盒；「网格 → 世界」= 行上的世界变换 × 实例的本地变换——烘焙实体（`booled_id`）
+/// 与管身（`tubi_relate`）读回来的本地变换是单位阵，落库时本地摆放已折进世界变换，与投影记录的 `Baked`
+/// 同义（`model_record_reader::projection_record_to_query` 的反向）。读回的行已由 SQL 过滤掉没有世界盒 /
+/// 世界变换的（`aabb.d != NONE AND world_trans.d != NONE`）。
+pub(crate) fn durable_room_inputs(rows: &[GeomInstQuery]) -> Vec<DurableRoomGeometry> {
+    rows.iter()
+        .flat_map(|row| {
+            let (mins, maxs) = (row.world_aabb.mins, row.world_aabb.maxs);
+            let world_bounds = [[mins.x, mins.y, mins.z], [maxs.x, maxs.y, maxs.z]];
+            row.insts.iter().map(move |inst| DurableRoomGeometry {
+                element: row.refno,
+                label: format!("{}:{}", row.refno, inst.geo_hash),
+                world_bounds,
+                mesh_id: inst.geo_hash.clone(),
+                mesh_to_world: (row.world_trans * inst.transform)
+                    .compute_matrix()
+                    .as_dmat4(),
+            })
+        })
+        .collect()
+}
+
 /// Fixed room-definition view. Construction and calculation have no database
 /// handle, global spatial tree or historical-membership dependency.
 // `pub`：它出现在 `model_db_adapter::frozen_room_calculator` / `persist_roots_batched` 的公开签名里，
@@ -2261,9 +2364,12 @@ impl MemoryRoomCalculator {
     /// 边界由生成路径守——记录到了这里就是这一根这一版的最终几何。一句库不读。
     /// 输入不合法（盒子不可用、面板网格不全）直接 `Err`：房间算不出来的根不落库，
     /// 房间失败 = 该根失败（ADR-073 D2）。
-    pub(crate) fn calculate_for_root(
+    ///
+    /// 几何的来源不限于投影记录：整库重算（D13）对不在投影里的根拿库上读回的模型行
+    /// （[`DurableRoomGeometry`]）走同一个入口——算法只认 [`RoomInput`]。
+    pub(crate) fn calculate_for_root<G: RoomInput>(
         &self,
-        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        records: &[G],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         self.calculate_edges(records, |record| {
             memory_model_world_points(record, self.panels.mesh_dir())
@@ -2303,19 +2409,15 @@ impl MemoryRoomCalculator {
     /// `WHERE in NOT IN $room_protected_panels`——一根一份名单，不逐构件重复整张列表（几何覆盖稀疏的
     /// 实例上缺几何的面板可能有两百多块，逐构件展开会把一根的事务撑大几十倍）。为空时语句与此前
     /// 逐字相同。
-    pub(crate) fn render_root_room_edges(
+    pub(crate) fn render_root_room_edges<G: RoomInput>(
         &self,
-        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        records: &[G],
         edges: &[ElementRoomEdge],
     ) -> String {
         let map = self.room_panel_map();
         let mut by_element = std::collections::BTreeMap::<RefnoEnum, Vec<ElementRoomEdge>>::new();
         for record in records {
-            by_element
-                .entry(crate::data_interface::generation_root::refno_from_e3d(
-                    record.source_refno,
-                ))
-                .or_default();
+            by_element.entry(record.element()).or_default();
         }
         for edge in edges {
             by_element
@@ -2348,27 +2450,25 @@ impl MemoryRoomCalculator {
         out
     }
 
-    fn calculate_edges(
+    fn calculate_edges<G: RoomInput>(
         &self,
-        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
-        mut points: impl FnMut(
-            &crate::fast_model::model_memory_store::ProjectedGeometry,
-        ) -> anyhow::Result<Vec<Point<Real>>>,
+        records: &[G],
+        mut points: impl FnMut(&G) -> anyhow::Result<Vec<Point<Real>>>,
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         let mut by_element =
             std::collections::BTreeMap::<RefnoEnum, HashMap<RefnoEnum, ElementRoomEdge>>::new();
         for record in records {
-            let element =
-                crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
+            let element = record.element();
             // 面板本身不做成员判定（它另有 `room_panel_relate` 那一半，见 `render_root_room_edges`）。
             if self.room_panel_map().all_panels.contains(&element) {
                 continue;
             }
-            let bounds = Aabb::new(record.world_bounds[0].into(), record.world_bounds[1].into());
+            let [mins, maxs] = record.world_bounds();
+            let bounds = Aabb::new(mins.into(), maxs.into());
             anyhow::ensure!(
                 aabb_is_usable(&bounds),
                 "invalid room input bounds: {}",
-                record.record_id
+                record.label()
             );
             let edges = by_element.entry(element).or_default();
             let mut world_points = None;
@@ -2409,19 +2509,12 @@ impl MemoryRoomCalculator {
     }
 }
 
-fn memory_model_world_points(
-    record: &crate::fast_model::model_memory_store::ProjectedGeometry,
+fn memory_model_world_points<G: RoomInput>(
+    record: &G,
     mesh_dir: &Path,
 ) -> anyhow::Result<Vec<Point<Real>>> {
-    let transform = match &record.shape {
-        crate::fast_model::model_memory_store::ProjectedShape::Baked => record.world_transform,
-        crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-            local_transform,
-            ..
-        } => record.world_transform * *local_transform,
-    }
-    .as_mat4();
-    let path = mesh_dir.join(format!("{}.mesh", record.mesh_id));
+    let transform = record.mesh_to_world().as_mat4();
+    let path = mesh_dir.join(format!("{}.mesh", record.mesh_id()));
     let mesh = PlantMesh::des_mesh_file(&path)?;
     anyhow::ensure!(
         mesh.indices.len() >= 3
