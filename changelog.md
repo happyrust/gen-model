@@ -35,8 +35,10 @@
   `no_model（不挡路）`**，与 10 个 TREAD、1 个 MNUM 同列；候选表里挡路的**只剩 STRFLT 锚点自己**（P23 排除，设计如此），6 根 rejected 的原因全部
   收敛到这一条。ams8000 对照窗不变：195→196 EQUI 挪位 `transform=1 rejected=0`；267→268 BRAN `BY U 2000` 照旧 regen（`CACHID / HPOS / TPOS`
   一起变不是只戳）。
-- **未做 / 边界**：`model_transform_cheap_path` 默认仍关；P23 排除不动（窗 C 要真走 transform 得另议 STRFLT）；Q6 探针第二手（闭包种子）没量；
-  e3d-model 侧改动在 vendor 工作树里**未提交**（gen-model 工作树已依赖 `NoModelTier::CacheStamp` / `cache_stamp`，两仓要一起入库）。
+- **未做 / 边界**：`model_transform_cheap_path` 默认仍关；P23 排除不动（窗 C 要真走 transform 得另议 STRFLT）；Q6 第二手（只戳候选不做闭包种子）
+  **同日拍板不动**——它只在整库扫写窗真省根，而那形状与「被引用的目录件 / 跨根设计引用变了、引用者只被盖戳」在 DESI 窗里分不出来，今天正是戳做种子
+  把后者收住的；收益等 ADR-078（分析与 A / B / C 三条路留在计划 §8 Q6 ★0917 第二手段）；
+  e3d-model 侧改动已随 vendor `5d92b97` 入库（gen-model `bf405d5ad` 起经 path 依赖用到 `NoModelTier::CacheStamp` / `cache_stamp`，两仓已一起入库）。
 
 ### ADR-066 D1 规则 2 · 账本去向 `no_model` 的候选不再把根踢回 regen——「挪 EQUI + 子元素改个名」走得了 transform
 
