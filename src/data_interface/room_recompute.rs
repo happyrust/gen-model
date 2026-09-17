@@ -976,10 +976,12 @@ mod tests {
     }
 
     /// 源码钉（ADR-073 D13 反查，2026-09-17）：收尾段的分派——请求说定向先走 `run_targeted_room_recompute`，它回 `None`
-    /// （树不就绪 / 根清单枚举不出来 / 有命中却折不出根 / 覆盖面对不上）就退 `run_room_only_recompute`；定向那一路
-    /// 先枚举根清单、再 `room_reverse::affected_roots`、再以 `RootScope::Targeted` 调 `recompute_dbnum_room_edges`，
-    /// 面板级语句经 `render_panel_delta_statements`；算不出的根与整库同一处置（`settle_room_recompute_failures`）；
-    /// 成功的结论是 `Targeted(重算那台计算器的代号)`，与 `WholeLibrary` 同样说得了「整库对齐到这一代」。
+    /// （树不就绪 / 根清单枚举不出来 / 有命中却折不出根 / 停放的元素折不出根 / 覆盖面对不上）就退
+    /// `run_room_only_recompute`；定向那一路先枚举根清单、再 `room_reverse::affected_roots`（自己那一段）、再
+    /// `room_reverse::fold_parked`（停放链）、两路的根并起来以 `RootScope::Targeted` 调 `recompute_dbnum_room_edges`，
+    /// 面板级语句经 `render_panel_delta_statements`（只有自己那一段有）；算不出的根与整库同一处置
+    /// （`settle_room_recompute_failures`）；成功的结论是 `Targeted(重算那台计算器的代号)`，与 `WholeLibrary` 同样说得了
+    /// 「整库对齐到这一代」。本库的槽只在分派处、按成功的结论清（U3 b 档）。
     #[test]
     fn the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer()
      {
@@ -997,6 +999,25 @@ mod tests {
                 && dispatch.contains("None =>")
                 && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
             "定向定不了（None）退整库；整库直接整库: {dispatch}"
+        );
+        // 清槽（U3 b 档）：只在分派处、结论是 `WholeLibrary` / `Targeted` 才清；整个执行体别处不清。
+        let decided = dispatch
+            .find("let verdict = match &request.scope {")
+            .expect("先定结论");
+        let cleared = dispatch
+            .find("room_reverse::clear(job.dbnum)")
+            .expect("成功后清本库的槽");
+        assert!(decided < cleared, "结论定了才清槽: {dispatch}");
+        assert!(
+            dispatch.contains(
+                "RoomRecomputeVerdict::WholeLibrary(_) | RoomRecomputeVerdict::Targeted(_)"
+            ),
+            "只有说得了「整库对齐到这一代」的两种结论才清槽（Failed / PartialCoverage / Disabled 留着）: {dispatch}"
+        );
+        assert_eq!(
+            worker.matches("room_reverse::clear(").count(),
+            1,
+            "执行体里清槽只此一处（准入处的顺手清在 room_recompute::parked_for_task）"
         );
         let targeted = function_body(worker, "async fn run_targeted_room_recompute(");
         // 停放（U3 b 档）只在结论定为 `Targeted` 的那一臂里、盖章之前；退整库 / Failed 的臂里没有。
@@ -1027,27 +1048,38 @@ mod tests {
             .find("library_generation_roots(dbnum, target_sesno)")
             .expect("先枚举 DbSet@T 的根清单（折根的靶子）");
         let lookup = targeted
-            .find("affected_roots(target.db(), store, dbnum, delta, &library_roots)")
-            .expect("反查命中的根");
+            .find("affected_roots(target.db(), store, dbnum, &swap.panels, &library_roots)")
+            .expect("自己那一段：反查命中的根");
+        let parked = targeted
+            .find("fold_parked(parked, &library_roots)")
+            .expect("停放链：折成本库的根（U3 b 档）");
         let recompute = targeted
             .find("recompute_dbnum_room_edges(")
             .expect("定向重算");
         assert!(
-            enumerate < lookup && lookup < recompute,
-            "根清单 → 反查 → 重算，顺序不能乱: {targeted}"
+            enumerate < lookup && lookup < parked && parked < recompute,
+            "根清单 → 反查 → 折停放 → 重算，顺序不能乱: {targeted}"
         );
         assert!(
-            targeted.contains("RootScope::Targeted {")
-                && targeted.contains("roots: &affected.roots,")
+            targeted.contains("None => AffectedRoots::default(),"),
+            "本任务没换代（欠账全在停放链上）就没有反查那一段: {targeted}"
+        );
+        assert!(
+            targeted.contains(".chain(parked_roots.iter())")
+                && targeted.contains("RootScope::Targeted {")
+                && targeted.contains("roots: &roots,")
                 && targeted.contains("panel_statements: &panel_statements,")
-                && targeted.contains("render_panel_delta_statements(delta)"),
-            "只重算命中的根，面板级语句作 prelude: {targeted}"
+                && targeted.contains("render_panel_delta_statements(&swap.panels)"),
+            "两路的根并起来只重算它们，面板级语句（只有自己那一段有）作 prelude: {targeted}"
+        );
+        assert!(
+            targeted.contains("room_recompute_uncovered(Some(&roots), &report.covered_roots)"),
+            "覆盖面对的是并起来的根: {targeted}"
         );
         for (fallback, marker) in [
             ("树不就绪", "Ok(ReverseLookup::TreeUnavailable(state)) =>"),
             ("有命中却折不出根", "if !affected.unresolved.is_empty() {"),
-            // U3-3：链上有停放物就退整库（消费随 U3-4 接进来）——只算自己那一段就盖章才是漏算。
-            ("链上有停放物（消费未接）", "if !parked.is_empty() {"),
+            ("停放的元素折不出根", "if !parked_unresolved.is_empty() {"),
         ] {
             let at = targeted
                 .find(marker)

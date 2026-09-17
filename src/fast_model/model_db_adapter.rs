@@ -6066,6 +6066,235 @@ mod tests {
         assert!(room_edges(&db).await.is_empty(), "两次定向 == 一次整库");
     }
 
+    /// ADR-073 D13 U3 b 档，`mem://` 两库端到端：面板 R1 在 A 库（7999）的任务里搬家。A 的反查（树的答案模拟：旧盒里
+    /// 有 A1 与 B 库的 B1）只折出 A1、B1 进 `foreign[B]`；A 定向重算只碰 A1，B 的两条边一字不动；结论 `Targeted` 后把
+    /// B1 连同这一段换代（g1 → g2）停进 B 的槽。B 的下一个任务：`Unchanged`、库上 = g1、常驻 = g2、槽里 g1 → g2 →
+    /// 准入链接上、只有停放链；折成 B1 一根、只重算它——B1 的陈旧边删了、B2（只在 R2 里）的边与 ACK 一字不动；
+    /// 与整库重算 B 同一终态；成功清槽。槽空（重启后）→ 整库；链断 → 整库。
+    #[tokio::test]
+    async fn a_panel_move_parks_the_other_librarys_hits_and_its_next_task_recomputes_only_those_roots()
+     {
+        use crate::data_interface::room_recompute::{RoomRecomputeScope, scope_for_task};
+        use crate::data_interface::room_reverse::{
+            self, ReverseLookup, RoomRoots, fold_parked, park_foreign_hits,
+        };
+        use crate::fast_model::room_resident::{
+            PanelBounds, PanelDelta, PanelMove, RoomReferenceRefresh,
+        };
+        use std::collections::{BTreeMap, BTreeSet};
+        const LIB_B: u32 = RefNo::new(24382, 1).dbno();
+        let b1 = RefNo::new(24382, 10);
+        let b2 = RefNo::new(24382, 20);
+        let record_in_b = |root: RefNo, min: f32, max: f32| ProjectedGeometry {
+            dbnum: LIB_B,
+            ancestors: vec![packed_refno(root), packed_refno(RefNo::new(24382, 1))],
+            ..room_record(root, min, max)
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
+            root_commit(b1, vec![record_in_b(b1, 300., 400.)]),
+            root_commit(b2, vec![record_in_b(b2, 1200., 1300.)]),
+        ]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A1 inside R1");
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            LIB_B,
+            &[b1, b2],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed B1 inside R1, B2 inside R2");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24382_10".to_string(),
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_600->pe:24382_20".to_string(),
+            ]
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+
+        // R1 搬到 x 2000–3000：常驻 g1 → g2。
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        let g1 = before_move.resident_generation().to_string();
+        let g2 = after_move.resident_generation().to_string();
+        assert_ne!(g1, g2);
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: Some(PanelBounds([[0., 0., 0.], [1000., 1000., 1000.]])),
+                new: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+
+        // A 的任务：反查（树的答案模拟——旧盒里有 A1 与 B1，新盒里没人）。
+        let tree_hits = BTreeSet::from([packed_refno(ROOM_ROOT_A), packed_refno(b1)]);
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &delta.query_boxes(),
+            tree_hits,
+            &[ROOM_ROOT_A],
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![ROOM_ROOT_A]);
+        assert_eq!(
+            affected.foreign,
+            BTreeMap::from([(
+                LIB_B,
+                BTreeMap::from([(
+                    packed_refno(b1),
+                    vec![packed_refno(b1), packed_refno(RefNo::new(24382, 1))]
+                )])
+            )]),
+            "B1 是 B 库的：存元素带祖先链、不折根"
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("A's targeted recompute");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24382_10".to_string(),
+                "pe:24383_600->pe:24382_20".to_string(),
+            ],
+            "A1 的边删了；B1 的边此刻陈旧却还在——A 的任务只碰 A 的根"
+        );
+        // 结论 Targeted → 停放给 B（执行体在 `run_targeted_room_recompute` 的那一臂里做）。
+        let lines = park_foreign_hits(BATCH_DBNUM, &g1, &g2, &affected.foreign);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("dbnum={LIB_B} 停放 1 个元素")),
+            "{lines:?}"
+        );
+
+        // B 的下一个任务：没换代、库上 g1、常驻 g2、槽里 g1 → g2 → 定向，只有停放链。
+        let parked = room_reverse::pending(LIB_B);
+        assert_eq!(parked.len(), 1);
+        assert_eq!(
+            (
+                parked[0].from_generation.as_str(),
+                parked[0].to_generation.as_str(),
+                parked[0].parked_by
+            ),
+            (g1.as_str(), g2.as_str(), BATCH_DBNUM)
+        );
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k2".into() };
+        assert_eq!(
+            scope_for_task(Some(&unchanged), Some(&g1), Some(&g2), &parked),
+            RoomRecomputeScope::Targeted {
+                swap: None,
+                parked: parked.clone(),
+            }
+        );
+        let (roots, unresolved) = fold_parked(&parked, &[b1, b2]);
+        assert_eq!(
+            (roots.as_slice(), unresolved.as_slice()),
+            ([b1].as_slice(), [].as_slice())
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            LIB_B,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("B's targeted recompute from the parked chain");
+        assert_eq!(report.covered_roots, vec![b1]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_600->pe:24382_20".to_string()],
+            "B1 的陈旧边删了；B2 一字不动"
+        );
+        assert_eq!(ack(b1).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(b2).as_deref(), Some(g1.as_str()), "没点名的根 ACK 不动");
+        // 成功 → 清槽（执行体在 `run_room_recompute` 按结论做）。
+        assert_eq!(room_reverse::clear(LIB_B), 1);
+        assert!(room_reverse::pending(LIB_B).is_empty());
+        // 对照：整库重算 B 得到同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            LIB_B,
+            &after_move,
+            Some(&[b1, b2]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole-library recompute of B");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_600->pe:24382_20".to_string()],
+            "定向（停放链）== 整库"
+        );
+
+        // 槽空（重启后停放物丢了）→ 整库；链断（槽里只有 g0 → g1，接不到 g2）→ 整库。
+        assert_eq!(
+            scope_for_task(Some(&unchanged), Some(&g1), Some(&g2), &[]),
+            RoomRecomputeScope::WholeLibrary
+        );
+        room_reverse::park(
+            LIB_B,
+            RoomRoots {
+                from_generation: "g0".into(),
+                to_generation: g1.clone(),
+                elements: BTreeMap::from([(packed_refno(b2), vec![packed_refno(b2)])]),
+                parked_by: BATCH_DBNUM,
+                parked_at: std::time::Instant::now(),
+            },
+        );
+        assert_eq!(
+            scope_for_task(
+                Some(&unchanged),
+                Some(&g1),
+                Some(&g2),
+                &room_reverse::pending(LIB_B)
+            ),
+            RoomRecomputeScope::WholeLibrary
+        );
+        room_reverse::clear(LIB_B);
+    }
+
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
     /// 房间算不出来（盒子不可用）在写库之前就剔出组、整根不落库、进 `failed`（d-932 口径 2），
     /// A 的边与章一点不受它牵连。事务账：A 的几何 + 房间边 + 回执共一笔。

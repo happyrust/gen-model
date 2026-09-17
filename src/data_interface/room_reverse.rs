@@ -346,6 +346,32 @@ pub(crate) fn clear(dbnum: u32) -> usize {
     parked_write().remove(&dbnum).map_or(0, |slot| slot.len())
 }
 
+/// 消费停放物（U3 b 档）：链上各段的元素（带祖先链）与本库 `DbSet@T` 的根清单求交，得要重算的根（去重、按打包
+/// refno 序）。折不出根的元素进第二个返回值——那一段的答案对不上本库此刻的根清单（元素 / 根已删、停放方没取到
+/// 祖先链），调用方按「反查不完整」退整库；不静默丢。不回库：祖先链停放方已带上。
+pub(crate) fn fold_parked(
+    parked: &[RoomRoots],
+    library_roots: &[RefNo],
+) -> (Vec<RefNo>, Vec<RefnoEnum>) {
+    let roots: BTreeSet<i64> = library_roots
+        .iter()
+        .map(|root| packed_refno(*root))
+        .collect();
+    // 同一元素在几段里都出现（挪走又挪回）只折一次；祖先链取最长的那份（空链是「没取到」，别拿它盖住有的）。
+    let mut hits: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for (element, anc) in parked.iter().flat_map(|entry| entry.elements.iter()) {
+        let slot = hits.entry(*element).or_default();
+        if anc.len() > slot.len() {
+            *slot = anc.clone();
+        }
+    }
+    let (matched, unresolved) = fold_to_roots(hits, &roots);
+    (
+        matched.into_iter().map(e3d_of).collect(),
+        unresolved.into_iter().map(refno_of).collect(),
+    )
+}
+
 /// 停放方任务的定向重算**结论定为 `Targeted` 之后**调：反查 `foreign` 的每一桶连同这一段换代（`from` = 它开工前对齐的
 /// 上一代，`to` = 它重算那台计算器的代号）停进那个库的槽。回每个库一句（给日志）。退整库 / `Failed` 不调——那时反查
 /// 说不了完整或本库自己都没算齐，别的库由 ③ 兜底整库。
@@ -744,6 +770,59 @@ mod tests {
             "清空的槽不出现在 /health"
         );
         clear(c);
+    }
+
+    /// 消费停放物（U3 b 档）：几段的元素合起来与本库根清单求交、去重按序；同一元素几段都有只折一次、祖先链取最长的
+    /// （空链不盖住有的）；折不出根的（根不在清单 / 停放方没取到祖先链）进 `unresolved`。
+    #[test]
+    fn parked_elements_fold_to_the_library_roots_on_their_carried_ancestor_chains() {
+        let root_a = RefNo::new(24_385, 1);
+        let root_b = RefNo::new(24_385, 2);
+        let library_roots = [root_a, root_b];
+        let element = |word1: u32, anc: &[RefNo]| {
+            (
+                packed(24_385, word1),
+                anc.iter()
+                    .map(|refno| packed_refno(*refno))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let segment = |from: &str, to: &str, elements: Vec<(i64, Vec<i64>)>| RoomRoots {
+            from_generation: from.into(),
+            to_generation: to.into(),
+            elements: elements.into_iter().collect(),
+            parked_by: 7_997,
+            parked_at: Instant::now(),
+        };
+        let (roots, unresolved) = fold_parked(
+            &[
+                segment(
+                    "g1",
+                    "g2",
+                    vec![
+                        // 根 B 的构件；同一元素在下一段里祖先链是空的（那一次没取到），这里的有效。
+                        element(10, &[RefNo::new(24_385, 5), root_b]),
+                        // 根 A 自己就是几何来源。
+                        element(1, &[RefNo::new(24_385, 100)]),
+                    ],
+                ),
+                segment(
+                    "g2",
+                    "g3",
+                    vec![
+                        element(10, &[]),
+                        // 祖先链上没有清单里的根：折不出。
+                        element(40, &[RefNo::new(24_385, 999)]),
+                        // 停放方没取到祖先链、自己也不是根：折不出。
+                        element(41, &[]),
+                    ],
+                ),
+            ],
+            &library_roots,
+        );
+        assert_eq!(roots, vec![root_a, root_b]);
+        assert_eq!(unresolved, vec![refno(24_385, 40), refno(24_385, 41)]);
+        assert_eq!(fold_parked(&[], &library_roots), (Vec::new(), Vec::new()));
     }
 
     /// 源码钉（U3 b 档）：库上管身的范围查询**不带库过滤**——跨库命中要在这一层就进来，分库在 `resolve` 里按
