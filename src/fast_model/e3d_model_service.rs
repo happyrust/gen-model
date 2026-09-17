@@ -2807,8 +2807,8 @@ fn bake_element(
 /// bake 时这件几何在房间判定眼里的形状——与它随后变成的投影记录**字段相同**（`project_geometry_delta`
 /// 的那一段）：构件 = `geometry_source_refno`（隐式管身挂容器）、标签 = 投影记录 id、世界变换 =
 /// `persisted_world_transform`（隐式管身把标准图元摆放折进去）、「网格 → 世界」= `room_model::projected_mesh_to_world`
-/// （标准图元再乘本地摆放；隐式管身**不再乘**——它的本地摆放已经在存下的世界变换里，与库上 `tubi_relate`
-/// 行读回的单位阵实例变换同义）。两边只许有这一份配方，源码钉 `bake_time_room_input_matches_the_projected_record`。
+/// （标准图元再乘本地摆放；隐式管身**不再乘**——它的本地摆放已经在存下的世界变换里，与库上管身行读回的
+/// 单位阵实例变换同义）。两边只许有这一份配方，源码钉 `bake_time_room_input_matches_the_projected_record`。
 fn baked_room_input(
     geometry_id: &GeometryId,
     primitive: Option<&e3d_model::primitive_instance::PrimitiveInstance>,
