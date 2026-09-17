@@ -2,6 +2,41 @@
 
 ## 2026-09-17
 
+### 反向传播的跨库停放：命中的别的库排成根级工作项 `RoomRoots`，由那个库的下一个任务沿准入链消费（ADR-073 D13 追记 U3 b，五笔）
+
+- **为什么**：D 五笔落完，反查里别的库的命中只**数**（`cross_library`），一窗内两个库都有任务时只有先开工的库走定向，后开工的库
+  `Unchanged` 却欠着 → 整库（③ 电平型兜底）——面板在 A 库、成员在 B 库是常态，B 每次都整库就把定向省下的又花回去。用户 2026-09-17
+  拍板 U3 b 拆单（停放槽先进程内、一项一笔）。
+- **改动（按提交）**：
+  1. `6cf5f1d61` 反查放开到全 MDB：库上 `tubi_relate` 范围查询不再带 `dbnum =`，投影管身一把读锁扫全域（新
+     `ModelMemoryStore::for_each_record`，不复制）；命中按 `RefNo::dbno()` 分桶——本库的折根，别的库的进
+     `AffectedRoots::foreign = dbnum → (元素 → 祖先链)` 存元素不折根、祖先链在这里就带上（管身来源 BRAN 在 `inst_relate` 里没有行，
+     那个库回库取不到；拆单写的「B 的任务补 `anc`」落地时改成停放方带上），`cross_library` = 其总数。
+  2. `a894eb1be` 停放槽 `room_reverse::RoomRoots { from_generation, to_generation, elements, parked_by, parked_at }`，进程内
+     `park`（同段并条、空条不停）/ `pending` / `clear` / `parked_health`；A 库定向重算**结论定为 `Targeted` 之后** `park_foreign_hits`
+     把每一桶连同这一段换代（上一代 → 重算那台的代号）停进那个库的槽；`RoomRecomputeScope::Targeted { swap: Option<PanelSwap>, parked }`
+     定下最终形状；`/health.room_build.parked` 一格。
+  3. `a73b40e12` 准入链：`scope_for_task(refresh, library, resident, parked)` 从库上那一代出发沿停放物 `from → to` 逐段接、最后一段
+     可以是本任务自己的换代（自己那一段优先、库上已越过的一段不要、链断 / 绕圈 / 从没盖过 / 常驻说不出代号退整库），今天的四条准入
+     是链长 1 的特例；两个执行体 `durable_alignment` 之后 `parked_for_task` 取槽（库上已同代顺手清槽）；`request_for_task` 接了停放链
+     多一句原因。
+  4. `a4ad36cd3` 消费：`run_targeted_room_recompute` 把停放的元素沿带来的祖先链折成本库的根（`fold_parked`，不回库、同一元素几段都有
+     只折一次），与自己那一段反查命中的根并起来 `RootScope::Targeted`（本任务没换代就只有停放那一路、没有面板级语句）；折不出根退整库；
+     `run_room_recompute` 按结论清槽（`WholeLibrary` / `Targeted` 才清）。
+  5. 本笔：ADR-073 D13 追记 U3 b、钉 23、§未决 U3 跨库那一半关（算法输入形态那一半仍开）；CONTEXT「整库房间重算」词条加跨库停放；changelog。
+- **不动的**：③ 电平型触发原样——停放槽进程内、重启即丢，丢了是多算不漏算；`run_room_only_recompute` 一字不改；今天的四条准入照旧。
+  **仍欠**：没命中的库看不到「这一段与你无关」，`Unchanged` 且槽空 → 仍整库一次（给全 MDB 停放空段要知道库的全集，本轮没做）。
+- **验证**：每笔定向 `cargo test --lib` 绿（U3-1 room_reverse 5 / U3-2 room_reverse+room_recompute+batch_worker 65 / U3-3 66 / U3-4 90 含
+  adapter）。新钉 5 条：`the_durable_tube_query_is_not_filtered_by_library`、`the_parking_slot_merges_the_same_segment_and_clears_per_library`、
+  `the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident`（链准入真值表 14 种局面）、
+  `parked_elements_fold_to_the_library_roots_on_their_carried_ancestor_chains`、`mem://` 两库端到端
+  `a_panel_move_parks_the_other_librarys_hits_and_its_next_task_recomputes_only_those_roots`（A 库面板搬家 → 只 A1 重写、B1 停放 → B 的任务
+  接链只重写 B1、B2 的边与 ACK 一字不动、与整库同终态、清槽；槽空 / 链断退整库）；`resolve_joins_…` 扩三个库、
+  `the_targeted_recompute_falls_back_…` / `the_room_only_recompute_is_wired_…` 扩停放 / 清槽 / 取槽的位置。**变异一次**：`resolve` 不分库
+  → 端到端与 `resolve_joins_…` 同时红，撤回复绿。全量 `cargo test --lib` **2263 passed / 5 failed / 119 ignored**——五条红与 D 收口时
+  同一批（`model_impact` ×2、`window_root_plan` ×2、`review::platform` ×1，都不在本轮碰过的文件里）。**未 live**：两个 DESI 库都有任务的
+  一窗里挪一块跨库面板（见 ADR-073 钉 23 的 live 待补）；Q6 管身范围查询放到全 MDB 的解引用成本要 live 量。
+
 ### 房间归属的反向传播：面板变了拿新旧盒反查成员、只重算命中的根，整库重算降为兜底（ADR-073 D13 追记 D，五笔）
 
 - **为什么**：逐根路径（D1）只答「本根在哪些面板里」；面板那一侧变了（PANE 几何 / 属主、FRMW / SBFR 改名、CWALL / CFLOOR 搬迁），

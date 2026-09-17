@@ -182,6 +182,26 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   对不上 = 退整库（多算不是漏算）。**不变的**：③ 电平型触发原样（重启后 / 从没盖过那一格只整库一次，盖上就安静）；整库那一路
   `run_room_only_recompute` 一字不改，是兜底；D1 钉「元素分支不依赖空间树」照旧只钉正向，反查是另一个入口。**代价**：一窗内两个
   库都有任务时，只有先开工的那个库走定向（它的库上代号是上一代），后开工的库看到库上 ≠ 常驻 且 `Unchanged` → 整库——U3 b 档才收。
+  **2026-09-17 晚追记（U3 b，跨库停放）：上面那条代价收了——反查命中的别的库不再只数，停放成根级工作项由那个库的下一个任务消费。**
+  用户拍板「停放槽先进程内，按 U3-1→U3-6 一项一笔」。落法：① **反查不分库**——库上 `tubi_relate` 范围查询去掉 `dbnum =`、投影管身
+  一把读锁扫全 MDB（`ModelMemoryStore::for_each_record`，不复制），命中按 `RefNo::dbno()` 分桶：本库的折根，别的库的进
+  `AffectedRoots::foreign = dbnum → (元素 → 祖先链)` **存元素不折根**（根清单在那个库的 `DbSet@T` 上）；祖先链在这里就带上——
+  管身的来源是 BRAN 那种容器，`inst_relate` 里没有它的行，那个库回库取不到（拆单时按「B 的任务补 `anc`」写的，落地时改成停放方带上）。
+  ② **停放槽**（`room_reverse::park / pending / clear`，进程内 `RwLock<BTreeMap<dbnum, Vec<RoomRoots>>>`）：A 库的任务**结论定为
+  `Targeted` 之后**才把 `foreign` 的每一桶连同这一段换代（`from` = 它开工前对齐的上一代，`to` = 它重算那台计算器的代号）停进那个
+  库的槽（`park_foreign_hits`）；同 `from → to` 并成一条（面板挪走又挪回得到同一对代号）、空条不停；退整库 / `Failed` 不停放。
+  `/health.room_build.parked` 一格 `{dbnum: {entries, elements, oldest_age_ms, segments}}`。③ **准入链**（`scope_for_task` 从
+  「四条同时成立」改成链式）：从库上 D14 那一格出发，每一步接一段——本任务自己的换代（`previous_generation → 常驻代号`，面板变化
+  非空）或停放物的 `from → to`——接到此刻常驻代号就定向（`RoomRecomputeScope::Targeted { swap: Option<PanelSwap>, parked }`）；
+  自己那一段优先（新鲜的反查）、库上已越过的一段不要、链断 / 绕圈 / 从没盖过 / 常驻说不出代号 → 整库；今天的四条准入是链长 1
+  的特例。两个执行体在读过库上那一格之后 `parked_for_task` 取槽：库上欠着才取，库上已与常驻同代顺手清槽（停放物说的都是越过
+  的代）。④ **消费**：`run_targeted_room_recompute` 把停放的元素沿带来的祖先链与本库根清单求交（`fold_parked`，不回库；同一元素几段
+  都有只折一次、祖先链取最长的），与自己那一段反查命中的根并起来 `RootScope::Targeted`；本任务没换代就只有停放那一路、没有面板级
+  语句（停放方已按面板写过——面板级语句天然跨库）；折不出根的元素退整库。`run_room_recompute` 按结论清槽：`WholeLibrary` /
+  `Targeted` 才清（说得了「整库对齐到这一代」），`Failed` / `PartialCoverage` / `Disabled` 留给 ③。**不变的**：③ 电平型触发原样——
+  停放槽进程内、重启即丢，丢了是**多算不漏算**（③ 兜底整库）；要不要落库等 live 看到重启后整库的频率再定。**仍欠**：没命中的库
+  （C）看不到 g1 → g2 那一段的「无事发生」，`Unchanged` 且槽空 → 仍整库；给全 MDB 的库停放空段要知道库的全集（常驻的
+  `expected_dbnums` 有），本轮没做。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -352,6 +372,34 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     live 待补：ams 1112 挪一块 PANE → 该窗任务日志「定向房间重算完成 … 反查 roots=N tree_hits=… tube_hits=… cross_library=…」、只有命中的根
     重写了边、`/dbnums` 的 `room_alignment.current == true`；下一窗不再整库；改一块 PANE 的 DESC → 面板变化为空、由 ① 走整库
     （只改元数据多算一次，D13 ① 早已接受的代价）。
+23. D13 追记（U3 b，跨库停放，2026-09-17 晚）：
+    - 反查不分库：`durable_tube_hits` 的查询 `FROM tubi_relate WHERE aabb.d != NONE AND (` 且函数体不含 `dbnum =`（钉
+      `the_durable_tube_query_is_not_filtered_by_library`）；`resolve` 按 `RefNo::dbno()` 分桶，别的库的命中三路（树 / 投影管身 / 库上管身）
+      都进 `foreign`、带祖先链、取不到的留空链（`mem://` 钉 `resolve_joins_tree_projection_and_durable_tubes_into_library_roots` 扩：
+      `24382/8`（树，回库取 anc）、`24382/9`（库上管身）、`24382/10`（投影管身）进 `foreign[7998]`，`24383/8` 空链进 `foreign[7999]`）。
+    - 停放槽：`park` 同段并条、空条不停、`pending` 不取走、`clear` 按库清、`parked_health` 只列有停放物的库（钉
+      `the_parking_slot_merges_the_same_segment_and_clears_per_library`）；`park_foreign_hits(` 在 `run_targeted_room_recompute` 里**只此
+      一处**、在 `Some(uncovered) if uncovered.is_empty() => {` 那一臂里、`Some(RoomRecomputeVerdict::Targeted(generation))` 之前，
+      `run_room_only_recompute` 里没有（钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 扩）。
+    - 准入链：`scope_for_task(refresh, library, resident, parked)` 纯函数真值表（钉
+      `the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident`：只停放链 / 停放链 + 自己换代 / 两段接起来按链序 /
+      库上已越过的一段不要 / 自己那一段优先于同一对代号的旧停放物；链断两种 / 绕圈 / 从没盖过 / 常驻说不出代号 / 自己那一段面板变化
+      为空而链要靠它 / 自己那一段的上一代不在链上 / 槽空却欠着 → 整库；`request_for_task` 接了停放链多一句「别的库的面板变化停放到本库
+      N 段：…」）；今天的四条准入照旧（钉 `a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt` 随签名改）。两个执行体
+      `refresh_room_reference_before_task` → `durable_alignment` → `parked_for_task(job.dbnum, alignment.as_ref())` → `request_for_task(…, &parked)`
+      顺序固定（钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end` 扩）。
+    - 消费：`run_targeted_room_recompute` 里 `library_generation_roots(` → `affected_roots(…, &swap.panels, …)`（`None => AffectedRoots::default()`）
+      → `fold_parked(parked, &library_roots)` → `.chain(parked_roots.iter())` 并根 → `recompute_dbnum_room_edges(` 顺序固定，
+      `if !parked_unresolved.is_empty() {` 在重算之前 `return None;`，覆盖面对的是并起来的根；`run_room_recompute` 里
+      `room_reverse::clear(job.dbnum)` 在 `let verdict = match` 之后、守着 `WholeLibrary(_) | Targeted(_)`，`batch_worker.rs` 里
+      `room_reverse::clear(` 只此一处（同一条钉扩）。`fold_parked` 纯函数（钉 `parked_elements_fold_to_the_library_roots_on_their_carried_ancestor_chains`）。
+    - `mem://` 两库端到端（钉 `a_panel_move_parks_the_other_librarys_hits_and_its_next_task_recomputes_only_those_roots`）：A 库面板 R1
+      搬家 → A 的反查折出 A1、B1 进 `foreign[B]` → A 定向只重写 A1（B 的两条边一字不动）→ 停放 → B 的任务 `Unchanged` + 库上 g1 +
+      常驻 g2 + 槽里 g1→g2 → 定向只有停放链 → 折成 B1 → 只重写 B1、B2 的边与 ACK 一字不动 → 与整库重算 B 同一终态 → 清槽；槽空 /
+      链断 → 整库。变异一次：`resolve` 不分库（别的库的命中当本库折）→ 该钉与 `resolve_joins_…` 同时红，撤回复绿。
+    live 待补：ams 两个 DESI 库都有任务的一窗里挪一块跨库面板 → A 的日志「已为 dbnum=B 停放 N 个元素（g1 → g2）」、B 的日志
+    「定向房间重算完成 … 停放链 1 段 N 个元素 → M 根」且 B 不再整库；`/health.room_build.parked` 在两个任务之间非空、之后为 `{}`；
+    Q6 那条不带库过滤的管身范围查询的解引用成本（行数 × 库数）。
 
 ## 背景
 
@@ -588,7 +636,10 @@ ADR-011 §8 / §10；ADR-048 D3；ADR-041 §5 与「不做」；CONTEXT.md 词�
   ADR-067 D2 那种驻留的面板索引（去掉换代 / 参照 / 生命周期，只剩「生成 PANE 时就地替换它的几何」）、也可以是 `ModelMemoryStore`
   按 `noun == PANE` 现取、或空间树按 noun 过滤（ADR-010 §6 的形状）。三者的差别在冷启动（PANE 尚未生成时构件先生成怎么办）与跨库
   （面板在 A 库、成员在 B 库）两处，本文不选。（2026-09-17 D 追记：跨库那一问现在有数据口——反查回执的 `cross_library` 数的是命中却
-  不属本库的元素；a 档只数不算，b 档「给命中的别的库排根级工作项、由那个库的下一个任务消费」等真库上看见这个数再定。）
+  不属本库的元素；a 档只数不算，b 档「给命中的别的库排根级工作项、由那个库的下一个任务消费」等真库上看见这个数再定。
+  **2026-09-17 晚 U3 b 追记：跨库那一半关**——反查不分库、命中的别的库停放成根级工作项 `RoomRoots`、由那个库的下一个任务沿准入链
+  消费（D13 追记 U3 b）；停放槽进程内、重启即丢，③ 兜底。**算法输入形态那一半仍开**（驻留面板索引 / 投影现取 / 树按 noun 过滤，
+  冷启动那一处）；另欠一小块：没命中的库看不到「这一段与你无关」，仍由 ③ 整库一次。）
 - **U4　「全量重建房间」入口还存不存在。** `AIOS_ROOM_FULL_REBUILD` / `build_room_relations` / ADR-067 D5 六条显式入口 / ADR-048 D3
   「不覆盖启动全量房间重建」——按 D1 它们都没有宿主。若不再有任何全量入口，ADR-010 §9 硬验收的对照物就只能是「同一份数据从零初始化的结果」
   （实施约束 8 暂按此），且「房间算错了想整库重算一次」的运维动作 = 该库整库 Reinitialize；若保留一个只重算房间边的入口，它就是 D1 说的内部
