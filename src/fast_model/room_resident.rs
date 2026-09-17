@@ -890,6 +890,167 @@ impl TopologyDiff {
     }
 }
 
+/// 一块面板的世界盒（`[mins, maxs]`，f32），**按位**比较——它要随 [`RoomReferenceRefresh`] 一起 `Eq`，
+/// 而 f32 本身不是。盒来自 [`ResidentPanel::world_aabb`]（装模型时已按可用性筛过，没有 NaN）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PanelBounds(pub [[f32; 3]; 2]);
+
+impl PanelBounds {
+    pub(crate) fn from_aabb(aabb: &Aabb) -> Self {
+        Self([
+            [aabb.mins.x, aabb.mins.y, aabb.mins.z],
+            [aabb.maxs.x, aabb.maxs.y, aabb.maxs.z],
+        ])
+    }
+
+    pub(crate) fn aabb(&self) -> Aabb {
+        Aabb::new(self.0[0].into(), self.0[1].into())
+    }
+
+    fn bits(&self) -> [u32; 6] {
+        let [mins, maxs] = self.0;
+        [
+            mins[0].to_bits(),
+            mins[1].to_bits(),
+            mins[2].to_bits(),
+            maxs[0].to_bits(),
+            maxs[1].to_bits(),
+            maxs[2].to_bits(),
+        ]
+    }
+}
+
+impl PartialEq for PanelBounds {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits() == other.bits()
+    }
+}
+
+impl Eq for PanelBounds {}
+
+/// 一块要反查的面板：`old` 管「离开的」成员（旧盒里曾有谁）、`new` 管「进来的」（新盒里现在有谁）。
+/// 哪一边没几何（那一代里它在 `missing_panels` / 不在册）就是 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PanelMove {
+    pub panel: RefnoEnum,
+    pub old: Option<PanelBounds>,
+    pub new: Option<PanelBounds>,
+}
+
+/// 反向传播的输入（ADR-073 D13 反查，2026-09-17）：这一次换代面板那一侧**到底动了哪几块、盒在哪**。
+///
+/// 只在 [`ResidentRooms::install`] 里对着被换下的那一代算——两代同时在手的唯一时刻；随
+/// [`RoomReferenceRefresh::Rebuilt::panels`] 交给任务执行体。与 [`TopologyDiff`] 的分工：拓扑差只看
+/// 「房间 → 面板」的归属，这里在它之上**补几何**——同一块在册面板 `world_aabb` 或实例集变了（PANE 只动几何、
+/// 不动归属时拓扑差是空的，而它名下别的根的成员边正是这时候陈旧），并给每一块带上反查要用的盒。
+/// 三类各自的处置（D13 反查）：`removed` 清边不查空间、`renumbered` 改列不查空间、`recalc` 拿旧盒 ∪ 新盒
+/// 去反查命中的根再逐根重算。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PanelDelta {
+    /// 不在册了（`TopologyDiff::removed_panels`）：清它全部出边与 `room_panel_relate` 入边。
+    pub removed: Vec<RefnoEnum>,
+    /// 只改房间号（`TopologyDiff::renumbered_rooms`）：交集里的面板改列。
+    pub renumbered: Vec<RoomRenumber>,
+    /// 新在册 / 换了房（`TopologyDiff::recalc_panels`）以及两边都在册但几何变了的，按面板 refno 序。
+    pub recalc: Vec<PanelMove>,
+    /// `recalc` 里有几个是**只**因几何变了进来的（拓扑差没点到）；给日志 / 回执看。
+    pub geometry_changed: usize,
+}
+
+/// 同一块面板两代的几何是否相同：世界盒按位相同、实例集（`geo_hash` + 世界矩阵按位）作为多重集相同。
+fn same_panel_geometry(before: &ResidentPanel, after: &ResidentPanel) -> bool {
+    if PanelBounds::from_aabb(&before.world_aabb) != PanelBounds::from_aabb(&after.world_aabb)
+        || before.insts.len() != after.insts.len()
+    {
+        return false;
+    }
+    let key = |inst: &ResidentInst| {
+        (
+            inst.geo_hash.clone(),
+            inst.matrix.to_cols_array().map(f32::to_bits),
+        )
+    };
+    let mut a: Vec<_> = before.insts.iter().map(key).collect();
+    let mut b: Vec<_> = after.insts.iter().map(key).collect();
+    a.sort();
+    b.sort();
+    a == b
+}
+
+impl PanelDelta {
+    /// 对着被换下的那一代算。`diff` 是同两代的 [`TopologyDiff`]（调用方已算好，不再算第二遍）。
+    pub(crate) fn between(
+        old: &ResidentRoomModel,
+        new: &ResidentRoomModel,
+        diff: &TopologyDiff,
+    ) -> Self {
+        let bounds = |model: &ResidentRoomModel, panel: RefnoEnum| {
+            model
+                .panels
+                .get(&panel)
+                .map(|resident| PanelBounds::from_aabb(&resident.world_aabb))
+        };
+        let mut delta = Self {
+            removed: diff.removed_panels.iter().copied().collect(),
+            renumbered: diff.renumbered_rooms.clone(),
+            recalc: Vec::new(),
+            geometry_changed: 0,
+        };
+        for panel in &diff.recalc_panels {
+            delta.recalc.push(PanelMove {
+                panel: *panel,
+                old: bounds(old, *panel),
+                new: bounds(new, *panel),
+            });
+        }
+        // 几何变了的在册面板：两边都在册（新在册的已在 `recalc_panels` 里）、拓扑差没点到，但新代里它的几何
+        // 与旧代不同——包括旧代里没几何（保护集）而新代有了的。反过来（旧代有、新代没了）不进：新代里它在
+        // 保护集，边不动、也算不出。
+        for (panel, after) in &new.panels {
+            if diff.recalc_panels.contains(panel) || diff.removed_panels.contains(panel) {
+                continue;
+            }
+            let before = old.panels.get(panel);
+            if before.is_some_and(|before| same_panel_geometry(before, after)) {
+                continue;
+            }
+            delta.geometry_changed += 1;
+            delta.recalc.push(PanelMove {
+                panel: *panel,
+                old: before.map(|before| PanelBounds::from_aabb(&before.world_aabb)),
+                new: Some(PanelBounds::from_aabb(&after.world_aabb)),
+            });
+        }
+        delta.recalc.sort_by_key(|entry| entry.panel);
+        delta.recalc.dedup_by_key(|entry| entry.panel);
+        delta
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.renumbered.is_empty() && self.recalc.is_empty()
+    }
+
+    /// 反查要拿去查空间的盒：`recalc` 的旧盒 ∪ 新盒（`removed` 不进——它的边按面板清，不用问谁在里面）。
+    pub(crate) fn query_boxes(&self) -> Vec<Aabb> {
+        self.recalc
+            .iter()
+            .flat_map(|entry| [entry.old, entry.new])
+            .flatten()
+            .map(|bounds| bounds.aabb())
+            .collect()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "removed={} renumbered_rooms={} recalc={} (geometry_only {})",
+            self.removed.len(),
+            self.renumbered.len(),
+            self.recalc.len(),
+            self.geometry_changed
+        )
+    }
+}
+
 /// 建不起来：整份失败，不产半份模型（原则 2）。`/health` 与启动日志按它点名。
 #[derive(Debug)]
 pub(crate) struct ResidentBuildError {
@@ -1342,10 +1503,12 @@ struct Generations {
     previous: Option<Arc<ResidentRoomModel>>,
 }
 
-/// 一次换代的结果：装进去的那份，以及与上一代的拓扑差（第一代没有上一代 → `None`）。
+/// 一次换代的结果：装进去的那份，以及与上一代的拓扑差与面板变化（第一代没有上一代 → 都是 `None`）。
 pub(crate) struct InstallOutcome {
     pub model: Arc<ResidentRoomModel>,
     pub diff: Option<TopologyDiff>,
+    /// 反向传播的输入（[`PanelDelta`]）：与 `diff` 同两代、同一次算出。
+    pub panels: Option<PanelDelta>,
 }
 
 /// 进程内的两路模型，各留当前 + 上一代（diff 只需两份，工程默认②）。
@@ -1390,18 +1553,27 @@ impl ResidentRooms {
             .is_some_and(|model| model.manifest == *manifest)
     }
 
-    /// 整份换代：新的进当前、当前退上一代、再往前的丢掉。返回与上一代的拓扑差。
+    /// 整份换代：新的进当前、当前退上一代、再往前的丢掉。返回与上一代的拓扑差与面板变化
+    /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）。
     pub(crate) fn install(&mut self, model: ResidentRoomModel) -> InstallOutcome {
         let model = Arc::new(model);
         let slot = self.slot_mut(model.manifest.form);
-        let diff = slot
-            .current
-            .as_ref()
-            .map(|old| TopologyDiff::between(&old.map, &model.map));
+        let (diff, panels) = match slot.current.as_ref() {
+            Some(old) => {
+                let diff = TopologyDiff::between(&old.map, &model.map);
+                let panels = PanelDelta::between(old, &model, &diff);
+                (Some(diff), Some(panels))
+            }
+            None => (None, None),
+        };
         slot.previous = slot.current.take();
         slot.current = Some(model.clone());
         self.prune_meshes();
-        InstallOutcome { model, diff }
+        InstallOutcome {
+            model,
+            diff,
+            panels,
+        }
     }
 
     fn prune_meshes(&self) {
@@ -1658,6 +1830,8 @@ pub(crate) struct StartupInitOutcome {
     /// （第一代 / 此前没建成 = `None`）。任务开工前对齐（[`refresh_before_task`]）拿它写日志与换代
     /// 回执，不再对着同两份视图再算一遍（审核 P3-7）。
     pub diff: Option<TopologyDiff>,
+    /// 与 `diff` 同两代算出的面板变化（[`PanelDelta`]，反向传播的输入）；同样原样带出。
+    pub panels: Option<PanelDelta>,
     pub elapsed_ms: u128,
 }
 
@@ -1802,7 +1976,11 @@ async fn initialize_file_backed_at_startup(
     let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
-    let InstallOutcome { model, diff } = resident_rooms()
+    let InstallOutcome {
+        model,
+        diff,
+        panels,
+    } = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
         .install(model);
@@ -1813,6 +1991,7 @@ async fn initialize_file_backed_at_startup(
         advance_warning: None,
         model,
         diff,
+        panels,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
@@ -1835,7 +2014,11 @@ async fn initialize_latest_at_startup(
     let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
-    let InstallOutcome { model, diff } = resident_rooms()
+    let InstallOutcome {
+        model,
+        diff,
+        panels,
+    } = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
         .install(model);
@@ -1846,6 +2029,7 @@ async fn initialize_latest_at_startup(
         advance_warning: None,
         model,
         diff,
+        panels,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
@@ -2180,8 +2364,13 @@ pub(crate) enum RoomReferenceRefresh {
         previous_key: Option<String>,
         key: String,
         generation_changed: bool,
+        /// 被换下的那一代的计算输入摘要（`input_version`）；此前没建成时为 `None`。反向传播的准入拿它对
+        /// 库上 `model_room_generation`：相等 = 库上的边对齐到上一代，这一次换代的面板变化就是全部欠账。
+        previous_generation: Option<String>,
         /// 与上一份的在册视图之差（`TopologyDiff::summary`）；此前没建成时为 `None`。
         diff: Option<String>,
+        /// 与上一份相比面板那一侧动了哪几块、盒在哪（[`PanelDelta`]，反向传播的输入）；此前没建成时为 `None`。
+        panels: Option<PanelDelta>,
         elapsed_ms: u128,
     },
     /// 重建没成：手上有旧的就留着继续算、`Degraded` 记一条 `stage=refresh` 缺口；没有旧的仍 `Blocked`。
@@ -2224,6 +2413,7 @@ impl RoomReferenceRefresh {
                 generation_changed,
                 diff,
                 elapsed_ms,
+                ..
             } => Some(format!(
                 "[房间参照] 文件版本变了，常驻房间模型按文件重建：{} → {}，计算输入{}，{}耗时 {elapsed_ms}ms",
                 previous_key
@@ -2437,6 +2627,7 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
             // 在册视图之差用 `install()` 顺手算的那一份（对着被换下的那一代算的——与 `installed` 是同一份：
             // 本函数持 `refresh_lock`，启动段的 `Loading` 在入口已挡开），不再对同两份视图算第二遍（P3-7）。
             let diff = outcome.diff;
+            let panels = outcome.panels;
             set_lifecycle(lifecycle_for(&outcome.model));
             record_generation_swap(GenerationSwapReport {
                 form: outcome.form.as_str().to_string(),
@@ -2456,7 +2647,9 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
                 previous_key: installed.map(|model| model.manifest.key.clone()),
                 key: outcome.model.manifest.key.clone(),
                 generation_changed: previous_generation.as_deref() != Some(generation.as_str()),
+                previous_generation,
                 diff: diff.map(|diff| diff.summary()),
+                panels,
                 elapsed_ms: started.elapsed().as_millis(),
             }
         }
@@ -3560,6 +3753,89 @@ mod tests {
         assert_eq!(rooms.stats().len(), 2);
     }
 
+    /// 反向传播的输入（ADR-073 D13 反查，D1）：`install()` 对着被换下的那一代给出 [`PanelDelta`]——拓扑差点到的
+    /// 三类原样分格，再补上**只动几何**的在册面板（拓扑差是空的、盒却变了，含旧代没几何新代有了的）；
+    /// `removed` 不带盒、`recalc` 带旧盒 ∪ 新盒（`query_boxes`），几何没变的面板一块都不进；第一代没有上一代。
+    #[test]
+    fn install_reports_which_panels_moved_and_where_their_boxes_are() {
+        let mut rooms = ResidentRooms::default();
+        // 第一代：R301(7, 8) / R302(9)；7 与 9 有几何，8 在册没几何（保护集）。
+        let first = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert!(first.panels.is_none(), "第一代没有上一代");
+
+        // 第二代：拓扑一字不动；7 挪了位置、9 原样、8 有了几何。
+        let second = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 5.0, (5.0, 6.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+                inst(8, "box", 0.0, (20.0, 21.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert!(
+            second.diff.as_ref().is_some_and(TopologyDiff::is_empty),
+            "只动几何：拓扑差是空的"
+        );
+        let delta = second.panels.expect("换代给出面板变化");
+        assert!(delta.removed.is_empty() && delta.renumbered.is_empty());
+        assert_eq!(
+            delta
+                .recalc
+                .iter()
+                .map(|entry| entry.panel)
+                .collect::<Vec<_>>(),
+            vec![r(7), r(8)],
+            "挪了的与新有几何的进 recalc，原样的 9 不进: {delta:?}"
+        );
+        assert_eq!(delta.geometry_changed, 2);
+        let moved = &delta.recalc[0];
+        assert_eq!(moved.old, Some(PanelBounds([[0.0; 3], [1.0; 3]])));
+        assert_eq!(moved.new, Some(PanelBounds([[5.0; 3], [6.0; 3]])));
+        let gained = &delta.recalc[1];
+        assert_eq!(gained.old, None, "旧代里没几何：没有旧盒可查");
+        assert_eq!(gained.new, Some(PanelBounds([[20.0; 3], [21.0; 3]])));
+        assert_eq!(delta.query_boxes().len(), 3, "旧盒 ∪ 新盒");
+        assert_eq!(
+            delta.summary(),
+            "removed=0 renumbered_rooms=0 recalc=2 (geometry_only 2)"
+        );
+
+        // 第三代：R301 改号成 R309（7、8 改列）、R302 改出关键字（9 不在册了）；几何都没动。
+        let renamed = vec![
+            group(5, "/1RX-RM03-R309", &[7, 8]),
+            group(6, "/1RX-STRU-R302", &[9]),
+        ];
+        let third = rooms.install(ResidentRoomModel::assemble(
+            manifest(ResidentForm::Published, "m3"),
+            renamed.clone(),
+            registered_map(&renamed, &keywords(), match_room_name_hd),
+            vec![
+                inst(7, "box", 5.0, (5.0, 6.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+                inst(8, "box", 0.0, (20.0, 21.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        let delta = third.panels.expect("换代给出面板变化");
+        assert_eq!(delta.removed, vec![r(9)]);
+        assert_eq!(delta.renumbered.len(), 1);
+        assert_eq!(delta.renumbered[0].panels, vec![r(7), r(8)]);
+        assert!(
+            delta.recalc.is_empty() && delta.geometry_changed == 0,
+            "几何没动、拓扑差只有改号与移出：不反查: {delta:?}"
+        );
+        assert!(delta.query_boxes().is_empty(), "removed 不带盒");
+        assert!(!delta.is_empty());
+    }
+
     /// 预热按缓存键去重；`.mesh` 读不出的面板搬进保护集、不阻代（ADR-073 D9）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn eager_mesh_warm_deduplicates_keys_and_demotes_a_panel_whose_mesh_is_missing() {
@@ -3947,9 +4223,14 @@ mod tests {
             "async fn initialize_latest_at_startup(",
         ] {
             let body = function_body(source, installer);
+            let destructures = body.contains("let InstallOutcome { model, diff, panels } =")
+                || body.contains("let InstallOutcome {\n        model,\n        diff,\n        panels,\n    } =")
+                || body.contains(
+                    "let InstallOutcome {\r\n        model,\r\n        diff,\r\n        panels,\r\n    } =",
+                );
             assert!(
-                body.contains("let InstallOutcome { model, diff } =") && body.contains("diff,"),
-                "{installer} 要把 install() 的 diff 接进回执，不许 `.model` 丢掉: {body}"
+                destructures && body.contains("diff,") && body.contains("panels,"),
+                "{installer} 要把 install() 的 diff 与 panels 接进回执，不许 `.model` 丢掉: {body}"
             );
         }
         assert_eq!(
@@ -4793,6 +5074,7 @@ mod tests {
             advance_warning: None,
             model: Arc::clone(&model),
             diff: None,
+            panels: None,
             elapsed_ms: 8000,
         };
         let line = outcome.summary();
@@ -4819,6 +5101,7 @@ mod tests {
             advance_warning: Some("清单前进跳过：存在未完成的文件发布".into()),
             model: Arc::clone(&model),
             diff: None,
+            panels: None,
             elapsed_ms: 12,
         };
         let line = warned.summary();
@@ -4834,6 +5117,7 @@ mod tests {
             advance_warning: None,
             model,
             diff: None,
+            panels: None,
             elapsed_ms: 7400,
         };
         let line = latest.summary();
