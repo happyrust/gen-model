@@ -929,6 +929,7 @@ mod tests {
             geometry_count: 0,
             model_target: None,
             published_via: "regen".into(),
+            room: None,
         }
     }
 
@@ -1110,6 +1111,7 @@ mod tests {
             manifest_hash: "placeholder".into(),
             geometry_count: 99,
             published_via: "unit".into(),
+            room: None,
         };
         controller
             .publish_commits(vec![ProjectionCommit {

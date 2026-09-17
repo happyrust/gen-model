@@ -114,6 +114,7 @@ mod tests {
                     manifest_hash: "empty".into(),
                     geometry_count: 0,
                     published_via: "e3d-model".into(),
+                    room: None,
                 },
             )),
             ..Default::default()

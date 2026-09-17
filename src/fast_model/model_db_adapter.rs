@@ -3021,6 +3021,7 @@ mod tests {
                 manifest_hash: format!("test-{geometry_count}"),
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         )
     }
@@ -3762,6 +3763,7 @@ mod tests {
             manifest_hash: "abc123".into(),
             geometry_count: 2,
             published_via: "regen".into(),
+            room: None,
         }
     }
 

@@ -1776,6 +1776,7 @@ impl E3dModelService {
                         manifest_hash: manifest_digest,
                         geometry_count,
                         published_via: "transform".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -2251,7 +2252,8 @@ impl E3dModelService {
             // cross-database dependencies that were not in watermark pins.
             publication.model_target =
                 Some(self.model_target(dbnum, source_sesno, dependency_sessions)?);
-            let (commit, mut projected) = project_geometry_delta(
+            let carried_room = snapshot.room;
+            let (mut commit, mut projected) = project_geometry_delta(
                 dbnum,
                 source_sesno,
                 snapshot.elements,
@@ -2259,6 +2261,11 @@ impl E3dModelService {
                 Some(&publication),
                 &index.owners,
             )?;
+            // bake 时算好的房间边随这一根的回执走（B/T3）：只有整根重生成这一条路带；清单没变、几何一条不重写的
+            // 那种回执也带——边对着同一份构件集，flush 时照样能用。
+            if let Some((_, receipt)) = commit.receipt.as_mut() {
+                receipt.room = carried_room;
+            }
             projected.skipped += root_skipped;
             projected.failed += root_failed;
             commits.push(commit);
@@ -2714,6 +2721,9 @@ pub struct BakedSnapshot {
     pub report: Report,
     /// 随 [`GeneratedSnapshot::visited`] 原样带过来；烤制不改子树。
     pub visited: Vec<RefNo>,
+    /// 这一根随回执走的房间归属边（B/T3，`RootReceipt::room`）：bake 时给了计算器才有；发布段把它挂到
+    /// `project_geometry_delta` 折出来的回执上。
+    pub room: Option<crate::fast_model::model_memory_store::CarriedRoomEdges>,
 }
 
 /// Triangulate, hash and publish one element's mesh.
@@ -2920,10 +2930,31 @@ fn bake_snapshot(
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BakedSnapshot> {
     let elements = bake_elements(snapshot.elements, mesh_dir, rooms)?;
+    // 随根走的那一份边（B/T3）：这一根全部几何的构件（有边没边都在册，flush 时与投影记录比对）+ 各元素的边收拢。
+    let room = match rooms {
+        Some(rooms) => {
+            let members = elements
+                .iter()
+                .map(|element| {
+                    geometry_source_refno(&element.geometry_id)
+                        .map(crate::data_interface::generation_root::refno_from_e3d)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Some(crate::fast_model::room_model::carry_root_edges(
+                rooms.resident_generation(),
+                members,
+                elements
+                    .iter()
+                    .flat_map(|element| element.room_edges.iter().cloned()),
+            ))
+        }
+        None => None,
+    };
     Ok(BakedSnapshot {
         elements,
         report: snapshot.report,
         visited: snapshot.visited,
+        room,
     })
 }
 
@@ -3109,6 +3140,7 @@ pub(crate) fn republish_roots_by_unit_delta_on(
                     manifest_hash: String::new(),
                     geometry_count: 0,
                     published_via: "unit".into(),
+                    room: None,
                 },
             )),
             scope: CommitScope::Partial,
@@ -3158,6 +3190,7 @@ fn cached_root_commit(
                 manifest_hash: published.manifest_hash.clone(),
                 geometry_count: published.geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         )),
         ..ProjectionCommit::default()
@@ -3332,6 +3365,7 @@ fn project_geometry_delta(
                 manifest_hash,
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
     }
@@ -4072,6 +4106,72 @@ mod tests {
         }
     }
 
+    /// 源码钉（B/T3）：随回执走的边只有**整根重生成**这一条路带——`bake_snapshot` 用那台计算器的代号把这一根全部
+    /// 构件与收拢后的边装成 `BakedSnapshot::room`，`persist_memory_batch` 把它挂到 `project_geometry_delta` 折出来的
+    /// 回执上；刚体前移（`published_via = "transform"`）与单元级局部发布（`"unit"`）的回执 `room: None`——它们没有整根
+    /// 的边，flush 时现算（Q5 兜底）。
+    #[test]
+    fn carried_room_edges_ride_only_on_the_regen_receipt() {
+        let source = include_str!("e3d_model_service.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .or_else(|| {
+                include_str!("e3d_model_service.rs").split_once("\r\n#[cfg(test)]\r\nmod tests {")
+            })
+            .expect("production code precedes the inline test module")
+            .0;
+        fn function_body<'a>(source: &'a str, start: &str) -> &'a str {
+            let body = source.split_once(start).expect("函数头").1;
+            let end = body
+                .find("\n}\r\n")
+                .or_else(|| body.find("\n}\n"))
+                .expect("函数总有结尾");
+            &body[..end]
+        }
+        let bake = function_body(source, "fn bake_snapshot(");
+        assert!(
+            bake.contains("carry_root_edges(")
+                && bake.contains("rooms.resident_generation(),")
+                && bake.contains("geometry_source_refno(&element.geometry_id)"),
+            "bake_snapshot 用那台计算器的代号、这一根全部构件装随根的边: {bake}"
+        );
+        let consumer = source
+            .split_once("pub async fn persist_memory_batch(")
+            .expect("整根重生成的发布段")
+            .1;
+        let attach = consumer
+            .find("receipt.room = carried_room;")
+            .expect("挂到回执上");
+        let project = consumer
+            .find("project_geometry_delta(")
+            .expect("折投影记录");
+        assert!(project < attach, "先折回执再挂边");
+        assert!(
+            consumer[..attach].contains("let carried_room = snapshot.room;"),
+            "边从 BakedSnapshot 上取"
+        );
+        // 刚体前移与单元级发布的回执不带边。
+        for (path, marker) in [
+            ("刚体前移", "published_via: \"transform\".into(),"),
+            ("单元级发布", "published_via: \"unit\".into(),"),
+        ] {
+            let at = source
+                .find(marker)
+                .unwrap_or_else(|| panic!("{path} 的回执"));
+            let after = &source[at + marker.len()..];
+            let next = after.trim_start();
+            assert!(
+                next.starts_with("room: None,"),
+                "{path} 的回执 room 必须是 None（没有整根的边，flush 现算）: {}",
+                &after[..after.len().min(80)]
+            );
+        }
+        assert_eq!(
+            source.matches("receipt.room = carried_room;").count(),
+            1,
+            "只有整根重生成这一处挂边"
+        );
+    }
+
     /// 源码钉（B/T2）：bake 时的房间判定只走 `edges_for_record` + `world_points_of(&mesh, …)`——取点的是手上
     /// **就要写盘的那份网格**，不是为算盒子折出来的 `world_mesh`（f64 → 与盘上回读差几个 ulp，会让贴面板边
     /// 的点翻面）；输入配方只有 `baked_room_input` 一处，且与 `project_geometry_delta` 折投影记录用的
@@ -4429,6 +4529,7 @@ mod tests {
                 manifest_hash: manifest,
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
         store.commit(ProjectionScope::Current, vec![commit]);
@@ -4461,6 +4562,7 @@ mod tests {
                         manifest_hash: "counts-do-not-match".into(),
                         geometry_count: 99,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -4778,6 +4880,7 @@ mod tests {
                 manifest_hash: manifest,
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
         store.commit(ProjectionScope::Current, vec![seed]);
@@ -5134,6 +5237,7 @@ mod tests {
                 manifest_hash: seed_hash,
                 geometry_count: seed_geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
         store.commit(ProjectionScope::Current, vec![seed]);
@@ -5329,6 +5433,7 @@ mod tests {
                 manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
                 geometry_count: 0,
                 published_via: "regen".into(),
+                room: None,
             }),
             projection_complete: true,
         };
@@ -5366,6 +5471,7 @@ mod tests {
                 manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
                 geometry_count: 0,
                 published_via: "regen".into(),
+                room: None,
             }),
             projection_complete: false,
         };
@@ -5410,6 +5516,7 @@ mod tests {
                 manifest_hash: "manifest".into(),
                 geometry_count: 3,
                 published_via: "regen".into(),
+                room: None,
             }),
             projection_complete: true,
         };
@@ -5445,6 +5552,7 @@ mod tests {
             manifest_hash: "manifest".into(),
             geometry_count: 0,
             published_via: "regen".into(),
+            room: None,
         });
         assert!(
             !cached_root_target_matches(&publication, 42),
@@ -5468,7 +5576,7 @@ mod tests {
             root: RefNo::new(24384, 1), model_target: Some(target.clone()),
             published: Some(RootReceipt {
                 source_sesno: 459, model_target: Some(target.clone()),
-                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(),
+                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(), room: None,
             }), projection_complete: true,
         };
         assert!(cached_root_target_matches(&publication, 459));
@@ -5876,6 +5984,7 @@ mod tests {
                 .collect(),
             report: Report::default(),
             visited: Vec::new(),
+            room: None,
         }
     }
 

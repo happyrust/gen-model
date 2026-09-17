@@ -2147,6 +2147,66 @@ mod memory_calculation_tests {
         );
     }
 
+    /// B/T3：随回执走的边是 `ElementRoomEdge` 的 wire 形，来回逐字不变；`carry_root_edges` 把这一根全部构件
+    /// （有边没边都在册、去重、升序）与收拢后的边装成一份；JSON 来回相等；旧回执没有 `room` 一格 → `None`。
+    #[test]
+    fn carried_room_edges_round_trip_and_list_every_element_of_the_root() {
+        use crate::fast_model::model_memory_store::{CarriedRoomEdges, RootReceipt};
+        let edge = |element: u32, panel: u32, inside: u8, dist: f32| ElementRoomEdge {
+            panel: RefnoEnum::from(RefU64::from_two_nums(7000, panel)),
+            room_num: format!("R{panel}"),
+            member: RoomMember {
+                refno: RefnoEnum::from(RefU64::from_two_nums(8000, element)),
+                inside_count: inside,
+                center_dist: dist,
+            },
+        };
+        let a = edge(30, 1, 4, 12.5);
+        assert_eq!(
+            ElementRoomEdge::from_carried(&a.to_carried()),
+            a,
+            "wire 形来回不变"
+        );
+
+        let elements = [8000u32, 8000, 30, 30, 10]
+            .into_iter()
+            .map(|seq| RefnoEnum::from(RefU64::from_two_nums(8000, seq)))
+            .collect::<Vec<_>>();
+        let carried = carry_root_edges(
+            "gen-1",
+            elements,
+            [a.clone(), edge(30, 1, 8, 3.0), edge(10, 2, 2, 9.0)],
+        );
+        assert_eq!(carried.generation, "gen-1");
+        assert_eq!(
+            carried.elements,
+            ["8000_10", "8000_30", "8000_8000"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "全部构件去重升序，没边的 8000_8000 也在册"
+        );
+        assert_eq!(carried.edges.len(), 2, "同 (构件, 面板) 收成一条");
+        let strongest = carried
+            .edges
+            .iter()
+            .find(|e| e.member == "8000_30")
+            .expect("30 的那条");
+        assert_eq!((strongest.inside_count, strongest.center_dist), (8, 3.0));
+
+        let json = serde_json::to_string(&carried).unwrap();
+        let back: CarriedRoomEdges = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, carried, "JSON 来回相等");
+        let old_receipt: RootReceipt = serde_json::from_str(
+            r#"{"source_sesno":12,"model_target":null,"manifest_hash":"m","geometry_count":1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old_receipt.room, None,
+            "旧产物没有 room 一格 → None，flush 走兜底现算"
+        );
+    }
+
     #[test]
     fn memory_projection_calculates_without_database_or_global_tree() {
         let dir = tempfile::tempdir().unwrap();
@@ -2684,6 +2744,52 @@ impl MemoryRoomCalculator {
             }
         }
         Ok(edges.into_values().collect())
+    }
+}
+
+impl ElementRoomEdge {
+    /// 进根回执的 wire 形（[`crate::fast_model::model_memory_store::CarriedRoomEdge`]）。
+    pub(crate) fn to_carried(&self) -> crate::fast_model::model_memory_store::CarriedRoomEdge {
+        crate::fast_model::model_memory_store::CarriedRoomEdge {
+            panel: self.panel.to_string(),
+            room_num: self.room_num.clone(),
+            member: self.member.refno.to_string(),
+            inside_count: self.member.inside_count,
+            center_dist: self.member.center_dist,
+        }
+    }
+
+    /// 从根回执的 wire 形读回。
+    pub(crate) fn from_carried(
+        carried: &crate::fast_model::model_memory_store::CarriedRoomEdge,
+    ) -> Self {
+        Self {
+            panel: RefnoEnum::from(carried.panel.as_str()),
+            room_num: carried.room_num.clone(),
+            member: RoomMember {
+                refno: RefnoEnum::from(carried.member.as_str()),
+                inside_count: carried.inside_count,
+                center_dist: carried.center_dist,
+            },
+        }
+    }
+}
+
+/// 一根在 bake 时算出的边收成随回执走的那一份（B/T3）：`elements` = 这一根**全部**几何的构件（有边没边都算，
+/// 去重、按字串升序——flush 时与投影记录的构件集比对），`edges` = 各元素的边经 [`merge_root_edges`] 收拢。
+pub(crate) fn carry_root_edges(
+    generation: &str,
+    elements: impl IntoIterator<Item = RefnoEnum>,
+    edges: impl IntoIterator<Item = ElementRoomEdge>,
+) -> crate::fast_model::model_memory_store::CarriedRoomEdges {
+    let elements: BTreeSet<String> = elements.into_iter().map(|e| e.to_string()).collect();
+    crate::fast_model::model_memory_store::CarriedRoomEdges {
+        generation: generation.to_string(),
+        elements: elements.into_iter().collect(),
+        edges: merge_root_edges(edges)
+            .iter()
+            .map(ElementRoomEdge::to_carried)
+            .collect(),
     }
 }
 
