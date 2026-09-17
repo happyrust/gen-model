@@ -2,6 +2,24 @@
 
 ## 2026-09-17
 
+### ADR-080「后果」段文档收口：ADR-056 N3 改写 + D3 指向 ADR-080、`model_refresh.rs` 过期注释改口、CONTEXT 补「单元级发布 / 局部清单」
+
+- **为什么**：0917 对 ADR-080 做了一遍「是否已实现」审核——D1–D10 机制全部落地且有测试钉住（HEAD `7298ddba6` `cargo test --lib`
+  **2222 过 0 败 118 ignored**；D10 五条单测单独跑 5 过），但「后果」段列的四条跟进文档三条没动：ADR-056 N3 仍写「模型发布根级原子：
+  一个根一次 CAS 发布」、D3 行末仍「单元级落库另立 ADR」不知道那份 ADR 已经立了；`model_refresh.rs` 的 `apply_window` 注释仍写
+  「`execute_plan` 半边（单元级落库，D3 已否）届时摘除」，与事实相反（它已是生产执行体 `UnitDeltaProducer::produce` 的核心）；
+  `CONTEXT.md` 没有「单元级发布 / 局部清单」词条，读代码注释里的 `Partial` / `UnitDelta` 无处可查。用户 0917 拍：把这四处补齐，以 docs 提交。
+- **改到哪**：ADR-056 状态行补「被 ADR-080 修订」，N3 改写为「原子边界 = 一次发布调用」（原文留在括号里），D3 行追记指向 ADR-080，
+  关联段 ADR-014 那句随 N3 改口；`model_refresh.rs` `apply_window` 文档注释改口（`#[allow(dead_code)]` 与「在那之前不删」不动）；
+  `CONTEXT.md`「模型影响」之后补 **单元级发布 (Unit-Level Publish)**（点明 core 对应物是 `css/SEGREP` 而非 `add/REPELE`），
+  「分支原子替换」之后补 **局部清单 (Partial Manifest)**，并把「分支原子替换」里引 N3 的那句随 N3 改口；ADR-080「后果」段前三条标 ★0917 已落。
+  第四条（面板 / `/health` 按 `published_via` 分档加一列）**没做**——今天连 regen / transform 都没有分档列，`handlers.rs` 只原样透出，等有人要看再加。
+- **审核里还开着的**（同一趟核出来，未动）：D9 开门三道门只过了①（单根对拍）；A5（`Partial` 之后 `persist_root` 不报
+  `outside its receipt scope`）没测试没证据，只有 `batch_worker.rs` 一句注释说 D3 接住了；实施约束 9「关着时逐位等于今天」只有机制没有守卫测试；
+  A6 全语料 / A7 净收益 / D7 Q3 未做；ADR 状态行仍「草案」，D2 / D3 / D7 / D9 等用户逐条过目。
+- **验证**：只改注释与 md；`cargo test --lib -- model_refresh::` 编译过、测试过；行尾各按文件原样（ADR-056 / `model_refresh.rs` LF，
+  CONTEXT / changelog / ADR-080 CRLF）。
+
 ### ADR 改号：单元级发布那份 ADR-078 → **ADR-080**，104 处引用一起换；MDB 闭包那份仍是 ADR-078
 
 - **为什么**：单元级发布的 ADR 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了 MDB 闭包那份（`ADR-078-projects-come-from-the-mdb…`，

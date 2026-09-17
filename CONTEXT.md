@@ -98,6 +98,10 @@ _Avoid_: 斜切、is_sloped、端面方向（当指属性时）
 一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（属性 put → `DESDRA_SCPlugs::PostSetAttribute` → `descases/VDESPT` 按字典 DCHC 类别进 `change/EVALAT`，在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`VDESPT` 就不进 `EVALAT`，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」的两档各要两票：`Skip` = 字典 DCHC=0 **∧** 生成读取集合不含它（`attribute_is_metadata_only`，2026-09-15 S6；之前是效果表 DataOnly ∧ DCHC=0 的五个名字，那张手写表退成报表分类与 `no_model` 的 `metadata_only` / `unread_attribute` 分档依据），`TransformOnly` = 效果表 ∧ DCHC=3。预览（`change_impact` / `model_affecting`）与执行（窗口规划器的元数据门）问同一个谓词。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（§9 为 `putAtt` 入口链与 `VDESPT` 的属性专项规则）。
 _Avoid_: 几何影响、is_geometry_update
 
+**单元级发布 (Unit-Level Publish)**：
+拿到一个要重算的生成根之后，只重建 `plan_update(S→T)` 点名的那几件单元（单元 = 投影里的一条记录，键 `GeometryId`，与 `manifest_hash` 的去重键同一个），以局部清单（`Partial`，见「局部清单」）叠在同一份**根级**回执之下发布，其余记录原地不动（ADR-080）。它是 ADR-056 D3「根级整根重算」的第二个例外（第一个是 ADR-066 刚体前移），三条路的优先序定死为 transform 优先、unit 兜底、整根重算保底；闸（回执 vs 计划基线）/ 管段完整性门 / 设计窗之外的目标变化 / 生产方任一条不成就回退整根 regen，回退永远正确、只是不省。core 的对应物是 `css/SEGREP`（单图元重建）而不是 `add/REPELE`（整件重画）——「模型影响」里 `Regen` 一档在 core 交互路本就分这两级，本词条把我方的 `Regen` 也拆成整根 / 单元两档；选根一个字不改，它只改「拿到一根之后在根内做什么」。只被 `no_model` 候选碰到的根（本窗名下没有一件几何要变）发一份空 `Partial` 只推回执（D10）。开关 `model_unit_level_publish` **默认关**，开门要过两态对拍全绿、全语料、净收益为正三道门（D9）；D10 另要三条级联同开。
+_Avoid_: 局部生成（当指 ADR-066「局部生成、整根 upsert」时）、单元级回执、单元级 CAS（回执与 CAS 仍是根级，ADR-080 D5）、增量发布（泛指时）
+
 **净变化 (Net Change)**：
 一个 `refno` 在整个待更新会话窗口内所有操作合并后的最终结果：`Added / Modified / Deleted / Cancelled`（新增后删除=无净变化）。
 _Avoid_: 合并变化、final op
@@ -291,8 +295,12 @@ _Avoid_: gb 标志（当指语义时）、图形忽略位、XGEOMETRY
 _Avoid_: 生成任务状态、pending 终态、实例计数
 
 **分支原子替换 (Branch-Atomic Replacement)**：
-单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以根级 CAS 发布的形态成立（ADR-056 N3）：一个根一次发布，`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。
+单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以 CAS 发布的形态成立（ADR-056 N3，★0917 按 ADR-080 D4 改口）：原子边界是**一次发布调用**——一批提交一次落地，可混整根与局部（见「局部清单」）、可跨多根；`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。触到某条 BRAN 管身的局部提交按整段重写，计划必须带齐该 BRAN 在 T 端的全部管段才发（ADR-080 D6）。
 _Avoid_: 生成根快照事务、先删后补
+
+**局部清单 (Partial Manifest)**：
+一次模型提交里 `CommitScope::Partial` 的那一档：`upserts` 只点名这根里重建过的那几件，缺席**什么也不证明**，要删什么必须显式写进 `removals`（合法来源只有三处：`plan_update.remove` 的单元、重建时画不出 / 画失败而被擦掉的单元、派生容器 base 端的旧管段键；回溯不到就回退）。与之相对的 `WholeRoot`（默认档，今天所有整根提交）是「`upserts` 是这根的全集，缺席 = 删除」——拿缺席推删除在生产代码里只许有 `whole_root_removals` 一处。局部提交之后没动的记录停在旧会话上、回执前移到 T，所以记录对回执的对账是 `record.source_sesno <= receipt.source_sesno`（ADR-080 D3；比回执新的记录仍是错）；整根 `manifest_hash` / `geometry_count` 由存储在写锁里按提交后的全部记录重算盖章（D5，调用方填的只是占位）。触到某条 BRAN 的管身按整段重写（`tube_branch_resets`），账上的段数 == 带上的段数才发（D6）。空清单只许来自规划器点了名的 `no_model_only` 根（D10），别的根回出空清单是生产方的 bug、回退不发。
+_Avoid_: 部分清单、增量清单、把 `Partial` 当成未完成写入（那是写入标记的事，见「未完成写入重初始化」）、把缺席当删除
 
 **合批重生成 (Batched Root Regeneration)**：
 一次生成调用同时承载多个生成根的重算方式，与「逐根重生成」相对。整批同成同败；批失败后回退逐根，以定位真正坏掉的那个根。

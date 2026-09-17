@@ -383,12 +383,16 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
 ## 后果
 
 - ADR-056 **N3 改写**为「一次发布调用是一个原子边界」（D4）；D3 从「根级整根重算」降为「默认档」，
-  例外现在有两个：ADR-066（刚体前移）与本文（单元级）。
+  例外现在有两个：ADR-066（刚体前移）与本文（单元级）。★0917 已落（会话 fable-5-1-18）：ADR-056 状态行补「被 ADR-080 修订」、
+  N3 改写（原文留在括号里）、D3 行末追记指向本文、关联段 ADR-014 那句随 N3 改口。
 - `e3d-model` 的 `execute_plan` **从「可执行规格」转正为生产执行体**；`model_refresh.rs`
-  「`execute_plan` 半边（单元级落库，D3 已否）届时摘除」那句注释作废，改引本 ADR。
+  「`execute_plan` 半边（单元级落库，D3 已否）届时摘除」那句注释作废，改引本 ADR。★0917 已落：`apply_window` 的文档注释改口，
+  `#[allow(dead_code)]` 与「在那之前不删」不动。
 - `CONTEXT.md`「模型影响」与「模型发布」两处补词条：`单元级发布 (Unit-Level Publish)`、
-  `局部清单 (Partial Manifest)`，并点明与 core `SEGREP` 的对应。
-- `RootReceipt.published_via` 出现第三个取值 `"unit"`；面板与 `/health` 的分档要跟着加一列。
+  `局部清单 (Partial Manifest)`，并点明与 core `SEGREP` 的对应。★0917 已落：`单元级发布` 紧跟「模型影响」之后（core 对应物
+  `css/SEGREP` 而非 `add/REPELE`），`局部清单` 紧跟「分支原子替换」之后（那条里引 N3 的一句随 N3 改口）。
+- `RootReceipt.published_via` 出现第三个取值 `"unit"`；面板与 `/health` 的分档要跟着加一列。（★0917 未做：今天 regen / transform
+  也没有分档列，`handlers.rs` 只原样透出 `published_via`；等有人要看再加，不算本 ADR 落地的前置。）
 - S7 的结论段与计划 §8 **Q4 收口**：按「真·重算」口径 86.5% > 70%，故立本 ADR。
   引用那个数**必须带口径**，只写一个数必被后人读反。
 
