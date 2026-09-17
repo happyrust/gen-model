@@ -3794,6 +3794,163 @@ mod tests {
         );
     }
 
+    /// 源码钉（审核 P3-8）：开工前对齐**不许在空间串行锁里调**。`refresh_before_task` 的装载走
+    /// `initialize_file_backed_at_startup`，那里取 `spatial_state::lock_spatial_serial()` 整份替换，而那是一把
+    /// tokio Mutex、不可重入——持着它调开工前对齐 = 自锁，不报错、任务永远收不了尾。钉法：全仓生产代码
+    /// （每个文件到第一个内联 `#[cfg(test)] mod … {` 为止）里每一处 `refresh_before_task()` /
+    /// `refresh_room_reference_before_task(` 的调用，所在函数体全文不含 `lock_spatial_serial(`；调用点就是已知的
+    /// 五处（适配层转手、两个执行体、初始化模型半边、ensure 准入），新调用点先确认不在锁内再进这张表；
+    /// 装载器那一处持锁照旧在——它是这条规矩的由来。
+    #[test]
+    fn the_task_start_refresh_is_never_called_under_the_spatial_serial_lock() {
+        /// 递归遍历 `dir` 下的所有 `.rs` 文件，交给 `visit` 看路径与全文。
+        fn each_rs_file(dir: &std::path::Path, visit: &mut impl FnMut(&std::path::Path, &str)) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|error| panic!("读取目录 {} 失败: {error}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("目录项不可读").path();
+                if path.is_dir() {
+                    each_rs_file(&path, visit);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("读取 {} 失败: {error}", path.display()));
+                    visit(&path, &text);
+                }
+            }
+        }
+        /// 生产代码段：到第一个 `#[cfg(test)]` 紧跟内联 `mod xxx {` 为止；外置的 `#[cfg(test)] mod xxx;`
+        /// 只是声明，不截（`data_interface/mod.rs` 那种后面还有生产代码）。
+        fn production_part(text: &str) -> &str {
+            const ATTRIBUTE: &str = "#[cfg(test)]";
+            let mut from = 0;
+            while let Some(found) = text[from..].find(ATTRIBUTE) {
+                let at = from + found;
+                let line = text[at + ATTRIBUTE.len()..]
+                    .trim_start()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                let line = line
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| line.strip_prefix("pub "))
+                    .unwrap_or(line);
+                if line.starts_with("mod ") && line.ends_with('{') {
+                    return &text[..at];
+                }
+                from = at + ATTRIBUTE.len();
+            }
+            text
+        }
+        /// 调用点所在的函数：往前找最近一行以 `[pub[(crate)]] [async] fn` 开头的函数头，函数体到与函数头
+        /// 同缩进的 `}` 为止（LF / CRLF 都认）。
+        fn enclosing_fn(production: &str, call_at: usize) -> (String, &str) {
+            let mut header = None;
+            let mut offset = 0;
+            for line in production[..call_at].split_inclusive('\n') {
+                let trimmed = line.trim_start();
+                let indent = line.len() - trimmed.len();
+                let signature = trimmed
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| trimmed.strip_prefix("pub(super) "))
+                    .or_else(|| trimmed.strip_prefix("pub "))
+                    .unwrap_or(trimmed);
+                let signature = ["const ", "async ", "unsafe "]
+                    .iter()
+                    .fold(signature, |s, prefix| s.strip_prefix(prefix).unwrap_or(s));
+                if let Some(rest) = signature.strip_prefix("fn ") {
+                    let name = rest
+                        .split(|c: char| c == '(' || c == '<')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    header = Some((offset, indent, name));
+                }
+                offset += line.len();
+            }
+            let (start, indent, name) = header.expect("调用点总在某个函数里");
+            let closing = format!("\n{}}}", " ".repeat(indent));
+            let body = &production[start..];
+            let mut from = 0;
+            let end = loop {
+                let found = body[from..]
+                    .find(&closing)
+                    .unwrap_or_else(|| panic!("函数 {name} 总有结尾"));
+                let at = from + found + closing.len();
+                match body.as_bytes().get(at) {
+                    None | Some(b'\r') | Some(b'\n') => break at,
+                    _ => from = at,
+                }
+            };
+            (name, &body[..end])
+        }
+
+        let src_root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut sites = Vec::new();
+        each_rs_file(&src_root, &mut |path, text| {
+            let production = production_part(text);
+            let file = path
+                .strip_prefix(&src_root)
+                .expect("src 之下")
+                .to_string_lossy()
+                .replace('\\', "/");
+            for call in [
+                "refresh_before_task()",
+                "refresh_room_reference_before_task(",
+            ] {
+                for (at, _) in production.match_indices(call) {
+                    let line_start = production[..at].rfind('\n').map_or(0, |i| i + 1);
+                    let line = production[line_start..].trim_start();
+                    if line.starts_with("//") || production[..at].ends_with("fn ") {
+                        continue; // 注释里的提及、函数定义本身
+                    }
+                    let (name, body) = enclosing_fn(production, at);
+                    assert!(
+                        !body.contains("lock_spatial_serial("),
+                        "{file}::{name} 持着空间串行锁调开工前对齐 = 自锁（装载在 lock_spatial_serial 里整份替换，\
+                         tokio Mutex 不可重入）: {body}"
+                    );
+                    let site = format!("{file}::{name}");
+                    if !sites.contains(&site) {
+                        sites.push(site);
+                    }
+                }
+            }
+        });
+        sites.sort();
+        assert_eq!(
+            sites,
+            [
+                "data_interface/batch_worker.rs::execute_frozen_batch_body",
+                "data_interface/batch_worker.rs::execute_model_only_body",
+                "data_interface/dbnum_initialize.rs::model_half_inner",
+                "data_interface/model_dbnum_ensure.rs::start_with_purpose",
+                "fast_model/model_db_adapter.rs::refresh_room_reference_before_task",
+            ],
+            "开工前对齐的生产调用点变了：新调用点先确认它（与它的调用方）不在 lock_spatial_serial 之内，再进这张表"
+        );
+
+        // 规矩的由来：装载器持锁照旧在，`refresh_before_task` 确实经它装载。
+        let own = production_part(include_str!("room_resident.rs"));
+        let refresh_at = own
+            .find("pub(crate) async fn refresh_before_task(")
+            .expect("开工前对齐");
+        let (_, refresh) = enclosing_fn(own, refresh_at + "pub(crate) async fn ".len());
+        assert!(
+            refresh.contains("initialize_file_backed_at_startup(")
+                && !refresh.contains("lock_spatial_serial("),
+            "开工前对齐经装载器换代、自己不持锁: {refresh}"
+        );
+        let installer_at = own
+            .find("async fn initialize_file_backed_at_startup(")
+            .expect("装载器");
+        let (_, installer) = enclosing_fn(own, installer_at + "async fn ".len());
+        assert!(
+            installer.contains("lock_spatial_serial().await"),
+            "装载器在空间串行锁里整份替换——这条规矩因它而立: {installer}"
+        );
+    }
+
     /// 参照行只动 `resident_reference` 一格：空间凭据原样，`room_model` 那种按字段投影的读法
     /// 不受影响；读回来逐字相等。
     #[tokio::test]

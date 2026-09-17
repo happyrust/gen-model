@@ -150,6 +150,26 @@
 - **验证**：`cargo test --lib -- room_resident::` **29 passed / 0 failed / 9 ignored**；rustfmt 本轮新增行无 diff（该文件 100 / 958 / 1249
   三处漂移为既有）。
 
+### 开工前对齐不许在空间串行锁里调——源码钉（审核 P3-8）
+
+- **为什么**：`room_resident::refresh_before_task` 换代走 `initialize_file_backed_at_startup`，那里取 `spatial_state::lock_spatial_serial()`
+  整份替换在册视图；而那是一把 tokio Mutex、不可重入——任何持着它的调用方再调开工前对齐就是自锁：不报错、不 panic，那个任务永远
+  收不了尾。今天五处调用点（适配层转手、两个执行体、初始化模型半边、ensure 准入）都在锁外，但这条规矩只活在人脑里，D12 再接一处
+  新调用点时没有东西挡。
+- **改动**：生产代码不动，只加源码钉 `room_resident::tests::the_task_start_refresh_is_never_called_under_the_spatial_serial_lock`：
+  扫全仓 `src/**/*.rs` 的生产段（每个文件到第一个内联 `#[cfg(test)] mod … {` 为止），每一处 `refresh_before_task()` /
+  `refresh_room_reference_before_task(` 的调用，所在函数体全文不含 `lock_spatial_serial(`；调用点清单钉成五处的表
+  （`batch_worker::execute_frozen_batch_body` / `execute_model_only_body`、`dbnum_initialize::model_half_inner`、
+  `model_dbnum_ensure::start_with_purpose`、`model_db_adapter::refresh_room_reference_before_task`），新调用点得先确认它与它的
+  调用方不在锁内再进表；另钉规矩的由来——`refresh_before_task` 经 `initialize_file_backed_at_startup(` 换代、自己不持锁，装载器体内
+  `lock_spatial_serial().await` 在。钉只看直接的函数体；深一层的持锁者（生产里 13 处：`query_service::room` / `spatial_bounds`、
+  AABB 刷新 / 持久化 / 装载、`helper::delete_room_membership`、两个启动装载器、`room_read_through::lookup`）本轮人工核过一遍，
+  没有一处走到那五个入口。
+- **验证**：`cargo test --lib -- the_task_start_refresh_is_never_called_under_the_spatial_serial_lock` 1 passed；变异一次——在
+  `model_dbnum_ensure::start_with_purpose` 调对齐之前插一句 `lock_spatial_serial().await`，钉红并点名
+  `data_interface/model_dbnum_ensure.rs::start_with_purpose`，撤掉后复绿；`cargo test --lib -- room_resident::`
+  **30 passed / 0 failed / 9 ignored**；rustfmt 本轮新增行无 diff（该文件 100 / 958 / 1249 三处漂移为既有）。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步
