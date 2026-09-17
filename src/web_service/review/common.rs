@@ -940,45 +940,42 @@ pub(super) async fn lookup_task_record_context(id: &str) -> anyhow::Result<Optio
     }))
 }
 
+/// 节点 → 负责人的唯一口径（sj=发起人、jd=校核人且缺失时回退 reviewer、sh|pz=审核人）。
+/// 入参已 trim；`TaskRow` / `TaskRecordContext` / 附件上下文行三处都走这里，避免同一张
+/// 映射表抄三份后各自漂移。
+pub(super) fn current_node_owner_of<'a>(
+    requester_id: &'a str,
+    checker_id: &'a str,
+    reviewer_id: &'a str,
+    approver_id: &'a str,
+    current_node: &str,
+) -> (&'a str, &'static str) {
+    match current_node {
+        "sj" => (requester_id, "requester"),
+        "jd" => {
+            if !checker_id.is_empty() {
+                (checker_id, "checker")
+            } else {
+                (reviewer_id, "reviewer")
+            }
+        }
+        "sh" | "pz" => (approver_id, "approver"),
+        _ => ("", "none"),
+    }
+}
+
 pub(super) fn current_node_owner_for_task_row<'a>(
     task: &'a TaskRow,
     current_node: &str,
 ) -> (&'a str, &'static str) {
-    match current_node {
-        "sj" => (
-            task.requester_id
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or_default(),
-            "requester",
-        ),
-        "jd" => {
-            let checker_id = task
-                .checker_id
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or_default();
-            if !checker_id.is_empty() {
-                (checker_id, "checker")
-            } else {
-                (
-                    task.reviewer_id
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or_default(),
-                    "reviewer",
-                )
-            }
-        }
-        "sh" | "pz" => (
-            task.approver_id
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or_default(),
-            "approver",
-        ),
-        _ => ("", "none"),
-    }
+    let field = |value: &'a Option<String>| value.as_deref().map(str::trim).unwrap_or_default();
+    current_node_owner_of(
+        field(&task.requester_id),
+        field(&task.checker_id),
+        field(&task.reviewer_id),
+        field(&task.approver_id),
+        current_node,
+    )
 }
 
 /// 当 JWT user_id 与节点指定的 owner_id 不一致时，给调用方一条能定位真正问题的错误消息。
@@ -1115,19 +1112,13 @@ pub(super) fn current_node_owner_for_task_context<'a>(
     context: &'a TaskRecordContext,
     current_node: &str,
 ) -> (&'a str, &'static str) {
-    match current_node {
-        "sj" => (context.requester_id.trim(), "requester"),
-        "jd" => {
-            let checker_id = context.checker_id.trim();
-            if !checker_id.is_empty() {
-                (checker_id, "checker")
-            } else {
-                (context.reviewer_id.trim(), "reviewer")
-            }
-        }
-        "sh" | "pz" => (context.approver_id.trim(), "approver"),
-        _ => ("", "none"),
-    }
+    current_node_owner_of(
+        context.requester_id.trim(),
+        context.checker_id.trim(),
+        context.reviewer_id.trim(),
+        context.approver_id.trim(),
+        current_node,
+    )
 }
 
 pub(super) fn record_id_to_string(id: surrealdb::sql::Thing) -> String {

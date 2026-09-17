@@ -102,50 +102,140 @@ struct AttachmentTaskContextRow {
     form_id: Option<String>,
     components: Option<Vec<ReviewComponent>>,
     requester_id: Option<String>,
+    /// 校核/审核人：批注截图走「工作流参与人」口径时要判当前节点负责人（见
+    /// `attachment_edit_denied_reason`），普通附件用不到。
+    checker_id: Option<String>,
+    reviewer_id: Option<String>,
+    approver_id: Option<String>,
     current_node: Option<String>,
     attachments: Option<Vec<ReviewAttachment>>,
 }
 
-const ATTACHMENT_TASK_CONTEXT_BY_ID_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, current_node, attachments \
+const ATTACHMENT_TASK_CONTEXT_BY_ID_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, checker_id, reviewer_id, approver_id, current_node, attachments \
      FROM review_tasks WHERE record::id(id) = $id AND (deleted IS NONE OR deleted = false) LIMIT 1";
 
 /// 按 form_id 反查最早的那条任务。投影里多带一列 `created_at`：本仓 2.1.4 fork 的解析器要求
 /// `ORDER BY` 的字段出现在非 `*` 投影里（旧端 3.x fork 不要求），否则整条报
 /// ``Missing order idiom `created_at` ``、`DELETE /api/review/attachments/{id}` 一律 504——
 /// 行结构体不接这一列，响应形状不变（2026-09-13 R5 复核，护栏 `tests::task_context_by_form_sql_picks_the_earliest_task`）。
-const ATTACHMENT_TASK_CONTEXT_BY_FORM_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, current_node, attachments, created_at \
+const ATTACHMENT_TASK_CONTEXT_BY_FORM_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, checker_id, reviewer_id, approver_id, current_node, attachments, created_at \
      FROM review_tasks WHERE form_id = $form_id AND (deleted IS NONE OR deleted = false) ORDER BY created_at ASC LIMIT 1";
 
-/// 已有任务的附件编辑权限：仅任务发起人在 sj（设计）节点可上传/删除。
+/// 批注截图：`markup|file` 之外的第三种正式附件类型。它不是「用户手工挂的资料」，而是
+/// 批注自身的证据载体（前端架构「截图是附件，批注只保存引用」，
+/// `plant-9/docs/verification/review-annotation-handling-architecture-2026-04-28.md`），
+/// 由画批注的人当场自动上传，因此权限口径与普通附件不同。
+const ATTACHMENT_FILE_TYPE_ANNOTATION_SCREENSHOT: &str = "annotation_screenshot";
+
+/// 归一化 `type` 字段：白名单之外一律落成 `file`，避免任意字符串进库。
+fn normalize_attachment_file_type(raw: Option<&str>) -> String {
+    let normalized = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "file".to_string());
+
+    match normalized.as_str() {
+        "markup" | "file" | ATTACHMENT_FILE_TYPE_ANNOTATION_SCREENSHOT => normalized,
+        _ => "file".to_string(),
+    }
+}
+
+/// 这次上传/删除是否按「批注截图」口径放宽权限：类型是 `annotation_screenshot`，
+/// 且带得出来源批注 ID（前端三条上传通道都会带，缺了说明不是批注证据流）。
+fn is_annotation_screenshot_edit(file_type: &str, source_annotation_id: Option<&str>) -> bool {
+    file_type == ATTACHMENT_FILE_TYPE_ANNOTATION_SCREENSHOT
+        && source_annotation_id
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+}
+
+/// 已有任务的附件编辑权限。两条口径：
+///
+/// - 普通附件（`markup|file`）：仅任务发起人在 sj（设计）节点可上传/删除（旧端原样）。
+/// - 批注截图（`annotation_screenshot` + sourceAnnotationId）：云线/批注的证据由画它的人
+///   当场自动上传，而校核/审核/批准都发生在 jd/sh/pz——卡在 sj 等于任何审核角色都存不下
+///   证据截图（2026-09-17 实测：jd 节点画完云线自动截图 403）。放行给对该任务有工作流
+///   权限的人：**当前节点负责人或发起人**，节点不限；判定口径与
+///   `authorize_task_write` 一致，含外部驱动（本侧 owner 全空）放行分支。
+///
 /// 返回 None 表示允许；Some(message) 表示拒绝原因。
 fn attachment_edit_denied_reason(
     claims: &TokenClaims,
     task: &AttachmentTaskContextRow,
+    annotation_screenshot: bool,
 ) -> Option<String> {
+    let field = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string()
+    };
     let current_node = task
         .current_node
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("sj");
+    let requester_id = field(&task.requester_id);
+
+    if annotation_screenshot {
+        let checker_id = field(&task.checker_id);
+        let reviewer_id = field(&task.reviewer_id);
+        let approver_id = field(&task.approver_id);
+
+        // 外部驱动（PMS 嵌入态）：本侧不维护 owner 命名空间，无从判定，放行交 PMS 侧。
+        let any_owner_configured = [&requester_id, &checker_id, &reviewer_id, &approver_id]
+            .iter()
+            .any(|value| !value.is_empty());
+        if !any_owner_configured {
+            return None;
+        }
+
+        let (owner_id, owner_source) = current_node_owner_of(
+            requester_id.as_str(),
+            checker_id.as_str(),
+            reviewer_id.as_str(),
+            approver_id.as_str(),
+            current_node,
+        );
+        let actor = claims.user_id.trim();
+        if !actor.is_empty() && (actor == owner_id || actor == requester_id) {
+            return None;
+        }
+        return Some(format!(
+            "权限不足：用户 {} 既不是任务发起人（{}）也不是当前「{}」节点负责人（{}={}），\
+             无权上传/删除批注截图",
+            if actor.is_empty() { "<空>" } else { actor },
+            if requester_id.is_empty() {
+                "<未记录>"
+            } else {
+                requester_id.as_str()
+            },
+            current_node,
+            owner_source,
+            if owner_id.is_empty() {
+                "<未记录>"
+            } else {
+                owner_id
+            },
+        ));
+    }
+
     if current_node != "sj" {
         return Some(format!(
             "当前任务位于「{}」节点，仅设计（sj）节点允许编辑附件；其余节点只能查看和下载",
             current_node
         ));
     }
-    let requester_id = task
-        .requester_id
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
     if requester_id.is_empty() || requester_id != claims.user_id {
         return Some(format!(
             "仅任务发起人可编辑附件（发起人={}，当前用户={}）",
             if requester_id.is_empty() {
                 "<未记录>"
             } else {
-                requester_id
+                requester_id.as_str()
             },
             claims.user_id
         ));
@@ -159,7 +249,8 @@ fn attachment_edit_denied_reason(
 /// 1. multipart 解析（请求体超限 → 413，不再静默丢字段）
 /// 2. 单文件 ≤ 50MB → 413
 /// 3. 扩展名白名单 → 415；PDF/PNG/JPEG 文件头校验 → 415
-/// 4. 解析并验证 formId/taskId 与上传权限 → 400/403
+/// 4. 解析并验证 formId/taskId 与上传权限（按附件类型分两条口径，见
+///    `attachment_edit_denied_reason`）→ 400/403
 /// 5. 落盘 → 入库 → 同步 review_tasks.attachments 投影；
 ///    入库/投影失败回滚已写文件与记录，避免孤儿文件。
 async fn upload_attachment(
@@ -169,24 +260,12 @@ async fn upload_attachment(
     let started = std::time::Instant::now();
     info!("Uploading attachment");
 
-    fn normalize_attachment_file_type(raw: Option<&str>) -> String {
-        let normalized = raw
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_else(|| "file".to_string());
-
-        match normalized.as_str() {
-            "markup" | "file" => normalized,
-            _ => "file".to_string(),
-        }
-    }
-
     let mut task_id: Option<String> = None;
     let mut form_id: Option<String> = None;
     let mut model_refnos: Option<Vec<String>> = None;
     let mut file_type: Option<String> = None;
     let mut description: Option<String> = None;
+    let mut source_annotation_id: Option<String> = None;
     let mut file_name: Option<String> = None;
     let mut file_data: Option<Vec<u8>> = None;
 
@@ -250,6 +329,11 @@ async fn upload_attachment(
             "description" => {
                 if let Ok(text) = field.text().await {
                     description = Some(text);
+                }
+            }
+            "sourceannotationid" | "source_annotation_id" => {
+                if let Ok(text) = field.text().await {
+                    source_annotation_id = Some(text);
                 }
             }
             "file" => {
@@ -367,6 +451,19 @@ async fn upload_attachment(
         .map(|s| s.to_string());
 
     let mut resolved_model_refnos = model_refnos.unwrap_or_default();
+
+    // 附件类型与来源批注先定下来：权限判定要靠它区分「普通附件」与「批注截图」两条口径。
+    let resolved_file_type = normalize_attachment_file_type(file_type.as_deref());
+    let resolved_source_annotation_id = source_annotation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let annotation_screenshot = is_annotation_screenshot_edit(
+        &resolved_file_type,
+        resolved_source_annotation_id.as_deref(),
+    );
+
     let db = match fresh_review_db().await {
         Ok(db) => db,
         Err(e) => {
@@ -409,8 +506,8 @@ async fn upload_attachment(
     }
 
     if let Some(task) = task_context.as_ref() {
-        // 已有任务：后端强制执行编辑权限（仅发起人 + sj 节点）
-        if let Some(reason) = attachment_edit_denied_reason(&claims, task) {
+        // 已有任务：后端强制执行编辑权限（普通附件＝发起人 + sj；批注截图＝当班人，节点不限）
+        if let Some(reason) = attachment_edit_denied_reason(&claims, task, annotation_screenshot) {
             return attachment_error_response(
                 StatusCode::FORBIDDEN,
                 reason,
@@ -457,8 +554,6 @@ async fn upload_attachment(
             );
         }
     };
-
-    let resolved_file_type = normalize_attachment_file_type(file_type.as_deref());
 
     let resolved_description = description
         .as_ref()
@@ -523,6 +618,7 @@ async fn upload_attachment(
             model_refnos: $model_refnos,
             file_id: $file_id,
             file_type: $file_type,
+            source_annotation_id: $source_annotation_id,
             download_url: $download_url,
             description: $description,
             file_ext: $file_ext,
@@ -539,7 +635,11 @@ async fn upload_attachment(
             .bind(("form_id", resolved_form_id.clone()))
             .bind(("model_refnos", resolved_model_refnos))
             .bind(("file_id", attachment_id.clone()))
-            .bind(("file_type", resolved_file_type))
+            .bind(("file_type", resolved_file_type.clone()))
+            .bind((
+                "source_annotation_id",
+                resolved_source_annotation_id.clone(),
+            ))
             .bind(("download_url", url.clone()))
             .bind(("description", resolved_description))
             .bind(("file_ext", file_ext_with_dot))
@@ -614,10 +714,12 @@ async fn upload_attachment(
     }
 
     info!(
-        "[REVIEW_API.upload_attachment] OK id={} form_id={} task_id={:?} size={} elapsed_ms={}",
+        "[REVIEW_API.upload_attachment] OK id={} form_id={} task_id={:?} type={} source_annotation_id={:?} size={} elapsed_ms={}",
         attachment_id,
         resolved_form_id,
         trimmed_task_id,
+        resolved_file_type,
+        resolved_source_annotation_id,
         file_size,
         started.elapsed().as_millis()
     );
@@ -637,7 +739,8 @@ async fn upload_attachment(
 ///
 /// 一致性删除：数据库记录 → review_tasks.attachments 投影 → 磁盘文件。
 /// 任一步失败返回明确错误，避免界面显示“已删除”但文件/记录仍残留。
-/// 权限：附件关联任务存在时，仅任务发起人且当前节点为 sj 可删除。
+/// 权限：附件关联任务存在时，普通附件仅任务发起人且当前节点为 sj 可删除；批注截图
+/// （`annotation_screenshot` + sourceAnnotationId）放宽到当前节点负责人或发起人，节点不限。
 async fn delete_attachment(
     Extension(claims): Extension<TokenClaims>,
     Path(attachment_id): Path<String>,
@@ -661,17 +764,20 @@ async fn delete_attachment(
         }
     };
 
-    // 读取附件记录（扩展名来自数据库，不再依赖固定扩展名数组猜测）
+    // 读取附件记录（扩展名来自数据库，不再依赖固定扩展名数组猜测；
+    // 类型与来源批注决定走哪条权限口径，旧数据缺这两列时按普通附件判）
     #[derive(Debug, Deserialize)]
     struct AttachmentLookupRow {
         file_ext: Option<String>,
         form_id: Option<String>,
+        file_type: Option<String>,
+        source_annotation_id: Option<String>,
     }
 
     let attachment_row: Option<AttachmentLookupRow> = match await_review_query(
         "review.attachments.delete_lookup",
         db.query(
-            "SELECT file_ext, form_id FROM review_attachment WHERE file_id = $file_id LIMIT 1",
+            "SELECT file_ext, form_id, file_type, source_annotation_id FROM review_attachment WHERE file_id = $file_id LIMIT 1",
         )
         .bind(("file_id", attachment_id.clone())),
     )
@@ -714,7 +820,16 @@ async fn delete_attachment(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
-    // 附件关联任务存在时，强制执行编辑权限（仅发起人 + sj 节点）
+    let annotation_screenshot = is_annotation_screenshot_edit(
+        attachment_row
+            .file_type
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default(),
+        attachment_row.source_annotation_id.as_deref(),
+    );
+
+    // 附件关联任务存在时，强制执行编辑权限（口径同上传）
     let mut task_context: Option<AttachmentTaskContextRow> = None;
     if let Some(fid) = form_id.as_deref() {
         match await_review_query(
@@ -742,7 +857,7 @@ async fn delete_attachment(
     }
 
     if let Some(task) = task_context.as_ref() {
-        if let Some(reason) = attachment_edit_denied_reason(&claims, task) {
+        if let Some(reason) = attachment_edit_denied_reason(&claims, task, annotation_screenshot) {
             return attachment_error_response(
                 StatusCode::FORBIDDEN,
                 reason,
@@ -896,13 +1011,41 @@ mod tests {
         db
     }
 
+    fn claims_for(user_id: &str) -> TokenClaims {
+        TokenClaims {
+            project_id: "project-123".to_string(),
+            user_id: user_id.to_string(),
+            user_name: String::new(),
+            role: None,
+            workflow_mode: None,
+            legacy_form_id: None,
+            exp: 4_102_444_800,
+            iat: 1_704_067_200,
+        }
+    }
+
+    /// jd 节点、校核人当班的任务上下文
+    fn task_at_jd() -> AttachmentTaskContextRow {
+        AttachmentTaskContextRow {
+            logical_id: Some("task-1".to_string()),
+            form_id: Some("F-1".to_string()),
+            components: None,
+            requester_id: Some("sj".to_string()),
+            checker_id: Some("jh".to_string()),
+            reviewer_id: Some("jh".to_string()),
+            approver_id: Some("sh".to_string()),
+            current_node: Some("jd".to_string()),
+            attachments: None,
+        }
+    }
+
     /// 两条任务上下文查询都必须能被本仓 2.1.4 fork 解析、读进 `AttachmentTaskContextRow`；
     /// 按 form_id 的那条要取 `created_at` 最早的一行（旧端语义），且软删行不参与。
     #[tokio::test]
     async fn task_context_by_form_sql_picks_the_earliest_task() {
         let db = probe_db("attachments_task_context").await;
         db.query(
-            "CREATE type::thing('review_tasks', 'task-late') SET form_id = 'F-1', requester_id = 'u-late', current_node = 'jd', created_at = d'2026-09-13T02:00:00Z'; \
+            "CREATE type::thing('review_tasks', 'task-late') SET form_id = 'F-1', requester_id = 'u-late', checker_id = 'u-checker', reviewer_id = 'u-reviewer', approver_id = 'u-approver', current_node = 'jd', created_at = d'2026-09-13T02:00:00Z'; \
              CREATE type::thing('review_tasks', 'task-early') SET form_id = 'F-1', requester_id = 'u-early', current_node = 'sj', created_at = d'2026-09-13T01:00:00Z', components = [{ id: 'c1', name: 'BRAN', refNo: '24381/145018', type: 'pipe' }]; \
              CREATE type::thing('review_tasks', 'task-deleted') SET form_id = 'F-1', requester_id = 'u-gone', created_at = d'2026-09-13T00:00:00Z', deleted = true;",
         )
@@ -936,6 +1079,93 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].logical_id.as_deref(), Some("task-late"));
         assert_eq!(rows[0].current_node.as_deref(), Some("jd"));
+        // 批注截图口径要判当前节点负责人，三列必须真的投影出来
+        assert_eq!(rows[0].checker_id.as_deref(), Some("u-checker"));
+        assert_eq!(rows[0].reviewer_id.as_deref(), Some("u-reviewer"));
+        assert_eq!(rows[0].approver_id.as_deref(), Some("u-approver"));
+    }
+
+    /// 批注截图（`annotation_screenshot` + sourceAnnotationId）在审核节点必须放行给当班人：
+    /// 这正是 2026-09-17 实测 jd 节点画完云线自动截图被 403 顶回来的那条路径。
+    #[test]
+    fn annotation_screenshot_is_allowed_for_the_current_node_owner() {
+        let task = task_at_jd();
+        assert_eq!(
+            attachment_edit_denied_reason(&claims_for("jh"), &task, true),
+            None
+        );
+        // 发起人（设计）在审核节点补拍证据同样放行
+        assert_eq!(
+            attachment_edit_denied_reason(&claims_for("sj"), &task, true),
+            None
+        );
+        // 不在这张单子上的人仍然挡住
+        let denied = attachment_edit_denied_reason(&claims_for("passerby"), &task, true)
+            .expect("局外人必须被拒");
+        assert!(denied.contains("passerby"), "{denied}");
+        assert!(denied.contains("jd"), "{denied}");
+    }
+
+    /// 放宽只对批注截图生效：普通附件在非 sj 节点照旧只读。
+    #[test]
+    fn ordinary_attachment_keeps_the_designer_only_rule() {
+        let task = task_at_jd();
+        let denied = attachment_edit_denied_reason(&claims_for("jh"), &task, false)
+            .expect("普通附件在 jd 节点必须被拒");
+        assert!(denied.contains("仅设计（sj）节点允许编辑附件"), "{denied}");
+
+        let sj_task = AttachmentTaskContextRow {
+            current_node: Some("sj".to_string()),
+            ..task_at_jd()
+        };
+        assert_eq!(
+            attachment_edit_denied_reason(&claims_for("sj"), &sj_task, false),
+            None
+        );
+    }
+
+    /// 外部驱动（PMS 嵌入态）：本侧 owner 全空时无从判定，放行交 PMS 侧，
+    /// 口径与 `authorize_task_write` 一致。
+    #[test]
+    fn annotation_screenshot_passes_through_when_no_owner_is_configured() {
+        let task = AttachmentTaskContextRow {
+            requester_id: None,
+            checker_id: None,
+            reviewer_id: Some("  ".to_string()),
+            approver_id: None,
+            ..task_at_jd()
+        };
+        assert_eq!(
+            attachment_edit_denied_reason(&claims_for("whoever"), &task, true),
+            None
+        );
+    }
+
+    /// 类型白名单：`annotation_screenshot` 是正式类型，不再被归一成 `file`；
+    /// 放宽口径要求同时带得出来源批注 ID。
+    #[test]
+    fn annotation_screenshot_is_a_first_class_file_type() {
+        assert_eq!(
+            normalize_attachment_file_type(Some("Annotation_Screenshot")),
+            "annotation_screenshot"
+        );
+        assert_eq!(normalize_attachment_file_type(Some("markup")), "markup");
+        assert_eq!(normalize_attachment_file_type(Some("weird")), "file");
+        assert_eq!(normalize_attachment_file_type(None), "file");
+
+        assert!(is_annotation_screenshot_edit(
+            "annotation_screenshot",
+            Some("cloud-1")
+        ));
+        assert!(!is_annotation_screenshot_edit(
+            "annotation_screenshot",
+            Some("  ")
+        ));
+        assert!(!is_annotation_screenshot_edit(
+            "annotation_screenshot",
+            None
+        ));
+        assert!(!is_annotation_screenshot_edit("file", Some("cloud-1")));
     }
 }
 
