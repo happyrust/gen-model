@@ -3144,13 +3144,18 @@ async fn run_unit_publish_units(
             .map(|task| crate::fast_model::e3d_model_service::UnitPublishUnit {
                 root_refno: task.root_refno.clone(),
                 source_start_sesno: base_sesno,
+                // D10：规划器点名「只被 no_model 候选碰到」的根，空子计划许只推回执。
+                no_model_only: task
+                    .unit_publish
+                    .is_some_and(|hint| hint.no_model_only),
             })
             .collect();
         let started = std::time::Instant::now();
-        let (completed, replayed, mut fallbacks): (
+        let (completed, replayed, mut fallbacks, receipt_only): (
             std::collections::HashSet<String>,
             std::collections::HashSet<String>,
             std::collections::HashMap<String, String>,
+            std::collections::HashSet<String>,
         ) = match service
             .republish_roots_by_unit_delta_from_window(dbnum, base_sesno, sesno as u32, &units)
             .await
@@ -3159,6 +3164,7 @@ async fn run_unit_publish_units(
                 report.completed.into_iter().collect(),
                 report.replayed.into_iter().collect(),
                 report.fallbacks.into_iter().collect(),
+                report.receipt_only.into_iter().collect(),
             ),
             Err(error) => {
                 warnings.push(format!(
@@ -3177,12 +3183,14 @@ async fn run_unit_publish_units(
                             )
                         })
                         .collect(),
+                    std::collections::HashSet::new(),
                 )
             }
         };
         println!(
-            "  单元级发布 dbnum={dbnum} 窗口 {base_sesno}→{sesno}：{} 根走成 / {} 根重放 / {} 根回退整根重算（耗时 {}ms）",
+            "  单元级发布 dbnum={dbnum} 窗口 {base_sesno}→{sesno}：{} 根走成（其中 {} 根只推回执）/ {} 根重放 / {} 根回退整根重算（耗时 {}ms）",
             completed.len(),
+            receipt_only.len(),
             replayed.len(),
             fallbacks.len(),
             started.elapsed().as_millis()
@@ -3238,17 +3246,29 @@ async fn run_unit_publish_units(
                     },
                 );
                 registry.bump_units_done(task_id);
+                let message = if replay {
+                    Some(
+                        "already republished at the target session (window replay); the partial \
+                         manifest was not re-applied"
+                            .to_string(),
+                    )
+                } else if receipt_only.contains(&task.root_refno) {
+                    // D10：只被 no_model 候选碰到的根——一件几何都没重建，只把回执推到 T。
+                    Some(
+                        "touched only by no_model candidates; no unit under this root changed, \
+                         receipt advanced to the target session without rebuilding geometry (D10)"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
                 results.push(ModelUnitResult {
                     dbnum: task.dbnum,
                     root_refno: task.root_refno.clone(),
                     noun: task.noun.clone(),
                     status: UnitGenStatus::Generated,
                     attempts: task.attempts,
-                    message: replay.then(|| {
-                        "already republished at the target session (window replay); the partial \
-                         manifest was not re-applied"
-                            .to_string()
-                    }),
+                    message,
                     old_owner: task.old_owner.clone(),
                     new_owner: task.new_owner.clone(),
                     kind: UnitKind::Unit,

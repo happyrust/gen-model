@@ -314,15 +314,18 @@ pub struct WindowRootSources {
     /// 反查判不了时把原因交给 [`WindowImpact::cascade_degraded`]（放弃凭证前移）。开关
     /// `model_design_reference_cascade` 关着时是 `DesignReferenceCascade::off()`（零 I/O）。
     pub design_reference: crate::data_interface::reverse_reference::DesignReferenceCascade,
-    /// 刚体前移（ADR-066，S4b）的文件侧输入：候选（两端属主链、`Δ`、三条排除的判决）与每个根在
-    /// T 端的属主链。开关 `model_transform_cheap_path` 关着时 `enabled = false`、两个集合都空——
-    /// 一次 `world_matrix` 都不算，`impact` / `plan_window_roots` 的产物与今天逐位相同。
+    /// 按根归因的候选表（刚体前移 ADR-066 S4b 与单元级发布 ADR-078 D10 共用）：候选（两端属主链、
+    /// 去向；刚体开关开着时另有 `Δ` 与三条排除的判决）与每个根在 T 端的属主链。两个开关
+    /// （`model_transform_cheap_path` / `model_unit_level_publish`）都关着时两个集合都空；刚体开关关着时
+    /// `enabled = false`、一次 `world_matrix` 都不算——`impact` / `plan_window_roots` 的产物与今天逐位相同。
     pub(crate) rigid: RigidMotionSources,
 }
 
-/// [`WindowRootSources::rigid`] 的形状。纯数据；分桶在 `rigid_motion::classify_transform_roots`。
+/// [`WindowRootSources::rigid`] 的形状。纯数据；刚体分桶在 `rigid_motion::classify_transform_roots`，
+/// D10 分桶在 [`classify_no_model_only_roots`]。
 #[derive(Debug, Default)]
 pub(crate) struct RigidMotionSources {
+    /// 刚体开关（`model_transform_cheap_path`）：假时候选表可能非空（单元级开关开着），但没有 `Δ`。
     pub enabled: bool,
     pub candidates: Vec<WindowCandidate>,
     pub root_ancestors_t: BTreeMap<RefnoEnum, Vec<RefnoEnum>>,
@@ -564,20 +567,25 @@ fn no_model_candidates(ledger: &ChangeLedger) -> BTreeSet<(u32, u32)> {
     no_model.difference(&otherwise).copied().collect()
 }
 
-/// 把 e3d-model 的账本折成刚体前移的候选表（只在开关开着时调）。每个 refno 一条：账本里只动了
-/// 摆放的（`placement_only`）算 `Anchor`；去向 `no_model` 的（[`no_model_candidates`]）算 `NoModel`——不是锚点
-/// 也不挡路；其余一律 `Other`（新建 / 删除 / 改挂 / 换类型 / 动成员 / 动了别的属性 / opaque / 读不出来）。
+/// 把 e3d-model 的账本折成按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用，任一开关开着才调）。
+/// 每个 refno 一条：账本里只动了摆放的（`placement_only`）算 `Anchor`；去向 `no_model` 的
+/// （[`no_model_candidates`]）算 `NoModel`——不是锚点也不挡路；其余一律 `Other`（新建 / 删除 / 改挂 /
+/// 换类型 / 动成员 / 动了别的属性 / opaque / 读不出来）。
 /// 锚点先于去向：`Δ` 是真的，乘上去永远不错；去向 `no_model` 的锚点名下本就没有单元，也就没有记录可乘。
 /// 删除 / 改挂 / 换类型的候选另走一遍 S 端属主链——旧根只有它说得出。
+///
+/// `rigid_enabled` = `model_transform_cheap_path`：关着时**一次 `world_matrix` 都不算**，只动了摆放的候选
+/// 记成 `Other`（对 D10 它本就不是 `no_model`，判法相同），`enabled` 也随之为假——刚体分桶照旧空。
 fn collect_rigid_motion_sources(
     plan: &UpdatePlan,
     base: &Arc<DbSet>,
     target: &Arc<DbSet>,
     owners: &BTreeMap<(u32, u32), RefNo>,
     roots_t: &[GenerationRoot],
+    rigid_enabled: bool,
 ) -> RigidMotionSources {
     let mut out = RigidMotionSources {
-        enabled: true,
+        enabled: rigid_enabled,
         ..Default::default()
     };
     let anchors = plan.ledger.placement_only();
@@ -608,13 +616,20 @@ fn collect_rigid_motion_sources(
             Vec::new()
         };
         let kind = if anchors.contains(&key) {
-            match rigid_anchor(base, target, refno, &chain_t) {
-                Ok(kind) => kind,
-                Err(error) => {
-                    out.notes
-                        .push(format!("placement anchor {refno} unreadable: {error:#}"));
-                    CandidateKind::Other(format!("placement anchor unreadable: {error:#}"))
+            if rigid_enabled {
+                match rigid_anchor(base, target, refno, &chain_t) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        out.notes
+                            .push(format!("placement anchor {refno} unreadable: {error:#}"));
+                        CandidateKind::Other(format!("placement anchor unreadable: {error:#}"))
+                    }
                 }
+            } else {
+                CandidateKind::Other(format!(
+                    "placement-only (Δ not computed: model_transform_cheap_path off): {}",
+                    details.join("; ")
+                ))
             }
         } else if no_model.contains(&key) {
             CandidateKind::NoModel(details.join("; "))
@@ -839,11 +854,19 @@ impl WindowRootSources {
             })?;
         let (nested_roots, duplicate_coverage_elements) =
             nested_root_observation(&roots_t, index.owners.as_ref());
-        // 刚体前移（ADR-066）：开关关 = 一次 `world_matrix` 都不算、候选表空，下游产物与今天逐位相同。
-        // 开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链 / `Δ` / 三条排除一次算完，
-        // 执行体从此一个文件都不必读。
-        let rigid = if crate::options::model_transform_cheap_path() {
-            collect_rigid_motion_sources(&plan, base, target, index.owners.as_ref(), &roots_t)
+        // 按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用）：两个开关都关 = 候选表空，下游产物
+        // 与今天逐位相同。任一开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链一次算完；
+        // `Δ` / 三条排除只在刚体开关开着时算（关着一次 `world_matrix` 都不算），执行体从此一个文件都不必读。
+        let rigid_enabled = crate::options::model_transform_cheap_path();
+        let rigid = if rigid_enabled || crate::options::model_unit_level_publish() {
+            collect_rigid_motion_sources(
+                &plan,
+                base,
+                target,
+                index.owners.as_ref(),
+                &roots_t,
+                rigid_enabled,
+            )
         } else {
             RigidMotionSources::default()
         };
@@ -935,6 +958,43 @@ impl WindowRootSources {
             impact.degraded_reason().as_deref(),
             &self.rigid.candidates,
             self.rigid.enabled,
+        )
+    }
+
+    /// 三条级联扩展（C2 / C8 / P4）各自要并进 `touched` 的根——**按各自的目标集取**，不是 `touched \ direct`：
+    /// 一根可以既被闭包直接命中、又是某条级联的对端，`touched \ direct` 会把它算成「直接命中」，而它在
+    /// 级联那一头的理由（对端变了、几何要跟）局部 DESI 差分看不见。开关关着的级联目标集为空。
+    pub(crate) fn cascaded_roots(&self) -> BTreeSet<RefnoEnum> {
+        let mut out = BTreeSet::new();
+        if self.structural_connection.enabled {
+            out.extend(self.structural_connection.far_end_roots.iter().copied());
+        }
+        if self.cable_endpoint.enabled {
+            out.extend(self.cable_endpoint.referrer_roots.iter().copied());
+        }
+        if self.design_reference.enabled {
+            out.extend(self.design_reference.referrer_roots.iter().copied());
+        }
+        out
+    }
+
+    /// 单元级发布 D10 的分桶，在 [`Self::impact`] 与 `plan_window_roots` 之后调：`plan.regen` 里哪些根这一窗
+    /// **只被 `no_model` 候选碰到**（[`classify_no_model_only_roots`]）。候选表随 `model_unit_level_publish`
+    /// 开关收集；关着时表空，每根都判不出候选、一根都不合格。
+    pub(crate) fn no_model_only(
+        &self,
+        roots_s: &[PersistedRoot],
+        settled: &BTreeSet<RefnoEnum>,
+        impact: &WindowImpact,
+        plan: &WindowRootPlan,
+    ) -> NoModelOnlyClassification {
+        classify_no_model_only_roots(
+            &plan.regen,
+            settled,
+            &self.directly_touched(roots_s),
+            &self.cascaded_roots(),
+            impact.degraded_reason().as_deref(),
+            &self.rigid.candidates,
         )
     }
 
@@ -1039,6 +1099,143 @@ fn rigid_motion_summary_line(
             String::new()
         } else {
             format!("; notes: {}", notes.join(" | "))
+        },
+    )
+}
+
+/// [`classify_no_model_only_roots`] 的产物（ADR-078 D10）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NoModelOnlyClassification {
+    /// 这一窗只被 `no_model` 候选碰到的 regen 根：单元路上切出的空子计划许当「没有一件几何要变」
+    /// 发一份空 `Partial`、只推回执。
+    pub roots: BTreeSet<RefnoEnum>,
+    /// 不合格的 regen 根与第一条原因——只供 warnings / 探针，它们照旧走完整的单元路（子计划非空就
+    /// 局部重建，为空就回退整根 regen）。
+    pub rejected: Vec<(RefnoEnum, String)>,
+}
+
+/// 纯函数（ADR-078 D10）：`regen` 里哪些根这一窗**只被账本去向 `no_model` 的候选碰到**。这样的根在
+/// 单元路上切出的子计划必然为空——Q6 第一手（元数据门三档：`NAME` 一类 / 生成器不读的属性 / 只跳
+/// `CACHID` 戳）已把它名下要重建的单元归零——今天的执行体把空子计划一律当「选根看得比 `plan_update`
+/// 远」回退整根 regen；对这一类根那一退是白算：整根重算出来的几何与 S 端逐字相同，只有回执前移了。
+///
+/// 五条缺一不可，任一不成就留在 `rejected`（照旧整根 regen，回退永远正确）：
+/// 1. 窗口没退化（`degraded`）——退化窗把每个持久根都判成 regen，那不是「这几件变了」；
+/// 2. 根在 `settled` 里：S 端已发布且安定（`settled_base_roots`，ADR-079）——新根 / 上一窗欠着的根
+///    没有「S 上的全集」可叠；
+/// 3. 根是闭包**直接**命中的（`direct`），且**不在**任何一条级联的目标集里（`cascaded`：C2 / C8 / P4）
+///    ——级联把它并进来的理由（对端 / 被引用者变了）在这根自己的 DESI 差分里看不见，空清单不是「没变」；
+/// 4. 归到它名下的候选至少一个——一个都归不到是被别的机制选进来的（恢复 / 目录名单），同上；
+/// 5. 归到它名下的候选**全部**是 [`CandidateKind::NoModel`]——只要有一个 `Anchor` / `Other`（`RolledUp` /
+///    `Unresolved` 去向），它名下就有单元要重建（或分类不可信），空子计划另有原因。
+///
+/// 归因只看两个方向：候选就是根、候选的 T 端链或 S 端链经过根。**不看根之上的候选**（与刚体路
+/// `classify_one` 差这一条，故意的）：祖先闭包按构造不因根之上的种子把根收进来；根之上的改动若真波及
+/// 根下的几何（挪 ZONE / 换类型 / 删除），e3d-model 的级联会把根下的单元放进动作集、子计划就不空，
+/// 这里的判决在那条路上根本用不到；反过来把 `WORL` 的 `UPDT` 一类每窗必跳的祖先候选算进来，这条路在
+/// 真库上一次都打不着。
+pub(crate) fn classify_no_model_only_roots(
+    regen: &[GenerationRoot],
+    settled: &BTreeSet<RefnoEnum>,
+    direct: &BTreeSet<RefnoEnum>,
+    cascaded: &BTreeSet<RefnoEnum>,
+    degraded: Option<&str>,
+    candidates: &[WindowCandidate],
+) -> NoModelOnlyClassification {
+    let mut out = NoModelOnlyClassification::default();
+    for root in regen {
+        match classify_no_model_only_root(
+            root.root, settled, direct, cascaded, degraded, candidates,
+        ) {
+            Ok(()) => {
+                out.roots.insert(root.root);
+            }
+            Err(reason) => out.rejected.push((root.root, reason)),
+        }
+    }
+    out
+}
+
+fn classify_no_model_only_root(
+    root: RefnoEnum,
+    settled: &BTreeSet<RefnoEnum>,
+    direct: &BTreeSet<RefnoEnum>,
+    cascaded: &BTreeSet<RefnoEnum>,
+    degraded: Option<&str>,
+    candidates: &[WindowCandidate],
+) -> Result<(), String> {
+    if let Some(reason) = degraded {
+        return Err(format!("window degraded: {reason}"));
+    }
+    if !settled.contains(&root) {
+        return Err("root is not a settled persisted root".into());
+    }
+    if !direct.contains(&root) {
+        return Err("root is not directly hit by the closure".into());
+    }
+    if cascaded.contains(&root) {
+        return Err(
+            "root is a target of a cascade expansion (C2 / C8 / P4); its DESI delta cannot see why"
+                .into(),
+        );
+    }
+    let mut no_model = 0usize;
+    for candidate in candidates {
+        let touching = candidate.refno == root
+            || candidate.chain_t.contains(&root)
+            || candidate.chain_s.contains(&root);
+        if !touching {
+            continue;
+        }
+        match &candidate.kind {
+            CandidateKind::NoModel(_) => no_model += 1,
+            CandidateKind::Anchor { .. } => {
+                return Err(format!(
+                    "{}: placement-only candidate under the root (rolled up)",
+                    candidate.refno.to_pdms_str()
+                ));
+            }
+            CandidateKind::Other(reason) => {
+                return Err(format!("{}: {reason}", candidate.refno.to_pdms_str()));
+            }
+        }
+    }
+    if no_model == 0 {
+        return Err("touched, but no candidate could be attributed to it".into());
+    }
+    Ok(())
+}
+
+/// warnings 里那一行 D10 的账；开关关着时不出这一行（计划与今天逐字相同）。
+fn no_model_only_summary_line(
+    dbnum: u32,
+    classification: &NoModelOnlyClassification,
+    regen: usize,
+) -> String {
+    const SHOWN: usize = 6;
+    let shown = classification
+        .roots
+        .iter()
+        .take(SHOWN)
+        .map(|root| root.to_pdms_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = classification.roots.len().saturating_sub(SHOWN);
+    format!(
+        "dbnum={dbnum}: unit-level publish (model_unit_level_publish) — no_model_only roots={} of \
+         regen={}{}{}; these publish an empty Partial (receipt only) on the unit path, the rest \
+         rebuild their named units or fall back to regen",
+        classification.roots.len(),
+        regen,
+        if shown.is_empty() {
+            String::new()
+        } else {
+            format!(" [{shown}]")
+        },
+        if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
         },
     )
 }
@@ -1184,6 +1381,23 @@ pub(crate) async fn build_model_update_plan_from_window(
     let unit_publish_base_sesno = (crate::options::model_unit_level_publish()
         && plan.degraded.is_none())
     .then_some(base_sesno);
+    // D10：基线带上了才分桶——`regen` 里只被 `no_model` 候选碰到的根随计划点名，单元路对它们的空子计划
+    // 只推回执。它也是 `regen` 的子集加提示，`work_items` / `units` 一字不改。
+    let unit_publish_no_model_only_roots = if unit_publish_base_sesno.is_some() {
+        let classification = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+        warnings.push(no_model_only_summary_line(
+            dbnum,
+            &classification,
+            plan.regen.len(),
+        ));
+        classification
+            .roots
+            .iter()
+            .map(|root| root.to_pdms_str())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut out =
         plan.into_model_update_plan(dbnum, db_type, target_sesno as i32, roots_s.len(), warnings);
     // The queue consumer still speaks in delivery-unit summaries.  The window
@@ -1195,6 +1409,7 @@ pub(crate) async fn build_model_update_plan_from_window(
     // `transform_units` 为空，计划与今天逐位相同。
     out.transform_units = transform_units;
     out.unit_publish_base_sesno = unit_publish_base_sesno;
+    out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;
     // 面板自身的变化（d-819 / ADR-073 D13）：本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL /
     // CFLOOR）→ 给本库排一条 `RoomOnly`——任务在本批根刷盘之后用现有几何重算本库全部根的两张
     // 房间边。逐根路径只算「本根在哪些面板里」，面板那一侧变了、它名下别的根点不着，这是那个盲区
@@ -2058,6 +2273,177 @@ mod tests {
             BTreeSet::from([(24384, 1), (24384, 5)])
         );
         assert!(no_model_candidates(&ChangeLedger::new()).is_empty());
+    }
+
+    /// ADR-078 D10：`regen` 里只被 `no_model` 候选碰到的根才点名——五条缺一不可。
+    ///
+    /// 层级：ZONE 1 ─┬─ EQUI 10（根）─── BOX 11
+    ///               └─ PIPE 20 ─── BRAN 21（根）─── ELBO 22
+    ///          ZONE 2 ─── EQUI 30（根）─── SUBE 31；EQUI 40（根，S 端有、T 端删了 BOX 41）
+    #[test]
+    fn no_model_only_roots_need_every_one_of_the_five_conditions() {
+        use crate::data_interface::rigid_motion::{CandidateKind, WindowCandidate};
+
+        let candidate =
+            |id: u32, kind: CandidateKind, chain_t: &[u32], chain_s: &[u32]| WindowCandidate {
+                refno: r(id),
+                kind,
+                chain_t: chain_t.iter().map(|n| r(*n)).collect(),
+                chain_s: chain_s.iter().map(|n| r(*n)).collect(),
+            };
+        let no_model = |id: u32, chain_t: &[u32]| {
+            candidate(
+                id,
+                CandidateKind::NoModel("AttributesModified: CACHID 变了".into()),
+                chain_t,
+                &[],
+            )
+        };
+        let other = |id: u32, chain_t: &[u32], chain_s: &[u32]| {
+            candidate(
+                id,
+                CandidateKind::Other("AttributesModified: DIAM 变了".into()),
+                chain_t,
+                chain_s,
+            )
+        };
+        let set = |ids: &[u32]| -> BTreeSet<RefnoEnum> { ids.iter().map(|n| r(*n)).collect() };
+        let regen = vec![
+            root(10, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(21, "BRAN", GenerationRootKind::DeliveryUnit),
+            root(30, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(40, "EQUI", GenerationRootKind::DeliveryUnit),
+        ];
+        let settled = set(&[10, 21, 30, 40]);
+        let direct = set(&[10, 21, 30, 40]);
+        let candidates = vec![
+            // EQUI 10：名下只有一个只跳戳的 BOX —— 合格。
+            no_model(11, &[10, 1]),
+            // BRAN 21：只戳的 ELBO 之外还有一个 Other（ELBO 22 的 DIAM）—— 不合格，点名它。
+            no_model(22, &[21, 20, 1]),
+            other(22, &[21, 20, 1], &[]),
+            // EQUI 30：只戳的 SUBE —— 合格；ZONE 2 自己 `Other`（成员表变了）在根之上，不算。
+            no_model(31, &[30, 2]),
+            other(2, &[], &[]),
+            // EQUI 40：只戳的 SUBE 之外还删了 BOX 41（只在 S 端链上）—— 靠 chain_s 归因，不合格。
+            no_model(42, &[40, 2]),
+            other(41, &[], &[40, 2]),
+        ];
+
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            &candidates,
+        );
+        assert_eq!(out.roots, set(&[10, 30]), "{:?}", out.rejected);
+        let rejected = out.rejected.into_iter().collect::<BTreeMap<_, _>>();
+        assert!(
+            rejected[&r(21)].contains("24384/22"),
+            "{}",
+            rejected[&r(21)]
+        );
+        assert!(rejected[&r(21)].contains("DIAM"), "{}", rejected[&r(21)]);
+        assert!(
+            rejected[&r(40)].contains("24384/41"),
+            "{}",
+            rejected[&r(40)]
+        );
+
+        // 条件 3：级联目标集里的根不合格，哪怕它名下的候选全是 no_model。
+        let out =
+            classify_no_model_only_roots(&regen, &settled, &direct, &set(&[10]), None, &candidates);
+        assert_eq!(out.roots, set(&[30]));
+        assert!(
+            out.rejected
+                .iter()
+                .any(|(root, reason)| *root == r(10) && reason.contains("cascade expansion")),
+            "{:?}",
+            out.rejected
+        );
+
+        // 条件 2 / 3：没安定的根、闭包没直接命中的根都不合格。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &set(&[10]),
+            &set(&[30]),
+            &BTreeSet::new(),
+            None,
+            &candidates,
+        );
+        assert!(out.roots.is_empty(), "{:?}", out.roots);
+        let rejected = out.rejected.into_iter().collect::<BTreeMap<_, _>>();
+        assert!(
+            rejected[&r(10)].contains("not directly hit"),
+            "{}",
+            rejected[&r(10)]
+        );
+        assert!(
+            rejected[&r(30)].contains("not a settled"),
+            "{}",
+            rejected[&r(30)]
+        );
+
+        // 条件 4：一个候选都归不到的根（被恢复 / 目录名单选进来的）不合格。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            &[no_model(11, &[10, 1])],
+        );
+        assert_eq!(out.roots, set(&[10]));
+        assert!(
+            out.rejected
+                .iter()
+                .any(|(root, reason)| *root == r(30) && reason.contains("no candidate")),
+            "{:?}",
+            out.rejected
+        );
+
+        // 条件 1：退化窗一根都不合格。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            Some("unresolved=1"),
+            &candidates,
+        );
+        assert!(out.roots.is_empty());
+        assert!(
+            out.rejected
+                .iter()
+                .all(|(_, reason)| reason.contains("degraded"))
+        );
+
+        // 只动了摆放的锚点（RolledUp）也不是 no_model：刚体开关关着时它记成 Other，开着时是 Anchor，两种都挡。
+        let anchor = candidate(
+            11,
+            CandidateKind::Anchor {
+                delta: glam::DMat4::IDENTITY,
+                rigid: Ok(()),
+            },
+            &[10, 1],
+            &[],
+        );
+        let out = classify_no_model_only_roots(
+            &regen[..1],
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            &[anchor],
+        );
+        assert!(out.roots.is_empty());
+        assert!(
+            out.rejected[0].1.contains("placement-only"),
+            "{}",
+            out.rejected[0].1
+        );
     }
 
     /// 探针（手动）：钉一窗、开着 `model_transform_cheap_path` 跑一遍**生产同款**选根 + 刚体分桶

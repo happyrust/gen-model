@@ -153,6 +153,13 @@ pub struct ModelUpdatePlan {
     /// 一切照旧整根重算。它与刚体前移提示一样只是**提示**，`work_items` / `units` 一字不改。
     #[serde(default)]
     pub unit_publish_base_sesno: Option<u32>,
+    /// 单元级发布 D10 的提示（`a/b`）：`work_items` 里哪些 `RegenRoot` 这一窗**只被账本去向 `no_model` 的
+    /// 候选碰到**（闭包直接命中、非级联扩进来、S 端安定、名下候选全是两票门放行的）——单元路对它们切出的
+    /// 空子计划许当「没有一件几何要变」发一份空 `Partial`、只推回执；不在名单上的空子计划照旧回退整根
+    /// regen。`unit_publish_base_sesno` 为 `None` 时恒空。`regen` 的子集加提示，`work_items` / `units`
+    /// 一字不改；旧恢复记录没有该字段。
+    #[serde(default)]
+    pub unit_publish_no_model_only_roots: Vec<String>,
 }
 
 impl ModelUpdatePlan {
@@ -868,6 +875,7 @@ fn build_cata_cascade_plan(
         window_planned: false,
         transform_units: Vec::new(),
         unit_publish_base_sesno: None,
+        unit_publish_no_model_only_roots: Vec::new(),
     }
 }
 
@@ -1096,6 +1104,7 @@ pub(crate) async fn build_model_update_plan(
         window_planned: false,
         transform_units: Vec::new(),
         unit_publish_base_sesno: None,
+        unit_publish_no_model_only_roots: Vec::new(),
     })
 }
 

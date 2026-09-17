@@ -1901,6 +1901,13 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 两条便宜路的优先序定死为 **transform 优先、unit 兜底**（实施约束 7）：一根同时判成刚体前移与
 /// 单元级时先走 [`model_transform_cheap_path`] 那一路，它回退下来的才试单元级，再不成才整根重算。
 ///
+/// 开着时规划器还会把 `regen` 里**只被账本去向 `no_model` 的候选碰到**的根点名
+/// （`ModelUpdatePlan::unit_publish_no_model_only_roots`，ADR-078 D10，2026-09-17）：那种根这一窗名下没有一件
+/// 几何要变（Q6 第一手已把只跳 `CACHID` 戳的候选从上卷里摘掉），单元路对它切出的空子计划发一份空的 `Partial`
+/// 只推回执，不再整根重算。**已知差异**：跨根设计引用的引用者只被盖戳这一形状，今天靠戳做种子整根 regen 收住，
+/// D10 之后靠 C2 / C8 / P4 级联把引用者的根挡在 D10 之外——开这个开关时建议把
+/// [`model_structural_connection_cascade`] / [`model_cable_endpoint_cascade`] 一起开，不开就是接受那条差异。
+///
 /// 这是「少算」方向的开关，开门要过 ADR-078 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
 /// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_unit_level_publish() -> bool {

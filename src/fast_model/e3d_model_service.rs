@@ -21,7 +21,7 @@ use e3d_model::increment::{
     IncrementReport, PlanLimits, UpdatePlan, collect_window, execute_plan, increment_update,
     plan_update, plan_update_with,
 };
-use e3d_model::ledger::ChangeLedger;
+use e3d_model::ledger::{ChangeLedger, Disposition};
 use e3d_model::pipeline::{Report, generate_subtree_with_cache};
 use e3d_model::primitive_instance::canonical_primitive_mesh;
 use e3d_model::transform::dmat4_to_affine4x3;
@@ -66,21 +66,30 @@ pub struct RigidMotionUnit {
 
 /// 单元级发布执行体（ADR-078 D4）一轮的结果，与 [`RigidMotionReport`] 同形：`completed` 走成了局部提交，
 /// `replayed` 是「回执已在 T」的窗口重放（投影一字未动、按已完成计），`fallbacks` 回退整根重算（带原因；
-/// D8：任何一件不成都整根回退，回退永远正确、只是不省）。
+/// D8：任何一件不成都整根回退，回退永远正确、只是不省）。`receipt_only` 是 `completed` 的**子集**——
+/// 局部清单为空、只把回执推到 T 的那几根（ADR-078 D10：只被 `no_model` 候选碰到的根，一件几何都没重建），
+/// 只作观测。
 #[derive(Debug, Default)]
 pub struct UnitPublishReport {
     pub completed: Vec<String>,
     pub replayed: Vec<String>,
     pub fallbacks: Vec<(String, String)>,
+    pub receipt_only: Vec<String>,
 }
 
 /// 单元级发布执行体一次吃的一根。`source_start_sesno` 是 `plan_update(S→T)` 的窗口基线 S：局部清单只对
 /// 「投影还停在 S」的根成立——回执已在 T 是重放，既不在 S 也不在 T 是半截状态或别的路径动过它，两者
 /// 都不许把局部清单叠上去（[`republish_gate`]，ADR-078 D4）。
+///
+/// `no_model_only`（ADR-078 D10）：规划器判这根这一窗**只被账本去向 `no_model` 的候选碰到**——闭包直接命中、
+/// 不是级联（C2 / C8 / P4）扩进来的、S 端已发布且安定、归到它名下的每个候选都是 `no_model`。只有带着它，
+/// 生产方切出来的**空**子计划才许当「这根名下没有一件几何要变」发一份空的 `Partial`（只推回执）；不带它的
+/// 空子计划照旧回退整根 regen——选根看得比 `plan_update` 远，空清单不是「没变」。
 #[derive(Debug, Clone)]
 pub struct UnitPublishUnit {
     pub root_refno: String,
     pub source_start_sesno: u32,
+    pub no_model_only: bool,
 }
 
 /// 单元级发布一根的**局部**产出（ADR-078 D2 的 `Partial`）：只点名这几件，缺席什么也不证明，要删的
@@ -98,6 +107,14 @@ pub struct UnitDelta {
     /// `upserts` 里真带上的段数：`tube_branch_resets` 是整段重写，漏一段就是静默丢管。
     /// 键是 `(word0, word1)`——`RefNo` 不实现 `Ord`，与 `owners` 表同一约定。
     pub tube_segments: BTreeMap<(u32, u32), usize>,
+}
+
+impl UnitDelta {
+    /// 一件几何都不动：不插、不删、不整段重写。这样的产出只有一个合法来源——生产方对一根**只被
+    /// `no_model` 候选碰到**的根切出空子计划（ADR-078 D10）；发出去就是「只推回执」。
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.removals.is_empty() && self.tube_branch_resets.is_empty()
+    }
 }
 
 /// 管段完整性门（ADR-078 D6 / 实施约束 4）：一次 `Partial` 若触到某条 BRAN 的管身，它的管身按**整段**处理——
@@ -174,6 +191,10 @@ struct WindowPlanSets {
     /// 计划期就读挂的候选 / 容器数（`unresolved` + `derived_stale_unreadable`）：非零时这一窗的
     /// 分类不可信，一根都不许走局部（D8）。
     unreadable: usize,
+    /// 账本上每个候选的去向（`ChangeLedger::dispositions`，`(word0, word1)` 键）。D10 的生产方守卫拿它
+    /// 复核「这根名下的候选全是 `no_model`」——规划器的提示与生产方的计划是两次独立算的（实施约束 12），
+    /// 空子计划能不能当「没变」发，两边都得点头。
+    dispositions: Vec<((u32, u32), Disposition)>,
 }
 
 impl WindowPlanSets {
@@ -195,6 +216,51 @@ impl WindowPlanSets {
         );
         Ok(())
     }
+}
+
+/// D10 的生产方守卫：这根名下（两端属主链任一端经过它，或候选就是它）的账本候选**全部**去向
+/// `no_model`，且至少有一个。成立时「子计划为空」才读得成「这一窗 DESI 侧没有一件几何要变」——
+/// 去向 `no_model` 的候选是两票元数据门放行的（字典 DCHC=0 ∨ 是戳，∧ 生成器不读），按构造不改几何。
+///
+/// 两种不成立各是一种「空清单不是没变」：名下一个候选都没有 = 这根不是被账本碰到的（级联 / 恢复 /
+/// 目录名单——选根看得比 `plan_update` 远）；名下有 `rolled_up` / `unresolved` 的候选却切出空子计划 =
+/// 它折进的单元不在这根之下（嵌套根）或分类不可信，都不许拿空清单盖 T 章。
+///
+/// **不看候选在根之上的方向**（与刚体路的归因差这一条，故意的）：祖先闭包按构造不因根之上的种子把根
+/// 收进来；根之上的改动若真波及根下几何（挪 ZONE / 换类型 / 删除），e3d-model 的级联会把根下的单元放进
+/// 动作集，子计划就不空——空子计划这一支根本走不到。反过来把 `WORL` 的 `UPDT` 一类每窗必跳的祖先候选算
+/// 进来，这条路在真库上一次都打不着。
+pub(crate) fn root_touched_only_by_no_model_candidates(
+    dispositions: &[((u32, u32), Disposition)],
+    root: RefNo,
+    owners_s: &BTreeMap<(u32, u32), RefNo>,
+    owners_t: &BTreeMap<(u32, u32), RefNo>,
+) -> anyhow::Result<()> {
+    let packed_root = packed_refno(root);
+    // 链含自身：候选就是根也算「名下」；两端表里都没有的候选链上只有它自己，除了它是根之外归不到谁。
+    let under = |unit: (u32, u32), owners: &BTreeMap<(u32, u32), RefNo>| {
+        ancestor_chain(RefNo::new(unit.0, unit.1), owners).map(|chain| chain.contains(&packed_root))
+    };
+    let mut attributed = 0usize;
+    for (key, disposition) in dispositions {
+        if !(under(*key, owners_t)? || under(*key, owners_s)?) {
+            continue;
+        }
+        attributed += 1;
+        anyhow::ensure!(
+            *disposition == Disposition::NoModel,
+            "candidate {}/{} under root {root} is {disposition:?}, not no_model; an empty partial \
+             manifest cannot stand for its change",
+            key.0,
+            key.1
+        );
+    }
+    anyhow::ensure!(
+        attributed > 0,
+        "no ledger candidate is attributed to root {root}; it was selected for a reason a partial \
+         DESI delta cannot see (cascade / recovery)"
+    );
+    Ok(())
 }
 
 /// 一根子计划里 `execute_plan` 的 `removals` **唯一**许来自的三处（ADR-078 D6 第一条）：
@@ -306,7 +372,7 @@ impl<'a> UnitDeltaProducer<'a> {
             remove,
             regenerate_derived,
             derived_stale,
-            ledger: _,
+            ledger,
             full_rebuild,
             report,
         } = plan;
@@ -324,6 +390,7 @@ impl<'a> UnitDeltaProducer<'a> {
                 derived_stale,
                 full_rebuild,
                 unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
+                dispositions: ledger.dispositions().to_vec(),
             },
         })
     }
@@ -338,10 +405,16 @@ impl<'a> UnitDeltaProducer<'a> {
     }
 
     /// 一根的局部产出。执行体已过完幂等闸（回执停在 S）才会叫到这里。
+    ///
+    /// `no_model_only` 是规划器随 unit 带来的提示（[`UnitPublishUnit::no_model_only`]，D10）：为真且这根的
+    /// 子计划为空时，再经 [`root_touched_only_by_no_model_candidates`] 对账本复核一遍，成立就回一份**空**
+    /// [`UnitDelta`]（只带本轮的 `model_target`）——执行体拿它发一份空的 `Partial`，存储在写锁里把回执推到 T、
+    /// 章按原记录重算（逐字不变）。为假的空子计划照旧 `bail!` 回退。
     pub(crate) fn produce(
         &mut self,
         root: RefNo,
         old_receipt: &RootReceipt,
+        no_model_only: bool,
     ) -> anyhow::Result<UnitDelta> {
         self.plan.admits_partial_publish()?;
         // 不可变目标先算、先核（便宜）：设计窗之外任何一格变了，都不是局部能覆盖的。
@@ -371,15 +444,39 @@ impl<'a> UnitDeltaProducer<'a> {
             self.target.index.owners.as_ref(),
         )?;
         // 选根比 `plan_update` 看得更远（结构连接 / 电缆端点 / 设计引用级联、目录级联、带过来的
-        // 未完成生成）：那些根这一窗没有一个自己的单元变了，几何却可能变了。子计划为空就不是
+        // 未完成生成）：那些根这一窗没有一个自己的单元变了，几何却可能变了。子计划为空默认就不是
         // 「没变」，是局部清单覆盖不到的理由——空 delta 盖一个 T 章正是 Q4 那种静默缺件。
-        anyhow::ensure!(
-            !subplan.is_empty(),
-            "window plan {}→{} names no unit under root {root}; the root was selected for a reason a \
-             partial DESI delta cannot see (cascade / recovery); falling back to regen",
-            self.base_sesno,
-            self.target_sesno
-        );
+        //
+        // 唯一的例外（D10）：规划器判这根**只被 `no_model` 候选碰到**（闭包直接命中、非级联、S 端安定、
+        // 名下候选全是两票门放行的），且这里对账本复核也成立——那空子计划读作「DESI 侧没有一件几何要变」，
+        // 回一份空 delta 只推回执。设计窗之外的目标（目录 / 模板 / 生成器）已在上面核过没变。
+        if subplan.is_empty() {
+            anyhow::ensure!(
+                no_model_only,
+                "window plan {}→{} names no unit under root {root}; the root was selected for a reason a \
+                 partial DESI delta cannot see (cascade / recovery) and the planner did not mark it \
+                 no_model_only; falling back to regen",
+                self.base_sesno,
+                self.target_sesno
+            );
+            root_touched_only_by_no_model_candidates(
+                &self.plan.dispositions,
+                root,
+                self.base.index.owners.as_ref(),
+                self.target.index.owners.as_ref(),
+            )
+            .with_context(|| {
+                format!(
+                    "window plan {}→{} names no unit under root {root} and the no_model_only hint \
+                     does not hold against the ledger; falling back to regen",
+                    self.base_sesno, self.target_sesno
+                )
+            })?;
+            return Ok(UnitDelta {
+                model_target: Some(model_target),
+                ..UnitDelta::default()
+            });
+        }
         let (plan, sets) = subplan.into_update_plan(self.base_sesno, self.target_sesno);
         let outcome = execute_plan(&self.target.set, plan);
         let failed = outcome.report.regen_failed.len() + outcome.report.derived_failed.len();
@@ -1837,7 +1934,7 @@ impl E3dModelService {
                     .map_err(|error| format!("{error:#}"))
             });
             match producer {
-                Ok(producer) => producer.produce(root, old),
+                Ok(producer) => producer.produce(root, old, unit.no_model_only),
                 Err(reason) => bail!("window producer {base_sesno}→{target_sesno} failed to open: {reason}"),
             }
         })
@@ -2995,9 +3092,24 @@ pub(crate) fn republish_roots_by_unit_delta_on(
             ));
             continue;
         }
+        // D10：空清单（不插、不删、不重写管段）只许来自带 `no_model_only` 提示的根——生产方对那种根切出
+        // 空子计划、对账本复核过才回空 delta；别的根回出空 delta 是生产方的 bug，不许拿它盖 T 章。
+        let receipt_only = delta.is_empty();
+        if receipt_only && !unit.no_model_only {
+            report.fallbacks.push((
+                root_refno.clone(),
+                format!(
+                    "partial manifest for root {root} is empty but the root was not planned as \
+                     no_model_only; an empty delta is not proof of \"unchanged\" (D10); falling back \
+                     to regen"
+                ),
+            ));
+            continue;
+        }
         // D2：一根被删空（最后一件也删了）不走 `Partial`，退回根级路径。执行体不读记录，判据只用
         // 回执上的记录数与清单本身：带了 upsert 的清单落完必有记录；一件不带、又删了不少于整根记录数
         // 的 id，或整段清了某条分支的管身（清多少段这里看不见），都可能把这根删空——按可能算，回退。
+        // 什么都不删的空清单（D10 只推回执）不在此列：它留下的记录就是原来那些，零记录的根也照旧零记录。
         if partial_delta_may_empty_the_root(&delta, old_receipt.geometry_count) {
             report.fallbacks.push((
                 root_refno.clone(),
@@ -3030,13 +3142,18 @@ pub(crate) fn republish_roots_by_unit_delta_on(
             )),
             scope: CommitScope::Partial,
         });
-        landing.push(root_refno.clone());
+        landing.push((root_refno.clone(), receipt_only));
     }
     if !commits.is_empty() {
         // 一次发布调用 = 一个原子边界（D4）：改挂两端的根一起落地。发布口不收件整轮上抛，与刚体路一致
         // ——没有一根算走成。
         publish(commits)?;
-        report.completed = landing;
+        for (root_refno, receipt_only) in landing {
+            if receipt_only {
+                report.receipt_only.push(root_refno.clone());
+            }
+            report.completed.push(root_refno);
+        }
     }
     Ok(report)
 }
@@ -3045,13 +3162,18 @@ pub(crate) fn republish_roots_by_unit_delta_on(
 /// 的记录数（投影完整时就是这根此刻的记录数）与清单本身。
 ///
 /// - 带了 upsert → 落完必有记录，不可能删空；
-/// - 一件不带、显式删除的 id 数 ≥ 记录数 → 可能删空（多出来的 id 若是无效 id 就删不到，那是保守多退一次）；
-/// - 一件不带、还整段清了某条分支的管身 → 一条重置清掉几段这里看不见，按可能删空算。
+/// - 一件不带、显式删除的 id 数 ≥ 记录数（且真删了东西）→ 可能删空（多出来的 id 若是无效 id 就删不到，
+///   那是保守多退一次）；
+/// - 一件不带、还整段清了某条分支的管身 → 一条重置清掉几段这里看不见，按可能删空算；
+/// - 什么都不删、什么都不插（D10 的只推回执）→ 记录集合原样不动，**不是**删空——零记录的根照旧零记录，
+///   那是它本来的样子，不是这份清单删出来的。
 ///
-/// 只在「可能」这一侧保守：判 `false` 的清单落完至少留一条记录，判 `true` 的回退整根重算，回退永远正确。
+/// 只在「可能」这一侧保守：判 `false` 的清单落完记录集合非空或与落之前相同，判 `true` 的回退整根重算，
+/// 回退永远正确。
 fn partial_delta_may_empty_the_root(delta: &UnitDelta, records_on_receipt: usize) -> bool {
     delta.upserts.is_empty()
-        && (!delta.tube_branch_resets.is_empty() || delta.removals.len() >= records_on_receipt)
+        && (!delta.tube_branch_resets.is_empty()
+            || (!delta.removals.is_empty() && delta.removals.len() >= records_on_receipt))
 }
 
 /// 目标没变、投影也还完整时这一根的全部改动：只重盖一次章。
@@ -4237,11 +4359,13 @@ mod tests {
             .map(|root| UnitPublishUnit {
                 root_refno: root.to_string(),
                 source_start_sesno: 42,
+                no_model_only: false,
             })
             .collect::<Vec<_>>();
         units.push(UnitPublishUnit {
             root_refno: "not-a-refno".into(),
             source_start_sesno: 42,
+            no_model_only: false,
         });
 
         let mut produced = Vec::new();
@@ -4303,6 +4427,7 @@ mod tests {
         let unit = UnitPublishUnit {
             root_refno: root.to_string(),
             source_start_sesno: 42,
+            no_model_only: false,
         };
 
         let stamped = std::cell::RefCell::new(Vec::new());
@@ -4412,6 +4537,280 @@ mod tests {
             before,
             "A4：第二次提交投影一字不动"
         );
+    }
+
+    /// ADR-078 D10：带 `no_model_only` 提示的根，生产方回一份**空** delta，执行体照样以 `Partial` 发出去
+    /// ——一件几何都不动（三条记录原地、`source_sesno` 停在 S），回执推到 T、章按原记录重算逐字不变，
+    /// `receipt_only` 点名它；同一份计划再提是重放。不带提示的根回出空 delta 是生产方的 bug：回退、不发。
+    #[test]
+    fn a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt() {
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let root = RefNo::new(24383, 800);
+        seed_complete_root(&store, &mesh_dir, root, 42);
+        let receipt_at_s = store.receipt(ProjectionScope::Current, root).unwrap();
+        let records_at_s = store.records_of_root(ProjectionScope::Current, root);
+        assert_eq!(records_at_s.len(), 3);
+
+        // 不带提示：空 delta 不许当「没变」发。
+        let unhinted = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: 42,
+            no_model_only: false,
+        };
+        let before = store.root_snapshot(ProjectionScope::Current, root);
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unhinted),
+            |_, _, _| Ok(UnitDelta::default()),
+            |_| panic!("空 delta 没有 no_model_only 提示不该发布"),
+        )
+        .unwrap();
+        assert!(report.completed.is_empty() && report.receipt_only.is_empty());
+        assert_eq!(report.fallbacks.len(), 1);
+        let reason = &report.fallbacks[0].1;
+        assert!(
+            reason.contains("not planned as no_model_only")
+                && reason.contains("falling back to regen"),
+            "{reason}"
+        );
+        assert_eq!(store.root_snapshot(ProjectionScope::Current, root), before);
+
+        // 带提示：空 Partial 发出去，只推回执。
+        let hinted = UnitPublishUnit {
+            no_model_only: true,
+            ..unhinted.clone()
+        };
+        let mut published = Vec::new();
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&hinted),
+            |unit, produced_root, old_receipt| {
+                assert!(unit.no_model_only);
+                assert_eq!(produced_root, root);
+                assert_eq!(old_receipt.source_sesno, 42);
+                Ok(UnitDelta::default())
+            },
+            |commits| {
+                assert_eq!(commits.len(), 1);
+                let commit = &commits[0];
+                assert_eq!(commit.scope, CommitScope::Partial);
+                assert!(
+                    commit.upserts.is_empty()
+                        && commit.removals.is_empty()
+                        && commit.tube_branch_resets.is_empty(),
+                    "空清单：不插、不删、不重写管段"
+                );
+                let (_, placeholder) = commit.receipt.as_ref().expect("回执照盖");
+                assert_eq!(
+                    (placeholder.source_sesno, placeholder.published_via.as_str()),
+                    (43, "unit")
+                );
+                published.extend(store.try_commit_current(commits));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed, vec![root.to_string()]);
+        assert_eq!(
+            report.receipt_only,
+            vec![root.to_string()],
+            "只推回执的根单列出来，供回执 / 面板观测"
+        );
+        assert!(report.replayed.is_empty() && report.fallbacks.is_empty());
+
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        assert_eq!(
+            records, records_at_s,
+            "一件几何都没动，`source_sesno` 停在 S"
+        );
+        let receipt = store.receipt(ProjectionScope::Current, root).unwrap();
+        assert_eq!(
+            (receipt.source_sesno, receipt.published_via.as_str()),
+            (43, "unit")
+        );
+        assert_eq!(
+            (receipt.manifest_hash.as_str(), receipt.geometry_count),
+            (
+                receipt_at_s.manifest_hash.as_str(),
+                receipt_at_s.geometry_count
+            ),
+            "章按原记录重算，与 S 上的逐字相同"
+        );
+        assert_eq!(published.as_slice(), &[(root, receipt.clone())]);
+        assert!(store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir));
+
+        // 再提一次：重放。
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&hinted),
+            |_, _, _| panic!("重放不该再要产出"),
+            |_| panic!("重放不该再发布"),
+        )
+        .unwrap();
+        assert_eq!(report.replayed, vec![root.to_string()]);
+    }
+
+    /// ADR-078 D10 的典型形状——**零记录的根**（HANG / SUPPO 那类没有 builder 的根，Q6 语料里 9172 个多算根有
+    /// 8486 个是它）：回执 `geometry_count = 0`、投影按定义完整。空 delta 对它**不是**「删空」（D2 那条判据
+    /// 只看真删了东西的清单），照样只推回执；显式删除 / 整段重写才按可能删空回退。
+    #[test]
+    fn an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root() {
+        // 判据本身：什么都不删的空清单不算「可能删空」，零记录的根也一样。
+        assert!(!partial_delta_may_empty_the_root(&UnitDelta::default(), 0));
+        assert!(!partial_delta_may_empty_the_root(&UnitDelta::default(), 3));
+        assert!(partial_delta_may_empty_the_root(
+            &UnitDelta {
+                removals: vec!["x".into()],
+                ..UnitDelta::default()
+            },
+            1
+        ));
+        assert!(partial_delta_may_empty_the_root(
+            &UnitDelta {
+                tube_branch_resets: vec![RefNo::new(24383, 1)],
+                ..UnitDelta::default()
+            },
+            0
+        ));
+        assert!(!partial_delta_may_empty_the_root(
+            &UnitDelta {
+                removals: vec!["x".into()],
+                ..UnitDelta::default()
+            },
+            2
+        ));
+
+        // 执行体上走一遍：零记录的根、回执停在 S。
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let root = RefNo::new(24383, 900);
+        let (empty_hash, zero) = manifest_hash(&[]).unwrap();
+        assert_eq!(zero, 0);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: empty_hash.clone(),
+                        geometry_count: 0,
+                        published_via: "regen".into(),
+                    },
+                )),
+                ..ProjectionCommit::default()
+            }],
+        );
+        assert!(
+            store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir),
+            "零记录 + 回执数 0 = 完整"
+        );
+        let unit = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: 42,
+            no_model_only: true,
+        };
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unit),
+            |_, _, _| Ok(UnitDelta::default()),
+            |commits| {
+                store.try_commit_current(commits);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            report.completed,
+            vec![root.to_string()],
+            "{:?}",
+            report.fallbacks
+        );
+        assert_eq!(report.receipt_only, vec![root.to_string()]);
+        let receipt = store.receipt(ProjectionScope::Current, root).unwrap();
+        assert_eq!(receipt.source_sesno, 43);
+        assert_eq!(
+            (receipt.manifest_hash, receipt.geometry_count),
+            (empty_hash, 0),
+            "零记录的章就是空清单的章"
+        );
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        assert!(records.is_empty(), "零记录的根照旧零记录");
+    }
+
+    /// ADR-078 D10 生产方守卫 [`root_touched_only_by_no_model_candidates`]：只看两个方向（候选就是根、
+    /// 候选的 T 端 / S 端链经过根），根之上的候选不算；名下候选全是 `no_model` 且至少一个才成立。
+    ///
+    /// 层级（T 端）：ZONE 1 ─┬─ EQUI 10（根）─── BOX 11 / SUBE 12
+    ///                     └─ EQUI 20（根）─── BOX 21
+    /// S 端另有 BOX 13 在 EQUI 10 下（T 端删了）。
+    #[test]
+    fn the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain() {
+        let e = |n: u32| RefNo::new(24383, n);
+        let key = |n: u32| (24383u32, n);
+        let owners_t = BTreeMap::from([
+            (key(1), e(1)),
+            (key(10), e(1)),
+            (key(11), e(10)),
+            (key(12), e(10)),
+            (key(20), e(1)),
+            (key(21), e(20)),
+        ]);
+        let mut owners_s = owners_t.clone();
+        owners_s.insert(key(13), e(10));
+        let guard = |dispositions: &[((u32, u32), Disposition)]| {
+            root_touched_only_by_no_model_candidates(dispositions, e(10), &owners_s, &owners_t)
+        };
+
+        // 名下一个只戳的候选：成立。候选就是根自己：成立。
+        guard(&[(key(11), Disposition::NoModel)]).unwrap();
+        guard(&[(key(10), Disposition::NoModel)]).unwrap();
+        // 别的根名下的候选不算进来；根之上（ZONE 1）的 RolledUp 候选也不算——两个都不拦。
+        guard(&[
+            (key(11), Disposition::NoModel),
+            (key(21), Disposition::RolledUp),
+            (key(1), Disposition::RolledUp),
+        ])
+        .unwrap();
+        // 名下有一个 RolledUp / Unresolved：不成立，点名它。
+        let err = guard(&[
+            (key(11), Disposition::NoModel),
+            (key(12), Disposition::RolledUp),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("24383/12") && err.contains("RolledUp"),
+            "{err}"
+        );
+        let err = guard(&[(key(12), Disposition::Unresolved)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Unresolved"), "{err}");
+        // T 端删掉的 BOX 13 只在 S 端链上：照样归到这根名下。
+        let err = guard(&[
+            (key(11), Disposition::NoModel),
+            (key(13), Disposition::RolledUp),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("24383/13"), "{err}");
+        // 一个都归不到：不成立。
+        let err = guard(&[(key(21), Disposition::NoModel)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no ledger candidate is attributed"), "{err}");
+        assert!(guard(&[]).is_err());
     }
 
     /// ADR-078 D6 / 实施约束 4 的三条判据，直接对门本身：不重置就带段、重置了没账、账与段数不符，
@@ -4548,6 +4947,7 @@ mod tests {
         let unit = UnitPublishUnit {
             root_refno: root.to_string(),
             source_start_sesno: 42,
+            no_model_only: false,
         };
         let rebuilt_segments = |ordinals: &[u32]| -> anyhow::Result<UnitDelta> {
             let (delta, _) = project_geometry_delta(
@@ -4676,6 +5076,7 @@ mod tests {
             derived_stale: BTreeSet::new(),
             full_rebuild: None,
             unreadable: 0,
+            dispositions: Vec::new(),
         };
         clean.admits_partial_publish().unwrap();
 
@@ -4686,6 +5087,7 @@ mod tests {
             derived_stale: BTreeSet::new(),
             full_rebuild: Some("candidates 30000 > max_candidates 20000".into()),
             unreadable: 0,
+            dispositions: Vec::new(),
         };
         let err = degraded.admits_partial_publish().unwrap_err().to_string();
         assert!(
@@ -4757,7 +5159,10 @@ mod tests {
     /// **整根 `manifest_hash`**（D9 ①：逐字相同；不等时按 `geometry_id` 逐条报差异）。
     ///
     /// 旋钮：`AIOS_UNIT_PUBLISH_PROBE_DBNUM`（默认 8000）、`AIOS_UNIT_PUBLISH_PROBE_WINDOW=S:T`（默认该库
-    /// 最新两个会话）、`AIOS_UNIT_PUBLISH_PROBE_ROOT=a/b`（默认：规划器 regen 名单里第一根 S 端也有的）。
+    /// 最新两个会话）、`AIOS_UNIT_PUBLISH_PROBE_ROOT=a/b`（默认：规划器 regen 名单里第一根 S 端也有的）、
+    /// `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>`（MDB 没声明的语料库挂成额外的 DESI pin，目录依赖仍经当前 MDB 解；
+    /// Q6 那六个库要配 `DB_OPTION_FILE=db_options/DbOption-aps.toml`）。D10 的分桶随 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`
+    /// 收候选表——不设它候选表为空、`no_model_only` 恒假，空子计划照旧回退。
     /// 要配置好的 MDB（`from_current`）与 E3D 模板目录。烘焙写的是真 mesh 目录（内容寻址，与整根重算同一处）。
     #[tokio::test]
     #[ignore = "manual live: needs the configured MDB and the E3D template directory; run with --ignored --nocapture"]
@@ -4778,7 +5183,22 @@ mod tests {
                 .and_then(|value| value.parse::<u32>().ok())
         };
         let dbnum = env_u32("AIOS_UNIT_PUBLISH_PROBE_DBNUM").unwrap_or(8000);
-        let service = E3dModelService::from_current().await?;
+        let mut service = E3dModelService::from_current().await?;
+        // `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>`：MDB 没声明的语料库（Q6 那六个库都是）挂成一枚
+        // 额外的 DESI pin，目录依赖仍经当前 MDB 的定位器解——文件所属项目的 CATA / PROP 得在 MDB 里。
+        if let Ok(file) = std::env::var("AIOS_UNIT_PUBLISH_PROBE_FILE") {
+            use crate::data_interface::direct_store::DbPin;
+
+            let file = PathBuf::from(file);
+            anyhow::ensure!(file.is_file(), "{} is not a file", file.display());
+            service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+            service.pins.push(DbPin {
+                dbnum: dbnum as i32,
+                db_type: "DESI".into(),
+                file,
+                sesno: None,
+            });
+        }
         let pin = service.pin(dbnum)?;
         let (base_sesno, target_sesno) = match std::env::var("AIOS_UNIT_PUBLISH_PROBE_WINDOW") {
             Ok(window) => {
@@ -4834,6 +5254,20 @@ mod tests {
             plan.regen.len(),
             plan.degraded
         );
+        // D10 分桶：探针没有进程内账本，S 端根全算安定。候选表随 `model_unit_level_publish` 开关收集——
+        // 开关关着（没设 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`）时表空、一根都判不出来，探针照旧走老路。
+        let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
+        let no_model_only = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+        println!(
+            "planner: no_model_only roots {} of regen {} (D10; unit-level switch {}; candidates {})",
+            no_model_only.roots.len(),
+            plan.regen.len(),
+            crate::options::model_unit_level_publish(),
+            sources.rigid.candidates.len()
+        );
+        for root in &no_model_only.roots {
+            println!("  no_model_only {}", root.to_pdms_str());
+        }
         let root = match std::env::var("AIOS_UNIT_PUBLISH_PROBE_ROOT") {
             Ok(text) => parse_refno(&text)?,
             Err(_) => {
@@ -4917,9 +5351,19 @@ mod tests {
         println!(
             "window plan: regenerate {planned_regenerate} remove {planned_remove} derived {planned_derived} ({plan_secs:.2}s)"
         );
+        let root_enum = crate::data_interface::generation_root::refno_from_e3d(root);
+        let root_no_model_only = no_model_only.roots.contains(&root_enum);
+        if let Some((_, reason)) = no_model_only
+            .rejected
+            .iter()
+            .find(|(candidate, _)| refno_to_e3d(*candidate) == root)
+        {
+            println!("root is not no_model_only: {reason}");
+        }
         let unit = UnitPublishUnit {
             root_refno: root.to_string(),
             source_start_sesno: base_sesno,
+            no_model_only: root_no_model_only,
         };
         let delta_shape = std::cell::RefCell::new((0usize, 0usize, 0usize));
         let clock = Instant::now();
@@ -4928,7 +5372,7 @@ mod tests {
             &mesh_dir,
             target_sesno,
             std::slice::from_ref(&unit),
-            |_, root, old_receipt| producer.produce(root, old_receipt),
+            |unit, root, old_receipt| producer.produce(root, old_receipt, unit.no_model_only),
             |commits| {
                 let commit = &commits[0];
                 *delta_shape.borrow_mut() = (
@@ -4942,8 +5386,9 @@ mod tests {
         )?;
         let unit_secs = clock.elapsed().as_secs_f64();
         println!(
-            "unit path: completed {:?} replayed {:?} fallbacks {:?} ({unit_secs:.2}s); delta upserts / removals / branch resets = {:?}",
+            "unit path: completed {:?} (receipt-only {:?}) replayed {:?} fallbacks {:?} ({unit_secs:.2}s); delta upserts / removals / branch resets = {:?}",
             report.completed,
+            report.receipt_only,
             report.replayed,
             report.fallbacks,
             delta_shape.borrow()
@@ -5035,14 +5480,19 @@ mod tests {
         let tube_gate = body
             .find("tube_segment_completeness(&delta)")
             .expect("tube segment completeness gate");
+        // D10：空清单只许来自带 `no_model_only` 提示的根，判在管段门之后、提交之前。
+        let empty_guard = body
+            .find("receipt_only && !unit.no_model_only")
+            .expect("D10 empty-delta guard");
         // 提交攒成一批、循环结束一次发（D4 的原子边界）。
         let publication = body.find("publish(commits)?").expect("publication");
         assert!(
             complete < gate
                 && gate < production
                 && production < tube_gate
-                && tube_gate < publication,
-            "顺序必须是 完整性前置 → 闸 → 产出 → 管段完整性门 → 提交"
+                && tube_gate < empty_guard
+                && empty_guard < publication,
+            "顺序必须是 完整性前置 → 闸 → 产出 → 管段完整性门 → 空清单守卫（D10）→ 提交"
         );
         for forbidden in [
             "records_of_root(",

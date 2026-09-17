@@ -2,6 +2,64 @@
 
 ## 2026-09-17
 
+### ADR-078 D10：「touched 但 0 单元」的根在单元路上只推回执——只被 `no_model` 候选碰到的 regen 根发一份空 `Partial`，不再整根重算
+
+- **为什么**：Q6 第一手（`bf405d5ad` + vendor `5d92b97`）把只跳 `CACHID` 的候选从上卷里摘掉，那些根名下**要重建的单元归零**；
+  但三档 `no_model` 候选照旧做闭包种子（不变量「根不在闭包里 ⇒ 子树里什么都没动」靠它守着，第二手 d-365 拍了不动），根仍 `touched`
+  → `RegenRoot`，整根重算出来的几何与 S 端逐字相同、只有回执前移。语料里 9172 / 263612 根（3.5%）是这形状，8486 个零单元；
+  整库缓存重建的扫写窗（aps7344 108→109、aps250209 16→17）整窗都是它。D9 接线后的单元路对这种根也不省：生产方切出的子计划为空，
+  按「空清单不是没变」（Q4 那条静默缺件的防线）回退整根 regen。用户 0917 拍：「开 ADR-078 那条：RegenRoot 只重建变了的单元，
+  把『touched 但 0 单元』的根变便宜」。
+- **改动**（会话 fable-5-1-10）：
+  - **规划器**（`window_root_plan.rs`）：新分桶 `classify_no_model_only_roots`——`plan.regen` 里的根五条缺一不可才点名：窗口没退化；
+    S 端已发布且安定（`settled`）；闭包**直接**命中且**不在**任何级联目标集里（`cascaded_roots()` = C2 `far_end_roots` ∪ C8 / P4
+    `referrer_roots`，按各自目标集取，不用 `touched \ direct`——一根可以既被直接命中又是级联对端）；归到它名下的候选至少一个；
+    名下候选**全部**是 `CandidateKind::NoModel`。归因只看候选就是根 / 候选的 T 端链或 S 端链经过根，**不看根之上的候选**
+    （与刚体路 `classify_one` 差这一条，故意的：闭包不因根之上的种子把根收进来；根之上的改动若真波及根下几何，e3d-model 级联会把
+    根下单元放进动作集、子计划就不空；反过来 `WORL` 的 `UPDT` 每窗必跳，算进来这条路一次都打不着）。候选表与刚体路**共用**：
+    `collect_rigid_motion_sources` 多一个 `rigid_enabled` 形参，任一开关开着就收表，刚体开关关着时不算 `Δ`、只动摆放的候选记 `Other`
+    （`RigidMotionSources::enabled` 仍 = 刚体开关，刚体分桶照旧空）。结果随计划走：`ModelUpdatePlan::unit_publish_no_model_only_roots`
+    （`a/b`，`#[serde(default)]`，基线为 `None` 时恒空）→ `UnitPublishHint::no_model_only` → `UnitPublishUnit::no_model_only`；
+    warnings 多一行 `unit-level publish — no_model_only roots=N of regen=M`。`regen` 的子集加提示，`work_items` / `units` 一字不改。
+  - **生产方**（`UnitDeltaProducer::produce(root, old, no_model_only)`）：子计划为空时，不带提示照旧回退（原因加「the planner did not
+    mark it no_model_only」）；带提示则对账本再复核一遍 `root_touched_only_by_no_model_candidates`（`WindowPlanSets` 从此留着
+    `ledger.dispositions()`；规划器与生产方是两次独立算的计划，实施约束 12——两边都点头才算），成立就回一份**空** `UnitDelta`
+    （只带本轮 `model_target`）。设计窗之外的目标核仍在它之前：目录 / 模板 / 生成器 / 细分档任何一格变了照旧回退——Q6 量表没实现的
+    「#8 目录侧」那一列，这里天然有。
+  - **执行体**（`republish_roots_by_unit_delta_on`）：空 delta **只许来自带提示的 unit**（守卫在管段门之后、提交之前，`include_str!`
+    钉住位置；别的根回出空 delta 是生产方的 bug，回退不发）。放行的空 delta 照常以 `Partial` 提交：存储在写锁里按原记录重算章
+    （逐字不变）、回执推到 T、`published_via = "unit"`；`UnitPublishReport` 加 `receipt_only`（`completed` 的子集），batch_worker 的
+    `ModelUnitResult.message` 带一句「touched only by no_model candidates … receipt advanced … (D10)」、日志行多报「其中 N 根只推回执」。
+    D2「可能删空」判据 `partial_delta_may_empty_the_root` 改口：只对**真删了东西**的空 upsert 清单判真——改口之前 `0 removals ≥ 0 records`
+    恒真，8486 个零单元根一个都走不成。
+  - **探针**：`probe_unit_publish_one_root_against_regen` 打出 D10 分桶（`AIOS_MODEL_UNIT_LEVEL_PUBLISH=1` 收候选表）、按分桶给 unit
+    带提示；新旋钮 `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>` 把 MDB 没声明的语料库挂成额外 DESI pin（Q6 那六个库都不在任何 MDB 里，
+    配 `DB_OPTION_FILE=db_options/DbOption-aps.toml` 解目录依赖）。
+  - 文档：ADR-078 状态行（D9 接线 / D10 落地 / **编号撞车**点明）、D10 正文、A8 验收行、Q6 开放问题、「不做」末条改口；
+    `options.rs` 开关文档；计划 §8 Q6 ★0917 段末补指向。
+- **验证**：
+  - 单测：`no_model_only_roots_need_every_one_of_the_five_conditions`、`the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain`、
+    `a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt`、`an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root`、
+    `collect_unit_tasks` / `merging_the_worklist_keeps_the_unit_publish_hint` 的名单测试，守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records`
+    多钉一格。把空清单守卫短路 / D2 判据改回旧形，两条行为测试全红（mutation 核过）。
+    `cargo test --lib -- e3d_model_service:: window_root_plan:: rigid_motion:: manual_update:: model_update_plan:: batch_worker:: model_memory_store:: model_write_behind:: options::`
+    **432 过 0 败 31 ignored**；整套 `cargo test --lib` **2221 过 0 败 118 ignored**（HEAD `f74e44fba` + 本条工作树 + 当前 vendor
+    e3d-model 工作树；比上一条多 4 = 本条新增的 4 条单测）；rustfmt 本轮新增行无差异（`e3d_model_service.rs` 剩 11 处、
+    `window_root_plan.rs` 剩 4 处、`batch_worker.rs` 剩 6 处，按行号对过 HEAD 全是旧的）；CRLF / LF 未翻。
+  - **真库探针**（`DB_OPTION_FILE=db_options/DbOption-aps.toml`、`AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`、`AIOS_UNIT_PUBLISH_PROBE_FILE` 挂文件）：
+    **aps7343 6→7** 规划器 `no_model_only 100 of regen 100`（与 Q6 量表 100 个多算根逐个相同）、根 `23727/3` STRU 零单元：
+    `window plan: regenerate 0 remove 0 derived 0`，单元路 `receipt-only`，空 delta，回执 6→7、章 == regen@7（空清单章），**PARITY OK**；
+    **aps250209 16→17**（扫写窗）`no_model_only 373 of regen 373`，根 `2013286753/40174` STRU **50 件**（HANDRA / GENSEC / STRFLT / PANE）：
+    单元路 0.04 s 只推回执、章 `1c6dc19a…` 与 regen@17（0.86 s）**逐字相同**，**PARITY OK**；**aps250209 15→16**（混合窗）
+    `no_model_only 311 of regen 373`（与 Q6 量表 311 多算 / 62 真变逐个相同；`window plan: regenerate 392`），根 `40094` 4 件 PARITY OK。
+    ams8000 S4 那几窗（607→614）扫过：只戳的会话（608→609 / 610→611 / 611→612 / 612→613 / 613→614）候选 1、regen 根 0，没有 D10 形状的根。
+- **未做 / 边界**：开关 `model_unit_level_publish` 仍默认关，D10 随它。**已知差异**：跨根设计引用（`JOIS` / `JOIE` / `CREF` / `CFRA` /
+  `STAREF` / `ENDREF` / `POSREF`）的引用者只被盖戳这一形状，今天靠戳做种子整根 regen「碰巧」收住，D10 之后靠 C2 / C8 / P4 把引用者的
+  根挡在 D10 之外——三条级联默认关，开 D9 时建议一起开；要不要写死「级联关着 ⇒ 不分桶」见 ADR Q6。D7（整根落盘）/ A5 / A6 全语料 /
+  A7 净收益照旧未做；D10 这类根的落盘代价 = 整根行重写（零记录根 = 只写回执）。**ADR 编号撞车**：本仓另有一份 Accepted 的
+  `ADR-078-projects-come-from-the-mdb…`，两份 D 编号互不相干，改不改号待拍板。ADR 草案文件此前一直**未跟踪**（changelog 0916 条说新增、
+  但没 `git add`），本条随提交入库。
+
 ### 属性变化分类对齐 core · §8 Q6 落地：只 `CACHID` 跳动的候选进 `no_model` 第三档 `cache_stamp`，窗 C 上 GENSEC / HANDRA 不再挡刚体前移
 
 - **为什么**：E3D 3.1 挪一件会给它整棵子树里每个带 `CACHID` 的元素各盖一次戳（S4 窗 C：STRFLT 自己 + 10 TREAD + 2 GENSEC + 2 HANDRA）。
