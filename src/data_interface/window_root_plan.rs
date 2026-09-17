@@ -2571,6 +2571,180 @@ mod tests {
         }
     }
 
+    /// ADR-080 实施约束 9 的守卫：`model_unit_level_publish` 关着时行为必须**逐位**等于今天——计划上没有基线、
+    /// 没有一个单元带 `unit_publish` 提示、单元级执行体一次都不被叫到。整条链只有规划器一处读开关，往下全靠
+    /// 「基线 `None` ⇒ 提示 `None` ⇒ 分桶为空 ⇒ 执行体不叫」传下去，所以钉四处，缺一处就红：
+    /// ① 规划器（本文件）：`unit_publish_base_sesno` 只从 `model_unit_level_publish() ∧ 没退化` 得出，D10 名单
+    ///    只在基线在时算，两格原样搬进 `ModelUpdatePlan`，文件里再没有第二处给它们赋值；`collect` 为单元级收候选表
+    ///    也要开关开。
+    /// ② 提示（`manual_update.rs`）：生产代码里 `UnitPublishHint` 只在 `collect_unit_tasks` 里、且只在
+    ///    `unit_publish_base_sesno.map(…)` 之下构造；合并工作单只搬已有的提示。行为也核一遍：基线 `None` 时
+    ///    D10 名单上的根也不带提示，基线 `Some` 时才带（免得这条守卫空转）。
+    /// ③ 分流（`batch_worker.rs`）：`run_unit_worklist` 按 `unit_publish.is_some()` 分桶，桶空不叫
+    ///    `run_unit_publish_units`；`republish_roots_by_unit_delta_from_window` 的生产调用点只有它里面那一处。
+    #[test]
+    fn switching_unit_level_publish_off_leaves_no_hint_and_never_reaches_the_executor() {
+        // 三个文件行尾不一（本文件 CRLF），先归一；只看 `#[cfg(test)]` 之前的生产半边。
+        let planner = include_str!("window_root_plan.rs").replace("\r\n", "\n");
+        let planner = planner
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("planner production half")
+            .0;
+        let hints = include_str!("manual_update.rs").replace("\r\n", "\n");
+        let hints = hints
+            .split_once("\n#[cfg(test)]\nmod ")
+            .expect("manual_update production half")
+            .0;
+        let worker = include_str!("batch_worker.rs").replace("\r\n", "\n");
+        let worker = worker
+            .split_once("\n#[cfg(test)]\n")
+            .expect("batch_worker production half")
+            .0;
+        // 顶层 fn 的正文：从签名起到第一个列 0 的 `}`。
+        let top_level_fn = |source: &str, start: &str| -> String {
+            let rest = source.split_once(start).expect(start).1;
+            rest[..rest.find("\n}\n").expect("fn end")].to_owned()
+        };
+
+        // ① 规划器：基线与 D10 名单都只从开关得出，且只赋值一次。
+        let build = top_level_fn(
+            planner,
+            "pub(crate) async fn build_model_update_plan_from_window(",
+        );
+        assert!(
+            build.contains(
+                "let unit_publish_base_sesno = (crate::options::model_unit_level_publish()\n        \
+                 && plan.degraded.is_none())\n    .then_some(base_sesno);"
+            ),
+            "基线只在开关开着且本窗没退化时带上"
+        );
+        assert!(
+            build.contains(
+                "let unit_publish_no_model_only_roots = if unit_publish_base_sesno.is_some() {"
+            ),
+            "D10 名单只在基线在时算"
+        );
+        assert!(
+            build.contains("out.unit_publish_base_sesno = unit_publish_base_sesno;")
+                && build.contains(
+                    "out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;"
+                ),
+            "两格原样搬进计划"
+        );
+        assert_eq!(
+            planner.matches("unit_publish_base_sesno =").count(),
+            2,
+            "本文件生产代码里给基线赋值的只有 `let` 与搬进计划那两处"
+        );
+        assert_eq!(
+            planner
+                .matches(".unit_publish_no_model_only_roots =")
+                .count(),
+            1,
+            "D10 名单只在搬进计划时赋一次"
+        );
+        let collect = {
+            let rest = planner
+                .split_once("    pub fn collect(")
+                .expect("collect")
+                .1;
+            &rest[..rest.find("\n    }\n").expect("collect end")]
+        };
+        assert!(
+            collect.contains("let unit_level_enabled = crate::options::model_unit_level_publish()"),
+            "为单元级收候选表也要开关开着"
+        );
+
+        // ② 提示：生产代码里只有 `collect_unit_tasks` 在基线之下造 `UnitPublishHint`。
+        assert_eq!(
+            hints.matches("UnitPublishHint {").count()
+                - hints.matches("pub struct UnitPublishHint {").count(),
+            1,
+            "生产代码里构造 UnitPublishHint 的只许有 collect_unit_tasks 一处（另一处是它的定义）"
+        );
+        assert!(
+            hints.contains(
+                "unit_publish: unit_publish_base_sesno.map(|source_start_sesno| UnitPublishHint {"
+            ),
+            "那一处必须挂在基线的 map 之下"
+        );
+        assert!(
+            hints.contains("existing.unit_publish = task.unit_publish;"),
+            "合并工作单只搬已有的提示，不另造"
+        );
+        let unit = DeliveryUnitSummary {
+            root_refno: r(6).to_pdms_str(),
+            noun: "BRAN".into(),
+            will_generate: true,
+            ..Default::default()
+        };
+        let named = vec![unit.root_refno.clone()];
+        let off = crate::data_interface::manual_update::collect_unit_tasks(
+            std::slice::from_ref(&unit),
+            &[],
+            7997,
+            42,
+            None,
+            &named,
+        );
+        assert_eq!(off.len(), 1);
+        assert!(
+            off[0].unit_publish.is_none(),
+            "基线 None：D10 名单上的根也不带提示"
+        );
+        let on = crate::data_interface::manual_update::collect_unit_tasks(
+            std::slice::from_ref(&unit),
+            &[],
+            7997,
+            42,
+            Some(41),
+            &named,
+        );
+        assert!(
+            matches!(
+                on[0].unit_publish,
+                Some(crate::data_interface::manual_update::UnitPublishHint {
+                    source_start_sesno: 41,
+                    no_model_only: true,
+                })
+            ),
+            "基线 Some 才带提示——这条守卫不是空转"
+        );
+
+        // ③ 分流：按提示分桶，桶空不叫执行体；执行体的生产调用点只有一处。
+        let worklist = top_level_fn(worker, "async fn run_unit_worklist(");
+        let partition = worklist
+            .find(".partition(|task| task.unit_publish.is_some());")
+            .expect("按 unit_publish 提示分桶");
+        let guard = worklist
+            .find("if !unit_tasks.is_empty() {")
+            .expect("桶空不进单元路");
+        let call = worklist
+            .find("run_unit_publish_units(")
+            .expect("单元路分流");
+        assert!(
+            partition < guard && guard < call,
+            "分桶 → 判空 → 才叫 run_unit_publish_units，顺序不能乱"
+        );
+        assert_eq!(
+            worker.matches("run_unit_publish_units(").count(),
+            2,
+            "run_unit_publish_units 只有定义与 run_unit_worklist 里那一次调用"
+        );
+        assert_eq!(
+            worker
+                .matches("republish_roots_by_unit_delta_from_window(")
+                .count(),
+            1,
+            "单元级执行体的生产调用点只有 run_unit_publish_units 里那一处"
+        );
+        let stage = top_level_fn(worker, "async fn run_unit_publish_units(");
+        assert!(
+            stage.contains("republish_roots_by_unit_delta_from_window("),
+            "那一处就在 run_unit_publish_units 里"
+        );
+    }
+
     /// 探针（手动）：钉一窗、开着 `model_transform_cheap_path` 跑一遍**生产同款**选根 + 刚体分桶
     /// （`WindowRootSources::collect` → `impact` → `plan_window_roots` → `rigid_motion`），把候选表按类
     /// （合格锚点 / 被排除锚点 / `no_model` / `Other`，`Other` 里单列「只 `CACHID`」）与每个被波及根的判决

@@ -419,6 +419,12 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
 8. **对拍门是 `#[ignore]` 手动门**，不进 CI 默认集（它要 E3D 模板目录与真库），
    但必须在 `changelog.md` 留跑过的数字与日期。
 9. **回退位保留到开关默认开之后一个版本**：`model_unit_level_publish=false` 时行为必须**逐位**等于今天。
+    ★0917 守卫（会话 fable-5-1-18）：`window_root_plan::tests::switching_unit_level_publish_off_leaves_no_hint_and_never_reaches_the_executor`
+    钉住整条「开关 → 基线 → 提示 → 分桶 → 执行体」链——规划器里 `unit_publish_base_sesno` 只从 `model_unit_level_publish() ∧ 没退化`
+    得出、D10 名单只在基线在时算、两格只赋值一次、`collect` 为单元级收候选表也要开关开；`manual_update.rs` 生产代码里 `UnitPublishHint`
+    只在 `collect_unit_tasks` 的 `unit_publish_base_sesno.map(…)` 之下构造（行为核：基线 `None` 时 D10 名单上的根也不带提示）；
+    `batch_worker::run_unit_worklist` 按 `unit_publish.is_some()` 分桶、桶空不叫 `run_unit_publish_units`，
+    `republish_roots_by_unit_delta_from_window` 的生产调用点只有那一处。mutation：把提示改成不看基线，守卫红在「那一处必须挂在基线的 map 之下」。
 10. **`Partial` 回执的章只许存储盖**（D5）：调用方不得在锁外自算 `manifest_hash` / `geometry_count` 填进
     `Partial` 回执当真值——填了也会被覆盖；要登记 durable 身份、要对 ACK，一律用 `commit` /
     `try_commit_current` 返回的那份。`WholeRoot` 反之：存储不替它算，调用方对自己写的章负责。

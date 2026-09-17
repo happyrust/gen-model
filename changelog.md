@@ -2,6 +2,24 @@
 
 ## 2026-09-17
 
+### ADR-080 实施约束 9 补守卫：`model_unit_level_publish` 关着时 `unit_publish` 提示恒 `None`、单元级执行体一次不被叫到
+
+- **为什么**：约束 9「关着时逐位等于今天」此前只有机制没有守卫——开关只在规划器一处被读，往下全靠「基线 `None` ⇒ 提示 `None` ⇒
+  分桶为空 ⇒ 执行体不叫」传下去，链上任何一环被人顺手改掉（比如提示不看基线、或多开一个执行体入口），默认配置下的行为就变了而没人报错。
+  用户 0917 拍：补一条守卫。
+- **守卫**（`window_root_plan::tests::switching_unit_level_publish_off_leaves_no_hint_and_never_reaches_the_executor`，`include_str!` 钉三个文件的生产半边 + 一段行为）：
+  ① 规划器 `build_model_update_plan_from_window`：`unit_publish_base_sesno` 只从 `model_unit_level_publish() ∧ plan.degraded.is_none()` 得出，
+  `unit_publish_no_model_only_roots` 只在基线在时算，两格原样搬进 `ModelUpdatePlan`、文件里再无第二处赋值；`WindowRootSources::collect`
+  为单元级收候选表也要开关开。② `manual_update.rs` 生产代码里 `UnitPublishHint` 只在 `collect_unit_tasks` 的 `unit_publish_base_sesno.map(…)` 之下构造，
+  `merge_unit_worklist` 只搬已有提示；行为核：基线 `None` 时 D10 名单上的根也不带提示，基线 `Some(41)` 才带（守卫不空转）。
+  ③ `batch_worker::run_unit_worklist` 先 `.partition(|task| task.unit_publish.is_some())`、再 `if !unit_tasks.is_empty()`、才 `run_unit_publish_units(`，
+  顺序钉死；`run_unit_publish_units(` 全文只有定义 + 那一次调用，`republish_roots_by_unit_delta_from_window(` 的生产调用点只有它里面那一处。
+- **mutation**：把 `collect_unit_tasks` 的提示改成 `Some(UnitPublishHint { source_start_sesno: base.unwrap_or(0), … })`（不看基线），守卫红在
+  「那一处必须挂在基线的 map 之下」；改回后绿。
+- **验证**：`cargo test --lib -- window_root_plan::` **34 过 0 败 11 ignored**；整套 `cargo test --lib` **2224 过 0 败 118 ignored**（+1）；
+  `rustfmt --check` 新增段按它改到干净（文件里剩 1504 / 2026 / 2038 / 2256 四处在新增段之前、HEAD 上就有）；`window_root_plan.rs` CRLF 未变。
+  生产代码零改动（mutation 改过的 `manual_update.rs` 已逐字改回，`git diff` 为空）。
+
 ### ADR-080 A5 补测试：`Partial` 之后 `persist_root` 过 D3 对账，七张表回读与 regen 路逐字相同、只有 `model_sesno` 落后
 
 - **为什么**：A5 是 D9 开门前唯一一条**没有任何测试也没有证据**的验收——`batch_worker.rs` 一句注释说「D3 把对账放宽成 `<=` 接的就是这个形状」，
