@@ -583,8 +583,9 @@ fn is_external_workflow(request: &SyncWorkflowRequest) -> bool {
 /// 2. 加载 form 对应活动 task；终态拒绝
 /// 3. action 与 current_node 匹配（active 仅 sj；agree/return/stop 仅 jd/sh/pz）
 /// 4. owner 校验：actor.id == 当前节点负责人
-/// 5. annotation_check 按 action 分化（agree=AgreeAdvance；
-///    active / return / stop 跳过）
+/// 5. annotation_check 按 action 分化（active / agree@sj = ActiveSubmit；
+///    agree@jd/sh/pz = AgreeAdvance；return / stop 跳过，见
+///    [`annotation_check_intent_for_action`]）
 ///
 /// 任意业务阻断走 soft block：返 200 OK + `passed=false` + 结构化诊断。
 pub async fn verify_workflow_handler(
@@ -743,21 +744,25 @@ pub async fn verify_workflow_handler(
     result
 }
 
-/// verify 路径用的 action → annotation_check intent 映射。
-/// active / return / stop 跳过批注检查：return 本身就是带问题批注退回设计。
-fn verify_action_intent_for_node(
+/// action → annotation_check intent，verify 与 sync 两条路径共用这一张表。
+///
+/// - `active`（sj 首次送审 / 驳回后重新送审）与 `agree@sj` 都是「从 sj 往 jd 提」，同走
+///   [`AnnotationCheckIntent::ActiveSubmit`]：要求 open == 0——每条批注都得被回复过
+///   （fixed / wont_fix / agreed / rejected 都算），没批注直接放行。2026-09-17 之前 active
+///   被整个跳过，驳回后带着校核人新加的未处理批注也能原样重提回 jd
+///   （`returned-sj-active-block` 场景那 6 条断言倒的就是这里）。
+/// - `agree@jd/sh/pz` 走 [`AnnotationCheckIntent::AgreeAdvance`]。
+/// - `return` / `stop` 跳过：return 本身就是带问题批注退回设计。
+fn annotation_check_intent_for_action(
     kind: WorkflowMutationKind,
     current_node: &str,
 ) -> Option<AnnotationCheckIntent> {
     match (kind, current_node) {
-        (WorkflowMutationKind::Agree, "sj") => Some(AnnotationCheckIntent::ActiveSubmit),
+        (WorkflowMutationKind::Active, _) | (WorkflowMutationKind::Agree, "sj") => {
+            Some(AnnotationCheckIntent::ActiveSubmit)
+        }
         (WorkflowMutationKind::Agree, _) => Some(AnnotationCheckIntent::AgreeAdvance),
-        (
-            WorkflowMutationKind::Active
-            | WorkflowMutationKind::Return
-            | WorkflowMutationKind::Stop,
-            _,
-        ) => None,
+        (WorkflowMutationKind::Return | WorkflowMutationKind::Stop, _) => None,
     }
 }
 
@@ -869,7 +874,7 @@ async fn validate_workflow_for_verify(
         is_external_workflow(request),
     )?;
 
-    let intent = verify_action_intent_for_node(kind, &current_node);
+    let intent = annotation_check_intent_for_action(kind, &current_node);
     if let Some(intent_value) = intent {
         let context = build_annotation_check_context(
             task.id.clone(),
@@ -1214,13 +1219,44 @@ fn workflow_next_step_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    use super::super::annotation_check::AnnotationCheckIntent;
     use super::super::types::{SyncWorkflowRequest, WorkflowNextStep};
     use super::{
-        WorkflowRecord, dominant_records_task_id, ensure_owner_matches, normalize_pms_human_code,
+        WorkflowMutationKind, WorkflowRecord, annotation_check_intent_for_action,
+        dominant_records_task_id, ensure_owner_matches, normalize_pms_human_code,
         resolve_required_next_step,
     };
     use crate::web_service::review::common::ReviewTask;
     use axum::http::StatusCode;
+
+    /// 批注闸门按 action 分表：active（含驳回后重新送审）与 agree@sj 同走 ActiveSubmit，
+    /// agree@jd/sh/pz 走 AgreeAdvance，return / stop 不查。谁把 active 再放回 None，
+    /// `returned-sj-active-block`（驳回后带 open 批注重提被放行）就会回来。
+    #[test]
+    fn active_goes_through_the_active_submit_annotation_gate() {
+        assert_eq!(
+            annotation_check_intent_for_action(WorkflowMutationKind::Active, "sj"),
+            Some(AnnotationCheckIntent::ActiveSubmit)
+        );
+        assert_eq!(
+            annotation_check_intent_for_action(WorkflowMutationKind::Agree, "sj"),
+            Some(AnnotationCheckIntent::ActiveSubmit)
+        );
+        for node in ["jd", "sh", "pz"] {
+            assert_eq!(
+                annotation_check_intent_for_action(WorkflowMutationKind::Agree, node),
+                Some(AnnotationCheckIntent::AgreeAdvance)
+            );
+            assert_eq!(
+                annotation_check_intent_for_action(WorkflowMutationKind::Return, node),
+                None
+            );
+            assert_eq!(
+                annotation_check_intent_for_action(WorkflowMutationKind::Stop, node),
+                None
+            );
+        }
+    }
 
     fn sync_request_with_next_step(
         assignee_id: &str,
@@ -1726,6 +1762,45 @@ async fn validate_workflow_active(
         workflow_next_step_diagnostic(request.next_step.as_ref()),
         external_workflow,
     )?;
+
+    // 批注闸门（与 verify 路径同一张表）：驳回后 SJ 重新送审，校核/审核人留下的未处理批注
+    // 必须先逐条回复（fixed / wont_fix），否则这里 block，任务留在 sj——之前 active 不过闸门，
+    // 带着 open 批注也能原样推回 jd。
+    if let Some(intent) =
+        annotation_check_intent_for_action(WorkflowMutationKind::Active, &current_node)
+    {
+        let annotation_check = evaluate_annotation_check(
+            &build_annotation_check_context(
+                task.id.clone(),
+                task.form_id.clone(),
+                task.current_node.clone(),
+            ),
+            AnnotationCheckOptions {
+                current_node: Some(current_node.clone()),
+                intent: Some(intent.as_str().to_string()),
+                included_types: None,
+            },
+        )
+        .await
+        .map_err(|(status, message)| WorkflowSyncActionError::plain(status, message))?;
+        if !annotation_check.passed {
+            let (owner_id, owner_source) = current_node_owner(&task, &current_node);
+            return Err(WorkflowSyncActionError::annotation_check_failed(
+                annotation_check,
+                Some(current_node.clone()),
+                Some(normalize_task_status(&task.status)),
+                Some(next_step.target_node.clone()),
+            )
+            .with_verify_diagnostics(
+                "ANNOTATION_CHECK_FAILED",
+                request.actor().id.trim(),
+                owner_id,
+                owner_source,
+                Some("jd".to_string()),
+                workflow_next_step_diagnostic(request.next_step.as_ref()),
+            ));
+        }
+    }
 
     Ok(WorkflowMutationPrecheck {
         task_status: normalize_task_status(&task.status),
