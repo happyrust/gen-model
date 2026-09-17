@@ -112,7 +112,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   记一条 `stage=refresh`；启动时 `Blocked` 而这次成了就是自愈。原因持续时不每个任务都整份重建一遍（2026-09-17 审核 P3-6）：
   同一文件版本 composite 下连续失败按指数退避（`room_resident::RebuildBackoff`，30s 起翻倍、10min 封顶），冷却期内的开工回
   `Deferred`、按上一次的结论继续（生命周期与 `last_failure` 不再动）；composite 变了 = 输入变了，立刻再试；建成了清账。**不是
-  永久跳过**——暂时性故障冷却期一到照样自愈；启动装载器失败不记这本账，进程起来后第一个任务总要亲自试一次。会话口径是文件最新（ADR-054 Q1），不是本任务的 T——排队期间
+  永久跳过**——暂时性故障冷却期一到照样自愈；启动装载器失败不记这本账，进程起来后第一个任务总要亲自试一次。
+  **一任务一台**（2026-09-17 B/T1）：对齐之后执行体紧接着冻**一次**（`model_db_adapter::TaskRoomCalculator::freeze()`，三态
+  `Disabled` / `Frozen(Arc)` / `Unavailable(原因)`），显式传给单元工作单 → 批量重生成与逐根重试 → 生成 → bake；此前是 write-behind
+  每次 flush 各冻一台，任务中途常驻换代（`/model/ensure` 并发对齐）会让同一任务各批根的边不是同一代算的（P2-3 的补丁从此只是
+  富余安全网）。`Unavailable` 时单元工作单入口就把全部单元按 D2 记失败（`room calculator unavailable for this task`，与此前 flush
+  时同一句），不白跑几何。flush 侧 `frozen_room_calculator()` 只剩「没带边的根」的兜底；没有任务语境的 process-store 发布仍按组冻一次。
+  会话口径是文件最新（ADR-054 Q1），不是本任务的 T——排队期间
   文件又前进了的话常驻比本窗几何新一版，下一窗追上即合一（ADR-067 D3 当年接受的同一口径）。
   **代号**（ACK 里的 `room_generation`、`required_room_generation`、生命周期的 `generation`）改为 `ResidentRoomModel::input_version`
   ——拓扑 + 在册视图 + 有几何面板的几何的摘要，与 `MemoryRoomCalculator::resident_generation` 同一个字串；文件 composite 只当
@@ -271,6 +277,29 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     `remaining` 对不同 composite 为 `None`、冷却期一到为 `None`、换 composite 从 1 数起（钉
     `the_task_start_refresh_backs_off_before_rebuilding_and_settles_the_ledger_on_both_outcomes`、
     `a_failed_rebuild_backs_off_under_the_same_composite_and_rearms_when_the_files_move`）。
+21. D1 追记（B，2026-09-17）——房间在 bake 时算、边随回执、flush 只渲染：
+    - 取点只有一处定义：`room_model::world_points_of(` 全仓恰一处，`memory_model_world_points`（回读）与 `e3d_model_service::bake_element`
+      （手上的 `mesh`）都调它；`bake_element` 不含 `world_mesh.vertices`；「网格 → 世界」只经 `room_model::projected_mesh_to_world`
+      （`ProjectedGeometry::mesh_to_world` 与 `baked_room_input` 同一条），`baked_room_input` 与 `project_geometry_delta` 共用
+      `geometry_source_refno` / `geometry_record_id` / `persisted_world_transform`（钉 `component_points_from_the_in_memory_mesh_equal_the_disk_read_back`、
+      `bake_time_room_input_matches_the_projected_record`、`bake_computes_room_edges_from_the_mesh_it_is_about_to_write`、
+      端到端 `baking_computes_the_same_room_edges_the_flush_would_and_fails_the_root_when_it_cannot`——真 cube manifold 下 bake 的边 ==
+      flush 回读算的边，含跨面板边、真走点检查的那件）。
+    - 一任务一台：两个执行体 `TaskRoomCalculator::freeze()` 落在 `refresh_room_reference_before_task(job.dbnum)` 之后、`run_unit_worklist(`
+      之前且以 `&rooms,` 传入；`run_unit_worklist` 里 `rooms.unavailable()` 的判死早于三路分流、`task_rooms.clone()` 恰两处（批量 + 逐根）、
+      函数体不含 `frozen_room_calculator()`；`produce_slices → spawn_generation_worker → bake_snapshot → bake_elements → bake_element` 逐层
+      显式传递、工作线程里不自己冻（钉 15 扩、`the_unit_worklist_uses_the_task_room_calculator_and_fails_fast_when_it_is_unavailable`）。
+    - 边随回执：`RootReceipt.room`（`#[serde(default)]`，旧产物 `None`）只有 `persist_memory_batch` 一处挂（`receipt.room = carried_room;`
+      在 `project_geometry_delta(` 之后），刚体前移 / 单元级发布的回执 `room: None`；`bake_snapshot` 用 `rooms.resident_generation()` +
+      `geometry_source_refno(&element.geometry_id)` 全部构件装 `carry_root_edges`（钉 `carried_room_edges_ride_only_on_the_regen_receipt`、
+      `carried_room_edges_round_trip_and_list_every_element_of_the_root`）。
+    - flush 三道闸：`room_stage` 先 `carried_edges_for(`（`carried.generation != resident_generation` / `elements.len() != listed.len()`
+      任一即 `None`），`calculate_for_root(` 只剩兜底一臂、`render_root_room_edges(` 恰一处；带来的与现算渲出的语句逐字相同
+      （钉 `room_membership_is_computed_per_root_before_the_write_and_rides_the_same_transaction` 扩、
+      `carried_edges_pass_only_when_generation_and_element_set_both_match`、`room_stage_renders_carried_edges_and_recomputes_when_a_gate_fails`）。
+    - D2 前移：`produce_slices` 非 `Required` 的 `Err` 臂只 `slice.failures.push`、不 `slice.push`
+      （钉 `a_root_whose_rooms_cannot_be_computed_is_a_dead_letter_and_never_published`）。
+    live 待补：ams 1112 一个增量窗 `[model-write-behind] … room_carried=N room_recomputed=0`，硬验收「增量收敛后两张边 == 从零初始化」照跑。
 
 ## 背景
 
@@ -299,6 +328,20 @@ ADR-071 / ADR-072 又把任务改成同步写库带写入标记、中断按 `(db
 房间归属是根产出的一部分，与 `inst_relate` / `tubi_relate` 行同块同事务落库（合块允许跨根，一根不拆）。任务末**没有**整库房间计算，
 任务收尾**没有**房间段；没有 `RoomRecalcPanel` / `RoomRecalcElement` 目标、没有房间轮、没有发布视图 / 结果目录工件 /
 常驻模型换代 / 参照落款 / 结构触发。`RoomOnly` 只作为生成路径上的**内部**意图存在（一次只算房间不重生几何的根级工作），不是对外契约。
+
+**2026-09-17 追记（B）：「模型计算之后」落在 bake 那一刻，边随根回执走，flush 只渲染。** 此前逐根归属在 write-behind
+flush 时算（`model_db_adapter::room_stage`：每次 flush 冻一台计算器、拿投影记录回读盘上 `.mesh` 取判定点）。现在
+整根重生成的生成 worker 在 `e3d_model_service::bake_element` 里、网格还在手上时就按元素算（`MemoryRoomCalculator::edges_for_record`），
+判定点取自**就要写盘的那份网格** × 同一个 f32 变换（`room_model::world_points_of`，与回读路同一个函数——不是为算盒子折出来的
+f64 `world_mesh`，那会差几个 ulp、让贴面板边的点翻面，破 ADR-010 §9「增量 == 全量逐边相等」）；输入配方 `baked_room_input`
+与投影记录同三个函数（`geometry_source_refno` / `geometry_record_id` / `persisted_world_transform`）加 `projected_mesh_to_world`。
+发布前按根收拢（`merge_root_edges`）成 `RootReceipt.room = CarriedRoomEdges { 代号, 构件集, 边 }` 随投影与 `model_artifact` 落盘；
+flush 的 `room_stage` 过三道闸（代号 == 此刻计算器代号、构件集 == 本根投影记录的构件集、计算器在）就只 `render_root_room_edges`，
+任一不过（刚体前移 / 单元级局部发布 / 旧产物 / 中途换代 / 嵌套根共享记录）照旧回读现算——两条路渲出的语句逐字相同，硬验收不多一种
+写点形状。算不出 = 这件几何 `Err` → 生成 worker 记这一根死信、不发布（D2 前移到 bake，文案带「room membership」）。
+`BatchedPersist.room_carried / room_recomputed` 与 `[model-persist]` / `[model-write-behind]` 日志说这一批边是带来的还是现算的；
+稳态下 `recomputed` 应为 0。不动的：D13 `RoomOnly` 整库重算、`model/rebuild`、`/model/ensure`、初始化双 lane、刚体路、单元路——
+全走 flush 兜底。
 
 **为什么不是别的做法**：
 - 不保留「任务末按库整段重算」（ADR-065 D8 / ADR-067）：它的成本是 O(整库) 而不是 O(本窗变更)，且必须有一枚房间水位与一份

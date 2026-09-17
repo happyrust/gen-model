@@ -2,6 +2,56 @@
 
 ## 2026-09-17
 
+### 房间归属在 bake 时算、边随根回执走、flush 只渲染；一任务一台房间计算器（ADR-073 D1 / D12 追记 B，六笔）
+
+- **为什么**：ADR-073 D1「模型计算之后用候选面板做点包含筛选」此前落在 write-behind flush 里：每次 flush 冻一台计算器，
+  拿投影记录**回读盘上 `.mesh`** 取判定点（`memory_model_world_points`），而生成 worker 在 `bake_element` 里刚把同一份网格
+  算出来又丢掉；计算器按 flush 冻，任务中途常驻换代（`/model/ensure` 并发对齐）会让同一任务各批根的边不是同一代算的
+  （P2-3 为此打过补丁）。用户 2026-09-17 拍板（grill 两轮）：时点提早到生成 worker、省掉回读，边随凭证同事务，
+  D2 失败前移，`RootReceipt` 带边，只覆盖批次任务的整根重生成、其余入口留 flush 兜底。
+- **改动（按提交）**：
+  1. `bd9957bfd` 对等用例：`calculate_edges` 拆成 `edges_for_record`（逐记录）+ `merge_root_edges`（同 (构件, 面板) 取最强、按键排序），
+     `memory_model_world_points` 拆成读盘 + `world_points_of`（f32 变换、按三角遍历去重）——**取点全仓只有这一处定义**；
+     用例 `component_points_from_the_in_memory_mesh_equal_the_disk_read_back`：内存网格取点 vs 盘上回读逐位相等，逐元素算边收拢后
+     与 `calculate_for_root` 逐字相同。
+  2. `c953c6cc9` 一任务一台：`model_db_adapter::TaskRoomCalculator { Disabled, Frozen(Arc), Unavailable(原因) }::freeze()`，两个执行体在
+     D12 对齐之后冻一次、传 `&rooms` 给 `run_unit_worklist`；`Unavailable` 时单元入口按 D2 把全部单元记失败（`room calculator unavailable
+     for this task`，与此前 flush 同一句）、不白跑几何；`generate_roots_report` / `generate_roots_with_rooms` / `generate_unit_model_with_rooms`
+     带 `rooms` 下传，process-store 形态优先用任务那一台（`TaskOrGroupRooms`）。
+  3. `9520d7321` bake 时算边：`rooms` 沿 `generate_and_persist_roots → produce_slices → spawn_generation_worker → bake_snapshot → bake_elements →
+     bake_element` 显式传递；`bake_element` 用 `room_model::BakedRoomInput`（构件 = `geometry_source_refno`、标签 = 投影记录 id、世界变换 =
+     `persisted_world_transform`、「网格 → 世界」= `projected_mesh_to_world`——与 `project_geometry_delta` 折投影记录**同一份配方**）调
+     `edges_for_record`，判定点经 `world_points_of(&mesh, …)`，取的是本地 / 标准图元那份**就要写盘的网格**，不是 manifold 在 f64 里折出来的
+     `world_mesh`（差几个 ulp 会让贴面板边的点翻面，破 ADR-010 §9）；`BakedElement.room_edges`。单元级局部发布 / 初始化 lane / 读透即时生成 /
+     路由轮询给 `None`。
+  4. `956a3991c` 边随回执：`RootReceipt.room: Option<CarriedRoomEdges { generation, elements: Vec<String>, edges }>`（`#[serde(default)]`，旧
+     `model_artifact` 读回 `None`；`RefnoEnum` 无 serde `Deserialize`，按字串存）；`bake_snapshot` 用那台计算器的代号 + 这一根**全部**构件
+     （有边没边都在册）+ `merge_root_edges` 装 `BakedSnapshot.room`，`persist_memory_batch` 挂到回执；刚体前移 / 单元级发布 `room: None`。
+     40 处 `RootReceipt` 字面量补 `room: None`。
+  5. `f38aca8b7` flush 三道闸：`carried_edges_for`（纯函数）——代号 == 此刻计算器代号、构件集 == 本根投影记录的构件集（少一个多一个都不行：
+     渲染对每个构件先删后插，拿只覆盖部分构件的边去渲会把没动的构件的边删掉而不补；嵌套根共享记录、局部发布后的整根形状在此挡下）、
+     计算器在 → `room_stage` 只 `render_root_room_edges`（`Carried`），否则 `calculate_for_root` 回读现算（`Recomputed`）；
+     `BatchedPersist.room_carried / room_recomputed`，`[model-persist]` 与 `[model-write-behind]` 日志带上，稳态下 `recomputed` 应为 0。
+  6. `d02ab8929` D2 前移 + 端到端：bake 失败文案「room membership of {投影记录 id} could not be computed: …」（与 flush 同族、带
+     「room membership」），`produce_slices` 消费侧 bake `Err` 本就成死信不发布（补钉）；真 cube manifold + 1000³ 面板：完全在内 / 跨边
+     （真走点检查）/ 盒不交三件，**bake 的边 == 同一件折成投影记录后 flush 路回读算的边**；面板网格缺 → `Err`。
+- **不动的**：D13 `RoomOnly` 整库重算、`model/rebuild`、`/model/ensure`、初始化双 lane、刚体路、单元路——全走 flush 兜底，同一台渲染器，
+  硬验收不多一种写点形状。ADR-073 D1 / D12 追记、钉 21；CONTEXT「逐根房间归属」「任务开工前对齐」词条。
+- **验证**：每笔各自 `cargo test --lib` 定向绿（room_model 42 / rooms 相关 145 / T1 300 / T2 165 / T3 144 / T4 236 / T5 e3d 48）；
+  六笔之后全量 `cargo test --lib` **2236 passed / 5 failed / 118 ignored**——5 条失败都不在本轮触碰的文件里：
+  `model_impact::tests::the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list` /
+  `the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate`（在 `c8d5f6b92`——本轮第一笔之前——的临时 worktree 上复跑
+  同样红，既有）、`window_root_plan::tests::a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved` /
+  `the_element_tier_is_the_widest_tier_any_of_its_attributes_needed`（同一元数据门家族）、
+  `web_service::review::platform::tests::test_verify_active_skips_annotation_gate_even_with_open`（另一路会话正在改的 review 区）。
+  rustfmt 各文件本轮新增行无 diff（`e3d_model_service.rs` 11 / `model_db_adapter.rs` 2 / `batch_worker.rs` 6 / `model_refresh.rs` 4 /
+  `room_resident.rs` 3 处漂移为既有）。**未 live**：ams 1112 增量窗 `room_carried=N room_recomputed=0` 与「增量 == 全量逐边」
+  硬验收脚本没跑。
+- **顺手看见、没动**（要另开卡）：`ProjectedGeometry::mesh_to_world` 对**隐式管身**是 `world_transform × local_transform`，而
+  `persisted_world_transform` 对隐式管身已把 `local` 折进 `world_transform`——点检查对跨面板边的隐式管身可能多乘一次本地摆放；
+  库上回读那条路（`durable_room_inputs`，管身 local = 单位阵）没有这一乘，两条路对同一根管身可能不逐字相等。本轮 bake 侧按投影
+  记录同一条公式算（与 flush-from-projection 对等），没改语义。
+
 ### ADR-066 D1 规则 2 · 账本去向 `no_model` 的候选不再把根踢回 regen——「挪 EQUI + 子元素改个名」走得了 transform
 
 - **为什么**：`collect_rigid_motion_sources` 把账本每一条都折成候选，不是锚点的一律 `Other`；`rigid_motion::classify_one`
