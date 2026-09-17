@@ -136,6 +136,20 @@
 - **接受的角**：代号 A→B→A 在任务内翻回去（开工 A、中途 B、收尾 A）两路都判不出——整库重排要逐根记刷盘代号才判得出，
   整库重算不受影响（单台计算器）。面板改动在一个任务里改完又改回，实际不会发生，不为它加逐根记账。
 
+### 开工前对齐的在册视图之差只算一遍（审核 P3-7）
+
+- **为什么**：`room_resident::refresh_before_task` 重建成功后对 `installed` 与新模型调 `TopologyDiff::between`，而
+  `initialize_file_backed_at_startup` 里 `ResidentRooms::install()` 刚对同两份视图算过一份、被 `.model` 丢掉。差是 O(在册面板)
+  的两张表比对，重建本身已经是 O(文件) 的事，多算一遍不伤大局，但两处对着同一对输入各算各的，哪天一处改了口径另一处就漂。
+- **改动**：`StartupInitOutcome` 加 `diff: Option<TopologyDiff>`，两个启动装载器（文件形态 / 读透 `latest`）用
+  `let InstallOutcome { model, diff } = …install(model)` 把它接住；`refresh_before_task` 改用 `outcome.diff`。语义不变：
+  `install()` 是对着被换下的那一代算的，与 `installed` 是同一份——本函数持 `refresh_lock`，启动段的 `Loading` 在入口已挡开。
+  新源码钉 `the_task_start_refresh_reuses_the_install_diff_instead_of_computing_it_twice`：`refresh_before_task` 函数体不含
+  `TopologyDiff::between(`、含 `let diff = outcome.diff;`；两个装载器都接 `diff`；生产代码里 `TopologyDiff::between(` 只剩启动对比
+  （`StartupRoomPlan`）与 `install()` 两处。
+- **验证**：`cargo test --lib -- room_resident::` **29 passed / 0 failed / 9 ignored**；rustfmt 本轮新增行无 diff（该文件 100 / 958 / 1249
+  三处漂移为既有）。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步

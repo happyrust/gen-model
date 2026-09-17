@@ -1654,6 +1654,10 @@ pub(crate) struct StartupInitOutcome {
     /// 新的）。两种都不拦建模。
     pub advance_warning: Option<String>,
     pub model: Arc<ResidentRoomModel>,
+    /// 与被换下的那一代的在册视图之差——`ResidentRooms::install` 顺手算的那一份，原样带出来
+    /// （第一代 / 此前没建成 = `None`）。任务开工前对齐（[`refresh_before_task`]）拿它写日志与换代
+    /// 回执，不再对着同两份视图再算一遍（审核 P3-7）。
+    pub diff: Option<TopologyDiff>,
     pub elapsed_ms: u128,
 }
 
@@ -1798,17 +1802,17 @@ async fn initialize_file_backed_at_startup(
     let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
-    let model = resident_rooms()
+    let InstallOutcome { model, diff } = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
-        .install(model)
-        .model;
+        .install(model);
     Ok(StartupInitOutcome {
         form,
         steps: Vec::new(),
         frozen,
         advance_warning: None,
         model,
+        diff,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
@@ -1831,17 +1835,17 @@ async fn initialize_latest_at_startup(
     let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
-    let model = resident_rooms()
+    let InstallOutcome { model, diff } = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
-        .install(model)
-        .model;
+        .install(model);
     Ok(StartupInitOutcome {
         form: ResidentForm::Latest,
         steps: Vec::new(),
         frozen,
         advance_warning: None,
         model,
+        diff,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
@@ -2294,9 +2298,9 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
         Ok(outcome) => {
             let previous_generation = installed.as_ref().map(|model| model.input_version());
             let generation = outcome.model.input_version();
-            let diff = installed
-                .as_ref()
-                .map(|old| TopologyDiff::between(&old.map, &outcome.model.map));
+            // 在册视图之差用 `install()` 顺手算的那一份（对着被换下的那一代算的——与 `installed` 是同一份：
+            // 本函数持 `refresh_lock`，启动段的 `Loading` 在入口已挡开），不再对同两份视图算第二遍（P3-7）。
+            let diff = outcome.diff;
             set_lifecycle(lifecycle_for(&outcome.model));
             record_generation_swap(GenerationSwapReport {
                 form: outcome.form.as_str().to_string(),
@@ -3747,6 +3751,49 @@ mod tests {
         );
     }
 
+    /// 源码钉（审核 P3-7）：在册视图之差只算一遍——`ResidentRooms::install` 算的那一份随
+    /// `StartupInitOutcome::diff` 带出来，`refresh_before_task` 拿它写日志与换代回执，不再对同两份
+    /// 视图调第二次 `TopologyDiff::between`。两个启动装载器都要把 `install()` 的 `diff` 接住、不许 `.model` 丢掉。
+    #[test]
+    fn the_task_start_refresh_reuses_the_install_diff_instead_of_computing_it_twice() {
+        let source = include_str!("room_resident.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        fn function_body<'a>(source: &'a str, start: &str) -> &'a str {
+            let body = source.split_once(start).expect("函数头").1;
+            let end = body
+                .find("\n}\r\n")
+                .or_else(|| body.find("\n}\n"))
+                .expect("函数总有结尾");
+            &body[..end]
+        }
+        let refresh = function_body(source, "pub(crate) async fn refresh_before_task(");
+        assert!(
+            !refresh.contains("TopologyDiff::between("),
+            "开工前对齐不自己再算一遍在册视图之差: {refresh}"
+        );
+        assert!(
+            refresh.contains("let diff = outcome.diff;"),
+            "用 install() 顺手算的那一份: {refresh}"
+        );
+        for installer in [
+            "async fn initialize_file_backed_at_startup(",
+            "async fn initialize_latest_at_startup(",
+        ] {
+            let body = function_body(source, installer);
+            assert!(
+                body.contains("let InstallOutcome { model, diff } =") && body.contains("diff,"),
+                "{installer} 要把 install() 的 diff 接进回执，不许 `.model` 丢掉: {body}"
+            );
+        }
+        assert_eq!(
+            source.matches("TopologyDiff::between(").count(),
+            2,
+            "生产代码里只剩两处算差：启动对比（StartupRoomPlan）与 install()"
+        );
+    }
+
     /// 参照行只动 `resident_reference` 一格：空间凭据原样，`room_model` 那种按字段投影的读法
     /// 不受影响；读回来逐字相等。
     #[tokio::test]
@@ -4293,6 +4340,7 @@ mod tests {
             frozen: vec![(7997, 155, 7370), (8002, 3, 180)],
             advance_warning: None,
             model: Arc::clone(&model),
+            diff: None,
             elapsed_ms: 8000,
         };
         let line = outcome.summary();
@@ -4318,6 +4366,7 @@ mod tests {
             frozen: Vec::new(),
             advance_warning: Some("清单前进跳过：存在未完成的文件发布".into()),
             model: Arc::clone(&model),
+            diff: None,
             elapsed_ms: 12,
         };
         let line = warned.summary();
@@ -4332,6 +4381,7 @@ mod tests {
             frozen: vec![(8000, 12, 5), (7997, 155, 7370)],
             advance_warning: None,
             model,
+            diff: None,
             elapsed_ms: 7400,
         };
         let line = latest.summary();
