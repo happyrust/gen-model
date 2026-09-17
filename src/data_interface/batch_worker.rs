@@ -1940,7 +1940,7 @@ async fn run_room_only_recompute(
     target_sesno: i32,
 ) -> RoomRecomputeVerdict {
     use crate::fast_model::model_db_adapter::{
-        PersistTarget, frozen_room_calculator, recompute_dbnum_room_edges,
+        PersistTarget, RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
     };
     let dbnum = job.dbnum;
     let rooms = match frozen_room_calculator() {
@@ -1977,6 +1977,7 @@ async fn run_room_only_recompute(
         dbnum,
         &rooms,
         expected.as_deref(),
+        RootScope::All,
     )
     .await
     {

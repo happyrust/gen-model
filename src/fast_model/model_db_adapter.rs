@@ -1046,7 +1046,52 @@ pub struct RoomEdgeRecompute {
     pub failed: Vec<(RefNo, String)>,
     /// 房间代号对齐到本台计算器的 ACK 数。
     pub acks_refreshed: usize,
+    /// 面板级处置语句数（[`RootScope::Targeted`] 的 `panel_statements`：不在册清边 / 只改号改列），进第一笔。
+    pub panel_statements: usize,
     pub elapsed_ms: u128,
+}
+
+/// [`recompute_dbnum_room_edges`] 的根范围（ADR-073 D13）。
+#[derive(Debug, Clone, Copy)]
+pub enum RootScope<'a> {
+    /// 整库：投影里本库有回执的根 + `library_roots` 里不在投影里的根（回读库上几何）。
+    All,
+    /// 反向传播命中的根（`room_reverse::AffectedRoots::roots`，2026-09-17）：投影里的按集合筛、集合里不在投影里的
+    /// 回读库；`library_roots` 不看（命中的根本就来自它）。`panel_statements` 是面板级的两类处置
+    /// （[`render_panel_delta_statements`]：不在册清边 / 只改号改列），作 prelude 进第一笔事务——删在第一笔，
+    /// 与整根发布的装块纪律同一条。
+    Targeted {
+        roots: &'a [RefNo],
+        panel_statements: &'a str,
+    },
+}
+
+/// 面板级的两类处置渲成语句（ADR-073 D13 反查，2026-09-17）：不在册的面板清它全部出边（它名下的成员，
+/// `{panel}->room_relate`）与指向它的 `room_panel_relate` 入边；只改房间号的房间对交集里的面板改列
+/// （`room_resident::render_renumber_statements`）。**不查空间、不算几何**——这两类与成员的几何无关。
+/// 每句以 `;\n` 收尾，直接当 [`RootScope::Targeted::panel_statements`]。要反查的那一类（`recalc`）不在这里：
+/// 它们的处置是命中根的逐根重算。
+pub(crate) fn render_panel_delta_statements(
+    delta: &crate::fast_model::room_resident::PanelDelta,
+) -> String {
+    let mut out = String::new();
+    // 两个渲染器一个带句尾分号一个不带；这里统一成「一句一个 `;\n`」。
+    let mut push = |statement: &str| {
+        out.push_str(statement.trim_end().trim_end_matches(';'));
+        out.push_str(";\n");
+    };
+    for panel in &delta.removed {
+        for statement in crate::fast_model::room_model::render_unregistered_panel_statements(*panel)
+        {
+            push(&statement);
+        }
+    }
+    for renumber in &delta.renumbered {
+        for statement in crate::fast_model::room_resident::render_renumber_statements(renumber) {
+            push(&statement);
+        }
+    }
+    out
 }
 
 /// 用本库全部根的**现有几何**重算两张房间边（`RoomOnly`，d-819 / ADR-073 D13）。
@@ -1076,6 +1121,10 @@ pub struct RoomEdgeRecompute {
 /// 回执里的 [`RoomEdgeRecompute::covered_roots`] 就是这一轮算过的全部根（投影里的 + 点名回读的）；它是不是
 /// 本库的全部根，仍由调用方对 `DbSet@T` 的根清单判——这里不枚举文件。
 ///
+/// **定向**（[`RootScope::Targeted`]，反向传播，2026-09-17）：根集换成反查命中的那几根——投影里的按集合筛、
+/// 集合里不在投影里的回读库——其余一字不改：同一个判定入口、同一套渲染、同一种装块，多的只是第一笔事务前面
+/// 的面板级处置语句（不在册清边 / 只改号改列）。
+///
 /// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
 /// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
 pub async fn recompute_dbnum_room_edges(
@@ -1084,19 +1133,40 @@ pub async fn recompute_dbnum_room_edges(
     dbnum: u32,
     rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
     library_roots: Option<&[RefNo]>,
+    root_scope: RootScope<'_>,
 ) -> anyhow::Result<RoomEdgeRecompute> {
     let started = std::time::Instant::now();
     let scope = ProjectionScope::Current;
+    // 定向：命中集合（打包 refno）；整库：`None`。
+    let (targeted, prelude): (Option<BTreeSet<i64>>, &str) = match root_scope {
+        RootScope::All => (None, ""),
+        RootScope::Targeted {
+            roots,
+            panel_statements,
+        } => (
+            Some(roots.iter().map(|root| packed_refno(*root)).collect()),
+            panel_statements,
+        ),
+    };
     let projected: Vec<RefNo> = store
         .roots(scope)
         .into_iter()
         .filter(|root| root.dbno() == dbnum && store.receipt(scope, *root).is_some())
+        .filter(|root| {
+            targeted
+                .as_ref()
+                .is_none_or(|targeted| targeted.contains(&packed_refno(*root)))
+        })
         .collect();
     let projected_set: BTreeSet<i64> = projected.iter().map(|root| packed_refno(*root)).collect();
-    // 点名的、不在投影里的根：去重、只认本库的、按 refno 序。
+    // 点名的、不在投影里的根：去重、只认本库的、按 refno 序。整库点名的是 `DbSet@T` 的清单，定向点名的是命中集合。
+    let named_roots: &[RefNo] = match root_scope {
+        RootScope::All => library_roots.unwrap_or_default(),
+        RootScope::Targeted { roots, .. } => roots,
+    };
     let mut durable: Vec<RefNo> = Vec::new();
     let mut named = BTreeSet::new();
-    for root in library_roots.unwrap_or_default() {
+    for root in named_roots {
         if root.dbno() == dbnum
             && !projected_set.contains(&packed_refno(*root))
             && named.insert(packed_refno(*root))
@@ -1112,6 +1182,7 @@ pub async fn recompute_dbnum_room_edges(
         covered_roots,
         projected_roots: projected.len(),
         durable_roots: durable.len(),
+        panel_statements: prelude.matches(";\n").count(),
         ..Default::default()
     };
     let mut pieces: Vec<(usize, String)> = Vec::new();
@@ -1179,7 +1250,8 @@ pub async fn recompute_dbnum_room_edges(
         );
     }
     out.durable_read_ms = durable_read.as_millis();
-    let transactions = pack_publication_transactions("", &pieces, "", false);
+    // 面板级处置（定向才有）作 prelude 进第一笔：删在第一笔，与整根发布同一条装块纪律。
+    let transactions = pack_publication_transactions(prelude, &pieces, "", false);
     for statements in &transactions {
         out.max_transaction_bytes = out.max_transaction_bytes.max(statements.len());
         commit_publication_transaction(target.db, statements, "room membership recompute").await?;
@@ -5559,6 +5631,7 @@ mod tests {
             BATCH_DBNUM,
             &after_move,
             None,
+            RootScope::All,
         )
         .await
         .expect("recompute after the panel moved");
@@ -5592,6 +5665,7 @@ mod tests {
             BATCH_DBNUM,
             &before_move,
             None,
+            RootScope::All,
         )
         .await
         .expect("recompute after the panel moved back");
@@ -5648,6 +5722,7 @@ mod tests {
             BATCH_DBNUM,
             &rooms,
             Some(&[ROOM_ROOT_A, ROOM_ROOT_B]),
+            RootScope::All,
         )
         .await
         .expect("recompute the library's room edges");
@@ -5740,6 +5815,7 @@ mod tests {
             BATCH_DBNUM,
             &after_move,
             Some(&[ROOM_ROOT_A]),
+            RootScope::All,
         )
         .await
         .expect("recompute A from its durable rows");
@@ -5781,6 +5857,7 @@ mod tests {
             BATCH_DBNUM,
             &before_move,
             Some(&[ROOM_ROOT_A]),
+            RootScope::All,
         )
         .await
         .expect("recompute A after the panel moved back");
@@ -5802,6 +5879,7 @@ mod tests {
             BATCH_DBNUM,
             &before_move,
             Some(&[ROOM_ROOT_B, ROOM_ROOT_A, RefNo::new(24384, 10)]),
+            RootScope::All,
         )
         .await
         .expect("recompute with an ungenerated root named");
@@ -5821,6 +5899,166 @@ mod tests {
             "{report:?}"
         );
         assert_eq!(room_edges(&db).await, before);
+    }
+
+    /// ADR-073 D13 反查（D/3）：面板级的两类处置渲成一串 `;\n` 收尾的语句——不在册的面板清它的出边与
+    /// `room_panel_relate` 入边、只改号的房间改列；要反查的那一类（`recalc`）不在这里。两个渲染器一个带句尾分号
+    /// 一个不带，这里统一。
+    #[test]
+    fn panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only() {
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove, RoomRenumber};
+        let delta = PanelDelta {
+            removed: vec![refno_from_e3d(RefNo::new(24383, 777))],
+            renumbered: vec![RoomRenumber {
+                room: "24383_501".into(),
+                old_num: "R1".into(),
+                new_num: "R1X".into(),
+                panels: vec![refno_from_e3d(PANEL_R1)],
+            }],
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R2),
+                old: None,
+                new: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
+            }],
+            geometry_changed: 1,
+        };
+        let sql = render_panel_delta_statements(&delta);
+        assert_eq!(
+            sql,
+            "DELETE pe:24383_777->room_relate;\n\
+             DELETE pe:24383_777<-room_panel_relate;\n\
+             UPDATE (SELECT VALUE id FROM pe:24383_500->room_relate WHERE room_num = 'R1') SET room_num = 'R1X';\n\
+             UPDATE (SELECT VALUE id FROM pe:24383_500<-room_panel_relate WHERE room_num = 'R1') SET room_num = 'R1X';\n"
+        );
+        assert!(!sql.contains("24383_600"), "要反查的面板不在面板级语句里");
+        assert!(render_panel_delta_statements(&PanelDelta::default()).is_empty());
+    }
+
+    /// ADR-073 D13 反查（D/3），`mem://` 真测：**定向**重算只碰命中的根。A、B 都在 R1 里落库；面板搬家后只点名 A
+    /// → A 的旧边删掉、ACK 换代，B 的边与 ACK**一字不动**（B 不在集合里，哪怕它同样陈旧——那是反查该不该命中它
+    /// 的事，不是这里的）；面板级 prelude 与逐根语句同一串事务：不在册的 777 的出边与 `room_panel_relate` 入边
+    /// 随第一笔一起清掉。再点名 B，B 也收敛——两次定向 == 一次整库。
+    #[tokio::test]
+    async fn a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_first()
+     {
+        use crate::fast_model::room_resident::PanelDelta;
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
+            root_commit(ROOM_ROOT_B, vec![room_record(ROOM_ROOT_B, 300., 400.)]),
+        ]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A, ROOM_ROOT_B],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A and B inside R1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_20".to_string(),
+            ]
+        );
+        // 一块不在册了的面板 777 留下的旧边：指向 A 的成员边，以及房间 778 → 777 的拓扑边。
+        db.query(
+            "INSERT RELATION INTO room_relate [{ id: room_relate:stale_777, in: pe:⟨24383_777⟩, out: pe:⟨24383_10⟩, room_num: 'R9', inside_count: 8, center_dist: 0.0 }];\n\
+             INSERT RELATION INTO room_panel_relate [{ id: room_panel_relate:778_777, in: pe:⟨24383_778⟩, out: pe:⟨24383_777⟩, room_num: 'R9' }];",
+        )
+        .await
+        .expect("seed the stale edges of an unregistered panel")
+        .check()
+        .expect("seed statements");
+        assert_eq!(room_edges(&db).await.len(), 3);
+        assert_eq!(
+            count(&db, "room_panel_relate").await,
+            1,
+            "逐根路径只对构件本身是面板的写 room_panel_relate；这里只有种进去的 778→777"
+        );
+
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        let delta = PanelDelta {
+            removed: vec![refno_from_e3d(RefNo::new(24383, 777))],
+            ..PanelDelta::default()
+        };
+        let panel_statements = render_panel_delta_statements(&delta);
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &[ROOM_ROOT_A],
+                panel_statements: &panel_statements,
+            },
+        )
+        .await
+        .expect("targeted recompute of A");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A], "{report:?}");
+        assert_eq!(
+            (
+                report.roots,
+                report.projected_roots,
+                report.durable_roots,
+                report.recomputed,
+                report.room_edges,
+                report.failed.len(),
+                report.panel_statements,
+                report.commits,
+                report.acks_refreshed
+            ),
+            (1, 1, 0, 1, 0, 0, 2, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_20".to_string()],
+            "A 的旧边删了、777 的旧边随 prelude 清了、B 的边一字不动"
+        );
+        assert_eq!(
+            count(&db, "room_panel_relate").await,
+            0,
+            "778→777 那条拓扑边随 prelude 清掉"
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+        assert_eq!(
+            ack(ROOM_ROOT_A).as_deref(),
+            Some(after_move.resident_generation())
+        );
+        assert_eq!(
+            ack(ROOM_ROOT_B).as_deref(),
+            Some(before_move.resident_generation()),
+            "没点名的根 ACK 不动"
+        );
+
+        // 再点名 B：收敛到与整库重算相同的终态。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &[ROOM_ROOT_B],
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("targeted recompute of B");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_B]);
+        assert_eq!(report.panel_statements, 0);
+        assert!(room_edges(&db).await.is_empty(), "两次定向 == 一次整库");
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B

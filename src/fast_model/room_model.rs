@@ -441,6 +441,16 @@ fn render_panel_room_topology_statements(
     statements
 }
 
+/// 一块**不在册了**的面板（ADR-073 D13 反查，`room_resident::PanelDelta::removed`）：清它全部出边
+/// （`{panel}->room_relate`——它名下的成员边，`room_relate` 的 `in` 是面板、`out` 是构件）与指向它的
+/// `room_panel_relate` 入边。不查空间、不算几何：面板不在册就是不在册，与树无关（`recalc_panel_membership_inner`
+/// 那条旧路同一判断）。语句不带句尾分号，与本文件其余渲染器同形。
+pub(crate) fn render_unregistered_panel_statements(panel: RefnoEnum) -> Vec<String> {
+    let mut statements = vec![format!("DELETE {}->room_relate", panel.to_pe_key())];
+    statements.extend(render_panel_room_topology_statements(panel, None));
+    statements
+}
+
 /// 增量整间分支的唯一提交单元：成员边与 panel→room 拓扑同成同败。
 ///
 /// 写守卫那一档随房间队列退役（t-678）：队列没了就只剩「直接写」这一种形态，
