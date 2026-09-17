@@ -2610,9 +2610,20 @@ pub(crate) async fn generate_unit_model(
     mgr: &AiosDBManager,
     root_refno: &str,
 ) -> anyhow::Result<()> {
-    crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
+    generate_unit_model_with_rooms(mgr, root_refno, None).await
+}
+
+/// 同 [`generate_unit_model`]，但带上**本任务**开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，
+/// B/T1）：批次任务里失败过的根逐根重试走这里，与同任务的批量重生成用同一台。没有任务语境给 `None`。
+pub(crate) async fn generate_unit_model_with_rooms(
+    mgr: &AiosDBManager,
+    root_refno: &str,
+    rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
+) -> anyhow::Result<()> {
+    crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_with_rooms(
         mgr,
         &[root_refno.to_string()],
+        rooms,
     )
     .await
 }

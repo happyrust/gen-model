@@ -895,6 +895,67 @@ pub fn frozen_room_calculator()
     crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir).map(Some)
 }
 
+/// **一任务一台**（ADR-073 D1「任务期间不换代」的字面形态，2026-09-17 B/T1）：dbnum 任务的执行体在
+/// 开工前对齐（D12）之后冻**一次**，显式传给单元工作单 → 生成 → bake，整个任务的每一根都用它；
+/// 此前是 write-behind 每次 flush 各冻一台，任务中途常驻换代（`/model/ensure` 并发对齐）就会让同一任务
+/// 各批根的边不是同一代算的（P2-3 为此打的补丁从此只是富余安全网）。三态各自的处置：
+///
+/// - [`Self::Disabled`]：房间开关关着——模型照常生成、不写新边（与 [`frozen_room_calculator`] 的 `Ok(None)` 同义）。
+/// - [`Self::Frozen`]：冻好的那台，`Arc` 让并行 bake 只读共享；`resident_generation()` 就是本任务的房间代号。
+/// - [`Self::Unavailable`]：冻不出（常驻 `Loading` / `Blocked`）——本任务每一根的房间都算不出来，
+///   D2「房间失败 = 该根失败」在**开工时**就定了：单元工作单入口把全部单元记 Failed、账本记同一句原因，
+///   不再白跑几何等到 flush 才判死。
+#[derive(Clone)]
+pub enum TaskRoomCalculator {
+    Disabled,
+    Frozen(std::sync::Arc<crate::fast_model::room_model::MemoryRoomCalculator>),
+    Unavailable(String),
+}
+
+impl TaskRoomCalculator {
+    /// 冻本任务那一台：[`frozen_room_calculator`] 的三态形。开工前对齐**之后**调（钉 15）。
+    pub fn freeze() -> Self {
+        match frozen_room_calculator() {
+            Ok(None) => Self::Disabled,
+            Ok(Some(calculator)) => Self::Frozen(std::sync::Arc::new(calculator)),
+            Err(error) => Self::Unavailable(format!(
+                "room calculator unavailable for this task: {error:#}"
+            )),
+        }
+    }
+
+    /// 冻好的那台（`Disabled` / `Unavailable` 都是 `None`）。
+    pub fn frozen(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::fast_model::room_model::MemoryRoomCalculator>> {
+        match self {
+            Self::Frozen(calculator) => Some(calculator),
+            Self::Disabled | Self::Unavailable(_) => None,
+        }
+    }
+
+    /// 冻不出时的那句原因；能算（或不用算）是 `None`。
+    pub fn unavailable(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable(reason) => Some(reason),
+            Self::Disabled | Self::Frozen(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for TaskRoomCalculator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("Disabled"),
+            Self::Frozen(calculator) => f
+                .debug_tuple("Frozen")
+                .field(&calculator.resident_generation())
+                .finish(),
+            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+        }
+    }
+}
+
 /// 一次整库房间边重算的账（[`recompute_dbnum_room_edges`]）。
 #[derive(Debug, Clone, Default)]
 pub struct RoomEdgeRecompute {

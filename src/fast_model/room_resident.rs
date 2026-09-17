@@ -3859,6 +3859,18 @@ mod tests {
                 refresh < side_actions && refresh < worklist,
                 "{label}: 对齐必须早于冻计算器的每一处"
             );
+            // 一任务一台（B/T1）：本任务的计算器在对齐之后、单元工作单之前冻一次，并真的传进去。
+            let freeze = body
+                .find("TaskRoomCalculator::freeze()")
+                .unwrap_or_else(|| panic!("{label}: 对齐之后冻本任务那一台: {body}"));
+            assert!(
+                refresh < freeze && freeze < worklist,
+                "{label}: 冻在对齐之后、单元工作单之前"
+            );
+            assert!(
+                body[worklist..].contains("&rooms,"),
+                "{label}: 冻好的那台要传给单元工作单，不许它自己再冻: {body}"
+            );
         }
 
         let init = include_str!("../data_interface/dbnum_initialize.rs");

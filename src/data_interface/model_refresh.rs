@@ -13,12 +13,31 @@
 //! `model_write_behind::publish` 进投影并登记刷盘，任务收尾前等它们拿到 durable ACK
 //! （ADR-076 D2）。「变更元素 → 生成根」的归一策略只有一份，在 `generation_root.rs`。
 
+use std::sync::Arc;
+
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::*;
 use anyhow::Context;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::e3d_model_service::E3dModelService;
+use crate::fast_model::room_model::MemoryRoomCalculator;
+
+/// process-store 形态下这一批根用哪台房间计算器：任务传进来的那台（一任务一台，B/T1）或没有任务
+/// 语境时在本函数里按组冻的那台。两者对下游只有一个借用形状（[`Self::calculator`]）。
+enum TaskOrGroupRooms {
+    Task(Arc<MemoryRoomCalculator>),
+    Group(MemoryRoomCalculator),
+}
+
+impl TaskOrGroupRooms {
+    fn calculator(&self) -> &MemoryRoomCalculator {
+        match self {
+            Self::Task(calculator) => calculator,
+            Self::Group(calculator) => calculator,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RootGenerationFailure {
@@ -112,7 +131,16 @@ impl ModelRefreshPolicy {
         mgr: &AiosDBManager,
         roots: &[String],
     ) -> anyhow::Result<()> {
-        let report = Self::generate_roots_report(mgr, roots).await?;
+        Self::generate_roots_with_rooms(mgr, roots, None).await
+    }
+
+    /// 同 [`Self::generate_roots`]，带上本任务冻住的房间计算器（一任务一台，B/T1）。
+    pub(crate) async fn generate_roots_with_rooms(
+        mgr: &AiosDBManager,
+        roots: &[String],
+        rooms: Option<Arc<MemoryRoomCalculator>>,
+    ) -> anyhow::Result<()> {
+        let report = Self::generate_roots_report(mgr, roots, rooms).await?;
         if report.failures.is_empty() {
             Ok(())
         } else {
@@ -130,11 +158,15 @@ impl ModelRefreshPolicy {
         }
     }
 
+    /// `rooms` 是**本任务**开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，B/T1）：dbnum 任务的
+    /// 批量重生成把它传进来，整批根共用；没有任务语境的调用方（路由轮询、手工重生成）给 `None`，房间那一半
+    /// 照旧由 flush 时冻的那台算（或 process-store 形态下在这里按组冻一台）。
     pub(crate) async fn generate_roots_report(
         mgr: &AiosDBManager,
         roots: &[String],
+        rooms: Option<Arc<MemoryRoomCalculator>>,
     ) -> anyhow::Result<TargetedGenerationReport> {
-        Self::generate_roots_report_on_source(mgr, roots, None, None).await
+        Self::generate_roots_report_on_source(mgr, roots, None, None, rooms).await
     }
 
     /// 与 [`Self::generate_roots_report`] 同一条执行/持久化流水线，但设计文件严格钉在
@@ -146,7 +178,7 @@ impl ModelRefreshPolicy {
         source: &crate::data_interface::frozen_source::FrozenSource,
         room_generation: Option<&str>,
     ) -> anyhow::Result<TargetedGenerationReport> {
-        Self::generate_roots_report_on_source(mgr, roots, Some(source), room_generation).await
+        Self::generate_roots_report_on_source(mgr, roots, Some(source), room_generation, None).await
     }
 
     async fn generate_roots_report_on_source(
@@ -154,6 +186,7 @@ impl ModelRefreshPolicy {
         roots: &[String],
         explicit_source: Option<&crate::data_interface::frozen_source::FrozenSource>,
         expected_room_generation: Option<&str>,
+        task_rooms: Option<Arc<MemoryRoomCalculator>>,
     ) -> anyhow::Result<TargetedGenerationReport> {
         if roots.is_empty() {
             return Ok(TargetedGenerationReport::default());
@@ -294,24 +327,30 @@ impl ModelRefreshPolicy {
             // 生成通过 ModelWriteBehind::publish 原子写内存并登记根。持久档到这里时只报告
             // memory=ready；后台再跨根合块写 RocksDB。非持久档仍在这里同步调用适配器。
             //
-            // 房间计算器在这里**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用。
+            // 房间计算器：任务传进来的那台优先（一任务一台，ADR-073 D1 / D12，B/T1）；没有任务语境时
+            // 在这里按组**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用。
             // 开关关闭时得到 None：模型照常持久化、不写新房间边；开关开启但常驻模型不可用
             // （在建 / 降级）时才把本批每根记成「房间算不出来」，下一次任务重生成。
-            let rooms = if publication_policy.uses_process_store()
+            let rooms: anyhow::Result<Option<TaskOrGroupRooms>> = if publication_policy
+                .uses_process_store()
                 && !crate::options::store_mode().is_durable()
             {
-                crate::fast_model::model_db_adapter::frozen_room_calculator().and_then(|rooms| {
-                    if let Some(expected) = expected_room_generation {
-                        let actual = rooms
-                            .as_ref()
-                            .map(|calculator| calculator.resident_generation());
-                        anyhow::ensure!(
-                            actual == Some(expected),
-                            "room resident generation changed before model publication: expected {expected}, actual {actual:?}"
-                        );
-                    }
-                    Ok(rooms)
-                })
+                match task_rooms.as_ref() {
+                    Some(task) => Ok(Some(TaskOrGroupRooms::Task(Arc::clone(task)))),
+                    None => crate::fast_model::model_db_adapter::frozen_room_calculator()
+                        .and_then(|rooms| {
+                            if let Some(expected) = expected_room_generation {
+                                let actual = rooms
+                                    .as_ref()
+                                    .map(|calculator| calculator.resident_generation());
+                                anyhow::ensure!(
+                                    actual == Some(expected),
+                                    "room resident generation changed before model publication: expected {expected}, actual {actual:?}"
+                                );
+                            }
+                            Ok(rooms.map(TaskOrGroupRooms::Group))
+                        }),
+                }
             } else {
                 Ok(None)
             };
@@ -437,7 +476,7 @@ impl ModelRefreshPolicy {
                                 crate::fast_model::model_memory_store::ModelMemoryStore::global(),
                                 dbnum,
                                 &refnos,
-                                rooms.as_ref(),
+                                rooms.as_ref().map(TaskOrGroupRooms::calculator),
                             )
                             .await?
                         }

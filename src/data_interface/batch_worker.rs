@@ -2322,6 +2322,9 @@ async fn execute_model_only_body(
     // 同一条纪律；回执留着，换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
     let room_reference =
         crate::fast_model::model_db_adapter::refresh_room_reference_before_task(job.dbnum).await;
+    // 一任务一台（B/T1）：对齐之后紧接着冻这一任务的房间计算器，批量重生成与逐根重试都用它；冻不出
+    // 时单元工作单入口按 D2 把每根记失败。flush 侧 `frozen_room_calculator()` 只剩「没带边的根」的兜底。
+    let rooms = crate::fast_model::model_db_adapter::TaskRoomCalculator::freeze();
     // 对齐之后记一次代号：整库重排（起点 0）收尾盖 `model_room_generation` 时与此刻比——不等 = 任务中途
     // 换过代，各批根的边不是同一代算的，那一格不盖（审核 P2-3，`task_room_generation_stamp`）。
     let room_generation_at_start = crate::fast_model::model_db_adapter::required_room_generation()
@@ -2357,7 +2360,16 @@ async fn execute_model_only_body(
         worklist.extend(regen_items.iter().map(unit_task_from_regen_item));
         worklist.extend(derived_units);
         let worklist = merge_unit_worklist(worklist);
-        run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
+        run_unit_worklist(
+            mgr,
+            registry,
+            &job.task_id,
+            worklist,
+            progress,
+            warnings,
+            &rooms,
+        )
+        .await
     };
     failed |= settlement_failed
         || units
@@ -2758,6 +2770,13 @@ async fn execute_frozen_batch_body(
                 .await,
         )
     };
+    // 一任务一台（B/T1）：对齐之后紧接着冻这一任务的房间计算器，本窗的批量重生成与逐根重试都用它；
+    // 模型半边不跑（`defer_model_phase`）时不冻——冻了也没人用。冻不出时单元工作单入口按 D2 把每根记失败。
+    let rooms = if defer_model_phase {
+        crate::fast_model::model_db_adapter::TaskRoomCalculator::Disabled
+    } else {
+        crate::fast_model::model_db_adapter::TaskRoomCalculator::freeze()
+    };
     // 第三条触发（电平型，2026-09-17）：库上 durable 侧的整库对齐代号与此刻（对齐之后）常驻代号不等
     // = 这个库欠一次整库重算。前两条触发的原因只活在本任务里，拆窗 / 单元失败 / 刷盘没齐都会把它丢掉；
     // 这一条按库上的事实判，直到某个任务把 `Aligned` 盖上才安静——整库重算对不在投影里的根回读库上几何
@@ -2832,7 +2851,16 @@ async fn execute_frozen_batch_body(
         ));
         new_units.extend(derived_units);
         let worklist = merge_unit_worklist(new_units);
-        run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
+        run_unit_worklist(
+            mgr,
+            registry,
+            &job.task_id,
+            worklist,
+            progress,
+            warnings,
+            &rooms,
+        )
+        .await
     } else {
         registry.set_unit_totals(&job.task_id, 0);
         (Vec::new(), true)
@@ -2931,8 +2959,11 @@ async fn run_single_unit(
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
     emit_started: bool,
+    rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
 ) -> (ModelUnitResult, bool) {
-    use crate::data_interface::manual_update::{emit, generate_unit_model, generation_root_lock};
+    use crate::data_interface::manual_update::{
+        emit, generate_unit_model_with_rooms, generation_root_lock,
+    };
 
     if emit_started {
         emit(
@@ -2949,7 +2980,7 @@ async fn run_single_unit(
     let outcome = {
         let lock = generation_root_lock(&task.root_refno);
         let _guard = lock.lock().await;
-        generate_unit_model(mgr, &task.root_refno).await
+        generate_unit_model_with_rooms(mgr, &task.root_refno, rooms).await
     };
     let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
     // 没有 pending 行要收口了（ADR-072 D5）：单元清单就是真值，成败直接进回执；失败另写到
@@ -3475,6 +3506,10 @@ async fn run_unit_publish_units(
 ///
 /// 生成一律是根级 `generate_roots`（ADR-056 D3）：模型侧从文件最新会话读（ADR-054），
 /// 不再拿数据窗口的 `(start, end)` 走 e3d-model 的单元级 `apply_window`。
+/// `rooms` 是本任务开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，B/T1）：批量重生成与逐根重试
+/// 都把它传给生成；冻不出（`Unavailable`）时 D2「房间失败 = 该根失败」在这里就判——全部单元记 Failed、
+/// 账本记同一句原因，不白跑几何等到 flush 才判死（此前 flush 冻不出计算器时每根记
+/// `room calculator unavailable for this task`，与这里同一句）。
 async fn run_unit_worklist(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -3482,6 +3517,7 @@ async fn run_unit_worklist(
     worklist: Vec<crate::data_interface::manual_update::UnitTask>,
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
+    rooms: &crate::fast_model::model_db_adapter::TaskRoomCalculator,
 ) -> (Vec<ModelUnitResult>, bool) {
     use crate::data_interface::manual_update::{emit, generation_root_lock};
 
@@ -3490,6 +3526,48 @@ async fn run_unit_worklist(
     let dbnum = worklist.first().map(|task| task.dbnum);
     let mut results = Vec::with_capacity(worklist.len());
     let mut settlement_failed = false;
+
+    if let Some(reason) = rooms.unavailable()
+        && !worklist.is_empty()
+    {
+        if let Some(dbnum) = dbnum {
+            println!(
+                "模型生成跳过 dbnum={dbnum} 交付单元={}：本任务冻不出房间计算器，每根按「房间算不出来」记失败（ADR-073 D2）: {reason}",
+                worklist.len()
+            );
+        }
+        for task in worklist {
+            mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, reason);
+            emit(
+                progress,
+                ManualUpdateEvent::ModelUnitFinished {
+                    dbnum: task.dbnum,
+                    root_refno: task.root_refno.clone(),
+                    success: false,
+                    message: Some(reason.to_string()),
+                },
+            );
+            registry.bump_units_done(task_id);
+            results.push(ModelUnitResult {
+                dbnum: task.dbnum,
+                root_refno: task.root_refno,
+                noun: task.noun,
+                status: UnitGenStatus::Failed,
+                attempts: task.attempts + 1,
+                message: Some(reason.to_string()),
+                old_owner: task.old_owner,
+                new_owner: task.new_owner,
+                kind: UnitKind::Regen,
+                transform_fallback_reason: None,
+                unit_fallback_reason: None,
+            });
+        }
+        results.sort_by(|left, right| {
+            (left.dbnum, left.root_refno.as_str()).cmp(&(right.dbnum, right.root_refno.as_str()))
+        });
+        return (results, true);
+    }
+    let task_rooms = rooms.frozen().cloned();
 
     // 刚体前移分流（ADR-066 B6）：先把「只动摆放」的单元交给便宜路执行体。走成的记 Transform 回执；
     // 走不成的连同回退原因改排整根重算，与其余单元一起走下面的老路。开关关时没有 transform 单元。
@@ -3588,7 +3666,9 @@ async fn run_unit_worklist(
             let batch_started = std::time::Instant::now();
             let report =
                 crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
-                    mgr, &roots,
+                    mgr,
+                    &roots,
+                    task_rooms.clone(),
                 )
                 .await;
             let (completed, mut failures) = match report {
@@ -3669,8 +3749,17 @@ async fn run_unit_worklist(
     }
 
     for task in singles {
-        let (result, failed) =
-            run_single_unit(mgr, registry, task_id, task, progress, warnings, true).await;
+        let (result, failed) = run_single_unit(
+            mgr,
+            registry,
+            task_id,
+            task,
+            progress,
+            warnings,
+            true,
+            task_rooms.clone(),
+        )
+        .await;
         settlement_failed |= failed;
         results.push(result);
     }
@@ -5605,6 +5694,73 @@ mod tests {
         assert!(
             !stage.contains("records_of_root(") && !stage.contains("manifest_hash("),
             "分流层不读投影、不自己算章"
+        );
+    }
+
+    /// 源码钉（一任务一台，ADR-073 D1 / D12，B/T1）：单元工作单只用执行体传进来的那台房间计算器——
+    /// 冻不出（`Unavailable`）在入口就把全部单元按 D2 记失败、账本记同一句，早于刚体 / 单元 / 整根三路；
+    /// 批量重生成与逐根重试都把 `task_rooms` 传给生成，函数体里不许自己再 `frozen_room_calculator()`。
+    #[test]
+    fn the_unit_worklist_uses_the_task_room_calculator_and_fails_fast_when_it_is_unavailable() {
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let body = source
+            .split_once("async fn run_unit_worklist(")
+            .expect("worklist")
+            .1;
+        let end = body
+            .find("\n}\r\n")
+            .or_else(|| body.find("\n}\n"))
+            .expect("函数总有结尾");
+        let body = &body[..end];
+        let unavailable = body.find("rooms.unavailable()").expect("冻不出在入口判");
+        let marked = body[unavailable..]
+            .find("mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, reason);")
+            .expect("每根账本记同一句原因");
+        let transform = body
+            .find("run_rigid_motion_units(")
+            .expect("rigid-motion stage");
+        assert!(
+            unavailable < transform && unavailable + marked < transform,
+            "冻不出的判死早于三路分流: {body}"
+        );
+        assert!(
+            body.contains("return (results, true);"),
+            "判死后 settlement_failed = true 直接返回"
+        );
+        let take = body
+            .find("let task_rooms = rooms.frozen().cloned();")
+            .expect("只从执行体传进来的那台取");
+        assert!(unavailable < take && take < transform);
+        let regen = body.find("generate_roots_report(").expect("regen stage");
+        let regen_call = &body[regen..regen + body[regen..].find(".await").expect("调用有尽头")];
+        assert!(
+            regen_call.contains("task_rooms.clone()"),
+            "批量重生成把本任务那一台传给 generate_roots_report: {regen_call}"
+        );
+        assert_eq!(
+            body.matches("task_rooms.clone()").count(),
+            2,
+            "批量重生成与逐根重试各传一次: {body}"
+        );
+        assert!(
+            !body.contains("frozen_room_calculator()"),
+            "单元工作单不许自己冻计算器（一任务一台）"
+        );
+        let single = source
+            .split_once("async fn run_single_unit(")
+            .expect("single unit")
+            .1;
+        let single_end = single
+            .find("\n}\r\n")
+            .or_else(|| single.find("\n}\n"))
+            .expect("函数总有结尾");
+        let single = &single[..single_end];
+        assert!(
+            single.contains("generate_unit_model_with_rooms(mgr, &task.root_refno, rooms)"),
+            "逐根重试同样用任务那一台: {single}"
         );
     }
 

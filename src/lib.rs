@@ -1960,6 +1960,7 @@ async fn targeted_model_refresh(
         match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
             manager,
             &root_names,
+            None,
         )
         .await
         {
