@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, RefnoEnum};
@@ -2186,6 +2186,16 @@ pub(crate) enum RoomReferenceRefresh {
     },
     /// 重建没成：手上有旧的就留着继续算、`Degraded` 记一条 `stage=refresh` 缺口；没有旧的仍 `Blocked`。
     Failed { error: String, kept_previous: bool },
+    /// 同一文件版本下上一次重建刚失败、冷却期未到（[`RebuildBackoff`]，审核 P3-6）：这一轮**不重建**，按上一次的
+    /// 结论继续——手上有旧的就用旧的（`Degraded` 照旧），没有仍 `Blocked`。`failures` 是同一 composite 下已连续
+    /// 失败几次，`retry_in_ms` 是冷却期还剩多久；`error` 是上一次的失败原因。生命周期与 `last_failure` 都不再动。
+    Deferred {
+        key: String,
+        error: String,
+        kept_previous: bool,
+        failures: u32,
+        retry_in_ms: u128,
+    },
 }
 
 impl RoomReferenceRefresh {
@@ -2193,6 +2203,21 @@ impl RoomReferenceRefresh {
     pub(crate) fn log_line(&self) -> Option<String> {
         match self {
             Self::NotApplicable | Self::Unchanged { .. } => None,
+            Self::Deferred {
+                key,
+                error,
+                kept_previous,
+                failures,
+                retry_in_ms,
+            } => Some(format!(
+                "[房间参照] 文件版本 {} 下常驻房间模型重建已连续失败 {failures} 次，退避中（还有 {retry_in_ms}ms 再试；{}）: {error}",
+                key.chars().take(12).collect::<String>(),
+                if *kept_previous {
+                    "留着上一份继续算"
+                } else {
+                    "此前也没建成，仍 blocked：本批根按「房间算不出来」记失败"
+                }
+            )),
             Self::Rebuilt {
                 previous_key,
                 key,
@@ -2235,6 +2260,101 @@ fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// 同一文件版本下重建刚失败过的退避账（审核 P3-6，2026-09-17）。
+///
+/// 探针给出的 composite 就是重建的全部输入（MDB 成员清单 + 每个 DESI 的最新会话 + 令牌）：composite 没变、上一次
+/// 重建却没成，多半是同一个原因再失败一次——启动 `Blocked` 且原因持续（MDB 读不了、某个 DESI 文件打不开）时，
+/// 此前每个任务开工都整份重建再失败：O(全部文件) 的空转加一条一模一样的 `last_failure`。现在同一 composite 下连续
+/// 失败按指数退避（[`REBUILD_BACKOFF_BASE`] 起、每次翻倍、[`REBUILD_BACKOFF_CAP`] 封顶），冷却期内的任务开工不再
+/// 重建、按上一次的结论继续（[`RoomReferenceRefresh::Deferred`]）；composite 变了（文件真前进了 = 输入变了）立刻
+/// 再试，成了就清账。**不是永久跳过**：暂时性故障（文件被别的写者锁着、盘暂时读不到）冷却期一到照样自愈，
+/// D12「启动时的暂时性故障不再要重启才能恢复」不变。只在持 [`refresh_lock`] 时读写；进程重启表是空的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RebuildBackoff {
+    /// 上一次重建失败时对着的文件版本 composite（探针键 `manifest.key` 那一格的值）。
+    pub key: String,
+    /// 同一 composite 下连续失败次数（≥ 1）。
+    pub failures: u32,
+    /// 上一次的失败原因。
+    pub last_error: String,
+    /// 下一次允许重建的时刻。
+    pub retry_at: Instant,
+}
+
+/// 第一次失败之后的冷却期。
+pub(crate) const REBUILD_BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// 冷却期上限——原因一直不消失时，最多每隔这么久再整份重建一次。
+pub(crate) const REBUILD_BACKOFF_CAP: Duration = Duration::from_secs(10 * 60);
+
+impl RebuildBackoff {
+    /// 第 `failures` 次连续失败之后等多久：`BASE × 2^(failures-1)`，封顶 `CAP`（`0` 当 `1`）。
+    pub(crate) fn cooldown(failures: u32) -> Duration {
+        let doublings = failures.saturating_sub(1).min(20);
+        REBUILD_BACKOFF_BASE
+            .checked_mul(1u32 << doublings)
+            .unwrap_or(REBUILD_BACKOFF_CAP)
+            .min(REBUILD_BACKOFF_CAP)
+    }
+
+    /// 对着 `key` 的重建在 `now` 又失败了：同一 composite 累加，换了 composite 从 1 数起。
+    pub(crate) fn after_failure(
+        previous: Option<&Self>,
+        key: &str,
+        error: String,
+        now: Instant,
+    ) -> Self {
+        let failures = match previous {
+            Some(previous) if previous.key == key => previous.failures.saturating_add(1),
+            _ => 1,
+        };
+        Self {
+            key: key.to_string(),
+            failures,
+            last_error: error,
+            retry_at: now + Self::cooldown(failures),
+        }
+    }
+
+    /// 此刻要对着 `key` 重建，冷却期还剩多久；`None` = 可以重建（composite 变了 / 冷却期已过）。
+    pub(crate) fn remaining(&self, key: &str, now: Instant) -> Option<Duration> {
+        if self.key != key {
+            return None;
+        }
+        let remaining = self.retry_at.saturating_duration_since(now);
+        (!remaining.is_zero()).then_some(remaining)
+    }
+
+    /// `/health.room_build.resident.rebuild_backoff` 那一格。
+    pub(crate) fn health(&self, now: Instant) -> serde_json::Value {
+        serde_json::json!({
+            "key": self.key.chars().take(12).collect::<String>(),
+            "failures": self.failures,
+            "last_error": self.last_error,
+            "retry_in_ms": u64::try_from(self.retry_at.saturating_duration_since(now).as_millis())
+                .unwrap_or(u64::MAX),
+        })
+    }
+}
+
+fn rebuild_backoff_slot() -> &'static RwLock<Option<RebuildBackoff>> {
+    static BACKOFF: OnceLock<RwLock<Option<RebuildBackoff>>> = OnceLock::new();
+    BACKOFF.get_or_init(|| RwLock::new(None))
+}
+
+/// 开工前对齐的重建退避账；没欠着 = `None`。
+pub(crate) fn rebuild_backoff() -> Option<RebuildBackoff> {
+    rebuild_backoff_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+fn set_rebuild_backoff(state: Option<RebuildBackoff>) {
+    *rebuild_backoff_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = state;
+}
+
 /// 任务开工前把常驻房间模型对齐到**此刻的文件版本**（ADR-073 D12）。
 ///
 /// 探针便宜（[`crate::fast_model::room_topology::latest_frozen_sources`]：成员清单 + 每个 DESI
@@ -2248,7 +2368,8 @@ fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
 /// 并发的任务开工共用一把 [`refresh_lock`]：第二个到的等第一个重建完，再探一次 composite、多半直接
 /// `Unchanged`。重建失败**不**让任务失败：留着旧的那份继续算、生命周期 `Degraded` 记一条
 /// `stage=refresh`（[`lifecycle_after_refresh_failure`]）；此前就没建成（启动 `Blocked`）而这次成了，
-/// 就是自愈——启动时的暂时性故障不再要重启才能恢复。
+/// 就是自愈——启动时的暂时性故障不再要重启才能恢复。原因持续时不每个任务都重建一遍：同一 composite 下
+/// 连续失败按指数退避（[`RebuildBackoff`]），冷却期内回 `Deferred`、按上一次的结论继续；composite 变了立刻再试。
 ///
 /// 会话口径：文件**最新**（ADR-054 Q1 未钉住 = 最新），不是本任务的 T——任务排队期间文件又前进了的话，
 /// 常驻里的面板比本窗几何新一版；下一窗任务追上来即合一。与 ADR-067 D3 当年接受的口径相同。
@@ -2285,7 +2406,20 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
             };
         }
     }
+    // 退避（审核 P3-6）：同一 composite 下上一次重建刚失败、冷却期未到 → 这一轮不重建，按上一次的结论继续。
+    // 生命周期与 `last_failure` 已在那一次记过，这里都不再动；composite 变了的话 `remaining` 是 `None`，照常重建。
     let started = Instant::now();
+    if let Some(backoff) = rebuild_backoff()
+        && let Some(remaining) = backoff.remaining(&probe.composite, started)
+    {
+        return RoomReferenceRefresh::Deferred {
+            key: probe.composite,
+            error: backoff.last_error,
+            kept_previous: installed.is_some(),
+            failures: backoff.failures,
+            retry_in_ms: remaining.as_millis(),
+        };
+    }
     let rebuilt = initialize_file_backed_at_startup(
         ResidentForm::for_face(face),
         inputs.hierarchy,
@@ -2296,6 +2430,8 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
     .await;
     match rebuilt {
         Ok(outcome) => {
+            // 建成了：退避账清掉（下一次失败从 1 数起）。
+            set_rebuild_backoff(None);
             let previous_generation = installed.as_ref().map(|model| model.input_version());
             let generation = outcome.model.input_version();
             // 在册视图之差用 `install()` 顺手算的那一份（对着被换下的那一代算的——与 `installed` 是同一份：
@@ -2324,7 +2460,17 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
                 elapsed_ms: started.elapsed().as_millis(),
             }
         }
-        Err(error) => refresh_failed(installed.as_deref(), &error),
+        Err(error) => {
+            // 没建成：记账——同一 composite 累加、冷却期翻倍；下一个任务开工冷却期未到就不再重建。
+            let previous = rebuild_backoff();
+            set_rebuild_backoff(Some(RebuildBackoff::after_failure(
+                previous.as_ref(),
+                &probe.composite,
+                format!("{error:#}"),
+                Instant::now(),
+            )));
+            refresh_failed(installed.as_deref(), &error)
+        }
     }
 }
 
@@ -2459,6 +2605,13 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
         target.insert(
             "last_failure".to_string(),
             serde_json::json!(last_failure()),
+        );
+        // 开工前对齐的重建退避账（审核 P3-6）：欠着时给出对着哪一版文件、连续败了几次、还有多久再试。
+        target.insert(
+            "rebuild_backoff".to_string(),
+            rebuild_backoff().map_or(serde_json::Value::Null, |backoff| {
+                backoff.health(Instant::now())
+            }),
         );
         if let Some(stat) = active {
             target.insert("rooms".to_string(), serde_json::json!(stat.rooms));
@@ -3948,6 +4101,136 @@ mod tests {
         assert!(
             installer.contains("lock_spatial_serial().await"),
             "装载器在空间串行锁里整份替换——这条规矩因它而立: {installer}"
+        );
+    }
+
+    /// 审核 P3-6：同一文件版本 composite 下重建连续失败按指数退避（30s 起翻倍、10min 封顶）；composite 变了
+    /// = 输入变了，立刻再试、从 1 数起；冷却期一到照样再试（暂时性故障照样自愈，不是永久跳过）。
+    #[test]
+    fn a_failed_rebuild_backs_off_under_the_same_composite_and_rearms_when_the_files_move() {
+        let t0 = Instant::now();
+        let first = RebuildBackoff::after_failure(None, "k1", "mdb unreadable".into(), t0);
+        assert_eq!(first.failures, 1);
+        assert_eq!(first.retry_at, t0 + REBUILD_BACKOFF_BASE);
+        assert_eq!(
+            first.remaining("k1", t0),
+            Some(REBUILD_BACKOFF_BASE),
+            "冷却期内同一 composite 不重建"
+        );
+        assert_eq!(
+            first.remaining("k1", t0 + REBUILD_BACKOFF_BASE / 2),
+            Some(REBUILD_BACKOFF_BASE / 2)
+        );
+        assert_eq!(
+            first.remaining("k2", t0),
+            None,
+            "composite 变了 = 输入变了，立刻再试"
+        );
+        assert_eq!(
+            first.remaining("k1", t0 + REBUILD_BACKOFF_BASE),
+            None,
+            "冷却期一到再试——暂时性故障照样自愈"
+        );
+
+        let at = t0 + REBUILD_BACKOFF_BASE;
+        let second = RebuildBackoff::after_failure(Some(&first), "k1", "still".into(), at);
+        assert_eq!(second.failures, 2, "同一 composite 累加");
+        assert_eq!(second.retry_at, at + REBUILD_BACKOFF_BASE * 2, "翻倍");
+        assert_eq!(second.last_error, "still");
+        let moved = RebuildBackoff::after_failure(Some(&second), "k2", "other".into(), at);
+        assert_eq!(moved.failures, 1, "换了 composite 从 1 数起");
+        assert_eq!(moved.retry_at, at + REBUILD_BACKOFF_BASE);
+
+        assert_eq!(RebuildBackoff::cooldown(0), REBUILD_BACKOFF_BASE, "0 当 1");
+        assert_eq!(RebuildBackoff::cooldown(1), REBUILD_BACKOFF_BASE);
+        assert_eq!(RebuildBackoff::cooldown(2), REBUILD_BACKOFF_BASE * 2);
+        assert_eq!(RebuildBackoff::cooldown(3), REBUILD_BACKOFF_BASE * 4);
+        assert_eq!(
+            RebuildBackoff::cooldown(6),
+            REBUILD_BACKOFF_CAP,
+            "30s × 2^5 = 16min → 封顶 10min"
+        );
+        assert_eq!(
+            RebuildBackoff::cooldown(u32::MAX),
+            REBUILD_BACKOFF_CAP,
+            "不溢出"
+        );
+
+        let health = second.health(at + Duration::from_secs(10));
+        assert_eq!(health["failures"], 2);
+        assert_eq!(health["key"], "k1");
+        assert_eq!(health["last_error"], "still");
+        assert_eq!(
+            health["retry_in_ms"],
+            (REBUILD_BACKOFF_BASE * 2 - Duration::from_secs(10)).as_millis() as u64
+        );
+        let deferred = RoomReferenceRefresh::Deferred {
+            key: "k1".into(),
+            error: "still".into(),
+            kept_previous: false,
+            failures: 2,
+            retry_in_ms: 50_000,
+        };
+        let line = deferred.log_line().expect("退避要在任务日志里说一句");
+        assert!(
+            line.contains("连续失败 2 次") && line.contains("50000ms") && line.contains("blocked"),
+            "{line}"
+        );
+    }
+
+    /// 源码钉（审核 P3-6）：退避判在重建之前、只看探针给的 composite；建成了清账、没建成记账；这本账只有
+    /// `refresh_before_task` 一处写（启动装载器失败不记——进程起来后第一个任务总要亲自试一次，那就是自愈的机会）。
+    #[test]
+    fn the_task_start_refresh_backs_off_before_rebuilding_and_settles_the_ledger_on_both_outcomes()
+    {
+        let source = include_str!("room_resident.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let refresh = source
+            .split_once("pub(crate) async fn refresh_before_task(")
+            .expect("函数头")
+            .1;
+        let end = refresh
+            .find("\n}\r\n")
+            .or_else(|| refresh.find("\n}\n"))
+            .expect("函数总有结尾");
+        let refresh = &refresh[..end];
+        let probe = refresh.find("latest_frozen_sources().await").expect("探针");
+        let deferred = refresh
+            .find("RoomReferenceRefresh::Deferred {")
+            .expect("退避回执");
+        let rebuild = refresh
+            .find("initialize_file_backed_at_startup(")
+            .expect("重建");
+        assert!(
+            probe < deferred && deferred < rebuild,
+            "退避判在探针之后、重建之前: {refresh}"
+        );
+        assert!(
+            refresh.contains("backoff.remaining(&probe.composite, started)"),
+            "只看探针给的 composite: {refresh}"
+        );
+        assert!(
+            refresh.contains("set_rebuild_backoff(None);"),
+            "建成了清账: {refresh}"
+        );
+        let record = refresh
+            .find("RebuildBackoff::after_failure(")
+            .expect("没建成记账");
+        assert!(
+            rebuild < record && refresh[record..].contains("&probe.composite,"),
+            "记账在重建之后、对着探针给的同一 composite: {refresh}"
+        );
+        assert_eq!(
+            source.matches("set_rebuild_backoff(").count(),
+            3,
+            "退避账只有 refresh_before_task 写（定义 + 清账 + 记账）"
+        );
+        assert_eq!(
+            source.matches("RebuildBackoff::after_failure(").count(),
+            1,
+            "记账只在 refresh_before_task 的 Err 臂"
         );
     }
 

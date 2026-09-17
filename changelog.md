@@ -170,6 +170,28 @@
   `data_interface/model_dbnum_ensure.rs::start_with_purpose`，撤掉后复绿；`cargo test --lib -- room_resident::`
   **30 passed / 0 failed / 9 ignored**；rustfmt 本轮新增行无 diff（该文件 100 / 958 / 1249 三处漂移为既有）。
 
+### 开工前对齐的重建失败按同一文件版本指数退避，不再每个任务整份重建再失败（ADR-073 D12，审核 P3-6）
+
+- **为什么**：`room_resident::refresh_before_task` 在启动 `Blocked`（或上一次换代没成、留着旧代）且原因持续——MDB 读不了、某个 DESI
+  文件打不开——时，每个 dbnum 任务开工都走一遍 `initialize_file_backed_at_startup`：O(全部文件) 的拓扑 + 面板几何重建，然后以同一个
+  原因再失败一次、`last_failure` 再刷一条一模一样的。探针给的 composite 就是重建的全部输入（MDB 成员清单 + 每个 DESI 最新会话 + 令牌），
+  composite 没变而上一次没成，多半还是不成；但也不能永久跳过——文件被别的写者锁着、盘暂时读不到这类暂时性故障，D12 承诺「不再要重启
+  才能恢复」。
+- **改动**：`room_resident::RebuildBackoff { key, failures, last_error, retry_at }` 进程内一份（持 `refresh_lock` 时读写；重启为空）：
+  同一 composite 下连续失败 `cooldown(n) = 30s × 2^(n-1)`、10min 封顶；`refresh_before_task` 探针之后、重建之前先问
+  `backoff.remaining(&probe.composite, now)`，冷却期未到回新变体 **`RoomReferenceRefresh::Deferred { key, error, kept_previous,
+  failures, retry_in_ms }`**——不重建、生命周期与 `last_failure` 都不再动，任务日志一行「文件版本 … 下常驻房间模型重建已连续失败 n 次，
+  退避中（还有 …ms 再试）」；composite 变了 `remaining` 为 `None` 照常重建、失败从 1 数起；建成了 `set_rebuild_backoff(None)` 清账。
+  启动装载器失败**不**记这本账：进程起来后第一个任务总要亲自试一次，那就是自愈的机会。`/health.room_build.resident` 加一格
+  `rebuild_backoff: { key, failures, last_error, retry_in_ms } | null`。`request_for_task` 只认 `Rebuilt { generation_changed: true }`，
+  `Deferred` 不触发整库重算（常驻没换代）。ADR-073 D12 正文与钉 20、CONTEXT「任务开工前对齐」词条同步。
+- **验证**：`cargo test --lib -- room_resident:: room_recompute:: the_task_start_refresh` **39 passed / 0 failed / 9 ignored**（含新增
+  `a_failed_rebuild_backs_off_under_the_same_composite_and_rearms_when_the_files_move`——冷却 / 翻倍 / 封顶 / 换 composite 归 1 /
+  冷却期到即再试 / health 格 / `Deferred` 日志行——与源码钉 `the_task_start_refresh_backs_off_before_rebuilding_and_settles_the_ledger_on_both_outcomes`；
+  既有钉 15 / P3-7 / P3-8 仍绿）；变异一次——删掉 `refresh_before_task` 里的退避早退，钉红在「退避回执」、撤掉后复绿；rustfmt 本轮
+  新增行无 diff（该文件 100 / 958 / 1250 三处漂移为既有）。**未 live**：「MDB 不可读启动 → 连续任务开工只重建一次、之后日志出『退避中』」
+  这条真机用例没跑。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步

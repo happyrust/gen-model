@@ -498,7 +498,7 @@ _Avoid_: 房间增量（流程含义，已退役）、房间任务、房间阶�
 _Avoid_: 房间阻断、resident blocked（指缺口时）、面板缺几何算失败、把 `Degraded` 当不可用、有行却不可用挡参照（D-A (a)，已作废）
 
 **任务开工前对齐 (Task-start Room Reference Refresh)**：
-每个 dbnum 任务的模型半边开工前，把常驻房间模型对齐到**此刻的文件版本**的那一步（ADR-073 2026-09-16 D12，入口 `model_db_adapter::refresh_room_reference_before_task`，四处：批次执行体、ModelOnly 执行体（启动追平 `model_sesno → 文件最新` 与 `model/rebuild`，2026-09-17 补上）、初始化双 lane、读透侧 ensure 准入）。探针便宜（MDB 成员清单 + 每个 DESI 的最新会话 + 冻结令牌，不装 schema、不起 E3D 服务），文件版本 composite 与装好的那份相同 = 常路、零重建；变了才按文件重建（两层按文件的缓存让没变的文件只付重开校验的钱），在 `lock_spatial_serial` 里整份替换——已开工任务手里的 `Arc` 不受影响，D1「任务期间不换代」说的是每个任务自己那份引用。重建失败留旧代继续算、`Degraded` 记一条 `stage=refresh`；启动 `Blocked` 而这次成了就是自愈。它取代了 ADR-067 那种「每轮 drain 进串行锁后按清单键懒换代」——没有轮、没有参照落款、没有启动对比。会话口径是文件最新，不是本任务的 T。
+每个 dbnum 任务的模型半边开工前，把常驻房间模型对齐到**此刻的文件版本**的那一步（ADR-073 2026-09-16 D12，入口 `model_db_adapter::refresh_room_reference_before_task`，四处：批次执行体、ModelOnly 执行体（启动追平 `model_sesno → 文件最新` 与 `model/rebuild`，2026-09-17 补上）、初始化双 lane、读透侧 ensure 准入）。探针便宜（MDB 成员清单 + 每个 DESI 的最新会话 + 冻结令牌，不装 schema、不起 E3D 服务），文件版本 composite 与装好的那份相同 = 常路、零重建；变了才按文件重建（两层按文件的缓存让没变的文件只付重开校验的钱），在 `lock_spatial_serial` 里整份替换——已开工任务手里的 `Arc` 不受影响，D1「任务期间不换代」说的是每个任务自己那份引用。重建失败留旧代继续算、`Degraded` 记一条 `stage=refresh`；启动 `Blocked` 而这次成了就是自愈。原因持续时不每个任务都整份重建：同一文件版本 composite 下连续失败按指数退避（`room_resident::RebuildBackoff`，30s 起翻倍、10min 封顶），冷却期内回 `Deferred`、按上一次结论继续，composite 变了立刻再试、建成了清账——不是永久跳过，暂时性故障冷却期一到照样自愈（2026-09-17 审核 P3-6；`/health.room_build.resident.rebuild_backoff` 看得见）。它取代了 ADR-067 那种「每轮 drain 进串行锁后按清单键懒换代」——没有轮、没有参照落款、没有启动对比。会话口径是文件最新，不是本任务的 T。
 _Avoid_: 换代（ADR-067 含义）、房间刷新、常驻模型热更新、把它当房间阶段
 
 **房间代号 (Room Generation)**：

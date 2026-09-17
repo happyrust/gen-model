@@ -109,7 +109,10 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   重建（`room-groups-v2` 磁盘工件 / GroupCache 按文件令牌、`room-input-cache` 面板几何按文件的 `initialization_target_hash`，
   没变的文件只付重开校验的钱），在 `lock_spatial_serial` 里整份替换。已开工的任务手里的 `Arc` 不受影响——D1「任务期间不换代」
   说的是每个任务自己那份引用；并发开工共用一把重建锁，后到的等完再探一次。重建失败**不**让任务失败：留旧代继续算、`Degraded`
-  记一条 `stage=refresh`；启动时 `Blocked` 而这次成了就是自愈。会话口径是文件最新（ADR-054 Q1），不是本任务的 T——排队期间
+  记一条 `stage=refresh`；启动时 `Blocked` 而这次成了就是自愈。原因持续时不每个任务都整份重建一遍（2026-09-17 审核 P3-6）：
+  同一文件版本 composite 下连续失败按指数退避（`room_resident::RebuildBackoff`，30s 起翻倍、10min 封顶），冷却期内的开工回
+  `Deferred`、按上一次的结论继续（生命周期与 `last_failure` 不再动）；composite 变了 = 输入变了，立刻再试；建成了清账。**不是
+  永久跳过**——暂时性故障冷却期一到照样自愈；启动装载器失败不记这本账，进程起来后第一个任务总要亲自试一次。会话口径是文件最新（ADR-054 Q1），不是本任务的 T——排队期间
   文件又前进了的话常驻比本窗几何新一版，下一窗追上即合一（ADR-067 D3 当年接受的同一口径）。
   **代号**（ACK 里的 `room_generation`、`required_room_generation`、生命周期的 `generation`）改为 `ResidentRoomModel::input_version`
   ——拓扑 + 在册视图 + 有几何面板的几何的摘要，与 `MemoryRoomCalculator::resident_generation` 同一个字串；文件 composite 只当
@@ -251,6 +254,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     `the_dbnum_row_carries_the_durable_room_alignment_as_one_optional_cell`（`/dbnums` 那一格与两枚水位同一趟读回，
     「成不成立」只许有一处判据）。
     live：rocksdb 真库冷重启（不重摄入）后 `e3d.room.lookup` 对有边的构件回 `ready_nonempty`。
+20. D12 退避（P3-6）：`refresh_before_task` 函数体里 `RoomReferenceRefresh::Deferred {` 落在 `latest_frozen_sources().await` 之后、
+    `initialize_file_backed_at_startup(` 之前，判据只看探针给的 composite（`backoff.remaining(&probe.composite, started)`）；
+    `Ok` 臂 `set_rebuild_backoff(None);`、`Err` 臂 `RebuildBackoff::after_failure(` 对着 `&probe.composite,` 记账，生产代码里
+    `set_rebuild_backoff(` 恰三处（定义 + 清账 + 记账）、`after_failure(` 恰一处；`cooldown(n) = 30s × 2^(n-1)` 封顶 10min、
+    `remaining` 对不同 composite 为 `None`、冷却期一到为 `None`、换 composite 从 1 数起（钉
+    `the_task_start_refresh_backs_off_before_rebuilding_and_settles_the_ledger_on_both_outcomes`、
+    `a_failed_rebuild_backs_off_under_the_same_composite_and_rearms_when_the_files_move`）。
 
 ## 背景
 
