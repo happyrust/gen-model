@@ -530,7 +530,7 @@ async fn model_half_inner(
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let produce = async {
         let outcome = service
-            .produce_slices(dbnum, &root_strings, failure_policy, &tx)
+            .produce_slices(dbnum, &root_strings, failure_policy, &tx, None)
             .await;
         drop(tx);
         outcome

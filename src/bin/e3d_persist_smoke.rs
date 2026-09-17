@@ -191,6 +191,7 @@ async fn main() -> anyhow::Result<()> {
             dbnum,
             &roots,
             aios_database::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
+            None,
         )
         .await
         .with_context(|| format!("生成 {dbnum}"))?;
@@ -935,6 +936,7 @@ async fn directed(dbnum: u32, root: &str) -> anyhow::Result<()> {
             dbnum,
             &roots,
             aios_database::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
+            None,
         )
         .await
         .with_context(|| format!("生成根 {root}"))?;

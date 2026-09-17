@@ -404,7 +404,8 @@ impl<'a> UnitDeltaProducer<'a> {
         for container in &sets.retired_containers {
             tube_segments.entry(*container).or_insert(0);
         }
-        let baked = bake_elements(outcome.upserts, self.service.mesh_dir.as_path())?;
+        // 单元级局部发布（ADR-078）不带房间边：只算了变了的元素，整根的边由 flush 现算（B/Q5 兜底）。
+        let baked = bake_elements(outcome.upserts, self.service.mesh_dir.as_path(), None)?;
         let (commit, _) = project_geometry_delta(
             self.dbnum,
             self.target_sesno,
@@ -828,6 +829,7 @@ fn spawn_generation_worker(
     queue: Arc<RootQueue>,
     caches: CachePool,
     mesh_dir: PathBuf,
+    rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
 ) -> impl std::future::Future<Output = anyhow::Result<()>> {
     crate::fast_model::concurrency::run_gated_cpu(move || {
         let mut cache = checkout_cache(&caches);
@@ -836,10 +838,12 @@ fn spawn_generation_worker(
             // the mesh file write are the rest of this root's CPU cost, and
             // doing them here is what lets the `Manifold` die on this thread
             // instead of riding into the serial publication step.
+            // 房间归属也在这里算（B/T2）：网格还在手上，判定点不必等 flush 再从盘上回读。
             let started = std::time::Instant::now();
             let evaluated = generate_snapshot_from_set(&set, &index, root, &mut cache);
             let evaluate_micros = started.elapsed().as_micros();
-            let outcome = evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir));
+            let outcome =
+                evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir, rooms.as_deref()));
             // 一根一行的生成账：整库那一档的墙钟压在哪几根上、是取数+几何还是烘焙，
             // 只有按根记才看得出来——按批记会把长尾摊平（7999 上 25 根里几根就占了 80%）。
             log::info!(
@@ -1331,6 +1335,7 @@ impl E3dModelService {
         roots: &[String],
         failure_policy: GeometryFailurePolicy,
         sink: &tokio::sync::mpsc::Sender<GeneratedMemoryBatch>,
+        rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
     ) -> anyhow::Result<()> {
         let pin = self.pin(dbnum)?;
         let source_sesno = self.source_session(pin)?;
@@ -1362,6 +1367,7 @@ impl E3dModelService {
                     queue.clone(),
                     caches.clone(),
                     self.mesh_dir.clone(),
+                    rooms.clone(),
                 ));
             }
             let Some(finished) = futures::StreamExt::next(&mut workers).await else {
@@ -1471,7 +1477,13 @@ impl E3dModelService {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
         let produce = async {
             let result = self
-                .produce_slices(dbnum, roots, GeometryFailurePolicy::BestEffortFallback, &tx)
+                .produce_slices(
+                    dbnum,
+                    roots,
+                    GeometryFailurePolicy::BestEffortFallback,
+                    &tx,
+                    None,
+                )
                 .await;
             drop(tx);
             result
@@ -1544,17 +1556,21 @@ impl E3dModelService {
         Ok(())
     }
 
+    /// `rooms` 是本任务开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，B/T1）：给了，每件几何的
+    /// 房间归属就在 bake 时算出来随根走（[`BakedElement::room_edges`]，B/T2）；`None` 则房间那一半照旧由
+    /// flush 时的 `room_stage` 现算。
     pub async fn generate_and_persist_roots(
         &self,
         dbnum: u32,
         roots: &[String],
         failure_policy: GeometryFailurePolicy,
+        rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
     ) -> anyhow::Result<E3dPersistReport> {
         crate::native_runtime::ensure_geometry_runtime()?;
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
         let produce = async move {
             let outcome = self
-                .produce_slices(dbnum, roots, failure_policy, &sender)
+                .produce_slices(dbnum, roots, failure_policy, &sender, rooms)
                 .await;
             // Closing the last sender is what ends the consumer's loop.
             drop(sender);
@@ -2169,7 +2185,7 @@ impl E3dModelService {
                 snapshots.swap_remove(index).1
             } else {
                 match generate_snapshot_from_set(set, index, root, &mut catalogue_mesh_cache)
-                    .and_then(|snapshot| bake_snapshot(snapshot, &self.mesh_dir))
+                    .and_then(|snapshot| bake_snapshot(snapshot, &self.mesh_dir, None))
                 {
                     Ok(outcome) => outcome,
                     Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {
@@ -2684,6 +2700,10 @@ pub struct BakedElement {
     pub world_bounds: [[f32; 3]; 2],
     /// Only a canonical primitive persists a local box.
     pub local_bounds: Option<[[f32; 3]; 2]>,
+    /// 这件几何对着本任务冻住的候选面板算出的房间归属边（ADR-073 D1，B/T2）：bake 时用手上的网格取判定点，
+    /// 与 flush 时从盘上回读算的逐字相同；未与同构件其它实例合并（发布前按根经 `room_model::merge_root_edges`
+    /// 收拢）。没给计算器（房间开关关 / 没有任务语境）时为空，房间那一半照旧由 flush 现算。
+    pub room_edges: Vec<crate::fast_model::room_model::ElementRoomEdge>,
 }
 
 /// A generated root after baking.  It carries no `owners`: publication reads
@@ -2702,7 +2722,17 @@ pub struct BakedSnapshot {
 /// publication transaction rolls back — leaves its mesh on disk.  That is the
 /// content-addressed contract rather than a new risk: the id *is* the content
 /// hash, so an orphan is simply unreferenced and waits for reachability GC.
-fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<BakedElement> {
+///
+/// `rooms` 给了就顺手算这件几何的房间归属（ADR-073 D1，B/T2）：判定点取自手上这份**就要写盘的网格**
+/// （本地 / 标准图元那一份，不是上面为算盒子折出来的 `world_mesh`——那是 manifold 在 f64 里算完再转的，
+/// 与盘上回读差几个 ulp）经 `room_model::world_points_of` 变换，与 flush 时从 `.mesh` 回读的那条路是**同一个
+/// 函数**，边逐字相同；只有盒跨在面板边上的构件才真取点。算不出来 = 这一根 `Err`（D2「房间失败 = 该根失败」，
+/// 文案与 flush 时 `room_stage` 的同形）。
+fn bake_element(
+    element: GeneratedElement,
+    mesh_dir: &Path,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BakedElement> {
     let world_bounds = {
         let world_mesh = element.parts.as_deref().map_or_else(
             || crate::fast_model::manifold_csg::manifold_to_plant_mesh(&element.solid),
@@ -2711,7 +2741,7 @@ fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<Ba
         let aabb = world_mesh.aabb.context("world PlantMesh missing AABB")?;
         [point3(&aabb.mins), point3(&aabb.maxs)]
     };
-    let (mesh_id, mesh_write, local_bounds) = match element.primitive_instance.as_ref() {
+    let (mesh, mesh_id, mesh_write, local_bounds) = match element.primitive_instance.as_ref() {
         Some(instance) => {
             let canonical = canonical_primitive_mesh(instance.key)?;
             let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(&canonical);
@@ -2719,14 +2749,36 @@ fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<Ba
             let aabb = mesh.aabb.context("canonical PlantMesh missing AABB")?;
             let bounds = [point3(&aabb.mins), point3(&aabb.maxs)];
             let write = ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?;
-            (mesh_id, write, Some(bounds))
+            (mesh, mesh_id, write, Some(bounds))
         }
         None => {
             let mesh = local_generated_mesh(&element);
             let mesh_id = baked_mesh_id(&mesh);
             let write = ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?;
-            (mesh_id, write, None)
+            (mesh, mesh_id, write, None)
         }
+    };
+    let room_edges = match rooms {
+        Some(rooms) => {
+            let input = baked_room_input(
+                &element.geometry_id,
+                element.primitive_instance.as_ref(),
+                element.world,
+                world_bounds,
+                &mesh_id,
+            )?;
+            rooms
+                .edges_for_record(&input, || {
+                    crate::fast_model::room_model::world_points_of(&mesh, input.mesh_to_world)
+                })
+                .with_context(|| {
+                    format!(
+                        "room membership of root {} could not be computed",
+                        element.refno
+                    )
+                })?
+        }
+        None => Vec::new(),
     };
     Ok(BakedElement {
         geometry_id: element.geometry_id,
@@ -2739,6 +2791,32 @@ fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<Ba
         mesh_write,
         world_bounds,
         local_bounds,
+        room_edges,
+    })
+}
+
+/// bake 时这件几何在房间判定眼里的形状——与它随后变成的投影记录**字段相同**（`project_geometry_delta`
+/// 的那一段）：构件 = `geometry_source_refno`（隐式管身挂容器）、标签 = 投影记录 id、世界变换 =
+/// `persisted_world_transform`（隐式管身把标准图元摆放折进去）、「网格 → 世界」= `room_model::projected_mesh_to_world`
+/// （标准图元再乘本地摆放）。两边只许有这一份配方，源码钉 `bake_time_room_input_matches_the_projected_record`。
+fn baked_room_input(
+    geometry_id: &GeometryId,
+    primitive: Option<&e3d_model::primitive_instance::PrimitiveInstance>,
+    world: DMat4,
+    world_bounds: [[f32; 3]; 2],
+    mesh_id: &str,
+) -> anyhow::Result<crate::fast_model::room_model::BakedRoomInput> {
+    let source_refno = geometry_source_refno(geometry_id)?;
+    let world_transform = persisted_world_transform(geometry_id, primitive, world);
+    Ok(crate::fast_model::room_model::BakedRoomInput {
+        element: crate::data_interface::generation_root::refno_from_e3d(source_refno),
+        label: geometry_record_id(geometry_id, source_refno),
+        world_bounds,
+        mesh_id: mesh_id.to_string(),
+        mesh_to_world: crate::fast_model::room_model::projected_mesh_to_world(
+            world_transform,
+            primitive.map(|instance| instance.local_transform),
+        ),
     })
 }
 
@@ -2788,10 +2866,11 @@ pub(crate) fn summarize_geometry_incidents(failed: &[e3d_model::pipeline::Incide
 fn bake_elements(
     elements: Vec<GeneratedElement>,
     mesh_dir: &Path,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<Vec<BakedElement>> {
     elements
         .into_iter()
-        .map(|element| bake_element(element, mesh_dir))
+        .map(|element| bake_element(element, mesh_dir, rooms))
         .collect()
 }
 
@@ -2835,8 +2914,12 @@ fn incomplete_root_policy(published: bool, has_geometry_rows: bool) -> Incomplet
 /// deciding there costs a discarded candidate its triangulation — its meshes
 /// are content-addressed, so a root that published before rewrites nothing —
 /// and it is the only order in which both halves can reach the same verdict.
-fn bake_snapshot(snapshot: GeneratedSnapshot, mesh_dir: &Path) -> anyhow::Result<BakedSnapshot> {
-    let elements = bake_elements(snapshot.elements, mesh_dir)?;
+fn bake_snapshot(
+    snapshot: GeneratedSnapshot,
+    mesh_dir: &Path,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BakedSnapshot> {
+    let elements = bake_elements(snapshot.elements, mesh_dir, rooms)?;
     Ok(BakedSnapshot {
         elements,
         report: snapshot.report,
@@ -3108,7 +3191,7 @@ pub(crate) async fn apply_geometry_delta_on(
     let (commit, mut report) = project_geometry_delta(
         dbnum,
         source_sesno,
-        bake_elements(upserts, mesh_dir)?,
+        bake_elements(upserts, mesh_dir, None)?,
         removals,
         None,
         owners,
@@ -3884,6 +3967,7 @@ mod tests {
             mesh_write: MeshWrite::Reused,
             world_bounds: [[0.0; 3], [1.0; 3]],
             local_bounds: None,
+            room_edges: Vec::new(),
         }
     }
 
@@ -3904,6 +3988,7 @@ mod tests {
             mesh_write: MeshWrite::Reused,
             world_bounds: [[0.0; 3], [1.0; 3]],
             local_bounds: None,
+            room_edges: Vec::new(),
         }
     }
 
@@ -3922,6 +4007,157 @@ mod tests {
             .expect("project invalid tube");
 
         assert!(commit.upserts[0].tube.as_ref().unwrap().invalid);
+    }
+
+    /// B/T2：bake 时房间判定看到的这件几何（`baked_room_input`）与它随后变成的投影记录（`project_geometry_delta`）
+    /// 在 `RoomInput` 的五格上**逐字相同**——构件（隐式管身挂容器）、标签（投影记录 id）、世界盒、网格 id、
+    /// 「网格 → 世界」（隐式管身把标准图元摆放折进存下的世界变换，再乘一次本地摆放，与投影记录的
+    /// `mesh_to_world()` 同一条公式）。三种形状各一例：烘焙实体、带标准图元的元素、带标准图元的隐式管身。
+    #[test]
+    fn bake_time_room_input_matches_the_projected_record() {
+        use crate::fast_model::room_model::RoomInput;
+        let root = RefNo::new(24383, 100);
+        let branch = RefNo::new(24383, 73948);
+        let equi = RefNo::new(24383, 200);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((branch.word0, branch.word1), root),
+            ((equi.word0, equi.word1), root),
+        ]);
+        let world = DMat4::from_scale_rotation_translation(
+            glam::DVec3::new(1.0, 1.0, 1.0),
+            glam::DQuat::from_rotation_z(0.7),
+            glam::DVec3::new(10.0, 20.0, 30.0),
+        );
+        let local = DMat4::from_scale(glam::DVec3::new(100.0, 100.0, 3000.0));
+        let primitive = e3d_model::primitive_instance::PrimitiveInstance {
+            key: e3d_model::primitive_instance::PrimitiveMeshKey::CylinderV3 { segments: 32 },
+            local_transform: local,
+        };
+        let mut baked = baked_element(equi, "baked-mesh");
+        baked.world = world;
+        baked.world_bounds = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let mut canonical = baked_element(equi, "canonical-mesh");
+        canonical.world = world;
+        canonical.primitive_instance = Some(primitive.clone());
+        canonical.local_bounds = Some([[0.0; 3], [1.0; 3]]);
+        let mut tube = baked_tube(branch, 3, "tube-mesh");
+        tube.world = world;
+        tube.primitive_instance = Some(primitive.clone());
+        tube.local_bounds = Some([[0.0; 3], [1.0; 3]]);
+
+        for element in [baked, canonical, tube] {
+            let shape = format!("{:?}", element.geometry_id);
+            let input = baked_room_input(
+                &element.geometry_id,
+                element.primitive_instance.as_ref(),
+                element.world,
+                element.world_bounds,
+                &element.mesh_id,
+            )
+            .expect("bake-time room input");
+            let (commit, _) =
+                project_geometry_delta(24383, 42, vec![element], Vec::new(), None, &owners)
+                    .expect("project");
+            let record = &commit.upserts[0];
+            assert_eq!(input.element(), record.element(), "{shape}");
+            assert_eq!(input.label(), record.label(), "{shape}");
+            assert_eq!(input.world_bounds(), record.world_bounds());
+            assert_eq!(input.mesh_id(), record.mesh_id());
+            assert_eq!(
+                input.mesh_to_world().to_cols_array(),
+                record.mesh_to_world().to_cols_array(),
+                "「网格 → 世界」同一条公式: {shape}"
+            );
+        }
+    }
+
+    /// 源码钉（B/T2）：bake 时的房间判定只走 `edges_for_record` + `world_points_of(&mesh, …)`——取点的是手上
+    /// **就要写盘的那份网格**，不是为算盒子折出来的 `world_mesh`（f64 → 与盘上回读差几个 ulp，会让贴面板边
+    /// 的点翻面）；输入配方只有 `baked_room_input` 一处，且与 `project_geometry_delta` 折投影记录用的
+    /// 同三个函数（`geometry_source_refno` / `geometry_record_id` / `persisted_world_transform`）；
+    /// 冻好的计算器沿 `produce_slices → spawn_generation_worker → bake_snapshot → bake_elements → bake_element`
+    /// 一路显式传递，工作线程里不许自己冻。
+    #[test]
+    fn bake_computes_room_edges_from_the_mesh_it_is_about_to_write() {
+        // 生产段到内联的 `#[cfg(test)] mod tests {` 为止（1043 行那处 `#[path = …]` 只是外置测试声明，不截）。
+        let source = include_str!("e3d_model_service.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .or_else(|| {
+                include_str!("e3d_model_service.rs").split_once("\r\n#[cfg(test)]\r\nmod tests {")
+            })
+            .expect("production code precedes the inline test module")
+            .0;
+        fn function_body<'a>(source: &'a str, start: &str) -> &'a str {
+            let body = source.split_once(start).expect("函数头").1;
+            let end = body
+                .find("\n}\r\n")
+                .or_else(|| body.find("\n}\n"))
+                .expect("函数总有结尾");
+            &body[..end]
+        }
+        let bake = function_body(source, "fn bake_element(");
+        let edges = bake
+            .find(".edges_for_record(&input, || {")
+            .expect("逐元素判定走 edges_for_record");
+        assert!(
+            bake[edges..].contains("world_points_of(&mesh, input.mesh_to_world)"),
+            "取点用手上就要写盘的那份 `mesh`: {bake}"
+        );
+        assert!(
+            !bake.contains("world_mesh.vertices") && !bake.contains("world_points_of(&world_mesh"),
+            "不许拿 f64 折出来的 world_mesh 取点: {bake}"
+        );
+        assert!(
+            bake.contains("baked_room_input(") && bake.contains("room_edges,"),
+            "输入配方只有 baked_room_input 一处、结果挂到 BakedElement.room_edges: {bake}"
+        );
+        assert!(
+            bake.contains("room membership of root {} could not be computed"),
+            "失败文案与 flush 时 room_stage 同形（D2）: {bake}"
+        );
+        let recipe = function_body(source, "fn baked_room_input(");
+        let projection = function_body(source, "fn project_geometry_delta(");
+        for shared in [
+            "geometry_source_refno(",
+            "geometry_record_id(",
+            "persisted_world_transform(",
+        ] {
+            assert!(
+                recipe.contains(shared) && projection.contains(shared),
+                "bake 输入与投影记录共用 {shared}"
+            );
+        }
+        assert!(
+            recipe.contains("projected_mesh_to_world(")
+                && projection.contains("world_bounds: element.world_bounds,"),
+            "「网格 → 世界」经 room_model::projected_mesh_to_world；世界盒同一份"
+        );
+        for (function, carries) in [
+            ("async fn produce_slices(", "rooms.clone(),"),
+            (
+                "fn spawn_generation_worker(",
+                "bake_snapshot(snapshot, &mesh_dir, rooms.as_deref())",
+            ),
+            (
+                "fn bake_snapshot(",
+                "bake_elements(snapshot.elements, mesh_dir, rooms)",
+            ),
+            (
+                "fn bake_elements(",
+                "bake_element(element, mesh_dir, rooms)",
+            ),
+        ] {
+            let body = function_body(source, function);
+            assert!(
+                body.contains(carries),
+                "{function} 把冻好的计算器往下传: {body}"
+            );
+            assert!(
+                !body.contains("frozen_room_calculator()"),
+                "{function} 不许自己冻计算器（一任务一台）"
+            );
+        }
     }
 
     /// 本文件的正文，行尾归一。护栏测试按文本形状判定，`core.autocrlf` 决定的检出行尾
@@ -4876,7 +5112,7 @@ mod tests {
                 snapshot.report.failed.len()
             );
             let owners = snapshot.owners.clone();
-            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+            let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
             let count = baked.elements.len();
             let (commit, _) =
                 project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;

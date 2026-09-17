@@ -244,7 +244,7 @@ impl ModelRefreshPolicy {
         };
         diagnostic.stage("model.geometry.begin", format!("dbnum={dbnum} roots={roots:?}"));
         let persisted = service
-            .generate_and_persist_roots(dbnum, roots, failure_policy)
+            .generate_and_persist_roots(dbnum, roots, failure_policy, task_rooms.clone())
             .await.map_err(|error| {
                 diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
                 error

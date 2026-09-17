@@ -1812,13 +1812,64 @@ impl RoomInput for crate::fast_model::model_memory_store::ProjectedGeometry {
     }
 
     fn mesh_to_world(&self) -> DMat4 {
-        match &self.shape {
-            crate::fast_model::model_memory_store::ProjectedShape::Baked => self.world_transform,
-            crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                local_transform,
-                ..
-            } => self.world_transform * *local_transform,
-        }
+        projected_mesh_to_world(
+            self.world_transform,
+            match &self.shape {
+                crate::fast_model::model_memory_store::ProjectedShape::Baked => None,
+                crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                    local_transform,
+                    ..
+                } => Some(*local_transform),
+            },
+        )
+    }
+}
+
+/// 投影记录的「网格 → 世界」：烘焙实体只有世界变换；标准图元把本地摆放折进去（`world × local`）。
+/// **只有这一处定义**：投影记录（[`RoomInput`] for `ProjectedGeometry`）与 bake 时的同一件几何
+/// （[`BakedRoomInput`]，`e3d_model_service::bake_element`）都经它——两边算出的判定点才逐位相等。
+pub(crate) fn projected_mesh_to_world(
+    world_transform: DMat4,
+    canonical_local: Option<DMat4>,
+) -> DMat4 {
+    match canonical_local {
+        Some(local_transform) => world_transform * local_transform,
+        None => world_transform,
+    }
+}
+
+/// bake 时手上的一件几何（`e3d_model_service::BakedElement` 折成房间判定要的形状，B/T2）：与它随后
+/// 变成的投影记录字段相同——`element` 同 `geometry_source_refno`、`label` 同投影记录 id、世界盒同一份、
+/// `mesh_to_world` 同 [`projected_mesh_to_world`]（世界变换取发布时存下的那一个）。判定点不读盘：
+/// 调用方拿就要写盘的那份网格经 [`world_points_of`] 取。
+#[derive(Debug, Clone)]
+pub(crate) struct BakedRoomInput {
+    pub element: RefnoEnum,
+    pub label: String,
+    pub world_bounds: [[f32; 3]; 2],
+    pub mesh_id: String,
+    pub mesh_to_world: DMat4,
+}
+
+impl RoomInput for BakedRoomInput {
+    fn element(&self) -> RefnoEnum {
+        self.element
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn world_bounds(&self) -> [[f32; 3]; 2] {
+        self.world_bounds
+    }
+
+    fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+
+    fn mesh_to_world(&self) -> DMat4 {
+        self.mesh_to_world
     }
 }
 
