@@ -151,7 +151,7 @@ _Avoid_: `gen_root`（已退役的表）、根凭证表、把账本持久化、�
 _Avoid_: 逐根目录落款、`root_dependency`（已退役的表）、目录版本表、把它当第三枚水位
 
 **整库房间对齐代号 (Library Room Alignment)**：
-水位行上的 `model_room_generation`（ADR-073 D14）：「这个库的房间边整库对齐到哪一代常驻模型」，取值与根 ACK 的 `room_generation` 同一个字串（见「房间代号」）。与库级目录落款同一条纪律：只在 `all_roots_ok` 时随 `model_sesno` 同一笔写，有资格写的只有能替**整库**说话的任务——初始化、起点 0 的整库重排 ModelOnly、本任务跑过整库房间重算（D13）；普通增量窗口那一格原样不动，`room_membership=false` 下盖水位时清空。读者两个：`e3d.room.lookup`——进程内没有该根 ACK 时（ACK 不持久，落盘形态冷重启后一条都没有）由它替那根说「算过」，判据仍是同一代 + 进程账本里这根没欠着；以及 `/dbnums` 每行的 `room_alignment` 格（`generation` / `resident_generation` / `current`），它是「这个库为什么回 `not_computed`」的唯一出处，那句「成不成立」与查询侧共用一处判据。`None` = durable 侧没有这句承诺（旧行、从没整库对齐过、关着开关生成的）。**它不是第三枚水位**：没有自己的推进规则，不参与任何放行 / 恢复判决。
+水位行上的 `model_room_generation`（ADR-073 D14）：「这个库的房间边整库对齐到哪一代常驻模型」，取值与根 ACK 的 `room_generation` 同一个字串（见「房间代号」）。与库级目录落款同一条纪律：只在 `all_roots_ok` 时随 `model_sesno` 同一笔写，有资格写的只有能替**整库**说话的任务——初始化、起点 0 的整库重排 ModelOnly、本任务跑过整库房间重算（D13）**且覆盖到 `DbSet@T` 的每一根**（`RoomRecomputeVerdict::WholeLibrary`；只覆盖到投影里的根是 `PartialCoverage`，那一格不动）；普通增量窗口那一格原样不动，`room_membership=false` 下盖水位时清空。读者三个：整库房间重算的触发 ③（见「整库房间重算」）——开工前对齐之后与此刻常驻代号不等就欠一次整库重算，所以这一格盖早了触发就哑了；`e3d.room.lookup`——进程内没有该根 ACK 时（ACK 不持久，落盘形态冷重启后一条都没有）由它替那根说「算过」，判据仍是同一代 + 进程账本里这根没欠着；以及 `/dbnums` 每行的 `room_alignment` 格（`generation` / `resident_generation` / `current`），它是「这个库为什么回 `not_computed`」的唯一出处，那句「成不成立」与查询侧共用一处判据。`None` = durable 侧没有这句承诺（旧行、从没整库对齐过、关着开关生成的）。**它不是第三枚水位**：没有自己的推进规则，不参与任何放行 / 恢复判决。
 _Avoid_: 房间水位、`room_sesno`（已退役）、房间就绪表、把它当逐根凭证
 
 **库一致性判决 (Dbnum Consistency Verdict)**：
@@ -275,7 +275,7 @@ _Avoid_: 对账读（泛指时）、回读确认、探针
 _Avoid_: 本地账本（那是生成根账本）、缓存（泛指时）、第二份真值、水位探针
 
 **ModelOnly 任务 (ModelOnly Task)**：
-只有模型半边、没有数据半边的 dbnum 任务：起点是该库的模型水位（`0` = 整库重排，ADR-079）、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；`room_membership=true` 时模型半边含每根房间归属，关闭时只生成模型。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。重新打开房间开关不会制造模型水位缺口，历史房间欠账需显式 `model/rebuild`。同族的 **`RoomOnly`** 不是一种任务，是 dbnum 任务**内部**的一步（见「整库房间重算」，ADR-073 D13 已落地）：用已有几何对该库全部根重算房间归属并重写两张边；由本窗变更集碰到房间定义族或开工前对齐换代触发（d-819），不是对外契约、不引入房间水位，失败语义同逐根。
+只有模型半边、没有数据半边的 dbnum 任务：起点是该库的模型水位（`0` = 整库重排，ADR-079）、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；`room_membership=true` 时模型半边含每根房间归属，关闭时只生成模型。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。重新打开房间开关不会制造模型水位缺口，历史房间欠账需显式 `model/rebuild`。同族的 **`RoomOnly`** 不是一种任务，是 dbnum 任务**内部**的一步（见「整库房间重算」，ADR-073 D13 已落地）：用已有几何对该库投影里全部根重算房间归属并重写两张边；由本窗变更集碰到房间定义族、开工前对齐换代、或库上整库对齐代号欠着（电平型，2026-09-17）触发（d-819），不是对外契约、不引入房间水位，失败语义同逐根。
 _Avoid_: 模型恢复批次、退化窗口任务、全库过期入队、model drain 页、房间任务、`rooms/rebuild` 对外口
 
 **联动更新 (Cascade Update)**：
@@ -506,8 +506,8 @@ _Avoid_: 换代（ADR-067 含义）、房间刷新、常驻模型热更新、把
 _Avoid_: resident generation（指文件 composite 时）、房间版本、房间水位
 
 **整库房间重算 (RoomOnly Recompute)**：
-面板自身变化的传播（d-819，ADR-073 2026-09-16 D13）：一个 dbnum 任务在本批根**刷盘之后、收尾之前**，拿开工时同一台计算器，对本库全部有回执的根按投影里的**现有几何**重算归属、重写 `room_relate` / `room_panel_relate`（`model_db_adapter::recompute_dbnum_room_edges`），不重生几何、不动模型行、不动空间树，提交全过后把这些根 ACK 的房间代号对齐。两条触发：① 窗口规划器在本窗变更集（e3d-model `ChangeLedger`）里碰到房间定义族 `PANE / FRMW / SBFR / CWALL / CFLOOR` 的任一条目 → 排一条 `ModelWorkAction::RoomOnly` 工作项（`target_refno = dbnum=<n>`，一窗一条，随 `side_actions` 交给任务）；② 开工前对齐换了房间代号。只按 noun 判、不解析账本散文——只改元数据的面板改动多触发一次，接受。与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等。算不出的根按 D2 记失败、任务 `Partial`、`model_sesno` 不盖；刷盘没齐不跑。它是任务内部的一步，不入队、没有 HTTP 口。跨库成员（面板在 A、成员在 B）只在 A 变了之后第一个开工的库上被 ② 带到，其余库等自己下一次触发（U3）。
-_Avoid_: 房间任务、房间阶段、`rooms/rebuild`、RoomRecalcPanel（ADR-010 那种逐面板目标行，已退役）、房间队列
+面板自身变化的传播（d-819，ADR-073 2026-09-16 D13）：一个 dbnum 任务在本批根**刷盘之后、收尾之前**，收尾时冻一台计算器（此刻这一代），对本库**投影里**全部有回执的根按**现有几何**重算归属、重写 `room_relate` / `room_panel_relate`（`model_db_adapter::recompute_dbnum_room_edges`），不重生几何、不动模型行、不动空间树，提交全过后把这些根 ACK 的房间代号对齐。三条触发（`room_recompute::request_for_task` 合成一句）：① 窗口规划器在本窗变更集（e3d-model `ChangeLedger`）里碰到房间定义族 `PANE / FRMW / SBFR / CWALL / CFLOOR` 的任一条目 → 排一条 `ModelWorkAction::RoomOnly` 工作项（`target_refno = dbnum=<n>`，一窗一条，随 `side_actions` 交给任务）；② 开工前对齐换了房间代号；③ **电平型再武装**（2026-09-17）：开工前对齐之后读库上的「整库房间对齐代号」，与此刻常驻代号不等（含没有那一格）= 欠一次整库重算（`room_recompute::durable_alignment_owed`）。①② 是边沿型，原因只活在本任务里——拆窗 / 单元失败 / 刷盘没齐 / 重算写库失败都会把它丢掉，下一窗再探又是 `Unchanged`；③ 按库上的事实判、重启后仍记得，直到某个任务把那一格盖上。只按 noun 判、不解析账本散文——只改元数据的面板改动多触发一次，接受。与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等。算不出的根按 D2 记失败、任务 `Partial`、`model_sesno` 不盖；刷盘没齐不跑。**覆盖面自证**：投影只装本进程生成过的根（初始化的模型行不进投影，ADR-077 D5），重算齐了要拿 `DbSet@T` 的根清单对一遍回执里的 `covered_roots`——都在 = `WholeLibrary`（那一格可盖）；有根不在 = `PartialCoverage`（水位照盖、那一格不动、warn 点名、点亮要 `model/rebuild`；③ 对这个库在这一代只再点一次，`settle_partial_coverage`，代号变了 / 失败过 / 重启了重新武装）。它是任务内部的一步，不入队、没有 HTTP 口。跨库成员（面板在 A、成员在 B）由 ③ 接住（A 变了 → 常驻换代 → 每个库下一个任务都欠），但生产落盘形态下初始化过的根不在投影里、这条路够不着它们的边——「整库」只到投影，是 U1 还欠着的那一半。
+_Avoid_: 房间任务、房间阶段、`rooms/rebuild`、RoomRecalcPanel（ADR-010 那种逐面板目标行，已退役）、房间队列、把 `PartialCoverage` 当失败、把去重记录当库上的事实
 
 **模型发布策略 (Model Publication Policy)**：
 与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 `mem` 档虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。

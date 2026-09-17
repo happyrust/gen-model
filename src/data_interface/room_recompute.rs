@@ -5,7 +5,7 @@
 //! 它名下**别的根**的成员边与 `room_num` 一个都不会被碰到：这是逐根路径的天然盲区
 //! （ADR-073 §未决 U1），原来填它的结构触发账本（ADR-010 D12 / ADR-040 D4）已随房间流程退役。
 //!
-//! 现行填法（d-819）：两条触发，同一种处置。
+//! 现行填法（d-819）：三条触发，同一种处置。
 //!
 //! 1. **规划期**：窗口规划器看本窗变更集（e3d-model 的 `ChangeLedger`），碰到房间定义族的
 //!    元素（[`ROOM_DEFINITION_NOUNS`]，增 / 删 / 改属主 / 改成员 / 改属性都算）→ 给本库排一条
@@ -15,12 +15,23 @@
 //! 2. **执行期**：任务开工前对齐（ADR-073 D12）换了房间代号——别的库的面板 / 房间变了、进了
 //!    常驻——本库的成员边同样可能陈旧，一并重算（跨库那一半只覆盖「变了之后第一个开工的库」，
 //!    §未决 U3 仍开着）。
+//! 3. **电平型再武装**（2026-09-17）：库上 durable 侧的整库对齐代号（`dbnum_watermark.model_room_generation`，
+//!    ADR-073 D14）与此刻常驻代号不等 = 这个库欠一次整库重算（[`library_alignment_owed`]）。前两条是
+//!    边沿型——原因只活在本任务里，拆窗 / 单元失败 / 刷盘没齐 / 重算写库失败都会把它丢掉，而下一窗的
+//!    账本不再含那条 PANE 变更、再探又是 `Unchanged`，边就永久陈旧到下一次不相关的 PANE 变化。这一条
+//!    按库上的事实判：直到某个任务把 `Aligned` 盖上（整库重算齐了、初始化、整库重排），每个任务开工
+//!    都会再点一次。**唯一的去重**（[`settle_partial_coverage`]）：同一个库在同一代下已经点过一次、结论是
+//!    覆盖不全（投影里没有本库全部根），同一代再点结果逐字相同，进程内不再重复；代号变了 / 失败过 /
+//!    重启了都重新武装。库上的事实不受它影响，`room_alignment.current` 照旧报 `false`。
 //!
-//! 处置：任务在本批根**刷盘之后、收尾之前**（`batch_worker::execute_frozen_batch`），拿开工时
-//! 冻的那台计算器，对本库全部有回执的根按投影里的**现有几何**重算归属、重写两张边
+//! 处置：任务在本批根**刷盘之后、收尾之前**（`batch_worker::execute_frozen_batch`），冻一台计算器，
+//! 对本库**投影里**全部有回执的根按现有几何重算归属、重写两张边
 //! （`model_db_adapter::recompute_dbnum_room_edges`），不重生几何、不动模型行、不动空间树。
-//! 算不出的根按 D2 记失败、`model_sesno` 不盖。它是任务内部的一步，不入队、没有 HTTP 口
-//! （ADR-073 §不做「不给房间开新的 HTTP 触发口」）。
+//! 算不出的根按 D2 记失败、`model_sesno` 不盖。**覆盖面要自证**：投影只装本进程生成过的根——
+//! 初始化的模型行不进投影（ADR-077 D5），落盘形态冷重启后投影是空的——所以重算完要拿 `DbSet@T`
+//! 的根清单对一遍，没全覆盖就只算「触到的根更新了」，durable 侧那一格「整库对齐到这一代」**不盖**
+//! （`batch_worker::RoomRecomputeVerdict::PartialCoverage`）；点亮要 `model/rebuild`。它是任务内部
+//! 的一步，不入队、没有 HTTP 口（ADR-073 §不做「不给房间开新的 HTTP 触发口」）。
 
 use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
 use crate::fast_model::room_resident::RoomReferenceRefresh;
@@ -77,11 +88,115 @@ pub(crate) fn room_only_work_item(dbnum: u32, db_type: &str, end_sesno: i32) -> 
     }
 }
 
-/// 这个任务要不要跑整库房间重算，以及为什么。两条触发合成一句：规划器排的 `RoomOnly` 工作项
-/// （本窗碰了房间定义族）、开工前对齐换了房间代号。都没有 = `None`。
+/// 第三条触发的进程内去重：`dbnum → 常驻代号`，记「这个库在这一代下跑过一次整库重算、结论是覆盖不全
+/// （`batch_worker::RoomRecomputeVerdict::PartialCoverage`）」。
+///
+/// 同一代下再点一次结果逐字相同：投影里的根那一轮已全部对齐到这一代，之后进投影的根（本任务 / `/model/ensure`
+/// 生成的）都是开工对齐之后用同一代算的，不在投影里的根（初始化 / 重启前生成的模型行，ADR-077 D5）这条路
+/// 本来就够不着——再点只是 O(投影) 的边重写 + 一次 `DbSet@T` 根枚举 + 一句同样的 warn。所以对 `(库, 代号)`
+/// 只点一次。**不是**库上的事实：`room_alignment.current` 照旧报 `false`、`e3d.room.lookup` 对那些根照旧回
+/// `not_computed`，点亮仍靠 `model/rebuild`。重新武装的三种情形：代号变了（面板 / 房间真变过，键对不上）、
+/// 重算失败过或覆盖面未知（[`rearm_library`]，边可能真陈旧，下一个任务再试）、进程重启（表是空的，投影也是空的，
+/// 重新自证一次）。
+static PARTIAL_COVERAGE_SETTLED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u32, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// 记下「`dbnum` 在常驻代号 `resident` 下的整库重算覆盖不全」：同一代下第三条触发不再点它。
+pub(crate) fn settle_partial_coverage(dbnum: u32, resident: &str) {
+    PARTIAL_COVERAGE_SETTLED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(dbnum, resident.to_string());
+}
+
+/// 忘掉 `dbnum` 的那条去重记录：重算失败 / 覆盖面未知 / 真的整库对齐了，下一个任务按库上的事实重新判。
+pub(crate) fn rearm_library(dbnum: u32) {
+    PARTIAL_COVERAGE_SETTLED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&dbnum);
+}
+
+/// `dbnum` 上一次覆盖不全的整库重算是在哪一代下跑的（没有 / 已重新武装 = `None`）。
+pub(crate) fn partial_coverage_settled_at(dbnum: u32) -> Option<String> {
+    PARTIAL_COVERAGE_SETTLED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&dbnum)
+        .cloned()
+}
+
+/// 第三条触发（电平型，2026-09-17）的纯函数形态：库上 durable 侧的整库对齐代号
+/// （`dbnum_watermark.model_room_generation`，ADR-073 D14）与此刻常驻代号不等 = 这个库欠一次整库重算。
+///
+/// `resident` 为 `None`（开关关着 / 常驻还在装 / `Blocked`）= 没有可对齐的目标，不触发——那种局面下
+/// 计算器也冻不出，重算无从谈起。`library` 为 `None`（旧行、从没整库对齐过、关着开关生成的）当然不等：
+/// 库上没有这句承诺，就欠一次；重算齐了盖上之后这一条就安静了，直到房间 / 面板真变过（代号变）。
+/// `settled_partial` 是进程内的去重记录（[`settle_partial_coverage`]）：与此刻常驻代号相同 = 这一代下
+/// 已经点过一次、投影够不着的根再点也够不着，不再触发；欠着这个事实本身不变。
+pub(crate) fn library_alignment_owed(
+    library: Option<&str>,
+    resident: Option<&str>,
+    settled_partial: Option<&str>,
+) -> Option<String> {
+    let resident = resident?;
+    if library == Some(resident) || settled_partial == Some(resident) {
+        return None;
+    }
+    let short = |generation: &str| generation.chars().take(12).collect::<String>();
+    Some(match library {
+        Some(library) => format!(
+            "库上整库房间对齐代号 {} ≠ 此刻常驻代号 {}（欠一次整库重算，D14）",
+            short(library),
+            short(resident)
+        ),
+        None => format!(
+            "库上没有整库房间对齐代号（从没整库对齐过 / 关着开关生成的），此刻常驻代号 {}（欠一次整库重算，D14）",
+            short(resident)
+        ),
+    })
+}
+
+/// 第三条触发的取数：库上那一格与两枚水位同一行（`DbnumState::read`），常驻代号取
+/// `query_service::resident_room_generation`（`Ready` / `Degraded` 才有），去重记录取
+/// [`partial_coverage_settled_at`]。开关关着直接 `None`；水位行读不出**不**触发（读错不是「欠着」的证据，
+/// 只留一句 warn）。任务开工前对齐（D12）之后调，拿到的才是此刻这一代。
+pub(crate) async fn durable_alignment_owed(dbnum: u32) -> Option<String> {
+    if !crate::options::room_membership() {
+        return None;
+    }
+    let resident = crate::query_service::resident_room_generation()?;
+    let library = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
+        Ok(state) => state.and_then(|state| state.model_room_generation),
+        Err(error) => {
+            log::warn!(
+                "dbnum={dbnum} 读不出水位行上的整库房间对齐代号，这一轮不按「欠整库重算」处理: {error:#}"
+            );
+            return None;
+        }
+    };
+    let settled = partial_coverage_settled_at(dbnum);
+    let owed = library_alignment_owed(
+        library.as_deref(),
+        Some(resident.as_str()),
+        settled.as_deref(),
+    );
+    if owed.is_none() && library.as_deref() != Some(resident.as_str()) {
+        log::debug!(
+            "dbnum={dbnum} 库上整库房间对齐代号仍与常驻不等，但这一代下已点过一次、覆盖不全（投影里没有本库全部根），不再重复；点亮要 model/rebuild"
+        );
+    }
+    owed
+}
+
+/// 这个任务要不要跑整库房间重算，以及为什么。三条触发合成一句：规划器排的 `RoomOnly` 工作项
+/// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`library_alignment_owed`]）。
+/// 都没有 = `None`。
 pub(crate) fn request_for_task(
     side_actions: &[ModelWorkItem],
     refresh: Option<&RoomReferenceRefresh>,
+    alignment_owed: Option<&str>,
 ) -> Option<String> {
     let mut reasons = Vec::new();
     if side_actions
@@ -102,6 +217,9 @@ pub(crate) fn request_for_task(
                 .map(|diff| format!("（在册视图之差 {diff}）"))
                 .unwrap_or_default()
         ));
+    }
+    if let Some(owed) = alignment_owed {
+        reasons.push(owed.to_string());
     }
     (!reasons.is_empty()).then(|| reasons.join("；"))
 }
@@ -225,13 +343,40 @@ mod tests {
             executor.contains("room_recompute::request_for_task("),
             "执行体把「要不要整库重算」交出去: {executor}"
         );
+        // 第三条触发（电平型）：两个执行体都在开工前对齐**之后**读库上那一格、喂给 `request_for_task`。
+        // 顺序要紧——对齐之前读到的常驻代号是上一代，比对会白点一次（或漏点一次）。
+        for (label, body) in [
+            ("批次执行体", executor),
+            (
+                "ModelOnly 执行体",
+                function_body(worker, "async fn execute_model_only_body("),
+            ),
+        ] {
+            let refresh = body
+                .find("refresh_room_reference_before_task(job.dbnum)")
+                .unwrap_or_else(|| panic!("{label}: 开工前对齐"));
+            let owed = body
+                .find("room_recompute::durable_alignment_owed(job.dbnum)")
+                .unwrap_or_else(|| panic!("{label}: 要读库上的整库对齐代号（第三条触发）: {body}"));
+            let request = body
+                .find("room_recompute::request_for_task(")
+                .unwrap_or_else(|| panic!("{label}: request_for_task"));
+            assert!(
+                refresh < owed && owed < request,
+                "{label}: 对齐 → 读库上那一格 → 合成三条触发，顺序不能乱"
+            );
+            assert!(
+                body.contains("alignment_owed.as_deref()"),
+                "{label}: 第三条触发要真的传进 request_for_task: {body}"
+            );
+        }
         // ModelOnly 执行体同样：启动追平窗口与稳态窗口共用同一条规划入口，`RoomOnly` 工作项随
         // `side_actions` 进来，这里此前硬编码 `room_recompute: None`，停机期间的 PANE 改动被静默吃掉。
         let model_only = function_body(worker, "async fn execute_model_only_body(");
         assert!(
             model_only.contains("room_recompute::request_for_task(")
                 && model_only.contains("Some(&room_reference)"),
-            "ModelOnly 执行体也要把「要不要整库重算」交出去（两条触发都带上）: {model_only}"
+            "ModelOnly 执行体也要把「要不要整库重算」交出去（三条触发都带上）: {model_only}"
         );
         // 规划失败的早退（模型半边没跑）仍是 `None`；跑完的那一份回执必须接住上面那句的结果。
         assert_eq!(
@@ -254,8 +399,8 @@ mod tests {
             .0;
         let flush = tail.find("await_units_durable(").expect("先等刷盘");
         let rooms = tail
-            .find("run_room_only_recompute(job, &reason, &mut result)")
-            .expect("整库房间重算在收尾段");
+            .find("run_room_only_recompute(job, &reason, &mut result, file_latest_sesno)")
+            .expect("整库房间重算在收尾段，带着 T 好对 DbSet@T 的根清单自证覆盖面");
         let outcome = tail.find("model_outcome_of(&flush").expect("模型收尾判决");
         assert!(
             flush < rooms && rooms < outcome,
@@ -269,6 +414,13 @@ mod tests {
             tail.contains("outcome.all_roots_ok = false"),
             "算不齐扣 all_roots_ok、水位不盖: {tail}"
         );
+        // 覆盖面不全（投影里没有本库全部根）只算「触到的根更新了」：durable 侧「整库对齐到这一代」那一格
+        // 不许盖——盖了就是替没算过的根说话，正是 D14 要挡的「拿上一代的边冒充这一版」。
+        assert!(
+            tail.contains("RoomRecomputeVerdict::speaks_for_library")
+                && tail.contains("RoomRecomputeVerdict::rooms_ok"),
+            "收尾要分开问两句：算齐了没有（水位）、覆盖整库了没有（对齐代号）: {tail}"
+        );
 
         // 旧过滤（「房间重算项不在内」）不得把 RoomOnly 拦在 side_actions 之外。
         let manual = include_str!("manual_update.rs");
@@ -278,11 +430,11 @@ mod tests {
         );
     }
 
-    /// 两条触发各自成句，都没有就是 `None`；代号没变的重建不触发。
+    /// 三条触发各自成句，都没有就是 `None`；代号没变的重建不触发。
     #[test]
     fn a_task_recomputes_rooms_on_either_trigger() {
         let item = room_only_work_item(7997, "DESI", 163);
-        assert!(request_for_task(&[], None).is_none());
+        assert!(request_for_task(&[], None, None).is_none());
         assert!(
             request_for_task(
                 &[],
@@ -293,6 +445,7 @@ mod tests {
                     diff: None,
                     elapsed_ms: 1,
                 }),
+                None,
             )
             .is_none(),
             "文件前进但房间 / 面板没变：代号不变，不重算"
@@ -300,11 +453,12 @@ mod tests {
         assert!(
             request_for_task(
                 &[],
-                Some(&RoomReferenceRefresh::Unchanged { key: "a".into() })
+                Some(&RoomReferenceRefresh::Unchanged { key: "a".into() }),
+                None,
             )
             .is_none()
         );
-        let planned = request_for_task(std::slice::from_ref(&item), None).unwrap();
+        let planned = request_for_task(std::slice::from_ref(&item), None, None).unwrap();
         assert!(planned.contains("房间定义族"), "{planned}");
         let swapped = request_for_task(
             &[],
@@ -315,13 +469,22 @@ mod tests {
                 diff: Some("removed=1 recalc=0".into()),
                 elapsed_ms: 1,
             }),
+            None,
         )
         .unwrap();
         assert!(
             swapped.contains("换了房间代号") && swapped.contains("removed=1"),
             "{swapped}"
         );
-        let both = request_for_task(
+        // 第三条：库上欠着，原因原样带进来；单独一条也触发。
+        let owed = request_for_task(
+            &[],
+            None,
+            Some("库上整库房间对齐代号 old ≠ 此刻常驻代号 new"),
+        )
+        .unwrap();
+        assert!(owed.contains("old ≠ 此刻常驻代号 new"), "{owed}");
+        let all = request_for_task(
             std::slice::from_ref(&item),
             Some(&RoomReferenceRefresh::Rebuilt {
                 previous_key: None,
@@ -330,8 +493,107 @@ mod tests {
                 diff: None,
                 elapsed_ms: 1,
             }),
+            Some("欠一次整库重算"),
         )
         .unwrap();
-        assert!(both.contains("；"), "两条触发合成一句: {both}");
+        assert_eq!(all.matches("；").count(), 2, "三条触发合成一句: {all}");
+    }
+
+    /// 第三条触发的真值表（电平型，2026-09-17）：库上那一格与此刻常驻代号不等就欠——包括库上没有那一格；
+    /// 相等不欠；常驻说不出代号（开关关 / 还在装 / `Blocked`）没有可对齐的目标，不欠。
+    #[test]
+    fn the_library_owes_a_recompute_until_its_durable_alignment_matches_the_resident() {
+        assert!(library_alignment_owed(Some("efd4ebe1"), Some("efd4ebe1"), None).is_none());
+        let stale =
+            library_alignment_owed(Some("00aa11bb22cc33dd"), Some("efd4ebe1ffff0000"), None)
+                .unwrap();
+        assert!(
+            stale.contains("00aa11bb22cc")
+                && stale.contains("efd4ebe1ffff")
+                && stale.contains("欠一次整库重算"),
+            "{stale}"
+        );
+        let never = library_alignment_owed(None, Some("efd4ebe1"), None).unwrap();
+        assert!(
+            never.contains("没有整库房间对齐代号") && never.contains("efd4ebe1"),
+            "{never}"
+        );
+        assert!(
+            library_alignment_owed(Some("efd4ebe1"), None, None).is_none()
+                && library_alignment_owed(None, None, None).is_none(),
+            "常驻说不出代号 = 没有可对齐的目标"
+        );
+    }
+
+    /// 去重（进程内）：同一代下已点过一次、覆盖不全 → 同一代不再点；代号变了照点；去重记录不替库上的事实说话
+    /// ——库上一旦对齐（相等）本来就不欠，与记录无关。表按库分格、可重新武装。
+    #[test]
+    fn a_partial_coverage_settles_the_level_trigger_for_that_generation_only() {
+        assert!(
+            library_alignment_owed(Some("old"), Some("new"), Some("new")).is_none(),
+            "这一代下点过一次、投影够不着的根再点也够不着"
+        );
+        assert!(
+            library_alignment_owed(None, Some("new"), Some("new")).is_none(),
+            "库上没有那一格也一样：欠着的事实不变，但同一代不重复"
+        );
+        assert!(
+            library_alignment_owed(Some("old"), Some("newer"), Some("new")).is_some(),
+            "面板 / 房间又变了（代号变）→ 重新武装"
+        );
+        assert!(
+            library_alignment_owed(Some("new"), Some("new"), Some("stale")).is_none(),
+            "库上已对齐：不欠，记录无关"
+        );
+
+        // 表本身：按库分格，settle / rearm 各管一格。测试进程共用这张表，用不会撞车的 dbnum。
+        let (a, b) = (u32::MAX - 7, u32::MAX - 8);
+        rearm_library(a);
+        rearm_library(b);
+        assert_eq!(partial_coverage_settled_at(a), None);
+        settle_partial_coverage(a, "g1");
+        assert_eq!(partial_coverage_settled_at(a).as_deref(), Some("g1"));
+        assert_eq!(partial_coverage_settled_at(b), None, "别的库不受影响");
+        settle_partial_coverage(a, "g2");
+        assert_eq!(
+            partial_coverage_settled_at(a).as_deref(),
+            Some("g2"),
+            "同一库只记最近一代"
+        );
+        rearm_library(a);
+        assert_eq!(
+            partial_coverage_settled_at(a),
+            None,
+            "失败 / 覆盖面未知 / 真对齐了 → 忘掉"
+        );
+
+        // 源码钉：收尾段的整库重算把结论回灌到这张表——覆盖不全（已点名）才 settle；失败、覆盖面未知、
+        // 整库都 rearm。表只在这里写，`durable_alignment_owed` 只读。
+        let recompute = function_body(
+            include_str!("batch_worker.rs"),
+            "async fn run_room_only_recompute(",
+        );
+        assert_eq!(
+            recompute
+                .matches("room_recompute::settle_partial_coverage(")
+                .count(),
+            1,
+            "只有点了名的覆盖不全才去重: {recompute}"
+        );
+        assert!(
+            recompute.matches("room_recompute::rearm_library(").count() >= 3,
+            "失败 / 覆盖面未知 / 整库都重新武装: {recompute}"
+        );
+        let settle = recompute
+            .find("room_recompute::settle_partial_coverage(")
+            .unwrap();
+        let partial_known = recompute
+            .find("Some(uncovered) => {")
+            .expect("点了名的覆盖不全那一臂");
+        let partial_unknown = recompute.find("None => {").expect("覆盖面未知那一臂");
+        assert!(
+            partial_known < settle && settle < partial_unknown,
+            "settle 落在「点了名的覆盖不全」那一臂里，不在「覆盖面未知」里: {recompute}"
+        );
     }
 }

@@ -898,8 +898,12 @@ pub fn frozen_room_calculator()
 /// 一次整库房间边重算的账（[`recompute_dbnum_room_edges`]）。
 #[derive(Debug, Clone, Default)]
 pub struct RoomEdgeRecompute {
-    /// 本库在投影里有回执的根数。
+    /// 本库在投影里有回执的根数（= `covered_roots.len()`）。
     pub roots: usize,
+    /// 本库在投影里有回执的根——这一轮**覆盖到**的根，按 refno 序。投影只装本进程生成过的根
+    /// （初始化的模型行不进投影，ADR-077 D5；落盘形态冷重启后是空的），调用方拿它对 `DbSet@T` 的
+    /// 根清单，才知道这一轮说得了「整库」还是只说得了「触到的根」（`RoomRecomputeVerdict`）。
+    pub covered_roots: Vec<RefNo>,
     /// 真重算并重写了边的根数（有几何的、算得出的）。
     pub recomputed: usize,
     /// 重写出的成员边数（`room_relate`）。
@@ -923,8 +927,12 @@ pub struct RoomEdgeRecompute {
 /// 进 `failed`，同批其余根照常。提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器
 /// （只改这一格，几何身份不动），`e3d.room.lookup` 对它们重新回 `ready`。
 ///
-/// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——那一刻本库
-/// 没有第二个写者。
+/// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——本任务的根都已
+/// 落库；同库别的根（`/model/ensure` 按需生成的）可能仍在 write-behind 队列里，两边对同一构件都是
+/// 先删后插、同一台计算器下幂等，后写的那份与先写的逐字相同。
+///
+/// **覆盖面只到投影**：回执里的 [`RoomEdgeRecompute::covered_roots`] 就是这一轮算过的全部根；它是不是
+/// 本库的全部根，由调用方对 `DbSet@T` 的根清单判——这里不回读库、不枚举文件。
 ///
 /// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
 /// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
@@ -943,6 +951,7 @@ pub async fn recompute_dbnum_room_edges(
         .collect();
     let mut out = RoomEdgeRecompute {
         roots: roots.len(),
+        covered_roots: roots.clone(),
         ..Default::default()
     };
     let mut pieces: Vec<(usize, String)> = Vec::new();
@@ -5303,6 +5312,11 @@ mod tests {
             (report.roots, report.recomputed, report.room_edges),
             (2, 1, 1),
             "{report:?}"
+        );
+        assert_eq!(
+            report.covered_roots,
+            vec![ROOM_ROOT_A, ROOM_ROOT_B],
+            "覆盖到的根 = 投影里有回执的根（含算不出的那根），按 refno 序——调用方拿它对 DbSet@T 自证覆盖面"
         );
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert_eq!(report.failed[0].0, ROOM_ROOT_B);

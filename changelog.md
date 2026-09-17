@@ -66,6 +66,54 @@
   （`dbnum_initialize` 那一路用 `rooms.resident_generation()` 是对的）；P2-4 ADR D13「拿开工时同一台计算器」与实现
   「收尾时新冻一台」措辞漂移；F3 / F4 / U3 照旧。
 
+### 整库房间重算的第三条触发（电平型再武装）与覆盖面自证（ADR-073 D13 / D14，审核 P1-2）
+
+- **为什么**：D13 的两条触发都是边沿型——「本窗碰了房间定义族」「开工前对齐换了代号」的原因只活在本任务里。拆窗（大窗口的
+  常态：本批只应用到 sesno X、余量排回队列）、任一单元没生成、`settlement_failed`、刷盘没齐、重算中途写库失败——这些情形下
+  `room_recompute` 的原因被丢掉，而下一窗的账本不再含那条 PANE 变更（触发 ① 没了）、本任务开工时已把常驻对齐到文件最新、
+  下一窗再探是 `Unchanged`（触发 ② 也没了）：别的根在这块面板里的边**永久陈旧**到下一次不相关的 PANE 变化。ADR 只写了
+  「刷盘没齐就不跑」，没写怎么补。审核给了两条路（电平型 / 进程内 `owed` 集合），用户 2026-09-17 07:36 选电平型。
+- **改动**（会话 opus-5-36 起草代码、fable-5-1-38 接手收口）：
+  - `room_recompute::library_alignment_owed(library, resident, settled_partial)`（纯函数）+ `durable_alignment_owed(dbnum)`
+    （取数：`DbnumState::read` 那一行的 `model_room_generation`、`query_service::resident_room_generation()`）：库上 D14 那一格
+    与此刻常驻代号不等（含库上没有那一格）= 欠一次整库重算。常驻说不出代号（开关关 / 还在装 / `Blocked`）不触发；水位行读不出
+    不触发（只 warn）。两个执行体（`execute_frozen_batch_body`、`execute_model_only_body`）都在 `refresh_room_reference_before_task`
+    **之后**读它、以第三个形参喂给 `request_for_task`——顺序钉在源码钉 17 里（对齐之前读到的是上一代）。
+  - **覆盖面自证**：起草时发现 `recompute_dbnum_room_edges` 只遍历投影里有回执的根，而初始化的模型行不进投影（ADR-077 D5）、
+    落盘形态冷重启后投影是空的——原实现在这种局面下照样把 D14 那一格盖成 `Aligned`，等于替没算过的根说话（而且一盖，电平型
+    触发就哑了）。现在 `RoomEdgeRecompute` 多一格 `covered_roots`，`run_room_only_recompute(job, &reason, &mut result, file_latest_sesno)`
+    重算齐了再拿 `window_root_plan::enumerate_target_roots(dbnum, T)` 的根清单对一遍（`room_recompute_uncovered` 纯函数），结论收成
+    `RoomRecomputeVerdict { WholeLibrary | PartialCoverage | Disabled | Failed }`：收尾分开问两句——`rooms_ok()`（只有 `Failed`
+    拖水位）与 `speaks_for_library()`（只有 `WholeLibrary` 盖 D14 那一格）。`PartialCoverage` 水位照盖、那一格不动、warn 点名前 5
+    个没覆盖到的根并指向 `model/rebuild`；枚举不出来按不全处理。
+  - **去重（本会话补）**：`PartialCoverage` 下电平型触发会在每个任务上再点一次，而同一代下再点结果逐字相同（投影里的根已对齐、
+    之后进投影的根都是这一代算的、不在投影里的根这条路够不着）——生产落盘形态下每个初始化过的库在任一 PANE 变化之后都会
+    变成这样，代价是每个任务一遍 O(投影) 边重写 + 一次 `DbSet@T` 根枚举 + 一句同样的 warn，直到人工 `model/rebuild`。
+    加进程内表 `room_recompute::PARTIAL_COVERAGE_SETTLED: dbnum → 常驻代号`：点了名的覆盖不全 `settle_partial_coverage`，
+    同一代不再触发 ③；失败 / 覆盖面未知（枚举失败可能是暂时的）/ 整库 `rearm_library`；代号变了键对不上、重启表空——都重新
+    武装。它**不是**库上的事实：`room_alignment.current` 照旧 `false`、`e3d.room.lookup` 照旧 `not_computed`。
+  - ADR-073 D13 正文补触发 ③、覆盖面自证、去重、以及**没收的第二半**（生产形态下初始化过的根这条路够不着，「整库」只到投影，
+    归 U1 另开卡）；顺手把 P2-4 的措辞漂移改掉（「拿开工时同一台计算器」→「收尾时新冻一台，此刻这一代」，与实现一致）、并把
+    P3-5「此刻本库没有第二个写者」改成实情（`/model/ensure` 的同库根可能仍在 write-behind 队列里，同一台计算器下幂等）。D14 写
+    规则加「且覆盖到 `DbSet@T` 的每一根」。源码钉 17 / 18 扩到上述钉点；U1 追记。CONTEXT「整库房间重算」「整库房间对齐代号」
+    「ModelOnly」三词条同步。
+- **验证**：`cargo test --lib -- room_recompute:: the_task_start_refresh… the_whole_library_eligibility… a_partial_coverage_recompute…
+  nothing_outside_the_task_writes_model_sesno a_window_with_no_model_work_still_stamps recompute_dbnum_room_edges room_edge
+  the_room_generation_stamp only_a_task_that_speaks` **22 passed / 0 failed**（含新用例
+  `the_library_owes_a_recompute_until_its_durable_alignment_matches_the_resident`、
+  `a_partial_coverage_settles_the_level_trigger_for_that_generation_only`、
+  `a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment`，源码钉 15 / 17 全绿）；
+  `cargo test --lib` 全量 **2216 passed / 4 failed / 118 ignored**——4 个失败全在 `model_impact` / `window_root_plan` 的
+  CACHID 元数据档（`the_metadata_tier_is_curated_only…`、`the_skip_verdict_uses_the_same_double_vote…`、
+  `a_change_is_metadata_only_when…`、`the_element_tier_is_the_widest_tier…`），随 vendor `e3d-model` 工作树里另一路会话未提交的
+  `element_diff.rs` / `increment.rs`（Q6 只 `CACHID` → `no_model`）而来，与本条无关、本条前后同样失败。rustfmt 对本轮新增行无 diff
+  （`batch_worker.rs` 6 处、`model_db_adapter.rs` 2 处漂移为既有）。**未 live**：「PANE 变化 → 拆窗 / 刷盘没齐丢掉触发 → 下一个任务
+  日志出『库上整库房间对齐代号 … ≠ 此刻常驻代号 …』并跑整库重算」与「初始化过的库 → `PartialCoverage` warn 一次、下一个任务不再重复」
+  两条真机用例没跑。
+- **未动**：P2-3 收尾盖章读的是任务结束那一刻的 `required_room_generation()`（`run_room_only_recompute` 冻的那台计算器代号没传给
+  盖章）——电平型之后它的分量更重：盖上一个边不是它算的代号，触发 ③ 就哑了；U1 第二半（初始化过的根不在投影里）要么让重算回读
+  库上几何、要么接受滞后到整库重建，另开决策卡；F3 / F4 / U3 照旧。
+
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 
 - **为什么**：`gen-model-refactor` 与 `codex/model-projection-cache` 各自实现过一遍 S6 第二档。双向同步
