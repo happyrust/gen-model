@@ -1121,6 +1121,34 @@ mod tests {
         assert_eq!(record_ids(&db).await, vec!["rec-b".to_string()]);
     }
 
+    /// 保存确认记录走 `CREATE ONLY … RETURN AFTER`，handler 用
+    /// `take::<Vec<ReviewRecordRow>>(0)` 读回写入的那一行。`CREATE ONLY` 回的是**单对象**
+    /// 而不是数组，两者在本仓 2.1.4 fork 下能否对上，决定了「写进去了却报
+    /// 保存失败」这条路存不存在——RUS-244 的 pre_action 保存就挂在这儿。
+    #[tokio::test]
+    async fn create_only_return_after_reads_back_as_rows() {
+        let db = probe_db("records_create_only").await;
+        let mut response = db
+            .query(
+                "CREATE ONLY type::thing('review_records', $id) CONTENT { \
+                 task_id: $task_id, form_id: 'F-1', type: 'batch', annotations: [], \
+                 dimension_document: { documentId: 'doc-1', records: [], schemaVersion: 2 }, \
+                 dimension_document_version: 1, note: 'probe', current_node: 'jd', \
+                 operator_id: 'JH', operator_name: 'JH', slot_key: 'F-1::jd::JH', \
+                 snapshot_hash: 'h', confirmed_at: time::now() } RETURN AFTER",
+            )
+            .bind(("id", "slot-probe"))
+            .bind(("task_id", "task-1"))
+            .await
+            .expect("CREATE ONLY 必须能被本仓解析器接受");
+
+        let rows: Vec<ReviewRecordRow> = response
+            .take(0)
+            .expect("CREATE ONLY 写进去的那一行必须能被 take::<Vec<_>> 读回来");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].dimension_document_version, Some(1));
+    }
+
     /// `DELETE /api/review/records/clear-task/{task_id}`：`LET $ids = SELECT VALUE id …; DELETE $ids`
     /// 两端逐字相同，这里钉住它在 2.1.4 fork 下只清该任务的记录。
     #[tokio::test]
