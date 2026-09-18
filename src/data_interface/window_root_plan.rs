@@ -28,6 +28,11 @@
 //! 执行端：`RegenRoot` / `DeleteCleanup` 随计划交回任务在内存里执行（ADR-072 D5）；`advance`
 //! 名单只进回执（`DataBatchResult.credential_advance`：这一窗省掉了多少根的重生成），库里
 //! 没有任何一行要为它改。
+//!
+//! 覆盖账（`docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` D3，2026-09-18）：变更账本
+//! [`UpdatePlan::remove`] 里每个被删的模型单元，自身或 S 端属主链上必须有一级落在 `delete` 或 `regen`
+//! 里（[`WindowRootSources::removed_units`] 在 `collect` 里带上 S 端属主链，[`uncovered_removed_units`]
+//! 算差集，[`delete_coverage_gap_warning`] 进回执 `warnings`）——只点名，不改任何桶、不判 `Partial`。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -240,6 +245,75 @@ pub fn plan_window_roots(
     plan
 }
 
+/// 覆盖账（`docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` D3）：变更账本说要删的
+/// 模型单元（e3d-model [`UpdatePlan::remove`]，几何挂在它身上的那一级——BOX / CYLI / FTUB…）里，
+/// 根规划两个会清旧行的桶都没盖住的那些。
+///
+/// 「盖住」= 单元自身或它 S 端属主链上的某一级落在 `delete`（`roots_S \ roots_T` → `DeleteCleanup`，
+/// 按 `anc` 清整根）或 `regen`（`RegenRoot`，整根重算、旧行随根级墓碑退掉）里。删掉一个成员、根还在
+/// → 根在 `regen`，盖住；删掉整根 → 根在 `delete`，盖住。都不在只有两种可能——`roots_S` 漏了根
+/// （09-15 S5 那四行孤儿：`gen_root` 里没有增量新建的 EQUI，`delete = ∅`、`regen = ∅` 而账本
+/// `remove = {BOX}`，两个数并排躺在同一行日志里三天没人看见），或闭包 / 属主链读挂。哪一种都要在
+/// 回执里点名。只比对、不改任何桶；输出按账本 `remove` 的键序。
+pub fn uncovered_removed_units(
+    removed: &[RemovedUnit],
+    delete: &[PersistedRoot],
+    regen: &[GenerationRoot],
+) -> Vec<RefnoEnum> {
+    let covering: BTreeSet<RefnoEnum> = delete
+        .iter()
+        .map(|root| root.refno)
+        .chain(regen.iter().map(|root| root.root))
+        .collect();
+    removed
+        .iter()
+        .filter(|unit| {
+            !covering.contains(&unit.refno)
+                && !unit
+                    .ancestors_s
+                    .iter()
+                    .any(|ancestor| covering.contains(ancestor))
+        })
+        .map(|unit| unit.refno)
+        .collect()
+}
+
+/// [`uncovered_removed_units`] 非空时进窗口回执 `warnings` 的那一行。只点名、不判 `Partial`、
+/// 不进 `/health`（计划 D4）：模型行残留不影响数据面正确性，它是单窗的账。点名最多前 12 个，
+/// 带账本记的 noun（账本没记的只出 refno）。
+pub fn delete_coverage_gap_warning(
+    dbnum: u32,
+    gap: &[RefnoEnum],
+    removed: &[RemovedUnit],
+    roots_s: usize,
+    roots_t: usize,
+    delete: usize,
+    regen: usize,
+) -> String {
+    const NAMED: usize = 12;
+    let noun_of = |refno: &RefnoEnum| -> String {
+        removed
+            .iter()
+            .find(|unit| unit.refno == *refno)
+            .map(|unit| unit.noun.as_str())
+            .filter(|noun| !noun.is_empty())
+            .map(|noun| format!("{} {noun}", refno.to_pdms_str()))
+            .unwrap_or_else(|| refno.to_pdms_str())
+    };
+    let mut named: Vec<String> = gap.iter().take(NAMED).map(noun_of).collect();
+    if gap.len() > NAMED {
+        named.push(format!("… (+{} more)", gap.len() - NAMED));
+    }
+    format!(
+        "dbnum={dbnum}: delete-coverage gap — the change ledger removes {} model unit(s) that no \
+         DeleteCleanup root and no RegenRoot covers: {}; their model rows are not cleaned by this \
+         window (roots_S={roots_s} roots_T={roots_t} delete={delete} regen={regen} remove={})",
+        gap.len(),
+        named.join(", "),
+        removed.len()
+    )
+}
+
 /// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08；
 /// 2026-09-15 S6 起回答带档）。
 ///
@@ -317,6 +391,42 @@ pub struct WindowRootSources {
     /// T 端的属主链。开关 `model_transform_cheap_path` 关着时 `enabled = false`、两个集合都空——
     /// 一次 `world_matrix` 都不算，`impact` / `plan_window_roots` 的产物与今天逐位相同。
     pub(crate) rigid: RigidMotionSources,
+    /// 覆盖账（计划 D3）的输入：账本 [`UpdatePlan::remove`] 里每个被删的模型单元，连同它在 **S 端**
+    /// 的属主链——删掉的东西只有 S 端说得出它曾挂在谁下面。分桶之后由 [`uncovered_removed_units`]
+    /// 拿它对 `delete` / `regen` 两桶比。
+    pub removed_units: Vec<RemovedUnit>,
+}
+
+/// 账本 [`UpdatePlan::remove`] 里的一个被删模型单元（几何挂在它身上的那一级：BOX / CYLI / FTUB…，
+/// 不是生成根），带 S 端属主链（不含自身，最近的属主在前）与账本记的 noun。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedUnit {
+    pub refno: RefnoEnum,
+    pub noun: String,
+    pub ancestors_s: Vec<RefnoEnum>,
+}
+
+/// 账本 `remove` 集 → [`RemovedUnit`]：noun 取账本 `Deleted` 条目的，属主链沿 `DbSet@S` 上溯
+/// （[`owner_chain_in_set`]）。链读挂时按空链记——那一件会被判成没盖住而出声，宁可多叫一次。
+fn collect_removed_units(plan: &UpdatePlan, base: &Arc<DbSet>) -> Vec<RemovedUnit> {
+    let nouns: BTreeMap<(u32, u32), &str> = plan
+        .ledger
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == ChangeKind::Deleted)
+        .map(|entry| ((entry.refno.word0, entry.refno.word1), entry.noun.as_str()))
+        .collect();
+    plan.remove
+        .iter()
+        .map(|&(word0, word1)| {
+            let refno = RefNo::new(word0, word1);
+            RemovedUnit {
+                refno: refno_from_e3d(refno),
+                noun: nouns.get(&(word0, word1)).map(|noun| noun.to_string()).unwrap_or_default(),
+                ancestors_s: owner_chain_in_set(base, refno).unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 /// [`WindowRootSources::rigid`] 的形状。纯数据；分桶在 `rigid_motion::classify_transform_roots`。
@@ -884,6 +994,8 @@ impl WindowRootSources {
         } else {
             crate::data_interface::reverse_reference::DesignReferenceCascade::off()
         };
+        // 覆盖账（计划 D3）：被删单元的 S 端属主链在这里取——两端 `DbSet` 都在手，之后只剩纯比对。
+        let removed_units = collect_removed_units(&plan, base);
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -891,6 +1003,7 @@ impl WindowRootSources {
             roots_t,
             plan,
             closure,
+            removed_units,
             index_keys: index.owners.len(),
             xgeometry_observed,
             xgeometry_unreadable,
@@ -1121,6 +1234,21 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
+    // 覆盖账（计划 D3，2026-09-18）：账本说要删的单元，自身或 S 端属主链上得有一级落在 `delete`
+    // 或 `regen` 里，否则它的旧行这一窗没人清——09-15 S5 那窗 `remove=1` / `delete=0` 就并排在
+    // 上面那一行里躺了三天没人看见。排在 `carry_unsettled_generation` 之后：欠着的根并进 regen 也算盖住。只告警。
+    let coverage_gap = uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen);
+    if !coverage_gap.is_empty() {
+        warnings.push(delete_coverage_gap_warning(
+            dbnum,
+            &coverage_gap,
+            &sources.removed_units,
+            roots_s.len(),
+            sources.roots_t.len(),
+            plan.delete.len(),
+            plan.regen.len(),
+        ));
+    }
     if sources.plan.report.metadata_only + sources.plan.report.unread_attribute > 0 {
         warnings.push(format!(
             "dbnum={dbnum}: metadata-only gate — {} modified candidate(s) changed nothing but \
@@ -1614,6 +1742,147 @@ mod tests {
         let plan = plan_window_roots(&[], &roots_s, &impact(&[]));
         assert_eq!(plan.delete, vec![persisted(7, "BRAN")]);
         assert!(plan.regen.is_empty() && plan.advance.is_empty());
+    }
+
+    fn removed(id: u32, noun: &str, ancestors: &[u32]) -> RemovedUnit {
+        RemovedUnit {
+            refno: r(id),
+            noun: noun.into(),
+            ancestors_s: ancestors.iter().map(|id| r(*id)).collect(),
+        }
+    }
+
+    /// 覆盖账（2026-09-18 计划 D3）——09-15 S5 那一窗的数：账本 `remove = {BOX 24384/26481}`（几何挂在
+    /// BOX 上，它的 S 端属主链是 EQUI 26480 → ZONE 24775 → SITE），`8adec7169` 的根规划 `delete = ∅`、
+    /// `regen = ∅`（`roots_S` 读 `gen_root`，增量新建的 EQUI 不在里面）。那件 BOX 要被点出来，warning
+    /// 要带上名字与两边的数，让「`remove=1` / `delete=0` 并排躺在同一行里」不再需要人眼去比。
+    #[test]
+    fn a_removed_unit_with_no_cleanup_root_above_it_is_named() {
+        let box_s5 = removed(26481, "BOX", &[26480, 24775, 24774]);
+        let gap = uncovered_removed_units(&[box_s5.clone()], &[], &[]);
+        assert_eq!(gap, vec![r(26481)]);
+
+        // 盖住了一件、漏了一件：只点漏的那件，按账本 `remove` 的顺序。
+        let ftub = removed(9, "FTUB", &[7, 5]);
+        let gap = uncovered_removed_units(
+            &[ftub.clone(), box_s5.clone()],
+            &[persisted(7, "BRAN")],
+            &[],
+        );
+        assert_eq!(gap, vec![r(26481)]);
+
+        let line = delete_coverage_gap_warning(
+            8000,
+            &[r(26481)],
+            &[box_s5.clone()],
+            952,
+            952,
+            0,
+            0,
+        );
+        assert!(
+            line.starts_with("dbnum=8000: delete-coverage gap — ")
+                && line.contains("removes 1 model unit(s)")
+                && line.contains("24384/26481 BOX")
+                && line.ends_with("(roots_S=952 roots_T=952 delete=0 regen=0 remove=1)"),
+            "{line}"
+        );
+
+        // 账本没记 noun 的只出 refno；点名有上限：13 件只点 12 件，尾巴说明还有几件。
+        let many: Vec<RemovedUnit> = (1..=13).map(|id| removed(id, "", &[])).collect();
+        let gap: Vec<RefnoEnum> = many.iter().map(|unit| unit.refno).collect();
+        let line = delete_coverage_gap_warning(8000, &gap, &many, 0, 0, 0, 0);
+        assert!(
+            line.contains("removes 13 model unit(s)")
+                && line.contains(": 24384/1, 24384/2,")
+                && line.contains("24384/12")
+                && !line.contains("24384/13")
+                && line.contains("… (+1 more)"),
+            "{line}"
+        );
+    }
+
+    /// 盖住了就一个字都不说：整根删掉 → 根在 `delete`（单元自身是根、或链上有根都算）；删成员、根还在
+    /// → 根在 `regen`（269→270 删 FTUB 的形状）；本窗没删东西 → 空。多删几根 / 多重算几根都无妨。
+    #[test]
+    fn a_removed_unit_under_a_delete_or_regen_root_raises_no_gap() {
+        let box_s5 = removed(26481, "BOX", &[26480, 24775, 24774]);
+        let ftub = removed(9, "FTUB", &[7, 5]);
+        let bran = removed(7, "BRAN", &[5]);
+        // 整根删掉：EQUI 在 delete 桶，BOX 由链盖住；BRAN 自身就是被删的根。
+        assert!(
+            uncovered_removed_units(
+                &[box_s5.clone(), bran.clone(), ftub.clone()],
+                &[persisted(26480, "EQUI"), persisted(7, "BRAN")],
+                &[]
+            )
+            .is_empty()
+        );
+        // 删成员、根还在：BRAN 整根重算。
+        assert!(
+            uncovered_removed_units(
+                &[ftub.clone()],
+                &[],
+                &[root(7, "BRAN", GenerationRootKind::DeliveryUnit)]
+            )
+            .is_empty()
+        );
+        // 多删 / 多重算别的根不影响。
+        assert!(
+            uncovered_removed_units(
+                &[box_s5.clone()],
+                &[persisted(26480, "EQUI"), persisted(3, "EQUI")],
+                &[root(7, "BRAN", GenerationRootKind::DeliveryUnit)]
+            )
+            .is_empty()
+        );
+        assert!(uncovered_removed_units(&[], &[persisted(7, "BRAN")], &[]).is_empty());
+        assert!(uncovered_removed_units(&[], &[], &[]).is_empty());
+    }
+
+    /// 源码钉（计划 S1）：比对接在窗口规划器里、排在分桶与 `carry_unsettled_generation` 之后、折成
+    /// `ModelUpdatePlan` 之前，拿的是账本被删单元（带 S 端属主链）与根规划的 `delete` / `regen` 两桶，
+    /// 不许换成别的几个数。
+    #[test]
+    fn the_window_planner_reports_delete_coverage_gaps() {
+        let body = include_str!("window_root_plan.rs")
+            .split_once("pub(crate) async fn build_model_update_plan_from_window(")
+            .expect("window planner exists")
+            .1
+            .split_once("// ---- 未触根的「前移」：只剩回执（ADR-079）----")
+            .expect("window planner boundary")
+            .0;
+        let buckets = body
+            .find("plan_window_roots(&sources.roots_t, &roots_s, &impact)")
+            .expect("root buckets are planned");
+        let carried = body
+            .find("carry_unsettled_generation(")
+            .expect("unsettled roots are carried into regen");
+        let gap = body
+            .find("uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen)")
+            .expect("coverage gap is computed from the removed units and the delete / regen buckets");
+        let warning = body
+            .find("delete_coverage_gap_warning(")
+            .expect("coverage gap is reported as a warning");
+        let folded = body
+            .find("into_model_update_plan(")
+            .expect("plan is folded into ModelUpdatePlan");
+        assert!(
+            buckets < carried && carried < gap && gap < warning && warning < folded,
+            "coverage gap must be compared after bucketing / carrying and reported before folding: {body}"
+        );
+        // 属主链在 `collect` 里取（两端 DbSet 在手），规划器不再开文件。
+        let collect = include_str!("window_root_plan.rs")
+            .split_once("    pub fn collect(")
+            .expect("collect exists")
+            .1
+            .split_once("    fn directly_touched(")
+            .expect("collect boundary")
+            .0;
+        assert!(
+            collect.contains("collect_removed_units(&plan, base)"),
+            "removed units and their S-side owner chains are gathered in collect: {collect}"
+        );
     }
 
     /// 三条护栏任一触发都退化：`advance` 清空，`roots_S ∩ roots_T` 全部 regen；
@@ -2175,8 +2444,11 @@ mod tests {
         let impact = sources.impact(&roots_s);
         let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
         let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
+        // 覆盖账（计划 D3 / S2）：账本被删单元里 `delete` / `regen` 两桶都没盖住的，生产会为它们出一条 warning。
+        let coverage_gap =
+            uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen);
         println!(
-            "{label}: roots_S={} roots_T={} touched={} regen={} delete={} advance={} lazy={} degraded={:?} | transform={} rejected={}",
+            "{label}: roots_S={} roots_T={} touched={} regen={} delete={} advance={} lazy={} degraded={:?} | transform={} rejected={} | remove={} gap={}{}",
             roots_s.len(),
             sources.roots_t.len(),
             impact.touched.len(),
@@ -2186,7 +2458,20 @@ mod tests {
             plan.lazy.len(),
             plan.degraded,
             rigid.transform.len(),
-            rigid.rejected.len()
+            rigid.rejected.len(),
+            sources.plan.remove.len(),
+            coverage_gap.len(),
+            if coverage_gap.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {:?}",
+                    coverage_gap
+                        .iter()
+                        .map(RefnoEnum::to_pdms_str)
+                        .collect::<Vec<_>>()
+                )
+            }
         );
         for (root, anchors) in &rigid.transform {
             println!(
@@ -2748,6 +3033,8 @@ mod tests {
                     .collect();
             let impact = sources.impact(&roots_s);
             let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+            let coverage_gap =
+                uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen);
             for entry in sources.plan.ledger.entries() {
                 println!(
                     "  ledger: {} {} {:?} {}",
@@ -2761,7 +3048,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             println!(
-                "window {}→{} [{}]: roots_S={} roots_T={} touched={:?} regen={:?} delete={:?} advance={} lazy={:?} degraded={:?} | {}",
+                "window {}→{} [{}]: roots_S={} roots_T={} touched={:?} regen={:?} delete={:?} advance={} lazy={:?} degraded={:?} | remove={} gap={:?} | {}",
                 expect.base,
                 expect.target,
                 expect.label,
@@ -2780,10 +3067,27 @@ mod tests {
                 plan.advance.len(),
                 describe(&plan.lazy),
                 plan.degraded,
+                sources.plan.remove.len(),
+                coverage_gap
+                    .iter()
+                    .map(RefnoEnum::to_pdms_str)
+                    .collect::<Vec<_>>(),
                 sources.plan.report.totals_line()
             );
 
             assert_eq!(plan.degraded, None, "{}", expect.label);
+            // 覆盖账（计划 D3 / S2）：账本被删的每个单元，自身或 S 端属主链上得有一级在 `delete` / `regen`
+            // 里——24→26 删 EQUI 子树（BOX 由 delete 里的 EQUI 盖住）、269→270 删 FTUB（由 regen 里的 BRAN
+            // 盖住）、270→271 删整条支管（成员由 delete 里的 BRAN 盖住）；其余窗口账本没删东西。
+            assert!(
+                coverage_gap.is_empty(),
+                "{}: the change ledger removes {:?} but the root plan does not delete them",
+                expect.label,
+                coverage_gap
+                    .iter()
+                    .map(RefnoEnum::to_pdms_str)
+                    .collect::<Vec<_>>()
+            );
             assert_eq!(
                 plan.regen.len(),
                 expect.regen,
