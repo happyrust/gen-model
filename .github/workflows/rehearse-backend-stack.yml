@@ -1,0 +1,246 @@
+name: Rehearse Backend Stack
+
+# 服务器的门还没开（root 口令登不上 sshd），但「这堆东西装上去到底能不能跑」不必等门。
+# 这条在 runner 上把服务器那一套原样走一遍：同一个 artifact、同一份 install_backend.sh、
+# 同一个渲染脚本、同一段 nginx 分流，连站点文件都用服务器上那份的快照。
+#
+# 跑绿意味着：按下真部署之后，剩下的未知只有那台机器本身（磁盘、已经在听 :3100 的旧后端、网络）。
+# 与真部署的差别只有三处：
+#   1. 机器是 ubuntu-latest runner，不是那台 ECS；
+#   2. 站点里 /api 与 ^~ /files/ 的上游 :3100 在 runner 上不存在——我们只验不该走它的那几条；
+#   3. JWT 密钥是本次运行现编的，不是 secrets.REVIEW_JWT_SECRET。
+#
+# 两个 matrix 档对应服务器可能的两种现状：
+#   legacy  —— 站点文件还是 2026-08-03 那份，没有 include，脚本得自己插进去（现在就是这一档）；
+#   patched —— 前端已经用带通配 include 的新模板发过一次，脚本不该再插第二行。
+
+on:
+  push:
+    branches: ['deploy/backend-*']
+  workflow_dispatch:
+    inputs:
+      binary_run_id:
+        description: '取哪一次 Linux binary 的产物；留空 = 该分支最近一次成功'
+        required: false
+        default: ''
+        type: string
+      binary_branch:
+        description: '到哪个分支上找 Linux binary 的成功运行'
+        required: false
+        default: 'ci/linux-build-20260918'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BINARY_RUN_ID: ${{ inputs.binary_run_id }}
+  BINARY_BRANCH: ${{ inputs.binary_branch || 'ci/linux-build-20260918' }}
+  SURREAL_VERSION: '2.1.4'
+  INSTALL_DIR: /opt/aios-database
+  DATA_DIR: /var/lib/aios-database
+  HTTP_PORT: '8022'
+  SURREAL_BIND: 127.0.0.1:8009
+  SURREAL_DATA_DIR: /var/lib/surrealdb/ams-8009
+  REMOTE_HOST: 127.0.0.1
+  NGINX_SITE: /etc/nginx/sites-available/plant3d-web
+
+jobs:
+  rehearse:
+    name: 在 runner 上把部署走一遍（站点 ${{ matrix.site }}）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        site: [legacy, patched]
+    concurrency:
+      group: rehearse-backend-${{ github.ref }}-${{ matrix.site }}
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Linux binary run
+        id: binrun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rid="${BINARY_RUN_ID}"
+          if [ -z "$rid" ]; then
+            rid="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow linux-binary.yml \
+                     --branch "$BINARY_BRANCH" --status success --limit 1 \
+                     --json databaseId --jq '.[0].databaseId')"
+          fi
+          [ -n "$rid" ] && [ "$rid" != "null" ] || {
+            echo "在 ${BINARY_BRANCH} 上找不到成功的 Linux binary 运行" >&2; exit 1; }
+          echo "run_id=$rid" >> "$GITHUB_OUTPUT"
+          gh run view "$rid" --repo "$GITHUB_REPOSITORY" \
+            --json createdAt,headSha,headBranch \
+            --jq '"彩排用的产物来自 run \(.headBranch) \(.headSha[0:9]) @ \(.createdAt)"'
+
+      - name: Download binary artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          gh run download "${{ steps.binrun.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name aios-database-linux-x64 --dir bundle
+          cat bundle/BUILD.txt
+          file bundle/aios-database
+          file bundle/aios-database | grep -q 'ELF 64-bit LSB .*x86-64' || {
+            echo "产物不是 x86-64 的 Linux 可执行文件" >&2; exit 1; }
+          sha256sum bundle/aios-database
+
+      - name: Fetch SurrealDB server binary
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 \
+            "https://github.com/surrealdb/surrealdb/releases/download/v${SURREAL_VERSION}/surreal-v${SURREAL_VERSION}.linux-amd64.tgz" \
+            -o "bundle/surreal-v${SURREAL_VERSION}.tgz"
+          tar -tzf "bundle/surreal-v${SURREAL_VERSION}.tgz"
+
+      - name: Render server DbOption
+        env:
+          E3D_PROJECT_DIR: /var/lib/aios-database/e3d
+        run: |
+          set -euo pipefail
+          python3 deploy/linux/render_dboption.py
+          echo "===== 与仓库里那份的差异 ====="
+          diff -u DbOption.toml bundle/DbOption.toml || true
+          python3 -c "import tomllib,sys; c=tomllib.load(open('bundle/DbOption.toml','rb')); print('TOML OK；store_mode=',c['store_mode'],'http_api_addr=',c['http_api_addr'])"
+
+      - name: Assemble bundle
+        run: |
+          set -euo pipefail
+          cp deploy/linux/install_backend.sh bundle/
+          chmod +x bundle/install_backend.sh
+          bash -n bundle/install_backend.sh
+          # 真部署里这一份来自 secrets.REVIEW_JWT_SECRET；彩排只为验「它有没有被写成 600 的 env 文件」。
+          umask 177
+          printf 'rehearsal-only-%s' "$GITHUB_RUN_ID" > bundle/jwt_secret
+          umask 022
+          ls -la bundle
+
+      - name: Stand up an nginx that looks like the server's
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y nginx
+          sudo mkdir -p /var/www/plant3d-web
+          printf '<!doctype html><title>rehearsal</title>\n' | sudo tee /var/www/plant3d-web/index.html >/dev/null
+          printf 'console.log("rehearsal")\n' | sudo tee /var/www/plant3d-web/app.js >/dev/null
+
+          sudo cp deploy/linux/rehearsal/site-legacy.nginx.conf "$NGINX_SITE"
+          if [ "${{ matrix.site }}" = "patched" ]; then
+            # 前端新模板多的就是这一行通配 include；脚本看见它就该收手，不再插自己那行。
+            sudo sed -i 's|^\(\s*\)server_name 123\.57\.182\.243;|\1server_name 123.57.182.243;\n\1include /etc/nginx/snippets/aios-review-split*.conf;|' "$NGINX_SITE"
+          fi
+          echo "===== 装分流之前的站点文件 ====="
+          sudo grep -nE 'server_name|include|location' "$NGINX_SITE"
+
+          sudo ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/plant3d-web
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t
+          sudo systemctl restart nginx
+          for p in / /api/review/health; do
+            printf '装分流之前 %-22s => %s\n' "$p" \
+              "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1${p}" || echo ERR)"
+          done
+
+      - name: Install (第一遍)
+        run: |
+          set -euo pipefail
+          sudo env INSTALL_DIR="$INSTALL_DIR" DATA_DIR="$DATA_DIR" \
+            SURREAL_BIND="$SURREAL_BIND" SURREAL_DATA_DIR="$SURREAL_DATA_DIR" \
+            HTTP_PORT="$HTTP_PORT" PUBLIC_HOST="$REMOTE_HOST" \
+            NGINX_SITE="$NGINX_SITE" SKIP_NGINX=0 ROLLBACK=0 \
+            bash bundle/install_backend.sh
+
+      - name: Verify through nginx (:80)
+        run: |
+          set -uo pipefail
+          fail=0
+          probe() {
+            code="$(curl -s -o /tmp/body -w '%{http_code}' --max-time 20 "http://127.0.0.1$1" || echo ERR)"
+            printf '%-30s => %-4s %s\n' "$1" "$code" "$(head -c 160 /tmp/body | tr -d '\n')"
+            [ "$code" = "$2" ] || { echo "::error::$1 期望 $2，实际 $code"; fail=1; }
+          }
+          probe /api/review/health 200   # 分流该把它送到 :8022
+          probe /api/v1/health 200
+          probe / 200                    # 前端首页：别把静态站点碰坏了
+          probe /app.js 200              # 静态资源那条正则还得在我们前面之后仍然管用
+          exit $fail
+
+      - name: Inspect what landed
+        run: |
+          set -uo pipefail
+          echo "===== /opt/aios-database ====="; sudo ls -la "$INSTALL_DIR" "$INSTALL_DIR/bin"
+          echo "===== service.env 权限 ====="; sudo stat -c '%a %U %n' "$INSTALL_DIR/service.env"
+          sudo grep -q '^JWT_SECRET=rehearsal-only-' "$INSTALL_DIR/service.env" \
+            && echo "JWT_SECRET 写进去了" || { echo "::error::service.env 里没有 JWT_SECRET"; exit 1; }
+          echo "===== 单元状态 ====="; systemctl is-active surrealdb aios-database; surreal version
+          echo "===== 实际生效的分流 location ====="
+          sudo nginx -T 2>/dev/null | grep -nE 'location .*(api/review|files/review_attachments)' || {
+            echo "::error::nginx 跑着的配置里没有分流 location"; exit 1; }
+          echo "===== 在听的端口 ====="; sudo ss -lntp | grep -E ':(80|8009|8022)\s'
+
+      - name: Install (第二遍：幂等)
+        run: |
+          set -euo pipefail
+          sudo env INSTALL_DIR="$INSTALL_DIR" DATA_DIR="$DATA_DIR" \
+            SURREAL_BIND="$SURREAL_BIND" SURREAL_DATA_DIR="$SURREAL_DATA_DIR" \
+            HTTP_PORT="$HTTP_PORT" PUBLIC_HOST="$REMOTE_HOST" \
+            NGINX_SITE="$NGINX_SITE" SKIP_NGINX=0 ROLLBACK=0 \
+            bash bundle/install_backend.sh
+
+      - name: 第二遍之后再核一次
+        run: |
+          set -uo pipefail
+          n="$(sudo grep -c 'aios-review-split' "$NGINX_SITE")"
+          echo "站点文件里的 include 行数：$n"
+          [ "$n" = "1" ] || { echo "::error::重复插入了 include（$n 行），两条 include 会撞成重复 location"; exit 1; }
+          sudo test -f "$INSTALL_DIR/bin/aios-database.prev" \
+            || { echo "::error::第二遍没留下 bin/aios-database.prev，回滚就无从谈起"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1/api/review/health || echo ERR)"
+          echo "第二遍之后 /api/review/health => $code"
+          [ "$code" = "200" ] || { echo "::error::第二遍之后校审域回的是 $code"; exit 1; }
+
+      - name: Rollback 那条路也走一遍
+        run: |
+          set -euo pipefail
+          sudo env INSTALL_DIR="$INSTALL_DIR" HTTP_PORT="$HTTP_PORT" ROLLBACK=1 \
+            bash bundle/install_backend.sh
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1/api/v1/health || echo ERR)"
+          echo "回滚之后 /api/v1/health => $code"
+          [ "$code" = "200" ] || { echo "::error::回滚之后服务没回来（$code）"; exit 1; }
+
+      - name: 收日志
+        if: always()
+        run: |
+          set +e
+          mkdir -p rehearsal-logs
+          cp bundle/DbOption.toml rehearsal-logs/ 2>/dev/null
+          sudo cp "$NGINX_SITE" rehearsal-logs/site.conf 2>/dev/null
+          sudo cp /etc/nginx/snippets/aios-review-split.conf rehearsal-logs/ 2>/dev/null
+          sudo systemctl status surrealdb aios-database --no-pager -l > rehearsal-logs/units.txt 2>&1
+          sudo journalctl -u surrealdb -n 300 --no-pager > rehearsal-logs/surrealdb.log 2>&1
+          sudo journalctl -u aios-database -n 600 --no-pager > rehearsal-logs/aios-database.log 2>&1
+          sudo tail -n 200 /var/log/nginx/error.log > rehearsal-logs/nginx-error.log 2>&1
+          sudo chown -R "$USER" rehearsal-logs
+          if [ "${{ job.status }}" != "success" ]; then
+            echo "===== aios-database 最后 120 行 ====="; tail -n 120 rehearsal-logs/aios-database.log
+            echo "===== surrealdb 最后 40 行 ====="; tail -n 40 rehearsal-logs/surrealdb.log
+          fi
+
+      - name: Upload rehearsal logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-${{ matrix.site }}
+          path: rehearsal-logs
+          if-no-files-found: warn
+          retention-days: 7

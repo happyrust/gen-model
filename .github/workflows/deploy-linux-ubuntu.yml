@@ -139,58 +139,9 @@ jobs:
           E3D_PROJECT_DIR: /var/lib/aios-database/e3d
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import os, re, sys, textwrap
-
-          src = "DbOption.toml"
-          dst = "bundle/DbOption.toml"
-          text = open(src, encoding="utf-8").read()
-
-          # 只改「这台机器是什么样」的那几格，其余一律沿用仓库里那份——服务器配置和开发档
-          # 之间每多一处自说自话，以后排查就多一处要先对账的地方。
-          overrides = {
-              "project_path": f'"{os.environ["E3D_PROJECT_DIR"]}"',   # Windows 的 D:/AVEVA/... 在这儿不存在
-              "v_ip": '"127.0.0.1"',
-              "store_mode": '"rocksdb"',                              # mem 档下校审四前缀一律 503
-              "http_api_addr": f'"0.0.0.0:{os.environ["HTTP_PORT"]}"',
-              "startup_autorun": "false",                             # 首发别让它一上来就消化积压
-              "gen_model": "false",
-              "gen_mesh": "false",
-          }
-
-          for key, value in overrides.items():
-              pattern = rf"(?m)^{re.escape(key)}\s*=.*$"
-              if not re.search(pattern, text):
-                  sys.exit(f"DbOption.toml 里没有顶层键 {key}：模板变了，先对一遍再部署")
-              text = re.sub(pattern, f"{key} = {value}", text, count=1)
-
-          review_web = os.environ.get("REVIEW_WEB_BASE_URL", "").strip() \
-              or f'http://{os.environ["REMOTE_HOST"]}'
-
-          # TOML 的表头必须排在所有顶层键之后，所以这三段只能追加在文件末尾。
-          text += textwrap.dedent(f"""\
-
-              # ── 以下三段由 deploy-linux-ubuntu.yml 按服务器口径追加 ──────────────────
-              # 校审接口的 JWT 鉴权。四个键的缺省与旧 :3100 端逐字相同，这里显式写出来
-              # 是为了「服务器上到底开没开」一眼看得见。
-              [review_auth]
-              enabled = true
-
-              # PMS 平台入站（S2S）那六条：embed-url / workflow sync / workflow verify /
-              # annotations check / cache preload / delete。review_web_base_url 就是
-              # embed-url 回给 PMS 的那个地址（移植计划 Q5）。
-              [platform_auth]
-              enabled = true
-              review_web_base_url = "{review_web}"
-
-              # 附件落盘位置；URL 前缀 /files/review_attachments/ 是前端写死的契约，
-              # 不在这儿配。
-              [review_attachments]
-              dir = "review_attachments"
-              """)
-
-          open(dst, "w", encoding="utf-8", newline="\n").write(text)
-          PY
+          # 渲染逻辑在 deploy/linux/render_dboption.py：彩排（rehearse-backend-stack.yml）
+          # 跑的必须是同一份，两边各抄一段的话，彩排验过的就不是这里要发的东西了。
+          python3 deploy/linux/render_dboption.py
           echo "===== 与仓库里那份的差异 ====="
           diff -u DbOption.toml bundle/DbOption.toml || true
 
