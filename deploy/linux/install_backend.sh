@@ -165,7 +165,10 @@ if [ -n "$JWT_SECRET" ]; then
   umask 177
   printf 'JWT_SECRET=%s\n' "$JWT_SECRET" > "${INSTALL_DIR}/service.env"
   umask 022
-  log "JWT_SECRET 写进 ${INSTALL_DIR}/service.env（600）"
+  # 光靠 umask 不够：父目录上挂了 default ACL 的机器（GitHub runner 的 /opt 就是）
+  # 创建出来的是 666，彩排里亲眼见过。密钥文件的权限不该看落在谁家。
+  chmod 600 "${INSTALL_DIR}/service.env"
+  log "JWT_SECRET 写进 ${INSTALL_DIR}/service.env（$(stat -c '%a' "${INSTALL_DIR}/service.env")）"
 fi
 
 {

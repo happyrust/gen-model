@@ -212,6 +212,8 @@ jobs:
           set -uo pipefail
           echo "===== /opt/aios-database ====="; sudo ls -la "$INSTALL_DIR" "$INSTALL_DIR/bin"
           echo "===== service.env 权限 ====="; sudo stat -c '%a %U %n' "$INSTALL_DIR/service.env"
+          mode="$(sudo stat -c '%a' "$INSTALL_DIR/service.env")"
+          [ "$mode" = "600" ] || { echo "::error::service.env 是 ${mode}，密钥文件不该是这个权限"; exit 1; }
           sudo grep -q '^JWT_SECRET=rehearsal-only-' "$INSTALL_DIR/service.env" \
             && echo "JWT_SECRET 写进去了" || { echo "::error::service.env 里没有 JWT_SECRET"; exit 1; }
           echo "===== resource/surreal ====="; sudo ls -1 "$INSTALL_DIR/resource/surreal"
