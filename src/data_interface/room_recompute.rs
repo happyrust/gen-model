@@ -507,11 +507,13 @@ mod tests {
             model_only.contains("whole_library_model_only(job)"),
             "整库重排（起点 0）每一根都刚算过，不再空转一遍: {model_only}"
         );
+        // 栅栏（等刷盘）自 2026-09-18 起在追平门之外，房间重算与模型收尾判决仍在追平门之内；
+        // 三者的先后不变：刷盘之后、判决之前。
         let tail = worker
             .split_once(
-                "if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")",
+                "let flush = if model_half_awaits_durable(initialization_closed_task, &job.db_type)",
             )
-            .expect("DESI 收尾门")
+            .expect("DESI durable 栅栏")
             .1
             .split_once("registry.set_stage(&job.task_id, \"task_end\")")
             .expect("收尾那一笔")
@@ -520,7 +522,7 @@ mod tests {
         let rooms = tail
             .find("run_room_recompute(job, &request, &mut result, file_latest_sesno)")
             .expect("房间重算（定向 / 整库）在收尾段，带着 T 好对 DbSet@T 的根清单自证覆盖面");
-        let outcome = tail.find("model_outcome_of(&flush").expect("模型收尾判决");
+        let outcome = tail.find("model_outcome_of(flush").expect("模型收尾判决");
         assert!(
             flush < rooms && rooms < outcome,
             "刷盘之后、模型收尾判决之前: {tail}"

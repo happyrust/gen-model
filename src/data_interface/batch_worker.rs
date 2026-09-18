@@ -1591,14 +1591,17 @@ async fn execute_frozen_batch(
     // write-behind，栅栏立刻放行，两档走同一段代码。刷不进去有预算（[`DURABLE_FLUSH_BUDGET`]）：
     // Retryable 用尽 / 判死 → 放弃那些根、逐出投影、单元记 Failed、账本记失败（ADR-079），任务
     // Partial、水位不盖。任务只等，不替 worker 写（第二个写者在热库上实测撞冲突）。只有 DESI 才有模型可收。
+    //
+    // 栅栏与「追平」解耦（2026-09-18 审核 P1）：模型半边只要跑过（DESI、非初始化编排），本任务就等自己
+    // 单元清单里的根拿到 durable ACK，判死 / 用尽的照样放弃、逐出投影、记账、Partial——**不问这一窗追平
+    // 没追平**。这一段从前整个躲在 `round_complete` 后面：截断窗口（预算拆窗，余量排回队列）照样跑了模型
+    // 半边，却一根不等——write-behind 里判死的根没人记账、不进 chasing、不逐出投影；余量批以 committed_end
+    // 为 S、只等自己那批根，追平就盖 `model_sesno = T`，durable 侧那几根旧行从此静默陈旧，投影遮到重启为止。
+    // 盖水位（连同房间重算、目录落款）仍只在追平那一窗：那是「这一版全好了」的承诺，截断窗说不了。
     let mut model_outcome: Option<crate::data_interface::task_end::TaskModelOutcome> = None;
     let mut end_time: Option<String> = None;
     let mut flush_note = String::new();
-    if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
-        end_time = result
-            .batch
-            .as_ref()
-            .and_then(|batch| batch.end_sesno_time.clone());
+    let flush = if model_half_awaits_durable(initialization_closed_task, &job.db_type) {
         registry.set_stage(&job.task_id, "durable_pending");
         let flush_started = Instant::now();
         let flush = await_units_durable(registry, job, &result.units).await;
@@ -1612,6 +1615,15 @@ async fn execute_frozen_batch(
             flush.blocked.len() + flush.exhausted.len(),
             flush_started.elapsed().as_millis()
         );
+        Some(flush)
+    } else {
+        None
+    };
+    if let Some(flush) = flush.as_ref().filter(|_| round_complete) {
+        end_time = result
+            .batch
+            .as_ref()
+            .and_then(|batch| batch.end_sesno_time.clone());
         // 整库房间重算（`RoomOnly`，d-819 / ADR-073 D13）：本窗碰了房间定义族 / 开工前对齐换了房间代号
         // → 用本库全部根的现有几何重写两张房间边。放在刷盘之后：本批根的模型行与边已在库里，此刻本库
         // 没有第二个写者；放在收尾之前：算不出的根按 D2 记失败、`model_sesno` 不盖。刷盘没齐就不跑
@@ -1640,7 +1652,7 @@ async fn execute_frozen_batch(
             recomputed_library_generation,
             result.room_generation_at_start.as_deref(),
         );
-        let mut outcome = model_outcome_of(&flush, catalogue_sessions, room_generation);
+        let mut outcome = model_outcome_of(flush, catalogue_sessions, room_generation);
         if !rooms_ok {
             outcome.all_roots_ok = false;
             outcome.catalogue_sessions = None;
@@ -1652,9 +1664,9 @@ async fn execute_frozen_batch(
 
     // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
     // 一个写者、一笔事务。`applied_sesno` 不在这里——它由数据尾事务在模型阶段之前盖（ADR-056 D1 /
-    // ADR-025 §7），`requeue_window_remainder` 与凭证前移都读它。模型没跑（这一轮没追平、非 DESI）
-    // 时 `model` 为 `None`，没全成时 `all_roots_ok: false`：这一笔只收标记、落统计、记根观测，
-    // 水位那一格原地。ModelOnly 与 `mem` 档走的也是这一段。
+    // ADR-025 §7），`requeue_window_remainder` 与凭证前移都读它。这一窗没追平（截断窗口，余量还在
+    // 队列里）、非 DESI、或模型没跑时 `model` 为 `None`，没全成时 `all_roots_ok: false`：这一笔只收
+    // 标记、落统计、记根观测，水位那一格原地。ModelOnly 与 `mem` 档走的也是这一段。
     if !initialization_closed_task {
         registry.set_stage(&job.task_id, "task_end");
         let ref0_rows = ref0_snapshot.as_ref().map(|snapshot| snapshot.rows.len());
@@ -2890,6 +2902,16 @@ fn batch_round_complete(
         && units
             .iter()
             .all(|unit| unit.status == UnitGenStatus::Generated)
+}
+
+/// 本任务要不要等自己那批根的 durable ACK（2026-09-18 审核 P1）：模型半边只要可能跑过就等——
+/// DESI 库、且收尾没被初始化双 lane 编排接管。**不问追平**（[`batch_round_complete`]）：追平决定的是
+/// 盖不盖 `model_sesno`，栅栏决定的是「本任务发出去的几何到底落了没有」，两件事分开问。截断窗口
+/// （余量排回队列）与 Partial 任务照样等：判死 / 用尽的根在这里被放弃、逐出投影、记进账本，余量批
+/// 才有得接（`carry_unsettled_generation`）；不等，它们就以「已发布」的身份留在 `roots_S` 里。
+/// 单元清单为空时等的是空集，立刻放行，零成本。
+fn model_half_awaits_durable(initialization_closed_task: bool, db_type: &str) -> bool {
+    !initialization_closed_task && db_type.eq_ignore_ascii_case("DESI")
 }
 
 /// 截断窗口的余量批次（ADR-017 拆窗）。
@@ -4672,9 +4694,9 @@ mod tests {
         let source = include_str!("batch_worker.rs");
         let tail = source
             .split_once(
-                "if !initialization_closed_task && round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")",
+                "let flush = if model_half_awaits_durable(initialization_closed_task, &job.db_type)",
             )
-            .expect("DESI settlement gate")
+            .expect("DESI durable barrier")
             .1
             .split_once("// ── 写入标记的兜底收口")
             .expect("settlement boundary")
@@ -4713,6 +4735,82 @@ mod tests {
                 "持久 / 非持久二分已消失，`{retired}` 不许回来: {tail}"
             );
         }
+    }
+
+    /// 2026-09-18 审核 P1：durable 栅栏不问追平。截断窗口（预算拆窗、余量排回队列）照样跑模型半边，
+    /// 从前栅栏整个躲在 `round_complete` 后面——write-behind 里判死的根没人放弃、不逐出投影、不进账本，
+    /// 余量批以 committed_end 为 S、只等自己那批根，追平就盖 `model_sesno = T`，durable 侧旧行静默陈旧。
+    /// 谓词那一半：DESI 且收尾没被初始化编排接管就等，与追平、任务状态、单元清单都无关。
+    #[test]
+    fn the_durable_barrier_applies_whenever_the_model_half_ran_not_only_on_catch_up() {
+        assert!(model_half_awaits_durable(false, "DESI"));
+        assert!(model_half_awaits_durable(false, "desi"));
+        assert!(
+            !model_half_awaits_durable(true, "DESI"),
+            "初始化双 lane 编排自己收尾，这里不再等"
+        );
+        for other in ["CATA", "SYST", "DICT", "PROP", ""] {
+            assert!(
+                !model_half_awaits_durable(false, other),
+                "{other:?} 没有模型半边可等"
+            );
+        }
+    }
+
+    /// 同一条的源码钉：栅栏在 `round_complete` 之外，盖水位的那一段在 `round_complete` 之内。
+    #[test]
+    fn the_durable_barrier_is_outside_the_catch_up_gate_and_the_stamp_is_inside() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch exists")
+            .1
+            .split_once("// ── 写入标记的兜底收口")
+            .expect("W1 marker")
+            .0;
+        let (before_barrier, from_barrier) = body
+            .split_once("let flush = if model_half_awaits_durable(initialization_closed_task, &job.db_type)")
+            .expect("the barrier is gated by the pure predicate");
+        assert!(
+            before_barrier.contains("let round_complete = work_round_complete;"),
+            "追平判据算在栅栏之前，栅栏却不拿它当条件: {before_barrier}"
+        );
+        let (barrier, after_barrier) = from_barrier
+            .split_once("if let Some(flush) = flush.as_ref().filter(|_| round_complete)")
+            .expect("the stamp block is gated by round_complete");
+        assert!(
+            barrier.contains("await_units_durable("),
+            "栅栏本体在追平门之前: {barrier}"
+        );
+        assert!(
+            barrier.contains("abandon_undurable_roots("),
+            "判死 / 用尽的根在追平门之前就放弃、记账: {barrier}"
+        );
+        assert!(
+            !barrier.contains("round_complete"),
+            "栅栏不许再问追平: {barrier}"
+        );
+        assert!(
+            !barrier.contains("model_outcome = Some("),
+            "栅栏里不盖水位: {barrier}"
+        );
+        let stamp = after_barrier
+            .split_once("registry.set_stage(&job.task_id, \"task_end\")")
+            .expect("closing tail follows the stamp block")
+            .0;
+        assert!(
+            stamp.contains("model_outcome = Some("),
+            "盖水位的结论只在追平那一窗算: {stamp}"
+        );
+        assert!(
+            !stamp.contains("await_units_durable("),
+            "追平门里不再有第二道栅栏: {stamp}"
+        );
+        assert_eq!(
+            body.matches("await_units_durable(").count(),
+            1,
+            "整个执行体只有一道栅栏: {body}"
+        );
     }
 
     /// ADR-076 D5（增量路计划 D4）：一个任务只调一次 `commit_task_end_on`——中途那笔 Ref0 统计已并进
