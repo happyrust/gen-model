@@ -6,6 +6,10 @@ name: Linux binary
 # 换成 linux 版。工具链版本、feature 组合与 windows 那条保持一致。
 
 on:
+  # workflow_dispatch 只认默认分支上的 workflow，这条还没并回去；push 触发按被推的那个
+  # commit 上的定义跑，所以调这条链的期间靠 push 触发。
+  push:
+    branches: ['ci/linux-build-*']
   workflow_dispatch:
     inputs:
       vendor_ref:
