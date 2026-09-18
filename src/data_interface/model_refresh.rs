@@ -53,6 +53,10 @@ pub(crate) struct TargetedGenerationReport {
     pub rows_upserted: usize,
     pub commits: usize,
     pub max_transaction_bytes: usize,
+    /// 这一批里被判**不画**的隐式管身点名账（见 `E3dPersistReport::tubes_not_drawn`）。
+    /// 生成成功也可能有值——它不是失败，是「模型比设计少一节管」的唯一线索，
+    /// 由任务侧原样挂进回执。
+    pub tubes_not_drawn: Option<String>,
 }
 
 /// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
@@ -249,7 +253,12 @@ impl ModelRefreshPolicy {
                 diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
                 error
             })?;
-        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}", persisted.failed, persisted.failed_roots));
+        // `failed=0 failures=[]` 是这一行的常态，而「按设计不画」的那几根管就消失在这份
+        // 常态里（2026-09-18 的 HBOR 探针：E3D 与本引擎同样不画，但只有 E3D 那边报得出来）。
+        // 点名账非空时就挂在同一行上——查的人本来就在看它。
+        let tubes_not_drawn = persisted.tubes_not_drawn.clone();
+        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}{}", persisted.failed, persisted.failed_roots,
+            tubes_not_drawn.as_deref().map(|line| format!(" {line}")).unwrap_or_default()));
         let generation_failures = persisted
             .failed_roots
             .iter()
@@ -544,6 +553,7 @@ impl ModelRefreshPolicy {
             report.rows_upserted = rows_upserted;
             report.commits = commits;
             report.max_transaction_bytes = max_transaction_bytes;
+            report.tubes_not_drawn = tubes_not_drawn;
             diagnostic.finish(format!("dbnum={dbnum} completed={:?} failures={:?} rows={} commits={} room_edges={}",
                 report.completed, report.failures, report.rows_upserted, report.commits, report.room_edges_written));
             Ok(report)

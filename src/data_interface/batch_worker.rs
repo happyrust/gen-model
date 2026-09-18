@@ -3950,10 +3950,21 @@ async fn run_unit_worklist(
                 .await;
             let (completed, mut failures) = match report {
                 Ok(report) => (
-                    report
-                        .completed
-                        .into_iter()
-                        .collect::<std::collections::HashSet<_>>(),
+                    {
+                        // 生成成功也可能少了几根管：两道门（共轴 / 通径）判不画的槽位不是失败，
+                        // E3D 在同一份数据上同样不画，所以它进不了 `failures`。但「模型比设计
+                        // 少一节管」必须在回执上留得下痕迹，否则查的人只有一句 failed=0。
+                        if let Some(line) = report.tubes_not_drawn.as_deref() {
+                            warnings.push(match dbnum {
+                                Some(dbnum) => format!("dbnum={dbnum}: {line}"),
+                                None => line.to_string(),
+                            });
+                        }
+                        report
+                            .completed
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>()
+                    },
                     report
                         .failures
                         .into_iter()
@@ -5866,6 +5877,12 @@ mod tests {
         assert!(
             units.contains("ModelRefreshPolicy::generate_roots_report("),
             "批量重生成必须消费逐根结果，不能把部分失败折成整批错误: {units}"
+        );
+        // 判不画的管身不是失败（E3D 同样不画），所以它只会从 `tubes_not_drawn` 这一路
+        // 出来；不挂进 warnings，整条线索就只剩 failed=0，回执上再也看不见少了哪一节管。
+        assert!(
+            units.contains("report.tubes_not_drawn.as_deref()") && units.contains("warnings.push("),
+            "生成成功但少产了管身时，回执上必须留下点名账: {units}"
         );
         assert!(
             units.contains("crate::options::model_regen_execution_group().max(1)")

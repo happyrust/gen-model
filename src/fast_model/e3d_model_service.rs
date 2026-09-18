@@ -2305,6 +2305,9 @@ impl E3dModelService {
                 ));
             }
         }
+        // 两道门判不画的那几根在这里离开生成层：报告里有点名账，回执与日志靠它才说得出
+        // 「少的是哪一根」。渲染在序列化之前，`generation` 之后就被 JSON 吃掉了。
+        total.tubes_not_drawn = generation.implied_tubes.not_drawn_line();
         total.generation_report = serde_json::to_value(generation)?;
         Ok(total)
     }
@@ -2975,6 +2978,10 @@ impl E3dPersistReport {
         self.unique_meshes = self.mesh_ids.len();
         self.source_sesno = self.source_sesno.or(other.source_sesno);
         self.visited_by_root.extend(other.visited_by_root);
+        self.tubes_not_drawn = match (self.tubes_not_drawn.take(), other.tubes_not_drawn) {
+            (Some(mine), Some(theirs)) => Some(format!("{mine} | {theirs}")),
+            (mine, theirs) => mine.or(theirs),
+        };
     }
 }
 
