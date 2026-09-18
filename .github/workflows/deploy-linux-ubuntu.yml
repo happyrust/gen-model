@@ -67,7 +67,7 @@ env:
   REMOTE_PASS: ${{ secrets.DEPLOY_REMOTE_PASS }}
   BINARY_RUN_ID: ${{ inputs.binary_run_id }}
   BINARY_BRANCH: ${{ inputs.binary_branch || 'ci/linux-build-20260918' }}
-  SURREAL_VERSION: '2.1.4'
+  SURREAL_FORK_REV: '45013fc9'
   INSTALL_DIR: /opt/aios-database
   DATA_DIR: /var/lib/aios-database
   HTTP_PORT: '8022'
@@ -133,16 +133,26 @@ jobs:
             echo "产物不是 x86-64 的 Linux 可执行文件" >&2; exit 1; }
           sha256sum bundle/aios-database
 
-      - name: Fetch SurrealDB server binary
+      # 服务端必须是 fork 的那条 2.1.4。官方 2.1.4 试过（彩排 run 35314163615）：
+      # 握手、signin、use 都过，第一条 query 就再没有回音，两边都不报错。
+      # 在 runner 上取而不是让服务器自己去下，省得服务器那头的网络成为部署的前提。
+      - name: Fetch SurrealDB server (fork 45013fc9)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # 客户端 SDK 是 fork 的 2.1.4（Cargo.lock: gitee.com/happydpc/surrealdb.git）。
-          # 服务端拿官方 2.1.4：大版本对得上就能开同一份存储，rev 不同只影响边角。
-          # 在 runner 上取而不是让服务器自己去 GitHub 下，省得服务器那头的网络成为部署的前提。
-          curl -fsSL --retry 3 \
-            "https://github.com/surrealdb/surrealdb/releases/download/v${SURREAL_VERSION}/surreal-v${SURREAL_VERSION}.linux-amd64.tgz" \
-            -o "bundle/surreal-v${SURREAL_VERSION}.tgz"
-          tar -tzf "bundle/surreal-v${SURREAL_VERSION}.tgz"
+          rid="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow surreal-fork-linux.yml \
+                   --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          [ -n "$rid" ] && [ "$rid" != "null" ] || {
+            echo "::error::还没有成功的 SurrealDB fork 构建，先把 ci/surreal-fork-* 那条跑绿" >&2; exit 1; }
+          gh run download "$rid" --repo "$GITHUB_REPOSITORY" --name surreal-linux-x64-fork --dir surrealbin
+          cat surrealbin/BUILD.txt
+          chmod +x surrealbin/surreal
+          surrealbin/surreal version
+          surrealbin/surreal version | grep -q "$SURREAL_FORK_REV" || {
+            echo "::error::artifact 里那个 surreal 自报的版本里没有 ${SURREAL_FORK_REV}" >&2; exit 1; }
+          mkdir -p bundle
+          cp surrealbin/surreal bundle/surreal
 
       - name: Render server DbOption
         env:
@@ -222,7 +232,7 @@ jobs:
           echo "真要发：往 deploy/backend-* 推一个提交信息带 [deploy] 的提交，或并回主线后用 Actions 按钮。"
           echo "这一发会做的事："
           echo "  1. 传 $(du -sh bundle | cut -f1) 的包到 /tmp/aios-deploy-${GITHUB_RUN_ID}"
-          echo "  2. 装 SurrealDB ${SURREAL_VERSION}（机器上已有 2.1.x 就跳过）+ systemd 单元 surrealdb.service"
+          echo "  2. 装 SurrealDB 2.1.4（fork rev ${SURREAL_FORK_REV}；机器上已经是这一版就跳过）+ systemd 单元 surrealdb.service"
           echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新二进制、DbOption 与 resource/surreal → 起"
           echo "  4. nginx 加 include /etc/nginx/snippets/aios-review-split.conf（skip_nginx=${SKIP_NGINX}）"
           echo "  5. 健康检查：本机 :8009 /health、:${HTTP_PORT} /api/v1/health 与 /api/review/health，再走公网一遍"

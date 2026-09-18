@@ -37,7 +37,7 @@ permissions:
 env:
   BINARY_RUN_ID: ${{ inputs.binary_run_id }}
   BINARY_BRANCH: ${{ inputs.binary_branch || 'ci/linux-build-20260918' }}
-  SURREAL_VERSION: '2.1.4'
+  SURREAL_FORK_REV: '45013fc9'
   INSTALL_DIR: /opt/aios-database
   DATA_DIR: /var/lib/aios-database
   HTTP_PORT: '8022'
@@ -104,13 +104,22 @@ jobs:
             echo "产物不是 x86-64 的 Linux 可执行文件" >&2; exit 1; }
           sha256sum bundle/aios-database
 
-      - name: Fetch SurrealDB server binary
+      - name: Fetch SurrealDB server (fork 45013fc9)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 \
-            "https://github.com/surrealdb/surrealdb/releases/download/v${SURREAL_VERSION}/surreal-v${SURREAL_VERSION}.linux-amd64.tgz" \
-            -o "bundle/surreal-v${SURREAL_VERSION}.tgz"
-          tar -tzf "bundle/surreal-v${SURREAL_VERSION}.tgz"
+          rid="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow surreal-fork-linux.yml \
+                   --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          [ -n "$rid" ] && [ "$rid" != "null" ] || {
+            echo "::error::还没有成功的 SurrealDB fork 构建，先把 ci/surreal-fork-* 那条跑绿" >&2; exit 1; }
+          gh run download "$rid" --repo "$GITHUB_REPOSITORY" --name surreal-linux-x64-fork --dir surrealbin
+          cat surrealbin/BUILD.txt
+          chmod +x surrealbin/surreal
+          surrealbin/surreal version | grep -q "$SURREAL_FORK_REV" || {
+            echo "::error::artifact 里那个 surreal 自报的版本里没有 ${SURREAL_FORK_REV}" >&2; exit 1; }
+          mkdir -p bundle
+          cp surrealbin/surreal bundle/surreal
 
       - name: Render server DbOption
         env:

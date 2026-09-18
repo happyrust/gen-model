@@ -79,18 +79,35 @@ fi
 mkdir -p "${INSTALL_DIR}/bin" "${DATA_DIR}/assets" "${DATA_DIR}/e3d" "${SURREAL_DATA_DIR%/*}"
 chmod 755 "${INSTALL_DIR}" "${INSTALL_DIR}/bin"
 
-# ── SurrealDB 2.1.x ─────────────────────────────────────────────────────────
+# ── SurrealDB：必须是 fork 的那条 2.1.4 ─────────────────────────────────────
+# 上游 2.1.4 不是替代品。2026-09-18 的彩排（run 35314163615）拿官方 2.1.4 试过：握手、
+# signin、use 全过，第一条 query（common.surql）发出去之后再没有回音，两边都不报错，
+# 最后是健康检查把服务判死的。客户端 SDK 是 gitee happydpc/surrealdb 那条线
+# （Cargo.lock rev 45013fc9），服务端就得是同一条线的构建——它自报的版本里带 rev 后缀。
+SURREAL_REQUIRE_REV="${SURREAL_REQUIRE_REV:-45013fc9}"
 have_surreal=""
 [ -x "$SURREAL_BIN" ] && have_surreal="$("$SURREAL_BIN" version 2>/dev/null || true)"
 case "$have_surreal" in
-  *2.1.*) log "SurrealDB 已就位：${have_surreal}" ;;
+  *"$SURREAL_REQUIRE_REV"*)
+    log "SurrealDB 已就位：${have_surreal}"
+    ;;
   *)
-    tgz="$(find "$BUNDLE_DIR" -maxdepth 1 -name 'surreal-*.tgz' -print -quit)"
-    [ -n "$tgz" ] || die "机器上没有 2.1.x 的 surreal（现有：${have_surreal:-无}），包里也没带 surreal-*.tgz"
-    log "从包里装 SurrealDB：$(basename "$tgz")"
-    tar -xzf "$tgz" -C /usr/local/bin surreal
-    chmod 755 /usr/local/bin/surreal
-    log "SurrealDB 版本：$(/usr/local/bin/surreal version)"
+    if [ -f "${BUNDLE_DIR}/surreal" ]; then
+      log "从包里装 SurrealDB（fork 构建）"
+      install -m 755 "${BUNDLE_DIR}/surreal" "$SURREAL_BIN"
+    else
+      tgz="$(find "$BUNDLE_DIR" -maxdepth 1 -name 'surreal-*.tgz' -print -quit)"
+      [ -n "$tgz" ] || die "包里既没有 surreal 二进制也没有 surreal-*.tgz（机器上现有：${have_surreal:-无}）"
+      log "从包里装 SurrealDB：$(basename "$tgz")"
+      tar -xzf "$tgz" -C "$(dirname "$SURREAL_BIN")" surreal
+      chmod 755 "$SURREAL_BIN"
+    fi
+    new_surreal="$("$SURREAL_BIN" version)"
+    log "SurrealDB 版本：${new_surreal}"
+    case "$new_surreal" in
+      *"$SURREAL_REQUIRE_REV"*) ;;
+      *) die "装上的是 ${new_surreal}，不是 fork 的那条（rev ${SURREAL_REQUIRE_REV}）——宁可现在停，也别留一台会在第一条 query 上无声挂住的库" ;;
+    esac
     ;;
 esac
 
@@ -190,7 +207,7 @@ wait_http "http://${SURREAL_BIND}/health" 60 "SurrealDB ${SURREAL_BIND}" \
 
 systemctl restart aios-database
 wait_http "http://127.0.0.1:${HTTP_PORT}/api/v1/health" "$HEALTH_TIMEOUT" "aios-database /api/v1/health" \
-  || { dump_service_failure aios-database; die "服务 ${HEALTH_TIMEOUT}s 内没起来"; }
+  || { dump_service_failure aios-database; dump_service_failure surrealdb; die "服务 ${HEALTH_TIMEOUT}s 内没起来"; }
 
 wait_http "http://127.0.0.1:${HTTP_PORT}/api/review/health" 30 "校审域 /api/review/health" \
   || { dump_service_failure aios-database; die "服务起来了但校审域不健康——先看启动横幅那句 review persistence"; }
