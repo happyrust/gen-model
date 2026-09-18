@@ -22,7 +22,7 @@ use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
-use parry3d::shape::{TriMesh, TriMeshFlags};
+use parry3d::shape::TriMesh;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1115,9 +1115,9 @@ impl PanelMeshes {
                         continue;
                     }
                 };
-                let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
+                let Some(tri_mesh) = crate::fast_model::room_predicate::panel_tri_mesh(
+                    &mesh,
                     (inst.world_trans * geo.transform).compute_matrix(),
-                    TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
                 ) else {
                     built
                         .failures

@@ -32,7 +32,7 @@ use aios_core::{GeomInstQuery, RefnoEnum};
 use anyhow::Context;
 use glam::Mat4;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
-use parry3d::shape::{TriMesh, TriMeshFlags};
+use parry3d::shape::TriMesh;
 use sha2::{Digest, Sha256};
 
 use crate::fast_model::room_model::{RoomPanelMap, RoomPanels, room_panel_map_from_groups};
@@ -198,6 +198,8 @@ impl MeshCache {
     }
 }
 
+/// 读 `{geo_hash}.mesh`，经 [`crate::fast_model::room_predicate::panel_tri_mesh`]（焊接、剔退化、乘世界矩阵）
+/// 建判定用三角网——面板三角网全仓只有那一处口径。
 pub(crate) fn build_tri_mesh(
     mesh_dir: &Path,
     geo_hash: &str,
@@ -206,11 +208,8 @@ pub(crate) fn build_tri_mesh(
     let file_path = mesh_dir.join(format!("{geo_hash}.mesh"));
     let mesh = PlantMesh::des_mesh_file(&file_path)
         .map_err(|error| format!("{}: {error}", file_path.display()))?;
-    mesh.get_tri_mesh_with_flag(
-        matrix,
-        TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
-    )
-    .ok_or_else(|| format!("{}: 三角网转换失败", file_path.display()))
+    crate::fast_model::room_predicate::panel_tri_mesh(&mesh, matrix)
+        .ok_or_else(|| format!("{}: 三角网转换失败", file_path.display()))
 }
 
 /// 一张世界坐标三角网占的字节（顶点 + 索引），`mesh_bytes` 指标的口径。

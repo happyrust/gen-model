@@ -1,5 +1,35 @@
 # 变更记录
 
+## 2026-09-18
+
+### 房间归属的点包含换成射线奇偶：parry `contains_point` 在退化盖面三角上把盒外点判成成员，且结论随浮点末位翻（ADR-010 §3 追记，一笔）
+
+- **为什么**：ams 1112 + 8000 从零初始化的 live 复核（`D:\adr078-verify\live-run-1112-8000\evidence\`）里，边集与 09-16 基线差
+  1112 −15/+5、8000 −14/+22，而两座库的构件行、六块面板行、`.mesh` 文件逐字相同、`room_predicate.rs` 两版零 diff——差的只能是谓词在
+  同一份几何上给了两个答案。拿库上真实行重放今天的谓词 + 独立 f64 射线奇偶复核：`17496/122987` 在 R320 足迹外 1.1 m（今天判 0/8 对、
+  09-16 判 8/8 错）；今天多出来的 `128587` / `129717`（R330）、`141798`（R311）、`106302`、`140998` 也全在房间外；两版都认的
+  `17496/72903 ∈ R320`（8/8）盒角 x = −1183 在面板世界盒 x_min = 0.03 之外。根因在 parry（gitee fork rev `06fd686`）
+  `point_triangle.rs`：点落在**零面积三角**（`va+vb+vc == 0`）的面 Voronoi 区时滑进给 2D 留的 `if solid { OnSolid, is_inside = true }`，
+  `point_composite_shape.rs` 的 best-first 访问器再 `if solid && is_inside { ExitEarly }`——房间棱柱的盖面是两百多个船体型线点的
+  三角剖分，共线处就有零面积碎片，哪些碎片经 f32 变换 / 焊接后恰好零面积决定了结论。本地盒内 2700 点网格对照：R330 假阳性
+  221/2700（8%）、R311 46、R320 盒内 0 但盒外中招；只焊接不剔退化不够（焊后 `122987` 又回 8/8）。
+- **改动**：`room_predicate::panel_tri_mesh`（面板 `.mesh` → 判定用三角网的唯一口径：顶点按 0.01 mm 焊接、剔顶点重合 / 三点共线的三角、
+  乘世界矩阵建 BVH，不带 `ORIENTED`），常驻 `room_resident::build_tri_mesh` 与库行 `PanelMeshes::from_rows` 都经它；
+  `room_predicate::point_inside_panel`（三条歪斜方向各数一次穿越、奇数为内、三取二；BVH 取候选、f64 Möller–Trumbore，行列式相对边长为零
+  不计），`count_vertices_inside` / `any_point_inside` 改调它。§3 口径（8 顶点 / 逐点兜底）与 `element_in_panel` 形状不变。
+- **验证**：`room_predicate` 8 条绿，新钉 3 条——`a_degenerate_cap_triangle_cannot_turn_an_outside_point_into_a_member`（盒 + 共线碎片 +
+  只差 1e-4 mm 的角点副本：剔成 12 片 / 焊成 8 点、盒外点仍在外）、`welding_keeps_first_seen_coordinates_and_drops_nothing_from_a_clean_box`、
+  **真网格** `a_real_room_prism_never_admits_points_outside_its_own_box`（夹具 `tests/fixtures/room_panel_24381_34950_R320.mesh` = R320 那块面板
+  68,772 B + 库上世界变换：`72903` / `122987` 两个盒 0/8、六个面外各 1 m 的探测点全在外、最大盖面三角重心落到半高在内；同一夹具走旧路
+  `ORIENTED | contains_point` 的假阳性也钉着，parry 修了先红）。定向 `cargo test --lib -- room_predicate room_model room_resident` 84 绿、
+  `room_reverse room_recompute batch_worker model_db_adapter::a_/recomputing` 106 绿。**live**（:9198 换新二进制 `POST /setup/restart`，
+  同一座 :8050 库 `POST model/rebuild`）：1112 6161 → **5858** 条（少 303 对 (构件, 面板)、110 对 `inside_count` 下调、**0 对新增**），
+  8000 4379 → **4284**（少 95 对、12 对下调）；少掉的集中在 R330（76 + 78）、R362、R342 / R343 / R345、R320；钉过的几个构件全部按预期
+  （`122987` 只剩 R346、`72903` 只剩 R101 / R144、`128587` / `129717` 只剩 R445、`141798` 只剩 R221）。同进程再重算与冷重启后重算
+  边 dump **逐字相同**（1112 `E7AC8737…` / 8000 `3A72E777…`）。重算耗时不变（8000 21 s、1112 12 s）。
+- **代价 / 要跟的**：① `inside_count` 数值口径变了（此前含伪法线误计）；② **存量 `room_relate` 不会自己重算**——常驻代号只摘要拓扑与面板几何、
+  不含谓词版本，要各 DESI 一次 `POST /dbnums/{dbnum}/model/rebuild`；③ 「横穿凹形房间的长管八角全在外」那条已知盲区照旧（本轮不改口径）。
+
 ## 2026-09-17
 
 ### 反向传播的跨库停放：命中的别的库排成根级工作项 `RoomRoots`，由那个库的下一个任务沿准入链消费（ADR-073 D13 追记 U3 b，五笔）
