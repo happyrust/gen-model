@@ -54,7 +54,7 @@
     从 -SourcePackage 取 aios-database.exe 与 web\（自动剔除冗余的 web\assets\meshes）。
 
 .PARAMETER ReuseWebFromZip
-    正常重建后端，但从一份既有、三腿冒烟全过的 -full zip 复用 web\。
+    正常重建后端，但从一份既有、三腿冒烟全过的 zip 复用 web\。
     适合后端单独发版，避免把 plant-ui 工作树中的未提交改动夹进同一版本号。
 
 .PARAMETER BuildId
@@ -715,62 +715,16 @@ Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buff
 Set-Content -LiteralPath (Join-Path $stage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
 
 # README
-$assetLayoutLine = if ($ExcludeMeshes) {
-    '- ``assets\`` —— 运行期资源目录；本包不含 ``assets\meshes``，网格由目标环境生成或另行提供'
-}
-else {
-    '- ``assets\`` —— 模型网格/字体等（``PLANT_ASSET_ROOT`` 指向它）'
-}
-$meshRuntimeNote = if (-not $IncludeWorkspace) {
-    '- **本包不含 workspace 与 meshes。** 三维网格从外部 workspace 读取，或由目标环境连接 E3D 项目后生成。'
-}
-elseif ($ExcludeMeshes) {
-    '- **本包不含 meshes。** 需要三维网格时，由目标环境连接 E3D 项目后生成，或另行放入 ``workspace\assets\meshes``。'
-}
-else {
-    '- 已生成模型的**三维可直接看**：树走文件、几何走 ``assets`` + accel 快照，不必等库。'
-}
-$startupInstruction = if ($IncludeWorkspace) {
-    '解压后双击 **Start-AMS.cmd**（或运行 Start-AMS.ps1）。服务就绪后自动打开 http://127.0.0.1:9099/ 。'
-}
-else {
-    '本包默认不带 workspace，由 ``Start-AMS.ps1`` 显式以 ``mem`` 启动：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在 DbOption.toml 里改。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、把配置里 v_ip:v_port 指过去，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
-}
-$rootSurrealLayoutLine = if ($IncludeWorkspace) {
-    ''
-}
-else {
-    '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切到 rocksdb 档、需要自己起一台库时使用'
-}
-$workspaceLayoutLines = if ($IncludeWorkspace) {
-@"
-- ``workspace\`` —— 运行所需依赖资源，Start-AMS 未传参时自动使用
-  - ``DbOption.toml`` / ``config\`` / ``resource\`` / ``search-index\`` / ``accel_tree_*.snapshot``
-  $assetLayoutLine
-  - ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；``Start-Surreal.ps1`` 起一台本地库（rocksdb 档要先起它，服务不拉库）
-"@
-}
-else {
-    '- 默认不含 ``workspace\``；索引、快照与 assets 由外部 workspace 提供'
-}
-$configLayoutLine = if ($IncludeWorkspace) {
-    '- ``workspace\DbOption.toml`` —— 附带 workspace 时唯一一份出厂配置'
-}
-else {
-    '- ``DbOption.toml`` —— 默认运行包唯一一份、不含本机路径的出厂配置'
-}
-$firstRunNote = if ($IncludeWorkspace) {
-    '本包附带的 workspace 使用出厂配置（``DbOption.toml`` + ``.first-run-pending``）；第一次启动会自动进入配置向导。'
-}
-else {
-    '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
-}
-$storeRuntimeNote = if ($IncludeWorkspace) {
-    '- **SurrealDB 数据与源模型不打入包。** 出厂由 ``Start-AMS.ps1`` 以 ``mem`` 启动（库在后端进程内，解压即跑，进程一退数据即清空）；介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在配置文件里、也不在向导里改（服务自身的默认档是 ``rocksdb``，包不靠它）。要数据活过重启：先跑 ``workspace\Start-Surreal.ps1`` 起一台 rocksdb 库（数据落 ``workspace\.surreal\``），在向导第②步把 v_ip:v_port 指过去并测试连接，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动——服务**只连**、不拉起。'
-}
-else {
-    '- **workspace 默认不打入包。** runtime 默认使用进程内 ``mem``；``bin\surreal.exe`` 留给切到 rocksdb 档时自己起库用。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
-}
+# 只剩 runtime 这一档（workspace 档随 -IncludeWorkspace / -ExcludeMeshes 于 2026-09-15 退役）。
+# 下面这几段以前是按档分叉的，而那两个开关删掉后变量再没被赋过值，分叉恒走 runtime 那一侧；
+# 留着只会让人以为还有第二档可走，索性摊平。
+$meshRuntimeNote = '- **本包不含 workspace 与 meshes。** 三维网格从外部 workspace 读取，或由目标环境连接 E3D 项目后生成。'
+$startupInstruction = '本包默认不带 workspace，由 ``Start-AMS.ps1`` 显式以 ``mem`` 启动：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在 DbOption.toml 里改。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、把配置里 v_ip:v_port 指过去，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
+$rootSurrealLayoutLine = '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切到 rocksdb 档、需要自己起一台库时使用'
+$workspaceLayoutLines = '- 默认不含 ``workspace\``；索引、快照与 assets 由外部 workspace 提供'
+$configLayoutLine = '- ``DbOption.toml`` —— 默认运行包唯一一份、不含本机路径的出厂配置'
+$firstRunNote = '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
+$storeRuntimeNote = '- **workspace 默认不打入包。** runtime 默认使用进程内 ``mem``；``bin\surreal.exe`` 留给切到 rocksdb 档时自己起库用。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
 $readme = @"
 # AMS 本地发布包（-$packageTier）：gen-model $BackendVersion + plant-ui $WebVersion（Web）
 
@@ -922,22 +876,22 @@ function Invoke-Smoke {
     if ($listener) {
         return [ordered]@{ status = 'skipped'; reason = "$SmokeHttpPort 被 PID $($listener.OwningProcess) 占用"; url = $smoke.url; store_mode = $SmokeStoreMode }
     }
-    # 冒烟工作区：workspace 档复制 workspace\；runtime 只复制根配置与存储启动资源。
-    # assets 用环境变量指回源。exe 以临时目录为 cwd，
-    # 跑出的日志/锁落在临时目录、不污染待打包的暂存目录。
+    # 这一腿考的是「本机真配置 + 包内程序」；没有打包机现场那份配置就没得考，
+    # 按「跳过」记账（脚本开头那句警告说的就是这一下），不要在读文件时炸掉整个出包。
+    $machineConfig = Join-Path $Workspace 'DbOption.toml'
+    if (-not (Test-Path -LiteralPath $machineConfig -PathType Leaf)) {
+        return [ordered]@{ status = 'skipped'; reason = "打包机现场配置不在：$machineConfig"; url = $smoke.url; store_mode = $SmokeStoreMode }
+    }
+    # 冒烟工作区：只复制根配置与存储启动资源（workspace 不进包）。assets 用环境变量指回源。
+    # exe 以临时目录为 cwd，跑出的日志/锁落在临时目录、不污染待打包的暂存目录。
     $smokeWs = Join-Path $env:TEMP ("ams-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
-    if ($IncludeWorkspace) {
-        Copy-Item -LiteralPath $wsStage -Destination $smokeWs -Recurse
-    }
-    else {
-        New-Item -ItemType Directory -Force $smokeWs | Out-Null
-        Copy-Item -LiteralPath (Join-Path $stage 'resource') -Destination (Join-Path $smokeWs 'resource') -Recurse
-        Copy-Item -LiteralPath (Join-Path $stage 'bin') -Destination (Join-Path $smokeWs 'bin') -Recurse
-    }
+    New-Item -ItemType Directory -Force $smokeWs | Out-Null
+    Copy-Item -LiteralPath (Join-Path $stage 'resource') -Destination (Join-Path $smokeWs 'resource') -Recurse
+    Copy-Item -LiteralPath (Join-Path $stage 'bin') -Destination (Join-Path $smokeWs 'bin') -Recurse
     # 全启动腿考的是「真配置 + 包内程序」：包里现在装的是出厂模板（设置模式形态），
     # 这一腿换回本机 workspace 的配置、摘掉首跑哨兵；出厂形态由 Invoke-SetupSmoke 那一腿考。
     $smokeConfigPath = Join-Path $smokeWs 'DbOption.toml'
-    $smokeConfig = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw
+    $smokeConfig = Get-Content -LiteralPath $machineConfig -Raw
     # 介质不写进配置（ADR-080）：由下面 $env:AIOS_STORE_MODE 递给服务，配置里只改地址。
     # 本机配置若还残留 store_mode 那一行，这里顺手拿掉——留着服务启动只会多一句「已不生效」。
     $smokeConfig = [regex]::Replace($smokeConfig, '(?m)^\s*store_mode\s*=.*\r?\n?', '')
@@ -1014,12 +968,7 @@ function Invoke-SetupSmoke {
     }
     $setupWs = Join-Path $env:TEMP ("ams-setup-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
     New-Item -ItemType Directory -Force $setupWs | Out-Null
-    $setupConfig = if ($IncludeWorkspace) {
-        Join-Path $wsStage 'DbOption.toml'
-    }
-    else {
-        Join-Path $stage 'DbOption.toml'
-    }
+    $setupConfig = Join-Path $stage 'DbOption.toml'
     $setupConfigText = Set-SmokeHttpPort (Get-Content -LiteralPath $setupConfig -Raw) $SmokeHttpPort
     [System.IO.File]::WriteAllText(
         (Join-Path $setupWs 'DbOption.toml'),
@@ -1066,7 +1015,7 @@ function Invoke-SetupSmoke {
     return $result
 }
 
-# 冒烟第三腿（ADR-074，取代 ADR-070 的「自带持久库」腿）：带 workspace 的包要能走通
+# 冒烟第三腿（ADR-074，取代 ADR-070 的「自带持久库」腿）：包要能走通
 # 「包内 surreal.exe 起一台 rocksdb 库 → 服务以 AIOS_STORE_MODE=rocksdb 连它」这条主路。
 # 脚本用暂存包里那只 surreal.exe 在 18010 起库（避开真 8010）、数据目录落在临时 workspace 的
 # .surreal\ 下，再让服务连过去：正常模式起来、/health 报 medium=rocksdb + durable=true、
@@ -1078,6 +1027,10 @@ function Invoke-RocksSmoke {
         $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($listener) { return [ordered]@{ status = 'skipped'; reason = "$port 被 PID $($listener.OwningProcess) 占用" } }
     }
+    $machineConfig = Join-Path $Workspace 'DbOption.toml'
+    if (-not (Test-Path -LiteralPath $machineConfig -PathType Leaf)) {
+        return [ordered]@{ status = 'skipped'; reason = "打包机现场配置不在：$machineConfig" }
+    }
     # 与 B 腿同底：整份包 workspace 拷过去（resource\surreal 的 surql、bin\surreal 都要在），
     # 再换配置——本机真配置把端口指到脚本起的 18010，摘掉首跑哨兵；介质由环境变量
     # AIOS_STORE_MODE=rocksdb 递给服务（ADR-080），不写进配置。
@@ -1085,7 +1038,7 @@ function Invoke-RocksSmoke {
     Copy-Item -LiteralPath $stage -Destination $rocksWs -Recurse
     Remove-Item -LiteralPath (Join-Path $rocksWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
     $rocksData = Join-Path $rocksWs '.surreal\smoke'
-    $cfg = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw
+    $cfg = Get-Content -LiteralPath $machineConfig -Raw
     $surrealProc = $null
     try {
         $surrealProc = Start-SmokeSurreal (Join-Path $rocksWs 'bin\surreal.exe') $rocksSmokeStorePort $rocksData `
@@ -1170,20 +1123,18 @@ else {
             Write-Warn2 "冒烟未过：$($smoke.reason)（看 $stage\smoke-logs）"
         }
     }
-    if ($IncludeWorkspace) {
-        Write-Step "冒烟门 C：包内 surreal 起 rocksdb 库 + 服务连它（rocksdb@$rocksSmokeStorePort，超时 ${SmokeTimeoutSeconds}s）"
-        $rocksSmoke = Invoke-RocksSmoke
-        switch ($rocksSmoke.status) {
-            'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }
-            'skipped' { Write-Warn2 "持久库腿跳过：$($rocksSmoke.reason)" }
-            default { Write-Warn2 "持久库腿未过：$($rocksSmoke.reason)（看 $stage\smoke-logs\rocks-smoke.*.log）" }
-        }
-    }
-    else {
-        $rocksSmoke = [ordered]@{ status = 'skipped'; reason = 'runtime tier does not bundle a workspace' }
+    # 这一腿以前挂在「包里带不带 workspace」上，而那个档 2026-09-15 就退役了——于是它从那天起
+    # 一次都没真跑过，release.json 里永远是 skipped，谁也没发现。它其实不需要包里带 workspace：
+    # 库由包内 surreal.exe 现起，配置取打包机现场那份，两样都在包外。
+    Write-Step "冒烟门 C：包内 surreal 起 rocksdb 库 + 服务连它（rocksdb@$rocksSmokeStorePort，超时 ${SmokeTimeoutSeconds}s）"
+    $rocksSmoke = Invoke-RocksSmoke
+    switch ($rocksSmoke.status) {
+        'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }
+        'skipped' { Write-Warn2 "持久库腿跳过：$($rocksSmoke.reason)" }
+        default { Write-Warn2 "持久库腿未过：$($rocksSmoke.reason)（看 $stage\smoke-logs\rocks-smoke.*.log）" }
     }
     $legFailed = ($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed') -or
-        ($IncludeWorkspace -and $rocksSmoke.status -eq 'failed')
+        ($rocksSmoke.status -eq 'failed')
     if ($StrictSmoke -and $legFailed) {
         throw "冒烟未过且 -StrictSmoke，中止、不出包。（A=$($setupSmoke.status) / B=$($smoke.status) / C=$($rocksSmoke.status)）"
     }
@@ -1194,7 +1145,7 @@ else {
 $smoke.setup_leg = $setupSmoke
 $smoke.rocks_leg = $rocksSmoke
 $smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed') -and
-    ((-not $IncludeWorkspace) -or ($rocksSmoke.status -eq 'passed')))
+    ($rocksSmoke.status -eq 'passed'))
 
 # ── 6. 组 zip + sha256 清单（assets 从源直灌，省磁盘） ───────────────────────
 $free = (Get-PSDrive (Split-Path $OutDir -Qualifier).TrimEnd(':')).Free
@@ -1224,36 +1175,8 @@ try {
         $h = Get-Sha256Compat $_.FullName
         [void]$files.Add([ordered]@{ path = $entry; sha256 = $h; bytes = $_.Length })
     }
-    # 6b. assets 从源直灌到 workspace/assets/*（不进暂存、不逐一 hash，按目录汇总）
-    $assetSrc = Join-Path $Workspace 'assets'
-    if ($IncludeWorkspace -and (Test-Path -LiteralPath $assetSrc)) {
-        $aBytes = [long]0; $aFiles = 0
-        $meshSkippedBytes = [long]0; $meshSkippedFiles = 0
-        Get-ChildItem -LiteralPath $assetSrc -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($assetSrc.Length + 1)
-            if ($ExcludeMeshes -and $rel -match '^(?i:meshes)[\\/]') {
-                $meshSkippedBytes += $_.Length
-                $meshSkippedFiles++
-                return
-            }
-            $entry = 'workspace/assets/' + ($rel -replace '\\', '/')
-            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entry, $cl) | Out-Null
-            $aBytes += $_.Length; $aFiles++
-        }
-        [void]$resources.Add([ordered]@{
-            path = 'workspace/assets'
-            bytes = $aBytes
-            files = $aFiles
-            meshes_excluded = [bool]$ExcludeMeshes
-            excluded_mesh_bytes = $meshSkippedBytes
-            excluded_mesh_files = $meshSkippedFiles
-        })
-        Write-Step ("assets 已灌入：{0} 个文件 / {1:N1} MB" -f $aFiles, ($aBytes / 1MB))
-        if ($ExcludeMeshes) {
-            Write-Step ("meshes 已排除：{0} 个文件 / {1:N1} MB" -f $meshSkippedFiles, ($meshSkippedBytes / 1MB))
-        }
-    }
-    elseif ($IncludeWorkspace) { Write-Warn2 "源 assets 不存在：$assetSrc（包内无 assets）" }
+    # 6b. 打包机现场的 assets 一个字节都不进包（2026-09-15 起只剩 runtime 这一档）：
+    # 运行期资源由目标环境自己提供，-Workspace / AMS_WORKSPACE 指过去。
 
     # 6c. release.json（不含自身 hash；zip 整体 sha 另写到 sibling）
     $backendFile = @($files | Where-Object { $_.path -eq 'aios-database.exe' })
@@ -1261,8 +1184,8 @@ try {
     $manifest = [ordered]@{
         name             = $Name
         tier             = $packageTier
-        workspace_included = [bool]$IncludeWorkspace
-        meshes_included  = [bool]$IncludeWorkspace -and -not [bool]$ExcludeMeshes
+        workspace_included = $false
+        meshes_included  = $false
         backend_version  = $BackendVersion
         backend_build_id = $backendBuildInfo.build_id
         backend_build_epoch = $backendBuildInfo.build_epoch

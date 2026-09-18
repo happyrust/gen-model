@@ -31,7 +31,8 @@
   ——此前只钉了页面读哪几格、没钉服务端发哪几格，改个名两条都不红而页面拿到 `undefined`（**已按负例验过**：
   把 `store_mode_source` 改名即红）。`New-LocalRelease.ps1`、内嵌的 `Start-AMS.ps1`（96 行）、`Start-Surreal8009.ps1` 通过
   PowerShell 语法解析，`strt_plant_ui_runtime.py` 通过 `py_compile`，`deploy/linux/install_backend.sh` 通过 `bash -n`、
-  渲染出的 TOML 解析通过且不含 `store_mode`。**未验**：发布包冒烟三腿。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了。）
+  渲染出的 TOML 解析通过且不含 `store_mode`。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了；
+  发布包冒烟三腿在下面第三条里真跑过了。）
 
 ### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-080 D6）
 
@@ -55,7 +56,31 @@
   启动前设 `AIOS_STORE_MODE=mem`」；③`project_path` 有效 + 地址上没库 → `SurrealDB 连接失败（ws://…）` exit 1（这就是新默认
   要的那种当场报错）。`Start-AMS.ps1` 的回填三个分支逐个实跑：不给且环境空 → `mem`；不给但环境已有 `rocksdb` → 沿用；
   给 `-StoreMode rocksdb` → `rocksdb`。向导第②步用 playwright 走真人路径截了图：介质栏显示「由 默认 rocksdb（…）决定」、
-  地址两格与「测试连接」可用、橙色提醒点名文件里那句 `store_mode = "mem"` 已不生效。**未验**：发布包冒烟三腿。
+  地址两格与「测试连接」可用、橙色提醒点名文件里那句 `store_mode = "mem"` 已不生效。发布包冒烟三腿见下一条。
+
+### 同日收尾：发布包冒烟三腿真跑了一遍——顺手发现 C 腿自 2026-09-15 起一次都没执行过
+
+- **为什么**：ADR-080 那两条改的正是发布包这条路（`Start-AMS.ps1` 回填 `mem`、冒烟各腿只递环境变量），
+  唯独「三腿真跑一遍」一直挂着未验。真跑之前先读了一遍冒烟门，发现 C 腿（包内 `surreal.exe` 起一台 rocksdb 库、
+  服务以 `AIOS_STORE_MODE=rocksdb` 连它）挂在 `if ($IncludeWorkspace)` 上，而那个开关 **2026-09-15 随 workspace 档一起删了**——
+  变量再没被赋过值，判断恒假。后果不是报错而是静默：从那天起每份 `release.json` 里 `rocks_leg` 都是
+  `skipped: runtime tier does not bundle a workspace`，而 `$smoked` 里 C 腿那一格写着「不带 workspace 就不算数」，
+  于是只过 A / B 两腿的包照样被判为「已冒烟」。连带 `-ReuseWebFromZip` 也一起死了：它要求来源包三腿全过，
+  而 09-15 之后出的包没有一个满足得了——0.1.28 那两版只能回头去引 0.1.26。
+- **改动**：C 腿改为总是执行，前置条件换成真实的那两条（端口 `9099`/`18010` 空闲、打包机现场那份 `DbOption.toml` 在）——
+  它本来就不需要包里带 workspace：库由包内 `surreal.exe` 现起，配置取打包机现场那份，两样都在包外。B 腿补同一道前置
+  （此前现场目录缺失时是读文件炸掉整个出包，与脚本开头那句「两腿会因此跳过」的警告对不上）。`$smoked` / `$legFailed`
+  纳入 C 腿。README / CHANGELOG 生成处那 7 段按 `$IncludeWorkspace` 分叉的文案、以及把 `workspace\assets` 直灌进 zip 的
+  6b 段一并删掉（同样恒走 runtime 那一侧）；`release.json` 的 `workspace_included` / `meshes_included` 落为字面 `false`。
+- **验证**：`New-LocalRelease.ps1` 整跑一次（`-ReuseWebFromZip` 引 0.1.26 那份、`-SmokeHttpPort 9499`），
+  **三腿全过**：A 出厂配置起服务 = 设置模式 + 向导页；B 本机配置全启动 = health 200 + 首页含 `plant_ui_app.js` +
+  `medium=mem` + `durable=false` + 服务没拉 surreal 子进程；**C = 包内 `surreal.exe` 2.1.4 起库 + 服务连上 +
+  `medium=rocksdb` + `durable=true` + 数据目录真落了 7 个文件**。**按负例验过**：把 18010 占上再跑，C 报
+  `skipped: 18010 被 PID … 占用`，产物随即被标『未冒烟』——改之前同样的局面是 C 一声不吭、包照样算冒烟过。
+- **当前交付件**：`ams-local-0.1.28_release.20260918113752.g5d528b5a5379.dirty-runtime.zip`
+  （120.96 MB / 126,834,258 B），SHA-256 `90649b8cc962c518cc0ac56d5d629064154125286b3dc5304f8679b76fb5c447`
+  （另行独立重算一致），构建自 `5d528b5a5379`（工作树带着别的会话的在途改动，故 `.dirty`），包内 78 个文件，
+  Web 仍复用 0.1.26 那份已验证包（plant-ui `0.1.11`）。
 
 ### 0.1.28 第三版包：带上重启台账与 `Start-AMS` 两条修复；上一版同号包已删
 
