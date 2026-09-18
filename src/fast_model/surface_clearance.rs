@@ -1387,6 +1387,76 @@ mod tests {
         TriMesh::with_flags(verts, idx, TriMeshFlags::empty())
     }
 
+    /// 直墙盒 `[min, max]` 沿 X（厚度方向）开一个矩形通孔 `y ∈ hole_y, z ∈ hole_z`——手搭的「布尔后」
+    /// 墙网格：外皮 8 点 + 两张开孔面上各 4 个孔角；±Y / ±Z 外面各 2 三角，−X / +X 开孔面各按
+    /// 「外角连最近孔角」切成四条梯形 8 三角，四片洞壁各 2 三角，共 32 三角。法向一律朝实体外
+    /// （洞壁的外法向朝洞里）。
+    fn box_with_hole_mesh(
+        min: [f32; 3],
+        max: [f32; 3],
+        hole_y: [f32; 2],
+        hole_z: [f32; 2],
+    ) -> TriMesh {
+        let (x0, x1) = (min[0], max[0]);
+        let (y0, y1) = (min[1], max[1]);
+        let (z0, z1) = (min[2], max[2]);
+        let (hy0, hy1) = (hole_y[0], hole_y[1]);
+        let (hz0, hz1) = (hole_z[0], hole_z[1]);
+        assert!(y0 < hy0 && hy0 < hy1 && hy1 < y1 && z0 < hz0 && hz0 < hz1 && hz1 < z1);
+        let verts = vec![
+            // 0–7：外皮，与 box_mesh 同序。
+            Point::new(x0, y0, z0),
+            Point::new(x1, y0, z0),
+            Point::new(x1, y1, z0),
+            Point::new(x0, y1, z0),
+            Point::new(x0, y0, z1),
+            Point::new(x1, y0, z1),
+            Point::new(x1, y1, z1),
+            Point::new(x0, y1, z1),
+            // 8–11：−X 面上的孔角（y 小 z 小、y 大 z 小、y 大 z 大、y 小 z 大）。
+            Point::new(x0, hy0, hz0),
+            Point::new(x0, hy1, hz0),
+            Point::new(x0, hy1, hz1),
+            Point::new(x0, hy0, hz1),
+            // 12–15：+X 面上的孔角，同序。
+            Point::new(x1, hy0, hz0),
+            Point::new(x1, hy1, hz0),
+            Point::new(x1, hy1, hz1),
+            Point::new(x1, hy0, hz1),
+        ];
+        // −Z / +Z / −Y / +Y 四个没开孔的外面，与 box_mesh 相同。
+        let mut idx: Vec<[u32; 3]> = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 3, 7],
+            [2, 7, 6],
+        ];
+        let mut quad = |a: u32, b: u32, c: u32, d: u32| {
+            idx.push([a, b, c]);
+            idx.push([a, c, d]);
+        };
+        // −X 开孔面（法向 −X）：孔下 / 孔上 / y 小侧 / y 大侧四条梯形。
+        quad(0, 8, 9, 3);
+        quad(4, 7, 10, 11);
+        quad(0, 4, 11, 8);
+        quad(3, 9, 10, 7);
+        // +X 开孔面（法向 +X）：同四条，绕向反过来。
+        quad(1, 2, 13, 12);
+        quad(5, 15, 14, 6);
+        quad(1, 12, 15, 5);
+        quad(2, 6, 14, 13);
+        // 四片洞壁，外法向朝洞里：洞底 +Z、洞顶 −Z、y 小侧 +Y、y 大侧 −Y。
+        quad(8, 12, 13, 9);
+        quad(11, 10, 14, 15);
+        quad(8, 11, 15, 12);
+        quad(9, 13, 14, 10);
+        TriMesh::with_flags(verts, idx, TriMeshFlags::empty())
+    }
+
     fn opts() -> SurfaceClearanceOptions {
         SurfaceClearanceOptions {
             perpendicular: true,
@@ -1613,6 +1683,68 @@ mod tests {
         assert!(approx(hit.distance, 400.0, 1e-3));
         assert_eq!(hit.target_face.expect("face").kind, FaceKind::Top);
         assert!(hit.perpendicular.is_none());
+    }
+
+    /// 09-17 计划 §7 表的 G6：带洞墙、构件在洞里 → 报到洞壁的距离，不是未开洞墙的 0。
+    /// （上面那条 `g6_beyond_max_distance_gives_no_hit` 测的是 `max_distance` 剪枝，与计划表的
+    /// G6 编号不对应；计划 G6 的几何用例是这一条。）
+    /// 墙 = 200 厚直墙沿厚度方向开 400 × 400 方孔；管 = 穿过孔的盒，离 y 小侧洞壁 50 mm、
+    /// 离 y 大侧 100 mm、上下各 80 mm。对照：同一根管对没开孔的同尺寸墙就是 G4（0 + intersects）。
+    #[test]
+    fn g6_component_in_wall_hole_measures_to_hole_wall_not_zero() {
+        let (hole_y, hole_z) = ([2000.0, 2400.0], [1000.0, 1400.0]);
+        let wall_with_hole = leaf(
+            "1/1",
+            "STWALL",
+            box_with_hole_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0], hole_y, hole_z),
+        );
+        assert_eq!(wall_with_hole.triangle_count(), 32);
+        let pipe = || {
+            leaf(
+                "2/2",
+                "FTUB",
+                box_mesh([-500.0, 2050.0, 1080.0], [700.0, 2300.0, 1320.0]),
+            )
+        };
+
+        let out = surface_clearance(&[pipe()], &[wall_with_hole], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "洞里的管不该报穿墙：{hit:?}");
+        assert_eq!(hit.witness, "closest-points");
+        assert!(approx(hit.distance, 50.0, 1e-2), "distance {}", hit.distance);
+        // 最近点对：墙侧在 y = 2000 那片洞壁上（x 在墙厚内、z 在孔高内），管侧在管的 y = 2050 面上。
+        assert!(
+            approx(hit.target_point.y, hole_y[0], 1e-2),
+            "target {:?}",
+            hit.target_point
+        );
+        assert!(
+            hit.target_point.x >= -1e-2
+                && hit.target_point.x <= 200.0 + 1e-2
+                && hit.target_point.z >= hole_z[0] - 1e-2
+                && hit.target_point.z <= hole_z[1] + 1e-2,
+            "target point must lie on the hole wall: {:?}",
+            hit.target_point
+        );
+        assert!(
+            approx(hit.source_point.y, 2050.0, 1e-2),
+            "source {:?}",
+            hit.source_point
+        );
+        assert!(hit.target_face.is_some());
+        assert_eq!((out.stats.total, out.stats.evaluated), (1, 1));
+
+        // 对照：没开孔的同一堵墙，同一根管就是 G4。
+        let solid_wall = leaf(
+            "1/1",
+            "STWALL",
+            box_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0]),
+        );
+        let out = surface_clearance(&[pipe()], &[solid_wall], opts());
+        let hit = out.hit.expect("hit");
+        assert_eq!(hit.distance, 0.0);
+        assert!(hit.intersects, "{hit:?}");
+        assert_eq!(hit.witness, "aabb-overlap-center");
     }
 
     #[test]
