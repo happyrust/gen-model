@@ -348,6 +348,37 @@
 
 ## 2026-09-18
 
+### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-080）
+
+- **为什么**：介质此前由三层叠加决定（环境变量 `AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 旧开关
+  `in_memory_db` / `AIOS_IN_MEMORY_DB`）。今天现场真踩了：文件写着 `store_mode = "rocksdb"`，上一条命令残留在会话里的
+  `AIOS_STORE_MODE=mem` 把它压成内存库——服务照常起、模型照常对、属性行一直不进库（mem 派生 read-through），日志一个字
+  没提。先补了「环境变量压过配置要出声」与横幅上的「谁定的」，用户随后拍板去根：**只允许环境变量控制**。介质是
+  「这一次进程怎么起」的事，跟启动命令走；配置文件描述「这个工程长什么样」，不该替进程挑介质。
+- **改动**：`options::store_mode()` 只读 `AIOS_STORE_MODE`（`mem` / `rocksdb`，不设 = `mem`，退役别名照认），
+  `effective_store_mode(env)` 签名里没有配置那一格；`store_mode_notice` → `store_mode_notices()`，文件里残留的
+  `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB` 逐条点名（文件说 X、实际跑 Y 时并排念出来并给出
+  `AIOS_STORE_MODE=X`），`run_cli` 逐条打印；`in_memory_db()` 删除；`store_mode_source` 只剩「环境变量 / 默认」两种答案。
+  向导第②步不再有两个 radio：只展示生效介质与出处（`GET /api/v1/setup/config` 的 `effective` 多出 `store_mode_source` /
+  `store_mode_env` / `store_mode_env_value` / `stale_config_store_mode`），文件里残留过期键时提醒删掉；`PUT` 收下 `store_mode`
+  但不写盘、不校验；`ensure_completion_ready` 以 `options::store_mode()` 为准。校审拒绝启用的三处文案改法指到
+  `AIOS_STORE_MODE=rocksdb`。仓内 16 份 `DbOption*.toml`（含仓根与出厂模板）把 `store_mode = ...` 换成退役注释并记下原值；
+  护栏从「每份必须声明」反转为 `no_db_option_fixture_still_carries_a_store_mode_key`。`New-LocalRelease.ps1` 生成的
+  `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`，冒烟 B / C 腿不再往临时配置写 `store_mode`、只递环境变量；
+  `Start-Surreal8009.ps1` / `strt_plant_ui_runtime.py` / `e3d_persist_smoke` 改口。Linux 部署脚本（`deploy/linux/`）
+  `aios-database` 单元加 `Environment=AIOS_STORE_MODE=rocksdb`、渲染不再写 `store_mode`（现役 0.1.27 也认这个环境变量）。
+- **对现场的影响**：只靠文件写 `rocksdb` 起服务的手工习惯要改成带 `$env:AIOS_STORE_MODE='rocksdb'`
+  （仓内 `Start-AiosDatabaseManual.ps1` / `Run-*.ps1` / `Verify-RocksDb8000.ps1` / `l3_suite` 本来就带，不必改）；不带的话
+  服务按 `mem` 起来，启动日志会整行点名文件里那句 `rocksdb` 已不生效并给出该设的值。发布包要持久库：先起库、向导填地址、
+  再 `Start-AMS.ps1 -StoreMode rocksdb`。
+- **验证**：`cargo check --lib --tests` 零错；`cargo test --lib options::tests` 73 绿、`web_service::setup::tests` 22 绿、
+  `web_service::review::db` 8 绿，`cargo test --lib store` 95 绿 0 红（含护栏 `no_db_option_fixture_still_carries_a_store_mode_key`
+  真扫过 16 份 `DbOption*.toml`）。另补一条服务端侧的钉：`the_config_endpoint_reports_the_effective_store_mode_and_names_a_stale_key`
+  ——此前只钉了页面读哪几格、没钉服务端发哪几格，改个名两条都不红而页面拿到 `undefined`（**已按负例验过**：
+  把 `store_mode_source` 改名即红）。`New-LocalRelease.ps1`、内嵌的 `Start-AMS.ps1`（96 行）、`Start-Surreal8009.ps1` 通过
+  PowerShell 语法解析，`strt_plant_ui_runtime.py` 通过 `py_compile`，`deploy/linux/install_backend.sh` 通过 `bash -n`、
+  渲染出的 TOML 解析通过且不含 `store_mode`。**未验**：真机起服务看横幅与 `/setup.html` 第②步的实际渲染；发布包冒烟三腿。
+
 ### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
 
 - 用户 21:4x：「一个节点的版本管理，要能够查看它属性的版本历史，以及模型的版本历史……」，grill 两轮拍板（共享决策 d-203）：

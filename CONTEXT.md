@@ -702,7 +702,7 @@ _Avoid_: 重盖章（泛指时）、迁移 epoch、队列重建（那是周期�
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=mem`：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、再把配置切到 `rocksdb`（服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再在向导改选 `rocksdb`；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认介质 `mem`：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、在向导填好 `v_ip:v_port`、再以 `Start-AMS.ps1 -StoreMode rocksdb` 启动（介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置里改，ADR-080；服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再以 `-StoreMode rocksdb` 起服务；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -714,7 +714,7 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（默认 `mem`，`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（默认 `mem`，`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `AIOS_STORE_MODE=rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。三腿的介质都以环境变量递给服务，不往临时配置里写 `store_mode`（ADR-080）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
 
@@ -732,13 +732,13 @@ _Avoid_: 监听地址、绑定地址、反向代理监听
 
 # 配置向导 (Setup Wizard)
 
-exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（两档：`mem` 内存库不用地址 / `rocksdb` 连已有库带连通 + 版本硬闸）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
+exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（**只展示**生效介质与出处——介质由环境变量 `AIOS_STORE_MODE` 决定、不在向导里选，ADR-080；`rocksdb` 档下填地址并过连通 + 版本硬闸，`mem` 不用地址；文件里残留过期 `store_mode` 时提醒删掉）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`；唯一例外是介质，它的真值在启动命令的环境里）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
 
 _Avoid_: 安装向导（没有安装动作）、配置中心 / 配置页（真值在文件，不在服务里）、首跑向导（向导也服务于日常改配置）。
 
 # 设置模式 (Setup Mode)
 
-启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或 `store_mode=rocksdb` 而 `v_ip` 空 / `v_port=0`；`mem` 不看地址）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；库地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
+启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或介质为 `rocksdb`（由环境变量 `AIOS_STORE_MODE` 决定）而 `v_ip` 空 / `v_port=0`；`mem` 不看地址）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；库地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
 
 _Avoid_: 安全模式 / 降级模式（正常启动链的失败语义没改）、维护模式（没有这一档）。
 
@@ -750,13 +750,13 @@ _Avoid_: 锁文件（不互斥任何东西）、初始化标记（初始化完�
 
 # 存储形态 (Store Mode)
 
-`DbOption.toml` 的 `store_mode`，**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。默认 `mem`。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：仍认，但启动时大声告警说清换成了什么；向导只写新名。
+持久层的介质，**只由环境变量 `AIOS_STORE_MODE` 决定**（ADR-080，2026-09-18；`DbOption.toml` 的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB` 不再参与，写了只会在启动时被整行点名），**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。不设 = `mem`。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：写在环境变量里仍认，但启动时大声告警说清换成了什么。介质是「这一次进程怎么起」的事，跟启动命令走（`Start-AMS.ps1 -StoreMode` / systemd `Environment=` / `$env:`）；配置文件描述「这个工程长什么样」，`v_ip:v_port` 留在文件里是「rocksdb 档连哪儿」，不是「要不要 rocksdb」。仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写这一行。
 
-_Avoid_: 自带持久库 / 自带存储 / spawned-*（服务不再拉库，那一套署名 / 心跳 / 四格裁决 / 孤儿回收随 `store_process.rs` 整个删除）、external（已更名 rocksdb）、embedded-mem / kv-mem（已更名 mem）、创建数据库实例（没有这个动作，库由人起、服务只连）。
+_Avoid_: `DbOption.toml` 里的 `store_mode`（2026-09-18 起不生效）、向导第②步改选（向导只展示）、自带持久库 / 自带存储 / spawned-*（服务不再拉库，那一套署名 / 心跳 / 四格裁决 / 孤儿回收随 `store_process.rs` 整个删除）、external（已更名 rocksdb）、embedded-mem / kv-mem（已更名 mem）、创建数据库实例（没有这个动作，库由人起、服务只连）。
 
 # 引导子集 (Guided Subset)
 
-配置向导管的那部分 `DbOption.toml` 键：`project_path` / `project_search_paths`（ADR-078，取代退役的 `included_projects`；向导第①步改成「搜索根 + 主项目 + MDB → 看闭包」，`POST /api/v1/setup/probe/mdb`） / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
+配置向导管的那部分 `DbOption.toml` 键：`project_path` / `project_search_paths`（ADR-078，取代退役的 `included_projects`；向导第①步改成「搜索根 + 主项目 + MDB → 看闭包」，`POST /api/v1/setup/probe/mdb`） / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。`store_mode` 已不在其内（ADR-080：介质由环境变量决定；`PUT` 仍收下这一格但不写盘，与 `included_projects` 同一处理）。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
 
 _Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。
 
@@ -770,7 +770,7 @@ _Avoid_: 审核 / 审批（那是校审流程里的节点动作，不是这个�
 
 # 持久化闸 (Review Persistence Gate)
 
-校审域挂路由之前对**落点**的一次裁决（`src/web_service/review/db.rs::review_persistence`，ADR-075 × ADR-074，d-398）。判据只有一条 `StoreMode::is_durable()`——全仓「这一档活不活得过重启」的唯一出处，校审不另立标准，否则会与 `/health.sul_db.durable` 讲两套话。`rocksdb` → 挂业务路由；`mem`（出厂默认，d-368）且未放行 → 四个前缀整体换成拒绝路由：任意路径、任意方法一律 **503** + `code=review.persistence.refused`（不是 404——404 分不清「没移植」和「配置不让跑」），启动打多行横幅点名介质、四个前缀、原因与改法；`fresh_review_db()` 同样先过闸再取句柄。三处文案（横幅 / 503 正文 / Err）共用同一份事实 `ReviewPersistenceRefusal`。闸在单测里照常活着（d-410）：`platform::tests` 的 `mem://` 夹具用 `cfg(test)` 进程级开关 `TEST_ALLOW_EPHEMERAL_STORE` 显式声明「知道会丢」，不许用 `#[cfg(not(test))]` 把闸编掉。生产启用校审的路径是先起持久 SurrealDB（`scripts/Start-Surreal8009.ps1`）、再把 `store_mode` 改成 `rocksdb`。
+校审域挂路由之前对**落点**的一次裁决（`src/web_service/review/db.rs::review_persistence`，ADR-075 × ADR-074，d-398）。判据只有一条 `StoreMode::is_durable()`——全仓「这一档活不活得过重启」的唯一出处，校审不另立标准，否则会与 `/health.sul_db.durable` 讲两套话。`rocksdb` → 挂业务路由；`mem`（出厂默认，d-368）且未放行 → 四个前缀整体换成拒绝路由：任意路径、任意方法一律 **503** + `code=review.persistence.refused`（不是 404——404 分不清「没移植」和「配置不让跑」），启动打多行横幅点名介质、四个前缀、原因与改法；`fresh_review_db()` 同样先过闸再取句柄。三处文案（横幅 / 503 正文 / Err）共用同一份事实 `ReviewPersistenceRefusal`。闸在单测里照常活着（d-410）：`platform::tests` 的 `mem://` 夹具用 `cfg(test)` 进程级开关 `TEST_ALLOW_EPHEMERAL_STORE` 显式声明「知道会丢」，不许用 `#[cfg(not(test))]` 把闸编掉。生产启用校审的路径是先起持久 SurrealDB（`scripts/Start-Surreal8009.ps1`）、把 `v_ip:v_port` 指过去、再以 `AIOS_STORE_MODE=rocksdb` 重启服务（介质只认这个环境变量，ADR-080）。
 
 _Avoid_: 校审开关 / 功能开关（它不是配置项，是介质派生的裁决）、降级 / 只读模式（拒绝就是整域 503，没有半开档）、`mem` 下静默放行（那是判据 A9 要禁的一行告警式失效）。
 
