@@ -367,24 +367,18 @@ pub fn surface_clearance(
     };
 
     let target_leaf = &target[hit.target_leaf];
-    let (face, face_interior) =
-        classify_target_face(target_leaf, hit.target_point, hit.source_point);
-    if opts.perpendicular && face.kind.is_main_face() {
-        match perpendicular_ray(
-            &target_leaf.mesh,
-            hit.source_point,
-            face.normal,
-            hit.distance,
-            face_interior,
-        ) {
-            Some(perpendicular) => hit.perpendicular = Some(perpendicular),
-            None => warnings.push(
-                "perpendicular_ray_missed: 源侧最近点沿墙面法向的射线没有落回墙面，最近点在墙的棱 / 角上，垂距置空"
-                    .to_string(),
-            ),
-        }
-    }
+    let (face, perpendicular, warning) = resolve_target_face(
+        target_leaf,
+        hit.target_point,
+        hit.source_point,
+        hit.distance,
+        opts.perpendicular,
+    );
+    hit.perpendicular = perpendicular;
     hit.target_face = Some(face);
+    if let Some(warning) = warning {
+        warnings.push(warning.to_string());
+    }
 
     ClearanceOutcome {
         hit: Some(hit),
@@ -398,13 +392,14 @@ fn unit_or_none(v: Vector<Real>) -> Option<Vector<Real>> {
     (n > 1e-9).then(|| v / n)
 }
 
-/// 命中点 q 所在的三角。最近点落在棱 / 角上时 parry 只报其中一片，这里在所有到 q 距离 ≤ eps 的三角里
-/// 挑法向最贴合「指向源侧」方向的那片——洞壁与开孔面共棱时选洞壁而不是外皮，墙角处选正对构件的那面。
-fn hit_triangle(
+/// 命中点 q 所在的三角，按「法向与指向源侧方向的贴合度」降序。最近点落在棱 / 角上时 parry 只报其中一片，
+/// 这里把所有到 q 距离 ≤ eps 的三角都列出来，第一片就是最贴合的——洞壁与开孔面共棱时先选洞壁而不是外皮，
+/// 墙角处先选正对构件的那面；后面几片留给垂距落空时换面读（见 `resolve_target_face`）。
+fn hit_candidates(
     mesh: &TriMesh,
     q: Point<Real>,
     toward_source: Option<Vector<Real>>,
-) -> Option<Triangle> {
+) -> Vec<Triangle> {
     let (_, feature) = mesh.project_local_point_and_get_feature(&q);
     let primary = match feature {
         FeatureId::Face(index) if (index as usize) < mesh.num_triangles() => {
@@ -413,21 +408,63 @@ fn hit_triangle(
         _ => None,
     };
     let Some(dir) = toward_source else {
-        return primary;
+        return primary.into_iter().collect();
     };
     let eps = (mesh.local_aabb().extents().norm() * 1e-6).max(1e-3);
-    let mut best: Option<(f32, Triangle)> = None;
-    for tri in mesh.triangles() {
-        if (tri.project_local_point(&q, false).point - q).norm() > eps {
-            continue;
+    let mut scored: Vec<(f32, Triangle)> = mesh
+        .triangles()
+        .filter(|tri| (tri.project_local_point(&q, false).point - q).norm() <= eps)
+        .filter_map(|tri| tri.normal().map(|n| (n.dot(&dir).abs(), tri)))
+        .collect();
+    if scored.is_empty() {
+        return primary.into_iter().collect();
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(_, tri)| tri).collect()
+}
+
+const PERPENDICULAR_RAY_MISSED: &str =
+    "perpendicular_ray_missed: 源侧最近点沿墙面法向的射线没有落回墙面，最近点在墙的棱 / 角上，垂距置空";
+
+/// 面分类 + 垂距一起定。主面就从源侧最近点沿 −n 打垂距；**射线落空且最近点在共棱上**（q 处还有别的三角）
+/// 时不报落空，换那条棱上的另一面读：另一面是端 / 顶 / 底这类非主面就直接读它（棱本来也属于它，不用垂距）；
+/// 另一面也是主面就沿它的法向再打一次。都不成才留着第一面 + `perpendicular_ray_missed`。
+/// 这样斜靠墙端竖棱的构件读 `end` 而不是「`side` + 落空警告」（2026-09-18 用户口径）。
+fn resolve_target_face(
+    target: &LeafMesh,
+    q: Point<Real>,
+    p: Point<Real>,
+    distance: f32,
+    want_perpendicular: bool,
+) -> (FaceInfo, Option<Perpendicular>, Option<&'static str>) {
+    let toward_source = unit_or_none(p - q);
+    let candidates = hit_candidates(&target.mesh, q, toward_source);
+    let face = classify_face(target, q, candidates.first(), toward_source);
+    if !(want_perpendicular && face.kind.is_main_face()) {
+        return (face, None, None);
+    }
+    let cast = |face: &FaceInfo, tri: &Triangle| {
+        perpendicular_ray(&target.mesh, p, face.normal, distance, Some(tri.center()))
+    };
+    let Some(first) = candidates.first() else {
+        return match perpendicular_ray(&target.mesh, p, face.normal, distance, None) {
+            Some(perpendicular) => (face, Some(perpendicular), None),
+            None => (face, None, Some(PERPENDICULAR_RAY_MISSED)),
+        };
+    };
+    if let Some(perpendicular) = cast(&face, first) {
+        return (face, Some(perpendicular), None);
+    }
+    for alt in candidates.iter().skip(1) {
+        let alt_face = classify_face(target, q, Some(alt), toward_source);
+        if !alt_face.kind.is_main_face() {
+            return (alt_face, None, None);
         }
-        let Some(n) = tri.normal() else { continue };
-        let score = n.dot(&dir).abs();
-        if best.as_ref().is_none_or(|(s, _)| score > *s) {
-            best = Some((score, tri));
+        if let Some(perpendicular) = cast(&alt_face, alt) {
+            return (alt_face, Some(perpendicular), None);
         }
     }
-    best.map(|(_, tri)| tri).or(primary)
+    (face, None, Some(PERPENDICULAR_RAY_MISSED))
 }
 
 /// 命中三角的法向，翻成指向源侧；取不到三角时退到「源点 − 命中点」方向。
@@ -551,18 +588,7 @@ fn wall_frame(mesh: &TriMesh) -> WallFrame {
     }
 }
 
-/// 命中墙面分类（§4.3）。世界 Up = +Z（E3D 的 U）。第二项是命中三角的重心，给打垂距时擦边落空兜底用。
-fn classify_target_face(
-    target: &LeafMesh,
-    q: Point<Real>,
-    p: Point<Real>,
-) -> (FaceInfo, Option<Point<Real>>) {
-    let toward_source = unit_or_none(p - q);
-    let tri = hit_triangle(&target.mesh, q, toward_source);
-    let face = classify_face(target, q, tri.as_ref(), toward_source);
-    (face, tri.as_ref().map(|t| t.center()))
-}
-
+/// 命中墙面分类（§4.3）。世界 Up = +Z（E3D 的 U）。`tri` 是 q 处选定的那片三角（见 `hit_candidates`）。
 fn classify_face(
     target: &LeafMesh,
     q: Point<Real>,
@@ -1679,22 +1705,44 @@ mod tests {
         assert!(
             approx(hit.target_point.x, 200.0, 1e-2) && approx(hit.target_point.y, 5000.0, 1e-2)
         );
-        // 竖棱上两面共点：hit_triangle 选法向更贴合「指向源侧」方向的那面——源在 (0.6, 0.8, 0) 方向，
-        // 端面（+Y）胜出读 end（不是主面，不打垂距、无 warning）；若读成 side，则垂距射线必落空并带 warning。
+        // 竖棱上两面共点：hit_candidates 先选法向更贴合「指向源侧」方向的那面——源在 (0.6, 0.8, 0) 方向，
+        // 端面（+Y）胜出读 end（不是主面，不打垂距、无 warning）。
         let face = hit.target_face.expect("face");
-        assert!(
-            matches!(face.kind, FaceKind::Side | FaceKind::End),
-            "{face:?}"
-        );
+        assert_eq!(face.kind, FaceKind::End, "{face:?}");
         assert!(
             hit.perpendicular.is_none(),
             "no face here is perpendicular to the closest line"
         );
-        let missed = out
-            .warnings
-            .iter()
-            .any(|w| w.starts_with("perpendicular_ray_missed"));
-        assert_eq!(missed, face.kind == FaceKind::Side, "{face:?} {:?}", out.warnings);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 共棱上先选中的是主面、但垂距射线落空时，退回那条棱上的非主面读法（2026-09-18 口径）：
+    /// 源在 (0.95, 0.32, 0) 方向 → 侧面（+X）贴合度高先被选中，可从源点沿 −X 打回去落在墙端之外（y 5100 > 5000）
+    /// → 落空 → 改读同一条竖棱上的 `end`，不带 `perpendicular_ray_missed`。
+    #[test]
+    fn edge_hit_falls_back_to_end_when_the_side_ray_misses() {
+        let wall = leaf(
+            "1/1",
+            "STWALL",
+            box_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0]),
+        );
+        let part = leaf(
+            "2/2",
+            "EQUI",
+            box_mesh([500.0, 5100.0, 500.0], [900.0, 5500.0, 900.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(
+            approx(hit.target_point.x, 200.0, 1e-2) && approx(hit.target_point.y, 5000.0, 1e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::End, "{face:?}");
+        assert!(face.normal.y > 0.99, "{:?}", face.normal);
+        assert!(hit.perpendicular.is_none());
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
     #[test]
