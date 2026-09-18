@@ -2571,8 +2571,8 @@ mod tests {
         ] {
             assert!(generation_reads_attribute(name), "{name}");
         }
-        // 2026-09-15 的规模：133 + 8 − 重叠 = 138。
-        assert_eq!(generation_read_set().len(), 138, "读取集合条数漂移");
+        // 今天的规模：134 + 8 − 重叠 = 139。
+        assert_eq!(generation_read_set().len(), 139, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
