@@ -1579,12 +1579,28 @@ mod tests {
     #[test]
     #[ignore = "requires E3D TTY and local AMS source files"]
     fn e3d_tty_says_the_rows_we_cannot_render_are_merely_unset() {
-        // 三个 noun 各一个：设计支路、设计构件、站点根。BRAN 那个就是界面截图里
-        // 报「34 项诊断」的 `/1WCC1135/B1`。
+        // 覆盖面按 noun 家族铺开：设计层级（SITE / ZONE / PIPE / BRAN / FTUB）、结构
+        // （STRU / FRMW / SCTN / SNOD / SBFR）、管件与焊口（ELBO / REDU / WELD / ATTA）、
+        // 目录与规格（CATE / SPEC / SCYL）。BRAN 那个就是界面截图里报「34 项诊断」的
+        // `/1WCC1135/B1`。一个 E3D 会话问完全部。
         let refnos = [
             RefU64::from_two_nums(24383, 66459),
             RefU64::from_two_nums(24384, 23262),
             RefU64::from_two_nums(24384, 46),
+            RefU64::from_two_nums(24384, 47),
+            RefU64::from_two_nums(24384, 2499),
+            RefU64::from_two_nums(24384, 48),
+            RefU64::from_two_nums(24384, 49),
+            RefU64::from_two_nums(24384, 50),
+            RefU64::from_two_nums(24384, 53),
+            RefU64::from_two_nums(24384, 26249),
+            RefU64::from_two_nums(24384, 2868),
+            RefU64::from_two_nums(24384, 24682),
+            RefU64::from_two_nums(24384, 26230),
+            RefU64::from_two_nums(24384, 2508),
+            RefU64::from_two_nums(15192, 521),
+            RefU64::from_two_nums(15192, 62134),
+            RefU64::from_two_nums(15192, 67325),
         ];
         let (service, _backup_rx) =
             ElementAttributeService::open("AvevaMarineSample", "ALL").unwrap();
@@ -1595,10 +1611,22 @@ mod tests {
             .noun_catalog()
             .expect("活 E3D 导出的 noun 目录不在，类型默认值本来也补不出来");
 
+        // 问 E3D 要用**它自己的**拼法：DB 短名在 E3D 的解析器里会撞车——SPEC 上
+        // `Q TQUAL` 答的是 `Tquality`，而这个短名在目录里指的是 `Tqualifier`，拿它
+        // 对值等于比错了行。有抬头就按抬头问，UDA 连前导 `:` 一起问。
+        let query_name = |name: &str| -> String {
+            if name.starts_with(':') {
+                return name.to_owned();
+            }
+            noun_catalog
+                .query_heading(e3d_attlib::db1_hash(name))
+                .map_or_else(|| name.to_owned(), str::to_owned)
+        };
+
         struct Sample {
             refno: String,
             response: ElementAttributesResponse,
-            /// 描述符里有、面板上没有的名字。
+            /// 描述符里有、面板上没有的名字（UDA 保留前导 `:`）。
             unrendered: Vec<String>,
             /// 面板上按类型默认补出来的行：名字 → 那一格的显示串。
             defaulted: Vec<(String, String)>,
@@ -1617,9 +1645,8 @@ mod tests {
                     .extraction
                     .attributes
                     .iter()
-                    .map(|attribute| attribute.name.trim_start_matches(':'))
-                    .filter(|name| !rendered.contains(name))
-                    .map(str::to_owned)
+                    .filter(|attribute| !rendered.contains(attribute.name.trim_start_matches(':')))
+                    .map(|attribute| attribute.name.clone())
                     .collect::<Vec<_>>();
                 // noun 目录补出来的每一行：类型零（`type-default`）、运行时规则
                 // （`derived`），以及类型零恰好是 `unset` 的（`unset` 且不是 UDA——UDA 的
@@ -1645,7 +1672,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        // 一个会话问完三个元素：开 E3D 是这条用例里最贵的一步。
+        // 一个会话问完全部元素：开 E3D 是这条用例里最贵的一步。
         let tty_elements = tty_query_attributes(
             &samples
                 .iter()
@@ -1653,8 +1680,8 @@ mod tests {
                     let names = sample
                         .unrendered
                         .iter()
-                        .cloned()
-                        .chain(sample.defaulted.iter().map(|(name, _)| name.clone()))
+                        .chain(sample.defaulted.iter().map(|(name, _)| name))
+                        .map(|name| query_name(name))
                         .collect::<Vec<_>>();
                     (sample.refno.clone(), names)
                 })
@@ -1673,7 +1700,26 @@ mod tests {
             let tty = tty_elements
                 .get(refno)
                 .unwrap_or_else(|| panic!("TTY 没有回答 {refno} 这一段"));
-            let answer = |name: &str| tty.answers.get(name).map_or("(未回答)", String::as_str);
+            let answer = |name: &str| {
+                tty.answers
+                    .get(&query_name(name))
+                    .map_or("(未回答)", String::as_str)
+            };
+            // E3D 答的是不是我们问的那一行：它印 `<抬头> <值>`，抬头要与问的那个词
+            // 一致。对不上就是名字在 E3D 那头指向了别的属性，拿它对值等于比错了行。
+            let misresolved = unrendered
+                .iter()
+                .chain(defaulted.iter().map(|(name, _)| name))
+                .map(|name| (query_name(name), answer(name)))
+                .filter(|(asked, answer)| {
+                    *answer != "ZZE"
+                        && !answer
+                            .split_whitespace()
+                            .next()
+                            .is_some_and(|heading| heading.eq_ignore_ascii_case(asked))
+                })
+                .map(|(asked, answer)| format!("问 {asked}，答 {answer:?}"))
+                .collect::<Vec<_>>();
 
             // E3D 那一页上的名字，面板有没有对应的行。没起过名的元素 E3D 那一页上的
             // `Name` 是它现编的全名，面板按 `is_unnamed_placeholder` 不画，这一个例外。
@@ -1698,14 +1744,32 @@ mod tests {
                 .filter(|name| !e3d_answer_is_nothing(name, answer(name)))
                 .map(|name| format!("{name}: {}", answer(name)))
                 .collect::<Vec<_>>();
-            let misaligned = defaulted
+            let (enum_spelled, misaligned): (Vec<_>, Vec<_>) = defaulted
                 .iter()
                 .filter(|(name, display)| !panel_matches_e3d(display, answer(name)))
-                .map(|(name, display)| format!("{name}: 面板={display:?} E3D={:?}", answer(name)))
+                .map(|(name, display)| {
+                    let spelling = is_enum_spelling(&noun_catalog, name, display, answer(name));
+                    (
+                        format!("{name}: 面板={display:?} E3D={:?}", answer(name)),
+                        spelling,
+                    )
+                })
+                .partition(|(_, spelling)| *spelling);
+            let enum_spelled = enum_spelled
+                .into_iter()
+                .map(|(row, _)| row)
                 .collect::<Vec<_>>();
+            let misaligned = misaligned
+                .into_iter()
+                .map(|(row, _)| row)
+                .collect::<Vec<_>>();
+            for row in &enum_spelled {
+                println!("TTY_ENUM_SPELLING {refno}\t{row}");
+            }
 
             println!(
-                "TTY_PARITY refno={} noun={} 面板行数={} 类型默认行={} 其中与E3D对不上={} | \
+                "TTY_PARITY refno={} noun={} 面板行数={} 类型默认行={} 其中与E3D对不上={} \
+                 枚举名拼法差异={} | \
                  E3D那一页={} 面板缺的行={} | \
                  画不出的行={} 其中E3D自己也答不上来={} E3D印出真值={} | 新诊断 undecoded={} \
                  shape_conflicts={} uda_issues={} | 不计入完整性 outside_schema={} \
@@ -1715,6 +1779,7 @@ mod tests {
                 response.attributes.len(),
                 defaulted.len(),
                 misaligned.len(),
+                enum_spelled.len(),
                 tty.page.len(),
                 missing_from_panel.len(),
                 unrendered.len(),
@@ -1735,6 +1800,11 @@ mod tests {
                 println!("TTY_ANSWER {refno}\t{name}\t{}\t面板=(不画)", answer(name));
             }
 
+            assert!(
+                misresolved.is_empty(),
+                "{refno}：E3D 答的不是我们问的那一行，这一轮对拍不作数（名字在 E3D 那头\
+                 指向了别的属性，按 `query_heading` 的抬头问）：{misresolved:?}"
+            );
             assert!(
                 misaligned.is_empty(),
                 "{refno}：这些行面板与 E3D 印的不是一回事（E3D 答不上来的我们也不该补）：\
@@ -1777,14 +1847,42 @@ mod tests {
         );
     }
 
+    /// E3D 把一部分整数属性按枚举名印：`Impstchange Undefined` 说的就是 `IMPSTC = 0`。
+    ///
+    /// 值没差，差的是拼法——而拼法要的那张 magic-values 表没有随目录导出来：字段记录里
+    /// 只有一个指针（`MAGICVALUES`）与一句散文（`DESTEX: Import status (Undefined, New,
+    /// Replace, Delete, Retain)`）。认它的是字段记录、不是名字表：带 `MAGICVALUES` 的
+    /// 才算，别的对不上照旧是对不上。
+    #[cfg(test)]
+    fn is_enum_spelling(catalog: &NounCatalog, name: &str, display: &str, answer: &str) -> bool {
+        let Some(record) = catalog.attribute_fields(e3d_attlib::db1_hash(name)) else {
+            return false;
+        };
+        if !record.fields.contains_key("MAGICVALUES") {
+            return false;
+        }
+        let value = answer
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, tail)| tail.trim());
+        display.trim().parse::<i64>().is_ok()
+            && !value.is_empty()
+            && value.chars().all(char::is_alphabetic)
+    }
+
     /// E3D 那一页上印、任何一份 schema 导出里都没有的行。
     ///
-    /// `Lock` 是元素锁：`attlib` 的 4271 条属性里没有它（`Brlock` / `Rlock` / `Prjlock`
-    /// 都在，独独没有 `Lock`），BRAN 的 86 条 noun 目录声明里也没有——它是内核自己答的，
-    /// 文件侧没有可解的槽位。三个样本上 E3D 都印 `Lock false`。补不出来就不补：面板
-    /// 宁可少这一行，也不画一个猜来的锁。
+    /// 两个名字在 `noun_layout.json` 与 `noun_attr_fields.json` 里都一个字都搜不到
+    /// （那两份是活 E3D 按 `DbElementType.SystemAttributes()` 导出的）：
+    ///
+    /// - `Lock`：元素锁。`attlib` 的 4271 条属性里也没有它——`Brlock` / `Rlock` /
+    ///   `Prjlock` 都在，独独没有 `Lock`。样本里 E3D 一律印 `Lock false`。
+    /// - `Nappflag`：只在目录几何（`SCYL` 这类）那一页上出现，E3D 印 `Nappflag 0`；
+    ///   SCYL 的 13 条目录声明里没有它。
+    ///
+    /// 都是内核自己答的，文件侧没有可解的槽位。补不出来就不补：面板宁可少这一行，
+    /// 也不画一个猜来的值。
     #[cfg(test)]
-    const E3D_PAGE_ROWS_WITHOUT_A_SCHEMA: [&str; 1] = ["lock"];
+    const E3D_PAGE_ROWS_WITHOUT_A_SCHEMA: [&str; 2] = ["lock", "nappflag"];
 
     /// 面板那一格与 E3D 印的值是不是同一个东西。
     ///
