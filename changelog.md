@@ -2,6 +2,36 @@
 
 ## 2026-09-18
 
+### 向导重启后进程台账跟着换；`Start-AMS.ps1` 拉起服务不再把调用方的管道堵死
+
+- **为什么**：上一笔只把「解压即跑」路上撞见的这两处小毛病记下来、没改，这一笔改掉。
+  ① 向导 ④→⑤ 之间那次 `/setup/restart` 换了进程，包根 `process.json` 里还写着上一条命的 pid
+  （现场记到台账 56460 / 实跑 35152）。`Rollback.ps1` 按 exe 路径匹配，功能上不疼，但那个文件
+  是运维手上唯一的台账，它骗人。② `Start-AMS.ps1` 用 `Start-Process -RedirectStandardOutput /
+  -RedirectStandardError` 拉服务，这条路子走 `CreateProcess(bInheritHandles=TRUE)`，**服务连调用方的
+  stdout 句柄一起继承过去**；调用方（脚本 / CI / 代理）只要接了管道，那一头就永远等不到 EOF——
+  服务是长命的。双击 `Start-AMS.cmd` 走控制台句柄不受影响，所以这坑只有自动化会踩，而它每次都踩。
+- **改动**：① `spawn_replacement` 拉起替身后回写包根 `process.json`——`pid` / `start_time` /
+  `executable` 三键就地改写，别人加的键原样留着；**只改已经在那儿的那一份**（开发态直接跑 exe 的
+  目录里没有这个文件，重启不该凭空造一个出来），写不动只警告：端口与单实例锁那时已经交出去了，
+  重启不能卡在台账上。② 生成的 `Start-AMS.ps1` 改让 `cmd` 接那两路重定向——
+  `Start-Process $env:ComSpec '/c ""<exe>" serve 1>"…" 2>"…""' -WindowStyle Hidden -PassThru`，
+  这一侧就只剩 ShellExecuteEx，句柄一个都不带过去；服务自己按可执行路径认回来（同脚本顶上认
+  既有实例那一招），`process.json` 与 `READY PID=` 记的仍是服务的 pid，不是 cmd 的。
+- **验证**：
+  - `cargo test --lib --features http_api -- web_service::setup::` **21 passed / 0 failed**，新钉 2 条：
+    三键改写且未知键存活（坏 JSON 也得给得出一份能用的台账）、没有台账的目录不冒出一份来。
+  - **句柄那条先量 A/B 再动手**：合成台架（调用方用真管道 + `ReadToEndAsync`）下，`-RedirectStandard*`
+    那一形拿不到 EOF；先试「spawn 前摘掉三个标准句柄的可继承位」——**没用**，照堵；不给重定向参数
+    （ShellExecuteEx）立刻通。cmd 这一路是这么定下来的，不是猜的。
+  - **真包上的 A/B**：交付的 0.1.28 解到空目录、跑在 9599。原装脚本：launcher 1.3s 就退出、服务
+    `health=ok`，而调用方的管道 7.3s 仍没 EOF；换上本笔的 exe + 脚本：2.2s 拿到
+    `READY PID=20920 URL=http://127.0.0.1:9599/` 且 EOF，两路日志照旧落 `logs\<stamp>.std*.log`。
+  - **台账**：同一台 `POST /setup/restart`，服务 20920 → 61984，`process.json` 跟着变成 61984
+    （`executable` 与 RFC3339 的 `start_time` 一并更新）。顺手回归端口判据：9099 occupied /
+    9599 self / 9699 free，仍走 `listener_table`。验完试跑实例与临时目录都已清掉。
+- **不在 0.1.28 的包里**：交付的 `…20260918042801.g695cc85dc8bb…zip` 早于本笔，要带上得重出一版。
+
 ### 配置向导第③步的端口判据改查监听表——绑 `127.0.0.1` 试探在 Windows 上会把占着的端口报成「可用」
 
 - **为什么**：0.1.28 出包后按「解压即跑」走了一遍首跑向导，撞见两道门对同一个端口给出相反的答案。

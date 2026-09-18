@@ -948,11 +948,49 @@ pub(crate) fn browser_facing(addr: &str) -> String {
 /// `Start-AMS.ps1` 重定向的日志文件因此接着写。
 fn spawn_replacement() -> anyhow::Result<u32> {
     let exe = std::env::current_exe()?;
-    let child = std::process::Command::new(exe)
+    let child = std::process::Command::new(&exe)
         .args(std::env::args_os().skip(1))
         .env(RESTART_HANDOFF_ENV, "1")
         .spawn()?;
-    Ok(child.id())
+    let pid = child.id();
+    rewrite_process_record(&exe, pid);
+    Ok(pid)
+}
+
+/// `Start-AMS.ps1` 在包根落的进程台账（`pid` / `start_time` / `executable`）。
+const PROCESS_RECORD: &str = "process.json";
+
+/// 交接换了进程，台账跟着换。**只改已经在那儿的那一份**：开发态直接跑 exe 的目录里没有
+/// 这个文件，重启不该凭空造一个出来。写不动只警告不失败——它是给人看的台账，
+/// 端口与单实例锁已经交出去了，重启不能卡在这一步上。
+fn rewrite_process_record(exe: &Path, pid: u32) {
+    let Some(path) = exe.parent().map(|dir| dir.join(PROCESS_RECORD)) else {
+        return;
+    };
+    let Ok(existing) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let next = process_record_after_restart(&existing, pid, exe, &chrono::Local::now().to_rfc3339());
+    if let Err(error) = std::fs::write(&path, next) {
+        eprintln!(
+            "[setup] 回写 {} 失败（新进程照常接管）：{error}",
+            path.display()
+        );
+    }
+}
+
+/// 三个键就地改写，其余原样留着（别的版本 / 别的脚本可能往里加过字段）。
+/// 读不成对象就重起一份——台账坏了不如换新的，总好过让它一直指着死进程。
+fn process_record_after_restart(existing: &str, pid: u32, exe: &Path, started_at: &str) -> String {
+    let mut record = serde_json::from_str::<serde_json::Value>(existing)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let fields = record.as_object_mut().expect("上面已挡住非对象");
+    fields.insert("pid".into(), json!(pid));
+    fields.insert("start_time".into(), json!(started_at));
+    fields.insert("executable".into(), json!(exe.display().to_string()));
+    record.to_string()
 }
 
 async fn setup_complete(
@@ -1513,6 +1551,53 @@ room_key_word = ["-RM"]
         unsafe { std::env::set_var(RESTART_HANDOFF_ENV, "1") };
         assert!(handoff_deadline().is_some());
         unsafe { std::env::remove_var(RESTART_HANDOFF_ENV) };
+    }
+
+    /// 交接之后台账指向新进程：pid / start_time / executable 三个键换掉，别人加的键不动。
+    #[test]
+    fn the_restart_rewrites_the_three_process_record_keys_and_keeps_the_rest() {
+        // Start-AMS.ps1 落的正是这三个键（ConvertTo-Json 的形状）；note 是「别人加的键」。
+        let shipped = r#"{"pid":56460,"start_time":"2026-09-18T11:52:03.1234567+08:00",
+            "executable":"D:\\pkg\\aios-database.exe","note":"留给运维的手记"}"#;
+        let exe = Path::new(r"D:\pkg\aios-database.exe");
+        let rewritten =
+            process_record_after_restart(shipped, 35152, exe, "2026-09-18T12:00:00+08:00");
+
+        let parsed: serde_json::Value = serde_json::from_str(&rewritten).expect("仍是合法 JSON");
+        assert_eq!(parsed["pid"], 35152, "台账还指着上一条命的 pid");
+        assert_eq!(parsed["start_time"], "2026-09-18T12:00:00+08:00");
+        assert_eq!(parsed["executable"], r"D:\pkg\aios-database.exe");
+        assert_eq!(parsed["note"], "留给运维的手记", "别人加的键不该被抹掉");
+
+        // 台账坏了也得给出一份能用的——不能让它继续指着死进程。
+        let from_rubble = process_record_after_restart("{ 半个 json", 7, exe, "2026-09-18T12:00:00+08:00");
+        let parsed: serde_json::Value = serde_json::from_str(&from_rubble).expect("合法 JSON");
+        assert_eq!(parsed["pid"], 7);
+    }
+
+    /// 没有台账的目录（开发态直接跑 exe）重启后也不该冒出一个 process.json 来。
+    #[test]
+    fn a_restart_does_not_conjure_a_process_record_where_there_was_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("aios-database.exe");
+
+        rewrite_process_record(&exe, 4242);
+        assert!(
+            !dir.path().join(PROCESS_RECORD).exists(),
+            "没有台账的目录不该被造出一份来"
+        );
+
+        std::fs::write(dir.path().join(PROCESS_RECORD), r#"{"pid":1,"executable":"old.exe"}"#)
+            .expect("先放一份台账");
+        rewrite_process_record(&exe, 4242);
+        let written = std::fs::read_to_string(dir.path().join(PROCESS_RECORD)).expect("读回台账");
+        let parsed: serde_json::Value = serde_json::from_str(&written).expect("合法 JSON");
+        assert_eq!(parsed["pid"], 4242);
+        assert_eq!(parsed["executable"], exe.display().to_string());
+        assert!(
+            parsed["start_time"].as_str().is_some_and(|value| value.contains('T')),
+            "start_time 得是 RFC3339，PowerShell 那头按 'o' 读"
+        );
     }
 
     /// 内嵌向导页必须带着标记串——冲烟第二腿与磁盘副本替换都靠它认「这是向导页」。

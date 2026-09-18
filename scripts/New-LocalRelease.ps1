@@ -599,7 +599,22 @@ if ($existing) {
     $env:AIOS_E3D_SCHEMA_ROOT = Join-Path $root 'schema'
     # 服务不拉库（ADR-074）：rocksdb 档要先自己跑 Start-Surreal.ps1，这里不再递 AIOS_SURREAL_EXE。
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $process = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $Workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logRoot "$stamp.stdout.log") -RedirectStandardError (Join-Path $logRoot "$stamp.stderr.log")
+    $stdoutLog = Join-Path $logRoot "$stamp.stdout.log"
+    $stderrLog = Join-Path $logRoot "$stamp.stderr.log"
+    # 不走 -RedirectStandard*：那条路子让服务连调用方的 stdout 句柄一起继承，调用方（脚本 / CI /
+    # 代理）只要接了管道，那一头就永远等不到 EOF——服务是长命的。改由 cmd 把两路输出接到同样的
+    # 日志文件上，这一侧只剩 ShellExecuteEx，一个句柄都不带过去。双击 .cmd 那条路本来就不受影响。
+    $redirected = '/c ""{0}" serve 1>"{1}" 2>"{2}""' -f $exe, $stdoutLog, $stderrLog
+    $shell = Start-Process -FilePath $env:ComSpec -ArgumentList $redirected -WorkingDirectory $Workspace -WindowStyle Hidden -PassThru
+    # cmd 只是那层重定向，真正要盯的是服务自己：按可执行路径认回来（同上面认既有实例那一招）。
+    $spawnDeadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 200
+        $spawned = Get-CimInstance Win32_Process -Filter "Name='aios-database.exe'" |
+            Where-Object { $_.ExecutablePath -eq $exe } | Select-Object -First 1
+    } while (-not $spawned -and -not $shell.HasExited -and (Get-Date) -lt $spawnDeadline)
+    if (-not $spawned) { throw "Backend did not start; see $logRoot" }
+    $process = Get-Process -Id $spawned.ProcessId
     @{ pid=$process.Id; start_time=$process.StartTime.ToString('o'); executable=$exe } | ConvertTo-Json | Set-Content (Join-Path $root 'process.json')
 }
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
