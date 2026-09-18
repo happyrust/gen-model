@@ -276,6 +276,25 @@ SNIPPET
 
   nginx -t
   systemctl reload nginx || nginx -s reload
+
+  # reload 是异步的：SIGHUP 之后老 worker 还会拿旧配置再服务一小会儿。2026-09-18 的彩排
+  # （run 35317065250）就栽在这里——脚本 reload 完，外面 38 毫秒后去探，探到的还是旧配置下
+  # 的 /api → :3100，一个干净的 502。所以这一步自己盯到分流真的生效为止。
+  # 不只看状态码：服务器上 :3100 那个旧后端也可能回 200，认的是校审 health 的响应体。
+  nginx_host_header=()
+  [ -n "$PUBLIC_HOST" ] && nginx_host_header=(-H "Host: ${PUBLIC_HOST}")
+  split_ok=""
+  split_last=""
+  for _ in $(seq 1 20); do
+    split_last="$(curl -s --max-time 5 "${nginx_host_header[@]}" \
+      "http://127.0.0.1/api/review/health" 2>/dev/null || true)"
+    case "$split_last" in
+      *'"database"'*) split_ok=1; break ;;
+    esac
+    sleep 1
+  done
+  [ -n "$split_ok" ] || die "nginx reload 过了，但从 :80 走 /api/review/health 拿到的不是校审后端的响应（最后一次：${split_last:-空}）——分流没生效，先看站点里还有没有别的 location 压在前面"
+  log "nginx 分流生效：:80 /api/review/health => ${split_last}"
 fi
 
 # ── 交代清楚现状 ────────────────────────────────────────────────────────────

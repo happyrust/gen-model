@@ -196,6 +196,17 @@ jobs:
           probe /app.js 200              # 静态资源那条正则还得在我们前面之后仍然管用
           exit $fail
 
+      - name: 分流不对就把现场摆出来
+        if: failure()
+        run: |
+          set +e
+          echo "===== nginx error.log ====="; sudo tail -n 40 /var/log/nginx/error.log
+          echo "===== 在听的端口 ====="; sudo ss -lntp | grep -E ':(80|8009|8022)\s'
+          echo "===== 绕开 nginx 直连 :8022 ====="
+          curl -s -o /dev/null -w '/api/review/health => %{http_code}\n' --max-time 10 http://127.0.0.1:8022/api/review/health
+          echo "===== nginx 眼里这个 server 块长什么样 ====="
+          sudo nginx -T 2>/dev/null | sed -n '/server_name 123\.57\.182\.243/,/^}/p' | head -n 60
+
       - name: Inspect what landed
         run: |
           set -uo pipefail
