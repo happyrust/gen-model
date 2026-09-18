@@ -454,7 +454,7 @@ try {
     $env:AIOS_LIVE_DB = 'AvevaMarineSample'
     $env:DB_OPTION_FILE = 'db_options/DbOption-issue7-e2e'
     # 靶已经定在 $SurrealPort 上那台库：进程必须连它，不许自己再拉一台。store_mode 的
-    # 默认是 mem（库在进程里），这一行不靠它：本脚本自己起了一台 surreal，服务必须连它。
+    # 这一行不靠默认（默认档会翻，2026-09-18 起是 rocksdb）：本脚本自己起了一台 surreal，服务必须连它。
     $env:AIOS_STORE_MODE = 'rocksdb'
     # 数据面同理：房间 e2e 要的是摄入链，data_face 的新默认（read-through，2026-09-05）不做基线。
     $env:AIOS_DATA_FACE = 'ingest'

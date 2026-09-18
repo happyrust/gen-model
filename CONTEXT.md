@@ -702,7 +702,7 @@ _Avoid_: 重盖章（泛指时）、迁移 epoch、队列重建（那是周期�
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认介质 `mem`：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、在向导填好 `v_ip:v_port`、再以 `Start-AMS.ps1 -StoreMode rocksdb` 启动（介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置里改，ADR-080；服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再以 `-StoreMode rocksdb` 起服务；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档由 `Start-AMS.ps1` 显式以 `mem` 起（服务自身默认档是 `rocksdb`，包不靠它）：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、在向导填好 `v_ip:v_port`、再以 `Start-AMS.ps1 -StoreMode rocksdb` 启动（介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置里改，ADR-080；服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再以 `-StoreMode rocksdb` 起服务；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -714,7 +714,7 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（默认 `mem`，`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `AIOS_STORE_MODE=rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。三腿的介质都以环境变量递给服务，不往临时配置里写 `store_mode`（ADR-080）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式（**有意不设介质**，考的是「落到默认档 rocksdb 也仍然拐进设置模式、向导打得开」这条逃生门）；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（`-SmokeStoreMode` 缺省取 `mem` 并显式递给服务，不是靠服务的默认档；`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `AIOS_STORE_MODE=rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。三腿的介质都以环境变量递给服务，不往临时配置里写 `store_mode`（ADR-080）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
 
@@ -750,7 +750,7 @@ _Avoid_: 锁文件（不互斥任何东西）、初始化标记（初始化完�
 
 # 存储形态 (Store Mode)
 
-持久层的介质，**只由环境变量 `AIOS_STORE_MODE` 决定**（ADR-080，2026-09-18；`DbOption.toml` 的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB` 不再参与，写了只会在启动时被整行点名），**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。不设 = `mem`。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：写在环境变量里仍认，但启动时大声告警说清换成了什么。介质是「这一次进程怎么起」的事，跟启动命令走（`Start-AMS.ps1 -StoreMode` / systemd `Environment=` / `$env:`）；配置文件描述「这个工程长什么样」，`v_ip:v_port` 留在文件里是「rocksdb 档连哪儿」，不是「要不要 rocksdb」。仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写这一行。
+持久层的介质，**只由环境变量 `AIOS_STORE_MODE` 决定**（ADR-080，2026-09-18；`DbOption.toml` 的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB` 不再参与，写了只会在启动时被整行点名），**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。**不设 = `rocksdb`**（ADR-080 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻过来：漏设的代价要落在「当场报连不上」而不是「服务起来了、属性行却一直不进库」那一侧）；发布包不靠这个默认，`Start-AMS.ps1` 不给 `-StoreMode` 时显式回填 `mem`，解压即跑照旧。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：写在环境变量里仍认，但启动时大声告警说清换成了什么。介质是「这一次进程怎么起」的事，跟启动命令走（`Start-AMS.ps1 -StoreMode` / systemd `Environment=` / `$env:`）；配置文件描述「这个工程长什么样」，`v_ip:v_port` 留在文件里是「rocksdb 档连哪儿」，不是「要不要 rocksdb」。仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写这一行。
 
 _Avoid_: `DbOption.toml` 里的 `store_mode`（2026-09-18 起不生效）、向导第②步改选（向导只展示）、自带持久库 / 自带存储 / spawned-*（服务不再拉库，那一套署名 / 心跳 / 四格裁决 / 孤儿回收随 `store_process.rs` 整个删除）、external（已更名 rocksdb）、embedded-mem / kv-mem（已更名 mem）、创建数据库实例（没有这个动作，库由人起、服务只连）。
 

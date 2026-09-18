@@ -67,7 +67,7 @@ try {
 
     $env:DB_OPTION_FILE = $spec.config
     # 本批次自己起了库并把靶定在 $port 上：进程必须连它，不许自己再拉一台。
-    # store_mode 默认是 mem（库在进程里，连不到本批次起的这台）；而这里有一部分
+    # 不押在默认档上（它会翻：2026-09-13 定 mem，2026-09-18 翻回 rocksdb）；而这里有一部分
     # live 用例不读 DB_OPTION_FILE（见下），它们只能靠这个环境变量收口。
     $env:AIOS_STORE_MODE = 'rocksdb'
     # 数据面同理：live 用例要的是摄入（基线 + 增量窗口），data_face 的新默认

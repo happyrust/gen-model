@@ -128,7 +128,7 @@
   <section class="card" id="step2" hidden>
     <h2>② 存储：模型数据放哪</h2>
     <!-- 介质不在这里选（ADR-080，2026-09-18）：它只由启动服务时的环境变量 AIOS_STORE_MODE 决定
-         （mem / rocksdb，不设 = mem），配置文件里的 store_mode 一个字都不生效。向导只展示生效的
+         （mem / rocksdb，不设 = rocksdb），配置文件里的 store_mode 一个字都不生效。向导只展示生效的
          那一档与出处、提醒文件里残留的过期键；地址那两格只在 rocksdb 档下可填。
          两档本身不变（2026-09-13 拍板）：本服务从不拉起任何数据库进程——内存就在进程里，落盘就连配置指的那台。 -->
     <div id="effective-store"></div>
