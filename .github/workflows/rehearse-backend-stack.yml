@@ -258,9 +258,14 @@ jobs:
           set -euo pipefail
           sudo env INSTALL_DIR="$INSTALL_DIR" HTTP_PORT="$HTTP_PORT" ROLLBACK=1 \
             bash bundle/install_backend.sh
-          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1/api/v1/health || echo ERR)"
-          echo "回滚之后 /api/v1/health => $code"
+          # 回滚验的是「二进制换回去之后服务还起得来」，所以直连 :8022——/api/v1 按口径
+          # 本来就不分流，从 :80 探它只会探到站点原来那条 /api → :3100。
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1:8022/api/v1/health || echo ERR)"
+          echo "回滚之后 :8022 /api/v1/health => $code"
           [ "$code" = "200" ] || { echo "::error::回滚之后服务没回来（$code）"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1/api/review/health || echo ERR)"
+          echo "回滚之后 :80 /api/review/health => $code（分流不该受回滚影响）"
+          [ "$code" = "200" ] || { echo "::error::回滚之后从 :80 走校审域回的是 $code"; exit 1; }
 
       - name: 收日志
         if: always()
