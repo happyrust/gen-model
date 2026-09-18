@@ -190,10 +190,16 @@ jobs:
             printf '%-30s => %-4s %s\n' "$1" "$code" "$(head -c 160 /tmp/body | tr -d '\n')"
             [ "$code" = "$2" ] || { echo "::error::$1 期望 $2，实际 $code"; fail=1; }
           }
-          probe /api/review/health 200   # 分流该把它送到 :8022
-          probe /api/v1/health 200
+          # 这四条一起把「切了什么、没切什么」钉死。runner 上 :3100 没人听，所以
+          # 502 = 还走着站点原来的 /api → :3100 那一条，正是 /api/v1 该有的样子。
+          probe /api/review/health 200   # 切了：该到 :8022
+          probe /api/v1/health 502       # 没切：该还在 :3100（服务器上那儿是活的旧后端）
           probe / 200                    # 前端首页：别把静态站点碰坏了
           probe /app.js 200              # 静态资源那条正则还得在我们前面之后仍然管用
+          # /api/auth 也切了；本后端未必有这条路由，但只要不是 502 就说明确实到了 :8022
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://127.0.0.1/api/auth/login || echo ERR)"
+          echo "/api/auth/login                => $code（不是 502 就说明到了 :8022）"
+          [ "$code" != "502" ] || { echo "::error::/api/auth/login 是 502，说明没分流过去"; fail=1; }
           exit $fail
 
       - name: 分流不对就把现场摆出来

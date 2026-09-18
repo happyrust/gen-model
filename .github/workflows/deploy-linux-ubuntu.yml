@@ -37,6 +37,11 @@ on:
         required: false
         default: ''
         type: string
+      review_split_prefixes:
+        description: '哪几个前缀分流到新后端（空格分隔）；留空 = api/review api/auth'
+        required: false
+        default: ''
+        type: string
       review_web_base_url:
         description: 'embed-url 回给 PMS 的校审前端基址'
         required: false
@@ -80,6 +85,9 @@ env:
   SKIP_NGINX: ${{ ((github.event_name == 'workflow_dispatch' && inputs.skip_nginx) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[skip-nginx]'))) && '1' || '0' }}
   ROLLBACK: ${{ inputs.rollback && '1' || '0' }}
   REVIEW_WEB_BASE_URL: ${{ inputs.review_web_base_url }}
+  # 只切没人在用的那两个前缀（/api/review 在旧后端是 504、/api/auth 是 404）。
+  # /api/v1 与 /api/users 留给 :3100 那个旧 web_server——2026-09-18 跟用户对过的口径。
+  REVIEW_SPLIT_PREFIXES: ${{ inputs.review_split_prefixes != '' && inputs.review_split_prefixes || 'api/review api/auth' }}
 
 jobs:
   deploy:
@@ -236,7 +244,7 @@ jobs:
           echo "  1. 传 $(du -sh bundle | cut -f1) 的包到 /tmp/aios-deploy-${GITHUB_RUN_ID}"
           echo "  2. 装 SurrealDB 2.1.4（fork rev ${SURREAL_FORK_REV}；机器上已经是这一版就跳过）+ systemd 单元 surrealdb.service"
           echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新二进制、DbOption 与 resource/surreal → 起"
-          echo "  4. nginx 加 include /etc/nginx/snippets/aios-review-split.conf（skip_nginx=${SKIP_NGINX}）"
+          echo "  4. nginx 加 include /etc/nginx/snippets/aios-review-split.conf，分流前缀 ${REVIEW_SPLIT_PREFIXES}（skip_nginx=${SKIP_NGINX}）"
           echo "  5. 健康检查：本机 :8009 /health、:${HTTP_PORT} /api/v1/health 与 /api/review/health，再走公网一遍"
 
       - name: Upload bundle
@@ -259,6 +267,7 @@ jobs:
             "INSTALL_DIR='${INSTALL_DIR}' DATA_DIR='${DATA_DIR}' \
              SURREAL_BIND='${SURREAL_BIND}' SURREAL_DATA_DIR='${SURREAL_DATA_DIR}' \
              HTTP_PORT='${HTTP_PORT}' PUBLIC_HOST='${REMOTE_HOST}' \
+             REVIEW_SPLIT_PREFIXES='${REVIEW_SPLIT_PREFIXES}' \
              SKIP_NGINX='${SKIP_NGINX}' ROLLBACK='${ROLLBACK}' \
              bash '${REMOTE_DIR}/install_backend.sh'"
 
@@ -266,12 +275,13 @@ jobs:
         if: env.DRY_RUN != 'true' && env.SKIP_NGINX != '1'
         run: |
           set -euo pipefail
-          for path in /api/review/health /api/v1/health; do
-            code="$(curl -s -o /tmp/body -w '%{http_code}' --max-time 20 "http://${REMOTE_HOST}${path}" || true)"
-            echo "http://${REMOTE_HOST}${path} => ${code}"
-            head -c 400 /tmp/body; echo
-            [ "$code" = "200" ] || { echo "::error::公网入口 ${path} 回的是 ${code}"; exit 1; }
-          done
+          code="$(curl -s -o /tmp/body -w '%{http_code}' --max-time 20 "http://${REMOTE_HOST}/api/review/health" || true)"
+          echo "http://${REMOTE_HOST}/api/review/health => ${code}"
+          head -c 400 /tmp/body; echo
+          [ "$code" = "200" ] || { echo "::error::公网入口 /api/review/health 回的是 ${code}"; exit 1; }
+          # /api/v1 按口径仍在 :3100 那个旧后端手里，这里只报一眼、不做判据：
+          # 它回 200 说明旧后端还好好的，正是我们要的「没碰现网」。
+          echo "http://${REMOTE_HOST}/api/v1/health => $(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://${REMOTE_HOST}/api/v1/health" || true)（应仍由 :3100 提供）"
           code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://${REMOTE_HOST}/" || true)"
           echo "前端首页 => ${code}（这条只是别把前端碰坏了的看门狗）"
           [ "$code" = "200" ] || { echo "::error::前端首页回的是 ${code}"; exit 1; }

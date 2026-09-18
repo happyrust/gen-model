@@ -246,11 +246,13 @@ else
   snippet=/etc/nginx/snippets/aios-review-split.conf
   mkdir -p /etc/nginx/snippets
 
-  # 切哪几个前缀是个要拿主意的事，所以做成参数。123.57.182.243 上 /api/v1 与 /api/users
-  # 此刻由 :3100 那个旧 web_server 实供着（/api/v1/health 回的是带 litefs 字段的那份，
-  # 200；/api/users 也是 200），把它们一起切过来等于把现网前端的数据面换了后端。
-  # /api/review 在那儿是 504、/api/auth 是 404，这两个切过来不动任何现有流量。
-  REVIEW_SPLIT_PREFIXES="${REVIEW_SPLIT_PREFIXES:-api/review api/users api/auth api/v1}"
+  # 切哪几个前缀是个要拿主意的事，所以做成参数。默认只切这两个，是 2026-09-18 跟用户对过的
+  # 口径：123.57.182.243 上 /api/review 是 504、/api/auth 是 404，都没人在用，切过来不动
+  # 任何现有流量；而 /api/v1 与 /api/users 此刻由 :3100 那个旧 web_server 实供着
+  # （/api/v1/health 回的是带 litefs 字段的那份，200），把它们一起切等于把现网前端的数据面
+  # 也换了后端——新后端的 core 还在 initializing、机器上没有 E3D 工程，那一排会是空的。
+  # 要切全四个：REVIEW_SPLIT_PREFIXES="api/review api/users api/auth api/v1"。
+  REVIEW_SPLIT_PREFIXES="${REVIEW_SPLIT_PREFIXES:-api/review api/auth}"
   dollar='$'
   split_re=""
   for prefix in $REVIEW_SPLIT_PREFIXES; do
