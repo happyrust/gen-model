@@ -55,7 +55,8 @@ pub const WALL_NOUNS: [&str; 5] = ["CWALL", "WALL", "PANE", "GWALL", "STWALL"];
 
 /// 单位网格缓存上限（按 geo_hash 内容寻址，永不过期；超过就整体清空，下次再热）。
 const UNIT_MESH_CACHE_CAP: usize = 8_192;
-/// 世界网格缓存上限（键 = 叶子行 key + model_sesno，换版自然失效）。
+/// 世界网格缓存上限（键 = 叶子行 key + model_sesno + 摆放指纹：换版换 sesno，`model/ensure force=true`
+/// 重算不换 sesno 只换摆放——两种都要自然失效）。
 const LEAF_MESH_CACHE_CAP: usize = 1_024;
 
 pub fn is_wall_noun(noun: &str) -> bool {
@@ -579,6 +580,27 @@ pub struct LeafRow {
     /// `(geo_hash, 本地变换)`；布尔后的行与隐式管身只有一项、无本地变换。
     pub insts: Vec<(String, Option<serde_json::Value>)>,
     pub model_sesno: Option<i64>,
+    /// `world_trans` + `insts` 的指纹（[`placement_fingerprint`]）。`model/ensure force=true` 重算一个根
+    /// 不换源会话号，`model_sesno` 分不出重算前后的摆放——2026-09-18 `:8022` 上 FIXING `17496/137183`
+    /// 重算后 `world_trans` 已对、同进程仍从缓存拿到旧网格；世界网格缓存键里要带上它。
+    pub placement_fingerprint: u64,
+}
+
+/// 一行叶子「拼网格要用的那几格」的指纹：`world_trans` 与每个实例的 `geo_hash` / 本地变换。
+/// 只在进程内当缓存键用，不落库、不进响应，所以用标准库的 hasher 就够。
+fn placement_fingerprint(
+    world_trans: Option<&serde_json::Value>,
+    insts: &[(String, Option<serde_json::Value>)],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    world_trans.map(|v| v.to_string()).hash(&mut hasher);
+    insts.len().hash(&mut hasher);
+    for (geo_hash, local) in insts {
+        geo_hash.hash(&mut hasher);
+        local.as_ref().map(|v| v.to_string()).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn json_str(v: &serde_json::Value) -> Option<String> {
@@ -636,6 +658,7 @@ fn row_to_leaf(row: &serde_json::Value, tube: bool) -> Option<LeafRow> {
             insts.push((hash, transform));
         }
     }
+    let placement_fingerprint = placement_fingerprint(world_trans.as_ref(), &insts);
     Some(LeafRow {
         key,
         refno,
@@ -643,6 +666,7 @@ fn row_to_leaf(row: &serde_json::Value, tube: bool) -> Option<LeafRow> {
         world_trans,
         insts,
         model_sesno,
+        placement_fingerprint,
     })
 }
 
@@ -807,7 +831,17 @@ fn mat_from_trans(t: Option<&serde_json::Value>) -> Mat4 {
 }
 
 static UNIT_MESHES: Lazy<DashMap<String, Arc<PlantMesh>>> = Lazy::new(DashMap::new);
-static LEAF_MESHES: Lazy<DashMap<(String, i64), Arc<TriMesh>>> = Lazy::new(DashMap::new);
+/// 键 = (叶子行 key, model_sesno, 摆放指纹)。见 [`LeafRow::placement_fingerprint`]。
+static LEAF_MESHES: Lazy<DashMap<(String, i64, u64), Arc<TriMesh>>> = Lazy::new(DashMap::new);
+
+/// 世界网格缓存键：没有 `model_sesno`（老数据）或 key 为空的行不进缓存。
+fn leaf_cache_key(row: &LeafRow) -> Option<(String, i64, u64)> {
+    if row.key.is_empty() {
+        return None;
+    }
+    row.model_sesno
+        .map(|sesno| (row.key.clone(), sesno, row.placement_fingerprint))
+}
 
 fn load_unit_mesh(meshes_dir: &Path, geo_hash: &str) -> Result<Arc<PlantMesh>> {
     if let Some(hit) = UNIT_MESHES.get(geo_hash) {
@@ -830,13 +864,11 @@ fn build_leaf_mesh(
     meshes_dir: &Path,
     warnings: &mut Vec<String>,
 ) -> Option<Arc<TriMesh>> {
-    let cache_key = row.model_sesno.map(|sesno| (row.key.clone(), sesno));
-    if let Some(key) = cache_key.as_ref() {
-        if !key.0.is_empty() {
-            if let Some(hit) = LEAF_MESHES.get(key) {
-                return Some(hit.clone());
-            }
-        }
+    let cache_key = leaf_cache_key(row);
+    if let Some(key) = cache_key.as_ref()
+        && let Some(hit) = LEAF_MESHES.get(key)
+    {
+        return Some(hit.clone());
     }
     let world = mat_from_trans(row.world_trans.as_ref());
     let mut verts: Vec<Point<Real>> = Vec::new();
@@ -872,12 +904,10 @@ fn build_leaf_mesh(
     }
     let mesh = Arc::new(TriMesh::with_flags(verts, idx, TriMeshFlags::empty()));
     if let Some(key) = cache_key {
-        if !key.0.is_empty() {
-            if LEAF_MESHES.len() >= LEAF_MESH_CACHE_CAP {
-                LEAF_MESHES.clear();
-            }
-            LEAF_MESHES.insert(key, mesh.clone());
+        if LEAF_MESHES.len() >= LEAF_MESH_CACHE_CAP {
+            LEAF_MESHES.clear();
         }
+        LEAF_MESHES.insert(key, mesh.clone());
     }
     Some(mesh)
 }
@@ -1873,12 +1903,14 @@ mod tests {
     }
 
     fn leaf_row(key: &str, refno: &str, noun: &str) -> LeafRow {
+        let insts = vec![(format!("hash_{refno}"), None)];
         LeafRow {
             key: key.to_string(),
             refno: refno.to_string(),
             noun: noun.to_string(),
             world_trans: None,
-            insts: vec![(format!("hash_{refno}"), None)],
+            placement_fingerprint: placement_fingerprint(None, &insts),
+            insts,
             model_sesno: Some(1),
         }
     }
@@ -1954,6 +1986,127 @@ mod tests {
         let p = m.transform_point3(Vec3::new(1.0, 0.0, 0.0));
         assert!((p - Vec3::new(12.0, 0.0, 0.0)).length() < 1e-5, "{p:?}");
         assert_eq!(mat_from_trans(None), Mat4::IDENTITY);
+    }
+
+    /// 摆放指纹：同一行两次读出来一样；`world_trans`、实例的本地变换、`geo_hash` 任一变了就不一样。
+    /// `row_to_leaf` 算出来的就是它，世界网格缓存键的第三格靠它把重算前后分开。
+    #[test]
+    fn placement_fingerprint_tracks_world_trans_and_instances() {
+        let row = |wt: serde_json::Value, insts: serde_json::Value| {
+            serde_json::json!({
+                "key": "17496_137183", "refno": "pe:17496_137183", "noun": "FIXING",
+                "wt": wt, "insts_flat": insts, "booled_id": null, "model_sesno": 729
+            })
+        };
+        let stale = serde_json::json!({"translation": [-2593.8, 12222.1, -5345.0], "rotation": [0.0, 0.0, 0.0, 1.0]});
+        let fixed = serde_json::json!({"translation": [-15559.96, -2743.64, 2150.0], "rotation": [0.0, 0.0, 0.0, 1.0]});
+        let inst = serde_json::json!([{"geo_hash": "e3d_baked_v2_c3edc9", "transform": {"translation": [0.0, 0.0, 0.0]}}]);
+        let inst_moved = serde_json::json!([{"geo_hash": "e3d_baked_v2_c3edc9", "transform": {"translation": [1.0, 0.0, 0.0]}}]);
+        let inst_other = serde_json::json!([{"geo_hash": "e3d_baked_v2_other", "transform": {"translation": [0.0, 0.0, 0.0]}}]);
+
+        let a = row_to_leaf(&row(stale.clone(), inst.clone()), false).expect("row");
+        let a_again = row_to_leaf(&row(stale.clone(), inst.clone()), false).expect("row");
+        let b = row_to_leaf(&row(fixed, inst.clone()), false).expect("row");
+        let c = row_to_leaf(&row(stale.clone(), inst_moved), false).expect("row");
+        let d = row_to_leaf(&row(stale, inst_other), false).expect("row");
+        assert_eq!(
+            a.placement_fingerprint, a_again.placement_fingerprint,
+            "同一行要稳定"
+        );
+        assert_eq!(
+            a.placement_fingerprint,
+            placement_fingerprint(a.world_trans.as_ref(), &a.insts)
+        );
+        assert_ne!(
+            a.placement_fingerprint, b.placement_fingerprint,
+            "world_trans 变了"
+        );
+        assert_ne!(
+            a.placement_fingerprint, c.placement_fingerprint,
+            "实例本地变换变了"
+        );
+        assert_ne!(
+            a.placement_fingerprint, d.placement_fingerprint,
+            "geo_hash 变了"
+        );
+        // 缓存键三格：key / sesno / 指纹——同 key 同 sesno 摆放不同，键必须不同；老数据没 sesno 不进缓存。
+        let ka = leaf_cache_key(&a).expect("key");
+        let kb = leaf_cache_key(&b).expect("key");
+        assert_eq!((ka.0.as_str(), ka.1), ("17496_137183", 729));
+        assert_eq!((ka.0.as_str(), ka.1), (kb.0.as_str(), kb.1));
+        assert_ne!(ka.2, kb.2);
+        let mut no_sesno = a.clone();
+        no_sesno.model_sesno = None;
+        assert!(leaf_cache_key(&no_sesno).is_none());
+        let mut no_key = a;
+        no_key.key.clear();
+        assert!(leaf_cache_key(&no_key).is_none());
+    }
+
+    /// 2026-09-18 `:8022` 实测的那个坑：`model/ensure force=true` 重算一个根，库里 `world_trans` 已换、
+    /// `model_sesno` 仍是 729，旧键 `(key, sesno)` 命中重算前的世界网格，FIXING × WALL 照旧回 10 358 mm。
+    /// 现在同 key 同 sesno、只换 `world_trans` 的第二行必须拼出新位置的网格，而不是缓存里的旧网格。
+    #[test]
+    fn leaf_mesh_cache_misses_when_placement_changes_under_the_same_sesno() {
+        let dir = std::env::temp_dir().join(format!(
+            "gmmc-surface-clearance-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp meshes dir");
+        let geo_hash = "unit_tri_for_cache_test";
+        let unit = PlantMesh {
+            indices: vec![0, 1, 2],
+            vertices: vec![
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            normals: vec![Vec3::Z, Vec3::Z, Vec3::Z],
+            ..PlantMesh::default()
+        };
+        unit.ser_to_file(&dir.join(format!("{geo_hash}.mesh")))
+            .expect("write unit mesh");
+
+        let row_at = |x: f64| {
+            let json = serde_json::json!({
+                "key": "cache_test_17496_137183", "refno": "pe:17496_137183", "noun": "FIXING",
+                "wt": {"translation": [x, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0, 1.0]},
+                "insts_flat": [{"geo_hash": geo_hash}], "booled_id": null, "model_sesno": 729
+            });
+            row_to_leaf(&json, false).expect("row")
+        };
+        let mut warnings = Vec::new();
+        let before = build_leaf_mesh(&row_at(0.0), &dir, &mut warnings).expect("mesh before regen");
+        let after =
+            build_leaf_mesh(&row_at(1000.0), &dir, &mut warnings).expect("mesh after regen");
+        let same_again =
+            build_leaf_mesh(&row_at(0.0), &dir, &mut warnings).expect("mesh before regen again");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let min_x = |mesh: &TriMesh| {
+            mesh.vertices()
+                .iter()
+                .map(|v| v.x)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            (min_x(&before) - 0.0).abs() < 1e-3,
+            "重算前的网格在原位: {}",
+            min_x(&before)
+        );
+        assert!(
+            (min_x(&after) - 1000.0).abs() < 1e-3,
+            "同 key 同 sesno 换了 world_trans，必须拼新网格而不是命中旧缓存: {}",
+            min_x(&after)
+        );
+        assert!(
+            Arc::ptr_eq(&before, &same_again),
+            "摆放没变的行仍要命中同一份缓存"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// live 8009（ns 1516 / AvevaMarineSample，与 `_runs/*-8022|8023` 两台服务同一个库）：
