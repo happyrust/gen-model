@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
+use crate::data_interface::db_file_header::DbFileHeader;
+use crate::data_interface::element_attributes::{ElementAttributeService, PinnedRead};
 use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::fast_model::e3d_model_service::{
     E3dModelService, SnapshotSourceError, apply_geometry_delta_on, current_mdb_sources,
@@ -95,6 +97,14 @@ impl std::fmt::Display for HistoricalModelError {
 
 impl std::error::Error for HistoricalModelError {}
 
+/// `tool=attributes` 裁决完入参之后要读的东西：哪份回执、哪个构件、单元根是谁。
+#[derive(Debug)]
+struct AttributesTarget {
+    report: HistoricalModelReport,
+    target: RefNo,
+    unit: RefNo,
+}
+
 /// 快照回执表。几何本身不在这里，在投影存储的 `Historical(<key>)` 命名空间里。
 #[derive(Default)]
 pub struct HistoricalModelStore {
@@ -164,10 +174,157 @@ impl HistoricalModelStore {
                 meshes
             }
             other => anyhow::bail!(
-                "unknown historical query tool {other:?}; expected snapshot/instances/tubes/geometry"
+                "unknown historical query tool {other:?}; expected snapshot/instances/tubes/geometry/attributes"
             ),
         };
         Ok(Value::Array(rows))
+    }
+
+    /// `tool=attributes` 的入参裁决，不碰文件：快照回执在不在、refno 合不合法、是不是快照所在库。
+    /// 抽出来是为了让这几档错误码在没有真库的环境里也测得到。
+    fn attributes_target(
+        &self,
+        snapshot_key: &str,
+        refno: &str,
+    ) -> Result<AttributesTarget, HistoricalModelError> {
+        // 键格式不对的快照不可能存在——与 DELETE 之后再问同一档。
+        validate_snapshot_key(snapshot_key)
+            .map_err(|error| HistoricalModelError::new("SNAPSHOT_NOT_FOUND", error))?;
+        let report = self
+            .reports
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(snapshot_key)
+            .cloned()
+            .ok_or_else(|| {
+                HistoricalModelError::new(
+                    "SNAPSHOT_NOT_FOUND",
+                    format!("snapshot 不存在（已 DELETE 或从未 generate）: {snapshot_key}"),
+                )
+            })?;
+        let target = crate::fast_model::e3d_model_service::parse_refno(refno)
+            .map_err(|error| HistoricalModelError::new("INVALID_REFNO", format!("{error:#}")))?;
+        if target.dbno() != report.dbnum {
+            return Err(HistoricalModelError::new(
+                "INVALID_REFNO",
+                format!(
+                    "refno {}/{} 不属于快照 {} 所在的库 dbnum {}",
+                    target.word0, target.word1, snapshot_key, report.dbnum
+                ),
+            ));
+        }
+        let unit =
+            crate::fast_model::e3d_model_service::parse_refno(&report.refno).map_err(|error| {
+                HistoricalModelError::new(
+                    "SNAPSHOT_NOT_FOUND",
+                    format!(
+                        "快照 {snapshot_key} 的单元根 {} 解析失败: {error:#}",
+                        report.refno
+                    ),
+                )
+            })?;
+        Ok(AttributesTarget {
+            report,
+            target,
+            unit,
+        })
+    }
+
+    /// `tool=attributes`：某构件在快照那个会话下的属性（ADR-081 候选条，契约 2026-09-18）。
+    ///
+    /// 取数 = 快照回执里的 `(source_file, resolved_session.sesno)` → 会话钉死的单库 `DbSet`
+    /// → 与 `POST element/attributes` **同一个渲染器**（[`ElementAttributeService::read_pinned`]），
+    /// 属性面板与属性历史对比对同一个属性印同一个字。**不落库、不进生产投影、不建缓存表**（d-179）。
+    ///
+    /// - 该 refno 在那个会话不存在（还没建 / 已删）→ `exists: false, noun: null, attributes: []`，
+    ///   **不是错误**——对比面板把「该版本不存在」当一种正常态显示。
+    /// - refno 存在但不在单元子树里（owner 链上溯到不了单元根）→ `REFNO_OUTSIDE_SNAPSHOT`。
+    /// - 快照不在 / 已 DELETE → `SNAPSHOT_NOT_FOUND`；refno 非法或不属于快照所在库 → `INVALID_REFNO`。
+    pub async fn attributes_at(
+        &self,
+        snapshot_key: &str,
+        refno: &str,
+        service: std::sync::Arc<ElementAttributeService>,
+    ) -> Result<Value, HistoricalModelError> {
+        let AttributesTarget {
+            report,
+            target,
+            unit,
+        } = self.attributes_target(snapshot_key, refno)?;
+        let started = Instant::now();
+        let sesno = report.resolved_session.sesno;
+        let file = PathBuf::from(&report.source_file);
+        let dbnum = report.dbnum;
+        let outcome = tokio::task::spawn_blocking(move || {
+            let header = DbFileHeader::read(&file).map_err(|error| {
+                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+            })?;
+            let pin = PinnedRead {
+                dbnum: dbnum as i32,
+                db_type: header.db_type,
+                file,
+                sesno,
+            };
+            let set = service.open_pinned(&pin).map_err(|error| {
+                HistoricalModelError::new("SESSION_NOT_FOUND", format!("{error:#}"))
+            })?;
+            let element = set.element(target);
+            let exists = element.exists().map_err(|error| {
+                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+            })?;
+            if !exists {
+                return Ok(None);
+            }
+            if target != unit {
+                let root = set.element(unit);
+                let inside = element.is_descendant_of(&root).map_err(|error| {
+                    HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+                })?;
+                if !inside {
+                    return Err(HistoricalModelError::new(
+                        "REFNO_OUTSIDE_SNAPSHOT",
+                        format!(
+                            "{}/{} 在会话 {sesno} 不在单元 {}/{} 的子树里",
+                            target.word0, target.word1, unit.word0, unit.word1
+                        ),
+                    ));
+                }
+            }
+            service.read_pinned(&set, &pin, target).map_err(|error| {
+                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+            })
+        })
+        .await
+        .map_err(|error| {
+            HistoricalModelError::new("internal", format!("属性历史读取线程异常退出: {error}"))
+        })??;
+        let refno_text = format!("{}/{}", target.word0, target.word1);
+        Ok(match outcome {
+            Some(response) => json!({
+                "snapshot_key": snapshot_key,
+                "dbnum": dbnum,
+                "sesno": sesno,
+                "refno": refno_text,
+                "exists": true,
+                "noun": response.noun,
+                "complete": response.complete,
+                "attributes": response.attributes,
+                "diagnostics": response.diagnostics,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }),
+            None => json!({
+                "snapshot_key": snapshot_key,
+                "dbnum": dbnum,
+                "sesno": sesno,
+                "refno": refno_text,
+                "exists": false,
+                "noun": Value::Null,
+                "complete": true,
+                "attributes": [],
+                "diagnostics": Value::Null,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }),
+        })
     }
 
     async fn publish(&self, report: &HistoricalModelReport) -> anyhow::Result<()> {
@@ -920,5 +1077,126 @@ mod tests {
             "别的快照不该被这一次丢连累"
         );
         projection.drop_scope(ProjectionScope::Historical(neighbour));
+    }
+
+    fn attributes_fixture_report(key: &str, unit: RefNo, sesno: u32) -> HistoricalModelReport {
+        HistoricalModelReport {
+            snapshot_key: key.to_string(),
+            dbnum: unit.dbno(),
+            refno: format!("{}/{}", unit.word0, unit.word1),
+            resolved_session: ResolvedSession {
+                requested: format!("sesno:{sesno}"),
+                sesno,
+                session_time: None,
+            },
+            source_file: "fixture".to_string(),
+            source_fingerprint: "fingerprint".to_string(),
+            visited: 1,
+            generated: 1,
+            failed: 0,
+            skipped: 0,
+            upserted: 1,
+            shared_instances: 1,
+            baked_instances: 0,
+            mesh_written: 0,
+            mesh_reused: 1,
+            unique_meshes: 1,
+            elapsed_ms: 1,
+        }
+    }
+
+    /// `tool=attributes` 的入参裁决（ADR-081 候选条的三档错误码）在没有真库的环境里就能判：
+    /// 快照不在 / 键格式不对 → SNAPSHOT_NOT_FOUND；refno 非法或不属于快照所在库 → INVALID_REFNO；
+    /// 合法则把单元根与目标一起交出去，子树归属留给钉死的池判。
+    #[tokio::test]
+    async fn attributes_target_settles_the_contract_error_codes_before_touching_any_file() {
+        let store = HistoricalModelStore::open().await.expect("report store");
+        let unit = RefNo::new(24384, 23257);
+        assert_eq!(unit.dbno(), 8000, "夹具单元根应落在 dbnum 8000");
+        let key = "24384_23257@573";
+        store
+            .publish(&attributes_fixture_report(key, unit, 573))
+            .await
+            .expect("publish fixture report");
+
+        let missing = store
+            .attributes_target("24384_23257@574", "24384/23262")
+            .expect_err("没 generate 过的快照");
+        assert_eq!(missing.code, "SNAPSHOT_NOT_FOUND");
+        let malformed = store
+            .attributes_target("24384_23257@573';DELETE", "24384/23262")
+            .expect_err("键格式不对的快照不可能存在");
+        assert_eq!(malformed.code, "SNAPSHOT_NOT_FOUND");
+
+        let garbage = store
+            .attributes_target(key, "not-a-refno")
+            .expect_err("refno 解析失败");
+        assert_eq!(garbage.code, "INVALID_REFNO");
+        let other_db = RefNo::new(24381, 145018);
+        assert_ne!(other_db.dbno(), unit.dbno(), "夹具需要一个别的库的 refno");
+        let foreign = store
+            .attributes_target(key, "24381/145018")
+            .expect_err("别的库的 refno 不属于这个快照");
+        assert_eq!(foreign.code, "INVALID_REFNO");
+        assert!(
+            foreign.message.contains("dbnum 8000"),
+            "{}",
+            foreign.message
+        );
+
+        let member = store
+            .attributes_target(key, "24384_23262")
+            .expect("a_b 写法也收");
+        assert_eq!(member.target, RefNo::new(24384, 23262));
+        assert_eq!(member.unit, unit);
+        assert_eq!(member.report.resolved_session.sesno, 573);
+        let root = store
+            .attributes_target(key, "24384/23257")
+            .expect("单元根自己也允许");
+        assert_eq!(root.target, root.unit);
+    }
+
+    /// 快照 DELETE 之后再问属性，回的是 SNAPSHOT_NOT_FOUND，不是一份空表。
+    #[tokio::test]
+    async fn attributes_after_drop_is_snapshot_not_found() {
+        let store = HistoricalModelStore::open().await.expect("report store");
+        let unit = RefNo::new(24384, 23257);
+        let key = "24384_23257@626";
+        store
+            .publish(&attributes_fixture_report(key, unit, 626))
+            .await
+            .expect("publish fixture report");
+        assert!(store.attributes_target(key, "24384/23262").is_ok());
+        store.drop_snapshot(key).await.expect("drop");
+        let gone = store
+            .attributes_target(key, "24384/23262")
+            .expect_err("DELETE 之后回执一起走");
+        assert_eq!(gone.code, "SNAPSHOT_NOT_FOUND");
+    }
+
+    /// 守卫：`tool=attributes` 的错误码只有契约那三档 + 文件层的 SOURCE/SESSION，
+    /// 且 `exists: false` 是正常回执不是错误——谁把「不存在」改成 404 先红。
+    #[test]
+    fn attributes_at_keeps_absence_as_a_normal_response() {
+        let source = include_str!("historical_model.rs");
+        let body = source
+            .split_once("pub async fn attributes_at(")
+            .expect("attributes_at exists")
+            .1
+            .split_once("async fn publish(")
+            .expect("publish follows attributes_at")
+            .0;
+        assert!(
+            body.contains("return Ok(None);"),
+            "构件在该会话不存在必须走正常回执，不是错误"
+        );
+        assert!(body.contains("\"exists\": false"));
+        assert!(body.contains("\"REFNO_OUTSIDE_SNAPSHOT\""));
+        for forbidden in ["write_behind", "publish(", "SUL_DB", "commit("] {
+            assert!(
+                !body.contains(forbidden),
+                "属性历史读取不得碰持久层 / 生产投影（d-179）: {forbidden}"
+            );
+        }
     }
 }

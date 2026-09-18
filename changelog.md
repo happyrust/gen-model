@@ -2,6 +2,23 @@
 
 ## 2026-09-18
 
+### 属性历史对比落地（`POST model/history/query tool=attributes`）——某构件在快照那个会话下的属性，与 `element/attributes` 同一个渲染器，不落库
+
+- 契约见 ADR-081 候选条（18:0x 定、一字未改）：`{ snapshot_key, tool: "attributes", arguments: { refno: "a/b" } }` →
+  `{ snapshot_key, dbnum, sesno, refno, exists, noun, attributes: ElementAttribute[] }`（另多给 `complete` / `diagnostics` / `elapsed_ms`）；
+  该 refno 在那个会话不存在 → `exists: false, noun: null, attributes: []` **不是 404**；`INVALID_REFNO` 400（含 refno 不属于快照所在库、缺 `arguments.refno`）/
+  `SNAPSHOT_NOT_FOUND` 404（含已 DELETE、键格式不对）/ `REFNO_OUTSIDE_SNAPSHOT` 422（存在但 owner 链上溯到不了单元根）。
+- 取数：回执里的 `(source_file, resolved_session.sesno)` → `DbFileHeader::read` 反出 `db_type` → `ElementAttributeService::open_pinned`（会话钉死的单库
+  `DbSet`，`open_pinned_set`）→ `exists` / `is_descendant_of` → `read_pinned`：`extraction()` / `parsed()` 交给与属性面板**同一个** `render`
+  （identity 三行 + `render_attribute` + 类型默认值 / UDA materialize），只是不 `offer_backup`（回执 `backup.status = "skipped-pinned"`）。
+  不进库、不进生产投影、不建缓存表（d-179）。
+- 前置：`element_attributes.rs` 的 E3D 对齐渲染器那一笔（另一会话在途，+678 行）由 fable-5-1-6 按用户拍板代提（`6a76eefb4`），门
+  `cargo test --lib` 2239 过 / 1 败——那 1 败是 `model_impact` 的读取集合镜像测试，比的是本仓 `generation_read_set.json` 与
+  `vendor/e3d-model/data/attribute-read-set.json`，后者今天 18:09 被 e3d-model 那边改了，与两笔都无关。
+- 验证：`historical_model::tests` +3（`attributes_target` 三档错误码 / DELETE 后 `SNAPSHOT_NOT_FOUND` / 守卫「不存在是正常回执、不碰持久层」）、
+  `element_attributes::tests` +1（`read` / `read_pinned` 共用 `render`、`offer_backup` 只在 `render` 里出现一次且只有 `read` 传 true）；
+  `cargo test --lib` 2247 过 / 1 败（同上那条）；`rustfmt --check` 新增段干净。真机 HTTP / plant3d-web 端到端见下一条追记。
+
 ### 候选需求登记（docs）：属性历史对比——plant3d-web 删掉 legacy `/api/model-history/*` 消费者后，本仓尚无对应只读接口
 
 - plant3d-web 同日退役了版本对比的 legacy 链（ADR 0065 追记），连带删掉钉在 legacy `/api/model-history/*`（anchors / resolve-anchor / snapshot）上的

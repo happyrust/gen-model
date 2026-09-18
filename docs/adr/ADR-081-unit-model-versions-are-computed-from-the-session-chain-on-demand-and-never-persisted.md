@@ -85,3 +85,10 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
     与 `unit_versions` 同一把尺子）。
   - 前端（plant3d-web，已按此契约接线）：`ModelVersionGeometry.handle` = snapshot_key（适配器私有），`ModelVersionSource.attributesAt(geometry, refno)`，
     对比面板把 `attributesAt(side, refno)` 随树内差异上下文交给模型树，差异模式底部新面板逐属性对比 A / B。
+  - **20:2x 实施（后端半边落地，契约一字未改）**：`element_attributes.rs` 那一笔（E3D 对齐渲染器）由 fable-5-1-6 代提入库（`6a76eefb4`）后，
+    `ElementAttributeService::read` 拆成 `read`（当前时点，offer_backup）+ `render`（共用渲染器）+ `read_pinned(set, pin, refno)`（调用方给的会话钉死
+    池，不 offer_backup、不落库，不存在 → `None`）；`HistoricalModelStore::attributes_at` 按回执 `(source_file, resolved_session.sesno)` 开池
+    （`DbFileHeader::read` 反出 `db_type`）、`exists` / `is_descendant_of(单元根)` 判存在与归属、再 `read_pinned`；`POST model/history/query`
+    的 handler 见 `tool == "attributes"` 走它（要 `arguments.refno`，缺了 `INVALID_REFNO`），`historical_error` 多映三档
+    `INVALID_REFNO` 400 / `SNAPSHOT_NOT_FOUND` 404 / `REFNO_OUTSIDE_SNAPSHOT` 422。回执在契约之外多给 `complete` / `diagnostics` / `elapsed_ms`。
+    入参裁决抽成 `attributes_target`，无真库也测得到三档错误码；守卫钉住「不存在是正常回执」与「`read_pinned` 不碰备份库 / 当前时点会话」。

@@ -1696,9 +1696,13 @@ pub struct HistoricalQueryReq {
 
 fn historical_error(error: crate::fast_model::historical_model::HistoricalModelError) -> ApiError {
     let status = match error.code {
-        "INVALID_SELECTOR" => StatusCode::BAD_REQUEST,
-        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" => StatusCode::NOT_FOUND,
-        "TIME_BEFORE_OLDEST_SESSION" => StatusCode::UNPROCESSABLE_ENTITY,
+        "INVALID_SELECTOR" | "INVALID_REFNO" => StatusCode::BAD_REQUEST,
+        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" | "SNAPSHOT_NOT_FOUND" => {
+            StatusCode::NOT_FOUND
+        }
+        "TIME_BEFORE_OLDEST_SESSION" | "REFNO_OUTSIDE_SNAPSHOT" => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         "GENERATION_LIMIT_EXCEEDED" => StatusCode::PAYLOAD_TOO_LARGE,
         "GENERATION_CANCELLED" => StatusCode::REQUEST_TIMEOUT,
         "SESSION_TIME_UNAVAILABLE" | "SOURCE_NOT_FOUND" | "SOURCE_CHANGED" => {
@@ -1845,13 +1849,41 @@ pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<
 }
 
 /// POST /api/v1/model/history/query
+///
+/// `tool=attributes`（ADR-081 候选条，契约 2026-09-18）另走一条：`arguments.refno`（`a/b`）在快照那个
+/// 会话下的属性，与 `element/attributes` 同一个渲染器；文件 I/O 在 `spawn_blocking` 里。
 pub async fn model_history_query(
+    State(state): State<AppState>,
     Json(req): Json<HistoricalQueryReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = req.arguments;
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()
         .await
         .map_err(ApiError::from_domain)?;
+    if req.tool == "attributes" {
+        let refno = req
+            .arguments
+            .get("refno")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::coded(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REFNO",
+                    "tool=attributes 需要 arguments.refno（a/b）",
+                )
+            })?;
+        let service = state
+            .element_attributes
+            .get()
+            .await
+            .map_err(ApiError::from_domain)?;
+        return store
+            .attributes_at(&req.snapshot_key, refno, service)
+            .await
+            .map(Json)
+            .map_err(historical_error);
+    }
     store
         .query(&req.snapshot_key, &req.tool)
         .await

@@ -14,11 +14,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
 use anyhow::Context;
+use e3d_io::db_element::DbSet;
 use e3d_io::noun_catalog::NounCatalog;
 use e3d_io::record::descriptor::{
     AttributeExtractionStatus, DescriptorValue, ElementExtraction, ExtractedAttribute,
 };
 use e3d_io::record::explicit::{ExplicitAttribute, ExplicitValue};
+use e3d_io::refno::RefNo;
 use e3d_io::uda_catalog::UdaCatalog;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -93,6 +95,17 @@ pub struct AttributeDiagnostics {
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupStatus {
     pub status: &'static str,
+}
+
+/// 一个会话钉死的读取点：[`ElementAttributeService::read_pinned`] 往回执里写的库身份，
+/// 也是 [`ElementAttributeService::open_pinned`] 开池的依据。`db_type` 决定模板文件
+/// （`DESI` → `desvir.dat`），从库文件头反哈希得来。
+#[derive(Debug, Clone)]
+pub struct PinnedRead {
+    pub dbnum: i32,
+    pub db_type: String,
+    pub file: PathBuf,
+    pub sesno: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,7 +244,83 @@ impl ElementAttributeService {
     }
 
     pub fn read(&self, refno: RefU64) -> anyhow::Result<ElementAttributesResponse> {
-        let mut snapshot = self.store.element_snapshot(refno)?;
+        let snapshot = self.store.element_snapshot(refno)?;
+        self.render(snapshot, true)
+    }
+
+    /// 打开一个会话钉死的单库 `DbSet`，给 [`Self::read_pinned`] 用；调用方在同一个池上先做
+    /// 存在 / 归属判断（`exists` / `is_descendant_of`），再读属性，不必开两次。
+    pub fn open_pinned(&self, pin: &PinnedRead) -> anyhow::Result<Arc<DbSet>> {
+        open_pinned_set(&self.reader.schema, &pin.file, &pin.db_type, pin.sesno)
+    }
+
+    /// 某构件在**指定会话**下的属性——属性历史对比（`model/history/query tool=attributes`，
+    /// ADR-081 候选条）走这里。
+    ///
+    /// 与 [`Self::read`] 同一个渲染器（identity 行 + `render_attribute` + 类型默认值 / UDA
+    /// materialize），属性面板与属性历史对比对同一个属性印同一个字；不同的只有取数——不经
+    /// `DirectStore` 那个钉在当前时点的会话，而是在调用方给的、按 `pin.sesno` 钉死的池上
+    /// `extraction()` / `parsed()`。**只读文件、不 offer_backup、不落库**（d-179：历史投影
+    /// 除 mesh 外一律不进库）。该 refno 在那个会话的索引里不存在（还没建 / 已删）→ `Ok(None)`，
+    /// 由调用方按「该版本不存在」的正常态回。
+    pub fn read_pinned(
+        &self,
+        set: &Arc<DbSet>,
+        pin: &PinnedRead,
+        refno: RefNo,
+    ) -> anyhow::Result<Option<ElementAttributesResponse>> {
+        let element = set.element(refno);
+        let exists = element.exists().map_err(|error| {
+            anyhow::anyhow!(
+                "会话 {} 的索引查 {}/{} 失败: {error}",
+                pin.sesno,
+                refno.word0,
+                refno.word1
+            )
+        })?;
+        if !exists {
+            return Ok(None);
+        }
+        let extraction = (*element.extraction().map_err(|error| {
+            anyhow::anyhow!(
+                "会话 {} 下抽取 {}/{} 失败: {error}",
+                pin.sesno,
+                refno.word0,
+                refno.word1
+            )
+        })?)
+        .clone();
+        let explicit_attributes = element
+            .parsed()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "会话 {} 下解析 {}/{} 失败: {error}",
+                    pin.sesno,
+                    refno.word0,
+                    refno.word1
+                )
+            })?
+            .explicit_attributes
+            .clone();
+        let snapshot = DirectElementSnapshot {
+            dbnum: pin.dbnum,
+            db_type: pin.db_type.clone(),
+            file: pin.file.clone(),
+            sesno: pin.sesno,
+            extraction,
+            explicit_attributes,
+        };
+        self.render(snapshot, false).map(Some)
+    }
+
+    /// 把一份文件快照渲染成公开的属性行。`read` / `read_pinned` 共用这一条：诊断按文件原样记、
+    /// 再补 E3D 会印的类型默认值、UDA 字典 materialize、identity 三行、按名排序去重。
+    /// `offer_backup` 只有当前时点的 `read` 给 true——历史会话的读不进备份库（d-179）。
+    fn render(
+        &self,
+        mut snapshot: DirectElementSnapshot,
+        offer_backup: bool,
+    ) -> anyhow::Result<ElementAttributesResponse> {
         let catalog = self.catalog.get()?;
         let mut diagnostics = AttributeDiagnostics {
             catalog_issues: catalog
@@ -317,7 +406,11 @@ impl ElementAttributeService {
         attributes.sort_by(|left, right| left.name.cmp(&right.name));
         attributes.dedup_by(|left, right| left.name == right.name);
 
-        let backup = self.offer_backup(&snapshot, &catalog);
+        let backup = if offer_backup {
+            self.offer_backup(&snapshot, &catalog)
+        } else {
+            "skipped-pinned"
+        };
         let complete = diagnostics.shape_conflicts.is_empty()
             && diagnostics.undecoded.is_empty()
             && diagnostics.uda_issues.is_empty();
@@ -1119,6 +1212,54 @@ mod tests {
         assert_eq!(value, Value::Null);
         assert_eq!(display, "unset");
         assert!(!editable);
+    }
+
+    /// 守卫（d-179 / ADR-081 候选条）：属性面板与属性历史对比走**同一个**渲染器——`read` 与
+    /// `read_pinned` 都只是把一份 `DirectElementSnapshot` 交给 `render`；而历史会话的读
+    /// 不进备份库：`offer_backup` 只在 `render` 里、且只有 `read` 那条传 true。
+    #[test]
+    fn pinned_reads_share_the_renderer_and_never_offer_backup() {
+        let source = include_str!("element_attributes.rs");
+        let read = source
+            .split_once("pub fn read(&self, refno: RefU64)")
+            .expect("read exists")
+            .1
+            .split_once("pub fn open_pinned(")
+            .expect("open_pinned follows read")
+            .0;
+        assert!(read.contains("self.render(snapshot, true)"), "{read}");
+
+        let pinned = source
+            .split_once("pub fn read_pinned(")
+            .expect("read_pinned exists")
+            .1
+            .split_once("/// 把一份文件快照渲染成公开的属性行")
+            .expect("render's doc follows read_pinned")
+            .0;
+        assert!(pinned.contains("self.render(snapshot, false)"), "{pinned}");
+        assert!(pinned.contains("return Ok(None);"), "不存在 → None，不是错误");
+        for forbidden in ["offer_backup", "spool", "SUL_DB", "store.element_snapshot"] {
+            assert!(
+                !pinned.contains(forbidden),
+                "read_pinned 不得走当前时点会话或备份库: {forbidden}"
+            );
+        }
+
+        let render = source
+            .split_once("fn render(")
+            .expect("render exists")
+            .1
+            .split_once("pub async fn ensure(")
+            .expect("ensure follows render")
+            .0;
+        // 针脚拼出来，免得这段测试自己的字面量也被数进去。
+        let call = format!("self.{}(", "offer_backup");
+        assert_eq!(
+            render.matches(call.as_str()).count(),
+            1,
+            "offer_backup 只在 render 里出现一次"
+        );
+        assert!(render.contains("if offer_backup {"));
     }
 
     #[test]
