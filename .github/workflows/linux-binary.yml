@@ -106,6 +106,12 @@ jobs:
 
       - name: Build release binary
         working-directory: gen-model
+        env:
+          # rustix 0.37 的 linux_raw 后端用 rustc_layout_scalar_valid_range_* 这类内部属性，
+          # 在这条 nightly 上直接「cannot find attribute」；官方逃生口是改走 libc 后端。
+          # windows 侧走的是另一套后端，所以那条 workflow 撞不上。
+          # RUSTFLAGS 一旦给了就整体顶掉 .cargo/config.toml 的 build.rustflags，-Z threads=8 要带回来。
+          RUSTFLAGS: "-Z threads=8 --cfg rustix_use_libc"
         run: >-
           cargo build --release --locked --bin aios-database
           --no-default-features
