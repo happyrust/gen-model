@@ -33,6 +33,14 @@
 
 ### 本地发布 0.1.28：房间归属三笔改写 + 空间净距新端点；`.dirty` 构建（六个仓的在途改动一并编进）
 
+- **当前交付的是第二版包**（同一 Cargo 版本、不同 build_id）：
+  `ams-local-0.1.28_release.20260918042801.g695cc85dc8bb.dirty-runtime.zip`（120.92 MB / 126,793,564 B），
+  SHA-256 `b9dc094bd2fe1a3d24c4dc86536a062283925740852624010a8124cab66f17f3`，构建自 `695cc85dc8bb`
+  （多带上面那条向导端口判据修复），A / B 两腿冒烟过（口 9499）、C 腿按 runtime 档跳过。
+  **验过修复真在包里**：把这份 zip 解到空目录起在 9599，问它 `0.0.0.0:9099` / `0.0.0.0:9399`（两个口
+  当时都真有监听）都回 `occupied  source=listener_table`，自己那个口回 `self`，空口回 `free`。
+  下面那份 `…20260918033726.g81d2c28c04cb…` 是本修之前的第一版，按 releases 不自动清理的纪律留着
+  （patch 基线用），**发出去别拿错**。
 - 后端 `0.1.28` 构建自 `81d2c28c04cb`（`chore(release): 0.1.28`），**工作树不干净**，build_id 带 `.dirty`。
   复用 0.1.26 那份已验证 Web（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，13 个文件）；
   前端本轮没有发版，plant-ui 工作树里 31 个在途文件**没有**进包。
