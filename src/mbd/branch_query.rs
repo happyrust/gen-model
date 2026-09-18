@@ -43,7 +43,7 @@ use e3d_model::route::{
     walk_route,
 };
 use e3d_model::transform::world_matrix;
-use glam::DVec3;
+use glam::{DMat4, DVec3};
 use plant_mbd::{
     BranchMember, BranchQueryResult, ConnectionRef, MbdV2Issue, PPoint, root_error_issue,
     suppress_issue,
@@ -167,13 +167,33 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     let tail_pos = container.get_position("TPOS")?;
     let tail_dir = container.get_direction("TDIR")?;
 
+    // 这四个读数是**属主相对**的，而构件端走 `CataloguePoints` / `world_matrix(&member)` 给的是
+    // 世界系。两端不折到同一个系里，属主链非单位阵的支管上头 / 尾段整条都落在系与系之间
+    // （e3d-model `route::container_point` 是同一处修复）。折不出来时如实记一笔，不拿单位阵冒充。
+    let container_world = match world_matrix(&container) {
+        Ok(matrix) => matrix,
+        Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => {
+            issues.push(suppress_issue(
+                &branch_refno,
+                &branch_refno,
+                "adapter.container_frame_unresolved",
+                "the container's owner chain could not be folded into world; head / tail points are \
+                 reported in the owner frame",
+            ));
+            DMat4::IDENTITY
+        }
+        Err(error) => return Err(error.into()),
+    };
+
     // 隐式管身的起点：上一站的离开点（Head 从 HPOS 起步；HDIR 缺时只判长度不判共轴）。
     let mut last_leave: Option<(String, RoutePoint, bool)> = head_pos.map(|pos| {
         (
             "Head".to_string(),
             RoutePoint {
-                pos: DVec3::from_array(pos),
-                dir: head_dir.map(DVec3::from_array).unwrap_or(DVec3::Z),
+                pos: container_world.transform_point3(DVec3::from_array(pos)),
+                dir: head_dir
+                    .map(|d| container_world.transform_vector3(DVec3::from_array(d)))
+                    .unwrap_or(DVec3::Z),
                 bore: container.get_double("HBOR").ok().flatten(),
             },
             head_dir.is_some(),
@@ -324,8 +344,10 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     if let (Some(tail), Some((from_refno, from, from_dir_known))) = (tail_pos, last_leave.as_ref())
     {
         let tail_point = RoutePoint {
-            pos: DVec3::from_array(tail),
-            dir: tail_dir.map(DVec3::from_array).unwrap_or(DVec3::Z),
+            pos: container_world.transform_point3(DVec3::from_array(tail)),
+            dir: tail_dir
+                .map(|d| container_world.transform_vector3(DVec3::from_array(d)))
+                .unwrap_or(DVec3::Z),
             bore: container.get_double("TBOR").ok().flatten(),
         };
         let arrive_check = if tail_dir.is_some() {
