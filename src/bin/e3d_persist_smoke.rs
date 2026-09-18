@@ -13,13 +13,13 @@
 //! worker 抢同一批行，热跑 5 次挂 2 次（`read or write conflict` 整笔回退）。内存介质那一档
 //! 没有 write-behind，由那个函数自己补落，抢不起来。
 //!
-//! **介质由配置说了算，本程序不自己挑**（`in_memory_db` / `AIOS_IN_MEMORY_DB`，与 `run_app`
-//! 同一个开关）：开着就接进程内嵌 kv-mem、跑完即消失、不碰任何外部库；关着就连
-//! `DbOption.toml` 里那台 SurrealDB 真写。让程序自己挑介质，回执里那句「落在哪」立刻就会
-//! 说谎——`PersistTarget` 的判据读的是配置。
+//! **介质由环境变量 `AIOS_STORE_MODE` 说了算，本程序不自己挑**（与 `run_app` 同一个开关，
+//! ADR-080：配置文件不再参与）：`mem` 就接进程内嵌 kv-mem、跑完即消失、不碰任何外部库；
+//! `rocksdb` 就连 `DbOption.toml` 里 v_ip:v_port 那台 SurrealDB 真写。让程序自己挑介质，
+//! 回执里那句「落在哪」立刻就会说谎——`PersistTarget` 的判据读的是同一个环境变量。
 //!
 //! ```text
-//! $env:AIOS_IN_MEMORY_DB="1"; cargo run --release --bin e3d_persist_smoke -- --dbnum 7997
+//! $env:AIOS_STORE_MODE="mem"; cargo run --release --bin e3d_persist_smoke -- --dbnum 7997
 //! ```
 //!
 //! `--root <a/b>` 换成**定向那一档**（`generate_and_persist_roots` → `persist_root`，
@@ -325,7 +325,7 @@ async fn batched_persist(dbnum: u32) -> anyhow::Result<()> {
 /// 所以每轮内两臂紧挨着跑、轮间换先后手，报的是各轮的中位数。
 ///
 /// 生成那一步照旧（本程序前半段），落库目标由 `--bind-endpoint` 单独连——与 `SUL_DB` 不是
-/// 同一个连接，生成期写进哪儿（配 `AIOS_IN_MEMORY_DB=1` 就是进程内 kv-mem）与这里无关。
+/// 同一个连接，生成期写进哪儿（`AIOS_STORE_MODE=mem` 就是进程内 kv-mem）与这里无关。
 async fn bind_bench(
     dbnum: u32,
     rows: usize,

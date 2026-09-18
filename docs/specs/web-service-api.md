@@ -726,7 +726,7 @@ ready 判据有两层，先进程后库上（ADR-073 D14，2026-09-16）：
 1. 当前根的 `RootPublicationAck`——房间开启时还要求 ACK 匹配当前 resident generation；
 2. ACK 够不着时（ACK 不持久，rocksdb 冷重启后一条都没有）看库上的整库对齐承诺
    `dbnum_watermark.model_room_generation`：与当前 resident generation 同一代，且本进程的生成根账本里
-   这根没欠着。落盘形态（`store_mode=rocksdb`）才有这一层；进程内嵌 `mem://` 活不过重启，仍只认第 1 层。
+   这根没欠着。落盘形态（`AIOS_STORE_MODE=rocksdb`）才有这一层；进程内嵌 `mem://` 活不过重启，仍只认第 1 层。
 
 两层用的是同一个代号，所以房间 / 面板真变过时两层一起作废 → `not_computed`。库上那一格由能替**整库**
 说话的任务（初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务）随 `model_sesno` 同盖，

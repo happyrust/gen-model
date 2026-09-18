@@ -240,9 +240,10 @@ impl ReviewPersistenceRefusal {
     pub fn message(&self) -> String {
         format!(
             "校审模块未启用：持久层介质 {} 活不过进程重启，而校审数据要求跨重启保留（ADR-075）。\
-             先启动持久 SurrealDB，再把 DbOption.toml 的 store_mode 改为 rocksdb 后重启服务；\
-             明知会丢也要开，设环境变量 {}=1。",
+             先启动持久 SurrealDB，再以环境变量 {}=rocksdb 重启服务（介质只认这个环境变量，\
+             DbOption.toml 里的 store_mode 不生效，ADR-080）；明知会丢也要开，设环境变量 {}=1。",
             self.store_mode,
+            crate::options::STORE_MODE_ENV,
             crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV
         )
     }
@@ -256,7 +257,7 @@ impl ReviewPersistenceRefusal {
         let rule = "=".repeat(78);
         format!(
             "{rule}\n\
-             *** 校审模块已拒绝启用（store_mode = {mode}）\n\
+             *** 校审模块已拒绝启用（介质 {mode}，由环境变量 {store_env} 决定）\n\
              \n\
              下面四组接口全部返回 503，不是 404、也不会退化成「能用但重启就没」：\n\
              {prefixes}\n\
@@ -266,8 +267,9 @@ impl ReviewPersistenceRefusal {
              让它先跑起来，等于让人把一天的校审意见写进一个会蒸发的库。\n\
              \n\
              怎么改（二选一）：\n\
-               1. 先启动持久 SurrealDB，再把 DbOption.toml 的 store_mode 改为 \"rocksdb\"，\n\
-                  指向该服务并重启 gen-model——这是正解；gen-model 不负责拉起数据库。\n\
+               1. 先启动持久 SurrealDB，把 DbOption.toml 的 v_ip / v_port 指向它，再以环境变量\n\
+                  {store_env}=rocksdb 重启 gen-model——这是正解；gen-model 不负责拉起数据库。\n\
+                  介质只认这个环境变量，文件里的 store_mode 不生效（ADR-080）。\n\
                2. 只是演示 / 联调、明知重启即丢：设环境变量 {env}=1 后重启，\n\
                   校审域照常启用，启动横幅会持续点名它。\n\
              \n\
@@ -275,6 +277,7 @@ impl ReviewPersistenceRefusal {
              {rule}",
             rule = rule,
             mode = self.store_mode,
+            store_env = crate::options::STORE_MODE_ENV,
             prefixes = REVIEW_URL_PREFIXES
                 .iter()
                 .map(|prefix| format!("  {prefix}/*"))
@@ -475,10 +478,11 @@ mod tests {
             assert_eq!(payload["success"], false, "{uri}: {payload}");
             assert_eq!(payload["code"], "review.persistence.refused", "{uri}");
             assert_eq!(payload["storeMode"], "mem", "{uri}");
+            // 改法要指到环境变量，不是配置文件（ADR-080）。
             assert!(
                 payload["message"]
                     .as_str()
-                    .is_some_and(|message| message.contains("store_mode")),
+                    .is_some_and(|message| message.contains("AIOS_STORE_MODE=rocksdb")),
                 "{uri}: {payload}"
             );
         }

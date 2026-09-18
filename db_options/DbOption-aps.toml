@@ -112,7 +112,10 @@ v_user = "root"
 v_password = "root"
 #【变更 2026-09-11】默认使用自带 kv-mem：服务自行拉起 memory SurrealDB，
 # 进程退出数据即消失；需要外置/持久库时显式改为 external 或 spawned-rocksdb。
-store_mode = "mem"
+#【退役 2026-09-18 / ADR-080】store_mode 已退出配置文件：介质只由环境变量 AIOS_STORE_MODE 决定
+#（mem / rocksdb，不设 = mem），文件里写这一行一个字都不生效、只会在启动日志被点名。
+# 这份配置此前写的是 store_mode = "mem"——配套脚本启动服务时要带 AIOS_STORE_MODE=mem（不设也是 mem）。
+# 上面关于「环境变量压过本键」的老话随之作废，留作决策史。
 
 #【新增 2026-08-27】in_memory_db —— 已被 store_mode 取代的兼容开关；默认不写 = 由上面的
 # store_mode 决定。只有未写 store_mode 时，显式 true 才选 embedded-mem、false 选 external。

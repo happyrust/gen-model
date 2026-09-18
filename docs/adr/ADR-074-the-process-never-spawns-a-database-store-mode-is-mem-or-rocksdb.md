@@ -2,6 +2,11 @@
 
 状态：**已接受**（2026-09-13 用户拍板：「mem 进程内，rocksdb 连配置里的远端库，不再自己拉子进程」；
 字面值用新名 `mem` / `rocksdb`、默认 `mem`、旧写法当别名认但启动时大声告警。**号到提交时复核**——ADR-060 曾撞号两次。）
+**2026-09-18 修订（ADR-080）**：介质**只由环境变量 `AIOS_STORE_MODE` 决定**，`DbOption.toml` 的 `store_mode` / `in_memory_db`
+退出配置文件、向导第②步只展示不选。本文 D3 里「`in_memory_db` 两态映射」作废（默认 `mem` 不变）；D4 的别名与告警只对
+**环境变量里**的退役写法生效，「向导只写新名」读作「向导一个字都不写」；实施约束 1 的护栏反转为
+`no_db_option_fixture_still_carries_a_store_mode_key`，约束 3 的向导用例换成 `the_wizard_shows_the_effective_store_mode_and_never_writes_it`。
+两档本身、只连不拉、durable 谓词与 `data_face` 派生（D1 / D2 / D5 / D6）不变。
 日期：2026-09-13
 落地：`src/options.rs`（`StoreMode { Mem, RocksDb }`、别名解析、`retired_store_mode_meaning` 告警、`has_endpoint()` 删除）、
 `src/lib.rs`（`ensure_store_connected` 两分支：`connect_in_memory_store` / `connect_configured_store`；`ensure_own_store` 删除）、

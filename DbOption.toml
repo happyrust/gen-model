@@ -110,32 +110,26 @@ v_ip = "localhost"
 v_port = 8009
 v_user = "root"
 v_password = "root"
-#【修订 2026-09-13，ADR-074】默认 mem：数据库在服务进程内，退出即消失。
-# 需要持久化时先启动外部 SurrealDB，再显式改成 rocksdb；服务只连接、不拉起数据库。
-#【本机开发档 2026-09-14】这里取 rocksdb：连 v_ip:v_port 上那台**以 RocksDB 后端起的**
-# surreal（scripts/Start-Surreal8009.ps1），本进程只连不拉。配合下面的 incremental-overlay：
+#【修订 2026-09-13，ADR-074】只有 mem / rocksdb 两档：mem = 数据库在服务进程内，退出即消失；
+# rocksdb = 连 v_ip:v_port 上那台**已经在跑、以 RocksDB 后端起的** surreal
+#（scripts/Start-Surreal8009.ps1），服务只连接、不拉起数据库。
+#【退役 2026-09-18，ADR-080】store_mode 已退出本文件：介质**只由环境变量 AIOS_STORE_MODE 决定**
+#（mem / rocksdb，不设 = mem）。这里再写 store_mode = "..." 一个字都不生效，只会在启动日志被点名。
+# 为什么：介质是「这一次进程怎么起」的事，跟启动命令走；本文件描述的是「这个工程长什么样」。
+# 同一份文件配置 + 环境变量分层叠加时，2026-09-18 现场真踩过「文件写 rocksdb、环境残留 mem、
+# 服务按 mem 起来、属性行一直不进库、日志一个字没提」——从此只留一个决定者。
+# 本机开发档要落盘：启动服务前 $env:AIOS_STORE_MODE = 'rocksdb'（Start-AiosDatabaseManual.ps1 /
+# Run-*.ps1 已经这么带），并先跑 Start-Surreal8009.ps1。配合下面的 incremental-overlay：
 # kv-mem 只留新生成的 root overlay，冷 root 直接查 RocksDB。
-store_mode = "rocksdb"
+# 2026-09-18 前这里写的是 store_mode = "rocksdb"。
 # RocksDB durable mode keeps only newly generated root overlays in kv-mem.
 # Cold roots are queried directly from RocksDB and never hydrated into kv-mem.
 model_cache_mode = "incremental-overlay"
 
-#【新增 2026-08-27】in_memory_db —— 已被 store_mode 取代的兼容开关；默认不写 = 由上面的
-# store_mode 决定。只有未写 store_mode 时，显式 true 才选 embedded-mem、false 选 external。
-# true：持久层换成**进程内嵌的 kv-mem 引擎**，上面 v_ip / v_port / v_user /
-#       v_password 整个不再使用。初始化解析、增量窗口写回、模型与房间派生数据
-#       全部照原路走，只是落点从 rocksdb 变成内存——SUL_DB 是 Surreal<Any>，
-#       引擎选择对上层不可见，没有第二条代码路径。
-# 【这是非正常运行状态】两条代价都不可逆：
-#   1. 进程一退整库就没了，崩溃现场只剩日志，事后取证做不了；
-#   2. 库在进程内，外面没有端口可连——rvm_verify、/sql 探针、Capture-*Evidence.ps1
-#      这类靠 ws 连库的工具全部够不着。
-# 要留证据或要让别的进程读库，用部署脚本的 -InMemory（外部 surreal 进程换 memory
-# 后端，端口还在），别用这个键。
-# 管不到的东西：assets/meshes 与 accel_tree 快照仍然落盘，那是 aios-database 自己
-# 写的派生数据；空间树启动判据照旧按库侧指纹裁决，空库会走重建。
-# 环境变量 AIOS_IN_MEMORY_DB 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
-# /health 有 in_memory_db 栏，启动横幅也会点名。
+#【新增 2026-08-27；退役 2026-09-18，ADR-080】in_memory_db —— store_mode 之前的旧开关，
+# 只表达得了 mem 那一档。随 store_mode 一起退出本文件：写了不生效、只会在启动日志被点名；
+# 环境变量 AIOS_IN_MEMORY_DB 同样不再决定介质。要选介质只有 AIOS_STORE_MODE 一条路。
+# /health 的 in_memory_db 栏仍在（按生效介质派生），供老客户端读。
 # in_memory_db = true
 pe_chunk = 300
 att_chunk = 200
