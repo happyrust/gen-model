@@ -230,7 +230,9 @@ SNIPPET
   fi
   [ -n "$site" ] || die "找不到站点配置文件，nginx 这一步没法自动做（可用 NGINX_SITE=... 指定，或 SKIP_NGINX=1 跳过）"
 
-  if grep -q 'aios-review-split.conf' "$site"; then
+  # 宽一点的匹配：前端那份模板里写的是通配 include（aios-review-split*.conf），
+  # 按全名找会漏掉它，于是又插一行，两条 include 撞出重复 location。
+  if grep -q 'aios-review-split' "$site"; then
     log "站点 ${site} 里已经 include 了分流片段"
   else
     backup="${site}.bak-$(date -u '+%Y%m%dT%H%M%SZ')"
