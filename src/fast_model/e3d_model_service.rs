@@ -2431,6 +2431,21 @@ impl E3dModelService {
                 file_target(dependency_dbnum, &selected.db_type, &selected.path, session)?,
             );
         }
+        // 字典库（DICT）也是几何的不可变输入：`build_set` 把 MDB 声明的字典库挂进 `DbSet`
+        // （`7d8e88c29`），目录表达式里的 UDA 从此按字典的键求值（e3d-io `9508ac4`，
+        // `( :HXYsize[2] )` 一类）——字典换一版，同一段目录程序可能求出别的数。身份按文件
+        // （长度 + 修改时间）记，会话位固定 0：字典库由 `add_db` 预开、不经 `E3dDbResolver`
+        // 懒开，没有谁往 `dependency_sessions` 里记它，让它跟会话走只会在两次算目标之间漂。
+        for pin in self
+            .pins
+            .iter()
+            .filter(|pin| pin.db_type.eq_ignore_ascii_case("DICT"))
+        {
+            catalogue.insert(
+                pin.dbnum as u32,
+                file_target(pin.dbnum as u32, &pin.db_type, &pin.file, 0)?,
+            );
+        }
         let project = self
             .locator
             .file_of(dbnum)
@@ -2445,7 +2460,7 @@ impl E3dModelService {
                 0,
             )?,
             generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
+                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-pml-uda-key-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION")
             ),
@@ -2465,6 +2480,11 @@ impl E3dModelService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for dependency in &published.catalogue {
+            // 目标里的字典库（DICT）按文件记身份、会话位固定 0（见 `model_target`），
+            // 不进依赖会话表——开它只为读一个不会用到的会话号。
+            if !dependency.db_type.eq_ignore_ascii_case("CATA") {
+                continue;
+            }
             let key = (published.design.dbnum, dependency.dbnum);
             if sessions.contains_key(&key) {
                 continue;
@@ -4116,6 +4136,56 @@ mod tests {
             .filter(|element| matches!(element.geometry_id, GeometryId::ImpliedTube { .. }))
             .count();
         assert_eq!(tubes, 103, "ZONE 24381/147826 的隐式管身根数变了");
+        Ok(())
+    }
+
+    /// 头槽位「一根也没多」不只靠求值环境不挂设计元素——**把 BRAN 挂上也长不出来**。
+    ///
+    /// 目录表达式里的 UDA 按字典的键求值（e3d-io `9508ac4`）：`/HRTUBE1-BOXI.PXLE` 写的键
+    /// `0x17EF4B61` 是 `AvevaCatalogue` 字典（acp7006）那条 `HXYsize` 的 `OLDKEY`，而支管的
+    /// `675 600` 存在本项目字典（ams5100）那条同名定义的键 `0x2652AB52` 下。六本字典按 CURD
+    /// 序合起来，键认成 acp 那条 → 对 BRAN 有效、元素上没值 → unset → 公式未解，印成 E3D
+    /// 的写法。这正是 E3D 自己对这些槽位报 `Catalogue error … unable to evaluate … PXLE`
+    /// 的落点；同一条支管 `Q :HXYsize` 却答 `675 600`。
+    #[tokio::test]
+    #[ignore = "real AMS 7997 + the project Dictionary databases"]
+    async fn ams7997_head_slot_expression_stays_unset_by_key_even_with_the_bran_attached()
+    -> anyhow::Result<()> {
+        use e3d_io::db_param_env::DbElementParamEnv;
+        use e3d_io::record::catalogue_eval::{AttributeNumber, ExpressionForm};
+        use e3d_io::record::descriptor::DescriptorValue;
+
+        let service = E3dModelService::from_current().await?;
+        let set = service.build_set(7997, None)?;
+        let dictionary = set.uda_catalog().context("MDB 声明的字典库一个都没读出来")?;
+        assert_eq!(
+            dictionary.by_key(0x17EF_4B61).map(|definition| definition.refno),
+            Some(RefNo::new(15198, 55)),
+            "目录写下的键该由 acp7006 的 /UDA/HVAC/HXYsize（OLDKEY）认下"
+        );
+
+        let branch = set.element(RefNo::new(24381, 59287));
+        assert_eq!(
+            branch.uda_by_key(0x2652_AB52)?,
+            Some(DescriptorValue::RealArray(vec![675.0, 600.0])),
+            "本项目字典那条键下有值"
+        );
+        assert_eq!(branch.uda_by_key(0x17EF_4B61)?, None, "目录指的那条键下没值");
+
+        let boxi = set
+            .find_named(7002, "/HRTUBE1-BOXI")?
+            .into_iter()
+            .map(|refno| set.element(refno))
+            .next()
+            .context("/HRTUBE1-BOXI 在 acp7002 里")?;
+        let attached = DbElementParamEnv::new(Some(branch), Some(boxi.clone()));
+        assert_eq!(
+            boxi.get_number("PXLE", &attached)?,
+            AttributeNumber::Unresolved {
+                form: ExpressionForm::Pml,
+                text: Some("( :HXYsize[2 ] )".into()),
+            }
+        );
         Ok(())
     }
 
