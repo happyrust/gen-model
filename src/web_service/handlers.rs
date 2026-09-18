@@ -1786,7 +1786,7 @@ pub struct ModelVersionsReq {
 
 fn unit_versions_error(error: crate::fast_model::unit_versions::UnitVersionsError) -> ApiError {
     let status = match error.code {
-        "INVALID_REFNO" => StatusCode::BAD_REQUEST,
+        "INVALID_REFNO" | "INVALID_VERSION_PAIR" => StatusCode::BAD_REQUEST,
         "REFNO_NOT_FOUND" | "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
         "NOT_A_DELIVERY_UNIT_ROOT" => StatusCode::UNPROCESSABLE_ENTITY,
         "COMPUTATION_TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
@@ -1864,6 +1864,103 @@ pub async fn element_versions(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
             format!("构件版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// GET /api/v1/element/attribute-history — 某个**节点**的属性变化时间线（plant3d-web ADR 0066）。
+///
+/// 与 `element/versions` 的分工：那张表只说「这一版它变没变」（两列五态）；这条说「谁在哪一版改了什么」——
+/// 每行一个它自身记录被改过的会话，带会话页 user / comment，展开是逐属性 before / after（与属性面板
+/// 同一个渲染器出字）。任意 refno 都受理。重 I/O，放 `spawn_blocking`。
+pub async fn element_attribute_history(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::attribute_history::AttributeHistoryReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let attributes = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::attribute_history::attribute_history(
+            dbnum,
+            refno,
+            since_sesno,
+            limit,
+            &attributes,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("属性时间线计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// `GET /api/v1/node/diff-summary` 的查询串：节点 + 两个会话 + 对比范围。
+#[derive(Debug, Deserialize)]
+pub struct NodeDiffSummaryReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    /// 较早的一版（链序在 `b` 之前，否则 400 `INVALID_VERSION_PAIR`）
+    pub a: u32,
+    /// 较新的一版
+    pub b: u32,
+    /// `self` / `subtree`，缺省 `subtree`
+    #[serde(default)]
+    pub scope: crate::fast_model::node_diff_summary::DiffScope,
+}
+
+/// GET /api/v1/node/diff-summary — 节点在 A→B 之间的差异摘要（plant3d-web ADR 0066）。
+///
+/// 不生成几何：一次索引差分 + 逐候选按生成路同一把尺子判新增 / 删除 / 修改 / noop，按最小交付单元分组，
+/// 附「变了的单元数」与要不要确认（阈值 `MODEL_HISTORY_CONFIRM_UNITS`）。前端拿变了的单元去逐个
+/// `history/generate`，未变的一份都不算。重 I/O，放 `spawn_blocking`。
+pub async fn node_diff_summary(
+    State(state): State<AppState>,
+    Query(req): Query<NodeDiffSummaryReq>,
+) -> Result<Json<crate::fast_model::node_diff_summary::DiffSummaryReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let NodeDiffSummaryReq {
+        dbnum, a, b, scope, ..
+    } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::node_diff_summary::node_diff_summary(dbnum, refno, a, b, scope)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("差异摘要计算线程异常退出: {error}"),
         )
     })?
     .map_err(unit_versions_error)?;

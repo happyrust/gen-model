@@ -2,6 +2,29 @@
 
 ## 2026-09-18
 
+### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
+
+- 用户 21:4x：「一个节点的版本管理，要能够查看它属性的版本历史，以及模型的版本历史……」，grill 两轮拍板（共享决策 d-203）：
+  任意节点一个面板，「对比范围」开关 `仅自身 / 所有子节点`，容器几何历史按最小交付单元折叠、**先摘要后生成**。
+- `GET /api/v1/element/attribute-history?dbnum&refno[&since_sesno&limit]`：**谁在哪一版改了什么**。每行一个它自身记录被改过的会话，
+  带会话页 `user` / `comment`（e3d-io `SessionPage`），`kind` created / modified / deleted，`impact` 与版本表同一词表（走同一个
+  `classify_operation_impact`），`changes[{name, value_type, before, after, stamp}]` 由属性面板**同一个渲染器**两端各出一次
+  （`ElementAttributeService::read_pinned`，字不同就是变了；`CACHID` 标 `stamp`），另列 `members{added, removed, reordered}` 与
+  `owner[before, after]`（成员序在 E3D 里就是管路走向）。索引说重写了但两端一字没差 = 原样换页，不成一行。
+- `GET /api/v1/node/diff-summary?dbnum&refno&a&b[&scope=subtree|self]`：A→B **不生成几何**的一张账。一次 `collect_window` 差分，
+  候选按范围过滤（`self` = `refno == 节点`；`subtree` = 变化那一侧 owner 链上溯到节点），逐个判 added / deleted / modified
+  （mesh · placement）/ noop，按所属单元分组（`groups[{unit_root, unit_noun, unit_name, counts, geometry_changed, rows}]`），
+  `units{changed, unchanged, total, complete}`（子树在 B 侧枚举、单元根以下不再下钻、上限 20 万元素），`needs_confirm` /
+  `estimated_projections = 变了的单元 × 2`，阈值 `MODEL_HISTORY_CONFIRM_UNITS`（缺省 20，0 = 从不确认）。`A` 不早于 `B` → 400
+  `INVALID_VERSION_PAIR`。
+- 两条都按需算、只活在进程内（ADR-081 / d-179）；`element_versions::SessionSets / modified_impact / resolve_unit_root` 放开为
+  `pub(crate)` 供三个模块共用。
+- 真机（debug 构建起在 :8033、内存库、ams8000 636 会话）：FTUB `24384/23262` 时间线 53 行（1 created + 52 modified），冷算 5.3 s
+  （索引差分 3.2 s + 两端渲染 1.3 s），每行 `POS` / `SPAMAP` 的 before/after 与 SAVEWORK 备注（`CODEX db8000 FTUBE 4 … up 500mm`）
+  逐字对得上；差异摘要 BRAN 子树 573→626 = 修改 1（FTUB）+ noop 1（BRAN 自身）50 ms；SITE `24384/22399` 子树 618→628 =
+  526 单元 / 变 2（BRAN 修改 1、EQUI 新增 BOX 1）71 ms；ZONE 子树 444→636 枚举 467 元素 / 449 单元 16 ms。单测 9 条。
+- 实现：`fast_model/attribute_history.rs`、`fast_model/node_diff_summary.rs`、`web_service/handlers.rs` 两个 handler + 路由。
+
 ### 构件级版本表（`GET /api/v1/element/versions`）——「查看某个构件的所有历史版本」，并排给所属单元那一列
 
 - 与 `model/versions` 并列、不覆盖：那条折整棵单元子树、非单元根 422；这条只认 `refno == 目标` 那一条变化，**任意 refno 都受理**。

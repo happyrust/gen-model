@@ -112,3 +112,16 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
   收窄到这个构件。按构件生成快照没有意义——管身是单元级派生物，单拎一个构件出来生成，几何对不齐。
 - 代码在 `fast_model/element_versions.rs`（独立模块）。`SessionSets` 与 `unit_versions` 那份 `PinnedSets` 同形，是当时那个文件另有
   会话在改、不动它留下的一份复制；两份合一是后续的小活。
+
+**2026-09-18 追记二：节点版本视图的两条（plant3d-web ADR 0066，共享决策 d-203）。** 同一条纪律再加两个派生量，都按需算、只活在进程内：
+
+- `GET /api/v1/element/attribute-history?dbnum&refno[&since_sesno&limit]`——**属性变化时间线**：谁在哪一版改了什么。每行一个它
+  自身记录被改过的会话，带会话页 `user` / `comment`、`kind`（created / modified / deleted）、与版本表同一词表的 `impact`，
+  `changes[{name, value_type, before, after, stamp}]` 由属性面板同一个渲染器两端各出一次，`members` / `owner` 另列。
+  `element/versions` 说「这一版它变没变」，这条说「改了什么、谁改的」，两条并列不覆盖。
+- `GET /api/v1/node/diff-summary?dbnum&refno&a&b[&scope]`——**差异摘要**：A→B 不生成几何的一张账，候选按范围（`self` / `subtree`）
+  过滤、按生成路同一把尺子判四态、按最小交付单元分组，附 `units{changed, unchanged, total, complete}` 与 `needs_confirm` /
+  `estimated_projections`（阈值 `MODEL_HISTORY_CONFIRM_UNITS`）。前端只对变了的单元 `history/generate`——代价只跟「变了多少」成正比，
+  这是容器节点（ZONE 下几百个单元）也能对比的前提。`A` 不早于 `B` → 400 `INVALID_VERSION_PAIR`。
+- 代码在 `fast_model/attribute_history.rs` / `fast_model/node_diff_summary.rs`；`element_versions` 的 `SessionSets` /
+  `modified_impact` / `resolve_unit_root` 放开为 `pub(crate)` 三处共用。

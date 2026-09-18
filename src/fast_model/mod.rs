@@ -7,6 +7,10 @@ pub mod historical_model;
 pub mod unit_versions;
 /// 单个构件的模型版本表：同一条链、只认它自己，并排给所属单元那一列。
 pub mod element_versions;
+/// 一个节点的属性变化时间线：谁在哪一版改了什么（会话 user / comment + 逐属性 before / after）。
+pub mod attribute_history;
+/// 节点两版之间的差异摘要：索引差分 + 模型影响，按最小交付单元分组，不生成几何。
+pub mod node_diff_summary;
 pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;

@@ -234,19 +234,30 @@ pub fn slice_table(
 /// 与 `unit_versions::PinnedSets` 同形（那份是模块私有的，且该文件此刻另有会话在改，不动它）；
 /// 两份合一等那笔落地后再做。不走 `E3dModelService::build_set` 的理由也一样：那条路每建一个池
 /// 都重解 attlib（真库实测 43 ms / 个）。
-struct SessionSets {
+pub(crate) struct SessionSets {
     attlib: Arc<e3d_attlib::AttlibData>,
     file: PathBuf,
     template: PathBuf,
     db_type: String,
     dbnum: u32,
     sets: HashMap<u32, Arc<DbSet>>,
-    built: usize,
-    build_time: Duration,
+    pub(crate) built: usize,
+    pub(crate) build_time: Duration,
 }
 
 impl SessionSets {
-    fn open(service: &E3dModelService, dbnum: u32) -> Result<Self, UnitVersionsError> {
+    /// 这个池对应的库文件与类型，按 `sesno` 钉成属性面板那套渲染器要的 `PinnedRead`
+    /// （`element_attributes::ElementAttributeService::read_pinned`）。
+    pub(crate) fn pin(&self, sesno: u32) -> crate::data_interface::element_attributes::PinnedRead {
+        crate::data_interface::element_attributes::PinnedRead {
+            dbnum: self.dbnum as i32,
+            db_type: self.db_type.clone(),
+            file: self.file.clone(),
+            sesno,
+        }
+    }
+
+    pub(crate) fn open(service: &E3dModelService, dbnum: u32) -> Result<Self, UnitVersionsError> {
         let (file, db_type) = service
             .source_pin(dbnum)
             .map_err(|e| UnitVersionsError::new("SOURCE_NOT_FOUND", format!("{e:#}")))?;
@@ -277,7 +288,7 @@ impl SessionSets {
         })
     }
 
-    fn at(&mut self, sesno: u32) -> Result<Arc<DbSet>, UnitVersionsError> {
+    pub(crate) fn at(&mut self, sesno: u32) -> Result<Arc<DbSet>, UnitVersionsError> {
         if let Some(set) = self.sets.get(&sesno) {
             return Ok(set.clone());
         }
@@ -314,7 +325,7 @@ impl SessionSets {
 }
 
 /// 元素级影响 → 版本词表。与单元表折叠用的是同一把尺子，只是这里没有「折叠」可言。
-fn impact_of(operation: OperationImpact) -> UnitVersionImpact {
+pub(crate) fn impact_of(operation: OperationImpact) -> UnitVersionImpact {
     match operation {
         OperationImpact::Regen => UnitVersionImpact::Mesh,
         OperationImpact::TransformOnly => UnitVersionImpact::Placement,
@@ -324,7 +335,7 @@ fn impact_of(operation: OperationImpact) -> UnitVersionImpact {
 
 /// 一个被修改元素在这一窗的影响：两端各读一次终态、差分、走生成路同一把尺子。
 /// 差分为空（原样重写换页）是 `None`——那不是它的一版。
-fn modified_impact(
+pub(crate) fn modified_impact(
     base: &Arc<DbSet>,
     target: &Arc<DbSet>,
     refno: RefNo,
@@ -349,7 +360,7 @@ fn modified_impact(
 /// owner 链上溯解出所属最小交付单元根；构件自己就是单元根时返回它自己。
 ///
 /// 上溯而不是像单元表那样建子树：这里只有一个元素要问，链深就是几层，比建整棵子树便宜。
-fn resolve_unit_root(
+pub(crate) fn resolve_unit_root(
     set: &Arc<DbSet>,
     refno: RefNo,
     unit_types: &[String],

@@ -564,6 +564,17 @@ async fn serve_with_ready(
         // 单个构件的模型版本表：同一条会话链、只认它自己，回执并排给所属单元那一列与
         // `unit_root`（前端拿它去生成 A/B 两版快照）。plant3d-web「查看某个构件的所有历史版本」吃它。
         .route("/api/v1/element/versions", get(handlers::element_versions))
+        // 节点版本视图（plant3d-web ADR 0066）的两条：属性变化时间线（谁在哪一版改了什么，会话 user /
+        // comment + 逐属性 before / after）与 A→B 差异摘要（索引差分 + 模型影响按单元分组，不生成几何）。
+        // 都按需算、只活在进程内（ADR-081 / d-179）。
+        .route(
+            "/api/v1/element/attribute-history",
+            get(handlers::element_attribute_history),
+        )
+        .route(
+            "/api/v1/node/diff-summary",
+            get(handlers::node_diff_summary),
+        )
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),

@@ -130,6 +130,14 @@ _Avoid_: 历史模型、历史快照落库、把它当版本身份、把它的�
 同一个构件在 A / B 两个模型版本（两份历史投影的 `sesno`）下的属性逐项 before / after。取数是 `POST model/history/query tool=attributes { snapshot_key, arguments: { refno } }`：按快照回执里的 `(source_file, sesno)` 开一个会话钉死的单库 `DbSet`，与属性面板 `element/attributes` **同一个渲染器**出行——两边对同一个属性印同一个字，字不同就是变了。该构件在那个会话不存在（还没建 / 已删）是一种**正常回执**（`exists: false`），不是错误；存在但不在单元子树里才是 `REFNO_OUTSIDE_SNAPSHOT`。与历史投影同一条纪律：按需算、不落库、不进备份库（ADR-081 候选条，2026-09-18）。
 _Avoid_: 属性快照落库、legacy `/api/model-history/*`（anchors / resolve-anchor / snapshot，plant3d-web 已删）、用另一套简化渲染出行
 
+**属性变化时间线 (Attribute Change Timeline)**：
+一个节点（任意 refno）按会话链列出的「谁在哪一版改了什么」：每行一个它**自身记录**被改过的会话，带会话页的 `user` / `comment`（e3d-io `SessionPage`）、`kind`（created / modified / deleted）、与版本表同一词表的 `impact`（同一个 `classify_operation_impact`），展开是逐属性 before / after——由属性面板同一个渲染器在两端各出一次（`ElementAttributeService::read_pinned`），字不同就是变了；成员增删 / 重排与 owner 改挂另列（成员序在 E3D 里就是管路走向）。索引说记录重写了但两端一字没差 = 原样换页，不成一行。它回答的是「谁改的、为什么改」，任意两版的净差看属性历史对比。`GET element/attribute-history`，按需算、只进进程内缓存（ADR-081，plant3d-web ADR 0066）。
+_Avoid_: 属性历史对比（那是 A / B 两版逐项，不是时间线）、会话列表（漏掉了改了什么）、把 `CACHID` 一类的戳当业务变化（回执里单独标 `stamp`）
+
+**差异摘要 (Node Diff Summary)**：
+节点在 A→B 之间**不生成几何**的一张账：一次会话索引差分，候选按对比范围过滤（`self` = 节点自己；`subtree` = 变化那一侧 owner 链上溯到节点），逐个按生成路同一把尺子判 added / deleted / modified（mesh · placement）/ noop，再按所属最小交付单元分组，附范围内单元总数、变了的单元数与 `needs_confirm` / `estimated_projections`（阈值 `MODEL_HISTORY_CONFIRM_UNITS`，服务端成本策略）。前端拿「变了的单元」去逐个生成历史投影，未变的一份都不算。`GET node/diff-summary`，按需算、不落库。
+_Avoid_: 预对比、干跑对比、把它当模型几何差异（那是几何生成之后的差）、前端写死阈值
+
 **模型水位 (Model Watermark)**：
 某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。**它是模型面唯一的持久事实**（ADR-079）：库里不再有逐根的凭证行，重启后「这个库欠到哪」只有它一个说法——落后于 `applied_sesno` 就排 `model_sesno → 文件最新`，`0` 就整库重排；上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做，没有第二个写者对它「对账」。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败——但承诺只覆盖**在册且有几何**的面板：常驻模型带「房间输入缺口」（缺文件的 DESI、缺几何的面板）时生命周期 `Degraded`，根照常算、边照常写、缺口点名的面板 / 库不在承诺内，`/health.degraded_sections` 含 `room`（ADR-073 2026-09-16 D11）；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（`http_422` 一类永久判定，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——前三格来自**生成根账本**（进程内，ADR-079），已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
 _Avoid_: 模型凭证下限（已退役的校验者 `settled_floor`）、生成水位、模型进度、把它当「模型有多新」的答案、拿它当同步点、模型水位对账（ADR-079 起没有这件事）
