@@ -6,6 +6,54 @@
 > `inst_relate:24384_26481`、`inst_info:24384_26481`、`aabb:24384_26481`、`trans:24384_26481`，`model_sesno` 停在删除前那一会话。
 > 不是 worktree 特有：`git log 8adec7169..HEAD -- helper.rs on_demand_model.rs batch_worker.rs model_update_plan.rs ele_ops.rs` 一笔都没有。
 > 状态：**待批准**。代码事实对到 `8adec7169`（= 主树今天这几个文件的内容）。
+> **2026-09-18 追记**：§1.2 **不是** S5 那四行孤儿的成因——成因在规划器选根，ADR-079 当晚已把它关掉、09-18 live 复验过，残留也已清；
+> 更正与对 D1–D3 的影响见紧接着的「成因更正」一节。要不要按更正后的口径把计划改小重立，由用户定。
+
+## 成因更正（2026-09-18）
+
+起因：09-18 对 8000 / 7999 / 7997 / 1112 四库 24 987 行存量模型记录逐行对现生成（plant3d-web
+`docs/verification/component-to-wall-surface-clearance-2026-09-17/README.md` §7.8），`in.deleted = true` 的模型行**全库只剩**
+`inst_relate:24384_26481` 这一条（8000 里 6 643 个已删元素其余都干净，7999 / 7997 / 1112 各 0）。顺着它把 603→604 那一窗按
+`8adec7169` 源码 + 窗口日志重新对了一遍，§1 的机制对不上：
+
+1. **`DeleteCleanup` 根本没排。** DESI 库的模型计划走 `build_effective_model_update_plan` → `window_root_plan.rs::build_model_update_plan_from_window`
+   （`8adec7169` 当时 `:1129–1130`），`DeleteCleanup` 只从 `plan_window_roots` 的 `delete = roots_S \ roots_T` 那一桶来（模块头表格）。
+   `8adec7169` 的 `roots_S` 是 `load_persisted_roots_with_settlement(dbnum)` 一次 `gen_root` 表读（`:1012`），而增量新建的根从头到尾没进过
+   `gen_root`（§1.4 / 证据 §6.2：始终 952 条，`gen_root:24384_26480` 不存在），于是 `delete = ∅`——窗口日志原文
+   `roots_T=952 roots_S=952 touched=0 regen=0 delete=0`。`delete_model_subtree` 一次都没被调，没有失败可报，任务 `applied` / `finished`。
+   §1.1 图里「规划 → `DeleteCleanup` → `delete_model_subtree`」那一支在这一窗上**不存在**。
+2. **证据 §7 第 1 条把 `units regen=0 remove=1` 读成「排了 `DeleteCleanup`」，读错了。** 那一句是变更账本（`ChangeLedger`）的 `totals_line`，
+   `remove=1` 数的是候选里「target 端不存在」的删除单元，跟根规划的 `delete` 桶是两个数。同一窗在今天 HEAD 上重放，账本行仍是
+   `candidates=3 (+0 ~1 -2) … units regen=0 remove=1`，而根规划的 `delete` 从 0 变成 1（见第 4 条）。
+3. **§1.2 说的「`topmost_deleted_refnos` 收敛 + `pe_owner` 子树走不下去」不在这一窗的路上。** 那是老规划器
+   `model_update_plan.rs::build_model_update_plan`，`build_effective_model_update_plan` 里只给 CATA 用（DESI → 窗口规划器，CATA → 老规划器，
+   其余空计划；`8adec7169` 与今天 HEAD 同样）。而且就算 `DeleteCleanup(EQUI 26480)` 排上了，ingest 档 `on_demand_model.rs::delete_model_subtree`
+   除了 `collect_pe_subtree_refnos` / `delete_inst_relate_subtree` 那一路，还对每个 lock root 执行 `render_spooled_scope_deletion(root, &[root], &[])`
+   ——按 `anc CONTAINS packed(root) AND model_sesno != NONE` 删，**不依赖 `pe_owner` 边**（这两处调用 09-07 / 09-09 就在，`8adec7169` 已有）。
+   那句谓词在 8009 上只读重放：`by_anc = ["24384_26481"]`，命中孤儿。边断了也删得掉——§1.2「防住了墓碑，没防住边」描述的边确实断了
+   （两个方向实测都空），但它只影响 `delete_inst_relate_subtree` 那一路，而那一路在增量上只是兜底。
+4. **ADR-079（`0247da413`，09-15 23:53，S5 实测当晚）已把成因关掉；2026-09-18 13:21 live 复验。** `gen_root` 退役后 `roots_S` = `DbSet@S` 枚举
+   （`build_model_update_plan_from_window`「`roots_S` 来自 `DbSet@S`」），增量新建的根自然在里面。在 HEAD `13695dd3d` 上跑探针
+   `probe_transform_classification_for_window`（`AIOS_TRANSFORM_WINDOW=603:604`、`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`、
+   `AIOS_E3D_SCHEMA_ROOT=vendor\e3d-io\schema`，只读 `ams8000_0001`，`cargo test --lib … -- --ignored --nocapture`，编 25 s、跑 0.5 s）：
+   `roots_S=953 roots_T=952 touched=1 regen=0 delete=1 advance=952 lazy=0 degraded=None`；候选表 `24384/26480 EQUI Deleted: target 端不存在`、
+   `24384/26481 BOX Deleted: target 端不存在`、`24384/24775 ZONE MembersChanged 成员 +0 -1`。同一窗、同一份文件，`8adec7169` 是
+   `roots_S=952 … delete=0`；多出来的那一根就是 EQUI `26480`，落 `delete` 桶 → `DeleteCleanup(26480)` → 第 3 条的 anc 墓碑清掉 BOX 那几行。
+5. **残留已清。** 8000 水位 `applied_sesno = model_sesno = 619`，603→604 那窗不会重排，孤儿不会自愈。2026-09-18 12:2x 走 `:8022` 的
+   `DELETE /api/v1/model/subtree?refno=24384/26481&confirm=24384/26481` → 200 `{"scope":"exact_subtree","status":"deleted"}`；
+   `inst_relate` / `inst_info` / `aabb` / `trans:24384_26481` 与 `geo_relate:[inst_info:24384_26481, …]` 五行都没了，8000 `inst_relate` 2 529 → 2 528，
+   `pe` 两行墓碑照旧。删前原样备份在 plant3d-web `…/8022-swap-2026-09-18/orphan-24384_26481-backup-before-delete.json`。
+
+**对本计划的影响**：
+
+- D1（全集排）/ D2（一窗一批）针对的是一个在增量路上走不到的断点，作为「修 S5 孤儿」**不成立**；按需入口 `DELETE /api/v1/model/subtree`
+  在边完好时行为本来就对，边断了也有 anc 墓碑兜着。
+- 仍站得住的只有 **D3 的覆盖账**：S5 那一窗如果有「账本 `remove` 非空、根规划 `delete` 桶为空」或「`DeleteCleanup` 一行都没清到」的告警，
+  孤儿当场就会被看见，而不是三天后靠全库对账翻出来。要立，就把它单独立成一条小的。
+- §1.4 / §5 里「可能同源的另一条」与本条**就是同一件事**，且已随 ADR-079 关掉；§4.3 的真库口径（一建一删比五个计数）照旧可用，
+  但它今天验的是 ADR-079 那条路，不是 D1 / D2。
+- 「新建的根不在 `roots_S`」这一类漏洞已经从结构上不存在；剩下的删除形态是**成员删了、根还在** → `regen`（整根重算，旧行被根级墓碑清掉），
+  `live_ams8000_pinned_windows_land_in_the_expected_buckets` 的 269→270「删 FTUB → regen 1」钉着它，四库对账 0 孤儿也印证它。
 
 ## 0. 一句话
 
@@ -58,7 +106,7 @@ SELECT VALUE ->pe_owner.out FROM [pe:24384_26481] →  []
 
 同一轮实测里，增量**新建**的根从头到尾没进过根册（`gen_root` 始终 952 条，`gen_root:24384_26480` 不存在），删除那一窗的根账因此是
 `roots_T=952 roots_S=952 touched=0 regen=0 delete=0`。`delete_model_subtree` 末尾那句 `DELETE gen_root:{key}` 对这种根是空操作。
-它与本条症状同源与否要另查，见 §5。
+它与本条症状同源与否要另查，见 §5。（2026-09-18：查了——**就是同一件事**，且是唯一成因，见文首「成因更正」。）
 
 ## 2. 决策
 
@@ -114,6 +162,7 @@ AMS 8000（外部 SurrealDB，`watch_dbnums = [8000]`），E3D TTY 一建一删�
 ## 5. 不做（本轮）
 
 - **增量新建的根不进 `gen_root` 根册**（§1.4）：症状明确、成因未查，可能与本条同源（根册里没有的根，删的时候也没人认领）。单开一条。
+  （2026-09-18：不必单开——它就是本条的成因，ADR-079 退役 `gen_root` 后随之关掉，见文首「成因更正」。）
 - 数据面墓碑口径、`noun` 名词表行的已知残留（`direct_window_replay_parity.rs:449` 指的那条）。
 - 投影淘汰、`gen_root` 的生命周期重构。
 
