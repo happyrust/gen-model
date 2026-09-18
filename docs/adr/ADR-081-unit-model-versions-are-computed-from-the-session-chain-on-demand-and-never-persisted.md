@@ -70,5 +70,18 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
 - **候选需求（未立，17:5x 追记）——属性历史对比**：plant3d-web 同日删掉了 legacy 的 `ModelTreeAttrDiffPanel` + `/api/model-history/*`
   （会话锚点 `anchors` / `resolve-anchor` / 元素属性快照 `snapshot`；grill 第 4 轮 Q25，用户拍板随 legacy 版本链一起删），前端此后没有「同一构件在 A / B
   两个 sesno 下属性逐项 before / after」的取数。本仓的积木都在：会话链 `db_file_header::session_chain` 给锚点，`ReadOnlyEngine::open_at(path, sesno)` +
-  `element_attributes` 给某会话下的属性；缺的只是一条只读接口（形状候选：`GET /api/v1/element/attributes?refno=&sesno=` 或
-  `model/history/query tool=attributes`）。与本 ADR 同一条纪律：按需算、不落库。要不要立、何时立，等前端有人再要。
+  `element_attributes` 给某会话下的属性；缺的只是一条只读接口。与本 ADR 同一条纪律：按需算、不落库。
+  **18:0x 用户拍板要做，走 `model/history/query tool=attributes`，契约先定（前端按它先接，后端等 `element_attributes.rs` 那一笔落地再实施）**：
+  - 请求：`POST /api/v1/model/history/query { snapshot_key, tool: "attributes", arguments: { refno: "a/b" } }`——`snapshot_key` 就是
+    版本对比 A / B 两侧已经 generate 出来的那份历史投影（`<unit_refno>@<sesno>`），`refno` 是单元子树里被选中的构件（也允许单元根自己）。
+  - 响应：`{ snapshot_key, dbnum, sesno, refno: "a/b", exists: bool, noun: string | null, attributes: ElementAttribute[] }`；
+    `attributes[]` 的行**与 `POST /api/v1/element/attributes` 同型**（`name / value_type / display / is_unset / editable / is_uda`），
+    由同一个渲染器出——属性面板与属性历史对比对同一个属性印同一个字。该 refno 在那个 sesno 不存在（还没建 / 已删）→
+    `exists: false, noun: null, attributes: []`，**不是 404**（对比面板要把「该版本不存在」当一种正常态显示）。
+  - 实现：快照回执里的 `(source_file, resolved_session.sesno)` → 会话钉死的 `DbSet`（`unit_versions::SessionSets::at` 那一套：共享 attlib、
+    单库 `DbSet::new + add_db(sesno)`）→ `element.extraction()` / `parsed()` → 走 `element_attributes.rs` 的渲染器（identity 行 + `render_attribute`
+    + UDA / 类型默认值 materialize）。**不落库、不进生产投影、不建缓存表**（d-179）；快照 `DELETE` 后再问回 `SNAPSHOT_NOT_FOUND` 404。
+  - 错误码：`INVALID_REFNO` 400、`SNAPSHOT_NOT_FOUND` 404、`REFNO_OUTSIDE_SNAPSHOT` 422（refno 不在该单元子树里——按 T / S 两端子树集判，
+    与 `unit_versions` 同一把尺子）。
+  - 前端（plant3d-web，已按此契约接线）：`ModelVersionGeometry.handle` = snapshot_key（适配器私有），`ModelVersionSource.attributesAt(geometry, refno)`，
+    对比面板把 `attributesAt(side, refno)` 随树内差异上下文交给模型树，差异模式底部新面板逐属性对比 A / B。

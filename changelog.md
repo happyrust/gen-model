@@ -7,6 +7,10 @@
 - plant3d-web 同日退役了版本对比的 legacy 链（ADR 0065 追记），连带删掉钉在 legacy `/api/model-history/*`（anchors / resolve-anchor / snapshot）上的
   `ModelTreeAttrDiffPanel`；「同一构件在 A / B 两个 sesno 下属性逐项对比」此后没有取数。ADR-081 实施记录追记一条候选需求：积木（`session_chain`、
   `ReadOnlyEngine::open_at` + `element_attributes`）都在，缺一条只读接口，按需算、不落库；何时立等前端再要。代码零改动。
+- **18:0x 追记：用户拍板要做，契约先定**——`POST /api/v1/model/history/query { snapshot_key, tool: "attributes", arguments: { refno } }` →
+  `{ snapshot_key, dbnum, sesno, refno, exists, noun, attributes: ElementAttribute[] }`，行与 `element/attributes` 同型、同一个渲染器；不存在的 refno
+  `exists: false` 不 404；`INVALID_REFNO` 400 / `SNAPSHOT_NOT_FOUND` 404 / `REFNO_OUTSIDE_SNAPSHOT` 422。后端实施等 `element_attributes.rs`
+  正在进行的那一笔（E3D 对齐渲染器 + `open_pinned_set`）落地后再做，避免两条会话改同一个文件；plant3d-web 前端半边先按契约接线。仍是代码零改动。
 
 ### ADR-081 立并实施：最小交付单元的模型版本表从会话链按需算、不落库——`GET /api/v1/model/versions`
 
