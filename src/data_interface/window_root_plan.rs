@@ -3150,8 +3150,9 @@ mod tests {
         }
     }
 
-    /// 元数据门谓词的真值表（2026-09-08；S6 两票 + 分档）：四条结构条件缺一不可，属性全部过
-    /// 「字典 DCHC=0 ∧ 生成器不读」才放行；全在老名单上是 `MetadataOnly`，否则 `UnreadAttribute`。
+    /// 元数据门谓词的真值表（2026-09-08；S6 两票 + 分档；2026-09-17 Q6 戳）：四条结构条件缺一不可，属性全部过
+    /// 「字典 DCHC=0 ∧ 生成器不读」才放行；全在老名单上是 `MetadataOnly`，否则 `UnreadAttribute`；戳（`CACHID`）
+    /// 的第一票由 e3d-model 戳表给，放行不改档，只有戳跳了记 `CacheStamp`。
     #[test]
     fn a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved() {
         use e3d_model::element_diff::MemberDelta;
@@ -3195,9 +3196,18 @@ mod tests {
         assert!(change_metadata_tier(&diff(&["NAME", "DIAM"])).is_none());
         assert!(change_metadata_tier(&diff(&["NAME", "POS"])).is_none());
         assert!(change_metadata_tier(&diff(&["NAME", "SPRE"])).is_none());
-        // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
-        assert!(!change_is_metadata_only(&diff(&["CACHID"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
+        // 戳（2026-09-17 Q6，用户拍板）：`CACHID` 字典按构造收不到，第一票由 e3d-model 的戳表给、第二票照旧问
+        // 读取集合——放行。只有戳跳了记第三档 `CacheStamp`；跟着 `NAME` 一起跳不改档，仍是老档。
+        // （255→256 那一窗的 PANE 26250 只戳，如今记 `cache_stamp=1`；那窗的 regen 3 来自同窗另两个候选。）
+        assert_eq!(
+            change_metadata_tier(&diff(&["CACHID"])),
+            Some(NoModelTier::CacheStamp)
+        );
+        assert!(change_is_metadata_only(&diff(&["CACHID"])));
+        assert_eq!(
+            change_metadata_tier(&diff(&["NAME", "CACHID"])),
+            Some(NoModelTier::MetadataOnly)
+        );
         // UDA 不放行。
         assert!(!change_is_metadata_only(&diff(&["UDA:42"])));
         // 没有属性变化不是「只改了元数据」：那是没变，或只动了结构。
@@ -3251,7 +3261,11 @@ mod tests {
         // 一票否决：混进一个生成侧读得到的名字，整个元素照旧上卷。
         assert!(change_metadata_tier(&diff(&["SUPP", "DIR"])).is_none());
         assert!(change_metadata_tier(&diff(&["SUPP", "DIAM"])).is_none());
-        assert!(change_metadata_tier(&diff(&["SUPP", "CACHID"])).is_none());
+        // 戳不否决也不改档（2026-09-17 Q6）：跟着新档名字跳仍是新档。
+        assert_eq!(
+            change_metadata_tier(&diff(&["SUPP", "CACHID"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
         // 结构四条对新档一视同仁。
         let mut members = diff(&["SUPP"]);
         members.members = Some(MemberDelta {

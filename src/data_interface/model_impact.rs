@@ -2735,6 +2735,7 @@ mod tests {
 
     /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字
     /// 就是 `UnreadAttribute`（与顺序无关）；一个没拿到两票、或一个属性都没有 → `None`。
+    /// 戳（2026-09-17 Q6）：放行不改档——跟 `NAME` 记老档、跟 `DUTY` 记新档；只有戳跳了才是 `CacheStamp`。
     #[test]
     fn the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list() {
         let tier = |names: &[&str]| metadata_only_tier(names.iter().copied());
@@ -2748,7 +2749,9 @@ mod tests {
         assert_eq!(tier(&["NAME", "DUTY"]), Some(NoModelTier::UnreadAttribute));
         assert_eq!(tier(&["DUTY", "NAME"]), Some(NoModelTier::UnreadAttribute));
         assert_eq!(tier(&["NAME", "DIR"]), None);
-        assert_eq!(tier(&["NAME", "CACHID"]), None);
+        assert_eq!(tier(&["NAME", "CACHID"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(tier(&["DUTY", "CACHID"]), Some(NoModelTier::UnreadAttribute));
+        assert_eq!(tier(&["CACHID"]), Some(NoModelTier::CacheStamp));
         assert_eq!(tier(&["NAME", "DIAM"]), None);
         assert_eq!(tier(&["UDA:42"]), None);
         assert_eq!(tier(&[]), None);
@@ -2798,9 +2801,9 @@ mod tests {
 
     /// 预览与执行同口径（2026-09-08）：`OperationImpact::Skip` 是「执行侧不会为它排模型
     /// 工作」这句承诺，判据必须与 direct 窗口规划器的元数据门逐名一致——两边共问
-    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。字典没
-    /// 投票的 `CACHID` 因此不是 Skip：规划器对它照旧整根重算，预览再报「不影响模型」，
-    /// 同一份回执里 `details` 与 `units` 就是两句话。S6 起新档同理：`HREF` 只改了引用，
+    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。戳 `CACHID`
+    /// 曾因字典没投票而不是 Skip（规划器整根重算、预览却报「不影响模型」，同一份回执两句话）；2026-09-17
+    /// Q6 起第一票由戳表给，两边同样放行——预览 Skip、规划器不上卷。S6 起新档同理：`HREF` 只改了引用，
     /// 规划器不上卷，预览也不许再说 Regen。
     #[test]
     fn the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate() {
@@ -2816,9 +2819,14 @@ mod tests {
                 "{name}"
             );
         }
-        // 一次改动里混进一个没拿到第二票的名字，整次操作就不再是 Skip。
+        // 戳（2026-09-17 Q6）两票齐：`NAME + CACHID` 两边都放行，预览是 Skip；混进一个字典 DCHC≠0 的
+        // 几何名字，整次操作就不再是 Skip。
         assert_eq!(
             classify_operation_impact(&modified_operation_with_attrs(&["NAME", "CACHID"])),
+            OperationImpact::Skip
+        );
+        assert_eq!(
+            classify_operation_impact(&modified_operation_with_attrs(&["NAME", "DIAM"])),
             OperationImpact::Regen
         );
         assert_eq!(
