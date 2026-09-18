@@ -99,13 +99,18 @@ fn element_attributes_response_shape_is_frozen() {
             "value_type",
         ])
     );
+    // 前三格算「不完整」，后三格只是说明。分格是有意的：`outside_schema` /
+    // `view_divergence` / `catalog_issues` 都不代表这个元素的值读丢了，混进去数
+    // 会让 `complete` 永远为假。
     assert_eq!(
         object_keys(&value["diagnostics"]),
         keys(&[
+            "catalog_issues",
             "outside_schema",
             "shape_conflicts",
             "uda_issues",
             "undecoded",
+            "view_divergence",
         ])
     );
     assert_eq!(object_keys(&value["backup"]), keys(&["status"]));

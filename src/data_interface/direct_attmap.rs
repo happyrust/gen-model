@@ -291,7 +291,10 @@ fn natural(value: &DescriptorValue) -> Option<NamedAttrValue> {
 ///
 /// `NonImplicit` 是「这个属性不在隐式区」，`DefaultRequired` 是「没存过值、也没默认可用」
 /// ——两者都不是解码失败。其余没有值的状态都要留名。
-fn undecoded_reason(status: &AttributeExtractionStatus) -> Option<String> {
+///
+/// 属性接口（`element_attributes`）也用这一处判据：它此前自己按「渲染不出来」记诊断，
+/// 于是把 E3D 的 unset 记成了未解码，BRAN 一口气 45 笔，`complete` 再没真过。
+pub(crate) fn undecoded_reason(status: &AttributeExtractionStatus) -> Option<String> {
     match status {
         AttributeExtractionStatus::NonImplicit | AttributeExtractionStatus::DefaultRequired => None,
         other => Some(format!("{other:?}")),

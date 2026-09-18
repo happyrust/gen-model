@@ -5459,6 +5459,687 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-080 A6 / D9 ②（手动，全语料）：沿每个 DESI 库的会话链逐窗走**生产口径**选根，对 `plan.regen` 里
+    /// **S 端也有**的根（跨名单等距抽样）各做一遍 [`probe_unit_publish_one_root_against_regen`] 那三步——
+    /// S 端整根重算灌基线 → 单元路（真生产方 + 执行体）→ 与 T 端整根重算比整根 `manifest_hash`——按库汇总进证据档。
+    /// **一根 DIFF 即红**（D9 ①）；回退 / 重放 / 生成失败只计数不判红（回退永远正确、只是不省）。
+    ///
+    /// 目录依赖仍经**当前 MDB**（`DB_OPTION_FILE`）解，所以一次只覆盖 MDB 解得出目录的那些库；语料五个目录里
+    /// 别的项目的库要换 `DB_OPTION_FILE` 再跑一遍——pin 不进 / 开不了窗的库记 `skip`，不算红。
+    /// 旋钮：`AIOS_POSREF_DIRS`（`;` 分隔，默认 S7 那五个目录）、`AIOS_UNIT_PUBLISH_STEPS_PER_DB`（每库会话链最后 K 步，
+    /// 0 = 整条链）、`AIOS_UNIT_PUBLISH_ROOTS_PER_WINDOW`（默认 40，0 = 全量；一窗上千根时跨 regen 名单等距抽）、
+    /// `AIOS_UNIT_PUBLISH_BUDGET_SECS`（默认 2400，到了只数不量）、`AIOS_UNIT_PUBLISH_MESH_DIR`（烘焙目录，默认临时目录、
+    /// 跑完删；`AIOS_UNIT_PUBLISH_KEEP_MESHES=1` 留着）、`AIOS_UNIT_PUBLISH_REPORT`（默认
+    /// `docs/evidence/2026-09-17-unit-publish-parity-corpus.md`，每跑一次追加一节；目录按政策不入库）、
+    /// `AIOS_UNIT_PUBLISH_SHARD=k/n`（全语料按**窗**轮流分给 n 个进程并行跑，本进程只量第 k 份；末尾一行
+    /// `SUMMARY_JSON` 几份相加就是全语料——ams8000 一条链六百多窗，按库分片会让一个进程吃光预算）。
+    /// D10 分桶随 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1` 且三条级联同开（同单根探针）。
+    #[tokio::test]
+    #[ignore = "manual live: walks every DESI chain of the corpus; needs DB_OPTION_FILE (MDB) and the E3D template directory"]
+    async fn probe_unit_publish_corpus_against_regen() -> anyhow::Result<()> {
+        use std::io::Write as _;
+        use std::time::Instant;
+
+        use crate::data_interface::direct_store::DbPin;
+        use crate::data_interface::generation_root::{
+            GenerationRoot, enumerate_generation_roots, refno_from_e3d, refno_to_e3d,
+            resolve_delivery_unit_types,
+        };
+        use crate::data_interface::reverse_reference::sources_in_dir;
+        use crate::data_interface::window_root_plan::{
+            PersistedRoot, WindowRootSources, plan_window_roots,
+        };
+        use e3d_io::engine::ReadOnlyEngine;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        let env_usize = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let per_db = env_usize("AIOS_UNIT_PUBLISH_STEPS_PER_DB", 0);
+        let roots_per_window = env_usize("AIOS_UNIT_PUBLISH_ROOTS_PER_WINDOW", 40);
+        let budget_secs = env_usize("AIOS_UNIT_PUBLISH_BUDGET_SECS", 2400) as f64;
+        // `AIOS_UNIT_PUBLISH_SHARD=k/n`：全语料按**窗**（不是按库——ams8000 一条链就有六百多窗）轮流分给 n 个进程，
+        // 本进程只量第 k 份；别的窗一概不数。几份的 `SUMMARY_JSON` 相加就是全语料。
+        let (shard, shards) = std::env::var("AIOS_UNIT_PUBLISH_SHARD")
+            .ok()
+            .and_then(|value| {
+                let (k, n) = value.split_once('/')?;
+                Some((k.trim().parse::<usize>().ok()?, n.trim().parse::<usize>().ok()?))
+            })
+            .filter(|(k, n)| *n > 0 && k < n)
+            .unwrap_or((0, 1));
+        let mut window_index = 0usize;
+        let keep_meshes = std::env::var("AIOS_UNIT_PUBLISH_KEEP_MESHES").is_ok_and(|v| v == "1");
+        let report_path = PathBuf::from(std::env::var("AIOS_UNIT_PUBLISH_REPORT").unwrap_or_else(
+            |_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-17-unit-publish-parity-corpus.md"
+                )
+                .into()
+            },
+        ));
+        let mesh_dir = std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("unit-publish-parity-meshes"));
+        std::fs::create_dir_all(&mesh_dir)?;
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+        let db_option_file = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "(default)".into());
+        let switches = format!(
+            "unit_level_publish={} structural_connection={} cable_endpoint={} design_reference={} \
+             skip_metadata_only={} transform_cheap_path={}",
+            crate::options::model_unit_level_publish(),
+            crate::options::model_structural_connection_cascade(),
+            crate::options::model_cable_endpoint_cascade(),
+            crate::options::model_design_reference_cascade(),
+            crate::options::model_skip_metadata_only_changes(),
+            crate::options::model_transform_cheap_path(),
+        );
+
+        let mut service = E3dModelService::from_current().await?;
+        service.mesh_dir = mesh_dir.clone();
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let started = Instant::now();
+        println!("corpus probe: DB_OPTION_FILE={db_option_file}; {switches}; mesh_dir={}", mesh_dir.display());
+
+        /// 一根的结局。
+        enum Outcome {
+            Parity {
+                ok: bool,
+                receipt_only: bool,
+                records: usize,
+                unit_secs: f64,
+                regen_t_secs: f64,
+                diff: usize,
+                extra: usize,
+                missing: usize,
+                /// 两端整根重算里画不出的件数（S, T）——不拦对拍，只记。
+                failed_elements: (usize, usize),
+            },
+            Fallback(String),
+            Replayed,
+            SeedFailed(String),
+            RegenTargetFailed(String),
+        }
+        /// 回退原因归桶：同一类只按类计，不按根展开。
+        fn fallback_bucket(reason: &str) -> &'static str {
+            const BUCKETS: [(&str, &str); 10] = [
+                ("no_model_only hint does not hold", "空子计划·no_model_only 复核不成立"),
+                ("names no unit under root", "空子计划·级联 / 恢复选进来的根（非 no_model_only）"),
+                ("immutable target", "设计窗之外的目标变了（目录 / 模板 / 生成器 / 细分档）"),
+                ("carries no model target", "旧回执没带目标"),
+                ("execute_plan under root", "execute_plan 报失败"),
+                ("tube segment", "管段完整性门"),
+                ("does not trace back", "removal 回溯不到子计划"),
+                ("full_rebuild", "窗计划退化成整库重建"),
+                ("unreadable", "计划期读挂"),
+                ("baseline", "回执不在规划基线上"),
+            ];
+            BUCKETS
+                .iter()
+                .find(|(needle, _)| reason.contains(needle))
+                .map(|(_, bucket)| *bucket)
+                .unwrap_or("其它")
+        }
+        #[derive(Default)]
+        struct FileStats {
+            windows: usize,
+            windows_skipped: usize,
+            windows_degraded: usize,
+            regen_roots: usize,
+            roots_at_s: usize,
+            tried: usize,
+            parity_ok: usize,
+            receipt_only: usize,
+            diff: usize,
+            fallback: usize,
+            replayed: usize,
+            seed_failed: usize,
+            regen_failed: usize,
+            with_failed_elements: usize,
+            over_budget: usize,
+            unit_secs: f64,
+            regen_t_secs: f64,
+            plan_secs: f64,
+        }
+        let mut per_file: Vec<(String, FileStats)> = Vec::new();
+        let mut skipped_files: Vec<(String, String)> = Vec::new();
+        let mut diffs: Vec<String> = Vec::new();
+        let mut fallback_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut fallback_examples: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut budget_exhausted = false;
+
+        for dir in dirs.iter().filter(|dir| dir.is_dir()) {
+            let sources = match sources_in_dir(dir, &["DESI"]) {
+                Ok(sources) => sources,
+                Err(error) => {
+                    skipped_files.push((dir.display().to_string(), format!("scan: {error}")));
+                    continue;
+                }
+            };
+            for source in sources {
+                let dbnum = source.dbnum;
+                let file = source.file.clone();
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // 语料库挂成一枚 DESI pin（MDB 没声明的也一样）；目录依赖经当前 MDB 解。
+                service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+                service.pins.push(DbPin {
+                    dbnum: dbnum as i32,
+                    db_type: "DESI".into(),
+                    file: file.clone(),
+                    sesno: None,
+                });
+                let sessions: Vec<u32> = match ReadOnlyEngine::open(&file) {
+                    Ok(mut engine) => match engine.sessions() {
+                        Ok(sessions) => sessions
+                            .iter()
+                            .map(|session| session.session_id)
+                            .collect(),
+                        Err(error) => {
+                            skipped_files.push((name, format!("sessions: {error}")));
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        skipped_files.push((name, format!("open: {error}")));
+                        continue;
+                    }
+                };
+                // 新→旧链取链头 K 对，再倒回旧→新（与 S7 同款）。
+                let mut steps: Vec<(u32, u32)> = sessions
+                    .windows(2)
+                    .take(if per_db == 0 { usize::MAX } else { per_db })
+                    .map(|pair| (pair[1], pair[0]))
+                    .collect();
+                steps.reverse();
+                if steps.is_empty() {
+                    skipped_files.push((name, "fewer than two sessions".into()));
+                    continue;
+                }
+                let mut stats = FileStats::default();
+                for (base_sesno, target_sesno) in steps {
+                    let mine = window_index % shards == shard;
+                    window_index += 1;
+                    if !mine {
+                        continue;
+                    }
+                    let label = format!("{name} {base_sesno}→{target_sesno}");
+                    if started.elapsed().as_secs_f64() > budget_secs {
+                        budget_exhausted = true;
+                        stats.windows_skipped += 1;
+                        continue;
+                    }
+                    let clock = Instant::now();
+                    let mut producer =
+                        match UnitDeltaProducer::open(&service, dbnum, base_sesno, target_sesno) {
+                            Ok(producer) => producer,
+                            Err(error) => {
+                                stats.windows_skipped += 1;
+                                println!("skip {label}: open: {error:#}");
+                                continue;
+                            }
+                        };
+                    stats.plan_secs += clock.elapsed().as_secs_f64();
+                    let base = producer.base.clone();
+                    let target = producer.target.clone();
+                    let sources = match WindowRootSources::collect(
+                        &file,
+                        base_sesno,
+                        target_sesno,
+                        &base.set,
+                        &target.set,
+                        &unit_types,
+                        &[],
+                    ) {
+                        Ok(sources) => sources,
+                        Err(error) => {
+                            stats.windows_skipped += 1;
+                            println!("skip {label}: collect: {error:#}");
+                            continue;
+                        }
+                    };
+                    let roots_s: Vec<PersistedRoot> =
+                        match enumerate_generation_roots(&base.set, &base.index.roots, &unit_types) {
+                            Ok(roots) => roots
+                                .into_iter()
+                                .map(|root| PersistedRoot {
+                                    refno: root.root,
+                                    noun: root.noun,
+                                })
+                                .collect(),
+                            Err(error) => {
+                                stats.windows_skipped += 1;
+                                println!("skip {label}: base roots: {error:#}");
+                                continue;
+                            }
+                        };
+                    stats.windows += 1;
+                    let impact = sources.impact(&roots_s);
+                    let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+                    stats.regen_roots += plan.regen.len();
+                    if plan.degraded.is_some() {
+                        // 退化窗把每个持久根都判成 regen，单元路对它一根都不许走（Q4）——只数不量。
+                        stats.windows_degraded += 1;
+                        continue;
+                    }
+                    let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
+                    let no_model_only = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+                    let at_s: BTreeSet<(u32, u32)> = roots_s
+                        .iter()
+                        .map(|root| {
+                            let refno = refno_to_e3d(root.refno);
+                            (refno.word0, refno.word1)
+                        })
+                        .collect();
+                    let candidates: Vec<&GenerationRoot> = plan
+                        .regen
+                        .iter()
+                        .filter(|root| {
+                            let refno = refno_to_e3d(root.root);
+                            at_s.contains(&(refno.word0, refno.word1))
+                        })
+                        .collect();
+                    stats.roots_at_s += candidates.len();
+                    let stride = match roots_per_window {
+                        0 => 1,
+                        limit => candidates.len().div_ceil(limit.max(1)).max(1),
+                    };
+                    let mut cache = CatalogueMeshCache::default();
+                    for root in candidates.iter().step_by(stride) {
+                        if started.elapsed().as_secs_f64() > budget_secs {
+                            budget_exhausted = true;
+                            stats.over_budget += 1;
+                            continue;
+                        }
+                        let refno = refno_to_e3d(root.root);
+                        let root_no_model_only = no_model_only.roots.contains(&refno_from_e3d(refno));
+                        stats.tried += 1;
+
+                        // 与单根探针同一套三步；每根一份干净的本地投影。
+                        let store = ModelMemoryStore::default();
+                        // 整根重算里画不出的件（e3d-model 没有 builder / 读挂）**不拦**：生产的整根重算对这种根也是
+                        // 「能画的照发、失败的记账」，两端同一套生成器，失败集相同则章仍该相同；件数记进报告。
+                        let regen_at = |sesno: u32,
+                                        input: &GenerationInput,
+                                        cache: &mut CatalogueMeshCache|
+                         -> anyhow::Result<(ProjectionCommit, usize)> {
+                            let snapshot =
+                                generate_snapshot_from_set(&input.set, &input.index, refno, cache)?;
+                            let failed = snapshot.report.failed.len();
+                            let owners = snapshot.owners.clone();
+                            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+                            let (commit, _) = project_geometry_delta(
+                                dbnum,
+                                sesno,
+                                baked.elements,
+                                Vec::new(),
+                                None,
+                                &owners,
+                            )?;
+                            Ok((commit, failed))
+                        };
+                        let outcome: Outcome = (|| -> anyhow::Result<Outcome> {
+                            let (mut seed, seed_failed) = match regen_at(base_sesno, &base, &mut cache) {
+                                Ok(seed) => seed,
+                                Err(error) => return Ok(Outcome::SeedFailed(format!("{error:#}"))),
+                            };
+                            let (seed_hash, seed_count) = manifest_hash(&seed.upserts)?;
+                            seed.receipt = Some((
+                                refno,
+                                RootReceipt {
+                                    source_sesno: base_sesno,
+                                    model_target: Some(service.model_target(
+                                        dbnum,
+                                        base_sesno,
+                                        &base.dependency_sessions,
+                                    )?),
+                                    manifest_hash: seed_hash,
+                                    geometry_count: seed_count,
+                                    published_via: "regen".into(),
+                                },
+                            ));
+                            store.commit(ProjectionScope::Current, vec![seed]);
+                            if !store.root_projection_complete(ProjectionScope::Current, refno, &mesh_dir) {
+                                return Ok(Outcome::SeedFailed("seed projection incomplete".into()));
+                            }
+                            let unit = UnitPublishUnit {
+                                root_refno: refno.to_string(),
+                                source_start_sesno: base_sesno,
+                                no_model_only: root_no_model_only,
+                            };
+                            let clock = Instant::now();
+                            let report = republish_roots_by_unit_delta_on(
+                                &store,
+                                &mesh_dir,
+                                target_sesno,
+                                std::slice::from_ref(&unit),
+                                |unit, root, old_receipt| {
+                                    producer.produce(root, old_receipt, unit.no_model_only)
+                                },
+                                |commits| {
+                                    store.try_commit_current(commits);
+                                    Ok(())
+                                },
+                            )?;
+                            let unit_secs = clock.elapsed().as_secs_f64();
+                            if let Some((_, reason)) = report.fallbacks.first() {
+                                return Ok(Outcome::Fallback(reason.clone()));
+                            }
+                            if !report.replayed.is_empty() {
+                                return Ok(Outcome::Replayed);
+                            }
+                            let receipt_only = !report.receipt_only.is_empty();
+                            let clock = Instant::now();
+                            let (regen_t, target_failed) =
+                                match regen_at(target_sesno, &target, &mut cache) {
+                                    Ok(regen_t) => regen_t,
+                                    Err(error) => {
+                                        return Ok(Outcome::RegenTargetFailed(format!("{error:#}")));
+                                    }
+                                };
+                            let regen_t_secs = clock.elapsed().as_secs_f64();
+                            let (regen_hash, regen_count) = manifest_hash(&regen_t.upserts)?;
+                            let receipt = store
+                                .receipt(ProjectionScope::Current, refno)
+                                .context("unit receipt")?;
+                            let records = store.records_of_root(ProjectionScope::Current, refno);
+                            let ok = receipt.manifest_hash == regen_hash
+                                && receipt.geometry_count == regen_count;
+                            let (mut diff, mut extra, mut missing) = (0usize, 0usize, 0usize);
+                            if !ok {
+                                let unit_entries = records
+                                    .iter()
+                                    .map(manifest_entry)
+                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+                                let regen_entries = regen_t
+                                    .upserts
+                                    .iter()
+                                    .map(manifest_entry)
+                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+                                for key in unit_entries
+                                    .keys()
+                                    .chain(regen_entries.keys())
+                                    .collect::<BTreeSet<_>>()
+                                {
+                                    match (unit_entries.get(key), regen_entries.get(key)) {
+                                        (Some(unit), Some(regen)) if unit == regen => {}
+                                        (Some(_), Some(_)) => diff += 1,
+                                        (Some(_), None) => extra += 1,
+                                        (None, Some(_)) => missing += 1,
+                                        (None, None) => unreachable!(),
+                                    }
+                                }
+                            }
+                            Ok(Outcome::Parity {
+                                ok,
+                                receipt_only,
+                                records: records.len(),
+                                unit_secs,
+                                regen_t_secs,
+                                diff,
+                                extra,
+                                missing,
+                                failed_elements: (seed_failed, target_failed),
+                            })
+                        })()
+                        .unwrap_or_else(|error| Outcome::SeedFailed(format!("probe error: {error:#}")));
+
+                        match outcome {
+                            Outcome::Parity {
+                                ok,
+                                receipt_only,
+                                records,
+                                unit_secs,
+                                regen_t_secs,
+                                diff,
+                                extra,
+                                missing,
+                                failed_elements,
+                            } => {
+                                stats.unit_secs += unit_secs;
+                                stats.regen_t_secs += regen_t_secs;
+                                if failed_elements != (0, 0) {
+                                    stats.with_failed_elements += 1;
+                                }
+                                let note = format!(
+                                    "{}{}",
+                                    if receipt_only { " (receipt-only, D10)" } else { "" },
+                                    if failed_elements != (0, 0) {
+                                        format!(
+                                            " [failed elements S {} / T {}]",
+                                            failed_elements.0, failed_elements.1
+                                        )
+                                    } else {
+                                        String::new()
+                                    }
+                                );
+                                if ok {
+                                    stats.parity_ok += 1;
+                                    if receipt_only {
+                                        stats.receipt_only += 1;
+                                    }
+                                    println!(
+                                        "{label}: PARITY OK {refno} `{}` {records} records{note} unit {unit_secs:.2}s regen {regen_t_secs:.2}s",
+                                        root.noun
+                                    );
+                                } else {
+                                    stats.diff += 1;
+                                    let line = format!(
+                                        "{label}: root {refno} `{}` DIFF {diff} EXTRA {extra} MISSING {missing}{note}",
+                                        root.noun
+                                    );
+                                    println!("RED {line}");
+                                    diffs.push(line);
+                                }
+                            }
+                            Outcome::Fallback(reason) => {
+                                stats.fallback += 1;
+                                let bucket = fallback_bucket(&reason);
+                                *fallback_buckets.entry(bucket).or_default() += 1;
+                                fallback_examples
+                                    .entry(bucket)
+                                    .or_insert_with(|| format!("{label} {refno} `{}`: {reason}", root.noun));
+                                println!("{label}: fallback {refno} `{}`: {bucket}", root.noun);
+                            }
+                            Outcome::Replayed => {
+                                stats.replayed += 1;
+                                println!("{label}: replayed {refno} (unexpected: seed receipt is at S)");
+                            }
+                            Outcome::SeedFailed(error) => {
+                                stats.seed_failed += 1;
+                                failures.push(format!("{label} {refno} `{}` seed@S: {error}", root.noun));
+                            }
+                            Outcome::RegenTargetFailed(error) => {
+                                stats.regen_failed += 1;
+                                failures.push(format!("{label} {refno} `{}` regen@T: {error}", root.noun));
+                            }
+                        }
+                    }
+                }
+                per_file.push((name, stats));
+            }
+        }
+
+        // 汇总。
+        let total = |pick: fn(&FileStats) -> usize| -> usize {
+            per_file.iter().map(|(_, stats)| pick(stats)).sum()
+        };
+        let total_f = |pick: fn(&FileStats) -> f64| -> f64 {
+            per_file.iter().map(|(_, stats)| pick(stats)).sum()
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let mut report = String::new();
+        report.push_str(&format!(
+            "\n## 运行 {}：`DB_OPTION_FILE={db_option_file}`{}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            if shards > 1 {
+                format!("，分片 {shard}/{shards}（按窗轮流）")
+            } else {
+                String::new()
+            }
+        ));
+        report.push_str(&format!(
+            "- 开关：{switches}\n- 语料目录：{}\n- 抽样：每库最后 {} 步（0 = 整条链），每窗最多 {} 根（跨 regen 名单等距抽，只抽 S 端也有的根）；预算 {budget_secs:.0}s{}；总耗时 {elapsed:.0}s\n\n",
+            dirs.iter().map(|dir| dir.display().to_string()).collect::<Vec<_>>().join("; "),
+            per_db,
+            roots_per_window,
+            if budget_exhausted { "（**已用尽**，其后只数不量）" } else { "" },
+        ));
+        report.push_str("| 合计 | 值 |\n|---|---|\n");
+        for (name, value) in [
+            ("有窗的库", per_file.iter().filter(|(_, s)| s.windows > 0).count()),
+            ("跳过的库（pin 不进 / 会话不足 / 扫描失败）", skipped_files.len()),
+            ("窗（规划成功）", total(|s| s.windows)),
+            ("窗（跳过：开不了 / 收不了 / 预算）", total(|s| s.windows_skipped)),
+            ("窗（退化，只数不量）", total(|s| s.windows_degraded)),
+            ("regen 根（全量）", total(|s| s.regen_roots)),
+            ("其中 S 端也有的根（可走单元路）", total(|s| s.roots_at_s)),
+            ("量到的根", total(|s| s.tried)),
+            ("**PARITY OK**", total(|s| s.parity_ok)),
+            ("其中 receipt-only（D10 空 Partial）", total(|s| s.receipt_only)),
+            ("**DIFF（红）**", total(|s| s.diff)),
+            ("回退整根 regen", total(|s| s.fallback)),
+            ("重放（不该出现）", total(|s| s.replayed)),
+            ("S 端整根生成报错（量不了）", total(|s| s.seed_failed)),
+            ("T 端整根生成报错（量不了）", total(|s| s.regen_failed)),
+            ("对拍过的根里两端带画不出的件的（照常对拍，只记）", total(|s| s.with_failed_elements)),
+            ("预算用尽未量", total(|s| s.over_budget)),
+        ] {
+            report.push_str(&format!("| {name} | {value} |\n"));
+        }
+        report.push_str(&format!(
+            "| 单元路总耗时 / T 端整根重算总耗时（只算走成对拍的根） | {:.1}s / {:.1}s |\n| 开窗（两端 DbSet + plan_update）总耗时 | {:.1}s |\n\n",
+            total_f(|s| s.unit_secs),
+            total_f(|s| s.regen_t_secs),
+            total_f(|s| s.plan_secs),
+        ));
+        report.push_str("### 逐库\n\n| 库 | 窗 | 退化窗 | regen 根 | S 端也有 | 量到 | OK | receipt-only | DIFF | 回退 | 生成失败 | unit s | regen s |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+        for (name, s) in &per_file {
+            // 一根 regen 都没有、也没跳过什么的库不占行（语料里大半是这种）。
+            if s.regen_roots == 0 && s.windows_skipped == 0 && s.windows_degraded == 0 {
+                continue;
+            }
+            report.push_str(&format!(
+                "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} | {:.1} |\n",
+                s.windows,
+                s.windows_degraded,
+                s.regen_roots,
+                s.roots_at_s,
+                s.tried,
+                s.parity_ok,
+                s.receipt_only,
+                s.diff,
+                s.fallback,
+                s.seed_failed + s.regen_failed,
+                s.unit_secs,
+                s.regen_t_secs,
+            ));
+        }
+        report.push_str("\n### 回退原因（按类）\n\n| 类 | 根数 | 一例 |\n|---|---|---|\n");
+        for (bucket, count) in &fallback_buckets {
+            let example = fallback_examples
+                .get(bucket)
+                .map(|line| line.replace('|', "\\|"))
+                .unwrap_or_default();
+            report.push_str(&format!("| {bucket} | {count} | {example} |\n"));
+        }
+        if !diffs.is_empty() {
+            report.push_str("\n### **红：DIFF**\n\n");
+            for line in &diffs {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
+        if !failures.is_empty() {
+            report.push_str(&format!("\n### 生成失败（量不了，非红）：{} 根，前 40 条\n\n", failures.len()));
+            for line in failures.iter().take(40) {
+                report.push_str(&format!("- {}\n", line.replace('\n', " ")));
+            }
+        }
+        if !skipped_files.is_empty() {
+            report.push_str(&format!("\n### 跳过的库：{} 个\n\n", skipped_files.len()));
+            for (name, reason) in &skipped_files {
+                report.push_str(&format!("- {name}: {}\n", reason.replace('\n', " ")));
+            }
+        }
+        if let Some(parent) = report_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let fresh = !report_path.exists();
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&report_path)?;
+        if fresh {
+            out.write_all(
+                "# ADR-080 A6 / D9 ②：单元级发布全语料对拍（`probe_unit_publish_corpus_against_regen`）\n\n\
+                 每根：S 端整根重算灌基线 → 单元路（真生产方 + 执行体）→ 与 T 端整根重算比整根 `manifest_hash`。\
+                 一根 DIFF 即红；回退 / 重放 / 生成失败只计数。目录依赖经当前 MDB 解，一次一个 `DB_OPTION_FILE`。\n"
+                    .as_bytes(),
+            )?;
+        }
+        out.write_all(report.as_bytes())?;
+        println!("{report}");
+        println!("report appended to {}", report_path.display());
+        // 机器可读的一行汇总：几份分片相加就是全语料。
+        println!(
+            "SUMMARY_JSON {}",
+            json!({
+                "db_option_file": db_option_file,
+                "shard": format!("{shard}/{shards}"),
+                "elapsed_secs": elapsed,
+                "budget_exhausted": budget_exhausted,
+                "dbs_with_windows": per_file.iter().filter(|(_, s)| s.windows > 0).count(),
+                "dbs_skipped": skipped_files.len(),
+                "windows": total(|s| s.windows),
+                "windows_skipped": total(|s| s.windows_skipped),
+                "windows_degraded": total(|s| s.windows_degraded),
+                "regen_roots": total(|s| s.regen_roots),
+                "roots_at_s": total(|s| s.roots_at_s),
+                "tried": total(|s| s.tried),
+                "parity_ok": total(|s| s.parity_ok),
+                "receipt_only": total(|s| s.receipt_only),
+                "diff": total(|s| s.diff),
+                "fallback": total(|s| s.fallback),
+                "replayed": total(|s| s.replayed),
+                "seed_failed": total(|s| s.seed_failed),
+                "regen_failed": total(|s| s.regen_failed),
+                "with_failed_elements": total(|s| s.with_failed_elements),
+                "over_budget": total(|s| s.over_budget),
+                "unit_secs": total_f(|s| s.unit_secs),
+                "regen_t_secs": total_f(|s| s.regen_t_secs),
+                "plan_secs": total_f(|s| s.plan_secs),
+                "fallback_buckets": fallback_buckets,
+            })
+        );
+        if !keep_meshes && std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR").is_err() {
+            let _ = std::fs::remove_dir_all(&mesh_dir);
+        }
+        assert!(total(|s| s.tried) > 0, "一根都没量到——DB_OPTION_FILE / AIOS_POSREF_DIRS 不对，或全被跳过");
+        assert!(
+            diffs.is_empty(),
+            "D9 ①：单元路与 regen 路的整根 manifest_hash 必须逐字相同，红了 {} 根：\n{}",
+            diffs.len(),
+            diffs.join("\n")
+        );
+        Ok(())
+    }
+
     /// ADR-080 实施约束 5：单元级执行体里闸在产出之前、产出在提交之前，且执行体自己**不读任何记录、
     /// 不自己算章**——删什么由产出点名，整根的章由存储在写锁里盖（D5）。闸后面要是长出一个
     /// `records_of_root`，就又多了一个能读到旧状态的窗口。闸与刚体路同一道、同一个枚举，不另造判据。
