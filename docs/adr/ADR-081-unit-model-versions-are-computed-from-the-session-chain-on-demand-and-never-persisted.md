@@ -34,6 +34,10 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
    不新建逐单元版本索引表——建了就要回答重建 / 回退 / 幽灵那一整套问题（ADR-060 / 079 刚把逐根表退掉）。
 4. **A/B 几何不另造**：两侧一律 `model/history/generate {dbnum, refno, sesno}`（B 是文件最新也一样：生产投影停在 `model_sesno`，常落后于文件最新），
    现有上限（≤ 100 000 元素 / 300 s）与生命周期（不落库、重启即丢、`DELETE` 释放）原样继承。
+   **用户 2026-09-18 15:4x 重申为硬约束**：「历史查询出来的、生成的模型数据，除了 mesh 文件，其他都不要存到数据库——一次性的，传递给前端的。」
+   代码上这条落在 `apply_geometry_delta_on` 的分派——`Historical(_)` 只进进程内 `ModelMemoryStore`，`Current` 才走 `model_write_behind::publish`；
+   mesh 在分派之前 `bake_elements` 落成盘上内容寻址的 `.mesh`（与生产共享，可达性 GC 收）；快照回执 `HistoricalModelStore` 是进程内 `RwLock<HashMap>`；
+   本文的版本表（D3）也只在进程内。守卫 `historical_model::tests::historical_scope_never_reaches_the_durable_publisher` 钉住分派形状。CONTEXT 补「历史投影」。
 5. **不做 diff 接口**：差异在前端按 `geo_hash + geo_index + matrix` 签名算（今天的做法）。`plan_update(A→B)` 限在单元的服务端 diff 是以后的可选项，不是前提。
 6. **不给 `tree/*` 加 `sesno`**：版本对比是单元尺度的，单元子树在某 sesno 的结构从 `history/query tool=snapshot` 取；全库版本树是另一件事。
 

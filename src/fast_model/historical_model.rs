@@ -766,6 +766,66 @@ mod tests {
         );
     }
 
+    /// 用户 2026-09-18 拍：「历史查询出来的、生成的模型数据，除了 mesh 文件，其他都不要存到数据库——一次性的，
+    /// 传给前端的。」代码上这条落在 `apply_geometry_delta_on` 的分派：`Historical(_)` 只进进程内
+    /// `ModelMemoryStore`，`Current` 才走 `model_write_behind::publish`（durable）；mesh 在两条路之前就已
+    /// `bake_elements` 落成盘上的 `.mesh` 文件（内容寻址、共享）。这条守卫钉住分派的形状，谁把历史那一臂
+    /// 也接到 write-behind 上，这里先红。
+    #[test]
+    fn historical_scope_never_reaches_the_durable_publisher() {
+        let service = include_str!("e3d_model_service.rs");
+        let body = service
+            .split_once("pub(crate) async fn apply_geometry_delta_on(")
+            .expect("apply_geometry_delta_on must exist")
+            .1
+            .split_once("\n}\n")
+            .expect("function body must end")
+            .0;
+        let historical_arm = body
+            .split_once("ProjectionScope::Historical(_) =>")
+            .expect("historical arm must exist")
+            .1
+            .split_once("}")
+            .expect("arm must close")
+            .0;
+        assert!(
+            historical_arm.contains("ModelMemoryStore::global().commit(scope"),
+            "historical projections must land in the in-process store only: {historical_arm}"
+        );
+        assert!(
+            !historical_arm.contains("write_behind") && !historical_arm.contains("publish("),
+            "historical projections must never reach the durable publisher: {historical_arm}"
+        );
+        let current_arm = body
+            .split_once("ProjectionScope::Current =>")
+            .expect("current arm must exist")
+            .1
+            .split_once("}")
+            .expect("arm must close")
+            .0;
+        assert!(
+            current_arm.contains("model_write_behind::publish("),
+            "only the current projection goes durable: {current_arm}"
+        );
+        assert!(
+            body.contains("bake_elements(upserts, mesh_dir)"),
+            "meshes are the one on-disk artifact, baked before the scope dispatch"
+        );
+        // 本模块自己：快照回执只活在进程内的 `RwLock<HashMap>`，没有任何库句柄
+        let this = include_str!("historical_model.rs");
+        let store = this
+            .split_once("pub struct HistoricalModelStore {")
+            .expect("store struct")
+            .1
+            .split_once("}")
+            .expect("struct end")
+            .0;
+        assert!(
+            store.contains("RwLock<HashMap<String, HistoricalModelReport>>"),
+            "snapshot reports stay in memory: {store}"
+        );
+    }
+
     #[test]
     fn a_session_time_is_looked_up_by_number_not_by_position() {
         let chain = chain_of(&[
