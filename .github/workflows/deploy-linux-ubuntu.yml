@@ -1,0 +1,305 @@
+name: Deploy Backend To Ubuntu
+
+# 把 Linux binary 那条流水线产出的 aios-database 发到服务器上，连同它跑起来所需的一切：
+# 外部 SurrealDB 2.1.x（store_mode = "rocksdb" 下服务只连不拉，ADR-074）、两个 systemd 单元、
+# 服务器口径的 DbOption，以及 nginx 上校审四前缀到 :8022 的分流。
+#
+# 需要的仓库配置：
+#   Secrets:   DEPLOY_REMOTE_PASS（服务器口令）、REVIEW_JWT_SECRET（可选，PMS 签发的 token 要对上）
+#   Variables: DEPLOY_REMOTE_HOST（可选，默认 123.57.182.243）、DEPLOY_REMOTE_USER（可选，默认 root）
+#
+# 触发方式：workflow_dispatch 只认默认分支上的 workflow，这条还没并回去，所以调链期间靠
+# push 到 deploy/backend-* 起。**push 起来的默认是空跑**（连上去看一眼就走，不动服务器）；
+# 真要发，提交信息里带 `[deploy]`。并回主线后用 Actions 页面上的按钮，inputs.dry_run 说了算。
+
+on:
+  push:
+    branches: ['deploy/backend-*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只连服务器勘查、不改任何东西'
+        required: false
+        default: false
+        type: boolean
+      binary_run_id:
+        description: '取哪一次 Linux binary 的产物；留空 = 该分支最近一次成功'
+        required: false
+        default: ''
+        type: string
+      binary_branch:
+        description: '到哪个分支上找 Linux binary 的成功运行'
+        required: false
+        default: 'ci/linux-build-20260918'
+        type: string
+      remote_host:
+        description: '目标服务器；留空用变量 DEPLOY_REMOTE_HOST'
+        required: false
+        default: ''
+        type: string
+      review_web_base_url:
+        description: 'embed-url 回给 PMS 的校审前端基址'
+        required: false
+        default: ''
+        type: string
+      skip_nginx:
+        description: '不动 nginx（只换二进制与配置）'
+        required: false
+        default: false
+        type: boolean
+      rollback:
+        description: '回滚：换回服务器上的 bin/aios-database.prev 并重启'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-backend-ubuntu
+  cancel-in-progress: false
+
+env:
+  REMOTE_HOST: ${{ inputs.remote_host != '' && inputs.remote_host || vars.DEPLOY_REMOTE_HOST || '123.57.182.243' }}
+  REMOTE_USER: ${{ vars.DEPLOY_REMOTE_USER || 'root' }}
+  REMOTE_PASS: ${{ secrets.DEPLOY_REMOTE_PASS }}
+  BINARY_RUN_ID: ${{ inputs.binary_run_id }}
+  BINARY_BRANCH: ${{ inputs.binary_branch || 'ci/linux-build-20260918' }}
+  SURREAL_VERSION: '2.1.4'
+  INSTALL_DIR: /opt/aios-database
+  DATA_DIR: /var/lib/aios-database
+  HTTP_PORT: '8022'
+  SURREAL_BIND: 127.0.0.1:8009
+  SURREAL_DATA_DIR: /var/lib/surrealdb/ams-8009
+  # 空跑判据：手动触发看 inputs.dry_run；push 触发默认空跑，提交信息带 [deploy] 才真发。
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[deploy]')) }}
+  SKIP_NGINX: ${{ inputs.skip_nginx && '1' || '0' }}
+  ROLLBACK: ${{ inputs.rollback && '1' || '0' }}
+  REVIEW_WEB_BASE_URL: ${{ inputs.review_web_base_url }}
+
+jobs:
+  deploy:
+    name: Ship aios-database to Ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Linux binary run
+        id: binrun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rid="${BINARY_RUN_ID}"
+          if [ -z "$rid" ]; then
+            rid="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow linux-binary.yml \
+                     --branch "$BINARY_BRANCH" --status success --limit 1 \
+                     --json databaseId --jq '.[0].databaseId')"
+          fi
+          [ -n "$rid" ] && [ "$rid" != "null" ] || {
+            echo "在 ${BINARY_BRANCH} 上找不到成功的 Linux binary 运行；先把它跑绿，或用 binary_run_id 指定" >&2
+            exit 1
+          }
+          echo "run_id=$rid" >> "$GITHUB_OUTPUT"
+          gh run view "$rid" --repo "$GITHUB_REPOSITORY" \
+            --json createdAt,headSha,headBranch \
+            --jq '"用的产物来自 run \(.headBranch) \(.headSha[0:9]) @ \(.createdAt)"'
+
+      - name: Download binary artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          gh run download "${{ steps.binrun.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name aios-database-linux-x64 --dir bundle
+          cat bundle/BUILD.txt
+          file bundle/aios-database
+          file bundle/aios-database | grep -q 'ELF 64-bit LSB .*x86-64' || {
+            echo "产物不是 x86-64 的 Linux 可执行文件" >&2; exit 1; }
+          sha256sum bundle/aios-database
+
+      - name: Fetch SurrealDB server binary
+        run: |
+          set -euo pipefail
+          # 客户端 SDK 是 fork 的 2.1.4（Cargo.lock: gitee.com/happydpc/surrealdb.git）。
+          # 服务端拿官方 2.1.4：大版本对得上就能开同一份存储，rev 不同只影响边角。
+          # 在 runner 上取而不是让服务器自己去 GitHub 下，省得服务器那头的网络成为部署的前提。
+          curl -fsSL --retry 3 \
+            "https://github.com/surrealdb/surrealdb/releases/download/v${SURREAL_VERSION}/surreal-v${SURREAL_VERSION}.linux-amd64.tgz" \
+            -o "bundle/surreal-v${SURREAL_VERSION}.tgz"
+          tar -tzf "bundle/surreal-v${SURREAL_VERSION}.tgz"
+
+      - name: Render server DbOption
+        env:
+          E3D_PROJECT_DIR: /var/lib/aios-database/e3d
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, sys, textwrap
+
+          src = "DbOption.toml"
+          dst = "bundle/DbOption.toml"
+          text = open(src, encoding="utf-8").read()
+
+          # 只改「这台机器是什么样」的那几格，其余一律沿用仓库里那份——服务器配置和开发档
+          # 之间每多一处自说自话，以后排查就多一处要先对账的地方。
+          overrides = {
+              "project_path": f'"{os.environ["E3D_PROJECT_DIR"]}"',   # Windows 的 D:/AVEVA/... 在这儿不存在
+              "v_ip": '"127.0.0.1"',
+              "store_mode": '"rocksdb"',                              # mem 档下校审四前缀一律 503
+              "http_api_addr": f'"0.0.0.0:{os.environ["HTTP_PORT"]}"',
+              "startup_autorun": "false",                             # 首发别让它一上来就消化积压
+              "gen_model": "false",
+              "gen_mesh": "false",
+          }
+
+          for key, value in overrides.items():
+              pattern = rf"(?m)^{re.escape(key)}\s*=.*$"
+              if not re.search(pattern, text):
+                  sys.exit(f"DbOption.toml 里没有顶层键 {key}：模板变了，先对一遍再部署")
+              text = re.sub(pattern, f"{key} = {value}", text, count=1)
+
+          review_web = os.environ.get("REVIEW_WEB_BASE_URL", "").strip() \
+              or f'http://{os.environ["REMOTE_HOST"]}'
+
+          # TOML 的表头必须排在所有顶层键之后，所以这三段只能追加在文件末尾。
+          text += textwrap.dedent(f"""\
+
+              # ── 以下三段由 deploy-linux-ubuntu.yml 按服务器口径追加 ──────────────────
+              # 校审接口的 JWT 鉴权。四个键的缺省与旧 :3100 端逐字相同，这里显式写出来
+              # 是为了「服务器上到底开没开」一眼看得见。
+              [review_auth]
+              enabled = true
+
+              # PMS 平台入站（S2S）那六条：embed-url / workflow sync / workflow verify /
+              # annotations check / cache preload / delete。review_web_base_url 就是
+              # embed-url 回给 PMS 的那个地址（移植计划 Q5）。
+              [platform_auth]
+              enabled = true
+              review_web_base_url = "{review_web}"
+
+              # 附件落盘位置；URL 前缀 /files/review_attachments/ 是前端写死的契约，
+              # 不在这儿配。
+              [review_attachments]
+              dir = "review_attachments"
+              """)
+
+          open(dst, "w", encoding="utf-8", newline="\n").write(text)
+          PY
+          echo "===== 与仓库里那份的差异 ====="
+          diff -u DbOption.toml bundle/DbOption.toml || true
+
+      - name: Assemble bundle
+        env:
+          JWT_SECRET: ${{ secrets.REVIEW_JWT_SECRET }}
+        run: |
+          set -euo pipefail
+          cp deploy/linux/install_backend.sh bundle/
+          chmod +x bundle/install_backend.sh
+          bash -n bundle/install_backend.sh   # 语法错要在这儿挂，不是在服务器上挂
+          # 密钥走文件不走命令行：命令行那一份在服务器上 ps 就看得见。
+          if [ -n "${JWT_SECRET:-}" ]; then
+            umask 177
+            printf '%s' "$JWT_SECRET" > bundle/jwt_secret
+            umask 022
+            echo "带上 REVIEW_JWT_SECRET"
+          else
+            echo "没有 REVIEW_JWT_SECRET：服务会用代码里的缺省密钥，PMS 签发的 token 大概率验不过"
+          fi
+          ls -la bundle
+
+      - name: Install deploy tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass rsync
+
+      - name: Validate deploy configuration
+        run: |
+          set -euo pipefail
+          test -n "$REMOTE_HOST" || { echo "没有目标服务器：给 inputs.remote_host 或仓库变量 DEPLOY_REMOTE_HOST"; exit 1; }
+          test -n "$REMOTE_PASS" || { echo "没有 secret DEPLOY_REMOTE_PASS"; exit 1; }
+          echo "目标 ${REMOTE_USER}@${REMOTE_HOST}；dry_run=${DRY_RUN}；skip_nginx=${SKIP_NGINX}；rollback=${ROLLBACK}"
+
+      - name: Preflight — 连上去看一眼
+        id: preflight
+        run: |
+          set -euo pipefail
+          SSH_OPTS=(-o PreferredAuthentications=password -o PubkeyAuthentication=no
+                    -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no
+                    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15)
+          if ! sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" true 2>ssh.err; then
+            echo "::error::登不上 ${REMOTE_USER}@${REMOTE_HOST}——口令不对，或 sshd 是 PermitRootLogin prohibit-password"
+            cat ssh.err >&2
+            exit 1
+          fi
+          sshpass -p "$REMOTE_PASS" ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" '
+            set -e
+            echo "== 机器 =="; hostname; . /etc/os-release; echo "$PRETTY_NAME"; uname -m
+            echo "== 磁盘 =="; df -h / | tail -1
+            echo "== 在听的端口 =="; ss -lntp | grep -E ":(80|3100|8009|8022)\s" || echo "(80/3100/8009/8022 都没人听)"
+            echo "== 已有的单元 =="; systemctl list-unit-files | grep -E "aios|surreal|nginx" || echo "(还没有 aios/surreal 单元)"
+            echo "== nginx 站点 =="; ls -1 /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
+            echo "== 现有 surreal =="; command -v surreal >/dev/null && surreal version || echo "(没装)"
+            echo "== 已装的 aios-database =="; [ -x /opt/aios-database/bin/aios-database ] && /opt/aios-database/bin/aios-database version || echo "(还没装)"
+          '
+
+      - name: Dry run — 到此为止
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "空跑：服务器一个字节都没动。"
+          echo "真要发：往 deploy/backend-* 推一个提交信息带 [deploy] 的提交，或并回主线后用 Actions 按钮。"
+          echo "这一发会做的事："
+          echo "  1. 传 $(du -sh bundle | cut -f1) 的包到 /tmp/aios-deploy-${GITHUB_RUN_ID}"
+          echo "  2. 装 SurrealDB ${SURREAL_VERSION}（机器上已有 2.1.x 就跳过）+ systemd 单元 surrealdb.service"
+          echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新的 → 起"
+          echo "  4. nginx 加 include /etc/nginx/snippets/aios-review-split.conf（skip_nginx=${SKIP_NGINX}）"
+          echo "  5. 健康检查：本机 :8009 /health、:${HTTP_PORT} /api/v1/health 与 /api/review/health，再走公网一遍"
+
+      - name: Upload bundle
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+          remote_dir="/tmp/aios-deploy-${GITHUB_RUN_ID}"
+          sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p '$remote_dir'"
+          sshpass -p "$REMOTE_PASS" rsync -az --info=progress2 -e "ssh $SSH_OPTS" \
+            bundle/ "${REMOTE_USER}@${REMOTE_HOST}:${remote_dir}/"
+          echo "REMOTE_DIR=$remote_dir" >> "$GITHUB_ENV"
+
+      - name: Install on server
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o ServerAliveInterval=30"
+          sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "${REMOTE_USER}@${REMOTE_HOST}" \
+            "INSTALL_DIR='${INSTALL_DIR}' DATA_DIR='${DATA_DIR}' \
+             SURREAL_BIND='${SURREAL_BIND}' SURREAL_DATA_DIR='${SURREAL_DATA_DIR}' \
+             HTTP_PORT='${HTTP_PORT}' PUBLIC_HOST='${REMOTE_HOST}' \
+             SKIP_NGINX='${SKIP_NGINX}' ROLLBACK='${ROLLBACK}' \
+             bash '${REMOTE_DIR}/install_backend.sh'"
+
+      - name: Verify through the public entrypoint
+        if: env.DRY_RUN != 'true' && env.SKIP_NGINX != '1'
+        run: |
+          set -euo pipefail
+          for path in /api/review/health /api/v1/health; do
+            code="$(curl -s -o /tmp/body -w '%{http_code}' --max-time 20 "http://${REMOTE_HOST}${path}" || true)"
+            echo "http://${REMOTE_HOST}${path} => ${code}"
+            head -c 400 /tmp/body; echo
+            [ "$code" = "200" ] || { echo "::error::公网入口 ${path} 回的是 ${code}"; exit 1; }
+          done
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "http://${REMOTE_HOST}/" || true)"
+          echo "前端首页 => ${code}（这条只是别把前端碰坏了的看门狗）"
+          [ "$code" = "200" ] || { echo "::error::前端首页回的是 ${code}"; exit 1; }
+
+      - name: Clean up remote bundle
+        if: always() && env.DRY_RUN != 'true'
+        run: |
+          SSH_OPTS="-o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+          sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "${REMOTE_USER}@${REMOTE_HOST}" \
+            "rm -rf '/tmp/aios-deploy-${GITHUB_RUN_ID}'" || true
