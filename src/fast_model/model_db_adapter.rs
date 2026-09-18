@@ -1759,10 +1759,16 @@ async fn persist_group(
     // 下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位（任务收尾只在这个库一根
     // 不剩时才推进 `dbnum_watermark.model_sesno`）。
     let mut prelude = String::new();
+    // 整片删排在分支重置**之前**：它靠 `tubi_relate` 行上的 `aabb` / `world_trans` 指针去删
+    // 管身的盒与变换，重置先把关系行删光的话，它读到的就是空集（管身的盒与变换按身份做键、
+    // 插入又是 `INSERT IGNORE`，没删掉就等于把第一次发布的几何永久钉在那条槽位上）。
+    prelude.push_str(&render_slice_delete(&sliced_roots));
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 本轮要插的管身按身份再删一遍盒 / 变换：重置只捞得到还有关系行指着的，没人指着的
+    // 孤儿（身份消失过又建回来）只有这一句够得着（见 [`render_tube_identity_sweep`]）。
+    prelude.push_str(&render_tube_identity_sweep(&records)?);
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
@@ -1998,10 +2004,16 @@ async fn persist_root_impl(
     let pieces = render_record_chunks(&records, mode, &mut tube_slots)?;
 
     let mut prelude = String::new();
+    // 整片删排在分支重置**之前**：它靠 `tubi_relate` 行上的 `aabb` / `world_trans` 指针去删
+    // 管身的盒与变换，重置先把关系行删光的话，它读到的就是空集（管身的盒与变换按身份做键、
+    // 插入又是 `INSERT IGNORE`，没删掉就等于把第一次发布的几何永久钉在那条槽位上）。
+    prelude.push_str(&render_slice_delete(&sliced_roots));
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 本轮要插的管身按身份再删一遍盒 / 变换：重置只捞得到还有关系行指着的，没人指着的
+    // 孤儿（身份消失过又建回来）只有这一句够得着（见 [`render_tube_identity_sweep`]）。
+    prelude.push_str(&render_tube_identity_sweep(&records)?);
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
@@ -2236,6 +2248,7 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
         .map(|record| record.source_refno)
         .collect::<Vec<_>>();
     statements.push_str(&render_tube_branch_resets(&branches));
+    statements.push_str(&render_tube_identity_sweep(&records)?);
     statements.push_str(&render_records(&records, WriteMode::Initial)?);
     statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     statements.push('\n');
@@ -2752,6 +2765,16 @@ fn collect_bound_record(
 }
 
 /// 一个 BRAN 的隐式管身整段清空。旧发布事务在插新段之前发的就是这一条。
+///
+/// **关系行与它的盒 / 变换要一起删**：管身的 `aabb` / `trans` 按**身份**做键
+/// （`geometry_record_id` = `GeometryId::ImpliedTube` 的 SHA-256，不是内容摘要），
+/// 而插入一律是 `INSERT IGNORE`。只删关系行的话，同一条槽位下一轮重新插出来的关系
+/// 仍指向那条**没被覆盖的旧**变换——槽位还在，几何却永远停在第一次发布的那个值。
+///
+/// 这一条以前指望 [`render_slice_delete`] 顺着行上的指针去删，但那条整片删是
+/// `SELECT … FROM tubi_relate WHERE anc CONTAINSANY …`，而**它排在本重置之后**：
+/// 关系行已经被这里删光，整片删读到的是空集，三句 `DELETE $slice_tubes.map(…)`
+/// 删的都是空数组。所以重置自己把指针捞出来删，不依赖语句顺序。
 pub fn render_tube_branch_resets(branches: &[RefNo]) -> String {
     let mut statements = String::new();
     let unique = branches
@@ -2765,10 +2788,51 @@ pub fn render_tube_branch_resets(branches: &[RefNo]) -> String {
 }
 
 fn append_tube_branch_reset(statements: &mut String, branch: RefNo) {
+    let key = format!("{}_{}", branch.word0, branch.word1);
+    // 走 `pe:⟨…⟩->tubi_relate` 而不是 `WHERE in = …`：前者吃 `in` 上的边索引，
+    // 后者在部署引擎上整表扫（`rvm_baseline::compare` 的文档里记着同一条）。
+    // `WHERE` 那一句挡住历史行——没有指针的行 `map` 出来是 NONE，`DELETE` 见到 NONE 整笔事务失败。
     statements.push_str(&format!(
-        "DELETE pe:⟨{}_{}⟩->tubi_relate;\n",
-        branch.word0, branch.word1
+        "LET $tube_reset_{key} = SELECT aabb, world_trans FROM pe:⟨{key}⟩->tubi_relate \
+         WHERE aabb != NONE AND world_trans != NONE;\n\
+         DELETE $tube_reset_{key}.map(|$row| $row.aabb);\n\
+         DELETE $tube_reset_{key}.map(|$row| $row.world_trans);\n\
+         DELETE pe:⟨{key}⟩->tubi_relate;\n"
     ));
+}
+
+/// 本轮要插的管身，按**身份**先把同 id 的盒与变换删一遍（`aabb:⟨id⟩` / `trans:⟨id⟩`，
+/// id 就是它的记录 id）。
+///
+/// 分支重置只删得到**当前关系行还指着的**那些盒 / 变换。此前只删关系行的版本留下过一批
+/// 没人指着的孤儿——身份消失过一轮（缝退化成 0、成员被删）、之后又建回来的那种；重置
+/// 沿指针捞不到它们，`INSERT IGNORE` 撞上同 id 新几何就整行落空，而管身的身份键在几何变了
+/// 之后也**不变**（e3d-model 故意如此，键的局部性）。所以「这条身份马上要插」就是
+/// 「库里同 id 的旧行必须先走」的充分条件；不存在的 id `DELETE` 是空操作。
+///
+/// 只管管身：元素行的盒 / 变换与 `inst_relate` 同键，整片删 / 按 id 删都顺手带走。
+/// 这一句进 prelude（第一笔），`render_records` 的 `Initial` 形态照旧只插不删。
+fn render_tube_identity_sweep(records: &[ProjectedGeometry]) -> anyhow::Result<String> {
+    let ids = records
+        .iter()
+        .filter(|record| record.tube.is_some())
+        .map(|record| bracketed_id(record.record_id.as_str()))
+        .collect::<anyhow::Result<BTreeSet<_>>>()?;
+    if ids.is_empty() {
+        return Ok(String::new());
+    }
+    let mut statements = String::new();
+    for table in ["aabb", "trans"] {
+        let refs = ids
+            .iter()
+            .map(|id| format!("{table}:⟨{id}⟩"))
+            .collect::<Vec<_>>()
+            .join(",");
+        statements.push_str(&format!(
+            "LET $tube_sweep_{table} = [{refs}];\nDELETE $tube_sweep_{table};\n"
+        ));
+    }
+    Ok(statements)
 }
 
 /// 从库里删掉这些记录 id 的全部表示。
@@ -2973,6 +3037,66 @@ fn bracketed_id(id: &str) -> anyhow::Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分支重置必须**连盒带变换一起删**，而且删在关系行之前。
+    ///
+    /// 管身的 `aabb` / `trans` 按身份做键（`GeometryId::ImpliedTube` 的 SHA-256），插入又一律
+    /// `INSERT IGNORE`：只删关系行的话，同一条槽位下一轮插出来的关系仍指向那条没被覆盖的旧
+    /// 变换，几何永远停在第一次发布的值。2026-09-18 实测就是这样——库里那条 `trans` 被手工
+    /// 改成 999mm 之后，`/model/ensure force=true` 整根重生成也没把它写回来。
+    #[test]
+    fn a_branch_reset_clears_the_tube_boxes_and_transforms_before_the_relations() {
+        let sql = render_tube_branch_resets(&[RefNo::new(24381, 103320)]);
+        let pointers = sql
+            .find("DELETE $tube_reset_24381_103320.map(|$row| $row.aabb);")
+            .expect(&format!("盒要顺指针删: {sql}"));
+        let transforms = sql
+            .find("DELETE $tube_reset_24381_103320.map(|$row| $row.world_trans);")
+            .expect(&format!("变换要顺指针删: {sql}"));
+        let relations = sql
+            .find("DELETE pe:⟨24381_103320⟩->tubi_relate;")
+            .expect(&format!("关系行照旧整段删: {sql}"));
+        assert!(
+            pointers < relations && transforms < relations,
+            "指针要在关系行之前捞出来删，否则读到的是空集: {sql}"
+        );
+        assert!(
+            sql.contains("FROM pe:⟨24381_103320⟩->tubi_relate"),
+            "走边索引，不用 `WHERE in = …`（部署引擎上那是整表扫）: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE aabb != NONE AND world_trans != NONE"),
+            "历史行没有指针，map 出 NONE 会让整笔事务失败: {sql}"
+        );
+    }
+
+    /// 整片删也顺着 `tubi_relate` 行上的指针删管身的盒与变换，所以它必须排在分支重置**之前**：
+    /// 重置先把关系行删光，整片删读到的就是空集，三句 `DELETE $slice_tubes.map(…)` 全落空。
+    #[test]
+    fn the_slice_delete_is_emitted_before_the_branch_resets() {
+        // 只看生产那一半：本测试自己也写着这几个字面量，连测试一起数会多出两处。
+        let production = include_str!("model_db_adapter.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("测试模块的起点")
+            .0;
+        let prelude_sites = production
+            .match_indices("let mut prelude = String::new();")
+            .count();
+        assert_eq!(prelude_sites, 2, "两条落库路径各一处 prelude");
+        for (start, _) in production.match_indices("let mut prelude = String::new();") {
+            let block = &production[start..];
+            let slice = block
+                .find("render_slice_delete(&sliced_roots)")
+                .expect("prelude 必须发整片删");
+            let reset = block
+                .find("append_tube_branch_reset(")
+                .expect("prelude 必须发分支重置");
+            assert!(
+                slice < reset,
+                "整片删要排在分支重置之前，否则它读不到管身行上的 aabb / world_trans 指针"
+            );
+        }
+    }
 
     /// 整片删只圈模型面写下的行（`model_sesno != NONE`），属性面独有的行碰不到；
     /// 多根一条 `CONTAINSANY`，不随根数展开成一堆语句。
@@ -4255,6 +4379,146 @@ mod tests {
             0,
             "上一轮的管身行跟着整片一起没"
         );
+    }
+
+    /// 库里全部管身行的 `world_trans.d.scale.z`——单位圆柱的长度就写在这一格。
+    async fn tube_scale_z(db: &Surreal<Any>) -> Vec<f32> {
+        let mut response = db
+            .query("SELECT VALUE world_trans.d.scale FROM tubi_relate;")
+            .await
+            .expect("scale")
+            .check()
+            .expect("scale statement");
+        response
+            .take::<Vec<[f32; 3]>>(0)
+            .expect("scale rows")
+            .into_iter()
+            .map(|scale| scale[2])
+            .collect()
+    }
+
+    fn tube_of_length(length_mm: f64) -> ProjectedGeometry {
+        let mut record = tube_record(0, TUBE_A);
+        record.world_transform = DMat4::from_scale(glam::DVec3::new(1.0, 1.0, length_mm));
+        record
+    }
+
+    /// 2026-09-18 现场（BRAN 103320 / 145128 / 159862）：HPOS 沿管轴挪了，头段管**该不该有**判对了、
+    /// **多长**却还是基线那个值，停服务重启、`force` 重生成都不动。机理：管身的 `aabb` / `trans`
+    /// 按身份做键（身份在几何变了之后也不变），插入是 `INSERT IGNORE`，而 HEAD 的分支重置只删关系行、
+    /// 整片删又排在重置之后读到空集——第一次发布的那条 `trans` 从此没人删得到，每一轮的新变换都落空。
+    /// 这里钉的就是那一根管：同一条身份、第二次发布换了长度，库里读回来必须是新长度，且旧行不留。
+    #[tokio::test]
+    async fn a_regenerated_tube_overwrites_its_previous_transform_under_the_same_identity() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        let store = ModelMemoryStore::default();
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), tube_of_length(144.875)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &store, root)
+            .await
+            .expect("first persist");
+        assert_eq!(tube_scale_z(&db).await, vec![144.875]);
+
+        // HPOS 退了 94.875mm：容器、序号、两端都没变，身份（记录 id）一字不变，只有长度变了。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                tube_branch_resets: vec![BRANCH],
+                upserts: vec![tube_of_length(50.0)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &store, root)
+            .await
+            .expect("second persist");
+        assert_eq!(
+            tube_scale_z(&db).await,
+            vec![50.0],
+            "同一条身份第二次发布，库里必须是新长度，不许被第一次发布的那条 trans 钉住"
+        );
+        assert_eq!(
+            count(&db, "trans").await,
+            2,
+            "元素一条 + 管身一条：旧变换要被删掉，不许留成孤儿"
+        );
+        assert_eq!(count(&db, "aabb").await, 2, "盒同理");
+    }
+
+    /// 修法之前的分支重置只删关系行，库里已经留下一批**没人指着**的旧 `trans` / `aabb`
+    /// （身份消失过一轮——缝退化成 0、成员被删——之后又建回来的那种，E1→E2）。重置沿指针捞不到
+    /// 它们，所以本轮要插的管身还得按身份把同 id 的旧行先删一遍（[`render_tube_identity_sweep`]），
+    /// 否则 `INSERT IGNORE` 撞上孤儿，建回来的管又是旧长度。
+    #[tokio::test]
+    async fn an_orphaned_identity_row_does_not_pin_a_returning_tube() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        let store = ModelMemoryStore::default();
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
+
+        // 孤儿：同一条身份上一世的变换，关系行早没了。
+        let stale = sql_value(&transform_value(DMat4::from_scale(glam::DVec3::new(
+            1.0, 1.0, 144.875,
+        ))));
+        db.query(format!("CREATE trans:⟨{TUBE_A}⟩ SET d = {stale};"))
+            .await
+            .expect("seed orphan")
+            .check()
+            .expect("seed orphan statement");
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), tube_of_length(50.0)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &store, root)
+            .await
+            .expect("persist");
+        assert_eq!(
+            tube_scale_z(&db).await,
+            vec![50.0],
+            "建回来的管身要带自己的长度，不许被没人指着的旧 trans 钉住"
+        );
+        assert_eq!(count(&db, "trans").await, 2);
+    }
+
+    /// spool 重放那一路同样先按身份清管身的盒 / 变换，再插 `Initial` 那批行。
+    #[test]
+    fn a_spooled_root_sweeps_tube_identities_before_inserting() {
+        let root = RefNo::new(24383, 1);
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), tube_record(0, TUBE_A)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let sql = render_spooled_root(&store, root).expect("render");
+        let sweep = sql
+            .find(&format!("LET $tube_sweep_trans = [trans:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_trans;"))
+            .expect(&format!("管身变换按身份先删: {sql}"));
+        assert!(
+            sql.contains(&format!("LET $tube_sweep_aabb = [aabb:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_aabb;")),
+            "盒同理: {sql}"
+        );
+        let insert = sql.find("INSERT IGNORE INTO trans [").expect("插变换");
+        assert!(sweep < insert, "先删后插: {sql}");
     }
 
     /// 不完整投影没有根回执时，缺席不能被解释成孤儿。
