@@ -1038,6 +1038,10 @@ pub struct E3dModelService {
     /// Initialization reuses the verified, durable source token, not mutable
     /// file length/mtime that may advance while the pinned session is generated.
     frozen_file_digests: BTreeMap<(u32, u32), String>,
+    /// The MDB's Dictionary UDA definitions, so `build_set` can answer project
+    /// attributes (`:HXYsize`) by name. `None` = no dictionary was readable;
+    /// that is a degraded read, not a reason to refuse to generate geometry.
+    uda: Option<Arc<e3d_io::uda_catalog::UdaCatalog>>,
 }
 
 #[cfg(test)]
@@ -1128,6 +1132,7 @@ impl E3dModelService {
         let option = aios_core::get_db_option();
         let (pins, locator, project_files) = current_mdb_source_inventory()?;
         Ok(Self {
+            uda: current_uda_catalog(),
             schema: DirectSchema::open_from_env()?,
             // CATA identity stays with the project-aware locator (see `build_set`
             // and `model_target`); the pins carry the design-side files only, as
@@ -2030,6 +2035,8 @@ impl E3dModelService {
             mesh_dir,
             generation_identity: None,
             frozen_file_digests: BTreeMap::new(),
+            // 这条口子是拿显式文件清单建的，身边没有 MDB，也就没有字典库名单。
+            uda: None,
         })
     }
 
@@ -2522,6 +2529,13 @@ impl E3dModelService {
         } else {
             set
         };
+        // 字典库的 UDA 定义（`:HXYsize` 一类）。系统属性来自 attlib 与 `*vir.dat`，
+        // 项目属性不在那儿——名字 → 键那张表在 MDB 声明的 DICT 库里，名单只能由这一层给，
+        // `DbSet` 自己不去找（见 `DbSet::with_uda_catalog`）。
+        let set = match self.uda.clone() {
+            Some(catalog) => set.with_uda_catalog(catalog),
+            None => set,
+        };
         let set = Arc::new(set);
         for pin in &self.pins {
             // CATA identity belongs to the project-aware locator.  Preloading a
@@ -2550,6 +2564,38 @@ impl E3dModelService {
 /// used by both current and historical generation.  Current projection replaces
 /// the returned pins with watermark-pinned DESI pins, while historical generation
 /// keeps these paths and selects a session per request.
+/// 当前 MDB 声明的字典库合成的一份 UDA 定义表，按 `CURD` 序合并。
+///
+/// 名单走 [`mdb_membership::MdbMembership::dictionary_paths`]，不扫项目目录：MDB 是跨项目的，
+/// `AvevaMarineSample /ALL` 声明的六个字典库有四个在 `AvevaCatalogue` 与 `SCB` 底下，
+/// 猜错不报错，而少一个字典库跟「这个 UDA 没值」长得一模一样。
+///
+/// 读不出来**不拦生成**：几何目前一格都不靠 UDA，为一份读不开的字典库把整轮生成判死
+/// 是更坏的交换。但它也不能没声音——问题原样进 `log::warn!`。
+fn current_uda_catalog() -> Option<Arc<e3d_io::uda_catalog::UdaCatalog>> {
+    let option = aios_core::get_db_option();
+    let membership = mdb_membership::get(&option.project_name, &option.mdb_name)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            mdb_membership::resolve(option, &option.project_name, &option.mdb_name).map(Arc::new)
+        });
+    let catalog = membership.and_then(|membership| {
+        let schema = Arc::new(DirectSchema::open_from_env()?);
+        crate::data_interface::uda_catalog_provider::UdaCatalogProvider::shared(
+            &membership,
+            schema,
+        )
+        .get()
+    });
+    match catalog {
+        Ok(catalog) => Some(catalog),
+        Err(error) => {
+            log::warn!("模型生成拿不到字典库的 UDA 定义，本轮按「没有 UDA」读：{error:#}");
+            None
+        }
+    }
+}
+
 fn current_mdb_source_inventory()
 -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator, ProjectDbFiles)> {
     let option = aios_core::get_db_option();
@@ -3992,6 +4038,84 @@ mod tests {
             snapshot.elements.len(),
             snapshot.report.failed.len()
         );
+        Ok(())
+    }
+
+    /// 字典库挂进 `build_set` 之后：UDA 按名字读得出，而几何**一根管也没多**。
+    ///
+    /// `:HXYsize` 是 H 族头槽位那条目录表达式 `( :HXYsize[n] )` 要的那一格。挂上字典库
+    /// 之前它根本不是个名字（`UnknownAttribute`），挂上之后是。两件事要一起成立：
+    /// 读得出，且这 7 个「只差这一格」的头槽位仍然一根管都不长——E3D 在本库自己也不画
+    /// （6 条报 `Catalogue error`、`30297` 连报都不报），所以长出来的会是我们凭空造的几何。
+    /// 它们不长，是因为风管隐式管身的求值环境**不挂设计元素**（`PREV` 才是那个构件），
+    /// UDA 在的是 BRAN 身上——挂字典库并不能把 BRAN 放进那个环境。
+    ///
+    /// 取证：`_runs/ams-init-1112-7997-20260917-mc/ledger-seg15-frameall.md` §16 / §18。
+    #[tokio::test]
+    #[ignore = "real AMS 7997 + the project Dictionary databases"]
+    async fn ams7997_dictionary_uda_reads_by_name_and_grows_no_duct() -> anyhow::Result<()> {
+        use e3d_io::record::descriptor::DescriptorValue;
+        use e3d_model::hvac_tube::duct_departure_section;
+        use e3d_model::route::RouteEnd;
+
+        let service = E3dModelService::from_current().await?;
+        anyhow::ensure!(
+            service.uda.is_some(),
+            "MDB 声明的字典库一个都没读出来，这条用例证明不了任何事"
+        );
+        let set = service.build_set(7997, None)?;
+
+        // 读得出：E3D 的 `Q :HXYsize` 在这条支管上答 675 600。
+        let branch = set.element(RefNo::new(24381, 59287));
+        assert_eq!(
+            branch.attribute(":HXYsize")?,
+            Some(DescriptorValue::RealArray(vec![675.0, 600.0]))
+        );
+
+        // 一根也没多：这 7 个头槽位就是「接上 UDA 就会长出来」的全部。
+        for word1 in [30297, 47065, 58284, 59287, 59302, 79980, 91034] {
+            let container = set.element(RefNo::new(24381, word1));
+            let grown = duct_departure_section(&RouteEnd::ContainerHead(container))?;
+            anyhow::ensure!(
+                grown.is_none(),
+                "24381/{word1} 的头槽位长出了一节 E3D 不画的管身：{grown:?}"
+            );
+        }
+
+        // 已经在画的那一支照旧：中段走的是构件自己的 `LSTU` 与离开 P 点，不碰 UDA。
+        let departure = set.element(RefNo::new(24381, 30293));
+        let section = duct_departure_section(&RouteEnd::MemberLeave {
+            member: departure,
+            ppoint: None,
+        })?
+        .context("TAPE 24381/30293 的离开侧断面")?;
+        assert_eq!(section.source, "/RTUBE2 BOXI /RTUBE2-BOXI");
+        match section.section {
+            e3d_model::route::TubeSection::Rectangular {
+                x_length, z_length, ..
+            } => {
+                assert_eq!((x_length, z_length), (1460.0, 1520.0));
+            }
+            other => anyhow::bail!("24381/30293 的中段断面变了：{other:?}"),
+        }
+
+        // 管道那一侧也数一遍：ZONE 24381/147826 的 13 条支管，E3D 导出 103 根隐式管身，
+        // 引擎在 `e1745dc` 之后逐根对上（§4 / §5）。挂字典库不该动这个数。
+        let pin = service.pin(7997)?;
+        let session = service.source_session(pin)?;
+        let index = scan_index(&pin.file, Some(session))?;
+        let snapshot = generate_snapshot_from_set(
+            &service.build_set(7997, Some(session))?,
+            &index,
+            RefNo::new(24381, 147826),
+            &mut CatalogueMeshCache::default(),
+        )?;
+        let tubes = snapshot
+            .elements
+            .iter()
+            .filter(|element| matches!(element.geometry_id, GeometryId::ImpliedTube { .. }))
+            .count();
+        assert_eq!(tubes, 103, "ZONE 24381/147826 的隐式管身根数变了");
         Ok(())
     }
 
