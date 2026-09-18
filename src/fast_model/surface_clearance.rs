@@ -227,6 +227,9 @@ pub struct Perpendicular {
     pub distance: f32,
     pub from: Point<Real>,
     pub to: Point<Real>,
+    /// 垂距怎么来的：`ray` 从源侧最近点沿命中主面法向打到墙面；`contact` 贴合（距离 ≤ 容差），取最近点
+    /// 连线；`edge` 最近点在棱 / 角上、垂足落在面外，但连线与面法向几乎平行（差在容差内），取连线本身。
+    pub method: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -367,7 +370,7 @@ pub fn surface_clearance(
     };
 
     let target_leaf = &target[hit.target_leaf];
-    let (face, perpendicular, warning) = resolve_target_face(
+    let (face, perpendicular) = resolve_target_face(
         target_leaf,
         hit.target_point,
         hit.source_point,
@@ -376,9 +379,6 @@ pub fn surface_clearance(
     );
     hit.perpendicular = perpendicular;
     hit.target_face = Some(face);
-    if let Some(warning) = warning {
-        warnings.push(warning.to_string());
-    }
 
     ClearanceOutcome {
         hit: Some(hit),
@@ -410,7 +410,11 @@ fn hit_candidates(
     let Some(dir) = toward_source else {
         return primary.into_iter().collect();
     };
-    let eps = (mesh.local_aabb().extents().norm() * 1e-6).max(1e-3);
+    // 「共点」= 三角到 q 的距离 ≤ eps。f32 在世界坐标（|坐标| ~ 1e4 mm）下 1 ulp 已是 2e-3 mm，邻面三角把 q
+    // 投影回来的残差常有几个 ulp——eps 得随坐标量级放大，不然墙角处只剩 parry 报的那一片，棱上另一面永远找不到
+    // （live 里 PANE 板角的 FTUB 就是这样只剩 side、没得换面）。
+    let scale = mesh.local_aabb().extents().norm().max(q.coords.abs().max());
+    let eps = (scale * 4e-6).max(1e-3);
     let mut scored: Vec<(f32, Triangle)> = mesh
         .triangles()
         .filter(|tri| (tri.project_local_point(&q, false).point - q).norm() <= eps)
@@ -423,63 +427,67 @@ fn hit_candidates(
     scored.into_iter().map(|(_, tri)| tri).collect()
 }
 
-const PERPENDICULAR_RAY_MISSED: &str =
-    "perpendicular_ray_missed: 源侧最近点沿墙面法向的射线没有落回墙面，最近点在墙的棱 / 角上，垂距置空";
-
-/// 面分类 + 垂距一起定。主面就从源侧最近点沿 −n 打垂距；**射线落空且最近点在共棱上**（q 处还有别的三角）
-/// 时不报落空，换那条棱上的另一面读：另一面是端 / 顶 / 底这类非主面就直接读它（棱本来也属于它，不用垂距）；
-/// 另一面也是主面就沿它的法向再打一次。都不成才留着第一面 + `perpendicular_ray_missed`。
-/// 这样斜靠墙端竖棱的构件读 `end` 而不是「`side` + 落空警告」（2026-09-18 用户口径）。
-/// **贴合**（距离 ≤ 垂距容差，型钢坐在板上的 0 mm）不打射线：垂距 = 距离本身（0 mm 时就是 0）、
-/// 垂足 = 目标侧最近点、无 warning——从贴合点出发的射线打不出 toi，打了只会被当成落空。
+/// 面分类 + 垂距一起定（2026-09-18 用户口径，按序）。主面且要垂距时：
+/// 1. **贴合**（距离 ≤ 垂距容差，型钢坐在板上的 0 mm）不打射线：垂距 = 距离本身（0 mm 就是 0）、
+///    垂足 = 目标侧最近点（`contact`）——从贴合点出发的射线打不出 toi，打了只会被当成落空。
+/// 2. 从源侧最近点沿 −n 打垂距（`ray`）。
+/// 3. **射线落空**（垂足落在面外，最近点在棱 / 角上）：
+///    a. 最近点连线与面法向几乎平行——`distance × (1 − cos θ)` ≤ 垂距容差，即连线长度与到面所在平面的
+///       垂距在容差内相等——就认这面，垂距 = 距离本身、垂足 = 棱上的最近点（`edge`）。live 里斜过 PANE
+///       板角 1–2° 的 FTUB 就是这种，不再是「`side` + 落空」。
+///    b. 否则换那条棱上的另一面读：另一面是端 / 顶 / 底这类非主面就直接读它（棱本来也属于它，不用垂距），
+///       斜靠墙端竖棱的构件由此读 `end`；另一面也是主面就沿它的法向再打一次。
+///    c. 都不成（源在两片主面之间的楔形区里，哪面都没有真垂足）：留第一面、垂距置空，**不报 warning**——
+///       主面 + 空垂距本身就说明了这一点。
 fn resolve_target_face(
     target: &LeafMesh,
     q: Point<Real>,
     p: Point<Real>,
     distance: f32,
     want_perpendicular: bool,
-) -> (FaceInfo, Option<Perpendicular>, Option<&'static str>) {
+) -> (FaceInfo, Option<Perpendicular>) {
     let toward_source = unit_or_none(p - q);
     let candidates = hit_candidates(&target.mesh, q, toward_source);
     let face = classify_face(target, q, candidates.first(), toward_source);
     if !(want_perpendicular && face.kind.is_main_face()) {
-        return (face, None, None);
+        return (face, None);
     }
-    // 贴合（距离在垂距容差内，典型是型钢坐在板上的 0 mm）：垂距就是这段距离本身、垂足 = 目标侧最近点，
-    // 不打射线——从贴合点出发的射线打不出 toi，会被当成落空。
-    if distance <= perpendicular_tolerance(distance) {
-        return (
-            face,
-            Some(Perpendicular {
-                distance,
-                from: p,
-                to: q,
-            }),
-            None,
-        );
-    }
-    let cast = |face: &FaceInfo, tri: &Triangle| {
-        perpendicular_ray(&target.mesh, p, face.normal, distance, Some(tri.center()))
+    let tolerance = perpendicular_tolerance(distance);
+    let closest_segment = |method: &'static str| Perpendicular {
+        distance,
+        from: p,
+        to: q,
+        method,
     };
+    if distance <= tolerance {
+        return (face, Some(closest_segment("contact")));
+    }
+    let cast = |face: &FaceInfo, interior: Option<Point<Real>>| {
+        perpendicular_ray(&target.mesh, p, face.normal, distance, interior)
+    };
+    // 连线在面法向上的投影就是到面所在平面的垂距；两者差在容差内 = 连线本身可以当垂距用。
+    let hugs_normal = |face: &FaceInfo| distance - (p - q).dot(&face.normal) <= tolerance;
     let Some(first) = candidates.first() else {
-        return match perpendicular_ray(&target.mesh, p, face.normal, distance, None) {
-            Some(perpendicular) => (face, Some(perpendicular), None),
-            None => (face, None, Some(PERPENDICULAR_RAY_MISSED)),
-        };
+        let perpendicular = cast(&face, None)
+            .or_else(|| hugs_normal(&face).then(|| closest_segment("edge")));
+        return (face, perpendicular);
     };
-    if let Some(perpendicular) = cast(&face, first) {
-        return (face, Some(perpendicular), None);
+    if let Some(perpendicular) = cast(&face, Some(first.center())) {
+        return (face, Some(perpendicular));
+    }
+    if hugs_normal(&face) {
+        return (face, Some(closest_segment("edge")));
     }
     for alt in candidates.iter().skip(1) {
         let alt_face = classify_face(target, q, Some(alt), toward_source);
         if !alt_face.kind.is_main_face() {
-            return (alt_face, None, None);
+            return (alt_face, None);
         }
-        if let Some(perpendicular) = cast(&alt_face, alt) {
-            return (alt_face, Some(perpendicular), None);
+        if let Some(perpendicular) = cast(&alt_face, Some(alt.center())) {
+            return (alt_face, Some(perpendicular));
         }
     }
-    (face, None, Some(PERPENDICULAR_RAY_MISSED))
+    (face, None)
 }
 
 /// 命中三角的法向，翻成指向源侧；取不到三角时退到「源点 − 命中点」方向。
@@ -719,6 +727,7 @@ fn perpendicular_ray(
         distance: toi,
         from,
         to: from + dir * toi,
+        method: "ray",
     })
 }
 
@@ -1144,6 +1153,8 @@ pub struct PerpendicularJson {
     pub distance_mm: f32,
     pub from: PointJson,
     pub to: PointJson,
+    /// `ray` 沿面法向打到 / `contact` 贴合 / `edge` 棱上最近点连线（见 [`Perpendicular::method`]）。
+    pub method: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1423,6 +1434,7 @@ pub async fn run(
                     distance_mm: perp.distance,
                     from: perp.from.into(),
                     to: perp.to.into(),
+                    method: perp.method,
                 }),
                 witness: hit.witness,
             })
@@ -1572,6 +1584,22 @@ mod tests {
         TriMesh::with_flags(verts, idx, TriMeshFlags::empty())
     }
 
+    /// `box_mesh` 再绕过 `pivot`（xy）的竖轴转 `yaw_deg`——顶点坐标不再是整数，世界量级下 f32 会有残差，
+    /// 复现 live 里转了 30° 的 PANE 板。
+    fn yawed_box_mesh(min: [f32; 3], max: [f32; 3], pivot: [f32; 2], yaw_deg: f32) -> TriMesh {
+        let base = box_mesh(min, max);
+        let (s, c) = yaw_deg.to_radians().sin_cos();
+        let verts = base
+            .vertices()
+            .iter()
+            .map(|v| {
+                let (dx, dy) = (v.x - pivot[0], v.y - pivot[1]);
+                Point::new(pivot[0] + dx * c - dy * s, pivot[1] + dx * s + dy * c, v.z)
+            })
+            .collect();
+        TriMesh::with_flags(verts, base.indices().to_vec(), TriMeshFlags::empty())
+    }
+
     /// 直墙盒 `[min, max]` 沿 X（厚度方向）开一个矩形通孔 `y ∈ hole_y, z ∈ hole_z`——手搭的「布尔后」
     /// 墙网格：外皮 8 点 + 两张开孔面上各 4 个孔角；±Y / ±Z 外面各 2 三角，−X / +X 开孔面各按
     /// 「外角连最近孔角」切成四条梯形 8 三角，四片洞壁各 2 三角，共 32 三角。法向一律朝实体外
@@ -1697,6 +1725,7 @@ mod tests {
         );
         let perp = hit.perpendicular.expect("perpendicular");
         assert!(approx(perp.distance, 300.0, 1e-2), "perp {}", perp.distance);
+        assert_eq!(perp.method, "ray");
         assert!(approx(perp.to.x, 200.0, 1e-2));
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
@@ -1737,7 +1766,7 @@ mod tests {
 
     /// 共棱上先选中的是主面、但垂距射线落空时，退回那条棱上的非主面读法（2026-09-18 口径）：
     /// 源在 (0.95, 0.32, 0) 方向 → 侧面（+X）贴合度高先被选中，可从源点沿 −X 打回去落在墙端之外（y 5100 > 5000）
-    /// → 落空 → 改读同一条竖棱上的 `end`，不带 `perpendicular_ray_missed`。
+    /// → 落空（连线偏离法向 18°，也过不了 3a）→ 改读同一条竖棱上的 `end`，无 warning。
     #[test]
     fn edge_hit_falls_back_to_end_when_the_side_ray_misses() {
         let wall = leaf(
@@ -1787,9 +1816,158 @@ mod tests {
         assert_eq!(face.kind, FaceKind::Side, "{face:?}");
         let perp = hit.perpendicular.expect("贴合也该有垂距");
         assert_eq!(perp.distance, hit.distance);
+        assert_eq!(perp.method, "contact");
         assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
         assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// live 里 PANE `17496/135244` 的布局：25 × 300 × 300 的板绕竖轴转了 30°，+n+r 那条竖棱在世界坐标
+    /// (−10425, 11746.9)。返回 `(板, 从那条棱沿「法向偏 phi_deg 朝端面方向」退 distance 的 FTUB 条)`，
+    /// 两者同一个 30° 朝向、z 都盖住 1000–1045。最近点对就是「条的角 ↔ 板的竖棱」，坐标在 1e4 量级、
+    /// 顶点不是整数——跟 live 一样吃 f32 精度。
+    fn yawed_pane_and_bar(phi_deg: f32, distance: f32) -> (LeafMesh, LeafMesh) {
+        let corner = [-10425.0f32, 11746.9f32];
+        let yaw = 30.0f32;
+        let pane = yawed_box_mesh(
+            [corner[0] - 25.0, corner[1] - 300.0, 970.0],
+            [corner[0], corner[1], 1270.0],
+            corner,
+            yaw,
+        );
+        let (s, c) = phi_deg.to_radians().sin_cos();
+        let tip = [corner[0] + distance * c, corner[1] + distance * s];
+        let bar = yawed_box_mesh(
+            [tip[0], tip[1], 1000.0],
+            [tip[0] + 400.0, tip[1] + 50.0, 1045.0],
+            corner,
+            yaw,
+        );
+        (leaf("1/1", "PANE", pane), leaf("2/2", "FTUB", bar))
+    }
+
+    /// 棱上落空、但最近点连线与面法向几乎平行（2026-09-18 口径 3a）：FTUB 条的角离 PANE 板的竖棱 46.6 mm、
+    /// 方向只偏离侧面法向 1°，沿法向的垂足落在板角外 0.8 mm → 射线落空；`distance × (1 − cos 1°)` = 0.007 mm
+    /// ≪ 容差 0.47 mm → 仍读 `side`，垂距 = 距离本身、垂足 = 棱上最近点、`method = edge`、无 warning。
+    /// 就是 live 里 FTUB `24384/24671` × PANE `17496/135244` 那 46.6 mm。
+    #[test]
+    fn edge_hit_nearly_along_the_face_normal_keeps_the_face_and_takes_the_closest_segment() {
+        let (pane, bar) = yawed_pane_and_bar(1.0, 46.6);
+        let out = surface_clearance(&[bar], &[pane], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "{hit:?}");
+        assert!(approx(hit.distance, 46.6, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Side, "{face:?}");
+        assert!(approx(face.normal.x, 0.866, 1e-3) && approx(face.normal.y, 0.5, 1e-3), "{:?}", face.normal);
+        let perp = hit.perpendicular.expect("连线几乎沿法向，该有垂距");
+        assert_eq!(perp.method, "edge");
+        assert_eq!(perp.distance, hit.distance);
+        assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
+        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 同一块转了 30° 的 PANE，FTUB 条改从偏离法向 18° 的方向斜过板角（G2 的情形）：3a 过不了
+    /// （100 × (1 − cos 18°) = 4.9 mm > 1 mm），要换棱上另一面读 `end`。板转过角、坐标又在 1e4 量级，
+    /// `end` 三角把 q 投影回来的残差有几个 ulp——`hit_candidates` 的 eps 得随坐标放大才找得到它，
+    /// 找不到就只剩 `side`、垂距空。
+    #[test]
+    fn edge_fallback_to_end_survives_world_scale_yawed_coordinates() {
+        let (pane, bar) = yawed_pane_and_bar(18.0, 100.0);
+        let out = surface_clearance(&[bar], &[pane], opts());
+        let hit = out.hit.expect("hit");
+        assert!(approx(hit.distance, 100.0, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::End, "{face:?}");
+        assert!(approx(face.normal.x, -0.5, 1e-3) && approx(face.normal.y, 0.866, 1e-3), "{:?}", face.normal);
+        assert!(hit.perpendicular.is_none(), "{:?}", hit.perpendicular);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 真楔形（2026-09-18 口径 3c）：构件在开孔正前方、斜对着洞口的一条竖棱——棱两侧是外皮（`side`）和
+    /// 洞壁（`opening`），都是主面；沿外皮法向的射线穿过洞、沿洞壁法向的射线在墙外走，都落空；连线偏离
+    /// 外皮法向 39°，3a 也不成。留第一面（外皮）、垂距置空、**不报 warning**。
+    #[test]
+    fn wedge_between_two_main_faces_leaves_perpendicular_empty_without_warning() {
+        let wall = leaf(
+            "1/1",
+            "STWALL",
+            box_with_hole_mesh(
+                [0.0, 0.0, 0.0],
+                [200.0, 5000.0, 3000.0],
+                [2000.0, 2400.0],
+                [1000.0, 1400.0],
+            ),
+        );
+        let part = leaf(
+            "2/2",
+            "TUBI",
+            box_mesh([-500.0, 2120.0, 1100.0], [-100.0, 2320.0, 1300.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "{hit:?}");
+        assert!(approx(hit.distance, 128.0625, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.target_point.x, 0.0, 1e-2) && approx(hit.target_point.y, 2400.0, 1e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert!(face.kind.is_main_face(), "{face:?}");
+        assert_eq!(face.kind, FaceKind::Side, "{face:?}");
+        assert!(hit.perpendicular.is_none(), "{:?}", hit.perpendicular);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// live 里 FTUB `24384/24671` × PANE `17496/135244` 为什么没能换面读 `end`：把那块板照 live 管线搭出来
+    /// （局部盒 ±12.5 / ±150 / ±150 经 30° 旋转 + 平移到 (−10360.825, 11610.75, 1120)），q 用接口回的那个
+    /// f32 值——板角处 `end` 三角把 q 投影回来的残差 1.4e-3 mm，比 `hit_candidates` 原来的 eps（1e-3）还大，
+    /// 于是候选里只剩 `side` 一片、没得换。eps 随坐标量级放大后两片都在，且 `side` 排前。
+    #[test]
+    fn hit_candidates_keeps_the_adjacent_face_under_world_scale_rounding() {
+        let (s, c) = 30f32.to_radians().sin_cos();
+        let t = [-10360.825f32, 11610.75f32, 1120.0f32];
+        let local = box_mesh([-12.5, -150.0, -150.0], [12.5, 150.0, 150.0]);
+        let verts: Vec<Point<Real>> = local
+            .vertices()
+            .iter()
+            .map(|v| Point::new(t[0] + v.x * c - v.y * s, t[1] + v.x * s + v.y * c, t[2] + v.z))
+            .collect();
+        let pane = TriMesh::with_flags(verts, local.indices().to_vec(), TriMeshFlags::empty());
+        let q = Point::new(-10424.999f32, 11746.903f32, 999.99994f32);
+        let dir = Vector::new(0.857f32, 0.515f32, 0.0f32).normalize();
+
+        let end_residual = pane
+            .triangles()
+            .filter(|tri| tri.normal().is_some_and(|n| n.x < -0.4))
+            .map(|tri| (tri.project_local_point(&q, false).point - q).norm())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            end_residual > 1e-3 && end_residual < 1e-2,
+            "end 三角到 q 的残差该在 (1e-3, 1e-2) 之间才复现得了 live：{end_residual:e}"
+        );
+
+        let candidates = hit_candidates(&pane, q, Some(dir));
+        let normals: Vec<_> = candidates
+            .iter()
+            .filter_map(|tri| tri.normal())
+            .map(|n| (n.x, n.y))
+            .collect();
+        assert_eq!(candidates.len(), 2, "{normals:?}");
+        assert!(approx(normals[0].0, 0.866, 1e-3) && approx(normals[0].1, 0.5, 1e-3), "side 该排前：{normals:?}");
+        assert!(approx(normals[1].0, -0.5, 1e-3) && approx(normals[1].1, 0.866, 1e-3), "end 该在后：{normals:?}");
     }
 
     #[test]
