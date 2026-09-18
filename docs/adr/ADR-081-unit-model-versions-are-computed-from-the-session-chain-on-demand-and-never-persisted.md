@@ -1,0 +1,61 @@
+# ADR-081：最小交付单元的模型版本表从会话链按需算出，不落库、不做 diff 接口
+
+- 状态：**已接受、已实施**（2026-09-18 plant3d-web 侧 grill 三轮 Q1–Q19 用户逐条拍板：版本对比取数迁到本仓、legacy `:3100` 链随开关退役、
+  `limit` 截断由前端按 `since_sesno` 连续拉；同日 D1–D6 落地——`fast_model::unit_versions` + `GET /api/v1/model/versions`，实施记录见文末）
+- 日期：2026-09-18
+- 关联：
+  - **沿用** ADR-079（生成根成败只活在进程里，`model_sesno` 是模型面唯一的持久事实）——本文不给模型面加第二份持久真值；
+  - **沿用** `fast_model::historical_model`（会话钉死的 e3d-io 读 + `Historical(<refno>@<sesno>)` 进程内命名空间，不落库）——A/B 几何直接用它，本文不另造；
+  - **复用** ADR-080 的选件层：e3d-model `plan_update(S→T)` / 增量管线的 `WindowDiff`、`classify_operation_impact`（CONTEXT「模型影响」三态）——版本表的「这一会话动了这单元没有、动的是网格还是摆放」用同一把尺子；
+  - **消费方**：plant3d-web ADR 0065（`ModelVersionSource` 端口）与其执行清单 `docs/plans/2026-09-18-model-version-compare-gen-model-v1-migration-plan.md`；
+  - **词汇**：CONTEXT「最小交付单元 (MDU)」「生成源版本」；plant3d-web CONTEXT「模型版本」= 单元子树在某个生成源版本下的只读状态，身份 `(dbnum, unit_refno, sesno)`。
+
+## 背景
+
+plant3d-web 的版本对比要回答三个问题：**这个单元有哪些版本**、**某个版本长什么样**、**A/B 差在哪**。
+legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 manifest）回答前两个，第三个在前端按几何签名算。
+本仓今天只回答第二个（`POST /api/v1/model/history/generate` → `query tool=instances`），第一个没有：HTTP 面全扫（~120 条路由串）
+没有任何版本列表 / diff / release 路由，`tree/*` 也不带 `sesno`。而按 ADR-079，库里没有逐根 / 逐版本的制品可读——
+「有哪些版本」不可能像 legacy 那样查一张表得到，只能从 dabacon 会话链算。
+
+可用的积木都在：`db_file_header::session_chain(path)` 一次给整条链的 `sesno` + 时刻；增量管线逐会话取变更元素集（`WindowDiff`）；
+`OWNER` 上溯到最近 MDU 根是选根的既有规则（CONTEXT「交付单元根」）；元素级影响归类 `classify_operation_impact` 是唯一权威。
+
+## 决策
+
+1. **新增 `GET /api/v1/model/versions`**：请求 = `ProjectReq` + `dbnum` + `refno`（`a/b` 或 `a_b`，同 `TreeReq` 归一）+ 可选 `since_sesno` / `limit`（默认 500，尾部截断回 `truncated: true`）。
+   响应 `{ dbnum, unit_refno, unit_noun, file_latest_sesno, truncated, versions: [{ sesno, session_time, impact_kind }] }`，按 `sesno` 升序。
+   错误沿 `ApiError` 码位：`400 INVALID_REFNO`、`404 REFNO_NOT_FOUND`、`422 NOT_A_DELIVERY_UNIT_ROOT`（带 `noun` 与项目当前 MDU 类型集）、`503 SOURCE_NOT_FOUND`。
+   **单元根合法性由服务端按项目 `delivery_unit_types` 判**，前端不再持类型清单。
+2. **版本表的算法**：`session_chain` → 逐会话变更元素集 → 每个元素 `OWNER` 上溯到最近 MDU 根，只留等于目标单元根的 → 该会话的 `impact_kind` 取最重：
+   单元根自身 `Add` → `delivery`；`Deleted` → `tombstone`；任一元素 `Regen` → `mesh`；否则任一 `TransformOnly` → `placement`；全 `Skip` → `noop`。
+   五态词表**沿用 legacy**（前端类型与词汇表都在用，换词无收益）；`noop` 会话**列出**（plant3d-web CONTEXT「无几何变化提交」保留版本轨迹）。
+3. **不落库**：结果只进进程内缓存，键 `(dbnum, unit_refno, source_fingerprint)`，文件指纹变了整条重算；重启即丢。
+   不新建逐单元版本索引表——建了就要回答重建 / 回退 / 幽灵那一整套问题（ADR-060 / 079 刚把逐根表退掉）。
+4. **A/B 几何不另造**：两侧一律 `model/history/generate {dbnum, refno, sesno}`（B 是文件最新也一样：生产投影停在 `model_sesno`，常落后于文件最新），
+   现有上限（≤ 100 000 元素 / 300 s）与生命周期（不落库、重启即丢、`DELETE` 释放）原样继承。
+5. **不做 diff 接口**：差异在前端按 `geo_hash + geo_index + matrix` 签名算（今天的做法）。`plan_update(A→B)` 限在单元的服务端 diff 是以后的可选项，不是前提。
+6. **不给 `tree/*` 加 `sesno`**：版本对比是单元尺度的，单元子树在某 sesno 的结构从 `history/query tool=snapshot` 取；全库版本树是另一件事。
+
+## 后果
+
+- 版本表的代价是数据面 O(会话数)，不触几何；长链靠 `since_sesno` / `limit` 与进程内缓存兜，首次冷算可能是秒级——接受，它是人点开对比时才发生的一次性成本。
+- `impact_kind` 与生成路径共用 `classify_operation_impact`：那边的判定改了，版本表的分档跟着变，不会出现「版本表说 mesh、生成说 Skip」两套说法。
+- 验收口径：ams8000 任取 3 个 BRAN 根，本接口的 `sesno` 集合与 `impact_kind` 与 legacy `GET /api/model/units/{refno}/versions` 逐条对上（legacy 的 `artifact_sesno` / `manifest_path` 不比，本仓没有对应物）。
+
+## 实施记录（2026-09-18）
+
+- 代码：`src/fast_model/unit_versions.rs`（算法 + 缓存 + 切片，纯函数 `fold_window_impact` / `slice_table` 单测 6 条）；
+  `web_service/handlers.rs::model_versions`（`spawn_blocking`，错误码 → HTTP 映射）；`web_service/mod.rs` 一条 GET 路由 + 源码守卫
+  `model_versions_route_is_a_single_read_only_get`（只此一条、无 diff / release 路由）。`historical_model::{source_service, source_fingerprint}` 放开为 `pub(crate)` 复用。
+- **D2 的两处实现取舍**（初稿没写、动手时定的）：
+  1. 归属判断不按候选逐个 owner 上溯，而是每窗把单元子树（含根）枚举成一个 refno 集、候选查集合——一窗的候选数跟整库这一会话改了多少走
+     （ams7997 实测 332 会话 18.7 万候选），子树集只跟单元自身大小走（一条 BRAN 十几个成员）。`Modified` 候选在 T 端**或** S 端子树里都算碰到（被挪出去的也是变化）。
+  2. 会话钉死的 `DbSet` 不走 `E3dModelService::build_set`（每建一池重解 attlib + 挂跨库解析器，43 ms / 个），而是 attlib 解一次共享、单库 `DbSet::new` + `add_db(sesno)`；
+     跨库 owner 解不到只记告警。三步实测（debug build，ams7997 BRAN 24381/145018，332 会话）：owner 上溯 + `build_set` 27.9 s → 共享 attlib 9.4 s → 子树集 **1.9 s**
+     （索引差分 0.8 s / 建池 0.6 s / 归属 0.6 s）。
+- **真库探针**（`#[ignore]` `live_probe_unit_versions_on_a_real_database`，`AIOS_UNIT_VERSIONS_PROBE_ROOT` / `_DBNUM` 选目标）：
+  - ams7997 BRAN `24381/145018`：latest 332，**1 版** `66 delivery`（2022-11-16），17 个成员在同一窗，归入 delivery；
+  - ams8000 EQUI `24384/26480`（ADR-076 S5 那台、ADR-079 已关的孤儿现场）：latest 620，**11 版** `587 delivery` → 9 × `placement`（589–602）→ `604 tombstone`，
+    与 `docs/evidence/2026-09-15-adr076-increment-durable-boundary.md` 记的「新建、挪了七窗、DELETE」一致；探针里另按会话页索引交叉核对：587 在 / 586 不在，604 不在 / 603 在。6.2 s（620 会话，debug）。
+- 未做：与 legacy `/api/model/units/{refno}/versions` 的逐条对拍——legacy `:3100` 未起；ADR-045 语料的 `artifact_sesno` 本仓无对应物本就不比。留给 plant3d-web A3 端到端时补。

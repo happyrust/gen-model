@@ -1,5 +1,28 @@
 # 变更记录
 
+## 2026-09-18
+
+### ADR-081 立并实施：最小交付单元的模型版本表从会话链按需算、不落库——`GET /api/v1/model/versions`
+
+- **为什么**：plant3d-web 的版本对比（最小交付单元 A/B）整条取数链钉在 legacy `:3100` 上，而 legacy 开关只保留一个发布周期；
+  它要问的三件事里本仓只答得出「某版本长什么样」（`model/history/*`），「这个单元有哪些版本」没有任何接口，
+  而按 ADR-079 库里也没有逐根 / 逐版本制品可查。用户 0918 三轮拍板（plant3d-web ADR 0065 / 本仓 ADR-081）：
+  版本表从 dabacon 会话链算，五态 `impact_kind` 沿用 legacy 词表，不建表、不做 diff 接口、不给 `tree/*` 加 `sesno`。
+- **做法**（`fast_model::unit_versions`）：`session_chain` 旧→新逐窗 e3d-model `collect_window` 索引差分 → 候选查「单元子树 refno 集」
+  （T 端集判 Inserted / Modified、S 端集判 Deleted，Modified 两端任一在都算）→ 根自身 Inserted = `delivery`、Deleted = `tombstone`，
+  否则成员按 `classify_operation_impact`（与生成路同一把尺子）取最重：`Regen` → `mesh`、`TransformOnly` → `placement`、全 `Skip` → `noop`；
+  没碰到就不是一版。全表进进程内缓存（键 `(dbnum, refno, 文件指纹)`，64 张满则清），重启即丢。请求 = `ProjectReq` + `dbnum` + `refno`
+  + 可选 `since_sesno`（按链序切、不在链上 404）+ `limit`（缺省 500 / 上限 5000，尾部截断回 `truncated`）。错误码：`INVALID_REFNO` 400、
+  `REFNO_NOT_FOUND` / `SESSION_NOT_FOUND` 404、`NOT_A_DELIVERY_UNIT_ROOT` 422（detail 带 noun 与项目 `delivery_unit_types`）、
+  `COMPUTATION_TIMEOUT` 504（300 s 预算）、`SOURCE_NOT_FOUND` 503。回执带 `stats`（会话数 / 有变化窗数 / 候选数 / 归属命中 / 建池数 / 三段耗时）。
+- **两处性能取舍**：归属不按候选 owner 上溯而查子树集（候选数跟整库改动走，子树跟单元大小走）；会话钉死的 `DbSet` 共享一份 attlib、
+  单库 `DbSet::new` + `add_db(sesno)`，不走 `build_set`（43 ms / 池）。ams7997 332 会话：27.9 s → 9.4 s → **1.9 s**（debug）。
+- **验证**：`cargo test --lib -- unit_versions:: web_service::tests::model_versions_route_is_a_single_read_only_get` 7 过 0 败
+  （折叠规则 / 链序切片 / 五态序列化 / 非 MDU 拒收 / 路由只此一条 GET）；真库探针（`--ignored live_probe_unit_versions_on_a_real_database`）：
+  ams7997 BRAN 24381/145018 → `66 delivery`；ams8000 EQUI 24384/26480 → `587 delivery`、9 × `placement`、`604 tombstone`，与 ADR-076 S5 现场一致，
+  会话页索引交叉核对通过。`rustfmt --check` 新增段干净（`handlers.rs` / `mod.rs` 既有 14 / 81 处 drift 未动）。CONTEXT 补「单元版本表」。
+  **未与 legacy `/api/model/units/{refno}/versions` 逐条对拍**（`:3100` 未起）。
+
 ## 2026-09-17
 
 ### ADR-080 实施约束 9 补守卫：`model_unit_level_publish` 关着时 `unit_publish` 提示恒 `None`、单元级执行体一次不被叫到

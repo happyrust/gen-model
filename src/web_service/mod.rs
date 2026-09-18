@@ -558,6 +558,9 @@ async fn serve_with_ready(
             "/api/v1/model/history/{snapshot_key}",
             get(handlers::model_history_get).delete(handlers::model_history_delete),
         )
+        // 最小交付单元的模型版本表（ADR-081）：从会话链按需算、不落库；只读 GET，plant3d-web 版本对比的
+        // `ModelVersionSource.listVersions` 就吃它。A/B 几何仍走上面的 `model/history/*`。
+        .route("/api/v1/model/versions", get(handlers::model_versions))
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
@@ -1067,6 +1070,32 @@ mod tests {
             !serve.contains("post(handlers::spatial_") && !serve.contains("delete(handlers::spatial_"),
             "spatial routes must stay read-only"
         );
+    }
+
+    /// ADR-081：版本表是从会话链算出来的只读派生量，只许 GET；A/B 几何仍走 `model/history/*`，
+    /// 本仓不为它另开 diff / release 路由。
+    #[test]
+    fn model_versions_route_is_a_single_read_only_get() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(
+            serve.contains("\"/api/v1/model/versions\", get(handlers::model_versions)"),
+            "model versions route must be a plain GET"
+        );
+        assert_eq!(
+            serve.matches("/api/v1/model/versions").count(),
+            1,
+            "exactly one versions route"
+        );
+        for forbidden in ["/api/v1/model/diff", "/api/model-version", "compare-readiness", "/releases"] {
+            assert!(!serve.contains(forbidden), "no {forbidden} route in this service");
+        }
     }
 
     /// ADR-073：按水位删除会制造无法证明完整性的局部状态，只保留只读预览。

@@ -3,6 +3,8 @@ pub mod e3d_model_service;
 #[cfg(feature = "legacy_model")]
 pub(crate) mod gen_model;
 pub mod historical_model;
+/// 最小交付单元的模型版本表：从会话链按需算、不落库（ADR-081）。
+pub mod unit_versions;
 pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;
