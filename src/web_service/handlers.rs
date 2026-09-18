@@ -1835,6 +1835,41 @@ pub async fn model_versions(
     Ok(Json(report))
 }
 
+/// GET /api/v1/element/versions — 某个**构件**的模型版本表。
+///
+/// 与上面那条的分工：`model/versions` 折整棵单元子树，这条只认 `refno == 目标` 那一条变化，
+/// 并把所属单元那一列并排放在同一行（`element_impact` 为空 = 这一版单元变了、构件自己没变）。
+/// 任意 refno 都受理——非交付单元根在这里不是错误，那正是它存在的理由。同样是重 I/O，放 `spawn_blocking`。
+pub async fn element_versions(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::element_versions::ElementVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::element_versions::element_versions(dbnum, refno, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("构件版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// GET /api/v1/model/history/{snapshot_key}
 pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()

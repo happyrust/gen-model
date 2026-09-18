@@ -92,3 +92,23 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
     的 handler 见 `tool == "attributes"` 走它（要 `arguments.refno`，缺了 `INVALID_REFNO`），`historical_error` 多映三档
     `INVALID_REFNO` 400 / `SNAPSHOT_NOT_FOUND` 404 / `REFNO_OUTSIDE_SNAPSHOT` 422。回执在契约之外多给 `complete` / `diagnostics` / `elapsed_ms`。
     入参裁决抽成 `attributes_target`，无真库也测得到三档错误码；守卫钉住「不存在是正常回执」与「`read_pinned` 不碰备份库 / 当前时点会话」。
+
+## 追记（2026-09-18 20:4x）：构件级版本表 `GET /api/v1/element/versions`
+
+用户要的是「查看某个构件的所有历史版本，再任选两版对比」。本 ADR 的 `model/versions` 只答得了**最小交付单元**（非单元根 422
+`NOT_A_DELIVERY_UNIT_ROOT`），所以另开一条，语义与它并列、互不覆盖：
+
+- **算法**：同一条会话链、同一份 `collect_window` 索引差分，只是把「候选 ∈ 单元子树」那一层换成 `refno == 目标`，命中后仍走
+  `classify_operation_impact`（与生成路同一把尺子）。少掉逐窗建子树那一层：真库 ams8000 一条 BRAN 的成员，debug 构建冷算
+  3.5 s（单元表命中缓存时），单元表自己那 5.9 s 是并排那一列的开销。
+- **两列，不是一列**（用户 Q1 拍 (c)）：构件的几何可以在自身记录没变时改变（抬一根管子 → 邻居的派生管身跟着变；换 SPRE →
+  形状换了而记录没动）。所以回执每一行给 `element_impact`（它自己，`null` = 没变）与 `unit_impact`（所属单元，`null` = 单元表里
+  没有这一会话）两格；单元根由 owner 链上溯解出（`delivery_unit_types`），解不到就只给左列 + 一条 warning，不报错。
+- **回执**：`{ dbnum, refno, noun, unit_root, unit_noun, file_latest_sesno, truncated, versions[{sesno, session_time,
+  element_impact, unit_impact}], cached, elapsed_ms, stats, warnings }`。五态词表照旧（对构件而言 `delivery` = 它出现的那一版）。
+  `since_sesno` / `limit` 与单元表同口径；错误码复用 `INVALID_REFNO` 400 / `REFNO_NOT_FOUND` 404 / `SESSION_NOT_FOUND` 404 /
+  `COMPUTATION_TIMEOUT` 504——**这里没有 `NOT_A_DELIVERY_UNIT_ROOT`**，任意 refno 都受理，那正是它存在的理由。
+- **几何对比不按构件切**：快照仍是 `单元@sesno`，前端拿回执里的 `unit_root` 去 `model/versions` + `history/generate`，对比结果再
+  收窄到这个构件。按构件生成快照没有意义——管身是单元级派生物，单拎一个构件出来生成，几何对不齐。
+- 代码在 `fast_model/element_versions.rs`（独立模块）。`SessionSets` 与 `unit_versions` 那份 `PinnedSets` 同形，是当时那个文件另有
+  会话在改、不动它留下的一份复制；两份合一是后续的小活。

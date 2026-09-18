@@ -2,6 +2,20 @@
 
 ## 2026-09-18
 
+### 构件级版本表（`GET /api/v1/element/versions`）——「查看某个构件的所有历史版本」，并排给所属单元那一列
+
+- 与 `model/versions` 并列、不覆盖：那条折整棵单元子树、非单元根 422；这条只认 `refno == 目标` 那一条变化，**任意 refno 都受理**。
+  同一条会话链、同一份 `collect_window` 差分、同一个 `classify_operation_impact`，只是去掉逐窗建子树那一层。
+- 每一行两列：`element_impact`（它自己变没变，`null` = 没变）+ `unit_impact`（所属单元在同一会话的折叠影响）。只给左列会漏——
+  抬一根管子会让邻居的派生管身跟着变、换 SPRE 能在不碰构件记录的前提下换掉它的形状（用户 Q1 拍板）。
+- 单元根由 owner 链上溯解出（`delivery_unit_types`）并随回执给 `unit_root`：前端拿它去 `model/versions` + `history/generate`
+  取 A/B 几何（快照仍是单元级），对比结果再收窄到这个构件。解不到单元的构件（如 SITE / ZONE 自己）只给左列 + 一条 warning。
+- 错误码复用单元表那套（`INVALID_REFNO` / `REFNO_NOT_FOUND` / `SESSION_NOT_FOUND` / `COMPUTATION_TIMEOUT`），没有
+  `NOT_A_DELIVERY_UNIT_ROOT`。缓存键 `(dbnum, refno, 文件指纹)`，重启即丢。
+- 真机（debug 构建、ams8000 633 会话）：FTUB `24384/23262` → 57 行、其中 53 行它自己变过（含本轮增量的 626），冷算 10.1 s
+  （并排的单元表 5.9 s）；同一条支管的邻居 `24384/23264` → 57 行里只有 1 行是它自己变的，其余 56 行正是「单元变了它没变」。
+- 实现：`fast_model/element_versions.rs`（4 条单测）+ `web_service/handlers.rs::element_versions` + 路由。
+
 ### 属性历史对比落地（`POST model/history/query tool=attributes`）——某构件在快照那个会话下的属性，与 `element/attributes` 同一个渲染器，不落库
 
 - 契约见 ADR-081 候选条（18:0x 定、一字未改）：`{ snapshot_key, tool: "attributes", arguments: { refno: "a/b" } }` →

@@ -5,6 +5,8 @@ pub(crate) mod gen_model;
 pub mod historical_model;
 /// 最小交付单元的模型版本表：从会话链按需算、不落库（ADR-081）。
 pub mod unit_versions;
+/// 单个构件的模型版本表：同一条链、只认它自己，并排给所属单元那一列。
+pub mod element_versions;
 pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;

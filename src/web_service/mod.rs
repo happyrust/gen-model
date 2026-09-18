@@ -561,6 +561,9 @@ async fn serve_with_ready(
         // 最小交付单元的模型版本表（ADR-081）：从会话链按需算、不落库；只读 GET，plant3d-web 版本对比的
         // `ModelVersionSource.listVersions` 就吃它。A/B 几何仍走上面的 `model/history/*`。
         .route("/api/v1/model/versions", get(handlers::model_versions))
+        // 单个构件的模型版本表：同一条会话链、只认它自己，回执并排给所属单元那一列与
+        // `unit_root`（前端拿它去生成 A/B 两版快照）。plant3d-web「查看某个构件的所有历史版本」吃它。
+        .route("/api/v1/element/versions", get(handlers::element_versions))
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
