@@ -405,7 +405,7 @@ fn classify_generation_error(error: anyhow::Error) -> HistoricalModelError {
     HistoricalModelError::new(code, format!("{error:#}"))
 }
 
-fn source_service() -> anyhow::Result<E3dModelService> {
+pub(crate) fn source_service() -> anyhow::Result<E3dModelService> {
     let option = aios_core::get_db_option();
     let (pins, locator) = current_mdb_sources()?;
     E3dModelService::from_source_files(pins, locator, option.get_meshes_path())
@@ -522,7 +522,7 @@ fn time_of(chain: &[ChainTime], sesno: u32) -> Option<String> {
         .map(|entry| entry.time.clone())
 }
 
-fn source_fingerprint(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn source_fingerprint(path: &Path) -> anyhow::Result<String> {
     let meta = std::fs::metadata(path)?;
     let modified = meta
         .modified()

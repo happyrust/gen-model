@@ -5,7 +5,9 @@ D3 的祖孙锚点改取**最内层**、盒的规则改成「纯平移加 t / �
 **2026-09-15 修订**（会话 fable-5-1-21，属性变化分类对齐 core 计划 S2 / S3）：D1 规则 3 补第四类排除——P23 摆放派生 noun——与第五类
 ——被属主消费的几何（负体 / 剖面数据 / 几何集；非单元在消费型属主下；`EVALAT` 规则 M 结构件的严格祖先），见规则 3 末注。
 **2026-09-17 修订**（会话 fable-5-1-37）：D1 规则 2「子树里另有非锚点候选 → 整根 `regen`」只数账本去向 `RolledUp` 的候选，
-去向 `no_model` 的（两票元数据门放行 / 没有模型归属）不是锚点也不挡路，见规则 2 末注。
+去向 `no_model` 的（两票元数据门放行 / 没有模型归属）不是锚点也不挡路，见规则 2 末注。**同日 Q6 落地**（用户拍板，会话
+fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_model` 第三档 `CacheStamp`——挪一件时被顺带盖戳的子树成员从此不再挡规则 2，
+见规则 2 末注（含对同条 Q5 段「只有 `CACHID` 变照旧 `regen`」半句的更正）。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
@@ -73,8 +75,15 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    （`rigid_motion::CandidateKind::NoModel`，去向由 `ChangeLedger::dispositions` 读出）。不接这一下的代价：真实编辑几乎必带这种
    候选——「挪 EQUI + 子元素改个名」两件事单独发生分别是 `transform` 与 `skip`，落在同一窗却整根 `regen`。三条边界：
    根里**只有** `no_model` 候选（没有一个 Δ）照旧 `regen`——零锚点的 `transform`（只推回执不动记录）是选根的另一道题，不在本条；
-   `Unresolved` 照旧挡路（那时窗口本就退化，规则 4）；只 `CACHID` 跳动的子元素今天**不是** `no_model`（计划 §8 Q6 未落地），仍挡路
-   ——E3D 3.1 挪一件会给整棵子树带 `CACHID` 的元素各盖一次戳，所以 ZONE / STRU / 带 SUBE 的 EQUI 挪位要等 Q6 才打得着这条路。
+   `Unresolved` 照旧挡路（那时窗口本就退化，规则 4）；第三条**同日已改**：只 `CACHID` 跳动的子元素原本**不是** `no_model`
+   （计划 §8 Q6 未落地）、仍挡路——E3D 3.1 挪一件会给整棵子树带 `CACHID` 的元素各盖一次戳，ZONE / STRU / 带 SUBE 的 EQUI 挪位因此打不着
+   这条路。**（2026-09-17 Q6 落地 · 用户拍板）** 戳现在是元数据门第一票的**唯一例外**：字典按构造收不到 `CACHID`（3.1 运行库 schema
+   里的项目 UDA，不是「还没补上」而是永远不会有），第一票改由 e3d-model 的戳表 `PLACEMENT_STAMP_ATTRIBUTES` 给
+   （gen-model `model_impact::attribute_is_cache_stamp`），第二票照旧问读取集合（守卫 `stamp_literals ∩ names = ∅`，两仓各钉一次）。
+   只有戳跳了的候选记 `no_model` 第三档 `NoModelTier::CacheStamp`（回执 `cache_stamp`，与前两档互斥、都含在 `no_model` 里），
+   不上卷、不级联、账本去向 `NoModel`——于是它对规则 2 不再挡路；戳混在别的放行属性里不改档（跟着 `NAME` 记老档、跟着 `DUTY` 记新档），
+   `[POS, CACHID]` 仍是锚点那条路（`is_placement_only`），不是元数据。上一段「只有 `CACHID` 变照旧不算（摆放一项都没动）」
+   说的是**它不是锚点**，仍成立；「照旧 `regen`」那半句自本日起作废。窗 C 复跑见 changelog 2026-09-17。
 3. 锚点及其到根的路上**没有路由容器**（e3d-model 上卷规则 1 里「会补管的容器」：BRAN / HANG 等，管段几何由成员两端点派生），
    锚点**不是点 / 环容器下的元素**（`graphicsBehaviour == 1` 那类祖先之下的点：它的 `POS` 是属主网格的输入，e3d-model 上卷规则 1
    本来就把它并进属主单元），也**不在 CWBRAN 子树里**（桥架件的摆放是伪属性，`cable_tray::placement_matrix` 读兄弟，上卷规则 5）。

@@ -98,6 +98,10 @@ _Avoid_: 斜切、is_sloped、端面方向（当指属性时）
 一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（属性 put → `DESDRA_SCPlugs::PostSetAttribute` → `descases/VDESPT` 按字典 DCHC 类别进 `change/EVALAT`，在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`VDESPT` 就不进 `EVALAT`，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」的两档各要两票：`Skip` = 字典 DCHC=0 **∧** 生成读取集合不含它（`attribute_is_metadata_only`，2026-09-15 S6；之前是效果表 DataOnly ∧ DCHC=0 的五个名字，那张手写表退成报表分类与 `no_model` 的 `metadata_only` / `unread_attribute` 分档依据），`TransformOnly` = 效果表 ∧ DCHC=3。预览（`change_impact` / `model_affecting`）与执行（窗口规划器的元数据门）问同一个谓词。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（§9 为 `putAtt` 入口链与 `VDESPT` 的属性专项规则）。
 _Avoid_: 几何影响、is_geometry_update
 
+**单元级发布 (Unit-Level Publish)**：
+拿到一个要重算的生成根之后，只重建 `plan_update(S→T)` 点名的那几件单元（单元 = 投影里的一条记录，键 `GeometryId`，与 `manifest_hash` 的去重键同一个），以局部清单（`Partial`，见「局部清单」）叠在同一份**根级**回执之下发布，其余记录原地不动（ADR-080）。它是 ADR-056 D3「根级整根重算」的第二个例外（第一个是 ADR-066 刚体前移），三条路的优先序定死为 transform 优先、unit 兜底、整根重算保底；闸（回执 vs 计划基线）/ 管段完整性门 / 设计窗之外的目标变化 / 生产方任一条不成就回退整根 regen，回退永远正确、只是不省。core 的对应物是 `css/SEGREP`（单图元重建）而不是 `add/REPELE`（整件重画）——「模型影响」里 `Regen` 一档在 core 交互路本就分这两级，本词条把我方的 `Regen` 也拆成整根 / 单元两档；选根一个字不改，它只改「拿到一根之后在根内做什么」。只被 `no_model` 候选碰到的根（本窗名下没有一件几何要变）发一份空 `Partial` 只推回执（D10）。开关 `model_unit_level_publish` **默认关**，开门要过两态对拍全绿、全语料、净收益为正三道门（D9）；D10 另要三条级联同开。
+_Avoid_: 局部生成（当指 ADR-066「局部生成、整根 upsert」时）、单元级回执、单元级 CAS（回执与 CAS 仍是根级，ADR-080 D5）、增量发布（泛指时）
+
 **净变化 (Net Change)**：
 一个 `refno` 在整个待更新会话窗口内所有操作合并后的最终结果：`Added / Modified / Deleted / Cancelled`（新增后删除=无净变化）。
 _Avoid_: 合并变化、final op
@@ -113,6 +117,10 @@ _Avoid_: 水位、sesno 水位（泛指时）
 **生成源版本 (Model Source Version)**：
 一个库在当前投影下用来生成模型的那一版数据：调用方显式指定的会话号 / 时刻（历史投影、增量窗口右端），或——未指定时——库文件此刻自报的最新会话。它不是应用水位：水位只说数据已摄入，生成时点不从它取；完成凭证记的是模型按哪一版生成，判「当前」看它是否**不早于**要求的版本，不判等值。它也**不是模型水位**（ADR-060）：这一个记「这份几何按哪一版**文件**算出来的」、判不早于，那一枚记「到哪一版**数据窗口**为止数据与模型一致」、判等值；模型按文件最新生成到更新的版本时，两者取值本就不同。
 _Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
+
+**单元版本表 (Unit Version Table)**：
+一个最小交付单元在其库文件会话链上**被触及过**的会话序列（旧 → 新），每条带一个五态 `impact_kind`：`delivery`（单元根在这一会话出现）/ `tombstone`（单元根被删）/ `mesh`（子树里任一元素按「模型影响」判为 `Regen`）/ `placement`（否则任一 `TransformOnly`）/ `noop`（碰到了、全是 `Skip`——plant3d-web 词汇表的「无几何变化提交」）。一个会话没碰到这个单元就不在表里。它是从会话链**算出来的派生量**（ADR-081），不是持久事实，库里没有它的表；同一份「模型影响」判据保证它与生成路不会各说一套。plant3d-web 的「模型版本」`(dbnum, unit_refno, sesno)` 就是这张表的一行。
+_Avoid_: 版本列表（泛指）、逐单元版本索引表、release、把它当模型水位或生成源版本
 
 **模型水位 (Model Watermark)**：
 某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。**它是模型面唯一的持久事实**（ADR-079）：库里不再有逐根的凭证行，重启后「这个库欠到哪」只有它一个说法——落后于 `applied_sesno` 就排 `model_sesno → 文件最新`，`0` 就整库重排；上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做，没有第二个写者对它「对账」。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败——但承诺只覆盖**在册且有几何**的面板：常驻模型带「房间输入缺口」（缺文件的 DESI、缺几何的面板）时生命周期 `Degraded`，根照常算、边照常写、缺口点名的面板 / 库不在承诺内，`/health.degraded_sections` 含 `room`（ADR-073 2026-09-16 D11）；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（`http_422` 一类永久判定，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——前三格来自**生成根账本**（进程内，ADR-079），已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
@@ -291,8 +299,12 @@ _Avoid_: gb 标志（当指语义时）、图形忽略位、XGEOMETRY
 _Avoid_: 生成任务状态、pending 终态、实例计数
 
 **分支原子替换 (Branch-Atomic Replacement)**：
-单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以根级 CAS 发布的形态成立（ADR-056 N3）：一个根一次发布，`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。
+单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以 CAS 发布的形态成立（ADR-056 N3，★0917 按 ADR-080 D4 改口）：原子边界是**一次发布调用**——一批提交一次落地，可混整根与局部（见「局部清单」）、可跨多根；`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。触到某条 BRAN 管身的局部提交按整段重写，计划必须带齐该 BRAN 在 T 端的全部管段才发（ADR-080 D6）。
 _Avoid_: 生成根快照事务、先删后补
+
+**局部清单 (Partial Manifest)**：
+一次模型提交里 `CommitScope::Partial` 的那一档：`upserts` 只点名这根里重建过的那几件，缺席**什么也不证明**，要删什么必须显式写进 `removals`（合法来源只有三处：`plan_update.remove` 的单元、重建时画不出 / 画失败而被擦掉的单元、派生容器 base 端的旧管段键；回溯不到就回退）。与之相对的 `WholeRoot`（默认档，今天所有整根提交）是「`upserts` 是这根的全集，缺席 = 删除」——拿缺席推删除在生产代码里只许有 `whole_root_removals` 一处。局部提交之后没动的记录停在旧会话上、回执前移到 T，所以记录对回执的对账是 `record.source_sesno <= receipt.source_sesno`（ADR-080 D3；比回执新的记录仍是错）；整根 `manifest_hash` / `geometry_count` 由存储在写锁里按提交后的全部记录重算盖章（D5，调用方填的只是占位）。触到某条 BRAN 的管身按整段重写（`tube_branch_resets`），账上的段数 == 带上的段数才发（D6）。空清单只许来自规划器点了名的 `no_model_only` 根（D10），别的根回出空清单是生产方的 bug、回退不发。
+_Avoid_: 部分清单、增量清单、把 `Partial` 当成未完成写入（那是写入标记的事，见「未完成写入重初始化」）、把缺席当删除
 
 **合批重生成 (Batched Root Regeneration)**：
 一次生成调用同时承载多个生成根的重算方式，与「逐根重生成」相对。整批同成同败；批失败后回退逐根，以定位真正坏掉的那个根。

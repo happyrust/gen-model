@@ -1839,6 +1839,72 @@ pub async fn model_history_generate(
     Ok((StatusCode::ACCEPTED, Json(json!({"task_id": task_id}))))
 }
 
+/// `GET /api/v1/model/versions` 的查询串：与 `/tree/*` 同一套请求身份 + `dbnum` + `refno`（`a/b` 或 `a_b`）。
+#[derive(Debug, Deserialize)]
+pub struct ModelVersionsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    /// 只列链序在它之后的会话（翻页游标）；不在链上是 404 `SESSION_NOT_FOUND`。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 缺省 500、上限 5000；尾部截断回 `truncated: true`。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+fn unit_versions_error(error: crate::fast_model::unit_versions::UnitVersionsError) -> ApiError {
+    let status = match error.code {
+        "INVALID_REFNO" => StatusCode::BAD_REQUEST,
+        "REFNO_NOT_FOUND" | "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "NOT_A_DELIVERY_UNIT_ROOT" => StatusCode::UNPROCESSABLE_ENTITY,
+        "COMPUTATION_TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
+        "SOURCE_NOT_FOUND" | "SESSION_TIME_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let api = ApiError::coded(status, error.code, error.message);
+    match error.detail {
+        Some(detail) => api.with_detail(detail),
+        None => api,
+    }
+}
+
+/// GET /api/v1/model/versions — 某最小交付单元的模型版本表（ADR-081）。
+///
+/// 从 dabacon 会话链按需算（e3d-io 索引差分 × 单元子树归属 × 元素级模型影响），只进进程内缓存、不落库；
+/// 五态 `impact_kind` 沿用 legacy 词表。单元根合法性由服务端按项目 `delivery_unit_types` 判，
+/// 前端不再持类型清单。整条链冷算是重 I/O，放 `spawn_blocking`。
+pub async fn model_versions(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::unit_versions::UnitVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::unit_versions::unit_versions(dbnum, refno, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// GET /api/v1/model/history/{snapshot_key}
 pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()

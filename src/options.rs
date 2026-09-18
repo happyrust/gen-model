@@ -226,7 +226,7 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_transform_cheap_path: Option<bool>,
 
-    /// 单元级发布（ADR-078 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
+    /// 单元级发布（ADR-080 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
     /// 只重建 `plan_update(S→T)` 点名的那几件，以 `Partial` 提交叠在根回执之下发布。
     /// `true` 才开；关着时计划与执行体的产物与今天逐位相同。详见 [`model_unit_level_publish`]。
     #[serde(default)]
@@ -1823,9 +1823,10 @@ pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA
 /// 开着时 `WindowRootSources::collect` 经 e3d-model `plan_update_with` 给规划器一条谓词
 /// （`window_root_plan::change_metadata_tier`）：一个 Modified 候选的改动**全部**落在
 /// `model_impact::attribute_is_metadata_only` 放行的属性上（E3D 字典 DCHC=0 **且** 生成器不读——
-/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）、且成员 /
-/// 属主 / 类型 / opaque 都没动 → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute`
-/// 新档两个计数）、不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收（候选与它的祖先
+/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个；2026-09-17 Q6 起
+/// 戳 `CACHID` 由 e3d-model 的戳表拿第一票——字典按构造收不到它）、且成员 / 属主 / 类型 / opaque 都没动
+/// → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute` 新档 / `cache_stamp` 只戳三个计数）、
+/// 不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收（候选与它的祖先
 /// 链照进闭包），房间结构触发（改名进 `RoomRecalcPanel`）与设计引用级联都不受影响；闭包里能少的只有
 /// 放行候选本来会触发的粗级联扇出（桥架分支「子树里改了任何东西就整条重建」那片单元），它们的根按
 /// 两票前移。此前 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
@@ -1888,7 +1889,7 @@ fn effective_model_transform_cheap_path(
 /// 环境变量名：一次性覆盖 [`model_unit_level_publish`]，不必改配置文件。
 pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 
-/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-078 D9，
+/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-080 D9，
 /// 2026-09-16）。
 ///
 /// 开着时 DESI 窗口规划器在计划上带出本窗的基线 S（`ModelUpdatePlan::unit_publish_base_sesno`），
@@ -1900,7 +1901,16 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 两条便宜路的优先序定死为 **transform 优先、unit 兜底**（实施约束 7）：一根同时判成刚体前移与
 /// 单元级时先走 [`model_transform_cheap_path`] 那一路，它回退下来的才试单元级，再不成才整根重算。
 ///
-/// 这是「少算」方向的开关，开门要过 ADR-078 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
+/// 开着时规划器还会把 `regen` 里**只被账本去向 `no_model` 的候选碰到**的根点名
+/// （`ModelUpdatePlan::unit_publish_no_model_only_roots`，ADR-080 D10，2026-09-17）：那种根这一窗名下没有一件
+/// 几何要变（Q6 第一手已把只跳 `CACHID` 戳的候选从上卷里摘掉），单元路对它切出的空子计划发一份空的 `Partial`
+/// 只推回执，不再整根重算。**D10 的前置写死**（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：
+/// [`model_structural_connection_cascade`] / [`model_cable_endpoint_cascade`] / [`model_design_reference_cascade`]
+/// 三条**都开着**规划器才分桶——跨根设计引用的引用者只被盖戳这一形状，今天靠戳做种子整根 regen 收住，D10 之后
+/// 只有级联的目标集能把引用者的根挡在桶外；有一条关着，整窗一根都不点名、空子计划照旧回退整根 regen，
+/// 计划 warnings 里报一句为什么。
+///
+/// 这是「少算」方向的开关，开门要过 ADR-080 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
 /// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_unit_level_publish() -> bool {
     effective_default_off_switch(
@@ -2992,7 +3002,7 @@ mod tests {
         ));
     }
 
-    /// 单元级发布默认关（ADR-078 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
+    /// 单元级发布默认关（ADR-080 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
     /// 取值规则；键在扩展字段名单里，配置读坏时的告警点得到它。
     #[test]
     fn the_unit_level_publish_switch_is_off_by_default_and_listed_as_an_ext_field() {

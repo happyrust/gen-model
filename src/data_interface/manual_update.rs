@@ -2349,7 +2349,7 @@ pub enum UnitGenStatus {
 }
 
 /// 一个交付单元这一轮的发布方式：整根重算（默认）、刚体前移便宜路（ADR-066）或单元级发布
-/// （ADR-078：只重建 `plan_update` 点名的那几件，`Partial` 提交叠在根回执之下，与回执的
+/// （ADR-080：只重建 `plan_update` 点名的那几件，`Partial` 提交叠在根回执之下，与回执的
 /// `published_via = "unit"` 同名）。旧回执没有这一列，反序列化成 `Regen`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2386,7 +2386,7 @@ pub struct ModelUnitResult {
     /// 规划期判 `transform`、执行期回退整根重算时的原因（`Some` 仅此时）。旧回执没有该字段。
     #[serde(default)]
     pub transform_fallback_reason: Option<String>,
-    /// 本窗带着单元级发布提示（ADR-078 D9）、执行期却回退整根重算时的原因（闸 / 完整性门 /
+    /// 本窗带着单元级发布提示（ADR-080 D9）、执行期却回退整根重算时的原因（闸 / 完整性门 /
     /// 生产方哪一条不成，`Some` 仅此时）。走成 `Unit` 的与从没试过单元级的都是 `None`。
     /// 旧回执没有该字段。
     #[serde(default)]
@@ -2462,7 +2462,7 @@ pub struct UnitTask {
     /// `None` = 照旧整根重算。开关关时规划器不产它，恒 `None`。执行体认它才分流，B6 之前的
     /// 执行体忽略它、行为不变。`UnitTask` 只在内存里，不入库，故无需 `serde`。
     pub transform: Option<TransformUnit>,
-    /// 单元级发布（ADR-078 D9）的提示：这个根是本窗规划出来的 regen 根，`source_start_sesno` 是本窗
+    /// 单元级发布（ADR-080 D9）的提示：这个根是本窗规划出来的 regen 根，`source_start_sesno` 是本窗
     /// `plan_update(S→T)` 的基线 S——执行体的幂等闸拿它对回执，生产方拿它切子计划，两处必须是同一个 S。
     /// `None` = 照旧整根重算：开关关着、规划退化、或这根不是本窗产物（级联 / 恢复 / 目录名单来的根，
     /// 它们的回执不在本窗的 S 上，局部清单对不上）。与 `transform` 同时在时 **transform 优先、unit 兜底**
@@ -2470,10 +2470,14 @@ pub struct UnitTask {
     pub unit_publish: Option<UnitPublishHint>,
 }
 
-/// 单元级发布提示（ADR-078 D9）随 [`UnitTask`] 走的那一格：本窗的基线 S。
+/// 单元级发布提示（ADR-080 D9）随 [`UnitTask`] 走的那一格：本窗的基线 S，外加 D10 的
+/// `no_model_only`——规划器判这根这一窗只被账本去向 `no_model` 的候选碰到（`ModelUpdatePlan::
+/// unit_publish_no_model_only_roots` 点了名），单元路对它切出的空子计划许只推回执；假时空子计划照旧
+/// 回退整根 regen。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitPublishHint {
     pub source_start_sesno: u32,
+    pub no_model_only: bool,
 }
 
 /// Derive the generation worklist of one applied DESI batch from its delivery-
@@ -2482,13 +2486,16 @@ pub struct UnitPublishHint {
 /// regenerate it reintroduces a deleted BRAN into the staged generation worklist.
 ///
 /// `unit_publish_base_sesno` 是计划上的 `ModelUpdatePlan::unit_publish_base_sesno`：`Some(S)` 时本窗的
-/// 每个新单元都带单元级发布提示（ADR-078 D9），`None` 时一个都不带、与今天逐位相同。
+/// 每个新单元都带单元级发布提示（ADR-080 D9），`None` 时一个都不带、与今天逐位相同。
+/// `no_model_only_roots` 是计划上的 `unit_publish_no_model_only_roots`（`a/b`）：名单上的根提示里
+/// `no_model_only = true`（D10）；基线为 `None` 时名单不看。
 pub fn collect_unit_tasks(
     units: &[DeliveryUnitSummary],
     transform_units: &[TransformUnit],
     dbnum: u32,
     end_sesno: i32,
     unit_publish_base_sesno: Option<u32>,
+    no_model_only_roots: &[String],
 ) -> Vec<UnitTask> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut tasks = Vec::new();
@@ -2511,10 +2518,14 @@ pub fn collect_unit_tasks(
                 .iter()
                 .find(|hint| hint.root_refno == unit.root_refno)
                 .cloned(),
-            // 单元级发布提示（ADR-078 D9）：开关开着、本窗规划没退化时规划器给出基线 S，本窗的
+            // 单元级发布提示（ADR-080 D9）：开关开着、本窗规划没退化时规划器给出基线 S，本窗的
             // 每个新单元都带；它与 transform 提示可以同时在，执行期 transform 优先（实施约束 7）。
+            // D10：规划器点名的「只被 no_model 候选碰到」的根在提示里标 `no_model_only`。
             unit_publish: unit_publish_base_sesno.map(|source_start_sesno| UnitPublishHint {
                 source_start_sesno,
+                no_model_only: no_model_only_roots
+                    .iter()
+                    .any(|root| root == &unit.root_refno),
             }),
         });
     }
@@ -5442,6 +5453,7 @@ impl AiosDBManager {
                     dbnum,
                     success.end_sesno,
                     success.model_plan.unit_publish_base_sesno,
+                    &success.model_plan.unit_publish_no_model_only_roots,
                 );
                 // 计划里 `RegenRoot` 之外的工作项（删除清理 / 位姿 / 级联 / 根生成后补刷 AABB）
                 // 随返回值交给任务就地执行（ADR-072 D5）——尾事务不再把它们写成 pending 行。
@@ -7955,7 +7967,7 @@ mod tests {
         assert!(unit.will_generate);
 
         // 一次分支重生成即可同时重算弯头与相邻管段——生成任务只有一个。
-        let tasks = collect_unit_tasks(&units, &[], 1, 42, None);
+        let tasks = collect_unit_tasks(&units, &[], 1, 42, None, &[]);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].root_refno, r(5).to_pdms_str());
     }
@@ -9102,7 +9114,7 @@ mod tests {
         assert_eq!(unit.deleted, 1);
         assert_eq!(unit.added, 1);
 
-        let tasks = collect_unit_tasks(&units, &[], 1, 42, None);
+        let tasks = collect_unit_tasks(&units, &[], 1, 42, None, &[]);
         assert_eq!(tasks.len(), 1, "same root dedupes to one generation task");
         assert_eq!(tasks[0].root_refno, root_key);
         assert_eq!(tasks[0].source_end_sesno, 42);
@@ -9113,7 +9125,7 @@ mod tests {
             &[change(20, NetOp::Added, false)],
             &default_unit_types(),
         );
-        assert!(collect_unit_tasks(&units, &[], 1, 42, None).is_empty());
+        assert!(collect_unit_tasks(&units, &[], 1, 42, None, &[]).is_empty());
 
         // Issue #18: deleting the delivery root itself is handled by DeleteCleanup. The preview
         // rollup may still mark the old BRAN model-affecting, but it no longer exists post-save.
@@ -9128,7 +9140,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            collect_unit_tasks(&[deleted_root], &[], 1, 42, None).is_empty(),
+            collect_unit_tasks(&[deleted_root], &[], 1, 42, None, &[]).is_empty(),
             "a deleted delivery root must not be regenerated"
         );
     }
@@ -9158,7 +9170,7 @@ mod tests {
                 delta: crate::data_interface::rigid_motion::MatrixWire([0.0; 16]),
             }],
         }];
-        let tasks = collect_unit_tasks(&[equi.clone(), bran.clone()], &hint, 7997, 42, None);
+        let tasks = collect_unit_tasks(&[equi.clone(), bran.clone()], &hint, 7997, 42, None, &[]);
         let equi_task = tasks
             .iter()
             .find(|t| t.root_refno == r(5).to_pdms_str())
@@ -9183,17 +9195,25 @@ mod tests {
             "计划上没有单元级发布基线（开关关 / 退化窗）时一个都不带提示，与今天逐位相同"
         );
 
-        // ADR-078 D9：计划带了基线 S，本窗的每个新单元都带单元级发布提示——与 transform 提示可以
-        // 同时在（执行期 transform 优先，实施约束 7）。
-        let tasks = collect_unit_tasks(&[equi, bran], &hint, 7997, 42, Some(41));
+        // ADR-080 D9：计划带了基线 S，本窗的每个新单元都带单元级发布提示——与 transform 提示可以
+        // 同时在（执行期 transform 优先，实施约束 7）。D10：只有计划点了名的根提示里才标 `no_model_only`。
+        let tasks = collect_unit_tasks(
+            &[equi.clone(), bran.clone()],
+            &hint,
+            7997,
+            42,
+            Some(41),
+            &[r(6).to_pdms_str()],
+        );
         assert_eq!(tasks.len(), 2);
         for task in &tasks {
             assert_eq!(
                 task.unit_publish,
                 Some(UnitPublishHint {
-                    source_start_sesno: 41
+                    source_start_sesno: 41,
+                    no_model_only: task.root_refno == r(6).to_pdms_str(),
                 }),
-                "{}: 本窗产物都带基线 S",
+                "{}: 本窗产物都带基线 S；只有名单上的 BRAN 标 no_model_only",
                 task.root_refno
             );
         }
@@ -9206,6 +9226,13 @@ mod tests {
                 .is_some(),
             "带了单元级提示不影响 transform 提示"
         );
+        // 基线为 None 时名单不看：一个都不带提示。
+        assert!(
+            collect_unit_tasks(&[equi, bran], &hint, 7997, 42, None, &[r(6).to_pdms_str()])
+                .iter()
+                .all(|task| task.unit_publish.is_none()),
+            "没有基线就没有单元级提示，名单上的根也不例外"
+        );
     }
 
     /// 几路来的交付单元合并时，单元级发布提示与 transform 提示同款：带着它的那一条补进空白。
@@ -9215,6 +9242,7 @@ mod tests {
         let fresh = UnitTask {
             unit_publish: Some(UnitPublishHint {
                 source_start_sesno: 41,
+                no_model_only: true,
             }),
             ..unit_task(1, 5, 42, 0)
         };
@@ -9223,8 +9251,10 @@ mod tests {
         assert_eq!(
             merged[0].unit_publish,
             Some(UnitPublishHint {
-                source_start_sesno: 41
-            })
+                source_start_sesno: 41,
+                no_model_only: true,
+            }),
+            "D10 的 no_model_only 随整条提示一起带过来"
         );
         assert_eq!(merged[0].source_end_sesno, 42);
     }

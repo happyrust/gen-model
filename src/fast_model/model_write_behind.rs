@@ -602,7 +602,7 @@ impl ModelWriteBehind {
             return Err(OverlayRejected);
         }
         // 登记的 durable 身份必须是存储**实际盖下**的那份回执：`Partial` 提交的
-        // `manifest_hash` / `geometry_count` 是存储在写锁里、delta 落完之后重算的（ADR-078 D5），
+        // `manifest_hash` / `geometry_count` 是存储在写锁里、delta 落完之后重算的（ADR-080 D5），
         // 提交前从 `commits` 里抄走的是占位值——拿它登记，这根的 ACK 永远对不上、永远 pending。
         let receipts = self
             .store
@@ -1104,7 +1104,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D5：`Partial` 回执的 `manifest_hash` / `geometry_count` 是存储在写锁里盖的。
+    /// ADR-080 D5：`Partial` 回执的 `manifest_hash` / `geometry_count` 是存储在写锁里盖的。
     /// write-behind 登记的 durable 身份必须是**盖完的那份**——从 `commits` 里提前抄走占位值，
     /// 这根的 ACK 就永远对不上、永远 pending，而且不报错。
     #[tokio::test(start_paused = true)]
