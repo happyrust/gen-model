@@ -1642,8 +1642,9 @@ mod tests {
         assert!(out.stats.pruned >= 1, "{:?}", out.stats);
     }
 
+    /// `max_distance` 剪枝：唯一一对的 AABB 下界就超了阈值 → 不算、无命中。（不是计划表的 G 编号。）
     #[test]
-    fn g6_beyond_max_distance_gives_no_hit() {
+    fn beyond_max_distance_gives_no_hit() {
         let wall = leaf(
             "1/1",
             "STWALL",
@@ -1666,8 +1667,10 @@ mod tests {
         assert_eq!(out.stats.pruned, 1);
     }
 
+    /// 顶面分类：构件骑在墙顶上方 → `top`，顶面不是主面、不打垂距。（不是计划表的 G 编号；
+    /// 计划 G7「源为 BRAN owner」要库里的 `tubi_relate` 行，只有 live 用例。）
     #[test]
-    fn g7_top_face_is_classified_without_perpendicular() {
+    fn top_face_is_classified_without_perpendicular() {
         let wall = leaf(
             "1/1",
             "STWALL",
@@ -1686,8 +1689,6 @@ mod tests {
     }
 
     /// 09-17 计划 §7 表的 G6：带洞墙、构件在洞里 → 报到洞壁的距离，不是未开洞墙的 0。
-    /// （上面那条 `g6_beyond_max_distance_gives_no_hit` 测的是 `max_distance` 剪枝，与计划表的
-    /// G6 编号不对应；计划 G6 的几何用例是这一条。）
     /// 墙 = 200 厚直墙沿厚度方向开 400 × 400 方孔；管 = 穿过孔的盒，离 y 小侧洞壁 50 mm、
     /// 离 y 大侧 100 mm、上下各 80 mm。对照：同一根管对没开孔的同尺寸墙就是 G4（0 + intersects）。
     #[test]
@@ -1745,6 +1746,60 @@ mod tests {
         assert_eq!(hit.distance, 0.0);
         assert!(hit.intersects, "{hit:?}");
         assert_eq!(hit.witness, "aabb-overlap-center");
+    }
+
+    /// 洞壁面分类的**现状**（不是口径）：`classify_target_face` 只认「Up = +Z 分顶底、水平 PCA 分端 / 侧」，
+    /// 不知道自己命中的是洞壁——沿厚度方向开的孔，两片竖洞壁的法向 ±Y 与墙的行进方向平行，读成
+    /// `end`（pca）；洞底 / 洞顶法向 ±Z 读成 `top` / `bottom`（normal-only）。三种都不是主面，不打垂距、
+    /// 不出 warning。以后要给洞壁单独口径，改这条就是改口径。
+    /// 构件用不穿墙的短盒（x 50–150）贴近某一片洞壁，让最近点落在那片洞壁内部而不是棱上，分类才唯一。
+    #[test]
+    fn hole_wall_faces_currently_classify_as_end_and_top_bottom() {
+        let (hole_y, hole_z) = ([2000.0, 2400.0], [1000.0, 1400.0]);
+        let wall = || {
+            leaf(
+                "1/1",
+                "STWALL",
+                box_with_hole_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0], hole_y, hole_z),
+            )
+        };
+        // （短盒 y 范围, z 范围, 期望面, 期望置信度, 期望法向——已翻成指向源侧）
+        let cases: [([f32; 2], [f32; 2], FaceKind, &str, Vector<Real>); 4] = [
+            // 贴 y 小侧洞壁 50 mm：法向 +Y 与行进方向平行 → end。
+            ([2050.0, 2250.0], [1100.0, 1300.0], FaceKind::End, "pca", Vector::y()),
+            // 贴 y 大侧洞壁：法向 −Y → end。
+            ([2150.0, 2350.0], [1100.0, 1300.0], FaceKind::End, "pca", -Vector::y()),
+            // 贴洞底：法向 +Z → top。
+            ([2100.0, 2300.0], [1050.0, 1250.0], FaceKind::Top, "normal-only", Vector::z()),
+            // 贴洞顶：法向 −Z → bottom。
+            ([2100.0, 2300.0], [1150.0, 1350.0], FaceKind::Bottom, "normal-only", -Vector::z()),
+        ];
+        for (ys, zs, kind, confidence, normal) in cases {
+            let stub = leaf(
+                "2/2",
+                "BOX",
+                box_mesh([50.0, ys[0], zs[0]], [150.0, ys[1], zs[1]]),
+            );
+            let out = surface_clearance(&[stub], &[wall()], opts());
+            let hit = out.hit.expect("hit");
+            assert!(
+                !hit.intersects && approx(hit.distance, 50.0, 1e-2),
+                "{ys:?} {zs:?}: {hit:?}"
+            );
+            let face = hit.target_face.expect("face");
+            assert_eq!(face.kind, kind, "{ys:?} {zs:?}: {face:?}");
+            assert_eq!(face.confidence, confidence, "{ys:?} {zs:?}: {face:?}");
+            assert!(
+                face.normal.dot(&normal) > 0.99,
+                "{ys:?} {zs:?}: normal {:?}",
+                face.normal
+            );
+            assert!(
+                hit.perpendicular.is_none(),
+                "{ys:?} {zs:?}: 洞壁三种面都不是主面，不该有垂距"
+            );
+            assert!(out.warnings.is_empty(), "{ys:?} {zs:?}: {:?}", out.warnings);
+        }
     }
 
     #[test]
