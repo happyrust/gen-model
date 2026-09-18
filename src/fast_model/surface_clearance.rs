@@ -430,6 +430,8 @@ const PERPENDICULAR_RAY_MISSED: &str =
 /// 时不报落空，换那条棱上的另一面读：另一面是端 / 顶 / 底这类非主面就直接读它（棱本来也属于它，不用垂距）；
 /// 另一面也是主面就沿它的法向再打一次。都不成才留着第一面 + `perpendicular_ray_missed`。
 /// 这样斜靠墙端竖棱的构件读 `end` 而不是「`side` + 落空警告」（2026-09-18 用户口径）。
+/// **贴合**（距离 ≤ 垂距容差，型钢坐在板上的 0 mm）不打射线：垂距 = 距离本身（0 mm 时就是 0）、
+/// 垂足 = 目标侧最近点、无 warning——从贴合点出发的射线打不出 toi，打了只会被当成落空。
 fn resolve_target_face(
     target: &LeafMesh,
     q: Point<Real>,
@@ -442,6 +444,19 @@ fn resolve_target_face(
     let face = classify_face(target, q, candidates.first(), toward_source);
     if !(want_perpendicular && face.kind.is_main_face()) {
         return (face, None, None);
+    }
+    // 贴合（距离在垂距容差内，典型是型钢坐在板上的 0 mm）：垂距就是这段距离本身、垂足 = 目标侧最近点，
+    // 不打射线——从贴合点出发的射线打不出 toi，会被当成落空。
+    if distance <= perpendicular_tolerance(distance) {
+        return (
+            face,
+            Some(Perpendicular {
+                distance,
+                from: p,
+                to: q,
+            }),
+            None,
+        );
     }
     let cast = |face: &FaceInfo, tri: &Triangle| {
         perpendicular_ray(&target.mesh, p, face.normal, distance, Some(tri.center()))
@@ -668,6 +683,11 @@ fn classify_face(
     }
 }
 
+/// 垂距与最近距离允许差多少：1%，最小 0.05 mm（弦高 0.5 mm 的十分之一）。
+fn perpendicular_tolerance(distance: f32) -> f32 {
+    (distance * 0.01).max(0.05)
+}
+
 /// 从源侧最近点沿 −n 打到墙面（§4.4）。落点与最近距离对不上（差 > 1% 且 > 0.05 mm）视为落空。
 /// 最近点正落在命中三角的棱 / 角上时（洞壁与开孔面共棱、构件与墙同宽），射线擦着棱会打空——
 /// 给了 `face_interior`（命中三角重心）就把起点朝它在面内挪一丁点再打一次；面垂直于射线，toi 不变，
@@ -692,8 +712,7 @@ fn perpendicular_ray(
         let nudge = (distance * 1e-3).clamp(0.01, 1.0);
         cast(from + lateral * nudge)
     })?;
-    let tolerance = (distance * 0.01).max(0.05);
-    if (toi - distance).abs() > tolerance {
+    if (toi - distance).abs() > perpendicular_tolerance(distance) {
         return None;
     }
     Some(Perpendicular {
@@ -1742,6 +1761,34 @@ mod tests {
         assert_eq!(face.kind, FaceKind::End, "{face:?}");
         assert!(face.normal.y > 0.99, "{:?}", face.normal);
         assert!(hit.perpendicular.is_none());
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 贴合（2026-09-18 口径）：距离在垂距容差（max(1%, 0.05 mm)）内就不打射线——垂距 = 距离本身、
+    /// 垂足 = 目标侧最近点，无 warning。live 里型钢坐在 PANE 板上的 0 mm 对就是这种；这里用离墙面
+    /// 0.02 mm 的盒复现（正好贴着的两片三角 parry 可能直接判相交，那是 G4 的事）。
+    #[test]
+    fn touching_component_gets_a_zero_length_perpendicular_without_a_ray() {
+        let wall = leaf(
+            "1/1",
+            "STWALL",
+            box_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0]),
+        );
+        let part = leaf(
+            "2/2",
+            "BOX",
+            box_mesh([200.02, 1000.0, 500.0], [600.0, 1400.0, 900.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "{hit:?}");
+        assert!(hit.distance <= 0.05, "distance {}", hit.distance);
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Side, "{face:?}");
+        let perp = hit.perpendicular.expect("贴合也该有垂距");
+        assert_eq!(perp.distance, hit.distance);
+        assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
+        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
