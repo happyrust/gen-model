@@ -168,6 +168,8 @@
   ams7997 BRAN 24381/145018 → `66 delivery`；ams8000 EQUI 24384/26480 → `587 delivery`、9 × `placement`、`604 tombstone`，与 ADR-076 S5 现场一致，
   会话页索引交叉核对通过。`rustfmt --check` 新增段干净（`handlers.rs` / `mod.rs` 既有 14 / 81 处 drift 未动）。CONTEXT 补「单元版本表」。
   **未与 legacy `/api/model/units/{refno}/versions` 逐条对拍**（`:3100` 未起）。
+- **真机（15:32 追记）**：`:8022` 换成 `d47d747fd`（`codex/model-projection-cache@7bcdd60df` + cherry-pick 本条，release）后同一请求冷 2.20 s（623 会话）、缓存 17 ms，
+  错误码与截断各一条对上；plant3d-web 浏览器端到端两条场景全过（证据在 plant3d-web `docs/verification/model-version-compare-gen-model-v1-2026-09-18/`）。
 
 ## 2026-09-17
 

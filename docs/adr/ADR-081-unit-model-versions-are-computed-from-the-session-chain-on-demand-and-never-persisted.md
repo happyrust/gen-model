@@ -59,3 +59,7 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
   - ams8000 EQUI `24384/26480`（ADR-076 S5 那台、ADR-079 已关的孤儿现场）：latest 620，**11 版** `587 delivery` → 9 × `placement`（589–602）→ `604 tombstone`，
     与 `docs/evidence/2026-09-15-adr076-increment-durable-boundary.md` 记的「新建、挪了七窗、DELETE」一致；探针里另按会话页索引交叉核对：587 在 / 586 不在，604 不在 / 603 在。6.2 s（620 会话，debug）。
 - 未做：与 legacy `/api/model/units/{refno}/versions` 的逐条对拍——legacy `:3100` 未起；ADR-045 语料的 `artifact_sesno` 本仓无对应物本就不比。留给 plant3d-web A3 端到端时补。
+- **真机 HTTP（15:32 追记）**：本机 `:8022` 换成 `d47d747fd`（`codex/model-projection-cache@7bcdd60df` + cherry-pick `ef2284f12`，release）后，
+  `GET /api/v1/model/versions?dbnum=8000&refno=24384/26480` 冷 **2.20 s**（623 会话：索引差分 959 ms / 建池 782 ms / 归属 514 ms，47 502 候选、命中 2）、
+  缓存 **17 ms**；11 版与探针一致；400 / 404 / `since_sesno + limit` 截断各一条对上。plant3d-web dev `:3111` 两条浏览器场景（602→604 tombstone、587→602 placement）
+  端到端全过，证据在 plant3d-web `docs/verification/model-version-compare-gen-model-v1-2026-09-18/`。
