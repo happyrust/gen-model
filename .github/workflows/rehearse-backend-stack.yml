@@ -220,7 +220,7 @@ jobs:
           loaded="$(sudo journalctl -u aios-database --no-pager | grep -c '载入surreal')"
           echo "启动日志里「载入surreal」出现 $loaded 次"
           [ "$loaded" -ge 1 ] || { echo "::error::启动时没有载入 resource/surreal 里的脚本"; exit 1; }
-          echo "===== 单元状态 ====="; systemctl is-active surrealdb aios-database; surreal version
+          echo "===== 单元状态 ====="; systemctl is-active aios-surrealdb aios-database; "$INSTALL_DIR/bin/surreal" version
           echo "===== 实际生效的分流 location ====="
           sudo nginx -T 2>/dev/null | grep -nE 'location .*(api/review|files/review_attachments)' || {
             echo "::error::nginx 跑着的配置里没有分流 location"; exit 1; }
@@ -264,8 +264,8 @@ jobs:
           cp bundle/DbOption.toml rehearsal-logs/ 2>/dev/null
           sudo cp "$NGINX_SITE" rehearsal-logs/site.conf 2>/dev/null
           sudo cp /etc/nginx/snippets/aios-review-split.conf rehearsal-logs/ 2>/dev/null
-          sudo systemctl status surrealdb aios-database --no-pager -l > rehearsal-logs/units.txt 2>&1
-          sudo journalctl -u surrealdb -n 300 --no-pager > rehearsal-logs/surrealdb.log 2>&1
+          sudo systemctl status aios-surrealdb aios-database --no-pager -l > rehearsal-logs/units.txt 2>&1
+          sudo journalctl -u aios-surrealdb -n 300 --no-pager > rehearsal-logs/surrealdb.log 2>&1
           sudo journalctl -u aios-database -n 600 --no-pager > rehearsal-logs/aios-database.log 2>&1
           sudo tail -n 200 /var/log/nginx/error.log > rehearsal-logs/nginx-error.log 2>&1
           sudo chown -R "$USER" rehearsal-logs

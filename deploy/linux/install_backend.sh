@@ -8,9 +8,12 @@
 # ROLLBACK=1 再跑一次就换回去。
 #
 # 一件必须知道的事：store_mode = "rocksdb" 的部署里，数据库是**外部进程**，服务只连不拉
-# （ADR-074）。所以这里装两个 systemd 单元，aios-database 依赖 surrealdb 先起来；
-# 客户端 SDK 是 fork 的 2.1.4，服务端二进制必须是 2.1.x——3.x 打不开 2.x 的存储，
-# 连内存后端都会在 WS 子协议上对不上。
+# （ADR-074）。所以这里装两个 systemd 单元：aios-surrealdb 与 aios-database，后者依赖前者。
+# 两个名字都带 aios- 前缀、surreal 二进制也落在 ${INSTALL_DIR}/bin 下，都是为了跟机器上
+# 已有的东西错开——123.57.182.243 上既有一个别人的 surrealdb.service，/usr/local/bin/surreal
+# 又是活着的 surreal-8020 在用的 3.2.0-nightly。
+# 服务端二进制必须是 fork 的那条 2.1.4：上游 2.1.4 会在第一条 query 上无声挂住，
+# 3.x 更是连 2.x 的存储都打不开。
 
 set -euo pipefail
 
@@ -18,7 +21,13 @@ BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/aios-database}"
 DATA_DIR="${DATA_DIR:-/var/lib/aios-database}"
-SURREAL_BIN="${SURREAL_BIN:-/usr/local/bin/surreal}"
+# 刻意不落 /usr/local/bin：123.57.182.243 上那里已经躺着一个 3.2.0-nightly，
+# 活着的 surreal-8020.service 正用它开一份存储版本 3 的库。拿 2.1.4 盖掉它，
+# 下次那台库重启就再也打不开自己的数据了。我们这一台只归自己用，放自己家里。
+SURREAL_BIN="${SURREAL_BIN:-${INSTALL_DIR}/bin/surreal}"
+# 单元名也带 aios- 前缀：那台机器上已经有一个（disabled 的）surrealdb.service，
+# 指向 /root/shells/run_surrealdb_kv_8020.sh，不是我们的东西。
+SURREAL_UNIT="${SURREAL_UNIT:-aios-surrealdb}"
 SURREAL_DATA_DIR="${SURREAL_DATA_DIR:-/var/lib/surrealdb/ams-8009}"
 SURREAL_BIND="${SURREAL_BIND:-127.0.0.1:8009}"
 SURREAL_USER="${SURREAL_USER:-root}"
@@ -56,6 +65,16 @@ dump_service_failure() {
   systemctl status "$unit" --no-pager --lines 20 >&2 || true
   printf '\n===== journalctl -u %s -n 200 =====\n' "$unit" >&2
   journalctl -u "$unit" -n 200 --no-pager >&2 || true
+}
+
+# 这台机器上别人的东西不许动。要覆盖的文件如果存在、又没有我们的印记，就停下来说清楚，
+# 而不是备份一下继续——备份救不回一个被我们改跑偏的线上服务。
+MANAGED_MARK='# managed-by: gen-model deploy/linux/install_backend.sh'
+assert_ours() {
+  local path="$1"
+  [ -e "$path" ] || return 0
+  grep -qF "$MANAGED_MARK" "$path" && return 0
+  die "${path} 已经存在，而且不是这个脚本写的——先确认它归谁管（要接管就在文件头加一行 '${MANAGED_MARK}'）"
 }
 
 # ── 回滚：换回上一版二进制就走 ────────────────────────────────────────────────
@@ -138,9 +157,13 @@ chmod 644 "${INSTALL_DIR}"/resource/surreal/*.surql
 log "resource/surreal：$(ls -1 "${INSTALL_DIR}/resource/surreal" | wc -l) 个 .surql 就位"
 
 # ── systemd ─────────────────────────────────────────────────────────────────
-cat > /etc/systemd/system/surrealdb.service <<UNIT
+assert_ours "/etc/systemd/system/${SURREAL_UNIT}.service"
+assert_ours /etc/systemd/system/aios-database.service
+
+cat > "/etc/systemd/system/${SURREAL_UNIT}.service" <<UNIT
+${MANAGED_MARK}
 [Unit]
-Description=SurrealDB 2.1.x (aios-database 的持久层，rocksdb)
+Description=SurrealDB 2.1.4 fork (aios-database 的持久层，rocksdb ${SURREAL_BIND})
 Documentation=https://surrealdb.com/docs
 After=network-online.target
 Wants=network-online.target
@@ -173,10 +196,11 @@ fi
 
 {
   cat <<UNIT
+${MANAGED_MARK}
 [Unit]
 Description=aios-database (gen-model 增量服务 / 三维校审后端 :${HTTP_PORT})
-After=network-online.target surrealdb.service
-Requires=surrealdb.service
+After=network-online.target ${SURREAL_UNIT}.service
+Requires=${SURREAL_UNIT}.service
 
 [Service]
 Type=simple
@@ -201,16 +225,16 @@ UNIT
 } > /etc/systemd/system/aios-database.service
 
 systemctl daemon-reload
-systemctl enable surrealdb aios-database >/dev/null
+systemctl enable "$SURREAL_UNIT" aios-database >/dev/null
 
 # ── 起库，再起服务 ──────────────────────────────────────────────────────────
-systemctl restart surrealdb
+systemctl restart "$SURREAL_UNIT"
 wait_http "http://${SURREAL_BIND}/health" 60 "SurrealDB ${SURREAL_BIND}" \
-  || { dump_service_failure surrealdb; die "SurrealDB 起不来，服务就不用起了（store_mode=rocksdb 只连不拉）"; }
+  || { dump_service_failure "$SURREAL_UNIT"; die "SurrealDB 起不来，服务就不用起了（store_mode=rocksdb 只连不拉）"; }
 
 systemctl restart aios-database
 wait_http "http://127.0.0.1:${HTTP_PORT}/api/v1/health" "$HEALTH_TIMEOUT" "aios-database /api/v1/health" \
-  || { dump_service_failure aios-database; dump_service_failure surrealdb; die "服务 ${HEALTH_TIMEOUT}s 内没起来"; }
+  || { dump_service_failure aios-database; dump_service_failure "$SURREAL_UNIT"; die "服务 ${HEALTH_TIMEOUT}s 内没起来"; }
 
 wait_http "http://127.0.0.1:${HTTP_PORT}/api/review/health" 30 "校审域 /api/review/health" \
   || { dump_service_failure aios-database; die "服务起来了但校审域不健康——先看启动横幅那句 review persistence"; }
@@ -221,12 +245,26 @@ if [ "$SKIP_NGINX" = "1" ]; then
 else
   snippet=/etc/nginx/snippets/aios-review-split.conf
   mkdir -p /etc/nginx/snippets
+
+  # 切哪几个前缀是个要拿主意的事，所以做成参数。123.57.182.243 上 /api/v1 与 /api/users
+  # 此刻由 :3100 那个旧 web_server 实供着（/api/v1/health 回的是带 litefs 字段的那份，
+  # 200；/api/users 也是 200），把它们一起切过来等于把现网前端的数据面换了后端。
+  # /api/review 在那儿是 504、/api/auth 是 404，这两个切过来不动任何现有流量。
+  REVIEW_SPLIT_PREFIXES="${REVIEW_SPLIT_PREFIXES:-api/review api/users api/auth api/v1}"
+  dollar='$'
+  split_re=""
+  for prefix in $REVIEW_SPLIT_PREFIXES; do
+    split_re="${split_re}|${prefix}(?:/|${dollar})"
+  done
+  split_re="${split_re#|}"
+  log "分流前缀：${REVIEW_SPLIT_PREFIXES}"
+
   # 出处：gen-model scripts/review/nginx-review-split.conf。那一份连 /api/ → :3100 的
   # 兜底一起给，这里只留 :8022 那几条——站点文件本来就有 /api 与 /files/，重复写会打架。
   cat > "$snippet" <<SNIPPET
 # 由 deploy/linux/install_backend.sh 生成，勿手改（下次部署会覆盖）。
 # 校审域（含 PMS 入站那六条）走新后端 aios-database；其余 /api 留在站点文件里原来的上游。
-location ~ ^/(api/review(?:/|\$)|api/users(?:/|\$)|api/auth(?:/|\$)|api/v1(?:/|\$)) {
+location ~ ^/(${split_re}) {
     proxy_pass http://127.0.0.1:${HTTP_PORT};
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
@@ -303,5 +341,5 @@ fi
 # ── 交代清楚现状 ────────────────────────────────────────────────────────────
 log "本机 /api/v1/health：$(curl -fsS --max-time 5 "http://127.0.0.1:${HTTP_PORT}/api/v1/health" | head -c 600)"
 log "本机 /api/review/health：$(curl -fsS --max-time 5 "http://127.0.0.1:${HTTP_PORT}/api/review/health" | head -c 600)"
-log "surrealdb：$(systemctl is-active surrealdb)  aios-database：$(systemctl is-active aios-database)"
-log "装完了：${INSTALL_DIR}/bin/aios-database"
+log "${SURREAL_UNIT}：$(systemctl is-active "$SURREAL_UNIT")  aios-database：$(systemctl is-active aios-database)"
+log "装完了：${INSTALL_DIR}/bin/aios-database（surreal 在 ${SURREAL_BIN}，没碰 /usr/local/bin）"

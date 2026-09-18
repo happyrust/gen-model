@@ -75,7 +75,9 @@ env:
   SURREAL_DATA_DIR: /var/lib/surrealdb/ams-8009
   # 空跑判据：手动触发看 inputs.dry_run；push 触发默认空跑，提交信息带 [deploy] 才真发。
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[deploy]')) }}
-  SKIP_NGINX: ${{ inputs.skip_nginx && '1' || '0' }}
+  # push 触发没法传 inputs，所以 nginx 这一档也认提交信息里的标记：
+  # 只装后端、先不碰站点配置就写 [skip-nginx]。
+  SKIP_NGINX: ${{ ((github.event_name == 'workflow_dispatch' && inputs.skip_nginx) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[skip-nginx]'))) && '1' || '0' }}
   ROLLBACK: ${{ inputs.rollback && '1' || '0' }}
   REVIEW_WEB_BASE_URL: ${{ inputs.review_web_base_url }}
 
