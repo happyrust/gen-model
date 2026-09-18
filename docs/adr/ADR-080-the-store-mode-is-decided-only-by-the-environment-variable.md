@@ -2,6 +2,9 @@
 
 状态：**已接受**（2026-09-18 用户拍板：「调整 store mode 的参数配置，取代 DbOption 里的参数控制，只允许环境变量控制」。
 **号到提交时复核**——ADR-060 曾撞号两次。）
+**同日修订（2026-09-18，用户拍板「走乙」）**：D6 的默认档由 `mem` 翻成 **`rocksdb`**，同时 D5 的 `Start-AMS.ps1`
+在不给 `-StoreMode` 时**显式回填** `AIOS_STORE_MODE=mem`。改的只是「漏设时落到哪一档」，D1–D4 一个字没动。
+初版落地当天就翻，是因为真机复验把两种漏法的代价量出来了——见改写后的 D6。
 日期：2026-09-18
 落地：`src/options.rs`（`store_mode()` 只读环境变量；`effective_store_mode(env)` 签名里没有配置那一格；
 `store_mode_notices()` 逐条点名文件里残留的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB`；
@@ -13,10 +16,10 @@
 `web/setup.html`（第②步不再选介质，只展示生效档与出处、提醒文件里的过期键；地址两格随生效档启停）、
 `src/web_service/review/db.rs`（拒绝启用的三处文案改法指到 `AIOS_STORE_MODE=rocksdb`）、
 仓内全部 `DbOption*.toml` 夹具与 `scripts/templates/DbOption.factory.toml`（`store_mode = ...` 换成退役注释、记下原值）、
-`scripts/New-LocalRelease.ps1`（生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`；冒烟 B / C 腿不再往配置里写 `store_mode`，只递环境变量）、
+`scripts/New-LocalRelease.ps1`（生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`、不给时回填 `mem`；冒烟 B / C 腿不再往配置里写 `store_mode`，只递环境变量；A 腿有意不设，考默认档下的设置模式逃生门）、`scripts/start-local-release.ps1`（老启动器同样显式回填 `mem`）、
 `scripts/Start-Surreal8009.ps1` / `scripts/strt_plant_ui_runtime.py` / `src/bin/e3d_persist_smoke.rs`（改口）。
 关联：
-- **修订 ADR-074** D3（默认 `mem` 不变；「`in_memory_db` 两态映射」作废——配置键不再参与）、D4（退役写法仍认，但只认**环境变量里**的退役写法；
+- **修订 ADR-074** D3（**默认由 `mem` 翻成 `rocksdb`**，见本文 D6；「`in_memory_db` 两态映射」作废——配置键不再参与）、D4（退役写法仍认，但只认**环境变量里**的退役写法；
   「向导只写新名」作废——向导一个字都不写）与实施约束 1、3（护栏反向；向导用例换成「只展示、不写」）。
 - **修订 ADR-069**「配置真值仍是 `DbOption.toml` 文件」：介质是唯一例外——它不是配置文件里的真值，是启动命令里的真值。
   D3 设置模式判据不变（`rocksdb` × 空地址 = 设置模式，`mem` 不看地址），只是 `rocksdb` 与否由环境变量说。
@@ -41,7 +44,7 @@
 
 ### D1　介质只由 `AIOS_STORE_MODE` 决定
 
-`store_mode()` 只读环境变量 `AIOS_STORE_MODE`：`mem` / `rocksdb`（下划线、大小写、退役别名照 ADR-074 D4 认），不设或空白 = **`mem`**，
+`store_mode()` 只读环境变量 `AIOS_STORE_MODE`：`mem` / `rocksdb`（下划线、大小写、退役别名照 ADR-074 D4 认），不设或空白 = **`rocksdb`**（同日修订，见 D6），
 认不出 = 当没设并出声。`effective_store_mode(env)` 的签名里**没有配置那一格**——配置文件想参与裁决，得先改这个签名，那就是在改本文。
 
 介质是「这一次进程怎么起」的事，跟启动命令走；配置文件描述的是「这个工程长什么样」（项目路径、MDB、库地址、监听端口……），
@@ -72,16 +75,34 @@
 
 ### D5　发布包与部署脚本把介质递给环境变量
 
-生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`：给了就设 `AIOS_STORE_MODE` 再拉服务（cmd → 服务两层都继承），不给沿用调用方环境，
+生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`：给了就设 `AIOS_STORE_MODE` 再拉服务（cmd → 服务两层都继承）；不给时沿用调用方环境里已有的那一档，调用方也没有就**显式回填 `mem`**（同日修订：服务默认档翻成 rocksdb 之后，包不再靠默认兜「解压即跑」），
 两处都没有 = `mem`；日志打一句 `STORE_MODE=…`。冒烟 B 腿本来就设 `$env:AIOS_STORE_MODE`，C 腿改为显式 `rocksdb`；两腿都不再往
 临时配置里写 `store_mode`（本机配置若残留这一行，顺手删掉）。Linux 部署（`deploy/linux/install_backend.sh`）在 `aios-database`
 单元里加 `Environment=AIOS_STORE_MODE=rocksdb`，`render_dboption.py` 不再渲染 `store_mode`——现役 0.1.27 二进制也认这个环境变量，
 两版二进制同一套脚本。
 
-### D6　默认与数据面派生不变
+### D6　漏设时落到 `rocksdb`（同日翻的，取代 ADR-074 D3 的 `mem`）
 
-默认 `mem`（ADR-074 D3 的理由不变：不配任何东西就能起来）；`data_face` 仍由介质派生（`rocksdb` → `ingest`，`mem` → `read-through`，
-ADR-074 D6）。所以漏设 `AIOS_STORE_MODE` 换掉的不只是介质，还有整个数据面——这正是 mem 横幅要把 read-through 的后果一并念出来的原因。
+不设、设成空白、或设成认不出的值，一律落到 **`rocksdb`**。`data_face` 仍由介质派生（`rocksdb` → `ingest`，
+`mem` → `read-through`，ADR-074 D6），所以漏设换掉的不只是介质，还有整个数据面。
+
+翻的依据不是「哪一档更常用」，是**两种漏法的代价不对等**，这一点在本文落地当天的真机复验里量出来了：
+
+| 漏设时兜底到 | 现象 | 多久发现 |
+| --- | --- | --- |
+| `mem`（旧） | 服务照常起、模型照常对，只有属性行一直不进库、校审域整域 503、重启即清空 | 2026-09-18 现场查了半天，而且是**先怀疑增量窗口**才找到这儿 |
+| `rocksdb`（新） | 地址上没库就当场 `SurrealDB 连接失败（ws://…）` 退出（exit 1） | 一眼 |
+
+默认值的作用就是兜住「人没说」。兜到一个会静默给出错误数据面的档上，等于把最贵的那类沉默设成了出厂值。
+
+代价是「不配任何东西就能起来」（ADR-074 D3 原本的理由）不再由默认提供，而是由 D5 的 `Start-AMS.ps1` 显式回填 `mem` 提供：
+发布包是唯一「机器上多半没有库」的场景，它自己说出这一档，不占用默认位。两处残余风险，接受：
+
+1. 从包里**绕过 `Start-AMS.ps1`** 直接双击 `aios-database.exe`：出厂配置 `project_path` 为空 → 仍拐进设置模式、向导打得开
+   （冒烟 A 腿有意不设介质，考的就是这条逃生门）；但**向导走完之后**再这样直起，就会去连 `v_ip:v_port` 然后失败。
+2. 配置已填好、机器上没库的开发机手工直起：同样是启动失败。改法是 `$env:AIOS_STORE_MODE='mem'`，
+   而且失败信息里就带着地址，不需要猜。仓内 `Start-AiosDatabaseManual.ps1` / `Run-*.ps1` / `Verify-*.ps1` / `l3_suite`
+   本来就显式带着介质，一个都不受影响。
 
 ## 后果
 
@@ -95,7 +116,7 @@ ADR-074 D6）。所以漏设 `AIOS_STORE_MODE` 换掉的不只是介质，还有
 
 ## 实施约束
 
-1. `the_default_store_mode_is_mem`、`only_the_environment_variable_decides_the_store_mode`（签名里没有配置那一格；`ROCKSDB` / ` Mem ` 都认）、
+1. `the_default_store_mode_is_rocksdb`（不设 / 空白 / 拼错都落 rocksdb；`mem` 仍可显式选）、`only_the_environment_variable_decides_the_store_mode`（签名里没有配置那一格；`ROCKSDB` / ` Mem ` 都认）、
    `an_unrecognised_store_mode_is_ignored_but_never_silent`。
 2. 点名：`a_stale_store_mode_key_in_the_config_is_named_not_swallowed`（文件说 rocksdb、实际 mem → 「两边不是同一档」+ `AIOS_STORE_MODE=rocksdb`；
    两边一样 → 仍说「不再生效、删掉」）、`the_legacy_in_memory_db_switch_is_named_not_swallowed`（配置键与旧环境变量各一条；四个过期来源同时在场 = 四条）、

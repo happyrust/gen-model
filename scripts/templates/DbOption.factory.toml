@@ -82,7 +82,9 @@ v_password = "root"
 # 预填 8009 只为切档时少填一格。
 v_port = "8009"
 # 介质（mem / rocksdb）**不在本文件里**（ADR-080，2026-09-18）：只由启动服务时的环境变量
-# AIOS_STORE_MODE 决定，不设 = mem。这里写 store_mode = "..." 一个字都不生效，只会在启动日志被点名。
+# AIOS_STORE_MODE 决定，不设 = rocksdb（ADR-080 D6：漏设要当场报连不上，而不是悄悄跑在内存库上）。
+# 本包不靠那个默认：Start-AMS.ps1 不给 -StoreMode 时会显式设成 mem，双击即跑照旧。
+# 这里写 store_mode = "..." 一个字都不生效，只会在启动日志被点名。
 # 出厂 mem：数据库在后端进程内，无子进程、无 Surreal TCP 端口，进程一退数据即清空。
 # 要数据活过重启：先用包内 Start-Surreal.ps1 / bin\surreal.exe 起一台 rocksdb 库（本服务不拉起它），
 # 把上面 v_ip:v_port 指过去，再以 Start-AMS.ps1 -StoreMode rocksdb（= AIOS_STORE_MODE=rocksdb）启动。

@@ -31,7 +31,31 @@
   ——此前只钉了页面读哪几格、没钉服务端发哪几格，改个名两条都不红而页面拿到 `undefined`（**已按负例验过**：
   把 `store_mode_source` 改名即红）。`New-LocalRelease.ps1`、内嵌的 `Start-AMS.ps1`（96 行）、`Start-Surreal8009.ps1` 通过
   PowerShell 语法解析，`strt_plant_ui_runtime.py` 通过 `py_compile`，`deploy/linux/install_backend.sh` 通过 `bash -n`、
-  渲染出的 TOML 解析通过且不含 `store_mode`。**未验**：真机起服务看横幅与 `/setup.html` 第②步的实际渲染；发布包冒烟三腿。
+  渲染出的 TOML 解析通过且不含 `store_mode`。**未验**：发布包冒烟三腿。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了。）
+
+### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-080 D6）
+
+- **为什么**：上一条落地后真机复验，把两种漏法的代价摆到了一起。兜底 `mem`（原 ADR-074 D3）时服务照常起、模型照常对，
+  只有属性行一直不进库、校审域整域 503、重启即清空——2026-09-18 现场为此查了半天，而且是先怀疑增量窗口才找到这儿；
+  兜底 `rocksdb` 时地址上没库就当场 `SurrealDB 连接失败（ws://…）` 退出（exit 1），一眼就知道漏了什么。默认值兜的是
+  「人没说」，不该兜到一个会静默换掉数据面的档上。用户 2026-09-18 拍板翻过来。
+- **改动**：`effective_store_mode` 的兜底 `Mem` → `RocksDb`（不设 / 空白 / 拼错都落 rocksdb，`mem` 仍可显式选）；
+  `store_mode_source` 的那句「默认」改成「默认 rocksdb（环境变量 AIOS_STORE_MODE 没设或认不出）」，横幅与向导跟着变。
+  「解压即跑」不再靠默认兜：生成的 `Start-AMS.ps1` 不给 `-StoreMode`、调用方环境里也没有时**显式回填**
+  `AIOS_STORE_MODE=mem`（给了 `-StoreMode` 以它为准；环境里已有的照旧沿用，不被盖），老启动器 `start-local-release.ps1`
+  同样回填。冒烟 A 腿有意仍不设介质——它考的正是「落到默认档也仍然拐进设置模式、向导打得开」这条逃生门。
+  护栏 `the_default_store_mode_is_mem` → `the_default_store_mode_is_rocksdb`；ADR-074 D3 整条被 ADR-080 D6 取代。
+- **对现场的影响**：配置填好、机器上没库还手工直起服务的，会从「起来了但跑在内存库上」变成「起不来，报连不上」——
+  改法是 `$env:AIOS_STORE_MODE='mem'`，失败信息里带着地址。仓内所有起服务的脚本本来就显式带介质，逐个核过，一个不必改；
+  服务器那台走 systemd `Environment=`，也不受影响。逃生门仍在：`project_path` 空、或 `v_ip` 空 / `v_port=0` 时照旧进设置模式。
+- **验证**：`cargo test --lib` **2297 passed / 0 failed**（翻默认前后逐个字相同——事前先拿 `AIOS_STORE_MODE=rocksdb`
+  跑过一遍全量当预演，同样 2297 绿，确认测试面一处都没押在默认上）。真机三跑（debug 二进制）：
+  ①老配置（`store_mode = "rocksdb"` + `in_memory_db = true`）不设环境变量 → 本进程按 **rocksdb** 跑、两条点名照出、
+  因两边同档不喊「两边不是同一档」；②配置残留 `store_mode = "mem"` 不设环境变量 → 按 rocksdb 跑并喊「两边不是同一档：
+  启动前设 `AIOS_STORE_MODE=mem`」；③`project_path` 有效 + 地址上没库 → `SurrealDB 连接失败（ws://…）` exit 1（这就是新默认
+  要的那种当场报错）。`Start-AMS.ps1` 的回填三个分支逐个实跑：不给且环境空 → `mem`；不给但环境已有 `rocksdb` → 沿用；
+  给 `-StoreMode rocksdb` → `rocksdb`。向导第②步用 playwright 走真人路径截了图：介质栏显示「由 默认 rocksdb（…）决定」、
+  地址两格与「测试连接」可用、橙色提醒点名文件里那句 `store_mode = "mem"` 已不生效。**未验**：发布包冒烟三腿。
 
 ### 0.1.28 第三版包：带上重启台账与 `Start-AMS` 两条修复；上一版同号包已删
 

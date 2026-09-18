@@ -937,7 +937,7 @@ pub fn model_full_rebuild_enabled() -> bool {
 /// 启动时被 [`store_mode_notices`] 点名，提醒改用 [`STORE_MODE_ENV`]。
 pub const IN_MEMORY_DB_ENV: &str = "AIOS_IN_MEMORY_DB";
 
-/// 环境变量名：**介质唯一的决定者**（ADR-080，2026-09-18）。`mem` / `rocksdb`，不设 = `mem`。
+/// 环境变量名：**介质唯一的决定者**（ADR-080，2026-09-18）。`mem` / `rocksdb`，不设 = `rocksdb`。
 /// 详见 [`store_mode`]。
 pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
 
@@ -1019,7 +1019,7 @@ impl StoreMode {
 }
 
 /// 本进程生效的存储形态。**只由环境变量 [`STORE_MODE_ENV`] 决定**（ADR-080，2026-09-18）：
-/// `AIOS_STORE_MODE=mem` / `AIOS_STORE_MODE=rocksdb`，不设 = **`mem`**。
+/// `AIOS_STORE_MODE=mem` / `AIOS_STORE_MODE=rocksdb`，不设 = **`rocksdb`**。
 ///
 /// `DbOption.toml` 里的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB`
 /// **都不再参与裁决**。2026-09-18 之前它们与这个环境变量分层叠加（环境变量 > 配置 > 旧开关），
@@ -1028,18 +1028,24 @@ impl StoreMode {
 /// 它不该替进程挑介质。旧键还留在文件里的，由 [`store_mode_notices`] 逐条点名，
 /// 仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写。
 ///
-/// 默认 `mem` 的理由不变（ADR-074 D3）：不配任何东西就能起来，库在进程里。要落盘的现场必须显式
-/// `AIOS_STORE_MODE=rocksdb` 并把 `v_ip:v_port` 指到一台真在跑的 SurrealDB 上。
+/// **不设 = `rocksdb`**（ADR-080 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻了过来）。这个值同时
+/// 决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），所以漏设它换掉的不只是介质，
+/// 还有整个数据面——而两种漏法的代价差得很远：兜底 `mem` 时服务照常起、模型照常对，只有属性行
+/// 一直不进库、校审域整域 503，症状要几个小时才浮出来；兜底 `rocksdb` 时地址上没库就当场
+/// `SurrealDB 连接失败` 退出，一眼就知道漏了什么。所以让默认落在会当场喊的那一侧。
 ///
-/// 这个值同时决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），
-/// 所以漏设这个环境变量换掉的不只是介质，还有整个数据面。认不出的值当没设，并出声。
+/// 代价是「解压即跑」不再靠默认兜着：发布包由 `Start-AMS.ps1` 在不给 `-StoreMode` 时**显式**
+/// 回填 `AIOS_STORE_MODE=mem`（ADR-080 D5），出厂体验一个字没变。认不出的值当没设，并出声。
 pub fn store_mode() -> StoreMode {
     effective_store_mode(std::env::var(STORE_MODE_ENV).ok().as_deref())
 }
 
 /// 签名里**只有环境变量这一格**：配置文件想参与裁决，得先改这个签名——那就是在改 ADR-080。
+///
+/// 兜底那一档是 `rocksdb`（ADR-080 D6，2026-09-18 当日翻过来的）：漏设的代价要落在
+/// 「起不来、当场报连不上」这一侧，不能落在「起来了、但属性行不进库、日志没人喊」那一侧。
 fn effective_store_mode(env_value: Option<&str>) -> StoreMode {
-    parse_store_mode(env_value).unwrap_or(StoreMode::Mem)
+    parse_store_mode(env_value).unwrap_or(StoreMode::RocksDb)
 }
 
 /// `Some(mode)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值
@@ -1179,7 +1185,7 @@ fn store_mode_source_for(env_value: Option<&str>) -> &'static str {
     if parse_store_mode(env_value).is_some() {
         "环境变量 AIOS_STORE_MODE"
     } else {
-        "默认（环境变量 AIOS_STORE_MODE 没设或认不出）"
+        "默认 rocksdb（环境变量 AIOS_STORE_MODE 没设或认不出）"
     }
 }
 
@@ -2647,17 +2653,23 @@ mod tests {
         );
     }
 
-    /// **默认是 `mem`**：环境变量没设（或空白）= 进程内嵌，不配任何东西就能起来。
-    /// 落盘部署必须显式 `AIOS_STORE_MODE=rocksdb`，不能让现场靠一个会变化的默认值决定介质。
+    /// **默认是 `rocksdb`**（ADR-080 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻过来）：环境变量
+    /// 没设、空白、或拼错，一律落到落盘那一档。
+    ///
+    /// 翻的理由是两种漏法的代价不对等，不是哪一档更常用：兜底 `mem` 时服务照常起、模型照常对，
+    /// 只有属性行一直不进库、校审域整域 503——2026-09-18 现场为此查了半天；兜底 `rocksdb` 时
+    /// 地址上没库就当场 `SurrealDB 连接失败` 退出，一眼就知道漏了什么。默认要落在会喊的那一侧。
+    /// 「解压即跑」改由 `Start-AMS.ps1` 显式回填 `AIOS_STORE_MODE=mem` 保住（ADR-080 D5），
+    /// 不再靠这个默认兜着。
     #[test]
-    fn the_default_store_mode_is_mem() {
-        assert_eq!(effective_store_mode(None), StoreMode::Mem);
-        assert_eq!(effective_store_mode(Some("")), StoreMode::Mem);
-        assert_eq!(effective_store_mode(Some("   ")), StoreMode::Mem);
+    fn the_default_store_mode_is_rocksdb() {
+        assert_eq!(effective_store_mode(None), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some("")), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some("   ")), StoreMode::RocksDb);
         assert_eq!(
-            effective_store_mode(Some("rocksdb")),
-            StoreMode::RocksDb,
-            "落盘库仍然可显式选择"
+            effective_store_mode(Some("mem")),
+            StoreMode::Mem,
+            "内存档仍然可显式选择——它只是不再是漏设时的那一档"
         );
     }
 
@@ -2686,7 +2698,11 @@ mod tests {
     fn only_the_environment_variable_decides_the_store_mode() {
         assert_eq!(effective_store_mode(Some("ROCKSDB")), StoreMode::RocksDb);
         assert_eq!(effective_store_mode(Some(" Mem ")), StoreMode::Mem);
-        assert_eq!(effective_store_mode(Some("rocks_db")), StoreMode::Mem, "认不出的值当没设");
+        assert_eq!(
+            effective_store_mode(Some("mem_")),
+            StoreMode::RocksDb,
+            "认不出的值当没设，落到默认那一档"
+        );
         // 配置里那两个键就算写了、就算与环境变量相反，也一个字都不改介质：
         // 它们只出现在告警的参数表里，不出现在裁决的参数表里。
         assert_eq!(effective_store_mode(Some("mem")), StoreMode::Mem);
@@ -2700,7 +2716,7 @@ mod tests {
     /// 一个 `memm` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
     #[test]
     fn an_unrecognised_store_mode_is_ignored_but_never_silent() {
-        assert_eq!(effective_store_mode(Some("memm")), StoreMode::Mem);
+        assert_eq!(effective_store_mode(Some("memm")), StoreMode::RocksDb);
         let notices = store_mode_notices_for(Some("memm"), None, None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("memm"), "{notices:?}");
@@ -2769,11 +2785,12 @@ mod tests {
         assert!(notices[0].contains("不再生效"), "{notices:?}");
         assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
         assert!(notices[0].contains("AIOS_STORE_MODE=rocksdb"), "{notices:?}");
-        // 环境变量没设、文件说 rocksdb：实际是默认 mem，同样是两边不一样，且要说清这一档是默认给的。
-        let notices = store_mode_notices_for(None, Some("rocksdb"), None, None);
+        // 环境变量没设、文件说 mem：实际是默认 rocksdb，同样是两边不一样，且要说清这一档是默认给的。
+        let notices = store_mode_notices_for(None, Some("mem"), None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
         assert!(notices[0].contains("默认"), "{notices:?}");
+        assert!(notices[0].contains("AIOS_STORE_MODE=mem"), "{notices:?}");
         // 两边恰好一样：仍要说「这一行已不生效、请删掉」，但不必喊「不一样」。
         let notices = store_mode_notices_for(Some("rocksdb"), Some("rocksdb"), None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");

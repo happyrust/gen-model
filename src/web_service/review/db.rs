@@ -177,7 +177,8 @@ pub fn review_persistence() -> ReviewPersistence {
 }
 
 /// 测试专用逃生门（d-410）：`platform::tests` 把 `SUL_DB` 接到进程内 `mem://` 夹具上实跑六条
-/// handler，ADR-074 之后未配置的 `store_mode` 默认就是 `mem`，闸会把它当成「会蒸发的库」拒掉。
+/// handler，而闸会把 `mem` 当成「会蒸发的库」拒掉——跑测试的会话里只要有 `AIOS_STORE_MODE=mem`
+/// 就会撞上（介质的默认档 2026-09-18 起是 rocksdb，但它翻过两次，夹具不押在它身上）。
 /// lib 测试是一个多线程进程，不能 `std::env::set_var`（`options.rs` 同一条纪律），所以给一个
 /// 只在 `cfg(test)` 下存在的进程级开关，由夹具显式置位、声明「知道会丢」；生产路径只认环境变量
 /// [`crate::options::REVIEW_ALLOW_EPHEMERAL_STORE_ENV`]。闸本身在单测里照常活着——不许用

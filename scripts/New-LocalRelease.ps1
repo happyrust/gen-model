@@ -35,7 +35,8 @@
     让后续二进制 patch 始终有精确的源包可取。
 
     存储只有两档（2026-09-13 拍板，ADR-074）：**出厂是 mem**（库在后端进程内，无 Surreal
-    TCP 端口，真正解压即跑）。介质只由环境变量 AIOS_STORE_MODE 决定（ADR-080，2026-09-18），
+    TCP 端口，真正解压即跑——Start-AMS.ps1 不给 -StoreMode 时显式设 AIOS_STORE_MODE=mem，不靠服务那边的
+    默认档，它 2026-09-18 起是 rocksdb）。介质只由环境变量 AIOS_STORE_MODE 决定（ADR-080），
     不在 DbOption.toml 里、也不在向导里改：要数据活过重启的现场以 Start-AMS.ps1 -StoreMode rocksdb
     启动——**服务只连、不拉起**那台库，包根附 bin\surreal.exe 与 Start-Surreal.ps1 让人先把它
     起起来。包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
@@ -308,7 +309,8 @@ if (-not $BuildId.StartsWith("$BackendVersion+", [StringComparison]::Ordinal)) {
 
 # 只剩这一档：workspace\ 不再进包，runtime-workspace / full 两档随两个开关一起退役。
 $packageTier = 'runtime'
-# B 腿默认 mem：服务不拉库，mem 是唯一不需要脚本先起一台库就能全启动的档；
+# B 腿取 mem：服务不拉库，mem 是唯一不需要脚本先起一台库就能全启动的档（这是本参数的缺省值，
+# 不是服务的默认档——服务那边 2026-09-18 起默认 rocksdb，本腿总是显式把介质递过去）；
 # rocksdb 档由 C 腿或显式 -SmokeStoreMode rocksdb 来考。
 if (-not $SmokeStoreMode) { $SmokeStoreMode = 'mem' }
 if (-not $Name) {
@@ -530,7 +532,8 @@ $factoryConfig = Join-Path $scriptDir 'templates\DbOption.factory.toml'
 if (-not (Test-Path -LiteralPath $factoryConfig)) { throw "缺出厂配置模板：$factoryConfig" }
 Write-Step "包根：出厂 DbOption.toml + 首跑哨兵 + bin\surreal.exe（workspace\ 不进包）"
 # 模板是「设置模式」形态（project_path 空、监听 0.0.0.0:9099；介质不在文件里，随 AIOS_STORE_MODE
-# 走、不设 = mem），解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。原样进包，不做外科改写。
+# 走，包里由 Start-AMS.ps1 显式设 mem），解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
+# 原样进包，不做外科改写。
 Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $stage 'DbOption.toml')
 Set-Content -LiteralPath (Join-Path $stage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
 $surrealBinDir = Join-Path $stage 'bin'
@@ -550,8 +553,11 @@ $startAms = @'
 param(
     [string]$Workspace = $env:AMS_WORKSPACE,
     # 存储介质（mem / rocksdb）。介质只由环境变量 AIOS_STORE_MODE 决定（ADR-080），不在
-    # DbOption.toml 里、也不在向导里改：这里给了就设给服务；不给则沿用调用方环境里的
-    # AIOS_STORE_MODE；两处都没有 = mem（库在进程内，进程一退即清空）。
+    # DbOption.toml 里、也不在向导里改：这里给了就设给服务；不给、且调用方环境里也没有时，
+    # 本脚本**显式回填 mem**（库在进程内，进程一退即清空）。
+    # 为什么要显式回填：服务自己的默认 2026-09-18 起是 rocksdb（ADR-080 D6，漏设要当场报错
+    # 而不是悄悄跑在内存库上）。发布包是唯一「机器上多半没有库」的场景，靠那个默认就成了
+    # 双击即连不上、连向导都打不开——所以这一档由包自己说出来，不靠默认兜。
     [ValidateSet('mem', 'rocksdb')][string]$StoreMode,
     [switch]$NoBrowser,
     [int]$TimeoutSeconds = 600
@@ -559,6 +565,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 if ($StoreMode) { $env:AIOS_STORE_MODE = $StoreMode }
+elseif (-not $env:AIOS_STORE_MODE) { $env:AIOS_STORE_MODE = 'mem' }
 $exe = Join-Path $root 'aios-database.exe'
 $logRoot = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force $logRoot | Out-Null
@@ -606,7 +613,8 @@ if ($existing) {
     $env:AIOS_E3D_SCHEMA_ROOT = Join-Path $root 'schema'
     # 服务不拉库（ADR-074）：rocksdb 档要先自己跑 Start-Surreal.ps1，这里不再递 AIOS_SURREAL_EXE。
     # 介质随环境变量 AIOS_STORE_MODE 进服务（cmd → 服务两层都继承）；日志里点一句，免得对着配置猜。
-    Write-Output ("STORE_MODE=" + $(if ($env:AIOS_STORE_MODE) { $env:AIOS_STORE_MODE } else { 'mem (default; set AIOS_STORE_MODE or -StoreMode)' }))
+    # 上面已经保证它非空（不给 -StoreMode 也会回填 mem），所以这里打出来的就是服务实际吃到的那一档。
+    Write-Output ("STORE_MODE=" + $env:AIOS_STORE_MODE + $(if ($StoreMode) { ' (-StoreMode)' } else { ' (包默认；要落盘用 -StoreMode rocksdb)' }))
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $stdoutLog = Join-Path $logRoot "$stamp.stdout.log"
     $stderrLog = Join-Path $logRoot "$stamp.stderr.log"
@@ -726,7 +734,7 @@ $startupInstruction = if ($IncludeWorkspace) {
     '解压后双击 **Start-AMS.cmd**（或运行 Start-AMS.ps1）。服务就绪后自动打开 http://127.0.0.1:9099/ 。'
 }
 else {
-    '本包默认不带 workspace，介质默认 ``mem``：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在 DbOption.toml 里改。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、把配置里 v_ip:v_port 指过去，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
+    '本包默认不带 workspace，由 ``Start-AMS.ps1`` 显式以 ``mem`` 启动：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在 DbOption.toml 里改。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、把配置里 v_ip:v_port 指过去，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
 }
 $rootSurrealLayoutLine = if ($IncludeWorkspace) {
     ''
@@ -758,7 +766,7 @@ else {
     '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
 }
 $storeRuntimeNote = if ($IncludeWorkspace) {
-    '- **SurrealDB 数据与源模型不打入包。** 出厂介质 ``mem``（库在后端进程内，解压即跑，进程一退数据即清空）；介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在配置文件里、也不在向导里改。要数据活过重启：先跑 ``workspace\Start-Surreal.ps1`` 起一台 rocksdb 库（数据落 ``workspace\.surreal\``），在向导第②步把 v_ip:v_port 指过去并测试连接，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动——服务**只连**、不拉起。'
+    '- **SurrealDB 数据与源模型不打入包。** 出厂由 ``Start-AMS.ps1`` 以 ``mem`` 启动（库在后端进程内，解压即跑，进程一退数据即清空）；介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在配置文件里、也不在向导里改（服务自身的默认档是 ``rocksdb``，包不靠它）。要数据活过重启：先跑 ``workspace\Start-Surreal.ps1`` 起一台 rocksdb 库（数据落 ``workspace\.surreal\``），在向导第②步把 v_ip:v_port 指过去并测试连接，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动——服务**只连**、不拉起。'
 }
 else {
     '- **workspace 默认不打入包。** runtime 默认使用进程内 ``mem``；``bin\surreal.exe`` 留给切到 rocksdb 档时自己起库用。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
@@ -1024,6 +1032,9 @@ function Invoke-SetupSmoke {
     $env:DB_OPTION_FILE = Join-Path $setupWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
     $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
+    # 这一腿有意**不设**介质：服务自己的默认 2026-09-18 起是 rocksdb（ADR-080 D6），而出厂配置
+    # project_path 留空——考的正是「就算落到 rocksdb 兜底，出厂形态也仍然拐进设置模式、向导打得开」，
+    # 那是配置错了还能救回来的唯一逃生门。包的正常路径由 Start-AMS.ps1 显式回填 mem，B / C 两腿各自考。
     Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $setupWs -WindowStyle Hidden -PassThru `
