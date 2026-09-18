@@ -1,0 +1,146 @@
+name: SurrealDB fork (linux)
+
+# gen-model 的客户端 SDK 是 fork 的 SurrealDB 2.1.4
+# （Cargo.lock: git+https://gitee.com/happydpc/surrealdb.git#45013fc9e74f…），
+# 开发机上那台服务端也是同一条线的构建——scripts/Start-Surreal8009.ps1 找的
+# bin/surreal.exe 自报 `2.1.4+20250317.45013fc9`，而且那个脚本专门拦「版本对不上」的二进制。
+#
+# 为什么不能拿上游 2.1.4 顶替（2026-09-18 彩排 run 35314163615 的实测）：
+# 握手、signin、use 全过，第一条 query（resource/surreal/common.surql，27 KB）发出去之后
+# 再没有回音——客户端 4 分钟 21ms CPU 卡在那儿，服务端日志停在 "Listening for a system
+# shutdown signal"，两边都不报错，最后是健康检查把服务判死的。fork 相对上游至少多了
+# 一路响应缓冲（`WEBSOCKET_RESPONSE_BUFFER_SIZE`，上游 v2.1.4 的 src/cnf/mod.rs 里
+# 根本没有这个名字），差的不止是版本号后缀。
+#
+# 这条 workflow 只为产出那一个 linux 二进制：跑一次，留 90 天，部署与彩排按 artifact 取。
+
+on:
+  push:
+    branches: ['ci/surreal-fork-*']
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: '要构建的 fork commit；留空用 Cargo.lock 锁的那个'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: surreal-fork-linux
+  cancel-in-progress: false
+
+env:
+  FORK_URL: https://gitee.com/happydpc/surrealdb.git
+  FORK_REV: ${{ inputs.rev != '' && inputs.rev || '45013fc9e74f6a112628e26fb5376f21cc1f9675' }}
+  # fork 那个 rev 是 2025-03-17 的，用同期的 stable；--locked 会把依赖钉在那时候的版本上。
+  RUST_TOOLCHAIN: '1.85.0'
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  build:
+    name: Build surreal 2.1.4 (fork) for x86_64-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Clone the fork
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-checkout "$FORK_URL" surrealdb
+          cd surrealdb
+          git checkout --quiet "$FORK_REV"
+          git log -1 --format='fork %h %ad  %s' --date=short
+          grep -n 'WEBSOCKET_RESPONSE_BUFFER_SIZE' src/cnf/mod.rs \
+            || { echo "::error::这个 rev 里没有 WEBSOCKET_RESPONSE_BUFFER_SIZE——clone 到的不是那条 fork"; exit 1; }
+
+      - name: Install system build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev
+          echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name 'libclang.so*' -print -quit)")" >> "$GITHUB_ENV"
+
+      - name: Install Rust (pinned)
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            surrealdb/target
+          key: surreal-fork-${{ env.FORK_REV }}-${{ github.run_id }}
+          restore-keys: |
+            surreal-fork-${{ env.FORK_REV }}-
+
+      # 默认 feature 组合（allocator / storage-mem / storage-surrealkv / storage-surrealcs /
+      # storage-rocksdb / scripting / http）原样保留：开发机那台是什么样，服务器就得是什么样，
+      # 为了省几分钟编译去裁 feature，换来的是一处只有线上才会暴露的差异。
+      - name: Build surreal
+        working-directory: surrealdb
+        run: cargo build --release --locked --bin surreal
+
+      - name: Save cargo cache
+        if: always() && steps.cargo-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            surrealdb/target
+          key: surreal-fork-${{ env.FORK_REV }}-${{ github.run_id }}
+
+      - name: Smoke test — 起一台 rocksdb 空库
+        run: |
+          set -euo pipefail
+          bin=surrealdb/target/release/surreal
+          "$bin" version
+          "$bin" version | grep -q "${FORK_REV:0:8}" \
+            || { echo "::error::二进制自报的版本里没有 ${FORK_REV:0:8}"; exit 1; }
+          SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE=0 \
+            "$bin" start --user root --pass root --bind 127.0.0.1:8009 "rocksdb:$RUNNER_TEMP/smoke" &
+          pid=$!
+          for i in $(seq 1 30); do
+            curl -fsS --max-time 3 http://127.0.0.1:8009/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS --max-time 5 http://127.0.0.1:8009/health && echo "  <= /health OK"
+          "$bin" sql --endpoint http://127.0.0.1:8009 --user root --pass root \
+            --ns smoke --db smoke --pretty <<<'DEFINE FUNCTION fn::smoke() { RETURN 1; }; RETURN fn::smoke();'
+          kill "$pid"
+          wait "$pid" 2>/dev/null || true
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          out=dist/surreal-linux-x64-fork
+          mkdir -p "$out"
+          cp surrealdb/target/release/surreal "$out/"
+          {
+            echo "source=${FORK_URL}"
+            echo "rev=${FORK_REV}"
+            echo "version=$(surrealdb/target/release/surreal version)"
+            echo "toolchain=$(rustc --version)"
+            echo "built_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "features=default (allocator,storage-mem,storage-surrealkv,storage-surrealcs,storage-rocksdb,scripting,http)"
+          } > "$out/BUILD.txt"
+          cat "$out/BUILD.txt"
+          ls -la "$out"
+
+      - name: Upload surreal binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: surreal-linux-x64-fork
+          path: dist/surreal-linux-x64-fork
+          if-no-files-found: error
+          retention-days: 90
