@@ -183,6 +183,25 @@ fn process_instance_lock_path() -> Option<PathBuf> {
 
 static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
 
+static STORE_MODE_NOTICES_PRINTED: std::sync::Once = std::sync::Once::new();
+
+/// 介质那一头所有过期来源的点名（[`options::store_mode_notices`]，ADR-080 D2）。
+///
+/// 放在这里而不是某一条臂里：`run_app` 有三条出口，只有一条走到 `run_cli`——设置模式与
+/// read-through（也就是 `mem` 这个**默认**档）都提前返回。只在 `run_cli` 打的话，最该看见
+/// 这句话的现场反而看不见：文件里写着 `store_mode = "rocksdb"`、服务按 mem 起来、控制台一个
+/// 字不提，正是 2026-09-18 那次查了半天的形状。
+///
+/// `run_app`（服务正门）与 `run_cli`（python 绑定、l3 夹具直接调的那道门）会各调一次，
+/// 这几句只该出现一遍——同 `NO_INSTANCE_LOCK_NOTICE` 的纪律。
+fn print_store_mode_notices_once() {
+    STORE_MODE_NOTICES_PRINTED.call_once(|| {
+        for notice in crate::options::store_mode_notices() {
+            eprintln!("*** {notice} ***");
+        }
+    });
+}
+
 /// 这一趟要不要拿锁；不拿时返回那句给人看的理由。
 ///
 /// **只有 `mem` 不拿。** 锁挡的是「两个进程驱动同一份持久状态」，而
@@ -1005,9 +1024,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     }
     // 介质那一头所有该出声的：环境变量拼错 / 退役写法，以及配置文件里还残留的
     // `store_mode` / `in_memory_db`（2026-09-18 起不再生效，ADR-080）——逐条打，不许只挑一条。
-    for notice in crate::options::store_mode_notices() {
-        eprintln!("*** {notice} ***");
-    }
+    // 走 `run_app` 进来的那条路上已经打过了，这里是 python 绑定 / l3 夹具直接调时的出口。
+    print_store_mode_notices_once();
     if let Some(notice) = crate::options::data_face_notice() {
         eprintln!("*** {notice} ***");
     }
@@ -1442,6 +1460,30 @@ fn startup_data_wait_is_stalled(
 
 #[cfg(test)]
 mod startup_data_wait_tests {
+    /// 过期的介质来源要在**每一条**启动臂上都被点名（ADR-080 D2）。`run_app` 有三条出口：
+    /// 设置模式、read-through（`mem` 这个默认档）、`run_cli`；点名只挂在最后一条上的话，
+    /// 前两条就是「文件里写着 rocksdb、服务按 mem 起来、控制台一个字不提」——正是这次要
+    /// 根除的那个形状。所以钉住它在分臂**之前**。
+    #[test]
+    fn every_startup_arm_names_a_stale_store_mode_key() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .rsplit_once("pub async fn run_app(")
+            .expect("run_app exists")
+            .1;
+        let notices = body
+            .find("print_store_mode_notices_once();")
+            .expect("run_app 必须自己打这几句");
+        for (arm, needle) in [
+            ("设置模式", "setup::setup_mode_reason(&db_option)"),
+            ("read-through", "run_read_through_core(db_option)"),
+            ("run_cli", "run_cli(db_option).await"),
+        ] {
+            let split = body.find(needle).unwrap_or_else(|| panic!("{arm} 那条臂还在吗"));
+            assert!(notices < split, "点名要在分出「{arm}」这条臂之前");
+        }
+    }
+
     #[test]
     fn read_through_startup_reports_each_waiting_stage() {
         let source = include_str!("lib.rs");
@@ -2198,6 +2240,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
         .unwrap_or_else(|| get_db_option_ext().inner);
+    // 分臂之前先把介质那一头的过期来源点名（ADR-080 D2）：下面三条出口里只有一条走到
+    // `run_cli`，而「文件里还写着 store_mode」在设置模式与 mem 那两条上一样会骗人。
+    print_store_mode_notices_once();
     // Public entrypoint guard: take the deny-share handle before connecting a
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.
