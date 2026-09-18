@@ -127,8 +127,13 @@ fn uda_catalogue_and_spool_do_not_depend_on_the_element_skeleton() {
     let view = function_body(&store, "pub fn view(&self)");
     assert!(view.contains("opened_sources()"), "freshness comes from already-open sources only");
     assert!(!store.contains("DICT_STYP") && !store.contains("dictionary_paths("));
+    // 字典一次读取只取一次：渲染器合一（d-179）之后这一取在 `render` 里，`read` 与
+    // `read_pinned` 都经它——逐个属性去问字典那条老路仍然不许回来。
+    let render = function_body(&attributes, "fn render(");
+    assert_eq!(render.matches("self.catalog.get()?").count(), 1);
     let read = function_body(&attributes, "pub fn read(&self, refno: RefU64)");
-    assert_eq!(read.matches("self.catalog.get()?").count(), 1);
+    assert!(read.contains("self.render(snapshot, true)"));
+    assert_eq!(read.matches("self.catalog.get()?").count(), 0);
 }
 
 /// 不变量 1：dbnum 只由 `RefNo::dbno()` 给出，且只在 `refno_route` 里出现这一个解码式。

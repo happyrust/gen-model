@@ -1561,7 +1561,7 @@ mod tests {
 
     /// E3D TTY 定标（2026-09-18）：面板上多的每一行、少的每一行，都由 E3D 自己回答。
     ///
-    /// 两个方向都查，一个 E3D 会话问完：
+    /// 三个方向都查，一个 E3D 会话问完：
     ///
     /// 1. **我们渲染不成行**的属性，逐个 `Q <名字>`。E3D 印得出真值而我们一行没画，
     ///    才是真读丢了；`ZZE`（E3D 自己也答不上来）与 `NAME` 的现编全名都不算。
@@ -1569,6 +1569,10 @@ mod tests {
     ///    非 UDA 的 `unset`），逐个 `Q <名字>`。E3D 印的值要与面板那一格对上（`0mm` 去
     ///    单位是 `0`、`Nulref` 面板拼作 `0/0`）；E3D 答不上来的名字我们也不许补——面板
     ///    对齐的是 E3D 印的那一页，多一行少一行都算偏。
+    /// 3. **E3D 自己那一页**（`VAR !attl ATTLIST`）列出的每一个名字，面板都要有对应的
+    ///    行。前两个方向都是拿描述符里的名字去问 E3D，问不到「E3D 印了、描述符里压根
+    ///    没有」的行；这一条反过来，以 E3D 那一页为准点名。名字对齐走
+    ///    [`NounCatalog::query_heading`]（`HEADW` → `HeadWidth`），UDA 去掉前导 `:`。
     ///
     /// 证据：`verification/attr-diagnostics-20260918/`。这条用例要开 E3D 会话，
     /// 与其它 TTY 用例一样单跑：`-- --ignored --test-threads=1`。
@@ -1584,6 +1588,12 @@ mod tests {
         ];
         let (service, _backup_rx) =
             ElementAttributeService::open("AvevaMarineSample", "ALL").unwrap();
+        // 面板的短名与 E3D 那一页上的名字对不上（`HEADW` / `HeadWidth`），靠目录换算。
+        let noun_catalog = service
+            .reader
+            .schema
+            .noun_catalog()
+            .expect("活 E3D 导出的 noun 目录不在，类型默认值本来也补不出来");
 
         struct Sample {
             refno: String,
@@ -1636,7 +1646,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         // 一个会话问完三个元素：开 E3D 是这条用例里最贵的一步。
-        let answers = tty_query_attributes(
+        let tty_elements = tty_query_attributes(
             &samples
                 .iter()
                 .map(|sample| {
@@ -1651,6 +1661,8 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
+        // 三个元素一起报，一次 E3D 会话就把缺的行看全。
+        let mut missing_by_element = Vec::new();
         for sample in &samples {
             let Sample {
                 refno,
@@ -1658,10 +1670,28 @@ mod tests {
                 unrendered,
                 defaulted,
             } = sample;
-            let answers = answers
+            let tty = tty_elements
                 .get(refno)
                 .unwrap_or_else(|| panic!("TTY 没有回答 {refno} 这一段"));
-            let answer = |name: &str| answers.get(name).map_or("(未回答)", String::as_str);
+            let answer = |name: &str| tty.answers.get(name).map_or("(未回答)", String::as_str);
+
+            // E3D 那一页上的名字，面板有没有对应的行。没起过名的元素 E3D 那一页上的
+            // `Name` 是它现编的全名，面板按 `is_unnamed_placeholder` 不画，这一个例外。
+            let panel_keys = response
+                .attributes
+                .iter()
+                .flat_map(|row| tty_names_of(&noun_catalog, row))
+                .collect::<HashSet<_>>();
+            let unnamed = e3d_answer_is_nothing("NAME", answer("NAME"));
+            let missing_from_panel = tty
+                .page
+                .iter()
+                .map(|name| name.trim_start_matches(':').to_ascii_lowercase())
+                .filter(|key| !panel_keys.contains(key))
+                .filter(|key| !(unnamed && key == "name"))
+                .filter(|key| !E3D_PAGE_ROWS_WITHOUT_A_SCHEMA.contains(&key.as_str()))
+                .collect::<Vec<_>>();
+            missing_by_element.push((refno.clone(), missing_from_panel.clone()));
 
             let with_a_real_value = unrendered
                 .iter()
@@ -1676,6 +1706,7 @@ mod tests {
 
             println!(
                 "TTY_PARITY refno={} noun={} 面板行数={} 类型默认行={} 其中与E3D对不上={} | \
+                 E3D那一页={} 面板缺的行={} | \
                  画不出的行={} 其中E3D自己也答不上来={} E3D印出真值={} | 新诊断 undecoded={} \
                  shape_conflicts={} uda_issues={} | 不计入完整性 outside_schema={} \
                  view_divergence={} catalog_issues={} | complete={}",
@@ -1684,6 +1715,8 @@ mod tests {
                 response.attributes.len(),
                 defaulted.len(),
                 misaligned.len(),
+                tty.page.len(),
+                missing_from_panel.len(),
                 unrendered.len(),
                 unrendered.iter().filter(|name| answer(name) == "ZZE").count(),
                 with_a_real_value.len(),
@@ -1732,7 +1765,26 @@ mod tests {
                 response.diagnostics
             );
         }
+
+        let missing = missing_by_element
+            .iter()
+            .filter(|(_, names)| !names.is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "E3D 那一页上有、面板上没有的行（面板对齐的是这一页；读不出来的那几个\
+             写在 E3D_PAGE_ROWS_WITHOUT_A_SCHEMA 里，不在其中就是新缺的）：{missing:?}"
+        );
     }
+
+    /// E3D 那一页上印、任何一份 schema 导出里都没有的行。
+    ///
+    /// `Lock` 是元素锁：`attlib` 的 4271 条属性里没有它（`Brlock` / `Rlock` / `Prjlock`
+    /// 都在，独独没有 `Lock`），BRAN 的 86 条 noun 目录声明里也没有——它是内核自己答的，
+    /// 文件侧没有可解的槽位。三个样本上 E3D 都印 `Lock false`。补不出来就不补：面板
+    /// 宁可少这一行，也不画一个猜来的锁。
+    #[cfg(test)]
+    const E3D_PAGE_ROWS_WITHOUT_A_SCHEMA: [&str; 1] = ["lock"];
 
     /// 面板那一格与 E3D 印的值是不是同一个东西。
     ///
@@ -1804,14 +1856,37 @@ mod tests {
                 .is_some_and(|unit| unit.chars().all(char::is_alphabetic))
     }
 
-    /// 一个会话里逐个 `Q <名字>` 问 E3D，答不上来的记 `ZZE`。
+    /// 面板一行在 E3D 那一页上可能用的名字：短名本身，以及目录给的查询抬头
+    /// （`HEADW` → `HeadWidth`）。UDA 的抬头不走目录哈希，去掉前导 `:` 后按名字对。
+    #[cfg(test)]
+    fn tty_names_of(catalog: &NounCatalog, row: &AttributeValue) -> Vec<String> {
+        let mut names = vec![row.name.to_ascii_lowercase()];
+        if !row.is_uda {
+            if let Some(heading) = catalog.query_heading(e3d_attlib::db1_hash(&row.name)) {
+                names.push(heading.to_ascii_lowercase());
+            }
+        }
+        names
+    }
+
+    /// 一个元素在 E3D 那头的两件事。
+    #[cfg(test)]
+    #[derive(Default)]
+    struct TtyElement {
+        /// 逐个 `Q <短名>` 的回答：短名 → 原样回答（答不上来记 `ZZE`）。
+        answers: std::collections::BTreeMap<String, String>,
+        /// E3D 自己那一页（`ATTLIST`）列的名字，按它印的顺序；UDA 带前导 `:`。
+        page: Vec<String>,
+    }
+
+    /// 一个会话里问完每个元素：点名的属性逐个 `Q`，再要一份 E3D 自己那一页。
     ///
-    /// 返回 `参考号 → 名字 → 原样回答`。名字用的是 DB 短名（`DUTY`），E3D 印回来的
-    /// 是它自己的长名加值（`Duty unset`），所以回答要连长名一起原样留着。
+    /// 名字用的是 DB 短名（`DUTY`），E3D 印回来的是它自己的长名加值（`Duty unset`），
+    /// 所以回答要连长名一起原样留着；答不上来记 `ZZE`。
     #[cfg(test)]
     fn tty_query_attributes(
         requests: &[(String, Vec<String>)],
-    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    ) -> std::collections::BTreeMap<String, TtyElement> {
         let repo = std::env::current_dir().unwrap();
         let driver = crate::e3d_query::E3dDriver::from_env(&repo).unwrap();
         let mut source = String::new();
@@ -1822,37 +1897,47 @@ mod tests {
                     "$P ZZA {name}\nQ {name}\nhandle any\n$P ZZE\nelsehandle none\nendhandle\n"
                 ));
             }
+            source.push_str("VAR !attl ATTLIST\nDO !a VALUES !attl\n$P ZZP $!a\nENDDO\n");
         }
         let raw = driver
             .run_source(&repo, "tty-attribute-probe", &source)
             .unwrap();
 
-        let mut answers: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, String>,
-        > = std::collections::BTreeMap::new();
+        let mut elements: std::collections::BTreeMap<String, TtyElement> =
+            std::collections::BTreeMap::new();
         let mut element: Option<String> = None;
         let mut pending: Option<String> = None;
         for line in raw.lines().map(str::trim) {
             if let Some(refno) = line.strip_prefix("ZZR ") {
                 element = Some(refno.to_owned());
                 pending = None;
-                answers.entry(refno.to_owned()).or_default();
+                elements.entry(refno.to_owned()).or_default();
+                continue;
+            }
+            if let Some(name) = line.strip_prefix("ZZP ") {
+                if let Some(refno) = element.as_ref() {
+                    elements
+                        .entry(refno.clone())
+                        .or_default()
+                        .page
+                        .push(name.to_owned());
+                }
                 continue;
             }
             match line.strip_prefix("ZZA ") {
                 Some(name) => pending = Some(name.to_owned()),
                 None => {
                     if let (Some(refno), Some(name)) = (element.as_ref(), pending.take()) {
-                        answers
+                        elements
                             .entry(refno.clone())
                             .or_default()
+                            .answers
                             .insert(name, line.to_owned());
                     }
                 }
             }
         }
-        answers
+        elements
     }
 
     /// 共用证明（母计划 §4 不变量）：树服务与属性服务钉住的是**同一份** `Arc<MdbReadStore>`
