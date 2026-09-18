@@ -2,6 +2,35 @@
 
 ## 2026-09-18
 
+### 配置向导第③步的端口判据改查监听表——绑 `127.0.0.1` 试探在 Windows 上会把占着的端口报成「可用」
+
+- **为什么**：0.1.28 出包后按「解压即跑」走了一遍首跑向导，撞见两道门对同一个端口给出相反的答案。
+  9099 上实实在在有一台服务在听（`0.0.0.0:9099`，`/health` 能答），`Start-AMS.ps1` 用
+  `GetActiveTcpListeners()` 一查就拒绝启动；而向导的 `probe/port` 回的是 `{"verdict":"free"}`。
+  根因在 `setup.rs::probe_port` 的判据——注释写着「目标就算是 0.0.0.0，本机回环那一份也必须是空的」，
+  **这条在 Windows 上不成立**：通配监听套接字不设 `SO_EXCLUSIVEADDRUSE`，别人持着 `0.0.0.0:P` 时
+  再绑 `127.0.0.1:P` 照样成功（当场验过）。现场按向导挑了一个已被占的口，要到启动那一下才知道。
+- **改动**：新增 `listening_ports()`——Windows 上走 `iphlpapi` 的 `GetTcpTable2` / `GetTcp6Table2`
+  取 `MIB_TCP_STATE_LISTEN` 的端口集合（与 `Start-AMS.ps1` 同一张表、同一口径：只看端口、不问绑在
+  哪个地址），非 Windows 回 `None`。判据抽成纯函数 `port_probe_verdict(bound_port, addr, listeners)`：
+  自己绑着的口先判 `self`，其次查表，表问不出来才退回原来的绑定试探（POSIX 上通配与回环互斥，
+  那条在那边本来就是对的）。回执多一格 `source` = `listener_table` / `bind_probe`，说清是哪一路给的。
+  `Cargo.toml` 加 `[target.'cfg(windows)'.dependencies] windows-sys`（0.59，已在 lock 里）。
+- **验证**：`cargo test --lib --features http_api -- web_service::setup::` **19 passed / 0 failed**，
+  新钉 3 条——真 socket 的 `a_wildcard_listener_makes_the_port_occupied_even_when_loopback_still_binds`
+  （自己开一个通配监听，断言判成 occupied，失败信息里带上「回环还绑得上」这个反例）、纯判据的
+  `the_port_verdict_reads_the_listener_table_and_answers_self_first`、Windows 上
+  `the_listener_table_is_readable_and_contains_a_port_we_just_opened`。**变异一次**：把监听表当作
+  读不出来（退回旧判据），第一条立刻红在 `{"verdict":"free","source":"bind_probe"}`，撤回复绿。
+  **live**（换上带本修的二进制、`_runs\ams-0.1.28-oob` 那台 0.1.28 在 9399 上）：`0.0.0.0:9099` 与
+  `127.0.0.1:9099` 都回 occupied、`0.0.0.0:9399` 回 self、`0.0.0.0:9499` 回 free、
+  `127.0.0.1` 上的 surreal `8009` 也认出来了，四个口与 `GetActiveTcpListeners()` 逐个一致。
+- **不在 0.1.28 的包里**：`ams-local-0.1.28_release.20260918033726…zip` 是本修之前打的，要带上得重出一版。
+- 顺带记下同一轮看到的两处小毛病（本笔未改）：① 向导 `/setup/restart` spawn 替身时不回写
+  `process.json`，重启后那个文件里还是旧 pid（`Rollback.ps1` 按 exe 路径匹配，功能上不疼）；
+  ② `Start-AMS.ps1` 真去拉起后端时，`Start-Process` 出来的服务继承调用方的 stdout 句柄——调用方若
+  接了管道或重定向到文件，那一头永远等不到 EOF（双击 `Start-AMS.cmd` 走控制台句柄，不受影响）。
+
 ### 本地发布 0.1.28：房间归属三笔改写 + 空间净距新端点；`.dirty` 构建（六个仓的在途改动一并编进）
 
 - 后端 `0.1.28` 构建自 `81d2c28c04cb`（`chore(release): 0.1.28`），**工作树不干净**，build_id 带 `.dirty`。

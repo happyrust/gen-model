@@ -657,20 +657,127 @@ pub struct PortProbeRequest {
 }
 
 fn probe_port(bound_port: Option<u16>, addr: &str) -> serde_json::Value {
+    port_probe_verdict(bound_port, addr, listening_ports().as_ref())
+}
+
+/// 端口判据：**查本机监听表，只看端口、不问绑在哪个地址**——与 `Start-AMS.ps1` 的
+/// `GetActiveTcpListeners()` 同一口径。两处必须同口径：向导说「可用」、启动脚本却
+/// 拒绝启动，现场只会以为是包坏了。
+///
+/// 此前这里绑 `127.0.0.1:<端口>` 试探，判据写的是「目标就算是 0.0.0.0，本机回环那一份
+/// 也必须是空的」——**这条在 Windows 上不成立**。通配地址的监听套接字不设
+/// `SO_EXCLUSIVEADDRUSE`，别人持着 `0.0.0.0:P` 时再绑 `127.0.0.1:P` 照样成功，于是
+/// 占着的端口被报成 `free`（2026-09-18 实测：9099 上另有一台服务在答 `/health`，
+/// 向导仍回 `{"verdict":"free"}`）。
+fn port_probe_verdict(
+    bound_port: Option<u16>,
+    addr: &str,
+    listeners: Option<&std::collections::BTreeSet<u16>>,
+) -> serde_json::Value {
     let Ok(parsed) = addr.trim().parse::<SocketAddr>() else {
         return json!({ "verdict": "invalid", "error": "不是 <IP>:<端口> 形态" });
     };
-    if Some(parsed.port()) == bound_port {
-        return json!({ "verdict": "self", "port": parsed.port() });
+    let port = parsed.port();
+    if Some(port) == bound_port {
+        return json!({ "verdict": "self", "port": port });
     }
-    // 绑 127.0.0.1 试探：目标就算是 0.0.0.0，本机回环那一份也必须是空的。
-    match std::net::TcpListener::bind(("127.0.0.1", parsed.port())) {
-        Ok(listener) => {
-            drop(listener);
-            json!({ "verdict": "free", "port": parsed.port() })
+    match listeners {
+        Some(ports) if ports.contains(&port) => {
+            json!({ "verdict": "occupied", "port": port, "source": "listener_table" })
         }
-        Err(_) => json!({ "verdict": "occupied", "port": parsed.port() }),
+        Some(_) => json!({ "verdict": "free", "port": port, "source": "listener_table" }),
+        // 监听表读不出来（非 Windows，或 iphlpapi 拒绝）才退回绑定试探。POSIX 上
+        // 通配与回环互斥，这一条在那边本来就是对的。
+        None => match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                drop(listener);
+                json!({ "verdict": "free", "port": port, "source": "bind_probe" })
+            }
+            Err(_) => json!({ "verdict": "occupied", "port": port, "source": "bind_probe" }),
+        },
     }
+}
+
+/// 本机此刻处于 LISTEN 的 TCP 端口。`None` = 这个平台上问不出来，调用方自己退回绑定试探。
+#[cfg(windows)]
+fn listening_ports() -> Option<std::collections::BTreeSet<u16>> {
+    use std::collections::BTreeSet;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetTcp6Table2, GetTcpTable2, MIB_TCP6ROW2, MIB_TCP6TABLE2, MIB_TCP_STATE_LISTEN,
+        MIB_TCPROW2, MIB_TCPTABLE2,
+    };
+
+    const NO_ERROR: u32 = 0;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    /// `dwLocalPort` 的低 16 位是网络序，取出来要转回主机序。
+    fn host_port(raw: u32) -> u16 {
+        u16::from_be(raw as u16)
+    }
+
+    /// 两步调用（先问大小再取表）之间表可能长大，所以允许重试几次。
+    /// `fetch` 拿到 `(缓冲区指针, 当前容量)`，回 Win32 错误码。
+    unsafe fn with_table<T>(
+        mut fetch: impl FnMut(*mut T, *mut u32) -> u32,
+        mut read: impl FnMut(*const T),
+    ) {
+        let mut size: u32 = 0;
+        for _ in 0..4 {
+            let code = fetch(std::ptr::null_mut(), &mut size);
+            if code != ERROR_INSUFFICIENT_BUFFER || size == 0 {
+                return;
+            }
+            // u32 对齐的缓冲区：MIB_*TABLE2 的字段都是 4 字节对齐，Vec<u8> 给不了这个保证。
+            let mut buffer = vec![0u32; (size as usize).div_ceil(4)];
+            let table = buffer.as_mut_ptr().cast::<T>();
+            match fetch(table, &mut size) {
+                NO_ERROR => {
+                    read(table);
+                    return;
+                }
+                ERROR_INSUFFICIENT_BUFFER => continue,
+                _ => return,
+            }
+        }
+    }
+
+    let mut ports = BTreeSet::new();
+    unsafe {
+        with_table::<MIB_TCPTABLE2>(
+            |table, size| GetTcpTable2(table, size, 0),
+            |table| {
+                let count = (*table).dwNumEntries as usize;
+                let rows =
+                    std::slice::from_raw_parts(std::ptr::addr_of!((*table).table).cast::<MIB_TCPROW2>(), count);
+                for row in rows {
+                    if row.dwState as i32 == MIB_TCP_STATE_LISTEN {
+                        ports.insert(host_port(row.dwLocalPort));
+                    }
+                }
+            },
+        );
+        with_table::<MIB_TCP6TABLE2>(
+            |table, size| GetTcp6Table2(table, size, 0),
+            |table| {
+                let count = (*table).dwNumEntries as usize;
+                let rows = std::slice::from_raw_parts(
+                    std::ptr::addr_of!((*table).table).cast::<MIB_TCP6ROW2>(),
+                    count,
+                );
+                for row in rows {
+                    if row.State == MIB_TCP_STATE_LISTEN {
+                        ports.insert(host_port(row.dwLocalPort));
+                    }
+                }
+            },
+        );
+    }
+    Some(ports)
+}
+
+#[cfg(not(windows))]
+fn listening_ports() -> Option<std::collections::BTreeSet<u16>> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,6 +1422,75 @@ room_key_word = ["-RM"]
             ..Default::default()
         };
         assert!(validate_patch(&good).is_empty());
+    }
+
+    // ---------- 端口探测 ----------
+
+    /// 真socket 用例：别人持着 `0.0.0.0:P` 时这个口就是**占着的**，哪怕回环还绑得上。
+    ///
+    /// 旧判据（绑 `127.0.0.1:P` 成功即 free）在 Windows 上恰好翻过来——通配监听不设
+    /// `SO_EXCLUSIVEADDRUSE`，回环那一份照样绑得上，于是向导报 free、`Start-AMS.ps1`
+    /// 查监听表却拒绝启动。断言里带上回环绑定的实际结果：它在 Windows 上为 true，
+    /// 正是这条用例要钉的反例。
+    #[test]
+    fn a_wildcard_listener_makes_the_port_occupied_even_when_loopback_still_binds() {
+        let held = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("拿一个通配监听");
+        let port = held.local_addr().expect("读端口").port();
+        let loopback_still_binds = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+
+        let verdict = probe_port(None, &format!("0.0.0.0:{port}"));
+        assert_eq!(
+            verdict["verdict"], "occupied",
+            "端口 {port} 上有通配监听却被判成可用（回环还绑得上 = {loopback_still_binds}）：{verdict}"
+        );
+        // 换个地址问同一个端口，答案必须一样：判据只看端口，与 Start-AMS.ps1 同口径。
+        assert_eq!(probe_port(None, &format!("127.0.0.1:{port}"))["verdict"], "occupied");
+        drop(held);
+    }
+
+    /// 判据本身（不碰 OS）：自己占的口报 `self`、表里没有的报 `free`、形状不对报 `invalid`。
+    #[test]
+    fn the_port_verdict_reads_the_listener_table_and_answers_self_first() {
+        let listeners: std::collections::BTreeSet<u16> = [9099, 8010].into_iter().collect();
+        let table = Some(&listeners);
+
+        // 自己就绑在 9399 上时，9399 不是「被占」而是「就是我」——先于监听表判。
+        assert_eq!(
+            port_probe_verdict(Some(9399), "0.0.0.0:9399", table)["verdict"],
+            "self"
+        );
+        assert_eq!(
+            port_probe_verdict(Some(9399), "0.0.0.0:9099", table)["verdict"],
+            "occupied"
+        );
+        assert_eq!(
+            port_probe_verdict(Some(9399), "0.0.0.0:9499", table)["verdict"],
+            "free"
+        );
+        assert_eq!(
+            port_probe_verdict(None, "not-an-addr", table)["verdict"],
+            "invalid"
+        );
+        // 监听表问不出来才退回绑定试探，答案里说清是哪一路给的。
+        assert_eq!(
+            port_probe_verdict(None, "0.0.0.0:9099", table)["source"],
+            "listener_table"
+        );
+    }
+
+    /// Windows 上监听表必须真读得出来：拿一个已知在 LISTEN 的口对一遍。
+    #[cfg(windows)]
+    #[test]
+    fn the_listener_table_is_readable_and_contains_a_port_we_just_opened() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("拿一个回环监听");
+        let port = held.local_addr().expect("读端口").port();
+        let ports = listening_ports().expect("Windows 上监听表必须读得出来");
+        assert!(
+            ports.contains(&port),
+            "刚开的 {port} 不在监听表里（表里 {} 条）",
+            ports.len()
+        );
+        drop(held);
     }
 
     // ---------- 杂项 ----------
