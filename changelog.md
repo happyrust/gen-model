@@ -2,6 +2,26 @@
 
 ## 2026-09-18
 
+### 0.1.28 第三版包：带上重启台账与 `Start-AMS` 两条修复；上一版同号包已删
+
+- **当前交付件**（同 Cargo 版本、新 build_id）：
+  `ams-local-0.1.28_release.20260918053140.g2bb1edc4e936.dirty-runtime.zip`（120.93 MB / 126,802,929 B），
+  SHA-256 `80e31ec563cb6587f014f80caae95419552eb74cb166455ad976d698b7987cc8`（另行独立重算一致），
+  构建自 `2bb1edc4e936`。A / B 两腿冒烟过（口 9499），C 腿按 runtime 档跳过；包内 78 个文件，
+  Web 仍复用 0.1.26 那份已验证包（plant-ui `0.1.11`，13 个文件）。
+- **验过两条修复真在包里**：zip 解到空目录起在 9599 —— ① 调用方接真管道跑**包里的**
+  `Start-AMS.ps1`，**1.3s 拿到 `READY PID=2728 …` 并 EOF**（上一版同一台架 7.3s 还堵着）；
+  ② `process.json` 记的就是 2728；③ `POST /setup/restart` 之后服务 2728 → 27512，台账跟着变成
+  27512；④ 端口判据回归：9099 occupied / 9599 self / 9699 free，仍走 `listener_table`。
+  包内 `Start-AMS.ps1` 已无 `-RedirectStandardOutput`。验完实例与目录都清掉。
+- **上一版 `…20260918042801.g695cc85dc8bb…` 已删**（zip / sha256 / manifest 与它的构建日志），
+  口径同前一次拍板：同一 Cargo 版本两个包摆一起，拿错的代价大过留着当 patch 基线。
+  `releases/` 里 0.1.28 只此一份。
+- **仍是 `.dirty`**：六个仓的在途改动照旧编进这只二进制——gen-model-model-cache `src/` 1 文件
+  80+/1−（别的会话的 `model_impact.rs`）、e3d-model 6 文件 807+/252−、e3d-io `schema.rs` +14、
+  e3d-attlib +4、old-aios-core 41+/6−、plant-mbd `crates/` 11 文件 622+/144−。
+- **未验**：rocksdb（durable）真库重启、plant-ui 侧回归、干净树上的重现构建。
+
 ### 向导重启后进程台账跟着换；`Start-AMS.ps1` 拉起服务不再把调用方的管道堵死
 
 - **为什么**：上一笔只把「解压即跑」路上撞见的这两处小毛病记下来、没改，这一笔改掉。
@@ -30,7 +50,8 @@
   - **台账**：同一台 `POST /setup/restart`，服务 20920 → 61984，`process.json` 跟着变成 61984
     （`executable` 与 RFC3339 的 `start_time` 一并更新）。顺手回归端口判据：9099 occupied /
     9599 self / 9699 free，仍走 `listener_table`。验完试跑实例与临时目录都已清掉。
-- **不在 0.1.28 的包里**：交付的 `…20260918042801.g695cc85dc8bb…zip` 早于本笔，要带上得重出一版。
+- **已重出一版包带上**：见上一节的 `…20260918053140.g2bb1edc4e936…zip`；本笔之前那版
+  `…20260918042801.g695cc85dc8bb…`（没有这两条）已删。
 
 ### 配置向导第③步的端口判据改查监听表——绑 `127.0.0.1` 试探在 Windows 上会把占着的端口报成「可用」
 
