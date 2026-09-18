@@ -2,6 +2,35 @@
 
 ## 2026-09-18
 
+### 本地发布 0.1.28：房间归属三笔改写 + 空间净距新端点；`.dirty` 构建（六个仓的在途改动一并编进）
+
+- 后端 `0.1.28` 构建自 `81d2c28c04cb`（`chore(release): 0.1.28`），**工作树不干净**，build_id 带 `.dirty`。
+  复用 0.1.26 那份已验证 Web（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，13 个文件）；
+  前端本轮没有发版，plant-ui 工作树里 31 个在途文件**没有**进包。
+- 产物 `releases/ams-local-0.1.28_release.20260918033726.g81d2c28c04cb.dirty-runtime.zip`（120.93 MB / 126,803,926 B），
+  SHA-256 `455b8c411ccb96cd83e7710c4316f588d0655b00abbaf1a5c25f1f13756d7e41`（另行独立重算一致）；包内
+  `aios-database.exe` 自报 `0.1.28+release.20260918033726.g81d2c28c04cb.dirty`（打包脚本对着 EXE 校过版本与构建号）。
+- 包型 `runtime`（同 0.1.27）：包根 `aios-database.exe` / `web\`（13）/ `bin\surreal.exe`（2.1.4+20250317.45013fc9）/
+  `resource\surreal\*.surql`（7）/ `schema\{e3d210,e3d31}`（48）/ 出厂 `DbOption.toml`（设置模式）/ `.first-run-pending` /
+  `Start-AMS` / `Start-Surreal` / `Rollback`，共 78 个文件。
+- 覆盖 0.1.27（`2cb5de1f112c`）之后的 **73 个提交**：房间归属改在 bake 时算、边随根回执走（ADR-073 D1 / D12）；面板变化的
+  反向传播与跨库停放（D13 的 D / U3 b）；点包含换成三方向射线奇偶、边数只减不增（ADR-010 §3）；新端点
+  `GET /spatial/surface-clearance`、`GET /spatial/centerline`、`GET /spatial/nearest-clearance`、`nearby` 的
+  `source_mode=bran_centerline`、`POST /element/ptset`、`POST /element/plines`；元数据门第二档开关退役
+  （`34ae04e00`，行为逐位不变、残留配置启动告警）；刚体前移补 P23 / 属主消费几何 / EVALAT 规则 M 三条排除；
+  校审三处修复；隐式管身重发布不再被首次发布的 aabb / trans 钉死（`7d67ca5f8`）。用户口径见 `docs/release-notes/0.1.28.md`。
+- **`.dirty` 的确切内容**（都真编进了这只二进制，作者与验证不在本次发布账上）：
+  - gen-model-model-cache `src/`：`data_interface/model_impact.rs` 与 `mbd/branch_query.rs`，2 文件 107+/6−；
+  - vendor/e3d-model（`5d92b9759eaf` 之上）`src/` 7 文件 892+/260−，含 `route.rs` 的容器两端折属主链；
+  - vendor/e3d-io（`97798ee34877` 之上）`src/schema.rs` +14；
+  - vendor/e3d-attlib `src/lib.rs` +4；vendor/old-aios-core `Cargo.toml` + `src/shape/pdms_shape.rs`（rkyv `validation`，
+    0.1.26 / 0.1.27 也带着）；vendor/plant-mbd `crates/` 11 文件 622+/144−。
+  - 其中「头 / 尾隐式管身按属主系读坐标」那条修复（`route.rs` + `branch_query.rs`）已写进 0.1.28 发布说明，
+    而**它的源码尚未提交**——撤掉那两处改动就要同步撤那一条说明。
+- 冒烟（口 9199；9099 被 `_runs\ams-0.1.27` 的服务占着）：A 出厂配置起服务 = 设置模式 + 向导页 → **过**；
+  B 本机配置全启动 `medium=mem` / `durable=false` / 服务没拉 surreal 子进程 → **过**；C rocksdb 腿按 runtime 档设计跳过
+  （不带 workspace）。**未做**：rocksdb（durable）真库重启验证、plant-ui 侧回归、本包在干净树上的重现构建。
+
 ### 房间归属的点包含换成射线奇偶：parry `contains_point` 在退化盖面三角上把盒外点判成成员，且结论随浮点末位翻（ADR-010 §3 追记，一笔）
 
 - **为什么**：ams 1112 + 8000 从零初始化的 live 复核（`D:\adr078-verify\live-run-1112-8000\evidence\`）里，边集与 09-16 基线差
