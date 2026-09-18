@@ -105,9 +105,19 @@ jobs:
             exit 1
           }
           echo "run_id=$rid" >> "$GITHUB_OUTPUT"
-          gh run view "$rid" --repo "$GITHUB_REPOSITORY" \
-            --json createdAt,headSha,headBranch \
-            --jq '"用的产物来自 run \(.headBranch) \(.headSha[0:9]) @ \(.createdAt)"'
+          info="$(gh run view "$rid" --repo "$GITHUB_REPOSITORY" --json createdAt,headSha,headBranch)"
+          echo "$info" | jq -r '"用的产物来自 run \(.headBranch) \(.headSha[0:9]) @ \(.createdAt)"'
+          echo "bin_sha=$(echo "$info" | jq -r .headSha)" >> "$GITHUB_OUTPUT"
+
+      # resource/surreal 必须跟二进制同一个 commit：启动时那一堆 fn:: 定义就是从这里读的，
+      # 脚本和二进制各来自一个版本的话，对不上的只会在运行时以「某个函数不存在」的形式冒出来。
+      - name: Check out resource/surreal at the binary's commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.binrun.outputs.bin_sha }}
+          sparse-checkout: resource/surreal
+          sparse-checkout-cone-mode: false
+          path: binsrc
 
       - name: Download binary artifact
         env:
@@ -153,6 +163,12 @@ jobs:
           cp deploy/linux/install_backend.sh bundle/
           chmod +x bundle/install_backend.sh
           bash -n bundle/install_backend.sh   # 语法错要在这儿挂，不是在服务器上挂
+          mkdir -p bundle/resource
+          cp -r binsrc/resource/surreal bundle/resource/
+          ls -1 bundle/resource/surreal
+          diff -ru resource/surreal bundle/resource/surreal >/dev/null \
+            && echo "resource/surreal 与本分支一致" \
+            || echo "::warning::resource/surreal 在本分支上跟二进制那个 commit 不一样，包里用的是二进制那一版"
           # 密钥走文件不走命令行：命令行那一份在服务器上 ps 就看得见。
           if [ -n "${JWT_SECRET:-}" ]; then
             umask 177
@@ -207,7 +223,7 @@ jobs:
           echo "这一发会做的事："
           echo "  1. 传 $(du -sh bundle | cut -f1) 的包到 /tmp/aios-deploy-${GITHUB_RUN_ID}"
           echo "  2. 装 SurrealDB ${SURREAL_VERSION}（机器上已有 2.1.x 就跳过）+ systemd 单元 surrealdb.service"
-          echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新的 → 起"
+          echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新二进制、DbOption 与 resource/surreal → 起"
           echo "  4. nginx 加 include /etc/nginx/snippets/aios-review-split.conf（skip_nginx=${SKIP_NGINX}）"
           echo "  5. 健康检查：本机 :8009 /health、:${HTTP_PORT} /api/v1/health 与 /api/review/health，再走公网一遍"
 

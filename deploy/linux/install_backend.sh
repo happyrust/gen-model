@@ -73,6 +73,7 @@ fi
 
 [ -f "${BUNDLE_DIR}/aios-database" ] || die "包里没有 aios-database"
 [ -f "${BUNDLE_DIR}/DbOption.toml" ] || die "包里没有 DbOption.toml"
+[ -d "${BUNDLE_DIR}/resource/surreal" ] || die "包里没有 resource/surreal——服务启动时按 CWD 相对路径读它，缺了连库那一步就退出"
 
 # ── 目录 ────────────────────────────────────────────────────────────────────
 mkdir -p "${INSTALL_DIR}/bin" "${DATA_DIR}/assets" "${DATA_DIR}/e3d" "${SURREAL_DATA_DIR%/*}"
@@ -108,6 +109,16 @@ if [ -f "${INSTALL_DIR}/DbOption.toml" ]; then
   cp -f "${INSTALL_DIR}/DbOption.toml" "${INSTALL_DIR}/DbOption.toml.bak-$(date -u '+%Y%m%dT%H%M%SZ')"
 fi
 install -m 644 "${BUNDLE_DIR}/DbOption.toml" "${INSTALL_DIR}/DbOption.toml"
+
+# aios_core::function::define_common_functions 用 std::fs::read_dir("resource/surreal")
+# 读这一目录——**相对 CWD**，也就是单元里的 WorkingDirectory；整目录 sort 后逐个 query。
+# 缺了它服务在连库那一步就退出，报的是「SurrealDB 连接失败（ws://…）: Failed to define
+# common functions: No such file or directory (os error 2)」，长得跟网络不通一模一样。
+rm -rf "${INSTALL_DIR}/resource/surreal"
+mkdir -p "${INSTALL_DIR}/resource"
+cp -r "${BUNDLE_DIR}/resource/surreal" "${INSTALL_DIR}/resource/"
+chmod 644 "${INSTALL_DIR}"/resource/surreal/*.surql
+log "resource/surreal：$(ls -1 "${INSTALL_DIR}/resource/surreal" | wc -l) 个 .surql 就位"
 
 # ── systemd ─────────────────────────────────────────────────────────────────
 cat > /etc/systemd/system/surrealdb.service <<UNIT

@@ -77,9 +77,18 @@ jobs:
           [ -n "$rid" ] && [ "$rid" != "null" ] || {
             echo "在 ${BINARY_BRANCH} 上找不到成功的 Linux binary 运行" >&2; exit 1; }
           echo "run_id=$rid" >> "$GITHUB_OUTPUT"
-          gh run view "$rid" --repo "$GITHUB_REPOSITORY" \
-            --json createdAt,headSha,headBranch \
-            --jq '"彩排用的产物来自 run \(.headBranch) \(.headSha[0:9]) @ \(.createdAt)"'
+          info="$(gh run view "$rid" --repo "$GITHUB_REPOSITORY" --json createdAt,headSha,headBranch)"
+          echo "$info" | jq -r '"彩排用的产物来自 run \(.headBranch) \(.headSha[0:9]) @ \(.createdAt)"'
+          echo "bin_sha=$(echo "$info" | jq -r .headSha)" >> "$GITHUB_OUTPUT"
+
+      # 跟真部署一样：resource/surreal 取二进制那个 commit 的，不取当前分支的。
+      - name: Check out resource/surreal at the binary's commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.binrun.outputs.bin_sha }}
+          sparse-checkout: resource/surreal
+          sparse-checkout-cone-mode: false
+          path: binsrc
 
       - name: Download binary artifact
         env:
@@ -119,6 +128,9 @@ jobs:
           cp deploy/linux/install_backend.sh bundle/
           chmod +x bundle/install_backend.sh
           bash -n bundle/install_backend.sh
+          mkdir -p bundle/resource
+          cp -r binsrc/resource/surreal bundle/resource/
+          ls -1 bundle/resource/surreal
           # 真部署里这一份来自 secrets.REVIEW_JWT_SECRET；彩排只为验「它有没有被写成 600 的 env 文件」。
           umask 177
           printf 'rehearsal-only-%s' "$GITHUB_RUN_ID" > bundle/jwt_secret
@@ -182,6 +194,10 @@ jobs:
           echo "===== service.env 权限 ====="; sudo stat -c '%a %U %n' "$INSTALL_DIR/service.env"
           sudo grep -q '^JWT_SECRET=rehearsal-only-' "$INSTALL_DIR/service.env" \
             && echo "JWT_SECRET 写进去了" || { echo "::error::service.env 里没有 JWT_SECRET"; exit 1; }
+          echo "===== resource/surreal ====="; sudo ls -1 "$INSTALL_DIR/resource/surreal"
+          loaded="$(sudo journalctl -u aios-database --no-pager | grep -c '载入surreal')"
+          echo "启动日志里「载入surreal」出现 $loaded 次"
+          [ "$loaded" -ge 1 ] || { echo "::error::启动时没有载入 resource/surreal 里的脚本"; exit 1; }
           echo "===== 单元状态 ====="; systemctl is-active surrealdb aios-database; surreal version
           echo "===== 实际生效的分流 location ====="
           sudo nginx -T 2>/dev/null | grep -nE 'location .*(api/review|files/review_attachments)' || {
