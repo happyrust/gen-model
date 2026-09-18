@@ -28,7 +28,8 @@
 //!
 //! 失败分两档（plant-mbd ADR-0002）：单个成员端口解不出 / 缺方向 → 记 `Suppress` issue、成员照常
 //! 下发；整条 BRAN 没有任何带几何的成员、或连近似 Head 都建不起来 → [`BranchQueryError::RootError`]
-//! （宿主映射 422）。refno 不存在 → `NotFound`（404）；不是派生隐式管身的路由容器 → `NotRouteContainer`（422）。
+//! （宿主映射 422）。refno 不存在 → `NotFound`（404）；不是派生隐式管身的路由容器 →
+//! `NotRouteContainer`（422）；是风管那一支 → `NotPipeRoute`（422）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +37,7 @@ use std::sync::Arc;
 use e3d_io::db_element::{DbElementError, DbSet};
 use e3d_io::refno::RefNo;
 use e3d_model::CataloguePoints;
-use e3d_model::category::derives_implied_tubes;
+use e3d_model::category::{RouteDiscipline, derives_implied_tubes, route_discipline};
 use e3d_model::route::{
     ArriveCheck, PPointResolver, RouteEnd, RoutePoint, SlotAlignment, ZERO_LENGTH_TOL_MM,
     departure_tube_outer_diameter, resolve_end, slot_alignment, tube_length, tube_outer_diameter,
@@ -60,8 +61,18 @@ pub enum BranchQueryError {
     NotFound {
         refno: RefNo,
     },
-    /// 元素存在，但不是派生隐式管身的路由容器（`derives_implied_tubes` 为假，如 HVAC 下的 BRAN）。
+    /// 元素存在，但不是派生隐式管身的路由容器（`derives_implied_tubes` 为假，如 EQUI）。
     NotRouteContainer {
+        refno: RefNo,
+        noun: String,
+    },
+    /// 是派生隐式管身的路由容器，但属主是 HVAC（`route_discipline` 为 `Hvac`）。
+    ///
+    /// 2026-09-18 之前这一档落在 `NotRouteContainer` 里——那时派生门自己把风管关在外面。
+    /// e3d-model `f93fd66` 让风管 BRAN 也派生隐式直段（断面是矩形 / 圆两制）之后门开了，
+    /// 而 MBD 是管道等轴测的量具：外径会按 `tube_outer_diameter` 回落成 `PBOR = 宽 + 高`，
+    /// 答出来的尺寸标注没有意义。学科在这一层挡，不动派生门（`ledger-seg15-frameall.md` §13.5）。
+    NotPipeRoute {
         refno: RefNo,
         noun: String,
     },
@@ -85,6 +96,10 @@ impl std::fmt::Display for BranchQueryError {
             Self::NotRouteContainer { refno, noun } => write!(
                 f,
                 "refno {refno}（{noun}）不是派生隐式管身的路由容器，没有管道尺寸标注"
+            ),
+            Self::NotPipeRoute { refno, noun } => write!(
+                f,
+                "refno {refno}（{noun}）的属主是 HVAC，风管不出管道尺寸标注"
             ),
             Self::RootError { refno, issues } => write!(
                 f,
@@ -125,6 +140,12 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     let container_noun = container.element_type()?;
     if !derives_implied_tubes(&container)? {
         return Err(BranchQueryError::NotRouteContainer {
+            refno,
+            noun: container_noun,
+        });
+    }
+    if route_discipline(&container)? == RouteDiscipline::Hvac {
+        return Err(BranchQueryError::NotPipeRoute {
             refno,
             noun: container_noun,
         });
