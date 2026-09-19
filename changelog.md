@@ -89,7 +89,7 @@
 - **未做 / 边界**：ams7997 两窗只复跑了选根（凭证前移的那 100 / 116 根没再做两端整根生成对拍——那 216 根 09-19 15:54 探针已量过
   绿 58 / 零单元 158 / 红 0）；30 库里 991 根零单元的多算根（ams251001 222 根、`ams2510xx` 船体结构 noun 一串）**无判别力**，0 红只在 519 根
   有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票两个名字都缺；S4 对拍门 21:59 已复跑（0 不等·锚点），
-  但刚体开关 `model_transform_cheap_path` **默认仍关**——开不开是 ADR-066 验收的另一票，本轮没动。S8 探针那一节与单测在工作树里**未提交**。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
+  但刚体开关 `model_transform_cheap_path` **默认仍关**——开不开是 ADR-066 验收的另一票，本轮没动。S8 探针那一节、单测与本段文档已入库 **`e96351e81`**（`test(model-gate)`）。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
   三个文件；gen-model 的钉子已依赖两个名字的常量，两仓紧挨着入库）；`docs/evidence/` 按政策不入库。
 
 ### 节点版本表 `GET node/versions?scope=self|subtree`——ADR 0066 的第三条：容器节点「所有子节点」下的时间线
