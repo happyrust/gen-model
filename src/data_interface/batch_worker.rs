@@ -1968,6 +1968,33 @@ fn split_unresolved_by_existence(
     (stuck, ignored)
 }
 
+/// 还在 `DbSet@T` 上却折不出根的元素再分一层（M2-S，2026-09-19）：`ancestors` 是反查 / 停放时随元素带来的祖先链
+/// （自身之外，近 → 远；`room_reverse::AffectedRoots::unresolved_ancestors` / `fold_parked` 的第二个返回值），`gone_ancestors`
+/// 是这些链上已不在 T 上的那几级。链非空且每一级都还在 = 这条链是现行的，它的根本就不在根清单里（`model_type_scope`
+/// 之外 / 历史遗留几何）——整库也不算它，忽略；链空（没取到）/ 有一级已不在 T 上（改过属主，链陈旧）= 说不了它现在归
+/// 哪个根，仍卡住、调用方退整库。两半都保持 `stuck` 的顺序。返回 `(still_stuck, out_of_scope)`。
+fn split_stuck_by_ancestry(
+    stuck: &[aios_core::RefnoEnum],
+    ancestors: &std::collections::BTreeMap<aios_core::RefnoEnum, Vec<aios_core::RefnoEnum>>,
+    gone_ancestors: &[e3d_io::refno::RefNo],
+) -> (Vec<aios_core::RefnoEnum>, Vec<aios_core::RefnoEnum>) {
+    let gone: std::collections::HashSet<aios_core::RefnoEnum> = gone_ancestors
+        .iter()
+        .map(|refno| crate::data_interface::generation_root::refno_from_e3d(*refno))
+        .collect();
+    let mut still_stuck = Vec::new();
+    let mut out_of_scope = Vec::new();
+    for refno in stuck {
+        match ancestors.get(refno) {
+            Some(chain) if !chain.is_empty() && chain.iter().all(|level| !gone.contains(level)) => {
+                out_of_scope.push(*refno)
+            }
+            _ => still_stuck.push(*refno),
+        }
+    }
+    (still_stuck, out_of_scope)
+}
+
 /// 本库 `DbSet@T` 上的全部生成根（e3d-io `RefNo`）：覆盖面自证的对照物，也是回读库上几何的靶子
 /// （不在投影里的根从这里点名），走规划器同一条枚举（`window_root_plan::enumerate_target_roots`），不回读库。
 async fn library_generation_roots(
@@ -2302,13 +2329,22 @@ async fn run_targeted_room_recompute(
         affected.roots.extend(segment.roots.iter().copied());
         affected.tree_hits += segment.tree_hits;
         affected.tube_hits += segment.tube_hits;
+        affected.member_hits += segment.member_hits;
         affected.cross_library += segment.cross_library;
         affected.durable_tube_ms += segment.durable_tube_ms;
         affected.durable_ancestor_lookups += segment.durable_ancestor_lookups;
         affected.durable_ancestor_ms += segment.durable_ancestor_ms;
+        affected.durable_member_lookups += segment.durable_member_lookups;
+        affected.durable_member_ms += segment.durable_member_ms;
         affected
             .unresolved
             .extend(segment.unresolved.iter().copied());
+        for (refno, anc) in &segment.unresolved_ancestors {
+            affected
+                .unresolved_ancestors
+                .entry(*refno)
+                .or_insert_with(|| anc.clone());
+        }
         for (owner, elements) in &segment.foreign {
             affected.foreign.entry(*owner).or_default().extend(
                 elements
@@ -2320,15 +2356,23 @@ async fn run_targeted_room_recompute(
     }
     // 停放链（U3 b 档）：别的库停放给本库的元素连同祖先链，与本库此刻的根清单求交。
     let (parked_roots, parked_unresolved) = fold_parked(parked, &library_roots);
-    // 折不出根的元素（反查命中的 + 停放链上的）分两类（审核 M2，2026-09-19）：在 `DbSet@T` 上已经没了的——本窗删掉的，
-    // 树 / 库上的残留还没刷掉——没有边要维护（对账删除那一半清），忽略；还在 T 上却对不上根清单的——枚举不一致、
-    // 反查不可信——退整库。此前任一元素折不出根就整库，本窗刚删的根的残留元素把每一次定向都拉回整库。
+    // 折不出根的元素（反查命中的 + 停放链上的）分三类（审核 M2 / M2-S，2026-09-19）：在 `DbSet@T` 上已经没了的——本窗删掉的，
+    // 树 / 库上的残留还没刷掉——没有边要维护（对账删除那一半清），忽略；还在 T 上、祖先链每一级也都在却没有一级是根清单里的
+    // ——链是现行的、它的根本就不在生成范围（`model_type_scope` 之外 / 历史遗留几何），整库也不算它，忽略；还在 T 上而链空 /
+    // 链上有一级已不在（改过属主、链陈旧）——说不了它现在归哪个根，反查不可信——退整库。此前任一元素折不出根就整库，
+    // 本窗刚删的根的残留元素、范围之外的历史几何把每一次定向都拉回整库。
     let unresolved: Vec<aios_core::RefnoEnum> = affected
         .unresolved
         .iter()
-        .chain(parked_unresolved.iter())
+        .chain(parked_unresolved.iter().map(|(refno, _)| refno))
         .copied()
         .collect();
+    let mut unresolved_ancestors = affected.unresolved_ancestors.clone();
+    for (refno, anc) in &parked_unresolved {
+        unresolved_ancestors
+            .entry(*refno)
+            .or_insert_with(|| anc.clone());
+    }
     if !unresolved.is_empty() {
         let gone = match crate::data_interface::window_root_plan::missing_at_target(
             dbnum,
@@ -2363,19 +2407,60 @@ async fn run_targeted_room_recompute(
             );
         }
         if !stuck.is_empty() {
-            result.warnings.push(format!(
-                "dbnum={dbnum} 定向房间重算有 {} 个元素还在 DbSet@{target_sesno} 上却折不出本库的根（反查命中 {} 个、停放链 {} 个；例如 {}），反查不完整，退整库",
-                stuck.len(),
-                affected.unresolved.len(),
-                parked_unresolved.len(),
-                stuck
-                    .iter()
-                    .take(5)
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("、")
-            ));
-            return None;
+            // M2-S：还在 T 上的再问一层——它祖先链上的每一级还在不在。都在 = 链现行、根本就不在生成范围，忽略；
+            // 链空 / 有一级不在 = 链陈旧，说不了，退整库。
+            let mut seen = std::collections::BTreeSet::new();
+            let ancestor_refnos: Vec<e3d_io::refno::RefNo> = stuck
+                .iter()
+                .flat_map(|refno| unresolved_ancestors.get(refno).into_iter().flatten())
+                .filter(|level| seen.insert(**level))
+                .map(|level| crate::data_interface::generation_root::refno_to_e3d(*level))
+                .collect();
+            let gone_ancestors = match crate::data_interface::window_root_plan::missing_at_target(
+                dbnum,
+                target_sesno.max(0) as u32,
+                ancestor_refnos,
+            )
+            .await
+            {
+                Ok(gone) => gone,
+                Err(error) => {
+                    result.warnings.push(format!(
+                        "dbnum={dbnum} 定向房间重算有 {} 个元素还在 DbSet@{target_sesno} 上却折不出根、又查不出它们的祖先还在不在，退整库: {error:#}",
+                        stuck.len()
+                    ));
+                    return None;
+                }
+            };
+            let (still_stuck, out_of_scope) =
+                split_stuck_by_ancestry(&stuck, &unresolved_ancestors, &gone_ancestors);
+            if !out_of_scope.is_empty() {
+                println!(
+                    "dbnum={dbnum} 定向房间重算：{} 个命中的元素还在 DbSet@{target_sesno} 上、祖先链每一级也都在，却没有一级是本库的生成根（生成范围之外 / 历史遗留几何），整库也不算它，忽略；例如 {}",
+                    out_of_scope.len(),
+                    out_of_scope
+                        .iter()
+                        .take(5)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("、")
+                );
+            }
+            if !still_stuck.is_empty() {
+                result.warnings.push(format!(
+                    "dbnum={dbnum} 定向房间重算有 {} 个元素还在 DbSet@{target_sesno} 上却折不出本库的根、祖先链空或有一级已不在 T 上（反查命中 {} 个、停放链 {} 个；例如 {}），反查不完整，退整库",
+                    still_stuck.len(),
+                    affected.unresolved.len(),
+                    parked_unresolved.len(),
+                    still_stuck
+                        .iter()
+                        .take(5)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ));
+                return None;
+            }
         }
     }
     let parked_elements: usize = parked.iter().map(|entry| entry.elements.len()).sum();
@@ -5382,6 +5467,80 @@ mod tests {
             !targeted.contains("if !affected.unresolved.is_empty() {")
                 && !targeted.contains("if !parked_unresolved.is_empty() {"),
             "不再对「折不出根」一刀切退整库: {targeted}"
+        );
+    }
+
+    /// 还在 `DbSet@T` 上却折不出根的再分一层（M2-S，2026-09-19）：祖先链非空且每一级都还在 = 链现行、它的根本就不在生成范围
+    /// （`model_type_scope` 之外 / 历史遗留），整库也不算它，忽略；链空 / 有一级已不在 T 上（改过属主，链陈旧）= 说不了，仍卡住。
+    /// 顺序照 `stuck`。源码钉：`stuck` 非空才问祖先、再分、只有 `still_stuck` 非空才 `return None`。
+    #[test]
+    fn stuck_hits_whose_whole_ancestor_chain_still_exists_are_out_of_scope_and_ignored() {
+        use aios_core::{RefU64, RefnoEnum};
+        use e3d_io::refno::RefNo;
+        use std::collections::BTreeMap;
+        let refno = |id: u32| RefnoEnum::from(RefU64::from_two_nums(24383, id));
+        let e3d = |id: u32| RefNo::new(24383, id);
+        let ancestors = BTreeMap::from([
+            // 链完整、每一级都在：范围之外的根（999 不是生成根）。
+            (refno(10), vec![refno(500), refno(999)]),
+            // 链上有一级（600）已不在 T 上：改过属主，链陈旧。
+            (refno(20), vec![refno(600), refno(999)]),
+            // 链空：没取到。
+            (refno(30), Vec::new()),
+        ]);
+        let (still_stuck, out_of_scope) = split_stuck_by_ancestry(
+            &[refno(10), refno(20), refno(30), refno(40)],
+            &ancestors,
+            &[e3d(600), e3d(777)],
+        );
+        assert_eq!(
+            out_of_scope,
+            vec![refno(10)],
+            "祖先都在、没有一级是根：范围之外，忽略"
+        );
+        assert_eq!(
+            still_stuck,
+            vec![refno(20), refno(30), refno(40)],
+            "链陈旧 / 链空 / 没有链的（40 不在表里）都说不了，仍卡住"
+        );
+        assert_eq!(
+            split_stuck_by_ancestry(&[], &ancestors, &[]),
+            (Vec::new(), Vec::new())
+        );
+
+        let targeted = include_str!("batch_worker.rs")
+            .split_once("async fn run_targeted_room_recompute(")
+            .expect("定向执行体")
+            .1
+            .split_once("\n}\n")
+            .expect("end")
+            .0;
+        let stuck_gate = targeted
+            .find("if !stuck.is_empty() {")
+            .expect("还在 T 上的才往下问");
+        let asked = targeted[stuck_gate..]
+            .find("window_root_plan::missing_at_target(")
+            .map(|at| stuck_gate + at)
+            .expect("stuck 非空才问祖先链上的每一级还在不在");
+        let split = targeted
+            .find("split_stuck_by_ancestry(&stuck, &unresolved_ancestors, &gone_ancestors)")
+            .expect("再分一层");
+        let still_gate = targeted
+            .find("if !still_stuck.is_empty() {")
+            .expect("只有链陈旧 / 链空的才拦");
+        let recompute = targeted.find("recompute_dbnum_room_edges(").expect("重算");
+        assert!(
+            stuck_gate < asked && asked < split && split < still_gate && still_gate < recompute,
+            "拦 → 问祖先 → 分 → 只拦说不了的 → 重算，顺序不能乱: {targeted}"
+        );
+        assert!(
+            targeted[still_gate..recompute].contains("return None;"),
+            "说不了的才退整库"
+        );
+        assert!(
+            !targeted[stuck_gate..still_gate].contains("return None;")
+                || targeted[stuck_gate..still_gate].contains("又查不出它们的祖先还在不在"),
+            "stuck 非空本身不再退整库——只有问不出来（读文件失败）才退: {targeted}"
         );
     }
 

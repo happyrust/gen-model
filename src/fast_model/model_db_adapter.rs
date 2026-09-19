@@ -6197,7 +6197,6 @@ mod tests {
                 new: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
             }],
             geometry_changed: 1,
-            old_box_unknown: 0,
         };
         let sql = render_panel_delta_statements(&delta);
         assert_eq!(
@@ -6417,14 +6416,20 @@ mod tests {
             ..PanelDelta::default()
         };
 
-        // A 的任务：反查（树的答案模拟——旧盒里有 A1 与 B1，新盒里没人）。
+        // A 的任务：反查（树的答案模拟——旧盒里有 A1 与 B1，新盒里没人）。离开的成员那一路从库上取（L1-P）：R1 此刻名下的
+        // 成员边正是 A1 与 B1——与树的答案同一批，不靠旧盒也找得齐。
         let tree_hits = BTreeSet::from([packed_refno(ROOM_ROOT_A), packed_refno(b1)]);
+        let members = room_reverse::durable_panel_members(&db, &delta.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, tree_hits, "库上 R1 名下的成员 == 旧盒里的人");
         let ReverseLookup::Resolved(affected) = room_reverse::resolve(
             &db,
             &store,
             BATCH_DBNUM,
             &delta.query_boxes(),
             tree_hits,
+            members,
             &[ROOM_ROOT_A],
         )
         .await
@@ -6432,6 +6437,7 @@ mod tests {
             panic!("树就绪与否不在这一半判")
         };
         assert_eq!(affected.roots, vec![ROOM_ROOT_A]);
+        assert_eq!(affected.member_hits, 2);
         assert_eq!(
             affected.foreign,
             BTreeMap::from([(
@@ -6685,14 +6691,20 @@ mod tests {
             "账本里两段接起来：库上 g1 → 冻的 g3，两段都反查、按 g3 算"
         );
 
-        // ② 反查 P（树的答案模拟：旧盒里 A1、新盒里 A2）→ 只重算 A1 / A2，按**开工冻的 g2**。
+        // ② 反查 P（树的答案模拟：旧盒里 A1、新盒里 A2；库上 R1 名下此刻只有 A1——离开的成员那一路，L1-P）→ 只重算
+        // A1 / A2，按**开工冻的 g2**。
         let tree_hits = BTreeSet::from([packed_refno(a1), packed_refno(a2)]);
+        let members = room_reverse::durable_panel_members(&db, &p.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, BTreeSet::from([packed_refno(a1)]));
         let ReverseLookup::Resolved(affected) = room_reverse::resolve(
             &db,
             &store,
             BATCH_DBNUM,
             &p.query_boxes(),
             tree_hits,
+            members,
             &library_roots,
         )
         .await
@@ -6753,14 +6765,19 @@ mod tests {
             },
             "T2 自己没重建（Unchanged），沿 ensure 记的那一段定向"
         );
-        // 反查 Q（树的答案模拟：旧盒里 A2、新盒里 A3）→ 只重算 A2 / A3，按冻的 g3。
+        // 反查 Q（树的答案模拟：旧盒里 A2、新盒里 A3；库上 R1 名下此刻是 A2）→ 只重算 A2 / A3，按冻的 g3。
         let tree_hits = BTreeSet::from([packed_refno(a2), packed_refno(a3)]);
+        let members = room_reverse::durable_panel_members(&db, &q.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, BTreeSet::from([packed_refno(a2)]));
         let ReverseLookup::Resolved(affected) = room_reverse::resolve(
             &db,
             &store,
             BATCH_DBNUM,
             &q.query_boxes(),
             tree_hits,
+            members,
             &library_roots,
         )
         .await

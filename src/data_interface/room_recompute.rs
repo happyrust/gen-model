@@ -245,9 +245,8 @@ impl ChainSegment<'_> {
 /// 读之间）时，账本里若有 g2 → g3 那一段就接上、两段都反查、按 g3 算；没有就整库（H1）——不拿 g2 的段冒充到 g3。
 ///
 /// 其余都整库：库上从没盖过（欠的不止这几段，diff 说不了）、常驻说不出代号、账本与槽都接不出链（重启后都丢了）、
-/// 换了代而面板变化为空的那一段没进账本（换代另有原因，例如关键字——这一段接不上）、账本里那一段有面板「旧盒说不出」
-/// （本进程第一代就在保护集里、重新有了几何——库上可能留着重启前那个位置的边，`PanelDelta::fully_known` 为假，
-/// L1-R 2026-09-19）、库上已是这一代却被问到（规划器排了 `RoomOnly`）。
+/// 换了代而面板变化为空的那一段没进账本（换代另有原因，例如关键字——这一段接不上）、库上已是这一代却被问到
+/// （规划器排了 `RoomOnly`）。
 pub(crate) fn scope_for_task(
     library_generation: Option<&str>,
     resident_generation: Option<&str>,
@@ -303,7 +302,7 @@ fn walk_chain<'a>(
         .chain(
             swaps
                 .iter()
-                .filter(|swap| swap.from_generation == cursor && swap.panels.fully_known())
+                .filter(|swap| swap.from_generation == cursor && !swap.panels.is_empty())
                 .map(ChainSegment::Swap),
         );
     for segment in candidates {
@@ -788,28 +787,10 @@ mod tests {
         }
     }
 
-    /// 一块本进程第一代就在保护集里的面板重新有了几何（L1-R）：旧盒 `None`、`old_box_unknown = 1`——
-    /// `PanelDelta::between` 对着 `unknown_bounds` 里的面板算出来的形状。
-    fn regained_with_unknown_old_box() -> PanelDelta {
-        use crate::fast_model::room_resident::{PanelBounds, PanelMove};
-        use aios_core::{RefU64, RefnoEnum};
-        PanelDelta {
-            recalc: vec![PanelMove {
-                panel: RefnoEnum::from(RefU64::from_two_nums(24381, 8)),
-                old: None,
-                new: Some(PanelBounds([[40.0; 3], [41.0; 3]])),
-            }],
-            geometry_changed: 1,
-            old_box_unknown: 1,
-            ..PanelDelta::default()
-        }
-    }
-
     /// 定向准入的真值表（ADR-073 D13 反查，2026-09-17；H1 / M1 2026-09-19 改成沿账本接段）：只有「库上盖过 + 本任务冻得出
-    /// 计算器 + 换代段账本里从库上那一代到冻的这一代接得通、每一段面板变化非空且旧盒都说得出」才定向；缺任何一条整库——
-    /// 库上更早 / 从没盖过、常驻说不出代号、账本里那一段面板变化为空（换代另有原因）、那一段有面板旧盒说不出（第一代就在
-    /// 保护集、重新有了几何，L1-R）、账本空（重启后）、对齐与冻计算器之间又换了一代而账本没有后一段。定向时把链上各段原样
-    /// 带走，终点就是冻的那一代。
+    /// 计算器 + 换代段账本里从库上那一代到冻的这一代接得通、每一段面板变化非空」才定向；缺任何一条整库——库上更早 /
+    /// 从没盖过、常驻说不出代号、账本里那一段面板变化为空（换代另有原因）、账本空（重启后）、对齐与冻计算器之间又换了
+    /// 一代而账本没有后一段。定向时把链上各段原样带走，终点就是冻的那一代。
     #[test]
     fn a_task_goes_targeted_only_when_the_ledger_explains_the_librarys_whole_debt() {
         let delta = moved_panel();
@@ -850,14 +831,6 @@ mod tests {
                 Some("g1"),
                 Some("g2"),
                 Vec::new(),
-            ),
-            (
-                // L1-R（2026-09-19）：本进程第一代就在保护集里的面板重新有了几何——旧盒说不出，库上可能留着重启前那个
-                // 位置的边，这一段只问新盒说不全，不接、整库兜底。
-                "面板变化里有一块旧盒说不出（第一代就在保护集、重新有了几何）",
-                Some("g1"),
-                Some("g2"),
-                vec![swap("g1", "g2", regained_with_unknown_old_box())],
             ),
             (
                 "账本里的段不从库上那一代起",
