@@ -347,6 +347,10 @@ struct ScopeState {
     by_source: BTreeMap<(u32, i64), BTreeSet<String>>,
     room_changes: BTreeMap<u32, BTreeMap<i64, GeometryChange>>,
     room_baselines: BTreeSet<u32>,
+    /// F3 落库收口（ADR-073 D13，2026-09-19 晚）：本进程**这一世**写进各库 `dbnum_watermark.model_room_stray_generations`
+    /// 的代号。只有这些代号写过的根，ACK 才在这份投影里、准入点名点得到；那一格里别的代号是重启前那一世写的，
+    /// 点不到——`room_recompute::request_for_task` 见了就整库。随本库 ACK 整体作废一并清掉。
+    stray_generations_written: BTreeMap<u32, BTreeSet<String>>,
     model_digests: BTreeMap<u32, [u8; 32]>,
     room_spatial: BTreeMap<u32, aios_core::accel_tree::acceleration_tree::AccelerationTree>,
     room_spatial_dirty: BTreeSet<(u32, i64)>,
@@ -663,6 +667,27 @@ impl ModelMemoryStore {
             .get(&ScopeKey::Current)
             .is_some_and(|state| state.room_baselines.contains(&dbnum))
     }
+
+    /// 记下「本进程这一世按 `generation` 写进了 `dbnum` 的 `model_room_stray_generations`」——
+    /// `model_db_adapter::note_stray_generation_written` 在那一句随本组提交成功之后调（F3 落库收口）。
+    pub(crate) fn note_stray_generation_written(&self, dbnum: u32, generation: &str) {
+        let mut scopes = self.write();
+        let state = scopes.entry(ScopeKey::Current).or_default();
+        state
+            .stray_generations_written
+            .entry(dbnum)
+            .or_default()
+            .insert(generation.to_owned());
+    }
+
+    /// 本进程这一世写进 `dbnum` 那一格的代号（字典序）。重启 / 本库 ACK 整体作废之后为空。
+    pub(crate) fn stray_generations_written(&self, dbnum: u32) -> Vec<String> {
+        self.read()
+            .get(&ScopeKey::Current)
+            .and_then(|state| state.stray_generations_written.get(&dbnum))
+            .map(|generations| generations.iter().cloned().collect())
+            .unwrap_or_default()
+    }
     pub(crate) fn room_members_intersecting(
         &self,
         dbnum: u32,
@@ -947,6 +972,7 @@ impl ModelMemoryStore {
             .invalidated_roots
             .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
+        state.stray_generations_written.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
         for record in records {
             state.insert(record);
@@ -1067,6 +1093,7 @@ impl ModelMemoryStore {
             .invalidated_roots
             .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
+        state.stray_generations_written.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
         state.model_digests.remove(&dbnum);
@@ -1326,6 +1353,7 @@ impl ModelMemoryStore {
             .extend(state.receipts.keys().copied());
         state.receipts.clear();
         state.publication_acks.clear();
+        state.stray_generations_written.clear();
         invalidated
     }
 
@@ -1349,6 +1377,7 @@ impl ModelMemoryStore {
             .extend(state.receipts.keys().filter(|key| belongs(key)).copied());
         state.receipts.retain(|packed, _| !belongs(packed));
         state.publication_acks.retain(|packed, _| !belongs(packed));
+        state.stray_generations_written.remove(&dbnum);
         before - state.receipts.len()
     }
 

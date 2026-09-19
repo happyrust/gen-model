@@ -1402,11 +1402,24 @@ async fn stray_room_generation_statement(
 
 /// 带着 [`stray_room_generation_statement`] 的那一组提交成功之后：水位镜像那一格作废，下一次读回填（生产库才有镜像；
 /// 旁路连接 / 测试夹具不影响主库镜像——`invalidate_mirrored_on` 自己判）。空 epilogue = 这一批没写那一格，不动镜像。
-fn note_stray_generation_written(db: &Surreal<Any>, dbnum: u32, stray_epilogue: &str) {
+/// 那一句随本组提交成功之后的两件事：作废水位镜像（那一格变了）；在投影上记下「本进程这一世按这一代写过这一格」
+/// （`ModelMemoryStore::note_stray_generation_written`，F3 落库收口 2026-09-19 晚）——准入据此分辨那一格里哪些代号的根
+/// 在投影里有 ACK 可点名、哪些是重启前那一世写的（点不到，整库）。这不是 ACK 状态：`persist_roots_batched_unacked`
+/// 那道缝「不动进程内 ACK」照旧成立；这一笔说的是那一格写过什么，与那一句 UPDATE 同时成立、同时随重启消失。
+fn note_stray_generation_written(
+    db: &Surreal<Any>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+    stray_epilogue: &str,
+) {
     if stray_epilogue.is_empty() {
         return;
     }
     crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
+    if let Some(rooms) = rooms {
+        store.note_stray_generation_written(dbnum, rooms.resident_generation());
+    }
 }
 
 /// 定向重算成功盖章那一刻（`batch_worker::run_targeted_room_recompute`，F3 2026-09-19）：投影里本库 ACK 房间代号在准入链上
@@ -1542,6 +1555,7 @@ async fn persist_roots_batched_unacked_impl(
     let concurrent_groups = if writers > 1 {
         persist_shares_concurrently(
             db,
+            store,
             dbnum,
             target.medium,
             rooms,
@@ -1590,7 +1604,7 @@ async fn persist_roots_batched_unacked_impl(
                     &mut boxes_all,
                     &mut cleared_all,
                 );
-                note_stray_generation_written(db, dbnum, &stray_epilogue);
+                note_stray_generation_written(db, store, dbnum, rooms, &stray_epilogue);
             }
             Err(error) if live.len() == 1 => {
                 out.push_failure(
@@ -1625,7 +1639,7 @@ async fn persist_roots_batched_unacked_impl(
                                 &mut boxes_all,
                                 &mut cleared_all,
                             );
-                            note_stray_generation_written(db, dbnum, &stray_epilogue);
+                            note_stray_generation_written(db, store, dbnum, rooms, &stray_epilogue);
                         }
                         Err(error) if retry.len() == 1 => {
                             out.push_failure(
@@ -1695,6 +1709,7 @@ struct GroupOutcome {
 #[allow(clippy::too_many_arguments)]
 async fn persist_shares_concurrently(
     db: &Surreal<Any>,
+    store: &ModelMemoryStore,
     dbnum: u32,
     medium: PersistMedium,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
@@ -1751,7 +1766,7 @@ async fn persist_shares_concurrently(
                     boxes_all,
                     cleared_all,
                 );
-                note_stray_generation_written(db, dbnum, stray_epilogue);
+                note_stray_generation_written(db, store, dbnum, rooms, stray_epilogue);
             }
             Err(error) => out.push_failure(
                 one[0].share.root,
@@ -7372,6 +7387,7 @@ mod tests {
             library: Some(g1.clone()),
             resident: g1.clone(),
             stray: Vec::new(),
+            stray_written_here: Vec::new(),
         };
         let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
         assert_eq!(
@@ -7697,6 +7713,7 @@ mod tests {
             library,
             resident: g1.clone(),
             stray,
+            stray_written_here: fresh.stray_generations_written(BATCH_DBNUM),
         };
         assert!(
             alignment
@@ -7769,10 +7786,10 @@ mod tests {
         assert!(statement_at < first_group, "{batched}");
         assert_eq!(
             batched
-                .matches("note_stray_generation_written(db, dbnum, &stray_epilogue)")
+                .matches("note_stray_generation_written(db, store, dbnum, rooms, &stray_epilogue)")
                 .count(),
             2,
-            "合块 + 二分重试两处提交成功之后作废镜像: {batched}"
+            "合块 + 二分重试两处提交成功之后作废镜像、在投影上记下本进程写过这一代: {batched}"
         );
         assert!(
             source
@@ -7782,8 +7799,189 @@ mod tests {
                 .split_once("\n}\n")
                 .expect("fan-out end")
                 .0
-                .contains("note_stray_generation_written(db, dbnum, stray_epilogue)"),
+                .contains("note_stray_generation_written(db, store, dbnum, rooms, stray_epilogue)"),
             "多写者那一路同样"
+        );
+    }
+
+    /// F3 落库收口（2026-09-19 晚，ADR-073 D13 收口总表第 11 行）的 `mem://` 复现：库上 g1；重启前那一世按 g2 刷了 A2（格里 `[g2]`）；
+    /// 重启（投影、ACK、「这一世写过什么」全丢）；下一个任务之前又按 g3 刷了 A3（格里 `[g2, g3]`，这一世只写过 g3）；常驻回 g1。
+    /// 投影里代号不等的 ACK 只有 A3——准入单看投影是「空段定向只点名 A3」，定向盖章会把整格清掉、A2 那条 g2 的陈旧边无人认领；
+    /// `request_for_task` 见格里的 g2 既不在链上、也不是这一世写的 → 整库，三根都按 g1 算，A2 / A3 的陈旧边都删掉。
+    #[tokio::test]
+    async fn a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed()
+     {
+        use crate::data_interface::room_recompute::{
+            DurableAlignment, RoomRecomputeScope, acked_roots, request_for_task, scope_for_task,
+        };
+        use crate::fast_model::room_resident::RoomReferenceRefresh;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+        let a3 = RefNo::new(24383, 40);
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let calc_g3 = room_calculator_with(dir.path(), 4000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+        let g3 = calc_g3.resident_generation().to_string();
+        assert!(g1 != g2 && g2 != g3 && g1 != g3);
+
+        let db = surreal_mem().await;
+        db.query(format!(
+            "UPSERT dbnum_watermark:{BATCH_DBNUM} SET dbnum={BATCH_DBNUM}, applied_sesno=1, model_sesno=1, model_room_generation='{g1}';"
+        ))
+        .await
+        .expect("seed watermark")
+        .check()
+        .expect("seed watermark statement");
+
+        // 重启前那一世：按 g1 发 A1（同代，不记）、按 g2 刷 A2（记下 g2，且这一世知道是自己写的）。
+        let before = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+        ]);
+        for (roots, calc) in [(&[a1][..], &calc_g1), (&[a2][..], &calc_g2)] {
+            let batched = persist_roots_batched(
+                PersistTarget::new(&db, PersistMedium::Mem),
+                &before,
+                BATCH_DBNUM,
+                roots,
+                Some(calc),
+            )
+            .await
+            .expect("persist before the restart");
+            assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        }
+        assert_eq!(
+            before.stray_generations_written(BATCH_DBNUM),
+            vec![g2.clone()],
+            "这一世写过 g2"
+        );
+        assert_eq!(
+            room_alignment_row_on(&db, BATCH_DBNUM).await.unwrap(),
+            Some((Some(g1.clone()), vec![g2.clone()]))
+        );
+
+        // 重启：新投影只带 A3、这一世什么都没写过；下一个任务之前按 g3 刷了它。
+        let after = room_store(vec![root_commit(a3, vec![room_record(a3, 4100., 4200.)])]);
+        assert!(after.stray_generations_written(BATCH_DBNUM).is_empty());
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &after,
+            BATCH_DBNUM,
+            &[a3],
+            Some(&calc_g3),
+        )
+        .await
+        .expect("A3 at g3");
+        assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        assert_eq!(
+            after.stray_generations_written(BATCH_DBNUM),
+            vec![g3.clone()]
+        );
+        let (library, stray) = room_alignment_row_on(&db, BATCH_DBNUM)
+            .await
+            .unwrap()
+            .expect("watermark row");
+        assert_eq!(library.as_deref(), Some(g1.as_str()));
+        let mut remembered = stray.clone();
+        remembered.sort();
+        let mut expected = vec![g2.clone(), g3.clone()];
+        expected.sort();
+        assert_eq!(remembered, expected, "格里两代都在");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_30".to_string(),
+                "pe:24383_500->pe:24383_40".to_string(),
+            ],
+            "A2 的边是 g2 算的、A3 的边是 g3 算的"
+        );
+
+        // 常驻回 g1：投影里代号不等的 ACK 只有 A3——准入单看投影只点名它。
+        let acked = acked_roots(&after, BATCH_DBNUM);
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g1), &[], &[], &acked),
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: Vec::new(),
+                stale_roots: vec![a3],
+                generation: g1.clone(),
+            },
+            "光看 ACK：空段定向只点得到 A3，A2 点不到"
+        );
+        // 格里的 g2 没人认领（不在链上、这一世没写过）→ 整库。
+        let alignment = DurableAlignment {
+            library,
+            resident: g1.clone(),
+            stray,
+            stray_written_here: after.stray_generations_written(BATCH_DBNUM),
+        };
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let request = request_for_task(&[], Some(&unchanged), Some(&alignment), &[], &[], &acked)
+            .expect("the cell owes");
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::WholeLibrary,
+            "{}",
+            request.reason
+        );
+        assert!(
+            request.reason.contains("F3 落库") && request.reason.contains("也不是本进程这一世写的"),
+            "{}",
+            request.reason
+        );
+
+        // 整库按 g1（A3 在投影里、A1 / A2 回读库上几何）：A2 / A3 的陈旧边都删掉，A1 照旧。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &after,
+            BATCH_DBNUM,
+            &calc_g1,
+            Some(&[a1, a2, a3]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole library on g1");
+        assert_eq!((report.projected_roots, report.durable_roots), (1, 2));
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "重启前按 g2 写的 A2 也被补上了"
+        );
+
+        // 源码钉：这一世写过什么随本库 ACK 整体作废一并清掉（重启的进程内形态）。
+        let store_source = include_str!("model_memory_store.rs");
+        for function in [
+            "pub(crate) fn restore_dbnum(",
+            "pub fn clear_dbnum(",
+            "pub fn invalidate_receipts_of_dbnum(",
+        ] {
+            let body = store_source
+                .split_once(function)
+                .unwrap_or_else(|| panic!("{function}"))
+                .1
+                .split_once("\n    }\n")
+                .expect("function end")
+                .0;
+            assert!(
+                body.contains("stray_generations_written.remove(&dbnum)"),
+                "{function} 作废本库 ACK 时一并忘掉这一世写过什么: {body}"
+            );
+        }
+        assert!(
+            store_source
+                .split_once("pub fn invalidate_all_receipts(")
+                .expect("invalidate_all_receipts")
+                .1
+                .split_once("\n    }\n")
+                .expect("function end")
+                .0
+                .contains("stray_generations_written.clear()"),
+            "全部作废同样"
         );
     }
 

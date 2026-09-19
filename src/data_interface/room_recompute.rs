@@ -155,6 +155,10 @@ pub(crate) struct DurableAlignment {
     /// 库上那一格盖章**之后**本库有根按哪几代写过边（`dbnum_watermark.model_room_stray_generations`，F3 落库 2026-09-19）：
     /// 刷盘一组按另一代写边时随那一组同事务记下、盖章时清空。库上 == 常驻时 ③ 不欠，这一格替重启后丢了 ACK 的那几根说话。
     pub stray: Vec<String>,
+    /// `stray` 里哪几代是**本进程这一世**写进去的（`ModelMemoryStore::stray_generations_written`，F3 落库收口 2026-09-19 晚）：
+    /// 只有这些代号写过的根，ACK 还在投影里、`scope_for_task` 点名点得到；其余是重启前那一世写的——那几根点不到，
+    /// 除非那一代在准入链上，否则定向说不全欠账，[`request_for_task`] 退整库。
+    pub stray_written_here: Vec<String>,
 }
 
 impl DurableAlignment {
@@ -162,6 +166,23 @@ impl DurableAlignment {
     pub(crate) fn owed(&self) -> Option<String> {
         library_alignment_owed(self.library.as_deref(), Some(self.resident.as_str()))
             .or_else(|| stray_generations_owed(self.library.as_deref(), &self.stray))
+    }
+
+    /// `stray` 里定向**说不了**的那几代：既不与库上同代（那几根的边与盖章一致）、又不在准入链上（它那一代到链尾之间
+    /// 面板动了什么各段都反查过，没命中就是边没变）、也不是本进程这一世写的（写过的根 ACK 都在投影里，
+    /// `stale_acked_roots` 点得到）。非空 = 那几代的根点不到（重启前那一世写的），只有整库能覆盖它们。字典序。
+    pub(crate) fn unaccounted_stray_generations(&self, on_chain: &BTreeSet<&str>) -> Vec<String> {
+        let mut unaccounted: Vec<String> = self
+            .stray
+            .iter()
+            .filter(|generation| Some(generation.as_str()) != self.library.as_deref())
+            .filter(|generation| !on_chain.contains(generation.as_str()))
+            .filter(|generation| !self.stray_written_here.contains(generation))
+            .cloned()
+            .collect();
+        unaccounted.sort();
+        unaccounted.dedup();
+        unaccounted
     }
 }
 
@@ -216,6 +237,7 @@ pub(crate) async fn durable_alignment(
         library,
         resident: resident.to_owned(),
         stray,
+        stray_written_here: ModelMemoryStore::global().stray_generations_written(dbnum),
     })
 }
 
@@ -527,7 +549,7 @@ pub(crate) fn request_for_task(
     // 库上已与常驻同代却被 ①/② 问到：它们说不出欠什么，整库（与今天同；F3 点名的根整库也覆盖）。其余由准入链定，
     // 投影里 ACK 代号不在链上的根一并点名（F3）——库上与常驻同代、前三条都没点亮时，它单独就是一条触发。
     let library_current = alignment.is_some_and(|alignment| alignment.owed().is_none());
-    let scope = if library_current && !reasons.is_empty() {
+    let mut scope = if library_current && !reasons.is_empty() {
         RoomRecomputeScope::WholeLibrary
     } else {
         scope_for_task(
@@ -538,6 +560,43 @@ pub(crate) fn request_for_task(
             acked,
         )
     };
+    // F3 落库收口（2026-09-19 晚，D13 收口总表第 11 行）：那一格里记着的代号，凡是既不在准入链上、又不是本进程这一世写进去的
+    // ——重启前那一世写的，那几根的 ACK 已随重启丢了，`acked` 里点不到它们——定向说不全欠账，退整库。链上的不算（各段都反查过）；
+    // 本进程写过的不算（写过的根 ACK 都在投影里，`stale_acked_roots` 已点名）。库上 == 常驻时链就是常驻这一代。
+    if let (
+        Some(alignment),
+        RoomRecomputeScope::Targeted {
+            swaps: used_swaps,
+            parked: used,
+            generation,
+            ..
+        },
+    ) = (alignment, &scope)
+    {
+        let mut on_chain: BTreeSet<&str> = BTreeSet::from([generation.as_str()]);
+        on_chain.extend(alignment.library.as_deref());
+        for swap in used_swaps {
+            on_chain.insert(swap.from_generation.as_str());
+            on_chain.insert(swap.to_generation.as_str());
+        }
+        for entry in used {
+            on_chain.insert(entry.from_generation.as_str());
+            on_chain.insert(entry.to_generation.as_str());
+        }
+        let unaccounted = alignment.unaccounted_stray_generations(&on_chain);
+        if !unaccounted.is_empty() {
+            reasons.push(format!(
+                "库上记着盖章之后按 {} 代写过边（{}）既不在准入链上、也不是本进程这一世写的（重启前写的，那几根的 ACK 已丢，点名点不到）——整库",
+                unaccounted.len(),
+                unaccounted
+                    .iter()
+                    .map(|generation| generation.chars().take(12).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+            scope = RoomRecomputeScope::WholeLibrary;
+        }
+    }
     if let RoomRecomputeScope::Targeted {
         swaps: used_swaps,
         parked: used,
@@ -843,6 +902,7 @@ mod tests {
             library: library.map(str::to_owned),
             resident: resident.to_owned(),
             stray: Vec::new(),
+            stray_written_here: Vec::new(),
         }
     }
 
@@ -1532,7 +1592,8 @@ mod tests {
             "{}",
             request.reason
         );
-        // 进程还活着：投影里 ACK 代号不等的根就是那几根 → 空段定向点名它们（两句原因）。
+        // 进程还活着（那一格的 g2 是本进程写的）：投影里 ACK 代号不等的根就是那几根 → 空段定向点名它们（两句原因）。
+        current.stray_written_here = vec!["g2".to_string()];
         let request = request_for_task(
             &[],
             Some(&unchanged),
@@ -1556,6 +1617,125 @@ mod tests {
             1,
             "{}",
             request.reason
+        );
+    }
+
+    /// F3 落库收口（2026-09-19 晚，ADR-073 D13 收口总表第 11 行）：那一格记的是**代号**不是根。重启前那一世按 g2 写过的根，
+    /// ACK 随重启丢了；重启后下一个任务之前若又有根按别的一代（g3）刷了盘、或按同一代 g2 再刷了几根，投影里就有了
+    /// 代号不等的 ACK，`scope_for_task` 只点名**它们**、定向盖章把整格清掉——g2 那几根的陈旧边就此无人认领。规则：
+    /// `stray` 里既不与库上同代、又不在准入链上、也不是本进程这一世写进去的代号（`stray_written_here`，写过的根 ACK 都在投影里）
+    /// → 定向说不全欠账，整库。链上的不算（各段都反查过）。
+    #[test]
+    fn a_stray_generation_nobody_here_wrote_and_no_chain_explains_forces_the_whole_library() {
+        let library_only = BTreeSet::from(["g1"]);
+        let mut current = alignment(Some("g1"), "g1");
+        current.stray = vec!["g1".to_string()];
+        assert!(
+            current
+                .unaccounted_stray_generations(&library_only)
+                .is_empty(),
+            "与库上同代的记录不算"
+        );
+        current.stray = vec!["g2".to_string()];
+        assert_eq!(
+            current.unaccounted_stray_generations(&library_only),
+            vec!["g2".to_string()],
+            "没人写过、链也说不了：点不到"
+        );
+        current.stray_written_here = vec!["g2".to_string()];
+        assert!(
+            current
+                .unaccounted_stray_generations(&library_only)
+                .is_empty(),
+            "本进程写的：那几根的 ACK 在投影里"
+        );
+        current.stray_written_here = Vec::new();
+        assert!(
+            current
+                .unaccounted_stray_generations(&BTreeSet::from(["g1", "g2", "g3"]))
+                .is_empty(),
+            "在准入链上：它那一代到链尾之间各段都反查过"
+        );
+        current.stray = vec!["g3".to_string(), "g2".to_string(), "g3".to_string()];
+        current.stray_written_here = vec!["g3".to_string()];
+        assert_eq!(
+            current.unaccounted_stray_generations(&library_only),
+            vec!["g2".to_string()],
+            "字典序、去重，只剩说不了的那一代"
+        );
+
+        // 第 11 行原形：库上 g1 == 常驻 g1，格里 [g2, g3]；g3 是这一世写的（A30 的 ACK 是 g3），g2 是重启前写的。
+        // 单看 `scope_for_task` 只点名 A30；`request_for_task` 看见 g2 没人认领 → 整库，原因里带这一句。
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let witnesses = [acked(10, Some("g1")), acked(30, Some("g3"))];
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g1"), &[], &[], &witnesses),
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: Vec::new(),
+                stale_roots: vec![RefNo::new(24383, 30)],
+                generation: "g1".into(),
+            },
+            "准入本身只看得见 g3 那一根"
+        );
+        let request = request_for_task(&[], Some(&unchanged), Some(&current), &[], &[], &witnesses)
+            .expect("the cell alone triggers");
+        assert_eq!(request.scope, RoomRecomputeScope::WholeLibrary);
+        assert!(
+            request.reason.contains("F3 落库")
+                && request
+                    .reason
+                    .contains("（g2）既不在准入链上、也不是本进程这一世写的")
+                && !request.reason.contains("点名重算"),
+            "{}",
+            request.reason
+        );
+
+        // 同一代再刷：重启后常驻又回到 g2、按 g2 刷了 A30（格里已含 g2，这一世没写），常驻回 g1——A30 作证不了重启前那几根。
+        current.stray = vec!["g2".to_string()];
+        current.stray_written_here = Vec::new();
+        let request = request_for_task(
+            &[],
+            Some(&unchanged),
+            Some(&current),
+            &[],
+            &[],
+            &[acked(10, Some("g1")), acked(30, Some("g2"))],
+        )
+        .unwrap();
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::WholeLibrary,
+            "有见证 ≠ 全见证：这一世没写过 g2，格里的 g2 就是别人的"
+        );
+
+        // 链接得通也一样：库上 g1、冻 g3、账本 g1 → g3，格里 g2 不在链上、没人写 → 整库；账本 g1 → g2 → g3 时 g2 在链上，照旧定向。
+        let mut behind = alignment(Some("g1"), "g3");
+        behind.stray = vec!["g2".to_string()];
+        let direct = swap("g1", "g3", moved_panel());
+        let request =
+            request_for_task(&[], None, Some(&behind), &[direct.clone()], &[], &[]).unwrap();
+        assert_eq!(request.scope, RoomRecomputeScope::WholeLibrary);
+        assert!(
+            request.reason.contains("g1 ≠ 此刻常驻代号 g3")
+                && request.reason.contains("（g2）既不在准入链上"),
+            "{}",
+            request.reason
+        );
+        let via_g2 = [
+            swap("g1", "g2", moved_panel()),
+            swap("g2", "g3", moved_panel()),
+        ];
+        let request = request_for_task(&[], None, Some(&behind), &via_g2, &[], &[]).unwrap();
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::Targeted {
+                swaps: via_g2.to_vec(),
+                parked: Vec::new(),
+                stale_roots: Vec::new(),
+                generation: "g3".into(),
+            },
+            "g2 在链上：g2 → g3 那一段反查过，没命中的根边没变"
         );
     }
 

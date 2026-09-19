@@ -2,6 +2,25 @@
 
 ## 2026-09-19
 
+### 房间 F3 落库收口：水位行那一格里没人认领的代号 → 整库——投影上记「本进程这一世写进那一格的代号」，准入对定向多一问（ADR-073 D13 收口总表第 11 行、钉 35）
+
+- **为什么**：`model_room_stray_generations` 记的是**代号**不是根。重启前那一世按 g2 写过的根，ACK 随重启丢了；重启后下一个任务之前
+  又有根按 g3（或按同一代 g2 再）刷了盘，投影里代号不等的 ACK 就只有新的那几根——`scope_for_task` 只点名它们、定向盖章 `Aligned(g1)`
+  把整格清掉，g2 那几根的陈旧边就此无人认领。原先「重启后没有 ACK → 整库」只对「一枚 ACK 都没有」成立。
+- **改动**：① `ModelMemoryStore::note_stray_generation_written / stray_generations_written`（按库记本进程这一世写进那一格的代号；
+  `restore_dbnum` / `clear_dbnum` / `invalidate_receipts_of_dbnum` / `invalidate_all_receipts` 作废 ACK 时一并清）。②
+  `model_db_adapter::note_stray_generation_written(db, store, dbnum, rooms, epilogue)`：那一句随本组提交成功之后除作废镜像再记这一代；
+  合块 / 二分重试 / 多写者三处同一句。③ `DurableAlignment.stray_written_here` + `unaccounted_stray_generations(on_chain)`：`stray` 去掉
+  与库上同代的、链上的（库上 ∪ 各段两端 ∪ 链尾）、这一世写的，剩下的就是点不到的；`request_for_task` 在定向结论之后多一问，非空 →
+  整库，原因多一句「……既不在准入链上、也不是本进程这一世写的……整库」。看的是**谁写的**不是**有没有 ACK**：同一代再刷时格里已含、
+  这一世没写，新根作证不了旧根。
+- **验证**：`cargo test --lib` 新纯函数钉 `a_stray_generation_nobody_here_wrote_and_no_chain_explains_forces_the_whole_library`（同代 / 没人写 /
+  这一世写的 / 链上的 / 去重；第 11 行原形单看准入点名一根、`request_for_task` 整库；同一代再刷也整库；链 g1 → g3 时 g2 不在链上整库、
+  g1 → g2 → g3 照旧定向）+ 新 `mem://` `a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed`
+  （旧投影按 g2 刷 A2、新投影按 g3 刷 A3、格里 `[g2, g3]`、常驻回 g1 → 整库 → 只剩 A1 的边；源码钉四处清理）；`the_library_owes_…` 那条
+  「进程还活着」补 `stray_written_here`；钉 34 源码钉改口。相关模块 629 绿 / 1 红（仍是 vendor/e3d-model 那条 SPAMAP 戳）；
+  `cargo check --all-targets` 零错；rustfmt hunk 数 == HEAD（0 / 2 / 4）；三个文件 LF 一致。live 待补同钉 34。
+
 ### 房间 F3 收口：ADR-073 D13 多一张「已收 / 未收」总表（`76a4dd480` / `3c932e17d` / `35e022318`），钉 34 补记回滚钉
 
 - **为什么**：F3 这一串三笔、两条追记、两组钉散在 D13 / 实施约束里，「到底收了什么、还欠什么」得翻三处才拼得全；`35e022318`

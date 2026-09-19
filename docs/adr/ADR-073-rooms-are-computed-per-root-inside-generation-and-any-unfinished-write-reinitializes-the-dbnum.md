@@ -381,7 +381,7 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   | 8 | `PartialCoverage` / `Failed` 批次任务（盖 `model_sesno` 不盖 D14）按任务那一代写的边，常驻回到库上那一代后同一个洞 | 同一条写路径：任务的刷盘同样经 `persist_roots_batched_unacked_impl`，代号 ≠ 库上就记 stray；不盖章所以不清，下一任务照欠 | `3c932e17d` | 已收（同路径，未单独钉） |
   | 9 | live：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 →（重启）→ 下一窗「ACK 代号不在链上点名 N 根」/「… F3 落库」+「整库房间重算完成」，`/dbnums.room_alignment.stray_generations` 两窗之间非空、之后消失；稳态下那一列恒空 | — | 需真库 | **待 live** |
   | 10 | rocksdb 上水位行两个写者（刷盘 epilogue 与 `task_end` 收尾那一笔）同行撞事务 | 设计上由刷盘既有的重试退避接住 | 未在 rocksdb 上实测 | **未实测** |
-  | 11 | stray 里记着的一代在投影里**一根 ACK 都没有作证**（重启前按 g2 写过 → 重启丢 ACK → 下一任务前又有一段 g3 刷了根 → 常驻回 g1）：`scope_for_task` 只点名 g3 那几根，盖章把整格清掉，g2 那几根的陈旧边就此无人认领 | 建议规则：`stray`（去掉与库上同代的）里有任一代在 `acked` 里找不到见证 → 整库（多算不漏算）；约 10 行 + 一条纯函数钉 | 未落 | **未收**（窄：两段中间代跨一次重启、中间没有批次任务） |
+  | 11 | stray 记的是**代号**不是根：重启前按 g2 写过的根 ACK 随重启丢了，重启后下一任务前又有根按 g3（或按同一代 g2 再）刷了盘 → 投影里代号不等的 ACK 只有新的那几根，`scope_for_task` 只点名它们，盖章把整格清掉，g2 那几根的陈旧边无人认领 | 投影上多记一份「本进程这一世写进那一格的代号」（`ModelMemoryStore::stray_generations_written`，`note_stray_generation_written` 提交成功后记、随本库 ACK 整体作废清）；`DurableAlignment::stray_written_here` 带进准入，`request_for_task` 对定向结论多一问：`stray` 里既不与库上同代、不在准入链上、又不是这一世写的代号 → 整库（`unaccounted_stray_generations`）。「有见证」不够——同一代再刷时格里已含、这一世没写，新根作证不了旧根，所以看的是**谁写的**不是**有没有 ACK** | 钉 35（本表之后的那一笔），`a_stray_generation_nobody_here_wrote_and_no_chain_explains_forces_the_whole_library` + `mem://` `a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed` | 已收 |
   | 12 | 代价：中间那一代生成的根即使边没变也点名重算一次、算齐前查询回 `not_computed`；每任务多一趟 O(本库投影根数) 读锁扫描；换代期每 (库, 代) 一句 UPDATE | 接受（多算不漏算；稳态零） | — | 接受不收 |
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
@@ -787,6 +787,25 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     live 待补：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 → **重启服务** → 下一窗日志「库上记着盖章之后本库有根按另 1 代写过边 …
     欠一次，F3 落库」+「整库房间重算完成」、`/dbnums.room_alignment.stray_generations` 在两窗之间非空、之后消失；稳态下
     `SELECT model_room_stray_generations FROM dbnum_watermark` 恒空。
+35. D13 收口总表第 11 行（F3 落库收口：那一格里没人认领的代号 → 整库，2026-09-19 晚）：
+    - `ModelMemoryStore`：`ScopeState.stray_generations_written: BTreeMap<u32, BTreeSet<String>>`（本进程这一世写进各库那一格的代号）、
+      `note_stray_generation_written(dbnum, generation)` / `stray_generations_written(dbnum)`；`restore_dbnum` / `clear_dbnum` /
+      `invalidate_receipts_of_dbnum` 作废本库 ACK 时 `remove(&dbnum)`，`invalidate_all_receipts` `clear()`（源码钉在 `mem://` 那条里）。
+    - `model_db_adapter::note_stray_generation_written(db, store, dbnum, rooms, stray_epilogue)`：那一句随本组提交成功之后，作废镜像之外
+      再 `store.note_stray_generation_written(dbnum, rooms.resident_generation())`；合块 / 二分重试 / 多写者三处同一句（钉 34 那条的源码钉改口）。
+      不是 ACK 状态——`persist_roots_batched_unacked` 那道缝「不动进程内 ACK」照旧。
+    - `room_recompute::DurableAlignment.stray_written_here`（`durable_alignment` 从 `ModelMemoryStore::global()` 取）、
+      `unaccounted_stray_generations(on_chain)`：`stray` 去掉与库上同代的、去掉链上的（库上那一代 ∪ 各段两端 ∪ 链尾；库上 == 常驻时就是常驻）、
+      去掉这一世写的，剩下的字典序去重。`request_for_task` 在 `scope_for_task` 回 `Targeted` 之后多一问：非空 → `WholeLibrary`，原因多一句
+      「库上记着盖章之后按 N 代写过边（…）既不在准入链上、也不是本进程这一世写的……整库」，此时不再有「点名重算」那一句。
+    - 钉 `a_stray_generation_nobody_here_wrote_and_no_chain_explains_forces_the_whole_library`：同代不算 / 没人写且链说不了 → 那一代 /
+      这一世写的不算 / 链上的不算 / 字典序去重；第 11 行原形（格里 `[g2, g3]`、这一世只写 g3、ACK 只见 g3）`scope_for_task` 单看点名一根、
+      `request_for_task` 整库；同一代再刷（格里 `[g2]`、这一世没写、ACK 见 g2）也整库；链接得通（g1 → g3）而 g2 不在链上 → 整库，
+      g1 → g2 → g3 时 g2 在链上照旧定向。`the_library_owes_a_recompute_when_…` 那条「进程还活着」的一段补 `stray_written_here = [g2]`。
+    - `mem://` 钉 `a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed`：
+      库上 g1；旧投影按 g1 发 A1、按 g2 刷 A2（`stray_generations_written == [g2]`、格里 `[g2]`）；换新投影只带 A3、按 g3 刷（这一世 `[g3]`、
+      格里 `[g2, g3]`、三条边各按各代）；常驻回 g1：`scope_for_task` 只点名 A3，`request_for_task` 整库；整库按 g1 → 只剩 A1 的边
+      （`projected_roots = 1, durable_roots = 2`）。
 
 ## 背景
 
