@@ -1967,6 +1967,64 @@ pub async fn node_diff_summary(
     Ok(Json(report))
 }
 
+/// `GET /api/v1/node/versions` 的查询串：节点 + 对比范围 + 分页。
+#[derive(Debug, Deserialize)]
+pub struct NodeVersionsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` / `a_b`，任意节点（构件 / 单元根 / SITE、ZONE 容器）
+    pub refno: String,
+    /// `self` / `subtree`，缺省 `subtree`
+    #[serde(default)]
+    pub scope: crate::fast_model::node_diff_summary::DiffScope,
+    /// 只给链序在它之后的版本；它必须在链上。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 缺省 500、上限 5000；尾部截断回 `truncated: true`。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/node/versions — 任意**节点**按对比范围折叠的模型版本表（plant3d-web ADR 0066）。
+///
+/// 与前两张表的分工：`model/versions` 只收单元根、折整棵单元子树；`element/versions` 只认构件自己那一条；这条任意节点都
+/// 受理——`scope=self` 是节点自身那一格，`scope=subtree` 是节点 + 其下整棵子树折成一版，并给「这一会话动了几个最小交付
+/// 单元」。容器（SITE / ZONE）「所有子节点」下的时间线只有它能列。整条链冷算是重 I/O，放 `spawn_blocking`。
+pub async fn node_versions(
+    State(state): State<AppState>,
+    Query(req): Query<NodeVersionsReq>,
+) -> Result<Json<crate::fast_model::node_versions::NodeVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let NodeVersionsReq {
+        dbnum,
+        scope,
+        since_sesno,
+        limit,
+        ..
+    } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::node_versions::node_versions(dbnum, refno, scope, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("节点版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// GET /api/v1/model/history/{snapshot_key}
 pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()

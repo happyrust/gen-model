@@ -125,3 +125,10 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
   这是容器节点（ZONE 下几百个单元）也能对比的前提。`A` 不早于 `B` → 400 `INVALID_VERSION_PAIR`。
 - 代码在 `fast_model/attribute_history.rs` / `fast_model/node_diff_summary.rs`；`element_versions` 的 `SessionSets` /
   `modified_impact` / `resolve_unit_root` 放开为 `pub(crate)` 三处共用。
+
+**2026-09-19 追记三：节点版本表 `GET /api/v1/node/versions?dbnum&refno[&scope=subtree|self][&since_sesno&limit]`。** 同一条纪律的
+第四个派生量——任意节点按对比范围折叠的版本表。容器（SITE / ZONE）不是单元，没有单元表可查，「所有子节点」下的时间线只有它能列：
+`subtree` 每行 = 节点自身或其下整棵子树里任何记录变过的会话，`impact` 取子树里最重的一档（节点自身出现 / 被删压过一切，成员新增 /
+删除按重生成记——`fold_window_impact` 同一把尺子），并给 `self_impact` / `units_changed` / `units_touched`；`self` 每行 = 它自身
+记录变过的会话。归属不按会话建子树集（容器子树几万个元素 × 几百个窗口建不起），而是每个候选沿 owner 链上溯一趟同时解出所属单元根。
+缓存键含 scope。代码在 `fast_model/node_versions.rs`。

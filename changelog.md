@@ -1,5 +1,23 @@
 # 变更记录
 
+## 2026-09-19
+
+### 节点版本表 `GET node/versions?scope=self|subtree`——ADR 0066 的第三条：容器节点「所有子节点」下的时间线
+
+- 用户 09-19 10:2x「开写后端 node/versions?scope=subtree，让容器节点也能列出子树时间线，替掉手填会话号」。前一版面板在容器
+  （SITE / ZONE）上列不出子树时间线（容器没有单元表可查，`element/versions` 只有它自己那一列），只能让人手填 A / B 会话号。
+- `GET /api/v1/node/versions?dbnum&refno[&scope=subtree|self][&since_sesno&limit]`：任意节点都受理。`self` 每行 = 它自身记录变过的
+  会话；`subtree` 每行 = 节点自身或其下整棵子树里任何记录变过的会话，`impact` 取子树里最重的一档（节点自身 inserted / deleted →
+  `delivery` / `tombstone` 压过一切；成员新增 / 删除按重生成记，与单元表同一把尺子 `fold_window_impact`），并给
+  `self_impact`（节点自身那一格，`null` = 只有子树变了）、`units_changed`（折叠影响不是 noop 的最小交付单元数）、
+  `units_touched`（记录被动过的单元数）。回执另带 `unit_root` / `unit_noun`（节点自己所属的单元，容器为 `null`）、
+  `truncated` / `since_sesno` 分页与 `model/versions` 同口径。
+- 归属判断不像单元表那样按会话建子树集（容器子树几万个元素 × 几百个窗口建不起），而是每个候选沿 owner 链**上溯一趟**，
+  同时回答「在不在节点子树里」与「所属单元根是谁」（`ascend`）；`self` 下一窗候选里没有它就不建会话集。链头节点已在时
+  枚举一次子树数「带着几个单元出现」（复用 `node_diff_summary::count_units_in_subtree`）。缓存键 `(dbnum, refno, scope, 文件指纹)`。
+- 实现：`fast_model/node_versions.rs`（单测 6 条：折叠 / 两格单元数 / 自身列 / 切片 / 序列化）、`handlers::node_versions` + 路由；
+  `DiffScope` 补 `Hash`。真机数字见下一条追记（release 构建换到 :8022 后补）。
+
 ## 2026-09-18
 
 ### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要

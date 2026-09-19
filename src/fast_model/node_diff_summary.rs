@@ -39,7 +39,7 @@ const MAX_WARNINGS: usize = 20;
 const DEFAULT_CONFIRM_UNITS: usize = 20;
 
 /// 对比范围。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DiffScope {
     /// 节点自身 + 其下整棵子树
@@ -516,8 +516,8 @@ fn compute(
 }
 
 /// 在某一会话上枚举节点子树，数其中的最小交付单元根（含节点自身）。
-/// 返回 `(单元数, 走过的元素数, 是否数完)`。
-fn count_units_in_subtree(
+/// 返回 `(单元数, 走过的元素数, 是否数完)`。`node_versions` 在链头节点已在时也用它数「带着几个单元出现」。
+pub(crate) fn count_units_in_subtree(
     set: &Arc<DbSet>,
     root: RefNo,
     unit_types: &[String],

@@ -11,6 +11,8 @@ pub mod element_versions;
 pub mod attribute_history;
 /// 节点两版之间的差异摘要：索引差分 + 模型影响，按最小交付单元分组，不生成几何。
 pub mod node_diff_summary;
+/// 任意节点按对比范围（自身 / 整棵子树）折叠的模型版本表：容器节点的时间线靠它，每版附动了几个单元。
+pub mod node_versions;
 pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;

@@ -575,6 +575,9 @@ async fn serve_with_ready(
             "/api/v1/node/diff-summary",
             get(handlers::node_diff_summary),
         )
+        // 任意节点按对比范围折叠的版本表（同一节 ADR 0066 的第三条）：容器「所有子节点」下的时间线只有它能列，
+        // 每版附「动了几个最小交付单元」。同样按需算、只活在进程内。
+        .route("/api/v1/node/versions", get(handlers::node_versions))
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
