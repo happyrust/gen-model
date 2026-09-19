@@ -37,7 +37,7 @@ use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::data_interface::mdb_membership;
 use crate::data_interface::model_source;
 use crate::data_interface::rigid_motion::{
-    RepublishGate, TransformAnchor, republish_gate, republish_records,
+    RepublishGate, TransformAnchor, bounds_of_points, republish_gate, republish_records,
 };
 use crate::fast_model::model_memory_store::{
     CommitScope, ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube,
@@ -310,6 +310,73 @@ fn same_target_outside_the_design_window(published: &ModelTarget, current: &Mode
         && published.template_attlib_digest == current.template_attlib_digest
         && published.generator_fingerprint == current.generator_fingerprint
         && published.tessellation_profile == current.tessellation_profile
+}
+
+/// 刚体前移回执的落款（ADR-066 D4「与重生成同款」）。`current` 是按 pin@T 现算的目标；只有设计窗之外
+/// 每一格（项目 / 设计文件身份 / 目录依赖含会话 / 模板 / 生成器指纹 / 细分档）都与旧回执相同、且设计会话
+/// 确实落在 T 上，才许拿它当这根的新落款——目录变了核对拍里 `Δ` 前移的记录与 regen@T 就不是同一份几何，
+/// core 对目录 / 几何集变化走的也是 `REPALL`。旧回执没带目标就证不了目录没动，一律回退整根重算。
+pub(crate) fn rigid_motion_target_at(
+    old_receipt: &RootReceipt,
+    current: ModelTarget,
+    target_sesno: u32,
+) -> anyhow::Result<ModelTarget> {
+    let Some(published) = old_receipt.model_target.as_ref() else {
+        bail!("cached receipt carries no model target; cannot prove the catalogue did not move");
+    };
+    anyhow::ensure!(
+        same_target_outside_the_design_window(published, &current),
+        "immutable target changed outside the design window (catalogue / template / generator / \
+         tessellation); rigid motion cannot cover it"
+    );
+    anyhow::ensure!(
+        current.design.session == target_sesno,
+        "model target pins design session {} but the window targets {target_sesno}",
+        current.design.session
+    );
+    Ok(current)
+}
+
+/// 含旋转的刚体前移重算盒（ADR-066 D3）：`bake_element` 存的 `world_bounds` 是世界网格顶点的紧 AABB，
+/// 本地盒过矩阵对含旋转的 `Δ` 一律偏松、过不了对拍门，所以读回这条记录自己的网格，顶点乘到新世界系
+/// `world` 再取 AABB（[`bounds_of_points`]）。网格到世界的矩阵见 [`rigid_motion_mesh_to_world`]。
+/// 读不到网格 / 网格没有顶点都是这根的回退理由（`republish_records` 整根 `Err`，不留半套）。
+pub(crate) fn rigid_motion_mesh_bounds(
+    mesh_dir: &Path,
+    record: &ProjectedGeometry,
+    world: DMat4,
+) -> anyhow::Result<[[f32; 3]; 2]> {
+    let path = mesh_dir.join(format!("{}.mesh", record.mesh_id));
+    let mesh = read_mesh_file(&path)
+        .with_context(|| format!("record {} rotated: bounds need its mesh", record.record_id))?;
+    let mesh_to_world = rigid_motion_mesh_to_world(record, world);
+    bounds_of_points(
+        mesh.vertices
+            .iter()
+            .map(|vertex| mesh_to_world.transform_point3(vertex.as_dvec3())),
+    )
+    .with_context(|| {
+        format!(
+            "record {} rotated: mesh {} has no vertices",
+            record.record_id,
+            path.display()
+        )
+    })
+}
+
+/// 记录的网格顶点到世界系，与生成时 [`persisted_world_transform`] / `bake_element` 同口径：烘焙件
+/// （`Baked`）的网格已按 `world⁻¹` 本地化，直接乘世界矩阵；标准图元（`Canonical`）先乘 `local_transform`；
+/// 隐式管身的 `local_transform` 生成时已折进存下来的世界矩阵（`persisted_world_transform`），不再乘。
+pub(crate) fn rigid_motion_mesh_to_world(record: &ProjectedGeometry, world: DMat4) -> DMat4 {
+    match (&record.shape, record.tube.is_some()) {
+        (
+            ProjectedShape::Canonical {
+                local_transform, ..
+            },
+            false,
+        ) => world * *local_transform,
+        _ => world,
+    }
 }
 
 /// 单元级发布的**真生产方**（ADR-080 D1 / D5 / D6 / D8）：`plan_update(S→T)` 一窗算一次，逐根切出子计划 →
@@ -673,7 +740,7 @@ pub struct ModelTarget {
 }
 use crate::fast_model::e3d_mesh_store::{
     E3dPersistReport, MeshWrite, baked_mesh_id, canonical_mesh_id, ensure_mesh_file,
-    geometry_record_id,
+    geometry_record_id, read_mesh_file,
 };
 
 /// One database's element index at a pinned session: its top-level elements
@@ -1753,8 +1820,9 @@ impl E3dModelService {
     /// 刚体前移执行体（ADR-066 B6）的**存储半边**：把「只动摆放」的根从整根重算改成「投影记录左乘
     /// Δ + 前移回执到 T」，只左乘并提交进内存投影——**生成服务不碰数据库**（登记 / durable flush 由
     /// 调用方在 batch_worker 里做，见 `run_rigid_motion_units`）。**保守优先**：任一前置不满足就把这根
-    /// 放进 `fallbacks` 退回整根重算，回退永远正确。本轮只做**纯平移**（`republish_records` 内部走
-    /// `translate_bounds`）；含旋转（要读网格重算盒）让盒闭包报错 → 回退。`completed` 的根已把左乘后的
+    /// 放进 `fallbacks` 退回整根重算，回退永远正确。盒按 D3：纯平移直接加 `t`（`republish_records` 内部走
+    /// `translate_bounds`）；含旋转读回记录自己的网格、顶点乘到新世界系再取紧 AABB
+    /// （[`rigid_motion_mesh_bounds`]），网格读不到 / 没有顶点就回退。`completed` 的根已把左乘后的
     /// 记录与前移到 T 的回执提交进投影，等调用方登记后由 `publish_completed_file_round` 统一刷 durable。
     /// 开关 `model_transform_cheap_path` 关着时规划器不产 transform 单元，本函数不会被调到。
     ///
@@ -1762,8 +1830,11 @@ impl E3dModelService {
     /// 回执已在 T（发布成功但回合没收尾的窗口重放）跳过、按已完成计（`replayed`）；回执不在规划
     /// 基线 S 上（半截状态 / 旧计划 / 别的路径动过它）`Δ` 对不上，回退整根重算。
     ///
-    /// 待补（开关翻开前 B8 对拍门会挡住）：含旋转时读网格顶点重算盒；`model_target.design` 落款推进到
-    /// pin@T（现在沿用旧的，最坏是下一窗不命中缓存、照旧重算，安全）。
+    /// 落款按 D4「与重生成同款」：回执的 `model_target` 是按 pin@T 现算的（与 regen / 单元级同一条
+    /// `hydrate_published_dependencies → model_target` 路，目录会话沿旧回执补水），且只在设计窗之外
+    /// 每一格都没变时才落（[`rigid_motion_target_at`]）——目录 / 模板 / 生成器 / 细分档任一变了，左乘
+    /// 一个 `Δ` 覆盖不了，回退整根重算。于是下一窗 `generation_root_cache_current` 看到的就是一根
+    /// 在 T 上完成的根，与一次 regen 落地后一模一样。
     pub(crate) async fn republish_roots_by_rigid_motion(
         &self,
         dbnum: u32,
@@ -1775,6 +1846,10 @@ impl E3dModelService {
         let store = ModelMemoryStore::global();
         let mesh_dir = self.mesh_dir.as_path();
         let mut report = RigidMotionReport::default();
+        // 目录会话表整轮共用（与单元级 `produce` 用窗口的 `dependency_sessions` 同形）：
+        // `hydrate_published_dependencies` 已有的键不重开文件。
+        let dependency_sessions: DependencySessions =
+            Arc::new(std::sync::Mutex::new(BTreeMap::new()));
         for unit in units {
             let root_refno = &unit.root_refno;
             let anchors = unit.anchors.as_slice();
@@ -1823,10 +1898,24 @@ impl E3dModelService {
                     continue;
                 }
             }
+            // 落款先算、先核（便宜，且不动任何记录）：pin@T 的目标与旧回执在设计窗之外逐格相同才往下走。
+            let model_target = match self
+                .hydrate_published_dependencies(&old_receipt, &dependency_sessions)
+                .and_then(|()| self.model_target(dbnum, target_sesno, &dependency_sessions))
+                .and_then(|current| rigid_motion_target_at(&old_receipt, current, target_sesno))
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    report
+                        .fallbacks
+                        .push((root_refno.clone(), format!("model target: {error:#}")));
+                    continue;
+                }
+            };
             let records = store.records_of_root(ProjectionScope::Current, root);
-            // 左乘 Δ：纯平移直接加 t；含旋转让盒闭包报错 → 回退（读网格那半边留作 B6 后续）。
-            let moved = match republish_records(records, anchors, target_sesno, |_, _| {
-                anyhow::bail!("rotation bounds read not yet wired; falling back to regen")
+            // 左乘 Δ：纯平移直接加 t；含旋转读回记录自己的网格重算盒（D3），读不到就回退。
+            let moved = match republish_records(records, anchors, target_sesno, |record, world| {
+                rigid_motion_mesh_bounds(mesh_dir, record, world)
             }) {
                 Ok(moved) => moved,
                 Err(error) => {
@@ -1845,7 +1934,7 @@ impl E3dModelService {
                     continue;
                 }
             };
-            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。发布调用只同步
+            // 回执整根前移到 T，落款是 pin@T 的目标（D4）。发布调用只同步
             // 提交内存投影并登记 write-behind；后台 worker 独立完成 durable flush。
             super::model_write_behind::publish(vec![ProjectionCommit {
                 upserts: moved,
@@ -1853,7 +1942,7 @@ impl E3dModelService {
                     root,
                     RootReceipt {
                         source_sesno: target_sesno,
-                        model_target: old_receipt.model_target.clone(),
+                        model_target: Some(model_target),
                         manifest_hash: manifest_digest,
                         geometry_count,
                         published_via: "transform".into(),
@@ -6462,6 +6551,255 @@ mod tests {
             persisted_world_transform(&element, Some(&primitive), world),
             world,
             "ordinary elements keep the separate local-transform branch"
+        );
+    }
+
+    fn fixture_target(design_session: u32) -> ModelTarget {
+        ModelTarget {
+            project: "fixture".into(),
+            design: ModelFileTarget {
+                dbnum: 8000,
+                db_type: "DESI".into(),
+                file: "design.db".into(),
+                session: design_session,
+                digest: format!("design@{design_session}"),
+            },
+            catalogue: vec![ModelFileTarget {
+                dbnum: 7000,
+                db_type: "CATA".into(),
+                file: "cata.db".into(),
+                session: 7,
+                digest: "cata@7".into(),
+            }],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "generator".into(),
+            tessellation_profile: "tessellation".into(),
+        }
+    }
+
+    fn receipt_at(source_sesno: u32, model_target: Option<ModelTarget>) -> RootReceipt {
+        RootReceipt {
+            source_sesno,
+            model_target,
+            manifest_hash: "manifest".into(),
+            geometry_count: 3,
+            published_via: "regen".into(),
+        }
+    }
+
+    /// ADR-066 D4：刚体前移的回执落款是 pin@T 现算的目标，不是旧回执那份；设计窗之外任何一格变了、
+    /// 目标没钉在 T 上、或旧回执根本没带目标，都是这根的回退理由。
+    #[test]
+    fn the_rigid_motion_receipt_takes_the_target_at_t_only_when_nothing_outside_the_window_moved() {
+        let old = receipt_at(41, Some(fixture_target(41)));
+        let at_t = rigid_motion_target_at(&old, fixture_target(42), 42)
+            .expect("only the design window moved");
+        assert_eq!(at_t.design.session, 42);
+        assert_eq!(at_t.design.digest, "design@42");
+        assert_ne!(
+            Some(&at_t),
+            old.model_target.as_ref(),
+            "the receipt must not reuse the old stamp"
+        );
+
+        let mut catalogue_moved = fixture_target(42);
+        catalogue_moved.catalogue[0].session = 8;
+        let error = rigid_motion_target_at(&old, catalogue_moved, 42).unwrap_err();
+        assert!(error.to_string().contains("outside the design window"));
+
+        let mut generator_changed = fixture_target(42);
+        generator_changed.generator_fingerprint = "generator-v2".into();
+        assert!(rigid_motion_target_at(&old, generator_changed, 42).is_err());
+
+        let error = rigid_motion_target_at(&old, fixture_target(41), 42).unwrap_err();
+        assert!(error.to_string().contains("pins design session 41"));
+
+        let error =
+            rigid_motion_target_at(&receipt_at(41, None), fixture_target(42), 42).unwrap_err();
+        assert!(error.to_string().contains("no model target"));
+    }
+
+    /// 盒 [0,1]×[0,2]×[0,3] 的八个角点，写成 `dir/<mesh_id>.mesh`。
+    fn box_mesh_file(dir: &Path, mesh_id: &str) {
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+            [1.0, 0.0, 3.0],
+            [0.0, 2.0, 3.0],
+            [1.0, 2.0, 3.0],
+        ];
+        let mesh = PlantMesh {
+            indices: vec![0, 1, 2],
+            vertices: corners
+                .iter()
+                .map(|[x, y, z]| glam::Vec3::new(*x, *y, *z))
+                .collect(),
+            normals: vec![glam::Vec3::Z; corners.len()],
+            wire_vertices: Vec::new(),
+            aabb: None,
+        };
+        ensure_mesh_file(&dir.join(format!("{mesh_id}.mesh")), &mesh).expect("fixture mesh");
+    }
+
+    fn projected(
+        record_id: &str,
+        mesh_id: &str,
+        shape: ProjectedShape,
+        tube: Option<ProjectedTube>,
+    ) -> ProjectedGeometry {
+        let source = RefNo::new(24384, 11);
+        ProjectedGeometry {
+            record_id: record_id.into(),
+            geometry_id: GeometryId::Element {
+                refno: source.to_string(),
+            },
+            source_refno: source,
+            dbnum: 7997,
+            source_sesno: 41,
+            noun: "BOX".into(),
+            mesh_id: mesh_id.into(),
+            world_transform: DMat4::IDENTITY,
+            world_bounds: [[0.0; 3], [1.0, 2.0, 3.0]],
+            ancestors: vec![packed_refno(source)],
+            shape,
+            tube,
+        }
+    }
+
+    fn assert_bounds_close(actual: [[f32; 3]; 2], expected: [[f32; 3]; 2]) {
+        for (a, e) in actual.iter().flatten().zip(expected.iter().flatten()) {
+            assert!((a - e).abs() < 1e-4, "bounds {actual:?} != {expected:?}");
+        }
+    }
+
+    /// ADR-066 D3：含旋转的 `Δ` 不拿盒过矩阵凑数——读回记录自己的网格、顶点乘到新世界系再取紧 AABB。
+    /// 烘焙件直接乘世界矩阵；标准图元先乘 `local_transform`；隐式管身的 `local_transform` 已折进世界矩阵，
+    /// 不再乘（与 `persisted_world_transform` 互为镜像）。网格不在是这根的回退理由，不是 panic。
+    #[test]
+    fn rotating_a_record_rebuilds_its_bounds_from_the_mesh_vertices() {
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh_file(dir.path(), "fixture_box");
+        // 绕 Z 转 90° 再平移 (10, 20, 30)：(x, y, z) → (−y + 10, x + 20, z + 30)。
+        let world = DMat4::from_translation(glam::DVec3::new(10.0, 20.0, 30.0))
+            * DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2);
+
+        let baked = projected("11", "fixture_box", ProjectedShape::Baked, None);
+        assert_bounds_close(
+            rigid_motion_mesh_bounds(dir.path(), &baked, world).unwrap(),
+            [[8.0, 20.0, 30.0], [10.0, 21.0, 33.0]],
+        );
+
+        let scaled = ProjectedShape::Canonical {
+            key: e3d_model::primitive_instance::PrimitiveMeshKey::CylinderV3 { segments: 32 },
+            local_transform: DMat4::from_scale(glam::DVec3::splat(2.0)),
+            local_bounds: [[0.0; 3], [1.0, 2.0, 3.0]],
+        };
+        let canonical = projected("12", "fixture_box", scaled.clone(), None);
+        assert_bounds_close(
+            rigid_motion_mesh_bounds(dir.path(), &canonical, world).unwrap(),
+            [[6.0, 20.0, 30.0], [10.0, 22.0, 36.0]],
+        );
+
+        let tube = projected(
+            "13",
+            "fixture_box",
+            scaled,
+            Some(ProjectedTube {
+                route_ordinal: 0,
+                from: RefNo::new(24384, 1),
+                to: RefNo::new(24384, 2),
+                invalid: false,
+            }),
+        );
+        assert_bounds_close(
+            rigid_motion_mesh_bounds(dir.path(), &tube, world).unwrap(),
+            [[8.0, 20.0, 30.0], [10.0, 21.0, 33.0]],
+        );
+
+        let missing = projected("14", "fixture_missing", ProjectedShape::Baked, None);
+        let error = rigid_motion_mesh_bounds(dir.path(), &missing, world).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("fixture_missing.mesh"),
+            "{error:#}"
+        );
+    }
+
+    /// 执行体喂给 `republish_records` 的就是这只闭包：旋转的锚点让记录的盒从网格重算、矩阵左乘 `Δ`；
+    /// 纯平移的锚点不碰文件（网格不存在也过）。
+    #[test]
+    fn the_executor_bounds_callback_rebuilds_rotated_records_through_republish_records() {
+        use crate::data_interface::generation_root::refno_from_e3d;
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh_file(dir.path(), "fixture_box");
+        let anchor_refno = refno_from_e3d(RefNo::new(24384, 11));
+        let rotate = DMat4::from_translation(glam::DVec3::new(10.0, 20.0, 30.0))
+            * DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2);
+
+        let moved = republish_records(
+            vec![projected("11", "fixture_box", ProjectedShape::Baked, None)],
+            &[TransformAnchor {
+                refno: anchor_refno,
+                delta: rotate,
+            }],
+            42,
+            |record, world| rigid_motion_mesh_bounds(dir.path(), record, world),
+        )
+        .expect("rotated record republished");
+        assert_eq!(moved[0].world_transform, rotate);
+        assert_eq!(moved[0].source_sesno, 42);
+        assert_bounds_close(
+            moved[0].world_bounds,
+            [[8.0, 20.0, 30.0], [10.0, 21.0, 33.0]],
+        );
+
+        let shifted = republish_records(
+            vec![projected(
+                "11",
+                "fixture_missing",
+                ProjectedShape::Baked,
+                None,
+            )],
+            &[TransformAnchor {
+                refno: anchor_refno,
+                delta: DMat4::from_translation(glam::DVec3::new(1.0, 2.0, 3.0)),
+            }],
+            42,
+            |record, world| rigid_motion_mesh_bounds(dir.path(), record, world),
+        )
+        .expect("a pure translation never opens the mesh");
+        assert_eq!(shifted[0].world_bounds, [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]);
+    }
+
+    /// ADR-066 D3 / D4 两处「待补」已补：执行体对旋转读网格而不是 bail，回执落款是 pin@T 的目标而不是
+    /// 旧回执那份，而且目标核对排在读任何记录之前。
+    #[test]
+    fn the_rigid_motion_executor_rebuilds_rotated_bounds_and_stamps_the_target_at_t() {
+        let source = service_source();
+        let body = source
+            .split_once("pub(crate) async fn republish_roots_by_rigid_motion(")
+            .expect("rigid-motion executor")
+            .1
+            .split_once("pub(crate) async fn republish_roots_by_unit_delta(")
+            .expect("rigid-motion executor end")
+            .0;
+        assert!(
+            !body.contains("not yet wired"),
+            "rotation must rebuild bounds from the mesh, not bail"
+        );
+        assert!(body.contains("rigid_motion_mesh_bounds(mesh_dir, record, world)"));
+        assert!(body.contains("rigid_motion_target_at(&old_receipt, current, target_sesno)"));
+        assert!(
+            !body.contains("old_receipt.model_target.clone()"),
+            "the transform receipt must carry the target at T"
+        );
+        let target_check = body.find("rigid_motion_target_at(").expect("target check");
+        let records = body.find("store.records_of_root(").expect("record read");
+        assert!(
+            target_check < records,
+            "the immutable-target check precedes touching any record"
         );
     }
 

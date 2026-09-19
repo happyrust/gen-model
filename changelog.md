@@ -2,6 +2,41 @@
 
 ## 2026-09-19
 
+### ADR-066 刚体前移执行体两处「待补」补齐：含旋转读网格顶点重算盒（D3）、回执落款推进到 pin@T（D4）——开关翻开前 B8 对拍门不再被它们挡
+
+- **为什么**：`republish_roots_by_rigid_motion`（S4b B6，09-09）函数头一直挂着两条「待补（开关翻开前 B8 对拍门会挡住）」：
+  (1) 含旋转的 `Δ` 让盒闭包 `bail!("rotation bounds read not yet wired")` → 整根回退 regen，`ORI` 变化一律走不到便宜路，live #2 只测得了平移；
+  (2) 回执 `model_target` 沿用旧回执那份——transform 之后根的 `model_target.design` 仍停在 S 的 pin，下一窗 `generation_root_cache_current`
+  判它过期又整根重算，安全但把验收 3 要量的省吃掉；而且目录 / 模板 / 生成器变了它也照样前移（D4 的「目录落款不变」当时是「没核」，不是「核过没变」）。
+  用户 2026-09-19 23:5x 点名先补这两处再谈 B7。
+- **改动**（会话 fable-5-1-37）：
+  - **盒（D3）**：新增 `e3d_model_service::rigid_motion_mesh_bounds(mesh_dir, record, world')`——读回记录自己的 `<mesh_id>.mesh`
+    （`e3d_mesh_store::read_mesh_file`，新加：把老 rkyv 读取器的 panic 接成错误，与 `verify_mesh_file` 同一手法），顶点乘到新世界系再
+    `bounds_of_points` 取紧 AABB。网格到世界的矩阵 `rigid_motion_mesh_to_world` 与生成时 `persisted_world_transform` / `bake_element` 互为镜像：
+    `Baked` 网格已按 `world⁻¹` 本地化、直接乘 `world'`；`Canonical` 先乘 `local_transform`；**隐式管身不乘**——它的 `local_transform` 生成时已折进
+    存下来的世界矩阵，`ProjectedShape` 里那份再乘一次就是双重缩放。读不到 / 没顶点 → `republish_records` 整根 `Err` → 这根回退 regen，不留半套；
+    纯平移仍走 `translate_bounds`，一个文件都不开。
+  - **落款（D4）**：新增 `rigid_motion_target_at(old_receipt, current, T)`——执行体过完幂等闸、**读任何记录之前**，用与 regen / 单元级同一条路
+    现算 pin@T 的目标（`hydrate_published_dependencies(old_receipt)` 沿旧回执补目录会话 → `model_target(dbnum, T)`；目录会话表整轮共用，与单元级
+    `produce` 用窗口的 `dependency_sessions` 同形），再核三条：旧回执得带目标（没有就证不了目录没动）、设计窗之外每一格（项目 / 设计文件身份 /
+    目录依赖含会话 / 模板 / 生成器指纹 / 细分档）与旧回执相同（复用 `same_target_outside_the_design_window`）、`design.session == T`；任一不成 →
+    回退 regen，原因 `model target: …`。过了就把它落进回执，`published_via = "transform"` 不变。于是 transform 落地后这根与一次 regen 落地后
+    一模一样：凭证在 T、目标在 T。
+- **验证**：新单测 4 条——`rotating_a_record_rebuilds_its_bounds_from_the_mesh_vertices`（临时目录写一块 [0,1]×[0,2]×[0,3] 的盒网格，绕 Z 90° +
+  平移 (10, 20, 30)：Baked → [8,10]×[20,21]×[30,33]、Canonical 2× 缩放 → [6,10]×[20,22]×[30,36]、同形状的隐式管身不乘 local → 与 Baked 相同、
+  网格不在 → Err 带文件名）、`the_executor_bounds_callback_rebuilds_rotated_records_through_republish_records`（执行体那只闭包喂进
+  `republish_records`：旋转锚点盒从网格重算 + 矩阵左乘、纯平移锚点网格不存在也过）、`the_rigid_motion_receipt_takes_the_target_at_t_only_when_nothing_outside_the_window_moved`
+  （只设计窗前移 → 取 T 端目标且 ≠ 旧的；目录会话 +1 / 生成器指纹变 / 目标钉在 41 而窗到 42 / 旧回执无目标 → 四种 Err）、源码钉
+  `the_rigid_motion_executor_rebuilds_rotated_bounds_and_stamps_the_target_at_t`（函数体无 `not yet wired`、调 `rigid_motion_mesh_bounds` 与
+  `rigid_motion_target_at`、不再 `old_receipt.model_target.clone()`、目标核对排在 `records_of_root` 之前）。定向 `cargo test --lib -- rigid_motion
+  e3d_model_service::tests` 30 + 57 过；整套 `cargo test --lib` **2272 过 0 败 122 ignored**（8.7s，含旁边会话工作树里未提交的 fast_model / web_service
+  改动）；`cargo check --lib --tests --bins` 过；`rustfmt --edition 2024 --check` 本轮新增行无差异（`e3d_model_service.rs` 剩 33 处、`e3d_mesh_store.rs`
+  4 处都是旧的，按 hunk 过滤核过）；两文件本就是 LF（`ls-files --eol` i/lf w/lf），行尾未翻。
+- **未做 / 边界**：执行体仍没在真投影上跑过一次——B7 `mem://` 夹具 / B8 门 3 / live #2 照旧是零，本条只把两处会挡 B8 的「待补」拆掉，开关默认仍关。
+  旋转重算盒的精度是 f32 顶点 → f64 乘 → f32 截，与 `bake_element` 从 f64 世界网格取盒差一个 f32 舍入，S4b 计划 §5 门 3 的 `world_bounds` 1e-3 mm
+  在 1e5 mm 级坐标上（f32 ulp ≈ 0.008 mm）大概率要放宽到按 ulp 判，跑门时再定。`model_target` 现算每根多一次 `hydrate_published_dependencies`
+  （已有键不重开文件）+ 三次 `fs::metadata`，未量。文档：本条、S4b 计划 §9 追一节、ADR-066 状态行一句。
+
 ### 属性变化分类对齐 core · §8 Q6 题 B 接线：`SPAMAP` 与 `CACHID` 同档进戳表 / `cache_stamp`，凭证前移比例护栏按净候选数判
 
 - **为什么**：`SPAMAP` 是 3.1 运行库 schema 里的空间索引簿记键（`INTVEC`，字典无票），Design 应用随图形 / 空间索引重建逐元素 `+1`，
@@ -90,7 +125,7 @@
   cargo / 探针进程 0，`AIOS_*` 已清。
 - **未做 / 边界**：ams7997 两窗只复跑了选根（凭证前移的那 100 / 116 根没再做两端整根生成对拍——那 216 根 09-19 15:54 探针已量过
   绿 58 / 零单元 158 / 红 0）；30 库里 991 根零单元的多算根（ams251001 222 根、`ams2510xx` 船体结构 noun 一串）**无判别力**，0 红只在 519 根
-  有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票两个名字都缺；S4 对拍门 21:59 已复跑（0 不等·锚点），
+  有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票**半缺**（fable-5-1-37 23:4x 翻装机目录与公开文档）：`SPAMAP` 在 2.10 `Aveva.Core.Database.xml`（`DbAttributeInstance.SPAMAP`）有一行「Pointer to map」，与 `TMAP`「Pointer to map for TUBE」/ `TMAPV`「Map values for tube」/ `MAPV`「Map values」同族，3.1 `attlib.dat` / `ui-attlist` 里紧挨 `OBST` / `TMAP` / `MAPV`——厂商自己把它归空间图（spatial map）簿记，与我方读法同向，但只此一行、没说它随图形重建 `+1`；docs.aveva.com「Spatial Map」页只讲图与 delta cache 随会话 / 目录变动重建、不点名任何属性；`CACHID` 在 2.10 API xml、3.1 attlib 与公开文档里**一处都没有**，那一半照旧缺；S4 对拍门 21:59 已复跑（0 不等·锚点），
   但刚体开关 `model_transform_cheap_path` **默认仍关**——开不开是 ADR-066 验收的另一票，本轮没动。S8 探针那一节、单测与本段文档已入库 **`e96351e81`**（`test(model-gate)`）。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
   三个文件；gen-model 的钉子已依赖两个名字的常量，两仓紧挨着入库）；`docs/evidence/` 按政策不入库。
 

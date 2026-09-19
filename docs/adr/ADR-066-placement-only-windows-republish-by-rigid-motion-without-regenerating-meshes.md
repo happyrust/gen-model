@@ -15,6 +15,9 @@ fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_mode
 `SPAMAP` 进表后 `is_placement_only` 多认的 885 个候选里 39 个成了合格锚点、其余 846 个仍被规则 3「路由容器之内」排除；合格锚点 163 → 186、对拍 152 根
 **不等·锚点 0**，门照旧过。少的 16 个是 ams7997 HVAC 的 `BEND` / `ATTA` / `DAMP`——e3d-model 09-18 `f93fd66` 让 HVAC BRAN 也派生隐式直段之后改判「路由容器之内」，
 与 `SPAMAP` 无关。`model_transform_cheap_path` 默认仍关。
+**同日 23:5x–00:4x 执行体两处「待补」补齐**（会话 fable-5-1-37）：D3 含旋转时读回记录自己的网格、顶点乘到新世界系重算盒（`rigid_motion_mesh_bounds`，
+隐式管身的 `local_transform` 已折进世界矩阵不再乘），此前一律 `bail!` 回退；D4 回执落款改按 pin@T 现算（`rigid_motion_target_at`：与 regen / 单元级同一条
+`hydrate_published_dependencies → model_target` 路，设计窗之外任一格变了回退 regen），此前沿用旧回执。执行体仍未在真投影上跑过（S4b B7 / B8 / 验收 2 / 3 照旧零），见 S4b 计划 §9。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，

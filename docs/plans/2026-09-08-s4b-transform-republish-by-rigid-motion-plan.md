@@ -295,3 +295,16 @@ C_r = { c : r ∈ roots_of(c) }；C_r = ∅                             → rege
 **P2 核对（对着 00:36 落进树的 B5/B6 逐条）**：(4) settle 口径 = regen 成功路同款 `settle_regen_work(root, revision, None)` ✓；(5) pending 重叠由规划期 carry（desired 抬高 → 不 settled → 不产提示）+ 新基线闸双保险 ✓；(6) fallback 清单在投影不完整 / 回执缺 / 盒闭包（旋转待接）/ 发布模式不支持 / 登记失败之外新增两道闸；回退不涨 `attempts`（与死信计法一致）✓；(7) `model_target` 仍沿用旧落款（执行体文档「待补」，最坏下一窗不命中缓存、照旧重算，安全；B8 前补）；(8) `published_via = "transform"` 已落 `render_receipt_version` ✓。
 
 **验证（2026-09-09 00:5x，本会话跑）**：targeted（`rigid_motion` + `window_root_plan` + `manual_update::collect_unit_tasks` + 开关）**54 passed / 0 failed**；全量 `cargo test --lib -- --skip damaged_…` **1919 passed / 0 failed / 121 ignored**（24.9 s，工作树同时含常驻房间线在飞的改动）；`rustfmt --edition 2024 --check` 五份改动文件（`rigid_motion` / `window_root_plan` / `manual_update` / `batch_worker` / `e3d_model_service`）干净。生产行为：开关默认关，闸只在便宜路内起效；重放语义从「双重搬移（错）」变为「跳过按完成计（对）」。
+
+### B6 补遗（2026-09-19 23:5x–00:4x，会话 fable-5-1-37）：P2 (6) 的「盒闭包（旋转待接）」与 (7) 的「`model_target` 沿用旧落款」两处「待补」补齐
+
+用户点名「先补执行体两处待补，再谈 B7」。两处都只动 `republish_roots_by_rigid_motion` 及其旁边的纯函数，B7 / B8 / live #2 仍是零。
+
+| 件 | 落地形态 | 与 ADR 的对应 |
+|---|---|---|
+| 旋转盒 | `e3d_model_service::rigid_motion_mesh_bounds(mesh_dir, record, world')`：读回记录自己的 `<mesh_id>.mesh`（新加 `e3d_mesh_store::read_mesh_file`，panic 接成错误）→ 顶点乘到新世界系 → `bounds_of_points`；网格到世界的矩阵 `rigid_motion_mesh_to_world`：`Baked` 直接乘、`Canonical` 先乘 `local_transform`、隐式管身不乘（`persisted_world_transform` 已折进去）。读不到 / 没顶点 → 整根 `Err` → 回退 regen | D3「含旋转读网格顶点重算」；纯平移仍 `translate_bounds` |
+| 落款 | `rigid_motion_target_at(old_receipt, current, T)`：闸过后、读记录前，`hydrate_published_dependencies(old_receipt)` → `model_target(dbnum, T)` 现算 pin@T（目录会话表整轮共用），核旧回执带目标 ∧ `same_target_outside_the_design_window` ∧ `design.session == T`，任一不成回退 regen（原因 `model target: …`）；过了落进回执 | D4「与重生成同款」：凭证在 T、目标在 T；目录 / 模板 / 生成器 / 细分档变了不许左乘 |
+| 钉 | 4 条单测：盒三形状 + 网格缺失、闭包经 `republish_records` 端到端、目标四种拒绝、源码钉（无 `not yet wired`、不再 `old_receipt.model_target.clone()`、目标核对先于 `records_of_root`） | §6 源码钉加一条 |
+
+**验证**：定向 `cargo test --lib -- rigid_motion e3d_model_service::tests` 30 + 57 过；全量 `cargo test --lib` **2272 passed / 0 failed / 122 ignored**（8.7 s，工作树含旁边会话未提交的 fast_model / web_service 改动）；`cargo check --lib --tests --bins` 过；`rustfmt --check` 本轮新增行无差异（两文件的旧差异 33 / 4 处不动）。
+**仍开着**：B7 `mem://` 夹具 (i)–(vii)、B8 门 3（`record_id` / 1e-9 / 1e-3 / 纯平移 `mesh_id` 复用）、live #2、验收 3 量、B9 CONTEXT.md 词条。门 3 的 `world_bounds` 1e-3 mm 在 1e5 mm 级坐标上撞 f32 ulp（≈ 0.008 mm），跑门时大概率要改按 ulp 判。详见 changelog 2026-09-19。
