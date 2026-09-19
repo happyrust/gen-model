@@ -596,7 +596,10 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     - 钉 `resolve_joins_tree_projection_and_durable_tubes_into_library_roots`：面板 7 名下四条成员边（投影里的 100、`inst_relate` 带 anc 的 310、
       盒远在 [50, 51]、只有 `tubi_relate` 两行的管身来源 500、别的库的 24382/20）→ `member_hits = 4`、根仍 A/B/C/D、`durable_ancestor_lookups = 7`、
       foreign[7998] 多 24382/20、`cross_library = 5`；只给成员不给树与盒 → 根 A/C/D、foreign 只有 24382/20、`unresolved` 空。
-      `mem://` 两库端到端（钉 `a_panel_move_parks_…`）：`durable_panel_members(R1) == 树的答案模拟 {A1, B1}`，`member_hits = 2`；
+      `mem://` 端到端（钉 `a_panel_that_regains_geometry_elsewhere_drops_its_stale_members_through_the_durable_edges`）：R1 收着 A1、
+      恢复几何挪到 x 2000–3000、`PanelMove { old: None, new }`——只问新盒一根都命中不到（此前的漏算形状），带成员 `member_hits = 1`
+      → 只重算 A1 → 陈旧边删掉、与整库同一终态。`mem://` 两库端到端（钉 `a_panel_move_parks_…`）：`durable_panel_members(R1) ==
+      树的答案模拟 {A1, B1}`，`member_hits = 2`；
       钉 `a_mid_task_generation_swap_…` 两段各自 `{A1}` / `{A2}`。钉 `install_reports_which_panels_moved_…`：第二代 `leaving_panels = [7, 8]`、
       第三代（9 不在册）`= [9]`；钉 `a_panel_that_regains_geometry_…` 第四代 `= [8]`。
     live 待补：ams 一块 PANE `.mesh` 读不出 → 重启服务 → 恢复 `.mesh` 并挪位 → 该窗日志「定向房间重算完成 … member_hits=N …」且旧位置

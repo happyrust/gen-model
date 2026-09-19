@@ -6337,6 +6337,124 @@ mod tests {
         assert!(room_edges(&db).await.is_empty(), "两次定向 == 一次整库");
     }
 
+    /// L1-P（2026-09-19），`mem://` 端到端：面板保护期不带盒、旧盒 `None`——「离开的成员」从库上按面板取。R1 收着 A1（边在库上）；
+    /// R1 恢复几何时挪到 x 2000–3000（`PanelMove { old: None, new: 新盒 }`，与「`.mesh` 读不出 → 重启 → 恢复并挪位」同形）：
+    /// 新盒里没人（树的答案空），成员那一路从 `pe:R1->room_relate` 取到 A1 → 只重算 A1 → 陈旧边删掉，与整库同一终态。
+    /// 对照：不带成员、只问新盒，一根都命中不到——陈旧边留着，这正是 L1 / L1-R 之前的漏算形状。
+    #[tokio::test]
+    async fn a_panel_that_regains_geometry_elsewhere_drops_its_stale_members_through_the_durable_edges()
+     {
+        use crate::data_interface::room_reverse::{self, ReverseLookup};
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let before = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before),
+        )
+        .await
+        .expect("seed A1 inside R1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()]
+        );
+
+        // R1 恢复几何、挪到 x 2000–3000：旧盒 None（保护期不带盒 / 重启后无从知道）。
+        let after = room_calculator_with(dir.path(), 2000., None);
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: None,
+                new: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        assert_eq!(delta.query_boxes().len(), 1, "只有新盒");
+        assert_eq!(delta.leaving_panels(), vec![refno_from_e3d(PANEL_R1)]);
+
+        // 对照：只问新盒、不带成员 → 新盒里没人、一根都命中不到 → A1 的陈旧边没人清（此前的漏算）。
+        let ReverseLookup::Resolved(boxes_only) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &delta.query_boxes(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            &[ROOM_ROOT_A],
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert!(boxes_only.roots.is_empty(), "{boxes_only:?}");
+
+        // 成员那一路：库上 R1 名下此刻就是 A1。
+        let members = room_reverse::durable_panel_members(&db, &delta.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, BTreeSet::from([packed_refno(ROOM_ROOT_A)]));
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &delta.query_boxes(),
+            BTreeSet::new(),
+            members,
+            &[ROOM_ROOT_A],
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![ROOM_ROOT_A]);
+        assert_eq!(
+            (affected.tree_hits, affected.member_hits),
+            (0, 1),
+            "新盒里没人，A1 只靠成员那一路进来"
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("targeted recompute on the regained panel");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A]);
+        assert!(
+            room_edges(&db).await.is_empty(),
+            "A1 不在 R1 的新位置里：陈旧边删掉，不靠旧盒"
+        );
+        // 对照：整库重算得到同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after,
+            Some(&[ROOM_ROOT_A]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole-library recompute");
+        assert!(room_edges(&db).await.is_empty(), "定向 == 整库");
+    }
+
     /// ADR-073 D13 U3 b 档，`mem://` 两库端到端：面板 R1 在 A 库（7999）的任务里搬家。A 的反查（树的答案模拟：旧盒里
     /// 有 A1 与 B 库的 B1）只折出 A1、B1 进 `foreign[B]`；A 定向重算只碰 A1，B 的两条边一字不动；结论 `Targeted` 后把
     /// B1 连同这一段换代（g1 → g2）停进 B 的槽。B 的下一个任务：`Unchanged`、库上 = g1、常驻 = g2、槽里 g1 → g2 →
