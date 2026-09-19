@@ -588,7 +588,15 @@ fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool) -> bool {
                 return true;
             }
             receipt.model_target.as_ref().is_some_and(|target|
-                super::room_read_through::target_current(target).unwrap_or(false))
+                super::room_read_through::target_current(target).unwrap_or_else(|error| {
+                    // 核对不了（文件 stat 不到、会话解不出）按过期处理，但要说出来：此前这一句被吞成
+                    // 「正在后台生成」，日志里一行不剩。
+                    println!(
+                        "[模型目标核对] 生成根 {} 的目标核对不了，按过期处理: {error:#}",
+                        root.to_pdms_str()
+                    );
+                    false
+                }))
         })
 }
 

@@ -2684,11 +2684,11 @@ fn task_catalogue_stamps(
         else {
             continue;
         };
-        for file in &target.catalogue {
+        for (dbnum, session) in target.catalogue_sessions() {
             stamps
-                .entry(file.dbnum)
-                .and_modify(|kept: &mut u32| *kept = (*kept).min(file.session))
-                .or_insert(file.session);
+                .entry(dbnum)
+                .and_modify(|kept: &mut u32| *kept = (*kept).min(session))
+                .or_insert(session);
         }
     }
     Some(stamps)

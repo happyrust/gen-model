@@ -575,6 +575,27 @@ pub struct ModelTarget {
     pub generator_fingerprint: String,
     pub tessellation_profile: String,
 }
+
+impl ModelFileTarget {
+    /// 这一项记了会话没有。`session == 0` 是「没记」：字典库（DICT）按约定会话位固定 0、身份只按
+    /// 文件记（[`E3dModelService::model_target`]）；目录库没被这根打开过、又没钉住时也落 0。没记的
+    /// 会话不能拿去对文件最新会话——永远不等：`/model/ensure` 会把每一根都判成过期、生成完再判一次
+    /// 照样过期、抛 409。判新旧只比摘要；库级目录落款（ADR-079）也收不了它。
+    pub fn session_tracked(&self) -> bool {
+        self.session != 0
+    }
+}
+
+impl ModelTarget {
+    /// 库级目录落款要收的项（ADR-079，`目录 dbnum → 会话`）：只有记了会话的目录项。会话位 0 的项
+    /// （字典库）收进去就是 `0 → 文件最新` 这一窗，永远收不了，目录核对每次冷启动都把整库判成前移。
+    pub fn catalogue_sessions(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.catalogue
+            .iter()
+            .filter(|file| file.session_tracked())
+            .map(|file| (file.dbnum, file.session))
+    }
+}
 use crate::fast_model::e3d_mesh_store::{
     E3dPersistReport, MeshWrite, baked_mesh_id, canonical_mesh_id, ensure_mesh_file,
     geometry_record_id,
@@ -6074,6 +6095,43 @@ mod tests {
             "same path with replaced content identity is a new target"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 7bde2aeea 把字典库按会话位 0 塞进 `catalogue` 之后，凡把 `session` 当真会话用的地方
+    /// （`target_current` 对文件最新会话、库级目录落款）都得绕开它：0 不是任何一个真会话。
+    #[test]
+    fn dictionary_entries_carry_no_session_and_stay_out_of_catalogue_stamps() {
+        let file = |dbnum: u32, db_type: &str, session: u32| ModelFileTarget {
+            dbnum,
+            db_type: db_type.into(),
+            file: format!("{db_type}-{dbnum}"),
+            session,
+            digest: format!("{db_type}@{session}"),
+        };
+        let target = ModelTarget {
+            project: "AMS".into(),
+            design: file(7997, "DESI", 332),
+            catalogue: vec![
+                file(5100, "DICT", 0),
+                file(7000, "CATA", 11),
+                file(7006, "DICT", 0),
+                file(7043, "CATA", 0),
+            ],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "gen".into(),
+            tessellation_profile: "e3d-default-v1".into(),
+        };
+        assert!(target.design.session_tracked());
+        assert_eq!(
+            target
+                .catalogue
+                .iter()
+                .map(ModelFileTarget::session_tracked)
+                .collect::<Vec<_>>(),
+            [false, true, false, false],
+            "会话位 0 的项——字典库、没钉住也没打开过的目录库——都算没记会话"
+        );
+        assert_eq!(target.catalogue_sessions().collect::<Vec<_>>(), [(7000, 11)]);
     }
 
     #[test]

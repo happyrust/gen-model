@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use aios_core::RefnoEnum;
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
-use crate::fast_model::{e3d_model_service::{ModelTarget, model_file_identity_digest},
+use crate::fast_model::{e3d_model_service::{ModelFileTarget, ModelTarget, model_file_identity_digest},
     model_memory_store::{ModelMemoryStore, ProjectionScope}, room_model::MemoryRoomCalculator,
     room_resident};
 use super::direct_tree::DirectTreeService;
@@ -20,18 +20,39 @@ fn require_stable(model: bool, source: bool, rooms: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// 目标里的一项对此刻的文件（纯判据，[`target_current`] 逐项调）：记了会话的项要求文件最新会话
+/// 等于记录会话、且身份摘要相同；会话位 0 的项（字典库，[`ModelFileTarget::session_tracked`]）
+/// 只比摘要——拿 0 去对文件最新会话永远不等，7bde2aeea 之后 `/model/ensure` 就是被这一刀判成
+/// 每根每次都过期、生成完再判一次照样过期、抛 409 的。
+fn target_file_current(file: &ModelFileTarget, latest_sesno: u32, digest_now: &str) -> bool {
+    (!file.session_tracked() || latest_sesno == file.session) && digest_now == file.digest
+}
+
 // Reuse the generator's identity recipe; inspect only its recorded dependencies.
 pub(crate) fn target_current(target: &ModelTarget) -> anyhow::Result<bool> {
     for file in std::iter::once(&target.design).chain(target.catalogue.iter()) {
         let path = Path::new(&file.file);
         let latest = super::model_source::latest_source_version_of_file(file.dbnum, &file.db_type, path)?;
-        if latest.sesno != file.session
-            || model_file_identity_digest(path, file.session)? != file.digest {
+        let digest = model_file_identity_digest(path, file.session)?;
+        if !target_file_current(file, latest.sesno, &digest) {
+            // 说清是哪一项、差在会话还是摘要：此前这一句被 `unwrap_or(false)` 与「正在后台生成」
+            // 盖住，日志里没有一行说得出这根的模型为什么不算新。
+            let reason = if file.session_tracked() && latest.sesno != file.session {
+                format!("会话 {} → 文件最新 {}", file.session, latest.sesno)
+            } else {
+                format!("摘要 {} → 现算 {digest}", file.digest)
+            };
+            println!("[模型目标核对] {} {} 已过期：{reason}（{}）", file.db_type, file.dbnum, file.file);
             return Ok(false);
         }
     }
     let attlib = super::direct_store::DirectSchema::template_dir_from_env()?.join("attlib.dat");
-    Ok(model_file_identity_digest(&attlib, 0)? == target.template_attlib_digest)
+    let attlib_current = model_file_identity_digest(&attlib, 0)? == target.template_attlib_digest;
+    if !attlib_current {
+        println!("[模型目标核对] 模板 attlib.dat 已换版：记摘要 {}（{}）",
+            target.template_attlib_digest, attlib.display());
+    }
+    Ok(attlib_current)
 }
 
 pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> anyhow::Result<Value> {
@@ -111,6 +132,22 @@ mod tests {
             .0;
         assert!(body.contains("template_dir_from_env()"), "{body}");
         assert!(!body.contains("open_from_env()"), "{body}");
+    }
+
+    /// 会话位 0 的项（字典库）只比摘要；记了会话的项会话、摘要都要对上。AMS 的六本字典库文件最新
+    /// 会话 27/7/18/17/13/277，记的是 0——此前第一项就判假，没有一根能算 current。
+    #[test]
+    fn dictionary_targets_are_judged_by_digest_alone() {
+        let file = |db_type: &str, session: u32, digest: &str| ModelFileTarget {
+            dbnum: 5100, db_type: db_type.into(), file: "acp5100".into(), session, digest: digest.into(),
+        };
+        let dict = file("DICT", 0, "d@0");
+        assert!(target_file_current(&dict, 27, "d@0"), "字典库文件最新会话 27 ≠ 记的 0 不算过期");
+        assert!(!target_file_current(&dict, 27, "d@1"), "字典库换了文件（长度 / 修改时间）才算过期");
+        let cata = file("CATA", 11, "c@11");
+        assert!(target_file_current(&cata, 11, "c@11"));
+        assert!(!target_file_current(&cata, 12, "c@11"), "目录库前移一版就过期");
+        assert!(!target_file_current(&cata, 11, "c@11-replaced"), "同一会话换了文件也过期");
     }
 
     #[test]
