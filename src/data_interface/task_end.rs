@@ -168,15 +168,22 @@ fn render_watermark_update(end: &TaskEnd) -> String {
             {
                 sets.push(render_catalogue_stamp_merge(stamps));
             }
+            // 盖章（`Aligned`）/ 清空（`Cleared`）都把「盖章之后按另一代写过根」那一格一并清掉（ADR-073 F3 落库）：
+            // 整库 / 定向盖到这一代 = 库上每条边都与这一代一致，此前记的另几代已被覆盖；关着开关这一格也没有意义。
+            // `Untouched` 两格都不碰。
             match &model.room_generation {
                 RoomGenerationStamp::Untouched => {}
                 RoomGenerationStamp::Cleared => {
                     sets.push("model_room_generation = NONE".to_owned());
+                    sets.push("model_room_stray_generations = []".to_owned());
                 }
-                RoomGenerationStamp::Aligned(generation) => sets.push(format!(
-                    "model_room_generation = '{}'",
-                    escape_surql_str(generation)
-                )),
+                RoomGenerationStamp::Aligned(generation) => {
+                    sets.push(format!(
+                        "model_room_generation = '{}'",
+                        escape_surql_str(generation)
+                    ));
+                    sets.push("model_room_stray_generations = []".to_owned());
+                }
             }
         }
         // 根观测是现场记录，不是承诺：失败的那一版也要留下痕迹。
@@ -451,6 +458,10 @@ mod tests {
         assert!(
             !sql.contains("model_room_generation"),
             "说不了整库对齐的任务不碰 model_room_generation：{sql}"
+        );
+        assert!(
+            !sql.contains("model_room_stray_generations"),
+            "同一条纪律：说不了整库对齐的任务也不清「盖章之后按另一代写过根」那一格（F3 落库）：{sql}"
         );
         // 时刻子句排在赋值之前（SurrealDB 的 SET 顺序求值）。
         let model_time = sql
@@ -811,15 +822,19 @@ mod tests {
 
     /// ADR-073 D14：`model_room_generation` 随 `model_sesno` 同盖、同一条纪律——能替整库说话的
     /// 任务 `Aligned` 写代号，关着开关盖章 `Cleared` 清空，普通增量窗口 `Untouched` 原样不动，
-    /// 模型没成一律不写。
+    /// 模型没成一律不写。F3 落库（2026-09-19）：「盖章之后按另一代写过根」那一格 `model_room_stray_generations`
+    /// 随 `Aligned` / `Cleared` 一并清空，`Untouched` / 模型没成同样不碰。
     #[tokio::test]
     async fn the_room_generation_stamp_follows_the_model_watermark() {
         let db = database().await;
-        db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20, \
+             model_room_stray_generations=['g2'];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
         async fn stamp(db: &Surreal<Any>) -> Option<String> {
             db.query("SELECT VALUE model_room_generation FROM ONLY dbnum_watermark:8000;")
                 .await
@@ -829,6 +844,22 @@ mod tests {
                 .take::<Option<String>>(0)
                 .unwrap()
         }
+        async fn stray(db: &Surreal<Any>) -> Vec<String> {
+            db.query(
+                "SELECT VALUE model_room_stray_generations ?? [] FROM ONLY dbnum_watermark:8000;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take::<Vec<String>>(0)
+            .unwrap()
+        }
+
+        // 普通增量窗口：两格都原样（盖章之前记下的另一代还在）。
+        commit_task_end_on(&db, &end()).await.unwrap();
+        assert_eq!(stamp(&db).await, None);
+        assert_eq!(stray(&db).await, vec!["g2".to_string()]);
 
         let mut aligned = end();
         aligned.model = Some(TaskModelOutcome {
@@ -842,8 +873,16 @@ mod tests {
             sql.contains("model_room_generation = 'efd4\\'ebe1'"),
             "代号按字符串转义写入：{sql}"
         );
+        assert!(
+            sql.contains("model_room_stray_generations = []"),
+            "盖章一并清掉「盖章之后按另一代写过根」那一格：{sql}"
+        );
         commit_task_end_on(&db, &aligned).await.unwrap();
         assert_eq!(stamp(&db).await.as_deref(), Some("efd4'ebe1"));
+        assert!(
+            stray(&db).await.is_empty(),
+            "盖到这一代 = 此前记的另几代都被覆盖"
+        );
 
         // 普通增量窗口：那一格原样。
         commit_task_end_on(&db, &end()).await.unwrap();
@@ -869,12 +908,14 @@ mod tests {
             room_generation: RoomGenerationStamp::Cleared,
         });
         assert!(
-            render_task_end_tail(&cleared).contains("model_room_generation = NONE"),
+            render_task_end_tail(&cleared).contains("model_room_generation = NONE")
+                && render_task_end_tail(&cleared).contains("model_room_stray_generations = []"),
             "{}",
             render_task_end_tail(&cleared)
         );
         commit_task_end_on(&db, &cleared).await.unwrap();
         assert_eq!(stamp(&db).await, None);
+        assert!(stray(&db).await.is_empty());
     }
 
     #[tokio::test]

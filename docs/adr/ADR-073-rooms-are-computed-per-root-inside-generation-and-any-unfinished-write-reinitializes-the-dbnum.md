@@ -321,7 +321,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   **2026-09-19 追记（F3，常驻代号回到旧值时中间那一代生成的根没人补——投影里 ACK 的代号就是欠账的证据）。** 同一遍复审的第三条：
   代号是输入摘要、**不单调**（D12）。形状：库上盖 g1 → 一块 PANE 的 `.mesh` 暂时读不出（重建 → g2；`PanelDelta::between` 只遍历
   `new.panels`，进保护集这一段是**空段、不进账本**）→ 期间「显示模型」`/model/ensure` 按 g2 重生成若干根（准入拿 ACK 代号对
-  `required_room_generation()`，不等即重生成，是常态）：P 不在索引，新进 P 的根拿不到 P 的边 → `.mesh` 恢复（重建 → g1，摘要同值）
+  `required_room_generation()`，不等即重生成，是常态；ensure 本身只发到投影——`publication_policy(true)` 在摄入形态是
+  `ProjectionOnly`——边是 **write-behind 刷盘那一刻**按 `room_stage` 那台计算器写进库的，那时常驻仍是 g2；一次没盖章的
+  `Failed` / `PartialCoverage` 批次任务同形）：P 不在索引，新进 P 的根拿不到 P 的边 → `.mesh` 恢复（重建 → g1，摘要同值）
   → 下一个批次任务：refresh `Unchanged`、库上 g1 == 冻的 g1 → ③ 不欠、账本没有 PANE 变更 → `request_for_task` 回 `None`。那几根的
   ACK 是 g2；`e3d.room.lookup` 第一层不认、第二层「库上 g1 == 常驻 g1 且账本没欠」→ 回 `ready`，边却是 g2 算的。面板挪走又挪回
   （撤销）同形。落法三条：① **投影里本库每一根 ACK 的房间代号进准入**（`room_recompute::acked_roots_for_task` → `AckedRoot { root,
@@ -343,9 +345,27 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   常驻这一代（或发布时没算房间）= `Stale`，`room_edges_ready(Stale, …)` 恒 `false`，库上那一层再对也不替它说话，回 `not_computed`，
   下一个任务的空段定向点名重算它；`Missing` 照旧由第 2 层作答，`Current` 照旧直接就绪。**代价**：中间那一代生成的根，即使边碰巧没变
   （不在那块面板附近）也点名重算一次、在被算齐之前查询回 `not_computed`——多算不漏算；每个任务多一趟 O(本库投影根数) 的读锁扫描。
-  **没收的**：ACK 是进程内的——中间那一代生成的根若在下一个任务之前随进程重启丢了 ACK（或 `drop_cached_root` 退役），证据随之消失，
-  库上 g1 == 常驻 g1 之下没人再点名它（与账本 / 停放槽「重启即丢」同一形状，但这里 ③ 兜不住，因为库上与常驻同代）；要收得先把 ACK
-  代号落库，等 live 看到再定。
+  **没收的**（同日由下条 F3 落库收）：ACK 是进程内的——中间那一代生成的根若在下一个任务之前随进程重启丢了 ACK（或
+  `drop_cached_root` 退役），证据随之消失，库上 g1 == 常驻 g1 之下没人再点名它（与账本 / 停放槽「重启即丢」同一形状，但这里 ③
+  兜不住，因为库上与常驻同代）。
+  **2026-09-19 追记（F3 落库，`dbnum_watermark.model_room_stray_generations`：盖章之后按哪几代写过根，重启不丢）。** 用户拍板
+  B（不逐根落——那是把 ADR-079 刚退役的 `gen_root` 换个名字请回来；也不单开小表——借水位行现成的镜像读与清库路径）：水位行多一格
+  **集合** `model_room_stray_generations: [代号]`——「库上 `model_room_generation` 盖章**之后**，本库有根按这几代写过边」。
+  ① **写**：刷盘一组按 `rooms` 这一代写边、而这一代 ≠ 库上那一格时，`model_db_adapter::stray_room_generation_statement` 渲一句
+  `UPDATE dbnum_watermark:⟨dbnum⟩ SET model_room_stray_generations = array::union(model_room_stray_generations ?? [], ['g'])`，作
+  `persist_group` 的 **epilogue 随本组的行同一笔事务**提交（一条几何都没有的组不带——没有边可陈旧）；库上那一格走水位镜像
+  （`DbnumState::read`，生产库）/ 点读（旁路连接），提交成功后 `invalidate_mirrored_on`。**不写**的几种：没有水位行、库上从没盖过
+  （`None`——③ 本来就欠着，整库一次就盖上）、与盖章同代（稳态：一个字都不写）、那一格已含这一代（每 (库, 代) 一次；不靠进程内
+  去重——盖章清掉之后再按这一代写就得再记）；读不出水位行只 warn 不写。② **清**：`task_end::render_watermark_update` 的 `Aligned(g)`
+  与 `Cleared` 两臂一并 `= []`（盖到这一代 = 库上每条边都与这一代一致，此前记的另几代已被覆盖），`Untouched` / 模型没成不碰——与
+  `model_room_generation` 同一道 `all_roots_ok` 门、同一条「说不了整库的任务不碰」纪律。③ **读**：`room_recompute::durable_alignment`
+  本来就读这一行——`DurableAlignment { library, resident, stray }`，`owed()` = 库上 ≠ 常驻（③ 原句）**或** `stray` 里有与库上不同代的
+  （`stray_generations_owed`：「库上记着盖章之后本库有根按另 N 代写过边……欠一次，F3 落库」）；`request_for_task` 里 `library_current`
+  随之为假 → `scope_for_task`：进程内还有代号不等的 ACK → 空段定向点名（F3 原路，精确）；重启后没有 ACK → 整库（多算不漏算）→
+  盖章 → 那一格清空。`/dbnums.room_alignment` 多一格可选 `stray_generations`（空时不出，形状对既有读者不变）。**代价**：稳态零；
+  换代期每 (库, 代) 一句 UPDATE 随刷盘同事务；水位行多一个写者（此前只有 `task_end` 与初始化 / 清库）——它写的是簿记不是水位，
+  W3「不是第三枚水位」照旧成立，rocksdb 上与收尾那一笔同行撞事务由刷盘既有的重试退避接住。**不动的**：F3 进程内那一路原样；
+  `persist_root_impl`（单根、不写边）不带这一句；ADR-079「逐根成败只活在进程里」一字不改——这一格是每库一份、集合、盖章即清。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -379,7 +399,8 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     一处判据（`query_service::library_room_alignment_is_current`）：各写一遍就会出现面板说「对齐了」而同一个库的查询回
     `not_computed`。它是现状陈述不是告警——要点亮，给该库跑一次 `model/rebuild` 或重初始化。
   - **它不是第三枚水位**：没有自己的推进规则、不参与任何放行 / 恢复判决，只是模型水位的一个属性（「这一版的边对齐到哪一代」），
-    W3 说的 `room_*` 五列一个都没回来。库上这一格与真实的边之间只有一个缺口：关着开关跑过一轮之后再打开——那正是
+    W3 说的 `room_*` 五列一个都没回来。旁边那一格 `model_room_stray_generations`（D13 追记 F3 落库，2026-09-19：「盖章之后本库有根
+    按哪几代写过边」，刷盘按另一代写边时同事务记、盖章即清）同理——是这一格的附注，不是水位。库上这一格与真实的边之间只有一个缺口：关着开关跑过一轮之后再打开——那正是
     2026-09-11 那节已经接受的降级（重新打开只影响之后重生成的根，补齐要显式 `model/rebuild`），而 `Cleared` 让这一格
     在那种局面下说「没有承诺」而不是说谎。
 - **不改**：逐根失败（构件包围盒不可用、候选面板网格取不到）仍 = 该根失败（D2）；`room_membership=false` 那一档（2026-09-11）不动；
@@ -718,6 +739,34 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     「定向房间重算完成 … 换代段 0 段 无（库上已与常驻同代，欠账只有点名的根——空段定向）… ACK 代号不在链上点名 N 根」、之后
     `e3d.room.lookup` 对那几根回 `ready_*`，两窗之间对它们回 `not_computed`（此前是错的 `ready`）；一次普通定向之后日志
     「链上 K 代、没命中的 M 根 ACK 房间代号一并对齐到 …」且下一窗**不**再把整个投影点名一遍。
+34. D13 追记（F3 落库，`model_room_stray_generations`，2026-09-19）：
+    - `DbnumState.model_room_stray_generations: Vec<String>`（`#[serde(default)]`，行结构 `Option<Vec<String>>`，`MODEL_WATERMARK_COLUMNS`
+      末尾多这一列，两处装配 `unwrap_or_default`）。
+    - `task_end::render_watermark_update`：`RoomGenerationStamp::Aligned(_)` 与 `Cleared` 两臂各多一句 `model_room_stray_generations = []`，
+      `Untouched` 不碰；说不了整库的任务渲出的 SQL 不含 `model_room_stray_generations`（钉 `the_room_generation_stamp_follows_the_model_watermark`
+      扩：种子 `['g2']`，普通窗口原样、`Aligned` / `Cleared` 清空；`the_tail_is_one_transaction_and_stamps_the_model_watermark_under_the_data_gate`
+      多一句 `!sql.contains("model_room_stray_generations")`）。
+    - `model_db_adapter`：`room_alignment_row_on(db, dbnum)`（生产库走 `DbnumState::read` 镜像、旁路连接点读）；
+      `stray_room_generation_statement(db, dbnum, generation)`——没有行 / 库上 `None` / 与库上同代 / 已含 → 空串，否则
+      `UPDATE dbnum_watermark:⟨dbnum⟩ SET model_room_stray_generations = array::union(model_room_stray_generations ?? [], ['g'])`（`+` 不行：
+      这一版 SurrealDB 不给数组做加法）；`note_stray_generation_written` 提交成功后 `invalidate_mirrored_on`。`persist_roots_batched_unacked_impl`
+      在分组之前 `stray_room_generation_statement(db, dbnum, rooms.resident_generation())` 算一次，`persist_group(db, &live, &stray_epilogue)` /
+      二分重试 / 多写者三处都带、各自成功之后 `note_stray_generation_written`；`persist_group(db, group, epilogue)` 里
+      `let epilogue = if pieces.is_empty() { "" } else { epilogue };` → `pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry)`，
+      不再有 `""` 那一档（钉 `room_membership_is_computed_per_root_before_the_write_and_rides_the_same_transaction` 改口）。
+    - `room_recompute::DurableAlignment { stray }`、`stray_generations_owed(library, stray)`（去掉与库上同代的；非空 = 欠）、`owed()` 两句
+      `or_else`；`durable_alignment` 从同一次 `DbnumState::read` 取 `model_room_stray_generations`（钉
+      `the_library_owes_a_recompute_when_the_watermark_remembers_writes_at_another_generation`：同代不算 / 另一代欠 / ③ 句在前 /
+      重启后 `request_for_task` 整库只此一句 / 进程内有 ACK 空段定向两句）。
+    - `manual_update::RoomAlignmentColumns.stray_generations`（`skip_serializing_if = "Vec::is_empty"`），与两枚水位同一趟读回（钉
+      `the_dbnum_row_carries_the_durable_room_alignment_as_one_optional_cell` 扩：空不出、非空多一格）。
+    - `mem://` 钉 `a_stray_generation_survives_a_restart_on_the_watermark_row_and_rearms_the_recompute`：没有行 / 没盖过 / 同代都不写；
+      按 g1 发 A1 那一格不动；按 g2 刷 A2 与它的行同一笔事务记下 `[g2]`、`failed` 为空、已含不再写；换一个空 `ModelMemoryStore` 模拟重启
+      → `DurableAlignment { g1, g1, [g2] }.owed()` 含「F3 落库」→ `request_for_task` 整库 → 两根都回读库上几何 → A2 的陈旧边删掉；
+      源码钉 epilogue / 三处 `note_stray_generation_written`。
+    live 待补：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 → **重启服务** → 下一窗日志「库上记着盖章之后本库有根按另 1 代写过边 …
+    欠一次，F3 落库」+「整库房间重算完成」、`/dbnums.room_alignment.stray_generations` 在两窗之间非空、之后消失；稳态下
+    `SELECT model_room_stray_generations FROM dbnum_watermark` 恒空。
 
 ## 背景
 
@@ -890,7 +939,8 @@ ADR-011 §8 / §10；ADR-048 D3；ADR-041 §5 与「不做」；CONTEXT.md 词�
   源码里不存在「模型行已提交、房间边稍后单独提交」的路径。
 - **W3 两枚水位**：`dbnum_watermark` 行无 `room_*` 列；`model_sesno` 只在本任务全部根（含各自的房间归属）成功时推进。
   D14 的 `model_room_generation` 是模型水位的属性（「这一版的边对齐到哪一代」），与 `model_sesno` 同一笔写、同一个门，
-  没有自己的推进规则，不构成第三枚水位。
+  没有自己的推进规则，不构成第三枚水位；它旁边的 `model_room_stray_generations`（F3 落库）是这一属性的附注——刷盘按另一代写边时
+  同事务记一笔、盖章即清，同样不参与任何放行 / 恢复判决。
 - **W4 `writing` 只有一种出路**：`status = writing` 的行，要么它的任务在飞（`task_registry`），要么下一次启动 / 开工把该库本批转
   Reinitialize；`src/` 里不存在按 `sesno > S` 删除的回退路径。
 - **W5 库层房间资源不动**：D4 点名的三个函数、`get_room_nodes.surql`、两张边表的定义不在任何 `REMOVE` 清单里，`embedded_surql`

@@ -1323,6 +1323,92 @@ pub async fn recompute_dbnum_room_edges(
     Ok(out)
 }
 
+/// 库上 D14 那一格与 F3 落库那一格（`dbnum_watermark.model_room_generation` / `model_room_stray_generations`）：
+/// 生产库走水位镜像（`DbnumState::read`，与 `model_coverage::library_credential_on` 同一条路），旁路连接 / 测试夹具
+/// 直接点读那一行。`None` = 没有水位行。
+async fn room_alignment_row_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<Option<(Option<String>, Vec<String>)>> {
+    if std::ptr::eq(db, &*aios_core::SUL_DB) {
+        return Ok(crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+            .await?
+            .map(|state| {
+                (
+                    state.model_room_generation,
+                    state.model_room_stray_generations,
+                )
+            }));
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(default)]
+        model_room_generation: Option<String>,
+        #[serde(default)]
+        model_room_stray_generations: Option<Vec<String>>,
+    }
+    let row: Option<Row> = db
+        .query(format!(
+            "SELECT model_room_generation, model_room_stray_generations FROM ONLY dbnum_watermark:{dbnum};"
+        ))
+        .await?
+        .check()?
+        .take(0)?;
+    Ok(row.map(|row| {
+        (
+            row.model_room_generation,
+            row.model_room_stray_generations.unwrap_or_default(),
+        )
+    }))
+}
+
+/// F3 落库（ADR-073 D14 追记，2026-09-19）：本批按 `generation` 这一代写边，库上盖章的却是另一代——把这一代记进水位行的
+/// `model_room_stray_generations`，随本组的行**同一笔事务**提交（[`persist_group`] 的 epilogue）。它替**重启后丢了进程内 ACK**
+/// 的那几根说话：库上 == 常驻、③ 不欠、账本没段，而这一格非空 = 有根的边是另一代算的，下一个任务欠一次
+/// （`room_recompute::DurableAlignment::owed`）；盖章（`Aligned` / `Cleared`）时清空。
+///
+/// 不写的几种：没有水位行、库上从没盖过（`None`——③ 本来就欠着、整库一次就盖上）、与盖章同代（稳态）、这一格已含这一代
+/// （每 (库, 代) 只写一次，不靠进程内去重——那一格被盖章清掉之后再按这一代写就得再记）。读不出水位行只 warn、不写：
+/// 读错不是「没欠」的证据，但也不能凭它写一格说不清的东西。
+async fn stray_room_generation_statement(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    generation: &str,
+) -> String {
+    let (library, stray) = match room_alignment_row_on(db, dbnum).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return String::new(),
+        Err(error) => {
+            log::warn!(
+                "dbnum={dbnum} 读不出水位行上的房间对齐代号，这一批按 {} 写的边不记进 model_room_stray_generations: {error:#}",
+                generation.chars().take(12).collect::<String>()
+            );
+            return String::new();
+        }
+    };
+    let Some(library) = library else {
+        return String::new();
+    };
+    if library == generation || stray.iter().any(|recorded| recorded == generation) {
+        return String::new();
+    }
+    // `array::union` 而不是 `+`：这一版 SurrealDB 不给数组做加法（"Cannot perform addition with '[]' and '[…]'"）。
+    format!(
+        "UPDATE dbnum_watermark:{dbnum} SET model_room_stray_generations = \
+         array::union(model_room_stray_generations ?? [], ['{}']);\n",
+        escape_surql_str(generation)
+    )
+}
+
+/// 带着 [`stray_room_generation_statement`] 的那一组提交成功之后：水位镜像那一格作废，下一次读回填（生产库才有镜像；
+/// 旁路连接 / 测试夹具不影响主库镜像——`invalidate_mirrored_on` 自己判）。空 epilogue = 这一批没写那一格，不动镜像。
+fn note_stray_generation_written(db: &Surreal<Any>, dbnum: u32, stray_epilogue: &str) {
+    if stray_epilogue.is_empty() {
+        return;
+    }
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
+}
+
 /// 定向重算成功盖章那一刻（`batch_worker::run_targeted_room_recompute`，F3 2026-09-19）：投影里本库 ACK 房间代号在准入链上
 /// 任一代（`on_chain`）、又不是链尾那一代的根，代号一并对齐到链尾 `generation`——它那一代到链尾之间面板动了什么链上各段都
 /// 反查过、没命中就是边没变，与库上那一格「整库对齐到这一代」是同一句话的逐根形态。链外的代号**不动**：那是盖章之后中间
@@ -1440,6 +1526,16 @@ async fn persist_roots_batched_unacked_impl(
     let mut boxes_all = Vec::<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>::new();
     let mut cleared_all = Vec::<aios_core::RefnoEnum>::new();
 
+    // F3 落库（ADR-073 D14 追记，2026-09-19）：本批按 `rooms` 这一代写边，而库上盖章的是另一代——这一代记进
+    // `dbnum_watermark.model_room_stray_generations`，与各组的行同一笔事务；库上已含这一代 / 与盖章同代 / 从没盖过
+    // （③ 本来就欠着）都不写。稳态一个字都不写。
+    let stray_epilogue = match rooms {
+        Some(rooms) => {
+            stray_room_generation_statement(db, dbnum, rooms.resident_generation()).await
+        }
+        None => String::new(),
+    };
+
     // 多写者（`AIOS_MODEL_PERSIST_WRITERS` > 1）：每根一个写者、并发提交，不合块、不二分。
     // 单写者走下面原来的 512 根合块 + 二分重试那一路，行为不变。
     let writers = persist_writers();
@@ -1452,6 +1548,7 @@ async fn persist_roots_batched_unacked_impl(
             record_ledger,
             &shares,
             writers,
+            &stray_epilogue,
             &mut total,
             &mut out,
             &mut refresh_all,
@@ -1478,20 +1575,23 @@ async fn persist_roots_batched_unacked_impl(
         // 正常路径把最多 512 根合进同一笔原子事务，避免大库退化成几万次网络往返。
         // 若 SQL 硬上限、数据事件或传输错误让整组失败，事务本身零提交；随后二分重试，
         // 直到定位到单根。于是成功路径保留合块吞吐，异常路径仍以根为赔付边界。
-        match persist_group(db, &live).await {
-            Ok(outcome) => accept_group_outcome(
-                &live,
-                dbnum,
-                target.medium,
-                rooms,
-                record_ledger,
-                outcome,
-                &mut total,
-                &mut out,
-                &mut refresh_all,
-                &mut boxes_all,
-                &mut cleared_all,
-            ),
+        match persist_group(db, &live, &stray_epilogue).await {
+            Ok(outcome) => {
+                accept_group_outcome(
+                    &live,
+                    dbnum,
+                    target.medium,
+                    rooms,
+                    record_ledger,
+                    outcome,
+                    &mut total,
+                    &mut out,
+                    &mut refresh_all,
+                    &mut boxes_all,
+                    &mut cleared_all,
+                );
+                note_stray_generation_written(db, dbnum, &stray_epilogue);
+            }
             Err(error) if live.len() == 1 => {
                 out.push_failure(
                     live[0].share.root,
@@ -1510,20 +1610,23 @@ async fn persist_roots_batched_unacked_impl(
                 retries.push_back((middle, live.len()));
                 while let Some((start, end)) = retries.pop_front() {
                     let retry = &live[start..end];
-                    match persist_group(db, retry).await {
-                        Ok(outcome) => accept_group_outcome(
-                            retry,
-                            dbnum,
-                            target.medium,
-                            rooms,
-                            record_ledger,
-                            outcome,
-                            &mut total,
-                            &mut out,
-                            &mut refresh_all,
-                            &mut boxes_all,
-                            &mut cleared_all,
-                        ),
+                    match persist_group(db, retry, &stray_epilogue).await {
+                        Ok(outcome) => {
+                            accept_group_outcome(
+                                retry,
+                                dbnum,
+                                target.medium,
+                                rooms,
+                                record_ledger,
+                                outcome,
+                                &mut total,
+                                &mut out,
+                                &mut refresh_all,
+                                &mut boxes_all,
+                                &mut cleared_all,
+                            );
+                            note_stray_generation_written(db, dbnum, &stray_epilogue);
+                        }
                         Err(error) if retry.len() == 1 => {
                             out.push_failure(
                                 retry[0].share.root,
@@ -1598,6 +1701,7 @@ async fn persist_shares_concurrently(
     record_ledger: bool,
     shares: &[RootShare],
     writers: usize,
+    stray_epilogue: &str,
     total: &mut PersistedRows,
     out: &mut BatchedPersist,
     refresh_all: &mut Vec<aios_core::RefnoEnum>,
@@ -1624,7 +1728,7 @@ async fn persist_shares_concurrently(
     let mut pending = Vec::with_capacity(live.len());
     for (index, one) in live.iter().enumerate() {
         pending.push(async move {
-            let outcome = persist_group(db, std::slice::from_ref(one)).await;
+            let outcome = persist_group(db, std::slice::from_ref(one), stray_epilogue).await;
             (index, outcome)
         });
     }
@@ -1633,19 +1737,22 @@ async fn persist_shares_concurrently(
         out.groups += 1;
         let one = &live[index..index + 1];
         match outcome {
-            Ok(outcome) => accept_group_outcome(
-                one,
-                dbnum,
-                medium,
-                rooms,
-                record_ledger,
-                outcome,
-                total,
-                out,
-                refresh_all,
-                boxes_all,
-                cleared_all,
-            ),
+            Ok(outcome) => {
+                accept_group_outcome(
+                    one,
+                    dbnum,
+                    medium,
+                    rooms,
+                    record_ledger,
+                    outcome,
+                    total,
+                    out,
+                    refresh_all,
+                    boxes_all,
+                    cleared_all,
+                );
+                note_stray_generation_written(db, dbnum, stray_epilogue);
+            }
             Err(error) => out.push_failure(
                 one[0].share.root,
                 publication_failure_kind(&error),
@@ -1730,9 +1837,12 @@ fn publication_failure_kind(error: &anyhow::Error) -> PersistFailureKind {
 
 /// 一组过了房间关卡的根：渲一笔、发一笔。失败即返回 Err，调用方把这一组记成失败。
 /// 每根的顺序：最终几何 → 房间归属 → 同事务写模型行与房间边（回执不落库，ADR-079）。
+/// `epilogue` 是调用方要随本组**最后一笔**一起提交的语句（[`stray_room_generation_statement`]：本组按另一代写边时
+/// 在水位行上记一笔，F3 落库）；本组一条几何都没有（只有回执没有几何的根）时不带——没有边可陈旧，不必记。
 async fn persist_group(
     db: &Surreal<Any>,
     group: &[LiveShare<'_>],
+    epilogue: &str,
 ) -> anyhow::Result<GroupOutcome> {
     // 本根要渲的完整记录；跨根重复由数据库幂等语义收敛。
     let records = group
@@ -1856,7 +1966,9 @@ async fn persist_group(
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
-    let transactions = pack_publication_transactions(&prelude, &pieces, "", touches_geometry);
+    // F3 落库那一句（调用方给的 epilogue）随本组最后一笔；一条几何都没有的组不带——没有边可陈旧。
+    let epilogue = if pieces.is_empty() { "" } else { epilogue };
+    let transactions = pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry);
     if transactions.is_empty() {
         return Ok(GroupOutcome {
             upserted: 0,
@@ -3346,7 +3458,7 @@ mod tests {
         let (live, failed) = room_stage(&shares, None);
         assert!(failed.is_empty());
         let db = Surreal::<Any>::init();
-        let error = persist_group(&db, &live).await.err().unwrap();
+        let error = persist_group(&db, &live, "").await.err().unwrap();
         assert_eq!(
             publication_failure_kind(&error),
             PersistFailureKind::Blocked
@@ -7236,6 +7348,7 @@ mod tests {
         let aligned = DurableAlignment {
             library: Some(g1.clone()),
             resident: g1.clone(),
+            stray: Vec::new(),
         };
         let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
         assert_eq!(
@@ -7436,6 +7549,218 @@ mod tests {
                 stale_roots: vec![a2, a3],
                 generation: g2.clone(),
             }
+        );
+    }
+
+    /// ADR-073 D13 追记 F3 落库（2026-09-19），`mem://` 端到端：F3 的证据（ACK 代号）是进程内的，重启即丢——库上 g1、
+    /// 中间那一代 g2 刷进库的根、常驻回到 g1、重启：③ 不欠、账本没段、投影空，读侧第二层替那几根说「就绪」，没人再点名它们。
+    /// 现在：刷盘一组按 g2 写边、而库上盖章的是 g1 → 随那一组同一笔事务在水位行记 `model_room_stray_generations += [g2]`
+    /// （与盖章同代不写、已含不再写、没盖过不写）；重启后 `durable_alignment` 读到它 → 欠一次 → 进程内没有 ACK 就整库
+    /// （多算不漏算）→ A2 的陈旧边删掉；盖章时那一格清空（`task_end` 那边钉）。
+    #[tokio::test]
+    async fn a_stray_generation_survives_a_restart_on_the_watermark_row_and_rearms_the_recompute() {
+        use crate::data_interface::room_recompute::{
+            DurableAlignment, RoomRecomputeScope, acked_roots, request_for_task,
+        };
+        use crate::fast_model::room_resident::RoomReferenceRefresh;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+
+        let db = surreal_mem().await;
+        async fn row(db: &Surreal<Any>) -> Option<(Option<String>, Vec<String>)> {
+            room_alignment_row_on(db, BATCH_DBNUM)
+                .await
+                .expect("watermark row")
+        }
+        // 没有水位行：不写（③ 本来就欠着——库上没盖过章）。
+        assert_eq!(row(&db).await, None);
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g2)
+                .await
+                .is_empty()
+        );
+        db.query(format!(
+            "UPSERT dbnum_watermark:{BATCH_DBNUM} SET dbnum={BATCH_DBNUM}, applied_sesno=1, model_sesno=1;"
+        ))
+        .await
+        .expect("seed watermark")
+        .check()
+        .expect("seed watermark statement");
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g2)
+                .await
+                .is_empty(),
+            "库上从没盖过：③ 欠着，整库一次就盖上，不必记"
+        );
+        db.query(format!(
+            "UPDATE dbnum_watermark:{BATCH_DBNUM} SET model_room_generation = '{g1}';"
+        ))
+        .await
+        .expect("stamp g1")
+        .check()
+        .expect("stamp statement");
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g1)
+                .await
+                .is_empty(),
+            "与盖章同代（稳态）：一个字都不写"
+        );
+        let statement = stray_room_generation_statement(&db, BATCH_DBNUM, &g2).await;
+        assert!(
+            statement.starts_with(&format!(
+                "UPDATE dbnum_watermark:{BATCH_DBNUM} SET model_room_stray_generations = array::union("
+            )) && statement.contains(&g2),
+            "{statement}"
+        );
+
+        let store = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+        ]);
+        // 库上 g1：按 g1 发 A1——同代，那一格不动。
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[a1],
+            Some(&calc_g1),
+        )
+        .await
+        .expect("A1 at g1");
+        assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        assert_eq!(row(&db).await, Some((Some(g1.clone()), Vec::new())));
+        // 中间那一代：按 g2 刷 A2——与它的行同一笔事务，那一格记下 g2。
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[a2],
+            Some(&calc_g2),
+        )
+        .await
+        .expect("A2 at g2");
+        assert!(
+            batched.failed.is_empty(),
+            "那一句随本组同一笔事务，语句不合法整组就判失败——这里要它一字不错: {:?}",
+            batched.failed
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_30".to_string(),
+            ],
+            "A2 的边是 g2 算的"
+        );
+        assert_eq!(row(&db).await, Some((Some(g1.clone()), vec![g2.clone()])));
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g2)
+                .await
+                .is_empty(),
+            "已含这一代：不再写"
+        );
+
+        // 重启：投影空、ACK 全丢；常驻回到 g1、库上 g1——只有水位行上那一格还记得。
+        let fresh = ModelMemoryStore::default();
+        assert!(acked_roots(&fresh, BATCH_DBNUM).is_empty());
+        let (library, stray) = row(&db).await.expect("watermark row");
+        let alignment = DurableAlignment {
+            library,
+            resident: g1.clone(),
+            stray,
+        };
+        assert!(
+            alignment
+                .owed()
+                .is_some_and(|reason| reason.contains("F3 落库")),
+            "{alignment:?}"
+        );
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let request = request_for_task(
+            &[],
+            Some(&unchanged),
+            Some(&alignment),
+            &[],
+            &[],
+            &acked_roots(&fresh, BATCH_DBNUM),
+        )
+        .expect("the watermark cell rearms the recompute after a restart");
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::WholeLibrary,
+            "进程内没有 ACK 可点名：整库（多算不漏算）"
+        );
+        // 整库按 g1（投影空，两根都回读库上几何）：A2 的陈旧边删掉、A1 的边照旧。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &fresh,
+            BATCH_DBNUM,
+            &calc_g1,
+            Some(&[a1, a2]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole library on g1 after the restart");
+        assert_eq!((report.projected_roots, report.durable_roots), (0, 2));
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "重启后那几根照样被补上"
+        );
+
+        // 源码钉：那一句随本组的行同一笔事务（epilogue），三处提交成功之后都作废镜像；一条几何都没有的组不带。
+        let source = include_str!("model_db_adapter.rs");
+        let group = source
+            .split_once("async fn persist_group(")
+            .expect("persist_group")
+            .1
+            .split_once("\n}\n")
+            .expect("persist_group end")
+            .0;
+        assert!(
+            group.contains("let epilogue = if pieces.is_empty() { \"\" } else { epilogue };")
+                && group.contains(
+                    "pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry)"
+                ),
+            "F3 落库那一句作 epilogue 随本组最后一笔提交；没有几何的组不带: {group}"
+        );
+        let batched = source
+            .split_once("async fn persist_roots_batched_unacked_impl(")
+            .expect("batched impl")
+            .1
+            .split_once("\n}\n")
+            .expect("batched impl end")
+            .0;
+        let statement_at = batched
+            .find("stray_room_generation_statement(db, dbnum, rooms.resident_generation())")
+            .expect("那一句在分组之前算一次");
+        let first_group = batched
+            .find("persist_group(db, &live, &stray_epilogue)")
+            .expect("合块那一路带着它");
+        assert!(statement_at < first_group, "{batched}");
+        assert_eq!(
+            batched
+                .matches("note_stray_generation_written(db, dbnum, &stray_epilogue)")
+                .count(),
+            2,
+            "合块 + 二分重试两处提交成功之后作废镜像: {batched}"
+        );
+        assert!(
+            source
+                .split_once("async fn persist_shares_concurrently(")
+                .expect("fan-out")
+                .1
+                .split_once("\n}\n")
+                .expect("fan-out end")
+                .0
+                .contains("note_stray_generation_written(db, dbnum, stray_epilogue)"),
+            "多写者那一路同样"
         );
     }
 
@@ -7939,9 +8264,14 @@ mod tests {
         let attach_at = group
             .find("sql.push_str(&live.room_statements)")
             .expect("房间边拼进这一根的末块");
+        // 收尾段没有逐根的章要盖（ADR-079）；唯一的 epilogue 是调用方给的 F3 落库那一句（水位行上一格，不是逐根回执）。
         let pack_at = group
-            .find("pack_publication_transactions(&prelude, &pieces, \"\", touches_geometry)")
-            .expect("装块时收尾段为空：没有逐根的章要盖");
+            .find("pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry)")
+            .expect("装块：收尾段只有调用方给的 F3 落库那一句，没有逐根的章");
+        assert!(
+            !group.contains("pack_publication_transactions(&prelude, &pieces, \"\", "),
+            "{group}"
+        );
         // 提交走 `commit_publication_transaction`（整笔原子 + 冲突重试），钉它的调用处。
         let commit_at = group
             .find("commit_publication_transaction(db, statements")

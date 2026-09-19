@@ -152,13 +152,38 @@ pub(crate) struct DurableAlignment {
     pub library: Option<String>,
     /// 此刻（开工前对齐之后）的常驻代号。
     pub resident: String,
+    /// 库上那一格盖章**之后**本库有根按哪几代写过边（`dbnum_watermark.model_room_stray_generations`，F3 落库 2026-09-19）：
+    /// 刷盘一组按另一代写边时随那一组同事务记下、盖章时清空。库上 == 常驻时 ③ 不欠，这一格替重启后丢了 ACK 的那几根说话。
+    pub stray: Vec<String>,
 }
 
 impl DurableAlignment {
-    /// 第三条触发（电平型）：库上那一格与常驻代号不等就欠。
+    /// 第三条触发（电平型）：库上那一格与常驻代号不等就欠；相等时库上记着盖章之后按另一代写过根（F3 落库）也欠。
     pub(crate) fn owed(&self) -> Option<String> {
         library_alignment_owed(self.library.as_deref(), Some(self.resident.as_str()))
+            .or_else(|| stray_generations_owed(self.library.as_deref(), &self.stray))
     }
+}
+
+/// F3 落库那一格的纯函数形态：库上记着「盖章之后按这几代写过根」（去掉与库上同代的——那几根的边与盖章一致），
+/// 非空 = 欠一次。库上 == 常驻时 ③ 不欠、账本没段、进程内 ACK 可能已随重启丢了，只有这一格还说得出「有根的边是另一代算的」；
+/// 欠的范围由 [`scope_for_task`] 定——进程内还有 ACK 就点名（空段定向），没有就整库（多算不漏算），盖章即清。
+pub(crate) fn stray_generations_owed(library: Option<&str>, stray: &[String]) -> Option<String> {
+    let short = |generation: &str| generation.chars().take(12).collect::<String>();
+    let strays: Vec<String> = stray
+        .iter()
+        .map(String::as_str)
+        .filter(|generation| Some(*generation) != library)
+        .map(short)
+        .collect();
+    if strays.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "库上记着盖章之后本库有根按另 {} 代写过边（{}），那几根的边不是库上这一代算的（欠一次，F3 落库）",
+        strays.len(),
+        strays.join("、")
+    ))
 }
 
 /// 第三条触发的取数：库上那一格与两枚水位同一行（`DbnumState::read`），常驻代号是**本任务冻好的那台计算器**的
@@ -171,8 +196,15 @@ pub(crate) async fn durable_alignment(
     resident: Option<&str>,
 ) -> Option<DurableAlignment> {
     let resident = resident?;
-    let library = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
-        Ok(state) => state.and_then(|state| state.model_room_generation),
+    let (library, stray) = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
+        Ok(state) => state
+            .map(|state| {
+                (
+                    state.model_room_generation,
+                    state.model_room_stray_generations,
+                )
+            })
+            .unwrap_or_default(),
         Err(error) => {
             log::warn!(
                 "dbnum={dbnum} 读不出水位行上的整库房间对齐代号，这一轮不按「欠整库重算」处理: {error:#}"
@@ -183,6 +215,7 @@ pub(crate) async fn durable_alignment(
     Some(DurableAlignment {
         library,
         resident: resident.to_owned(),
+        stray,
     })
 }
 
@@ -809,6 +842,7 @@ mod tests {
         DurableAlignment {
             library: library.map(str::to_owned),
             resident: resident.to_owned(),
+            stray: Vec::new(),
         }
     }
 
@@ -1451,6 +1485,78 @@ mod tests {
         );
         // 说不出常驻代号（冻不出 / 开关关）：没有可比对的目标，ACK 不看。
         assert!(request_for_task(&[], Some(&unchanged), None, &[], &[], &stale_two).is_none());
+    }
+
+    /// F3 落库（2026-09-19）：库上 == 常驻、③ 不欠、账本没段，而水位行上记着「盖章之后本库有根按另一代写过边」
+    /// （`model_room_stray_generations`）——那是刷盘按另一代写边时同事务记下的、重启也不丢的证据：欠一次。范围照 F3：
+    /// 进程内还有代号不等的 ACK 就点名（空段定向）；重启后 ACK 丢了就整库（多算不漏算）。与库上同代的记录不算证据；
+    /// 库上 ≠ 常驻时 ③ 那一句在前，这一格不另说。
+    #[test]
+    fn the_library_owes_a_recompute_when_the_watermark_remembers_writes_at_another_generation() {
+        assert!(stray_generations_owed(Some("g1"), &[]).is_none());
+        assert!(
+            stray_generations_owed(Some("g1"), &["g1".to_string()]).is_none(),
+            "与库上同代的记录不是证据（那几根的边与盖章一致）"
+        );
+        let owed =
+            stray_generations_owed(Some("g1"), &["g1".to_string(), "g2".to_string()]).unwrap();
+        assert!(
+            owed.contains("另 1 代写过边（g2）") && owed.contains("F3 落库"),
+            "{owed}"
+        );
+        let mut current = alignment(Some("g1"), "g1");
+        assert!(current.owed().is_none());
+        current.stray = vec!["g2".to_string()];
+        assert!(
+            current
+                .owed()
+                .is_some_and(|reason| reason.contains("F3 落库")),
+            "库上 == 常驻却记着另一代写过根：欠"
+        );
+        let mut behind = alignment(Some("g1"), "g2");
+        behind.stray = vec!["gx".to_string()];
+        assert!(
+            behind
+                .owed()
+                .is_some_and(|reason| reason.contains("g1 ≠ 此刻常驻代号 g2")),
+            "库上 ≠ 常驻：③ 那一句在前"
+        );
+
+        // 重启后：进程内没有 ACK → 整库；原因只有 F3 落库那一句。
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let request = request_for_task(&[], Some(&unchanged), Some(&current), &[], &[], &[])
+            .expect("the watermark cell alone triggers");
+        assert_eq!(request.scope, RoomRecomputeScope::WholeLibrary);
+        assert!(
+            request.reason.contains("F3 落库") && request.reason.matches("；").count() == 0,
+            "{}",
+            request.reason
+        );
+        // 进程还活着：投影里 ACK 代号不等的根就是那几根 → 空段定向点名它们（两句原因）。
+        let request = request_for_task(
+            &[],
+            Some(&unchanged),
+            Some(&current),
+            &[],
+            &[],
+            &[acked(10, Some("g1")), acked(30, Some("g2"))],
+        )
+        .unwrap();
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: Vec::new(),
+                stale_roots: vec![RefNo::new(24383, 30)],
+                generation: "g1".into(),
+            }
+        );
+        assert_eq!(
+            request.reason.matches("；").count(),
+            1,
+            "{}",
+            request.reason
+        );
     }
 
     /// 源码钉（ADR-073 D13 反查，2026-09-17）：收尾段的分派——请求说定向先走 `run_targeted_room_recompute`，它回 `None`

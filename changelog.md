@@ -2,6 +2,30 @@
 
 ## 2026-09-19
 
+### 房间 F3 落库：水位行多一格 `model_room_stray_generations`——盖章之后按另一代写过根，重启不丢（ADR-073 D13 追记 F3 落库、钉 34）
+
+- **为什么**：F3 的证据（进程内 ACK 的房间代号）随重启消失。库上 g1、中间那一代 g2 由 write-behind 刷进库的根、常驻回到 g1、
+  **重启**：③ 不欠（同代）、账本没段、投影空——读侧第二层替那几根说「就绪」，没人再点名它们，直到那块面板自己再动或某次整库。
+  用户拍板 B：不逐根落（那是把 ADR-079 刚退役的 `gen_root` 换个名字请回来），不单开小表（借水位行现成的镜像读与清库路径）。
+- **改动**：① `dbnum_watermark.model_room_stray_generations: [代号]`（`DbnumState` / 行结构 / 列清单 / 两处装配）。② 刷盘一组按 `rooms`
+  这一代写边、而这一代 ≠ 库上 `model_room_generation` 时，`model_db_adapter::stray_room_generation_statement` 渲一句
+  `UPDATE … SET model_room_stray_generations = array::union(model_room_stray_generations ?? [], ['g'])`，作 `persist_group` 的 epilogue
+  **随本组的行同一笔事务**提交（一条几何都没有的组不带；合块 / 二分重试 / 多写者三处都带、成功后 `invalidate_mirrored_on`）；没有行 /
+  没盖过 / 同代 / 已含都不写——稳态一个字都不写。③ `task_end` 的 `Aligned` / `Cleared` 两臂一并 `= []`，`Untouched` 不碰。
+  ④ `room_recompute::DurableAlignment { stray }`，`owed()` 多一句 `stray_generations_owed`（去掉与库上同代的；非空 = 欠，「F3 落库」）；
+  `request_for_task` 随之走 `scope_for_task`：进程内还有代号不等的 ACK → 空段定向点名；重启后没有 → 整库，盖章即清。
+  ⑤ `/dbnums.room_alignment.stray_generations`（空时不出，形状不变）。ADR-073 F3 追记改口（ensure 只发投影、边是 write-behind
+  刷盘那一刻写的）+ F3 落库追记 + D14 / W3 注 + 钉 34。
+- **验证**：`cargo test --lib` 房间 / 水位相关 18 项全绿——新 `mem://` `a_stray_generation_survives_a_restart_on_the_watermark_row_and_rearms_the_recompute`
+  （没有行 / 没盖过 / 同代不写；按 g2 刷 A2 同事务记下 `[g2]`、`failed` 为空、已含不再写；换空投影模拟重启 → `owed()` 含「F3 落库」→
+  整库 → A2 陈旧边删掉；源码钉 epilogue 与三处作废镜像）、新纯函数 `the_library_owes_a_recompute_when_the_watermark_remembers_writes_at_another_generation`；
+  `the_room_generation_stamp_follows_the_model_watermark`（种子 `['g2']`、普通窗口原样、盖章 / 清空都清）、`the_dbnum_row_carries_…`（空不出 /
+  非空多一格）、`the_tail_is_one_transaction_…`（说不了整库的任务不碰这一格）、`room_membership_is_computed_per_root_…`（epilogue 字面）改口 / 扩。
+  相关模块 627 绿 / 1 红（仍是 vendor/e3d-model 别的会话未提交的 SPAMAP 戳）；`cargo check --all-targets` 零错；rustfmt hunk 数 ≤ HEAD；
+  CRLF 一致。踩坑一条：这一版 SurrealDB 不给数组做 `+`（"Cannot perform addition with '[]' and '[…]'"），且合块事务里一句失败**不**回滚
+  其余语句、只在 `failed` 里记这一根——测试里必须断言 `failed` 为空，否则那一句悄悄没写。live 待补：`.mesh` 暂时读不出 → 点「显示模型」
+  → 恢复 → 重启 → 下一窗「库上记着盖章之后本库有根按另 1 代写过边 … F3 落库」+ 整库；稳态下那一列恒空。
+
 ### 房间定向重算：常驻代号回到旧值时中间那一代生成的根——投影里 ACK 代号不在链上的根点名重算、盖章时对齐链上 ACK、读侧一票否决（ADR-073 D13 追记 F3）
 
 - **为什么**：常驻代号是输入摘要、不单调。库上盖 g1 → 一块 PANE 的 `.mesh` 暂时读不出（重建 → g2，进保护集这一段是空段、不进账本）
