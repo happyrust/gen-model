@@ -39,8 +39,10 @@
   `the_room_generation_stamp_follows_the_model_watermark`（种子 `['g2']`、普通窗口原样、盖章 / 清空都清）、`the_dbnum_row_carries_…`（空不出 /
   非空多一格）、`the_tail_is_one_transaction_…`（说不了整库的任务不碰这一格）、`room_membership_is_computed_per_root_…`（epilogue 字面）改口 / 扩。
   相关模块 627 绿 / 1 红（仍是 vendor/e3d-model 别的会话未提交的 SPAMAP 戳）；`cargo check --all-targets` 零错；rustfmt hunk 数 ≤ HEAD；
-  CRLF 一致。踩坑一条：这一版 SurrealDB 不给数组做 `+`（"Cannot perform addition with '[]' and '[…]'"），且合块事务里一句失败**不**回滚
-  其余语句、只在 `failed` 里记这一根——测试里必须断言 `failed` 为空，否则那一句悄悄没写。live 待补：`.mesh` 暂时读不出 → 点「显示模型」
+  CRLF 一致。踩坑一条：这一版 SurrealDB 不给数组做 `+`（"Cannot perform addition with '[]' and '[…]'"）。**更正（09-19 晚）**：原记的「合块事务里一句失败不回滚
+  其余语句」是误判——用 `bin/surreal.exe`（2.1.4+45013fc9，与 SDK 同一提交、同一台执行器）在 memory 与 rocksdb 上都核过：`BEGIN … COMMIT` 里
+  任一句报错（`THROW` / 数组 `+`）整笔零提交、其余各句回「not executed due to a failed transaction」；当时看见 A2 的边照样落库，是那一版 epilogue
+  还没进同一笔事务。`publication_error_retains_the_cause_after_rollback_errors` 现在连回滚本身也钉住。测试仍要断言 `failed` 为空——否则那一句悄悄没写。live 待补：`.mesh` 暂时读不出 → 点「显示模型」
   → 恢复 → 重启 → 下一窗「库上记着盖章之后本库有根按另 1 代写过边 … F3 落库」+ 整库；稳态下那一列恒空。
 
 ### 房间定向重算：常驻代号回到旧值时中间那一代生成的根——投影里 ACK 代号不在链上的根点名重算、盖章时对齐链上 ACK、读侧一票否决（ADR-073 D13 追记 F3）

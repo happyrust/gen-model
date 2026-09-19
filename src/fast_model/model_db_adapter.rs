@@ -4124,6 +4124,29 @@ mod tests {
             "{error}"
         );
         assert!(error.to_string().contains("statement"), "{error}");
+
+        // 回滚本身也钉住：`BEGIN … COMMIT` 里一句报错——显式 `THROW` 或表达式算不出（F3 落库
+        // epilogue 当初就是数组 `+` 报的错）——前面已执行的几句一并作废。写库路径「随本组的行
+        // 同一笔事务」（房间边跟着几何走、stray 那一句跟着最后一笔）全靠这一条；memory 与
+        // rocksdb 是同一台执行器在管（2026-09-19 用 bin/surreal.exe 2.1.4+45013fc9 两边都核过）。
+        let response = db
+            .query(
+                "BEGIN TRANSACTION; CREATE publication_probe:two; \
+                 UPDATE publication_probe:two SET x = [] + ['a']; COMMIT TRANSACTION;",
+            )
+            .await
+            .expect("transaction response");
+        let error = check_publication_response(response).expect_err("must fail");
+        assert!(error.to_string().contains("addition"), "{error}");
+        let mut response = db
+            .query("SELECT * FROM publication_probe;")
+            .await
+            .expect("probe rows");
+        let rows = response.take::<Vec<Value>>(0).expect("probe rows");
+        assert!(
+            rows.is_empty(),
+            "a failed transaction must commit nothing, not even the statements before the failing one: {rows:?}"
+        );
     }
 
     /// Plant UI 的平表快路要的三件（`aabb_d` / `world_trans_d` / `insts_flat`）都在
