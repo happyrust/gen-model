@@ -1192,6 +1192,12 @@ impl E3dModelService {
         let target_dbnum = source.dbnum() as u32;
         for token in dependencies.iter().chain(tokens.clone().iter()) {
             let frozen = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
+            // 摘要故意记 sha256(commit_token_json) 而不是 `model_file_identity_digest`（路径 + 长度 +
+            // 修改时间 + 会话）：token 里全是冻结那一刻的值，同一份 token 之后重开、文件被 SAVEWORK
+            // 追加过也算得出同一个数（`initialization_target_tests::initialization_target_survives_append_…`），
+            // `room_resident` 的 room-input-cache 就靠它让没变的文件只付重开校验的钱。它与
+            // `room_read_through::target_current` 现场重算的公式对不上没关系：初始化的回执不进投影
+            // （ADR-077 D5），`target_current` 只会看到按需 / 批次那条路写的、按现场公式记的回执。
             service.frozen_file_digests.insert(
                 (frozen.dbnum() as u32, frozen.target_sesno()),
                 hex::encode(Sha256::digest(frozen.commit_token_json()?.as_bytes())),
@@ -6095,6 +6101,23 @@ mod tests {
             "same path with replaced content identity is a new target"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 初始化服务记进 `frozen_file_digests` 的是 **token 摘要**，不是现场文件身份：同一份冻结 token
+    /// 重开、文件被追加过也得算出同一个数（room-input-cache 的前提，见
+    /// `initialization_target_tests::initialization_target_survives_append_and_reopen_but_rejects_replacement`）。
+    /// 2026-09-19 差一点被改成 `model_file_identity_digest`——那会让每次 SAVEWORK 都把面板几何缓存打掉。
+    #[test]
+    fn initialization_keeps_the_token_digest_so_appends_do_not_change_the_target() {
+        let body = include_str!("e3d_model_service.rs")
+            .split_once("pub async fn from_initialization_sources(")
+            .expect("from_initialization_sources exists")
+            .1
+            .split_once("pub fn initialization_target_hash(")
+            .expect("from_initialization_sources end")
+            .0;
+        assert!(body.contains("Sha256::digest(frozen.commit_token_json()"), "{body}");
+        assert!(!body.contains("model_file_identity_digest(frozen.path()"), "{body}");
     }
 
     /// 7bde2aeea 把字典库按会话位 0 塞进 `catalogue` 之后，凡把 `session` 当真会话用的地方

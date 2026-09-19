@@ -15,7 +15,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
-use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
+use crate::data_interface::on_demand_model::{
+    ModelGenerationInProgress, ModelStaleAfterGeneration, UnresolvableRoot,
+};
 use crate::fast_model::{spatial_clearance, spatial_query, surface_clearance};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
@@ -2411,7 +2413,10 @@ fn ensure_error(error: anyhow::Error) -> ApiError {
     if error.downcast_ref::<InitializationNotReady>().is_some() {
         return ApiError::initialization_not_ready(message);
     }
-    if error.downcast_ref::<ModelGenerationInProgress>().is_some() {
+    if error.downcast_ref::<ModelGenerationInProgress>().is_some()
+        || error.downcast_ref::<ModelStaleAfterGeneration>().is_some()
+    {
+        // 两种都是「重试就好」的 409；文案不同，排障时分得开（后者说得出是源前移还是目标核对不过）。
         return ApiError::conflict(message);
     }
     match error.downcast_ref::<UnresolvableRoot>() {
@@ -3904,6 +3909,9 @@ mod tests {
             .0;
         assert!(ensure.contains("InitializationNotReady"));
         assert!(ensure.contains("initialization_not_ready"));
+        // 后验失败（生成完了却判成不新）与「正在后台生成」是两种错，都得认得出、都回 409。
+        assert!(ensure.contains("ModelGenerationInProgress"));
+        assert!(ensure.contains("ModelStaleAfterGeneration"));
     }
 
     /// 队列行只带 `blocked_by_phase`，说得出「在等哪一相」、说不出「是谁挡的」。
