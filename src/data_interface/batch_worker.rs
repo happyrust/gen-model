@@ -1894,7 +1894,8 @@ enum RoomRecomputeVerdict {
     /// （`room_recompute::scope_for_task`），反查命中的每一根都算齐了、面板级处置也写了——库上每条边都与这一代
     /// 一致，与 `WholeLibrary` 同样盖得上「整库对齐到这一代」（载荷同样是重算那台计算器的代号——定向那台就是
     /// 本任务开工冻的、准入链终点那一代，H1 2026-09-19）。不盖的话下一个任务的电平型触发看到库上代号 ≠ 常驻代号，
-    /// 照样整库扫一遍——定向就白做了。
+    /// 照样整库扫一遍——定向就白做了。空段定向（F3：库上已与常驻同代，点名的只是投影里 ACK 代号不等的根）盖的是同一个
+    /// 代号——那一格不变，变的是那几根的 ACK。
     Targeted(String),
     /// 算齐了、但说不了「整库」：`DbSet@T` 的根清单枚举不出来（覆盖面未知，只算了投影里的根——不在投影里的
     /// 根要靶着清单回读库），或点名了却没覆盖到（回读那条路按清单逐根走，这一种本不该出现）。触到的根边已
@@ -2184,7 +2185,12 @@ async fn run_room_recompute(
         RoomRecomputeScope::WholeLibrary => {
             run_room_only_recompute(job, &request.reason, result, target_sesno).await
         }
-        RoomRecomputeScope::Targeted { swaps, parked, .. } => {
+        RoomRecomputeScope::Targeted {
+            swaps,
+            parked,
+            stale_roots,
+            ..
+        } => {
             let targeted = match task_rooms {
                 Some(rooms) => {
                     run_targeted_room_recompute(
@@ -2192,6 +2198,7 @@ async fn run_room_recompute(
                         &request.reason,
                         swaps,
                         parked,
+                        stale_roots,
                         request.scope.targeted_generation(),
                         rooms,
                         result,
@@ -2246,7 +2253,9 @@ async fn run_room_recompute(
 
 /// 定向房间重算（反向传播，ADR-073 D13 反查，2026-09-17）：准入链上每一段换代的面板变化 → 各反查一次命中的根
 /// （`room_reverse::affected_roots`；段来自换代段账本，本任务自己那一次重建的、别处重建时记的都算，M1 2026-09-19），
-/// 加上别的库停放给本库的元素折成的根（`room_reverse::fold_parked`，U3 b 档）→ 只重算它们 + 面板级处置
+/// 加上别的库停放给本库的元素折成的根（`room_reverse::fold_parked`，U3 b 档），再加上准入时点名的、投影里 ACK 房间代号不在
+/// 链上的根（`stale_roots`，F3 2026-09-19：库上盖章之后中间那一代生成的，链说不了它那一代与链的差；库上已与常驻同代时链长 0、
+/// 只有这一路——空段定向）→ 只重算它们 + 面板级处置
 /// （`RootScope::Targeted`：各段的面板级语句按链序拼、末尾补要反查的面板自己的 `room_panel_relate`（F2），整串作
 /// **最后一笔**的 epilogue（F1）——改号是逐段接力的，A→B 再 B→C；停放那一路没有面板级语句——停放方的任务已按面板
 /// 写过，面板级语句天然跨库）。回 `None` = 这一路定不了、调用方退整库：树不就绪、`DbSet@T` 的根清单枚举不出来
@@ -2266,11 +2275,16 @@ async fn run_room_recompute(
 /// （`RoomRecomputeScope::targeted_generation`）——与它的代号不等就不是同一段欠账（对齐、冻、读数之间被 `/model/ensure`
 /// 换了代），定不了、退整库；此前这里新冻「此刻这一代」，中途 g2 → g3 时按 g3 算只有 g1 → g2 命中的根、盖 g3，
 /// g2 → g3 动的面板命中的根从此永久陈旧、③ 哑掉。
+///
+/// **盖章那一刻把链上的 ACK 一并对齐**（F3）：投影里 ACK 房间代号在链上任一代、又没被命中的根，它那一代到链尾之间面板动了什么
+/// 各段都反查过、没命中就是边没变——与库上那一格说的是同一句话，`model_db_adapter::align_room_acks_along_chain` 把它们的代号
+/// 对齐到链尾。此后本库「ACK ≠ 库上代号」只剩一种含义：盖章之后另一代写的；下一个任务凭它点名、读侧凭它一票否决。
 async fn run_targeted_room_recompute(
     job: &FrozenBatch,
     reason: &str,
     swaps: &[crate::data_interface::room_recompute::PanelSwap],
     parked: &[crate::data_interface::room_reverse::RoomRoots],
+    stale_roots: &[e3d_io::refno::RefNo],
     expected_generation: Option<&str>,
     rooms: &std::sync::Arc<crate::fast_model::room_model::MemoryRoomCalculator>,
     result: &mut DataBatchTaskResult,
@@ -2280,8 +2294,8 @@ async fn run_targeted_room_recompute(
         AffectedRoots, ReverseLookup, affected_roots, fold_parked, park_foreign_hits,
     };
     use crate::fast_model::model_db_adapter::{
-        PersistTarget, RootScope, recompute_dbnum_room_edges, render_panel_delta_statements,
-        render_recalc_panel_topology_statements,
+        PersistTarget, RootScope, align_room_acks_along_chain, recompute_dbnum_room_edges,
+        render_panel_delta_statements, render_recalc_panel_topology_statements,
     };
     let dbnum = job.dbnum;
     // 一台计算器、一段欠账：准入链的终点必须就是这台的代号。
@@ -2479,11 +2493,12 @@ async fn run_targeted_room_recompute(
             println!("dbnum={dbnum} 定向房间重算：{line}");
         }
     }
-    // 两路的根并起来（去重、按打包 refno 序）：各段反查命中的 + 停放链折出的。
+    // 三路的根并起来（去重、按打包 refno 序）：各段反查命中的 + 停放链折出的 + 准入时点名的 ACK 代号不在链上的（F3）。
     let mut roots: Vec<e3d_io::refno::RefNo> = affected
         .roots
         .iter()
         .chain(parked_roots.iter())
+        .chain(stale_roots.iter())
         .copied()
         .collect();
     roots.sort_by_key(|root| crate::fast_model::model_memory_store::packed_refno(*root));
@@ -2516,27 +2531,30 @@ async fn run_targeted_room_recompute(
     {
         Ok(report) => {
             println!(
-                "dbnum={dbnum} 定向房间重算完成（触发：{reason}；计算器 {}（本任务开工冻的）；换代段 {} 段 {}；反查 {}（{}）；停放链 {} 段 {} 个元素 → {} 根）：根 {}/{} 重算（投影里 {}、回读库 {}：读回几何 {} 条、{}ms）、面板级语句 {}、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
+                "dbnum={dbnum} 定向房间重算完成（触发：{reason}；计算器 {}（本任务开工冻的）；换代段 {} 段 {}；反查 {}（{}）；停放链 {} 段 {} 个元素 → {} 根；ACK 代号不在链上点名 {} 根）：根 {}/{} 重算（投影里 {}、回读库 {}：读回几何 {} 条、{}ms）、面板级语句 {}、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
                 rooms
                     .resident_generation()
                     .chars()
                     .take(12)
                     .collect::<String>(),
                 swaps.len(),
-                if swaps.is_empty() {
-                    "无（欠账全在停放链上）".to_string()
-                } else {
+                if !swaps.is_empty() {
                     swaps
                         .iter()
                         .map(|swap| swap.summary())
                         .collect::<Vec<_>>()
                         .join("、")
+                } else if parked.is_empty() {
+                    "无（库上已与常驻同代，欠账只有点名的根——空段定向）".to_string()
+                } else {
+                    "无（欠账全在停放链上）".to_string()
                 },
                 affected.summary(),
                 affected.durable_timing(),
                 parked.len(),
                 parked_elements,
                 parked_roots.len(),
+                stale_roots.len(),
                 report.recomputed,
                 report.roots,
                 report.projected_roots,
@@ -2565,6 +2583,28 @@ async fn run_targeted_room_recompute(
             let generation = rooms.resident_generation().to_string();
             match room_recompute_uncovered(Some(&roots), &report.covered_roots) {
                 Some(uncovered) if uncovered.is_empty() => {
+                    // 盖章的那一刻，投影里 ACK 代号在链上任一代、没被命中的根一并对齐到链尾（F3）：它那一代到这一代之间
+                    // 面板动了什么各段都反查过，没命中就是边没变——与库上那一格是同一句话。此后本库「ACK ≠ 库上代号」只剩
+                    // 「盖章之后另一代写的」一种含义，下一个任务凭它点名、读侧凭它一票否决。
+                    let on_chain: std::collections::BTreeSet<String> = swaps
+                        .iter()
+                        .flat_map(|swap| [&swap.from_generation, &swap.to_generation])
+                        .chain(
+                            parked
+                                .iter()
+                                .flat_map(|entry| [&entry.from_generation, &entry.to_generation]),
+                        )
+                        .chain(std::iter::once(&generation))
+                        .cloned()
+                        .collect();
+                    let aligned = align_room_acks_along_chain(store, dbnum, &on_chain, &generation);
+                    if aligned > 0 {
+                        println!(
+                            "dbnum={dbnum} 定向房间重算：链上 {} 代、没命中的 {aligned} 根 ACK 房间代号一并对齐到 {}（边没变，与库上那一格同一句话）",
+                            on_chain.len(),
+                            generation.chars().take(12).collect::<String>()
+                        );
+                    }
                     Some(RoomRecomputeVerdict::Targeted(generation))
                 }
                 _ => {
@@ -2866,6 +2906,10 @@ async fn execute_model_only_body(
         crate::data_interface::room_recompute::parked_for_task(job.dbnum, alignment.as_ref());
     // 换代段账本（M1）：本进程每一次常驻重建记下的 `from → to → 面板变化`，库上欠着才取来接准入链。
     let swaps = crate::data_interface::room_recompute::swaps_for_task(alignment.as_ref());
+    // 投影里本库每一根 ACK 的房间代号（F3）：库上已与常驻同代时，代号不等的根就是欠账本身（盖章之后中间那一代
+    // `/model/ensure` 生成的），点名走空段定向；链接得通时，代号不在链上的根一并点名。
+    let acked =
+        crate::data_interface::room_recompute::acked_roots_for_task(job.dbnum, alignment.as_ref());
 
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
@@ -2930,6 +2974,7 @@ async fn execute_model_only_body(
             alignment.as_ref(),
             &swaps,
             &parked,
+            &acked,
         )
     };
 
@@ -3341,6 +3386,10 @@ async fn execute_frozen_batch_body(
         crate::data_interface::room_recompute::parked_for_task(job.dbnum, alignment.as_ref());
     // 换代段账本（M1）：本进程每一次常驻重建记下的 `from → to → 面板变化`，库上欠着才取来接准入链。
     let swaps = crate::data_interface::room_recompute::swaps_for_task(alignment.as_ref());
+    // 投影里本库每一根 ACK 的房间代号（F3）：库上已与常驻同代时，代号不等的根就是欠账本身（盖章之后中间那一代
+    // `/model/ensure` 生成的），点名走空段定向；链接得通时，代号不在链上的根一并点名。
+    let acked =
+        crate::data_interface::room_recompute::acked_roots_for_task(job.dbnum, alignment.as_ref());
 
     // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
     // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
@@ -3472,6 +3521,7 @@ async fn execute_frozen_batch_body(
             alignment.as_ref(),
             &swaps,
             &parked,
+            &acked,
         )
     };
 

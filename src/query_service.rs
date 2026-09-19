@@ -80,6 +80,12 @@ async fn read_room_memberships(
 ///
 /// 两层用的是同一个代号（`ResidentRoomModel::input_version`），所以判据也是同一句：房间 / 面板
 /// 真变过 → 代号变 → 两层同时作废，回 `not_computed` 而不是拿上一代的边冒充这一版的结论。
+///
+/// **进程内有 ACK 而代号不是这一代 = 一票否决**（F3，2026-09-19）：常驻代号是输入摘要、不单调——库上 g1、一块面板
+/// 的 `.mesh` 暂时读不出（→ g2）、期间 `/model/ensure` 按 g2 生成了这根、`.mesh` 恢复（→ g1）：库上 g1 == 常驻 g1，
+/// 第 2 层却替一根边是 g2 算的根说了「就绪」。定向 / 整库盖章时链上的 ACK 都已对齐到盖的那一代
+/// （`model_db_adapter::align_room_acks_along_chain`），所以「ACK ≠ 常驻」在库上与常驻同代时只剩「盖章之后另一代写的」
+/// 一种含义——第 2 层替不了它，回 `not_computed`，下一个任务的空段定向（`room_recompute::scope_for_task`）点名重算它。
 fn room_calculation_status(
     memberships: usize,
     dbnum: u32,
@@ -119,11 +125,17 @@ fn room_calculation_status(
         crate::fast_model::model_memory_store::ProjectionScope::Current,
         root,
     );
-    let published_here = ack.is_some_and(|ack| {
-        ack.dbnum == dbnum
-            && ack.room_membership
-            && ack.room_generation.as_deref() == Some(generation.as_str())
-    });
+    let process_ack = match ack {
+        None => ProcessAck::Missing,
+        Some(ack)
+            if ack.dbnum == dbnum
+                && ack.room_membership
+                && ack.room_generation.as_deref() == Some(generation.as_str()) =>
+        {
+            ProcessAck::Current
+        }
+        Some(_) => ProcessAck::Stale,
+    };
     // 本进程试过这根、没成（ADR-079 账本里还悬着）：库上那一版边是上一版的，库级承诺也救不了它
     // ——与 `model_coverage::root_credential_covers` 的一票否决同一条纪律。
     let chasing_here = crate::data_interface::model_root_ledger::entry(
@@ -132,7 +144,7 @@ fn room_calculation_status(
     )
     .is_some_and(|entry| !entry.is_settled());
     if !room_edges_ready(
-        published_here,
+        process_ack,
         chasing_here,
         library_room_alignment_is_current(library_room_generation),
     ) {
@@ -145,10 +157,28 @@ fn room_calculation_status(
     }
 }
 
-/// 两层判据合成的那一句（[`room_calculation_status`]）：本进程完整发布过这根，或库上整库对齐这一层
-/// 此刻成立、且本进程没有替这根欠着账。
-fn room_edges_ready(published_here: bool, chasing_here: bool, aligned_on_store: bool) -> bool {
-    published_here || (!chasing_here && aligned_on_store)
+/// 进程内这根的 ACK 对此刻常驻代号说什么（[`room_calculation_status`] 的第 1 层）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessAck {
+    /// 本进程没有这根的 ACK（rocksdb 冷重启后的常态）：由库上那一层作答。
+    Missing,
+    /// 本进程完整发布过这根，且 ACK 的房间代号就是此刻常驻这一代：最强的一句话。
+    Current,
+    /// 本进程有这根的 ACK，房间代号却不是此刻常驻这一代（或发布时没算房间）：它的边是另一代算的，库上那一格替不了它
+    /// 说话（F3 2026-09-19 一票否决）——库上与常驻同代时这枚 ACK 只可能是盖章之后中间那一代写的（盖章时链上的 ACK 都已
+    /// 对齐到盖的那一代），下一个任务会点名重算它。
+    Stale,
+}
+
+/// 两层判据合成的那一句（[`room_calculation_status`]）：本进程完整发布过这根（`Current`），或本进程没有它的 ACK
+/// （`Missing`）而库上整库对齐这一层此刻成立、且本进程没有替这根欠着账；本进程替它记着另一代的 ACK（`Stale`）
+/// 一票否决，库上那一层再对也不算。
+fn room_edges_ready(ack: ProcessAck, chasing_here: bool, aligned_on_store: bool) -> bool {
+    match ack {
+        ProcessAck::Current => true,
+        ProcessAck::Stale => false,
+        ProcessAck::Missing => !chasing_here && aligned_on_store,
+    }
 }
 
 /// 此刻常驻房间模型这一代（`ResidentRoomModel::input_version`，ADR-073 D12）；`None` = 房间体制
@@ -1293,18 +1323,28 @@ mod tests {
     }
 
     /// ADR-073 D14：进程内没有这根的 ACK 时（rocksdb 冷重启后这是常态）由库上那一格接住；
-    /// 本进程知道这根还欠着时，库级承诺也救不了它（ADR-079 的一票否决）。
+    /// 本进程知道这根还欠着时，库级承诺也救不了它（ADR-079 的一票否决）；本进程替这根记着**另一代**的 ACK
+    /// （F3，2026-09-19：库上盖章之后中间那一代 `/model/ensure` 生成的）同样一票否决——它的边是另一代算的，
+    /// 库上那一格替不了它说话。
     #[test]
     fn the_durable_alignment_answers_for_roots_this_process_never_published() {
-        // 进程内有 ACK：库上那一层说什么都不影响结论。
+        // 进程内有这一代的 ACK：库上那一层说什么都不影响结论。
         for aligned in [false, true] {
-            assert!(room_edges_ready(true, false, aligned));
+            assert!(room_edges_ready(ProcessAck::Current, false, aligned));
         }
         // 没有 ACK：库上整库对齐这一层成立就够了——边与模型行同事务落库（D1），水位盖过就都在库里。
-        assert!(room_edges_ready(false, false, true));
-        assert!(!room_edges_ready(false, false, false));
+        assert!(room_edges_ready(ProcessAck::Missing, false, true));
+        assert!(!room_edges_ready(ProcessAck::Missing, false, false));
         // 本进程试过这根、没成：那一版边是上一版的，两层都不算数。
-        assert!(!room_edges_ready(false, true, true));
+        assert!(!room_edges_ready(ProcessAck::Missing, true, true));
+        // F3：有 ACK 但代号不是这一代——库上那一层成立、账本没欠着也不算：这一层「对齐」说的是链上的边，这枚 ACK
+        // 正是盖章之后另一代写的证据。
+        for (chasing, aligned) in [(false, true), (false, false), (true, true), (true, false)] {
+            assert!(
+                !room_edges_ready(ProcessAck::Stale, chasing, aligned),
+                "chasing={chasing} aligned={aligned}"
+            );
+        }
     }
 
     /// 第 2 层自己的判据：落盘形态 + 库上那一格与此刻常驻模型同一代。代号对不上 = 房间 / 面板
@@ -1341,6 +1381,14 @@ mod tests {
         assert!(status.contains("publication_ack("), "{status}");
         assert!(status.contains("room_edges_ready("), "{status}");
         assert!(status.contains("model_root_ledger::entry("), "{status}");
+        // F3：ACK 三态都要接到判据上——有 ACK 而代号不等不许退成「没有 ACK」再由库上那一层放行。
+        for state in [
+            "ProcessAck::Missing",
+            "ProcessAck::Current",
+            "ProcessAck::Stale",
+        ] {
+            assert!(status.contains(state), "{state}: {status}");
+        }
         let room = source
             .split_once("async fn room(&self")
             .expect("room query exists")

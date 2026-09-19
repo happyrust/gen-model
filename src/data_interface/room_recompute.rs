@@ -40,6 +40,13 @@
 //! （[`durable_alignment`] 收它的代号），自己那一段的 `Rebuilt.generation` 不等于它 → 整库；收尾那一步再对一次
 //! （`batch_worker::run_targeted_room_recompute`）。此前收尾新冻一台「此刻这一代」——scope 按 g2 定、边按 g3 算、盖 g3，
 //! 中途 g2 → g3 动的面板命中的根从此永久陈旧、③ 哑掉；整库那一路不受影响（每一根都算），照旧新冻。
+//! **ACK 代号不在链上的根（F3，2026-09-19）**：常驻代号是输入摘要、不单调——一块 PANE 的 `.mesh` 暂时读不出（重建 → g2，进保护集
+//! 这一段是空段、不进账本）、期间 `/model/ensure` 按 g2 生成了几根（P 不在索引，进 P 的根拿不到 P 的边）、`.mesh` 恢复（重建 → g1，
+//! 摘要同值）：库上 g1 == 常驻 g1，③ 不欠、账本没段，那几根的边却是 g2 算的。投影里本库每一枚 ACK 的房间代号（[`acked_roots_for_task`]）
+//! 是这一段的证据：库上已与常驻同代时，代号 ≠ 常驻的根就是欠账本身——点名它们走**空段定向**
+//! （`Targeted { swaps: [], parked: [], stale_roots }`，[`scope_for_task`]）；库上欠着、链接得通时，代号不在链上任一代的根一并点名
+//! （它那一代与链的差链说不了）。定向成功盖章那一刻把代号在链上的 ACK 一并对齐到链尾（`model_db_adapter::align_room_acks_along_chain`），
+//! 此后本库「ACK ≠ 库上代号」只剩一种含义——盖章之后另一代写的，读侧 `query_service::room_edges_ready` 拿它一票否决。
 //! 算不出的根按 D2 记失败、`model_sesno` 不盖。**覆盖面要自证**：投影只装本进程生成过的根——
 //! 初始化的模型行不进投影（ADR-077 D5），落盘形态冷重启后投影是空的——回读库补的正是这一半；重算完
 //! 拿回执里覆盖到的根对一遍清单，每一根都在才说「整库」、durable 侧那一格「整库对齐到这一代」才盖；
@@ -49,7 +56,10 @@
 
 use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
 use crate::data_interface::room_reverse::RoomRoots;
+use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope, packed_refno};
 use crate::fast_model::room_resident::RoomReferenceRefresh;
+use e3d_io::refno::RefNo;
+use std::collections::BTreeSet;
 
 /// 房间定义族：房间节点（FRMW / SBFR）、`project_hd` 的容器（CWALL / CFLOOR）、面板本体（PANE）。
 /// 与 `room_topology::RoomHierarchy` 两种口径的并集——按 noun 判，不分口径：不在本项目层级里的
@@ -194,6 +204,10 @@ pub(crate) enum RoomRecomputeScope {
         swaps: Vec<PanelSwap>,
         /// 别的库停放给本库的（链序）。随 U3-3 接进准入链、U3-4 消费。
         parked: Vec<RoomRoots>,
+        /// 投影里 ACK 的房间代号**不在准入链上任一代**的根（F3，2026-09-19；打包 refno 序、去重）：它们的边是链外那一代算的
+        /// （库上盖章之后中间那一代 `/model/ensure` 生成的，那一段是空段没进账本），链上各段的反查说不了它那一代与链的差，
+        /// 点名重算。库上已与常驻同代时链长 0，这一格就是欠账的全部（`swaps` / `parked` 都空——空段定向）。
+        stale_roots: Vec<RefNo>,
         /// 准入链的终点 = 本任务冻的计算器代号（`DurableAlignment::resident`）：收尾的定向重算拿它对那台计算器，
         /// 不等就不是同一段欠账、退整库（H1）。
         generation: String,
@@ -224,13 +238,83 @@ enum ChainSegment<'a> {
     Parked(&'a RoomRoots),
 }
 
-impl ChainSegment<'_> {
-    fn to_generation(&self) -> &str {
+impl<'a> ChainSegment<'a> {
+    fn from_generation(&self) -> &'a str {
+        match self {
+            Self::Swap(swap) => &swap.from_generation,
+            Self::Parked(entry) => &entry.from_generation,
+        }
+    }
+
+    fn to_generation(&self) -> &'a str {
         match self {
             Self::Swap(swap) => &swap.to_generation,
             Self::Parked(entry) => &entry.to_generation,
         }
     }
+}
+
+/// 投影里本库一根的 ACK 说它的边是哪一代算的（F3 的证据，[`acked_roots`]）：`room_generation` = `Some(代号)`
+/// （发布时算了房间、ACK 带代号）；`None` = 发布时没算房间（开关关着 / 计算器没在）——同样不是常驻这一代算的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AckedRoot {
+    pub root: RefNo,
+    pub room_generation: Option<String>,
+}
+
+/// 投影里本库每一根的 ACK 房间代号（F3）：只收「回执与 ACK 对得上」的根——候选前移了的（在途重生成）由它自己的刷盘另记
+/// 新 ACK，点名它是白算一次；`evict_missing_root` 之后只剩 ACK 没回执的（源上已没有的根）也不收。打包 refno 序（`roots()` 的序）。
+pub(crate) fn acked_roots(store: &ModelMemoryStore, dbnum: u32) -> Vec<AckedRoot> {
+    let scope = ProjectionScope::Current;
+    store
+        .roots(scope)
+        .into_iter()
+        .filter(|root| root.dbno() == dbnum)
+        .filter_map(|root| {
+            let receipt = store.receipt(scope, root)?;
+            let ack = store.publication_ack(scope, root)?;
+            if ack.dbnum != dbnum || !ack.matches(&receipt) {
+                return None;
+            }
+            Some(AckedRoot {
+                root,
+                room_generation: if ack.room_membership {
+                    ack.room_generation
+                } else {
+                    None
+                },
+            })
+        })
+        .collect()
+}
+
+/// [`acked_roots`] 的执行体取数：两个执行体在读过库上那一格之后调。说不出常驻代号 / 库上那一格读不出（`alignment` 为 `None`）
+/// 就没有可比对的目标，不取。
+pub(crate) fn acked_roots_for_task(
+    dbnum: u32,
+    alignment: Option<&DurableAlignment>,
+) -> Vec<AckedRoot> {
+    if alignment.is_none() {
+        return Vec::new();
+    }
+    acked_roots(ModelMemoryStore::global(), dbnum)
+}
+
+/// ACK 房间代号不在 `on_chain` 里任一代的根（没算房间的 `None` 也算），打包 refno 序、去重。
+fn stale_acked_roots(acked: &[AckedRoot], on_chain: &BTreeSet<&str>) -> Vec<RefNo> {
+    let mut stale: Vec<RefNo> = acked
+        .iter()
+        .filter(|entry| {
+            !entry
+                .room_generation
+                .as_deref()
+                .is_some_and(|generation| on_chain.contains(generation))
+        })
+        .map(|entry| entry.root)
+        .collect();
+    stale.sort_by_key(|root| packed_refno(*root));
+    stale.dedup();
+    stale
 }
 
 /// 定向准入（纯函数，链式）。只有「库上那一代 → 本任务冻的计算器这一代之间，面板动了什么本进程**全知道**」时才定向：
@@ -246,28 +330,47 @@ impl ChainSegment<'_> {
 ///
 /// 其余都整库：库上从没盖过（欠的不止这几段，diff 说不了）、常驻说不出代号、账本与槽都接不出链（重启后都丢了）、
 /// 换了代而面板变化为空的那一段没进账本（换代另有原因，例如关键字——这一段接不上）、库上已是这一代却被问到
-/// （规划器排了 `RoomOnly`）。
+/// （规划器排了 `RoomOnly`）而投影里没有一枚代号不等的 ACK。
+///
+/// **`acked` 是投影里本库每一根 ACK 的房间代号（F3，2026-09-19）**：库上已与常驻同代时，代号 ≠ 这一代的根就是欠账本身
+/// （盖章之后中间那一代 `/model/ensure` 生成的——那一段是空段没进账本、③ 又不欠），点名它们走空段定向；链接得通时，代号不在
+/// 链上任一代的根一并点名——链上各段说的是「这几代之间面板动了什么」，它那一代与链的差链说不了。代号在链上的根不点名：它那一代
+/// 到链尾之间面板动了什么各段都反查过，没命中就是边没变。
 pub(crate) fn scope_for_task(
     library_generation: Option<&str>,
     resident_generation: Option<&str>,
     swaps: &[PanelSwap],
     parked: &[RoomRoots],
+    acked: &[AckedRoot],
 ) -> RoomRecomputeScope {
     let (Some(library), Some(resident)) = (library_generation, resident_generation) else {
         return RoomRecomputeScope::WholeLibrary;
     };
     if library == resident {
-        // 库上已是这一代：不欠；问到这里的（规划器排了 `RoomOnly`）按整库办，与今天同。
-        return RoomRecomputeScope::WholeLibrary;
+        // 库上已是这一代：链上没有欠账。投影里 ACK 代号 ≠ 这一代的根是唯一说得清的欠账（F3）——只算它们；一根都没有
+        // 而被问到（规划器排了 `RoomOnly` / 本任务刚换回这一代）按整库办，与今天同。
+        let stale_roots = stale_acked_roots(acked, &BTreeSet::from([resident]));
+        if stale_roots.is_empty() {
+            return RoomRecomputeScope::WholeLibrary;
+        }
+        return RoomRecomputeScope::Targeted {
+            swaps: Vec::new(),
+            parked: Vec::new(),
+            stale_roots,
+            generation: resident.to_owned(),
+        };
     }
-    let mut visited = std::collections::BTreeSet::new();
+    let mut visited = BTreeSet::new();
     let mut path: Vec<ChainSegment<'_>> = Vec::new();
     if !walk_chain(library, resident, swaps, parked, &mut visited, &mut path) {
         return RoomRecomputeScope::WholeLibrary;
     }
+    let mut on_chain: BTreeSet<&str> = BTreeSet::from([library, resident]);
     let mut used_swaps = Vec::new();
     let mut used_parked = Vec::new();
     for segment in path {
+        on_chain.insert(segment.from_generation());
+        on_chain.insert(segment.to_generation());
         match segment {
             ChainSegment::Swap(swap) => used_swaps.push(swap.clone()),
             ChainSegment::Parked(entry) => used_parked.push(entry.clone()),
@@ -276,6 +379,7 @@ pub(crate) fn scope_for_task(
     RoomRecomputeScope::Targeted {
         swaps: used_swaps,
         parked: used_parked,
+        stale_roots: stale_acked_roots(acked, &on_chain),
         generation: resident.to_owned(),
     }
 }
@@ -351,15 +455,18 @@ pub(crate) fn parked_for_task(dbnum: u32, alignment: Option<&DurableAlignment>) 
 }
 
 /// 这个任务要不要跑房间重算、为什么、算多大。三条触发合成一句：规划器排的 `RoomOnly` 工作项
-/// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`DurableAlignment::owed`]）。
-/// 都没有 = `None`。范围由 [`scope_for_task`] 定（账本里的换代段 `swaps` + 停放链 `parked`）；定向里接了哪几段，
-/// 原因各多一句。
+/// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`DurableAlignment::owed`]）；第四句是
+/// F3——投影里有 ACK 房间代号不在准入链上的根（`acked`，[`acked_roots_for_task`]），库上与常驻同代、前三条都没点亮时
+/// 单独也触发（空段定向）。都没有 = `None`。范围由 [`scope_for_task`] 定（账本里的换代段 `swaps` + 停放链 `parked` +
+/// 点名的 `stale_roots`）；库上已与常驻同代却被 ①/② 问到仍按整库办——它们说不出欠什么，整库覆盖 F3 点名的那几根。
+/// 定向里接了哪几段、点名了几根，原因各多一句。
 pub(crate) fn request_for_task(
     side_actions: &[ModelWorkItem],
     refresh: Option<&RoomReferenceRefresh>,
     alignment: Option<&DurableAlignment>,
     swaps: &[PanelSwap],
     parked: &[RoomRoots],
+    acked: &[AckedRoot],
 ) -> Option<RoomRecomputeRequest> {
     let mut reasons = Vec::new();
     if side_actions
@@ -384,21 +491,39 @@ pub(crate) fn request_for_task(
     if let Some(owed) = alignment.and_then(DurableAlignment::owed) {
         reasons.push(owed);
     }
-    if reasons.is_empty() {
-        return None;
-    }
-    let scope = scope_for_task(
-        alignment.and_then(|alignment| alignment.library.as_deref()),
-        alignment.map(|alignment| alignment.resident.as_str()),
-        swaps,
-        parked,
-    );
+    // 库上已与常驻同代却被 ①/② 问到：它们说不出欠什么，整库（与今天同；F3 点名的根整库也覆盖）。其余由准入链定，
+    // 投影里 ACK 代号不在链上的根一并点名（F3）——库上与常驻同代、前三条都没点亮时，它单独就是一条触发。
+    let library_current = alignment.is_some_and(|alignment| alignment.owed().is_none());
+    let scope = if library_current && !reasons.is_empty() {
+        RoomRecomputeScope::WholeLibrary
+    } else {
+        scope_for_task(
+            alignment.and_then(|alignment| alignment.library.as_deref()),
+            alignment.map(|alignment| alignment.resident.as_str()),
+            swaps,
+            parked,
+            acked,
+        )
+    };
     if let RoomRecomputeScope::Targeted {
         swaps: used_swaps,
         parked: used,
+        stale_roots,
         ..
     } = &scope
     {
+        if !stale_roots.is_empty() {
+            reasons.push(format!(
+                "投影里 {} 根的 ACK 房间代号不在准入链上（库上盖章之后中间那一代生成的，F3），点名重算：例如 {}",
+                stale_roots.len(),
+                stale_roots
+                    .iter()
+                    .take(5)
+                    .map(RefNo::to_string)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
         if !used_swaps.is_empty() {
             reasons.push(format!(
                 "沿换代段账本接了 {} 段：{}",
@@ -421,6 +546,9 @@ pub(crate) fn request_for_task(
             ));
         }
     }
+    if reasons.is_empty() {
+        return None;
+    }
     Some(RoomRecomputeRequest {
         reason: reasons.join("；"),
         scope,
@@ -431,7 +559,6 @@ pub(crate) fn request_for_task(
 mod tests {
     use super::*;
     use crate::fast_model::room_resident::PanelDelta;
-    use e3d_io::refno::RefNo;
     use e3d_model::ledger::{ChangeKind, LedgerEntry};
 
     fn entry(noun: &str, kind: ChangeKind, id: u32) -> LedgerEntry {
@@ -575,6 +702,13 @@ mod tests {
             let swaps = body
                 .find("room_recompute::swaps_for_task(alignment.as_ref())")
                 .unwrap_or_else(|| panic!("{label}: 换代段账本（M1）按库上那一格取: {body}"));
+            // F3（2026-09-19）：投影里本库每一根 ACK 的房间代号也在读过库上那一格之后取、喂给 `request_for_task`——
+            // 库上已与常驻同代时代号不等的根就是欠账本身（空段定向），链接得通时代号不在链上的根一并点名。
+            let acked = body
+                .find("room_recompute::acked_roots_for_task(job.dbnum, alignment.as_ref())")
+                .unwrap_or_else(|| {
+                    panic!("{label}: 投影里 ACK 的房间代号（F3）按库上那一格取: {body}")
+                });
             let request = body
                 .find("room_recompute::request_for_task(")
                 .unwrap_or_else(|| panic!("{label}: request_for_task"));
@@ -583,14 +717,16 @@ mod tests {
                     && frozen < owed
                     && owed < parked
                     && parked < swaps
-                    && swaps < request,
-                "{label}: 对齐 → 冻计算器 → 读库上那一格 → 取停放链 → 取账本 → 合成三条触发，顺序不能乱"
+                    && swaps < acked
+                    && acked < request,
+                "{label}: 对齐 → 冻计算器 → 读库上那一格 → 取停放链 → 取账本 → 取 ACK 代号 → 合成触发，顺序不能乱"
             );
             assert!(
                 body.contains("alignment.as_ref(),")
                     && body.contains("&swaps,")
-                    && body.contains("&parked,"),
-                "{label}: 库上那一格、账本段与停放链要真的传进 request_for_task（第三条触发与定向准入都从它出发）: {body}"
+                    && body.contains("&parked,")
+                    && body.contains("&acked,"),
+                "{label}: 库上那一格、账本段、停放链与 ACK 代号要真的传进 request_for_task（三条触发、定向准入与 F3 点名都从它出发）: {body}"
             );
             assert!(
                 body.contains("room_calculator: rooms.frozen().cloned(),"),
@@ -680,7 +816,7 @@ mod tests {
     #[test]
     fn a_task_recomputes_rooms_on_either_trigger() {
         let item = room_only_work_item(7997, "DESI", 163);
-        assert!(request_for_task(&[], None, None, &[], &[]).is_none());
+        assert!(request_for_task(&[], None, None, &[], &[], &[]).is_none());
         assert!(
             request_for_task(
                 &[],
@@ -697,6 +833,7 @@ mod tests {
                 None,
                 &[],
                 &[],
+                &[],
             )
             .is_none(),
             "文件前进但房间 / 面板没变：代号不变，不重算"
@@ -708,11 +845,13 @@ mod tests {
                 Some(&alignment(Some("g"), "g")),
                 &[],
                 &[],
+                &[],
             )
             .is_none(),
             "库上与常驻同一代：不欠"
         );
-        let planned = request_for_task(std::slice::from_ref(&item), None, None, &[], &[]).unwrap();
+        let planned =
+            request_for_task(std::slice::from_ref(&item), None, None, &[], &[], &[]).unwrap();
         assert!(planned.reason.contains("房间定义族"), "{planned:?}");
         assert_eq!(planned.scope, RoomRecomputeScope::WholeLibrary);
         let swapped = request_for_task(
@@ -730,6 +869,7 @@ mod tests {
             None,
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert!(
@@ -737,8 +877,15 @@ mod tests {
             "{swapped:?}"
         );
         // 第三条：库上欠着，原因原样带进来；单独一条也触发。
-        let owed =
-            request_for_task(&[], None, Some(&alignment(Some("old"), "new")), &[], &[]).unwrap();
+        let owed = request_for_task(
+            &[],
+            None,
+            Some(&alignment(Some("old"), "new")),
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
         assert!(owed.reason.contains("old ≠ 此刻常驻代号 new"), "{owed:?}");
         assert_eq!(owed.scope, RoomRecomputeScope::WholeLibrary);
         let all = request_for_task(
@@ -754,6 +901,7 @@ mod tests {
                 elapsed_ms: 1,
             }),
             Some(&alignment(None, "new")),
+            &[],
             &[],
             &[],
         )
@@ -798,10 +946,11 @@ mod tests {
         let targeted = RoomRecomputeScope::Targeted {
             swaps: vec![own.clone()],
             parked: Vec::new(),
+            stale_roots: Vec::new(),
             generation: "g2".into(),
         };
         assert_eq!(
-            scope_for_task(Some("g1"), Some("g2"), &[own.clone()], &[]),
+            scope_for_task(Some("g1"), Some("g2"), &[own.clone()], &[], &[]),
             targeted,
             "库上 g1、冻 g2、账本 g1 → g2：定向，带着这一段的面板变化"
         );
@@ -847,7 +996,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                scope_for_task(library, resident, &ledger, &[]),
+                scope_for_task(library, resident, &ledger, &[], &[]),
                 RoomRecomputeScope::WholeLibrary,
                 "{label}"
             );
@@ -855,23 +1004,36 @@ mod tests {
         // M1：账本里有 g2 → g3（ensure 重建时记的）就接上——两段都反查、按冻的 g3 算。
         let ensure = swap("g2", "g3", delta.clone());
         assert_eq!(
-            scope_for_task(Some("g1"), Some("g3"), &[own.clone(), ensure.clone()], &[]),
+            scope_for_task(
+                Some("g1"),
+                Some("g3"),
+                &[own.clone(), ensure.clone()],
+                &[],
+                &[]
+            ),
             RoomRecomputeScope::Targeted {
                 swaps: vec![own.clone(), ensure.clone()],
                 parked: Vec::new(),
+                stale_roots: Vec::new(),
                 generation: "g3".into(),
             },
             "对齐与冻之间换的那一代账本里有：两段接起来定向"
         );
         // 账本里的段不分谁记的：本任务 `Unchanged`（ensure 先重建了），库上 g1、冻 g2、账本 g1 → g2 → 定向。
         assert_eq!(
-            scope_for_task(Some("g1"), Some("g2"), &[ensure.clone(), own.clone()], &[]),
+            scope_for_task(
+                Some("g1"),
+                Some("g2"),
+                &[ensure.clone(), own.clone()],
+                &[],
+                &[]
+            ),
             targeted,
             "谁重建谁记，谁来接都接得上（M1）"
         );
         // 库上已是这一代：不欠；问到这里的（规划器排了 `RoomOnly`）按整库办。
         assert_eq!(
-            scope_for_task(Some("g2"), Some("g2"), &[own.clone()], &[]),
+            scope_for_task(Some("g2"), Some("g2"), &[own.clone()], &[], &[]),
             RoomRecomputeScope::WholeLibrary
         );
         // `request_for_task` 把范围带上：三条触发同时点亮（规划器 + 换代 + ③）仍是定向，多一句说接了哪几段。
@@ -890,6 +1052,7 @@ mod tests {
             }),
             Some(&alignment(Some("g1"), "g2")),
             &[own.clone()],
+            &[],
             &[],
         )
         .unwrap();
@@ -927,10 +1090,11 @@ mod tests {
 
         // 只停放链：本任务没换代，库上 g1，停放 g1→g2，冻 g2。
         assert_eq!(
-            scope_for_task(Some("g1"), Some("g2"), &[], &[g1_g2.clone()]),
+            scope_for_task(Some("g1"), Some("g2"), &[], &[g1_g2.clone()], &[]),
             RoomRecomputeScope::Targeted {
                 swaps: Vec::new(),
                 parked: vec![g1_g2.clone()],
+                stale_roots: Vec::new(),
                 generation: "g2".into(),
             }
         );
@@ -940,31 +1104,47 @@ mod tests {
             Some("g3"),
             &[swap("g2", "g3", delta.clone())],
             &[g1_g2.clone()],
+            &[],
         );
         assert_eq!(
             chained,
             RoomRecomputeScope::Targeted {
                 swaps: vec![swap("g2", "g3", delta.clone())],
                 parked: vec![g1_g2.clone()],
+                stale_roots: Vec::new(),
                 generation: "g3".into(),
             }
         );
         assert_eq!(chained.targeted_generation(), Some("g3"));
         // 两段停放接起来：库上 g1，停放 g1→g2、g2→g3（先后无关），冻 g3；用到的按链的顺序排。
         assert_eq!(
-            scope_for_task(Some("g1"), Some("g3"), &[], &[g2_g3.clone(), g1_g2.clone()]),
+            scope_for_task(
+                Some("g1"),
+                Some("g3"),
+                &[],
+                &[g2_g3.clone(), g1_g2.clone()],
+                &[]
+            ),
             RoomRecomputeScope::Targeted {
                 swaps: Vec::new(),
                 parked: vec![g1_g2.clone(), g2_g3.clone()],
+                stale_roots: Vec::new(),
                 generation: "g3".into(),
             }
         );
         // 库上已越过的一段不要：库上 g2，停放 g1→g2、g2→g3，冻 g3。
         assert_eq!(
-            scope_for_task(Some("g2"), Some("g3"), &[], &[g1_g2.clone(), g2_g3.clone()]),
+            scope_for_task(
+                Some("g2"),
+                Some("g3"),
+                &[],
+                &[g1_g2.clone(), g2_g3.clone()],
+                &[]
+            ),
             RoomRecomputeScope::Targeted {
                 swaps: Vec::new(),
                 parked: vec![g2_g3.clone()],
+                stale_roots: Vec::new(),
                 generation: "g3".into(),
             }
         );
@@ -974,11 +1154,13 @@ mod tests {
                 Some("g1"),
                 Some("g2"),
                 &[swap("g1", "g2", delta.clone())],
-                &[g1_g2.clone()]
+                &[g1_g2.clone()],
+                &[]
             ),
             RoomRecomputeScope::Targeted {
                 swaps: Vec::new(),
                 parked: vec![g1_g2.clone()],
+                stale_roots: Vec::new(),
                 generation: "g2".into(),
             }
         );
@@ -988,11 +1170,13 @@ mod tests {
                 Some("g1"),
                 Some("g3"),
                 &[swap("g1", "g3", delta.clone())],
-                &[g1_g2.clone()]
+                &[g1_g2.clone()],
+                &[]
             ),
             RoomRecomputeScope::Targeted {
                 swaps: vec![swap("g1", "g3", delta.clone())],
                 parked: Vec::new(),
+                stale_roots: Vec::new(),
                 generation: "g3".into(),
             }
         );
@@ -1055,14 +1239,14 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                scope_for_task(library, resident, &ledger, &slot),
+                scope_for_task(library, resident, &ledger, &slot, &[]),
                 RoomRecomputeScope::WholeLibrary,
                 "{label}"
             );
         }
         // 库上已是这一代：不欠；停放物是越过的代（执行体在 `parked_for_task` 里顺手清掉）。
         assert_eq!(
-            scope_for_task(Some("g2"), Some("g2"), &[], &[g1_g2.clone()]),
+            scope_for_task(Some("g2"), Some("g2"), &[], &[g1_g2.clone()], &[]),
             RoomRecomputeScope::WholeLibrary
         );
 
@@ -1074,6 +1258,7 @@ mod tests {
             Some(&alignment(Some("g1"), "g3")),
             &[],
             &[g1_g2.clone(), g2_g3.clone()],
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -1081,6 +1266,7 @@ mod tests {
             RoomRecomputeScope::Targeted {
                 swaps: Vec::new(),
                 parked: vec![g1_g2, g2_g3],
+                stale_roots: Vec::new(),
                 generation: "g3".into(),
             }
         );
@@ -1119,6 +1305,154 @@ mod tests {
         );
     }
 
+    fn acked(root: u32, generation: Option<&str>) -> AckedRoot {
+        AckedRoot {
+            root: RefNo::new(24383, root),
+            room_generation: generation.map(str::to_owned),
+        }
+    }
+
+    /// F3（2026-09-19）：常驻代号是输入摘要、不单调——库上 g1、中间一代 g2 是空段（进保护集）没进账本、期间 `/model/ensure`
+    /// 按 g2 生成了几根、常驻又回到 g1：库上 g1 == 常驻 g1，③ 不欠、账本没段，那几根的边却是 g2 算的。投影里 ACK 的房间代号
+    /// 是唯一证据：库上已与常驻同代时，代号 ≠ 这一代的根（没算房间的 `None` 也算）走空段定向、只算它们；都对得上才是「不欠」；
+    /// 链接得通时，代号不在链上任一代的根一并点名，在链上的不点（各段反查过）；链断退整库时不看。`request_for_task`：
+    /// F3 单独就是一条触发；库上同代却被 ①/② 问到仍整库（它们说不出欠什么）；说不出常驻代号时 ACK 不看。
+    #[test]
+    fn a_stale_ack_in_an_aligned_library_is_the_debt_itself_and_goes_targeted_on_its_own() {
+        let stale_two = [
+            acked(10, Some("g1")),
+            acked(30, Some("g2")),
+            acked(20, None),
+        ];
+        let empty_segment = RoomRecomputeScope::Targeted {
+            swaps: Vec::new(),
+            parked: Vec::new(),
+            stale_roots: vec![RefNo::new(24383, 20), RefNo::new(24383, 30)],
+            generation: "g1".into(),
+        };
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g1"), &[], &[], &stale_two),
+            empty_segment,
+            "库上 g1 == 常驻 g1：ACK 不是 g1 的两根（另一代 / 没算房间）就是欠账，打包 refno 序"
+        );
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g1"), &[], &[], &[acked(10, Some("g1"))]),
+            RoomRecomputeScope::WholeLibrary,
+            "都对得上：没有可点名的欠账（被 ①/② 问到才会走到这里，按整库办）"
+        );
+        // 链接得通：库上 g1、冻 g2、账本 g1 → g2；ACK g1 / g2 在链上不点名，gx（中间那一代）与没算房间的点名。
+        let own = swap("g1", "g2", moved_panel());
+        let mixed = [
+            acked(10, Some("g1")),
+            acked(30, Some("g2")),
+            acked(20, Some("gx")),
+            acked(40, None),
+        ];
+        let off_chain = vec![RefNo::new(24383, 20), RefNo::new(24383, 40)];
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g2"), &[own.clone()], &[], &mixed),
+            RoomRecomputeScope::Targeted {
+                swaps: vec![own.clone()],
+                parked: Vec::new(),
+                stale_roots: off_chain.clone(),
+                generation: "g2".into(),
+            }
+        );
+        // 停放段的两端同样算在链上。
+        let slot = parked("g1", "g2", 7_997, &[11]);
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g2"), &[], &[slot.clone()], &mixed),
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: vec![slot],
+                stale_roots: off_chain,
+                generation: "g2".into(),
+            }
+        );
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g2"), &[], &[], &mixed),
+            RoomRecomputeScope::WholeLibrary,
+            "链断退整库：每一根都算，ACK 不看"
+        );
+
+        // `request_for_task`：Unchanged + 库上同代 + 有代号不等的 ACK → F3 单独触发、空段定向、原因点名。
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let current = alignment(Some("g1"), "g1");
+        let request = request_for_task(&[], Some(&unchanged), Some(&current), &[], &[], &stale_two)
+            .expect("F3 alone triggers");
+        assert_eq!(request.scope, empty_segment);
+        assert!(
+            request
+                .reason
+                .contains("投影里 2 根的 ACK 房间代号不在准入链上")
+                && request.reason.contains("24383/20、24383/30"),
+            "{}",
+            request.reason
+        );
+        assert_eq!(request.reason.matches("；").count(), 0, "只有这一句");
+        assert!(
+            request_for_task(
+                &[],
+                Some(&unchanged),
+                Some(&current),
+                &[],
+                &[],
+                &[acked(10, Some("g1"))],
+            )
+            .is_none(),
+            "都对得上：不欠"
+        );
+        // 库上同代却被 ① 问到：整库（① 说不出欠什么），F3 那一句不加。
+        let item = room_only_work_item(7997, "DESI", 163);
+        let planned = request_for_task(
+            std::slice::from_ref(&item),
+            Some(&unchanged),
+            Some(&current),
+            &[],
+            &[],
+            &stale_two,
+        )
+        .unwrap();
+        assert_eq!(planned.scope, RoomRecomputeScope::WholeLibrary);
+        assert!(!planned.reason.contains("F3"), "{}", planned.reason);
+        // ② 同理：本任务刚换回这一代。
+        let back = RoomReferenceRefresh::Rebuilt {
+            previous_key: Some("k2".into()),
+            key: "k1".into(),
+            generation_changed: true,
+            generation: "g1".into(),
+            previous_generation: Some("g2".into()),
+            diff: None,
+            panels: None,
+            elapsed_ms: 1,
+        };
+        let rebuilt =
+            request_for_task(&[], Some(&back), Some(&current), &[], &[], &stale_two).unwrap();
+        assert_eq!(rebuilt.scope, RoomRecomputeScope::WholeLibrary);
+        // 库上欠着、链接得通：③ 那一句 + F3 一句 + 账本一句，范围带着点名的根。
+        let chained = request_for_task(
+            &[],
+            Some(&unchanged),
+            Some(&alignment(Some("g1"), "g2")),
+            &[own.clone()],
+            &[],
+            &mixed,
+        )
+        .unwrap();
+        assert_eq!(
+            chained.reason.matches("；").count(),
+            2,
+            "{}",
+            chained.reason
+        );
+        assert!(
+            matches!(&chained.scope, RoomRecomputeScope::Targeted { stale_roots, .. } if stale_roots.len() == 2),
+            "{chained:?}"
+        );
+        // 说不出常驻代号（冻不出 / 开关关）：没有可比对的目标，ACK 不看。
+        assert!(request_for_task(&[], Some(&unchanged), None, &[], &[], &stale_two).is_none());
+    }
+
     /// 源码钉（ADR-073 D13 反查，2026-09-17）：收尾段的分派——请求说定向先走 `run_targeted_room_recompute`，它回 `None`
     /// （树不就绪 / 根清单枚举不出来 / 有命中却折不出根 / 停放的元素折不出根 / 覆盖面对不上）就退
     /// `run_room_only_recompute`；定向那一路先枚举根清单、再 `room_reverse::affected_roots`（自己那一段）、再
@@ -1133,16 +1467,19 @@ mod tests {
         let dispatch = function_body(worker, "async fn run_room_recompute(");
         assert!(
             dispatch.contains("RoomRecomputeScope::WholeLibrary =>")
-                && dispatch.contains("RoomRecomputeScope::Targeted { swaps, parked, .. } =>"),
+                && dispatch.contains("RoomRecomputeScope::Targeted {")
+                && dispatch.contains("stale_roots,")
+                && dispatch.contains("} => {"),
             "两种范围各走一路: {dispatch}"
         );
         assert!(
             dispatch.contains("run_targeted_room_recompute(")
                 && dispatch.contains("swaps,")
                 && dispatch.contains("parked,")
+                && dispatch.contains("stale_roots,")
                 && dispatch.contains("None =>")
                 && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
-            "定向定不了（None）退整库；整库直接整库: {dispatch}"
+            "定向定不了（None）退整库；整库直接整库；点名的根（F3）随范围交给定向那一路: {dispatch}"
         );
         // H1（2026-09-19）：定向那一路拿的是本任务开工冻的那台（`task_rooms`）与准入链的终点代号；没冻出（`None`）
         // 同样退整库，不在收尾新冻。
@@ -1271,11 +1608,36 @@ mod tests {
         );
         assert!(
             targeted.contains(".chain(parked_roots.iter())")
+                && targeted.contains(".chain(stale_roots.iter())")
                 && targeted.contains("RootScope::Targeted {")
                 && targeted.contains("roots: &roots,")
                 && targeted.contains("panel_statements: &panel_statements,")
                 && targeted.contains("render_panel_delta_statements(&swap.panels)"),
-            "两路的根并起来只重算它们，面板级语句（只有换代段有）随 RootScope::Targeted 交出去: {targeted}"
+            "三路的根并起来只重算它们（反查命中 + 停放折出 + F3 点名），面板级语句（只有换代段有）随 RootScope::Targeted 交出去: {targeted}"
+        );
+        // F3（2026-09-19）：盖章那一臂里、结论之前，把链上的 ACK 一并对齐到链尾——链外的代号是下一个任务要点名的证据，不动。
+        let stamped = targeted
+            .find("Some(uncovered) if uncovered.is_empty() => {")
+            .expect("覆盖面对上的那一臂");
+        let aligned = targeted
+            .find("align_room_acks_along_chain(store, dbnum, &on_chain, &generation)")
+            .expect("盖章时对齐链上的 ACK（F3）");
+        let verdict_at = targeted
+            .find("Some(RoomRecomputeVerdict::Targeted(generation))")
+            .expect("定向的结论");
+        assert!(
+            stamped < aligned && aligned < verdict_at,
+            "链上的 ACK 在覆盖面对上之后、结论之前对齐: {targeted}"
+        );
+        assert_eq!(
+            targeted.matches("align_room_acks_along_chain(").count(),
+            1,
+            "只此一处对齐；`Failed` / 退整库都不动 ACK"
+        );
+        assert!(
+            !function_body(worker, "async fn run_room_only_recompute(")
+                .contains("align_room_acks_along_chain("),
+            "整库那一路每一根都算、ACK 由 recompute_dbnum_room_edges 自己对齐，不走链"
         );
         // F2（2026-09-19）：要反查的面板自己的 `room_panel_relate` 也补在面板级语句里（按本任务计算器的在册视图），
         // 面板级语句整串进最后一笔（F1：`recompute_dbnum_room_edges` 里作 epilogue，不再是 prelude）。

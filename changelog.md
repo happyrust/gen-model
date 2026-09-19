@@ -2,6 +2,32 @@
 
 ## 2026-09-19
 
+### 房间定向重算：常驻代号回到旧值时中间那一代生成的根——投影里 ACK 代号不在链上的根点名重算、盖章时对齐链上 ACK、读侧一票否决（ADR-073 D13 追记 F3）
+
+- **为什么**：常驻代号是输入摘要、不单调。库上盖 g1 → 一块 PANE 的 `.mesh` 暂时读不出（重建 → g2，进保护集这一段是空段、不进账本）
+  → 期间「显示模型」`/model/ensure` 按 g2 生成了几根（P 不在索引，进 P 的根拿不到 P 的边）→ `.mesh` 恢复（重建 → g1，摘要同值）→ 下一个
+  批次任务 `Unchanged`、库上 g1 == 冻的 g1 → ③ 不欠、账本没段 → `request_for_task` 回 `None`；那几根 ACK 是 g2，`e3d.room.lookup` 第一层
+  不认、第二层「库上 g1 == 常驻 g1」→ 回 `ready`，边却是 g2 算的。面板挪走又挪回（撤销）同形。
+- **改动**：① 投影里本库每一根 ACK 的房间代号进准入——`room_recompute::acked_roots_for_task`（只收回执与 ACK 对得上的），两个执行体
+  在 `swaps_for_task` 之后取、传进 `request_for_task`；`scope_for_task(…, acked)` 在库上 == 常驻时把代号 ≠ 这一代的根点成
+  `Targeted { swaps: [], parked: [], stale_roots }`（空段定向），链接得通时把代号不在链上任一代的根一并进 `stale_roots`；
+  `request_for_task` 多第四句原因，库上同代、前三条都没点亮时 F3 单独触发，被 ①/② 问到仍整库。`run_targeted_room_recompute` 把点名的
+  根与反查命中、停放折出的并起来。② 定向成功盖章那一刻 `model_db_adapter::align_room_acks_along_chain` 把投影里 ACK 代号在链上任一代、
+  没被命中的根对齐到链尾（它那一代到链尾之间面板动了什么各段都反查过——与库上那一格是同一句话的逐根形态；没有它，下一个任务会把整个
+  投影点名一遍）；链外的、没算房间的不动——那是证据。`recompute_dbnum_room_edges` 对投影里一条几何都没有的根也对齐 ACK。③ 读侧
+  `query_service::room_calculation_status` 第 1 层改三态 `ProcessAck::{Missing, Current, Stale}`，`Stale`（有 ACK 而代号 ≠ 常驻 / 没算房间）
+  一票否决，库上那一层再对也不替它说话。ADR-073 D13 追记 F3、D14「读」补一句、钉 33。
+- **验证**：`cargo test --lib` 房间相关 35 项全绿——新 `a_stale_ack_in_an_aligned_library_is_the_debt_itself_and_goes_targeted_on_its_own`
+  （纯函数十余例）、新 `mem://` `a_root_generated_in_a_transient_generation_is_repaired_when_the_resident_returns`（库上 g1 发 A1 → ensure 按 g2
+  发 A2 与空根 A3 → 回 g1：空段定向只点名 g2 那两根、按 g1 重算 A2 陈旧边删掉、A1 不动、A3 的 ACK 也对齐、再问不欠、== 整库按 g1；
+  `align_room_acks_along_chain` 链上对齐 / 链外与没算房间的不动）；钉 `the_room_only_recompute_is_wired_…`（`swaps < acked < request`）、
+  `the_targeted_recompute_falls_back_…`（`stale_roots` 并根、对齐在盖章那一臂）、`the_durable_alignment_answers_…`（`Stale` 四例）、
+  `the_room_status_reads_both_…`（三态字面）改口 / 扩。相关模块 575 绿 / 1 红（`the_extra_stamp_knob_is_off_unless_it_is_given`——
+  `vendor/e3d-model` 工作树里别的会话未提交的 SPAMAP 戳，与房间无关）；`cargo check --all-targets` 零错；rustfmt 四个文件 hunk 数与 HEAD
+  相同（6/0/3/5）。**没收的**：ACK 是进程内的——中间那一代生成的根若在下一个任务之前随重启丢了 ACK，库上 == 常驻之下没人再点名它；
+  要收得把 ACK 代号落库，等 live 看到再定。live 待补：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 → 下一窗「… ACK 代号不在链上点名 N 根」、
+  两窗之间那几根回 `not_computed`；普通定向之后「链上 K 代、没命中的 M 根 ACK … 对齐到 …」且下一窗不再点名整个投影。
+
 ### 房间定向重算：面板级语句挪到最后一笔、停放在反查完成就做，补 `recalc` 面板自己的 `room_panel_relate`（ADR-073 D13 追记 F1 / F2）
 
 - **为什么**：第三遍复审读出 M1 的一条连带——ADR ⑤ 写的「`Failed` → 下一个任务整库」在 M1 之后不成立：账本里那一段还在，下一个

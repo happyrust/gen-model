@@ -318,6 +318,34 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   `get_room_nodes` 只读 `room_relate`——所以看不见）。落法：`MemoryRoomCalculator::render_panel_topology_statements(panel)`（与逐根路径对
   面板元素写的同一句：先删指向它的旧入边，在册再写回本代的），`model_db_adapter::render_recalc_panel_topology_statements(rooms, panels)`
   对链上每一块 `recalc` 面板渲一次（按本任务计算器的在册视图 = 链尾那一代；面板 refno 序、去重），拼在各段面板级语句之后、同进最后一笔。
+  **2026-09-19 追记（F3，常驻代号回到旧值时中间那一代生成的根没人补——投影里 ACK 的代号就是欠账的证据）。** 同一遍复审的第三条：
+  代号是输入摘要、**不单调**（D12）。形状：库上盖 g1 → 一块 PANE 的 `.mesh` 暂时读不出（重建 → g2；`PanelDelta::between` 只遍历
+  `new.panels`，进保护集这一段是**空段、不进账本**）→ 期间「显示模型」`/model/ensure` 按 g2 重生成若干根（准入拿 ACK 代号对
+  `required_room_generation()`，不等即重生成，是常态）：P 不在索引，新进 P 的根拿不到 P 的边 → `.mesh` 恢复（重建 → g1，摘要同值）
+  → 下一个批次任务：refresh `Unchanged`、库上 g1 == 冻的 g1 → ③ 不欠、账本没有 PANE 变更 → `request_for_task` 回 `None`。那几根的
+  ACK 是 g2；`e3d.room.lookup` 第一层不认、第二层「库上 g1 == 常驻 g1 且账本没欠」→ 回 `ready`，边却是 g2 算的。面板挪走又挪回
+  （撤销）同形。落法三条：① **投影里本库每一根 ACK 的房间代号进准入**（`room_recompute::acked_roots_for_task` → `AckedRoot { root,
+  room_generation }`，只收回执与 ACK 对得上的、发布时没算房间的记 `None`；两个执行体在 `swaps_for_task` 之后取、`request_for_task(…, &acked)`
+  传进去）：`scope_for_task(library, resident, swaps, parked, acked)` 在**库上 == 常驻**时，代号 ≠ 这一代的根就是欠账本身——
+  `Targeted { swaps: [], parked: [], stale_roots, generation }`（**空段定向**），一根都没有才回整库（被 ①/② 问到的那种）；链接得通时
+  代号**不在链上任一代**（库上那一代 ∪ 各段两端 ∪ 链尾）的根一并进 `stale_roots`——链上各段说的是「这几代之间面板动了什么」，它那一代
+  与链的差链说不了；在链上的不点名（各段都反查过，没命中就是边没变）。`request_for_task` 第四句原因「投影里 N 根的 ACK 房间代号不在
+  准入链上……点名重算」，库上同代、前三条都没点亮时它单独触发；库上同代却被 ①/② 问到仍整库（它们说不出欠什么，整库覆盖点名的根）。
+  `run_targeted_room_recompute(…, stale_roots, …)` 把点名的根与反查命中、停放折出的并起来进 `RootScope::Targeted`。
+  ② **盖章那一刻把链上的 ACK 一并对齐到链尾**（`model_db_adapter::align_room_acks_along_chain(store, dbnum, on_chain, generation)`，
+  在覆盖面对上之后、结论 `Targeted(g)` 之前）：投影里 ACK 代号在链上任一代、又没被命中的根，它那一代到链尾之间面板动了什么各段都
+  反查过、没命中就是边没变——与库上那一格「整库对齐到这一代」是同一句话的逐根形态。没有这一步，定向之后没命中的根 ACK 全停在上一代，
+  下一个任务 F3 会把整个投影点名一遍（O(投影)，定向白做）、读侧会把它们全否掉。链**外**的代号不动——那正是「盖章之后中间那一代写的」
+  证据；没算房间的不动；候选前移了的 `record_publication_ack` 拒收、由它自己的刷盘另记。`recompute_dbnum_room_edges` 对投影里一条
+  几何都没有的根（空根）也对齐 ACK（没有边可陈旧，什么都不写）——否则它永远挂着旧代号、每个任务再点名一次。整库那一路每一根都算、
+  ACK 由它自己对齐，不走链。有了 ①②，本库「ACK ≠ 库上代号」只剩一种含义：盖章之后另一代写的。③ **读侧一票否决**：
+  `query_service::room_calculation_status` 的第 1 层从两态改成三态 `ProcessAck::{Missing, Current, Stale}`——有 ACK 而代号不是此刻
+  常驻这一代（或发布时没算房间）= `Stale`，`room_edges_ready(Stale, …)` 恒 `false`，库上那一层再对也不替它说话，回 `not_computed`，
+  下一个任务的空段定向点名重算它；`Missing` 照旧由第 2 层作答，`Current` 照旧直接就绪。**代价**：中间那一代生成的根，即使边碰巧没变
+  （不在那块面板附近）也点名重算一次、在被算齐之前查询回 `not_computed`——多算不漏算；每个任务多一趟 O(本库投影根数) 的读锁扫描。
+  **没收的**：ACK 是进程内的——中间那一代生成的根若在下一个任务之前随进程重启丢了 ACK（或 `drop_cached_root` 退役），证据随之消失，
+  库上 g1 == 常驻 g1 之下没人再点名它（与账本 / 停放槽「重启即丢」同一形状，但这里 ③ 兜不住，因为库上与常驻同代）；要收得先把 ACK
+  代号落库，等 live 看到再定。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -342,7 +370,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     不等 = 中途换过代、各批根的边不是同一代算的，`Untouched`（下一个任务由 ③ 补一次整库重算）；开工没记下也不盖。
   - **读**：`e3d.room.lookup` 的就绪判据变成两层——进程内该根的 ACK 命中，**或**库上这一格与此刻常驻模型同一代且本进程的
     账本里这根没欠着（ADR-079 的一票否决）。两层用同一个代号，所以也是同一句判据：房间 / 面板真变过 → 代号变 → 两层同时
-    作废 → `not_computed`，不拿上一代的边冒充这一版的结论。只在**落盘**形态下作数：进程内嵌 `mem://` 活不过重启，
+    作废 → `not_computed`，不拿上一代的边冒充这一版的结论。本进程替这根记着**另一代**的 ACK（有 ACK 而代号 ≠ 常驻、或发布时
+    没算房间）同样一票否决（D13 追记 F3，2026-09-19）：库上与常驻同代时那枚 ACK 只可能是盖章之后中间那一代写的（盖章时链上的
+    ACK 都已对齐到盖的那一代），第 2 层替不了它说话。只在**落盘**形态下作数：进程内嵌 `mem://` 活不过重启，
     库与水位行一起消失，那一档仍只认进程内 ACK（d-381 的启动屏障要的就是本进程逐根算完那一句）。
   - **看**：`/dbnums` 每行多一格可选的 `room_alignment{generation, resident_generation, current}`（DESI 行才有，spec §4.7）
     ——`current: false` 就是「这个库此刻只能回 `not_computed`」的解释，是这句话的唯一出处。那句「成不成立」与查询侧共用
@@ -658,6 +688,36 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     live 待补：把一间 FRMW 改名进关键字（不动它的面板）→ 该窗「定向房间重算完成 … 面板级语句 N」且 `SELECT * FROM pe:⟨P⟩<-room_panel_relate`
     对每块新在册面板各一条、房间号对；定向中途写库失败一次（收尾段停一下 surreal 让某笔事务失败）→ 下一窗同一段重走仍
     「定向房间重算完成 … member_hits=N」、不在册面板名下成员落到别的房间。
+33. D13 追记（F3，ACK 代号不在链上的根点名重算 + 盖章时对齐链上 ACK + 读侧一票否决，2026-09-19）：
+    - `room_recompute::AckedRoot { root, room_generation }`、`acked_roots(store, dbnum)`（只收 `ack.matches(&receipt)` 的；`room_membership`
+      为假记 `None`）、`acked_roots_for_task(dbnum, alignment)`（`alignment` 为 `None` 回空）；`RoomRecomputeScope::Targeted { stale_roots }`；
+      `scope_for_task(library, resident, swaps, parked, acked)`：库上 == 常驻 → `stale_acked_roots(acked, {resident})` 非空则空段定向、
+      空则整库；链接得通 → `on_chain` = 库上那一代 ∪ 各段 `from` / `to` ∪ 链尾，`stale_roots = stale_acked_roots(acked, &on_chain)`；
+      `request_for_task(…, acked)`：`library_current && !reasons.is_empty()` → 整库，否则 `scope_for_task`；F3 那一句在账本 / 停放两句
+      之前；`if reasons.is_empty() { return None; }` 在范围定了**之后**（F3 单独触发）。两个执行体 `swaps_for_task` 之后
+      `room_recompute::acked_roots_for_task(job.dbnum, alignment.as_ref())`、以 `&acked,` 传进 `request_for_task`（钉
+      `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end` 扩：`swaps < acked < request`）。
+    - `run_room_recompute` 分派 `RoomRecomputeScope::Targeted { swaps, parked, stale_roots, .. }` → `run_targeted_room_recompute(…, stale_roots, …)`，
+      函数体里 `.chain(stale_roots.iter())` 并根；`align_room_acks_along_chain(store, dbnum, &on_chain, &generation)` 只此一处、落在
+      `Some(uncovered) if uncovered.is_empty() => {` 之后、`Some(RoomRecomputeVerdict::Targeted(generation))` 之前；`run_room_only_recompute`
+      里没有（钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 扩）。
+    - `model_db_adapter::align_room_acks_along_chain`：`room_membership` 为假 / 代号 `None` / 代号 == 链尾 / 代号不在 `on_chain` 都不动，
+      其余只改代号一格、`record_publication_ack` 拒收不计；`recompute_dbnum_room_edges` 对 `records.is_empty()` 的投影根进 `empty_projected`、
+      与 `recomputed` 一起对齐 ACK（`acks_refreshed` 计入）。
+    - `query_service::ProcessAck { Missing, Current, Stale }`；`room_edges_ready(ack, chasing_here, aligned_on_store)`：`Current` → true、
+      `Stale` → false、`Missing` → `!chasing_here && aligned_on_store`；`room_calculation_status` 函数体里三态字面都在（钉
+      `the_durable_alignment_answers_for_roots_this_process_never_published` 扩四例、
+      `the_room_status_reads_both_the_process_ack_and_the_durable_alignment` 扩）。
+    - 钉 `a_stale_ack_in_an_aligned_library_is_the_debt_itself_and_goes_targeted_on_its_own`（纯函数：库上同代两根点名 / 都对得上整库 /
+      链上 g1、g2 不点、gx 与 None 点 / 停放段两端算在链上 / 链断不看 / `request_for_task` F3 单独触发、① / ② 同代仍整库、链接得通三句、
+      常驻说不出不看）；`mem://` 钉 `a_root_generated_in_a_transient_generation_is_repaired_when_the_resident_returns`（库上 g1 发 A1 →
+      ensure 按 g2 发 A2 与空根 A3 → 回 g1：`acked_roots` 读出 g2 两根 → 空段定向只点名它们 → 按 g1 重算，A2 的陈旧边删掉、A1 不动、A3
+      什么都不写但 ACK 对齐（`acks_refreshed = 2`）→ 再问不欠 → == 整库按 g1；`align_room_acks_along_chain` 链上 g1 → g2、链外 gx 与
+      没算房间的不动、再来一遍 0）。
+    live 待补：ams 让一块 PANE 的 `.mesh` 暂时读不出 → 点「显示模型」让 ensure 按那一代生成几根 → 恢复 `.mesh` → 下一窗日志
+    「定向房间重算完成 … 换代段 0 段 无（库上已与常驻同代，欠账只有点名的根——空段定向）… ACK 代号不在链上点名 N 根」、之后
+    `e3d.room.lookup` 对那几根回 `ready_*`，两窗之间对它们回 `not_computed`（此前是错的 `ready`）；一次普通定向之后日志
+    「链上 K 代、没命中的 M 根 ACK 房间代号一并对齐到 …」且下一窗**不**再把整个投影点名一遍。
 
 ## 背景
 
