@@ -2,6 +2,23 @@
 
 ## 2026-09-19
 
+### 任务收尾那一笔包进冲突重试：与刷盘 stray epilogue 同写水位行时谁后提交谁输，输了重发而不是让任务落 `Partial`（ADR-073 D13 收口总表第 10 行、钉 36）
+
+- **为什么**：实测（`bin/surreal.exe` 起 8009，memory / 一次性 rocksdb 各 150 × 150 笔、事务内 `SLEEP 5ms` 逼重叠）两台引擎都报
+  「Failed to commit transaction due to a read or write conflict. This transaction can be retried」、输的一笔整笔零提交、**两边都会输**
+  （memory 刷盘侧 33 / 收尾侧 19，rocksdb 77 / 30）。刷盘侧 `commit_publication_transaction` 早就走 `retry_surreal_write_operation`；
+  收尾侧 `commit_task_end_on` 是裸 `db.query` → 输一次 = 任务 `Partial`、模型水位 / `Aligned` 盖章 / 清格都没落（下次任务再欠一次、
+  多算一遍），W1 兜底那一笔再输就「下一次启动把这个库退回写入起点重跑」。F3 落库给同一行多了一个写者之后更容易踩到。
+- **改动**：`commit_task_end_on` 退成薄壳，发送与回执解读搬进 `commit_task_end_via(end, run)`（`run` = 「把这段 SQL 发出去」，生产
+  `db.query`），那一句 + 逐条取错 + 取水位回执包进 `crate::surreal_retry::retry_surreal_write_operation`（每次 `run(sql.clone())`
+  重发同一段；只有冲突文本才重试，`THROW` / 语法错照旧第一次就报）。W1 兜底、`dbnum_initialize` 那一处一并受惠。
+- **验证**：新 `mem://` 钉 `the_tail_retries_past_a_conflict_with_the_flush_epilogue_on_the_same_row`——第一次发送时竞争者先按刷盘的样子
+  `array::union(…, ['g3'])` 改同一行、发送口回 `Error::Db(TxRetryable)`，第二次真发 → 两次尝试、`model_sesno = 26`、
+  `model_room_generation = 'g1'`、格空；`Thrown` 一次就报不重发；源码钉薄壳经 `_via`、`_via` 包在重试里。冲突由发送口注入：同一进程里
+  一个 `mem://` 句柄上的请求是串行的（本地引擎 router 一次一条；先试过真并发，竞争者要等收尾那 1.5 s 跑完才轮到），撞不出真冲突
+  ——顺带说明 `AIOS_STORE_MODE=mem` 下这一行根本撞不上，rocksdb 档才会。`task_end::tests` 26 项全绿；rustfmt hunk 数 == HEAD；CRLF 一致。
+  ADR-073 总表第 10 行翻成已收、钉 36。
+
 ### 房间 F3 落库收口：水位行那一格里没人认领的代号 → 整库——投影上记「本进程这一世写进那一格的代号」，准入对定向多一问（ADR-073 D13 收口总表第 11 行、钉 35）
 
 - **为什么**：`model_room_stray_generations` 记的是**代号**不是根。重启前那一世按 g2 写过的根，ACK 随重启丢了；重启后下一个任务之前

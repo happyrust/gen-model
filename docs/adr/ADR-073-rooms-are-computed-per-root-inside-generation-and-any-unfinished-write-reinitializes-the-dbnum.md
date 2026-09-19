@@ -380,7 +380,7 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   | 7 | F3 追记里「ensure 按 g2 生成……写了边」说得不准 | 改口：ensure 在摄入形态 `ProjectionOnly`，边是 write-behind 刷盘那一刻 `room_stage` 那台计算器写的 | `3c932e17d`（本条 F3 追记） | 已收 |
   | 8 | `PartialCoverage` / `Failed` 批次任务（盖 `model_sesno` 不盖 D14）按任务那一代写的边，常驻回到库上那一代后同一个洞 | 同一条写路径：任务的刷盘同样经 `persist_roots_batched_unacked_impl`，代号 ≠ 库上就记 stray；不盖章所以不清，下一任务照欠 | `3c932e17d` | 已收（同路径，未单独钉） |
   | 9 | live：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 →（重启）→ 下一窗「ACK 代号不在链上点名 N 根」/「… F3 落库」+「整库房间重算完成」，`/dbnums.room_alignment.stray_generations` 两窗之间非空、之后消失；稳态下那一列恒空 | — | 需真库 | **待 live** |
-  | 10 | 水位行两个写者（刷盘 epilogue 与 `task_end` 收尾那一笔）同行撞事务 | **实测（09-19 晚）**：`bin/surreal.exe` 起 8009，memory（surrealkv）与一次性 rocksdb 各跑 150 × 150 笔、事务内 `SLEEP 5ms` 逼重叠——两台引擎都报「Failed to commit transaction due to a read or write conflict. This transaction can be retried」，输的那一笔整笔零提交（行数对得上），**谁后提交谁输**：memory 刷盘侧输 33 / 收尾侧输 19，rocksdb 77 / 30。刷盘侧 `commit_publication_transaction` 走 `retry_surreal_write_operation`（16 次、25 ms 起指数退避）接得住；**收尾侧 `commit_task_end_on` 没有重试**——输一次 = 任务 `Partial`、模型水位 / `Aligned` 盖章 / 清格都没落（下次任务再欠一次、多算一遍），W1 兜底那一笔再输就「下一次启动把这个库退回写入起点重跑」 | 待拍：收尾那一笔同样包进 `retry_surreal_write_operation`（整笔零提交、语句幂等，输了重发即可） | **接了一半**（刷盘侧已收、收尾侧未收） |
+  | 10 | 水位行两个写者（刷盘 epilogue 与 `task_end` 收尾那一笔）同行撞事务 | **实测（09-19 晚）**：`bin/surreal.exe` 起 8009，memory（surrealkv）与一次性 rocksdb 各跑 150 × 150 笔、事务内 `SLEEP 5ms` 逼重叠——两台引擎都报「Failed to commit transaction due to a read or write conflict. This transaction can be retried」，输的那一笔整笔零提交（行数对得上），**谁后提交谁输**：memory 刷盘侧输 33 / 收尾侧输 19，rocksdb 77 / 30。刷盘侧 `commit_publication_transaction` 走 `retry_surreal_write_operation`（16 次、25 ms 起指数退避）接得住；**收尾侧 `commit_task_end_on` 没有重试**——输一次 = 任务 `Partial`、模型水位 / `Aligned` 盖章 / 清格都没落（下次任务再欠一次、多算一遍），W1 兜底那一笔再输就「下一次启动把这个库退回写入起点重跑」 | 收尾那一笔（`commit_task_end_on`）包进同一个 `retry_surreal_write_operation`：整笔零提交、语句都是绝对值的 UPSERT / UPDATE，输了重发即可；只有冲突文本才重试，`THROW` / 语法错照旧第一次就报。W1 兜底与 `dbnum_initialize` 那一处调用一并受惠 | 钉 36，`the_tail_retries_past_a_conflict_with_the_flush_epilogue_on_the_same_row`（第一次发送时竞争者先改同一行、回 `TxRetryable` → 重发成功，行上是收尾的值；`THROW` 不重发；同一 `mem://` 句柄上请求串行、撞不出真冲突，所以冲突由发送口注入，引擎侧证据是 8009 实测） | 已收 |
   | 11 | stray 记的是**代号**不是根：重启前按 g2 写过的根 ACK 随重启丢了，重启后下一任务前又有根按 g3（或按同一代 g2 再）刷了盘 → 投影里代号不等的 ACK 只有新的那几根，`scope_for_task` 只点名它们，盖章把整格清掉，g2 那几根的陈旧边无人认领 | 投影上多记一份「本进程这一世写进那一格的代号」（`ModelMemoryStore::stray_generations_written`，`note_stray_generation_written` 提交成功后记、随本库 ACK 整体作废清）；`DurableAlignment::stray_written_here` 带进准入，`request_for_task` 对定向结论多一问：`stray` 里既不与库上同代、不在准入链上、又不是这一世写的代号 → 整库（`unaccounted_stray_generations`）。「有见证」不够——同一代再刷时格里已含、这一世没写，新根作证不了旧根，所以看的是**谁写的**不是**有没有 ACK** | 钉 35（本表之后的那一笔），`a_stray_generation_nobody_here_wrote_and_no_chain_explains_forces_the_whole_library` + `mem://` `a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed` | 已收 |
   | 12 | 代价：中间那一代生成的根即使边没变也点名重算一次、算齐前查询回 `not_computed`；每任务多一趟 O(本库投影根数) 读锁扫描；换代期每 (库, 代) 一句 UPDATE | 接受（多算不漏算；稳态零） | — | 接受不收 |
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
@@ -806,6 +806,16 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       库上 g1；旧投影按 g1 发 A1、按 g2 刷 A2（`stray_generations_written == [g2]`、格里 `[g2]`）；换新投影只带 A3、按 g3 刷（这一世 `[g3]`、
       格里 `[g2, g3]`、三条边各按各代）；常驻回 g1：`scope_for_task` 只点名 A3，`request_for_task` 整库；整库按 g1 → 只剩 A1 的边
       （`projected_roots = 1, durable_roots = 2`）。
+36. D13 收口总表第 10 行（收尾那一笔的冲突重试，2026-09-19 晚）：`task_end::commit_task_end_on` 退成薄壳，发送与回执解读搬进
+    `commit_task_end_via(end, run)`——`run` 是「把这段 SQL 发出去」（生产 `db.query`）——那一句连同逐条取错、取水位回执一起包进
+    `crate::surreal_retry::retry_surreal_write_operation`（每次尝试 `run(sql.clone())` 重发同一段；16 次、25 ms 起指数退避；只有
+    「read or write conflict」文本才重试）。实测依据：`bin/surreal.exe` 起 8009，memory（surrealkv）与一次性 rocksdb 各 150 × 150 笔、
+    事务内 `SLEEP 5ms` 逼重叠——两台引擎都报 `TxRetryable`、谁后提交谁输、输的一笔整笔零提交（memory 刷盘侧输 33 / 收尾侧 19，
+    rocksdb 77 / 30）。钉 `the_tail_retries_past_a_conflict_with_the_flush_epilogue_on_the_same_row`：第一次发送时竞争者先
+    `array::union(…, ['g3'])` 改同一行、发送口回 `Error::Db(TxRetryable)`，第二次真发 → 两次尝试、`stamped`、`model_sesno = 26`、
+    `model_room_generation = 'g1'`、格空（竞争者的 g2 / g3 都被盖掉）；`Thrown` 一次就报、不重发；源码钉薄壳经 `_via`、`_via` 里
+    `retry_surreal_write_operation(` + `run(sql.clone())`。冲突由发送口注入而不是真并发：同一进程里一个 `mem://` 句柄上的请求
+    是串行的（本地引擎的 router 一次只处理一条），撞不出真冲突——顺带说明 `AIOS_STORE_MODE=mem` 下这一行根本撞不上，rocksdb 档才会。
 
 ## 背景
 
