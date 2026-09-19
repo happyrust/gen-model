@@ -2303,7 +2303,7 @@ async fn run_targeted_room_recompute(
     };
     let target = PersistTarget::process();
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-    // 换代段：每一段各反查一次（各自的新旧盒），根并起来；别的库的命中按段留着，成功后按段停放。没有换代段
+    // 换代段：每一段各反查一次（各自的新盒 + 库上名下的成员），根并起来；别的库的命中按段留着，成功后按段停放。没有换代段
     // （欠账全在停放链上）就没有这一路。
     let mut affected = AffectedRoots::default();
     let mut foreign_by_swap = Vec::with_capacity(swaps.len());

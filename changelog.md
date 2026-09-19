@@ -2,6 +2,18 @@
 
 ## 2026-09-19
 
+### 房间反查：旧盒退役——只问新盒 + 库上成员边，`protected_bounds` 删掉（ADR-073 D13 追记 L1-P 第二步）
+
+- **为什么**：L1-P（`1e7dbfd91`）之后旧盒只剩一个用处——在途还没落库的根靠它；而那些根随它自己那一台计算器落库、由 ③ 兜底，
+  不值得每次定向多扫一遍旧盒，更不值得为它在模型上跨代带一份「上一次可用盒」（L1 的 `protected_bounds`，只活在进程内）。
+- **改动**：`PanelDelta::query_boxes()` 只回 `recalc` 的新盒；`PanelMove::old` 只给日志 / 用例看（取旧代 `current_bounds`，保护中 /
+  不在册 = `None`）；`ResidentRoomModel::protected_bounds` / `last_known_bounds` / `inherit_protected_bounds` 删掉、`install` 不再带盒，
+  新 `current_bounds(panel)`。反查定型为「新盒问空间谁进来了、库上成员边答谁离开了」。ADR-073 D13 L1 段标退役、L1-P 段加第二步、
+  钉 27 标历史、钉 30 改口。
+- **验证**：`cargo test --lib` 定向 25 项全绿（钉 `a_panel_that_regains_geometry_…` 改名 `…_is_looked_up_by_its_new_box_and_its_durable_members`：
+  保护 → 仍保护 `query_boxes == [2.0]` → 恢复 `[40.0]`、`leaving_panels == [8]`、账本末段一个盒；`install_reports_…` 第二代
+  `query_boxes == [5.0, 20.0]`）；相关模块 394 绿 0 红；`cargo check --all-targets` 零错；rustfmt hunk 数与 HEAD 相同；CRLF 一致。
+
 ### 房间反查：离开的成员从库上按面板取、范围之外的历史几何不再把定向拉回整库（ADR-073 D13 追记 L1-P / M2-S；撤 L1-R 的门）
 
 - **为什么**：复审 L1（`b21613278`）读出它的漏洞——上一次可用盒只活在进程内，而**丢盒的方向是漏算**：面板有几何、有边 → `.mesh`

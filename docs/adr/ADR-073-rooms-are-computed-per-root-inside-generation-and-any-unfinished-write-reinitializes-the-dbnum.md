@@ -257,6 +257,7 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   有几何的不带、不在册的不带（`removed` 按面板清边不问空间）、从没可用过的没有可带；`PanelDelta::between` 的旧盒改走
   `ResidentRoomModel::last_known_bounds`（有几何 = 此刻的盒，保护中 = 带着的盒），新盒只认新代此刻有几何的。重新有几何之后它不在
   保护集、那份盒随之丢掉。不进摘要、不进 `input_version`——它不是这一代的输入，是「离开的成员在哪」的备忘。
+  **（同日退役，见下 L1-P 末段：旧盒不再是反查的输入，`protected_bounds` / `last_known_bounds` / `inherit_protected_bounds` 已删。）**
   **2026-09-19 追记（L1-P，离开的成员从库上按面板取）。** 复审 L1 读出它的漏洞：上一次可用盒只活在进程内，而**丢盒的方向是漏算**
   （账本丢了是多算——③ 兜底整库；盒丢了却让那一段照常定向、只问新盒）。形状：面板 P 有几何、有边 → `.mesh` 读不出进保护集 → **重启**
   → 本进程第一代 P 仍在保护集、没有上一代可带 → P 恢复且挪位 → 那一段 `old = None`，与「从没可用过」同一处置——只问新盒，
@@ -266,10 +267,14 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   按 `PanelDelta::leaving_panels()`（`recalc` 里动了 / 恢复了 / 换了房的每一块 + `removed` 不在册了的每一块；`renumbered` 不进）一块一句
   取齐，与树上命中同一处置进 `resolve`（祖先链投影里有的从投影拿、没有的回库取——`inst_relate` 没有行的管身来源再按 `in` 到
   `tubi_relate` 取一遍）；别的库的成员同样进 `foreign` 停放。这个集合精确（就是要重算的那些边的另一端）、不靠旧盒、重启也不丢。
-  旧盒 ∪ 新盒的空间查询照旧（`query_boxes()` 不变）：新盒答「进来的」，旧盒是空间那一路的辅助——在途还没落库的根靠它；`protected_bounds`
-  （L1）留着给旧盒用。**顺手收掉一条同族漏算**：`removed`（不在册了）的面板此前只清边不重算，它名下的成员若还在别的面板盒里，该落到
-  那间房却没人算——现在它也在 `leaving_panels` 里，成员的根照样重算。`AffectedRoots` 多 `member_hits` / `durable_member_lookups` /
-  `durable_member_ms`，`summary()` 多一格 `member_hits=`、`durable_timing()` 多一句「面板现存成员 P 块 Qms」。
+  **顺手收掉一条同族漏算**：`removed`（不在册了）的面板此前只清边不重算，它名下的成员若还在别的面板盒里，该落到那间房却没人算
+  ——现在它也在 `leaving_panels` 里，成员的根照样重算。`AffectedRoots` 多 `member_hits` / `durable_member_lookups` / `durable_member_ms`，
+  `summary()` 多一格 `member_hits=`、`durable_timing()` 多一句「面板现存成员 P 块 Qms」。
+  **旧盒退役（同日第二步）**：`1e7dbfd91` 那一笔先留着旧盒 ∪ 新盒的空间查询（旧盒给在途还没落库的根），随后拿掉——「离开的」由成员那一路
+  答得更准，在途未落库的根若与挪走的面板有关，随它自己那一台计算器落库、由 ③ 兜底，不为它多扫一遍旧盒。`PanelDelta::query_boxes()`
+  只回 `recalc` 的**新盒**；`PanelMove::old` 只给日志 / 用例看「从哪挪到哪」（取旧代 `current_bounds`，保护中 / 不在册 = `None`）；
+  L1 的 `protected_bounds` / `last_known_bounds` / `inherit_protected_bounds` 删掉，`install` 不再带盒——模型上没有任何跨代带盒的字段，
+  「旧盒 None 是从没可用过还是说不出」这个问题不再存在。反查的形状定型为：**新盒问空间「谁进来了」，库上成员边答「谁离开了」**。
   **2026-09-19 追记（M2-S，还在 T 上却折不出根的再分一层）。** M2 分完之后 `stuck` 里还有一种常客：元素在 `DbSet@T` 上、祖先链上每一级也都在，
   却没有一级是本库的生成根——它的根本就不在生成范围（`model_type_scope` 之外 / 历史遗留几何）。此前它让每一次盒扫得到它的定向都退整库，
   而整库也不算它（根不在清单里）——持久多算、零收益。落法：反查 / 停放折不出根的元素连同祖先链一起回（`fold_to_roots` 第二个返回值带
@@ -544,7 +549,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       的退整库清单改口）。
     live 待补：ams 一窗里删一个根 + 挪一块面板（面板盒扫得到那个根的构件）→ 该窗日志「N 个命中的元素在 DbSet@T 上已不存在 … 忽略」
     且仍「定向房间重算完成」，不再退整库。
-27. D13 追记（L1，保护集成员带着上一次可用的盒，2026-09-19）：
+27. D13 追记（L1，保护集成员带着上一次可用的盒，2026-09-19；**同日随 L1-P 退役**——下面几条只作历史，`protected_bounds` /
+    `last_known_bounds` / `inherit_protected_bounds` 已不存在，`PanelDelta::between` 的旧盒取旧代 `current_bounds`、只给日志看，
+    钉 `a_panel_that_regains_geometry_…` 改名为 `…_is_looked_up_by_its_new_box_and_its_durable_members`，见钉 30）：
     - `ResidentRoomModel::protected_bounds`、`last_known_bounds(panel)`（有几何 = 此刻的盒，保护中 = 带着的盒，其余 `None`）、
       `inherit_protected_bounds(previous)`（只给 `missing_panels` 里的带）；`ResidentRooms::install(mut model)` 里
       `model.inherit_protected_bounds(old)` 在 `PanelDelta::between(` 之前；`PanelDelta::between` 两处旧盒都走 `old.last_known_bounds(`，
@@ -572,8 +579,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     live 待补：7997 那种库上一次定向的「库上管身范围查 Nms」——N 明显压过 `durable_read_ms` / 总耗时才做 `aabb_d` 平副本（并决定回填还是分两半查）。
 30. D13 追记（L1-P，离开的成员从库上按面板取，2026-09-19；取代同日 `2ba772b25` 的 L1-R 门——`unknown_bounds` / `old_box_unknown` /
     `fully_known` 已撤，`walk_chain` 的过滤回到 `!swap.panels.is_empty()`）：
-    - `PanelDelta::leaving_panels()` = `recalc` 里每一块 ∪ `removed`，按面板 refno 序去重（`renumbered` 不进）；`query_boxes()` 一字不改
-      （旧盒 ∪ 新盒）。
+    - `PanelDelta::leaving_panels()` = `recalc` 里每一块 ∪ `removed`，按面板 refno 序去重（`renumbered` 不进）；`query_boxes()` 只回
+      `recalc` 的新盒（`filter_map(|entry| entry.new)`；第一步 `1e7dbfd91` 时还是旧盒 ∪ 新盒，第二步拿掉）。`ResidentRoomModel` 上没有
+      `protected_bounds`；`ResidentRooms::install(model)` 不再 `inherit_*`；`PanelDelta::between` 两处 `old` 都是 `old.current_bounds(`。
+      钉 `a_panel_that_regains_geometry_after_protection_is_looked_up_by_its_new_box_and_its_durable_members`：8 [20, 21] → 保护
+      （`current_bounds(8) == None`、这一段空）→ 仍保护（7 挪了，`query_boxes == [2.0]`）→ 8 恢复到 [40, 41]：`recalc = [8: None → [40, 41]]`、
+      `query_boxes == [40.0]`、`leaving_panels == [8]`、账本末段一个盒；从没可用过的 8 有几何同形。钉 `install_reports_…` 第二代
+      `query_boxes == [5.0, 20.0]`（7 的旧盒 [0, 1] 不问）。
     - `room_reverse::durable_panel_members(db, panels) -> BTreeSet<打包 refno>`：每块一句 `SELECT VALUE out FROM {panel}->room_relate;`；
       `affected_roots` 先 `ensure_spatial_ready`、再 `leaving_panels` → `durable_panel_members`（计时进 `durable_member_lookups / durable_member_ms`），
       盒与成员都空才早退；树只在盒非空时读。`resolve(db, store, dbnum, boxes, tree_hits, member_hits, library_roots)` 多一个参数：投影那一遍
