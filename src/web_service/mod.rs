@@ -235,6 +235,8 @@ impl ApiError {
             "ATTR_NOT_APPLICABLE" => (StatusCode::UNPROCESSABLE_ENTITY, "attr_not_applicable"),
             "CHAIN_INCOMPLETE" => (StatusCode::UNPROCESSABLE_ENTITY, "chain_incomplete"),
             "DB_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "db_unavailable"),
+            // 直读源（文件 / 直连树）暂时看不见：与 `DB_UNAVAILABLE` 同一档 503，不再落进 500「internal」。
+            "SOURCE_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "source_unavailable"),
             "E3D_SESSION_FAILED" => (StatusCode::SERVICE_UNAVAILABLE, "e3d_session_failed"),
             "TIMEOUT" => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
             "PARSE_ERROR" => (StatusCode::INTERNAL_SERVER_ERROR, "parse_error"),
@@ -1390,6 +1392,7 @@ mod tests {
             ("ATTR_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
             ("CHAIN_INCOMPLETE", StatusCode::UNPROCESSABLE_ENTITY),
             ("DB_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
+            ("SOURCE_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
             ("E3D_SESSION_FAILED", StatusCode::SERVICE_UNAVAILABLE),
             ("TIMEOUT", StatusCode::GATEWAY_TIMEOUT),
             ("PARSE_ERROR", StatusCode::INTERNAL_SERVER_ERROR),

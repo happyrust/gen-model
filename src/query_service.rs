@@ -675,14 +675,11 @@ impl QueryService {
                 .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
             return crate::data_interface::room_read_through::lookup(refno, tree).await
                 .map_err(|error| {
-                    let code = if error.is::<crate::data_interface::room_read_through::RoomNotReady>() {
-                        "UPDATING"
-                    } else if error.chain().any(|cause| matches!(
-                        cause.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
-                        Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { refno: missing, .. })
-                            if missing == &refno.to_string() || missing == &refno.to_pdms_str()
-                    )) { "NOT_FOUND" } else { "SOURCE_UNAVAILABLE" };
-                    QueryError::new(code, error)
+                    if error.is::<crate::data_interface::room_read_through::RoomNotReady>() {
+                        QueryError::new("UPDATING", error)
+                    } else {
+                        room_source_error(error, &refno)
+                    }
                 });
         }
         Self::ensure_model_db().await?;
@@ -715,7 +712,7 @@ impl QueryService {
                 refno.refno(),
                 &crate::data_interface::generation_root::configured_delivery_unit_types(),
             )
-            .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?
+            .map_err(|error| room_source_error(error, &refno))?
             .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root));
         let edges = read_room_memberships(&SUL_DB, &refno.to_string())
             .await
@@ -1048,6 +1045,24 @@ fn db_error(error: impl ToString) -> QueryError {
     QueryError::new("DB_UNAVAILABLE", error)
 }
 
+/// `e3d.room.lookup` 取源那一步的错怎么分型（读透 / 摄入两条形态共用）：这个 refno 在库里**确定
+/// 不存在**——索引里没有它（`NoSuchElement`，只认问的那一个，祖先缺了是另一回事）、解出的库不在
+/// MDB（`DbNotInMdb`）、编号本身非法（`InvalidRefNo`），与 `ApiError::from_domain` 同一口径 → `NOT_FOUND`
+/// （404）；其余是源暂时看不见 → `SOURCE_UNAVAILABLE`（503）。此前摄入形态一律包成
+/// `SOURCE_UNAVAILABLE`，而 `ApiError::from_query` 又不认这个码，查一个不存在的 refno 回的是
+/// 500「internal」——2026-09-19 f20 部署实测 `24381/42528` 就是这么回的。
+fn room_source_error(error: anyhow::Error, refno: &RefnoEnum) -> QueryError {
+    use crate::data_interface::direct_store::DirectStoreError;
+    let missing = error.chain().any(|cause| match cause.downcast_ref::<DirectStoreError>() {
+        Some(DirectStoreError::NoSuchElement { refno: missing, .. }) => {
+            missing == &refno.to_string() || missing == &refno.to_pdms_str()
+        }
+        Some(DirectStoreError::DbNotInMdb { .. } | DirectStoreError::InvalidRefNo { .. }) => true,
+        _ => false,
+    });
+    QueryError::new(if missing { "NOT_FOUND" } else { "SOURCE_UNAVAILABLE" }, format!("{error:#}"))
+}
+
 fn e3d_error(error: anyhow::Error) -> QueryError {
     let message = format!("{error:#}");
     let lower = message.to_ascii_lowercase();
@@ -1065,6 +1080,41 @@ fn e3d_error(error: anyhow::Error) -> QueryError {
 
 #[cfg(test)]
 mod tests {
+    /// 查一个库里没有的 refno 是 404，不是 500：`NoSuchElement` 只认问的那一个，祖先缺了、源打不开
+    /// 都是 `SOURCE_UNAVAILABLE`。
+    #[test]
+    fn room_lookup_of_a_missing_refno_is_not_found_not_internal() {
+        use crate::data_interface::direct_store::DirectStoreError;
+        let refno = aios_core::RefnoEnum::from("24381/42528");
+        let missing = |target: &str| {
+            anyhow::Error::new(DirectStoreError::NoSuchElement {
+                refno: target.into(),
+                dbnum: 7997,
+                sesno: Some(333),
+            })
+            .context("room root task failed")
+        };
+        assert_eq!(super::room_source_error(missing("24381/42528"), &refno).code, "NOT_FOUND");
+        assert_eq!(super::room_source_error(missing("24381_42528"), &refno).code, "NOT_FOUND");
+        assert_eq!(
+            super::room_source_error(missing("24381/1"), &refno).code,
+            "SOURCE_UNAVAILABLE",
+            "祖先缺了不是「问的那个不存在」"
+        );
+        assert_eq!(
+            super::room_source_error(
+                anyhow::Error::new(DirectStoreError::DbNotInMdb { dbnum: 7997, refno: "24381/42528".into() }),
+                &refno
+            )
+            .code,
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            super::room_source_error(anyhow::anyhow!("dabacon 冻结源捕获期间文件持续变化"), &refno).code,
+            "SOURCE_UNAVAILABLE"
+        );
+    }
+
     #[test]
     fn subtree_bounds_union_rejects_invalid_and_empty_geometry() {
         assert!(super::aggregate_bounds([]).is_none());

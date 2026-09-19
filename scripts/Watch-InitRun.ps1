@@ -21,7 +21,11 @@
 # 内层 `$_` 把外层的库号遮住了，那个判据实际恒真。
 param(
     [int]$Port = 18422,
-    [int[]]$Dbnums = @(1112, 7997),
+    # 既接受 `pwsh -Command … -Dbnums 1112,7997`（到手是数组）也接受 `pwsh -File … -Dbnums 1112,7997`
+    # （-File 下参数是**一个**字面字串 "1112,7997"）。此前声明成 [int[]]，-File 那种写法会被
+    # PowerShell 按千分位读成一个数 11127997（2026-09-19 f20 部署实测），守望的库就一个也对不上。
+    # 所以先按字串收，下面再拆逗号 / 空白转 int。
+    [string[]]$Dbnums = @('1112', '7997'),
     [string]$Project = 'AvevaMarineSample',
     [int]$TimeoutMins = 150,
     [int]$PollSecs = 20,
@@ -29,6 +33,8 @@ param(
     [switch]$Once
 )
 $ErrorActionPreference = 'Continue'
+$Dbnums = @($Dbnums | ForEach-Object { "$_" -split '[,\s]+' } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
+if ($Dbnums.Count -eq 0) { throw '-Dbnums 至少要一个库号' }
 $log = Join-Path $RunDir 'monitor.log'
 $snapDir = Join-Path $RunDir 'snapshots'
 New-Item -ItemType Directory -Force $snapDir | Out-Null
