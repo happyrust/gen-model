@@ -174,11 +174,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   `noun == PANE` 剔掉；元素 → 根 = `anc` ∪ 自身 ∩ 本库 `DbSet@T` 根清单（嵌套根两根都算，多算一根是幂等重写）；折不出根的元素
   如实进 `unresolved` → 反查不完整 → 退整库；跨库命中只数不算（U3 a 档，b 档「给别的库排根级工作项」等数据再定）。
   ④ **处置**：`removed` 清它全部出边（`{panel}->room_relate`）与 `room_panel_relate` 入边、`renumbered` 改列
-  （`render_renumber_statements`）——不查空间、不算几何，渲成 prelude 进第一笔事务（删在第一笔）；`recalc` 命中的根经
+  （`render_renumber_statements`）——不查空间、不算几何，渲成面板级语句随逐根块同一串事务（起初作 prelude 进第一笔；2026-09-19 F1 起
+  作 epilogue 进最后一笔，F2 起末尾再补 `recalc` 面板自己的 `room_panel_relate`）；`recalc` 命中的根经
   `recompute_dbnum_room_edges(…, RootScope::Targeted { roots, panel_statements })`：投影里的按集合筛、其余回读库，其余一字不改
   （同一个判定入口、同一套渲染、同一种装块）。⑤ **盖章**：命中根全算齐 = `RoomRecomputeVerdict::Targeted(重算那台计算器的代号)`
   → `LibraryRoomClaim::Recomputed` → D14 那一格盖 `Aligned`（不盖的话下一个任务 ③ 看到库上 ≠ 常驻照样整库扫、定向白做）；任一根
-  算不出 / 反查读库失败 / 写库失败 = `Failed`，不盖、③ 再武装、下一个任务整库；树不就绪 / 根清单枚举不出来 / 有折不出根的 / 覆盖面
+  算不出 / 反查读库失败 / 写库失败 = `Failed`，不盖、③ 再武装、下一个任务整库（M1 之后账本里那一段还在，下一个任务沿账本**重走同一段**
+  仍是定向——F1 2026-09-19 为此把面板级删挪到最后一笔、停放改在反查完成就做，重走才完整）；树不就绪 / 根清单枚举不出来 / 有折不出根的 / 覆盖面
   对不上 = 退整库（多算不是漏算）。**不变的**：③ 电平型触发原样（重启后 / 从没盖过那一格只整库一次，盖上就安静）；整库那一路
   `run_room_only_recompute` 一字不改，是兜底；D1 钉「元素分支不依赖空间树」照旧只钉正向，反查是另一个入口。**代价**：一窗内两个
   库都有任务时，只有先开工的那个库走定向（它的库上代号是上一代），后开工的库看到库上 ≠ 常驻 且 `Unchanged` → 整库——U3 b 档才收。
@@ -294,6 +296,28 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   引用），前者是一次迁移、后者没有数据说明省得下——没有数就不动查询。只加量具：`AffectedRoots::durable_tube_ms / durable_ancestor_lookups /
   durable_ancestor_ms`（`resolve` 里两次库读各计时），`run_targeted_room_recompute` 按段累加，「定向房间重算完成」那一行多一句
   「（库上管身范围查 Nms、回库取祖先链 K 个 Mms）」；`summary()` 不变。缓解等 live 的这个数说话。
+  **2026-09-19 追记（F1，定向失败不丢证据：面板级语句挪到最后一笔、停放在反查完成就做）。** 第三遍复审读出 M1 的一条连带：
+  D 追记 ⑤ 写的「`Failed` → 不盖、③ 再武装、**下一个任务整库**」在 M1 之前成立（自己那一段随任务丢、下一任务 `Unchanged` → 链断 →
+  整库），M1 之后账本里那一段还在，`swaps_for_task` 欠着就整本给，下一个任务照样接链——**仍是定向**。而定向的面板级语句（`removed`
+  的 `DELETE {P}->room_relate` / `<-room_panel_relate`）装在第一笔事务，`recompute_dbnum_room_edges` 逐笔提交、失败即返：第一笔提交后
+  若后面某笔写库失败（`Err` → `Failed`，且不 `mark_generation_failed`），P 名下成员的边已经删了、没提交那几笔里的根新边没写；
+  下一个任务重走同一段时 `durable_panel_members(P)` 回空、P 不在册也没新盒——这些成员若该落到别的房间（房间套房间）永远没人算，
+  也没有重生成兜底。跨库那一半更直接：`Failed` 不停放，B 库下一任务沿账本接段时证据已被 A 的第一笔删掉。落法两条：
+  ① 面板级语句从 `pack_publication_transactions` 的 `prelude` 挪到 `epilogue`（**最后一笔**）——三类语句与逐根块的先后无关（重算的根
+  不会插向不在册面板的边、改号 UPDATE 幂等、面板拓扑边按面板先删后插），中途失败留下的是「重算了、面板级还没删」的多算形状，
+  证据还在、下一个任务重走同一段就补齐；② `park_foreign_hits` 从「结论定为 `Targeted` 之后」改到**反查完成、折不出根的分类过关之后、
+  `recompute_dbnum_room_edges` 之前**、不以结论为条件——反查本身已经完整，本库算没算齐、覆盖面对不对、退不退整库都不改变别的库欠
+  什么；树不就绪 / 反查读库失败 / 仍卡住的 `return None` 都在它之前，反查说不了完整时到不了停放；同 `from → to` 再停一次是并集，重试
+  幂等。⑤ 那句改口：`Failed` = 不盖、③ 再武装、下一个任务沿账本**重走同一段**（定向），靠 ①② 保证重走是完整的。
+  **2026-09-19 追记（F2，定向路补 `recalc` 面板自己的 `room_panel_relate`）。** 同一遍复审：`render_panel_delta_statements` 只处理
+  `removed`（删两边）/ `renumbered`（改列），`recalc`（新在册 / 换了房 / 几何变了）面板的「房间 → 面板」边只有它**自己的根**被重算时才写
+  （`render_root_room_edges` 对面板元素那一句），而反查命中的是**成员**的根——面板自己的根多半不在集合里（PANE 从树命中里剔掉、它的
+  兄弟元素也不一定在盒里）。形状：FRMW / SBFR 改名进关键字（NAME 在 `DATA_ONLY_ATTR_NAMES`、`attribute_is_metadata_only` 放行，根不重
+  生成）→ 面板新在册 → 代号变 → 定向：成员的 `room_relate` 齐了，这些面板的 `room_panel_relate` 一条没有；换了房同理（旧边留着、新边没有）。
+  整库路 / 从零初始化都会写，实施约束 8「两张边 == 从零初始化」在第二张表上不成立（今天没有生产读者——`fn::room_code` / `room_num_of` /
+  `get_room_nodes` 只读 `room_relate`——所以看不见）。落法：`MemoryRoomCalculator::render_panel_topology_statements(panel)`（与逐根路径对
+  面板元素写的同一句：先删指向它的旧入边，在册再写回本代的），`model_db_adapter::render_recalc_panel_topology_statements(rooms, panels)`
+  对链上每一块 `recalc` 面板渲一次（按本任务计算器的在册视图 = 链尾那一代；面板 refno 序、去重），拼在各段面板级语句之后、同进最后一笔。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -454,10 +478,10 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       折成四根，别的库按 dbnum 在库里就筛掉，折不出根的进 `unresolved`；`the_box_predicate_is_a_closed_interval_test_per_axis`）。
       本模块不写树（写点白名单钉照旧只认三处）。
     - 处置：`recompute_dbnum_room_edges(…, library_roots, RootScope)`——`All` 与今天逐字同形（钉 18 全部照旧）；`Targeted { roots,
-      panel_statements }` 投影里的按集合筛、回读清单 = 集合 ∖ 投影、`panel_statements` 作 `pack_publication_transactions` 的 prelude
-      （钉 `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_first`——`mem://`：A、B 同在 R1，面板搬家
-      只点名 A → A 的边删、ACK 换代，B 的边与 ACK 一字不动，不在册的 777 的出边与 `room_panel_relate` 入边随第一笔清掉；再点名 B →
-      与整库同一终态；`panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only`）。
+      panel_statements }` 投影里的按集合筛、回读清单 = 集合 ∖ 投影、`panel_statements` 作 `pack_publication_transactions` 的 **epilogue**
+      （起初是 prelude，F1 2026-09-19 改到最后一笔，见钉 32；钉 `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_last`
+      ——`mem://`：A、B 同在 R1，面板搬家只点名 A → A 的边删、ACK 换代，B 的边与 ACK 一字不动，不在册的 777 的出边与 `room_panel_relate`
+      入边随最后一笔清掉；再点名 B → 与整库同一终态；`panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only`）。
     - 分派与盖章：`run_room_recompute` 对 `Targeted(delta)` 先 `run_targeted_room_recompute`，其中 `library_generation_roots(` →
       `affected_roots(target.db(), store, dbnum, delta, &library_roots)` → `recompute_dbnum_room_edges(` 顺序固定，`TreeUnavailable` /
       `unresolved` 非空在重算之前 `return None` 退 `run_room_only_recompute`；成功 `Some(RoomRecomputeVerdict::Targeted(generation))`，
@@ -474,8 +498,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       `24382/8`（树，回库取 anc）、`24382/9`（库上管身）、`24382/10`（投影管身）进 `foreign[7998]`，`24383/8` 空链进 `foreign[7999]`）。
     - 停放槽：`park` 同段并条、空条不停、`pending` 不取走、`clear` 按库清、`parked_health` 只列有停放物的库（钉
       `the_parking_slot_merges_the_same_segment_and_clears_per_library`）；`park_foreign_hits(` 在 `run_targeted_room_recompute` 里**只此
-      一处**、在 `Some(uncovered) if uncovered.is_empty() => {` 那一臂里、`Some(RoomRecomputeVerdict::Targeted(generation))` 之前，
-      `run_room_only_recompute` 里没有（钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 扩）。
+      一处**、在折不出根的最后一层分类（`if !still_stuck.is_empty() {`）之后、`recompute_dbnum_room_edges(` 之前、不以结论为条件（起初在
+      `Some(uncovered) if uncovered.is_empty() => {` 那一臂里，F1 2026-09-19 提前，见钉 32），`run_room_only_recompute` 里没有
+      （钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 扩）。
     - 准入链：`scope_for_task(refresh, library, resident, parked)` 纯函数真值表（钉
       `the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident`：只停放链 / 停放链 + 自己换代 / 两段接起来按链序 /
       库上已越过的一段不要 / 自己那一段优先于同一对代号的旧停放物；链断两种 / 绕圈 / 从没盖过 / 常驻说不出代号 / 自己那一段面板变化
@@ -616,6 +641,23 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       `return None;` 钉照旧成立（`return None;` 在块内）。
     live 待补：盒扫得到 `model_type_scope` 之外的历史几何时，该窗日志「… 祖先链每一级也都在，却没有一级是本库的生成根 … 忽略」且仍
     「定向房间重算完成」。
+32. D13 追记（F1 / F2，定向失败不丢证据 + `recalc` 面板自己的拓扑边，2026-09-19）：
+    - `recompute_dbnum_room_edges` 函数体里 `pack_publication_transactions("", &pieces, panel_statements, false)`——面板级语句作 epilogue 进
+      最后一笔、prelude 为空；`RoomEdgeRecompute.panel_statements` 计数不变。
+    - `run_targeted_room_recompute` 函数体里 `park_foreign_hits(` 只此一处，落在 `if !still_stuck.is_empty() {` 之后、`recompute_dbnum_room_edges(`
+      之前、`Some(uncovered) if uncovered.is_empty() => {` 之前（不以结论为条件）；`run_room_only_recompute` 里没有。
+    - `MemoryRoomCalculator::render_panel_topology_statements(panel)`；`model_db_adapter::render_recalc_panel_topology_statements(rooms, panels)`
+      按面板 refno 序去重、在册先删后插、不在册只删、空输入空串；`run_targeted_room_recompute` 里
+      `render_recalc_panel_topology_statements(` 以 `swap.panels.recalc.iter().map(|entry| entry.panel)` 喂、拼在各段
+      `render_panel_delta_statements(&swap.panels)` 之后；`render_panel_delta_statements` 本身仍不含 `recalc`。
+    - 钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 改口（`classified < park < recompute`、
+      `park < decided`、epilogue 字面）；`mem://` 钉 `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_last`
+      （改名）、新 `recalc_panel_topology_statements_follow_the_calculators_registered_view`（纯函数五例）、新
+      `a_targeted_recompute_writes_the_recalc_panels_own_topology_edge`（R2 新在册、只点名成员 A → 陈旧 999 → R2 删掉、601 → R2 写上、
+      别的面板的现行边不动、成员边照常；再跑一遍幂等）。
+    live 待补：把一间 FRMW 改名进关键字（不动它的面板）→ 该窗「定向房间重算完成 … 面板级语句 N」且 `SELECT * FROM pe:⟨P⟩<-room_panel_relate`
+    对每块新在册面板各一条、房间号对；定向中途写库失败一次（收尾段停一下 surreal 让某笔事务失败）→ 下一窗同一段重走仍
+    「定向房间重算完成 … member_hits=N」、不在册面板名下成员落到别的房间。
 
 ## 背景
 

@@ -2247,16 +2247,19 @@ async fn run_room_recompute(
 /// 定向房间重算（反向传播，ADR-073 D13 反查，2026-09-17）：准入链上每一段换代的面板变化 → 各反查一次命中的根
 /// （`room_reverse::affected_roots`；段来自换代段账本，本任务自己那一次重建的、别处重建时记的都算，M1 2026-09-19），
 /// 加上别的库停放给本库的元素折成的根（`room_reverse::fold_parked`，U3 b 档）→ 只重算它们 + 面板级处置
-/// （`RootScope::Targeted`：各段的面板级语句按链序拼成 prelude——改号是逐段接力的，A→B 再 B→C；停放那一路没有面板级
-/// 语句——停放方的任务已按面板写过，面板级语句天然跨库）。回 `None` = 这一路定不了、调用方退整库：树不就绪、
-/// `DbSet@T` 的根清单枚举不出来（折不出根）、有命中 / 停放的元素**还在 `DbSet@T` 上**却折不出根（反查不完整；
-/// 已不在 T 上的是本窗删掉的残留，忽略——审核 M2）、覆盖面对不上。回 `Some`：
-/// `Targeted(代号)` = 命中根全算齐、盖得上；算不出的根 / 反查失败 / 写库失败 = `Failed`（与整库同一处置，下一个任务由
-/// 电平型触发整库补）。
+/// （`RootScope::Targeted`：各段的面板级语句按链序拼、末尾补要反查的面板自己的 `room_panel_relate`（F2），整串作
+/// **最后一笔**的 epilogue（F1）——改号是逐段接力的，A→B 再 B→C；停放那一路没有面板级语句——停放方的任务已按面板
+/// 写过，面板级语句天然跨库）。回 `None` = 这一路定不了、调用方退整库：树不就绪、`DbSet@T` 的根清单枚举不出来
+/// （折不出根）、有命中 / 停放的元素**还在 `DbSet@T` 上**却折不出根（反查不完整；已不在 T 上的是本窗删掉的残留，
+/// 忽略——审核 M2）、覆盖面对不上。回 `Some`：`Targeted(代号)` = 命中根全算齐、盖得上；算不出的根 / 反查失败 /
+/// 写库失败 = `Failed`（与整库同一处置：不盖、③ 再武装；M1 之后账本里那一段还在，下一个任务沿账本**重走同一段**、
+/// 仍是定向——所以面板级的删要在最后一笔、停放要在反查完成就做，中途失败才不丢证据，F1 2026-09-19）。
 ///
-/// 结论定为 `Targeted` 之后，每一段反查里别的库的命中连同**那一段**换代（`from → to`）停进那个库的槽
+/// 反查完成、折不出根的分类过关之后，每一段反查里别的库的命中连同**那一段**换代（`from → to`）就停进那个库的槽
 /// （`room_reverse::park_foreign_hits`）——按段停，别的库从它库上那一代起才接得上；由那个库的下一个任务消费；
-/// 退整库 / `Failed` 不停放。本库槽的清空在调用方（`run_room_recompute`），按结论。
+/// 本库之后算齐没算齐、退不退整库都不改变别的库欠什么（此前等结论定为 `Targeted` 才停，`Failed` 就把证据与停放一起
+/// 丢了）。树不就绪 / 反查读库失败 / 有还在 T 上却折不出根的 → 反查说不了完整，不停放。本库槽的清空在调用方
+/// （`run_room_recompute`），按结论。
 ///
 /// **计算器是本任务开工冻的那台**（`rooms`，一任务一台；H1 2026-09-19），不在收尾新冻：scope 是按它的代号定的
 /// （`durable_alignment` 收的就是它），链上各段的边都得是它这一代算的。`expected_generation` 是准入链的终点
@@ -2278,6 +2281,7 @@ async fn run_targeted_room_recompute(
     };
     use crate::fast_model::model_db_adapter::{
         PersistTarget, RootScope, recompute_dbnum_room_edges, render_panel_delta_statements,
+        render_recalc_panel_topology_statements,
     };
     let dbnum = job.dbnum;
     // 一台计算器、一段欠账：准入链的终点必须就是这台的代号。
@@ -2464,6 +2468,17 @@ async fn run_targeted_room_recompute(
         }
     }
     let parked_elements: usize = parked.iter().map(|entry| entry.elements.len()).sum();
+    // 停放（U3 b 档）在**反查完成、分类过关**这一刻就做（F1，2026-09-19）——不再等结论定为 `Targeted`：每一段反查里别的库
+    // 的命中连同**那一段**换代（`from → to`）进那个库的槽，由它的下一个任务消费（按段停，那个库从它库上那一代起才接得上）。
+    // 反查本身已经完整，本库下面算没算齐、覆盖面对不对得上、退不退整库都不改变别的库欠什么；而等结论的话 `Failed`
+    // 不停放，B 库下一任务沿账本重走同一段时，不在册面板名下 B 成员的边已被本库那一笔面板级语句删掉——证据没了、
+    // 停放也没做，那些成员该落到别的房间就没人算。同 `from → to` 再停一次是并集（重试幂等）。停放链上的元素都是
+    // 本库的，没有要转停的。
+    for (swap, foreign) in swaps.iter().zip(&foreign_by_swap) {
+        for line in park_foreign_hits(dbnum, &swap.from_generation, &swap.to_generation, foreign) {
+            println!("dbnum={dbnum} 定向房间重算：{line}");
+        }
+    }
     // 两路的根并起来（去重、按打包 refno 序）：各段反查命中的 + 停放链折出的。
     let mut roots: Vec<e3d_io::refno::RefNo> = affected
         .roots
@@ -2473,11 +2488,19 @@ async fn run_targeted_room_recompute(
         .collect();
     roots.sort_by_key(|root| crate::fast_model::model_memory_store::packed_refno(*root));
     roots.dedup();
-    // 面板级语句按链序拼：改号是逐段接力的（A→B 再 B→C），顺序反了第二句就找不到第一句改出来的号。
-    let panel_statements = swaps
+    // 面板级语句按链序拼：改号是逐段接力的（A→B 再 B→C），顺序反了第二句就找不到第一句改出来的号。末尾再补链上
+    // 每一块要反查的面板**自己的** `room_panel_relate`（F2：命中的是成员的根，面板自己的根多半不在集合里；按本任务
+    // 计算器的在册视图渲，多段点到同一块只渲一次）。整串进最后一笔事务（F1）。
+    let mut panel_statements = swaps
         .iter()
         .map(|swap| render_panel_delta_statements(&swap.panels))
         .collect::<String>();
+    panel_statements.push_str(&render_recalc_panel_topology_statements(
+        rooms,
+        swaps
+            .iter()
+            .flat_map(|swap| swap.panels.recalc.iter().map(|entry| entry.panel)),
+    ));
     match recompute_dbnum_room_edges(
         target,
         store,
@@ -2538,22 +2561,10 @@ async fn run_targeted_room_recompute(
             }
             // 命中的每一根都要在回执里（点名的根按清单逐根走，对不上本不该出现）；出现了就不敢盖，退整库补齐。
             // 盖的是重算那台计算器的代号（审核 P2-3）——就是本任务开工冻的那台、准入链的终点（入口处对过）。
+            // 别的库的命中在反查完成那一刻已经停放过（上面），这里只盖章。
             let generation = rooms.resident_generation().to_string();
             match room_recompute_uncovered(Some(&roots), &report.covered_roots) {
                 Some(uncovered) if uncovered.is_empty() => {
-                    // 结论定了才停放（U3 b 档）：每一段反查里别的库的命中连同**那一段**换代（`from → to`）进那个库的槽，
-                    // 由它的下一个任务消费——按段停，那个库从它库上那一代起才接得上。停放链上的元素都是本库的，
-                    // 没有要转停的。
-                    for (swap, foreign) in swaps.iter().zip(&foreign_by_swap) {
-                        for line in park_foreign_hits(
-                            dbnum,
-                            &swap.from_generation,
-                            &swap.to_generation,
-                            foreign,
-                        ) {
-                            println!("dbnum={dbnum} 定向房间重算：{line}");
-                        }
-                    }
                     Some(RoomRecomputeVerdict::Targeted(generation))
                 }
                 _ => {

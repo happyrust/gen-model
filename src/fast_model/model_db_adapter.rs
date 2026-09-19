@@ -1069,9 +1069,13 @@ pub enum RootScope<'a> {
     /// 整库：投影里本库有回执的根 + `library_roots` 里不在投影里的根（回读库上几何）。
     All,
     /// 反向传播命中的根（`room_reverse::AffectedRoots::roots`，2026-09-17）：投影里的按集合筛、集合里不在投影里的
-    /// 回读库；`library_roots` 不看（命中的根本就来自它）。`panel_statements` 是面板级的两类处置
-    /// （[`render_panel_delta_statements`]：不在册清边 / 只改号改列），作 prelude 进第一笔事务——删在第一笔，
-    /// 与整根发布的装块纪律同一条。
+    /// 回读库；`library_roots` 不看（命中的根本就来自它）。`panel_statements` 是面板级的处置
+    /// （[`render_panel_delta_statements`]：不在册清边 / 只改号改列；[`render_recalc_panel_topology_statements`]：
+    /// 要反查的面板自己的 `room_panel_relate`），作 **epilogue 进最后一笔**事务（2026-09-19 F1）：命中的每一根都重写
+    /// 之后才删面板级的边——不在册面板名下的成员边正是下一个任务重走同一段时 `room_reverse::durable_panel_members`
+    /// 要取的证据，装在第一笔的话中途一笔写库失败（`Failed`、不盖、下一个任务沿账本**仍是定向**）就把证据先销毁了，
+    /// 那些成员该落到别的房间也没人算。三类语句与逐根块的先后无关：重算的根不会插向不在册面板的边、改号 UPDATE
+    /// 幂等、面板拓扑边按面板先删后插。
     Targeted {
         roots: &'a [RefNo],
         panel_statements: &'a str,
@@ -1106,6 +1110,32 @@ pub(crate) fn render_panel_delta_statements(
     out
 }
 
+/// 要反查的那一类面板（`PanelDelta::recalc`：新在册 / 换了房 / 几何变了）**自己的** `room_panel_relate`
+/// （F2，2026-09-19）。逐根路径只在面板所在的根被重算时写这一句（[`MemoryRoomCalculator::render_root_room_edges`]
+/// 对面板元素），而定向命中的是**成员**的根——面板自己的根多半不在集合里（PANE 从树命中里剔掉、它的兄弟元素也不一定
+/// 在盒里）：FRMW / SBFR 改名进关键字（NAME 是元数据、根不重生成）→ 面板新在册 → 成员的 `room_relate` 齐了，
+/// 「房间 → 面板」那一半却一条没有；换了房同理（旧边留着、新边没有）。整库路与从零初始化都写，「两张边 == 从零初始化」
+/// 在第二张表上就此不成立。按本任务计算器的在册视图（= 准入链尾那一代）渲：在册 = 先删后插，不在册 = 只删；链上多段
+/// 点到同一块只渲一次（面板 refno 序、去重）。每句 `;\n` 收尾，拼在 [`render_panel_delta_statements`] 之后同进最后一笔。
+///
+/// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
+pub(crate) fn render_recalc_panel_topology_statements(
+    rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+    recalc_panels: impl IntoIterator<Item = aios_core::RefnoEnum>,
+) -> String {
+    let mut panels: Vec<aios_core::RefnoEnum> = recalc_panels.into_iter().collect();
+    panels.sort();
+    panels.dedup();
+    let mut out = String::new();
+    for panel in panels {
+        for statement in rooms.render_panel_topology_statements(panel) {
+            out.push_str(statement.trim_end().trim_end_matches(';'));
+            out.push_str(";\n");
+        }
+    }
+    out
+}
+
 /// 用本库全部根的**现有几何**重算两张房间边（`RoomOnly`，d-819 / ADR-073 D13）。
 ///
 /// 不重生几何、不动模型行、不动空间树：每个有回执的根拿它在投影里的记录
@@ -1134,8 +1164,8 @@ pub(crate) fn render_panel_delta_statements(
 /// 本库的全部根，仍由调用方对 `DbSet@T` 的根清单判——这里不枚举文件。
 ///
 /// **定向**（[`RootScope::Targeted`]，反向传播，2026-09-17）：根集换成反查命中的那几根——投影里的按集合筛、
-/// 集合里不在投影里的回读库——其余一字不改：同一个判定入口、同一套渲染、同一种装块，多的只是第一笔事务前面
-/// 的面板级处置语句（不在册清边 / 只改号改列）。
+/// 集合里不在投影里的回读库——其余一字不改：同一个判定入口、同一套渲染、同一种装块，多的只是最后一笔事务末尾
+/// 的面板级处置语句（不在册清边 / 只改号改列 / 要反查的面板自己的拓扑边；F1 2026-09-19 从第一笔挪到最后一笔）。
 ///
 /// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
 /// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
@@ -1149,8 +1179,8 @@ pub async fn recompute_dbnum_room_edges(
 ) -> anyhow::Result<RoomEdgeRecompute> {
     let started = std::time::Instant::now();
     let scope = ProjectionScope::Current;
-    // 定向：命中集合（打包 refno）；整库：`None`。
-    let (targeted, prelude): (Option<BTreeSet<i64>>, &str) = match root_scope {
+    // 定向：命中集合（打包 refno）+ 面板级语句（进最后一笔）；整库：`None`、空。
+    let (targeted, panel_statements): (Option<BTreeSet<i64>>, &str) = match root_scope {
         RootScope::All => (None, ""),
         RootScope::Targeted {
             roots,
@@ -1194,7 +1224,7 @@ pub async fn recompute_dbnum_room_edges(
         covered_roots,
         projected_roots: projected.len(),
         durable_roots: durable.len(),
-        panel_statements: prelude.matches(";\n").count(),
+        panel_statements: panel_statements.matches(";\n").count(),
         ..Default::default()
     };
     let mut pieces: Vec<(usize, String)> = Vec::new();
@@ -1262,8 +1292,11 @@ pub async fn recompute_dbnum_room_edges(
         );
     }
     out.durable_read_ms = durable_read.as_millis();
-    // 面板级处置（定向才有）作 prelude 进第一笔：删在第一笔，与整根发布同一条装块纪律。
-    let transactions = pack_publication_transactions(prelude, &pieces, "", false);
+    // 面板级处置（定向才有）作 epilogue 进**最后一笔**（F1，2026-09-19）：命中的每一根都重写之后才删面板级的边。
+    // 中途一笔写库失败留下的是「重算了、面板级还没删」的多算形状，不在册面板名下的成员边（下一个任务重走同一段时
+    // `durable_panel_members` 的证据）还在；装第一笔的话失败之后那些成员就没人找得到了（`Failed` 不盖，
+    // 下一个任务沿账本仍是定向，不是整库）。
+    let transactions = pack_publication_transactions("", &pieces, panel_statements, false);
     for statements in &transactions {
         out.max_transaction_bytes = out.max_transaction_bytes.max(statements.len());
         commit_publication_transaction(target.db, statements, "room membership recompute").await?;
@@ -6212,11 +6245,11 @@ mod tests {
 
     /// ADR-073 D13 反查（D/3），`mem://` 真测：**定向**重算只碰命中的根。A、B 都在 R1 里落库；面板搬家后只点名 A
     /// → A 的旧边删掉、ACK 换代，B 的边与 ACK**一字不动**（B 不在集合里，哪怕它同样陈旧——那是反查该不该命中它
-    /// 的事，不是这里的）；面板级 prelude 与逐根语句同一串事务：不在册的 777 的出边与 `room_panel_relate` 入边
-    /// 随第一笔一起清掉。再点名 B，B 也收敛——两次定向 == 一次整库。
+    /// 的事，不是这里的）；面板级语句与逐根语句同一串事务、装在**最后一笔**（F1 2026-09-19，此前是第一笔）：
+    /// 不在册的 777 的出边与 `room_panel_relate` 入边随最后一笔一起清掉。再点名 B，B 也收敛——两次定向 == 一次整库。
     #[tokio::test]
-    async fn a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_first()
-     {
+    async fn a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_last()
+    {
         use crate::fast_model::room_resident::PanelDelta;
         let dir = tempfile::tempdir().unwrap();
         let before_move = room_calculator_with(dir.path(), 0., None);
@@ -6335,6 +6368,160 @@ mod tests {
         assert_eq!(report.covered_roots, vec![ROOM_ROOT_B]);
         assert_eq!(report.panel_statements, 0);
         assert!(room_edges(&db).await.is_empty(), "两次定向 == 一次整库");
+    }
+
+    /// F2（2026-09-19）：要反查的面板（`PanelDelta::recalc`）**自己的** `room_panel_relate` 由面板级语句补，不靠面板
+    /// 所在的根被命中。纯函数半截：在册的先删后插（房间、房间号来自计算器的在册视图）、不在册的只删、同一块给两次只渲
+    /// 一次、按面板 refno 序、空输入空串。
+    #[test]
+    fn recalc_panel_topology_statements_follow_the_calculators_registered_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator_with(dir.path(), 0., None);
+        let unregistered = refno_from_e3d(RefNo::new(24383, 777));
+        let sql = render_recalc_panel_topology_statements(
+            &rooms,
+            [
+                refno_from_e3d(PANEL_R2),
+                unregistered,
+                refno_from_e3d(PANEL_R1),
+                refno_from_e3d(PANEL_R2),
+            ],
+        );
+        let statements: Vec<&str> = sql.split(";\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(
+            statements.len(),
+            5,
+            "R1 删 + 插、R2 删 + 插（只一次）、777 只删: {sql}"
+        );
+        assert!(sql.ends_with(";\n"), "{sql}");
+        let r1 = refno_from_e3d(PANEL_R1).to_pe_key();
+        let r2 = refno_from_e3d(PANEL_R2).to_pe_key();
+        assert_eq!(
+            statements[0],
+            format!("DELETE {r1}<-room_panel_relate"),
+            "按面板 refno 序、先删"
+        );
+        assert!(
+            statements[1].starts_with("INSERT RELATION INTO room_panel_relate [")
+                && statements[1].contains(&format!("out: {r1}"))
+                && statements[1].contains("room_num: 'R1'"),
+            "{}",
+            statements[1]
+        );
+        assert_eq!(statements[2], format!("DELETE {r2}<-room_panel_relate"));
+        assert!(
+            statements[3].contains(&format!("out: {r2}"))
+                && statements[3].contains("room_num: 'R2'"),
+            "{}",
+            statements[3]
+        );
+        assert_eq!(
+            statements[4],
+            format!("DELETE {}<-room_panel_relate", unregistered.to_pe_key()),
+            "不在册的只删、不插"
+        );
+        assert_eq!(sql.matches("INSERT RELATION").count(), 2, "同一块只渲一次");
+        assert!(render_recalc_panel_topology_statements(&rooms, []).is_empty());
+    }
+
+    /// F2（2026-09-19），`mem://` 真测：R2 新在册（FRMW 改名进关键字的形状——它的根不重生成、盒里的成员 A 才是命中
+    /// 的根）。库上先种一条指向 R2 的陈旧拓扑边（旧房间 999 → R2）与一条别的面板的现行边（501 → R1）；只点名 A、
+    /// 面板级语句带 R2 的拓扑边 → 999 → R2 删掉、601 → R2 写上、501 → R1 一字不动、A 的成员边照常重写；再跑一次幂等。
+    /// 此前定向路一条 `room_panel_relate` 都不写：整库路 / 从零初始化都会写，「两张边 == 从零初始化」在第二张表上不成立。
+    #[tokio::test]
+    async fn a_targeted_recompute_writes_the_recalc_panels_own_topology_edge() {
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 700., 800.)],
+        )]);
+        let r1 = refno_from_e3d(PANEL_R1).to_pe_key();
+        let r2 = refno_from_e3d(PANEL_R2).to_pe_key();
+        db.query(format!(
+            "INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:stale_999_600, in: pe:⟨24383_999⟩, out: {r2}, room_num: 'OLD' }}];\n\
+             INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:live_501_500, in: pe:⟨24383_501⟩, out: {r1}, room_num: 'R1' }}];"
+        ))
+        .await
+        .expect("seed topology edges")
+        .check()
+        .expect("seed statements");
+        assert_eq!(count(&db, "room_panel_relate").await, 2);
+
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R2),
+                old: None,
+                new: Some(PanelBounds([[500., 0., 0.], [1500., 1000., 1000.]])),
+            }],
+            ..PanelDelta::default()
+        };
+        let mut panel_statements = render_panel_delta_statements(&delta);
+        assert!(panel_statements.is_empty(), "recalc 不在两类面板级语句里");
+        panel_statements.push_str(&render_recalc_panel_topology_statements(
+            &rooms,
+            delta.recalc.iter().map(|entry| entry.panel),
+        ));
+        async fn topology(db: &Surreal<Any>) -> Vec<String> {
+            #[derive(serde::Deserialize)]
+            struct Edge {
+                i: String,
+                o: String,
+                room_num: String,
+            }
+            let mut response = db
+                .query("SELECT <string>in AS i, <string>out AS o, room_num FROM room_panel_relate;")
+                .await
+                .expect("topology edges")
+                .check()
+                .expect("topology statement");
+            let mut edges = response
+                .take::<Vec<Edge>>(0)
+                .expect("topology rows")
+                .into_iter()
+                .map(|edge| format!("{}->{} {}", edge.i, edge.o, edge.room_num))
+                .collect::<Vec<_>>();
+            edges.sort();
+            edges
+        }
+        for pass in 1..=2 {
+            let report = recompute_dbnum_room_edges(
+                PersistTarget::new(&db, PersistMedium::Mem),
+                &store,
+                BATCH_DBNUM,
+                &rooms,
+                None,
+                RootScope::Targeted {
+                    roots: &[ROOM_ROOT_A],
+                    panel_statements: &panel_statements,
+                },
+            )
+            .await
+            .expect("targeted recompute of A");
+            assert_eq!(
+                (report.recomputed, report.panel_statements, report.commits),
+                (1, 2, 1),
+                "第 {pass} 遍: {report:?}"
+            );
+            assert_eq!(
+                room_edges(&db).await,
+                vec![
+                    "pe:24383_500->pe:24383_10".to_string(),
+                    "pe:24383_600->pe:24383_10".to_string(),
+                ],
+                "第 {pass} 遍：A 在 R1 / R2 重叠段，成员边照常"
+            );
+            assert_eq!(
+                topology(&db).await,
+                vec![
+                    "pe:24383_501->pe:24383_500 R1".to_string(),
+                    "pe:24383_601->pe:24383_600 R2".to_string(),
+                ],
+                "第 {pass} 遍：999 → R2 删掉、601 → R2 写上、501 → R1 不动"
+            );
+        }
     }
 
     /// L1-P（2026-09-19），`mem://` 端到端：面板保护期不带盒、旧盒 `None`——「离开的成员」从库上按面板取。R1 收着 A1（边在库上）；

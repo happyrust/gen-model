@@ -1211,24 +1211,34 @@ mod tests {
             targeted.contains("&swap.to_generation,"),
             "停放给别的库的那一段以自己这一段的 to 收尾（== 计算器代号，入口对过）: {targeted}"
         );
-        // 停放（U3 b 档）只在结论定为 `Targeted` 的那一臂里、盖章之前；退整库 / Failed 的臂里没有。
+        // 停放（U3 b 档；F1 2026-09-19 改在反查完成就停）：折不出根的分类过关之后、`recompute_dbnum_room_edges(` 之前，
+        // **不以结论为条件**——反查已经完整，本库算没算齐不改变别的库欠什么；此前等结论定为 `Targeted` 才停，`Failed`
+        // 一次就把 B 库的欠账连同证据（第一笔已删的成员边）一起丢了。树不就绪 / 反查读库失败 / 仍卡住的 `return None`
+        // 都在它之前，反查说不了完整时到不了停放。
         let park = targeted
             .find("park_foreign_hits(")
-            .expect("定向成功后把别的库的命中停放给它");
+            .expect("反查完成后把别的库的命中停放给它");
+        let classified = targeted
+            .find("if !still_stuck.is_empty() {")
+            .expect("折不出根的最后一层分类");
+        let recompute_at = targeted
+            .find("recompute_dbnum_room_edges(")
+            .expect("定向重算");
         let decided = targeted
             .find("Some(uncovered) if uncovered.is_empty() => {")
             .expect("覆盖面对上的那一臂");
-        let stamped = targeted
-            .find("Some(RoomRecomputeVerdict::Targeted(generation))")
-            .expect("定向的结论");
         assert!(
-            decided < park && park < stamped,
-            "结论定为 Targeted 之后才停放（覆盖面对上的那一臂里、结论之前）: {targeted}"
+            classified < park && park < recompute_at && park < decided,
+            "停放在分类过关之后、重算之前，不等结论: {targeted}"
         );
         assert_eq!(
             targeted.matches("park_foreign_hits(").count(),
             1,
             "只此一处停放"
+        );
+        assert!(
+            targeted.contains("Some(RoomRecomputeVerdict::Targeted(generation))"),
+            "定向的结论"
         );
         assert!(
             !function_body(worker, "async fn run_room_only_recompute(")
@@ -1265,7 +1275,23 @@ mod tests {
                 && targeted.contains("roots: &roots,")
                 && targeted.contains("panel_statements: &panel_statements,")
                 && targeted.contains("render_panel_delta_statements(&swap.panels)"),
-            "两路的根并起来只重算它们，面板级语句（只有自己那一段有）作 prelude: {targeted}"
+            "两路的根并起来只重算它们，面板级语句（只有换代段有）随 RootScope::Targeted 交出去: {targeted}"
+        );
+        // F2（2026-09-19）：要反查的面板自己的 `room_panel_relate` 也补在面板级语句里（按本任务计算器的在册视图），
+        // 面板级语句整串进最后一笔（F1：`recompute_dbnum_room_edges` 里作 epilogue，不再是 prelude）。
+        assert!(
+            targeted.contains("render_recalc_panel_topology_statements(")
+                && targeted.contains("swap.panels.recalc.iter().map(|entry| entry.panel)"),
+            "链上每一块 recalc 面板自己的拓扑边随面板级语句一起写: {targeted}"
+        );
+        let adapter = function_body(
+            include_str!("../fast_model/model_db_adapter.rs"),
+            "pub async fn recompute_dbnum_room_edges(",
+        );
+        assert!(
+            adapter
+                .contains("pack_publication_transactions(\"\", &pieces, panel_statements, false)"),
+            "面板级语句作 epilogue 进最后一笔：命中的根都重写之后才删面板级的边，中途失败不丢 durable_panel_members 的证据: {adapter}"
         );
         assert!(
             targeted.contains("room_recompute_uncovered(Some(&roots), &report.covered_roots)"),

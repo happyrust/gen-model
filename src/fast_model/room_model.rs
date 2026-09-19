@@ -2696,6 +2696,14 @@ impl MemoryRoomCalculator {
         out
     }
 
+    /// 一块面板此刻的 `room_panel_relate` 那一半（与 [`Self::render_root_room_edges`] 对面板元素写的同一句：先删指向它的
+    /// 旧入边，在册再写回本代的；不在册 = 只删）。定向重算拿它给要反查的面板（`PanelDelta::recalc`）补自己的拓扑边
+    /// （F2，2026-09-19）：命中的是成员的根，面板自己的根多半不在集合里，逐根路径那一句到不了它。语句不带句尾分号。
+    pub(crate) fn render_panel_topology_statements(&self, panel: RefnoEnum) -> Vec<String> {
+        let map = self.room_panel_map();
+        render_panel_room_topology_statements(panel, map.room_of_panel(panel))
+    }
+
     fn calculate_edges<G: RoomInput>(
         &self,
         records: &[G],

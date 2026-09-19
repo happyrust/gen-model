@@ -2,6 +2,30 @@
 
 ## 2026-09-19
 
+### 房间定向重算：面板级语句挪到最后一笔、停放在反查完成就做，补 `recalc` 面板自己的 `room_panel_relate`（ADR-073 D13 追记 F1 / F2）
+
+- **为什么**：第三遍复审读出 M1 的一条连带——ADR ⑤ 写的「`Failed` → 下一个任务整库」在 M1 之后不成立：账本里那一段还在，下一个
+  任务照样接链、仍是定向；而定向的面板级删（不在册面板的 `{P}->room_relate` / `<-room_panel_relate`）装在第一笔事务、逐笔提交失败即返，
+  第一笔提交后若后面某笔写库失败，P 名下成员的边已删、没提交那几笔里的根新边没写，下一个任务重走同一段时 `durable_panel_members(P)`
+  回空、P 也没新盒——这些成员若该落到别的房间永远没人算（跨库更直接：`Failed` 不停放，B 库接段时证据已被 A 删掉）。另一条：
+  `render_panel_delta_statements` 只处理 `removed` / `renumbered`，`recalc` 面板自己的「房间 → 面板」边只有它自己的根被重算才写，而反查
+  命中的是成员的根——FRMW 改名进关键字（NAME 是元数据、根不重生成）→ 成员的 `room_relate` 齐了、面板的 `room_panel_relate` 一条没有，
+  「两张边 == 从零初始化」在第二张表上不成立（今天没有生产读者，所以看不见）。
+- **改动**：F1——`recompute_dbnum_room_edges` 里面板级语句从 `pack_publication_transactions` 的 prelude 挪到 epilogue（最后一笔）：命中的
+  根都重写之后才删面板级的边，中途失败留下的是多算形状、证据还在；`run_targeted_room_recompute` 的 `park_foreign_hits` 从「结论定为
+  `Targeted` 之后」提前到反查完成、分类过关之后、重算之前，不以结论为条件（同段再停是并集，重试幂等）。F2——
+  `MemoryRoomCalculator::render_panel_topology_statements(panel)` + `model_db_adapter::render_recalc_panel_topology_statements(rooms, panels)`
+  （按本任务计算器的在册视图，refno 序去重，在册先删后插、不在册只删），`run_targeted_room_recompute` 拼在各段面板级语句之后。
+  ADR-073 D13 追记 F1 / F2、⑤ 与钉 22 / 23 改口、钉 32。
+- **验证**：`cargo test --lib` 定向 30 项全绿——钉 `the_targeted_recompute_falls_back_…` 改口（`classified < park < recompute`、`park < decided`、
+  epilogue 字面）；`mem://` `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_last`（改名，终态不变）；新
+  `recalc_panel_topology_statements_follow_the_calculators_registered_view`（五例）、新
+  `a_targeted_recompute_writes_the_recalc_panels_own_topology_edge`（R2 新在册、只点名成员 A → 陈旧 999 → R2 删掉、601 → R2 写上、
+  别的面板现行边不动、成员边照常；再跑一遍幂等）。相关模块 398 绿 / 1 红（`the_extra_stamp_knob_is_off_unless_it_is_given`——
+  `vendor/e3d-model` 工作树里别的会话把 `PLACEMENT_STAMP_ATTRIBUTES` 改成 `["CACHID","SPAMAP"]` 未提交，与房间无关）；
+  `cargo check --all-targets` 零错；rustfmt 四个文件 hunk 数与 HEAD 相同；CRLF 一致。live 待补：FRMW 改名进关键字 → 每块新在册面板
+  各一条 `room_panel_relate`；定向中途写库失败一次 → 下一窗同一段重走仍完整。
+
 ### 房间反查：旧盒退役——只问新盒 + 库上成员边，`protected_bounds` 删掉（ADR-073 D13 追记 L1-P 第二步）
 
 - **为什么**：L1-P（`1e7dbfd91`）之后旧盒只剩一个用处——在途还没落库的根靠它；而那些根随它自己那一台计算器落库、由 ③ 兜底，
