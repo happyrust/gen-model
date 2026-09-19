@@ -2,6 +2,23 @@
 
 ## 2026-09-19
 
+### 网格目录只剩一个解析口：`PLANT_ASSET_ROOT` 压过配置 `meshes_path`，生成落盘 / `/assets/meshes` / 房间面板预热同一个目录（ADR-068 追记 D7，issue #030）
+
+- **为什么**：`options::apply_asset_root` 只把 `PLANT_ASSET_ROOT\meshes` 写进 `DbOptionExt.inner` 那一份克隆，而全仓 22 处直接拿
+  `aios_core::get_db_option().get_meshes_path()`（只认配置 `meshes_path`）。配了 `meshes_path` 又设了 `PLANT_ASSET_ROOT` 的部署
+  （2026-09-19 f13 隔离部署 `0.1.28+g082d092d7e01`）：初始化把网格写到 `<ws>\meshes`，房间常驻模型去 `<ws>\assets\meshes` 找面板网格
+  → 230 块面板 `stage=mesh-warm` 全缺、`room=degraded`、`Watch-InitRun` 永远到不了 DONE，而两库初始化照样 in_sync——两条路径各自都
+  「成功」。f20 / f37b 靠 `assets\meshes → meshes` 的 junction 绕过去，没人看见。
+- **改动**：`options::meshes_dir_of / meshes_dir_for / meshes_dir`（`PLANT_ASSET_ROOT` → 配置 `meshes_path` → `asset_root()/meshes`）
+  是唯一解析口；22 处直调全改走它，`apply_asset_root` 退成把答案写回 `meshes_path`；`clippy.toml` `disallowed-methods` 禁
+  `DbOption::get_meshes_path`（lib 顶上 `#![allow(warnings)]` 之后补 `#![deny(clippy::disallowed_methods)]`，负向探针实测拦得住），
+  `meshes_dir_is_the_only_resolver` 扫 `src/` 再守一遍；配置被压掉时 `run_app` / `run_cli` 启动打一次
+  `⚠ DbOption.toml 里的 meshes_path = … 被环境变量 PLANT_ASSET_ROOT 压过 …`（`meshes_dir_notice`）。`mesh_glb` 那条钉改口成钉
+  `crate::options::meshes_dir()`。
+- **验证**：`cargo test --release --lib -- meshes_dir apply_asset_root mesh_glb_handler …` 新增四条 + 改口一条全绿；live：f13 同一份
+  配置、拆掉 junction、清库重跑——启动日志出现那句 ⚠，`[房间初始化] … 230/230`、`room=ready`，网格全部落在 `<ws>\assets\meshes`、
+  配置指的 `<ws>\meshes` 保持为空，两库 in_sync、`Watch-InitRun` DONE（数字见 ADR-068 D7 末尾）。
+
 ### 房间 F3 落库：水位行多一格 `model_room_stray_generations`——盖章之后按另一代写过根，重启不丢（ADR-073 D13 追记 F3 落库、钉 34）
 
 - **为什么**：F3 的证据（进程内 ACK 的房间代号）随重启消失。库上 g1、中间那一代 g2 由 write-behind 刷进库的根、常驻回到 g1、

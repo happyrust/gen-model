@@ -346,7 +346,7 @@ pub async fn generate_historical(
         generated.elements,
         Vec::new(),
         &generated.owners,
-        &option.get_meshes_path(),
+        &crate::options::meshes_dir_for(option),
     )
     .await
     .map_err(|e| HistoricalModelError::new("SNAPSHOT_COMMIT_FAILED", e))?;
@@ -408,7 +408,7 @@ fn classify_generation_error(error: anyhow::Error) -> HistoricalModelError {
 fn source_service() -> anyhow::Result<E3dModelService> {
     let option = aios_core::get_db_option();
     let (pins, locator) = current_mdb_sources()?;
-    E3dModelService::from_source_files(pins, locator, option.get_meshes_path())
+    E3dModelService::from_source_files(pins, locator, crate::options::meshes_dir_for(option))
 }
 
 /// 解一个库文件上的时点选择。**当前投影解「最新」也走这里**（ADR-054 实施约束 1：一把尺子），

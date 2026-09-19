@@ -103,7 +103,7 @@ pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> a
     let records = store.records_of_root(scope, root).into_iter()
         .filter(|record| record.source_refno == native_member).collect::<Vec<_>>();
     let model = rooms.clone();
-    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir();
     let version = definition.clone();
     let session = i32::try_from(receipt.source_sesno).context("room session overflow")?;
     let mut edges = tokio::task::spawn_blocking(move ||

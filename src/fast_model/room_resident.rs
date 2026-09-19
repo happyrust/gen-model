@@ -1350,7 +1350,7 @@ async fn preload_panel_projection(
 ) -> anyhow::Result<PanelPreload> {
     use crate::data_interface::frozen_source::FrozenSource;
     use crate::fast_model::{e3d_model_service::E3dModelService, model_artifact};
-    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir();
     let cache_dir = mesh_dir.join("room-input-cache");
     let mut dependencies = tokens.to_vec();
     for pin in crate::fast_model::e3d_model_service::current_mdb_sources()?.0 {
@@ -2511,7 +2511,7 @@ impl ResidentInputs {
             hierarchy,
             room_key_words: option.get_room_key_word(),
             match_room_fn,
-            mesh_dir: option.get_meshes_path(),
+            mesh_dir: crate::options::meshes_dir_for(option),
         })
     }
 }
@@ -3122,7 +3122,7 @@ mod tests {
         )
         .await?;
         let load_ms = started.elapsed().as_millis();
-        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        warm_for_install(&mut model, &crate::options::meshes_dir_for(option)).await?;
         let stats = model.stats();
         let report = serde_json::json!({
             "project": option.project_name, "mdb": option.mdb_name,
@@ -3293,7 +3293,7 @@ mod tests {
         )
         .await
         .context("缺一个 DESI 文件时常驻模型必须照样建起来（D8）")?;
-        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        warm_for_install(&mut model, &crate::options::meshes_dir_for(option)).await?;
         anyhow::ensure!(
             model
                 .missing_dbnums
@@ -3316,8 +3316,9 @@ mod tests {
             "{state:?}"
         );
         let generation = model.input_version();
-        let calculator = MemoryRoomCalculator::new(Arc::new(model), option.get_meshes_path())
-            .context("Degraded 的模型照样冻得出计算器（D10）")?;
+        let calculator =
+            MemoryRoomCalculator::new(Arc::new(model), crate::options::meshes_dir_for(option))
+                .context("Degraded 的模型照样冻得出计算器（D10）")?;
         anyhow::ensure!(calculator.resident_generation() == generation);
         let restore = lifecycle();
         set_lifecycle(state);
@@ -3378,7 +3379,7 @@ mod tests {
             Arc::<MeshCache>::default(),
         )
         .await?;
-        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        warm_for_install(&mut model, &crate::options::meshes_dir_for(option)).await?;
         anyhow::ensure!(
             model.missing_panels.is_empty(),
             "room definitions incomplete"
@@ -3387,9 +3388,10 @@ mod tests {
         let room_version = model.input_version();
         let sources = model.source_tokens.clone();
         let expected_files = sources.len();
-        let calculator = MemoryRoomCalculator::new(Arc::new(model), option.get_meshes_path())?;
+        let calculator =
+            MemoryRoomCalculator::new(Arc::new(model), crate::options::meshes_dir_for(option))?;
         let memory = ModelMemoryStore::default();
-        let cache_dir = option.get_meshes_path().join("model-input-cache");
+        let cache_dir = crate::options::meshes_dir_for(option).join("model-input-cache");
         let dependencies = crate::fast_model::e3d_model_service::current_mdb_sources()?
             .0
             .into_iter()
@@ -3418,9 +3420,12 @@ mod tests {
             let mut cached = 0;
             for root in &roots {
                 let root = parse_refno(&root.root.to_string())?;
-                if let Some(commit) =
-                    model_artifact::load(&cache_dir, &option.get_meshes_path(), &input, root)
-                {
+                if let Some(commit) = model_artifact::load(
+                    &cache_dir,
+                    &crate::options::meshes_dir_for(option),
+                    &input,
+                    root,
+                ) {
                     memory.commit(ProjectionScope::Current, vec![commit]);
                     cached += 1;
                 } else {

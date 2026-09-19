@@ -995,7 +995,7 @@ async fn recalc_panel_membership_inner(
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
     let members = match cal_room_refnos_from(
-        &db_option.get_meshes_path(),
+        &crate::options::meshes_dir_for(db_option),
         panel,
         &exclude,
         resident,
@@ -1292,7 +1292,7 @@ async fn load_panel_index_from(
     resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
     let mut index = PanelIndex {
-        mesh_dir: db_option.get_meshes_path(),
+        mesh_dir: crate::options::meshes_dir_for(db_option),
         resident,
         ..Default::default()
     };

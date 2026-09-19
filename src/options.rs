@@ -780,10 +780,103 @@ fn meshes_dir_from_asset_root(asset_root: Option<OsString>) -> Option<PathBuf> {
         .map(|root| root.join("meshes"))
 }
 
-pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
-    if let Some(meshes_dir) = meshes_dir_from_asset_root(std::env::var_os("PLANT_ASSET_ROOT")) {
-        option.meshes_path = Some(meshes_dir.to_string_lossy().into_owned());
+/// 网格目录的**唯一解析口**（ADR-068 追记 D7，2026-09-19）。
+///
+/// 顺序：`PLANT_ASSET_ROOT`（非空白）→ `<root>\meshes`；否则配置里的 `meshes_path`；否则
+/// [`asset_root`] 兜底出来的那个 `assets` 下的 `meshes`。与 `/assets` ServeDir 认同一枚环境变量、
+/// 同一条优先级——浏览器端取 `.mesh` 走 `/assets/meshes/<hash>.mesh`，挂的是 `asset_root()`；
+/// 生成侧落盘、`/api/v1/meshes/{hash}` 直读、常驻房间模型预热面板网格，都得是同一个目录。
+///
+/// 此前只有 `DbOptionExt.inner`（[`get_db_option_ext`] 经 [`apply_asset_root`]）带这一层覆盖，而
+/// 生成侧与十几处读侧直接拿 `aios_core::get_db_option().get_meshes_path()`（只认配置 `meshes_path`）。
+/// 配了 `meshes_path` 又设了 `PLANT_ASSET_ROOT` 的部署（2026-09-19 f13 实测）：初始化把网格写到
+/// `<ws>\meshes`，房间常驻模型到 `<ws>\assets\meshes` 找面板网格 → 230 块面板 `stage=mesh-warm`
+/// 全缺、房间 degraded，而两库初始化照样 in_sync——两条路径各自都「成功」，正是 ADR-075 D6 记过的
+/// 那种静默失效。所以它是一个函数而不是两处各算各的。
+///
+/// 只解析、不碰磁盘；要顺手建目录用 [`meshes_dir`] / [`meshes_dir_for`]。
+pub fn meshes_dir_of(option: &DbOption) -> PathBuf {
+    resolve_meshes_dir(
+        std::env::var_os("PLANT_ASSET_ROOT"),
+        option.meshes_path.as_deref(),
+        || asset_root(),
+    )
+}
+
+fn resolve_meshes_dir(
+    asset_root_env: Option<OsString>,
+    configured: Option<&str>,
+    fallback_asset_root: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    if let Some(dir) = meshes_dir_from_asset_root(asset_root_env) {
+        return dir;
     }
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(configured) => PathBuf::from(configured),
+        None => fallback_asset_root().join("meshes"),
+    }
+}
+
+/// 全局配置下的网格目录，**并保证目录存在**——沿用 `DbOption::get_meshes_path` 的建目录语义，
+/// 生成侧与读侧此前都靠它。全仓只许经这里（或 [`meshes_dir_for`]）拿网格目录，不许再直接调
+/// `get_meshes_path()`：`clippy.toml` 的 `disallowed-methods` 与 `meshes_dir_is_the_only_resolver`
+/// 两道钉守着。
+pub fn meshes_dir() -> PathBuf {
+    meshes_dir_for(aios_core::get_db_option())
+}
+
+/// 同 [`meshes_dir`]，按给定的那份配置解析（历史模型服务、用例夹具带着自己的 `DbOption` 时）。
+pub fn meshes_dir_for(option: &DbOption) -> PathBuf {
+    let dir = meshes_dir_of(option);
+    if let Err(error) = fs::create_dir_all(&dir) {
+        // 不像 `get_meshes_path` 那样 unwrap：目录建不出来的现场，随后第一笔落盘会用它自己的
+        // 错误说清是哪个文件；解析口本身不该成为 panic 源，但也不能一声不响。
+        eprintln!("⚠ 网格目录 {} 建不出来：{error}", dir.display());
+    }
+    dir
+}
+
+/// `PLANT_ASSET_ROOT` 把配置里的 `meshes_path` 压掉时给人看的那一句；两边同一个目录或没配
+/// `meshes_path` 时不出声。与 [`store_mode_notices`] 同一条纪律：设了却没生效的配置必须当场点名。
+pub fn meshes_dir_notice() -> Option<String> {
+    meshes_dir_notice_for(
+        std::env::var_os("PLANT_ASSET_ROOT"),
+        aios_core::get_db_option().meshes_path.as_deref(),
+    )
+}
+
+fn meshes_dir_notice_for(
+    asset_root_env: Option<OsString>,
+    configured: Option<&str>,
+) -> Option<String> {
+    let effective = meshes_dir_from_asset_root(asset_root_env)?;
+    let configured = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if same_dir(Path::new(configured), &effective) {
+        return None;
+    }
+    Some(format!(
+        "⚠ DbOption.toml 里的 meshes_path = {configured:?} 被环境变量 PLANT_ASSET_ROOT 压过：网格目录按 {} 生效\
+         （生成落盘、/assets/meshes、房间面板预热同一个目录，ADR-068 D7）。要用配置里那个目录，就别设 PLANT_ASSET_ROOT，\
+         或把它指到那个目录的上一级。",
+        effective.display()
+    ))
+}
+
+/// 两个目录是不是同一个：都在盘上就按规范化路径比（junction / 大小写 / 斜杠方向都吸掉），
+/// 有一个还不存在就退回字面比较。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// `DbOptionExt.inner` 那一格 `meshes_path` 写成解析后的**生效值**：`run_app` 往下传的
+/// `db_option`、设置向导的回显，读到的与 [`meshes_dir`] 是同一个答案，而不是各自再算一遍。
+pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
+    option.meshes_path = Some(meshes_dir_of(&option).to_string_lossy().into_owned());
     option
 }
 
@@ -3731,6 +3824,127 @@ mod tests {
             Some(PathBuf::from(r"C:\Legacy Assets").join("meshes"))
         );
         assert_eq!(meshes_dir_from_asset_root(Some(OsString::from("  "))), None);
+    }
+
+    /// 网格目录的三级优先级（ADR-068 D7）：`PLANT_ASSET_ROOT` 压过配置 `meshes_path`，配置压过
+    /// `asset_root()` 兜底；空白一律当没设。这是 f13 那次「生成写 `<ws>\meshes`、房间去 `<ws>\assets\meshes`
+    /// 找」分家的对照物——三处读法现在只剩这一个函数，它的优先级就是全仓的优先级。
+    #[test]
+    fn meshes_dir_prefers_asset_root_then_configured_path_then_fallback() {
+        let fallback = || PathBuf::from(r"D:\run\assets");
+        assert_eq!(
+            resolve_meshes_dir(
+                Some(OsString::from(r"D:\run\assets")),
+                Some(r"D:/run/meshes"),
+                fallback
+            ),
+            PathBuf::from(r"D:\run\assets").join("meshes"),
+            "环境变量在，配置里的 meshes_path 不再各算各的"
+        );
+        assert_eq!(
+            resolve_meshes_dir(Some(OsString::from("  ")), Some(r"D:/run/meshes"), fallback),
+            PathBuf::from(r"D:/run/meshes"),
+            "空白环境变量当没设，配置生效"
+        );
+        assert_eq!(
+            resolve_meshes_dir(None, Some("   "), fallback),
+            PathBuf::from(r"D:\run\assets").join("meshes"),
+            "配置留空白也当没配，落到 asset_root()/meshes"
+        );
+        assert_eq!(
+            resolve_meshes_dir(None, None, fallback),
+            PathBuf::from(r"D:\run\assets").join("meshes")
+        );
+    }
+
+    /// 配置被环境变量压掉时必须出声；两边同一个目录、或者根本没配 `meshes_path`，不出声。
+    #[test]
+    fn meshes_dir_notice_only_when_the_configured_path_is_overridden() {
+        let notice = meshes_dir_notice_for(
+            Some(OsString::from(r"D:\run\assets")),
+            Some(r"D:\run\meshes"),
+        )
+        .expect("被压掉要点名");
+        assert!(notice.contains("meshes_path"), "{notice}");
+        assert!(notice.contains("PLANT_ASSET_ROOT"), "{notice}");
+        assert!(notice.contains(r"D:\run\assets\meshes"), "{notice}");
+        assert_eq!(
+            meshes_dir_notice_for(
+                Some(OsString::from(r"D:\run\assets")),
+                Some(r"D:\run\assets\meshes")
+            ),
+            None,
+            "同一个目录不算被压"
+        );
+        assert_eq!(
+            meshes_dir_notice_for(Some(OsString::from(r"D:\run\assets")), None),
+            None
+        );
+        assert_eq!(meshes_dir_notice_for(None, Some(r"D:\run\meshes")), None);
+    }
+
+    /// `apply_asset_root` 只是把解析口的答案写回 `meshes_path`，不另有一套算法：
+    /// 没设环境变量时它落的就是解析口的兜底 / 配置值，而不是保留 `None`。
+    #[test]
+    fn apply_asset_root_materializes_the_resolver_answer() {
+        let mut option = DbOption::default();
+        option.meshes_path = Some(r"D:\somewhere\meshes".into());
+        let applied = apply_asset_root(option.clone());
+        assert_eq!(
+            applied.meshes_path.as_deref().map(PathBuf::from),
+            Some(meshes_dir_of(&option)),
+            "写回的必须与 meshes_dir_of 同一个答案"
+        );
+    }
+
+    /// 全仓拿网格目录只许经 `options::meshes_dir*`——`get_meshes_path()` 只认配置里的 `meshes_path`，
+    /// 与 `PLANT_ASSET_ROOT` 那一层覆盖各算各的，正是 2026-09-19 房间面板预热全缺的根因。
+    /// `clippy.toml` 的 `disallowed-methods` 在 clippy 侧守同一件事；这里在 `cargo test` 侧再守一次，
+    /// 免得只跑测试的机器放它过去。
+    #[test]
+    fn meshes_dir_is_the_only_resolver() {
+        fn walk(dir: &Path, offenders: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).expect("src 可读") {
+                let path = entry.expect("目录项可读").path();
+                if path.is_dir() {
+                    walk(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(OsStr::to_str) != Some("rs") {
+                    continue;
+                }
+                if path.file_name().and_then(OsStr::to_str) == Some("options.rs")
+                    && path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(OsStr::to_str)
+                        == Some("src")
+                {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).expect("源码可读");
+                for (index, line) in source.lines().enumerate() {
+                    if line.contains("get_meshes_path(") && !line.trim_start().starts_with("//") {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            path.display(),
+                            index + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        let mut offenders = Vec::new();
+        walk(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut offenders,
+        );
+        assert!(
+            offenders.is_empty(),
+            "网格目录只许经 options::meshes_dir / meshes_dir_for / meshes_dir_of 拿（ADR-068 D7）：\n{}",
+            offenders.join("\n")
+        );
     }
 
     #[test]

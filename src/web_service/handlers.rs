@@ -1229,9 +1229,7 @@ pub async fn mesh_glb(
             "geo_hash 只允许字母、数字与下划线: {stem}"
         )));
     }
-    let path = aios_core::get_db_option()
-        .get_meshes_path()
-        .join(format!("{stem}.mesh"));
+    let path = crate::options::meshes_dir().join(format!("{stem}.mesh"));
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1552,7 +1550,7 @@ pub async fn spatial_surface_clearance(
         ),
         Err(_) => (String::new(), String::new()),
     };
-    let meshes_dir = aios_core::get_db_option().get_meshes_path();
+    let meshes_dir = crate::options::meshes_dir();
     let response = surface_clearance::run(&aios_core::SUL_DB, meshes_dir, &params, nouns)
         .await
         .map_err(|error| match error {
@@ -3450,8 +3448,8 @@ mod tests {
             "必须过 geo_hash 字符集门再拼路径: {body}"
         );
         assert!(
-            body.contains("get_meshes_path()"),
-            "网格目录必须与生成侧同一份配置（meshes_path）: {body}"
+            body.contains("crate::options::meshes_dir()"),
+            "网格目录必须与生成侧走同一个解析口（options::meshes_dir，ADR-068 D7）: {body}"
         );
     }
 

@@ -30,6 +30,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use surrealdb::sql::Thing;
 
+/// 网格目录：有配置按它解析，没有就按一份默认 `DbOption` 解析——两条路都经
+/// `options::meshes_dir_for` 这一个解析口（ADR-068 D7），不再各写一句 `"assets/meshes"`。
+fn meshes_dir_of_option(option: Option<&DbOption>) -> PathBuf {
+    match option {
+        Some(option) => crate::options::meshes_dir_for(option),
+        None => crate::options::meshes_dir_for(&DbOption::default()),
+    }
+}
+
 ///生成小的几何体
 #[tokio::test]
 #[ignore = "manual integration: requires the configured Surreal project and mesh files"]
@@ -158,10 +167,7 @@ pub async fn gen_meshes_in_db(
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
     // let time = std::time::Instant::now();
-    let dir = option
-        .as_ref()
-        .map(|x| x.get_meshes_path())
-        .unwrap_or("assets/meshes".into());
+    let dir = meshes_dir_of_option(option.as_deref());
 
     // Check if the directory exists, if not, create it
     if !std::path::Path::new(&dir).exists() {
@@ -194,10 +200,7 @@ pub async fn booleans_meshes_in_db(
         return Ok(());
     }
     for chunk in refnos.chunks(100) {
-        let dir = option
-            .as_ref()
-            .map(|x| x.get_meshes_path())
-            .unwrap_or("assets/meshes".into());
+        let dir = meshes_dir_of_option(option.as_deref());
         let replace_exist = option
             .as_ref()
             .map(|x| x.is_replace_mesh())
@@ -231,10 +234,7 @@ pub async fn process_meshes_update_db(
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
     let time = std::time::Instant::now();
-    let dir = option
-        .as_ref()
-        .map(|x| x.get_meshes_path())
-        .unwrap_or("assets/meshes".into());
+    let dir = meshes_dir_of_option(option.as_deref());
     // dbg!(&target_refnos);
     // 生成模型文件
     gen_inst_meshes(&refnos, replace_exist, dir.clone()).await?;
@@ -414,7 +414,7 @@ async fn process_one_model_root(
     refno: RefnoEnum,
     failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<RootStageTiming> {
-    let dir = dboption.get_meshes_path();
+    let dir = crate::options::meshes_dir_for(dboption);
     let replace_exist = dboption.is_replace_mesh();
     let mut timing = RootStageTiming::default();
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]

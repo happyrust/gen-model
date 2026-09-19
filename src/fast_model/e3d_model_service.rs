@@ -1165,7 +1165,7 @@ impl E3dModelService {
             locator,
             project_files,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-            mesh_dir: option.get_meshes_path(),
+            mesh_dir: crate::options::meshes_dir_for(option),
             generation_identity: None,
             frozen_file_digests: BTreeMap::new(),
         })

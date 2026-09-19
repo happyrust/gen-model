@@ -958,7 +958,7 @@ pub fn frozen_room_calculator()
         return Ok(None);
     }
     let model = crate::fast_model::room_resident::current_for_calculation()?;
-    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir();
     crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir).map(Some)
 }
 
