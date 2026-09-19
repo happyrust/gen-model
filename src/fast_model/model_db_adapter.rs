@@ -6197,6 +6197,7 @@ mod tests {
                 new: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
             }],
             geometry_changed: 1,
+            old_box_unknown: 0,
         };
         let sql = render_panel_delta_statements(&delta);
         assert_eq!(

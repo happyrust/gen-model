@@ -2,6 +2,23 @@
 
 ## 2026-09-19
 
+### 房间反查：旧盒说不出的保护成员重新有几何，那一段不许定向（ADR-073 D13 追记 L1-R）
+
+- **为什么**：复审 L1（`b21613278`）读出它的漏洞——上一次可用盒只活在进程内，而**丢盒的方向是漏算**：换代段账本丢了是多算
+  （③ 兜底整库），盒丢了却让那一段照常定向、只问新盒。形状：面板有几何、有边 → `.mesh` 读不出进保护集 → **重启** → 本进程第一代
+  它仍在保护集、没有上一代可带 → 恢复且挪位 → `old = None`，此前与「从没可用过」同一处置，旧位置里成员的陈旧边没人清。
+- **改动**：`ResidentRoomModel::unknown_bounds`——本进程第一代（`install` 时槽里没有上一代）`missing_panels` 里的每一块都「说不出」，
+  之后逐代带下去（旧代给不出盒且旧代里它也说不出才算；本进程亲眼见它新在册、一直没几何的不算）；`PanelDelta::old_box_unknown` +
+  `fully_known()`；`room_recompute::walk_chain` 只接 `fully_known` 的换代段——有说不出的段就接不上、整库兜底（漏算换成多算，
+  一次重启 + 一次恢复才触发一次）。账本照记、`summary()` 多一句 `old_box_unknown=N`，`/health` 看得见。ADR-073 D13 追记 L1-R、
+  源码钉 30。更精确的做法（从库上按房间取此刻的成员当「离开的」集合，不依赖旧盒）留作后续。
+- **验证**：`cargo test --lib` 定向 23 项全绿（`a_panel_that_regains_geometry_…` 尾段改成 L1-R 六步：第一代保护 → 仍保护 → 恢复
+  `old_box_unknown = 1` / `fully_known()` 假 / 账本末段同样 1 → 再保护再恢复 `old = [40, 41]`、0 → 反例新在册一直没几何再有几何 0；
+  `install_reports_which_panels_moved_…` 第二代改口；`scope_for_task` 真值表多一行 → 整库）；`batch_worker room_ model_db_adapter
+  query_service task_end dbnum_initialize window_root_plan model_dbnum_ensure handlers` 392 绿 0 红；`cargo check --all-targets` 零错；
+  rustfmt 三个文件 hunk 数与 HEAD 相同；CRLF 文件行尾一致。live 待补：一块 PANE `.mesh` 读不出 → 重启 → 恢复并挪位 → 该窗
+  「…退整库」、`swap_ledger.segments` 末段带 `old_box_unknown=1`。
+
 ### 房间反查：保护集成员带着上一次可用的盒、定向成功只清消费过的停放段、库读计时（ADR-073 D13 追记 L1 / L3 / L2）
 
 - **为什么**：审核（`output/show-me-room-increment.html` §06）剩下的三条低档。L1 是一条窄漏算：一块面板「有几何、有边 → 某代

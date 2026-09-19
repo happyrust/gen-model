@@ -257,6 +257,16 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   有几何的不带、不在册的不带（`removed` 按面板清边不问空间）、从没可用过的没有可带；`PanelDelta::between` 的旧盒改走
   `ResidentRoomModel::last_known_bounds`（有几何 = 此刻的盒，保护中 = 带着的盒），新盒只认新代此刻有几何的。重新有几何之后它不在
   保护集、那份盒随之丢掉。不进摘要、不进 `input_version`——它不是这一代的输入，是「离开的成员在哪」的备忘。
+  **2026-09-19 追记（L1-R，旧盒说不出的保护成员不许定向）。** 复审 L1 读出它的漏洞：上一次可用盒只活在进程内，而**丢盒的方向是漏算**
+  （账本丢了是多算——③ 兜底整库；盒丢了却让那一段照常定向、只问新盒）。形状：面板 P 有几何、有边 → `.mesh` 读不出进保护集 → **重启**
+  → 本进程第一代 P 仍在保护集、没有上一代可带 → P 恢复且挪位 → 那一段 `old = None`，此前与「从没可用过」同一处置——只问新盒，
+  P 旧位置里成员的陈旧边没人清。落法：`ResidentRoomModel::unknown_bounds: BTreeSet<面板>`——本进程第一代（`install` 时槽里没有上一代）
+  `missing_panels` 里的每一块都「说不出」，之后每一代从被换下的那一代带下去（旧代给不出盒且旧代里它也说不出 = 继续说不出；旧代里
+  它不在册 / 在册却从没可用过 = 本进程亲眼见它从没有过几何，不算）；`PanelDelta::between` 数 `old_box_unknown`（`recalc` 里
+  `old = None`、`new = Some`、旧代 `unknown_bounds` 含它的），`PanelDelta::fully_known() = 非空 && old_box_unknown == 0`；
+  `room_recompute::walk_chain` 只接 `fully_known` 的换代段——有说不出的段就接不上链、整库兜底（漏算换成多算；一次重启 + 一次恢复
+  才触发一次）。账本照记（`summary()` 多一句 `old_box_unknown=N`，`/health` 看得见），准入那一侧不接。更精确的做法（从库上按房间取
+  P 此刻的成员当「离开的」集合，不依赖旧盒、也不怕重启）留作后续，这一条先把方向掰回多算。
   **2026-09-19 追记（L3，定向成功只清消费过的段）。** 审核（同页 §06 L3）：`parked_for_task` 在开工时快照本库的槽，收尾
   `room_reverse::clear(dbnum)` 清的却是槽里**此刻**的全部——任务跑着的时候别的库停进来的段（或往同一段并进来的新元素）没折过根就
   随手丢了（不漏算：账本里还有那一段，③ 欠着照样接得上，只是白丢一次免反查的捷径；今天单个批次 worker 顺序消费，撞上的机会小）。
@@ -550,6 +560,22 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       四个回库取 anc、`durable_timing()` 的形状）。
     - `run_targeted_room_recompute` 按段累加三格，「定向房间重算完成」那一行 `反查 {}（{}）` 第二格是 `affected.durable_timing()`。
     live 待补：7997 那种库上一次定向的「库上管身范围查 Nms」——N 明显压过 `durable_read_ms` / 总耗时才做 `aabb_d` 平副本（并决定回填还是分两半查）。
+30. D13 追记（L1-R，旧盒说不出的保护成员不许定向，2026-09-19）：
+    - `ResidentRoomModel::unknown_bounds`；`inherit_protected_bounds(previous: Option<&ResidentRoomModel>)`——`None`（本进程第一代）时
+      `unknown_bounds = missing_panels` 全部、`protected_bounds` 空；`Some` 时先算 `protected_bounds`，`unknown_bounds` 只收「不在
+      `protected_bounds` 里且旧代 `unknown_bounds` 含它」的；`ResidentRooms::install` 里 `model.inherit_protected_bounds(slot.current.as_deref())`
+      在 `PanelDelta::between(` 之前。
+    - `PanelDelta::old_box_unknown`（`between` 在 `dedup_by_key` 之后数：`old.is_none() && new.is_some() && old.unknown_bounds.contains(panel)`）、
+      `PanelDelta::fully_known()`；`room_recompute::walk_chain` 的换代段过滤是 `swap.panels.fully_known()`（不再是 `!is_empty()`）；
+      `summary()` 在 `old_box_unknown > 0` 时多一句 `old_box_unknown=N（旧盒说不出，定向不接这一段）`，等于 0 时一字不变。
+    - 钉 `a_panel_that_regains_geometry_after_protection_brings_its_last_usable_box_as_the_old_one` 尾段：第一代 7 有几何、8 / 9 在保护
+      → `unknown_bounds = {8, 9}`；下一代仍保护 → 继续 `{8, 9}`、那一段 `old_box_unknown = 0`；8 恢复到 [40, 41] → `recalc = [8: None → [40, 41]]`、
+      `old_box_unknown = 1`、`fully_known()` 假、账本末段同样 1；8 再保护、再恢复到 [60, 61] → `old = [40, 41]`、0；反例：本进程里新在册、
+      一直没几何的 8 再有几何 → 0（从没可用过，不是说不出）。钉 `install_reports_which_panels_moved_and_where_their_boxes_are` 第二代
+      改口（8 第一代就在保护集 → `old_box_unknown = 1`、summary 多那一句）。`scope_for_task` 真值表多一行（`regained_with_unknown_old_box()`
+      → 整库）。
+    live 待补：ams 一块 PANE `.mesh` 读不出 → 重启服务 → 恢复 `.mesh` 并挪位 → 该窗日志「…退整库」而不是「定向房间重算完成」，
+    `/health.room_build.resident.swap_ledger.segments` 末段带 `old_box_unknown=1`。
 
 ## 背景
 

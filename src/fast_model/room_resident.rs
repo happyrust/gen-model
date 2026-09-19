@@ -307,6 +307,12 @@ pub(crate) struct ResidentRoomModel {
     /// [`PanelDelta::between`] 当旧盒用：一块面板「有几何 → 几何不可用（保护，旧边留着）→ 几何又可用但位置变了」，
     /// 没有这一份，反查只问新盒，旧位置里那些成员的陈旧边没人清。不进摘要、不进 `input_version`。
     pub protected_bounds: BTreeMap<RefnoEnum, PanelBounds>,
+    /// 保护集里**说不出**上一次可用盒的面板（审核复审 L1-R，2026-09-19）：本进程第一代就在保护集里的——重启前它有没有过
+    /// 几何、边算在哪个位置，进程内无从知道——以及从它们一路带下来仍在保护的。它们重新有几何那一段旧盒是 `None`，但**不能**
+    /// 当「从没可用过、没有陈旧边」：库上可能留着重启前那个位置的边。[`PanelDelta::between`] 数进 `old_box_unknown`，
+    /// 定向准入不接这样的段（`room_recompute::walk_chain`），整库兜底——漏算换成多算。与 `protected_bounds` 不相交；
+    /// 同样不进摘要、不进 `input_version`。
+    pub unknown_bounds: BTreeSet<RefnoEnum>,
     /// MDB 声明了、搜索根里却没有文件的 DESI `(dbnum, 名字)`（ADR-073 D8）：模型按有的文件建，
     /// 缺失库里的房间与面板不在册。
     pub missing_dbnums: Vec<(u32, String)>,
@@ -339,6 +345,7 @@ impl fmt::Debug for ResidentRoomModel {
             .field("missing_panels", &self.missing_panels.len())
             .field("unusable_panels", &self.unusable_panels.len())
             .field("protected_bounds", &self.protected_bounds.len())
+            .field("unknown_bounds", &self.unknown_bounds.len())
             .field("missing_dbnums", &self.missing_dbnums.len())
             .field("problems", &self.problems.len())
             .field("digest", &self.digest)
@@ -501,6 +508,7 @@ impl ResidentRoomModel {
             missing_panels,
             unusable_panels: invalid,
             protected_bounds: BTreeMap::new(),
+            unknown_bounds: BTreeSet::new(),
             missing_dbnums: Vec::new(),
             problems: Vec::new(),
             digest,
@@ -559,9 +567,19 @@ impl ResidentRoomModel {
 
     /// 换代时从被换下的那一代把保护集成员的上一次可用盒带过来（L1）：这一代 `missing_panels` 里的每一块，
     /// 旧代给得出 [`Self::last_known_bounds`] 的就记下。这一代有几何的面板不记（它的盒就是自己的）；不在册的
-    /// 不记（`removed` 按面板清边，不问空间）。旧代也给不出的（从没可用过）没有旧盒可带。
-    fn inherit_protected_bounds(&mut self, previous: &ResidentRoomModel) {
-        self.protected_bounds = self
+    /// 不记（`removed` 按面板清边，不问空间）。旧代也给不出的分两种（L1-R）：旧代里它也是「说不出」的
+    /// （[`Self::unknown_bounds`]）就继续说不出；旧代里它根本不在册 / 在册却从没可用过 = 本进程亲眼见它从没有过
+    /// 几何，没有陈旧边可清，两边都不记。
+    ///
+    /// `previous = None` 是本进程的第一代：保护集里的每一块都说不出上一次可用盒——重启前它有没有过几何、边算在哪，
+    /// 进程内无从知道，全部进 `unknown_bounds`。
+    fn inherit_protected_bounds(&mut self, previous: Option<&ResidentRoomModel>) {
+        let Some(previous) = previous else {
+            self.protected_bounds = BTreeMap::new();
+            self.unknown_bounds = self.missing_panels.iter().copied().collect();
+            return;
+        };
+        let protected: BTreeMap<RefnoEnum, PanelBounds> = self
             .missing_panels
             .iter()
             .filter_map(|panel| {
@@ -570,6 +588,16 @@ impl ResidentRoomModel {
                     .map(|bounds| (*panel, bounds))
             })
             .collect();
+        let unknown: BTreeSet<RefnoEnum> = self
+            .missing_panels
+            .iter()
+            .copied()
+            .filter(|panel| {
+                !protected.contains_key(panel) && previous.unknown_bounds.contains(panel)
+            })
+            .collect();
+        self.protected_bounds = protected;
+        self.unknown_bounds = unknown;
     }
 
     /// 一块在册面板的几何判不了（`.mesh` 读不出 / 三角化失败）：从有几何那一侧搬到
@@ -987,6 +1015,10 @@ pub(crate) struct PanelDelta {
     pub recalc: Vec<PanelMove>,
     /// `recalc` 里有几个是**只**因几何变了进来的（拓扑差没点到）；给日志 / 回执看。
     pub geometry_changed: usize,
+    /// `recalc` 里有几块是「旧代在保护集、旧盒**说不出**」的面板重新有了几何（[`ResidentRoomModel::unknown_bounds`]，
+    /// L1-R）：它们的 `old` 是 `None`，但不是「从没可用过」——库上可能留着重启前那个位置的边，只问新盒说不全。
+    /// 非零的段定向准入不接（[`Self::fully_known`]），整库兜底。
+    pub old_box_unknown: usize,
 }
 
 /// 同一块面板两代的几何是否相同：世界盒按位相同、实例集（`geo_hash` + 世界矩阵按位）作为多重集相同。
@@ -1027,6 +1059,7 @@ impl PanelDelta {
             renumbered: diff.renumbered_rooms.clone(),
             recalc: Vec::new(),
             geometry_changed: 0,
+            old_box_unknown: 0,
         };
         for panel in &diff.recalc_panels {
             delta.recalc.push(PanelMove {
@@ -1055,11 +1088,28 @@ impl PanelDelta {
         }
         delta.recalc.sort_by_key(|entry| entry.panel);
         delta.recalc.dedup_by_key(|entry| entry.panel);
+        // 旧代在保护集且旧盒说不出（本进程第一代就在保护集里、或从那时一路带下来）的面板重新有了几何：`old = None`
+        // 不是「从没可用过」，这一段的反查说不全（L1-R）。
+        delta.old_box_unknown = delta
+            .recalc
+            .iter()
+            .filter(|entry| {
+                entry.old.is_none()
+                    && entry.new.is_some()
+                    && old.unknown_bounds.contains(&entry.panel)
+            })
+            .count();
         delta
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.removed.is_empty() && self.renumbered.is_empty() && self.recalc.is_empty()
+    }
+
+    /// 这一段能不能拿去定向反查：非空，且 `recalc` 里没有旧盒说不出的面板（L1-R）。有的话旧位置里的成员说不全，
+    /// 准入链不接它（`room_recompute::walk_chain`），本库整库兜底——漏算换成多算。
+    pub(crate) fn fully_known(&self) -> bool {
+        !self.is_empty() && self.old_box_unknown == 0
     }
 
     /// 反查要拿去查空间的盒：`recalc` 的旧盒 ∪ 新盒（`removed` 不进——它的边按面板清，不用问谁在里面）。
@@ -1073,13 +1123,20 @@ impl PanelDelta {
     }
 
     pub(crate) fn summary(&self) -> String {
-        format!(
+        let mut line = format!(
             "removed={} renumbered_rooms={} recalc={} (geometry_only {})",
             self.removed.len(),
             self.renumbered.len(),
             self.recalc.len(),
             self.geometry_changed
-        )
+        );
+        if self.old_box_unknown > 0 {
+            line.push_str(&format!(
+                " old_box_unknown={}（旧盒说不出，定向不接这一段）",
+                self.old_box_unknown
+            ));
+        }
+        line
     }
 }
 
@@ -1696,12 +1753,11 @@ impl ResidentRooms {
     /// 整份换代：新的进当前、当前退上一代、再往前的丢掉。返回与上一代的拓扑差与面板变化
     /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）；面板变化非空就顺手记进换代段账本
     /// （[`SwapLedger`]，谁重建谁记，M1 2026-09-19）。保护集成员的上一次可用盒也在这里从被换下的那一代带过来
-    /// （[`ResidentRoomModel::protected_bounds`]，L1）——先带、再算面板变化，下一次换代它当旧盒。
+    /// （[`ResidentRoomModel::protected_bounds`]，L1）——先带、再算面板变化，下一次换代它当旧盒；本进程第一代
+    /// 没有上一代可带，保护集里的每一块都记成「说不出」（[`ResidentRoomModel::unknown_bounds`]，L1-R）。
     pub(crate) fn install(&mut self, mut model: ResidentRoomModel) -> InstallOutcome {
         let slot = self.slot_mut(model.manifest.form);
-        if let Some(old) = slot.current.as_ref() {
-            model.inherit_protected_bounds(old);
-        }
+        model.inherit_protected_bounds(slot.current.as_deref());
         let model = Arc::new(model);
         let (diff, panels, segment) = match slot.current.as_ref() {
             Some(old) => {
@@ -3982,9 +4038,13 @@ mod tests {
         assert_eq!(gained.old, None, "旧代里没几何：没有旧盒可查");
         assert_eq!(gained.new, Some(PanelBounds([[20.0; 3], [21.0; 3]])));
         assert_eq!(delta.query_boxes().len(), 3, "旧盒 ∪ 新盒");
+        // 8 是本进程第一代就在保护集里的：旧盒不是「从没可用过」而是「说不出」（重启前它可能有过几何、库上留着那个
+        // 位置的边），这一段只问新盒说不全——数进 `old_box_unknown`、定向准入不接它（L1-R，2026-09-19）。
+        assert_eq!(delta.old_box_unknown, 1, "{delta:?}");
+        assert!(!delta.fully_known(), "旧盒说不出的段定向不接");
         assert_eq!(
             delta.summary(),
-            "removed=0 renumbered_rooms=0 recalc=2 (geometry_only 2)"
+            "removed=0 renumbered_rooms=0 recalc=2 (geometry_only 2) old_box_unknown=1（旧盒说不出，定向不接这一段）"
         );
 
         // 第三代：R301 改号成 R309（7、8 改列）、R302 改出关键字（9 不在册了）；几何都没动。
@@ -4073,7 +4133,7 @@ mod tests {
             rooms.mesh_cache(),
         ));
         assert!(
-            first.model.protected_bounds.is_empty(),
+            first.model.protected_bounds.is_empty() && first.model.unknown_bounds.is_empty(),
             "第一代没有上一代、也没人在保护集"
         );
 
@@ -4092,6 +4152,10 @@ mod tests {
             second.model.protected_bounds,
             BTreeMap::from([(r(8), box_of(20.0))]),
             "进保护集那一代带着上一代的盒"
+        );
+        assert!(
+            second.model.unknown_bounds.is_empty(),
+            "盒说得出的保护成员不算「说不出」"
         );
         assert_eq!(second.model.last_known_bounds(r(8)), Some(box_of(20.0)));
         assert_eq!(
@@ -4161,6 +4225,10 @@ mod tests {
             "旧盒是进保护集前最后一次可用的那一个: {delta:?}"
         );
         assert_eq!(delta.geometry_changed, 1);
+        assert!(
+            delta.old_box_unknown == 0 && delta.fully_known(),
+            "旧盒说得出：这一段定向接得上: {delta:?}"
+        );
         assert_eq!(
             delta
                 .query_boxes()
@@ -4179,21 +4247,52 @@ mod tests {
             Some(2)
         );
 
-        // 反例：从没可用过的面板重新有几何——没有旧盒可带，旧盒仍是 None（第一代就没有 8 的几何）。
+        // L1-R：本进程第一代就在保护集里的面板（重启前它有没有过几何、边算在哪，进程内无从知道）——没有旧盒可带，
+        // 旧盒仍是 None，但它是「说不出」而不是「从没可用过」：重新有几何那一段 `old_box_unknown = 1`、`fully_known()` 为假，
+        // 定向准入不接这一段（`room_recompute::walk_chain`），整库兜底。
         let mut fresh = ResidentRooms::default();
-        fresh.install(model_of(
+        let first = fresh.install(model_of(
             groups(),
             vec![inst(7, "box", 0.0, (0.0, 1.0))],
             fresh.mesh_cache(),
         ));
+        assert_eq!(first.model.missing_panels, vec![r(8), r(9)]);
+        assert!(
+            first.model.protected_bounds.is_empty()
+                && first.model.unknown_bounds == BTreeSet::from([r(8), r(9)]),
+            "第一代的保护成员全部说不出上一次可用盒: {:?}",
+            first.model
+        );
+        // 保护期跨代：仍说不出（8、9 都还没几何；7 挪一下让这一段非空）。
+        let still = fresh.install(model_of(
+            groups(),
+            vec![inst(7, "box", 2.0, (2.0, 3.0))],
+            fresh.mesh_cache(),
+        ));
+        assert_eq!(
+            still.model.unknown_bounds,
+            BTreeSet::from([r(8), r(9)]),
+            "说不出的状态随保护期一路带下去"
+        );
+        let delta = still.panels.expect("换代给出面板变化");
+        assert!(
+            delta.old_box_unknown == 0 && delta.fully_known(),
+            "保护成员没重新有几何，这一段不受影响: {delta:?}"
+        );
+        // 8 重新有几何：旧盒 None、这一段说不全。
         let gained = fresh.install(model_of(
             groups(),
             vec![
-                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(7, "box", 2.0, (2.0, 3.0)),
                 inst(8, "box", 0.0, (40.0, 41.0)),
             ],
             fresh.mesh_cache(),
         ));
+        assert_eq!(
+            gained.model.unknown_bounds,
+            BTreeSet::from([r(9)]),
+            "重新有几何的不再「说不出」；仍在保护的继续带"
+        );
         let delta = gained.panels.expect("换代给出面板变化");
         assert_eq!(
             delta.recalc,
@@ -4202,7 +4301,79 @@ mod tests {
                 old: None,
                 new: Some(box_of(40.0)),
             }],
-            "从没可用过：没有旧位置、没有陈旧边要清"
+            "没有旧盒可带：旧盒仍是 None"
+        );
+        assert!(
+            delta.old_box_unknown == 1 && !delta.fully_known(),
+            "旧盒说不出的面板重新有几何：这一段定向不接: {delta:?}"
+        );
+        assert!(
+            delta.summary().contains("old_box_unknown=1"),
+            "账本 / 日志里看得见: {}",
+            delta.summary()
+        );
+        assert!(
+            fresh
+                .swap_segments()
+                .last()
+                .is_some_and(|segment| segment.panels.old_box_unknown == 1),
+            "账本照记（/health 看得见），准入那一侧不接"
+        );
+        // 之后 8 再进保护、再出来：这回旧盒说得出（[40, 41]），恢复成 L1 的常路。
+        fresh.install(model_of(
+            groups(),
+            vec![inst(7, "box", 2.0, (2.0, 3.0))],
+            fresh.mesh_cache(),
+        ));
+        let back = fresh.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 2.0, (2.0, 3.0)),
+                inst(8, "box", 0.0, (60.0, 61.0)),
+            ],
+            fresh.mesh_cache(),
+        ));
+        let delta = back.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta.recalc,
+            vec![PanelMove {
+                panel: r(8),
+                old: Some(box_of(40.0)),
+                new: Some(box_of(60.0)),
+            }],
+            "本进程见过它有几何之后，旧盒就是上一次可用的那个"
+        );
+        assert!(delta.old_box_unknown == 0 && delta.fully_known());
+
+        // 真正「从没可用过」的：本进程亲眼见它新在册、一直没几何，再有几何——不是说不出，只问新盒就够。
+        let mut seen = ResidentRooms::default();
+        seen.install(model_of(
+            vec![group(5, "/1RX-RM03-R301", &[7])],
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            seen.mesh_cache(),
+        ));
+        let registered = seen.install(model_of(
+            groups(),
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            seen.mesh_cache(),
+        ));
+        assert_eq!(registered.model.missing_panels, vec![r(8), r(9)]);
+        assert!(
+            registered.model.unknown_bounds.is_empty(),
+            "本进程里新在册、一直没几何的面板：不是说不出，是从没可用过"
+        );
+        let gained = seen.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (40.0, 41.0)),
+            ],
+            seen.mesh_cache(),
+        ));
+        let delta = gained.panels.expect("换代给出面板变化");
+        assert!(
+            delta.old_box_unknown == 0 && delta.fully_known(),
+            "从没可用过：没有旧位置、没有陈旧边要清，定向照接: {delta:?}"
         );
     }
 
