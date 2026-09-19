@@ -28,6 +28,16 @@ fn target_file_current(file: &ModelFileTarget, latest_sesno: u32, digest_now: &s
     (!file.session_tracked() || latest_sesno == file.session) && digest_now == file.digest
 }
 
+/// 没有生成根的元素的答复：字段与算得出的那一份同形，只是全部为空 / 未计算——前端按
+/// `calculation_status` 分型，不必再多认一种形状。
+fn no_generation_root_reply(member: RefnoEnum) -> Value {
+    json!({"refno": member.to_string(), "memberships": [],
+        "room_membership": true, "calculation_status": "not_computed", "source": "memory",
+        "model_epoch": Value::Null, "source_sesno": Value::Null,
+        "room_definition_version": Value::Null, "published_version": Value::Null,
+        "stale": Value::Null, "publication_status": "unsupported"})
+}
+
 // Reuse the generator's identity recipe; inspect only its recorded dependencies.
 pub(crate) fn target_current(target: &ModelTarget) -> anyhow::Result<bool> {
     for file in std::iter::once(&target.design).chain(target.catalogue.iter()) {
@@ -59,11 +69,16 @@ pub(crate) async fn lookup(member: RefnoEnum, tree: Arc<DirectTreeService>) -> a
     ensure!(crate::options::room_membership() && crate::options::spatial_compute(),
         RoomNotReady("room calculation is disabled"));
     let resolve_tree = tree.clone();
-    let root = tokio::task::spawn_blocking(move || resolve_tree.generation_root_of(member.refno(),
+    let Some(root) = tokio::task::spawn_blocking(move || resolve_tree.generation_root_of(member.refno(),
         &super::generation_root::configured_delivery_unit_types()))
         .await.context("room root task failed")??
-        .ok_or(RoomNotReady("element has no owning generation root"))?.root;
-    let root = super::generation_root::refno_to_e3d(root);
+    else {
+        // 容器（WORL / SITE / ZONE …）与不在任何交付单元之下的元素没有生成根，也就没有房间归属可算：
+        // 与摄入形态（`query_service::room` 对 `generation_root = None`）同一口径回 `not_computed`。
+        // 此前抛 `RoomNotReady` → 409「updating」，前端会把一个永远不会变的容器当成「房间归属更新中」。
+        return Ok(no_generation_root_reply(member));
+    };
+    let root = super::generation_root::refno_to_e3d(root.root);
     let native_member = super::generation_root::refno_to_e3d(member);
     let store = ModelMemoryStore::global();
     let scope = ProjectionScope::Current;
@@ -148,6 +163,26 @@ mod tests {
         assert!(target_file_current(&cata, 11, "c@11"));
         assert!(!target_file_current(&cata, 12, "c@11"), "目录库前移一版就过期");
         assert!(!target_file_current(&cata, 11, "c@11-replaced"), "同一会话换了文件也过期");
+    }
+
+    /// 容器 / 无生成根的元素回 `not_computed`（与摄入形态同口径），不再是 `RoomNotReady` → 409。
+    #[test]
+    fn an_element_without_a_generation_root_is_not_computed_rather_than_updating() {
+        let reply = no_generation_root_reply(RefnoEnum::from("24381/147826"));
+        assert_eq!(reply["refno"], "24381_147826");
+        assert_eq!(reply["calculation_status"], "not_computed");
+        assert_eq!(reply["memberships"], serde_json::json!([]));
+        assert_eq!(reply["room_membership"], true);
+        assert!(reply["model_epoch"].is_null() && reply["source_sesno"].is_null());
+        let body = include_str!("room_read_through.rs")
+            .split_once("pub(crate) async fn lookup(")
+            .expect("lookup exists")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("lookup end")
+            .0;
+        assert!(!body.contains("element has no owning generation root"), "{body}");
+        assert!(body.contains("no_generation_root_reply(member)"), "{body}");
     }
 
     #[test]
