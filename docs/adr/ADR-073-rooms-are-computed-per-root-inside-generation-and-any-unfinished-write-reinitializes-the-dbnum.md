@@ -366,6 +366,23 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   换代期每 (库, 代) 一句 UPDATE 随刷盘同事务；水位行多一个写者（此前只有 `task_end` 与初始化 / 清库）——它写的是簿记不是水位，
   W3「不是第三枚水位」照旧成立，rocksdb 上与收尾那一笔同行撞事务由刷盘既有的重试退避接住。**不动的**：F3 进程内那一路原样；
   `persist_root_impl`（单根、不写边）不带这一句；ADR-079「逐根成败只活在进程里」一字不改——这一格是每库一份、集合、盖章即清。
+  **2026-09-19 晚 F3 收口总表（`76a4dd480` / `3c932e17d` / `35e022318`）。** 三笔加起来收了什么、还欠什么，一处看全（各行的细节在上面
+  两条追记与钉 33 / 34 里，这里只列结论）：
+
+  | # | 洞 / 疑点 | 收法 | 落点 | 状态 |
+  | --- | --- | --- | --- | --- |
+  | 1 | 常驻代号回到旧值，中间那一代（write-behind 按 g2 刷进库）写过的根没人补——③ 不欠、账本没段、读侧回 `ready` | ① 投影里 ACK 房间代号进准入：库上 == 常驻时代号 ≠ 这一代的根走**空段定向** `Targeted { swaps: [], parked: [], stale_roots }`；链接得通时代号不在链上任一代的根一并点名 | `76a4dd480`，钉 33，`a_stale_ack_in_an_aligned_library_is_the_debt_itself_and_goes_targeted_on_its_own` | 已收 |
+  | 2 | 原建议字面落会**回退**：普通定向只刷命中根的 ACK，盖章后其余根停在上一代 → 下一任务点名整个投影、读侧全否 | ② 定向盖章时 `align_room_acks_along_chain` 把链上没命中的根一并对齐到链尾；`recompute_dbnum_room_edges` 对空根也对齐 | `76a4dd480`，钉 33，`mem://` `a_root_generated_in_a_transient_generation_is_repaired_when_the_resident_returns` | 已收 |
+  | 3 | 读侧有 ACK 而代号 ≠ 常驻，第 2 层却替它说「就绪」 | ③ `ProcessAck::{Missing, Current, Stale}`，`Stale` 一票否决回 `not_computed` | `76a4dd480`，钉 33 | 已收 |
+  | 4 | ACK 是进程内的：中间那一代写过的根在下一个任务之前随**重启**丢 ACK，库上 == 常驻之下没人再点名 | 水位行 `model_room_stray_generations`：刷盘按 ≠ 库上那一代写边时随本组最后一笔**同事务**记、`Aligned` / `Cleared` 清、`durable_alignment` 读 → 重启后整库一次 | `3c932e17d`，钉 34，`a_stray_generation_survives_a_restart_on_the_watermark_row_and_rearms_the_recompute` | 已收 |
+  | 5 | 疑点：合块事务里一句失败**不**回滚其余语句（至少 mem 上如此）？ | **误判**。`bin/surreal.exe` 2.1.4+45013fc9（与 SDK 同一提交、同一台 executor）在 memory 与 rocksdb 各跑同一组探针：`BEGIN … COMMIT` 里任一句报错（`THROW` / 数组 `+`）整笔零提交、其余各句回 `not executed due to a failed transaction`；当时看见 A2 的边落库，是那一版 epilogue 还没进同一笔事务 | `35e022318`，`publication_error_retains_the_cause_after_rollback_errors` 连回滚本身也钉住 | 已核 |
+  | 6 | 「进程活着却丢 ACK」是不是第二个洞 | 不是：投影没有别的逐出口——`drop_cached_root` 只在 `abandon_undurable_roots`（刷盘判死）那一路，且下一窗并进 regen 重刷、按当时常驻重写边，自愈 | 源码核，没改 | 已核 |
+  | 7 | F3 追记里「ensure 按 g2 生成……写了边」说得不准 | 改口：ensure 在摄入形态 `ProjectionOnly`，边是 write-behind 刷盘那一刻 `room_stage` 那台计算器写的 | `3c932e17d`（本条 F3 追记） | 已收 |
+  | 8 | `PartialCoverage` / `Failed` 批次任务（盖 `model_sesno` 不盖 D14）按任务那一代写的边，常驻回到库上那一代后同一个洞 | 同一条写路径：任务的刷盘同样经 `persist_roots_batched_unacked_impl`，代号 ≠ 库上就记 stray；不盖章所以不清，下一任务照欠 | `3c932e17d` | 已收（同路径，未单独钉） |
+  | 9 | live：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 →（重启）→ 下一窗「ACK 代号不在链上点名 N 根」/「… F3 落库」+「整库房间重算完成」，`/dbnums.room_alignment.stray_generations` 两窗之间非空、之后消失；稳态下那一列恒空 | — | 需真库 | **待 live** |
+  | 10 | rocksdb 上水位行两个写者（刷盘 epilogue 与 `task_end` 收尾那一笔）同行撞事务 | 设计上由刷盘既有的重试退避接住 | 未在 rocksdb 上实测 | **未实测** |
+  | 11 | stray 里记着的一代在投影里**一根 ACK 都没有作证**（重启前按 g2 写过 → 重启丢 ACK → 下一任务前又有一段 g3 刷了根 → 常驻回 g1）：`scope_for_task` 只点名 g3 那几根，盖章把整格清掉，g2 那几根的陈旧边就此无人认领 | 建议规则：`stray`（去掉与库上同代的）里有任一代在 `acked` 里找不到见证 → 整库（多算不漏算）；约 10 行 + 一条纯函数钉 | 未落 | **未收**（窄：两段中间代跨一次重启、中间没有批次任务） |
+  | 12 | 代价：中间那一代生成的根即使边没变也点名重算一次、算齐前查询回 `not_computed`；每任务多一趟 O(本库投影根数) 读锁扫描；换代期每 (库, 代) 一句 UPDATE | 接受（多算不漏算；稳态零） | — | 接受不收 |
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -764,6 +781,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       按 g1 发 A1 那一格不动；按 g2 刷 A2 与它的行同一笔事务记下 `[g2]`、`failed` 为空、已含不再写；换一个空 `ModelMemoryStore` 模拟重启
       → `DurableAlignment { g1, g1, [g2] }.owed()` 含「F3 落库」→ `request_for_task` 整库 → 两根都回读库上几何 → A2 的陈旧边删掉；
       源码钉 epilogue / 三处 `note_stray_generation_written`。
+    - `publication_error_retains_the_cause_after_rollback_errors`（`35e022318`）：`BEGIN … COMMIT` 里一句报错——`THROW` 或表达式算不出（数组 `+`）——
+      整笔零提交，`SELECT * FROM publication_probe` 为空。「随本组的行同一笔事务」的前提；memory 与 rocksdb 同一台执行器，`bin/surreal.exe`
+      两边核过（D13 收口总表第 5 行）。
     live 待补：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 → **重启服务** → 下一窗日志「库上记着盖章之后本库有根按另 1 代写过边 …
     欠一次，F3 落库」+「整库房间重算完成」、`/dbnums.room_alignment.stray_generations` 在两窗之间非空、之后消失；稳态下
     `SELECT model_room_stray_generations FROM dbnum_watermark` 恒空。

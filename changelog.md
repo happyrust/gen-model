@@ -2,6 +2,16 @@
 
 ## 2026-09-19
 
+### 房间 F3 收口：ADR-073 D13 多一张「已收 / 未收」总表（`76a4dd480` / `3c932e17d` / `35e022318`），钉 34 补记回滚钉
+
+- **为什么**：F3 这一串三笔、两条追记、两组钉散在 D13 / 实施约束里，「到底收了什么、还欠什么」得翻三处才拼得全；`35e022318`
+  核掉的那条「合块事务一句失败不回滚」误判也该在 ADR 里有一行落点。
+- **改动**：D13 F3 落库追记之后加 12 行总表——已收 8 行（空段定向 / 盖章对齐链上 ACK / 读侧一票否决 / stray 落库 / 事务原子性核实 /
+  「进程活着丢 ACK」不构成第二个洞 / ensure 措辞改口 / `PartialCoverage` 同路径），待 live 1 行、未实测 1 行（rocksdb 上水位行两个写者撞事务）、
+  **未收 1 行**（stray 里记着的一代在投影里一根 ACK 都没作证时——重启前按 g2 写过、重启后下一任务前又有一段 g3 刷了根——`scope_for_task`
+  只点名 g3 那几根、盖章把整格清掉，g2 那几根无人认领；建议规则「stray 里有任一代在 `acked` 里找不到见证 → 整库」，未落）、接受不收 1 行。
+  钉 34 多一条 `publication_error_retains_the_cause_after_rollback_errors`。只动文档。
+
 ### 网格目录只剩一个解析口：`PLANT_ASSET_ROOT` 压过配置 `meshes_path`，生成落盘 / `/assets/meshes` / 房间面板预热同一个目录（ADR-068 追记 D7，issue #030）
 
 - **为什么**：`options::apply_asset_root` 只把 `PLANT_ASSET_ROOT\meshes` 写进 `DbOptionExt.inner` 那一份克隆，而全仓 22 处直接拿
