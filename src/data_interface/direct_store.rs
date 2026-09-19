@@ -73,9 +73,16 @@ fn report_schema_error(message: &str) {
 /// 按文件路径缓存的逻辑 noun 目录，见 [`DirectSchema::noun_catalog`]。
 ///
 /// 解析失败也记一格 `None`：同一对文件再问一次不会再解析一遍、也不会再刷一次日志。
+///
+/// 目录读进来之后按 attlib 给共用存储号的那几格起名（SPCO / GPART / PRTELE 上的
+/// 565843 是 `DETR` / `Detref`，不是导出里写的 `DETA`）：活 E3D 的 .NET 导出按 hash
+/// 去重，这一格的真名只有 attlib 的目录值列知道。attlib 元数据（抬头 `Detref`）要再读
+/// 一遍 attlib.dat，读不出来只影响抬头，目录照用、别名照起、抬头退回短名。
 fn shared_noun_catalog(
     layout: &Path,
     fields: &Path,
+    attlib: &e3d_attlib::AttlibData,
+    attlib_path: &Path,
 ) -> Option<Arc<e3d_io::noun_catalog::NounCatalog>> {
     type Cache = BTreeMap<(PathBuf, PathBuf), Option<Arc<e3d_io::noun_catalog::NounCatalog>>>;
     static CATALOGS: std::sync::OnceLock<Mutex<Cache>> = std::sync::OnceLock::new();
@@ -88,10 +95,23 @@ fn shared_noun_catalog(
         .or_insert_with(|| {
             let started = Instant::now();
             match e3d_io::noun_catalog::NounCatalog::read(layout, fields) {
-                Ok(catalog) => {
+                Ok(mut catalog) => {
+                    let metadata = e3d_io::attlib_metadata::AttributeMetadataCatalog::parse_file(
+                        attlib_path,
+                        attlib,
+                    )
+                    .unwrap_or_else(|error| {
+                        report_schema_error(&format!(
+                            "[E3D schema] attlib 元数据读不出来（共用存储号的别名抬头退回短名）: \
+                             attlib={}；原因: {error}",
+                            attlib_path.display()
+                        ));
+                        Default::default()
+                    });
+                    let aliased = catalog.apply_attlib_storage_aliases(attlib, &metadata);
                     report_schema_info(&format!(
                         "[E3D schema] noun 目录加载成功: layout={} fields={} nouns={} \
-                         declarations={} elapsed_ms={}",
+                         declarations={} storage_aliases={aliased} elapsed_ms={}",
                         layout.display(),
                         fields.display(),
                         catalog.noun_count(),
@@ -567,7 +587,12 @@ impl DirectSchema {
     /// `offer_backup` 每次读都新开一个 `DirectSchema`，它们不问就不付。
     pub fn noun_catalog(&self) -> Option<Arc<e3d_io::noun_catalog::NounCatalog>> {
         let (layout, fields) = self.catalog_files.as_ref()?;
-        shared_noun_catalog(layout, fields)
+        shared_noun_catalog(
+            layout,
+            fields,
+            &self.attlib,
+            &self.template_dir.join("attlib.dat"),
+        )
     }
 
     /// 一个库类型的模板文件。

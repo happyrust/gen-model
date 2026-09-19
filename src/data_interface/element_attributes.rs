@@ -985,10 +985,16 @@ fn identity_attribute(name: &str, value: Value) -> AttributeValue {
 /// 只补**目录里有**的属性。描述符里有、E3D 自己的属性面里没有的（BRAN 上的 `UDTYPE`
 /// / `WDATUM` / `RREF` / `UDATAB` …）E3D 的 `q` 同样答不上来（2026-09-18 TTY 对拍：
 /// 三个 noun 上 9 / 9 / 7 个），它们照旧不画——面板对齐的是 E3D，不是描述符。
+///
+/// 最后按 noun 给共用存储号的那几格改名：SPCO / GPART / PRTELE 上 565843 那一格 E3D 叫
+/// `Detref`（REF），只有设计 noun 上它才是 `Detail`（BOOL）——导出的目录按 hash 记名，
+/// 三个目录 noun 上都写成了 `DETA`。改的只是名字，hash 与值不动，所以放在配对都做完
+/// 之后（2026-09-19 活 E3D 定标，规则与来源见 [`NounCatalog::apply_attlib_storage_aliases`]）。
 fn materialize_type_defaults(catalog: &NounCatalog, extraction: &mut ElementExtraction) {
     catalog.apply_static_defaults(extraction);
     catalog.apply_runtime_derived(extraction);
     catalog.apply_pseudo_defaults(extraction);
+    catalog.apply_storage_aliases(extraction);
 }
 
 /// 没起过名的元素，`NAME` 的类型默认是 `unset`——但 E3D 从不印 `Name unset`，它当场
@@ -1581,8 +1587,10 @@ mod tests {
     fn e3d_tty_says_the_rows_we_cannot_render_are_merely_unset() {
         // 覆盖面按 noun 家族铺开：设计层级（SITE / ZONE / PIPE / BRAN / FTUB）、结构
         // （STRU / FRMW / SCTN / SNOD / SBFR）、管件与焊口（ELBO / REDU / WELD / ATTA）、
-        // 目录与规格（CATE / SPEC / SCYL）。BRAN 那个就是界面截图里报「34 项诊断」的
-        // `/1WCC1135/B1`。一个 E3D 会话问完全部。
+        // 目录与规格（CATE / SPEC / SCYL），再加共用存储号 565843 的三个目录 noun
+        // （SPCO ×2 / PRTELE / GPART：那一格在它们身上叫 `Detref`，在 BRAN 上叫
+        // `Detail`，2026-09-19 前面板印错名、E3D 那一页少一行）。BRAN 那个就是界面
+        // 截图里报「34 项诊断」的 `/1WCC1135/B1`。一个 E3D 会话问完全部。
         let refnos = [
             RefU64::from_two_nums(24383, 66459),
             RefU64::from_two_nums(24384, 23262),
@@ -1601,6 +1609,10 @@ mod tests {
             RefU64::from_two_nums(15192, 521),
             RefU64::from_two_nums(15192, 62134),
             RefU64::from_two_nums(15192, 67325),
+            RefU64::from_two_nums(15192, 60087),
+            RefU64::from_two_nums(15192, 235090),
+            RefU64::from_two_nums(15192, 226147),
+            RefU64::from_two_nums(15192, 226148),
         ];
         let run = run_tty_parity(&refnos);
         assert!(
@@ -1648,7 +1660,7 @@ mod tests {
     ///
     /// 这一条是**普查**，不是护栏：铺开之后冒出来的分歧分档记账、整份印出来
     /// （`TTY_CORPUS_*`），只有「E3D 印得出真值、面板一行没画」那一格是硬规矩。
-    /// 手挑的那 17 个才是每一格都必须空的那条线。
+    /// 手挑的那 21 个才是每一格都必须空的那条线。
     ///
     /// 语料跨项目取样，不是每个 refno 都在本地 `/ALL` 里；打不开的记下来、不算失败，
     /// 但读到的元素少于 100 个就说明这份 MDB 不对，直接红。
@@ -1784,10 +1796,13 @@ mod tests {
             .iter()
             .filter_map(|refno| {
                 // 语料跨项目取样：本地 `/ALL` 里没有的那几个记一笔跳过，不是失败。
-                let Ok(snapshot) = service.store.element_snapshot(*refno) else {
+                let Ok(mut snapshot) = service.store.element_snapshot(*refno) else {
                     run.unreadable.push(refno.to_slash_string());
                     return None;
                 };
+                // 描述符里的名字要先过一遍共用存储号的别名（SPCO 上的 565843 叫
+                // `DETR`），否则它与面板上那一行同格不同名，会被数成「画不出的行」。
+                noun_catalog.apply_storage_aliases(&mut snapshot.extraction);
                 let response = service.read(*refno).unwrap();
                 let rendered = response
                     .attributes
@@ -1960,7 +1975,7 @@ mod tests {
                 println!("TTY_ANSWER {refno}\t{name}\t{}\t面板=(不画)", answer(name));
             }
 
-            // 断言一条都不在这儿做：调用方按自己的严格度挑剔。手挑的那 17 个要求
+            // 断言一条都不在这儿做：调用方按自己的严格度挑剔。手挑的那 21 个要求
             // 每一格都空；整份语料是广度普查，只有「真读丢了」那一格不许有。
             let tag = |rows: &[String]| {
                 rows.iter()
