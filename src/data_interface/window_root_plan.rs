@@ -5265,6 +5265,13 @@ mod tests {
         let mut stamp_blocked: BTreeMap<&'static str, usize> = BTreeMap::new();
         // `CACHID` 混进差分把我方判定从「若忽略它」推到了哪里：`(忽略它的判定, 实际判定)`。
         let mut verdict_shifts: BTreeMap<(ProbeVerdict, ProbeVerdict), usize> = BTreeMap::new();
+        // Q5 的地（2026-09-19 `SPAMAP` 进戳表之后加的桶）：只动了摆放的候选里，戳跟着跳的是哪几个——
+        // 形状（[`placement_stamp_shape`]）× 我方判定 `[transform, regen, skip]`，再按 noun / 库 / 被排除的原因拆。
+        let mut placement_shapes: BTreeMap<String, [usize; 3]> = BTreeMap::new();
+        let mut placement_shape_nouns: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut placement_shape_anchor_nouns: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut placement_shape_dbs: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut placement_shape_excluded: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut cachid_only_causes: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut cachid_only_examples: Vec<String> = Vec::new();
         let mut cachid_only_examples_per_noun: BTreeMap<String, usize> = BTreeMap::new();
@@ -5429,6 +5436,31 @@ mod tests {
                         let (verdict, excluded) = probe_verdict(&base, &target, refno, &diff);
                         if excluded.is_some() {
                             placement_excluded += 1;
+                        }
+                        if diff.is_placement_only() {
+                            let shape = placement_stamp_shape(&diff);
+                            let slot = placement_shapes.entry(shape.clone()).or_default();
+                            slot[match verdict {
+                                ProbeVerdict::Transform => 0,
+                                ProbeVerdict::Regen => 1,
+                                ProbeVerdict::Skip => 2,
+                            }] += 1;
+                            *placement_shape_nouns
+                                .entry((shape.clone(), diff.noun.clone()))
+                                .or_default() += 1;
+                            if verdict == ProbeVerdict::Transform {
+                                *placement_shape_anchor_nouns
+                                    .entry((shape.clone(), diff.noun.clone()))
+                                    .or_default() += 1;
+                            }
+                            *placement_shape_dbs
+                                .entry((shape.clone(), name.clone()))
+                                .or_default() += 1;
+                            if let Some(reason) = &excluded {
+                                *placement_shape_excluded
+                                    .entry((shape, anonymize_refnos(reason)))
+                                    .or_default() += 1;
+                            }
                         }
                         let transition = values.as_ref().map(|(before, after)| {
                             *shapes
@@ -5896,6 +5928,65 @@ mod tests {
              我方两票门也不放行（字典没投票）→ regen。同一列的读法同上。\n\n",
         );
         report.push_str(&attribute_state_table(&non_dictionary_names, 30));
+        report.push_str(&format!(
+            "\n## 只动了摆放的候选（`is_placement_only`）：戳跟着跳的形状 × 我方判定（Q5 的地）\n\n\
+             `is_placement_only` = 至少一项摆放属性变了、其余只允许 `PLACEMENT_STAMP_ATTRIBUTES` 里的戳（今天 = {:?}）。\
+             形状标签按常量现算：「摆放」= 一个戳都没跟着跳，「摆放 + X」= X 跟着跳了；2026-09-19 `SPAMAP` 进表之后，\
+             带 `SPAMAP` 的那几行就是**新放进这一档的候选**（之前判 regen、进不了 `transform` 桶）。\
+             transform = `rigid_anchor` 判刚的合格锚点；regen = 被排除或算不出（原因在下面按规则并行，refno 抹成 `#`）；\
+             按候选判，不问 `model_transform_cheap_path` 开关。\n\n",
+            e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+        ));
+        report.push_str(
+            "| 形状 | 候选 | transform（合格锚点） | regen（被排除 / 算不出） | skip |\n|---|---:|---:|---:|---:|\n",
+        );
+        let mut placement_total = [0usize; 3];
+        for (shape, slot) in &placement_shapes {
+            for (sum, value) in placement_total.iter_mut().zip(slot) {
+                *sum += value;
+            }
+            report.push_str(&format!(
+                "| {shape} | {} | {} | {} | {} |\n",
+                slot.iter().sum::<usize>(),
+                slot[0],
+                slot[1],
+                slot[2]
+            ));
+        }
+        report.push_str(&format!(
+            "| **合计** | **{}** | **{}** | **{}** | **{}** |\n",
+            placement_total.iter().sum::<usize>(),
+            placement_total[0],
+            placement_total[1],
+            placement_total[2]
+        ));
+        for (title, rows, limit) in [
+            ("候选按 noun", &placement_shape_nouns, 15usize),
+            (
+                "transform（合格锚点）按 noun",
+                &placement_shape_anchor_nouns,
+                15,
+            ),
+            ("候选按库", &placement_shape_dbs, 15),
+            ("regen 的原因（按规则并行）", &placement_shape_excluded, 20),
+        ] {
+            report.push_str(&format!("\n### {title}（每形状前 {limit}）\n\n"));
+            report.push_str("| 形状 | 键 | 候选数 |\n|---|---|---:|\n");
+            for shape in placement_shapes.keys() {
+                let mut hits: Vec<(&String, &usize)> = rows
+                    .iter()
+                    .filter(|((slot, _), _)| slot == shape)
+                    .map(|((_, key), count)| (key, count))
+                    .collect();
+                hits.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                if hits.is_empty() {
+                    report.push_str(&format!("| {shape} | （无） | 0 |\n"));
+                }
+                for (key, count) in hits.into_iter().take(limit) {
+                    report.push_str(&format!("| {shape} | `{key}` | {count} |\n"));
+                }
+            }
+        }
         if !extra_stamp.is_empty() {
             // 旋钮没给时这一整节不出现：缺省口径下本报告与 S8 那一跑逐字节相同。
             let joined = extra_stamp.join(" / ");
@@ -8108,6 +8199,89 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// 只动了摆放的候选里戳跟着跳的**形状**标签（S8 探针 Q5 那一节）：「摆放」+ 每个在
+    /// `e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES` 里且这次也变了的名字（按常量的顺序），
+    /// 如「摆放 + SPAMAP」「摆放 + CACHID + SPAMAP」。名单引用常量，不写字面量。
+    fn placement_stamp_shape(diff: &ElementDiff) -> String {
+        let mut label = String::from("摆放");
+        for stamp in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
+            if diff.attributes.iter().any(|name| name == stamp) {
+                label.push_str(" + ");
+                label.push_str(stamp);
+            }
+        }
+        label
+    }
+
+    /// 排除原因里的 refno（`RefNo` 印成 `2013287545/4294`、`RefnoEnum` 印成 `21909_17035` 一类）抹成 `#`
+    /// ——同一条规则挡下的原因才能并成一行。
+    fn anonymize_refnos(reason: &str) -> String {
+        reason
+            .split(' ')
+            .map(|token| {
+                let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                let looks_like_refno = core.chars().any(|c| c == '/' || c == '_')
+                    && core.chars().any(|c| c.is_ascii_digit())
+                    && core
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == '/' || c == '_');
+                if looks_like_refno {
+                    token.replacen(core, "#", 1)
+                } else {
+                    token.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn the_placement_stamp_shape_names_the_stamps_that_rode_along() {
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "NOZZ".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        assert_eq!(placement_stamp_shape(&diff(&["POS"])), "摆放");
+        assert_eq!(placement_stamp_shape(&diff(&["POS", "ORI"])), "摆放");
+        assert_eq!(
+            placement_stamp_shape(&diff(&["POS", "CACHID"])),
+            "摆放 + CACHID"
+        );
+        assert_eq!(
+            placement_stamp_shape(&diff(&["POS", "SPAMAP"])),
+            "摆放 + SPAMAP"
+        );
+        // 顺序跟常量走，不跟属性在差分里的顺序走。
+        assert_eq!(
+            placement_stamp_shape(&diff(&["SPAMAP", "POS", "CACHID"])),
+            "摆放 + CACHID + SPAMAP"
+        );
+        assert_eq!(
+            anonymize_refnos(
+                "anchor 2013287545/4294 is negative geometry (NCYL); its owner's mesh consumes it"
+            ),
+            "anchor # is negative geometry (NCYL); its owner's mesh consumes it"
+        );
+        assert_eq!(
+            anonymize_refnos("anchor under structural member PANE =24384/1234; rule M"),
+            "anchor under structural member PANE =#; rule M"
+        );
+        assert_eq!(
+            anonymize_refnos("anchor inside route container BRAN 21909_17035"),
+            "anchor inside route container BRAN #"
+        );
+        // 不是 refno 的数字 / 下划线不动。
+        assert_eq!(
+            anonymize_refnos("P23, 0x1022EAEE rule_M 4"),
+            "P23, 0x1022EAEE rule_M 4"
+        );
     }
 
     #[test]

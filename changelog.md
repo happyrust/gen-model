@@ -32,6 +32,11 @@
     才抓到 E0063（fable-5-1-6 那轮只过了 `--lib`）。
   - 文档：ADR-066 状态行 + 规则 2 / 规则 4 末注；计划 §8 Q6 ★0919 题 B 段；`options.rs` 门开关文档；e3d-model `element_diff.rs`
     常量文档；核账文档头部一条「已拍板接线」指针。
+  - **S8 探针加一节**（`probe_cachid_consistency`，只在 `#[cfg(test)]`；fable-5-1-16，用户 21:0x 点头）：「只动了摆放的候选：戳跟着跳的形状 ×
+    我方判定」——`placement_stamp_shape` 按 `PLACEMENT_STAMP_ATTRIBUTES` 现算标签（「摆放」/「摆放 + CACHID」/「摆放 + SPAMAP」/
+    「摆放 + CACHID + SPAMAP」，名单不另写字面量），每形状给 transform / regen / skip，再按 noun、合格锚点按 noun、按库、regen 原因拆
+    （`anonymize_refnos` 把 `2013287545/4294` 与 `21909_17035` 两种写法的 refno 抹成 `#`，同一条规则才并得成一行）；缺省报告多这一节，
+    旋钮语义不变。单测 `the_placement_stamp_shape_names_the_stamps_that_rode_along`。
 - **验证**：e3d-model `cargo test --lib -- element_diff:: increment:: attribute_reads::` **20 过**、`cargo test --test attribute_reads_guard`
   **2 过**；gen-model 受影响模块（`model_impact:: window_root_plan:: manual_update::… rigid_motion:: structural_connection:: cable_endpoint::
   reverse_reference:: attribute_history::`）**146 过 0 败 18 ignored**，整套 `cargo test --lib` **2267 过 0 败 122 ignored**（11.6s；
@@ -60,10 +65,31 @@
   `HSTIFF` / `HBRCKT` / `CSTIFF` **全是零单元**（T 端没有生成物，既不绿也不红）。至此 30 库 1510 根多算根**全部实测**：绿 519 / 零单元 991 / 红 0；
   `SPAMAP` 的安全样本从 1034 根抬到 **1788 根**（绿 639 / 零单元 1149 / 红 0），单库全量合计 2472 根（绿 1323 / 零单元 1149 / 红 0）。
   跑到第 18 库时 D: 被旁边会话 20:33–20:37 的 cargo 增量产物顶满（`os error 112`），11 份报告没写出来，20:40 空间回来后同口径重跑写齐。
+  **`[POS, SPAMAP]` 形状的锚点数**（S8 探针新那一节，21:26–21:32 全语料 453 库 / 3157 窗 / 36822 个真变了的候选，345s，当前树现编）：
+  只动了摆放的候选 **1696** = 摆放 723（合格锚点 63）/ + `CACHID` 88（合格 84，`EQUI` 83）/ + `SPAMAP` **881（合格 35）** /
+  + `CACHID` + `SPAMAP` 4（`FLOOR`，全合格）。`SPAMAP` 新放进这一档的 885 个候选里只有 **39 个**成了合格锚点（`NOZZ` 17 / `BOX` 6 /
+  `FLOOR` 2 + 4 / `HNUT` `HPIN` `PCLA` `RCPL` 各 2 / `CTOR` `CYLI` 各 1），其余 **846 个全部被「路由容器 `BRAN` 之内」一条排除**
+  （`FTUB` 172 / `GASK` 139 / `FLAN` 123 / `ELBO` 114 / `TEE` 57 / `ATTA` 49 / `VALV` 37 …；acw5525 454 / ams8000 221 / ams7999 90 /
+  ams7997 82）——之前是「还动了别的属性」的 regen、现在是「被排除」的 regen，结果一根没变。两个戳跟着摆放跳的形状不同：`CACHID` 那 88 个
+  是整台 `EQUI` 挪位（合格率 95%），`SPAMAP` 那 881 个是分支里的管件挪位（合格率 4%）。规模表「位姿候选被锚点排除而落 regen」1510 =
+  四形状 regen 之和，交叉表「含 DCHC=3 × transform」186 = 四形状合格锚点之和。报告 `docs/evidence/2026-09-19-s8-placement-stamp-shapes-corpus.md`。
+  单测 3 过（`the_placement_stamp_shape_…` / `stamp_only_takes_…` / `the_extra_stamp_knob_…`）；rustfmt 本轮新增行无差异（剩 1529 / 2096 / 2108 / 2326
+  四处旧的）；CRLF 9627 / 裸 LF 0。
+  **S4 对拍门复跑**（用户 21:3x 点名；`probe_rigid_exclusion_windows` 全语料、缺省旋钮、当前树现编，21:41–21:59 共 1093s，报告
+  `docs/evidence/2026-09-19-rigid-exclusion-parity-spamap.md`）：3157 窗、只动了摆放的候选 **1696**（与 S8 那一节逐位相同）= rigid **186** /
+  P23 4 / 规则 M 62 / 负体 52 / 路由容器 1392；合格锚点对拍 **152 根：两态相等 135 / 无判别力 10 / 窗内另改 7 / 不等·锚点 0**——门照旧过，
+  `SPAMAP` 新放进来的 39 个都在里面。与 09-16 那跑（2961 窗 / 794 候选 / rigid 163 / 139 根 108 等 22 无判别力 9 另改 0 不等）逐行对：
+  只在今天出现的 rigid 样本 31 行——ams7326 `HNUT` / `HPIN` / `PCLA` / `RCPL` 8 行全等（各 1 件由 Δ 前移、根 1–11 件，有判别力）、ams1112 `FLOOR`
+  5 行（4 等 / 1 窗内另改）、acw5525 `NOZZ` / `BOX` / `CYLI` 12 行（9 等 / 3 窗内另改）、ams7997 270→273 `ZONE` 6 行全等（新窗，与 `SPAMAP` 无关）；
+  acw5525 108→109 / 117→118 / 126→127 三根 09-16 是「不等·窗内另改」、今天**变成相等**——那「另改」的正是 `[POS, SPAMAP]` 的 BOX / DISH / CYLI，
+  现在自己成了锚点跟着 Δ 走。rigid 163 → 186 = −16 + 39：少的 16 个是 ams7997 HVAC 分支的 `BEND` / `ATTA` / `DAMP`——e3d-model 09-18 `f93fd66`
+  「风管 BRAN 也派生隐式直段」之后 `derives_implied_tubes` 对 HVAC BRAN 为真，它们改判「路由容器之内」（09-16 时是无判别力的合格锚点），
+  与 `SPAMAP` 无关。路由容器那一类不等·锚点 3（ams7997 `VALV` / `UNIO`，属主链 TUBI 变）= 排除有内容，同 09-16。`CTOR` 那 1 个候选没在明细里出现
+  （Δ≈0 不拍或同根归组，未逐个核）。cargo / 探针进程 0，`AIOS_*` 已清。
 - **未做 / 边界**：ams7997 两窗只复跑了选根（凭证前移的那 100 / 116 根没再做两端整根生成对拍——那 216 根 09-19 15:54 探针已量过
   绿 58 / 零单元 158 / 红 0）；30 库里 991 根零单元的多算根（ams251001 222 根、`ams2510xx` 船体结构 noun 一串）**无判别力**，0 红只在 519 根
-  有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票两个名字都缺；`[POS, SPAMAP]` 形状的锚点数没量
-  （刚体开关默认仍关）。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
+  有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票两个名字都缺；S4 对拍门 21:59 已复跑（0 不等·锚点），
+  但刚体开关 `model_transform_cheap_path` **默认仍关**——开不开是 ADR-066 验收的另一票，本轮没动。S8 探针那一节与单测在工作树里**未提交**。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
   三个文件；gen-model 的钉子已依赖两个名字的常量，两仓紧挨着入库）；`docs/evidence/` 按政策不入库。
 
 ### 节点版本表 `GET node/versions?scope=self|subtree`——ADR 0066 的第三条：容器节点「所有子节点」下的时间线
