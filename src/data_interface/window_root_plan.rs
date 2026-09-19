@@ -20,7 +20,8 @@
 //! | `lazy`    | `(roots_T \ roots_S) \ touched` | 什么都不做：从未生成过又没被波及，等按需 `ensure` |
 //!
 //! 护栏（ADR-056 实施约束 5）：闭包不完整、`plan_update` 报 `unresolved`、或候选数超过
-//! 索引键数的 [`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`] → **不信闭包**：`advance` 清空、
+//! 索引键数的 [`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`]（候选数按**净数**算：只有戳跳了的候选
+//! `cache_stamp` 不计，2026-09-19，见 [`WindowImpact::cache_stamp`]）→ **不信闭包**：`advance` 清空、
 //! `roots_S ∩ roots_T` 全部进 `regen`（「全部根过期」的行为），[`WindowRootPlan::degraded`]
 //! 记原因，回执字段 `credential_advance_degraded`。`lazy` 在退化时也不动——没生成过的根
 //! 即便波及不明也只需等按需生成，不必 eager。
@@ -96,6 +97,13 @@ pub struct WindowImpact {
     pub unresolved: usize,
     /// 索引差分候选数（`IncrementReport::candidates`）。
     pub candidates: usize,
+    /// `candidates` 里**只有戳跳了**的候选数（`IncrementReport::cache_stamp`，Q6 第三档 [`NoModelTier::CacheStamp`]；
+    /// 元数据门关着时恒 0）。比例护栏的分子把它们净掉（2026-09-19，计划 §8 Q6 题 B / t-334，用户拍板）：
+    /// 整库缓存 / 空间索引重建的扫写（`CACHID` / `SPAMAP` 逐元素 `+1`）能让一窗的候选数超过索引键数的 30%，
+    /// 而这些候选去向 `NoModel`、不上卷、不级联，对闭包可不可信一个字都没说——ams7997 52→53 / 54→55 两窗
+    /// 5819 个只 `SPAMAP` 候选把 7328 / 8535 顶过 5993 / 7652 的线、整窗退化 regen 216 根，净掉后 5161 / 5534
+    /// 不再退化，216 根量到红 0（`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md` §4 读法 4）。
+    pub cache_stamp: usize,
     /// target 端索引键总数（护栏分母）。
     pub index_keys: usize,
 }
@@ -103,7 +111,8 @@ pub struct WindowImpact {
 impl WindowImpact {
     /// 不能前移凭证的原因；`None` = 闭包可信、可以前移。
     ///
-    /// 比例护栏是「超过」不是「达到」：空库（0 键 0 候选）不算退化。
+    /// 比例护栏是「超过」不是「达到」：空库（0 键 0 候选）不算退化。分子是**净候选数**
+    /// `candidates − cache_stamp`（[`Self::cache_stamp`]）；`cache_stamp` 为 0 时与 2026-09-19 之前逐位相同。
     pub fn degraded_reason(&self) -> Option<String> {
         let mut reasons = Vec::new();
         if !self.closure_complete {
@@ -118,15 +127,29 @@ impl WindowImpact {
             ));
         }
         let limit = CREDENTIAL_ADVANCE_CANDIDATE_RATIO * self.index_keys as f64;
-        if self.candidates as f64 > limit {
+        let net_candidates = self.net_candidates();
+        if net_candidates as f64 > limit {
+            let stamp_note = if self.cache_stamp > 0 {
+                format!(
+                    " ({} indexed minus {} stamp-only)",
+                    self.candidates, self.cache_stamp
+                )
+            } else {
+                String::new()
+            };
             reasons.push(format!(
-                "too many candidates: {} > {:.0}% of {} index keys",
-                self.candidates,
+                "too many candidates: {net_candidates}{stamp_note} > {:.0}% of {} index keys",
                 CREDENTIAL_ADVANCE_CANDIDATE_RATIO * 100.0,
                 self.index_keys
             ));
         }
         (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+
+    /// 比例护栏的分子：索引差分候选数减去只有戳跳了的候选数（[`Self::cache_stamp`]）。
+    /// `cache_stamp ⊆ no_model ⊆ candidates`（e3d-model `IncrementReport::accounts_for` 钉），饱和减只是防御。
+    pub fn net_candidates(&self) -> usize {
+        self.candidates.saturating_sub(self.cache_stamp)
     }
 }
 
@@ -248,9 +271,10 @@ pub fn plan_window_roots(
 /// （E3D 字典 DCHC=0 ∧ 生成器不读；S6 之前是效果表 DataOnly ∧ DCHC=0 的五个名字）。名单与分档只有
 /// [`crate::data_interface::model_impact::metadata_only_tier`] 那一份：全部落在老名单
 /// `NAME / DESC / PURP / FUNC / LCHKDA` 上回 [`NoModelTier::MetadataOnly`]，否则
-/// [`NoModelTier::UnreadAttribute`]；**只有戳**（`CACHID`）跳了回 [`NoModelTier::CacheStamp`]（2026-09-17 Q6：
+/// [`NoModelTier::UnreadAttribute`]；**只有戳**（`CACHID`，2026-09-19 起还有 `SPAMAP`——名单只有 e3d-model
+/// `PLACEMENT_STAMP_ATTRIBUTES` 那一份）跳了回 [`NoModelTier::CacheStamp`]（2026-09-17 Q6：
 /// 戳由 e3d-model 的戳表拿第一票、读取集合守卫拿第二票，跟着别的放行属性时不改档）——档位只进回执三个计数，
-/// 不改去向。`attributes` 为空回 `None`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+/// 不改去向；第三档另有一处用：护栏分子把它净掉（[`WindowImpact::cache_stamp`]）。`attributes` 为空回 `None`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
 ///
 /// 它只决定**上卷与级联**：账本照记、闭包种子照收（候选与它的祖先链照进闭包，候选所在的根凭证前移
 /// 一个都不少收），房间结构触发照读账本（FRMW 改名命中关键字仍出 `RoomRecalcPanel`），设计引用级联照读
@@ -1044,6 +1068,7 @@ impl WindowRootSources {
             cascade_degraded: self.design_reference.degraded.clone(),
             unresolved: self.plan.report.unresolved.len(),
             candidates: self.plan.report.candidates,
+            cache_stamp: self.plan.report.cache_stamp,
             index_keys: self.index_keys,
         }
     }
@@ -1380,8 +1405,8 @@ pub(crate) async fn build_model_update_plan_from_window(
     if gated > 0 {
         warnings.push(format!(
             "dbnum={dbnum}: metadata-only gate — {gated} modified candidate(s) changed nothing but \
-             attributes with dictionary DCHC=0 that the generator never reads (or only the CACHID \
-             stamp) and were not rolled up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, \
+             attributes with dictionary DCHC=0 that the generator never reads (or only the CACHID / \
+             SPAMAP stamps) and were not rolled up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, \
              unread_attribute={} on the wider S6 tier, cache_stamp={} on the stamp-only Q6 tier); \
              ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
             sources.plan.report.metadata_only,
@@ -1797,6 +1822,7 @@ mod tests {
             cascade_degraded: None,
             unresolved: 0,
             candidates: 3,
+            cache_stamp: 0,
             index_keys: 1000,
         }
     }
@@ -1946,6 +1972,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(empty.degraded_reason(), None);
+    }
+
+    /// 比例护栏的分子是**净候选数**（2026-09-19，Q6 题 B）：只有戳跳了的候选（`cache_stamp`）不计。
+    /// ams7997 52→53 的形状：7328 候选里 2167 只 `SPAMAP`，index_keys 19975 → 毛数 7328 > 5993 退化，
+    /// 净数 5161 不退化。`cache_stamp` 为 0 时与之前逐位相同（前一条测试）；净数恰在线上仍是「超过」才退化。
+    #[test]
+    fn the_candidate_ratio_guard_nets_out_stamp_only_candidates() {
+        let mut window = impact(&[]);
+        window.candidates = 7328;
+        window.index_keys = 19975;
+        let gross = window.degraded_reason().expect("毛数 7328 > 5993 退化");
+        assert!(
+            gross.contains("too many candidates: 7328 > 30% of 19975 index keys"),
+            "{gross}"
+        );
+        assert!(!gross.contains("stamp-only"), "没有戳就别提戳：{gross}");
+
+        window.cache_stamp = 2167;
+        assert_eq!(window.net_candidates(), 5161);
+        assert_eq!(window.degraded_reason(), None, "净数 5161 ≤ 5993 不退化");
+
+        // 净掉之后仍超线：原因里把毛数与戳数都写出来，读回执的人对得上账。
+        window.cache_stamp = 1000;
+        let net = window.degraded_reason().expect("净数 6328 > 5993 仍退化");
+        assert!(
+            net.contains("too many candidates: 6328 (7328 indexed minus 1000 stamp-only) > 30% of 19975 index keys"),
+            "{net}"
+        );
+
+        // 「超过」不是「达到」：净数恰好压线不退化。
+        window.candidates = 6000;
+        window.index_keys = 20000;
+        window.cache_stamp = 0;
+        assert_eq!(window.degraded_reason(), None);
+        window.candidates = 6001;
+        assert!(window.degraded_reason().is_some());
+        window.cache_stamp = 1;
+        assert_eq!(window.degraded_reason(), None);
+
+        // 防御：戳数不可能大于候选数（e3d-model `accounts_for` 钉），真出现也只饱和到 0，不 panic。
+        window.candidates = 3;
+        window.cache_stamp = 5;
+        assert_eq!(window.net_candidates(), 0);
+        assert_eq!(window.degraded_reason(), None);
     }
 
     /// 工作项：regen → `RegenRoot`（noun 取 T 端）、delete → `DeleteCleanup`（noun 取
@@ -7997,7 +8067,8 @@ mod tests {
 
     /// 「只动了戳」的候选（口径 §1.1 五条）：记录真变了，没换类型 / 没改挂 / 成员表没动 / 不 `opaque`，
     /// 且**每一个**变了的属性都在 [`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`]
-    /// （今天 = `["CACHID"]`，t-47 落地的常量）里。名单只写一份——引用常量，不写字面量。
+    /// （t-47 落地的常量；今天 = `["CACHID", "SPAMAP"]`——`SPAMAP` 2026-09-19 用户拍板同档进表，N2 / t-334）里。
+    /// 名单只写一份——引用常量，不写字面量。
     ///
     /// 与 `ElementDiff::is_placement_only` **互斥**，别混用：那个问「除了摆放还动了别的没有」（戳跟着
     /// 摆放一起变不算数，Q5 / t-47），要求 `POS`/`ORI` 至少动一项；这个问「除了戳还动了没有」，要求
@@ -8009,8 +8080,9 @@ mod tests {
     /// [`stamp_only`] 的参数化版本：`extra` 里的名字**也**当成戳。`extra` 为空时与 `stamp_only`
     /// 逐位相同——五条判据只写这一份，缺省路径不另开分支。
     ///
-    /// 只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问：`extra` 由探针旋钮
-    /// `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 给，缺省空。生产常量 `PLACEMENT_STAMP_ATTRIBUTES` 不动。
+    /// 原本只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问：`extra` 由探针旋钮
+    /// `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 给，缺省空。2026-09-19 `SPAMAP` 已进生产常量，那一问结了；旋钮留着，
+    /// 下次再有候选戳名字时照旧「先量后接」——缺省口径永远等于生产常量。
     fn stamp_only_with(diff: &ElementDiff, extra: &[String]) -> bool {
         !diff.is_unchanged()
             && diff.type_changed.is_none()
@@ -8050,10 +8122,15 @@ mod tests {
             opaque: false,
         };
         assert!(stamp_only(&diff(&["CACHID"])));
+        // 第二个戳（2026-09-19）：单独跳、两个一起跳都是只动了戳。
+        assert!(stamp_only(&diff(&["SPAMAP"])));
+        assert!(stamp_only(&diff(&["CACHID", "SPAMAP"])));
         // 戳 + 业务元数据：那是 S6 元数据门的地（S8「含戳的只 DCHC=0 候选」），不是只动了戳。
         assert!(!stamp_only(&diff(&["CACHID", "NAME"])));
+        assert!(!stamp_only(&diff(&["SPAMAP", "NAME"])));
         // 戳 + 摆放：那是 Q5 的地（`is_placement_only` 为真），不是只动了戳。
         assert!(!stamp_only(&diff(&["POS", "CACHID"])));
+        assert!(!stamp_only(&diff(&["POS", "SPAMAP"])));
     }
 
     #[test]
@@ -8067,15 +8144,18 @@ mod tests {
             attributes: attributes.iter().map(|name| name.to_string()).collect(),
             opaque: false,
         };
-        let spamap = vec!["SPAMAP".to_string()];
-        // 空名单 = 今天的口径，逐位不变（t-194 的复现靠这一条）。
-        assert!(!stamp_only_with(&diff(&["SPAMAP"]), &[]));
-        assert!(!stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &[]));
+        // `SPAMAP` 2026-09-19 前就是这里的「额外名字」；进了生产常量之后换一个表外的名字演同一件事。
+        let extra = vec!["ZZSTMP".to_string()];
+        // 空名单 = 今天的口径（= 生产常量），逐位不变（t-194 的复现靠这一条）。
+        assert!(!stamp_only_with(&diff(&["ZZSTMP"]), &[]));
+        assert!(!stamp_only_with(&diff(&["CACHID", "ZZSTMP"]), &[]));
         assert!(stamp_only_with(&diff(&["CACHID"]), &[]));
+        assert!(stamp_only_with(&diff(&["SPAMAP"]), &[]));
         // 给了名单才多放行，而且只多放行名单里的那些。
-        assert!(stamp_only_with(&diff(&["SPAMAP"]), &spamap));
-        assert!(stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &spamap));
-        assert!(!stamp_only_with(&diff(&["SPAMAP", "NAME"]), &spamap));
+        assert!(stamp_only_with(&diff(&["ZZSTMP"]), &extra));
+        assert!(stamp_only_with(&diff(&["CACHID", "ZZSTMP"]), &extra));
+        assert!(stamp_only_with(&diff(&["SPAMAP", "ZZSTMP"]), &extra));
+        assert!(!stamp_only_with(&diff(&["ZZSTMP", "NAME"]), &extra));
     }
 
     /// 每个多算根量到的一行（T4）。
@@ -8166,8 +8246,10 @@ mod tests {
     ///   只做前一手时候选自己若是单元会留在 `regenerate` 集里，而那三个动作集恒为种子，根级一根都省不下。
     ///
     /// `regen_A \ regen_B0` 就是**多算的根**（主指标）。护栏（[`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`]）
-    /// 的分子今天按 `report.candidates` 算（含只 CACHID）：**B0** 照旧、**B1** 按净候选数再判一次，
-    /// 两列并排——回答「接线时护栏分子要不要跟着改」。
+    /// 的分子 2026-09-19 之前按 `report.candidates` 算（含只戳）：**B0** 照旧、**B1** 按净候选数再判一次，
+    /// 两列并排——回答「接线时护栏分子要不要跟着改」。**2026-09-19 已接线**（用户拍板，随 `SPAMAP` 进戳表一起：
+    /// [`WindowImpact::cache_stamp`]，生产分子从此是净候选数），A 态与 B0 态都按净数判，**B1 列从此恒等于 B0、
+    /// 「B1 额外」恒 0**——列位留着只为让报告与 09-16 / 09-19 的几份对得上。
     ///
     /// 每个多算根再走 S7 的尺子 [`unit_rebuild_of_root`]（两端各整根生成一次、逐件按 `GeometryId` 配对、
     /// [`ParityInvariants`] 全等，S4 同容差）做**安全自检**：全等 = 绿（确实白算）；不全等 = 红
@@ -8540,10 +8622,12 @@ mod tests {
                     cascade_degraded: impact_a.cascade_degraded.clone(),
                     unresolved: plan_b.report.unresolved.len(),
                     candidates: plan_b.report.candidates,
+                    // 2026-09-19 起生产护栏按净候选数判（`WindowImpact::cache_stamp`），B0 跟生产同口径。
+                    cache_stamp: plan_b.report.cache_stamp,
                     index_keys: sources.index_keys,
                 };
-                let mut impact_b1 = impact_b0.clone();
-                impact_b1.candidates = impact_b0.candidates.saturating_sub(stamp_here);
+                // B1 = 「护栏按净候选数再判」——接线后与 B0 相同，这一列恒 0（见函数文档）。
+                let impact_b1 = impact_b0.clone();
                 let plan_b0 = plan_window_roots(&sources.roots_t, &roots_s, &impact_b0);
                 let plan_b1 = plan_window_roots(&sources.roots_t, &roots_s, &impact_b1);
 

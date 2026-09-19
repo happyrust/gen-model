@@ -1824,9 +1824,11 @@ pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA
 /// （`window_root_plan::change_metadata_tier`）：一个 Modified 候选的改动**全部**落在
 /// `model_impact::attribute_is_metadata_only` 放行的属性上（E3D 字典 DCHC=0 **且** 生成器不读——
 /// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个；2026-09-17 Q6 起
-/// 戳 `CACHID` 由 e3d-model 的戳表拿第一票——字典按构造收不到它）、且成员 / 属主 / 类型 / opaque 都没动
+/// 戳 `CACHID` 由 e3d-model 的戳表拿第一票——字典按构造收不到它；2026-09-19 起 `SPAMAP` 同档进戳表）、且成员 /
+/// 属主 / 类型 / opaque 都没动
 /// → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute` 新档 / `cache_stamp` 只戳三个计数）、
-/// 不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收（候选与它的祖先
+/// 不上卷、不级联；它的根不因它进 `regen`；`cache_stamp` 那一档还从凭证前移比例护栏的分子里净掉
+/// （`window_root_plan::WindowImpact::cache_stamp`，2026-09-19——整库戳扫写不再把窗顶成退化）。账本照记、闭包种子照收（候选与它的祖先
 /// 链照进闭包），房间结构触发（改名进 `RoomRecalcPanel`）与设计引用级联都不受影响；闭包里能少的只有
 /// 放行候选本来会触发的粗级联扇出（桥架分支「子树里改了任何东西就整条重建」那片单元），它们的根按
 /// 两票前移。此前 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。

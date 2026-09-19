@@ -8,6 +8,9 @@ D3 的祖孙锚点改取**最内层**、盒的规则改成「纯平移加 t / �
 去向 `no_model` 的（两票元数据门放行 / 没有模型归属）不是锚点也不挡路，见规则 2 末注。**同日 Q6 落地**（用户拍板，会话
 fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_model` 第三档 `CacheStamp`——挪一件时被顺带盖戳的子树成员从此不再挡规则 2，
 见规则 2 末注（含对同条 Q5 段「只有 `CACHID` 变照旧 `regen`」半句的更正）。
+**2026-09-19 修订**（用户 18:15 拍板 A，会话 fable-5-1-36 起手、fable-5-1-6 接力）：`SPAMAP` 与 `CACHID` **同档进戳表**
+`PLACEMENT_STAMP_ATTRIBUTES`（计划 §8 Q6 题 B / N2 t-334：同是 3.1 运行库 schema 簿记键、字典无票、生成器不读、四库全量 1718 根 0 红），
+规则 2 的戳例外与 Q6 第三档从此都是两个名字；**同日凭证前移比例护栏的分子改按净候选数**（毛候选 − 只戳候选 `cache_stamp`），见规则 2 / 规则 4 末注。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
@@ -84,6 +87,16 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    不上卷、不级联、账本去向 `NoModel`——于是它对规则 2 不再挡路；戳混在别的放行属性里不改档（跟着 `NAME` 记老档、跟着 `DUTY` 记新档），
    `[POS, CACHID]` 仍是锚点那条路（`is_placement_only`），不是元数据。上一段「只有 `CACHID` 变照旧不算（摆放一项都没动）」
    说的是**它不是锚点**，仍成立；「照旧 `regen`」那半句自本日起作废。窗 C 复跑见 changelog 2026-09-17。
+   **（2026-09-19 · `SPAMAP` 同档 · 用户拍板）** 戳表加第二个名字 `SPAMAP`（e3d-model `PLACEMENT_STAMP_ATTRIBUTES = ["CACHID", "SPAMAP"]`）：
+   3.1 运行库 schema 里的空间索引簿记键（`INTVEC`，字典无票），Design 应用随图形 / 空间索引重建逐次 `+1`，生成器一处不读（两仓
+   `stamp_literals` 守卫同款钉住），S8 语料 453 库里单独跳 11666 次；两态实证与 `CACHID` 同一把尺子——四库全量 1718 根 0 红
+   （归 `SPAMAP` 增量的 1034 根）、全语料命中 36 库（30 库是 `CACHID` 一根都没剔到的），四门与 `CACHID` 同向、无一格反向
+   （`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md` §4.1）。后果与 `CACHID` 完全平行：本条规则 2 判「摆放之外还动了别的」时
+   忽略它（`[POS, SPAMAP]` / `[POS, CACHID, SPAMAP]` 算只动了摆放）、只 `SPAMAP` 跳记第三档 `CacheStamp`、不挡规则 2；
+   **另加一手 `CACHID` 当初没有的**：ams7997 那类库里 5819 个只 `SPAMAP` 候选把 52→53 / 54→55 两窗候选数顶过索引键数 30% 的线
+   （7328 / 8535 > 5993 / 7652），整窗按规则 4 退化 regen 216 根、B0 剔种子一根救不回——于是**比例护栏的分子改按净候选数**
+   `candidates − cache_stamp`（gen-model `WindowImpact::cache_stamp` / `net_candidates`，元数据门关着时恒 0、逐位回到之前），
+   净掉后 5161 / 5534 不再退化，216 根量到红 0。名单仍只有 e3d-model 那一份；接线记录见 changelog 2026-09-19。
 3. 锚点及其到根的路上**没有路由容器**（e3d-model 上卷规则 1 里「会补管的容器」：BRAN / HANG 等，管段几何由成员两端点派生），
    锚点**不是点 / 环容器下的元素**（`graphicsBehaviour == 1` 那类祖先之下的点：它的 `POS` 是属主网格的输入，e3d-model 上卷规则 1
    本来就把它并进属主单元），也**不在 CWBRAN 子树里**（桥架件的摆放是伪属性，`cable_tray::placement_matrix` 读兄弟，上卷规则 5）。
@@ -105,6 +118,9 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    少算方向两票缺一不放行。结构件**自己**挪位不在此列（它的网格只依赖自身属性 + 目录）。
    五类排除的原因文本各不相同，回执 `transform_fallback_reason` 原样带出。开关 `model_transform_cheap_path` 仍默认关，S4 对拍样本过了再翻（D7）。
 4. 窗口没有退化（`WindowImpact::degraded_reason() == None`）。退化时一切进 `regen`，与今天一样。
+   **（2026-09-19 末注）** 退化四因里的「候选数超过索引键数 30%」自本日起按**净候选数**判（`candidates − cache_stamp`，
+   只有戳跳了的候选不计——它们去向 `NoModel`、不上卷不级联，对闭包可不可信一个字都没说；`cache_stamp` 为 0 时逐位同前）。
+   其余三因（闭包不完整 / `unresolved` / 设计反查判不了）不动。
 5. **（19:50 修订）** 它不是由级联扩展（C2 结构连接 / C8 电缆端点 / P4 `POSREF` 反查，`WindowRootSources::impact` 的
    `expand_touched`）加进 `touched` 的——那三条是「别处动了、我这里的几何随之变」，不是刚体运动，照旧 `regen`。
    判据在 `expand_touched` **之前**算，扩展进来的根若与 `transform` 候选重合，`regen` 吞掉。

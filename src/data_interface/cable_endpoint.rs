@@ -459,6 +459,7 @@ mod tests {
             cascade_degraded: None,
             unresolved: 0,
             candidates: 1,
+            cache_stamp: 0,
             index_keys: 1000,
         };
         let roots_t = vec![root(1, "EQUI"), root(2, "CABLE")];

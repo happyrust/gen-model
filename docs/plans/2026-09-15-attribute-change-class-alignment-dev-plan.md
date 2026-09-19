@@ -336,3 +336,31 @@ ams8000 会话链从 607 长到 619，aps250110 从 32 长到 36（APS 一腿只
   **写死「级联关着 ⇒ 不分桶」**，三条级联同开才生效）。真库：级联关着时规划器点名 aps7343 6→7 100 / 100、aps250209 16→17 373 / 373、
   15→16 311 / 373——与本节量表的多算根逐个相同；规则写死、级联同开后 26 / 100 与 350 / 373（差掉的是级联判成引用者对端的根）；
   四根 PARITY OK。开关 `model_unit_level_publish` 仍默认关。详见 ADR-080（单元级）D10 与 changelog 2026-09-17。
+  ★0919 **题 B（`SPAMAP` 是不是第二个戳，N2 / t-334）已拍板并接线**（用户 18:15 拍板 A：「SPAMAP 跟 CACHID 同档接进 cache_stamp，护栏净数一起接，
+  开接线切片」；会话 fable-5-1-36 起手、fable-5-1-6 接力、fable-5-1-18 收尾入库）。**量**（opus-5-7 09-16 起量、fable-5-1-32 / -36 09-19 补齐，
+  `docs/evidence/2026-09-16-q6-spamap-denominator-audit.md`）：`SPAMAP` 是 3.1 运行库 schema 里的空间索引簿记键（`INTVEC`，字典无票），
+  Design 应用随图形 / 空间索引重建逐次 `+1`，生成器一处不读；S8 语料 453 库里只 `SPAMAP` 候选 13880（去重 ams7997 备份后约 8200），
+  四库单库全量两态 1718 根 0 红（归 `SPAMAP` 增量的 1034 根：aps250209 +62 / aps7329 +574 / ams7999 +182 / ams7997 只 B1 216），全语料多算根
+  9172 → 10744（3.5% → 4.1%）、命中库 6 → 36（新增 30 库全是 `CACHID` 0 根的库）、T-形状 96.6% → 98.3%；四门与 `CACHID` 同向、无一格反向，
+  单看自己不过 3% 线——「接不接」是政策题，用户拍了接。**接**：(1) e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES = ["CACHID", "SPAMAP"]`
+  ——名单只此一份，Q5 的 `is_placement_only`（`[POS, SPAMAP]` 算只动了摆放）、Q6 的第三档（只 `SPAMAP` 跳记 `CacheStamp`）、
+  `attribute_history` 的 `stamp` 标记全部自动跟上；`gen_read_set.py` 的 `STAMP_LITERALS` 加名、两仓 `attribute-read-set.json` /
+  `generation_read_set.json` 重生成，`stamp_literals` 三处逐名相等的守卫照旧钉；gen-model `DATA_ONLY_ATTR_NAMES` 也登记它（报表口径与 `CACHID` 一致，
+  不是放行的票）。(2) **护栏净数**——`CACHID` 当初没有的一手：ams7997 那类库 5819 个只 `SPAMAP` 候选把 52→53 / 54→55 两窗候选数顶过
+  索引键数 30% 的线（7328 / 8535 > 5993 / 7652），A / B0 都整窗退化 regen，B0 剔种子一根救不回、只有 B1 净掉候选数能拉回 216 根（1.5%，红 0）。
+  于是 `WindowImpact` 加 `cache_stamp`（= `IncrementReport::cache_stamp`，门关着恒 0），`degraded_reason` 的比例护栏按 `net_candidates()
+  = candidates − cache_stamp` 判、退化原因里把毛数与戳数都印出来；Q6 探针的 B0 跟生产同口径、B1 列从此恒 0（留列位为报告可比）。
+  (3) 单测：`the_candidate_ratio_guard_nets_out_stamp_only_candidates`（ams7997 52→53 的数：7328 / 2167 / 19975）；`metadata_only_tier`
+  对 `[SPAMAP]` / `[CACHID, SPAMAP]` / `[NAME, SPAMAP]` / `[POS, SPAMAP]` 四种形状；预览 `verdicts` 同口径；戳表恰好两个名字的钉子；
+  e3d-model `[POS, CACHID, SPAMAP]` 只动了摆放、`[CACHID, SPAMAP]` 不是。落点：e3d-model `element_diff.rs` / `attribute_reads.rs`（测试）/
+  `data/attribute-read-set.json`；gen-model `output/gen_read_set.py` / `generation_read_set.json` / `model_impact.rs` / `window_root_plan.rs` /
+  `manual_update.rs`（测试）/ `options.rs`（文档）+ 七处 `WindowImpact` 字面构造（`src/` 三处单测 + `tests/` 四份集成测试 equi / hvac_bran / ctray /
+  pipe26229_increment，后四份 `cargo test --lib` 不编、`cargo check --tests` 才抓到）；ADR-066 状态行 + 规则 2 / 规则 4 末注；本条。验证见 changelog 2026-09-19
+  ——含 ams7997 52→53 / 54→55 两窗生产路径复跑：`cache_stamp` 2167 / 3001、净候选 5161 / 5534 不再超线、`degraded=None`、regen 255 → 155 / 309 → 193、
+  advance 100 / 116，与探针 B1 列逐个数相同。
+  ★0919 20:41 **新命中 30 库已全部单库全量实测**（fable-5-1-16；同 exe 同旋钮同预算，每库一份 `docs/evidence/2026-09-19-q6-spamap-<库>-spamap.md`，
+  汇总 `2026-09-19-q6-spamap-new30-summary.md`）：除已量的 aps7329 / ams7999 外 28 库 128 窗，窗数 / `regen_A` / 多算根与 17:43 语料 T6 逐位相同；
+  多算根 754、量到 754、**绿 305 / 零单元 449 / 红 0**，T8 契约 28 库全过。30 库 1510 根合计绿 519 / 零单元 991 / 红 0——`SPAMAP` 安全样本
+  1034 → 1788 根（红 0），「同形状推的」那半句不再成立；但 991 根零单元（ams251001 的 `HRSOF` / `HRSO` 222 根、`ams2510xx` 的船体结构 noun）
+  无判别力，绿只在 519 根有生成物的根上成立。
+  **仍开着**：目录侧那一列仍全 `未查`；厂商口径那一票两个名字都缺；`[POS, SPAMAP]` 形状的锚点数没量（S8 探针加桶 3 分钟的事，等点头）。

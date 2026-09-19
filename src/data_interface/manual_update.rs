@@ -5670,7 +5670,9 @@ mod metadata_gate_caliber_tests {
     /// 整根重算，预览也得这么说。
     #[test]
     fn with_the_gate_on_only_the_double_voted_names_are_not_model_affecting() {
-        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "HREF", "CACHID"] {
+        for name in [
+            "NAME", "DESC", "PURP", "FUNC", "LCHKDA", "DUTY", "HREF", "CACHID", "SPAMAP",
+        ] {
             assert!(!affecting(&[name], true), "{name}");
         }
         for name in ["DIR", "UDA:42"] {
@@ -5759,6 +5761,9 @@ mod metadata_gate_caliber_tests {
         // 戳（Q6，2026-09-17）第一票由戳表给：单独跳记第三档，跟着老名单跳记老档，两边都说「不生成」。
         assert_eq!(verdicts(&["CACHID"], true), (false, false));
         assert_eq!(verdicts(&["NAME", "CACHID"], true), (false, false));
+        // 第二个戳（2026-09-19，`SPAMAP` 与 `CACHID` 同档）：同一句话。
+        assert_eq!(verdicts(&["SPAMAP"], true), (false, false));
+        assert_eq!(verdicts(&["CACHID", "SPAMAP"], true), (false, false));
         // 混进一个几何属性、或混进读取集合里的名字，两边都说「要生成」。
         assert_eq!(verdicts(&["NAME", "DIAM"], true), (true, true));
         assert_eq!(verdicts(&["CACHID", "DIR"], true), (true, true));

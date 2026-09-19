@@ -106,6 +106,7 @@ fn impact(touched: &[RefnoEnum]) -> WindowImpact {
         cascade_degraded: None,
         unresolved: 0,
         candidates: 2,
+        cache_stamp: 0,
         index_keys: 100,
     }
 }

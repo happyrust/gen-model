@@ -2,6 +2,70 @@
 
 ## 2026-09-19
 
+### 属性变化分类对齐 core · §8 Q6 题 B 接线：`SPAMAP` 与 `CACHID` 同档进戳表 / `cache_stamp`，凭证前移比例护栏按净候选数判
+
+- **为什么**：`SPAMAP` 是 3.1 运行库 schema 里的空间索引簿记键（`INTVEC`，字典无票），Design 应用随图形 / 空间索引重建逐元素 `+1`，
+  生成器一处不读——在我方这一侧与 `CACHID` 处境完全相同（S8 语料 453 库里它单独跳 11666 次，有值元素上 406/406 与 `CACHID` 同跳），
+  差的只有实证。opus-5-7 09-16 起量、fable-5-1-32 / -36 09-19 补齐（`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md`）：
+  四库单库全量两态 **1718 根 0 红**（归 `SPAMAP` 增量的 1034 根），全语料多算根 9172 → 10744（3.5% → 4.1%）、命中库 6 → 36
+  （新增 30 库全是 `CACHID` 一根都没剔到的），T-形状 96.6% → 98.3%；四门与 `CACHID` 同向、无一格反向，单看自己不过 3% 线。
+  另暴露一种 `CACHID` 当初没有的形状：ams7997 里 5819 个只 `SPAMAP` 候选把 52→53 / 54→55 两窗候选数顶过索引键数 30% 的退化线
+  （7328 / 8535 > 5993 / 7652），整窗退化 regen 216 根，B0 剔种子一根救不回，只有护栏按净候选数再判能拉回来（红 0）。
+  用户 18:15 拍板 A：「SPAMAP 跟 CACHID 同档接进 cache_stamp，护栏净数一起接，开接线切片」。
+- **改动**（会话 fable-5-1-36 起手、fable-5-1-6 接力、fable-5-1-18 收尾入库）：
+  - **戳表**：e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES` 从 `["CACHID"]` 改成 `["CACHID", "SPAMAP"]`——名单只此一份，
+    Q5 的 `is_placement_only`（`[POS, SPAMAP]` / `[POS, CACHID, SPAMAP]` 算只动了摆放、`[CACHID, SPAMAP]` 不是）、Q6 的第三档
+    （`metadata_only_tier` 对 `[SPAMAP]` / `[CACHID, SPAMAP]` 回 `CacheStamp`，跟着 `NAME` 记老档、跟着 `DUTY` 记新档、
+    `[POS, SPAMAP]` 回 `None`）、预览 `classify_operation_impact` 的 Skip、`attribute_history` 的 `stamp` 标记全部引用常量自动跟上。
+    读取集合：`gen_read_set.py` 的 `STAMP_LITERALS` 加名，两仓产物 `attribute-read-set.json` / `generation_read_set.json` 重生成，
+    `stamp_literals` 三处逐名相等与 `stamp_literals ∩ names = ∅` 的守卫照旧钉。gen-model `DATA_ONLY_ATTR_NAMES` 也登记 `SPAMAP`
+    （报表口径与 `CACHID` 一致：效果表 DataOnly、不是老名单；放行的票仍是戳表那一张）。`model_impact` 新钉一条：戳表**恰好**
+    `["CACHID", "SPAMAP"]`——再加名字得回来重新过两票。
+  - **护栏净数**：gen-model `window_root_plan::WindowImpact` 加 `cache_stamp`（= e3d-model `IncrementReport::cache_stamp`，
+    元数据门关着时恒 0），`degraded_reason` 的比例护栏改按 `net_candidates() = candidates − cache_stamp` 判、退化原因里把毛数与戳数
+    都印出来（`too many candidates: 6328 (7328 indexed minus 1000 stamp-only) > 30% of 19975 index keys`；`cache_stamp` 为 0 时
+    字串与之前逐位相同）。其余三因（闭包不完整 / `unresolved` / 设计反查判不了）不动。Q6 探针 `probe_cachid_only_regen_cost` 的
+    B0 态跟生产同口径（`cache_stamp` 照填），B1 列从此恒等于 B0、「B1 额外」恒 0，列位留着只为报告可比；`stamp_only_with` 的旋钮
+    `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 留着（缺省口径永远 = 生产常量），单测里的「额外名字」从 `SPAMAP` 换成表外的 `ZZSTMP`。
+    `WindowImpact` 的字面构造七处补 `cache_stamp: 0`：`src/` 三处单测（cable_endpoint / reverse_reference / structural_connection）与 `tests/`
+    四份集成测试（equi / hvac_bran / ctray / pipe26229_increment）——后四份 `cargo test --lib` 不编，fable-5-1-18 20:3x 用 `cargo check --tests`
+    才抓到 E0063（fable-5-1-6 那轮只过了 `--lib`）。
+  - 文档：ADR-066 状态行 + 规则 2 / 规则 4 末注；计划 §8 Q6 ★0919 题 B 段；`options.rs` 门开关文档；e3d-model `element_diff.rs`
+    常量文档；核账文档头部一条「已拍板接线」指针。
+- **验证**：e3d-model `cargo test --lib -- element_diff:: increment:: attribute_reads::` **20 过**、`cargo test --test attribute_reads_guard`
+  **2 过**；gen-model 受影响模块（`model_impact:: window_root_plan:: manual_update::… rigid_motion:: structural_connection:: cable_endpoint::
+  reverse_reference:: attribute_history::`）**146 过 0 败 18 ignored**，整套 `cargo test --lib` **2267 过 0 败 122 ignored**（11.6s；
+  含旁边会话工作树里未提交的 fast_model / web_service 改动）。新单测 `the_candidate_ratio_guard_nets_out_stamp_only_candidates`
+  用 ams7997 52→53 的数（7328 / 2167 / 19975）：毛数退化、净数 5161 不退化、净数仍超线时原因带毛数与戳数、「超过」不是「达到」、
+  戳数 > 候选数只饱和不 panic。`rustfmt --edition 2024 --check` 本轮新增行无差异（`window_root_plan.rs` 剩的四处 1529 / 2096 / 2108 / 2326
+  与 `manual_update.rs` 四处不是本轮的）；CRLF 未翻（`window_root_plan.rs` 9460 / 裸 LF 0）。
+  fable-5-1-18 20:3x 复验一轮，数字相同（定向 **150 过**——多出的 4 条是 `manual_update::metadata_gate` 那组整组进筛；整套 2267 / 0 / 122，8.7s），
+  另加：`cargo check --lib --tests --bins` 过；四份集成测试 `cargo test --test {equi,hvac_bran,ctray,pipe26229}_increment` **33 过**（9 / 9 / 8 / 7）；
+  e3d-model 整套 `cargo test --lib` **338 过 0 败**（隔离 target 目录）；`git ls-files --eol` 两仓全部改动文件 index / worktree 同款、行尾未翻。
+  读取集合条数的钉子 138 → **139**：多出的是 `LBOR`——e3d-model 09-18 `226154c` 风管那条带进的读点，那边产物早已 134、
+  这边副本一直没重生成，本轮重生成才对上；两个戳一个都不在 `names` 里。
+  **ams7997 两窗生产路径复跑**（用户 19:0x 点名；`probe_transform_classification_for_window` = `WindowRootSources::collect` → `impact`
+  → `plan_window_roots` 生产同款，`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1` 只为让它打印分桶行、不改选根）：**52→53** `candidates=7328
+  (+5159 ~2168 -1) no_model=2257 (cache_stamp=2167)`，净 5161 ≤ 5993，**`degraded=None`、regen 255 → 155、advance 100**；
+  **54→55** `candidates=8535 (+5533 ~3002 -0) no_model=3098 (cache_stamp=3001)`，净 5534 ≤ 7652，**`degraded=None`、regen 309 → 193、
+  advance 116**。与 09-19 15:54 探针报告 T3 那两行（退化 A 是 / regen_A 255 · 309 / B1 额外 100 · 116）逐个数对上；`cache_stamp`
+  与探针独立数出的只戳候选 2167 / 3001 逐位相同。两窗各 10–13s。
+  **`SPAMAP` 新命中 30 库单库全量实测补齐**（fable-5-1-16，20:31–20:41；同一个 exe `F194E82F89ACDA0D`（源码 `198985300b1b` 干净树）+ 旋钮
+  `AIOS_Q6_PROBE_EXTRA_STAMP_NAMES=SPAMAP`、`SAMPLES_PER_NOUN_DB=0` 全量、预算 1200s，与 09-19 四库那几跑同口径；每库一份
+  `docs/evidence/2026-09-19-q6-spamap-<库>-spamap.md`，汇总 `2026-09-19-q6-spamap-new30-summary.md`）：除已量的 aps7329（09-16）/ ams7999（12:04）外
+  其余 **28 库** 128 窗全跑完，每库的窗数 / `regen_A` / 多算根与 17:43 语料报告 T6 那行**逐位相同**；只 `SPAMAP` 候选 830、多算根 **754**
+  （全部去向 advance、整窗前移窗 29）、量到 754 / **绿 305 / 零单元 449 / 红 0**、新根 0、生成失败 0、单元记录 Σ 2032、两端秒 Σ 20.1s，
+  T8 三条契约 + 对账 + 归因自检 28 库全过。有判别力的绿集中在 aps7327（`HANG` 106 根 / 656 单元）、aps7356（`FRMW` / `STRU` 72）、acp7321（`BRAN` 40）、
+  zdj7596（34 根 / 634 单元）、aps7324（18）、aps7332（16）；ams251001 那 222 根（`HRSOF` / `HRSO`）与 `ams2510xx` 一串的 `HPANEL` / `HPLATE` /
+  `HSTIFF` / `HBRCKT` / `CSTIFF` **全是零单元**（T 端没有生成物，既不绿也不红）。至此 30 库 1510 根多算根**全部实测**：绿 519 / 零单元 991 / 红 0；
+  `SPAMAP` 的安全样本从 1034 根抬到 **1788 根**（绿 639 / 零单元 1149 / 红 0），单库全量合计 2472 根（绿 1323 / 零单元 1149 / 红 0）。
+  跑到第 18 库时 D: 被旁边会话 20:33–20:37 的 cargo 增量产物顶满（`os error 112`），11 份报告没写出来，20:40 空间回来后同口径重跑写齐。
+- **未做 / 边界**：ams7997 两窗只复跑了选根（凭证前移的那 100 / 116 根没再做两端整根生成对拍——那 216 根 09-19 15:54 探针已量过
+  绿 58 / 零单元 158 / 红 0）；30 库里 991 根零单元的多算根（ams251001 222 根、`ams2510xx` 船体结构 noun 一串）**无判别力**，0 红只在 519 根
+  有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票两个名字都缺；`[POS, SPAMAP]` 形状的锚点数没量
+  （刚体开关默认仍关）。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
+  三个文件；gen-model 的钉子已依赖两个名字的常量，两仓紧挨着入库）；`docs/evidence/` 按政策不入库。
+
 ### 节点版本表 `GET node/versions?scope=self|subtree`——ADR 0066 的第三条：容器节点「所有子节点」下的时间线
 
 - 用户 09-19 10:2x「开写后端 node/versions?scope=subtree，让容器节点也能列出子树时间线，替掉手填会话号」。前一版面板在容器
