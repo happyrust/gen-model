@@ -1050,6 +1050,113 @@ impl PanelDelta {
     }
 }
 
+/// 一段换代：常驻从 `from_generation` 换到 `to_generation`，面板动了 `panels`（非空）。反查按 `panels` 的新旧盒问谁在
+/// 里面；别的库的命中停放出去时这一段就是它们的 `from → to`。定向准入（`room_recompute::scope_for_task`）沿这些段
+/// 从库上那一代接到本任务冻的计算器代号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PanelSwap {
+    pub from_generation: String,
+    pub to_generation: String,
+    pub panels: PanelDelta,
+}
+
+impl PanelSwap {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} → {}（{}）",
+            short_generation(&self.from_generation),
+            short_generation(&self.to_generation),
+            self.panels.summary()
+        )
+    }
+}
+
+fn short_generation(generation: &str) -> String {
+    generation.chars().take(12).collect()
+}
+
+/// 换代段账本（审核 M1，2026-09-19）：**谁重建谁记**——每一次 [`ResidentRooms::install`] 对着被换下的那一代算出非空
+/// [`PanelDelta`] 就记一段 `from → to → panels`，任何任务的定向准入都能沿它接段、反查，不再只认自己那一次 `Rebuilt`
+/// 带回来的那一段。
+///
+/// 此前 `PanelDelta` 只活在做了重建的那一次 `refresh_before_task` 调用里：`/model/ensure`（UI「显示模型」）先探到
+/// composite 变了、做了重建，随后每个库的任务都是 `Unchanged` + 库上欠着 + 槽空 → 链断 → 全 MDB 每个库各整库一次；
+/// 截断窗口（大窗口的常态）跑不到收尾，自己那一段随任务丢掉，下一窗又是 `Unchanged` → 整库；没被命中的库看不到
+/// 「这一段与你无关」→ 整库。账本把这三种丢法都收了：段在账本里，谁来接都接得上。
+///
+/// 进程内、重启即丢——丢了是多算不漏算（③ 电平型触发兜底整库）；同 `from → to` 的再记一次替换旧的（同两代 = 同输入
+/// = 同一段，新的那份是同一次算法的重算）；空段不记（面板变化为空却换了代 = 换代另有原因，这一段说不了成员边，
+/// 准入照旧整库）；容量封顶，满了丢最早的。锁在 [`ResidentRooms`] 上，与两代模型同一把。
+#[derive(Debug, Clone)]
+pub(crate) struct SwapLedger {
+    entries: std::collections::VecDeque<(Instant, PanelSwap)>,
+    capacity: usize,
+}
+
+impl Default for SwapLedger {
+    fn default() -> Self {
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
+    }
+}
+
+impl SwapLedger {
+    /// 留多少段：一段 = 几块面板的新旧盒，几十段远超一次重启之内可能攒下的换代数；再多是别的地方出了问题。
+    pub(crate) const DEFAULT_CAPACITY: usize = 64;
+
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(capacity.max(1)),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// 记一段。空段不记（回 `false`）；同 `from → to` 替换旧的（位置不变、时刻刷新）；满了丢最早的。
+    pub(crate) fn record(&mut self, swap: PanelSwap, now: Instant) -> bool {
+        if swap.panels.is_empty() || swap.from_generation == swap.to_generation {
+            return false;
+        }
+        if let Some(slot) = self.entries.iter_mut().find(|(_, entry)| {
+            entry.from_generation == swap.from_generation
+                && entry.to_generation == swap.to_generation
+        }) {
+            *slot = (now, swap);
+            return true;
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((now, swap));
+        true
+    }
+
+    /// 全部段（按记入先后）。
+    pub(crate) fn segments(&self) -> Vec<PanelSwap> {
+        self.entries.iter().map(|(_, swap)| swap.clone()).collect()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `/health.room_build.resident.swap_ledger`：`{ entries, capacity, oldest_age_ms, segments: ["g1→g2 (removed=… recalc=…)"] }`。
+    pub(crate) fn health(&self, now: Instant) -> serde_json::Value {
+        serde_json::json!({
+            "entries": self.entries.len(),
+            "capacity": self.capacity,
+            "oldest_age_ms": self
+                .entries
+                .iter()
+                .map(|(at, _)| u64::try_from(now.saturating_duration_since(*at).as_millis()).unwrap_or(u64::MAX))
+                .max(),
+            "segments": self
+                .entries
+                .iter()
+                .map(|(_, swap)| swap.summary())
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// 建不起来：整份失败，不产半份模型（原则 2）。`/health` 与启动日志按它点名。
 #[derive(Debug)]
 pub(crate) struct ResidentBuildError {
@@ -1510,12 +1617,13 @@ pub(crate) struct InstallOutcome {
     pub panels: Option<PanelDelta>,
 }
 
-/// 进程内的两路模型，各留当前 + 上一代（diff 只需两份，工程默认②）。
+/// 进程内的两路模型，各留当前 + 上一代（diff 只需两份，工程默认②），加一本换代段账本（[`SwapLedger`]，M1）。
 #[derive(Default)]
 pub(crate) struct ResidentRooms {
     published: Generations,
     latest: Generations,
     meshes: Arc<MeshCache>,
+    swaps: SwapLedger,
 }
 
 impl ResidentRooms {
@@ -1553,26 +1661,45 @@ impl ResidentRooms {
     }
 
     /// 整份换代：新的进当前、当前退上一代、再往前的丢掉。返回与上一代的拓扑差与面板变化
-    /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）。
+    /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）；面板变化非空就顺手记进换代段账本
+    /// （[`SwapLedger`]，谁重建谁记，M1 2026-09-19）。
     pub(crate) fn install(&mut self, model: ResidentRoomModel) -> InstallOutcome {
         let model = Arc::new(model);
         let slot = self.slot_mut(model.manifest.form);
-        let (diff, panels) = match slot.current.as_ref() {
+        let (diff, panels, segment) = match slot.current.as_ref() {
             Some(old) => {
                 let diff = TopologyDiff::between(&old.map, &model.map);
                 let panels = PanelDelta::between(old, &model, &diff);
-                (Some(diff), Some(panels))
+                let segment = PanelSwap {
+                    from_generation: old.input_version(),
+                    to_generation: model.input_version(),
+                    panels: panels.clone(),
+                };
+                (Some(diff), Some(panels), Some(segment))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         slot.previous = slot.current.take();
         slot.current = Some(model.clone());
+        if let Some(segment) = segment {
+            self.swaps.record(segment, Instant::now());
+        }
         self.prune_meshes();
         InstallOutcome {
             model,
             diff,
             panels,
         }
+    }
+
+    /// 换代段账本里的全部段（按记入先后）——定向准入沿它接段（`room_recompute::scope_for_task`）。
+    pub(crate) fn swap_segments(&self) -> Vec<PanelSwap> {
+        self.swaps.segments()
+    }
+
+    /// `/health.room_build.resident.swap_ledger`。
+    pub(crate) fn swap_ledger_health(&self, now: Instant) -> serde_json::Value {
+        self.swaps.health(now)
     }
 
     fn prune_meshes(&self) {
@@ -1610,6 +1737,14 @@ impl ResidentRooms {
 pub(crate) fn resident_rooms() -> &'static RwLock<ResidentRooms> {
     static ROOMS: OnceLock<RwLock<ResidentRooms>> = OnceLock::new();
     ROOMS.get_or_init(|| RwLock::new(ResidentRooms::default()))
+}
+
+/// 进程内换代段账本的全部段（[`SwapLedger`]，M1）：定向准入的取数口，`room_recompute::swaps_for_task` 经它拿。
+pub(crate) fn swap_segments() -> Vec<PanelSwap> {
+    resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .swap_segments()
 }
 
 /// Fixed, already-preloaded room input for a dbnum Task. This accessor performs
@@ -2363,6 +2498,10 @@ pub(crate) enum RoomReferenceRefresh {
         previous_key: Option<String>,
         key: String,
         generation_changed: bool,
+        /// 装上的这一代的计算输入摘要（`input_version`）——这一段换代的 `to`。反向传播的准入拿它对本任务
+        /// 冻好的计算器代号（2026-09-19 H1）：不等 = 对齐与冻计算器之间常驻又换了一代（`/model/ensure` 并发对齐），
+        /// 这一段面板变化说不了「库上 → 此刻」的全部欠账，退整库；此前准入默认它就是此刻的常驻代号。
+        generation: String,
         /// 被换下的那一代的计算输入摘要（`input_version`）；此前没建成时为 `None`。反向传播的准入拿它对
         /// 库上 `model_room_generation`：相等 = 库上的边对齐到上一代，这一次换代的面板变化就是全部欠账。
         previous_generation: Option<String>,
@@ -2646,6 +2785,7 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
                 previous_key: installed.map(|model| model.manifest.key.clone()),
                 key: outcome.model.manifest.key.clone(),
                 generation_changed: previous_generation.as_deref() != Some(generation.as_str()),
+                generation,
                 previous_generation,
                 diff: diff.map(|diff| diff.summary()),
                 panels,
@@ -2748,6 +2888,7 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
     let active = rooms
         .for_membership(crate::options::data_face())
         .map(|model| model.stats());
+    let swap_ledger = rooms.swap_ledger_health(Instant::now());
     drop(rooms);
     let startup = startup_report();
     let mut health = resident_health_from(
@@ -2805,6 +2946,8 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
                 backoff.health(Instant::now())
             }),
         );
+        // 换代段账本（审核 M1）：本进程记下的每一段 `from → to`（面板动了什么），定向准入沿它接段。
+        target.insert("swap_ledger".to_string(), swap_ledger);
         if let Some(stat) = active {
             target.insert("rooms".to_string(), serde_json::json!(stat.rooms));
             target.insert(
@@ -3833,6 +3976,124 @@ mod tests {
         );
         assert!(delta.query_boxes().is_empty(), "removed 不带盒");
         assert!(!delta.is_empty());
+
+        // 换代段账本（M1，2026-09-19）：谁重建谁记——两次换代各记一段 `from → to → panels`，第一代没有上一代不记；
+        // 段的两端就是两代的 `input_version`，任何任务的准入链都能沿它接（`room_recompute::scope_for_task`）。
+        let segments = rooms.swap_segments();
+        assert_eq!(segments.len(), 2, "{segments:?}");
+        assert_eq!(
+            (
+                segments[0].from_generation.as_str(),
+                segments[0].to_generation.as_str()
+            ),
+            (
+                first.model.input_version().as_str(),
+                second.model.input_version().as_str()
+            )
+        );
+        assert_eq!(
+            segments[0].panels.recalc.len(),
+            2,
+            "第二代那一段带着挪了的两块"
+        );
+        assert_eq!(
+            (
+                segments[1].from_generation.as_str(),
+                segments[1].to_generation.as_str()
+            ),
+            (
+                second.model.input_version().as_str(),
+                third.model.input_version().as_str()
+            )
+        );
+        assert_eq!(
+            segments[1].panels, delta,
+            "第三代那一段就是 install 回的那份面板变化"
+        );
+        let health = rooms.swap_ledger_health(Instant::now());
+        assert_eq!(health["entries"], 2);
+        assert_eq!(health["capacity"], SwapLedger::DEFAULT_CAPACITY);
+        assert_eq!(health["segments"].as_array().map(Vec::len), Some(2));
+    }
+
+    /// 换代段账本的纯函数（M1，2026-09-19）：空段不记、同两代不记；同 `from → to` 替换旧的（位置不变）；满了丢最早的；
+    /// `segments` 按记入先后；`/health` 那一格报条数 / 容量 / 最老年龄 / 各段一句。
+    #[test]
+    fn the_swap_ledger_keeps_the_latest_segments_and_replaces_a_repeated_pair() {
+        let moved = |old: f32, new: f32| PanelDelta {
+            recalc: vec![PanelMove {
+                panel: r(7),
+                old: Some(PanelBounds([[old; 3], [old + 1.0; 3]])),
+                new: Some(PanelBounds([[new; 3], [new + 1.0; 3]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let swap = |from: &str, to: &str, panels: PanelDelta| PanelSwap {
+            from_generation: from.into(),
+            to_generation: to.into(),
+            panels,
+        };
+        let now = Instant::now();
+        let mut ledger = SwapLedger::with_capacity(3);
+        assert!(
+            !ledger.record(swap("g1", "g2", PanelDelta::default()), now),
+            "空段不记（换代另有原因，这一段说不了成员边）"
+        );
+        assert!(
+            !ledger.record(swap("g1", "g1", moved(0.0, 1.0)), now),
+            "同两代不是一段"
+        );
+        assert_eq!(ledger.len(), 0);
+        assert!(ledger.record(swap("g1", "g2", moved(0.0, 1.0)), now));
+        assert!(ledger.record(swap("g2", "g3", moved(1.0, 2.0)), now));
+        assert!(
+            ledger.record(swap("g1", "g2", moved(0.0, 5.0)), now),
+            "同 from → to 替换旧的"
+        );
+        assert_eq!(ledger.len(), 2);
+        let segments = ledger.segments();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|swap| (swap.from_generation.as_str(), swap.to_generation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("g1", "g2"), ("g2", "g3")],
+            "替换不换位置"
+        );
+        assert_eq!(
+            segments[0].panels.recalc[0].new,
+            Some(PanelBounds([[5.0; 3], [6.0; 3]])),
+            "替换后是新的那份"
+        );
+        assert!(ledger.record(swap("g3", "g4", moved(2.0, 3.0)), now));
+        assert!(ledger.record(swap("g4", "g5", moved(3.0, 4.0)), now));
+        assert_eq!(ledger.len(), 3, "满了丢最早的");
+        assert_eq!(
+            ledger
+                .segments()
+                .iter()
+                .map(|swap| swap.from_generation.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g2", "g3", "g4"]
+        );
+        let health = ledger.health(now + Duration::from_millis(250));
+        assert_eq!(health["entries"], 3);
+        assert_eq!(health["capacity"], 3);
+        assert_eq!(health["oldest_age_ms"], 250);
+        assert_eq!(
+            health["segments"][0],
+            "g2 → g3（removed=0 renumbered_rooms=0 recalc=1 (geometry_only 1)）"
+        );
+        assert_eq!(
+            SwapLedger::default().health(now),
+            serde_json::json!({
+                "entries": 0,
+                "capacity": SwapLedger::DEFAULT_CAPACITY,
+                "oldest_age_ms": serde_json::Value::Null,
+                "segments": [],
+            })
+        );
     }
 
     /// 预热按缓存键去重；`.mesh` 读不出的面板搬进保护集、不阻代（ADR-073 D9）。

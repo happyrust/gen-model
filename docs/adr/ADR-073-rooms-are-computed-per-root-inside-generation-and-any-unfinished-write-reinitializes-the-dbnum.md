@@ -202,6 +202,45 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   停放槽进程内、重启即丢，丢了是**多算不漏算**（③ 兜底整库）；要不要落库等 live 看到重启后整库的频率再定。**仍欠**：没命中的库
   （C）看不到 g1 → g2 那一段的「无事发生」，`Unchanged` 且槽空 → 仍整库；给全 MDB 的库停放空段要知道库的全集（常驻的
   `expected_dbnums` 有），本轮没做。
+  **2026-09-19 追记（H1，定向路一任务一台）：定向重算用的是本任务开工冻的那台计算器，准入链的终点、边、盖的代号三者
+  同一代。** 审核（`output/show-me-room-increment.html` §06 H1）读出一条漏算：scope 按开工时读到的常驻代号定，收尾却
+  `frozen_room_calculator()` **新冻一台**「此刻这一代」——P2-3 自己点名的那条竞态（一个 DESI 前进 + 用户同时点「显示模型」，
+  `/model/ensure` 并发对齐在任务中途把常驻 g2 → g3、面板 Q 又动了）下：反查只用 P（g1 → g2）的盒、命中根按 g3 算、
+  `Targeted(g3)` 盖 D14 ← g3，Q 命中的根从此永久陈旧，③ 看到库上 g3 == 常驻 g3 就哑了；`park_foreign_hits(g1 → g3)` 还把
+  同一个洞停放给别的库。整库那一路没事（每一根都算，更新的计算器也诚实）。落法：① `RoomReferenceRefresh::Rebuilt` 多一格
+  `generation`（装上那一代的 `input_version`，这一段换代的 `to`）；② 「此刻常驻代号」只从冻好的那台取——
+  `TaskRoomCalculator::generation()`，两个执行体 `durable_alignment(job.dbnum, rooms.generation())`，不再另读一次生命周期
+  （对齐、冻、读数是三次独立的读，ensure 可以插在任意两次之间）；③ `scope_for_task` 的准入链必须**恰好**接到 `resident`
+  ——自己那一段 `g1 → g2` 接不到冻的 g3 就整库（定向只有一台计算器，链上各段的边都得是它这一代算的），除非账本里有 g2 → g3
+  那一段可以续（见下条 M1）；`PanelSwap` 带 `to_generation`，停放给别的库的那一段以它收尾；④ 冻的那台随
+  `DataBatchTaskResult::room_calculator` 交给收尾段，`run_room_recompute(job, &request, task_rooms.as_ref(), …)`，定向那一路
+  `run_targeted_room_recompute(…, expected_generation = scope.targeted_generation(), rooms, …)` **不新冻**，入口先对
+  `expected_generation == rooms.resident_generation()`，不等 / 没冻出（`None`）退整库；整库那一路 `run_room_only_recompute`
+  一字不改、照旧收尾新冻。**不变的**：三条触发、③ 电平型原样；中途换代的那一段（g2 → g3）由下一个任务的 ③ 接住——库上盖的
+  是 g2，常驻 g3，欠着；账本 / 槽里有 g2 → g3 就定向，否则整库（多算不漏算）。
+  **2026-09-19 追记（M1，换代段账本）：面板变化不再只活在做了重建的那一次调用里——谁重建谁记，任何任务的准入链都能接。**
+  审核（同页 §06 M1）：`PanelDelta` 只随 `RoomReferenceRefresh::Rebuilt` 回给做了重建的那一次 `refresh_before_task`；
+  `/model/ensure`（UI「显示模型」）先探到 composite 变了、做了重建 → 拿到那一段的是它，随后每个库的任务都是 `Unchanged` +
+  库上欠着 + 槽空 → 链断 → **全 MDB 每个库各整库一次**；截断窗口（大窗口的常态）跑不到收尾，自己那一段随任务丢掉，下一窗
+  又是 `Unchanged` → 整库；没被命中的库看不到「这一段与你无关」→ 整库（上条「仍欠」）。N 个 DESI 库一次面板变化最坏 N 次整库，
+  定向只在「批次任务自己重建 + 一窗追平 + 被命中」三件同时成立时省钱。落法：① **账本**——`room_resident::SwapLedger`
+  （`ResidentRooms` 上的一个字段，与两代模型同一把锁）：`ResidentRooms::install()` 对着被换下的那一代算出**非空** `PanelDelta`
+  就记一段 `PanelSwap { from = 旧代 input_version, to = 新代 input_version, panels }`——`refresh_before_task`、初始化 lane、
+  `/model/ensure` 都经 `install`，谁重建谁记；空段不记（换代另有原因，这一段说不了成员边，准入照旧整库）、同 `from → to`
+  替换旧的、容量 64 满了丢最早的；进程内、重启即丢（③ 兜底）。`PanelSwap` 随之搬到 `room_resident`（`room_recompute` 只
+  `pub(crate) use`）。② **准入改成路径搜索**——`scope_for_task(library, resident, swaps, parked)` 不再收 `refresh`：从库上那一代
+  出发，沿账本段 / 停放段深度优先找到 `resident`（本任务冻的计算器代号）的第一条路（`walk_chain`），同一起点**停放段优先**
+  （元素是别的库反查时已找出来的、免一次空间查询；同两代的账本段是同一问题的另一种问法，答案等价）、一条路断了换另一条、
+  绕圈靠已访问集挡；一条都接不上 = 整库。结果 `RoomRecomputeScope::Targeted { swaps: Vec<PanelSwap>（链序）, parked, generation }`
+  ——链上可以有**多段**换代段（对齐 g1 → g2 + ensure g2 → g3 + 冻 g3 = 两段都反查、按 g3 算，H1 那条竞态从「整库」升成「定向」）。
+  ③ **消费**——`run_targeted_room_recompute(…, swaps, parked, expected_generation, rooms, …)`：每一段各 `affected_roots` 一次、
+  根并起来，面板级语句按链序拼成 prelude（改号是逐段接力的，A→B 再 B→C）；结论 `Targeted` 之后**按段**停放
+  （`park_foreign_hits(dbnum, &swap.from, &swap.to, foreign_of_that_swap)`，别的库从它库上那一代起才接得上）。两个执行体在
+  `parked_for_task` 之后 `swaps_for_task(alignment.as_ref())` 取账本（库上欠着才取），传进 `request_for_task(…, &swaps, &parked)`；
+  原因多一句「沿换代段账本接了 N 段：…」。`/health.room_build.resident.swap_ledger = { entries, capacity, oldest_age_ms, segments }`。
+  **收掉的**：上条「仍欠」（没命中的库 C）——C 的任务沿账本接段、反查一次得到空命中就 `Targeted`（只写面板级语句）、盖代号，
+  不再整库；ensure 先重建 / 截断窗口丢段两种丢法同样收掉。**不变的**：③ 电平型原样、停放槽原样（现在是省一次反查的捷径，
+  不再是跨库唯一的传播路）、整库兜底原样。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -270,10 +309,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     经同一句交出（`Some(&room_reference)` 两条触发都带；`reconcile_startup_window` 与稳态窗口共用同一条规划入口，`RoomOnly` 工作项
     随 `side_actions` 进来——此前这里硬编码 `room_recompute: None`，停机期间的 PANE 改动经启动追平进来就被静默吃掉，2026-09-17 审核补上；
     整库重排（`whole_library_model_only`，起点 0）例外：每一根都刚用对齐后的计算器算过、承诺已由那一句盖上，不再空转一遍；
-    规划失败的早退仍 `None`）；两个执行体里触发 ③ 与定向准入共用的读数 `room_recompute::durable_alignment(job.dbnum)`（库上那一格 +
-    此刻常驻代号，一次读）落在 `refresh_room_reference_before_task(job.dbnum)` **之后**、`request_for_task(` 之前，并以
+    规划失败的早退仍 `None`）；两个执行体里触发 ③ 与定向准入共用的读数 `room_recompute::durable_alignment(job.dbnum, rooms.generation())`
+    （库上那一格 + 本任务冻的计算器代号，一次读；H1 2026-09-19 起常驻代号只从冻好的那台取，执行体不含 `resident_room_generation()`）
+    落在 `refresh_room_reference_before_task(job.dbnum)` 与 `TaskRoomCalculator::freeze()` **之后**、`request_for_task(` 之前，并以
     `alignment.as_ref(),` 真的传进去（对齐之前读到的常驻代号是上一代，比对会白点一次或漏点一次；2026-09-17）；`execute_frozen_batch`
-    的 DESI 收尾段里 `run_room_recompute(job, &request, &mut result, file_latest_sesno)`（定向 / 整库的分派，D 追记）在 `await_units_durable(` 之后、
+    的 DESI 收尾段里 `let task_rooms = result.room_calculator.clone();` →
+    `run_room_recompute(job, &request, task_rooms.as_ref(), &mut result, file_latest_sesno)`（定向 / 整库的分派，D 追记；定向复用本任务
+    冻的那台，H1）在 `await_units_durable(` 之后、
     `model_outcome_of(&flush` 之前、`flush.all_acked()` 门内，算不齐 `outcome.all_roots_ok = false`，收尾分开问两句
     `RoomRecomputeVerdict::rooms_ok`（水位）与 `::speaks_for_library`（D14 那一格）；`run_room_only_recompute` 函数体里
     `library_generation_roots(dbnum, target_sesno)` 落在 `recompute_dbnum_room_edges(` **之前**并以 `expected.as_deref()` 真的传进去
@@ -400,6 +442,48 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     live 待补：ams 两个 DESI 库都有任务的一窗里挪一块跨库面板 → A 的日志「已为 dbnum=B 停放 N 个元素（g1 → g2）」、B 的日志
     「定向房间重算完成 … 停放链 1 段 N 个元素 → M 根」且 B 不再整库；`/health.room_build.parked` 在两个任务之间非空、之后为 `{}`；
     Q6 那条不带库过滤的管身范围查询的解引用成本（行数 × 库数）。
+24. D13 追记（H1，定向路一任务一台，2026-09-19）：
+    - `RoomReferenceRefresh::Rebuilt { generation, .. }` 由 `refresh_before_task` 填装上那一代的 `input_version`；`PanelSwap { to_generation }`；
+      `RoomRecomputeScope::targeted_generation()` = 链尾那一段的 `to`（自己那一段总在链尾，否则停放链末段）。
+    - 准入：`scope_for_task` 取自己那一段时 `to != resident → WholeLibrary`（钉 `a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt`
+      加两行：Rebuilt 到 g2 却冻 g3 → 整库；槽里有 g2 → g3 也不替它续；`the_admission_walks_the_parked_chain_…` 加一行：停放 g1→g2 + 自己
+      g2→g3 + 冻 g4 → 整库；两条链式用例断言 `targeted_generation()`）。
+    - 执行体：`TaskRoomCalculator::generation()`；两个执行体 `refresh → freeze → durable_alignment(job.dbnum, rooms.generation()) →
+      parked_for_task → request_for_task` 顺序固定、`room_calculator: rooms.frozen().cloned(),` 随回执、函数体不含
+      `resident_room_generation()`；收尾 `let task_rooms = result.room_calculator.clone();` → `run_room_recompute(… task_rooms.as_ref() …)`；
+      分派处 `let targeted = match task_rooms {` / `Some(rooms) => {` / `request.scope.targeted_generation(),` / `rooms,`，`None` 退整库，
+      分派处与 `run_targeted_room_recompute` 函数体都不含 `frozen_room_calculator()`；`run_targeted_room_recompute` 入口
+      `if expected_generation != Some(rooms.resident_generation()) {` 在 `library_generation_roots(` 之前 `return None;`，停放以
+      `&swap.to_generation,` 收尾（钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end` 扩、
+      `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 扩）。
+    - `mem://` 端到端（钉 `a_mid_task_generation_swap_keeps_the_targeted_recompute_on_the_task_calculator`）：A1 / A2 / A3 各在 R1 三代
+      的盒里，库上 g1；T1 对齐 g1 → g2、冻 g2、中途常驻到 g3 → 准入按冻的 g2 定向（按 g3 就整库）、反查 P 命中 A1 / A2 按 g2 算
+      （A1 删边、A2 补边、A3 不动）、盖 g2 之后 `library_alignment_owed(g2, g3)` 仍欠（盖 g3 就不欠——反例）；T2 Unchanged + 库上 g2 +
+      常驻 g3 + 槽空 → 整库按 g3 → 只剩 R1 → A3，== 从零按 g3。
+    - `DataBatchTaskResult::room_calculator` 不进回执（`task_receipt_exposes_the_final_model_verdict_and_caught_up_time` 扩）。
+    live 待补：ams 一窗里挪一块 PANE、同时点「显示模型」让 ensure 中途换代 → 该窗日志「定向房间重算完成（… 计算器 <开工那一代> …）」
+    或「准入链终点 … 不是本任务冻的计算器代号 … 退整库」，下一窗 ③ 再点一次；`/dbnums` 的 `room_alignment.current` 在两窗之间为 `false`。
+25. D13 追记（M1，换代段账本，2026-09-19）：
+    - `room_resident::PanelSwap { from_generation, to_generation, panels }`（`room_recompute` 里 `pub(crate) use` 它）；`SwapLedger`
+      纯函数：`record` 空段 / 同两代不记、同 `from → to` 替换（位置不变）、满了丢最早的（`DEFAULT_CAPACITY = 64`），`segments` 按记入
+      先后，`health` 报 `entries / capacity / oldest_age_ms / segments`（钉 `the_swap_ledger_keeps_the_latest_segments_and_replaces_a_repeated_pair`）；
+      `ResidentRooms { swaps: SwapLedger }`，`install()` 里 `PanelDelta::between(` 之后、`slot.current` 换代之后 `self.swaps.record(`，
+      段的两端是两代的 `input_version`（钉 `install_reports_which_panels_moved_and_where_their_boxes_are` 扩：两次换代两段、第一代不记、
+      第三代那一段 == install 回的 `panels`）；`room_resident::swap_segments()` 是取数口。
+    - `scope_for_task(library, resident, swaps, parked)`（不再收 `refresh`）深度优先 `walk_chain`，同一起点停放段先于账本段；
+      `RoomRecomputeScope::Targeted { swaps, parked, generation }`，`targeted_generation()` 回 `generation`（钉
+      `a_task_goes_targeted_only_when_the_ledger_explains_the_librarys_whole_debt`：库上更早 / 从没盖过 / 冻不出 / 空段 / 账本空 /
+      段不从库上起 / 账本没有后一段 → 整库；账本两段接起来 → 两段定向；`Unchanged` 的任务沿别人记的段定向；`request_for_task` 多一句
+      「沿换代段账本接了 N 段」；`the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident`：停放段优先、
+      一条路断了换另一条、绕圈 / 链断 / 空段 → 整库）。
+    - 执行体：`parked_for_task` 之后 `room_recompute::swaps_for_task(alignment.as_ref())`、`request_for_task(…, &swaps, &parked)`
+      （钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end` 扩）；`run_targeted_room_recompute` 收
+      `swaps: &[PanelSwap]`，`for swap in swaps {` 各反查、`for (swap, foreign) in swaps.iter().zip(&foreign_by_swap) {` 按段停放，
+      面板级语句按链序拼（钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 扩）。
+    - `mem://`（钉 `a_mid_task_generation_swap_keeps_the_targeted_recompute_on_the_task_calculator` 扩 ④）：T2 `Unchanged`、库上 g2、
+      冻 g3、槽空、账本有 ensure 记的 g2 → g3 → 沿账本定向、反查 Q 命中 A2 / A3、按 g3 算 → 与整库按 g3 同一终态；账本空才整库。
+    live 待补：ams 两个 DESI 库、UI 先点「显示模型」让 ensure 做那一次重建 → 两个库的任务日志都是「定向房间重算完成（… 换代段 1 段 …）」、
+    `/health.room_build.resident.swap_ledger.entries ≥ 1`，没有一个库整库；没被命中的库日志「换代段 1 段 … 反查 roots=0 …」。
 
 ## 背景
 

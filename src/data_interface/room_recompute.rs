@@ -28,11 +28,18 @@
 //! 几何（`model_record_reader::durable_records_of_root`，U1 第二半）重算归属、重写两张边
 //! （`model_db_adapter::recompute_dbnum_room_edges`），不重生几何、不动模型行、不动空间树。
 //!
-//! **定向（反向传播，2026-09-17）**：整库是兜底，不是常路。本任务的开工前对齐真换了代、带着与上一代的面板变化
-//! （`RoomReferenceRefresh::Rebuilt::panels`）、且库上的对齐代号正是上一代（[`scope_for_task`]）——那么上一代 →
-//! 这一代之间面板动了什么就是欠账的全部：不在册的面板清边、只改号的改列（不查空间），几何变了 / 换了房的拿新旧盒
-//! 反查（`room_reverse`：全局树 + 管身范围查询）命中的根，只重算它们（`RootScope::Targeted`）；成功即盖
-//! `Aligned`（命中根算齐 = 库上每条边都与这一代一致）。树不就绪 / 折不出根 / 根清单枚举不出来 → 退整库。
+//! **定向（反向传播，2026-09-17）**：整库是兜底，不是常路。从库上的对齐代号出发，沿**换代段账本**里的段
+//! （`room_resident::SwapLedger`：每一次常驻重建对着被换下的那一代算出的面板变化 `from → to → PanelDelta`，谁重建谁记
+//! ——本任务自己那一次、`/model/ensure` / 初始化 lane 那一次都在；M1 2026-09-19）与别的库停放给本库的段接到本任务冻的
+//! 计算器代号（[`scope_for_task`]）——那么这几段面板动了什么就是欠账的全部：不在册的面板清边、只改号的改列
+//! （不查空间），几何变了 / 换了房的拿新旧盒反查（`room_reverse`：全局树 + 管身范围查询）命中的根，只重算它们
+//! （`RootScope::Targeted`）；成功即盖 `Aligned`（命中根算齐 = 库上每条边都与这一代一致）。树不就绪 / 折不出根 /
+//! 根清单枚举不出来 → 退整库。此前只认本任务自己那一次 `Rebuilt` 带回的段：ensure 先重建了 / 截断窗口丢了那一段 /
+//! 没被命中的库，全 MDB 每个库各整库一次（审核 M1）。
+//! **定向重算用的是本任务开工冻的那台计算器**（2026-09-19 H1，一任务一台）：准入链的终点 `resident` 就取自它
+//! （[`durable_alignment`] 收它的代号），自己那一段的 `Rebuilt.generation` 不等于它 → 整库；收尾那一步再对一次
+//! （`batch_worker::run_targeted_room_recompute`）。此前收尾新冻一台「此刻这一代」——scope 按 g2 定、边按 g3 算、盖 g3，
+//! 中途 g2 → g3 动的面板命中的根从此永久陈旧、③ 哑掉；整库那一路不受影响（每一根都算），照旧新冻。
 //! 算不出的根按 D2 记失败、`model_sesno` 不盖。**覆盖面要自证**：投影只装本进程生成过的根——
 //! 初始化的模型行不进投影（ADR-077 D5），落盘形态冷重启后投影是空的——回读库补的正是这一半；重算完
 //! 拿回执里覆盖到的根对一遍清单，每一根都在才说「整库」、durable 侧那一格「整库对齐到这一代」才盖；
@@ -42,7 +49,7 @@
 
 use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
 use crate::data_interface::room_reverse::RoomRoots;
-use crate::fast_model::room_resident::{PanelDelta, RoomReferenceRefresh};
+use crate::fast_model::room_resident::RoomReferenceRefresh;
 
 /// 房间定义族：房间节点（FRMW / SBFR）、`project_hd` 的容器（CWALL / CFLOOR）、面板本体（PANE）。
 /// 与 `room_topology::RoomHierarchy` 两种口径的并集——按 noun 判，不分口径：不在本项目层级里的
@@ -144,15 +151,16 @@ impl DurableAlignment {
     }
 }
 
-/// 第三条触发的取数：库上那一格与两枚水位同一行（`DbnumState::read`），常驻代号取
-/// `query_service::resident_room_generation`（`Ready` / `Degraded` 才有）。开关关着直接 `None`；
-/// 水位行读不出**不**触发（读错不是「欠着」的证据，只留一句 warn）——那一轮也说不出库上是哪一代，定向准入
-/// 随之不成立。任务开工前对齐（D12）之后调，拿到的才是此刻这一代。
-pub(crate) async fn durable_alignment(dbnum: u32) -> Option<DurableAlignment> {
-    if !crate::options::room_membership() {
-        return None;
-    }
-    let resident = crate::query_service::resident_room_generation()?;
+/// 第三条触发的取数：库上那一格与两枚水位同一行（`DbnumState::read`），常驻代号是**本任务冻好的那台计算器**的
+/// （`TaskRoomCalculator::generation`，2026-09-19 H1）——不再另读一次生命周期：对齐、冻计算器、读代号是三次独立的读，
+/// `/model/ensure` 并发对齐可以插在任意两次之间换代；准入链的终点与收尾定向重算用的计算器必须是同一代，所以终点
+/// 从那台计算器上取。冻不出 / 开关关（`None`）= 没有可对齐的目标，直接 `None`；水位行读不出**不**触发（读错不是
+/// 「欠着」的证据，只留一句 warn）——那一轮也说不出库上是哪一代，定向准入随之不成立。
+pub(crate) async fn durable_alignment(
+    dbnum: u32,
+    resident: Option<&str>,
+) -> Option<DurableAlignment> {
+    let resident = resident?;
     let library = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
         Ok(state) => state.and_then(|state| state.model_room_generation),
         Err(error) => {
@@ -162,31 +170,44 @@ pub(crate) async fn durable_alignment(dbnum: u32) -> Option<DurableAlignment> {
             return None;
         }
     };
-    Some(DurableAlignment { library, resident })
+    Some(DurableAlignment {
+        library,
+        resident: resident.to_owned(),
+    })
 }
 
-/// 本任务自己的那一段换代：开工前对齐把常驻从 `from_generation` 换到此刻这一代，面板动了 `panels`。
-/// 反查按 `panels` 的新旧盒问谁在里面；别的库的命中停放出去时这一段就是它们的 `from → to`（`to` = 重算那台计算器的代号）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PanelSwap {
-    pub from_generation: String,
-    pub panels: PanelDelta,
-}
+/// 一段换代（`from → to → 面板动了什么`）；定义在常驻模型那边（谁重建谁记，`room_resident::SwapLedger`），这里只是
+/// 准入链的一种段。
+pub(crate) use crate::fast_model::room_resident::PanelSwap;
 
 /// 这个任务的房间重算要算多大范围（ADR-073 D13 反查，2026-09-17）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RoomRecomputeScope {
     /// 整库：`DbSet@T` 的每一根（今天的 D13）。
     WholeLibrary,
-    /// 定向（反向传播）：库上那一代 → 此刻常驻这一代之间面板动了什么就是本库的全部欠账——本任务自己这一段换代的
-    /// 面板变化（`swap`，反查命中的根）加上别的库停放给本库的根级工作项（`parked`，U3 b 档），只重算它们；
+    /// 定向（反向传播）：库上那一代 → 本任务冻的计算器这一代之间面板动了什么就是本库的全部欠账——换代段账本里的段
+    /// （`swaps`，每段反查命中的根）加上别的库停放给本库的根级工作项（`parked`，U3 b 档），只重算它们；
     /// 面板级的两类（不在册 / 只改号）不查空间直接写。
     Targeted {
-        /// 本任务自己换的那一段；`None` = 本任务没换代，欠账全在停放链上（U3 b 档的准入链，随 U3-3 接进来）。
-        swap: Option<PanelSwap>,
-        /// 别的库停放给本库的（按停进来的先后）。随 U3-3 接进准入链、U3-4 消费；此前恒空。
+        /// 链上要反查的换代段（链序）：本任务自己那一次重建的、`/model/ensure` / 初始化 lane 重建时记的都在账本里
+        /// （M1，2026-09-19）；空 = 欠账全在停放链上。
+        swaps: Vec<PanelSwap>,
+        /// 别的库停放给本库的（链序）。随 U3-3 接进准入链、U3-4 消费。
         parked: Vec<RoomRoots>,
+        /// 准入链的终点 = 本任务冻的计算器代号（`DurableAlignment::resident`）：收尾的定向重算拿它对那台计算器，
+        /// 不等就不是同一段欠账、退整库（H1）。
+        generation: String,
     },
+}
+
+impl RoomRecomputeScope {
+    /// 定向那一档准入链的终点代号（= 本任务冻的计算器代号）；整库 = `None`。
+    pub(crate) fn targeted_generation(&self) -> Option<&str> {
+        match self {
+            Self::WholeLibrary => None,
+            Self::Targeted { generation, .. } => Some(generation),
+        }
+    }
 }
 
 /// 这个任务要跑的房间重算：为什么（三条触发合成一句）与算多大。
@@ -196,68 +217,118 @@ pub(crate) struct RoomRecomputeRequest {
     pub scope: RoomRecomputeScope,
 }
 
-/// 定向准入（纯函数，链式）。只有「库上那一代 → 此刻常驻这一代之间，面板动了什么本任务**全知道**」时才定向：
-/// 从库上 `model_room_generation` 出发，每一步接一段换代——本任务自己那一段（开工前对齐**真换了代**、说得出上一代、
-/// 带着**非空**面板变化：`previous_generation → 常驻代号`），或别的库停放给本库的一段（`RoomRoots::from → to`，U3 b 档）
-/// ——接到此刻常驻代号就是定向：链上各段的欠账（自己那一段反查、停放的元素折根）加起来就是本库欠账的全部。
+/// 准入链上的一段：换代段（要反查）或停放段（元素已在手，折根即可）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChainSegment<'a> {
+    Swap(&'a PanelSwap),
+    Parked(&'a RoomRoots),
+}
+
+impl ChainSegment<'_> {
+    fn to_generation(&self) -> &str {
+        match self {
+            Self::Swap(swap) => &swap.to_generation,
+            Self::Parked(entry) => &entry.to_generation,
+        }
+    }
+}
+
+/// 定向准入（纯函数，链式）。只有「库上那一代 → 本任务冻的计算器这一代之间，面板动了什么本进程**全知道**」时才定向：
+/// 从库上 `model_room_generation` 出发，每一步接一段——换代段账本里的一段（`PanelSwap::from → to`，谁重建谁记，
+/// 本任务自己那一次重建的也在里面；M1 2026-09-19）或别的库停放给本库的一段（`RoomRoots::from → to`，U3 b 档）
+/// ——接到 `resident`（本任务冻的计算器代号）就是定向：链上各段的欠账（换代段反查、停放的元素折根）加起来就是
+/// 本库欠账的全部，收尾用那一台计算器算每一根、盖它的代号。
 ///
-/// 规则：自己那一段优先（它是此刻对树的新鲜反查；同一对代号的旧停放物是上一轮的答案）；停放物里 `from` 在库上那一代
-/// 之前的一段不要（库上已越过它）；一段都接不上 / 中途断了 / 绕圈 = 整库。今天的四条准入（真换了代 + 面板变化非空 +
-/// 说得出上一代 + 库上正是上一代）是链长 1、只有自己那一段的特例。
+/// 规则：同一个起点上**停放段优先**（元素是别的库反查时已经找出来的、免一次空间查询；同两代的换代段是同一个问题的
+/// 另一种问法，答案等价），再看换代段；深度优先找第一条到得了 `resident` 的路，绕圈（面板挪走又挪回成环）靠已访问集
+/// 挡；一条都接不上 = 整库。终点必须**恰是** `resident`：对齐装上 g2、冻计算器时常驻已是 g3（`/model/ensure` 插在两次
+/// 读之间）时，账本里若有 g2 → g3 那一段就接上、两段都反查、按 g3 算；没有就整库（H1）——不拿 g2 的段冒充到 g3。
 ///
-/// 其余都整库：库上从没盖过（欠的不止这几段，diff 说不了）、常驻说不出代号、`Unchanged` 却欠着而槽里接不出链
-/// （重启后停放物已丢 / 别的库先换的代却没停放给本库）、`generation_changed` 而面板变化为空（换代另有原因，例如关键字
-/// ——这一段接不上）、第一代（没有上一代）。
+/// 其余都整库：库上从没盖过（欠的不止这几段，diff 说不了）、常驻说不出代号、账本与槽都接不出链（重启后都丢了）、
+/// 换了代而面板变化为空的那一段没进账本（换代另有原因，例如关键字——这一段接不上）、库上已是这一代却被问到
+/// （规划器排了 `RoomOnly`）。
 pub(crate) fn scope_for_task(
-    refresh: Option<&RoomReferenceRefresh>,
     library_generation: Option<&str>,
     resident_generation: Option<&str>,
+    swaps: &[PanelSwap],
     parked: &[RoomRoots],
 ) -> RoomRecomputeScope {
     let (Some(library), Some(resident)) = (library_generation, resident_generation) else {
         return RoomRecomputeScope::WholeLibrary;
     };
-    let own = match refresh {
-        Some(RoomReferenceRefresh::Rebuilt {
-            generation_changed: true,
-            previous_generation: Some(previous),
-            panels: Some(delta),
-            ..
-        }) if !delta.is_empty() => Some((previous.as_str(), delta)),
-        _ => None,
-    };
-    let mut cursor = library;
-    let mut swap: Option<PanelSwap> = None;
-    let mut used: Vec<RoomRoots> = Vec::new();
-    let mut visited = std::collections::BTreeSet::new();
-    while cursor != resident {
-        if !visited.insert(cursor) {
-            // 绕圈（面板挪走又挪回的停放物成环，而常驻已在环外）。
-            return RoomRecomputeScope::WholeLibrary;
-        }
-        if let Some((previous, delta)) = own {
-            if previous == cursor {
-                swap = Some(PanelSwap {
-                    from_generation: previous.to_owned(),
-                    panels: delta.clone(),
-                });
-                cursor = resident;
-                continue;
-            }
-        }
-        match parked.iter().find(|entry| entry.from_generation == cursor) {
-            Some(entry) => {
-                used.push(entry.clone());
-                cursor = entry.to_generation.as_str();
-            }
-            None => return RoomRecomputeScope::WholeLibrary,
-        }
-    }
-    if swap.is_none() && used.is_empty() {
+    if library == resident {
         // 库上已是这一代：不欠；问到这里的（规划器排了 `RoomOnly`）按整库办，与今天同。
         return RoomRecomputeScope::WholeLibrary;
     }
-    RoomRecomputeScope::Targeted { swap, parked: used }
+    let mut visited = std::collections::BTreeSet::new();
+    let mut path: Vec<ChainSegment<'_>> = Vec::new();
+    if !walk_chain(library, resident, swaps, parked, &mut visited, &mut path) {
+        return RoomRecomputeScope::WholeLibrary;
+    }
+    let mut used_swaps = Vec::new();
+    let mut used_parked = Vec::new();
+    for segment in path {
+        match segment {
+            ChainSegment::Swap(swap) => used_swaps.push(swap.clone()),
+            ChainSegment::Parked(entry) => used_parked.push(entry.clone()),
+        }
+    }
+    RoomRecomputeScope::Targeted {
+        swaps: used_swaps,
+        parked: used_parked,
+        generation: resident.to_owned(),
+    }
+}
+
+/// 深度优先：从 `cursor` 出发沿段走到 `target`，走到了 `path` 里就是链序的各段。同一起点停放段先试；已访问的代号不再进。
+fn walk_chain<'a>(
+    cursor: &str,
+    target: &str,
+    swaps: &'a [PanelSwap],
+    parked: &'a [RoomRoots],
+    visited: &mut std::collections::BTreeSet<String>,
+    path: &mut Vec<ChainSegment<'a>>,
+) -> bool {
+    if cursor == target {
+        return true;
+    }
+    if !visited.insert(cursor.to_owned()) {
+        return false;
+    }
+    let candidates = parked
+        .iter()
+        .filter(|entry| entry.from_generation == cursor)
+        .map(ChainSegment::Parked)
+        .chain(
+            swaps
+                .iter()
+                .filter(|swap| swap.from_generation == cursor && !swap.panels.is_empty())
+                .map(ChainSegment::Swap),
+        );
+    for segment in candidates {
+        path.push(segment.clone());
+        if walk_chain(
+            segment.to_generation(),
+            target,
+            swaps,
+            parked,
+            visited,
+            path,
+        ) {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
+/// 换代段账本（M1）的取数，两个执行体在读过库上那一格之后调：库上欠着（③）才拿账本里的段去接准入链；不欠 / 说不出
+/// 不取。账本是进程一份、不按库清——段说的是常驻换了什么，与哪个库无关。
+pub(crate) fn swaps_for_task(alignment: Option<&DurableAlignment>) -> Vec<PanelSwap> {
+    match alignment.map(DurableAlignment::owed) {
+        Some(Some(_)) => crate::fast_model::room_resident::swap_segments(),
+        _ => Vec::new(),
+    }
 }
 
 /// 停放链（U3 b 档）的取数，两个执行体在开工前对齐、读过库上那一格之后调：库上欠着（③）才拿本库槽里的停放物去接
@@ -281,11 +352,13 @@ pub(crate) fn parked_for_task(dbnum: u32, alignment: Option<&DurableAlignment>) 
 
 /// 这个任务要不要跑房间重算、为什么、算多大。三条触发合成一句：规划器排的 `RoomOnly` 工作项
 /// （本窗碰了房间定义族）、开工前对齐换了房间代号、库上整库对齐代号欠着（[`DurableAlignment::owed`]）。
-/// 都没有 = `None`。范围由 [`scope_for_task`] 定；定向里接了停放链的，原因多一句说停的是谁、多少。
+/// 都没有 = `None`。范围由 [`scope_for_task`] 定（账本里的换代段 `swaps` + 停放链 `parked`）；定向里接了哪几段，
+/// 原因各多一句。
 pub(crate) fn request_for_task(
     side_actions: &[ModelWorkItem],
     refresh: Option<&RoomReferenceRefresh>,
     alignment: Option<&DurableAlignment>,
+    swaps: &[PanelSwap],
     parked: &[RoomRoots],
 ) -> Option<RoomRecomputeRequest> {
     let mut reasons = Vec::new();
@@ -315,12 +388,28 @@ pub(crate) fn request_for_task(
         return None;
     }
     let scope = scope_for_task(
-        refresh,
         alignment.and_then(|alignment| alignment.library.as_deref()),
         alignment.map(|alignment| alignment.resident.as_str()),
+        swaps,
         parked,
     );
-    if let RoomRecomputeScope::Targeted { parked: used, .. } = &scope {
+    if let RoomRecomputeScope::Targeted {
+        swaps: used_swaps,
+        parked: used,
+        ..
+    } = &scope
+    {
+        if !used_swaps.is_empty() {
+            reasons.push(format!(
+                "沿换代段账本接了 {} 段：{}",
+                used_swaps.len(),
+                used_swaps
+                    .iter()
+                    .map(PanelSwap::summary)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
         if !used.is_empty() {
             reasons.push(format!(
                 "别的库的面板变化停放到本库 {} 段：{}",
@@ -341,6 +430,7 @@ pub(crate) fn request_for_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fast_model::room_resident::PanelDelta;
     use e3d_io::refno::RefNo;
     use e3d_model::ledger::{ChangeKind, LedgerEntry};
 
@@ -457,8 +547,10 @@ mod tests {
             executor.contains("room_recompute::request_for_task("),
             "执行体把「要不要整库重算」交出去: {executor}"
         );
-        // 第三条触发（电平型）：两个执行体都在开工前对齐**之后**读库上那一格、喂给 `request_for_task`。
-        // 顺序要紧——对齐之前读到的常驻代号是上一代，比对会白点一次（或漏点一次）。
+        // 第三条触发（电平型）：两个执行体都在开工前对齐**之后**、冻好本任务的计算器之后读库上那一格、喂给
+        // `request_for_task`。顺序要紧——对齐之前读到的常驻代号是上一代，比对会白点一次（或漏点一次）；常驻代号
+        // 从冻好的那台取（`rooms.generation()`，H1 2026-09-19），不另读生命周期——准入链的终点与收尾定向重算用的
+        // 计算器必须是同一台。
         for (label, body) in [
             ("批次执行体", executor),
             (
@@ -469,24 +561,44 @@ mod tests {
             let refresh = body
                 .find("refresh_room_reference_before_task(job.dbnum)")
                 .unwrap_or_else(|| panic!("{label}: 开工前对齐"));
+            let frozen = body
+                .find("TaskRoomCalculator::freeze()")
+                .unwrap_or_else(|| panic!("{label}: 一任务一台，对齐之后冻一次"));
             let owed = body
-                .find("room_recompute::durable_alignment(job.dbnum)")
+                .find("room_recompute::durable_alignment(job.dbnum, rooms.generation())")
                 .unwrap_or_else(|| {
-                    panic!("{label}: 要读库上的整库对齐代号（第三条触发 / 定向准入）: {body}")
+                    panic!("{label}: 要拿本任务冻的计算器代号读库上的整库对齐代号（第三条触发 / 定向准入）: {body}")
                 });
             let parked = body
                 .find("room_recompute::parked_for_task(job.dbnum, alignment.as_ref())")
                 .unwrap_or_else(|| panic!("{label}: 停放链（U3 b 档）按库上那一格取: {body}"));
+            let swaps = body
+                .find("room_recompute::swaps_for_task(alignment.as_ref())")
+                .unwrap_or_else(|| panic!("{label}: 换代段账本（M1）按库上那一格取: {body}"));
             let request = body
                 .find("room_recompute::request_for_task(")
                 .unwrap_or_else(|| panic!("{label}: request_for_task"));
             assert!(
-                refresh < owed && owed < parked && parked < request,
-                "{label}: 对齐 → 读库上那一格 → 取停放链 → 合成三条触发，顺序不能乱"
+                refresh < frozen
+                    && frozen < owed
+                    && owed < parked
+                    && parked < swaps
+                    && swaps < request,
+                "{label}: 对齐 → 冻计算器 → 读库上那一格 → 取停放链 → 取账本 → 合成三条触发，顺序不能乱"
             );
             assert!(
-                body.contains("alignment.as_ref(),") && body.contains("&parked,"),
-                "{label}: 库上那一格与停放链要真的传进 request_for_task（第三条触发与定向准入都从它出发）: {body}"
+                body.contains("alignment.as_ref(),")
+                    && body.contains("&swaps,")
+                    && body.contains("&parked,"),
+                "{label}: 库上那一格、账本段与停放链要真的传进 request_for_task（第三条触发与定向准入都从它出发）: {body}"
+            );
+            assert!(
+                body.contains("room_calculator: rooms.frozen().cloned(),"),
+                "{label}: 冻的那台随回执交给收尾段，定向重算复用它（H1）: {body}"
+            );
+            assert!(
+                !body.contains("resident_room_generation()"),
+                "{label}: 常驻代号只从冻好的那台取，不另读生命周期（H1）"
             );
         }
         // ModelOnly 执行体同样：启动追平窗口与稳态窗口共用同一条规划入口，`RoomOnly` 工作项随
@@ -520,12 +632,18 @@ mod tests {
             .0;
         let flush = tail.find("await_units_durable(").expect("先等刷盘");
         let rooms = tail
-            .find("run_room_recompute(job, &request, &mut result, file_latest_sesno)")
+            .find("run_room_recompute(")
             .expect("房间重算（定向 / 整库）在收尾段，带着 T 好对 DbSet@T 的根清单自证覆盖面");
         let outcome = tail.find("model_outcome_of(flush").expect("模型收尾判决");
         assert!(
             flush < rooms && rooms < outcome,
             "刷盘之后、模型收尾判决之前: {tail}"
+        );
+        assert!(
+            tail.contains("let task_rooms = result.room_calculator.clone();")
+                && tail.contains("task_rooms.as_ref(),")
+                && tail.contains("file_latest_sesno,"),
+            "分派带着本任务开工冻的那台计算器（定向复用它，H1）与 T: {tail}"
         );
         assert!(
             tail.contains("Some(request) if flush.all_acked()"),
@@ -562,7 +680,7 @@ mod tests {
     #[test]
     fn a_task_recomputes_rooms_on_either_trigger() {
         let item = room_only_work_item(7997, "DESI", 163);
-        assert!(request_for_task(&[], None, None, &[]).is_none());
+        assert!(request_for_task(&[], None, None, &[], &[]).is_none());
         assert!(
             request_for_task(
                 &[],
@@ -570,12 +688,14 @@ mod tests {
                     previous_key: Some("a".into()),
                     key: "b".into(),
                     generation_changed: false,
+                    generation: "g".into(),
                     previous_generation: Some("g".into()),
                     diff: None,
                     panels: None,
                     elapsed_ms: 1,
                 }),
                 None,
+                &[],
                 &[],
             )
             .is_none(),
@@ -587,11 +707,12 @@ mod tests {
                 Some(&RoomReferenceRefresh::Unchanged { key: "a".into() }),
                 Some(&alignment(Some("g"), "g")),
                 &[],
+                &[],
             )
             .is_none(),
             "库上与常驻同一代：不欠"
         );
-        let planned = request_for_task(std::slice::from_ref(&item), None, None, &[]).unwrap();
+        let planned = request_for_task(std::slice::from_ref(&item), None, None, &[], &[]).unwrap();
         assert!(planned.reason.contains("房间定义族"), "{planned:?}");
         assert_eq!(planned.scope, RoomRecomputeScope::WholeLibrary);
         let swapped = request_for_task(
@@ -600,12 +721,14 @@ mod tests {
                 previous_key: None,
                 key: "b".into(),
                 generation_changed: true,
+                generation: "b-gen".into(),
                 previous_generation: None,
                 diff: Some("removed=1 recalc=0".into()),
                 panels: None,
                 elapsed_ms: 1,
             }),
             None,
+            &[],
             &[],
         )
         .unwrap();
@@ -614,7 +737,8 @@ mod tests {
             "{swapped:?}"
         );
         // 第三条：库上欠着，原因原样带进来；单独一条也触发。
-        let owed = request_for_task(&[], None, Some(&alignment(Some("old"), "new")), &[]).unwrap();
+        let owed =
+            request_for_task(&[], None, Some(&alignment(Some("old"), "new")), &[], &[]).unwrap();
         assert!(owed.reason.contains("old ≠ 此刻常驻代号 new"), "{owed:?}");
         assert_eq!(owed.scope, RoomRecomputeScope::WholeLibrary);
         let all = request_for_task(
@@ -623,12 +747,14 @@ mod tests {
                 previous_key: None,
                 key: "b".into(),
                 generation_changed: true,
+                generation: "new".into(),
                 previous_generation: None,
                 diff: None,
                 panels: None,
                 elapsed_ms: 1,
             }),
             Some(&alignment(None, "new")),
+            &[],
             &[],
         )
         .unwrap();
@@ -639,115 +765,141 @@ mod tests {
         );
     }
 
-    /// 定向准入的真值表（ADR-073 D13 反查，2026-09-17）：只有「真换了代 + 带着非空面板变化 + 说得出上一代 + 库上正是
-    /// 上一代」四条同时成立才定向；缺任何一条整库——库上更早 / 从没盖过、`Unchanged` 却欠着、面板变化为空、
-    /// 没有上一代、开工前对齐失败 / 退避。定向时把面板变化原样带走。
-    #[test]
-    fn a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt() {
+    fn swap(from: &str, to: &str, panels: PanelDelta) -> PanelSwap {
+        PanelSwap {
+            from_generation: from.into(),
+            to_generation: to.into(),
+            panels,
+        }
+    }
+
+    fn moved_panel() -> PanelDelta {
         use crate::fast_model::room_resident::{PanelBounds, PanelMove};
         use aios_core::{RefU64, RefnoEnum};
-        let panel = RefnoEnum::from(RefU64::from_two_nums(24381, 7));
-        let delta = PanelDelta {
+        PanelDelta {
             recalc: vec![PanelMove {
-                panel,
+                panel: RefnoEnum::from(RefU64::from_two_nums(24381, 7)),
                 old: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
                 new: Some(PanelBounds([[5.0; 3], [6.0; 3]])),
             }],
             geometry_changed: 1,
             ..PanelDelta::default()
-        };
-        let rebuilt = |generation_changed: bool,
-                       previous_generation: Option<&str>,
-                       panels: Option<PanelDelta>| {
-            RoomReferenceRefresh::Rebuilt {
-                previous_key: Some("k1".into()),
-                key: "k2".into(),
-                generation_changed,
-                previous_generation: previous_generation.map(str::to_owned),
-                diff: None,
-                panels,
-                elapsed_ms: 1,
-            }
-        };
+        }
+    }
+
+    /// 定向准入的真值表（ADR-073 D13 反查，2026-09-17；H1 / M1 2026-09-19 改成沿账本接段）：只有「库上盖过 + 本任务冻得出
+    /// 计算器 + 换代段账本里从库上那一代到冻的这一代接得通、每一段面板变化非空」才定向；缺任何一条整库——库上更早 /
+    /// 从没盖过、常驻说不出代号、账本里那一段面板变化为空（换代另有原因）、账本空（重启后）、对齐与冻计算器之间又换了
+    /// 一代而账本没有后一段。定向时把链上各段原样带走，终点就是冻的那一代。
+    #[test]
+    fn a_task_goes_targeted_only_when_the_ledger_explains_the_librarys_whole_debt() {
+        let delta = moved_panel();
+        let own = swap("g1", "g2", delta.clone());
         let targeted = RoomRecomputeScope::Targeted {
-            swap: Some(PanelSwap {
-                from_generation: "g1".into(),
-                panels: delta.clone(),
-            }),
+            swaps: vec![own.clone()],
             parked: Vec::new(),
+            generation: "g2".into(),
         };
         assert_eq!(
-            scope_for_task(
-                Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
-                Some("g1"),
-                Some("g2"),
-                &[]
-            ),
+            scope_for_task(Some("g1"), Some("g2"), &[own.clone()], &[]),
             targeted,
-            "四条齐：定向，带着自己这一段换代（从上一代起）的面板变化"
+            "库上 g1、冻 g2、账本 g1 → g2：定向，带着这一段的面板变化"
         );
-        for (label, refresh, library) in [
+        assert_eq!(
+            targeted.targeted_generation(),
+            Some("g2"),
+            "准入链的终点就是冻的那一代"
+        );
+        assert_eq!(RoomRecomputeScope::WholeLibrary.targeted_generation(), None);
+        for (label, library, resident, ledger) in [
+            ("库上是更早的代", Some("g0"), Some("g2"), vec![own.clone()]),
+            ("库上从没盖过", None, Some("g2"), vec![own.clone()]),
             (
-                "库上是更早的代",
-                rebuilt(true, Some("g1"), Some(delta.clone())),
-                Some("g0"),
-            ),
-            (
-                "库上从没盖过",
-                rebuilt(true, Some("g1"), Some(delta.clone())),
+                "常驻说不出代号（冻不出）",
+                Some("g1"),
                 None,
+                vec![own.clone()],
             ),
             (
                 "面板变化为空（换代另有原因）",
-                rebuilt(true, Some("g1"), Some(PanelDelta::default())),
                 Some("g1"),
+                Some("g2"),
+                vec![swap("g1", "g2", PanelDelta::default())],
             ),
             (
-                "没有上一代",
-                rebuilt(true, None, Some(delta.clone())),
+                "账本空（重启后 / 从没换过代）",
                 Some("g1"),
+                Some("g2"),
+                Vec::new(),
             ),
-            ("没带面板变化", rebuilt(true, Some("g1"), None), Some("g1")),
             (
-                "代号没变",
-                rebuilt(false, Some("g1"), Some(delta.clone())),
+                "账本里的段不从库上那一代起",
                 Some("g1"),
+                Some("g2"),
+                vec![swap("g0", "g2", delta.clone())],
             ),
             (
-                "Unchanged 却欠着（重启后 / 别的库先换的代）",
-                RoomReferenceRefresh::Unchanged { key: "k2".into() },
-                Some("g0"),
-            ),
-            (
-                "重建失败留旧代",
-                RoomReferenceRefresh::Failed {
-                    error: "x".into(),
-                    kept_previous: true,
-                },
-                Some("g0"),
+                // H1（2026-09-19）：对齐装上 g2、冻计算器时常驻已是 g3，账本里没有 g2 → g3——这一段说不了 g2 → g3。
+                "对齐与冻计算器之间又换了一代，账本没有后一段",
+                Some("g1"),
+                Some("g3"),
+                vec![own.clone()],
             ),
         ] {
             assert_eq!(
-                scope_for_task(Some(&refresh), library, Some("g2"), &[]),
+                scope_for_task(library, resident, &ledger, &[]),
                 RoomRecomputeScope::WholeLibrary,
                 "{label}"
             );
         }
+        // M1：账本里有 g2 → g3（ensure 重建时记的）就接上——两段都反查、按冻的 g3 算。
+        let ensure = swap("g2", "g3", delta.clone());
         assert_eq!(
-            scope_for_task(None, Some("g1"), Some("g2"), &[]),
+            scope_for_task(Some("g1"), Some("g3"), &[own.clone(), ensure.clone()], &[]),
+            RoomRecomputeScope::Targeted {
+                swaps: vec![own.clone(), ensure.clone()],
+                parked: Vec::new(),
+                generation: "g3".into(),
+            },
+            "对齐与冻之间换的那一代账本里有：两段接起来定向"
+        );
+        // 账本里的段不分谁记的：本任务 `Unchanged`（ensure 先重建了），库上 g1、冻 g2、账本 g1 → g2 → 定向。
+        assert_eq!(
+            scope_for_task(Some("g1"), Some("g2"), &[ensure.clone(), own.clone()], &[]),
+            targeted,
+            "谁重建谁记，谁来接都接得上（M1）"
+        );
+        // 库上已是这一代：不欠；问到这里的（规划器排了 `RoomOnly`）按整库办。
+        assert_eq!(
+            scope_for_task(Some("g2"), Some("g2"), &[own.clone()], &[]),
             RoomRecomputeScope::WholeLibrary
         );
-        // `request_for_task` 把范围带上：定向那一档三条触发同时点亮（规划器 + 换代 + ③），仍是定向。
+        // `request_for_task` 把范围带上：三条触发同时点亮（规划器 + 换代 + ③）仍是定向，多一句说接了哪几段。
         let item = room_only_work_item(7997, "DESI", 163);
         let request = request_for_task(
             std::slice::from_ref(&item),
-            Some(&rebuilt(true, Some("g1"), Some(delta.clone()))),
+            Some(&RoomReferenceRefresh::Rebuilt {
+                previous_key: Some("k1".into()),
+                key: "k2".into(),
+                generation_changed: true,
+                generation: "g2".into(),
+                previous_generation: Some("g1".into()),
+                diff: None,
+                panels: Some(delta.clone()),
+                elapsed_ms: 1,
+            }),
             Some(&alignment(Some("g1"), "g2")),
+            &[own.clone()],
             &[],
         )
         .unwrap();
         assert_eq!(request.scope, targeted);
-        assert_eq!(request.reason.matches("；").count(), 2, "{request:?}");
+        assert_eq!(request.reason.matches("；").count(), 3, "{request:?}");
+        assert!(
+            request.reason.contains("沿换代段账本接了 1 段：g1 → g2（removed=0 renumbered_rooms=0 recalc=1 (geometry_only 1)）"),
+            "{}",
+            request.reason
+        );
     }
 
     fn parked(from: &str, to: &str, by: u32, elements: &[i64]) -> RoomRoots {
@@ -763,183 +915,173 @@ mod tests {
         }
     }
 
-    /// 准入链的真值表（U3 b 档，2026-09-17）：从库上那一代出发沿停放物 `from → to` 逐段接，最后一段可以是本任务自己的
-    /// 换代，接到此刻常驻代号就定向——只停放链（本任务 `Unchanged`）/ 停放链 + 自己换代 / 库上已越过的一段不要 /
-    /// 自己那一段优先于同一对代号的旧停放物；链断 / 绕圈 / 库上从没盖过 / 常驻说不出代号 / 自己那一段面板变化为空而链
-    /// 又要靠它 → 整库。`request_for_task` 接了停放链就多一句原因。
+    /// 准入链的真值表（U3 b 档，2026-09-17；M1 2026-09-19 账本段并入）：从库上那一代出发沿停放物 / 账本段 `from → to`
+    /// 逐段接，接到冻的那一代就定向——只停放链 / 停放链 + 账本段 / 两段停放接起来按链序 / 库上已越过的一段不要 /
+    /// 同一起点停放段优先于同两代的账本段（免一次反查）/ 一条路断了换另一条；链断 / 绕圈 / 库上从没盖过 / 常驻说不出
+    /// 代号 / 账本段面板变化为空而链要靠它 → 整库。`request_for_task` 接了哪几段各多一句原因。
     #[test]
     fn the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident() {
-        use crate::fast_model::room_resident::{PanelBounds, PanelMove};
-        use aios_core::{RefU64, RefnoEnum};
-        let delta = PanelDelta {
-            recalc: vec![PanelMove {
-                panel: RefnoEnum::from(RefU64::from_two_nums(24381, 7)),
-                old: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
-                new: Some(PanelBounds([[5.0; 3], [6.0; 3]])),
-            }],
-            geometry_changed: 1,
-            ..PanelDelta::default()
-        };
-        let own = |previous: &str, panels: PanelDelta| RoomReferenceRefresh::Rebuilt {
-            previous_key: Some("k1".into()),
-            key: "k2".into(),
-            generation_changed: true,
-            previous_generation: Some(previous.to_owned()),
-            diff: None,
-            panels: Some(panels),
-            elapsed_ms: 1,
-        };
-        let unchanged = RoomReferenceRefresh::Unchanged { key: "k2".into() };
-        let swap = |from: &str| PanelSwap {
-            from_generation: from.into(),
-            panels: delta.clone(),
-        };
+        let delta = moved_panel();
         let g1_g2 = parked("g1", "g2", 7_997, &[10, 11]);
         let g2_g3 = parked("g2", "g3", 7_999, &[12]);
 
-        // 只停放链：本任务没换代，库上 g1，停放 g1→g2，常驻 g2。
+        // 只停放链：本任务没换代，库上 g1，停放 g1→g2，冻 g2。
         assert_eq!(
-            scope_for_task(Some(&unchanged), Some("g1"), Some("g2"), &[g1_g2.clone()]),
+            scope_for_task(Some("g1"), Some("g2"), &[], &[g1_g2.clone()]),
             RoomRecomputeScope::Targeted {
-                swap: None,
+                swaps: Vec::new(),
                 parked: vec![g1_g2.clone()],
+                generation: "g2".into(),
             }
         );
-        // 停放链 + 自己换代：库上 g1，停放 g1→g2，自己 g2→g3（常驻 g3）。
+        // 停放链 + 账本段：库上 g1，停放 g1→g2，账本 g2→g3（本任务自己那一次重建），冻 g3。
+        let chained = scope_for_task(
+            Some("g1"),
+            Some("g3"),
+            &[swap("g2", "g3", delta.clone())],
+            &[g1_g2.clone()],
+        );
         assert_eq!(
-            scope_for_task(
-                Some(&own("g2", delta.clone())),
-                Some("g1"),
-                Some("g3"),
-                &[g1_g2.clone()]
-            ),
+            chained,
             RoomRecomputeScope::Targeted {
-                swap: Some(swap("g2")),
+                swaps: vec![swap("g2", "g3", delta.clone())],
                 parked: vec![g1_g2.clone()],
+                generation: "g3".into(),
             }
         );
-        // 两段停放接起来：库上 g1，停放 g1→g2、g2→g3（先后无关），常驻 g3；用到的按链的顺序排。
+        assert_eq!(chained.targeted_generation(), Some("g3"));
+        // 两段停放接起来：库上 g1，停放 g1→g2、g2→g3（先后无关），冻 g3；用到的按链的顺序排。
         assert_eq!(
-            scope_for_task(
-                Some(&unchanged),
-                Some("g1"),
-                Some("g3"),
-                &[g2_g3.clone(), g1_g2.clone()]
-            ),
+            scope_for_task(Some("g1"), Some("g3"), &[], &[g2_g3.clone(), g1_g2.clone()]),
             RoomRecomputeScope::Targeted {
-                swap: None,
+                swaps: Vec::new(),
                 parked: vec![g1_g2.clone(), g2_g3.clone()],
+                generation: "g3".into(),
             }
         );
-        // 库上已越过的一段不要：库上 g2，停放 g1→g2、g2→g3，常驻 g3。
+        // 库上已越过的一段不要：库上 g2，停放 g1→g2、g2→g3，冻 g3。
         assert_eq!(
-            scope_for_task(
-                Some(&unchanged),
-                Some("g2"),
-                Some("g3"),
-                &[g1_g2.clone(), g2_g3.clone()]
-            ),
+            scope_for_task(Some("g2"), Some("g3"), &[], &[g1_g2.clone(), g2_g3.clone()]),
             RoomRecomputeScope::Targeted {
-                swap: None,
+                swaps: Vec::new(),
                 parked: vec![g2_g3.clone()],
+                generation: "g3".into(),
             }
         );
-        // 自己那一段优先：库上 g1，槽里有同一对代号的旧停放物 g1→g2，自己也是 g1→g2（常驻 g2）——用新鲜的反查。
+        // 同一起点停放段优先：库上 g1，槽里 g1→g2，账本也有 g1→g2，冻 g2——用停放的（元素已在手，免一次反查）。
         assert_eq!(
             scope_for_task(
-                Some(&own("g1", delta.clone())),
                 Some("g1"),
                 Some("g2"),
+                &[swap("g1", "g2", delta.clone())],
                 &[g1_g2.clone()]
             ),
             RoomRecomputeScope::Targeted {
-                swap: Some(swap("g1")),
-                parked: Vec::new(),
+                swaps: Vec::new(),
+                parked: vec![g1_g2.clone()],
+                generation: "g2".into(),
             }
         );
-        for (label, refresh, library, resident, slot) in [
+        // 一条路断了换另一条：库上 g1，停放 g1→g2 到不了 g3，账本有 g1→g3——走账本那条。
+        assert_eq!(
+            scope_for_task(
+                Some("g1"),
+                Some("g3"),
+                &[swap("g1", "g3", delta.clone())],
+                &[g1_g2.clone()]
+            ),
+            RoomRecomputeScope::Targeted {
+                swaps: vec![swap("g1", "g3", delta.clone())],
+                parked: Vec::new(),
+                generation: "g3".into(),
+            }
+        );
+        for (label, library, resident, ledger, slot) in [
             (
                 "链断：停放 g2→g3，库上 g1",
-                unchanged.clone(),
                 Some("g1"),
                 Some("g3"),
+                Vec::new(),
                 vec![g2_g3.clone()],
             ),
             (
-                "链断：停放 g1→g2 到不了常驻 g3",
-                unchanged.clone(),
+                "链断：停放 g1→g2 到不了冻的 g3",
                 Some("g1"),
                 Some("g3"),
+                Vec::new(),
                 vec![g1_g2.clone()],
             ),
             (
-                "绕圈：g1→g2、g2→g1，常驻 g3",
-                unchanged.clone(),
+                "绕圈：g1→g2、g2→g1，冻 g3",
                 Some("g1"),
                 Some("g3"),
+                Vec::new(),
                 vec![g1_g2.clone(), parked("g2", "g1", 7_998, &[13])],
             ),
             (
                 "库上从没盖过",
-                unchanged.clone(),
                 None,
                 Some("g2"),
+                Vec::new(),
                 vec![g1_g2.clone()],
             ),
             (
                 "常驻说不出代号",
-                unchanged.clone(),
                 Some("g1"),
                 None,
+                Vec::new(),
                 vec![g1_g2.clone()],
             ),
             (
-                "自己那一段面板变化为空而链要靠它：g1→g2 停放、自己 g2→g3 空 delta",
-                own("g2", PanelDelta::default()),
+                "账本段面板变化为空而链要靠它：g1→g2 停放、账本 g2→g3 空 delta",
                 Some("g1"),
                 Some("g3"),
+                vec![swap("g2", "g3", PanelDelta::default())],
                 vec![g1_g2.clone()],
             ),
             (
-                "自己那一段的上一代不在链上：库上 g1、停放 g1→g2、自己 g5→g3",
-                own("g5", delta.clone()),
+                "账本段不在链上：库上 g1、停放 g1→g2、账本 g5→g3",
                 Some("g1"),
                 Some("g3"),
+                vec![swap("g5", "g3", delta.clone())],
                 vec![g1_g2.clone()],
             ),
             (
-                "槽空、Unchanged 却欠着（重启后停放物丢了）",
-                unchanged.clone(),
+                "槽空、账本空、却欠着（重启后都丢了）",
                 Some("g1"),
                 Some("g2"),
+                Vec::new(),
                 Vec::new(),
             ),
         ] {
             assert_eq!(
-                scope_for_task(Some(&refresh), library, resident, &slot),
+                scope_for_task(library, resident, &ledger, &slot),
                 RoomRecomputeScope::WholeLibrary,
                 "{label}"
             );
         }
         // 库上已是这一代：不欠；停放物是越过的代（执行体在 `parked_for_task` 里顺手清掉）。
         assert_eq!(
-            scope_for_task(Some(&unchanged), Some("g2"), Some("g2"), &[g1_g2.clone()]),
+            scope_for_task(Some("g2"), Some("g2"), &[], &[g1_g2.clone()]),
             RoomRecomputeScope::WholeLibrary
         );
 
         // `request_for_task`：接了停放链的定向多一句原因，点名停的是谁、多少；③ 那一句照旧。
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k2".into() };
         let request = request_for_task(
             &[],
             Some(&unchanged),
             Some(&alignment(Some("g1"), "g3")),
+            &[],
             &[g1_g2.clone(), g2_g3.clone()],
         )
         .unwrap();
         assert_eq!(
             request.scope,
             RoomRecomputeScope::Targeted {
-                swap: None,
+                swaps: Vec::new(),
                 parked: vec![g1_g2, g2_g3],
+                generation: "g3".into(),
             }
         );
         assert!(
@@ -991,16 +1133,29 @@ mod tests {
         let dispatch = function_body(worker, "async fn run_room_recompute(");
         assert!(
             dispatch.contains("RoomRecomputeScope::WholeLibrary =>")
-                && dispatch.contains("RoomRecomputeScope::Targeted { swap, parked } =>"),
+                && dispatch.contains("RoomRecomputeScope::Targeted { swaps, parked, .. } =>"),
             "两种范围各走一路: {dispatch}"
         );
         assert!(
             dispatch.contains("run_targeted_room_recompute(")
-                && dispatch.contains("swap.as_ref(),")
+                && dispatch.contains("swaps,")
                 && dispatch.contains("parked,")
                 && dispatch.contains("None =>")
                 && dispatch.matches("run_room_only_recompute(job, ").count() == 2,
             "定向定不了（None）退整库；整库直接整库: {dispatch}"
+        );
+        // H1（2026-09-19）：定向那一路拿的是本任务开工冻的那台（`task_rooms`）与准入链的终点代号；没冻出（`None`）
+        // 同样退整库，不在收尾新冻。
+        assert!(
+            dispatch.contains("let targeted = match task_rooms {")
+                && dispatch.contains("Some(rooms) => {")
+                && dispatch.contains("request.scope.targeted_generation(),")
+                && dispatch.contains("rooms,"),
+            "定向复用本任务冻的计算器、带上准入链终点: {dispatch}"
+        );
+        assert!(
+            !dispatch.contains("frozen_room_calculator()"),
+            "分派处不新冻计算器（整库那一路在 run_room_only_recompute 里自己冻）"
         );
         // 清槽（U3 b 档）：只在分派处、结论是 `WholeLibrary` / `Targeted` 才清；整个执行体别处不清。
         let decided = dispatch
@@ -1022,6 +1177,25 @@ mod tests {
             "执行体里清槽只此一处（准入处的顺手清在 room_recompute::parked_for_task）"
         );
         let targeted = function_body(worker, "async fn run_targeted_room_recompute(");
+        // H1（2026-09-19）：定向路**不**新冻——用传进来的那台；入口先对准入链终点与它的代号，不等退整库。
+        assert!(
+            !targeted.contains("frozen_room_calculator()"),
+            "定向路复用本任务开工冻的计算器，不在收尾新冻「此刻这一代」: {targeted}"
+        );
+        let guard = targeted
+            .find("if expected_generation != Some(rooms.resident_generation()) {")
+            .expect("入口对准入链终点与计算器代号");
+        assert!(
+            guard
+                < targeted
+                    .find("library_generation_roots(dbnum, target_sesno)")
+                    .expect("先枚举根清单"),
+            "代号对不上在枚举根清单之前就退整库: {targeted}"
+        );
+        assert!(
+            targeted.contains("&swap.to_generation,"),
+            "停放给别的库的那一段以自己这一段的 to 收尾（== 计算器代号，入口对过）: {targeted}"
+        );
         // 停放（U3 b 档）只在结论定为 `Targeted` 的那一臂里、盖章之前；退整库 / Failed 的臂里没有。
         let park = targeted
             .find("park_foreign_hits(")
@@ -1063,8 +1237,12 @@ mod tests {
             "根清单 → 反查 → 折停放 → 重算，顺序不能乱: {targeted}"
         );
         assert!(
-            targeted.contains("None => AffectedRoots::default(),"),
-            "本任务没换代（欠账全在停放链上）就没有反查那一段: {targeted}"
+            targeted.contains("for swap in swaps {"),
+            "链上每一段换代各反查一次（M1：账本里的段不止本任务自己那一次）；没有换代段就没有反查那一路: {targeted}"
+        );
+        assert!(
+            targeted.contains("for (swap, foreign) in swaps.iter().zip(&foreign_by_swap) {"),
+            "停放按段：每一段的别的库命中连同**那一段**的 from → to 停出去，别的库的链才接得上: {targeted}"
         );
         assert!(
             targeted.contains(".chain(parked_roots.iter())")
@@ -1079,6 +1257,10 @@ mod tests {
             "覆盖面对的是并起来的根: {targeted}"
         );
         for (fallback, marker) in [
+            (
+                "计算器不是准入链终点那一代（H1）",
+                "if expected_generation != Some(rooms.resident_generation()) {",
+            ),
             ("树不就绪", "Ok(ReverseLookup::TreeUnavailable(state)) =>"),
             ("有命中却折不出根", "if !affected.unresolved.is_empty() {"),
             ("停放的元素折不出根", "if !parked_unresolved.is_empty() {"),

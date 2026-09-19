@@ -1,5 +1,52 @@
 # 变更记录
 
+## 2026-09-19
+
+### 房间换代段账本：谁重建谁记，任何任务的定向准入都能沿它接段（ADR-073 D13 追记 M1）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06 M1）指出定向常路在生产里很难走到——面板变化 `PanelDelta` 只随
+  `Rebuilt` 回给做了重建的那一次 `refresh_before_task`。`/model/ensure`（UI「显示模型」）先探到 composite 变了、做了重建，
+  随后每个库的任务都是 `Unchanged` + 库上欠着 + 槽空 → 链断 → 全 MDB 每个库各整库一次；截断窗口（大窗口的常态）跑不到收尾，
+  自己那一段随任务丢掉，下一窗又 `Unchanged` → 整库；没被命中的库看不到「这一段与你无关」→ 整库。N 个 DESI 库一次面板变化最坏
+  N 次整库（每次 O(本库根数) 次库读 + 重写全部边）。
+- **改动**：`room_resident::SwapLedger`（`ResidentRooms` 的一个字段，与两代模型同一把锁）——`install()` 对着被换下的那一代算出
+  非空 `PanelDelta` 就记一段 `PanelSwap { from, to, panels }`（两端 = 两代 `input_version`），空段不记、同两代替换、容量 64；
+  `PanelSwap` 搬到 `room_resident`；`scope_for_task(library, resident, swaps, parked)` 改成沿账本段 / 停放段的深度优先路径搜索
+  （同一起点停放段优先、一条路断了换另一条），`Targeted { swaps: Vec<PanelSwap>, parked, generation }` 链上可多段；
+  `swaps_for_task` 在两个执行体里紧跟 `parked_for_task`；`run_targeted_room_recompute` 每一段各反查、面板级语句按链序拼、
+  **按段**停放给别的库；`/health.room_build.resident.swap_ledger`。H1 那条竞态（对齐 g1→g2、ensure 中途 g2→g3、冻 g3）从
+  「整库」升成「两段定向」。停放槽保留（省一次反查的捷径）。ADR-073 D13 追记 M1、源码钉 25。
+- **验证**：`cargo test --lib` 定向 31 项全绿（`SwapLedger` 纯函数、`install` 记段、`scope_for_task` 两张真值表重写、`mem://`
+  端到端 ④ 改成「T2 沿 ensure 记的 g2→g3 定向，与整库按 g3 同一终态」）；`batch_worker room_ model_db_adapter query_service task_end
+  dbnum_initialize window_root_plan model_dbnum_ensure handlers` 389 绿 0 红；`cargo check --all-targets` 零错。
+  live 待补：两个 DESI 库、UI 先点「显示模型」让 ensure 做重建 → 两个库的任务都「定向房间重算完成（… 换代段 1 段 …）」、
+  `swap_ledger.entries ≥ 1`、没有一个库整库。
+
+### 房间定向重算复用本任务开工冻的计算器——scope、边、盖的代号同一代（ADR-073 D13 追记 H1）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06 H1）读出一条漏算。定向路（反向传播）的 scope 在开工时按读到的
+  常驻代号定（库上 g1 → 常驻 g2，自己这一段面板变化 P），收尾却 `frozen_room_calculator()` **新冻一台**「此刻这一代」。P2-3 自己
+  点名的竞态（一个 DESI 前进 + 用户同时点「显示模型」，`/model/ensure` 并发对齐在任务中途把常驻 g2 → g3、面板 Q 又动了）下：
+  反查只用 P 的盒、命中根按 g3 算、`Targeted(g3)` 盖 D14 ← g3；Q 命中的根从此永久陈旧，③ 看到库上 g3 == 常驻 g3 就哑，
+  `park_foreign_hits(g1 → g3)` 还把同一个洞停放给别的库。准入侧同病：`Rebuilt` 不带自己的新代号，`scope_for_task` 默认自己那一段
+  的 `to` 就是此刻常驻，而「此刻常驻」是另一次独立的读。整库那一路没事（每一根都算）。
+- **改动**：`RoomReferenceRefresh::Rebuilt` 多一格 `generation`（装上那一代的 `input_version`）；`PanelSwap` 带 `to_generation`，
+  `RoomRecomputeScope::targeted_generation()` = 链尾那一段的 `to`；`scope_for_task` 取自己那一段时要求 `generation == resident`，
+  不等整库（停放物不替它续）；`TaskRoomCalculator::generation()`，两个执行体 `durable_alignment(job.dbnum, rooms.generation())`
+  ——「此刻常驻代号」只从冻好的那台取，不再另读生命周期；冻的那台随 `DataBatchTaskResult::room_calculator`（`#[serde(skip)]`）
+  交给收尾段，`run_room_recompute(… task_rooms.as_ref() …)`，`run_targeted_room_recompute` 收 `expected_generation` 与那台计算器、
+  **不新冻**，入口先对代号、不等 / 没冻出退整库，停放以 `&swap.to_generation` 收尾；`MemoryRoomCalculator` 实现 `Debug`（只报代号）。
+  `run_room_only_recompute` 一字不改。ADR-073 D13 追记 + 源码钉 17 改口、新钉 24。
+- **验证**：`cargo test --lib` 定向 28 项全绿（含新 `mem://` 端到端
+  `a_mid_task_generation_swap_keeps_the_targeted_recompute_on_the_task_calculator`：T1 对齐 g1→g2、冻 g2、中途常驻 g3 → 按冻的 g2
+  定向、反查命中 A1/A2 按 g2 算、盖 g2 之后 `library_alignment_owed(g2, g3)` 仍欠、盖 g3 就不欠——反例；T2 整库按 g3 == 从零；
+  `scope_for_task` 真值表加三行；源码钉扩：执行体 `refresh → freeze → durable_alignment(job.dbnum, rooms.generation()) → parked_for_task →
+  request_for_task`、`room_calculator: rooms.frozen().cloned()`、不含 `resident_room_generation()`；分派与定向函数体不含
+  `frozen_room_calculator()`、入口代号守门在 `library_generation_roots(` 之前 `return None`）；`batch_worker room_ model_db_adapter
+  query_service task_end dbnum_initialize window_root_plan model_dbnum_ensure` 352 绿 0 红；`cargo check --all-targets` 零错。
+  live 待补：ams 一窗挪 PANE + 同时点「显示模型」→ 日志「定向房间重算完成（… 计算器 <开工那一代> …）」或「准入链终点 … 不是本任务
+  冻的计算器代号 … 退整库」，下一窗 ③ 再点一次。
+
 ## 2026-09-18
 
 ### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-080）

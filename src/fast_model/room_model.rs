@@ -1958,6 +1958,16 @@ pub struct MemoryRoomCalculator {
     definition_version: String,
 }
 
+// 它随任务回执（`batch_worker::DataBatchTaskResult::room_calculator`）走一段，回执要 `Debug`；索引本体不打印，
+// 只报代号——日志里认的就是它。
+impl std::fmt::Debug for MemoryRoomCalculator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryRoomCalculator")
+            .field("definition_version", &self.definition_version)
+            .finish_non_exhaustive()
+    }
+}
+
 /// 一个闭合且朝外的盒子。`TriMeshFlags::ORIENTED` 下 `contains_point` 依赖法线朝向，
 /// 绕序错了会把内外判反，而房间判定的两轮全押在它上面。
 ///

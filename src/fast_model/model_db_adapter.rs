@@ -1008,6 +1008,13 @@ impl TaskRoomCalculator {
             Self::Disabled | Self::Frozen(_) => None,
         }
     }
+
+    /// 本任务的房间代号 = 冻好的那台的 `resident_generation()`；`Disabled` / `Unavailable` 没有代号。
+    /// 第三条触发（D13 ③）与定向准入（`room_recompute::durable_alignment` / `scope_for_task`）的「此刻常驻代号」从
+    /// 这里取，不再另读一次生命周期（2026-09-19 H1）：准入链的终点与收尾定向重算用的计算器必须是同一台。
+    pub fn generation(&self) -> Option<&str> {
+        self.frozen().map(|rooms| rooms.resident_generation())
+    }
 }
 
 impl std::fmt::Debug for TaskRoomCalculator {
@@ -6342,9 +6349,7 @@ mod tests {
         use crate::data_interface::room_reverse::{
             self, ReverseLookup, RoomRoots, fold_parked, park_foreign_hits,
         };
-        use crate::fast_model::room_resident::{
-            PanelBounds, PanelDelta, PanelMove, RoomReferenceRefresh,
-        };
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
         use std::collections::{BTreeMap, BTreeSet};
         const LIB_B: u32 = RefNo::new(24382, 1).dbno();
         let b1 = RefNo::new(24382, 10);
@@ -6467,7 +6472,7 @@ mod tests {
             "{lines:?}"
         );
 
-        // B 的下一个任务：没换代、库上 g1、常驻 g2、槽里 g1 → g2 → 定向，只有停放链。
+        // B 的下一个任务：没换代、库上 g1、冻 g2、槽里 g1 → g2 → 定向，只有停放链（账本空——这里没经 install 记段）。
         let parked = room_reverse::pending(LIB_B);
         assert_eq!(parked.len(), 1);
         assert_eq!(
@@ -6478,12 +6483,12 @@ mod tests {
             ),
             (g1.as_str(), g2.as_str(), BATCH_DBNUM)
         );
-        let unchanged = RoomReferenceRefresh::Unchanged { key: "k2".into() };
         assert_eq!(
-            scope_for_task(Some(&unchanged), Some(&g1), Some(&g2), &parked),
+            scope_for_task(Some(&g1), Some(&g2), &[], &parked),
             RoomRecomputeScope::Targeted {
-                swap: None,
+                swaps: Vec::new(),
                 parked: parked.clone(),
+                generation: g2.clone(),
             }
         );
         let (roots, unresolved) = fold_parked(&parked, &[b1, b2]);
@@ -6532,9 +6537,9 @@ mod tests {
             "定向（停放链）== 整库"
         );
 
-        // 槽空（重启后停放物丢了）→ 整库；链断（槽里只有 g0 → g1，接不到 g2）→ 整库。
+        // 槽空、账本空（重启后都丢了）→ 整库；链断（槽里只有 g0 → g1，接不到 g2）→ 整库。
         assert_eq!(
-            scope_for_task(Some(&unchanged), Some(&g1), Some(&g2), &[]),
+            scope_for_task(Some(&g1), Some(&g2), &[], &[]),
             RoomRecomputeScope::WholeLibrary
         );
         room_reverse::park(
@@ -6548,15 +6553,261 @@ mod tests {
             },
         );
         assert_eq!(
-            scope_for_task(
-                Some(&unchanged),
-                Some(&g1),
-                Some(&g2),
-                &room_reverse::pending(LIB_B)
-            ),
+            scope_for_task(Some(&g1), Some(&g2), &[], &room_reverse::pending(LIB_B)),
             RoomRecomputeScope::WholeLibrary
         );
         room_reverse::clear(LIB_B);
+    }
+
+    /// H1 / M1（2026-09-19，ADR-073 D13 追记）`mem://` 端到端：定向路的计算器是**本任务开工冻的那台**，scope、边、盖的代号
+    /// 三者同一代；任务中途常驻又换了代（`/model/ensure` 并发对齐 g2 → g3，面板 Q 又动了）不许把 scope 按 g2 定的
+    /// 命中根用 g3 算、再盖 g3——那会让 g2 → g3 命中的根永久陈旧、③ 哑掉。换代段账本（M1）让 ensure 那一次重建记下的
+    /// g2 → g3 也能被下一个任务接上：T2 不再整库。
+    ///
+    /// 夹具：A1 在 R1@0 里、A2 在 R1@2000 里、A3 在 R1@4000 里；g1 / g2 / g3 = R1 在三处的三代。库上 g1（三根都按 g1 算过）。
+    /// 任务 T1：对齐 g1 → g2（P = R1 0–1000 → 2000–3000，记进账本）、冻 g2；中途 ensure 把常驻换到 g3
+    /// （Q = R1 2000–3000 → 4000–5000，也记进账本）。
+    /// 断言：① 准入按冻的那一代：账本 g1 → g2 + 冻 g2 → 定向、终点 g2；账本只有 g1 → g2 + 冻 g3 → 整库；账本有 g2 → g3 + 冻 g3
+    /// → 两段定向；② 反查 P 命中 A1 / A2、按 **g2** 重算 → A1 的边删、A2 的边补、A3 不动；③ 盖 g2 之后库上 g2 ≠ 常驻 g3，
+    /// ③ 仍欠（盖 g3 就不欠了——这正是漏算）；④ 下一个任务 T2（Unchanged、库上 g2、冻 g3、槽空、账本有 g2 → g3）→ 定向沿
+    /// 账本接 Q、反查命中 A2 / A3、按 g3 算 → 只剩 R1→A3，== 整库按 g3 == 从零。
+    #[tokio::test]
+    async fn a_mid_task_generation_swap_keeps_the_targeted_recompute_on_the_task_calculator() {
+        use crate::data_interface::room_recompute::{
+            PanelSwap, RoomRecomputeScope, library_alignment_owed, scope_for_task,
+        };
+        use crate::data_interface::room_reverse::{self, ReverseLookup};
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        use std::collections::BTreeSet;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+        let a3 = RefNo::new(24383, 40);
+        let library_roots = [a1, a2, a3];
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let calc_g3 = room_calculator_with(dir.path(), 4000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+        let g3 = calc_g3.resident_generation().to_string();
+        assert!(g1 != g2 && g2 != g3 && g1 != g3, "三代代号两两不同");
+
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+            root_commit(a3, vec![room_record(a3, 4100., 4200.)]),
+        ]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &library_roots,
+            Some(&calc_g1),
+        )
+        .await
+        .expect("seed the library at g1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "库上 g1：只有 A1 在 R1@0 里"
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+
+        // T1 开工前对齐：g1 → g2，面板 P 动了——这一段进账本（`ResidentRooms::install` 记的，这里直接造）。
+        let p = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: Some(PanelBounds([[0., 0., 0.], [1000., 1000., 1000.]])),
+                new: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let own = PanelSwap {
+            from_generation: g1.clone(),
+            to_generation: g2.clone(),
+            panels: p.clone(),
+        };
+        // ① 准入按本任务冻的那一代（`durable_alignment` 收的就是它）：账本 g1 → g2、冻 g2 → 定向、终点 g2。
+        let scope = scope_for_task(Some(&g1), Some(&g2), &[own.clone()], &[]);
+        assert_eq!(
+            scope,
+            RoomRecomputeScope::Targeted {
+                swaps: vec![own.clone()],
+                parked: Vec::new(),
+                generation: g2.clone(),
+            }
+        );
+        assert_eq!(scope.targeted_generation(), Some(g2.as_str()));
+        // 对齐装上 g2、冻计算器时常驻却已是 g3（ensure 插在两次读之间）、账本里还没有 g2 → g3：接不到冻的那一代，整库。
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g3), &[own.clone()], &[]),
+            RoomRecomputeScope::WholeLibrary,
+            "账本只有 g1 → g2 却冻了 g3：接不到冻的那一代"
+        );
+        // 收尾那一步的同一道门（`run_targeted_room_recompute` 入口）：终点 g2 ≠ 中途换上的 g3，定不了。
+        assert_ne!(
+            scope.targeted_generation(),
+            Some(calc_g3.resident_generation()),
+            "此刻常驻（g3）不是准入链的终点，收尾不许拿它算"
+        );
+        // ensure 中途重建 g2 → g3（面板 Q 动了）也记进账本；冻的若是 g3，两段接起来定向（M1）。
+        let q = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+                new: Some(PanelBounds([[4000., 0., 0.], [5000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let ensure = PanelSwap {
+            from_generation: g2.clone(),
+            to_generation: g3.clone(),
+            panels: q.clone(),
+        };
+        let ledger = [own.clone(), ensure.clone()];
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g3), &ledger, &[]),
+            RoomRecomputeScope::Targeted {
+                swaps: vec![own.clone(), ensure.clone()],
+                parked: Vec::new(),
+                generation: g3.clone(),
+            },
+            "账本里两段接起来：库上 g1 → 冻的 g3，两段都反查、按 g3 算"
+        );
+
+        // ② 反查 P（树的答案模拟：旧盒里 A1、新盒里 A2）→ 只重算 A1 / A2，按**开工冻的 g2**。
+        let tree_hits = BTreeSet::from([packed_refno(a1), packed_refno(a2)]);
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &p.query_boxes(),
+            tree_hits,
+            &library_roots,
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![a1, a2]);
+        assert!(affected.unresolved.is_empty());
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g2,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("T1's targeted recompute on the task calculator");
+        assert_eq!(report.covered_roots, vec![a1, a2]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_30".to_string()],
+            "按 g2：A1 离开 R1、A2 进来；A3 没点名，一字不动"
+        );
+        assert_eq!(ack(a1).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(a2).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(a3).as_deref(), Some(g1.as_str()), "没点名的根 ACK 不动");
+
+        // ③ 结论 `Targeted(g2)` → 库上盖 g2：此刻常驻 g3 ≠ g2，③ 仍欠着——g2 → g3 那一段（A3 进 R1）由下一个任务补。
+        let stamped = calc_g2.resident_generation();
+        assert_eq!(stamped, g2);
+        assert!(
+            library_alignment_owed(Some(stamped), Some(&g3)).is_some(),
+            "盖的是边真正用的那一代，③ 才看得见 g2 → g3 还欠着"
+        );
+        assert!(
+            library_alignment_owed(Some(&g3), Some(&g3)).is_none(),
+            "反例：按此刻常驻盖 g3，③ 就哑了——A3 的边永远补不上（这正是 H1）"
+        );
+
+        // ④ T2：Unchanged（g3 早已装上）、库上 g2、冻 g3、槽空、账本有 ensure 记的 g2 → g3 → 定向沿账本接 Q（M1）；
+        // 账本空（重启后）才整库。
+        assert_eq!(
+            scope_for_task(Some(&g2), Some(&g3), &[], &[]),
+            RoomRecomputeScope::WholeLibrary,
+            "账本空：整库兜底"
+        );
+        let scope = scope_for_task(Some(&g2), Some(&g3), &ledger, &[]);
+        assert_eq!(
+            scope,
+            RoomRecomputeScope::Targeted {
+                swaps: vec![ensure.clone()],
+                parked: Vec::new(),
+                generation: g3.clone(),
+            },
+            "T2 自己没重建（Unchanged），沿 ensure 记的那一段定向"
+        );
+        // 反查 Q（树的答案模拟：旧盒里 A2、新盒里 A3）→ 只重算 A2 / A3，按冻的 g3。
+        let tree_hits = BTreeSet::from([packed_refno(a2), packed_refno(a3)]);
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &q.query_boxes(),
+            tree_hits,
+            &library_roots,
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![a2, a3]);
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g3,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("T2's targeted recompute along the ledger segment");
+        assert_eq!(report.covered_roots, vec![a2, a3]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_40".to_string()],
+            "g2 → g3 那一段补上：A2 离开、A3 进来；A1 没点名、一字不动"
+        );
+        assert_eq!(ack(a1).as_deref(), Some(g2.as_str()), "没点名的根 ACK 不动");
+        assert_eq!(ack(a3).as_deref(), Some(g3.as_str()));
+        assert!(
+            library_alignment_owed(Some(&g3), Some(&g3)).is_none(),
+            "定向算齐、盖 g3，③ 安静"
+        );
+        // 对照：整库按 g3 得到同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g3,
+            Some(&library_roots),
+            RootScope::All,
+        )
+        .await
+        .expect("whole-library recompute on g3");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_40".to_string()],
+            "两段定向（T1 按 g2、T2 沿账本按 g3）== 整库按 g3"
+        );
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
