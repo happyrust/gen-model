@@ -241,6 +241,34 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   **收掉的**：上条「仍欠」（没命中的库 C）——C 的任务沿账本接段、反查一次得到空命中就 `Targeted`（只写面板级语句）、盖代号，
   不再整库；ensure 先重建 / 截断窗口丢段两种丢法同样收掉。**不变的**：③ 电平型原样、停放槽原样（现在是省一次反查的捷径，
   不再是跨库唯一的传播路）、整库兜底原样。
+  **2026-09-19 追记（M2，折不出根的元素按「在 T 上还在不在」分两半）。** 审核（同页 §06 M2）：反查命中却折不出根
+  （`anc ∪ 自身 ∩ DbSet@T 根清单 = ∅`）的元素此前任一个就退整库，而最常见的来源是**本窗刚删掉的根**——树 / 库上的残留
+  还没刷掉、被面板的盒扫到，它在 T 上没有边要维护（对账删除那一半清），却把每一次定向都拉回整库。落法：
+  `window_root_plan::missing_at_target(dbnum, T, refnos)` 拿同一个 `DbSet@T`（`build_set` 走生成输入缓存）问 `element_exists`
+  ——dabacon 没有墓碑位，「不存在」就是这个时点键集里没有它；`run_targeted_room_recompute` 把反查命中的与停放链上折不出根的
+  元素合起来问一次，`split_unresolved_by_existence` 分两半：已不存在的忽略（stdout 一句点名）、还在 T 上的才是「反查不完整」
+  退整库；问不出来（读文件失败）也退整库——不把「不知道」当「不在」。**不变的**：`room_reverse` 仍如实把折不出根的进 `unresolved`、
+  不静默丢；分类在调用方。
+  **2026-09-19 追记（L1，保护集成员带着上一次可用的盒）。** 审核（同页 §06 L1）读出一条窄漏算，D9 保护集的设计后果：一块面板
+  「有几何、有边 → 某一代几何不可用进保护集（旧边受保护留着）→ 再一代几何可用但**位置变了**」，`PanelDelta::between` 的旧盒取自
+  旧代 `panels`，旧代里它在保护集 → `old = None` → 反查只问新盒，旧位置里那些成员的陈旧边没人清（三步连发才触发）。落法：
+  `ResidentRoomModel::protected_bounds: BTreeMap<面板, PanelBounds>`——`ResidentRooms::install()` 在算面板变化**之前**从被换下的那一代
+  给这一代 `missing_panels` 里每一块带一份 `last_known_bounds`（旧代有几何 = 旧代的盒；旧代也在保护 = 旧代带着的那份；跨几代都带），
+  有几何的不带、不在册的不带（`removed` 按面板清边不问空间）、从没可用过的没有可带；`PanelDelta::between` 的旧盒改走
+  `ResidentRoomModel::last_known_bounds`（有几何 = 此刻的盒，保护中 = 带着的盒），新盒只认新代此刻有几何的。重新有几何之后它不在
+  保护集、那份盒随之丢掉。不进摘要、不进 `input_version`——它不是这一代的输入，是「离开的成员在哪」的备忘。
+  **2026-09-19 追记（L3，定向成功只清消费过的段）。** 审核（同页 §06 L3）：`parked_for_task` 在开工时快照本库的槽，收尾
+  `room_reverse::clear(dbnum)` 清的却是槽里**此刻**的全部——任务跑着的时候别的库停进来的段（或往同一段并进来的新元素）没折过根就
+  随手丢了（不漏算：账本里还有那一段，③ 欠着照样接得上，只是白丢一次免反查的捷径；今天单个批次 worker 顺序消费，撞上的机会小）。
+  落法：`room_reverse::clear_consumed(dbnum, consumed) -> (撤掉, 剩下)`——按 `from → to` 对条、去掉快照里有的元素、去空的整条撤；
+  `run_room_recompute` 按 `(结论, 范围)` 分派：`(Targeted, Targeted { parked })` 走 `clear_consumed(job.dbnum, parked)`（`parked` 就是
+  接进准入链的快照），`WholeLibrary` 仍整槽 `clear`（覆盖一切；中途停进来的若说的是更后面的代，③ 欠着、账本还有那一段）。
+  `parked_for_task` 里「库上已与常驻同代顺手清槽」不变——那时停放物说的都是越过的代。
+  **2026-09-19 追记（L2，只加量具）。** 审核（同页 §06 L2）：`durable_tube_hits` 每次定向 O(全部 `tubi_relate` 行) 的链接解引用，
+  ADR 列的缓解（补 `aabb_d` 平副本）live 从没量过。**不做缓解**：平副本要么回填全部存量行、要么查询分两半（新行走平副本、老行照旧解
+  引用），前者是一次迁移、后者没有数据说明省得下——没有数就不动查询。只加量具：`AffectedRoots::durable_tube_ms / durable_ancestor_lookups /
+  durable_ancestor_ms`（`resolve` 里两次库读各计时），`run_targeted_room_recompute` 按段累加，「定向房间重算完成」那一行多一句
+  「（库上管身范围查 Nms、回库取祖先链 K 个 Mms）」；`summary()` 不变。缓解等 live 的这个数说话。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -484,6 +512,44 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
       冻 g3、槽空、账本有 ensure 记的 g2 → g3 → 沿账本定向、反查 Q 命中 A2 / A3、按 g3 算 → 与整库按 g3 同一终态；账本空才整库。
     live 待补：ams 两个 DESI 库、UI 先点「显示模型」让 ensure 做那一次重建 → 两个库的任务日志都是「定向房间重算完成（… 换代段 1 段 …）」、
     `/health.room_build.resident.swap_ledger.entries ≥ 1`，没有一个库整库；没被命中的库日志「换代段 1 段 … 反查 roots=0 …」。
+26. D13 追记（M2，折不出根的元素按在 T 上还在不在分两半，2026-09-19）：
+    - `window_root_plan::missing_at_target(dbnum, target_sesno, refnos)`：`E3dModelService::from_current()` → `build_set(dbnum, Some(T))` →
+      逐个 `element_exists`，回不存在的那几个；空输入不开文件。
+    - `batch_worker::split_unresolved_by_existence(candidates, gone) -> (stuck, ignored)` 纯函数：按候选序、去重（钉
+      `unresolved_hits_that_no_longer_exist_at_the_target_are_ignored_and_the_rest_block_the_targeted_path`）。
+    - `run_targeted_room_recompute` 函数体：`fold_parked(` 之后把 `affected.unresolved` 与 `parked_unresolved` 合成 `unresolved`，
+      `window_root_plan::missing_at_target(` → `split_unresolved_by_existence(&unresolved, &gone)` → `if !stuck.is_empty() {` 才
+      `return None;`，三处都在 `recompute_dbnum_room_edges(` 之前；函数体不再含 `if !affected.unresolved.is_empty() {` /
+      `if !parked_unresolved.is_empty() {`（同一条钉 + `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer`
+      的退整库清单改口）。
+    live 待补：ams 一窗里删一个根 + 挪一块面板（面板盒扫得到那个根的构件）→ 该窗日志「N 个命中的元素在 DbSet@T 上已不存在 … 忽略」
+    且仍「定向房间重算完成」，不再退整库。
+27. D13 追记（L1，保护集成员带着上一次可用的盒，2026-09-19）：
+    - `ResidentRoomModel::protected_bounds`、`last_known_bounds(panel)`（有几何 = 此刻的盒，保护中 = 带着的盒，其余 `None`）、
+      `inherit_protected_bounds(previous)`（只给 `missing_panels` 里的带）；`ResidentRooms::install(mut model)` 里
+      `model.inherit_protected_bounds(old)` 在 `PanelDelta::between(` 之前；`PanelDelta::between` 两处旧盒都走 `old.last_known_bounds(`，
+      新盒只认 `new.panels`。
+    - 四代用例（钉 `a_panel_that_regains_geometry_after_protection_brings_its_last_usable_box_as_the_old_one`）：8 有几何 [20, 21] →
+      不可用（进保护集，带着 [20, 21]，这一段面板变化为空、不进账本）→ 仍不可用（盒继续带）→ 有几何且挪到 [40, 41] → 那一段
+      `recalc = [8: old [20, 21] → new [40, 41]]`、`query_boxes` 两个、账本里那一段同样两个盒；重新有几何之后 `protected_bounds` 空。
+      反例：从没可用过的面板有了几何，旧盒仍 `None`。
+    live 待补：ams 一块 PANE 先让它的 `.mesh` 读不出（进保护集）、再恢复并挪位 → 该窗日志「定向房间重算完成 … recalc=1 …」且反查
+    `tree_hits` 覆盖旧位置里的成员（它们的陈旧边被删）。
+28. D13 追记（L3，定向成功只清消费过的段，2026-09-19）：
+    - `room_reverse::clear_consumed(dbnum, consumed) -> (撤掉, 剩下)`：按 `from → to` 对条、按元素去、去空整条撤、槽空撤键；空快照不动槽
+      （钉 `clearing_the_consumed_segments_keeps_what_was_parked_while_the_task_ran`：快照两段、任务中并进一个元素 + 停进一段 → 收尾
+      撤 1 剩 2、并进来的元素与新段都在、`parked_by` 不改；再清一次 0；剩下的各自消费后槽空、`/health` 里没有它）。
+    - `run_room_recompute` 分派处 `match (&verdict, &request.scope) {`：`(RoomRecomputeVerdict::Targeted(_), RoomRecomputeScope::Targeted { parked, .. }) => {`
+      走 `room_reverse::clear_consumed(job.dbnum, parked)`，`(RoomRecomputeVerdict::WholeLibrary(_) | RoomRecomputeVerdict::Targeted(_), _) => {`
+      走 `room_reverse::clear(job.dbnum)`，两处都在 `let verdict = match` 之后；`batch_worker.rs` 里 `room_reverse::clear(` 与
+      `room_reverse::clear_consumed(` 各只此一处（钉 `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer` 改口）。
+      `mem://` 两库端到端里 B 收尾改按快照 `clear_consumed(LIB_B, &parked) == (1, 0)`（钉 `a_panel_move_parks_…` 改口）。
+29. D13 追记（L2，只加量具，2026-09-19）：
+    - `AffectedRoots { durable_tube_ms, durable_ancestor_lookups, durable_ancestor_ms }`、`durable_timing()`；`resolve` 里 `durable_tube_hits(`
+      与 `durable_ancestors(` 各计一次时；`summary()` 一字不改（钉 `resolve_joins_tree_projection_and_durable_tubes_into_library_roots` 扩：
+      四个回库取 anc、`durable_timing()` 的形状）。
+    - `run_targeted_room_recompute` 按段累加三格，「定向房间重算完成」那一行 `反查 {}（{}）` 第二格是 `affected.durable_timing()`。
+    live 待补：7997 那种库上一次定向的「库上管身范围查 Nms」——N 明显压过 `durable_read_ms` / 总耗时才做 `aabb_d` 平副本（并决定回填还是分两半查）。
 
 ## 背景
 

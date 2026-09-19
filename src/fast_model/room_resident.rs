@@ -302,6 +302,11 @@ pub(crate) struct ResidentRoomModel {
     /// （`/health` 与横幅点名「几何不可信」而不是「还没生成」）；对归属计算与其余缺几何面板
     /// 一样是保护集。「有行却不可用挡参照」那一档随参照机制作废（ADR-073 2026-09-16 D9）。
     pub unusable_panels: BTreeSet<RefnoEnum>,
+    /// 保护集里的面板**上一次可用**的世界盒（审核 L1，2026-09-19）：`ResidentRooms::install` 对着被换下的那一代带过来
+    /// ——旧代它有几何就是旧代的盒，旧代它也在保护就是旧代带着的那份；在册且几何可用的面板不在这里。只给
+    /// [`PanelDelta::between`] 当旧盒用：一块面板「有几何 → 几何不可用（保护，旧边留着）→ 几何又可用但位置变了」，
+    /// 没有这一份，反查只问新盒，旧位置里那些成员的陈旧边没人清。不进摘要、不进 `input_version`。
+    pub protected_bounds: BTreeMap<RefnoEnum, PanelBounds>,
     /// MDB 声明了、搜索根里却没有文件的 DESI `(dbnum, 名字)`（ADR-073 D8）：模型按有的文件建，
     /// 缺失库里的房间与面板不在册。
     pub missing_dbnums: Vec<(u32, String)>,
@@ -333,6 +338,7 @@ impl fmt::Debug for ResidentRoomModel {
             .field("panels_with_geometry", &self.panels.len())
             .field("missing_panels", &self.missing_panels.len())
             .field("unusable_panels", &self.unusable_panels.len())
+            .field("protected_bounds", &self.protected_bounds.len())
             .field("missing_dbnums", &self.missing_dbnums.len())
             .field("problems", &self.problems.len())
             .field("digest", &self.digest)
@@ -494,6 +500,7 @@ impl ResidentRoomModel {
             panels,
             missing_panels,
             unusable_panels: invalid,
+            protected_bounds: BTreeMap::new(),
             missing_dbnums: Vec::new(),
             problems: Vec::new(),
             digest,
@@ -539,6 +546,30 @@ impl ResidentRoomModel {
     pub(crate) fn with_problems(mut self, problems: impl IntoIterator<Item = String>) -> Self {
         self.problems.extend(problems);
         self
+    }
+
+    /// 一块面板这一代**最后一次可用**的世界盒：有几何就是它此刻的盒；在保护集里就是带过来的上一次可用盒
+    /// （[`Self::protected_bounds`]）；不在册 / 从没可用过 = `None`。只给反查当「离开的成员在哪」用（L1）。
+    pub(crate) fn last_known_bounds(&self, panel: RefnoEnum) -> Option<PanelBounds> {
+        self.panels
+            .get(&panel)
+            .map(|resident| PanelBounds::from_aabb(&resident.world_aabb))
+            .or_else(|| self.protected_bounds.get(&panel).copied())
+    }
+
+    /// 换代时从被换下的那一代把保护集成员的上一次可用盒带过来（L1）：这一代 `missing_panels` 里的每一块，
+    /// 旧代给得出 [`Self::last_known_bounds`] 的就记下。这一代有几何的面板不记（它的盒就是自己的）；不在册的
+    /// 不记（`removed` 按面板清边，不问空间）。旧代也给不出的（从没可用过）没有旧盒可带。
+    fn inherit_protected_bounds(&mut self, previous: &ResidentRoomModel) {
+        self.protected_bounds = self
+            .missing_panels
+            .iter()
+            .filter_map(|panel| {
+                previous
+                    .last_known_bounds(*panel)
+                    .map(|bounds| (*panel, bounds))
+            })
+            .collect();
     }
 
     /// 一块在册面板的几何判不了（`.mesh` 读不出 / 三角化失败）：从有几何那一侧搬到
@@ -928,7 +959,9 @@ impl PartialEq for PanelBounds {
 impl Eq for PanelBounds {}
 
 /// 一块要反查的面板：`old` 管「离开的」成员（旧盒里曾有谁）、`new` 管「进来的」（新盒里现在有谁）。
-/// 哪一边没几何（那一代里它在 `missing_panels` / 不在册）就是 `None`。
+/// 新那一边没几何（那一代里它在 `missing_panels` / 不在册）就是 `None`；旧那一边是旧代的
+/// [`ResidentRoomModel::last_known_bounds`]——旧代里它在保护集时是带过来的上一次可用盒（L1），旧代不在册 /
+/// 从没可用过才是 `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PanelMove {
     pub panel: RefnoEnum,
@@ -977,15 +1010,15 @@ fn same_panel_geometry(before: &ResidentPanel, after: &ResidentPanel) -> bool {
 }
 
 impl PanelDelta {
-    /// 对着被换下的那一代算。`diff` 是同两代的 [`TopologyDiff`]（调用方已算好，不再算第二遍）。
+    /// 对着被换下的那一代算。`diff` 是同两代的 [`TopologyDiff`]（调用方已算好，不再算第二遍）。旧盒取旧代的
+    /// [`ResidentRoomModel::last_known_bounds`]（保护集成员带着的上一次可用盒也算，L1）；新盒只认新代此刻有几何的。
     pub(crate) fn between(
         old: &ResidentRoomModel,
         new: &ResidentRoomModel,
         diff: &TopologyDiff,
     ) -> Self {
-        let bounds = |model: &ResidentRoomModel, panel: RefnoEnum| {
-            model
-                .panels
+        let new_bounds = |panel: RefnoEnum| {
+            new.panels
                 .get(&panel)
                 .map(|resident| PanelBounds::from_aabb(&resident.world_aabb))
         };
@@ -998,13 +1031,13 @@ impl PanelDelta {
         for panel in &diff.recalc_panels {
             delta.recalc.push(PanelMove {
                 panel: *panel,
-                old: bounds(old, *panel),
-                new: bounds(new, *panel),
+                old: old.last_known_bounds(*panel),
+                new: new_bounds(*panel),
             });
         }
         // 几何变了的在册面板：两边都在册（新在册的已在 `recalc_panels` 里）、拓扑差没点到，但新代里它的几何
-        // 与旧代不同——包括旧代里没几何（保护集）而新代有了的。反过来（旧代有、新代没了）不进：新代里它在
-        // 保护集，边不动、也算不出。
+        // 与旧代不同——包括旧代里没几何（保护集）而新代有了的：旧盒是它进保护集前最后一次可用的盒（L1），
+        // 旧位置里的成员要清陈旧边。反过来（旧代有、新代没了）不进：新代里它在保护集，边不动、也算不出。
         for (panel, after) in &new.panels {
             if diff.recalc_panels.contains(panel) || diff.removed_panels.contains(panel) {
                 continue;
@@ -1016,7 +1049,7 @@ impl PanelDelta {
             delta.geometry_changed += 1;
             delta.recalc.push(PanelMove {
                 panel: *panel,
-                old: before.map(|before| PanelBounds::from_aabb(&before.world_aabb)),
+                old: old.last_known_bounds(*panel),
                 new: Some(PanelBounds::from_aabb(&after.world_aabb)),
             });
         }
@@ -1662,10 +1695,14 @@ impl ResidentRooms {
 
     /// 整份换代：新的进当前、当前退上一代、再往前的丢掉。返回与上一代的拓扑差与面板变化
     /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）；面板变化非空就顺手记进换代段账本
-    /// （[`SwapLedger`]，谁重建谁记，M1 2026-09-19）。
-    pub(crate) fn install(&mut self, model: ResidentRoomModel) -> InstallOutcome {
-        let model = Arc::new(model);
+    /// （[`SwapLedger`]，谁重建谁记，M1 2026-09-19）。保护集成员的上一次可用盒也在这里从被换下的那一代带过来
+    /// （[`ResidentRoomModel::protected_bounds`]，L1）——先带、再算面板变化，下一次换代它当旧盒。
+    pub(crate) fn install(&mut self, mut model: ResidentRoomModel) -> InstallOutcome {
         let slot = self.slot_mut(model.manifest.form);
+        if let Some(old) = slot.current.as_ref() {
+            model.inherit_protected_bounds(old);
+        }
+        let model = Arc::new(model);
         let (diff, panels, segment) = match slot.current.as_ref() {
             Some(old) => {
                 let diff = TopologyDiff::between(&old.map, &model.map);
@@ -4014,6 +4051,159 @@ mod tests {
         assert_eq!(health["entries"], 2);
         assert_eq!(health["capacity"], SwapLedger::DEFAULT_CAPACITY);
         assert_eq!(health["segments"].as_array().map(Vec::len), Some(2));
+    }
+
+    /// 保护集成员的上一次可用盒（审核 L1，2026-09-19）：一块面板「有几何 → 几何不可用（保护集，旧边留着）→ 再一代
+    /// 仍不可用 → 几何又可用但位置变了」，反查那一段要带**进保护集前最后一次可用的盒**当旧盒——否则只问新盒，旧位置里
+    /// 成员的陈旧边没人清。`install` 每次换代从被换下的那一代把 `missing_panels` 里每一块的 `last_known_bounds` 带过来
+    /// （有几何的不带、从没可用过的没有可带）；`PanelDelta::between` 的旧盒走 `last_known_bounds`。重新有几何之后
+    /// 它不再在保护集，那份盒随之丢掉。
+    #[test]
+    fn a_panel_that_regains_geometry_after_protection_brings_its_last_usable_box_as_the_old_one() {
+        let mut rooms = ResidentRooms::default();
+        let box_of = |min: f32| PanelBounds([[min; 3], [min + 1.0; 3]]);
+        // 第一代：7、8、9 都有几何；8 在 [20, 21]。
+        let first = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (20.0, 21.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert!(
+            first.model.protected_bounds.is_empty(),
+            "第一代没有上一代、也没人在保护集"
+        );
+
+        // 第二代：8 的几何不可用（一条几何行都没有）→ 保护集；带着第一代的盒 [20, 21]。这一段面板变化里没有 8
+        // （旧代有、新代没了不进：边受保护、也算不出）。
+        let second = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert_eq!(second.model.missing_panels, vec![r(8)]);
+        assert_eq!(
+            second.model.protected_bounds,
+            BTreeMap::from([(r(8), box_of(20.0))]),
+            "进保护集那一代带着上一代的盒"
+        );
+        assert_eq!(second.model.last_known_bounds(r(8)), Some(box_of(20.0)));
+        assert_eq!(
+            second.model.last_known_bounds(r(7)),
+            Some(box_of(0.0)),
+            "有几何的面板：last_known_bounds 就是它此刻的盒"
+        );
+        assert_eq!(
+            second.model.last_known_bounds(r(22)),
+            None,
+            "不在册的面板没有盒"
+        );
+        let delta = second.panels.expect("换代给出面板变化");
+        assert!(
+            delta.is_empty(),
+            "几何不可用那一段不反查、也不进账本: {delta:?}"
+        );
+
+        // 第三代：8 仍不可用；盒继续往下带（不是只带一代）。8 之外 7 挪了一下，让这一段非空、进账本。
+        let third = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 2.0, (2.0, 3.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert_eq!(
+            third.model.protected_bounds,
+            BTreeMap::from([(r(8), box_of(20.0))]),
+            "保护期跨几代都带着同一份盒"
+        );
+        let delta = third.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta
+                .recalc
+                .iter()
+                .map(|entry| entry.panel)
+                .collect::<Vec<_>>(),
+            vec![r(7)],
+            "8 仍在保护集：这一段里没有它: {delta:?}"
+        );
+
+        // 第四代：8 有了几何、位置变到 [40, 41]。旧盒是保护前的 [20, 21]（此前是 None → 只问新盒，旧位置里成员的陈旧边
+        // 没人清）；查空间的盒 = 旧 ∪ 新两个。重新有几何之后它不再在保护集，那份盒丢掉。
+        let fourth = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 2.0, (2.0, 3.0)),
+                inst(8, "box", 0.0, (40.0, 41.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert!(
+            fourth.model.missing_panels.is_empty() && fourth.model.protected_bounds.is_empty(),
+            "重新有几何：不在保护集、不再带盒"
+        );
+        let delta = fourth.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta.recalc,
+            vec![PanelMove {
+                panel: r(8),
+                old: Some(box_of(20.0)),
+                new: Some(box_of(40.0)),
+            }],
+            "旧盒是进保护集前最后一次可用的那一个: {delta:?}"
+        );
+        assert_eq!(delta.geometry_changed, 1);
+        assert_eq!(
+            delta
+                .query_boxes()
+                .iter()
+                .map(|aabb| aabb.mins.x)
+                .collect::<Vec<_>>(),
+            vec![20.0, 40.0],
+            "反查两个盒：旧位置清陈旧边、新位置补边"
+        );
+        // 账本里那一段带的就是这份（任何任务沿它接段反查都问两个盒）。
+        let segments = rooms.swap_segments();
+        assert_eq!(
+            segments
+                .last()
+                .map(|segment| segment.panels.query_boxes().len()),
+            Some(2)
+        );
+
+        // 反例：从没可用过的面板重新有几何——没有旧盒可带，旧盒仍是 None（第一代就没有 8 的几何）。
+        let mut fresh = ResidentRooms::default();
+        fresh.install(model_of(
+            groups(),
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            fresh.mesh_cache(),
+        ));
+        let gained = fresh.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (40.0, 41.0)),
+            ],
+            fresh.mesh_cache(),
+        ));
+        let delta = gained.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta.recalc,
+            vec![PanelMove {
+                panel: r(8),
+                old: None,
+                new: Some(box_of(40.0)),
+            }],
+            "从没可用过：没有旧位置、没有陈旧边要清"
+        );
     }
 
     /// 换代段账本的纯函数（M1，2026-09-19）：空段不记、同两代不记；同 `from → to` 替换旧的（位置不变）；满了丢最早的；

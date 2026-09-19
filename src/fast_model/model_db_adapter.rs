@@ -6517,8 +6517,8 @@ mod tests {
         );
         assert_eq!(ack(b1).as_deref(), Some(g2.as_str()));
         assert_eq!(ack(b2).as_deref(), Some(g1.as_str()), "没点名的根 ACK 不动");
-        // 成功 → 清槽（执行体在 `run_room_recompute` 按结论做）。
-        assert_eq!(room_reverse::clear(LIB_B), 1);
+        // 成功 → 只清消费过的那一段（执行体在 `run_room_recompute` 按结论做；快照 = 接进准入链的 `parked`，L3）。
+        assert_eq!(room_reverse::clear_consumed(LIB_B, &parked), (1, 0));
         assert!(room_reverse::pending(LIB_B).is_empty());
         // 对照：整库重算 B 得到同一终态。
         recompute_dbnum_room_edges(

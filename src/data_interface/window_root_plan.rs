@@ -1487,6 +1487,35 @@ pub(crate) async fn enumerate_target_roots(
     .map_err(|error| anyhow::anyhow!("target root enumeration task failed: {error}"))?
 }
 
+/// `refnos` 里在本库 `DbSet@T` 上**已不存在**的元素（审核 M2，2026-09-19）。房间反查命中却折不出根的元素分两类：
+/// 元素还在 T 上、祖先链却对不上根清单 = 枚举不一致，反查不可信、退整库；元素在 T 上已经没了（本窗删掉的，树 / 库上
+/// 的残留还没刷掉）= 它没有边要维护（对账删除那一半清），忽略即可。这里只答后一问，与 [`enumerate_target_roots`] 同一个
+/// `DbSet@T`（`build_set` 走生成输入缓存）。dabacon 没有墓碑位，「不存在」就是这个时点上键集里没有它。
+pub(crate) async fn missing_at_target(
+    dbnum: u32,
+    target_sesno: u32,
+    refnos: Vec<RefNo>,
+) -> anyhow::Result<Vec<RefNo>> {
+    if refnos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let service = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
+    tokio::task::spawn_blocking(move || {
+        let target = service.build_set(dbnum, Some(target_sesno))?;
+        let mut missing = Vec::new();
+        for refno in refnos {
+            if !target.element_exists(refno).with_context(|| {
+                format!("checking whether {refno} still exists in DbSet@{target_sesno}")
+            })? {
+                missing.push(refno);
+            }
+        }
+        Ok(missing)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("target existence check task failed: {error}"))?
+}
+
 /// 纯函数：一窗左端怎么取（ADR-079）。`model_sesno` 是这个库模型面唯一的持久事实：
 /// `0` = 从没追平过 → 不开窗，`DbSet@T` 全部根重排；`>= T` = 已追平 → 不开窗，只重排账本里欠着的；
 /// 其余 → 开 `model_sesno → T` 的窗。

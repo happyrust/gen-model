@@ -1941,6 +1941,33 @@ fn room_recompute_uncovered(
     })
 }
 
+/// 折不出根的元素按「在 `DbSet@T` 上还在不在」分两半（审核 M2，2026-09-19）：`gone` 是 `window_root_plan::missing_at_target`
+/// 答的「已不存在」的那几个。返回 `(stuck, ignored)`——还在 T 上却折不出根的（反查不可信，调用方退整库）、已不存在的
+/// （没有边要维护，忽略）。两半都保持 `candidates` 的顺序、去重。
+fn split_unresolved_by_existence(
+    candidates: &[aios_core::RefnoEnum],
+    gone: &[e3d_io::refno::RefNo],
+) -> (Vec<aios_core::RefnoEnum>, Vec<aios_core::RefnoEnum>) {
+    let gone: std::collections::HashSet<aios_core::RefnoEnum> = gone
+        .iter()
+        .map(|refno| crate::data_interface::generation_root::refno_from_e3d(*refno))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut stuck = Vec::new();
+    let mut ignored = Vec::new();
+    for refno in candidates {
+        if !seen.insert(*refno) {
+            continue;
+        }
+        if gone.contains(refno) {
+            ignored.push(*refno);
+        } else {
+            stuck.push(*refno);
+        }
+    }
+    (stuck, ignored)
+}
+
 /// 本库 `DbSet@T` 上的全部生成根（e3d-io `RefNo`）：覆盖面自证的对照物，也是回读库上几何的靶子
 /// （不在投影里的根从这里点名），走规划器同一条枚举（`window_root_plan::enumerate_target_roots`），不回读库。
 async fn library_generation_roots(
@@ -2162,19 +2189,30 @@ async fn run_room_recompute(
             }
         }
     };
-    // 停放槽（U3 b 档）：本库算齐、说得了「整库对齐到这一代」（定向 = 链上每一段都算齐；整库 = 覆盖一切）就清槽；
-    // `Failed` / `PartialCoverage` / `Disabled` 留着——③ 兜底整库成功那一次再清。
-    if matches!(
-        verdict,
-        RoomRecomputeVerdict::WholeLibrary(_) | RoomRecomputeVerdict::Targeted(_)
-    ) {
-        let cleared = crate::data_interface::room_reverse::clear(job.dbnum);
-        if cleared > 0 {
-            println!(
-                "dbnum={} 房间重算成功，槽里 {cleared} 段停放物已消费 / 已被整库覆盖，清掉",
-                job.dbnum
-            );
+    // 停放槽（U3 b 档）：本库算齐、说得了「整库对齐到这一代」才动槽；`Failed` / `PartialCoverage` / `Disabled` 留着
+    // ——③ 兜底整库成功那一次再清。定向清的只是**消费过的那几段**（开工时快照进准入链的那些，审核 L3，2026-09-19）：
+    // 任务跑着的时候别的库停进来的不在快照里、没折过根，留给下一个任务接；整库覆盖一切，整槽清。
+    match (&verdict, &request.scope) {
+        (RoomRecomputeVerdict::Targeted(_), RoomRecomputeScope::Targeted { parked, .. }) => {
+            let (consumed, left) =
+                crate::data_interface::room_reverse::clear_consumed(job.dbnum, parked);
+            if consumed > 0 || left > 0 {
+                println!(
+                    "dbnum={} 定向房间重算成功，槽里消费过的 {consumed} 段停放物清掉，任务期间新停进来的 {left} 段留给下一个任务",
+                    job.dbnum
+                );
+            }
         }
+        (RoomRecomputeVerdict::WholeLibrary(_) | RoomRecomputeVerdict::Targeted(_), _) => {
+            let cleared = crate::data_interface::room_reverse::clear(job.dbnum);
+            if cleared > 0 {
+                println!(
+                    "dbnum={} 整库房间重算成功，槽里 {cleared} 段停放物已被覆盖，清掉",
+                    job.dbnum
+                );
+            }
+        }
+        _ => {}
     }
     verdict
 }
@@ -2184,7 +2222,8 @@ async fn run_room_recompute(
 /// 加上别的库停放给本库的元素折成的根（`room_reverse::fold_parked`，U3 b 档）→ 只重算它们 + 面板级处置
 /// （`RootScope::Targeted`：各段的面板级语句按链序拼成 prelude——改号是逐段接力的，A→B 再 B→C；停放那一路没有面板级
 /// 语句——停放方的任务已按面板写过，面板级语句天然跨库）。回 `None` = 这一路定不了、调用方退整库：树不就绪、
-/// `DbSet@T` 的根清单枚举不出来（折不出根）、有命中 / 停放的元素折不出根（反查不完整）、覆盖面对不上。回 `Some`：
+/// `DbSet@T` 的根清单枚举不出来（折不出根）、有命中 / 停放的元素**还在 `DbSet@T` 上**却折不出根（反查不完整；
+/// 已不在 T 上的是本窗删掉的残留，忽略——审核 M2）、覆盖面对不上。回 `Some`：
 /// `Targeted(代号)` = 命中根全算齐、盖得上；算不出的根 / 反查失败 / 写库失败 = `Failed`（与整库同一处置，下一个任务由
 /// 电平型触发整库补）。
 ///
@@ -2264,6 +2303,9 @@ async fn run_targeted_room_recompute(
         affected.tree_hits += segment.tree_hits;
         affected.tube_hits += segment.tube_hits;
         affected.cross_library += segment.cross_library;
+        affected.durable_tube_ms += segment.durable_tube_ms;
+        affected.durable_ancestor_lookups += segment.durable_ancestor_lookups;
+        affected.durable_ancestor_ms += segment.durable_ancestor_ms;
         affected
             .unresolved
             .extend(segment.unresolved.iter().copied());
@@ -2276,35 +2318,65 @@ async fn run_targeted_room_recompute(
         }
         foreign_by_swap.push(segment.foreign);
     }
-    if !affected.unresolved.is_empty() {
-        result.warnings.push(format!(
-            "dbnum={dbnum} 定向房间重算的反查命中 {} 个本库元素折不出根（例如 {}），反查不完整，退整库",
-            affected.unresolved.len(),
-            affected
-                .unresolved
-                .iter()
-                .take(5)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("、")
-        ));
-        return None;
-    }
-    // 停放链（U3 b 档）：别的库停放给本库的元素连同祖先链，与本库此刻的根清单求交；折不出的（元素 / 根已删、祖先链
-    // 停放方没取到）→ 那一段的答案对不上本库、反查不完整，退整库。
+    // 停放链（U3 b 档）：别的库停放给本库的元素连同祖先链，与本库此刻的根清单求交。
     let (parked_roots, parked_unresolved) = fold_parked(parked, &library_roots);
-    if !parked_unresolved.is_empty() {
-        result.warnings.push(format!(
-            "dbnum={dbnum} 定向房间重算的停放链上 {} 个元素折不出本库的根（例如 {}），退整库",
-            parked_unresolved.len(),
-            parked_unresolved
+    // 折不出根的元素（反查命中的 + 停放链上的）分两类（审核 M2，2026-09-19）：在 `DbSet@T` 上已经没了的——本窗删掉的，
+    // 树 / 库上的残留还没刷掉——没有边要维护（对账删除那一半清），忽略；还在 T 上却对不上根清单的——枚举不一致、
+    // 反查不可信——退整库。此前任一元素折不出根就整库，本窗刚删的根的残留元素把每一次定向都拉回整库。
+    let unresolved: Vec<aios_core::RefnoEnum> = affected
+        .unresolved
+        .iter()
+        .chain(parked_unresolved.iter())
+        .copied()
+        .collect();
+    if !unresolved.is_empty() {
+        let gone = match crate::data_interface::window_root_plan::missing_at_target(
+            dbnum,
+            target_sesno.max(0) as u32,
+            unresolved
                 .iter()
-                .take(5)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("、")
-        ));
-        return None;
+                .map(|refno| crate::data_interface::generation_root::refno_to_e3d(*refno))
+                .collect(),
+        )
+        .await
+        {
+            Ok(gone) => gone,
+            Err(error) => {
+                result.warnings.push(format!(
+                    "dbnum={dbnum} 定向房间重算有 {} 个元素折不出根、又查不出它们在 DbSet@{target_sesno} 上还在不在，退整库: {error:#}",
+                    unresolved.len()
+                ));
+                return None;
+            }
+        };
+        let (stuck, ignored) = split_unresolved_by_existence(&unresolved, &gone);
+        if !ignored.is_empty() {
+            println!(
+                "dbnum={dbnum} 定向房间重算：{} 个命中的元素在 DbSet@{target_sesno} 上已不存在（本窗删掉的，树 / 库上的残留），没有边要维护，忽略；例如 {}",
+                ignored.len(),
+                ignored
+                    .iter()
+                    .take(5)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+        }
+        if !stuck.is_empty() {
+            result.warnings.push(format!(
+                "dbnum={dbnum} 定向房间重算有 {} 个元素还在 DbSet@{target_sesno} 上却折不出本库的根（反查命中 {} 个、停放链 {} 个；例如 {}），反查不完整，退整库",
+                stuck.len(),
+                affected.unresolved.len(),
+                parked_unresolved.len(),
+                stuck
+                    .iter()
+                    .take(5)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+            return None;
+        }
     }
     let parked_elements: usize = parked.iter().map(|entry| entry.elements.len()).sum();
     // 两路的根并起来（去重、按打包 refno 序）：各段反查命中的 + 停放链折出的。
@@ -2336,7 +2408,7 @@ async fn run_targeted_room_recompute(
     {
         Ok(report) => {
             println!(
-                "dbnum={dbnum} 定向房间重算完成（触发：{reason}；计算器 {}（本任务开工冻的）；换代段 {} 段 {}；反查 {}；停放链 {} 段 {} 个元素 → {} 根）：根 {}/{} 重算（投影里 {}、回读库 {}：读回几何 {} 条、{}ms）、面板级语句 {}、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
+                "dbnum={dbnum} 定向房间重算完成（触发：{reason}；计算器 {}（本任务开工冻的）；换代段 {} 段 {}；反查 {}（{}）；停放链 {} 段 {} 个元素 → {} 根）：根 {}/{} 重算（投影里 {}、回读库 {}：读回几何 {} 条、{}ms）、面板级语句 {}、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
                 rooms
                     .resident_generation()
                     .chars()
@@ -2353,6 +2425,7 @@ async fn run_targeted_room_recompute(
                         .join("、")
                 },
                 affected.summary(),
+                affected.durable_timing(),
                 parked.len(),
                 parked_elements,
                 parked_roots.len(),
@@ -5247,6 +5320,68 @@ mod tests {
             room_recompute_uncovered(None, &[a]),
             None,
             "根清单枚举不出来 = 覆盖面未知，调用方按不全处理"
+        );
+    }
+
+    /// 反查折不出根的元素按「在 `DbSet@T` 上还在不在」分两半（审核 M2，2026-09-19）：已不存在的忽略（本窗删掉的残留，没有边
+    /// 要维护）、还在的才是「反查不完整」；顺序照候选、去重；一个都不在 T 上 → `stuck` 空，调用方不退整库。
+    #[test]
+    fn unresolved_hits_that_no_longer_exist_at_the_target_are_ignored_and_the_rest_block_the_targeted_path()
+     {
+        use aios_core::{RefU64, RefnoEnum};
+        use e3d_io::refno::RefNo;
+        let refno = |id: u32| RefnoEnum::from(RefU64::from_two_nums(24383, id));
+        let e3d = |id: u32| RefNo::new(24383, id);
+        let (stuck, ignored) = split_unresolved_by_existence(
+            &[refno(10), refno(20), refno(10), refno(30)],
+            &[e3d(20), e3d(99)],
+        );
+        assert_eq!(
+            stuck,
+            vec![refno(10), refno(30)],
+            "还在 T 上的按候选序、去重"
+        );
+        assert_eq!(
+            ignored,
+            vec![refno(20)],
+            "已不存在的忽略；gone 里多出来的不算候选"
+        );
+        let (stuck, ignored) =
+            split_unresolved_by_existence(&[refno(10), refno(20)], &[e3d(10), e3d(20)]);
+        assert!(stuck.is_empty(), "一个都不在 T 上：定向照走");
+        assert_eq!(ignored, vec![refno(10), refno(20)]);
+        assert_eq!(
+            split_unresolved_by_existence(&[], &[e3d(10)]),
+            (Vec::new(), Vec::new())
+        );
+
+        // 源码钉：定向路先问 `missing_at_target` 再判，只有 `stuck` 非空才 `return None` 退整库；问不出来（读文件失败）
+        // 也退整库——不把「不知道」当「不在」。
+        let targeted = include_str!("batch_worker.rs")
+            .split_once("async fn run_targeted_room_recompute(")
+            .expect("定向执行体")
+            .1
+            .split_once("\n}\n")
+            .expect("end")
+            .0;
+        let ask = targeted
+            .find("window_root_plan::missing_at_target(")
+            .expect("先问 DbSet@T 上还在不在");
+        let split = targeted
+            .find("split_unresolved_by_existence(&unresolved, &gone)")
+            .expect("再分两半");
+        let stuck_gate = targeted
+            .find("if !stuck.is_empty() {")
+            .expect("只有还在 T 上的才拦");
+        let recompute = targeted.find("recompute_dbnum_room_edges(").expect("重算");
+        assert!(
+            ask < split && split < stuck_gate && stuck_gate < recompute,
+            "问 → 分 → 拦 → 重算，顺序不能乱: {targeted}"
+        );
+        assert!(
+            !targeted.contains("if !affected.unresolved.is_empty() {")
+                && !targeted.contains("if !parked_unresolved.is_empty() {"),
+            "不再对「折不出根」一刀切退整库: {targeted}"
         );
     }
 

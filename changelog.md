@@ -2,6 +2,41 @@
 
 ## 2026-09-19
 
+### 房间反查：保护集成员带着上一次可用的盒、定向成功只清消费过的停放段、库读计时（ADR-073 D13 追记 L1 / L3 / L2）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06）剩下的三条低档。L1 是一条窄漏算：一块面板「有几何、有边 → 某代
+  几何不可用进保护集（旧边留着）→ 再一代几何可用但位置变了」，`PanelDelta::between` 的旧盒取自旧代 `panels`、保护中是 `None`
+  → 反查只问新盒，旧位置里成员的陈旧边没人清。L3 是加固：`parked_for_task` 开工时快照本库的槽，收尾 `clear(dbnum)` 却清此刻的
+  全部，任务期间别的库停进来的段没折过根就随手丢了（不漏算，账本里还有那一段）。L2 是性能：`durable_tube_hits` O(全部
+  `tubi_relate` 行) 的链接解引用 live 从没量过，ADR 列的缓解（`aabb_d` 平副本）要么回填存量、要么查询分两半，没有数不动查询。
+- **改动**：L1——`ResidentRoomModel::protected_bounds` + `last_known_bounds`，`ResidentRooms::install` 算面板变化之前从被换下的那一代
+  给这一代 `missing_panels` 里每一块带一份上一次可用盒（跨几代都带，重新有几何就丢），`PanelDelta::between` 旧盒走
+  `last_known_bounds`。L3——`room_reverse::clear_consumed(dbnum, consumed)` 按 `from → to` 对条、按元素去、去空整条撤；
+  `run_room_recompute` 按 `(结论, 范围)` 分派：定向按接进准入链的快照 `clear_consumed`，整库仍整槽 `clear`。L2——
+  `AffectedRoots { durable_tube_ms, durable_ancestor_lookups, durable_ancestor_ms }` + `durable_timing()`，「定向房间重算完成」那一行多一句
+  「（库上管身范围查 Nms、回库取祖先链 K 个 Mms）」。ADR-073 D13 追记 L1 / L3 / L2、源码钉 27–29。
+- **验证**：`cargo test --lib` 定向 32 项全绿（新 `a_panel_that_regains_geometry_after_protection_brings_its_last_usable_box_as_the_old_one`
+  四代用例 + 反例；新 `clearing_the_consumed_segments_keeps_what_was_parked_while_the_task_ran`；`resolve_joins_…` 扩量具；分派处源码钉改口；
+  `mem://` 两库端到端 B 收尾改按快照清）；`batch_worker room_ model_db_adapter query_service task_end dbnum_initialize window_root_plan
+  model_dbnum_ensure handlers` 392 绿 0 红；`cargo check --all-targets` 零错；rustfmt 我改的块整平（三个文件的剩余 hunk 数与 HEAD 相同）。
+  live 待补：一块 PANE 先让 `.mesh` 读不出再恢复并挪位 → 「定向房间重算完成 … recalc=1」且旧位置成员的陈旧边被删；7997 一次定向的
+  「库上管身范围查 Nms」压过总耗时才做平副本。
+
+### 房间反查折不出根的元素按「在 DbSet@T 上还在不在」分两半，删掉的残留不再把定向拉回整库（ADR-073 D13 追记 M2）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06 M2）——反查命中却折不出根（`anc ∪ 自身 ∩ DbSet@T 根清单 = ∅`）
+  的元素此前任一个就退整库，而最常见的来源是**本窗刚删掉的根**：树 / 库上的残留还没刷掉、被面板的盒扫到，它在 T 上没有边要
+  维护（对账删除那一半清），却让每一次「删根 + 挪面板」同窗的定向都变整库。
+- **改动**：`window_root_plan::missing_at_target(dbnum, T, refnos)` 拿同一个 `DbSet@T`（`build_set` 走生成输入缓存）逐个
+  `element_exists`；`run_targeted_room_recompute` 把反查命中的与停放链上折不出根的元素合起来问一次，
+  `split_unresolved_by_existence` 分两半——已不存在的忽略（stdout 点名）、还在 T 上的才是「反查不完整」退整库；问不出来（读文件
+  失败）也退整库，不把「不知道」当「不在」。`room_reverse` 不变：仍如实把折不出根的进 `unresolved`，分类在调用方。ADR-073 D13
+  追记 M2、源码钉 26。
+- **验证**：`cargo test --lib` 定向 30 项全绿（新 `unresolved_hits_that_no_longer_exist_at_the_target_are_ignored_and_the_rest_block_the_targeted_path`：
+  纯函数四例 + 源码钉「问 → 分 → 拦 → 重算」顺序、旧的一刀切分支已删）；`batch_worker room_ model_db_adapter query_service task_end
+  dbnum_initialize window_root_plan model_dbnum_ensure handlers` 390 绿 0 红；`cargo check --all-targets` 零错。live 待补：一窗里
+  删一个根 + 挪一块面板 → 日志「N 个命中的元素在 DbSet@T 上已不存在 … 忽略」且仍「定向房间重算完成」。
+
 ### 房间换代段账本：谁重建谁记，任何任务的定向准入都能沿它接段（ADR-073 D13 追记 M1）
 
 - **为什么**：审核（`output/show-me-room-increment.html` §06 M1）指出定向常路在生产里很难走到——面板变化 `PanelDelta` 只随

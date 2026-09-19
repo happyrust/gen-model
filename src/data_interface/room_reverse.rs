@@ -9,8 +9,9 @@
 //!   不复制）；③ 库上 `tubi_relate` 的 `aabb.d` 范围过滤（不在投影里的根的管身——初始化的、重启前生成的），
 //!   **不带 `dbnum =`**——面板在 A 库、成员在 B 库是常态，按库过滤会把 B 的命中漏在这一层。
 //! - **元素 → 根**：`anc`（投影记录的 `ancestors` / 库行的 `anc`）∪ 自身，与本库 `DbSet@T` 的根清单求交；
-//!   嵌套根共享记录时两根都算（多算一根是同一台计算器下的幂等重写）。折不出根的元素进 `unresolved`——
-//!   调用方按「反查不完整」处置（退整库），不静默丢。
+//!   嵌套根共享记录时两根都算（多算一根是同一台计算器下的幂等重写）。折不出根的元素进 `unresolved`——这里不静默丢，
+//!   调用方（`batch_worker::run_targeted_room_recompute`）再问一句它在 `DbSet@T` 上还在不在（审核 M2，2026-09-19）：
+//!   已不存在的（本窗删掉的，树 / 库上的残留还没刷掉）没有边要维护、忽略；还在的才是「反查不完整」、退整库。
 //! - **跨库命中按库分桶、存元素不折根**（§未决 U3，b 档，2026-09-17）：任务按库、事务按库，本轮只重算本库的根；
 //!   别的库命中的元素连同祖先链进 [`AffectedRoots::foreign`]，由调用方停放给那个库、它的下一个任务折根
 //!   （根清单在那个库的 `DbSet@T` 上，这里枚举不了；祖先链在这里就带上——管身的来源是 BRAN 那种容器，
@@ -66,6 +67,13 @@ pub(crate) struct AffectedRoots {
     pub foreign: BTreeMap<u32, BTreeMap<i64, Vec<i64>>>,
     /// 本库命中却折不出根的元素（`anc` ∪ 自身与根清单不交）：反查不完整的证据，调用方据此退整库。
     pub unresolved: Vec<RefnoEnum>,
+    /// 库上管身范围查询（[`durable_tube_hits`]，O(全部 `tubi_relate` 行) 的链接解引用、不分库）这一次花的毫秒数
+    /// （审核 L2，2026-09-19：ADR 列的缓解——给 `tubi_relate` 补 `aabb_d` 平副本——要不要做，先拿这个数）。
+    pub durable_tube_ms: u64,
+    /// 树上命中、投影里没有、回库取 `anc` 的元素个数（[`durable_ancestors`]，按 400 一批）。
+    pub durable_ancestor_lookups: usize,
+    /// 回库取 `anc` 花的毫秒数。
+    pub durable_ancestor_ms: u64,
 }
 
 impl AffectedRoots {
@@ -78,6 +86,14 @@ impl AffectedRoots {
             self.cross_library,
             self.foreign.len(),
             self.unresolved.len()
+        )
+    }
+
+    /// 两次库读各花了多久（给「定向房间重算完成」那一行；L2 的量具）。
+    pub(crate) fn durable_timing(&self) -> String {
+        format!(
+            "库上管身范围查 {}ms、回库取祖先链 {} 个 {}ms",
+            self.durable_tube_ms, self.durable_ancestor_lookups, self.durable_ancestor_ms
         )
     }
 }
@@ -153,11 +169,13 @@ pub(crate) async fn resolve(
                 .or_insert_with(|| record.ancestors.clone());
         }
     });
-    // 库上的管身（不在投影里的根的，以及已落库的）：范围过滤不带库，回来源与祖先链。
+    // 库上的管身（不在投影里的根的，以及已落库的）：范围过滤不带库，回来源与祖先链。计时（L2 的量具）。
+    let started = Instant::now();
     for (source, anc) in durable_tube_hits(db, boxes).await? {
         tube_hits.insert(source);
         ancestors_of.entry(source).or_insert(anc);
     }
+    out.durable_tube_ms = elapsed_ms(started);
     out.tube_hits = tube_hits.len();
     // 树上命中、投影里没有的元素（重启前生成 / 初始化的，本库与别的库都有）：回库拿 `anc`。
     let unknown: Vec<i64> = tree_hits
@@ -165,9 +183,12 @@ pub(crate) async fn resolve(
         .copied()
         .filter(|source| !ancestors_of.contains_key(source))
         .collect();
+    out.durable_ancestor_lookups = unknown.len();
+    let started = Instant::now();
     for (source, anc) in durable_ancestors(db, &unknown).await? {
         ancestors_of.insert(source, anc);
     }
+    out.durable_ancestor_ms = elapsed_ms(started);
 
     // 分库：本库的折根；别的库的按库存下（元素 + 祖先链）不折——根清单在那个库的 T 上，由它的任务折（U3 b 档）。
     let hits: BTreeSet<i64> = tree_hits.iter().chain(tube_hits.iter()).copied().collect();
@@ -212,6 +233,10 @@ pub(crate) fn fold_to_roots(
         }
     }
     (roots, unresolved)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn e3d_of(packed: i64) -> RefNo {
@@ -340,10 +365,42 @@ pub(crate) fn pending(dbnum: u32) -> Vec<RoomRoots> {
     parked_read().get(&dbnum).cloned().unwrap_or_default()
 }
 
-/// 清空 `dbnum` 的槽，回清掉的条数。只在这个库的房间重算**成功**之后调（定向 = 链上每一段都算齐；整库 = 覆盖一切），
-/// 或它的库上代号已与常驻相等（停放物说的都是它已经越过的代）。失败不清——③ 兜底整库时再清。
+/// 清空 `dbnum` 的槽，回清掉的条数。只在这个库的房间重算**整库**成功之后调（覆盖一切——中途停进来的段若说的是
+/// 更后面的代，③ 欠着、账本里还有那一段，下一个任务照样接得上），或它的库上代号已与常驻相等（停放物说的都是它已经
+/// 越过的代）。定向成功清的是消费过的那几段（[`clear_consumed`]）；失败不清——③ 兜底整库时再清。
 pub(crate) fn clear(dbnum: u32) -> usize {
     parked_write().remove(&dbnum).map_or(0, |slot| slot.len())
+}
+
+/// 定向成功之后只清**消费过的**那几段（审核 L3，2026-09-19）：`consumed` 是这个任务开工时从槽里取走、接进准入链、
+/// 折过根的停放物（快照）；按 `from → to` 对上槽里的那一条，从中去掉快照里有的元素，去空了整条撤掉。任务跑着的时候
+/// 别的库停进来的（新的一段、或同一段并进来的新元素）都不在快照里，**留着**给下一个任务接——此前这里 `clear(dbnum)`
+/// 一刀清整槽，那些就随手丢了（不漏算：账本里还有那一段，只是白丢一次免反查的捷径）。回 `(撤掉的条数, 槽里剩下的条数)`。
+pub(crate) fn clear_consumed(dbnum: u32, consumed: &[RoomRoots]) -> (usize, usize) {
+    if consumed.is_empty() {
+        return (0, parked_read().get(&dbnum).map_or(0, Vec::len));
+    }
+    let mut slots = parked_write();
+    let Some(slot) = slots.get_mut(&dbnum) else {
+        return (0, 0);
+    };
+    let before = slot.len();
+    for entry in consumed {
+        if let Some(parked) = slot.iter_mut().find(|parked| {
+            parked.from_generation == entry.from_generation
+                && parked.to_generation == entry.to_generation
+        }) {
+            parked
+                .elements
+                .retain(|element, _| !entry.elements.contains_key(element));
+        }
+    }
+    slot.retain(|parked| !parked.elements.is_empty());
+    let left = slot.len();
+    if left == 0 {
+        slots.remove(&dbnum);
+    }
+    (before - left, left)
 }
 
 /// 消费停放物（U3 b 档）：链上各段的元素（带祖先链）与本库 `DbSet@T` 的根清单求交，得要重算的根（去重、按打包
@@ -692,6 +749,16 @@ mod tests {
             affected.summary(),
             "roots=4 tree_hits=5 tube_hits=4 cross_library=4 foreign_libraries=2 unresolved=1"
         );
+        // L2 的量具：树上命中、投影里没有的 300 / 24382-8 / 24383-8 / 600 四个回库取 anc；两次库读各自计了时
+        // （毫秒数不断言——`mem://` 上是 0 或 1）。
+        assert_eq!(affected.durable_ancestor_lookups, 4);
+        assert_eq!(
+            affected.durable_timing(),
+            format!(
+                "库上管身范围查 {}ms、回库取祖先链 4 个 {}ms",
+                affected.durable_tube_ms, affected.durable_ancestor_ms
+            )
+        );
     }
 
     fn parked(from: &str, to: &str, by: u32, elements: &[(u32, u32)]) -> RoomRoots {
@@ -770,6 +837,60 @@ mod tests {
             "清空的槽不出现在 /health"
         );
         clear(c);
+    }
+
+    /// 定向成功只清消费过的那几段（审核 L3，2026-09-19）：任务开工时的快照是它消费的全部；任务跑着的时候别的库
+    /// 又停进来的——新的一段、或往同一段并进来的新元素——不在快照里，留着给下一个任务接。按 `from → to` 对条、
+    /// 按元素去，去空了整条撤；快照里有、槽里已没有的（被整库清过）不报错；空快照不动槽。
+    #[test]
+    fn clearing_the_consumed_segments_keeps_what_was_parked_while_the_task_ran() {
+        let d = 9_003;
+        assert_eq!(clear_consumed(d, &[]), (0, 0), "槽空、快照空");
+        park(d, parked("g1", "g2", 7_997, &[(24_387, 8), (24_387, 9)]));
+        park(d, parked("g2", "g3", 7_997, &[(24_387, 10)]));
+        // 任务开工：快照两段（`pending` 不取走）。
+        let snapshot = pending(d);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(
+            clear_consumed(d, &[]),
+            (0, 2),
+            "快照为空（整库 / 链上没用到停放段）不动槽，只报剩多少"
+        );
+        // 任务跑着：别的库往同一段并进一个新元素、又停进一段新的。
+        park(d, parked("g1", "g2", 7_999, &[(24_387, 11)]));
+        park(d, parked("g3", "g4", 7_999, &[(24_387, 12)]));
+        assert_eq!(pending(d).len(), 3);
+
+        // 收尾：只清快照里的。g2→g3 整条去空撤掉；g1→g2 剩下中途并进来的 11；g3→g4 原样。
+        assert_eq!(clear_consumed(d, &snapshot), (1, 2));
+        let left = pending(d);
+        assert_eq!(
+            left.iter()
+                .map(|entry| {
+                    (
+                        entry.from_generation.as_str(),
+                        entry.to_generation.as_str(),
+                        entry.elements.keys().copied().collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("g1", "g2", vec![packed(24_387, 11)]),
+                ("g3", "g4", vec![packed(24_387, 12)]),
+            ],
+            "中途停进来的一个元素、一段都还在"
+        );
+        assert_eq!(
+            left[0].parked_by, 7_997,
+            "并进来的那条保留第一个停放方，去元素不改它"
+        );
+        // 再按同一份快照清一次：对得上条却没有元素可去 → 一条都不撤。
+        assert_eq!(clear_consumed(d, &snapshot), (0, 2));
+        // 剩下的两段各自被消费 → 槽空、/health 里没有它。
+        assert_eq!(clear_consumed(d, &left), (2, 0));
+        assert!(pending(d).is_empty());
+        assert!(parked_health().get(d.to_string()).is_none());
+        assert_eq!(clear_consumed(d, &snapshot), (0, 0), "槽已没了不报错");
     }
 
     /// 消费停放物（U3 b 档）：几段的元素合起来与本库根清单求交、去重按序；同一元素几段都有只折一次、祖先链取最长的

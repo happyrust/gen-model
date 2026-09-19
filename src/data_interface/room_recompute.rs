@@ -1157,24 +1157,39 @@ mod tests {
             !dispatch.contains("frozen_room_calculator()"),
             "分派处不新冻计算器（整库那一路在 run_room_only_recompute 里自己冻）"
         );
-        // 清槽（U3 b 档）：只在分派处、结论是 `WholeLibrary` / `Targeted` 才清；整个执行体别处不清。
+        // 清槽（U3 b 档 / L3）：只在分派处、结论是 `WholeLibrary` / `Targeted` 才动槽；整个执行体别处不清。
+        // 定向清的是消费过的那几段（`clear_consumed(job.dbnum, parked)`，parked = 接进准入链的快照，L3 2026-09-19），
+        // 整库才整槽清（`clear(job.dbnum)`）。
         let decided = dispatch
             .find("let verdict = match &request.scope {")
             .expect("先定结论");
+        let consumed = dispatch
+            .find("room_reverse::clear_consumed(job.dbnum, parked)")
+            .expect("定向成功后只清消费过的段");
         let cleared = dispatch
             .find("room_reverse::clear(job.dbnum)")
-            .expect("成功后清本库的槽");
-        assert!(decided < cleared, "结论定了才清槽: {dispatch}");
+            .expect("整库成功后清本库的槽");
+        assert!(
+            decided < consumed && decided < cleared,
+            "结论定了才动槽: {dispatch}"
+        );
         assert!(
             dispatch.contains(
-                "RoomRecomputeVerdict::WholeLibrary(_) | RoomRecomputeVerdict::Targeted(_)"
+                "(RoomRecomputeVerdict::Targeted(_), RoomRecomputeScope::Targeted { parked, .. }) => {"
+            ) && dispatch.contains(
+                "(RoomRecomputeVerdict::WholeLibrary(_) | RoomRecomputeVerdict::Targeted(_), _) => {"
             ),
-            "只有说得了「整库对齐到这一代」的两种结论才清槽（Failed / PartialCoverage / Disabled 留着）: {dispatch}"
+            "定向结论按快照清消费过的段；整库结论整槽清；Failed / PartialCoverage / Disabled 留着: {dispatch}"
         );
         assert_eq!(
             worker.matches("room_reverse::clear(").count(),
             1,
-            "执行体里清槽只此一处（准入处的顺手清在 room_recompute::parked_for_task）"
+            "执行体里整槽清只此一处（准入处的顺手清在 room_recompute::parked_for_task）"
+        );
+        assert_eq!(
+            worker.matches("room_reverse::clear_consumed(").count(),
+            1,
+            "执行体里按段清只此一处"
         );
         let targeted = function_body(worker, "async fn run_targeted_room_recompute(");
         // H1（2026-09-19）：定向路**不**新冻——用传进来的那台；入口先对准入链终点与它的代号，不等退整库。
@@ -1262,8 +1277,12 @@ mod tests {
                 "if expected_generation != Some(rooms.resident_generation()) {",
             ),
             ("树不就绪", "Ok(ReverseLookup::TreeUnavailable(state)) =>"),
-            ("有命中却折不出根", "if !affected.unresolved.is_empty() {"),
-            ("停放的元素折不出根", "if !parked_unresolved.is_empty() {"),
+            (
+                // M2（2026-09-19）：折不出根的元素（反查命中的 + 停放链上的）只有**还在 DbSet@T 上**的才拦；
+                // 已不存在的（本窗删掉的残留）忽略。
+                "有命中 / 停放的元素还在 T 上却折不出根",
+                "if !stuck.is_empty() {",
+            ),
         ] {
             let at = targeted
                 .find(marker)
