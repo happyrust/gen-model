@@ -16,7 +16,15 @@
   同时回答「在不在节点子树里」与「所属单元根是谁」（`ascend`）；`self` 下一窗候选里没有它就不建会话集。链头节点已在时
   枚举一次子树数「带着几个单元出现」（复用 `node_diff_summary::count_units_in_subtree`）。缓存键 `(dbnum, refno, scope, 文件指纹)`。
 - 实现：`fast_model/node_versions.rs`（单测 6 条：折叠 / 两格单元数 / 自身列 / 切片 / 序列化）、`handlers::node_versions` + 路由；
-  `DiffScope` 补 `Hash`。真机数字见下一条追记（release 构建换到 :8022 后补）。
+  `DiffScope` 补 `Hash`。
+- 真机（release `a382b2cf3` 换到共享 `:8022`，内存库，ams8000 639 会话，10:5x）：SITE `24384/22399` subtree 冷算 **3.45 s**（639 会话 /
+  47,522 候选 / 3,786 在范围 / 640 个会话集，索引差分 1.5 s + 建集 1.0 s），全表 298 行，`since_sesno=618` 命中缓存 20 ms → 626 / 628 /
+  630 / 632 各 `units_changed 1`（FTUB 抬管 / EQUI 加 BOX / 回 U2900 / 删 BOX）；BRAN `24384/23257` subtree **57 行与 `model/versions`
+  逐行同序同档**（2.4 s vs 6.6 s——上溯归属比按窗建子树集便宜）；FTUB `24384/23262` self **53 行与 `element/versions` 左列一致**；
+  ZONE `24384/22400` subtree 198 行 / self 5 行；`scope=bogus` 400、不存在 refno 404、dbnum 不符 400、`since_sesno` 不在链上 404。
+  页面级（plant3d-web dev `:3111`，`e2e/node-version-view-gen-model-v1.spec.ts` 2 passed）见 plant3d-web
+  `docs/verification/model-version-compare-gen-model-v1-2026-09-18/README.md` §7。顺手看到：只设 UDA 的会话（SITE sesno 10：
+  `UDA:2902d6e2 / 2902d6e3`）按模型口径不成一行，`attribute-history` 却列它——两条路由口径刻意不同，前端按并集列。
 
 ## 2026-09-18
 
