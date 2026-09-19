@@ -11,6 +11,10 @@ fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_mode
 **2026-09-19 修订**（用户 18:15 拍板 A，会话 fable-5-1-36 起手、fable-5-1-6 接力）：`SPAMAP` 与 `CACHID` **同档进戳表**
 `PLACEMENT_STAMP_ATTRIBUTES`（计划 §8 Q6 题 B / N2 t-334：同是 3.1 运行库 schema 簿记键、字典无票、生成器不读、四库全量 1718 根 0 红），
 规则 2 的戳例外与 Q6 第三档从此都是两个名字；**同日凭证前移比例护栏的分子改按净候选数**（毛候选 − 只戳候选 `cache_stamp`），见规则 2 / 规则 4 末注。
+**同日 21:59 验收 1 的对拍门复跑**（会话 fable-5-1-16，`probe_rigid_exclusion_windows` 全语料 3157 窗，报告 `docs/evidence/2026-09-19-rigid-exclusion-parity-spamap.md`）：
+`SPAMAP` 进表后 `is_placement_only` 多认的 885 个候选里 39 个成了合格锚点、其余 846 个仍被规则 3「路由容器之内」排除；合格锚点 163 → 186、对拍 152 根
+**不等·锚点 0**，门照旧过。少的 16 个是 ams7997 HVAC 的 `BEND` / `ATTA` / `DAMP`——e3d-model 09-18 `f93fd66` 让 HVAC BRAN 也派生隐式直段之后改判「路由容器之内」，
+与 `SPAMAP` 无关。`model_transform_cheap_path` 默认仍关。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
