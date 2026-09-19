@@ -20,7 +20,7 @@ use tokio::time::Instant;
 
 use super::e3d_model_service::ModelTarget;
 use super::model_db_adapter::{
-    ExactAckCandidate, PersistFailureKind, PersistTarget, RootPersistFailure,
+    ExactAckCandidate, PersistFailureKind, PersistTarget, PersistedRows, RootPersistFailure,
     frozen_room_calculator, persist_roots_batched_unacked,
 };
 use super::model_memory_store::{
@@ -95,6 +95,15 @@ struct State {
     blocked_transitions: u64,
     ack_mismatches: u64,
     last_attempt_at: Option<String>,
+    /// 本进程起以来 durable 档真写进介质的行账，逐批累加（[`DurableBatchResult::rows`]）。
+    /// 换装复验读 `/health` 前后各一次、取差，就知道这一轮到底写了多少行、发了几笔事务。
+    rows_upserted: u64,
+    rows_removed: u64,
+    receipts_written: u64,
+    commits: u64,
+    room_edges_written: u64,
+    /// 至今提交过的最大一笔事务字节数（取最大值，不累加）。
+    max_transaction_bytes: usize,
 }
 
 impl Default for State {
@@ -113,6 +122,12 @@ impl Default for State {
             blocked_transitions: 0,
             ack_mismatches: 0,
             last_attempt_at: None,
+            rows_upserted: 0,
+            rows_removed: 0,
+            receipts_written: 0,
+            commits: 0,
+            room_edges_written: 0,
+            max_transaction_bytes: 0,
         }
     }
 }
@@ -132,6 +147,15 @@ trait PersistencePort: Send + Sync {
 struct DurableBatchResult {
     acknowledged: Vec<ExactAckCandidate>,
     failures: Vec<RootPersistFailure>,
+    /// 这一批真写进介质的行账。`None` = 没走到写库那一步（根都被剔出去了 / 房间算不出来），
+    /// 与「写了 0 行」不是一回事。
+    ///
+    /// durable 这一档的行账原先只活在这个函数里：`model_refresh` 那一支打的是 `durable=pending`，
+    /// `rows` / `commits` 两个计数只在非 durable 分支填，于是换装复验只数得出根、数不出行
+    /// （`ledger-seg15-frameall.md` §20.5）。这里带出来，进 [`State`] 累计、上 `/health`。
+    rows: Option<PersistedRows>,
+    room_edges: usize,
+    max_transaction_bytes: usize,
 }
 
 struct ProcessPersistence;
@@ -189,19 +213,33 @@ impl PersistencePort for ProcessPersistence {
                 Ok(report) => {
                     // 房间边是 bake 时带来的还是这里现算的（B/T4）：稳态下 recomputed 应为 0，
                     // 非 0 就是回执没带 / 代号不等 / 构件集不等，值得看一眼。
-                    if report.room_carried + report.room_recomputed > 0 {
-                        log::info!(
-                            "[model-write-behind] dbnum={dbnum} flushed roots={} room_edges={} room_carried={} room_recomputed={}",
-                            report.acknowledged.len(),
-                            report.room_edges,
-                            report.room_carried,
-                            report.room_recomputed
-                        );
-                    }
+                    //
+                    // 这行原先是 `log::info!` 且只在 `room_carried + room_recomputed > 0` 时打。
+                    // 终端日志器只收 Warn 以上（`lib.rs` 的 `CombinedLogger`），info 只进另一个
+                    // `*_dblog.txt`——于是现场那份 stdout 日志上它一次都没出现过，durable 档写了
+                    // 多少行无处可查。改成 `println!`、且只要走到写库就打，与兄弟两行
+                    // （`[model-write-behind] … memory=ready durable=pending` 与 `[model-persist]`）
+                    // 同一个口子。
+                    let rows = report.rows.as_ref();
+                    println!(
+                        "[model-write-behind] dbnum={dbnum} flushed roots={} rows={} removed={} receipts={} commits={} room_edges={} room_carried={} room_recomputed={} max_transaction_bytes={}",
+                        report.acknowledged.len(),
+                        rows.map_or(0, |rows| rows.upserted),
+                        rows.map_or(0, |rows| rows.removed),
+                        rows.map_or(0, |rows| rows.receipts),
+                        rows.map_or(0, |rows| rows.commits),
+                        report.room_edges,
+                        report.room_carried,
+                        report.room_recomputed,
+                        report.max_transaction_bytes
+                    );
                     deterministic_failures.extend(report.failures);
                     DurableBatchResult {
                         acknowledged: report.acknowledged,
                         failures: deterministic_failures,
+                        rows: report.rows,
+                        room_edges: report.room_edges,
+                        max_transaction_bytes: report.max_transaction_bytes,
                     }
                 }
                 Err(error) => {
@@ -324,6 +362,16 @@ pub(crate) struct WriteBehindSnapshot {
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
     pub blocked_samples: Vec<BlockedRootSample>,
+    /// durable 档写进介质的行账，本进程起累计。前面那几格数的都是**根**；换装复验要的是
+    /// **行**——`model_refresh` 那一支只打 `durable=pending`，`rows` / `commits` 只在非 durable
+    /// 分支填，行账过去在这一档无处可查（`ledger-seg15-frameall.md` §20.5）。
+    /// 复验读前后两次取差即可。
+    pub rows_upserted: u64,
+    pub rows_removed: u64,
+    pub receipts_written: u64,
+    pub commits: u64,
+    pub room_edges_written: u64,
+    pub max_transaction_bytes: usize,
 }
 
 pub(crate) fn snapshot() -> WriteBehindSnapshot {
@@ -390,6 +438,12 @@ fn snapshot_for(controller: &ModelWriteBehind) -> WriteBehindSnapshot {
         last_success_at: state.last_success_at.clone(),
         last_error: state.last_error.clone(),
         blocked_samples,
+        rows_upserted: state.rows_upserted,
+        rows_removed: state.rows_removed,
+        receipts_written: state.receipts_written,
+        commits: state.commits,
+        room_edges_written: state.room_edges_written,
+        max_transaction_bytes: state.max_transaction_bytes,
     }
 }
 
@@ -713,6 +767,21 @@ async fn persist_batch(controller: &ModelWriteBehind, dbnum: u32, jobs: Vec<Pers
         .persistence
         .persist(controller.store, dbnum, roots.clone())
         .await;
+    // 行账先收进来再动队列：`acknowledged` / `failures` 下面就被 `into_iter` 吃掉了。
+    // 没走到写库那一步（`rows` 是 `None`）就一格都不动——那与「写了 0 行」不是一回事。
+    if let Some(rows) = outcome.rows {
+        let mut state = controller.state();
+        state.rows_upserted = state.rows_upserted.saturating_add(rows.upserted as u64);
+        state.rows_removed = state.rows_removed.saturating_add(rows.removed as u64);
+        state.receipts_written = state.receipts_written.saturating_add(rows.receipts as u64);
+        state.commits = state.commits.saturating_add(rows.commits as u64);
+        state.room_edges_written = state
+            .room_edges_written
+            .saturating_add(outcome.room_edges as u64);
+        state.max_transaction_bytes = state
+            .max_transaction_bytes
+            .max(outcome.max_transaction_bytes);
+    }
     let acknowledgements = outcome
         .acknowledged
         .into_iter()
@@ -1239,6 +1308,120 @@ mod tests {
         controller.notify.notify_waiters();
     }
 
+    /// durable 档写了多少**行**要能在 `/health` 上数出来——前面那些格数的都是**根**。
+    ///
+    /// 由来：2026-09-18 23:18 换装到 `7bde2aeea` 之后的复验只数得出 229 根重算、数不出写了多少行
+    /// （`ledger-seg15-frameall.md` §20.5）：`model_refresh` 的 durable 那一支只打
+    /// `durable=pending`，`rows` / `commits` 只在非 durable 分支填。行账其实一直在
+    /// `persist_roots_batched_unacked` 的回执里，只是走到这儿就被丢了。
+    ///
+    /// 连 `None` 那一档一起钉：没走到写库那一步（根被剔出去 / 房间算不出来）**一格都不许动**，
+    /// 那与「写了 0 行」不是一回事。
+    #[tokio::test(start_paused = true)]
+    async fn the_durable_row_account_reaches_health_so_a_swap_recheck_can_count_rows() {
+        fn rows(upserted: usize, removed: usize, receipts: usize, commits: usize) -> PersistedRows {
+            PersistedRows {
+                medium: super::super::model_db_adapter::PersistMedium::RocksDb,
+                upserted,
+                removed,
+                receipts,
+                commits,
+            }
+        }
+
+        let first = RefNo::new(7997, 131);
+        let second = RefNo::new(7997, 132);
+        let third = RefNo::new(7997, 133);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![
+            DurableBatchResult {
+                acknowledged: vec![ack(first, "rows")],
+                rows: Some(rows(103, 2, 1, 1)),
+                room_edges: 7,
+                max_transaction_bytes: 4096,
+                ..Default::default()
+            },
+            DurableBatchResult {
+                acknowledged: vec![ack(second, "rows")],
+                rows: Some(rows(16, 0, 1, 2)),
+                room_edges: 0,
+                // 比上一笔小：这一格取最大值，不累加。
+                max_transaction_bytes: 1024,
+                ..Default::default()
+            },
+            DurableBatchResult {
+                failures: vec![RootPersistFailure {
+                    root: third,
+                    kind: PersistFailureKind::Blocked,
+                    error: "room membership".into(),
+                }],
+                rows: None,
+                ..Default::default()
+            },
+        ]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(first, "rows")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).pending_unique_roots == 0).await;
+        let after_first = snapshot_for(controller);
+        assert_eq!(
+            (
+                after_first.rows_upserted,
+                after_first.rows_removed,
+                after_first.receipts_written,
+                after_first.commits,
+                after_first.room_edges_written,
+                after_first.max_transaction_bytes,
+            ),
+            (103, 2, 1, 1, 7, 4096)
+        );
+
+        controller
+            .publish_commits(vec![commit(second, "rows")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).pending_unique_roots == 0).await;
+        let after_second = snapshot_for(controller);
+        assert_eq!(
+            (
+                after_second.rows_upserted,
+                after_second.rows_removed,
+                after_second.receipts_written,
+                after_second.commits,
+                after_second.room_edges_written,
+            ),
+            (119, 2, 2, 3, 7),
+            "逐批累加：复验读前后两次取差就是这一轮写的行数"
+        );
+        assert_eq!(
+            after_second.max_transaction_bytes, 4096,
+            "最大一笔取最大值，不被后面较小的那笔改小"
+        );
+
+        controller
+            .publish_commits(vec![commit(third, "rows")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).blocked_roots == 1).await;
+        let after_blocked = snapshot_for(controller);
+        assert_eq!(
+            (
+                after_blocked.rows_upserted,
+                after_blocked.rows_removed,
+                after_blocked.receipts_written,
+                after_blocked.commits,
+                after_blocked.room_edges_written,
+                after_blocked.max_transaction_bytes,
+            ),
+            (119, 2, 2, 3, 7, 4096),
+            "rows 是 None = 压根没走到写库那一步，一格都不许动"
+        );
+        assert_eq!(after_blocked.persist_attempts, 3);
+
+        controller.state().accepting = false;
+        controller.notify.notify_waiters();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn ten_thousand_publishes_of_one_root_keep_one_pending_state() {
         let root = RefNo::new(7997, 109);
@@ -1281,6 +1464,7 @@ mod tests {
                         error: "invalid root".into(),
                     },
                 ],
+                ..Default::default()
             },
             DurableBatchResult {
                 acknowledged: vec![ack(retrying, "retrying")],
@@ -1597,6 +1781,7 @@ mod tests {
                 kind: PersistFailureKind::Retryable,
                 error: "timeout".into(),
             }],
+            ..Default::default()
         }]));
         let store = Box::leak(Box::new(ModelMemoryStore::default()));
         let controller = Box::leak(Box::new(ModelWriteBehind::new(store, adapter)));
