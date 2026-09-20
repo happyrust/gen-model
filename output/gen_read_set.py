@@ -76,7 +76,9 @@ TEST_MARKER = "#[cfg(test)]"
 # 多收一个戳就把这条判据自己写的排除名单反过来挡住了。
 # **例外**：真被传进 e3d-io 读取口（`.get_integer("CACHID")`）就照旧算读、照旧进 names——那时守卫那条
 # 「戳不许出现在 names」立刻红，逼人回来看这处读是不是几何输入。
-STAMP_LITERALS = {"CACHID"}
+# 2026-09-20：e3d-model cf6d8b6 把 `SPAMAP` 加进 `PLACEMENT_STAMP_ATTRIBUTES`（与 `CACHID` 同档），这里跟上——
+# 否则脚本会把 `SPAMAP` 归进 names、把 e3d-model 那份产物里的戳表倒回去，两仓守卫一边红一边被改坏。
+STAMP_LITERALS = {"CACHID", "SPAMAP"}
 # e3d-io `DbElement` 的全部按名读取口。直接传字面量进来的读点**无条件**算属性名——哪怕字典 / schema
 # 都没收它（Core3D 伪属性 `CPAR` 就是这样），因为它被当属性读了这件事本身就是证据。
 DIRECT_READERS = [
