@@ -48,6 +48,17 @@
   执行与预览在这一点上不是一句话；`docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §6.2 G6 记的是「类别 0 → 不动 ✅」。
   待拍板：要不要让 `directly_touched` 对只由元数据候选撑起来的闭包命中放行（前移不重算）。
 
+### 移除
+
+- **`scripts/Run-RoomE3DE2E.ps1` / `scripts/Run-Issue7E2E.ps1` 退役（删除）。** 两份脚本的核心一步都是
+  `cargo test --test issue7_e2e_increment … issue7_e2e_room_comes_back_after_e3d_save`，而那个测试目标随 ADR-072 R3/R4
+  （`588e71915`）删掉了——今天跑它们只会得到「no test target」，房间五连 / 逐类型矩阵一条都验不了。用户 2026-09-20 拍板退役。
+  **留下的**：`scripts/e3d/room_*.mac` / `issue7_cap_pos_*.mac` 与 `scripts/e3d/ams_model_type_cases.json`（宏与类型清单，
+  别的编排还引用）、`db_options/DbOption-issue7-e2e.toml`（`Start-AiosDatabaseManual.ps1` 的默认配置）。
+  **活的等价物**：`l3_suite --fixture-manifest`（`scripts/e3d/increment_fixture/`）的 room-member / room-structure 场景，同日在真
+  AMS 7998 上 9/9 PASS。`docs/2026-08-12_live-test-ledger.md` 那一行、`docs/e3d-model-type-verification-ledger.md` 的复跑命令、
+  `docs/2026-08-07_e3d-tty-test-plan.md` 顶部各补一句退役追记；`docs/plans/` 与 `specs/` 里的历史提法原样不动。
+
 ### `the_extra_stamp_knob_is_off_unless_it_is_given` 跟上 `SPAMAP` 进生产常量：名单外的样本换成合成名字
 
 - **为什么**：e3d-model `cf6d8b6` 把 `PLACEMENT_STAMP_ATTRIBUTES` 定成 `["CACHID", "SPAMAP"]`、本仓 `2175dee93` 的戳表随之跟上，

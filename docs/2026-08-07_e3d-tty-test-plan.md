@@ -15,6 +15,10 @@
 | B 矩阵层 | AMS 实库几何类型（noun）× 增量变更的逐类型验证 | `scripts/e3d/ams_model_type_cases.json` + `Run-RoomE3DE2E.ps1 -ModelTypes` + `tests/issue7_e2e_increment.rs` | **本文** |
 | C 场景层 | 房间语义场景（五连）与 L3+V 全链路（M/F 系列） | `Run-RoomE3DE2E.ps1` legacy cases、`l3_suite` | `2026-08-06_room-incremental-automation-test-plan.md`、`2026-08-06_e3d-l3-automation-test-plan.md` |
 
+> **2026-09-20 追记**：B / C 两层的载体 `Run-RoomE3DE2E.ps1`（及 `Run-Issue7E2E.ps1`）已退役——它们调用的
+> `tests/issue7_e2e_increment.rs` 随 ADR-072 R3/R4（`588e71915`）删除。下文所有 `Run-RoomE3DE2E.ps1 …` 命令都是
+> 历史记录；今天能跑的端到端增量 / 房间用例是 `l3_suite --fixture-manifest`（`scripts/e3d/increment_fixture/`）。
+
 C 层已有专文，本文只引用不重抄。本文的增量价值 = **矩阵以实库几何类型全集为纲收尾 +
 通道失败路径补零 + 编排/门禁把手**。
 

@@ -15,9 +15,12 @@
   （noun 全集 = 当前库 `inst_relate` 出现过的 noun；T1 探针轮把全集从 41 扩到 47，
   `no_geometry` 是探针证实的「AMS 目录下无独立几何」终态，详见 §2.1）。
 - 传统房间用例：5 / 5 通过（§3）。
-- 复跑命令（单个类型）：
+- 复跑命令（单个类型）——**2026-09-20 起跑不了**：`Run-RoomE3DE2E.ps1` 依赖的 `tests/issue7_e2e_increment.rs`
+  已随 ADR-072 删除，脚本同日退役；下面这段只作历史口径保留，逐类型复跑要另起编排（宏与
+  `scripts/e3d/ams_model_type_cases.json` 都还在），基础增量链路由 `l3_suite --fixture-manifest` 覆盖。
 
 ```powershell
+# 历史命令（2026-08，已退役）：
 powershell -File scripts\Run-RoomE3DE2E.ps1 -SkipLegacyCases -ModelTypes BEND
 # 全部 relative_position 类型：-ModelTypes all
 ```
