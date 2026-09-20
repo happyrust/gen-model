@@ -18,6 +18,14 @@ fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_mode
 **同日 23:5x–00:4x 执行体两处「待补」补齐**（会话 fable-5-1-37）：D3 含旋转时读回记录自己的网格、顶点乘到新世界系重算盒（`rigid_motion_mesh_bounds`，
 隐式管身的 `local_transform` 已折进世界矩阵不再乘），此前一律 `bail!` 回退；D4 回执落款改按 pin@T 现算（`rigid_motion_target_at`：与 regen / 单元级同一条
 `hydrate_published_dependencies → model_target` 路，设计窗之外任一格变了回退 regen），此前沿用旧回执。执行体仍未在真投影上跑过（S4b B7 / B8 / 验收 2 / 3 照旧零），见 S4b 计划 §9。
+**2026-09-20 02:1x–02:4x 验收 1 的生产记录半边首跑**（会话 fable-5-1-37 起手、fable-5-1-47 接力，`probe_rigid_motion_gate3_for_window`，报告 `docs/evidence/2026-09-20-s4b-gate3-rigid-motion-parity.md`）：
+**ams8000 195→196 过 S4b §5 门 3**（`record_id` / 1e-9 / 1e-3 / `mesh_id` 复用 / 回执与目标都在 T），另 6 窗 12 根同过，含两窗**含旋转**（D3 读网格重算盒与 regen@T 逐位相同）。
+三条发现，全部已拍板落地（fable-5-1-51 08:5x）：**嵌套根双乘已修**——嵌套显著根名下记录互相包含、执行体逐根串行把共有记录**乘了两次 Δ**（ams7997 156→157 / ams1112 724→725 红；P0 幂等闸按根判护不住），
+`republish_records` 加**按记录**的幂等闸（`source_sesno == T` 不再乘、比规划基线新的整根回退 regen）后两窗全跑都过（14 + 3 / 1090 + 31 记录，|Δ| ≤ 9.1e-13、盒差 0）；
+纯平移下 Baked `mesh_id` 也漂（本地化残差进 SHA，内容逐位同）——§5「纯平移必复用」对 Baked 立不住，**§5 门 3 改口**：Canonical 按 id、Baked 一律按内容判（顶点 / 法线 < 1e-3、索引同 → 观察项）；
+`world_bounds` 1e-3 mm 这一轮全过但最大 0.000977 mm = 1 ulp、离线 2.3%，坐标 ≥ 16384 mm 段同样的差就判死，**§5 门 3 改口**：`|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`。
+两处改口后 7 窗 19 根复跑全过（含旋转两窗的 Baked 按内容判也 0 不等）。
+`model_transform_cheap_path` 默认仍关；live #2 / 验收 3 未跑。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，

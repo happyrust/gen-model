@@ -1843,7 +1843,32 @@ impl E3dModelService {
     ) -> anyhow::Result<RigidMotionReport> {
         let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
         ensure_not_older_than_persisted(dbnum, target_sesno).await?;
-        let store = ModelMemoryStore::global();
+        run_blocking(|| {
+            self.republish_roots_by_rigid_motion_on(
+                ModelMemoryStore::global(),
+                dbnum,
+                target_sesno,
+                units,
+                |commits| {
+                    super::model_write_behind::publish(commits)?;
+                    Ok(())
+                },
+            )
+        })
+    }
+
+    /// [`Self::republish_roots_by_rigid_motion`] 的无锁本体：投影与发布口由调用方注入——生产给全局投影 +
+    /// write-behind，门 3 探针（`probe_rigid_motion_gate3_for_window`）给本地投影 + 直接提交，两边跑的是
+    /// 同一段闸 → 目标核对 → 左乘 → 回执。与单元级的 `republish_roots_by_unit_delta_on` 同形；同步 CPU +
+    /// 文件 IO，调用方负责在 [`run_blocking`] 里跑。
+    pub(crate) fn republish_roots_by_rigid_motion_on(
+        &self,
+        store: &ModelMemoryStore,
+        dbnum: u32,
+        target_sesno: u32,
+        units: &[RigidMotionUnit],
+        mut publish: impl FnMut(Vec<ProjectionCommit>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<RigidMotionReport> {
         let mesh_dir = self.mesh_dir.as_path();
         let mut report = RigidMotionReport::default();
         // 目录会话表整轮共用（与单元级 `produce` 用窗口的 `dependency_sessions` 同形）：
@@ -1913,10 +1938,15 @@ impl E3dModelService {
                 }
             };
             let records = store.records_of_root(ProjectionScope::Current, root);
-            // 左乘 Δ：纯平移直接加 t；含旋转读回记录自己的网格重算盒（D3），读不到就回退。
-            let moved = match republish_records(records, anchors, target_sesno, |record, world| {
-                rigid_motion_mesh_bounds(mesh_dir, record, world)
-            }) {
+            // 左乘 Δ：纯平移直接加 t；含旋转读回记录自己的网格重算盒（D3），读不到就回退。已在 T 的记录
+            // （嵌套根共有、同窗别的根落的、窗口重放）按记录的闸放过、不再乘（S4b §9 B8 首跑那条红）。
+            let moved = match republish_records(
+                records,
+                anchors,
+                unit.source_start_sesno,
+                target_sesno,
+                |record, world| rigid_motion_mesh_bounds(mesh_dir, record, world),
+            ) {
                 Ok(moved) => moved,
                 Err(error) => {
                     report
@@ -1934,9 +1964,9 @@ impl E3dModelService {
                     continue;
                 }
             };
-            // 回执整根前移到 T，落款是 pin@T 的目标（D4）。发布调用只同步
+            // 回执整根前移到 T，落款是 pin@T 的目标（D4）。生产的发布口只同步
             // 提交内存投影并登记 write-behind；后台 worker 独立完成 durable flush。
-            super::model_write_behind::publish(vec![ProjectionCommit {
+            publish(vec![ProjectionCommit {
                 upserts: moved,
                 receipt: Some((
                     root,
@@ -5548,6 +5578,662 @@ mod tests {
         Ok(())
     }
 
+    /// `x` 这个量级上 f32 相邻两个数的间距（`world_bounds` 存 f32，盒差小于这一格就是舍入、不是几何）。
+    fn f32_ulp(x: f32) -> f32 {
+        let x = x.abs();
+        if !x.is_finite() {
+            return f32::INFINITY;
+        }
+        if x == 0.0 {
+            return f32::MIN_POSITIVE;
+        }
+        f32::from_bits(x.to_bits() + 1) - x
+    }
+
+    /// ADR-066 验收 1 的**生产记录半边** = S4b 计划 §5 门 3（手动，真库）：钉一窗 S→T、开着 `model_transform_cheap_path`
+    /// 跑生产同款选根 + 刚体分桶（`WindowRootSources::collect` → `impact` → `plan_window_roots` → `rigid_motion`），对每个
+    /// 判成 transform 的根：S 端整根重算灌进本地投影当基线（回执停在 S、目标是 S 的），走**真执行体**
+    /// （[`E3dModelService::republish_roots_by_rigid_motion_on`]：闸 → pin@T 目标核对 → `republish_records` + 盒闭包 → 回执），
+    /// 再与 T 端整根重算的投影记录逐条比。**判死三条**（§5 门 3，09-20 改口）：`record_id` 集合相同；`world_transform`
+    /// 逐元素 `|Δ| < 1e-9`；`world_bounds` 逐分量 `|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`——1e-3 是绝对底线，
+    /// 坐标量级上去了按 f32 ulp 放行（两边各自舍入最多 2 ulp；`t_c` 是该记录命中锚点的平移在这一分量上的值）。`mesh_id`：
+    /// Canonical 按 id 判死；Baked **一律按内容判**——id 不等时读两份网格，顶点数同、顶点 / 法线最大偏差 < 1e-3、索引逐位同
+    /// 记 `DRIFT`（CAS id 漂、几何同，观察项），否则判死。`manifest_hash` 相等只作观察项。另核 D4 回执：`source_sesno == T`、
+    /// `published_via == "transform"`、`model_target` 与 regen@T 会落的那份逐字段相等。另印每根盒差的最大值与该量级下
+    /// f32 的 ulp、以及「≥ 1e-3 mm 但被 ulp 臂放过」的分量数——改口前后的差别就在这一格。
+    ///
+    /// 旋钮：`AIOS_TRANSFORM_WINDOW=S:T`（必填）、`AIOS_RIGID_PROBE_DBNUM`（默认 8000）、`AIOS_RIGID_PROBE_FILE`（MDB 没声明的
+    /// 库挂成额外 DESI pin）、`AIOS_RIGID_PROBE_ROOTS=w0/w1,…`（只执行这几根；嵌套根共有记录时用它挑最内层）；
+    /// 开关 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1` 必须开，否则分桶为空。要配置好的 MDB（`from_current`）
+    /// 与 E3D 模板目录；烘焙写真 mesh 目录（内容寻址，与整根重算同一处）。
+    #[tokio::test]
+    #[ignore = "manual live: AIOS_TRANSFORM_WINDOW=S:T on the configured MDB with AIOS_MODEL_TRANSFORM_CHEAP_PATH=1; run with --ignored --nocapture"]
+    async fn probe_rigid_motion_gate3_for_window() -> anyhow::Result<()> {
+        use std::time::Instant;
+
+        use crate::data_interface::generation_root::{
+            enumerate_generation_roots, resolve_delivery_unit_types,
+        };
+        use crate::data_interface::rigid_motion::pure_translation;
+        use crate::data_interface::window_root_plan::{
+            PersistedRoot, WindowRootSources, plan_window_roots,
+        };
+
+        let env_u32 = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+        };
+        let dbnum = env_u32("AIOS_RIGID_PROBE_DBNUM").unwrap_or(8000);
+        anyhow::ensure!(
+            crate::options::model_transform_cheap_path(),
+            "set AIOS_MODEL_TRANSFORM_CHEAP_PATH=1: with the switch off the planner classifies nothing"
+        );
+        let window = std::env::var("AIOS_TRANSFORM_WINDOW")
+            .context("AIOS_TRANSFORM_WINDOW=S:T is required")?;
+        let (base_sesno, target_sesno) = {
+            let (base, target) = window
+                .split_once(':')
+                .context("AIOS_TRANSFORM_WINDOW=S:T")?;
+            (base.trim().parse::<u32>()?, target.trim().parse::<u32>()?)
+        };
+        let mut service = E3dModelService::from_current().await?;
+        if let Ok(file) = std::env::var("AIOS_RIGID_PROBE_FILE") {
+            use crate::data_interface::direct_store::DbPin;
+
+            let file = PathBuf::from(file);
+            anyhow::ensure!(file.is_file(), "{} is not a file", file.display());
+            service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+            service.pins.push(DbPin {
+                dbnum: dbnum as i32,
+                db_type: "DESI".into(),
+                file,
+                sesno: None,
+            });
+        }
+        let pin = service.pin(dbnum)?;
+        println!(
+            "probe dbnum={dbnum} file={} window {base_sesno}→{target_sesno}",
+            pin.file.display()
+        );
+
+        // 生产同款选根 + 刚体分桶（探针没有进程内账本：S 端根全算安定）。
+        let base = generation_input(&service, dbnum, base_sesno)?;
+        let target = generation_input(&service, dbnum, target_sesno)?;
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let sources = WindowRootSources::collect(
+            &pin.file,
+            base_sesno,
+            target_sesno,
+            &base.set,
+            &target.set,
+            &unit_types,
+            &[],
+        )?;
+        let roots_s: Vec<PersistedRoot> =
+            enumerate_generation_roots(&base.set, &base.index.roots, &unit_types)?
+                .into_iter()
+                .map(|root| PersistedRoot {
+                    refno: root.root,
+                    noun: root.noun,
+                })
+                .collect();
+        let impact = sources.impact(&roots_s);
+        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+        let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
+        let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
+        println!(
+            "planner: regen {} degraded {:?} | transform {} rejected {} | placement candidates {}",
+            plan.regen.len(),
+            plan.degraded,
+            rigid.transform.len(),
+            rigid.rejected.len(),
+            sources.rigid.candidates.len()
+        );
+        for (root, reason) in rigid.rejected.iter().take(10) {
+            println!("  rejected {} : {reason}", root.to_pdms_str());
+        }
+        anyhow::ensure!(
+            !rigid.transform.is_empty(),
+            "no root classified transform in {base_sesno}→{target_sesno}"
+        );
+        // `AIOS_RIGID_PROBE_ROOTS=w0/w1,w0/w1`：只把这几根交给执行体（嵌套根共有记录时挑最内层那根，
+        // 把「两根各乘一次 Δ」与几何 / f32 的题分开量）；不给 = 规划器判成 transform 的全部。
+        let only_roots: Option<BTreeSet<String>> =
+            std::env::var("AIOS_RIGID_PROBE_ROOTS").ok().map(|value| {
+                value
+                    .split(',')
+                    .map(|root| root.trim().to_string())
+                    .filter(|root| !root.is_empty())
+                    .collect()
+            });
+        let units: Vec<RigidMotionUnit> = rigid
+            .transform
+            .iter()
+            .map(|(root, anchors)| RigidMotionUnit {
+                root_refno: root.to_pdms_str(),
+                source_start_sesno: base_sesno,
+                anchors: anchors.clone(),
+            })
+            .filter(|unit| {
+                only_roots
+                    .as_ref()
+                    .is_none_or(|roots| roots.contains(&unit.root_refno))
+            })
+            .collect();
+        if let Some(roots) = &only_roots {
+            println!(
+                "  AIOS_RIGID_PROBE_ROOTS={roots:?}: executing {} of {} transform root(s)",
+                units.len(),
+                rigid.transform.len()
+            );
+            anyhow::ensure!(
+                !units.is_empty(),
+                "none of AIOS_RIGID_PROBE_ROOTS was classified transform"
+            );
+        }
+        for unit in &units {
+            let shapes = unit
+                .anchors
+                .iter()
+                .map(|anchor| match pure_translation(&anchor.delta) {
+                    Some(t) => format!(
+                        "{} t=({:.3}, {:.3}, {:.3})",
+                        anchor.refno.to_pdms_str(),
+                        t.x,
+                        t.y,
+                        t.z
+                    ),
+                    None => format!("{} rotation", anchor.refno.to_pdms_str()),
+                })
+                .collect::<Vec<_>>();
+            println!("  transform {} anchors {:?}", unit.root_refno, shapes);
+        }
+
+        // 基线：每根 S 端整根重算 → 本地投影，回执停在 S、目标是 S 的。
+        let store = ModelMemoryStore::default();
+        let mesh_dir = service.mesh_dir.clone();
+        let mut cache = CatalogueMeshCache::default();
+        let regen_at = |root: RefNo,
+                        sesno: u32,
+                        input: &GenerationInput,
+                        cache: &mut CatalogueMeshCache|
+         -> anyhow::Result<ProjectionCommit> {
+            let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, cache)?;
+            anyhow::ensure!(
+                snapshot.report.failed.is_empty(),
+                "regen of {root} at {sesno} has {} failed element(s)",
+                snapshot.report.failed.len()
+            );
+            let owners = snapshot.owners.clone();
+            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+            let (commit, _) =
+                project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
+            Ok(commit)
+        };
+        // 两端都先整根重算完再落款：目录会话表是生成时按需填的（`E3dDbResolver` 开到哪个目录库才登记哪个），
+        // `model_target` 的 `catalogue` 列就是「此刻表里有什么」——逐根边生成边落款，早生成的根落款里目录少几行，
+        // 与 regen@T 的落款比就是假阴性。表填满之后 S / T 两端各算一次，所有根共用。
+        let clock = Instant::now();
+        let mut seeds = Vec::new();
+        let mut regen_t_by_root = BTreeMap::<String, ProjectionCommit>::new();
+        for unit in &units {
+            let root = parse_refno(&unit.root_refno)?;
+            seeds.push((
+                root,
+                unit.root_refno.clone(),
+                regen_at(root, base_sesno, &base, &mut cache)?,
+            ));
+            regen_t_by_root.insert(
+                unit.root_refno.clone(),
+                regen_at(root, target_sesno, &target, &mut cache)?,
+            );
+        }
+        let target_at_s = service.model_target(dbnum, base_sesno, &base.dependency_sessions)?;
+        let target_at_t = service.model_target(dbnum, target_sesno, &target.dependency_sessions)?;
+        // 嵌套根（STRU ⊃ FRMW ⊃ SBFR 一类）名下记录互相包含：`records_of_root` 按祖先链取，两根共有的记录
+        // 会被两根各处理一遍。先把重叠数出来，对拍失败时好归因。
+        let seed_ids: Vec<(String, BTreeSet<String>)> = seeds
+            .iter()
+            .map(|(_, root_refno, seed)| {
+                (
+                    root_refno.clone(),
+                    seed.upserts
+                        .iter()
+                        .map(|record| record.record_id.clone())
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut shared_records = BTreeMap::<String, usize>::new();
+        for (i, (root_a, ids_a)) in seed_ids.iter().enumerate() {
+            for (root_b, ids_b) in seed_ids.iter().skip(i + 1) {
+                let shared = ids_a.intersection(ids_b).count();
+                if shared > 0 {
+                    println!(
+                        "  NESTED  {root_a} ∩ {root_b}: {shared} shared record(s) (both roots will republish them)"
+                    );
+                    *shared_records.entry(root_a.clone()).or_default() += shared;
+                    *shared_records.entry(root_b.clone()).or_default() += shared;
+                }
+            }
+        }
+        for (root, _, mut seed) in seeds {
+            let (hash, count) = manifest_hash(&seed.upserts)?;
+            seed.receipt = Some((
+                root,
+                RootReceipt {
+                    source_sesno: base_sesno,
+                    model_target: Some(target_at_s.clone()),
+                    manifest_hash: hash,
+                    geometry_count: count,
+                    published_via: "regen".into(),
+                },
+            ));
+            store.commit(ProjectionScope::Current, vec![seed]);
+            anyhow::ensure!(
+                store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir),
+                "seed projection of {root} incomplete"
+            );
+        }
+        println!(
+            "seed@{base_sesno}: {} root(s) regenerated into the local projection; regen@{target_sesno} reference ready ({:.2}s); nested roots sharing records: {}",
+            units.len(),
+            clock.elapsed().as_secs_f64(),
+            shared_records.len()
+        );
+
+        // 真执行体（无锁本体；探针自己是唯一写者），发布口直接提交本地投影。
+        let clock = Instant::now();
+        let report = service.republish_roots_by_rigid_motion_on(
+            &store,
+            dbnum,
+            target_sesno,
+            &units,
+            |commits| {
+                store.try_commit_current(commits);
+                Ok(())
+            },
+        )?;
+        let transform_secs = clock.elapsed().as_secs_f64();
+        println!(
+            "executor: completed {:?} replayed {:?} fallbacks {:?} ({transform_secs:.2}s)",
+            report.completed, report.replayed, report.fallbacks
+        );
+
+        // 门 3：与 T 端整根重算的投影记录逐条比。
+        let mut failures = Vec::new();
+        let mut total_ulp_arm_passes = 0usize;
+        let mut total_drift = 0usize;
+        let clock = Instant::now();
+        for root_refno in &report.completed {
+            let root = parse_refno(root_refno)?;
+            let unit = units
+                .iter()
+                .find(|unit| &unit.root_refno == root_refno)
+                .context("unit of a completed root")?;
+            let pure = unit
+                .anchors
+                .iter()
+                .all(|anchor| pure_translation(&anchor.delta).is_some());
+            let moved: BTreeMap<String, ProjectedGeometry> = store
+                .records_of_root(ProjectionScope::Current, root)
+                .into_iter()
+                .map(|record| (record.record_id.clone(), record))
+                .collect();
+            let regen_t = regen_t_by_root
+                .get(root_refno)
+                .context("regen@T reference of a completed root")?;
+            let regen: BTreeMap<String, ProjectedGeometry> = regen_t
+                .upserts
+                .iter()
+                .cloned()
+                .map(|record| (record.record_id.clone(), record))
+                .collect();
+            let receipt = store
+                .receipt(ProjectionScope::Current, root)
+                .context("receipt after transform")?;
+            let (regen_hash, _) = manifest_hash(&regen_t.upserts)?;
+            // D4：transform 落地后的回执要与一次 regen@T 落地后一模一样——凭证在 T、目标是 pin@T 的。
+            let receipt_target_equal = receipt.model_target.as_ref() == Some(&target_at_t);
+            let receipt_ok = receipt.source_sesno == target_sesno
+                && receipt.published_via == "transform"
+                && receipt_target_equal;
+            println!(
+                "    receipt: source_sesno {} published_via {} model_target.design.session {:?} | == regen@{target_sesno} target: {}",
+                receipt.source_sesno,
+                receipt.published_via,
+                receipt
+                    .model_target
+                    .as_ref()
+                    .map(|target| target.design.session),
+                if receipt_target_equal { "yes" } else { "NO" }
+            );
+            if !receipt_target_equal {
+                if let Some(stamped) = receipt.model_target.as_ref() {
+                    let differing: Vec<&str> = [
+                        ("project", stamped.project == target_at_t.project),
+                        ("design", stamped.design == target_at_t.design),
+                        ("catalogue", stamped.catalogue == target_at_t.catalogue),
+                        (
+                            "template_attlib_digest",
+                            stamped.template_attlib_digest == target_at_t.template_attlib_digest,
+                        ),
+                        (
+                            "generator_fingerprint",
+                            stamped.generator_fingerprint == target_at_t.generator_fingerprint,
+                        ),
+                        (
+                            "tessellation_profile",
+                            stamped.tessellation_profile == target_at_t.tessellation_profile,
+                        ),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, equal)| (!equal).then_some(name))
+                    .collect();
+                    println!(
+                        "    TARGET  fields differing from regen@{target_sesno}: {differing:?} (catalogue rows: transform {} vs regen {})",
+                        stamped.catalogue.len(),
+                        target_at_t.catalogue.len()
+                    );
+                }
+            }
+
+            let only_moved: Vec<_> = moved
+                .keys()
+                .filter(|key| !regen.contains_key(*key))
+                .cloned()
+                .collect();
+            let only_regen: Vec<_> = regen
+                .keys()
+                .filter(|key| !moved.contains_key(*key))
+                .cloned()
+                .collect();
+            let mut max_matrix = 0f64;
+            let mut max_bounds = 0f32;
+            let mut max_bounds_ulps = 0f32;
+            let mut magnitude = 0f32;
+            // §5 门 3 `world_bounds` 判法（09-20 改口）：逐分量 `|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`。
+            // 1e-3 的绝对底线保留，坐标量级上去了按 ulp 放行：两边各自 f32 舍入——transform 侧纯平移是 f32(f32(盒_S) + t_c)
+            // （S 端一次、T 端一次，S 端量级 ≤ |a| + |t_c|），regen 侧 f32(f64 紧盒) 一次，最多 2 ulp（按两端量级较大者）；
+            // 含旋转两边都是 f32(f64 紧盒)，`+ |t_c|` 只是多给一点余量。超容差的分量判死；≥ 1e-3 但被 ulp 臂放过的记观察项。
+            let mut bounds_over: Vec<(String, &'static str, f32, f32, f32)> = Vec::new();
+            let mut ulp_arm_passes = 0usize;
+            let mut mesh_mismatch = Vec::new();
+            // Baked 网格是「世界求值 → 乘 world⁻¹ 本地化」存 CAS 的：位置一变，本地化后的顶点末位就可能翻，regen@T
+            // 落出内容相同、id 不同的新网格——纯平移也漂（09-20 270→271 四条）。§5 门 3（09-20 改口）：Baked **一律按内容判**，
+            // 不再分纯平移 / 含旋转：id 不等时读两份网格，顶点数同、顶点 / 法线最大偏差 < 1e-3、索引逐位同 = 同一份几何、
+            // 只是 CAS id 漂（`DRIFT` 观察项），否则判死。Canonical 的 `mesh_id` 是标准网格，仍按 id 判死。
+            let mut mesh_drift = Vec::new();
+            let mut matrix_diffs: Vec<(f64, String)> = Vec::new();
+            // 盒差最大的那一格：(记录, 分量名, regen 值, transform 值)——看 1e-3 是撞在哪个量级上。
+            let mut worst_bounds: Option<(String, &'static str, f32, f32)> = None;
+            let mut worst_ulps: Option<(String, &'static str, f32, f32)> = None;
+            const COMPONENTS: [&str; 6] = ["min.x", "min.y", "min.z", "max.x", "max.y", "max.z"];
+            for (key, after) in &moved {
+                let Some(expected) = regen.get(key) else {
+                    continue;
+                };
+                let matrix = expected
+                    .world_transform
+                    .to_cols_array()
+                    .iter()
+                    .zip(after.world_transform.to_cols_array().iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0f64, f64::max);
+                max_matrix = max_matrix.max(matrix);
+                matrix_diffs.push((matrix, key.clone()));
+                // 这条记录命中的锚点的平移列——容差里的 `t_c` 按分量取；不在任何锚点之下的记录 t = 0。
+                let translation =
+                    crate::data_interface::rigid_motion::nearest_anchor(after, &unit.anchors)
+                        .map(|anchor| anchor.delta.w_axis.truncate())
+                        .unwrap_or(glam::DVec3::ZERO);
+                for (component, (x, y)) in expected
+                    .world_bounds
+                    .iter()
+                    .flatten()
+                    .zip(after.world_bounds.iter().flatten())
+                    .enumerate()
+                {
+                    let diff = (x - y).abs();
+                    let scale = x.abs().max(y.abs());
+                    let t_c = translation[component % 3].abs() as f32;
+                    let tolerance = 1e-3f32.max(2.0 * f32_ulp(scale + t_c));
+                    if diff > max_bounds {
+                        worst_bounds = Some((key.clone(), COMPONENTS[component], *x, *y));
+                    }
+                    let ulps = diff / f32_ulp(scale);
+                    if ulps > max_bounds_ulps {
+                        worst_ulps = Some((key.clone(), COMPONENTS[component], *x, *y));
+                    }
+                    max_bounds = max_bounds.max(diff);
+                    magnitude = magnitude.max(scale);
+                    max_bounds_ulps = max_bounds_ulps.max(ulps);
+                    if diff > tolerance {
+                        bounds_over.push((key.clone(), COMPONENTS[component], *x, *y, tolerance));
+                    } else if diff >= 1e-3 {
+                        ulp_arm_passes += 1;
+                    }
+                }
+                let canonical = matches!(expected.shape, ProjectedShape::Canonical { .. });
+                if expected.mesh_id != after.mesh_id {
+                    // (顶点数, 顶点数', 顶点最大偏差 mm, 法线最大偏差, 索引是否逐位相同)
+                    let verdict = if canonical {
+                        None
+                    } else {
+                        let read = |mesh_id: &str| {
+                            read_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")))
+                        };
+                        let max_delta = |ours: &[glam::Vec3], theirs: &[glam::Vec3]| {
+                            if ours.len() != theirs.len() {
+                                return f32::INFINITY;
+                            }
+                            ours.iter()
+                                .zip(theirs.iter())
+                                .map(|(a, b)| (*a - *b).abs().max_element())
+                                .fold(0f32, f32::max)
+                        };
+                        match (read(&after.mesh_id), read(&expected.mesh_id)) {
+                            (Ok(ours), Ok(theirs)) => Some((
+                                ours.vertices.len(),
+                                theirs.vertices.len(),
+                                max_delta(&ours.vertices, &theirs.vertices),
+                                max_delta(&ours.normals, &theirs.normals),
+                                ours.indices == theirs.indices,
+                            )),
+                            _ => None,
+                        }
+                    };
+                    match verdict {
+                        Some((n, m, delta, normal_delta, same_indices))
+                            if n == m && delta < 1e-3 && normal_delta < 1e-3 && same_indices =>
+                        {
+                            mesh_drift.push((key.clone(), n, delta, normal_delta));
+                        }
+                        _ => mesh_mismatch.push((key.clone(), verdict)),
+                    }
+                }
+            }
+            let bounds_ok = bounds_over.is_empty();
+            total_ulp_arm_passes += ulp_arm_passes;
+            total_drift += mesh_drift.len();
+            let records_off = matrix_diffs
+                .iter()
+                .filter(|(diff, _)| *diff >= 1e-9)
+                .count();
+            println!(
+                "root {root_refno} ({} records, {} anchor(s), {}{}): ids +{} −{} | world_transform max |Δ| {max_matrix:.3e} ({records_off} record(s) ≥ 1e-9) | world_bounds max diff {max_bounds:.6} mm = {max_bounds_ulps:.2} ulp (|coord| ≤ {magnitude:.1} mm, ulp there {:.6} mm; over tolerance {}, ≥ 1e-3 passed by ulp arm {ulp_arm_passes}) | mesh_id mismatches {} + drift {} | manifest_hash {}",
+                moved.len(),
+                unit.anchors.len(),
+                if pure { "pure translation" } else { "rotation" },
+                match shared_records.get(root_refno) {
+                    Some(shared) => format!(", {shared} record(s) shared with nested root(s)"),
+                    None => String::new(),
+                },
+                only_moved.len(),
+                only_regen.len(),
+                f32_ulp(magnitude),
+                bounds_over.len(),
+                mesh_mismatch.len(),
+                mesh_drift.len(),
+                if receipt.manifest_hash == regen_hash {
+                    "equal"
+                } else {
+                    "DIFFERENT (observation only)"
+                }
+            );
+            if max_bounds > 0.0 {
+                if let Some((key, component, regen_value, transform_value)) = &worst_bounds {
+                    println!(
+                        "    BOUNDS  worst abs: {key} {component} regen {regen_value:.6} vs transform {transform_value:.6} (diff {:.6} mm = {:.2} ulp at that magnitude)",
+                        (regen_value - transform_value).abs(),
+                        (regen_value - transform_value).abs()
+                            / f32_ulp(regen_value.abs().max(transform_value.abs()))
+                    );
+                }
+                if let Some((key, component, regen_value, transform_value)) = &worst_ulps {
+                    println!(
+                        "    BOUNDS  worst ulp: {key} {component} regen {regen_value:.6} vs transform {transform_value:.6} (diff {:.6} mm = {:.2} ulp at that magnitude)",
+                        (regen_value - transform_value).abs(),
+                        (regen_value - transform_value).abs()
+                            / f32_ulp(regen_value.abs().max(transform_value.abs()))
+                    );
+                }
+            }
+            for (key, component, regen_value, transform_value, tolerance) in
+                bounds_over.iter().take(3)
+            {
+                println!(
+                    "    BOUNDS  OVER: {key} {component} regen {regen_value:.6} vs transform {transform_value:.6} (diff {:.6} mm > tolerance {tolerance:.6} mm = max(1e-3, 2 ulp))",
+                    (regen_value - transform_value).abs()
+                );
+            }
+            for key in only_moved.iter().take(5) {
+                println!("    EXTRA   {key} (transform has it, regen@T does not)");
+            }
+            for key in only_regen.iter().take(5) {
+                println!("    MISSING {key} (regen@T has it, transform does not)");
+            }
+            for (key, verdict) in mesh_mismatch.iter().take(5) {
+                println!(
+                    "    MESH    {key}: transform {} vs regen {} | content: {}",
+                    moved[key].mesh_id,
+                    regen[key].mesh_id,
+                    match verdict {
+                        Some((n, m, delta, normal_delta, same_indices)) => format!(
+                            "{n} vs {m} vertices, max |Δv| {delta:.6} mm, max |Δn| {normal_delta:.3e}, indices {}",
+                            if *same_indices { "same" } else { "DIFFER" }
+                        ),
+                        None => "unreadable / canonical".to_string(),
+                    }
+                );
+            }
+            for (key, n, delta, normal_delta) in mesh_drift.iter().take(3) {
+                println!(
+                    "    DRIFT   {key}: Baked mesh id differs, content equal ({n} vertices, max |Δv| {delta:.3e} mm, max |Δn| {normal_delta:.3e}, indices same) — transform {} vs regen {}",
+                    moved[key].mesh_id, regen[key].mesh_id
+                );
+            }
+            // 矩阵不等的记录：印最差的三条——它在哪条祖先链上、命中了哪个锚点、两边的平移列各是什么。
+            matrix_diffs.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for (diff, key) in matrix_diffs
+                .iter()
+                .filter(|(diff, _)| *diff >= 1e-9)
+                .take(3)
+            {
+                let after = &moved[key];
+                let expected = &regen[key];
+                let chain: Vec<String> = after
+                    .ancestors
+                    .iter()
+                    .map(|packed| {
+                        let packed = *packed as u64;
+                        format!("{}/{}", packed >> 32, packed as u32)
+                    })
+                    .collect();
+                let anchor =
+                    crate::data_interface::rigid_motion::nearest_anchor(after, &unit.anchors)
+                        .map(|anchor| anchor.refno.to_pdms_str());
+                println!(
+                    "    OFF     {key} {} source_sesno {} |Δ| {diff:.3e}: transform t=({:.3}, {:.3}, {:.3}) vs regen t=({:.3}, {:.3}, {:.3}) | nearest anchor {:?} | ancestors {}",
+                    after.noun,
+                    after.source_sesno,
+                    after.world_transform.w_axis.x,
+                    after.world_transform.w_axis.y,
+                    after.world_transform.w_axis.z,
+                    expected.world_transform.w_axis.x,
+                    expected.world_transform.w_axis.y,
+                    expected.world_transform.w_axis.z,
+                    anchor,
+                    chain.join(" → ")
+                );
+            }
+            if !only_moved.is_empty() || !only_regen.is_empty() {
+                failures.push(format!(
+                    "{root_refno}: record_id sets differ (+{} −{})",
+                    only_moved.len(),
+                    only_regen.len()
+                ));
+            }
+            if max_matrix >= 1e-9 {
+                failures.push(format!(
+                    "{root_refno}: world_transform max |Δ| {max_matrix:.3e} ≥ 1e-9"
+                ));
+            }
+            if !bounds_ok {
+                failures.push(format!(
+                    "{root_refno}: {} world_bounds component(s) over max(1e-3 mm, 2 ulp) — max diff {max_bounds:.6} mm = {max_bounds_ulps:.2} ulp at |coord| ≤ {magnitude:.1} mm",
+                    bounds_over.len()
+                ));
+            }
+            if !mesh_mismatch.is_empty() {
+                failures.push(format!(
+                    "{root_refno}: {} mesh_id(s) differ (Canonical id / Baked content)",
+                    mesh_mismatch.len()
+                ));
+            }
+            if !receipt_ok {
+                failures.push(format!(
+                    "{root_refno}: receipt not stamped at T (source_sesno {} published_via {} target == regen@T: {})",
+                    receipt.source_sesno,
+                    receipt.published_via,
+                    receipt.model_target.as_ref() == Some(&target_at_t)
+                ));
+            }
+        }
+        println!(
+            "parity check {:.2}s; bounds components ≥ 1e-3 mm passed by the ulp arm: {total_ulp_arm_passes}; Baked mesh_id drift with equal content: {total_drift} record(s)",
+            clock.elapsed().as_secs_f64()
+        );
+        anyhow::ensure!(
+            !report.completed.is_empty(),
+            "no root went the transform path (fallbacks {:?})",
+            report.fallbacks
+        );
+        if failures.is_empty() {
+            println!(
+                "GATE 3 OK: {} root(s) transform == regen@{target_sesno} (record_id / 1e-9 / bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content / receipt@T){}",
+                report.completed.len(),
+                if total_drift > 0 {
+                    format!(
+                        " — {total_drift} Baked mesh_id drift(s) counted as observation (content equal)"
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+        for failure in &failures {
+            println!("GATE 3 FAIL: {failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "gate 3 failed on {} check(s); see GATE 3 FAIL lines",
+            failures.len()
+        );
+        Ok(())
+    }
+
     /// ADR-080 A6 / D9 ②（手动，全语料）：沿每个 DESI 库的会话链逐窗走**生产口径**选根，对 `plan.regen` 里
     /// **S 端也有**的根（跨名单等距抽样）各做一遍 [`probe_unit_publish_one_root_against_regen`] 那三步——
     /// S 端整根重算灌基线 → 单元路（真生产方 + 执行体）→ 与 T 端整根重算比整根 `manifest_hash`——按库汇总进证据档。
@@ -6744,6 +7430,7 @@ mod tests {
                 refno: anchor_refno,
                 delta: rotate,
             }],
+            41,
             42,
             |record, world| rigid_motion_mesh_bounds(dir.path(), record, world),
         )
@@ -6766,6 +7453,7 @@ mod tests {
                 refno: anchor_refno,
                 delta: DMat4::from_translation(glam::DVec3::new(1.0, 2.0, 3.0)),
             }],
+            41,
             42,
             |record, world| rigid_motion_mesh_bounds(dir.path(), record, world),
         )
@@ -6800,6 +7488,14 @@ mod tests {
         assert!(
             target_check < records,
             "the immutable-target check precedes touching any record"
+        );
+        // 按记录的幂等闸要拿到规划基线 S 才判得出「比基线新又不在 T」：执行体必须把
+        // `unit.source_start_sesno` 传给 `republish_records`（嵌套根共有记录只乘一次 Δ）。
+        let republish = body.find("republish_records(").expect("record republish");
+        let republish_call = &body[republish..republish + 400];
+        assert!(
+            republish_call.contains("unit.source_start_sesno,"),
+            "republish_records must receive the planned baseline: {republish_call}"
         );
     }
 

@@ -250,21 +250,39 @@ pub fn bounds_of_points(points: impl IntoIterator<Item = DVec3>) -> Option<[[f32
 
 /// 把一根的记录按锚点前移到 `target_sesno`（ADR-066 D3 / D4 的记录半边）。
 ///
+/// - **按记录的幂等闸**（先于一切）：`source_sesno == target_sesno` 的记录这一窗已经在 T 上——
+///   嵌套显著根（STRU ⊃ FRMW ⊃ SBFR、EQUI ⊃ SUBE 一类）名下记录互相包含，`records_of_root` 按祖先链
+///   取，同一条记录会被外层根与内层根各处理一遍；也可能是同窗别的根整根重算落的、或窗口重放。
+///   它们的矩阵 / 盒**一字不动**（再乘一次 `Δ` 就是双重搬移，且不会有任何报错）。比规划基线
+///   `planned_base_sesno` 新、又不在 T 上的记录，`Δ = W_T·W_S⁻¹` 对不上 → 整批 `Err`，这根回退 regen。
+///   停在基线之前的记录是正常的（ADR-080 D3：记录带的是它自己最后一次真正生成的会话，单元级
+///   发布之后没动的记录会落在回执之前）。
 /// - 在某个锚点之下的记录：`world' = Δ · world`；盒：纯平移直接加 `t`，含旋转交给 `bounds`
 ///   闭包（读网格顶点重算，见 [`bounds_of_points`]）。
 /// - 不在任何锚点之下的记录：矩阵与盒不动。
-/// - **每条**记录的 `source_sesno` 都改成 `target_sesno`：同根记录的会话必须一致，
-///   `persist_root_chunks_impl` 断言它。
+/// - 经手的每条记录 `source_sesno` 都改成 `target_sesno`（已在 T 的本来就是）。
 /// - `record_id` / `geometry_id` / `mesh_id` / `shape` / `tube` / `ancestors` 一个字不动。
 pub fn republish_records(
     records: Vec<ProjectedGeometry>,
     anchors: &[TransformAnchor],
+    planned_base_sesno: u32,
     target_sesno: u32,
     mut bounds: impl FnMut(&ProjectedGeometry, DMat4) -> anyhow::Result<[[f32; 3]; 2]>,
 ) -> anyhow::Result<Vec<ProjectedGeometry>> {
     records
         .into_iter()
         .map(|mut record| {
+            if record.source_sesno == target_sesno {
+                // 已由别的根前移 / 重算到 T（嵌套根共有记录、窗口重放）：不再乘 Δ。
+                return Ok(record);
+            }
+            anyhow::ensure!(
+                record.source_sesno <= planned_base_sesno,
+                "record {} sits at sesno {} — newer than the planned baseline {planned_base_sesno} \
+                 yet not at the target {target_sesno}; Δ does not apply to it",
+                record.record_id,
+                record.source_sesno
+            );
             if let Some(anchor) = nearest_anchor(&record, anchors) {
                 let world = anchor.delta * record.world_transform;
                 record.world_bounds = match pure_translation(&anchor.delta) {
@@ -786,7 +804,7 @@ mod tests {
         assert_eq!(nearest_anchor(&under_sube, &anchors).unwrap().refno, r(31));
         assert_eq!(nearest_anchor(&under_equi, &anchors).unwrap().refno, r(2));
 
-        let out = republish_records(vec![under_sube, under_equi], &anchors, 41, |_, _| {
+        let out = republish_records(vec![under_sube, under_equi], &anchors, 40, 41, |_, _| {
             panic!("纯平移不许读网格")
         })
         .unwrap();
@@ -814,6 +832,7 @@ mod tests {
                 record("32", &[32, 31, 30, 2], DMat4::IDENTITY),
             ],
             &anchors,
+            40,
             41,
             |_, _| panic!("纯平移不许读网格"),
         )
@@ -832,7 +851,7 @@ mod tests {
             delta: translation(5.0, 0.0, 0.0),
         }];
         let untouched = record("30", &[30, 2], translation(2.0, 2.0, 2.0));
-        let out = republish_records(vec![untouched.clone()], &anchors, 41, |_, _| {
+        let out = republish_records(vec![untouched.clone()], &anchors, 40, 41, |_, _| {
             panic!("不该算盒")
         })
         .unwrap();
@@ -841,6 +860,79 @@ mod tests {
         assert_eq!(out[0].source_sesno, 41);
         assert_eq!(out[0].record_id, untouched.record_id);
         assert_eq!(out[0].mesh_id, untouched.mesh_id);
+    }
+
+    /// 嵌套显著根（S4b §9 B8 首跑：ams7997 `99982 ⊃ SUBS 100006`、ams1112 `STRU 92413 ⊃ FRMW 98576`）：
+    /// 外层根先把共有记录乘 Δ 落到 T，内层根再拿到同一条记录时它已在 T——**不再乘**，矩阵 / 盒一字不动。
+    /// 这里用同一套锚点跑两遍：第二遍的输出必须与第一遍逐位相同（幂等），而不是再挪一个 Δ。
+    #[test]
+    fn records_already_at_the_target_are_not_moved_again_by_a_nested_root() {
+        let anchors = [TransformAnchor {
+            refno: r(31),
+            delta: translation(5.0, 0.0, 0.0),
+        }];
+        // 外层根 EQUI 30 的记录：SUBE 31 下的 BOX 32（共有）+ 自己的 30。
+        let outer = republish_records(
+            vec![
+                record("32", &[32, 31, 30, 2], translation(1.0, 1.0, 1.0)),
+                record("30", &[30, 2], translation(2.0, 2.0, 2.0)),
+            ],
+            &anchors,
+            40,
+            41,
+            |_, _| panic!("纯平移不许读网格"),
+        )
+        .unwrap();
+        assert_eq!(outer[0].world_transform, translation(6.0, 1.0, 1.0));
+        assert_eq!(outer[0].world_bounds, [[5.0, 0.0, 0.0], [6.0, 2.0, 3.0]]);
+        assert!(outer.iter().all(|record| record.source_sesno == 41));
+
+        // 内层根 SUBE 31 的记录集 = 共有的那条 BOX 32，此刻已在 T。
+        let inner = republish_records(vec![outer[0].clone()], &anchors, 40, 41, |_, _| {
+            panic!("已在 T 的记录连盒都不该算")
+        })
+        .unwrap();
+        assert_eq!(inner, vec![outer[0].clone()], "第二遍不许再挪一个 Δ");
+
+        // 混着来：一条已在 T、一条还在 S——只动后者。
+        let mixed = republish_records(
+            vec![
+                outer[0].clone(),
+                record("33", &[33, 31, 30, 2], DMat4::IDENTITY),
+            ],
+            &anchors,
+            40,
+            41,
+            |_, _| panic!("纯平移不许读网格"),
+        )
+        .unwrap();
+        assert_eq!(mixed[0], outer[0]);
+        assert_eq!(mixed[1].world_transform, translation(5.0, 0.0, 0.0));
+        assert_eq!(mixed[1].source_sesno, 41);
+    }
+
+    /// 比规划基线新、又不在 T 的记录：`Δ = W_T·W_S⁻¹` 对不上，整根回退（Err 带记录 id 与两个会话号）。
+    /// 停在基线**之前**的记录是正常的（ADR-080 D3：单元级发布后没动的记录落在回执之前），照常乘。
+    #[test]
+    fn a_record_newer_than_the_baseline_fails_the_root_and_an_older_one_is_moved() {
+        let anchors = [TransformAnchor {
+            refno: r(2),
+            delta: translation(1.0, 0.0, 0.0),
+        }];
+        let mut newer = record("30", &[30, 2], DMat4::IDENTITY);
+        newer.source_sesno = 41;
+        let error = republish_records(vec![newer], &anchors, 40, 42, |_, _| unreachable!())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("record 30"), "{error}");
+        assert!(error.contains("sesno 41"), "{error}");
+        assert!(error.contains("baseline 40"), "{error}");
+
+        let mut older = record("30", &[30, 2], DMat4::IDENTITY);
+        older.source_sesno = 37;
+        let out = republish_records(vec![older], &anchors, 40, 42, |_, _| unreachable!()).unwrap();
+        assert_eq!(out[0].world_transform, translation(1.0, 0.0, 0.0));
+        assert_eq!(out[0].source_sesno, 42);
     }
 
     /// 含旋转的 Δ 不许拿盒过矩阵凑数：交给闭包（读网格顶点）；纯平移不问闭包。
@@ -854,6 +946,7 @@ mod tests {
         let out = republish_records(
             vec![record("30", &[30, 2], DMat4::IDENTITY)],
             &rotating,
+            40,
             41,
             |record, world| {
                 asked.push((record.record_id.clone(), world));
@@ -877,6 +970,7 @@ mod tests {
         let error = republish_records(
             vec![record("30", &[30, 2], DMat4::IDENTITY)],
             &rotating,
+            40,
             41,
             |_, _| anyhow::bail!("mesh_30.mesh: not found"),
         )
@@ -1020,6 +1114,7 @@ mod tests {
                 refno: r(2),
                 delta: translation(1.0, 0.0, 0.0),
             }],
+            40,
             41,
             |_, _| unreachable!(),
         )
