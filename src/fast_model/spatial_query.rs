@@ -409,6 +409,11 @@ pub trait ElementAttributes: Send + Sync {
     fn spec_value_of(&self, _refno: RefU64) -> i64 {
         crate::fast_model::spatial_discipline::SPEC_VALUE_OTHER
     }
+    /// 所属的最小交付单元（ADR 0068）：属主链上首个 noun 在 `delivery_unit_types` 里的元素；不属任何单元为 `None`。
+    /// 只有树路由对命中调，生产实现带逐级记忆（`spatial_tree_view`）。
+    fn unit_root_of(&self, _refno: RefU64) -> Option<crate::fast_model::spatial_tree_view::UnitRoot> {
+        None
+    }
 }
 
 impl ElementAttributes for DirectTreeService {
@@ -422,6 +427,10 @@ impl ElementAttributes for DirectTreeService {
 
     fn spec_value_of(&self, refno: RefU64) -> i64 {
         crate::fast_model::spatial_discipline::spec_value_of_shared(self, self.lineage_epoch(), refno)
+    }
+
+    fn unit_root_of(&self, refno: RefU64) -> Option<crate::fast_model::spatial_tree_view::UnitRoot> {
+        crate::fast_model::spatial_tree_view::unit_root_of_shared(self, self.lineage_epoch(), refno)
     }
 }
 
@@ -1046,7 +1055,7 @@ fn source_json(center: &Center) -> Option<SourceJson> {
 
 /// 预取走廊时的非致命问题（有成员没成段、refno 解不出）+ 房间过滤的缺口（判不出归属的候选数、边不是当前代）。
 /// 没有就不出现，老响应一字不变。
-fn response_warnings(
+pub(crate) fn response_warnings(
     center: &Center,
     room_scope: Option<&crate::fast_model::spatial_rooms::RoomScope>,
 ) -> Option<Vec<String>> {
@@ -1323,6 +1332,39 @@ pub async fn nearby_refnos(
     let params = params.clone();
     assemble_off_runtime("nearby/refnos", move || {
         assemble_nearby_refnos(scan, &params, attrs.as_ref(), room_scope.as_ref())
+    })
+    .await
+}
+
+/// `GET /api/v1/spatial/nearby/tree`（plant3d-web ADR 0068）：同参的一次查询折成房间层级树。`rooms=` 必填——
+/// 树以所选房间为根，没选房间的命中没有根可挂（要对全部候选反查归属，另一笔账），400。
+/// `unit_types` 是本项目的最小交付单元类型表（`configured_delivery_unit_types()`），由 handler 传入，单测可以给自己的。
+pub async fn nearby_tree(
+    params: &SpatialQueryParams,
+    centerline: Option<&BranCenterline>,
+    attrs: Arc<dyn ElementAttributes>,
+    unit_types: Vec<String>,
+    options: crate::fast_model::spatial_tree_view::TreeOptions,
+) -> Result<crate::fast_model::spatial_tree_view::TreeResponse, SpatialQueryError> {
+    if params.rooms.is_none() {
+        return Err(SpatialQueryError::BadRequest(
+            "nearby/tree 需要 rooms=（房间层级树以所选房间为根；不按房间过滤请用 nearby）".to_string(),
+        ));
+    }
+    let scan = scan_global_tree(params, centerline).await?;
+    let room_scope = resolve_rooms_for_scan(&scan, params, attrs.as_ref())
+        .await?
+        .ok_or_else(|| SpatialQueryError::Internal(anyhow::anyhow!("rooms= 给了却没有解出成员集")))?;
+    let params = params.clone();
+    assemble_off_runtime("nearby/tree", move || {
+        crate::fast_model::spatial_tree_view::assemble_tree(
+            scan,
+            &params,
+            attrs.as_ref(),
+            &room_scope,
+            &unit_types,
+            &options,
+        )
     })
     .await
 }

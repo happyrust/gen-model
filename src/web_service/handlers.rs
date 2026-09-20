@@ -1525,6 +1525,96 @@ pub async fn spatial_nearby_refnos(
     Ok(Json(response))
 }
 
+/// 树路由的叶子选择器原文（叶子超上限后只取一组：`unit=<单元 refno>` / `other_noun=<NOUN>`）。
+#[derive(Debug, Default, Deserialize)]
+pub struct RawLeafSelector {
+    pub unit: Option<String>,
+    pub other_noun: Option<String>,
+}
+
+/// `GET /api/v1/spatial/nearby/tree` 与 `rooms/{refno}/tree` 的 query 串：身份三格 + `nearby` 全部参数原文 + 叶子选择器。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialTreeReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_query::RawSpatialQuery,
+    #[serde(flatten)]
+    pub leaves: RawLeafSelector,
+}
+
+fn tree_options(
+    raw: &RawLeafSelector,
+) -> Result<crate::fast_model::spatial_tree_view::TreeOptions, SpatialApiError> {
+    use crate::fast_model::spatial_tree_view::{DEFAULT_LEAF_CAP, LeafSelector, TreeOptions};
+    let only = LeafSelector::parse(raw.unit.as_deref(), raw.other_noun.as_deref())
+        .map_err(ApiError::bad_request)?;
+    Ok(TreeOptions {
+        leaf_cap: DEFAULT_LEAF_CAP,
+        only,
+    })
+}
+
+/// GET /api/v1/spatial/nearby/tree — 同 `nearby` 的一次查询折成房间层级树（spec §4.13.5；plant3d-web ADR 0068）：
+/// `rooms=` 必填，命中不分页、按 refno 去重，折成 房间 → 专业 → 最小交付单元类型 → 单元 → 构件；`sort` / `page` /
+/// `per_page` 收下不生效。后半程（过滤 + 派生专业 / 单元根 + 折树）与 `nearby` 一样在阻塞线程上跑。
+pub async fn spatial_nearby_tree(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialTreeReq>,
+) -> Result<Json<crate::fast_model::spatial_tree_view::TreeResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let options = tree_options(&request.leaves)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_tree(
+        &params,
+        centerline.as_ref(),
+        service,
+        crate::data_interface::generation_root::configured_delivery_unit_types(),
+        options,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/rooms/{refno}/tree — 一间在册房间的房间层级树（spec §4.13.6；plant3d-web ADR 0068，给模型树
+/// ROOM 标签页浏览一间房）：以房间自身的包围盒为范围（`radius` 是外扩量、缺省 0）、`rooms=` 它自己、不算它自己的面板；
+/// 响应同 `nearby/tree`，`rooms[]` 恒一条。房间从没生成过面板模型（投影与树里都没有盒）→ 404，不在册 → 400。
+pub async fn spatial_room_tree(
+    State(state): State<AppState>,
+    Path(refno): Path<String>,
+    Query(request): Query<SpatialTreeReq>,
+) -> Result<Json<crate::fast_model::spatial_tree_view::TreeResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let room = RefU64::from_str(refno.trim())
+        .ok()
+        .filter(RefU64::is_valid)
+        .ok_or_else(|| ApiError::bad_request(format!("房间 refno 格式非法（应为 a_b）: {refno}")))?;
+    let params = crate::fast_model::spatial_tree_view::room_tree_params(room, &request.query)
+        .map_err(ApiError::bad_request)?;
+    let options = tree_options(&request.leaves)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_tree(
+        &params,
+        None,
+        service,
+        crate::data_interface::generation_root::configured_delivery_unit_types(),
+        options,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/v1/spatial/nearest-clearance` 的 query 串：身份三格 + 净距参数原文。
 #[derive(Debug, Default, Deserialize)]
 pub struct SpatialClearanceReq {

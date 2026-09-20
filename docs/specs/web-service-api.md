@@ -959,7 +959,7 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
-### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns, nearest-clearance, centerline, surface-clearance, rooms}` — 进程内空间树的邻近查询
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, nearby/tree, negative-nouns, nearest-clearance, centerline, surface-clearance, rooms, rooms/{refno}/tree}` — 进程内空间树的邻近查询
 
 出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
 §5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
@@ -970,8 +970,10 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 见 plant3d-web `docs/plans/2026-09-17-component-to-wall-surface-clearance-plan.md` §5。**2026-09-20 起**（plant3d-web ADR 0067 /
 `docs/plans/2026-09-20-spatial-query-room-and-discipline-filter-plan.md`）`nearby` 与 `nearby/refnos` 多两个过滤维度 **`rooms=`（房间）**
 与 **`spec_values=`（所属专业）**，结果多 `spec_value` / `spec_groups` / `filter_options.spec_values` / `by_spec_value` / `room_status`，
-并新增第七条 `rooms`（§4.13.4：在册房间清单 + 房间体制状态）。
-七条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
+并新增第七条 `rooms`（§4.13.4：在册房间清单 + 房间体制状态）。**同日晚**（plant3d-web ADR 0068 /
+`docs/plans/2026-09-20-spatial-room-hierarchy-tree-plan.md`）再加第八、九条 **`nearby/tree`**（§4.13.5：同参的一次查询折成
+房间 → 专业 → 最小交付单元类型 → 单元 → 构件 的层级树）与 **`rooms/{refno}/tree`**（§4.13.6：一间房的同一棵树，给房间浏览）。
+九条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
 
 - **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
   随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
@@ -1260,7 +1262,79 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   的 `NAME`（`DirectTreeService::name_of`，百级），`dbnum` 答不出为 `null`，`panel_count` 是它名下在册面板数。
 - 与 `nearby?rooms=` 的关系：那里的 422 `rooms_unavailable` 的 `detail.status` 就是这里的 `status`；那里的 400「不是在册房间」指的就是不在这份清单里。
 
-错误一览（七条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
+#### 4.13.5 `GET /api/v1/spatial/nearby/tree` — 同参的一次查询折成房间层级树（2026-09-20）
+
+出处：plant3d-web ADR 0068 / `docs/plans/2026-09-20-spatial-room-hierarchy-tree-plan.md` §4.1 / §4.2；实现
+`fast_model::spatial_tree_view::assemble_tree` + `spatial_query::nearby_tree` + `handlers::spatial_nearby_tree`。抽屉选了房间之后结果区不再
+平铺分组、改画这棵树；模型树 ROOM 标签页浏览一间房走 §4.13.6 的同一棵。
+
+参数与 `nearby` **完全相同**（`refno | x,y,z`、`radius`、`shape`、`source_mode`、`nouns`、`keyword`、`include_self`、`include_negative`、
+`dbnums`、`rooms`、`spec_values`），过滤链也相同（`include_self → 负实体 → dbnums → rooms → nouns → spec_values → keyword`），三处不同：
+
+- **`rooms=` 必填**：树以所选房间为根，没给 → 400 `bad_request`「nearby/tree 需要 rooms=」。不按房间过滤请用 `nearby`——没选房间的命中
+  要对全部候选反查归属才有根可挂，那是另一笔账（ADR 0067 Q7 不给房间 facet 的同一理由），先不给。
+- **不分页、按 refno 去重**：`sort` / `page` / `per_page` 收下不生效；空间树里同一 refno 的多条条目在这里只算一条（距离取最近）。
+- 另两个可选参数只在叶子超上限后用：`unit=<单元 refno>`（`a/b` / `a_b`）/ `other_noun=<NOUN>`——只把这一组的叶子内联进来，树骨架照常给；
+  两个同时给 400。
+
+```json
+{ "center": { "x": 1.0, "y": 2.0, "z": 3.0, "source": "refno_aabb_center" }, "radius": 3000, "shape": "sphere",
+  "total_count": 1055,
+  "candidate_count": 3940, "truncated_candidates": false, "candidate_cap": 200000,
+  "leaves_inline": true, "leaf_cap": 5000, "leaf_count": 1061,
+  "delivery_unit_types": ["BRAN", "HANG", "SUPPO", "EQUI"],
+  "rooms": [
+    { "refno": "24381_35580", "room_num": "R432", "name": "/1RX-RM04-R432", "count": 1055,
+      "specs": [
+        { "spec_value": 0, "count": 8, "unit_types": [],
+          "others": { "count": 8, "by_noun": [ { "noun": "GWALL", "count": 5, "min_distance": 0.0,
+                                                  "elements": [ { "refno": "24381_4090", "noun": "GWALL", "distance": 0.0 } ] } ] } },
+        { "spec_value": 3, "count": 1047,
+          "unit_types": [
+            { "noun": "BRAN", "count": 900, "units": [
+                { "refno": "24381_1200", "noun": "BRAN", "name": "/C-IY-1R330-B", "count": 80, "min_distance": 12.3,
+                  "elements": [ { "refno": "24381_1240", "noun": "TUBI", "distance": 12.3, "shared_rooms": 2 } ] } ] },
+            { "noun": "EQUI", "count": 100, "units": [] } ],
+          "others": { "count": 47, "by_noun": [] } } ] } ],
+  "room_status": { "rooms": [{ "refno": "24381_35580", "room_num": "R432" }], "source": "memory", "matched": 1298, "unresolved": 0,
+                   "definition_version": "…", "library_alignment_current": null },
+  "warnings": ["…"],
+  "spatial_state": "ready", "coverage": "global-tree" }
+```
+
+- **层级**：`rooms[]`（按 `room_num`、refno 排）→ `specs[]`（`spec_value` 升序，0「其他」在前，同 `sort=spec_distance`）→
+  `unit_types[]`（按本项目 `delivery_unit_types` 配置表顺序，即 `/health.delivery_unit_types`）→ `units[]`（按最近成员距离、refno）→
+  `elements[]`（按距离、refno）；专业下另有 `others`——不属于任何最小交付单元的构件（面板 / 框架 / 楼板 / 型面……）按 noun 分组
+  （`by_noun[]` 按计数降序、同计数按 noun），它是「没有单元」的兜底，不是一种专业也不是一种单元类型。
+- **单元**：候选属主链上（含自身）首个 noun 在 `delivery_unit_types` 里的元素（`generation_root::is_delivery_unit_noun`），到
+  SITE / ZONE / WORL 仍没遇到 → 其他构件。派生沿 OWNER 逐级读记录、逐级记忆（同专业派生：链上每个走过的元素都记下答案，
+  换代整体清空，锁只罩查表 / 写回不罩记录读）。`units[].name` 是单元的 `NAME`（爬链时顺手拿到，不另读），没有为 `null`；叶子**不带名字**。
+- **计数**：所有 `count` 都是该节点下按 refno 去重的构件数；`total_count` 是全树去重数。**横跨多间所选房间的构件在每间房下都出现**
+  （任一归属，ADR 0067 Q2 的同一口径），只在 `total_count` 里算一次，叶子上带 `shared_rooms`（所属的所选房间数，≥ 2 才出现），
+  所以 `Σ rooms[].count ≥ total_count`。构件属于哪几间房来自 `rooms=` 解算时的 `面板 → 构件` 边（读透形态现算；落盘形态读
+  `room_relate` 的 `in`）——`RoomScope::member_rooms`，`nearby` 的响应一字不变。
+- **叶子**：`leaf_count` 是叶子放置数（跨房构件每间房各算一次）；≤ `leaf_cap`（5000）时全部 `elements` 内联、`leaves_inline = true`；
+  超过就整体省略（所有 `elements` 键不出现）、`leaves_inline = false`，客户端按 `unit=` / `other_noun=` 再取一组——那一次响应里只有
+  被点到的单元 / noun 组带 `elements`，`inlined` 字段说明是哪一组（`unit:24381_1200` / `other_noun:PANE`），`leaves_inline` 仍为 `false`。
+- 与 `nearby` / `nearby/refnos` 的关系：同参数下 `total_count` = `nearby/refnos` 的 `refnos` 去重数；`room_status` / `warnings` 同一份；
+  不再重复给 `filter_options` / `spec_groups` / `groups`。
+- 错误：`rooms=` 缺失 400；不在册房间 400；房间体制不可用 422 `rooms_unavailable`（`detail.status` 同 §4.13.4）；其余同 `nearby`
+  （404 / 503 / 422 `identity_mismatch`）。
+
+#### 4.13.6 `GET /api/v1/spatial/rooms/{refno}/tree` — 一间在册房间的房间层级树（2026-09-20）
+
+出处同 §4.13.5（计划 §4.5，给模型树 ROOM 标签页在 gen-model-v1 源下浏览一间房）；实现 `spatial_tree_view::room_tree_params` +
+`handlers::spatial_room_tree`，之后与 §4.13.5 同一条流水线。
+
+- **范围就是这间房**：目标 = 路径里的房间（`a_b`；同 `nearby?refno=` 的口径，它的并集盒来自投影里祖先链含它的记录——也就是它名下的
+  面板——投影没有再看树上它自己的条目），`shape=cube`，`rooms=` 它自己，`include_self=false`（房间自己的面板不算成员）。
+  `radius` 在这里是**盒的外扩量**，缺省 0 = 只要与房间盒相交、上限同 `nearby`（100 000 mm）。
+- **不接受** `refno` / `x,y,z` / `source_mode` / `rooms`（都 400，范围与房间已由路径定死）；其余过滤（`nouns` / `keyword` /
+  `include_negative` / `dbnums` / `spec_values`）与叶子选择器（`unit` / `other_noun`）透传。
+- 响应同 §4.13.5，`rooms[]` 恒一条、`center.source = refno_aabb_center`。房间从没生成过面板模型（投影与树里都没有它的盒）→ 404
+  `not_found`；不在册（名字不含房间关键词或房间号不合规）→ 400；房间体制不可用 → 422 `rooms_unavailable`。
+
+错误一览（九条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
 找不到这条 refno）、422 `precondition`（中心线模式源不是 BRAN / 路由容器，或一段都拼不出）、422 `identity_mismatch`（§3）、
 503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档；`centerline` 不碰树、没有这一档）；其余暂时故障
 （`DirectTreeService` 取不到、MBD 服务不可用等）按 §3 统一信封 500。
