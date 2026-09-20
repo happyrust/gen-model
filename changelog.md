@@ -1,5 +1,20 @@
 # 变更记录
 
+## 2026-09-20
+
+### `/model/ensure` 撞上「正在后台生成」回的是 500 不是 409：领域错穿过共享航班后只挂在 `source()` 上，`ensure_error` 改沿链找
+
+- **为什么**：`ensure_exact_generation_root` 走 `generation_flight::Flights` 共享一个生产者，失败被包成 `OutcomeError`、
+  原错只在它的 `source()` 上；HTTP 层 `ensure_error` 只看顶层 `downcast_ref`，`ModelGenerationInProgress` /
+  `ModelStaleAfterGeneration` / `UnresolvableRoot` / `InitializationNotReady` 一个都认不出，全落 `from_domain` → 500 `internal`，
+  文案还被 `{error:#}` 印成「生成根 X 正在后台生成: 生成根 X 正在后台生成」。E3D 增量夹具播种时正撞上启动的模型补齐任务，
+  九个场景一个都起不来（`output/e3d-fixture/20260920-162108`）。不走航班的直路（同进程第一次请求）从来没坏过，所以单测没红。
+- **改动**：`handlers::domain_cause<T>` = 顶层 `downcast_ref` 或 `error.chain()` 逐级 `downcast_ref`；`ensure_error` 四处分型都走它。
+  `Flights` 本身不动（它已经把原错留在链上，`shared_error_preserves_the_domain_cause` 钉着）。
+- **验证**：新 `ensure_error_classifies_domain_causes_buried_under_the_shared_flight`（直给 / `.context` / 经 `Flights` 三种形态 ×
+  四种领域错，前提断言「共享航班顶层 downcast 看不见原错」；链上没有领域错照旧 500）；`cargo test --lib` **2349 passed / 0 failed / 121 ignored**。
+  live：夹具 `20260920-165908` 播种 12 根，无一 500。
+
 ## 2026-09-19
 
 ### 任务收尾那一笔包进冲突重试：与刷盘 stray epilogue 同写水位行时谁后提交谁输，输了重发而不是让任务落 `Partial`（ADR-073 D13 收口总表第 10 行、钉 36）

@@ -2530,20 +2530,33 @@ pub async fn dbnum_data_reinitialize(
         .map_err(|e| ApiError::from_domain(e.into()))
 }
 
+/// 在 `anyhow` 链上找某个领域错误：先看顶层（`Error::new(E)` 与 `.context(..)` 包着的
+/// `downcast_ref` 都认得），再沿 `source()` 逐级往下看。
+///
+/// 后一半是为 `generation_flight::Flights` 留的：并发的 `/model/ensure` 共用一个生产者，
+/// 失败被包成 `OutcomeError`、原错只挂在它的 `source()` 上，顶层 `downcast_ref` 一个字都
+/// 看不见——2026-09-20 夹具实测：启动批次正在生成某根时再来一次 `/model/ensure`，
+/// 「生成根 … 正在后台生成」回的是 500 `internal`，不是约定的 409。
+fn domain_cause<T: std::error::Error + Send + Sync + 'static>(error: &anyhow::Error) -> Option<&T> {
+    error
+        .downcast_ref::<T>()
+        .or_else(|| error.chain().find_map(|cause| cause.downcast_ref::<T>()))
+}
+
 /// 解不出生成根不是服务端的错，客户端对这三种的出路也各不相同——都压成
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
     let message = format!("{error:#}");
-    if error.downcast_ref::<InitializationNotReady>().is_some() {
+    if domain_cause::<InitializationNotReady>(&error).is_some() {
         return ApiError::initialization_not_ready(message);
     }
-    if error.downcast_ref::<ModelGenerationInProgress>().is_some()
-        || error.downcast_ref::<ModelStaleAfterGeneration>().is_some()
+    if domain_cause::<ModelGenerationInProgress>(&error).is_some()
+        || domain_cause::<ModelStaleAfterGeneration>(&error).is_some()
     {
         // 两种都是「重试就好」的 409；文案不同，排障时分得开（后者说得出是源前移还是目标核对不过）。
         return ApiError::conflict(message);
     }
-    match error.downcast_ref::<UnresolvableRoot>() {
+    match domain_cause::<UnresolvableRoot>(&error) {
         Some(UnresolvableRoot::Container) => ApiError::container(message),
         Some(UnresolvableRoot::NotFound) => ApiError::not_found(message),
         Some(UnresolvableRoot::NoRoot) => ApiError::precondition(message),
@@ -4036,6 +4049,77 @@ mod tests {
         // 后验失败（生成完了却判成不新）与「正在后台生成」是两种错，都得认得出、都回 409。
         assert!(ensure.contains("ModelGenerationInProgress"));
         assert!(ensure.contains("ModelStaleAfterGeneration"));
+    }
+
+    /// 领域错误穿过 `generation_flight::Flights` 之后只挂在 `source()` 上；`ensure_error`
+    /// 必须沿链找，否则并发第二个 `/model/ensure` 撞上「正在后台生成」回的是 500 而不是 409
+    ///（2026-09-20 夹具实测）。四种领域错各走一遍：直给、`.context` 包着、经共享航班。
+    #[tokio::test]
+    async fn ensure_error_classifies_domain_causes_buried_under_the_shared_flight() {
+        use crate::data_interface::generation_flight::Flights;
+        use crate::data_interface::on_demand_model::UnresolvableRoot;
+
+        async fn through_flight(error: anyhow::Error) -> anyhow::Error {
+            Flights::<usize>::default()
+                .run("shared".into(), async move { Err(error) })
+                .await
+                .expect_err("the flight relays the producer's failure")
+        }
+
+        let in_progress = || {
+            anyhow::Error::new(ModelGenerationInProgress {
+                root_refno: "24382/124".into(),
+            })
+        };
+        // 直给与 `.context` 包着的：原本就认得，改法不得把它们弄丢。
+        assert_eq!(ensure_error(in_progress()).code, "conflict");
+        assert_eq!(
+            ensure_error(in_progress().context("按需生成 24382/124")).code,
+            "conflict"
+        );
+        // 经共享航班：顶层是 `OutcomeError`，原错在 `source()` 上。
+        let shared = through_flight(in_progress()).await;
+        assert!(
+            shared.downcast_ref::<ModelGenerationInProgress>().is_none(),
+            "前提：共享航班的顶层 downcast 看不见原错，否则这条钉没在钉任何东西"
+        );
+        let classified = ensure_error(shared);
+        assert_eq!(classified.status, StatusCode::CONFLICT);
+        assert_eq!(classified.code, "conflict");
+        assert!(
+            classified.message.contains("正在后台生成"),
+            "{}",
+            classified.message
+        );
+
+        let stale = through_flight(anyhow::Error::new(ModelStaleAfterGeneration {
+            root_refno: "24382/124".into(),
+            reason: "源文件版本在生成期间前移",
+        }))
+        .await;
+        assert_eq!(ensure_error(stale).code, "conflict");
+
+        let container = through_flight(
+            anyhow::Error::new(UnresolvableRoot::Container)
+                .context("构件 24384/22400 无法解析生成根"),
+        )
+        .await;
+        assert_eq!(ensure_error(container).code, "container");
+
+        let not_ready = through_flight(anyhow::Error::new(InitializationNotReady {
+            snapshot:
+                crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                    .snapshot(),
+        }))
+        .await;
+        assert_eq!(ensure_error(not_ready).code, "initialization_not_ready");
+
+        // 链上什么领域错都没有 → 照旧 internal。
+        let plain = through_flight(anyhow::anyhow!("fixture failure")).await;
+        assert_eq!(
+            ensure_error(plain).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// 队列行只带 `blocked_by_phase`，说得出「在等哪一相」、说不出「是谁挡的」。
