@@ -1,6 +1,6 @@
 # ADR-073：房间随根生成、不再是一条流程；任何未完成写入一律整库重初始化
 
-状态：**已接受，2026-09-11 修订房间总开关语义，2026-09-16 修订房间输入不全的处置（降级不判死），2026-09-20 补 D13 欠账（审核 P1-2）与 D14 代号守卫（审核 P2-3）、D13「拿开工时同一台计算器」改口（P2-4）**（2026-09-10 用户拍板：「房间只保留几何与筛选算法，流程整套删除」（共识 **d-757**）；「任何未完成的写入
+状态：**已接受，2026-09-11 修订房间总开关语义，2026-09-16 修订房间输入不全的处置（降级不判死），2026-09-20 补 D13 欠账（审核 P1-2）与 D14 代号守卫（审核 P2-3）、D13「拿开工时同一台计算器」改口（P2-4）、D13 根全集改口——从源文件枚举、不在 overlay 里的冷根从库里读几何行（d-149 / ADR-082 D3）**（2026-09-10 用户拍板：「房间只保留几何与筛选算法，流程整套删除」（共识 **d-757**）；「任何未完成的写入
 重启后一律按整个 dbnum 清理并重新初始化，不再按 sesno 回退」（共识 **d-747**，三条口径）。本文由协同组「房间」t-803 起草，
 是 t-735 文档清点里拆出的「刀 1」——后续 ADR / CONTEXT / 计划改写都以本文为尺子。措辞待指挥官 / 用户过目；
 **号到提交时复核**——ADR-060 曾撞号两次。）**实施中**：worktree `gen-model-refactor`，分支 `refactor/retire-publish-stage`，
@@ -125,9 +125,14 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   代号（别的库的面板 / 房间变了、进了常驻），本库的成员边同样可能陈旧。处置：任务在本批根**刷盘之后**（durable ACK 齐了，此刻
   本库没有第二个写者）、**收尾之前**，在收尾段冻一台计算器（**2026-09-20 改口**，审核 P2-4：此前写「拿开工时同一台计算器」，
   实现从落地起就是收尾时新冻——刷盘之后常驻可能已被别的任务对齐到更新的一代，用最新的那一代算、ACK 与 D14 那一格都盖它），
-  对本库全部有回执的根按投影里的**现有几何**重算归属、重写两张边
+  对本库**全部根**按**现有几何**重算归属、重写两张边
   （`model_db_adapter::recompute_dbnum_room_edges`：与逐根路径同一套渲染 → 「整库重算 == 从零初始化」逐边相等的硬验收不多一条
-  口径），不重生几何、不动模型行、不动空间树，提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器。算不出的根按 D2
+  口径），不重生几何、不动模型行、不动空间树，提交全过后把 overlay 里这些根 ACK 的 `room_generation` 对齐到本台计算器。
+  **根全集**（**2026-09-20 二次改口**，d-149 / ADR-082 D3；此前只遍历「投影里有回执的根」）= overlay 里有回执的根 ∪ 从本任务冻结的
+  源文件枚举出的本库生成根（`batch_worker::library_generation_roots` → `E3dModelService::initialization_roots`，与从零初始化取根
+  同一条路）：在 overlay 里的拿投影里的记录，不在的——按根数上限逐出过（ADR-082 D1）、进程重启后没回填——把库里的几何行读回来
+  （`model_record_reader::durable_room_records_of_root`，与读路冷读同一条 SQL）再算；根集取不齐就是 `Incomplete`（不盖、欠账留着）。
+  冷根没有进程内 ACK，读路对它本来就直读库。算不出的根按 D2
   记失败（账本 `failed`、单元清单补一条 `Failed`）、任务 `Partial`、`model_sesno` 不盖；刷盘没齐（那批根已判死）就不跑。
   仍是内部意图：不入队、没有 HTTP 口（§不做）。**没收的那一半**：跨库成员（面板在 A、成员在 B）只在 A 变了之后**第一个开工**
   的库上被 ② 带到，其余库要等自己下一次碰到触发——U3 的跨库那一问仍开着。
@@ -220,6 +225,9 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     `the_reason_merges_this_window_with_the_debt_and_names_the_debtor`、`startup_schema_covers_every_increment_state_table`）。
 18. `recompute_dbnum_room_edges` 走 `calculate_for_root` + `render_root_room_edges` 同一套渲染：重算后的边与逐根落库逐字相同、
     算不出的根边原样进 `failed`、ACK 代号对齐（钉 `recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks`）。
+    根全集 = overlay 有回执的 ∪ 调用方从源文件枚举的 `library_roots`，不在 overlay 里的冷根从库里读几何行再算、不装回 overlay
+    （d-149 / ADR-082 D3，钉 `a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows`；
+    `batch_worker::library_generation_roots` 走 `initialization_roots`，源码钉里 `RoomOnlyRecompute::Incomplete` 计 4 处）。
     `mem://` 真测 (e)：改一块 PANE 的 NAME 以外的属性 / 把一块 PANE 换属主 → 该窗任务日志有「整库房间重算完成」、别的根在这块
     面板里的成员边随之更新；(f) 只改 BRAN → 不触发。
 19. D14：`task_end::render_watermark_update` 对 `model_room_generation` 只有三种动作（`Untouched` / `Cleared` / `Aligned`），

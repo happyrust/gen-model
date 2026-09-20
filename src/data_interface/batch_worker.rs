@@ -1909,9 +1909,36 @@ enum RoomOnlyRecompute {
     Incomplete,
 }
 
+/// 整库房间重算的**根全集**（d-149 / ADR-073 D13 2026-09-20 改口）：从本任务冻结的源文件枚举本库的生成根
+/// ——与从零初始化取根同一条路（`E3dModelService::initialization_roots`，一行库都不读），所以「整库重算 ==
+/// 从零初始化」在 overlay 逐出之后仍是同一个根集。冻结源在手（任务窗口内）就钉它那一版文件，否则取文件
+/// 最新——与 `model_refresh` 同一个取法；同一份冻结源算出同一个 `generation_identity`，生成输入缓存里
+/// 本窗刚用过的那份 `DbSet` / 索引直接复用，不另开一份。
+async fn library_generation_roots(dbnum: u32) -> anyhow::Result<Vec<e3d_io::refno::RefNo>> {
+    use crate::fast_model::e3d_model_service::E3dModelService;
+    let service = match active_frozen_source()? {
+        Some(source) => {
+            anyhow::ensure!(
+                source.dbnum() as u32 == dbnum,
+                "active file round dbnum {} cannot enumerate the roots of dbnum {dbnum}",
+                source.dbnum()
+            );
+            E3dModelService::from_frozen_source(&source).await?
+        }
+        None => E3dModelService::from_current().await?,
+    };
+    let roots = service.initialization_roots(dbnum)?;
+    Ok(roots
+        .into_iter()
+        .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
+        .collect())
+}
+
 /// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：在收尾段冻一台计算器（本批根
 /// 刷盘之后常驻可能已被别的任务对齐到更新的一代，用最新的那一代算、ACK 与 D14 那一格都盖它），对本库
-/// 全部有回执的根按投影里的现有几何重算归属、重写两张边（[`recompute_dbnum_room_edges`]）。
+/// 全部根——overlay 里有回执的按投影里的现有几何、不在 overlay 里的（按根数上限逐出过 / 重启后没回填）
+/// 从库里读几何行（d-149）——重算归属、重写两张边（[`recompute_dbnum_room_edges`]）；根全集从源文件枚举
+/// （[`library_generation_roots`]），取不齐就是 `Incomplete`。
 ///
 /// 返回「本库这一版的房间归属齐了没有、齐到哪一代」（[`RoomOnlyRecompute`]）：算不出的根按 D2 记失败
 /// （账本 `failed`，下一窗重排；单元清单补一条 `Failed` 让回执看得见）、任务 `Partial`、水位不盖；
@@ -1944,13 +1971,35 @@ async fn run_room_only_recompute(
             return RoomOnlyRecompute::Incomplete;
         }
     };
+    // 根全集从源文件枚举（d-149 / D13 2026-09-20 改口）：overlay 里没有的冷根（按根数上限逐出过、
+    // 进程重启后没回填）由 `recompute_dbnum_room_edges` 从库里读几何行再算。取不齐根集就说不了
+    // 「整库」——不盖、欠账留着，下一个任务再还。
+    let library_roots = match library_generation_roots(dbnum).await {
+        Ok(roots) => roots,
+        Err(error) => {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "dbnum={dbnum} 整库房间重算取不齐本库的根集（触发：{reason}），overlay 之外的冷根算不了，这一版 model_sesno 不盖: {error:#}"
+            ));
+            return RoomOnlyRecompute::Incomplete;
+        }
+    };
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
-    match recompute_dbnum_room_edges(PersistTarget::process(), store, dbnum, &rooms).await {
+    match recompute_dbnum_room_edges(
+        PersistTarget::process(),
+        store,
+        dbnum,
+        &library_roots,
+        &rooms,
+    )
+    .await
+    {
         Ok(report) => {
             println!(
-                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{} 重算、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，代号 {}，耗时 {}ms",
+                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{}（其中冷根 {} 从库读）重算、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，代号 {}，耗时 {}ms",
                 report.recomputed,
                 report.roots,
+                report.cold_roots,
                 report.room_edges,
                 report.commits,
                 report.max_transaction_bytes,
@@ -4623,8 +4672,25 @@ mod tests {
         );
         assert_eq!(
             recompute.matches("RoomOnlyRecompute::Incomplete").count(),
-            3,
-            "冻不出 / 有根算不出 / 写库失败三处都是 Incomplete: {recompute}"
+            4,
+            "冻不出 / 根集取不齐（d-149）/ 有根算不出 / 写库失败四处都是 Incomplete: {recompute}"
+        );
+        // d-149：根全集从源文件枚举，冷根从库里读——整库重算不再只看 overlay。
+        assert!(
+            recompute.contains("library_generation_roots(dbnum).await"),
+            "整库的根集从源文件枚举: {recompute}"
+        );
+        assert!(
+            recompute.contains("&library_roots,"),
+            "枚举出的根集交给 recompute_dbnum_room_edges: {recompute}"
+        );
+        let enumerate = source
+            .split_once("async fn library_generation_roots(")
+            .expect("library_generation_roots")
+            .1;
+        assert!(
+            enumerate.contains("service.initialization_roots(dbnum)?"),
+            "与从零初始化取根同一条路: {enumerate}"
         );
         assert!(
             !recompute.contains("return true") && !recompute.contains("return false"),

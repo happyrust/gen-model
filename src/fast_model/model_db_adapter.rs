@@ -910,21 +910,29 @@ pub struct RoomEdgeRecompute {
     pub failed: Vec<(RefNo, String)>,
     /// 房间代号对齐到本台计算器的 ACK 数。
     pub acks_refreshed: usize,
+    /// `roots` 里**不在 overlay 里**、几何行从库里读回来算的根数（d-149：按根数上限逐出过的、
+    /// 进程重启后没回填的——两种冷根同一个形态）。它们没有进程内 ACK 可对齐，不计入 `acks_refreshed`。
+    pub cold_roots: usize,
     pub elapsed_ms: u128,
 }
 
 /// 用本库全部根的**现有几何**重算两张房间边（`RoomOnly`，d-819 / ADR-073 D13）。
 ///
-/// 不重生几何、不动模型行、不动空间树、不回读库：每个有回执的根拿它在投影里的记录
-/// → [`MemoryRoomCalculator::calculate_for_root`] → [`MemoryRoomCalculator::render_root_room_edges`]
+/// 根的全集 = overlay 里有回执的根 ∪ `library_roots`（调用方从源文件枚举出的本库生成根——
+/// 与从零初始化 `initialization_roots` 同一份，d-149 2026-09-20 改口）。在 overlay 里的根拿它在
+/// 投影里的记录；**不在**的（按根数上限逐出过、进程重启后没回填）把库里的几何行读回来
+/// （[`crate::fast_model::model_record_reader::durable_room_records_of_root`]，与读路的冷读同一条 SQL），
+/// 两种来源都 → [`MemoryRoomCalculator::calculate_for_root`] → [`MemoryRoomCalculator::render_root_room_edges`]
 /// （按构件先删后插，缺几何面板的边受保护，D9），按 [`PERSIST_CHUNK`] 装块、一串事务提交
 /// ——与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等的硬验收（ADR-010 §9）
-/// 不多一条口径。没有几何的根跳过（它的边由对账删除那一半清过了）；算不出的根边原样留、
-/// 进 `failed`，同批其余根照常。提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器
-/// （只改这一格，几何身份不动），`e3d.room.lookup` 对它们重新回 `ready`。
+/// 不多一条口径，overlay 逐出之后也仍成立。不重生几何、不动模型行、不动空间树。没有几何的根跳过
+/// （它的边由对账删除那一半清过了）；算不出的根边原样留、进 `failed`，同批其余根照常。提交全过后把
+/// overlay 里这些根 ACK 的 `room_generation` 对齐到本台计算器（只改这一格，几何身份不动），
+/// `e3d.room.lookup` 对它们重新回 `ready`；冷根没有进程内 ACK，读路对它们本来就直读库。
 ///
 /// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——那一刻本库
-/// 没有第二个写者。
+/// 没有第二个写者。`library_roots` 给空就是只算 overlay 里的（今天之前的口径）：冷根一根不算、
+/// 也不报错——**整库**的承诺由调用方枚举根集来兑现。
 ///
 /// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
 /// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
@@ -932,23 +940,41 @@ pub async fn recompute_dbnum_room_edges(
     target: PersistTarget<'_>,
     store: &ModelMemoryStore,
     dbnum: u32,
+    library_roots: &[RefNo],
     rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
 ) -> anyhow::Result<RoomEdgeRecompute> {
     let started = std::time::Instant::now();
     let scope = ProjectionScope::Current;
-    let roots: Vec<RefNo> = store
-        .roots(scope)
-        .into_iter()
-        .filter(|root| root.dbno() == dbnum && store.receipt(scope, *root).is_some())
-        .collect();
+    // (根, 在 overlay 里吗)：常驻的先、冷根后，各自去重；不属于本库的库根不收。
+    let mut seen = std::collections::BTreeSet::<i64>::new();
+    let mut roots: Vec<(RefNo, bool)> = Vec::new();
+    for root in store.roots(scope) {
+        if root.dbno() == dbnum
+            && store.receipt(scope, root).is_some()
+            && seen.insert(packed_refno(root))
+        {
+            roots.push((root, true));
+        }
+    }
+    for root in library_roots {
+        if root.dbno() == dbnum && seen.insert(packed_refno(*root)) {
+            roots.push((*root, false));
+        }
+    }
     let mut out = RoomEdgeRecompute {
         roots: roots.len(),
+        cold_roots: roots.iter().filter(|(_, resident)| !resident).count(),
         ..Default::default()
     };
     let mut pieces: Vec<(usize, String)> = Vec::new();
     let mut recomputed = Vec::new();
-    for root in &roots {
-        let records = store.records_of_root(scope, *root);
+    for (root, resident) in &roots {
+        let records = if *resident {
+            store.records_of_root(scope, *root)
+        } else {
+            crate::fast_model::model_record_reader::durable_room_records_of_root(target.db, *root)
+                .await?
+        };
         if records.is_empty() {
             continue;
         }
@@ -5417,6 +5443,7 @@ mod tests {
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
+            &[],
             &after_move,
         )
         .await
@@ -5449,6 +5476,7 @@ mod tests {
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
+            &[],
             &before_move,
         )
         .await
@@ -5503,6 +5531,7 @@ mod tests {
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
+            &[],
             &rooms,
         )
         .await
@@ -5543,6 +5572,165 @@ mod tests {
                 .is_none(),
             "算不出的根没有 ACK 可对齐"
         );
+    }
+
+    /// d-149 / ADR-073 D13（2026-09-20 改口），`mem://` 真测：一根从 overlay 里逐出之后（按根数上限收回 /
+    /// 进程重启都是这个形态），整库房间重算把它的几何行从库里读回来算——面板搬走，它的旧边照样删；搬回来，
+    /// 边又从库里的几何算回来、与逐根落库逐字相同。库根名单给空就只算 overlay（冷根一根不算）；同一根
+    /// 既常驻又在名单里，overlay 那份说了算、不算冷根。冷根没有进程内 ACK，`acks_refreshed` 不计它。
+    #[tokio::test]
+    async fn a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A inside R1");
+        let seeded = vec!["pe:24383_500->pe:24383_10".to_string()];
+        assert_eq!(room_edges(&db).await, seeded);
+
+        // 逐出：overlay 里不再有 A 的回执与记录，库里那一份不动。
+        store.drop_cached_root(ROOM_ROOT_A);
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, ROOM_ROOT_A)
+                .is_none()
+        );
+        assert!(
+            store
+                .records_of_root(ProjectionScope::Current, ROOM_ROOT_A)
+                .is_empty()
+        );
+        assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 1);
+
+        // 面板搬走（R1 → x 2000–3000）。只看 overlay：一根都没有，什么都不算，旧边留在原处。
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[],
+            &after_move,
+        )
+        .await
+        .expect("recompute with no library roots");
+        assert_eq!(
+            (
+                report.roots,
+                report.cold_roots,
+                report.recomputed,
+                report.commits
+            ),
+            (0, 0, 0, 0),
+            "{report:?}"
+        );
+        assert_eq!(room_edges(&db).await, seeded, "没人告诉它库里还有 A");
+
+        // 带上库根：A 的几何行从库里读回来算——搬走的面板不再装着 A，旧边删掉；模型行不动。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            &after_move,
+        )
+        .await
+        .expect("recompute the cold root from its durable rows");
+        assert_eq!(
+            (
+                report.roots,
+                report.cold_roots,
+                report.recomputed,
+                report.room_edges,
+                report.failed.len(),
+                report.acks_refreshed,
+            ),
+            (1, 1, 1, 0, 0, 0),
+            "{report:?}"
+        );
+        assert!(room_edges(&db).await.is_empty(), "A 的旧边随冷根重算删掉");
+        assert_eq!(
+            count_record(&db, "inst_relate", "24383_10").await,
+            1,
+            "整库房间重算不动模型行"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, ROOM_ROOT_A)
+                .is_none(),
+            "冷根不装回 overlay"
+        );
+
+        // 搬回来：边从库里的几何再算回来——与逐根落库逐字相同。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A, ROOM_ROOT_A, RefNo::new(24384, 10)],
+            &before_move,
+        )
+        .await
+        .expect("recompute the cold root after the panel moved back");
+        assert_eq!(
+            (
+                report.roots,
+                report.cold_roots,
+                report.recomputed,
+                report.room_edges
+            ),
+            (1, 1, 1, 1),
+            "重复的与别的库的库根不收: {report:?}"
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            seeded,
+            "整库重算 == 逐根落库，逐边相等"
+        );
+
+        // 同一根既常驻又在名单里：overlay 那份说了算，不算冷根、ACK 照常对齐。
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before_move),
+        )
+        .await
+        .expect("re-seed A resident");
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            &before_move,
+        )
+        .await
+        .expect("recompute with A both resident and listed");
+        assert_eq!(
+            (
+                report.roots,
+                report.cold_roots,
+                report.recomputed,
+                report.acks_refreshed,
+            ),
+            (1, 0, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(room_edges(&db).await, seeded);
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B

@@ -358,6 +358,18 @@ _Avoid_: 分块、chunk、execution group（指内存预算时）、ZONE 切片
 生成端 worker 最多能跑在装配端前面多少根（`model_regen_execution_group`）。它同时是两件事的答案：**无栏并行**——worker 不在 cohort 边界上停下来等这一批里最慢的那根（几何负载长尾，设栏等于每批都赔上尾巴），只有队头能挡住人；**内存有界**——在飞的已生成几何最多一个窗口，加上正在攒的那一片。窗口满时 worker 把许可**还回去**再退出，由装配端滑动窗口后重新派出，绝不攥着许可等（那是 ADR-052 开篇那个容量倒置）。装配严格按源顺序，所以切片边界与 `Required` 裁决与「谁先算完」无关，`geometry_workers = 1` 逐字节复现串行路径。
 _Avoid_: 批、wave、in-flight（泛指时）、并发度（那是闸额度）
 
+**投影 overlay 根数上限 (Overlay Root Limit)**：
+进程内模型投影（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个有回执的根（`model_overlay_max_roots`，环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS` 压过，**默认 0 = 不限**）。overlay 此前无界——一个根进来就一直在。超了按**最近一次盖回执**的先后逐出**已 durable ACK 且与回执逐字相符**的根：整根记录（与仍常驻的回执共有的留下）+ 回执 + ACK 一起掉，是缓存态的收回不是删除——库里那一份不动、不产生删除 delta、不进房间变化账；读路对它直读 RocksDB，单元级发布 / 刚体前移拿不到 S 端基线回退 regen，整库房间重算从库里读它的几何行（见「冷根」）。未落盘的根永远不在候选里，候选用尽仍超限就只报数（「设了上限却一直不逐」= 常驻的全是还没落盘的根）；只在 durable 介质下动（嵌入 kv-mem 时 overlay 是唯一一份）；读不刷新序。时机：write-behind 每次发布之后、每批 durable ACK 记下之后。现值 `/health.model_cache.resident_roots`，上限与累计逐出数在 `write_behind.overlay_root_limit` / `overlay_evicted_total`（ADR-082 D1，d-149）。
+_Avoid_: overlay LRU（读不刷新序）、按字节的内存预算、投影淘汰（当指 `evict_missing_root` 那种「库里没了」的收回时）、overlay 硬上限 503（旧设计残词，从未有过）
+
+**冷根 (Cold Root)**：
+库里有几何行、进程投影里没有回执的生成根——按根数上限逐出过的、进程重启后没回填的（`model_cache_mode=incremental-overlay` 启动不回填），两种同一形态。读路对它直读 RocksDB、不回填；整库房间重算把它的几何行读回来装成**房间视图**（`model_record_reader::durable_room_records_of_root`，与读路冷读同一条 SQL）：只有房间计算读的那几格忠实——构件、noun、网格、世界盒、折进本地摆放的世界变换；`record_id` / `ancestors` / `source_sesno` / `tube` 是占位，**不装回 overlay**。根的全集不从库里猜（`gen_root` 已退役、几何行的 `anc` 分不出谁是根），从本任务冻结的源文件枚举（`E3dModelService::initialization_roots`，与从零初始化同一条路）；枚举不出就是 `Incomplete`（ADR-082 D3，修订 ADR-073 D13）。
+_Avoid_: 缺根、未生成的根（那是从没生成过的）、冷读回填、把房间视图当投影记录
+
+**元素缓存元素数上限 (Element Cache Entry Limit)**：
+生成用 `DbSet` 池级元素缓存（`model_element_cache`，默认开）最多装多少个元素（`model_element_cache_max_entries`，环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES` 压过，**默认 0 = 不限**）。缓存体在 vendor e3d-io `DbSet::with_element_cache_limit`：全池跨库合计，一枚原子计数器（只数 `parsed`，与 `cached_element_count` 同一口径，近似值）；满了**整张清**再装下一个——与四张版本表缓存同一个做法，零簿记，不做 LRU（每元素上百次命中的读路径上不写一笔），代价只是清空之后那一小段重新变冷。每份 `DbSet` 各算，生成输入缓存每库留一份，进程里的上限是「库数 × 这个数」。产物逐字不变（缓存只省重复的 open + parse；7997 一轮这块实测 768 MB → 1.55 GB）；缓存关着时这个数没有意义（ADR-082 D4，d-149）。
+_Avoid_: 元素缓存 LRU、按字节的缓存预算、把它当成生成输入缓存的上限（那个每库一条、不归它管）
+
 **几何 CPU 执行域 (Geometry CPU Domain)**：
 几何计算跑的那个私有线程池（线程数 = 几何并发闸额度，**不是**全局 Rayon 池——那个被 `room_model` / `db_model` 的 `par_iter` 共用，宽度不归闸管，接进来就是第二套并发口径）。唯一入口 `run_gated_cpu`，只收**同步闭包**：闭包里写不出 `.await`，「攥着许可去 await 另一个过闸子任务」这条会死锁的写法在类型层就不成立。等库、等锁一律留在 async 侧，不占额度。fan-out 宽度只来自 `resident_workers(件数) = min(额度, 件数)` 个**常驻 worker 从共享队列动态领取**，不是静态均分（几何负载长尾，一块里摆两个重 BRAN 就把其余 worker 空在那儿），也不是「每件一个 task 挤信号量」。
 _Avoid_: 线程池（泛指时）、rayon 池、spawn_gated_leaf（已退役）、静态均分

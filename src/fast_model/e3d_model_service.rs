@@ -2707,8 +2707,10 @@ impl E3dModelService {
         // 同一批目录件反复查索引反复解析（AMS 7999 实测：15,968 个元素跑出 537 万次点查、
         // 264 s，占生成 CPU 的 85%；开着之后生成 71.0 → 3.84 s）。关掉只是慢回去，
         // 落下去的行逐字不变——它换的是内存（7997 峰值 768 MB → 1.55 GB），所以留了关位。
+        // 元素数上限（[`crate::options::model_element_cache_max_entries`]，d-149，默认 0 = 不限）：
+        // 满了整张清、下一次读再从文件装——产物仍逐字不变，只是清空之后那一小段重新变冷。
         let set = if crate::options::model_element_cache() {
-            set.with_element_cache()
+            set.with_element_cache_limit(crate::options::model_element_cache_max_entries())
         } else {
             set
         };

@@ -335,5 +335,15 @@ model_regen_execution_group = 16
 # execution group 的根数，本预算只在一页异常肥时提前封片——切片预算不能只按根数算，
 # 一个 BRAN 和一个 EQUI 的元素数差两个数量级。单根不拆（根是发布的原子单位）。
 model_memory_slice_elements = 8000
+#【新增 2026-09-20，d-149】两道按数量的内存闸，默认 0 = 不限（今天的行为一个字不变），现场先量再配：
+# model_overlay_max_roots —— 进程内模型投影 overlay 最多常驻多少个根。超了按最近一次提交的先后
+#   逐出「已 durable ACK 且不在 write-behind 待刷」的根（整根记录 + 回执 + ACK 一起掉），未落盘的不丢；
+#   只在 rocksdb 介质下生效，逐出后读路直读 RocksDB、便宜路回退 regen、RoomOnly 整库房间重算从库读冷根。
+#   看现值：/health.model_cache.resident_roots；环境变量 AIOS_MODEL_OVERLAY_MAX_ROOTS 压过本键。
+# model_element_cache_max_entries —— 生成用 DbSet 池级元素缓存最多装多少个元素，满了整张清（每份 DbSet
+#   各算，进程里 = 库数 × 这个数）。7997 一轮实测这块缓存 768 MB → 1.55 GB。环境变量
+#   AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES 压过本键；AIOS_MODEL_ELEMENT_CACHE=false 时无意义。
+model_overlay_max_roots = 0
+model_element_cache_max_entries = 0
 model_root_inflight_max = 2
 model_full_rebuild_enabled = true

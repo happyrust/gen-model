@@ -2,6 +2,44 @@
 
 ## 2026-09-20
 
+### ADR-082 · 进程内缓存按数量设上限：模型投影 overlay 按根数逐出已落盘的根、生成用元素缓存按元素数满则清（两个上限默认 0 = 不限）；`RoomOnly` 整库房间重算改口——根全集从源文件枚举、不在 overlay 里的冷根从库里读几何行
+
+- **为什么**：2026-09-20 12:03 对增量服务的内存做清点：**没有全局内存预算**——瞬时峰值有切片 / 在飞根 / CPU 额度 / 事务字节几道局部闸，
+  自适应并发控制器（RSS > 1.25× 基线就把在飞根数减半）**只会少干、不会吐**；常驻那一半里两块**无界**——模型投影 overlay
+  （`ModelMemoryStore`，一个根进来就一直在，ACK 过的热根也不逐出）与生成用元素缓存（每库一份 `DbSet` 的池级缓存，官方实测
+  7997 一轮 768 MB → 1.55 GB 就是它）。用户 12:06 要按**数量**限，12:17 拍板（共识 **d-149**）：「两道都要：overlay 按根数、
+  元素缓存按元素数；RoomOnly 改成也读 RocksDB 冷根；默认 0 不限」。
+- **改动**（会话 fable-5-1-66 起手 overlay 闸 / options / DbOption / e3d-io 缓存上限，fable-5-1-6 接手补齐接线、`RoomOnly` 冷根、单测与文档）：
+  - **overlay 按根数**（`model_memory_store.rs` / `model_write_behind.rs`）：`model_overlay_max_roots`（环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS`
+    压过，0 = 不限）。`ScopeState` 记每根**最近一次盖回执**的序号（读不刷新）；`enforce_root_limit(limit)` 按序逐出**已 durable ACK 且与回执
+    逐字相符**的根（整根记录 + 回执 + ACK + 序号一起掉，与仍常驻回执共有的记录留下——与 `drop_cached_root` 共用 `drop_root`），
+    候选用尽仍超限就停手、`OverlayEviction::still_over_limit` 报出来；`limit == 0` 早退。`model_write_behind` 在发布之后与每批
+    durable ACK 记下之后各调一次，`store_mode().is_durable()` 门内；`WriteBehindSnapshot` 多 `overlay_root_limit` /
+    `overlay_evicted_total` / `element_cache_max_entries` 三格（`/health.model_cache.write_behind`）。
+  - **元素缓存按元素数**（vendor e3d-io `db_element.rs` + `options.rs` + `e3d_model_service.rs`）：`DbSet::with_element_cache_limit(n)`——
+    全池跨库合计一枚原子计数器，装第 `n + 1` 个之前整张清（零簿记、不做 LRU），`fork_without` 按留下来的重数，`forget_cached_db` 饱和减；
+    `model_element_cache_max_entries`（环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES`，0 = 不限）经 `build_set` 接进去，
+    `model_element_cache=false` 时无意义。`options::effective_count_limit`：环境变量合法非负整数压过配置、拼错当没设、没写 = 0。
+  - **`RoomOnly` 冷根**（`model_record_reader.rs` / `model_db_adapter.rs` / `batch_worker.rs`）：`recompute_dbnum_room_edges` 多收
+    `library_roots`——根全集 = overlay 有回执的 ∪ 库根；不在 overlay 里的冷根（逐出过 / 重启没回填）用
+    `durable_room_records_of_root`（与读路冷读同一条 SQL）把几何行装成**房间视图**（只有构件 / noun / 网格 / 世界盒 / 折进本地摆放的
+    世界变换忠实；不装回 overlay）再算，报表多 `cold_roots` 一格。`batch_worker::library_generation_roots` 从本任务冻结的源
+    `from_frozen_source` → `initialization_roots(dbnum)` 枚举（与从零初始化同一条路、复用本窗生成输入）；枚举失败 →
+    `RoomOnlyRecompute::Incomplete`（源码钉计 4 处）。
+  - **配置与文档**：`DbOption.toml` 两键 = 0 与注释；ADR-082（新）；ADR-073 状态行 / D13 段 / 源码钉 18 二次改口；CONTEXT 词条
+    「投影 overlay 根数上限」「冷根」「元素缓存元素数上限」。
+- **验证**：单测新增 8 条——`model_memory_store` 4 条（最旧 ACK 根先出 / 未落盘不出 / kv-mem ACK 与再提交过的不算 / 嵌套根共有记录
+  留给父根 / 再提交刷新序）、`model_record_reader::the_durable_room_view_keeps_only_what_the_room_calculator_reads`、
+  `model_db_adapter::a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows`（`mem://`：逐出 → 面板搬走旧边删掉 →
+  搬回来边回来、与逐根落库逐字相同；重复 / 别的库的库根不收；既常驻又在名单里按 overlay 算）、
+  `options::a_count_limit_takes_a_valid_env_override_falls_back_to_config_and_defaults_to_unbounded`、
+  e3d-io `the_element_cache_limit_clears_the_whole_pool_when_full_and_zero_means_unbounded`；`batch_worker` 源码钉补根集枚举三条。
+  全量 `cargo test --lib` 16:24：**2285 passed / 0 failed / 123 ignored**（`170fde71a` 的 2278 + 7）；e3d-io `cargo test --test
+  dbset_element_cache_limit --test dbset_generations` 2 passed / 1 ignored（vendor 提交 `d51c3dd`）；`cargo check --lib --tests --bins` 过；
+  rustfmt 本条新增行无差异（各文件的旧差异不动）。**未验证**：真机上没跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」
+  整条链；默认值待现场量 `resident_roots` 与 RSS 再定。
+- **不做（单开）**：稳态窗口收尾释放 `GenerationInput`（会改今天默认行为）；overlay / 元素缓存的字节账；`/dbnums` 面板那一格。
+
 ### ADR-073 · 整库房间重算的触发改成可再武装（审核 P1-2：durable 欠账 `dbnum_room_recompute_owed`）+ D14 代号守卫（审核 P2-3：盖算边那台计算器的代号）
 
 - **为什么**：2026-09-17 审核 `codex/model-projection-cache` 同批点出、当时「本条未动」的两条。**P1-2**：`RoomOnly` 的两条触发
