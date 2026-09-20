@@ -1122,6 +1122,55 @@ fn generation_input(
     Ok(input)
 }
 
+/// 生成输入缓存里一份 `DbSet` 的池级元素缓存此刻的体量（d-149 观测用，
+/// `/health.model_cache.element_cache.databases[]`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GenerationInputFootprint {
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    /// 已缓存的解析记录条数——元素数上限数的就是它。
+    pub parsed_entries: usize,
+    /// 已缓存的描述符抽取条数（解析条数的子集）。
+    pub extraction_entries: usize,
+    /// 估算字节（`DbSet::element_cache_stats`：`Arc` 块 + 表槽 + 内联结构 + 字串 / 数组载荷）。
+    pub approx_bytes: usize,
+    /// 这份 `DbSet` 生效的元素数上限（0 = 不限 / 没开缓存）。
+    pub max_entries: usize,
+}
+
+/// 生成输入缓存里每库那份 `DbSet` 的元素缓存体量，按 `dbnum` 升序（d-149 观测用）。
+///
+/// 查时现算、不缓存、不落库：先在缓存锁里把各份 `Arc<DbSet>` 抄出来，再在锁外逐份走它的缓存
+/// （`element_cache_stats`，每份 O(条数)，各库缓存各自的读锁）——`GENERATION_INPUT_CACHE` 那把锁
+/// 不被观测拖住。按观测频率调，别放进生成路径。
+pub(crate) fn generation_input_cache_footprint() -> Vec<GenerationInputFootprint> {
+    let Some(cache) = GENERATION_INPUT_CACHE.get() else {
+        return Vec::new();
+    };
+    let sets: Vec<(u32, u32, Arc<DbSet>)> = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|((dbnum, sesno, _), input)| (*dbnum, *sesno, input.set.clone()))
+        .collect();
+    let mut out: Vec<GenerationInputFootprint> = sets
+        .into_iter()
+        .map(|(dbnum, source_sesno, set)| {
+            let stats = set.element_cache_stats();
+            GenerationInputFootprint {
+                dbnum,
+                source_sesno,
+                parsed_entries: stats.parsed_entries,
+                extraction_entries: stats.extraction_entries,
+                approx_bytes: stats.approx_bytes,
+                max_entries: stats.limit,
+            }
+        })
+        .collect();
+    out.sort_by_key(|footprint| (footprint.dbnum, footprint.source_sesno));
+    out
+}
+
 /// Drop every cached generation input of one database.
 ///
 /// The cache is keyed by `(dbnum, sesno, identity)` and only ever evicts the

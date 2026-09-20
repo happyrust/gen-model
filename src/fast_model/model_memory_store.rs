@@ -330,6 +330,9 @@ struct ScopeState {
     next_commit_tick: u64,
     /// 按根数限额累计逐出了多少根（`/health.model_cache.overlay_evicted_total`）。
     overlay_evictions: u64,
+    /// 常驻记录的估算堆字节（[`approx_record_bytes`] 之和）：插入加、删除减，
+    /// [`ModelMemoryStore::overlay_footprint`] O(1) 读它——观测用，不落任何地方。
+    record_bytes: usize,
 }
 
 impl std::fmt::Debug for ScopeState {
@@ -483,6 +486,9 @@ impl ScopeState {
         *sesno = (*sesno).max(record.source_sesno);
         let member = packed_refno(record.source_refno);
         let record_id = record.record_id.clone();
+        self.record_bytes = self
+            .record_bytes
+            .saturating_add(approx_record_bytes(&record));
         self.geometries.insert(record_id, record);
         self.room_spatial_dirty.insert((dbnum, member));
         self.bump_epoch(dbnum);
@@ -508,6 +514,9 @@ impl ScopeState {
             self.observe_member(&previous);
         }
         let record = self.geometries.remove(record_id)?;
+        self.record_bytes = self
+            .record_bytes
+            .saturating_sub(approx_record_bytes(&record));
         self.toggle_digest(&record);
         let key = (record.dbnum, packed_refno(record.source_refno));
         if let Some(ids) = self.by_source.get_mut(&key) {
@@ -698,6 +707,63 @@ impl OverlayEviction {
     pub fn still_over_limit(&self) -> bool {
         self.limit > 0 && self.resident_after > self.limit
     }
+}
+
+/// `Current` 作用域此刻的体量（[`ModelMemoryStore::overlay_footprint`]）：条数是精确的，
+/// 字节是**估算**——查时现算、不落任何地方，给 `/health` 对着 RSS 看的。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct OverlayFootprint {
+    /// 几何记录条数（与 `current_counts().0` 同一个数）。
+    pub records: usize,
+    /// 有回执的根数（与 `current_counts().1` 同一个数）。
+    pub roots: usize,
+    /// 进程内完整发布确认（ACK）条数。
+    pub acks: usize,
+    /// 估算的堆字节：每条记录的内联结构 + 字串 / 祖先链 + 四张索引里的 `record_id` 副本与树节点，
+    /// 再加回执与 ACK。**不含**每库的房间空间树（`room_spatial`）与网格文件——网格在盘上。
+    pub approx_bytes: usize,
+}
+
+/// 一条投影记录在 overlay 里大约占多少字节（d-149 观测用）：内联结构、它自己的字串与祖先链，
+/// 加上 `geometries` 键、`by_source`、每个祖先一份 `by_ancestor`、管身一份 `by_tube_branch` 里的
+/// `record_id` 副本与 B 树节点。按长度不按容量——是给人对 RSS 的估算，不是分配器审计。
+fn approx_record_bytes(record: &ProjectedGeometry) -> usize {
+    // 一个 BTreeMap / BTreeSet 条目摊下来的节点开销（键值之外）。
+    const NODE: usize = 32;
+    let geometry_id = match &record.geometry_id {
+        GeometryId::Element { refno } => refno.len(),
+        GeometryId::ImpliedTube {
+            container_refno,
+            from_refno,
+            to_refno,
+            ..
+        } => container_refno.len() + from_refno.len() + to_refno.len(),
+    };
+    let own = std::mem::size_of::<ProjectedGeometry>()
+        + record.record_id.len()
+        + geometry_id
+        + record.noun.len()
+        + record.mesh_id.len()
+        + record.ancestors.len() * std::mem::size_of::<i64>();
+    // `geometries` 键 + `by_source` + 每个祖先一份 `by_ancestor` + 管身一份 `by_tube_branch`。
+    let index_copies = 2 + record.ancestors.len() + usize::from(record.tube.is_some());
+    own + index_copies * (record.record_id.len() + NODE)
+}
+
+/// 一份 [`ModelTarget`] 的字串堆字节（回执与 ACK 各带一份）。
+fn approx_model_target_bytes(target: Option<&ModelTarget>) -> usize {
+    let Some(target) = target else {
+        return 0;
+    };
+    let file = |file: &crate::fast_model::e3d_model_service::ModelFileTarget| {
+        std::mem::size_of_val(file) + file.db_type.len() + file.file.len() + file.digest.len()
+    };
+    target.project.len()
+        + target.template_attlib_digest.len()
+        + target.generator_fingerprint.len()
+        + target.tessellation_profile.len()
+        + file(&target.design)
+        + target.catalogue.iter().map(file).sum::<usize>()
 }
 
 /// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
@@ -927,6 +993,45 @@ impl ModelMemoryStore {
             .get(&ProjectionScope::Current.key())
             .map(|state| (state.geometries.len(), state.receipts.len()))
             .unwrap_or_default()
+    }
+
+    /// `Current` 作用域此刻的体量与**估算**字节（d-149 观测用，`/health.model_cache.overlay`）。
+    /// 查时现算、不缓存、不落库：记录那一半是插入 / 删除时随手记的账（`record_bytes`，O(1)），
+    /// 回执与 ACK 在读锁里走一遍（根的量级，十万级也只是几毫秒）。估算口径见 [`approx_record_bytes`]；
+    /// 房间空间树与盘上的网格不在里面。
+    pub fn overlay_footprint(&self) -> OverlayFootprint {
+        const NODE: usize = 32;
+        let scopes = self.read();
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return OverlayFootprint::default();
+        };
+        let records = state.record_bytes;
+        let receipts: usize = state
+            .receipts
+            .values()
+            .map(|receipt| {
+                NODE + std::mem::size_of::<RootReceipt>()
+                    + receipt.manifest_hash.len()
+                    + receipt.published_via.len()
+                    + approx_model_target_bytes(receipt.model_target.as_ref())
+            })
+            .sum();
+        let acks: usize = state
+            .publication_acks
+            .values()
+            .map(|ack| {
+                NODE + std::mem::size_of::<RootPublicationAck>()
+                    + ack.manifest_hash.len()
+                    + ack.room_generation.as_ref().map_or(0, String::len)
+                    + approx_model_target_bytes(ack.model_target.as_ref())
+            })
+            .sum();
+        OverlayFootprint {
+            records: state.geometries.len(),
+            roots: state.receipts.len(),
+            acks: state.publication_acks.len(),
+            approx_bytes: records + receipts + acks,
+        }
     }
 
     /// 当前投影里某个库的提交纪元，配合 [`Self::restore_dbnum`] 用。
@@ -3225,6 +3330,74 @@ mod tests {
             "嵌套根仍持有共有的那条"
         );
         assert_eq!(store.current_counts(), (1, 1), "父根独有的那条掉了");
+    }
+
+    /// d-149 观测：`overlay_footprint` 查时现算——条数与 `current_counts` 同一口径，字节随记录 / 回执 / ACK
+    /// 单调增长，祖先链更长的记录（索引里多几份 `record_id` 副本）估得更大；空作用域全 0。
+    #[test]
+    fn the_overlay_footprint_counts_what_is_resident_and_grows_with_it() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        assert_eq!(store.overlay_footprint(), OverlayFootprint::default());
+
+        let root = RefNo::new(7997, 1);
+        let receipt = commit_root(&store, root, "one");
+        let after_one = store.overlay_footprint();
+        assert_eq!(
+            (after_one.records, after_one.roots, after_one.acks),
+            (1, 1, 0),
+            "{after_one:?}"
+        );
+        assert!(
+            after_one.approx_bytes
+                >= std::mem::size_of::<ProjectedGeometry>() + std::mem::size_of::<RootReceipt>(),
+            "{after_one:?}"
+        );
+        assert_eq!(
+            (after_one.records, after_one.roots),
+            store.current_counts(),
+            "条数与 current_counts 同一口径"
+        );
+
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            root,
+            ack_matching(&receipt, 7997, PersistMedium::RocksDb),
+        ));
+        let with_ack = store.overlay_footprint();
+        assert_eq!(with_ack.acks, 1);
+        assert!(with_ack.approx_bytes > after_one.approx_bytes, "ACK 也算钱");
+
+        // 祖先链长一倍的记录：索引里多几份 record_id 副本，估得更大。
+        let short = record("short", RefNo::new(7997, 11), RefNo::new(7997, 10), 7997);
+        let mut long = short.clone();
+        long.record_id = "long!".into();
+        long.ancestors = vec![1, 2, 3, 4, 5, 6];
+        assert!(approx_record_bytes(&long) > approx_record_bytes(&short));
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![short, long],
+                ..Default::default()
+            }],
+        );
+        let with_more = store.overlay_footprint();
+        assert_eq!(with_more.records, 3);
+        assert!(with_more.approx_bytes > with_ack.approx_bytes);
+
+        store.clear_dbnum(7997);
+        let cleared = store.overlay_footprint();
+        assert_eq!(
+            (
+                cleared.records,
+                cleared.roots,
+                cleared.acks,
+                cleared.approx_bytes
+            ),
+            (0, 0, 0, 0),
+            "删光之后记录那半的账也归零: {cleared:?}"
+        );
     }
 
     /// d-149：LRU 键是**最近一次盖回执**的序号——同一根再提交一次就排到最新，读它不刷新。

@@ -200,11 +200,31 @@ fn health_status(
 }
 
 fn model_cache_health(store_reachable: bool) -> Value {
-    let (resident_records, resident_roots) =
-        crate::fast_model::model_memory_store::ModelMemoryStore::global().current_counts();
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let (resident_records, resident_roots) = store.current_counts();
+    // d-149 观测（ADR-082 D5）：两块此前无界的常驻各给一份**估算**字节——查时现算、回给前端，
+    // 不落库、不缓存。overlay 的记录那半是插入 / 删除时随手记的账，回执 / ACK 与每库的元素缓存
+    // 在读锁里走一遍（根 / 元素的量级）；上限（0 = 不限）并排给，现场对着 RSS 定数字。
+    let overlay = store.overlay_footprint();
+    let element_cache = crate::fast_model::e3d_model_service::generation_input_cache_footprint();
     let mut health = json!({
         "resident_records": resident_records,
         "resident_roots": resident_roots,
+        "overlay": {
+            "records": overlay.records,
+            "roots": overlay.roots,
+            "acks": overlay.acks,
+            "approx_bytes": overlay.approx_bytes,
+            "max_roots": crate::options::model_overlay_max_roots(),
+            "evicted_total": store.overlay_evictions_total(),
+        },
+        "element_cache": {
+            "enabled": crate::options::model_element_cache(),
+            "max_entries": crate::options::model_element_cache_max_entries(),
+            "parsed_entries": element_cache.iter().map(|db| db.parsed_entries).sum::<usize>(),
+            "approx_bytes": element_cache.iter().map(|db| db.approx_bytes).sum::<usize>(),
+            "databases": element_cache,
+        },
     });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
     health["store_reachable"] = json!(store_reachable);

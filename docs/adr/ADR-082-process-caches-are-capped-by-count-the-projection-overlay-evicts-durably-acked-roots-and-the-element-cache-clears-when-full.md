@@ -97,6 +97,17 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - 现场**先量再配**：`/health.model_cache.resident_roots`（overlay 现值）、`/health.model_cache.write_behind.overlay_root_limit` /
   `overlay_evicted_total` / `element_cache_max_entries`（上限与累计逐出）。「设了上限却一直不逐」= 常驻的全是还没落盘的根。
   默认值（例如 overlay 20000 根 / 元素缓存 200000 条）等量过再拍，不在本文定。
+- **估算字节（2026-09-20 用户追加拍板：「查时现算、不落库」）**：`/health.model_cache.overlay`
+  `{ records, roots, acks, approx_bytes, max_roots, evicted_total }` 与 `/health.model_cache.element_cache`
+  `{ enabled, max_entries, parsed_entries, approx_bytes, databases[{ dbnum, source_sesno, parsed_entries, extraction_entries, approx_bytes, max_entries }] }`。
+  两个 `approx_bytes` 都是**被查时现算、直接回给前端**的数，不落库、不缓存、不进任何表：
+  - overlay（`ModelMemoryStore::overlay_footprint`）：记录那一半是插入 / 删除时随手记的账（`ScopeState::record_bytes`，每条按
+    `approx_record_bytes` = 内联结构 + 自己的字串与祖先链 + 四张索引里的 `record_id` 副本与树节点），O(1) 读；回执与 ACK 在读锁里
+    走一遍（根的量级）。**不含**每库房间空间树与盘上的网格。
+  - 元素缓存（`e3d_model_service::generation_input_cache_footprint` → e3d-io `DbSet::element_cache_stats`）：在缓存锁里抄出各份
+    `Arc<DbSet>`、锁外逐份走它的两张表（`Arc` 块 + 表槽 + 内联结构 + `ParsedElement` / `ElementExtraction::approx_heap_bytes`
+    的字串 / 数组载荷），O(条数)，按 `/health` 的观测频率付，不进生成路径。
+  - 都按**长度不按容量**：是给人对着 RSS 定上限用的估算，不是分配器审计。
 
 ### D6　按数量、不按字节
 
@@ -121,7 +132,8 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
   `RoomOnly` 多读库（冷根的几何行）。这三条都是既有回退，只是更常被走到。
 - 设了元素缓存上限之后：生成的 owner 链上溯 / 目录链走查在清空之后那一段重新变冷（7999 实测缓存全开 3.84 s、全关 71 s，上限落在中间）。
 - `RoomOnly` 多了一步「从源文件枚举根集」（O(ZONE 数) 的索引走查、复用本窗的生成输入），取不齐就 `Incomplete`——比此前静默漏算冷根严格。
-- 可观测多了三格；overlay / 元素缓存的**字节数**仍没有任何一格（§不做）。
+- 可观测：`write_behind` 三格之外，`/health.model_cache.overlay` / `element_cache` 各给条数、上限与估算字节（D5）；
+  `/health` 每次多付一遍回执 / ACK 与元素缓存的遍历。
 
 ## 实施约束（源码钉）
 
@@ -145,12 +157,19 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
    `batch_worker.rs`：`library_generation_roots` → `run_room_only_recompute`（`Incomplete` 第四处）；源码钉里 `RoomOnlyRecompute::Incomplete` 计 4。
 7. `DbOption.toml`：`model_overlay_max_roots = 0` / `model_element_cache_max_entries = 0` 与注释；ADR-073 D13 段与源码钉 18 同步改口；
    CONTEXT「投影 overlay 根数上限」「冷根」「元素缓存元素数上限」。
+8. 估算字节（D5 追加）：`model_memory_store.rs` `ScopeState::record_bytes`（`insert` 加 / `remove_internal` 减）、`approx_record_bytes`、
+   `approx_model_target_bytes`、`ModelMemoryStore::overlay_footprint` → `OverlayFootprint`；钉
+   `the_overlay_footprint_counts_what_is_resident_and_grows_with_it`（删光归零 = 加减账对得上）。
+   `e3d_model_service::generation_input_cache_footprint` → `GenerationInputFootprint`；`handlers::model_cache_health` 的
+   `overlay` / `element_cache` 两块。vendor e3d-io：`ParsedElement::approx_heap_bytes`、`ElementExtraction::approx_heap_bytes`、
+   `DbSet::element_cache_stats` → `ElementCacheStats`（钉在 `dbset_element_cache_limit.rs` 同一条用例末尾；vendor 提交 `4a76d2a`）。
 
 ## 不做 / 未决
 
 - **不做**字节记账、不做 overlay 的读刷新 LRU、不做元素缓存 LRU（D6 / D4 已说明）。
 - **不在本文**让稳态窗口收尾释放 `GenerationInput`（`forget_generation_input`，初始化那一路已经这么做）：它会改今天默认行为
   （每窗重开 MDB、元素缓存重新变冷），与 D5「一个字不变」冲突——要做单开决策卡，先量每窗重开的代价。
-- **未决**默认值：先在现场量 `resident_roots` 与 RSS 的关系再定；`/dbnums` 面板没有 overlay 那一格，只有 `/health`。
+- **未决**默认值：先在现场量 `/health.model_cache.overlay.approx_bytes` / `element_cache.approx_bytes` 与 RSS 的关系再定；
+  `/dbnums` 面板没有 overlay 那一格，只有 `/health`。估算字节只在 `/health` 上现算，**不做**任何持久化 / 历史曲线（2026-09-20 用户拍板）。
 - **未验证**：真机（live）上没有跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」整条链；本文的证据是 `mem://` 单测与源码钉。
 - 跨库成员（面板在 A、成员在 B）的 `RoomOnly` 那一问（ADR-073 U3）不在本文。

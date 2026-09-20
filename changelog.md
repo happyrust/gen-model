@@ -38,7 +38,14 @@
   dbset_element_cache_limit --test dbset_generations` 2 passed / 1 ignored（vendor 提交 `d51c3dd`）；`cargo check --lib --tests --bins` 过；
   rustfmt 本条新增行无差异（各文件的旧差异不动）。**未验证**：真机上没跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」
   整条链；默认值待现场量 `resident_roots` 与 RSS 再定。
-- **不做（单开）**：稳态窗口收尾释放 `GenerationInput`（会改今天默认行为）；overlay / 元素缓存的字节账；`/dbnums` 面板那一格。
+- **不做（单开）**：稳态窗口收尾释放 `GenerationInput`（会改今天默认行为）；`/dbnums` 面板那一格。
+- **追加（同日 16:3x，用户拍板「查时现算、不落库」）**：`/health.model_cache` 多两块——`overlay { records, roots, acks, approx_bytes,
+  max_roots, evicted_total }` 与 `element_cache { enabled, max_entries, parsed_entries, approx_bytes, databases[] }`，两个 `approx_bytes`
+  都是被查时现算、直接回前端的估算，不落库不缓存。overlay 记录那一半是 `ScopeState::record_bytes` 插入加 / 删除减的账
+  （`approx_record_bytes`：内联结构 + 字串 / 祖先链 + 四张索引里的 `record_id` 副本与树节点），回执 / ACK 在读锁里走一遍；元素缓存经
+  `generation_input_cache_footprint` → e3d-io `DbSet::element_cache_stats`（`ParsedElement` / `ElementExtraction::approx_heap_bytes`，
+  锁外逐份走），按长度不按容量。钉 `the_overlay_footprint_counts_what_is_resident_and_grows_with_it`（删光归零 = 加减账对得上）；
+  e3d-io 用例末尾补 `element_cache_stats` 三断言（vendor 提交 `4a76d2a`）。
 
 ### ADR-073 · 整库房间重算的触发改成可再武装（审核 P1-2：durable 欠账 `dbnum_room_recompute_owed`）+ D14 代号守卫（审核 P2-3：盖算边那台计算器的代号）
 
