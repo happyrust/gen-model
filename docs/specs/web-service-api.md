@@ -997,7 +997,7 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 | `shape` | `sphere`（默认）\| `cube` |
 | `nouns` | 逗号分隔，大小写不敏感（服务端按大写比较） |
 | `keyword` | 分页前过滤，大小写不敏感；只匹配 refno（`a_b` / `a/b` 两种写法）与 noun，**不匹配 name**（计划 §5-2 按 (a)） |
-| `sort` | `distance`（默认：距离升序，同距按 dbnum、refno 兜底）\| `name`（名字只对本页解，全集按 noun、refno 作近似序）；两种都是全序，翻页稳定 |
+| `sort` | `distance`（默认：距离升序，同距按 dbnum、refno 兜底）\| `name`（名字只对本页解，全集按 noun、refno 作近似序）\| `spec_distance`（2026-09-20：先按 `spec_value` 升序、0「其他」在前，同专业再按距离 / dbnum / refno——legacy `/api/sqlite-spatial/nearby` 的同名档，抽屉「按专业」排序用它；只在页内按专业分组给不出跨页的专业序）；三种都是全序，翻页稳定。`nearby/refnos` 的全集不看它、恒按距离 |
 | `include_self` | 默认 `false`：refno 模式剔除目标自身与祖先链含目标的整个子树；点模式无意义 |
 | `include_negative` | 默认 `false`：按 `aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES` 剔除负实体（NBOX / NCYL …） |
 | `dbnums` | 逗号分隔 u32，限定库；给了它时答不出库号的条目一律剔除 |
@@ -1022,7 +1022,9 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   分类（首个命中生效、关键字大小写不敏感；缺省即 legacy 后端 `spec_info.rs::site_name_to_spec_value` 那张：PIPE→1 管道、
   ELEC/DIANQI/电气→2 电气、INST/INSTR→3 仪表、HVAC→4 暖通、CIVI/CIVIL/ARCH→5 土建、STRU/STRUCT→6 结构），找不到 SITE / 都不中为 0「其他」。
   实现 `fast_model::spatial_discipline`：沿 OWNER 逐级读记录、逐级记忆（键含 `DirectTreeService` 的会话指纹，换代整体清空），
-  每个元素整个进程生命期最多读一次；首个大半径查询付一次账（5 万候选 ≈ 5 万次记录读，与 `name_of` 同代价）。
+  每个元素整个进程生命期最多读一次；首个大半径查询付一次账（5 万候选 ≈ 5 万次记录读，与 `name_of` 同代价）。因为这一账要对
+  **全部**候选付，锁外的后半程（过滤 / 派生专业 / 排序 / 切页 / 补 `name`）整段在 `spawn_blocking` 里跑、不占 tokio worker；
+  共享记忆的锁只罩查表与写回、不罩记录读，并发查询不在 I/O 上互相串行（2026-09-20 复审后改）。
 - **房间归属（`rooms=`，`fast_model::spatial_rooms`）**：成员集的取法与 `e3d.room.lookup` 同一条判据分两路——
   读透形态（`data_face = read-through`）库上不落 `room_relate` 边，用常驻房间模型 + 候选的内存投影记录现算
   （`MemoryRoomCalculator::calculate_for_root`，只读投影快照、**不取空间串行锁**）；没有投影记录的候选（树从快照恢复而本进程没再

@@ -9,9 +9,12 @@
 //! 代价：每级要回元素记录读一次 OWNER（与 `DirectTreeService::name_of` 同代价）。[`SpecMemo`] 逐级记忆：
 //! 链上任何一个已算过的祖先都能截断本次爬升、并把这一段路径上的元素一并记下，所以整个进程生命期里每个元素的记录
 //! **最多读一次**；记忆按 `DirectTreeService` 的换代键（会话指纹）整体作废。
+//!
+//! 进程内共享的那份记忆（[`spec_value_of_shared`]）的锁**只罩查表与写回，不罩记录读**：每爬一级先锁内看一眼有没有
+//! 现成答案，没有就放开锁去读记录；并发的查询因此不在 I/O 上互相串行（两条同时爬同一段链最多重复读几条，写回的值一样）。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use aios_core::RefU64;
 
@@ -92,30 +95,9 @@ impl SpecMemo {
         rules: &[SpecValueRuleConfig],
         refno: RefU64,
     ) -> i64 {
-        if let Some(value) = self.values.get(&refno) {
-            return *value;
-        }
-        let mut path: Vec<RefU64> = Vec::new();
-        let mut current = refno;
-        let value = loop {
-            if let Some(value) = self.values.get(&current) {
-                break *value;
-            }
-            if path.len() >= MAX_DEPTH || path.contains(&current) {
-                break SPEC_VALUE_OTHER;
-            }
-            path.push(current);
-            let Some(step) = lineage.lineage_step(current) else {
-                break SPEC_VALUE_OTHER;
-            };
-            if is_site_noun(&step.noun) {
-                break classify_site_name(rules, &step.name);
-            }
-            match step.owner {
-                Some(owner) if owner.0 != 0 && owner != current => current = owner,
-                _ => break SPEC_VALUE_OTHER,
-            }
-        };
+        let (path, value) = walk_to_site(lineage, rules, refno, |current| {
+            self.values.get(&current).copied()
+        });
         for visited in path {
             self.values.insert(visited, value);
         }
@@ -123,33 +105,107 @@ impl SpecMemo {
     }
 }
 
+/// 沿 OWNER 往上爬到 SITE（或到顶 / 读不出 / 成环 / 超深）。`memoised` 是「这一级有没有现成答案」的查表，
+/// 命中就截断；回 `(这次走过、还没有答案的路径, 专业值)`，路径上的元素都该记成这个值。
+/// [`SpecMemo`] 查自己的表；共享记忆每级锁内查一眼、读记录在锁外（[`spec_value_of_shared`]）。
+fn walk_to_site(
+    lineage: &dyn Lineage,
+    rules: &[SpecValueRuleConfig],
+    refno: RefU64,
+    mut memoised: impl FnMut(RefU64) -> Option<i64>,
+) -> (Vec<RefU64>, i64) {
+    let mut path: Vec<RefU64> = Vec::new();
+    let mut current = refno;
+    let value = loop {
+        if let Some(value) = memoised(current) {
+            break value;
+        }
+        if path.len() >= MAX_DEPTH || path.contains(&current) {
+            break SPEC_VALUE_OTHER;
+        }
+        path.push(current);
+        let Some(step) = lineage.lineage_step(current) else {
+            break SPEC_VALUE_OTHER;
+        };
+        if is_site_noun(&step.noun) {
+            break classify_site_name(rules, &step.name);
+        }
+        match step.owner {
+            Some(owner) if owner.0 != 0 && owner != current => current = owner,
+            _ => break SPEC_VALUE_OTHER,
+        }
+    };
+    (path, value)
+}
+
 /// 进程内共享的记忆 + 它对应的换代键；换代（会话指纹变了）整体清空。
 struct SharedMemo {
     epoch: u64,
-    rules: Vec<SpecValueRuleConfig>,
-    memo: SpecMemo,
+    /// 规则表随记忆一起换代；`Arc` 是为了在锁外爬链时拿着用。
+    rules: Arc<[SpecValueRuleConfig]>,
+    values: HashMap<RefU64, i64>,
 }
 
-fn shared_memo() -> &'static Mutex<Option<SharedMemo>> {
-    static SLOT: OnceLock<Mutex<Option<SharedMemo>>> = OnceLock::new();
+type SharedSlot = Mutex<Option<SharedMemo>>;
+
+fn shared_slot() -> &'static SharedSlot {
+    static SLOT: OnceLock<SharedSlot> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// 锁内的一小段：换代检查 + 对记忆做一件纯内存的事（查表 / 写回 / 取规则）。**不在这里读记录。**
+fn with_shared<R>(
+    slot: &SharedSlot,
+    epoch: u64,
+    load_rules: fn() -> Vec<SpecValueRuleConfig>,
+    f: impl FnOnce(&mut SharedMemo) -> R,
+) -> R {
+    let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    let stale = guard.as_ref().is_none_or(|shared| shared.epoch != epoch);
+    if stale {
+        *guard = Some(SharedMemo {
+            epoch,
+            rules: load_rules().into(),
+            values: HashMap::new(),
+        });
+    }
+    f(guard.as_mut().expect("shared memo was just initialised"))
+}
+
+/// 共享记忆答某元素的专业：查表与写回各锁一小段，爬链时每级锁内看一眼、记录读在锁外。
+fn spec_value_of_in(
+    slot: &SharedSlot,
+    load_rules: fn() -> Vec<SpecValueRuleConfig>,
+    lineage: &dyn Lineage,
+    epoch: u64,
+    refno: RefU64,
+) -> i64 {
+    let rules = with_shared(slot, epoch, load_rules, |shared| shared.rules.clone());
+    let (path, value) = walk_to_site(lineage, &rules, refno, |current| {
+        with_shared(slot, epoch, load_rules, |shared| {
+            shared.values.get(&current).copied()
+        })
+    });
+    if !path.is_empty() {
+        with_shared(slot, epoch, load_rules, |shared| {
+            for visited in path {
+                shared.values.insert(visited, value);
+            }
+        });
+    }
+    value
 }
 
 /// 生产入口：按 `epoch`（`DirectTreeService` 的会话指纹）取共享记忆答某元素的专业。
 /// 规则表在第一次用到时读一次配置（`crate::options::spec_value_rules`），随记忆一起换代。
 pub fn spec_value_of_shared(lineage: &dyn Lineage, epoch: u64, refno: RefU64) -> i64 {
-    let mut guard = shared_memo().lock().unwrap_or_else(PoisonError::into_inner);
-    let stale = guard.as_ref().is_none_or(|shared| shared.epoch != epoch);
-    if stale {
-        *guard = Some(SharedMemo {
-            epoch,
-            rules: crate::options::spec_value_rules(),
-            memo: SpecMemo::new(),
-        });
-    }
-    let shared = guard.as_mut().expect("shared memo was just initialised");
-    let SharedMemo { rules, memo, .. } = shared;
-    memo.spec_value_of(lineage, rules, refno)
+    spec_value_of_in(
+        shared_slot(),
+        crate::options::spec_value_rules,
+        lineage,
+        epoch,
+        refno,
+    )
 }
 
 #[cfg(test)]
@@ -283,5 +339,51 @@ mod tests {
         let mut memo = SpecMemo::new();
         assert_eq!(memo.spec_value_of(&lineage, &rules(), refno(10)), 0);
         assert_eq!(memo.len(), 2);
+    }
+
+    /// 共享记忆：读记录时锁**不在手上**（每次 `lineage_step` 里 `try_lock` 都得成功——std `Mutex` 不可重入，
+    /// 锁被持着时 `try_lock` 回 `WouldBlock`）；路径照记、同代不重读；换代整体清空、再问要重读。
+    #[test]
+    fn shared_memo_releases_the_lock_while_reading_records_and_resets_on_epoch_change() {
+        struct LockProbe<'a> {
+            inner: TableLineage,
+            slot: &'a SharedSlot,
+            lock_free_reads: Cell<usize>,
+        }
+
+        impl Lineage for LockProbe<'_> {
+            fn lineage_step(&self, refno: RefU64) -> Option<LineageStep> {
+                if self.slot.try_lock().is_ok() {
+                    self.lock_free_reads.set(self.lock_free_reads.get() + 1);
+                }
+                self.inner.lineage_step(refno)
+            }
+        }
+
+        let slot: SharedSlot = Mutex::new(None);
+        let probe = LockProbe {
+            inner: tree(),
+            slot: &slot,
+            lock_free_reads: Cell::new(0),
+        };
+
+        assert_eq!(spec_value_of_in(&slot, rules, &probe, 7, refno(6)), 1);
+        assert_eq!(probe.inner.reads.get(), 5, "ELBO → BRAN → PIPE → ZONE → SITE");
+        assert_eq!(probe.lock_free_reads.get(), 5, "五次记录读都在锁外");
+
+        // 同代：整段路径都记下了，BRAN 一次都不读；另一棵只读 SCTN + 它的 SITE。
+        assert_eq!(spec_value_of_in(&slot, rules, &probe, 7, refno(5)), 1);
+        assert_eq!(probe.inner.reads.get(), 5);
+        assert_eq!(spec_value_of_in(&slot, rules, &probe, 7, refno(8)), 6);
+        assert_eq!(probe.inner.reads.get(), 7);
+
+        // 换代（会话指纹变了）：记忆整体清空，同一个 BRAN 要重新爬到 SITE。
+        assert_eq!(spec_value_of_in(&slot, rules, &probe, 8, refno(5)), 1);
+        assert_eq!(probe.inner.reads.get(), 11, "BRAN → PIPE → ZONE → SITE 四次");
+        assert_eq!(
+            probe.lock_free_reads.get(),
+            probe.inner.reads.get(),
+            "换代之后的读同样在锁外"
+        );
     }
 }

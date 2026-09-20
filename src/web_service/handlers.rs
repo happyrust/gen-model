@@ -1473,7 +1473,7 @@ pub async fn spatial_nearby(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby(&params, centerline.as_ref(), service.as_ref()).await?;
+    let response = spatial_query::nearby(&params, centerline.as_ref(), service).await?;
     Ok(Json(response))
 }
 
@@ -1521,8 +1521,7 @@ pub async fn spatial_nearby_refnos(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response =
-        spatial_query::nearby_refnos(&params, centerline.as_ref(), service.as_ref()).await?;
+    let response = spatial_query::nearby_refnos(&params, centerline.as_ref(), service).await?;
     Ok(Json(response))
 }
 

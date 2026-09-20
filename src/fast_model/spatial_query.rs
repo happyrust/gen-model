@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES;
@@ -112,6 +113,10 @@ pub enum SortBy {
     Distance,
     /// 名字序。名字只对本页解（§5-2 按 (a)），全集上用 noun、refno 作近似序。
     Name,
+    /// 先按专业（`spec_value` 升序，0「其他」在前），同专业再按距离 / dbnum / refno（ADR 0067，2026-09-20）：
+    /// 与 legacy `/api/sqlite-spatial/nearby` 的 `spec_distance` 同一档——抽屉「按专业」排序要的是**跨页**的专业序，
+    /// 只在页内按专业分组做不到。
+    SpecDistance,
 }
 
 /// 查询中心：点，或某个构件（含子树）的并集盒。
@@ -263,7 +268,12 @@ impl SpatialQueryParams {
             Some(value) => match value.to_ascii_lowercase().as_str() {
                 "distance" => SortBy::Distance,
                 "name" => SortBy::Name,
-                other => return Err(format!("sort 只接受 distance/name（收到 {other}）")),
+                "spec_distance" => SortBy::SpecDistance,
+                other => {
+                    return Err(format!(
+                        "sort 只接受 distance/name/spec_distance（收到 {other}）"
+                    ));
+                }
             },
         };
         let nouns = split_csv(raw.nouns.as_deref())
@@ -387,8 +397,9 @@ impl std::fmt::Display for SpatialQueryError {
     }
 }
 
-/// 候选补属性的来源：生产是 [`DirectTreeService`]，单测用查表实现。
-pub trait ElementAttributes: Sync {
+/// 候选补属性的来源：生产是 [`DirectTreeService`]，单测用查表实现。`Send + Sync`：`nearby` / `nearby_refnos`
+/// 把它装进 `Arc` 带到阻塞线程上跑后半程（[`assemble_off_runtime`]）。
+pub trait ElementAttributes: Send + Sync {
     /// 库号：答不出为 `None`（Ref0 非法、或其库不在本 MDB 路由目录）。
     fn dbnum_of(&self, refno: RefU64) -> Option<u32>;
     /// `NAME`：没有名字或读不出记录为 `None`。只对本页调（§5-2 按 (a)）。
@@ -901,21 +912,26 @@ pub fn filter_candidates(
 }
 
 /// 排序（计划 §3.2 步骤 7）。`Distance`：距离升序，同距按 dbnum、refno；`Name`：名字只对本页解，
-/// 全集用 noun、refno 作近似序（spec §4.13）。两种都是全序，翻页稳定。
+/// 全集用 noun、refno 作近似序（spec §4.13）；`SpecDistance`：先按 `spec_value` 升序，同专业再按距离 / dbnum / refno。
+/// 三种都是全序，翻页稳定。
 pub fn sort_hits(hits: &mut [Hit], sort: SortBy) {
+    fn by_distance(a: &Hit, b: &Hit) -> std::cmp::Ordering {
+        a.distance
+            .total_cmp(&b.distance)
+            .then_with(|| a.dbnum.cmp(&b.dbnum))
+            .then_with(|| a.refno.cmp(&b.refno))
+    }
     match sort {
-        SortBy::Distance => hits.sort_by(|a, b| {
-            a.distance
-                .total_cmp(&b.distance)
-                .then_with(|| a.dbnum.cmp(&b.dbnum))
-                .then_with(|| a.refno.cmp(&b.refno))
-        }),
+        SortBy::Distance => hits.sort_by(by_distance),
         SortBy::Name => hits.sort_by(|a, b| {
             a.noun
                 .to_ascii_uppercase()
                 .cmp(&b.noun.to_ascii_uppercase())
                 .then_with(|| a.refno.cmp(&b.refno))
         }),
+        SortBy::SpecDistance => {
+            hits.sort_by(|a, b| a.spec_value.cmp(&b.spec_value).then_with(|| by_distance(a, b)))
+        }
     }
 }
 
@@ -1265,26 +1281,50 @@ pub(crate) async fn scan_global_tree(
     )
 }
 
-/// `GET /api/v1/spatial/nearby`。`centerline` 由 handler 预取（见 [`scan_tree`]）。
+/// 锁外的后半程（[`assemble_nearby`] / [`assemble_nearby_refnos`]）在 `spawn_blocking` 里跑，不占 tokio worker：
+/// `filter_candidates` 要对**每个**过了 dbnums / rooms 的候选派生专业（`ElementAttributes::spec_value_of` → 回元素记录
+/// 读 OWNER，首个大半径查询可达 [`CANDIDATE_CAP`] 次同步记录读），本页还要补 `name`。2026-09-20 之前只有 `dbnum_of`
+/// 与本页的 `name_of`，跑在 async 线程上问题不大；专业维度进来之后不行了。
+async fn assemble_off_runtime<T: Send + 'static>(
+    what: &'static str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, SpatialQueryError> {
+    tokio::task::spawn_blocking(work).await.map_err(|join| {
+        SpatialQueryError::Internal(anyhow::anyhow!(
+            "spatial {what} assemble task aborted: {join}"
+        ))
+    })
+}
+
+/// `GET /api/v1/spatial/nearby`。`centerline` 由 handler 预取（见 [`scan_tree`]）。`attrs` 要 `Arc`：后半程挪到
+/// 阻塞线程上跑（[`assemble_off_runtime`]），闭包得拿走它。
 pub async fn nearby(
     params: &SpatialQueryParams,
     centerline: Option<&BranCenterline>,
-    attrs: &dyn ElementAttributes,
+    attrs: Arc<dyn ElementAttributes>,
 ) -> Result<NearbyResponse, SpatialQueryError> {
     let scan = scan_global_tree(params, centerline).await?;
-    let room_scope = resolve_rooms_for_scan(&scan, params, attrs).await?;
-    Ok(assemble_nearby(scan, params, attrs, room_scope.as_ref()))
+    let room_scope = resolve_rooms_for_scan(&scan, params, attrs.as_ref()).await?;
+    let params = params.clone();
+    assemble_off_runtime("nearby", move || {
+        assemble_nearby(scan, &params, attrs.as_ref(), room_scope.as_ref())
+    })
+    .await
 }
 
 /// `GET /api/v1/spatial/nearby/refnos`。
 pub async fn nearby_refnos(
     params: &SpatialQueryParams,
     centerline: Option<&BranCenterline>,
-    attrs: &dyn ElementAttributes,
+    attrs: Arc<dyn ElementAttributes>,
 ) -> Result<NearbyRefnosResponse, SpatialQueryError> {
     let scan = scan_global_tree(params, centerline).await?;
-    let room_scope = resolve_rooms_for_scan(&scan, params, attrs).await?;
-    Ok(assemble_nearby_refnos(scan, params, attrs, room_scope.as_ref()))
+    let room_scope = resolve_rooms_for_scan(&scan, params, attrs.as_ref()).await?;
+    let params = params.clone();
+    assemble_off_runtime("nearby/refnos", move || {
+        assemble_nearby_refnos(scan, &params, attrs.as_ref(), room_scope.as_ref())
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -2605,5 +2645,65 @@ mod tests {
         let json = serde_json::to_value(&refnos).expect("json");
         assert_eq!(json["room_status"]["source"], "memory");
         assert_eq!(json["room_status"]["rooms"][0]["refno"], refno(900).to_string());
+    }
+
+    /// `sort=spec_distance`（抽屉「按专业」）：全集先按 `spec_value` 升序、同专业再按距离，**跨页**成立；
+    /// 分组计数不随页变；未知排序名 400 且提示里列出这一档。
+    #[test]
+    fn spec_distance_sort_orders_by_spec_value_then_distance_across_pages() {
+        let hit = |seq: u32, distance: f32, spec_value: i64| Hit {
+            refno: refno(seq),
+            noun: "PIPE".into(),
+            aabb: cube([0.0; 3], [1.0; 3]),
+            distance,
+            dbnum: Some(24383),
+            spec_value,
+        };
+        let mut hits = vec![hit(3, 1.0, 6), hit(2, 1.0, 1), hit(1, 0.5, 1), hit(9, 9.0, 0)];
+        sort_hits(&mut hits, SortBy::SpecDistance);
+        assert_eq!(
+            hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
+            vec![refno(9), refno(1), refno(2), refno(3)],
+            "0「其他」在前；同专业按距离，同距按 refno"
+        );
+
+        let tree = filter_tree();
+        // 距离序是 1 / 3 / 4 / 5，专业 1 / 6 / 1 / 0 → 专业序应为 5（0）、1、4（1）、3（6）。
+        let table = attrs_with_specs(&[(1, 24381), (3, 24383), (4, 24383), (5, 24383)], &[(1, 1), (4, 1), (3, 6)]);
+        let first_query = origin_query(&[("sort", "SPEC_DISTANCE"), ("per_page", "2")]);
+        assert_eq!(first_query.sort, SortBy::SpecDistance, "大小写不敏感");
+        let first = assemble_nearby(scan_local(&tree, &first_query), &first_query, &table, None);
+        assert_eq!(
+            refnos_of(&first.results),
+            vec![refno(5).to_string(), refno(1).to_string()]
+        );
+        assert!(first.has_more);
+        let second_query = origin_query(&[("sort", "spec_distance"), ("per_page", "2"), ("page", "2")]);
+        let second = assemble_nearby(scan_local(&tree, &second_query), &second_query, &table, None);
+        assert_eq!(
+            refnos_of(&second.results),
+            vec![refno(4).to_string(), refno(3).to_string()],
+            "第 2 页接着专业序走，不是按距离重排"
+        );
+        assert!(!second.has_more);
+        assert_eq!(first.spec_groups, second.spec_groups, "全集分组不随页变");
+        assert_eq!(first.total_count, 4);
+
+        // `nearby/refnos` 的全集仍按距离（批量操作要的是同一批 refno，不看排序）。
+        let refnos = assemble_nearby_refnos(scan_local(&tree, &first_query), &first_query, &table, None);
+        assert_eq!(
+            refnos.refnos,
+            [1, 3, 4, 5].map(|seq| refno(seq).to_string()).to_vec()
+        );
+
+        let bad = SpatialQueryParams::parse(&raw(&[
+            ("x", "0"),
+            ("y", "0"),
+            ("z", "0"),
+            ("radius", "1"),
+            ("sort", "spec"),
+        ]))
+        .expect_err("未知排序名");
+        assert!(bad.contains("spec_distance"), "{bad}");
     }
 }
