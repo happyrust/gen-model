@@ -359,7 +359,7 @@ _Avoid_: 分块、chunk、execution group（指内存预算时）、ZONE 切片
 _Avoid_: 批、wave、in-flight（泛指时）、并发度（那是闸额度）
 
 **投影 overlay 根数上限 (Overlay Root Limit)**：
-进程内模型投影（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个有回执的根（`model_overlay_max_roots`，环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS` 压过，**默认 0 = 不限**）。overlay 此前无界——一个根进来就一直在。超了按**最近一次盖回执**的先后逐出**已 durable ACK 且与回执逐字相符**的根：整根记录（与仍常驻的回执共有的留下）+ 回执 + ACK 一起掉，是缓存态的收回不是删除——库里那一份不动、不产生删除 delta、不进房间变化账；读路对它直读 RocksDB，单元级发布 / 刚体前移拿不到 S 端基线回退 regen，整库房间重算从库里读它的几何行（见「冷根」）。未落盘的根永远不在候选里，候选用尽仍超限就只报数（「设了上限却一直不逐」= 常驻的全是还没落盘的根）；只在 durable 介质下动（嵌入 kv-mem 时 overlay 是唯一一份）；读不刷新序。时机：write-behind 每次发布之后、每批 durable ACK 记下之后。现值 `/health.model_cache.resident_roots`，上限与累计逐出数在 `write_behind.overlay_root_limit` / `overlay_evicted_total`；`/health.model_cache.overlay.approx_bytes` 是被查时现算的估算字节（记录那半插入加 / 删除减记账，回执 / ACK 走一遍；不含房间空间树与盘上网格），只回前端、不落库（ADR-082 D1 / D5，d-149）。
+进程内模型投影（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个有回执的根（`model_overlay_max_roots`，环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS` 压过；**没写 = 50,000**（2026-09-20 mem 档实测 ≈ 13.8 KB/根 → ≈ 0.7 GB，证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`），**写 0 = 不限**）。overlay 此前无界——一个根进来就一直在。超了按**最近一次盖回执**的先后逐出**已 durable ACK 且与回执逐字相符**的根：整根记录（与仍常驻的回执共有的留下）+ 回执 + ACK 一起掉，是缓存态的收回不是删除——库里那一份不动、不产生删除 delta、不进房间变化账；读路对它直读 RocksDB，单元级发布 / 刚体前移拿不到 S 端基线回退 regen，整库房间重算从库里读它的几何行（见「冷根」）。未落盘的根永远不在候选里，候选用尽仍超限就只报数（「设了上限却一直不逐」= 常驻的全是还没落盘的根）；只在 durable 介质下动（嵌入 kv-mem 时 overlay 是唯一一份）；读不刷新序。时机：write-behind 每次发布之后、每批 durable ACK 记下之后。现值 `/health.model_cache.resident_roots`，上限与累计逐出数在 `write_behind.overlay_root_limit` / `overlay_evicted_total`；`/health.model_cache.overlay.approx_bytes` 是被查时现算的估算字节（记录那半插入加 / 删除减记账，回执 / ACK 走一遍；不含房间空间树与盘上网格），只回前端、不落库（ADR-082 D1 / D5，d-149）。
 _Avoid_: overlay LRU（读不刷新序）、按字节的内存预算、投影淘汰（当指 `evict_missing_root` 那种「库里没了」的收回时）、overlay 硬上限 503（旧设计残词，从未有过）
 
 **冷根 (Cold Root)**：
@@ -367,7 +367,7 @@ _Avoid_: overlay LRU（读不刷新序）、按字节的内存预算、投影淘
 _Avoid_: 缺根、未生成的根（那是从没生成过的）、冷读回填、把房间视图当投影记录
 
 **元素缓存元素数上限 (Element Cache Entry Limit)**：
-生成用 `DbSet` 池级元素缓存（`model_element_cache`，默认开）最多装多少个元素（`model_element_cache_max_entries`，环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES` 压过，**默认 0 = 不限**）。缓存体在 vendor e3d-io `DbSet::with_element_cache_limit`：全池跨库合计，一枚原子计数器（只数 `parsed`，与 `cached_element_count` 同一口径，近似值）；满了**整张清**再装下一个——与四张版本表缓存同一个做法，零簿记，不做 LRU（每元素上百次命中的读路径上不写一笔），代价只是清空之后那一小段重新变冷。每份 `DbSet` 各算，生成输入缓存每库留一份，进程里的上限是「库数 × 这个数」。产物逐字不变（缓存只省重复的 open + parse；7997 一轮这块实测 768 MB → 1.55 GB）；缓存关着时这个数没有意义。现值 `/health.model_cache.element_cache`（每库一行：条数、抽取条数、估算字节、上限），估算是被查时逐份走缓存现算的、只回前端、不落库（ADR-082 D4 / D5，d-149）。
+生成用 `DbSet` 池级元素缓存（`model_element_cache`，默认开）最多装多少个元素（`model_element_cache_max_entries`，环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES` 压过；**没写 = 200,000**（2026-09-20 mem 档实测 3.6–4.7 KB/元素 → ≈ 0.7–0.95 GB/库，样例最大库整库一遍 177k 条不会清一次），**写 0 = 不限**）。缓存体在 vendor e3d-io `DbSet::with_element_cache_limit`：全池跨库合计，一枚原子计数器（只数 `parsed`，与 `cached_element_count` 同一口径，近似值）；满了**整张清**再装下一个——与四张版本表缓存同一个做法，零簿记，不做 LRU（每元素上百次命中的读路径上不写一笔），代价只是清空之后那一小段重新变冷。每份 `DbSet` 各算，生成输入缓存每库留一份，进程里的上限是「库数 × 这个数」。产物逐字不变（缓存只省重复的 open + parse；7997 一轮这块实测 768 MB → 1.55 GB）；缓存关着时这个数没有意义。现值 `/health.model_cache.element_cache`（每库一行：条数、抽取条数、估算字节、上限），估算是被查时逐份走缓存现算的、只回前端、不落库（ADR-082 D4 / D5，d-149）。
 _Avoid_: 元素缓存 LRU、按字节的缓存预算、把它当成生成输入缓存的上限（那个每库一条、不归它管）
 
 **几何 CPU 执行域 (Geometry CPU Domain)**：

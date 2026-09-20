@@ -1,6 +1,6 @@
-# ADR-082：进程内缓存按数量设上限——模型投影 overlay 按根数逐出已落盘的根，生成用元素缓存按元素数满则清；两个上限默认 0 = 不限
+# ADR-082：进程内缓存按数量设上限——模型投影 overlay 按根数逐出已落盘的根，生成用元素缓存按元素数满则清；默认 overlay 50,000 根 / 元素缓存 200,000 条，写 0 = 不限
 
-- 状态：**已接受、已实施**（2026-09-20 用户拍板，共识 **d-149**：「两道都要：overlay 按根数、元素缓存按元素数；RoomOnly 改成也读 RocksDB 冷根；默认 0 不限」；
+- 状态：**已接受、已实施**（2026-09-20 用户拍板，共识 **d-149**：「两道都要：overlay 按根数、元素缓存按元素数；RoomOnly 改成也读 RocksDB 冷根；默认 0 不限」；同日 17:0x 用户要求在 mem 档实例上量了一组数、定了两个默认值（D5）；
   同日落地——`ModelMemoryStore::enforce_root_limit` + `model_write_behind` 两处接线、vendor e3d-io `DbSet::with_element_cache_limit`、
   `recompute_dbnum_room_edges` 的根全集与冷根读库、`DbOption.toml` 两键；实施记录见文末源码钉）
 - 日期：2026-09-20
@@ -91,12 +91,23 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
   正在读的句柄手里的 `Arc` 不受影响；`fork_without` 带过去的条目按现状重数。
 - 每份 `DbSet` 各算：生成输入缓存每库留一份，进程里的上限是「库数 × 这个数」。产物逐字不变（缓存只省重复的 open + parse）。
 
-### D5　两个上限默认 0 = 不限：只加能力，今天的行为一个字不变
+### D5　默认值：overlay 50,000 根、元素缓存 200,000 条 / 库；写 0 = 不限
 
-- `enforce_root_limit(0)` 早退、`with_element_cache_limit(0)` 与 `with_element_cache()` 同形——默认配置下两条代码路径与此前逐位相同。
-- 现场**先量再配**：`/health.model_cache.resident_roots`（overlay 现值）、`/health.model_cache.write_behind.overlay_root_limit` /
-  `overlay_evicted_total` / `element_cache_max_entries`（上限与累计逐出）。「设了上限却一直不逐」= 常驻的全是还没落盘的根。
-  默认值（例如 overlay 20000 根 / 元素缓存 200000 条）等量过再拍，不在本文定。
+- 落地那一刻（d-149 第 4 条）两个上限默认 0——只加能力，行为一个字不变，先量再配。**同日 17:0x 用户要求量了定默认值**
+  （「在 mem 档实例上跑一窗，把 `/health.model_cache.overlay.approx_bytes` 与 `process_rss_bytes` 对着记一组数，给两个上限定默认值」），
+  证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`：release 二进制、mem 档、整库即时生成 8000 / 7998 / 7997 / 1112 四库
+  → 7,743 根 / 59,929 条记录，overlay 106.5 MB（≈ **13.8 KB / 根**、1.8 KB / 记录），元素缓存 219,623 条 820.6 MB
+  （≈ **3.6–4.7 KB / 元素**，7997 单库整库一遍 176,982 条 643.8 MB），RSS 2.04 GB 里这两块合计 46%（其余是 mem 档的 kv-mem 模型行）。
+- **`model_overlay_max_roots` 默认 50,000**（`options::MODEL_OVERLAY_MAX_ROOTS_DEFAULT`）：≈ 0.7 GB；整套 AMS 样例 MDB 装得下六遍
+  （样例现场永远不逐出），「AMS 全量 12 万根」量级下把常驻压到四成。再小就拿便宜路换内存。
+- **`model_element_cache_max_entries` 默认 200,000**（`options::MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT`）：≈ 0.7–0.95 GB / 库；
+  样例里最大的库整库一遍装到 177k，默认值下一遍生成不会清一次，清的是长驻之后越过一整遍的累积。它管不住「库数 ×」那一维
+  （§不做：稳态窗口收尾释放 `GenerationInput`）。
+- 三层裁决：环境变量 > 配置键 > 默认值；**任何一层写 0 = 不限**（`effective_count_limit(env, configured, default)`）。
+  `enforce_root_limit(0)` 早退、`with_element_cache_limit(0)` 与 `with_element_cache()` 同形。overlay 那道只在 durable 介质逐出，
+  mem 档下默认值不改变任何行为；元素缓存那道两档都作用，样例规模下一遍生成也碰不到。
+- 现场对着看：`/health.model_cache.overlay` / `element_cache`（下一条）、`write_behind.overlay_root_limit` / `overlay_evicted_total` /
+  `element_cache_max_entries`。「设了上限却一直不逐」= 常驻的全是还没落盘的根。
 - **估算字节（2026-09-20 用户追加拍板：「查时现算、不落库」）**：`/health.model_cache.overlay`
   `{ records, roots, acks, approx_bytes, max_roots, evicted_total }` 与 `/health.model_cache.element_cache`
   `{ enabled, max_entries, parsed_entries, approx_bytes, databases[{ dbnum, source_sesno, parsed_entries, extraction_entries, approx_bytes, max_entries }] }`。
@@ -121,7 +132,7 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 1. **未落盘的根一条不丢**：逐出候选 = durable ACK 与回执逐字相符；候选用尽仍超限就停手。
 2. **逐出不是删除**：库里的几何行、边、水位一格不动；不产生 removal delta、不进房间变化账（`evict` 不是 `remove`）。
 3. **非 durable 介质下闸不动**：`store_mode().is_durable()` 为假时 `enforce_overlay_root_limit` 直接返回。
-4. **两个上限为 0 时行为与此前逐位相同**。
+4. **任何一层把上限写成 0 时行为与此前逐位相同**（默认值不是 0 之后，「一个字不变」要靠显式写 0 换取）。
 5. **整库房间重算 == 从零初始化**：根全集与从零初始化同一条枚举（`initialization_roots`），冷根的几何来自库里那一份、渲染同一套。
 6. 元素缓存上限只换时间不换产物：`READBACK` 两态逐字相同（缓存只省重复的 open + parse）。
 
@@ -169,7 +180,8 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - **不做**字节记账、不做 overlay 的读刷新 LRU、不做元素缓存 LRU（D6 / D4 已说明）。
 - **不在本文**让稳态窗口收尾释放 `GenerationInput`（`forget_generation_input`，初始化那一路已经这么做）：它会改今天默认行为
   （每窗重开 MDB、元素缓存重新变冷），与 D5「一个字不变」冲突——要做单开决策卡，先量每窗重开的代价。
-- **未决**默认值：先在现场量 `/health.model_cache.overlay.approx_bytes` / `element_cache.approx_bytes` 与 RSS 的关系再定；
-  `/dbnums` 面板没有 overlay 那一格，只有 `/health`。估算字节只在 `/health` 上现算，**不做**任何持久化 / 历史曲线（2026-09-20 用户拍板）。
+- 默认值已按 mem 档实测定下（D5）；**没量**的是 rocksdb 档下逐出真正发生之后的三条回退路与稳态小窗口的增量——现场先看
+  `/health.model_cache.overlay.evicted_total` 有没有动。`/dbnums` 面板没有 overlay 那一格，只有 `/health`。估算字节只在 `/health` 上
+  现算，**不做**任何持久化 / 历史曲线（2026-09-20 用户拍板）。
 - **未验证**：真机（live）上没有跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」整条链；本文的证据是 `mem://` 单测与源码钉。
 - 跨库成员（面板在 A、成员在 B）的 `RoomOnly` 那一问（ADR-073 U3）不在本文。

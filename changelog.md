@@ -46,6 +46,14 @@
   `generation_input_cache_footprint` → e3d-io `DbSet::element_cache_stats`（`ParsedElement` / `ElementExtraction::approx_heap_bytes`，
   锁外逐份走），按长度不按容量。钉 `the_overlay_footprint_counts_what_is_resident_and_grows_with_it`（删光归零 = 加减账对得上）；
   e3d-io 用例末尾补 `element_cache_stats` 三断言（vendor 提交 `4a76d2a`）。
+- **追加（同日 17:0x–17:4x，用户拍板「在 mem 档实例上跑一窗…给两个上限定默认值」）**：release 二进制（拷到私有目录——共用的
+  `D:\Rust\target` 被旁边 worktree 覆盖过一次）、mem 档、`POST /dbnums/{dbnum}/model/ensure` 整库即时生成 8000 / 7998 / 7997 / 1112：
+  7,743 根 / 59,929 条记录 → overlay 106.5 MB（≈ 13.8 KB/根、1.8 KB/记录），元素缓存 219,623 条 820.6 MB（3.6–4.7 KB/元素，7997 单库
+  176,982 条 643.8 MB），RSS 2.04 GB（两块合计 46%，其余是 mem 档的 kv-mem 模型行）。**默认值**：`model_overlay_max_roots = 50000`
+  （≈ 0.7 GB，样例 MDB 装六遍、12 万根量级压到四成）、`model_element_cache_max_entries = 200000`（≈ 0.7–0.95 GB/库，最大样例库一遍
+  不清一次）；`options::MODEL_OVERLAY_MAX_ROOTS_DEFAULT` / `MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT`，`effective_count_limit` 多一个
+  `default` 参数，**任何一层写 0 仍 = 不限**。证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`；ADR-082 标题 / D5 / 不变量 4 /
+  未决、DbOption.toml 注释、CONTEXT 两词条同步。
 
 ### ADR-073 · 整库房间重算的触发改成可再武装（审核 P1-2：durable 欠账 `dbnum_room_recompute_owed`）+ D14 代号守卫（审核 P2-3：盖算边那台计算器的代号）
 

@@ -152,10 +152,10 @@ pub struct DbOptionExt {
     /// 一片内存批最多携带多少个已生成元素。详见 [`model_memory_slice_elements`]。
     #[serde(default)]
     pub model_memory_slice_elements: Option<usize>,
-    /// 进程内模型投影 overlay 最多常驻多少个根（0 = 不限）。详见 [`model_overlay_max_roots`]。
+    /// 进程内模型投影 overlay 最多常驻多少个根（没写 = 50,000；0 = 不限）。详见 [`model_overlay_max_roots`]。
     #[serde(default)]
     pub model_overlay_max_roots: Option<usize>,
-    /// 生成用 `DbSet` 池级元素缓存最多装多少个元素（0 = 不限）。详见 [`model_element_cache_max_entries`]。
+    /// 生成用 `DbSet` 池级元素缓存最多装多少个元素（没写 = 200,000；0 = 不限）。详见 [`model_element_cache_max_entries`]。
     #[serde(default)]
     pub model_element_cache_max_entries: Option<usize>,
 
@@ -940,9 +940,20 @@ pub const MODEL_OVERLAY_MAX_ROOTS_ENV: &str = "AIOS_MODEL_OVERLAY_MAX_ROOTS";
 /// 环境变量名：一次性覆盖 [`model_element_cache_max_entries`]，不必改配置文件。
 pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES";
 
+/// [`model_overlay_max_roots`] 没写时的默认值（ADR-082 D5，2026-09-20 mem 档实测定的）：
+/// 4 库 7,743 根 / 59,929 条记录量 106.5 MB ≈ **13.8 KB / 根**（7997 单库 6,772 根 94.2 MB），
+/// 50,000 根 ≈ 0.7 GB——整套 AMS 样例 MDB 装得下六遍、生产「AMS 全量 12 万根」量级下把常驻压到四成。
+pub const MODEL_OVERLAY_MAX_ROOTS_DEFAULT: usize = 50_000;
+/// [`model_element_cache_max_entries`] 没写时的默认值（ADR-082 D5，同一次实测）：
+/// 每份 `DbSet` **3.6–4.7 KB / 元素**（7997 176,982 条 643.8 MB、1112 30,967 条 121.8 MB、8000 11,674 条 54.9 MB），
+/// 200,000 条 ≈ 0.7–0.95 GB / 库；样例里最大的 7997 整库一遍只装到 177k，默认值下一遍生成不会清一次，
+/// 清的只是长驻之后越过一整遍的累积。
+pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
+
 /// 进程内模型投影 overlay（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个**根**
 /// （`DbOption.toml` 的 `model_overlay_max_roots`，环境变量 [`MODEL_OVERLAY_MAX_ROOTS_ENV`] 压过；
-/// **默认 0 = 不限**，2026-09-20 用户拍板 d-149：只加能力，今天的行为一个字不变）。
+/// 没写 = [`MODEL_OVERLAY_MAX_ROOTS_DEFAULT`]，**写 0 = 不限**。2026-09-20 用户拍板 d-149 时先按
+/// 「默认 0、现场先量再配」落地，同日 mem 档实测之后按用户要求定了默认值，见 ADR-082 D5）。
 ///
 /// overlay 此前无界——一个根进来就一直在，直到显式失效或整库清空；长驻进程碰过的根越多它越大。
 /// 设了上限之后，每次发布与每次 durable ACK 之后按**最近一次提交**的先后（LRU）逐出**已 durable
@@ -958,12 +969,14 @@ pub fn model_overlay_max_roots() -> usize {
     effective_count_limit(
         std::env::var(MODEL_OVERLAY_MAX_ROOTS_ENV).ok().as_deref(),
         load_ext_fields().model_overlay_max_roots,
+        MODEL_OVERLAY_MAX_ROOTS_DEFAULT,
     )
 }
 
 /// 生成用 `DbSet` 的池级元素缓存（[`model_element_cache`]）最多装多少个**元素**
 /// （`DbOption.toml` 的 `model_element_cache_max_entries`，环境变量
-/// [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV`] 压过；**默认 0 = 不限**，d-149）。
+/// [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV`] 压过；没写 = [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT`]，
+/// **写 0 = 不限**，d-149 / ADR-082 D5）。
 ///
 /// 缓存体在 vendor `e3d-io` 的 `DbSet::with_element_cache_limit`：满了**整张清**（与四张版本表
 /// 缓存同一个做法，零簿记），下一次读再从文件装。每份 `DbSet` 各算——生成输入缓存
@@ -975,15 +988,21 @@ pub fn model_element_cache_max_entries() -> usize {
             .ok()
             .as_deref(),
         load_ext_fields().model_element_cache_max_entries,
+        MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
     )
 }
 
-/// 数量上限的裁决：环境变量是合法非负整数就用它，拼错了当没设（回配置），配置没写 = 0 = 不限。
-fn effective_count_limit(env_override: Option<&str>, configured: Option<usize>) -> usize {
+/// 数量上限的裁决：环境变量是合法非负整数就用它，拼错了当没设（回配置），配置没写 = `default`；
+/// 无论哪一层给的 **0 都是「不限」**——要关掉上限就显式写 0。
+fn effective_count_limit(
+    env_override: Option<&str>,
+    configured: Option<usize>,
+    default: usize,
+) -> usize {
     env_override
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .or(configured)
-        .unwrap_or(0)
+        .unwrap_or(default)
 }
 
 pub fn model_root_inflight_max() -> usize {
@@ -3924,42 +3943,50 @@ dir = "review_attachments"
         );
     }
 
-    /// d-149：两道按数量的内存闸的裁决——环境变量是合法非负整数就压过配置，拼错了当没设（回配置），
-    /// 配置没写 = 0 = 不限；两个变量名进了 DbOption.toml 的注释与 ADR-082，改名要一起改。
+    /// d-149 / ADR-082 D5：两道按数量的内存闸的裁决——环境变量是合法非负整数就压过配置，拼错了当没设
+    /// （回配置），配置没写 = 默认值（50,000 根 / 200,000 条，2026-09-20 mem 档实测定的），任何一层写 0 = 不限；
+    /// 两个变量名进了 DbOption.toml 的注释与 ADR-082，改名要一起改。
     #[test]
-    fn a_count_limit_takes_a_valid_env_override_falls_back_to_config_and_defaults_to_unbounded() {
-        assert_eq!(effective_count_limit(None, None), 0, "没写 = 不限");
+    fn a_count_limit_takes_a_valid_env_override_falls_back_to_config_then_to_the_default() {
+        assert_eq!(effective_count_limit(None, None, 9), 9, "没写 = 默认值");
         assert_eq!(
-            effective_count_limit(None, Some(20_000)),
+            effective_count_limit(None, Some(20_000), 9),
             20_000,
             "配置说了算"
         );
         assert_eq!(
-            effective_count_limit(Some("5"), Some(20_000)),
+            effective_count_limit(None, Some(0), 9),
+            0,
+            "配置写 0 = 不限，不回默认"
+        );
+        assert_eq!(
+            effective_count_limit(Some("5"), Some(20_000), 9),
             5,
             "环境变量压过配置"
         );
         assert_eq!(
-            effective_count_limit(Some(" 7 "), None),
+            effective_count_limit(Some(" 7 "), None, 9),
             7,
             "两边的空白不算"
         );
         assert_eq!(
-            effective_count_limit(Some("0"), Some(20_000)),
+            effective_count_limit(Some("0"), Some(20_000), 9),
             0,
             "环境变量给 0 = 现场关掉上限"
         );
         assert_eq!(
-            effective_count_limit(Some("-1"), Some(20_000)),
+            effective_count_limit(Some("-1"), Some(20_000), 9),
             20_000,
             "负数拼错了当没设"
         );
         assert_eq!(
-            effective_count_limit(Some("many"), Some(20_000)),
+            effective_count_limit(Some("many"), Some(20_000), 9),
             20_000,
             "非数字当没设"
         );
-        assert_eq!(effective_count_limit(Some(""), None), 0);
+        assert_eq!(effective_count_limit(Some(""), None, 9), 9);
+        assert_eq!(MODEL_OVERLAY_MAX_ROOTS_DEFAULT, 50_000);
+        assert_eq!(MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT, 200_000);
         assert_eq!(MODEL_OVERLAY_MAX_ROOTS_ENV, "AIOS_MODEL_OVERLAY_MAX_ROOTS");
         assert_eq!(
             MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV,
