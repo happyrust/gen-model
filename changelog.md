@@ -48,6 +48,17 @@
   执行与预览在这一点上不是一句话；`docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §6.2 G6 记的是「类别 0 → 不动 ✅」。
   待拍板：要不要让 `directly_touched` 对只由元数据候选撑起来的闭包命中放行（前移不重算）。
 
+### `the_extra_stamp_knob_is_off_unless_it_is_given` 跟上 `SPAMAP` 进生产常量：名单外的样本换成合成名字
+
+- **为什么**：e3d-model `cf6d8b6` 把 `PLACEMENT_STAMP_ATTRIBUTES` 定成 `["CACHID", "SPAMAP"]`、本仓 `2175dee93` 的戳表随之跟上，
+  这条钉还拿 `SPAMAP` 当「名单外」样本断言 `!stamp_only_with(&diff(&["SPAMAP"]), &[])`，`cargo test --lib` 一直 1 红（09-19 的几条
+  记录都写着「仍是那条 SPAMAP 戳」）。
+- **改动**：样本换成 `PROBESTAMP`（永远不会进常量的名字）；空名单那一半改成「常量里的每一枚都放行、常量外一个不放行」，
+  并逐个遍历 `PLACEMENT_STAMP_ATTRIBUTES` 断言——常量再加名字这条钉不用再改。`stamp_only` / `stamp_only_with` 的注释改口。
+- **验证**：`cargo test --lib` 2349 passed / 0 failed；增量集成用例 12 个 target 全绿
+  （ctray / equi / hvac_bran / pipe26229 increment、db8000_session_pairs、baseline_stream_8000、db8000_two_delete_fixture、
+  db_session_fixture_selfcheck、read_through_rows_parity、model_impact、shared_read_view_invalidation、direct_index_contract：91 passed / 2 ignored）。
+
 ## 2026-09-19
 
 ### 任务收尾那一笔包进冲突重试：与刷盘 stray epilogue 同写水位行时谁后提交谁输，输了重发而不是让任务落 `Partial`（ADR-073 D13 收口总表第 10 行、钉 36）

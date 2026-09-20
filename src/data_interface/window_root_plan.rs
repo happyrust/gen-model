@@ -7633,7 +7633,8 @@ mod tests {
 
     /// 「只动了戳」的候选（口径 §1.1 五条）：记录真变了，没换类型 / 没改挂 / 成员表没动 / 不 `opaque`，
     /// 且**每一个**变了的属性都在 [`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`]
-    /// （今天 = `["CACHID"]`，t-47 落地的常量）里。名单只写一份——引用常量，不写字面量。
+    /// （t-47 落地时 = `["CACHID"]`；e3d-model `cf6d8b6` 起 `SPAMAP` 也进了名单，本仓 `2175dee93`
+    /// 的戳表随之跟上）里。名单只写一份——引用常量，不写字面量。
     ///
     /// 与 `ElementDiff::is_placement_only` **互斥**，别混用：那个问「除了摆放还动了别的没有」（戳跟着
     /// 摆放一起变不算数，Q5 / t-47），要求 `POS`/`ORI` 至少动一项；这个问「除了戳还动了没有」，要求
@@ -7645,7 +7646,8 @@ mod tests {
     /// [`stamp_only`] 的参数化版本：`extra` 里的名字**也**当成戳。`extra` 为空时与 `stamp_only`
     /// 逐位相同——五条判据只写这一份，缺省路径不另开分支。
     ///
-    /// 只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问：`extra` 由探针旋钮
+    /// 当初只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问（那一问已经答完：
+    /// `SPAMAP` 进了生产常量）；旋钮留给下一个候选戳同样的先量。`extra` 由探针旋钮
     /// `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 给，缺省空。生产常量 `PLACEMENT_STAMP_ATTRIBUTES` 不动。
     fn stamp_only_with(diff: &ElementDiff, extra: &[String]) -> bool {
         !diff.is_unchanged()
@@ -7703,15 +7705,28 @@ mod tests {
             attributes: attributes.iter().map(|name| name.to_string()).collect(),
             opaque: false,
         };
-        let spamap = vec!["SPAMAP".to_string()];
-        // 空名单 = 今天的口径，逐位不变（t-194 的复现靠这一条）。
-        assert!(!stamp_only_with(&diff(&["SPAMAP"]), &[]));
-        assert!(!stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &[]));
+        // 一个不在生产常量里、也永远不该进去的名字，专门用来量「旋钮关着时放不放行」。
+        // 原先这里用的是 `SPAMAP`——它 2026-09-20 起进了 `PLACEMENT_STAMP_ATTRIBUTES`
+        //（e3d-model `cf6d8b6`），成了生产口径的一部分，不再能当「名单外」的样本。
+        let probe = vec!["PROBESTAMP".to_string()];
+        // 空名单 = 今天的口径，逐位不变（t-194 的复现靠这一条）：常量里的两枚戳放行，
+        // 常量外的一个都不放行。
         assert!(stamp_only_with(&diff(&["CACHID"]), &[]));
+        assert!(stamp_only_with(&diff(&["SPAMAP"]), &[]));
+        assert!(stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &[]));
+        assert!(!stamp_only_with(&diff(&["PROBESTAMP"]), &[]));
+        assert!(!stamp_only_with(&diff(&["CACHID", "PROBESTAMP"]), &[]));
         // 给了名单才多放行，而且只多放行名单里的那些。
-        assert!(stamp_only_with(&diff(&["SPAMAP"]), &spamap));
-        assert!(stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &spamap));
-        assert!(!stamp_only_with(&diff(&["SPAMAP", "NAME"]), &spamap));
+        assert!(stamp_only_with(&diff(&["PROBESTAMP"]), &probe));
+        assert!(stamp_only_with(&diff(&["CACHID", "PROBESTAMP"]), &probe));
+        assert!(!stamp_only_with(&diff(&["PROBESTAMP", "NAME"]), &probe));
+        // 名单是照抄常量来的：常量里有什么，这里就放行什么——别在测试里再写一份字面量。
+        for name in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
+            assert!(
+                stamp_only_with(&diff(&[name]), &[]),
+                "{name} 在生产常量里却没被当成戳"
+            );
+        }
     }
 
     /// 每个多算根量到的一行（T4）。
