@@ -15,6 +15,39 @@
   四种领域错，前提断言「共享航班顶层 downcast 看不见原错」；链上没有领域错照旧 500）；`cargo test --lib` **2349 passed / 0 failed / 121 ignored**。
   live：夹具 `20260920-165908` 播种 12 根，无一 500。
 
+### E3D 增量夹具（`l3_suite --fixture-manifest`）：三处随架构漂移的断口修好，九个场景在真 AMS 项目 7998 上 9/9 PASS
+
+- **为什么**：这套 9 场景（data / transform / geometry / boolean / owner / add / room-structure / room-member / delete）是「部署形态的
+  增量 + 房间归属增量」唯一的端到端用例，09-11 隔离端口之后没再跑通过。今天从头跑到底，依次撞出：① 服务从 `run_dir` 起
+  （8335b4800 隔离实例锁）而 aios_core 连库时按 CWD 找 `resource/surreal`，`Failed to define common functions … os error 3`；
+  ② `project-mirror` 只拷目标 DESI，服务（ADR-078 MDB 闭包）从 SYS **文件**读 `/ALL` 声明，`已尝试 SYS 库：（没有找到任何 SYS 库文件）`，
+  房间常驻模型建不起来；③ 配置没钉 `room_membership = true`（ADR-073 起默认 false，基础配置也写 false），两个 `room: true` 场景断言的
+  `room_relate` 边根本不会写；④ 播种与启动的模型补齐任务抢同一批根（上一条的 409 → 500）；⑤ drain 助手写死金基线 `API`（8028），
+  夹具 18028 上每个场景都去敲一台不存在的服务；⑥ 模型面断言按 `pe->inst_relate` / `->geo_relate` 图跳读——`inst_relate` 是普通表
+  （`INSERT IGNORE`，烘焙行没有 `out`）、`geo_relate` 挂在 `inst_info` 上，两边永远空列表，「模型变了」永远为假；⑦ 「重生成的根」
+  去 `model_drain.detail.roots` 里找，而 ADR-071 D1 起模型随 dbnum 任务生成，根在 `data_batch.result.units[].root_refno`；
+  ⑧ `setup.mac` 的 `/AIOS-INC-DATA-EQ` 没给 POS、落在原点，整只 BOX 在夹具房间 R101 盒里，room-structure 改名房间时它的边跟着掉，
+  被判成「无关夹具状态变了」；⑨ 只改名的根照样整根重算（候选照进闭包，e3d-model `affected_closure` 的「宁多勿漏」），
+  `inst_relate.model_sesno` 随之跳，data 场景与每一次 restore 对拍都红。
+- **改动**（只动运行器与夹具宏，不动服务）：`stage_surreal_scripts` 把 `resource/surreal/*.surql` 拷进 `<run>/resource/surreal`；
+  `mirror_project_meta_dbs` 把 `<code>sys / com / mis` 拷到镜像目标 DB 旁（缺 SYS 直接报错）；`write_runtime_config` 钉 `room_membership = true`；
+  播种前先 `wait_fixture_pending(…, "startup")`，`ensure_root_model` 对 409 退避重试（预算 5 分钟）；`model_drain_task_ids` /
+  `wait_model_drain_settlement` 带 `api` 参数，金基线传 `API`、夹具传 `fixture_api()`；快照 SQL 改成
+  `SELECT * FROM inst_relate WHERE in IN $ids` / `FROM geo_relate WHERE geom_refno IN $ids`（unrelated 同款）；
+  `regenerated_roots` 从 `data_batch.result.units` 取（`model_drain.detail.roots` 仍认）；`strip_fixture_volatile` 多剥 `model_sesno`，
+  `fixture_plane` 也过一遍它；`setup.mac` 给 DATA 设备 `POS E -5000 N 5000 U 0`。README 补「直接对 E3D3.1 真项目 + 7998 跑」的用法。
+- **验证**：`cargo test --bin l3_suite` **39 passed**（新钉：脚本先于起服务、镜像带元数据库、`room_membership = true`、只重试 409 且
+  settle→seed→settle 顺序、夹具不碰金基线端口、模型面比内容不比戳）。live：`l3_suite --fixture-manifest … --target-db-file
+  D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7998_0001 --target-dbnum 7998`（`L3_ALLOW_EXISTING_E3D_SESSION=1`，桌面开着两个
+  E3D GUI 会话），`output/e3d-fixture/20260920-165908`：**9/9 PASS**，5m51s；每个场景 apply / restore 两窗 `data_batch` 都 `succeeded`、
+  `applied == model == file_latest`、四平面 changed 与期望逐位相同（data：只 attributes；transform / geometry / boolean：+model；
+  owner / add / delete：+tree +model；room-structure：+room；room-member：+model +room），room-member 的 BOX `24382/353` R101 → R102 →
+  restore 回 R101；teardown 后 7998 里 `/AIOS-INC-*` 一个不剩。前六次失败的现场留在同目录 `20260920-16{0315,1345,2108,2929,3357,5017}`。
+- **顺带看见、没改**：⑨ 是行为不是夹具——只改 `NAME` 的 EQUI 根这一窗 `touched=1 regen=1`（`data_batch.result.units` 里
+  `kind=regen`），而同一窗回执的候选账 `no_model=2 (metadata_only=1)`、`manual_update` 的预览口径说它 `will_generate=false`。
+  执行与预览在这一点上不是一句话；`docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §6.2 G6 记的是「类别 0 → 不动 ✅」。
+  待拍板：要不要让 `directly_touched` 对只由元数据候选撑起来的闭包命中放行（前移不重算）。
+
 ## 2026-09-19
 
 ### 任务收尾那一笔包进冲突重试：与刷盘 stray epilogue 同写水位行时谁后提交谁输，输了重发而不是让任务落 `Partial`（ADR-073 D13 收口总表第 10 行、钉 36）
