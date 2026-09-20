@@ -430,6 +430,20 @@ async fn library_alignment_current(dbnums: &BTreeSet<u32>) -> Option<bool> {
     Some(all_current)
 }
 
+/// 只核「房间体制可用 + 请求的房间都在册」，不解成员：树路由在扫树**之前**先过这一道，好让「不在册 → 400」
+/// 排在「中心构件没有盒 → 404」前面（`rooms/{refno}/tree` 的房间既是范围又是过滤，不在册的房间自然也没有盒，
+/// 先扫会答成 404）。`nearby` 不走这里——它的错误顺序不动。
+pub fn ensure_rooms_registered(requested: &BTreeSet<RefU64>) -> Result<(), SpatialQueryError> {
+    let availability = rooms_availability();
+    let Some(model) = availability.model else {
+        return Err(SpatialQueryError::RoomsUnavailable {
+            status: availability.status,
+            reason: availability.reason,
+        });
+    };
+    select_rooms(&model, requested).map(|_| ())
+}
+
 /// `rooms=` 的解算入口：`requested` 是参数里的房间 refno，`candidates` 是这次扫出来的候选 refno（可重复）。
 pub async fn resolve_room_scope(
     requested: &BTreeSet<RefU64>,

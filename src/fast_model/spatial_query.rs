@@ -1346,11 +1346,14 @@ pub async fn nearby_tree(
     unit_types: Vec<String>,
     options: crate::fast_model::spatial_tree_view::TreeOptions,
 ) -> Result<crate::fast_model::spatial_tree_view::TreeResponse, SpatialQueryError> {
-    if params.rooms.is_none() {
+    let Some(rooms) = &params.rooms else {
         return Err(SpatialQueryError::BadRequest(
             "nearby/tree 需要 rooms=（房间层级树以所选房间为根；不按房间过滤请用 nearby）".to_string(),
         ));
-    }
+    };
+    // 先核房间（不在册 400 / 体制不可用 422），再扫树（中心没盒 404）：`rooms/{refno}/tree` 的房间既是范围又是过滤，
+    // 不在册的房间自然也没有盒，扫在前就会答成 404。
+    crate::fast_model::spatial_rooms::ensure_rooms_registered(rooms)?;
     let scan = scan_global_tree(params, centerline).await?;
     let room_scope = resolve_rooms_for_scan(&scan, params, attrs.as_ref())
         .await?
