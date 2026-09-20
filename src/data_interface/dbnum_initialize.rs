@@ -334,6 +334,16 @@ pub(crate) async fn initialize(
     let receipt = crate::data_interface::task_end::commit_task_end_on(&aios_core::SUL_DB, &end)
         .await
         .with_context(|| format!("dbnum={dbnum} 初始化收尾一笔未落（写入标记仍是 writing，下次启动整库重来）"))?;
+    // 整库房间重算的欠账（审核 P1-2）随 `Aligned` 一并销掉：这一库的每一根都是这台计算器算的，
+    // 上一窗欠下的那次整库重算已经没有意义。没盖 `Aligned`（有根失败 / 开关关着）就留着。
+    if model_outcome.as_ref().is_some_and(|outcome| {
+        matches!(outcome.room_generation, RoomGenerationStamp::Aligned(_))
+    }) && let Err(error) = crate::data_interface::room_recompute::discharge(dbnum).await
+    {
+        warnings.push(format!(
+            "dbnum={dbnum} 整库房间重算欠账未销（初始化已把每一根对齐；下一个任务会多跑一次整库重算）: {error:#}"
+        ));
+    }
 
     println!(
         "dbnum={dbnum} 初始化完成 耗时={}ms pe={pe_count} worl={root_count} 属性 lane: tx={} bytes={} 冲突重试={} 超时={}；模型 lane: tx={} bytes={} 冲突重试={} 超时={} 根={} 失败根={} 记录={} 房间边={} model_sesno={}",

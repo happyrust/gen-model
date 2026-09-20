@@ -2,6 +2,51 @@
 
 ## 2026-09-20
 
+### ADR-073 · 整库房间重算的触发改成可再武装（审核 P1-2：durable 欠账 `dbnum_room_recompute_owed`）+ D14 代号守卫（审核 P2-3：盖算边那台计算器的代号）
+
+- **为什么**：2026-09-17 审核 `codex/model-projection-cache` 同批点出、当时「本条未动」的两条。**P1-2**：`RoomOnly` 的两条触发
+  （本窗账本碰到房间定义族 / 开工前对齐换了房间代号）都是边沿型——只在碰到那条变更的那一窗出现一次。那一窗要是没跑到收尾段
+  （预算拆窗 `round_complete=false`、单元失败让执行体直接给 `None`、刷盘没齐 `flush.all_acked()=false`）或重算写库失败，原因随任务
+  回执一起丢：数据水位已推进、下一窗账本里不再有那条 PANE 变更，开工前对齐再探也是 `Unchanged`，本库的成员边**永久陈旧**到下一次
+  不相关的 PANE 变化；重启后按模型水位缺口重排的 ModelOnly 也救不了（普通增量窗口一成功 `model_sesno` 就越过了那条变更）。
+  **P2-3**：收尾盖 `model_room_generation`（D14）读的是任务结束那一刻的 `required_room_generation()`——并发 `/model/ensure` 或别的库
+  任务在本任务中途把常驻对齐到新一代时，`Aligned` 盖上一个边不是它算的代号（`dbnum_initialize` 那一路用 `rooms.resident_generation()`
+  本来就是对的）。用户 2026-09-20 10:5x 拍板一起修。
+- **改动**（会话 fable-5-1-58）：
+  - **欠账**（`room_recompute.rs`）：新表 `dbnum_room_recompute_owed:{dbnum}`（一库一行、SCHEMALESS，`reason` / `task_id` /
+    第一次欠下的 `armed_at`，`armed_at ?? time::now()` 保第一次），`arm` / `owed` / `discharge` 三句与 `write_state` 同形；
+    `reason_with_owed` 把本窗触发与欠账合成一句、点名是哪个任务什么时候欠下的。`dbnum_state::INCREMENT_STATE_SCHEMA` 定义它，
+    `table_parity::CONTROL_PLANE_TABLES` 5 → 6（行上带 `time::now()`，中途 diff 排除）。
+  - **两个执行体不再因失败丢触发**：`execute_frozen_batch_body` 交出「要不要」只按 `defer_model_phase`（让位）判、不再看
+    `settlement_failed`；`execute_model_only_body` 只按 `whole_library_model_only(job)` 判、不再看 `failed`。
+  - **`execute_frozen_batch`**：执行体一返回（`body_ms` 之后、拆窗余量 / 刷盘栅栏之前）就 `room_recompute::arm(dbnum, reason, task_id)`
+    （`!initialization_closed_task` 且 `room_membership()` 门内；初始化双 lane 每一根都是对齐后的计算器算的，不欠；开关关着不记，
+    重新打开后的补齐仍是显式 `model/rebuild`）。DESI 收尾段：`owed(dbnum)` → `reason_with_owed` → `Some(reason) if flush.all_acked()`
+    才跑 → `model_outcome_of` → 只在 `outcome.room_generation` 是 `Aligned(_)` 时 `discharge(dbnum)`；`Untouched` / `Cleared`
+    都不销，欠着的留给下一个任务。整库重排的 ModelOnly 不读欠账、不替它空转一遍——它盖 `Aligned` 时一并销。读欠账失败只按本窗
+    自己的触发判、留一句；记账 / 销账失败各留一句（销账失败的代价是下一个任务多跑一次整库重算）。
+  - **`dbnum_initialize::initialize`**：收尾一笔落了、盖的是 `Aligned` 才 `discharge(dbnum)`。
+  - **代号守卫**（`batch_worker.rs`）：`run_room_only_recompute` 返回 `RoomOnlyRecompute`（`Aligned(rooms.resident_generation())` /
+    `Incomplete` / `NotApplicable`，不再是 bool，代号与写进根 ACK 的同一个字串）；`DataBatchTaskResult` 加 `room_generation_at_start`
+    （`serde(skip)`，两个执行体在 `refresh_room_reference_before_task` 之后、`run_unit_worklist` 之前经 `room_generation_after_refresh()`
+    留底）；`task_room_generation_stamp(job, at_start, recompute)` → `(处置, 一句解释)`，判据纯函数 `room_generation_stamp_of(now, evidence)`
+    按 `WholeLibraryEvidence` 分三档：`Recomputed(代号)` → `Aligned(代号)`（收尾常驻取不到 / 又换了代都不改）；
+    `EveryRootRegenerated { at_start }` → 只有 `at_start == now` 才 `Aligned(now)`，不等 → `Untouched` + 「常驻房间模型在任务中途换了代
+    （开工 X → 收尾 Y）…这一版不盖」进 `warnings`；`None` → `Untouched`；`Ok(None)`（开关关着）一律 `Cleared`。
+  - **文档**：ADR-073 状态行、D13 欠账段 + 「拿开工时同一台计算器」改口成「在收尾段冻一台计算器」（审核 **P2-4** 的措辞漂移，
+    实现从落地起就是收尾时新冻）、D14「盖哪一代」段、源码钉 17 / 19；CONTEXT「整库房间重算」「`model_room_generation`」两词条。
+- **不做 / 边界**：`/dbnums` 面板没加「欠着整库重算」那一格（欠账只在任务日志与回执 `warnings` 里可见）；欠账的 `reason` 是最近
+  一次触发的，第一次的只剩 `armed_at`；`room_membership=false` 期间不记账、已记的不销（重新打开后第一个 DESI 任务会还）；
+  真机没跑「拆窗 / 单元失败之后下一窗自动补跑整库重算」与「并发 ensure 中途换代不盖 Aligned」两条用例。审核里 F3 / F4 / U3 照旧。
+- **验证**：整套 `cargo test --lib` **2278 passed / 0 failed / 123 ignored**（较 `ea7ade930` 多 4 条 = 本条新增：`mem://` 欠账往返
+  `the_owed_marker_round_trips_and_keeps_the_first_arming_time`、`the_arming_statement_upserts_and_the_discharge_deletes_the_row`、
+  `the_reason_merges_this_window_with_the_debt_and_names_the_debtor`、`the_task_stamp_uses_the_recompute_generation_and_guards_the_mid_task_swap`；
+  改写 `only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation` 按三档证据逐格钉、源码钉
+  `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end` 加欠账的记 / 读 / 合 / 销顺序与初始化销账；
+  工作树含旁边会话未提交的 `attribute_history / unit_versions / web_service` 改动）；定向 13 条过；`cargo check --lib --tests --bins` 过；
+  `rustfmt --edition 2024 --check` 本条新增行无差异（`batch_worker.rs` 剩 6 处、`dbnum_initialize.rs` 剩 18 处旧差异按 hunk 过滤核过，
+  `room_recompute.rs` 整文件干净）；`room_recompute.rs` CRLF / 其余 .rs LF / 三份文档各自行尾未翻、裸 LF 0。**未 live**：真机没跑欠账补跑与中途换代两条用例。
+
 ### ADR-066 · S4b §5 门 3 首跑：真库探针 `probe_rigid_motion_gate3_for_window`——ams8000 195→196 过门，另 9 窗 19 根同过；嵌套根共有记录被双乘（**已修**：`republish_records` 按记录的幂等闸）、Baked `mesh_id` 纯平移也漂（**已改口**：Baked 按内容判）、1e-3 离 f32 ulp 只差 2.3%（**已改口**：`max(1e-3, 2 ulp)`）
 
 - **为什么**：ADR-066 D7 写明默认关「直到 §验收的对拍门在 ams8000 与 live #2 上过了再翻」，而执行体 `republish_roots_by_rigid_motion` 从 09-09 落地到

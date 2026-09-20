@@ -663,8 +663,16 @@ pub struct DataBatchTaskResult {
     /// 本任务要在本批根刷盘之后、收尾之前用现有几何重算本库全部根的房间边（`RoomOnly`，
     /// d-819 / ADR-073 D13）：`Some(原因)`——本窗变更集碰到房间定义族 / 开工前对齐换了房间代号。
     /// 执行体内部的接力，不进回执（收尾那一段的结果进 `warnings` / `units`）。
+    /// **模型半边失败也照样给**（审核 P1-2）：这一格说的是「本窗触发了」，跑不跑、这次跑不跑得成
+    /// 是收尾段的事——触发一丢，本库的成员边就永久陈旧到下一次不相关的 PANE 变化。
     #[serde(skip)]
     pub room_recompute: Option<String>,
+    /// 模型半边开工前对齐之后、冻第一台计算器之前读到的房间代号（`required_room_generation`）。
+    /// 收尾盖 durable 侧房间就绪承诺（ADR-073 D14）时的代号守卫（审核 P2-3）：整库重排的 ModelOnly
+    /// 每根各自冻计算器（write-behind 逐批冻），常驻要是在任务中途换了代，各根就不是同一代算的，
+    /// 收尾那一刻读到的代号替不了它们说话。`None` = 模型半边没跑 / 开关关着 / 代号取不到。
+    #[serde(skip)]
+    pub room_generation_at_start: Option<String>,
 }
 
 /// 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
@@ -1050,6 +1058,7 @@ async fn run_one_batch(
                                     model_caught_up_at: None,
                                     initialization_closed_task: false,
                                     room_recompute: None,
+                                    room_generation_at_start: None,
                                 };
                             }
                         }
@@ -1156,6 +1165,7 @@ async fn run_one_batch(
                         model_caught_up_at: None,
                         initialization_closed_task: false,
                         room_recompute: None,
+                        room_generation_at_start: None,
                     }
                 }
             }
@@ -1485,6 +1495,22 @@ async fn execute_frozen_batch(
     };
     let body_ms = body_started.elapsed().as_millis();
 
+    // 整库房间重算的欠账（审核 P1-2）：触发一出现就落库记下，**早于**下面的拆窗余量 / 刷盘栅栏 /
+    // 重算本身——那几处任何一处没走到，原因都不再随回执丢。收尾段跑齐了才销（`Aligned` 那一处）。
+    // 初始化双 lane 已把每一根都用对齐后的计算器算过、自己那一笔盖了 `Aligned`，不欠；开关关着没有
+    // 房间可算，不记（重新打开后的补齐仍是显式 `model/rebuild`，2026-09-11 那节的口径）。
+    if !result.initialization_closed_task
+        && crate::options::room_membership()
+        && let Some(reason) = result.room_recompute.as_deref()
+        && let Err(error) =
+            crate::data_interface::room_recompute::arm(job.dbnum, reason, &job.task_id).await
+    {
+        result.warnings.push(format!(
+            "dbnum={} 整库房间重算欠账未记下（这一窗跑不成的话触发会随任务丢；触发：{reason}）: {error:#}",
+            job.dbnum
+        ));
+    }
+
     // 预算式定窗的余量（`AIOS_INCREMENT_WINDOW_MAX_SESSIONS`）：水位已经推进到截断点时
     // 立刻把剩下的区间排回队列，不等下一轮 IDLE_WAKE 重扫——一段积压会被拖成分钟级
     // 的等待链。只看数据批次的终态，与模型生成成败无关（ADR-056 N4）。
@@ -1606,28 +1632,66 @@ async fn execute_frozen_batch(
             flush_started.elapsed().as_millis()
         );
         // 整库房间重算（`RoomOnly`，d-819 / ADR-073 D13）：本窗碰了房间定义族 / 开工前对齐换了房间代号
-        // → 用本库全部根的现有几何重写两张房间边。放在刷盘之后：本批根的模型行与边已在库里，此刻本库
-        // 没有第二个写者；放在收尾之前：算不出的根按 D2 记失败、`model_sesno` 不盖。刷盘没齐就不跑
-        // ——那一批根已经判死，水位本来就不盖。
-        let room_recompute = result.room_recompute.clone();
-        let recomputed_whole_library = room_recompute.is_some() && flush.all_acked();
-        let rooms_ok = match room_recompute {
+        // / 上一窗欠着没还（审核 P1-2）→ 用本库全部根的现有几何重写两张房间边。放在刷盘之后：本批根的
+        // 模型行与边已在库里，此刻本库没有第二个写者；放在收尾之前：算不出的根按 D2 记失败、
+        // `model_sesno` 不盖。刷盘没齐就不跑——那一批根已经判死，水位本来就不盖；欠账留着，下一个任务还。
+        // 整库重排的 ModelOnly 不跑：`DbSet@T` 上每一根都刚用对齐后的计算器算过，再来一遍是 O(本库)
+        // 的空转——它盖 `Aligned` 时把欠账一并销掉。
+        let owed = if whole_library_model_only(job) {
+            None
+        } else {
+            match crate::data_interface::room_recompute::owed(job.dbnum).await {
+                Ok(owed) => owed,
+                Err(error) => {
+                    result.warnings.push(format!(
+                        "dbnum={} 读不到整库房间重算欠账（这一窗只按自己的触发判；欠账若有仍在库里）: {error:#}",
+                        job.dbnum
+                    ));
+                    None
+                }
+            }
+        };
+        let room_recompute = crate::data_interface::room_recompute::reason_with_owed(
+            result.room_recompute.as_deref(),
+            owed.as_ref(),
+        );
+        let recompute = match room_recompute {
             Some(reason) if flush.all_acked() => {
                 registry.set_stage(&job.task_id, "rooms");
-                run_room_only_recompute(job, &reason, &mut result).await
+                Some(run_room_only_recompute(job, &reason, &mut result).await)
             }
-            _ => true,
+            _ => None,
         };
+        let rooms_ok = !matches!(recompute, Some(RoomOnlyRecompute::Incomplete));
         // 库级目录落款（ADR-079）：只有目录级联排的 / 整库重排的 ModelOnly 有资格说，随收尾那一笔
         // 与 `model_sesno` 同盖；单元清单是任务手里的事实，不回问库。
         let catalogue_sessions = task_catalogue_stamps(job, &result.units);
-        let room_generation = task_room_generation_stamp(job, recomputed_whole_library && rooms_ok);
+        let (room_generation, generation_note) = task_room_generation_stamp(
+            job,
+            result.room_generation_at_start.as_deref(),
+            recompute.as_ref(),
+        );
+        if let Some(note) = generation_note {
+            result.warnings.push(format!("dbnum={} {note}", job.dbnum));
+        }
         let mut outcome = model_outcome_of(&flush, catalogue_sessions, room_generation);
         if !rooms_ok {
             outcome.all_roots_ok = false;
             outcome.catalogue_sessions = None;
             outcome.room_generation =
                 crate::data_interface::task_end::RoomGenerationStamp::Untouched;
+        }
+        // 销账（审核 P1-2）：只有 durable 侧整库对齐真盖得上（`Aligned`）才算还清——整库重算跑齐、
+        // 或整库重排让每一根都是这一代算的。`Untouched` / `Cleared` 都不销：欠着的留给下一个任务。
+        if matches!(
+            outcome.room_generation,
+            crate::data_interface::task_end::RoomGenerationStamp::Aligned(_)
+        ) && let Err(error) = crate::data_interface::room_recompute::discharge(job.dbnum).await
+        {
+            result.warnings.push(format!(
+                "dbnum={} 整库房间重算欠账未销（边已对齐；下一个任务会多跑一次整库重算）: {error:#}",
+                job.dbnum
+            ));
         }
         model_outcome = Some(outcome);
     }
@@ -1832,20 +1896,34 @@ async fn abandon_undurable_roots(
     ));
 }
 
-/// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：拿开工时同一台计算器，对本库
+/// [`run_room_only_recompute`] 的结果：整库的边齐了没有，齐了的话是**哪一代**算的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoomOnlyRecompute {
+    /// `room_membership=false`：没有房间可算，按齐了算（不盖、不销账——见 D14 的 `Cleared`）。
+    NotApplicable,
+    /// 本库全部有回执的根都用同一台计算器重算了、边全部提交、ACK 对齐：带的是那台计算器的代号
+    /// （`resident_generation`，与 `recompute_dbnum_room_edges` 写进 ACK 的同一个字串）——收尾盖
+    /// D14 那一格就盖它，不再在收尾那一刻重读常驻（审核 P2-3）。
+    Aligned(String),
+    /// 冻不出计算器 / 有根算不出 / 写库失败：任务 `Partial`、水位不盖、欠账留着。
+    Incomplete,
+}
+
+/// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：在收尾段冻一台计算器（本批根
+/// 刷盘之后常驻可能已被别的任务对齐到更新的一代，用最新的那一代算、ACK 与 D14 那一格都盖它），对本库
 /// 全部有回执的根按投影里的现有几何重算归属、重写两张边（[`recompute_dbnum_room_edges`]）。
 ///
-/// 返回「本库这一版的房间归属齐了没有」：算不出的根按 D2 记失败（账本 `failed`，下一窗重排；
-/// 单元清单补一条 `Failed` 让回执看得见）、任务 `Partial`、水位不盖；整批提交失败同样 `false`。
-/// 开关关着（`Ok(None)`）= 没有房间可算，如实记一句、按齐了算；计算器冻不出（`Blocked`）= 本库
-/// 这一版的房间算不了，`false`。
+/// 返回「本库这一版的房间归属齐了没有、齐到哪一代」（[`RoomOnlyRecompute`]）：算不出的根按 D2 记失败
+/// （账本 `failed`，下一窗重排；单元清单补一条 `Failed` 让回执看得见）、任务 `Partial`、水位不盖；
+/// 整批提交失败同样 `Incomplete`。开关关着（`Ok(None)`）= 没有房间可算，如实记一句、`NotApplicable`；
+/// 计算器冻不出（`Blocked`）= 本库这一版的房间算不了，`Incomplete`。
 ///
 /// [`recompute_dbnum_room_edges`]: crate::fast_model::model_db_adapter::recompute_dbnum_room_edges
 async fn run_room_only_recompute(
     job: &FrozenBatch,
     reason: &str,
     result: &mut DataBatchTaskResult,
-) -> bool {
+) -> RoomOnlyRecompute {
     use crate::fast_model::model_db_adapter::{
         PersistTarget, frozen_room_calculator, recompute_dbnum_room_edges,
     };
@@ -1856,21 +1934,21 @@ async fn run_room_only_recompute(
             result.warnings.push(format!(
                 "dbnum={dbnum} 整库房间重算跳过：room_membership=false（触发：{reason}）"
             ));
-            return true;
+            return RoomOnlyRecompute::NotApplicable;
         }
         Err(error) => {
             result.status = ManualUpdateStatus::Partial;
             result.warnings.push(format!(
                 "dbnum={dbnum} 整库房间重算冻不出计算器（触发：{reason}），这一版 model_sesno 不盖: {error:#}"
             ));
-            return false;
+            return RoomOnlyRecompute::Incomplete;
         }
     };
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     match recompute_dbnum_room_edges(PersistTarget::process(), store, dbnum, &rooms).await {
         Ok(report) => {
             println!(
-                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{} 重算、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，耗时 {}ms",
+                "dbnum={dbnum} 整库房间重算完成（触发：{reason}）：根 {}/{} 重算、成员边 {}、事务 {}（最大 {} B）、ACK 对齐 {}、算不出 {}，代号 {}，耗时 {}ms",
                 report.recomputed,
                 report.roots,
                 report.room_edges,
@@ -1878,10 +1956,11 @@ async fn run_room_only_recompute(
                 report.max_transaction_bytes,
                 report.acks_refreshed,
                 report.failed.len(),
+                rooms.resident_generation(),
                 report.elapsed_ms
             );
             if report.failed.is_empty() {
-                return true;
+                return RoomOnlyRecompute::Aligned(rooms.resident_generation().to_owned());
             }
             for (root, error) in &report.failed {
                 let root_refno =
@@ -1913,14 +1992,14 @@ async fn run_room_only_recompute(
                     .collect::<Vec<_>>()
                     .join("；")
             ));
-            false
+            RoomOnlyRecompute::Incomplete
         }
         Err(error) => {
             result.status = ManualUpdateStatus::Partial;
             result.warnings.push(format!(
-                "dbnum={dbnum} 整库房间重算写库失败（触发：{reason}；已提交的事务照样有效、下一次触发重来），这一版 model_sesno 不盖: {error:#}"
+                "dbnum={dbnum} 整库房间重算写库失败（触发：{reason}；已提交的事务照样有效，欠账留着、下一个任务重来），这一版 model_sesno 不盖: {error:#}"
             ));
-            false
+            RoomOnlyRecompute::Incomplete
         }
     }
 }
@@ -2003,31 +2082,84 @@ fn model_outcome_of(
 /// 房间开关关着 → `Cleared`：这一版 `model_sesno` 只承诺几何（ADR-073 2026-09-11 修订），
 /// durable 侧的房间就绪承诺随之清空，免得关掉开关跑过一轮之后那一格还替旧边说话。
 ///
-/// 代号取此刻的 [`required_room_generation`]，与 `/model/ensure` 准入判「这根的 ACK 够不够新」
-/// 用的是同一个字串；取不到（常驻模型 `Blocked`）时不盖——那种局面下本批根本来也没几根落得下去。
+/// 盖哪一代（审核 P2-3 的代号守卫）：**盖算边的那台计算器的代号，不是收尾那一刻常驻的代号。**
+/// 跑过整库重算的，代号随 [`RoomOnlyRecompute::Aligned`] 一起回来——与它写进根 ACK 的同一个字串；
+/// 整库重排的 ModelOnly 没有一台统一的计算器（write-behind 逐批冻），只有常驻在任务期间**没换代**
+/// （开工前对齐之后读到的代号 == 收尾此刻读到的代号）才能说各根是同一代算的；中途换了代
+/// （并发 `/model/ensure` 或别的库任务把常驻对齐到了新一代）就不盖，并说一句为什么。
+/// 收尾此刻的代号仍取 [`required_room_generation`]（`Ok(None)` = 开关关着 → `Cleared`；取不到 → 不盖）。
+///
+/// 返回 `(处置, 一句解释)`——解释只在守卫拦下时给，进任务回执的 `warnings`。
 ///
 /// [`required_room_generation`]: crate::fast_model::model_db_adapter::required_room_generation
 fn task_room_generation_stamp(
     job: &FrozenBatch,
-    recomputed_whole_library: bool,
-) -> crate::data_interface::task_end::RoomGenerationStamp {
-    room_generation_stamp_of(
-        crate::fast_model::model_db_adapter::required_room_generation(),
-        recomputed_whole_library || whole_library_model_only(job),
-    )
+    generation_at_start: Option<&str>,
+    recompute: Option<&RoomOnlyRecompute>,
+) -> (
+    crate::data_interface::task_end::RoomGenerationStamp,
+    Option<String>,
+) {
+    let now = crate::fast_model::model_db_adapter::required_room_generation();
+    let evidence = match recompute {
+        Some(RoomOnlyRecompute::Aligned(generation)) => {
+            WholeLibraryEvidence::Recomputed(generation)
+        }
+        Some(RoomOnlyRecompute::Incomplete) => WholeLibraryEvidence::None,
+        Some(RoomOnlyRecompute::NotApplicable) | None if whole_library_model_only(job) => {
+            WholeLibraryEvidence::EveryRootRegenerated {
+                at_start: generation_at_start,
+            }
+        }
+        Some(RoomOnlyRecompute::NotApplicable) | None => WholeLibraryEvidence::None,
+    };
+    let swapped_mid_task = match (&evidence, &now) {
+        (WholeLibraryEvidence::EveryRootRegenerated { at_start }, Ok(Some(now))) => {
+            (*at_start != Some(now.as_str())).then(|| {
+                format!(
+                    "常驻房间模型在任务中途换了代（开工 {} → 收尾 {now}），本任务的根不是同一代算的，durable 侧房间对齐承诺这一版不盖（审核 P2-3）",
+                    at_start.unwrap_or("无")
+                )
+            })
+        }
+        _ => None,
+    };
+    (room_generation_stamp_of(now, evidence), swapped_mid_task)
+}
+
+/// 本任务凭什么替**整库**说「房间边对齐到这一代」（ADR-073 D14）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WholeLibraryEvidence<'a> {
+    /// 说不了：普通增量窗口只重算被触到的根。
+    None,
+    /// 本任务跑齐了整库房间重算：边全是这台计算器算的，代号就是它的。
+    Recomputed(&'a str),
+    /// 整库重排的 ModelOnly：每一根都在本任务算过，但各根各自冻计算器——只有开工到收尾常驻没换代
+    /// （`at_start` == 收尾此刻）才是同一代。
+    EveryRootRegenerated { at_start: Option<&'a str> },
 }
 
 /// 判据的纯函数形态，逐格钉住（[`task_room_generation_stamp`]）。
 fn room_generation_stamp_of(
-    room_generation: anyhow::Result<Option<String>>,
-    speaks_for_library: bool,
+    room_generation_now: anyhow::Result<Option<String>>,
+    evidence: WholeLibraryEvidence<'_>,
 ) -> crate::data_interface::task_end::RoomGenerationStamp {
     use crate::data_interface::task_end::RoomGenerationStamp;
-    match room_generation {
-        // 开关关着：这一版水位只承诺几何，库上那一格随之清空。
-        Ok(None) => RoomGenerationStamp::Cleared,
-        Ok(Some(generation)) if speaks_for_library => RoomGenerationStamp::Aligned(generation),
-        Ok(Some(_)) | Err(_) => RoomGenerationStamp::Untouched,
+    match (room_generation_now, evidence) {
+        // 开关关着：这一版水位只承诺几何，库上那一格随之清空——凭什么都一样。
+        (Ok(None), _) => RoomGenerationStamp::Cleared,
+        // 整库重算跑齐了：盖算边那台计算器的代号；常驻此刻取不到 / 又换了代都不改这句——
+        // 边确实是那一代算的，`room_alignment.current` 会如实说它是不是此刻这一代。
+        (_, WholeLibraryEvidence::Recomputed(generation)) => {
+            RoomGenerationStamp::Aligned(generation.to_owned())
+        }
+        (Ok(Some(now)), WholeLibraryEvidence::EveryRootRegenerated { at_start })
+            if at_start == Some(now.as_str()) =>
+        {
+            RoomGenerationStamp::Aligned(now)
+        }
+        // 中途换代 / 普通增量窗口 / 代号取不到：不盖，不拿收尾那一刻的代号替别的代算的边说话。
+        (Ok(Some(_)), _) | (Err(_), _) => RoomGenerationStamp::Untouched,
     }
 }
 
@@ -2132,6 +2264,7 @@ async fn execute_model_only_body(
                 model_caught_up_at: None,
                 initialization_closed_task: false,
                 room_recompute: None,
+                room_generation_at_start: None,
             };
         }
     };
@@ -2142,6 +2275,8 @@ async fn execute_model_only_body(
     // 同一条纪律；回执留着，换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
     let room_reference =
         crate::fast_model::model_db_adapter::refresh_room_reference_before_task(job.dbnum).await;
+    // 对齐之后、冻第一台计算器之前的房间代号——收尾盖 D14 那一格时的守卫（审核 P2-3）。
+    let room_generation_at_start = room_generation_after_refresh();
 
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
@@ -2186,9 +2321,10 @@ async fn execute_model_only_body(
     // `build_model_update_plan_from_window`，本窗碰了房间定义族时 `RoomOnly` 工作项就在 `side_actions`
     // 里（`run_model_side_actions` 不认它，只是带过）；开工前对齐换了房间代号是第二条触发。此前这里
     // 硬编码 `None`，停机期间的 PANE 改动经启动追平进来就被静默吃掉。真跑在执行体收尾段（刷盘之后）。
-    // 模型半边没收口就不跑。整库重排（起点 0）例外：`DbSet@T` 上每一个根都刚用对齐后的计算器算过，
-    // 再来一遍是 O(本库) 的空转，且 durable 侧的对齐承诺已由 `whole_library_model_only` 那一句盖上。
-    let room_recompute = if failed || whole_library_model_only(job) {
+    // 模型半边失败**也照样交出去**（审核 P1-2）：这一格只说「触发了」，收尾段记成欠账、跑不成就留到
+    // 下一个任务——不然这一窗的失败就把那条 PANE 变更永久吞掉。整库重排（起点 0）例外：`DbSet@T` 上
+    // 每一个根都在本任务用对齐后的计算器算，durable 侧的对齐承诺由 `whole_library_model_only` 那一句盖。
+    let room_recompute = if whole_library_model_only(job) {
         None
     } else {
         crate::data_interface::room_recompute::request_for_task(
@@ -2211,7 +2347,20 @@ async fn execute_model_only_body(
         model_caught_up_at: None,
         initialization_closed_task: false,
         room_recompute,
+        room_generation_at_start,
     }
+}
+
+/// 开工前对齐（[`refresh_room_reference_before_task`]）之后、冻第一台计算器之前读一次房间代号
+/// （[`required_room_generation`]），给收尾的代号守卫（审核 P2-3）留底。开关关着 / 常驻 `Blocked`
+/// 都是 `None`——那两种局面下收尾本来也盖不出 `Aligned`。
+///
+/// [`refresh_room_reference_before_task`]: crate::fast_model::model_db_adapter::refresh_room_reference_before_task
+/// [`required_room_generation`]: crate::fast_model::model_db_adapter::required_room_generation
+fn room_generation_after_refresh() -> Option<String> {
+    crate::fast_model::model_db_adapter::required_room_generation()
+        .ok()
+        .flatten()
 }
 
 /// 任务随身带来的**明确根名单**（[`FrozenBatch::regen_roots`]，目录级联反查命中的根）→ 工作单。
@@ -2511,6 +2660,7 @@ fn failed_window_result(
         model_caught_up_at: None,
         initialization_closed_task: false,
         room_recompute: None,
+        room_generation_at_start: None,
     }
 }
 
@@ -2567,6 +2717,10 @@ async fn execute_frozen_batch_body(
                 .await,
         )
     };
+    // 对齐之后、冻第一台计算器之前的房间代号——收尾盖 D14 那一格时的守卫（审核 P2-3）。
+    let room_generation_at_start = room_reference
+        .as_ref()
+        .and_then(|_| room_generation_after_refresh());
 
     // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
     // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
@@ -2679,8 +2833,11 @@ async fn execute_frozen_batch_body(
 
     // 整库房间重算的接力（`RoomOnly`，d-819 / ADR-073 D13）：规划器排了 `RoomOnly` 工作项（本窗碰了
     // 房间定义族），或开工前对齐换了房间代号。真跑在执行体收尾段——本批根刷盘之后（那时本库没有
-    // 第二个写者），这里只把「要不要、为什么」交出去。模型半边没跑 / 本批没收口就不跑。
-    let room_recompute = if defer_model_phase || settlement_failed {
+    // 第二个写者），这里只把「要不要、为什么」交出去。模型半边没跑（让位）才是 `None`：这一窗的
+    // 计划没被消费，下一次该库任务由水位缺口重排时会再看到那条变更。单元失败**照样交**（审核 P1-2）
+    // ——本批没收口时收尾段不跑它，但会先记成欠账，留到下一个任务还；不然这一窗的失败就把那条
+    // PANE 变更永久吞掉（数据水位已推进，下一窗账本里没有它）。
+    let room_recompute = if defer_model_phase {
         None
     } else {
         crate::data_interface::room_recompute::request_for_task(
@@ -2704,6 +2861,7 @@ async fn execute_frozen_batch_body(
         model_caught_up_at: None,
         initialization_closed_task,
         room_recompute,
+        room_generation_at_start,
     }
 }
 
@@ -4343,33 +4501,155 @@ mod tests {
     /// 重算，或是整库重排的 ModelOnly。普通增量窗口只重算被触到的根，面板那一侧没动过的根的边仍是
     /// 上一代算的，盖了就是替它们说了谎；开关关着要**清空**那一格，不是原样留着替旧边说话；
     /// 常驻模型此刻取不到代号（`Blocked`）时什么都不盖。
+    ///
+    /// 代号守卫（审核 P2-3）：盖的是**算边那台计算器**的代号。跑过整库重算的盖重算用的那一代，收尾
+    /// 那一刻常驻是不是又换了代 / 取不取得到都不改这句；整库重排的 ModelOnly 各根各自冻计算器，
+    /// 只有开工到收尾常驻没换代才盖，中途换了代就不盖——不拿收尾那一刻的代号替别的代算的边说话。
     #[test]
     fn only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation() {
         use crate::data_interface::task_end::RoomGenerationStamp;
 
         let generation = || Ok(Some("efd4ebe1".to_owned()));
+        let regenerated = |at_start: Option<&'static str>| {
+            WholeLibraryEvidence::EveryRootRegenerated { at_start }
+        };
         assert_eq!(
-            room_generation_stamp_of(generation(), true),
+            room_generation_stamp_of(generation(), regenerated(Some("efd4ebe1"))),
             RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
-            "整库对齐过的任务盖这一代"
+            "整库重排、开工到收尾没换代：盖这一代"
         );
         assert_eq!(
-            room_generation_stamp_of(generation(), false),
+            room_generation_stamp_of(generation(), regenerated(Some("0ld00001"))),
+            RoomGenerationStamp::Untouched,
+            "整库重排但常驻中途换了代：各根不是同一代算的，不盖（P2-3）"
+        );
+        assert_eq!(
+            room_generation_stamp_of(generation(), regenerated(None)),
+            RoomGenerationStamp::Untouched,
+            "开工时代号取不到（Blocked）、收尾却有了：说不清各根是哪一代算的，不盖"
+        );
+        assert_eq!(
+            room_generation_stamp_of(generation(), WholeLibraryEvidence::None),
             RoomGenerationStamp::Untouched,
             "普通增量窗口说不了整库的话，那一格原样"
         );
-        // 开关关着：两种任务都清空——`model_sesno` 这一版只承诺几何（ADR-073 2026-09-11 修订）。
-        for speaks_for_library in [true, false] {
+        assert_eq!(
+            room_generation_stamp_of(generation(), WholeLibraryEvidence::Recomputed("efd4ebe1")),
+            RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
+            "整库重算跑齐了：盖算边那台计算器的代号"
+        );
+        assert_eq!(
+            room_generation_stamp_of(generation(), WholeLibraryEvidence::Recomputed("0ld00001")),
+            RoomGenerationStamp::Aligned("0ld00001".to_owned()),
+            "重算之后常驻又换了代：仍盖算边的那一代，current 与否由 room_alignment 如实说"
+        );
+        assert_eq!(
+            room_generation_stamp_of(
+                Err(anyhow::anyhow!("blocked")),
+                WholeLibraryEvidence::Recomputed("efd4ebe1")
+            ),
+            RoomGenerationStamp::Aligned("efd4ebe1".to_owned()),
+            "重算之后常驻取不到了：边确实是那一代算的，照盖"
+        );
+        // 开关关着：凭什么都清空——`model_sesno` 这一版只承诺几何（ADR-073 2026-09-11 修订）。
+        for evidence in [
+            WholeLibraryEvidence::None,
+            WholeLibraryEvidence::Recomputed("efd4ebe1"),
+            regenerated(Some("efd4ebe1")),
+        ] {
             assert_eq!(
-                room_generation_stamp_of(Ok(None), speaks_for_library),
+                room_generation_stamp_of(Ok(None), evidence),
                 RoomGenerationStamp::Cleared
             );
+        }
+        for evidence in [WholeLibraryEvidence::None, regenerated(Some("efd4ebe1"))] {
             assert_eq!(
-                room_generation_stamp_of(Err(anyhow::anyhow!("blocked")), speaks_for_library),
+                room_generation_stamp_of(Err(anyhow::anyhow!("blocked")), evidence),
                 RoomGenerationStamp::Untouched,
                 "代号取不到就不盖，不拿空字串冒充一代"
             );
         }
+    }
+
+    /// 审核 P2-3 的接线：收尾盖 D14 那一格时，跑过整库重算的拿重算那台计算器的代号；整库重排的
+    /// ModelOnly 拿开工前对齐之后留底的代号与收尾此刻比，中途换代就拦下并说一句；普通增量窗口不盖。
+    #[test]
+    fn the_task_stamp_uses_the_recompute_generation_and_guards_the_mid_task_swap() {
+        use crate::data_interface::task_end::RoomGenerationStamp;
+
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let stamp = source
+            .split_once("fn task_room_generation_stamp(")
+            .expect("task_room_generation_stamp")
+            .1
+            .split_once("\nenum WholeLibraryEvidence")
+            .expect("evidence enum follows")
+            .0;
+        assert!(
+            stamp.contains("RoomOnlyRecompute::Aligned(generation)")
+                && stamp.contains("WholeLibraryEvidence::Recomputed(generation)"),
+            "跑过整库重算：盖重算那台计算器的代号: {stamp}"
+        );
+        assert!(
+            stamp.contains("at_start: generation_at_start"),
+            "整库重排：拿开工前对齐之后留底的代号当证据: {stamp}"
+        );
+        assert!(
+            stamp.contains("required_room_generation()"),
+            "收尾此刻的代号只用来判开关 / 比对，不直接盖: {stamp}"
+        );
+        assert!(
+            stamp.contains("在任务中途换了代"),
+            "守卫拦下要说一句进 warnings: {stamp}"
+        );
+
+        // 整库重算的结果一路带着代号：`Aligned(代号)`，跑不齐就是 `Incomplete`。
+        let recompute = source
+            .split_once("async fn run_room_only_recompute(")
+            .expect("run_room_only_recompute")
+            .1;
+        let end = recompute
+            .find("\n}\r\n")
+            .or_else(|| recompute.find("\n}\n"))
+            .expect("function end");
+        let recompute = &recompute[..end];
+        assert!(
+            recompute
+                .contains("RoomOnlyRecompute::Aligned(rooms.resident_generation().to_owned())"),
+            "重算齐了带回算边那台计算器的代号: {recompute}"
+        );
+        assert_eq!(
+            recompute.matches("RoomOnlyRecompute::Incomplete").count(),
+            3,
+            "冻不出 / 有根算不出 / 写库失败三处都是 Incomplete: {recompute}"
+        );
+        assert!(
+            !recompute.contains("return true") && !recompute.contains("return false"),
+            "不再用 bool 丢掉代号: {recompute}"
+        );
+
+        // 两个执行体在开工前对齐之后、冻第一台计算器之前各留底一次代号。
+        for start in [
+            "async fn execute_frozen_batch_body(",
+            "async fn execute_model_only_body(",
+        ] {
+            let body = source.split_once(start).expect(start).1;
+            let refresh = body
+                .find("refresh_room_reference_before_task(job.dbnum)")
+                .expect("对齐");
+            let at_start = body
+                .find("room_generation_after_refresh()")
+                .expect("留底代号");
+            let worklist = body.find("run_unit_worklist(").expect("单元工作单");
+            assert!(
+                refresh < at_start && at_start < worklist,
+                "{start} 留底在对齐之后、冻计算器之前"
+            );
+        }
+        let _ = RoomGenerationStamp::Untouched;
     }
 
     /// 资格判定只有一处：库级目录落款与 durable 侧房间就绪承诺共用 [`whole_library_model_only`]，
@@ -4472,11 +4752,16 @@ mod tests {
             model_verdict: Some("in_sync".into()),
             model_caught_up_at: Some("2026-09-05T17:01:43Z".into()),
             initialization_closed_task: false,
-            room_recompute: None,
+            room_recompute: Some("本窗变更集碰到房间定义族".into()),
+            room_generation_at_start: Some("efd4ebe1".into()),
         };
         let json = serde_json::to_value(receipt).expect("task receipt serializes");
         assert_eq!(json["model_verdict"], "in_sync");
         assert_eq!(json["model_caught_up_at"], "2026-09-05T17:01:43Z");
+        assert!(
+            json.get("room_recompute").is_none() && json.get("room_generation_at_start").is_none(),
+            "执行体内部的接力不进回执: {json}"
+        );
     }
 
     /// 预算式定窗只剩「配置值」一档（ADR-056：触顶收窄随暂存资源状态机退役）。

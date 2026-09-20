@@ -1,6 +1,6 @@
 # ADR-073：房间随根生成、不再是一条流程；任何未完成写入一律整库重初始化
 
-状态：**已接受，2026-09-11 修订房间总开关语义，2026-09-16 修订房间输入不全的处置（降级不判死）**（2026-09-10 用户拍板：「房间只保留几何与筛选算法，流程整套删除」（共识 **d-757**）；「任何未完成的写入
+状态：**已接受，2026-09-11 修订房间总开关语义，2026-09-16 修订房间输入不全的处置（降级不判死），2026-09-20 补 D13 欠账（审核 P1-2）与 D14 代号守卫（审核 P2-3）、D13「拿开工时同一台计算器」改口（P2-4）**（2026-09-10 用户拍板：「房间只保留几何与筛选算法，流程整套删除」（共识 **d-757**）；「任何未完成的写入
 重启后一律按整个 dbnum 清理并重新初始化，不再按 sesno 回退」（共识 **d-747**，三条口径）。本文由协同组「房间」t-803 起草，
 是 t-735 文档清点里拆出的「刀 1」——后续 ADR / CONTEXT / 计划改写都以本文为尺子。措辞待指挥官 / 用户过目；
 **号到提交时复核**——ADR-060 曾撞号两次。）**实施中**：worktree `gen-model-refactor`，分支 `refactor/retire-publish-stage`，
@@ -123,12 +123,24 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
   判，不解析 `detail` 散文**——DESC 之类只改元数据的面板改动多触发一次整库重算，接受）→ 给本库排一条 `ModelWorkAction::RoomOnly`
   工作项（`target_refno = dbnum=<n>`，一窗一条，随 `side_actions` 交给任务，不入队）；② **执行期**——开工前对齐（D12）换了房间
   代号（别的库的面板 / 房间变了、进了常驻），本库的成员边同样可能陈旧。处置：任务在本批根**刷盘之后**（durable ACK 齐了，此刻
-  本库没有第二个写者）、**收尾之前**，拿开工时同一台计算器，对本库全部有回执的根按投影里的**现有几何**重算归属、重写两张边
+  本库没有第二个写者）、**收尾之前**，在收尾段冻一台计算器（**2026-09-20 改口**，审核 P2-4：此前写「拿开工时同一台计算器」，
+  实现从落地起就是收尾时新冻——刷盘之后常驻可能已被别的任务对齐到更新的一代，用最新的那一代算、ACK 与 D14 那一格都盖它），
+  对本库全部有回执的根按投影里的**现有几何**重算归属、重写两张边
   （`model_db_adapter::recompute_dbnum_room_edges`：与逐根路径同一套渲染 → 「整库重算 == 从零初始化」逐边相等的硬验收不多一条
   口径），不重生几何、不动模型行、不动空间树，提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器。算不出的根按 D2
   记失败（账本 `failed`、单元清单补一条 `Failed`）、任务 `Partial`、`model_sesno` 不盖；刷盘没齐（那批根已判死）就不跑。
   仍是内部意图：不入队、没有 HTTP 口（§不做）。**没收的那一半**：跨库成员（面板在 A、成员在 B）只在 A 变了之后**第一个开工**
   的库上被 ② 带到，其余库要等自己下一次碰到触发——U3 的跨库那一问仍开着。
+  **欠账（2026-09-20 补，审核 P1-2）**：两条触发都是边沿型的——只在碰到那条变更的那一窗出现一次。那一窗没跑到收尾段（预算拆窗、
+  单元失败、刷盘没齐）或重算写库失败，原因随任务回执一起丢：数据水位已推进，下一窗账本里没有那条 PANE 变更，开工前对齐再探也是
+  `Unchanged`，本库的成员边就此**永久陈旧**到下一次不相关的 PANE 变化；重启后按模型水位缺口重排的 ModelOnly 也救不了它——普通增量
+  窗口一成功 `model_sesno` 就越过了那条变更。处置：执行体一交出「要不要」（`DataBatchTaskResult.room_recompute`，**模型半边失败
+  也照样交**，只有让位才 `None`），`execute_frozen_batch` 就把它落库记成一条 durable 欠账 `dbnum_room_recompute_owed:{dbnum}`
+  （一库一行：`reason` / `task_id` / 第一次欠下的 `armed_at`，`room_recompute::arm`，早于拆窗余量与刷盘栅栏；初始化双 lane 不欠、
+  `room_membership=false` 不记）。每个 DESI 任务的收尾段把本窗自己的触发与库里欠着的那一笔合成一句一起跑
+  （`room_recompute::reason_with_owed`），跑齐了、D14 那一格盖得上 `Aligned` 才销账（`room_recompute::discharge`，整库重排的
+  ModelOnly 与初始化盖 `Aligned` 时一并销）；`Untouched` / `Cleared` 都不销，欠着的留给下一个任务。它不是水位、不参与任何放行
+  判决，`table_parity::CONTROL_PLANE_TABLES` 里与写入标记同列。
 - **D14　durable 侧的房间就绪承诺：`dbnum_watermark.model_room_generation`（`e3d.room.lookup` 的第二层判据）。**
   起因：2026-09-16 rocksdb 真库复跑（`docs/evidence/2026-09-16-room-membership-live-and-real-file-acceptance.md` §6 F2）——
   三个库的边、房间号、版本三元组全对，`e3d.room.lookup` 的 `calculation_status` 却恒 `not_computed`。判据是 2026-09-11
@@ -140,6 +152,13 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     初始化（每个根都是这台计算器算的）、整库重排的 ModelOnly（起点水位为 0 / 缺席）、本任务跑过整库房间重算（D13）。
     普通增量窗口只重算被触到的根，别的根的边仍是上一代算的，说不了这句，那一格**原样不动**；`all_roots_ok` 为假一律不写；
     `room_membership=false` 下盖模型水位时**清空**（这一版水位只承诺几何，不能留着替旧边说话）。
+    **盖哪一代（2026-09-20 补，审核 P2-3 代号守卫）**：盖**算边那台计算器**的代号，不是收尾那一刻常驻的代号。此前执行体收尾
+    读一次 `required_room_generation()` 就盖——并发 `/model/ensure` 或别的库任务在本任务中途把常驻对齐到新一代时，`Aligned`
+    会盖上一个边不是它算的代号（`dbnum_initialize` 那一路用 `rooms.resident_generation()` 本来就是对的）。现在：跑过整库房间重算
+    的任务，代号随重算结果回来（`RoomOnlyRecompute::Aligned(代号)`，与写进根 ACK 的同一个字串），收尾常驻是不是又换了代 /
+    取不取得到都不改这句（`room_alignment.current` 如实说它是不是此刻这一代）；整库重排的 ModelOnly 没有一台统一的计算器
+    （write-behind 逐批冻），执行体在开工前对齐之后、冻第一台计算器之前留底一次代号（`DataBatchTaskResult.room_generation_at_start`），
+    收尾只有**开工 == 收尾**才盖，中途换了代不盖并在 `warnings` 里说一句。
   - **读**：`e3d.room.lookup` 的就绪判据变成两层——进程内该根的 ACK 命中，**或**库上这一格与此刻常驻模型同一代且本进程的
     账本里这根没欠着（ADR-079 的一票否决）。两层用同一个代号，所以也是同一句判据：房间 / 面板真变过 → 代号变 → 两层同时
     作废 → `not_computed`，不拿上一代的边冒充这一版的结论。只在**落盘**形态下作数：进程内嵌 `mem://` 活不过重启，
@@ -189,15 +208,29 @@ D2 的论证原文是「不整枚扣住 `model_sesno`：一次持久的房间失
     规划失败的早退仍 `None`）；`execute_frozen_batch`
     的 DESI 收尾段里 `run_room_only_recompute` 在 `await_units_durable(` 之后、`model_outcome_of(&flush` 之前、`flush.all_acked()`
     门内，算不齐 `outcome.all_roots_ok = false`；`manual_update` 的 side_actions 过滤只拦 `RoomRecalc*`（`is_room_recalc` 不含
-    `RoomOnly`）（钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end`、
-    `a_change_to_any_room_definition_noun_triggers_and_nothing_else_does`、`a_task_recomputes_rooms_on_either_trigger`）。
+    `RoomOnly`）。**欠账（P1-2）**：两个执行体交出「要不要」那一句只按让位 / 整库重排判，不含 `settlement_failed` / `failed`；
+    `execute_frozen_batch` 在执行体返回点之后、`requeue_window_remainder(` 与 `await_units_durable(` 之前 `room_recompute::arm(`
+    （`!result.initialization_closed_task` 且 `room_membership()` 门内）；收尾段 `room_recompute::owed(` → `reason_with_owed(` →
+    重算 → `model_outcome_of(&flush` → 只在 `RoomGenerationStamp::Aligned(_)` 下 `room_recompute::discharge(`，`whole_library_model_only(job)`
+    不读欠账；`dbnum_initialize` 收尾一笔落了、盖的是 `Aligned` 才 `discharge(`；`dbnum_state::INCREMENT_STATE_SCHEMA` 与
+    `table_parity::CONTROL_PLANE_TABLES` 含 `dbnum_room_recompute_owed`
+    （钉 `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end`、
+    `a_change_to_any_room_definition_noun_triggers_and_nothing_else_does`、`a_task_recomputes_rooms_on_either_trigger`、
+    `the_owed_marker_round_trips_and_keeps_the_first_arming_time`、`the_arming_statement_upserts_and_the_discharge_deletes_the_row`、
+    `the_reason_merges_this_window_with_the_debt_and_names_the_debtor`、`startup_schema_covers_every_increment_state_table`）。
 18. `recompute_dbnum_room_edges` 走 `calculate_for_root` + `render_root_room_edges` 同一套渲染：重算后的边与逐根落库逐字相同、
     算不出的根边原样进 `failed`、ACK 代号对齐（钉 `recomputing_a_librarys_room_edges_reuses_the_per_root_rendering_and_refreshes_acks`）。
     `mem://` 真测 (e)：改一块 PANE 的 NAME 以外的属性 / 把一块 PANE 换属主 → 该窗任务日志有「整库房间重算完成」、别的根在这块
     面板里的成员边随之更新；(f) 只改 BRAN → 不触发。
 19. D14：`task_end::render_watermark_update` 对 `model_room_generation` 只有三种动作（`Untouched` / `Cleared` / `Aligned`），
     与 `model_sesno` 同在 `all_roots_ok` 门内；「起点为 0 的 ModelOnly」这句资格判定全文只有一处定义
-    （`whole_library_model_only`），库级目录落款与房间代号共用它；`query_service::room_calculation_status` 的函数体里
+    （`whole_library_model_only`），库级目录落款与房间代号共用它；**代号守卫（P2-3）**：`run_room_only_recompute` 返回
+    `RoomOnlyRecompute`（`Aligned(rooms.resident_generation())` / `Incomplete` / `NotApplicable`，不再是 bool），
+    `task_room_generation_stamp` 对跑过整库重算的盖 `WholeLibraryEvidence::Recomputed(代号)`、对整库重排的 ModelOnly 拿
+    `room_generation_at_start` 与收尾此刻的 `required_room_generation()` 比（`EveryRootRegenerated`，不等 → `Untouched` + 一句
+    「在任务中途换了代」进 `warnings`），两个执行体 `room_generation_after_refresh()` 在 `refresh_room_reference_before_task(`
+    之后、`run_unit_worklist(` 之前（钉 `only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation`、
+    `the_task_stamp_uses_the_recompute_generation_and_guards_the_mid_task_swap`）；`query_service::room_calculation_status` 的函数体里
     同时出现 `publication_ack(`、`room_edges_ready(` 与 `model_root_ledger::entry(`，`room()` 里的库上那一层按本次查询的
     dbnum 现读（`Self::library_room_generation(dbnum).await`）。钉
     `the_room_generation_stamp_follows_the_model_watermark`、

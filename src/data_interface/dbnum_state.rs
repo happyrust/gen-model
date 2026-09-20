@@ -256,6 +256,8 @@ const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_write_state SCHEMALESS;
+-- 整库房间重算的欠账（ADR-073 D13，审核 P1-2）：一库一行，行在 = 欠着。
+DEFINE TABLE IF NOT EXISTS dbnum_room_recompute_owed SCHEMALESS;
 -- 回退到水位（ADR-072 D2）按 dbnum 谓词删 `inst_info`，而这张表此前一条索引都没有：
 -- 量测里它是唯一一张落 `Iterate Table` 的模型面表（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md`
 -- §2 / §5）。姐妹表 `inst_relate` / `tubi_relate` 的同名索引在 `pdms_inst::INST_RELATE_INDEX_SQL`
@@ -1996,6 +1998,7 @@ mod tests {
             WATERMARK_TABLE,
             INFO_TABLE,
             crate::data_interface::write_state::WRITE_STATE_TABLE,
+            crate::data_interface::room_recompute::ROOM_RECOMPUTE_OWED_TABLE,
             "queue_control",
         ] {
             assert!(
