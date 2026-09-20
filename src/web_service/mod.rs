@@ -577,8 +577,8 @@ async fn serve_with_ready(
         .route("/api/v1/tree/roots", get(handlers::tree_roots))
         .route("/api/v1/tree/children", get(handlers::tree_children))
         .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
-        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，六条都是 GET（`centerline` 只读库、
-        // `surface-clearance` 只读库 + 磁盘网格，都不碰树）。
+        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，七条都是 GET（`centerline` 只读库、
+        // `surface-clearance` 只读库 + 磁盘网格、`rooms` 只读常驻房间模型，都不碰树）。
         .route("/api/v1/spatial/nearby", get(handlers::spatial_nearby))
         .route(
             "/api/v1/spatial/nearby/refnos",
@@ -588,6 +588,7 @@ async fn serve_with_ready(
             "/api/v1/spatial/negative-nouns",
             get(handlers::spatial_negative_nouns),
         )
+        .route("/api/v1/spatial/rooms", get(handlers::spatial_rooms))
         .route(
             "/api/v1/spatial/nearest-clearance",
             get(handlers::spatial_nearest_clearance),
@@ -1051,7 +1052,8 @@ mod tests {
     }
 
     /// spec §4.13：空间邻近查询三条 + `nearest-clearance`（计划 §3.2）+ `centerline`（§4.13.3）
-    /// + `surface-clearance`（plant3d-web 2026-09-17 构件到墙计划 §5）都是只读 GET，且挂在 `/api/v1/spatial/` 下。
+    /// + `surface-clearance`（plant3d-web 2026-09-17 构件到墙计划 §5）+ `rooms`（§4.13.4，plant3d-web ADR 0067）
+    /// 都是只读 GET，且挂在 `/api/v1/spatial/` 下。
     #[test]
     fn spatial_routes_are_read_only_get_endpoints() {
         let source = include_str!("mod.rs");
@@ -1069,6 +1071,7 @@ mod tests {
             "\"/api/v1/spatial/nearest-clearance\",\n            get(handlers::spatial_nearest_clearance)",
             "\"/api/v1/spatial/centerline\",\n            get(handlers::spatial_centerline)",
             "\"/api/v1/spatial/surface-clearance\",\n            get(handlers::spatial_surface_clearance)",
+            ".route(\"/api/v1/spatial/rooms\", get(handlers::spatial_rooms))",
         ] {
             assert!(serve.contains(route), "missing spatial GET route: {route}");
         }

@@ -115,6 +115,13 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub room_membership: Option<bool>,
 
+    /// 空间查询「所属专业」的派生规则（plant3d-web ADR 0067 / 计划 2026-09-20 §4.1）：
+    /// 候选属主链上 SITE 的 `NAME` 含哪组关键字（大小写不敏感）就落哪个专业值，首个命中的规则生效，
+    /// 都不中为 0「其他」。缺省即 legacy 后端 `spec_info.rs::site_name_to_spec_value` 那张表
+    /// （见 [`default_spec_value_rules`]），两种数据源对同一构件报同一个专业。
+    #[serde(default)]
+    pub spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
+
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
@@ -506,6 +513,7 @@ impl From<DbOption> for DbOptionExt {
             model_incremental: None,
             model_incremental_types: None,
             room_membership: None,
+            spec_value_rules: None,
             catalogue_project_priority: None,
             project_search_paths: None,
             watch_dbnums: None,
@@ -583,6 +591,8 @@ struct DbOptionExtFields {
     model_incremental_types: Option<Vec<String>>,
     #[serde(default)]
     room_membership: Option<bool>,
+    #[serde(default)]
+    spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
@@ -910,6 +920,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_incremental: ext.model_incremental,
         model_incremental_types: ext.model_incremental_types.clone(),
         room_membership: ext.room_membership,
+        spec_value_rules: ext.spec_value_rules.clone(),
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         project_search_paths: ext.project_search_paths.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
@@ -1753,6 +1764,64 @@ fn effective_spatial_compute(env_override: Option<&str>) -> bool {
 // 随房间流程退役（ADR-073 D7、源码钉 6）：房间归属随每个生成根算出、与模型行同事务落库，
 // 「房间阶段」没了，开关只剩一个永远不被问的布尔；常驻房间模型是逐根计算的算法输入，
 // 只随 `spatial_compute` 与 project_hd / project_hh 特性一道门走。
+
+/// `DbOption.toml` 里 `spec_value_rules` 的一条：`{ value = 1, keywords = ["PIPE"] }`。
+///
+/// `value` 是专业值（前端 `SiteSpecValue`：1 管道 / 2 电气 / 3 仪表 / 4 暖通 / 5 土建 / 6 结构，0 = 其他），
+/// `keywords` 是 SITE 名里要含的片段（大小写不敏感；中文原样比较）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecValueRuleConfig {
+    pub value: i64,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+/// 缺省的专业派生规则 = legacy 后端 `plant-model-gen/src/fast_model/export_model/spec_info.rs::site_name_to_spec_value`
+/// 那张表，逐字搬过来、顺序也一样（首个命中生效；`INST` 排在 `HVAC` 前，`CIVI` 之后才是 `STRU`）。
+pub fn default_spec_value_rules() -> Vec<SpecValueRuleConfig> {
+    let rule = |value: i64, keywords: &[&str]| SpecValueRuleConfig {
+        value,
+        keywords: keywords.iter().map(|word| word.to_string()).collect(),
+    };
+    vec![
+        rule(1, &["PIPE"]),
+        rule(2, &["ELEC", "DIANQI", "电气"]),
+        rule(3, &["INST", "INSTR"]),
+        rule(4, &["HVAC"]),
+        rule(5, &["CIVI", "CIVIL", "ARCH"]),
+        rule(6, &["STRU", "STRUCT"]),
+    ]
+}
+
+/// 生效的专业派生规则：配置里写了（且非空）用配置的，否则缺省表。
+/// 关键字为空的规则不算（永远匹配不上，也不该把后面的规则挡住）。
+pub fn spec_value_rules() -> Vec<SpecValueRuleConfig> {
+    effective_spec_value_rules(load_ext_fields().spec_value_rules.as_deref())
+}
+
+fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec<SpecValueRuleConfig> {
+    let rules: Vec<SpecValueRuleConfig> = configured
+        .filter(|rules| !rules.is_empty())
+        .map(|rules| rules.to_vec())
+        .unwrap_or_else(default_spec_value_rules)
+        .into_iter()
+        .map(|rule| SpecValueRuleConfig {
+            value: rule.value,
+            keywords: rule
+                .keywords
+                .into_iter()
+                .map(|word| word.trim().to_string())
+                .filter(|word| !word.is_empty())
+                .collect(),
+        })
+        .filter(|rule| !rule.keywords.is_empty())
+        .collect();
+    if rules.is_empty() {
+        default_spec_value_rules()
+    } else {
+        rules
+    }
+}
 
 /// 环境变量名：一次性覆盖 [`room_membership`]，不必改配置文件。
 pub const ROOM_MEMBERSHIP_ENV: &str = "AIOS_ROOM_MEMBERSHIP";

@@ -70,6 +70,10 @@ pub mod spatial_state;
 
 pub mod spatial_query;
 
+pub mod spatial_discipline;
+
+pub mod spatial_rooms;
+
 pub mod spatial_centerline;
 
 pub mod spatial_clearance;

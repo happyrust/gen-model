@@ -1328,6 +1328,22 @@ impl From<spatial_query::SpatialQueryError> for SpatialApiError {
             SpatialQueryError::BadRequest(message) => Self::Api(ApiError::bad_request(message)),
             SpatialQueryError::NotFound(message) => Self::Api(ApiError::not_found(message)),
             SpatialQueryError::NotReady(state) => Self::NotReady(state),
+            // 给了 `rooms=` 而房间体制答不出来（开关关 / 模型未就绪 / 非 hd·hh 构建）：422，`detail.status`
+            // 与 `GET /spatial/rooms` 的 `status` 同一套字面值，客户端据此收起房间块并写原因（ADR 0067，Q5）。
+            SpatialQueryError::RoomsUnavailable { status, reason } => Self::Api(
+                ApiError::precondition(format!(
+                    "房间过滤此刻不可用（{status}）{}",
+                    reason
+                        .as_deref()
+                        .map(|reason| format!("：{reason}"))
+                        .unwrap_or_default()
+                ))
+                .with_detail(json!({
+                    "reason": "rooms_unavailable",
+                    "status": status,
+                    "message": reason,
+                })),
+            ),
             SpatialQueryError::Internal(error) => Self::Api(ApiError::from_domain(error)),
         }
     }
@@ -1468,6 +1484,27 @@ fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
         spatial_query::Target::Refno(refno) => Some(refno),
         spatial_query::Target::Position(_) => None,
     }
+}
+
+/// GET /api/v1/spatial/rooms — 在册房间清单 + 房间体制此刻的状态（spec §4.13.4；plant3d-web ADR 0067 / 计划 2026-09-20）。
+/// 给抽屉「按房间过滤」画可搜索下拉：`status` 不是 `ready` / `degraded` 时清单为空、`reason` 说为什么，客户端整块收起。
+/// 只过身份门、只读常驻房间模型，不看空间树状态、不碰 `GLOBAL_AABB_TREE`；名字经 `DirectTreeService::name_of` 只对在册房间补（百级）。
+pub async fn spatial_rooms(
+    State(state): State<AppState>,
+    Query(request): Query<ProjectReq>,
+) -> Result<Json<crate::fast_model::spatial_rooms::RoomsResponse>, SpatialApiError> {
+    resolve_identity(&state, &request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = tokio::task::spawn_blocking(move || {
+        crate::fast_model::spatial_rooms::list_rooms(service.as_ref())
+    })
+    .await
+    .map_err(|join| ApiError::from_domain(anyhow::anyhow!("rooms task aborted: {join}")))?;
+    Ok(Json(response))
 }
 
 /// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。

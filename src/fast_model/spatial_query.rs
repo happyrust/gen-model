@@ -65,6 +65,10 @@ pub struct RawSpatialQuery {
     pub include_self: Option<String>,
     pub include_negative: Option<String>,
     pub dbnums: Option<String>,
+    /// 逗号分隔的房间 refno（`a/b` / `a_b`）：只保留归属含任一所选房间的候选（ADR 0067，`spatial_rooms`）。
+    pub rooms: Option<String>,
+    /// 逗号分隔的专业值（整数，0 = 其他）：只保留派生专业在其中的候选（`spatial_discipline`）。
+    pub spec_values: Option<String>,
     pub page: Option<String>,
     pub per_page: Option<String>,
 }
@@ -133,6 +137,10 @@ pub struct SpatialQueryParams {
     pub include_negative: bool,
     /// `None` = 不限库。
     pub dbnums: Option<BTreeSet<u32>>,
+    /// `None` = 不按房间过滤；`Some` = 所选房间的 refno（成员集由 `spatial_rooms::resolve_room_scope` 解）。
+    pub rooms: Option<BTreeSet<RefU64>>,
+    /// `None` = 不按专业过滤。
+    pub spec_values: Option<BTreeSet<i64>>,
     /// 从 1 起。
     pub page: usize,
     /// `1..=MAX_PER_PAGE`。
@@ -279,6 +287,26 @@ impl SpatialQueryParams {
                 .collect::<Result<BTreeSet<_>, _>>()?;
             (!items.is_empty()).then_some(items)
         };
+        let rooms = {
+            let items = split_csv(raw.rooms.as_deref())
+                .map(|item| {
+                    RefU64::from_str(item)
+                        .ok()
+                        .filter(RefU64::is_valid)
+                        .ok_or_else(|| format!("rooms 必须是逗号分隔的房间 refno（a/b 或 a_b，收到 {item}）"))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            (!items.is_empty()).then_some(items)
+        };
+        let spec_values = {
+            let items = split_csv(raw.spec_values.as_deref())
+                .map(|item| {
+                    item.parse::<i64>()
+                        .map_err(|_| format!("spec_values 必须是逗号分隔的专业值整数（收到 {item}）"))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            (!items.is_empty()).then_some(items)
+        };
         let page = match raw.page.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             None => 1,
             Some(value) => value
@@ -311,6 +339,8 @@ impl SpatialQueryParams {
             include_self,
             include_negative,
             dbnums,
+            rooms,
+            spec_values,
             page,
             per_page,
         })
@@ -325,6 +355,12 @@ pub enum SpatialQueryError {
     NotFound(String),
     /// 空间树不在 Ready / ReadyEmpty（503 + `Retry-After`）。
     NotReady(SpatialTreeState),
+    /// 给了 `rooms=` 而房间体制此刻答不出来（开关关 / 模型未就绪 / 非 hd·hh 构建；422，
+    /// `detail.reason = rooms_unavailable`、`detail.status` 同 `/spatial/rooms` 的 `status`）。
+    RoomsUnavailable {
+        status: &'static str,
+        reason: Option<String>,
+    },
     Internal(anyhow::Error),
 }
 
@@ -338,6 +374,14 @@ impl std::fmt::Display for SpatialQueryError {
                 spatial_state::SPATIAL_TREE_NOT_READY,
                 state.as_str()
             ),
+            Self::RoomsUnavailable { status, reason } => write!(
+                f,
+                "房间过滤此刻不可用（{status}）{}",
+                reason
+                    .as_deref()
+                    .map(|reason| format!("：{reason}"))
+                    .unwrap_or_default()
+            ),
             Self::Internal(error) => write!(f, "{error:#}"),
         }
     }
@@ -349,6 +393,11 @@ pub trait ElementAttributes: Sync {
     fn dbnum_of(&self, refno: RefU64) -> Option<u32>;
     /// `NAME`：没有名字或读不出记录为 `None`。只对本页调（§5-2 按 (a)）。
     fn name_of(&self, refno: RefU64) -> Option<String>;
+    /// 所属专业（`spec_value`，ADR 0067）：属主链上 SITE 名按规则派生，答不出为 0「其他」。
+    /// 对**全部**候选调（过滤与 facet 计数都要它），生产实现带逐级记忆（`spatial_discipline`）。
+    fn spec_value_of(&self, _refno: RefU64) -> i64 {
+        crate::fast_model::spatial_discipline::SPEC_VALUE_OTHER
+    }
 }
 
 impl ElementAttributes for DirectTreeService {
@@ -358,6 +407,10 @@ impl ElementAttributes for DirectTreeService {
 
     fn name_of(&self, refno: RefU64) -> Option<String> {
         DirectTreeService::name_of(self, refno)
+    }
+
+    fn spec_value_of(&self, refno: RefU64) -> i64 {
+        crate::fast_model::spatial_discipline::spec_value_of_shared(self, self.lineage_epoch(), refno)
     }
 }
 
@@ -706,6 +759,8 @@ pub struct Hit {
     pub aabb: Aabb,
     pub distance: f32,
     pub dbnum: Option<u32>,
+    /// 所属专业（ADR 0067）；答不出为 0。
+    pub spec_value: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -715,9 +770,18 @@ pub struct NounOption {
     pub is_negative: bool,
 }
 
+/// `filter_options.spec_values` 的一项：候选里某专业有几条（与 noun 计数同一位置算，选中不收窄清单）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecValueOption {
+    pub value: i64,
+    pub count: usize,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct FilterOptions {
     pub nouns: Vec<NounOption>,
+    /// 按 count 降序、同 count 按专业值升序。
+    pub spec_values: Vec<SpecValueOption>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -750,21 +814,25 @@ fn keyword_matches(keyword_upper: &str, refno: RefU64, noun_upper: &str) -> bool
         || RefnoEnum::from(refno).to_pdms_str().contains(keyword_upper)
 }
 
-/// 过滤（计划 §3.2 步骤 5，顺序固定）：`include_self` → 负实体 → `dbnums` → 记 `filter_options.nouns`
-/// 计数 → `nouns` → `keyword`。noun 计数落在 `nouns` / `keyword` 之前：它是给筛选器画可选项用的，
-/// 选中一个 noun 不能让别的 noun 从清单上消失。
+/// 过滤（计划 §3.2 步骤 5，顺序固定；2026-09-20 起多两格）：`include_self` → 负实体 → `dbnums` → **`rooms`** →
+/// 记 `filter_options.nouns` / **`filter_options.spec_values`** 计数 → `nouns` → **`spec_values`** → `keyword`。
+/// 两个 facet 计数落在 `nouns` / `spec_values` / `keyword` 之前：它们是给筛选器画可选项用的，选中一个不能让别的
+/// 从清单上消失；落在 `rooms` 之后：房间是与 `dbnums` 同级的范围收窄。`room_scope` 为 `None` = 参数没给 `rooms`。
 pub fn filter_candidates(
     candidates: Vec<Candidate>,
     params: &SpatialQueryParams,
     center: &Center,
     attrs: &dyn ElementAttributes,
+    room_scope: Option<&crate::fast_model::spatial_rooms::RoomScope>,
 ) -> Filtered {
     let mut memo = DbnumMemo {
         attrs,
         cache: HashMap::new(),
     };
+    let mut spec_memo: HashMap<RefU64, i64> = HashMap::new();
     let exclude_subtree = !params.include_self && center.target_box.is_some();
     let mut noun_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut spec_counts: BTreeMap<i64, usize> = BTreeMap::new();
     let mut hits = Vec::new();
     for Candidate { entry, distance } in candidates {
         if exclude_subtree && center.subtree.contains(&entry.refno) {
@@ -780,8 +848,22 @@ pub fn filter_candidates(
         {
             continue;
         }
+        if let Some(scope) = room_scope
+            && !scope.contains(entry.refno)
+        {
+            continue;
+        }
+        let spec_value = *spec_memo
+            .entry(entry.refno)
+            .or_insert_with(|| attrs.spec_value_of(entry.refno));
         *noun_counts.entry(noun_upper.clone()).or_default() += 1;
+        *spec_counts.entry(spec_value).or_default() += 1;
         if !params.nouns.is_empty() && !params.nouns.contains(&noun_upper) {
+            continue;
+        }
+        if let Some(allowed) = &params.spec_values
+            && !allowed.contains(&spec_value)
+        {
             continue;
         }
         if let Some(keyword) = &params.keyword
@@ -795,6 +877,7 @@ pub fn filter_candidates(
             aabb: entry.aabb,
             distance,
             dbnum,
+            spec_value,
         });
     }
     let mut nouns = noun_counts
@@ -806,9 +889,14 @@ pub fn filter_candidates(
         })
         .collect::<Vec<_>>();
     nouns.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    let mut spec_values = spec_counts
+        .into_iter()
+        .map(|(value, count)| SpecValueOption { value, count })
+        .collect::<Vec<_>>();
+    spec_values.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
     Filtered {
         hits,
-        filter_options: FilterOptions { nouns },
+        filter_options: FilterOptions { nouns, spec_values },
     }
 }
 
@@ -846,6 +934,25 @@ pub fn group_by_dbnum(hits: &[Hit]) -> Vec<DbnumGroup> {
     counts
         .into_iter()
         .map(|(dbnum, count)| DbnumGroup { dbnum, count })
+        .collect()
+}
+
+/// 全集按专业分组计数（ADR 0067；与 legacy `/api/sqlite-spatial/nearby` 的 `groups[].spec_value` 同形）。
+/// 0「其他」也成一组——它是一个真实的档，不是「答不出」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecGroup {
+    pub spec_value: i64,
+    pub count: usize,
+}
+
+pub fn group_by_spec_value(hits: &[Hit]) -> Vec<SpecGroup> {
+    let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+    for hit in hits {
+        *counts.entry(hit.spec_value).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(spec_value, count)| SpecGroup { spec_value, count })
         .collect()
 }
 
@@ -921,10 +1028,27 @@ fn source_json(center: &Center) -> Option<SourceJson> {
     })
 }
 
-/// 预取走廊时的非致命问题（有成员没成段、refno 解不出）。没有就不出现，老响应一字不变。
-fn source_warnings(center: &Center) -> Option<Vec<String>> {
-    let warnings = &center.centerline.as_ref()?.warnings;
-    (!warnings.is_empty()).then(|| warnings.clone())
+/// 预取走廊时的非致命问题（有成员没成段、refno 解不出）+ 房间过滤的缺口（判不出归属的候选数、边不是当前代）。
+/// 没有就不出现，老响应一字不变。
+fn response_warnings(
+    center: &Center,
+    room_scope: Option<&crate::fast_model::spatial_rooms::RoomScope>,
+) -> Option<Vec<String>> {
+    let mut warnings = center
+        .centerline
+        .as_ref()
+        .map(|centerline| centerline.warnings.clone())
+        .unwrap_or_default();
+    if let Some(scope) = room_scope {
+        warnings.extend(scope.warnings());
+    }
+    (!warnings.is_empty()).then_some(warnings)
+}
+
+fn room_status_json(
+    room_scope: Option<&crate::fast_model::spatial_rooms::RoomScope>,
+) -> Option<crate::fast_model::spatial_rooms::RoomStatusJson> {
+    room_scope.map(|scope| scope.status_json())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -934,6 +1058,8 @@ pub struct NearbyItem {
     /// 答不出为 `null`（与 §4.10 树节点的 `dbnum` 同义：不是 0 号库）。
     pub dbnum: Option<u32>,
     pub noun: String,
+    /// 所属专业（ADR 0067）：属主链上 SITE 名按 `spec_value_rules` 派生；答不出为 0「其他」。
+    pub spec_value: i64,
     /// 只对本页补；没有名字为 `null`。
     pub name: Option<String>,
     pub aabb: BoxJson,
@@ -963,7 +1089,12 @@ pub struct NearbyResponse {
     pub truncated_candidates: bool,
     pub candidate_cap: usize,
     pub groups: Vec<DbnumGroup>,
+    /// 全集按专业分组（ADR 0067）。
+    pub spec_groups: Vec<SpecGroup>,
     pub filter_options: FilterOptions,
+    /// 只在给了 `rooms=` 时出现。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_status: Option<crate::fast_model::spatial_rooms::RoomStatusJson>,
     pub spatial_state: &'static str,
     pub coverage: &'static str,
 }
@@ -973,6 +1104,8 @@ pub struct NearbyRefnosResponse {
     /// `a_b`，按距离序，上限 `result_cap`。
     pub refnos: Vec<String>,
     pub by_dbnum: BTreeMap<String, Vec<String>>,
+    /// 与 `by_dbnum` 同形，键是专业值的十进制字串（0「其他」也进桶）。
+    pub by_spec_value: BTreeMap<String, Vec<String>>,
     pub total_count: usize,
     pub truncated_results: bool,
     pub result_cap: usize,
@@ -984,23 +1117,28 @@ pub struct NearbyRefnosResponse {
     pub warnings: Option<Vec<String>>,
     pub radius: f32,
     pub shape: &'static str,
+    /// 只在给了 `rooms=` 时出现。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_status: Option<crate::fast_model::spatial_rooms::RoomStatusJson>,
     pub spatial_state: &'static str,
     pub coverage: &'static str,
 }
 
-/// 锁外的后半程（步骤 5-7 + 切页 + 只给本页补 name）。
+/// 锁外的后半程（步骤 5-7 + 切页 + 只给本页补 name）。`room_scope` 是 `rooms=` 解出来的成员集（没给就 `None`）。
 pub fn assemble_nearby(
     scan: Scan,
     params: &SpatialQueryParams,
     attrs: &dyn ElementAttributes,
+    room_scope: Option<&crate::fast_model::spatial_rooms::RoomScope>,
 ) -> NearbyResponse {
     let candidate_count = scan.candidates.len();
     let Filtered {
         mut hits,
         filter_options,
-    } = filter_candidates(scan.candidates, params, &scan.center, attrs);
+    } = filter_candidates(scan.candidates, params, &scan.center, attrs, room_scope);
     sort_hits(&mut hits, params.sort);
     let groups = group_by_dbnum(&hits);
+    let spec_groups = group_by_spec_value(&hits);
     let total_count = hits.len();
     let (page_hits, has_more) = paginate(hits, params.page, params.per_page);
     let results = page_hits
@@ -1008,6 +1146,7 @@ pub fn assemble_nearby(
         .map(|hit| NearbyItem {
             refno: hit.refno.to_string(),
             dbnum: hit.dbnum,
+            spec_value: hit.spec_value,
             name: attrs.name_of(hit.refno),
             noun: hit.noun,
             aabb: BoxJson::from(&hit.aabb),
@@ -1019,7 +1158,7 @@ pub fn assemble_nearby(
         returned_count: results.len(),
         results,
         source: source_json(&scan.center),
-        warnings: source_warnings(&scan.center),
+        warnings: response_warnings(&scan.center, room_scope),
         center: CenterJson::from(&scan.center),
         radius: params.radius,
         shape: params.shape.as_str(),
@@ -1031,7 +1170,9 @@ pub fn assemble_nearby(
         truncated_candidates: scan.truncated_candidates,
         candidate_cap: CANDIDATE_CAP,
         groups,
+        spec_groups,
         filter_options,
+        room_status: room_status_json(room_scope),
         spatial_state: scan.state.as_str(),
         coverage: COVERAGE,
     }
@@ -1042,13 +1183,16 @@ pub fn assemble_nearby_refnos(
     scan: Scan,
     params: &SpatialQueryParams,
     attrs: &dyn ElementAttributes,
+    room_scope: Option<&crate::fast_model::spatial_rooms::RoomScope>,
 ) -> NearbyRefnosResponse {
-    let Filtered { mut hits, .. } = filter_candidates(scan.candidates, params, &scan.center, attrs);
+    let Filtered { mut hits, .. } =
+        filter_candidates(scan.candidates, params, &scan.center, attrs, room_scope);
     sort_hits(&mut hits, SortBy::Distance);
     let total_count = hits.len();
     let truncated_results = total_count > RESULT_CAP;
     hits.truncate(RESULT_CAP);
     let mut by_dbnum: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut by_spec_value: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut refnos = Vec::with_capacity(hits.len());
     for hit in &hits {
         let text = hit.refno.to_string();
@@ -1058,22 +1202,47 @@ pub fn assemble_nearby_refnos(
                 .or_default()
                 .push(text.clone());
         }
+        by_spec_value
+            .entry(hit.spec_value.to_string())
+            .or_default()
+            .push(text.clone());
         refnos.push(text);
     }
     NearbyRefnosResponse {
         refnos,
         by_dbnum,
+        by_spec_value,
         total_count,
         truncated_results,
         result_cap: RESULT_CAP,
         source: source_json(&scan.center),
-        warnings: source_warnings(&scan.center),
+        warnings: response_warnings(&scan.center, room_scope),
         center: CenterJson::from(&scan.center),
         radius: params.radius,
         shape: params.shape.as_str(),
+        room_status: room_status_json(room_scope),
         spatial_state: scan.state.as_str(),
         coverage: COVERAGE,
     }
+}
+
+/// `rooms=` 给了就解成员集（要在 scan 之后：读透形态按候选的投影记录现算），没给就 `None`。
+async fn resolve_rooms_for_scan(
+    scan: &Scan,
+    params: &SpatialQueryParams,
+    attrs: &dyn ElementAttributes,
+) -> Result<Option<crate::fast_model::spatial_rooms::RoomScope>, SpatialQueryError> {
+    let Some(rooms) = &params.rooms else {
+        return Ok(None);
+    };
+    let candidates = scan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.entry.refno)
+        .collect::<Vec<_>>();
+    crate::fast_model::spatial_rooms::resolve_room_scope(rooms, &candidates, attrs)
+        .await
+        .map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1272,8 @@ pub async fn nearby(
     attrs: &dyn ElementAttributes,
 ) -> Result<NearbyResponse, SpatialQueryError> {
     let scan = scan_global_tree(params, centerline).await?;
-    Ok(assemble_nearby(scan, params, attrs))
+    let room_scope = resolve_rooms_for_scan(&scan, params, attrs).await?;
+    Ok(assemble_nearby(scan, params, attrs, room_scope.as_ref()))
 }
 
 /// `GET /api/v1/spatial/nearby/refnos`。
@@ -1113,7 +1283,8 @@ pub async fn nearby_refnos(
     attrs: &dyn ElementAttributes,
 ) -> Result<NearbyRefnosResponse, SpatialQueryError> {
     let scan = scan_global_tree(params, centerline).await?;
-    Ok(assemble_nearby_refnos(scan, params, attrs))
+    let room_scope = resolve_rooms_for_scan(&scan, params, attrs).await?;
+    Ok(assemble_nearby_refnos(scan, params, attrs, room_scope.as_ref()))
 }
 
 #[cfg(test)]
@@ -1158,6 +1329,8 @@ mod tests {
                 "include_self" => &mut raw.include_self,
                 "include_negative" => &mut raw.include_negative,
                 "dbnums" => &mut raw.dbnums,
+                "rooms" => &mut raw.rooms,
+                "spec_values" => &mut raw.spec_values,
                 "page" => &mut raw.page,
                 "per_page" => &mut raw.per_page,
                 other => panic!("unknown query key {other}"),
@@ -1175,6 +1348,8 @@ mod tests {
     struct TableAttrs {
         dbnums: HashMap<RefU64, u32>,
         names: HashMap<RefU64, String>,
+        /// 查表专业；不在表里的按缺省 0「其他」。
+        specs: HashMap<RefU64, i64>,
     }
 
     impl ElementAttributes for TableAttrs {
@@ -1185,6 +1360,10 @@ mod tests {
         fn name_of(&self, refno: RefU64) -> Option<String> {
             self.names.get(&refno).cloned()
         }
+
+        fn spec_value_of(&self, refno: RefU64) -> i64 {
+            self.specs.get(&refno).copied().unwrap_or(0)
+        }
     }
 
     fn attrs(dbnums: &[(u32, u32)]) -> TableAttrs {
@@ -1194,7 +1373,17 @@ mod tests {
                 .map(|(seq, dbnum)| (refno(*seq), *dbnum))
                 .collect(),
             names: HashMap::new(),
+            specs: HashMap::new(),
         }
+    }
+
+    fn attrs_with_specs(dbnums: &[(u32, u32)], specs: &[(u32, i64)]) -> TableAttrs {
+        let mut table = attrs(dbnums);
+        table.specs = specs
+            .iter()
+            .map(|(seq, spec)| (refno(*seq), *spec))
+            .collect();
+        table
     }
 
     fn scan_local(tree: &AccelerationTree, params: &SpatialQueryParams) -> Scan {
@@ -1477,7 +1666,7 @@ mod tests {
         );
 
         let filtered =
-            filter_candidates(scan.candidates.clone(), &query, &scan.center, &attrs(&[]));
+            filter_candidates(scan.candidates.clone(), &query, &scan.center, &attrs(&[]), None);
         assert_eq!(
             filtered.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
             vec![refno(11)]
@@ -1494,6 +1683,7 @@ mod tests {
             &with_self,
             &scan.center,
             &attrs(&[]),
+            None,
         );
         assert_eq!(kept.hits.len(), 2);
         assert_eq!(
@@ -1618,7 +1808,7 @@ mod tests {
             HashSet::from([refno(20), refno(21), refno(22)])
         );
 
-        let filtered = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]));
+        let filtered = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]), None);
         assert_eq!(
             filtered.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
             vec![refno(41)]
@@ -1759,7 +1949,7 @@ mod tests {
             "同时落在两段探针里的盒只算一条候选"
         );
 
-        let filtered = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]));
+        let filtered = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]), None);
         let mut hits = filtered
             .hits
             .iter()
@@ -1778,7 +1968,7 @@ mod tests {
         ]);
         let boxed = scan_local(&tree, &by_box);
         assert_eq!(boxed.center.source, CenterSource::RefnoAabbCenter);
-        let boxed_hits = filter_candidates(boxed.candidates, &by_box, &boxed.center, &attrs(&[]));
+        let boxed_hits = filter_candidates(boxed.candidates, &by_box, &boxed.center, &attrs(&[]), None);
         assert_eq!(
             boxed_hits
                 .hits
@@ -1801,7 +1991,7 @@ mod tests {
             "剔除集 = BRAN 自己 ∪ branch_query 成员: {:?}",
             scan.center.subtree
         );
-        let kept = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]));
+        let kept = filter_candidates(scan.candidates, &query, &scan.center, &attrs(&[]), None);
         assert_eq!(
             kept.hits
                 .iter()
@@ -1842,7 +2032,7 @@ mod tests {
             .find(|candidate| candidate.entry.refno == refno(56))
             .expect("方模式保留探针命中的远盒");
         assert!((far.distance - 113.137).abs() < 1.0e-2, "{}", far.distance);
-        let response = assemble_nearby(cube_scan, &cube_query, &attrs(&[]));
+        let response = assemble_nearby(cube_scan, &cube_query, &attrs(&[]), None);
         assert!(
             !response
                 .results
@@ -1869,7 +2059,7 @@ mod tests {
         let tree = corridor_tree();
         let line = corridor(100);
         let query = centerline_query(100, &[]);
-        let response = assemble_nearby(scan_corridor(&tree, &line, &query), &query, &attrs(&[]));
+        let response = assemble_nearby(scan_corridor(&tree, &line, &query), &query, &attrs(&[]), None);
         assert_eq!(response.center.source, "bran_centerline");
         assert_eq!(
             response.source,
@@ -1890,18 +2080,19 @@ mod tests {
         );
 
         let refnos =
-            assemble_nearby_refnos(scan_corridor(&tree, &line, &query), &query, &attrs(&[]));
+            assemble_nearby_refnos(scan_corridor(&tree, &line, &query), &query, &attrs(&[]), None);
         assert_eq!(refnos.source, response.source);
         assert_eq!(refnos.warnings, response.warnings);
 
         // 其它模式一字不变：两个字段都不序列化。
         let plain = origin_query(&[]);
-        let plain_response = assemble_nearby(scan_local(&tree, &plain), &plain, &attrs(&[]));
+        let plain_response = assemble_nearby(scan_local(&tree, &plain), &plain, &attrs(&[]), None);
         assert_eq!((plain_response.source, plain_response.warnings), (None, None));
         let json = serde_json::to_string(&assemble_nearby(
             scan_local(&tree, &plain),
             &plain,
             &attrs(&[]),
+            None,
         ))
         .unwrap();
         assert!(!json.contains("\"source\":{"), "不出 source 块");
@@ -1934,7 +2125,7 @@ mod tests {
 
         let default = origin_query(&[]);
         let scan = scan_local(&tree, &default);
-        let filtered = filter_candidates(scan.candidates.clone(), &default, &scan.center, &table);
+        let filtered = filter_candidates(scan.candidates.clone(), &default, &scan.center, &table, None);
         assert_eq!(
             filtered
                 .hits
@@ -1972,6 +2163,7 @@ mod tests {
             &with_negative,
             &scan.center,
             &table,
+            None,
         );
         assert_eq!(
             kept.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
@@ -1993,21 +2185,21 @@ mod tests {
         );
 
         let by_keyword = origin_query(&[("keyword", "_4")]);
-        let hits = filter_candidates(scan.candidates.clone(), &by_keyword, &scan.center, &table);
+        let hits = filter_candidates(scan.candidates.clone(), &by_keyword, &scan.center, &table, None);
         assert_eq!(
             hits.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
             vec![refno(4)],
             "keyword 匹配 refno 的 a_b 形式"
         );
         let by_slash = origin_query(&[("keyword", "4000000011/3")]);
-        let hits = filter_candidates(scan.candidates.clone(), &by_slash, &scan.center, &table);
+        let hits = filter_candidates(scan.candidates.clone(), &by_slash, &scan.center, &table, None);
         assert_eq!(
             hits.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
             vec![refno(3)],
             "也匹配 a/b 形式"
         );
         let by_noun = origin_query(&[("keyword", "val")]);
-        let hits = filter_candidates(scan.candidates.clone(), &by_noun, &scan.center, &table);
+        let hits = filter_candidates(scan.candidates.clone(), &by_noun, &scan.center, &table, None);
         assert_eq!(
             hits.hits.iter().map(|h| h.refno).collect::<Vec<_>>(),
             vec![refno(5)],
@@ -2015,7 +2207,7 @@ mod tests {
         );
 
         let by_dbnum = origin_query(&[("dbnums", "24383")]);
-        let hits = filter_candidates(scan.candidates.clone(), &by_dbnum, &scan.center, &table);
+        let hits = filter_candidates(scan.candidates.clone(), &by_dbnum, &scan.center, &table, None);
         assert_eq!(
             hits.hits.iter().map(|h| h.refno).collect::<BTreeSet<_>>(),
             BTreeSet::from([refno(3), refno(4), refno(5)])
@@ -2035,6 +2227,7 @@ mod tests {
             &by_dbnum,
             &scan.center,
             &attrs(&[]),
+            None,
         );
         assert!(hits.hits.is_empty());
     }
@@ -2049,7 +2242,7 @@ mod tests {
         table.names.insert(refno(5), "/V-5".into());
 
         let query = origin_query(&[("per_page", "2")]);
-        let first = assemble_nearby(scan_local(&tree, &query), &query, &table);
+        let first = assemble_nearby(scan_local(&tree, &query), &query, &table, None);
         assert_eq!(
             refnos_of(&first.results),
             vec![refno(1).to_string(), refno(3).to_string()]
@@ -2099,21 +2292,21 @@ mod tests {
         assert_eq!((first.spatial_state, first.coverage), ("ready", COVERAGE));
 
         let last = origin_query(&[("per_page", "2"), ("page", "2")]);
-        let second = assemble_nearby(scan_local(&tree, &last), &last, &table);
+        let second = assemble_nearby(scan_local(&tree, &last), &last, &table, None);
         assert_eq!(
             refnos_of(&second.results),
             vec![refno(4).to_string(), refno(5).to_string()]
         );
         assert!(!second.has_more);
         let beyond = origin_query(&[("per_page", "2"), ("page", "9")]);
-        let empty = assemble_nearby(scan_local(&tree, &beyond), &beyond, &table);
+        let empty = assemble_nearby(scan_local(&tree, &beyond), &beyond, &table, None);
         assert!(empty.results.is_empty());
         assert_eq!(empty.total_count, 4);
         assert!(!empty.has_more);
 
         // sort=name：名字只对本页解，全集按 noun / refno 近似。
         let by_name = origin_query(&[("sort", "name")]);
-        let named = assemble_nearby(scan_local(&tree, &by_name), &by_name, &table);
+        let named = assemble_nearby(scan_local(&tree, &by_name), &by_name, &table, None);
         assert_eq!(
             refnos_of(&named.results),
             vec![refno(3), refno(1), refno(4), refno(5)]
@@ -2126,35 +2319,19 @@ mod tests {
 
     #[test]
     fn distance_sort_breaks_ties_by_dbnum_then_refno() {
+        let hit = |seq: u32, distance: f32, dbnum: Option<u32>| Hit {
+            refno: refno(seq),
+            noun: "PIPE".into(),
+            aabb: cube([0.0; 3], [1.0; 3]),
+            distance,
+            dbnum,
+            spec_value: 0,
+        };
         let mut hits = vec![
-            Hit {
-                refno: refno(3),
-                noun: "PIPE".into(),
-                aabb: cube([0.0; 3], [1.0; 3]),
-                distance: 1.0,
-                dbnum: Some(24383),
-            },
-            Hit {
-                refno: refno(2),
-                noun: "PIPE".into(),
-                aabb: cube([0.0; 3], [1.0; 3]),
-                distance: 1.0,
-                dbnum: Some(24381),
-            },
-            Hit {
-                refno: refno(1),
-                noun: "PIPE".into(),
-                aabb: cube([0.0; 3], [1.0; 3]),
-                distance: 1.0,
-                dbnum: Some(24383),
-            },
-            Hit {
-                refno: refno(9),
-                noun: "PIPE".into(),
-                aabb: cube([0.0; 3], [1.0; 3]),
-                distance: 0.5,
-                dbnum: None,
-            },
+            hit(3, 1.0, Some(24383)),
+            hit(2, 1.0, Some(24381)),
+            hit(1, 1.0, Some(24383)),
+            hit(9, 0.5, None),
         ];
         sort_hits(&mut hits, SortBy::Distance);
         assert_eq!(
@@ -2168,7 +2345,7 @@ mod tests {
         let tree = filter_tree();
         let table = attrs(&[(1, 24381), (3, 24383), (4, 24383)]);
         let query = origin_query(&[("per_page", "1"), ("page", "7")]);
-        let response = assemble_nearby_refnos(scan_local(&tree, &query), &query, &table);
+        let response = assemble_nearby_refnos(scan_local(&tree, &query), &query, &table, None);
         assert_eq!(
             response.refnos,
             vec![refno(1), refno(3), refno(4), refno(5)]
@@ -2268,5 +2445,165 @@ mod tests {
             .expect("fn end")
             .0;
         assert!(!guarded.contains(".await"), "读锁期间不得 await: {guarded}");
+    }
+
+    // ---- 房间 / 专业（ADR 0067，计划 2026-09-20）----
+
+    #[test]
+    fn params_parse_rooms_and_spec_values_and_reject_bad_values() {
+        let query = params(&[
+            ("x", "0"),
+            ("y", "0"),
+            ("z", "0"),
+            ("radius", "100"),
+            ("rooms", "4000000011/1, 4000000011_2,,"),
+            ("spec_values", "1, 4 ,0"),
+        ]);
+        assert_eq!(query.rooms, Some(BTreeSet::from([refno(1), refno(2)])));
+        assert_eq!(query.spec_values, Some(BTreeSet::from([0, 1, 4])));
+        let plain = origin_query(&[]);
+        assert_eq!((plain.rooms, plain.spec_values), (None, None), "缺省都不过滤");
+        assert_eq!(origin_query(&[("rooms", ""), ("spec_values", " ")]).rooms, None, "空串 = 不给");
+
+        let bad_room = SpatialQueryParams::parse(&raw(&[
+            ("x", "0"),
+            ("y", "0"),
+            ("z", "0"),
+            ("radius", "1"),
+            ("rooms", "A101"),
+        ]))
+        .expect_err("房间号不是 refno");
+        assert!(bad_room.contains("rooms"), "{bad_room}");
+        let bad_spec = SpatialQueryParams::parse(&raw(&[
+            ("x", "0"),
+            ("y", "0"),
+            ("z", "0"),
+            ("radius", "1"),
+            ("spec_values", "pipe"),
+        ]))
+        .expect_err("专业值要整数");
+        assert!(bad_spec.contains("spec_values"), "{bad_spec}");
+    }
+
+    #[test]
+    fn spec_values_filter_after_counting_and_items_carry_their_spec_value() {
+        let tree = filter_tree();
+        // 1 / 4 管道，3 结构，5 没配 → 0 其他。
+        let table = attrs_with_specs(&[(1, 24381), (3, 24383), (4, 24383), (5, 24383)], &[(1, 1), (4, 1), (3, 6)]);
+        let default = origin_query(&[]);
+        let scan = scan_local(&tree, &default);
+        let all = filter_candidates(scan.candidates.clone(), &default, &scan.center, &table, None);
+        assert_eq!(
+            all.filter_options.spec_values,
+            vec![
+                SpecValueOption { value: 1, count: 2 },
+                SpecValueOption { value: 0, count: 1 },
+                SpecValueOption { value: 6, count: 1 },
+            ],
+            "按计数降序、同计数按专业值升序；0「其他」也是一档"
+        );
+        assert_eq!(
+            all.hits.iter().map(|h| (h.refno, h.spec_value)).collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(refno(1), 1), (refno(3), 6), (refno(4), 1), (refno(5), 0)])
+        );
+
+        let pipes = origin_query(&[("spec_values", "1")]);
+        let kept = filter_candidates(scan.candidates.clone(), &pipes, &scan.center, &table, None);
+        assert_eq!(
+            kept.hits.iter().map(|h| h.refno).collect::<BTreeSet<_>>(),
+            BTreeSet::from([refno(1), refno(4)])
+        );
+        assert_eq!(
+            kept.filter_options.spec_values.len(),
+            3,
+            "选中一个专业不收窄专业清单"
+        );
+        assert_eq!(
+            kept.filter_options.nouns.iter().map(|n| n.value.as_str()).collect::<Vec<_>>(),
+            vec!["PIPE", "BRAN", "VALV"],
+            "专业筛选也不收窄 noun 清单"
+        );
+
+        // spec_values 与 nouns 叠加：管道里只要 PIPE 类 → 1 / 4 都是 PIPE，再叠 keyword 只剩 4。
+        let stacked = origin_query(&[("spec_values", "1"), ("nouns", "PIPE"), ("keyword", "_4")]);
+        let kept = filter_candidates(scan.candidates.clone(), &stacked, &scan.center, &table, None);
+        assert_eq!(kept.hits.iter().map(|h| h.refno).collect::<Vec<_>>(), vec![refno(4)]);
+
+        let response = assemble_nearby(scan_local(&tree, &default), &default, &table, None);
+        assert_eq!(
+            response.spec_groups,
+            vec![
+                SpecGroup { spec_value: 0, count: 1 },
+                SpecGroup { spec_value: 1, count: 2 },
+                SpecGroup { spec_value: 6, count: 1 },
+            ],
+            "全集按专业分组，按专业值升序"
+        );
+        assert_eq!(
+            response.results.iter().map(|item| item.spec_value).collect::<Vec<_>>(),
+            vec![1, 6, 1, 0]
+        );
+        assert!(response.room_status.is_none(), "没给 rooms 就没有 room_status");
+        let json = serde_json::to_value(&response).expect("json");
+        assert!(json.get("room_status").is_none(), "字段整个不出现，老客户端一字不变");
+        assert_eq!(json["results"][0]["spec_value"], 1);
+
+        let refnos = assemble_nearby_refnos(scan_local(&tree, &default), &default, &table, None);
+        assert_eq!(
+            refnos.by_spec_value,
+            BTreeMap::from([
+                ("0".to_string(), vec![refno(5).to_string()]),
+                ("1".to_string(), vec![refno(1).to_string(), refno(4).to_string()]),
+                ("6".to_string(), vec![refno(3).to_string()]),
+            ])
+        );
+    }
+
+    #[test]
+    fn room_scope_keeps_only_members_and_room_status_reports_the_gap() {
+        use crate::fast_model::spatial_rooms::{RoomRef, room_scope_from_members};
+        let tree = filter_tree();
+        let table = attrs_with_specs(&[(1, 24381), (3, 24383), (4, 24383), (5, 24383)], &[(1, 1), (4, 1)]);
+        let query = origin_query(&[("rooms", "4000000011/900")]);
+        let scan = scan_local(&tree, &query);
+        // 房间 900 的成员：3 与 4（5 不在，1 不在）。
+        let scope = room_scope_from_members(
+            vec![RoomRef {
+                refno: refno(900).to_string(),
+                room_num: "A101".into(),
+            }],
+            [refno(3), refno(4)],
+            2,
+        );
+        let kept = filter_candidates(scan.candidates.clone(), &query, &scan.center, &table, Some(&scope));
+        assert_eq!(
+            kept.hits.iter().map(|h| h.refno).collect::<BTreeSet<_>>(),
+            BTreeSet::from([refno(3), refno(4)])
+        );
+        assert_eq!(
+            kept.filter_options.nouns.iter().map(|n| (n.value.as_str(), n.count)).collect::<Vec<_>>(),
+            vec![("BRAN", 1), ("PIPE", 1)],
+            "房间在 facet 计数之前生效：不在房里的 noun 不进清单"
+        );
+        assert_eq!(
+            kept.filter_options.spec_values,
+            vec![SpecValueOption { value: 0, count: 1 }, SpecValueOption { value: 1, count: 1 }]
+        );
+
+        let response = assemble_nearby(scan_local(&tree, &query), &query, &table, Some(&scope));
+        assert_eq!(response.total_count, 2);
+        assert_eq!(response.groups, vec![DbnumGroup { dbnum: 24383, count: 2 }]);
+        let status = response.room_status.as_ref().expect("rooms 给了就有 room_status");
+        assert_eq!((status.matched, status.unresolved), (2, 2));
+        assert_eq!(status.rooms[0].room_num, "A101");
+        let warnings = response.warnings.as_deref().expect("unresolved > 0 要提示");
+        assert!(warnings[0].contains("2 个候选"), "{warnings:?}");
+
+        let refnos = assemble_nearby_refnos(scan_local(&tree, &query), &query, &table, Some(&scope));
+        assert_eq!(refnos.refnos, vec![refno(3).to_string(), refno(4).to_string()]);
+        assert!(refnos.room_status.is_some());
+        let json = serde_json::to_value(&refnos).expect("json");
+        assert_eq!(json["room_status"]["source"], "memory");
+        assert_eq!(json["room_status"]["rooms"][0]["refno"], refno(900).to_string());
     }
 }
