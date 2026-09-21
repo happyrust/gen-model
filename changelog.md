@@ -454,7 +454,11 @@
   （`8c89728c3` / `b90f9e38d` / `e376ad2bb`），按用户「只合这几笔」cherry-pick 进 `gen-model-refactor`（`options.rs` / `lib.rs` /
   `setup.rs` 自动合并，只有 changelog 撞了一处标题）。ADR 在主线**改号 080 → 083**——主线 ADR-080 已是单元级发布、081 / 082 也已占用；
   代码注释、向导、脚本、16 份 `DbOption*.toml` 与 ADR-069 / 074 / 075 的修订注记里的引用一并改，主线原有的 ADR-080（单元级发布）引用一处未动。
-  顺手把 16 份夹具退役注释里落后于 D6 的「不设 = mem」改成「不设 = rocksdb」，ADR-083 D3 同一句改口。验证见本条末尾追记。
+  顺手把 16 份夹具退役注释里落后于 D6 的「不设 = mem」改成「不设 = rocksdb」，ADR-083 D3 同一句改口。
+  验证（2026-09-21，同一工作树里另一会话有在途改动）：`cargo check --lib --tests` 0 error；`cargo test --lib -- options:: web_service::setup::
+  web_service::review::db:: store_mode` **99 passed / 1 failed**——唯一那条红是护栏 `no_db_option_fixture_still_carries_a_store_mode_key`
+  点名了**未入库**的本机文件 `DbOption-slyk.toml: store_mode = "mem"`（另一会话的探针配置，不在任何提交里），正是这条护栏该抓的东西；
+  入库的 16 份夹具无一命中。**未验**：真机起服务看启动横幅与向导第②步。
 
 ### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
 
