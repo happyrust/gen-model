@@ -2,6 +2,47 @@
 
 ## 2026-09-21
 
+### 本地发布 0.1.29：主线自 0.1.27 后的第一个包——ADR-081 版本与历史只读接口、属性面板对齐 E3D、ADR-082 缓存上限；跳过 0.1.28（该号已被 model-cache 分支的包占用）
+
+- 后端 `0.1.29` 构建自 `92ef5365cb34`（`chore(release): 0.1.29`，**干净树**，build_id 不带 `.dirty`）。版本号从 0.1.27 **跳到 0.1.29**：
+  0.1.28 是 `codex/model-projection-cache` 分支 2026-09-18 出的三版 `.dirty` 包（`81d2c28c0` 起；那边的 `docs/release-notes/0.1.28.md`
+  与主线内容不同，且该分支 09-17 之后的 96 个提交主线尚未合入）。同一个号挂两份发布说明、两条 patch 基线，拿错的代价大过留一个空号；
+  下一次双向同步时 Cargo 版本取高者，`0.1.28.md` 原样进主线、不撞名。
+- 产物 `releases/ams-local-0.1.29_release.20260921013814.g92ef5365cb34-runtime.zip`（120.9 MB / 126,758,082 B），
+  SHA-256 `9cb13e431752d53ddcb3ef28c2edd8bf169271759436b2c2a67c2b68bd4bacff`（另行独立重算一致）；包内 `aios-database.exe` 自报
+  `0.1.29+release.20260921013814.g92ef5365cb34`、`git_dirty:false`，SHA-256 `edb6eb30c07355d82af1a3d046a12d2fdfdc6d38995d9772510728f63a5032e8`
+  （213,216,768 B）。包型 `runtime`（同 0.1.27 / 0.1.28）：`aios-database.exe` / `web\`（13）/ `bin\surreal.exe`（2.1.4+20250317.45013fc9）/
+  `resource\surreal\*.surql`（7）/ `schema\{e3d210,e3d31}`（48）/ 出厂 `DbOption.toml`（设置模式、`store_mode="mem"`、`room_membership=false`）/
+  `.first-run-pending` / `Start-AMS` / `Start-Surreal` / `Rollback` / README / CHANGELOG，共 78 个文件 + `release.json`。
+- Web 复用 0.1.26 那份三腿全过的包（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，脚本校过来源包哈希，
+  13 个文件）；`index.html` / CHANGELOG 取自 plant-ui 干净 worktree `786187947`（`chore(release): plant-ui 0.1.11`），与包内 wasm 同源
+  （blob `321bf87b`，与 0.1.26 包里那份逐字节相同）——plant-ui 主工作树在途的 `index.html` 改动（`data_api_url` 回落 origin）与 `## 未发布` 段
+  都**没有**进包，包内 CHANGELOG 前端节是 `## 0.1.11` 那一段。
+- 覆盖 0.1.27（`2cb5de1f1`）之后主线的 68 个提交（含同日 09:29 的 `db07e39a1`，只动 `DbOption.toml` 注释模板 / spec / changelog），用户口径见
+  `docs/release-notes/0.1.29.md`：ADR-081 版本与历史只读接口（`model/versions` / `element/versions` / `node/versions` /
+  `element/attribute-history` / `node/diff-summary` / `model/history/query tool=attributes`）；属性面板与 E3D 对齐的渲染器（`6a76eefb4` /
+  `198985300`）；`spatial/centerline` + `nearest-clearance` + `bran_centerline`（`1bbd2e449` / `1dbedf8c3`）、`element/ptset` + `plines`
+  （`c0fc7be0c` / `a00565522` / `df61072cc`）；ADR-082 两个缓存上限默认 50,000 / 200,000（`9efe5a512` / `4b04f4c61` / `d258c0fba`）；元数据门两票与
+  `cache_stamp`、`model_skip_unread_attribute_changes` 退役（`34ae04e00`）、刚体前移三条排除与两处修（`ff5390d62` / `73adfee00` / `ea7ade930`）；
+  ADR-080 单元级发布开关（默认关）；ADR-073 房间降级 / D12 / D13 `RoomOnly` / D14 与 `dbnum_room_recompute_owed`（`170fde71a`）。发布说明第一条
+  列了「0.1.28 有而本版没有」：D1 bake 时算房间、D13 反查形态、射线奇偶、`surface-clearance`、隐式管身两修、校审三修。
+  **同日 09:5x 起另一路会话把该分支的存储介质系列 cherry-pick 进主线（`8a1b30c80` ← `8c89728c3`、`21b5d6c64`、`103bee843`，ADR 在主线改号
+  080 → 083 见 `8ab1277f1`：介质只由 `AIOS_STORE_MODE` 决定、漏设落 rocksdb）——都在本包之后，不在 0.1.29 里**：本包出厂 `DbOption.toml`
+  仍写 `store_mode = "mem"`、向导第②步仍可选存储。
+- 冒烟（口 19099，`-StrictSmoke`）：A 出厂配置起服务 = 设置模式 + 向导页、B 本机配置（`test-worklspace\bin`）全启动 `medium=mem` / `durable=false` /
+  服务没拉 surreal 子进程——两腿通过；C rocksdb 腿在 runtime 档按设计跳过。脚本全程 3 分 20 秒（本地六个 crate 重编、第三方依赖走共享 target）。
+- **构建输入（与主工作树隔离）**：在 `D:\work\plant-code\rel-0.1.29\` 下另起七个 worktree 打包——gen-model `92ef5365c`；vendor 各取 committed
+  HEAD：e3d-io `4a76d2a`、e3d-model `4866468`、e3d-attlib `f37be2e`、plant-mbd `f888a50`、old-aios-core `a438029` **+ 0.1.26 / 0.1.27 也带着的
+  那一处稳定未提交增量**（rkyv `validation` 特性 + `pdms_shape.rs` 47 行，防损坏 `.mesh` 反序列化溢出；`git apply` 主工作树的 diff，逐字相同）；
+  `cargo metadata --locked` 在这棵树上通过，打包前后 Cargo.lock 一字未动。**没进包**的在途改动：主工作树里另一路会话的 `attribute_diff`
+  （`GET element/attribute-diff`，6 文件 + 1 新文件，09:15 还在改）；e3d-io 4 文件 +587/−69（`element_name.rs` 无名构件短名等，09:15 还在改）、
+  e3d-model 3 文件 +202/−3（`increment.rs` / `pipeline.rs`）、plant-mbd 15 文件、e3d-attlib 2 文件。打包完七个 worktree 已删。
+- **未验**：rocksdb（durable）真库路径本包没跑（C 腿按档跳过，也没像 0.1.27 那样另做真库验证）；plant-ui 侧对新接口的消费；ADR-082 默认上限
+  在现场的实际逐出行为（09-20 只在 mem 档量过占用）；`cargo test --lib` 本次没在打包树上重跑（主线 `d258c0fba` 09-20 16:24 的 2285 passed 是最近一次全量）。
+- **记一笔操作事故（已改正）**：写这一条时另一路会话正在 cherry-pick `8c89728c3`、`changelog.md` 处于冲突态，本会话的 `git add changelog.md && git commit`
+  把对方已暂存的 34 个文件与冲突解决一并收进了一个挂着本条消息的提交（`e8c8612c4`）。随即 `reset --soft` 拆开：对方的 cherry-pick 按原作者 / 原消息
+  重新落成 `8a1b30c80`（文件清单与 `8c89728c3` 逐一相同，changelog 只含他那一段），本条单独成提交。工作树里 `attribute_diff` 那六个未暂存文件全程没动。
+
 ### 校审域 JWT 密钥 `[model_center].token_secret`：生产 `:8022` 此前跑在代码默认串上，已补成旧 `:3100` 同一把；模板与规格补上这一格，并记下部署管线会把它冲掉
 
 - **为什么**：2026-09-21 00:2x 退役 `:3100` 前，对照旧 plant-model-gen 的 API 口径逐项核 `:8022`，发现 `/opt/aios-database/DbOption.toml`
