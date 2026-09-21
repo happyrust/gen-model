@@ -6,10 +6,11 @@
 
 - **为什么**：ADR-082 真机整条链在私有实例 `D:\d149live`（release 二进制 `d258c0fba`，`:18093` / surreal `:18149` rocksdb，7997 AvevaMarineSample，
   `AIOS_MODEL_OVERLAY_MAX_ROOTS=4`、`AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES=100000`、W2 起 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`）上跑：W1 zone-move /
-  W2 restore-cheap / W3 move-mixed / W4 restore-mixed 都走通（逐出发生、`POST /model/records` 读被逐的根走 durable 冷根路、便宜路回退），
-  **W5 room-rename（`RoomOnly`）task `db-20260921-002335-000007` 00:23:39 起停在 `rooms` 阶段 7 分钟没动被杀，W6 room-restore 复跑 00:35–01:42 67 分钟没动**。
-  现场像锁：aios 115 线程全 Wait、CPU 不涨、`stage_last_progress_at` 不动；但 surreal 单核满转（6 s 墙钟吃 6.0 s CPU、30 分钟 2,500 s CPU），`idx_lookups`
-  从 00:37 起不再涨。根因是 `model_record_reader::durable_records_of_root` 那条冷读 SQL（读路 `/model/records` 与 `RoomOnly` 冷根共用）
+  W2 restore-cheap / W3 move-mixed / W4 restore-mixed 都走通（逐出发生、`POST /model/records` 读被逐的根走 durable 冷根路、冷根走 `projection incomplete`
+  回退 regen），**W5 room-rename（`RoomOnly`）task `db-20260921-002335-000007` 00:23:39 起停在 `rooms` 阶段 7 分钟没动被杀，W6 room-restore 复跑
+  00:35–01:42 67 分钟没动**。现场像锁：aios 115 线程全 Wait、CPU 不涨、`stage_last_progress_at` 不动；但 surreal 单核满转（6 s 墙钟吃 6.0 s CPU），
+  aios 侧 e3d-io 读计数（`/health.core.source_reads`）进 `rooms` 十几秒后就一格不动——aios 不在读源、时间全在库端（追记：首版这里写成「`idx_lookups`
+  不涨 = 没走索引」，那一格是源文件读计数不是库索引，已在 11:5x 改口）。根因是 `model_record_reader::durable_records_of_root` 那条冷读 SQL（读路 `/model/records` 与 `RoomOnly` 冷根共用）
   `WHERE (anc CONTAINS <根> OR in = <根>) AND aabb.d != NONE AND world_trans.d != NONE`——SurrealDB 2.1.4 对纯 OR 做索引并集，再挂 AND 谓词就整条退回
   `Iterate Table`（`EXPLAIN FULL` 实测）：47,751 行的 `inst_relate` 一根 786 ms、`tubi_relate` 再扫一遍；7997 6,772 根、overlay 上限 4 → 6,770 个冷根串行
   `await`，≈ 90–177 分钟。`model_db_adapter.rs` 的 `render_spooled_scope_cleanup` 早就记过并绕开了同一个坑，冷读这条没跟上；ADR-082 之前 overlay 不逐出、
@@ -21,15 +22,20 @@
   历史行）」只靠 `in =` 一路兜住、「两路都命中的管身行」去重。ADR-082 加文末追记（W1–W6、根因、修法、真机数）、源码钉 6 与「不做 / 未决」改口。
 - **真机验证**（同一实例换 build2 = `d258c0fba` + 本修法，serve5，01:46 起）：杀 W6 后 Reinitialize 1..366 **111 s**（6,772 根、68,143 房间边）；紧接
   365..366 窗（FRMW 属性改 → `RoomOnly`）**34 s 成功**，日志「整库房间重算完成：根 6433/6772（其中冷根 6770 从库读）、成员边 68260、事务 36、ACK 对齐 2、
-  耗时 32103ms」——对照 W5 7 分钟 / W6 67 分钟没动。每窗证据在 `D:\d149live\windows\W*\`（W5 的 `task-000007-stuck.json` / `health-stuck.json` /
-  `stuck-process.txt`），还没整理成 `docs/evidence`。
+  耗时 32103ms」——对照 W5 7 分钟 / W6 67 分钟没动。每窗原始件在 `D:\d149live\windows\W*\`（W5 的 `task-000007-stuck.json` / `health-stuck.json` /
+  `stuck-process.txt`），六窗的数与读法整理成 **`docs/evidence/2026-09-21-d149-live-chain.md`**（11:5x 追记）：W1–W4 每窗 9 根 2.6–2.8 s、
+  durable ACK 后「9 → 4 根，逐出 5」×4 + publish 时机「6 → 4，逐出 2」= 17 与 `evicted_total` 对上；**便宜路一次都没走成**——冷根 `projection incomplete`
+  回退（ADR-082 D2 那条），留在 overlay 里的 4 根被判 `immutable target changed outside the design window`（前一窗刚 regen 过，原因待查，新欠账）；
+  W5 / W6 进 `rooms` 十几秒内 `library_generation_roots` 枚举根集（解析 70,084 元素、RSS +90 MB）做完，之后 aios 侧计数一格不动；
+  serve4（旧二进制）Reinitialize 118 s 与 serve5 111 s 一样快——慢的只有 `RoomOnly` 那一步。
 - **单测**：`cargo test --lib -q model_record_reader`——d149live 树（`d258c0fba` + 修法）10:32 `5 passed; 0 failed`；主线 `04b103f2e` + 同一份文件
   （SHA-256 逐字相同）在隔离 worktree 11:51 重跑 `5 passed; 0 failed; 2403 filtered out`（79 s 含编译）。没跑全量 `--lib`。
 - **影响面**：0.1.29（`92ef5365c`）/ 0.1.30（`3c04f0ddb`）两个包都带着旧 OR 形态（release exe 里字串 4 处）。默认 50,000 根上限下 AMS 样例不会逐出，
   但 rocksdb 档**重启后的冷根**走同一条读路（`incremental-overlay` 不回填）：`/model/records` 读一个没回填的根 ~0.8 s × 2 表；`RoomOnly` 重启后第一窗会对
   整库逐根冷读——修前就是那 90 分钟。下一个包收进。
-- **未验 / 欠账**：每窗重开 `GenerationInput` 的代价没量（ADR-082 §不做那张决策卡仍开着）；rocksdb 档逐出后便宜路回退 regen 的代价没单独量；
-  `/dbnums` 面板「逐出 / 上限」那一格没做；主工作树里另一路会话在途的 `attribute_history` / `unit_versions` / `handlers` 等 5 文件**没进本提交**。
+- **未验 / 欠账**：每窗重开 `GenerationInput` 的代价没量（ADR-082 §不做那张决策卡仍开着；这组窗同库连续、没有重开发生）；rocksdb 档逐出后便宜路回退 regen
+  的代价量不出来（便宜路本来就没走成）；留在 overlay 里的根为什么被判 `immutable target changed` 没查；`RoomOnly` 修后 34 s 仍是 6,770 个冷根串行读库、
+  并行 / 批读没看；`/dbnums` 面板「逐出 / 上限」那一格没做；主工作树里另一路会话在途的 `attribute_history` / `unit_versions` / `handlers` 等 5 文件**没进本提交**。
 
 ### 本地发布 0.1.30：存储介质只由 `AIOS_STORE_MODE` 决定、漏设落 rocksdb（ADR-083）——0.1.29 之后主线唯一的运行时改动
 

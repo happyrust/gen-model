@@ -199,14 +199,17 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 
 - **怎么跑**：私有实例 `D:\d149live`（release 二进制 `d258c0fba`、HTTP `:18093`、surreal `:18149` **rocksdb**、dbnum 7997 AvevaMarineSample、
   `DbOption-d149-live.toml`），`AIOS_MODEL_OVERLAY_MAX_ROOTS=4`、`AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES=100000`，W2 起加 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`；
-  起窗 + 采样 + 切日志用 `Run-Window.ps1`，每窗的任务 JSON / `/health` 采样 / 日志切片落在 `D:\d149live\windows\W*\`（还没整理成 `docs/evidence`）。
-- **W1 zone-move → W4 restore-mixed 都走通**：逐出发生（`overlay_evicted_total` 动了）；`POST /model/records` 读被逐的根走 durable 冷根路、结果正常；
-  W2 restore-cheap / W3 move-mixed / W4 restore-mixed 便宜路与逐出叠着跑，成功。
+  起窗 + 采样 + 切日志用 `Run-Window.ps1`，每窗的任务 JSON / `/health` 采样 / 日志切片落在 `D:\d149live\windows\W*\`；
+  六窗的数与读法整理在 **`docs/evidence/2026-09-21-d149-live-chain.md`**。
+- **W1 zone-move → W4 restore-mixed 都走通**（每窗 9 根 BRAN、2.6–2.8 s、`in_sync`）：逐出如 D1——每窗 durable ACK 后「9 → 4 根，逐出 5」，
+  2 s 采样能看到 9 根在 overlay 里的那一瞬；`POST /model/records` 读被逐的根走 durable 冷根路、结果正常。**便宜路一次都没走成**：被逐 / 重启后冷的根
+  → `projection incomplete` → 回退整根 regen（D2 那条，真机走到了）；留在 overlay 里的 4 根 → `model target: immutable target changed outside the
+  design window … rigid motion cannot cover it`——前一窗刚 regen 过、目录 / 模板没动，**为什么判成这样没查**（新欠账，不影响正确性）。
 - **W5 room-rename（`RoomOnly`）与 W6 room-restore 复跑都「卡死」**：W5 task `db-20260921-002335-000007` 00:23:39 起停在 `rooms` 阶段、7 分钟没动被杀
   （证据 `D:\d149live\windows\W5-room-rename-roomonly\{task-000007-stuck.json, health-stuck.json, stuck-process.txt}`）；W6 用同一二进制复跑，00:35:37 起到 01:42
   被杀，67 分钟。现场像锁：aios 115 线程全 Wait、CPU 57 s 后不再涨、`stage_last_progress_at` 不动（逐根循环里没有进度计）。**但 surreal 单核满转**
-  （6 s 墙钟吃 6.0 s CPU、30 分钟 2,500 s CPU），`idx_lookups` 从 00:37 起不再涨——走的不是索引；aios 到 surreal 只有一条 WS 连接，
-  `recompute_dbnum_room_edges` 对每个冷根串行 `await` 一次 `durable_room_records_of_root`，所以客户端那边只看得到空转。
+  （6 s 墙钟吃 6.0 s CPU），aios 侧 e3d-io 读计数（`/health.core.source_reads`）从进 `rooms` 十几秒后起一格不动——aios 不在读源，时间全在库端；
+  aios 到 surreal 只有一条 WS 连接，`recompute_dbnum_room_edges` 对每个冷根串行 `await` 一次 `durable_room_records_of_root`，所以客户端那边只看得到空转。
 - **根因**：`model_record_reader::durable_records_of_root` 那条冷读 SQL（读路 `/model/records` 与 D3 的冷根共用）
   `WHERE (anc CONTAINS <根> OR in = <根>) AND aabb.d != NONE AND world_trans.d != NONE`——SurrealDB 2.1.4 对**纯 OR** 会做索引并集，
   一挂上别的 AND 谓词就整条退回 `Iterate Table`（`EXPLAIN FULL` 实测）。47,751 行的 `inst_relate` 上一根 **786 ms**，`tubi_relate` 再扫一遍；
@@ -224,5 +227,6 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - **对本文的意思**：D2 表里「读路直读 RocksDB」与 D3「冷根从库里读几何行」的单价从 O(表) 回到 O(命中行)；D3「与读路的冷读同一条 SQL」仍成立
   （同一个 `durable_records_sql`）。`RoomOnly` 在 rocksdb 档**重启后的第一窗**会对整库逐根冷读（`incremental-overlay` 不回填），修前那就是 90 分钟——
   0.1.29（`92ef5365c`）/ 0.1.30（`3c04f0ddb`）两个包都还带着旧形态（release exe 里字串 4 处），下一个包收进。
-- **仍开着**：每窗重开 `GenerationInput` 的代价（§不做那张决策卡）；rocksdb 档便宜路回退 regen 的单独代价；`/dbnums` 面板「逐出 / 上限」那一格；
-  W1–W4 的采样整理成 `docs/evidence`。
+- **仍开着**：每窗重开 `GenerationInput` 的代价（§不做那张决策卡；这组窗同库连续、没有重开发生，量不到）；rocksdb 档便宜路回退 regen 的单独代价
+  （便宜路本来就没走成，量不出来）；留在 overlay 里的根为什么被判 `immutable target changed`；`/dbnums` 面板「逐出 / 上限」那一格；
+  `RoomOnly` 修后的 34 s 仍是 6,770 个冷根串行读库，并行 / 批读没看。
