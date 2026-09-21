@@ -1786,7 +1786,7 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
         eprintln!("内存库预装磁盘 surql 函数未成（{error:#}），等 run_cli 的内置快照兜底");
     }
     println!(
-        "*** 内存模式（这一档由{}定的）：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
+        "*** 内存模式（这一档由 {} 定的）：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
         crate::options::store_mode_source(),
         db_option.surreal_ns,
         db_option.project_name,
