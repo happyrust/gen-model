@@ -353,13 +353,14 @@ model_full_rebuild_enabled = true
 # default-jwt-secret-key（启动 warn 一句）——知道这个默认串的人不连服务器就能签出任意 project_id / user_id / role 的 token，
 # 直接过 /api/review/* 与 /api/users/*。token_expiration_hours 不写 = 24。同段还认 frontend_base_url（embed-url 前端基址链
 # 里的第二档，review/platform/config.rs；一般配 [platform_auth].review_web_base_url 就够）。
-# 生产 123.57.182.243:8022 自 2026-09-21 00:31 起手工配了本段，值 = 旧 :3100（plant-model-gen）同一把 token_secret，
-# PMS 手里按旧密钥签的 token 换址后照旧有效。
+# 生产 123.57.182.243:8022 自 2026-09-21 00:31 起手工配了本段，值沿用旧 :3100（plant-model-gen）那一把。注意 PMS **不持有**
+# 密钥：它的 S2S token 是先调我们的 POST /api/auth/token 取的，所以密钥只需本机签 / 验一致、跨重启与重部署稳定，值本身
+# 随便一串强随机都行；换密钥 = 已发的 token 全部失效，PMS 重取、前端重登即可。
 # 两条提醒：
 #   1. 密钥值不进仓库，按站点在服务器那份 DbOption.toml 里填。github/deploy/backend-20260918 分支的
 #      deploy/linux/install_backend.sh 每次部署整份覆盖 /opt/aios-database/DbOption.toml，render_dboption.py 只追加
 #      [review_auth] / [platform_auth] / [review_attachments]，它写进 service.env 的 JWT_SECRET 又不在上面那条口径里——
-#      重部署前先把本段补进渲染，否则密钥回落默认串、PMS 与前端手里的 token 全 401。
+#      重部署前先把本段补进渲染，否则密钥回落默认串：已发 token 全 401（重取后又能用），而默认串谁都能离线伪造。
 #   2. TOML 里 [表] 之后的裸键都归到那张表下。本文件其余键全是顶层键，scripts/Invoke-SiteDbnumParse.ps1 与部署渲染也都在
 #      文件末尾追加顶层键——所以本段在这里只以注释形态出现；真要写活的表头，放到所有顶层键之后，并且之后别再追加裸键。
 # [model_center]

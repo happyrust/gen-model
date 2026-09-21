@@ -7,10 +7,10 @@
 - **为什么**：2026-09-21 00:2x 退役 `:3100` 前，对照旧 plant-model-gen 的 API 口径逐项核 `:8022`，发现 `/opt/aios-database/DbOption.toml`
   没有 `[model_center]`、进程环境也没 `JWT_SECRET`、`service.env` 不存在——而 `review/auth.rs::JwtConfig::from_config_file` 的口径是：
   配置文件能载入就**只**读 `model_center.token_secret`，读不到直接回落 `default-jwt-secret-key`，`JWT_SECRET` 环境变量此时根本不看
-  （`auth.rs:152-168`；`JwtConfig::default()` 才读环境变量，只在找不到任何配置文件时走到）。后果两条：知道默认串的人不连服务器就能
-  签出任意 `project_id / user_id / role` 的 token 直接过 `/api/review/*` `/api/users/*`；PMS 手里按旧 `:3100` 密钥签的 token 换址到
-  不带端口后一律 401。仓库里 `DbOption.toml` 模板、`docs/specs/review-api.md`（写的是「密钥来自 `JWT_SECRET` 环境变量」）与部署渲染
-  都没有这一格——从来没人给新栈配过。
+  （`auth.rs:152-168`；`JwtConfig::default()` 才读环境变量，只在找不到任何配置文件时走到）。后果：知道默认串的人不连服务器就能
+  签出任意 `project_id / user_id / role` 的 token 直接过 `/api/review/*` `/api/users/*`（首版还写了「PMS 按旧密钥签的 token 会 401」，
+  同日 09:5x 用户指正后撤回，见末尾**改口**）。仓库里 `DbOption.toml` 模板、`docs/specs/review-api.md`（写的是「密钥来自 `JWT_SECRET`
+  环境变量」）与部署渲染都没有这一格——从来没人给新栈配过。
 - **改动**：
   - **服务器（会话 fable-5-1-25，00:31，不在仓库里）**：备份 `DbOption.toml.bak-20260920T163130Z` 后，把旧 `:3100`
     `[model_center].token_secret` 那一行原样追到 `/opt/aios-database/DbOption.toml` 末尾，`systemctl restart aios-database`。
@@ -36,6 +36,13 @@
   `DbOption.toml` 里，与 `service.env` 600 的初衷相悖）；(b) `JwtConfig::from_config_file` 让 `JWT_SECRET` 环境变量压过
   `model_center.token_secret`（与本仓 `AIOS_*` 环境变量压配置键的惯例一致，`service.env` 那条路就通了；`warn_if_default_jwt_secret`
   的告警文案也该一起改口）。
+- **改口（同日 09:5x，用户指正「密钥 PMS 会调用我们提供的接口生成」）**：PMS **不持有** `token_secret`——它的 S2S `token` 是先调
+  `POST /api/auth/token` 取的（`plant3d-web/scripts/pms-contract-sequence.ts` 第 0 步「auth/token (login)」→ 后面六条复用），不是拿共享密钥
+  自己签。于是：① 密钥值与旧 `:3100` 是否一致**不影响 PMS**，昨夜沿用旧密钥无害但非必要，`REVIEW_JWT_SECRET` 填任何一串强随机都行；
+  ② 密钥要求只剩「本机签 / 验一致、跨重启与重部署稳定」，换密钥 = 已发 token 全部失效，PMS 重取、前端重登即可（PMS 收到 401 是否自动
+  重取本仓看不到，要问 PMS 侧）；③ §8 六条的 JWT 校验挡住的只是「没先调 `/api/auth/token`」，而它**不要密码**——真正的信任边界是
+  谁能打到 `/api/auth/token`，收紧的抓手是 nginx 对这条路径按 PMS 出口 IP 白名单（本仓与 plant3d-web 都没做，待拍板）。
+  `DbOption.toml` 注释与 `review-api.md` §1.1 的对应两句同步改口。
 
 ## 2026-09-20
 
