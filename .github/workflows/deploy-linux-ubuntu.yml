@@ -5,7 +5,10 @@ name: Deploy Backend To Ubuntu
 # 服务器口径的 DbOption，以及 nginx 上校审四前缀到 :8022 的分流。
 #
 # 需要的仓库配置：
-#   Secrets:   DEPLOY_REMOTE_PASS（服务器口令）、REVIEW_JWT_SECRET（可选，PMS 签发的 token 要对上）
+#   Secrets:   DEPLOY_REMOTE_PASS（服务器口令）、REVIEW_JWT_SECRET（**必填**：校审 / PMS 入站 JWT 的密钥，
+#              渲染进 DbOption.toml 的 [model_center].token_secret，与旧 :3100 一样写在配置文件里；没有它
+#              「Render server DbOption」那一步直接失败——服务有配置文件时不读环境变量 JWT_SECRET，
+#              首发那条 service.env 路就是这么落空的。值与服务器上现有的 token_secret 相同则已发 token 不失效。）
 #   Variables: DEPLOY_REMOTE_HOST（可选，默认 123.57.182.243）、DEPLOY_REMOTE_USER（可选，默认 root）
 #
 # 触发方式：workflow_dispatch 只认默认分支上的 workflow，这条还没并回去，所以调链期间靠
@@ -167,17 +170,19 @@ jobs:
       - name: Render server DbOption
         env:
           E3D_PROJECT_DIR: /var/lib/aios-database/e3d
+          # 密钥进配置文件（[model_center].token_secret），不走环境变量——服务有配置文件时不读 JWT_SECRET。
+          # 没配这个 secret，render_dboption.py 会在这里失败，空跑也会：宁可早知道。
+          JWT_SECRET: ${{ secrets.REVIEW_JWT_SECRET }}
         run: |
           set -euo pipefail
           # 渲染逻辑在 deploy/linux/render_dboption.py：彩排（rehearse-backend-stack.yml）
           # 跑的必须是同一份，两边各抄一段的话，彩排验过的就不是这里要发的东西了。
           python3 deploy/linux/render_dboption.py
-          echo "===== 与仓库里那份的差异 ====="
-          diff -u DbOption.toml bundle/DbOption.toml || true
+          echo "===== 与仓库里那份的差异（token_secret 那一行已遮掉） ====="
+          diff -u DbOption.toml bundle/DbOption.toml | sed -E 's/^(\+token_secret[[:space:]]*=).*/\1 "<redacted>"/' || true
+          stat -c '%a %n' bundle/DbOption.toml
 
       - name: Assemble bundle
-        env:
-          JWT_SECRET: ${{ secrets.REVIEW_JWT_SECRET }}
         run: |
           set -euo pipefail
           cp deploy/linux/install_backend.sh bundle/
@@ -189,15 +194,7 @@ jobs:
           diff -ru resource/surreal bundle/resource/surreal >/dev/null \
             && echo "resource/surreal 与本分支一致" \
             || echo "::warning::resource/surreal 在本分支上跟二进制那个 commit 不一样，包里用的是二进制那一版"
-          # 密钥走文件不走命令行：命令行那一份在服务器上 ps 就看得见。
-          if [ -n "${JWT_SECRET:-}" ]; then
-            umask 177
-            printf '%s' "$JWT_SECRET" > bundle/jwt_secret
-            umask 022
-            echo "带上 REVIEW_JWT_SECRET"
-          else
-            echo "没有 REVIEW_JWT_SECRET：服务会用代码里的缺省密钥，PMS 签发的 token 大概率验不过"
-          fi
+          # 密钥已在 bundle/DbOption.toml（600）里，不再另放 jwt_secret 文件、也不走命令行。
           ls -la bundle
 
       - name: Install deploy tools
@@ -243,7 +240,7 @@ jobs:
           echo "这一发会做的事："
           echo "  1. 传 $(du -sh bundle | cut -f1) 的包到 /tmp/aios-deploy-${GITHUB_RUN_ID}"
           echo "  2. 装 SurrealDB 2.1.4（fork rev ${SURREAL_FORK_REV}；机器上已经是这一版就跳过）+ systemd 单元 surrealdb.service"
-          echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新二进制、DbOption 与 resource/surreal → 起"
+          echo "  3. 停 aios-database → 旧二进制存成 bin/aios-database.prev → 装新二进制、DbOption（含 [model_center].token_secret，600）与 resource/surreal → 起"
           echo "  4. nginx 加 include /etc/nginx/snippets/aios-review-split.conf，分流前缀 ${REVIEW_SPLIT_PREFIXES}（skip_nginx=${SKIP_NGINX}）"
           echo "  5. 健康检查：本机 :8009 /health、:${HTTP_PORT} /api/v1/health 与 /api/review/health，再走公网一遍"
 

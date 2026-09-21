@@ -34,7 +34,11 @@ SURREAL_USER="${SURREAL_USER:-root}"
 SURREAL_PASS="${SURREAL_PASS:-root}"
 HTTP_PORT="${HTTP_PORT:-8022}"
 PUBLIC_HOST="${PUBLIC_HOST:-}"
-JWT_SECRET="${JWT_SECRET:-}"
+# 没有 JWT_SECRET 这个入参了：校审 JWT 的密钥在包里 DbOption.toml 的 [model_center].token_secret
+# （render_dboption.py 从 secrets.REVIEW_JWT_SECRET 渲染），与旧 :3100 一样写在配置文件里。
+# 服务的口径（review/auth.rs::JwtConfig::from_config_file）是有配置文件就只读那里，环境变量
+# JWT_SECRET 根本不看——2026-09-18 首发走 service.env + EnvironmentFile 那条路就是这么落空的，
+# 生产在代码默认串上跑到 2026-09-21 00:31 手工补上才对。
 RUST_LOG_LEVEL="${RUST_LOG_LEVEL:-info}"
 SKIP_NGINX="${SKIP_NGINX:-0}"
 ROLLBACK="${ROLLBACK:-0}"
@@ -141,10 +145,33 @@ if [ -f "${INSTALL_DIR}/bin/aios-database" ]; then
 fi
 install -m 755 "${BUNDLE_DIR}/aios-database" "${INSTALL_DIR}/bin/aios-database"
 
+# 配置里必须带校审 JWT 密钥，且不是代码默认串。这一步整份覆盖服务器上的 DbOption.toml，
+# 包里那份没有 [model_center] 就等于把线上密钥打回 default-jwt-secret-key（已发 token 全失效、
+# 谁都能离线伪造）——宁可停在这儿。手工 scp 上来的包也过这道门。
+bundle_secret="$(awk '
+  /^\[model_center\]/ { f = 1; next }
+  /^\[/               { f = 0 }
+  f && /^token_secret[ \t]*=/ { sub(/^token_secret[ \t]*=[ \t]*/, ""); print; exit }
+' "${BUNDLE_DIR}/DbOption.toml")"
+case "$bundle_secret" in
+  "")                          die "包里的 DbOption.toml 没有 [model_center].token_secret——render_dboption.py 没拿到 JWT_SECRET（仓库 secret REVIEW_JWT_SECRET）就渲染了？" ;;
+  '""'|'"default-jwt-secret-key"') die "包里的 [model_center].token_secret 是空串 / 代码默认串，等于没配" ;;
+esac
+
 if [ -f "${INSTALL_DIR}/DbOption.toml" ]; then
-  cp -f "${INSTALL_DIR}/DbOption.toml" "${INSTALL_DIR}/DbOption.toml.bak-$(date -u '+%Y%m%dT%H%M%SZ')"
+  backup="${INSTALL_DIR}/DbOption.toml.bak-$(date -u '+%Y%m%dT%H%M%SZ')"
+  cp -pf "${INSTALL_DIR}/DbOption.toml" "$backup"
+  chmod 600 "$backup"   # 旧配置里可能也有密钥（2026-09-21 起就有）
 fi
-install -m 644 "${BUNDLE_DIR}/DbOption.toml" "${INSTALL_DIR}/DbOption.toml"
+# 600：里面有密钥。服务以 root 跑（单元没有 User=），读得到。
+install -m 600 "${BUNDLE_DIR}/DbOption.toml" "${INSTALL_DIR}/DbOption.toml"
+log "DbOption.toml 已就位（600，含 [model_center].token_secret）"
+
+# 首发那条不生效的路留下的文件：里面只有一行 JWT_SECRET，服务从来没读过。留着只会让人误以为密钥在这儿。
+if [ -f "${INSTALL_DIR}/service.env" ]; then
+  rm -f "${INSTALL_DIR}/service.env"
+  log "移除旧的 ${INSTALL_DIR}/service.env（EnvironmentFile 那条路服务不读，密钥现在在 DbOption.toml [model_center]）"
+fi
 
 # aios_core::function::define_common_functions 用 std::fs::read_dir("resource/surreal")
 # 读这一目录——**相对 CWD**，也就是单元里的 WorkingDirectory；整目录 sort 后逐个 query。
@@ -181,19 +208,7 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 UNIT
 
-# JWT 密钥不进单元文件（那是 644，谁都读得到）：单独一个 600 的 env 文件，
-# 单元用 EnvironmentFile=- 引它，没有也能起。
-[ -z "$JWT_SECRET" ] && [ -f "${BUNDLE_DIR}/jwt_secret" ] && JWT_SECRET="$(cat "${BUNDLE_DIR}/jwt_secret")"
-if [ -n "$JWT_SECRET" ]; then
-  umask 177
-  printf 'JWT_SECRET=%s\n' "$JWT_SECRET" > "${INSTALL_DIR}/service.env"
-  umask 022
-  # 光靠 umask 不够：父目录上挂了 default ACL 的机器（GitHub runner 的 /opt 就是）
-  # 创建出来的是 666，彩排里亲眼见过。密钥文件的权限不该看落在谁家。
-  chmod 600 "${INSTALL_DIR}/service.env"
-  log "JWT_SECRET 写进 ${INSTALL_DIR}/service.env（$(stat -c '%a' "${INSTALL_DIR}/service.env")）"
-fi
-
+# 单元文件是 644，密钥不在这里：它在 600 的 DbOption.toml 里，DB_OPTION_FILE 指过去。
 {
   cat <<UNIT
 ${MANAGED_MARK}
@@ -205,7 +220,6 @@ Requires=${SURREAL_UNIT}.service
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
-EnvironmentFile=-${INSTALL_DIR}/service.env
 Environment=DB_OPTION_FILE=${INSTALL_DIR}/DbOption.toml
 Environment=PLANT_ASSET_ROOT=${DATA_DIR}/assets
 Environment=RUST_LOG=${RUST_LOG_LEVEL}

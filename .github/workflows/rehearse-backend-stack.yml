@@ -8,7 +8,10 @@ name: Rehearse Backend Stack
 # 与真部署的差别只有三处：
 #   1. 机器是 ubuntu-latest runner，不是那台 ECS；
 #   2. 站点里 /api 与 ^~ /files/ 的上游 :3100 在 runner 上不存在——我们只验不该走它的那几条；
-#   3. JWT 密钥是本次运行现编的，不是 secrets.REVIEW_JWT_SECRET。
+#   3. JWT 密钥是本次运行现编的（rehearsal-only-<run_id>），不是 secrets.REVIEW_JWT_SECRET；
+#      但走的路一样：render_dboption.py 写进 DbOption.toml 的 [model_center].token_secret，
+#      末尾还会用它自签一枚 token 打 /api/users/me，验「服务真的用了这把密钥」（首发彩排只验了
+#      service.env 文件写成 600，没验服务读没读——事实上那条路服务根本不读）。
 #
 # 两个 matrix 档对应服务器可能的两种现状：
 #   legacy  —— 站点文件还是 2026-08-03 那份，没有 include，脚本得自己插进去（现在就是这一档）；
@@ -45,6 +48,8 @@ env:
   SURREAL_DATA_DIR: /var/lib/surrealdb/ams-8009
   REMOTE_HOST: 127.0.0.1
   NGINX_SITE: /etc/nginx/sites-available/plant3d-web
+  # 彩排用的 JWT 密钥：现编、可打印、随 run 变，真部署那一份来自 secrets.REVIEW_JWT_SECRET。
+  REHEARSAL_JWT_SECRET: rehearsal-only-${{ github.run_id }}
 
 jobs:
   rehearse:
@@ -124,12 +129,22 @@ jobs:
       - name: Render server DbOption
         env:
           E3D_PROJECT_DIR: /var/lib/aios-database/e3d
+          JWT_SECRET: ${{ env.REHEARSAL_JWT_SECRET }}
         run: |
           set -euo pipefail
           python3 deploy/linux/render_dboption.py
           echo "===== 与仓库里那份的差异 ====="
           diff -u DbOption.toml bundle/DbOption.toml || true
-          python3 -c "import tomllib,sys; c=tomllib.load(open('bundle/DbOption.toml','rb')); print('TOML OK；store_mode=',c['store_mode'],'http_api_addr=',c['http_api_addr'])"
+          python3 -c "
+          import tomllib, os
+          c = tomllib.load(open('bundle/DbOption.toml', 'rb'))
+          print('TOML OK；store_mode=', c['store_mode'], 'http_api_addr=', c['http_api_addr'])
+          assert c['model_center']['token_secret'] == os.environ['JWT_SECRET'], '渲染出的 token_secret 与 JWT_SECRET 不一致'
+          assert c['model_center']['token_expiration_hours'] == 24
+          print('[model_center].token_secret 已渲染进配置（', len(c['model_center']['token_secret']), '个字符）')
+          "
+          stat -c '%a %n' bundle/DbOption.toml
+          [ "$(stat -c '%a' bundle/DbOption.toml)" = "600" ] || { echo "::error::含密钥的 bundle/DbOption.toml 不是 600"; exit 1; }
 
       - name: Assemble bundle
         run: |
@@ -140,10 +155,7 @@ jobs:
           mkdir -p bundle/resource
           cp -r binsrc/resource/surreal bundle/resource/
           ls -1 bundle/resource/surreal
-          # 真部署里这一份来自 secrets.REVIEW_JWT_SECRET；彩排只为验「它有没有被写成 600 的 env 文件」。
-          umask 177
-          printf 'rehearsal-only-%s' "$GITHUB_RUN_ID" > bundle/jwt_secret
-          umask 022
+          # 密钥已在 bundle/DbOption.toml 里，不再另放 jwt_secret 文件（那条 service.env 路服务不读）。
           ls -la bundle
 
       - name: Stand up an nginx that looks like the server's
@@ -217,11 +229,52 @@ jobs:
         run: |
           set -uo pipefail
           echo "===== /opt/aios-database ====="; sudo ls -la "$INSTALL_DIR" "$INSTALL_DIR/bin"
-          echo "===== service.env 权限 ====="; sudo stat -c '%a %U %n' "$INSTALL_DIR/service.env"
-          mode="$(sudo stat -c '%a' "$INSTALL_DIR/service.env")"
-          [ "$mode" = "600" ] || { echo "::error::service.env 是 ${mode}，密钥文件不该是这个权限"; exit 1; }
-          sudo grep -q '^JWT_SECRET=rehearsal-only-' "$INSTALL_DIR/service.env" \
-            && echo "JWT_SECRET 写进去了" || { echo "::error::service.env 里没有 JWT_SECRET"; exit 1; }
+          echo "===== DbOption.toml 权限（里面有密钥，要 600） ====="; sudo stat -c '%a %U %n' "$INSTALL_DIR/DbOption.toml"
+          mode="$(sudo stat -c '%a' "$INSTALL_DIR/DbOption.toml")"
+          [ "$mode" = "600" ] || { echo "::error::DbOption.toml 是 ${mode}，含密钥的配置不该是这个权限"; exit 1; }
+          sudo grep -qE "^token_secret[[:space:]]*=[[:space:]]*\"${REHEARSAL_JWT_SECRET}\"" "$INSTALL_DIR/DbOption.toml" \
+            && echo "[model_center].token_secret 落到服务器配置里了" \
+            || { echo "::error::装上去的 DbOption.toml 里没有本次的 token_secret"; exit 1; }
+          sudo grep -q '^\[model_center\]' "$INSTALL_DIR/DbOption.toml" || { echo "::error::装上去的 DbOption.toml 没有 [model_center]"; exit 1; }
+          sudo test ! -e "$INSTALL_DIR/service.env" || { echo "::error::service.env 还在——那条路服务不读，脚本该把它收掉"; exit 1; }
+          grep -q 'EnvironmentFile' /etc/systemd/system/aios-database.service && { echo "::error::单元里还有 EnvironmentFile"; exit 1; } || true
+          echo "===== 服务真的用了这把密钥？（自签 HS256 探针 + /api/auth/token 那条 PMS 路） ====="
+          python3 - "$REHEARSAL_JWT_SECRET" "$HTTP_PORT" <<'PY'
+          import base64, hashlib, hmac, json, sys, time, urllib.error, urllib.request
+          secret, port = sys.argv[1], sys.argv[2]
+          base = f"http://127.0.0.1:{port}"
+          def b64(b): return base64.urlsafe_b64encode(b).rstrip(b"=")
+          def jwt(sec, claims):
+              h = b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+              p = b64(json.dumps(claims, separators=(",", ":")).encode())
+              sig = b64(hmac.new(sec.encode(), h + b"." + p, hashlib.sha256).digest())
+              return (h + b"." + p + b"." + sig).decode()
+          def status(req):
+              try:
+                  return urllib.request.urlopen(req, timeout=10).status
+              except urllib.error.HTTPError as e:
+                  return e.code
+          def me(token):
+              return status(urllib.request.Request(base + "/api/users/me", headers={"Authorization": "Bearer " + token}))
+          now = int(time.time())
+          claims = {"project_id": "rehearsal", "user_id": "SJ", "user_name": "probe", "role": "sj", "exp": now + 300, "iat": now}
+          with_ours = me(jwt(secret, claims))
+          with_default = me(jwt("default-jwt-secret-key", claims))
+          # PMS 走的路：先 POST /api/auth/token 领 token，再拿它调接口。
+          body = json.dumps({"project_id": "rehearsal", "user_id": "PMS-probe", "role": "sj"}).encode()
+          req = urllib.request.Request(base + "/api/auth/token", data=body, headers={"Content-Type": "application/json"})
+          issued = json.load(urllib.request.urlopen(req, timeout=10))["data"]["token"]
+          with_issued = me(issued)
+          print(f"用配置里的密钥自签 -> {with_ours}（要 200）")
+          print(f"用代码默认串自签   -> {with_default}（要 401：说明服务没在用默认串）")
+          print(f"/api/auth/token 领的 -> {with_issued}（要 200：PMS 那条路通）")
+          ok = with_ours == 200 and with_default == 401 and with_issued == 200
+          if not ok:
+              print("::error::服务用的密钥与 DbOption.toml [model_center].token_secret 对不上")
+          sys.exit(0 if ok else 1)
+          PY
+          probe_rc=$?
+          [ "$probe_rc" = "0" ] || exit "$probe_rc"
           echo "===== resource/surreal ====="; sudo ls -1 "$INSTALL_DIR/resource/surreal"
           loaded="$(sudo journalctl -u aios-database --no-pager | grep -c '载入surreal')"
           echo "启动日志里「载入surreal」出现 $loaded 次"
