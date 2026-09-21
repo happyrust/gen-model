@@ -26,12 +26,9 @@ use surrealdb::engine::any::{Any, connect};
 ///
 /// 第二条异步账的三张表（模型意图队列 / 固定区间恢复记录 / 副作用队列）随 ADR-072 D5 整体退役，
 /// 不再列在这里：库里没有它们，对拍也就没有可掩的。
-pub const CONTROL_PLANE_TABLES: [&str; 6] = [
+pub const CONTROL_PLANE_TABLES: [&str; 5] = [
     "dbnum_watermark",
     "dbnum_write_state",
-    // 整库房间重算的欠账（ADR-073 D13，审核 P1-2）：与写入标记同一种形态的控制面行，
-    // 行上带 `armed_at = time::now()`，逐字节对拍天然不等。
-    "dbnum_room_recompute_owed",
     "queue_control",
     "dbnum_info_table",
     "dbnum_stats_state",

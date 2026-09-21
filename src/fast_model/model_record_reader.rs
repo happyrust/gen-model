@@ -38,83 +38,11 @@ fn sort_overlay_records(records: &mut [ProjectedGeometry]) {
     records.sort_by(|a, b| (a.tube.is_some(), &a.record_id).cmp(&(b.tube.is_some(), &b.record_id)));
 }
 
-/// 冷根的**房间视图**（ADR-073 D13，d-149 2026-09-20 改口）：整库房间重算对**不在 overlay 里**的根
-/// 把库里的几何行读回来、装成 [`ProjectedGeometry`] 交给 `MemoryRoomCalculator`。与 [`records_of_root`]
-/// 的冷读同一条 SQL——读的就是读路服务给 Plant UI 的那批行。
-///
-/// 只有房间计算读的那几格是忠实的：`source_refno` / `noun` / `mesh_id` / `world_bounds` / `world_transform`
-/// （标准图元的本地摆放已折进世界变换，形状一律记 `Baked`——`room_model::memory_model_world_points`
-/// 对两种形状算出的世界点相同）。库行不带的东西这里也没有：`record_id` 是 `<构件>@durable#<序>`
-/// （只进错误信息）、`ancestors` 只有构件自身与这根、`source_sesno` 为 0、`tube` 为 `None`（管身那一行
-/// 的 noun 仍是 `TUBI`）。**别把它当成投影记录装回 overlay**——它是算房间用的一次性输入，不是那根的
-/// 模型。没有网格的行（不该有：写路对每一行都落 `booled_id` 或一条 `geo_relate`）跳过，不编一个空
-/// `mesh_id` 让读网格那一步报错。
-pub(crate) async fn durable_room_records_of_root(
-    db: &Surreal<Any>,
-    root: e3d_io::refno::RefNo,
-) -> anyhow::Result<Vec<ProjectedGeometry>> {
-    let key = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-    let rows = durable_records_of_root(db, key).await?;
-    Ok(rows
-        .into_iter()
-        .enumerate()
-        .filter_map(|(ordinal, row)| room_record_from_durable(row, root, ordinal))
-        .collect())
-}
-
-fn room_record_from_durable(
-    row: GeomInstQuery,
-    root: e3d_io::refno::RefNo,
-    ordinal: usize,
-) -> Option<ProjectedGeometry> {
-    let inst = row.insts.into_iter().next()?;
-    let source = crate::data_interface::generation_root::refno_to_e3d(row.refno);
-    let ancestors = if source == root {
-        vec![super::model_memory_store::packed_refno(root)]
-    } else {
-        vec![
-            super::model_memory_store::packed_refno(source),
-            super::model_memory_store::packed_refno(root),
-        ]
-    };
-    Some(ProjectedGeometry {
-        record_id: format!("{source}@durable#{ordinal}"),
-        geometry_id: e3d_model::elmodl::GeometryId::Element {
-            refno: source.to_string(),
-        },
-        source_refno: source,
-        dbnum: root.dbno(),
-        source_sesno: 0,
-        noun: row.generic,
-        mesh_id: inst.geo_hash,
-        world_transform: dmat4_of(&row.world_trans) * dmat4_of(&inst.transform),
-        world_bounds: [
-            [
-                row.world_aabb.mins.x,
-                row.world_aabb.mins.y,
-                row.world_aabb.mins.z,
-            ],
-            [
-                row.world_aabb.maxs.x,
-                row.world_aabb.maxs.y,
-                row.world_aabb.maxs.z,
-            ],
-        ],
-        ancestors,
-        shape: ProjectedShape::Baked,
-        tube: None,
-    })
-}
-
-fn dmat4_of(transform: &bevy_transform::components::Transform) -> glam::DMat4 {
-    glam::DMat4::from_scale_rotation_translation(
-        transform.scale.as_dvec3(),
-        transform.rotation.as_dquat(),
-        transform.translation.as_dvec3(),
-    )
-}
-
-async fn durable_records_of_root(
+/// 只读库上的基线：一根名下全部 `inst_relate` / `tubi_relate` 行（有世界盒与世界变换的），不看投影。
+/// 整库房间重算（ADR-073 D13）对**不在投影里**的根——初始化的模型行（ADR-077 D5）、落盘形态重启前
+/// 生成的——从这里读回几何再算归属（`room_model::durable_room_inputs`）；投影里有回执的根不该走这里，
+/// 投影那份才是本进程的现值。
+pub(crate) async fn durable_records_of_root(
     db: &Surreal<Any>,
     root: RefnoEnum,
 ) -> anyhow::Result<Vec<GeomInstQuery>> {
@@ -270,6 +198,74 @@ mod tests {
         assert!(!tube.has_neg, "durable tubi_relate rows are never boolean rows");
     }
 
+    /// 房间判定的「网格 → 世界」在两条路上要对得上：投影记录直接算（逐根路径 / 整库重算对投影里的根）与
+    /// 库上行回读（`durable_room_inputs`，整库重算对不在投影里的根；这里用 `projection_record_to_query`
+    /// 折出与库行同形的查询行）。标准图元元素两边都是 `world × local`；**标准隐式管身**存下的世界变换已折进本地
+    /// 摆放、库行实例变换是单位阵，投影记录那一侧也**不许再乘**一次本地摆放——此前多乘了（2026-09-17 修）。
+    /// 库行经 f32 `Transform` 分解再合成，比到 f32 精度。
+    #[test]
+    fn a_canonical_implied_tube_has_the_same_mesh_to_world_on_the_projected_and_durable_paths() {
+        use crate::fast_model::room_model::{RoomInput, durable_room_inputs};
+        use e3d_model::primitive_instance::PrimitiveMeshKey;
+        let root = RefNo::new(24384, 26606);
+        let world = DMat4::from_scale_rotation_translation(
+            glam::DVec3::ONE,
+            glam::DQuat::from_rotation_z(0.7),
+            glam::DVec3::new(10.0, 20.0, 30.0),
+        );
+        let local = DMat4::from_scale(glam::DVec3::new(100.0, 100.0, 3000.0));
+        let canonical = |tube: Option<ProjectedTube>| {
+            let mut record = projected(
+                ProjectedShape::Canonical {
+                    key: PrimitiveMeshKey::CylinderV3 { segments: 32 },
+                    local_transform: local,
+                    local_bounds: [[0.0; 3], [1.0; 3]],
+                },
+                tube,
+            );
+            // 与 `e3d_model_service::persisted_world_transform` 同口径：隐式管身把本地摆放折进存下的世界变换。
+            record.world_transform = if record.tube.is_some() {
+                world * local
+            } else {
+                world
+            };
+            record
+        };
+        let close = |a: DMat4, b: DMat4, what: &str| {
+            for (x, y) in a.to_cols_array().iter().zip(b.to_cols_array()) {
+                assert!(
+                    (x - y).abs() <= 1e-3 * (1.0 + y.abs()),
+                    "{what}: {a:?} vs {b:?}"
+                );
+            }
+        };
+        let tube = Some(ProjectedTube {
+            route_ordinal: 0,
+            from: RefNo::new(24384, 1),
+            to: RefNo::new(24384, 2),
+            invalid: false,
+        });
+        for (record, what) in [
+            (canonical(None), "标准图元元素"),
+            (canonical(tube), "标准隐式管身"),
+        ] {
+            let projected_path = record.mesh_to_world();
+            close(
+                projected_path,
+                world * local,
+                &format!("{what}：本地摆放只乘一次"),
+            );
+            let rows = vec![super::projection_record_to_query(record, root)];
+            let durable = durable_room_inputs(&rows);
+            assert_eq!(durable.len(), 1, "{what}");
+            close(
+                durable[0].mesh_to_world(),
+                projected_path,
+                &format!("{what}：库行回读与投影记录同一个「网格 → 世界」"),
+            );
+        }
+    }
+
     #[tokio::test]
     async fn cold_read_includes_baked_canonical_and_tube_but_not_other_roots() {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
@@ -302,66 +298,5 @@ mod tests {
         let baked = records.iter().find(|r| r.generic == "FLOOR").unwrap();
         assert!(baked.has_neg);
         assert_eq!(baked.insts[0].geo_hash, "hole");
-    }
-
-    /// d-149 / ADR-073 D13：冷根的房间视图从同一条冷读 SQL 装出来——只有房间计算读的那几格是忠实的
-    /// （构件、noun、网格、世界盒、折进本地摆放的世界变换），别的根的行不进来，形状一律 `Baked`。
-    #[tokio::test]
-    async fn the_durable_room_view_keeps_only_what_the_room_calculator_reads() {
-        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
-        db.use_ns("test").use_db("cold_room_view").await.unwrap();
-        let root = RefNo::new(24384, 26606);
-        let packed = super::super::model_memory_store::packed_refno(root);
-        db.query(format!(r#"
-          CREATE aabb:box SET d={{mins:[0,0,0],maxs:[1,1,1]}};
-          CREATE trans:world SET d={{translation:[120,0,0],rotation:[0,0,0,1],scale:[1,1,1]}};
-          CREATE inst_relate:baked SET in=pe:⟨24384_26609⟩, anc=[{packed}],
-            aabb=aabb:box,world_trans=trans:world,generic='FLOOR',booled_id='hole';
-          CREATE inst_relate:canonical SET in=pe:⟨24384_26610⟩,anc=[{packed}],
-            aabb=aabb:box,world_trans=trans:world,generic='BOX',
-            insts_flat=[{{geo_hash:'box',transform:{{translation:[5,0,0],rotation:[0,0,0,1],scale:[2,3,4]}}}}];
-          CREATE inst_relate:other SET in=pe:⟨24384_999⟩,anc=[1],
-            aabb=aabb:box,world_trans=trans:world,generic='BOX',booled_id='other';
-          CREATE tubi_relate:tube SET in=pe:⟨24384_26611⟩,anc=[{packed}],
-            out=inst_geo:tube,aabb=aabb:box,world_trans=trans:world,invalid=true;
-        "#)).await.unwrap().check().unwrap();
-
-        let records = super::durable_room_records_of_root(&db, root)
-            .await
-            .unwrap();
-        assert_eq!(records.len(), 3, "别的根的那一行不进来");
-        assert!(records.iter().all(|r| r.dbnum == root.dbno()
-            && r.shape == ProjectedShape::Baked
-            && r.tube.is_none()
-            && r.source_sesno == 0
-            && r.ancestors
-                == vec![
-                    super::super::model_memory_store::packed_refno(r.source_refno),
-                    packed
-                ]));
-
-        let baked = records.iter().find(|r| r.noun == "FLOOR").unwrap();
-        assert_eq!(baked.source_refno, RefNo::new(24384, 26609));
-        assert_eq!(baked.mesh_id, "hole");
-        assert_eq!(baked.world_bounds, [[0.0; 3], [1.0; 3]]);
-        assert_eq!(
-            baked.world_transform.w_axis.x, 120.0,
-            "没有本地摆放：世界变换就是行上那份"
-        );
-
-        let canonical = records.iter().find(|r| r.noun == "BOX").unwrap();
-        assert_eq!(canonical.mesh_id, "box");
-        let (scale, _, translation) = canonical.world_transform.to_scale_rotation_translation();
-        assert_eq!(translation.x, 125.0, "本地摆放 (+5) 折进世界变换 (+120)");
-        assert_eq!(scale, glam::DVec3::new(2.0, 3.0, 4.0));
-
-        let tube = records.iter().find(|r| r.noun == "TUBI").unwrap();
-        assert_eq!(tube.mesh_id, "tube");
-        assert_eq!(tube.source_refno, RefNo::new(24384, 26611));
-        assert!(
-            tube.record_id.starts_with("24384/26611@durable#"),
-            "{}",
-            tube.record_id
-        );
     }
 }

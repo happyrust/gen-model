@@ -313,6 +313,9 @@ impl ClearanceParams {
             include_self: true,
             include_negative: true,
             dbnums: None,
+            // 净距不按房间 / 专业收窄候选（ADR 0067 的两格只给抽屉的范围 / 距离查询）。
+            rooms: None,
+            spec_values: None,
             page: 1,
             per_page: spatial_query::MAX_PER_PAGE,
         }

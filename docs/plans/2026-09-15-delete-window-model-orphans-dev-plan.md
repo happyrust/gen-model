@@ -1,136 +1,182 @@
-# 删除窗口不再留模型孤儿：开发计划
+# 删除窗口不再留模型孤儿：开发计划（2026-09-18 改小重立版——只留覆盖账告警）
 
 > 来源：2026-09-15 ADR-076 S5 真进程实测（`docs/evidence/2026-09-15-adr076-increment-durable-boundary.md` §7）。
 > 现场：AMS 8000 上 `DELETE EQUI`（EQUI + 1 个 BOX）+ SAVEWORK，窗口报 `deleted=2`、`applied`、水位推到 T、标记 `finished`——
 > 数据面对（两行都成了 `deleted = true` 的墓碑，活行回到基线 6,637），**模型面留下四行孤儿**：
 > `inst_relate:24384_26481`、`inst_info:24384_26481`、`aabb:24384_26481`、`trans:24384_26481`，`model_sesno` 停在删除前那一会话。
-> 不是 worktree 特有：`git log 8adec7169..HEAD -- helper.rs on_demand_model.rs batch_worker.rs model_update_plan.rs ele_ops.rs` 一笔都没有。
-> 状态：**待批准**。代码事实对到 `8adec7169`（= 主树今天这几个文件的内容）。
+> 被测二进制 `8adec7169`；成因与 ADR-079 之后的 live 复验见下节。
+> 状态：**待批准（2026-09-18 改小重立版）**。用户 09-18 13:3x 拍板：「按更正后的口径把 09-15 计划改小重立：只留 D3 覆盖账
+> （delete 桶为空而账本 remove 非空时出 warning），把 D1 / D2 划掉」。09-15 版的 §1.1–1.3 / D1 / D2 / S0–S3 已划掉，
+> 原文见 `git show 13695dd3d:docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md`。本版代码事实对到 **`13695dd3d`**（09-18 HEAD）。
+
+## 成因更正（2026-09-18）
+
+起因：09-18 对 8000 / 7999 / 7997 / 1112 四库 24 987 行存量模型记录逐行对现生成（plant3d-web
+`docs/verification/component-to-wall-surface-clearance-2026-09-17/README.md` §7.8），`in.deleted = true` 的模型行**全库只剩**
+`inst_relate:24384_26481` 这一条（8000 里 6 643 个已删元素其余都干净，7999 / 7997 / 1112 各 0）。顺着它把 603→604 那一窗按
+`8adec7169` 源码 + 窗口日志重新对了一遍，09-15 版 §1 的机制对不上：
+
+1. **`DeleteCleanup` 根本没排。** DESI 库的模型计划走 `build_effective_model_update_plan` → `window_root_plan.rs::build_model_update_plan_from_window`
+   （`8adec7169` 当时 `:1129–1130`），`DeleteCleanup` 只从 `plan_window_roots` 的 `delete = roots_S \ roots_T` 那一桶来（模块头表格）。
+   `8adec7169` 的 `roots_S` 是 `load_persisted_roots_with_settlement(dbnum)` 一次 `gen_root` 表读（`:1012`），而增量新建的根从头到尾没进过
+   `gen_root`（证据 §6.2：始终 952 条，`gen_root:24384_26480` 不存在），于是 `delete = ∅`——窗口日志原文
+   `roots_T=952 roots_S=952 touched=0 regen=0 delete=0`。`delete_model_subtree` 一次都没被调，没有失败可报，任务 `applied` / `finished`。
+   09-15 版 §1.1 图里「规划 → `DeleteCleanup` → `delete_model_subtree`」那一支在这一窗上**不存在**。
+2. **证据 §7 第 1 条把 `units regen=0 remove=1` 读成「排了 `DeleteCleanup`」，读错了。** 那一句是变更账本（e3d-model `UpdatePlan` / `IncrementReport`）
+   的 `totals_line`，`remove=1` 数的是候选里「target 端不存在」的删除单元（`UpdatePlan.remove`），跟根规划的 `delete` 桶是两个数。
+   同一窗在今天 HEAD 上重放，账本行仍是 `candidates=3 (+0 ~1 -2) … units regen=0 remove=1`，而根规划的 `delete` 从 0 变成 1（见第 4 条）。
+   **这两个数并排躺在同一行日志里、没人比它们——这就是本版要补的那一条。**
+3. **09-15 版 §1.2 说的「`topmost_deleted_refnos` 收敛 + `pe_owner` 子树走不下去」不在这一窗的路上。** 那是老规划器
+   `model_update_plan.rs::build_model_update_plan`，`build_effective_model_update_plan` 里只给 CATA 用（DESI → 窗口规划器，CATA → 老规划器，
+   其余空计划；`8adec7169` 与今天 HEAD 同样）。而且就算 `DeleteCleanup(EQUI 26480)` 排上了，ingest 档 `on_demand_model.rs::delete_model_subtree`
+   除了 `collect_pe_subtree_refnos` / `delete_inst_relate_subtree` 那一路，还对每个 lock root 执行 `render_spooled_scope_deletion(root, &[root], &[])`
+   ——按 `anc CONTAINS packed(root) AND model_sesno != NONE` 删，**不依赖 `pe_owner` 边**（这两处调用 09-07 / 09-09 就在，`8adec7169` 已有）。
+   那句谓词在 8009 上只读重放：`by_anc = ["24384_26481"]`，命中孤儿。边断了也删得掉——§1.2「防住了墓碑，没防住边」描述的边确实断了
+   （两个方向实测都空），但它只影响 `delete_inst_relate_subtree` 那一路，而那一路在增量上只是兜底。
+4. **ADR-079（`0247da413`，09-15 23:53，S5 实测当晚）已把成因关掉；2026-09-18 13:21 live 复验。** `gen_root` 退役后 `roots_S` = `DbSet@S` 枚举
+   （`build_model_update_plan_from_window`「`roots_S` 来自 `DbSet@S`」），增量新建的根自然在里面。在 HEAD `13695dd3d` 上跑探针
+   `probe_transform_classification_for_window`（`AIOS_TRANSFORM_WINDOW=603:604`、`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`、
+   `AIOS_E3D_SCHEMA_ROOT=vendor\e3d-io\schema`，只读 `ams8000_0001`，`cargo test --lib … -- --ignored --nocapture`，编 25 s、跑 0.5 s）：
+   `roots_S=953 roots_T=952 touched=1 regen=0 delete=1 advance=952 lazy=0 degraded=None`；候选表 `24384/26480 EQUI Deleted: target 端不存在`、
+   `24384/26481 BOX Deleted: target 端不存在`、`24384/24775 ZONE MembersChanged 成员 +0 -1`。同一窗、同一份文件，`8adec7169` 是
+   `roots_S=952 … delete=0`；多出来的那一根就是 EQUI `26480`，落 `delete` 桶 → `DeleteCleanup(26480)` → 第 3 条的 anc 墓碑清掉 BOX 那几行。
+5. **残留已清。** 8000 水位 `applied_sesno = model_sesno = 619`，603→604 那窗不会重排，孤儿不会自愈。2026-09-18 12:2x 走 `:8022` 的
+   `DELETE /api/v1/model/subtree?refno=24384/26481&confirm=24384/26481` → 200 `{"scope":"exact_subtree","status":"deleted"}`；
+   `inst_relate` / `inst_info` / `aabb` / `trans:24384_26481` 与 `geo_relate:[inst_info:24384_26481, …]` 五行都没了，8000 `inst_relate` 2 529 → 2 528，
+   `pe` 两行墓碑照旧。删前原样备份在 plant3d-web `…/8022-swap-2026-09-18/orphan-24384_26481-backup-before-delete.json`。
+
+**对 09-15 版的影响**（已按此改小，见下文）：D1（全集排）/ D2（一窗一批）针对的是一个在增量路上走不到的断点，作为「修 S5 孤儿」**不成立**；
+仍站得住的只有 D3 的覆盖账——S5 那一窗如果有「账本 `remove` 非空、根规划 `delete` 桶为空」的告警，孤儿当场就会被看见，而不是三天后靠全库对账翻出来。
+09-15 版 §1.4 / §5「可能同源的另一条」与本条**就是同一件事**，且已随 ADR-079 关掉。「新建的根不在 `roots_S`」这一类漏洞已经从结构上不存在；
+剩下的删除形态是**成员删了、根还在** → `regen`（整根重算，旧行被根级墓碑清掉），`live_ams8000_pinned_windows_land_in_the_expected_buckets`
+的 269→270「删 FTUB → regen 1」钉着它，四库对账 0 孤儿也印证它。
 
 ## 0. 一句话
 
-**删除清理按收集器给的被删名单清，不再从库里重走 `pe_owner` 子树；盖不全就出声。**
-不动数据面的墓碑口径、不动读透（mem）那一档、不动根册（`gen_root`）的登记时机。
+**账本说要删的模型单元，自身或它 S 端属主链上必须有一级落在 `delete` 或 `regen` 桶里；都没有，就在这一窗的回执里点名出声。**
+不动选根、不动 `DeleteCleanup` / `RegenRoot` 的执行路径、不动数据面墓碑口径；`collect` 里多取一条 S 端属主链，分桶后一次纯比对 + 一行 warning。
 
-## 1. 现状（代码事实，`8adec7169`）
+> 2026-09-18 14:1x 落地时更正了一个前提：e3d-model `UpdatePlan.remove` 记的是**被删的模型单元**（几何挂在它身上的那一级——
+> BOX / CYLI / FTUB…），**不是**生成根。S5 那窗 `remove = {BOX 24384/26481}`，不是 `{EQUI 26480}`；24→26 是 `{BOX 24779}`，
+> 270→271 是 8 个成员。所以「`remove` 与 `delete` 直接比」比不上，「`delete` 为空而 `remove` 非空就告警」也会在 269→270
+> （删 FTUB、BRAN 整根 `regen`）上误报。改成按 S 端属主链找「谁来清它的旧行」：`delete` 里的根按 `anc` 清整根，`regen` 里的根
+> 整根重算、旧行随根级墓碑退掉——两者都算盖住。
 
-### 1.1 一次删除在两侧各走一条路
+## 1. 现状（代码事实，`13695dd3d`）
+
+### 1.1 同一窗里有两份「删了什么」，并排打出来，没人比
 
 ```text
-任务 execute_frozen_batch
-  ├─ stage_apply（数据面）   ele_ops.rs:1239  父的 children 变了 → DELETE pe:{owner}<-pe_owner; 再 INSERT RELATION 剩下的
-  │                          element_batch.rs 被删元素落墓碑：pe 行在、deleted = true、noun/owner 保留、sesno = 删除会话
-  └─ 规划 → 就地执行（模型面）batch_worker.rs:1899  RegenRoot 之外的工作项交 run_model_side_actions（ADR-072 D5）
-                             :2052  DeleteCleanup → delete_model_subtree(refno)
-                                      → collect_pe_subtree_refnos([refno])      沿 <-pe_owner.in 向下收子树
-                                      → delete_inst_relate_subtree([refno],300) 同一个走法再来一遍
+build_model_update_plan_from_window（window_root_plan.rs:1050，DESI 增量的唯一模型规划入口）
+  ├─ WindowRootSources::collect（:774）→ sources.plan : e3d_model::UpdatePlan      变更账本（L3）
+  │       .remove : BTreeSet<(u32, u32)>   被删的模型单元（S5：{BOX 24384/26481}；24→26：{BOX 24779}；270→271：8 个成员）
+  │       .report.units_to_remove          同一个数；totals_line（vendor/e3d-model/src/increment.rs:413）里的 `remove=`
+  └─ plan_window_roots(roots_T, roots_S, impact)（:212，纯函数）→ plan.delete : Vec<PersistedRoot>   = roots_S \ roots_T
+          → into_model_update_plan（:173）→ work_items 里的 DeleteCleanup 只从这一桶来
+          → warnings[0] = "dbnum=…: window S→T roots_T=… roots_S=… touched=… regen=… delete=… advance=… lazy=… | <totals_line>"（:1112–1123）
 ```
 
-顺序是固定的：`stage_apply` 在前，模型侧就地执行在后（本轮任务回执的 `steps` 也是这个顺序）。
+S5 那一窗（`8adec7169`）就是 `delete=0` 与 `remove=1` 并排躺在 `warnings[0]` 同一行里，三天没人看见。
 
-### 1.2 断在哪儿
+### 1.2 warnings 去哪儿
 
-`model_update_plan.rs:918–925` 从净窗口取被删集（`NetOp::Deleted`），随即用 `topmost_deleted_refnos` **收敛到每棵子树最顶端的那一个**；
-`:204–219` 为收敛后的每个 refno 排一条 `DeleteCleanup`，注释写明理由：
+`plan.warnings` → `increment_pipeline.rs:981 warnings.extend(model_plan.warnings.iter().cloned())`（任务路）/
+`manual_update.rs:4407`（预览路）→ 任务回执 `warnings`，同一行也进服务日志。本条不用新开通道。
 
-> 执行侧 `delete_inst_relate_subtree` 本来就沿 pe_owner 递归整棵子树，子节点再单排一条只是把同一棵子树走两遍。
+### 1.3 旧行是谁清的（本版不动）
 
-执行侧 `helper.rs:194–211` 也确实想到了墓碑：
+- `DeleteCleanup`：`batch_worker.rs::run_model_side_actions`（:2762）在规划出来那一刻就地执行 → `mgr.delete_model_subtree(refno)`
+  （`on_demand_model.rs:62`）→ ingest 档对每个 lock root：`delete_persisted_geometry_root` + `render_spooled_scope_deletion(root, &[root], &[])`
+  （anc 墓碑，不靠 `pe_owner` 边）→ `delete_inst_relate_subtree(&[refno], 300)` → `forget_root`。边断不断都删得掉（成因更正第 3 条）。
+- `RegenRoot`：整根重算，发布时按根清旧行再落新行——成员删了、根还在，旧成员的行随之退掉。四库对账 8000 里 6 643 个已删元素
+  0 孤儿（S5 那条之外）就是这条路的实证。
 
-> 自身 + 全部后代（沿 pe_owner 向下），**刻意不加 `!in.deleted`：我们要清理的正是已软删节点**。
+### 1.4 为什么账本 `remove` 里的每一件都该被这两桶之一盖住
 
-**防住了墓碑，没防住边本身已经没了。** 同一个任务更早的 `stage_apply` 已经把所有权边拆了，实测两个方向都空：
+一件模型单元 u 在 S 端存在、T 端不存在，它的 S 端属主链上必有一个生成根 R（`unit_types` 判的，`roots_S` 用同一份口径枚举）。
+R 在 T 端还在 → u 的删除让 R 进闭包 → R ∈ `touched ∩ roots_T` = `regen`；R 在 T 端也没了 → R ∈ `roots_S \ roots_T` = `delete`；
+闭包不完整 / 退化 → `roots_S ∩ roots_T` 全进 `regen`，`delete` 照算。所以**正常情况下差集恒空**。非空只有两种可能：
 
-```
-SELECT VALUE <-pe_owner.in FROM [pe:24384_26480]  →  []
-SELECT VALUE ->pe_owner.out FROM [pe:24384_26481] →  []
-```
-
-于是 `collect_pe_subtree_refnos` 只剩种子那一个 refno，孩子的 `inst_relate` / `inst_info` / `aabb` / `trans` 没人删，
-而 `DeleteCleanup` **报成功**——任务 warnings 里没有任何一条失败。收敛（少排）与递归（走不下去）两个半边各自都说得通，合起来漏掉了中间那一层。
-
-### 1.3 谁不受影响
-
-`on_demand_model.rs:65–156` 的读透（`data_face().is_read_through()`，mem 档）分支从 `ModelMemoryStore::records_of_root` 取记录、按
-`record_id` 反查受影响根，**不碰 `pe_owner`**。本计划不动它，但要用例钉住这条差别。
-
-### 1.4 顺带一提，本计划不修的那条
-
-同一轮实测里，增量**新建**的根从头到尾没进过根册（`gen_root` 始终 952 条，`gen_root:24384_26480` 不存在），删除那一窗的根账因此是
-`roots_T=952 roots_S=952 touched=0 regen=0 delete=0`。`delete_model_subtree` 末尾那句 `DELETE gen_root:{key}` 对这种根是空操作。
-它与本条症状同源与否要另查，见 §5。
+- **`roots_S` 漏了 R**——S5 型：`gen_root` 里没有增量新建的 EQUI，R 既不在 `delete` 也不在 `regen`（`roots_T` 里也没有）。
+  结构上已随 ADR-079 消失，但这正是要防的那一类：`roots_S` 的来源以后再换一次，这条告警是唯一会当场叫的东西；
+- **属主链 / 闭包读挂**——链读不出来按空链记，那一件会被判成没盖住而出声（宁可多叫一次）。
 
 ## 2. 决策
 
-- **D1 计划侧交全集**：`DeleteCleanup` 按收集器的 `NetOp::Deleted` **全集**排，`topmost_deleted_refnos` 退役。
-  收敛的前提是「执行侧能沿 `pe_owner` 走下去」，而这个前提在同一个任务里恰好不成立。
-  `insert_item` 按 `(action, target_refno)` 去重，全集不会排出重复条目。
-- **D2 执行侧一窗一批**：`run_model_side_actions` 把本窗全部 `DeleteCleanup` 目标**聚成一次**清理调用
-  （`delete_inst_relate_subtree` / `delete_room_membership` 本来就按 `chunk_size` 分块），而不是每条工作项一次往返。
-  根级动作（`try_generation_root` 锁、`delete_persisted_geometry_root`、墓碑事务、`DELETE gen_root:…`）按解析出来的**根集**去重执行，
-  次数与今天一致。子树递归保留：增量这一路它现在收不到东西，但边没被拆的场景（按需入口 `DELETE /api/v1/model/subtree`）仍靠它。
-- **D3 盖不全要出声**：清理返回一份覆盖账 `{ planned, swept, had_rows, deleted_rows }`，`swept < planned` 时把差额与点名写进任务回执
-  `warnings`。今天它静默成功，这是最难发现的那一半。
-- **D4 读透档不动**：mem 那一档照旧走投影，本计划只改 ingest 档的路径与计划侧的名单。
+- ~~**D1 计划侧交全集**~~——**划掉**（2026-09-18）。它针对的 `topmost_deleted_refnos` 只在 CATA 老规划器里，不在 DESI 增量路上；
+  DESI 的 `DeleteCleanup` 本来就按根排、一根一条。
+- ~~**D2 执行侧一窗一批**~~——**划掉**（2026-09-18）。往返次数不是问题所在；`delete_inst_relate_subtree` 已按 300 分块。
+- **D3 覆盖账（唯一保留，口径 = 规划期按 S 端属主链比对）**：
+  - `collect` 里多取一份 `removed_units: Vec<RemovedUnit { refno, noun, ancestors_s }>`——账本 `remove` 的每一件，noun 取账本 `Deleted`
+    条目，属主链沿 `DbSet@S` 上溯（现成的 `owner_chain_in_set`，不含自身、最近属主在前）。两端 `DbSet` 都在手，之后不再开文件。
+  - 分桶（含 `carry_unsettled_generation`）之后纯函数 `uncovered_removed_units(&removed_units, &plan.delete, &plan.regen)`：
+    自身或链上任一级 ∈ `delete` ∪ `regen` 即盖住；差集按账本键序。
+  - 非空就 push 一条 warning（`delete_coverage_gap_warning`）：
 
-## 3. 切片
+    ```text
+    dbnum={dbnum}: delete-coverage gap — the change ledger removes {n} model unit(s) that no DeleteCleanup root and no RegenRoot covers:
+    24384/26481 BOX, …; their model rows are not cleaned by this window (roots_S={} roots_T={} delete={} regen={} remove={})
+    ```
 
-| # | 内容 | 落点 | 验收 |
-| --- | --- | --- | --- |
-| S0 | **取证**：一条现在就红的用例——`mem://` 上造 `pe` 父子 + `pe_owner` 边 + 两行 `inst_relate`，先拆边（模拟 `stage_apply`）再调 `delete_inst_relate_subtree([父])`，断言子行**还在**；另一条对照钉读透档不受影响 | `helper.rs`（用例）、`on_demand_model.rs`（用例） | 两条用例落地：漏删那条红、读透那条绿 |
-| S1 | **计划侧交全集**：`topmost_deleted_refnos` 退役，`work_items_from_units` 的 `deleted_refnos` 直接来自 `NetOp::Deleted` 全集；`:217` 那段注释改写成「执行侧不能指望 `pe_owner` 还在」 | `model_update_plan.rs` | 现有三条 `topmost_*` 用例改写成「全集都排上」；源码钉：`work_items_from_units` 不再出现 `topmost_deleted_refnos` |
-| S2 | **执行侧批量化**：`run_model_side_actions` 先把 `DeleteCleanup` 目标聚齐，一次交给新的批量入口（根集去重后做根级动作，再一次性清 `inst_relate` 级联与房间边） | `batch_worker.rs`、`on_demand_model.rs`、`helper.rs` | 删 N 个元素时清理往返次数与 N 无关（用例数 SQL 调用或钉批量入口只被调一次）；根级动作次数不变 |
-| S3 | **覆盖账与告警**：清理入口返回 `{planned, swept, had_rows, deleted_rows}`，`swept < planned` 进 `warnings` 并点名前若干个漏掉的 refno | `helper.rs`、`batch_worker.rs` | 用例：构造断边场景 → 回执 warnings 含「计划 N、子树只覆盖 M」 |
-| S4 | **回归 + 真库复验** | — | `cargo test --lib` 不退步；AMS 8000 真库：建一个 EQUI（带成员）→ 删掉 → `pe` 活行、`inst_relate`、`inst_info`、`aabb`、`trans` 五项全部回到建之前的基线 |
+    点名最多 12 件，带账本 noun。用户 09-18 的口径「`delete` 桶为空而账本 `remove` 非空时出 warning」在这里体现为：`delete` 与 `regen`
+    都空而 `remove` 非空 → 差集 = 全集，全部点名；`regen` 非空时按链判（269→270 不误报）。
+- **D4 只告警、不判 `Partial`、不进 `/health`**（承 09-15 版 Q2 / Q3 的推荐）：模型行残留不影响数据面正确性；它是单窗的账，不是常驻状态。
+- **D5 观测面顺手带上**：`probe_transform_classification_for_window` 的分桶行加 `remove= gap=`（非空时点名）；
+  `live_ams8000_pinned_windows_land_in_the_expected_buckets` 每窗打 `remove= gap=` 并断言 gap 为空。
 
-S0 独立；S1 与 S2 可并行但 S2 依赖 S1 的全集（否则批量里仍只有顶端那一个）；S3 依赖 S2 的入口；S4 最后。
+## 3. 切片（S0–S2 已落地，2026-09-18 14:1x）
+
+| # | 内容 | 落点 | 验收 | 状态 |
+| --- | --- | --- | --- | --- |
+| S0 | **纯函数 + 用例**：`RemovedUnit` / `uncovered_removed_units` / `delete_coverage_gap_warning`；S5 的数（`remove = {BOX 26481, 链 EQUI 26480 → ZONE → SITE}`、`delete = []`、`regen = []`）→ 点名 `24384/26481 BOX`；EQUI 进 `delete` 或 BRAN 进 `regen` → 空 | `window_root_plan.rs` | §4.1 前两条 | **done** |
+| S1 | **接线**：`collect` 里 `collect_removed_units(&plan, base)`；`build_model_update_plan_from_window` 里比对 + push warning；源码钉 | `window_root_plan.rs` | 源码钉用例绿；`cargo test --lib` 不退步 | **done** |
+| S2 | **观测**：探针与真库门加 `remove= gap=`，真库门每窗 `assert!(gap.is_empty())` | `window_root_plan.rs`（tests） | 603→604 → `delete=1 remove=1 gap=0`；九个钉死窗口全绿 | **done** |
+| S3（可选） | **真库一建一删**（09-15 版 §4.3 的五个计数）：E3D TTY 建 EQUI + BOX → 删 → 回执无 gap warning、五个计数回基线 | — | 需要 E3D TTY，按 09-15 S5 的 mac 改 | 未做 |
 
 ## 4. 验证与验收
 
 ### 4.1 单测（名字即判据）
 
-- `a_deleted_child_loses_its_model_rows_even_after_its_owner_edge_is_gone`
-- `the_window_plan_keeps_every_deleted_refno_not_just_the_topmost`
-- `delete_cleanup_sweeps_the_whole_window_in_one_batch`
-- `an_incomplete_delete_sweep_names_what_it_missed`
-- `the_read_through_face_deletes_by_projection_and_never_walks_pe_owner`（对照，本计划不许改它的行为）
+- `a_removed_unit_with_no_cleanup_root_above_it_is_named`
+- `a_removed_unit_under_a_delete_or_regen_root_raises_no_gap`
+- `the_window_planner_reports_delete_coverage_gaps`（源码钉：比对排在 `plan_window_roots` 与 `carry_unsettled_generation` 之后、
+  `into_model_update_plan` 之前；属主链在 `collect` 里取）
 
-### 4.2 回归
+### 4.2 回归（2026-09-18 14:1x 实跑）
 
-- `cargo test --lib` 不退步（动手当天的 `2093 passed / 0 failed` 为基线，以当天实跑为准）。
-- `direct_window_replay_parity.rs` 的墓碑用例（「`pe` 行在、`deleted = true`、BOX 行没了」）口径不变——本计划不碰数据面。
-- 按需删除入口（`DELETE /api/v1/model/subtree` → `handlers::model_delete_subtree` → `delete_model_subtree`）在边完好的场景下行为逐字不变。
+- 主工作树里 `vendor/e3d-model` 正被另一条会话改到编不过（`pipeline.rs` / `route.rs` 每几分钟一变），本轮在 `%TEMP%\gm-iso`
+  里用 **e3d-model `32bfebc`（HEAD）+ gen-model-model-cache HEAD + 本文件** 单独编（其余 vendor 与 `plant-ui` 用 junction 指回原处，
+  `CARGO_TARGET_DIR` 共用 `D:\Rust\target`）。
+- `cargo test --lib`：**2 290 passed / 5 failed / 119 ignored**；同一棵树、换回 HEAD 原文件：**2 287 / 5 / 119**——多出的 3 条就是
+  §4.1，失败的 5 条两边同一批、都不在本文件改动的路上（`model_impact` × 2 与本文件 × 2 是 `CACHID` 元数据档的口径变了——
+  `metadata_only_tier` 现在把只戳 `CACHID` 判成 `CacheStamp` 档、用例还按旧口径断言，另一条会话手里 `model_impact.rs` 在途；
+  `web_service::review::platform` × 1 与模型面无关）。
+- 九个钉死窗口 + 603→604 探针：gap 全 0——`603→604: roots_S=953 roots_T=952 touched=1 regen=0 delete=1 … remove=1 gap=0`；
+  `24→26 删 EQUI 子树: delete=[24778 EQUI] remove=1 gap=[]`、`269→270 删 FTUB 4: regen=[26261 BRAN] remove=1 gap=[]`、
+  `270→271 删整条支管: delete=[26261 BRAN] remove=8 gap=[]`，其余六窗 `remove=0`。要看 warning 真的打出来，只有单测那条 S5 数字
+  ——真库上这一类已经不再发生，这是好事，不是验收缺口。
+- 09-15 版 §4.2 那两条口径照旧：`direct_window_replay_parity.rs` 的墓碑用例不变（不碰数据面）；按需删除入口 `DELETE /api/v1/model/subtree` 行为逐字不变。
 
-### 4.3 真库
+### 4.3 真库（S3，可选）
 
-AMS 8000（外部 SurrealDB，`watch_dbnums = [8000]`），E3D TTY 一建一删，比五个计数：
-
-| 表 | 建之前 | 删之后应当 |
-| --- | --- | --- |
-| `pe` 活行（`deleted` 非真） | 6,637 | 6,637 |
-| `inst_relate` | 2,527 | 2,527 |
-| `inst_info` / `aabb` / `trans` 对应行 | — | 不留被删元素的行 |
+同 09-15 版 §4.3 表；今天 8000 的基线：`pe` 活行 6,637、`inst_relate` **2,528**（09-18 清孤儿后），`inst_info` / `aabb` / `trans` 不留被删元素的行。
 
 ## 5. 不做（本轮）
 
-- **增量新建的根不进 `gen_root` 根册**（§1.4）：症状明确、成因未查，可能与本条同源（根册里没有的根，删的时候也没人认领）。单开一条。
-- 数据面墓碑口径、`noun` 名词表行的已知残留（`direct_window_replay_parity.rs:449` 指的那条）。
-- 投影淘汰、`gen_root` 的生命周期重构。
+- **执行侧逐行覆盖账**（`DeleteCleanup` 到底清了多少行）：要改 `render_spooled_scope_cleanup` 的 `RETURN` 并把计数穿三层返回值；
+  anc 墓碑不靠边，这一层今天没有已知漏洞。有下一条实例再立。
+- 选根、`DeleteCleanup` 执行路径、数据面墓碑口径、`noun` 名词表行的已知残留（`direct_window_replay_parity.rs:449` 指的那条）、投影淘汰。
 
 ## 6. 风险与取舍
 
-- **工作项条数上涨**：一次删掉一个几百件的 EQUI，`DeleteCleanup` 从 1 条变成几百条。`ModelUpdatePlan` 会随
-  durable attempt 序列化，条目多了恢复记录也变大。D2 的批量化抵消的是**往返次数**，不是记录大小；要不要改成
-  计划里单独挂一个 `delete_cleanup_refnos: Vec<String>` 而不是 N 条 `work_items`，见 Q1。
-- **`model_type_scope` 的类型门**：`DeleteCleanup` 在 `model_type_scope.rs:51` 的名单里按 `noun` 过滤，而删除项的 `noun` 是空串
-  （`:213`）。全集化之后条目变多，先确认空 `noun` 那一档的放行口径没变（`:347–348` 有现成用例）。
-- **一次清太多**：批量化之后一条语句覆盖的 refno 变多，`chunk_size = 300` 的分块要保留，别把它合成一条巨型语句。
+- **假阳性**：只在 `roots_S` 漏根或属主链读挂时出声；`regen` 算盖住是为了「删成员、根还在」这一最常见的删除形态不误报。
+  若哪天出现「链上有根、根却既没 regen 也没 delete」之外的新形态，先看是不是 `unit_types` 口径分叉。
+- **退化窗**：`plan.degraded` 时 `delete` 桶照算（`roots_S \ roots_T`）、`roots_S ∩ roots_T` 全进 `regen`，比对照做、只会更容易盖住。
+- **成本**：`remove` 条数 × 一次 S 端属主链（几次 owner 读，删除窗口通常个位数到几十件）+ 一次 `BTreeSet` 查找 × 链长；
+  不进热路径、不加序列化字段。
 
-## 7. 待定
+## 7. 待定 → 已定
 
-- **Q1**：计划里怎么装被删集——N 条 `DeleteCleanup` 工作项（改动最小，序列化记录变大），还是
-  `ModelUpdatePlan` 上单独一个 `#[serde(default)] delete_cleanup_refnos`（记录紧凑，但多一个字段与一条兼容口径）？
-  **推荐**：先按 N 条落，S4 真库那一轮顺手量一次「删 300 件」的 attempt 记录大小，超标再换。
-- **Q2**：覆盖账除了任务回执 `warnings`，要不要也进 `/health`？**推荐**：不进。它是单次窗口的账，不是常驻状态。
-- **Q3**：`swept < planned` 是只告警，还是把这一窗判成 `Partial`？**推荐**：只告警。模型行残留不影响数据面正确性，
-  判 `Partial` 会让一条清理瑕疵把整窗拖成失败。
+- ~~**Q1**：差集里的单元若正好落在某个 `regen` 根名下要不要免告警？~~ **已定为「算盖住」**（就是「删成员、根还在」的常态，
+  269→270 钉着）。
+- ~~**Q2**：warning 要不要点到 noun？~~ **已点**：noun 取账本 `Deleted` 条目（`RemovedUnit.noun`），账本没记的只出 refno。

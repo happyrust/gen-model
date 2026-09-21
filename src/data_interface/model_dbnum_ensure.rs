@@ -859,6 +859,7 @@ mod tests {
             manifest_hash: "old".into(),
             geometry_count: 0,
             published_via: "regen".into(),
+            room: None,
         };
         let exact = RootReceipt {
             source_sesno: 42,

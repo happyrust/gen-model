@@ -25,6 +25,16 @@ powershell -File scripts\Run-E3DFixtureSuite.ps1 `
 RocksDB 保留在 `output/e3d-fixture/<run-id>`。加 `-KeepSites` 可保留 E3D 夹具，
 加 `-Ui` 才启动 plant-ui 冒烟检查。
 
+本机没有 `E3D31-L3` 副本时，直接对 `D:\AVEVA\Projects\E3D3.1\AvevaMarineSample` 跑也行——
+选一个小的 DESI 做靶（`ams7998_0001` / 7998，基线解析几秒钟），夹具 SITE 都建在它的 WORLD 下、
+跑完即删。桌面上开着 E3D GUI 会话时设 `L3_ALLOW_EXISTING_E3D_SESSION=1`，驱动只等待并清理
+自己起的那一个 TTY 会话（2026-09-20 实跑：9/9 PASS，约 6 分钟）。
+
+运行器给隔离服务准备的东西（2026-09-20 起，之前三处都断在起服务 / 播种）：`<run>/resource/surreal`
+（aios_core 连库时按 CWD 找函数脚本）、`project-mirror` 里目标 DB 旁的 `amssys` / `amscom` / `amsmis`
+（服务从 SYS **文件**读 MDB 声明）、配置里钉 `room_membership = true`（两个 `room: true` 场景断言的
+是 `room_relate` 边）；播种前先等启动的模型补齐任务落定，撞上 409 只重试不判死。
+
 ## 只读预检
 
 直接运行 `l3_suite` 并增加 `--fixture-check-only`，只生成 `preflight.json`，不会登录

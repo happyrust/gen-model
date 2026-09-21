@@ -5,6 +5,7 @@
 「带 workspace 档默认 spawned-rocksdb」作废）。下文凡 `embedded-mem` 读作 `mem`；凡 `spawned-rocksdb` / `external` 读作
 `rocksdb`——但 `rocksdb` 档**服务只连不拉起**，要持久的现场先跑包内 `Start-Surreal.ps1` 再在向导改选；`spawned-mem` 一档
 不复存在。D6 的冒烟腿按 ADR-074「后果」一节读：B 腿默认 `mem`，C 腿由脚本起库、服务连它。
+**2026-09-19 追记 D7**：网格目录只有一个解析口 `options::meshes_dir*`，`PLANT_ASSET_ROOT` 压过配置 `meshes_path`（issue #030）。
 日期：2026-09-09
 落地：`scripts/New-LocalRelease.ps1`（全链路组包）、`docs/release-notes/<版本>.md`（后端提炼稿）、产物 `releases/ams-local-0.1.19-full.zip`。
 关联：
@@ -55,6 +56,44 @@
   要求首页可用、`/health.sul_db.medium=embedded-mem` 且没有 Surreal 子进程。
 - 带 workspace 档仍跑三腿：设置模式、默认 `spawned-rocksdb`、隔离的 `spawned-rocksdb@18010`。
   失败写进 `release.json.smoke`，`-StrictSmoke` 下中止出包。
+
+### D7　网格目录只有一个解析口；`PLANT_ASSET_ROOT` 压过配置里的 `meshes_path`（2026-09-19 追记，issue #030）
+
+D5 说「后端从 `PLANT_ASSET_ROOT = workspace\assets` 供 mesh」，落地时却只落了一半：`options::apply_asset_root` 把
+`PLANT_ASSET_ROOT\meshes` 写进 `DbOptionExt.inner` 那一份**克隆**的 `meshes_path`，而 `aios_core::get_db_option()` 是没有 setter 的
+全局原件，全仓 22 处 `get_meshes_path()` 直调（生成侧落盘、`/api/v1/meshes/{hash}`、房间常驻模型预热面板网格、房间输入缓存、
+历史模型服务……）都只认配置里的 `meshes_path`。发布包不配 `meshes_path`、工作目录又恰是 `workspace\`，两口径碰巧落同一个目录；
+配了 `meshes_path` 的现场两边就分家——2026-09-19 f13 隔离部署实测：网格写到 `<ws>\meshes`，房间常驻模型到 `<ws>\assets\meshes`
+找面板网格，**230 块面板 `stage=mesh-warm` 全缺、房间 degraded，而两库初始化照样 in_sync**。两条路径各自都「成功」，与 ADR-075 D6
+记的校审附件目录是同一种静默失效，修法也同一种：**一个函数，不是两处各算各的**。
+
+- **解析口**：`options::meshes_dir_of(&DbOption)`（纯解析）/ `meshes_dir_for(&DbOption)` / `meshes_dir()`（顺手建目录，沿用
+  `get_meshes_path` 的语义）。顺序：`PLANT_ASSET_ROOT`（非空白）→ `<root>\meshes`；否则配置 `meshes_path`；否则
+  `asset_root()/meshes`。第一级与 `/assets` ServeDir 认的是同一枚环境变量、同一条优先级：浏览器端取 `.mesh` 走
+  `/assets/meshes/<hash>.mesh`，挂的是 `asset_root()`，生成侧写到别处前端就拿不到——所以是环境变量压配置，不是反过来。
+- **`apply_asset_root` 退成写回**：它只把解析口的答案写进 `DbOptionExt.inner.meshes_path`，让读那一格的人（`run_app` 往下传的
+  `db_option`、向导回显）看到的与 `meshes_dir()` 是同一个值。
+- **两道钉**：`clippy.toml` `disallowed-methods` 禁 `aios_core::options::DbOption::get_meshes_path`——lib 顶上的
+  `#![allow(warnings)]` 会把 warn 级 clippy 全放行，所以紧跟一句 `#![deny(clippy::disallowed_methods)]` 把这一条单独抬到 deny
+  （负向探针实测：塞一句直调，`cargo clippy --release --lib` 以 error 拦下；拿掉后 exit 0）；
+  `options::tests::meshes_dir_is_the_only_resolver` 扫 `src/`，`cargo test` 侧再守一遍。
+- **出声**：配置里的 `meshes_path` 被压掉时 `run_app` / `run_cli` 启动各打一次
+  `⚠ DbOption.toml 里的 meshes_path = … 被环境变量 PLANT_ASSET_ROOT 压过：网格目录按 … 生效`（`options::meshes_dir_notice`），
+  与 ADR-080 D2 的 store_mode 点名同一条纪律；两边同一个目录（含 junction）或没配 `meshes_path` 时不出声。
+- **后果**：设了 `PLANT_ASSET_ROOT` 且 `meshes_path` 指向别处的现场，生成侧落盘从配置目录改到 `<root>\meshes`——此前写的那个目录
+  前端与房间本就读不到，老网格留在原地、缺的按需重生。发布包与未设 `PLANT_ASSET_ROOT` 的开发跑法位置不变（`asset_root()` 在 exe
+  同级 / 上一级没有 `assets` 时仍回 `assets`）。`lib.rs::instance_lock_skip_reason` 那句「先让两份配置的 `meshes_path` 分家」照旧成立，
+  只是「分家」现在指解析口的答案，不是文件里那一行。
+- **live**（2026-09-19 21:51，`0.1.28+g76a4dd480f26.…dirty`，f13 同一份配置、同一个 `start.ps1`、拆掉 `assets\meshes → meshes`
+  的 junction、清库重跑）：启动 stderr 第一行就是那句 ⚠（`meshes_path = "…/f13/meshes"` 被压过 → `…\f13\assets\meshes`）；
+  `[房间初始化] published 文件 [] → 215 间房 / 230 块在册面板 / 230 块有几何 / 0 块无几何 / 网格 230/230 键 0.6 MB`，`常驻房间模型：开，ready（代 72979202d292）`；
+  `Watch-InitRun` 21:52:09 → 21:54:45 DONE：7997 6772 根 / 0 失败 / 房间边 66135、1112 18 根 / 0 失败 / 房间边 11716，两库 `applied == file == model`、
+  `in_sync`、`room_alignment.current=true`；`/health` `status=ok`、`resident.panels_ready=230/230`、`mesh_warm_failed=0`。
+  网格 19749 个文件**全部**在 `<ws>\assets\meshes`（不是 junction），配置指的 `<ws>\meshes` 保持 0 个文件；
+  `GET /assets/meshes/<面板 geo_hash>.mesh` → 200（5772 字节）。库上 `room_relate` 1112 = 5858 / 7997 = 58396、`room_panel_relate` = 229，
+  `e3d.room.lookup` `17496/72903 → ready_nonempty [R144/R101]`、`24381/105161 → [R232/R332]`、`17496/121765 → ready_empty`——
+  与修前带 junction 那一跑（同日 20:57）逐字相同。修前不带 junction 的对照（同日 20:45）：`0 块有几何 / 230 块无几何（预热失败 230）`、
+  `room=degraded`、守望永不 DONE。
 
 ## 后果
 

@@ -80,9 +80,17 @@ pub mod spatial_state;
 
 pub mod spatial_query;
 
+pub mod spatial_discipline;
+
+pub mod spatial_rooms;
+/// 房间层级树（plant3d-web ADR 0068）：`nearby/tree` 与 `rooms/{refno}/tree` 的聚合。
+pub mod spatial_tree_view;
+
 pub mod spatial_centerline;
 
 pub mod spatial_clearance;
+
+pub mod surface_clearance;
 
 pub mod coverage_audit;
 

@@ -271,6 +271,7 @@ mod tests {
                     manifest_hash: format!("test-{records}"),
                     geometry_count: records,
                     published_via: "regen".into(),
+                    room: None,
                 },
             )),
             upserts,

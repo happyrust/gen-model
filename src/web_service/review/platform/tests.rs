@@ -51,8 +51,10 @@ static ENGINE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 /// 只往引擎的 channel 上发消息，跨 runtime 收发没有问题。
 async fn ensure_test_db() {
     TEST_DB.get_or_init(|| {
-        // 夹具就是一台会蒸发的 `mem://`；ADR-074 之后未配置的 store_mode 默认为 `mem`，
-        // 持久化闸（ADR-075）会拒掉它。这里显式声明「知道会丢」，走测试专用开关而不是 set_var（d-410）。
+        // 夹具就是一台会蒸发的 `mem://`，而持久化闸（ADR-075）拒的正是 `mem`。介质的默认档 2026-09-18
+        // 起翻成了 rocksdb（ADR-080 D6），所以不设环境变量跑测试时闸并不拒；但会话里只要有
+        // `AIOS_STORE_MODE=mem` 就会撞上，而这个默认档已经翻过两次——夹具不押在它身上，照旧显式
+        // 声明「知道会丢」，走测试专用开关而不是 set_var（d-410）。
         super::super::db::TEST_ALLOW_EPHEMERAL_STORE
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // `Runtime::block_on` 不允许在 runtime 线程上调，借一条普通线程把引擎起起来。

@@ -568,7 +568,8 @@ impl<'a> UnitDeltaProducer<'a> {
         for container in &sets.retired_containers {
             tube_segments.entry(*container).or_insert(0);
         }
-        let baked = bake_elements(outcome.upserts, self.service.mesh_dir.as_path())?;
+        // 单元级局部发布（ADR-078）不带房间边：只算了变了的元素，整根的边由 flush 现算（B/Q5 兜底）。
+        let baked = bake_elements(outcome.upserts, self.service.mesh_dir.as_path(), None)?;
         let (commit, _) = project_geometry_delta(
             self.dbnum,
             self.target_sesno,
@@ -737,6 +738,27 @@ pub struct ModelTarget {
     pub template_attlib_digest: String,
     pub generator_fingerprint: String,
     pub tessellation_profile: String,
+}
+
+impl ModelFileTarget {
+    /// 这一项记了会话没有。`session == 0` 是「没记」：字典库（DICT）按约定会话位固定 0、身份只按
+    /// 文件记（[`E3dModelService::model_target`]）；目录库没被这根打开过、又没钉住时也落 0。没记的
+    /// 会话不能拿去对文件最新会话——永远不等：`/model/ensure` 会把每一根都判成过期、生成完再判一次
+    /// 照样过期、抛 409。判新旧只比摘要；库级目录落款（ADR-079）也收不了它。
+    pub fn session_tracked(&self) -> bool {
+        self.session != 0
+    }
+}
+
+impl ModelTarget {
+    /// 库级目录落款要收的项（ADR-079，`目录 dbnum → 会话`）：只有记了会话的目录项。会话位 0 的项
+    /// （字典库）收进去就是 `0 → 文件最新` 这一窗，永远收不了，目录核对每次冷启动都把整库判成前移。
+    pub fn catalogue_sessions(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.catalogue
+            .iter()
+            .filter(|file| file.session_tracked())
+            .map(|file| (file.dbnum, file.session))
+    }
 }
 use crate::fast_model::e3d_mesh_store::{
     E3dPersistReport, MeshWrite, baked_mesh_id, canonical_mesh_id, ensure_mesh_file,
@@ -992,6 +1014,7 @@ fn spawn_generation_worker(
     queue: Arc<RootQueue>,
     caches: CachePool,
     mesh_dir: PathBuf,
+    rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
 ) -> impl std::future::Future<Output = anyhow::Result<()>> {
     crate::fast_model::concurrency::run_gated_cpu(move || {
         let mut cache = checkout_cache(&caches);
@@ -1000,10 +1023,12 @@ fn spawn_generation_worker(
             // the mesh file write are the rest of this root's CPU cost, and
             // doing them here is what lets the `Manifold` die on this thread
             // instead of riding into the serial publication step.
+            // 房间归属也在这里算（B/T2）：网格还在手上，判定点不必等 flush 再从盘上回读。
             let started = std::time::Instant::now();
             let evaluated = generate_snapshot_from_set(&set, &index, root, &mut cache);
             let evaluate_micros = started.elapsed().as_micros();
-            let outcome = evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir));
+            let outcome =
+                evaluated.and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir, rooms.as_deref()));
             // 一根一行的生成账：整库那一档的墙钟压在哪几根上、是取数+几何还是烘焙，
             // 只有按根记才看得出来——按批记会把长尾摊平（7999 上 25 根里几根就占了 80%）。
             log::info!(
@@ -1247,6 +1272,10 @@ pub struct E3dModelService {
     /// Initialization reuses the verified, durable source token, not mutable
     /// file length/mtime that may advance while the pinned session is generated.
     frozen_file_digests: BTreeMap<(u32, u32), String>,
+    /// The MDB's Dictionary UDA definitions, so `build_set` can answer project
+    /// attributes (`:HXYsize`) by name. `None` = no dictionary was readable;
+    /// that is a degraded read, not a reason to refuse to generate geometry.
+    uda: Option<Arc<e3d_io::uda_catalog::UdaCatalog>>,
 }
 
 #[cfg(test)]
@@ -1337,6 +1366,7 @@ impl E3dModelService {
         let option = aios_core::get_db_option();
         let (pins, locator, project_files) = current_mdb_source_inventory()?;
         Ok(Self {
+            uda: current_uda_catalog(),
             schema: DirectSchema::open_from_env()?,
             // CATA identity stays with the project-aware locator (see `build_set`
             // and `model_target`); the pins carry the design-side files only, as
@@ -1348,7 +1378,7 @@ impl E3dModelService {
             locator,
             project_files,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-            mesh_dir: option.get_meshes_path(),
+            mesh_dir: crate::options::meshes_dir_for(option),
             generation_identity: None,
             frozen_file_digests: BTreeMap::new(),
         })
@@ -1375,6 +1405,12 @@ impl E3dModelService {
         let target_dbnum = source.dbnum() as u32;
         for token in dependencies.iter().chain(tokens.clone().iter()) {
             let frozen = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
+            // 摘要故意记 sha256(commit_token_json) 而不是 `model_file_identity_digest`（路径 + 长度 +
+            // 修改时间 + 会话）：token 里全是冻结那一刻的值，同一份 token 之后重开、文件被 SAVEWORK
+            // 追加过也算得出同一个数（`initialization_target_tests::initialization_target_survives_append_…`），
+            // `room_resident` 的 room-input-cache 就靠它让没变的文件只付重开校验的钱。它与
+            // `room_read_through::target_current` 现场重算的公式对不上没关系：初始化的回执不进投影
+            // （ADR-077 D5），`target_current` 只会看到按需 / 批次那条路写的、按现场公式记的回执。
             service.frozen_file_digests.insert(
                 (frozen.dbnum() as u32, frozen.target_sesno()),
                 hex::encode(Sha256::digest(frozen.commit_token_json()?.as_bytes())),
@@ -1544,6 +1580,7 @@ impl E3dModelService {
         roots: &[String],
         failure_policy: GeometryFailurePolicy,
         sink: &tokio::sync::mpsc::Sender<GeneratedMemoryBatch>,
+        rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
     ) -> anyhow::Result<()> {
         let pin = self.pin(dbnum)?;
         let source_sesno = self.source_session(pin)?;
@@ -1575,6 +1612,7 @@ impl E3dModelService {
                     queue.clone(),
                     caches.clone(),
                     self.mesh_dir.clone(),
+                    rooms.clone(),
                 ));
             }
             let Some(finished) = futures::StreamExt::next(&mut workers).await else {
@@ -1684,7 +1722,13 @@ impl E3dModelService {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
         let produce = async {
             let result = self
-                .produce_slices(dbnum, roots, GeometryFailurePolicy::BestEffortFallback, &tx)
+                .produce_slices(
+                    dbnum,
+                    roots,
+                    GeometryFailurePolicy::BestEffortFallback,
+                    &tx,
+                    None,
+                )
                 .await;
             drop(tx);
             result
@@ -1757,17 +1801,21 @@ impl E3dModelService {
         Ok(())
     }
 
+    /// `rooms` 是本任务开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，B/T1）：给了，每件几何的
+    /// 房间归属就在 bake 时算出来随根走（[`BakedElement::room_edges`]，B/T2）；`None` 则房间那一半照旧由
+    /// flush 时的 `room_stage` 现算。
     pub async fn generate_and_persist_roots(
         &self,
         dbnum: u32,
         roots: &[String],
         failure_policy: GeometryFailurePolicy,
+        rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
     ) -> anyhow::Result<E3dPersistReport> {
         crate::native_runtime::ensure_geometry_runtime()?;
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
         let produce = async move {
             let outcome = self
-                .produce_slices(dbnum, roots, failure_policy, &sender)
+                .produce_slices(dbnum, roots, failure_policy, &sender, rooms)
                 .await;
             // Closing the last sender is what ends the consumer's loop.
             drop(sender);
@@ -2025,6 +2073,7 @@ impl E3dModelService {
                         manifest_hash: manifest_digest,
                         geometry_count,
                         published_via: "transform".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -2278,6 +2327,8 @@ impl E3dModelService {
             mesh_dir,
             generation_identity: None,
             frozen_file_digests: BTreeMap::new(),
+            // 这条口子是拿显式文件清单建的，身边没有 MDB，也就没有字典库名单。
+            uda: None,
         })
     }
 
@@ -2434,7 +2485,7 @@ impl E3dModelService {
                 snapshots.swap_remove(index).1
             } else {
                 match generate_snapshot_from_set(set, index, root, &mut catalogue_mesh_cache)
-                    .and_then(|snapshot| bake_snapshot(snapshot, &self.mesh_dir))
+                    .and_then(|snapshot| bake_snapshot(snapshot, &self.mesh_dir, None))
                 {
                     Ok(outcome) => outcome,
                     Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {
@@ -2500,7 +2551,8 @@ impl E3dModelService {
             // cross-database dependencies that were not in watermark pins.
             publication.model_target =
                 Some(self.model_target(dbnum, source_sesno, dependency_sessions)?);
-            let (commit, mut projected) = project_geometry_delta(
+            let carried_room = snapshot.room;
+            let (mut commit, mut projected) = project_geometry_delta(
                 dbnum,
                 source_sesno,
                 snapshot.elements,
@@ -2508,6 +2560,11 @@ impl E3dModelService {
                 Some(&publication),
                 &index.owners,
             )?;
+            // bake 时算好的房间边随这一根的回执走（B/T3）：只有整根重生成这一条路带；清单没变、几何一条不重写的
+            // 那种回执也带——边对着同一份构件集，flush 时照样能用。
+            if let Some((_, receipt)) = commit.receipt.as_mut() {
+                receipt.room = carried_room;
+            }
             projected.skipped += root_skipped;
             projected.failed += root_failed;
             commits.push(commit);
@@ -2547,6 +2604,9 @@ impl E3dModelService {
                 ));
             }
         }
+        // 两道门判不画的那几根在这里离开生成层：报告里有点名账，回执与日志靠它才说得出
+        // 「少的是哪一根」。渲染在序列化之前，`generation` 之后就被 JSON 吃掉了。
+        total.tubes_not_drawn = generation.implied_tubes.not_drawn_line();
         total.generation_report = serde_json::to_value(generation)?;
         Ok(total)
     }
@@ -2663,6 +2723,21 @@ impl E3dModelService {
                 file_target(dependency_dbnum, &selected.db_type, &selected.path, session)?,
             );
         }
+        // 字典库（DICT）也是几何的不可变输入：`build_set` 把 MDB 声明的字典库挂进 `DbSet`
+        // （`7d8e88c29`），目录表达式里的 UDA 从此按字典的键求值（e3d-io `9508ac4`，
+        // `( :HXYsize[2] )` 一类）——字典换一版，同一段目录程序可能求出别的数。身份按文件
+        // （长度 + 修改时间）记，会话位固定 0：字典库由 `add_db` 预开、不经 `E3dDbResolver`
+        // 懒开，没有谁往 `dependency_sessions` 里记它，让它跟会话走只会在两次算目标之间漂。
+        for pin in self
+            .pins
+            .iter()
+            .filter(|pin| pin.db_type.eq_ignore_ascii_case("DICT"))
+        {
+            catalogue.insert(
+                pin.dbnum as u32,
+                file_target(pin.dbnum as u32, &pin.db_type, &pin.file, 0)?,
+            );
+        }
         let project = self
             .locator
             .file_of(dbnum)
@@ -2677,7 +2752,7 @@ impl E3dModelService {
                 0,
             )?,
             generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
+                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-pml-uda-key-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION")
             ),
@@ -2697,6 +2772,11 @@ impl E3dModelService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for dependency in &published.catalogue {
+            // 目标里的字典库（DICT）按文件记身份、会话位固定 0（见 `model_target`），
+            // 不进依赖会话表——开它只为读一个不会用到的会话号。
+            if !dependency.db_type.eq_ignore_ascii_case("CATA") {
+                continue;
+            }
             let key = (published.design.dbnum, dependency.dbnum);
             if sessions.contains_key(&key) {
                 continue;
@@ -2763,6 +2843,13 @@ impl E3dModelService {
         } else {
             set
         };
+        // 字典库的 UDA 定义（`:HXYsize` 一类）。系统属性来自 attlib 与 `*vir.dat`，
+        // 项目属性不在那儿——名字 → 键那张表在 MDB 声明的 DICT 库里，名单只能由这一层给，
+        // `DbSet` 自己不去找（见 `DbSet::with_uda_catalog`）。
+        let set = match self.uda.clone() {
+            Some(catalog) => set.with_uda_catalog(catalog),
+            None => set,
+        };
         let set = Arc::new(set);
         for pin in &self.pins {
             // CATA identity belongs to the project-aware locator.  Preloading a
@@ -2791,6 +2878,38 @@ impl E3dModelService {
 /// used by both current and historical generation.  Current projection replaces
 /// the returned pins with watermark-pinned DESI pins, while historical generation
 /// keeps these paths and selects a session per request.
+/// 当前 MDB 声明的字典库合成的一份 UDA 定义表，按 `CURD` 序合并。
+///
+/// 名单走 [`mdb_membership::MdbMembership::dictionary_paths`]，不扫项目目录：MDB 是跨项目的，
+/// `AvevaMarineSample /ALL` 声明的六个字典库有四个在 `AvevaCatalogue` 与 `SCB` 底下，
+/// 猜错不报错，而少一个字典库跟「这个 UDA 没值」长得一模一样。
+///
+/// 读不出来**不拦生成**：几何目前一格都不靠 UDA，为一份读不开的字典库把整轮生成判死
+/// 是更坏的交换。但它也不能没声音——问题原样进 `log::warn!`。
+fn current_uda_catalog() -> Option<Arc<e3d_io::uda_catalog::UdaCatalog>> {
+    let option = aios_core::get_db_option();
+    let membership = mdb_membership::get(&option.project_name, &option.mdb_name)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            mdb_membership::resolve(option, &option.project_name, &option.mdb_name).map(Arc::new)
+        });
+    let catalog = membership.and_then(|membership| {
+        let schema = Arc::new(DirectSchema::open_from_env()?);
+        crate::data_interface::uda_catalog_provider::UdaCatalogProvider::shared(
+            &membership,
+            schema,
+        )
+        .get()
+    });
+    match catalog {
+        Ok(catalog) => Some(catalog),
+        Err(error) => {
+            log::warn!("模型生成拿不到字典库的 UDA 定义，本轮按「没有 UDA」读：{error:#}");
+            None
+        }
+    }
+}
+
 fn current_mdb_source_inventory()
 -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator, ProjectDbFiles)> {
     let option = aios_core::get_db_option();
@@ -2951,6 +3070,10 @@ pub struct BakedElement {
     pub world_bounds: [[f32; 3]; 2],
     /// Only a canonical primitive persists a local box.
     pub local_bounds: Option<[[f32; 3]; 2]>,
+    /// 这件几何对着本任务冻住的候选面板算出的房间归属边（ADR-073 D1，B/T2）：bake 时用手上的网格取判定点，
+    /// 与 flush 时从盘上回读算的逐字相同；未与同构件其它实例合并（发布前按根经 `room_model::merge_root_edges`
+    /// 收拢）。没给计算器（房间开关关 / 没有任务语境）时为空，房间那一半照旧由 flush 现算。
+    pub room_edges: Vec<crate::fast_model::room_model::ElementRoomEdge>,
 }
 
 /// A generated root after baking.  It carries no `owners`: publication reads
@@ -2961,6 +3084,9 @@ pub struct BakedSnapshot {
     pub report: Report,
     /// 随 [`GeneratedSnapshot::visited`] 原样带过来；烤制不改子树。
     pub visited: Vec<RefNo>,
+    /// 这一根随回执走的房间归属边（B/T3，`RootReceipt::room`）：bake 时给了计算器才有；发布段把它挂到
+    /// `project_geometry_delta` 折出来的回执上。
+    pub room: Option<crate::fast_model::model_memory_store::CarriedRoomEdges>,
 }
 
 /// Triangulate, hash and publish one element's mesh.
@@ -2969,7 +3095,17 @@ pub struct BakedSnapshot {
 /// publication transaction rolls back — leaves its mesh on disk.  That is the
 /// content-addressed contract rather than a new risk: the id *is* the content
 /// hash, so an orphan is simply unreferenced and waits for reachability GC.
-fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<BakedElement> {
+///
+/// `rooms` 给了就顺手算这件几何的房间归属（ADR-073 D1，B/T2）：判定点取自手上这份**就要写盘的网格**
+/// （本地 / 标准图元那一份，不是上面为算盒子折出来的 `world_mesh`——那是 manifold 在 f64 里算完再转的，
+/// 与盘上回读差几个 ulp）经 `room_model::world_points_of` 变换，与 flush 时从 `.mesh` 回读的那条路是**同一个
+/// 函数**，边逐字相同；只有盒跨在面板边上的构件才真取点。算不出来 = 这一根 `Err`（D2「房间失败 = 该根失败」，
+/// 文案与 flush 时 `room_stage` 的同形）。
+fn bake_element(
+    element: GeneratedElement,
+    mesh_dir: &Path,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BakedElement> {
     let world_bounds = {
         let world_mesh = element.parts.as_deref().map_or_else(
             || crate::fast_model::manifold_csg::manifold_to_plant_mesh(&element.solid),
@@ -2978,7 +3114,7 @@ fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<Ba
         let aabb = world_mesh.aabb.context("world PlantMesh missing AABB")?;
         [point3(&aabb.mins), point3(&aabb.maxs)]
     };
-    let (mesh_id, mesh_write, local_bounds) = match element.primitive_instance.as_ref() {
+    let (mesh, mesh_id, mesh_write, local_bounds) = match element.primitive_instance.as_ref() {
         Some(instance) => {
             let canonical = canonical_primitive_mesh(instance.key)?;
             let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(&canonical);
@@ -2986,14 +3122,35 @@ fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<Ba
             let aabb = mesh.aabb.context("canonical PlantMesh missing AABB")?;
             let bounds = [point3(&aabb.mins), point3(&aabb.maxs)];
             let write = ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?;
-            (mesh_id, write, Some(bounds))
+            (mesh, mesh_id, write, Some(bounds))
         }
         None => {
             let mesh = local_generated_mesh(&element);
             let mesh_id = baked_mesh_id(&mesh);
             let write = ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?;
-            (mesh_id, write, None)
+            (mesh, mesh_id, write, None)
         }
+    };
+    let room_edges = match rooms {
+        Some(rooms) => {
+            let input = baked_room_input(
+                &element.geometry_id,
+                element.primitive_instance.as_ref(),
+                element.world,
+                world_bounds,
+                &mesh_id,
+            )?;
+            // 算不出 = 这一根 Err（D2）：生成 worker 把它记成这一根的死信、不发布；文案带「room membership」，
+            // 与 flush 时 `room_stage` 的同族，账本 / 回执的消费方不用分辨是哪一处算的。
+            rooms
+                .edges_for_record(&input, || {
+                    crate::fast_model::room_model::world_points_of(&mesh, input.mesh_to_world)
+                })
+                .with_context(|| {
+                    format!("room membership of {} could not be computed", input.label)
+                })?
+        }
+        None => Vec::new(),
     };
     Ok(BakedElement {
         geometry_id: element.geometry_id,
@@ -3006,6 +3163,34 @@ fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<Ba
         mesh_write,
         world_bounds,
         local_bounds,
+        room_edges,
+    })
+}
+
+/// bake 时这件几何在房间判定眼里的形状——与它随后变成的投影记录**字段相同**（`project_geometry_delta`
+/// 的那一段）：构件 = `geometry_source_refno`（隐式管身挂容器）、标签 = 投影记录 id、世界变换 =
+/// `persisted_world_transform`（隐式管身把标准图元摆放折进去）、「网格 → 世界」= `room_model::projected_mesh_to_world`
+/// （标准图元再乘本地摆放；隐式管身**不再乘**——它的本地摆放已经在存下的世界变换里，与库上管身行读回的
+/// 单位阵实例变换同义）。两边只许有这一份配方，源码钉 `bake_time_room_input_matches_the_projected_record`。
+fn baked_room_input(
+    geometry_id: &GeometryId,
+    primitive: Option<&e3d_model::primitive_instance::PrimitiveInstance>,
+    world: DMat4,
+    world_bounds: [[f32; 3]; 2],
+    mesh_id: &str,
+) -> anyhow::Result<crate::fast_model::room_model::BakedRoomInput> {
+    let source_refno = geometry_source_refno(geometry_id)?;
+    let world_transform = persisted_world_transform(geometry_id, primitive, world);
+    Ok(crate::fast_model::room_model::BakedRoomInput {
+        element: crate::data_interface::generation_root::refno_from_e3d(source_refno),
+        label: geometry_record_id(geometry_id, source_refno),
+        world_bounds,
+        mesh_id: mesh_id.to_string(),
+        mesh_to_world: crate::fast_model::room_model::projected_mesh_to_world(
+            world_transform,
+            primitive.map(|instance| instance.local_transform),
+            matches!(geometry_id, GeometryId::ImpliedTube { .. }),
+        ),
     })
 }
 
@@ -3055,10 +3240,11 @@ pub(crate) fn summarize_geometry_incidents(failed: &[e3d_model::pipeline::Incide
 fn bake_elements(
     elements: Vec<GeneratedElement>,
     mesh_dir: &Path,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<Vec<BakedElement>> {
     elements
         .into_iter()
-        .map(|element| bake_element(element, mesh_dir))
+        .map(|element| bake_element(element, mesh_dir, rooms))
         .collect()
 }
 
@@ -3102,12 +3288,37 @@ fn incomplete_root_policy(published: bool, has_geometry_rows: bool) -> Incomplet
 /// deciding there costs a discarded candidate its triangulation — its meshes
 /// are content-addressed, so a root that published before rewrites nothing —
 /// and it is the only order in which both halves can reach the same verdict.
-fn bake_snapshot(snapshot: GeneratedSnapshot, mesh_dir: &Path) -> anyhow::Result<BakedSnapshot> {
-    let elements = bake_elements(snapshot.elements, mesh_dir)?;
+fn bake_snapshot(
+    snapshot: GeneratedSnapshot,
+    mesh_dir: &Path,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BakedSnapshot> {
+    let elements = bake_elements(snapshot.elements, mesh_dir, rooms)?;
+    // 随根走的那一份边（B/T3）：这一根全部几何的构件（有边没边都在册，flush 时与投影记录比对）+ 各元素的边收拢。
+    let room = match rooms {
+        Some(rooms) => {
+            let members = elements
+                .iter()
+                .map(|element| {
+                    geometry_source_refno(&element.geometry_id)
+                        .map(crate::data_interface::generation_root::refno_from_e3d)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Some(crate::fast_model::room_model::carry_root_edges(
+                rooms.resident_generation(),
+                members,
+                elements
+                    .iter()
+                    .flat_map(|element| element.room_edges.iter().cloned()),
+            ))
+        }
+        None => None,
+    };
     Ok(BakedSnapshot {
         elements,
         report: snapshot.report,
         visited: snapshot.visited,
+        room,
     })
 }
 
@@ -3127,6 +3338,10 @@ impl E3dPersistReport {
         self.unique_meshes = self.mesh_ids.len();
         self.source_sesno = self.source_sesno.or(other.source_sesno);
         self.visited_by_root.extend(other.visited_by_root);
+        self.tubes_not_drawn = match (self.tubes_not_drawn.take(), other.tubes_not_drawn) {
+            (Some(mine), Some(theirs)) => Some(format!("{mine} | {theirs}")),
+            (mine, theirs) => mine.or(theirs),
+        };
     }
 }
 
@@ -3308,6 +3523,7 @@ pub(crate) fn republish_roots_by_unit_delta_on(
                     manifest_hash: String::new(),
                     geometry_count: 0,
                     published_via: "unit".into(),
+                    room: None,
                 },
             )),
             scope: CommitScope::Partial,
@@ -3367,6 +3583,7 @@ fn cached_root_commit(
                 manifest_hash: published.manifest_hash.clone(),
                 geometry_count: published.geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         )),
         ..ProjectionCommit::default()
@@ -3400,7 +3617,7 @@ pub(crate) async fn apply_geometry_delta_on(
     let (commit, mut report) = project_geometry_delta(
         dbnum,
         source_sesno,
-        bake_elements(upserts, mesh_dir)?,
+        bake_elements(upserts, mesh_dir, None)?,
         removals,
         None,
         owners,
@@ -3541,6 +3758,7 @@ fn project_geometry_delta(
                 manifest_hash,
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
     }
@@ -4162,6 +4380,134 @@ mod tests {
         Ok(())
     }
 
+    /// 字典库挂进 `build_set` 之后：UDA 按名字读得出，而几何**一根管也没多**。
+    ///
+    /// `:HXYsize` 是 H 族头槽位那条目录表达式 `( :HXYsize[n] )` 要的那一格。挂上字典库
+    /// 之前它根本不是个名字（`UnknownAttribute`），挂上之后是。两件事要一起成立：
+    /// 读得出，且这 7 个「只差这一格」的头槽位仍然一根管都不长——E3D 在本库自己也不画
+    /// （6 条报 `Catalogue error`、`30297` 连报都不报），所以长出来的会是我们凭空造的几何。
+    /// 它们不长，是因为风管隐式管身的求值环境**不挂设计元素**（`PREV` 才是那个构件），
+    /// UDA 在的是 BRAN 身上——挂字典库并不能把 BRAN 放进那个环境。
+    ///
+    /// 取证：`_runs/ams-init-1112-7997-20260917-mc/ledger-seg15-frameall.md` §16 / §18。
+    #[tokio::test]
+    #[ignore = "real AMS 7997 + the project Dictionary databases"]
+    async fn ams7997_dictionary_uda_reads_by_name_and_grows_no_duct() -> anyhow::Result<()> {
+        use e3d_io::record::descriptor::DescriptorValue;
+        use e3d_model::hvac_tube::duct_departure_section;
+        use e3d_model::route::RouteEnd;
+
+        let service = E3dModelService::from_current().await?;
+        anyhow::ensure!(
+            service.uda.is_some(),
+            "MDB 声明的字典库一个都没读出来，这条用例证明不了任何事"
+        );
+        let set = service.build_set(7997, None)?;
+
+        // 读得出：E3D 的 `Q :HXYsize` 在这条支管上答 675 600。
+        let branch = set.element(RefNo::new(24381, 59287));
+        assert_eq!(
+            branch.attribute(":HXYsize")?,
+            Some(DescriptorValue::RealArray(vec![675.0, 600.0]))
+        );
+
+        // 一根也没多：这 7 个头槽位就是「接上 UDA 就会长出来」的全部。
+        for word1 in [30297, 47065, 58284, 59287, 59302, 79980, 91034] {
+            let container = set.element(RefNo::new(24381, word1));
+            let grown = duct_departure_section(&RouteEnd::ContainerHead(container))?;
+            anyhow::ensure!(
+                grown.is_none(),
+                "24381/{word1} 的头槽位长出了一节 E3D 不画的管身：{grown:?}"
+            );
+        }
+
+        // 已经在画的那一支照旧：中段走的是构件自己的 `LSTU` 与离开 P 点，不碰 UDA。
+        let departure = set.element(RefNo::new(24381, 30293));
+        let section = duct_departure_section(&RouteEnd::MemberLeave {
+            member: departure,
+            ppoint: None,
+        })?
+        .context("TAPE 24381/30293 的离开侧断面")?;
+        assert_eq!(section.source, "/RTUBE2 BOXI /RTUBE2-BOXI");
+        match section.section {
+            e3d_model::route::TubeSection::Rectangular {
+                x_length, z_length, ..
+            } => {
+                assert_eq!((x_length, z_length), (1460.0, 1520.0));
+            }
+            other => anyhow::bail!("24381/30293 的中段断面变了：{other:?}"),
+        }
+
+        // 管道那一侧也数一遍：ZONE 24381/147826 的 13 条支管，E3D 导出 103 根隐式管身，
+        // 引擎在 `e1745dc` 之后逐根对上（§4 / §5）。挂字典库不该动这个数。
+        let pin = service.pin(7997)?;
+        let session = service.source_session(pin)?;
+        let index = scan_index(&pin.file, Some(session))?;
+        let snapshot = generate_snapshot_from_set(
+            &service.build_set(7997, Some(session))?,
+            &index,
+            RefNo::new(24381, 147826),
+            &mut CatalogueMeshCache::default(),
+        )?;
+        let tubes = snapshot
+            .elements
+            .iter()
+            .filter(|element| matches!(element.geometry_id, GeometryId::ImpliedTube { .. }))
+            .count();
+        assert_eq!(tubes, 103, "ZONE 24381/147826 的隐式管身根数变了");
+        Ok(())
+    }
+
+    /// 头槽位「一根也没多」不只靠求值环境不挂设计元素——**把 BRAN 挂上也长不出来**。
+    ///
+    /// 目录表达式里的 UDA 按字典的键求值（e3d-io `9508ac4`）：`/HRTUBE1-BOXI.PXLE` 写的键
+    /// `0x17EF4B61` 是 `AvevaCatalogue` 字典（acp7006）那条 `HXYsize` 的 `OLDKEY`，而支管的
+    /// `675 600` 存在本项目字典（ams5100）那条同名定义的键 `0x2652AB52` 下。六本字典按 CURD
+    /// 序合起来，键认成 acp 那条 → 对 BRAN 有效、元素上没值 → unset → 公式未解，印成 E3D
+    /// 的写法。这正是 E3D 自己对这些槽位报 `Catalogue error … unable to evaluate … PXLE`
+    /// 的落点；同一条支管 `Q :HXYsize` 却答 `675 600`。
+    #[tokio::test]
+    #[ignore = "real AMS 7997 + the project Dictionary databases"]
+    async fn ams7997_head_slot_expression_stays_unset_by_key_even_with_the_bran_attached()
+    -> anyhow::Result<()> {
+        use e3d_io::db_param_env::DbElementParamEnv;
+        use e3d_io::record::catalogue_eval::{AttributeNumber, ExpressionForm};
+        use e3d_io::record::descriptor::DescriptorValue;
+
+        let service = E3dModelService::from_current().await?;
+        let set = service.build_set(7997, None)?;
+        let dictionary = set.uda_catalog().context("MDB 声明的字典库一个都没读出来")?;
+        assert_eq!(
+            dictionary.by_key(0x17EF_4B61).map(|definition| definition.refno),
+            Some(RefNo::new(15198, 55)),
+            "目录写下的键该由 acp7006 的 /UDA/HVAC/HXYsize（OLDKEY）认下"
+        );
+
+        let branch = set.element(RefNo::new(24381, 59287));
+        assert_eq!(
+            branch.uda_by_key(0x2652_AB52)?,
+            Some(DescriptorValue::RealArray(vec![675.0, 600.0])),
+            "本项目字典那条键下有值"
+        );
+        assert_eq!(branch.uda_by_key(0x17EF_4B61)?, None, "目录指的那条键下没值");
+
+        let boxi = set
+            .find_named(7002, "/HRTUBE1-BOXI")?
+            .into_iter()
+            .map(|refno| set.element(refno))
+            .next()
+            .context("/HRTUBE1-BOXI 在 acp7002 里")?;
+        let attached = DbElementParamEnv::new(Some(branch), Some(boxi.clone()));
+        assert_eq!(
+            boxi.get_number("PXLE", &attached)?,
+            AttributeNumber::Unresolved {
+                form: ExpressionForm::Pml,
+                text: Some("( :HXYsize[2 ] )".into()),
+            }
+        );
+        Ok(())
+    }
+
     fn baked_element(refno: RefNo, mesh_id: &str) -> BakedElement {
         BakedElement {
             geometry_id: GeometryId::Element {
@@ -4176,6 +4522,7 @@ mod tests {
             mesh_write: MeshWrite::Reused,
             world_bounds: [[0.0; 3], [1.0; 3]],
             local_bounds: None,
+            room_edges: Vec::new(),
         }
     }
 
@@ -4196,6 +4543,7 @@ mod tests {
             mesh_write: MeshWrite::Reused,
             world_bounds: [[0.0; 3], [1.0; 3]],
             local_bounds: None,
+            room_edges: Vec::new(),
         }
     }
 
@@ -4214,6 +4562,477 @@ mod tests {
             .expect("project invalid tube");
 
         assert!(commit.upserts[0].tube.as_ref().unwrap().invalid);
+    }
+
+    /// B/T2：bake 时房间判定看到的这件几何（`baked_room_input`）与它随后变成的投影记录（`project_geometry_delta`）
+    /// 在 `RoomInput` 的五格上**逐字相同**——构件（隐式管身挂容器）、标签（投影记录 id）、世界盒、网格 id、
+    /// 「网格 → 世界」（与投影记录的 `mesh_to_world()` 同一条公式）。三种形状各一例：烘焙实体、带标准图元的元素、
+    /// 带标准图元的隐式管身。而且那条公式对三种形状都是**本地摆放只乘一次**：烘焙实体 = 世界变换；标准图元元素
+    /// = 世界 × 本地；标准管身的本地摆放已由 `persisted_world_transform` 折进存下的世界变换，`mesh_to_world()`
+    /// 不再乘——此前两边一致地多乘了一次（`world × local × local`），判定点落在 Plant UI 画的网格之外，
+    /// 与库上 `tubi_relate` 行回读（实例变换单位阵）算出的边也对不上（2026-09-17 修）。
+    #[test]
+    fn bake_time_room_input_matches_the_projected_record() {
+        use crate::fast_model::room_model::RoomInput;
+        let root = RefNo::new(24383, 100);
+        let branch = RefNo::new(24383, 73948);
+        let equi = RefNo::new(24383, 200);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((branch.word0, branch.word1), root),
+            ((equi.word0, equi.word1), root),
+        ]);
+        let world = DMat4::from_scale_rotation_translation(
+            glam::DVec3::new(1.0, 1.0, 1.0),
+            glam::DQuat::from_rotation_z(0.7),
+            glam::DVec3::new(10.0, 20.0, 30.0),
+        );
+        let local = DMat4::from_scale(glam::DVec3::new(100.0, 100.0, 3000.0));
+        let primitive = e3d_model::primitive_instance::PrimitiveInstance {
+            key: e3d_model::primitive_instance::PrimitiveMeshKey::CylinderV3 { segments: 32 },
+            local_transform: local,
+        };
+        let mut baked = baked_element(equi, "baked-mesh");
+        baked.world = world;
+        baked.world_bounds = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let mut canonical = baked_element(equi, "canonical-mesh");
+        canonical.world = world;
+        canonical.primitive_instance = Some(primitive.clone());
+        canonical.local_bounds = Some([[0.0; 3], [1.0; 3]]);
+        let mut tube = baked_tube(branch, 3, "tube-mesh");
+        tube.world = world;
+        tube.primitive_instance = Some(primitive.clone());
+        tube.local_bounds = Some([[0.0; 3], [1.0; 3]]);
+
+        for element in [baked, canonical, tube] {
+            let shape = format!("{:?}", element.geometry_id);
+            let placed_once = if element.primitive_instance.is_some() {
+                world * local
+            } else {
+                world
+            };
+            let input = baked_room_input(
+                &element.geometry_id,
+                element.primitive_instance.as_ref(),
+                element.world,
+                element.world_bounds,
+                &element.mesh_id,
+            )
+            .expect("bake-time room input");
+            let (commit, _) =
+                project_geometry_delta(24383, 42, vec![element], Vec::new(), None, &owners)
+                    .expect("project");
+            let record = &commit.upserts[0];
+            assert_eq!(input.element(), record.element(), "{shape}");
+            assert_eq!(input.label(), record.label(), "{shape}");
+            assert_eq!(input.world_bounds(), record.world_bounds());
+            assert_eq!(input.mesh_id(), record.mesh_id());
+            assert_eq!(
+                input.mesh_to_world().to_cols_array(),
+                record.mesh_to_world().to_cols_array(),
+                "「网格 → 世界」同一条公式: {shape}"
+            );
+            assert_eq!(
+                record.mesh_to_world().to_cols_array(),
+                placed_once.to_cols_array(),
+                "本地摆放只乘一次（标准管身的已折进存下的世界变换）: {shape}"
+            );
+        }
+    }
+
+    /// B/T2 + T5 端到端（真几何、不连库）：一块 1000³ 的面板，两件 cube——完全在内的与跨在 x=1000 那一面上的；
+    /// `bake_element` 带计算器 → 边随 `BakedElement` 出来（跨边那件真走了点检查，用的是手上的网格），与随后
+    /// 变成的投影记录经 flush 路（`edges_for_record` 回读盘上 `.mesh`）算出的边**逐字相同**；`bake_snapshot`
+    /// 把全部构件与收拢后的边装进 `room`。算不出（面板网格缺）= 这件几何 `Err`、文案带「room membership」
+    /// ——生成 worker 据此把整根记死信、不发布（D2 失败前移）。
+    #[test]
+    fn baking_computes_the_same_room_edges_the_flush_would_and_fails_the_root_when_it_cannot() {
+        use crate::fast_model::room_model::{
+            RoomInput, RoomPanelMap, RoomPanels, box_mesh_for_test,
+        };
+        use crate::fast_model::room_resident::{
+            MeshCache, ResidentForm, ResidentManifest, ResidentRoomModel,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mesh_dir = dir.path().to_path_buf();
+        box_mesh_for_test(glam::Vec3::ZERO, glam::Vec3::splat(1000.))
+            .ser_to_file(&mesh_dir.join("panel.mesh"))
+            .unwrap();
+        let panel_refno = RefNo::new(7000, 1);
+        let panel: RefnoEnum = crate::data_interface::generation_root::refno_from_e3d(panel_refno);
+        let calculator = |panel_mesh: &str| {
+            let map = RoomPanelMap {
+                rooms: vec![RoomPanels {
+                    room: "7000_2".into(),
+                    room_num: "R1".into(),
+                    panels: vec![panel],
+                }],
+                all_panels: std::collections::HashSet::from([panel]),
+            };
+            let panel_record = ProjectedGeometry {
+                record_id: "7000_1".into(),
+                geometry_id: GeometryId::Element {
+                    refno: "7000/1".into(),
+                },
+                source_refno: panel_refno,
+                dbnum: 7000,
+                source_sesno: 1,
+                noun: "PANE".into(),
+                mesh_id: panel_mesh.into(),
+                world_transform: DMat4::IDENTITY,
+                world_bounds: [[0.; 3], [1000.; 3]],
+                ancestors: vec![],
+                shape: ProjectedShape::Baked,
+                tube: None,
+            };
+            let model = Arc::new(ResidentRoomModel::from_projection(
+                ResidentManifest {
+                    form: ResidentForm::Latest,
+                    key: format!("fixture-{panel_mesh}"),
+                },
+                vec![],
+                map,
+                &[panel_record],
+                Arc::<MeshCache>::default(),
+            ));
+            crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir.clone())
+                .expect("calculator")
+        };
+        let element_at = |seq: u32, center: glam::DVec3| {
+            let world = DMat4::from_translation(center) * DMat4::from_rotation_z(0.31);
+            let local = manifold_csg::Manifold::cube(200.0, 200.0, 200.0, true);
+            let parts = vec![local.transform(&dmat4_to_affine4x3(world))];
+            GeneratedElement {
+                geometry_id: GeometryId::Element {
+                    refno: format!("8000/{seq}"),
+                },
+                refno: RefNo::new(8000, seq),
+                noun: "EQUI".into(),
+                is_invalid_tubi: false,
+                name: None,
+                solid: manifold_csg::Manifold::compose(&parts),
+                parts: Some(parts),
+                part_catalogue_nouns: Vec::new(),
+                degenerate_parts: Vec::new(),
+                part_record_repeats: Vec::new(),
+                world,
+                primitive_instance: None,
+                analytic_primitive: None,
+                negatives_applied: 0,
+                negatives_skipped: vec![],
+                notes: vec![],
+            }
+        };
+        let rooms = calculator("panel");
+
+        let inside = bake_element(
+            element_at(10, glam::DVec3::new(500., 500., 500.)),
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake inside");
+        assert_eq!(inside.room_edges.len(), 1, "完全在内：一条边");
+        assert_eq!(inside.room_edges[0].member.inside_count, 8);
+        let straddling = bake_element(
+            element_at(20, glam::DVec3::new(1000., 500., 500.)),
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake straddling");
+        assert_eq!(straddling.room_edges.len(), 1, "跨在面板边上：点检查判进");
+        assert!(straddling.room_edges[0].member.inside_count < 8);
+        let outside = bake_element(
+            element_at(30, glam::DVec3::new(3000., 500., 500.)),
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake outside");
+        assert!(outside.room_edges.is_empty(), "盒都不交：没有边");
+
+        // flush 路：同一件几何折成投影记录、回读盘上 .mesh 取点 → 边逐字相同。
+        let root = RefNo::new(8000, 1);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((8000, 10), root),
+            ((8000, 20), root),
+            ((8000, 30), root),
+        ]);
+        for baked in [&inside, &straddling, &outside] {
+            let expected = baked.room_edges.clone();
+            let clone = BakedElement {
+                geometry_id: baked.geometry_id.clone(),
+                refno: baked.refno,
+                noun: baked.noun.clone(),
+                is_invalid_tubi: baked.is_invalid_tubi,
+                world: baked.world,
+                primitive_instance: baked.primitive_instance.clone(),
+                mesh_id: baked.mesh_id.clone(),
+                mesh_write: MeshWrite::Reused,
+                world_bounds: baked.world_bounds,
+                local_bounds: baked.local_bounds,
+                room_edges: Vec::new(),
+            };
+            let (commit, _) =
+                project_geometry_delta(8000, 1, vec![clone], Vec::new(), None, &owners)
+                    .expect("project");
+            let record = &commit.upserts[0];
+            let from_flush = rooms
+                .calculate_for_root(std::slice::from_ref(record))
+                .unwrap();
+            assert_eq!(
+                crate::fast_model::room_model::merge_root_edges(expected),
+                from_flush,
+                "bake 时的边 == flush 回读算的边: {}",
+                record.label()
+            );
+        }
+
+        // 随根的那一份：全部构件在册、边收拢。
+        let snapshot = bake_snapshot(
+            GeneratedSnapshot {
+                elements: vec![
+                    element_at(10, glam::DVec3::new(500., 500., 500.)),
+                    element_at(30, glam::DVec3::new(3000., 500., 500.)),
+                ],
+                owners: Arc::new(owners.clone()),
+                report: Report::default(),
+                visited: Vec::new(),
+            },
+            &mesh_dir,
+            Some(&rooms),
+        )
+        .expect("bake snapshot");
+        let room = snapshot.room.expect("带计算器就有随根的边");
+        assert_eq!(room.generation, rooms.resident_generation());
+        assert_eq!(
+            room.elements,
+            vec!["8000_10".to_string(), "8000_30".to_string()]
+        );
+        assert_eq!(room.edges.len(), 1);
+        assert!(
+            bake_snapshot(
+                GeneratedSnapshot {
+                    elements: vec![element_at(10, glam::DVec3::new(500., 500., 500.))],
+                    owners: Arc::new(owners),
+                    report: Report::default(),
+                    visited: Vec::new(),
+                },
+                &mesh_dir,
+                None,
+            )
+            .unwrap()
+            .room
+            .is_none(),
+            "没给计算器 → 不带边，flush 现算"
+        );
+
+        // 算不出 = Err（D2）：面板网格缺、构件盒又与它相交 → 这件几何 Err，文案带「room membership」。
+        let broken = calculator("missing-panel-mesh");
+        let error = bake_element(
+            element_at(40, glam::DVec3::new(500., 500., 500.)),
+            &mesh_dir,
+            Some(&broken),
+        )
+        .err()
+        .expect("面板网格缺就算不出");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("room membership of 8000_40 could not be computed")
+                && text.contains("room panel mesh incomplete"),
+            "{text}"
+        );
+    }
+
+    /// 源码钉（B/T5）：bake 的 `Err`（含房间算不出）在 `produce_slices` 的消费侧是这一根的**死信**——进
+    /// `slice.failures`、不 `slice.push`、不发布（`BestEffortFallback`）；`Required` 才整批上抛。
+    #[test]
+    fn a_root_whose_rooms_cannot_be_computed_is_a_dead_letter_and_never_published() {
+        let source = include_str!("e3d_model_service.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .or_else(|| {
+                include_str!("e3d_model_service.rs").split_once("\r\n#[cfg(test)]\r\nmod tests {")
+            })
+            .expect("production code precedes the inline test module")
+            .0;
+        let produce = source
+            .split_once("pub(crate) async fn produce_slices(")
+            .expect("produce_slices")
+            .1;
+        let produce = &produce[..produce
+            .find("pub async fn persist_memory_batch(")
+            .expect("consumer follows")];
+        let dead_letter = produce
+            .find("Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {")
+            .expect("非 Required 的 Err 臂");
+        let arm = &produce[dead_letter..];
+        let arm = &arm[..arm.find("Err(error) => {").expect("Required 臂紧随")];
+        assert!(
+            arm.contains("slice.failures.push((root, format!(\"{error:#}\")));")
+                && !arm.contains("slice.push("),
+            "bake Err = 这一根的死信，不进切片、不发布: {arm}"
+        );
+        let worker = source
+            .split_once("fn spawn_generation_worker(")
+            .expect("worker")
+            .1;
+        assert!(
+            worker.contains("queue.store(slot, outcome);"),
+            "worker 把 bake 的成败原样交给消费侧"
+        );
+    }
+
+    /// 源码钉（B/T3）：随回执走的边只有**整根重生成**这一条路带——`bake_snapshot` 用那台计算器的代号把这一根全部
+    /// 构件与收拢后的边装成 `BakedSnapshot::room`，`persist_memory_batch` 把它挂到 `project_geometry_delta` 折出来的
+    /// 回执上；刚体前移（`published_via = "transform"`）与单元级局部发布（`"unit"`）的回执 `room: None`——它们没有整根
+    /// 的边，flush 时现算（Q5 兜底）。
+    #[test]
+    fn carried_room_edges_ride_only_on_the_regen_receipt() {
+        let source = include_str!("e3d_model_service.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .or_else(|| {
+                include_str!("e3d_model_service.rs").split_once("\r\n#[cfg(test)]\r\nmod tests {")
+            })
+            .expect("production code precedes the inline test module")
+            .0;
+        fn function_body<'a>(source: &'a str, start: &str) -> &'a str {
+            let body = source.split_once(start).expect("函数头").1;
+            let end = body
+                .find("\n}\r\n")
+                .or_else(|| body.find("\n}\n"))
+                .expect("函数总有结尾");
+            &body[..end]
+        }
+        let bake = function_body(source, "fn bake_snapshot(");
+        assert!(
+            bake.contains("carry_root_edges(")
+                && bake.contains("rooms.resident_generation(),")
+                && bake.contains("geometry_source_refno(&element.geometry_id)"),
+            "bake_snapshot 用那台计算器的代号、这一根全部构件装随根的边: {bake}"
+        );
+        let consumer = source
+            .split_once("pub async fn persist_memory_batch(")
+            .expect("整根重生成的发布段")
+            .1;
+        let attach = consumer
+            .find("receipt.room = carried_room;")
+            .expect("挂到回执上");
+        let project = consumer
+            .find("project_geometry_delta(")
+            .expect("折投影记录");
+        assert!(project < attach, "先折回执再挂边");
+        assert!(
+            consumer[..attach].contains("let carried_room = snapshot.room;"),
+            "边从 BakedSnapshot 上取"
+        );
+        // 刚体前移与单元级发布的回执不带边。
+        for (path, marker) in [
+            ("刚体前移", "published_via: \"transform\".into(),"),
+            ("单元级发布", "published_via: \"unit\".into(),"),
+        ] {
+            let at = source
+                .find(marker)
+                .unwrap_or_else(|| panic!("{path} 的回执"));
+            let after = &source[at + marker.len()..];
+            let next = after.trim_start();
+            assert!(
+                next.starts_with("room: None,"),
+                "{path} 的回执 room 必须是 None（没有整根的边，flush 现算）: {}",
+                &after[..after.len().min(80)]
+            );
+        }
+        assert_eq!(
+            source.matches("receipt.room = carried_room;").count(),
+            1,
+            "只有整根重生成这一处挂边"
+        );
+    }
+
+    /// 源码钉（B/T2）：bake 时的房间判定只走 `edges_for_record` + `world_points_of(&mesh, …)`——取点的是手上
+    /// **就要写盘的那份网格**，不是为算盒子折出来的 `world_mesh`（f64 → 与盘上回读差几个 ulp，会让贴面板边
+    /// 的点翻面）；输入配方只有 `baked_room_input` 一处，且与 `project_geometry_delta` 折投影记录用的
+    /// 同三个函数（`geometry_source_refno` / `geometry_record_id` / `persisted_world_transform`）；
+    /// 冻好的计算器沿 `produce_slices → spawn_generation_worker → bake_snapshot → bake_elements → bake_element`
+    /// 一路显式传递，工作线程里不许自己冻。
+    #[test]
+    fn bake_computes_room_edges_from_the_mesh_it_is_about_to_write() {
+        // 生产段到内联的 `#[cfg(test)] mod tests {` 为止（1043 行那处 `#[path = …]` 只是外置测试声明，不截）。
+        let source = include_str!("e3d_model_service.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .or_else(|| {
+                include_str!("e3d_model_service.rs").split_once("\r\n#[cfg(test)]\r\nmod tests {")
+            })
+            .expect("production code precedes the inline test module")
+            .0;
+        fn function_body<'a>(source: &'a str, start: &str) -> &'a str {
+            let body = source.split_once(start).expect("函数头").1;
+            let end = body
+                .find("\n}\r\n")
+                .or_else(|| body.find("\n}\n"))
+                .expect("函数总有结尾");
+            &body[..end]
+        }
+        let bake = function_body(source, "fn bake_element(");
+        let edges = bake
+            .find(".edges_for_record(&input, || {")
+            .expect("逐元素判定走 edges_for_record");
+        assert!(
+            bake[edges..].contains("world_points_of(&mesh, input.mesh_to_world)"),
+            "取点用手上就要写盘的那份 `mesh`: {bake}"
+        );
+        assert!(
+            !bake.contains("world_mesh.vertices") && !bake.contains("world_points_of(&world_mesh"),
+            "不许拿 f64 折出来的 world_mesh 取点: {bake}"
+        );
+        assert!(
+            bake.contains("baked_room_input(") && bake.contains("room_edges,"),
+            "输入配方只有 baked_room_input 一处、结果挂到 BakedElement.room_edges: {bake}"
+        );
+        assert!(
+            bake.contains("room membership of {} could not be computed"),
+            "失败文案与 flush 时 room_stage 同族、带「room membership」（D2）: {bake}"
+        );
+        let recipe = function_body(source, "fn baked_room_input(");
+        let projection = function_body(source, "fn project_geometry_delta(");
+        for shared in [
+            "geometry_source_refno(",
+            "geometry_record_id(",
+            "persisted_world_transform(",
+        ] {
+            assert!(
+                recipe.contains(shared) && projection.contains(shared),
+                "bake 输入与投影记录共用 {shared}"
+            );
+        }
+        assert!(
+            recipe.contains("projected_mesh_to_world(")
+                && projection.contains("world_bounds: element.world_bounds,"),
+            "「网格 → 世界」经 room_model::projected_mesh_to_world；世界盒同一份"
+        );
+        for (function, carries) in [
+            ("async fn produce_slices(", "rooms.clone(),"),
+            (
+                "fn spawn_generation_worker(",
+                "bake_snapshot(snapshot, &mesh_dir, rooms.as_deref())",
+            ),
+            (
+                "fn bake_snapshot(",
+                "bake_elements(snapshot.elements, mesh_dir, rooms)",
+            ),
+            (
+                "fn bake_elements(",
+                "bake_element(element, mesh_dir, rooms)",
+            ),
+        ] {
+            let body = function_body(source, function);
+            assert!(
+                body.contains(carries),
+                "{function} 把冻好的计算器往下传: {body}"
+            );
+            assert!(
+                !body.contains("frozen_room_calculator()"),
+                "{function} 不许自己冻计算器（一任务一台）"
+            );
+        }
     }
 
     /// 本文件的正文，行尾归一。护栏测试按文本形状判定，`core.autocrlf` 决定的检出行尾
@@ -4485,6 +5304,7 @@ mod tests {
                 manifest_hash: manifest,
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
         store.commit(ProjectionScope::Current, vec![commit]);
@@ -4517,6 +5337,7 @@ mod tests {
                         manifest_hash: "counts-do-not-match".into(),
                         geometry_count: 99,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -5111,6 +5932,7 @@ mod tests {
                 manifest_hash: manifest,
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
         store.commit(ProjectionScope::Current, vec![seed]);
@@ -5482,7 +6304,7 @@ mod tests {
                 snapshot.report.failed.len()
             );
             let owners = snapshot.owners.clone();
-            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+            let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
             let count = baked.elements.len();
             let (commit, _) =
                 project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
@@ -5504,6 +6326,7 @@ mod tests {
                 manifest_hash: seed_hash,
                 geometry_count: seed_geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         ));
         store.commit(ProjectionScope::Current, vec![seed]);
@@ -7052,6 +7875,7 @@ mod tests {
                 manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
                 geometry_count: 0,
                 published_via: "regen".into(),
+                room: None,
             }),
             projection_complete: true,
         };
@@ -7089,6 +7913,7 @@ mod tests {
                 manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
                 geometry_count: 0,
                 published_via: "regen".into(),
+                room: None,
             }),
             projection_complete: false,
         };
@@ -7133,6 +7958,7 @@ mod tests {
                 manifest_hash: "manifest".into(),
                 geometry_count: 3,
                 published_via: "regen".into(),
+                room: None,
             }),
             projection_complete: true,
         };
@@ -7168,6 +7994,7 @@ mod tests {
             manifest_hash: "manifest".into(),
             geometry_count: 0,
             published_via: "regen".into(),
+            room: None,
         });
         assert!(
             !cached_root_target_matches(&publication, 42),
@@ -7191,7 +8018,7 @@ mod tests {
             root: RefNo::new(24384, 1), model_target: Some(target.clone()),
             published: Some(RootReceipt {
                 source_sesno: 459, model_target: Some(target.clone()),
-                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(),
+                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(), room: None,
             }), projection_complete: true,
         };
         assert!(cached_root_target_matches(&publication, 459));
@@ -7233,6 +8060,60 @@ mod tests {
             "same path with replaced content identity is a new target"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 初始化服务记进 `frozen_file_digests` 的是 **token 摘要**，不是现场文件身份：同一份冻结 token
+    /// 重开、文件被追加过也得算出同一个数（room-input-cache 的前提，见
+    /// `initialization_target_tests::initialization_target_survives_append_and_reopen_but_rejects_replacement`）。
+    /// 2026-09-19 差一点被改成 `model_file_identity_digest`——那会让每次 SAVEWORK 都把面板几何缓存打掉。
+    #[test]
+    fn initialization_keeps_the_token_digest_so_appends_do_not_change_the_target() {
+        let body = include_str!("e3d_model_service.rs")
+            .split_once("pub async fn from_initialization_sources(")
+            .expect("from_initialization_sources exists")
+            .1
+            .split_once("pub fn initialization_target_hash(")
+            .expect("from_initialization_sources end")
+            .0;
+        assert!(body.contains("Sha256::digest(frozen.commit_token_json()"), "{body}");
+        assert!(!body.contains("model_file_identity_digest(frozen.path()"), "{body}");
+    }
+
+    /// 7bde2aeea 把字典库按会话位 0 塞进 `catalogue` 之后，凡把 `session` 当真会话用的地方
+    /// （`target_current` 对文件最新会话、库级目录落款）都得绕开它：0 不是任何一个真会话。
+    #[test]
+    fn dictionary_entries_carry_no_session_and_stay_out_of_catalogue_stamps() {
+        let file = |dbnum: u32, db_type: &str, session: u32| ModelFileTarget {
+            dbnum,
+            db_type: db_type.into(),
+            file: format!("{db_type}-{dbnum}"),
+            session,
+            digest: format!("{db_type}@{session}"),
+        };
+        let target = ModelTarget {
+            project: "AMS".into(),
+            design: file(7997, "DESI", 332),
+            catalogue: vec![
+                file(5100, "DICT", 0),
+                file(7000, "CATA", 11),
+                file(7006, "DICT", 0),
+                file(7043, "CATA", 0),
+            ],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "gen".into(),
+            tessellation_profile: "e3d-default-v1".into(),
+        };
+        assert!(target.design.session_tracked());
+        assert_eq!(
+            target
+                .catalogue
+                .iter()
+                .map(ModelFileTarget::session_tracked)
+                .collect::<Vec<_>>(),
+            [false, true, false, false],
+            "会话位 0 的项——字典库、没钉住也没打开过的目录库——都算没记会话"
+        );
+        assert_eq!(target.catalogue_sessions().collect::<Vec<_>>(), [(7000, 11)]);
     }
 
     #[test]
@@ -7858,6 +8739,7 @@ mod tests {
                 .collect(),
             report: Report::default(),
             visited: Vec::new(),
+            room: None,
         }
     }
 

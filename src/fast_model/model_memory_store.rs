@@ -154,6 +154,36 @@ pub struct RootReceipt {
     /// 旧回执没有这一列 → `"regen"`。落 `gen_root.published_via` 供观测，不进任何判据。
     #[serde(default = "default_published_via")]
     pub published_via: String,
+    /// 随根携带的房间归属边（ADR-073 D1，B/T3）：整根重生成时在 bake 里算好（`BakedElement::room_edges`）、发布前按根
+    /// 收拢（`room_model::merge_root_edges`），flush 的 `room_stage` 过了三道闸就拿它渲染、不再回读 `.mesh` 现算。
+    /// 刚体前移 / 单元级局部发布 / 旧产物没有 → `None`，flush 照旧现算。存边不存 SQL：渲染仍是同一台
+    /// `render_root_room_edges`。
+    #[serde(default)]
+    pub room: Option<CarriedRoomEdges>,
+}
+
+/// 随根回执携带的房间归属边（ADR-073 D1，B/T3）。flush 时 `room_stage` 的三道闸：`generation` 与此刻常驻代号
+/// 相等、`elements` 与本根投影记录的构件集相等、计算器在——都过才用；任一不过就现算。`elements` 不是可选项：
+/// 渲染只对它们 DELETE + INSERT，拿整根记录配一份只覆盖部分构件的边，会把没动的构件的边删掉而不补。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CarriedRoomEdges {
+    /// 算这些边那台计算器的 `resident_generation()`（计算输入摘要，ADR-073 D12）。
+    pub generation: String,
+    /// 这些边覆盖了哪些构件（`RefnoEnum` 字串，去重、升序）。
+    pub elements: Vec<String>,
+    /// 已按根收拢（同 (构件, 面板) 只留最强的一条）、按 (构件, 面板) 排序。
+    pub edges: Vec<CarriedRoomEdge>,
+}
+
+/// [`CarriedRoomEdges`] 里的一条：`room_model::ElementRoomEdge` 的 wire 形（`RefnoEnum` 没有 serde
+/// `Deserialize`，按字串存，`RefnoEnum::from(&str)` 读回）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CarriedRoomEdge {
+    pub panel: String,
+    pub room_num: String,
+    pub member: String,
+    pub inside_count: u8,
+    pub center_dist: f32,
 }
 
 /// 当前进程里一根“模型行 + 房间边 + 数据库回执”已经完整提交的确认。
@@ -317,6 +347,10 @@ struct ScopeState {
     by_source: BTreeMap<(u32, i64), BTreeSet<String>>,
     room_changes: BTreeMap<u32, BTreeMap<i64, GeometryChange>>,
     room_baselines: BTreeSet<u32>,
+    /// F3 落库收口（ADR-073 D13，2026-09-19 晚）：本进程**这一世**写进各库 `dbnum_watermark.model_room_stray_generations`
+    /// 的代号。只有这些代号写过的根，ACK 才在这份投影里、准入点名点得到；那一格里别的代号是重启前那一世写的，
+    /// 点不到——`room_recompute::request_for_task` 见了就整库。随本库 ACK 整体作废一并清掉。
+    stray_generations_written: BTreeMap<u32, BTreeSet<String>>,
     model_digests: BTreeMap<u32, [u8; 32]>,
     room_spatial: BTreeMap<u32, aios_core::accel_tree::acceleration_tree::AccelerationTree>,
     room_spatial_dirty: BTreeSet<(u32, i64)>,
@@ -785,6 +819,27 @@ impl ModelMemoryStore {
             .get(&ScopeKey::Current)
             .is_some_and(|state| state.room_baselines.contains(&dbnum))
     }
+
+    /// 记下「本进程这一世按 `generation` 写进了 `dbnum` 的 `model_room_stray_generations`」——
+    /// `model_db_adapter::note_stray_generation_written` 在那一句随本组提交成功之后调（F3 落库收口）。
+    pub(crate) fn note_stray_generation_written(&self, dbnum: u32, generation: &str) {
+        let mut scopes = self.write();
+        let state = scopes.entry(ScopeKey::Current).or_default();
+        state
+            .stray_generations_written
+            .entry(dbnum)
+            .or_default()
+            .insert(generation.to_owned());
+    }
+
+    /// 本进程这一世写进 `dbnum` 那一格的代号（字典序）。重启 / 本库 ACK 整体作废之后为空。
+    pub(crate) fn stray_generations_written(&self, dbnum: u32) -> Vec<String> {
+        self.read()
+            .get(&ScopeKey::Current)
+            .and_then(|state| state.stray_generations_written.get(&dbnum))
+            .map(|generations| generations.iter().cloned().collect())
+            .unwrap_or_default()
+    }
     pub(crate) fn room_members_intersecting(
         &self,
         dbnum: u32,
@@ -1108,6 +1163,7 @@ impl ModelMemoryStore {
             .invalidated_roots
             .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
+        state.stray_generations_written.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
         for record in records {
             state.insert(record);
@@ -1252,6 +1308,7 @@ impl ModelMemoryStore {
         state
             .commit_ticks
             .retain(|packed, _| receipts.contains_key(packed));
+        state.stray_generations_written.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
         state.model_digests.remove(&dbnum);
@@ -1330,6 +1387,20 @@ impl ModelMemoryStore {
             .get(&scope.key())
             .map(|state| state.geometries.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// 在一把读锁下逐条过一遍这个投影域的记录，**不复制**。全 MDB 的按盒扫（反查 `room_reverse`：管身不进树，
+    /// 每一库的管身记录都要对着面板的新旧盒过一遍）用它——`records()` 那种整域克隆在这里只为筛出几条。
+    /// 闭包里不许 await、不许回头拿这把锁。
+    pub(crate) fn for_each_record(
+        &self,
+        scope: ProjectionScope<'_>,
+        mut visit: impl FnMut(&ProjectedGeometry),
+    ) {
+        let scopes = self.read();
+        if let Some(state) = scopes.get(&scope.key()) {
+            state.geometries.values().for_each(|record| visit(record));
+        }
     }
 
     /// Immutable file view and its version from one read lock. Room consumers
@@ -1497,6 +1568,7 @@ impl ModelMemoryStore {
             .extend(state.receipts.keys().copied());
         state.receipts.clear();
         state.publication_acks.clear();
+        state.stray_generations_written.clear();
         invalidated
     }
 
@@ -1520,6 +1592,7 @@ impl ModelMemoryStore {
             .extend(state.receipts.keys().filter(|key| belongs(key)).copied());
         state.receipts.retain(|packed, _| !belongs(packed));
         state.publication_acks.retain(|packed, _| !belongs(packed));
+        state.stray_generations_written.remove(&dbnum);
         before - state.receipts.len()
     }
 
@@ -1762,6 +1835,7 @@ mod tests {
                         manifest_hash: whole_hash.clone(),
                         geometry_count: whole_count,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..Default::default()
@@ -1785,6 +1859,7 @@ mod tests {
                         manifest_hash: "placeholder".into(),
                         geometry_count: 0,
                         published_via: "unit".into(),
+                        room: None,
                     },
                 )),
                 scope: CommitScope::Partial,
@@ -1834,6 +1909,7 @@ mod tests {
             manifest_hash: "as-written".into(),
             geometry_count: 9,
             published_via: "regen".into(),
+            room: None,
         };
         let stamped = store.commit(
             ProjectionScope::Current,
@@ -1870,6 +1946,7 @@ mod tests {
                         manifest_hash: "seed".into(),
                         geometry_count: 1,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..Default::default()
@@ -1903,6 +1980,7 @@ mod tests {
                                     manifest_hash: "placeholder".into(),
                                     geometry_count: 0,
                                     published_via: "unit".into(),
+                                    room: None,
                                 },
                             )),
                             scope: CommitScope::Partial,
@@ -1961,6 +2039,7 @@ mod tests {
                                     manifest_hash: version.to_string(),
                                     geometry_count: count,
                                     published_via: default_published_via(),
+                                    room: None,
                                 },
                             )),
                             ..Default::default()
@@ -2002,6 +2081,7 @@ mod tests {
                             manifest_hash: manifest.into(),
                             geometry_count: 1,
                             published_via: default_published_via(),
+                            room: None,
                         },
                     )),
                     ..Default::default()
@@ -2034,6 +2114,7 @@ mod tests {
             manifest_hash: "manifest".into(),
             geometry_count: 1,
             published_via: default_published_via(),
+            room: None,
         };
         let root_8000 = RefNo::new(8_000, 100);
         let root_8000_second_extent = RefNo::new(8_000 + 0x2000, 7);
@@ -2137,6 +2218,7 @@ mod tests {
             manifest_hash: "manifest".into(),
             geometry_count: 1,
             published_via: default_published_via(),
+            room: None,
         };
         store.commit(
             ProjectionScope::Current,
@@ -2193,7 +2275,7 @@ mod tests {
         let other = RefNo::new(24384, 2);
         assert_eq!(root.dbno(), 8000);
         let receipt = RootReceipt { source_sesno: 1, model_target: None,
-            manifest_hash: "test".into(), geometry_count: 1, published_via: "regen".into() };
+            manifest_hash: "test".into(), geometry_count: 1, published_via: "regen".into(), room: None };
         let commit = ProjectionCommit {
             upserts: vec![record("deleted", root, root, 8000),
                 record("same-db-survivor", other, other, 8000),
@@ -2349,6 +2431,7 @@ mod tests {
                         manifest_hash: "legacy".into(),
                         geometry_count: 1,
                         published_via: default_published_via(),
+                        room: None,
                     },
                 )),
                 ..Default::default()
@@ -2880,6 +2963,7 @@ mod tests {
                         manifest_hash: "manifest".into(),
                         geometry_count: 1,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -2922,6 +3006,7 @@ mod tests {
                         manifest_hash: "manifest".into(),
                         geometry_count: 1,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -2965,6 +3050,7 @@ mod tests {
                         manifest_hash: "new-content".into(),
                         geometry_count: 0,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..Default::default()

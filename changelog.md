@@ -241,6 +241,74 @@
   「嵌套根共有记录只乘一次」；acw5525（旋转 + 1.8×10⁶ mm 坐标）不在 MDB 里没跑。探针基线是 S 端整根重算灌进本地投影，不是生产库里真实落过的回执；
   房间 / 空间收敛 / `persist_root_for_file_round` 不在探针里。文档：本条、S4b 计划 §5 门 3 两处判法改口 + §9 追一节、ADR-066 状态行一句。
 
+### `/model/ensure` 撞上「正在后台生成」回的是 500 不是 409：领域错穿过共享航班后只挂在 `source()` 上，`ensure_error` 改沿链找
+
+- **为什么**：`ensure_exact_generation_root` 走 `generation_flight::Flights` 共享一个生产者，失败被包成 `OutcomeError`、
+  原错只在它的 `source()` 上；HTTP 层 `ensure_error` 只看顶层 `downcast_ref`，`ModelGenerationInProgress` /
+  `ModelStaleAfterGeneration` / `UnresolvableRoot` / `InitializationNotReady` 一个都认不出，全落 `from_domain` → 500 `internal`，
+  文案还被 `{error:#}` 印成「生成根 X 正在后台生成: 生成根 X 正在后台生成」。E3D 增量夹具播种时正撞上启动的模型补齐任务，
+  九个场景一个都起不来（`output/e3d-fixture/20260920-162108`）。不走航班的直路（同进程第一次请求）从来没坏过，所以单测没红。
+- **改动**：`handlers::domain_cause<T>` = 顶层 `downcast_ref` 或 `error.chain()` 逐级 `downcast_ref`；`ensure_error` 四处分型都走它。
+  `Flights` 本身不动（它已经把原错留在链上，`shared_error_preserves_the_domain_cause` 钉着）。
+- **验证**：新 `ensure_error_classifies_domain_causes_buried_under_the_shared_flight`（直给 / `.context` / 经 `Flights` 三种形态 ×
+  四种领域错，前提断言「共享航班顶层 downcast 看不见原错」；链上没有领域错照旧 500）；`cargo test --lib` **2349 passed / 0 failed / 121 ignored**。
+  live：夹具 `20260920-165908` 播种 12 根，无一 500。
+
+### E3D 增量夹具（`l3_suite --fixture-manifest`）：三处随架构漂移的断口修好，九个场景在真 AMS 项目 7998 上 9/9 PASS
+
+- **为什么**：这套 9 场景（data / transform / geometry / boolean / owner / add / room-structure / room-member / delete）是「部署形态的
+  增量 + 房间归属增量」唯一的端到端用例，09-11 隔离端口之后没再跑通过。今天从头跑到底，依次撞出：① 服务从 `run_dir` 起
+  （8335b4800 隔离实例锁）而 aios_core 连库时按 CWD 找 `resource/surreal`，`Failed to define common functions … os error 3`；
+  ② `project-mirror` 只拷目标 DESI，服务（ADR-078 MDB 闭包）从 SYS **文件**读 `/ALL` 声明，`已尝试 SYS 库：（没有找到任何 SYS 库文件）`，
+  房间常驻模型建不起来；③ 配置没钉 `room_membership = true`（ADR-073 起默认 false，基础配置也写 false），两个 `room: true` 场景断言的
+  `room_relate` 边根本不会写；④ 播种与启动的模型补齐任务抢同一批根（上一条的 409 → 500）；⑤ drain 助手写死金基线 `API`（8028），
+  夹具 18028 上每个场景都去敲一台不存在的服务；⑥ 模型面断言按 `pe->inst_relate` / `->geo_relate` 图跳读——`inst_relate` 是普通表
+  （`INSERT IGNORE`，烘焙行没有 `out`）、`geo_relate` 挂在 `inst_info` 上，两边永远空列表，「模型变了」永远为假；⑦ 「重生成的根」
+  去 `model_drain.detail.roots` 里找，而 ADR-071 D1 起模型随 dbnum 任务生成，根在 `data_batch.result.units[].root_refno`；
+  ⑧ `setup.mac` 的 `/AIOS-INC-DATA-EQ` 没给 POS、落在原点，整只 BOX 在夹具房间 R101 盒里，room-structure 改名房间时它的边跟着掉，
+  被判成「无关夹具状态变了」；⑨ 只改名的根照样整根重算（候选照进闭包，e3d-model `affected_closure` 的「宁多勿漏」），
+  `inst_relate.model_sesno` 随之跳，data 场景与每一次 restore 对拍都红。
+- **改动**（只动运行器与夹具宏，不动服务）：`stage_surreal_scripts` 把 `resource/surreal/*.surql` 拷进 `<run>/resource/surreal`；
+  `mirror_project_meta_dbs` 把 `<code>sys / com / mis` 拷到镜像目标 DB 旁（缺 SYS 直接报错）；`write_runtime_config` 钉 `room_membership = true`；
+  播种前先 `wait_fixture_pending(…, "startup")`，`ensure_root_model` 对 409 退避重试（预算 5 分钟）；`model_drain_task_ids` /
+  `wait_model_drain_settlement` 带 `api` 参数，金基线传 `API`、夹具传 `fixture_api()`；快照 SQL 改成
+  `SELECT * FROM inst_relate WHERE in IN $ids` / `FROM geo_relate WHERE geom_refno IN $ids`（unrelated 同款）；
+  `regenerated_roots` 从 `data_batch.result.units` 取（`model_drain.detail.roots` 仍认）；`strip_fixture_volatile` 多剥 `model_sesno`，
+  `fixture_plane` 也过一遍它；`setup.mac` 给 DATA 设备 `POS E -5000 N 5000 U 0`。README 补「直接对 E3D3.1 真项目 + 7998 跑」的用法。
+- **验证**：`cargo test --bin l3_suite` **39 passed**（新钉：脚本先于起服务、镜像带元数据库、`room_membership = true`、只重试 409 且
+  settle→seed→settle 顺序、夹具不碰金基线端口、模型面比内容不比戳）。live：`l3_suite --fixture-manifest … --target-db-file
+  D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7998_0001 --target-dbnum 7998`（`L3_ALLOW_EXISTING_E3D_SESSION=1`，桌面开着两个
+  E3D GUI 会话），`output/e3d-fixture/20260920-165908`：**9/9 PASS**，5m51s；每个场景 apply / restore 两窗 `data_batch` 都 `succeeded`、
+  `applied == model == file_latest`、四平面 changed 与期望逐位相同（data：只 attributes；transform / geometry / boolean：+model；
+  owner / add / delete：+tree +model；room-structure：+room；room-member：+model +room），room-member 的 BOX `24382/353` R101 → R102 →
+  restore 回 R101；teardown 后 7998 里 `/AIOS-INC-*` 一个不剩。前六次失败的现场留在同目录 `20260920-16{0315,1345,2108,2929,3357,5017}`。
+- **顺带看见、没改**：⑨ 是行为不是夹具——只改 `NAME` 的 EQUI 根这一窗 `touched=1 regen=1`（`data_batch.result.units` 里
+  `kind=regen`），而同一窗回执的候选账 `no_model=2 (metadata_only=1)`、`manual_update` 的预览口径说它 `will_generate=false`。
+  执行与预览在这一点上不是一句话；`docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §6.2 G6 记的是「类别 0 → 不动 ✅」。
+  待拍板：要不要让 `directly_touched` 对只由元数据候选撑起来的闭包命中放行（前移不重算）。
+
+### 移除
+
+- **`scripts/Run-RoomE3DE2E.ps1` / `scripts/Run-Issue7E2E.ps1` 退役（删除）。** 两份脚本的核心一步都是
+  `cargo test --test issue7_e2e_increment … issue7_e2e_room_comes_back_after_e3d_save`，而那个测试目标随 ADR-072 R3/R4
+  （`588e71915`）删掉了——今天跑它们只会得到「no test target」，房间五连 / 逐类型矩阵一条都验不了。用户 2026-09-20 拍板退役。
+  **留下的**：`scripts/e3d/room_*.mac` / `issue7_cap_pos_*.mac` 与 `scripts/e3d/ams_model_type_cases.json`（宏与类型清单，
+  别的编排还引用）、`db_options/DbOption-issue7-e2e.toml`（`Start-AiosDatabaseManual.ps1` 的默认配置）。
+  **活的等价物**：`l3_suite --fixture-manifest`（`scripts/e3d/increment_fixture/`）的 room-member / room-structure 场景，同日在真
+  AMS 7998 上 9/9 PASS。`docs/2026-08-12_live-test-ledger.md` 那一行、`docs/e3d-model-type-verification-ledger.md` 的复跑命令、
+  `docs/2026-08-07_e3d-tty-test-plan.md` 顶部各补一句退役追记；`docs/plans/` 与 `specs/` 里的历史提法原样不动。
+
+### `the_extra_stamp_knob_is_off_unless_it_is_given` 跟上 `SPAMAP` 进生产常量：名单外的样本换成合成名字
+
+- **为什么**：e3d-model `cf6d8b6` 把 `PLACEMENT_STAMP_ATTRIBUTES` 定成 `["CACHID", "SPAMAP"]`、本仓 `2175dee93` 的戳表随之跟上，
+  这条钉还拿 `SPAMAP` 当「名单外」样本断言 `!stamp_only_with(&diff(&["SPAMAP"]), &[])`，`cargo test --lib` 一直 1 红（09-19 的几条
+  记录都写着「仍是那条 SPAMAP 戳」）。
+- **改动**：样本换成 `PROBESTAMP`（永远不会进常量的名字）；空名单那一半改成「常量里的每一枚都放行、常量外一个不放行」，
+  并逐个遍历 `PLACEMENT_STAMP_ATTRIBUTES` 断言——常量再加名字这条钉不用再改。`stamp_only` / `stamp_only_with` 的注释改口。
+- **验证**：`cargo test --lib` 2349 passed / 0 failed；增量集成用例 12 个 target 全绿
+  （ctray / equi / hvac_bran / pipe26229 increment、db8000_session_pairs、baseline_stream_8000、db8000_two_delete_fixture、
+  db_session_fixture_selfcheck、read_through_rows_parity、model_impact、shared_read_view_invalidation、direct_index_contract：91 passed / 2 ignored）。
+
 ## 2026-09-19
 
 ### ADR-066 刚体前移执行体两处「待补」补齐：含旋转读网格顶点重算盒（D3）、回执落款推进到 pin@T（D4）——开关翻开前 B8 对拍门不再被它们挡
@@ -394,6 +462,262 @@
   `docs/verification/model-version-compare-gen-model-v1-2026-09-18/README.md` §7。顺手看到：只设 UDA 的会话（SITE sesno 10：
   `UDA:2902d6e2 / 2902d6e3`）按模型口径不成一行，`attribute-history` 却列它——两条路由口径刻意不同，前端按并集列。
 
+### 任务收尾那一笔包进冲突重试：与刷盘 stray epilogue 同写水位行时谁后提交谁输，输了重发而不是让任务落 `Partial`（ADR-073 D13 收口总表第 10 行、钉 36）
+
+- **为什么**：实测（`bin/surreal.exe` 起 8009，memory / 一次性 rocksdb 各 150 × 150 笔、事务内 `SLEEP 5ms` 逼重叠）两台引擎都报
+  「Failed to commit transaction due to a read or write conflict. This transaction can be retried」、输的一笔整笔零提交、**两边都会输**
+  （memory 刷盘侧 33 / 收尾侧 19，rocksdb 77 / 30）。刷盘侧 `commit_publication_transaction` 早就走 `retry_surreal_write_operation`；
+  收尾侧 `commit_task_end_on` 是裸 `db.query` → 输一次 = 任务 `Partial`、模型水位 / `Aligned` 盖章 / 清格都没落（下次任务再欠一次、
+  多算一遍），W1 兜底那一笔再输就「下一次启动把这个库退回写入起点重跑」。F3 落库给同一行多了一个写者之后更容易踩到。
+- **改动**：`commit_task_end_on` 退成薄壳，发送与回执解读搬进 `commit_task_end_via(end, run)`（`run` = 「把这段 SQL 发出去」，生产
+  `db.query`），那一句 + 逐条取错 + 取水位回执包进 `crate::surreal_retry::retry_surreal_write_operation`（每次 `run(sql.clone())`
+  重发同一段；只有冲突文本才重试，`THROW` / 语法错照旧第一次就报）。W1 兜底、`dbnum_initialize` 那一处一并受惠。
+- **验证**：新 `mem://` 钉 `the_tail_retries_past_a_conflict_with_the_flush_epilogue_on_the_same_row`——第一次发送时竞争者先按刷盘的样子
+  `array::union(…, ['g3'])` 改同一行、发送口回 `Error::Db(TxRetryable)`，第二次真发 → 两次尝试、`model_sesno = 26`、
+  `model_room_generation = 'g1'`、格空；`Thrown` 一次就报不重发；源码钉薄壳经 `_via`、`_via` 包在重试里。冲突由发送口注入：同一进程里
+  一个 `mem://` 句柄上的请求是串行的（本地引擎 router 一次一条；先试过真并发，竞争者要等收尾那 1.5 s 跑完才轮到），撞不出真冲突
+  ——顺带说明 `AIOS_STORE_MODE=mem` 下这一行根本撞不上，rocksdb 档才会。`task_end::tests` 26 项全绿；rustfmt hunk 数 == HEAD；CRLF 一致。
+  ADR-073 总表第 10 行翻成已收、钉 36。
+
+### 房间 F3 落库收口：水位行那一格里没人认领的代号 → 整库——投影上记「本进程这一世写进那一格的代号」，准入对定向多一问（ADR-073 D13 收口总表第 11 行、钉 35）
+
+- **为什么**：`model_room_stray_generations` 记的是**代号**不是根。重启前那一世按 g2 写过的根，ACK 随重启丢了；重启后下一个任务之前
+  又有根按 g3（或按同一代 g2 再）刷了盘，投影里代号不等的 ACK 就只有新的那几根——`scope_for_task` 只点名它们、定向盖章 `Aligned(g1)`
+  把整格清掉，g2 那几根的陈旧边就此无人认领。原先「重启后没有 ACK → 整库」只对「一枚 ACK 都没有」成立。
+- **改动**：① `ModelMemoryStore::note_stray_generation_written / stray_generations_written`（按库记本进程这一世写进那一格的代号；
+  `restore_dbnum` / `clear_dbnum` / `invalidate_receipts_of_dbnum` / `invalidate_all_receipts` 作废 ACK 时一并清）。②
+  `model_db_adapter::note_stray_generation_written(db, store, dbnum, rooms, epilogue)`：那一句随本组提交成功之后除作废镜像再记这一代；
+  合块 / 二分重试 / 多写者三处同一句。③ `DurableAlignment.stray_written_here` + `unaccounted_stray_generations(on_chain)`：`stray` 去掉
+  与库上同代的、链上的（库上 ∪ 各段两端 ∪ 链尾）、这一世写的，剩下的就是点不到的；`request_for_task` 在定向结论之后多一问，非空 →
+  整库，原因多一句「……既不在准入链上、也不是本进程这一世写的……整库」。看的是**谁写的**不是**有没有 ACK**：同一代再刷时格里已含、
+  这一世没写，新根作证不了旧根。
+- **验证**：`cargo test --lib` 新纯函数钉 `a_stray_generation_nobody_here_wrote_and_no_chain_explains_forces_the_whole_library`（同代 / 没人写 /
+  这一世写的 / 链上的 / 去重；第 11 行原形单看准入点名一根、`request_for_task` 整库；同一代再刷也整库；链 g1 → g3 时 g2 不在链上整库、
+  g1 → g2 → g3 照旧定向）+ 新 `mem://` `a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed`
+  （旧投影按 g2 刷 A2、新投影按 g3 刷 A3、格里 `[g2, g3]`、常驻回 g1 → 整库 → 只剩 A1 的边；源码钉四处清理）；`the_library_owes_…` 那条
+  「进程还活着」补 `stray_written_here`；钉 34 源码钉改口。相关模块 629 绿 / 1 红（仍是 vendor/e3d-model 那条 SPAMAP 戳）；
+  `cargo check --all-targets` 零错；rustfmt hunk 数 == HEAD（0 / 2 / 4）；三个文件 LF 一致。live 待补同钉 34。
+
+### 房间 F3 收口：ADR-073 D13 多一张「已收 / 未收」总表（`76a4dd480` / `3c932e17d` / `35e022318`），钉 34 补记回滚钉
+
+- **为什么**：F3 这一串三笔、两条追记、两组钉散在 D13 / 实施约束里，「到底收了什么、还欠什么」得翻三处才拼得全；`35e022318`
+  核掉的那条「合块事务一句失败不回滚」误判也该在 ADR 里有一行落点。
+- **改动**：D13 F3 落库追记之后加 12 行总表——已收 8 行（空段定向 / 盖章对齐链上 ACK / 读侧一票否决 / stray 落库 / 事务原子性核实 /
+  「进程活着丢 ACK」不构成第二个洞 / ensure 措辞改口 / `PartialCoverage` 同路径），待 live 1 行、未实测 1 行（rocksdb 上水位行两个写者撞事务）、
+  **未收 1 行**（stray 里记着的一代在投影里一根 ACK 都没作证时——重启前按 g2 写过、重启后下一任务前又有一段 g3 刷了根——`scope_for_task`
+  只点名 g3 那几根、盖章把整格清掉，g2 那几根无人认领；建议规则「stray 里有任一代在 `acked` 里找不到见证 → 整库」，未落）、接受不收 1 行。
+  钉 34 多一条 `publication_error_retains_the_cause_after_rollback_errors`。只动文档。
+
+### 网格目录只剩一个解析口：`PLANT_ASSET_ROOT` 压过配置 `meshes_path`，生成落盘 / `/assets/meshes` / 房间面板预热同一个目录（ADR-068 追记 D7，issue #030）
+
+- **为什么**：`options::apply_asset_root` 只把 `PLANT_ASSET_ROOT\meshes` 写进 `DbOptionExt.inner` 那一份克隆，而全仓 22 处直接拿
+  `aios_core::get_db_option().get_meshes_path()`（只认配置 `meshes_path`）。配了 `meshes_path` 又设了 `PLANT_ASSET_ROOT` 的部署
+  （2026-09-19 f13 隔离部署 `0.1.28+g082d092d7e01`）：初始化把网格写到 `<ws>\meshes`，房间常驻模型去 `<ws>\assets\meshes` 找面板网格
+  → 230 块面板 `stage=mesh-warm` 全缺、`room=degraded`、`Watch-InitRun` 永远到不了 DONE，而两库初始化照样 in_sync——两条路径各自都
+  「成功」。f20 / f37b 靠 `assets\meshes → meshes` 的 junction 绕过去，没人看见。
+- **改动**：`options::meshes_dir_of / meshes_dir_for / meshes_dir`（`PLANT_ASSET_ROOT` → 配置 `meshes_path` → `asset_root()/meshes`）
+  是唯一解析口；22 处直调全改走它，`apply_asset_root` 退成把答案写回 `meshes_path`；`clippy.toml` `disallowed-methods` 禁
+  `DbOption::get_meshes_path`（lib 顶上 `#![allow(warnings)]` 之后补 `#![deny(clippy::disallowed_methods)]`，负向探针实测拦得住），
+  `meshes_dir_is_the_only_resolver` 扫 `src/` 再守一遍；配置被压掉时 `run_app` / `run_cli` 启动打一次
+  `⚠ DbOption.toml 里的 meshes_path = … 被环境变量 PLANT_ASSET_ROOT 压过 …`（`meshes_dir_notice`）。`mesh_glb` 那条钉改口成钉
+  `crate::options::meshes_dir()`。
+- **验证**：`cargo test --release --lib -- meshes_dir apply_asset_root mesh_glb_handler …` 新增四条 + 改口一条全绿；live：f13 同一份
+  配置、拆掉 junction、清库重跑——启动日志出现那句 ⚠，`[房间初始化] … 230/230`、`room=ready`，网格全部落在 `<ws>\assets\meshes`、
+  配置指的 `<ws>\meshes` 保持为空，两库 in_sync、`Watch-InitRun` DONE（数字见 ADR-068 D7 末尾）。
+
+### 房间 F3 落库：水位行多一格 `model_room_stray_generations`——盖章之后按另一代写过根，重启不丢（ADR-073 D13 追记 F3 落库、钉 34）
+
+- **为什么**：F3 的证据（进程内 ACK 的房间代号）随重启消失。库上 g1、中间那一代 g2 由 write-behind 刷进库的根、常驻回到 g1、
+  **重启**：③ 不欠（同代）、账本没段、投影空——读侧第二层替那几根说「就绪」，没人再点名它们，直到那块面板自己再动或某次整库。
+  用户拍板 B：不逐根落（那是把 ADR-079 刚退役的 `gen_root` 换个名字请回来），不单开小表（借水位行现成的镜像读与清库路径）。
+- **改动**：① `dbnum_watermark.model_room_stray_generations: [代号]`（`DbnumState` / 行结构 / 列清单 / 两处装配）。② 刷盘一组按 `rooms`
+  这一代写边、而这一代 ≠ 库上 `model_room_generation` 时，`model_db_adapter::stray_room_generation_statement` 渲一句
+  `UPDATE … SET model_room_stray_generations = array::union(model_room_stray_generations ?? [], ['g'])`，作 `persist_group` 的 epilogue
+  **随本组的行同一笔事务**提交（一条几何都没有的组不带；合块 / 二分重试 / 多写者三处都带、成功后 `invalidate_mirrored_on`）；没有行 /
+  没盖过 / 同代 / 已含都不写——稳态一个字都不写。③ `task_end` 的 `Aligned` / `Cleared` 两臂一并 `= []`，`Untouched` 不碰。
+  ④ `room_recompute::DurableAlignment { stray }`，`owed()` 多一句 `stray_generations_owed`（去掉与库上同代的；非空 = 欠，「F3 落库」）；
+  `request_for_task` 随之走 `scope_for_task`：进程内还有代号不等的 ACK → 空段定向点名；重启后没有 → 整库，盖章即清。
+  ⑤ `/dbnums.room_alignment.stray_generations`（空时不出，形状不变）。ADR-073 F3 追记改口（ensure 只发投影、边是 write-behind
+  刷盘那一刻写的）+ F3 落库追记 + D14 / W3 注 + 钉 34。
+- **验证**：`cargo test --lib` 房间 / 水位相关 18 项全绿——新 `mem://` `a_stray_generation_survives_a_restart_on_the_watermark_row_and_rearms_the_recompute`
+  （没有行 / 没盖过 / 同代不写；按 g2 刷 A2 同事务记下 `[g2]`、`failed` 为空、已含不再写；换空投影模拟重启 → `owed()` 含「F3 落库」→
+  整库 → A2 陈旧边删掉；源码钉 epilogue 与三处作废镜像）、新纯函数 `the_library_owes_a_recompute_when_the_watermark_remembers_writes_at_another_generation`；
+  `the_room_generation_stamp_follows_the_model_watermark`（种子 `['g2']`、普通窗口原样、盖章 / 清空都清）、`the_dbnum_row_carries_…`（空不出 /
+  非空多一格）、`the_tail_is_one_transaction_…`（说不了整库的任务不碰这一格）、`room_membership_is_computed_per_root_…`（epilogue 字面）改口 / 扩。
+  相关模块 627 绿 / 1 红（仍是 vendor/e3d-model 别的会话未提交的 SPAMAP 戳）；`cargo check --all-targets` 零错；rustfmt hunk 数 ≤ HEAD；
+  CRLF 一致。踩坑一条：这一版 SurrealDB 不给数组做 `+`（"Cannot perform addition with '[]' and '[…]'"）。**更正（09-19 晚）**：原记的「合块事务里一句失败不回滚
+  其余语句」是误判——用 `bin/surreal.exe`（2.1.4+45013fc9，与 SDK 同一提交、同一台执行器）在 memory 与 rocksdb 上都核过：`BEGIN … COMMIT` 里
+  任一句报错（`THROW` / 数组 `+`）整笔零提交、其余各句回「not executed due to a failed transaction」；当时看见 A2 的边照样落库，是那一版 epilogue
+  还没进同一笔事务。`publication_error_retains_the_cause_after_rollback_errors` 现在连回滚本身也钉住。测试仍要断言 `failed` 为空——否则那一句悄悄没写。live 待补：`.mesh` 暂时读不出 → 点「显示模型」
+  → 恢复 → 重启 → 下一窗「库上记着盖章之后本库有根按另 1 代写过边 … F3 落库」+ 整库；稳态下那一列恒空。
+
+### 房间定向重算：常驻代号回到旧值时中间那一代生成的根——投影里 ACK 代号不在链上的根点名重算、盖章时对齐链上 ACK、读侧一票否决（ADR-073 D13 追记 F3）
+
+- **为什么**：常驻代号是输入摘要、不单调。库上盖 g1 → 一块 PANE 的 `.mesh` 暂时读不出（重建 → g2，进保护集这一段是空段、不进账本）
+  → 期间「显示模型」`/model/ensure` 按 g2 生成了几根（P 不在索引，进 P 的根拿不到 P 的边）→ `.mesh` 恢复（重建 → g1，摘要同值）→ 下一个
+  批次任务 `Unchanged`、库上 g1 == 冻的 g1 → ③ 不欠、账本没段 → `request_for_task` 回 `None`；那几根 ACK 是 g2，`e3d.room.lookup` 第一层
+  不认、第二层「库上 g1 == 常驻 g1」→ 回 `ready`，边却是 g2 算的。面板挪走又挪回（撤销）同形。
+- **改动**：① 投影里本库每一根 ACK 的房间代号进准入——`room_recompute::acked_roots_for_task`（只收回执与 ACK 对得上的），两个执行体
+  在 `swaps_for_task` 之后取、传进 `request_for_task`；`scope_for_task(…, acked)` 在库上 == 常驻时把代号 ≠ 这一代的根点成
+  `Targeted { swaps: [], parked: [], stale_roots }`（空段定向），链接得通时把代号不在链上任一代的根一并进 `stale_roots`；
+  `request_for_task` 多第四句原因，库上同代、前三条都没点亮时 F3 单独触发，被 ①/② 问到仍整库。`run_targeted_room_recompute` 把点名的
+  根与反查命中、停放折出的并起来。② 定向成功盖章那一刻 `model_db_adapter::align_room_acks_along_chain` 把投影里 ACK 代号在链上任一代、
+  没被命中的根对齐到链尾（它那一代到链尾之间面板动了什么各段都反查过——与库上那一格是同一句话的逐根形态；没有它，下一个任务会把整个
+  投影点名一遍）；链外的、没算房间的不动——那是证据。`recompute_dbnum_room_edges` 对投影里一条几何都没有的根也对齐 ACK。③ 读侧
+  `query_service::room_calculation_status` 第 1 层改三态 `ProcessAck::{Missing, Current, Stale}`，`Stale`（有 ACK 而代号 ≠ 常驻 / 没算房间）
+  一票否决，库上那一层再对也不替它说话。ADR-073 D13 追记 F3、D14「读」补一句、钉 33。
+- **验证**：`cargo test --lib` 房间相关 35 项全绿——新 `a_stale_ack_in_an_aligned_library_is_the_debt_itself_and_goes_targeted_on_its_own`
+  （纯函数十余例）、新 `mem://` `a_root_generated_in_a_transient_generation_is_repaired_when_the_resident_returns`（库上 g1 发 A1 → ensure 按 g2
+  发 A2 与空根 A3 → 回 g1：空段定向只点名 g2 那两根、按 g1 重算 A2 陈旧边删掉、A1 不动、A3 的 ACK 也对齐、再问不欠、== 整库按 g1；
+  `align_room_acks_along_chain` 链上对齐 / 链外与没算房间的不动）；钉 `the_room_only_recompute_is_wired_…`（`swaps < acked < request`）、
+  `the_targeted_recompute_falls_back_…`（`stale_roots` 并根、对齐在盖章那一臂）、`the_durable_alignment_answers_…`（`Stale` 四例）、
+  `the_room_status_reads_both_…`（三态字面）改口 / 扩。相关模块 575 绿 / 1 红（`the_extra_stamp_knob_is_off_unless_it_is_given`——
+  `vendor/e3d-model` 工作树里别的会话未提交的 SPAMAP 戳，与房间无关）；`cargo check --all-targets` 零错；rustfmt 四个文件 hunk 数与 HEAD
+  相同（6/0/3/5）。**没收的**：ACK 是进程内的——中间那一代生成的根若在下一个任务之前随重启丢了 ACK，库上 == 常驻之下没人再点名它；
+  要收得把 ACK 代号落库，等 live 看到再定。live 待补：`.mesh` 暂时读不出 → 点「显示模型」→ 恢复 → 下一窗「… ACK 代号不在链上点名 N 根」、
+  两窗之间那几根回 `not_computed`；普通定向之后「链上 K 代、没命中的 M 根 ACK … 对齐到 …」且下一窗不再点名整个投影。
+
+### 房间定向重算：面板级语句挪到最后一笔、停放在反查完成就做，补 `recalc` 面板自己的 `room_panel_relate`（ADR-073 D13 追记 F1 / F2）
+
+- **为什么**：第三遍复审读出 M1 的一条连带——ADR ⑤ 写的「`Failed` → 下一个任务整库」在 M1 之后不成立：账本里那一段还在，下一个
+  任务照样接链、仍是定向；而定向的面板级删（不在册面板的 `{P}->room_relate` / `<-room_panel_relate`）装在第一笔事务、逐笔提交失败即返，
+  第一笔提交后若后面某笔写库失败，P 名下成员的边已删、没提交那几笔里的根新边没写，下一个任务重走同一段时 `durable_panel_members(P)`
+  回空、P 也没新盒——这些成员若该落到别的房间永远没人算（跨库更直接：`Failed` 不停放，B 库接段时证据已被 A 删掉）。另一条：
+  `render_panel_delta_statements` 只处理 `removed` / `renumbered`，`recalc` 面板自己的「房间 → 面板」边只有它自己的根被重算才写，而反查
+  命中的是成员的根——FRMW 改名进关键字（NAME 是元数据、根不重生成）→ 成员的 `room_relate` 齐了、面板的 `room_panel_relate` 一条没有，
+  「两张边 == 从零初始化」在第二张表上不成立（今天没有生产读者，所以看不见）。
+- **改动**：F1——`recompute_dbnum_room_edges` 里面板级语句从 `pack_publication_transactions` 的 prelude 挪到 epilogue（最后一笔）：命中的
+  根都重写之后才删面板级的边，中途失败留下的是多算形状、证据还在；`run_targeted_room_recompute` 的 `park_foreign_hits` 从「结论定为
+  `Targeted` 之后」提前到反查完成、分类过关之后、重算之前，不以结论为条件（同段再停是并集，重试幂等）。F2——
+  `MemoryRoomCalculator::render_panel_topology_statements(panel)` + `model_db_adapter::render_recalc_panel_topology_statements(rooms, panels)`
+  （按本任务计算器的在册视图，refno 序去重，在册先删后插、不在册只删），`run_targeted_room_recompute` 拼在各段面板级语句之后。
+  ADR-073 D13 追记 F1 / F2、⑤ 与钉 22 / 23 改口、钉 32。
+- **验证**：`cargo test --lib` 定向 30 项全绿——钉 `the_targeted_recompute_falls_back_…` 改口（`classified < park < recompute`、`park < decided`、
+  epilogue 字面）；`mem://` `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_last`（改名，终态不变）；新
+  `recalc_panel_topology_statements_follow_the_calculators_registered_view`（五例）、新
+  `a_targeted_recompute_writes_the_recalc_panels_own_topology_edge`（R2 新在册、只点名成员 A → 陈旧 999 → R2 删掉、601 → R2 写上、
+  别的面板现行边不动、成员边照常；再跑一遍幂等）。相关模块 398 绿 / 1 红（`the_extra_stamp_knob_is_off_unless_it_is_given`——
+  `vendor/e3d-model` 工作树里别的会话把 `PLACEMENT_STAMP_ATTRIBUTES` 改成 `["CACHID","SPAMAP"]` 未提交，与房间无关）；
+  `cargo check --all-targets` 零错；rustfmt 四个文件 hunk 数与 HEAD 相同；CRLF 一致。live 待补：FRMW 改名进关键字 → 每块新在册面板
+  各一条 `room_panel_relate`；定向中途写库失败一次 → 下一窗同一段重走仍完整。
+
+### 房间反查：旧盒退役——只问新盒 + 库上成员边，`protected_bounds` 删掉（ADR-073 D13 追记 L1-P 第二步）
+
+- **为什么**：L1-P（`1e7dbfd91`）之后旧盒只剩一个用处——在途还没落库的根靠它；而那些根随它自己那一台计算器落库、由 ③ 兜底，
+  不值得每次定向多扫一遍旧盒，更不值得为它在模型上跨代带一份「上一次可用盒」（L1 的 `protected_bounds`，只活在进程内）。
+- **改动**：`PanelDelta::query_boxes()` 只回 `recalc` 的新盒；`PanelMove::old` 只给日志 / 用例看（取旧代 `current_bounds`，保护中 /
+  不在册 = `None`）；`ResidentRoomModel::protected_bounds` / `last_known_bounds` / `inherit_protected_bounds` 删掉、`install` 不再带盒，
+  新 `current_bounds(panel)`。反查定型为「新盒问空间谁进来了、库上成员边答谁离开了」。ADR-073 D13 L1 段标退役、L1-P 段加第二步、
+  钉 27 标历史、钉 30 改口。
+- **验证**：`cargo test --lib` 定向 25 项全绿（钉 `a_panel_that_regains_geometry_…` 改名 `…_is_looked_up_by_its_new_box_and_its_durable_members`：
+  保护 → 仍保护 `query_boxes == [2.0]` → 恢复 `[40.0]`、`leaving_panels == [8]`、账本末段一个盒；`install_reports_…` 第二代
+  `query_boxes == [5.0, 20.0]`）；相关模块 394 绿 0 红；`cargo check --all-targets` 零错；rustfmt hunk 数与 HEAD 相同；CRLF 一致。
+
+### 房间反查：离开的成员从库上按面板取、范围之外的历史几何不再把定向拉回整库（ADR-073 D13 追记 L1-P / M2-S；撤 L1-R 的门）
+
+- **为什么**：复审 L1（`b21613278`）读出它的漏洞——上一次可用盒只活在进程内，而**丢盒的方向是漏算**：面板有几何、有边 → `.mesh`
+  读不出进保护集 → **重启** → 第一代它仍在保护集、没有上一代可带 → 恢复且挪位 → `old = None`，只问新盒，旧位置里成员的陈旧边没人清。
+  同日第一版（`2ba772b25`，L1-R）是保守门：第一代就在保护集的面板记成「旧盒说不出」，恢复那一段不许定向、整库兜底。这一笔改成精确
+  做法、门撤掉。另一条：M2 分完之后 `stuck` 里的常客是「元素在 T 上、祖先链每一级也都在、却没有一级是生成根」的历史几何
+  （`model_type_scope` 之外）——每一次盒扫得到它的定向都退整库，而整库也不算它，持久多算、零收益。
+- **改动**：L1-P——「离开的成员」不问空间：此前算在面板名下的每一个成员都在库上（`{panel}->room_relate` 的 `out` 端，`in` 走索引），
+  `room_reverse::durable_panel_members` 按 `PanelDelta::leaving_panels()`（`recalc` 每一块 + `removed` 每一块）一块一句取齐，与树上命中
+  同一处置进 `resolve`（祖先链投影拿、回库取；`inst_relate` 没有行的管身来源再按 `in` 到 `tubi_relate` 取）；别的库的成员照样进 `foreign`
+  停放。集合精确、不靠旧盒、重启不丢。旧盒 ∪ 新盒的空间查询照旧（在途未落库的根靠它）。顺手收掉同族漏算：`removed` 的面板此前只清边
+  不重算，成员若还在别的面板盒里该落到那间房却没人算——现在它的成员根也重算。`AffectedRoots` 多 `member_hits` 等三格、`summary()`
+  多一格、`durable_timing()` 多一句。撤 L1-R：`unknown_bounds` / `old_box_unknown` / `fully_known` 删掉，`walk_chain` 回到 `!is_empty()`。
+  M2-S——反查 / 停放折不出根的元素连同祖先链一起回（`unresolved_ancestors`）；`run_targeted_room_recompute` 在 `stuck` 非空时再问一次
+  `missing_at_target`（链上每一级），`split_stuck_by_ancestry`：链非空且每一级都在 = 范围之外，忽略（stdout 点名）；链空 / 有一级已不在
+  （改过属主，链陈旧）= 仍卡住，退整库。ADR-073 D13 追记 L1-P / M2-S、源码钉 30（改口）/ 31。
+- **验证**：`cargo test --lib` 定向 25 项全绿——`resolve_joins_…` 扩成四路（面板 7 名下四条成员边：投影里的、`inst_relate` 带 anc 的、
+  盒远在 [50, 51] 只有 `tubi_relate` 两行的管身来源、别的库的 → `member_hits = 4`、`durable_ancestor_lookups = 7`、foreign 多一个；只给成员
+  不给树与盒也折出 A/C/D）；两库端到端 `durable_panel_members(R1) == 树的答案模拟`；新 `stuck_hits_whose_whole_ancestor_chain_still_exists_…`
+  （四例 + 拦 → 问祖先 → 分 → 只拦说不了的 → 重算的顺序钉）；`hits_fold_to_every_library_root_…` / `parked_elements_fold_…` 改口带链；
+  `install_reports_…` / `a_panel_that_regains_geometry_…` 加 `leaving_panels` 断言。`batch_worker room_ model_db_adapter query_service
+  task_end dbnum_initialize window_root_plan model_dbnum_ensure handlers` 394 绿 0 红；`cargo check --all-targets` 零错；rustfmt 五个文件
+  hunk 数与 HEAD 相同；CRLF 文件行尾一致。live 待补：PANE `.mesh` 读不出 → 重启 → 恢复并挪位 → 「定向房间重算完成 … member_hits=N」
+  且旧位置陈旧边被删；面板移出关键字 → 成员落到别的房间；盒扫到范围之外的历史几何 → 「… 忽略」仍定向。
+
+### 房间反查：保护集成员带着上一次可用的盒、定向成功只清消费过的停放段、库读计时（ADR-073 D13 追记 L1 / L3 / L2）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06）剩下的三条低档。L1 是一条窄漏算：一块面板「有几何、有边 → 某代
+  几何不可用进保护集（旧边留着）→ 再一代几何可用但位置变了」，`PanelDelta::between` 的旧盒取自旧代 `panels`、保护中是 `None`
+  → 反查只问新盒，旧位置里成员的陈旧边没人清。L3 是加固：`parked_for_task` 开工时快照本库的槽，收尾 `clear(dbnum)` 却清此刻的
+  全部，任务期间别的库停进来的段没折过根就随手丢了（不漏算，账本里还有那一段）。L2 是性能：`durable_tube_hits` O(全部
+  `tubi_relate` 行) 的链接解引用 live 从没量过，ADR 列的缓解（`aabb_d` 平副本）要么回填存量、要么查询分两半，没有数不动查询。
+- **改动**：L1——`ResidentRoomModel::protected_bounds` + `last_known_bounds`，`ResidentRooms::install` 算面板变化之前从被换下的那一代
+  给这一代 `missing_panels` 里每一块带一份上一次可用盒（跨几代都带，重新有几何就丢），`PanelDelta::between` 旧盒走
+  `last_known_bounds`。L3——`room_reverse::clear_consumed(dbnum, consumed)` 按 `from → to` 对条、按元素去、去空整条撤；
+  `run_room_recompute` 按 `(结论, 范围)` 分派：定向按接进准入链的快照 `clear_consumed`，整库仍整槽 `clear`。L2——
+  `AffectedRoots { durable_tube_ms, durable_ancestor_lookups, durable_ancestor_ms }` + `durable_timing()`，「定向房间重算完成」那一行多一句
+  「（库上管身范围查 Nms、回库取祖先链 K 个 Mms）」。ADR-073 D13 追记 L1 / L3 / L2、源码钉 27–29。
+- **验证**：`cargo test --lib` 定向 32 项全绿（新 `a_panel_that_regains_geometry_after_protection_brings_its_last_usable_box_as_the_old_one`
+  四代用例 + 反例；新 `clearing_the_consumed_segments_keeps_what_was_parked_while_the_task_ran`；`resolve_joins_…` 扩量具；分派处源码钉改口；
+  `mem://` 两库端到端 B 收尾改按快照清）；`batch_worker room_ model_db_adapter query_service task_end dbnum_initialize window_root_plan
+  model_dbnum_ensure handlers` 392 绿 0 红；`cargo check --all-targets` 零错；rustfmt 我改的块整平（三个文件的剩余 hunk 数与 HEAD 相同）。
+  live 待补：一块 PANE 先让 `.mesh` 读不出再恢复并挪位 → 「定向房间重算完成 … recalc=1」且旧位置成员的陈旧边被删；7997 一次定向的
+  「库上管身范围查 Nms」压过总耗时才做平副本。
+
+### 房间反查折不出根的元素按「在 DbSet@T 上还在不在」分两半，删掉的残留不再把定向拉回整库（ADR-073 D13 追记 M2）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06 M2）——反查命中却折不出根（`anc ∪ 自身 ∩ DbSet@T 根清单 = ∅`）
+  的元素此前任一个就退整库，而最常见的来源是**本窗刚删掉的根**：树 / 库上的残留还没刷掉、被面板的盒扫到，它在 T 上没有边要
+  维护（对账删除那一半清），却让每一次「删根 + 挪面板」同窗的定向都变整库。
+- **改动**：`window_root_plan::missing_at_target(dbnum, T, refnos)` 拿同一个 `DbSet@T`（`build_set` 走生成输入缓存）逐个
+  `element_exists`；`run_targeted_room_recompute` 把反查命中的与停放链上折不出根的元素合起来问一次，
+  `split_unresolved_by_existence` 分两半——已不存在的忽略（stdout 点名）、还在 T 上的才是「反查不完整」退整库；问不出来（读文件
+  失败）也退整库，不把「不知道」当「不在」。`room_reverse` 不变：仍如实把折不出根的进 `unresolved`，分类在调用方。ADR-073 D13
+  追记 M2、源码钉 26。
+- **验证**：`cargo test --lib` 定向 30 项全绿（新 `unresolved_hits_that_no_longer_exist_at_the_target_are_ignored_and_the_rest_block_the_targeted_path`：
+  纯函数四例 + 源码钉「问 → 分 → 拦 → 重算」顺序、旧的一刀切分支已删）；`batch_worker room_ model_db_adapter query_service task_end
+  dbnum_initialize window_root_plan model_dbnum_ensure handlers` 390 绿 0 红；`cargo check --all-targets` 零错。live 待补：一窗里
+  删一个根 + 挪一块面板 → 日志「N 个命中的元素在 DbSet@T 上已不存在 … 忽略」且仍「定向房间重算完成」。
+
+### 房间换代段账本：谁重建谁记，任何任务的定向准入都能沿它接段（ADR-073 D13 追记 M1）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06 M1）指出定向常路在生产里很难走到——面板变化 `PanelDelta` 只随
+  `Rebuilt` 回给做了重建的那一次 `refresh_before_task`。`/model/ensure`（UI「显示模型」）先探到 composite 变了、做了重建，
+  随后每个库的任务都是 `Unchanged` + 库上欠着 + 槽空 → 链断 → 全 MDB 每个库各整库一次；截断窗口（大窗口的常态）跑不到收尾，
+  自己那一段随任务丢掉，下一窗又 `Unchanged` → 整库；没被命中的库看不到「这一段与你无关」→ 整库。N 个 DESI 库一次面板变化最坏
+  N 次整库（每次 O(本库根数) 次库读 + 重写全部边）。
+- **改动**：`room_resident::SwapLedger`（`ResidentRooms` 的一个字段，与两代模型同一把锁）——`install()` 对着被换下的那一代算出
+  非空 `PanelDelta` 就记一段 `PanelSwap { from, to, panels }`（两端 = 两代 `input_version`），空段不记、同两代替换、容量 64；
+  `PanelSwap` 搬到 `room_resident`；`scope_for_task(library, resident, swaps, parked)` 改成沿账本段 / 停放段的深度优先路径搜索
+  （同一起点停放段优先、一条路断了换另一条），`Targeted { swaps: Vec<PanelSwap>, parked, generation }` 链上可多段；
+  `swaps_for_task` 在两个执行体里紧跟 `parked_for_task`；`run_targeted_room_recompute` 每一段各反查、面板级语句按链序拼、
+  **按段**停放给别的库；`/health.room_build.resident.swap_ledger`。H1 那条竞态（对齐 g1→g2、ensure 中途 g2→g3、冻 g3）从
+  「整库」升成「两段定向」。停放槽保留（省一次反查的捷径）。ADR-073 D13 追记 M1、源码钉 25。
+- **验证**：`cargo test --lib` 定向 31 项全绿（`SwapLedger` 纯函数、`install` 记段、`scope_for_task` 两张真值表重写、`mem://`
+  端到端 ④ 改成「T2 沿 ensure 记的 g2→g3 定向，与整库按 g3 同一终态」）；`batch_worker room_ model_db_adapter query_service task_end
+  dbnum_initialize window_root_plan model_dbnum_ensure handlers` 389 绿 0 红；`cargo check --all-targets` 零错。
+  live 待补：两个 DESI 库、UI 先点「显示模型」让 ensure 做重建 → 两个库的任务都「定向房间重算完成（… 换代段 1 段 …）」、
+  `swap_ledger.entries ≥ 1`、没有一个库整库。
+
+### 房间定向重算复用本任务开工冻的计算器——scope、边、盖的代号同一代（ADR-073 D13 追记 H1）
+
+- **为什么**：审核（`output/show-me-room-increment.html` §06 H1）读出一条漏算。定向路（反向传播）的 scope 在开工时按读到的
+  常驻代号定（库上 g1 → 常驻 g2，自己这一段面板变化 P），收尾却 `frozen_room_calculator()` **新冻一台**「此刻这一代」。P2-3 自己
+  点名的竞态（一个 DESI 前进 + 用户同时点「显示模型」，`/model/ensure` 并发对齐在任务中途把常驻 g2 → g3、面板 Q 又动了）下：
+  反查只用 P 的盒、命中根按 g3 算、`Targeted(g3)` 盖 D14 ← g3；Q 命中的根从此永久陈旧，③ 看到库上 g3 == 常驻 g3 就哑，
+  `park_foreign_hits(g1 → g3)` 还把同一个洞停放给别的库。准入侧同病：`Rebuilt` 不带自己的新代号，`scope_for_task` 默认自己那一段
+  的 `to` 就是此刻常驻，而「此刻常驻」是另一次独立的读。整库那一路没事（每一根都算）。
+- **改动**：`RoomReferenceRefresh::Rebuilt` 多一格 `generation`（装上那一代的 `input_version`）；`PanelSwap` 带 `to_generation`，
+  `RoomRecomputeScope::targeted_generation()` = 链尾那一段的 `to`；`scope_for_task` 取自己那一段时要求 `generation == resident`，
+  不等整库（停放物不替它续）；`TaskRoomCalculator::generation()`，两个执行体 `durable_alignment(job.dbnum, rooms.generation())`
+  ——「此刻常驻代号」只从冻好的那台取，不再另读生命周期；冻的那台随 `DataBatchTaskResult::room_calculator`（`#[serde(skip)]`）
+  交给收尾段，`run_room_recompute(… task_rooms.as_ref() …)`，`run_targeted_room_recompute` 收 `expected_generation` 与那台计算器、
+  **不新冻**，入口先对代号、不等 / 没冻出退整库，停放以 `&swap.to_generation` 收尾；`MemoryRoomCalculator` 实现 `Debug`（只报代号）。
+  `run_room_only_recompute` 一字不改。ADR-073 D13 追记 + 源码钉 17 改口、新钉 24。
+- **验证**：`cargo test --lib` 定向 28 项全绿（含新 `mem://` 端到端
+  `a_mid_task_generation_swap_keeps_the_targeted_recompute_on_the_task_calculator`：T1 对齐 g1→g2、冻 g2、中途常驻 g3 → 按冻的 g2
+  定向、反查命中 A1/A2 按 g2 算、盖 g2 之后 `library_alignment_owed(g2, g3)` 仍欠、盖 g3 就不欠——反例；T2 整库按 g3 == 从零；
+  `scope_for_task` 真值表加三行；源码钉扩：执行体 `refresh → freeze → durable_alignment(job.dbnum, rooms.generation()) → parked_for_task →
+  request_for_task`、`room_calculator: rooms.frozen().cloned()`、不含 `resident_room_generation()`；分派与定向函数体不含
+  `frozen_room_calculator()`、入口代号守门在 `library_generation_roots(` 之前 `return None`）；`batch_worker room_ model_db_adapter
+  query_service task_end dbnum_initialize window_root_plan model_dbnum_ensure` 352 绿 0 红；`cargo check --all-targets` 零错。
+  live 待补：ams 一窗挪 PANE + 同时点「显示模型」→ 日志「定向房间重算完成（… 计算器 <开工那一代> …）」或「准入链终点 … 不是本任务
+  冻的计算器代号 … 退整库」，下一窗 ③ 再点一次。
+
 ## 2026-09-18
 
 ### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-083）
@@ -546,6 +870,175 @@
   **未与 legacy `/api/model/units/{refno}/versions` 逐条对拍**（`:3100` 未起）。
 - **真机（15:32 追记）**：`:8022` 换成 `d47d747fd`（`codex/model-projection-cache@7bcdd60df` + cherry-pick 本条，release）后同一请求冷 2.20 s（623 会话）、缓存 17 ms，
   错误码与截断各一条对上；plant3d-web 浏览器端到端两条场景全过（证据在 plant3d-web `docs/verification/model-version-compare-gen-model-v1-2026-09-18/`）。
+### 同日收尾：发布包冒烟三腿真跑了一遍——顺手发现 C 腿自 2026-09-15 起一次都没执行过
+
+- **为什么**：ADR-080 那两条改的正是发布包这条路（`Start-AMS.ps1` 回填 `mem`、冒烟各腿只递环境变量），
+  唯独「三腿真跑一遍」一直挂着未验。真跑之前先读了一遍冒烟门，发现 C 腿（包内 `surreal.exe` 起一台 rocksdb 库、
+  服务以 `AIOS_STORE_MODE=rocksdb` 连它）挂在 `if ($IncludeWorkspace)` 上，而那个开关 **2026-09-15 随 workspace 档一起删了**——
+  变量再没被赋过值，判断恒假。后果不是报错而是静默：从那天起每份 `release.json` 里 `rocks_leg` 都是
+  `skipped: runtime tier does not bundle a workspace`，而 `$smoked` 里 C 腿那一格写着「不带 workspace 就不算数」，
+  于是只过 A / B 两腿的包照样被判为「已冒烟」。连带 `-ReuseWebFromZip` 也一起死了：它要求来源包三腿全过，
+  而 09-15 之后出的包没有一个满足得了——0.1.28 那两版只能回头去引 0.1.26。
+- **改动**：C 腿改为总是执行，前置条件换成真实的那两条（端口 `9099`/`18010` 空闲、打包机现场那份 `DbOption.toml` 在）——
+  它本来就不需要包里带 workspace：库由包内 `surreal.exe` 现起，配置取打包机现场那份，两样都在包外。B 腿补同一道前置
+  （此前现场目录缺失时是读文件炸掉整个出包，与脚本开头那句「两腿会因此跳过」的警告对不上）。`$smoked` / `$legFailed`
+  纳入 C 腿。README / CHANGELOG 生成处那 7 段按 `$IncludeWorkspace` 分叉的文案、以及把 `workspace\assets` 直灌进 zip 的
+  6b 段一并删掉（同样恒走 runtime 那一侧）；`release.json` 的 `workspace_included` / `meshes_included` 落为字面 `false`。
+- **验证**：`New-LocalRelease.ps1` 整跑一次（`-ReuseWebFromZip` 引 0.1.26 那份、`-SmokeHttpPort 9499`），
+  **三腿全过**：A 出厂配置起服务 = 设置模式 + 向导页；B 本机配置全启动 = health 200 + 首页含 `plant_ui_app.js` +
+  `medium=mem` + `durable=false` + 服务没拉 surreal 子进程；**C = 包内 `surreal.exe` 2.1.4 起库 + 服务连上 +
+  `medium=rocksdb` + `durable=true` + 数据目录真落了 7 个文件**。**按负例验过**：把 18010 占上再跑，C 报
+  `skipped: 18010 被 PID … 占用`，产物随即被标『未冒烟』——改之前同样的局面是 C 一声不吭、包照样算冒烟过。
+- **当前交付件**：`ams-local-0.1.28_release.20260918113752.g5d528b5a5379.dirty-runtime.zip`
+  （120.96 MB / 126,834,258 B），SHA-256 `90649b8cc962c518cc0ac56d5d629064154125286b3dc5304f8679b76fb5c447`
+  （另行独立重算一致），构建自 `5d528b5a5379`（工作树带着别的会话的在途改动，故 `.dirty`），包内 78 个文件，
+  Web 仍复用 0.1.26 那份已验证包（plant-ui `0.1.11`）。
+
+### 0.1.28 第三版包：带上重启台账与 `Start-AMS` 两条修复；上一版同号包已删
+
+- **当前交付件**（同 Cargo 版本、新 build_id）：
+  `ams-local-0.1.28_release.20260918053140.g2bb1edc4e936.dirty-runtime.zip`（120.93 MB / 126,802,929 B），
+  SHA-256 `80e31ec563cb6587f014f80caae95419552eb74cb166455ad976d698b7987cc8`（另行独立重算一致），
+  构建自 `2bb1edc4e936`。A / B 两腿冒烟过（口 9499），C 腿按 runtime 档跳过；包内 78 个文件，
+  Web 仍复用 0.1.26 那份已验证包（plant-ui `0.1.11`，13 个文件）。
+- **验过两条修复真在包里**：zip 解到空目录起在 9599 —— ① 调用方接真管道跑**包里的**
+  `Start-AMS.ps1`，**1.3s 拿到 `READY PID=2728 …` 并 EOF**（上一版同一台架 7.3s 还堵着）；
+  ② `process.json` 记的就是 2728；③ `POST /setup/restart` 之后服务 2728 → 27512，台账跟着变成
+  27512；④ 端口判据回归：9099 occupied / 9599 self / 9699 free，仍走 `listener_table`。
+  包内 `Start-AMS.ps1` 已无 `-RedirectStandardOutput`。验完实例与目录都清掉。
+- **上一版 `…20260918042801.g695cc85dc8bb…` 已删**（zip / sha256 / manifest 与它的构建日志），
+  口径同前一次拍板：同一 Cargo 版本两个包摆一起，拿错的代价大过留着当 patch 基线。
+  `releases/` 里 0.1.28 只此一份。
+- **仍是 `.dirty`**：六个仓的在途改动照旧编进这只二进制——gen-model-model-cache `src/` 1 文件
+  80+/1−（别的会话的 `model_impact.rs`）、e3d-model 6 文件 807+/252−、e3d-io `schema.rs` +14、
+  e3d-attlib +4、old-aios-core 41+/6−、plant-mbd `crates/` 11 文件 622+/144−。
+- **未验**：rocksdb（durable）真库重启、plant-ui 侧回归、干净树上的重现构建。
+
+### 向导重启后进程台账跟着换；`Start-AMS.ps1` 拉起服务不再把调用方的管道堵死
+
+- **为什么**：上一笔只把「解压即跑」路上撞见的这两处小毛病记下来、没改，这一笔改掉。
+  ① 向导 ④→⑤ 之间那次 `/setup/restart` 换了进程，包根 `process.json` 里还写着上一条命的 pid
+  （现场记到台账 56460 / 实跑 35152）。`Rollback.ps1` 按 exe 路径匹配，功能上不疼，但那个文件
+  是运维手上唯一的台账，它骗人。② `Start-AMS.ps1` 用 `Start-Process -RedirectStandardOutput /
+  -RedirectStandardError` 拉服务，这条路子走 `CreateProcess(bInheritHandles=TRUE)`，**服务连调用方的
+  stdout 句柄一起继承过去**；调用方（脚本 / CI / 代理）只要接了管道，那一头就永远等不到 EOF——
+  服务是长命的。双击 `Start-AMS.cmd` 走控制台句柄不受影响，所以这坑只有自动化会踩，而它每次都踩。
+- **改动**：① `spawn_replacement` 拉起替身后回写包根 `process.json`——`pid` / `start_time` /
+  `executable` 三键就地改写，别人加的键原样留着；**只改已经在那儿的那一份**（开发态直接跑 exe 的
+  目录里没有这个文件，重启不该凭空造一个出来），写不动只警告：端口与单实例锁那时已经交出去了，
+  重启不能卡在台账上。② 生成的 `Start-AMS.ps1` 改让 `cmd` 接那两路重定向——
+  `Start-Process $env:ComSpec '/c ""<exe>" serve 1>"…" 2>"…""' -WindowStyle Hidden -PassThru`，
+  这一侧就只剩 ShellExecuteEx，句柄一个都不带过去；服务自己按可执行路径认回来（同脚本顶上认
+  既有实例那一招），`process.json` 与 `READY PID=` 记的仍是服务的 pid，不是 cmd 的。
+- **验证**：
+  - `cargo test --lib --features http_api -- web_service::setup::` **21 passed / 0 failed**，新钉 2 条：
+    三键改写且未知键存活（坏 JSON 也得给得出一份能用的台账）、没有台账的目录不冒出一份来。
+  - **句柄那条先量 A/B 再动手**：合成台架（调用方用真管道 + `ReadToEndAsync`）下，`-RedirectStandard*`
+    那一形拿不到 EOF；先试「spawn 前摘掉三个标准句柄的可继承位」——**没用**，照堵；不给重定向参数
+    （ShellExecuteEx）立刻通。cmd 这一路是这么定下来的，不是猜的。
+  - **真包上的 A/B**：交付的 0.1.28 解到空目录、跑在 9599。原装脚本：launcher 1.3s 就退出、服务
+    `health=ok`，而调用方的管道 7.3s 仍没 EOF；换上本笔的 exe + 脚本：2.2s 拿到
+    `READY PID=20920 URL=http://127.0.0.1:9599/` 且 EOF，两路日志照旧落 `logs\<stamp>.std*.log`。
+  - **台账**：同一台 `POST /setup/restart`，服务 20920 → 61984，`process.json` 跟着变成 61984
+    （`executable` 与 RFC3339 的 `start_time` 一并更新）。顺手回归端口判据：9099 occupied /
+    9599 self / 9699 free，仍走 `listener_table`。验完试跑实例与临时目录都已清掉。
+- **已重出一版包带上**：见上一节的 `…20260918053140.g2bb1edc4e936…zip`；本笔之前那版
+  `…20260918042801.g695cc85dc8bb…`（没有这两条）已删。
+
+### 配置向导第③步的端口判据改查监听表——绑 `127.0.0.1` 试探在 Windows 上会把占着的端口报成「可用」
+
+- **为什么**：0.1.28 出包后按「解压即跑」走了一遍首跑向导，撞见两道门对同一个端口给出相反的答案。
+  9099 上实实在在有一台服务在听（`0.0.0.0:9099`，`/health` 能答），`Start-AMS.ps1` 用
+  `GetActiveTcpListeners()` 一查就拒绝启动；而向导的 `probe/port` 回的是 `{"verdict":"free"}`。
+  根因在 `setup.rs::probe_port` 的判据——注释写着「目标就算是 0.0.0.0，本机回环那一份也必须是空的」，
+  **这条在 Windows 上不成立**：通配监听套接字不设 `SO_EXCLUSIVEADDRUSE`，别人持着 `0.0.0.0:P` 时
+  再绑 `127.0.0.1:P` 照样成功（当场验过）。现场按向导挑了一个已被占的口，要到启动那一下才知道。
+- **改动**：新增 `listening_ports()`——Windows 上走 `iphlpapi` 的 `GetTcpTable2` / `GetTcp6Table2`
+  取 `MIB_TCP_STATE_LISTEN` 的端口集合（与 `Start-AMS.ps1` 同一张表、同一口径：只看端口、不问绑在
+  哪个地址），非 Windows 回 `None`。判据抽成纯函数 `port_probe_verdict(bound_port, addr, listeners)`：
+  自己绑着的口先判 `self`，其次查表，表问不出来才退回原来的绑定试探（POSIX 上通配与回环互斥，
+  那条在那边本来就是对的）。回执多一格 `source` = `listener_table` / `bind_probe`，说清是哪一路给的。
+  `Cargo.toml` 加 `[target.'cfg(windows)'.dependencies] windows-sys`（0.59，已在 lock 里）。
+- **验证**：`cargo test --lib --features http_api -- web_service::setup::` **19 passed / 0 failed**，
+  新钉 3 条——真 socket 的 `a_wildcard_listener_makes_the_port_occupied_even_when_loopback_still_binds`
+  （自己开一个通配监听，断言判成 occupied，失败信息里带上「回环还绑得上」这个反例）、纯判据的
+  `the_port_verdict_reads_the_listener_table_and_answers_self_first`、Windows 上
+  `the_listener_table_is_readable_and_contains_a_port_we_just_opened`。**变异一次**：把监听表当作
+  读不出来（退回旧判据），第一条立刻红在 `{"verdict":"free","source":"bind_probe"}`，撤回复绿。
+  **live**（换上带本修的二进制、`_runs\ams-0.1.28-oob` 那台 0.1.28 在 9399 上）：`0.0.0.0:9099` 与
+  `127.0.0.1:9099` 都回 occupied、`0.0.0.0:9399` 回 self、`0.0.0.0:9499` 回 free、
+  `127.0.0.1` 上的 surreal `8009` 也认出来了，四个口与 `GetActiveTcpListeners()` 逐个一致。
+- **不在 0.1.28 的包里**：`ams-local-0.1.28_release.20260918033726…zip` 是本修之前打的，要带上得重出一版。
+- 顺带记下同一轮看到的两处小毛病（本笔未改）：① 向导 `/setup/restart` spawn 替身时不回写
+  `process.json`，重启后那个文件里还是旧 pid（`Rollback.ps1` 按 exe 路径匹配，功能上不疼）；
+  ② `Start-AMS.ps1` 真去拉起后端时，`Start-Process` 出来的服务继承调用方的 stdout 句柄——调用方若
+  接了管道或重定向到文件，那一头永远等不到 EOF（双击 `Start-AMS.cmd` 走控制台句柄，不受影响）。
+
+### 本地发布 0.1.28：房间归属三笔改写 + 空间净距新端点；`.dirty` 构建（六个仓的在途改动一并编进）
+
+- **当前交付的是第二版包**（同一 Cargo 版本、不同 build_id）：
+  `ams-local-0.1.28_release.20260918042801.g695cc85dc8bb.dirty-runtime.zip`（120.92 MB / 126,793,564 B），
+  SHA-256 `b9dc094bd2fe1a3d24c4dc86536a062283925740852624010a8124cab66f17f3`，构建自 `695cc85dc8bb`
+  （多带上面那条向导端口判据修复），A / B 两腿冒烟过（口 9499）、C 腿按 runtime 档跳过。
+  **验过修复真在包里**：把这份 zip 解到空目录起在 9599，问它 `0.0.0.0:9099` / `0.0.0.0:9399`（两个口
+  当时都真有监听）都回 `occupied  source=listener_table`，自己那个口回 `self`，空口回 `free`。
+  本修之前还打过一版 `…20260918033726.g81d2c28c04cb…`（那一版的向导会把占着的端口报成可用），
+  用户 2026-09-18 拍板**删掉**——同一 Cargo 版本两个包摆在一起，拿错的代价大过留着当 patch 基线的
+  那点好处。`releases/` 里 0.1.28 只此一份。
+- 后端 `0.1.28` 构建自 `81d2c28c04cb`（`chore(release): 0.1.28`），**工作树不干净**，build_id 带 `.dirty`。
+  复用 0.1.26 那份已验证 Web（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，13 个文件）；
+  前端本轮没有发版，plant-ui 工作树里 31 个在途文件**没有**进包。
+- 产物 `releases/ams-local-0.1.28_release.20260918033726.g81d2c28c04cb.dirty-runtime.zip`（120.93 MB / 126,803,926 B），
+  SHA-256 `455b8c411ccb96cd83e7710c4316f588d0655b00abbaf1a5c25f1f13756d7e41`（另行独立重算一致）；包内
+  `aios-database.exe` 自报 `0.1.28+release.20260918033726.g81d2c28c04cb.dirty`（打包脚本对着 EXE 校过版本与构建号）。
+- 包型 `runtime`（同 0.1.27）：包根 `aios-database.exe` / `web\`（13）/ `bin\surreal.exe`（2.1.4+20250317.45013fc9）/
+  `resource\surreal\*.surql`（7）/ `schema\{e3d210,e3d31}`（48）/ 出厂 `DbOption.toml`（设置模式）/ `.first-run-pending` /
+  `Start-AMS` / `Start-Surreal` / `Rollback`，共 78 个文件。
+- 覆盖 0.1.27（`2cb5de1f112c`）之后的 **73 个提交**：房间归属改在 bake 时算、边随根回执走（ADR-073 D1 / D12）；面板变化的
+  反向传播与跨库停放（D13 的 D / U3 b）；点包含换成三方向射线奇偶、边数只减不增（ADR-010 §3）；新端点
+  `GET /spatial/surface-clearance`、`GET /spatial/centerline`、`GET /spatial/nearest-clearance`、`nearby` 的
+  `source_mode=bran_centerline`、`POST /element/ptset`、`POST /element/plines`；元数据门第二档开关退役
+  （`34ae04e00`，行为逐位不变、残留配置启动告警）；刚体前移补 P23 / 属主消费几何 / EVALAT 规则 M 三条排除；
+  校审三处修复；隐式管身重发布不再被首次发布的 aabb / trans 钉死（`7d67ca5f8`）。用户口径见 `docs/release-notes/0.1.28.md`。
+- **`.dirty` 的确切内容**（都真编进了这只二进制，作者与验证不在本次发布账上）：
+  - gen-model-model-cache `src/`：`data_interface/model_impact.rs` 与 `mbd/branch_query.rs`，2 文件 107+/6−；
+  - vendor/e3d-model（`5d92b9759eaf` 之上）`src/` 7 文件 892+/260−，含 `route.rs` 的容器两端折属主链；
+  - vendor/e3d-io（`97798ee34877` 之上）`src/schema.rs` +14；
+  - vendor/e3d-attlib `src/lib.rs` +4；vendor/old-aios-core `Cargo.toml` + `src/shape/pdms_shape.rs`（rkyv `validation`，
+    0.1.26 / 0.1.27 也带着）；vendor/plant-mbd `crates/` 11 文件 622+/144−。
+  - 其中「头 / 尾隐式管身按属主系读坐标」那条修复（`route.rs` + `branch_query.rs`）已写进 0.1.28 发布说明，
+    而**它的源码尚未提交**——撤掉那两处改动就要同步撤那一条说明。
+- 冒烟（口 9199；9099 被 `_runs\ams-0.1.27` 的服务占着）：A 出厂配置起服务 = 设置模式 + 向导页 → **过**；
+  B 本机配置全启动 `medium=mem` / `durable=false` / 服务没拉 surreal 子进程 → **过**；C rocksdb 腿按 runtime 档设计跳过
+  （不带 workspace）。**未做**：rocksdb（durable）真库重启验证、plant-ui 侧回归、本包在干净树上的重现构建。
+
+### 房间归属的点包含换成射线奇偶：parry `contains_point` 在退化盖面三角上把盒外点判成成员，且结论随浮点末位翻（ADR-010 §3 追记，一笔）
+
+- **为什么**：ams 1112 + 8000 从零初始化的 live 复核（`D:\adr078-verify\live-run-1112-8000\evidence\`）里，边集与 09-16 基线差
+  1112 −15/+5、8000 −14/+22，而两座库的构件行、六块面板行、`.mesh` 文件逐字相同、`room_predicate.rs` 两版零 diff——差的只能是谓词在
+  同一份几何上给了两个答案。拿库上真实行重放今天的谓词 + 独立 f64 射线奇偶复核：`17496/122987` 在 R320 足迹外 1.1 m（今天判 0/8 对、
+  09-16 判 8/8 错）；今天多出来的 `128587` / `129717`（R330）、`141798`（R311）、`106302`、`140998` 也全在房间外；两版都认的
+  `17496/72903 ∈ R320`（8/8）盒角 x = −1183 在面板世界盒 x_min = 0.03 之外。根因在 parry（gitee fork rev `06fd686`）
+  `point_triangle.rs`：点落在**零面积三角**（`va+vb+vc == 0`）的面 Voronoi 区时滑进给 2D 留的 `if solid { OnSolid, is_inside = true }`，
+  `point_composite_shape.rs` 的 best-first 访问器再 `if solid && is_inside { ExitEarly }`——房间棱柱的盖面是两百多个船体型线点的
+  三角剖分，共线处就有零面积碎片，哪些碎片经 f32 变换 / 焊接后恰好零面积决定了结论。本地盒内 2700 点网格对照：R330 假阳性
+  221/2700（8%）、R311 46、R320 盒内 0 但盒外中招；只焊接不剔退化不够（焊后 `122987` 又回 8/8）。
+- **改动**：`room_predicate::panel_tri_mesh`（面板 `.mesh` → 判定用三角网的唯一口径：顶点按 0.01 mm 焊接、剔顶点重合 / 三点共线的三角、
+  乘世界矩阵建 BVH，不带 `ORIENTED`），常驻 `room_resident::build_tri_mesh` 与库行 `PanelMeshes::from_rows` 都经它；
+  `room_predicate::point_inside_panel`（三条歪斜方向各数一次穿越、奇数为内、三取二；BVH 取候选、f64 Möller–Trumbore，行列式相对边长为零
+  不计），`count_vertices_inside` / `any_point_inside` 改调它。§3 口径（8 顶点 / 逐点兜底）与 `element_in_panel` 形状不变。
+- **验证**：`room_predicate` 8 条绿，新钉 3 条——`a_degenerate_cap_triangle_cannot_turn_an_outside_point_into_a_member`（盒 + 共线碎片 +
+  只差 1e-4 mm 的角点副本：剔成 12 片 / 焊成 8 点、盒外点仍在外）、`welding_keeps_first_seen_coordinates_and_drops_nothing_from_a_clean_box`、
+  **真网格** `a_real_room_prism_never_admits_points_outside_its_own_box`（夹具 `tests/fixtures/room_panel_24381_34950_R320.mesh` = R320 那块面板
+  68,772 B + 库上世界变换：`72903` / `122987` 两个盒 0/8、六个面外各 1 m 的探测点全在外、最大盖面三角重心落到半高在内；同一夹具走旧路
+  `ORIENTED | contains_point` 的假阳性也钉着，parry 修了先红）。定向 `cargo test --lib -- room_predicate room_model room_resident` 84 绿、
+  `room_reverse room_recompute batch_worker model_db_adapter::a_/recomputing` 106 绿。**live**（:9198 换新二进制 `POST /setup/restart`，
+  同一座 :8050 库 `POST model/rebuild`）：1112 6161 → **5858** 条（少 303 对 (构件, 面板)、110 对 `inside_count` 下调、**0 对新增**），
+  8000 4379 → **4284**（少 95 对、12 对下调）；少掉的集中在 R330（76 + 78）、R362、R342 / R343 / R345、R320；钉过的几个构件全部按预期
+  （`122987` 只剩 R346、`72903` 只剩 R101 / R144、`128587` / `129717` 只剩 R445、`141798` 只剩 R221）。同进程再重算与冷重启后重算
+  边 dump **逐字相同**（1112 `E7AC8737…` / 8000 `3A72E777…`）。重算耗时不变（8000 21 s、1112 12 s）。
+- **代价 / 要跟的**：① `inside_count` 数值口径变了（此前含伪法线误计）；② **存量 `room_relate` 不会自己重算**——常驻代号只摘要拓扑与面板几何、
+  不含谓词版本，要各 DESI 一次 `POST /dbnums/{dbnum}/model/rebuild`；③ 「横穿凹形房间的长管八角全在外」那条已知盲区照旧（本轮不改口径）。
 
 ## 2026-09-17
 
@@ -724,6 +1217,145 @@
   **同日拍板不动**——它只在整库扫写窗真省根，而那形状与「被引用的目录件 / 跨根设计引用变了、引用者只被盖戳」在 DESI 窗里分不出来，今天正是戳做种子
   把后者收住的；收益等 ADR-080（分析与 A / B / C 三条路留在计划 §8 Q6 ★0917 第二手段）；
   e3d-model 侧改动已随 vendor `5d92b97` 入库（gen-model `bf405d5ad` 起经 path 依赖用到 `NoModelTier::CacheStamp` / `cache_stamp`，两仓已一起入库）。
+### 反向传播的跨库停放：命中的别的库排成根级工作项 `RoomRoots`，由那个库的下一个任务沿准入链消费（ADR-073 D13 追记 U3 b，五笔）
+
+- **为什么**：D 五笔落完，反查里别的库的命中只**数**（`cross_library`），一窗内两个库都有任务时只有先开工的库走定向，后开工的库
+  `Unchanged` 却欠着 → 整库（③ 电平型兜底）——面板在 A 库、成员在 B 库是常态，B 每次都整库就把定向省下的又花回去。用户 2026-09-17
+  拍板 U3 b 拆单（停放槽先进程内、一项一笔）。
+- **改动（按提交）**：
+  1. `6cf5f1d61` 反查放开到全 MDB：库上 `tubi_relate` 范围查询不再带 `dbnum =`，投影管身一把读锁扫全域（新
+     `ModelMemoryStore::for_each_record`，不复制）；命中按 `RefNo::dbno()` 分桶——本库的折根，别的库的进
+     `AffectedRoots::foreign = dbnum → (元素 → 祖先链)` 存元素不折根、祖先链在这里就带上（管身来源 BRAN 在 `inst_relate` 里没有行，
+     那个库回库取不到；拆单写的「B 的任务补 `anc`」落地时改成停放方带上），`cross_library` = 其总数。
+  2. `a894eb1be` 停放槽 `room_reverse::RoomRoots { from_generation, to_generation, elements, parked_by, parked_at }`，进程内
+     `park`（同段并条、空条不停）/ `pending` / `clear` / `parked_health`；A 库定向重算**结论定为 `Targeted` 之后** `park_foreign_hits`
+     把每一桶连同这一段换代（上一代 → 重算那台的代号）停进那个库的槽；`RoomRecomputeScope::Targeted { swap: Option<PanelSwap>, parked }`
+     定下最终形状；`/health.room_build.parked` 一格。
+  3. `a73b40e12` 准入链：`scope_for_task(refresh, library, resident, parked)` 从库上那一代出发沿停放物 `from → to` 逐段接、最后一段
+     可以是本任务自己的换代（自己那一段优先、库上已越过的一段不要、链断 / 绕圈 / 从没盖过 / 常驻说不出代号退整库），今天的四条准入
+     是链长 1 的特例；两个执行体 `durable_alignment` 之后 `parked_for_task` 取槽（库上已同代顺手清槽）；`request_for_task` 接了停放链
+     多一句原因。
+  4. `a4ad36cd3` 消费：`run_targeted_room_recompute` 把停放的元素沿带来的祖先链折成本库的根（`fold_parked`，不回库、同一元素几段都有
+     只折一次），与自己那一段反查命中的根并起来 `RootScope::Targeted`（本任务没换代就只有停放那一路、没有面板级语句）；折不出根退整库；
+     `run_room_recompute` 按结论清槽（`WholeLibrary` / `Targeted` 才清）。
+  5. 本笔：ADR-073 D13 追记 U3 b、钉 23、§未决 U3 跨库那一半关（算法输入形态那一半仍开）；CONTEXT「整库房间重算」词条加跨库停放；changelog。
+- **不动的**：③ 电平型触发原样——停放槽进程内、重启即丢，丢了是多算不漏算；`run_room_only_recompute` 一字不改；今天的四条准入照旧。
+  **仍欠**：没命中的库看不到「这一段与你无关」，`Unchanged` 且槽空 → 仍整库一次（给全 MDB 停放空段要知道库的全集，本轮没做）。
+- **验证**：每笔定向 `cargo test --lib` 绿（U3-1 room_reverse 5 / U3-2 room_reverse+room_recompute+batch_worker 65 / U3-3 66 / U3-4 90 含
+  adapter）。新钉 5 条：`the_durable_tube_query_is_not_filtered_by_library`、`the_parking_slot_merges_the_same_segment_and_clears_per_library`、
+  `the_admission_walks_the_parked_chain_from_the_library_generation_to_the_resident`（链准入真值表 14 种局面）、
+  `parked_elements_fold_to_the_library_roots_on_their_carried_ancestor_chains`、`mem://` 两库端到端
+  `a_panel_move_parks_the_other_librarys_hits_and_its_next_task_recomputes_only_those_roots`（A 库面板搬家 → 只 A1 重写、B1 停放 → B 的任务
+  接链只重写 B1、B2 的边与 ACK 一字不动、与整库同终态、清槽；槽空 / 链断退整库）；`resolve_joins_…` 扩三个库、
+  `the_targeted_recompute_falls_back_…` / `the_room_only_recompute_is_wired_…` 扩停放 / 清槽 / 取槽的位置。**变异一次**：`resolve` 不分库
+  → 端到端与 `resolve_joins_…` 同时红，撤回复绿。全量 `cargo test --lib` **2263 passed / 5 failed / 119 ignored**——五条红与 D 收口时
+  同一批（`model_impact` ×2、`window_root_plan` ×2、`review::platform` ×1，都不在本轮碰过的文件里）。**未 live**：两个 DESI 库都有任务的
+  一窗里挪一块跨库面板（见 ADR-073 钉 23 的 live 待补）；Q6 管身范围查询放到全 MDB 的解引用成本要 live 量。
+
+### 房间归属的反向传播：面板变了拿新旧盒反查成员、只重算命中的根，整库重算降为兜底（ADR-073 D13 追记 D，五笔）
+
+- **为什么**：逐根路径（D1）只答「本根在哪些面板里」；面板那一侧变了（PANE 几何 / 属主、FRMW / SBFR 改名、CWALL / CFLOOR 搬迁），
+  它名下**别的根**的边陈旧，此前唯一的填法是 D13 整库重算——O(本库全部根) 的回读几何 + 点检查，而真正陈旧的只有与那块面板新旧盒
+  相交的几根。用户 2026-09-17 拍板（grill 两轮，五题全按推荐）：拆三类 / 按根 / 全局树 + 不可用退整库 / 先同库、目标跨库工作项 /
+  定向成功即盖 `Aligned`、③ 保留整库。拆单时多出一题 **Q6：隐式管身不在空间树上**（`projected_tree_entry` 对 `tube` 回 `None`，直管穿房
+  两端都不在房里是常态、只查树会漏）→ 按默认「库上 `tubi_relate` 范围查询」办，不动树的契约。
+- **改动（按提交）**：
+  1. `41d9e10b7` 面板变化结构化：`room_resident::PanelDelta { removed, renumbered, recalc: [(面板, 旧盒?, 新盒?)], geometry_changed }`，
+     `ResidentRooms::install()` 对着被换下的那一代与 `TopologyDiff` 同一次算——`recalc` = 拓扑差点到的 ∪ **两边都在册但 `world_aabb` /
+     实例集变了的**（PANE 只动几何时拓扑差是空的）；`PanelBounds` 按位 `Eq`；随 `InstallOutcome.panels` → `StartupInitOutcome.panels` →
+     `RoomReferenceRefresh::Rebuilt { panels, previous_generation }`（上一代的计算摘要，准入要对它）。
+  2. `94c02b346` 反查 `data_interface::room_reverse`：`affected_roots` 先 `ensure_spatial_ready()`（不过 → `TreeUnavailable`），树读锁只罩
+     取候选（`tree_element_hits`，剔 `PANE`、跨盒去重）；`resolve` 合三路——树上元素、投影里本库管身按盒扫、库上 `tubi_relate`
+     `aabb.d` 范围过滤（`durable_tube_hits`，闭区间逐轴谓词）——按 `RefNo::dbno()` 分库（跨库只数 `cross_library`）、树上不在投影里的
+     元素按记录 id 批量取 `anc`（`durable_ancestors`）、`fold_to_roots` 与本库 `DbSet@T` 根清单求交（嵌套根两根都算），折不出根的进
+     `unresolved`。不写树。
+  3. `d32fdc246` 处置：`recompute_dbnum_room_edges(…, library_roots, RootScope)`——`All` 与今天逐字同形；`Targeted { roots, panel_statements }`
+     投影里的按集合筛、回读清单 = 集合 ∖ 投影，`render_panel_delta_statements`（不在册：`DELETE {panel}->room_relate` + 清
+     `room_panel_relate` 入边，`room_model::render_unregistered_panel_statements`；只改号：`render_renumber_statements`）作
+     `pack_publication_transactions` 的 prelude 进第一笔；`RoomEdgeRecompute.panel_statements`。
+  4. `fa97f8758` 分派与盖章：`room_recompute::durable_alignment`（库上那一格 + 常驻代号，一次读；③ 与准入共用）、
+     `RoomRecomputeRequest { reason, scope: WholeLibrary | Targeted(PanelDelta) }`、`scope_for_task` 四条准入（真换了代 + 面板变化非空 +
+     说得出上一代 + 库上正是上一代）；收尾段 `run_room_recompute` 分派——定向 `run_targeted_room_recompute`（根清单 → 反查 → 定向重算），
+     `TreeUnavailable` / `unresolved` 非空 / 根清单枚举不出来 / 覆盖面对不上 → `None` 退 `run_room_only_recompute`；成功
+     `RoomRecomputeVerdict::Targeted(重算那台计算器的代号)` → `LibraryRoomClaim::Recomputed` → `Aligned`；算不出的根两路同走
+     `settle_room_recompute_failures`。`DataBatchTaskResult.room_recompute` 改带 `RoomRecomputeRequest`；`PersistTarget::db()` 访问器。
+  5. 本笔：ADR-073 D13 追记 D、钉 17 更名 / 钉 22、§未决 U1 库内部分关 / U3 记 a 档；CONTEXT「整库房间重算」词条；changelog。
+- **不动的**：③ 电平型触发（重启后 / 从没盖过那一格只整库一次）；`run_room_only_recompute` 一字不改；D1 钉「元素分支不依赖空间树」
+  只钉正向；树的写点白名单三处不变。**代价**：一窗内两个库都有任务时只有先开工的库走定向（库上代号是上一代），后开工的库
+  `Unchanged` 却欠着 → 整库——U3 b 档才收。
+- **验证**：每笔定向 `cargo test --lib` 绿（D1 room_resident 40 / D2 room_reverse 4 / D3 adapter+room 135 / D4 room_recompute+batch_worker 62）；
+  新钉：`install_reports_which_panels_moved_and_where_their_boxes_are`、`hits_fold_to_every_library_root_on_their_ancestor_chain`、
+  `tree_candidates_exclude_panels_and_deduplicate_across_boxes`、`mem://` `resolve_joins_tree_projection_and_durable_tubes_into_library_roots`、
+  `the_box_predicate_is_a_closed_interval_test_per_axis`、`panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only`、
+  `mem://` `a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_first`、
+  `a_task_goes_targeted_only_when_this_swap_is_the_librarys_whole_debt`、
+  `the_targeted_recompute_falls_back_to_the_whole_library_when_the_reverse_lookup_cannot_answer`。全量 `cargo test --lib`
+  **2257 passed / 5 failed / 118 ignored**——五条红与 B/T6 收口时同一批（`model_impact` ×2、`window_root_plan` ×2、`review::platform` ×1，
+  都不在本轮碰过的文件里）。**未 live**：ams 1112 挪一块 PANE 的那一窗（见 ADR-073 钉 22 的 live 待补）。
+
+### 标准隐式管身的房间判定点不再多乘一次本地摆放（ADR-073 D1 追记 B 的一处修正）
+
+- **为什么**：`persisted_world_transform` 对隐式管身把标准图元的本地摆放折进存下的世界变换（Plant UI 只拿这一个变换摆标准网格），
+  而投影记录的 `ProjectedGeometry::mesh_to_world()` 与 bake 侧 `baked_room_input` 对 `Canonical` 一律再乘 `local_transform`——
+  标准管身就成了 `world × local × local`：跨面板边、真走点检查的那段管身，判定点落在画出来的网格之外；库上 `tubi_relate` 行回读
+  （实例变换单位阵，`durable_room_inputs`）算的是 `world × local`，整库重算 / 从零初始化与逐根路径对同一段管身可能不逐边相等
+  （ADR-010 §9 硬验收）。B/T6 收口时顺手看见、单列一笔。
+- **改动**：`room_model::projected_mesh_to_world(world, canonical_local, implied_tube)` 多一格——隐式管身不乘本地；
+  `ProjectedGeometry::mesh_to_world()` 传 `tube.is_some()`，`baked_room_input` 传 `matches!(geometry_id, ImpliedTube)`；测试助手
+  `calculate_with_component_bvh` 改调 `record.mesh_to_world()`（不再自己复述公式）。
+- **验证**：`bake_time_room_input_matches_the_projected_record` 加一句「三种形状本地摆放都只乘一次」；新钉
+  `model_record_reader::a_canonical_implied_tube_has_the_same_mesh_to_world_on_the_projected_and_durable_paths`（投影记录 vs
+  `projection_record_to_query` → `durable_room_inputs` 回读，标准图元元素与标准管身两例，f32 精度内相同）。
+
+### 房间归属在 bake 时算、边随根回执走、flush 只渲染；一任务一台房间计算器（ADR-073 D1 / D12 追记 B，六笔）
+
+- **为什么**：ADR-073 D1「模型计算之后用候选面板做点包含筛选」此前落在 write-behind flush 里：每次 flush 冻一台计算器，
+  拿投影记录**回读盘上 `.mesh`** 取判定点（`memory_model_world_points`），而生成 worker 在 `bake_element` 里刚把同一份网格
+  算出来又丢掉；计算器按 flush 冻，任务中途常驻换代（`/model/ensure` 并发对齐）会让同一任务各批根的边不是同一代算的
+  （P2-3 为此打过补丁）。用户 2026-09-17 拍板（grill 两轮）：时点提早到生成 worker、省掉回读，边随凭证同事务，
+  D2 失败前移，`RootReceipt` 带边，只覆盖批次任务的整根重生成、其余入口留 flush 兜底。
+- **改动（按提交）**：
+  1. `bd9957bfd` 对等用例：`calculate_edges` 拆成 `edges_for_record`（逐记录）+ `merge_root_edges`（同 (构件, 面板) 取最强、按键排序），
+     `memory_model_world_points` 拆成读盘 + `world_points_of`（f32 变换、按三角遍历去重）——**取点全仓只有这一处定义**；
+     用例 `component_points_from_the_in_memory_mesh_equal_the_disk_read_back`：内存网格取点 vs 盘上回读逐位相等，逐元素算边收拢后
+     与 `calculate_for_root` 逐字相同。
+  2. `c953c6cc9` 一任务一台：`model_db_adapter::TaskRoomCalculator { Disabled, Frozen(Arc), Unavailable(原因) }::freeze()`，两个执行体在
+     D12 对齐之后冻一次、传 `&rooms` 给 `run_unit_worklist`；`Unavailable` 时单元入口按 D2 把全部单元记失败（`room calculator unavailable
+     for this task`，与此前 flush 同一句）、不白跑几何；`generate_roots_report` / `generate_roots_with_rooms` / `generate_unit_model_with_rooms`
+     带 `rooms` 下传，process-store 形态优先用任务那一台（`TaskOrGroupRooms`）。
+  3. `9520d7321` bake 时算边：`rooms` 沿 `generate_and_persist_roots → produce_slices → spawn_generation_worker → bake_snapshot → bake_elements →
+     bake_element` 显式传递；`bake_element` 用 `room_model::BakedRoomInput`（构件 = `geometry_source_refno`、标签 = 投影记录 id、世界变换 =
+     `persisted_world_transform`、「网格 → 世界」= `projected_mesh_to_world`——与 `project_geometry_delta` 折投影记录**同一份配方**）调
+     `edges_for_record`，判定点经 `world_points_of(&mesh, …)`，取的是本地 / 标准图元那份**就要写盘的网格**，不是 manifold 在 f64 里折出来的
+     `world_mesh`（差几个 ulp 会让贴面板边的点翻面，破 ADR-010 §9）；`BakedElement.room_edges`。单元级局部发布 / 初始化 lane / 读透即时生成 /
+     路由轮询给 `None`。
+  4. `956a3991c` 边随回执：`RootReceipt.room: Option<CarriedRoomEdges { generation, elements: Vec<String>, edges }>`（`#[serde(default)]`，旧
+     `model_artifact` 读回 `None`；`RefnoEnum` 无 serde `Deserialize`，按字串存）；`bake_snapshot` 用那台计算器的代号 + 这一根**全部**构件
+     （有边没边都在册）+ `merge_root_edges` 装 `BakedSnapshot.room`，`persist_memory_batch` 挂到回执；刚体前移 / 单元级发布 `room: None`。
+     40 处 `RootReceipt` 字面量补 `room: None`。
+  5. `f38aca8b7` flush 三道闸：`carried_edges_for`（纯函数）——代号 == 此刻计算器代号、构件集 == 本根投影记录的构件集（少一个多一个都不行：
+     渲染对每个构件先删后插，拿只覆盖部分构件的边去渲会把没动的构件的边删掉而不补；嵌套根共享记录、局部发布后的整根形状在此挡下）、
+     计算器在 → `room_stage` 只 `render_root_room_edges`（`Carried`），否则 `calculate_for_root` 回读现算（`Recomputed`）；
+     `BatchedPersist.room_carried / room_recomputed`，`[model-persist]` 与 `[model-write-behind]` 日志带上，稳态下 `recomputed` 应为 0。
+  6. `d02ab8929` D2 前移 + 端到端：bake 失败文案「room membership of {投影记录 id} could not be computed: …」（与 flush 同族、带
+     「room membership」），`produce_slices` 消费侧 bake `Err` 本就成死信不发布（补钉）；真 cube manifold + 1000³ 面板：完全在内 / 跨边
+     （真走点检查）/ 盒不交三件，**bake 的边 == 同一件折成投影记录后 flush 路回读算的边**；面板网格缺 → `Err`。
+- **不动的**：D13 `RoomOnly` 整库重算、`model/rebuild`、`/model/ensure`、初始化双 lane、刚体路、单元路——全走 flush 兜底，同一台渲染器，
+  硬验收不多一种写点形状。ADR-073 D1 / D12 追记、钉 21；CONTEXT「逐根房间归属」「任务开工前对齐」词条。
+- **验证**：每笔各自 `cargo test --lib` 定向绿（room_model 42 / rooms 相关 145 / T1 300 / T2 165 / T3 144 / T4 236 / T5 e3d 48）；
+  六笔之后全量 `cargo test --lib` **2236 passed / 5 failed / 118 ignored**——5 条失败都不在本轮触碰的文件里：
+  `model_impact::tests::the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list` /
+  `the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate`（在 `c8d5f6b92`——本轮第一笔之前——的临时 worktree 上复跑
+  同样红，既有）、`window_root_plan::tests::a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved` /
+  `the_element_tier_is_the_widest_tier_any_of_its_attributes_needed`（同一元数据门家族）、
+  `web_service::review::platform::tests::test_verify_active_skips_annotation_gate_even_with_open`（另一路会话正在改的 review 区）。
+  rustfmt 各文件本轮新增行无 diff（`e3d_model_service.rs` 11 / `model_db_adapter.rs` 2 / `batch_worker.rs` 6 / `model_refresh.rs` 4 /
+  `room_resident.rs` 3 处漂移为既有）。**未 live**：ams 1112 增量窗 `room_carried=N room_recomputed=0` 与「增量 == 全量逐边」
+  硬验收脚本没跑。
+- **顺手看见、没动**（要另开卡）：`ProjectedGeometry::mesh_to_world` 对**隐式管身**是 `world_transform × local_transform`，而
+  `persisted_world_transform` 对隐式管身已把 `local` 折进 `world_transform`——点检查对跨面板边的隐式管身可能多乘一次本地摆放；
+  库上回读那条路（`durable_room_inputs`，管身 local = 单位阵）没有这一乘，两条路对同一根管身可能不逐字相等。本轮 bake 侧按投影
+  记录同一条公式算（与 flush-from-projection 对等），没改语义。
 
 ### ADR-066 D1 规则 2 · 账本去向 `no_model` 的候选不再把根踢回 regen——「挪 EQUI + 子元素改个名」走得了 transform
 
@@ -788,6 +1420,174 @@
   任务结束那一刻的 `required_room_generation()`，并发 `/model/ensure` 中途换代时 `Aligned` 可能盖上一个边不是它算的代号
   （`dbnum_initialize` 那一路用 `rooms.resident_generation()` 是对的）；P2-4 ADR D13「拿开工时同一台计算器」与实现
   「收尾时新冻一台」措辞漂移；F3 / F4 / U3 照旧。
+
+### 整库房间重算的第三条触发（电平型再武装）与覆盖面自证（ADR-073 D13 / D14，审核 P1-2）
+
+- **为什么**：D13 的两条触发都是边沿型——「本窗碰了房间定义族」「开工前对齐换了代号」的原因只活在本任务里。拆窗（大窗口的
+  常态：本批只应用到 sesno X、余量排回队列）、任一单元没生成、`settlement_failed`、刷盘没齐、重算中途写库失败——这些情形下
+  `room_recompute` 的原因被丢掉，而下一窗的账本不再含那条 PANE 变更（触发 ① 没了）、本任务开工时已把常驻对齐到文件最新、
+  下一窗再探是 `Unchanged`（触发 ② 也没了）：别的根在这块面板里的边**永久陈旧**到下一次不相关的 PANE 变化。ADR 只写了
+  「刷盘没齐就不跑」，没写怎么补。审核给了两条路（电平型 / 进程内 `owed` 集合），用户 2026-09-17 07:36 选电平型。
+- **改动**（会话 opus-5-36 起草代码、fable-5-1-38 接手收口）：
+  - `room_recompute::library_alignment_owed(library, resident, settled_partial)`（纯函数）+ `durable_alignment_owed(dbnum)`
+    （取数：`DbnumState::read` 那一行的 `model_room_generation`、`query_service::resident_room_generation()`）：库上 D14 那一格
+    与此刻常驻代号不等（含库上没有那一格）= 欠一次整库重算。常驻说不出代号（开关关 / 还在装 / `Blocked`）不触发；水位行读不出
+    不触发（只 warn）。两个执行体（`execute_frozen_batch_body`、`execute_model_only_body`）都在 `refresh_room_reference_before_task`
+    **之后**读它、以第三个形参喂给 `request_for_task`——顺序钉在源码钉 17 里（对齐之前读到的是上一代）。
+  - **覆盖面自证**：起草时发现 `recompute_dbnum_room_edges` 只遍历投影里有回执的根，而初始化的模型行不进投影（ADR-077 D5）、
+    落盘形态冷重启后投影是空的——原实现在这种局面下照样把 D14 那一格盖成 `Aligned`，等于替没算过的根说话（而且一盖，电平型
+    触发就哑了）。现在 `RoomEdgeRecompute` 多一格 `covered_roots`，`run_room_only_recompute(job, &reason, &mut result, file_latest_sesno)`
+    重算齐了再拿 `window_root_plan::enumerate_target_roots(dbnum, T)` 的根清单对一遍（`room_recompute_uncovered` 纯函数），结论收成
+    `RoomRecomputeVerdict { WholeLibrary | PartialCoverage | Disabled | Failed }`：收尾分开问两句——`rooms_ok()`（只有 `Failed`
+    拖水位）与 `speaks_for_library()`（只有 `WholeLibrary` 盖 D14 那一格）。`PartialCoverage` 水位照盖、那一格不动、warn 点名前 5
+    个没覆盖到的根并指向 `model/rebuild`；枚举不出来按不全处理。
+  - **去重（本会话补）**：`PartialCoverage` 下电平型触发会在每个任务上再点一次，而同一代下再点结果逐字相同（投影里的根已对齐、
+    之后进投影的根都是这一代算的、不在投影里的根这条路够不着）——生产落盘形态下每个初始化过的库在任一 PANE 变化之后都会
+    变成这样，代价是每个任务一遍 O(投影) 边重写 + 一次 `DbSet@T` 根枚举 + 一句同样的 warn，直到人工 `model/rebuild`。
+    加进程内表 `room_recompute::PARTIAL_COVERAGE_SETTLED: dbnum → 常驻代号`：点了名的覆盖不全 `settle_partial_coverage`，
+    同一代不再触发 ③；失败 / 覆盖面未知（枚举失败可能是暂时的）/ 整库 `rearm_library`；代号变了键对不上、重启表空——都重新
+    武装。它**不是**库上的事实：`room_alignment.current` 照旧 `false`、`e3d.room.lookup` 照旧 `not_computed`。
+  - ADR-073 D13 正文补触发 ③、覆盖面自证、去重、以及**没收的第二半**（生产形态下初始化过的根这条路够不着，「整库」只到投影，
+    归 U1 另开卡）；顺手把 P2-4 的措辞漂移改掉（「拿开工时同一台计算器」→「收尾时新冻一台，此刻这一代」，与实现一致）、并把
+    P3-5「此刻本库没有第二个写者」改成实情（`/model/ensure` 的同库根可能仍在 write-behind 队列里，同一台计算器下幂等）。D14 写
+    规则加「且覆盖到 `DbSet@T` 的每一根」。源码钉 17 / 18 扩到上述钉点；U1 追记。CONTEXT「整库房间重算」「整库房间对齐代号」
+    「ModelOnly」三词条同步。
+- **验证**：`cargo test --lib -- room_recompute:: the_task_start_refresh… the_whole_library_eligibility… a_partial_coverage_recompute…
+  nothing_outside_the_task_writes_model_sesno a_window_with_no_model_work_still_stamps recompute_dbnum_room_edges room_edge
+  the_room_generation_stamp only_a_task_that_speaks` **22 passed / 0 failed**（含新用例
+  `the_library_owes_a_recompute_until_its_durable_alignment_matches_the_resident`、
+  `a_partial_coverage_settles_the_level_trigger_for_that_generation_only`、
+  `a_partial_coverage_recompute_keeps_the_watermark_but_never_claims_library_alignment`，源码钉 15 / 17 全绿）；
+  `cargo test --lib` 全量 **2216 passed / 4 failed / 118 ignored**——4 个失败全在 `model_impact` / `window_root_plan` 的
+  CACHID 元数据档（`the_metadata_tier_is_curated_only…`、`the_skip_verdict_uses_the_same_double_vote…`、
+  `a_change_is_metadata_only_when…`、`the_element_tier_is_the_widest_tier…`），随 vendor `e3d-model` 工作树里另一路会话未提交的
+  `element_diff.rs` / `increment.rs`（Q6 只 `CACHID` → `no_model`）而来，与本条无关、本条前后同样失败。rustfmt 对本轮新增行无 diff
+  （`batch_worker.rs` 6 处、`model_db_adapter.rs` 2 处漂移为既有）。**未 live**：「PANE 变化 → 拆窗 / 刷盘没齐丢掉触发 → 下一个任务
+  日志出『库上整库房间对齐代号 … ≠ 此刻常驻代号 …』并跑整库重算」与「初始化过的库 → `PartialCoverage` warn 一次、下一个任务不再重复」
+  两条真机用例没跑。
+- **未动**：P2-3（收尾盖章读的是任务结束那一刻的 `required_room_generation()`）紧接着下一条收掉；U1 第二半（初始化过的根不在投影里）
+  要么让重算回读库上几何、要么接受滞后到整库重建，另开决策卡；F3 / F4 / U3 照旧。
+
+### `model_room_generation` 盖的是边真正用的那一代，不是收尾那一刻的常驻代号（ADR-073 D14，审核 P2-3）
+
+- **为什么**：`task_room_generation_stamp` 此前对两路整库任务都拿收尾那一刻的 `required_room_generation()` 盖 `Aligned`。批次 worker
+  单消费者，但 `/model/ensure` 与初始化 lane 都会并发调开工前对齐（D12）——一个 DESI 前进 + 用户同时点「显示模型」就会在任务中途
+  换代：整库重排的 ModelOnly 各批根由 write-behind 每次刷盘时 `frozen_room_calculator()` 那台算，前半 G1、后半 G2，收尾盖 G2；
+  整库房间重算的边是收尾冻的那台（G1）算的，盖章时常驻已到 G2，也盖 G2。两种都是「拿上一代的边冒充这一版」——D14 要挡的事；
+  电平型触发 ③（上一条）读的正是这一格，盖错了它就哑了。`dbnum_initialize` 那一路用 `rooms.resident_generation()` 本来就对。
+- **改动**：
+  - `RoomRecomputeVerdict::WholeLibrary` 带载荷 = 重算那台计算器的 `resident_generation()`（`speaks_for_library()` →
+    `library_generation() -> Option<&str>`），收尾盖它——边是它算的、ACK 已对齐到它，此刻常驻是哪一代、取不取得到都无关。
+  - `DataBatchTaskResult` 加 `room_generation_at_start`（不进回执）：ModelOnly 执行体在开工前对齐**之后**、生成之前记一次
+    `required_room_generation()`；整库重排收尾拿它与此刻比——相等 = 每次刷盘冻的都是这一代，盖；不等 / 没记下 / 此刻取不到 →
+    `Untouched`，下一个任务由 ③ 补一次整库重算。
+  - 判据收成 `room_generation_stamp_of(now, LibraryRoomClaim { None | Recomputed(代号) | Rebuilt { started_at } })`：`Ok(None)`
+    一律 `Cleared`（开关关着），其余按上两条。ADR-073 D14 写规则加「代号出处」一段、钉 19 扩到它；CONTEXT「整库房间对齐代号」同步。
+- **验证**：`cargo test --lib -- room_recompute:: … only_a_task_that_speaks … a_partial_coverage_recompute …` **23 passed / 0 failed**
+  （`only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation` 重写成三路真值表 + 源码钉：载荷来自
+  `rooms.resident_generation()`、开工代号落在对齐之后 / `run_unit_worklist(` 之前、收尾从回执里取；`a_partial_coverage_recompute…`
+  的四态表改成 `library_generation()`；源码钉 17 的 `tail` 改认 `RoomRecomputeVerdict::library_generation`）。rustfmt 本轮新增行无 diff。
+  **未 live**：任务中途并发 `/model/ensure` 换代 → 整库重排收尾 `Untouched`、下一个任务由 ③ 补整库重算，这条真机用例没跑。
+- **接受的角**：代号 A→B→A 在任务内翻回去（开工 A、中途 B、收尾 A）两路都判不出——整库重排要逐根记刷盘代号才判得出，
+  整库重算不受影响（单台计算器）。面板改动在一个任务里改完又改回，实际不会发生，不为它加逐根记账。
+
+### 开工前对齐的在册视图之差只算一遍（审核 P3-7）
+
+- **为什么**：`room_resident::refresh_before_task` 重建成功后对 `installed` 与新模型调 `TopologyDiff::between`，而
+  `initialize_file_backed_at_startup` 里 `ResidentRooms::install()` 刚对同两份视图算过一份、被 `.model` 丢掉。差是 O(在册面板)
+  的两张表比对，重建本身已经是 O(文件) 的事，多算一遍不伤大局，但两处对着同一对输入各算各的，哪天一处改了口径另一处就漂。
+- **改动**：`StartupInitOutcome` 加 `diff: Option<TopologyDiff>`，两个启动装载器（文件形态 / 读透 `latest`）用
+  `let InstallOutcome { model, diff } = …install(model)` 把它接住；`refresh_before_task` 改用 `outcome.diff`。语义不变：
+  `install()` 是对着被换下的那一代算的，与 `installed` 是同一份——本函数持 `refresh_lock`，启动段的 `Loading` 在入口已挡开。
+  新源码钉 `the_task_start_refresh_reuses_the_install_diff_instead_of_computing_it_twice`：`refresh_before_task` 函数体不含
+  `TopologyDiff::between(`、含 `let diff = outcome.diff;`；两个装载器都接 `diff`；生产代码里 `TopologyDiff::between(` 只剩启动对比
+  （`StartupRoomPlan`）与 `install()` 两处。
+- **验证**：`cargo test --lib -- room_resident::` **29 passed / 0 failed / 9 ignored**；rustfmt 本轮新增行无 diff（该文件 100 / 958 / 1249
+  三处漂移为既有）。
+
+### 开工前对齐不许在空间串行锁里调——源码钉（审核 P3-8）
+
+- **为什么**：`room_resident::refresh_before_task` 换代走 `initialize_file_backed_at_startup`，那里取 `spatial_state::lock_spatial_serial()`
+  整份替换在册视图；而那是一把 tokio Mutex、不可重入——任何持着它的调用方再调开工前对齐就是自锁：不报错、不 panic，那个任务永远
+  收不了尾。今天五处调用点（适配层转手、两个执行体、初始化模型半边、ensure 准入）都在锁外，但这条规矩只活在人脑里，D12 再接一处
+  新调用点时没有东西挡。
+- **改动**：生产代码不动，只加源码钉 `room_resident::tests::the_task_start_refresh_is_never_called_under_the_spatial_serial_lock`：
+  扫全仓 `src/**/*.rs` 的生产段（每个文件到第一个内联 `#[cfg(test)] mod … {` 为止），每一处 `refresh_before_task()` /
+  `refresh_room_reference_before_task(` 的调用，所在函数体全文不含 `lock_spatial_serial(`；调用点清单钉成五处的表
+  （`batch_worker::execute_frozen_batch_body` / `execute_model_only_body`、`dbnum_initialize::model_half_inner`、
+  `model_dbnum_ensure::start_with_purpose`、`model_db_adapter::refresh_room_reference_before_task`），新调用点得先确认它与它的
+  调用方不在锁内再进表；另钉规矩的由来——`refresh_before_task` 经 `initialize_file_backed_at_startup(` 换代、自己不持锁，装载器体内
+  `lock_spatial_serial().await` 在。钉只看直接的函数体；深一层的持锁者（生产里 13 处：`query_service::room` / `spatial_bounds`、
+  AABB 刷新 / 持久化 / 装载、`helper::delete_room_membership`、两个启动装载器、`room_read_through::lookup`）本轮人工核过一遍，
+  没有一处走到那五个入口。
+- **验证**：`cargo test --lib -- the_task_start_refresh_is_never_called_under_the_spatial_serial_lock` 1 passed；变异一次——在
+  `model_dbnum_ensure::start_with_purpose` 调对齐之前插一句 `lock_spatial_serial().await`，钉红并点名
+  `data_interface/model_dbnum_ensure.rs::start_with_purpose`，撤掉后复绿；`cargo test --lib -- room_resident::`
+  **30 passed / 0 failed / 9 ignored**；rustfmt 本轮新增行无 diff（该文件 100 / 958 / 1249 三处漂移为既有）。
+
+### 开工前对齐的重建失败按同一文件版本指数退避，不再每个任务整份重建再失败（ADR-073 D12，审核 P3-6）
+
+- **为什么**：`room_resident::refresh_before_task` 在启动 `Blocked`（或上一次换代没成、留着旧代）且原因持续——MDB 读不了、某个 DESI
+  文件打不开——时，每个 dbnum 任务开工都走一遍 `initialize_file_backed_at_startup`：O(全部文件) 的拓扑 + 面板几何重建，然后以同一个
+  原因再失败一次、`last_failure` 再刷一条一模一样的。探针给的 composite 就是重建的全部输入（MDB 成员清单 + 每个 DESI 最新会话 + 令牌），
+  composite 没变而上一次没成，多半还是不成；但也不能永久跳过——文件被别的写者锁着、盘暂时读不到这类暂时性故障，D12 承诺「不再要重启
+  才能恢复」。
+- **改动**：`room_resident::RebuildBackoff { key, failures, last_error, retry_at }` 进程内一份（持 `refresh_lock` 时读写；重启为空）：
+  同一 composite 下连续失败 `cooldown(n) = 30s × 2^(n-1)`、10min 封顶；`refresh_before_task` 探针之后、重建之前先问
+  `backoff.remaining(&probe.composite, now)`，冷却期未到回新变体 **`RoomReferenceRefresh::Deferred { key, error, kept_previous,
+  failures, retry_in_ms }`**——不重建、生命周期与 `last_failure` 都不再动，任务日志一行「文件版本 … 下常驻房间模型重建已连续失败 n 次，
+  退避中（还有 …ms 再试）」；composite 变了 `remaining` 为 `None` 照常重建、失败从 1 数起；建成了 `set_rebuild_backoff(None)` 清账。
+  启动装载器失败**不**记这本账：进程起来后第一个任务总要亲自试一次，那就是自愈的机会。`/health.room_build.resident` 加一格
+  `rebuild_backoff: { key, failures, last_error, retry_in_ms } | null`。`request_for_task` 只认 `Rebuilt { generation_changed: true }`，
+  `Deferred` 不触发整库重算（常驻没换代）。ADR-073 D12 正文与钉 20、CONTEXT「任务开工前对齐」词条同步。
+- **验证**：`cargo test --lib -- room_resident:: room_recompute:: the_task_start_refresh` **39 passed / 0 failed / 9 ignored**（含新增
+  `a_failed_rebuild_backs_off_under_the_same_composite_and_rearms_when_the_files_move`——冷却 / 翻倍 / 封顶 / 换 composite 归 1 /
+  冷却期到即再试 / health 格 / `Deferred` 日志行——与源码钉 `the_task_start_refresh_backs_off_before_rebuilding_and_settles_the_ledger_on_both_outcomes`；
+  既有钉 15 / P3-7 / P3-8 仍绿）；变异一次——删掉 `refresh_before_task` 里的退避早退，钉红在「退避回执」、撤掉后复绿；rustfmt 本轮
+  新增行无 diff（该文件 100 / 958 / 1250 三处漂移为既有）。**未 live**：「MDB 不可读启动 → 连续任务开工只重建一次、之后日志出『退避中』」
+  这条真机用例没跑。
+
+### 整库房间重算对不在投影里的根回读库上几何——「整库」不再只到投影（ADR-073 D13 / D14，U1 第二半）
+
+- **为什么**：D13 的整库重算只遍历投影里有回执的根，而投影只装本进程生成过的根——初始化的模型行不进投影（ADR-077 D5）、
+  落盘形态冷重启后投影是空的。生产形态下面板一变，那些根的边这条路够不着：`e3d.room.lookup` 对它们恒 `not_computed`、D14 那一格
+  永远盖不上，电平型触发 ③ 每个任务都点、每次都 `PartialCoverage`（上午为此还加了一张进程内去重表），点亮只有 `model/rebuild`。
+  用户 2026-09-17 拍板：让重算为不在投影里的根回读库上几何、把边补齐（不选「接受滞后到整库重建」）。
+- **改动**：
+  - `room_model`：房间判定的输入抽成 trait `RoomInput`（构件、世界盒、网格、「网格 → 世界」变换、报错点名），`ProjectedGeometry`
+    实现它；新增 `DurableRoomGeometry` + `durable_room_inputs(&[GeomInstQuery])`——把库上读回的 `inst_relate` / `tubi_relate` 行折成
+    同一形状（一行一条或多条实例、共用该行的世界盒；变换 = 世界 × 实例本地，烘焙 / 管身读回的本地是单位阵，与投影 `Baked` 同义）。
+    `calculate_for_root` / `render_root_room_edges` / `calculate_edges` / `memory_model_world_points` 泛化到 `G: RoomInput`，算法一行
+    没改；`calculate`（读透）仍收 `ProjectedGeometry`。
+  - `model_record_reader::durable_records_of_root` 提成 `pub(crate)`（SQL 不动）。
+  - `model_db_adapter::recompute_dbnum_room_edges(…, library_roots: Option<&[RefNo]>)`：调用方点名 `DbSet@T` 的根清单；投影里有回执的
+    照旧拿投影，清单里不在投影里的（去重、只认本库、按 refno 序）逐根 `durable_records_of_root` → `durable_room_inputs` → **同一个**
+    `calculate_for_root` / `render_root_room_edges`（两种来源共用一段 `recompute_root`），读回零行的算覆盖到、什么都不写；回读失败
+    整轮 `Err`（与写库失败同一处置）。回执加 `projected_roots` / `durable_roots` / `durable_records` / `durable_read_ms`，`covered_roots`
+    = 两种来源之和；ACK 只对投影里的根对齐（回读的根没有进程内 ACK，就绪由 D14 那一格作答）。
+  - `batch_worker::run_room_only_recompute`：根清单**先**枚举、作为靶子传进去；`WholeLibrary` 从此在落盘形态下也成立。`PartialCoverage`
+    只剩「清单枚举不出来、覆盖面未知」（点名了却没覆盖到的臂保留、如实不盖，回读按清单逐根走、理论上不再出现）；任务日志多报
+    「投影里 N、回读库 M：读回几何 K 条、T ms」。
+  - **去重表退役**：`room_recompute::PARTIAL_COVERAGE_SETTLED` / `settle_partial_coverage` / `rearm_library` /
+    `partial_coverage_settled_at` 删掉，`library_alignment_owed(library, resident)` 少一个形参——它的存在理由（同一代下反复点、每次都
+    覆盖不全）随回读消失：③ 在每个库上多跑一次就盖上那一格、自己安静。
+  - 文档：ADR-073 D13 正文（覆盖面那段重写、「没收的两半」收成一半）、D14 写规则、钉 17 / 18、U1 追记「第二半已收」；CONTEXT
+    「整库房间重算」「整库房间对齐代号」「ModelOnly」；spec §4.7 `room_alignment` 的「要点亮」一句改成「下一个任务会自己盖上，不想等再
+    rebuild」。
+- **验证**：新 `mem://` 真测 `a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows`：A 经逐根路径落库后
+  换成空投影、面板搬家 → 点名 `[A]` 回读重算：`(projected, durable, records) = (0, 1, 1)`、`recomputed=1 / room_edges=0 / acks_refreshed=0`，
+  旧边删掉、`inst_relate` 行不动；搬回来 `room_edges=1`、边与逐根落库逐字相同；点名 `[B, A, 别库根]` → `covered_roots=[A, B]`、B 零行算
+  覆盖到。新源码钉 `the_library_recompute_reads_back_the_durable_geometry_of_roots_outside_the_projection`（枚举在重算之前并真的传进去；
+  `recompute_dbnum_room_edges` 签名 / 投影根不回读 / 先读后折 / 两个入口各恰一处；去重表不再定义）；既有
+  `recomputing_a_librarys_room_edges…` 加 `(projected, durable, records) == (2, 0, 0)`；`a_partial_coverage_settles_the_level_trigger…`
+  随表删掉。`cargo test --lib -- room_recompute:: room_model:: model_record_reader:: room_read_through:: model_initial_persist::
+  room_resident:: …` **99 passed / 0 failed / 9 ignored**；全量 `cargo test --lib` **2225 passed / 4 failed / 118 ignored**（4 失败仍是
+  `model_impact` ×2 + `window_root_plan` ×2 那四条 CACHID 元数据档，本条前后同样红）。rustfmt：五个 Rust 文件的漂移数与 HEAD 逐个相等
+  （room_model 0/0、model_db_adapter 2/2、model_record_reader 4/4、batch_worker 6/6、room_recompute 0/0），EOL 未翻。**未 live**：
+  落盘形态冷重启 → 改一块 PANE → 下一个任务日志「整库房间重算完成…回读库 N」且 `/dbnums.room_alignment.current` 翻 `true`、
+  `e3d.room.lookup` 对初始化过的根回 `ready`，这条真机用例没跑。
+- **代价与边界**：回读是 O(本库根数) 次库读（每根两条 SELECT，按 `anc` / `in` 索引），只在真触发时付；跨库那一半（U3）照旧；变换经
+  TRS（f32）往返读回，与 Plant UI 读的是同一份。
 
 ### 元数据门第二档的开关退役：`model_skip_unread_attribute_changes` 不再存在，两票就是谓词本身
 

@@ -12,16 +12,17 @@ use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
 use aios_core::{RefnoEnum, init_test_surreal};
+use anyhow::Context as _;
 use bevy_transform::TransformPoint;
 use bevy_transform::components::Transform;
 use dashmap::{DashMap, DashSet};
-use glam::{Mat4, Vec3};
+use glam::{DMat4, Mat4, Vec3};
 use itertools::Itertools;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
-use parry3d::shape::{TriMesh, TriMeshFlags};
+use parry3d::shape::TriMesh;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -440,6 +441,16 @@ fn render_panel_room_topology_statements(
     statements
 }
 
+/// 一块**不在册了**的面板（ADR-073 D13 反查，`room_resident::PanelDelta::removed`）：清它全部出边
+/// （`{panel}->room_relate`——它名下的成员边，`room_relate` 的 `in` 是面板、`out` 是构件）与指向它的
+/// `room_panel_relate` 入边。不查空间、不算几何：面板不在册就是不在册，与树无关（`recalc_panel_membership_inner`
+/// 那条旧路同一判断）。语句不带句尾分号，与本文件其余渲染器同形。
+pub(crate) fn render_unregistered_panel_statements(panel: RefnoEnum) -> Vec<String> {
+    let mut statements = vec![format!("DELETE {}->room_relate", panel.to_pe_key())];
+    statements.extend(render_panel_room_topology_statements(panel, None));
+    statements
+}
+
 /// 增量整间分支的唯一提交单元：成员边与 panel→room 拓扑同成同败。
 ///
 /// 写守卫那一档随房间队列退役（t-678）：队列没了就只剩「直接写」这一种形态，
@@ -565,7 +576,7 @@ async fn write_room_panel_relate(map: &RoomPanelMap) -> anyhow::Result<()> {
 /// `fn::room_code` 是 `limit 1` 取首条。没有排序键时取到哪条由存储顺序决定——
 /// 全量重建时碰巧稳定，一旦改成增量、边删了再写回去就会变，表现为房间号无规律跳动。
 /// 这两个字段给它一个全序（ADR-010 §5、缺陷 D7）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoomMember {
     pub refno: RefnoEnum,
     /// 元素 AABB 八顶点落在面板内的个数（0–8），越大归属越强。
@@ -984,7 +995,7 @@ async fn recalc_panel_membership_inner(
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
     let members = match cal_room_refnos_from(
-        &db_option.get_meshes_path(),
+        &crate::options::meshes_dir_for(db_option),
         panel,
         &exclude,
         resident,
@@ -1104,9 +1115,9 @@ impl PanelMeshes {
                         continue;
                     }
                 };
-                let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
+                let Some(tri_mesh) = crate::fast_model::room_predicate::panel_tri_mesh(
+                    &mesh,
                     (inst.world_trans * geo.transform).compute_matrix(),
-                    TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
                 ) else {
                     built
                         .failures
@@ -1281,7 +1292,7 @@ async fn load_panel_index_from(
     resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
     let mut index = PanelIndex {
-        mesh_dir: db_option.get_meshes_path(),
+        mesh_dir: crate::options::meshes_dir_for(db_option),
         resident,
         ..Default::default()
     };
@@ -1768,11 +1779,174 @@ async fn element_world_points(
 }
 
 /// 元素分支算出来的一条归属边。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ElementRoomEdge {
     pub panel: RefnoEnum,
     pub room_num: String,
     pub member: RoomMember,
+}
+
+/// 房间归属判定对一件几何的全部要求：挂在哪个构件上、世界盒、网格与「网格 → 世界」的变换。
+///
+/// 两种来源都实现它——投影记录（本进程生成的根，[`crate::fast_model::model_memory_store::ProjectedGeometry`]）
+/// 与库上读回的模型行（初始化 / 重启前生成的根，不在投影里；[`DurableRoomGeometry`]）。判定
+/// （[`MemoryRoomCalculator::calculate_for_root`]）与渲染（[`MemoryRoomCalculator::render_root_room_edges`]）
+/// 只认这几样、不认来源，所以整库重算对两种根走的是同一套算法与同一形状的语句（ADR-073 D13：
+/// 「整库重算 == 从零初始化」逐边相等的硬验收不多一条口径）。
+pub(crate) trait RoomInput {
+    /// 归属挂在哪个构件上（隐式管身挂容器）。
+    fn element(&self) -> RefnoEnum;
+    /// 报错点名用：投影记录 id / 库行的构件与网格。
+    fn label(&self) -> String;
+    fn world_bounds(&self) -> [[f32; 3]; 2];
+    fn mesh_id(&self) -> &str;
+    /// 网格顶点 → 世界：烘焙实体只有世界变换，标准图元把本地摆放折进去。
+    fn mesh_to_world(&self) -> DMat4;
+}
+
+impl RoomInput for crate::fast_model::model_memory_store::ProjectedGeometry {
+    fn element(&self) -> RefnoEnum {
+        crate::data_interface::generation_root::refno_from_e3d(self.source_refno)
+    }
+
+    fn label(&self) -> String {
+        self.record_id.clone()
+    }
+
+    fn world_bounds(&self) -> [[f32; 3]; 2] {
+        self.world_bounds
+    }
+
+    fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+
+    fn mesh_to_world(&self) -> DMat4 {
+        projected_mesh_to_world(
+            self.world_transform,
+            match &self.shape {
+                crate::fast_model::model_memory_store::ProjectedShape::Baked => None,
+                crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                    local_transform,
+                    ..
+                } => Some(*local_transform),
+            },
+            self.tube.is_some(),
+        )
+    }
+}
+
+/// 投影记录的「网格 → 世界」：烘焙实体只有世界变换；标准图元把本地摆放折进去（`world × local`）。
+/// **只有这一处定义**：投影记录（[`RoomInput`] for `ProjectedGeometry`）与 bake 时的同一件几何
+/// （[`BakedRoomInput`]，`e3d_model_service::bake_element`）都经它——两边算出的判定点才逐位相等。
+///
+/// **隐式管身例外**（`implied_tube`）：它存下的世界变换已经把标准图元的本地摆放折进去了
+/// （`e3d_model_service::persisted_world_transform`——隐式管身只向 Plant UI 暴露一个变换），库上
+/// `tubi_relate` 行读回的实例变换也是单位阵（`model_record_reader::projection_record_to_query` /
+/// [`durable_room_inputs`]）。这里若再乘一次本地摆放，标准管身的判定点就落到 Plant UI 画的网格之外，
+/// 与库上回读那条路（整库重算、从零初始化）算出的边也对不上——「增量 == 全量」逐边相等的硬验收
+/// （ADR-010 §9）在跨面板边的标准管身上会破。
+pub(crate) fn projected_mesh_to_world(
+    world_transform: DMat4,
+    canonical_local: Option<DMat4>,
+    implied_tube: bool,
+) -> DMat4 {
+    match canonical_local {
+        Some(local_transform) if !implied_tube => world_transform * local_transform,
+        _ => world_transform,
+    }
+}
+
+/// bake 时手上的一件几何（`e3d_model_service::BakedElement` 折成房间判定要的形状，B/T2）：与它随后
+/// 变成的投影记录字段相同——`element` 同 `geometry_source_refno`、`label` 同投影记录 id、世界盒同一份、
+/// `mesh_to_world` 同 [`projected_mesh_to_world`]（世界变换取发布时存下的那一个）。判定点不读盘：
+/// 调用方拿就要写盘的那份网格经 [`world_points_of`] 取。
+#[derive(Debug, Clone)]
+pub(crate) struct BakedRoomInput {
+    pub element: RefnoEnum,
+    pub label: String,
+    pub world_bounds: [[f32; 3]; 2],
+    pub mesh_id: String,
+    pub mesh_to_world: DMat4,
+}
+
+impl RoomInput for BakedRoomInput {
+    fn element(&self) -> RefnoEnum {
+        self.element
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn world_bounds(&self) -> [[f32; 3]; 2] {
+        self.world_bounds
+    }
+
+    fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+
+    fn mesh_to_world(&self) -> DMat4 {
+        self.mesh_to_world
+    }
+}
+
+/// 库上读回的一件几何（`model_record_reader::durable_records_of_root` 一行里的一条实例），已折成房间
+/// 判定要的形状。不在投影里的根——初始化的模型行（ADR-077 D5）、落盘形态重启前生成的——只有这一种来源；
+/// 它只活在整库重算这一步里，不进投影、不发布。
+#[derive(Debug, Clone)]
+pub(crate) struct DurableRoomGeometry {
+    element: RefnoEnum,
+    label: String,
+    world_bounds: [[f32; 3]; 2],
+    mesh_id: String,
+    mesh_to_world: DMat4,
+}
+
+impl RoomInput for DurableRoomGeometry {
+    fn element(&self) -> RefnoEnum {
+        self.element
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn world_bounds(&self) -> [[f32; 3]; 2] {
+        self.world_bounds
+    }
+
+    fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+
+    fn mesh_to_world(&self) -> DMat4 {
+        self.mesh_to_world
+    }
+}
+
+/// 把库上的模型行折成房间判定的输入：一行一条或多条实例（`insts_flat`，旧行走 `geo_relate`），每条实例
+/// 一件几何、共用该行的世界盒；「网格 → 世界」= 行上的世界变换 × 实例的本地变换——烘焙实体（`booled_id`）
+/// 与管身（`tubi_relate`）读回来的本地变换是单位阵，落库时本地摆放已折进世界变换，与投影记录的 `Baked`
+/// 同义（`model_record_reader::projection_record_to_query` 的反向）。读回的行已由 SQL 过滤掉没有世界盒 /
+/// 世界变换的（`aabb.d != NONE AND world_trans.d != NONE`）。
+pub(crate) fn durable_room_inputs(rows: &[GeomInstQuery]) -> Vec<DurableRoomGeometry> {
+    rows.iter()
+        .flat_map(|row| {
+            let (mins, maxs) = (row.world_aabb.mins, row.world_aabb.maxs);
+            let world_bounds = [[mins.x, mins.y, mins.z], [maxs.x, maxs.y, maxs.z]];
+            row.insts.iter().map(move |inst| DurableRoomGeometry {
+                element: row.refno,
+                label: format!("{}:{}", row.refno, inst.geo_hash),
+                world_bounds,
+                mesh_id: inst.geo_hash.clone(),
+                mesh_to_world: (row.world_trans * inst.transform)
+                    .compute_matrix()
+                    .as_dmat4(),
+            })
+        })
+        .collect()
 }
 
 /// Fixed room-definition view. Construction and calculation have no database
@@ -1782,6 +1956,16 @@ pub(crate) struct ElementRoomEdge {
 pub struct MemoryRoomCalculator {
     panels: PanelIndex,
     definition_version: String,
+}
+
+// 它随任务回执（`batch_worker::DataBatchTaskResult::room_calculator`）走一段，回执要 `Debug`；索引本体不打印，
+// 只报代号——日志里认的就是它。
+impl std::fmt::Debug for MemoryRoomCalculator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryRoomCalculator")
+            .field("definition_version", &self.definition_version)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 一个闭合且朝外的盒子。`TriMeshFlags::ORIENTED` 下 `contains_point` 依赖法线朝向，
@@ -1876,6 +2060,180 @@ mod memory_calculation_tests {
         };
         assert_eq!(bits(&new), bits(old.vertices()));
         assert_eq!(new, old.vertices());
+    }
+
+    /// B/T2 对等用例（ADR-010 §9「增量 == 全量逐边相等」的取点前提）：bake 时拿手上就要写盘的那份网格取点，
+    /// 与 flush 时从盘上 `.mesh` 回读取点，**逐位相等**——两边都是 [`world_points_of`] 一处定义（f32 变换、
+    /// 按三角遍历去重）；据此逐元素算出的边（[`MemoryRoomCalculator::edges_for_record`]）经
+    /// [`merge_root_edges`] 收拢后，与逐根路径 [`MemoryRoomCalculator::calculate_for_root`] 的结果逐字相同，
+    /// 含 `inside_count` / `center_dist` 两个排序键。跨面板边的构件（`NeedsPointCheck`）与同构件多实例各一例。
+    #[test]
+    fn component_points_from_the_in_memory_mesh_equal_the_disk_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        // 一块 1000³ 的面板；构件网格是个歪放的单位盒，非平凡变换让 f32 舍入真的参与进来。
+        box_mesh_for_test(Vec3::ZERO, Vec3::splat(1000.))
+            .ser_to_file(&dir.path().join("panel.mesh"))
+            .unwrap();
+        let mut component = box_mesh_for_test(Vec3::ZERO, Vec3::splat(1.));
+        component.vertices.push(Vec3::splat(4321.)); // 未被引用的顶点：两边都不算
+        component
+            .ser_to_file(&dir.path().join("mesh30.mesh"))
+            .unwrap();
+        let panel: RefnoEnum = "7000_1".into();
+        let map = RoomPanelMap {
+            rooms: vec![RoomPanels {
+                room: "7000_2".into(),
+                room_num: "R1".into(),
+                panels: vec![panel],
+            }],
+            all_panels: HashSet::from([panel]),
+        };
+        let mut panel_record = record(1, 0., 1000.);
+        panel_record.source_refno = e3d_io::refno::RefNo::new(7000, 1);
+        panel_record.dbnum = 7000;
+        panel_record.world_bounds = [[0.; 3], [1000.; 3]];
+        panel_record.mesh_id = "panel".into();
+        let model = Arc::new(ResidentRoomModel::from_projection(
+            ResidentManifest {
+                form: ResidentForm::Latest,
+                key: "source".into(),
+            },
+            vec![],
+            map,
+            &[panel_record],
+            Arc::<MeshCache>::default(),
+        ));
+        let calc = MemoryRoomCalculator::new(model, dir.path().to_path_buf()).unwrap();
+
+        // 跨在面板 x=1000 那一面上的构件：盒 900..1100，顶点经变换后一部分在内、一部分在外 → 必走点检查。
+        let mut straddling = record(30, 900., 1100.);
+        straddling.world_transform = glam::DMat4::from_scale_rotation_translation(
+            glam::DVec3::new(200., 200., 200.),
+            glam::DQuat::from_rotation_z(0.31),
+            glam::DVec3::new(900., 400., 400.),
+        );
+        // 同一构件的第二个实例，完全在内：与第一个实例合并后 `stronger` 留 inside_count 更大的那条。
+        let mut second = record(30, 400., 600.);
+        second.record_id = "second-instance".into();
+        second.mesh_id = "mesh30".into();
+        second.world_transform = glam::DMat4::from_scale_rotation_translation(
+            glam::DVec3::new(200., 200., 200.),
+            glam::DQuat::IDENTITY,
+            glam::DVec3::new(400., 400., 400.),
+        );
+        let records = [straddling.clone(), second.clone()];
+
+        // 1. 取点逐位相等：内存那份网格 vs 盘上回读。
+        let from_disk = memory_model_world_points(&straddling, dir.path()).unwrap();
+        let from_memory = world_points_of(&component, straddling.mesh_to_world()).unwrap();
+        assert_eq!(
+            from_memory.len(),
+            8,
+            "单位盒 8 个被引用的顶点，多出的那个不算"
+        );
+        let bits = |points: &[Point<Real>]| {
+            points
+                .iter()
+                .map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bits(&from_memory),
+            bits(&from_disk),
+            "取点是同一处定义，逐位相等"
+        );
+
+        // 2. 逐元素算边（bake 形状）→ 收拢 == 逐根路径（flush 形状）。
+        let per_element = records
+            .iter()
+            .flat_map(|record| {
+                calc.edges_for_record(record, || {
+                    world_points_of(&component, record.mesh_to_world())
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let from_bake = merge_root_edges(per_element);
+        let from_flush = calc.calculate_for_root(&records).unwrap();
+        assert_eq!(
+            from_bake, from_flush,
+            "两条路的边逐字相同（含 inside_count / center_dist）"
+        );
+        assert_eq!(from_flush.len(), 1, "同构件两实例合并成一条");
+        assert_eq!(from_flush[0].member.inside_count, 8, "留下完全在内的那一次");
+
+        // 3. 点检查确实发生过：不给点就算不出（跨边构件），完全在内的那件不取点。
+        assert!(
+            calc.edges_for_record(&straddling, || anyhow::bail!("no points"))
+                .is_err(),
+            "跨面板边的构件要点检查"
+        );
+        assert_eq!(
+            calc.edges_for_record(&second, || panic!("fully inside must not take points"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// B/T3：随回执走的边是 `ElementRoomEdge` 的 wire 形，来回逐字不变；`carry_root_edges` 把这一根全部构件
+    /// （有边没边都在册、去重、升序）与收拢后的边装成一份；JSON 来回相等；旧回执没有 `room` 一格 → `None`。
+    #[test]
+    fn carried_room_edges_round_trip_and_list_every_element_of_the_root() {
+        use crate::fast_model::model_memory_store::{CarriedRoomEdges, RootReceipt};
+        let edge = |element: u32, panel: u32, inside: u8, dist: f32| ElementRoomEdge {
+            panel: RefnoEnum::from(RefU64::from_two_nums(7000, panel)),
+            room_num: format!("R{panel}"),
+            member: RoomMember {
+                refno: RefnoEnum::from(RefU64::from_two_nums(8000, element)),
+                inside_count: inside,
+                center_dist: dist,
+            },
+        };
+        let a = edge(30, 1, 4, 12.5);
+        assert_eq!(
+            ElementRoomEdge::from_carried(&a.to_carried()),
+            a,
+            "wire 形来回不变"
+        );
+
+        let elements = [8000u32, 8000, 30, 30, 10]
+            .into_iter()
+            .map(|seq| RefnoEnum::from(RefU64::from_two_nums(8000, seq)))
+            .collect::<Vec<_>>();
+        let carried = carry_root_edges(
+            "gen-1",
+            elements,
+            [a.clone(), edge(30, 1, 8, 3.0), edge(10, 2, 2, 9.0)],
+        );
+        assert_eq!(carried.generation, "gen-1");
+        assert_eq!(
+            carried.elements,
+            ["8000_10", "8000_30", "8000_8000"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            "全部构件去重升序，没边的 8000_8000 也在册"
+        );
+        assert_eq!(carried.edges.len(), 2, "同 (构件, 面板) 收成一条");
+        let strongest = carried
+            .edges
+            .iter()
+            .find(|e| e.member == "8000_30")
+            .expect("30 的那条");
+        assert_eq!((strongest.inside_count, strongest.center_dist), (8, 3.0));
+
+        let json = serde_json::to_string(&carried).unwrap();
+        let back: CarriedRoomEdges = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, carried, "JSON 来回相等");
+        let old_receipt: RootReceipt = serde_json::from_str(
+            r#"{"source_sesno":12,"model_target":null,"manifest_hash":"m","geometry_count":1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old_receipt.room, None,
+            "旧产物没有 room 一格 → None，flush 走兜底现算"
+        );
     }
 
     #[test]
@@ -2140,19 +2498,10 @@ impl MemoryRoomCalculator {
             room_definition_version,
             records,
             |record| {
-                let transform = match &record.shape {
-                    crate::fast_model::model_memory_store::ProjectedShape::Baked => {
-                        record.world_transform
-                    }
-                    crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                        local_transform,
-                        ..
-                    } => record.world_transform * *local_transform,
-                };
                 Ok(crate::fast_model::room_resident::build_tri_mesh(
                     self.panels.mesh_dir(),
                     &record.mesh_id,
-                    transform.as_mat4(),
+                    record.mesh_to_world().as_mat4(),
                 )
                 .map_err(anyhow::Error::msg)?
                 .vertices()
@@ -2261,9 +2610,12 @@ impl MemoryRoomCalculator {
     /// 边界由生成路径守——记录到了这里就是这一根这一版的最终几何。一句库不读。
     /// 输入不合法（盒子不可用、面板网格不全）直接 `Err`：房间算不出来的根不落库，
     /// 房间失败 = 该根失败（ADR-073 D2）。
-    pub(crate) fn calculate_for_root(
+    ///
+    /// 几何的来源不限于投影记录：整库重算（D13）对不在投影里的根拿库上读回的模型行
+    /// （[`DurableRoomGeometry`]）走同一个入口——算法只认 [`RoomInput`]。
+    pub(crate) fn calculate_for_root<G: RoomInput>(
         &self,
-        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        records: &[G],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         self.calculate_edges(records, |record| {
             memory_model_world_points(record, self.panels.mesh_dir())
@@ -2303,19 +2655,15 @@ impl MemoryRoomCalculator {
     /// `WHERE in NOT IN $room_protected_panels`——一根一份名单，不逐构件重复整张列表（几何覆盖稀疏的
     /// 实例上缺几何的面板可能有两百多块，逐构件展开会把一根的事务撑大几十倍）。为空时语句与此前
     /// 逐字相同。
-    pub(crate) fn render_root_room_edges(
+    pub(crate) fn render_root_room_edges<G: RoomInput>(
         &self,
-        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        records: &[G],
         edges: &[ElementRoomEdge],
     ) -> String {
         let map = self.room_panel_map();
         let mut by_element = std::collections::BTreeMap::<RefnoEnum, Vec<ElementRoomEdge>>::new();
         for record in records {
-            by_element
-                .entry(crate::data_interface::generation_root::refno_from_e3d(
-                    record.source_refno,
-                ))
-                .or_default();
+            by_element.entry(record.element()).or_default();
         }
         for edge in edges {
             by_element
@@ -2348,81 +2696,169 @@ impl MemoryRoomCalculator {
         out
     }
 
-    fn calculate_edges(
+    /// 一块面板此刻的 `room_panel_relate` 那一半（与 [`Self::render_root_room_edges`] 对面板元素写的同一句：先删指向它的
+    /// 旧入边，在册再写回本代的；不在册 = 只删）。定向重算拿它给要反查的面板（`PanelDelta::recalc`）补自己的拓扑边
+    /// （F2，2026-09-19）：命中的是成员的根，面板自己的根多半不在集合里，逐根路径那一句到不了它。语句不带句尾分号。
+    pub(crate) fn render_panel_topology_statements(&self, panel: RefnoEnum) -> Vec<String> {
+        let map = self.room_panel_map();
+        render_panel_room_topology_statements(panel, map.room_of_panel(panel))
+    }
+
+    fn calculate_edges<G: RoomInput>(
         &self,
-        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
-        mut points: impl FnMut(
-            &crate::fast_model::model_memory_store::ProjectedGeometry,
-        ) -> anyhow::Result<Vec<Point<Real>>>,
+        records: &[G],
+        mut points: impl FnMut(&G) -> anyhow::Result<Vec<Point<Real>>>,
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
-        let mut by_element =
-            std::collections::BTreeMap::<RefnoEnum, HashMap<RefnoEnum, ElementRoomEdge>>::new();
+        let mut edges = Vec::new();
         for record in records {
-            let element =
-                crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
-            // 面板本身不做成员判定（它另有 `room_panel_relate` 那一半，见 `render_root_room_edges`）。
-            if self.room_panel_map().all_panels.contains(&element) {
-                continue;
-            }
-            let bounds = Aabb::new(record.world_bounds[0].into(), record.world_bounds[1].into());
+            edges.extend(self.edges_for_record(record, || points(record))?);
+        }
+        Ok(merge_root_edges(edges))
+    }
+
+    /// **一件几何**对着候选面板的归属边（未与同构件的其它实例合并；合并见 [`merge_root_edges`]）。
+    ///
+    /// 逐根路径（[`Self::calculate_for_root`]）与 bake 时的逐元素判定共用这一段：面板本身不做成员判定
+    /// （它另有 `room_panel_relate` 那一半，见 [`Self::render_root_room_edges`]）；世界盒不可用 `Err`；
+    /// 盒 → 候选面板（[`PanelIndex::candidate_slots`]）→ 每片面板网格 [`membership_by_aabb`]，只有
+    /// `NeedsPointCheck`（盒跨在面板边上）才调一次 `points` 取这件几何的世界判定点。`points` 是谁给的
+    /// 不影响结果——盘上回读（[`memory_model_world_points`]）与 bake 手上的网格都经 [`world_points_of`]
+    /// 同一个函数取点，数值一个不差（源码钉 `component_points_from_the_in_memory_mesh_equal_the_disk_read_back`）。
+    pub(crate) fn edges_for_record<G: RoomInput>(
+        &self,
+        record: &G,
+        points: impl FnOnce() -> anyhow::Result<Vec<Point<Real>>>,
+    ) -> anyhow::Result<Vec<ElementRoomEdge>> {
+        let element = record.element();
+        if self.room_panel_map().all_panels.contains(&element) {
+            return Ok(Vec::new());
+        }
+        let [mins, maxs] = record.world_bounds();
+        let bounds = Aabb::new(mins.into(), maxs.into());
+        anyhow::ensure!(
+            aabb_is_usable(&bounds),
+            "invalid room input bounds: {}",
+            record.label()
+        );
+        let mut edges = HashMap::<RefnoEnum, ElementRoomEdge>::new();
+        let mut points = Some(points);
+        let mut world_points: Option<Vec<Point<Real>>> = None;
+        for slot in self.panels.candidate_slots(&bounds) {
+            let candidate = self.panels.entry(slot);
+            let meshes = self.panels.meshes(candidate);
             anyhow::ensure!(
-                aabb_is_usable(&bounds),
-                "invalid room input bounds: {}",
-                record.record_id
+                meshes.failures.is_empty() && !meshes.tri_meshes.is_empty(),
+                "room panel mesh incomplete: {}",
+                candidate.panel
             );
-            let edges = by_element.entry(element).or_default();
-            let mut world_points = None;
-            for slot in self.panels.candidate_slots(&bounds) {
-                let candidate = self.panels.entry(slot);
-                let meshes = self.panels.meshes(candidate);
-                anyhow::ensure!(
-                    meshes.failures.is_empty() && !meshes.tri_meshes.is_empty(),
-                    "room panel mesh incomplete: {}",
-                    candidate.panel
-                );
-                for mesh in &meshes.tri_meshes {
-                    let Some((verdict, count)) = membership_by_aabb(mesh, &bounds) else {
-                        continue;
-                    };
-                    let inside = match verdict {
-                        AabbVerdict::Inside => true,
-                        AabbVerdict::Outside => false,
-                        AabbVerdict::NeedsPointCheck => {
-                            if world_points.is_none() {
-                                world_points = Some(points(record)?);
-                            }
-                            any_point_inside(mesh, world_points.as_ref().unwrap().iter().copied())
+            for mesh in &meshes.tri_meshes {
+                let Some((verdict, count)) = membership_by_aabb(mesh, &bounds) else {
+                    continue;
+                };
+                let inside = match verdict {
+                    AabbVerdict::Inside => true,
+                    AabbVerdict::Outside => false,
+                    AabbVerdict::NeedsPointCheck => {
+                        if world_points.is_none() {
+                            let take = points.take().expect("points are taken at most once");
+                            world_points = Some(take()?);
                         }
-                    };
-                    if inside {
-                        merge_element_edge(edges, candidate, element, &bounds, count);
+                        any_point_inside(mesh, world_points.as_ref().unwrap().iter().copied())
                     }
+                };
+                if inside {
+                    merge_element_edge(&mut edges, candidate, element, &bounds, count);
                 }
             }
         }
-        let mut edges: Vec<_> = by_element
-            .into_values()
-            .flat_map(|edges| edges.into_values())
-            .collect();
-        edges.sort_by_key(|edge| (edge.member.refno, edge.panel));
-        Ok(edges)
+        Ok(edges.into_values().collect())
     }
 }
 
-fn memory_model_world_points(
-    record: &crate::fast_model::model_memory_store::ProjectedGeometry,
+impl ElementRoomEdge {
+    /// 进根回执的 wire 形（[`crate::fast_model::model_memory_store::CarriedRoomEdge`]）。
+    pub(crate) fn to_carried(&self) -> crate::fast_model::model_memory_store::CarriedRoomEdge {
+        crate::fast_model::model_memory_store::CarriedRoomEdge {
+            panel: self.panel.to_string(),
+            room_num: self.room_num.clone(),
+            member: self.member.refno.to_string(),
+            inside_count: self.member.inside_count,
+            center_dist: self.member.center_dist,
+        }
+    }
+
+    /// 从根回执的 wire 形读回。
+    pub(crate) fn from_carried(
+        carried: &crate::fast_model::model_memory_store::CarriedRoomEdge,
+    ) -> Self {
+        Self {
+            panel: RefnoEnum::from(carried.panel.as_str()),
+            room_num: carried.room_num.clone(),
+            member: RoomMember {
+                refno: RefnoEnum::from(carried.member.as_str()),
+                inside_count: carried.inside_count,
+                center_dist: carried.center_dist,
+            },
+        }
+    }
+}
+
+/// 一根在 bake 时算出的边收成随回执走的那一份（B/T3）：`elements` = 这一根**全部**几何的构件（有边没边都算，
+/// 去重、按字串升序——flush 时与投影记录的构件集比对），`edges` = 各元素的边经 [`merge_root_edges`] 收拢。
+pub(crate) fn carry_root_edges(
+    generation: &str,
+    elements: impl IntoIterator<Item = RefnoEnum>,
+    edges: impl IntoIterator<Item = ElementRoomEdge>,
+) -> crate::fast_model::model_memory_store::CarriedRoomEdges {
+    let elements: BTreeSet<String> = elements.into_iter().map(|e| e.to_string()).collect();
+    crate::fast_model::model_memory_store::CarriedRoomEdges {
+        generation: generation.to_string(),
+        elements: elements.into_iter().collect(),
+        edges: merge_root_edges(edges)
+            .iter()
+            .map(ElementRoomEdge::to_carried)
+            .collect(),
+    }
+}
+
+/// 一根的归属边收拢：同一 `(构件, 面板)` 的多条（同构件多个实例、同面板多片网格）按
+/// [`RoomMember::stronger`] 留最强的一条，再按 `(构件, 面板)` 排成稳定序——与逐根路径此前
+/// 逐记录合并再排序的结果逐字相同（取最强是可交换、可结合的）。bake 时按元素算出的边在
+/// 发布前也经这里收成一根的边。
+pub(crate) fn merge_root_edges(
+    edges: impl IntoIterator<Item = ElementRoomEdge>,
+) -> Vec<ElementRoomEdge> {
+    let mut merged = std::collections::BTreeMap::<(RefnoEnum, RefnoEnum), ElementRoomEdge>::new();
+    for edge in edges {
+        merged
+            .entry((edge.member.refno, edge.panel))
+            .and_modify(|kept| kept.member = kept.member.stronger(edge.member))
+            .or_insert(edge);
+    }
+    merged.into_values().collect()
+}
+
+/// 盘上回读一件几何的判定点：读 `{mesh_id}.mesh`，再经 [`world_points_of`]。
+fn memory_model_world_points<G: RoomInput>(
+    record: &G,
     mesh_dir: &Path,
 ) -> anyhow::Result<Vec<Point<Real>>> {
-    let transform = match &record.shape {
-        crate::fast_model::model_memory_store::ProjectedShape::Baked => record.world_transform,
-        crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-            local_transform,
-            ..
-        } => record.world_transform * *local_transform,
-    }
-    .as_mat4();
-    let path = mesh_dir.join(format!("{}.mesh", record.mesh_id));
+    let path = mesh_dir.join(format!("{}.mesh", record.mesh_id()));
     let mesh = PlantMesh::des_mesh_file(&path)?;
+    world_points_of(&mesh, record.mesh_to_world())
+        .with_context(|| format!("component mesh {}", path.display()))
+}
+
+/// 网格 → 这件几何的世界判定点。**全仓只有这一处定义**：盘上回读（[`memory_model_world_points`]）与
+/// bake 时手上那份就要写盘的网格（`e3d_model_service::bake_element`）都走它——增量算出的边要与从零
+/// 初始化逐字相等（ADR-010 §9），取点的数值路径不许有第二份（f32 变换、按三角遍历去重，都在这里）。
+///
+/// 只有房间面板需要三角加速结构；构件只出点：为它建 BVH 再丢掉是白干。去重与旧 TriMesh 一致：
+/// 未被三角引用的顶点不算、重复顶点按遍历序合并。
+pub(crate) fn world_points_of(
+    mesh: &PlantMesh,
+    mesh_to_world: DMat4,
+) -> anyhow::Result<Vec<Point<Real>>> {
     anyhow::ensure!(
         mesh.indices.len() >= 3
             && mesh.indices.len() % 3 == 0
@@ -2430,19 +2866,17 @@ fn memory_model_world_points(
                 .indices
                 .iter()
                 .all(|&i| (i as usize) < mesh.vertices.len()),
-        "invalid component mesh: {}",
-        path.display()
+        "invalid component mesh"
     );
-    // Only room panels need a triangle acceleration structure. Components
-    // supply points: constructing their BVH just to discard it is wasted work.
+    let transform = mesh_to_world.as_mat4();
     let vertices: Vec<Point<Real>> = mesh
         .vertices
-        .into_iter()
-        .map(|p| transform.transform_point3(p).into())
+        .iter()
+        .map(|p| transform.transform_point3(*p).into())
         .collect();
     let mut seen = HashSet::new();
     let mut points = Vec::new();
-    for index in mesh.indices {
+    for &index in &mesh.indices {
         let point = vertices[index as usize];
         if seen.insert(parry3d::utils::HashablePartialEq::new(point)) {
             points.push(point);

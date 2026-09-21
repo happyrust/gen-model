@@ -13,12 +13,31 @@
 //! `model_write_behind::publish` 进投影并登记刷盘，任务收尾前等它们拿到 durable ACK
 //! （ADR-076 D2）。「变更元素 → 生成根」的归一策略只有一份，在 `generation_root.rs`。
 
+use std::sync::Arc;
+
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::*;
 use anyhow::Context;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::e3d_model_service::E3dModelService;
+use crate::fast_model::room_model::MemoryRoomCalculator;
+
+/// process-store 形态下这一批根用哪台房间计算器：任务传进来的那台（一任务一台，B/T1）或没有任务
+/// 语境时在本函数里按组冻的那台。两者对下游只有一个借用形状（[`Self::calculator`]）。
+enum TaskOrGroupRooms {
+    Task(Arc<MemoryRoomCalculator>),
+    Group(MemoryRoomCalculator),
+}
+
+impl TaskOrGroupRooms {
+    fn calculator(&self) -> &MemoryRoomCalculator {
+        match self {
+            Self::Task(calculator) => calculator,
+            Self::Group(calculator) => calculator,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RootGenerationFailure {
@@ -34,6 +53,10 @@ pub(crate) struct TargetedGenerationReport {
     pub rows_upserted: usize,
     pub commits: usize,
     pub max_transaction_bytes: usize,
+    /// 这一批里被判**不画**的隐式管身点名账（见 `E3dPersistReport::tubes_not_drawn`）。
+    /// 生成成功也可能有值——它不是失败，是「模型比设计少一节管」的唯一线索，
+    /// 由任务侧原样挂进回执。
+    pub tubes_not_drawn: Option<String>,
 }
 
 /// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
@@ -115,7 +138,16 @@ impl ModelRefreshPolicy {
         mgr: &AiosDBManager,
         roots: &[String],
     ) -> anyhow::Result<()> {
-        let report = Self::generate_roots_report(mgr, roots).await?;
+        Self::generate_roots_with_rooms(mgr, roots, None).await
+    }
+
+    /// 同 [`Self::generate_roots`]，带上本任务冻住的房间计算器（一任务一台，B/T1）。
+    pub(crate) async fn generate_roots_with_rooms(
+        mgr: &AiosDBManager,
+        roots: &[String],
+        rooms: Option<Arc<MemoryRoomCalculator>>,
+    ) -> anyhow::Result<()> {
+        let report = Self::generate_roots_report(mgr, roots, rooms).await?;
         if report.failures.is_empty() {
             Ok(())
         } else {
@@ -133,11 +165,15 @@ impl ModelRefreshPolicy {
         }
     }
 
+    /// `rooms` 是**本任务**开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，B/T1）：dbnum 任务的
+    /// 批量重生成把它传进来，整批根共用；没有任务语境的调用方（路由轮询、手工重生成）给 `None`，房间那一半
+    /// 照旧由 flush 时冻的那台算（或 process-store 形态下在这里按组冻一台）。
     pub(crate) async fn generate_roots_report(
         mgr: &AiosDBManager,
         roots: &[String],
+        rooms: Option<Arc<MemoryRoomCalculator>>,
     ) -> anyhow::Result<TargetedGenerationReport> {
-        Self::generate_roots_report_on_source(mgr, roots, None, None).await
+        Self::generate_roots_report_on_source(mgr, roots, None, None, rooms).await
     }
 
     /// 与 [`Self::generate_roots_report`] 同一条执行/持久化流水线，但设计文件严格钉在
@@ -149,7 +185,7 @@ impl ModelRefreshPolicy {
         source: &crate::data_interface::frozen_source::FrozenSource,
         room_generation: Option<&str>,
     ) -> anyhow::Result<TargetedGenerationReport> {
-        Self::generate_roots_report_on_source(mgr, roots, Some(source), room_generation).await
+        Self::generate_roots_report_on_source(mgr, roots, Some(source), room_generation, None).await
     }
 
     async fn generate_roots_report_on_source(
@@ -157,6 +193,7 @@ impl ModelRefreshPolicy {
         roots: &[String],
         explicit_source: Option<&crate::data_interface::frozen_source::FrozenSource>,
         expected_room_generation: Option<&str>,
+        task_rooms: Option<Arc<MemoryRoomCalculator>>,
     ) -> anyhow::Result<TargetedGenerationReport> {
         if roots.is_empty() {
             return Ok(TargetedGenerationReport::default());
@@ -214,12 +251,17 @@ impl ModelRefreshPolicy {
         };
         diagnostic.stage("model.geometry.begin", format!("dbnum={dbnum} roots={roots:?}"));
         let persisted = service
-            .generate_and_persist_roots(dbnum, roots, failure_policy)
+            .generate_and_persist_roots(dbnum, roots, failure_policy, task_rooms.clone())
             .await.map_err(|error| {
                 diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
                 error
             })?;
-        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}", persisted.failed, persisted.failed_roots));
+        // `failed=0 failures=[]` 是这一行的常态，而「按设计不画」的那几根管就消失在这份
+        // 常态里（2026-09-18 的 HBOR 探针：E3D 与本引擎同样不画，但只有 E3D 那边报得出来）。
+        // 点名账非空时就挂在同一行上——查的人本来就在看它。
+        let tubes_not_drawn = persisted.tubes_not_drawn.clone();
+        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}{}", persisted.failed, persisted.failed_roots,
+            tubes_not_drawn.as_deref().map(|line| format!(" {line}")).unwrap_or_default()));
         let generation_failures = persisted
             .failed_roots
             .iter()
@@ -297,24 +339,30 @@ impl ModelRefreshPolicy {
             // 生成通过 ModelWriteBehind::publish 原子写内存并登记根。持久档到这里时只报告
             // memory=ready；后台再跨根合块写 RocksDB。非持久档仍在这里同步调用适配器。
             //
-            // 房间计算器在这里**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用。
+            // 房间计算器：任务传进来的那台优先（一任务一台，ADR-073 D1 / D12，B/T1）；没有任务语境时
+            // 在这里按组**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用。
             // 开关关闭时得到 None：模型照常持久化、不写新房间边；开关开启但常驻模型不可用
             // （在建 / 降级）时才把本批每根记成「房间算不出来」，下一次任务重生成。
-            let rooms = if publication_policy.uses_process_store()
+            let rooms: anyhow::Result<Option<TaskOrGroupRooms>> = if publication_policy
+                .uses_process_store()
                 && !crate::options::store_mode().is_durable()
             {
-                crate::fast_model::model_db_adapter::frozen_room_calculator().and_then(|rooms| {
-                    if let Some(expected) = expected_room_generation {
-                        let actual = rooms
-                            .as_ref()
-                            .map(|calculator| calculator.resident_generation());
-                        anyhow::ensure!(
-                            actual == Some(expected),
-                            "room resident generation changed before model publication: expected {expected}, actual {actual:?}"
-                        );
-                    }
-                    Ok(rooms)
-                })
+                match task_rooms.as_ref() {
+                    Some(task) => Ok(Some(TaskOrGroupRooms::Task(Arc::clone(task)))),
+                    None => crate::fast_model::model_db_adapter::frozen_room_calculator()
+                        .and_then(|rooms| {
+                            if let Some(expected) = expected_room_generation {
+                                let actual = rooms
+                                    .as_ref()
+                                    .map(|calculator| calculator.resident_generation());
+                                anyhow::ensure!(
+                                    actual == Some(expected),
+                                    "room resident generation changed before model publication: expected {expected}, actual {actual:?}"
+                                );
+                            }
+                            Ok(rooms.map(TaskOrGroupRooms::Group))
+                        }),
+                }
             } else {
                 Ok(None)
             };
@@ -440,7 +488,7 @@ impl ModelRefreshPolicy {
                                 crate::fast_model::model_memory_store::ModelMemoryStore::global(),
                                 dbnum,
                                 &refnos,
-                                rooms.as_ref(),
+                                rooms.as_ref().map(TaskOrGroupRooms::calculator),
                             )
                             .await?
                         }
@@ -469,13 +517,15 @@ impl ModelRefreshPolicy {
                         commits = rows.commits;
                         max_transaction_bytes = batched.max_transaction_bytes;
                         println!(
-                            "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
+                            "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} room_carried={} room_recomputed={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
                             refnos.len(),
                             batched.groups,
                             rows.upserted,
                             rows.removed,
                             rows.receipts,
                             batched.room_edges,
+                            batched.room_carried,
+                            batched.room_recomputed,
                             rows.commits,
                             batched.max_transaction_bytes,
                             batched.failed.len(),
@@ -506,6 +556,7 @@ impl ModelRefreshPolicy {
             report.rows_upserted = rows_upserted;
             report.commits = commits;
             report.max_transaction_bytes = max_transaction_bytes;
+            report.tubes_not_drawn = tubes_not_drawn;
             diagnostic.finish(format!("dbnum={dbnum} completed={:?} failures={:?} rows={} commits={} room_edges={}",
                 report.completed, report.failures, report.rows_upserted, report.commits, report.room_edges_written));
             Ok(report)

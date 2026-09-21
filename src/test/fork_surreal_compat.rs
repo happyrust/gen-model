@@ -2064,6 +2064,7 @@ async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory(
                 manifest_hash: "restart-proof".into(),
                 geometry_count: 0,
                 published_via: "regen".into(),
+                room: None,
             },
         )),
         ..Default::default()

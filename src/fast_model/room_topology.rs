@@ -447,9 +447,7 @@ pub(crate) async fn load_room_groups_from_files(
             source.target_sesno(),
         );
         let key = (dbnum, sesno, composite.clone(), hierarchy);
-        let cache_dir = aios_core::get_db_option()
-            .get_meshes_path()
-            .join("room-input-cache");
+        let cache_dir = crate::options::meshes_dir().join("room-input-cache");
         // 磁盘工件按**本文件**的冻结令牌寻址，不含 composite：一个文件的解析产物只由它
         // 自己的内容 + 会话 + 层级口径决定，把整组文件的 composite 编进键里，等于任一
         // 邻库前进就把没变文件的工件全部作废、整份重解析（ams7997 实测 6–7 s / 文件，

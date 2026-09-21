@@ -63,6 +63,14 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 
 ### D3　`RoomOnly` 整库房间重算：根全集从源文件枚举，冷根从库里读几何行（修订 ADR-073 D13）
 
+> **2026-09-21 合并追记**：`codex/model-projection-cache` 并入主线时发现那边 2026-09-17 已独立落了同一件事（ADR-073 D13「U1 第二半」：
+> `library_roots: Option<&[RefNo]>` 从 `DbSet@T` 枚举、不在投影里的根经 `model_record_reader::durable_records_of_root` 读库、
+> `room_model::durable_room_inputs` 折形状、回执 `covered_roots` / `projected_roots` / `durable_roots`，覆盖面对不上是
+> `RoomRecomputeVerdict::PartialCoverage`——D14 那一格不盖、电平型触发 ③ 下一个任务再点）。合并取了那一套，本节 2026-09-20 落的
+> `durable_room_records_of_root` / `RoomEdgeRecompute::cold_roots` / `RoomOnlyRecompute::Incomplete` / `library_generation_roots(dbnum)`
+> 与源码钉随之退役；**D3 的结论不变**（根全集不从库里猜、冷根从库读几何再算、逐出之后「整库重算 == 从零初始化」仍成立），
+> 下面按 2026-09-20 写的实现细节只作历史记录，现行接线见 ADR-073 D13 与源码钉 17 / 18。
+
 - `recompute_dbnum_room_edges(target, store, dbnum, library_roots, rooms)` 多收一份 `library_roots`：根的全集 = overlay 里有回执的根 ∪
   `library_roots`。在 overlay 里的根拿投影里的记录；不在的（按根数上限逐出过、进程重启后没回填——两种冷根同一形态）
   从库里把几何行读回来（`model_record_reader::durable_room_records_of_root`，与读路的冷读**同一条 SQL**）。两种来源都走
@@ -162,10 +170,11 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 5. vendor e3d-io `db_element.rs`：`DbSet::with_element_cache_limit` / `element_cache_limit` / `element_cache_entries` 计数、`store_parsed` 满则清、
    `forget_cached_db` 饱和减、`fork_without` 重数；钉 `tests/dbset_element_cache_limit.rs::the_element_cache_limit_clears_the_whole_pool_when_full_and_zero_means_unbounded`
    （单开一个测试二进制：`read_stats` 是进程全局的，`dbset_generations.rs` 断言精确的打开次数）。vendor 提交 `d51c3dd`。
-6. `model_record_reader.rs`：`durable_room_records_of_root` + `room_record_from_durable`；钉 `the_durable_room_view_keeps_only_what_the_room_calculator_reads`。
-   `model_db_adapter.rs`：`recompute_dbnum_room_edges(…, library_roots, …)`、`RoomEdgeRecompute::cold_roots`；
-   钉 `a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows`。
-   `batch_worker.rs`：`library_generation_roots` → `run_room_only_recompute`（`Incomplete` 第四处）；源码钉里 `RoomOnlyRecompute::Incomplete` 计 4。
+6. （2026-09-21 合并后改口）冷根读路是 `model_record_reader::durable_records_of_root` → `room_model::durable_room_inputs`
+   （ADR-073 D13 U1 第二半那一套）；`model_db_adapter.rs`：`recompute_dbnum_room_edges(…, rooms, library_roots: Option<&[RefNo]>, RootScope)`、
+   回执 `projected_roots` / `durable_roots` / `covered_roots`；钉 `a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows`。
+   `batch_worker.rs`：`library_generation_roots(dbnum, target_sesno)` → `run_room_only_recompute`，枚举不出 = `RoomRecomputeVerdict::PartialCoverage`。
+   2026-09-20 落的 `durable_room_records_of_root` / `cold_roots` / `RoomOnlyRecompute` 已随合并退役。
 7. `DbOption.toml`：`model_overlay_max_roots = 0` / `model_element_cache_max_entries = 0` 与注释；ADR-073 D13 段与源码钉 18 同步改口；
    CONTEXT「投影 overlay 根数上限」「冷根」「元素缓存元素数上限」。
 8. 估算字节（D5 追加）：`model_memory_store.rs` `ScopeState::record_bytes`（`insert` 加 / `remove_internal` 减）、`approx_record_bytes`、

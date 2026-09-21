@@ -256,8 +256,6 @@ const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_write_state SCHEMALESS;
--- 整库房间重算的欠账（ADR-073 D13，审核 P1-2）：一库一行，行在 = 欠着。
-DEFINE TABLE IF NOT EXISTS dbnum_room_recompute_owed SCHEMALESS;
 -- 回退到水位（ADR-072 D2）按 dbnum 谓词删 `inst_info`，而这张表此前一条索引都没有：
 -- 量测里它是唯一一张落 `Iterate Table` 的模型面表（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md`
 -- §2 / §5）。姐妹表 `inst_relate` / `tubi_relate` 的同名索引在 `pdms_inst::INST_RELATE_INDEX_SQL`
@@ -365,6 +363,13 @@ pub struct DbnumState {
     /// `e3d.room.lookup` 在进程内没有该根 ACK 时（rocksdb 直写不留投影、冷重启）拿它当就绪判据。
     #[serde(default)]
     pub model_room_generation: Option<String>,
+    /// 上面那一格盖章**之后**，本库有根按哪几代常驻模型写过边（ADR-073 D13 追记 F3 落库，2026-09-19）：
+    /// 刷盘一组按 `rooms` 这一代写边、而这一代 ≠ 库上 `model_room_generation` 时，随那一组的行同一笔事务记进来
+    /// （`model_db_adapter::stray_room_generation_statement`）；`Aligned` / `Cleared` 盖章时清空。它替**重启后丢了
+    /// 进程内 ACK** 的那几根说话：库上 == 常驻、③ 不欠、账本没段，而这一格非空 = 有根的边是另一代算的，
+    /// 下一个任务欠一次（`room_recompute::DurableAlignment::owed`）。是模型水位的属性，不是第三枚水位（W3）。
+    #[serde(default)]
+    pub model_room_stray_generations: Vec<String>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
@@ -462,6 +467,9 @@ struct StateRow {
     /// 整库房间边对齐到的常驻代号（ADR-073 D14）；旧行没有这一列 → `None`。
     #[serde(default)]
     model_room_generation: Option<String>,
+    /// 盖章之后按哪几代写过根（ADR-073 F3 落库）；旧行没有这一列 → 空。
+    #[serde(default)]
+    model_room_stray_generations: Option<Vec<String>>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
@@ -471,7 +479,8 @@ struct StateRow {
 const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
      IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
      model_lazy_roots, \
-     model_dead_roots, model_roots_observed_at, model_catalogue_sessions, model_room_generation";
+     model_dead_roots, model_roots_observed_at, model_catalogue_sessions, model_room_generation, \
+     model_room_stray_generations";
 
 #[derive(Debug, Deserialize)]
 struct DatabaseWatermark {
@@ -1337,6 +1346,9 @@ impl DbnumState {
                     model_roots_observed_at: row.model_roots_observed_at,
                     model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
                     model_room_generation: row.model_room_generation,
+                    model_room_stray_generations: row
+                        .model_room_stray_generations
+                        .unwrap_or_default(),
                     initialized: effective.is_some(),
                 })
             })
@@ -1497,6 +1509,7 @@ impl DbnumState {
             model_roots_observed_at: row.model_roots_observed_at,
             model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
             model_room_generation: row.model_room_generation,
+            model_room_stray_generations: row.model_room_stray_generations.unwrap_or_default(),
             initialized: applied.is_some(),
         }))
     }
@@ -1998,7 +2011,6 @@ mod tests {
             WATERMARK_TABLE,
             INFO_TABLE,
             crate::data_interface::write_state::WRITE_STATE_TABLE,
-            crate::data_interface::room_recompute::ROOM_RECOMPUTE_OWED_TABLE,
             "queue_control",
         ] {
             assert!(
