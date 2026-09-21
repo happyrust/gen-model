@@ -79,7 +79,7 @@ D5 说「后端从 `PLANT_ASSET_ROOT = workspace\assets` 供 mesh」，落地时
   `options::tests::meshes_dir_is_the_only_resolver` 扫 `src/`，`cargo test` 侧再守一遍。
 - **出声**：配置里的 `meshes_path` 被压掉时 `run_app` / `run_cli` 启动各打一次
   `⚠ DbOption.toml 里的 meshes_path = … 被环境变量 PLANT_ASSET_ROOT 压过：网格目录按 … 生效`（`options::meshes_dir_notice`），
-  与 ADR-080 D2 的 store_mode 点名同一条纪律；两边同一个目录（含 junction）或没配 `meshes_path` 时不出声。
+  与 ADR-083 D2 的 store_mode 点名同一条纪律；两边同一个目录（含 junction）或没配 `meshes_path` 时不出声。
 - **后果**：设了 `PLANT_ASSET_ROOT` 且 `meshes_path` 指向别处的现场，生成侧落盘从配置目录改到 `<root>\meshes`——此前写的那个目录
   前端与房间本就读不到，老网格留在原地、缺的按需重生。发布包与未设 `PLANT_ASSET_ROOT` 的开发跑法位置不变（`asset_root()` 在 exe
   同级 / 上一级没有 `assets` 时仍回 `assets`）。`lib.rs::instance_lock_skip_reason` 那句「先让两份配置的 `meshes_path` 分家」照旧成立，

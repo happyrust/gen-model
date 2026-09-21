@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / 'output/strt-cpv-20260905/live'
 RUN.mkdir(parents=True, exist_ok=True)
 config = (ROOT / 'DbOption.toml').read_text(encoding='utf-8-sig')
-# 介质不写进配置（ADR-080）：由启动服务的那一侧以 AIOS_STORE_MODE 决定，这条验证跑的是 mem（= 不设）。
+# 介质不写进配置（ADR-083）：由启动服务的那一侧以 AIOS_STORE_MODE 决定，这条验证跑的是 mem（= 不设）。
 overrides = {
     'project_path': 'D:/AVEVA/Projects/E3D3.1',
     'data_face': 'read-through',

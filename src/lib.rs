@@ -188,7 +188,7 @@ static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
 
 static STORE_MODE_NOTICES_PRINTED: std::sync::Once = std::sync::Once::new();
 
-/// 介质那一头所有过期来源的点名（[`options::store_mode_notices`]，ADR-080 D2）。
+/// 介质那一头所有过期来源的点名（[`options::store_mode_notices`]，ADR-083 D2）。
 ///
 /// 放在这里而不是某一条臂里：`run_app` 有三条出口，只有一条走到 `run_cli`——设置模式与
 /// read-through（也就是 `mem` 这个**默认**档）都提前返回。只在 `run_cli` 打的话，最该看见
@@ -1032,7 +1032,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         eprintln!("*** {notice} ***");
     }
     // 介质那一头所有该出声的：环境变量拼错 / 退役写法，以及配置文件里还残留的
-    // `store_mode` / `in_memory_db`（2026-09-18 起不再生效，ADR-080）——逐条打，不许只挑一条。
+    // `store_mode` / `in_memory_db`（2026-09-18 起不再生效，ADR-083）——逐条打，不许只挑一条。
     // 走 `run_app` 进来的那条路上已经打过了，这里是 python 绑定 / l3 夹具直接调时的出口。
     print_store_mode_notices_once();
     if let Some(notice) = crate::options::data_face_notice() {
@@ -1469,7 +1469,7 @@ fn startup_data_wait_is_stalled(
 
 #[cfg(test)]
 mod startup_data_wait_tests {
-    /// 过期的介质来源要在**每一条**启动臂上都被点名（ADR-080 D2）。`run_app` 有三条出口：
+    /// 过期的介质来源要在**每一条**启动臂上都被点名（ADR-083 D2）。`run_app` 有三条出口：
     /// 设置模式、read-through（`mem` 这个默认档）、`run_cli`；点名只挂在最后一条上的话，
     /// 前两条就是「文件里写着 rocksdb、服务按 mem 起来、控制台一个字不提」——正是这次要
     /// 根除的那个形状。所以钉住它在分臂**之前**。
@@ -1731,7 +1731,7 @@ fn print_startup_complete_banner(
     if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
         println!("  *** {notice}");
     }
-    // 介质只由环境变量 AIOS_STORE_MODE 决定（ADR-080）；横幅带上「谁定的」——配置文件里
+    // 介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083）；横幅带上「谁定的」——配置文件里
     // 若还残留着过期的 store_mode，翻文件得出的结论会与这里相反。
     match crate::options::store_mode() {
         crate::options::StoreMode::Mem => println!(
@@ -1770,7 +1770,7 @@ fn print_startup_complete_banner(
 }
 
 /// 把进程全局 `SUL_DB` 接到进程内嵌的 kv-mem 引擎上（[`options::StoreMode::Mem`]，
-/// 由环境变量 `AIOS_STORE_MODE` 选出，ADR-080）。
+/// 由环境变量 `AIOS_STORE_MODE` 选出，ADR-083）。
 ///
 /// 换掉的只是介质。`SUL_DB` 是 `Surreal<Any>`，引擎选择对调用方不可见，所以初始化
 /// 解析、增量窗口写回、模型与房间派生数据全部走原来那条路，只是落点从 rocksdb 变成
@@ -1795,7 +1795,7 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
         eprintln!("内存库预装磁盘 surql 函数未成（{error:#}），等 run_cli 的内置快照兜底");
     }
     println!(
-        "*** 内存模式（这一档由{}定的）：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
+        "*** 内存模式（这一档由 {} 定的）：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
         crate::options::store_mode_source(),
         db_option.surreal_ns,
         db_option.project_name,
@@ -1805,7 +1805,7 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
         "*** 进程一退整库即消失，外部没有端口可连（rvm_verify / /sql 探针 / \
          Capture-*Evidence 与 plant-ui 的「库供数」读面都够不着）。\
          要留证据请以 AIOS_STORE_MODE=rocksdb 启动，并把 v_ip:v_port 指到一台真在跑的库\
-         （介质只认这个环境变量，DbOption.toml 里的 store_mode 不再生效，ADR-080）。"
+         （介质只认这个环境变量，DbOption.toml 里的 store_mode 不再生效，ADR-083）。"
     );
     // 这一句是 2026-09-18 补的：现场改了属性、模型跟着变了、库里的属性行却一动不动，
     // 查了半天才发现服务跑在 mem 上。数据面形态是 store_mode 派生的，不是另一个开关，
@@ -2250,7 +2250,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
         .unwrap_or_else(|| get_db_option_ext().inner);
-    // 分臂之前先把介质那一头的过期来源点名（ADR-080 D2）：下面三条出口里只有一条走到
+    // 分臂之前先把介质那一头的过期来源点名（ADR-083 D2）：下面三条出口里只有一条走到
     // `run_cli`，而「文件里还写着 store_mode」在设置模式与 mem 那两条上一样会骗人。
     print_store_mode_notices_once();
     // Public entrypoint guard: take the deny-share handle before connecting a

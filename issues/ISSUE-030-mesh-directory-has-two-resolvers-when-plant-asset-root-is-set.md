@@ -61,7 +61,7 @@
   `options::tests::meshes_dir_is_the_only_resolver` 扫 `src/` 再守一遍。
 - 配置里的 `meshes_path` 被压掉时 `run_app` / `run_cli` 启动各打一次
   `⚠ DbOption.toml 里的 meshes_path = … 被环境变量 PLANT_ASSET_ROOT 压过：网格目录按 … 生效`（`options::meshes_dir_notice`，
-  与 ADR-080 D2 的 store_mode 点名同一条纪律）。
+  与 ADR-083 D2 的 store_mode 点名同一条纪律）。
 
 ### 风险
 

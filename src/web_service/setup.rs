@@ -6,7 +6,7 @@
 //! 1. **配置真值是 `DbOption.toml` 文件**，本模块只是它的 HTTP 读写口。写盘走 `toml_edit`
 //!    外科手术式改键——注释是决策史、未知键可能是别的版本的键，两者都原样保留；写前
 //!    先落 `DbOption.toml.bak`。唯一的例外是**介质**（`mem` / `rocksdb`）：它不在文件里、
-//!    也不在向导里改，只由环境变量 `AIOS_STORE_MODE` 决定（ADR-080）；向导只展示生效的那一档。
+//!    也不在向导里改，只由环境变量 `AIOS_STORE_MODE` 决定（ADR-083）；向导只展示生效的那一档。
 //! 2. **setup 与应用面均允许远程访问**，默认监听所有网卡。部署方应使用可信网络、
 //!    防火墙或认证代理限制管理入口的访问。
 //! 3. **两个判据各管一件事**：设置模式（启动臂）= 配置无效（`project_path` 缺/不存在，或
@@ -160,7 +160,7 @@ fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()>
             .trim()
             .to_string()
     };
-    // 介质不从文件里读（ADR-080）：它只由环境变量 AIOS_STORE_MODE 决定，与本进程实际跑的
+    // 介质不从文件里读（ADR-083）：它只由环境变量 AIOS_STORE_MODE 决定，与本进程实际跑的
     // 那一档就是同一个值——文件里若还残留 `store_mode`，那一行不生效，这里也不看它。
     let store = crate::options::store_mode();
     let v_port = values
@@ -202,7 +202,7 @@ pub struct SetupConfigPatch {
     pub module: Option<String>,
     pub project_code: Option<i64>,
     pub surreal_ns: Option<String>,
-    /// 已退役（ADR-080）：介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置文件里、也不在向导里改。
+    /// 已退役（ADR-083）：介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置文件里、也不在向导里改。
     /// 旧页面还会带这一格，收下但**不写盘**——写进去的那一行一个字都不生效，只会误导读配置的人。
     #[serde(default)]
     pub store_mode: Option<String>,
@@ -219,7 +219,7 @@ pub struct SetupConfigPatch {
 /// 写盘前的形状校验。只拦「写进去必然坏」的：值域交给探测口与正常启动去说。
 fn validate_patch(patch: &SetupConfigPatch) -> Vec<String> {
     let mut problems = Vec::new();
-    // `store_mode` 不校验：它不写盘（ADR-080），值域交给环境变量那一头。
+    // `store_mode` 不校验：它不写盘（ADR-083），值域交给环境变量那一头。
     if let Some(port) = patch.v_port.as_deref()
         && !port.trim().is_empty()
         && port.trim().parse::<u16>().is_err()
@@ -294,7 +294,7 @@ fn apply_patch(
         };
         set(document, "surreal_ns", item);
     }
-    // `store_mode` 有意不写：介质只由环境变量 AIOS_STORE_MODE 决定（ADR-080），文件里
+    // `store_mode` 有意不写：介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083），文件里
     // 这一行不生效；向导替人写进去，等于在文件里留一句必定与实际相反的话。
     if let Some(ip) = &patch.v_ip {
         set(document, "v_ip", value(ip.as_str()));
@@ -401,7 +401,7 @@ fn subset_values(document: &toml_edit::DocumentMut) -> serde_json::Value {
         "module",
         "project_code",
         "surreal_ns",
-        // `store_mode` 不在子集里（ADR-080）：文件里若残留这一行，由 `setup_get_config` 的
+        // `store_mode` 不在子集里（ADR-083）：文件里若残留这一行，由 `setup_get_config` 的
         // `effective.stale_config_store_mode` 单独点名，不混进「向导管的值」里。
         "v_ip",
         "v_port",
@@ -807,7 +807,7 @@ async fn setup_get_config(
             ctx.config_path.display()
         ))
     })?;
-    // 介质只由环境变量决定（ADR-080）：向导只**展示**这一档与它的出处，不提供改口。
+    // 介质只由环境变量决定（ADR-083）：向导只**展示**这一档与它的出处，不提供改口。
     // 文件里若还残留 `store_mode = "..."`，把原文念给页面，让它提醒人删掉——那一行不生效，
     // 留着只会让读配置的人得出与实际相反的结论。
     let stale_config_store_mode = document
@@ -1400,7 +1400,7 @@ room_key_word = ["-RM"]
 
     /// 空地址不再是「写进去必然坏」的形态：本进程一台库都不拉，没有 bind 这回事，
     /// 空地址只会安全地回设置模式，所以地址照写。而 `store_mode` **一个字都不落盘**
-    /// （ADR-080）：旧页面带过来也只是被收下，文件里原有的那一行原样留着，不改、不补。
+    /// （ADR-083）：旧页面带过来也只是被收下，文件里原有的那一行原样留着，不改、不补。
     #[test]
     fn write_config_never_writes_store_mode_and_accepts_a_blank_address() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1454,7 +1454,7 @@ room_key_word = ["-RM"]
     }
 
     /// PUT 的形状校验：v_port 非数字、监听/展示地址不成形都拦在写盘前；`store_mode` 不在
-    /// 校验之列（不落盘，ADR-080），拼错也不算一条问题。
+    /// 校验之列（不落盘，ADR-083），拼错也不算一条问题。
     #[test]
     fn patch_validation_rejects_malformed_values() {
         let bad = SetupConfigPatch {
@@ -1623,7 +1623,7 @@ room_key_word = ["-RM"]
         );
     }
 
-    /// 向导第②步不再选介质（ADR-080，2026-09-18）：介质只由环境变量 `AIOS_STORE_MODE` 决定，
+    /// 向导第②步不再选介质（ADR-083，2026-09-18）：介质只由环境变量 `AIOS_STORE_MODE` 决定，
     /// 页面只**展示**生效的那一档与出处、提醒文件里残留的过期键，地址那两格随生效档启停。
     /// 写盘那一包里不许再有 `store_mode`——写进去的那一行必定与实际相反。
     /// 两档本身（`mem` 不用地址 / `rocksdb` 须通过「测试连接」）不变。
@@ -1670,7 +1670,7 @@ room_key_word = ["-RM"]
     /// 改名字那一下两条都不红，而页面拿到 `undefined`：介质栏画成默认的 `mem`、
     /// 残留键的提醒整条消失，看上去像「文件里那行已经删了」。
     ///
-    /// 生效档与出处按 `options::store_mode()` 现算（介质只由环境变量决定，ADR-080），
+    /// 生效档与出处按 `options::store_mode()` 现算（介质只由环境变量决定，ADR-083），
     /// 所以这里不比对具体字面值，只钉住「与本进程的裁决同一个答案」；
     /// `stale_config_store_mode` 念的是文件里那一行的原文，没有这一行就是 `null`。
     #[tokio::test]

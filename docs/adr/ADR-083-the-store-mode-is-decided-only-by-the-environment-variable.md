@@ -1,4 +1,4 @@
-# ADR-080：存储介质只由环境变量 `AIOS_STORE_MODE` 决定——`store_mode` 退出配置文件与向导
+# ADR-083：存储介质只由环境变量 `AIOS_STORE_MODE` 决定——`store_mode` 退出配置文件与向导
 
 状态：**已接受**（2026-09-18 用户拍板：「调整 store mode 的参数配置，取代 DbOption 里的参数控制，只允许环境变量控制」。
 **号到提交时复核**——ADR-060 曾撞号两次。）
@@ -61,7 +61,7 @@
 
 护栏反转：`no_db_option_fixture_still_carries_a_store_mode_key` 扫仓根、`db_options/`、`scripts/templates/` 下全部 `DbOption*.toml`，
 任何一份出现未注释的 `store_mode =` / `in_memory_db =` 即红。此前那条「每份夹具必须显式写 `store_mode`」（ADR-074 实施约束 1）
-护的是「不许依赖会翻的默认」；现在默认仍是 `mem` 且不再翻，而文件里那一行**必定**与某次实际启动相反，留着只会骗人。
+护的是「不许依赖会翻的默认」；现在默认是 `rocksdb`（D6 同日修订）且不再翻，而文件里那一行**必定**与某次实际启动相反，留着只会骗人。
 每份夹具把原值记进注释（「此前写的是 rocksdb——配套脚本启动服务时要带 `AIOS_STORE_MODE=rocksdb`」），配套脚本本来就带着这个环境变量。
 
 ### D4　向导只展示、不选、不写

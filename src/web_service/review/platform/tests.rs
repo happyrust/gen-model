@@ -52,7 +52,7 @@ static ENGINE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 async fn ensure_test_db() {
     TEST_DB.get_or_init(|| {
         // 夹具就是一台会蒸发的 `mem://`，而持久化闸（ADR-075）拒的正是 `mem`。介质的默认档 2026-09-18
-        // 起翻成了 rocksdb（ADR-080 D6），所以不设环境变量跑测试时闸并不拒；但会话里只要有
+        // 起翻成了 rocksdb（ADR-083 D6），所以不设环境变量跑测试时闸并不拒；但会话里只要有
         // `AIOS_STORE_MODE=mem` 就会撞上，而这个默认档已经翻过两次——夹具不押在它身上，照旧显式
         // 声明「知道会丢」，走测试专用开关而不是 set_var（d-410）。
         super::super::db::TEST_ALLOW_EPHEMERAL_STORE

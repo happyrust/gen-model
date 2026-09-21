@@ -20,7 +20,7 @@ if ($listener) {
 
 $env:DB_OPTION_FILE = $Config
 # 这个脚本只负责起服务，库由人自己先起好（`Start-Surreal8009.ps1`）：明写 rocksdb，
-# 显式写出来、不靠默认：介质是这一跑的事（ADR-080），默认档 2026-09-18 起是 rocksdb，但默认会翻，
+# 显式写出来、不靠默认：介质是这一跑的事（ADR-083），默认档 2026-09-18 起是 rocksdb，但默认会翻，
 # 而这个脚本要连的就是手工起的那台库——写死它，翻多少次都不影响。
 # 服务在任何档位都不自己拉库（ADR-074）。
 $env:AIOS_STORE_MODE = 'rocksdb'

@@ -14,7 +14,7 @@
 //! 没有 write-behind，由那个函数自己补落，抢不起来。
 //!
 //! **介质由环境变量 `AIOS_STORE_MODE` 说了算，本程序不自己挑**（与 `run_app` 同一个开关，
-//! ADR-080：配置文件不再参与）：`mem` 就接进程内嵌 kv-mem、跑完即消失、不碰任何外部库；
+//! ADR-083：配置文件不再参与）：`mem` 就接进程内嵌 kv-mem、跑完即消失、不碰任何外部库；
 //! `rocksdb` 就连 `DbOption.toml` 里 v_ip:v_port 那台 SurrealDB 真写。让程序自己挑介质，
 //! 回执里那句「落在哪」立刻就会说谎——`PersistTarget` 的判据读的是同一个环境变量。
 //!

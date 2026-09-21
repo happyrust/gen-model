@@ -1,5 +1,17 @@
 # 变更记录
 
+## 2026-09-21
+
+### ADR 改号：「介质只由环境变量 `AIOS_STORE_MODE` 决定」080 → 083，与主线叫法一致
+
+- 主线 `gen-model-refactor` 2026-09-21 把本支的 `8c89728c3` / `b90f9e38d` / `e376ad2bb` 三笔 cherry-pick 过去时发现撞号——主线的 ADR-080
+  是单元级发布（2026-09-16），081 / 082 也已占用，于是那一篇在主线叫 ADR-083（主线 `8ab1277f1`）。本支跟着改，免得同一份决定两个号：
+  文件改名 `ADR-083-the-store-mode-is-decided-only-by-the-environment-variable.md`，代码注释 / 向导文案 / 脚本 / 16 份 `DbOption*.toml` /
+  ADR-068 / 069 / 074 / 075 修订注记 / ISSUE-030 / CONTEXT.md / 本文件里的引用一并改；`scripts/make_increment_arch_ppt.py` 两处「ADR-001 … ADR-080」
+  是范围脚注，不动。顺手：16 份夹具退役注释里落后于 D6 的「不设 = mem」改成「不设 = rocksdb」，ADR-083 D3「现在默认仍是 mem」同句改口；
+  内存模式横幅「由环境变量 AIOS_STORE_MODE 定的」补上两侧空格（主线 `f89254f8b` 同款）。**未做编译验证以外的验证**：改动全在注释 /
+  字面量 / 文档，与主线同一变换（主线 options / setup / review-db / store_mode 单测 99 绿），本支只跑 `cargo check --lib --tests`。
+
 ## 2026-09-20
 
 ### `/model/ensure` 撞上「正在后台生成」回的是 500 不是 409：领域错穿过共享航班后只挂在 `source()` 上，`ensure_error` 改沿链找
@@ -330,7 +342,7 @@
 
 ## 2026-09-18
 
-### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-080）
+### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-083）
 
 - **为什么**：介质此前由三层叠加决定（环境变量 `AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 旧开关
   `in_memory_db` / `AIOS_IN_MEMORY_DB`）。今天现场真踩了：文件写着 `store_mode = "rocksdb"`，上一条命令残留在会话里的
@@ -362,7 +374,7 @@
   渲染出的 TOML 解析通过且不含 `store_mode`。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了；
   发布包冒烟三腿在下面第三条里真跑过了。）
 
-### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-080 D6）
+### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-083 D6）
 
 - **为什么**：上一条落地后真机复验，把两种漏法的代价摆到了一起。兜底 `mem`（原 ADR-074 D3）时服务照常起、模型照常对，
   只有属性行一直不进库、校审域整域 503、重启即清空——2026-09-18 现场为此查了半天，而且是先怀疑增量窗口才找到这儿；
@@ -373,7 +385,7 @@
   「解压即跑」不再靠默认兜：生成的 `Start-AMS.ps1` 不给 `-StoreMode`、调用方环境里也没有时**显式回填**
   `AIOS_STORE_MODE=mem`（给了 `-StoreMode` 以它为准；环境里已有的照旧沿用，不被盖），老启动器 `start-local-release.ps1`
   同样回填。冒烟 A 腿有意仍不设介质——它考的正是「落到默认档也仍然拐进设置模式、向导打得开」这条逃生门。
-  护栏 `the_default_store_mode_is_mem` → `the_default_store_mode_is_rocksdb`；ADR-074 D3 整条被 ADR-080 D6 取代。
+  护栏 `the_default_store_mode_is_mem` → `the_default_store_mode_is_rocksdb`；ADR-074 D3 整条被 ADR-083 D6 取代。
 - **对现场的影响**：配置填好、机器上没库还手工直起服务的，会从「起来了但跑在内存库上」变成「起不来，报连不上」——
   改法是 `$env:AIOS_STORE_MODE='mem'`，失败信息里带着地址。仓内所有起服务的脚本本来就显式带介质，逐个核过，一个不必改；
   服务器那台走 systemd `Environment=`，也不受影响。逃生门仍在：`project_path` 空、或 `v_ip` 空 / `v_port=0` 时照旧进设置模式。
@@ -388,7 +400,7 @@
 
 ### 同日收尾：发布包冒烟三腿真跑了一遍——顺手发现 C 腿自 2026-09-15 起一次都没执行过
 
-- **为什么**：ADR-080 那两条改的正是发布包这条路（`Start-AMS.ps1` 回填 `mem`、冒烟各腿只递环境变量），
+- **为什么**：ADR-083 那两条改的正是发布包这条路（`Start-AMS.ps1` 回填 `mem`、冒烟各腿只递环境变量），
   唯独「三腿真跑一遍」一直挂着未验。真跑之前先读了一遍冒烟门，发现 C 腿（包内 `surreal.exe` 起一台 rocksdb 库、
   服务以 `AIOS_STORE_MODE=rocksdb` 连它）挂在 `if ($IncludeWorkspace)` 上，而那个开关 **2026-09-15 随 workspace 档一起删了**——
   变量再没被赋过值，判断恒假。后果不是报错而是静默：从那天起每份 `release.json` 里 `rocks_leg` 都是
