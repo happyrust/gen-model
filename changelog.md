@@ -2,6 +2,31 @@
 
 ## 2026-09-21
 
+### 本地发布 0.1.30：存储介质只由 `AIOS_STORE_MODE` 决定、漏设落 rocksdb（ADR-083）——0.1.29 之后主线唯一的运行时改动
+
+- 后端 `0.1.30` 构建自 `3c04f0ddb230`（`chore(release): 0.1.30`，**干净树**，`git_dirty:false`）。与 0.1.29（`92ef5365c`，同日 09:38）之间的运行时差只有
+  存储介质那一串：`8a1b30c80` / `21b5d6c64` / `103bee843`（从 `codex/model-projection-cache` cherry-pick，ADR 在主线改号 080 → 083 见 `8ab1277f1`）
+  与横幅空格 `f89254f8b`；其余 `db07e39a1` / `3c42390cc` / `b7f50208c` / `8dd925396` 只动注释、spec、changelog。用户口径见 `docs/release-notes/0.1.30.md`
+  （升级注意：手工直起 exe 的现场要带 `AIOS_STORE_MODE=rocksdb`，不带会去连 `v_ip:v_port`、没库就起不来）。
+- 产物 `releases/ams-local-0.1.30_release.20260921022635.g3c04f0ddb230-runtime.zip`（120.9 MB / 126,758,510 B），
+  SHA-256 `f6749299748f5f0d88d436c99cde6dc43cd21355810f4e2641a069fdf58624e0`（另行独立重算一致）；包内 `aios-database.exe` 自报
+  `0.1.30+release.20260921022635.g3c04f0ddb230`、`git_dirty:false`，SHA-256 `dde87123acee38290511884d590cf1897e7bdac02722601dde55d9e34688df28`
+  （213,222,912 B）。包型 `runtime`，79 个文件：`aios-database.exe` / `web\`（13）/ `bin\surreal.exe` / `resource\`（7）/ `schema\`（48）/
+  出厂 `DbOption.toml`（**没有 `store_mode` / `in_memory_db` 行**——与 0.1.29 包的第一处可见差别）/ `.first-run-pending` / `Start-AMS.ps1`
+  （**新增 `-StoreMode mem|rocksdb`**，不给且环境为空时回填 `mem`）/ `Start-Surreal` / `Rollback` / README / CHANGELOG + `release.json`。
+- Web 与 0.1.29 同源：复用 0.1.26 包（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，脚本校过来源包哈希
+  `195b4280…`），`index.html` / CHANGELOG 取自 plant-ui 干净 worktree `786187947`。
+- 冒烟（口 19099，`-StrictSmoke`）：A 出厂配置起服务 = 设置模式 + 向导页、B 本机配置（`test-worklspace\bin`）全启动 `medium=mem` / `durable=false` /
+  服务没拉 surreal 子进程——两腿通过；C rocksdb 腿在 runtime 档按设计跳过。脚本全程 3 分 35 秒（本地六个 crate 重编 3 分 17 秒，三方依赖走共享 target）。
+- **构建输入（与主工作树隔离，照 0.1.29 的做法）**：`D:\work\plant-code\rel-0.1.30\` 下七个 worktree——gen-model `3c04f0ddb`；vendor 各取 committed HEAD：
+  e3d-io `4a76d2a`、e3d-model `4866468`、e3d-attlib `f37be2e`、plant-mbd `f888a50`、old-aios-core `a438029` + 0.1.26 / 0.1.27 / 0.1.29 都带着的那一处
+  稳定未提交增量（rkyv `validation` 特性 + `pdms_shape.rs` 47 行；两个文件直接拷自主工作树，`git apply --check --reverse` 主工作树 diff 为空 = 逐字相同）；
+  plant-ui `786187947`。`cargo metadata --locked` 在这棵树上通过，Cargo.lock 只动了自身版本号那一行。**没进包**的在途改动：主工作树里另一路会话的
+  `attribute_history` / `unit_versions` / `model_record_reader` / `handlers` 等 6 文件；e3d-io 5 文件、e3d-model 5 文件、e3d-attlib 2 文件、plant-mbd 15 文件。
+  打包完七个 worktree 已删。
+- **未验**：rocksdb（durable）真库路径本包没跑（C 腿按档跳过）；`cargo test --lib` 没在打包树上重跑（主线 options / setup / review-db / store_mode
+  相关 99 条 09:5x 在主工作树上跑过，见上一节追记）；plant-ui 侧无变化。
+
 ### 本地发布 0.1.29：主线自 0.1.27 后的第一个包——ADR-081 版本与历史只读接口、属性面板对齐 E3D、ADR-082 缓存上限；跳过 0.1.28（该号已被 model-cache 分支的包占用）
 
 - 后端 `0.1.29` 构建自 `92ef5365cb34`（`chore(release): 0.1.29`，**干净树**，build_id 不带 `.dirty`）。版本号从 0.1.27 **跳到 0.1.29**：
