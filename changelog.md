@@ -84,6 +84,17 @@
   重取本仓看不到，要问 PMS 侧）；③ §8 六条的 JWT 校验挡住的只是「没先调 `/api/auth/token`」，而它**不要密码**——真正的信任边界是
   谁能打到 `/api/auth/token`，收紧的抓手是 nginx 对这条路径按 PMS 出口 IP 白名单（本仓与 plant3d-web 都没做，待拍板）。
   `DbOption.toml` 注释与 `review-api.md` §1.1 的对应两句同步改口。
+- **落地（同日 10:1x，用户拍板选 (a)「密钥写进生成的 DbOption.toml，和旧 :3100 一样」）**：在 `deploy/backend-20260918` 分支提交
+  `329ec2a17`（本地，未 push；worktree `.scratch/wt-deploy-backend-20260918`）：`render_dboption.py` 追加第四段 `[model_center]`
+  （`JWT_SECRET` 必填 / 非默认串 / ≥16 字符，否则拒绝渲染而不是默默回落；`json.dumps` 转义；写完 600；`tomllib` 自检；日志只报长度）；
+  `install_backend.sh` 去掉 `service.env` 写入与单元里的 `EnvironmentFile=`，装前 `awk` 核包里有 `[model_center].token_secret` 且不是
+  空串 / 默认串否则 `die`，`install -m 600`，备份也 600，发现旧 `service.env` 就删；`deploy-linux-ubuntu.yml` 把 `REVIEW_JWT_SECRET`
+  改必填、喂给 Render 步、diff 遮掉 `+token_secret` 行、不再写 `bundle/jwt_secret`；`rehearse-backend-stack.yml` 彩排密钥
+  `rehearsal-only-<run_id>` 走同一条渲染路，Inspect 步改验 600 / 在场 / 无 `service.env` / 无 `EnvironmentFile`，再用该密钥自签
+  HS256 打 `/api/users/me`（200）、默认串自签（401）、`/api/auth/token` 领的（200）——首发彩排只验了 env 文件写成 600。本机验证：
+  两份 YAML 解析、探针可编译、render 四种坏输入全拒、怪字符密钥 TOML 往返一致、awk 门三份样本 OK/die/die、`bash -n` 过、探针逻辑对生产
+  试跑 401/401/200。**GitHub 上目前没有 `REVIEW_JWT_SECRET`**（`gh secret list` 只有 `DEPLOY_REMOTE_PASS` / `GH_PAT`）——设上它
+  （值取服务器 `[model_center].token_secret` 则已发 token 不失效）再推；推上去不带 `[deploy]` 是空跑，空跑也会在渲染步因缺 secret 而红。
 
 ## 2026-09-20
 
