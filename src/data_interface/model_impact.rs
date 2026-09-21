@@ -6,12 +6,15 @@
 //!
 //! 新语义（对齐 `plant-model-gen`）：
 //! - 未知属性 / UDA 一律**保守触发**（漏判=正确性 bug；误判=多算一次，成本可控）；
+//! - **WNOEVT 事件门**（core `putAtt` 流程里 DCHC 之前的第一道门）：字典置 `wnoevt` 的属性被写时
+//!   core 连变更事件都不发，故增量判决把它**无条件短路**为「不动模型」，不再问 DCHC / 读取集合两票
+//!   （[`attribute_no_event`]，attlib.dat 离线解出，全 7 个是激光/照明/温度属性，均不在模型 schema）；
 //! - 「不影响模型、可跳过」要两票：E3D 字典 DCHC = 0 **且** 生成器不读它
 //!   （[`attribute_is_metadata_only`]，2026-09-15 S6；此前只放行 `NAME`/`DESC`/`PURP`/`FUNC`/`LCHKDA`）；
 //! - noun/类型不再作为分类前置门，只用于最终生成器路由。
 //!
 //! 属性清单来源：AVEVA Everything3D `core.dll` / `Core3D.dll` 逆向（`DCHC/EVALAT`
-//! 设计变化层，非 `wnoevt` 事件门）+ 运行库 `att_meta`(702) 交叉校验（100% 命中），
+//! 设计变化层为主，`wnoevt` 事件门作 DCHC 之前的短路）+ 运行库 `att_meta`(702) 交叉校验（100% 命中），
 //! 详见 `plant-model-gen/docs/reverse/core_dll_noun_att_model_update.md` §13/§14。
 
 use std::collections::{HashMap, HashSet};
@@ -373,6 +376,21 @@ pub fn raw_plcf(raw_name: &str) -> Option<bool> {
         .then(|| plcf_flagged_names().contains(name.as_str()))
 }
 
+/// E3D 字典 `WNOEVT` 字段（299311034）：core `putAtt` 流程里 **DCHC 之前的第一道门**——
+/// `DB_Attribute::wnoevt`（`core.dll 0x58D5290`）为真的属性被写时 `DB_ElementChangesPlugger`
+/// 一个变更事件都不广播（`sub_55BB6C3` 读进 `+184`）。因此这类属性改动 core 侧没有任何下游重算，
+/// 我们的增量判决也应把它当作「什么都不用动」，且这判定**在 DCHC / 读取集合两票之前**、无条件成立。
+///
+/// 名单由 `attlib.dat` 纯离线解出（`e3d_attlib::dict::AttrDict` / `output/gen_wnoevt_flags.py`，
+/// 解 DCHC 4270/4270 · PLCF 58/58 逐条校准后同批导出 `wnoevt_flags.json` 随源码入库）。E3D 3.1 全字典
+/// 只有 7 个属性置了它（`DPOSCA EVITCA EVITCP EXTEMP LIGTCA LIGTCP TEMPLI`），全是激光/照明/温度属性，
+/// 没有一个在模型生成的 schema 或读取集合里——所以本门当前对模型语料是恒等变换（回执基线不变），
+/// 只在这些「静默」属性万一出现时把它们从「未知→保守重算」纠正为「不动模型」。
+/// [`tests::wnoevt_gate_is_disjoint_from_reads_and_geometry`] 钉住这份不变量。
+pub fn attribute_no_event(raw_name: &str) -> bool {
+    wnoevt_no_event_names().contains(&normalize_attribute_name(raw_name))
+}
+
 /// gen-model 侧的模型面读点模块（开发计划 2026-09-15 D2 / S5）：目录求值入口、房间、结构连接、电缆端点、
 /// direct 窗口规划器与刚体前移。生成读取集合的第二半从这些文件里扫（第一半是 e3d-model 整个 `src`，
 /// 由它自己的 `data/attribute-read-set.json` 交付）。与 `output/gen_read_set.py::GEN_MODEL_READ_MODULES`
@@ -487,6 +505,21 @@ fn plcf_flagged_names() -> &'static HashSet<String> {
     })
 }
 
+/// `wnoevt_flags.json` 里 `WNOEVT == 1` 的属性名集合（事件门），懒解析一次。
+/// 与 DCHC/PLCF 同批由 `output/gen_wnoevt_flags.py`（及 `e3d_attlib::dict`）从 `attlib.dat` 导出。
+fn wnoevt_no_event_names() -> &'static HashSet<String> {
+    #[derive(Deserialize)]
+    struct WnoevtFlags {
+        names: Vec<String>,
+    }
+    static TABLE: OnceLock<HashSet<String>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let flags: WnoevtFlags = serde_json::from_str(include_str!("wnoevt_flags.json"))
+            .expect("wnoevt_flags.json 随源码入库，必须是合法 JSON");
+        flags.names.into_iter().collect()
+    })
+}
+
 /// 「只改了这个属性，模型一个字都不用动」的**两票**判据（direct 窗口规划器的元数据门，
 /// 2026-09-08 立、2026-09-15 S6 改口径）：E3D 字典的设计变化码说它是 0（core 自己也不为它重画，
 /// `IDCHNG` 门），**并且**生成器不读它（[`generation_read_set`]：e3d-model 整个 `src` 与 gen-model
@@ -511,6 +544,11 @@ fn plcf_flagged_names() -> &'static HashSet<String> {
 /// 两态全等 0 红。第二票照旧问读取集合（守卫 `stamp_literals ∩ names = ∅`）。`UDA:<id>` 与任何别的字典
 /// 没有的名字仍不放行：例外只认那张表。
 pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
+    // WNOEVT 事件门（DCHC 之前的第一道门）：core 对置位属性不发任何变更事件，
+    // 直接短路为「不动模型」，不再问 DCHC / 读取集合两票（见 [`attribute_no_event`]）。
+    if attribute_no_event(raw_name) {
+        return true;
+    }
     (raw_dchc_code(raw_name) == Some(0) || attribute_is_cache_stamp(raw_name))
         && !generation_reads_attribute(raw_name)
 }
@@ -2636,6 +2674,47 @@ mod tests {
             callers.is_empty(),
             "PLCF 只作报表 / 探针，不进任何判决（D4）；有人开始消费它了：{callers:?}"
         );
+    }
+
+    /// WNOEVT 事件门（用户 2026-09-17 拍板接进增量判决）：core 对置位属性不发变更事件，
+    /// [`attribute_is_metadata_only`] 在 DCHC 之前无条件短路它。这道门是 core `putAtt` 的第一关，
+    /// 但对模型语料必须是恒等变换——本测试钉住：全部 7 个 WNOEVT 属性既不被生成器读、也不携带任何
+    /// 正设计变化码（DCHC 0 或 None），所以无条件短路它不会漏算任何几何输入（守住「宁多勿漏」）。
+    #[test]
+    fn wnoevt_gate_is_disjoint_from_reads_and_geometry() {
+        let names = wnoevt_no_event_names();
+        // 快照口径：E3D 3.1 字典恰好 7 个（变了要重新确认它们仍非模型属性）。
+        assert_eq!(names.len(), 7, "WNOEVT==1 的条数漂移");
+        for name in ["DPOSCA", "EVITCA", "EVITCP", "EXTEMP", "LIGTCA", "LIGTCP", "TEMPLI"] {
+            assert!(names.contains(name), "{name} 应在 WNOEVT 名单里");
+            // 事件门命中 → 无条件走「不动模型」，且这判定在 DCHC 之前（归一化 / att. 前缀同答）。
+            assert!(attribute_no_event(name), "{name}");
+            assert!(attribute_no_event(&format!("att.{name}")), "att.{name}");
+            assert!(
+                attribute_is_metadata_only(name),
+                "{name} 事件门应短路为不动模型"
+            );
+            // 不动模型的安全前提：生成器不读它、字典也没有正的设计变化码（否则短路会漏算）。
+            assert!(
+                !generation_reads_attribute(name),
+                "{name} 竟被生成器读取——无条件短路会漏算，需人工复核"
+            );
+            assert!(
+                matches!(raw_dchc_code(name), None | Some(0)),
+                "{name} 竟带正 DCHC 码——不该无条件短路"
+            );
+            // 端到端：单独改这一个 WNOEVT 属性 → 增量判决 Skip（接进 DCHC 之前那道短路的净效果；
+            // 没接门时这些名字落 Unknown 会保守 Regen）。
+            assert_eq!(
+                classify_operation_impact(&modified_operation(name)),
+                OperationImpact::Skip,
+                "{name} 应短路为 Skip"
+            );
+        }
+        // 模型属性不受影响：事件门对它们一律 false。
+        for name in ["POS", "ORI", "BORE", "DIAM", "HEIG", "NAME", "UDA:7"] {
+            assert!(!attribute_no_event(name), "{name} 不该命中 WNOEVT 事件门");
+        }
     }
 
     /// S6 真值表（开发计划 2026-09-15 D2）：元数据门要两票——字典 DCHC=0 **且** 生成器不读。
