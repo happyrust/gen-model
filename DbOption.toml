@@ -351,3 +351,23 @@ model_overlay_max_roots = 50000
 model_element_cache_max_entries = 200000
 model_root_inflight_max = 2
 model_full_rebuild_enabled = true
+
+#【新增 2026-09-21】[model_center] —— 校审域 / PMS 入站 JWT 的密钥与有效期
+#（web_service/review/auth.rs::JwtConfig::from_config_file）。这一段之前从来没进过模板，生产也没配过。
+# 取值口径：配置文件能载入（DB_OPTION_FILE → db_options/DbOption → DbOption，服务器上恒成立）时，密钥**只**读
+# model_center.token_secret，环境变量 JWT_SECRET 这时**不生效**（找不到任何配置文件才读它）；本段不写 = 回落代码里的
+# default-jwt-secret-key（启动 warn 一句）——知道这个默认串的人不连服务器就能签出任意 project_id / user_id / role 的 token，
+# 直接过 /api/review/* 与 /api/users/*。token_expiration_hours 不写 = 24。同段还认 frontend_base_url（embed-url 前端基址链
+# 里的第二档，review/platform/config.rs；一般配 [platform_auth].review_web_base_url 就够）。
+# 生产 123.57.182.243:8022 自 2026-09-21 00:31 起手工配了本段，值 = 旧 :3100（plant-model-gen）同一把 token_secret，
+# PMS 手里按旧密钥签的 token 换址后照旧有效。
+# 两条提醒：
+#   1. 密钥值不进仓库，按站点在服务器那份 DbOption.toml 里填。github/deploy/backend-20260918 分支的
+#      deploy/linux/install_backend.sh 每次部署整份覆盖 /opt/aios-database/DbOption.toml，render_dboption.py 只追加
+#      [review_auth] / [platform_auth] / [review_attachments]，它写进 service.env 的 JWT_SECRET 又不在上面那条口径里——
+#      重部署前先把本段补进渲染，否则密钥回落默认串、PMS 与前端手里的 token 全 401。
+#   2. TOML 里 [表] 之后的裸键都归到那张表下。本文件其余键全是顶层键，scripts/Invoke-SiteDbnumParse.ps1 与部署渲染也都在
+#      文件末尾追加顶层键——所以本段在这里只以注释形态出现；真要写活的表头，放到所有顶层键之后，并且之后别再追加裸键。
+# [model_center]
+# token_secret = "<按站点填，不要提交真值>"
+# token_expiration_hours = 24

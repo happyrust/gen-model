@@ -1,5 +1,42 @@
 # 变更记录
 
+## 2026-09-21
+
+### 校审域 JWT 密钥 `[model_center].token_secret`：生产 `:8022` 此前跑在代码默认串上，已补成旧 `:3100` 同一把；模板与规格补上这一格，并记下部署管线会把它冲掉
+
+- **为什么**：2026-09-21 00:2x 退役 `:3100` 前，对照旧 plant-model-gen 的 API 口径逐项核 `:8022`，发现 `/opt/aios-database/DbOption.toml`
+  没有 `[model_center]`、进程环境也没 `JWT_SECRET`、`service.env` 不存在——而 `review/auth.rs::JwtConfig::from_config_file` 的口径是：
+  配置文件能载入就**只**读 `model_center.token_secret`，读不到直接回落 `default-jwt-secret-key`，`JWT_SECRET` 环境变量此时根本不看
+  （`auth.rs:152-168`；`JwtConfig::default()` 才读环境变量，只在找不到任何配置文件时走到）。后果两条：知道默认串的人不连服务器就能
+  签出任意 `project_id / user_id / role` 的 token 直接过 `/api/review/*` `/api/users/*`；PMS 手里按旧 `:3100` 密钥签的 token 换址到
+  不带端口后一律 401。仓库里 `DbOption.toml` 模板、`docs/specs/review-api.md`（写的是「密钥来自 `JWT_SECRET` 环境变量」）与部署渲染
+  都没有这一格——从来没人给新栈配过。
+- **改动**：
+  - **服务器（会话 fable-5-1-25，00:31，不在仓库里）**：备份 `DbOption.toml.bak-20260920T163130Z` 后，把旧 `:3100`
+    `[model_center].token_secret` 那一行原样追到 `/opt/aios-database/DbOption.toml` 末尾，`systemctl restart aios-database`。
+    真机自签 HS256 探针：旧密钥签的 token `GET /api/users/me` / `/api/review/tasks?limit=1` **200**，`default-jwt-secret-key` 签的
+    **401 InvalidSignature**。回滚一句：`cp -p /opt/aios-database/DbOption.toml.bak-20260920T163130Z /opt/aios-database/DbOption.toml && systemctl restart aios-database`。
+  - **`DbOption.toml`（本仓模板）**：末尾追加 `[model_center]` 的**注释形态**模板（`token_secret` / `token_expiration_hours`）与取值口径、
+    生产现状、两条提醒。只写注释不写活表头：本文件其余键全是顶层键，`scripts/Invoke-SiteDbnumParse.ps1` 与部署渲染都在文件末尾追加
+    顶层键，活的 `[表]` 会把它们吞进 `model_center.*`。
+  - **`docs/specs/review-api.md` §1.1**：「密钥来自 `JWT_SECRET` 环境变量」改成真实口径（配置文件能载入 → 只读 `[model_center].token_secret`，
+    `JWT_SECRET` 不生效；无配置文件才读环境变量），并记下生产现状与部署管线的缺口。
+- **验证**：`tomllib` 解析改后的模板通过、顶层键集合与改前逐字相同、没有 `model_center` 表（注释形态）；把 `github/deploy/backend-20260918`
+  的 `render_dboption.py` 拿到临时目录对改后模板渲染一遍，产物仍是合法 TOML、三段追加照旧；`review/auth.rs:152-168` 逐行核过口径。
+  生产 01:52 复核 `/api/v1/health` ok / core ready / open 29，三套真机脚本（`verify-gen-model-v1.ps1` 9/9、`pms-contract-sequence.ts` 7/7、
+  `review-annotation-flow-contract.ts` 35/35）全过。**未验证**：没有从零走一遍部署 workflow。
+- **没做、要人拍板（部署管线在 `github/deploy/backend-20260918` 分支，未并入本分支；生产二进制 `c04a9e558` 也在那条线上）**：
+  1. `deploy/linux/install_backend.sh:144-147` 每次部署**整份覆盖** `/opt/aios-database/DbOption.toml`（先备份），`render_dboption.py`
+     只追加 `[review_auth]` / `[platform_auth]` / `[review_attachments]`——下一次走 workflow 部署，服务器上手工补的 `[model_center]` 就没了，
+     密钥回落默认串、所有已签 token 失效。
+  2. 同脚本把 `secrets.REVIEW_JWT_SECRET` 写成 `service.env` 的 `JWT_SECRET` 并挂 `EnvironmentFile=`（`install_backend.sh:184-195,208`），
+     但按上面的口径它**永远不会被读到**（`DB_OPTION_FILE` 指的配置一定能载入）；09-18 彩排 `rehearse-backend-stack.yml:217` 只验了
+     「文件写成 600」，没验「服务用了它」。
+  两条修法二选一或都做：(a) `render_dboption.py` 追加 `[model_center]`，`token_secret` 从 `REVIEW_JWT_SECRET` 渲染进去（密钥落在 644 的
+  `DbOption.toml` 里，与 `service.env` 600 的初衷相悖）；(b) `JwtConfig::from_config_file` 让 `JWT_SECRET` 环境变量压过
+  `model_center.token_secret`（与本仓 `AIOS_*` 环境变量压配置键的惯例一致，`service.env` 那条路就通了；`warn_if_default_jwt_secret`
+  的告警文案也该一起改口）。
+
 ## 2026-09-20
 
 ### ADR-082 · 进程内缓存按数量设上限：模型投影 overlay 按根数逐出已落盘的根、生成用元素缓存按元素数满则清（两个上限默认 0 = 不限）；`RoomOnly` 整库房间重算改口——根全集从源文件枚举、不在 overlay 里的冷根从库里读几何行
