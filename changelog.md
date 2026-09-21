@@ -458,7 +458,15 @@
   验证（2026-09-21，同一工作树里另一会话有在途改动）：`cargo check --lib --tests` 0 error；`cargo test --lib -- options:: web_service::setup::
   web_service::review::db:: store_mode` **99 passed / 1 failed**——唯一那条红是护栏 `no_db_option_fixture_still_carries_a_store_mode_key`
   点名了**未入库**的本机文件 `DbOption-slyk.toml: store_mode = "mem"`（另一会话的探针配置，不在任何提交里），正是这条护栏该抓的东西；
-  入库的 16 份夹具无一命中。**未验**：真机起服务看启动横幅与向导第②步。
+  入库的 16 份夹具无一命中（那份本机文件随后按 ADR-083 改掉：删行、`_slyk_verify_partial.ps1` 改带 `AIOS_STORE_MODE=mem`，护栏转绿）。
+  真机（debug 二进制 `0.1.29+g37341392b`，临时配置复制自仓根、端口 8047、**故意留一行** `store_mode = "rocksdb"`）：
+  ①`AIOS_STORE_MODE=mem` 起服务 → 横幅「内存模式（这一档由环境变量 AIOS_STORE_MODE 定的）」+「⚠ DbOption.toml 里的 store_mode =
+  "rocksdb" 已不再生效……本进程按 mem 跑……**两边不是同一档**：启动前设 AIOS_STORE_MODE=rocksdb」；`/health.sul_db` =
+  `{medium: mem, endpoint: embedded:mem, durable: false}`、`data_face: read-through`；`GET /api/v1/setup/config` 的 `effective` =
+  `{store_mode: mem, store_mode_source: 环境变量 AIOS_STORE_MODE, stale_config_store_mode: rocksdb}`；`/setup.html` 第②步
+  `name="store_mode"` 的 radio 0 个、「当前介质：内存库（mem）　由 环境变量 AIOS_STORE_MODE 决定」与残留键提醒都在。
+  ②不设环境变量 → 按默认 rocksdb 去连 `ws://localhost:8009`，端口上没库，`SurrealDB 连接失败` exit 1（D6 要的那种当场报错），
+  残留键同样被点名、因两边同档不喊「不是同一档」。
 
 ### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
 
