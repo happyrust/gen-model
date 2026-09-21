@@ -19,7 +19,7 @@
 //! | `test_workflow_verify_missing_form_returns_404` | `active` + 主单据不存在也走上面那条放行分支 | 改用 `agree` 复现 404；另加一条钉住 `active` 的放行 |
 //! | `test_workflow_verify_agree_owner_mismatch_returns_structured_diagnostics` | 外部驱动模式（claims 无 `workflow_mode`）**跳过** owner 校验（单测 `external_workflow_verify_skips_owner_match` 同口径） | 断言外部模式放行；OWNER_MISMATCH 由 `workflow_sync::tests` 的内部模式单测覆盖 |
 //! | `test_workflow_verify_agree_returns_annotation_gate_block_without_mutation` | verify 不读 `next_step`，诊断里 `next_step` / `requested_next_step` 为 None | 这两格为 None，其余不变 |
-//! | `test_verify_active_blocks_when_open_exists` / `test_verify_return_blocks_when_no_problem` | verify 对 `active` / `return` **不跑**批注闸门（`verify_action_intent_for_node`） | 断言放行 |
+//! | `test_verify_active_blocks_when_open_exists` / `test_verify_return_blocks_when_no_problem` | verify 对 `active` / `return` **不跑**批注闸门（`verify_action_intent_for_node`） | 断言放行。**2026-09-17 c8d5f6b92 之后 `active` 那一半改回来**：`annotation_check_intent_for_action` 把 `(Active, _)` 收进 ActiveSubmit，verify 带 open 批注 → 200 + passed=false + `ANNOTATION_CHECK_FAILED`（3.6.1）；`return` 照旧放行 |
 //! | `test_sync_return_blocks_without_problem_annotation` | sync `return` 不跑批注闸门；旧断言实际撞到的是 REVIEW_FORM_NOT_FOUND | 改为 sync `agree` + 待确认批注 → 409 `ANNOTATION_CHECK_FAILED`，任务不变 |
 //! | `test_sync_actor_name_default_falls_back_to_id` | 种子只建 task 不建 review_forms，事务必 409 REVIEW_FORM_NOT_FOUND | 种子补一条主单据存根（真实链路里 embed-url 会先建它） |
 //! | 两条 `#[ignore]`（持久化 role 复用 / 回传既有 task） | 旧端要外部库 | 有 `mem://` 就能跑，去掉 ignore |
@@ -1069,10 +1069,13 @@ async fn post_sync(body: serde_json::Value) -> (StatusCode, SyncWorkflowResponse
     (status, payload)
 }
 
-// 3.6.1（旧名 test_verify_active_blocks_when_open_exists）：verify 对 active 不跑批注闸门，
-// 即使有 open 批注也放行——闸门留给 sync agree（`verify_action_intent_for_node`）。
+// 3.6.1：verify 对 active 走 ActiveSubmit 批注闸门（c8d5f6b92，2026-09-17：`annotation_check_intent_for_action`
+// 把 `(Active, _)` 收进 ActiveSubmit，verify 与 sync 共用一张表——此前 Active => None 被整个跳过，JH 驳回后
+// SJ 不回复新批注就能原样重提）。带一条 open（没人回过的）批注 → soft block：200 + passed=false +
+// ANNOTATION_CHECK_FAILED，任务留在 sj、诊断指向 jd。只卡 open：fixed / pending / rejected 都算回过，见 3.6.2。
+// （移植时曾按当时 handler 的行为断言成「不跑闸门、放行」，c8d5f6b92 之后那条断言落后于 handler，改回来。）
 #[tokio::test]
-async fn test_verify_active_skips_annotation_gate_even_with_open() {
+async fn test_verify_active_blocks_when_open_exists() {
     let form_id = "FORM-V3-ACTIVE-OPEN";
     seed_task_with_record(
         form_id,
@@ -1094,11 +1097,29 @@ async fn test_verify_active_skips_annotation_gate_even_with_open() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload.code, 200);
+    assert_eq!(
+        payload.error_code.as_deref(),
+        Some("ANNOTATION_CHECK_FAILED")
+    );
     let data = payload.data.expect("verify data");
-    assert!(data.passed, "{data:?}");
+    assert!(!data.passed, "{data:?}");
     assert_eq!(data.action, "active");
-    assert_eq!(data.recommended_action, "proceed");
-    assert!(payload.annotation_check.is_none());
+    assert_eq!(data.block_code.as_deref(), Some("ANNOTATION_CHECK_FAILED"));
+    assert_eq!(data.current_node.as_deref(), Some("sj"));
+    assert_eq!(data.task_status.as_deref(), Some("draft"));
+    assert_eq!(data.expected_next_node.as_deref(), Some("jd"));
+    assert_eq!(data.recommended_action, "block");
+    assert!(data.reason.contains("未处理批注"), "{}", data.reason);
+    assert!(payload.annotation_check.is_some());
+
+    // verify 不落库：任务一字不动，仍在 sj / draft。
+    let task = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("seeded task");
+    assert_eq!(task.current_node, "sj");
+    assert_eq!(task.status, "draft");
 
     cleanup_form(form_id).await;
 }
