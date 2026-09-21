@@ -164,6 +164,17 @@ fn update_mesh_digest(hash: &mut Sha256, mesh: &PlantMesh) {
     }
 }
 
+/// 读回一份落盘的 mesh。老的 rkyv 读取器在某些截断输入上会 panic：损坏的缓存文件是普通的
+/// 读取失败，不是让进程停下的理由，所以在这里把 panic 接成错误。刚体前移含旋转时重算盒
+/// （`e3d_model_service::rigid_motion_mesh_bounds`）走这条路读记录自己的网格。
+pub(crate) fn read_mesh_file(path: &Path) -> anyhow::Result<PlantMesh> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PlantMesh::des_mesh_file(&path)
+    }))
+    .map_err(|_| anyhow::anyhow!("{} mesh 文件损坏", path.display()))?
+    .with_context(|| format!("read mesh {}", path.display()))
+}
+
 /// 把落盘的 mesh 拿回它自己的内容 id 上对一遍：`e3d_baked_v2_<sha256>` 的那一档，id
 /// 就是内容摘要，重算一遍就知道文件是不是还是当初那份。
 ///

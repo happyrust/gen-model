@@ -329,5 +329,40 @@ model_regen_execution_group = 16
 # execution group 的根数，本预算只在一页异常肥时提前封片——切片预算不能只按根数算，
 # 一个 BRAN 和一个 EQUI 的元素数差两个数量级。单根不拆（根是发布的原子单位）。
 model_memory_slice_elements = 8000
+#【新增 2026-09-20，d-149 / ADR-082】两道按数量的内存闸。写 0 = 不限；键不写 = 下面这两个默认值
+#（同日 mem 档实测定的：4 库 7,743 根 / 59,929 条记录的 overlay 106.5 MB ≈ 13.8 KB/根；元素缓存 3.6–4.7 KB/元素，
+#  7997 单库整库一遍装到 176,982 条 643.8 MB；RSS 2.04 GB 里这两块合计 0.93 GB）：
+# model_overlay_max_roots —— 进程内模型投影 overlay 最多常驻多少个根。超了按最近一次盖回执的先后
+#   逐出「已 durable ACK 且与回执逐字相符」的根（整根记录 + 回执 + ACK 一起掉），未落盘的不丢；
+#   只在 rocksdb 介质下生效，逐出后读路直读 RocksDB、便宜路回退 regen、RoomOnly 整库房间重算从库读冷根。
+#   50,000 根 ≈ 0.7 GB：整套 AMS 样例 MDB 装得下六遍，「AMS 全量 12 万根」量级下常驻压到四成。
+#   看现值：/health.model_cache.overlay（根数 / 估算字节 / 累计逐出）；环境变量 AIOS_MODEL_OVERLAY_MAX_ROOTS 压过本键。
+# model_element_cache_max_entries —— 生成用 DbSet 池级元素缓存最多装多少个元素，满了整张清（每份 DbSet
+#   各算，进程里 = 库数 × 这个数）。200,000 条 ≈ 0.7–0.95 GB / 库：样例里最大的 7997 整库一遍只装到 177k，
+#   一遍生成不会清一次，清的是长驻之后越过一整遍的累积。看现值：/health.model_cache.element_cache；
+#   环境变量 AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES 压过本键；AIOS_MODEL_ELEMENT_CACHE=false 时无意义。
+model_overlay_max_roots = 50000
+model_element_cache_max_entries = 200000
 model_root_inflight_max = 2
 model_full_rebuild_enabled = true
+
+#【新增 2026-09-21】[model_center] —— 校审域 / PMS 入站 JWT 的密钥与有效期
+#（web_service/review/auth.rs::JwtConfig::from_config_file）。这一段之前从来没进过模板，生产也没配过。
+# 取值口径：配置文件能载入（DB_OPTION_FILE → db_options/DbOption → DbOption，服务器上恒成立）时，密钥**只**读
+# model_center.token_secret，环境变量 JWT_SECRET 这时**不生效**（找不到任何配置文件才读它）；本段不写 = 回落代码里的
+# default-jwt-secret-key（启动 warn 一句）——知道这个默认串的人不连服务器就能签出任意 project_id / user_id / role 的 token，
+# 直接过 /api/review/* 与 /api/users/*。token_expiration_hours 不写 = 24。同段还认 frontend_base_url（embed-url 前端基址链
+# 里的第二档，review/platform/config.rs；一般配 [platform_auth].review_web_base_url 就够）。
+# 生产 123.57.182.243:8022 自 2026-09-21 00:31 起手工配了本段，值沿用旧 :3100（plant-model-gen）那一把。注意 PMS **不持有**
+# 密钥：它的 S2S token 是先调我们的 POST /api/auth/token 取的，所以密钥只需本机签 / 验一致、跨重启与重部署稳定，值本身
+# 随便一串强随机都行；换密钥 = 已发的 token 全部失效，PMS 重取、前端重登即可。
+# 两条提醒：
+#   1. 密钥值不进仓库，按站点在服务器那份 DbOption.toml 里填。github/deploy/backend-20260918 分支的
+#      deploy/linux/install_backend.sh 每次部署整份覆盖 /opt/aios-database/DbOption.toml，render_dboption.py 只追加
+#      [review_auth] / [platform_auth] / [review_attachments]，它写进 service.env 的 JWT_SECRET 又不在上面那条口径里——
+#      重部署前先把本段补进渲染，否则密钥回落默认串：已发 token 全 401（重取后又能用），而默认串谁都能离线伪造。
+#   2. TOML 里 [表] 之后的裸键都归到那张表下。本文件其余键全是顶层键，scripts/Invoke-SiteDbnumParse.ps1 与部署渲染也都在
+#      文件末尾追加顶层键——所以本段在这里只以注释形态出现；真要写活的表头，放到所有顶层键之后，并且之后别再追加裸键。
+# [model_center]
+# token_secret = "<按站点填，不要提交真值>"
+# token_expiration_hours = 24

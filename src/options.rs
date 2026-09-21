@@ -159,6 +159,12 @@ pub struct DbOptionExt {
     /// 一片内存批最多携带多少个已生成元素。详见 [`model_memory_slice_elements`]。
     #[serde(default)]
     pub model_memory_slice_elements: Option<usize>,
+    /// 进程内模型投影 overlay 最多常驻多少个根（没写 = 50,000；0 = 不限）。详见 [`model_overlay_max_roots`]。
+    #[serde(default)]
+    pub model_overlay_max_roots: Option<usize>,
+    /// 生成用 `DbSet` 池级元素缓存最多装多少个元素（没写 = 200,000；0 = 不限）。详见 [`model_element_cache_max_entries`]。
+    #[serde(default)]
+    pub model_element_cache_max_entries: Option<usize>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -231,7 +237,7 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_transform_cheap_path: Option<bool>,
 
-    /// 单元级发布（ADR-078 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
+    /// 单元级发布（ADR-080 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
     /// 只重建 `plan_update(S→T)` 点名的那几件，以 `Partial` 提交叠在根回执之下发布。
     /// `true` 才开；关着时计划与执行体的产物与今天逐位相同。详见 [`model_unit_level_publish`]。
     #[serde(default)]
@@ -523,6 +529,8 @@ impl From<DbOption> for DbOptionExt {
             model_post_regen_aabb_page: None,
             model_regen_execution_group: None,
             model_memory_slice_elements: None,
+            model_overlay_max_roots: None,
+            model_element_cache_max_entries: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -611,6 +619,10 @@ struct DbOptionExtFields {
     model_regen_execution_group: Option<usize>,
     #[serde(default)]
     model_memory_slice_elements: Option<usize>,
+    #[serde(default)]
+    model_overlay_max_roots: Option<usize>,
+    #[serde(default)]
+    model_element_cache_max_entries: Option<usize>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -930,6 +942,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_post_regen_aabb_page: ext.model_post_regen_aabb_page,
         model_regen_execution_group: ext.model_regen_execution_group,
         model_memory_slice_elements: ext.model_memory_slice_elements,
+        model_overlay_max_roots: ext.model_overlay_max_roots,
+        model_element_cache_max_entries: ext.model_element_cache_max_entries,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -1021,6 +1035,76 @@ pub fn model_memory_slice_elements() -> usize {
         .model_memory_slice_elements
         .unwrap_or(8000)
         .max(1)
+}
+
+/// 环境变量名：一次性覆盖 [`model_overlay_max_roots`]，不必改配置文件。
+pub const MODEL_OVERLAY_MAX_ROOTS_ENV: &str = "AIOS_MODEL_OVERLAY_MAX_ROOTS";
+/// 环境变量名：一次性覆盖 [`model_element_cache_max_entries`]，不必改配置文件。
+pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES";
+
+/// [`model_overlay_max_roots`] 没写时的默认值（ADR-082 D5，2026-09-20 mem 档实测定的）：
+/// 4 库 7,743 根 / 59,929 条记录量 106.5 MB ≈ **13.8 KB / 根**（7997 单库 6,772 根 94.2 MB），
+/// 50,000 根 ≈ 0.7 GB——整套 AMS 样例 MDB 装得下六遍、生产「AMS 全量 12 万根」量级下把常驻压到四成。
+pub const MODEL_OVERLAY_MAX_ROOTS_DEFAULT: usize = 50_000;
+/// [`model_element_cache_max_entries`] 没写时的默认值（ADR-082 D5，同一次实测）：
+/// 每份 `DbSet` **3.6–4.7 KB / 元素**（7997 176,982 条 643.8 MB、1112 30,967 条 121.8 MB、8000 11,674 条 54.9 MB），
+/// 200,000 条 ≈ 0.7–0.95 GB / 库；样例里最大的 7997 整库一遍只装到 177k，默认值下一遍生成不会清一次，
+/// 清的只是长驻之后越过一整遍的累积。
+pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
+
+/// 进程内模型投影 overlay（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个**根**
+/// （`DbOption.toml` 的 `model_overlay_max_roots`，环境变量 [`MODEL_OVERLAY_MAX_ROOTS_ENV`] 压过；
+/// 没写 = [`MODEL_OVERLAY_MAX_ROOTS_DEFAULT`]，**写 0 = 不限**。2026-09-20 用户拍板 d-149 时先按
+/// 「默认 0、现场先量再配」落地，同日 mem 档实测之后按用户要求定了默认值，见 ADR-082 D5）。
+///
+/// overlay 此前无界——一个根进来就一直在，直到显式失效或整库清空；长驻进程碰过的根越多它越大。
+/// 设了上限之后，每次发布与每次 durable ACK 之后按**最近一次提交**的先后（LRU）逐出**已 durable
+/// ACK 且不在 write-behind 待刷**的根（`root_needs_persist == false`），整根记录 + 回执 + ACK 一起掉；
+/// 没有可逐出的就不逐（未落盘的一条不丢）。只在 durable 介质（`store_mode().is_durable()`）下生效：
+/// 嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。逐出之后读路对该根直读 RocksDB
+/// （本来就支持），单元级发布 / 刚体前移拿不到 S 端基线回退 regen，`RoomOnly` 整库房间重算对
+/// 冷根从库里读行再算（ADR-073 D13 2026-09-20 改口）。
+///
+/// 按根数不按字节：一根从 1 条到上千条记录不等，但逐出单位就是整根，按字节记账要逐条估算，
+/// 数量零成本且直观；现场先量（`/health.model_cache.resident_roots`）再配。
+pub fn model_overlay_max_roots() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_OVERLAY_MAX_ROOTS_ENV).ok().as_deref(),
+        load_ext_fields().model_overlay_max_roots,
+        MODEL_OVERLAY_MAX_ROOTS_DEFAULT,
+    )
+}
+
+/// 生成用 `DbSet` 的池级元素缓存（[`model_element_cache`]）最多装多少个**元素**
+/// （`DbOption.toml` 的 `model_element_cache_max_entries`，环境变量
+/// [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV`] 压过；没写 = [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT`]，
+/// **写 0 = 不限**，d-149 / ADR-082 D5）。
+///
+/// 缓存体在 vendor `e3d-io` 的 `DbSet::with_element_cache_limit`：满了**整张清**（与四张版本表
+/// 缓存同一个做法，零簿记），下一次读再从文件装。每份 `DbSet` 各算——生成输入缓存
+/// （`GENERATION_INPUT_CACHE`）每库留一份，所以进程里的上限是「库数 × 这个数」。
+/// 关掉缓存（[`MODEL_ELEMENT_CACHE_ENV`]`=false`）时这个数没有意义。
+pub fn model_element_cache_max_entries() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_element_cache_max_entries,
+        MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+    )
+}
+
+/// 数量上限的裁决：环境变量是合法非负整数就用它，拼错了当没设（回配置），配置没写 = `default`；
+/// 无论哪一层给的 **0 都是「不限」**——要关掉上限就显式写 0。
+fn effective_count_limit(
+    env_override: Option<&str>,
+    configured: Option<usize>,
+    default: usize,
+) -> usize {
+    env_override
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .or(configured)
+        .unwrap_or(default)
 }
 
 pub fn model_root_inflight_max() -> usize {
@@ -1987,9 +2071,12 @@ pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA
 /// 开着时 `WindowRootSources::collect` 经 e3d-model `plan_update_with` 给规划器一条谓词
 /// （`window_root_plan::change_metadata_tier`）：一个 Modified 候选的改动**全部**落在
 /// `model_impact::attribute_is_metadata_only` 放行的属性上（E3D 字典 DCHC=0 **且** 生成器不读——
-/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）、且成员 /
-/// 属主 / 类型 / opaque 都没动 → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute`
-/// 新档两个计数）、不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收（候选与它的祖先
+/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个；2026-09-17 Q6 起
+/// 戳 `CACHID` 由 e3d-model 的戳表拿第一票——字典按构造收不到它；2026-09-19 起 `SPAMAP` 同档进戳表）、且成员 /
+/// 属主 / 类型 / opaque 都没动
+/// → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute` 新档 / `cache_stamp` 只戳三个计数）、
+/// 不上卷、不级联；它的根不因它进 `regen`；`cache_stamp` 那一档还从凭证前移比例护栏的分子里净掉
+/// （`window_root_plan::WindowImpact::cache_stamp`，2026-09-19——整库戳扫写不再把窗顶成退化）。账本照记、闭包种子照收（候选与它的祖先
 /// 链照进闭包），房间结构触发（改名进 `RoomRecalcPanel`）与设计引用级联都不受影响；闭包里能少的只有
 /// 放行候选本来会触发的粗级联扇出（桥架分支「子树里改了任何东西就整条重建」那片单元），它们的根按
 /// 两票前移。此前 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
@@ -2052,7 +2139,7 @@ fn effective_model_transform_cheap_path(
 /// 环境变量名：一次性覆盖 [`model_unit_level_publish`]，不必改配置文件。
 pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 
-/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-078 D9，
+/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-080 D9，
 /// 2026-09-16）。
 ///
 /// 开着时 DESI 窗口规划器在计划上带出本窗的基线 S（`ModelUpdatePlan::unit_publish_base_sesno`），
@@ -2064,7 +2151,16 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 两条便宜路的优先序定死为 **transform 优先、unit 兜底**（实施约束 7）：一根同时判成刚体前移与
 /// 单元级时先走 [`model_transform_cheap_path`] 那一路，它回退下来的才试单元级，再不成才整根重算。
 ///
-/// 这是「少算」方向的开关，开门要过 ADR-078 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
+/// 开着时规划器还会把 `regen` 里**只被账本去向 `no_model` 的候选碰到**的根点名
+/// （`ModelUpdatePlan::unit_publish_no_model_only_roots`，ADR-080 D10，2026-09-17）：那种根这一窗名下没有一件
+/// 几何要变（Q6 第一手已把只跳 `CACHID` 戳的候选从上卷里摘掉），单元路对它切出的空子计划发一份空的 `Partial`
+/// 只推回执，不再整根重算。**D10 的前置写死**（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：
+/// [`model_structural_connection_cascade`] / [`model_cable_endpoint_cascade`] / [`model_design_reference_cascade`]
+/// 三条**都开着**规划器才分桶——跨根设计引用的引用者只被盖戳这一形状，今天靠戳做种子整根 regen 收住，D10 之后
+/// 只有级联的目标集能把引用者的根挡在桶外；有一条关着，整窗一根都不点名、空子计划照旧回退整根 regen，
+/// 计划 warnings 里报一句为什么。
+///
+/// 这是「少算」方向的开关，开门要过 ADR-080 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
 /// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_unit_level_publish() -> bool {
     effective_default_off_switch(
@@ -3177,7 +3273,7 @@ mod tests {
         ));
     }
 
-    /// 单元级发布默认关（ADR-078 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
+    /// 单元级发布默认关（ADR-080 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
     /// 取值规则；键在扩展字段名单里，配置读坏时的告警点得到它。
     #[test]
     fn the_unit_level_publish_switch_is_off_by_default_and_listed_as_an_ext_field() {
@@ -4150,6 +4246,57 @@ dir = "review_attachments"
             REVIEW_ALLOW_EPHEMERAL_STORE_ENV,
             "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
             "变量名进了 ADR-075 与启动横幅，改名要三处一起改"
+        );
+    }
+
+    /// d-149 / ADR-082 D5：两道按数量的内存闸的裁决——环境变量是合法非负整数就压过配置，拼错了当没设
+    /// （回配置），配置没写 = 默认值（50,000 根 / 200,000 条，2026-09-20 mem 档实测定的），任何一层写 0 = 不限；
+    /// 两个变量名进了 DbOption.toml 的注释与 ADR-082，改名要一起改。
+    #[test]
+    fn a_count_limit_takes_a_valid_env_override_falls_back_to_config_then_to_the_default() {
+        assert_eq!(effective_count_limit(None, None, 9), 9, "没写 = 默认值");
+        assert_eq!(
+            effective_count_limit(None, Some(20_000), 9),
+            20_000,
+            "配置说了算"
+        );
+        assert_eq!(
+            effective_count_limit(None, Some(0), 9),
+            0,
+            "配置写 0 = 不限，不回默认"
+        );
+        assert_eq!(
+            effective_count_limit(Some("5"), Some(20_000), 9),
+            5,
+            "环境变量压过配置"
+        );
+        assert_eq!(
+            effective_count_limit(Some(" 7 "), None, 9),
+            7,
+            "两边的空白不算"
+        );
+        assert_eq!(
+            effective_count_limit(Some("0"), Some(20_000), 9),
+            0,
+            "环境变量给 0 = 现场关掉上限"
+        );
+        assert_eq!(
+            effective_count_limit(Some("-1"), Some(20_000), 9),
+            20_000,
+            "负数拼错了当没设"
+        );
+        assert_eq!(
+            effective_count_limit(Some("many"), Some(20_000), 9),
+            20_000,
+            "非数字当没设"
+        );
+        assert_eq!(effective_count_limit(Some(""), None, 9), 9);
+        assert_eq!(MODEL_OVERLAY_MAX_ROOTS_DEFAULT, 50_000);
+        assert_eq!(MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT, 200_000);
+        assert_eq!(MODEL_OVERLAY_MAX_ROOTS_ENV, "AIOS_MODEL_OVERLAY_MAX_ROOTS");
+        assert_eq!(
+            MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV,
+            "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES"
         );
     }
 }

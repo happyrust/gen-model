@@ -202,11 +202,31 @@ fn health_status(
 }
 
 fn model_cache_health(store_reachable: bool) -> Value {
-    let (resident_records, resident_roots) =
-        crate::fast_model::model_memory_store::ModelMemoryStore::global().current_counts();
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let (resident_records, resident_roots) = store.current_counts();
+    // d-149 观测（ADR-082 D5）：两块此前无界的常驻各给一份**估算**字节——查时现算、回给前端，
+    // 不落库、不缓存。overlay 的记录那半是插入 / 删除时随手记的账，回执 / ACK 与每库的元素缓存
+    // 在读锁里走一遍（根 / 元素的量级）；上限（0 = 不限）并排给，现场对着 RSS 定数字。
+    let overlay = store.overlay_footprint();
+    let element_cache = crate::fast_model::e3d_model_service::generation_input_cache_footprint();
     let mut health = json!({
         "resident_records": resident_records,
         "resident_roots": resident_roots,
+        "overlay": {
+            "records": overlay.records,
+            "roots": overlay.roots,
+            "acks": overlay.acks,
+            "approx_bytes": overlay.approx_bytes,
+            "max_roots": crate::options::model_overlay_max_roots(),
+            "evicted_total": store.overlay_evictions_total(),
+        },
+        "element_cache": {
+            "enabled": crate::options::model_element_cache(),
+            "max_entries": crate::options::model_element_cache_max_entries(),
+            "parsed_entries": element_cache.iter().map(|db| db.parsed_entries).sum::<usize>(),
+            "approx_bytes": element_cache.iter().map(|db| db.approx_bytes).sum::<usize>(),
+            "databases": element_cache,
+        },
     });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
     health["store_reachable"] = json!(store_reachable);
@@ -1896,9 +1916,13 @@ pub struct HistoricalQueryReq {
 
 fn historical_error(error: crate::fast_model::historical_model::HistoricalModelError) -> ApiError {
     let status = match error.code {
-        "INVALID_SELECTOR" => StatusCode::BAD_REQUEST,
-        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" => StatusCode::NOT_FOUND,
-        "TIME_BEFORE_OLDEST_SESSION" => StatusCode::UNPROCESSABLE_ENTITY,
+        "INVALID_SELECTOR" | "INVALID_REFNO" => StatusCode::BAD_REQUEST,
+        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" | "SNAPSHOT_NOT_FOUND" => {
+            StatusCode::NOT_FOUND
+        }
+        "TIME_BEFORE_OLDEST_SESSION" | "REFNO_OUTSIDE_SNAPSHOT" => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         "GENERATION_LIMIT_EXCEEDED" => StatusCode::PAYLOAD_TOO_LARGE,
         "GENERATION_CANCELLED" => StatusCode::REQUEST_TIMEOUT,
         "SESSION_TIME_UNAVAILABLE" | "SOURCE_NOT_FOUND" | "SOURCE_CHANGED" => {
@@ -1965,6 +1989,262 @@ pub async fn model_history_generate(
     Ok((StatusCode::ACCEPTED, Json(json!({"task_id": task_id}))))
 }
 
+/// `GET /api/v1/model/versions` 的查询串：与 `/tree/*` 同一套请求身份 + `dbnum` + `refno`（`a/b` 或 `a_b`）。
+#[derive(Debug, Deserialize)]
+pub struct ModelVersionsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    /// 只列链序在它之后的会话（翻页游标）；不在链上是 404 `SESSION_NOT_FOUND`。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 缺省 500、上限 5000；尾部截断回 `truncated: true`。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+fn unit_versions_error(error: crate::fast_model::unit_versions::UnitVersionsError) -> ApiError {
+    let status = match error.code {
+        "INVALID_REFNO" | "INVALID_VERSION_PAIR" => StatusCode::BAD_REQUEST,
+        "REFNO_NOT_FOUND" | "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "NOT_A_DELIVERY_UNIT_ROOT" => StatusCode::UNPROCESSABLE_ENTITY,
+        "COMPUTATION_TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
+        "SOURCE_NOT_FOUND" | "SESSION_TIME_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let api = ApiError::coded(status, error.code, error.message);
+    match error.detail {
+        Some(detail) => api.with_detail(detail),
+        None => api,
+    }
+}
+
+/// GET /api/v1/model/versions — 某最小交付单元的模型版本表（ADR-081）。
+///
+/// 从 dabacon 会话链按需算（e3d-io 索引差分 × 单元子树归属 × 元素级模型影响），只进进程内缓存、不落库；
+/// 五态 `impact_kind` 沿用 legacy 词表。单元根合法性由服务端按项目 `delivery_unit_types` 判，
+/// 前端不再持类型清单。整条链冷算是重 I/O，放 `spawn_blocking`。
+pub async fn model_versions(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::unit_versions::UnitVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::unit_versions::unit_versions(dbnum, refno, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// GET /api/v1/element/versions — 某个**构件**的模型版本表。
+///
+/// 与上面那条的分工：`model/versions` 折整棵单元子树，这条只认 `refno == 目标` 那一条变化，
+/// 并把所属单元那一列并排放在同一行（`element_impact` 为空 = 这一版单元变了、构件自己没变）。
+/// 任意 refno 都受理——非交付单元根在这里不是错误，那正是它存在的理由。同样是重 I/O，放 `spawn_blocking`。
+pub async fn element_versions(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::element_versions::ElementVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::element_versions::element_versions(dbnum, refno, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("构件版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// GET /api/v1/element/attribute-history — 某个**节点**的属性变化时间线（plant3d-web ADR 0066）。
+///
+/// 与 `element/versions` 的分工：那张表只说「这一版它变没变」（两列五态）；这条说「谁在哪一版改了什么」——
+/// 每行一个它自身记录被改过的会话，带会话页 user / comment，展开是逐属性 before / after（与属性面板
+/// 同一个渲染器出字）。任意 refno 都受理。重 I/O，放 `spawn_blocking`。
+pub async fn element_attribute_history(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::attribute_history::AttributeHistoryReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let attributes = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::attribute_history::attribute_history(
+            dbnum,
+            refno,
+            since_sesno,
+            limit,
+            &attributes,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("属性时间线计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// `GET /api/v1/node/diff-summary` 的查询串：节点 + 两个会话 + 对比范围。
+#[derive(Debug, Deserialize)]
+pub struct NodeDiffSummaryReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    /// 较早的一版（链序在 `b` 之前，否则 400 `INVALID_VERSION_PAIR`）
+    pub a: u32,
+    /// 较新的一版
+    pub b: u32,
+    /// `self` / `subtree`，缺省 `subtree`
+    #[serde(default)]
+    pub scope: crate::fast_model::node_diff_summary::DiffScope,
+}
+
+/// GET /api/v1/node/diff-summary — 节点在 A→B 之间的差异摘要（plant3d-web ADR 0066）。
+///
+/// 不生成几何：一次索引差分 + 逐候选按生成路同一把尺子判新增 / 删除 / 修改 / noop，按最小交付单元分组，
+/// 附「变了的单元数」与要不要确认（阈值 `MODEL_HISTORY_CONFIRM_UNITS`）。前端拿变了的单元去逐个
+/// `history/generate`，未变的一份都不算。重 I/O，放 `spawn_blocking`。
+pub async fn node_diff_summary(
+    State(state): State<AppState>,
+    Query(req): Query<NodeDiffSummaryReq>,
+) -> Result<Json<crate::fast_model::node_diff_summary::DiffSummaryReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let NodeDiffSummaryReq {
+        dbnum, a, b, scope, ..
+    } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::node_diff_summary::node_diff_summary(dbnum, refno, a, b, scope)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("差异摘要计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// `GET /api/v1/node/versions` 的查询串：节点 + 对比范围 + 分页。
+#[derive(Debug, Deserialize)]
+pub struct NodeVersionsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` / `a_b`，任意节点（构件 / 单元根 / SITE、ZONE 容器）
+    pub refno: String,
+    /// `self` / `subtree`，缺省 `subtree`
+    #[serde(default)]
+    pub scope: crate::fast_model::node_diff_summary::DiffScope,
+    /// 只给链序在它之后的版本；它必须在链上。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 缺省 500、上限 5000；尾部截断回 `truncated: true`。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/node/versions — 任意**节点**按对比范围折叠的模型版本表（plant3d-web ADR 0066）。
+///
+/// 与前两张表的分工：`model/versions` 只收单元根、折整棵单元子树；`element/versions` 只认构件自己那一条；这条任意节点都
+/// 受理——`scope=self` 是节点自身那一格，`scope=subtree` 是节点 + 其下整棵子树折成一版，并给「这一会话动了几个最小交付
+/// 单元」。容器（SITE / ZONE）「所有子节点」下的时间线只有它能列。整条链冷算是重 I/O，放 `spawn_blocking`。
+pub async fn node_versions(
+    State(state): State<AppState>,
+    Query(req): Query<NodeVersionsReq>,
+) -> Result<Json<crate::fast_model::node_versions::NodeVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let NodeVersionsReq {
+        dbnum,
+        scope,
+        since_sesno,
+        limit,
+        ..
+    } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::node_versions::node_versions(dbnum, refno, scope, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("节点版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// GET /api/v1/model/history/{snapshot_key}
 pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()
@@ -1979,13 +2259,41 @@ pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<
 }
 
 /// POST /api/v1/model/history/query
+///
+/// `tool=attributes`（ADR-081 候选条，契约 2026-09-18）另走一条：`arguments.refno`（`a/b`）在快照那个
+/// 会话下的属性，与 `element/attributes` 同一个渲染器；文件 I/O 在 `spawn_blocking` 里。
 pub async fn model_history_query(
+    State(state): State<AppState>,
     Json(req): Json<HistoricalQueryReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = req.arguments;
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()
         .await
         .map_err(ApiError::from_domain)?;
+    if req.tool == "attributes" {
+        let refno = req
+            .arguments
+            .get("refno")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::coded(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REFNO",
+                    "tool=attributes 需要 arguments.refno（a/b）",
+                )
+            })?;
+        let service = state
+            .element_attributes
+            .get()
+            .await
+            .map_err(ApiError::from_domain)?;
+        return store
+            .attributes_at(&req.snapshot_key, refno, service)
+            .await
+            .map(Json)
+            .map_err(historical_error);
+    }
     store
         .query(&req.snapshot_key, &req.tool)
         .await

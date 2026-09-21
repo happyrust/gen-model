@@ -220,7 +220,7 @@ pub fn default_published_via() -> String {
     "regen".to_string()
 }
 
-/// 一笔提交**是不是这根的全集**（ADR-078 D2）。
+/// 一笔提交**是不是这根的全集**（ADR-080 D2）。
 ///
 /// 它**不改存储的删除行为**：`ScopeState::apply_removals` 一向只删 [`ProjectionCommit::removals`]
 /// 与 [`ProjectionCommit::tube_branch_resets`] 点名的那些，从来不拿「缺席」当删除。
@@ -230,7 +230,7 @@ pub fn default_published_via() -> String {
 ///
 /// 于是这一格的用处有三个：① 让一笔提交自己说得清它是哪一种，不靠调用点上下文去猜；
 /// ② 给「缺席推删除」那条推导一个能被机器钉住的前提（见 `e3d_model_service::whole_root_removals`）；
-/// ③ 告诉存储这笔提交的回执**该由谁盖章**（ADR-078 D5，见 [`CommitScope::Partial`]）。
+/// ③ 告诉存储这笔提交的回执**该由谁盖章**（ADR-080 D5，见 [`CommitScope::Partial`]）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitScope {
     /// `upserts` 是这根的全集：缺席 = 删除，上游可以做差。今天所有生产提交都是这一档。
@@ -239,7 +239,7 @@ pub enum CommitScope {
     WholeRoot,
     /// 只点名了这几件：**缺席什么也不证明**，要删什么必须显式写进 `removals`。
     ///
-    /// 带回执时，回执的 `manifest_hash` / `geometry_count` **由存储在写锁里盖**（ADR-078 D5）：
+    /// 带回执时，回执的 `manifest_hash` / `geometry_count` **由存储在写锁里盖**（ADR-080 D5）：
     /// `upserts` 只是这根的一角，整根的章只能在 delta 落进去之后、按此刻这根名下的全部记录算；
     /// 锁外先读 `records_of_root` 再算再提交，读与提交之间还有别的写入者（另一批提交、淘汰、
     /// 整库清空），算出来的章对的是一个已经不存在的版本。所以调用方在这两格填什么都只是占位，
@@ -258,10 +258,10 @@ pub struct ProjectionCommit {
     pub removals: Vec<String>,
     pub upserts: Vec<ProjectedGeometry>,
     /// 本次投影给某个生成根盖的章。`scope` 是 [`CommitScope::Partial`] 时，`manifest_hash` /
-    /// `geometry_count` 两格由存储在写锁里重算并覆盖（ADR-078 D5），调用方填的只是占位。
+    /// `geometry_count` 两格由存储在写锁里重算并覆盖（ADR-080 D5），调用方填的只是占位。
     #[serde(with = "receipt_wire")]
     pub receipt: Option<(RefNo, RootReceipt)>,
-    /// 这一笔是整根全集还是局部（ADR-078 D2）。默认 `WholeRoot` = 今天的语义；
+    /// 这一笔是整根全集还是局部（ADR-080 D2）。默认 `WholeRoot` = 今天的语义；
     /// 磁盘上那些没有这一格的旧产物（`model_artifact`）反序列化后也落在 `WholeRoot`，
     /// 与它们被写下时的语义一致。
     #[serde(default)]
@@ -357,6 +357,16 @@ struct ScopeState {
     room_spatial_rebuild_count: u64,
     room_spatial_rows_rebuilt: u64,
     room_spatial_rebuild_duration_ms: u64,
+    /// 生成根 → 最近一次盖回执的序号（单调计数，不是时刻）。按根数限额逐出时的 LRU 键
+    /// （[`ModelMemoryStore::enforce_root_limit`]，d-149）：读不刷新它——被逐出的根读路直读
+    /// RocksDB，刷新读序只会让「常读的旧根」把「刚生成的新根」挤出去。
+    commit_ticks: BTreeMap<i64, u64>,
+    next_commit_tick: u64,
+    /// 按根数限额累计逐出了多少根（`/health.model_cache.overlay_evicted_total`）。
+    overlay_evictions: u64,
+    /// 常驻记录的估算堆字节（[`approx_record_bytes`] 之和）：插入加、删除减，
+    /// [`ModelMemoryStore::overlay_footprint`] O(1) 读它——观测用，不落任何地方。
+    record_bytes: usize,
 }
 
 impl std::fmt::Debug for ScopeState {
@@ -510,6 +520,9 @@ impl ScopeState {
         *sesno = (*sesno).max(record.source_sesno);
         let member = packed_refno(record.source_refno);
         let record_id = record.record_id.clone();
+        self.record_bytes = self
+            .record_bytes
+            .saturating_add(approx_record_bytes(&record));
         self.geometries.insert(record_id, record);
         self.room_spatial_dirty.insert((dbnum, member));
         self.bump_epoch(dbnum);
@@ -535,6 +548,9 @@ impl ScopeState {
             self.observe_member(&previous);
         }
         let record = self.geometries.remove(record_id)?;
+        self.record_bytes = self
+            .record_bytes
+            .saturating_sub(approx_record_bytes(&record));
         self.toggle_digest(&record);
         let key = (record.dbnum, packed_refno(record.source_refno));
         if let Some(ids) = self.by_source.get_mut(&key) {
@@ -590,7 +606,7 @@ impl ScopeState {
 
     /// 落 upserts、盖回执；返回**实际入库**的那份回执。`WholeRoot` 原样入库；`Partial` 的章在
     /// upserts 落完之后由 [`Self::stamp_partial_receipt`] 就地重算——与落 delta 在同一把写锁里，
-    /// 中间插不进任何别的写入者（ADR-078 D5）。
+    /// 中间插不进任何别的写入者（ADR-080 D5）。
     fn apply_upserts_and_receipt(
         &mut self,
         commit: ProjectionCommit,
@@ -610,11 +626,68 @@ impl ScopeState {
         *sesno = (*sesno).max(receipt.source_sesno);
         self.invalidated_roots.remove(&packed_refno(root));
         self.receipts.insert(packed_refno(root), receipt.clone());
+        self.next_commit_tick = self.next_commit_tick.wrapping_add(1);
+        self.commit_ticks
+            .insert(packed_refno(root), self.next_commit_tick);
         self.bump_epoch(root.dbno());
         Some((root, receipt))
     }
 
-    /// ADR-078 D5：局部提交的回执按**此刻**这根名下的全部记录盖章。
+    /// 整根从 overlay 里掉：回执、ACK、失效标记、提交序号，以及名下**不与别的常驻回执共有**的
+    /// 记录（嵌套根共有的记录归另一个回执继续持有）。这是缓存态的收回，不是生成出来的删除 delta
+    /// ——库里那一份不动，读路对这根从此直读 RocksDB。调用方随后 `flush_room_spatial`。
+    fn drop_root(&mut self, root: RefNo) {
+        let packed = packed_refno(root);
+        self.receipts.remove(&packed);
+        self.publication_acks.remove(&packed);
+        self.invalidated_roots.remove(&packed);
+        self.commit_ticks.remove(&packed);
+        for id in self.record_ids_under(root) {
+            let shared = self.geometries.get(&id).is_some_and(|record| {
+                self.receipts
+                    .keys()
+                    .any(|other| record.ancestors.contains(other))
+            });
+            if !shared {
+                self.evict(&id);
+            }
+        }
+    }
+
+    /// 按根数限额逐出（d-149）：候选 = 有回执、且 durable ACK 与回执逐字相符的根（库里已经有
+    /// 这一版，逐出不丢任何东西）；按最近一次盖回执的先后，最旧的先出，出到根数 ≤ `limit` 或候选
+    /// 用尽为止。没落盘的（ACK 缺 / 不符 / 介质不是 durable）永远不在候选里。
+    fn evict_acked_roots_over(&mut self, limit: usize) -> usize {
+        if limit == 0 || self.receipts.len() <= limit {
+            return 0;
+        }
+        let mut candidates: Vec<(u64, i64)> = self
+            .receipts
+            .iter()
+            .filter(|(packed, receipt)| {
+                self.publication_acks
+                    .get(*packed)
+                    .is_some_and(|ack| ack.medium.is_durable() && ack.matches(receipt))
+            })
+            .map(|(packed, _)| (self.commit_ticks.get(packed).copied().unwrap_or(0), *packed))
+            .collect();
+        candidates.sort_unstable();
+        let mut evicted = 0;
+        for (_, packed) in candidates {
+            if self.receipts.len() <= limit {
+                break;
+            }
+            self.drop_root(RefNo::new((packed >> 32) as u32, packed as u32));
+            evicted += 1;
+        }
+        if evicted > 0 {
+            self.overlay_evictions += evicted as u64;
+            self.flush_room_spatial();
+        }
+        evicted
+    }
+
+    /// ADR-080 D5：局部提交的回执按**此刻**这根名下的全部记录盖章。
     ///
     /// 只在写锁里、且 `removals` / `tube_branch_resets` / `upserts` 都已落地之后调用——这是
     /// 「应用 delta + 重算 `manifest_hash` + 盖回执」三步成为一个原子操作的全部依据。记录集合与
@@ -650,8 +723,87 @@ impl std::fmt::Display for OverlayRejected {
 
 impl std::error::Error for OverlayRejected {}
 
+/// 一次按根数限额逐出的结果（[`ModelMemoryStore::enforce_root_limit`]）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct OverlayEviction {
+    /// 这次按的上限（0 = 不限）。
+    pub limit: usize,
+    /// 逐出前 `Current` 作用域里有回执的根数。
+    pub resident_before: usize,
+    /// 这次逐出了几根。
+    pub evicted: usize,
+    /// 逐出后还剩几根；仍 > `limit` 就是剩下的都还没落盘，闸收不下去。
+    pub resident_after: usize,
+}
+
+impl OverlayEviction {
+    /// 上限设了、也逐了、却仍在上限之上：剩下的全是没落盘的根。
+    pub fn still_over_limit(&self) -> bool {
+        self.limit > 0 && self.resident_after > self.limit
+    }
+}
+
+/// `Current` 作用域此刻的体量（[`ModelMemoryStore::overlay_footprint`]）：条数是精确的，
+/// 字节是**估算**——查时现算、不落任何地方，给 `/health` 对着 RSS 看的。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct OverlayFootprint {
+    /// 几何记录条数（与 `current_counts().0` 同一个数）。
+    pub records: usize,
+    /// 有回执的根数（与 `current_counts().1` 同一个数）。
+    pub roots: usize,
+    /// 进程内完整发布确认（ACK）条数。
+    pub acks: usize,
+    /// 估算的堆字节：每条记录的内联结构 + 字串 / 祖先链 + 四张索引里的 `record_id` 副本与树节点，
+    /// 再加回执与 ACK。**不含**每库的房间空间树（`room_spatial`）与网格文件——网格在盘上。
+    pub approx_bytes: usize,
+}
+
+/// 一条投影记录在 overlay 里大约占多少字节（d-149 观测用）：内联结构、它自己的字串与祖先链，
+/// 加上 `geometries` 键、`by_source`、每个祖先一份 `by_ancestor`、管身一份 `by_tube_branch` 里的
+/// `record_id` 副本与 B 树节点。按长度不按容量——是给人对 RSS 的估算，不是分配器审计。
+fn approx_record_bytes(record: &ProjectedGeometry) -> usize {
+    // 一个 BTreeMap / BTreeSet 条目摊下来的节点开销（键值之外）。
+    const NODE: usize = 32;
+    let geometry_id = match &record.geometry_id {
+        GeometryId::Element { refno } => refno.len(),
+        GeometryId::ImpliedTube {
+            container_refno,
+            from_refno,
+            to_refno,
+            ..
+        } => container_refno.len() + from_refno.len() + to_refno.len(),
+    };
+    let own = std::mem::size_of::<ProjectedGeometry>()
+        + record.record_id.len()
+        + geometry_id
+        + record.noun.len()
+        + record.mesh_id.len()
+        + record.ancestors.len() * std::mem::size_of::<i64>();
+    // `geometries` 键 + `by_source` + 每个祖先一份 `by_ancestor` + 管身一份 `by_tube_branch`。
+    let index_copies = 2 + record.ancestors.len() + usize::from(record.tube.is_some());
+    own + index_copies * (record.record_id.len() + NODE)
+}
+
+/// 一份 [`ModelTarget`] 的字串堆字节（回执与 ACK 各带一份）。
+fn approx_model_target_bytes(target: Option<&ModelTarget>) -> usize {
+    let Some(target) = target else {
+        return 0;
+    };
+    let file = |file: &crate::fast_model::e3d_model_service::ModelFileTarget| {
+        std::mem::size_of_val(file) + file.db_type.len() + file.file.len() + file.digest.len()
+    };
+    target.project.len()
+        + target.template_attlib_digest.len()
+        + target.generator_fingerprint.len()
+        + target.tessellation_profile.len()
+        + file(&target.design)
+        + target.catalogue.iter().map(file).sum::<usize>()
+}
+
 /// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
-/// 只读它。**无界**：不记字节、不淘汰——一个根进来就一直在，直到显式失效或整库清空。
+/// 只读它。不记字节；**默认无界**——一个根进来就一直在，直到显式失效或整库清空。
+/// 配了 `model_overlay_max_roots`（d-149）才按根数收：只逐出已 durable ACK 的根
+/// （[`Self::enforce_root_limit`]），未落盘的一条不丢。
 #[derive(Debug, Default)]
 pub struct ModelMemoryStore {
     scopes: RwLock<HashMap<ScopeKey, ScopeState>>,
@@ -843,7 +995,7 @@ impl ModelMemoryStore {
     ///
     /// 返回这一批**实际入库**的回执，按提交顺序。`WholeRoot` 的就是调用方递进来的那份；
     /// `Partial` 的 `manifest_hash` / `geometry_count` 是在这把锁里、delta 落完之后重算的
-    /// （ADR-078 D5），调用方手里那份是占位——要登记 durable 身份、要对 ACK，都得拿这里返回的。
+    /// （ADR-080 D5），调用方手里那份是占位——要登记 durable 身份、要对 ACK，都得拿这里返回的。
     pub fn commit(
         &self,
         scope: ProjectionScope<'_>,
@@ -896,6 +1048,45 @@ impl ModelMemoryStore {
             .get(&ProjectionScope::Current.key())
             .map(|state| (state.geometries.len(), state.receipts.len()))
             .unwrap_or_default()
+    }
+
+    /// `Current` 作用域此刻的体量与**估算**字节（d-149 观测用，`/health.model_cache.overlay`）。
+    /// 查时现算、不缓存、不落库：记录那一半是插入 / 删除时随手记的账（`record_bytes`，O(1)），
+    /// 回执与 ACK 在读锁里走一遍（根的量级，十万级也只是几毫秒）。估算口径见 [`approx_record_bytes`]；
+    /// 房间空间树与盘上的网格不在里面。
+    pub fn overlay_footprint(&self) -> OverlayFootprint {
+        const NODE: usize = 32;
+        let scopes = self.read();
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return OverlayFootprint::default();
+        };
+        let records = state.record_bytes;
+        let receipts: usize = state
+            .receipts
+            .values()
+            .map(|receipt| {
+                NODE + std::mem::size_of::<RootReceipt>()
+                    + receipt.manifest_hash.len()
+                    + receipt.published_via.len()
+                    + approx_model_target_bytes(receipt.model_target.as_ref())
+            })
+            .sum();
+        let acks: usize = state
+            .publication_acks
+            .values()
+            .map(|ack| {
+                NODE + std::mem::size_of::<RootPublicationAck>()
+                    + ack.manifest_hash.len()
+                    + ack.room_generation.as_ref().map_or(0, String::len)
+                    + approx_model_target_bytes(ack.model_target.as_ref())
+            })
+            .sum();
+        OverlayFootprint {
+            records: state.geometries.len(),
+            roots: state.receipts.len(),
+            acks: state.publication_acks.len(),
+            approx_bytes: records + receipts + acks,
+        }
     }
 
     /// 当前投影里某个库的提交纪元，配合 [`Self::restore_dbnum`] 用。
@@ -1042,26 +1233,46 @@ impl ModelMemoryStore {
     /// longer exists. Shared nested-root records remain owned by their other
     /// resident receipts. This is cache state, not a generated removal delta.
     pub(crate) fn drop_cached_root(&self, root: RefNo) {
-        let packed = packed_refno(root);
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
             return;
         };
-        state.receipts.remove(&packed);
-        state.publication_acks.remove(&packed);
-        state.invalidated_roots.remove(&packed);
-        for id in state.record_ids_under(root) {
-            let shared = state.geometries.get(&id).is_some_and(|record| {
-                state
-                    .receipts
-                    .keys()
-                    .any(|other| record.ancestors.contains(other))
-            });
-            if !shared {
-                state.evict(&id);
-            }
-        }
+        state.drop_root(root);
         state.flush_room_spatial();
+    }
+
+    /// 按根数上限收 overlay（d-149）：`Current` 作用域里有回执的根多于 `limit` 时，按最近一次
+    /// 盖回执的先后逐出**已 durable ACK 且与回执逐字相符**的根（库里已有这一版，读路对它直读
+    /// RocksDB），最旧先出，出到 ≤ `limit` 或候选用尽。`limit == 0` = 不限，什么都不做。
+    /// 没落盘的根（ACK 缺 / 不符 / 介质非 durable）不在候选里——这道闸不丢任何还没写进库的东西，
+    /// 所以「全部待刷」时它收不下去，只把数字报出来。
+    ///
+    /// 调用时机归调用方守：每次发布之后、每次 durable ACK 记下之后（`model_write_behind`），且只在
+    /// `store_mode().is_durable()` 下——嵌入 kv-mem 时 overlay 就是唯一一份。
+    pub fn enforce_root_limit(&self, limit: usize) -> OverlayEviction {
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
+            return OverlayEviction {
+                limit,
+                ..Default::default()
+            };
+        };
+        let resident_before = state.receipts.len();
+        let evicted = state.evict_acked_roots_over(limit);
+        OverlayEviction {
+            limit,
+            resident_before,
+            evicted,
+            resident_after: state.receipts.len(),
+        }
+    }
+
+    /// 按根数限额累计逐出了多少根（进程起来以来）。
+    pub fn overlay_evictions_total(&self) -> u64 {
+        self.read()
+            .get(&ScopeKey::Current)
+            .map(|state| state.overlay_evictions)
+            .unwrap_or(0)
     }
 
     /// A whole-dbnum reinitialize invalidates the process projection immediately.
@@ -1093,6 +1304,10 @@ impl ModelMemoryStore {
             .invalidated_roots
             .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
+        let receipts = &state.receipts;
+        state
+            .commit_ticks
+            .retain(|packed, _| receipts.contains_key(packed));
         state.stray_generations_written.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
@@ -1477,7 +1692,7 @@ mod tests {
         ModelMemoryStore::default()
     }
 
-    /// ADR-078 D2：**未提及 ≠ 删除**。
+    /// ADR-080 D2：**未提及 ≠ 删除**。
     ///
     /// 存储本来就只删点名的那些，这一条把它钉住——单元级发布正要靠它：一根三件只重建一件，
     /// 另外两件必须原地不动。同时钉住 `tube_branch_resets` **不受这条约束**：它是整段重写，
@@ -1536,7 +1751,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D6：`tube_branch_resets` 与「未提及 ≠ 删除」是两条相反的规矩，
+    /// ADR-080 D6：`tube_branch_resets` 与「未提及 ≠ 删除」是两条相反的规矩，
     /// 局部提交碰到某条分支的管身就得把它那几段一起带上，否则静默丢管。
     #[test]
     fn a_partial_commit_that_resets_a_branch_still_clears_every_segment_of_it() {
@@ -1577,7 +1792,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D2：磁盘上那些没有 `scope` 这一格的旧 `model_artifact` 反序列化后必须落在
+    /// ADR-080 D2：磁盘上那些没有 `scope` 这一格的旧 `model_artifact` 反序列化后必须落在
     /// `WholeRoot`——它们被写下时就是整根全集，读成 `Partial` 会让上游少删该删的。
     #[test]
     fn a_commit_serialized_before_the_scope_field_reads_back_as_whole_root() {
@@ -1595,7 +1810,7 @@ mod tests {
         crate::fast_model::e3d_model_service::manifest_hash(records).expect("serializable")
     }
 
-    /// ADR-078 D5：`Partial` 回执的章是存储在写锁里、delta 落完之后按这根**此刻**的全部记录盖的。
+    /// ADR-080 D5：`Partial` 回执的章是存储在写锁里、delta 落完之后按这根**此刻**的全部记录盖的。
     ///
     /// 调用方在 `manifest_hash` / `geometry_count` 里填什么都只是占位；盖出来的必须等于对
     /// 「提交之后 `records_of_root`」跑一遍共用配方的结果，也必须能过
@@ -1681,7 +1896,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 实施约束 9：`WholeRoot` 一字不动——回执照调用方写的入库，存储不替它重算。
+    /// ADR-080 实施约束 9：`WholeRoot` 一字不动——回执照调用方写的入库，存储不替它重算。
     /// 缓存命中（`cached_root_commit`）与「目标变了、清单没变」两条路都靠这一点：它们的
     /// `upserts` 是空的，替它们重算就是把一根完整的投影盖成空章。
     #[test]
@@ -1711,7 +1926,7 @@ mod tests {
         assert_eq!(stamped, vec![(root, receipt)]);
     }
 
-    /// ADR-078 D5 的「原子」二字：一边不停地发 `Partial` 提交，另一边任何一次 `root_snapshot`
+    /// ADR-080 D5 的「原子」二字：一边不停地发 `Partial` 提交，另一边任何一次 `root_snapshot`
     /// 读到的回执都必须描述同一次读到的那批记录——章对得上、数对得上。章要是在锁外先算好再
     /// 提交，读者迟早会撞上「记录已经是 v+1、章还是 v」的一拍。
     #[test]
@@ -2874,5 +3089,436 @@ mod tests {
             },
         ));
         assert!(store.pending_roots_of_dbnum(root.dbno()).is_empty());
+    }
+
+    fn limit_receipt(manifest_hash: &str, geometry_count: usize) -> RootReceipt {
+        RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: manifest_hash.into(),
+            geometry_count,
+            published_via: "regen".into(),
+        }
+    }
+
+    fn ack_matching(
+        receipt: &RootReceipt,
+        dbnum: u32,
+        medium: crate::fast_model::model_db_adapter::PersistMedium,
+    ) -> RootPublicationAck {
+        RootPublicationAck {
+            dbnum,
+            source_sesno: receipt.source_sesno,
+            geometry_count: receipt.geometry_count,
+            manifest_hash: receipt.manifest_hash.clone(),
+            model_target: receipt.model_target.clone(),
+            room_membership: false,
+            room_generation: None,
+            medium,
+        }
+    }
+
+    /// 一根一条记录、盖回执提交进 `Current`；返回那份回执（拿去对 ACK）。
+    fn commit_root(store: &ModelMemoryStore, root: RefNo, record_id: &str) -> RootReceipt {
+        let receipt = limit_receipt(&format!("manifest-{record_id}"), 1);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record(
+                    record_id,
+                    RefNo::new(root.word0, root.word1 + 1000),
+                    root,
+                    root.dbno(),
+                )],
+                receipt: Some((root, receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        receipt
+    }
+
+    /// d-149：按根数限额只逐出**已 durable ACK 且与回执逐字相符**的根，最旧一次盖回执的先出；
+    /// 没落盘的根不在候选里——候选用尽仍在上限之上就停手、把数字报出来；`limit == 0` 什么都不做。
+    #[test]
+    fn the_root_limit_evicts_durably_acked_roots_oldest_commit_first_and_never_unacked_ones() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let roots: Vec<RefNo> = (1..=4).map(|n| RefNo::new(7997, n)).collect();
+        let receipts: Vec<RootReceipt> = roots
+            .iter()
+            .enumerate()
+            .map(|(i, root)| commit_root(&store, *root, &format!("r{}", i + 1)))
+            .collect();
+        for i in [0, 1, 3] {
+            assert!(store.record_publication_ack(
+                ProjectionScope::Current,
+                roots[i],
+                ack_matching(&receipts[i], 7997, PersistMedium::RocksDb),
+            ));
+        }
+        // r3 没有 ACK：还没落盘。
+
+        let untouched = store.enforce_root_limit(0);
+        assert_eq!(
+            untouched,
+            OverlayEviction {
+                limit: 0,
+                resident_before: 4,
+                evicted: 0,
+                resident_after: 4,
+            },
+            "0 = 不限，什么都不做"
+        );
+        assert!(!untouched.still_over_limit());
+
+        let outcome = store.enforce_root_limit(2);
+        assert_eq!(
+            outcome,
+            OverlayEviction {
+                limit: 2,
+                resident_before: 4,
+                evicted: 2,
+                resident_after: 2,
+            },
+            "{outcome:?}"
+        );
+        assert!(!outcome.still_over_limit());
+        for gone in [roots[0], roots[1]] {
+            assert!(
+                store.receipt(ProjectionScope::Current, gone).is_none(),
+                "{gone} 最旧、已落盘：先出"
+            );
+            assert!(
+                store
+                    .publication_ack(ProjectionScope::Current, gone)
+                    .is_none()
+            );
+            assert!(
+                store
+                    .records_of_root(ProjectionScope::Current, gone)
+                    .is_empty(),
+                "整根记录一起掉"
+            );
+        }
+        for kept in [roots[2], roots[3]] {
+            assert!(
+                store.receipt(ProjectionScope::Current, kept).is_some(),
+                "{kept} 留下"
+            );
+            assert_eq!(
+                store.records_of_root(ProjectionScope::Current, kept).len(),
+                1
+            );
+        }
+        assert_eq!(store.current_counts(), (2, 2));
+        assert_eq!(store.overlay_evictions_total(), 2);
+
+        // 再收到 1：候选只剩 r4（r3 没 ACK）——比它旧的 r3 照旧留着，r4 出。
+        let outcome = store.enforce_root_limit(1);
+        assert_eq!(
+            (outcome.evicted, outcome.resident_after),
+            (1, 1),
+            "{outcome:?}"
+        );
+        assert!(
+            store.receipt(ProjectionScope::Current, roots[2]).is_some(),
+            "没落盘的根一条不丢"
+        );
+        assert!(store.receipt(ProjectionScope::Current, roots[3]).is_none());
+
+        // 又进一根没 ACK 的：两根都没落盘，上限 1 收不下去——不逐、如实报。
+        commit_root(&store, RefNo::new(7997, 5), "r5");
+        let stuck = store.enforce_root_limit(1);
+        assert_eq!(
+            stuck,
+            OverlayEviction {
+                limit: 1,
+                resident_before: 2,
+                evicted: 0,
+                resident_after: 2,
+            },
+            "{stuck:?}"
+        );
+        assert!(stuck.still_over_limit(), "剩下的全是没落盘的根");
+        assert_eq!(store.overlay_evictions_total(), 3);
+    }
+
+    /// d-149：kv-mem 介质的 ACK 不算「库里有这一版」；一根在 ACK 之后又提交了一版，ACK 随候选几何
+    /// 变动失效（旧版落了盘、新版还没有）——两种根都不在逐出候选里。
+    #[test]
+    fn a_mem_ack_or_a_root_republished_after_its_ack_does_not_make_it_evictable() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let mem_root = RefNo::new(7997, 1);
+        let stale_root = RefNo::new(7997, 2);
+        let durable_root = RefNo::new(7997, 3);
+        let mem_receipt = commit_root(&store, mem_root, "mem");
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            mem_root,
+            ack_matching(&mem_receipt, 7997, PersistMedium::Mem),
+        ));
+        let stale_receipt = commit_root(&store, stale_root, "stale");
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            stale_root,
+            ack_matching(&stale_receipt, 7997, PersistMedium::RocksDb),
+        ));
+        // 同一根又提交了一版：ACK 随候选几何变动失效，这根重新变成「没落盘」。
+        commit_root(&store, stale_root, "stale-v2");
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, stale_root)
+                .is_none()
+        );
+        let durable_receipt = commit_root(&store, durable_root, "durable");
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            durable_root,
+            ack_matching(&durable_receipt, 7997, PersistMedium::RocksDb),
+        ));
+
+        let outcome = store.enforce_root_limit(1);
+        assert_eq!(
+            (outcome.evicted, outcome.resident_after),
+            (1, 2),
+            "{outcome:?}"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, durable_root)
+                .is_none(),
+            "唯一的候选"
+        );
+        assert!(
+            store.receipt(ProjectionScope::Current, mem_root).is_some(),
+            "kv-mem 的 ACK 不算落盘"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, stale_root)
+                .is_some(),
+            "ACK 之后又提交过的根，新版还没落盘"
+        );
+        assert!(outcome.still_over_limit());
+    }
+
+    /// d-149：逐出嵌套根时，与仍常驻的另一个回执**共有**的记录留下（归那个回执继续持有）；
+    /// 只归被逐出根自己的记录才掉——与 `drop_cached_root` 同一条保护。
+    #[test]
+    fn evicting_a_nested_root_keeps_the_records_its_resident_parent_still_holds() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let parent = RefNo::new(7997, 10);
+        let nested = RefNo::new(7997, 20);
+        let mut own = record("own", RefNo::new(7997, 11), parent, 7997);
+        own.ancestors = vec![packed_refno(own.source_refno), packed_refno(parent)];
+        let mut shared = record("shared", RefNo::new(7997, 21), nested, 7997);
+        shared.ancestors = vec![
+            packed_refno(shared.source_refno),
+            packed_refno(nested),
+            packed_refno(parent),
+        ];
+        let parent_receipt = limit_receipt("parent", 2);
+        let nested_receipt = limit_receipt("nested", 1);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![own, shared],
+                receipt: Some((parent, parent_receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((nested, nested_receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store
+                .records_of_root(ProjectionScope::Current, parent)
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .records_of_root(ProjectionScope::Current, nested)
+                .len(),
+            1
+        );
+        // 只有嵌套根落了盘：它是唯一候选。
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            nested,
+            ack_matching(&nested_receipt, 7997, PersistMedium::RocksDb),
+        ));
+
+        let outcome = store.enforce_root_limit(1);
+        assert_eq!(
+            (outcome.evicted, outcome.resident_after),
+            (1, 1),
+            "{outcome:?}"
+        );
+        assert!(store.receipt(ProjectionScope::Current, nested).is_none());
+        assert_eq!(
+            store
+                .records_of_root(ProjectionScope::Current, parent)
+                .len(),
+            2,
+            "共有记录归父根的回执继续持有，一条不掉"
+        );
+        assert_eq!(store.current_counts(), (2, 1));
+
+        // 反过来：父根落了盘、嵌套根还没有 → 父根出，只掉它独有的那条。
+        let store = ModelMemoryStore::default();
+        let mut own = record("own", RefNo::new(7997, 11), parent, 7997);
+        own.ancestors = vec![packed_refno(own.source_refno), packed_refno(parent)];
+        let mut shared = record("shared", RefNo::new(7997, 21), nested, 7997);
+        shared.ancestors = vec![
+            packed_refno(shared.source_refno),
+            packed_refno(nested),
+            packed_refno(parent),
+        ];
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![own, shared],
+                receipt: Some((parent, parent_receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((nested, nested_receipt)),
+                ..Default::default()
+            }],
+        );
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            parent,
+            ack_matching(&parent_receipt, 7997, PersistMedium::RocksDb),
+        ));
+        let outcome = store.enforce_root_limit(1);
+        assert_eq!(
+            (outcome.evicted, outcome.resident_after),
+            (1, 1),
+            "{outcome:?}"
+        );
+        assert!(store.receipt(ProjectionScope::Current, parent).is_none());
+        assert_eq!(
+            store
+                .records_of_root(ProjectionScope::Current, nested)
+                .len(),
+            1,
+            "嵌套根仍持有共有的那条"
+        );
+        assert_eq!(store.current_counts(), (1, 1), "父根独有的那条掉了");
+    }
+
+    /// d-149 观测：`overlay_footprint` 查时现算——条数与 `current_counts` 同一口径，字节随记录 / 回执 / ACK
+    /// 单调增长，祖先链更长的记录（索引里多几份 `record_id` 副本）估得更大；空作用域全 0。
+    #[test]
+    fn the_overlay_footprint_counts_what_is_resident_and_grows_with_it() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        assert_eq!(store.overlay_footprint(), OverlayFootprint::default());
+
+        let root = RefNo::new(7997, 1);
+        let receipt = commit_root(&store, root, "one");
+        let after_one = store.overlay_footprint();
+        assert_eq!(
+            (after_one.records, after_one.roots, after_one.acks),
+            (1, 1, 0),
+            "{after_one:?}"
+        );
+        assert!(
+            after_one.approx_bytes
+                >= std::mem::size_of::<ProjectedGeometry>() + std::mem::size_of::<RootReceipt>(),
+            "{after_one:?}"
+        );
+        assert_eq!(
+            (after_one.records, after_one.roots),
+            store.current_counts(),
+            "条数与 current_counts 同一口径"
+        );
+
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            root,
+            ack_matching(&receipt, 7997, PersistMedium::RocksDb),
+        ));
+        let with_ack = store.overlay_footprint();
+        assert_eq!(with_ack.acks, 1);
+        assert!(with_ack.approx_bytes > after_one.approx_bytes, "ACK 也算钱");
+
+        // 祖先链长一倍的记录：索引里多几份 record_id 副本，估得更大。
+        let short = record("short", RefNo::new(7997, 11), RefNo::new(7997, 10), 7997);
+        let mut long = short.clone();
+        long.record_id = "long!".into();
+        long.ancestors = vec![1, 2, 3, 4, 5, 6];
+        assert!(approx_record_bytes(&long) > approx_record_bytes(&short));
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![short, long],
+                ..Default::default()
+            }],
+        );
+        let with_more = store.overlay_footprint();
+        assert_eq!(with_more.records, 3);
+        assert!(with_more.approx_bytes > with_ack.approx_bytes);
+
+        store.clear_dbnum(7997);
+        let cleared = store.overlay_footprint();
+        assert_eq!(
+            (
+                cleared.records,
+                cleared.roots,
+                cleared.acks,
+                cleared.approx_bytes
+            ),
+            (0, 0, 0, 0),
+            "删光之后记录那半的账也归零: {cleared:?}"
+        );
+    }
+
+    /// d-149：LRU 键是**最近一次盖回执**的序号——同一根再提交一次就排到最新，读它不刷新。
+    #[test]
+    fn recommitting_a_root_moves_it_to_the_newest_end_of_the_eviction_order() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let first = RefNo::new(7997, 1);
+        let second = RefNo::new(7997, 2);
+        commit_root(&store, first, "first");
+        let second_receipt = commit_root(&store, second, "second");
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            second,
+            ack_matching(&second_receipt, 7997, PersistMedium::RocksDb),
+        ));
+        // 读不刷新序：读了 first 之后再提交一版，它才排到最新。
+        let _ = store.records_of_root(ProjectionScope::Current, first);
+        let first_again = commit_root(&store, first, "first-v2");
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            first,
+            ack_matching(&first_again, 7997, PersistMedium::RocksDb),
+        ));
+
+        let outcome = store.enforce_root_limit(1);
+        assert_eq!(
+            (outcome.evicted, outcome.resident_after),
+            (1, 1),
+            "{outcome:?}"
+        );
+        assert!(
+            store.receipt(ProjectionScope::Current, second).is_none(),
+            "second 的回执更旧，先出"
+        );
+        assert!(store.receipt(ProjectionScope::Current, first).is_some());
     }
 }

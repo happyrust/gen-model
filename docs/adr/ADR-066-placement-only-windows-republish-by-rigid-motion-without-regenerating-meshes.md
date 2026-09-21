@@ -5,7 +5,27 @@ D3 的祖孙锚点改取**最内层**、盒的规则改成「纯平移加 t / �
 **2026-09-15 修订**（会话 fable-5-1-21，属性变化分类对齐 core 计划 S2 / S3）：D1 规则 3 补第四类排除——P23 摆放派生 noun——与第五类
 ——被属主消费的几何（负体 / 剖面数据 / 几何集；非单元在消费型属主下；`EVALAT` 规则 M 结构件的严格祖先），见规则 3 末注。
 **2026-09-17 修订**（会话 fable-5-1-37）：D1 规则 2「子树里另有非锚点候选 → 整根 `regen`」只数账本去向 `RolledUp` 的候选，
-去向 `no_model` 的（两票元数据门放行 / 没有模型归属）不是锚点也不挡路，见规则 2 末注。
+去向 `no_model` 的（两票元数据门放行 / 没有模型归属）不是锚点也不挡路，见规则 2 末注。**同日 Q6 落地**（用户拍板，会话
+fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_model` 第三档 `CacheStamp`——挪一件时被顺带盖戳的子树成员从此不再挡规则 2，
+见规则 2 末注（含对同条 Q5 段「只有 `CACHID` 变照旧 `regen`」半句的更正）。
+**2026-09-19 修订**（用户 18:15 拍板 A，会话 fable-5-1-36 起手、fable-5-1-6 接力）：`SPAMAP` 与 `CACHID` **同档进戳表**
+`PLACEMENT_STAMP_ATTRIBUTES`（计划 §8 Q6 题 B / N2 t-334：同是 3.1 运行库 schema 簿记键、字典无票、生成器不读、四库全量 1718 根 0 红），
+规则 2 的戳例外与 Q6 第三档从此都是两个名字；**同日凭证前移比例护栏的分子改按净候选数**（毛候选 − 只戳候选 `cache_stamp`），见规则 2 / 规则 4 末注。
+**同日 21:59 验收 1 的对拍门复跑**（会话 fable-5-1-16，`probe_rigid_exclusion_windows` 全语料 3157 窗，报告 `docs/evidence/2026-09-19-rigid-exclusion-parity-spamap.md`）：
+`SPAMAP` 进表后 `is_placement_only` 多认的 885 个候选里 39 个成了合格锚点、其余 846 个仍被规则 3「路由容器之内」排除；合格锚点 163 → 186、对拍 152 根
+**不等·锚点 0**，门照旧过。少的 16 个是 ams7997 HVAC 的 `BEND` / `ATTA` / `DAMP`——e3d-model 09-18 `f93fd66` 让 HVAC BRAN 也派生隐式直段之后改判「路由容器之内」，
+与 `SPAMAP` 无关。`model_transform_cheap_path` 默认仍关。
+**同日 23:5x–00:4x 执行体两处「待补」补齐**（会话 fable-5-1-37）：D3 含旋转时读回记录自己的网格、顶点乘到新世界系重算盒（`rigid_motion_mesh_bounds`，
+隐式管身的 `local_transform` 已折进世界矩阵不再乘），此前一律 `bail!` 回退；D4 回执落款改按 pin@T 现算（`rigid_motion_target_at`：与 regen / 单元级同一条
+`hydrate_published_dependencies → model_target` 路，设计窗之外任一格变了回退 regen），此前沿用旧回执。执行体仍未在真投影上跑过（S4b B7 / B8 / 验收 2 / 3 照旧零），见 S4b 计划 §9。
+**2026-09-20 02:1x–02:4x 验收 1 的生产记录半边首跑**（会话 fable-5-1-37 起手、fable-5-1-47 接力，`probe_rigid_motion_gate3_for_window`，报告 `docs/evidence/2026-09-20-s4b-gate3-rigid-motion-parity.md`）：
+**ams8000 195→196 过 S4b §5 门 3**（`record_id` / 1e-9 / 1e-3 / `mesh_id` 复用 / 回执与目标都在 T），另 6 窗 12 根同过，含两窗**含旋转**（D3 读网格重算盒与 regen@T 逐位相同）。
+三条发现，全部已拍板落地（fable-5-1-51 08:5x）：**嵌套根双乘已修**——嵌套显著根名下记录互相包含、执行体逐根串行把共有记录**乘了两次 Δ**（ams7997 156→157 / ams1112 724→725 红；P0 幂等闸按根判护不住），
+`republish_records` 加**按记录**的幂等闸（`source_sesno == T` 不再乘、比规划基线新的整根回退 regen）后两窗全跑都过（14 + 3 / 1090 + 31 记录，|Δ| ≤ 9.1e-13、盒差 0）；
+纯平移下 Baked `mesh_id` 也漂（本地化残差进 SHA，内容逐位同）——§5「纯平移必复用」对 Baked 立不住，**§5 门 3 改口**：Canonical 按 id、Baked 一律按内容判（顶点 / 法线 < 1e-3、索引同 → 观察项）；
+`world_bounds` 1e-3 mm 这一轮全过但最大 0.000977 mm = 1 ulp、离线 2.3%，坐标 ≥ 16384 mm 段同样的差就判死，**§5 门 3 改口**：`|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`。
+两处改口后 7 窗 19 根复跑全过（含旋转两窗的 Baked 按内容判也 0 不等）。
+`model_transform_cheap_path` 默认仍关；live #2 / 验收 3 未跑。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
@@ -73,8 +93,25 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    （`rigid_motion::CandidateKind::NoModel`，去向由 `ChangeLedger::dispositions` 读出）。不接这一下的代价：真实编辑几乎必带这种
    候选——「挪 EQUI + 子元素改个名」两件事单独发生分别是 `transform` 与 `skip`，落在同一窗却整根 `regen`。三条边界：
    根里**只有** `no_model` 候选（没有一个 Δ）照旧 `regen`——零锚点的 `transform`（只推回执不动记录）是选根的另一道题，不在本条；
-   `Unresolved` 照旧挡路（那时窗口本就退化，规则 4）；只 `CACHID` 跳动的子元素今天**不是** `no_model`（计划 §8 Q6 未落地），仍挡路
-   ——E3D 3.1 挪一件会给整棵子树带 `CACHID` 的元素各盖一次戳，所以 ZONE / STRU / 带 SUBE 的 EQUI 挪位要等 Q6 才打得着这条路。
+   `Unresolved` 照旧挡路（那时窗口本就退化，规则 4）；第三条**同日已改**：只 `CACHID` 跳动的子元素原本**不是** `no_model`
+   （计划 §8 Q6 未落地）、仍挡路——E3D 3.1 挪一件会给整棵子树带 `CACHID` 的元素各盖一次戳，ZONE / STRU / 带 SUBE 的 EQUI 挪位因此打不着
+   这条路。**（2026-09-17 Q6 落地 · 用户拍板）** 戳现在是元数据门第一票的**唯一例外**：字典按构造收不到 `CACHID`（3.1 运行库 schema
+   里的项目 UDA，不是「还没补上」而是永远不会有），第一票改由 e3d-model 的戳表 `PLACEMENT_STAMP_ATTRIBUTES` 给
+   （gen-model `model_impact::attribute_is_cache_stamp`），第二票照旧问读取集合（守卫 `stamp_literals ∩ names = ∅`，两仓各钉一次）。
+   只有戳跳了的候选记 `no_model` 第三档 `NoModelTier::CacheStamp`（回执 `cache_stamp`，与前两档互斥、都含在 `no_model` 里），
+   不上卷、不级联、账本去向 `NoModel`——于是它对规则 2 不再挡路；戳混在别的放行属性里不改档（跟着 `NAME` 记老档、跟着 `DUTY` 记新档），
+   `[POS, CACHID]` 仍是锚点那条路（`is_placement_only`），不是元数据。上一段「只有 `CACHID` 变照旧不算（摆放一项都没动）」
+   说的是**它不是锚点**，仍成立；「照旧 `regen`」那半句自本日起作废。窗 C 复跑见 changelog 2026-09-17。
+   **（2026-09-19 · `SPAMAP` 同档 · 用户拍板）** 戳表加第二个名字 `SPAMAP`（e3d-model `PLACEMENT_STAMP_ATTRIBUTES = ["CACHID", "SPAMAP"]`）：
+   3.1 运行库 schema 里的空间索引簿记键（`INTVEC`，字典无票），Design 应用随图形 / 空间索引重建逐次 `+1`，生成器一处不读（两仓
+   `stamp_literals` 守卫同款钉住），S8 语料 453 库里单独跳 11666 次；两态实证与 `CACHID` 同一把尺子——四库全量 1718 根 0 红
+   （归 `SPAMAP` 增量的 1034 根）、全语料命中 36 库（30 库是 `CACHID` 一根都没剔到的），四门与 `CACHID` 同向、无一格反向
+   （`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md` §4.1）。后果与 `CACHID` 完全平行：本条规则 2 判「摆放之外还动了别的」时
+   忽略它（`[POS, SPAMAP]` / `[POS, CACHID, SPAMAP]` 算只动了摆放）、只 `SPAMAP` 跳记第三档 `CacheStamp`、不挡规则 2；
+   **另加一手 `CACHID` 当初没有的**：ams7997 那类库里 5819 个只 `SPAMAP` 候选把 52→53 / 54→55 两窗候选数顶过索引键数 30% 的线
+   （7328 / 8535 > 5993 / 7652），整窗按规则 4 退化 regen 216 根、B0 剔种子一根救不回——于是**比例护栏的分子改按净候选数**
+   `candidates − cache_stamp`（gen-model `WindowImpact::cache_stamp` / `net_candidates`，元数据门关着时恒 0、逐位回到之前），
+   净掉后 5161 / 5534 不再退化，216 根量到红 0。名单仍只有 e3d-model 那一份；接线记录见 changelog 2026-09-19。
 3. 锚点及其到根的路上**没有路由容器**（e3d-model 上卷规则 1 里「会补管的容器」：BRAN / HANG 等，管段几何由成员两端点派生），
    锚点**不是点 / 环容器下的元素**（`graphicsBehaviour == 1` 那类祖先之下的点：它的 `POS` 是属主网格的输入，e3d-model 上卷规则 1
    本来就把它并进属主单元），也**不在 CWBRAN 子树里**（桥架件的摆放是伪属性，`cable_tray::placement_matrix` 读兄弟，上卷规则 5）。
@@ -96,6 +133,9 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    少算方向两票缺一不放行。结构件**自己**挪位不在此列（它的网格只依赖自身属性 + 目录）。
    五类排除的原因文本各不相同，回执 `transform_fallback_reason` 原样带出。开关 `model_transform_cheap_path` 仍默认关，S4 对拍样本过了再翻（D7）。
 4. 窗口没有退化（`WindowImpact::degraded_reason() == None`）。退化时一切进 `regen`，与今天一样。
+   **（2026-09-19 末注）** 退化四因里的「候选数超过索引键数 30%」自本日起按**净候选数**判（`candidates − cache_stamp`，
+   只有戳跳了的候选不计——它们去向 `NoModel`、不上卷不级联，对闭包可不可信一个字都没说；`cache_stamp` 为 0 时逐位同前）。
+   其余三因（闭包不完整 / `unresolved` / 设计反查判不了）不动。
 5. **（19:50 修订）** 它不是由级联扩展（C2 结构连接 / C8 电缆端点 / P4 `POSREF` 反查，`WindowRootSources::impact` 的
    `expand_touched`）加进 `touched` 的——那三条是「别处动了、我这里的几何随之变」，不是刚体运动，照旧 `regen`。
    判据在 `expand_touched` **之前**算，扩展进来的根若与 `transform` 候选重合，`regen` 吞掉。

@@ -98,6 +98,10 @@ _Avoid_: 斜切、is_sloped、端面方向（当指属性时）
 一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（属性 put → `DESDRA_SCPlugs::PostSetAttribute` → `descases/VDESPT` 按字典 DCHC 类别进 `change/EVALAT`，在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`VDESPT` 就不进 `EVALAT`，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」的两档各要两票：`Skip` = 字典 DCHC=0 **∧** 生成读取集合不含它（`attribute_is_metadata_only`，2026-09-15 S6；之前是效果表 DataOnly ∧ DCHC=0 的五个名字，那张手写表退成报表分类与 `no_model` 的 `metadata_only` / `unread_attribute` 分档依据），`TransformOnly` = 效果表 ∧ DCHC=3。预览（`change_impact` / `model_affecting`）与执行（窗口规划器的元数据门）问同一个谓词。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（§9 为 `putAtt` 入口链与 `VDESPT` 的属性专项规则）。
 _Avoid_: 几何影响、is_geometry_update
 
+**单元级发布 (Unit-Level Publish)**：
+拿到一个要重算的生成根之后，只重建 `plan_update(S→T)` 点名的那几件单元（单元 = 投影里的一条记录，键 `GeometryId`，与 `manifest_hash` 的去重键同一个），以局部清单（`Partial`，见「局部清单」）叠在同一份**根级**回执之下发布，其余记录原地不动（ADR-080）。它是 ADR-056 D3「根级整根重算」的第二个例外（第一个是 ADR-066 刚体前移），三条路的优先序定死为 transform 优先、unit 兜底、整根重算保底；闸（回执 vs 计划基线）/ 管段完整性门 / 设计窗之外的目标变化 / 生产方任一条不成就回退整根 regen，回退永远正确、只是不省。core 的对应物是 `css/SEGREP`（单图元重建）而不是 `add/REPELE`（整件重画）——「模型影响」里 `Regen` 一档在 core 交互路本就分这两级，本词条把我方的 `Regen` 也拆成整根 / 单元两档；选根一个字不改，它只改「拿到一根之后在根内做什么」。只被 `no_model` 候选碰到的根（本窗名下没有一件几何要变）发一份空 `Partial` 只推回执（D10）。开关 `model_unit_level_publish` **默认关**，开门要过两态对拍全绿、全语料、净收益为正三道门（D9）；D10 另要三条级联同开。
+_Avoid_: 局部生成（当指 ADR-066「局部生成、整根 upsert」时）、单元级回执、单元级 CAS（回执与 CAS 仍是根级，ADR-080 D5）、增量发布（泛指时）
+
 **净变化 (Net Change)**：
 一个 `refno` 在整个待更新会话窗口内所有操作合并后的最终结果：`Added / Modified / Deleted / Cancelled`（新增后删除=无净变化）。
 _Avoid_: 合并变化、final op
@@ -113,6 +117,30 @@ _Avoid_: 水位、sesno 水位（泛指时）
 **生成源版本 (Model Source Version)**：
 一个库在当前投影下用来生成模型的那一版数据：调用方显式指定的会话号 / 时刻（历史投影、增量窗口右端），或——未指定时——库文件此刻自报的最新会话。它不是应用水位：水位只说数据已摄入，生成时点不从它取；完成凭证记的是模型按哪一版生成，判「当前」看它是否**不早于**要求的版本，不判等值。它也**不是模型水位**（ADR-060）：这一个记「这份几何按哪一版**文件**算出来的」、判不早于，那一枚记「到哪一版**数据窗口**为止数据与模型一致」、判等值；模型按文件最新生成到更新的版本时，两者取值本就不同。
 _Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
+
+**单元版本表 (Unit Version Table)**：
+一个最小交付单元在其库文件会话链上**被触及过**的会话序列（旧 → 新），每条带一个五态 `impact_kind`：`delivery`（单元根在这一会话出现）/ `tombstone`（单元根被删）/ `mesh`（子树里任一元素按「模型影响」判为 `Regen`）/ `placement`（否则任一 `TransformOnly`）/ `noop`（碰到了、全是 `Skip`——plant3d-web 词汇表的「无几何变化提交」）。一个会话没碰到这个单元就不在表里。它是从会话链**算出来的派生量**（ADR-081），不是持久事实，库里没有它的表；同一份「模型影响」判据保证它与生成路不会各说一套。plant3d-web 的「模型版本」`(dbnum, unit_refno, sesno)` 就是这张表的一行。
+_Avoid_: 版本列表（泛指）、逐单元版本索引表、release、把它当模型水位或生成源版本
+
+**历史投影 (Historical Projection)**：
+按需把一个单元子树在某个生成源版本下的几何算出来给前端看的那一份：只活在进程内自己的命名空间（`<refno>@<sesno>`）里，**不进库、不进生产投影、不进任何水位或回执**，前端用完 `DELETE` 或进程重启就没了；它留在盘上的只有内容寻址、跟生产共享的 mesh 文件（用户 2026-09-18：「除了 mesh 文件，其他都不要存到数据库，相当于是一次性的，传递给前端的」）。plant3d-web 版本对比的 A/B 几何就是两份历史投影；「模型版本」是身份，历史投影是把它算出来的一种方式，两个词不互换。
+_Avoid_: 历史模型、历史快照落库、把它当版本身份、把它的记录算进 `model_sesno` 或生成根账本
+
+**属性历史对比 (Attribute History Diff)**：
+同一个构件在 A / B 两个模型版本（两份历史投影的 `sesno`）下的属性逐项 before / after。取数是 `POST model/history/query tool=attributes { snapshot_key, arguments: { refno } }`：按快照回执里的 `(source_file, sesno)` 开一个会话钉死的单库 `DbSet`，与属性面板 `element/attributes` **同一个渲染器**出行——两边对同一个属性印同一个字，字不同就是变了。该构件在那个会话不存在（还没建 / 已删）是一种**正常回执**（`exists: false`），不是错误；存在但不在单元子树里才是 `REFNO_OUTSIDE_SNAPSHOT`。与历史投影同一条纪律：按需算、不落库、不进备份库（ADR-081 候选条，2026-09-18）。
+_Avoid_: 属性快照落库、legacy `/api/model-history/*`（anchors / resolve-anchor / snapshot，plant3d-web 已删）、用另一套简化渲染出行
+
+**属性变化时间线 (Attribute Change Timeline)**：
+一个节点（任意 refno）按会话链列出的「谁在哪一版改了什么」：每行一个它**自身记录**被改过的会话，带会话页的 `user` / `comment`（e3d-io `SessionPage`）、`kind`（created / modified / deleted）、与版本表同一词表的 `impact`（同一个 `classify_operation_impact`），展开是逐属性 before / after——由属性面板同一个渲染器在两端各出一次（`ElementAttributeService::read_pinned`），字不同就是变了；成员增删 / 重排与 owner 改挂另列（成员序在 E3D 里就是管路走向）。索引说记录重写了但两端一字没差 = 原样换页，不成一行。它回答的是「谁改的、为什么改」，任意两版的净差看属性历史对比。`GET element/attribute-history`，按需算、只进进程内缓存（ADR-081，plant3d-web ADR 0066）。
+_Avoid_: 属性历史对比（那是 A / B 两版逐项，不是时间线）、会话列表（漏掉了改了什么）、把 `CACHID` 一类的戳当业务变化（回执里单独标 `stamp`）
+
+**差异摘要 (Node Diff Summary)**：
+节点在 A→B 之间**不生成几何**的一张账：一次会话索引差分，候选按对比范围过滤（`self` = 节点自己；`subtree` = 变化那一侧 owner 链上溯到节点），逐个按生成路同一把尺子判 added / deleted / modified（mesh · placement）/ noop，再按所属最小交付单元分组，附范围内单元总数、变了的单元数与 `needs_confirm` / `estimated_projections`（阈值 `MODEL_HISTORY_CONFIRM_UNITS`，服务端成本策略）。前端拿「变了的单元」去逐个生成历史投影，未变的一份都不算。`GET node/diff-summary`，按需算、不落库。
+_Avoid_: 预对比、干跑对比、把它当模型几何差异（那是几何生成之后的差）、前端写死阈值
+
+**节点版本表 (Node Version Table)**：
+任意节点（构件、单元根、SITE / ZONE 容器）按**对比范围**折叠的模型版本表：`scope=self` 每行是它自身记录变过的会话；`scope=subtree` 每行是节点自身或其下整棵子树里任何记录变过的会话，影响取子树里最重的一档（节点自身出现 / 被删压过一切，成员新增 / 删除按重生成记——与单元表同一把尺子 `fold_window_impact`），并给 `units_changed`（折叠影响不是 noop 的最小交付单元数）/ `units_touched`（记录被动过的单元数）与 `self_impact`（节点自身那一格）。归属不建子树集而是每个候选沿 owner 链上溯一趟，同时解出所属单元根——容器子树几万个元素 × 几百个窗口建不起子树集。它是容器节点「所有子节点」下时间线的唯一来源（容器没有单元表可查）。`GET node/versions`，按需算、只进进程内缓存，键含 scope（ADR-081，plant3d-web ADR 0066）。
+_Avoid_: 子树版本表（漏掉了 `self` 这一档）、容器版本表（它也收构件与单元根）、把它当单元表的并集（并集丢了「节点自身那一格」和单元数）
 
 **模型水位 (Model Watermark)**：
 某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。**它是模型面唯一的持久事实**（ADR-079）：库里不再有逐根的凭证行，重启后「这个库欠到哪」只有它一个说法——落后于 `applied_sesno` 就排 `model_sesno → 文件最新`，`0` 就整库重排；上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做，没有第二个写者对它「对账」。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败——但承诺只覆盖**在册且有几何**的面板：常驻模型带「房间输入缺口」（缺文件的 DESI、缺几何的面板）时生命周期 `Degraded`，根照常算、边照常写、缺口点名的面板 / 库不在承诺内，`/health.degraded_sections` 含 `room`（ADR-073 2026-09-16 D11）；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（`http_422` 一类永久判定，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——前三格来自**生成根账本**（进程内，ADR-079），已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
@@ -291,8 +319,12 @@ _Avoid_: gb 标志（当指语义时）、图形忽略位、XGEOMETRY
 _Avoid_: 生成任务状态、pending 终态、实例计数
 
 **分支原子替换 (Branch-Atomic Replacement)**：
-单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以根级 CAS 发布的形态成立（ADR-056 N3）：一个根一次发布，`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。
+单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以 CAS 发布的形态成立（ADR-056 N3，★0917 按 ADR-080 D4 改口）：原子边界是**一次发布调用**——一批提交一次落地，可混整根与局部（见「局部清单」）、可跨多根；`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。触到某条 BRAN 管身的局部提交按整段重写，计划必须带齐该 BRAN 在 T 端的全部管段才发（ADR-080 D6）。
 _Avoid_: 生成根快照事务、先删后补
+
+**局部清单 (Partial Manifest)**：
+一次模型提交里 `CommitScope::Partial` 的那一档：`upserts` 只点名这根里重建过的那几件，缺席**什么也不证明**，要删什么必须显式写进 `removals`（合法来源只有三处：`plan_update.remove` 的单元、重建时画不出 / 画失败而被擦掉的单元、派生容器 base 端的旧管段键；回溯不到就回退）。与之相对的 `WholeRoot`（默认档，今天所有整根提交）是「`upserts` 是这根的全集，缺席 = 删除」——拿缺席推删除在生产代码里只许有 `whole_root_removals` 一处。局部提交之后没动的记录停在旧会话上、回执前移到 T，所以记录对回执的对账是 `record.source_sesno <= receipt.source_sesno`（ADR-080 D3；比回执新的记录仍是错）；整根 `manifest_hash` / `geometry_count` 由存储在写锁里按提交后的全部记录重算盖章（D5，调用方填的只是占位）。触到某条 BRAN 的管身按整段重写（`tube_branch_resets`），账上的段数 == 带上的段数才发（D6）。空清单只许来自规划器点了名的 `no_model_only` 根（D10），别的根回出空清单是生产方的 bug、回退不发。
+_Avoid_: 部分清单、增量清单、把 `Partial` 当成未完成写入（那是写入标记的事，见「未完成写入重初始化」）、把缺席当删除
 
 **合批重生成 (Batched Root Regeneration)**：
 一次生成调用同时承载多个生成根的重算方式，与「逐根重生成」相对。整批同成同败；批失败后回退逐根，以定位真正坏掉的那个根。
@@ -325,6 +357,18 @@ _Avoid_: 分块、chunk、execution group（指内存预算时）、ZONE 切片
 **生成窗口 (Generation Window)**：
 生成端 worker 最多能跑在装配端前面多少根（`model_regen_execution_group`）。它同时是两件事的答案：**无栏并行**——worker 不在 cohort 边界上停下来等这一批里最慢的那根（几何负载长尾，设栏等于每批都赔上尾巴），只有队头能挡住人；**内存有界**——在飞的已生成几何最多一个窗口，加上正在攒的那一片。窗口满时 worker 把许可**还回去**再退出，由装配端滑动窗口后重新派出，绝不攥着许可等（那是 ADR-052 开篇那个容量倒置）。装配严格按源顺序，所以切片边界与 `Required` 裁决与「谁先算完」无关，`geometry_workers = 1` 逐字节复现串行路径。
 _Avoid_: 批、wave、in-flight（泛指时）、并发度（那是闸额度）
+
+**投影 overlay 根数上限 (Overlay Root Limit)**：
+进程内模型投影（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个有回执的根（`model_overlay_max_roots`，环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS` 压过；**没写 = 50,000**（2026-09-20 mem 档实测 ≈ 13.8 KB/根 → ≈ 0.7 GB，证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`），**写 0 = 不限**）。overlay 此前无界——一个根进来就一直在。超了按**最近一次盖回执**的先后逐出**已 durable ACK 且与回执逐字相符**的根：整根记录（与仍常驻的回执共有的留下）+ 回执 + ACK 一起掉，是缓存态的收回不是删除——库里那一份不动、不产生删除 delta、不进房间变化账；读路对它直读 RocksDB，单元级发布 / 刚体前移拿不到 S 端基线回退 regen，整库房间重算从库里读它的几何行（见「冷根」）。未落盘的根永远不在候选里，候选用尽仍超限就只报数（「设了上限却一直不逐」= 常驻的全是还没落盘的根）；只在 durable 介质下动（嵌入 kv-mem 时 overlay 是唯一一份）；读不刷新序。时机：write-behind 每次发布之后、每批 durable ACK 记下之后。现值 `/health.model_cache.resident_roots`，上限与累计逐出数在 `write_behind.overlay_root_limit` / `overlay_evicted_total`；`/health.model_cache.overlay.approx_bytes` 是被查时现算的估算字节（记录那半插入加 / 删除减记账，回执 / ACK 走一遍；不含房间空间树与盘上网格），只回前端、不落库（ADR-082 D1 / D5，d-149）。
+_Avoid_: overlay LRU（读不刷新序）、按字节的内存预算、投影淘汰（当指 `evict_missing_root` 那种「库里没了」的收回时）、overlay 硬上限 503（旧设计残词，从未有过）
+
+**冷根 (Cold Root)**：
+库里有几何行、进程投影里没有回执的生成根——按根数上限逐出过的、进程重启后没回填的（`model_cache_mode=incremental-overlay` 启动不回填），两种同一形态。读路对它直读 RocksDB、不回填；整库房间重算把它的几何行读回来折成房间计算的输入（`model_record_reader::durable_records_of_root` → `room_model::durable_room_inputs`，ADR-073 D13 U1 第二半；2026-09-21 合并前主线短暂有过一份 `durable_room_records_of_root`「房间视图」，已并成这一条）：只有房间计算读的那几样忠实——构件、世界盒、网格、变换；**不装回 overlay**、不发布。根的全集不从库里猜（`gen_root` 已退役、几何行的 `anc` 分不出谁是根），从本任务冻结的源按 `DbSet@T` 枚举（`batch_worker::library_generation_roots`，与规划器同一条枚举）；枚举不出就是 `PartialCoverage`——只算投影那一半、D14 那一格不盖、电平型触发下一个任务再点（ADR-082 D3，修订 ADR-073 D13）。
+_Avoid_: 缺根、未生成的根（那是从没生成过的）、冷读回填、把房间视图当投影记录
+
+**元素缓存元素数上限 (Element Cache Entry Limit)**：
+生成用 `DbSet` 池级元素缓存（`model_element_cache`，默认开）最多装多少个元素（`model_element_cache_max_entries`，环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES` 压过；**没写 = 200,000**（2026-09-20 mem 档实测 3.6–4.7 KB/元素 → ≈ 0.7–0.95 GB/库，样例最大库整库一遍 177k 条不会清一次），**写 0 = 不限**）。缓存体在 vendor e3d-io `DbSet::with_element_cache_limit`：全池跨库合计，一枚原子计数器（只数 `parsed`，与 `cached_element_count` 同一口径，近似值）；满了**整张清**再装下一个——与四张版本表缓存同一个做法，零簿记，不做 LRU（每元素上百次命中的读路径上不写一笔），代价只是清空之后那一小段重新变冷。每份 `DbSet` 各算，生成输入缓存每库留一份，进程里的上限是「库数 × 这个数」。产物逐字不变（缓存只省重复的 open + parse；7997 一轮这块实测 768 MB → 1.55 GB）；缓存关着时这个数没有意义。现值 `/health.model_cache.element_cache`（每库一行：条数、抽取条数、估算字节、上限），估算是被查时逐份走缓存现算的、只回前端、不落库（ADR-082 D4 / D5，d-149）。
+_Avoid_: 元素缓存 LRU、按字节的缓存预算、把它当成生成输入缓存的上限（那个每库一条、不归它管）
 
 **几何 CPU 执行域 (Geometry CPU Domain)**：
 几何计算跑的那个私有线程池（线程数 = 几何并发闸额度，**不是**全局 Rayon 池——那个被 `room_model` / `db_model` 的 `par_iter` 共用，宽度不归闸管，接进来就是第二套并发口径）。唯一入口 `run_gated_cpu`，只收**同步闭包**：闭包里写不出 `.await`，「攥着许可去 await 另一个过闸子任务」这条会死锁的写法在类型层就不成立。等库、等锁一律留在 async 侧，不占额度。fan-out 宽度只来自 `resident_workers(件数) = min(额度, 件数)` 个**常驻 worker 从共享队列动态领取**，不是静态均分（几何负载长尾，一块里摆两个重 BRAN 就把其余 worker 空在那儿），也不是「每件一个 task 挤信号量」。

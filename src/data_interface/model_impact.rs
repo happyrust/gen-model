@@ -124,7 +124,12 @@ pub const TRANSFORM_ONLY_ATTR_NAMES: &[&str] = &["POS", "ORI"];
 /// 没命中过，而真名 `FUNC`（633 个 noun 上有，字典 DCHC=0）反而落 `Unknown` 整根重算。
 /// 2026-09-08 改回短名，并由 [`tests::curated_tables_are_reconciled_against_the_runtime_schema`]
 /// 钉住「这张减免表里不许再有匹配不上任何东西的名字」。
-pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNC", "CACHID", "LCHKDA"];
+///
+/// 两个**戳**（`CACHID` / `SPAMAP`，e3d-model `PLACEMENT_STAMP_ATTRIBUTES`）也登记在这里：效果表判它们
+/// DataOnly，但它们**不是老名单**（字典没收、[`attribute_is_curated_metadata`] 为假），放行靠戳表那一票
+/// （[`attribute_is_cache_stamp`]）。`SPAMAP` 2026-09-19 与 `CACHID` 同档进表（计划 §8 Q6 题 B / t-334）。
+pub const DATA_ONLY_ATTR_NAMES: &[&str] =
+    &["NAME", "DESC", "PURP", "FUNC", "CACHID", "SPAMAP", "LCHKDA"];
 
 /// 结构/成员/类型属性（改变层级、生成分派或参与范围）。
 pub const STRUCTURAL_ATTR_NAMES: &[&str] = &["OWNER", "CHILDREN", "NOUN", "TYPE", "LEVE", "LEVEL"];
@@ -421,7 +426,7 @@ pub const E3D_IO_CATALOGUE_EVAL_FILES: [&str; 3] = [
 #[derive(Debug, Deserialize)]
 pub struct GenerationReadSetFile {
     /// **戳**（2026-09-16 Q5）：是属性名，但源码提它只为**按名字把它排除掉**——差分层判「只动了摆放」
-    /// 时要忽略的那张表（`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`，今天只有 `CACHID`）。
+    /// 时要忽略的那张表（`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`：`CACHID`，2026-09-19 起还有 `SPAMAP`）。
     /// 写一句名字不是读，所以扫描把它们从**每一侧**的 `names` 里摘出来；收进去就等于让这条判据
     /// 自己写的排除名单反过来把它挡住。真被传进 e3d-io 的按名读取口就照旧算读、照旧回到 `names`，
     /// 守卫随即红。生成脚本的 `STAMP_LITERALS` 与那张表逐名相等（两仓守卫各钉一次）。
@@ -469,7 +474,8 @@ pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
 /// 按最宽口径扫（多收只少跳一次、漏收是一张停在旧形状上的网格）。
 ///
 /// 它是元数据门的**第二票**：S6 起 [`attribute_is_metadata_only`] 改成「字典 DCHC == 0 ∧ 不在这里」；
-/// 本轮（S5）只交付产物与护栏，判决还没换。2026-09-15：138 个名字，DCHC=0 的恰好六个
+/// 本轮（S5）只交付产物与护栏，判决还没换。2026-09-15：138 个名字（2026-09-19 重生成后 139——e3d-model 09-18
+/// 风管那条带进的 `LBOR`），DCHC=0 的恰好六个
 /// `DIR FILL GTYP PKEY UKEY VXREF`（core 不重画、我们却真读的输入，正是第二票要挡的那几个），
 /// 老五个元数据名 `NAME DESC PURP FUNC LCHKDA` 一个都不在。
 ///
@@ -479,8 +485,9 @@ pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
 ///
 /// 戳（[`GenerationReadSetFile::stamp_literals`]，2026-09-16 Q5）也不在这里：`CACHID` 在运行库 schema 里，
 /// 差分层为了排除它而写下的那个字面量会被这条最宽的扫描当成读点，那是错的——它不是几何输入。
-/// 它不进这一票不代表元数据门放行它：字典压根没收它，[`attribute_is_metadata_only`] 第一票就回 `false`
-/// （只 `CACHID` 变的候选照旧上卷重算，见计划 §8 Q6）。
+/// 它不在这里正是元数据门放行它的**第二票**（守卫 `stamp_literals ∩ names = ∅`）；第一票字典给不了
+/// （压根没收它），2026-09-17 Q6 起由戳表 [`attribute_is_cache_stamp`] 给——只 `CACHID` 变的候选记
+/// `no_model` 第三档 [`NoModelTier::CacheStamp`]，不再上卷重算。
 pub fn generation_read_set() -> &'static HashSet<String> {
     static SET: OnceLock<HashSet<String>> = OnceLock::new();
     SET.get_or_init(|| generation_read_set_file().names.iter().cloned().collect())
@@ -543,6 +550,11 @@ fn wnoevt_no_event_names() -> &'static HashSet<String> {
 /// 不看它（0831 取证 `changesBetweenSessions` 的 `DDES_GraphicsMngr` 一路），S4 对拍把它剔出比较集后 108 根
 /// 两态全等 0 红。第二票照旧问读取集合（守卫 `stamp_literals ∩ names = ∅`）。`UDA:<id>` 与任何别的字典
 /// 没有的名字仍不放行：例外只认那张表。
+///
+/// **2026-09-19 `SPAMAP` 同档进表**（用户拍板，计划 §8 Q6 题 B / t-334）：同是 3.1 运行库 schema 里的簿记键
+/// （`INTVEC`，字典无票），Design 应用随图形 / 空间索引重建逐次 `+1`，生成器一处不读（同一对守卫钉住），
+/// 四库全量两态 1718 根 0 红（归 `SPAMAP` 的 1034 根）、全语料 453 库命中 36 库、四门与 `CACHID` 同向无一格反向
+/// （`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md` §4.1）。名单仍只有 e3d-model 那一份，这里不点名。
 pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
     // WNOEVT 事件门（DCHC 之前的第一道门）：core 对置位属性不发任何变更事件，
     // 直接短路为「不动模型」，不再问 DCHC / 读取集合两票（见 [`attribute_no_event`]）。
@@ -553,8 +565,8 @@ pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
         && !generation_reads_attribute(raw_name)
 }
 
-/// 这个名字是不是**戳**（e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES`，今天只有 `CACHID`）：
-/// 应用随图形重建写的缓存计数，不是设计变更。归一化后按名查；名单只有 e3d-model 那一份，
+/// 这个名字是不是**戳**（e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES`：`CACHID`，2026-09-19 起还有 `SPAMAP`）：
+/// 应用随图形 / 空间索引重建写的簿记计数，不是设计变更。归一化后按名查；名单只有 e3d-model 那一份，
 /// 读取集合产物的 `stamp_literals` 与它逐名相等（守卫钉两边）。
 pub fn attribute_is_cache_stamp(raw_name: &str) -> bool {
     let name = normalize_attribute_name(raw_name);
@@ -2609,7 +2621,9 @@ mod tests {
         ] {
             assert!(generation_reads_attribute(name), "{name}");
         }
-        // 今天的规模：134 + 8 − 重叠 = 139。
+        // 2026-09-15 的规模：133 + 8 − 重叠 = 138。2026-09-19 随 `SPAMAP` 进戳表重生成产物：134 + 8 − 重叠 = 139
+        // ——多出的一个是 `LBOR`（e3d-model 09-18 `226154c` 风管那条带进的读点，那边的产物早已 134，这边的副本
+        // 一直没重生成）；两个戳都在 `stamp_literals` 里，一个都不进 `names`（上面那条循环钉住）。
         assert_eq!(generation_read_set().len(), 139, "读取集合条数漂移");
     }
 
@@ -2769,17 +2783,33 @@ mod tests {
         // 戳（Q6，2026-09-17）：字典按构造收不到 `CACHID`（项目 UDA），第一票由 e3d-model 的戳表给、
         // 第二票读取集合守卫钉住它不是读点——放行；效果表判它 DataOnly，但它不是老名单（不是业务元数据）。
         for stamp in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
-            assert_eq!(raw_dchc_code(stamp), None, "{stamp} 进了字典快照？那就不该再走戳这条例外");
+            assert_eq!(
+                raw_dchc_code(stamp),
+                None,
+                "{stamp} 进了字典快照？那就不该再走戳这条例外"
+            );
             assert!(attribute_is_cache_stamp(stamp), "{stamp}");
-            assert!(attribute_is_cache_stamp(&stamp.to_ascii_lowercase()), "{stamp}");
-            assert!(!generation_reads_attribute(stamp), "{stamp} 是戳却在读取集合里");
+            assert!(
+                attribute_is_cache_stamp(&stamp.to_ascii_lowercase()),
+                "{stamp}"
+            );
+            assert!(
+                !generation_reads_attribute(stamp),
+                "{stamp} 是戳却在读取集合里"
+            );
             assert!(attribute_is_metadata_only(stamp), "{stamp}");
             assert!(!attribute_is_curated_metadata(stamp), "{stamp}");
+            // 效果表也登记它 DataOnly（`DATA_ONLY_ATTR_NAMES`）——报表口径与门一致，但那不是放行的票。
+            assert_eq!(
+                classify_attribute_effect(stamp),
+                AttributeEffect::DataOnly,
+                "{stamp}"
+            );
         }
-        assert_eq!(
-            classify_attribute_effect("CACHID"),
-            AttributeEffect::DataOnly
-        );
+        // 戳表今天恰好两个名字（`CACHID` 2026-09-16 / `SPAMAP` 2026-09-19）；多一个少一个都得回来重新过两票。
+        let mut stamps: Vec<&str> = e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES.to_vec();
+        stamps.sort_unstable();
+        assert_eq!(stamps, ["CACHID", "SPAMAP"]);
         assert!(!attribute_is_cache_stamp("NAME") && !attribute_is_cache_stamp("POS"));
         // 老名单恰好五个，且是新门的子集。
         let curated: Vec<&str> = DATA_ONLY_ATTR_NAMES
@@ -2814,7 +2844,7 @@ mod tests {
 
     /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字
     /// 就是 `UnreadAttribute`（与顺序无关）；一个没拿到两票、或一个属性都没有 → `None`。
-    /// 戳（2026-09-17 Q6）：放行不改档——跟 `NAME` 记老档、跟 `DUTY` 记新档；只有戳跳了才是 `CacheStamp`。
+    /// Q6（2026-09-17）：戳放行但不改档，只有戳跳了才是第三档 `CacheStamp`。
     #[test]
     fn the_metadata_tier_is_curated_only_when_every_name_is_on_the_old_list() {
         let tier = |names: &[&str]| metadata_only_tier(names.iter().copied());
@@ -2828,12 +2858,42 @@ mod tests {
         assert_eq!(tier(&["NAME", "DUTY"]), Some(NoModelTier::UnreadAttribute));
         assert_eq!(tier(&["DUTY", "NAME"]), Some(NoModelTier::UnreadAttribute));
         assert_eq!(tier(&["NAME", "DIR"]), None);
-        assert_eq!(tier(&["NAME", "CACHID"]), Some(NoModelTier::MetadataOnly));
-        assert_eq!(tier(&["DUTY", "CACHID"]), Some(NoModelTier::UnreadAttribute));
-        assert_eq!(tier(&["CACHID"]), Some(NoModelTier::CacheStamp));
         assert_eq!(tier(&["NAME", "DIAM"]), None);
         assert_eq!(tier(&["UDA:42"]), None);
         assert_eq!(tier(&[]), None);
+        // 戳：单独跳是第三档；跟着谁就记谁的档；跟着没拿到两票的名字照旧 `None`。
+        assert_eq!(tier(&["CACHID"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["cachid"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["NAME", "CACHID"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(tier(&["CACHID", "NAME"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(
+            tier(&["DUTY", "CACHID"]),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            tier(&["CACHID", "NAME", "DUTY"]),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(
+            tier(&["POS", "CACHID"]),
+            None,
+            "只动了摆放是锚点，不是元数据"
+        );
+        assert_eq!(tier(&["CACHID", "DIR"]), None);
+        assert_eq!(tier(&["CACHID", "DIAM"]), None);
+        assert_eq!(tier(&["CACHID", "UDA:42"]), None);
+        // 第二个戳 `SPAMAP`（2026-09-19，与 `CACHID` 同档）：单独跳、两个一起跳都是第三档；跟着谁记谁的档；
+        // 跟着摆放走锚点那条路。
+        assert_eq!(tier(&["SPAMAP"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["spamap"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["CACHID", "SPAMAP"]), Some(NoModelTier::CacheStamp));
+        assert_eq!(tier(&["NAME", "SPAMAP"]), Some(NoModelTier::MetadataOnly));
+        assert_eq!(
+            tier(&["SPAMAP", "DUTY", "CACHID"]),
+            Some(NoModelTier::UnreadAttribute)
+        );
+        assert_eq!(tier(&["POS", "SPAMAP"]), None);
+        assert_eq!(tier(&["SPAMAP", "DIAM"]), None);
     }
 
     /// 两票压过手写表：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字
@@ -2880,10 +2940,10 @@ mod tests {
 
     /// 预览与执行同口径（2026-09-08）：`OperationImpact::Skip` 是「执行侧不会为它排模型
     /// 工作」这句承诺，判据必须与 direct 窗口规划器的元数据门逐名一致——两边共问
-    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。戳 `CACHID`
-    /// 曾因字典没投票而不是 Skip（规划器整根重算、预览却报「不影响模型」，同一份回执两句话）；2026-09-17
-    /// Q6 起第一票由戳表给，两边同样放行——预览 Skip、规划器不上卷。S6 起新档同理：`HREF` 只改了引用，
-    /// 规划器不上卷，预览也不许再说 Regen。
+    /// [`attribute_is_metadata_only`] / [`metadata_only_tier`]，谁也不许自己再列一张名单。S6 起新档同理：
+    /// `HREF` 只改了引用，规划器不上卷，预览也不许再说 Regen。Q6（2026-09-17）起 `CACHID` 由戳表拿到
+    /// 第一票：规划器记 `no_model` 第三档，预览同样 Skip——此前它是「字典没投票 → 不是 Skip」的反例，
+    /// 现在两边一起翻。
     #[test]
     fn the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate() {
         for name in DATA_ONLY_ATTR_NAMES {
@@ -2898,14 +2958,22 @@ mod tests {
                 "{name}"
             );
         }
-        // 戳（2026-09-17 Q6）两票齐：`NAME + CACHID` 两边都放行，预览是 Skip；混进一个字典 DCHC≠0 的
-        // 几何名字，整次操作就不再是 Skip。
+        // 戳跟着老名单一起变照旧 Skip；只有戳跳了也是 Skip（规划器那边记 `CacheStamp`）。
         assert_eq!(
             classify_operation_impact(&modified_operation_with_attrs(&["NAME", "CACHID"])),
             OperationImpact::Skip
         );
         assert_eq!(
-            classify_operation_impact(&modified_operation_with_attrs(&["NAME", "DIAM"])),
+            classify_operation_impact(&modified_operation("CACHID")),
+            OperationImpact::Skip
+        );
+        assert_eq!(
+            metadata_only_tier(["CACHID"]),
+            Some(NoModelTier::CacheStamp)
+        );
+        // 一次改动里混进一个没拿到第二票的名字（读取集合里的 `DIR`），整次操作就不再是 Skip。
+        assert_eq!(
+            classify_operation_impact(&modified_operation_with_attrs(&["CACHID", "DIR"])),
             OperationImpact::Regen
         );
         assert_eq!(

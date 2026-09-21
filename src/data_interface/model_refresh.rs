@@ -99,8 +99,11 @@ impl ModelRefreshPolicy {
     ///
     /// ADR-056 P2-1 改造对象：暂存窗口退役后它失去生产调用点（直写路径一直是
     /// `run_unit_worklist(…, None, …)` → 根级 `generate_roots`，D3）。P2 用它的
-    /// `collect_window` + `plan_update` 半边做选根与凭证前移，`execute_plan` 半边
-    /// （单元级落库，D3 已否）届时摘除；在那之前不删。
+    /// `collect_window` + `plan_update` 半边做选根与凭证前移。`execute_plan` 半边原写
+    /// 「单元级落库，D3 已否，届时摘除」——★0917 作废：ADR-080（单元级发布）把 `execute_plan`
+    /// 转正为生产执行体，`e3d_model_service::UnitDeltaProducer::produce` 逐根切子计划喂它、
+    /// 产出 `UnitDelta` 以 `Partial` 提交叠在根回执之下（开关 `model_unit_level_publish`，默认关）。
+    /// 本方法仍是整窗一口气生成 + 落库的旧形态，生产不调；在那之前不删。
     #[allow(dead_code)]
     pub(crate) async fn apply_window(
         dbnum: u32,

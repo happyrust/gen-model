@@ -14,8 +14,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
 use anyhow::Context;
-use e3d_io::record::descriptor::{AttributeExtractionStatus, DescriptorValue, ExtractedAttribute};
+use e3d_io::db_element::DbSet;
+use e3d_io::noun_catalog::NounCatalog;
+use e3d_io::record::descriptor::{
+    AttributeExtractionStatus, DescriptorValue, ElementExtraction, ExtractedAttribute,
+};
 use e3d_io::record::explicit::{ExplicitAttribute, ExplicitValue};
+use e3d_io::refno::RefNo;
 use e3d_io::uda_catalog::UdaCatalog;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -59,17 +64,48 @@ pub struct AttributeValue {
     pub editable: bool,
 }
 
+/// 这一份属性读得完整不完整，答案分两层：**只有前三格算「不完整」**，后三格是
+/// 说明，进响应供排查、不参与 `complete`。混在一起数过——`NonImplicit` 这种「本就
+/// 没有值」也算一笔，于是 BRAN 常年 40 多项诊断，界面那条告警成了常驻，真出事的
+/// `Unsupported` / `OutOfBounds` 反倒淹在里头看不见。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AttributeDiagnostics {
-    pub outside_schema: Vec<String>,
+    /// 文件里有值、任何表示都落不下去。真读丢了。
     pub shape_conflicts: Vec<Value>,
+    /// 该有值却没解出来（`Unsupported` / `OutOfBounds` 这类）。
+    ///
+    /// `NonImplicit`（描述符里压根没有隐式槽位）与 `DefaultRequired`（槽位是未设
+    /// 哨兵且无模板默认）**不在此列**：引擎已经依次试过显式流与 noun 默认记录，
+    /// 留在这两个状态就是 E3D 自己的 unset，不是解码失败。判据与
+    /// [`super::direct_attmap::undecoded_reason`] 同一处，不另立一套。
     pub undecoded: Vec<Value>,
+    /// **本元素**的 UDA 问题（字典里查无此定义，只能按哈希名显示）。
     pub uda_issues: Vec<String>,
+    /// 应用 schema 不认识的键。值照样按文件自然形状给出，面板显示是对的。
+    pub outside_schema: Vec<String>,
+    /// schema 声明与文件形状对不上，但 DB 读侧拿同一份声明同样读不出（`TYPEX` /
+    /// `SPAMAP` / `UNIPAR` 这些簿记键）。两侧同样读不出就谈不上直读读错，
+    /// 见 [`super::direct_attmap::DirectAttrs::view_divergence`]。
+    pub view_divergence: Vec<Value>,
+    /// 整个项目 Dictionary 的定义问题，与当前元素无关——一条坏定义不该让全项目
+    /// 每个元素都挂上「属性不完整」。
+    pub catalog_issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupStatus {
     pub status: &'static str,
+}
+
+/// 一个会话钉死的读取点：[`ElementAttributeService::read_pinned`] 往回执里写的库身份，
+/// 也是 [`ElementAttributeService::open_pinned`] 开池的依据。`db_type` 决定模板文件
+/// （`DESI` → `desvir.dat`），从库文件头反哈希得来。
+#[derive(Debug, Clone)]
+pub struct PinnedRead {
+    pub dbnum: i32,
+    pub db_type: String,
+    pub file: PathBuf,
+    pub sesno: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,10 +244,86 @@ impl ElementAttributeService {
     }
 
     pub fn read(&self, refno: RefU64) -> anyhow::Result<ElementAttributesResponse> {
-        let mut snapshot = self.store.element_snapshot(refno)?;
+        let snapshot = self.store.element_snapshot(refno)?;
+        self.render(snapshot, true)
+    }
+
+    /// 打开一个会话钉死的单库 `DbSet`，给 [`Self::read_pinned`] 用；调用方在同一个池上先做
+    /// 存在 / 归属判断（`exists` / `is_descendant_of`），再读属性，不必开两次。
+    pub fn open_pinned(&self, pin: &PinnedRead) -> anyhow::Result<Arc<DbSet>> {
+        open_pinned_set(&self.reader.schema, &pin.file, &pin.db_type, pin.sesno)
+    }
+
+    /// 某构件在**指定会话**下的属性——属性历史对比（`model/history/query tool=attributes`，
+    /// ADR-081 候选条）走这里。
+    ///
+    /// 与 [`Self::read`] 同一个渲染器（identity 行 + `render_attribute` + 类型默认值 / UDA
+    /// materialize），属性面板与属性历史对比对同一个属性印同一个字；不同的只有取数——不经
+    /// `DirectStore` 那个钉在当前时点的会话，而是在调用方给的、按 `pin.sesno` 钉死的池上
+    /// `extraction()` / `parsed()`。**只读文件、不 offer_backup、不落库**（d-179：历史投影
+    /// 除 mesh 外一律不进库）。该 refno 在那个会话的索引里不存在（还没建 / 已删）→ `Ok(None)`，
+    /// 由调用方按「该版本不存在」的正常态回。
+    pub fn read_pinned(
+        &self,
+        set: &Arc<DbSet>,
+        pin: &PinnedRead,
+        refno: RefNo,
+    ) -> anyhow::Result<Option<ElementAttributesResponse>> {
+        let element = set.element(refno);
+        let exists = element.exists().map_err(|error| {
+            anyhow::anyhow!(
+                "会话 {} 的索引查 {}/{} 失败: {error}",
+                pin.sesno,
+                refno.word0,
+                refno.word1
+            )
+        })?;
+        if !exists {
+            return Ok(None);
+        }
+        let extraction = (*element.extraction().map_err(|error| {
+            anyhow::anyhow!(
+                "会话 {} 下抽取 {}/{} 失败: {error}",
+                pin.sesno,
+                refno.word0,
+                refno.word1
+            )
+        })?)
+        .clone();
+        let explicit_attributes = element
+            .parsed()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "会话 {} 下解析 {}/{} 失败: {error}",
+                    pin.sesno,
+                    refno.word0,
+                    refno.word1
+                )
+            })?
+            .explicit_attributes
+            .clone();
+        let snapshot = DirectElementSnapshot {
+            dbnum: pin.dbnum,
+            db_type: pin.db_type.clone(),
+            file: pin.file.clone(),
+            sesno: pin.sesno,
+            extraction,
+            explicit_attributes,
+        };
+        self.render(snapshot, false).map(Some)
+    }
+
+    /// 把一份文件快照渲染成公开的属性行。`read` / `read_pinned` 共用这一条：诊断按文件原样记、
+    /// 再补 E3D 会印的类型默认值、UDA 字典 materialize、identity 三行、按名排序去重。
+    /// `offer_backup` 只有当前时点的 `read` 给 true——历史会话的读不进备份库（d-179）。
+    fn render(
+        &self,
+        mut snapshot: DirectElementSnapshot,
+        offer_backup: bool,
+    ) -> anyhow::Result<ElementAttributesResponse> {
         let catalog = self.catalog.get()?;
         let mut diagnostics = AttributeDiagnostics {
-            uda_issues: catalog
+            catalog_issues: catalog
                 .issues()
                 .iter()
                 .map(|issue| format!("{}: {}", issue.refno, issue.detail))
@@ -223,20 +335,20 @@ impl ElementAttributeService {
             diagnostics.shape_conflicts = projected
                 .shape_conflicts
                 .into_iter()
-                .chain(projected.view_divergence)
-                .map(|conflict| {
-                    json!({
-                        "name": conflict.name,
-                        "found": conflict.found,
-                        "declared": conflict.declared,
-                    })
-                })
+                .map(shape_conflict_json)
                 .collect();
-            diagnostics.undecoded = projected
-                .undecoded
+            diagnostics.view_divergence = projected
+                .view_divergence
                 .into_iter()
-                .map(|item| json!({ "name": item.name, "reason": item.reason }))
+                .map(shape_conflict_json)
                 .collect();
+            // `projected.undecoded` 与下面那轮渲染同源同判据，取一处即可——两处都记
+            // 会把同一个失败的键数成两笔。留渲染那一轮：它按面板实际画不出来的行记。
+        }
+        // 诊断已按文件原样记完，这之后才补 E3D 的类型默认值：它们是 E3D 会印的行，
+        // 不是文件里的值，不该改变「文件读得完整不完整」的答案。
+        if let Some(noun_catalog) = self.reader.schema.noun_catalog() {
+            materialize_type_defaults(&noun_catalog, &mut snapshot.extraction);
         }
         let known_uda_keys = catalog
             .definitions()
@@ -258,12 +370,16 @@ impl ElementAttributeService {
             identity_attribute("TYPE", json!(noun.clone())),
         ];
         for attribute in &snapshot.extraction.attributes {
+            if is_unnamed_placeholder(attribute) {
+                continue;
+            }
             match render_attribute(attribute) {
                 Some(value) => attributes.push(value),
-                None => diagnostics.undecoded.push(json!({
-                    "name": attribute.name,
-                    "reason": format!("{:?}", attribute.status),
-                })),
+                // 没渲染出来不等于读坏了：`NonImplicit` / `DefaultRequired` 是
+                // E3D 的 unset，`undecoded_diagnostic` 把它们挡在诊断之外。
+                None => diagnostics
+                    .undecoded
+                    .extend(undecoded_diagnostic(attribute)),
             }
         }
         for explicit in snapshot
@@ -290,9 +406,12 @@ impl ElementAttributeService {
         attributes.sort_by(|left, right| left.name.cmp(&right.name));
         attributes.dedup_by(|left, right| left.name == right.name);
 
-        let backup = self.offer_backup(&snapshot, &catalog);
-        let complete = diagnostics.outside_schema.is_empty()
-            && diagnostics.shape_conflicts.is_empty()
+        let backup = if offer_backup {
+            self.offer_backup(&snapshot, &catalog)
+        } else {
+            "skipped-pinned"
+        };
+        let complete = diagnostics.shape_conflicts.is_empty()
             && diagnostics.undecoded.is_empty()
             && diagnostics.uda_issues.is_empty();
         Ok(ElementAttributesResponse {
@@ -852,15 +971,76 @@ fn identity_attribute(name: &str, value: Value) -> AttributeValue {
     }
 }
 
+/// 把 E3D 会印出来的类型默认值补进抽取件。
+///
+/// `q att` 对一个没存过值的属性不是不印，印的是**类型的零**：`HeadWidth 0mm`、
+/// `Tsfbreak false`、`Orrf Nulref`、`Duty unset`。文件直读只拿得到「这里没有值」
+/// （`NonImplicit`），于是面板比 E3D 少几十行；哪个属性是什么类型、哪些是伪属性，
+/// 只有活 E3D 导出的逻辑 noun 目录知道，所以这一步要它在场。
+///
+/// 三步与 e3d-io `e3d-descriptor describe` 同序：静态类型零 → 有已知运行时规则的
+/// 伪属性（BRAN 圆口的 HEADW / HEADH / TAILW / TAILH 为 0、INCO 为空串、RLST 为
+/// unset）→ 其余伪属性的类型零；后两步只认前面没认领的行。
+///
+/// 只补**目录里有**的属性。描述符里有、E3D 自己的属性面里没有的（BRAN 上的 `UDTYPE`
+/// / `WDATUM` / `RREF` / `UDATAB` …）E3D 的 `q` 同样答不上来（2026-09-18 TTY 对拍：
+/// 三个 noun 上 9 / 9 / 7 个），它们照旧不画——面板对齐的是 E3D，不是描述符。
+///
+/// 最后按 noun 给共用存储号的那几格改名：SPCO / GPART / PRTELE 上 565843 那一格 E3D 叫
+/// `Detref`（REF），只有设计 noun 上它才是 `Detail`（BOOL）——导出的目录按 hash 记名，
+/// 三个目录 noun 上都写成了 `DETA`。改的只是名字，hash 与值不动，所以放在配对都做完
+/// 之后（2026-09-19 活 E3D 定标，规则与来源见 [`NounCatalog::apply_attlib_storage_aliases`]）。
+fn materialize_type_defaults(catalog: &NounCatalog, extraction: &mut ElementExtraction) {
+    catalog.apply_static_defaults(extraction);
+    catalog.apply_runtime_derived(extraction);
+    catalog.apply_pseudo_defaults(extraction);
+    catalog.apply_storage_aliases(extraction);
+}
+
+/// 没起过名的元素，`NAME` 的类型默认是 `unset`——但 E3D 从不印 `Name unset`，它当场
+/// 编一个 `FTUBE 4 of BRANCH /C-OR-1R345-C`。那个全名要走属主链与兄弟序号，是 `FLNM`
+/// 伪属性那条线的事；在它落地之前这一行不画：画一个 E3D 不会印的 `unset`，比少一行
+/// 离 E3D 更远。存过名的 `NAME`（`Decoded`）不受影响。
+fn is_unnamed_placeholder(attribute: &ExtractedAttribute) -> bool {
+    attribute.name == "NAME" && attribute.status == AttributeExtractionStatus::CatalogDefault
+}
+
+/// 一个画不出行的属性，值不值得报一笔诊断。
+///
+/// 判据借 [`super::direct_attmap::undecoded_reason`]，不在这里另写一份：同一个
+/// 响应里两套「什么叫没有值」，是这条告警常驻的根由。
+fn undecoded_diagnostic(attribute: &ExtractedAttribute) -> Option<Value> {
+    super::direct_attmap::undecoded_reason(&attribute.status)
+        .map(|reason| json!({ "name": attribute.name, "reason": reason }))
+}
+
+fn shape_conflict_json(conflict: super::direct_attmap::ShapeConflict) -> Value {
+    json!({
+        "name": conflict.name,
+        "found": conflict.found,
+        "declared": conflict.declared,
+    })
+}
+
 fn render_attribute(attribute: &ExtractedAttribute) -> Option<AttributeValue> {
     let is_uda = attribute.name.starts_with(':');
     let value = attribute.value.as_ref()?;
     let is_unset = descriptor_is_unset(value);
     let (value_type, value, display, editable) = descriptor_json(value);
+    // E3D 运行时按规则算出来的伪属性值（圆口支路 HEADW=0、INCO 空串）：没有存储槽位，
+    // 改它改的不是任何一处字节，所以不给编辑框。
+    let derived = matches!(
+        attribute.status,
+        AttributeExtractionStatus::RuntimeDerived { .. }
+    );
     let origin = match attribute.status {
         AttributeExtractionStatus::TemplateDefault => "schema-default",
         AttributeExtractionStatus::CatalogDefault if is_unset => "unset",
-        AttributeExtractionStatus::CatalogDefault => "uda-default",
+        AttributeExtractionStatus::CatalogDefault if is_uda => "uda-default",
+        // noun 目录给的类型零：E3D 对没存过值的属性印的那个 `0` / `false` / `Nulref`。
+        // 与 `schema-default`（noun 默认记录里存着的值）不同，这里文件与模板都没有值。
+        AttributeExtractionStatus::CatalogDefault => "type-default",
+        AttributeExtractionStatus::RuntimeDerived { .. } => "derived",
         AttributeExtractionStatus::DecodedExplicit if is_uda => "uda-stored",
         AttributeExtractionStatus::DecodedExplicit => "explicit",
         _ => "stored",
@@ -873,7 +1053,7 @@ fn render_attribute(attribute: &ExtractedAttribute) -> Option<AttributeValue> {
         origin,
         is_uda,
         is_unset,
-        editable: editable && !is_unset,
+        editable: editable && !is_unset && !derived,
     })
 }
 
@@ -1040,6 +1220,54 @@ mod tests {
         assert!(!editable);
     }
 
+    /// 守卫（d-179 / ADR-081 候选条）：属性面板与属性历史对比走**同一个**渲染器——`read` 与
+    /// `read_pinned` 都只是把一份 `DirectElementSnapshot` 交给 `render`；而历史会话的读
+    /// 不进备份库：`offer_backup` 只在 `render` 里、且只有 `read` 那条传 true。
+    #[test]
+    fn pinned_reads_share_the_renderer_and_never_offer_backup() {
+        let source = include_str!("element_attributes.rs");
+        let read = source
+            .split_once("pub fn read(&self, refno: RefU64)")
+            .expect("read exists")
+            .1
+            .split_once("pub fn open_pinned(")
+            .expect("open_pinned follows read")
+            .0;
+        assert!(read.contains("self.render(snapshot, true)"), "{read}");
+
+        let pinned = source
+            .split_once("pub fn read_pinned(")
+            .expect("read_pinned exists")
+            .1
+            .split_once("/// 把一份文件快照渲染成公开的属性行")
+            .expect("render's doc follows read_pinned")
+            .0;
+        assert!(pinned.contains("self.render(snapshot, false)"), "{pinned}");
+        assert!(pinned.contains("return Ok(None);"), "不存在 → None，不是错误");
+        for forbidden in ["offer_backup", "spool", "SUL_DB", "store.element_snapshot"] {
+            assert!(
+                !pinned.contains(forbidden),
+                "read_pinned 不得走当前时点会话或备份库: {forbidden}"
+            );
+        }
+
+        let render = source
+            .split_once("fn render(")
+            .expect("render exists")
+            .1
+            .split_once("pub async fn ensure(")
+            .expect("ensure follows render")
+            .0;
+        // 针脚拼出来，免得这段测试自己的字面量也被数进去。
+        let call = format!("self.{}(", "offer_backup");
+        assert_eq!(
+            render.matches(call.as_str()).count(),
+            1,
+            "offer_backup 只在 render 里出现一次"
+        );
+        assert!(render.contains("if offer_backup {"));
+    }
+
     #[test]
     fn empty_word_keeps_durable_empty_value_and_unset_display() {
         for text in [None, Some(String::new())] {
@@ -1056,6 +1284,930 @@ mod tests {
             text: Some("OPEN".into()),
         });
         assert_eq!(value, json!("OPEN"));
+    }
+
+    /// 一个没有值的属性。存储布局字段与这里的分类无关，给最小值即可。
+    fn valueless(name: &str, status: AttributeExtractionStatus) -> ExtractedAttribute {
+        use e3d_io::record::template::{EncodedLocation, StorageDescriptor, StorageLayout};
+
+        ExtractedAttribute {
+            hash: 0,
+            name: name.to_string(),
+            storage_type_code: 0,
+            semantic_type_code: None,
+            semantic_size: None,
+            layout: StorageLayout::Compact,
+            storage: StorageDescriptor {
+                storage_words: 0,
+                location: EncodedLocation { raw: 0 },
+                flags: 0,
+            },
+            status,
+            value: None,
+        }
+    }
+
+    /// E3D 的 unset 不是解码失败。`NonImplicit` 是「描述符里没有隐式槽位」，引擎已经
+    /// 依次试过显式流与 noun 默认记录；`DefaultRequired` 是「槽位写着未设哨兵、也没有
+    /// 模板默认」。两者都画不出行，但都不该记诊断——BRAN 上这一类有四十几个，全记
+    /// 进去，`complete` 就再没有真过。
+    #[test]
+    fn e3d_unset_never_becomes_a_diagnostic() {
+        for status in [
+            AttributeExtractionStatus::NonImplicit,
+            AttributeExtractionStatus::DefaultRequired,
+        ] {
+            let attribute = valueless("DUTY", status);
+            assert!(render_attribute(&attribute).is_none());
+            assert_eq!(undecoded_diagnostic(&attribute), None);
+        }
+    }
+
+    /// 真读不出来的照记，且带上原因——这一类才是 `complete=false` 要说的事。
+    #[test]
+    fn a_real_decode_failure_still_reports_its_reason() {
+        let attribute = valueless(
+            "SPREF",
+            AttributeExtractionStatus::OutOfBounds {
+                detail: "offset 12 + storage 4 exceeds implicit words 8".into(),
+            },
+        );
+        assert!(render_attribute(&attribute).is_none());
+        let diagnostic = undecoded_diagnostic(&attribute).expect("a real failure must be reported");
+        assert_eq!(diagnostic["name"], "SPREF");
+        assert!(
+            diagnostic["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("OutOfBounds")),
+            "{diagnostic}"
+        );
+    }
+
+    /// 一个有值的属性，状态由调用方给。
+    fn valued(
+        name: &str,
+        status: AttributeExtractionStatus,
+        value: DescriptorValue,
+    ) -> ExtractedAttribute {
+        ExtractedAttribute {
+            hash: e3d_attlib::db1_hash(name.trim_start_matches(':')),
+            value: Some(value),
+            ..valueless(name, status)
+        }
+    }
+
+    /// E3D 对没存过值的属性印的是类型的零，面板照印成行：`0` / `false` / `0/0`（E3D
+    /// 拼作 `Nulref`），`origin` 记 `type-default`，界面由此知道它不是文件里的值；字与
+    /// 文本的类型零就是 `unset`，沿用原有那一格，不可编辑。
+    #[test]
+    fn type_defaults_render_as_rows_e3d_would_print() {
+        use AttributeExtractionStatus::CatalogDefault;
+        let nulref = DescriptorValue::RefNo(e3d_io::refno::RefNo::new(0, 0));
+        let empty_word = DescriptorValue::Word { raw: 0, text: None };
+        let cases = [
+            ("HEADW", DescriptorValue::Real(0.0), "real", "0", "type-default", false, true),
+            ("BSTA", DescriptorValue::Int(0), "int", "0", "type-default", false, true),
+            ("TSFBR", DescriptorValue::Bool(false), "bool", "false", "type-default", false, true),
+            ("ORRF", nulref, "ref", "0/0", "type-default", false, true),
+            ("HDMT", empty_word, "word", "unset", "unset", true, false),
+            ("DESC", DescriptorValue::Unset, "unset", "unset", "unset", true, false),
+        ];
+        for (name, value, value_type, display, origin, is_unset, editable) in cases {
+            let row = render_attribute(&valued(name, CatalogDefault, value))
+                .unwrap_or_else(|| panic!("{name} 必须成行"));
+            assert_eq!(
+                (
+                    row.value_type.as_str(),
+                    row.display.as_str(),
+                    row.origin,
+                    row.is_unset,
+                    row.editable,
+                ),
+                (value_type, display, origin, is_unset, editable),
+                "{name}"
+            );
+            assert!(!row.is_uda, "{name}");
+        }
+    }
+
+    /// 字典 UDA 自带的默认值仍记 `uda-default`：那是 Dictionary 里声明的值，不是类型的零。
+    #[test]
+    fn a_uda_dictionary_default_keeps_its_own_origin() {
+        let row = render_attribute(&valued(
+            ":AREA",
+            AttributeExtractionStatus::CatalogDefault,
+            DescriptorValue::Int(100),
+        ))
+        .unwrap();
+        assert_eq!(
+            (row.name.as_str(), row.origin, row.is_uda, row.editable),
+            ("AREA", "uda-default", true, true)
+        );
+    }
+
+    /// 运行时算出来的伪属性（圆口支路的 HEADW 为 0、INCO 为空串）记 `derived`，成行但
+    /// 不给编辑框：它没有存储槽位，改它改的不是任何一处字节。
+    #[test]
+    fn runtime_derived_rows_are_shown_but_not_editable() {
+        let derived = |evaluator: &str| AttributeExtractionStatus::RuntimeDerived {
+            evaluator: evaluator.into(),
+        };
+        let width = render_attribute(&valued(
+            "HEADW",
+            derived("bran_circular_end_dimensions"),
+            DescriptorValue::Real(0.0),
+        ))
+        .unwrap();
+        assert_eq!(
+            (width.origin, width.display.as_str(), width.is_unset, width.editable),
+            ("derived", "0", false, false)
+        );
+        let inco = render_attribute(&valued(
+            "INCO",
+            derived("design_qrofcn_absent_internal_points"),
+            DescriptorValue::Text(String::new()),
+        ))
+        .unwrap();
+        assert_eq!(
+            (inco.origin, inco.display.as_str(), inco.editable),
+            ("derived", "", false)
+        );
+    }
+
+    /// 没起过名的 `NAME`：类型默认是 `unset`，但 E3D 印的是现编的全名，这一行不画；
+    /// 存过名的照画，别的属性的 `unset` 也照画。
+    #[test]
+    fn an_unnamed_element_gets_no_name_row_until_flnm_lands() {
+        use AttributeExtractionStatus::{CatalogDefault, Decoded};
+        assert!(is_unnamed_placeholder(&valued(
+            "NAME",
+            CatalogDefault,
+            DescriptorValue::Unset
+        )));
+        assert!(!is_unnamed_placeholder(&valued(
+            "NAME",
+            Decoded,
+            DescriptorValue::Text("/1WCC1135/B1".into())
+        )));
+        assert!(!is_unnamed_placeholder(&valued(
+            "DESC",
+            CatalogDefault,
+            DescriptorValue::Unset
+        )));
+    }
+
+    /// 一份只认识一个 BRAN 的 noun 目录，属性哈希与描述符同源（`db1_hash`）。
+    fn tiny_bran_catalog() -> NounCatalog {
+        let attribute = |name: &str, type_name: &str, is_pseudo: bool| {
+            format!(
+                r#"{{"name":"{name}","hash":{hash},"type":0,"typeName":"{type_name}","isArray":false,"maxSize":1,"trueSize":0,"isUda":false,"isPseudo":{is_pseudo},"hidden":false,"noClaim":false,"def":"e2/153"}}"#,
+                hash = e3d_attlib::db1_hash(name)
+            )
+        };
+        let attrs = [
+            attribute("NAME", "STRING", true),
+            attribute("DESC", "STRING", false),
+            attribute("HBOR", "DOUBLE", false),
+            attribute("HEADW", "DOUBLE", true),
+            attribute("BSTA", "INTEGER", false),
+            attribute("ORRF", "ELEMENT", false),
+        ];
+        let layout = format!(
+            r#"[{{"noun":"BRANCH","short":"BRAN","hash":{hash},"base":"BRANCH","hard":"BRANCH","isUdet":false,"isPseudo":false,"isWorld":false,"isPrimary":true,"visible":true,"dbTypes":[1],"attrs":[{attrs}]}}]"#,
+            hash = e3d_attlib::db1_hash("BRAN"),
+            attrs = attrs.join(",")
+        );
+        let fields = format!(
+            "{{{}}}",
+            ["NAME", "DESC", "HBOR", "HEADW", "BSTA", "ORRF"]
+                .iter()
+                .map(|name| format!(
+                    r#""{}":{{"name":"{name}","f":{{}}}}"#,
+                    e3d_attlib::db1_hash(name)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        NounCatalog::parse(&layout, &fields).unwrap()
+    }
+
+    /// 补类型默认值的三步与 e3d-io 同序，且只补目录里有的属性。
+    ///
+    /// 圆口支路（HBOR 存了 15）的 HEADW 走运行时规则成 `derived` 0，不被静态那一步
+    /// 抢先成 `type-default`；没起过名的 NAME 拿到的是伪属性的类型零；描述符里有、
+    /// 目录里没有的 UDTYPE 一个字都不动——E3D 的 `q` 对它同样答不上来。
+    #[test]
+    fn type_defaults_follow_the_catalog_and_leave_descriptor_only_rows_alone() {
+        use AttributeExtractionStatus::{CatalogDefault, Decoded, NonImplicit};
+        let stored = |name: &str, value: DescriptorValue| valued(name, Decoded, value);
+        let absent = |name: &str| ExtractedAttribute {
+            hash: e3d_attlib::db1_hash(name),
+            ..valueless(name, NonImplicit)
+        };
+        let mut extraction = ElementExtraction {
+            refno: e3d_io::refno::RefNo::new(24383, 66459),
+            owner: e3d_io::refno::RefNo::new(24383, 1),
+            noun_hash: e3d_attlib::db1_hash("BRAN"),
+            noun_name: Some("BRAN".into()),
+            implicit_word_count: 0,
+            format_word_10: 0,
+            layout: e3d_io::record::template::StorageLayout::Compact,
+            attributes: vec![
+                absent("NAME"),
+                absent("DESC"),
+                stored("HBOR", DescriptorValue::Real(15.0)),
+                absent("HEADW"),
+                absent("BSTA"),
+                absent("ORRF"),
+                absent("UDTYPE"),
+            ],
+        };
+
+        materialize_type_defaults(&tiny_bran_catalog(), &mut extraction);
+
+        let status_and_value = |name: &str| {
+            let attribute = extraction.find_attribute(name).unwrap();
+            (attribute.status.clone(), attribute.value.clone())
+        };
+        assert_eq!(
+            status_and_value("HEADW"),
+            (
+                AttributeExtractionStatus::RuntimeDerived {
+                    evaluator: "bran_circular_end_dimensions".into(),
+                },
+                Some(DescriptorValue::Real(0.0))
+            )
+        );
+        assert_eq!(
+            status_and_value("BSTA"),
+            (CatalogDefault, Some(DescriptorValue::Int(0)))
+        );
+        assert_eq!(
+            status_and_value("ORRF"),
+            (
+                CatalogDefault,
+                Some(DescriptorValue::RefNo(e3d_io::refno::RefNo::new(0, 0)))
+            )
+        );
+        assert_eq!(
+            status_and_value("DESC"),
+            (CatalogDefault, Some(DescriptorValue::Unset))
+        );
+        assert_eq!(
+            status_and_value("NAME"),
+            (CatalogDefault, Some(DescriptorValue::Unset))
+        );
+        assert!(is_unnamed_placeholder(extraction.find_attribute("NAME").unwrap()));
+        assert_eq!(
+            status_and_value("HBOR"),
+            (Decoded, Some(DescriptorValue::Real(15.0)))
+        );
+        assert_eq!(status_and_value("UDTYPE"), (NonImplicit, None));
+    }
+
+    /// E3D TTY 定标（2026-09-18）：面板上多的每一行、少的每一行，都由 E3D 自己回答。
+    ///
+    /// 三个方向都查，一个 E3D 会话问完：
+    ///
+    /// 1. **我们渲染不成行**的属性，逐个 `Q <名字>`。E3D 印得出真值而我们一行没画，
+    ///    才是真读丢了；`ZZE`（E3D 自己也答不上来）与 `NAME` 的现编全名都不算。
+    /// 2. **我们按 noun 目录补出来的行**（`origin` 为 `type-default` / `derived`，以及
+    ///    非 UDA 的 `unset`），逐个 `Q <名字>`。E3D 印的值要与面板那一格对上（`0mm` 去
+    ///    单位是 `0`、`Nulref` 面板拼作 `0/0`）；E3D 答不上来的名字我们也不许补——面板
+    ///    对齐的是 E3D 印的那一页，多一行少一行都算偏。
+    /// 3. **E3D 自己那一页**（`VAR !attl ATTLIST`）列出的每一个名字，面板都要有对应的
+    ///    行。前两个方向都是拿描述符里的名字去问 E3D，问不到「E3D 印了、描述符里压根
+    ///    没有」的行；这一条反过来，以 E3D 那一页为准点名。名字对齐走
+    ///    [`NounCatalog::query_heading`]（`HEADW` → `HeadWidth`），UDA 去掉前导 `:`。
+    ///
+    /// 证据：`verification/attr-diagnostics-20260918/`。这条用例要开 E3D 会话，
+    /// 与其它 TTY 用例一样单跑：`-- --ignored --test-threads=1`。
+    #[test]
+    #[ignore = "requires E3D TTY and local AMS source files"]
+    fn e3d_tty_says_the_rows_we_cannot_render_are_merely_unset() {
+        // 覆盖面按 noun 家族铺开：设计层级（SITE / ZONE / PIPE / BRAN / FTUB）、结构
+        // （STRU / FRMW / SCTN / SNOD / SBFR）、管件与焊口（ELBO / REDU / WELD / ATTA）、
+        // 目录与规格（CATE / SPEC / SCYL），再加共用存储号 565843 的三个目录 noun
+        // （SPCO ×2 / PRTELE / GPART：那一格在它们身上叫 `Detref`，在 BRAN 上叫
+        // `Detail`，2026-09-19 前面板印错名、E3D 那一页少一行）。BRAN 那个就是界面
+        // 截图里报「34 项诊断」的 `/1WCC1135/B1`。一个 E3D 会话问完全部。
+        let refnos = [
+            RefU64::from_two_nums(24383, 66459),
+            RefU64::from_two_nums(24384, 23262),
+            RefU64::from_two_nums(24384, 46),
+            RefU64::from_two_nums(24384, 47),
+            RefU64::from_two_nums(24384, 2499),
+            RefU64::from_two_nums(24384, 48),
+            RefU64::from_two_nums(24384, 49),
+            RefU64::from_two_nums(24384, 50),
+            RefU64::from_two_nums(24384, 53),
+            RefU64::from_two_nums(24384, 26249),
+            RefU64::from_two_nums(24384, 2868),
+            RefU64::from_two_nums(24384, 24682),
+            RefU64::from_two_nums(24384, 26230),
+            RefU64::from_two_nums(24384, 2508),
+            RefU64::from_two_nums(15192, 521),
+            RefU64::from_two_nums(15192, 62134),
+            RefU64::from_two_nums(15192, 67325),
+            RefU64::from_two_nums(15192, 60087),
+            RefU64::from_two_nums(15192, 235090),
+            RefU64::from_two_nums(15192, 226147),
+            RefU64::from_two_nums(15192, 226148),
+        ];
+        let run = run_tty_parity(&refnos);
+        assert!(
+            run.unreadable.is_empty(),
+            "本地读不到：{:?}",
+            run.unreadable
+        );
+        assert!(
+            run.without_defaults.is_empty(),
+            "这几个本来就有几十行类型默认值，一行都没补说明 noun 目录没加载：{:?}",
+            run.without_defaults
+        );
+        assert!(
+            run.misresolved.is_empty(),
+            "E3D 答的不是我们问的那一行，这一轮对拍不作数：{:?}",
+            run.misresolved
+        );
+        assert!(
+            run.lost_values.is_empty(),
+            "E3D 印得出值、我们却一行都没画——这才是真读丢了，得留在诊断里：{:?}",
+            run.lost_values
+        );
+        assert!(
+            run.misaligned.is_empty(),
+            "这些行面板与 E3D 印的不是一回事（E3D 答不上来的我们也不该补）：{:?}",
+            run.misaligned
+        );
+        assert!(
+            run.missing_rows.is_empty(),
+            "E3D 那一页上有、面板上没有的行（读不出来的那几个写在 \
+             E3D_PAGE_ROWS_WITHOUT_A_SCHEMA 里，不在其中就是新缺的）：{:?}",
+            run.missing_rows
+        );
+        assert!(
+            run.diagnostics_disagree.is_empty(),
+            "E3D 逐条答得上来，除了本元素的 UDA 缺口就不该再说它不完整：{:?}",
+            run.diagnostics_disagree
+        );
+        assert_eq!(run.covered, refnos.len());
+    }
+
+    /// 同样三个方向，铺到整份取样语料上：e3d-io `20260826-tty-sampling` 那 128 个元素、
+    /// 83 个 noun。上面那条是手挑的家族代表，跑得快、平时看它；这一条是广度——内核自己
+    /// 答的行（`Lock` / `Nappflag` 那一类）与枚举名拼法差异，都是铺开之后才露头的。
+    ///
+    /// 这一条是**普查**，不是护栏：铺开之后冒出来的分歧分档记账、整份印出来
+    /// （`TTY_CORPUS_*`），只有「E3D 印得出真值、面板一行没画」那一格是硬规矩。
+    /// 手挑的那 21 个才是每一格都必须空的那条线。
+    ///
+    /// 语料跨项目取样，不是每个 refno 都在本地 `/ALL` 里；打不开的记下来、不算失败，
+    /// 但读到的元素少于 100 个就说明这份 MDB 不对，直接红。
+    #[test]
+    #[ignore = "requires E3D TTY and local AMS source files"]
+    fn e3d_tty_parity_holds_across_the_whole_sampled_corpus() {
+        let refnos = parity_corpus();
+        assert!(refnos.len() >= 120, "语料只剩 {} 个", refnos.len());
+        let run = run_tty_parity(&refnos);
+        println!(
+            "TTY_CORPUS 语料={} 读到={} 本地打不开={} 一行类型默认都没补的={} \
+             枚举名拼法差异={} 伪属性规则未知={}",
+            refnos.len(),
+            run.covered,
+            run.unreadable.len(),
+            run.without_defaults.len(),
+            run.enum_spelled.len(),
+            run.pseudo_gaps.len(),
+        );
+        for name in &run.unreadable {
+            println!("TTY_CORPUS_SKIP 本地打不开\t{name}");
+        }
+        for name in &run.without_defaults {
+            println!("TTY_CORPUS_SKIP 一行类型默认都没补\t{name}");
+        }
+        for row in &run.misresolved {
+            println!("TTY_CORPUS_MISRESOLVED {row}");
+        }
+        for row in &run.misaligned {
+            println!("TTY_CORPUS_MISALIGNED {row}");
+        }
+        for row in &run.missing_rows {
+            println!("TTY_CORPUS_MISSING_ROW {row}");
+        }
+        for row in &run.diagnostics_disagree {
+            println!("TTY_CORPUS_DIAGNOSTICS {row}");
+        }
+        println!(
+            "TTY_CORPUS_TOTALS 对不上={} 缺的行={} 认岔了={} 诊断有话说={}",
+            run.misaligned.len(),
+            run.missing_rows.len(),
+            run.misresolved.len(),
+            run.diagnostics_disagree.len(),
+        );
+        assert!(
+            run.covered >= 100,
+            "只读到 {} 个元素，这份 MDB 不对：{:?}",
+            run.covered,
+            run.unreadable
+        );
+        assert!(
+            run.lost_values.is_empty(),
+            "E3D 印得出值、面板却一行都没画——整份语料上这一条都不许有：{:?}",
+            run.lost_values
+        );
+    }
+
+    /// 取样语料里的 refno：每行 `<参考号> <noun>`，`#` 起头的是注释。
+    fn parity_corpus() -> Vec<RefU64> {
+        include_str!("e3d_tty_parity_corpus.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let refno = line.split_whitespace().next().expect("每行先是参考号");
+                let (word0, word1) = refno.split_once('/').expect("参考号写作 word0/word1");
+                RefU64::from_two_nums(
+                    word0.parse().expect("word0 是数"),
+                    word1.parse().expect("word1 是数"),
+                )
+            })
+            .collect()
+    }
+
+    /// 一轮对拍的结果：断言在里面做，这里只捎出调用方还要挑剔的那几格。
+    #[derive(Default)]
+    struct ParityRun {
+        /// 真读到、真跟 E3D 对过的元素数。
+        covered: usize,
+        /// 本地 MDB 打不开的元素。
+        unreadable: Vec<String>,
+        /// 一行类型默认值都没补出来的元素（多半是 noun 目录里没有这个 noun）。
+        without_defaults: Vec<String>,
+        /// E3D 按枚举名印、面板印数值的行。
+        enum_spelled: Vec<String>,
+        /// 伪属性：E3D 现算出一个值，我们只知道类型零（规则还没落地）。
+        pseudo_gaps: Vec<String>,
+        /// **硬规矩**：E3D 印得出真值、面板一行都没画——这才是把值读丢了。
+        lost_values: Vec<String>,
+        /// 面板补出来的行与 E3D 印的对不上，且不属于上面两类。
+        misaligned: Vec<String>,
+        /// E3D 那一页上有、面板上没有的行。
+        missing_rows: Vec<String>,
+        /// E3D 答的不是我们问的那一行（名字在它那头指向了别的属性）。
+        misresolved: Vec<String>,
+        /// 诊断还说不完整，理由却不是本元素的 UDA 字典缺口。
+        diagnostics_disagree: Vec<String>,
+    }
+
+    /// 跑一轮三方向对拍：一个 E3D 会话问完给到的全部元素。
+    fn run_tty_parity(refnos: &[RefU64]) -> ParityRun {
+        let mut run = ParityRun::default();
+        let (service, _backup_rx) =
+            ElementAttributeService::open("AvevaMarineSample", "ALL").unwrap();
+        // 面板的短名与 E3D 那一页上的名字对不上（`HEADW` / `HeadWidth`），靠目录换算。
+        let noun_catalog = service
+            .reader
+            .schema
+            .noun_catalog()
+            .expect("活 E3D 导出的 noun 目录不在，类型默认值本来也补不出来");
+
+        // 问 E3D 要用**它自己的**拼法：DB 短名在 E3D 的解析器里会撞车——SPEC 上
+        // `Q TQUAL` 答的是 `Tquality`，而这个短名在目录里指的是 `Tqualifier`，拿它
+        // 对值等于比错了行。有抬头就按抬头问，UDA 连前导 `:` 一起问。
+        let query_name = |name: &str| -> String {
+            if name.starts_with(':') {
+                return name.to_owned();
+            }
+            noun_catalog
+                .query_heading(e3d_attlib::db1_hash(name))
+                .map_or_else(|| name.to_owned(), str::to_owned)
+        };
+
+        struct Sample {
+            refno: String,
+            response: ElementAttributesResponse,
+            /// 描述符里有、面板上没有的名字（UDA 保留前导 `:`）。
+            unrendered: Vec<String>,
+            /// 面板上按类型默认补出来的行：名字、那一格的显示串、`origin`。
+            defaulted: Vec<(String, String, &'static str)>,
+        }
+        let samples = refnos
+            .iter()
+            .filter_map(|refno| {
+                // 语料跨项目取样：本地 `/ALL` 里没有的那几个记一笔跳过，不是失败。
+                let Ok(mut snapshot) = service.store.element_snapshot(*refno) else {
+                    run.unreadable.push(refno.to_slash_string());
+                    return None;
+                };
+                // 描述符里的名字要先过一遍共用存储号的别名（SPCO 上的 565843 叫
+                // `DETR`），否则它与面板上那一行同格不同名，会被数成「画不出的行」。
+                noun_catalog.apply_storage_aliases(&mut snapshot.extraction);
+                let response = service.read(*refno).unwrap();
+                let rendered = response
+                    .attributes
+                    .iter()
+                    .map(|attribute| attribute.name.as_str())
+                    .collect::<HashSet<_>>();
+                let unrendered = snapshot
+                    .extraction
+                    .attributes
+                    .iter()
+                    .filter(|attribute| !rendered.contains(attribute.name.trim_start_matches(':')))
+                    .map(|attribute| attribute.name.clone())
+                    .collect::<Vec<_>>();
+                // noun 目录补出来的每一行：类型零（`type-default`）、运行时规则
+                // （`derived`），以及类型零恰好是 `unset` 的（`unset` 且不是 UDA——UDA 的
+                // `unset` 来自 Dictionary，不是这次补的）。
+                let defaulted = response
+                    .attributes
+                    .iter()
+                    .filter(|attribute| {
+                        matches!(attribute.origin, "type-default" | "derived")
+                            || (attribute.origin == "unset" && !attribute.is_uda)
+                    })
+                    .map(|attribute| {
+                        (
+                            attribute.name.clone(),
+                            attribute.display.clone(),
+                            attribute.origin,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                // 一行都没补出来，多半是这个 noun 不在目录里——记下来，交给调用方挑剔。
+                if defaulted.is_empty() {
+                    run.without_defaults.push(refno.to_slash_string());
+                }
+                Some(Sample {
+                    refno: refno.to_slash_string(),
+                    response,
+                    unrendered,
+                    defaulted,
+                })
+            })
+            .collect::<Vec<_>>();
+        // 一个会话问完全部元素：开 E3D 是这条用例里最贵的一步。
+        let tty_elements = tty_query_attributes(
+            &samples
+                .iter()
+                .map(|sample| {
+                    let names = sample
+                        .unrendered
+                        .iter()
+                        .chain(sample.defaulted.iter().map(|(name, ..)| name))
+                        .map(|name| query_name(name))
+                        .collect::<Vec<_>>();
+                    (sample.refno.clone(), names)
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        for sample in &samples {
+            let Sample {
+                refno,
+                response,
+                unrendered,
+                defaulted,
+            } = sample;
+            let tty = tty_elements
+                .get(refno)
+                .unwrap_or_else(|| panic!("TTY 没有回答 {refno} 这一段"));
+            let answer = |name: &str| {
+                tty.answers
+                    .get(&query_name(name))
+                    .map_or("(未回答)", String::as_str)
+            };
+            // E3D 答的是不是我们问的那一行：它印 `<抬头> <值>`，抬头要与问的那个词
+            // 一致。对不上就是名字在 E3D 那头指向了别的属性，拿它对值等于比错了行。
+            let misresolved = unrendered
+                .iter()
+                .chain(defaulted.iter().map(|(name, ..)| name))
+                .map(|name| (query_name(name), answer(name)))
+                .filter(|(asked, answer)| {
+                    *answer != "ZZE"
+                        && !answer
+                            .split_whitespace()
+                            .next()
+                            .is_some_and(|heading| heading.eq_ignore_ascii_case(asked))
+                })
+                .map(|(asked, answer)| format!("问 {asked}，答 {answer:?}"))
+                .collect::<Vec<_>>();
+
+            // E3D 那一页上的名字，面板有没有对应的行。没起过名的元素 E3D 那一页上的
+            // `Name` 是它现编的全名，面板按 `is_unnamed_placeholder` 不画，这一个例外。
+            let panel_keys = response
+                .attributes
+                .iter()
+                .flat_map(|row| tty_names_of(&noun_catalog, row))
+                .collect::<HashSet<_>>();
+            let unnamed = e3d_answer_is_nothing("NAME", answer("NAME"));
+            let missing_from_panel = tty
+                .page
+                .iter()
+                .map(|name| name.trim_start_matches(':').to_ascii_lowercase())
+                .filter(|key| !panel_keys.contains(key))
+                .filter(|key| !(unnamed && key == "name"))
+                .filter(|key| !E3D_PAGE_ROWS_WITHOUT_A_SCHEMA.contains(&key.as_str()))
+                .collect::<Vec<_>>();
+
+            let with_a_real_value = unrendered
+                .iter()
+                .filter(|name| !e3d_answer_is_nothing(name, answer(name)))
+                .map(|name| format!("{name}: {}", answer(name)))
+                .collect::<Vec<_>>();
+            // 补出来的行与 E3D 印的对不上时，分三档：E3D 按枚举名印同一个数（拼法）、
+            // 伪属性的真规则我们还不知道（E3D 现算，我们只给了类型零）、真对不上。
+            let mut enum_spelled = Vec::new();
+            let mut pseudo_gaps = Vec::new();
+            let mut misaligned = Vec::new();
+            for (name, display, origin) in defaulted {
+                let answer = answer(name);
+                if panel_matches_e3d(display, answer) {
+                    continue;
+                }
+                let row = format!("{name}: 面板={display:?} E3D={answer:?}");
+                if is_enum_spelling(&noun_catalog, name, display, answer) {
+                    println!("TTY_ENUM_SPELLING {refno}\t{row}");
+                    run.enum_spelled.push(format!("{refno} {row}"));
+                    enum_spelled.push(row);
+                } else if *origin != "derived"
+                    && is_pseudo_attribute(&noun_catalog, &response.noun, name)
+                {
+                    println!("TTY_PSEUDO_GAP {refno}\t{row}");
+                    run.pseudo_gaps.push(format!("{refno} {row}"));
+                    pseudo_gaps.push(row);
+                } else {
+                    misaligned.push(row);
+                }
+            }
+
+            println!(
+                "TTY_PARITY refno={} noun={} 面板行数={} 类型默认行={} 其中与E3D对不上={} \
+                 枚举名拼法差异={} 伪属性规则未知={} | \
+                 E3D那一页={} 面板缺的行={} | \
+                 画不出的行={} 其中E3D自己也答不上来={} E3D印出真值={} | 新诊断 undecoded={} \
+                 shape_conflicts={} uda_issues={} | 不计入完整性 outside_schema={} \
+                 view_divergence={} catalog_issues={} | complete={}",
+                response.refno,
+                response.noun,
+                response.attributes.len(),
+                defaulted.len(),
+                misaligned.len(),
+                enum_spelled.len(),
+                pseudo_gaps.len(),
+                tty.page.len(),
+                missing_from_panel.len(),
+                unrendered.len(),
+                unrendered.iter().filter(|name| answer(name) == "ZZE").count(),
+                with_a_real_value.len(),
+                response.diagnostics.undecoded.len(),
+                response.diagnostics.shape_conflicts.len(),
+                response.diagnostics.uda_issues.len(),
+                response.diagnostics.outside_schema.len(),
+                response.diagnostics.view_divergence.len(),
+                response.diagnostics.catalog_issues.len(),
+                response.complete,
+            );
+            for (name, display, _) in defaulted {
+                println!("TTY_ANSWER {refno}\t{name}\t{}\t面板={display}", answer(name));
+            }
+            for name in unrendered {
+                println!("TTY_ANSWER {refno}\t{name}\t{}\t面板=(不画)", answer(name));
+            }
+
+            // 断言一条都不在这儿做：调用方按自己的严格度挑剔。手挑的那 21 个要求
+            // 每一格都空；整份语料是广度普查，只有「真读丢了」那一格不许有。
+            let tag = |rows: &[String]| {
+                rows.iter()
+                    .map(|row| format!("{refno} {row}"))
+                    .collect::<Vec<_>>()
+            };
+            run.lost_values.extend(tag(&with_a_real_value));
+            run.misaligned.extend(tag(&misaligned));
+            run.misresolved.extend(tag(&misresolved));
+            run.missing_rows.extend(tag(&missing_from_panel));
+            if !response.diagnostics.undecoded.is_empty()
+                || !response.diagnostics.shape_conflicts.is_empty()
+                || response.complete != response.diagnostics.uda_issues.is_empty()
+            {
+                // `uda_issues` 是本元素自己的字典缺口（值留着、只能按哈希名显示），它
+                // 该继续把 `complete` 打成 false——那是唯一还允许留下的理由。
+                run.diagnostics_disagree
+                    .push(format!("{refno} {:?}", response.diagnostics));
+            }
+        }
+
+        run.covered = samples.len();
+        run
+    }
+
+    /// E3D 把一部分整数属性按枚举名印：`Impstchange Undefined` 说的就是 `IMPSTC = 0`。
+    ///
+    /// 值没差，差的是拼法——而拼法要的那张 magic-values 表没有随目录导出来：字段记录里
+    /// 只有一个指针（`MAGICVALUES`）与一句散文（`DESTEX: Import status (Undefined, New,
+    /// Replace, Delete, Retain)`）。认它的是字段记录、不是名字表：带 `MAGICVALUES` 的
+    /// 才算，别的对不上照旧是对不上。
+    #[cfg(test)]
+    fn is_enum_spelling(catalog: &NounCatalog, name: &str, display: &str, answer: &str) -> bool {
+        let Some(record) = catalog.attribute_fields(e3d_attlib::db1_hash(name)) else {
+            return false;
+        };
+        if !record.fields.contains_key("MAGICVALUES") {
+            return false;
+        }
+        let value = answer
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, tail)| tail.trim());
+        display.trim().parse::<i64>().is_ok()
+            && !value.is_empty()
+            && value.chars().all(char::is_alphabetic)
+    }
+
+    /// 这个属性在 noun 目录里是不是伪属性（E3D 现算、没有存储槽位）。
+    ///
+    /// 伪属性的真规则只落地了几条（BRAN 圆口的 `HEADW` 那几个、`INCO` / `RLST`），
+    /// 其余只给类型零；E3D 现算出别的值（`SkeyScale 100`）时，差的是那条规则，不是
+    /// 把文件读丢了。已落地的那几条 `origin` 是 `derived`，不走这一档——它们再对不上
+    /// 就是规则写错了，照旧红。
+    #[cfg(test)]
+    fn is_pseudo_attribute(catalog: &NounCatalog, noun: &str, name: &str) -> bool {
+        let hash = e3d_attlib::db1_hash(name);
+        catalog
+            .noun(e3d_attlib::db1_hash(noun))
+            .is_some_and(|noun| {
+                noun.attrs
+                    .iter()
+                    .any(|attribute| attribute.hash == hash && attribute.is_pseudo)
+            })
+    }
+
+    /// E3D 那一页上印、任何一份 schema 导出里都没有的行。
+    ///
+    /// 两个名字在 `noun_layout.json` 与 `noun_attr_fields.json` 里都一个字都搜不到
+    /// （那两份是活 E3D 按 `DbElementType.SystemAttributes()` 导出的）：
+    ///
+    /// - `Lock`：元素锁。`attlib` 的 4271 条属性里也没有它——`Brlock` / `Rlock` /
+    ///   `Prjlock` 都在，独独没有 `Lock`。样本里 E3D 一律印 `Lock false`。
+    /// - `Nappflag`：只在目录几何（`SCYL` 这类）那一页上出现，E3D 印 `Nappflag 0`；
+    ///   SCYL 的 13 条目录声明里没有它。
+    ///
+    /// 都是内核自己答的，文件侧没有可解的槽位。补不出来就不补：面板宁可少这一行，
+    /// 也不画一个猜来的值。
+    #[cfg(test)]
+    const E3D_PAGE_ROWS_WITHOUT_A_SCHEMA: [&str; 2] = ["lock", "nappflag"];
+
+    /// 面板那一格与 E3D 印的值是不是同一个东西。
+    ///
+    /// E3D 印 `<长名> <值>`；值那一截按面板的拼法归一——`Nulref` 面板拼作 `0/0`，带单位
+    /// 的数去掉单位（`0mm` / `0pascal` → `0`），两边都是数就按数比（`0` 与 `0.0` 是一个
+    /// 数），其余逐字比、不分大小写（`unset` / `false` / 空）。`ZZE`（E3D 答不上来）
+    /// 永远不对：E3D 没有这一行，我们也不该有。
+    fn panel_matches_e3d(display: &str, answer: &str) -> bool {
+        if answer == "ZZE" {
+            return false;
+        }
+        let value = answer
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, tail)| tail.trim());
+        let value = if value.eq_ignore_ascii_case("nulref") {
+            "0/0"
+        } else {
+            value
+        };
+        let unitless = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+        if let (Ok(ours), Ok(theirs)) = (display.trim().parse::<f64>(), unitless.parse::<f64>()) {
+            return ours == theirs;
+        }
+        display.trim().eq_ignore_ascii_case(value)
+    }
+
+    #[test]
+    fn panel_and_e3d_agree_on_type_defaults_however_e3d_spells_them() {
+        assert!(panel_matches_e3d("0", "HeadWidth 0mm"));
+        assert!(panel_matches_e3d("0", "TPressure 0pascal"));
+        assert!(panel_matches_e3d("0", "Bstatus 0"));
+        assert!(panel_matches_e3d("false", "Tsfbreak false"));
+        assert!(panel_matches_e3d("0/0", "Orrf Nulref"));
+        assert!(panel_matches_e3d("unset", "Duty unset"));
+        assert!(panel_matches_e3d("", "Inco"));
+        assert!(!panel_matches_e3d("0", "HeadWidth 100mm"));
+        assert!(!panel_matches_e3d("unset", "Bstatus 0"));
+        assert!(!panel_matches_e3d("0", "ZZE"));
+    }
+
+    /// E3D 这句回答等于「这儿什么都没有」。
+    ///
+    /// 它印的是 `<长名> <值>`，值那半截为空、`unset`、`Nulref`、`false`，或者零
+    /// （`0` / `0mm` / `0pascal`——REAL 属性没有存过值时 E3D 给的类型默认）时，
+    /// 就是没有值。`ZZE` 是 E3D 自己也答不上来，同样不是我们把值读丢了。
+    ///
+    /// `NAME` 另算：没起过名的元素 E3D 不印空串，而是当场编一个
+    /// `FTUBE 4 of BRANCH /C-OR-1R345-C`。真名一律以 `/` 开头，所以不以 `/` 开头的
+    /// 就是那个临时拼的全名——它是 E3D 现算的，库里没有这个值，不能拿来证明我们漏读。
+    /// （要不要把这个全名也显示出来，是 `FLNM` 伪属性那条线的事，不在本模块。）
+    fn e3d_answer_is_nothing(name: &str, answer: &str) -> bool {
+        if answer == "ZZE" {
+            return true;
+        }
+        if name == "NAME" {
+            return !answer
+                .split_once(char::is_whitespace)
+                .is_some_and(|(_, value)| value.trim_start().starts_with('/'));
+        }
+        let value = answer
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, tail)| tail.trim());
+        value.is_empty()
+            || value.eq_ignore_ascii_case("unset")
+            || value.eq_ignore_ascii_case("nulref")
+            || value.eq_ignore_ascii_case("false")
+            || value
+                .strip_prefix('0')
+                .is_some_and(|unit| unit.chars().all(char::is_alphabetic))
+    }
+
+    /// 面板一行在 E3D 那一页上可能用的名字：短名本身，以及目录给的查询抬头
+    /// （`HEADW` → `HeadWidth`）。UDA 的抬头不走目录哈希，去掉前导 `:` 后按名字对。
+    #[cfg(test)]
+    fn tty_names_of(catalog: &NounCatalog, row: &AttributeValue) -> Vec<String> {
+        let mut names = vec![row.name.to_ascii_lowercase()];
+        if !row.is_uda {
+            if let Some(heading) = catalog.query_heading(e3d_attlib::db1_hash(&row.name)) {
+                names.push(heading.to_ascii_lowercase());
+            }
+        }
+        names
+    }
+
+    /// 一个元素在 E3D 那头的两件事。
+    #[cfg(test)]
+    #[derive(Default)]
+    struct TtyElement {
+        /// 逐个 `Q <短名>` 的回答：短名 → 原样回答（答不上来记 `ZZE`）。
+        answers: std::collections::BTreeMap<String, String>,
+        /// E3D 自己那一页（`ATTLIST`）列的名字，按它印的顺序；UDA 带前导 `:`。
+        page: Vec<String>,
+    }
+
+    /// 一个会话里问完每个元素：点名的属性逐个 `Q`，再要一份 E3D 自己那一页。
+    ///
+    /// 名字用的是 DB 短名（`DUTY`），E3D 印回来的是它自己的长名加值（`Duty unset`），
+    /// 所以回答要连长名一起原样留着；答不上来记 `ZZE`。
+    #[cfg(test)]
+    fn tty_query_attributes(
+        requests: &[(String, Vec<String>)],
+    ) -> std::collections::BTreeMap<String, TtyElement> {
+        let repo = std::env::current_dir().unwrap();
+        let driver = crate::e3d_query::E3dDriver::from_env(&repo).unwrap();
+        let mut source = String::new();
+        for (refno, names) in requests {
+            source.push_str(&format!("$P ZZR {refno}\n={refno}\n"));
+            for name in names {
+                source.push_str(&format!(
+                    "$P ZZA {name}\nQ {name}\nhandle any\n$P ZZE\nelsehandle none\nendhandle\n"
+                ));
+            }
+            source.push_str("VAR !attl ATTLIST\nDO !a VALUES !attl\n$P ZZP $!a\nENDDO\n");
+        }
+        let raw = driver
+            .run_source(&repo, "tty-attribute-probe", &source)
+            .unwrap();
+
+        let mut elements: std::collections::BTreeMap<String, TtyElement> =
+            std::collections::BTreeMap::new();
+        let mut element: Option<String> = None;
+        let mut pending: Option<String> = None;
+        for line in raw.lines().map(str::trim) {
+            if let Some(refno) = line.strip_prefix("ZZR ") {
+                element = Some(refno.to_owned());
+                pending = None;
+                elements.entry(refno.to_owned()).or_default();
+                continue;
+            }
+            if let Some(name) = line.strip_prefix("ZZP ") {
+                if let Some(refno) = element.as_ref() {
+                    elements
+                        .entry(refno.clone())
+                        .or_default()
+                        .page
+                        .push(name.to_owned());
+                }
+                continue;
+            }
+            match line.strip_prefix("ZZA ") {
+                Some(name) => pending = Some(name.to_owned()),
+                None => {
+                    if let (Some(refno), Some(name)) = (element.as_ref(), pending.take()) {
+                        elements
+                            .entry(refno.clone())
+                            .or_default()
+                            .answers
+                            .insert(name, line.to_owned());
+                    }
+                }
+            }
+        }
+        elements
     }
 
     /// 共用证明（母计划 §4 不变量）：树服务与属性服务钉住的是**同一份** `Arc<MdbReadStore>`

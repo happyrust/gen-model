@@ -362,6 +362,12 @@ pub(crate) struct WriteBehindSnapshot {
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
     pub blocked_samples: Vec<BlockedRootSample>,
+    /// d-149 按根数的 overlay 闸：上限（0 = 不限）、进程起来以来累计逐出的根数。现值用同一节点上的
+    /// `model_cache.resident_roots` 对着看；「设了上限却一直不逐」= 常驻的全是还没落盘的根。
+    pub overlay_root_limit: usize,
+    pub overlay_evicted_total: u64,
+    /// d-149 元素缓存的元素数上限（0 = 不限；`model_element_cache=false` 时无意义）。
+    pub element_cache_max_entries: usize,
     /// durable 档写进介质的行账，本进程起累计。前面那几格数的都是**根**；换装复验要的是
     /// **行**——`model_refresh` 那一支只打 `durable=pending`，`rows` / `commits` 只在非 durable
     /// 分支填，行账过去在这一档无处可查（`ledger-seg15-frameall.md` §20.5）。
@@ -438,6 +444,9 @@ fn snapshot_for(controller: &ModelWriteBehind) -> WriteBehindSnapshot {
         last_success_at: state.last_success_at.clone(),
         last_error: state.last_error.clone(),
         blocked_samples,
+        overlay_root_limit: crate::options::model_overlay_max_roots(),
+        overlay_evicted_total: controller.store.overlay_evictions_total(),
+        element_cache_max_entries: crate::options::model_element_cache_max_entries(),
         rows_upserted: state.rows_upserted,
         rows_removed: state.rows_removed,
         receipts_written: state.receipts_written,
@@ -656,7 +665,7 @@ impl ModelWriteBehind {
             return Err(OverlayRejected);
         }
         // 登记的 durable 身份必须是存储**实际盖下**的那份回执：`Partial` 提交的
-        // `manifest_hash` / `geometry_count` 是存储在写锁里、delta 落完之后重算的（ADR-078 D5），
+        // `manifest_hash` / `geometry_count` 是存储在写锁里、delta 落完之后重算的（ADR-080 D5），
         // 提交前从 `commits` 里抄走的是占位值——拿它登记，这根的 ACK 永远对不上、永远 pending。
         let receipts = self
             .store
@@ -677,11 +686,39 @@ impl ModelWriteBehind {
             );
         }
         drop(state);
+        // d-149：刚发布的这批根还没 ACK、不在候选里；被挤出去的是更早已落盘的根。
+        enforce_overlay_root_limit(self.store, "publish");
         let _ = self.ensure_worker();
         self.notify.notify_one();
         Ok(MemoryReady {
             roots: receipts.into_values().map(|(root, _)| root).collect(),
         })
+    }
+}
+
+/// 按根数上限收 overlay（d-149，`model_overlay_max_roots`）。只在 durable 介质下、上限 > 0 时动：
+/// 嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。两处调：发布之后（挤出更早落盘的根）、
+/// 一批 durable ACK 记下之后（刚落盘的根成为候选）。逐了就按批打一行；收不下去（剩下的全是
+/// 没落盘的）不吵，`/health.model_cache` 上看得见。
+fn enforce_overlay_root_limit(store: &ModelMemoryStore, moment: &str) {
+    let limit = crate::options::model_overlay_max_roots();
+    if limit == 0 || !crate::options::store_mode().is_durable() {
+        return;
+    }
+    let outcome = store.enforce_root_limit(limit);
+    if outcome.evicted > 0 {
+        println!(
+            "模型投影 overlay 按根数上限收回（{moment}）：{} → {} 根，上限 {}，逐出 {}{}",
+            outcome.resident_before,
+            outcome.resident_after,
+            outcome.limit,
+            outcome.evicted,
+            if outcome.still_over_limit() {
+                "；剩下的都还没落盘，先留着"
+            } else {
+                ""
+            }
+        );
     }
 }
 
@@ -852,6 +889,8 @@ async fn persist_batch(controller: &ModelWriteBehind, dbnum: u32, jobs: Vec<Pers
         state.last_error = Some(error);
     }
     drop(state);
+    // d-149：这一批刚记下 durable ACK 的根成了可逐出候选，上限之上的这时才收得动。
+    enforce_overlay_root_limit(controller.store, "durable-ack");
     controller.notify.notify_one();
     controller.durable.notify_waiters();
 }
@@ -1173,7 +1212,7 @@ mod tests {
         );
     }
 
-    /// ADR-078 D5：`Partial` 回执的 `manifest_hash` / `geometry_count` 是存储在写锁里盖的。
+    /// ADR-080 D5：`Partial` 回执的 `manifest_hash` / `geometry_count` 是存储在写锁里盖的。
     /// write-behind 登记的 durable 身份必须是**盖完的那份**——从 `commits` 里提前抄走占位值，
     /// 这根的 ACK 就永远对不上、永远 pending，而且不报错。
     #[tokio::test(start_paused = true)]

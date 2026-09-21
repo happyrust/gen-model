@@ -3,6 +3,16 @@ pub mod e3d_model_service;
 #[cfg(feature = "legacy_model")]
 pub(crate) mod gen_model;
 pub mod historical_model;
+/// 最小交付单元的模型版本表：从会话链按需算、不落库（ADR-081）。
+pub mod unit_versions;
+/// 单个构件的模型版本表：同一条链、只认它自己，并排给所属单元那一列。
+pub mod element_versions;
+/// 一个节点的属性变化时间线：谁在哪一版改了什么（会话 user / comment + 逐属性 before / after）。
+pub mod attribute_history;
+/// 节点两版之间的差异摘要：索引差分 + 模型影响，按最小交付单元分组，不生成几何。
+pub mod node_diff_summary;
+/// 任意节点按对比范围（自身 / 整棵子树）折叠的模型版本表：容器节点的时间线靠它，每版附动了几个单元。
+pub mod node_versions;
 pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;

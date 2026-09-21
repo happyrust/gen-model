@@ -12,7 +12,244 @@
   内存模式横幅「由环境变量 AIOS_STORE_MODE 定的」补上两侧空格（主线 `f89254f8b` 同款）。**未做编译验证以外的验证**：改动全在注释 /
   字面量 / 文档，与主线同一变换（主线 options / setup / review-db / store_mode 单测 99 绿），本支只跑 `cargo check --lib --tests`。
 
+### 本地发布 0.1.29：主线自 0.1.27 后的第一个包——ADR-081 版本与历史只读接口、属性面板对齐 E3D、ADR-082 缓存上限；跳过 0.1.28（该号已被 model-cache 分支的包占用）
+
+- 后端 `0.1.29` 构建自 `92ef5365cb34`（`chore(release): 0.1.29`，**干净树**，build_id 不带 `.dirty`）。版本号从 0.1.27 **跳到 0.1.29**：
+  0.1.28 是 `codex/model-projection-cache` 分支 2026-09-18 出的三版 `.dirty` 包（`81d2c28c0` 起；那边的 `docs/release-notes/0.1.28.md`
+  与主线内容不同，且该分支 09-17 之后的 96 个提交主线尚未合入）。同一个号挂两份发布说明、两条 patch 基线，拿错的代价大过留一个空号；
+  下一次双向同步时 Cargo 版本取高者，`0.1.28.md` 原样进主线、不撞名。
+- 产物 `releases/ams-local-0.1.29_release.20260921013814.g92ef5365cb34-runtime.zip`（120.9 MB / 126,758,082 B），
+  SHA-256 `9cb13e431752d53ddcb3ef28c2edd8bf169271759436b2c2a67c2b68bd4bacff`（另行独立重算一致）；包内 `aios-database.exe` 自报
+  `0.1.29+release.20260921013814.g92ef5365cb34`、`git_dirty:false`，SHA-256 `edb6eb30c07355d82af1a3d046a12d2fdfdc6d38995d9772510728f63a5032e8`
+  （213,216,768 B）。包型 `runtime`（同 0.1.27 / 0.1.28）：`aios-database.exe` / `web\`（13）/ `bin\surreal.exe`（2.1.4+20250317.45013fc9）/
+  `resource\surreal\*.surql`（7）/ `schema\{e3d210,e3d31}`（48）/ 出厂 `DbOption.toml`（设置模式、`store_mode="mem"`、`room_membership=false`）/
+  `.first-run-pending` / `Start-AMS` / `Start-Surreal` / `Rollback` / README / CHANGELOG，共 78 个文件 + `release.json`。
+- Web 复用 0.1.26 那份三腿全过的包（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，脚本校过来源包哈希，
+  13 个文件）；`index.html` / CHANGELOG 取自 plant-ui 干净 worktree `786187947`（`chore(release): plant-ui 0.1.11`），与包内 wasm 同源
+  （blob `321bf87b`，与 0.1.26 包里那份逐字节相同）——plant-ui 主工作树在途的 `index.html` 改动（`data_api_url` 回落 origin）与 `## 未发布` 段
+  都**没有**进包，包内 CHANGELOG 前端节是 `## 0.1.11` 那一段。
+- 覆盖 0.1.27（`2cb5de1f1`）之后主线的 68 个提交（含同日 09:29 的 `db07e39a1`，只动 `DbOption.toml` 注释模板 / spec / changelog），用户口径见
+  `docs/release-notes/0.1.29.md`：ADR-081 版本与历史只读接口（`model/versions` / `element/versions` / `node/versions` /
+  `element/attribute-history` / `node/diff-summary` / `model/history/query tool=attributes`）；属性面板与 E3D 对齐的渲染器（`6a76eefb4` /
+  `198985300`）；`spatial/centerline` + `nearest-clearance` + `bran_centerline`（`1bbd2e449` / `1dbedf8c3`）、`element/ptset` + `plines`
+  （`c0fc7be0c` / `a00565522` / `df61072cc`）；ADR-082 两个缓存上限默认 50,000 / 200,000（`9efe5a512` / `4b04f4c61` / `d258c0fba`）；元数据门两票与
+  `cache_stamp`、`model_skip_unread_attribute_changes` 退役（`34ae04e00`）、刚体前移三条排除与两处修（`ff5390d62` / `73adfee00` / `ea7ade930`）；
+  ADR-080 单元级发布开关（默认关）；ADR-073 房间降级 / D12 / D13 `RoomOnly` / D14 与 `dbnum_room_recompute_owed`（`170fde71a`）。发布说明第一条
+  列了「0.1.28 有而本版没有」：D1 bake 时算房间、D13 反查形态、射线奇偶、`surface-clearance`、隐式管身两修、校审三修。
+  **同日 09:5x 起另一路会话把该分支的存储介质系列 cherry-pick 进主线（`8a1b30c80` ← `8c89728c3`、`21b5d6c64`、`103bee843`，ADR 在主线改号
+  080 → 083 见 `8ab1277f1`：介质只由 `AIOS_STORE_MODE` 决定、漏设落 rocksdb）——都在本包之后，不在 0.1.29 里**：本包出厂 `DbOption.toml`
+  仍写 `store_mode = "mem"`、向导第②步仍可选存储。
+- 冒烟（口 19099，`-StrictSmoke`）：A 出厂配置起服务 = 设置模式 + 向导页、B 本机配置（`test-worklspace\bin`）全启动 `medium=mem` / `durable=false` /
+  服务没拉 surreal 子进程——两腿通过；C rocksdb 腿在 runtime 档按设计跳过。脚本全程 3 分 20 秒（本地六个 crate 重编、第三方依赖走共享 target）。
+- **构建输入（与主工作树隔离）**：在 `D:\work\plant-code\rel-0.1.29\` 下另起七个 worktree 打包——gen-model `92ef5365c`；vendor 各取 committed
+  HEAD：e3d-io `4a76d2a`、e3d-model `4866468`、e3d-attlib `f37be2e`、plant-mbd `f888a50`、old-aios-core `a438029` **+ 0.1.26 / 0.1.27 也带着的
+  那一处稳定未提交增量**（rkyv `validation` 特性 + `pdms_shape.rs` 47 行，防损坏 `.mesh` 反序列化溢出；`git apply` 主工作树的 diff，逐字相同）；
+  `cargo metadata --locked` 在这棵树上通过，打包前后 Cargo.lock 一字未动。**没进包**的在途改动：主工作树里另一路会话的 `attribute_diff`
+  （`GET element/attribute-diff`，6 文件 + 1 新文件，09:15 还在改）；e3d-io 4 文件 +587/−69（`element_name.rs` 无名构件短名等，09:15 还在改）、
+  e3d-model 3 文件 +202/−3（`increment.rs` / `pipeline.rs`）、plant-mbd 15 文件、e3d-attlib 2 文件。打包完七个 worktree 已删。
+- **未验**：rocksdb（durable）真库路径本包没跑（C 腿按档跳过，也没像 0.1.27 那样另做真库验证）；plant-ui 侧对新接口的消费；ADR-082 默认上限
+  在现场的实际逐出行为（09-20 只在 mem 档量过占用）；`cargo test --lib` 本次没在打包树上重跑（主线 `d258c0fba` 09-20 16:24 的 2285 passed 是最近一次全量）。
+- **记一笔操作事故（已改正）**：写这一条时另一路会话正在 cherry-pick `8c89728c3`、`changelog.md` 处于冲突态，本会话的 `git add changelog.md && git commit`
+  把对方已暂存的 34 个文件与冲突解决一并收进了一个挂着本条消息的提交（`e8c8612c4`）。随即 `reset --soft` 拆开：对方的 cherry-pick 按原作者 / 原消息
+  重新落成 `8a1b30c80`（文件清单与 `8c89728c3` 逐一相同，changelog 只含他那一段），本条单独成提交。工作树里 `attribute_diff` 那六个未暂存文件全程没动。
+
+### 校审域 JWT 密钥 `[model_center].token_secret`：生产 `:8022` 此前跑在代码默认串上，已补成旧 `:3100` 同一把；模板与规格补上这一格，并记下部署管线会把它冲掉
+
+- **为什么**：2026-09-21 00:2x 退役 `:3100` 前，对照旧 plant-model-gen 的 API 口径逐项核 `:8022`，发现 `/opt/aios-database/DbOption.toml`
+  没有 `[model_center]`、进程环境也没 `JWT_SECRET`、`service.env` 不存在——而 `review/auth.rs::JwtConfig::from_config_file` 的口径是：
+  配置文件能载入就**只**读 `model_center.token_secret`，读不到直接回落 `default-jwt-secret-key`，`JWT_SECRET` 环境变量此时根本不看
+  （`auth.rs:152-168`；`JwtConfig::default()` 才读环境变量，只在找不到任何配置文件时走到）。后果：知道默认串的人不连服务器就能
+  签出任意 `project_id / user_id / role` 的 token 直接过 `/api/review/*` `/api/users/*`（首版还写了「PMS 按旧密钥签的 token 会 401」，
+  同日 09:5x 用户指正后撤回，见末尾**改口**）。仓库里 `DbOption.toml` 模板、`docs/specs/review-api.md`（写的是「密钥来自 `JWT_SECRET`
+  环境变量」）与部署渲染都没有这一格——从来没人给新栈配过。
+- **改动**：
+  - **服务器（会话 fable-5-1-25，00:31，不在仓库里）**：备份 `DbOption.toml.bak-20260920T163130Z` 后，把旧 `:3100`
+    `[model_center].token_secret` 那一行原样追到 `/opt/aios-database/DbOption.toml` 末尾，`systemctl restart aios-database`。
+    真机自签 HS256 探针：旧密钥签的 token `GET /api/users/me` / `/api/review/tasks?limit=1` **200**，`default-jwt-secret-key` 签的
+    **401 InvalidSignature**。回滚一句：`cp -p /opt/aios-database/DbOption.toml.bak-20260920T163130Z /opt/aios-database/DbOption.toml && systemctl restart aios-database`。
+  - **`DbOption.toml`（本仓模板）**：末尾追加 `[model_center]` 的**注释形态**模板（`token_secret` / `token_expiration_hours`）与取值口径、
+    生产现状、两条提醒。只写注释不写活表头：本文件其余键全是顶层键，`scripts/Invoke-SiteDbnumParse.ps1` 与部署渲染都在文件末尾追加
+    顶层键，活的 `[表]` 会把它们吞进 `model_center.*`。
+  - **`docs/specs/review-api.md` §1.1**：「密钥来自 `JWT_SECRET` 环境变量」改成真实口径（配置文件能载入 → 只读 `[model_center].token_secret`，
+    `JWT_SECRET` 不生效；无配置文件才读环境变量），并记下生产现状与部署管线的缺口。
+- **验证**：`tomllib` 解析改后的模板通过、顶层键集合与改前逐字相同、没有 `model_center` 表（注释形态）；把 `github/deploy/backend-20260918`
+  的 `render_dboption.py` 拿到临时目录对改后模板渲染一遍，产物仍是合法 TOML、三段追加照旧；`review/auth.rs:152-168` 逐行核过口径。
+  生产 01:52 复核 `/api/v1/health` ok / core ready / open 29，三套真机脚本（`verify-gen-model-v1.ps1` 9/9、`pms-contract-sequence.ts` 7/7、
+  `review-annotation-flow-contract.ts` 35/35）全过。**未验证**：没有从零走一遍部署 workflow。
+- **没做、要人拍板（部署管线在 `github/deploy/backend-20260918` 分支，未并入本分支；生产二进制 `c04a9e558` 也在那条线上）**：
+  1. `deploy/linux/install_backend.sh:144-147` 每次部署**整份覆盖** `/opt/aios-database/DbOption.toml`（先备份），`render_dboption.py`
+     只追加 `[review_auth]` / `[platform_auth]` / `[review_attachments]`——下一次走 workflow 部署，服务器上手工补的 `[model_center]` 就没了，
+     密钥回落默认串、所有已签 token 失效。
+  2. 同脚本把 `secrets.REVIEW_JWT_SECRET` 写成 `service.env` 的 `JWT_SECRET` 并挂 `EnvironmentFile=`（`install_backend.sh:184-195,208`），
+     但按上面的口径它**永远不会被读到**（`DB_OPTION_FILE` 指的配置一定能载入）；09-18 彩排 `rehearse-backend-stack.yml:217` 只验了
+     「文件写成 600」，没验「服务用了它」。
+  两条修法二选一或都做：(a) `render_dboption.py` 追加 `[model_center]`，`token_secret` 从 `REVIEW_JWT_SECRET` 渲染进去（密钥落在 644 的
+  `DbOption.toml` 里，与 `service.env` 600 的初衷相悖）；(b) `JwtConfig::from_config_file` 让 `JWT_SECRET` 环境变量压过
+  `model_center.token_secret`（与本仓 `AIOS_*` 环境变量压配置键的惯例一致，`service.env` 那条路就通了；`warn_if_default_jwt_secret`
+  的告警文案也该一起改口）。
+- **改口（同日 09:5x，用户指正「密钥 PMS 会调用我们提供的接口生成」）**：PMS **不持有** `token_secret`——它的 S2S `token` 是先调
+  `POST /api/auth/token` 取的（`plant3d-web/scripts/pms-contract-sequence.ts` 第 0 步「auth/token (login)」→ 后面六条复用），不是拿共享密钥
+  自己签。于是：① 密钥值与旧 `:3100` 是否一致**不影响 PMS**，昨夜沿用旧密钥无害但非必要，`REVIEW_JWT_SECRET` 填任何一串强随机都行；
+  ② 密钥要求只剩「本机签 / 验一致、跨重启与重部署稳定」，换密钥 = 已发 token 全部失效，PMS 重取、前端重登即可（PMS 收到 401 是否自动
+  重取本仓看不到，要问 PMS 侧）；③ §8 六条的 JWT 校验挡住的只是「没先调 `/api/auth/token`」，而它**不要密码**——真正的信任边界是
+  谁能打到 `/api/auth/token`，收紧的抓手是 nginx 对这条路径按 PMS 出口 IP 白名单（本仓与 plant3d-web 都没做，待拍板）。
+  `DbOption.toml` 注释与 `review-api.md` §1.1 的对应两句同步改口。
+
 ## 2026-09-20
+
+### ADR-082 · 进程内缓存按数量设上限：模型投影 overlay 按根数逐出已落盘的根、生成用元素缓存按元素数满则清（两个上限默认 0 = 不限）；`RoomOnly` 整库房间重算改口——根全集从源文件枚举、不在 overlay 里的冷根从库里读几何行
+
+- **为什么**：2026-09-20 12:03 对增量服务的内存做清点：**没有全局内存预算**——瞬时峰值有切片 / 在飞根 / CPU 额度 / 事务字节几道局部闸，
+  自适应并发控制器（RSS > 1.25× 基线就把在飞根数减半）**只会少干、不会吐**；常驻那一半里两块**无界**——模型投影 overlay
+  （`ModelMemoryStore`，一个根进来就一直在，ACK 过的热根也不逐出）与生成用元素缓存（每库一份 `DbSet` 的池级缓存，官方实测
+  7997 一轮 768 MB → 1.55 GB 就是它）。用户 12:06 要按**数量**限，12:17 拍板（共识 **d-149**）：「两道都要：overlay 按根数、
+  元素缓存按元素数；RoomOnly 改成也读 RocksDB 冷根；默认 0 不限」。
+- **改动**（会话 fable-5-1-66 起手 overlay 闸 / options / DbOption / e3d-io 缓存上限，fable-5-1-6 接手补齐接线、`RoomOnly` 冷根、单测与文档）：
+  - **overlay 按根数**（`model_memory_store.rs` / `model_write_behind.rs`）：`model_overlay_max_roots`（环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS`
+    压过，0 = 不限）。`ScopeState` 记每根**最近一次盖回执**的序号（读不刷新）；`enforce_root_limit(limit)` 按序逐出**已 durable ACK 且与回执
+    逐字相符**的根（整根记录 + 回执 + ACK + 序号一起掉，与仍常驻回执共有的记录留下——与 `drop_cached_root` 共用 `drop_root`），
+    候选用尽仍超限就停手、`OverlayEviction::still_over_limit` 报出来；`limit == 0` 早退。`model_write_behind` 在发布之后与每批
+    durable ACK 记下之后各调一次，`store_mode().is_durable()` 门内；`WriteBehindSnapshot` 多 `overlay_root_limit` /
+    `overlay_evicted_total` / `element_cache_max_entries` 三格（`/health.model_cache.write_behind`）。
+  - **元素缓存按元素数**（vendor e3d-io `db_element.rs` + `options.rs` + `e3d_model_service.rs`）：`DbSet::with_element_cache_limit(n)`——
+    全池跨库合计一枚原子计数器，装第 `n + 1` 个之前整张清（零簿记、不做 LRU），`fork_without` 按留下来的重数，`forget_cached_db` 饱和减；
+    `model_element_cache_max_entries`（环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES`，0 = 不限）经 `build_set` 接进去，
+    `model_element_cache=false` 时无意义。`options::effective_count_limit`：环境变量合法非负整数压过配置、拼错当没设、没写 = 0。
+  - **`RoomOnly` 冷根**（`model_record_reader.rs` / `model_db_adapter.rs` / `batch_worker.rs`）：`recompute_dbnum_room_edges` 多收
+    `library_roots`——根全集 = overlay 有回执的 ∪ 库根；不在 overlay 里的冷根（逐出过 / 重启没回填）用
+    `durable_room_records_of_root`（与读路冷读同一条 SQL）把几何行装成**房间视图**（只有构件 / noun / 网格 / 世界盒 / 折进本地摆放的
+    世界变换忠实；不装回 overlay）再算，报表多 `cold_roots` 一格。`batch_worker::library_generation_roots` 从本任务冻结的源
+    `from_frozen_source` → `initialization_roots(dbnum)` 枚举（与从零初始化同一条路、复用本窗生成输入）；枚举失败 →
+    `RoomOnlyRecompute::Incomplete`（源码钉计 4 处）。
+  - **配置与文档**：`DbOption.toml` 两键 = 0 与注释；ADR-082（新）；ADR-073 状态行 / D13 段 / 源码钉 18 二次改口；CONTEXT 词条
+    「投影 overlay 根数上限」「冷根」「元素缓存元素数上限」。
+- **验证**：单测新增 8 条——`model_memory_store` 4 条（最旧 ACK 根先出 / 未落盘不出 / kv-mem ACK 与再提交过的不算 / 嵌套根共有记录
+  留给父根 / 再提交刷新序）、`model_record_reader::the_durable_room_view_keeps_only_what_the_room_calculator_reads`、
+  `model_db_adapter::a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows`（`mem://`：逐出 → 面板搬走旧边删掉 →
+  搬回来边回来、与逐根落库逐字相同；重复 / 别的库的库根不收；既常驻又在名单里按 overlay 算）、
+  `options::a_count_limit_takes_a_valid_env_override_falls_back_to_config_and_defaults_to_unbounded`、
+  e3d-io `the_element_cache_limit_clears_the_whole_pool_when_full_and_zero_means_unbounded`；`batch_worker` 源码钉补根集枚举三条。
+  全量 `cargo test --lib` 16:24：**2285 passed / 0 failed / 123 ignored**（`170fde71a` 的 2278 + 7）；e3d-io `cargo test --test
+  dbset_element_cache_limit --test dbset_generations` 2 passed / 1 ignored（vendor 提交 `d51c3dd`）；`cargo check --lib --tests --bins` 过；
+  rustfmt 本条新增行无差异（各文件的旧差异不动）。**未验证**：真机上没跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」
+  整条链；默认值待现场量 `resident_roots` 与 RSS 再定。
+- **不做（单开）**：稳态窗口收尾释放 `GenerationInput`（会改今天默认行为）；`/dbnums` 面板那一格。
+- **追加（同日 16:3x，用户拍板「查时现算、不落库」）**：`/health.model_cache` 多两块——`overlay { records, roots, acks, approx_bytes,
+  max_roots, evicted_total }` 与 `element_cache { enabled, max_entries, parsed_entries, approx_bytes, databases[] }`，两个 `approx_bytes`
+  都是被查时现算、直接回前端的估算，不落库不缓存。overlay 记录那一半是 `ScopeState::record_bytes` 插入加 / 删除减的账
+  （`approx_record_bytes`：内联结构 + 字串 / 祖先链 + 四张索引里的 `record_id` 副本与树节点），回执 / ACK 在读锁里走一遍；元素缓存经
+  `generation_input_cache_footprint` → e3d-io `DbSet::element_cache_stats`（`ParsedElement` / `ElementExtraction::approx_heap_bytes`，
+  锁外逐份走），按长度不按容量。钉 `the_overlay_footprint_counts_what_is_resident_and_grows_with_it`（删光归零 = 加减账对得上）；
+  e3d-io 用例末尾补 `element_cache_stats` 三断言（vendor 提交 `4a76d2a`）。
+- **追加（同日 17:0x–17:4x，用户拍板「在 mem 档实例上跑一窗…给两个上限定默认值」）**：release 二进制（拷到私有目录——共用的
+  `D:\Rust\target` 被旁边 worktree 覆盖过一次）、mem 档、`POST /dbnums/{dbnum}/model/ensure` 整库即时生成 8000 / 7998 / 7997 / 1112：
+  7,743 根 / 59,929 条记录 → overlay 106.5 MB（≈ 13.8 KB/根、1.8 KB/记录），元素缓存 219,623 条 820.6 MB（3.6–4.7 KB/元素，7997 单库
+  176,982 条 643.8 MB），RSS 2.04 GB（两块合计 46%，其余是 mem 档的 kv-mem 模型行）。**默认值**：`model_overlay_max_roots = 50000`
+  （≈ 0.7 GB，样例 MDB 装六遍、12 万根量级压到四成）、`model_element_cache_max_entries = 200000`（≈ 0.7–0.95 GB/库，最大样例库一遍
+  不清一次）；`options::MODEL_OVERLAY_MAX_ROOTS_DEFAULT` / `MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT`，`effective_count_limit` 多一个
+  `default` 参数，**任何一层写 0 仍 = 不限**。证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`；ADR-082 标题 / D5 / 不变量 4 /
+  未决、DbOption.toml 注释、CONTEXT 两词条同步。
+
+### ADR-073 · 整库房间重算的触发改成可再武装（审核 P1-2：durable 欠账 `dbnum_room_recompute_owed`）+ D14 代号守卫（审核 P2-3：盖算边那台计算器的代号）
+
+- **为什么**：2026-09-17 审核 `codex/model-projection-cache` 同批点出、当时「本条未动」的两条。**P1-2**：`RoomOnly` 的两条触发
+  （本窗账本碰到房间定义族 / 开工前对齐换了房间代号）都是边沿型——只在碰到那条变更的那一窗出现一次。那一窗要是没跑到收尾段
+  （预算拆窗 `round_complete=false`、单元失败让执行体直接给 `None`、刷盘没齐 `flush.all_acked()=false`）或重算写库失败，原因随任务
+  回执一起丢：数据水位已推进、下一窗账本里不再有那条 PANE 变更，开工前对齐再探也是 `Unchanged`，本库的成员边**永久陈旧**到下一次
+  不相关的 PANE 变化；重启后按模型水位缺口重排的 ModelOnly 也救不了（普通增量窗口一成功 `model_sesno` 就越过了那条变更）。
+  **P2-3**：收尾盖 `model_room_generation`（D14）读的是任务结束那一刻的 `required_room_generation()`——并发 `/model/ensure` 或别的库
+  任务在本任务中途把常驻对齐到新一代时，`Aligned` 盖上一个边不是它算的代号（`dbnum_initialize` 那一路用 `rooms.resident_generation()`
+  本来就是对的）。用户 2026-09-20 10:5x 拍板一起修。
+- **改动**（会话 fable-5-1-58）：
+  - **欠账**（`room_recompute.rs`）：新表 `dbnum_room_recompute_owed:{dbnum}`（一库一行、SCHEMALESS，`reason` / `task_id` /
+    第一次欠下的 `armed_at`，`armed_at ?? time::now()` 保第一次），`arm` / `owed` / `discharge` 三句与 `write_state` 同形；
+    `reason_with_owed` 把本窗触发与欠账合成一句、点名是哪个任务什么时候欠下的。`dbnum_state::INCREMENT_STATE_SCHEMA` 定义它，
+    `table_parity::CONTROL_PLANE_TABLES` 5 → 6（行上带 `time::now()`，中途 diff 排除）。
+  - **两个执行体不再因失败丢触发**：`execute_frozen_batch_body` 交出「要不要」只按 `defer_model_phase`（让位）判、不再看
+    `settlement_failed`；`execute_model_only_body` 只按 `whole_library_model_only(job)` 判、不再看 `failed`。
+  - **`execute_frozen_batch`**：执行体一返回（`body_ms` 之后、拆窗余量 / 刷盘栅栏之前）就 `room_recompute::arm(dbnum, reason, task_id)`
+    （`!initialization_closed_task` 且 `room_membership()` 门内；初始化双 lane 每一根都是对齐后的计算器算的，不欠；开关关着不记，
+    重新打开后的补齐仍是显式 `model/rebuild`）。DESI 收尾段：`owed(dbnum)` → `reason_with_owed` → `Some(reason) if flush.all_acked()`
+    才跑 → `model_outcome_of` → 只在 `outcome.room_generation` 是 `Aligned(_)` 时 `discharge(dbnum)`；`Untouched` / `Cleared`
+    都不销，欠着的留给下一个任务。整库重排的 ModelOnly 不读欠账、不替它空转一遍——它盖 `Aligned` 时一并销。读欠账失败只按本窗
+    自己的触发判、留一句；记账 / 销账失败各留一句（销账失败的代价是下一个任务多跑一次整库重算）。
+  - **`dbnum_initialize::initialize`**：收尾一笔落了、盖的是 `Aligned` 才 `discharge(dbnum)`。
+  - **代号守卫**（`batch_worker.rs`）：`run_room_only_recompute` 返回 `RoomOnlyRecompute`（`Aligned(rooms.resident_generation())` /
+    `Incomplete` / `NotApplicable`，不再是 bool，代号与写进根 ACK 的同一个字串）；`DataBatchTaskResult` 加 `room_generation_at_start`
+    （`serde(skip)`，两个执行体在 `refresh_room_reference_before_task` 之后、`run_unit_worklist` 之前经 `room_generation_after_refresh()`
+    留底）；`task_room_generation_stamp(job, at_start, recompute)` → `(处置, 一句解释)`，判据纯函数 `room_generation_stamp_of(now, evidence)`
+    按 `WholeLibraryEvidence` 分三档：`Recomputed(代号)` → `Aligned(代号)`（收尾常驻取不到 / 又换了代都不改）；
+    `EveryRootRegenerated { at_start }` → 只有 `at_start == now` 才 `Aligned(now)`，不等 → `Untouched` + 「常驻房间模型在任务中途换了代
+    （开工 X → 收尾 Y）…这一版不盖」进 `warnings`；`None` → `Untouched`；`Ok(None)`（开关关着）一律 `Cleared`。
+  - **文档**：ADR-073 状态行、D13 欠账段 + 「拿开工时同一台计算器」改口成「在收尾段冻一台计算器」（审核 **P2-4** 的措辞漂移，
+    实现从落地起就是收尾时新冻）、D14「盖哪一代」段、源码钉 17 / 19；CONTEXT「整库房间重算」「`model_room_generation`」两词条。
+- **不做 / 边界**：`/dbnums` 面板没加「欠着整库重算」那一格（欠账只在任务日志与回执 `warnings` 里可见）；欠账的 `reason` 是最近
+  一次触发的，第一次的只剩 `armed_at`；`room_membership=false` 期间不记账、已记的不销（重新打开后第一个 DESI 任务会还）；
+  真机没跑「拆窗 / 单元失败之后下一窗自动补跑整库重算」与「并发 ensure 中途换代不盖 Aligned」两条用例。审核里 F3 / F4 / U3 照旧。
+- **验证**：整套 `cargo test --lib` **2278 passed / 0 failed / 123 ignored**（较 `ea7ade930` 多 4 条 = 本条新增：`mem://` 欠账往返
+  `the_owed_marker_round_trips_and_keeps_the_first_arming_time`、`the_arming_statement_upserts_and_the_discharge_deletes_the_row`、
+  `the_reason_merges_this_window_with_the_debt_and_names_the_debtor`、`the_task_stamp_uses_the_recompute_generation_and_guards_the_mid_task_swap`；
+  改写 `only_a_task_that_speaks_for_the_whole_library_stamps_the_durable_room_generation` 按三档证据逐格钉、源码钉
+  `the_room_only_recompute_is_wired_after_the_durable_barrier_and_before_task_end` 加欠账的记 / 读 / 合 / 销顺序与初始化销账；
+  工作树含旁边会话未提交的 `attribute_history / unit_versions / web_service` 改动）；定向 13 条过；`cargo check --lib --tests --bins` 过；
+  `rustfmt --edition 2024 --check` 本条新增行无差异（`batch_worker.rs` 剩 6 处、`dbnum_initialize.rs` 剩 18 处旧差异按 hunk 过滤核过，
+  `room_recompute.rs` 整文件干净）；`room_recompute.rs` CRLF / 其余 .rs LF / 三份文档各自行尾未翻、裸 LF 0。**未 live**：真机没跑欠账补跑与中途换代两条用例。
+
+### ADR-066 · S4b §5 门 3 首跑：真库探针 `probe_rigid_motion_gate3_for_window`——ams8000 195→196 过门，另 9 窗 19 根同过；嵌套根共有记录被双乘（**已修**：`republish_records` 按记录的幂等闸）、Baked `mesh_id` 纯平移也漂（**已改口**：Baked 按内容判）、1e-3 离 f32 ulp 只差 2.3%（**已改口**：`max(1e-3, 2 ulp)`）
+
+- **为什么**：ADR-066 D7 写明默认关「直到 §验收的对拍门在 ams8000 与 live #2 上过了再翻」，而执行体 `republish_roots_by_rigid_motion` 从 09-09 落地到
+  09-20 00:59（两处「待补」补齐入库 `73adfee00`）**一次都没在真投影上跑过**——验收 1 的生产记录半边 = S4b 计划 §5 门 3（B8）一直是零。
+  用户 00:57 点名「用 ams8000 195→196 钉一窗跑 S4b §5 门 3，顺手看 world_bounds 1e-3 在 f32 上撞不撞」。
+- **改动**（会话 fable-5-1-37 起手、fable-5-1-47 接力）：
+  - **执行体拆成无锁本体**：`E3dModelService::republish_roots_by_rigid_motion_on(store, dbnum, T, units, publish)`——投影与发布口由调用方注入，
+    原 `republish_roots_by_rigid_motion` 只剩「生成锁 + `ensure_not_older_than_persisted` + `run_blocking` 调本体、发布口 = 全局投影 + write-behind」；
+    与单元级的 `republish_roots_by_unit_delta_on` 同形，行为不变。
+  - **门 3 探针** `e3d_model_service::tests::probe_rigid_motion_gate3_for_window`（`#[ignore]`，真库）：`AIOS_TRANSFORM_WINDOW=S:T` +
+    `AIOS_RIGID_PROBE_DBNUM`（默认 8000）+ 开关 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`，可选 `AIOS_RIGID_PROBE_FILE`（MDB 外的库挂 pin）与
+    `AIOS_RIGID_PROBE_ROOTS=w0/w1,…`（只执行这几根）。生产同款选根 + 刚体分桶 → 判成 transform 的每根 S 端整根重算灌本地 `ModelMemoryStore`
+    当基线（回执停 S）→ 真执行体（本体，发布口 = `try_commit_current`）→ 与 T 端整根重算逐条比。判死按 §5 门 3 原文（`record_id` 集合 / `world_transform`
+    1e-9 / `world_bounds` 1e-3 / `mesh_id` 纯平移必复用、含旋转 Baked 不判、Canonical 仍判），另核 **D4 回执**（`source_sesno == T`、`published_via == transform`、
+    `model_target` 与 regen@T 逐字段相等）；`manifest_hash` 观察项。Baked `mesh_id` 不等时读回两份网格逐顶点 / 法线 / 索引比，内容同记 `DRIFT` 观察项、
+    不同才判死。另印：每根盒差最坏的分量两边的值与 f32 ulp、矩阵不等记录的祖先链 + 命中锚点 + 两边平移列、嵌套根共有记录数。
+    两端的 `model_target` 在**全部根两端重算完之后**各算一次再落款——目录会话表是生成时按需填的，逐根边生成边落款会让早生成的根少几行目录、与 regen@T 假不等（首跑 7 / 9 根就是这么红的）。
+  - **执行体修法（用户 02:5x 拍板 (a)）**：`rigid_motion::republish_records(records, anchors, planned_base_sesno, target_sesno, bounds)` 多收规划基线 S，
+    逐条先过**按记录的幂等闸**——`source_sesno == T` 的记录这一窗已经在 T 上（嵌套根共有、同窗别的根整根重算落的、窗口重放），矩阵 / 盒一字不动、
+    直接放过；`S < source_sesno ≠ T` 的记录 `Δ = W_T·W_S⁻¹` 对不上 → 整批 `Err`、这根回退 regen；`≤ S` 照常乘（ADR-080 D3：单元级发布后没动的记录
+    落在回执之前，正常）。执行体传 `unit.source_start_sesno`。单测 2 条：`records_already_at_the_target_are_not_moved_again_by_a_nested_root`
+    （外层根乘完的共有记录喂给内层根，第二遍逐位相同；一条在 T 一条在 S 只动后者）、`a_record_newer_than_the_baseline_fails_the_root_and_an_older_one_is_moved`；
+    源码钉 `the_rigid_motion_executor_rebuilds_rotated_bounds_and_stamps_the_target_at_t` 加一句「`republish_records` 收到 `unit.source_start_sesno`」。
+    P0 那道按根回执的闸（mem-42）不动，两道叠着用。
+- **结果**（`docs/evidence/2026-09-20-s4b-gate3-rigid-motion-parity.md`，不入库）：
+  - **ams8000 195→196 过门**：EQUI 24384/26186 平移 10 mm，1 记录，`world_transform` |Δ| 9.1e-13、`world_bounds` 差 0（≤ 8311 mm）、`mesh_id` 复用、回执@196 且目标 == regen@196。
+  - 另 9 窗 19 根同过（含修后全跑的两个嵌套窗）：ams7997 270→271（挪 ZONE 1000 mm，9 根 BRAN 237 记录含 128 隐式管身）、ams7997 87→88 / ams7999 160→161（平移 10 m）、
+    ams8000 31→32、ams7326 617→618（坐标 86100 mm）、ams1112 722→723 / 724→725（**含旋转**，D3 读网格重算盒，与 regen@T 盒逐位相同）/ 723→724（平移 100 m，坐标 103550 mm）、
+    ams7997 156→157（平移 (−42.3 m, −90.6 m)，坐标 99873 mm）。执行体 9 根 237 记录 0.05–0.08 s、1090 + 31 记录 0.19 s。
+  - **红 1（执行体 bug，已修）**：ams7997 156→157（`99982 ⊃ SUBS 100006`，3 共有记录）与 ams1112 724→725（`STRU 92413 ⊃ FRMW 98576`，31 共有）——嵌套显著根
+    名下记录互相包含（`records_of_root` 按祖先链取），规划器把锚点链上每个根都判成 transform，执行体逐根串行就把共有记录**乘了两次 Δ**
+    （CYLI 100007 差恰好一个 Δ；FLOOR 100004 差 100000 = t.z）。P0 幂等闸按根回执判，护不住跨根共有的记录，窗口重放同样漏。只执行最内层根两窗都过。
+    按记录的闸落地后两窗全跑**都过**：156→157 两根 17 记录 `world_transform` |Δ| 3.1e-33、盒差 0；724→725 两根 1090 + 31 记录（含旋转）|Δ| 9.1e-13、盒差 0，执行体 0.19 s。
+  - **发现 2**：纯平移下 Baked `mesh_id` 也漂——270→271 有 4 条 regen@T 落出新 `e3d_baked_v2_*`，两份网格顶点差 ≤ 9.1e-13 mm、法线差 ≤ 7.4e-34、索引同：
+    本地化残差（`world⁻¹` 后没归零的 1e-13 尘）进了 SHA。§5「纯平移必复用」对 Baked 不可能一直成立，探针按内容判成 drift。
+    **已改口（用户 08:4x 拍板，fable-5-1-51 落地）**：§5 门 3 `mesh_id` = Canonical 按 id 判死、Baked **一律按内容判**（不再分纯平移 / 含旋转）——id 不等时读两份网格，
+    顶点数同、顶点 / 法线 < 1e-3、索引逐位同 → `DRIFT` 观察项，否则判死；探针去掉 `judge_mesh = pure || canonical` 那道分叉。
+  - **发现 3（f32）**：这一轮 1e-3 全过，**最大 0.000977 mm（8201.7 mm 处 = 1 ulp）离线 2.3%**，只因坐标 < 16384 mm；≥ 16384 mm 段 1 ulp = 0.00195 mm 同样的差就判死。
+    差的来源是两边各自的 f32 舍入（transform 侧 S / T 各一次、regen 侧一次），绝对 ≤ 1 ulp（两端量级较大者）、分量搬到小量级时相对可到 4 ulp
+    （94.988 mm 处 3.1e-5 mm）。**已改口（同上拍板）**：§5 门 3 `world_bounds` = 逐分量 `|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`，`t_c` 按分量取该记录
+    命中锚点的平移（兜住 S 端量级比 T 端大的情形）；探针逐分量算容差，超容差的分量进 `bounds_over` 判死、≥ 1e-3 但被 ulp 臂放过的计 `ulp_arm_passes` 印成观察项。
+  - **改口后复跑**（`%TEMP%\gate3-logs\*-gate3v2.log`）7 窗 19 根全过：270→271 九根盒差最大仍 1 ulp、ulp 臂放行 0 分量、Baked drift 4 条内容同；含旋转的 1112 722→723 / 724→725
+    全跑（1090 + 31 记录）Baked 现在也判内容——`mesh_id` 不等 0 条，旋转下这两窗 CAS id 没漂；723→724 / 156→157 / 195→196 / 7326 617→618 盒差 0（617→618 第一遍撞上旁边会话
+    正在改 `vendor/e3d-io` 编不过，09:03 重跑过）。
+- **验证**：定向 `cargo test --lib -- rigid_motion e3d_model_service::tests::the_rigid_motion …` 32 过；整套 `cargo test --lib` **2274 passed / 0 failed / 123 ignored**
+  （多的 1 个 ignored 就是本探针；工作树含旁边会话未提交的 fast_model / web_service 改动）；`cargo check --lib --tests --bins` 过；`rustfmt --edition 2024 --check`
+  本轮新增行无差异（`e3d_model_service.rs` 剩 33 处旧差异按 hunk 过滤核过；`rigid_motion.rs` 干净）；`e3d_model_service.rs` LF、`rigid_motion.rs` CRLF，行尾都未翻。
+  探针 14 次真库运行见证据档，`AIOS_*` 环境变量跑完即清。
+  **fable-5-1-51 08:3x 复核**（共享 `D:\Rust\target` 已被清空，冷编译到 `D:\Rust\target-f51` 4 m 37 s）：整套 `cargo test --lib` **2274 / 0 / 123** 复现，
+  定向 `rigid_motion the_rigid_motion` 30 过 1 ignored（含新增 2 条与源码钉）；`rigid_motion.rs` 两条新单测里 3 处 rustfmt 折行差异抹平、CRLF 未翻；
+  两嵌套窗 + ams8000 195→196 探针在当前树上复跑仍过（156→157 |Δ| 3.1e-33 · 盒差 0，724→725 |Δ| 9.1e-13 · 盒差 0，执行体 0.00 / 0.22 s）；
+  证据档补「修后全跑」两行与发现 1 的修法段，ADR-066 状态行改成「一条已修两条等拍板」。
+- **未做 / 边界**：B7 `mem://` 夹具 / live #2 / 验收 3 量照旧零——B7 该加一臂
+  「嵌套根共有记录只乘一次」；acw5525（旋转 + 1.8×10⁶ mm 坐标）不在 MDB 里没跑。探针基线是 S 端整根重算灌进本地投影，不是生产库里真实落过的回执；
+  房间 / 空间收敛 / `persist_root_for_file_round` 不在探针里。文档：本条、S4b 计划 §5 门 3 两处判法改口 + §9 追一节、ADR-066 状态行一句。
 
 ### `/model/ensure` 撞上「正在后台生成」回的是 500 不是 409：领域错穿过共享航班后只挂在 `source()` 上，`ensure_error` 改沿链找
 
@@ -83,6 +320,157 @@
   db_session_fixture_selfcheck、read_through_rows_parity、model_impact、shared_read_view_invalidation、direct_index_contract：91 passed / 2 ignored）。
 
 ## 2026-09-19
+
+### ADR-066 刚体前移执行体两处「待补」补齐：含旋转读网格顶点重算盒（D3）、回执落款推进到 pin@T（D4）——开关翻开前 B8 对拍门不再被它们挡
+
+- **为什么**：`republish_roots_by_rigid_motion`（S4b B6，09-09）函数头一直挂着两条「待补（开关翻开前 B8 对拍门会挡住）」：
+  (1) 含旋转的 `Δ` 让盒闭包 `bail!("rotation bounds read not yet wired")` → 整根回退 regen，`ORI` 变化一律走不到便宜路，live #2 只测得了平移；
+  (2) 回执 `model_target` 沿用旧回执那份——transform 之后根的 `model_target.design` 仍停在 S 的 pin，下一窗 `generation_root_cache_current`
+  判它过期又整根重算，安全但把验收 3 要量的省吃掉；而且目录 / 模板 / 生成器变了它也照样前移（D4 的「目录落款不变」当时是「没核」，不是「核过没变」）。
+  用户 2026-09-19 23:5x 点名先补这两处再谈 B7。
+- **改动**（会话 fable-5-1-37）：
+  - **盒（D3）**：新增 `e3d_model_service::rigid_motion_mesh_bounds(mesh_dir, record, world')`——读回记录自己的 `<mesh_id>.mesh`
+    （`e3d_mesh_store::read_mesh_file`，新加：把老 rkyv 读取器的 panic 接成错误，与 `verify_mesh_file` 同一手法），顶点乘到新世界系再
+    `bounds_of_points` 取紧 AABB。网格到世界的矩阵 `rigid_motion_mesh_to_world` 与生成时 `persisted_world_transform` / `bake_element` 互为镜像：
+    `Baked` 网格已按 `world⁻¹` 本地化、直接乘 `world'`；`Canonical` 先乘 `local_transform`；**隐式管身不乘**——它的 `local_transform` 生成时已折进
+    存下来的世界矩阵，`ProjectedShape` 里那份再乘一次就是双重缩放。读不到 / 没顶点 → `republish_records` 整根 `Err` → 这根回退 regen，不留半套；
+    纯平移仍走 `translate_bounds`，一个文件都不开。
+  - **落款（D4）**：新增 `rigid_motion_target_at(old_receipt, current, T)`——执行体过完幂等闸、**读任何记录之前**，用与 regen / 单元级同一条路
+    现算 pin@T 的目标（`hydrate_published_dependencies(old_receipt)` 沿旧回执补目录会话 → `model_target(dbnum, T)`；目录会话表整轮共用，与单元级
+    `produce` 用窗口的 `dependency_sessions` 同形），再核三条：旧回执得带目标（没有就证不了目录没动）、设计窗之外每一格（项目 / 设计文件身份 /
+    目录依赖含会话 / 模板 / 生成器指纹 / 细分档）与旧回执相同（复用 `same_target_outside_the_design_window`）、`design.session == T`；任一不成 →
+    回退 regen，原因 `model target: …`。过了就把它落进回执，`published_via = "transform"` 不变。于是 transform 落地后这根与一次 regen 落地后
+    一模一样：凭证在 T、目标在 T。
+- **验证**：新单测 4 条——`rotating_a_record_rebuilds_its_bounds_from_the_mesh_vertices`（临时目录写一块 [0,1]×[0,2]×[0,3] 的盒网格，绕 Z 90° +
+  平移 (10, 20, 30)：Baked → [8,10]×[20,21]×[30,33]、Canonical 2× 缩放 → [6,10]×[20,22]×[30,36]、同形状的隐式管身不乘 local → 与 Baked 相同、
+  网格不在 → Err 带文件名）、`the_executor_bounds_callback_rebuilds_rotated_records_through_republish_records`（执行体那只闭包喂进
+  `republish_records`：旋转锚点盒从网格重算 + 矩阵左乘、纯平移锚点网格不存在也过）、`the_rigid_motion_receipt_takes_the_target_at_t_only_when_nothing_outside_the_window_moved`
+  （只设计窗前移 → 取 T 端目标且 ≠ 旧的；目录会话 +1 / 生成器指纹变 / 目标钉在 41 而窗到 42 / 旧回执无目标 → 四种 Err）、源码钉
+  `the_rigid_motion_executor_rebuilds_rotated_bounds_and_stamps_the_target_at_t`（函数体无 `not yet wired`、调 `rigid_motion_mesh_bounds` 与
+  `rigid_motion_target_at`、不再 `old_receipt.model_target.clone()`、目标核对排在 `records_of_root` 之前）。定向 `cargo test --lib -- rigid_motion
+  e3d_model_service::tests` 30 + 57 过；整套 `cargo test --lib` **2272 过 0 败 122 ignored**（8.7s，含旁边会话工作树里未提交的 fast_model / web_service
+  改动）；`cargo check --lib --tests --bins` 过；`rustfmt --edition 2024 --check` 本轮新增行无差异（`e3d_model_service.rs` 剩 33 处、`e3d_mesh_store.rs`
+  4 处都是旧的，按 hunk 过滤核过）；两文件本就是 LF（`ls-files --eol` i/lf w/lf），行尾未翻。
+- **未做 / 边界**：执行体仍没在真投影上跑过一次——B7 `mem://` 夹具 / B8 门 3 / live #2 照旧是零，本条只把两处会挡 B8 的「待补」拆掉，开关默认仍关。
+  旋转重算盒的精度是 f32 顶点 → f64 乘 → f32 截，与 `bake_element` 从 f64 世界网格取盒差一个 f32 舍入，S4b 计划 §5 门 3 的 `world_bounds` 1e-3 mm
+  在 1e5 mm 级坐标上（f32 ulp ≈ 0.008 mm）大概率要放宽到按 ulp 判，跑门时再定。`model_target` 现算每根多一次 `hydrate_published_dependencies`
+  （已有键不重开文件）+ 三次 `fs::metadata`，未量。文档：本条、S4b 计划 §9 追一节、ADR-066 状态行一句。
+
+### 属性变化分类对齐 core · §8 Q6 题 B 接线：`SPAMAP` 与 `CACHID` 同档进戳表 / `cache_stamp`，凭证前移比例护栏按净候选数判
+
+- **为什么**：`SPAMAP` 是 3.1 运行库 schema 里的空间索引簿记键（`INTVEC`，字典无票），Design 应用随图形 / 空间索引重建逐元素 `+1`，
+  生成器一处不读——在我方这一侧与 `CACHID` 处境完全相同（S8 语料 453 库里它单独跳 11666 次，有值元素上 406/406 与 `CACHID` 同跳），
+  差的只有实证。opus-5-7 09-16 起量、fable-5-1-32 / -36 09-19 补齐（`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md`）：
+  四库单库全量两态 **1718 根 0 红**（归 `SPAMAP` 增量的 1034 根），全语料多算根 9172 → 10744（3.5% → 4.1%）、命中库 6 → 36
+  （新增 30 库全是 `CACHID` 一根都没剔到的），T-形状 96.6% → 98.3%；四门与 `CACHID` 同向、无一格反向，单看自己不过 3% 线。
+  另暴露一种 `CACHID` 当初没有的形状：ams7997 里 5819 个只 `SPAMAP` 候选把 52→53 / 54→55 两窗候选数顶过索引键数 30% 的退化线
+  （7328 / 8535 > 5993 / 7652），整窗退化 regen 216 根，B0 剔种子一根救不回，只有护栏按净候选数再判能拉回来（红 0）。
+  用户 18:15 拍板 A：「SPAMAP 跟 CACHID 同档接进 cache_stamp，护栏净数一起接，开接线切片」。
+- **改动**（会话 fable-5-1-36 起手、fable-5-1-6 接力、fable-5-1-18 收尾入库）：
+  - **戳表**：e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES` 从 `["CACHID"]` 改成 `["CACHID", "SPAMAP"]`——名单只此一份，
+    Q5 的 `is_placement_only`（`[POS, SPAMAP]` / `[POS, CACHID, SPAMAP]` 算只动了摆放、`[CACHID, SPAMAP]` 不是）、Q6 的第三档
+    （`metadata_only_tier` 对 `[SPAMAP]` / `[CACHID, SPAMAP]` 回 `CacheStamp`，跟着 `NAME` 记老档、跟着 `DUTY` 记新档、
+    `[POS, SPAMAP]` 回 `None`）、预览 `classify_operation_impact` 的 Skip、`attribute_history` 的 `stamp` 标记全部引用常量自动跟上。
+    读取集合：`gen_read_set.py` 的 `STAMP_LITERALS` 加名，两仓产物 `attribute-read-set.json` / `generation_read_set.json` 重生成，
+    `stamp_literals` 三处逐名相等与 `stamp_literals ∩ names = ∅` 的守卫照旧钉。gen-model `DATA_ONLY_ATTR_NAMES` 也登记 `SPAMAP`
+    （报表口径与 `CACHID` 一致：效果表 DataOnly、不是老名单；放行的票仍是戳表那一张）。`model_impact` 新钉一条：戳表**恰好**
+    `["CACHID", "SPAMAP"]`——再加名字得回来重新过两票。
+  - **护栏净数**：gen-model `window_root_plan::WindowImpact` 加 `cache_stamp`（= e3d-model `IncrementReport::cache_stamp`，
+    元数据门关着时恒 0），`degraded_reason` 的比例护栏改按 `net_candidates() = candidates − cache_stamp` 判、退化原因里把毛数与戳数
+    都印出来（`too many candidates: 6328 (7328 indexed minus 1000 stamp-only) > 30% of 19975 index keys`；`cache_stamp` 为 0 时
+    字串与之前逐位相同）。其余三因（闭包不完整 / `unresolved` / 设计反查判不了）不动。Q6 探针 `probe_cachid_only_regen_cost` 的
+    B0 态跟生产同口径（`cache_stamp` 照填），B1 列从此恒等于 B0、「B1 额外」恒 0，列位留着只为报告可比；`stamp_only_with` 的旋钮
+    `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 留着（缺省口径永远 = 生产常量），单测里的「额外名字」从 `SPAMAP` 换成表外的 `ZZSTMP`。
+    `WindowImpact` 的字面构造七处补 `cache_stamp: 0`：`src/` 三处单测（cable_endpoint / reverse_reference / structural_connection）与 `tests/`
+    四份集成测试（equi / hvac_bran / ctray / pipe26229_increment）——后四份 `cargo test --lib` 不编，fable-5-1-18 20:3x 用 `cargo check --tests`
+    才抓到 E0063（fable-5-1-6 那轮只过了 `--lib`）。
+  - 文档：ADR-066 状态行 + 规则 2 / 规则 4 末注；计划 §8 Q6 ★0919 题 B 段；`options.rs` 门开关文档；e3d-model `element_diff.rs`
+    常量文档；核账文档头部一条「已拍板接线」指针。
+  - **S8 探针加一节**（`probe_cachid_consistency`，只在 `#[cfg(test)]`；fable-5-1-16，用户 21:0x 点头）：「只动了摆放的候选：戳跟着跳的形状 ×
+    我方判定」——`placement_stamp_shape` 按 `PLACEMENT_STAMP_ATTRIBUTES` 现算标签（「摆放」/「摆放 + CACHID」/「摆放 + SPAMAP」/
+    「摆放 + CACHID + SPAMAP」，名单不另写字面量），每形状给 transform / regen / skip，再按 noun、合格锚点按 noun、按库、regen 原因拆
+    （`anonymize_refnos` 把 `2013287545/4294` 与 `21909_17035` 两种写法的 refno 抹成 `#`，同一条规则才并得成一行）；缺省报告多这一节，
+    旋钮语义不变。单测 `the_placement_stamp_shape_names_the_stamps_that_rode_along`。
+- **验证**：e3d-model `cargo test --lib -- element_diff:: increment:: attribute_reads::` **20 过**、`cargo test --test attribute_reads_guard`
+  **2 过**；gen-model 受影响模块（`model_impact:: window_root_plan:: manual_update::… rigid_motion:: structural_connection:: cable_endpoint::
+  reverse_reference:: attribute_history::`）**146 过 0 败 18 ignored**，整套 `cargo test --lib` **2267 过 0 败 122 ignored**（11.6s；
+  含旁边会话工作树里未提交的 fast_model / web_service 改动）。新单测 `the_candidate_ratio_guard_nets_out_stamp_only_candidates`
+  用 ams7997 52→53 的数（7328 / 2167 / 19975）：毛数退化、净数 5161 不退化、净数仍超线时原因带毛数与戳数、「超过」不是「达到」、
+  戳数 > 候选数只饱和不 panic。`rustfmt --edition 2024 --check` 本轮新增行无差异（`window_root_plan.rs` 剩的四处 1529 / 2096 / 2108 / 2326
+  与 `manual_update.rs` 四处不是本轮的）；CRLF 未翻（`window_root_plan.rs` 9460 / 裸 LF 0）。
+  fable-5-1-18 20:3x 复验一轮，数字相同（定向 **150 过**——多出的 4 条是 `manual_update::metadata_gate` 那组整组进筛；整套 2267 / 0 / 122，8.7s），
+  另加：`cargo check --lib --tests --bins` 过；四份集成测试 `cargo test --test {equi,hvac_bran,ctray,pipe26229}_increment` **33 过**（9 / 9 / 8 / 7）；
+  e3d-model 整套 `cargo test --lib` **338 过 0 败**（隔离 target 目录）；`git ls-files --eol` 两仓全部改动文件 index / worktree 同款、行尾未翻。
+  读取集合条数的钉子 138 → **139**：多出的是 `LBOR`——e3d-model 09-18 `226154c` 风管那条带进的读点，那边产物早已 134、
+  这边副本一直没重生成，本轮重生成才对上；两个戳一个都不在 `names` 里。
+  **ams7997 两窗生产路径复跑**（用户 19:0x 点名；`probe_transform_classification_for_window` = `WindowRootSources::collect` → `impact`
+  → `plan_window_roots` 生产同款，`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1` 只为让它打印分桶行、不改选根）：**52→53** `candidates=7328
+  (+5159 ~2168 -1) no_model=2257 (cache_stamp=2167)`，净 5161 ≤ 5993，**`degraded=None`、regen 255 → 155、advance 100**；
+  **54→55** `candidates=8535 (+5533 ~3002 -0) no_model=3098 (cache_stamp=3001)`，净 5534 ≤ 7652，**`degraded=None`、regen 309 → 193、
+  advance 116**。与 09-19 15:54 探针报告 T3 那两行（退化 A 是 / regen_A 255 · 309 / B1 额外 100 · 116）逐个数对上；`cache_stamp`
+  与探针独立数出的只戳候选 2167 / 3001 逐位相同。两窗各 10–13s。
+  **`SPAMAP` 新命中 30 库单库全量实测补齐**（fable-5-1-16，20:31–20:41；同一个 exe `F194E82F89ACDA0D`（源码 `198985300b1b` 干净树）+ 旋钮
+  `AIOS_Q6_PROBE_EXTRA_STAMP_NAMES=SPAMAP`、`SAMPLES_PER_NOUN_DB=0` 全量、预算 1200s，与 09-19 四库那几跑同口径；每库一份
+  `docs/evidence/2026-09-19-q6-spamap-<库>-spamap.md`，汇总 `2026-09-19-q6-spamap-new30-summary.md`）：除已量的 aps7329（09-16）/ ams7999（12:04）外
+  其余 **28 库** 128 窗全跑完，每库的窗数 / `regen_A` / 多算根与 17:43 语料报告 T6 那行**逐位相同**；只 `SPAMAP` 候选 830、多算根 **754**
+  （全部去向 advance、整窗前移窗 29）、量到 754 / **绿 305 / 零单元 449 / 红 0**、新根 0、生成失败 0、单元记录 Σ 2032、两端秒 Σ 20.1s，
+  T8 三条契约 + 对账 + 归因自检 28 库全过。有判别力的绿集中在 aps7327（`HANG` 106 根 / 656 单元）、aps7356（`FRMW` / `STRU` 72）、acp7321（`BRAN` 40）、
+  zdj7596（34 根 / 634 单元）、aps7324（18）、aps7332（16）；ams251001 那 222 根（`HRSOF` / `HRSO`）与 `ams2510xx` 一串的 `HPANEL` / `HPLATE` /
+  `HSTIFF` / `HBRCKT` / `CSTIFF` **全是零单元**（T 端没有生成物，既不绿也不红）。至此 30 库 1510 根多算根**全部实测**：绿 519 / 零单元 991 / 红 0；
+  `SPAMAP` 的安全样本从 1034 根抬到 **1788 根**（绿 639 / 零单元 1149 / 红 0），单库全量合计 2472 根（绿 1323 / 零单元 1149 / 红 0）。
+  跑到第 18 库时 D: 被旁边会话 20:33–20:37 的 cargo 增量产物顶满（`os error 112`），11 份报告没写出来，20:40 空间回来后同口径重跑写齐。
+  **`[POS, SPAMAP]` 形状的锚点数**（S8 探针新那一节，21:26–21:32 全语料 453 库 / 3157 窗 / 36822 个真变了的候选，345s，当前树现编）：
+  只动了摆放的候选 **1696** = 摆放 723（合格锚点 63）/ + `CACHID` 88（合格 84，`EQUI` 83）/ + `SPAMAP` **881（合格 35）** /
+  + `CACHID` + `SPAMAP` 4（`FLOOR`，全合格）。`SPAMAP` 新放进这一档的 885 个候选里只有 **39 个**成了合格锚点（`NOZZ` 17 / `BOX` 6 /
+  `FLOOR` 2 + 4 / `HNUT` `HPIN` `PCLA` `RCPL` 各 2 / `CTOR` `CYLI` 各 1），其余 **846 个全部被「路由容器 `BRAN` 之内」一条排除**
+  （`FTUB` 172 / `GASK` 139 / `FLAN` 123 / `ELBO` 114 / `TEE` 57 / `ATTA` 49 / `VALV` 37 …；acw5525 454 / ams8000 221 / ams7999 90 /
+  ams7997 82）——之前是「还动了别的属性」的 regen、现在是「被排除」的 regen，结果一根没变。两个戳跟着摆放跳的形状不同：`CACHID` 那 88 个
+  是整台 `EQUI` 挪位（合格率 95%），`SPAMAP` 那 881 个是分支里的管件挪位（合格率 4%）。规模表「位姿候选被锚点排除而落 regen」1510 =
+  四形状 regen 之和，交叉表「含 DCHC=3 × transform」186 = 四形状合格锚点之和。报告 `docs/evidence/2026-09-19-s8-placement-stamp-shapes-corpus.md`。
+  单测 3 过（`the_placement_stamp_shape_…` / `stamp_only_takes_…` / `the_extra_stamp_knob_…`）；rustfmt 本轮新增行无差异（剩 1529 / 2096 / 2108 / 2326
+  四处旧的）；CRLF 9627 / 裸 LF 0。
+  **S4 对拍门复跑**（用户 21:3x 点名；`probe_rigid_exclusion_windows` 全语料、缺省旋钮、当前树现编，21:41–21:59 共 1093s，报告
+  `docs/evidence/2026-09-19-rigid-exclusion-parity-spamap.md`）：3157 窗、只动了摆放的候选 **1696**（与 S8 那一节逐位相同）= rigid **186** /
+  P23 4 / 规则 M 62 / 负体 52 / 路由容器 1392；合格锚点对拍 **152 根：两态相等 135 / 无判别力 10 / 窗内另改 7 / 不等·锚点 0**——门照旧过，
+  `SPAMAP` 新放进来的 39 个都在里面。与 09-16 那跑（2961 窗 / 794 候选 / rigid 163 / 139 根 108 等 22 无判别力 9 另改 0 不等）逐行对：
+  只在今天出现的 rigid 样本 31 行——ams7326 `HNUT` / `HPIN` / `PCLA` / `RCPL` 8 行全等（各 1 件由 Δ 前移、根 1–11 件，有判别力）、ams1112 `FLOOR`
+  5 行（4 等 / 1 窗内另改）、acw5525 `NOZZ` / `BOX` / `CYLI` 12 行（9 等 / 3 窗内另改）、ams7997 270→273 `ZONE` 6 行全等（新窗，与 `SPAMAP` 无关）；
+  acw5525 108→109 / 117→118 / 126→127 三根 09-16 是「不等·窗内另改」、今天**变成相等**——那「另改」的正是 `[POS, SPAMAP]` 的 BOX / DISH / CYLI，
+  现在自己成了锚点跟着 Δ 走。rigid 163 → 186 = −16 + 39：少的 16 个是 ams7997 HVAC 分支的 `BEND` / `ATTA` / `DAMP`——e3d-model 09-18 `f93fd66`
+  「风管 BRAN 也派生隐式直段」之后 `derives_implied_tubes` 对 HVAC BRAN 为真，它们改判「路由容器之内」（09-16 时是无判别力的合格锚点），
+  与 `SPAMAP` 无关。路由容器那一类不等·锚点 3（ams7997 `VALV` / `UNIO`，属主链 TUBI 变）= 排除有内容，同 09-16。`CTOR` 那 1 个候选没在明细里露名字，是**同根归组**：
+  acw5525 108→109 根 `EQUI` 21909/16805 下 8 个合格锚点（`BOX` 16809 / `CYLI` 16810 / `DISH` 16811 · 16812 / **`CTOR` 16818** / `CYLI` 16819 · 16820 · 16821），
+  明细行只印前 4 个名字，那一行两态相等（15 件，8 件由 Δ 前移）——用 `probe_transform_classification_for_window` 单开那一窗核的。
+  cargo / 探针进程 0，`AIOS_*` 已清。
+- **未做 / 边界**：ams7997 两窗只复跑了选根（凭证前移的那 100 / 116 根没再做两端整根生成对拍——那 216 根 09-19 15:54 探针已量过
+  绿 58 / 零单元 158 / 红 0）；30 库里 991 根零单元的多算根（ams251001 222 根、`ams2510xx` 船体结构 noun 一串）**无判别力**，0 红只在 519 根
+  有生成物的根上成立；目录侧那一列仍全 `未查`（新量的 754 根也全是）；厂商口径那一票**半缺**（fable-5-1-37 23:4x 翻装机目录与公开文档）：`SPAMAP` 在 2.10 `Aveva.Core.Database.xml`（`DbAttributeInstance.SPAMAP`）有一行「Pointer to map」，与 `TMAP`「Pointer to map for TUBE」/ `TMAPV`「Map values for tube」/ `MAPV`「Map values」同族，3.1 `attlib.dat` / `ui-attlist` 里紧挨 `OBST` / `TMAP` / `MAPV`——厂商自己把它归空间图（spatial map）簿记，与我方读法同向，但只此一行、没说它随图形重建 `+1`；docs.aveva.com「Spatial Map」页只讲图与 delta cache 随会话 / 目录变动重建、不点名任何属性；`CACHID` 在 2.10 API xml、3.1 attlib 与公开文档里**一处都没有**，那一半照旧缺；S4 对拍门 21:59 已复跑（0 不等·锚点），
+  但刚体开关 `model_transform_cheap_path` **默认仍关**——开不开是 ADR-066 验收的另一票，本轮没动。S8 探针那一节、单测与本段文档已入库 **`e96351e81`**（`test(model-gate)`）。e3d-model 侧已入库 **`cf6d8b6`**（只带 `element_diff.rs` / `attribute_reads.rs` / `data/attribute-read-set.json`
+  三个文件；gen-model 的钉子已依赖两个名字的常量，两仓紧挨着入库）；`docs/evidence/` 按政策不入库。
+
+### 节点版本表 `GET node/versions?scope=self|subtree`——ADR 0066 的第三条：容器节点「所有子节点」下的时间线
+
+- 用户 09-19 10:2x「开写后端 node/versions?scope=subtree，让容器节点也能列出子树时间线，替掉手填会话号」。前一版面板在容器
+  （SITE / ZONE）上列不出子树时间线（容器没有单元表可查，`element/versions` 只有它自己那一列），只能让人手填 A / B 会话号。
+- `GET /api/v1/node/versions?dbnum&refno[&scope=subtree|self][&since_sesno&limit]`：任意节点都受理。`self` 每行 = 它自身记录变过的
+  会话；`subtree` 每行 = 节点自身或其下整棵子树里任何记录变过的会话，`impact` 取子树里最重的一档（节点自身 inserted / deleted →
+  `delivery` / `tombstone` 压过一切；成员新增 / 删除按重生成记，与单元表同一把尺子 `fold_window_impact`），并给
+  `self_impact`（节点自身那一格，`null` = 只有子树变了）、`units_changed`（折叠影响不是 noop 的最小交付单元数）、
+  `units_touched`（记录被动过的单元数）。回执另带 `unit_root` / `unit_noun`（节点自己所属的单元，容器为 `null`）、
+  `truncated` / `since_sesno` 分页与 `model/versions` 同口径。
+- 归属判断不像单元表那样按会话建子树集（容器子树几万个元素 × 几百个窗口建不起），而是每个候选沿 owner 链**上溯一趟**，
+  同时回答「在不在节点子树里」与「所属单元根是谁」（`ascend`）；`self` 下一窗候选里没有它就不建会话集。链头节点已在时
+  枚举一次子树数「带着几个单元出现」（复用 `node_diff_summary::count_units_in_subtree`）。缓存键 `(dbnum, refno, scope, 文件指纹)`。
+- 实现：`fast_model/node_versions.rs`（单测 6 条：折叠 / 两格单元数 / 自身列 / 切片 / 序列化）、`handlers::node_versions` + 路由；
+  `DiffScope` 补 `Hash`。
+- 真机（release `a382b2cf3` 换到共享 `:8022`，内存库，ams8000 639 会话，10:5x）：SITE `24384/22399` subtree 冷算 **3.45 s**（639 会话 /
+  47,522 候选 / 3,786 在范围 / 640 个会话集，索引差分 1.5 s + 建集 1.0 s），全表 298 行，`since_sesno=618` 命中缓存 20 ms → 626 / 628 /
+  630 / 632 各 `units_changed 1`（FTUB 抬管 / EQUI 加 BOX / 回 U2900 / 删 BOX）；BRAN `24384/23257` subtree **57 行与 `model/versions`
+  逐行同序同档**（2.4 s vs 6.6 s——上溯归属比按窗建子树集便宜）；FTUB `24384/23262` self **53 行与 `element/versions` 左列一致**；
+  ZONE `24384/22400` subtree 198 行 / self 5 行；`scope=bogus` 400、不存在 refno 404、dbnum 不符 400、`since_sesno` 不在链上 404。
+  页面级（plant3d-web dev `:3111`，`e2e/node-version-view-gen-model-v1.spec.ts` 2 passed）见 plant3d-web
+  `docs/verification/model-version-compare-gen-model-v1-2026-09-18/README.md` §7。顺手看到：只设 UDA 的会话（SITE sesno 10：
+  `UDA:2902d6e2 / 2902d6e3`）按模型口径不成一行，`attribute-history` 却列它——两条路由口径刻意不同，前端按并集列。
 
 ### 任务收尾那一笔包进冲突重试：与刷盘 stray epilogue 同写水位行时谁后提交谁输，输了重发而不是让任务落 `Partial`（ADR-073 D13 收口总表第 10 行、钉 36）
 
@@ -371,8 +759,7 @@
   ——此前只钉了页面读哪几格、没钉服务端发哪几格，改个名两条都不红而页面拿到 `undefined`（**已按负例验过**：
   把 `store_mode_source` 改名即红）。`New-LocalRelease.ps1`、内嵌的 `Start-AMS.ps1`（96 行）、`Start-Surreal8009.ps1` 通过
   PowerShell 语法解析，`strt_plant_ui_runtime.py` 通过 `py_compile`，`deploy/linux/install_backend.sh` 通过 `bash -n`、
-  渲染出的 TOML 解析通过且不含 `store_mode`。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了；
-  发布包冒烟三腿在下面第三条里真跑过了。）
+  渲染出的 TOML 解析通过且不含 `store_mode`。**未验**：发布包冒烟三腿。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了。）
 
 ### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-083 D6）
 
@@ -396,8 +783,103 @@
   启动前设 `AIOS_STORE_MODE=mem`」；③`project_path` 有效 + 地址上没库 → `SurrealDB 连接失败（ws://…）` exit 1（这就是新默认
   要的那种当场报错）。`Start-AMS.ps1` 的回填三个分支逐个实跑：不给且环境空 → `mem`；不给但环境已有 `rocksdb` → 沿用；
   给 `-StoreMode rocksdb` → `rocksdb`。向导第②步用 playwright 走真人路径截了图：介质栏显示「由 默认 rocksdb（…）决定」、
-  地址两格与「测试连接」可用、橙色提醒点名文件里那句 `store_mode = "mem"` 已不生效。发布包冒烟三腿见下一条。
+  地址两格与「测试连接」可用、橙色提醒点名文件里那句 `store_mode = "mem"` 已不生效。**未验**：发布包冒烟三腿。
+- **合入主线（2026-09-21）**：上面两节与 D2 那笔（`fix(startup)` 启动臂逐条点名）原落在 `codex/model-projection-cache`
+  （`8c89728c3` / `b90f9e38d` / `e376ad2bb`），按用户「只合这几笔」cherry-pick 进 `gen-model-refactor`（`options.rs` / `lib.rs` /
+  `setup.rs` 自动合并，只有 changelog 撞了一处标题）。ADR 在主线**改号 080 → 083**——主线 ADR-080 已是单元级发布、081 / 082 也已占用；
+  代码注释、向导、脚本、16 份 `DbOption*.toml` 与 ADR-069 / 074 / 075 的修订注记里的引用一并改，主线原有的 ADR-080（单元级发布）引用一处未动。
+  顺手把 16 份夹具退役注释里落后于 D6 的「不设 = mem」改成「不设 = rocksdb」，ADR-083 D3 同一句改口。
+  验证（2026-09-21，同一工作树里另一会话有在途改动）：`cargo check --lib --tests` 0 error；`cargo test --lib -- options:: web_service::setup::
+  web_service::review::db:: store_mode` **99 passed / 1 failed**——唯一那条红是护栏 `no_db_option_fixture_still_carries_a_store_mode_key`
+  点名了**未入库**的本机文件 `DbOption-slyk.toml: store_mode = "mem"`（另一会话的探针配置，不在任何提交里），正是这条护栏该抓的东西；
+  入库的 16 份夹具无一命中。**未验**：真机起服务看启动横幅与向导第②步。
 
+### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
+
+- 用户 21:4x：「一个节点的版本管理，要能够查看它属性的版本历史，以及模型的版本历史……」，grill 两轮拍板（共享决策 d-203）：
+  任意节点一个面板，「对比范围」开关 `仅自身 / 所有子节点`，容器几何历史按最小交付单元折叠、**先摘要后生成**。
+- `GET /api/v1/element/attribute-history?dbnum&refno[&since_sesno&limit]`：**谁在哪一版改了什么**。每行一个它自身记录被改过的会话，
+  带会话页 `user` / `comment`（e3d-io `SessionPage`），`kind` created / modified / deleted，`impact` 与版本表同一词表（走同一个
+  `classify_operation_impact`），`changes[{name, value_type, before, after, stamp}]` 由属性面板**同一个渲染器**两端各出一次
+  （`ElementAttributeService::read_pinned`，字不同就是变了；`CACHID` 标 `stamp`），另列 `members{added, removed, reordered}` 与
+  `owner[before, after]`（成员序在 E3D 里就是管路走向）。索引说重写了但两端一字没差 = 原样换页，不成一行。
+- `GET /api/v1/node/diff-summary?dbnum&refno&a&b[&scope=subtree|self]`：A→B **不生成几何**的一张账。一次 `collect_window` 差分，
+  候选按范围过滤（`self` = `refno == 节点`；`subtree` = 变化那一侧 owner 链上溯到节点），逐个判 added / deleted / modified
+  （mesh · placement）/ noop，按所属单元分组（`groups[{unit_root, unit_noun, unit_name, counts, geometry_changed, rows}]`），
+  `units{changed, unchanged, total, complete}`（子树在 B 侧枚举、单元根以下不再下钻、上限 20 万元素），`needs_confirm` /
+  `estimated_projections = 变了的单元 × 2`，阈值 `MODEL_HISTORY_CONFIRM_UNITS`（缺省 20，0 = 从不确认）。`A` 不早于 `B` → 400
+  `INVALID_VERSION_PAIR`。
+- 两条都按需算、只活在进程内（ADR-081 / d-179）；`element_versions::SessionSets / modified_impact / resolve_unit_root` 放开为
+  `pub(crate)` 供三个模块共用。
+- 真机（debug 构建起在 :8033、内存库、ams8000 636 会话）：FTUB `24384/23262` 时间线 53 行（1 created + 52 modified），冷算 5.3 s
+  （索引差分 3.2 s + 两端渲染 1.3 s），每行 `POS` / `SPAMAP` 的 before/after 与 SAVEWORK 备注（`CODEX db8000 FTUBE 4 … up 500mm`）
+  逐字对得上；差异摘要 BRAN 子树 573→626 = 修改 1（FTUB）+ noop 1（BRAN 自身）50 ms；SITE `24384/22399` 子树 618→628 =
+  526 单元 / 变 2（BRAN 修改 1、EQUI 新增 BOX 1）71 ms；ZONE 子树 444→636 枚举 467 元素 / 449 单元 16 ms。单测 9 条。
+- 实现：`fast_model/attribute_history.rs`、`fast_model/node_diff_summary.rs`、`web_service/handlers.rs` 两个 handler + 路由。
+
+### 构件级版本表（`GET /api/v1/element/versions`）——「查看某个构件的所有历史版本」，并排给所属单元那一列
+
+- 与 `model/versions` 并列、不覆盖：那条折整棵单元子树、非单元根 422；这条只认 `refno == 目标` 那一条变化，**任意 refno 都受理**。
+  同一条会话链、同一份 `collect_window` 差分、同一个 `classify_operation_impact`，只是去掉逐窗建子树那一层。
+- 每一行两列：`element_impact`（它自己变没变，`null` = 没变）+ `unit_impact`（所属单元在同一会话的折叠影响）。只给左列会漏——
+  抬一根管子会让邻居的派生管身跟着变、换 SPRE 能在不碰构件记录的前提下换掉它的形状（用户 Q1 拍板）。
+- 单元根由 owner 链上溯解出（`delivery_unit_types`）并随回执给 `unit_root`：前端拿它去 `model/versions` + `history/generate`
+  取 A/B 几何（快照仍是单元级），对比结果再收窄到这个构件。解不到单元的构件（如 SITE / ZONE 自己）只给左列 + 一条 warning。
+- 错误码复用单元表那套（`INVALID_REFNO` / `REFNO_NOT_FOUND` / `SESSION_NOT_FOUND` / `COMPUTATION_TIMEOUT`），没有
+  `NOT_A_DELIVERY_UNIT_ROOT`。缓存键 `(dbnum, refno, 文件指纹)`，重启即丢。
+- 真机（debug 构建、ams8000 633 会话）：FTUB `24384/23262` → 57 行、其中 53 行它自己变过（含本轮增量的 626），冷算 10.1 s
+  （并排的单元表 5.9 s）；同一条支管的邻居 `24384/23264` → 57 行里只有 1 行是它自己变的，其余 56 行正是「单元变了它没变」。
+- 实现：`fast_model/element_versions.rs`（4 条单测）+ `web_service/handlers.rs::element_versions` + 路由。
+
+### 属性历史对比落地（`POST model/history/query tool=attributes`）——某构件在快照那个会话下的属性，与 `element/attributes` 同一个渲染器，不落库
+
+- 契约见 ADR-081 候选条（18:0x 定、一字未改）：`{ snapshot_key, tool: "attributes", arguments: { refno: "a/b" } }` →
+  `{ snapshot_key, dbnum, sesno, refno, exists, noun, attributes: ElementAttribute[] }`（另多给 `complete` / `diagnostics` / `elapsed_ms`）；
+  该 refno 在那个会话不存在 → `exists: false, noun: null, attributes: []` **不是 404**；`INVALID_REFNO` 400（含 refno 不属于快照所在库、缺 `arguments.refno`）/
+  `SNAPSHOT_NOT_FOUND` 404（含已 DELETE、键格式不对）/ `REFNO_OUTSIDE_SNAPSHOT` 422（存在但 owner 链上溯到不了单元根）。
+- 取数：回执里的 `(source_file, resolved_session.sesno)` → `DbFileHeader::read` 反出 `db_type` → `ElementAttributeService::open_pinned`（会话钉死的单库
+  `DbSet`，`open_pinned_set`）→ `exists` / `is_descendant_of` → `read_pinned`：`extraction()` / `parsed()` 交给与属性面板**同一个** `render`
+  （identity 三行 + `render_attribute` + 类型默认值 / UDA materialize），只是不 `offer_backup`（回执 `backup.status = "skipped-pinned"`）。
+  不进库、不进生产投影、不建缓存表（d-179）。
+- 前置：`element_attributes.rs` 的 E3D 对齐渲染器那一笔（另一会话在途，+678 行）由 fable-5-1-6 按用户拍板代提（`6a76eefb4`），门
+  `cargo test --lib` 2239 过 / 1 败——那 1 败是 `model_impact` 的读取集合镜像测试，比的是本仓 `generation_read_set.json` 与
+  `vendor/e3d-model/data/attribute-read-set.json`，后者今天 18:09 被 e3d-model 那边改了，与两笔都无关。
+- 验证：`historical_model::tests` +3（`attributes_target` 三档错误码 / DELETE 后 `SNAPSHOT_NOT_FOUND` / 守卫「不存在是正常回执、不碰持久层」）、
+  `element_attributes::tests` +1（`read` / `read_pinned` 共用 `render`、`offer_backup` 只在 `render` 里出现一次且只有 `read` 传 true）；
+  `cargo test --lib` 2247 过 / 1 败（同上那条）；`rustfmt --check` 新增段干净。真机 HTTP / plant3d-web 端到端见下一条追记。
+
+### 候选需求登记（docs）：属性历史对比——plant3d-web 删掉 legacy `/api/model-history/*` 消费者后，本仓尚无对应只读接口
+
+- plant3d-web 同日退役了版本对比的 legacy 链（ADR 0065 追记），连带删掉钉在 legacy `/api/model-history/*`（anchors / resolve-anchor / snapshot）上的
+  `ModelTreeAttrDiffPanel`；「同一构件在 A / B 两个 sesno 下属性逐项对比」此后没有取数。ADR-081 实施记录追记一条候选需求：积木（`session_chain`、
+  `ReadOnlyEngine::open_at` + `element_attributes`）都在，缺一条只读接口，按需算、不落库；何时立等前端再要。代码零改动。
+- **18:0x 追记：用户拍板要做，契约先定**——`POST /api/v1/model/history/query { snapshot_key, tool: "attributes", arguments: { refno } }` →
+  `{ snapshot_key, dbnum, sesno, refno, exists, noun, attributes: ElementAttribute[] }`，行与 `element/attributes` 同型、同一个渲染器；不存在的 refno
+  `exists: false` 不 404；`INVALID_REFNO` 400 / `SNAPSHOT_NOT_FOUND` 404 / `REFNO_OUTSIDE_SNAPSHOT` 422。后端实施等 `element_attributes.rs`
+  正在进行的那一笔（E3D 对齐渲染器 + `open_pinned_set`）落地后再做，避免两条会话改同一个文件；plant3d-web 前端半边先按契约接线。仍是代码零改动。
+
+### ADR-081 立并实施：最小交付单元的模型版本表从会话链按需算、不落库——`GET /api/v1/model/versions`
+
+- **为什么**：plant3d-web 的版本对比（最小交付单元 A/B）整条取数链钉在 legacy `:3100` 上，而 legacy 开关只保留一个发布周期；
+  它要问的三件事里本仓只答得出「某版本长什么样」（`model/history/*`），「这个单元有哪些版本」没有任何接口，
+  而按 ADR-079 库里也没有逐根 / 逐版本制品可查。用户 0918 三轮拍板（plant3d-web ADR 0065 / 本仓 ADR-081）：
+  版本表从 dabacon 会话链算，五态 `impact_kind` 沿用 legacy 词表，不建表、不做 diff 接口、不给 `tree/*` 加 `sesno`。
+- **做法**（`fast_model::unit_versions`）：`session_chain` 旧→新逐窗 e3d-model `collect_window` 索引差分 → 候选查「单元子树 refno 集」
+  （T 端集判 Inserted / Modified、S 端集判 Deleted，Modified 两端任一在都算）→ 根自身 Inserted = `delivery`、Deleted = `tombstone`，
+  否则成员按 `classify_operation_impact`（与生成路同一把尺子）取最重：`Regen` → `mesh`、`TransformOnly` → `placement`、全 `Skip` → `noop`；
+  没碰到就不是一版。全表进进程内缓存（键 `(dbnum, refno, 文件指纹)`，64 张满则清），重启即丢。请求 = `ProjectReq` + `dbnum` + `refno`
+  + 可选 `since_sesno`（按链序切、不在链上 404）+ `limit`（缺省 500 / 上限 5000，尾部截断回 `truncated`）。错误码：`INVALID_REFNO` 400、
+  `REFNO_NOT_FOUND` / `SESSION_NOT_FOUND` 404、`NOT_A_DELIVERY_UNIT_ROOT` 422（detail 带 noun 与项目 `delivery_unit_types`）、
+  `COMPUTATION_TIMEOUT` 504（300 s 预算）、`SOURCE_NOT_FOUND` 503。回执带 `stats`（会话数 / 有变化窗数 / 候选数 / 归属命中 / 建池数 / 三段耗时）。
+- **两处性能取舍**：归属不按候选 owner 上溯而查子树集（候选数跟整库改动走，子树跟单元大小走）；会话钉死的 `DbSet` 共享一份 attlib、
+  单库 `DbSet::new` + `add_db(sesno)`，不走 `build_set`（43 ms / 池）。ams7997 332 会话：27.9 s → 9.4 s → **1.9 s**（debug）。
+- **验证**：`cargo test --lib -- unit_versions:: web_service::tests::model_versions_route_is_a_single_read_only_get` 7 过 0 败
+  （折叠规则 / 链序切片 / 五态序列化 / 非 MDU 拒收 / 路由只此一条 GET）；真库探针（`--ignored live_probe_unit_versions_on_a_real_database`）：
+  ams7997 BRAN 24381/145018 → `66 delivery`；ams8000 EQUI 24384/26480 → `587 delivery`、9 × `placement`、`604 tombstone`，与 ADR-076 S5 现场一致，
+  会话页索引交叉核对通过。`rustfmt --check` 新增段干净（`handlers.rs` / `mod.rs` 既有 14 / 81 处 drift 未动）。CONTEXT 补「单元版本表」。
+  **未与 legacy `/api/model/units/{refno}/versions` 逐条对拍**（`:3100` 未起）。
+- **真机（15:32 追记）**：`:8022` 换成 `d47d747fd`（`codex/model-projection-cache@7bcdd60df` + cherry-pick 本条，release）后同一请求冷 2.20 s（623 会话）、缓存 17 ms，
+  错误码与截断各一条对上；plant3d-web 浏览器端到端两条场景全过（证据在 plant3d-web `docs/verification/model-version-compare-gen-model-v1-2026-09-18/`）。
 ### 同日收尾：发布包冒烟三腿真跑了一遍——顺手发现 C 腿自 2026-09-15 起一次都没执行过
 
 - **为什么**：ADR-083 那两条改的正是发布包这条路（`Start-AMS.ps1` 回填 `mem`、冒烟各腿只递环境变量），
@@ -570,6 +1052,181 @@
 
 ## 2026-09-17
 
+### ADR-080 实施约束 9 补守卫：`model_unit_level_publish` 关着时 `unit_publish` 提示恒 `None`、单元级执行体一次不被叫到
+
+- **为什么**：约束 9「关着时逐位等于今天」此前只有机制没有守卫——开关只在规划器一处被读，往下全靠「基线 `None` ⇒ 提示 `None` ⇒
+  分桶为空 ⇒ 执行体不叫」传下去，链上任何一环被人顺手改掉（比如提示不看基线、或多开一个执行体入口），默认配置下的行为就变了而没人报错。
+  用户 0917 拍：补一条守卫。
+- **守卫**（`window_root_plan::tests::switching_unit_level_publish_off_leaves_no_hint_and_never_reaches_the_executor`，`include_str!` 钉三个文件的生产半边 + 一段行为）：
+  ① 规划器 `build_model_update_plan_from_window`：`unit_publish_base_sesno` 只从 `model_unit_level_publish() ∧ plan.degraded.is_none()` 得出，
+  `unit_publish_no_model_only_roots` 只在基线在时算，两格原样搬进 `ModelUpdatePlan`、文件里再无第二处赋值；`WindowRootSources::collect`
+  为单元级收候选表也要开关开。② `manual_update.rs` 生产代码里 `UnitPublishHint` 只在 `collect_unit_tasks` 的 `unit_publish_base_sesno.map(…)` 之下构造，
+  `merge_unit_worklist` 只搬已有提示；行为核：基线 `None` 时 D10 名单上的根也不带提示，基线 `Some(41)` 才带（守卫不空转）。
+  ③ `batch_worker::run_unit_worklist` 先 `.partition(|task| task.unit_publish.is_some())`、再 `if !unit_tasks.is_empty()`、才 `run_unit_publish_units(`，
+  顺序钉死；`run_unit_publish_units(` 全文只有定义 + 那一次调用，`republish_roots_by_unit_delta_from_window(` 的生产调用点只有它里面那一处。
+- **mutation**：把 `collect_unit_tasks` 的提示改成 `Some(UnitPublishHint { source_start_sesno: base.unwrap_or(0), … })`（不看基线），守卫红在
+  「那一处必须挂在基线的 map 之下」；改回后绿。
+- **验证**：`cargo test --lib -- window_root_plan::` **34 过 0 败 11 ignored**；整套 `cargo test --lib` **2224 过 0 败 118 ignored**（+1）；
+  `rustfmt --check` 新增段按它改到干净（文件里剩 1504 / 2026 / 2038 / 2256 四处在新增段之前、HEAD 上就有）；`window_root_plan.rs` CRLF 未变。
+  生产代码零改动（mutation 改过的 `manual_update.rs` 已逐字改回，`git diff` 为空）。
+
+### ADR-080 A5 补测试：`Partial` 之后 `persist_root` 过 D3 对账，七张表回读与 regen 路逐字相同、只有 `model_sesno` 落后
+
+- **为什么**：A5 是 D9 开门前唯一一条**没有任何测试也没有证据**的验收——`batch_worker.rs` 一句注释说「D3 把对账放宽成 `<=` 接的就是这个形状」，
+  但没人真让一笔 `Partial` 走过 `persist_root_impl`。`a_record_may_lag_its_root_receipt_but_never_lead_it` 钉的是对账两端（手填一条 41 的记录），
+  不是「单元路投出来的投影落库后与 regen 路落的是同一批行」。用户 0917 拍：补一条。
+- **测试**（`model_db_adapter::tests::a_partial_commit_persists_the_same_rows_as_a_regen_commit_and_only_model_sesno_lags`）：两条路各一个 `mem://`
+  库，同一份 S=42 基线（烘焙件 `24383_73948` + 共享图元件 `24383_500` + 一段管身）先落一次；T=43 只有烘焙件换了网格——regen 路整根重投三件全盖 43
+  （带 `tube_branch_resets`），unit 路只以 `CommitScope::Partial` 投那一件、回执两格占位（存储在写锁里盖成 `geometry_count 3` / `source_sesno 43` /
+  `published_via "unit"`，D5 顺手核）。两边再 `persist_root_on` 一次：unit 路**放行**（D3 放宽之前必撞「outside its receipt scope」）；
+  `upserted == 3`（D7：`Partial` 之后落盘仍按整根刷）、`removed == 0`、`commits == 1`；`inst_relate` / `inst_info` / `geo_relate` / `inst_geo` /
+  `aabb` / `trans` / `tubi_relate` 七张表 `SELECT * … ORDER BY id` 取成 SurrealDB 值、剥掉 `model_sesno` 之后逐行逐字相同；`model_sesno` 单独核——
+  regen 路三处表全 43，unit 路只有换了网格那件的 `inst_relate` 是 43、另三行停在 42（一件前移、三行落后，数字钉死）。
+- **mutation**：把 `persist_root_impl` 的 `<=` 改回 `==`，测试红在 `unit 路 T 端落库被拦：root 24383/1 projection contains records outside its receipt scope`，
+  改回后绿。
+- **口径**：A5 的「逐字相同」是**除 `model_sesno` 之外**——那一列就是 D3 放宽的地方，让它落后是设计不是差异；ADR-080 验收表 A5 行按此改 ✅。
+- **验证**：`cargo test --lib -- model_db_adapter::` **66 过 0 败 1 ignored**；整套 `cargo test --lib` **2223 过 0 败 118 ignored**（+1）；
+  `rustfmt --check` 本文件新增段干净（剩 1352 / 6311 两处是 HEAD 上就有的）；`model_db_adapter.rs` LF 未变。
+
+### ADR-080「后果」段文档收口：ADR-056 N3 改写 + D3 指向 ADR-080、`model_refresh.rs` 过期注释改口、CONTEXT 补「单元级发布 / 局部清单」
+
+- **为什么**：0917 对 ADR-080 做了一遍「是否已实现」审核——D1–D10 机制全部落地且有测试钉住（HEAD `7298ddba6` `cargo test --lib`
+  **2222 过 0 败 118 ignored**；D10 五条单测单独跑 5 过），但「后果」段列的四条跟进文档三条没动：ADR-056 N3 仍写「模型发布根级原子：
+  一个根一次 CAS 发布」、D3 行末仍「单元级落库另立 ADR」不知道那份 ADR 已经立了；`model_refresh.rs` 的 `apply_window` 注释仍写
+  「`execute_plan` 半边（单元级落库，D3 已否）届时摘除」，与事实相反（它已是生产执行体 `UnitDeltaProducer::produce` 的核心）；
+  `CONTEXT.md` 没有「单元级发布 / 局部清单」词条，读代码注释里的 `Partial` / `UnitDelta` 无处可查。用户 0917 拍：把这四处补齐，以 docs 提交。
+- **改到哪**：ADR-056 状态行补「被 ADR-080 修订」，N3 改写为「原子边界 = 一次发布调用」（原文留在括号里），D3 行追记指向 ADR-080，
+  关联段 ADR-014 那句随 N3 改口；`model_refresh.rs` `apply_window` 文档注释改口（`#[allow(dead_code)]` 与「在那之前不删」不动）；
+  `CONTEXT.md`「模型影响」之后补 **单元级发布 (Unit-Level Publish)**（点明 core 对应物是 `css/SEGREP` 而非 `add/REPELE`），
+  「分支原子替换」之后补 **局部清单 (Partial Manifest)**，并把「分支原子替换」里引 N3 的那句随 N3 改口；ADR-080「后果」段前三条标 ★0917 已落。
+  第四条（面板 / `/health` 按 `published_via` 分档加一列）**没做**——今天连 regen / transform 都没有分档列，`handlers.rs` 只原样透出，等有人要看再加。
+- **审核里还开着的**（同一趟核出来，未动）：D9 开门三道门只过了①（单根对拍）；A5（`Partial` 之后 `persist_root` 不报
+  `outside its receipt scope`）没测试没证据，只有 `batch_worker.rs` 一句注释说 D3 接住了；实施约束 9「关着时逐位等于今天」只有机制没有守卫测试；
+  A6 全语料 / A7 净收益 / D7 Q3 未做；ADR 状态行仍「草案」，D2 / D3 / D7 / D9 等用户逐条过目。
+- **验证**：只改注释与 md；`cargo test --lib -- model_refresh::` 编译过、测试过；行尾各按文件原样（ADR-056 / `model_refresh.rs` LF，
+  CONTEXT / changelog / ADR-080 CRLF）。
+
+### ADR 改号：单元级发布那份 ADR-078 → **ADR-080**，104 处引用一起换；MDB 闭包那份仍是 ADR-078
+
+- **为什么**：单元级发布的 ADR 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了 MDB 闭包那份（`ADR-078-projects-come-from-the-mdb…`，
+  Accepted）。两份同号并存了一天，D 编号又互不相干（两边都有 D1–D6，含义完全不同），代码注释里一个 `ADR-078 D5` 既可能是
+  「局部回执在写锁里盖章」也可能是「路由目录带项目码报错」。用户 0917 拍：改号。
+- **怎么分的**：逐行分类，不整仓 `sed`——`grep` 到的 115 处按「提单元级 / `Partial` / `UnitDelta`」与「提 MDB 闭包 / 搜索根 /
+  `included_projects`」两类分开，**104 处改成 ADR-080**、**11 处留在 ADR-078**（`options.rs` 的 `project_search_paths` 四处、
+  `e3d_model_service.rs:2292` 路由目录 D5 一处、`manual_update.rs:3930` 候选项目一处、changelog 0915 五条）。
+- **改到哪**：`docs/adr/ADR-078-unit-level-publish-…md` → `ADR-080-unit-level-publish-…md`（`git mv`，正文标题与★0917 改号记录同步）；
+  gen-model `e3d_model_service.rs`(29) / `model_memory_store.rs`(14) / `manual_update.rs`(7) / `batch_worker.rs`(6) / `window_root_plan.rs`(5) /
+  `options.rs`(5) / `model_db_adapter.rs`(4) / `model_write_behind.rs`(2) / `model_update_plan.rs`(1)；`changelog.md`(18，含 0916–0917 历史条目，
+  **不留双号并存**)；计划 `2026-09-15-attribute-change-class-alignment-dev-plan.md`(11)；vendor **`e3d-model/src/increment.rs`(2)**
+  （管段账那两句注释，随 e3d-model 侧下次提交入库）。
+- **验证**：改完全仓 `rg ADR-078` 只剩 MDB 闭包那一份的引用（外加 ADR-080 正文里点名它的改号记录）；`rg ADR-080` 104 + 6（ADR 正文自述）；
+  `cargo test --lib` **2222 过 0 败 118 ignored**（与改号前同数——`mdb_closure.rs` 里 `assert!(notice.contains("ADR-078"))` 那条断言
+  属于 MDB 闭包那一份，未受影响）。
+
+### ADR-080 D10：「touched 但 0 单元」的根在单元路上只推回执——只被 `no_model` 候选碰到的 regen 根发一份空 `Partial`，不再整根重算
+
+- **为什么**：Q6 第一手（`bf405d5ad` + vendor `5d92b97`）把只跳 `CACHID` 的候选从上卷里摘掉，那些根名下**要重建的单元归零**；
+  但三档 `no_model` 候选照旧做闭包种子（不变量「根不在闭包里 ⇒ 子树里什么都没动」靠它守着，第二手 d-365 拍了不动），根仍 `touched`
+  → `RegenRoot`，整根重算出来的几何与 S 端逐字相同、只有回执前移。语料里 9172 / 263612 根（3.5%）是这形状，8486 个零单元；
+  整库缓存重建的扫写窗（aps7344 108→109、aps250209 16→17）整窗都是它。D9 接线后的单元路对这种根也不省：生产方切出的子计划为空，
+  按「空清单不是没变」（Q4 那条静默缺件的防线）回退整根 regen。用户 0917 拍：「开 ADR-080 那条：RegenRoot 只重建变了的单元，
+  把『touched 但 0 单元』的根变便宜」。
+- **改动**（会话 fable-5-1-10）：
+  - **规划器**（`window_root_plan.rs`）：新分桶 `classify_no_model_only_roots`——`plan.regen` 里的根五条缺一不可才点名：窗口没退化；
+    S 端已发布且安定（`settled`）；闭包**直接**命中且**不在**任何级联目标集里（`cascaded_roots()` = C2 `far_end_roots` ∪ C8 / P4
+    `referrer_roots`，按各自目标集取，不用 `touched \ direct`——一根可以既被直接命中又是级联对端）；归到它名下的候选至少一个；
+    名下候选**全部**是 `CandidateKind::NoModel`。归因只看候选就是根 / 候选的 T 端链或 S 端链经过根，**不看根之上的候选**
+    （与刚体路 `classify_one` 差这一条，故意的：闭包不因根之上的种子把根收进来；根之上的改动若真波及根下几何，e3d-model 级联会把
+    根下单元放进动作集、子计划就不空；反过来 `WORL` 的 `UPDT` 每窗必跳，算进来这条路一次都打不着）。候选表与刚体路**共用**：
+    `collect_rigid_motion_sources` 多一个 `rigid_enabled` 形参，任一开关开着就收表，刚体开关关着时不算 `Δ`、只动摆放的候选记 `Other`
+    （`RigidMotionSources::enabled` 仍 = 刚体开关，刚体分桶照旧空）。结果随计划走：`ModelUpdatePlan::unit_publish_no_model_only_roots`
+    （`a/b`，`#[serde(default)]`，基线为 `None` 时恒空）→ `UnitPublishHint::no_model_only` → `UnitPublishUnit::no_model_only`；
+    warnings 多一行 `unit-level publish — no_model_only roots=N of regen=M`。`regen` 的子集加提示，`work_items` / `units` 一字不改。
+  - **生产方**（`UnitDeltaProducer::produce(root, old, no_model_only)`）：子计划为空时，不带提示照旧回退（原因加「the planner did not
+    mark it no_model_only」）；带提示则对账本再复核一遍 `root_touched_only_by_no_model_candidates`（`WindowPlanSets` 从此留着
+    `ledger.dispositions()`；规划器与生产方是两次独立算的计划，实施约束 12——两边都点头才算），成立就回一份**空** `UnitDelta`
+    （只带本轮 `model_target`）。设计窗之外的目标核仍在它之前：目录 / 模板 / 生成器 / 细分档任何一格变了照旧回退——Q6 量表没实现的
+    「#8 目录侧」那一列，这里天然有。
+  - **执行体**（`republish_roots_by_unit_delta_on`）：空 delta **只许来自带提示的 unit**（守卫在管段门之后、提交之前，`include_str!`
+    钉住位置；别的根回出空 delta 是生产方的 bug，回退不发）。放行的空 delta 照常以 `Partial` 提交：存储在写锁里按原记录重算章
+    （逐字不变）、回执推到 T、`published_via = "unit"`；`UnitPublishReport` 加 `receipt_only`（`completed` 的子集），batch_worker 的
+    `ModelUnitResult.message` 带一句「touched only by no_model candidates … receipt advanced … (D10)」、日志行多报「其中 N 根只推回执」。
+    D2「可能删空」判据 `partial_delta_may_empty_the_root` 改口：只对**真删了东西**的空 upsert 清单判真——改口之前 `0 removals ≥ 0 records`
+    恒真，8486 个零单元根一个都走不成。
+  - **探针**：`probe_unit_publish_one_root_against_regen` 打出 D10 分桶（`AIOS_MODEL_UNIT_LEVEL_PUBLISH=1` 收候选表）、按分桶给 unit
+    带提示；新旋钮 `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>` 把 MDB 没声明的语料库挂成额外 DESI pin（Q6 那六个库都不在任何 MDB 里，
+    配 `DB_OPTION_FILE=db_options/DbOption-aps.toml` 解目录依赖）。
+  - 文档：ADR-080 状态行（D9 接线 / D10 落地 / **编号撞车**点明）、D10 正文、A8 验收行、Q6 开放问题、「不做」末条改口；
+    `options.rs` 开关文档；计划 §8 Q6 ★0917 段末补指向。
+- **验证**：
+  - 单测：`no_model_only_roots_need_every_one_of_the_five_conditions`、`the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain`、
+    `a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt`、`an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root`、
+    `collect_unit_tasks` / `merging_the_worklist_keeps_the_unit_publish_hint` 的名单测试，守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records`
+    多钉一格。把空清单守卫短路 / D2 判据改回旧形，两条行为测试全红（mutation 核过）。
+    `cargo test --lib -- e3d_model_service:: window_root_plan:: rigid_motion:: manual_update:: model_update_plan:: batch_worker:: model_memory_store:: model_write_behind:: options::`
+    **432 过 0 败 31 ignored**；整套 `cargo test --lib` **2221 过 0 败 118 ignored**（HEAD `f74e44fba` + 本条工作树 + 当前 vendor
+    e3d-model 工作树；比上一条多 4 = 本条新增的 4 条单测）；rustfmt 本轮新增行无差异（`e3d_model_service.rs` 剩 11 处、
+    `window_root_plan.rs` 剩 4 处、`batch_worker.rs` 剩 6 处，按行号对过 HEAD 全是旧的）；CRLF / LF 未翻。
+  - **真库探针**（`DB_OPTION_FILE=db_options/DbOption-aps.toml`、`AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`、`AIOS_UNIT_PUBLISH_PROBE_FILE` 挂文件）：
+    **aps7343 6→7** 规划器 `no_model_only 100 of regen 100`（与 Q6 量表 100 个多算根逐个相同）、根 `23727/3` STRU 零单元：
+    `window plan: regenerate 0 remove 0 derived 0`，单元路 `receipt-only`，空 delta，回执 6→7、章 == regen@7（空清单章），**PARITY OK**；
+    **aps250209 16→17**（扫写窗）`no_model_only 373 of regen 373`，根 `2013286753/40174` STRU **50 件**（HANDRA / GENSEC / STRFLT / PANE）：
+    单元路 0.04 s 只推回执、章 `1c6dc19a…` 与 regen@17（0.86 s）**逐字相同**，**PARITY OK**；**aps250209 15→16**（混合窗）
+    `no_model_only 311 of regen 373`（与 Q6 量表 311 多算 / 62 真变逐个相同；`window plan: regenerate 392`），根 `40094` 4 件 PARITY OK。
+    ams8000 S4 那几窗（607→614）扫过：只戳的会话（608→609 / 610→611 / 611→612 / 612→613 / 613→614）候选 1、regen 根 0，没有 D10 形状的根。
+- **★同日拍板，规则写死**（用户「把『级联关着 ⇒ D10 不分桶』写死成规则（安全优先，默认配置下 D10 不生效）」）：跨根设计引用
+  （`JOIS` / `JOIE` / `CREF` / `CFRA` / `STAREF` / `ENDREF` / `POSREF`）的引用者只被盖戳这一形状，今天靠戳做种子整根 regen「碰巧」收住，
+  D10 之后只有级联目标集能把引用者的根挡在桶外（条件 ③）。于是 `WindowRootSources::no_model_only_cascades_off` 看齐三条级联的
+  `enabled`（`model_structural_connection_cascade` / `model_cable_endpoint_cascade` / `model_design_reference_cascade`），有关着的整窗
+  一根都不点名（`classify_no_model_only_roots` 多一个 `cascades_off` 形参，每根原因「cascade(s) off: …」）、warnings 报一句为什么、
+  `collect` 也只在三个开关同开时为单元级收候选表；源码钉 `d10_refuses_to_classify_unless_all_three_cascades_are_on` 把三处钉住。
+  **级联开着的账**（同一探针，三条级联 `AIOS_MODEL_*_CASCADE=1`）：aps250209 16→17 `no_model_only` 从 373 / 373 降到 **350 / 373**——
+  差掉的 23 根是级联判成引用者对端的（`2013286753/40174` 那根 50 件的 STRU 就在其中，回退原因「target of a cascade expansion」），
+  `40094` 4 件 receipt-only PARITY OK；aps7343 6→7 从 100 / 100 降到 **26 / 100**（SCTN 的 `JOIS` / `JOIE`），`23727/3` PARITY OK；
+  级联关着复跑：`0 / 373`、原因「cascade(s) off: …」、空子计划回退 regen。上面那三跑 373 / 373、100 / 100、311 / 373 是规则写死之前的数。
+  验证：`cargo test --lib` **2222 过 0 败 118 ignored**（+1 源码钉）；rustfmt 本轮新增行无差异；CRLF 未翻。
+- **未做 / 边界**：开关 `model_unit_level_publish` 仍默认关，D10 随它且要三条级联同开。D7（整根落盘）/ A5 / A6 全语料 /
+  A7 净收益照旧未做；D10 这类根的落盘代价 = 整根行重写（零记录根 = 只写回执）。**ADR 编号撞车**：本仓另有一份 Accepted 的
+  `ADR-078-projects-come-from-the-mdb…`，两份 D 编号互不相干，改不改号待拍板（★0917 已拍：单元级那份改号 ADR-080，见同日「ADR 改号」条，
+  本条正文里的 ADR 号已随之改写）。ADR 草案文件此前一直**未跟踪**（changelog 0916 条说新增、但没 `git add`），本条随提交入库。
+
+### 属性变化分类对齐 core · §8 Q6 落地：只 `CACHID` 跳动的候选进 `no_model` 第三档 `cache_stamp`，窗 C 上 GENSEC / HANDRA 不再挡刚体前移
+
+- **为什么**：E3D 3.1 挪一件会给它整棵子树里每个带 `CACHID` 的元素各盖一次戳（S4 窗 C：STRFLT 自己 + 10 TREAD + 2 GENSEC + 2 HANDRA）。
+  Q5 让戳跟着 `POS` / `ORI` 走时不挡「只动了摆放」，但**只有**戳跳了的候选——挪位时被顺带盖戳的子树成员，或整库缓存重建的扫写
+  （S8：12734 个、92.8% 的跳动）——元数据门不放行：第一票是字典 DCHC=0，而 `CACHID` 是 3.1 运行库 schema 里的项目 UDA，字典按构造
+  收不到它。于是它们照旧上卷重算，是模型单元的（GENSEC / HANDRA）还在 ADR-066 D1 规则 2 里当 `Other` 把根踢回 `regen`——上一条量出的
+  窗 C「路只让出一半」就是这个账。用户 07:37 拍板：进 `no_model` 第三档，按两票口径落字典 + 读取集合守卫，窗 C 复跑。
+- **改动**（会话 fable-5-1-37 起手、fable-5-1-42 接力收尾）：
+  - **第一票**：gen-model `model_impact::attribute_is_metadata_only` 改成「(字典 DCHC=0 **∨** 是戳) ∧ 生成器不读」；「是戳」由新函数
+    `attribute_is_cache_stamp` 按 e3d-model `element_diff::PLACEMENT_STAMP_ATTRIBUTES` 那一份名单判（归一化后按名查）——例外**只认那张表**，
+    `UDA:<id>` 与别的字典没有的名字照旧不放行。**第二票**照旧问读取集合，守卫钉住：`stamp_literals ∩ names = ∅`、三处名单逐名相等
+    （`the_generation_read_set_mirrors_e3d_model_and_the_model_side_modules`），`metadata_only_needs_dchc_zero_and_an_unread_attribute` 钉每个戳
+    「`raw_dchc_code` 为 `None` ∧ 不在读取集合 ∧ 放行 ∧ 不是老名单」——哪天有人真读 `CACHID`，守卫红、门自动关。
+  - **分档**：e3d-model `NoModelTier` 加 `CacheStamp`，`IncrementReport` 加 `cache_stamp` 计数（`accounts_for` 钉三档之和 ≤ `no_model`，
+    `totals_line` 带出 `cache_stamp=`）；gen-model `metadata_only_tier` 对戳放行但**不改档**——跟着 `NAME` 记老档、跟着 `DUTY` 记新档，
+    **只有**戳跳了才记 `CacheStamp`；`[POS, CACHID]` 仍走锚点那条路（`is_placement_only`），这里回 `None`。预览 `classify_operation_impact`
+    与规划器共问同一谓词，只戳的操作从「字典没投票 → 不是 Skip」翻成 Skip（`the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate`）。
+  - **去向**：e3d-model `plan_update_with` 对第三档同样 `settle(…, false)` → `Disposition::NoModel`，不上卷、不级联、账本照记、闭包种子照收；
+    `window_root_plan::no_model_candidates` 因此把它们分进 `CandidateKind::NoModel`，规则 2 不再数它。`build_model_update_plan_from_window`
+    的门警告把三档一起报。两条探针跟上：`probe_transform_classification_for_window` 的「Other·只 CACHID」类改标「Q6 落地后不该再出现」；
+    `probe_cachid_only_regen_cost` 的 B 态谓词改回真档 `CacheStamp`（此前借 `UnreadAttribute` 计数），对账改成「B 态 `cache_stamp` == 只 CACHID
+    候选数」——它量的从此只剩第二手（只戳候选不做闭包种子能再省多少根，选根的题）。
+  - 文档：ADR-066 状态行 + D1 规则 2 末注（含对 Q5 段「只有 `CACHID` 变照旧 `regen`」半句的更正）、计划 §8 Q6 ★0917 落地段、
+    `options.rs` 门开关文档补第三档、e3d-model `increment.rs` / `element_diff.rs` 文档改口。
+- **验证**：e3d-model `cargo test --lib -- increment:: element_diff::` 19 过、`cargo test --test attribute_reads_guard` 2 过；gen-model
+  `cargo test --lib -- model_impact:: window_root_plan:: rigid_motion:: …` **103 过 0 败 11 ignored**（含 `the_metadata_tier_is_curated_only_…`
+  的戳分档 11 条断言、`change_metadata_tier` 对 `[CACHID]` / `[NAME, CACHID]` / `[POS, CACHID]` / `[SUPP, CACHID]` 四种形状）；两仓整套
+  `cargo test --lib`：e3d-model **321 过 0 败**、gen-model **2217 过 0 败 118 ignored**（HEAD `f1398e442` + 本条工作树）；rustfmt 本轮新增行
+  无差异（`window_root_plan.rs` 剩的四处 1233 / 1755 / 1767 / 1985 不是本轮的）；CRLF 未翻。**窗 C 复跑**（`probe_transform_classification_for_window`，aps250110 **32→33**，`AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`）：
+  回执 `candidates=16 rolled_up=1 no_model=15 (cache_stamp=14)`——上一条里的 **4 个只 `CACHID` 的 GENSEC / HANDRA 从 `Other（挡路）` 变成
+  `no_model（不挡路）`**，与 10 个 TREAD、1 个 MNUM 同列；候选表里挡路的**只剩 STRFLT 锚点自己**（P23 排除，设计如此），6 根 rejected 的原因全部
+  收敛到这一条。ams8000 对照窗不变：195→196 EQUI 挪位 `transform=1 rejected=0`；267→268 BRAN `BY U 2000` 照旧 regen（`CACHID / HPOS / TPOS`
+  一起变不是只戳）。
+- **未做 / 边界**：`model_transform_cheap_path` 默认仍关；P23 排除不动（窗 C 要真走 transform 得另议 STRFLT）；Q6 第二手（只戳候选不做闭包种子）
+  **同日拍板不动**——它只在整库扫写窗真省根，而那形状与「被引用的目录件 / 跨根设计引用变了、引用者只被盖戳」在 DESI 窗里分不出来，今天正是戳做种子
+  把后者收住的；收益等 ADR-080（分析与 A / B / C 三条路留在计划 §8 Q6 ★0917 第二手段）；
+  e3d-model 侧改动已随 vendor `5d92b97` 入库（gen-model `bf405d5ad` 起经 path 依赖用到 `NoModelTier::CacheStamp` / `cache_stamp`，两仓已一起入库）。
 ### 反向传播的跨库停放：命中的别的库排成根级工作项 `RoomRoots`，由那个库的下一个任务沿准入链消费（ADR-073 D13 追记 U3 b，五笔）
 
 - **为什么**：D 五笔落完，反查里别的库的命中只**数**（`cross_library`），一窗内两个库都有任务时只有先开工的库走定向，后开工的库
@@ -739,7 +1396,7 @@
   - ams8000 **195→196**（EQUI 位姿）：1 候选 = 合格锚点，**transform=1 rejected=0**——生产同款分桶在自然 EQUI 挪位上真走了便宜路。
   - ams8000 **267→268**（BRAN `BY U 2000`）：BRAN 自己 `CACHID / HPOS / TPOS`、FTUB `POS / SPAMAP` 都是 `Other`，BEND 在路由容器内被排除
     → regen，与 D1 规则 3 一致。
-- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动——上面窗 C 的 4 件就是它的账；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关
+- **未做**：Q6（只 `CACHID` → `no_model` 第三档）没动——上面窗 C 的 4 件就是它的账（**同日上一条已落地**）；ADR-066 验收 2 live #2 / 验收 3 量没跑；开关
   `model_transform_cheap_path` 默认仍关。e3d-model 的 `dispositions()` 访问器只在 vendor 工作树里、**未提交**——gen-model HEAD 已经依赖它。
 
 ### ModelOnly 执行体补上开工前对齐与 `RoomOnly` 接力（ADR-073 D12 / D13 的漏接，审核 P1-1）
@@ -981,7 +1638,7 @@
   `moved > 0` 的相等不受类别影响）；探针钉 db8000 609→610 复跑（`output/e3d-s4/probe_window_A_609_610_reading.md`）：样本行与
   读法列都成了「属主不变量未变」，test ok；`cargo check --lib --tests` 绿；`rustfmt --check` 本文件只剩两处原有的差异；CRLF 未翻。
 
-### ADR-078 D1 / D6 / D8：真生产方 `UnitDeltaProducer` 接进单元级执行体，真库探针 ams8000 五窗五根与整根重算逐字同章
+### ADR-080 D1 / D6 / D8：真生产方 `UnitDeltaProducer` 接进单元级执行体，真库探针 ams8000 五窗五根与整根重算逐字同章
 
 - **生产方**（`e3d_model_service.rs`）：`UnitDeltaProducer::open(service, dbnum, S, T)` 一窗算一次——`collect_window` →
   两端 `generation_input`（与整根重算共用缓存的 `DbSet` / 索引）→ `plan_update`，**计划口径与选根那一步同一份**
@@ -1026,7 +1683,7 @@
   未接。`produce` 是同步阻塞的 I/O + CPU，今天在 async 执行体里直接调（与刚体路同款），接生产调用点时要放
   `spawn_blocking`。
 
-### ADR-078 D6 / A3：管段完整性门夹在执行体的产出与提交之间——触到的 BRAN 少带一段就整根回退，不发
+### ADR-080 D6 / A3：管段完整性门夹在执行体的产出与提交之间——触到的 BRAN 少带一段就整根回退，不发
 
 - **门**：`e3d_model_service::tube_segment_completeness(&UnitDelta) -> Result<(), String>`，在
   `republish_roots_by_unit_delta_on` 里位于 `produce` 之后、`publish` 之前；不成就 `fallbacks` 一条
@@ -1051,7 +1708,7 @@
 - **没做**：D6 第一条「`removals` 只许来自 `UpdatePlan.remove` ∪ 派生旧键差集」还没在执行体里核——今天 `UnitDelta::removals`
   是生产方给什么算什么，接上 `execute_plan` 时钉成守卫。仍没有生产调用点（D9 开关未立）。
 
-### ADR-078 D4 / A4：单元级发布执行体骨架——`republish_gate` 当 `Partial` 的幂等闸，闸先于产出，执行体自己不读记录
+### ADR-080 D4 / A4：单元级发布执行体骨架——`republish_gate` 当 `Partial` 的幂等闸，闸先于产出，执行体自己不读记录
 
 - **执行体立起来了**：`E3dModelService::republish_roots_by_unit_delta(dbnum, T, units, produce)`，与刚体路
   `republish_roots_by_rigid_motion` 同形、同一把 `db_generation_lock(dbnum)`、同一道 `ensure_not_older_than_persisted`
@@ -1146,7 +1803,7 @@
   `zz_tmp_s4_census` 出会话差分 `sesdiff_aps250110_{32_33,33_34,34_35,32_36}.txt`；e3d-io 例程 `zz_tmp_seslist` 读会话页 user / date / comment 定的撞车责任——三个临时探针收尾时**都已删**（用法记在取证文档）。
   宏新增 `scripts/e3d/s4_aps_strflt_{move,restore,fix}{,_driver}.mac` 六个。生产代码零改动；未跑全量 `cargo test`（本轮没有可退步的东西）。
 
-### ADR-078 D5：局部提交的回执由存储在写锁里盖——「应用 delta + 重算 `manifest_hash` + 盖回执」成为一个原子操作
+### ADR-080 D5：局部提交的回执由存储在写锁里盖——「应用 delta + 重算 `manifest_hash` + 盖回执」成为一个原子操作
 
 - **章盖在 `ModelMemoryStore` 的写锁里。** `ScopeState::apply_upserts_and_receipt` 落完 upserts 后，
   `scope == Partial` 且带回执的提交由新加的 `ScopeState::stamp_partial_receipt` 按 `record_ids_under(root)`
@@ -1162,13 +1819,13 @@
   那道守卫照旧绿。
 - **调用方的分工**：`Partial` 回执里 `manifest_hash` / `geometry_count` 是占位、会被覆盖；`source_sesno` /
   `model_target` / `published_via` 照调用方填的。`CommitScope::Partial` 与 `ProjectionCommit::receipt` 的文档
-  写明了这一条；ADR-078 加实施约束 10。
+  写明了这一条；ADR-080 加实施约束 10。
 - **`commit` / `try_commit_current` 改为返回实际入库的回执**（`Vec<(RefNo, RootReceipt)>`，按提交序）。
   顺手修了一处会静默咬人的地方：`model_write_behind::publish_commits` 原先在**提交前**从 `commits` 抄回执去登记
   durable 身份——对 `Partial` 就是拿占位值登记，ACK 永远对不上、这根永远 pending 且不报错。现改用返回值登记；
   非持久档的 `publish` 也从返回值取根。`apply_geometry_delta_on` 的 Historical 分支加了个分号吞掉返回值，
   别无改动。
-- **`WholeRoot` 一字不动**（ADR-078 实施约束 9）：回执照调用方写的入库，存储不替它算。
+- **`WholeRoot` 一字不动**（ADR-080 实施约束 9）：回执照调用方写的入库，存储不替它算。
   `cached_root_commit` 与「目标变了、清单没变」两条路的 `upserts` 是空的，替它们重算就是把完整投影盖成空章。
 - **护栏四条**：`a_partial_receipt_is_stamped_from_the_root_as_it_stands_after_the_delta`（占位不入库；
   章 == 对提交后 `records_of_root` 跑配方；数 == 记录数；与不经存储、直接对 `[a, c']` 算的逐字相同；
@@ -1185,7 +1842,7 @@
   D5 那笔 O(根内记录数) 的 digest 账没变（省的只是克隆），Q1 照旧挂着。下一步是 D4 的幂等闸
   （搬 ADR-066 `republish_gate`）或 D6 / 实施约束 4 的管段完整性门。
 
-### ADR-078 D2 / A2：`CommitScope::{WholeRoot, Partial}` 落地——但不变量不在存储里，在上游那条「缺席 ⇒ 删除」的做差上
+### ADR-080 D2 / A2：`CommitScope::{WholeRoot, Partial}` 落地——但不变量不在存储里，在上游那条「缺席 ⇒ 删除」的做差上
 
 - **动手时发现初稿把不变量放错了层。** 存储（`ScopeState::apply_removals`）**本来就只删**
   `ProjectionCommit::removals` 与 `tube_branch_resets` 点名的那些，从来不拿缺席当删除。
@@ -1210,17 +1867,17 @@
 - **仍然没有打开任何行为**：今天所有生产提交都是 `WholeRoot`，`Partial` 只有测试在构造；
   局部生成、幂等闸、`model_unit_level_publish` 都还没有。
 
-### ADR-078 A1：投影记录与根回执的对账从 `==` 放宽成 `<=`——记录带的是自己最后一次生成的会话，根推进到哪了看回执
+### ADR-080 A1：投影记录与根回执的对账从 `==` 放宽成 `<=`——记录带的是自己最后一次生成的会话，根推进到哪了看回执
 
 - **改的是两处，不是三处。** `model_db_adapter.rs` 的 `RootShare::load` 与 `persist_root_impl` 里那条
   `record.source_sesno == receipt.source_sesno && record.ancestors.contains(&packed_root)` 改判 `<=`；
   越界那一半（祖先链里没有这个根）一字未动。**比回执新的记录仍然报错**——那意味着有人把几何投进来却没盖章，
   这根的全集就不是回执说的那一份。
-- **为什么要动它**：单元级发布（ADR-078）只重建变了的那几件，没动的记录仍停在上一次真正生成它的会话上，
+- **为什么要动它**：单元级发布（ADR-080）只重建变了的那几件，没动的记录仍停在上一次真正生成它的会话上，
   而回执整根前移到 T——落盘那一刻就撞这条等号，现场只看得见一句 "projection contains records outside its
   receipt scope"。顺带解释了一件旧事：**ADR-066 刚体前移明明不重算网格，为什么仍要把整根记录全部 upsert 一遍**
   ——它就是在绕这一条。它省的是生成，不是写入。
-- **ADR-078 初稿 D3 列了三处，动手时核掉一处**：`room_resident.rs` 的
+- **ADR-080 初稿 D3 列了三处，动手时核掉一处**：`room_resident.rs` 的
   `row.source_sesno == source.target_sesno()` **不该改**。它校的是 `generate_frozen_roots` 的产出，
   而产出永远来自一次新鲜生成、每条都盖着 `batch.source_sesno`，根本不经过投影里那些没动的旧记录；
   放宽它只是白削一道还成立的检查。`room_model.rs` 读活投影、本来就是 `<=`，也不动。ADR 的 D3 与 A1 已改口。
@@ -1230,9 +1887,9 @@
 - 验证：gen-model `cargo test --lib` **2129 绿 / 0 红 / 114 ignored**，e3d-model **320 绿 / 0 红**；
   `rustfmt --edition 2024 --check src/fast_model/model_db_adapter.rs` 干净；该文件行尾 LF，与 HEAD 一致未翻。
 - **本条不打开任何行为**：`CommitScope`、局部清单、`model_unit_level_publish` 一样都还没有，这一步只是
-  把那道等号从单元级发布的必经之路上挪开（ADR-078 实施约束 1：先改语义，后接执行体）。
+  把那道等号从单元级发布的必经之路上挪开（ADR-080 实施约束 1：先改语义，后接执行体）。
 
-### 属性变化分类对齐 core · S7 收口：图元级重建先量出 86.5%（真·重算口径），§8 Q4 关闭，单元级发布立 ADR-078（草案）
+### 属性变化分类对齐 core · S7 收口：图元级重建先量出 86.5%（真·重算口径），§8 Q4 关闭，单元级发布立 ADR-080（草案）
 
 - **S7 探针**（`window_root_plan::tests::probe_unit_level_rebuild_ratio`，`#[ignore]` 手动，工作树内未提交，作者协同组 dchc 的 opus-5-74）：
   沿 ams8000_0001 整条会话链逐窗走生产口径选根，对 `plan.regen` 里的每一根**两端各 `generate_subtree` 一次**，逐件按 `GeometryId` 配对、
@@ -1249,7 +1906,7 @@
 - **顺带量到一笔不属于 S7 的账**：整根白算 255/488 根，按单元占真·重算总量 **1230/2670（46.1%）**——一件都没变却被整根重算。那是选根的题
   （S6 / 计划 §8 Q6），单元级发布在这些根上一个图元都不碰。它比 S7 能省的还大，另开一条线。
 - **计划 §8 Q4 关闭**：阈值 70% 没动，动的是分母；按真·重算口径过线。用户 2026-09-16 拍板立 ADR。
-- **新增 `docs/adr/ADR-078-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`（草案）**——ADR-056 **D3 末句**留的那个口子
+- **新增 `docs/adr/ADR-080-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md`（草案）**——ADR-056 **D3 末句**留的那个口子
   （「单元级落库（`execute_plan` 直写）另立 ADR」），也是 D3 的第二个例外（第一个是 ADR-066）。九条决策，核心三点：
   ① 单元级的**判定与生成早就现成**（`plan_update` / `execute_plan` / `apply_geometry_delta` / `ProjectionCommit` 记录级 / 房间 overlay 记录级），
   缺的是「局部清单怎么在一个根级回执之下安全落地」；② `ProjectionCommit` 加 `CommitScope::{WholeRoot, Partial}`，`Partial` 下**未提及 ≠ 删除**
