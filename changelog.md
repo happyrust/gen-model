@@ -355,7 +355,7 @@
 
 ## 2026-09-18
 
-### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-080）
+### 存储介质只由环境变量 `AIOS_STORE_MODE` 决定；`store_mode` / `in_memory_db` 退出配置文件与向导（ADR-083）
 
 - **为什么**：介质此前由三层叠加决定（环境变量 `AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 旧开关
   `in_memory_db` / `AIOS_IN_MEMORY_DB`）。今天现场真踩了：文件写着 `store_mode = "rocksdb"`，上一条命令残留在会话里的
@@ -386,7 +386,7 @@
   PowerShell 语法解析，`strt_plant_ui_runtime.py` 通过 `py_compile`，`deploy/linux/install_backend.sh` 通过 `bash -n`、
   渲染出的 TOML 解析通过且不含 `store_mode`。**未验**：发布包冒烟三腿。（真机横幅与 `/setup.html` 第②步的实际渲染已在下一条里验了。）
 
-### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-080 D6）
+### 同日修订：漏设 `AIOS_STORE_MODE` 时落到 `rocksdb`，发布包改由 `Start-AMS.ps1` 显式回填 `mem`（ADR-083 D6）
 
 - **为什么**：上一条落地后真机复验，把两种漏法的代价摆到了一起。兜底 `mem`（原 ADR-074 D3）时服务照常起、模型照常对，
   只有属性行一直不进库、校审域整域 503、重启即清空——2026-09-18 现场为此查了半天，而且是先怀疑增量窗口才找到这儿；
@@ -397,7 +397,7 @@
   「解压即跑」不再靠默认兜：生成的 `Start-AMS.ps1` 不给 `-StoreMode`、调用方环境里也没有时**显式回填**
   `AIOS_STORE_MODE=mem`（给了 `-StoreMode` 以它为准；环境里已有的照旧沿用，不被盖），老启动器 `start-local-release.ps1`
   同样回填。冒烟 A 腿有意仍不设介质——它考的正是「落到默认档也仍然拐进设置模式、向导打得开」这条逃生门。
-  护栏 `the_default_store_mode_is_mem` → `the_default_store_mode_is_rocksdb`；ADR-074 D3 整条被 ADR-080 D6 取代。
+  护栏 `the_default_store_mode_is_mem` → `the_default_store_mode_is_rocksdb`；ADR-074 D3 整条被 ADR-083 D6 取代。
 - **对现场的影响**：配置填好、机器上没库还手工直起服务的，会从「起来了但跑在内存库上」变成「起不来，报连不上」——
   改法是 `$env:AIOS_STORE_MODE='mem'`，失败信息里带着地址。仓内所有起服务的脚本本来就显式带介质，逐个核过，一个不必改；
   服务器那台走 systemd `Environment=`，也不受影响。逃生门仍在：`project_path` 空、或 `v_ip` 空 / `v_port=0` 时照旧进设置模式。
@@ -409,6 +409,11 @@
   要的那种当场报错）。`Start-AMS.ps1` 的回填三个分支逐个实跑：不给且环境空 → `mem`；不给但环境已有 `rocksdb` → 沿用；
   给 `-StoreMode rocksdb` → `rocksdb`。向导第②步用 playwright 走真人路径截了图：介质栏显示「由 默认 rocksdb（…）决定」、
   地址两格与「测试连接」可用、橙色提醒点名文件里那句 `store_mode = "mem"` 已不生效。**未验**：发布包冒烟三腿。
+- **合入主线（2026-09-21）**：上面两节与 D2 那笔（`fix(startup)` 启动臂逐条点名）原落在 `codex/model-projection-cache`
+  （`8c89728c3` / `b90f9e38d` / `e376ad2bb`），按用户「只合这几笔」cherry-pick 进 `gen-model-refactor`（`options.rs` / `lib.rs` /
+  `setup.rs` 自动合并，只有 changelog 撞了一处标题）。ADR 在主线**改号 080 → 083**——主线 ADR-080 已是单元级发布、081 / 082 也已占用；
+  代码注释、向导、脚本、16 份 `DbOption*.toml` 与 ADR-069 / 074 / 075 的修订注记里的引用一并改，主线原有的 ADR-080（单元级发布）引用一处未动。
+  顺手把 16 份夹具退役注释里落后于 D6 的「不设 = mem」改成「不设 = rocksdb」，ADR-083 D3 同一句改口。验证见本条末尾追记。
 
 ### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
 

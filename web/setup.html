@@ -127,7 +127,7 @@
   <!-- ② 存储 -->
   <section class="card" id="step2" hidden>
     <h2>② 存储：模型数据放哪</h2>
-    <!-- 介质不在这里选（ADR-080，2026-09-18）：它只由启动服务时的环境变量 AIOS_STORE_MODE 决定
+    <!-- 介质不在这里选（ADR-083，2026-09-18）：它只由启动服务时的环境变量 AIOS_STORE_MODE 决定
          （mem / rocksdb，不设 = rocksdb），配置文件里的 store_mode 一个字都不生效。向导只展示生效的
          那一档与出处、提醒文件里残留的过期键；地址那两格只在 rocksdb 档下可填。
          两档本身不变（2026-09-13 拍板）：本服务从不拉起任何数据库进程——内存就在进程里，落盘就连配置指的那台。 -->
@@ -256,7 +256,7 @@ async function boot() {
   $("chip-ver").textContent = "v" + state.version;
   const config = await api("/api/v1/setup/config");
   S.cfg = config.values || {};
-  // 介质只由环境变量决定（ADR-080）：页面拿到的是「本进程实际跑的那一档」与它的出处，不是文件里的字。
+  // 介质只由环境变量决定（ADR-083）：页面拿到的是「本进程实际跑的那一档」与它的出处，不是文件里的字。
   S.effective = config.effective || {};
   fillForm(S.cfg);
   const resume = new URLSearchParams(location.search).get("resume");
@@ -299,7 +299,7 @@ function fillForm(v) {
 }
 
 // ---------- ② 介质展示与地址联动 ----------
-// 介质是后端按环境变量 AIOS_STORE_MODE 定下的（ADR-080），页面不选、只读回来。
+// 介质是后端按环境变量 AIOS_STORE_MODE 定下的（ADR-083），页面不选、只读回来。
 function storeTier() {
   return (S.effective && S.effective.store_mode) === "rocksdb" ? "rocksdb" : "mem";
 }
@@ -316,7 +316,7 @@ function renderEffectiveStore() {
     '（<code>Start-AMS.ps1 -StoreMode rocksdb</code>、systemd 单元的 <code>Environment=</code>、PowerShell 的 <code>$env:</code> 都行），改完重启服务，本页跟着变。</div>';
   if (e.stale_config_store_mode !== null && e.stale_config_store_mode !== undefined) {
     html += '<div class="note warn">配置文件里还写着 <code>store_mode = ' + esc(JSON.stringify(e.stale_config_store_mode)) +
-      '</code>——这一行<b>已不生效</b>（2026-09-18 起，ADR-080），留着只会让读配置的人得出与实际相反的结论，建议删掉。</div>';
+      '</code>——这一行<b>已不生效</b>（2026-09-18 起，ADR-083），留着只会让读配置的人得出与实际相反的结论，建议删掉。</div>';
   }
   $("effective-store").innerHTML = html;
 }
@@ -466,7 +466,7 @@ async function probePort() {
 
 // ---------- ④ 保存并重启 ----------
 function gatherPatch() {
-  // 不带 store_mode：介质由环境变量决定（ADR-080），向导不往文件里写这一格。
+  // 不带 store_mode：介质由环境变量决定（ADR-083），向导不往文件里写这一格。
   const full = $("tier-full").checked;
   const patch = {
     project_path: val("f-project_path"),
