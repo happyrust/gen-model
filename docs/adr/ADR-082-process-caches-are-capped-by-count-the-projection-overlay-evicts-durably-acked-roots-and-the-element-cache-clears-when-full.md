@@ -2,7 +2,9 @@
 
 - 状态：**已接受、已实施**（2026-09-20 用户拍板，共识 **d-149**：「两道都要：overlay 按根数、元素缓存按元素数；RoomOnly 改成也读 RocksDB 冷根；默认 0 不限」；同日 17:0x 用户要求在 mem 档实例上量了一组数、定了两个默认值（D5）；
   同日落地——`ModelMemoryStore::enforce_root_limit` + `model_write_behind` 两处接线、vendor e3d-io `DbSet::with_element_cache_limit`、
-  `recompute_dbnum_room_edges` 的根全集与冷根读库、`DbOption.toml` 两键；实施记录见文末源码钉）
+  `recompute_dbnum_room_edges` 的根全集与冷根读库、`DbOption.toml` 两键；实施记录见文末源码钉。
+  **2026-09-21 追记**：真机整条链 W1–W6 跑过——W5 / W6 `RoomOnly` 撞出冷读 SQL 在 SurrealDB 里退成全表扫描（像卡死，不是锁），
+  拆成两路各走索引后 6,770 个冷根 34 s，见文末追记）
 - 日期：2026-09-20
 - 关联：
   - **修订** ADR-073 D13（`RoomOnly` 整库房间重算）：根全集不再只是「投影里有回执的根」——从源文件枚举、不在 overlay 里的冷根从库里读几何行再算（本文 D3）；
@@ -174,7 +176,11 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
    （ADR-073 D13 U1 第二半那一套）；`model_db_adapter.rs`：`recompute_dbnum_room_edges(…, rooms, library_roots: Option<&[RefNo]>, RootScope)`、
    回执 `projected_roots` / `durable_roots` / `covered_roots`；钉 `a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows`。
    `batch_worker.rs`：`library_generation_roots(dbnum, target_sesno)` → `run_room_only_recompute`，枚举不出 = `RoomRecomputeVerdict::PartialCoverage`。
-   2026-09-20 落的 `durable_room_records_of_root` / `cold_roots` / `RoomOnlyRecompute` 已随合并退役。
+   2026-09-20 落的 `durable_room_records_of_root` / `cold_roots` / `RoomOnlyRecompute` 已随合并退役（主线钉 `the_durable_room_view_keeps_only_what_the_room_calculator_reads`
+   随之删除）。
+   冷读 SQL 本身（读路与 `RoomOnly` 冷根共用）在 `durable_records_sql` / `durable_scope_reads`：每张表拆成 `anc CONTAINS` 与 `in =` 两句各走
+   `idx_<表>_anc` / `idx_<表>_in`，库端 `array::union` 再 `ORDER BY record_order`——**不许合成一条 `… OR …`**（2026-09-21 追记）；
+   钉 `durable_cold_read_scopes_are_planned_through_indexes`（四路 `EXPLAIN FULL` 不出现 `Iterate Table`、落在对应索引，并反证旧 OR 形态退回扫表）。
 7. `DbOption.toml`：`model_overlay_max_roots = 0` / `model_element_cache_max_entries = 0` 与注释；ADR-073 D13 段与源码钉 18 同步改口；
    CONTEXT「投影 overlay 根数上限」「冷根」「元素缓存元素数上限」。
 8. 估算字节（D5 追加）：`model_memory_store.rs` `ScopeState::record_bytes`（`insert` 加 / `remove_internal` 减）、`approx_record_bytes`、
@@ -192,5 +198,45 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - 默认值已按 mem 档实测定下（D5）；**没量**的是 rocksdb 档下逐出真正发生之后的三条回退路与稳态小窗口的增量——现场先看
   `/health.model_cache.overlay.evicted_total` 有没有动。`/dbnums` 面板没有 overlay 那一格，只有 `/health`。估算字节只在 `/health` 上
   现算，**不做**任何持久化 / 历史曲线（2026-09-20 用户拍板）。
-- **未验证**：真机（live）上没有跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」整条链；本文的证据是 `mem://` 单测与源码钉。
+- ~~**未验证**：真机（live）上没有跑过「设上限 → 逐出 → 冷根读路 / 便宜路回退 / `RoomOnly` 读库」整条链~~ → **2026-09-21 在 d-149 私有实例上跑过
+  W1–W6**（文末追记）：逐出、冷根读路、便宜路回退、`RoomOnly` 读库都走到了；`RoomOnly` 撞出冷读 SQL 退成扫表，已修。**仍没量**的是 rocksdb 档下
+  便宜路回退 regen 的单独代价，与每窗重开 `GenerationInput` 的代价（上一条决策卡）。
 - 跨库成员（面板在 A、成员在 B）的 `RoomOnly` 那一问（ADR-073 U3）不在本文。
+
+## 追记（2026-09-21 11:5x）：真机整条链 W1–W6——W5 / W6 `RoomOnly` 停 67 分钟不是锁，是冷读 SQL 在 SurrealDB 里退成全表扫描；拆两路走索引后 6,770 个冷根 34 s
+
+用户 2026-09-20 20:36 拍 (a)：起私有实例压小上限跑几窗，把整条链量出来。
+
+- **怎么跑**：私有实例 `D:\d149live`（release 二进制 `d258c0fba`、HTTP `:18093`、surreal `:18149` **rocksdb**、dbnum 7997 AvevaMarineSample、
+  `DbOption-d149-live.toml`），`AIOS_MODEL_OVERLAY_MAX_ROOTS=4`、`AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES=100000`，W2 起加 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`；
+  起窗 + 采样 + 切日志用 `Run-Window.ps1`，每窗的任务 JSON / `/health` 采样 / 日志切片落在 `D:\d149live\windows\W*\`；
+  六窗的数与读法整理在 **`docs/evidence/2026-09-21-d149-live-chain.md`**。
+- **W1 zone-move → W4 restore-mixed 都走通**（每窗 9 根 BRAN、2.6–2.8 s、`in_sync`）：逐出如 D1——每窗 durable ACK 后「9 → 4 根，逐出 5」，
+  2 s 采样能看到 9 根在 overlay 里的那一瞬；`POST /model/records` 读被逐的根走 durable 冷根路、结果正常。**便宜路一次都没走成**：被逐 / 重启后冷的根
+  → `projection incomplete` → 回退整根 regen（D2 那条，真机走到了）；留在 overlay 里的 4 根 → `model target: immutable target changed outside the
+  design window … rigid motion cannot cover it`——前一窗刚 regen 过、目录 / 模板没动，**为什么判成这样没查**（新欠账，不影响正确性）。
+- **W5 room-rename（`RoomOnly`）与 W6 room-restore 复跑都「卡死」**：W5 task `db-20260921-002335-000007` 00:23:39 起停在 `rooms` 阶段、7 分钟没动被杀
+  （证据 `D:\d149live\windows\W5-room-rename-roomonly\{task-000007-stuck.json, health-stuck.json, stuck-process.txt}`）；W6 用同一二进制复跑，00:35:37 起到 01:42
+  被杀，67 分钟。现场像锁：aios 115 线程全 Wait、CPU 57 s 后不再涨、`stage_last_progress_at` 不动（逐根循环里没有进度计）。**但 surreal 单核满转**
+  （6 s 墙钟吃 6.0 s CPU），aios 侧 e3d-io 读计数（`/health.core.source_reads`）从进 `rooms` 十几秒后起一格不动——aios 不在读源，时间全在库端；
+  aios 到 surreal 只有一条 WS 连接，`recompute_dbnum_room_edges` 对每个冷根串行 `await` 一次 `durable_room_records_of_root`，所以客户端那边只看得到空转。
+- **根因**：`model_record_reader::durable_records_of_root` 那条冷读 SQL（读路 `/model/records` 与 D3 的冷根共用）
+  `WHERE (anc CONTAINS <根> OR in = <根>) AND aabb.d != NONE AND world_trans.d != NONE`——SurrealDB 2.1.4 对**纯 OR** 会做索引并集，
+  一挂上别的 AND 谓词就整条退回 `Iterate Table`（`EXPLAIN FULL` 实测）。47,751 行的 `inst_relate` 上一根 **786 ms**，`tubi_relate` 再扫一遍；
+  7997 共 6,772 根、overlay 上限 4 → 6,770 个冷根 × 0.8–1.6 s ≈ 90–177 分钟。`model_db_adapter.rs` 的 `render_spooled_scope_cleanup` 早就记过并绕开了
+  同一个坑，冷读这条没跟上；本文之前 overlay 不逐出、冷根只在重启后出现，所以一直没被撞到。
+- **修法**（`model_record_reader.rs`，+186/−25）：`durable_scope_reads` 把每张表拆成两句（`anc CONTAINS` 走 `idx_<表>_anc`、`in =` 走 `idx_<表>_in`），
+  `durable_records_sql` 在库端 `array::union` 去重后 `ORDER BY record_order`；行集与顺序和原来那一条 OR **逐字相同**（6 根现场对过），读路的游标偏移不变。
+  每根 ~2 ms 服务端（22 ms 含 HTTP）。单测 `durable_cold_read_scopes_are_planned_through_indexes` 钉住四路计划都落在索引、不出现 `Iterate Table`，并反证
+  旧 OR 形态在这引擎上确实退回扫表（哪天不退了这条会红，提醒把注释改掉）；原用例扩到 5 行，含「根自己的几何（`anc` 缺失的历史行）」只靠 `in =` 那一路兜住、
+  「两路都命中的管身行」去重。`cargo test --lib -q model_record_reader`：d149live 树（`d258c0fba` + 修法）5 绿；主线 `04b103f2e` + 同一份文件在隔离
+  worktree 重跑 5 绿（11:51）。
+- **真机验证**（同一实例换 build2 = `d258c0fba` + 修法，serve5，01:46 起）：杀 W6 后 Reinitialize 1..366 **111 s**（6,772 根、68,143 房间边）；
+  紧接 365..366 窗（FRMW 属性改 → `RoomOnly`）**34 s 成功**，日志原文「整库房间重算完成：根 6433/6772（其中冷根 6770 从库读）、成员边 68260、事务 36、
+  ACK 对齐 2、耗时 32103ms」。对照 W5 7 分钟 / W6 67 分钟没动。
+- **对本文的意思**：D2 表里「读路直读 RocksDB」与 D3「冷根从库里读几何行」的单价从 O(表) 回到 O(命中行)；D3「与读路的冷读同一条 SQL」仍成立
+  （同一个 `durable_records_sql`）。`RoomOnly` 在 rocksdb 档**重启后的第一窗**会对整库逐根冷读（`incremental-overlay` 不回填），修前那就是 90 分钟——
+  0.1.29（`92ef5365c`）/ 0.1.30（`3c04f0ddb`）两个包都还带着旧形态（release exe 里字串 4 处），下一个包收进。
+- **仍开着**：每窗重开 `GenerationInput` 的代价（§不做那张决策卡；这组窗同库连续、没有重开发生，量不到）；rocksdb 档便宜路回退 regen 的单独代价
+  （便宜路本来就没走成，量不出来）；留在 overlay 里的根为什么被判 `immutable target changed`；`/dbnums` 面板「逐出 / 上限」那一格；
+  `RoomOnly` 修后的 34 s 仍是 6,770 个冷根串行读库，并行 / 批读没看。

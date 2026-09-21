@@ -2,6 +2,66 @@
 
 ## 2026-09-21
 
+### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁
+
+- **为什么**：ADR-082 真机整条链在私有实例 `D:\d149live`（release 二进制 `d258c0fba`，`:18093` / surreal `:18149` rocksdb，7997 AvevaMarineSample，
+  `AIOS_MODEL_OVERLAY_MAX_ROOTS=4`、`AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES=100000`、W2 起 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1`）上跑：W1 zone-move /
+  W2 restore-cheap / W3 move-mixed / W4 restore-mixed 都走通（逐出发生、`POST /model/records` 读被逐的根走 durable 冷根路、冷根走 `projection incomplete`
+  回退 regen），**W5 room-rename（`RoomOnly`）task `db-20260921-002335-000007` 00:23:39 起停在 `rooms` 阶段 7 分钟没动被杀，W6 room-restore 复跑
+  00:35–01:42 67 分钟没动**。现场像锁：aios 115 线程全 Wait、CPU 不涨、`stage_last_progress_at` 不动；但 surreal 单核满转（6 s 墙钟吃 6.0 s CPU），
+  aios 侧 e3d-io 读计数（`/health.core.source_reads`）进 `rooms` 十几秒后就一格不动——aios 不在读源、时间全在库端（追记：首版这里写成「`idx_lookups`
+  不涨 = 没走索引」，那一格是源文件读计数不是库索引，已在 11:5x 改口）。根因是 `model_record_reader::durable_records_of_root` 那条冷读 SQL（读路 `/model/records` 与 `RoomOnly` 冷根共用）
+  `WHERE (anc CONTAINS <根> OR in = <根>) AND aabb.d != NONE AND world_trans.d != NONE`——SurrealDB 2.1.4 对纯 OR 做索引并集，再挂 AND 谓词就整条退回
+  `Iterate Table`（`EXPLAIN FULL` 实测）：47,751 行的 `inst_relate` 一根 786 ms、`tubi_relate` 再扫一遍；7997 6,772 根、overlay 上限 4 → 6,770 个冷根串行
+  `await`，≈ 90–177 分钟。`model_db_adapter.rs` 的 `render_spooled_scope_cleanup` 早就记过并绕开了同一个坑，冷读这条没跟上；ADR-082 之前 overlay 不逐出、
+  冷根只在重启后出现，所以没撞到。
+- **改动**（`src/fast_model/model_record_reader.rs`，+186/−25）：`durable_scope_reads` 把每张表拆成两句（`anc CONTAINS` 走 `idx_<表>_anc`、`in =` 走
+  `idx_<表>_in`），`durable_records_sql` 在库端 `array::union` 去重后 `ORDER BY record_order`；行集与顺序和原来那一条 OR **逐字相同**（6 根现场对过）、
+  读路游标偏移不变，每根 ~2 ms 服务端（22 ms 含 HTTP）。新单测 `durable_cold_read_scopes_are_planned_through_indexes`：四路 `EXPLAIN FULL` 不出现
+  `Iterate Table` 且落在对应索引，并反证旧 OR 形态确实退回扫表（引擎哪天不退了这条会红、提醒改注释）；原用例扩到 5 行，含「根自己的几何（`anc` 缺失的
+  历史行）」只靠 `in =` 一路兜住、「两路都命中的管身行」去重。ADR-082 加文末追记（W1–W6、根因、修法、真机数）、源码钉 6 与「不做 / 未决」改口。
+- **真机验证**（同一实例换 build2 = `d258c0fba` + 本修法，serve5，01:46 起）：杀 W6 后 Reinitialize 1..366 **111 s**（6,772 根、68,143 房间边）；紧接
+  365..366 窗（FRMW 属性改 → `RoomOnly`）**34 s 成功**，日志「整库房间重算完成：根 6433/6772（其中冷根 6770 从库读）、成员边 68260、事务 36、ACK 对齐 2、
+  耗时 32103ms」——对照 W5 7 分钟 / W6 67 分钟没动。每窗原始件在 `D:\d149live\windows\W*\`（W5 的 `task-000007-stuck.json` / `health-stuck.json` /
+  `stuck-process.txt`），六窗的数与读法整理成 **`docs/evidence/2026-09-21-d149-live-chain.md`**（11:5x 追记）：W1–W4 每窗 9 根 2.6–2.8 s、
+  durable ACK 后「9 → 4 根，逐出 5」×4 + publish 时机「6 → 4，逐出 2」= 17 与 `evicted_total` 对上；**便宜路一次都没走成**——冷根 `projection incomplete`
+  回退（ADR-082 D2 那条），留在 overlay 里的 4 根被判 `immutable target changed outside the design window`（前一窗刚 regen 过，原因待查，新欠账）；
+  W5 / W6 进 `rooms` 十几秒内 `library_generation_roots` 枚举根集（解析 70,084 元素、RSS +90 MB）做完，之后 aios 侧计数一格不动；
+  serve4（旧二进制）Reinitialize 118 s 与 serve5 111 s 一样快——慢的只有 `RoomOnly` 那一步。
+- **单测**：`cargo test --lib -q model_record_reader`——d149live 树（`d258c0fba` + 修法）10:32 `5 passed; 0 failed`；主线 `04b103f2e` + 同一份文件
+  （SHA-256 逐字相同）在隔离 worktree 11:51 重跑 `5 passed; 0 failed; 2403 filtered out`（79 s 含编译）。没跑全量 `--lib`。
+- **影响面**：0.1.29（`92ef5365c`）/ 0.1.30（`3c04f0ddb`）两个包都带着旧 OR 形态（release exe 里字串 4 处）。默认 50,000 根上限下 AMS 样例不会逐出，
+  但 rocksdb 档**重启后的冷根**走同一条读路（`incremental-overlay` 不回填）：`/model/records` 读一个没回填的根 ~0.8 s × 2 表；`RoomOnly` 重启后第一窗会对
+  整库逐根冷读——修前就是那 90 分钟。下一个包收进。
+- **未验 / 欠账**：每窗重开 `GenerationInput` 的代价没量（ADR-082 §不做那张决策卡仍开着；这组窗同库连续、没有重开发生）；rocksdb 档逐出后便宜路回退 regen
+  的代价量不出来（便宜路本来就没走成）；留在 overlay 里的根为什么被判 `immutable target changed` 没查；`RoomOnly` 修后 34 s 仍是 6,770 个冷根串行读库、
+  并行 / 批读没看；`/dbnums` 面板「逐出 / 上限」那一格没做；主工作树里另一路会话在途的 `attribute_history` / `unit_versions` / `handlers` 等 5 文件**没进本提交**。
+
+### 本地发布 0.1.30：存储介质只由 `AIOS_STORE_MODE` 决定、漏设落 rocksdb（ADR-083）——0.1.29 之后主线唯一的运行时改动
+
+- 后端 `0.1.30` 构建自 `3c04f0ddb230`（`chore(release): 0.1.30`，**干净树**，`git_dirty:false`）。与 0.1.29（`92ef5365c`，同日 09:38）之间的运行时差只有
+  存储介质那一串：`8a1b30c80` / `21b5d6c64` / `103bee843`（从 `codex/model-projection-cache` cherry-pick，ADR 在主线改号 080 → 083 见 `8ab1277f1`）
+  与横幅空格 `f89254f8b`；其余 `db07e39a1` / `3c42390cc` / `b7f50208c` / `8dd925396` 只动注释、spec、changelog。用户口径见 `docs/release-notes/0.1.30.md`
+  （升级注意：手工直起 exe 的现场要带 `AIOS_STORE_MODE=rocksdb`，不带会去连 `v_ip:v_port`、没库就起不来）。
+- 产物 `releases/ams-local-0.1.30_release.20260921022635.g3c04f0ddb230-runtime.zip`（120.9 MB / 126,758,510 B），
+  SHA-256 `f6749299748f5f0d88d436c99cde6dc43cd21355810f4e2641a069fdf58624e0`（另行独立重算一致）；包内 `aios-database.exe` 自报
+  `0.1.30+release.20260921022635.g3c04f0ddb230`、`git_dirty:false`，SHA-256 `dde87123acee38290511884d590cf1897e7bdac02722601dde55d9e34688df28`
+  （213,222,912 B）。包型 `runtime`，79 个文件：`aios-database.exe` / `web\`（13）/ `bin\surreal.exe` / `resource\`（7）/ `schema\`（48）/
+  出厂 `DbOption.toml`（**没有 `store_mode` / `in_memory_db` 行**——与 0.1.29 包的第一处可见差别）/ `.first-run-pending` / `Start-AMS.ps1`
+  （**新增 `-StoreMode mem|rocksdb`**，不给且环境为空时回填 `mem`）/ `Start-Surreal` / `Rollback` / README / CHANGELOG + `release.json`。
+- Web 与 0.1.29 同源：复用 0.1.26 包（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，脚本校过来源包哈希
+  `195b4280…`），`index.html` / CHANGELOG 取自 plant-ui 干净 worktree `786187947`。
+- 冒烟（口 19099，`-StrictSmoke`）：A 出厂配置起服务 = 设置模式 + 向导页、B 本机配置（`test-worklspace\bin`）全启动 `medium=mem` / `durable=false` /
+  服务没拉 surreal 子进程——两腿通过；C rocksdb 腿在 runtime 档按设计跳过。脚本全程 3 分 35 秒（本地六个 crate 重编 3 分 17 秒，三方依赖走共享 target）。
+- **构建输入（与主工作树隔离，照 0.1.29 的做法）**：`D:\work\plant-code\rel-0.1.30\` 下七个 worktree——gen-model `3c04f0ddb`；vendor 各取 committed HEAD：
+  e3d-io `4a76d2a`、e3d-model `4866468`、e3d-attlib `f37be2e`、plant-mbd `f888a50`、old-aios-core `a438029` + 0.1.26 / 0.1.27 / 0.1.29 都带着的那一处
+  稳定未提交增量（rkyv `validation` 特性 + `pdms_shape.rs` 47 行；两个文件直接拷自主工作树，`git apply --check --reverse` 主工作树 diff 为空 = 逐字相同）；
+  plant-ui `786187947`。`cargo metadata --locked` 在这棵树上通过，Cargo.lock 只动了自身版本号那一行。**没进包**的在途改动：主工作树里另一路会话的
+  `attribute_history` / `unit_versions` / `model_record_reader` / `handlers` 等 6 文件；e3d-io 5 文件、e3d-model 5 文件、e3d-attlib 2 文件、plant-mbd 15 文件。
+  打包完七个 worktree 已删。
+- **未验**：rocksdb（durable）真库路径本包没跑（C 腿按档跳过）；`cargo test --lib` 没在打包树上重跑（主线 options / setup / review-db / store_mode
+  相关 99 条 09:5x 在主工作树上跑过，见上一节追记）；plant-ui 侧无变化。
+
 ### ADR 改号：「介质只由环境变量 `AIOS_STORE_MODE` 决定」080 → 083，与主线叫法一致
 
 - 主线 `gen-model-refactor` 2026-09-21 把本支的 `8c89728c3` / `b90f9e38d` / `e376ad2bb` 三笔 cherry-pick 过去时发现撞号——主线的 ADR-080
@@ -94,6 +154,17 @@
   重取本仓看不到，要问 PMS 侧）；③ §8 六条的 JWT 校验挡住的只是「没先调 `/api/auth/token`」，而它**不要密码**——真正的信任边界是
   谁能打到 `/api/auth/token`，收紧的抓手是 nginx 对这条路径按 PMS 出口 IP 白名单（本仓与 plant3d-web 都没做，待拍板）。
   `DbOption.toml` 注释与 `review-api.md` §1.1 的对应两句同步改口。
+- **落地（同日 10:1x，用户拍板选 (a)「密钥写进生成的 DbOption.toml，和旧 :3100 一样」）**：在 `deploy/backend-20260918` 分支提交
+  `329ec2a17`（本地，未 push；worktree `.scratch/wt-deploy-backend-20260918`）：`render_dboption.py` 追加第四段 `[model_center]`
+  （`JWT_SECRET` 必填 / 非默认串 / ≥16 字符，否则拒绝渲染而不是默默回落；`json.dumps` 转义；写完 600；`tomllib` 自检；日志只报长度）；
+  `install_backend.sh` 去掉 `service.env` 写入与单元里的 `EnvironmentFile=`，装前 `awk` 核包里有 `[model_center].token_secret` 且不是
+  空串 / 默认串否则 `die`，`install -m 600`，备份也 600，发现旧 `service.env` 就删；`deploy-linux-ubuntu.yml` 把 `REVIEW_JWT_SECRET`
+  改必填、喂给 Render 步、diff 遮掉 `+token_secret` 行、不再写 `bundle/jwt_secret`；`rehearse-backend-stack.yml` 彩排密钥
+  `rehearsal-only-<run_id>` 走同一条渲染路，Inspect 步改验 600 / 在场 / 无 `service.env` / 无 `EnvironmentFile`，再用该密钥自签
+  HS256 打 `/api/users/me`（200）、默认串自签（401）、`/api/auth/token` 领的（200）——首发彩排只验了 env 文件写成 600。本机验证：
+  两份 YAML 解析、探针可编译、render 四种坏输入全拒、怪字符密钥 TOML 往返一致、awk 门三份样本 OK/die/die、`bash -n` 过、探针逻辑对生产
+  试跑 401/401/200。**GitHub 上目前没有 `REVIEW_JWT_SECRET`**（`gh secret list` 只有 `DEPLOY_REMOTE_PASS` / `GH_PAT`）——设上它
+  （值取服务器 `[model_center].token_secret` 则已发 token 不失效）再推；推上去不带 `[deploy]` 是空跑，空跑也会在渲染步因缺 secret 而红。
 
 ## 2026-09-20
 
@@ -792,7 +863,15 @@
   验证（2026-09-21，同一工作树里另一会话有在途改动）：`cargo check --lib --tests` 0 error；`cargo test --lib -- options:: web_service::setup::
   web_service::review::db:: store_mode` **99 passed / 1 failed**——唯一那条红是护栏 `no_db_option_fixture_still_carries_a_store_mode_key`
   点名了**未入库**的本机文件 `DbOption-slyk.toml: store_mode = "mem"`（另一会话的探针配置，不在任何提交里），正是这条护栏该抓的东西；
-  入库的 16 份夹具无一命中。**未验**：真机起服务看启动横幅与向导第②步。
+  入库的 16 份夹具无一命中（那份本机文件随后按 ADR-083 改掉：删行、`_slyk_verify_partial.ps1` 改带 `AIOS_STORE_MODE=mem`，护栏转绿）。
+  真机（debug 二进制 `0.1.29+g37341392b`，临时配置复制自仓根、端口 8047、**故意留一行** `store_mode = "rocksdb"`）：
+  ①`AIOS_STORE_MODE=mem` 起服务 → 横幅「内存模式（这一档由环境变量 AIOS_STORE_MODE 定的）」+「⚠ DbOption.toml 里的 store_mode =
+  "rocksdb" 已不再生效……本进程按 mem 跑……**两边不是同一档**：启动前设 AIOS_STORE_MODE=rocksdb」；`/health.sul_db` =
+  `{medium: mem, endpoint: embedded:mem, durable: false}`、`data_face: read-through`；`GET /api/v1/setup/config` 的 `effective` =
+  `{store_mode: mem, store_mode_source: 环境变量 AIOS_STORE_MODE, stale_config_store_mode: rocksdb}`；`/setup.html` 第②步
+  `name="store_mode"` 的 radio 0 个、「当前介质：内存库（mem）　由 环境变量 AIOS_STORE_MODE 决定」与残留键提醒都在。
+  ②不设环境变量 → 按默认 rocksdb 去连 `ws://localhost:8009`，端口上没库，`SurrealDB 连接失败` exit 1（D6 要的那种当场报错），
+  残留键同样被点名、因两边同档不喊「不是同一档」。
 
 ### 节点版本视图的两条后端（plant3d-web ADR 0066）：`GET element/attribute-history` 属性变化时间线 + `GET node/diff-summary` 差异摘要
 

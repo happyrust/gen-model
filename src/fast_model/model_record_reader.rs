@@ -49,34 +49,71 @@ pub(crate) async fn durable_records_of_root(
     let packed = root.refno().0;
     let owner = root.to_pe_key();
     let mut response = db
-        .query(format!(
-            r#"
-        SELECT id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner,
-          generic, aabb.d AS world_aabb, world_trans.d AS world_trans,
-          out.ptset.d.pt AS pts, booled_id != NONE AS has_neg,
-          IF booled_id != NONE {{ [{{geo_hash: booled_id}}] }}
-          ELSE {{ insts_flat ?? (SELECT transform ?? trans.d AS transform,
-              record::id(out) AS geo_hash FROM out->geo_relate
-              WHERE visible AND out.meshed AND geo_type = 'Pos'
-                AND (transform != NONE OR trans.d != NONE)) }} AS insts
-        FROM inst_relate
-        WHERE (anc CONTAINS {packed} OR in = {owner})
-          AND aabb.d != NONE AND world_trans.d != NONE ORDER BY record_order;
-        SELECT id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner,
-          'TUBI' AS generic, aabb.d AS world_aabb, world_trans.d AS world_trans,
-          false AS has_neg,
-          [{{geo_hash: record::id(out), is_tubi: true,
-             is_invalid_tubi: invalid ?? false}}] AS insts
-        FROM tubi_relate
-        WHERE (anc CONTAINS {packed} OR in = {owner})
-          AND aabb.d != NONE AND world_trans.d != NONE ORDER BY record_order;
-    "#
-        ))
+        .query(durable_records_sql(packed, &owner))
         .await?
         .check()?;
     let mut records: Vec<GeomInstQuery> = response.take(0)?;
     records.extend(response.take::<Vec<GeomInstQuery>>(1)?);
     Ok(records)
+}
+
+/// 一张表的两路作用域读——`(按 anc 的一句, 按 in 的一句)`：子树行 `anc CONTAINS <根>` 走 `idx_<表>_anc`，
+/// 根自己的几何 / `anc` 缺失的历史行 `in = <根>` 走 `idx_<表>_in`。两句只差 WHERE 的第一个谓词，
+/// 都不带 `ORDER BY`——排序留给并集之后那一层。
+fn durable_scope_reads(table: &str, projection: &str, packed: u64, owner: &str) -> [String; 2] {
+    [
+        format!(
+            "SELECT {projection} FROM {table} WHERE anc CONTAINS {packed} \
+             AND aabb.d != NONE AND world_trans.d != NONE"
+        ),
+        format!(
+            "SELECT {projection} FROM {table} WHERE in = {owner} \
+             AND aabb.d != NONE AND world_trans.d != NONE"
+        ),
+    ]
+}
+
+/// 冷读的两句 SQL：`inst_relate` 一句、`tubi_relate` 一句，各自 `ORDER BY record_order`（= 记录 id），
+/// 调用方 `take(0)` / `take(1)`。
+///
+/// 每张表的作用域是两路（[`durable_scope_reads`]），**分开读、各走各的索引、再 `array::union`**，
+/// 不写成一条 `anc CONTAINS … OR in = …`：优化器碰到 OR 再挂上别的 AND 谓词（这里的
+/// `aabb.d != NONE AND world_trans.d != NONE`）整条放弃索引退回 `Iterate Table`——单独一条 OR 它会做
+/// 索引并集，一加 AND 就不做了（SurrealDB 2.1.4 rocksdb 现场 EXPLAIN 实测：47,751 行的 `inst_relate`
+/// 上一根 0.76 s，拆开 2–3 ms；mem 引擎同样，`durable_cold_read_scopes_are_planned_through_indexes`
+/// 钉住）。整库房间重算（ADR-073 D13 / ADR-082）对 overlay 之外的每一根都要来一次冷读，那 0.8 s 乘上
+/// 根数就是 O(根 × 库)——d-149 真机 7997（6,772 根、overlay 上限 4）上一窗跑成 90 分钟、看着像卡死。
+/// 与 [`render_spooled_scope_cleanup`] 同一条纪律。
+///
+/// 并集在库端算（两路的行只在 `anc` 含自身的管身行上重合，`array::union` 去重）、按 `record_order`
+/// 排：行集与顺序和原来那一条 OR 逐字相同（6 根现场对过），读路的游标偏移不变。
+///
+/// [`render_spooled_scope_cleanup`]: super::model_db_adapter
+fn durable_records_sql(packed: u64, owner: &str) -> String {
+    let inst_projection = format!(
+        "id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner, \
+         generic, aabb.d AS world_aabb, world_trans.d AS world_trans, \
+         out.ptset.d.pt AS pts, booled_id != NONE AS has_neg, \
+         IF booled_id != NONE {{ [{{geo_hash: booled_id}}] }} \
+         ELSE {{ insts_flat ?? (SELECT transform ?? trans.d AS transform, \
+             record::id(out) AS geo_hash FROM out->geo_relate \
+             WHERE visible AND out.meshed AND geo_type = 'Pos' \
+               AND (transform != NONE OR trans.d != NONE)) }} AS insts"
+    );
+    let tubi_projection = format!(
+        "id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner, \
+         'TUBI' AS generic, aabb.d AS world_aabb, world_trans.d AS world_trans, \
+         false AS has_neg, \
+         [{{geo_hash: record::id(out), is_tubi: true, is_invalid_tubi: invalid ?? false}}] AS insts"
+    );
+    let [inst_by_anc, inst_by_owner] =
+        durable_scope_reads("inst_relate", &inst_projection, packed, owner);
+    let [tubi_by_anc, tubi_by_owner] =
+        durable_scope_reads("tubi_relate", &tubi_projection, packed, owner);
+    format!(
+        "SELECT * FROM array::union(({inst_by_anc}), ({inst_by_owner})) ORDER BY record_order;\n\
+         SELECT * FROM array::union(({tubi_by_anc}), ({tubi_by_owner})) ORDER BY record_order;"
+    )
 }
 
 fn projection_record_to_query(
@@ -284,19 +321,143 @@ mod tests {
             aabb=aabb:box,world_trans=trans:world,generic='BOX',booled_id='other';
           CREATE tubi_relate:tube SET in=pe:⟨24384_26611⟩,anc=[{packed}],
             out=inst_geo:tube,aabb=aabb:box,world_trans=trans:world,invalid=true;
+          -- 根自己的几何、`anc` 缺失的历史形态：只有 `in = 根` 那一路兜得住。
+          CREATE inst_relate:own SET in=pe:⟨24384_26606⟩,anc=[1],
+            aabb=aabb:box,world_trans=trans:world,generic='EQUI',booled_id='own';
+          -- 根自己的管身、`anc` 含自身：两路都命中，并集里只许出现一次。
+          CREATE tubi_relate:both SET in=pe:⟨24384_26606⟩,anc=[{packed}],
+            out=inst_geo:tube,aabb=aabb:box,world_trans=trans:world;
         "#)).await.unwrap().check().unwrap();
         let records = super::durable_records_of_root(&db, root).await.unwrap();
-        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records.len(),
+            5,
+            "两路并集：子树 2 + 根自己 1，管身 1 + 根自己的 1（去重）"
+        );
         assert!(records.iter().all(|r| r.owner == root));
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.refno.to_string())
+                .collect::<Vec<_>>(),
+            [
+                "24384_26609",
+                "24384_26610",
+                "24384_26606",
+                "24384_26606",
+                "24384_26611"
+            ],
+            "inst_relate 先、tubi_relate 后，各按记录 id 排：与原来那一条 OR 的顺序相同"
+        );
+        assert_eq!(
+            records[2].generic, "EQUI",
+            "`in = 根` 那一路补进来的根自己的几何"
+        );
+        assert_eq!(
+            records.iter().filter(|r| r.generic == "TUBI").count(),
+            2,
+            "两路都命中的管身行不重复"
+        );
         let canonical = records.iter().find(|r| r.generic == "BOX").unwrap();
         assert_eq!(canonical.insts[0].transform.translation.x, 5.0);
         assert_eq!(canonical.world_trans.translation.x, 120.0);
-        let tube = records.iter().find(|r| r.generic == "TUBI").unwrap();
+        let tube = records
+            .iter()
+            .find(|r| r.generic == "TUBI" && r.refno.to_string() == "24384_26611")
+            .unwrap();
         assert!(!canonical.has_neg);
         assert!(!tube.has_neg);
         assert!(tube.insts[0].is_tubi && tube.insts[0].is_invalid_tubi);
+        let own_tube = records
+            .iter()
+            .find(|r| r.generic == "TUBI" && r.refno.to_string() == "24384_26606")
+            .unwrap();
+        assert!(own_tube.insts[0].is_tubi && !own_tube.insts[0].is_invalid_tubi);
         let baked = records.iter().find(|r| r.generic == "FLOOR").unwrap();
         assert!(baked.has_neg);
         assert_eq!(baked.insts[0].geo_hash, "hole");
+    }
+
+    /// 冷读的每一路作用域读都必须落在索引上（`anc CONTAINS` → `idx_<表>_anc`，`in =` → `idx_<表>_in`），
+    /// 计划里不许出现 `Iterate Table`；两路合成一条 `… OR …` 时优化器整条退回扫表（改写前就是这样：
+    /// 47,751 行的库上一根 0.76 s，整库房间重算逐根冷读跑成 90 分钟），所以并集只许在两路各自读完之后算。
+    #[tokio::test]
+    async fn durable_cold_read_scopes_are_planned_through_indexes() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("cold_read_plans").await.unwrap();
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let root: aios_core::RefnoEnum = "24384_26606".into();
+        let (packed, owner) = (root.refno().0, root.to_pe_key());
+
+        let sql = super::durable_records_sql(packed, &owner);
+        let statements = sql
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statements.len(),
+            2,
+            "inst_relate 一句、tubi_relate 一句: {sql}"
+        );
+        for statement in &statements {
+            assert!(
+                statement.starts_with("SELECT * FROM array::union((")
+                    && statement.ends_with(")) ORDER BY record_order;"),
+                "并集在库端算、并完再排: {statement}"
+            );
+            assert!(
+                !statement.contains("OR in =") && !statement.contains("OR anc CONTAINS"),
+                "两路作用域不许合成一条 OR 谓词——优化器会整条退回扫表: {statement}"
+            );
+        }
+
+        for table in ["inst_relate", "tubi_relate"] {
+            let reads = super::durable_scope_reads(table, "id", packed, &owner);
+            for (read, index) in reads
+                .iter()
+                .zip([format!("idx_{table}_anc"), format!("idx_{table}_in")])
+            {
+                assert!(
+                    statements.iter().any(|statement| {
+                        statement.contains(read.split_once(" WHERE ").unwrap().1)
+                    }),
+                    "冷读 SQL 里找不到这一路的谓词: {read}"
+                );
+                let mut response = db
+                    .query(format!("{read} EXPLAIN FULL;"))
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let plan: surrealdb::Value = response.take(0).unwrap();
+                let plan = plan.to_string();
+                assert!(
+                    !plan.contains("Iterate Table") && plan.contains(&index),
+                    "{read} must be planned through {index}, plan: {plan}"
+                );
+            }
+        }
+
+        // 对照：改写前的那一条 OR——单靠索引并集它能走索引，一挂上 AND 谓词就整条退回扫表。
+        let mut response = db
+            .query(format!(
+                "SELECT id FROM inst_relate WHERE (anc CONTAINS {packed} OR in = {owner}) \
+                 AND aabb.d != NONE AND world_trans.d != NONE EXPLAIN FULL;"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let plan: surrealdb::Value = response.take(0).unwrap();
+        assert!(
+            plan.to_string().contains("Iterate Table"),
+            "the OR shape no longer falls back to a table scan on this engine—\
+             the split is then only a style choice, update this note: {plan}"
+        );
     }
 }
