@@ -3098,6 +3098,7 @@ mod tests {
             manifest_hash: manifest_hash.into(),
             geometry_count,
             published_via: "regen".into(),
+            room: None,
         }
     }
 

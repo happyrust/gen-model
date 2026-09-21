@@ -964,8 +964,9 @@ mod tests {
             current_arm.contains("model_write_behind::publish("),
             "only the current projection goes durable: {current_arm}"
         );
+        // 合并后 `bake_elements` 多了房间计算器那一位（ADR-073 D1，B/T2）；历史快照不算房间归属，传 `None`。
         assert!(
-            body.contains("bake_elements(upserts, mesh_dir)"),
+            body.contains("bake_elements(upserts, mesh_dir, None)"),
             "meshes are the one on-disk artifact, baked before the scope dispatch"
         );
         // 本模块自己：快照回执只活在进程内的 `RwLock<HashMap>`，没有任何库句柄

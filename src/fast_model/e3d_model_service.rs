@@ -5695,6 +5695,7 @@ mod tests {
                         manifest_hash: empty_hash.clone(),
                         geometry_count: 0,
                         published_via: "regen".into(),
+                        room: None,
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -6640,7 +6641,7 @@ mod tests {
                 snapshot.report.failed.len()
             );
             let owners = snapshot.owners.clone();
-            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+            let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
             let (commit, _) =
                 project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
             Ok(commit)
@@ -6702,6 +6703,7 @@ mod tests {
                     manifest_hash: hash,
                     geometry_count: count,
                     published_via: "regen".into(),
+                    room: None,
                 },
             ));
             store.commit(ProjectionScope::Current, vec![seed]);
@@ -7432,7 +7434,7 @@ mod tests {
                                 generate_snapshot_from_set(&input.set, &input.index, refno, cache)?;
                             let failed = snapshot.report.failed.len();
                             let owners = snapshot.owners.clone();
-                            let baked = bake_snapshot(snapshot, &mesh_dir)?;
+                            let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
                             let (commit, _) = project_geometry_delta(
                                 dbnum,
                                 sesno,
@@ -7461,6 +7463,7 @@ mod tests {
                                     manifest_hash: seed_hash,
                                     geometry_count: seed_count,
                                     published_via: "regen".into(),
+                                    room: None,
                                 },
                             ));
                             store.commit(ProjectionScope::Current, vec![seed]);
@@ -8202,6 +8205,7 @@ mod tests {
             manifest_hash: "manifest".into(),
             geometry_count: 3,
             published_via: "regen".into(),
+            room: None,
         }
     }
 

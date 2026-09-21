@@ -4948,6 +4948,7 @@ mod tests {
             manifest_hash: format!("test-{geometry_count}"),
             geometry_count,
             published_via: via.into(),
+            room: None,
         };
 
         async fn rows_without_model_sesno(db: &Surreal<Any>, table: &str) -> Vec<SurValue> {
