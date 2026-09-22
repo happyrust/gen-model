@@ -12,8 +12,10 @@
     成员距离排、截到 `tube_root_cap = 500`）→ `TreeDraft::finish`（直段过范围 / 过滤 / 归房 / 挂单元 / 出响应）；`assemble_tree` 变薄壳，
     `tubes` 关着时与拆分前逐字节相同（新键全是 `Option` + skip）。新形状：`TreeTube { ordinal, from, to, from_noun, to_noun, distance, length, aabb, invalid,
     shared_rooms? }`、各层 `tube_count?`、顶层 `total_tube_count?` / `tubes_truncated?`；`count` / `total_count` 不变；直段放置数计入 `leaf_count`、共用 `leaf_cap`。
-    归属按两端管件任一属该房（`RoomScope::member_rooms`），两端都解不出的按单元所在的房兜底；`include_self=false` 剔目标子树里的 BRAN 的直段；
-    `nouns=` 不含 TUBI 直段不出；`keyword=` 用容器 BRAN + `TUBI` 走同一谓词。
+    归属按两端管件任一属该房（`RoomScope::member_rooms`）；两端都不是所选房间成员时，任一端在范围里（是候选）却不是成员 = 属于别处、不列
+    （真机 R432 整房 176 段里 8 段穿过房间盒、两端却是邻房的 BEND / UNIO / VALV——它们旁边的管件正是这样被 `rooms=` 滤掉的，第二笔收窄），
+    两端都不在范围里才按单元所在的房兜底；`include_self=false` 剔目标子树里的 BRAN 的直段；`nouns=` 不含 TUBI 直段不出；`keyword=` 用容器
+    BRAN + `TUBI` 走同一谓词。
   - 新 `spatial_tree_tubes`：`TubeRecord`（身份四元组 + 盒 + 长度 = 世界变换 z 轴列的模 + `invalid`）；`load_tube_records`：投影里有回执的根取
     `root_snapshot`（与 `/model/records` 同谓词），其余一次冷读；冷读行 `route_ordinal` 未落盘的按同 `(from, to)` 内出现序补号。
   - `model_record_reader`：`durable_tube_rows_of_branches` / `durable_tube_rows_sql`——只读 `tubi_relate`、只按 `in` 一路（管身行的 `in` 就是容器 BRAN），

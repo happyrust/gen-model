@@ -490,6 +490,9 @@ pub struct TreeDraft {
     options: TreeOptions,
     /// 过滤、按距离排、按 refno 去重后的命中。
     hits: Vec<Hit>,
+    /// 过滤前树上取到的全部候选 refno：直段归房时区分「两端在范围里却不是任一所选房间的成员 = 属于别处」与
+    /// 「两端根本不在范围里 = 解不出」（[`TreeDraft::place_tubes`]）。
+    candidate_refnos: HashSet<RefU64>,
     /// 每条命中放到了几间房。
     shared: Vec<usize>,
     /// 管件放置数（跨房构件每间房各算一次）。
@@ -534,6 +537,14 @@ pub fn draft_tree(
     options: &TreeOptions,
 ) -> TreeDraft {
     let candidate_count = scan.candidates.len();
+    let candidate_refnos: HashSet<RefU64> = if options.tubes {
+        scan.candidates
+            .iter()
+            .map(|candidate| candidate.entry.refno)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let Filtered { mut hits, .. } =
         filter_candidates(scan.candidates, params, &scan.center, attrs, Some(scope));
     sort_hits(&mut hits, SortBy::Distance);
@@ -591,6 +602,7 @@ pub fn draft_tree(
         params: params.clone(),
         options: options.clone(),
         hits,
+        candidate_refnos,
         shared,
         leaf_count,
         per_room,
@@ -729,6 +741,8 @@ impl TreeDraft {
                 let Some(distance) = measure_box_in_range(&self.center, &self.params, &record.aabb) else {
                     continue;
                 };
+                // D4 (i)：两端管件任一属该房就挂到该房；两端都不是任一所选房间的成员时再分两档——在范围里（是候选）却不是成员
+                // = 已经判过、属于别处，它旁边的管件正是这样被 `rooms=` 滤掉的，直段跟着走；根本不在范围里 = 解不出，按单元所在的房兜底。
                 let mut ends: Vec<usize> = Vec::new();
                 for end in [record.from, record.to] {
                     if let Some(rooms) = scope.member_rooms.get(&end) {
@@ -737,6 +751,13 @@ impl TreeDraft {
                 }
                 ends.sort_unstable();
                 ends.dedup();
+                if ends.is_empty()
+                    && [record.from, record.to]
+                        .iter()
+                        .any(|end| self.candidate_refnos.contains(end) && !scope.contains(*end))
+                {
+                    continue;
+                }
                 let placed: Vec<(usize, i64)> = if ends.is_empty() {
                     slots.clone()
                 } else {
@@ -812,6 +833,7 @@ impl TreeDraft {
             params,
             options,
             hits,
+            candidate_refnos: _,
             shared,
             leaf_count,
             per_room,
@@ -1224,7 +1246,8 @@ mod tests {
     }
 
     /// 1 TUBI / 2 ELBO 挂 BRAN 10，3 NOZZ 挂 EQUI 20，4 PANE 无单元（树上两条条目），6 TUBI 挂 BRAN 11 且跨两间房，
-    /// 7 FLOOR 无单元、只在第二间房。房间 51「R2」在前（下标 0）、52「R1」在后（下标 1）——输出按房间号排要反过来。
+    /// 7 FLOOR 无单元、只在第二间房；5 GWALL 在范围里却不是任一所选房间的成员（被 `rooms=` 滤掉的那一类）。
+    /// 房间 51「R2」在前（下标 0）、52「R1」在后（下标 1）——输出按房间号排要反过来。
     fn fixture() -> (AccelerationTree, TableAttrs, RoomScope) {
         let tree = AccelerationTree::load(vec![
             entry(1, "TUBI", [1.0, 0.0, 0.0], [2.0, 1.0, 1.0]),
@@ -1232,6 +1255,7 @@ mod tests {
             entry(3, "NOZZ", [3.0, 0.0, 0.0], [4.0, 1.0, 1.0]),
             entry(4, "PANE", [4.0, 0.0, 0.0], [5.0, 1.0, 1.0]),
             entry(4, "PANE", [6.0, 0.0, 0.0], [7.0, 1.0, 1.0]),
+            entry(5, "GWALL", [1.0, 5.0, 0.0], [2.0, 6.0, 1.0]),
             entry(6, "tubi", [5.0, 0.0, 0.0], [6.0, 1.0, 1.0]),
             entry(7, "FLOOR", [7.0, 0.0, 0.0], [8.0, 1.0, 1.0]),
         ]);
@@ -1310,8 +1334,8 @@ mod tests {
     #[test]
     fn tree_folds_hits_into_room_spec_unit_type_unit_and_others_with_dedup_and_shared_rooms() {
         let tree = tree_of(&TreeOptions::default());
-        assert_eq!(tree.total_count, 6, "refno 4 的两条条目只算一条");
-        assert_eq!(tree.candidate_count, 7);
+        assert_eq!(tree.total_count, 6, "refno 4 的两条条目只算一条；5 不是房间成员");
+        assert_eq!(tree.candidate_count, 8);
         assert_eq!(tree.leaf_count, 7, "6 跨两房、各算一次放置");
         assert!(tree.leaves_inline);
         assert_eq!(tree.inlined, None);
@@ -1499,8 +1523,9 @@ mod tests {
         }
     }
 
-    /// BRAN 10 的五段（a 两端都是房 0 的成员；b 在范围外；c 从容器头到 1；d 到一个不在命中里的 8；e 两端都解不出）、
-    /// BRAN 11 的两段（f 一端是跨两房的 6；g 一端是只在房 1 的 7）、BRAN 12（不在树上）的一段。
+    /// BRAN 10 的六段（a 两端都是房 0 的成员；b 在范围外；c 从容器头到 1；d 到一个不在命中里的 8；e 两端都不在范围里、解不出；
+    /// h 一端是 5——在范围里却不是任一所选房间的成员 = 属于别处）、BRAN 11 的两段（f 一端是跨两房的 6；g 一端是只在房 1 的 7）、
+    /// BRAN 12（不在树上）的一段。
     fn supplement() -> TubeSupplement {
         TubeSupplement {
             by_root: HashMap::from([
@@ -1512,6 +1537,7 @@ mod tests {
                         tube_record(10, 10, 1, 0, [0.5, 0.0, 0.0], [1.0, 1.0, 1.0]),
                         tube_record(10, 2, 8, 1, [2.5, 0.0, 0.0], [3.0, 1.0, 1.0]),
                         tube_record(10, 8, 9, 0, [3.0, 0.0, 0.0], [3.5, 1.0, 1.0]),
+                        tube_record(10, 5, 9, 0, [1.0, 4.0, 0.0], [2.0, 5.0, 1.0]),
                     ],
                 ),
                 (
@@ -1623,7 +1649,11 @@ mod tests {
     fn tubes_on_hangs_segments_under_bran_units_by_their_end_rooms_and_counts_them_apart() {
         let (tree, attrs) = tube_tree_of(&tubes_on(TreeOptions::default()));
         assert_eq!(tree.total_count, 6, "构件计数不变");
-        assert_eq!(tree.total_tube_count, Some(6), "b 在范围外、BRAN 12 不在树上；f 跨两房只算一次");
+        assert_eq!(
+            tree.total_tube_count,
+            Some(6),
+            "b 在范围外、h 一端是范围里的非成员（属于别处）、BRAN 12 不在树上；f 跨两房只算一次"
+        );
         assert_eq!(tree.tubes_truncated, Some(false));
         assert_eq!(tree.leaf_count, 7 + 7, "7 个构件放置 + 7 个直段放置（f 两间房各一次）");
         assert!(tree.leaves_inline);
