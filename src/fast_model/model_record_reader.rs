@@ -116,6 +116,63 @@ fn durable_records_sql(packed: u64, owner: &str) -> String {
     )
 }
 
+/// 库上一条隐式管身行里房间层级树 `tubes=1` 要的那几格（`spatial_tree_tubes` 折成 `TubeRecord`；计划
+/// `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md` §2.2 / §2.7）。`tube_ordinal` 是 T2 才落盘的
+/// `route_ordinal`，老行读成 `None`、由调用方按同 `(from, to)` 内的出现序补号——所以行**必须**按 `record_order`（分支槽位）排回来。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct DurableTubeRow {
+    /// 容器 BRAN，`a_b`（`record::id(in)`）。
+    pub container: String,
+    /// 离开侧构件，`a_b`（`record::id(leave)`）。
+    pub tube_from: String,
+    /// 到达侧构件，`a_b`（`record::id(arrive)`）。
+    pub tube_to: String,
+    #[serde(default)]
+    pub tube_ordinal: Option<u32>,
+    pub world_aabb: parry3d::bounding_volume::Aabb,
+    pub world_trans: bevy_transform::components::Transform,
+    #[serde(default)]
+    pub invalid: bool,
+}
+
+/// 一批 BRAN 名下隐式管身行的冷读 SQL：**只读 `tubi_relate`、只按 `in`**——管身行的 `in` 就是容器 BRAN，不需要
+/// [`durable_scope_reads`] 的 `anc` 那一路；每根一句等值（`idx_tubi_relate_in`，`pdms_inst::INST_RELATE_INDEX_SQL`），
+/// 不写 `in IN [...]`（本 fork 2.1.4 对 `IN` 的索引联合支持没复核过，`pdms_inst::render_watch_scope_filter` 的注记），
+/// 拼成一条多语句一次往返、调用方 `take(i)`。两端缺失的历史行（`leave` / `arrive` 为 NONE）没有身份，在库端就滤掉。
+/// 钉 `durable_tube_rows_are_planned_through_the_in_index`：每句 `EXPLAIN FULL` 不出现 `Iterate Table`、落在 `idx_tubi_relate_in`。
+pub(crate) fn durable_tube_rows_sql(branches: &[RefU64]) -> String {
+    branches
+        .iter()
+        .map(|branch| {
+            let owner = RefnoEnum::from(*branch).to_pe_key();
+            format!(
+                "SELECT record::id(in) AS container, record::id(leave) AS tube_from, record::id(arrive) AS tube_to, \
+                 route_ordinal AS tube_ordinal, aabb.d AS world_aabb, world_trans.d AS world_trans, \
+                 invalid ?? false AS invalid, id AS record_order FROM tubi_relate \
+                 WHERE in = {owner} AND aabb.d != NONE AND world_trans.d != NONE \
+                 AND leave != NONE AND arrive != NONE ORDER BY record_order;"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 冷读一批 BRAN 名下的隐式管身行（[`durable_tube_rows_sql`]）。空清单不碰库。返回顺序 = `branches` 顺序 × 各自槽位序。
+pub(crate) async fn durable_tube_rows_of_branches(
+    db: &Surreal<Any>,
+    branches: &[RefU64],
+) -> anyhow::Result<Vec<DurableTubeRow>> {
+    if branches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut response = db.query(durable_tube_rows_sql(branches)).await?.check()?;
+    let mut rows = Vec::new();
+    for index in 0..branches.len() {
+        rows.extend(response.take::<Vec<DurableTubeRow>>(index)?);
+    }
+    Ok(rows)
+}
+
 fn projection_record_to_query(
     record: ProjectedGeometry,
     root: e3d_io::refno::RefNo,
@@ -171,6 +228,7 @@ fn projection_record_to_query(
 
 #[cfg(test)]
 mod tests {
+    use aios_core::{RefU64, RefnoEnum};
     use e3d_io::refno::RefNo;
     use e3d_model::elmodl::GeometryId;
     use glam::DMat4;
@@ -459,5 +517,101 @@ mod tests {
             "the OR shape no longer falls back to a table scan on this engine—\
              the split is then only a style choice, update this note: {plan}"
         );
+    }
+
+    // ---- 房间层级树 tubes=1 的管身冷读 ----
+
+    /// 两条 BRAN 各两段管身 + 一条缺 `arrive` 的历史行 + 一条别的 BRAN 的：只按 `in` 取、缺端的在库端滤掉、
+    /// 行按槽位排、`route_ordinal` 没落盘的读成 `None`、落了的原样读回；两根一次往返、顺序 = 入参顺序 × 槽位序。
+    #[tokio::test]
+    async fn durable_tube_rows_come_back_per_branch_in_slot_order_without_endless_rows() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("tube_rows").await.unwrap();
+        db.query(
+            r#"
+          CREATE aabb:t0 SET d={mins:[0,0,0],maxs:[100,10,10]};
+          CREATE aabb:t1 SET d={mins:[100,0,0],maxs:[300,10,10]};
+          CREATE trans:t0 SET d={translation:[50,5,5],rotation:[0,0,0,1],scale:[5,5,100]};
+          CREATE trans:t1 SET d={translation:[200,5,5],rotation:[0,0,0,1],scale:[5,5,200]};
+          INSERT RELATION INTO tubi_relate [
+            {id:tubi_relate:[pe:⟨24384_100⟩,1],in:pe:⟨24384_100⟩,out:inst_geo:m,leave:pe:⟨24384_102⟩,arrive:pe:⟨24384_103⟩,
+             aabb:aabb:t1,world_trans:trans:t1,invalid:true,anc:[1],dbnum:24384},
+            {id:tubi_relate:[pe:⟨24384_100⟩,0],in:pe:⟨24384_100⟩,out:inst_geo:m,leave:pe:⟨24384_101⟩,arrive:pe:⟨24384_102⟩,
+             aabb:aabb:t0,world_trans:trans:t0,invalid:false,anc:[1],dbnum:24384,route_ordinal:2},
+            {id:tubi_relate:[pe:⟨24384_100⟩,2],in:pe:⟨24384_100⟩,out:inst_geo:m,leave:pe:⟨24384_103⟩,
+             aabb:aabb:t0,world_trans:trans:t0,anc:[1],dbnum:24384},
+            {id:tubi_relate:[pe:⟨24384_200⟩,0],in:pe:⟨24384_200⟩,out:inst_geo:m,leave:pe:⟨24384_200⟩,arrive:pe:⟨24384_201⟩,
+             aabb:aabb:t0,world_trans:trans:t0,anc:[1],dbnum:24384},
+            {id:tubi_relate:[pe:⟨24384_300⟩,0],in:pe:⟨24384_300⟩,out:inst_geo:m,leave:pe:⟨24384_301⟩,arrive:pe:⟨24384_302⟩,
+             aabb:aabb:t0,world_trans:trans:t0,anc:[1],dbnum:24384}
+          ];
+        "#,
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let branches = [RefU64::from_two_nums(24384, 100), RefU64::from_two_nums(24384, 200)];
+        let rows = super::durable_tube_rows_of_branches(&db, &branches)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.container.as_str(), row.tube_from.as_str(), row.tube_to.as_str(), row.tube_ordinal, row.invalid))
+                .collect::<Vec<_>>(),
+            [
+                ("24384_100", "24384_101", "24384_102", Some(2), false),
+                ("24384_100", "24384_102", "24384_103", None, true),
+                ("24384_200", "24384_200", "24384_201", None, false),
+            ],
+            "槽位 0 在 1 前、缺 arrive 的不来、别的 BRAN 不来、两根按入参顺序"
+        );
+        assert_eq!(rows[1].world_aabb.maxs.x, 300.0);
+        assert_eq!(rows[1].world_trans.scale.z, 200.0, "长度就在世界变换的 z 缩放里");
+        assert!(
+            super::durable_tube_rows_of_branches(&db, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// 管身冷读每句都要落在 `idx_tubi_relate_in` 上、不许 `Iterate Table`（与 `durable_cold_read_scopes_are_planned_through_indexes`
+    /// 同一条纪律）：`tubes=1` 在落盘形态下对每个 BRAN 单元来一句，走不上索引就是「每根扫一遍 tubi_relate」。
+    #[tokio::test]
+    async fn durable_tube_rows_are_planned_through_the_in_index() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("tube_rows_plan").await.unwrap();
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let branches = [RefU64::from_two_nums(24384, 100), RefU64::from_two_nums(24384, 200)];
+        let sql = super::durable_tube_rows_sql(&branches);
+        let statements = sql.lines().collect::<Vec<_>>();
+        assert_eq!(statements.len(), 2, "每根一句: {sql}");
+        for (statement, branch) in statements.iter().zip(&branches) {
+            assert!(
+                statement.contains(&format!("WHERE in = {}", RefnoEnum::from(*branch).to_pe_key()))
+                    && !statement.contains("anc CONTAINS")
+                    && !statement.contains(" IN ["),
+                "只按 in 一路等值: {statement}"
+            );
+            let explain = statement
+                .trim_end_matches(';')
+                .split(" ORDER BY ")
+                .next()
+                .unwrap()
+                .to_string()
+                + " EXPLAIN FULL;";
+            let mut response = db.query(explain).await.unwrap().check().unwrap();
+            let plan: surrealdb::Value = response.take(0).unwrap();
+            let plan = plan.to_string();
+            assert!(
+                !plan.contains("Iterate Table") && plan.contains("idx_tubi_relate_in"),
+                "{statement} must be planned through idx_tubi_relate_in, plan: {plan}"
+            );
+        }
     }
 }

@@ -1,5 +1,31 @@
 # 变更记录
 
+## 2026-09-22
+
+### 房间层级树按 BRAN 单元列出直段（plant3d-web 方案 B · T1 后端）：`nearby/tree` / `rooms/{refno}/tree` 加 opt-in `tubes=1`，缺省响应逐字节不变
+
+- **为什么**：隐式管身（TUBI 直段）没有 refno、不进空间树（ADR-072 D4），两棵房间层级树列不出、也数不到直段。方案 A（plant3d-web `331f2e9b`，
+  前端单元级动作按整条 BRAN 走）只解决了三维里「管件带着直段走」；用户接着要「树里 / 计数里列出直段」（plant3d-web
+  `docs/plans/2026-09-21-room-tree-tube-segments-plan.md`，D1–D7 2026-09-22 11:19 全按推荐拍板）。
+- **改动**（计划 `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`；spec §4.13.5「`tubes=1`」/ §4.13.6 透传；ADR-072 D4 追记）：
+  - `spatial_tree_view`：折树拆成两段——`draft_tree`（过滤 / 排 / 去重 / 单元 / 折入累加器）→ `TreeDraft::tube_roots`（树里出现的 BRAN 单元，按最近
+    成员距离排、截到 `tube_root_cap = 500`）→ `TreeDraft::finish`（直段过范围 / 过滤 / 归房 / 挂单元 / 出响应）；`assemble_tree` 变薄壳，
+    `tubes` 关着时与拆分前逐字节相同（新键全是 `Option` + skip）。新形状：`TreeTube { ordinal, from, to, from_noun, to_noun, distance, length, aabb, invalid,
+    shared_rooms? }`、各层 `tube_count?`、顶层 `total_tube_count?` / `tubes_truncated?`；`count` / `total_count` 不变；直段放置数计入 `leaf_count`、共用 `leaf_cap`。
+    归属按两端管件任一属该房（`RoomScope::member_rooms`），两端都解不出的按单元所在的房兜底；`include_self=false` 剔目标子树里的 BRAN 的直段；
+    `nouns=` 不含 TUBI 直段不出；`keyword=` 用容器 BRAN + `TUBI` 走同一谓词。
+  - 新 `spatial_tree_tubes`：`TubeRecord`（身份四元组 + 盒 + 长度 = 世界变换 z 轴列的模 + `invalid`）；`load_tube_records`：投影里有回执的根取
+    `root_snapshot`（与 `/model/records` 同谓词），其余一次冷读；冷读行 `route_ordinal` 未落盘的按同 `(from, to)` 内出现序补号。
+  - `model_record_reader`：`durable_tube_rows_of_branches` / `durable_tube_rows_sql`——只读 `tubi_relate`、只按 `in` 一路（管身行的 `in` 就是容器 BRAN），
+    每根一句等值拼成一条多语句一次往返；钉 `durable_tube_rows_are_planned_through_the_in_index`（`EXPLAIN FULL` 落 `idx_tubi_relate_in`、无 `Iterate Table`）。
+  - `spatial_query`：`measure_box_in_range` 对单个不在树上的盒复算 `collect_candidates` 逐分支同判据（钉 `a_box_off_the_tree_is_measured_like_a_tree_entry`
+    五档逐盒「树上取到 ⇔ `Some` 且距离相等」）；`ElementAttributes::noun_of`（缺省 `None`，`DirectTreeService` 走 `noun_of`）；`nearby_tree` 两段之间
+    `tubes=1` 才 `await` 读直段。`handlers::RawLeafSelector.tubes` → `parse_flag`（非法 400）。
+- **不做**：不建管身 R*-tree、不改快照 / 启动判据 / `/health`；孤直段（管件全在范围外、只有直段穿过）列不出，写进 spec；`model/records` 带直段元数据与
+  `tubi_relate` 落 `route_ordinal` 是 T2 另一笔。
+- **验证**：`cargo test --lib spatial_tree_view`（13 过，含 6 条新用例：关着无直段键 / 归房与逐层计数 / 共用 `leaf_cap` 与 `unit=` / `nouns` 与 `keyword` /
+  预算截断 / `include_self`）；`spatial_query` / `spatial_tree_tubes` / `model_record_reader` 单测见下文各条；真机 `:8027` 账见 plant3d-web 验证 README §10。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁

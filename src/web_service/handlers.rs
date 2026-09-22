@@ -1545,11 +1545,13 @@ pub async fn spatial_nearby_refnos(
     Ok(Json(response))
 }
 
-/// 树路由的叶子选择器原文（叶子超上限后只取一组：`unit=<单元 refno>` / `other_noun=<NOUN>`）。
+/// 树路由的叶子选择器原文（叶子超上限后只取一组：`unit=<单元 refno>` / `other_noun=<NOUN>`）+ `tubes=`（BRAN 单元下补直段行，
+/// 缺省关；spec §4.13.5「`tubes=1`」，计划 `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`）。
 #[derive(Debug, Default, Deserialize)]
 pub struct RawLeafSelector {
     pub unit: Option<String>,
     pub other_noun: Option<String>,
+    pub tubes: Option<String>,
 }
 
 /// `GET /api/v1/spatial/nearby/tree` 与 `rooms/{refno}/tree` 的 query 串：身份三格 + `nearby` 全部参数原文 + 叶子选择器。
@@ -1566,18 +1568,22 @@ pub struct SpatialTreeReq {
 fn tree_options(
     raw: &RawLeafSelector,
 ) -> Result<crate::fast_model::spatial_tree_view::TreeOptions, SpatialApiError> {
-    use crate::fast_model::spatial_tree_view::{DEFAULT_LEAF_CAP, LeafSelector, TreeOptions};
+    use crate::fast_model::spatial_tree_view::{LeafSelector, TreeOptions};
     let only = LeafSelector::parse(raw.unit.as_deref(), raw.other_noun.as_deref())
         .map_err(ApiError::bad_request)?;
+    let tubes = spatial_query::parse_flag("tubes", raw.tubes.as_deref(), false)
+        .map_err(ApiError::bad_request)?;
     Ok(TreeOptions {
-        leaf_cap: DEFAULT_LEAF_CAP,
         only,
+        tubes,
+        ..TreeOptions::default()
     })
 }
 
 /// GET /api/v1/spatial/nearby/tree — 同 `nearby` 的一次查询折成房间层级树（spec §4.13.5；plant3d-web ADR 0068）：
 /// `rooms=` 必填，命中不分页、按 refno 去重，折成 房间 → 专业 → 最小交付单元类型 → 单元 → 构件；`sort` / `page` /
-/// `per_page` 收下不生效。后半程（过滤 + 派生专业 / 单元根 + 折树）与 `nearby` 一样在阻塞线程上跑。
+/// `per_page` 收下不生效。后半程（过滤 + 派生专业 / 单元根 + 折树）与 `nearby` 一样在阻塞线程上跑；`tubes=1` 时中间多一步
+/// 按树里出现的 BRAN 单元读直段（spec §4.13.5「`tubes=1`」，2026-09-22），缺省关、关着时响应逐字节不变。
 pub async fn spatial_nearby_tree(
     State(state): State<AppState>,
     Query(request): Query<SpatialTreeReq>,

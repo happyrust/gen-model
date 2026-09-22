@@ -1321,6 +1321,39 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 - 错误：`rooms=` 缺失 400；不在册房间 400；房间体制不可用 422 `rooms_unavailable`（`detail.status` 同 §4.13.4）；其余同 `nearby`
   （404 / 503 / 422 `identity_mismatch`）。
 
+**`tubes=1`——BRAN 单元下列出直段（2026-09-22；plant3d-web 方案 B，ADR 0068 追记 ②；计划
+`docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`；实现 `spatial_tree_view::TreeDraft` + `spatial_tree_tubes`）**
+
+隐式管身（TUBI 直段）没有自己的 refno、不进空间树（ADR-072 D4 保持），所以缺省的树**列不出、也数不到**直段。`tubes=1`（`true/yes/on`
+亦可；非法值 400）打开后，服务端折完管件、再按树里出现的每个 **BRAN 单元**读它根名下的管身记录（投影里有回执的根取投影——与 `/model/records`
+同一谓词；其余冷读 `tubi_relate`，只按 `in` 一路各走索引、一次往返），把落在范围内的直段挂到该单元下：
+
+- **缺省关**：不带 `tubes=` 的响应与不认识这个参数的旧版**逐字节相同**（下面所有新键都不出现）；两条树路由都认它。
+- **响应**（只在 `tubes=1` 时出现）：`units[].tubes[]` 每段 `{ ordinal, from, to, from_noun, to_noun, distance, length, aabb: {min, max},
+  invalid, shared_rooms? }`；`units[]` / `unit_types[]` / `specs[]` / `rooms[]` 各多一格 `tube_count`；顶层多 `total_tube_count`（按身份去重，
+  跨房直段只算一次）与 `tubes_truncated`。`from` / `to` 是两端管件的 `a_b`（容器头 / 尾那一段的一端是 BRAN 自己，`*_noun` 为 `BRAN`）；
+  两端 noun 命中里有就用命中的，没有回记录读一次，读不出为空串；`length` 是直管长度（mm，存下的世界变换 z 轴列的模）；`aabb` 给前端定位飞行。
+- **身份**是 `(单元 refno, from, to, ordinal)` 四元组：`ordinal` 是同 `(from, to)` 内的序号（e3d-model `route_ordinal`），无关两段常为 0。
+  落盘行在 T2 落 `route_ordinal` 之前没有这一格，冷读路按同 `(from, to)` 内的出现序（分支槽位序）补号——同 `(from, to)` 多段的 BRAN
+  在冷读路上序号可能与投影不一致，是已知窗口。
+- **计数**：`count` / `total_count` **不变**，直段不是构件、不算进去；`tube_count` 是该节点下落在范围内、属于该房间的直段**放置**数。
+  直段放置数**计入 `leaf_count`、共用 `leaf_cap`**：超上限时 `tubes` 与 `elements` 一起省略，`unit=` 点到的单元连直段一起内联；
+  `other_noun=` 组没有直段。`tubes[]` 按距离、再 `(from, to, ordinal)` 排；`min_distance` 仍只看管件。
+- **过滤链**与管件同一把尺、走它能走的几格：范围按 `collect_candidates` 逐分支同判据对单个盒复算（`spatial_query::measure_box_in_range`：
+  点 + sphere 盒到点 ≤ r；点 + cube 与 `center ± r` 相交；refno 目标与 `target ± r` 相交、sphere 再盒到盒 ≤ r；中心线走廊逐段探针 +
+  走廊到盒距离）；`include_self=false` 时目标子树里的 BRAN 是「自己」，它的直段不列；`nouns=` 点名了类型却没点 `TUBI` → 直段不出；
+  `keyword=` 用容器 BRAN 的 refno + `TUBI` 走同一个谓词；`dbnums` / `spec_values` / `rooms` 由「它挂在哪个单元下」隐含（直段与它的 BRAN 同库、
+  同专业；单元能出现说明成员过了这几格）。
+- **归属哪间房**（D4）：`member_rooms[from] ∪ member_rooms[to]`——两端管件任一属该房就挂到该房下的这个单元；只往**已有的单元节点**下挂
+  （成员都被过滤掉的房间没有节点可挂）；两端都解不出归属（都不是任一所选房间的成员）的段按该单元出现的每一间房兜底；放到 ≥ 2 间房的带
+  `shared_rooms`。
+- **预算**：一次响应最多为最近的 **500** 个 BRAN 单元（按最近成员距离）补直段；超出 `tubes_truncated=true`、`warnings` 加一句、没读的单元
+  `tube_count = 0`。
+- **已知漏洞**（接受，D1 取 (b)）：**孤直段**——一条 BRAN 的管件全在范围外、只有直段穿过范围，这根不在树上，直段补不出来；要全就得给
+  管身另建一棵树，真被踩到再升。
+- 与 `/model/records` 的关系：范围 = 整房时，一条 BRAN 在房间树里的 `tube_count` ≤ 它 `model/records` 里 `is_tubi` 的条数（相等或更少；
+  多了就是 bug）。
+
 #### 4.13.6 `GET /api/v1/spatial/rooms/{refno}/tree` — 一间在册房间的房间层级树（2026-09-20）
 
 出处同 §4.13.5（计划 §4.5，给模型树 ROOM 标签页在 gen-model-v1 源下浏览一间房）；实现 `spatial_tree_view::room_tree_params` +
@@ -1330,7 +1363,7 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   面板——投影没有再看树上它自己的条目），`shape=cube`，`rooms=` 它自己，`include_self=false`（房间自己的面板不算成员）。
   `radius` 在这里是**盒的外扩量**，缺省 0 = 只要与房间盒相交、上限同 `nearby`（100 000 mm）。
 - **不接受** `refno` / `x,y,z` / `source_mode` / `rooms`（都 400，范围与房间已由路径定死）；其余过滤（`nouns` / `keyword` /
-  `include_negative` / `dbnums` / `spec_values`）与叶子选择器（`unit` / `other_noun`）透传。
+  `include_negative` / `dbnums` / `spec_values`）与叶子选择器（`unit` / `other_noun`）、`tubes=1`（§4.13.5，2026-09-22）透传。
 - 响应同 §4.13.5，`rooms[]` 恒一条、`center.source = refno_aabb_center`。房间从没生成过面板模型（投影与树里都没有它的盒）→ 404
   `not_found`；不在册（名字不含房间关键词或房间号不合规）→ 400；房间体制不可用 → 422 `rooms_unavailable`。
 

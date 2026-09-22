@@ -4,7 +4,8 @@
 > 拍板「D1–D7 全按推荐，从 T1 后端开工（先写后端执行计划再动代码）」。上位：plant3d-web ADR 0068（房间层级树，2026-09-21「管件带直段」追记）；
 > 本仓 ADR-072 D4（隐式管身不进空间树——**保持**）；spec `docs/specs/web-service-api.md` §4.13.5 / §4.13.6。
 > 基线：本仓 `main@579b1d8b2`（`:8027` 验证实例 `65dacd576`，mem 档，AMS 7997，`room_membership=true`）；plant3d-web `main@151290c1`。
-> 状态：**执行中**（本计划先落一笔，代码随后按 §3 分步落；T2 另立一笔）。
+> 状态：**T1 代码已落地**（计划 `fa744490a` 先落一笔，代码随后一笔：§3 T1-a…f 全部，单测 13 + 37 + 274 绿、clippy 触及文件 0 告警；
+> 真机 `:8027` 账见 §4 与 plant3d-web 验证 README §10）。T2 另立一笔。
 > 已拍板：D1 (b) 按树里已有的 BRAN 单元补 / D2 独立 `tube_count` / D3 四元组身份 + 落盘补 `route_ordinal`（T2）/ D4 (i) 两端管件任一属该房 /
 > D5 (i) 前端只读（T3）/ D6 `tubes=` 缺省关 / D7 直段计入 `leaf_count`、共用 `leaf_cap`。
 

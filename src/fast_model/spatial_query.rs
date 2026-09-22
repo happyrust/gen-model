@@ -22,7 +22,7 @@ use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBo
 use aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES;
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefU64, RefnoEnum};
-use parry3d::bounding_volume::Aabb;
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Point, Vector};
 use serde::{Deserialize, Serialize};
 
@@ -414,6 +414,11 @@ pub trait ElementAttributes: Send + Sync {
     fn unit_root_of(&self, _refno: RefU64) -> Option<crate::fast_model::spatial_tree_view::UnitRoot> {
         None
     }
+    /// 这个元素的 noun（`TYPE`，大写）；读不出记录为 `None`。只有树路由 `tubes=1` 对**不在命中里**的直段两端调
+    /// （`spatial_tree_view`，两端多半就是命中、免读），一次记录读。
+    fn noun_of(&self, _refno: RefU64) -> Option<String> {
+        None
+    }
 }
 
 impl ElementAttributes for DirectTreeService {
@@ -431,6 +436,13 @@ impl ElementAttributes for DirectTreeService {
 
     fn unit_root_of(&self, refno: RefU64) -> Option<crate::fast_model::spatial_tree_view::UnitRoot> {
         crate::fast_model::spatial_tree_view::unit_root_of_shared(self, self.lineage_epoch(), refno)
+    }
+
+    fn noun_of(&self, refno: RefU64) -> Option<String> {
+        DirectTreeService::noun_of(self, refno)
+            .ok()
+            .map(|noun| noun.trim().to_ascii_uppercase())
+            .filter(|noun| !noun.is_empty())
     }
 }
 
@@ -730,6 +742,60 @@ pub fn collect_candidates(
     }
 }
 
+/// 一个**不在树上**的盒按与 [`collect_candidates`] 逐分支同一判据量到中心的距离；不在范围内回 `None`。
+///
+/// 隐式管身不进空间树（ADR-072 D4），房间层级树的 `tubes=1`（`spatial_tree_view`，计划
+/// `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md` §2.3）要把直段按与管件**同一把尺**过范围，
+/// 就对单个盒复算树上取候选那件事：点 + sphere：盒到点最小距离 ≤ r（rstar `locate_within_distance` 的判据）；
+/// 点 + cube：与 `center ± r` 相交；refno 目标：与 `target ± r` 相交、sphere 再按盒到盒最小距离 ≤ r；中心线走廊：
+/// 任一段的探针（段盒外扩 r）相交、距离是整条走廊到盒的最小距离、sphere 再 ≤ r。相交判定两边都是闭区间
+/// （rstar `AABB::intersects` 与 parry `Aabb::intersects` 同为 `<=`）。单测 `a_box_off_the_tree_is_measured_like_a_tree_entry`
+/// 对着同一夹具钉「树上取到 ⇔ 这里 `Some`，且距离相等」。
+pub fn measure_box_in_range(center: &Center, params: &SpatialQueryParams, aabb: &Aabb) -> Option<f32> {
+    let radius = params.radius;
+    if let Some(centerline) = &center.centerline {
+        let probed = centerline.segments.iter().any(|segment| {
+            let bounds = segment_bbox(segment);
+            Aabb::new(
+                bounds.mins - Vector::repeat(radius),
+                bounds.maxs + Vector::repeat(radius),
+            )
+            .intersects(aabb)
+        });
+        if !probed {
+            return None;
+        }
+        let distance = centerline_aabb_distance(&centerline.segments, aabb);
+        return (params.shape == Shape::Cube || distance <= radius).then_some(distance);
+    }
+    match (center.target_box, params.shape) {
+        (None, Shape::Sphere) => {
+            let distance = aabb_point_distance(aabb, &center.point);
+            (distance <= radius).then_some(distance)
+        }
+        (None, Shape::Cube) => {
+            let probe = Aabb::new(
+                center.point - Vector::repeat(radius),
+                center.point + Vector::repeat(radius),
+            );
+            probe
+                .intersects(aabb)
+                .then(|| aabb_point_distance(aabb, &center.point))
+        }
+        (Some(target), shape) => {
+            let probe = Aabb::new(
+                target.mins - Vector::repeat(radius),
+                target.maxs + Vector::repeat(radius),
+            );
+            if !probe.intersects(aabb) {
+                return None;
+            }
+            let distance = aabb_min_distance(aabb, &target);
+            (shape == Shape::Cube || distance <= radius).then_some(distance)
+        }
+    }
+}
+
 /// 读锁内那一段的产物：状态、中心、候选。之后的过滤 / 排序 / 分页 / 补属性都在锁外。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scan {
@@ -828,7 +894,9 @@ pub fn negative_nouns() -> Vec<&'static str> {
         .collect()
 }
 
-fn keyword_matches(keyword_upper: &str, refno: RefU64, noun_upper: &str) -> bool {
+/// `keyword=` 的谓词：noun 含 / `a_b` 含 / `a/b` 含（都按大写比）。树路由的直段没有 refno，用容器 BRAN + `TUBI` 走同一个谓词
+/// （`spatial_tree_view`）。
+pub(crate) fn keyword_matches(keyword_upper: &str, refno: RefU64, noun_upper: &str) -> bool {
     noun_upper.contains(keyword_upper)
         || refno.to_string().contains(keyword_upper)
         || RefnoEnum::from(refno).to_pdms_str().contains(keyword_upper)
@@ -1355,19 +1423,39 @@ pub async fn nearby_tree(
     // 不在册的房间自然也没有盒，扫在前就会答成 404。
     crate::fast_model::spatial_rooms::ensure_rooms_registered(rooms)?;
     let scan = scan_global_tree(params, centerline).await?;
-    let room_scope = resolve_rooms_for_scan(&scan, params, attrs.as_ref())
+    let room_scope = Arc::new(
+        resolve_rooms_for_scan(&scan, params, attrs.as_ref())
+            .await?
+            .ok_or_else(|| SpatialQueryError::Internal(anyhow::anyhow!("rooms= 给了却没有解出成员集")))?,
+    );
+    // 折树分两段（`spatial_tree_view::TreeDraft`，计划 `2026-09-22-room-tree-tube-segments-backend-dev-plan.md` §2.2）：
+    // 第一段过滤 / 排 / 去重 / 单元；`tubes=1` 时中间按树里出现的 BRAN 单元读直段（投影有回执取投影，否则冷读要 await，
+    // 所以不能塞在阻塞线程里）；第二段出响应。`tubes` 关着时中间那步是空操作，响应与拆分前逐字节相同。
+    let tubes_on = options.tubes;
+    let draft = {
+        let params = params.clone();
+        let attrs = Arc::clone(&attrs);
+        let scope = Arc::clone(&room_scope);
+        assemble_off_runtime("nearby/tree", move || {
+            crate::fast_model::spatial_tree_view::draft_tree(scan, &params, attrs.as_ref(), &scope, &options)
+        })
         .await?
-        .ok_or_else(|| SpatialQueryError::Internal(anyhow::anyhow!("rooms= 给了却没有解出成员集")))?;
-    let params = params.clone();
-    assemble_off_runtime("nearby/tree", move || {
-        crate::fast_model::spatial_tree_view::assemble_tree(
-            scan,
-            &params,
-            attrs.as_ref(),
-            &room_scope,
-            &unit_types,
-            &options,
-        )
+    };
+    let supplement = if tubes_on {
+        let roots = draft.tube_roots();
+        let by_root = crate::fast_model::spatial_tree_tubes::load_tube_records(&roots.roots)
+            .await
+            .map_err(SpatialQueryError::Internal)?;
+        Some(crate::fast_model::spatial_tree_view::TubeSupplement {
+            by_root,
+            roots_total: roots.total,
+            truncated: roots.truncated,
+        })
+    } else {
+        None
+    };
+    assemble_off_runtime("nearby/tree/finish", move || {
+        draft.finish(attrs.as_ref(), &room_scope, &unit_types, supplement)
     })
     .await
 }
@@ -1972,6 +2060,106 @@ mod tests {
             &ModelMemoryStore::default(),
         )
         .expect("scan")
+    }
+
+    /// 直段不进树（ADR-072 D4），房间层级树 `tubes=1` 用 [`measure_box_in_range`] 对单个盒复算树上取候选那件事——
+    /// 五档（点 + sphere / 点 + cube / refno + sphere / refno + cube / 走廊 sphere + cube）逐盒钉：树上取到 ⇔ 这里 `Some`，且距离相等。
+    /// 夹具故意放了「探针里、球外」（56：走廊 113 > r）与「整盒里、走廊外」（52）这两类边界盒。
+    #[test]
+    fn a_box_off_the_tree_is_measured_like_a_tree_entry() {
+        let tree = corridor_tree();
+        let line = corridor(100);
+        let entries = tree
+            .tree
+            .iter()
+            .cloned()
+            .collect::<Vec<RStarBoundingBox>>();
+        assert_eq!(entries.len(), 7, "夹具里每个盒都要对一遍");
+        let compare = |what: &str, scan: &Scan, query: &SpatialQueryParams| {
+            for entry in &entries {
+                let on_tree = scan
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.entry == *entry)
+                    .map(|candidate| candidate.distance);
+                let measured = measure_box_in_range(&scan.center, query, &entry.aabb);
+                assert_eq!(
+                    on_tree, measured,
+                    "{what}: {} {:?} 树上 {on_tree:?} vs 单盒 {measured:?}",
+                    entry.refno, entry.noun
+                );
+            }
+        };
+        let scan_plain = |query: &SpatialQueryParams| {
+            scan_tree(
+                &tree,
+                SpatialTreeState::Ready,
+                query,
+                None,
+                &ModelMemoryStore::default(),
+            )
+            .expect("scan")
+        };
+        for (what, query) in [
+            (
+                "点 + sphere",
+                params(&[("x", "1000"), ("y", "500"), ("z", "0"), ("radius", "120")]),
+            ),
+            (
+                "点 + cube",
+                params(&[
+                    ("x", "1000"),
+                    ("y", "500"),
+                    ("z", "0"),
+                    ("radius", "120"),
+                    ("shape", "cube"),
+                ]),
+            ),
+            (
+                "refno + sphere",
+                params(&[
+                    ("refno", &RefnoEnum::from(refno(53)).to_pdms_str()),
+                    ("radius", "60"),
+                ]),
+            ),
+            (
+                "refno + cube",
+                params(&[
+                    ("refno", &RefnoEnum::from(refno(53)).to_pdms_str()),
+                    ("radius", "60"),
+                    ("shape", "cube"),
+                ]),
+            ),
+        ] {
+            let scan = scan_plain(&query);
+            assert!(!scan.candidates.is_empty(), "{what}: 夹具该有命中");
+            assert!(
+                scan.candidates.len() < entries.len(),
+                "{what}: 夹具该有落在范围外的盒"
+            );
+            compare(what, &scan, &query);
+        }
+        for (what, query) in [
+            ("走廊 sphere", centerline_query(100, &[])),
+            ("走廊 cube", centerline_query(100, &[("shape", "cube")])),
+        ] {
+            let scan = scan_corridor(&tree, &line, &query);
+            compare(what, &scan, &query);
+        }
+        // 边界盒各自的答案：56 在探针里、离走廊 113 > 100——球模式 None、方模式 Some(113)；52 整盒里、走廊外——两种模式都 None。
+        let sphere = centerline_query(100, &[]);
+        let scan = scan_corridor(&tree, &line, &sphere);
+        let box_of = |seq: u32| entries.iter().find(|e| e.refno == refno(seq)).unwrap().aabb;
+        assert_eq!(measure_box_in_range(&scan.center, &sphere, &box_of(56)), None);
+        assert_eq!(measure_box_in_range(&scan.center, &sphere, &box_of(52)), None);
+        let cube_query = centerline_query(100, &[("shape", "cube")]);
+        let scan = scan_corridor(&tree, &line, &cube_query);
+        assert!(
+            measure_box_in_range(&scan.center, &cube_query, &box_of(56))
+                .is_some_and(|d| (d - 113.137_085).abs() < 1e-3),
+            "方模式保留探针命中的全部、距离仍是到走廊的"
+        );
+        assert_eq!(measure_box_in_range(&scan.center, &cube_query, &box_of(52)), None);
     }
 
     #[test]
