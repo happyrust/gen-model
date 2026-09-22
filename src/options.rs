@@ -1084,8 +1084,10 @@ pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT: usize = 16;
 ///
 /// overlay 此前无界——一个根进来就一直在，直到显式失效或整库清空；长驻进程碰过的根越多它越大。
 /// 设了上限之后，每次发布与每次 durable ACK 之后按**最近一次提交**的先后（LRU）逐出**已 durable
-/// ACK 且不在 write-behind 待刷**的根（`root_needs_persist == false`），整根记录 + 回执 + ACK 一起掉；
-/// 没有可逐出的就不逐（未落盘的一条不丢）。只在 durable 介质（`store_mode().is_durable()`）下生效：
+/// ACK 且与回执逐字相符**的根（`ack.medium.is_durable() && ack.matches(receipt)`——「不在 write-behind 待刷」
+/// 就是这句话的另一种说法：待刷的根要么还没 ACK、要么 ACK 已被新一版提交作废；2026-09-22 起 ACK 是房间边
+/// 唯一证据的根也排除，见 `ScopeState::ack_is_stray_room_evidence` / `ack_owes_room_edges`），
+/// 整根记录 + 回执 + ACK 一起掉；没有可逐出的就不逐（未落盘的一条不丢）。只在 durable 介质（`store_mode().is_durable()`）下生效：
 /// 嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。逐出之后读路对该根直读 RocksDB
 /// （本来就支持），单元级发布 / 刚体前移拿不到 S 端基线回退 regen，`RoomOnly` 整库房间重算对
 /// 冷根从库里读行再算（ADR-073 D13 2026-09-20 改口）。

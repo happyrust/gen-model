@@ -165,6 +165,17 @@
   再问 `SNAPSHOT_NOT_FOUND` / 上限收到 1 按序全出 / 显式 DELETE 不计）、`the_historical_footprint_lists_each_snapshot_scope_with_the_overlay_ruler`。
 - **验证**：见提交说明。
 
+### 内存控制计划 P6：文档 / 注释欠账清掉，`/ops.html` 底栏多三格（overlay / 元素缓存 / 历史快照）
+
+- **D6 缺失的证据档**：`docs/evidence/2026-09-20-d149-mem-footprint.md` 被 ADR-082 D5 与 CONTEXT 引用，仓库里从未有过、git 历史里也没有——按拍板**不**按 D5 的数字复原一份假证据档：
+  ADR-082 D5 那句划掉加勘误（原始采样件丢在会话里没落盘，D5 段的数字是唯一留下的记录、原样保留），CONTEXT 改成「数字见 ADR-082 D5——原始采样件未入库」。
+- **三处过时注释**：`options.rs` `model_overlay_max_roots` 说逐出要 `root_needs_persist == false`——实现只看 `ack.medium.is_durable() && ack.matches(receipt)`（等价，写的检查并不存在），改口并带上 2026-09-22 的两类排除；
+  `model_write_behind.rs` `BLOCKED_RETRY` 注释里「所有写入撞硬上限回 503」是旧设计残词，改成「上限收不下去只报数不拒写，503 从来没有过」；
+  `model_memory_store.rs` 存储结构体的「**默认无界**」与 `try_commit_current` 的「overlay 无界，不存在装不下」改成现行口径（默认 50,000 / 历史快照 16，上限由 write-behind 事后收、提交时不做准入）。
+- **`/ops.html` 底栏**（`renderSysbar`）：多三格 `overlay`（根数 / 上限 · 估算 MiB · 累计逐出）、`元素缓存`（库数 / 上限 · 条数 · MiB · 累计逐库）、`历史快照`（格数 / 上限 · MiB · 累计顶掉）——
+  上限 0 不显示分母、有逐出才亮 warn；新 `mib()` 格式化。ADR-082 §仍开着 的「`/dbnums` 面板那一格」以此收（面板就是 ops.html，没有 `/dbnums` 自己的页）。
+- **验证**：ops.html 两段内联脚本 `node vm.Script` 解析通过；`.rs` 只改注释，`cargo check` 见提交说明。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁

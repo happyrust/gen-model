@@ -14,6 +14,9 @@
 > ADR-084 起稿；§3.4 的两库交替窗真机量法与证据档、默认值改数还开着）。
 > **P4 已落地**（同日：`model_historical_snapshots_max` 默认 16、`HistoricalModelStore::publish_capped` 最久没 generate 的先 `drop_snapshot`、
 > `ModelMemoryStore::historical_footprint`、`/health.model_cache.historical`、ADR-081 追记；钉两条）。
+> **P6 已落地**（同日：D6 两处引用改口 + ADR-082 D5 勘误；`options.rs` / `model_write_behind.rs` / `model_memory_store.rs` 三处过时注释；`/ops.html` 底栏三格）。
+> **仍开着**：P3 默认值（ADR-084 D3，等两库交替窗真机）；P5 视 P3 真机 `ec_parsed` 再说；**分支撞车**——`codex/adr084-cache-followups`（`958155a04`，2026-09-21，未并入）已独立做了
+> S0–S2（`/health` 观测、历史快照按数量 + TTL `model_historical_max_snapshots` 默认 4、同名 `model_generation_input_max_dbnums`）并占了 ADR-084 号，如何取舍待用户拍。
 > 代码事实对到本仓工作树 2026-09-22 14:3x（主线 `579b1d8b2` + 上述未提交改动）；行号以那一刻为准，落地后以源码为准。
 > 关联：ADR-082（两道闸、D5 默认值、§不做）、ADR-073 D13 / F3（`RoomOnly` 冷根、stray 代号）、ADR-041 / ADR-052（瞬时峰值，不在本计划）、
 > `docs/evidence/2026-09-21-d149-live-chain.md`（W1–W6 真机链）。

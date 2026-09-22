@@ -841,9 +841,10 @@ fn approx_model_target_bytes(target: Option<&ModelTarget>) -> usize {
 }
 
 /// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
-/// 只读它。不记字节；**默认无界**——一个根进来就一直在，直到显式失效或整库清空。
-/// 配了 `model_overlay_max_roots`（d-149）才按根数收：只逐出已 durable ACK 的根
-/// （[`Self::enforce_root_limit`]），未落盘的一条不丢。
+/// 只读它。按数量不按字节收（字节只在 `/health` 上估算，[`Self::overlay_footprint`]）：
+/// `Current` 作用域按根数——`model_overlay_max_roots` **默认 50,000**（ADR-082 D5；写 0 才无界），
+/// 超了只逐出已 durable ACK 的根（[`Self::enforce_root_limit`]），未落盘的一条不丢；
+/// `Historical(*)` 作用域按格数——`model_historical_snapshots_max` 默认 16（`HistoricalModelStore` 守）。
 #[derive(Debug, Default)]
 pub struct ModelMemoryStore {
     scopes: RwLock<HashMap<ScopeKey, ScopeState>>,
@@ -1042,8 +1043,9 @@ impl ModelMemoryStore {
         stamped
     }
 
-    /// 把一批 current overlay 的改动整体装进去。overlay 无界，不存在装不下这回事，
-    /// 所以这里没有准入判断——只是 [`Self::commit`] 钉死在 `Current` 作用域上的形态。
+    /// 把一批 current overlay 的改动整体装进去。提交时不做准入判断——根数上限由 write-behind
+    /// 在发布 / durable ACK 之后**事后**收（[`Self::enforce_root_limit`]），装进来的这一批本来就
+    /// 还没落盘、不在候选里；这里只是 [`Self::commit`] 钉死在 `Current` 作用域上的形态。
     /// 返回值同 [`Self::commit`]：实际入库的回执。
     pub fn try_commit_current(&self, commits: Vec<ProjectionCommit>) -> Vec<(RefNo, RootReceipt)> {
         if commits.iter().all(ProjectionCommit::is_empty) {

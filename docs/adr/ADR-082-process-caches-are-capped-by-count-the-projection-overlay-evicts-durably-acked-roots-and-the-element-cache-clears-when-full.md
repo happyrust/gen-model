@@ -114,7 +114,8 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 
 - 落地那一刻（d-149 第 4 条）两个上限默认 0——只加能力，行为一个字不变，先量再配。**同日 17:0x 用户要求量了定默认值**
   （「在 mem 档实例上跑一窗，把 `/health.model_cache.overlay.approx_bytes` 与 `process_rss_bytes` 对着记一组数，给两个上限定默认值」），
-  证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`：release 二进制、mem 档、整库即时生成 8000 / 7998 / 7997 / 1112 四库
+  ~~证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`~~（**2026-09-22 勘误**：这份证据档从未入库、git 历史里也没有——原始采样件（`/health` JSON 与 RSS 记录）
+  丢在会话里没落盘，本段的数字是唯一留下的记录，按原样保留；D6 拍板不按这些数字复原一份假证据档）：release 二进制、mem 档、整库即时生成 8000 / 7998 / 7997 / 1112 四库
   → 7,743 根 / 59,929 条记录，overlay 106.5 MB（≈ **13.8 KB / 根**、1.8 KB / 记录），元素缓存 219,623 条 820.6 MB
   （≈ **3.6–4.7 KB / 元素**，7997 单库整库一遍 176,982 条 643.8 MB），RSS 2.04 GB 里这两块合计 46%（其余是 mem 档的 kv-mem 模型行）。
 - **`model_overlay_max_roots` 默认 50,000**（`options::MODEL_OVERLAY_MAX_ROOTS_DEFAULT`）：≈ 0.7 GB；整套 AMS 样例 MDB 装得下六遍
