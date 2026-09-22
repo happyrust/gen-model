@@ -2660,9 +2660,13 @@ fn collect_record(
                 format!("{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false}}"),
             );
         }
+        // `route_ordinal`（2026-09-22，方案 B T2）：同 `(leave, arrive)` 站点对内的序号，与投影 `ProjectedTube::route_ordinal` /
+        // `GeometryId::ImpliedTube` 同一份——`/model/records` 与房间层级树 `tubes=1` 的直段身份四元组 `(BRAN, from, to, ordinal)`
+        // 在冷读路上从此不必再按出现序补号。老行没有这一格，读侧 `Option`。
         batch.tubi_relate.push(format!(
-            "{{id:tubi_relate:[pe:⟨{source_id}⟩,{slot}],in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,aabb:aabb:⟨{id}⟩,world_trans:trans:⟨{id}⟩,bore_size:0,invalid:{},anc:{anc},dbnum:{dbnum},model_sesno:{source_sesno}}}",
+            "{{id:tubi_relate:[pe:⟨{source_id}⟩,{slot}],in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,route_ordinal:{},aabb:aabb:⟨{id}⟩,world_trans:trans:⟨{id}⟩,bore_size:0,invalid:{},anc:{anc},dbnum:{dbnum},model_sesno:{source_sesno}}}",
             tube.from.word0, tube.from.word1, tube.to.word0, tube.to.word1,
+            tube.route_ordinal,
             tube.invalid,
         ));
         return Ok(());
@@ -2884,6 +2888,7 @@ fn collect_bound_record(
             ("out", sur_thing("inst_geo", mesh_id)),
             ("leave", sur_thing("pe", &refno_key(tube.from))),
             ("arrive", sur_thing("pe", &refno_key(tube.to))),
+            ("route_ordinal", SurValue::Number(SurNumber::Int(i64::from(tube.route_ordinal)))),
             ("aabb", sur_thing("aabb", id)),
             ("world_trans", sur_thing("trans", id)),
             ("bore_size", SurValue::Number(SurNumber::Int(0))),
@@ -3798,6 +3803,8 @@ mod tests {
         assert!(sql.contains("id:tubi_relate:[pe:⟨24383_73948⟩,0]"));
         assert!(sql.contains("leave:pe:⟨24383_10⟩"));
         assert!(sql.contains("arrive:pe:⟨24383_20⟩"));
+        // 2026-09-22（方案 B T2）：直段身份四元组的序号随行落盘，冷读不再按出现序补号
+        assert!(sql.contains("arrive:pe:⟨24383_20⟩,route_ordinal:0,aabb:"), "{sql}");
         assert!(sql.contains("out:inst_geo:⟨e3d_baked_v2_deadbeef⟩"));
         assert!(sql.contains(&format!(
             "aabb:aabb:⟨{TUBE_A}⟩,world_trans:trans:⟨{TUBE_A}⟩"

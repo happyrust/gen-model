@@ -2,7 +2,10 @@
 //!
 //! A resident receipt shadows RocksDB for the whole root. Durable reads are
 //! returned directly and never hydrate kv-mem.
+use std::collections::HashMap;
+
 use aios_core::{GeomInstQuery, RefU64, RefnoEnum};
+use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
 use super::model_memory_store::{
@@ -16,22 +19,162 @@ pub async fn records_of_root(
     let packed = root.refno().0 as u64;
     let e3d_root = e3d_io::refno::RefNo::new((packed >> 32) as u32, packed as u32);
     let store = ModelMemoryStore::global();
-    if let Some((receipt, mut records)) = store.root_snapshot(ProjectionScope::Current, e3d_root) {
-        anyhow::ensure!(
-            records.len() == receipt.geometry_count,
-            "memory overlay root {e3d_root} is incomplete: receipt expects {}, store has {}",
-            receipt.geometry_count,
-            records.len()
-        );
-        // Match the durable order: inst_relate first, then tubi_relate,
-        // each ordered by record id. Eviction must not change cursor offsets.
-        sort_overlay_records(&mut records);
+    if let Some(records) = overlay_records_of_root(store, e3d_root)? {
         return Ok(records
             .into_iter()
             .map(|record| projection_record_to_query(record, e3d_root))
             .collect());
     }
     durable_records_of_root(db, root).await
+}
+
+/// 投影里有回执的根：整根记录按库上的顺序（`inst_relate` 先、`tubi_relate` 后，各按记录 id）；没有回执回 `None`（走冷读）。
+fn overlay_records_of_root(
+    store: &ModelMemoryStore,
+    root: e3d_io::refno::RefNo,
+) -> anyhow::Result<Option<Vec<ProjectedGeometry>>> {
+    let Some((receipt, mut records)) = store.root_snapshot(ProjectionScope::Current, root) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        records.len() == receipt.geometry_count,
+        "memory overlay root {root} is incomplete: receipt expects {}, store has {}",
+        receipt.geometry_count,
+        records.len()
+    );
+    // Match the durable order: inst_relate first, then tubi_relate,
+    // each ordered by record id. Eviction must not change cursor offsets.
+    sort_overlay_records(&mut records);
+    Ok(Some(records))
+}
+
+/// 一段隐式管身的身份（方案 B T2，2026-09-22；spec §4.5「`tube`」）：容器就是这条记录的 `refno`（BRAN），加上两端管件与同
+/// `(from, to)` 内的序号——与房间层级树 `tubes=1` 的直段 `(BRAN, from, to, ordinal)` 同一个四元组，前端拿它把直段行与场景对象对上。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TubeMeta {
+    pub ordinal: u32,
+    /// `a_b`
+    pub from: String,
+    /// `a_b`
+    pub to: String,
+}
+
+/// `/model/records` 的一条：库行 / 投影记录折成的 [`GeomInstQuery`]（形状一字不改，`serde(flatten)`）+ 隐式管身才有的
+/// [`TubeMeta`]。放在记录一级而不是 `insts[]` 里：`ModelHashInst` 在 `aios_core`，这一格只属于本仓的读面；一条管身记录恰好一个实例。
+#[derive(Debug, Serialize)]
+pub struct ModelRecord {
+    #[serde(flatten)]
+    pub inst: GeomInstQuery,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tube: Option<TubeMeta>,
+}
+
+/// [`records_of_root`] 的带直段元数据版（`/model/records` 用）：投影路直接来自 `ProjectedTube`；冷读路读 `tubi_relate` 的
+/// `leave` / `arrive` / `route_ordinal`，`route_ordinal` 没落盘的老行按同 `(from, to)` 内的出现序补号（行按记录 id 排，
+/// 与 `spatial_tree_tubes::from_durable_rows` 同一规则）。两端缺失的历史行 `tube` 为 `None`。
+pub async fn model_records_of_root(
+    db: &Surreal<Any>,
+    root: RefnoEnum,
+) -> anyhow::Result<Vec<ModelRecord>> {
+    let packed = root.refno().0 as u64;
+    let e3d_root = e3d_io::refno::RefNo::new((packed >> 32) as u32, packed as u32);
+    let store = ModelMemoryStore::global();
+    if let Some(records) = overlay_records_of_root(store, e3d_root)? {
+        return Ok(records
+            .into_iter()
+            .map(|record| {
+                let tube = record.tube.as_ref().map(|tube| TubeMeta {
+                    ordinal: tube.route_ordinal,
+                    from: refno_text(tube.from),
+                    to: refno_text(tube.to),
+                });
+                ModelRecord {
+                    inst: projection_record_to_query(record, e3d_root),
+                    tube,
+                }
+            })
+            .collect());
+    }
+    durable_model_records_of_root(db, root).await
+}
+
+fn refno_text(refno: e3d_io::refno::RefNo) -> String {
+    RefU64::from_two_nums(refno.word0, refno.word1).to_string()
+}
+
+/// 管身行的直段三格（第三句 SQL 的行，与第二句的管身行**同序**——两句同一个作用域、同一个 `ORDER BY record_order`）。
+/// 不与 `GeomInstQuery` 合成一行 `serde(flatten)` 读：SurrealDB 的反序列化器过 flatten 缓冲时 `RefnoEnum` 这类 untagged 枚举
+/// 会报「untagged and internally tagged enums do not support enum input」，所以管身行读两遍、按序配对。
+#[derive(Debug, Deserialize)]
+struct TubeColumns {
+    #[serde(default)]
+    tube_from: Option<String>,
+    #[serde(default)]
+    tube_to: Option<String>,
+    #[serde(default)]
+    tube_ordinal: Option<u32>,
+}
+
+/// 管身行的直段三格那一句：作用域与 [`durable_records_sql`] 的管身句相同（两路 `array::union`、`ORDER BY record_order`），
+/// 只投 `record_order` + `leave` / `arrive`（折成 `a_b`）/ `route_ordinal`——两端缺的历史行读成 NONE。
+fn durable_tube_meta_sql(packed: u64, owner: &str) -> String {
+    let projection = "id AS record_order, \
+         IF leave != NONE { record::id(leave) } ELSE { NONE } AS tube_from, \
+         IF arrive != NONE { record::id(arrive) } ELSE { NONE } AS tube_to, \
+         route_ordinal AS tube_ordinal";
+    let [by_anc, by_owner] = durable_scope_reads("tubi_relate", projection, packed, owner);
+    format!("SELECT * FROM array::union(({by_anc}), ({by_owner})) ORDER BY record_order;")
+}
+
+/// 管身记录 + 同序的三格 → [`ModelRecord`]：`route_ordinal` 缺的按同 `(容器, from, to)` 内出现序补号；两端缺的没有 `tube`。
+fn pair_tube_records(tubes: Vec<GeomInstQuery>, metas: Vec<TubeColumns>) -> Vec<ModelRecord> {
+    let mut seen: HashMap<(String, String, String), u32> = HashMap::new();
+    tubes
+        .into_iter()
+        .zip(metas)
+        .map(|(inst, meta)| {
+            let tube = match (meta.tube_from, meta.tube_to) {
+                (Some(from), Some(to)) => {
+                    let container = inst.refno.to_string();
+                    let slot = seen.entry((container, from.clone(), to.clone())).or_insert(0);
+                    let ordinal = meta.tube_ordinal.unwrap_or(*slot);
+                    *slot += 1;
+                    Some(TubeMeta { ordinal, from, to })
+                }
+                _ => None,
+            };
+            ModelRecord { inst, tube }
+        })
+        .collect()
+}
+
+async fn durable_model_records_of_root(
+    db: &Surreal<Any>,
+    root: RefnoEnum,
+) -> anyhow::Result<Vec<ModelRecord>> {
+    let packed = root.refno().0;
+    let owner = root.to_pe_key();
+    let sql = format!(
+        "{}\n{}",
+        durable_records_sql(packed, &owner),
+        durable_tube_meta_sql(packed, &owner)
+    );
+    let mut response = db.query(sql).await?.check()?;
+    let insts: Vec<GeomInstQuery> = response.take(0)?;
+    let tubes: Vec<GeomInstQuery> = response.take(1)?;
+    let metas: Vec<TubeColumns> = response.take(2)?;
+    anyhow::ensure!(
+        tubes.len() == metas.len(),
+        "durable tube rows of {root}: {} records but {} identity rows",
+        tubes.len(),
+        metas.len()
+    );
+    let mut records = insts
+        .into_iter()
+        .map(|inst| ModelRecord { inst, tube: None })
+        .collect::<Vec<_>>();
+    records.extend(pair_tube_records(tubes, metas));
+    Ok(records)
 }
 
 fn sort_overlay_records(records: &mut [ProjectedGeometry]) {
@@ -100,11 +243,16 @@ fn durable_records_sql(packed: u64, owner: &str) -> String {
              WHERE visible AND out.meshed AND geo_type = 'Pos' \
                AND (transform != NONE OR trans.d != NONE)) }} AS insts"
     );
+    // 管身行多三格直段身份（方案 B T2）：`leave` / `arrive` 折成 `a_b`、`route_ordinal` 老行读成 NONE；只有
+    // `model_records_of_root` 消费它们，`records_of_root` 的 `GeomInstQuery` 不认这三格、原样忽略（同 `record_order`）。
     let tubi_projection = format!(
         "id AS record_order, in AS refno, in.old_pe AS old_refno, {owner} AS owner, \
          'TUBI' AS generic, aabb.d AS world_aabb, world_trans.d AS world_trans, \
          false AS has_neg, \
-         [{{geo_hash: record::id(out), is_tubi: true, is_invalid_tubi: invalid ?? false}}] AS insts"
+         [{{geo_hash: record::id(out), is_tubi: true, is_invalid_tubi: invalid ?? false}}] AS insts, \
+         IF leave != NONE {{ record::id(leave) }} ELSE {{ NONE }} AS tube_from, \
+         IF arrive != NONE {{ record::id(arrive) }} ELSE {{ NONE }} AS tube_to, \
+         route_ordinal AS tube_ordinal"
     );
     let [inst_by_anc, inst_by_owner] =
         durable_scope_reads("inst_relate", &inst_projection, packed, owner);
@@ -517,6 +665,66 @@ mod tests {
             "the OR shape no longer falls back to a table scan on this engine—\
              the split is then only a style choice, update this note: {plan}"
         );
+    }
+
+    /// `/model/records` 的直段元数据（方案 B T2）：管身行的 `leave` / `arrive` / `route_ordinal` 折成记录一级的 `tube{ordinal, from, to}`；
+    /// `route_ordinal` 没落盘的按同 `(容器, from, to)` 内出现序补号；两端缺失的历史行与 `inst_relate` 行没有 `tube`；
+    /// `GeomInstQuery` 那一半与 `records_of_root` 逐字相同（多出来的三格它不认、原样忽略）；序列化时 `tube` 缺就不出键。
+    #[tokio::test]
+    async fn model_records_carry_tube_identity_from_durable_rows_and_number_legacy_ordinals() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("model_records_tube").await.unwrap();
+        let root: aios_core::RefnoEnum = "24384_26606".into();
+        let packed = root.refno().0;
+        db.query(format!(r#"
+          CREATE aabb:box SET d={{mins:[0,0,0],maxs:[1,1,1]}};
+          CREATE trans:world SET d={{translation:[120,0,0],rotation:[0,0,0,1],scale:[1,1,1]}};
+          CREATE inst_relate:baked SET in=pe:⟨24384_26609⟩, anc=[{packed}],
+            aabb=aabb:box,world_trans=trans:world,generic='FLOOR',booled_id='hole';
+          -- 三段同一容器：前两段同 (leave, arrive) 且没有 route_ordinal（按出现序补 0、1）；第三段落了盘的 route_ordinal=5 原样
+          CREATE tubi_relate:[pe:⟨24384_26606⟩,0] SET in=pe:⟨24384_26606⟩,anc=[{packed}],out=inst_geo:tube,
+            aabb=aabb:box,world_trans=trans:world,leave=pe:⟨24384_1⟩,arrive=pe:⟨24384_2⟩;
+          CREATE tubi_relate:[pe:⟨24384_26606⟩,1] SET in=pe:⟨24384_26606⟩,anc=[{packed}],out=inst_geo:tube,
+            aabb=aabb:box,world_trans=trans:world,leave=pe:⟨24384_1⟩,arrive=pe:⟨24384_2⟩,invalid=true;
+          CREATE tubi_relate:[pe:⟨24384_26606⟩,2] SET in=pe:⟨24384_26606⟩,anc=[{packed}],out=inst_geo:tube,
+            aabb=aabb:box,world_trans=trans:world,leave=pe:⟨24384_2⟩,arrive=pe:⟨24384_3⟩,route_ordinal=5;
+          -- 两端缺失的历史行：还是一条 TUBI 记录，只是没有 tube
+          CREATE tubi_relate:[pe:⟨24384_26606⟩,3] SET in=pe:⟨24384_26606⟩,anc=[{packed}],out=inst_geo:tube,
+            aabb=aabb:box,world_trans=trans:world;
+        "#)).await.unwrap().check().unwrap();
+
+        let records = super::durable_model_records_of_root(&db, root).await.unwrap();
+        assert_eq!(records.len(), 5, "1 构件 + 4 管身");
+        assert!(records[0].tube.is_none() && records[0].inst.generic == "FLOOR");
+        let tubes = records[1..]
+            .iter()
+            .map(|record| (record.inst.generic.as_str(), record.tube.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tubes,
+            [
+                ("TUBI", Some(super::TubeMeta { ordinal: 0, from: "24384_1".into(), to: "24384_2".into() })),
+                ("TUBI", Some(super::TubeMeta { ordinal: 1, from: "24384_1".into(), to: "24384_2".into() })),
+                ("TUBI", Some(super::TubeMeta { ordinal: 5, from: "24384_2".into(), to: "24384_3".into() })),
+                ("TUBI", None),
+            ]
+        );
+        assert!(records[2].inst.insts[0].is_invalid_tubi);
+
+        // `GeomInstQuery` 那一半与 records_of_root 同形同序
+        let plain = super::durable_records_of_root(&db, root).await.unwrap();
+        assert_eq!(plain.len(), records.len());
+        for (a, b) in plain.iter().zip(&records) {
+            assert_eq!((a.refno.to_string(), a.generic.clone(), a.insts[0].geo_hash.clone()),
+                (b.inst.refno.to_string(), b.inst.generic.clone(), b.inst.insts[0].geo_hash.clone()));
+        }
+
+        let json = serde_json::to_value(&records).unwrap();
+        assert!(json[0].get("tube").is_none(), "构件行没有 tube 键");
+        assert_eq!(json[1]["tube"], serde_json::json!({ "ordinal": 0, "from": "24384_1", "to": "24384_2" }));
+        assert_eq!(json[1]["generic"], "TUBI", "flatten：GeomInstQuery 的键仍在顶层");
+        assert!(json[1]["insts"][0]["is_tubi"].as_bool().unwrap());
+        assert!(json[4].get("tube").is_none(), "两端缺失的历史行没有 tube 键");
     }
 
     // ---- 房间层级树 tubes=1 的管身冷读 ----

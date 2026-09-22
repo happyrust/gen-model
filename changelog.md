@@ -78,6 +78,31 @@
 - **口径 / 边界**：函数级近似——同一 fn 里读自身与读祖先分不开，`reads` 是「这个 fn 一共读了什么」，`why` 说清哪些是祖先读；报错文案里的属性名也算
   （宽口径，与读取集合守卫一致）；只钉 `.owner()` 这一个上溯口，`members()` 向下不在范围。
 
+### `model/records` 带直段身份、`tubi_relate` 落 `route_ordinal`（plant3d-web 方案 B · T2）
+
+- **为什么**：T1 让房间层级树按 `(BRAN, from, to, ordinal)` 列出直段，但三维里的直管对象来自 `/model/records`，那边的 TUBI 记录只有
+  `is_tubi` / `is_invalid_tubi`、没有两端与序号——前端对不上「树里这一段」是「场景里哪个对象」（小计划 §3.1 B3，逐段眼睛 T4 的前置）。
+  冷读路的序号此前只能按出现序补号（T1 §2.5 的已知窗口）。
+- **改动**（spec §4.5.2「`tube`」）：
+  - `model_record_reader::model_records_of_root` / `ModelRecord { flatten GeomInstQuery, tube?: TubeMeta{ordinal, from, to} }`：投影路来自
+    `ProjectedTube`；冷读路 `durable_records_sql` 的管身投影多三格 `tube_from` / `tube_to` / `tube_ordinal`（`records_of_root` 的
+    `GeomInstQuery` 不认、原样忽略），`route_ordinal` 缺的按同 `(容器, from, to)` 内记录 id 序补号，两端缺失的历史行 `tube` 为 `None`。
+    `tube` 放在记录一级而不是 `insts[]`（`ModelHashInst` 是 `aios_core` 的类型）。`/model/records` 改用它，别的字段一字不改。
+  - `model_db_adapter::render_records` / `bind_records`：`tubi_relate` 行补 `route_ordinal`（`leave` / `arrive` 之后），文本与参数两种形态同步；
+    树路由 `tubes=1` 的冷读（`durable_tube_rows_sql` 已读 `route_ordinal AS tube_ordinal`）从此对新行不必补号。
+- **验证**：`model_record_reader` 单测 +1（`mem://` 三段同容器：两段同 `(from,to)` 无 `route_ordinal` 补 0 / 1、一段落了 5 原样、缺端行无 `tube`；
+  `GeomInstQuery` 那一半与 `records_of_root` 同形同序；序列化 `tube` 缺就不出键）；`model_db_adapter` 管身契约钉加 `route_ordinal:0`。
+  主仓工作树因 vendor `e3d-io` 同日加 `TextList` 变体、gen-model 4 处穷举 match 尚未补臂而编不过（别的会话在做），本笔单测在
+  钉住 vendor 旧版（e3d-io `56d94cb` / e3d-model `4866468` / e3d-attlib `f37be2e` / old-aios-core `a438029` / plant-mbd `f888a50`）的
+  隔离 worktree `.scratch\t2\`（`2aab735df` + 本笔）里跑：`model_record_reader` + `model_db_adapter` 92 过、`web_service` +
+  `spatial_tree_view` + `spatial_tree_tubes` 274 过、`cargo clippy --lib` 触及文件 0 告警。
+- **真机**（`:8027` mem 档，换上同一 worktree 的 release 二进制 `0.1.30+g2aab735dfa9e.…dirty`，7997 整库 ensure 6772 根 / `failed 0` / 79 s）：
+  R432 整房树 28 个 BRAN 单元的 `model/records` 826 条里 340 条 TUBI **条条带 `tube`**、构件记录与 EQUI 根一条不带；同 BRAN 内
+  `(from, to, ordinal)` 唯一；`rooms/24381_35580/tree?tubes=1` 的 **159 段直段逐条**能在所属 BRAN 的 `tube` 里找到（树与记录同一四元组坐实）；
+  去掉 `tube` 后 28 根的 `items` 与换前旧二进制**逐字相同**；金样 `spatial-tree-check.ps1 -SkipEnsure` 41 / 41 过。走的是投影路
+  （`source=model-memory`，mem 档全库常驻），冷读路与补号由 `mem://` 单测钉；本房 `ordinal` 全 0（同 `(from, to)` 多段本就罕见）。
+  仓外脚本 `.scratch\tubes-verify\t2-records-check.ps1`（`-Phase before/after`，账在 `t2-records\summary-after.json`）。
+
 ### 房间层级树按 BRAN 单元列出直段（plant3d-web 方案 B · T1 后端）：`nearby/tree` / `rooms/{refno}/tree` 加 opt-in `tubes=1`，缺省响应逐字节不变
 
 - **为什么**：隐式管身（TUBI 直段）没有 refno、不进空间树（ADR-072 D4），两棵房间层级树列不出、也数不到直段。方案 A（plant3d-web `331f2e9b`，

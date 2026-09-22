@@ -180,8 +180,12 @@ SELECT record::id(in) AS container, record::id(leave) AS tube_from, record::id(a
 - 平铺态（`nearby`）不列直段；HANG / EQUI 不涉及；`count` 语义不改；不给直段行显隐（T4 另议）。
 - 不改 `model_memory_store.rs`（别的会话在改；本计划用它已有的 `root_snapshot`）。
 
-## 6. T2 预告（另一笔，0.5 天）
+## 6. T2（已落地，另一笔）
 
-`model/records` 的 `GeomInst` 加 `tube?: { ordinal, from, to }`：内存路 `projection_record_to_query` 填 `ProjectedTube`；冷读路 `tubi_projection`
-加 `leave AS tube_from, arrive AS tube_to, route_ordinal AS tube_ordinal`；`render_records` / 参数形态给 `tubi_relate` 行补 `route_ordinal`。
-是前端 T4「逐段眼睛」的前置，T1 不依赖它。
+`model/records` 的每条记录多一格 `tube?: { ordinal, from, to }`——放在**记录一级**而不是小计划写的 `GeomInst.tube?`（`insts[]` 的元素
+`ModelHashInst` 是 `aios_core` 的类型，不为这一格跨仓改它；一条管身记录恰好一个实例）：`model_record_reader::model_records_of_root` /
+`ModelRecord { flatten GeomInstQuery, tube? }`，内存路填 `ProjectedTube`；冷读路 `durable_records_sql` 的管身投影加 `tube_from` / `tube_to` /
+`tube_ordinal`（`records_of_root` 的 `GeomInstQuery` 不认这三格、原样忽略），`route_ordinal` 缺的按同 `(容器, from, to)` 内出现序补号；
+`render_records` / `bind_records` 给 `tubi_relate` 行补 `route_ordinal`。spec §4.5.2「`tube`」。是前端 T4「逐段眼睛」的前置，T1 / T3 不依赖它。
+单测在钉住 vendor 旧版的隔离 worktree 里跑（主仓工作树当时因 vendor `e3d-io` 新变体编不过，见 changelog）；真机 `:8027` 换上同一 worktree 的
+二进制后 R432 整房 28 根 BRAN 的 340 条 TUBI 记录条条带 `tube`、树里 159 段直段逐条对得上、去掉 `tube` 后记录与旧版逐字相同、金样 41 / 41（changelog）。

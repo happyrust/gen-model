@@ -510,6 +510,14 @@ rebuild、不推进应用/模型水位。
   `dbnum` / `model_source` / `model_source_reason` / `durable` 四格见 §4.12。
   `complete` 表示这些记录对应的完整根发布已提交；`model-memory` 可在数据库/房间事务失败后仍返回
   候选几何供诊断，此时 `complete=false` 且 `incomplete_roots` 点名根，绝不能把候选 receipt 当成功。
+- **`tube`**（2026-09-22，plant3d-web 方案 B T2；实现 `model_record_reader::model_records_of_root` / `ModelRecord`）：隐式管身的记录
+  （`generic = TUBI`、`insts[0].is_tubi = true`，挂在容器 BRAN 自己的 refno 上）在**记录一级**多一格
+  `"tube": {"ordinal": 0, "from": "24381_100678", "to": "24381_100679"}`——两端管件的 `a_b` 与同 `(from, to)` 内的序号，
+  与房间层级树 `tubes=1` 的直段身份 `(BRAN = refno, from, to, ordinal)` 是**同一个四元组**（§4.13.5），前端拿它把树里的直段行与
+  场景里的直管对象对上。构件记录没有这一格（键不出现），别的字段一字不改。投影路来自 `ProjectedTube`；冷读路来自 `tubi_relate` 的
+  `leave` / `arrive` / `route_ordinal`——`route_ordinal` 自本日起随行落盘（`model_db_adapter::render_records`），此前的老行没有这一格，
+  读侧按同 `(容器, from, to)` 内的出现序（记录 id 序）补 0、1、2…；两端缺失的历史行没有 `tube`。放在记录一级而不是 `insts[]` 里：
+  `ModelHashInst` 是 `aios_core` 的类型，这一格只属于本仓的读面，且一条管身记录恰好一个实例。
 - 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
   `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
 

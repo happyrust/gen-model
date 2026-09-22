@@ -616,7 +616,7 @@ _Avoid_: 中心线包围盒、BRAN 盒、管线走廊、TUBI 走廊、走廊盒�
 _Avoid_: 最近距离（泛指时）、管墙距、净空、碰撞检查、clearance 查询
 
 **直段行 (Tube Row)**：
-房间层级树（`nearby/tree` / `rooms/{refno}/tree`）在 `tubes=1` 时挂在 **BRAN 单元**下的一行隐式管身：身份是 `(单元 refno, 离开侧构件, 到达侧构件, 序号)` 四元组——直管没有自己的 refno，所以它不是构件、不计入任何 `count`，另立 `tube_count` / `total_tube_count`。来源是**按单元补**：折完管件后按树里出现的 BRAN 单元读根名下的管身记录（投影有回执取投影，否则冷读 `tubi_relate`），对单个盒复算与管件同一把尺的范围判据，按两端管件任一属该房归房；管身仍不进空间树（ADR-072 D4）。管件全在范围外、只有直段穿过的「孤直段」列不出（spec §4.13.5）。
+房间层级树（`nearby/tree` / `rooms/{refno}/tree`）在 `tubes=1` 时挂在 **BRAN 单元**下的一行隐式管身：身份是 `(单元 refno, 离开侧构件, 到达侧构件, 序号)` 四元组——直管没有自己的 refno，所以它不是构件、不计入任何 `count`，另立 `tube_count` / `total_tube_count`。来源是**按单元补**：折完管件后按树里出现的 BRAN 单元读根名下的管身记录（投影有回执取投影，否则冷读 `tubi_relate`），对单个盒复算与管件同一把尺的范围判据，按两端管件任一属该房归房；管身仍不进空间树（ADR-072 D4）。管件全在范围外、只有直段穿过的「孤直段」列不出（spec §4.13.5）。`/model/records` 的管身记录在记录一级带同一个四元组的 `tube{ordinal, from, to}`（spec §4.5.2；`route_ordinal` 随 `tubi_relate` 行落盘，老行读侧按出现序补号），前端拿它把直段行对上场景里的直管对象。
 _Avoid_: 直管构件、TUBI 叶子、管身条目（指树上条目时）、直段节点（前端节点模型另有叫法）
 
 ## 实机端到端测试（Live E2E Testing）

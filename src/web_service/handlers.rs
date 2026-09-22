@@ -3555,7 +3555,7 @@ pub async fn model_records(
         }
     }
     let mut memory_overlay_used = false;
-    let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
+    let mut per_root: Vec<(String, Vec<crate::fast_model::model_record_reader::ModelRecord>)> =
         Vec::with_capacity(roots.len());
     for (name, root) in roots.iter().zip(&parsed_roots) {
         // Durable reads never hydrate kv-mem.  A resident receipt is a complete
@@ -3564,10 +3564,14 @@ pub async fn model_records(
         let memory_overlay = store.receipt(scope, *root).is_some();
         memory_overlay_used |= memory_overlay;
         let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-        let records =
-            crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
-                .await
-                .map_err(ApiError::from_domain)?;
+        // 每条记录 = `GeomInstQuery` 原形 + 隐式管身才有的 `tube{ordinal, from, to}`（spec §4.5，方案 B T2）：
+        // 与树路由 `tubes=1` 的直段同一身份四元组，前端据此把直段行对上场景对象。
+        let records = crate::fast_model::model_record_reader::model_records_of_root(
+            &aios_core::SUL_DB,
+            refno,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
