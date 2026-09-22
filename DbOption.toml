@@ -351,6 +351,12 @@ model_element_cache_max_entries = 200000
 #   看现值：/health.model_cache.element_cache.{max_dbnums, resident_dbnums, evicted_dbnums_total} 与 databases[].last_used_tick；
 #   环境变量 AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS 压过本键。
 model_generation_input_max_dbnums = 0
+#【新增 2026-09-22，内存控制计划 P4】model_historical_snapshots_max —— 历史快照（POST /model/history/generate 造的 Historical(<key>)
+#   作用域，每格一个单元子树的完整投影）最多同时留几格。此前只有显式 DELETE / 同 key 重生成才丢，没条数上限、没 TTL、/health 看不见。
+#   发布第 N+1 格时按最近一次 generate 的先后把最旧的那格连回执一起丢（与 DELETE 同一条路，之后再查它 = SNAPSHOT_NOT_FOUND）；
+#   同 key 重生成不算新格。默认 16（一次分析开几个时点对照够用）；写 0 = 不限。看现值：/health.model_cache.historical；
+#   环境变量 AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX 压过本键。
+model_historical_snapshots_max = 16
 model_root_inflight_max = 2
 model_full_rebuild_enabled = true
 

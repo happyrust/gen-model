@@ -168,6 +168,9 @@ pub struct DbOptionExt {
     /// 生成输入缓存最多同时留多少个库的 `GenerationInput`（没写 = 0 = 不限）。详见 [`model_generation_input_max_dbnums`]。
     #[serde(default)]
     pub model_generation_input_max_dbnums: Option<usize>,
+    /// 历史快照（`POST /model/history/generate` 造的 `Historical(*)` 作用域）最多同时留几格（没写 = 16；0 = 不限）。详见 [`model_historical_snapshots_max`]。
+    #[serde(default)]
+    pub model_historical_snapshots_max: Option<usize>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -535,6 +538,7 @@ impl From<DbOption> for DbOptionExt {
             model_overlay_max_roots: None,
             model_element_cache_max_entries: None,
             model_generation_input_max_dbnums: None,
+            model_historical_snapshots_max: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -629,6 +633,8 @@ struct DbOptionExtFields {
     model_element_cache_max_entries: Option<usize>,
     #[serde(default)]
     model_generation_input_max_dbnums: Option<usize>,
+    #[serde(default)]
+    model_historical_snapshots_max: Option<usize>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -951,6 +957,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_overlay_max_roots: ext.model_overlay_max_roots,
         model_element_cache_max_entries: ext.model_element_cache_max_entries,
         model_generation_input_max_dbnums: ext.model_generation_input_max_dbnums,
+        model_historical_snapshots_max: ext.model_historical_snapshots_max,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -1050,6 +1057,8 @@ pub const MODEL_OVERLAY_MAX_ROOTS_ENV: &str = "AIOS_MODEL_OVERLAY_MAX_ROOTS";
 pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES";
 /// 环境变量名：一次性覆盖 [`model_generation_input_max_dbnums`]，不必改配置文件。
 pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV: &str = "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS";
+/// 环境变量名：一次性覆盖 [`model_historical_snapshots_max`]，不必改配置文件。
+pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV: &str = "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX";
 
 /// [`model_overlay_max_roots`] 没写时的默认值（ADR-082 D5，2026-09-20 mem 档实测定的）：
 /// 4 库 7,743 根 / 59,929 条记录量 106.5 MB ≈ **13.8 KB / 根**（7997 单库 6,772 根 94.2 MB），
@@ -1064,6 +1073,9 @@ pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
 /// 与 ADR-082 D5 同一条路——先只加能力、行为一个字不变，真机量过「每窗重开一份 `GenerationInput` 的代价」
 /// （两库交替窗 × 上限 1）再定数字；候选 2–4（一个长驻实例通常同时活跃的 DESI 库数）。
 pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT: usize = 0;
+/// [`model_historical_snapshots_max`] 没写时的默认值（内存控制计划 P4 / D4，2026-09-22）：一次分析开几个时点对照，
+/// 十几格够用；每格是一个单元子树的完整投影（一根到一库不等），此前无界、`/health` 也看不见。
+pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT: usize = 16;
 
 /// 进程内模型投影 overlay（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个**根**
 /// （`DbOption.toml` 的 `model_overlay_max_roots`，环境变量 [`MODEL_OVERLAY_MAX_ROOTS_ENV`] 压过；
@@ -1123,6 +1135,24 @@ pub fn model_generation_input_max_dbnums() -> usize {
             .as_deref(),
         load_ext_fields().model_generation_input_max_dbnums,
         MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
+    )
+}
+
+/// 历史快照最多同时留几格（`DbOption.toml` 的 `model_historical_snapshots_max`，环境变量
+/// [`MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV`] 压过；没写 = [`MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT`] = 16，**写 0 = 不限**）。
+///
+/// `POST /model/history/generate` 每个不同的 `snapshot_key` 在投影存储里造一格完整的 `Historical(<key>)` 作用域，
+/// 此前只有显式 `DELETE` 或同 key 重生成才丢——没 TTL、没条数上限，`/health` 也看不见。设了上限之后，
+/// 发布第 N+1 格时按**最近一次 generate** 的先后把最旧的那格连回执一起丢（与 `DELETE` 同一条路，
+/// 之后再查它是既有的 `SNAPSHOT_NOT_FOUND`）；同 key 重生成不算新格。按条数不按字节、不做 TTL（d-149 口径）。
+/// 现值 `/health.model_cache.historical`。
+pub fn model_historical_snapshots_max() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_historical_snapshots_max,
+        MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
     )
 }
 
@@ -4337,6 +4367,11 @@ dir = "review_attachments"
         assert_eq!(
             MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV,
             "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS"
+        );
+        assert_eq!(MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT, 16);
+        assert_eq!(
+            MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV,
+            "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX"
         );
     }
 }

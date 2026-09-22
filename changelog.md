@@ -129,6 +129,24 @@
 - **验证**：`cargo test --lib -- e3d_model_service::tests::the_generation_input_cache_keeps_at_most_n_dbnums_and_evicts_the_least_recently_used options::tests::a_count_limit…` 2 绿；
   `e3d_model_service::tests:: options::tests::` 全组与 `cargo check --lib --tests --bins` 见提交说明。
 
+### 历史快照按条数封顶（内存控制计划 P4）：`model_historical_snapshots_max` 默认 16，最久没 generate 的先丢；`/health.model_cache.historical` 第一次能看见这几格
+
+- **为什么**（2026-09-22 审核 D2）：`POST /model/history/generate` 每个不同的 `snapshot_key` 在投影存储里造一格完整的 `Historical(<key>)` 作用域（一个单元子树
+  在某一会话的全部记录），只有显式 `DELETE` 或同 key 重生成才 `drop_scope`——没条数上限、没 TTL；`overlay_footprint` 只数 `Current`，`/health` 看不见它们。
+- **改动**：
+  - `options.rs`：`model_historical_snapshots_max`（`DbOption.toml` 键 / 环境变量 `AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX` / 默认 `MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT = 16`，0 = 不限），
+    三层裁决同 `effective_count_limit`；那条单测再扩一键。
+  - `historical_model.rs`：`HistoricalModelStore` 多 `publish_ticks`（每格最近一次 publish 的单调序号）/ `evicted_total`；`publish` → `publish_capped(report, cap)`：
+    登记之后 `while 格数 > 上限` 把序号最小的那格（≠ 刚发布的）走 `drop_snapshot`（回执 + 那格几何一起，与 `DELETE` 同一条路），同 key 重生成只刷新序号；
+    顶掉打一行日志。`try_global()`（同步、不初始化）+ `stats() -> HistoricalStoreStats { snapshots, max_snapshots, evicted_total }`。
+  - `model_memory_store.rs`：`overlay_footprint` 的尺子抽成 `footprint_of(state)`，新 `historical_footprint() -> Vec<HistoricalScopeFootprint { snapshot_key, records, roots, acks, approx_bytes }>`
+    （按键升序，`Current` 不在里面）。
+  - `handlers.rs` `/health.model_cache.historical { snapshots, max_snapshots, evicted_total, scopes, records, approx_bytes, snapshots_detail[] }`。
+  - ADR-081 追记（前端遇 `SNAPSHOT_NOT_FOUND` 404 要重新 `generate`，handle 不永久有效）；CONTEXT「历史快照格数上限」；`DbOption.toml` 键 + 注释。
+- **钉** `the_snapshot_cap_drops_the_oldest_generated_first_and_a_regenerated_key_takes_no_new_slot`（0 不限 / 同 key 重生成不算新格不顶别人 / 第四格顶掉最旧那格连几何、
+  再问 `SNAPSHOT_NOT_FOUND` / 上限收到 1 按序全出 / 显式 DELETE 不计）、`the_historical_footprint_lists_each_snapshot_scope_with_the_overlay_ruler`。
+- **验证**：见提交说明。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁

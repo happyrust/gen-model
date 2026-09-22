@@ -211,6 +211,16 @@ fn model_cache_health(store_reachable: bool) -> Value {
     let element_cache = crate::fast_model::e3d_model_service::generation_input_cache_footprint();
     // ADR-084：生成输入缓存这一维（库数）——上限 / 现留几库 / 累计逐出；`databases[]` 每条带 `last_used_tick`。
     let generation_inputs = crate::fast_model::e3d_model_service::generation_input_cache_limits();
+    // 内存控制计划 P4：历史快照那几格——回执表的条数 / 上限 / 累计顶掉，加投影里每格的记录数与估算字节
+    // （与 overlay 同一把尺；此前 `/health` 只数 `Current`，这几格看不见）。
+    let historical_scopes = store.historical_footprint();
+    let historical_store = crate::fast_model::historical_model::HistoricalModelStore::try_global()
+        .map(|store| store.stats())
+        .unwrap_or(crate::fast_model::historical_model::HistoricalStoreStats {
+            snapshots: 0,
+            max_snapshots: crate::options::model_historical_snapshots_max(),
+            evicted_total: 0,
+        });
     let mut health = json!({
         "resident_records": resident_records,
         "resident_roots": resident_roots,
@@ -231,6 +241,15 @@ fn model_cache_health(store_reachable: bool) -> Value {
             "resident_dbnums": generation_inputs.resident_dbnums,
             "evicted_dbnums_total": generation_inputs.evicted_dbnums_total,
             "databases": element_cache,
+        },
+        "historical": {
+            "snapshots": historical_store.snapshots,
+            "max_snapshots": historical_store.max_snapshots,
+            "evicted_total": historical_store.evicted_total,
+            "scopes": historical_scopes.len(),
+            "records": historical_scopes.iter().map(|scope| scope.footprint.records).sum::<usize>(),
+            "approx_bytes": historical_scopes.iter().map(|scope| scope.footprint.approx_bytes).sum::<usize>(),
+            "snapshots_detail": historical_scopes,
         },
     });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());

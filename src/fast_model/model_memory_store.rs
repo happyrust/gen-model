@@ -757,6 +757,47 @@ pub struct OverlayFootprint {
     pub approx_bytes: usize,
 }
 
+/// 一格历史快照作用域（`Historical(<key>)`）的体量（[`ModelMemoryStore::historical_footprint`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HistoricalScopeFootprint {
+    pub snapshot_key: String,
+    #[serde(flatten)]
+    pub footprint: OverlayFootprint,
+}
+
+/// 一个作用域此刻的体量：记录那一半是插入 / 删除时随手记的账（`record_bytes`，O(1)），
+/// 回执与 ACK 走一遍（根的量级）。`Current` 与每一格 `Historical` 同一把尺。
+fn footprint_of(state: &ScopeState) -> OverlayFootprint {
+    const NODE: usize = 32;
+    let records = state.record_bytes;
+    let receipts: usize = state
+        .receipts
+        .values()
+        .map(|receipt| {
+            NODE + std::mem::size_of::<RootReceipt>()
+                + receipt.manifest_hash.len()
+                + receipt.published_via.len()
+                + approx_model_target_bytes(receipt.model_target.as_ref())
+        })
+        .sum();
+    let acks: usize = state
+        .publication_acks
+        .values()
+        .map(|ack| {
+            NODE + std::mem::size_of::<RootPublicationAck>()
+                + ack.manifest_hash.len()
+                + ack.room_generation.as_ref().map_or(0, String::len)
+                + approx_model_target_bytes(ack.model_target.as_ref())
+        })
+        .sum();
+    OverlayFootprint {
+        records: state.geometries.len(),
+        roots: state.receipts.len(),
+        acks: state.publication_acks.len(),
+        approx_bytes: records + receipts + acks,
+    }
+}
+
 /// 一条投影记录在 overlay 里大约占多少字节（d-149 观测用）：内联结构、它自己的字串与祖先链，
 /// 加上 `geometries` 键、`by_source`、每个祖先一份 `by_ancestor`、管身一份 `by_tube_branch` 里的
 /// `record_id` 副本与 B 树节点。按长度不按容量——是给人对 RSS 的估算，不是分配器审计。
@@ -1034,38 +1075,29 @@ impl ModelMemoryStore {
     /// 回执与 ACK 在读锁里走一遍（根的量级，十万级也只是几毫秒）。估算口径见 [`approx_record_bytes`]；
     /// 盘上的网格不在里面。
     pub fn overlay_footprint(&self) -> OverlayFootprint {
-        const NODE: usize = 32;
         let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else {
-            return OverlayFootprint::default();
-        };
-        let records = state.record_bytes;
-        let receipts: usize = state
-            .receipts
-            .values()
-            .map(|receipt| {
-                NODE + std::mem::size_of::<RootReceipt>()
-                    + receipt.manifest_hash.len()
-                    + receipt.published_via.len()
-                    + approx_model_target_bytes(receipt.model_target.as_ref())
+        scopes
+            .get(&ScopeKey::Current)
+            .map(footprint_of)
+            .unwrap_or_default()
+    }
+
+    /// 每一格 `Historical(<key>)` 作用域此刻的体量（内存控制计划 P4，`/health.model_cache.historical`）：
+    /// 与 [`Self::overlay_footprint`] 同一把尺，按键升序。查时现算、不落库。
+    pub fn historical_footprint(&self) -> Vec<HistoricalScopeFootprint> {
+        let scopes = self.read();
+        let mut out: Vec<HistoricalScopeFootprint> = scopes
+            .iter()
+            .filter_map(|(key, state)| match key {
+                ScopeKey::Historical(snapshot_key) => Some(HistoricalScopeFootprint {
+                    snapshot_key: snapshot_key.clone(),
+                    footprint: footprint_of(state),
+                }),
+                ScopeKey::Current => None,
             })
-            .sum();
-        let acks: usize = state
-            .publication_acks
-            .values()
-            .map(|ack| {
-                NODE + std::mem::size_of::<RootPublicationAck>()
-                    + ack.manifest_hash.len()
-                    + ack.room_generation.as_ref().map_or(0, String::len)
-                    + approx_model_target_bytes(ack.model_target.as_ref())
-            })
-            .sum();
-        OverlayFootprint {
-            records: state.geometries.len(),
-            roots: state.receipts.len(),
-            acks: state.publication_acks.len(),
-            approx_bytes: records + receipts + acks,
-        }
+            .collect();
+        out.sort_by(|a, b| a.snapshot_key.cmp(&b.snapshot_key));
+        out
     }
 
     /// 当前投影里某个库的提交纪元，配合 [`Self::restore_dbnum`] 用。
@@ -3635,6 +3667,61 @@ mod tests {
             ),
             (0, 0, 0, 0),
             "删光之后记录那半的账也归零: {cleared:?}"
+        );
+    }
+
+    /// 内存控制计划 P4：每一格 `Historical(<key>)` 作用域的体量与 overlay 同一把尺、按键升序列出，
+    /// `Current` 不在里面；丢了那格就不再列。
+    #[test]
+    fn the_historical_footprint_lists_each_snapshot_scope_with_the_overlay_ruler() {
+        let store = store();
+        assert!(store.historical_footprint().is_empty());
+        commit_root(&store, RefNo::new(7997, 1), "current-only");
+
+        let root = RefNo::new(7997, 10);
+        store.commit(
+            ProjectionScope::Historical("b@2"),
+            vec![ProjectionCommit {
+                upserts: vec![record("hb", RefNo::new(7997, 11), root, 7997)],
+                ..Default::default()
+            }],
+        );
+        store.commit(
+            ProjectionScope::Historical("a@1"),
+            vec![ProjectionCommit {
+                upserts: vec![
+                    record("ha1", RefNo::new(7997, 12), root, 7997),
+                    record("ha2", RefNo::new(7997, 13), root, 7997),
+                ],
+                receipt: Some((root, limit_receipt("ha", 2))),
+                ..Default::default()
+            }],
+        );
+
+        let scopes = store.historical_footprint();
+        assert_eq!(
+            scopes
+                .iter()
+                .map(|scope| (scope.snapshot_key.as_str(), scope.footprint.records, scope.footprint.roots))
+                .collect::<Vec<_>>(),
+            vec![("a@1", 2, 1), ("b@2", 1, 0)],
+            "按键升序、Current 不在里面: {scopes:?}"
+        );
+        assert!(scopes[0].footprint.approx_bytes > scopes[1].footprint.approx_bytes);
+        assert_eq!(
+            store.overlay_footprint().records,
+            1,
+            "overlay 那把尺只量 Current"
+        );
+
+        store.drop_scope(ProjectionScope::Historical("a@1"));
+        assert_eq!(
+            store
+                .historical_footprint()
+                .iter()
+                .map(|scope| scope.snapshot_key.clone())
+                .collect::<Vec<_>>(),
+            vec!["b@2".to_string()]
         );
     }
 

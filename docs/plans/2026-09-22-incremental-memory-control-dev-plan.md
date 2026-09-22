@@ -12,6 +12,8 @@
 > **P2 已落地**（同日：`evict_missing_root` 连带删 ACK / 提交序号 / 失效标记，记录仍走 `remove`；钉 `evicting_a_missing_root_leaves_no_orphan_ack_or_tick`）。
 > **P3 能力已落地、默认值待真机**（同日：`model_generation_input_max_dbnums` 默认 0、`DbnumLru` 命中刷新 + 锁外 drop、`/health.model_cache.element_cache` 三格 + `last_used_tick`、
 > ADR-084 起稿；§3.4 的两库交替窗真机量法与证据档、默认值改数还开着）。
+> **P4 已落地**（同日：`model_historical_snapshots_max` 默认 16、`HistoricalModelStore::publish_capped` 最久没 generate 的先 `drop_snapshot`、
+> `ModelMemoryStore::historical_footprint`、`/health.model_cache.historical`、ADR-081 追记；钉两条）。
 > 代码事实对到本仓工作树 2026-09-22 14:3x（主线 `579b1d8b2` + 上述未提交改动）；行号以那一刻为准，落地后以源码为准。
 > 关联：ADR-082（两道闸、D5 默认值、§不做）、ADR-073 D13 / F3（`RoomOnly` 冷根、stray 代号）、ADR-041 / ADR-052（瞬时峰值，不在本计划）、
 > `docs/evidence/2026-09-21-d149-live-chain.md`（W1–W6 真机链）。

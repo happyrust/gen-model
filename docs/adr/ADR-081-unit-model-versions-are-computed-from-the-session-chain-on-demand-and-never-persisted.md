@@ -92,6 +92,10 @@ legacy 靠 DuckLake 的逐单元提交表（`impact_kind` 五态 + 不可变 man
     的 handler 见 `tool == "attributes"` 走它（要 `arguments.refno`，缺了 `INVALID_REFNO`），`historical_error` 多映三档
     `INVALID_REFNO` 400 / `SNAPSHOT_NOT_FOUND` 404 / `REFNO_OUTSIDE_SNAPSHOT` 422。回执在契约之外多给 `complete` / `diagnostics` / `elapsed_ms`。
     入参裁决抽成 `attributes_target`，无真库也测得到三档错误码；守卫钉住「不存在是正常回执」与「`read_pinned` 不碰备份库 / 当前时点会话」。
+  - **2026-09-22 追记（内存控制计划 P4）**：快照格数**按条数封顶**——`model_historical_snapshots_max`（`DbOption.toml` / `AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX`，
+    默认 **16**，0 = 不限）。`generate` 发布第 N+1 格时按最近一次 generate 的先后把最旧的那格连回执一起丢（`HistoricalModelStore::publish_capped` → `drop_snapshot`，
+    与 `DELETE` 同一条路），之后再 `query` 它就是上面那档 `SNAPSHOT_NOT_FOUND` 404——**前端遇到 404 要重新 `generate`**，不能假定 handle 永久有效；
+    同 key 重生成只刷新序号、不算新格。现值 `/health.model_cache.historical { snapshots, max_snapshots, evicted_total, scopes, records, approx_bytes, snapshots_detail[] }`。
 
 ## 追记（2026-09-18 20:4x）：构件级版本表 `GET /api/v1/element/versions`
 
