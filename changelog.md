@@ -2,6 +2,27 @@
 
 ## 2026-09-22
 
+### 祖先读点守卫（GitHub #39）：生成器沿 owner 链只许读 POS / ORI / noun，每处上溯登记；登记出 FIXING 一条「单元之上」的读
+
+- **为什么**：读取集合那一票（S5 / S6，`attribute_reads_guard`）只钉「读了哪个属性」、不钉「从谁身上读」，而选根按候选的**祖先闭包**上卷——
+  根之上的祖先属性变了不进任何根的闭包，只有 `POS` / `ORI` 走锚点。生成器一旦在 builder 里 `owner().get_double("LEVE")`，就是一张停在旧形状上
+  的网格，且读取集合守卫是绿的。2026-09-22 增量缺口审阅 C-1（追踪 #31）。
+- **改动**：
+  - e3d-model `tests/ancestor_reads_guard.rs`（新，4 条）：扫 `src/**/*.rs`（去 `src/bin`、截 `#[cfg(test)]`）里**每一处** `.owner()` 并定位到所在 fn，
+    `(文件, fn)` 与登记表 `OWNER_WALK_SITES` 逐条相等，每个 fn 读到的属性名（大写字面量 ∩ 嵌入读取集合，noun / 注释不算）⊆ 登记的 `reads`；
+    四档 `Transform` / `NounOnly` / `WithinUnit` / `AboveUnit`（后者 `why` 必须点名 ADR-080 与 issue）；接过祖先去读的函数（`first_rpath` /
+    `path_points` / `justification_offset` / `wall_spine_points`）按 `ANCESTOR_CONSUMERS` 同样登记；`local_matrix` / `local_placement` 只许读
+    `POS` / `ORI`，桥架伪属性分支必须挡在 `is_cable_tray_element` 之后；扫描器自检一条。
+  - 登记结果：12 处 owner 上溯 = Transform 2 / NounOnly 7 / WithinUnit 2（桥架 `placement` / `resolve_anchor`，都在 CWBRAN 单元内）/
+    **AboveUnit 1**——`elmodl.rs::fixing_host_frame`：FIXING 自成模型单元，实例标架却读 owner²=`JLDATU.ZDIS` 与宿主 `WALL` 的 spine。整棵子树重算的
+    根口径覆盖；**单元级发布（ADR-080）不覆盖**（JLDATU 改了 FIXING 不会被 `plan_update` 点名），翻 `model_unit_level_publish` 默认前要补这条边（已记 #37）。
+  - `CONTEXT.md`「模型影响」词条补「祖先读点纪律」一句（随 `9ab7756b4` 一并入库）。
+- **验证**：e3d-model `cargo test --test ancestor_reads_guard --test attribute_reads_guard --test reference_reads_guard`（隔离 target）**4 + 2 + 2 全绿**；
+  mutation ① `world_matrix` 循环里加 `current.get_double("LEVE")?` → 红「读到了没登记的属性 [LEVE]」；mutation ② `local_matrix` 开头加
+  `el.owner()?.map(|o| o.get_double("LEVE"))` → 两条红（未登记的 owner 上溯 + 读了 POS / ORI 之外的属性）；两处已还原。`rustfmt --edition 2024 --check` 干净、LF。
+- **口径 / 边界**：函数级近似——同一 fn 里读自身与读祖先分不开，`reads` 是「这个 fn 一共读了什么」，`why` 说清哪些是祖先读；报错文案里的属性名也算
+  （宽口径，与读取集合守卫一致）；只钉 `.owner()` 这一个上溯口，`members()` 向下不在范围。
+
 ### 房间层级树按 BRAN 单元列出直段（plant3d-web 方案 B · T1 后端）：`nearby/tree` / `rooms/{refno}/tree` 加 opt-in `tubes=1`，缺省响应逐字节不变
 
 - **为什么**：隐式管身（TUBI 直段）没有 refno、不进空间树（ADR-072 D4），两棵房间层级树列不出、也数不到直段。方案 A（plant3d-web `331f2e9b`，
