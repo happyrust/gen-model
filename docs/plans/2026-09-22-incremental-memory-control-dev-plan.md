@@ -8,6 +8,7 @@
 > 状态：**已批准**（2026-09-22 15:0x，Plannotator `--gate` + 面板确认「已在 Plannotator 里批准，按 D1–D8 的推荐项落地，先做 P0」；§4 八条全按推荐项定：
 > D1 删树、D2 按库数 LRU、D3 先 0 落地再量、D4 Historical 16 条、D5 元素缓存先不动、D6 缺失证据档改引用、D7 钉、D8 P0→P1→P2→P3→P4→P6）。
 > **P0 已落地**（同日，见 changelog 2026-09-22；`enforce_root_limit(limit, room_membership_enabled)`、`ack_owes_room_edges`、ADR-082 D1/D2/实施约束改口、CONTEXT）。
+> **P1 已落地**（同日：P1a `drop_root` / `restore_root` 共有判定换迭代方向 + 逐出日志 `耗时`；P1b `room_spatial` 整套删除、4 条测试改用本地 `members_intersecting`、1 条专测删）。
 > 代码事实对到本仓工作树 2026-09-22 14:3x（主线 `579b1d8b2` + 上述未提交改动）；行号以那一刻为准，落地后以源码为准。
 > 关联：ADR-082（两道闸、D5 默认值、§不做）、ADR-073 D13 / F3（`RoomOnly` 冷根、stray 代号）、ADR-041 / ADR-052（瞬时峰值，不在本计划）、
 > `docs/evidence/2026-09-21-d149-live-chain.md`（W1–W6 真机链）。

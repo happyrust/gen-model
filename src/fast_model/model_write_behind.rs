@@ -706,14 +706,17 @@ fn enforce_overlay_root_limit(store: &ModelMemoryStore, moment: &str) {
         return;
     }
     // 房间开关从 options 读、传进去（store 对配置无知）：开着时 ACK 没带房间代号的根不逐（d-149 补丁 D7）。
+    // 耗时是这一批逐出占住 `ModelMemoryStore` 写锁的时间（逐出全在写锁里做），真机对着看的唯一哨兵。
+    let started_at = std::time::Instant::now();
     let outcome = store.enforce_root_limit(limit, crate::options::room_membership());
     if outcome.evicted > 0 {
         println!(
-            "模型投影 overlay 按根数上限收回（{moment}）：{} → {} 根，上限 {}，逐出 {}{}",
+            "模型投影 overlay 按根数上限收回（{moment}）：{} → {} 根，上限 {}，逐出 {}，耗时 {}ms{}",
             outcome.resident_before,
             outcome.resident_after,
             outcome.limit,
             outcome.evicted,
+            started_at.elapsed().as_millis(),
             if outcome.still_over_limit() {
                 "；剩下的都还没落盘，先留着"
             } else {

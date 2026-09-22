@@ -24,7 +24,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Instant;
 
 use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
@@ -358,11 +357,6 @@ struct ScopeState {
     /// `query_service::room_calculation_status` 点得到它的唯一证据（d-149 补丁，2026-09-22）。
     stamped_room_generations: BTreeMap<u32, String>,
     model_digests: BTreeMap<u32, [u8; 32]>,
-    room_spatial: BTreeMap<u32, aios_core::accel_tree::acceleration_tree::AccelerationTree>,
-    room_spatial_dirty: BTreeSet<(u32, i64)>,
-    room_spatial_rebuild_count: u64,
-    room_spatial_rows_rebuilt: u64,
-    room_spatial_rebuild_duration_ms: u64,
     /// 生成根 → 最近一次盖回执的序号（单调计数，不是时刻）。按根数限额逐出时的 LRU 键
     /// （[`ModelMemoryStore::enforce_root_limit`]，d-149）：读不刷新它——被逐出的根读路直读
     /// RocksDB，刷新读序只会让「常读的旧根」把「刚生成的新根」挤出去。
@@ -395,42 +389,6 @@ pub(crate) struct GeometryChange {
 }
 
 impl ScopeState {
-    fn flush_room_spatial(&mut self) {
-        let dirty = std::mem::take(&mut self.room_spatial_dirty);
-        let dbnums = dirty
-            .into_iter()
-            .map(|(dbnum, _)| dbnum)
-            .collect::<BTreeSet<_>>();
-        for dbnum in dbnums {
-            use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-            let started_at = Instant::now();
-            let boxes = self
-                .by_source
-                .range((dbnum, i64::MIN)..=(dbnum, i64::MAX))
-                .flat_map(|(_, ids)| ids)
-                .filter_map(|id| self.geometries.get(id))
-                .map(|row| {
-                    RStarBoundingBox::new(
-                        parry3d::bounding_volume::Aabb::new(
-                            row.world_bounds[0].into(),
-                            row.world_bounds[1].into(),
-                        ),
-                        crate::data_interface::generation_root::refno_from_e3d(row.source_refno),
-                        row.noun.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let row_count = boxes.len() as u64;
-            self.room_spatial
-                .insert(dbnum, AccelerationTree::load(boxes));
-            self.room_spatial_rebuild_count = self.room_spatial_rebuild_count.saturating_add(1);
-            self.room_spatial_rows_rebuilt =
-                self.room_spatial_rows_rebuilt.saturating_add(row_count);
-            self.room_spatial_rebuild_duration_ms = self
-                .room_spatial_rebuild_duration_ms
-                .saturating_add(started_at.elapsed().as_millis() as u64);
-        }
-    }
     fn toggle_digest(&mut self, record: &ProjectedGeometry) {
         use sha2::{Digest, Sha256};
         // Include the unique record identity, so equal geometry cannot cancel.
@@ -524,13 +482,11 @@ impl ScopeState {
             .entry(record.dbnum)
             .or_insert(record.source_sesno);
         *sesno = (*sesno).max(record.source_sesno);
-        let member = packed_refno(record.source_refno);
         let record_id = record.record_id.clone();
         self.record_bytes = self
             .record_bytes
             .saturating_add(approx_record_bytes(&record));
         self.geometries.insert(record_id, record);
-        self.room_spatial_dirty.insert((dbnum, member));
         self.bump_epoch(dbnum);
     }
 
@@ -538,7 +494,7 @@ impl ScopeState {
         self.remove_internal(record_id, true)
     }
 
-    /// 只把这条记录从驻留视图里摘掉，不记成模型删除。索引与空间视图照常变，但
+    /// 只把这条记录从驻留视图里摘掉，不记成模型删除。索引照常变，但
     /// 房间发布不能把「库里本来就没有了」当成源模型的一次删除。
     fn evict(&mut self, record_id: &str) -> Option<ProjectedGeometry> {
         self.remove_internal(record_id, false)
@@ -583,8 +539,6 @@ impl ScopeState {
                 }
             }
         }
-        self.room_spatial_dirty
-            .insert((record.dbnum, packed_refno(record.source_refno)));
         Some(record)
     }
 
@@ -641,7 +595,11 @@ impl ScopeState {
 
     /// 整根从 overlay 里掉：回执、ACK、失效标记、提交序号，以及名下**不与别的常驻回执共有**的
     /// 记录（嵌套根共有的记录归另一个回执继续持有）。这是缓存态的收回，不是生成出来的删除 delta
-    /// ——库里那一份不动，读路对这根从此直读 RocksDB。调用方随后 `flush_room_spatial`。
+    /// ——库里那一份不动，读路对这根从此直读 RocksDB。
+    ///
+    /// 共有判定按记录的祖先链查回执表（O(祖先数 × log 回执数)），**不是**按回执表查祖先链：后者对不共有的
+    /// 记录（绝大多数）要把全部回执走完，默认 50,000 根时每条记录 5 万次比较、一批 512 根的逐出就是 10⁹ 量级，
+    /// 全在写锁里（2026-09-22 审核 B）。两种写法是同一个谓词。
     fn drop_root(&mut self, root: RefNo) {
         let packed = packed_refno(root);
         self.receipts.remove(&packed);
@@ -650,9 +608,10 @@ impl ScopeState {
         self.commit_ticks.remove(&packed);
         for id in self.record_ids_under(root) {
             let shared = self.geometries.get(&id).is_some_and(|record| {
-                self.receipts
-                    .keys()
-                    .any(|other| record.ancestors.contains(other))
+                record
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| self.receipts.contains_key(ancestor))
             });
             if !shared {
                 self.evict(&id);
@@ -722,7 +681,6 @@ impl ScopeState {
         }
         if evicted > 0 {
             self.overlay_evictions += evicted as u64;
-            self.flush_room_spatial();
         }
         evicted
     }
@@ -794,7 +752,8 @@ pub struct OverlayFootprint {
     /// 进程内完整发布确认（ACK）条数。
     pub acks: usize,
     /// 估算的堆字节：每条记录的内联结构 + 字串 / 祖先链 + 四张索引里的 `record_id` 副本与树节点，
-    /// 再加回执与 ACK。**不含**每库的房间空间树（`room_spatial`）与网格文件——网格在盘上。
+    /// 再加回执与 ACK。**不含**网格文件——网格在盘上。（每库的房间空间树 `room_spatial` 2026-09-22 已删：
+    /// 没有生产读者，却每次提交 / 逐出整棵重建；此前它也不在这个数里。）
     pub approx_bytes: usize,
 }
 
@@ -900,30 +859,6 @@ impl ModelMemoryStore {
             .map(|generations| generations.iter().cloned().collect())
             .unwrap_or_default()
     }
-    pub(crate) fn room_members_intersecting(
-        &self,
-        dbnum: u32,
-        bounds: &[[[f32; 3]; 2]],
-    ) -> BTreeSet<i64> {
-        let scopes = self.read();
-        let Some(tree) = scopes
-            .get(&ScopeKey::Current)
-            .and_then(|state| state.room_spatial.get(&dbnum))
-        else {
-            return BTreeSet::new();
-        };
-        bounds
-            .iter()
-            .flat_map(|bounds| {
-                tree.locate_intersecting_bounds(&parry3d::bounding_volume::Aabb::new(
-                    bounds[0].into(),
-                    bounds[1].into(),
-                ))
-                .map(|row| row.refno.0 as i64)
-                .collect::<Vec<_>>()
-            })
-            .collect()
-    }
 
     pub(crate) fn room_member_records(
         &self,
@@ -1024,20 +959,6 @@ impl ModelMemoryStore {
         STORE.get_or_init(Self::default)
     }
 
-    /// 房间 overlay 按库整体重建的次数、喂进去的行数、以及前台累计耗时（毫秒）。
-    /// 重建是已知的前台开销热点，这三个数是它唯一的哨兵。
-    pub(crate) fn room_spatial_rebuild_stats(&self) -> (u64, u64, u64) {
-        self.read()
-            .get(&ScopeKey::Current)
-            .map_or((0, 0, 0), |state| {
-                (
-                    state.room_spatial_rebuild_count,
-                    state.room_spatial_rows_rebuilt,
-                    state.room_spatial_rebuild_duration_ms,
-                )
-            })
-    }
-
     fn read(&self) -> RwLockReadGuard<'_, HashMap<ScopeKey, ScopeState>> {
         self.scopes
             .read()
@@ -1077,7 +998,6 @@ impl ModelMemoryStore {
         for commit in commits {
             stamped.extend(state.apply_upserts_and_receipt(commit));
         }
-        state.flush_room_spatial();
         stamped
     }
 
@@ -1099,7 +1019,6 @@ impl ModelMemoryStore {
         for commit in commits {
             stamped.extend(state.apply_upserts_and_receipt(commit));
         }
-        state.flush_room_spatial();
         stamped
     }
 
@@ -1113,7 +1032,7 @@ impl ModelMemoryStore {
     /// `Current` 作用域此刻的体量与**估算**字节（d-149 观测用，`/health.model_cache.overlay`）。
     /// 查时现算、不缓存、不落库：记录那一半是插入 / 删除时随手记的账（`record_bytes`，O(1)），
     /// 回执与 ACK 在读锁里走一遍（根的量级，十万级也只是几毫秒）。估算口径见 [`approx_record_bytes`]；
-    /// 房间空间树与盘上的网格不在里面。
+    /// 盘上的网格不在里面。
     pub fn overlay_footprint(&self) -> OverlayFootprint {
         const NODE: usize = 32;
         let scopes = self.read();
@@ -1178,7 +1097,6 @@ impl ModelMemoryStore {
         if state.receipts.remove(&packed_refno(root)).is_some() {
             state.bump_epoch(dbnum);
         }
-        state.flush_room_spatial();
         true
     }
 
@@ -1234,7 +1152,6 @@ impl ModelMemoryStore {
             state.invalidated_roots.remove(&packed_refno(root));
             state.receipts.insert(packed_refno(root), receipt);
         }
-        state.flush_room_spatial();
         true
     }
 
@@ -1270,10 +1187,10 @@ impl ModelMemoryStore {
             .collect::<Vec<_>>();
         for id in stale {
             let shared = state.geometries.get(&id).is_some_and(|record| {
-                state
-                    .receipts
-                    .keys()
-                    .any(|other| *other != packed && record.ancestors.contains(other))
+                record
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| *ancestor != packed && state.receipts.contains_key(ancestor))
             });
             if !shared {
                 state.evict(&id);
@@ -1285,7 +1202,6 @@ impl ModelMemoryStore {
         state.room_baselines.remove(&dbnum);
         state.invalidated_roots.remove(&packed);
         state.receipts.insert(packed, receipt);
-        state.flush_room_spatial();
         true
     }
 
@@ -1298,7 +1214,6 @@ impl ModelMemoryStore {
             return;
         };
         state.drop_root(root);
-        state.flush_room_spatial();
     }
 
     /// 按根数上限收 overlay（d-149）：`Current` 作用域里有回执的根多于 `limit` 时，按最近一次
@@ -1377,10 +1292,6 @@ impl ModelMemoryStore {
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
         state.model_digests.remove(&dbnum);
-        state.room_spatial.remove(&dbnum);
-        state
-            .room_spatial_dirty
-            .retain(|(owner, _)| *owner != dbnum);
         state.bump_epoch(dbnum);
     }
 
@@ -1755,6 +1666,26 @@ mod tests {
 
     fn store() -> ModelMemoryStore {
         ModelMemoryStore::default()
+    }
+
+    /// `Current` 里某个库、盒与给定任一盒相交的记录的构件（打包 refno）。替代 2026-09-22 删掉的每库房间
+    /// 空间树 `room_members_intersecting`（没有生产读者）：这几条用例钉的是「记录换位 / 换属主 / 删除之后
+    /// overlay 里谁还在、盒在哪」，不是树本身。
+    fn members_intersecting(
+        store: &ModelMemoryStore,
+        dbnum: u32,
+        bounds: &[[[f32; 3]; 2]],
+    ) -> BTreeSet<i64> {
+        let intersects = |a: &[[f32; 3]; 2], b: &[[f32; 3]; 2]| {
+            (0..3).all(|axis| a[0][axis] <= b[1][axis] && b[0][axis] <= a[1][axis])
+        };
+        store
+            .records(ProjectionScope::Current)
+            .iter()
+            .filter(|record| record.dbnum == dbnum)
+            .filter(|record| bounds.iter().any(|probe| intersects(&record.world_bounds, probe)))
+            .map(|record| packed_refno(record.source_refno))
+            .collect()
     }
 
     /// ADR-080 D2：**未提及 ≠ 删除**。
@@ -2555,15 +2486,9 @@ mod tests {
             changes[&packed_refno(member)].after,
             vec![moved.world_bounds]
         );
+        assert!(members_intersecting(&store, 7997, &[original.world_bounds]).is_empty());
         assert!(
-            store
-                .room_members_intersecting(7997, &[original.world_bounds])
-                .is_empty()
-        );
-        assert!(
-            store
-                .room_members_intersecting(7997, &[moved.world_bounds])
-                .contains(&packed_refno(member))
+            members_intersecting(&store, 7997, &[moved.world_bounds]).contains(&packed_refno(member))
         );
         store.commit(
             ProjectionScope::Current,
@@ -2592,55 +2517,7 @@ mod tests {
     }
 
     #[test]
-    fn room_spatial_accepts_large_incremental_pipe_like_cohorts() {
-        let store = store();
-        let root = RefNo::new(24384, 1);
-        let make = |index: u32| {
-            let member = RefNo::new(24384, 100_000 + index);
-            let angle = index as f32 * 0.173;
-            let radius = 8_000.0 + (index % 53) as f32 * 97.0;
-            let x = radius * angle.cos();
-            let y = radius * angle.sin();
-            let z = (index % 17) as f32 * 250.0;
-            let mut row = record(&format!("pipe-{index}"), member, root, 8000);
-            row.noun = if index % 2 == 0 { "FTUB" } else { "BEND" }.into();
-            row.world_bounds = [[x, y, z], [x + 50.0, y + 100.0, z + 30.0]];
-            row
-        };
-        for range in [0..441, 441..800, 800..1_150, 1_150..1_512] {
-            store.commit(
-                ProjectionScope::Current,
-                vec![ProjectionCommit {
-                    upserts: range.map(make).collect(),
-                    ..Default::default()
-                }],
-            );
-        }
-        assert_eq!(
-            store
-                .room_members_intersecting(8000, &[[[-20_000.0; 3], [20_000.0; 3]]])
-                .len(),
-            1_512
-        );
-        store.commit(
-            ProjectionScope::Current,
-            vec![ProjectionCommit {
-                removals: (0..100).map(|index| format!("pipe-{index}")).collect(),
-                ..Default::default()
-            }],
-        );
-        let remaining = store.room_members_intersecting(8000, &[[[-20_000.0; 3], [20_000.0; 3]]]);
-        assert_eq!(remaining.len(), 1_412);
-        assert!((0..100).all(|index| {
-            !remaining.contains(&packed_refno(RefNo::new(24384, 100_000 + index)))
-        }));
-        let (rebuild_count, rows_rebuilt, _) = store.room_spatial_rebuild_stats();
-        assert_eq!(rebuild_count, 5);
-        assert_eq!(rows_rebuilt, 5_315);
-    }
-
-    #[test]
-    fn replacing_one_record_moves_the_spatial_member_without_leaving_old_bounds() {
+    fn replacing_one_record_moves_the_member_without_leaving_old_bounds() {
         let store = store();
         let root = RefNo::new(7997, 100);
         let old_member = RefNo::new(7997, 10);
@@ -2665,13 +2542,9 @@ mod tests {
             }],
         );
 
-        assert!(
-            store
-                .room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]])
-                .is_empty()
-        );
+        assert!(members_intersecting(&store, 7997, &[[[0.0; 3], [1.0; 3]]]).is_empty());
         assert_eq!(
-            store.room_members_intersecting(7997, &[[[10.0; 3], [11.0; 3]]]),
+            members_intersecting(&store, 7997, &[[[10.0; 3], [11.0; 3]]]),
             BTreeSet::from([packed_refno(new_member)])
         );
     }
@@ -2889,7 +2762,7 @@ mod tests {
             };
             store.commit(ProjectionScope::Current, commits);
             assert_eq!(
-                store.room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]]),
+                members_intersecting(&store, 7997, &[[[0.0; 3], [1.0; 3]]]),
                 BTreeSet::from([packed_refno(member)]),
                 "destination_first={destination_first}"
             );

@@ -55,7 +55,9 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
   刷新读序只会让「常读的旧根」把「刚生成的新根」挤出去。
 - **逐出 = 整根从缓存态掉**：回执、ACK、失效标记、序号，以及名下**不与别的常驻回执共有**的记录（嵌套根共有的记录归另一个回执继续持有）
   ——与 `drop_cached_root` 同一段代码（`ScopeState::drop_root`）；记录走 `evict` 不走 `remove`（不记成模型删除、不进房间变化账）；
-  随后 `flush_room_spatial`。**库里那一份不动**——这是缓存态的收回，不是生成出来的删除 delta。
+  ~~随后 `flush_room_spatial`~~（2026-09-22 P1b：每库房间空间树 `room_spatial` 已删——没有生产读者，房间候选走 `GLOBAL_AABB_TREE`，
+  却在每次提交 / 逐出后对脏库整棵重建、全在写锁里；同日 P1a 把 `drop_root` 的共有判定从「按回执表查祖先链」换成「按祖先链查回执表」，
+  O(回执数) → O(祖先数 × log 回执数)，同一个谓词）。**库里那一份不动**——这是缓存态的收回，不是生成出来的删除 delta。
 - **时机**归 `model_write_behind` 守：每次发布之后（刚发布的这批还没 ACK、不在候选里，被挤出去的是更早落盘的根）、
   每批 durable ACK 记下之后（刚落盘的根成为候选，上限之上这时才收得动）。**只在 `store_mode().is_durable()` 下动**：
   嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。逐了就按批打一行日志；收不下去不吵。
@@ -131,7 +133,7 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
   两个 `approx_bytes` 都是**被查时现算、直接回给前端**的数，不落库、不缓存、不进任何表：
   - overlay（`ModelMemoryStore::overlay_footprint`）：记录那一半是插入 / 删除时随手记的账（`ScopeState::record_bytes`，每条按
     `approx_record_bytes` = 内联结构 + 自己的字串与祖先链 + 四张索引里的 `record_id` 副本与树节点），O(1) 读；回执与 ACK 在读锁里
-    走一遍（根的量级）。**不含**每库房间空间树与盘上的网格。
+    走一遍（根的量级）。**不含**盘上的网格（每库房间空间树此前也不在里面，2026-09-22 已删，见 D1 追记——D5 的 13.8 KB / 根从此不再低估）。
   - 元素缓存（`e3d_model_service::generation_input_cache_footprint` → e3d-io `DbSet::element_cache_stats`）：在缓存锁里抄出各份
     `Arc<DbSet>`、锁外逐份走它的两张表（`Arc` 块 + 表槽 + 内联结构 + `ParsedElement` / `ElementExtraction::approx_heap_bytes`
     的字串 / 数组载荷），O(条数)，按 `/health` 的观测频率付，不进生成路径。

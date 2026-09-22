@@ -54,6 +54,29 @@
   `a_root_published_without_room_membership_while_the_switch_is_on_is_not_evictable`）；`task_end::tests:: model_write_behind::tests:: room_recompute::tests::` 58 绿；
   `cargo check --lib --tests --bins` 0 error。真机未跑（这一条只收窄候选，W1–W6 那组数在 `room_membership=true`、每窗 9 根全带代号的形态下不受影响）。
 
+### overlay 逐出的写锁成本（内存控制计划 P1）：`drop_root` 共有判定 O(回执数) → O(祖先数 × log R)；删掉没有生产读者却每次提交 / 逐出整棵重建的每库房间空间树 `room_spatial`；逐出日志带耗时
+
+- **为什么**（2026-09-22 审核 B / C）：`drop_root` 判一条记录是否与别的常驻回执共有，写的是 `receipts.keys().any(|other| record.ancestors.contains(other))`——
+  对**不共有**的记录（绝大多数）要把全部回执走完，默认 50,000 根时每条记录 5 万 × 祖先数次比较，一批 512 根（`ROOTS_PER_FLUSH`）的 durable ACK 之后
+  逐 512 根 ≈ 10⁹ 量级操作，全在 `ModelMemoryStore` 写锁里，`/model/records`、发布、房间查询都等着；真机只压过上限 4，这条路没被量到。
+  另一处：`ScopeState::room_spatial` 每库一棵 R*-树，唯一读者 `room_members_intersecting` 全仓只有本文件测试在调（生产房间候选早已走 `GLOBAL_AABB_TREE`），
+  却在 `commit` / `try_commit_current` / `evict_acked_roots_over` / `evict_missing_root` / `drop_cached_root` 之后对脏库 `AccelerationTree::load(该库全部驻留记录)`
+  ——50,000 根 ≈ 40 万条记录时每次发布一次 40 万盒的 bulk-load，在写锁里；这棵树还不在 `overlay.approx_bytes` 里，D5 的 13.8 KB / 根因此低估。
+- **改动**（`model_memory_store.rs` / `model_write_behind.rs`）：
+  - `drop_root` 与 `restore_root`（`cfg(test)`）的共有判定改成 `record.ancestors.iter().any(|a| receipts.contains_key(a))`——同一个谓词，换了迭代方向。
+  - 删 `ScopeState::{room_spatial, room_spatial_dirty, room_spatial_rebuild_count, room_spatial_rows_rebuilt, room_spatial_rebuild_duration_ms}`、`flush_room_spatial`
+    及其 7 处调用、`insert` / `remove_internal` 里的脏标记、`clear_dbnum` 里的两行、`ModelMemoryStore::{room_members_intersecting, room_spatial_rebuild_stats}`、
+    `use std::time::Instant`。`by_source` 保留（`room_records_for_members` 在用）。测试：专测这棵树的 `room_spatial_accepts_large_incremental_pipe_like_cohorts` 删；
+    其余 4 条（房间变化账保留旧盒、同 id 换位、换属主两种顺序）改成对 `records(Current)` 按库 + 盒相交过滤的本地 helper `members_intersecting`——
+    它们钉的是「记录换位 / 换属主 / 删除之后 overlay 里谁还在、盒在哪」，不是树本身；`replacing_one_record_moves_the_spatial_member_…` 改名去掉 `spatial`。
+  - `model_write_behind::enforce_overlay_root_limit` 那行日志多一格 `耗时 {ms}ms`（`Instant` 包住 `enforce_root_limit`，即这一批逐出占住写锁的时间）——
+    真机对着看的唯一哨兵。
+  - ADR-082 D1 / D5、ADR-080 那张表、CONTEXT「投影 overlay 根数上限」改口。
+- **不变**：逐出候选、序、语义一个字不变（既有四条逐出单测 + `evicting_a_nested_root_keeps_the_records_its_resident_parent_still_holds` 原样通过）；
+  `approx_bytes` 的数不变（树本来就不在里面）。
+- **验证**：`cargo test --lib -- model_memory_store::tests::` 37 绿（38 − 1 删）；`task_end / model_write_behind / room_recompute::tests::` 58 绿；`cargo check --lib --tests --bins` 0 error。
+  真机（计划 §5：`AIOS_MODEL_OVERLAY_MAX_ROOTS=3000` 起 d149live 看 `耗时`）未跑。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁
