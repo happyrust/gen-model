@@ -23,6 +23,17 @@
 //! - 开关 `model_structural_connection_cascade`（`DbOption.toml` /
 //!   `AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE`），**默认关**；关着时一次文件读都不发生，`touched` 一字不改。
 //!
+//! **跨库对端（GitHub #33，2026-09-22 探针 `live_probe_cross_db_structural_connection_edges`）：读得到、上卷不到。**
+//! 生产的 `DbSet@T` 由 `E3dModelService::build_set` 造，MDB 全部 DESI 都注册（窗口那个库钉 T、其余钉当前 pin），
+//! 所以对端落在别的 DESI 库时 `backref_holds` 照样读到、回指照样核对——AvevaPlantSample 98 个 DESI 库里 12 条跨库边
+//! （`FIXING.CREF ↔ GENSEC.JOIE`，250104↔250112 / 250108↔250110 / 250558↔250564 / 250560↔250562）12/12 `Some(true)`。
+//! 但 [`StructuralConnectionCascade::collect`] 拿到的 `owners` 与 `roots_T` 是**窗口那一个文件**的索引与根集
+//! （`WindowRootSources::collect` 只扫 `file`），对端在别的库时 `roots_on_owner_chain` 第一步 `owners.get` 就是 `None`
+//! → 空 → 记进 `far_end_without_root`，与「对端已删 / 无根族」混在同一格，对端的根（对端库自己的索引能找到，12/12）
+//! **一个都没进 `touched`**。要覆盖它得有跨 dbnum 的工作交接——对端的根属于另一个库的任务，本窗的计划装不下它——
+//! 与房间反查的跨库停放（ADR-073 D13 U3 b `RoomRoots`）同型；翻默认（#34）之前先把这一格从 `far_end_without_root`
+//! 里拆出来单独记账，再决定停放形态。
+//!
 //! 几何上今天不显：e3d-model 第 4 阶段（SCTN 关节负体）未接，对端重算出来的梁还是毛坯；先接线，
 //! 第 4 阶段一落地这里就是正确性项（计划 §3 C2 ★0907）。
 
@@ -714,6 +725,222 @@ mod tests {
                     regen_off.len()
                 );
             }
+        }
+
+        /// 探针（GitHub #33）：**对端落在另一个 DESI 库时，这条级联读得到吗、上卷得到吗？**
+        ///
+        /// 扫一个项目目录里全部 DESI 库的最新会话，找持连接属性的结构 noun 里 `get_ref` 指向
+        /// **别的库号**的边（`RefNo::dbno()` 不等），对每条：
+        /// - 「读到 / 读不到」：在一份**MDB 同款**的 `DbSet`（全部 DESI 都 `add_db`，与生产 `build_set` 同形）
+        ///   上跑 `backref_holds`——`Some(true)` = 读到且回指成立；`None` = 对端所在库没注册 / 读挂；
+        /// - 「生产口径的上卷」：`roots_on_owner_chain(源库的 owner 索引, 源库的 roots_T, 对端)`——这就是
+        ///   `WindowRootSources::collect` 里传的那两样（都只有窗口那一个文件），对端在别的库时 `owners.get`
+        ///   第一步就是 `None`，预期**空**，账记在 `far_end_without_root` 里与「对端已删」混在一格；
+        /// - 「对端自己库里的根」：同一函数换成**对端库**的 owner 索引与根集，看它本来该落到哪些根。
+        ///
+        /// 语料里一条跨库边都没有也是结论（打印出来，测试仍过）。有的话钉住今天的形状：生产口径一根都
+        /// 上卷不到、而对端库自己能找到根——这就是 #33 要回答的「读得到、上卷不到」。只读文件：
+        /// `AIOS_APS_PROJECT_DIR`（默认 `D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000`）+ `AIOS_E3D_TEMPLATE_DIR`。
+        #[test]
+        #[ignore = "manual live: needs a project directory of DESI files and the E3D template directory"]
+        fn live_probe_cross_db_structural_connection_edges() {
+            use crate::data_interface::db_file_header::DbFileHeader;
+
+            let dir =
+                PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
+                    r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
+                }));
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let unit_types = resolve_delivery_unit_types(&[]);
+
+            // 目录里的 DESI 库：按文件头认，不按名字猜。
+            let mut desi: Vec<(u32, PathBuf, u32)> = std::fs::read_dir(&dir)
+                .expect("read project dir")
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|path| path.is_file())
+                .filter_map(|path| {
+                    let header = DbFileHeader::read(&path).ok()?;
+                    header
+                        .db_type
+                        .eq_ignore_ascii_case("DESI")
+                        .then(|| (header.dbnum as u32, path, header.latest_sesno()))
+                })
+                .collect();
+            desi.sort();
+            desi.dedup_by_key(|(dbnum, _, _)| *dbnum);
+            assert!(!desi.is_empty(), "{} 下没有 DESI 库文件", dir.display());
+            println!(
+                "[probe #33] {} 个 DESI 库：{:?}",
+                desi.len(),
+                desi.iter().map(|d| d.0).collect::<Vec<_>>()
+            );
+
+            // MDB 同款的一份 DbSet：全部 DESI 钉最新（生产 build_set 只把窗口那个库钉在 T，其余钉当前 pin）。
+            let all = Arc::new(
+                DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
+            );
+            for (_, path, sesno) in &desi {
+                all.add_db(DbFilePin {
+                    file: path.clone(),
+                    template: template_file_for(schema.template_dir(), "DESI")
+                        .expect("DESI template"),
+                    db_type: Some("DESI".into()),
+                    sesno: Some(*sesno),
+                })
+                .expect("pin DESI");
+            }
+
+            // 每个库：最新会话的索引（owner 表）+ 生产同口径的根集。
+            struct Lib {
+                owners: Arc<BTreeMap<(u32, u32), RefNo>>,
+                roots: BTreeSet<(u32, u32)>,
+                elements: Vec<RefNo>,
+            }
+            let mut libs: BTreeMap<u32, Lib> = BTreeMap::new();
+            for (dbnum, path, sesno) in &desi {
+                let index = scan_index(path, Some(*sesno)).expect("scan index");
+                let roots = enumerate_generation_roots(&all, &index.roots, &unit_types)
+                    .expect("enumerate roots")
+                    .into_iter()
+                    .map(|root| {
+                        let refno = refno_to_e3d(root.root);
+                        (refno.word0, refno.word1)
+                    })
+                    .collect();
+                // `SourceIndex::roots` 只是顶层元素；全库元素是 owner 表的键。
+                let elements = index
+                    .owners
+                    .keys()
+                    .map(|&(word0, word1)| RefNo::new(word0, word1))
+                    .collect();
+                libs.insert(
+                    *dbnum,
+                    Lib {
+                        owners: index.owners.clone(),
+                        roots,
+                        elements,
+                    },
+                );
+            }
+
+            // 正向读每个结构 noun 的连接属性，只留指向别的库的边。
+            struct Edge {
+                source: RefNo,
+                noun: String,
+                attribute: &'static str,
+                target: RefNo,
+            }
+            let mut cross: Vec<Edge> = Vec::new();
+            let mut same_db = 0usize;
+            let mut sources_seen = 0usize;
+            for (dbnum, lib) in &libs {
+                for refno in &lib.elements {
+                    let element = all.element(*refno);
+                    let Ok(noun) = element.element_type() else {
+                        continue;
+                    };
+                    let attributes = forward_attributes(&noun);
+                    if attributes.is_empty() {
+                        continue;
+                    }
+                    sources_seen += 1;
+                    for &attribute in attributes {
+                        if !element.has_attribute(attribute).unwrap_or(false) {
+                            continue;
+                        }
+                        let Ok(Some(target)) = element.get_ref(attribute) else {
+                            continue;
+                        };
+                        if !target.is_valid() {
+                            continue;
+                        }
+                        if target.dbno() == *dbnum {
+                            same_db += 1;
+                        } else {
+                            cross.push(Edge {
+                                source: *refno,
+                                noun: noun.clone(),
+                                attribute,
+                                target,
+                            });
+                        }
+                    }
+                }
+            }
+            let mut by_pair: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+            for edge in &cross {
+                *by_pair
+                    .entry((edge.source.dbno(), edge.target.dbno()))
+                    .or_default() += 1;
+            }
+            println!(
+                "[probe #33] 结构 noun 元素 {sources_seen} 个；同库边 {same_db} 条；跨库边 {} 条，按 (源库 → 目标库)：{by_pair:?}",
+                cross.len()
+            );
+            if cross.is_empty() {
+                println!(
+                    "[probe #33] 语料里没有跨库的结构连接边——「读得到 / 上卷不到」在这份语料上无从判别，结论只能从代码形状说"
+                );
+                return;
+            }
+
+            // 逐条：读到没有 / 生产口径上卷到什么 / 对端自己库里该是什么根。
+            let mut readable = 0usize;
+            let mut backref_ok = 0usize;
+            let mut production_found = 0usize;
+            let mut far_end_lib_found = 0usize;
+            let mut target_lib_missing = 0usize;
+            for (i, edge) in cross.iter().enumerate() {
+                let backref = backref_holds(&all, edge.target, edge.attribute, edge.source);
+                if backref.is_some() {
+                    readable += 1;
+                }
+                if backref == Some(true) {
+                    backref_ok += 1;
+                }
+                let src_lib = &libs[&edge.source.dbno()];
+                let production = roots_on_owner_chain(&src_lib.owners, &src_lib.roots, edge.target);
+                if !production.is_empty() {
+                    production_found += 1;
+                }
+                let far_end = match libs.get(&edge.target.dbno()) {
+                    Some(lib) => roots_on_owner_chain(&lib.owners, &lib.roots, edge.target),
+                    None => {
+                        target_lib_missing += 1;
+                        Vec::new()
+                    }
+                };
+                if !far_end.is_empty() {
+                    far_end_lib_found += 1;
+                }
+                if i < 20 {
+                    println!(
+                        "[probe #33] {} {} .{} → {} | backref={backref:?} | 生产口径上卷={:?} | 对端库自己的根={:?}",
+                        edge.noun,
+                        edge.source,
+                        edge.attribute,
+                        edge.target,
+                        production.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                        far_end.iter().map(|r| r.to_string()).collect::<Vec<_>>()
+                    );
+                }
+            }
+            println!(
+                "[probe #33] 跨库边 {} 条：读到 {readable}（回指成立 {backref_ok}）；生产口径上卷到根 {production_found}；\
+                 对端库自己能找到根 {far_end_lib_found}；目标库不在目录里 {target_lib_missing}",
+                cross.len()
+            );
+
+            // 钉今天的形状：读得到（MDB 同款 DbSet 注册了对端库），生产口径一根都上卷不到。
+            assert_eq!(
+                readable + target_lib_missing,
+                cross.len(),
+                "对端库在 DbSet 里就该读得到——读不到的那些不是「库没注册」就是数据问题，逐条看上面的打印"
+            );
+            assert_eq!(
+                production_found, 0,
+                "生产口径（源库 owner 索引 + 源库 roots_T）对跨库对端本该一根都找不到；找到了说明形状变了，更新 #33 的结论"
+            );
         }
 
         /// 九个钉死窗口（`window_root_plan::tests::live_ams8000_pinned_windows_land_in_the_expected_buckets`

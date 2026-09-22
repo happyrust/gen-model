@@ -2,6 +2,24 @@
 
 ## 2026-09-22
 
+### 结构连接级联的跨库对端（GitHub #33）：读得到、上卷不到——探针坐实 12/12，账混在 `far_end_without_root` 里
+
+- **为什么**：C2 结构连接正向级联（`structural_connection.rs`，默认关）只在 T 端 `DbSet` 里读对端回指并沿 owner 链上卷；对端落在
+  另一个 DESI 库时能不能读到、能不能把对端的根并进 `touched`，模块文档与 09-04 联动清单 #12 都没写。2026-09-22 增量缺口审阅 A-4（追踪 #31）。
+- **探针**：`structural_connection::tests::live::live_probe_cross_db_structural_connection_edges`（`#[ignore]` 真库）——扫项目目录里全部 DESI 库
+  （按文件头认，不按名字猜）最新会话，正向读结构 noun 的连接属性、只留 `RefNo::dbno()` 不同的边；每条在 MDB 同款 `DbSet`（全部 DESI 都 `add_db`，
+  与生产 `build_set` 同形）上跑 `backref_holds`，再分别用**源库**的 owner 索引 + `roots_T`（生产 `collect` 传的那两样）与**对端库**的索引 + 根集跑
+  `roots_on_owner_chain`。钉住今天的形状：跨库边读得到（`readable + 目标库不在目录里 == 跨库边数`）、生产口径一根都上卷不到。
+- **结论**（AvevaPlantSample `aps000`，98 个 DESI 库，结构 noun 元素 26,746、同库边 11,074）：**跨库边 12 条**（`FIXING.CREF ↔ GENSEC.JOIE`，
+  250104↔250112 / 250108↔250110 / 250558↔250564 / 250560↔250562 四对），`backref` 12/12 `Some(true)`——**读得到**（生产 `DbSet@T` 注册 MDB 全部
+  DESI）；**生产口径上卷 0/12**（`owners.get(对端)` 第一步就是 `None`），记进 `far_end_without_root` 与「对端已删 / 无根族」混格；对端库自己的索引
+  能找到根 **12/12**（如 `GENSEC 2013286648/1198.JOIE → FIXING 2013286656/4550`，对端根 `2013286656/2026`、`/3`）。覆盖它要跨 dbnum 的工作交接
+  （对端的根属于另一个库的任务，与房间反查的跨库停放 ADR-073 D13 U3 b `RoomRoots` 同型）；翻默认（#34）之前先把这一格从 `far_end_without_root`
+  拆出来单独记账。写进模块头与联动清单 #12 行。
+- **验证**：探针在干净工作树（`git worktree` HEAD + 本改动）上 `cargo test --lib -- …live_probe_cross_db… --ignored --nocapture` 1 过，41 s；
+  主工作树当时被另一会话未完成的 `increment_pipeline.rs` 改动（E0382）挡着编不过，与本条无关。`rustfmt --edition 2024 --check` 本文件干净。
+- **未做**：拆账（`far_end_cross_db` 计数）与跨库停放本条不动——都是翻默认（#34）的前置，形态待拍板。
+
 ### 祖先读点守卫（GitHub #39）：生成器沿 owner 链只许读 POS / ORI / noun，每处上溯登记；登记出 FIXING 一条「单元之上」的读
 
 - **为什么**：读取集合那一票（S5 / S6，`attribute_reads_guard`）只钉「读了哪个属性」、不钉「从谁身上读」，而选根按候选的**祖先闭包**上卷——
