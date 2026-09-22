@@ -77,6 +77,16 @@
 - **验证**：`cargo test --lib -- model_memory_store::tests::` 37 绿（38 − 1 删）；`task_end / model_write_behind / room_recompute::tests::` 58 绿；`cargo check --lib --tests --bins` 0 error。
   真机（计划 §5：`AIOS_MODEL_OVERLAY_MAX_ROOTS=3000` 起 d149live 看 `耗时`）未跑。
 
+### `evict_missing_root` 不再留孤儿 ACK / 提交序号（内存控制计划 P2）
+
+- **为什么**（2026-09-22 审核 D3）：源上确认没了的根走 `evict_missing_root`，此前只删记录（`remove`，进房间变化账）与回执，**不删** `publication_acks` /
+  `commit_ticks` / `invalidated_roots`——按根数限额的逐出候选按 `receipts` 迭代，这些孤儿永远收不到，随源上删根数累积；症状 `/health.model_cache.overlay.acks > roots`。
+- **改动**（`model_memory_store.rs`）：回执之外把这根的 ACK / 提交序号 / 失效标记一起摘掉（与 `drop_root` 前四行同一组）；记录**仍走 `remove`**——源上真没了是删除、
+  要进房间变化账，与限额逐出（`evict`，缓存态收回）的分工不变。`room_recompute::acked_roots` 注释改口（「只剩 ACK 没回执」这一档正常不再出现，过滤留作护栏）。
+- **钉** `evicting_a_missing_root_leaves_no_orphan_ack_or_tick`：两根都 ACK 过、房间账清到基线 → 删一根 → `overlay { records 1, roots 1, acks 1 }`、`commit_ticks` 里没有它、
+  房间账上恰有它那一条删除（`before` 1 盒 / `after` 空）、上限 1 时 `resident_before` 数的是回执不受影响。
+- **验证**：`cargo test --lib -- model_memory_store::tests::` 38 绿；`cargo check --lib --tests --bins` 0 error。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁

@@ -1079,6 +1079,11 @@ impl ModelMemoryStore {
     /// Retire a confirmed-missing current root only if no publication occurred
     /// since the caller began its source point lookup. Never scan other roots
     /// or remove another database's projection. Historical scopes are untouched.
+    ///
+    /// 记录走 `remove` 不走 `evict`：源上真没了，这是删除、要进房间变化账——与按根数限额的 `drop_root`
+    /// 不同。但这根的 ACK / 提交序号 / 失效标记要跟回执一起掉（2026-09-22 审核 D3）：此前只删记录与回执，
+    /// `publication_acks` / `commit_ticks` 留下孤儿——逐出候选按 `receipts` 迭代，永远收不到它们，
+    /// 随源上删根数累积（症状 `/health.model_cache.overlay.acks > roots`）。
     pub fn evict_missing_root(&self, root: RefNo, expected_epoch: u64) -> bool {
         let dbnum = root.dbno();
         let mut scopes = self.write();
@@ -1094,7 +1099,11 @@ impl ModelMemoryStore {
                 state.remove(&id);
             }
         }
-        if state.receipts.remove(&packed_refno(root)).is_some() {
+        let packed = packed_refno(root);
+        state.publication_acks.remove(&packed);
+        state.commit_ticks.remove(&packed);
+        state.invalidated_roots.remove(&packed);
+        if state.receipts.remove(&packed).is_some() {
             state.bump_epoch(dbnum);
         }
         true
@@ -3382,6 +3391,68 @@ mod tests {
         assert_eq!((released.evicted, released.resident_after), (1, 1), "{released:?}");
         assert!(store.receipt(ProjectionScope::Current, owed).is_none());
         assert_eq!(store.overlay_evictions_total(), 2);
+    }
+
+    /// 2026-09-22 审核 D3（内存控制计划 P2）：源上确认没了的根整个从缓存态掉——记录、回执之外，ACK / 提交序号 /
+    /// 失效标记一起走，不留孤儿。此前只删记录与回执，`overlay.acks > roots` 随源上删根数累积、逐出候选（按 `receipts`
+    /// 迭代）永远收不到它们。记录仍走 `remove`（进房间变化账）——这一条与 `drop_root` 的分工不变。
+    #[test]
+    fn evicting_a_missing_root_leaves_no_orphan_ack_or_tick() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let gone = RefNo::new(7997, 1);
+        let kept = RefNo::new(7997, 2);
+        for (root, name) in [(gone, "gone"), (kept, "kept")] {
+            let receipt = commit_root(&store, root, name);
+            assert!(store.record_publication_ack(
+                ProjectionScope::Current,
+                root,
+                ack_matching(&receipt, 7997, PersistMedium::RocksDb),
+            ));
+        }
+        let before = store.overlay_footprint();
+        assert_eq!((before.records, before.roots, before.acks), (2, 2, 2));
+        // 房间账清到这一刻：之后的变化才算「这一轮的」。
+        let (baseline, _, _, _) = store.room_snapshot(7997, true);
+        assert!(store.ack_rooms(7997, baseline));
+
+        let epoch = store.commit_epoch(7997);
+        assert!(store.evict_missing_root(gone, epoch));
+        let after = store.overlay_footprint();
+        assert_eq!(
+            (after.records, after.roots, after.acks),
+            (1, 1, 1),
+            "ACK 跟回执一起走，不留孤儿: {after:?}"
+        );
+        assert!(store.publication_ack(ProjectionScope::Current, gone).is_none());
+        assert!(store.publication_ack(ProjectionScope::Current, kept).is_some());
+        {
+            let scopes = store.read();
+            let state = scopes.get(&ScopeKey::Current).expect("current scope");
+            assert!(
+                !state.commit_ticks.contains_key(&packed_refno(gone)),
+                "提交序号也不留"
+            );
+            assert!(state.commit_ticks.contains_key(&packed_refno(kept)));
+        }
+        // 房间变化账里记的是一次删除（记录走 `remove`，不是 `evict`）——与 drop_root 的分工不变。
+        let (_, _, changes, _) = store.room_snapshot(7997, false);
+        let gone_member = packed_refno(RefNo::new(gone.word0, gone.word1 + 1000));
+        assert!(
+            changes
+                .get(&gone_member)
+                .is_some_and(|change| change.before.len() == 1 && change.after.is_empty()),
+            "源上没了的根是删除，进房间变化账: {changes:?}"
+        );
+        assert_eq!(changes.len(), 1, "kept 没动，账上只有 gone 那一条");
+
+        // 只剩 kept 一根、上限 1：数的是回执，不逐——孤儿不会把 resident_before 数错。
+        let outcome = store.enforce_root_limit(1, false);
+        assert_eq!(
+            (outcome.resident_before, outcome.evicted, outcome.resident_after),
+            (1, 0, 1),
+            "{outcome:?}"
+        );
     }
 
     /// d-149：逐出嵌套根时，与仍常驻的另一个回执**共有**的记录留下（归那个回执继续持有）；

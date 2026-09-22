@@ -318,7 +318,8 @@ pub(crate) struct AckedRoot {
 }
 
 /// 投影里本库每一根的 ACK 房间代号（F3）：只收「回执与 ACK 对得上」的根——候选前移了的（在途重生成）由它自己的刷盘另记
-/// 新 ACK，点名它是白算一次；`evict_missing_root` 之后只剩 ACK 没回执的（源上已没有的根）也不收。打包 refno 序（`roots()` 的序）。
+/// 新 ACK，点名它是白算一次；只剩 ACK 没回执的也不收（`evict_missing_root` 2026-09-22 起连 ACK 一起删，这一档正常不再出现，
+/// 过滤留着当护栏）。打包 refno 序（`roots()` 的序）。
 pub(crate) fn acked_roots(store: &ModelMemoryStore, dbnum: u32) -> Vec<AckedRoot> {
     let scope = ProjectionScope::Current;
     store
