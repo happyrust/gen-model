@@ -87,6 +87,27 @@
   房间账上恰有它那一条删除（`before` 1 盒 / `after` 空）、上限 1 时 `resident_before` 数的是回执不受影响。
 - **验证**：`cargo test --lib -- model_memory_store::tests::` 38 绿；`cargo check --lib --tests --bins` 0 error。
 
+### 生成输入缓存按库数设上限（ADR-084，内存控制计划 P3）：`model_generation_input_max_dbnums`，最近一次生成用到的先后逐库整份出、命中刷新；默认 0 = 不限，默认值待真机
+
+- **为什么**：ADR-082 D4 管住了每份 `DbSet` 元素缓存的元素数，管不住**份数**——`GENERATION_INPUT_CACHE` 每个 DESI 库一份 `GenerationInput`
+  （开着 MDB 全部 DESI 文件的 `DbSet` + 池级元素缓存 ≤ 200k × 3.6–4.7 KB ≈ 0.7–0.95 GB + 源索引），插入只 `retain` 掉同库旧条，`forget_generation_input`
+  只有初始化收尾与常驻房间换代两处在调；长驻进程碰过 N 个 DESI 库就留 N 份、CATA 链元素在每份里各缓存一遍。2026-09-22 审核把它列为仍无界的三处里**最大的一项**；
+  ADR-082 §不做 把它推给「先量每窗重开代价的决策卡」——真机 W1–W6 同库连续窗量不到，所以这一条沿 D5 的路：先只加能力、默认不动、量过再定。
+- **改动**：
+  - `options.rs`：`model_generation_input_max_dbnums`（`DbOption.toml` 键 / 环境变量 `AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS` / 默认 `MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT = 0`），
+    三层裁决同 `effective_count_limit`；三层裁决那条单测扩到这一键。
+  - `e3d_model_service.rs`：`GENERATION_INPUT_CACHE` 从裸 `HashMap` 换成 `DbnumLru<GenerationInput>`——每条记「最近一次被生成用到」的单调序号，`generation_input()`
+    **命中也刷新**（与 overlay 那道「读不刷新」相反：这里保护的正是最近在生成的库），装入先替同库旧条（不计逐出）、再 `while 库数 > 上限` 把最久没用的别的库整份出，
+    刚装入的永远留；被替 / 被逐的值**在缓存锁外 drop**（`DbSet` 析构要关文件、放元素缓存）；逐出打一行日志。`forget_generation_input` 改走 `forget_dbnum`（不计逐出）。
+    `GenerationInputFootprint.last_used_tick`、新 `GenerationInputCacheLimits` / `generation_input_cache_limits()`。
+  - `handlers.rs` `/health.model_cache.element_cache` 多 `max_dbnums` / `resident_dbnums` / `evicted_dbnums_total`，`databases[]` 每条多 `last_used_tick`。
+  - `DbOption.toml` 一键 + 注释；ADR-084 起稿（D3 默认值那一节留着等真机）；ADR-082 §不做 指向它；CONTEXT「生成输入缓存库数上限」。
+- **不变**：上限 0 或 ≥ 出现过的库数时，缓存内容与命中序列与此前逐位相同（只多了序号）；产物逐字不变（缓存只省 open + parse）。
+- **待量**（计划 §3.4 / ADR-084 D3）：d149live 两库交替窗 × `AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS=1`，每窗记任务耗时 / `db_opens` 增量 / RSS / `parsed_entries` 爬升，
+  对照不限——据此定默认值（候选 2–4）。
+- **验证**：`cargo test --lib -- e3d_model_service::tests::the_generation_input_cache_keeps_at_most_n_dbnums_and_evicts_the_least_recently_used options::tests::a_count_limit…` 2 绿；
+  `e3d_model_service::tests:: options::tests::` 全组与 `cargo check --lib --tests --bins` 见提交说明。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁

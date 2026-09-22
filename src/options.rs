@@ -165,6 +165,9 @@ pub struct DbOptionExt {
     /// 生成用 `DbSet` 池级元素缓存最多装多少个元素（没写 = 200,000；0 = 不限）。详见 [`model_element_cache_max_entries`]。
     #[serde(default)]
     pub model_element_cache_max_entries: Option<usize>,
+    /// 生成输入缓存最多同时留多少个库的 `GenerationInput`（没写 = 0 = 不限）。详见 [`model_generation_input_max_dbnums`]。
+    #[serde(default)]
+    pub model_generation_input_max_dbnums: Option<usize>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -531,6 +534,7 @@ impl From<DbOption> for DbOptionExt {
             model_memory_slice_elements: None,
             model_overlay_max_roots: None,
             model_element_cache_max_entries: None,
+            model_generation_input_max_dbnums: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -623,6 +627,8 @@ struct DbOptionExtFields {
     model_overlay_max_roots: Option<usize>,
     #[serde(default)]
     model_element_cache_max_entries: Option<usize>,
+    #[serde(default)]
+    model_generation_input_max_dbnums: Option<usize>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -944,6 +950,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_memory_slice_elements: ext.model_memory_slice_elements,
         model_overlay_max_roots: ext.model_overlay_max_roots,
         model_element_cache_max_entries: ext.model_element_cache_max_entries,
+        model_generation_input_max_dbnums: ext.model_generation_input_max_dbnums,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -1041,6 +1048,8 @@ pub fn model_memory_slice_elements() -> usize {
 pub const MODEL_OVERLAY_MAX_ROOTS_ENV: &str = "AIOS_MODEL_OVERLAY_MAX_ROOTS";
 /// 环境变量名：一次性覆盖 [`model_element_cache_max_entries`]，不必改配置文件。
 pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES";
+/// 环境变量名：一次性覆盖 [`model_generation_input_max_dbnums`]，不必改配置文件。
+pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV: &str = "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS";
 
 /// [`model_overlay_max_roots`] 没写时的默认值（ADR-082 D5，2026-09-20 mem 档实测定的）：
 /// 4 库 7,743 根 / 59,929 条记录量 106.5 MB ≈ **13.8 KB / 根**（7997 单库 6,772 根 94.2 MB），
@@ -1051,6 +1060,10 @@ pub const MODEL_OVERLAY_MAX_ROOTS_DEFAULT: usize = 50_000;
 /// 200,000 条 ≈ 0.7–0.95 GB / 库；样例里最大的 7997 整库一遍只装到 177k，默认值下一遍生成不会清一次，
 /// 清的只是长驻之后越过一整遍的累积。
 pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
+/// [`model_generation_input_max_dbnums`] 没写时的默认值：**0 = 不限**（ADR-084 D3，2026-09-22）。
+/// 与 ADR-082 D5 同一条路——先只加能力、行为一个字不变，真机量过「每窗重开一份 `GenerationInput` 的代价」
+/// （两库交替窗 × 上限 1）再定数字；候选 2–4（一个长驻实例通常同时活跃的 DESI 库数）。
+pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT: usize = 0;
 
 /// 进程内模型投影 overlay（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个**根**
 /// （`DbOption.toml` 的 `model_overlay_max_roots`，环境变量 [`MODEL_OVERLAY_MAX_ROOTS_ENV`] 压过；
@@ -1091,6 +1104,25 @@ pub fn model_element_cache_max_entries() -> usize {
             .as_deref(),
         load_ext_fields().model_element_cache_max_entries,
         MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+    )
+}
+
+/// 生成输入缓存（`e3d_model_service::GENERATION_INPUT_CACHE`）最多同时留多少个**库**的 `GenerationInput`
+/// （`DbOption.toml` 的 `model_generation_input_max_dbnums`，环境变量 [`MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV`]
+/// 压过；没写 = [`MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT`] = **0 = 不限**，ADR-084）。
+///
+/// 每份 `GenerationInput` = 一份 `DbSet`（MDB 全部 DESI 文件都开着 + 池级元素缓存，≤ `model_element_cache_max_entries`
+/// × 3.6–4.7 KB ≈ 0.7–0.95 GB）+ 一份 `SourceIndex`；此前只在同库换 sesno 时替换、初始化收尾时释放，长驻进程碰过
+/// N 个 DESI 库就留 N 份——ADR-082 D4 管住了单份的元素数，管不住这一维。设了上限之后按**最近一次生成用到**的先后
+/// 逐库整份出（命中也刷新——保护的正是「最近在生成的库」这份热度），上限 ≥ 活跃库数时与不设逐位相同；被逐的库
+/// 下一窗从文件重开（元素缓存重新变冷，产物逐字不变）。按库数不按字节：与 d-149 同一口径，零簿记。
+pub fn model_generation_input_max_dbnums() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_generation_input_max_dbnums,
+        MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
     )
 }
 
@@ -4293,10 +4325,18 @@ dir = "review_attachments"
         assert_eq!(effective_count_limit(Some(""), None, 9), 9);
         assert_eq!(MODEL_OVERLAY_MAX_ROOTS_DEFAULT, 50_000);
         assert_eq!(MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT, 200_000);
+        assert_eq!(
+            MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT, 0,
+            "ADR-084 D3：先 0 不限落地，真机量过每窗重开代价再定"
+        );
         assert_eq!(MODEL_OVERLAY_MAX_ROOTS_ENV, "AIOS_MODEL_OVERLAY_MAX_ROOTS");
         assert_eq!(
             MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV,
             "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES"
+        );
+        assert_eq!(
+            MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV,
+            "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS"
         );
     }
 }

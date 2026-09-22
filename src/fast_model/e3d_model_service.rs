@@ -1103,16 +1103,118 @@ struct GenerationInput {
 
 type GenerationInputKey = (u32, u32, String);
 
-static GENERATION_INPUT_CACHE: OnceLock<
-    std::sync::Mutex<HashMap<GenerationInputKey, GenerationInput>>,
-> = OnceLock::new();
+/// 生成输入缓存的表（ADR-084）：键 `(dbnum, source_sesno, identity)`，**每库最多一条**（同库换 sesno / 换 identity
+/// 就替换——换库 = 换时点，旧条不能再喂），再按**库数**设上限：每条记「最近一次被生成用到」的单调序号，
+/// 命中也刷新（保护的正是「最近在生成的库」这份热度；一窗内同库只刷一次，成本可忽略），库数超过上限时
+/// 最久没用的库整份出。值是 `Arc` 的句柄：被逐出的那份由还握着它的切片继续用完，这里只是不再喂新调用方。
+/// `max_dbnums == 0` = 不限（与 2026-09-22 之前逐位相同）。泛型只为了单测不用开真文件。
+struct DbnumLru<V> {
+    entries: HashMap<GenerationInputKey, (V, u64)>,
+    next_tick: u64,
+    evicted_dbnums: u64,
+}
+
+impl<V: Clone> DbnumLru<V> {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_tick: 0,
+            evicted_dbnums: 0,
+        }
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.next_tick += 1;
+        self.next_tick
+    }
+
+    /// 命中即刷新：这一库刚被生成用到。
+    fn get_touch(&mut self, key: &GenerationInputKey) -> Option<V> {
+        let tick = self.tick();
+        let (value, last_used) = self.entries.get_mut(key)?;
+        *last_used = tick;
+        Some(value.clone())
+    }
+
+    /// 装入：先把同库的旧条替掉（换 sesno / identity），再按库数上限把最久没用的**别的**库整份出。
+    /// 返回被替 / 被逐的值，调用方在锁外 drop（`DbSet` 的析构要关文件、放元素缓存，不该在缓存锁里做）。
+    fn insert(&mut self, key: GenerationInputKey, value: V, max_dbnums: usize) -> Vec<V> {
+        let dbnum = key.0;
+        let mut displaced: Vec<V> = Vec::new();
+        let same_dbnum: Vec<GenerationInputKey> = self
+            .entries
+            .keys()
+            .filter(|(cached, _, _)| *cached == dbnum)
+            .cloned()
+            .collect();
+        for stale in same_dbnum {
+            if let Some((old, _)) = self.entries.remove(&stale) {
+                displaced.push(old);
+            }
+        }
+        let tick = self.tick();
+        self.entries.insert(key, (value, tick));
+        if max_dbnums > 0 {
+            while self.dbnum_count() > max_dbnums {
+                let Some(oldest) = self
+                    .entries
+                    .iter()
+                    .filter(|((cached, _, _), _)| *cached != dbnum)
+                    .min_by_key(|(_, (_, last_used))| *last_used)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                if let Some((old, _)) = self.entries.remove(&oldest) {
+                    displaced.push(old);
+                }
+                self.evicted_dbnums += 1;
+            }
+        }
+        displaced
+    }
+
+    /// 整库忘掉（初始化收尾、常驻房间换代），不计入按上限的逐出数。
+    fn forget_dbnum(&mut self, dbnum: u32) -> Vec<V> {
+        let keys: Vec<GenerationInputKey> = self
+            .entries
+            .keys()
+            .filter(|(cached, _, _)| *cached == dbnum)
+            .cloned()
+            .collect();
+        keys.iter()
+            .filter_map(|key| self.entries.remove(key).map(|(value, _)| value))
+            .collect()
+    }
+
+    fn dbnum_count(&self) -> usize {
+        self.entries
+            .keys()
+            .map(|(dbnum, _, _)| *dbnum)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&GenerationInputKey, &V, u64)> {
+        self.entries
+            .iter()
+            .map(|(key, (value, last_used))| (key, value, *last_used))
+    }
+}
+
+static GENERATION_INPUT_CACHE: OnceLock<std::sync::Mutex<DbnumLru<GenerationInput>>> =
+    OnceLock::new();
+
+fn generation_input_cache() -> &'static std::sync::Mutex<DbnumLru<GenerationInput>> {
+    GENERATION_INPUT_CACHE.get_or_init(|| std::sync::Mutex::new(DbnumLru::new()))
+}
 
 fn generation_input(
     service: &E3dModelService,
     dbnum: u32,
     source_sesno: u32,
 ) -> anyhow::Result<GenerationInput> {
-    let cache = GENERATION_INPUT_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let cache = generation_input_cache();
     let identity = service.generation_identity.clone().unwrap_or_else(|| {
         let pin = service
             .pin(dbnum)
@@ -1126,25 +1228,65 @@ fn generation_input(
     if let Some(value) = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .cloned()
+        .get_touch(&key)
     {
         return Ok(value);
     }
     let pin = service.pin(dbnum)?;
     let index = Arc::new(scan_index(&pin.file, Some(source_sesno))?);
     let set = service.build_set(dbnum, Some(source_sesno))?;
-    let mut guard = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.retain(|(cached_dbnum, _, _), _| *cached_dbnum != dbnum);
     let input = GenerationInput {
         set,
         index,
         dependency_sessions: service.dependency_sessions.clone(),
     };
-    guard.insert(key, input.clone());
+    // 按库数上限（ADR-084，`model_generation_input_max_dbnums`，0 = 不限）：被替 / 被逐的那几份在锁外 drop。
+    let max_dbnums = crate::options::model_generation_input_max_dbnums();
+    let (displaced, resident_dbnums) = {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let displaced = guard.insert(key, input.clone(), max_dbnums);
+        (displaced, guard.dbnum_count())
+    };
+    if max_dbnums > 0 && !displaced.is_empty() {
+        log::info!(
+            "dbnum={dbnum} 生成输入缓存按库数上限收回：放掉 {} 份，现留 {resident_dbnums} 库，上限 {max_dbnums}",
+            displaced.len()
+        );
+    }
+    drop(displaced);
     Ok(input)
+}
+
+/// 生成输入缓存这一维的现值（ADR-084，`/health.model_cache.element_cache`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GenerationInputCacheLimits {
+    /// 生效的库数上限（0 = 不限）。
+    pub max_dbnums: usize,
+    /// 此刻留着几个库的 `GenerationInput`。
+    pub resident_dbnums: usize,
+    /// 进程起来以来按库数上限逐出了几份（同库换 sesno 的替换与 `forget_generation_input` 不计）。
+    pub evicted_dbnums_total: u64,
+}
+
+pub(crate) fn generation_input_cache_limits() -> GenerationInputCacheLimits {
+    let max_dbnums = crate::options::model_generation_input_max_dbnums();
+    let Some(cache) = GENERATION_INPUT_CACHE.get() else {
+        return GenerationInputCacheLimits {
+            max_dbnums,
+            resident_dbnums: 0,
+            evicted_dbnums_total: 0,
+        };
+    };
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    GenerationInputCacheLimits {
+        max_dbnums,
+        resident_dbnums: guard.dbnum_count(),
+        evicted_dbnums_total: guard.evicted_dbnums,
+    }
 }
 
 /// 生成输入缓存里一份 `DbSet` 的池级元素缓存此刻的体量（d-149 观测用，
@@ -1161,6 +1303,8 @@ pub struct GenerationInputFootprint {
     pub approx_bytes: usize,
     /// 这份 `DbSet` 生效的元素数上限（0 = 不限 / 没开缓存）。
     pub max_entries: usize,
+    /// 最近一次被生成用到的序号（进程内单调计数，不是时刻；越大越新）——按库数上限逐出时最小的先出（ADR-084）。
+    pub last_used_tick: u64,
 }
 
 /// 生成输入缓存里每库那份 `DbSet` 的元素缓存体量，按 `dbnum` 升序（d-149 观测用）。
@@ -1172,15 +1316,17 @@ pub(crate) fn generation_input_cache_footprint() -> Vec<GenerationInputFootprint
     let Some(cache) = GENERATION_INPUT_CACHE.get() else {
         return Vec::new();
     };
-    let sets: Vec<(u32, u32, Arc<DbSet>)> = cache
+    let sets: Vec<(u32, u32, Arc<DbSet>, u64)> = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(|((dbnum, sesno, _), input)| (*dbnum, *sesno, input.set.clone()))
+        .map(|((dbnum, sesno, _), input, last_used)| {
+            (*dbnum, *sesno, input.set.clone(), last_used)
+        })
         .collect();
     let mut out: Vec<GenerationInputFootprint> = sets
         .into_iter()
-        .map(|(dbnum, source_sesno, set)| {
+        .map(|(dbnum, source_sesno, set, last_used_tick)| {
             let stats = set.element_cache_stats();
             GenerationInputFootprint {
                 dbnum,
@@ -1189,6 +1335,7 @@ pub(crate) fn generation_input_cache_footprint() -> Vec<GenerationInputFootprint
                 extraction_entries: stats.extraction_entries,
                 approx_bytes: stats.approx_bytes,
                 max_entries: stats.limit,
+                last_used_tick,
             }
         })
         .collect();
@@ -1198,14 +1345,15 @@ pub(crate) fn generation_input_cache_footprint() -> Vec<GenerationInputFootprint
 
 /// Drop every cached generation input of one database.
 ///
-/// The cache is keyed by `(dbnum, sesno, identity)` and only ever evicts the
-/// *same* dbnum's older entry when a new one is inserted, so an entry outlives
-/// the run that built it for as long as the process lives.  An initialization
-/// run keys its entry by the digest of its frozen tokens — a key no later
-/// service (`from_current`, `from_frozen_source`) asks for again — which makes
-/// the entry dead weight once the run has finished: one parsed `attlib.dat`,
-/// one open `DbSet` over every MDB design file, and one whole-database owner
-/// table per initialized dbnum, held until exit.
+/// The cache is keyed by `(dbnum, sesno, identity)`; a new entry only replaces
+/// the *same* dbnum's older one, and beyond that the only bound is the dbnum
+/// count limit (`model_generation_input_max_dbnums`, ADR-084, default unbounded),
+/// so an entry can outlive the run that built it for as long as the process
+/// lives.  An initialization run keys its entry by the digest of its frozen
+/// tokens — a key no later service (`from_current`, `from_frozen_source`) asks
+/// for again — which makes the entry dead weight once the run has finished:
+/// one parsed `attlib.dat`, one open `DbSet` over every MDB design file, and
+/// one whole-database owner table per initialized dbnum, held until exit.
 ///
 /// Callers still holding an `Arc` clone keep their input alive; the next
 /// `generation_input` for the dbnum rebuilds from the file.  The removed values
@@ -1214,17 +1362,10 @@ pub(crate) fn forget_generation_input(dbnum: u32) -> usize {
     let Some(cache) = GENERATION_INPUT_CACHE.get() else {
         return 0;
     };
-    let removed: Vec<GenerationInput> = {
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let keys = guard
-            .keys()
-            .filter(|(cached_dbnum, _, _)| *cached_dbnum == dbnum)
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.iter().filter_map(|key| guard.remove(key)).collect()
-    };
+    let removed: Vec<GenerationInput> = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .forget_dbnum(dbnum);
     removed.len()
 }
 
@@ -4068,6 +4209,60 @@ mod tests {
     use super::*;
     use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
+
+    /// ADR-084（内存控制计划 P3）：生成输入缓存按**库数**设上限——每库一条（同库换 sesno 替换、不算逐出），
+    /// 超过上限时最久没被生成用到的库整份出，**命中也刷新**；0 = 不限；`forget_dbnum` 不计入逐出数；
+    /// 被替 / 被逐的值原样交还给调用方（在锁外 drop）。
+    #[test]
+    fn the_generation_input_cache_keeps_at_most_n_dbnums_and_evicts_the_least_recently_used() {
+        let key = |dbnum: u32, sesno: u32| (dbnum, sesno, format!("id-{dbnum}"));
+        let mut cache: DbnumLru<&'static str> = DbnumLru::new();
+
+        // 0 = 不限：三个库都留着。
+        assert!(cache.insert(key(7997, 1), "7997@1", 0).is_empty());
+        assert!(cache.insert(key(8000, 1), "8000@1", 0).is_empty());
+        assert!(cache.insert(key(1112, 1), "1112@1", 0).is_empty());
+        assert_eq!(cache.dbnum_count(), 3);
+        assert_eq!(cache.evicted_dbnums, 0);
+
+        // 同库换 sesno：替换，不算逐出，旧值交还。
+        assert_eq!(cache.insert(key(7997, 2), "7997@2", 0), vec!["7997@1"]);
+        assert_eq!(cache.dbnum_count(), 3);
+        assert_eq!(cache.evicted_dbnums, 0);
+        assert_eq!(cache.get_touch(&key(7997, 1)), None, "旧 sesno 的键已不在");
+
+        // 命中刷新：8000 最旧 → 摸一下 8000，最旧变成 1112。
+        assert_eq!(cache.get_touch(&key(8000, 1)), Some("8000@1"));
+
+        // 上限 3、再进第四个库：最久没用的 1112 出，刚进的 7998 一定留。
+        assert_eq!(cache.insert(key(7998, 1), "7998@1", 3), vec!["1112@1"]);
+        assert_eq!(cache.dbnum_count(), 3);
+        assert_eq!(cache.evicted_dbnums, 1);
+        assert_eq!(cache.get_touch(&key(1112, 1)), None);
+
+        // 上限收到 1：留刚进的那一份，其余按序出（7997@2 比 8000@1 更旧——8000 被摸过）。
+        let displaced = cache.insert(key(5052, 1), "5052@1", 1);
+        assert_eq!(displaced.len(), 3, "{displaced:?}");
+        assert!(displaced.contains(&"7997@2") && displaced.contains(&"8000@1") && displaced.contains(&"7998@1"));
+        assert_eq!(cache.dbnum_count(), 1);
+        assert_eq!(cache.evicted_dbnums, 4);
+        assert_eq!(cache.get_touch(&key(5052, 1)), Some("5052@1"));
+
+        // 序在别的库之间也成立：上限 2，最旧的先出、被摸过的留。
+        assert!(cache.insert(key(6000, 1), "6000@1", 2).is_empty());
+        assert_eq!(cache.get_touch(&key(5052, 1)), Some("5052@1"));
+        assert_eq!(cache.insert(key(6001, 1), "6001@1", 2), vec!["6000@1"]);
+        assert_eq!(cache.evicted_dbnums, 5);
+
+        // forget：整库拿走、不计逐出。
+        assert_eq!(cache.forget_dbnum(5052), vec!["5052@1"]);
+        assert_eq!(cache.forget_dbnum(5052), Vec::<&str>::new());
+        assert_eq!(cache.dbnum_count(), 1);
+        assert_eq!(cache.evicted_dbnums, 5);
+        let ticks: Vec<(u32, u64)> = cache.iter().map(|(key, _, tick)| (key.0, tick)).collect();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].0, 6001);
+    }
 
     /// f32 印进 SQL 时只许带 f32 有的那几位。`json!` 的 `value as f64` 会把二进制展开的
     /// 尾巴一起印出来，而落库时间几乎全按字节走——这条钉住的是**字节**，不是数值。

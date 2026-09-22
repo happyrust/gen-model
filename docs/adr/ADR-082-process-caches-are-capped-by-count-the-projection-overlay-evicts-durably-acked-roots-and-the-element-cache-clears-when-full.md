@@ -210,6 +210,8 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - **不做**字节记账、不做 overlay 的读刷新 LRU、不做元素缓存 LRU（D6 / D4 已说明）。
 - **不在本文**让稳态窗口收尾释放 `GenerationInput`（`forget_generation_input`，初始化那一路已经这么做）：它会改今天默认行为
   （每窗重开 MDB、元素缓存重新变冷），与 D5「一个字不变」冲突——要做单开决策卡，先量每窗重开的代价。
+  → **2026-09-22 那张卡是 ADR-084**：按**库数**设上限（`model_generation_input_max_dbnums`，最近一次生成用到的先后逐库整份出、命中刷新），
+  落地默认 0 = 不限，默认值等两库交替窗量过重开代价再定；「每窗收尾释放」仍不做。
 - 默认值已按 mem 档实测定下（D5）；**没量**的是 rocksdb 档下逐出真正发生之后的三条回退路与稳态小窗口的增量——现场先看
   `/health.model_cache.overlay.evicted_total` 有没有动。`/dbnums` 面板没有 overlay 那一格，只有 `/health`。估算字节只在 `/health` 上
   现算，**不做**任何持久化 / 历史曲线（2026-09-20 用户拍板）。

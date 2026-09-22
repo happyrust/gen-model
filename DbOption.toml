@@ -343,6 +343,14 @@ model_memory_slice_elements = 8000
 #   环境变量 AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES 压过本键；AIOS_MODEL_ELEMENT_CACHE=false 时无意义。
 model_overlay_max_roots = 50000
 model_element_cache_max_entries = 200000
+#【新增 2026-09-22，ADR-084】model_generation_input_max_dbnums —— 生成输入缓存最多同时留多少个库的 GenerationInput
+#   （每份 = 一份开着 MDB 全部 DESI 文件的 DbSet + 它的池级元素缓存 ≤ model_element_cache_max_entries × 3.6–4.7 KB ≈ 0.7–0.95 GB
+#   + 一份源索引）。上面那道闸管住了单份的元素数，管不住「库数 ×」这一维：长驻进程碰过 N 个 DESI 库就留 N 份。
+#   设了之后按「最近一次生成用到」的先后逐库整份出（命中也刷新），上限 ≥ 活跃库数时与不设逐位相同；被逐的库下一窗从文件重开
+#   （元素缓存重新变冷，产物逐字不变）。**默认 0 = 不限**（先只加能力，真机量过每窗重开的代价再定数字，候选 2–4）。
+#   看现值：/health.model_cache.element_cache.{max_dbnums, resident_dbnums, evicted_dbnums_total} 与 databases[].last_used_tick；
+#   环境变量 AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS 压过本键。
+model_generation_input_max_dbnums = 0
 model_root_inflight_max = 2
 model_full_rebuild_enabled = true
 

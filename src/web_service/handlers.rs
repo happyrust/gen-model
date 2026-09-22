@@ -209,6 +209,8 @@ fn model_cache_health(store_reachable: bool) -> Value {
     // 在读锁里走一遍（根 / 元素的量级）；上限（0 = 不限）并排给，现场对着 RSS 定数字。
     let overlay = store.overlay_footprint();
     let element_cache = crate::fast_model::e3d_model_service::generation_input_cache_footprint();
+    // ADR-084：生成输入缓存这一维（库数）——上限 / 现留几库 / 累计逐出；`databases[]` 每条带 `last_used_tick`。
+    let generation_inputs = crate::fast_model::e3d_model_service::generation_input_cache_limits();
     let mut health = json!({
         "resident_records": resident_records,
         "resident_roots": resident_roots,
@@ -225,6 +227,9 @@ fn model_cache_health(store_reachable: bool) -> Value {
             "max_entries": crate::options::model_element_cache_max_entries(),
             "parsed_entries": element_cache.iter().map(|db| db.parsed_entries).sum::<usize>(),
             "approx_bytes": element_cache.iter().map(|db| db.approx_bytes).sum::<usize>(),
+            "max_dbnums": generation_inputs.max_dbnums,
+            "resident_dbnums": generation_inputs.resident_dbnums,
+            "evicted_dbnums_total": generation_inputs.evicted_dbnums_total,
             "databases": element_cache,
         },
     });
