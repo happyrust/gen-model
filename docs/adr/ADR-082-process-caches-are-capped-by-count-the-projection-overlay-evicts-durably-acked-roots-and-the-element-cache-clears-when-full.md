@@ -45,6 +45,12 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - **候选**：有回执、且 `publication_acks` 里那枚 ACK **介质是 durable** 且 **与回执逐字相符**（`ack.medium.is_durable() && ack.matches(receipt)`）
   ——库里已经有这一版，逐出不丢任何东西。没落盘的（ACK 缺 / 又提交过一版让 ACK 失效 / 介质是 kv-mem）**永远不在候选里**；
   候选用尽仍在上限之上就停手，只把数字报出来（`OverlayEviction::still_over_limit`）。
+  **2026-09-22 补丁（d-149 审核 A / D7）**：再排除两类——库里有它的几何、但「它的房间边是另一代算的 / 还没算」这句话**只有这枚 ACK 说得出**：
+  (a) ACK 房间代号是本进程这一世写进 `model_room_stray_generations` 的 stray 代号（`ScopeState::stray_generations_written`）、而库上最近一次
+  `model_room_generation` 盖的不是这一代（`stamped_room_generations`，`task_end::commit_task_end_on` 真盖上之后记）——`ScopeState::ack_is_stray_room_evidence`；
+  (b) 房间开关开着（`options::room_membership()`，由 `model_write_behind` 传进 `enforce_root_limit(limit, room_membership_enabled)`，store 对配置无知）
+  却 `!(ack.room_membership && ack.room_generation.is_some())`——`ScopeState::ack_owes_room_edges`。
+  这类根很少，定向 / 整库盖章把库上那一格对齐到它们那一代之后自然放行。
 - **序**：每根记「最近一次盖回执」的单调序号（`ScopeState::commit_ticks`），最旧的先出。**读不刷新它**——被逐出的根读路直读 RocksDB，
   刷新读序只会让「常读的旧根」把「刚生成的新根」挤出去。
 - **逐出 = 整根从缓存态掉**：回执、ACK、失效标记、序号，以及名下**不与别的常驻回执共有**的记录（嵌套根共有的记录归另一个回执继续持有）
@@ -62,6 +68,7 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 | 单元级发布 / 刚体前移（便宜路） | 拿不到 S 端基线 → 回退整根 regen | ADR-080 约束 / ADR-066 规则，既有 |
 | 按需生成 `/model/ensure` | overlay 没回执就生成，与冷启动同一形态 | 既有 |
 | `RoomOnly` 整库房间重算 | 此前只遍历「投影里有回执的根」，逐出后会**漏算**——本文 D3 改口 | **本文** |
+| 定向房间重算的准入与点名（`room_recompute::request_for_task` 的 `unaccounted_stray_generations` 靠「本进程写过的根 ACK 都在投影里」放行 stray 代号、`stale_acked_roots` 靠 ACK 点名）与 `query_service::room_calculation_status`（`ProcessAck::Stale` 一票否决） | **没有去处**：ACK 是唯一证据，逐出 = 证据消失——定向重算漏根、就绪误判。所以这类 ACK 的根**不进候选**（D1 2026-09-22 补丁），不是给它另找去处 | 2026-09-22 审核 A / D7 |
 
 ### D3　`RoomOnly` 整库房间重算：根全集从源文件枚举，冷根从库里读几何行（修订 ADR-073 D13）
 
@@ -164,6 +171,12 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
    `a_mem_ack_or_a_root_republished_after_its_ack_does_not_make_it_evictable`、
    `evicting_a_nested_root_keeps_the_records_its_resident_parent_still_holds`、
    `recommitting_a_root_moves_it_to_the_newest_end_of_the_eviction_order`。
+   2026-09-22 补丁：`ScopeState::{stamped_room_generations, ack_is_stray_room_evidence, ack_owes_room_edges}`、
+   `ModelMemoryStore::note_room_generation_stamped`（`task_end::commit_task_end_on` 真盖上 / 真清空之后调；`clear_dbnum` 连带清）、
+   `enforce_root_limit(limit, room_membership_enabled)` 多一位由 `model_write_behind::enforce_overlay_root_limit` 传 `options::room_membership()`；
+   钉 `a_root_whose_ack_carries_an_unstamped_stray_room_generation_is_not_evictable`、
+   `a_root_published_without_room_membership_while_the_switch_is_on_is_not_evictable`。
+   后续（写锁热点、`GenerationInput` 按库数上限、`Historical` 封顶、孤儿 ACK）见 `docs/plans/2026-09-22-incremental-memory-control-dev-plan.md`。
 2. `model_write_behind.rs`：`enforce_overlay_root_limit(store, moment)` 两处调（`publish` 之后、`persist_batch` 记 durable ACK 之后），
    `store_mode().is_durable()` 门内；`WriteBehindSnapshot` 多三格。
 3. `options.rs`：`model_overlay_max_roots` / `model_element_cache_max_entries` / `effective_count_limit`（环境变量合法非负整数压过配置、

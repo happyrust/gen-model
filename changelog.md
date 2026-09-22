@@ -26,6 +26,32 @@
 - **验证**：`cargo test --lib spatial_tree_view`（13 过，含 6 条新用例：关着无直段键 / 归房与逐层计数 / 共用 `leaf_cap` 与 `unit=` / `nouns` 与 `keyword` /
   预算截断 / `include_self`）；`spatial_query` / `spatial_tree_tubes` / `model_record_reader` 单测见下文各条；真机 `:8027` 账见 plant3d-web 验证 README §10。
 
+### overlay 按根数逐出不再逐「ACK 是房间边唯一证据」的根（ADR-082 D1 补丁，d-149 审核 A / D7）；增量内存控制开发计划立项并过门禁
+
+- **为什么**：2026-09-22 审核 `gen-model-model-cache` 增量更新的内存控制策略（fable-5-1-27，A–F 七项），A 是正确性缺口——`drop_root` 删掉被逐根的
+  ACK，却不动按库记的 `stray_generations_written`；`room_recompute::request_for_task` 的 `unaccounted_stray_generations` 把「本进程写过的代号」
+  放行的依据是「写过的根 ACK 都在投影里、`stale_acked_roots` 点得到」。场景：库上盖 g1 → `/model/ensure` 在中间代 g2 生成根 R（ACK g2、stray += g2）
+  → 发布量越过 50,000、R 作为最旧的 durable 根被逐 → 下一个任务 `acked_roots` 里没有 R、g2 又被放行 → **定向重算漏掉 R**，盖章后库上 stray 清空，
+  这笔欠账从此没人记得。同一前提的第二个读者 `query_service::room_calculation_status`：`Stale` 一票否决变成 `Missing` → 由库上那一层作答 → 误判 `ready_*`。
+  ADR-082 D2「逐出之后每一条路都有去处」漏了这第五个读者。
+- **改动**（`model_memory_store.rs` / `task_end.rs` / `model_write_behind.rs`）：
+  - `ScopeState::stamped_room_generations`（库上 `model_room_generation` 最近一次盖成哪一代；`task_end::commit_task_end_on` 真盖上之后 `Aligned(g)` → 记 g、
+    `Cleared` → 记没有、`Untouched` 不说话）+ `ack_is_stray_room_evidence(&ack)`：房间代号 ∈ `stray_generations_written[dbnum]` **且** ≠ 库上那一代 → 是 F3 证据，
+    **不进逐出候选**。为什么多记「库上盖到哪一代」而不是单看 stray 集合 / 盖章时清集合：单看集合会把限额废掉（面板一变之后每根 ACK 都是那一代、全被钉死）；
+    盖章清集合会在「并发 stray 刷盘先提交、盖章抹掉库上那一列」的缝里丢证据。判据与 F3 自己的定义（`ProcessAck::Stale` = ACK 代号 ≠ 常驻 / 库上）同一句话。
+  - **D7**：`enforce_root_limit(limit, room_membership_enabled)` 多一位，`model_write_behind::enforce_overlay_root_limit` 传 `options::room_membership()`
+    （store 对配置无知）；开关开着却 `!(ack.room_membership && ack.room_generation.is_some())` 的根（`ack_owes_room_edges`）同样不逐——`stale_acked_roots`
+    把没算房间的 `None` 也算 stale、下一个定向任务给它补边，逐了它就再也点不到。
+  - ADR-082 D1 候选定义 / D2 表加第五行 / 实施约束 1 加钉名；CONTEXT「投影 overlay 根数上限」加这一条例外。
+- **计划**：`docs/plans/2026-09-22-incremental-memory-control-dev-plan.md`——ADR-082 策略不改，补落地里的四类欠账：P0 本条；P1 写锁热点
+  （`drop_root` 共有判定 O(回执数) → O(祖先 × log R)；删无生产读者、每次提交 / 逐出整棵重建的 `room_spatial`）；P2 `evict_missing_root` 留下的孤儿 ACK；
+  P3 `GenerationInput × 库数` 按库数 LRU 上限（新键 `model_generation_input_max_dbnums`，落地默认 0、真机量每窗重开代价后定默认值 → ADR-084）；
+  P4 `Historical(*)` 按条数封顶 + 进 `/health`；P5（可选）元素缓存只清最大表；P6 文档 / 观测欠账。**Plannotator 门禁已批准**（2026-09-22 15:0x，D1–D8 全按推荐项：
+  删树 / 按库数 LRU / 先 0 再量 / Historical 16 条 / 元素缓存先不动 / 缺失证据档改引用 / D7 钉 / 顺序 P0→P1→P2→P3→P4→P6）。
+- **验证**：`cargo test --lib -- model_memory_store::tests::` 38 绿（含两条新钉 `a_root_whose_ack_carries_an_unstamped_stray_room_generation_is_not_evictable`、
+  `a_root_published_without_room_membership_while_the_switch_is_on_is_not_evictable`）；`task_end::tests:: model_write_behind::tests:: room_recompute::tests::` 58 绿；
+  `cargo check --lib --tests --bins` 0 error。真机未跑（这一条只收窄候选，W1–W6 那组数在 `room_membership=true`、每窗 9 根全带代号的形态下不受影响）。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁
