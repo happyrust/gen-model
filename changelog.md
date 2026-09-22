@@ -2,6 +2,22 @@
 
 ## 2026-09-22
 
+### 闭包项目里的 CATA 前移能被 watcher 观察并进目录版本核对（GitHub #42）：覆盖；两条边界派生 #46 / #47
+
+- **为什么**：ADR-078 把项目集合改成 MDB 派生后，「外项目（闭包项目）的 CATA 文件前移能不能被 watcher 观察到并触发目录版本核对」文档没写。
+  2026-09-22 增量缺口审阅 C-4（追踪 #31）。
+- **结论（代码走读；源码钉在 `increment_manager::tests::the_ingest_sweep_hands_catalogue_sessions_to_the_model_face`）**：**观察得到**——监控目录 = 闭包每个项目的
+  `<code>000` 库目录（`project_paths::plan_watch_dirs` + 补挂的 `discovered_watch_dirs`）；PollWatcher 事件与周期 `reconcile` 拍都走 `sweep_watch_dirs` →
+  `SweepSurface::Full`；sweep 里清单选中的 CATA 正本（`catalogue_manifest_for_dirs`：扫全部监控目录、按文件头认、同号跨项目按 `catalogue_project_priority` 选主，
+  不受 MDB 声明与 `watch_dbnums` 限制）记 `catalogue_observed`，Full 收尾 `reconcile_catalogue_versions_after_sweep` 与上一轮比、前移即核对。外项目与主项目同一条路，
+  前提只有「项目在闭包里且目录在搜索根里解析得到」（否则 `/health.mdb_closure.unresolved` 点名）。退路 (ii) 按 dbnum 做，不分项目。
+- **两条边界**（都在核对那一步，不在监听）：① MDB 没声明、只有 `Dependency` 路由的 CATA——核对解文件走 `current_mdb_sources()`（MDB 声明的成员），解不出 →
+  `unreadable_catalogue_dbnums`、不判过期、不级联（core 对这类库根本读不到，不是相对 core 的少算，但我们读了它生成几何）→ **#46**（`ready-for-human`）；
+  ② 同号跨项目的正本选法——观察按 `catalogue_project_priority`、生成按 `preferred_project`（`E3dDbResolver` / `select_dependency_file`），不是同一函数，
+  `build_set` 注释里 APS7600 vs ZDJ7600 就是这一形状 → **#47**（`ready-for-agent`）。
+- **改动**：ADR-078 追记 2026-09-22 一节；09-04 联动清单 #4 行 ★0922 注；#46 / #47 挂到 #31 之下并进任务列表。未改代码、未跑真机（主工作树仍被另一会话未收尾
+  的 e3d-io `TextList` / `model_record_reader` 改动挡着编不过）。
+
 ### `TMPL` 下元素的生成根（GitHub #44）：交付单元之外 `TMPL` 自己成根、成员全归它——与 core `topNoun == TMPL` 整件重建同口径，真库 3209 个 TMPL 0 例外
 
 - **为什么**：core `UPGRPH` 对 `topNoun == TMPL` 的元素整件 `REPELE`、`LPRMTV` 把「属主是 `TMPL`」一律当图元；我方默认 MDU 不含 `TMPL`，

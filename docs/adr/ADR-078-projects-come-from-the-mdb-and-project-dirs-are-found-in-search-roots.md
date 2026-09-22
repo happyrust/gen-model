@@ -55,3 +55,23 @@ ADR-046 把 `included_projects` 定为唯一名单并拒绝 UNC，理由是「�
 ## 回滚
 
 恢复 ADR-046 的 `included_projects` 名单解析与对应单测，把 `project_search_paths` 与闭包模块下线；回滚前要确认没有部署已经删掉 `included_projects`。
+
+## 追记 2026-09-22：闭包项目里的 CATA 前移能不能被 watcher 观察并进目录版本核对（GitHub #42）
+
+核查结论（代码走读，钉源码的测试 `increment_manager::tests::the_ingest_sweep_hands_catalogue_sessions_to_the_model_face` 已在）：
+
+- **观察得到。** 监控目录 = 闭包里每个项目的 `<code>000` 库目录（`project_paths::plan_watch_dirs`，含补挂进来的 `discovered_watch_dirs`）；
+  PollWatcher 在这些目录上的 Create / Modify / Remove 事件 → `sweep_watch_dirs("watch")` → `sweep_dirs(.., SweepSurface::Full)`，周期 `reconcile` 拍同一条路。
+  sweep 里每个**清单选中的 CATA 正本**（`catalogue_manifest_for_dirs`：扫全部监控目录、按文件头认 CATA、同号跨项目按 `catalogue_project_priority` 选主，
+  **不受 MDB 声明与 `watch_dbnums` 限制**）记 `catalogue_observed[dbnum] = 最新会话`，Full 收尾交 `reconcile_catalogue_versions_after_sweep` 与上一轮比，
+  前移即开一次目录版本核对（`reconcile` 拍强制）。外项目 CATA 与主项目 CATA 走的是同一条路——前提只有一条：它的项目在闭包里且目录在搜索根里解析得到
+  （否则 `/health.mdb_closure.unresolved` 点名，本 ADR 决策 7）。
+- **两条边界**（都不是「监听不到」，是核对那一步的口径）：
+  1. 核对解文件走 `model_source::latest_source_version(dbnum)` → `current_mdb_sources()` = **MDB 声明的成员**。决策 6 里「MDB 没声明、只靠依赖目录扫描补成
+     `Dependency` 路由」的 CATA：sweep 观察得到、核对却解不出文件 → 落 `unreadable_catalogue_dbnums`、**不判过期、不级联**。core 对这类库根本读不到，
+     所以不是相对 core 的少算；但我们既然读了它生成几何，它前移就是我们自己的过期——要么核对改走路由目录（含 `Dependency` 路由）解文件，要么把
+     「生成读到了未声明的 CATA」本身报出来。→ GitHub 追踪票见 #31。
+  2. 同号跨项目的 CATA：sweep 观察的正本按 `catalogue_project_priority` 选，生成时 `E3dDbResolver` / `select_dependency_file` 按 `preferred_project`
+     （目标 DESI 所在项目）选——两处选法不是同一个函数，`build_set` 注释里 APS7600 vs ZDJ7600 就是这一形状；观察到的会话与生成读的会话可能不是同一份文件。
+     → 同上追踪。
+- 退路 (ii)（目录库没有反向引用表 → 该库全部依赖根判过期）按 dbnum 在 `reverse_reference::expand_reverse_cascade` 里做，不分本项目 / 外项目。
