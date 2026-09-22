@@ -2,6 +2,27 @@
 
 ## 2026-09-22
 
+### `TMPL` 下元素的生成根（GitHub #44）：交付单元之外 `TMPL` 自己成根、成员全归它——与 core `topNoun == TMPL` 整件重建同口径，真库 3209 个 TMPL 0 例外
+
+- **为什么**：core `UPGRPH` 对 `topNoun == TMPL` 的元素整件 `REPELE`、`LPRMTV` 把「属主是 `TMPL`」一律当图元；我方默认 MDU 不含 `TMPL`，
+  它下面的元素上卷到谁、会不会漏几何，`CONTEXT.md`「生成根」词条没写。2026-09-22 增量缺口审阅 C-6（追踪 #31）。
+- **口径**：位表快照 `core-noun-granularity-e3d31.json` 里 `TMPL` `significant=true` / `toplevel=true`，文件侧枚举（`enumerate_generation_roots_in_subtree`）
+  在交付单元之外把它收成根并继续向下；成员位表里都不显著 → 不成根 → 归 `TMPL`。变更元素解析口径（`resolve_element_generation_root`）对 TMPL 成员：
+  无 MDU 祖先 → 第一个非 loop / 非 FTUB 的属主 = `TMPL`。两套口径同答。
+- **探针** `generation_root::tests::live_probe_tmpl_members_roll_up_to_the_tmpl_root`（`#[ignore]` 真库）：扫 APS + AMS 两个项目目录全部 DESI 库
+  （按文件头认）最新会话，对每个 `TMPL` 记属主链形状、是否在根集、成员 noun 直方图、成员是否自己成根、两套口径是否一致。
+  **结果（388 个 DESI 库，3209 个 TMPL，出现在 55 个库）**：交付单元之外 2563 个**全部成根**；交付单元之内 646 个（`EQUI` 625 / `SUBE` 19 /
+  `SUPPO` 链 2）归那个交付单元（core 整件 TMPL、我们整台 EQUI，多算不漏算）；38,116 个成员（`CYLI` 8715 / `EXTR` 5141 / `NCYL` 4053 / `DDSE` 2911 /
+  `BOX` 2876 / `GENSEC` 2402 / `SCTN` 2031 / `PANE` 1948 / `CTOR` 1440 / `CONE` 1326 / `DPSE` 1266 / `NBOX` 761 / `TMRPSE` 735 / `DISH` 658 / `NOZZ` 551 …）
+  **0 个自己成根**、两套口径 **0 处不一致**。属主链形状 22 种：`TMPL ← EQUI`（625）、`TMPL ← FIXING ← PLDATU ← JLDATU ← GENSEC ← FRMW ← STRU`（920）、
+  `TMPL ← CTFEAT ← CTSTRA ← CTMTRL ← CWBRAN`（546）、`TMPL ← TMAR ← TPWL ← WORL`（337，模板世界里的模板定义）、`TMPL ← CMFI / FITT / SJOI / HRPOST / HRPANE / HRTERM / HRGATE`
+  （目录构件的模板壳，共 ~700）。
+- **结论**：与 core 同口径，`generation_root` 不改。两条观察（不是增量缺口）：① 目录构件（FIXING / CMFI / FITT / HRPOST …）的 TMPL 壳是 STRU / FRMW / HANDRA / CWBRAN
+  之下的**嵌套显著根**，属「嵌套根整棵生成」的重复覆盖成本类；② 模板世界 `TPWL / TMAR` 下的 337 个 TMPL 也成根、会被生成——模板定义要不要出几何是几何覆盖 /
+  产品决定，与上卷无关。`CONTEXT.md`「生成根」词条补 TMPL 一句。
+- **验证**：探针在隔离环境（`.scratch/wt-f48`：gen-model HEAD + vendor e3d-io 钉 `901d6cd~1`——主工作树与 gen-model HEAD 都被另一会话未收尾的
+  e3d-io `TextList` / `model_record_reader` 改动挡着编不过）上 1 过（153 s）；`rustfmt --edition 2024 --check` 本文件干净。隔离环境用完即删。
+
 ### 结构连接级联的跨库对端（GitHub #33）：读得到、上卷不到——探针坐实 12/12，账混在 `far_end_without_root` 里
 
 - **为什么**：C2 结构连接正向级联（`structural_connection.rs`，默认关）只在 T 端 `DbSet` 里读对端回指并沿 owner 链上卷；对端落在

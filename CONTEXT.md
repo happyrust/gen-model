@@ -15,7 +15,7 @@ _Avoid_: 局部更新、局部刷新
 _Avoid_: 流水线模式、跳步开关、增量总开关、把 `room_membership` 当模型消费门、三阶段
 
 **生成根 (Generation Root)**：
-一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 RefNo 位解码得到（见「RefNo 库归属」），`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
+一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 RefNo 位解码得到（见「RefNo 库归属」），`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。**`TMPL`（目录模板在设计侧实例化出来的壳）**：位表 `significant=true` / `toplevel=true`，交付单元之外它自己成根，成员（`BOX` / `CYLI` / `EXTR` / 负体 / `GENSEC` / `SCTN` / `PANE` / `NOZZ` …）位表里都不显著、全归它——与 core `UPGRPH` 对 `topNoun == TMPL` 整件 `REPELE` 同口径；交付单元之内归那个交付单元（core 整件 `TMPL`、我们整台 EQUI，多算不漏算）。真库（APS + AMS 388 个 DESI 库）3209 个 `TMPL`：交付单元之外 2563 个全部成根、38,116 个成员 0 个自己成根、变更元素解析口径与枚举口径 0 处不一致（GitHub #44 探针 `live_probe_tmpl_members_roll_up_to_the_tmpl_root`）。
 _Avoid_: 重生成根、regen root、目标根
 
 **RefNo 库归属 (RefNo Database Affiliation)**：
