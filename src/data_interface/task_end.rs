@@ -306,6 +306,22 @@ pub(crate) async fn commit_task_end_on(
     DbnumState::invalidate_mirrored_on(db, end.dbnum);
 
     let wanted_stamp = end.model_stamps();
+    // 库上 `model_room_generation` 真盖上 / 真清空之后，告诉投影这一代（d-149 补丁 2026-09-22）：按根数限额逐出
+    // 时，ACK 房间代号是本进程写过的 stray 代号、又不是库上这一代的根是 F3 的证据、不进候选；盖到这一代之后
+    // 同代的 ACK 才放行。`Untouched` 不说话——普通增量窗口替不了整库。
+    if stamped && wanted_stamp {
+        match end.model.as_ref().map(|model| &model.room_generation) {
+            Some(RoomGenerationStamp::Aligned(generation)) => {
+                crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                    .note_room_generation_stamped(end.dbnum, Some(generation));
+            }
+            Some(RoomGenerationStamp::Cleared) => {
+                crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                    .note_room_generation_stamped(end.dbnum, None);
+            }
+            Some(RoomGenerationStamp::Untouched) | None => {}
+        }
+    }
     Ok(TaskEndReceipt {
         model_sesno: (stamped && wanted_stamp).then_some(end.target_sesno),
         info_rows: end.info.as_ref().map(|snapshot| snapshot.rows.len()),

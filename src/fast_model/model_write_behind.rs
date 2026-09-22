@@ -705,7 +705,8 @@ fn enforce_overlay_root_limit(store: &ModelMemoryStore, moment: &str) {
     if limit == 0 || !crate::options::store_mode().is_durable() {
         return;
     }
-    let outcome = store.enforce_root_limit(limit);
+    // 房间开关从 options 读、传进去（store 对配置无知）：开着时 ACK 没带房间代号的根不逐（d-149 补丁 D7）。
+    let outcome = store.enforce_root_limit(limit, crate::options::room_membership());
     if outcome.evicted > 0 {
         println!(
             "模型投影 overlay 按根数上限收回（{moment}）：{} → {} 根，上限 {}，逐出 {}{}",

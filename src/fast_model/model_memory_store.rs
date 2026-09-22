@@ -351,6 +351,12 @@ struct ScopeState {
     /// 的代号。只有这些代号写过的根，ACK 才在这份投影里、准入点名点得到；那一格里别的代号是重启前那一世写的，
     /// 点不到——`room_recompute::request_for_task` 见了就整库。随本库 ACK 整体作废一并清掉。
     stray_generations_written: BTreeMap<u32, BTreeSet<String>>,
+    /// 收尾那一笔最近一次把 `dbnum_watermark.model_room_generation` 盖成了哪一代（`task_end::commit_task_end_on`
+    /// 成功之后记；`Cleared` 记成没有）。与 `stray_generations_written` 合起来判一枚 ACK 是不是 F3 的证据
+    /// （[`ScopeState::ack_is_stray_room_evidence`]）：房间代号是本进程写过的 stray 代号、库上又还没盖到这一代
+    /// ——这样的根不进按根数限额的逐出候选，它的 ACK 是 `room_recompute::stale_acked_roots` 与
+    /// `query_service::room_calculation_status` 点得到它的唯一证据（d-149 补丁，2026-09-22）。
+    stamped_room_generations: BTreeMap<u32, String>,
     model_digests: BTreeMap<u32, [u8; 32]>,
     room_spatial: BTreeMap<u32, aios_core::accel_tree::acceleration_tree::AccelerationTree>,
     room_spatial_dirty: BTreeSet<(u32, i64)>,
@@ -654,10 +660,41 @@ impl ScopeState {
         }
     }
 
+    /// 这枚 ACK 是不是 F3 的证据（ADR-073 F3；d-149 补丁 2026-09-22）：房间代号是本进程这一世写进
+    /// `model_room_stray_generations` 的代号之一（`stray_generations_written`），而库上最近一次盖章
+    /// （`stamped_room_generations`）不是这一代。`room_recompute::request_for_task` 靠「本进程写过的根 ACK 都在
+    /// 投影里」放行这些代号、`query_service::room_calculation_status` 靠这枚 ACK 一票否决——逐出了它，
+    /// 两处都会把另一代算的边当成这一代的。盖到这一代之后同代的 ACK 不再是证据；没盖过 / `Cleared` 时只看 stray 集合。
+    fn ack_is_stray_room_evidence(&self, ack: &RootPublicationAck) -> bool {
+        let Some(generation) = ack.room_generation.as_deref() else {
+            return false;
+        };
+        if self
+            .stamped_room_generations
+            .get(&ack.dbnum)
+            .is_some_and(|stamped| stamped == generation)
+        {
+            return false;
+        }
+        self.stray_generations_written
+            .get(&ack.dbnum)
+            .is_some_and(|written| written.contains(generation))
+    }
+
+    /// 房间开关开着、这枚 ACK 却没带房间代号（发布时没算房间，或开关关着时发布的）：
+    /// `room_recompute::stale_acked_roots` 会点名它（没算房间的 `None` 也算 stale），下一个定向任务给它补边
+    /// ——逐出了它，`acked_roots` 从此不列它，定向任务再也点不到，边一直缺到下一次整库
+    /// （d-149 补丁 D7，2026-09-22）。开关关着时房间边没人问，不算欠。
+    fn ack_owes_room_edges(ack: &RootPublicationAck, room_membership_enabled: bool) -> bool {
+        room_membership_enabled && !(ack.room_membership && ack.room_generation.is_some())
+    }
+
     /// 按根数限额逐出（d-149）：候选 = 有回执、且 durable ACK 与回执逐字相符的根（库里已经有
     /// 这一版，逐出不丢任何东西）；按最近一次盖回执的先后，最旧的先出，出到根数 ≤ `limit` 或候选
-    /// 用尽为止。没落盘的（ACK 缺 / 不符 / 介质不是 durable）永远不在候选里。
-    fn evict_acked_roots_over(&mut self, limit: usize) -> usize {
+    /// 用尽为止。没落盘的（ACK 缺 / 不符 / 介质不是 durable）永远不在候选里；ACK 是 F3 证据的
+    /// （[`Self::ack_is_stray_room_evidence`]）与开关开着却还欠房间边的（[`Self::ack_owes_room_edges`]）
+    /// 也不在——库里有它的几何，却没有「它的边是另一代算的 / 还没算」这句话。
+    fn evict_acked_roots_over(&mut self, limit: usize, room_membership_enabled: bool) -> usize {
         if limit == 0 || self.receipts.len() <= limit {
             return 0;
         }
@@ -665,9 +702,12 @@ impl ScopeState {
             .receipts
             .iter()
             .filter(|(packed, receipt)| {
-                self.publication_acks
-                    .get(*packed)
-                    .is_some_and(|ack| ack.medium.is_durable() && ack.matches(receipt))
+                self.publication_acks.get(*packed).is_some_and(|ack| {
+                    ack.medium.is_durable()
+                        && ack.matches(receipt)
+                        && !self.ack_is_stray_room_evidence(ack)
+                        && !Self::ack_owes_room_edges(ack, room_membership_enabled)
+                })
             })
             .map(|(packed, _)| (self.commit_ticks.get(packed).copied().unwrap_or(0), *packed))
             .collect();
@@ -830,6 +870,26 @@ impl ModelMemoryStore {
             .entry(dbnum)
             .or_default()
             .insert(generation.to_owned());
+    }
+
+    /// 收尾那一笔把 `dbnum_watermark.model_room_generation` 盖成 `generation`（`Aligned`）/ 清空
+    /// （`Cleared`，传 `None`）**成功之后**调（`task_end::commit_task_end_on`；d-149 补丁 2026-09-22）。
+    /// 只影响按根数限额的逐出候选（[`ScopeState::ack_is_stray_room_evidence`]）：盖到这一代之后，
+    /// 同代的 ACK 不再是 F3 的证据、可以逐出。不改任何 ACK、不动 `stray_generations_written`
+    /// ——那一格记的是「写过什么」，与库上那一列同时成立、随重启消失。
+    pub(crate) fn note_room_generation_stamped(&self, dbnum: u32, generation: Option<&str>) {
+        let mut scopes = self.write();
+        let state = scopes.entry(ScopeKey::Current).or_default();
+        match generation {
+            Some(generation) => {
+                state
+                    .stamped_room_generations
+                    .insert(dbnum, generation.to_owned());
+            }
+            None => {
+                state.stamped_room_generations.remove(&dbnum);
+            }
+        }
     }
 
     /// 本进程这一世写进 `dbnum` 那一格的代号（字典序）。重启 / 本库 ACK 整体作废之后为空。
@@ -1245,11 +1305,15 @@ impl ModelMemoryStore {
     /// 盖回执的先后逐出**已 durable ACK 且与回执逐字相符**的根（库里已有这一版，读路对它直读
     /// RocksDB），最旧先出，出到 ≤ `limit` 或候选用尽。`limit == 0` = 不限，什么都不做。
     /// 没落盘的根（ACK 缺 / 不符 / 介质非 durable）不在候选里——这道闸不丢任何还没写进库的东西，
-    /// 所以「全部待刷」时它收不下去，只把数字报出来。
+    /// 所以「全部待刷」时它收不下去，只把数字报出来。ACK 房间代号是本进程写过的 stray 代号、库上又还没
+    /// 盖到这一代的根同样不在候选里（[`ScopeState::ack_is_stray_room_evidence`]，d-149 补丁）：库里有它的
+    /// 几何，但「它的边是另一代算的」这句话只有这枚 ACK 说得出。`room_membership_enabled`（房间开关，
+    /// 由调用方从 options 读——store 自己对配置无知）为真时，ACK 没带房间代号的根也不逐
+    /// （[`ScopeState::ack_owes_room_edges`]）：定向房间重算靠这枚 ACK 点名它补边。
     ///
     /// 调用时机归调用方守：每次发布之后、每次 durable ACK 记下之后（`model_write_behind`），且只在
     /// `store_mode().is_durable()` 下——嵌入 kv-mem 时 overlay 就是唯一一份。
-    pub fn enforce_root_limit(&self, limit: usize) -> OverlayEviction {
+    pub fn enforce_root_limit(&self, limit: usize, room_membership_enabled: bool) -> OverlayEviction {
         let mut scopes = self.write();
         let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
             return OverlayEviction {
@@ -1258,7 +1322,7 @@ impl ModelMemoryStore {
             };
         };
         let resident_before = state.receipts.len();
-        let evicted = state.evict_acked_roots_over(limit);
+        let evicted = state.evict_acked_roots_over(limit, room_membership_enabled);
         OverlayEviction {
             limit,
             resident_before,
@@ -1309,6 +1373,7 @@ impl ModelMemoryStore {
             .commit_ticks
             .retain(|packed, _| receipts.contains_key(packed));
         state.stray_generations_written.remove(&dbnum);
+        state.stamped_room_generations.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
         state.model_digests.remove(&dbnum);
@@ -3159,7 +3224,7 @@ mod tests {
         }
         // r3 没有 ACK：还没落盘。
 
-        let untouched = store.enforce_root_limit(0);
+        let untouched = store.enforce_root_limit(0, false);
         assert_eq!(
             untouched,
             OverlayEviction {
@@ -3172,7 +3237,7 @@ mod tests {
         );
         assert!(!untouched.still_over_limit());
 
-        let outcome = store.enforce_root_limit(2);
+        let outcome = store.enforce_root_limit(2, false);
         assert_eq!(
             outcome,
             OverlayEviction {
@@ -3215,7 +3280,7 @@ mod tests {
         assert_eq!(store.overlay_evictions_total(), 2);
 
         // 再收到 1：候选只剩 r4（r3 没 ACK）——比它旧的 r3 照旧留着，r4 出。
-        let outcome = store.enforce_root_limit(1);
+        let outcome = store.enforce_root_limit(1, false);
         assert_eq!(
             (outcome.evicted, outcome.resident_after),
             (1, 1),
@@ -3229,7 +3294,7 @@ mod tests {
 
         // 又进一根没 ACK 的：两根都没落盘，上限 1 收不下去——不逐、如实报。
         commit_root(&store, RefNo::new(7997, 5), "r5");
-        let stuck = store.enforce_root_limit(1);
+        let stuck = store.enforce_root_limit(1, false);
         assert_eq!(
             stuck,
             OverlayEviction {
@@ -3279,7 +3344,7 @@ mod tests {
             ack_matching(&durable_receipt, 7997, PersistMedium::RocksDb),
         ));
 
-        let outcome = store.enforce_root_limit(1);
+        let outcome = store.enforce_root_limit(1, false);
         assert_eq!(
             (outcome.evicted, outcome.resident_after),
             (1, 2),
@@ -3302,6 +3367,148 @@ mod tests {
             "ACK 之后又提交过的根，新版还没落盘"
         );
         assert!(outcome.still_over_limit());
+    }
+
+    /// d-149 补丁（2026-09-22）：ACK 房间代号是本进程写过的 stray 代号、库上又还没盖到这一代的根，
+    /// 是 F3 唯一点得到它的证据（`room_recompute::stale_acked_roots` / `query_service::room_calculation_status`
+    /// 都靠这枚 ACK）——即使已 durable ACK、也最旧，不进逐出候选，候选用尽就如实报「收不下去」；
+    /// 库上盖到**别的**一代仍是证据；收尾把库上盖到**这一代**之后才可逐。
+    #[test]
+    fn a_root_whose_ack_carries_an_unstamped_stray_room_generation_is_not_evictable() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let ack_with_rooms = |receipt: &RootReceipt, generation: &str| {
+            let mut ack = ack_matching(receipt, 7997, PersistMedium::RocksDb);
+            ack.room_membership = true;
+            ack.room_generation = Some(generation.into());
+            ack
+        };
+        // 提交序 = 逐出序：两枚 g2（stray）的最旧，g1（库上那一代）最新。
+        let evidence_a = RefNo::new(7997, 1);
+        let evidence_b = RefNo::new(7997, 2);
+        let plain = RefNo::new(7997, 3);
+        for (root, name, generation) in [
+            (evidence_a, "evidence-a", "g2"),
+            (evidence_b, "evidence-b", "g2"),
+            (plain, "plain", "g1"),
+        ] {
+            let receipt = commit_root(&store, root, name);
+            assert!(store.record_publication_ack(
+                ProjectionScope::Current,
+                root,
+                ack_with_rooms(&receipt, generation),
+            ));
+        }
+        // 刷盘那一组按 g2 写过边（库上盖的是 g1）：本进程记下「写过 g2」。
+        store.note_stray_generation_written(7997, "g2");
+
+        // 上限 1：最旧的是两枚 g2，但它们是 F3 证据——出的是最新的 plain；剩下两根都是证据，收不下去、如实报。
+        let outcome = store.enforce_root_limit(1, false);
+        assert_eq!(
+            outcome,
+            OverlayEviction {
+                limit: 1,
+                resident_before: 3,
+                evicted: 1,
+                resident_after: 2,
+            },
+            "{outcome:?}"
+        );
+        assert!(outcome.still_over_limit(), "剩下的都是带 stray 代号的 ACK");
+        assert!(store.receipt(ProjectionScope::Current, plain).is_none());
+        for kept in [evidence_a, evidence_b] {
+            assert!(
+                store.receipt(ProjectionScope::Current, kept).is_some(),
+                "{kept} 的 ACK 是 F3 证据，留着"
+            );
+            assert!(
+                store
+                    .publication_ack(ProjectionScope::Current, kept)
+                    .is_some_and(|ack| ack.room_generation.as_deref() == Some("g2")),
+                "ACK 原样，不改代号"
+            );
+        }
+
+        // 库上盖到别的一代（g3）：g2 仍不是库上那一代，照旧是证据。
+        store.note_room_generation_stamped(7997, Some("g3"));
+        let still = store.enforce_root_limit(1, false);
+        assert_eq!((still.evicted, still.resident_after), (0, 2), "{still:?}");
+
+        // 房间开关关着盖章（`Cleared`）：没有库上那一代可比，只看 stray 集合——仍是证据。
+        store.note_room_generation_stamped(7997, None);
+        let cleared = store.enforce_root_limit(1, false);
+        assert_eq!((cleared.evicted, cleared.resident_after), (0, 2), "{cleared:?}");
+
+        // 库上盖到 g2：这一代的边就是库上的边，ACK 不再是证据——最旧的 evidence_a 出，收到上限。
+        store.note_room_generation_stamped(7997, Some("g2"));
+        let released = store.enforce_root_limit(1, false);
+        assert_eq!(
+            (released.evicted, released.resident_after),
+            (1, 1),
+            "{released:?}"
+        );
+        assert!(!released.still_over_limit());
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, evidence_a)
+                .is_none(),
+            "盖到同一代之后按提交序出：最旧的先"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, evidence_b)
+                .is_some()
+        );
+        assert_eq!(store.overlay_evictions_total(), 2);
+    }
+
+    /// d-149 补丁 D7（2026-09-22）：房间开关开着时，ACK 没带房间代号的根（发布时没算房间）是
+    /// `room_recompute::stale_acked_roots` 会点名补边的那一类——不进逐出候选；开关关着时它与普通根无异。
+    /// 带代号的 ACK 不受这一条影响（仍只看 stray 证据那一条）。
+    #[test]
+    fn a_root_published_without_room_membership_while_the_switch_is_on_is_not_evictable() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let owed = RefNo::new(7997, 1);
+        let with_rooms = RefNo::new(7997, 2);
+        // 提交序 = 逐出序：没算房间的最旧。
+        let owed_receipt = commit_root(&store, owed, "owed");
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            owed,
+            ack_matching(&owed_receipt, 7997, PersistMedium::RocksDb),
+        ));
+        let with_rooms_receipt = commit_root(&store, with_rooms, "with-rooms");
+        let mut ack = ack_matching(&with_rooms_receipt, 7997, PersistMedium::RocksDb);
+        ack.room_membership = true;
+        ack.room_generation = Some("g1".into());
+        assert!(store.record_publication_ack(ProjectionScope::Current, with_rooms, ack));
+
+        // 开关开着：最旧的 owed 欠着房间边，不逐——出的是带代号的 with_rooms；剩下那根收不下去、如实报。
+        let outcome = store.enforce_root_limit(1, true);
+        assert_eq!(
+            outcome,
+            OverlayEviction {
+                limit: 1,
+                resident_before: 2,
+                evicted: 1,
+                resident_after: 1,
+            },
+            "{outcome:?}"
+        );
+        assert!(store.receipt(ProjectionScope::Current, owed).is_some(), "欠房间边的根留着");
+        assert!(store.receipt(ProjectionScope::Current, with_rooms).is_none());
+
+        commit_root(&store, RefNo::new(7997, 3), "third");
+        let stuck = store.enforce_root_limit(1, true);
+        assert_eq!((stuck.evicted, stuck.resident_after), (0, 2), "{stuck:?}");
+        assert!(stuck.still_over_limit(), "owed 不进候选、third 没 ACK：收不下去");
+
+        // 开关关着：房间边没人问，owed 就是一根普通的已落盘根——按提交序出。
+        let released = store.enforce_root_limit(1, false);
+        assert_eq!((released.evicted, released.resident_after), (1, 1), "{released:?}");
+        assert!(store.receipt(ProjectionScope::Current, owed).is_none());
+        assert_eq!(store.overlay_evictions_total(), 2);
     }
 
     /// d-149：逐出嵌套根时，与仍常驻的另一个回执**共有**的记录留下（归那个回执继续持有）；
@@ -3356,7 +3563,7 @@ mod tests {
             ack_matching(&nested_receipt, 7997, PersistMedium::RocksDb),
         ));
 
-        let outcome = store.enforce_root_limit(1);
+        let outcome = store.enforce_root_limit(1, false);
         assert_eq!(
             (outcome.evicted, outcome.resident_after),
             (1, 1),
@@ -3402,7 +3609,7 @@ mod tests {
             parent,
             ack_matching(&parent_receipt, 7997, PersistMedium::RocksDb),
         ));
-        let outcome = store.enforce_root_limit(1);
+        let outcome = store.enforce_root_limit(1, false);
         assert_eq!(
             (outcome.evicted, outcome.resident_after),
             (1, 1),
@@ -3510,7 +3717,7 @@ mod tests {
             ack_matching(&first_again, 7997, PersistMedium::RocksDb),
         ));
 
-        let outcome = store.enforce_root_limit(1);
+        let outcome = store.enforce_root_limit(1, false);
         assert_eq!(
             (outcome.evicted, outcome.resident_after),
             (1, 1),
