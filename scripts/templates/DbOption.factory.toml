@@ -146,3 +146,15 @@ model_post_regen_aabb_page = 256
 model_regen_execution_group = 16
 model_root_inflight_max = 4
 model_full_rebuild_enabled = true
+
+# 进程内四块按**数量**设闸的常驻（ADR-082 / ADR-084 / 内存控制计划 P4，2026-09-22 补进模板）。不写 = 下面的默认值，写 0 = 不限；
+# 对应环境变量 AIOS_MODEL_OVERLAY_MAX_ROOTS / AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES / AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS /
+# AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX 压过本键。现值都在 /health.model_cache（overlay / element_cache / historical）与 /ops.html 底栏。
+# model_overlay_max_roots            —— 模型投影 overlay 最多常驻多少个根（≈ 13.8 KB/根；只逐已落盘的根、只在 rocksdb 介质下动）。
+# model_element_cache_max_entries    —— 每份生成用 DbSet 的池级元素缓存最多装多少个元素（≈ 3.6–4.7 KB/元素；满了整张清）。
+# model_generation_input_max_dbnums  —— 生成输入缓存最多同时留几个库的 GenerationInput（≈ 0.7–0.95 GB/库；最久没用的库先出）。默认 0 待真机定。
+# model_historical_snapshots_max     —— 历史快照最多同时留几格（最久没 generate 的先丢，再查 = SNAPSHOT_NOT_FOUND）。
+model_overlay_max_roots = 50000
+model_element_cache_max_entries = 200000
+model_generation_input_max_dbnums = 0
+model_historical_snapshots_max = 16

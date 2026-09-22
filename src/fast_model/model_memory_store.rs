@@ -752,9 +752,13 @@ pub struct OverlayFootprint {
     /// 进程内完整发布确认（ACK）条数。
     pub acks: usize,
     /// 估算的堆字节：每条记录的内联结构 + 字串 / 祖先链 + 四张索引里的 `record_id` 副本与树节点，
-    /// 再加回执与 ACK。**不含**网格文件——网格在盘上。（每库的房间空间树 `room_spatial` 2026-09-22 已删：
-    /// 没有生产读者，却每次提交 / 逐出整棵重建；此前它也不在这个数里。）
+    /// 再加回执（含随根携带的房间边，见 `receipt_room_bytes`）与 ACK。**不含**网格文件——网格在盘上。
+    /// （每库的房间空间树 `room_spatial` 2026-09-22 已删：没有生产读者，却每次提交 / 逐出整棵重建；此前它也不在这个数里。）
     pub approx_bytes: usize,
+    /// `approx_bytes` 里回执上随根携带的房间边（`RootReceipt::room`）那一部分——只有还没 ACK 的根才带着
+    /// （ACK 记下就摘，内存控制计划 P7）；这个数长期不落回 0 = write-behind 积压。
+    #[serde(default)]
+    pub receipt_room_bytes: usize,
 }
 
 /// 一格历史快照作用域（`Historical(<key>)`）的体量（[`ModelMemoryStore::historical_footprint`]）。
@@ -770,6 +774,11 @@ pub struct HistoricalScopeFootprint {
 fn footprint_of(state: &ScopeState) -> OverlayFootprint {
     const NODE: usize = 32;
     let records = state.record_bytes;
+    let receipt_room_bytes: usize = state
+        .receipts
+        .values()
+        .map(|receipt| approx_carried_room_bytes(receipt.room.as_ref()))
+        .sum();
     let receipts: usize = state
         .receipts
         .values()
@@ -779,7 +788,8 @@ fn footprint_of(state: &ScopeState) -> OverlayFootprint {
                 + receipt.published_via.len()
                 + approx_model_target_bytes(receipt.model_target.as_ref())
         })
-        .sum();
+        .sum::<usize>()
+        + receipt_room_bytes;
     let acks: usize = state
         .publication_acks
         .values()
@@ -795,7 +805,31 @@ fn footprint_of(state: &ScopeState) -> OverlayFootprint {
         roots: state.receipts.len(),
         acks: state.publication_acks.len(),
         approx_bytes: records + receipts + acks,
+        receipt_room_bytes,
     }
+}
+
+/// 回执上随根携带的房间边大约占多少堆字节（按长度不按容量）：代号字串、构件字串表、每条边的内联结构与三个字串。
+fn approx_carried_room_bytes(room: Option<&CarriedRoomEdges>) -> usize {
+    let Some(room) = room else {
+        return 0;
+    };
+    room.generation.len()
+        + room
+            .elements
+            .iter()
+            .map(|element| std::mem::size_of::<String>() + element.len())
+            .sum::<usize>()
+        + room
+            .edges
+            .iter()
+            .map(|edge| {
+                std::mem::size_of::<CarriedRoomEdge>()
+                    + edge.panel.len()
+                    + edge.room_num.len()
+                    + edge.member.len()
+            })
+            .sum::<usize>()
 }
 
 /// 一条投影记录在 overlay 里大约占多少字节（d-149 观测用）：内联结构、它自己的字串与祖先链，
@@ -1513,12 +1547,17 @@ impl ModelMemoryStore {
         let accepted = {
             let mut scopes = self.write();
             let state = scopes.entry(scope.key()).or_default();
-            let Some(receipt) = state.receipts.get(&packed_refno(root)) else {
+            let Some(receipt) = state.receipts.get_mut(&packed_refno(root)) else {
                 return false;
             };
             if !ack.matches(receipt) {
                 return false;
             }
+            // 随根携带的房间边（ADR-073 D1 B/T3）只在 flush 的 `room_stage` 里读一次；ACK 记下 = 那些边已经
+            // 在库里，回执上这份从此没有读者——一根几百构件的边是几十 KB 字串，默认 50,000 根常驻时是
+            // overlay 里最大的一块隐形常驻（不在 `approx_bytes` 的记录账里）。摘掉（内存控制计划 P7，
+            // 承 codex/adr084-cache-followups 的 D3）：再发布一版会带新的边来，`ack.matches` 不看这一格。
+            receipt.room = None;
             state.publication_acks.insert(packed_refno(root), ack);
             true
         };
@@ -3670,6 +3709,76 @@ mod tests {
             (0, 0, 0, 0),
             "删光之后记录那半的账也归零: {cleared:?}"
         );
+    }
+
+    /// 内存控制计划 P7（承 codex/adr084-cache-followups D3）：随根携带的房间边只在 flush 里读一次，
+    /// ACK 记下就从回执上摘掉；`approx_bytes` 把它算进去、`receipt_room_bytes` 单列——没 ACK 的根带着、
+    /// ACK 过的为 0；对不上的 ACK 不收、边也不动。
+    #[test]
+    fn a_matching_ack_drops_the_carried_room_edges_from_the_receipt() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let mut receipt = limit_receipt("with-rooms", 1);
+        // 一根几十个构件的边——比一枚 ACK 重得多，摘掉之后总账要真的往下走。
+        receipt.room = Some(CarriedRoomEdges {
+            generation: "g1".into(),
+            elements: (0..40).map(|i| format!("24381/{}", 1001 + i)).collect(),
+            edges: (0..40)
+                .map(|i| CarriedRoomEdge {
+                    panel: "24381/5000".into(),
+                    room_num: "R512".into(),
+                    member: format!("24381/{}", 1001 + i),
+                    inside_count: 8,
+                    center_dist: 120.5,
+                })
+                .collect(),
+        });
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("with-rooms", RefNo::new(7997, 1001), root, 7997)],
+                receipt: Some((root, receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        let carrying = store.overlay_footprint();
+        assert!(carrying.receipt_room_bytes > 0, "{carrying:?}");
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, root)
+                .is_some_and(|receipt| receipt.room.is_some())
+        );
+
+        // 对不上的 ACK（别的 manifest）：不收、边不动。
+        let mut stale = ack_matching(&receipt, 7997, PersistMedium::RocksDb);
+        stale.manifest_hash = "somebody-else".into();
+        assert!(!store.record_publication_ack(ProjectionScope::Current, root, stale));
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, root)
+                .is_some_and(|receipt| receipt.room.is_some())
+        );
+
+        // 对上了：ACK 记下、边摘掉、字节归零；回执别的格不动。
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            root,
+            ack_matching(&receipt, 7997, PersistMedium::RocksDb),
+        ));
+        let acked = store
+            .receipt(ProjectionScope::Current, root)
+            .expect("receipt stays");
+        assert!(acked.room.is_none(), "ACK 之后回执上的边没有读者");
+        assert_eq!(acked.manifest_hash, receipt.manifest_hash);
+        assert_eq!(acked.geometry_count, receipt.geometry_count);
+        let dropped = store.overlay_footprint();
+        assert_eq!(dropped.receipt_room_bytes, 0);
+        assert!(
+            dropped.approx_bytes < carrying.approx_bytes,
+            "{dropped:?} vs {carrying:?}"
+        );
+        assert!(!store.root_needs_persist(root), "ACK 仍与回执相符");
     }
 
     /// 内存控制计划 P4：每一格 `Historical(<key>)` 作用域的体量与 overlay 同一把尺、按键升序列出，

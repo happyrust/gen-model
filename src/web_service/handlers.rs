@@ -229,6 +229,7 @@ fn model_cache_health(store_reachable: bool) -> Value {
             "roots": overlay.roots,
             "acks": overlay.acks,
             "approx_bytes": overlay.approx_bytes,
+            "receipt_room_bytes": overlay.receipt_room_bytes,
             "max_roots": crate::options::model_overlay_max_roots(),
             "evicted_total": store.overlay_evictions_total(),
         },

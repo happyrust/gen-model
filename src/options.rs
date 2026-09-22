@@ -3403,6 +3403,33 @@ mod tests {
             .and_then(toml::Value::as_array)
             .expect("模板写了 project_search_paths（ADR-078）");
         assert!(search_paths.is_empty(), "出厂模板的搜索根应为空数组");
+        // 四道按数量的内存闸（ADR-082 / ADR-084 / 内存控制计划 P4）：模板写的值必须就是代码默认，
+        // 不然「模板起的现场」与「没写键的现场」两套行为——2026-09-15 那次事故的同一种分叉。
+        for (key, default) in [
+            ("model_overlay_max_roots", MODEL_OVERLAY_MAX_ROOTS_DEFAULT),
+            (
+                "model_element_cache_max_entries",
+                MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+            ),
+            (
+                "model_generation_input_max_dbnums",
+                MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
+            ),
+            (
+                "model_historical_snapshots_max",
+                MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
+            ),
+        ] {
+            let configured = table
+                .get(key)
+                .and_then(toml::Value::as_integer)
+                .unwrap_or_else(|| panic!("模板写了 {key}"));
+            assert_eq!(
+                configured,
+                default as i64,
+                "出厂模板的 {key} 与代码默认分叉了"
+            );
+        }
     }
 
     /// 测试覆盖两个方向都得能摁住，且离开作用域即恢复「按配置来」。

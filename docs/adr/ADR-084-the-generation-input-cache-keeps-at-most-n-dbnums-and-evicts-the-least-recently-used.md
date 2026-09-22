@@ -7,6 +7,11 @@
   - **承接** ADR-082 §不做「不在本文让稳态窗口收尾释放 `GenerationInput`……要做单开决策卡，先量每窗重开的代价」——本文就是那张决策卡；
   - **沿用** ADR-082 D4 / D5（元素缓存按元素数、满则清；三层裁决 `effective_count_limit`，任何一层写 0 = 不限）与 D6（按数量不按字节）；
   - **不动** ADR-082 D1–D3（overlay 那道闸与冷根读路）、ADR-041（内存批切片：生成中的峰值）——本文管的是「库数 ×」这一维的常驻；
+  - **取代** 分支 `codex/adr084-cache-followups`（`958155a04`，2026-09-21，自 `gen-model-refactor@0b2bf527b` 分出、未并入）上的同号草案
+    「ADR-082 的补遗——历史快照按数量 + 时限收、生成输入缓存按库数收、ACK 之后摘掉回执上的房间边」：2026-09-22 用户拍 **以本支为准、那条分支作废**。
+    对照：它的 S2（`model_generation_input_max_dbnums`，同名同义）= 本文；S1（`model_historical_max_snapshots` 默认 4 + `model_historical_ttl_secs` 1800）
+    → 本支 P4 按 D4 只做条数、键名 `model_historical_snapshots_max`、默认 16、**不做 TTL**；S0（`/health` 观测）→ 本支 P3 / P4 的 `/health.model_cache` 三块；
+    它没落地的 D3「ACK 之后摘掉回执上的房间边」→ 本支 **P7**（见下 D5）；它补的 `scripts/templates/DbOption.factory.toml` 四键 → 本支同日补上并钉住与代码默认一致。
   - 词汇：CONTEXT「生成输入缓存库数上限」。
 
 ## 背景
@@ -52,6 +57,16 @@ ADR-082 当时没做，理由是「稳态窗口收尾释放」会改今天的默
   `databases[]` 每条多 `last_used_tick`（进程内单调序号，越大越新——对着看谁下一个出）。查时现算、不落库（ADR-082 D5 口径）。
 - 逐出时打一行 `dbnum=… 生成输入缓存按库数上限收回：放掉 N 份，现留 M 库，上限 K`；上限为 0 时不打。
 
+### D5　（P7，承作废分支的 D3）ACK 记下之后摘掉回执上随根携带的房间边
+
+- `RootReceipt::room`（`CarriedRoomEdges`，ADR-073 D1 B/T3）在 bake 时算好挂上回执，**只在** flush 的 `room_stage` 里读一次（`carried_edges_for`）；
+  ACK 记下 = 那些边已经在库里，回执上这份从此没有读者——一根几百构件的边是几十 KB 字串，默认 50,000 根常驻时是 overlay 里最大的一块**隐形**常驻
+  （此前不在 `approx_bytes` 的账里，D5 的 13.8 KB / 根量的是 RSS 差、含它）。
+- `ModelMemoryStore::record_publication_ack` 收下一枚与回执相符的 ACK 时 `receipt.room = None`（任一介质；`ack.matches` 不看这一格，`root_needs_persist` 不变）。
+  再发布一版带新的边来；刚体前移 / 单元级发布的回执本来就是 `None`（flush 现算，Q5 兜底）。没 ACK 的根（write-behind 积压 / `Blocked` 重试）照旧带着——重试还要用。
+- 观测：`OverlayFootprint.receipt_room_bytes`（也计入 `approx_bytes`），`/health.model_cache.overlay.receipt_room_bytes`——长期不落回 0 = write-behind 积压。
+- 钉 `a_matching_ack_drops_the_carried_room_edges_from_the_receipt`（对不上的 ACK 不收、边不动；对上了边摘掉、字节归零、回执别的格不动）。
+
 ## 不变量
 
 1. 上限为 0、或上限 ≥ 出现过的库数时，缓存的内容与命中序列与 2026-09-22 之前逐位相同（只多了序号）。
@@ -73,8 +88,11 @@ ADR-082 当时没做，理由是「稳态窗口收尾释放」会改今天的默
    `GENERATION_INPUT_CACHE: OnceLock<Mutex<DbnumLru<GenerationInput>>>`、`generation_input()` 命中刷新 + 装入后锁外 drop + 日志、
    `GenerationInputCacheLimits` / `generation_input_cache_limits()`、`GenerationInputFootprint.last_used_tick`、`forget_generation_input` 改走 `forget_dbnum`；
    钉 `the_generation_input_cache_keeps_at_most_n_dbnums_and_evicts_the_least_recently_used`（泛型上跑：不限 / 同库替换不计 / 命中刷新 / 上限 3→1 / forget 不计）。
-3. `handlers.rs` `model_cache_health`：`element_cache.{max_dbnums, resident_dbnums, evicted_dbnums_total}`。
-4. `DbOption.toml`：`model_generation_input_max_dbnums = 0` 与注释；CONTEXT「生成输入缓存库数上限」；changelog 2026-09-22。
+3. `handlers.rs` `model_cache_health`：`element_cache.{max_dbnums, resident_dbnums, evicted_dbnums_total}`；`overlay.receipt_room_bytes`（D5）。
+4. `DbOption.toml`：`model_generation_input_max_dbnums = 0` 与注释；`scripts/templates/DbOption.factory.toml` 四键（`options::tests::factory_template_room_membership_matches_code_default`
+   钉住与代码默认一致）；CONTEXT「生成输入缓存库数上限」；changelog 2026-09-22。
+5. D5：`model_memory_store.rs` `record_publication_ack` 摘 `receipt.room`、`approx_carried_room_bytes`、`OverlayFootprint.receipt_room_bytes`；
+   钉 `a_matching_ack_drops_the_carried_room_edges_from_the_receipt`。
 
 ## 不做 / 未决
 

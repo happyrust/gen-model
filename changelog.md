@@ -176,6 +176,20 @@
   上限 0 不显示分母、有逐出才亮 warn；新 `mib()` 格式化。ADR-082 §仍开着 的「`/dbnums` 面板那一格」以此收（面板就是 ops.html，没有 `/dbnums` 自己的页）。
 - **验证**：ops.html 两段内联脚本 `node vm.Script` 解析通过；`.rs` 只改注释，`cargo check` 见提交说明。
 
+### 内存控制计划 P7：ACK 记下之后摘掉回执上随根携带的房间边；出厂模板补四道内存闸并钉住与代码默认一致；`codex/adr084-cache-followups` 作废、ADR-084 记下取代关系
+
+- **撞车**：分支 `codex/adr084-cache-followups`（`958155a04`，2026-09-21，自 `gen-model-refactor@0b2bf527b` 分出、未并入本支）昨天已独立做了 S0 `/health` 观测、
+  S1 历史快照按数量 + TTL（`model_historical_max_snapshots` 默认 4 / `model_historical_ttl_secs` 1800）、S2 同名的 `model_generation_input_max_dbnums`，并占了 ADR-084 号；
+  S3「ACK 之后摘掉回执上的房间边」没落地。2026-09-22 用户拍 **以本支为准、那条分支作废**：本支 P3 / P4 覆盖 S0–S2（键名 `model_historical_snapshots_max`、默认 16、
+  按 D4 不做 TTL），S3 由本条 P7 落地，模板四键补上；取代关系记进本支 ADR-084 关联段。分支与 worktree `gen-model-adr084` 本条不删（留用户处置）。
+- **P7**（`model_memory_store.rs` / `handlers.rs`，ADR-084 D5）：`RootReceipt::room`（`CarriedRoomEdges`，ADR-073 D1 B/T3）只在 flush 的 `room_stage` 读一次，ACK 记下后回执上这份
+  没有读者——一根几百构件的边是几十 KB 字串，默认 50,000 根常驻时是 overlay 里最大的一块隐形常驻（此前不在 `approx_bytes` 的账里）。`record_publication_ack` 收下相符的 ACK 时
+  `receipt.room = None`（`ack.matches` 不看这一格、`root_needs_persist` 不变；没 ACK 的根照旧带着，重试还要用）；`OverlayFootprint.receipt_room_bytes` 单列并计入 `approx_bytes`，
+  `/health.model_cache.overlay.receipt_room_bytes`（长期不落回 0 = write-behind 积压）。钉 `a_matching_ack_drops_the_carried_room_edges_from_the_receipt`。
+- **出厂模板** `scripts/templates/DbOption.factory.toml`：补 `model_overlay_max_roots = 50000` / `model_element_cache_max_entries = 200000` / `model_generation_input_max_dbnums = 0` /
+  `model_historical_snapshots_max = 16` 与注释；`options::tests::factory_template_room_membership_matches_code_default` 扩成也钉这四键 == 代码默认（2026-09-15 那次「模板与代码分叉」事故的同一种守卫）。
+- **验证**：见提交说明。
+
 ## 2026-09-21
 
 ### 冷读 SQL 拆成两路各走索引（ADR-082 追记）：`RoomOnly` 整库房间重算逐根冷读在 SurrealDB 里退成全表扫描，d-149 真机上一窗 67 分钟像卡死——W5 / W6 的根因不是锁
