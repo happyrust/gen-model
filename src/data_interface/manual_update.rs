@@ -2754,6 +2754,11 @@ pub struct DbnumPreview {
     /// never counted here — they ride the `Transform` path
     /// (`transform_targets`) even on ZONE/SITE containers.
     pub no_generation: u32,
+    /// 这一窗会落几条**交付删除记录**（`datacenter_delete`，plan 2026-09-22 T4）：交付单元自身
+    /// 被删或改位号各一条、按 `[refno, 老位号]` 去重，与执行体同一条渲染路数出来的。只是报告
+    /// 口径——不改任何判定、不进 `dbnum + sesno` 执行边界；非 DESI 恒为 0。
+    #[serde(default)]
+    pub datacenter_delete_rows: usize,
     /// File-identity anomaly, if any (rollback/duplicate/etc.).
     pub anomaly: Option<FileAnomaly>,
     /// When `true` this `dbnum` is blocked (e.g. rollback/duplicate) and no data
@@ -4433,6 +4438,21 @@ impl AiosDBManager {
                         preview.zones = zones;
                         preview.sites = sites;
                         warnings.extend(model_plan.warnings);
+                        // 交付删除记录只计数（plan 2026-09-22 T4）：与执行体同一条渲染路；
+                        // 数不出来不拖垮预览主体，落 warning、格子留 0。
+                        match IncrementPipeline::count_datacenter_delete_records(
+                            range_eles,
+                            &cand.db_type,
+                            cand.db_num,
+                        )
+                        .await
+                        {
+                            Ok(rows) => preview.datacenter_delete_rows = rows,
+                            Err(error) => warnings.push(format!(
+                                "统计 dbnum={} 交付删除记录失败（不影响预览主体）: {error:#}",
+                                cand.db_num
+                            )),
+                        }
                     }
                 }
                 None => {}

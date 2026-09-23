@@ -50,6 +50,10 @@ _Avoid_: 交付单元类型、delivery type、内置交付单元
 生成根的一种：变化元素**最近的** MDU 类型的自身或祖先；嵌套时取最近者。
 _Avoid_: 单元根、unit root
 
+**交付删除记录 (Delivery Delete Record)**：
+`datacenter_delete` 表的一行：某个交付单元曾以某个位号发布到中台、如今该位号要从中台删掉。主键 `[pe:⟨refno⟩, 老位号]`（同一单元多次改位号各留一行，历史不互相覆盖），字段 `refno / name（老位号）/ type（单元 noun）/ zone_refno（沿 owner 链最近的 ZONE，链断为 NONE）/ dbnum / sesno / sesno_time / reason（deleted | renamed）`。两种来源、都只看交付单元**自身**：被删（S 侧墓碑上的位号）、`NAME` 改了（改前的位号）；下属管件的增删改名不记。写者只有增量的随窗语句（`increment_pipeline::render_datacenter_delete_upsert`：固定目标 UPSERT、整窗重放收敛、无条件写——发布过没有由消费端 join `datacenter_version` 判）；删者只有 rs-server（中台 `remove-apply` 成功之后）。不进 `fast_delete::RANGE_TABLES`：回退 / 重初始化 / 删库都不清。预览回执 `DbnumPreview.datacenter_delete_rows` 只计数。来源 plant-ui #1，计划 `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`。
+_Avoid_: 删除标记、`datacent_delete`（issue 原文的笔误）、把它当 `datacenter_version` 的 Delete 状态（那条照旧并存，消费端按 `instance_code` 去重）
+
 **正常颗粒 (Normal Granularity)**：
 生成根的另一种：当变化元素**没有** MDU 祖先时采用的默认口径，等同于自动 watch 路径长期使用的 significant owner 口径（而非「整个 ZONE 兜底」，也非「跳过」）。
 _Avoid_: 常规颗粒、默认颗粒、ZONE 兜底

@@ -1889,6 +1889,153 @@ async fn dual_multi_target_update_sets_every_listed_record_only() {
     );
 }
 
+/// 交付删除记录 `datacenter_delete:[pe:⟨…⟩, '<老位号>']`（plan 2026-09-22 D1 / D2）：数组 id 里
+/// **混记录链接 + 字串**这一格此前没证过（`pe_owner:[owner, 槽位]` 证的是链接 + 整数）。用生产渲染器
+/// `render_datacenter_delete_upsert` 出的语句在两引擎上：DEFINE TABLE / INDEX 建得进、UPSERT 写得进、
+/// 同键重写只刷字段不多一行（整窗重放收敛）、`zone_refno` 等值与 `IN [...]` 查得回、id 数组往返保真、
+/// 位号里的 `'` / `\` 转义后原样落库；fork 上 `zone_refno = …` 的 EXPLAIN 走 `idx_datacenter_delete_zone`
+/// （rs-server 消费端按所选 ZONE 收行押在这上面）。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_datacenter_delete_array_ids_round_trip() {
+    use crate::data_interface::increment_pipeline::{
+        DatacenterDeleteRecord, render_datacenter_delete_upsert,
+    };
+    let Some((mem, fork, _guard)) = dual_dbs("datacenter_delete").await else {
+        return;
+    };
+    let refno = |n: u64| RefU64((8000u64 << 32) | n);
+    let renamed = render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+        refno: refno(3),
+        name: "/A-OLD",
+        noun: "BRAN",
+        zone: Some(refno(5)),
+        dbnum: 8000,
+        sesno: 12,
+        sesno_time: Some("2026-09-22T10:00:00+08:00"),
+        reason: "renamed",
+    });
+    let deleted = render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+        refno: refno(21),
+        name: "/E'Q\\1",
+        noun: "EQUI",
+        zone: None,
+        dbnum: 8000,
+        sesno: 30,
+        sesno_time: None,
+        reason: "deleted",
+    });
+    // 同一 refno 再改一次位号：另一把键，两行并存（D2：按位号做键，历史不互相覆盖）。
+    let renamed_again = render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+        refno: refno(3),
+        name: "/A-MID",
+        noun: "BRAN",
+        zone: Some(refno(5)),
+        dbnum: 8000,
+        sesno: 14,
+        sesno_time: None,
+        reason: "renamed",
+    });
+    let probe_rows = "SELECT name, type, reason, dbnum, sesno, sesno_time, zone_refno, refno \
+                      FROM datacenter_delete ORDER BY name;";
+    assert_dual_same(
+        "datacenter_delete",
+        &mem,
+        &fork,
+        &[
+            crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL,
+            &renamed,
+            &deleted,
+            probe_rows,
+            // 同键重写：字段刷新、行数不变。
+            &renamed,
+            "SELECT count() AS n FROM datacenter_delete GROUP ALL;",
+            &renamed_again,
+            "SELECT count() AS n FROM datacenter_delete GROUP ALL;",
+            probe_rows,
+            "SELECT name FROM datacenter_delete WHERE zone_refno = pe:⟨8000_5⟩ ORDER BY name;",
+            "SELECT name FROM datacenter_delete WHERE zone_refno IN [pe:⟨8000_5⟩, pe:⟨8000_6⟩] ORDER BY name;",
+            "SELECT name FROM datacenter_delete WHERE zone_refno = NONE ORDER BY name;",
+            // id 数组往返：第 0 位是 pe 记录链接、第 1 位是位号原文。
+            "SELECT VALUE record::id(id) FROM datacenter_delete ORDER BY name;",
+            // 消费端 join：`datacenter_version:{refno}` 与 `pe:{refno}` 同一个键串。
+            "SELECT VALUE type::thing('datacenter_version', record::id(refno)) FROM datacenter_delete ORDER BY name;",
+        ],
+    )
+    .await;
+
+    #[derive(serde::Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    struct Row {
+        name: String,
+        reason: String,
+        zone: String,
+    }
+    let zoned: Vec<Row> = sorted_values(
+        &fork,
+        "SELECT name, reason, record::id(zone_refno) AS zone FROM datacenter_delete \
+         WHERE zone_refno != NONE;",
+    )
+    .await;
+    assert_eq!(
+        zoned,
+        vec![
+            Row {
+                name: "/A-MID".into(),
+                reason: "renamed".into(),
+                zone: "8000_5".into(),
+            },
+            Row {
+                name: "/A-OLD".into(),
+                reason: "renamed".into(),
+                zone: "8000_5".into(),
+            },
+        ],
+        "同一 refno 两把位号键两行并存、同键重写不多行、zone 链接往返保真"
+    );
+    let unzoned: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE name FROM datacenter_delete WHERE zone_refno = NONE;",
+    )
+    .await;
+    assert_eq!(
+        unzoned,
+        vec!["/E'Q\\1".to_string()],
+        "转义后的位号原样落库、链断的 zone_refno 是 NONE"
+    );
+    // 总行数按 id 数（`SELECT VALUE count() … GROUP ALL` 在 2.1.4 上回的是 `{ count: n }` 对象、
+    // 不是裸整数；`count() AS n` 那一形状已在上面的双跑里比过）。
+    let total: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE record::id(id)[1] FROM datacenter_delete;",
+    )
+    .await;
+    assert_eq!(
+        total,
+        vec![
+            "/A-MID".to_string(),
+            "/A-OLD".to_string(),
+            "/E'Q\\1".to_string()
+        ],
+        "三把键三行：同键重写不多行、两把位号键并存、链断那一行也在"
+    );
+    let by_zone: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE name FROM datacenter_delete WHERE zone_refno = pe:⟨8000_5⟩;",
+    )
+    .await;
+    assert_eq!(by_zone, vec!["/A-MID".to_string(), "/A-OLD".to_string()]);
+
+    let plan = exec_capture(
+        &fork,
+        "SELECT * FROM datacenter_delete WHERE zone_refno = pe:⟨8000_5⟩ EXPLAIN;",
+    )
+    .await;
+    let text = plan[0].as_ref().expect("zone_refno EXPLAIN 应可执行");
+    assert!(
+        text.contains("idx_datacenter_delete_zone"),
+        "[fork] 按 zone_refno 等值收行应走 idx_datacenter_delete_zone，plan: {text}"
+    );
+}
+
 /// `pe` 是图顶点：删它会把 `pe_owner` / `ref_rev` / `tubi_relate` 这些挂在它身上的边一并带走（元素批
 /// 模块头「pe 行为什么不删」）。所以 `pe` 行走一条批量 `INSERT … ON DUPLICATE KEY UPDATE <全部字段>`：
 /// 已有行整行换新内容、id 与边都在；不存在的 id 直接插。两引擎必须同款。

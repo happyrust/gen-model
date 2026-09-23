@@ -142,6 +142,11 @@ pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
 /// `define_pe_index` 历史上建的，AMS 实库两者并存实测在案）。旧库有、
 /// 新库/暂存库没有——`IF EXISTS` 各种情况都是安全 no-op，含表尚不存在的
 /// 全新库，2.1.4 双引擎语义由双跑套件钉住。
+///
+/// 末两行是**交付删除记录**表 `datacenter_delete`（plan
+/// `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md` D1）：与 `datacenter_version`
+/// 同样 SCHEMALESS，只给 rs-server 消费端按所选 ZONE 过滤的那一条 `zone_refno` 索引；
+/// 写者只有增量随窗语句（`increment_pipeline::render_datacenter_delete_upsert`）。
 pub const INST_RELATE_INDEX_SQL: &str = "\
     REMOVE INDEX IF EXISTS idx_inst_relate_zone_refno ON TABLE inst_relate;\n\
     REMOVE INDEX IF EXISTS inst_relate_zone_refno_index ON TABLE inst_relate;\n\
@@ -151,7 +156,9 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
     DEFINE INDEX IF NOT EXISTS idx_geo_relate_in ON TABLE geo_relate COLUMNS in;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_dbnum ON TABLE tubi_relate COLUMNS dbnum;
-    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_in ON TABLE tubi_relate COLUMNS in;";
+    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_in ON TABLE tubi_relate COLUMNS in;\n\
+    DEFINE TABLE IF NOT EXISTS datacenter_delete SCHEMALESS;\n\
+    DEFINE INDEX IF NOT EXISTS idx_datacenter_delete_zone ON TABLE datacenter_delete COLUMNS zone_refno;";
 
 /// 存量 `inst_relate` / `tubi_relate` 行的 `anc` + `dbnum` 回填（幂等，自愈式）。
 ///

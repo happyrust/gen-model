@@ -36,6 +36,10 @@ const RANGE_TABLES: &[&str] = &[
     "inst_info",
     "aabb",
     "trans",
+    // **不在**这份清单里的两张交付台账（plan 2026-09-22 D7）：`datacenter_version`（rs-server 的
+    // 提资状态账）与 `datacenter_delete`（待交中台删的老位号）。它们记的是「中台那边有什么 /
+    // 该删什么」，与本库重不重建无关——回退 / 重初始化 / 删库都不清，源码钉
+    // `the_wipe_never_touches_the_delivery_ledgers`。
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1134,6 +1138,34 @@ mod tests {
                 "room_panel_relate 是 room_relate 的同源姐妹边，必须一并纳入 Ref0 \
                  区间清库，否则回退重建后残留孤儿边: {ranges:?}"
             );
+        }
+    }
+
+    /// 交付台账不随库清（plan 2026-09-22 D7）：`datacenter_version` 是 rs-server 的提资状态账，
+    /// `datacenter_delete` 是待交中台删的老位号——待删的老位号仍待删，与库重不重建无关。
+    /// 两张表都**不在** `RANGE_TABLES`，三种水位处置渲出的清库语句一条都不点名它们；
+    /// 往 `RANGE_TABLES` 加任一张即让本测试变红。
+    #[test]
+    fn the_wipe_never_touches_the_delivery_ledgers() {
+        for ledger in ["datacenter_version", "datacenter_delete"] {
+            assert!(
+                !RANGE_TABLES.contains(&ledger),
+                "{ledger} 是交付台账，不进 Ref0 区间清库集: {RANGE_TABLES:?}"
+            );
+        }
+        for disposal in [
+            WatermarkDisposal::DropRow,
+            WatermarkDisposal::ResetForReinit,
+            WatermarkDisposal::RestartInitializationData,
+        ] {
+            let (relations, ranges, metadata) =
+                render_delete_phases(7997, &["24381".into()], &["BRAN".into()], disposal);
+            for statement in relations.iter().chain(&ranges).chain(&metadata) {
+                assert!(
+                    !statement.contains("datacenter"),
+                    "{disposal:?} 的清库语句不得碰交付台账: {statement}"
+                );
+            }
         }
     }
 

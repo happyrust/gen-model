@@ -2,6 +2,39 @@
 
 ## 2026-09-23
 
+### 交付单元删除 / 改位号的中台删除记录 `datacenter_delete` 落地（plant-ui #1「增加删除标记」；plan 2026-09-22 T1–T5）
+
+- **为什么**：元数据提资时，最小交付单元（`BRAN / SUPPO / EQUI …`）被删或 `NAME`（位号）改了，中台仍留着旧位号那一份、要通知它删。
+  「删除」那一半此前靠 `datacenter_version` 的 `status = 'Delete'` 行（老位号还在 `instance_code` 上）勉强能走；**改位号是真空白**——只标 `Modify`、
+  下次按新位号提，旧位号在中台永久残留，rs-server `save_datacenter_record` 的 UPSERT 还会把 `instance_code` 覆盖成新值，库里也找不回老位号。
+- **改动**（[plant-ui #1](https://github.com/MUDS7/plant-ui/issues/1)；`docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md` D1–D9）：
+  - 表 **`datacenter_delete`**（issue 写的 `datacent_delete` 视作笔误，与 `datacenter_version` 同前缀）：SCHEMALESS + `idx_datacenter_delete_zone`，随
+    `pdms_inst::INST_RELATE_INDEX_SQL` 一起灌，不另开 `.surql`。主键 **`[pe:⟨refno⟩, 老位号]`**——按 refno 一把键会让 A→B（提资过）→C 的 A 被覆盖、
+    中台永远删不到；按位号做键天然去重。字段 `refno / name / type / zone_refno / dbnum / sesno / sesno_time / reason('deleted' | 'renamed')`；
+    不写 `instance_code` / `object_model_code`（前者消费端用 `change_name_into_illegal(name)` 推、后者改名不变）。
+  - `increment_pipeline::resolve_datacenter_statements_with` 在随窗语句批里多渲两个分支（D4，与 `datacenter_version` 的 Modify / Delete 同一批、水位之前、
+    整窗重放收敛）：交付单元**自身**被删 → 记 S 侧墓碑上的位号（`reason = 'deleted'`）；自身 `NAME` 变（`modified_(explicit_)attrs` 里 old 非空且 ≠ new）→
+    记改前位号（`reason = 'renamed'`）；`NAME` 从 `added_*` 出现（以前没名字）、下属管件的增删改名都不记。`zone_refno` 沿 owner 链上溯到最近 `ZONE`
+    （`nearest_zone`，SUPPO → STRU → ZONE 隔两层也解得到；链断 `NONE`），不沿用 `belong_zone` 那套「BRAN 隔一层、其余取 owner」。
+    `PeChainView { noun, owner, name }` 换掉 `(noun, owner)` 二元组、持久层点查多选 `name`；`end_sesno_time` 的读取从尾事务前挪到随窗渲染前，记录带
+    `sesno_time`、不用 `time::now()`（过 `replay_safe` R1 固定目标）。原有 `status = 'Delete', belong_zone = …` 一字不改（D9，两条路在消费端按 `instance_code` 去重）。
+  - gen-model **只写不删、无条件写**（D6 / D7）：不查「发布过没有」（那要在渲染期回问库或写条件语句），由 rs-server join `datacenter_version` 判、join 不到就删行；
+    **不进** `fast_delete::RANGE_TABLES`，回退 / 重初始化 / 删库都不清——源码钉 `the_wipe_never_touches_the_delivery_ledgers`（三种水位处置渲出的清库语句一条
+    不点名 `datacenter_*`，`datacenter_version` 一并钉住）。
+  - 预览回执 `DbnumPreview.datacenter_delete_rows`：`IncrementPipeline::count_datacenter_delete_records` 走与执行体**同一条**渲染路数出来，只计数、不改判定，
+    数不出来落 warning 格子留 0。
+  - `CONTEXT.md` 新词条「**交付删除记录 (Delivery Delete Record)**」；计划状态改「T1–T5 已落地」。
+- **验证**：`cargo check --lib` 绿（09-22 挡住的 e3d-io `TextList` 编译期阻塞已随 `direct_attmap.rs` / `element_attributes.rs` 补分支解除）；
+  `cargo test --lib -- datacenter_delete datacenter_tests accepts_the_persist_path_statement_shapes the_wipe_never_touches the_preview_count` **21 绿**
+  ——fork 双跑 `dual_datacenter_delete_array_ids_round_trip` 首跑红：`SELECT VALUE count() … GROUP ALL` 在 2.1.4 上回的是 `{ count: n }` 对象、不是裸整数，
+  探针改按 id 第二位（老位号）数行后绿，其余（DEFINE 建得进、UPSERT 写得进、同键重写不多行、两把位号键并存、`zone_refno` 等值 / `IN` / `= NONE`、
+  id 数组与 `type::thing('datacenter_version', record::id(refno))` join 往返、`'` / `\` 转义、EXPLAIN 走 `idx_datacenter_delete_zone`）两引擎同款；
+  全量 `cargo test --lib` **2433 passed / 0 failed / 128 ignored**；`rustfmt --check` 改到的每一段干净（同文件 HEAD 上就有的 5 处旧 diff 不动）。
+  真机 `mem://` 改位号 + 删 EQUI 各一行、kill 重放行数不变（计划 §4.2）**未跑**。
+- **跨仓后续（未开工）**：rs-server `get_datacenter_delete_data` 仍只收 `status='Delete'` 行，要再读 `datacenter_delete WHERE zone_refno IN [所选 ZONE]`、
+  join `datacenter_version`、按老位号发 `remove-apply`、成功后 `DELETE` 这些行、改回原名的跳过（计划 §6）；plant-ui 不必改。`HANG` 算不算提资交付单元待确认
+  （Q1，不确认按配置全收）。
+
 ### 圆弧墙两端按 SPINE `DRNS` / `DRNE` 斜接（vendor e3d-model）：WF05 RR001 WALL 4 起点内角与 E3D TTY RVM 对上，130 / 130；WF03 的「默认 Y 向三角楔」硬编码退役
 
 - **为什么**：用户截图 `/1RS-WF05-W-C-RR001`（`17496/106640`）WALL 4（`17496/107037`）名下 JLDATU / PLDATU / FIXING 的模型有问题，要求结合 E3D TTY 导出 RVM 修并验证。

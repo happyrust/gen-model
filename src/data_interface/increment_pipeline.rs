@@ -25,6 +25,40 @@ use crate::data_interface::frozen_source::FrozenSource;
 use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
 
 const DATACENTER_VERSION: &str = "datacenter_version";
+/// 交付删除记录表（plan `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md` D1）：
+/// 交付单元被删 / 改位号时，记「这个 refno 曾以哪个位号发布过、如今该位号要从中台删掉」。
+/// 主键 `datacenter_delete:[pe:⟨…⟩, '<老位号>']`（D2）；写者只有增量随窗语句，删者只有 rs-server（D7）。
+pub(crate) const DATACENTER_DELETE: &str = "datacenter_delete";
+
+/// datacenter 上溯用的 `pe` 行视图：noun / owner / name。overlay（本窗净态）与持久层
+/// 窗口前态都渲成这一形状，`effective_view` 逐字段 overlay 优先合成。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PeChainView {
+    pub noun: Option<String>,
+    pub owner: Option<RefU64>,
+    /// `NAME`（含首位 `/`）；没名字的元素为 `None`。
+    pub name: Option<String>,
+}
+
+impl PeChainView {
+    #[cfg(test)]
+    pub(crate) fn new(noun: Option<&str>, owner: Option<RefU64>) -> Self {
+        Self {
+            noun: noun.map(str::to_owned),
+            owner,
+            name: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn named(noun: Option<&str>, owner: Option<RefU64>, name: &str) -> Self {
+        Self {
+            noun: noun.map(str::to_owned),
+            owner,
+            name: Some(name.to_owned()),
+        }
+    }
+}
 
 /// Meta / config DB types: persist + watermark only; no geometry model refresh.
 /// Same set as cold-start eligibility ([`COLD_START_DB_TYPES`]).
@@ -618,6 +652,80 @@ fn dedup_statements_keep_last(statements: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// 一次 `Modified` 里交付单元自身 `NAME` 的 (旧值, 新值)。只看 `modified_attrs ∪
+/// modified_explicit_attrs`（`normalize_attribute_name == "NAME"`）：`NAME` 从 `added_*`
+/// 出现说明以前没名字，没有「改前的位号」可记，回 `None`。值不是文本型也回 `None`。
+fn delivery_unit_name_change(modified: &ModifiedElement) -> Option<(String, String)> {
+    use crate::data_interface::model_impact::normalize_attribute_name;
+    fn text(value: &aios_core::NamedAttrValue) -> Option<&str> {
+        use aios_core::NamedAttrValue;
+        match value {
+            NamedAttrValue::StringType(s)
+            | NamedAttrValue::ElementType(s)
+            | NamedAttrValue::WordType(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+    modified
+        .modified_attrs
+        .iter()
+        .chain(&modified.modified_explicit_attrs)
+        .find(|(attr, _)| normalize_attribute_name(attr) == "NAME")
+        .and_then(|(_, (old, new))| Some((text(old)?.to_owned(), text(new)?.to_owned())))
+}
+
+/// 一条交付删除记录的渲染输入（plan 2026-09-22 D3）。
+pub(crate) struct DatacenterDeleteRecord<'a> {
+    pub refno: RefU64,
+    /// 要在中台删掉的那个位号（`NAME` 原文，含首位 `/`）。
+    pub name: &'a str,
+    pub noun: &'a str,
+    pub zone: Option<RefU64>,
+    pub dbnum: u32,
+    pub sesno: u32,
+    pub sesno_time: Option<&'a str>,
+    /// `deleted` | `renamed`
+    pub reason: &'static str,
+}
+
+/// `UPSERT datacenter_delete:[pe:⟨…⟩, '<老位号>'] SET …;`——固定目标、字段全是字面量
+/// （`replay_safe` R1；不带 `time::now()`），整窗重放落同一条。位号进单引号字串，`\` 与 `'`
+/// 转义（`dbnum_state::escape_surql_str`）。数组 id 混记录链接 + 字串在 2.1.4 fork 上可写可查、
+/// 两引擎同款，由 `fork_surreal_compat::dual_datacenter_delete_array_ids_round_trip` 钉住。
+pub(crate) fn render_datacenter_delete_upsert(record: &DatacenterDeleteRecord<'_>) -> String {
+    use crate::data_interface::dbnum_state::escape_surql_str;
+    let pe = record.refno.to_pe_key();
+    let name = escape_surql_str(record.name);
+    let zone = record
+        .zone
+        .map(|zone| zone.to_pe_key())
+        .unwrap_or_else(|| "NONE".into());
+    let sesno_time = record
+        .sesno_time
+        .map(|time| format!("'{}'", escape_surql_str(time)))
+        .unwrap_or_else(|| "NONE".into());
+    format!(
+        "UPSERT {DATACENTER_DELETE}:[{pe}, '{name}'] SET refno = {pe}, name = '{name}', \
+         type = '{noun}', zone_refno = {zone}, dbnum = {dbnum}, sesno = {sesno}, \
+         sesno_time = {sesno_time}, reason = '{reason}';",
+        noun = escape_surql_str(record.noun),
+        dbnum = record.dbnum,
+        sesno = record.sesno,
+        reason = record.reason,
+    )
+}
+
+/// 预览回执用（plan 2026-09-22 T4）：一批随窗语句里有几条**交付删除记录**。只认
+/// [`render_datacenter_delete_upsert`] 出的形状（`UPSERT datacenter_delete:` 开头）；语句已过
+/// `dedup_statements_keep_last`，同键重写不多行，数出来的就是会落库的行数。
+pub(crate) fn count_datacenter_delete_statements(statements: &[String]) -> usize {
+    let prefix = format!("UPSERT {DATACENTER_DELETE}:");
+    statements
+        .iter()
+        .filter(|statement| statement.starts_with(&prefix))
+        .count()
+}
+
 fn retain_finally_live_design_refnos(
     plan: &mut crate::data_interface::model_update_plan::ModelUpdatePlan,
     mut is_live: impl FnMut(RefU64) -> bool,
@@ -1050,13 +1158,20 @@ impl IncrementPipeline {
             crate::data_interface::manual_update::build_reverse_index_statements(&range_eles)
         };
 
+        // 水位推进要顺手存下右端那条保存的写入时刻（plant-ui ADR-0019 Q6）：文件被换回
+        // 旧版本之后这一页就读不到了，这一刻是唯一能存下来的时机。一页会话页，每批一次。
+        // 交付删除记录的 `sesno_time` 也用它（plan 2026-09-22 D3，不用 `time::now()`），所以在
+        // 随窗语句渲染之前就读。
+        let end_sesno_time =
+            crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
+
         // Resolve-then-render（W3）：这个计时槽现在只含**窗口前持久态的点查**
-        // （overlay 兜不住的祖先 noun/owner），产出的语句是固定目标 id 的纯
-        // UPDATE——收口事务里不再有任何 datacenter 上溯 I/O，也不再依赖持久层
+        // （overlay 兜不住的祖先 noun/owner/name），产出的语句是固定目标 id 的纯
+        // UPDATE / UPSERT——收口事务里不再有任何 datacenter 上溯 I/O，也不再依赖持久层
         // 灌了 fn::find_ancestor_types。
         let mut window_statements = StageTimings::measure(
             &mut timings.datacenter,
-            Self::datacenter_statements(&range_eles, db_type),
+            Self::datacenter_statements(&range_eles, db_type, dbnum, end_sesno_time.as_deref()),
         )
         .await?;
         // OWNER 搬迁的定点 anc 重算先于水位提交、失败即拦住水位
@@ -1118,11 +1233,6 @@ impl IncrementPipeline {
         // record. If any step fails, the watermark is untouched, the attempt
         // remains, and the whole fixed range is safe to replay (the idempotent
         // fixed-target updates converge on re-application).
-        // 水位推进要顺手存下右端那条保存的写入时刻（plant-ui ADR-0019 Q6）：文件被换回
-        // 旧版本之后这一页就读不到了，这一刻是唯一能存下来的时机。一页会话页，每批一次。
-        let end_sesno_time =
-            crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
-
         // Recheck the stable file generation immediately before publishing the
         // watermark tail. Same-file append is accepted; atomic path replacement
         // is not.
@@ -1461,30 +1571,38 @@ impl IncrementPipeline {
     /// 也就是老的 commit-time `fn::find_ancestor_types` 现场上溯看到的世界）。
     fn window_net_states(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
-    ) -> HashMap<RefU64, (Option<String>, Option<RefU64>)> {
+    ) -> HashMap<RefU64, PeChainView> {
         use crate::data_interface::cata_closure::is_valid_ref0;
         use crate::data_interface::model_impact::{added_owner, owner_change};
-        let mut states: HashMap<RefU64, (Option<String>, Option<RefU64>)> = HashMap::new();
+        let mut states: HashMap<RefU64, PeChainView> = HashMap::new();
         for op in data.values().flatten() {
             let entry = states.entry(op.refno).or_default();
             match &op.detail {
-                EleOperationDetail::Add(_) => {
+                EleOperationDetail::Add(added) => {
                     let noun = op.get_noun_type();
                     if !noun.is_empty() {
-                        entry.0 = Some(noun);
+                        entry.noun = Some(noun);
                     }
                     if let Some(owner) = added_owner(op) {
-                        entry.1 = Some(owner.refno());
+                        entry.owner = Some(owner.refno());
+                    }
+                    if !added.name.is_empty() {
+                        entry.name = Some(added.name.clone());
                     }
                 }
                 EleOperationDetail::Modified(modified) => {
                     if !modified.noun.is_empty() {
-                        entry.0 = Some(modified.noun.clone());
+                        entry.noun = Some(modified.noun.clone());
                     }
                     if is_valid_ref0(modified.current_data.owner.get_0()) {
-                        entry.1 = Some(modified.current_data.owner);
+                        entry.owner = Some(modified.current_data.owner);
                     } else if let (_, Some(new_owner)) = owner_change(op) {
-                        entry.1 = Some(new_owner.refno());
+                        entry.owner = Some(new_owner.refno());
+                    }
+                    if !modified.current_data.name.is_empty() {
+                        entry.name = Some(modified.current_data.name.clone());
+                    } else if let Some((_, new_name)) = delivery_unit_name_change(modified) {
+                        entry.name = Some(new_name);
                     }
                 }
                 // Deleted 不带任何新态：它的 noun/owner 就是窗口前持久态
@@ -1512,58 +1630,89 @@ impl IncrementPipeline {
     /// 上溯解不出目标（链断 / 没有单元层祖先，如 SITE 自身的属性修改）时**跳过**
     /// 该语句：老形态里这是 `$pe = NONE` 塞进 `type::thing` 的未定义行为角落，
     /// 现在是显式的「无交付记录可标，无事发生」。
+    ///
+    /// 同一趟还渲染**交付删除记录**（[`DATACENTER_DELETE`]，plan 2026-09-22 D4）：交付单元
+    /// **自身**被删 → 记删除前的位号；交付单元自身 `NAME` 变 → 记改前的位号。固定目标
+    /// `UPSERT datacenter_delete:[pe:⟨…⟩, '<老位号>'] SET …`，无条件写（D6：发布过没有由
+    /// rs-server join `datacenter_version` 判）；`zone_refno` 沿 owner 链上溯到最近 `ZONE`（D5）。
+    /// 下属管件的增删改名不记（issue 原文「不包含其下属管件」），照旧只让单元记 Modify。
     async fn resolve_datacenter_statements_with<F, Fut>(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         delivery_unit_types: &[String],
+        dbnum: u32,
+        sesno_time: Option<&str>,
         mut load_pe: F,
     ) -> anyhow::Result<Vec<String>>
     where
         F: FnMut(Vec<RefU64>) -> Fut,
-        Fut: std::future::Future<
-                Output = anyhow::Result<HashMap<RefU64, (Option<String>, Option<RefU64>)>>,
-            >,
+        Fut: std::future::Future<Output = anyhow::Result<HashMap<RefU64, PeChainView>>>,
     {
         /// 防御性走链上限（owner 环 / 数据损坏的最后一道闸）。
         const ROLLUP_WALK_CAP: usize = 64;
 
-        /// 逐 refno 的效果视图（noun, owner）：overlay 字段优先，缺的问持久层
+        /// 逐 refno 的效果视图（noun / owner / name）：overlay 字段优先，缺的问持久层
         /// （懒加载 + 记忆化；`cache` 里 `None` = 行不存在，问过了）。
         async fn effective_view<F, Fut>(
-            overlay: &HashMap<RefU64, (Option<String>, Option<RefU64>)>,
-            cache: &mut HashMap<RefU64, Option<(Option<String>, Option<RefU64>)>>,
+            overlay: &HashMap<RefU64, PeChainView>,
+            cache: &mut HashMap<RefU64, Option<PeChainView>>,
             load_pe: &mut F,
             refno: RefU64,
-        ) -> anyhow::Result<(Option<String>, Option<RefU64>)>
+        ) -> anyhow::Result<PeChainView>
         where
             F: FnMut(Vec<RefU64>) -> Fut,
-            Fut: std::future::Future<
-                    Output = anyhow::Result<HashMap<RefU64, (Option<String>, Option<RefU64>)>>,
-                >,
+            Fut: std::future::Future<Output = anyhow::Result<HashMap<RefU64, PeChainView>>>,
         {
             use crate::data_interface::cata_closure::is_valid_ref0;
-            let overlay_entry = overlay.get(&refno).cloned().unwrap_or((None, None));
-            if overlay_entry.0.is_some() && overlay_entry.1.is_some() {
+            let overlay_entry = overlay.get(&refno).cloned().unwrap_or_default();
+            if overlay_entry.noun.is_some() && overlay_entry.owner.is_some() {
                 return Ok(overlay_entry);
             }
             if !cache.contains_key(&refno) {
                 let fetched = load_pe(vec![refno]).await?;
                 cache.insert(refno, fetched.get(&refno).cloned());
             }
-            let stored = cache.get(&refno).cloned().flatten().unwrap_or((None, None));
-            Ok((
-                overlay_entry.0.or(stored.0),
-                overlay_entry
-                    .1
-                    .or(stored.1.filter(|owner| is_valid_ref0(owner.get_0()))),
-            ))
+            let stored = cache.get(&refno).cloned().flatten().unwrap_or_default();
+            Ok(PeChainView {
+                noun: overlay_entry.noun.or(stored.noun),
+                owner: overlay_entry
+                    .owner
+                    .or(stored.owner.filter(|owner| is_valid_ref0(owner.get_0()))),
+                name: overlay_entry.name.or(stored.name),
+            })
+        }
+
+        /// 从 `start`（含自身）沿 owner 链上溯到最近的 `ZONE`（D5）。链断 / 到顶 → `None`。
+        async fn nearest_zone<F, Fut>(
+            overlay: &HashMap<RefU64, PeChainView>,
+            cache: &mut HashMap<RefU64, Option<PeChainView>>,
+            load_pe: &mut F,
+            start: Option<RefU64>,
+        ) -> anyhow::Result<Option<RefU64>>
+        where
+            F: FnMut(Vec<RefU64>) -> Fut,
+            Fut: std::future::Future<Output = anyhow::Result<HashMap<RefU64, PeChainView>>>,
+        {
+            let mut current = start;
+            for _ in 0..ROLLUP_WALK_CAP {
+                let Some(refno) = current else {
+                    return Ok(None);
+                };
+                let view = effective_view(overlay, cache, load_pe, refno).await?;
+                match view.noun.as_deref() {
+                    None => return Ok(None), // 链断：行不在
+                    Some("ZONE") => return Ok(Some(refno)),
+                    Some(_) => current = view.owner,
+                }
+            }
+            Ok(None)
         }
 
         let mut unit = delivery_unit_types.to_vec();
         unit.push("ZONE".into());
+        let is_delivery_unit = |noun: &str| delivery_unit_types.iter().any(|unit| unit == noun);
         let overlay = Self::window_net_states(data);
         // 持久层窗口前态缓存：None = 行不存在（问过了）。
-        let mut persistent: HashMap<RefU64, Option<(Option<String>, Option<RefU64>)>> =
-            HashMap::new();
+        let mut persistent: HashMap<RefU64, Option<PeChainView>> = HashMap::new();
 
         let mut statements = Vec::new();
         // Modify 状态归组（plan 2026-09-06 §1.1 #7 / P3）：同状态、无别的字段的目标攒成一条多目标
@@ -1574,16 +1723,17 @@ impl IncrementPipeline {
             for d in ops {
                 match &d.detail {
                     EleOperationDetail::Deleted => {
-                        let (noun, owner) =
-                            effective_view(&overlay, &mut persistent, &mut load_pe, d.refno)
-                                .await?;
-                        let belong_zone = match (noun.as_deref(), owner) {
+                        // Deleted 的 overlay 为空，这里读到的就是窗口前态（墓碑保留的
+                        // noun / owner / name）——artifact 先渲后落，持久层此刻还是 S 侧。
+                        let view = effective_view(&overlay, &mut persistent, &mut load_pe, d.refno)
+                            .await?;
+                        let belong_zone = match (view.noun.as_deref(), view.owner) {
                             // BRAN 的归属 ZONE 隔一层 PIPE（与老形态的
                             // `$pe.owner.owner` 同义）。
                             (Some("BRAN"), Some(owner)) => {
                                 effective_view(&overlay, &mut persistent, &mut load_pe, owner)
                                     .await?
-                                    .1
+                                    .owner
                             }
                             (_, owner) => owner,
                         };
@@ -1596,6 +1746,33 @@ impl IncrementPipeline {
                             DataCenterRecordOperate::Delete,
                             belong_zone
                         ));
+
+                        // D4 删除分支：交付单元自身被删 → 记删除前的位号。
+                        if let (Some(noun), Some(name)) =
+                            (view.noun.as_deref(), view.name.as_deref())
+                        {
+                            if is_delivery_unit(noun) && !name.is_empty() {
+                                let zone = nearest_zone(
+                                    &overlay,
+                                    &mut persistent,
+                                    &mut load_pe,
+                                    view.owner,
+                                )
+                                .await?;
+                                statements.push(render_datacenter_delete_upsert(
+                                    &DatacenterDeleteRecord {
+                                        refno: d.refno,
+                                        name,
+                                        noun,
+                                        zone,
+                                        dbnum,
+                                        sesno: d.sesno,
+                                        sesno_time,
+                                        reason: "deleted",
+                                    },
+                                ));
+                            }
+                        }
                     }
                     EleOperationDetail::Modified(modify_data) => {
                         let target = if unit.iter().any(|noun| noun == &modify_data.noun) {
@@ -1607,21 +1784,21 @@ impl IncrementPipeline {
                             let mut current = d.refno;
                             let mut target = None;
                             for _ in 0..ROLLUP_WALK_CAP {
-                                let (noun, owner) = effective_view(
+                                let view = effective_view(
                                     &overlay,
                                     &mut persistent,
                                     &mut load_pe,
                                     current,
                                 )
                                 .await?;
-                                let Some(noun) = noun else {
+                                let Some(noun) = view.noun else {
                                     break; // 链断：行不在（老形态同样解析不出）
                                 };
                                 if unit.iter().any(|unit_noun| unit_noun == &noun) {
                                     target = Some(current);
                                     break;
                                 }
-                                let Some(owner) = owner else {
+                                let Some(owner) = view.owner else {
                                     break; // 到顶（WORL 之上）仍没有单元层
                                 };
                                 current = owner;
@@ -1641,6 +1818,43 @@ impl IncrementPipeline {
                                 d.refno.to_pe_key()
                             ),
                         }
+
+                        // D4 改名分支：交付单元自身的 NAME 变了 → 记改前的位号。
+                        // 老值不存在（NAME 是本窗新出现的）不记：中台没有按空位号发布过的东西。
+                        if is_delivery_unit(&modify_data.noun) {
+                            if let Some((old_name, new_name)) =
+                                delivery_unit_name_change(modify_data)
+                            {
+                                if !old_name.is_empty() && old_name != new_name {
+                                    let view = effective_view(
+                                        &overlay,
+                                        &mut persistent,
+                                        &mut load_pe,
+                                        d.refno,
+                                    )
+                                    .await?;
+                                    let zone = nearest_zone(
+                                        &overlay,
+                                        &mut persistent,
+                                        &mut load_pe,
+                                        view.owner,
+                                    )
+                                    .await?;
+                                    statements.push(render_datacenter_delete_upsert(
+                                        &DatacenterDeleteRecord {
+                                            refno: d.refno,
+                                            name: &old_name,
+                                            noun: &modify_data.noun,
+                                            zone,
+                                            dbnum,
+                                            sesno: d.sesno,
+                                            sesno_time,
+                                            reason: "renamed",
+                                        },
+                                    ));
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1659,11 +1873,11 @@ impl IncrementPipeline {
         Ok(statements)
     }
 
-    /// 窗口前持久态的 pe 点查（noun + owner），显式 `SUL_DB` 不经读路由——
-    /// 与锁域解析同一纪律；软删行仍在场，Deleted 分支读到的正是删除前的归属。
-    async fn load_pe_noun_owner_from_persistent(
+    /// 窗口前持久态的 pe 点查（noun + owner + name），显式 `SUL_DB` 不经读路由——
+    /// 与锁域解析同一纪律；软删行仍在场，Deleted 分支读到的正是删除前的归属与位号。
+    async fn load_pe_chain_view_from_persistent(
         refnos: Vec<RefU64>,
-    ) -> anyhow::Result<HashMap<RefU64, (Option<String>, Option<RefU64>)>> {
+    ) -> anyhow::Result<HashMap<RefU64, PeChainView>> {
         #[derive(serde::Deserialize)]
         struct PeChainRow {
             id: RefnoEnum,
@@ -1671,6 +1885,8 @@ impl IncrementPipeline {
             noun: Option<String>,
             #[serde(default)]
             owner: Option<RefnoEnum>,
+            #[serde(default)]
+            name: Option<String>,
         }
         let mut out = HashMap::new();
         for chunk in refnos.chunks(200) {
@@ -1681,7 +1897,7 @@ impl IncrementPipeline {
                 .join(",");
             let mut response = SUL_DB
                 .query(format!(
-                    "SELECT id, noun, owner FROM [{keys}] WHERE record::exists(id);"
+                    "SELECT id, noun, owner, name FROM [{keys}] WHERE record::exists(id);"
                 ))
                 .await?
                 .check()?;
@@ -1689,7 +1905,11 @@ impl IncrementPipeline {
             for row in rows {
                 out.insert(
                     row.id.refno(),
-                    (row.noun, row.owner.map(|owner| owner.refno())),
+                    PeChainView {
+                        noun: row.noun,
+                        owner: row.owner.map(|owner| owner.refno()),
+                        name: row.name.filter(|name| !name.is_empty()),
+                    },
                 );
             }
         }
@@ -1718,6 +1938,8 @@ impl IncrementPipeline {
     async fn datacenter_statements(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
+        dbnum: u32,
+        sesno_time: Option<&str>,
     ) -> anyhow::Result<Vec<String>> {
         if db_type != "DESI" {
             return Ok(Vec::new());
@@ -1728,9 +1950,24 @@ impl IncrementPipeline {
         Self::resolve_datacenter_statements_with(
             data,
             &delivery_unit_types,
-            Self::load_pe_noun_owner_from_persistent,
+            dbnum,
+            sesno_time,
+            Self::load_pe_chain_view_from_persistent,
         )
         .await
+    }
+
+    /// 预览回执的 `datacenter_delete_rows`（plan 2026-09-22 T4）：这一窗会落几条交付删除记录。
+    /// 走与执行体**同一条**渲染路（[`Self::datacenter_statements`]，含持久层窗口前态点查），
+    /// 数出来的就是执行会写的——只计数、不改任何判定；非 DESI 窗口恒为 0。`sesno_time` 传
+    /// `None`：它只是记录上的一个字段，不影响条数。
+    pub(crate) async fn count_datacenter_delete_records(
+        data: &BTreeMap<u32, Vec<EleOperationData>>,
+        db_type: &str,
+        dbnum: u32,
+    ) -> anyhow::Result<usize> {
+        let statements = Self::datacenter_statements(data, db_type, dbnum, None).await?;
+        Ok(count_datacenter_delete_statements(&statements))
     }
 
     /// ADR-003 B1-emit: maintain the reverse-reference index (`ref_rev`) for this
@@ -1824,7 +2061,9 @@ mod cache_tests {
         let cata = at("cata_dependency::resolve_dependency_rows(");
         let invalidate = at("Self::invalidate_caches(&cache_refnos)");
         let reverse_index = at("build_reverse_index_statements(&range_eles)");
-        let datacenter = at("Self::datacenter_statements(&range_eles, db_type)");
+        let datacenter = at(
+            "Self::datacenter_statements(&range_eles, db_type, dbnum, end_sesno_time.as_deref())",
+        );
         let artifact = at("IncrementWindowArtifact::from_window(");
         let landed = at("land_increment_window(");
         let recheck = at("reopen_verified()");
@@ -2996,10 +3235,15 @@ mod datacenter_tests {
         )
     }
 
-    type ChainMap = std::collections::HashMap<RefU64, (Option<String>, Option<RefU64>)>;
+    type ChainMap = std::collections::HashMap<RefU64, PeChainView>;
 
     fn refu(n: u64) -> RefU64 {
         RefU64((7997u64 << 32) | n)
+    }
+
+    /// 窗口前态一行：`(noun, owner)`，没名字。
+    fn row(noun: &str, owner: Option<RefU64>) -> PeChainView {
+        PeChainView::new(Some(noun), owner)
     }
 
     fn chain_loader(
@@ -3018,6 +3262,8 @@ mod datacenter_tests {
         IncrementPipeline::resolve_datacenter_statements_with(
             &BTreeMap::from([(1u32, ops)]),
             &unit_types,
+            7997,
+            None,
             chain_loader(chain),
         )
         .await
@@ -3027,11 +3273,11 @@ mod datacenter_tests {
     /// 走链兜底用的窗口前持久态：1 → 6(PIPE) → 5(ZONE) → 4(SITE)，旁支 2 → 5。
     fn pre_window_chain() -> ChainMap {
         ChainMap::from([
-            (refu(1), (Some("FTUB".into()), Some(refu(6)))),
-            (refu(2), (Some("DAMP".into()), Some(refu(5)))),
-            (refu(6), (Some("PIPE".into()), Some(refu(5)))),
-            (refu(5), (Some("ZONE".into()), Some(refu(4)))),
-            (refu(4), (Some("SITE".into()), None)),
+            (refu(1), row("FTUB", Some(refu(6)))),
+            (refu(2), row("DAMP", Some(refu(5)))),
+            (refu(6), row("PIPE", Some(refu(5)))),
+            (refu(5), row("ZONE", Some(refu(4)))),
+            (refu(4), row("SITE", None)),
         ])
     }
 
@@ -3102,7 +3348,7 @@ mod datacenter_tests {
             m.current_data.owner = refu(7);
         }
         let mut chain = pre_window_chain();
-        chain.insert(refu(7), (Some("ZONE".into()), Some(refu(4))));
+        chain.insert(refu(7), row("ZONE", Some(refu(4))));
 
         let statement = render_with(vec![op], chain).await.remove(0);
         assert_eq!(
@@ -3131,7 +3377,7 @@ mod datacenter_tests {
 
         // BRAN：归属 ZONE 隔一层 PIPE（老形态的 $pe.owner.owner）。
         let mut chain = pre_window_chain();
-        chain.insert(refu(3), (Some("BRAN".into()), Some(refu(6))));
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
         let deleted_bran = render_with(
             vec![EleOperationData::new(
                 refu(3),
@@ -3178,7 +3424,7 @@ mod datacenter_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resolved_statements_carry_no_server_side_walks() {
         let mut chain = pre_window_chain();
-        chain.insert(refu(8), (Some("SITE".into()), None));
+        chain.insert(refu(8), row("SITE", None));
         let statements = render_with(
             vec![
                 modified("FTUB"),
@@ -3227,6 +3473,240 @@ mod datacenter_tests {
                 "收口语句必须是固定目标 id 的纯 UPDATE（D5 回退即红）: {statement}"
             );
         }
+    }
+
+    // ---- 交付删除记录（plan 2026-09-22-datacenter-delete-records-dev-plan §3.1）----
+
+    fn text(s: &str) -> aios_core::NamedAttrValue {
+        aios_core::NamedAttrValue::StringType(s.to_string())
+    }
+
+    /// 交付单元 `refno` 自身改位号 `old → new`（显式属性那一格，与 fold 之后的形状一致），
+    /// 窗口净态的 owner 为 `owner`。
+    fn renamed(refno: RefU64, noun: &str, owner: RefU64, old: &str, new: &str) -> EleOperationData {
+        let mut op = modified(noun);
+        op.refno = refno;
+        op.sesno = 12;
+        if let EleOperationDetail::Modified(m) = &mut op.detail {
+            m.current_data.owner = owner;
+            m.current_data.name = new.to_string();
+            m.modified_explicit_attrs
+                .insert("NAME".into(), (text(old), text(new)));
+        }
+        op
+    }
+
+    fn delete_rows(statements: &[String]) -> Vec<&String> {
+        statements
+            .iter()
+            .filter(|s| s.contains("datacenter_delete:"))
+            .collect()
+    }
+
+    /// 改位号：一条固定目标 UPSERT，键是 `[refno, 老位号]`，字段齐（D2 / D3），原有 Modify 照旧；
+    /// 语句过 `replay_safe` 白名单（R1 显式目标、无随机 / 时间函数）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renaming_a_delivery_unit_records_the_old_name_for_deletion() {
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
+        let statements = render_with(
+            vec![renamed(refu(3), "BRAN", refu(6), "/A-OLD", "/A-NEW")],
+            chain,
+        )
+        .await;
+
+        assert_eq!(statements.len(), 2, "{statements:?}");
+        let delete = delete_rows(&statements).remove(0);
+        assert_eq!(
+            delete,
+            "UPSERT datacenter_delete:[pe:7997_3, '/A-OLD'] SET refno = pe:7997_3, name = '/A-OLD', \
+             type = 'BRAN', zone_refno = pe:7997_5, dbnum = 7997, sesno = 12, sesno_time = NONE, \
+             reason = 'renamed';"
+        );
+        crate::data_interface::staging::replay_safe::validate_statement(delete)
+            .expect("交付删除记录是固定目标 UPSERT，必须过重放安全白名单");
+        assert!(
+            statements
+                .iter()
+                .any(|s| s == "update datacenter_version:7997_3 set status = 'Modify';"),
+            "改位号的单元照旧标 Modify，新数据按正常提资走: {statements:?}"
+        );
+    }
+
+    /// 下属管件改名、`NAME` 从无到有、位号没变（只是 `NAME` 出现在别的改动里）：都不记。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn component_renames_and_first_names_do_not_record_deletions() {
+        // ELBO(11) 在 BRAN(3) 之下改名：只让 BRAN 记 Modify。
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
+        chain.insert(refu(11), row("ELBO", Some(refu(3))));
+        let component = render_with(
+            vec![renamed(refu(11), "ELBO", refu(3), "/E-OLD", "/E-NEW")],
+            chain.clone(),
+        )
+        .await;
+        assert!(delete_rows(&component).is_empty(), "{component:?}");
+        assert_eq!(
+            component,
+            vec!["update datacenter_version:7997_3 set status = 'Modify';".to_string()]
+        );
+
+        // NAME 本窗才出现（added_explicit_attrs）：以前没名字，没有改前位号。
+        let mut first_name = modified("BRAN");
+        first_name.refno = refu(3);
+        if let EleOperationDetail::Modified(m) = &mut first_name.detail {
+            m.current_data.owner = refu(6);
+            m.added_explicit_attrs.insert("NAME".into(), text("/A-NEW"));
+        }
+        let first = render_with(vec![first_name], chain.clone()).await;
+        assert!(delete_rows(&first).is_empty(), "{first:?}");
+
+        // (old, new) 相同（别处写回同值）：不记。
+        let same = render_with(vec![renamed(refu(3), "BRAN", refu(6), "/A", "/A")], chain).await;
+        assert!(delete_rows(&same).is_empty(), "{same:?}");
+    }
+
+    /// 删除：位号与 noun 来自窗口前态（墓碑），`zone_refno` 沿 owner 链上溯到最近 ZONE——
+    /// SUPPO → STRU → ZONE 隔两层也解得到（D5 与 `belong_zone` 那套「其余取 owner」的差别）；
+    /// 原有 `status = 'Delete', belong_zone = …` 一字不改。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_a_delivery_unit_records_its_name_and_nearest_zone() {
+        let mut chain = pre_window_chain();
+        chain.insert(refu(20), row("STRU", Some(refu(5))));
+        chain.insert(
+            refu(21),
+            PeChainView::named(Some("SUPPO"), Some(refu(20)), "/SUPP-001"),
+        );
+        let mut op = EleOperationData::new(refu(21), 1, EleOperationDetail::Deleted);
+        op.sesno = 30;
+        let statements = render_with(vec![op], chain).await;
+
+        assert_eq!(statements.len(), 2, "{statements:?}");
+        assert_eq!(
+            statements[0],
+            "update datacenter_version:7997_21 set status = 'Delete', belong_zone = pe:7997_20;",
+            "belong_zone 那半句保持老口径（D9）"
+        );
+        assert_eq!(
+            statements[1],
+            "UPSERT datacenter_delete:[pe:7997_21, '/SUPP-001'] SET refno = pe:7997_21, \
+             name = '/SUPP-001', type = 'SUPPO', zone_refno = pe:7997_5, dbnum = 7997, sesno = 30, \
+             sesno_time = NONE, reason = 'deleted';"
+        );
+        crate::data_interface::staging::replay_safe::validate_statement(&statements[1])
+            .expect("固定目标 UPSERT 过白名单");
+    }
+
+    /// 删的不是交付单元（DAMP）、或单元没名字：只有原来的 Delete 那一条。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_components_or_unnamed_units_records_nothing_extra() {
+        let component = render_with(
+            vec![EleOperationData::new(
+                refu(2),
+                1,
+                EleOperationDetail::Deleted,
+            )],
+            pre_window_chain(),
+        )
+        .await;
+        assert_eq!(component.len(), 1, "{component:?}");
+        assert!(delete_rows(&component).is_empty());
+
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
+        let unnamed = render_with(
+            vec![EleOperationData::new(
+                refu(3),
+                1,
+                EleOperationDetail::Deleted,
+            )],
+            chain,
+        )
+        .await;
+        assert_eq!(unnamed.len(), 1, "{unnamed:?}");
+        assert!(delete_rows(&unnamed).is_empty());
+    }
+
+    /// 链断（owner 行不在）：`zone_refno = NONE`，语句仍出；位号里的 `'` / `\` 转义后仍过白名单。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn orphan_units_record_none_zone_and_names_are_escaped() {
+        let statements = render_with(
+            vec![renamed(refu(9), "EQUI", refu(99), "/E'Q\\1", "/E-2")],
+            ChainMap::new(),
+        )
+        .await;
+        let delete = delete_rows(&statements).remove(0);
+        assert!(
+            delete.contains("zone_refno = NONE") && delete.contains("'/E\\'Q\\\\1'"),
+            "{delete}"
+        );
+        crate::data_interface::staging::replay_safe::validate_statement(delete)
+            .expect("转义后的位号仍是固定目标 UPSERT");
+    }
+
+    /// 同一批语句渲两遍逐字相同（整窗重放收敛）；`sesno_time` 给了就原样带上。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_records_render_deterministically_and_carry_the_session_time() {
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
+        let ops = || vec![renamed(refu(3), "BRAN", refu(6), "/A-OLD", "/A-NEW")];
+        async fn render(ops: Vec<EleOperationData>, chain: ChainMap) -> Vec<String> {
+            let unit_types =
+                crate::data_interface::generation_root::resolve_delivery_unit_types(&[]);
+            IncrementPipeline::resolve_datacenter_statements_with(
+                &BTreeMap::from([(1u32, ops)]),
+                &unit_types,
+                7997,
+                Some("2026-09-22T10:00:00+08:00"),
+                chain_loader(chain),
+            )
+            .await
+            .expect("resolve")
+        }
+        let first = render(ops(), chain.clone()).await;
+        let second = render(ops(), chain).await;
+        assert_eq!(first, second);
+        assert!(
+            delete_rows(&first)[0].contains("sesno_time = '2026-09-22T10:00:00+08:00'"),
+            "{first:?}"
+        );
+    }
+
+    /// 预览回执的计数与渲染同口径（T4）：单元改名一条 + 单元被删一条 + 下属管件改名零条 = 2；
+    /// `datacenter_version` 的 Modify / Delete 状态语句不算进来。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_preview_count_matches_the_rendered_delete_records() {
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
+        chain.insert(refu(11), row("ELBO", Some(refu(3))));
+        chain.insert(refu(20), row("STRU", Some(refu(5))));
+        chain.insert(
+            refu(21),
+            PeChainView::named(Some("SUPPO"), Some(refu(20)), "/SUPP-001"),
+        );
+        let statements = render_with(
+            vec![
+                renamed(refu(3), "BRAN", refu(6), "/A-OLD", "/A-NEW"),
+                renamed(refu(11), "ELBO", refu(3), "/E-OLD", "/E-NEW"),
+                EleOperationData::new(refu(21), 1, EleOperationDetail::Deleted),
+            ],
+            chain,
+        )
+        .await;
+        assert_eq!(
+            count_datacenter_delete_statements(&statements),
+            2,
+            "{statements:?}"
+        );
+        assert_eq!(
+            count_datacenter_delete_statements(&statements),
+            delete_rows(&statements).len()
+        );
+        assert!(
+            statements.len() > 2,
+            "datacenter_version 的状态语句照旧在同一批里: {statements:?}"
+        );
+        assert_eq!(count_datacenter_delete_statements(&[]), 0);
     }
 
     /// 语义等价对拍：固定目标 UPDATE 与老形态的服务端现场上溯，落在**同一批**
@@ -3294,6 +3774,8 @@ mod datacenter_tests {
                 ],
             )]),
             &crate::data_interface::generation_root::resolve_delivery_unit_types(&[]),
+            7997,
+            None,
             move |refnos| {
                 let db = loader_db.clone();
                 async move {
@@ -3304,6 +3786,8 @@ mod datacenter_tests {
                         noun: Option<String>,
                         #[serde(default)]
                         owner: Option<aios_core::RefnoEnum>,
+                        #[serde(default)]
+                        name: Option<String>,
                     }
                     let keys = refnos
                         .iter()
@@ -3312,14 +3796,23 @@ mod datacenter_tests {
                         .join(",");
                     let mut response = db
                         .query(format!(
-                            "SELECT id, noun, owner FROM [{keys}] WHERE record::exists(id);"
+                            "SELECT id, noun, owner, name FROM [{keys}] WHERE record::exists(id);"
                         ))
                         .await?
                         .check()?;
                     let rows: Vec<Row> = response.take(0)?;
                     Ok(rows
                         .into_iter()
-                        .map(|row| (row.id.refno(), (row.noun, row.owner.map(|o| o.refno()))))
+                        .map(|row| {
+                            (
+                                row.id.refno(),
+                                PeChainView {
+                                    noun: row.noun,
+                                    owner: row.owner.map(|o| o.refno()),
+                                    name: row.name,
+                                },
+                            )
+                        })
                         .collect())
                 }
             },
