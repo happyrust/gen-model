@@ -1,5 +1,41 @@
 # 变更记录
 
+## 2026-09-23
+
+### 圆弧墙两端按 SPINE `DRNS` / `DRNE` 斜接（vendor e3d-model）：WF05 RR001 WALL 4 起点内角与 E3D TTY RVM 对上，130 / 130；WF03 的「默认 Y 向三角楔」硬编码退役
+
+- **为什么**：用户截图 `/1RS-WF05-W-C-RR001`（`17496/106640`）WALL 4（`17496/107037`）名下 JLDATU / PLDATU / FIXING 的模型有问题，要求结合 E3D TTY 导出 RVM 修并验证。
+  E3D 3.1 DESIGN TTY 只读导出整条 CWALL（`output/wf05-rr001-20260923/rr001.mac`，`repre insu/obst off`、`export holes on`，8 s，无 SAVEWORK）+ `Q ATT / Q POS WRT /* / Q ORI WRT /*`
+  取 FIXING `17496/156972` 与其 PLDATU / JLDATU / WALL / SPINE / POINSP / CURVE 的原始属性；`rvm_facets_dump` 出 358 个 group（130 个带面片），按 E3D 显示名
+  （`FIXING 1 of PLDATUM 1 of JLDATUM /1RS05CC0013T`、`SBFITTING 1 of CMPFITTING /…`、`WALL 4 of CWALL /…`）与生成侧逐件配对比世界 AABB（`compare_rr001.py` 吃 `:8022` 的
+  `/model/records`；`compare_gen_ams.py` 吃 `gen_ams` 的 `elements.json`）。
+- **对拍结果**：① 在跑的 `:8022`（`attrdiff-wt-0b2bf527b`）与 vendor HEAD 的 `gen_ams`：**129 / 130 对上、0.00 mm**——69 只 FIXING（含截图那只 `156972`：
+  位 (7723, −14524, 10500)、轴 N 28 W、Ø240 × 1000 套管，与 `Q ATT` 逐字相同）、39 只 SBFI、18 堵 GWALL、WALL 1–3 全部一致；**唯一差的是 WALL 4 起点端**：
+  gen 内角 x = 5208.2，RVM 内角 x = 5492.3（**差 284 mm**，内外两角同 x）。② 截图里 FIXING 挤成一簇、离开墙面那种形状，是 `.scratch/bin-pinned`（09-14）那一代
+  `gen_ams` 的样子（同一根 70 / 130 不合、FIXING 偏 13–25 m），即 vendor `ed5ad20`（09-15，实例与开孔刀共用 `fixing_host_frame`）修掉的那条；
+  当前 HEAD 与 `:8022` 都已不带它——看见这种画面的后端是 09-15 之前的构建，换二进制重启即可，本仓不另改。
+- **根因**：WALL 4 的 SPINE `Drnstart E`、`Drnend` 未设。E3D（Core3D `DB_Gensec::setMitrePlanes` + `" Start-mitre extension"`）拿 `DRNS` 作起点端面法向：
+  过 POINSP 1 (5492.3, −16510.4) 的竖直面 `x = 5492.3`；这里墙沿 E 18.4 N 出发、内角落在平面**体内一侧**，于是被削掉 ≈ 300 mm（沿切向）。
+  `elmodl::wall_local_solid` 一直按径向平头建两端，只在 `sweep_segments == 3` 时按「默认 +Y 向」补一个三角楔——那是照 WF03 RR001 WALL 4（同样 `DRNS = E`，
+  但那里内角落在平面**体外一侧**、E3D 反过来**外延** 1.41°，`docs/2026-08-12_live-test-ledger.md` 曾记为「非 gen 缺陷」）硬编码的，碰不到 WF05 这一件。
+  两件是同一条规则的两个符号。
+- **改动（`../vendor/e3d-model`，未提交）**：`section.rs` 新增 `spine_mitre_plane`（`setMitrePlanes` 三门：端向缺席 / 与切向垂直「no mitre」/ 平行「suppress」→
+  平头；否则过端点、法向 = 端向、规约指向体内）、`mitre_extension_length` / `mitre_extension_solid`（XSPYR 同理：截面各顶点沿切向的棱与平面求交，体外最远的那一个
+  就是沿切向补挤的长度；往体内多挤 `MANIFOLD_NUDGE_MM` 让并集与本体咬合成一块，不留两片贴脸的壳）。`elmodl::wall_local_solid` 删掉 `default_wall_start_wedge` 与
+  `sweep_segments == 3` 分支，改读 SPINE `DRNS` / `DRNE`（经 SPINE `local_matrix` 转到 WALL 局部系），端标架 X 沿墙厚朝内、Y 朝上、Z 逆时针切向，体所在一侧随
+  扫掠方向定号。没有按 refno / 名字 / 截图坐标特判。**GENSEC 没接**：`spine_swept_solid` 仍按平头建、只记账——aps250209 有 178 只 GENSEC 带非零 `DRNS`/`DRNE`
+  （接上后 162 只体积不变只挪端面、16 只少 15–28%），但今天这台机器上 APS 的 E3D TTY 会话起不来（`des.exe -tty APS SYSTEM/… /ALL` 一律 0xC0000005，AMS 同一
+  启动器正常），拿不到基准，按仓库「几何改动先过 E3D 对拍」的规矩留到下一单；helper 已就位，接法见 `spine_swept_solid` 里那段注释。
+- **验证**：① e3d-model 单测 +3（WF03 楔子第三角 (−5058.2188, −15289.8818) 与旧硬编码逐位相同、补挤 394.97 mm、体积增量 = 三角楔、并成 1 个分量；
+  WF05 起点内角 5208.2 → 5492.3、其余五面不动、不补挤；`setMitrePlanes` 三门与法向定号），`cargo test --lib` 341 全过，`rustfmt --check` 干净，clippy 无新告警。
+  ② 真库：`gen_ams --root 17496/106640` → **130 / 130 对上，最大差 0.003 mm**（改前 129 / 130，WALL 4 差 284.08 mm）；回归 `--root 17496/105799`
+  （WF03 RR001，基准 `test_data/rvm/1RS-WF03-W-C-RR001.rvm`）改前改后同为 **111 / 113**，WALL 1–4 全对上，逐元素只有 WALL 4 变了 0.007 mm³（拓扑从两壳变一块）；
+  两处残差（GWALL 13 x 最大差 20.15 mm、FIXING `/1RS03LL0018T` 6.17 mm）在 HEAD 未打补丁的基线上就在，与本次无关，另议。整 ZONE `/1RS-WF05`（1731 件）
+  改前改后只有 WALL 4 一件变；aps250209 全库（4605 件，GENSEC 2698）逐件不变。③ 服务侧未 live：主工作树仍编不过（另一会话的 e3d-io 改动，见 09-22 两条），
+  `:8022` 二进制是别的工作树出的，换二进制归用户。证据目录 `output/wf05-rr001-20260923/`（宏、ALPHA 日志、RVM、两侧 JSON、对拍报告、补丁 `drns-mitre.patch`）。
+- **顺带看到的**：E3D 导出的 FIXING `/W-HOLE-W` 套管是 34 面 / 36 环的空心管（Ø240 外 / Ø200 内），生成侧网格半径直方图同为 {120, 100}，形状一致；
+  `Q REPRE` 显示 TTY 会话缺省 `Hole Off`，`export holes on` 才把墙上的洞写进 RVM。
+
 ## 2026-09-22
 
 ### 闭包项目里的 CATA 前移能被 watcher 观察并进目录版本核对（GitHub #42）：覆盖；两条边界派生 #46 / #47
