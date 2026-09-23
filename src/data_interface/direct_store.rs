@@ -70,6 +70,71 @@ fn report_schema_error(message: &str) {
     eprintln!("{message}");
 }
 
+/// 按文件路径缓存的逻辑 noun 目录，见 [`DirectSchema::noun_catalog`]。
+///
+/// 解析失败也记一格 `None`：同一对文件再问一次不会再解析一遍、也不会再刷一次日志。
+///
+/// 目录读进来之后按 attlib 给共用存储号的那几格起名（SPCO / GPART / PRTELE 上的
+/// 565843 是 `DETR` / `Detref`，不是导出里写的 `DETA`）：活 E3D 的 .NET 导出按 hash
+/// 去重，这一格的真名只有 attlib 的目录值列知道。attlib 元数据（抬头 `Detref`）要再读
+/// 一遍 attlib.dat，读不出来只影响抬头，目录照用、别名照起、抬头退回短名。
+fn shared_noun_catalog(
+    layout: &Path,
+    fields: &Path,
+    attlib: &e3d_attlib::AttlibData,
+    attlib_path: &Path,
+) -> Option<Arc<e3d_io::noun_catalog::NounCatalog>> {
+    type Cache = BTreeMap<(PathBuf, PathBuf), Option<Arc<e3d_io::noun_catalog::NounCatalog>>>;
+    static CATALOGS: std::sync::OnceLock<Mutex<Cache>> = std::sync::OnceLock::new();
+    let mut cache = CATALOGS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entry((layout.to_path_buf(), fields.to_path_buf()))
+        .or_insert_with(|| {
+            let started = Instant::now();
+            match e3d_io::noun_catalog::NounCatalog::read(layout, fields) {
+                Ok(mut catalog) => {
+                    let metadata = e3d_io::attlib_metadata::AttributeMetadataCatalog::parse_file(
+                        attlib_path,
+                        attlib,
+                    )
+                    .unwrap_or_else(|error| {
+                        report_schema_error(&format!(
+                            "[E3D schema] attlib 元数据读不出来（共用存储号的别名抬头退回短名）: \
+                             attlib={}；原因: {error}",
+                            attlib_path.display()
+                        ));
+                        Default::default()
+                    });
+                    let aliased = catalog.apply_attlib_storage_aliases(attlib, &metadata);
+                    report_schema_info(&format!(
+                        "[E3D schema] noun 目录加载成功: layout={} fields={} nouns={} \
+                         declarations={} storage_aliases={aliased} elapsed_ms={}",
+                        layout.display(),
+                        fields.display(),
+                        catalog.noun_count(),
+                        catalog.declaration_count(),
+                        started.elapsed().as_millis()
+                    ));
+                    Some(Arc::new(catalog))
+                }
+                Err(error) => {
+                    report_schema_error(&format!(
+                        "[E3D schema] noun 目录加载失败（属性面板不补类型默认值）: layout={} \
+                         fields={} elapsed_ms={}；原因: {error}",
+                        layout.display(),
+                        fields.display(),
+                        started.elapsed().as_millis()
+                    ));
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
 /// 一个库的读取时点与身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbPin {
@@ -236,6 +301,9 @@ pub struct DirectSchema {
     attlib: e3d_attlib::AttlibData,
     template_dir: PathBuf,
     version: Option<&'static E3dVersion>,
+    /// 逻辑 noun 目录两份导出（`catalog/noun_layout.json`、`noun_attr_fields.json`）的位置。
+    /// 只有从 schema pack 打开时才有；显式模板目录（[`Self::open`]）没有清单，也就没有它。
+    catalog_files: Option<(PathBuf, PathBuf)>,
 }
 
 impl std::fmt::Debug for DirectSchema {
@@ -385,6 +453,7 @@ impl DirectSchema {
             attlib,
             template_dir,
             version: None,
+            catalog_files: None,
         })
     }
 
@@ -415,10 +484,13 @@ impl DirectSchema {
         }
         let attlib = e3d_attlib::AttlibData::parse_file(&attlib_path)
             .map_err(|error| anyhow::anyhow!("parse {}: {error}", attlib_path.display()))?;
+        // 两份都在清单里才算有目录：只有布局没有字段表，`NounCatalog::parse` 会拒收。
+        let catalog_files = pack.noun_layout().zip(pack.noun_attr_fields());
         Ok(Self {
             attlib,
             template_dir,
             version: Some(version),
+            catalog_files,
         })
     }
 
@@ -502,6 +574,25 @@ impl DirectSchema {
     /// accidentally combine definitions decoded with a different schema.
     pub fn attlib(&self) -> &e3d_attlib::AttlibData {
         &self.attlib
+    }
+
+    /// 活 E3D 导出的逻辑 noun 目录：每个 noun 有哪些属性、各是什么类型、哪些是伪属性。
+    ///
+    /// 物理描述符（`*vir.dat`）只说字节怎么摆；「E3D 把哪些属性当成这个 noun 的属性」
+    /// 以及「一个没存过值的属性 `q att` 印什么」（`0mm` / `false` / `Nulref` / `unset`）
+    /// 只有它答得上来。可选：pack 没带、或两份 JSON 解析失败，返回 `None`，调用方按
+    /// 「没有逻辑目录」降级——属性面板少几十行类型默认值，取值本身不受影响。
+    ///
+    /// 两份导出共 9 MB，**按进程只解析一次**（以文件路径为键），谁先问谁付这一次；
+    /// `offer_backup` 每次读都新开一个 `DirectSchema`，它们不问就不付。
+    pub fn noun_catalog(&self) -> Option<Arc<e3d_io::noun_catalog::NounCatalog>> {
+        let (layout, fields) = self.catalog_files.as_ref()?;
+        shared_noun_catalog(
+            layout,
+            fields,
+            &self.attlib,
+            &self.template_dir.join("attlib.dat"),
+        )
     }
 
     /// 一个库类型的模板文件。
@@ -1259,7 +1350,7 @@ mod tests {
             fn db_type_of(&self, _: u32) -> Option<String> { Some("DESI".into()) }
             fn file_of(&self, _: u32) -> Option<(String, PathBuf)> { None }
         }
-        let schema = Arc::new(DirectSchema { attlib: e3d_attlib::AttlibData::default(), template_dir: "unused".into(), version: None });
+        let schema = Arc::new(DirectSchema { attlib: e3d_attlib::AttlibData::default(), template_dir: "unused".into(), version: None, catalog_files: None });
         let store = DirectStore::new(schema, Arc::new(Missing));
         let reference = RefU64::from_two_nums(24384, 42);
         assert_eq!(store.dbnum_of(reference).unwrap(), 8000);
@@ -1271,6 +1362,7 @@ mod tests {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
             version: None,
+            catalog_files: None,
         });
         let locator = FakeLocator {
             ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
@@ -1285,6 +1377,7 @@ mod tests {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
             version: None,
+            catalog_files: None,
         });
         let locator = Arc::new(FakeLocator {
             ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
@@ -1423,6 +1516,7 @@ mod tests {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
             version: None,
+            catalog_files: None,
         });
         let store = DirectStore::new(schema, Arc::new(LocatorWithFile));
         assert!(store.pinned(8000).is_none());
@@ -1510,6 +1604,7 @@ mod tests {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("dir"),
             version: None,
+            catalog_files: None,
         };
         // 目录里没有文件，所以只看它找的是哪一个。
         let error = schema.template_file("DESI").unwrap_err().to_string();
@@ -1571,6 +1666,7 @@ mod tests {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from(r"C:\runtime\schema\e3d210\binaries"),
             version: Some(&e3d_io::E3D210),
+            catalog_files: None,
         };
         let success = schema.load_success_message(
             r"mode=auto project=D:\AVEVA\Projects\E3D2.1 schema_root=C:\runtime\schema",

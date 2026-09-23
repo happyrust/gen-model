@@ -204,10 +204,13 @@ C_r = { c : r ∈ roots_of(c) }；C_r = ∅                             → rege
 
 1. **单测**：§4 B3 全部形状绿；开关关时 `plan_window_roots` 的输出与今天逐位相同（钉：把 `transform` 全并回 `regen` 后与旧实现 `==`）。
 2. **`mem://`**：B7 (i)–(vi)。
-3. **对拍门**（手动，ams8000；判法按 00:08 审核 P1 修订）：D1 判成 `transform` 的每根，前移 vs 在 T 上整根重算——**判死三条**：`record_id` 集合相同；`world_transform` 逐元素
-   `|Δ| < 1e-9`（f64）；`world_bounds` 逐分量 `< 1e-3`（mm；f32 网格顶点的舍入）。`mesh_id`：纯平移判死（必须复用）；**含旋转的 Baked 记录不判**——烘焙网格是
-   「世界求值 → 乘 `world⁻¹` 本地化」存 CAS 的，旋转的本地化残差没有归零兑着，regen@T 可能落出内容不同的新网格（CAS id 漂），transform 复用旧网格反而是对的；
-   那半边先量 ORI 重算的 mesh_id 稳定率再定判法。`manifest_hash` 相等**降为观察项**：清单吃的是 f32 截断后的位形，ULP 进位与四元数分解在 `w≈0` 处的 `q/−q`
+3. **对拍门**（手动，ams8000；判法按 00:08 审核 P1 修订，09-20 B8 首跑后再改两处）：D1 判成 `transform` 的每根，前移 vs 在 T 上整根重算——**判死三条**：`record_id` 集合相同；`world_transform` 逐元素
+   `|Δ| < 1e-9`（f64）；`world_bounds` 逐分量 **`|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`**（09-20 改口：1e-3 是绝对底线，坐标量级上去了按 f32 ulp 放行——
+   两边各自舍入最多 2 ulp：transform 侧纯平移 `f32(f32(盒_S) + t_c)` 两次、regen 侧 `f32(f64 紧盒)` 一次；`t_c` 是该记录命中锚点的平移在这一分量上的值，兜住 S 端量级比 T 端大的情形。
+   旧判法 `< 1e-3` 在 8192 mm 段就已是 1 ulp、≥ 16384 mm 段 1 ulp = 0.00195 mm 必撞；≥ 1e-3 但被 ulp 臂放过的分量数印成观察项）。
+   `mesh_id`（09-20 改口）：**Canonical 按 id 判死**（标准网格，刚体运动不该换）；**Baked 一律按内容判**，不再分纯平移 / 含旋转——烘焙网格是「世界求值 → 乘 `world⁻¹` 本地化」
+   存 CAS 的，本地化残差（1e-13 量级的尘）进 SHA，纯平移同样会让 regen@T 落出内容相同、id 不同的新网格（B8 首跑 270→271 四条），transform 复用旧网格反而是对的；
+   id 不等时读两份网格：顶点数同、顶点 / 法线最大偏差 < 1e-3、索引逐位同 → `DRIFT` 观察项，否则判死。`manifest_hash` 相等**降为观察项**：清单吃的是 f32 截断后的位形，ULP 进位与四元数分解在 `w≈0` 处的 `q/−q`
    符号翻转都能「几何同、哈希不同」偶发——哈希不等时不判死，降级为逐条目容差比对再裁。
 4. **live #2**：挪 ZONE → SAVEWORK → 名下根 `units[].kind == "transform"`、`/dbnums` ≤ 120 s `in_sync`、房间边逐边 == `build_room_relations`、plant-ui 几何整体平移且网格不重载。
 5. `cargo test --lib -- --skip damaged_existing_content_addressed_file_is_rejected` 不降；aios-database 零告警；`rustfmt --edition 2024 --check`。
@@ -295,3 +298,38 @@ C_r = { c : r ∈ roots_of(c) }；C_r = ∅                             → rege
 **P2 核对（对着 00:36 落进树的 B5/B6 逐条）**：(4) settle 口径 = regen 成功路同款 `settle_regen_work(root, revision, None)` ✓；(5) pending 重叠由规划期 carry（desired 抬高 → 不 settled → 不产提示）+ 新基线闸双保险 ✓；(6) fallback 清单在投影不完整 / 回执缺 / 盒闭包（旋转待接）/ 发布模式不支持 / 登记失败之外新增两道闸；回退不涨 `attempts`（与死信计法一致）✓；(7) `model_target` 仍沿用旧落款（执行体文档「待补」，最坏下一窗不命中缓存、照旧重算，安全；B8 前补）；(8) `published_via = "transform"` 已落 `render_receipt_version` ✓。
 
 **验证（2026-09-09 00:5x，本会话跑）**：targeted（`rigid_motion` + `window_root_plan` + `manual_update::collect_unit_tasks` + 开关）**54 passed / 0 failed**；全量 `cargo test --lib -- --skip damaged_…` **1919 passed / 0 failed / 121 ignored**（24.9 s，工作树同时含常驻房间线在飞的改动）；`rustfmt --edition 2024 --check` 五份改动文件（`rigid_motion` / `window_root_plan` / `manual_update` / `batch_worker` / `e3d_model_service`）干净。生产行为：开关默认关，闸只在便宜路内起效；重放语义从「双重搬移（错）」变为「跳过按完成计（对）」。
+
+### B6 补遗（2026-09-19 23:5x–00:4x，会话 fable-5-1-37）：P2 (6) 的「盒闭包（旋转待接）」与 (7) 的「`model_target` 沿用旧落款」两处「待补」补齐
+
+用户点名「先补执行体两处待补，再谈 B7」。两处都只动 `republish_roots_by_rigid_motion` 及其旁边的纯函数，B7 / B8 / live #2 仍是零。
+
+| 件 | 落地形态 | 与 ADR 的对应 |
+|---|---|---|
+| 旋转盒 | `e3d_model_service::rigid_motion_mesh_bounds(mesh_dir, record, world')`：读回记录自己的 `<mesh_id>.mesh`（新加 `e3d_mesh_store::read_mesh_file`，panic 接成错误）→ 顶点乘到新世界系 → `bounds_of_points`；网格到世界的矩阵 `rigid_motion_mesh_to_world`：`Baked` 直接乘、`Canonical` 先乘 `local_transform`、隐式管身不乘（`persisted_world_transform` 已折进去）。读不到 / 没顶点 → 整根 `Err` → 回退 regen | D3「含旋转读网格顶点重算」；纯平移仍 `translate_bounds` |
+| 落款 | `rigid_motion_target_at(old_receipt, current, T)`：闸过后、读记录前，`hydrate_published_dependencies(old_receipt)` → `model_target(dbnum, T)` 现算 pin@T（目录会话表整轮共用），核旧回执带目标 ∧ `same_target_outside_the_design_window` ∧ `design.session == T`，任一不成回退 regen（原因 `model target: …`）；过了落进回执 | D4「与重生成同款」：凭证在 T、目标在 T；目录 / 模板 / 生成器 / 细分档变了不许左乘 |
+| 钉 | 4 条单测：盒三形状 + 网格缺失、闭包经 `republish_records` 端到端、目标四种拒绝、源码钉（无 `not yet wired`、不再 `old_receipt.model_target.clone()`、目标核对先于 `records_of_root`） | §6 源码钉加一条 |
+
+**验证**：定向 `cargo test --lib -- rigid_motion e3d_model_service::tests` 30 + 57 过；全量 `cargo test --lib` **2272 passed / 0 failed / 122 ignored**（8.7 s，工作树含旁边会话未提交的 fast_model / web_service 改动）；`cargo check --lib --tests --bins` 过；`rustfmt --check` 本轮新增行无差异（两文件的旧差异 33 / 4 处不动）。
+**仍开着**：B7 `mem://` 夹具 (i)–(vii)、B8 门 3（`record_id` / 1e-9 / 1e-3 / 纯平移 `mesh_id` 复用）、live #2、验收 3 量、B9 CONTEXT.md 词条。门 3 的 `world_bounds` 1e-3 mm 在 1e5 mm 级坐标上撞 f32 ulp（≈ 0.008 mm），跑门时大概率要改按 ulp 判。详见 changelog 2026-09-19。
+
+### B8 门 3 首跑（2026-09-20 02:1x–02:4x，会话 fable-5-1-37 起手、fable-5-1-47 接力）：ams8000 195→196 过门；嵌套根双乘、Baked `mesh_id` 漂、1e-3 离 ulp 2.3% 三条发现
+
+用户 00:57 点名「用 ams8000 195→196 钉一窗跑 §5 门 3，顺手看 `world_bounds` 1e-3 在 f32 上撞不撞」。落地形态与 B8 原文的差别：门 3 没放 `tests/`，放在
+`e3d_model_service::tests::probe_rigid_motion_gate3_for_window`（`#[ignore]`，真库；与 `probe_unit_publish_one_root_against_regen` 同一屋、共用 `generation_input` / `regen_at` 那套夹具）；
+执行体为它拆出无锁本体 `republish_roots_by_rigid_motion_on(store, dbnum, T, units, publish)`，生产入口只剩锁 + 水位 + `run_blocking`。证据档 `docs/evidence/2026-09-20-s4b-gate3-rigid-motion-parity.md`。
+
+| 件 | 结果 |
+|---|---|
+| **ams8000 195→196** | **过**：EQUI 24384/26186 平移 10 mm，`record_id` +0 −0、`world_transform` \|Δ\| 9.1e-13、`world_bounds` 差 0、`mesh_id` 复用、回执 `source_sesno` 196 / `published_via` transform / `model_target` == regen@196 |
+| 另 6 窗 12 根 | 过：ams7997 270→271（挪 ZONE，9 根 BRAN 237 记录含 128 管身）、ams7997 87→88、ams7999 160→161、ams8000 31→32、ams7326 617→618（86100 mm）、ams1112 722→723 / 724→725（**含旋转**，D3 盒与 regen@T 逐位同）/ 723→724（103550 mm）；执行体 237 记录 0.05–0.08 s |
+| **红：嵌套根双乘（已修）** | ams7997 156→157（`99982 ⊃ SUBS 100006`）、ams1112 724→725（`STRU 92413 ⊃ FRMW 98576`）：`records_of_root` 按祖先链取，嵌套显著根名下记录互相包含，规划器把锚点链上每个根都判 transform，逐根串行把共有记录**乘了两次 Δ**（差恰好一个 Δ）。P0 幂等闸按根回执判，护不住跨根共有记录；窗口重放同漏。只执行最内层根两窗都过。**修法 (a)（用户 02:5x 拍板）**：`republish_records` 多收规划基线 S，逐条先过按记录的闸——`source_sesno == T` 放过不乘、`S < sesno ≠ T` 整批 Err 回退、`≤ S` 照常乘；执行体传 `unit.source_start_sesno`；单测 2 条 + 源码钉 1 句。修后两窗全跑都过（17 / 1121 记录，|Δ| ≤ 9.1e-13、盒差 0） |
+| Baked `mesh_id` 纯平移也漂 | 270→271 有 4 条 regen@T 落出新 `e3d_baked_v2_*`，两份网格顶点差 ≤ 9.1e-13 mm、法线 ≤ 7.4e-34、索引同——本地化残差进了 SHA。§5「纯平移必复用」对 Baked 不可能一直成立；探针按内容判成 `DRIFT` 观察项 |
+| `world_bounds` 1e-3 vs f32 | 全过，但最大 0.000977 mm（8201.7 mm 处 = 1 ulp）**离线 2.3%**，只因坐标 < 16384 mm；≥ 16384 mm 段 1 ulp = 0.00195 mm 同样的差就判死。来源是两边各自的 f32 舍入，绝对 ≤ 1 ulp（两端量级较大者）、分量搬到小量级时相对可到 4 ulp |
+
+**三条都已拍板并落地**（fable-5-1-51，09-20 08:4x–08:5x）：(1) 双乘修法 (a) 已拍已落（见上表）；(b) 规划期只发最外层根不做。(2) §5 门 3 `mesh_id` 判法改口：Baked 记录一律按内容判
+（顶点 / 法线 < 1e-3、索引逐位同 → `DRIFT` 观察项，否则判死），只对 Canonical 判 id——不再分纯平移 / 含旋转。(3) §5 门 3 `world_bounds` 判法改口：`|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`
+（`t_c` 按分量取该记录命中锚点的平移）。两处都同步进了 §5 原文与探针判死逻辑（`bounds_over` / `ulp_arm_passes` 两个计数印在每根那一行，GATE 3 OK 的括号改成
+`bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content`）。改口后复跑 7 窗 19 根**全过**：270→271 九根盒差最大仍 1 ulp（0.000977 mm @ 8201 mm）、相对最坏 4 ulp（3.1e-5 mm @ 95 mm）
+都在 1e-3 底线之内、ulp 臂放行 0 个分量、Baked drift 4 条（内容同）；含旋转的 1112 722→723 / 724→725 全跑（STRU 1090 + FRMW 31）Baked 现在**也判内容**——`mesh_id` 不等 0 条，
+旋转下 CAS id 这两窗根本没漂；723→724（103550 mm）/ 156→157（99873 mm）/ 195→196 / 7326 617→618（86100 mm）盒差 0。
+**验证**：全量 `cargo test --lib` 2274 passed / 0 failed / 123 ignored（多的 1 个 ignored 是本探针）；`cargo check --lib --tests --bins` 过；`rustfmt --check` 新增行无差异。**仍开着**：B7 `mem://`（该加一臂：嵌套根共有记录只乘一次，`mem://` 上钉住上面这条闸）、live #2、验收 3 量、B9。详见 changelog 2026-09-20。

@@ -53,6 +53,10 @@ pub(crate) struct TargetedGenerationReport {
     pub rows_upserted: usize,
     pub commits: usize,
     pub max_transaction_bytes: usize,
+    /// 这一批里被判**不画**的隐式管身点名账（见 `E3dPersistReport::tubes_not_drawn`）。
+    /// 生成成功也可能有值——它不是失败，是「模型比设计少一节管」的唯一线索，
+    /// 由任务侧原样挂进回执。
+    pub tubes_not_drawn: Option<String>,
 }
 
 /// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
@@ -95,8 +99,11 @@ impl ModelRefreshPolicy {
     ///
     /// ADR-056 P2-1 改造对象：暂存窗口退役后它失去生产调用点（直写路径一直是
     /// `run_unit_worklist(…, None, …)` → 根级 `generate_roots`，D3）。P2 用它的
-    /// `collect_window` + `plan_update` 半边做选根与凭证前移，`execute_plan` 半边
-    /// （单元级落库，D3 已否）届时摘除；在那之前不删。
+    /// `collect_window` + `plan_update` 半边做选根与凭证前移。`execute_plan` 半边原写
+    /// 「单元级落库，D3 已否，届时摘除」——★0917 作废：ADR-080（单元级发布）把 `execute_plan`
+    /// 转正为生产执行体，`e3d_model_service::UnitDeltaProducer::produce` 逐根切子计划喂它、
+    /// 产出 `UnitDelta` 以 `Partial` 提交叠在根回执之下（开关 `model_unit_level_publish`，默认关）。
+    /// 本方法仍是整窗一口气生成 + 落库的旧形态，生产不调；在那之前不删。
     #[allow(dead_code)]
     pub(crate) async fn apply_window(
         dbnum: u32,
@@ -249,7 +256,12 @@ impl ModelRefreshPolicy {
                 diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
                 error
             })?;
-        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}", persisted.failed, persisted.failed_roots));
+        // `failed=0 failures=[]` 是这一行的常态，而「按设计不画」的那几根管就消失在这份
+        // 常态里（2026-09-18 的 HBOR 探针：E3D 与本引擎同样不画，但只有 E3D 那边报得出来）。
+        // 点名账非空时就挂在同一行上——查的人本来就在看它。
+        let tubes_not_drawn = persisted.tubes_not_drawn.clone();
+        diagnostic.stage("model.geometry.done", format!("dbnum={dbnum} failed={} failures={:?}{}", persisted.failed, persisted.failed_roots,
+            tubes_not_drawn.as_deref().map(|line| format!(" {line}")).unwrap_or_default()));
         let generation_failures = persisted
             .failed_roots
             .iter()
@@ -544,6 +556,7 @@ impl ModelRefreshPolicy {
             report.rows_upserted = rows_upserted;
             report.commits = commits;
             report.max_transaction_bytes = max_transaction_bytes;
+            report.tubes_not_drawn = tubes_not_drawn;
             diagnostic.finish(format!("dbnum={dbnum} completed={:?} failures={:?} rows={} commits={} room_edges={}",
                 report.completed, report.failures, report.rows_upserted, report.commits, report.room_edges_written));
             Ok(report)

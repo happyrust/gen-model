@@ -235,6 +235,8 @@ impl ApiError {
             "ATTR_NOT_APPLICABLE" => (StatusCode::UNPROCESSABLE_ENTITY, "attr_not_applicable"),
             "CHAIN_INCOMPLETE" => (StatusCode::UNPROCESSABLE_ENTITY, "chain_incomplete"),
             "DB_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "db_unavailable"),
+            // 直读源（文件 / 直连树）暂时看不见：与 `DB_UNAVAILABLE` 同一档 503，不再落进 500「internal」。
+            "SOURCE_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "source_unavailable"),
             "E3D_SESSION_FAILED" => (StatusCode::SERVICE_UNAVAILABLE, "e3d_session_failed"),
             "TIMEOUT" => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
             "PARSE_ERROR" => (StatusCode::INTERNAL_SERVER_ERROR, "parse_error"),
@@ -558,6 +560,26 @@ async fn serve_with_ready(
             "/api/v1/model/history/{snapshot_key}",
             get(handlers::model_history_get).delete(handlers::model_history_delete),
         )
+        // 最小交付单元的模型版本表（ADR-081）：从会话链按需算、不落库；只读 GET，plant3d-web 版本对比的
+        // `ModelVersionSource.listVersions` 就吃它。A/B 几何仍走上面的 `model/history/*`。
+        .route("/api/v1/model/versions", get(handlers::model_versions))
+        // 单个构件的模型版本表：同一条会话链、只认它自己，回执并排给所属单元那一列与
+        // `unit_root`（前端拿它去生成 A/B 两版快照）。plant3d-web「查看某个构件的所有历史版本」吃它。
+        .route("/api/v1/element/versions", get(handlers::element_versions))
+        // 节点版本视图（plant3d-web ADR 0066）的两条：属性变化时间线（谁在哪一版改了什么，会话 user /
+        // comment + 逐属性 before / after）与 A→B 差异摘要（索引差分 + 模型影响按单元分组，不生成几何）。
+        // 都按需算、只活在进程内（ADR-081 / d-179）。
+        .route(
+            "/api/v1/element/attribute-history",
+            get(handlers::element_attribute_history),
+        )
+        .route(
+            "/api/v1/node/diff-summary",
+            get(handlers::node_diff_summary),
+        )
+        // 任意节点按对比范围折叠的版本表（同一节 ADR 0066 的第三条）：容器「所有子节点」下的时间线只有它能列，
+        // 每版附「动了几个最小交付单元」。同样按需算、只活在进程内。
+        .route("/api/v1/node/versions", get(handlers::node_versions))
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
@@ -575,16 +597,26 @@ async fn serve_with_ready(
         .route("/api/v1/tree/roots", get(handlers::tree_roots))
         .route("/api/v1/tree/children", get(handlers::tree_children))
         .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
-        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，六条都是 GET（`centerline` 只读库、
-        // `surface-clearance` 只读库 + 磁盘网格，都不碰树）。
+        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，九条都是 GET（`centerline` 只读库、
+        // `surface-clearance` 只读库 + 磁盘网格、`rooms` 只读常驻房间模型，都不碰树；`nearby/tree` 与
+        // `rooms/{refno}/tree` 是同一条流水线折成房间层级树，plant3d-web ADR 0068）。
         .route("/api/v1/spatial/nearby", get(handlers::spatial_nearby))
         .route(
             "/api/v1/spatial/nearby/refnos",
             get(handlers::spatial_nearby_refnos),
         )
         .route(
+            "/api/v1/spatial/nearby/tree",
+            get(handlers::spatial_nearby_tree),
+        )
+        .route(
             "/api/v1/spatial/negative-nouns",
             get(handlers::spatial_negative_nouns),
+        )
+        .route("/api/v1/spatial/rooms", get(handlers::spatial_rooms))
+        .route(
+            "/api/v1/spatial/rooms/{refno}/tree",
+            get(handlers::spatial_room_tree),
         )
         .route(
             "/api/v1/spatial/nearest-clearance",
@@ -1049,7 +1081,9 @@ mod tests {
     }
 
     /// spec §4.13：空间邻近查询三条 + `nearest-clearance`（计划 §3.2）+ `centerline`（§4.13.3）
-    /// + `surface-clearance`（plant3d-web 2026-09-17 构件到墙计划 §5）都是只读 GET，且挂在 `/api/v1/spatial/` 下。
+    /// + `surface-clearance`（plant3d-web 2026-09-17 构件到墙计划 §5）+ `rooms`（§4.13.4，plant3d-web ADR 0067）
+    /// + `nearby/tree` / `rooms/{refno}/tree`（§4.13.5 / §4.13.6，plant3d-web ADR 0068）
+    /// 都是只读 GET，且挂在 `/api/v1/spatial/` 下。
     #[test]
     fn spatial_routes_are_read_only_get_endpoints() {
         let source = include_str!("mod.rs");
@@ -1063,10 +1097,13 @@ mod tests {
         for route in [
             ".route(\"/api/v1/spatial/nearby\", get(handlers::spatial_nearby))",
             "\"/api/v1/spatial/nearby/refnos\",\n            get(handlers::spatial_nearby_refnos)",
+            "\"/api/v1/spatial/nearby/tree\",\n            get(handlers::spatial_nearby_tree)",
             "\"/api/v1/spatial/negative-nouns\",\n            get(handlers::spatial_negative_nouns)",
             "\"/api/v1/spatial/nearest-clearance\",\n            get(handlers::spatial_nearest_clearance)",
             "\"/api/v1/spatial/centerline\",\n            get(handlers::spatial_centerline)",
             "\"/api/v1/spatial/surface-clearance\",\n            get(handlers::spatial_surface_clearance)",
+            ".route(\"/api/v1/spatial/rooms\", get(handlers::spatial_rooms))",
+            "\"/api/v1/spatial/rooms/{refno}/tree\",\n            get(handlers::spatial_room_tree)",
         ] {
             assert!(serve.contains(route), "missing spatial GET route: {route}");
         }
@@ -1074,6 +1111,32 @@ mod tests {
             !serve.contains("post(handlers::spatial_") && !serve.contains("delete(handlers::spatial_"),
             "spatial routes must stay read-only"
         );
+    }
+
+    /// ADR-081：版本表是从会话链算出来的只读派生量，只许 GET；A/B 几何仍走 `model/history/*`，
+    /// 本仓不为它另开 diff / release 路由。
+    #[test]
+    fn model_versions_route_is_a_single_read_only_get() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(
+            serve.contains("\"/api/v1/model/versions\", get(handlers::model_versions)"),
+            "model versions route must be a plain GET"
+        );
+        assert_eq!(
+            serve.matches("/api/v1/model/versions").count(),
+            1,
+            "exactly one versions route"
+        );
+        for forbidden in ["/api/v1/model/diff", "/api/model-version", "compare-readiness", "/releases"] {
+            assert!(!serve.contains(forbidden), "no {forbidden} route in this service");
+        }
     }
 
     /// ADR-073：按水位删除会制造无法证明完整性的局部状态，只保留只读预览。
@@ -1390,6 +1453,7 @@ mod tests {
             ("ATTR_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
             ("CHAIN_INCOMPLETE", StatusCode::UNPROCESSABLE_ENTITY),
             ("DB_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
+            ("SOURCE_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
             ("E3D_SESSION_FAILED", StatusCode::SERVICE_UNAVAILABLE),
             ("TIMEOUT", StatusCode::GATEWAY_TIMEOUT),
             ("PARSE_ERROR", StatusCode::INTERNAL_SERVER_ERROR),

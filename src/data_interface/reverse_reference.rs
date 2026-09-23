@@ -1526,6 +1526,7 @@ mod tests {
             cascade_degraded: cascade.degraded.clone(),
             unresolved: 0,
             candidates: 1,
+            cache_stamp: 0,
             index_keys: 1000,
         };
         let roots_t = vec![design_root(10, "CWBRAN"), design_root(20, "PIPE")];

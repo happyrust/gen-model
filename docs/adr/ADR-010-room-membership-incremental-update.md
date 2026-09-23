@@ -582,6 +582,21 @@ D1 与 D2 相互独立，修好任何一个另一个依然成立。
 （单点、只有 `ORIENTED`、命中即返回）本来就是两套规则，会对同一个 (元素, 面板) 组合
 给出不同答案。共享谓词让不一致在结构上不可能发生。
 
+**追记 2026-09-18（点包含的实现换成射线奇偶）**：§3 的口径（8 顶点 / 逐点兜底）不变，但「一个点在不在面板内」
+不再问 parry 的 `TriMesh::contains_point`（`ORIENTED` 伪法线 + `solid` 短路），改为 `room_predicate::point_inside_panel`
+——沿三条歪斜方向各数一次与面板三角网的穿越次数、奇数为内、三取二；面板三角网全仓只经 `room_predicate::panel_tri_mesh`
+建：顶点按 0.01 mm 焊接、剔零面积三角、乘世界矩阵，不再带 `ORIENTED`（常驻 `build_tri_mesh` 与库行 `PanelMeshes::from_rows`
+两条路同一份）。起因是 ams 1112 + 8000 从零初始化的 live 复核（`D:\adr078-verify\live-run-1112-8000\evidence\`）：
+`contains_point` 在房间棱柱的退化盖面三角上把**盒外的点**判成在内——`point_triangle.rs` 里点落在零面积三角
+（`va+vb+vc == 0`）的面 Voronoi 区时滑进给 2D 留的 `if solid { OnSolid, is_inside = true }`，复合形状的 best-first
+访问器再 `if solid && is_inside { ExitEarly }`；1112 的 `17496/72903`（盒角 x = −1183，R320 面板世界盒 x_min = 0.03）
+两版二进制都判 8/8 在 R320 内，`17496/122987`（面板本地系 y ≈ −1365，足迹 y ≥ −113）09-16 判 8/8、次日判 0/8——
+同一份几何、两天两个答案，差别只在哪些碎片经 f32 变换 / 焊接后恰好零面积。换谓词后同一座库整库重算：1112 少
+303 对 (构件, 面板)、110 对 `inside_count` 下调、0 对新增；8000 少 95 对、12 对下调；同进程两次重算与冷重启后
+重算逐字相同。真网格用例 `a_real_room_prism_never_admits_points_outside_its_own_box`（`tests/fixtures/room_panel_24381_34950_R320.mesh`）
+把「盒外点不得为成员」与那条旧路的假阳性一并钉住。**存量 `room_relate` 不会自己重算**：常驻代号只摘要拓扑与面板几何、
+不含谓词版本，要各 DESI 一次 `POST /dbnums/{dbnum}/model/rebuild`；`inside_count` 的数值口径随之变（此前含误计）。
+
 ### 4. 触发源：AABB 真的变了
 
 在重算包围盒那一步比对新旧值，**变了才入队**；同时给 `TransformOnly` 路径补上这一步

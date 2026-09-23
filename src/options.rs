@@ -115,6 +115,13 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub room_membership: Option<bool>,
 
+    /// 空间查询「所属专业」的派生规则（plant3d-web ADR 0067 / 计划 2026-09-20 §4.1）：
+    /// 候选属主链上 SITE 的 `NAME` 含哪组关键字（大小写不敏感）就落哪个专业值，首个命中的规则生效，
+    /// 都不中为 0「其他」。缺省即 legacy 后端 `spec_info.rs::site_name_to_spec_value` 那张表
+    /// （见 [`default_spec_value_rules`]），两种数据源对同一构件报同一个专业。
+    #[serde(default)]
+    pub spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
+
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
@@ -152,6 +159,18 @@ pub struct DbOptionExt {
     /// 一片内存批最多携带多少个已生成元素。详见 [`model_memory_slice_elements`]。
     #[serde(default)]
     pub model_memory_slice_elements: Option<usize>,
+    /// 进程内模型投影 overlay 最多常驻多少个根（没写 = 50,000；0 = 不限）。详见 [`model_overlay_max_roots`]。
+    #[serde(default)]
+    pub model_overlay_max_roots: Option<usize>,
+    /// 生成用 `DbSet` 池级元素缓存最多装多少个元素（没写 = 200,000；0 = 不限）。详见 [`model_element_cache_max_entries`]。
+    #[serde(default)]
+    pub model_element_cache_max_entries: Option<usize>,
+    /// 生成输入缓存最多同时留多少个库的 `GenerationInput`（没写 = 0 = 不限）。详见 [`model_generation_input_max_dbnums`]。
+    #[serde(default)]
+    pub model_generation_input_max_dbnums: Option<usize>,
+    /// 历史快照（`POST /model/history/generate` 造的 `Historical(*)` 作用域）最多同时留几格（没写 = 16；0 = 不限）。详见 [`model_historical_snapshots_max`]。
+    #[serde(default)]
+    pub model_historical_snapshots_max: Option<usize>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -167,17 +186,15 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub data_tx_elements: Option<u64>,
 
-    /// 旧开关：持久层换成进程内嵌的 kv-mem 引擎。显式 `false` 仍表示 external；
-    /// 两个形态键都不写时的新默认由 [`store_mode`] 决定。详见 [`in_memory_db`]。
-    ///
-    /// **已被 [`store_mode`] 取代**：它只表达得了 `mem` 那一档。保留是因为
-    /// 它散在环境变量、`/health`、`PersistTarget` 与两份 ADR 里，一次性删的面太大。
+    /// **已退出配置文件（ADR-083，2026-09-18）**：介质只由环境变量 [`STORE_MODE_ENV`] 决定，
+    /// 这一键与下面的 `store_mode` 都**不再参与裁决**。字段留着只为了旧配置照常解析、
+    /// 并在启动时由 [`store_mode_notices`] 点名「这一行已不生效」。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
 
-    /// 持久层的介质：`mem`（进程内嵌）/ `rocksdb`（连配置指的那台）。退役的
-    /// `external` / `spawned-rocksdb` / `spawned-mem` / `embedded-mem` 仍认、但会告警。
-    /// 详见 [`store_mode`]。
+    /// **已退出配置文件（ADR-083，2026-09-18）**：介质只由环境变量 [`STORE_MODE_ENV`] 决定。
+    /// 配置里再写 `store_mode = "..."` 不改变任何行为，只会在启动时被 [`store_mode_notices`]
+    /// 点名。字段留着是让旧配置照常解析、并能把那句过期的值念出来。详见 [`store_mode`]。
     #[serde(default)]
     pub store_mode: Option<String>,
 
@@ -226,7 +243,7 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_transform_cheap_path: Option<bool>,
 
-    /// 单元级发布（ADR-078 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
+    /// 单元级发布（ADR-080 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
     /// 只重建 `plan_update(S→T)` 点名的那几件，以 `Partial` 提交叠在根回执之下发布。
     /// `true` 才开；关着时计划与执行体的产物与今天逐位相同。详见 [`model_unit_level_publish`]。
     #[serde(default)]
@@ -508,6 +525,7 @@ impl From<DbOption> for DbOptionExt {
             model_incremental: None,
             model_incremental_types: None,
             room_membership: None,
+            spec_value_rules: None,
             catalogue_project_priority: None,
             project_search_paths: None,
             watch_dbnums: None,
@@ -517,6 +535,10 @@ impl From<DbOption> for DbOptionExt {
             model_post_regen_aabb_page: None,
             model_regen_execution_group: None,
             model_memory_slice_elements: None,
+            model_overlay_max_roots: None,
+            model_element_cache_max_entries: None,
+            model_generation_input_max_dbnums: None,
+            model_historical_snapshots_max: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -586,6 +608,8 @@ struct DbOptionExtFields {
     #[serde(default)]
     room_membership: Option<bool>,
     #[serde(default)]
+    spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
+    #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
     project_search_paths: Option<Vec<String>>,
@@ -603,6 +627,14 @@ struct DbOptionExtFields {
     model_regen_execution_group: Option<usize>,
     #[serde(default)]
     model_memory_slice_elements: Option<usize>,
+    #[serde(default)]
+    model_overlay_max_roots: Option<usize>,
+    #[serde(default)]
+    model_element_cache_max_entries: Option<usize>,
+    #[serde(default)]
+    model_generation_input_max_dbnums: Option<usize>,
+    #[serde(default)]
+    model_historical_snapshots_max: Option<usize>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -782,10 +814,103 @@ fn meshes_dir_from_asset_root(asset_root: Option<OsString>) -> Option<PathBuf> {
         .map(|root| root.join("meshes"))
 }
 
-pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
-    if let Some(meshes_dir) = meshes_dir_from_asset_root(std::env::var_os("PLANT_ASSET_ROOT")) {
-        option.meshes_path = Some(meshes_dir.to_string_lossy().into_owned());
+/// 网格目录的**唯一解析口**（ADR-068 追记 D7，2026-09-19）。
+///
+/// 顺序：`PLANT_ASSET_ROOT`（非空白）→ `<root>\meshes`；否则配置里的 `meshes_path`；否则
+/// [`asset_root`] 兜底出来的那个 `assets` 下的 `meshes`。与 `/assets` ServeDir 认同一枚环境变量、
+/// 同一条优先级——浏览器端取 `.mesh` 走 `/assets/meshes/<hash>.mesh`，挂的是 `asset_root()`；
+/// 生成侧落盘、`/api/v1/meshes/{hash}` 直读、常驻房间模型预热面板网格，都得是同一个目录。
+///
+/// 此前只有 `DbOptionExt.inner`（[`get_db_option_ext`] 经 [`apply_asset_root`]）带这一层覆盖，而
+/// 生成侧与十几处读侧直接拿 `aios_core::get_db_option().get_meshes_path()`（只认配置 `meshes_path`）。
+/// 配了 `meshes_path` 又设了 `PLANT_ASSET_ROOT` 的部署（2026-09-19 f13 实测）：初始化把网格写到
+/// `<ws>\meshes`，房间常驻模型到 `<ws>\assets\meshes` 找面板网格 → 230 块面板 `stage=mesh-warm`
+/// 全缺、房间 degraded，而两库初始化照样 in_sync——两条路径各自都「成功」，正是 ADR-075 D6 记过的
+/// 那种静默失效。所以它是一个函数而不是两处各算各的。
+///
+/// 只解析、不碰磁盘；要顺手建目录用 [`meshes_dir`] / [`meshes_dir_for`]。
+pub fn meshes_dir_of(option: &DbOption) -> PathBuf {
+    resolve_meshes_dir(
+        std::env::var_os("PLANT_ASSET_ROOT"),
+        option.meshes_path.as_deref(),
+        || asset_root(),
+    )
+}
+
+fn resolve_meshes_dir(
+    asset_root_env: Option<OsString>,
+    configured: Option<&str>,
+    fallback_asset_root: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    if let Some(dir) = meshes_dir_from_asset_root(asset_root_env) {
+        return dir;
     }
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(configured) => PathBuf::from(configured),
+        None => fallback_asset_root().join("meshes"),
+    }
+}
+
+/// 全局配置下的网格目录，**并保证目录存在**——沿用 `DbOption::get_meshes_path` 的建目录语义，
+/// 生成侧与读侧此前都靠它。全仓只许经这里（或 [`meshes_dir_for`]）拿网格目录，不许再直接调
+/// `get_meshes_path()`：`clippy.toml` 的 `disallowed-methods` 与 `meshes_dir_is_the_only_resolver`
+/// 两道钉守着。
+pub fn meshes_dir() -> PathBuf {
+    meshes_dir_for(aios_core::get_db_option())
+}
+
+/// 同 [`meshes_dir`]，按给定的那份配置解析（历史模型服务、用例夹具带着自己的 `DbOption` 时）。
+pub fn meshes_dir_for(option: &DbOption) -> PathBuf {
+    let dir = meshes_dir_of(option);
+    if let Err(error) = fs::create_dir_all(&dir) {
+        // 不像 `get_meshes_path` 那样 unwrap：目录建不出来的现场，随后第一笔落盘会用它自己的
+        // 错误说清是哪个文件；解析口本身不该成为 panic 源，但也不能一声不响。
+        eprintln!("⚠ 网格目录 {} 建不出来：{error}", dir.display());
+    }
+    dir
+}
+
+/// `PLANT_ASSET_ROOT` 把配置里的 `meshes_path` 压掉时给人看的那一句；两边同一个目录或没配
+/// `meshes_path` 时不出声。与 [`store_mode_notices`] 同一条纪律：设了却没生效的配置必须当场点名。
+pub fn meshes_dir_notice() -> Option<String> {
+    meshes_dir_notice_for(
+        std::env::var_os("PLANT_ASSET_ROOT"),
+        aios_core::get_db_option().meshes_path.as_deref(),
+    )
+}
+
+fn meshes_dir_notice_for(
+    asset_root_env: Option<OsString>,
+    configured: Option<&str>,
+) -> Option<String> {
+    let effective = meshes_dir_from_asset_root(asset_root_env)?;
+    let configured = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if same_dir(Path::new(configured), &effective) {
+        return None;
+    }
+    Some(format!(
+        "⚠ DbOption.toml 里的 meshes_path = {configured:?} 被环境变量 PLANT_ASSET_ROOT 压过：网格目录按 {} 生效\
+         （生成落盘、/assets/meshes、房间面板预热同一个目录，ADR-068 D7）。要用配置里那个目录，就别设 PLANT_ASSET_ROOT，\
+         或把它指到那个目录的上一级。",
+        effective.display()
+    ))
+}
+
+/// 两个目录是不是同一个：都在盘上就按规范化路径比（junction / 大小写 / 斜杠方向都吸掉），
+/// 有一个还不存在就退回字面比较。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// `DbOptionExt.inner` 那一格 `meshes_path` 写成解析后的**生效值**：`run_app` 往下传的
+/// `db_option`、设置向导的回显，读到的与 [`meshes_dir`] 是同一个答案，而不是各自再算一遍。
+pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
+    option.meshes_path = Some(meshes_dir_of(&option).to_string_lossy().into_owned());
     option
 }
 
@@ -819,6 +944,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_incremental: ext.model_incremental,
         model_incremental_types: ext.model_incremental_types.clone(),
         room_membership: ext.room_membership,
+        spec_value_rules: ext.spec_value_rules.clone(),
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         project_search_paths: ext.project_search_paths.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
@@ -828,6 +954,10 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_post_regen_aabb_page: ext.model_post_regen_aabb_page,
         model_regen_execution_group: ext.model_regen_execution_group,
         model_memory_slice_elements: ext.model_memory_slice_elements,
+        model_overlay_max_roots: ext.model_overlay_max_roots,
+        model_element_cache_max_entries: ext.model_element_cache_max_entries,
+        model_generation_input_max_dbnums: ext.model_generation_input_max_dbnums,
+        model_historical_snapshots_max: ext.model_historical_snapshots_max,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -921,6 +1051,126 @@ pub fn model_memory_slice_elements() -> usize {
         .max(1)
 }
 
+/// 环境变量名：一次性覆盖 [`model_overlay_max_roots`]，不必改配置文件。
+pub const MODEL_OVERLAY_MAX_ROOTS_ENV: &str = "AIOS_MODEL_OVERLAY_MAX_ROOTS";
+/// 环境变量名：一次性覆盖 [`model_element_cache_max_entries`]，不必改配置文件。
+pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES";
+/// 环境变量名：一次性覆盖 [`model_generation_input_max_dbnums`]，不必改配置文件。
+pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV: &str = "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS";
+/// 环境变量名：一次性覆盖 [`model_historical_snapshots_max`]，不必改配置文件。
+pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV: &str = "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX";
+
+/// [`model_overlay_max_roots`] 没写时的默认值（ADR-082 D5，2026-09-20 mem 档实测定的）：
+/// 4 库 7,743 根 / 59,929 条记录量 106.5 MB ≈ **13.8 KB / 根**（7997 单库 6,772 根 94.2 MB），
+/// 50,000 根 ≈ 0.7 GB——整套 AMS 样例 MDB 装得下六遍、生产「AMS 全量 12 万根」量级下把常驻压到四成。
+pub const MODEL_OVERLAY_MAX_ROOTS_DEFAULT: usize = 50_000;
+/// [`model_element_cache_max_entries`] 没写时的默认值（ADR-082 D5，同一次实测）：
+/// 每份 `DbSet` **3.6–4.7 KB / 元素**（7997 176,982 条 643.8 MB、1112 30,967 条 121.8 MB、8000 11,674 条 54.9 MB），
+/// 200,000 条 ≈ 0.7–0.95 GB / 库；样例里最大的 7997 整库一遍只装到 177k，默认值下一遍生成不会清一次，
+/// 清的只是长驻之后越过一整遍的累积。
+pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
+/// [`model_generation_input_max_dbnums`] 没写时的默认值：**0 = 不限**（ADR-084 D3，2026-09-22）。
+/// 与 ADR-082 D5 同一条路——先只加能力、行为一个字不变，真机量过「每窗重开一份 `GenerationInput` 的代价」
+/// （两库交替窗 × 上限 1）再定数字；候选 2–4（一个长驻实例通常同时活跃的 DESI 库数）。
+pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT: usize = 0;
+/// [`model_historical_snapshots_max`] 没写时的默认值（内存控制计划 P4 / D4，2026-09-22）：一次分析开几个时点对照，
+/// 十几格够用；每格是一个单元子树的完整投影（一根到一库不等），此前无界、`/health` 也看不见。
+pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT: usize = 16;
+
+/// 进程内模型投影 overlay（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个**根**
+/// （`DbOption.toml` 的 `model_overlay_max_roots`，环境变量 [`MODEL_OVERLAY_MAX_ROOTS_ENV`] 压过；
+/// 没写 = [`MODEL_OVERLAY_MAX_ROOTS_DEFAULT`]，**写 0 = 不限**。2026-09-20 用户拍板 d-149 时先按
+/// 「默认 0、现场先量再配」落地，同日 mem 档实测之后按用户要求定了默认值，见 ADR-082 D5）。
+///
+/// overlay 此前无界——一个根进来就一直在，直到显式失效或整库清空；长驻进程碰过的根越多它越大。
+/// 设了上限之后，每次发布与每次 durable ACK 之后按**最近一次提交**的先后（LRU）逐出**已 durable
+/// ACK 且与回执逐字相符**的根（`ack.medium.is_durable() && ack.matches(receipt)`——「不在 write-behind 待刷」
+/// 就是这句话的另一种说法：待刷的根要么还没 ACK、要么 ACK 已被新一版提交作废；2026-09-22 起 ACK 是房间边
+/// 唯一证据的根也排除，见 `ScopeState::ack_is_stray_room_evidence` / `ack_owes_room_edges`），
+/// 整根记录 + 回执 + ACK 一起掉；没有可逐出的就不逐（未落盘的一条不丢）。只在 durable 介质（`store_mode().is_durable()`）下生效：
+/// 嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。逐出之后读路对该根直读 RocksDB
+/// （本来就支持），单元级发布 / 刚体前移拿不到 S 端基线回退 regen，`RoomOnly` 整库房间重算对
+/// 冷根从库里读行再算（ADR-073 D13 2026-09-20 改口）。
+///
+/// 按根数不按字节：一根从 1 条到上千条记录不等，但逐出单位就是整根，按字节记账要逐条估算，
+/// 数量零成本且直观；现场先量（`/health.model_cache.resident_roots`）再配。
+pub fn model_overlay_max_roots() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_OVERLAY_MAX_ROOTS_ENV).ok().as_deref(),
+        load_ext_fields().model_overlay_max_roots,
+        MODEL_OVERLAY_MAX_ROOTS_DEFAULT,
+    )
+}
+
+/// 生成用 `DbSet` 的池级元素缓存（[`model_element_cache`]）最多装多少个**元素**
+/// （`DbOption.toml` 的 `model_element_cache_max_entries`，环境变量
+/// [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV`] 压过；没写 = [`MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT`]，
+/// **写 0 = 不限**，d-149 / ADR-082 D5）。
+///
+/// 缓存体在 vendor `e3d-io` 的 `DbSet::with_element_cache_limit`：满了**整张清**（与四张版本表
+/// 缓存同一个做法，零簿记），下一次读再从文件装。每份 `DbSet` 各算——生成输入缓存
+/// （`GENERATION_INPUT_CACHE`）每库留一份，所以进程里的上限是「库数 × 这个数」。
+/// 关掉缓存（[`MODEL_ELEMENT_CACHE_ENV`]`=false`）时这个数没有意义。
+pub fn model_element_cache_max_entries() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_element_cache_max_entries,
+        MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+    )
+}
+
+/// 生成输入缓存（`e3d_model_service::GENERATION_INPUT_CACHE`）最多同时留多少个**库**的 `GenerationInput`
+/// （`DbOption.toml` 的 `model_generation_input_max_dbnums`，环境变量 [`MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV`]
+/// 压过；没写 = [`MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT`] = **0 = 不限**，ADR-084）。
+///
+/// 每份 `GenerationInput` = 一份 `DbSet`（MDB 全部 DESI 文件都开着 + 池级元素缓存，≤ `model_element_cache_max_entries`
+/// × 3.6–4.7 KB ≈ 0.7–0.95 GB）+ 一份 `SourceIndex`；此前只在同库换 sesno 时替换、初始化收尾时释放，长驻进程碰过
+/// N 个 DESI 库就留 N 份——ADR-082 D4 管住了单份的元素数，管不住这一维。设了上限之后按**最近一次生成用到**的先后
+/// 逐库整份出（命中也刷新——保护的正是「最近在生成的库」这份热度），上限 ≥ 活跃库数时与不设逐位相同；被逐的库
+/// 下一窗从文件重开（元素缓存重新变冷，产物逐字不变）。按库数不按字节：与 d-149 同一口径，零簿记。
+pub fn model_generation_input_max_dbnums() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_generation_input_max_dbnums,
+        MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
+    )
+}
+
+/// 历史快照最多同时留几格（`DbOption.toml` 的 `model_historical_snapshots_max`，环境变量
+/// [`MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV`] 压过；没写 = [`MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT`] = 16，**写 0 = 不限**）。
+///
+/// `POST /model/history/generate` 每个不同的 `snapshot_key` 在投影存储里造一格完整的 `Historical(<key>)` 作用域，
+/// 此前只有显式 `DELETE` 或同 key 重生成才丢——没 TTL、没条数上限，`/health` 也看不见。设了上限之后，
+/// 发布第 N+1 格时按**最近一次 generate** 的先后把最旧的那格连回执一起丢（与 `DELETE` 同一条路，
+/// 之后再查它是既有的 `SNAPSHOT_NOT_FOUND`）；同 key 重生成不算新格。按条数不按字节、不做 TTL（d-149 口径）。
+/// 现值 `/health.model_cache.historical`。
+pub fn model_historical_snapshots_max() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_historical_snapshots_max,
+        MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
+    )
+}
+
+/// 数量上限的裁决：环境变量是合法非负整数就用它，拼错了当没设（回配置），配置没写 = `default`；
+/// 无论哪一层给的 **0 都是「不限」**——要关掉上限就显式写 0。
+fn effective_count_limit(
+    env_override: Option<&str>,
+    configured: Option<usize>,
+    default: usize,
+) -> usize {
+    env_override
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .or(configured)
+        .unwrap_or(default)
+}
+
 pub fn model_root_inflight_max() -> usize {
     match model_concurrency_mode() {
         ModelConcurrencyMode::Legacy => 1,
@@ -935,39 +1185,12 @@ pub fn model_full_rebuild_enabled() -> bool {
     load_ext_fields().model_full_rebuild_enabled.unwrap_or(true)
 }
 
-/// 环境变量名：一次性覆盖 [`in_memory_db`]，不必改配置文件。
+/// 旧环境变量名（`AIOS_IN_MEMORY_DB`）。**已不再决定介质**（ADR-083）：还设着的话只会在
+/// 启动时被 [`store_mode_notices`] 点名，提醒改用 [`STORE_MODE_ENV`]。
 pub const IN_MEMORY_DB_ENV: &str = "AIOS_IN_MEMORY_DB";
 
-/// 持久层用进程内嵌的 kv-mem 引擎，而不是 `v_ip:v_port` 那台 SurrealDB
-/// （`DbOption.toml` 的 `in_memory_db`，**默认 false**）。
-///
-/// 换掉的只是介质：`SUL_DB` 是 `Surreal<Any>`，引擎选择对上层不可见，因此初始化
-/// 解析、增量窗口写回、模型与房间派生数据全部照原路走，只是落在 kv-mem 而不是
-/// rocksdb。ADR-017 的暂存窗口本来就是 `mem://`，开着这个开关之后写回目标也成了
-/// mem——两者仍是两个独立实例，窗口语义（journal、分块重放、水位发布）一个字
-/// 都没变。
-///
-/// **代价有两条，都不可逆**：进程一退整库就没了，崩溃现场只剩日志；而且库进了
-/// 进程内，外面没有端口可连，`rvm_verify`、`/sql` 探针、`Capture-*Evidence.ps1`
-/// 这类靠 ws 连库的工具全部够不着。要留证据或要让别的进程读库，就别开——那时
-/// 该用的是部署脚本的 `-InMemory`（外部 surreal 进程换 memory 后端，端口还在）。
-///
-/// 环境变量 [`IN_MEMORY_DB_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
-pub fn in_memory_db() -> bool {
-    effective_in_memory_db(
-        load_ext_fields().in_memory_db,
-        std::env::var(IN_MEMORY_DB_ENV).ok().as_deref(),
-    )
-}
-
-fn effective_in_memory_db(configured: Option<bool>, env_override: Option<&str>) -> bool {
-    env_override
-        .and_then(parse_bool_flag)
-        .or(configured)
-        .unwrap_or(false)
-}
-
-/// 环境变量名：一次性覆盖 [`store_mode`]，不必改配置文件。
+/// 环境变量名：**介质唯一的决定者**（ADR-083，2026-09-18）。`mem` / `rocksdb`，不设 = `rocksdb`。
+/// 详见 [`store_mode`]。
 pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
 
 /// Environment override for [`model_cache_mode`].
@@ -1047,59 +1270,42 @@ impl StoreMode {
     }
 }
 
-/// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
-/// [`STORE_MODE_ENV`] 压过它）。
+/// 本进程生效的存储形态。**只由环境变量 [`STORE_MODE_ENV`] 决定**（ADR-083，2026-09-18）：
+/// `AIOS_STORE_MODE=mem` / `AIOS_STORE_MODE=rocksdb`，不设 = **`rocksdb`**。
 ///
-/// **默认 `mem`**：不配任何东西就能起来，库在进程里。要落盘的现场必须显式写
-/// `store_mode = "rocksdb"` 并把 `v_ip:v_port` 指到一台真在跑的 SurrealDB 上；
-/// 仓内夹具均由 `every_db_option_fixture_declares_its_store_mode_and_data_face`
-/// 护栏钉住，不依赖默认值。
+/// `DbOption.toml` 里的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB`
+/// **都不再参与裁决**。2026-09-18 之前它们与这个环境变量分层叠加（环境变量 > 配置 > 旧开关），
+/// 现场就真踩过「配置写 rocksdb、环境里残留 mem、服务按 mem 起来、属性行一直不进库、日志一个字
+/// 没提」。介质是「这一次进程怎么起」的事，跟启动命令走；配置文件描述的是「这个工程长什么样」，
+/// 它不该替进程挑介质。旧键还留在文件里的，由 [`store_mode_notices`] 逐条点名，
+/// 仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写。
 ///
-/// 这个默认同时决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），
-/// 所以漏写这一项换掉的不只是介质，还有整个数据面。
+/// **不设 = `rocksdb`**（ADR-083 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻了过来）。这个值同时
+/// 决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），所以漏设它换掉的不只是介质，
+/// 还有整个数据面——而两种漏法的代价差得很远：兜底 `mem` 时服务照常起、模型照常对，只有属性行
+/// 一直不进库、校审域整域 503，症状要几个小时才浮出来；兜底 `rocksdb` 时地址上没库就当场
+/// `SurrealDB 连接失败` 退出，一眼就知道漏了什么。所以让默认落在会当场喊的那一侧。
 ///
-/// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `mem`，与那个旧开关今天的行为
-/// 逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的回 `rocksdb`——那句显式的
-/// `false` 是人的意图，不能被默认覆盖。两个键都没写时才采用 `mem`。
-/// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
-/// 认不出的值当没设，同样出声。
+/// 代价是「解压即跑」不再靠默认兜着：发布包由 `Start-AMS.ps1` 在不给 `-StoreMode` 时**显式**
+/// 回填 `AIOS_STORE_MODE=mem`（ADR-083 D5），出厂体验一个字没变。认不出的值当没设，并出声。
 pub fn store_mode() -> StoreMode {
-    let ext = load_ext_fields();
-    effective_store_mode(
-        ext.store_mode.as_deref(),
-        std::env::var(STORE_MODE_ENV).ok().as_deref(),
-        ext.in_memory_db,
-        std::env::var(IN_MEMORY_DB_ENV).ok().as_deref(),
-    )
+    effective_store_mode(std::env::var(STORE_MODE_ENV).ok().as_deref())
 }
 
-fn effective_store_mode(
-    configured: Option<&str>,
-    env_override: Option<&str>,
-    configured_in_memory_db: Option<bool>,
-    in_memory_db_env: Option<&str>,
-) -> StoreMode {
-    if let Some(mode) = parse_store_mode(env_override).or_else(|| parse_store_mode(configured)) {
-        return mode;
-    }
-    // 没写 `store_mode` 时先尊重旧开关，语义与它今天的两态逐字相同：
-    // `true` = 库在进程里，`false` = 过配置指的那台库。两个键都没写才走默认 mem。
-    match in_memory_db_env
-        .and_then(parse_bool_flag)
-        .or(configured_in_memory_db)
-    {
-        Some(true) => StoreMode::Mem,
-        Some(false) => StoreMode::RocksDb,
-        None => StoreMode::Mem,
-    }
+/// 签名里**只有环境变量这一格**：配置文件想参与裁决，得先改这个签名——那就是在改 ADR-083。
+///
+/// 兜底那一档是 `rocksdb`（ADR-083 D6，2026-09-18 当日翻过来的）：漏设的代价要落在
+/// 「起不来、当场报连不上」这一侧，不能落在「起来了、但属性行不进库、日志没人喊」那一侧。
+fn effective_store_mode(env_value: Option<&str>) -> StoreMode {
+    parse_store_mode(env_value).unwrap_or(StoreMode::RocksDb)
 }
 
 /// `Some(mode)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值
-/// （后者要出声，见 [`store_mode_notice`]）。
+/// （后者要出声，见 [`store_mode_notices`]）。
 ///
 /// 退役的两档仍然解析得出来，但**落到的介质变了**：`spawned-mem` 从「有端口的内存库」
 /// 变成进程内嵌的 `mem`，`spawned-rocksdb` 从「自己拉一台」变成「连配置指的那台」。
-/// 让它们静默改道是不行的——现场配置照抄了好几年，[`retired_store_mode_notice`]
+/// 让它们静默改道是不行的——现场脚本照抄了好几年，[`store_mode_notices`]
 /// 负责在启动时把这件事说出来。
 pub(crate) fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
     match normalized_store_mode(raw)?.as_str() {
@@ -1131,59 +1337,107 @@ fn retired_store_mode_meaning(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// `store_mode` 设了却认不出、或与 `in_memory_db` 打架时的一句告警
-/// （[`data_read_mode_notice`] 同款纪律：静默吃掉一个设了的开关是最高级别缺陷之一）。
-/// 返回 `Some` 时调用方必须把它打出来。
-pub fn store_mode_notice() -> Option<String> {
+/// 介质这一件事上所有该出声的地方（[`data_read_mode_notice`] 同款纪律：静默吃掉一个设了的
+/// 开关是最高级别缺陷之一）。返回非空时调用方必须**逐条**打出来。
+///
+/// 四种情形：环境变量认不出 / 是退役写法；配置文件里还写着 `store_mode` 或 `in_memory_db`
+/// （2026-09-18 起它们不再生效，ADR-083）；旧环境变量 `AIOS_IN_MEMORY_DB` 还设着。
+/// 后三种要把「文件里那句」与「实际跑的那档」并排念出来——两边不一样时人第一反应是去翻配置，
+/// 翻到的还是那句过期的值。
+pub fn store_mode_notices() -> Vec<String> {
     let ext = load_ext_fields();
-    store_mode_notice_for(
-        ext.store_mode.as_deref(),
+    store_mode_notices_for(
         std::env::var(STORE_MODE_ENV).ok().as_deref(),
+        ext.store_mode.as_deref(),
         ext.in_memory_db,
+        std::env::var(IN_MEMORY_DB_ENV).ok().as_deref(),
     )
 }
 
-fn store_mode_notice_for(
-    configured: Option<&str>,
-    env_override: Option<&str>,
+fn store_mode_notices_for(
+    env_value: Option<&str>,
+    configured_store_mode: Option<&str>,
     configured_in_memory_db: Option<bool>,
-) -> Option<String> {
-    for (source, raw) in [(STORE_MODE_ENV, env_override), ("store_mode", configured)] {
-        let Some(raw) = raw else { continue };
-        if raw.trim().is_empty() || parse_store_mode(Some(raw)).is_some() {
-            continue;
+    in_memory_db_env: Option<&str>,
+) -> Vec<String> {
+    let effective = effective_store_mode(env_value);
+    let mut notices = Vec::new();
+
+    // 1. 环境变量本身：认不出 → 按默认；退役写法 → 仍认，但落到的介质变了，必须当场说清。
+    if let Some(raw) = env_value.filter(|raw| !raw.trim().is_empty()) {
+        match parse_store_mode(Some(raw)) {
+            None => notices.push(format!(
+                "⚠ {STORE_MODE_ENV} = {raw:?} 认不出来（只认 mem / rocksdb），按未设置处理：本进程按 {} 跑",
+                effective.as_str()
+            )),
+            Some(declared) => {
+                let normalized = normalized_store_mode(Some(raw)).unwrap_or_default();
+                if let Some(meaning) = retired_store_mode_meaning(&normalized) {
+                    notices.push(format!(
+                        "⚠ {STORE_MODE_ENV} = {normalized:?} 是退役写法，已按 {:?} 生效：{meaning}。\
+                         请改成 {STORE_MODE_ENV}={}",
+                        declared.as_str(),
+                        declared.as_str()
+                    ));
+                }
+            }
         }
-        return Some(format!(
-            "⚠ {source} = {raw:?} 认不出来（只认 mem / rocksdb），按未设置处理"
+    }
+
+    // 2. 配置文件里还写着 store_mode：2026-09-18 起它一个字都不决定（ADR-083）。
+    //    2026-09-18 之前真踩过的坑：配置写着 `store_mode = "rocksdb"`，上一条命令残留的
+    //    `AIOS_STORE_MODE=mem` 把它压成了内存库——服务照常起、模型照常对，只有属性行一直不进库，
+    //    而启动日志里没有一个字提过配置被压。现在配置不参与裁决了，但文件里那句还会骗人，
+    //    所以两边不一样时要**并排念出来**并说清该设哪个环境变量。
+    if let Some(raw) = configured_store_mode.filter(|raw| !raw.trim().is_empty()) {
+        let mut line = format!(
+            "⚠ DbOption.toml 里的 store_mode = {raw:?} 已不再生效——介质只由环境变量 {STORE_MODE_ENV} 决定\
+             （ADR-083，2026-09-18）；本进程按 {} 跑（{}）。",
+            effective.as_str(),
+            store_mode_source_for(env_value)
+        );
+        if let Some(wanted) = parse_store_mode(Some(raw)).filter(|wanted| *wanted != effective) {
+            line.push_str(&format!(
+                "**两边不是同一档**：要按配置里那一档跑，启动前设 {STORE_MODE_ENV}={}。",
+                wanted.as_str()
+            ));
+        }
+        line.push_str("请把这一行从配置里删掉");
+        notices.push(line);
+    }
+
+    // 3. 更老的那个开关同理：配置键与旧环境变量都只剩「点名」这一个用途。
+    if let Some(flag) = configured_in_memory_db {
+        notices.push(format!(
+            "⚠ DbOption.toml 里的 in_memory_db = {flag} 已不再生效（旧开关，随 store_mode 一起退出配置文件，\
+             ADR-083）；本进程按 {} 跑。请删掉这一行，要选介质用 {STORE_MODE_ENV}=mem / rocksdb",
+            effective.as_str()
         ));
     }
-    // 旧字面值：仍然认，但落到的介质变了，必须当场说清楚换成了什么。
-    for (source, raw) in [(STORE_MODE_ENV, env_override), ("store_mode", configured)] {
-        let Some(normalized) = normalized_store_mode(raw) else {
-            continue;
-        };
-        let Some(meaning) = retired_store_mode_meaning(&normalized) else {
-            continue;
-        };
-        let declared = parse_store_mode(raw).map_or("?", StoreMode::as_str);
-        return Some(format!(
-            "⚠ {source} = {normalized:?} 是退役写法，已按 {declared:?} 生效：{meaning}。\
-             请把配置改成 store_mode = {declared:?}"
+    if let Some(raw) = in_memory_db_env.filter(|raw| !raw.trim().is_empty()) {
+        notices.push(format!(
+            "⚠ 环境变量 {IN_MEMORY_DB_ENV} = {raw:?} 已不再决定介质（ADR-083），本进程按 {} 跑；\
+             请改用 {STORE_MODE_ENV}=mem / rocksdb",
+            effective.as_str()
         ));
     }
-    // 两个键都写、且说的不是同一件事：以 `store_mode` 为准，但不许静默。
-    let declared = parse_store_mode(env_override).or_else(|| parse_store_mode(configured))?;
-    match configured_in_memory_db {
-        Some(true) if declared != StoreMode::Mem => Some(format!(
-            "⚠ 配置同时写了 in_memory_db = true 与 store_mode = {:?}：以 store_mode 为准。\
-             in_memory_db 是 store_mode 之前的旧开关，只表达得了 mem 那一档",
-            declared.as_str()
-        )),
-        Some(false) if declared != StoreMode::RocksDb => Some(format!(
-            "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
-            declared.as_str()
-        )),
-        _ => None,
+    notices
+}
+
+/// 生效的 [`store_mode`] 是**谁定的**：环境变量，还是没设（或认不出）时的默认。
+///
+/// 启动横幅只说「现在是哪一档」，说不清「这一档是谁定的」——配置文件里那句过期的
+/// `store_mode = "rocksdb"` 还在时，人第一反应是去翻配置，翻到的还是它。横幅带上这一句，
+/// 一眼就知道下一步该动的是启动命令，不是文件。
+pub fn store_mode_source() -> &'static str {
+    store_mode_source_for(std::env::var(STORE_MODE_ENV).ok().as_deref())
+}
+
+fn store_mode_source_for(env_value: Option<&str>) -> &'static str {
+    if parse_store_mode(env_value).is_some() {
+        "环境变量 AIOS_STORE_MODE"
+    } else {
+        "默认 rocksdb（环境变量 AIOS_STORE_MODE 没设或认不出）"
     }
 }
 
@@ -1245,7 +1499,7 @@ fn parse_data_face(raw: Option<&str>) -> Option<DataFace> {
     }
 }
 
-/// `data_face` 设了却认不出时的一句告警（[`store_mode_notice`] 同款纪律）。
+/// `data_face` 设了却认不出时的一句告警（[`store_mode_notices`] 同款纪律）。
 /// 返回 `Some` 时调用方必须把它打出来。
 pub fn data_face_notice() -> Option<String> {
     let ext = load_ext_fields();
@@ -1258,7 +1512,7 @@ pub fn data_face_notice() -> Option<String> {
     let mode = store_mode();
     let effective = data_face_for_store(mode);
     (requested != effective).then(|| format!(
-        "⚠ data_face={} 与 store_mode={} 的备份范围不符，采用 {}：内存库仅存模型，RocksDB 备份属性与模型",
+        "⚠ data_face={} 与介质 {}（由 AIOS_STORE_MODE 决定）的备份范围不符，采用 {}：内存库仅存模型，RocksDB 备份属性与模型",
         requested.as_str(), mode.as_str(), effective.as_str()
     ))
 }
@@ -1659,6 +1913,64 @@ fn effective_spatial_compute(env_override: Option<&str>) -> bool {
 // 「房间阶段」没了，开关只剩一个永远不被问的布尔；常驻房间模型是逐根计算的算法输入，
 // 只随 `spatial_compute` 与 project_hd / project_hh 特性一道门走。
 
+/// `DbOption.toml` 里 `spec_value_rules` 的一条：`{ value = 1, keywords = ["PIPE"] }`。
+///
+/// `value` 是专业值（前端 `SiteSpecValue`：1 管道 / 2 电气 / 3 仪表 / 4 暖通 / 5 土建 / 6 结构，0 = 其他），
+/// `keywords` 是 SITE 名里要含的片段（大小写不敏感；中文原样比较）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecValueRuleConfig {
+    pub value: i64,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+/// 缺省的专业派生规则 = legacy 后端 `plant-model-gen/src/fast_model/export_model/spec_info.rs::site_name_to_spec_value`
+/// 那张表，逐字搬过来、顺序也一样（首个命中生效；`INST` 排在 `HVAC` 前，`CIVI` 之后才是 `STRU`）。
+pub fn default_spec_value_rules() -> Vec<SpecValueRuleConfig> {
+    let rule = |value: i64, keywords: &[&str]| SpecValueRuleConfig {
+        value,
+        keywords: keywords.iter().map(|word| word.to_string()).collect(),
+    };
+    vec![
+        rule(1, &["PIPE"]),
+        rule(2, &["ELEC", "DIANQI", "电气"]),
+        rule(3, &["INST", "INSTR"]),
+        rule(4, &["HVAC"]),
+        rule(5, &["CIVI", "CIVIL", "ARCH"]),
+        rule(6, &["STRU", "STRUCT"]),
+    ]
+}
+
+/// 生效的专业派生规则：配置里写了（且非空）用配置的，否则缺省表。
+/// 关键字为空的规则不算（永远匹配不上，也不该把后面的规则挡住）。
+pub fn spec_value_rules() -> Vec<SpecValueRuleConfig> {
+    effective_spec_value_rules(load_ext_fields().spec_value_rules.as_deref())
+}
+
+fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec<SpecValueRuleConfig> {
+    let rules: Vec<SpecValueRuleConfig> = configured
+        .filter(|rules| !rules.is_empty())
+        .map(|rules| rules.to_vec())
+        .unwrap_or_else(default_spec_value_rules)
+        .into_iter()
+        .map(|rule| SpecValueRuleConfig {
+            value: rule.value,
+            keywords: rule
+                .keywords
+                .into_iter()
+                .map(|word| word.trim().to_string())
+                .filter(|word| !word.is_empty())
+                .collect(),
+        })
+        .filter(|rule| !rule.keywords.is_empty())
+        .collect();
+    if rules.is_empty() {
+        default_spec_value_rules()
+    } else {
+        rules
+    }
+}
+
 /// 环境变量名：一次性覆盖 [`room_membership`]，不必改配置文件。
 pub const ROOM_MEMBERSHIP_ENV: &str = "AIOS_ROOM_MEMBERSHIP";
 
@@ -1823,9 +2135,12 @@ pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA
 /// 开着时 `WindowRootSources::collect` 经 e3d-model `plan_update_with` 给规划器一条谓词
 /// （`window_root_plan::change_metadata_tier`）：一个 Modified 候选的改动**全部**落在
 /// `model_impact::attribute_is_metadata_only` 放行的属性上（E3D 字典 DCHC=0 **且** 生成器不读——
-/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）、且成员 /
-/// 属主 / 类型 / opaque 都没动 → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute`
-/// 新档两个计数）、不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收（候选与它的祖先
+/// 两票；S6 之前是效果表 DataOnly ∧ DCHC=0 的 `NAME / DESC / PURP / FUNC / LCHKDA` 五个；2026-09-17 Q6 起
+/// 戳 `CACHID` 由 e3d-model 的戳表拿第一票——字典按构造收不到它；2026-09-19 起 `SPAMAP` 同档进戳表）、且成员 /
+/// 属主 / 类型 / opaque 都没动
+/// → 记 `no_model`（回执分 `metadata_only` 老名单 / `unread_attribute` 新档 / `cache_stamp` 只戳三个计数）、
+/// 不上卷、不级联；它的根不因它进 `regen`；`cache_stamp` 那一档还从凭证前移比例护栏的分子里净掉
+/// （`window_root_plan::WindowImpact::cache_stamp`，2026-09-19——整库戳扫写不再把窗顶成退化）。账本照记、闭包种子照收（候选与它的祖先
 /// 链照进闭包），房间结构触发（改名进 `RoomRecalcPanel`）与设计引用级联都不受影响；闭包里能少的只有
 /// 放行候选本来会触发的粗级联扇出（桥架分支「子树里改了任何东西就整条重建」那片单元），它们的根按
 /// 两票前移。此前 direct 路径对「改了哪个属性」一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
@@ -1888,7 +2203,7 @@ fn effective_model_transform_cheap_path(
 /// 环境变量名：一次性覆盖 [`model_unit_level_publish`]，不必改配置文件。
 pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 
-/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-078 D9，
+/// 单元级发布开不开（`DbOption.toml` 的 `model_unit_level_publish`，**默认 false**，ADR-080 D9，
 /// 2026-09-16）。
 ///
 /// 开着时 DESI 窗口规划器在计划上带出本窗的基线 S（`ModelUpdatePlan::unit_publish_base_sesno`），
@@ -1900,7 +2215,16 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 两条便宜路的优先序定死为 **transform 优先、unit 兜底**（实施约束 7）：一根同时判成刚体前移与
 /// 单元级时先走 [`model_transform_cheap_path`] 那一路，它回退下来的才试单元级，再不成才整根重算。
 ///
-/// 这是「少算」方向的开关，开门要过 ADR-078 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
+/// 开着时规划器还会把 `regen` 里**只被账本去向 `no_model` 的候选碰到**的根点名
+/// （`ModelUpdatePlan::unit_publish_no_model_only_roots`，ADR-080 D10，2026-09-17）：那种根这一窗名下没有一件
+/// 几何要变（Q6 第一手已把只跳 `CACHID` 戳的候选从上卷里摘掉），单元路对它切出的空子计划发一份空的 `Partial`
+/// 只推回执，不再整根重算。**D10 的前置写死**（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：
+/// [`model_structural_connection_cascade`] / [`model_cable_endpoint_cascade`] / [`model_design_reference_cascade`]
+/// 三条**都开着**规划器才分桶——跨根设计引用的引用者只被盖戳这一形状，今天靠戳做种子整根 regen 收住，D10 之后
+/// 只有级联的目标集能把引用者的根挡在桶外；有一条关着，整窗一根都不点名、空子计划照旧回退整根 regen，
+/// 计划 warnings 里报一句为什么。
+///
+/// 这是「少算」方向的开关，开门要过 ADR-080 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
 /// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_unit_level_publish() -> bool {
     effective_default_off_switch(
@@ -2651,36 +2975,23 @@ mod tests {
         );
     }
 
-    /// 缺配置就是连外部 SurrealDB。内存模式会把整库关进进程里，进程一退就没了，
-    /// 外部工具也连不上——这种取舍不能靠「没写就当开」拿到。
+    /// **默认是 `rocksdb`**（ADR-083 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻过来）：环境变量
+    /// 没设、空白、或拼错，一律落到落盘那一档。
+    ///
+    /// 翻的理由是两种漏法的代价不对等，不是哪一档更常用：兜底 `mem` 时服务照常起、模型照常对，
+    /// 只有属性行一直不进库、校审域整域 503——2026-09-18 现场为此查了半天；兜底 `rocksdb` 时
+    /// 地址上没库就当场 `SurrealDB 连接失败` 退出，一眼就知道漏了什么。默认要落在会喊的那一侧。
+    /// 「解压即跑」改由 `Start-AMS.ps1` 显式回填 `AIOS_STORE_MODE=mem` 保住（ADR-083 D5），
+    /// 不再靠这个默认兜着。
     #[test]
-    fn the_persistent_store_stays_external_unless_someone_asks_for_memory() {
-        assert!(!effective_in_memory_db(None, None));
-        assert!(effective_in_memory_db(Some(true), None));
-        assert!(!effective_in_memory_db(Some(false), None));
-    }
-
-    /// 两个方向都要能压：配置里写死内存模式的调试部署，也得有办法这一次跑回
-    /// 外部库去留证据。拼错的值退回配置值，理由同 [`effective_startup_autorun`]。
-    #[test]
-    fn the_in_memory_db_env_override_wins_in_both_directions() {
-        assert!(effective_in_memory_db(Some(false), Some("on")));
-        assert!(!effective_in_memory_db(Some(true), Some("0")));
-        assert!(effective_in_memory_db(None, Some("yes")));
-        assert!(effective_in_memory_db(Some(true), Some("ture")));
-        assert!(!effective_in_memory_db(Some(false), Some("ture")));
-        assert!(!effective_in_memory_db(None, Some("ture")));
-    }
-
-    /// **默认是 `mem`**：两个形态键都没写 = 进程内嵌，不配任何东西就能起来。
-    /// 落盘部署必须显式写 `rocksdb`，不能让现场配置靠一个会变化的默认值决定介质。
-    #[test]
-    fn the_default_store_mode_is_mem() {
-        assert_eq!(effective_store_mode(None, None, None, None), StoreMode::Mem);
+    fn the_default_store_mode_is_rocksdb() {
+        assert_eq!(effective_store_mode(None), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some("")), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some("   ")), StoreMode::RocksDb);
         assert_eq!(
-            effective_store_mode(Some("rocksdb"), None, None, None),
-            StoreMode::RocksDb,
-            "落盘库仍然可显式选择"
+            effective_store_mode(Some("mem")),
+            StoreMode::Mem,
+            "内存档仍然可显式选择——它只是不再是漏设时的那一档"
         );
     }
 
@@ -2702,43 +3013,24 @@ mod tests {
         );
     }
 
-    /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
+    /// **介质只由环境变量决定**（ADR-083）。`effective_store_mode` 的签名里根本没有配置那一格，
+    /// 这条用例钉的是「配置文件里写什么都换不了介质」这件事本身；下划线与大小写都认
+    /// （`ROCKSDB` 是环境变量里最自然的写法，认不出它只会让人以为开关没生效）。
     #[test]
-    fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
+    fn only_the_environment_variable_decides_the_store_mode() {
+        assert_eq!(effective_store_mode(Some("ROCKSDB")), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some(" Mem ")), StoreMode::Mem);
         assert_eq!(
-            effective_store_mode(None, None, Some(true), None),
-            StoreMode::Mem
+            effective_store_mode(Some("mem_")),
+            StoreMode::RocksDb,
+            "认不出的值当没设，落到默认那一档"
         );
-        assert_eq!(
-            effective_store_mode(None, None, Some(false), None),
-            StoreMode::RocksDb
-        );
-        // 旧开关的环境变量压过它自己的配置值，与 `in_memory_db()` 同一规则。
-        assert_eq!(
-            effective_store_mode(None, None, Some(false), Some("1")),
-            StoreMode::Mem
-        );
-    }
-
-    /// 环境变量压过配置，配置压过旧开关；下划线与大小写都认（`ROCKSDB` 是环境变量里
-    /// 最自然的写法，认不出它只会让人以为开关没生效）。
-    #[test]
-    fn the_store_mode_env_override_wins_over_config_and_the_legacy_flag() {
-        assert_eq!(
-            effective_store_mode(Some("rocksdb"), Some("mem"), Some(false), None),
-            StoreMode::Mem
-        );
-        assert_eq!(
-            effective_store_mode(Some("mem"), None, Some(true), None),
-            StoreMode::Mem
-        );
-        assert_eq!(
-            effective_store_mode(None, Some("ROCKSDB"), Some(true), None),
-            StoreMode::RocksDb
-        );
-        assert_eq!(
-            effective_store_mode(Some(" Mem "), None, None, None),
-            StoreMode::Mem
+        // 配置里那两个键就算写了、就算与环境变量相反，也一个字都不改介质：
+        // 它们只出现在告警的参数表里，不出现在裁决的参数表里。
+        assert_eq!(effective_store_mode(Some("mem")), StoreMode::Mem);
+        assert!(
+            !store_mode_notices_for(Some("mem"), Some("rocksdb"), Some(false), None).is_empty(),
+            "写了却不生效的键必须出声"
         );
     }
 
@@ -2746,16 +3038,14 @@ mod tests {
     /// 一个 `memm` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
     #[test]
     fn an_unrecognised_store_mode_is_ignored_but_never_silent() {
-        assert_eq!(
-            effective_store_mode(Some("memm"), None, Some(false), None),
-            StoreMode::RocksDb
-        );
-        let notice =
-            store_mode_notice_for(Some("memm"), None, None).expect("认不出的 store_mode 必须出声");
-        assert!(notice.contains("memm"), "{notice}");
-        assert!(notice.contains("mem / rocksdb"), "{notice}");
-        assert!(store_mode_notice_for(Some("rocksdb"), None, None).is_none());
-        assert!(store_mode_notice_for(None, None, None).is_none());
+        assert_eq!(effective_store_mode(Some("memm")), StoreMode::RocksDb);
+        let notices = store_mode_notices_for(Some("memm"), None, None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("memm"), "{notices:?}");
+        assert!(notices[0].contains("mem / rocksdb"), "{notices:?}");
+        assert!(store_mode_notices_for(Some("rocksdb"), None, None, None).is_empty());
+        assert!(store_mode_notices_for(Some("  "), None, None, None).is_empty());
+        assert!(store_mode_notices_for(None, None, None, None).is_empty());
     }
 
     /// 退役的四个旧字面值仍然解析得出来，但**落到的介质变了**，不许静默改道。
@@ -2778,36 +3068,93 @@ mod tests {
         assert_eq!(parse_store_mode(Some("embedded-mem")), Some(StoreMode::Mem));
         assert_eq!(parse_store_mode(Some("kv-mem")), Some(StoreMode::Mem));
 
-        let notice = store_mode_notice_for(Some("spawned-rocksdb"), None, None)
-            .expect("退役写法必须出声");
+        let notices = store_mode_notices_for(Some("spawned-rocksdb"), None, None, None);
+        assert_eq!(notices.len(), 1, "退役写法必须出声，且只这一条：{notices:?}");
+        let notice = &notices[0];
         assert!(notice.contains("spawned-rocksdb"), "{notice}");
         assert!(notice.contains("rocksdb"), "{notice}");
         assert!(
             notice.contains("不再拉起"),
             "必须说出行为变了，不能只说改名：{notice}"
         );
-        let notice =
-            store_mode_notice_for(Some("spawned-mem"), None, None).expect("退役写法必须出声");
         assert!(
-            notice.contains("没有端口"),
-            "丢端口这件事必须当场说：{notice}"
+            notice.contains("AIOS_STORE_MODE=rocksdb"),
+            "要给出该改成的写法——改的是环境变量，不是配置文件：{notice}"
+        );
+        let notices = store_mode_notices_for(Some("spawned-mem"), None, None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("没有端口"),
+            "丢端口这件事必须当场说：{notices:?}"
         );
         // 新写法不吵。
-        assert!(store_mode_notice_for(Some("mem"), None, None).is_none());
-        assert!(store_mode_notice_for(Some("rocksdb"), None, None).is_none());
+        assert!(store_mode_notices_for(Some("mem"), None, None, None).is_empty());
+        assert!(store_mode_notices_for(Some("rocksdb"), None, None, None).is_empty());
     }
 
-    /// 两个键打架时以 `store_mode` 为准，但不许静默——旧配置里那句
-    /// `in_memory_db = true` 会让读配置的人得出相反的结论。
+    /// 配置文件里还写着 `store_mode` 时必须出声，并且要把文件里那句与实际跑的那档并排念出来。
+    ///
+    /// 2026-09-18 真踩过（还是分层叠加那会儿）：配置 `store_mode = "rocksdb"`、环境里残留
+    /// `AIOS_STORE_MODE=mem`，服务按 mem 起来，模型照常对、属性行一直不进库，日志里没有一个字
+    /// 提过配置被压——人只会对着那句 `rocksdb` 反复怀疑增量窗口。现在配置根本不参与裁决，
+    /// 但那句过期的值还躺在文件里，人翻到的还是它。
     #[test]
-    fn a_contradicting_legacy_flag_is_named_not_swallowed() {
-        let notice = store_mode_notice_for(Some("rocksdb"), None, Some(true))
-            .expect("store_mode 与 in_memory_db 打架时必须出声");
-        assert!(notice.contains("in_memory_db"), "{notice}");
-        assert!(notice.contains("rocksdb"), "{notice}");
-        // 说的是同一件事就不必吵。
-        assert!(store_mode_notice_for(Some("mem"), None, Some(true)).is_none());
-        assert!(store_mode_notice_for(Some("rocksdb"), None, Some(false)).is_none());
+    fn a_stale_store_mode_key_in_the_config_is_named_not_swallowed() {
+        // 文件说 rocksdb、实际 mem：点名「两边不是同一档」并给出该设的环境变量值。
+        let notices = store_mode_notices_for(Some("mem"), Some("rocksdb"), None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains(r#"store_mode = "rocksdb""#), "{notices:?}");
+        assert!(notices[0].contains("不再生效"), "{notices:?}");
+        assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
+        assert!(notices[0].contains("AIOS_STORE_MODE=rocksdb"), "{notices:?}");
+        // 环境变量没设、文件说 mem：实际是默认 rocksdb，同样是两边不一样，且要说清这一档是默认给的。
+        let notices = store_mode_notices_for(None, Some("mem"), None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
+        assert!(notices[0].contains("默认"), "{notices:?}");
+        assert!(notices[0].contains("AIOS_STORE_MODE=mem"), "{notices:?}");
+        // 两边恰好一样：仍要说「这一行已不生效、请删掉」，但不必喊「不一样」。
+        let notices = store_mode_notices_for(Some("rocksdb"), Some("rocksdb"), None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("不再生效"), "{notices:?}");
+        assert!(notices[0].contains("删掉"), "{notices:?}");
+        assert!(!notices[0].contains("两边不是同一档"), "{notices:?}");
+        // 文件里没这一行（或只是空白）：不吵。
+        assert!(store_mode_notices_for(Some("mem"), None, None, None).is_empty());
+        assert!(store_mode_notices_for(Some("mem"), Some("  "), None, None).is_empty());
+    }
+
+    /// 横幅要说得出「这一档是谁定的」——只剩两种答案：环境变量，或默认。
+    /// 配置文件不再是候选（ADR-083），这里一个「配置」字都不许回来。
+    #[test]
+    fn the_effective_store_mode_can_name_who_decided_it() {
+        assert_eq!(
+            store_mode_source_for(Some("rocksdb")),
+            "环境变量 AIOS_STORE_MODE"
+        );
+        assert_eq!(store_mode_source_for(Some("MEM")), "环境变量 AIOS_STORE_MODE");
+        assert!(store_mode_source_for(None).contains("默认"));
+        // 认不出的值按没设处理，来源也得跟着退回去（与 effective_store_mode 同一口径）。
+        assert!(store_mode_source_for(Some("memm")).contains("默认"));
+    }
+
+    /// 更老的那个开关（配置 `in_memory_db` / 环境变量 `AIOS_IN_MEMORY_DB`）同样不再决定介质，
+    /// 但写了就要点名——旧配置里那句 `in_memory_db = true` 会让读配置的人得出相反的结论。
+    #[test]
+    fn the_legacy_in_memory_db_switch_is_named_not_swallowed() {
+        let notices = store_mode_notices_for(Some("rocksdb"), None, Some(true), None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("in_memory_db = true"), "{notices:?}");
+        assert!(notices[0].contains("rocksdb"), "要把实际跑的那档念出来：{notices:?}");
+        assert!(notices[0].contains("AIOS_STORE_MODE"), "要指路：{notices:?}");
+        let notices = store_mode_notices_for(None, None, None, Some("1"));
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("AIOS_IN_MEMORY_DB"), "{notices:?}");
+        assert!(notices[0].contains("AIOS_STORE_MODE"), "{notices:?}");
+        // 几个过期来源同时在场：一条一条都要念，不许只挑一条。
+        let notices =
+            store_mode_notices_for(Some("memm"), Some("rocksdb"), Some(false), Some("0"));
+        assert_eq!(notices.len(), 4, "{notices:?}");
     }
 
     /// `rocksdb` 的行活得过进程重启，`mem` 的活不过。
@@ -2865,22 +3212,23 @@ mod tests {
         assert!(data_face_notice_for(None, None).is_none());
     }
 
-    /// **形态键必须显式声明的护栏。** 这两个键决定的是「库在哪、属性进不进库」，
-    /// 漏写的症状一律不是报错，而是「测试莫名其妙全查不到数据」「开机后 `pe` 一行都不进」
-    /// ——看上去像解析坏了，实际是配置少了一行。
+    /// **形态键不许再出现在配置文件里的护栏。** 2026-09-18 之前它反过来（每份夹具必须显式写
+    /// `store_mode`——默认值翻过四次，漏写的配置会静默换介质）。ADR-083 之后介质只由环境变量
+    /// `AIOS_STORE_MODE` 决定，文件里那一行**一个字都不生效**——留着它，读配置的人得出的结论
+    /// 就与实际跑的介质相反，正是 2026-09-18 现场踩过的坑。所以现在护的是「文件里不许有」。
     ///
-    /// 默认值本身翻过四次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
-    /// `external`，2026-09-11 再改为 `spawned-mem`，2026-09-13 两档化后定为 `mem`），每一次都会让
-    /// 没写这一项的配置静默换介质、连带换掉 `data_face`（它是从 `store_mode` 派生的）。
-    /// 护栏守的正是「不许有配置去依赖那个会变的默认」，所以它与默认值当前指向哪一档无关。
-    ///
-    /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
+    /// 仓根 `DbOption.toml`、`db_options/`、出厂模板一起扫；注释掉的行放过（历史与说明都靠注释留）。
+    /// 只认 `key =` 这一形状：`store_mode_xxx` 之类别的键不在此列。
     #[test]
-    fn every_db_option_fixture_declares_its_store_mode() {
+    fn no_db_option_fixture_still_carries_a_store_mode_key() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut missing = Vec::new();
+        let mut offending = Vec::new();
         let mut checked = 0;
-        for dir in [repo.to_path_buf(), repo.join("db_options")] {
+        for dir in [
+            repo.to_path_buf(),
+            repo.join("db_options"),
+            repo.join("scripts").join("templates"),
+        ] {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -2890,31 +3238,28 @@ mod tests {
                 if !name.starts_with("DbOption") || !name.ends_with(".toml") {
                     continue;
                 }
-                if name == "DbOption.toml" {
-                    continue;
-                }
                 let Ok(text) = std::fs::read_to_string(&path) else {
                     continue;
                 };
                 checked += 1;
-                let declares = |key: &str| {
-                    text.lines().any(|line| {
+                for key in ["store_mode", "in_memory_db"] {
+                    let assigns = |line: &str| {
                         let line = line.trim_start();
-                        !line.starts_with('#') && line.starts_with(key)
-                    })
-                };
-                for key in ["store_mode"] {
-                    if !declares(key) {
-                        missing.push(format!("{name} 缺 {key}"));
+                        !line.starts_with('#')
+                            && line.starts_with(key)
+                            && line[key.len()..].trim_start().starts_with('=')
+                    };
+                    if let Some(line) = text.lines().find(|line| assigns(line)) {
+                        offending.push(format!("{name}: {}", line.trim()));
                     }
                 }
             }
         }
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
-            missing.is_empty(),
-            "这些配置没有显式声明存储形态：{missing:?}。data_face 由 store_mode 统一派生，\
-             不要求每份配置重复声明"
+            offending.is_empty(),
+            "这些配置里还写着已退出配置文件的形态键（ADR-083：介质只由 AIOS_STORE_MODE 决定，\
+             文件里这一行不生效、只会误导读配置的人）：{offending:?}"
         );
     }
 
@@ -2992,7 +3337,7 @@ mod tests {
         ));
     }
 
-    /// 单元级发布默认关（ADR-078 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
+    /// 单元级发布默认关（ADR-080 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
     /// 取值规则；键在扩展字段名单里，配置读坏时的告警点得到它。
     #[test]
     fn the_unit_level_publish_switch_is_off_by_default_and_listed_as_an_ext_field() {
@@ -3058,6 +3403,33 @@ mod tests {
             .and_then(toml::Value::as_array)
             .expect("模板写了 project_search_paths（ADR-078）");
         assert!(search_paths.is_empty(), "出厂模板的搜索根应为空数组");
+        // 四道按数量的内存闸（ADR-082 / ADR-084 / 内存控制计划 P4）：模板写的值必须就是代码默认，
+        // 不然「模板起的现场」与「没写键的现场」两套行为——2026-09-15 那次事故的同一种分叉。
+        for (key, default) in [
+            ("model_overlay_max_roots", MODEL_OVERLAY_MAX_ROOTS_DEFAULT),
+            (
+                "model_element_cache_max_entries",
+                MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+            ),
+            (
+                "model_generation_input_max_dbnums",
+                MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
+            ),
+            (
+                "model_historical_snapshots_max",
+                MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
+            ),
+        ] {
+            let configured = table
+                .get(key)
+                .and_then(toml::Value::as_integer)
+                .unwrap_or_else(|| panic!("模板写了 {key}"));
+            assert_eq!(
+                configured,
+                default as i64,
+                "出厂模板的 {key} 与代码默认分叉了"
+            );
+        }
     }
 
     /// 测试覆盖两个方向都得能摁住，且离开作用域即恢复「按配置来」。
@@ -3710,6 +4082,127 @@ mod tests {
         assert_eq!(meshes_dir_from_asset_root(Some(OsString::from("  "))), None);
     }
 
+    /// 网格目录的三级优先级（ADR-068 D7）：`PLANT_ASSET_ROOT` 压过配置 `meshes_path`，配置压过
+    /// `asset_root()` 兜底；空白一律当没设。这是 f13 那次「生成写 `<ws>\meshes`、房间去 `<ws>\assets\meshes`
+    /// 找」分家的对照物——三处读法现在只剩这一个函数，它的优先级就是全仓的优先级。
+    #[test]
+    fn meshes_dir_prefers_asset_root_then_configured_path_then_fallback() {
+        let fallback = || PathBuf::from(r"D:\run\assets");
+        assert_eq!(
+            resolve_meshes_dir(
+                Some(OsString::from(r"D:\run\assets")),
+                Some(r"D:/run/meshes"),
+                fallback
+            ),
+            PathBuf::from(r"D:\run\assets").join("meshes"),
+            "环境变量在，配置里的 meshes_path 不再各算各的"
+        );
+        assert_eq!(
+            resolve_meshes_dir(Some(OsString::from("  ")), Some(r"D:/run/meshes"), fallback),
+            PathBuf::from(r"D:/run/meshes"),
+            "空白环境变量当没设，配置生效"
+        );
+        assert_eq!(
+            resolve_meshes_dir(None, Some("   "), fallback),
+            PathBuf::from(r"D:\run\assets").join("meshes"),
+            "配置留空白也当没配，落到 asset_root()/meshes"
+        );
+        assert_eq!(
+            resolve_meshes_dir(None, None, fallback),
+            PathBuf::from(r"D:\run\assets").join("meshes")
+        );
+    }
+
+    /// 配置被环境变量压掉时必须出声；两边同一个目录、或者根本没配 `meshes_path`，不出声。
+    #[test]
+    fn meshes_dir_notice_only_when_the_configured_path_is_overridden() {
+        let notice = meshes_dir_notice_for(
+            Some(OsString::from(r"D:\run\assets")),
+            Some(r"D:\run\meshes"),
+        )
+        .expect("被压掉要点名");
+        assert!(notice.contains("meshes_path"), "{notice}");
+        assert!(notice.contains("PLANT_ASSET_ROOT"), "{notice}");
+        assert!(notice.contains(r"D:\run\assets\meshes"), "{notice}");
+        assert_eq!(
+            meshes_dir_notice_for(
+                Some(OsString::from(r"D:\run\assets")),
+                Some(r"D:\run\assets\meshes")
+            ),
+            None,
+            "同一个目录不算被压"
+        );
+        assert_eq!(
+            meshes_dir_notice_for(Some(OsString::from(r"D:\run\assets")), None),
+            None
+        );
+        assert_eq!(meshes_dir_notice_for(None, Some(r"D:\run\meshes")), None);
+    }
+
+    /// `apply_asset_root` 只是把解析口的答案写回 `meshes_path`，不另有一套算法：
+    /// 没设环境变量时它落的就是解析口的兜底 / 配置值，而不是保留 `None`。
+    #[test]
+    fn apply_asset_root_materializes_the_resolver_answer() {
+        let mut option = DbOption::default();
+        option.meshes_path = Some(r"D:\somewhere\meshes".into());
+        let applied = apply_asset_root(option.clone());
+        assert_eq!(
+            applied.meshes_path.as_deref().map(PathBuf::from),
+            Some(meshes_dir_of(&option)),
+            "写回的必须与 meshes_dir_of 同一个答案"
+        );
+    }
+
+    /// 全仓拿网格目录只许经 `options::meshes_dir*`——`get_meshes_path()` 只认配置里的 `meshes_path`，
+    /// 与 `PLANT_ASSET_ROOT` 那一层覆盖各算各的，正是 2026-09-19 房间面板预热全缺的根因。
+    /// `clippy.toml` 的 `disallowed-methods` 在 clippy 侧守同一件事；这里在 `cargo test` 侧再守一次，
+    /// 免得只跑测试的机器放它过去。
+    #[test]
+    fn meshes_dir_is_the_only_resolver() {
+        fn walk(dir: &Path, offenders: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).expect("src 可读") {
+                let path = entry.expect("目录项可读").path();
+                if path.is_dir() {
+                    walk(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(OsStr::to_str) != Some("rs") {
+                    continue;
+                }
+                if path.file_name().and_then(OsStr::to_str) == Some("options.rs")
+                    && path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(OsStr::to_str)
+                        == Some("src")
+                {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).expect("源码可读");
+                for (index, line) in source.lines().enumerate() {
+                    if line.contains("get_meshes_path(") && !line.trim_start().starts_with("//") {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            path.display(),
+                            index + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        let mut offenders = Vec::new();
+        walk(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut offenders,
+        );
+        assert!(
+            offenders.is_empty(),
+            "网格目录只许经 options::meshes_dir / meshes_dir_for / meshes_dir_of 拿（ADR-068 D7）：\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[test]
     fn extension_fields_follow_the_core_db_option_override() {
         assert_eq!(
@@ -3844,6 +4337,70 @@ dir = "review_attachments"
             REVIEW_ALLOW_EPHEMERAL_STORE_ENV,
             "PLANT_REVIEW_ALLOW_EPHEMERAL_STORE",
             "变量名进了 ADR-075 与启动横幅，改名要三处一起改"
+        );
+    }
+
+    /// d-149 / ADR-082 D5：两道按数量的内存闸的裁决——环境变量是合法非负整数就压过配置，拼错了当没设
+    /// （回配置），配置没写 = 默认值（50,000 根 / 200,000 条，2026-09-20 mem 档实测定的），任何一层写 0 = 不限；
+    /// 两个变量名进了 DbOption.toml 的注释与 ADR-082，改名要一起改。
+    #[test]
+    fn a_count_limit_takes_a_valid_env_override_falls_back_to_config_then_to_the_default() {
+        assert_eq!(effective_count_limit(None, None, 9), 9, "没写 = 默认值");
+        assert_eq!(
+            effective_count_limit(None, Some(20_000), 9),
+            20_000,
+            "配置说了算"
+        );
+        assert_eq!(
+            effective_count_limit(None, Some(0), 9),
+            0,
+            "配置写 0 = 不限，不回默认"
+        );
+        assert_eq!(
+            effective_count_limit(Some("5"), Some(20_000), 9),
+            5,
+            "环境变量压过配置"
+        );
+        assert_eq!(
+            effective_count_limit(Some(" 7 "), None, 9),
+            7,
+            "两边的空白不算"
+        );
+        assert_eq!(
+            effective_count_limit(Some("0"), Some(20_000), 9),
+            0,
+            "环境变量给 0 = 现场关掉上限"
+        );
+        assert_eq!(
+            effective_count_limit(Some("-1"), Some(20_000), 9),
+            20_000,
+            "负数拼错了当没设"
+        );
+        assert_eq!(
+            effective_count_limit(Some("many"), Some(20_000), 9),
+            20_000,
+            "非数字当没设"
+        );
+        assert_eq!(effective_count_limit(Some(""), None, 9), 9);
+        assert_eq!(MODEL_OVERLAY_MAX_ROOTS_DEFAULT, 50_000);
+        assert_eq!(MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT, 200_000);
+        assert_eq!(
+            MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT, 0,
+            "ADR-084 D3：先 0 不限落地，真机量过每窗重开代价再定"
+        );
+        assert_eq!(MODEL_OVERLAY_MAX_ROOTS_ENV, "AIOS_MODEL_OVERLAY_MAX_ROOTS");
+        assert_eq!(
+            MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV,
+            "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES"
+        );
+        assert_eq!(
+            MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV,
+            "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS"
+        );
+        assert_eq!(MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT, 16);
+        assert_eq!(
+            MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV,
+            "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX"
         );
     }
 }

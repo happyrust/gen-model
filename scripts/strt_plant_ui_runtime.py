@@ -8,9 +8,10 @@ ROOT = Path(__file__).resolve().parents[1]
 RUN = ROOT / 'output/strt-cpv-20260905/live'
 RUN.mkdir(parents=True, exist_ok=True)
 config = (ROOT / 'DbOption.toml').read_text(encoding='utf-8-sig')
+# 介质不写进配置（ADR-083）：由启动服务的那一侧以 AIOS_STORE_MODE 决定，这条验证跑的是 mem（= 不设）。
 overrides = {
     'project_path': 'D:/AVEVA/Projects/E3D3.1',
-    'store_mode': 'mem', 'data_face': 'read-through',
+    'data_face': 'read-through',
     'http_api_addr': '127.0.0.1:18206',
     'meshes_path': (RUN / 'meshes').as_posix(),
     'surreal_ns': 'strt_cpv_ui_20260905',

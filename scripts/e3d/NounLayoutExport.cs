@@ -1,20 +1,34 @@
 // One-shot exporter: dumps every element type's ordered implicit-attribute layout
 // from the live E3D dictionary so gen-model can parse element binaries offline.
 //
-// Build (x86, AVEVA assemblies are 32-bit):
-//   csc /platform:x86 /target:library /out:GenModelNounLayout.dll NounLayoutExport.cs
-//       /r:"<E3D>\Aveva.Core.Database.dll" /r:"<E3D>\PMLNet.dll"
-//       /r:"<E3D>\Aveva.ApplicationFramework.dll" /r:System.Windows.Forms.dll
+// 2026-09-17: noun_attr_fields.json now also carries WNOEVT / WNOCLM (see
+// UnnamedFields below). The DbAttributeField enum omits both, but its members
+// ARE the PDMS field-selector hashes (DCHC=596407, PLCF=652066, CASC=604371 …
+// all match), and DbAttributeImpl.GetInteger forwards (int)field straight to
+// DB_Attribute::getField, so an unlisted field is readable by casting its hash.
+// WNOEVT (299311034) is the DCHC-record gate DB_ElementChangesPlugger::Post*
+// consult before broadcasting a change event (docs/2026-09-15 §9.1).
 //
-// Two entry points, because AVEVA_DESIGN_ENTRYMACRO is not honoured on a direct
-// des.exe launch (the literal appears in no shipped binary but Startup.dll):
+// Build (x86, AVEVA assemblies are 32-bit; Aveva.Core.Geometry is now needed
+// because DefaultProbe touches Position/Direction/Orientation on this 3.1 build):
+//   csc /platform:x86 /target:library /nowarn:618 /out:GenModelNounLayout.dll NounLayoutExport.cs
+//       /r:"<E3D>\Aveva.Core.Database.dll" /r:"<E3D>\PMLNet.dll"
+//       /r:"<E3D>\Aveva.ApplicationFramework.dll" /r:"<E3D>\Aveva.Core.Utilities.dll"
+//       /r:"<E3D>\Aveva.Core.Geometry.dll" /r:System.Windows.Forms.dll
+//
+// Entry points. Prefer the CAF addin: PML.NET object creation does NOT work under
+// `des.exe -tty` on this box (2026-09-17: `object RVMEXPORT()` — the known-good
+// RVM assembly — also fails there right after a successful import, so it is the
+// -tty/PMLNet bridge, not this DLL). The addin runs its C# path directly on idle.
 //   1. NounLayoutAddin  - a CAF addin, registered by adding "GenModelNounLayout"
 //      to DesignAddins.xml. Fires by itself on the first idle after startup, so it
-//      needs neither the appware start macro nor a command window.
-//   2. NounLayoutExport - PML.NET callable, for driving the same export by hand:
+//      needs neither the appware start macro nor a command window. Reliable path.
+//   2. NounLayoutExport / GmDict - PML.NET callable, only usable in a GUI Design
+//      session (not -tty). GmDict is the short-named twin for the export, mirroring
+//      GmSlots for the slots dump:
 //        import 'GenModelNounLayout'
-//        !e = object NOUNLAYOUTEXPORT()
-//        !s = !e.export('D:/work/plant-code/old/gen-model/output/noun_layout.json')
+//        !e = object GMDICT()
+//        !s = !e.Run('D:/work/plant-code/old/gen-model-model-cache/output/noun_layout.json')
 
 using System;
 using System.Collections.Generic;
@@ -89,7 +103,21 @@ namespace GenModel.E3D
         // (noun, attribute) pair.
         private static readonly Dictionary<int, DbAttribute> Seen = new Dictionary<int, DbAttribute>();
 
-        private static string Run(string path)
+        // Dictionary fields core.dll reads off the same record as DCHC
+        // (DB_Attribute::ReadData, core.dll 0x58CE1F0: WNOEVT -> this+184, the
+        // gate DB_ElementChangesPlugger::Post* consult before broadcasting any
+        // change event; WNOCLM -> this+185) that the DbAttributeField enum never
+        // named. The enum's underlying values are the PDMS field-name hashes and
+        // DbAttributeImpl.GetBool/GetInteger forward (int)field straight to
+        // DB_Attribute::getField, so an unlisted field is reachable by casting
+        // its hash. Emitted under the field's own name next to the named ones.
+        private static readonly KeyValuePair<string, int>[] UnnamedFields =
+        {
+            new KeyValuePair<string, int>("WNOEVT", 299311034),
+            new KeyValuePair<string, int>("WNOCLM", 193514909),
+        };
+
+        internal static string Run(string path)
         {
             Seen.Clear();
             List<DbElementType> types = new List<DbElementType>();
@@ -167,6 +195,16 @@ namespace GenModel.E3D
                     sb.Append("\"").Append(Esc(fld.ToString())).Append("\":").Append(parts);
                     written++;
                 }
+                foreach (KeyValuePair<string, int> extra in UnnamedFields)
+                {
+                    DbAttributeField fld = (DbAttributeField)extra.Value;
+                    string parts = ReadField(a, fld, FieldTypeName(fld));
+                    if (parts == null) continue;
+                    if (!firstField) sb.Append(",");
+                    firstField = false;
+                    sb.Append("\"").Append(extra.Key).Append("\":").Append(parts);
+                    written++;
+                }
                 sb.Append("}}");
             }
             sb.Append("\n}\n");
@@ -176,14 +214,30 @@ namespace GenModel.E3D
 
         private static string ReadField(DbAttribute a, DbAttributeField f)
         {
+            return ReadField(a, f, null);
+        }
+
+        /// `typeTag`, when given, is written as `"t"` so the reader can tell a
+        /// field the dictionary types as LOGICAL from one that merely happens to
+        /// read back as 0/1 through the integer getter.
+        private static string ReadField(DbAttribute a, DbAttributeField f, string typeTag)
+        {
             StringBuilder o = new StringBuilder(48);
             o.Append("{");
             bool any = false;
+            bool anyValue = false;
+            if (!string.IsNullOrEmpty(typeTag))
+            {
+                o.Append("\"t\":\"").Append(Esc(typeTag)).Append("\"");
+                any = true;
+            }
             try
             {
                 int i = a.GetInteger(f);
+                if (any) o.Append(",");
                 o.Append("\"i\":").Append(i.ToString(CultureInfo.InvariantCulture));
                 any = true;
+                anyValue = true;
             }
             catch
             {
@@ -194,6 +248,7 @@ namespace GenModel.E3D
                 if (any) o.Append(",");
                 o.Append("\"b\":").Append(SafeBool(b));
                 any = true;
+                anyValue = true;
             }
             catch
             {
@@ -206,14 +261,20 @@ namespace GenModel.E3D
                     if (any) o.Append(",");
                     o.Append("\"s\":\"").Append(Esc(s)).Append("\"");
                     any = true;
+                    anyValue = true;
                 }
             }
             catch
             {
             }
-            if (!any) return null;
+            if (!anyValue) return null;
             o.Append("}");
             return o.ToString();
+        }
+
+        private static string FieldTypeName(DbAttributeField f)
+        {
+            try { return DbAttribute.AttributeFieldType(f).ToString(); } catch { return "?"; }
         }
 
         private static string SafeAttrName(DbAttribute a)
@@ -684,6 +745,42 @@ namespace GenModel.E3D
             string dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
             File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        }
+    }
+
+    /// Short-named twin of NounLayoutExport.Export for the dictionary dump. In a
+    /// TTY entry-macro session `object NOUNLAYOUTEXPORT()` fails right after a
+    /// successful `import` (2026-09-17 evidence, output/noun-export/), the same
+    /// name-length trap GmSlots was added for; this is the name the export
+    /// macro should use.
+    ///
+    ///     import 'GenModelNounLayout'
+    ///     !e = object GMDICT()
+    ///     !s = !e.Run('D:/.../noun_layout.json')
+    [PMLNetCallable()]
+    public class GmDict
+    {
+        [PMLNetCallable()]
+        public GmDict()
+        {
+        }
+
+        [PMLNetCallable()]
+        public void Assign(GmDict other)
+        {
+        }
+
+        [PMLNetCallable()]
+        public string Run(string path)
+        {
+            try
+            {
+                return NounLayoutExport.Run(path);
+            }
+            catch (Exception ex)
+            {
+                return "ERROR " + ex.GetType().Name + ": " + ex.Message;
+            }
         }
     }
 

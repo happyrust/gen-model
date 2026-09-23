@@ -84,9 +84,10 @@ pub async fn respond(
         Err(BranchQueryError::NotFound { refno }) => Err(ApiError::not_found(format!(
             "refno {refno} 在所钉会话里不存在"
         ))),
-        Err(error @ BranchQueryError::NotRouteContainer { .. }) => {
-            Err(ApiError::precondition(error.to_string()))
-        }
+        Err(
+            error @ (BranchQueryError::NotRouteContainer { .. }
+            | BranchQueryError::NotPipeRoute { .. }),
+        ) => Err(ApiError::precondition(error.to_string())),
         Err(BranchQueryError::RootError { refno, issues }) => {
             // 与 `ApiError` 同一信封（`code / message / detail`），只是 `detail` 带上四级定位的 issues，
             // 前端尺寸面板能把「为什么整条没出图」说清楚，而不是只剩一个 422。

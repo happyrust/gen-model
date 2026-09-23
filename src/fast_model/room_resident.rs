@@ -32,7 +32,7 @@ use aios_core::{GeomInstQuery, RefnoEnum};
 use anyhow::Context;
 use glam::Mat4;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
-use parry3d::shape::{TriMesh, TriMeshFlags};
+use parry3d::shape::TriMesh;
 use sha2::{Digest, Sha256};
 
 use crate::fast_model::room_model::{RoomPanelMap, RoomPanels, room_panel_map_from_groups};
@@ -198,6 +198,8 @@ impl MeshCache {
     }
 }
 
+/// 读 `{geo_hash}.mesh`，经 [`crate::fast_model::room_predicate::panel_tri_mesh`]（焊接、剔退化、乘世界矩阵）
+/// 建判定用三角网——面板三角网全仓只有那一处口径。
 pub(crate) fn build_tri_mesh(
     mesh_dir: &Path,
     geo_hash: &str,
@@ -206,11 +208,8 @@ pub(crate) fn build_tri_mesh(
     let file_path = mesh_dir.join(format!("{geo_hash}.mesh"));
     let mesh = PlantMesh::des_mesh_file(&file_path)
         .map_err(|error| format!("{}: {error}", file_path.display()))?;
-    mesh.get_tri_mesh_with_flag(
-        matrix,
-        TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
-    )
-    .ok_or_else(|| format!("{}: 三角网转换失败", file_path.display()))
+    crate::fast_model::room_predicate::panel_tri_mesh(&mesh, matrix)
+        .ok_or_else(|| format!("{}: 三角网转换失败", file_path.display()))
 }
 
 /// 一张世界坐标三角网占的字节（顶点 + 索引），`mesh_bytes` 指标的口径。
@@ -540,6 +539,16 @@ impl ResidentRoomModel {
     pub(crate) fn with_problems(mut self, problems: impl IntoIterator<Item = String>) -> Self {
         self.problems.extend(problems);
         self
+    }
+
+    /// 一块在册面板此刻的世界盒：有几何就是它的盒；在保护集里 / 不在册 = `None`。只给 [`PanelDelta::between`]
+    /// 填 `PanelMove` 用。此前这里还带着保护集成员的「上一次可用盒」（L1 的 `protected_bounds`）——反查拿它当旧盒去问
+    /// 「离开的成员在哪」；2026-09-19 L1-P 之后离开的成员从库上按面板取（`room_reverse::durable_panel_members`），
+    /// 旧盒不再是反查的输入，那一份随之退役。
+    pub(crate) fn current_bounds(&self, panel: RefnoEnum) -> Option<PanelBounds> {
+        self.panels
+            .get(&panel)
+            .map(|resident| PanelBounds::from_aabb(&resident.world_aabb))
     }
 
     /// 一块在册面板的几何判不了（`.mesh` 读不出 / 三角化失败）：从有几何那一侧搬到
@@ -928,8 +937,11 @@ impl PartialEq for PanelBounds {
 
 impl Eq for PanelBounds {}
 
-/// 一块要反查的面板：`old` 管「离开的」成员（旧盒里曾有谁）、`new` 管「进来的」（新盒里现在有谁）。
-/// 哪一边没几何（那一代里它在 `missing_panels` / 不在册）就是 `None`。
+/// 一块要反查的面板：`new` 管「进来的」成员（新盒里现在有谁，[`PanelDelta::query_boxes`] 只问它）；「离开的」成员
+/// 不问空间——库上此刻算在它名下的成员边就是精确答案（`room_reverse::durable_panel_members`，L1-P 2026-09-19）。
+/// `old` 是旧代里它此刻的盒（[`ResidentRoomModel::current_bounds`]，旧代在保护集 / 不在册 = `None`），**只给日志 /
+/// 用例看「从哪挪到哪」，反查不用它**——此前它是旧盒查询的输入（含 L1 带过来的上一次可用盒），随 L1-P 退役。
+/// 新那一边没几何（那一代里它在 `missing_panels` / 不在册）就是 `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PanelMove {
     pub panel: RefnoEnum,
@@ -943,8 +955,9 @@ pub(crate) struct PanelMove {
 /// [`RoomReferenceRefresh::Rebuilt::panels`] 交给任务执行体。与 [`TopologyDiff`] 的分工：拓扑差只看
 /// 「房间 → 面板」的归属，这里在它之上**补几何**——同一块在册面板 `world_aabb` 或实例集变了（PANE 只动几何、
 /// 不动归属时拓扑差是空的，而它名下别的根的成员边正是这时候陈旧），并给每一块带上反查要用的盒。
-/// 三类各自的处置（D13 反查）：`removed` 清边不查空间、`renumbered` 改列不查空间、`recalc` 拿旧盒 ∪ 新盒
-/// 去反查命中的根再逐根重算。
+/// 三类各自的处置（D13 反查）：`renumbered` 改列不查空间；`removed` 清边不查空间、它名下的成员从库上取来重算归属；
+/// `recalc` 拿**新盒**去问空间「谁进来了」、拿库上此刻名下的成员边答「谁离开了」（[`Self::leaving_panels`]，L1-P），
+/// 命中的根逐根重算。旧盒不再是反查的输入（2026-09-19）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PanelDelta {
     /// 不在册了（`TopologyDiff::removed_panels`）：清它全部出边与 `room_panel_relate` 入边。
@@ -978,15 +991,15 @@ fn same_panel_geometry(before: &ResidentPanel, after: &ResidentPanel) -> bool {
 }
 
 impl PanelDelta {
-    /// 对着被换下的那一代算。`diff` 是同两代的 [`TopologyDiff`]（调用方已算好，不再算第二遍）。
+    /// 对着被换下的那一代算。`diff` 是同两代的 [`TopologyDiff`]（调用方已算好，不再算第二遍）。两边的盒都只认
+    /// 那一代此刻有几何的（[`ResidentRoomModel::current_bounds`]）；旧盒只给日志看，反查只用新盒 + 库上的成员边。
     pub(crate) fn between(
         old: &ResidentRoomModel,
         new: &ResidentRoomModel,
         diff: &TopologyDiff,
     ) -> Self {
-        let bounds = |model: &ResidentRoomModel, panel: RefnoEnum| {
-            model
-                .panels
+        let new_bounds = |panel: RefnoEnum| {
+            new.panels
                 .get(&panel)
                 .map(|resident| PanelBounds::from_aabb(&resident.world_aabb))
         };
@@ -999,13 +1012,13 @@ impl PanelDelta {
         for panel in &diff.recalc_panels {
             delta.recalc.push(PanelMove {
                 panel: *panel,
-                old: bounds(old, *panel),
-                new: bounds(new, *panel),
+                old: old.current_bounds(*panel),
+                new: new_bounds(*panel),
             });
         }
         // 几何变了的在册面板：两边都在册（新在册的已在 `recalc_panels` 里）、拓扑差没点到，但新代里它的几何
-        // 与旧代不同——包括旧代里没几何（保护集）而新代有了的。反过来（旧代有、新代没了）不进：新代里它在
-        // 保护集，边不动、也算不出。
+        // 与旧代不同——包括旧代里没几何（保护集）而新代有了的：它旧位置里的成员（陈旧边）由库上此刻算在它名下的
+        // 成员边答（L1-P），不问旧盒。反过来（旧代有、新代没了）不进：新代里它在保护集，边不动、也算不出。
         for (panel, after) in &new.panels {
             if diff.recalc_panels.contains(panel) || diff.removed_panels.contains(panel) {
                 continue;
@@ -1017,7 +1030,7 @@ impl PanelDelta {
             delta.geometry_changed += 1;
             delta.recalc.push(PanelMove {
                 panel: *panel,
-                old: before.map(|before| PanelBounds::from_aabb(&before.world_aabb)),
+                old: old.current_bounds(*panel),
                 new: Some(PanelBounds::from_aabb(&after.world_aabb)),
             });
         }
@@ -1030,14 +1043,31 @@ impl PanelDelta {
         self.removed.is_empty() && self.renumbered.is_empty() && self.recalc.is_empty()
     }
 
-    /// 反查要拿去查空间的盒：`recalc` 的旧盒 ∪ 新盒（`removed` 不进——它的边按面板清，不用问谁在里面）。
+    /// 反查要拿去查空间的盒：`recalc` 的**新盒**——空间这一路只答「谁进来了」；「谁离开了」由库上此刻算在
+    /// [`Self::leaving_panels`] 名下的成员边答（`room_reverse::durable_panel_members`，L1-P 2026-09-19），旧盒不再问
+    /// （此前是旧盒 ∪ 新盒，旧盒还要靠 L1 的 `protected_bounds` 补保护期——两样都退役了）。`removed` 不进：它的边按面板清、
+    /// 成员走 `leaving_panels`，不用问谁在里面。
     pub(crate) fn query_boxes(&self) -> Vec<Aabb> {
         self.recalc
             .iter()
-            .flat_map(|entry| [entry.old, entry.new])
-            .flatten()
+            .filter_map(|entry| entry.new)
             .map(|bounds| bounds.aabb())
             .collect()
+    }
+
+    /// 「离开的成员」要到库上按哪几块面板取（L1-P，2026-09-19）：`recalc` 里的每一块（动了 / 恢复了 / 换了房——此前算在它
+    /// 名下的成员都要重算归属）与 `removed` 不在册了的每一块（它的边按面板清掉之后，成员该落到别的房间里去——只清边不重算
+    /// 是漏算）。`renumbered` 不进：只改号，成员不动。按面板 refno 序、去重。
+    pub(crate) fn leaving_panels(&self) -> Vec<RefnoEnum> {
+        let mut panels: Vec<RefnoEnum> = self
+            .recalc
+            .iter()
+            .map(|entry| entry.panel)
+            .chain(self.removed.iter().copied())
+            .collect();
+        panels.sort();
+        panels.dedup();
+        panels
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -1048,6 +1078,113 @@ impl PanelDelta {
             self.recalc.len(),
             self.geometry_changed
         )
+    }
+}
+
+/// 一段换代：常驻从 `from_generation` 换到 `to_generation`，面板动了 `panels`（非空）。反查按 `panels` 的新盒问谁进来、
+/// 按库上此刻算在这些面板名下的成员边问谁离开（L1-P）；别的库的命中停放出去时这一段就是它们的 `from → to`。定向准入（`room_recompute::scope_for_task`）沿这些段
+/// 从库上那一代接到本任务冻的计算器代号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PanelSwap {
+    pub from_generation: String,
+    pub to_generation: String,
+    pub panels: PanelDelta,
+}
+
+impl PanelSwap {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "{} → {}（{}）",
+            short_generation(&self.from_generation),
+            short_generation(&self.to_generation),
+            self.panels.summary()
+        )
+    }
+}
+
+fn short_generation(generation: &str) -> String {
+    generation.chars().take(12).collect()
+}
+
+/// 换代段账本（审核 M1，2026-09-19）：**谁重建谁记**——每一次 [`ResidentRooms::install`] 对着被换下的那一代算出非空
+/// [`PanelDelta`] 就记一段 `from → to → panels`，任何任务的定向准入都能沿它接段、反查，不再只认自己那一次 `Rebuilt`
+/// 带回来的那一段。
+///
+/// 此前 `PanelDelta` 只活在做了重建的那一次 `refresh_before_task` 调用里：`/model/ensure`（UI「显示模型」）先探到
+/// composite 变了、做了重建，随后每个库的任务都是 `Unchanged` + 库上欠着 + 槽空 → 链断 → 全 MDB 每个库各整库一次；
+/// 截断窗口（大窗口的常态）跑不到收尾，自己那一段随任务丢掉，下一窗又是 `Unchanged` → 整库；没被命中的库看不到
+/// 「这一段与你无关」→ 整库。账本把这三种丢法都收了：段在账本里，谁来接都接得上。
+///
+/// 进程内、重启即丢——丢了是多算不漏算（③ 电平型触发兜底整库）；同 `from → to` 的再记一次替换旧的（同两代 = 同输入
+/// = 同一段，新的那份是同一次算法的重算）；空段不记（面板变化为空却换了代 = 换代另有原因，这一段说不了成员边，
+/// 准入照旧整库）；容量封顶，满了丢最早的。锁在 [`ResidentRooms`] 上，与两代模型同一把。
+#[derive(Debug, Clone)]
+pub(crate) struct SwapLedger {
+    entries: std::collections::VecDeque<(Instant, PanelSwap)>,
+    capacity: usize,
+}
+
+impl Default for SwapLedger {
+    fn default() -> Self {
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
+    }
+}
+
+impl SwapLedger {
+    /// 留多少段：一段 = 几块面板的盒，几十段远超一次重启之内可能攒下的换代数；再多是别的地方出了问题。
+    pub(crate) const DEFAULT_CAPACITY: usize = 64;
+
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(capacity.max(1)),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// 记一段。空段不记（回 `false`）；同 `from → to` 替换旧的（位置不变、时刻刷新）；满了丢最早的。
+    pub(crate) fn record(&mut self, swap: PanelSwap, now: Instant) -> bool {
+        if swap.panels.is_empty() || swap.from_generation == swap.to_generation {
+            return false;
+        }
+        if let Some(slot) = self.entries.iter_mut().find(|(_, entry)| {
+            entry.from_generation == swap.from_generation
+                && entry.to_generation == swap.to_generation
+        }) {
+            *slot = (now, swap);
+            return true;
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((now, swap));
+        true
+    }
+
+    /// 全部段（按记入先后）。
+    pub(crate) fn segments(&self) -> Vec<PanelSwap> {
+        self.entries.iter().map(|(_, swap)| swap.clone()).collect()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `/health.room_build.resident.swap_ledger`：`{ entries, capacity, oldest_age_ms, segments: ["g1→g2 (removed=… recalc=…)"] }`。
+    pub(crate) fn health(&self, now: Instant) -> serde_json::Value {
+        serde_json::json!({
+            "entries": self.entries.len(),
+            "capacity": self.capacity,
+            "oldest_age_ms": self
+                .entries
+                .iter()
+                .map(|(at, _)| u64::try_from(now.saturating_duration_since(*at).as_millis()).unwrap_or(u64::MAX))
+                .max(),
+            "segments": self
+                .entries
+                .iter()
+                .map(|(_, swap)| swap.summary())
+                .collect::<Vec<_>>(),
+        })
     }
 }
 
@@ -1213,7 +1350,7 @@ async fn preload_panel_projection(
 ) -> anyhow::Result<PanelPreload> {
     use crate::data_interface::frozen_source::FrozenSource;
     use crate::fast_model::{e3d_model_service::E3dModelService, model_artifact};
-    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir();
     let cache_dir = mesh_dir.join("room-input-cache");
     let mut dependencies = tokens.to_vec();
     for pin in crate::fast_model::e3d_model_service::current_mdb_sources()?.0 {
@@ -1511,12 +1648,13 @@ pub(crate) struct InstallOutcome {
     pub panels: Option<PanelDelta>,
 }
 
-/// 进程内的两路模型，各留当前 + 上一代（diff 只需两份，工程默认②）。
+/// 进程内的两路模型，各留当前 + 上一代（diff 只需两份，工程默认②），加一本换代段账本（[`SwapLedger`]，M1）。
 #[derive(Default)]
 pub(crate) struct ResidentRooms {
     published: Generations,
     latest: Generations,
     meshes: Arc<MeshCache>,
+    swaps: SwapLedger,
 }
 
 impl ResidentRooms {
@@ -1554,26 +1692,45 @@ impl ResidentRooms {
     }
 
     /// 整份换代：新的进当前、当前退上一代、再往前的丢掉。返回与上一代的拓扑差与面板变化
-    /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）。
+    /// （[`PanelDelta`]，反向传播的输入——这里是两代同时在手的唯一时刻）；面板变化非空就顺手记进换代段账本
+    /// （[`SwapLedger`]，谁重建谁记，M1 2026-09-19）。
     pub(crate) fn install(&mut self, model: ResidentRoomModel) -> InstallOutcome {
-        let model = Arc::new(model);
         let slot = self.slot_mut(model.manifest.form);
-        let (diff, panels) = match slot.current.as_ref() {
+        let model = Arc::new(model);
+        let (diff, panels, segment) = match slot.current.as_ref() {
             Some(old) => {
                 let diff = TopologyDiff::between(&old.map, &model.map);
                 let panels = PanelDelta::between(old, &model, &diff);
-                (Some(diff), Some(panels))
+                let segment = PanelSwap {
+                    from_generation: old.input_version(),
+                    to_generation: model.input_version(),
+                    panels: panels.clone(),
+                };
+                (Some(diff), Some(panels), Some(segment))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         slot.previous = slot.current.take();
         slot.current = Some(model.clone());
+        if let Some(segment) = segment {
+            self.swaps.record(segment, Instant::now());
+        }
         self.prune_meshes();
         InstallOutcome {
             model,
             diff,
             panels,
         }
+    }
+
+    /// 换代段账本里的全部段（按记入先后）——定向准入沿它接段（`room_recompute::scope_for_task`）。
+    pub(crate) fn swap_segments(&self) -> Vec<PanelSwap> {
+        self.swaps.segments()
+    }
+
+    /// `/health.room_build.resident.swap_ledger`。
+    pub(crate) fn swap_ledger_health(&self, now: Instant) -> serde_json::Value {
+        self.swaps.health(now)
     }
 
     fn prune_meshes(&self) {
@@ -1611,6 +1768,14 @@ impl ResidentRooms {
 pub(crate) fn resident_rooms() -> &'static RwLock<ResidentRooms> {
     static ROOMS: OnceLock<RwLock<ResidentRooms>> = OnceLock::new();
     ROOMS.get_or_init(|| RwLock::new(ResidentRooms::default()))
+}
+
+/// 进程内换代段账本的全部段（[`SwapLedger`]，M1）：定向准入的取数口，`room_recompute::swaps_for_task` 经它拿。
+pub(crate) fn swap_segments() -> Vec<PanelSwap> {
+    resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .swap_segments()
 }
 
 /// Fixed, already-preloaded room input for a dbnum Task. This accessor performs
@@ -2346,7 +2511,7 @@ impl ResidentInputs {
             hierarchy,
             room_key_words: option.get_room_key_word(),
             match_room_fn,
-            mesh_dir: option.get_meshes_path(),
+            mesh_dir: crate::options::meshes_dir_for(option),
         })
     }
 }
@@ -2364,6 +2529,10 @@ pub(crate) enum RoomReferenceRefresh {
         previous_key: Option<String>,
         key: String,
         generation_changed: bool,
+        /// 装上的这一代的计算输入摘要（`input_version`）——这一段换代的 `to`。反向传播的准入拿它对本任务
+        /// 冻好的计算器代号（2026-09-19 H1）：不等 = 对齐与冻计算器之间常驻又换了一代（`/model/ensure` 并发对齐），
+        /// 这一段面板变化说不了「库上 → 此刻」的全部欠账，退整库；此前准入默认它就是此刻的常驻代号。
+        generation: String,
         /// 被换下的那一代的计算输入摘要（`input_version`）；此前没建成时为 `None`。反向传播的准入拿它对
         /// 库上 `model_room_generation`：相等 = 库上的边对齐到上一代，这一次换代的面板变化就是全部欠账。
         previous_generation: Option<String>,
@@ -2647,6 +2816,7 @@ pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
                 previous_key: installed.map(|model| model.manifest.key.clone()),
                 key: outcome.model.manifest.key.clone(),
                 generation_changed: previous_generation.as_deref() != Some(generation.as_str()),
+                generation,
                 previous_generation,
                 diff: diff.map(|diff| diff.summary()),
                 panels,
@@ -2749,6 +2919,7 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
     let active = rooms
         .for_membership(crate::options::data_face())
         .map(|model| model.stats());
+    let swap_ledger = rooms.swap_ledger_health(Instant::now());
     drop(rooms);
     let startup = startup_report();
     let mut health = resident_health_from(
@@ -2806,6 +2977,8 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
                 backoff.health(Instant::now())
             }),
         );
+        // 换代段账本（审核 M1）：本进程记下的每一段 `from → to`（面板动了什么），定向准入沿它接段。
+        target.insert("swap_ledger".to_string(), swap_ledger);
         if let Some(stat) = active {
             target.insert("rooms".to_string(), serde_json::json!(stat.rooms));
             target.insert(
@@ -2949,7 +3122,7 @@ mod tests {
         )
         .await?;
         let load_ms = started.elapsed().as_millis();
-        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        warm_for_install(&mut model, &crate::options::meshes_dir_for(option)).await?;
         let stats = model.stats();
         let report = serde_json::json!({
             "project": option.project_name, "mdb": option.mdb_name,
@@ -3120,7 +3293,7 @@ mod tests {
         )
         .await
         .context("缺一个 DESI 文件时常驻模型必须照样建起来（D8）")?;
-        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        warm_for_install(&mut model, &crate::options::meshes_dir_for(option)).await?;
         anyhow::ensure!(
             model
                 .missing_dbnums
@@ -3143,8 +3316,9 @@ mod tests {
             "{state:?}"
         );
         let generation = model.input_version();
-        let calculator = MemoryRoomCalculator::new(Arc::new(model), option.get_meshes_path())
-            .context("Degraded 的模型照样冻得出计算器（D10）")?;
+        let calculator =
+            MemoryRoomCalculator::new(Arc::new(model), crate::options::meshes_dir_for(option))
+                .context("Degraded 的模型照样冻得出计算器（D10）")?;
         anyhow::ensure!(calculator.resident_generation() == generation);
         let restore = lifecycle();
         set_lifecycle(state);
@@ -3205,7 +3379,7 @@ mod tests {
             Arc::<MeshCache>::default(),
         )
         .await?;
-        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        warm_for_install(&mut model, &crate::options::meshes_dir_for(option)).await?;
         anyhow::ensure!(
             model.missing_panels.is_empty(),
             "room definitions incomplete"
@@ -3214,9 +3388,10 @@ mod tests {
         let room_version = model.input_version();
         let sources = model.source_tokens.clone();
         let expected_files = sources.len();
-        let calculator = MemoryRoomCalculator::new(Arc::new(model), option.get_meshes_path())?;
+        let calculator =
+            MemoryRoomCalculator::new(Arc::new(model), crate::options::meshes_dir_for(option))?;
         let memory = ModelMemoryStore::default();
-        let cache_dir = option.get_meshes_path().join("model-input-cache");
+        let cache_dir = crate::options::meshes_dir_for(option).join("model-input-cache");
         let dependencies = crate::fast_model::e3d_model_service::current_mdb_sources()?
             .0
             .into_iter()
@@ -3245,9 +3420,12 @@ mod tests {
             let mut cached = 0;
             for root in &roots {
                 let root = parse_refno(&root.root.to_string())?;
-                if let Some(commit) =
-                    model_artifact::load(&cache_dir, &option.get_meshes_path(), &input, root)
-                {
+                if let Some(commit) = model_artifact::load(
+                    &cache_dir,
+                    &crate::options::meshes_dir_for(option),
+                    &input,
+                    root,
+                ) {
                     memory.commit(ProjectionScope::Current, vec![commit]);
                     cached += 1;
                 } else {
@@ -3755,7 +3933,8 @@ mod tests {
 
     /// 反向传播的输入（ADR-073 D13 反查，D1）：`install()` 对着被换下的那一代给出 [`PanelDelta`]——拓扑差点到的
     /// 三类原样分格，再补上**只动几何**的在册面板（拓扑差是空的、盒却变了，含旧代没几何新代有了的）；
-    /// `removed` 不带盒、`recalc` 带旧盒 ∪ 新盒（`query_boxes`），几何没变的面板一块都不进；第一代没有上一代。
+    /// `removed` 不带盒、`recalc` 只带新盒去问空间（`query_boxes`；离开的成员从库上按面板取，`leaving_panels`），
+    /// 几何没变的面板一块都不进；第一代没有上一代。
     #[test]
     fn install_reports_which_panels_moved_and_where_their_boxes_are() {
         let mut rooms = ResidentRooms::default();
@@ -3800,9 +3979,25 @@ mod tests {
         assert_eq!(moved.old, Some(PanelBounds([[0.0; 3], [1.0; 3]])));
         assert_eq!(moved.new, Some(PanelBounds([[5.0; 3], [6.0; 3]])));
         let gained = &delta.recalc[1];
-        assert_eq!(gained.old, None, "旧代里没几何：没有旧盒可查");
+        assert_eq!(
+            gained.old, None,
+            "旧代里没几何：没有旧盒——它离开的成员由库上此刻名下的成员边答（L1-P）"
+        );
         assert_eq!(gained.new, Some(PanelBounds([[20.0; 3], [21.0; 3]])));
-        assert_eq!(delta.query_boxes().len(), 3, "旧盒 ∪ 新盒");
+        assert_eq!(
+            delta
+                .query_boxes()
+                .iter()
+                .map(|aabb| aabb.mins.x)
+                .collect::<Vec<_>>(),
+            vec![5.0, 20.0],
+            "只问新盒（7 的新位置、8 的新位置）；旧盒 [0, 1] 不问——7 旧位置里的成员从库上取"
+        );
+        assert_eq!(
+            delta.leaving_panels(),
+            vec![r(7), r(8)],
+            "recalc 里的每一块都到库上取此刻名下的成员"
+        );
         assert_eq!(
             delta.summary(),
             "removed=0 renumbered_rooms=0 recalc=2 (geometry_only 2)"
@@ -3830,10 +4025,288 @@ mod tests {
         assert_eq!(delta.renumbered[0].panels, vec![r(7), r(8)]);
         assert!(
             delta.recalc.is_empty() && delta.geometry_changed == 0,
-            "几何没动、拓扑差只有改号与移出：不反查: {delta:?}"
+            "几何没动、拓扑差只有改号与移出：不反查空间: {delta:?}"
+        );
+        assert_eq!(
+            delta.leaving_panels(),
+            vec![r(9)],
+            "不在册了的面板名下的成员要到库上取来重算归属（L1-P）；只改号的不进"
         );
         assert!(delta.query_boxes().is_empty(), "removed 不带盒");
         assert!(!delta.is_empty());
+
+        // 换代段账本（M1，2026-09-19）：谁重建谁记——两次换代各记一段 `from → to → panels`，第一代没有上一代不记；
+        // 段的两端就是两代的 `input_version`，任何任务的准入链都能沿它接（`room_recompute::scope_for_task`）。
+        let segments = rooms.swap_segments();
+        assert_eq!(segments.len(), 2, "{segments:?}");
+        assert_eq!(
+            (
+                segments[0].from_generation.as_str(),
+                segments[0].to_generation.as_str()
+            ),
+            (
+                first.model.input_version().as_str(),
+                second.model.input_version().as_str()
+            )
+        );
+        assert_eq!(
+            segments[0].panels.recalc.len(),
+            2,
+            "第二代那一段带着挪了的两块"
+        );
+        assert_eq!(
+            (
+                segments[1].from_generation.as_str(),
+                segments[1].to_generation.as_str()
+            ),
+            (
+                second.model.input_version().as_str(),
+                third.model.input_version().as_str()
+            )
+        );
+        assert_eq!(
+            segments[1].panels, delta,
+            "第三代那一段就是 install 回的那份面板变化"
+        );
+        let health = rooms.swap_ledger_health(Instant::now());
+        assert_eq!(health["entries"], 2);
+        assert_eq!(health["capacity"], SwapLedger::DEFAULT_CAPACITY);
+        assert_eq!(health["segments"].as_array().map(Vec::len), Some(2));
+    }
+
+    /// 保护集成员重新有几何（审核 L1 → L1-P，2026-09-19）：一块面板「有几何 → 几何不可用（保护集，旧边留着）→ 再一代
+    /// 仍不可用 → 几何又可用但位置变了」。此前反查要靠旧盒问「旧位置里成员是谁」，保护期还得把上一次可用的盒一代代带下去
+    /// （L1 的 `protected_bounds`）——只活在进程内，重启就丢、丢了漏算。现在「离开的成员」从库上按面板取
+    /// （`room_reverse::durable_panel_members`，[`PanelDelta::leaving_panels`]），旧盒不再是反查的输入：`query_boxes` 只有新盒、
+    /// `PanelMove::old` 只给日志看、模型上没有任何带盒的字段。
+    #[test]
+    fn a_panel_that_regains_geometry_after_protection_is_looked_up_by_its_new_box_and_its_durable_members()
+     {
+        let mut rooms = ResidentRooms::default();
+        let box_of = |min: f32| PanelBounds([[min; 3], [min + 1.0; 3]]);
+        // 第一代：7、8、9 都有几何；8 在 [20, 21]。
+        let first = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (20.0, 21.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert_eq!(first.model.current_bounds(r(8)), Some(box_of(20.0)));
+        assert_eq!(
+            first.model.current_bounds(r(22)),
+            None,
+            "不在册的面板没有盒"
+        );
+
+        // 第二代：8 的几何不可用（一条几何行都没有）→ 保护集。这一段面板变化里没有 8（旧代有、新代没了不进：边受保护、
+        // 也算不出）；模型上不带它的旧盒。
+        let second = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert_eq!(second.model.missing_panels, vec![r(8)]);
+        assert_eq!(
+            second.model.current_bounds(r(8)),
+            None,
+            "保护中：此刻没有盒；上一次可用的盒不再带（L1 的 protected_bounds 已退役）"
+        );
+        let delta = second.panels.expect("换代给出面板变化");
+        assert!(
+            delta.is_empty(),
+            "几何不可用那一段不反查、也不进账本: {delta:?}"
+        );
+
+        // 第三代：8 仍不可用；7 挪了一下，让这一段非空、进账本。
+        let third = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 2.0, (2.0, 3.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        let delta = third.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta
+                .recalc
+                .iter()
+                .map(|entry| entry.panel)
+                .collect::<Vec<_>>(),
+            vec![r(7)],
+            "8 仍在保护集：这一段里没有它: {delta:?}"
+        );
+        assert_eq!(
+            delta
+                .query_boxes()
+                .iter()
+                .map(|aabb| aabb.mins.x)
+                .collect::<Vec<_>>(),
+            vec![2.0],
+            "只问新盒：7 挪到哪、谁进来了；7 旧位置里的成员从库上按面板取"
+        );
+
+        // 第四代：8 有了几何、位置变到 [40, 41]。旧盒 None（保护期不带盒）、新盒 [40, 41]；查空间的只有新盒，8 旧位置里成员的
+        // 陈旧边由库上此刻算在 8 名下的成员边答（`leaving_panels` 点名它）。
+        let fourth = rooms.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 2.0, (2.0, 3.0)),
+                inst(8, "box", 0.0, (40.0, 41.0)),
+                inst(9, "box", 0.0, (10.0, 11.0)),
+            ],
+            rooms.mesh_cache(),
+        ));
+        assert!(
+            fourth.model.missing_panels.is_empty(),
+            "重新有几何：不在保护集"
+        );
+        let delta = fourth.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta.recalc,
+            vec![PanelMove {
+                panel: r(8),
+                old: None,
+                new: Some(box_of(40.0)),
+            }],
+            "旧盒 None（保护期不带盒）：反查不需要它: {delta:?}"
+        );
+        assert_eq!(delta.geometry_changed, 1);
+        assert_eq!(
+            delta
+                .query_boxes()
+                .iter()
+                .map(|aabb| aabb.mins.x)
+                .collect::<Vec<_>>(),
+            vec![40.0],
+            "反查只问新盒：新位置补边；旧位置清陈旧边走成员那一路"
+        );
+        assert_eq!(
+            delta.leaving_panels(),
+            vec![r(8)],
+            "库上此刻算在 8 名下的成员就是要清陈旧边的那些"
+        );
+        // 账本里那一段带的就是这份（任何任务沿它接段反查都只问新盒 + 成员）。
+        let segments = rooms.swap_segments();
+        assert_eq!(
+            segments
+                .last()
+                .map(|segment| segment.panels.query_boxes().len()),
+            Some(1)
+        );
+
+        // 同形：从没可用过的面板有了几何——旧盒同样 None，成员那一路查到空、只问新盒。两种「旧盒 None」不再需要分辨。
+        let mut fresh = ResidentRooms::default();
+        fresh.install(model_of(
+            groups(),
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            fresh.mesh_cache(),
+        ));
+        let gained = fresh.install(model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (40.0, 41.0)),
+            ],
+            fresh.mesh_cache(),
+        ));
+        let delta = gained.panels.expect("换代给出面板变化");
+        assert_eq!(
+            delta.recalc,
+            vec![PanelMove {
+                panel: r(8),
+                old: None,
+                new: Some(box_of(40.0)),
+            }],
+            "从没可用过：没有旧位置；库上也没有它名下的成员边"
+        );
+        assert_eq!(delta.leaving_panels(), vec![r(8)]);
+    }
+
+    /// 换代段账本的纯函数（M1，2026-09-19）：空段不记、同两代不记；同 `from → to` 替换旧的（位置不变）；满了丢最早的；
+    /// `segments` 按记入先后；`/health` 那一格报条数 / 容量 / 最老年龄 / 各段一句。
+    #[test]
+    fn the_swap_ledger_keeps_the_latest_segments_and_replaces_a_repeated_pair() {
+        let moved = |old: f32, new: f32| PanelDelta {
+            recalc: vec![PanelMove {
+                panel: r(7),
+                old: Some(PanelBounds([[old; 3], [old + 1.0; 3]])),
+                new: Some(PanelBounds([[new; 3], [new + 1.0; 3]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let swap = |from: &str, to: &str, panels: PanelDelta| PanelSwap {
+            from_generation: from.into(),
+            to_generation: to.into(),
+            panels,
+        };
+        let now = Instant::now();
+        let mut ledger = SwapLedger::with_capacity(3);
+        assert!(
+            !ledger.record(swap("g1", "g2", PanelDelta::default()), now),
+            "空段不记（换代另有原因，这一段说不了成员边）"
+        );
+        assert!(
+            !ledger.record(swap("g1", "g1", moved(0.0, 1.0)), now),
+            "同两代不是一段"
+        );
+        assert_eq!(ledger.len(), 0);
+        assert!(ledger.record(swap("g1", "g2", moved(0.0, 1.0)), now));
+        assert!(ledger.record(swap("g2", "g3", moved(1.0, 2.0)), now));
+        assert!(
+            ledger.record(swap("g1", "g2", moved(0.0, 5.0)), now),
+            "同 from → to 替换旧的"
+        );
+        assert_eq!(ledger.len(), 2);
+        let segments = ledger.segments();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|swap| (swap.from_generation.as_str(), swap.to_generation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("g1", "g2"), ("g2", "g3")],
+            "替换不换位置"
+        );
+        assert_eq!(
+            segments[0].panels.recalc[0].new,
+            Some(PanelBounds([[5.0; 3], [6.0; 3]])),
+            "替换后是新的那份"
+        );
+        assert!(ledger.record(swap("g3", "g4", moved(2.0, 3.0)), now));
+        assert!(ledger.record(swap("g4", "g5", moved(3.0, 4.0)), now));
+        assert_eq!(ledger.len(), 3, "满了丢最早的");
+        assert_eq!(
+            ledger
+                .segments()
+                .iter()
+                .map(|swap| swap.from_generation.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g2", "g3", "g4"]
+        );
+        let health = ledger.health(now + Duration::from_millis(250));
+        assert_eq!(health["entries"], 3);
+        assert_eq!(health["capacity"], 3);
+        assert_eq!(health["oldest_age_ms"], 250);
+        assert_eq!(
+            health["segments"][0],
+            "g2 → g3（removed=0 renumbered_rooms=0 recalc=1 (geometry_only 1)）"
+        );
+        assert_eq!(
+            SwapLedger::default().health(now),
+            serde_json::json!({
+                "entries": 0,
+                "capacity": SwapLedger::DEFAULT_CAPACITY,
+                "oldest_age_ms": serde_json::Value::Null,
+                "segments": [],
+            })
+        );
     }
 
     /// 预热按缓存键去重；`.mesh` 读不出的面板搬进保护集、不阻代（ADR-073 D9）。

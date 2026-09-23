@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
     启动本项目用的 SurrealDB（8009），并挡住版本不匹配的二进制。
-    `store_mode = "rocksdb"` 的部署**必须先跑它**；默认 `mem` 不需要任何库进程。
+    以 `AIOS_STORE_MODE=rocksdb` 启动的服务**必须先跑它**——2026-09-18 起这也是**不设时的默认档**（ADR-083 D6），
+    所以多数情况下都得先跑它；只有显式 `AIOS_STORE_MODE=mem` 那一档不需要任何库进程。
+    （介质只由这个环境变量决定，DbOption.toml 里的 store_mode 不再生效——ADR-083，2026-09-18。）
 
 .DESCRIPTION
     【先看这一段，2026-09-13】存储只有两档（ADR-074），gen-model **从不自己拉起数据库**：

@@ -1,0 +1,7 @@
+# 网格目录只有一个解析口：`crate::options::meshes_dir` / `meshes_dir_for` / `meshes_dir_of`（ADR-068 D7）。
+# `DbOption::get_meshes_path` 只认配置里的 `meshes_path`，不知道 `PLANT_ASSET_ROOT` 那一层覆盖——
+# 2026-09-19 生成侧写 `<ws>\meshes`、房间常驻模型去 `<ws>\assets\meshes` 找面板网格，230 块面板预热全缺，
+# 就是两边各算各的结果。`cargo test` 侧由 `options::tests::meshes_dir_is_the_only_resolver` 守同一件事。
+disallowed-methods = [
+    { path = "aios_core::options::DbOption::get_meshes_path", reason = "网格目录经 crate::options::meshes_dir / meshes_dir_for 解析（PLANT_ASSET_ROOT 压过 meshes_path，ADR-068 D7）" },
+]

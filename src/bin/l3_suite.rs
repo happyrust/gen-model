@@ -1010,7 +1010,7 @@ fn seed_scenario_models(selected: &[&'static Scenario], run_dir: &Path) -> Resul
         .iter()
         .flat_map(|s| scenario_roots(s))
         .collect::<std::collections::BTreeSet<_>>();
-    let model_before = model_drain_task_ids()?;
+    let model_before = model_drain_task_ids(API)?;
     let mut evidence = Vec::new();
     for root in &roots {
         let mut body = identity();
@@ -1029,7 +1029,7 @@ fn seed_scenario_models(selected: &[&'static Scenario], run_dir: &Path) -> Resul
     )?;
     // 「选中库的非房间 pending 清零」那一道等待随队列表退役（ADR-072 D5）：模型欠账
     // 现在由 `/dbnums` 的双水位判决回答，播种的收敛只看队列空 + 任务终态。
-    wait_model_drain_settlement(&model_before)?;
+    wait_model_drain_settlement(API, &model_before)?;
     Ok(())
 }
 
@@ -1768,7 +1768,7 @@ fn execute_and_wait(
     queue_scenario: Option<&str>,
 ) -> Result<(Value, Vec<Value>)> {
     fs::create_dir_all(dir)?;
-    let model_before = model_drain_task_ids()?;
+    let model_before = model_drain_task_ids(API)?;
     let receipt = http_json("POST", &format!("{API}/update/execute"), Some(identity()))?;
     fs::write(
         dir.join("execute-receipt.json"),
@@ -1797,13 +1797,16 @@ fn execute_and_wait(
             }
         }
     }
-    tasks.extend(wait_model_drain_settlement(&model_before)?);
+    tasks.extend(wait_model_drain_settlement(API, &model_before)?);
     fs::write(dir.join("tasks.json"), serde_json::to_vec_pretty(&tasks)?)?;
     Ok((receipt, tasks))
 }
 
-fn model_drain_task_ids() -> Result<HashSet<String>> {
-    Ok(model_drain_tasks()?
+/// `api` 是这一套栈的 `/api/v1` 前缀：金基线套件钉在 [`API`]（8028），可移植夹具用
+/// `fixture::fixture_api()`（缺省 18028）。三个 drain 助手都从这里取地址——夹具的端口
+/// 2026-09-11 与金基线分开之后，这里曾仍写死 `API`，夹具每个场景都去敲一台不存在的 8028。
+fn model_drain_task_ids(api: &str) -> Result<HashSet<String>> {
+    Ok(model_drain_tasks(api)?
         .into_iter()
         .filter_map(|task| {
             task.get("task_id")
@@ -1813,10 +1816,10 @@ fn model_drain_task_ids() -> Result<HashSet<String>> {
         .collect())
 }
 
-fn model_drain_tasks() -> Result<Vec<Value>> {
+fn model_drain_tasks(api: &str) -> Result<Vec<Value>> {
     let response = http_json(
         "GET",
-        &format!("{API}/tasks?kind=model_drain&limit=200"),
+        &format!("{api}/tasks?kind=model_drain&limit=200"),
         None,
     )?;
     response
@@ -1826,13 +1829,13 @@ fn model_drain_tasks() -> Result<Vec<Value>> {
         .context("model_drain task response has no tasks array")
 }
 
-fn wait_model_drain_settlement(before: &HashSet<String>) -> Result<Vec<Value>> {
+fn wait_model_drain_settlement(api: &str, before: &HashSet<String>) -> Result<Vec<Value>> {
     // `/update/pending-units` 随第二条异步账退了（ADR-072 D5），这里不再问它：模型随
     // dbnum 任务同步生成，「模型收敛」= 队列空 + 本轮新起的任务全部到终态。
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
     loop {
-        let queue = http_json("GET", &format!("{API}/queue"), None)?;
-        let tasks = model_drain_tasks()?;
+        let queue = http_json("GET", &format!("{api}/queue"), None)?;
+        let tasks = model_drain_tasks(api)?;
         let fresh = tasks
             .into_iter()
             .filter(|task| {

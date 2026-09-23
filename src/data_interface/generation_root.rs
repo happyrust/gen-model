@@ -2040,4 +2040,254 @@ mod tests {
             top.len()
         );
     }
+
+    /// 探针（GitHub #44）：**`TMPL`（设计侧的目录模板实例壳）底下的元素上卷到哪个生成根？**
+    ///
+    /// core 的口径：`UPGRPH` 对 `topNoun == TMPL` 的元素整件 `REPELE`；`nounlib/LPRMTV` 把「属主是 `TMPL`」
+    /// 的元素一律当图元。位表快照（`core-noun-granularity-e3d31.json`）里 `TMPL` `significant=true`、
+    /// `toplevel=true`，所以文件侧枚举（[`enumerate_generation_roots_in_subtree`]）在交付单元之外把它
+    /// 收成根、继续向下；它的成员（`BOX` / `NBOX` / `NCYL` / `PANE` …）位表里都不显著 → 不成根 → 归 `TMPL`。
+    /// 本探针在真库上核这三件事：
+    /// 1. 交付单元之外的每个 `TMPL` 都在根集里；交付单元之内的 `TMPL` 归那个交付单元（core 整件 `TMPL`，我们整台
+    ///    EQUI，多算不漏算）；
+    /// 2. `TMPL` 的成员没有一个自己成根（除非它自己显著——打印出来看）；
+    /// 3. 变更元素的解析口径 [`resolve_element_generation_root`] 对每个 `TMPL` 成员给出的根，与枚举口径
+    ///    「沿 owner 链向上第一个根」一致——两套口径在 `TMPL` 上不许各说一套。
+    ///
+    /// 顺带打印 `TMPL` 的属主链形状与成员 noun 直方图（看有没有 `TMPWL` 这类位表外的容器）。
+    /// 只读文件：`AIOS_APS_PROJECT_DIR`（默认 AvevaPlantSample `aps000`）、`AIOS_AMS_PROJECT_DIR`
+    /// （默认 AvevaMarineSample `ams000`）+ `AIOS_E3D_TEMPLATE_DIR`。
+    #[test]
+    #[ignore = "manual live: needs project directories of DESI files and the E3D template directory"]
+    fn live_probe_tmpl_members_roll_up_to_the_tmpl_root() {
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        use e3d_io::db_element::{DbFilePin, DbSet, template_file_for};
+
+        use crate::data_interface::db_file_header::DbFileHeader;
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::fast_model::e3d_model_service::scan_index;
+
+        let dirs = [
+            std::env::var("AIOS_APS_PROJECT_DIR")
+                .unwrap_or_else(|_| r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()),
+            std::env::var("AIOS_AMS_PROJECT_DIR")
+                .unwrap_or_else(|_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000".into()),
+        ];
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let unit_types = resolve_delivery_unit_types(&[]);
+
+        let mut tmpl_total = 0usize;
+        let mut tmpl_outside_delivery = 0usize;
+        let mut tmpl_inside_delivery = 0usize;
+        let mut tmpl_root_ok = 0usize;
+        let mut members_total = 0usize;
+        let mut members_that_are_roots: Vec<String> = Vec::new();
+        let mut resolver_disagreements: Vec<String> = Vec::new();
+        let mut owner_shapes: BTreeMap<String, usize> = BTreeMap::new();
+        let mut member_nouns: BTreeMap<String, usize> = BTreeMap::new();
+        let mut libs_with_tmpl: Vec<u32> = Vec::new();
+
+        for dir in dirs.iter().map(PathBuf::from) {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                println!("[probe #44] 跳过不存在的目录 {}", dir.display());
+                continue;
+            };
+            let mut desi: Vec<(u32, PathBuf, u32)> = entries
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|path| path.is_file())
+                .filter_map(|path| {
+                    let header = DbFileHeader::read(&path).ok()?;
+                    header
+                        .db_type
+                        .eq_ignore_ascii_case("DESI")
+                        .then(|| (header.dbnum as u32, path, header.latest_sesno()))
+                })
+                .collect();
+            desi.sort();
+            desi.dedup_by_key(|(dbnum, _, _)| *dbnum);
+            println!("[probe #44] {}：{} 个 DESI 库", dir.display(), desi.len());
+
+            for (dbnum, file, sesno) in desi {
+                let set = Arc::new(
+                    DbSet::with_attlib_file(schema.template_dir().join("attlib.dat"))
+                        .expect("attlib"),
+                );
+                set.add_db(DbFilePin {
+                    file: file.clone(),
+                    template: template_file_for(schema.template_dir(), "DESI")
+                        .expect("DESI template"),
+                    db_type: Some("DESI".into()),
+                    sesno: Some(sesno),
+                })
+                .expect("pin DESI");
+                let index = scan_index(&file, Some(sesno)).expect("scan index");
+                let roots: HashMap<RefnoEnum, GenerationRootKind> =
+                    enumerate_generation_roots(&set, &index.roots, &unit_types)
+                        .expect("enumerate roots")
+                        .into_iter()
+                        .map(|root| (root.root, root.kind))
+                        .collect();
+
+                // 变更元素解析口径的取数适配：owner / noun / name 全从 DbSet 读。
+                let lookup = |refno: RefnoEnum| -> Option<GenerationNode> {
+                    let element = set.element(refno_to_e3d(refno));
+                    if !element.exists().ok()? {
+                        return None;
+                    }
+                    let owner = element
+                        .owner()
+                        .ok()?
+                        .map(|owner| refno_from_e3d(owner.refno()))
+                        .filter(|owner| *owner != refno);
+                    Some(GenerationNode {
+                        owner,
+                        noun: element.element_type().ok()?,
+                        name: element.stored_name().ok()?.unwrap_or_default(),
+                    })
+                };
+                // 枚举口径下一个元素归哪个根：沿 owner 链向上（含自身）第一个落在根集里的。
+                let nearest_root = |refno: RefnoEnum| -> Option<RefnoEnum> {
+                    let mut current = refno;
+                    for _ in 0..MAX_ANCESTOR_DEPTH {
+                        if roots.contains_key(&current) {
+                            return Some(current);
+                        }
+                        let key = {
+                            let e = refno_to_e3d(current);
+                            (e.word0, e.word1)
+                        };
+                        let owner = index.owners.get(&key)?;
+                        if !owner.is_valid() {
+                            return None;
+                        }
+                        let next = refno_from_e3d(*owner);
+                        if next == current {
+                            return None;
+                        }
+                        current = next;
+                    }
+                    None
+                };
+
+                let mut lib_has_tmpl = false;
+                for (&(word0, word1), _) in index.owners.iter() {
+                    let refno = refno_from_e3d(RefNo::new(word0, word1));
+                    let element = set.element(RefNo::new(word0, word1));
+                    let Ok(noun) = element.element_type() else {
+                        continue;
+                    };
+                    if noun != "TMPL" {
+                        continue;
+                    }
+                    lib_has_tmpl = true;
+                    tmpl_total += 1;
+
+                    // 属主链形状：TMPL ← 属主 noun ← … 直到 WORL / 链顶。
+                    let mut shape = vec!["TMPL".to_string()];
+                    let mut inside_delivery = false;
+                    let mut cursor = element.owner().ok().flatten();
+                    let mut hops = 0;
+                    while let Some(owner) = cursor {
+                        let owner_noun = owner.element_type().unwrap_or_else(|_| "?".into());
+                        if is_delivery_unit_noun(&owner_noun, &unit_types) {
+                            inside_delivery = true;
+                        }
+                        shape.push(owner_noun);
+                        hops += 1;
+                        if hops > MAX_ANCESTOR_DEPTH {
+                            break;
+                        }
+                        cursor = owner.owner().ok().flatten();
+                    }
+                    *owner_shapes.entry(shape.join(" ← ")).or_default() += 1;
+
+                    if inside_delivery {
+                        tmpl_inside_delivery += 1;
+                    } else {
+                        tmpl_outside_delivery += 1;
+                        if roots.contains_key(&refno) {
+                            tmpl_root_ok += 1;
+                        } else {
+                            println!(
+                                "[probe #44] ✗ dbnum {dbnum} TMPL {} 在交付单元之外却不是根（链 {}）",
+                                refno.to_pdms_str(),
+                                shape.join(" ← ")
+                            );
+                        }
+                    }
+
+                    // 成员：noun 直方图、是否自己成根、两套口径是否一致。
+                    for member in element.member_refnos().unwrap_or_default() {
+                        members_total += 1;
+                        let member_refno = refno_from_e3d(member);
+                        let member_noun = set
+                            .element(member)
+                            .element_type()
+                            .unwrap_or_else(|_| "?".into());
+                        *member_nouns.entry(member_noun.clone()).or_default() += 1;
+                        if roots.contains_key(&member_refno) {
+                            members_that_are_roots.push(format!(
+                                "{} {member_noun} (significant={:?})",
+                                member_refno.to_pdms_str(),
+                                core_significant_bit(&member_noun)
+                            ));
+                        }
+                        let resolved =
+                            resolve_element_generation_root(member_refno, &unit_types, &lookup)
+                                .map(|root| root.root);
+                        let enumerated = nearest_root(member_refno);
+                        if resolved != enumerated {
+                            resolver_disagreements.push(format!(
+                                "{} {member_noun}: resolve={:?} enumerate={:?}",
+                                member_refno.to_pdms_str(),
+                                resolved.map(|r| r.to_pdms_str()),
+                                enumerated.map(|r| r.to_pdms_str())
+                            ));
+                        }
+                    }
+                }
+                if lib_has_tmpl {
+                    libs_with_tmpl.push(dbnum);
+                }
+            }
+        }
+
+        println!(
+            "[probe #44] TMPL {tmpl_total} 个（交付单元之外 {tmpl_outside_delivery}，其中是根 {tmpl_root_ok}；\
+             交付单元之内 {tmpl_inside_delivery}），出现在 {} 个库 {libs_with_tmpl:?}",
+            libs_with_tmpl.len()
+        );
+        println!("[probe #44] 属主链形状：{owner_shapes:#?}");
+        println!(
+            "[probe #44] 成员 {members_total} 个，noun 直方图：{member_nouns:?}；成员自己成根的 {} 个：{:?}",
+            members_that_are_roots.len(),
+            members_that_are_roots.iter().take(10).collect::<Vec<_>>()
+        );
+        println!(
+            "[probe #44] 两套口径不一致的成员 {} 个：{:?}",
+            resolver_disagreements.len(),
+            resolver_disagreements.iter().take(10).collect::<Vec<_>>()
+        );
+        if tmpl_total == 0 {
+            println!("[probe #44] 语料里没有 TMPL——结论只能从位表与代码形状说");
+            return;
+        }
+        assert_eq!(
+            tmpl_root_ok, tmpl_outside_delivery,
+            "交付单元之外的 TMPL 必须每个都是根（位表 significant=true）"
+        );
+        assert!(
+            resolver_disagreements.is_empty(),
+            "变更元素解析口径与枚举口径在 TMPL 成员上各说一套：{resolver_disagreements:?}"
+        );
+        for row in &members_that_are_roots {
+            assert!(
+                row.contains("significant=Some(true)"),
+                "不显著的 TMPL 成员不该自己成根：{row}"
+            );
+        }
+    }
 }

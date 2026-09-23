@@ -510,6 +510,14 @@ rebuild、不推进应用/模型水位。
   `dbnum` / `model_source` / `model_source_reason` / `durable` 四格见 §4.12。
   `complete` 表示这些记录对应的完整根发布已提交；`model-memory` 可在数据库/房间事务失败后仍返回
   候选几何供诊断，此时 `complete=false` 且 `incomplete_roots` 点名根，绝不能把候选 receipt 当成功。
+- **`tube`**（2026-09-22，plant3d-web 方案 B T2；实现 `model_record_reader::model_records_of_root` / `ModelRecord`）：隐式管身的记录
+  （`generic = TUBI`、`insts[0].is_tubi = true`，挂在容器 BRAN 自己的 refno 上）在**记录一级**多一格
+  `"tube": {"ordinal": 0, "from": "24381_100678", "to": "24381_100679"}`——两端管件的 `a_b` 与同 `(from, to)` 内的序号，
+  与房间层级树 `tubes=1` 的直段身份 `(BRAN = refno, from, to, ordinal)` 是**同一个四元组**（§4.13.5），前端拿它把树里的直段行与
+  场景里的直管对象对上。构件记录没有这一格（键不出现），别的字段一字不改。投影路来自 `ProjectedTube`；冷读路来自 `tubi_relate` 的
+  `leave` / `arrive` / `route_ordinal`——`route_ordinal` 自本日起随行落盘（`model_db_adapter::render_records`），此前的老行没有这一格，
+  读侧按同 `(容器, from, to)` 内的出现序（记录 id 序）补 0、1、2…；两端缺失的历史行没有 `tube`。放在记录一级而不是 `insts[]` 里：
+  `ModelHashInst` 是 `aios_core` 的类型，这一格只属于本仓的读面，且一条管身记录恰好一个实例。
 - 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
   `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
 
@@ -726,7 +734,7 @@ ready 判据有两层，先进程后库上（ADR-073 D14，2026-09-16）：
 1. 当前根的 `RootPublicationAck`——房间开启时还要求 ACK 匹配当前 resident generation；
 2. ACK 够不着时（ACK 不持久，rocksdb 冷重启后一条都没有）看库上的整库对齐承诺
    `dbnum_watermark.model_room_generation`：与当前 resident generation 同一代，且本进程的生成根账本里
-   这根没欠着。落盘形态（`store_mode=rocksdb`）才有这一层；进程内嵌 `mem://` 活不过重启，仍只认第 1 层。
+   这根没欠着。落盘形态（`AIOS_STORE_MODE=rocksdb`）才有这一层；进程内嵌 `mem://` 活不过重启，仍只认第 1 层。
 
 两层用的是同一个代号，所以房间 / 面板真变过时两层一起作废 → `not_computed`。库上那一格由能替**整库**
 说话的任务（初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务）随 `model_sesno` 同盖，
@@ -959,15 +967,21 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
-### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, negative-nouns, nearest-clearance, centerline}` — 进程内空间树的邻近查询
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, nearby/tree, negative-nouns, nearest-clearance, centerline, surface-clearance, rooms, rooms/{refno}/tree}` — 进程内空间树的邻近查询
 
 出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
 §5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
 `model-source/genModelV1/spatialSource.ts`（抽屉「按范围查找」在 `?model_source=gen-model-v1` 下走这三条，legacy 源仍走旧后端
 `/api/sqlite-spatial/*`）。2026-09-16 起（本仓 `docs/plans/2026-09-16-bran-centerline-nearest-clearance-v1-dev-plan.md` §3.1 / §3.2）
 `nearby` 与 `nearby/refnos` 多一档 `source_mode=bran_centerline`（§4.13.1），并新增第四条 `nearest-clearance`（§4.13.2）；
-同日晚再加第五条 `centerline`（§4.13.3：把一条 BRAN 的中心线线段表原样给前端，只读库、不碰树）。
-五条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
+同日晚再加第五条 `centerline`（§4.13.3：把一条 BRAN 的中心线线段表原样给前端，只读库、不碰树）；第六条 `surface-clearance`
+见 plant3d-web `docs/plans/2026-09-17-component-to-wall-surface-clearance-plan.md` §5。**2026-09-20 起**（plant3d-web ADR 0067 /
+`docs/plans/2026-09-20-spatial-query-room-and-discipline-filter-plan.md`）`nearby` 与 `nearby/refnos` 多两个过滤维度 **`rooms=`（房间）**
+与 **`spec_values=`（所属专业）**，结果多 `spec_value` / `spec_groups` / `filter_options.spec_values` / `by_spec_value` / `room_status`，
+并新增第七条 `rooms`（§4.13.4：在册房间清单 + 房间体制状态）。**同日晚**（plant3d-web ADR 0068 /
+`docs/plans/2026-09-20-spatial-room-hierarchy-tree-plan.md`）再加第八、九条 **`nearby/tree`**（§4.13.5：同参的一次查询折成
+房间 → 专业 → 最小交付单元类型 → 单元 → 构件 的层级树）与 **`rooms/{refno}/tree`**（§4.13.6：一间房的同一棵树，给房间浏览）。
+九条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
 
 - **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
   随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
@@ -993,10 +1007,12 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 | `shape` | `sphere`（默认）\| `cube` |
 | `nouns` | 逗号分隔，大小写不敏感（服务端按大写比较） |
 | `keyword` | 分页前过滤，大小写不敏感；只匹配 refno（`a_b` / `a/b` 两种写法）与 noun，**不匹配 name**（计划 §5-2 按 (a)） |
-| `sort` | `distance`（默认：距离升序，同距按 dbnum、refno 兜底）\| `name`（名字只对本页解，全集按 noun、refno 作近似序）；两种都是全序，翻页稳定 |
+| `sort` | `distance`（默认：距离升序，同距按 dbnum、refno 兜底）\| `name`（名字只对本页解，全集按 noun、refno 作近似序）\| `spec_distance`（2026-09-20：先按 `spec_value` 升序、0「其他」在前，同专业再按距离 / dbnum / refno——legacy `/api/sqlite-spatial/nearby` 的同名档，抽屉「按专业」排序用它；只在页内按专业分组给不出跨页的专业序）；三种都是全序，翻页稳定。`nearby/refnos` 的全集不看它、恒按距离 |
 | `include_self` | 默认 `false`：refno 模式剔除目标自身与祖先链含目标的整个子树；点模式无意义 |
 | `include_negative` | 默认 `false`：按 `aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES` 剔除负实体（NBOX / NCYL …） |
 | `dbnums` | 逗号分隔 u32，限定库；给了它时答不出库号的条目一律剔除 |
+| `rooms` | 逗号分隔的**房间 refno**（`a/b` / `a_b`，2026-09-20）：只保留房间归属含**任一**所选房间的候选（横跨两间房的构件两边都算；材料表取的「主归属」不在这里用）。不在册的房间 → 400 `bad_request`（消息指去 `/spatial/rooms` 看清单）；房间体制此刻答不出来（`room_membership=false` / 模型未就绪 / 非 hd·hh 构建）→ 422 `precondition`，`detail.reason = rooms_unavailable`、`detail.status` 同 §4.13.4 的 `status`。成员集怎么解见下文「房间归属」 |
+| `spec_values` | 逗号分隔的专业值整数（2026-09-20；0 = 其他）：只保留派生专业在其中的候选。专业怎么派生见下文「所属专业」 |
 | `page` / `per_page` | `page` 从 1 起；`per_page` 默认 500、夹在 `1..=1000`（超出钳位，不报错） |
 | `source_mode` | `aabb`（默认：源 = 目标含子树的并集盒）\| `bran_centerline`（源 = 这条 BRAN 的真实中心线走廊，见 §4.13.1）；大小写不敏感；只能与 `refno` 搭配，与 `x,y,z` 同给 400 |
 
@@ -1009,8 +1025,22 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   （盒内为 0；sphere 走 rstar `locate_within_distance(p, r²)`，即 `sqrt(distance_2)`；cube 是与 `center ± r` 的盒相交）；
   refno 模式是候选盒到目标并集盒的最小表面距离（逐轴 `max(0, a.min − b.max, b.min − a.max)` 的欧氏范数；sphere 再按 `≤ r`
   过滤，cube 只要与目标盒外扩 r 相交）。`within_radius = distance ≤ radius`，cube 下角落上的条目可以是 `false`。
-- **过滤顺序固定**：`include_self` → 负实体 → `dbnums` → 记 `filter_options.nouns` 计数 → `nouns` → `keyword`。noun 计数落在
-  `nouns` / `keyword` 之前：它是给筛选器画可选项用的，选中一个 noun 不能让别的 noun 从清单上消失。
+- **过滤顺序固定**（2026-09-20 起多两格）：`include_self` → 负实体 → `dbnums` → **`rooms`** → 记 `filter_options.nouns` /
+  **`filter_options.spec_values`** 计数 → `nouns` → **`spec_values`** → `keyword`。两个 facet 计数落在 `nouns` / `spec_values` /
+  `keyword` 之前：它们是给筛选器画可选项用的，选中一个不能让别的从清单上消失；落在 `rooms` 之后：房间是与 `dbnums` 同级的范围收窄。
+- **所属专业（`spec_value`，ADR 0067）**：候选属主链上 `TYPE = SITE` 那一级的 `NAME` 按 `DbOption.toml` 的 `spec_value_rules`
+  分类（首个命中生效、关键字大小写不敏感；缺省即 legacy 后端 `spec_info.rs::site_name_to_spec_value` 那张：PIPE→1 管道、
+  ELEC/DIANQI/电气→2 电气、INST/INSTR→3 仪表、HVAC→4 暖通、CIVI/CIVIL/ARCH→5 土建、STRU/STRUCT→6 结构），找不到 SITE / 都不中为 0「其他」。
+  实现 `fast_model::spatial_discipline`：沿 OWNER 逐级读记录、逐级记忆（键含 `DirectTreeService` 的会话指纹，换代整体清空），
+  每个元素整个进程生命期最多读一次；首个大半径查询付一次账（5 万候选 ≈ 5 万次记录读，与 `name_of` 同代价）。因为这一账要对
+  **全部**候选付，锁外的后半程（过滤 / 派生专业 / 排序 / 切页 / 补 `name`）整段在 `spawn_blocking` 里跑、不占 tokio worker；
+  共享记忆的锁只罩查表与写回、不罩记录读，并发查询不在 I/O 上互相串行（2026-09-20 复审后改）。
+- **房间归属（`rooms=`，`fast_model::spatial_rooms`）**：成员集的取法与 `e3d.room.lookup` 同一条判据分两路——
+  读透形态（`data_face = read-through`）库上不落 `room_relate` 边，用常驻房间模型 + 候选的内存投影记录现算
+  （`MemoryRoomCalculator::calculate_for_root`，只读投影快照、**不取空间串行锁**）；没有投影记录的候选（树从快照恢复而本进程没再
+  ensure 过的根）判不出归属，计入 `room_status.unresolved`、从结果剔除、`warnings` 加一句。摄入 / 落盘形态直接读 `SUL_DB` 的
+  `room_relate`（`in ∈ 所选面板`），并按候选所在库核 `dbnum_watermark.model_room_generation` 是否当前代（`room_status.library_alignment_current`），
+  不是当前代**照常答**、`warnings` 加一句，不 409。
 - **上限**：读锁内最多取 `candidate_cap = 200000` 条候选，超出置 `truncated_candidates: true`（`candidate_count` 是过滤前的
   候选数）。`groups`（按 dbnum 计数）与 `total_count` 都是**过滤后的全集**、不受分页影响；答不出库号的条目不进 `groups`。
   不做服务端扫描快照缓存，每页重扫（rstar 查询 ms 级，计划 §5-6 按 (a)）。
@@ -1018,29 +1048,40 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 响应（200）：
 
 ```json
-{ "results": [{ "refno": "24383_71586", "dbnum": 24383, "noun": "PIPE", "name": "/P-1001",
+{ "results": [{ "refno": "24383_71586", "dbnum": 24383, "noun": "PIPE", "spec_value": 1, "name": "/P-1001",
                 "aabb": { "min": [x, y, z], "max": [x, y, z] }, "distance": 123.4, "within_radius": true }],
   "center": { "x": 0, "y": 0, "z": 0, "source": "position | refno_aabb_center" },
   "radius": 5000, "shape": "sphere",
   "total_count": 0, "returned_count": 0, "page": 1, "per_page": 500, "has_more": false,
   "candidate_count": 0, "truncated_candidates": false, "candidate_cap": 200000,
   "groups": [{ "dbnum": 24383, "count": 0 }],
-  "filter_options": { "nouns": [{ "value": "PIPE", "count": 0, "is_negative": false }] },
+  "spec_groups": [{ "spec_value": 1, "count": 0 }],
+  "filter_options": { "nouns": [{ "value": "PIPE", "count": 0, "is_negative": false }],
+                      "spec_values": [{ "value": 1, "count": 0 }] },
+  "room_status": { "rooms": [{ "refno": "17496_8516", "room_num": "A101" }], "source": "memory | durable",
+                   "matched": 12, "unresolved": 0, "definition_version": "…", "library_alignment_current": null },
+  "warnings": ["房间过滤：3 个候选没有内存投影记录、判不出房间归属，已从结果剔除（先显示它们再查会被纳入）"],
   "spatial_state": "ready", "coverage": "global-tree" }
 ```
 
 - `refno` 一律 `a_b`；`dbnum` 先取投影记录，缺则 `DirectTreeService::dbnum_of`，两处都答不出为 `null`（与 §4.10 同义：
   「答不出」，不是 0 号库）；`name` **只对本页补**（`DirectTreeService::name_of`，回元素记录读一次 `NAME`，≤ 1000 条），
   没有名字为 `null`；`aabb` 是 mm、Z-up 的世界坐标盒；`filter_options.nouns` 按 count 降序、同 count 按 noun 字典序。
-  **没有专业（`spec_value`）维度**——v1 链路里根本没有它，前端在这一源下隐藏专业筛选、改按 `groups` 的 dbnum 分组
-  （计划 §5-1 按 (a)；按 noun 派生专业要产品口径，另起切片）。
+- **`spec_value`（2026-09-20 起，ADR 0067）**：上文「所属专业」的派生值，每条结果都带（0 = 其他，不是「答不出」）。`spec_groups`
+  是**过滤后全集**按专业的计数（与 `groups` 同口径、按专业值升序），`filter_options.spec_values` 是**过滤前**（`rooms` 之后）候选按专业的
+  计数（按 count 降序、同 count 按值升序）。此前这里写的「没有专业维度、前端隐藏专业筛选」自本日作废：plant3d-web v1 源
+  `capabilities.specValues` 翻为 true，专业筛选 / 排序 / 分组原样点亮。
+- **`room_status`** 只在给了 `rooms=` 时出现（老客户端一字不变）：`rooms` 是请求点到的在册房间（refno `a_b` + 房间号）；`source`
+  `memory`（读透现算）/ `durable`（读边）；`matched` 是所选房间在本次候选里命中的成员数（过滤前口径）；`unresolved` 见上文；
+  `definition_version` 是常驻房间模型这一代的代号；`library_alignment_current` 落盘形态下候选所在库是否都对齐到当前代，读透 `null`。
 
 `GET /spatial/nearby/refnos`：同参、忽略 `page` / `per_page` / `sort`，按距离序给完整命中集、不补 `name`，上限
-`result_cap = 100000`（超出置 `truncated_results: true`，`total_count` 仍是全集数；`by_dbnum` 只收答得出库号的条目）：
+`result_cap = 100000`（超出置 `truncated_results: true`，`total_count` 仍是全集数；`by_dbnum` 只收答得出库号的条目；
+`by_spec_value` 与它同形、键是专业值的十进制字串、0「其他」也进桶；`rooms=` 给了同样带 `room_status` / `warnings`）：
 
 ```json
-{ "refnos": ["24383_71586"], "by_dbnum": { "24383": ["24383_71586"] }, "total_count": 1,
-  "truncated_results": false, "result_cap": 100000,
+{ "refnos": ["24383_71586"], "by_dbnum": { "24383": ["24383_71586"] }, "by_spec_value": { "1": ["24383_71586"] },
+  "total_count": 1, "truncated_results": false, "result_cap": 100000,
   "center": { "x": 0, "y": 0, "z": 0, "source": "position" }, "radius": 5000, "shape": "sphere",
   "spatial_state": "ready", "coverage": "global-tree" }
 ```
@@ -1207,7 +1248,135 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 - **只读库、不碰空间树**：这条不需要 `GLOBAL_AABB_TREE`，所以**没有** 503 `spatial_not_ready` 一档，也不带 `spatial_state` / `coverage`；
   库没 ensure 过也答得出（中心线来自 E3D 库的成员序，不依赖生成过模型）。
 
-错误一览（五条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
+#### 4.13.4 `GET /api/v1/spatial/rooms` — 在册房间清单 + 房间体制此刻的状态（2026-09-20）
+
+出处：plant3d-web ADR 0067 / `docs/plans/2026-09-20-spatial-query-room-and-discipline-filter-plan.md` §4.1（Q4 / Q5）；
+实现 `fast_model::spatial_rooms::list_rooms` + `handlers::spatial_rooms`。给抽屉「按房间过滤」画可搜索多选下拉：房间号不保证全库唯一，
+所以线上一律用房间 refno，房间号在客户端对着这份清单解析。只过身份门（`?project=&mdb=&namespace=`），只读常驻房间模型，
+不看空间树状态、不碰 `GLOBAL_AABB_TREE`。
+
+```json
+{ "status": "ready | degraded | initializing | disabled | unsupported | failed",
+  "reason": "room_membership=false：服务端未开启房间归属计算",
+  "definition_version": "…",
+  "rooms": [{ "refno": "17496_8516", "room_num": "A101", "name": "/A101-RM", "dbnum": 17496, "panel_count": 6 }] }
+```
+
+- `status` 由总开关 `room_membership` / `AIOS_SPATIAL_COMPUTE` 与常驻房间模型的生命周期折出：开关关 → `disabled`；`Loading` →
+  `initializing`；`Unsupported` → `unsupported`；`Blocked` → `failed`；`Ready` → `ready`；`Degraded` → `degraded`（仍给清单，`reason`
+  是 problems 首句——Degraded 的模型照常算房间，ADR-073 D10）。非 `ready` / `degraded` 时 `rooms` 为空、`definition_version` 为 `null`；
+  `reason` 没有就不出现。客户端据此整块收起房间过滤并写原因。
+- `rooms` 只列**在册**房间（名字含 `room_key_word` 且房间号过项目命名校验的 FRMW / SBFR），按 `room_num`、refno 排；`name` 是房间元素
+  的 `NAME`（`DirectTreeService::name_of`，百级），`dbnum` 答不出为 `null`，`panel_count` 是它名下在册面板数。
+- 与 `nearby?rooms=` 的关系：那里的 422 `rooms_unavailable` 的 `detail.status` 就是这里的 `status`；那里的 400「不是在册房间」指的就是不在这份清单里。
+
+#### 4.13.5 `GET /api/v1/spatial/nearby/tree` — 同参的一次查询折成房间层级树（2026-09-20）
+
+出处：plant3d-web ADR 0068 / `docs/plans/2026-09-20-spatial-room-hierarchy-tree-plan.md` §4.1 / §4.2；实现
+`fast_model::spatial_tree_view::assemble_tree` + `spatial_query::nearby_tree` + `handlers::spatial_nearby_tree`。抽屉选了房间之后结果区不再
+平铺分组、改画这棵树；模型树 ROOM 标签页浏览一间房走 §4.13.6 的同一棵。
+
+参数与 `nearby` **完全相同**（`refno | x,y,z`、`radius`、`shape`、`source_mode`、`nouns`、`keyword`、`include_self`、`include_negative`、
+`dbnums`、`rooms`、`spec_values`），过滤链也相同（`include_self → 负实体 → dbnums → rooms → nouns → spec_values → keyword`），三处不同：
+
+- **`rooms=` 必填**：树以所选房间为根，没给 → 400 `bad_request`「nearby/tree 需要 rooms=」。不按房间过滤请用 `nearby`——没选房间的命中
+  要对全部候选反查归属才有根可挂，那是另一笔账（ADR 0067 Q7 不给房间 facet 的同一理由），先不给。
+- **不分页、按 refno 去重**：`sort` / `page` / `per_page` 收下不生效；空间树里同一 refno 的多条条目在这里只算一条（距离取最近）。
+- 另两个可选参数只在叶子超上限后用：`unit=<单元 refno>`（`a/b` / `a_b`）/ `other_noun=<NOUN>`——只把这一组的叶子内联进来，树骨架照常给；
+  两个同时给 400。
+
+```json
+{ "center": { "x": 1.0, "y": 2.0, "z": 3.0, "source": "refno_aabb_center" }, "radius": 3000, "shape": "sphere",
+  "total_count": 1055,
+  "candidate_count": 3940, "truncated_candidates": false, "candidate_cap": 200000,
+  "leaves_inline": true, "leaf_cap": 5000, "leaf_count": 1061,
+  "delivery_unit_types": ["BRAN", "HANG", "SUPPO", "EQUI"],
+  "rooms": [
+    { "refno": "24381_35580", "room_num": "R432", "name": "/1RX-RM04-R432", "count": 1055,
+      "specs": [
+        { "spec_value": 0, "count": 8, "unit_types": [],
+          "others": { "count": 8, "by_noun": [ { "noun": "GWALL", "count": 5, "min_distance": 0.0,
+                                                  "elements": [ { "refno": "24381_4090", "noun": "GWALL", "distance": 0.0 } ] } ] } },
+        { "spec_value": 3, "count": 1047,
+          "unit_types": [
+            { "noun": "BRAN", "count": 900, "units": [
+                { "refno": "24381_1200", "noun": "BRAN", "name": "/C-IY-1R330-B", "count": 80, "min_distance": 12.3,
+                  "elements": [ { "refno": "24381_1240", "noun": "TUBI", "distance": 12.3, "shared_rooms": 2 } ] } ] },
+            { "noun": "EQUI", "count": 100, "units": [] } ],
+          "others": { "count": 47, "by_noun": [] } } ] } ],
+  "room_status": { "rooms": [{ "refno": "24381_35580", "room_num": "R432" }], "source": "memory", "matched": 1298, "unresolved": 0,
+                   "definition_version": "…", "library_alignment_current": null },
+  "warnings": ["…"],
+  "spatial_state": "ready", "coverage": "global-tree" }
+```
+
+- **层级**：`rooms[]`（按 `room_num`、refno 排）→ `specs[]`（`spec_value` 升序，0「其他」在前，同 `sort=spec_distance`）→
+  `unit_types[]`（按本项目 `delivery_unit_types` 配置表顺序，即 `/health.delivery_unit_types`）→ `units[]`（按最近成员距离、refno）→
+  `elements[]`（按距离、refno）；专业下另有 `others`——不属于任何最小交付单元的构件（面板 / 框架 / 楼板 / 型面……）按 noun 分组
+  （`by_noun[]` 按计数降序、同计数按 noun），它是「没有单元」的兜底，不是一种专业也不是一种单元类型。
+- **单元**：候选属主链上（含自身）首个 noun 在 `delivery_unit_types` 里的元素（`generation_root::is_delivery_unit_noun`），到
+  SITE / ZONE / WORL 仍没遇到 → 其他构件。派生沿 OWNER 逐级读记录、逐级记忆（同专业派生：链上每个走过的元素都记下答案，
+  换代整体清空，锁只罩查表 / 写回不罩记录读）。`units[].name` 是单元的 `NAME`（爬链时顺手拿到，不另读），没有为 `null`；叶子**不带名字**。
+- **计数**：所有 `count` 都是该节点下按 refno 去重的构件数；`total_count` 是全树去重数。**横跨多间所选房间的构件在每间房下都出现**
+  （任一归属，ADR 0067 Q2 的同一口径），只在 `total_count` 里算一次，叶子上带 `shared_rooms`（所属的所选房间数，≥ 2 才出现），
+  所以 `Σ rooms[].count ≥ total_count`。构件属于哪几间房来自 `rooms=` 解算时的 `面板 → 构件` 边（读透形态现算；落盘形态读
+  `room_relate` 的 `in`）——`RoomScope::member_rooms`，`nearby` 的响应一字不变。
+- **叶子**：`leaf_count` 是叶子放置数（跨房构件每间房各算一次）；≤ `leaf_cap`（5000）时全部 `elements` 内联、`leaves_inline = true`；
+  超过就整体省略（所有 `elements` 键不出现）、`leaves_inline = false`，客户端按 `unit=` / `other_noun=` 再取一组——那一次响应里只有
+  被点到的单元 / noun 组带 `elements`，`inlined` 字段说明是哪一组（`unit:24381_1200` / `other_noun:PANE`），`leaves_inline` 仍为 `false`。
+- 与 `nearby` / `nearby/refnos` 的关系：同参数下 `total_count` = `nearby/refnos` 的 `refnos` 去重数；`room_status` / `warnings` 同一份；
+  不再重复给 `filter_options` / `spec_groups` / `groups`。
+- 错误：`rooms=` 缺失 400；不在册房间 400；房间体制不可用 422 `rooms_unavailable`（`detail.status` 同 §4.13.4）；其余同 `nearby`
+  （404 / 503 / 422 `identity_mismatch`）。
+
+**`tubes=1`——BRAN 单元下列出直段（2026-09-22；plant3d-web 方案 B，ADR 0068 追记 ②；计划
+`docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`；实现 `spatial_tree_view::TreeDraft` + `spatial_tree_tubes`）**
+
+隐式管身（TUBI 直段）没有自己的 refno、不进空间树（ADR-072 D4 保持），所以缺省的树**列不出、也数不到**直段。`tubes=1`（`true/yes/on`
+亦可；非法值 400）打开后，服务端折完管件、再按树里出现的每个 **BRAN 单元**读它根名下的管身记录（投影里有回执的根取投影——与 `/model/records`
+同一谓词；其余冷读 `tubi_relate`，只按 `in` 一路各走索引、一次往返），把落在范围内的直段挂到该单元下：
+
+- **缺省关**：不带 `tubes=` 的响应与不认识这个参数的旧版**逐字节相同**（下面所有新键都不出现）；两条树路由都认它。
+- **响应**（只在 `tubes=1` 时出现）：`units[].tubes[]` 每段 `{ ordinal, from, to, from_noun, to_noun, distance, length, aabb: {min, max},
+  invalid, shared_rooms? }`；`units[]` / `unit_types[]` / `specs[]` / `rooms[]` 各多一格 `tube_count`；顶层多 `total_tube_count`（按身份去重，
+  跨房直段只算一次）与 `tubes_truncated`。`from` / `to` 是两端管件的 `a_b`（容器头 / 尾那一段的一端是 BRAN 自己，`*_noun` 为 `BRAN`）；
+  两端 noun 命中里有就用命中的，没有回记录读一次，读不出为空串；`length` 是直管长度（mm，存下的世界变换 z 轴列的模）；`aabb` 给前端定位飞行。
+- **身份**是 `(单元 refno, from, to, ordinal)` 四元组：`ordinal` 是同 `(from, to)` 内的序号（e3d-model `route_ordinal`），无关两段常为 0。
+  落盘行在 T2 落 `route_ordinal` 之前没有这一格，冷读路按同 `(from, to)` 内的出现序（分支槽位序）补号——同 `(from, to)` 多段的 BRAN
+  在冷读路上序号可能与投影不一致，是已知窗口。
+- **计数**：`count` / `total_count` **不变**，直段不是构件、不算进去；`tube_count` 是该节点下落在范围内、属于该房间的直段**放置**数。
+  直段放置数**计入 `leaf_count`、共用 `leaf_cap`**：超上限时 `tubes` 与 `elements` 一起省略，`unit=` 点到的单元连直段一起内联；
+  `other_noun=` 组没有直段。`tubes[]` 按距离、再 `(from, to, ordinal)` 排；`min_distance` 仍只看管件。
+- **过滤链**与管件同一把尺、走它能走的几格：范围按 `collect_candidates` 逐分支同判据对单个盒复算（`spatial_query::measure_box_in_range`：
+  点 + sphere 盒到点 ≤ r；点 + cube 与 `center ± r` 相交；refno 目标与 `target ± r` 相交、sphere 再盒到盒 ≤ r；中心线走廊逐段探针 +
+  走廊到盒距离）；`include_self=false` 时目标子树里的 BRAN 是「自己」，它的直段不列；`nouns=` 点名了类型却没点 `TUBI` → 直段不出；
+  `keyword=` 用容器 BRAN 的 refno + `TUBI` 走同一个谓词；`dbnums` / `spec_values` / `rooms` 由「它挂在哪个单元下」隐含（直段与它的 BRAN 同库、
+  同专业；单元能出现说明成员过了这几格）。
+- **归属哪间房**（D4）：`member_rooms[from] ∪ member_rooms[to]`——两端管件任一属该房就挂到该房下的这个单元；只往**已有的单元节点**下挂
+  （成员都被过滤掉的房间没有节点可挂）。两端都不是任一所选房间的成员时分两档：任一端**在范围里**（是候选）却不是成员 = 已经判过、属于别处
+  ——它旁边的管件正是这样被 `rooms=` 滤掉的，直段跟着不列（R432 整房真机 176 段里 8 段是这一档：穿过房间盒、两端却在邻房）；两端都**不在
+  范围里** = 解不出，按该单元出现的每一间房兜底。放到 ≥ 2 间房的带 `shared_rooms`。
+- **预算**：一次响应最多为最近的 **500** 个 BRAN 单元（按最近成员距离）补直段；超出 `tubes_truncated=true`、`warnings` 加一句、没读的单元
+  `tube_count = 0`。
+- **已知漏洞**（接受，D1 取 (b)）：**孤直段**——一条 BRAN 的管件全在范围外、只有直段穿过范围，这根不在树上，直段补不出来；要全就得给
+  管身另建一棵树，真被踩到再升。
+- 与 `/model/records` 的关系：范围 = 整房时，一条 BRAN 在房间树里的 `tube_count` ≤ 它 `model/records` 里 `is_tubi` 的条数（相等或更少；
+  多了就是 bug）。
+
+#### 4.13.6 `GET /api/v1/spatial/rooms/{refno}/tree` — 一间在册房间的房间层级树（2026-09-20）
+
+出处同 §4.13.5（计划 §4.5，给模型树 ROOM 标签页在 gen-model-v1 源下浏览一间房）；实现 `spatial_tree_view::room_tree_params` +
+`handlers::spatial_room_tree`，之后与 §4.13.5 同一条流水线。
+
+- **范围就是这间房**：目标 = 路径里的房间（`a_b`；同 `nearby?refno=` 的口径，它的并集盒来自投影里祖先链含它的记录——也就是它名下的
+  面板——投影没有再看树上它自己的条目），`shape=cube`，`rooms=` 它自己，`include_self=false`（房间自己的面板不算成员）。
+  `radius` 在这里是**盒的外扩量**，缺省 0 = 只要与房间盒相交、上限同 `nearby`（100 000 mm）。
+- **不接受** `refno` / `x,y,z` / `source_mode` / `rooms`（都 400，范围与房间已由路径定死）；其余过滤（`nouns` / `keyword` /
+  `include_negative` / `dbnums` / `spec_values`）与叶子选择器（`unit` / `other_noun`）、`tubes=1`（§4.13.5，2026-09-22）透传。
+- 响应同 §4.13.5，`rooms[]` 恒一条、`center.source = refno_aabb_center`。房间从没生成过面板模型（投影与树里都没有它的盒）→ 404
+  `not_found`；不在册（名字不含房间关键词或房间号不合规）→ 400；房间体制不可用 → 422 `rooms_unavailable`。
+
+错误一览（九条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
 找不到这条 refno）、422 `precondition`（中心线模式源不是 BRAN / 路由容器，或一段都拼不出）、422 `identity_mismatch`（§3）、
 503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档；`centerline` 不碰树、没有这一档）；其余暂时故障
 （`DirectTreeService` 取不到、MBD 服务不可用等）按 §3 统一信封 500。

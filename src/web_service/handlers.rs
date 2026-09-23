@@ -15,7 +15,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
-use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
+use crate::data_interface::on_demand_model::{
+    ModelGenerationInProgress, ModelStaleAfterGeneration, UnresolvableRoot,
+};
 use crate::fast_model::{spatial_clearance, spatial_query, surface_clearance};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
@@ -200,11 +202,56 @@ fn health_status(
 }
 
 fn model_cache_health(store_reachable: bool) -> Value {
-    let (resident_records, resident_roots) =
-        crate::fast_model::model_memory_store::ModelMemoryStore::global().current_counts();
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let (resident_records, resident_roots) = store.current_counts();
+    // d-149 观测（ADR-082 D5）：两块此前无界的常驻各给一份**估算**字节——查时现算、回给前端，
+    // 不落库、不缓存。overlay 的记录那半是插入 / 删除时随手记的账，回执 / ACK 与每库的元素缓存
+    // 在读锁里走一遍（根 / 元素的量级）；上限（0 = 不限）并排给，现场对着 RSS 定数字。
+    let overlay = store.overlay_footprint();
+    let element_cache = crate::fast_model::e3d_model_service::generation_input_cache_footprint();
+    // ADR-084：生成输入缓存这一维（库数）——上限 / 现留几库 / 累计逐出；`databases[]` 每条带 `last_used_tick`。
+    let generation_inputs = crate::fast_model::e3d_model_service::generation_input_cache_limits();
+    // 内存控制计划 P4：历史快照那几格——回执表的条数 / 上限 / 累计顶掉，加投影里每格的记录数与估算字节
+    // （与 overlay 同一把尺；此前 `/health` 只数 `Current`，这几格看不见）。
+    let historical_scopes = store.historical_footprint();
+    let historical_store = crate::fast_model::historical_model::HistoricalModelStore::try_global()
+        .map(|store| store.stats())
+        .unwrap_or(crate::fast_model::historical_model::HistoricalStoreStats {
+            snapshots: 0,
+            max_snapshots: crate::options::model_historical_snapshots_max(),
+            evicted_total: 0,
+        });
     let mut health = json!({
         "resident_records": resident_records,
         "resident_roots": resident_roots,
+        "overlay": {
+            "records": overlay.records,
+            "roots": overlay.roots,
+            "acks": overlay.acks,
+            "approx_bytes": overlay.approx_bytes,
+            "receipt_room_bytes": overlay.receipt_room_bytes,
+            "max_roots": crate::options::model_overlay_max_roots(),
+            "evicted_total": store.overlay_evictions_total(),
+        },
+        "element_cache": {
+            "enabled": crate::options::model_element_cache(),
+            "max_entries": crate::options::model_element_cache_max_entries(),
+            "parsed_entries": element_cache.iter().map(|db| db.parsed_entries).sum::<usize>(),
+            "approx_bytes": element_cache.iter().map(|db| db.approx_bytes).sum::<usize>(),
+            "max_dbnums": generation_inputs.max_dbnums,
+            "resident_dbnums": generation_inputs.resident_dbnums,
+            "evicted_dbnums_total": generation_inputs.evicted_dbnums_total,
+            "databases": element_cache,
+        },
+        "historical": {
+            "snapshots": historical_store.snapshots,
+            "max_snapshots": historical_store.max_snapshots,
+            "evicted_total": historical_store.evicted_total,
+            "scopes": historical_scopes.len(),
+            "records": historical_scopes.iter().map(|scope| scope.footprint.records).sum::<usize>(),
+            "approx_bytes": historical_scopes.iter().map(|scope| scope.footprint.approx_bytes).sum::<usize>(),
+            "snapshots_detail": historical_scopes,
+        },
     });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
     health["store_reachable"] = json!(store_reachable);
@@ -1227,9 +1274,7 @@ pub async fn mesh_glb(
             "geo_hash 只允许字母、数字与下划线: {stem}"
         )));
     }
-    let path = aios_core::get_db_option()
-        .get_meshes_path()
-        .join(format!("{stem}.mesh"));
+    let path = crate::options::meshes_dir().join(format!("{stem}.mesh"));
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1328,6 +1373,22 @@ impl From<spatial_query::SpatialQueryError> for SpatialApiError {
             SpatialQueryError::BadRequest(message) => Self::Api(ApiError::bad_request(message)),
             SpatialQueryError::NotFound(message) => Self::Api(ApiError::not_found(message)),
             SpatialQueryError::NotReady(state) => Self::NotReady(state),
+            // 给了 `rooms=` 而房间体制答不出来（开关关 / 模型未就绪 / 非 hd·hh 构建）：422，`detail.status`
+            // 与 `GET /spatial/rooms` 的 `status` 同一套字面值，客户端据此收起房间块并写原因（ADR 0067，Q5）。
+            SpatialQueryError::RoomsUnavailable { status, reason } => Self::Api(
+                ApiError::precondition(format!(
+                    "房间过滤此刻不可用（{status}）{}",
+                    reason
+                        .as_deref()
+                        .map(|reason| format!("：{reason}"))
+                        .unwrap_or_default()
+                ))
+                .with_detail(json!({
+                    "reason": "rooms_unavailable",
+                    "status": status,
+                    "message": reason,
+                })),
+            ),
             SpatialQueryError::Internal(error) => Self::Api(ApiError::from_domain(error)),
         }
     }
@@ -1457,7 +1518,7 @@ pub async fn spatial_nearby(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby(&params, centerline.as_ref(), service.as_ref()).await?;
+    let response = spatial_query::nearby(&params, centerline.as_ref(), service).await?;
     Ok(Json(response))
 }
 
@@ -1468,6 +1529,27 @@ fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
         spatial_query::Target::Refno(refno) => Some(refno),
         spatial_query::Target::Position(_) => None,
     }
+}
+
+/// GET /api/v1/spatial/rooms — 在册房间清单 + 房间体制此刻的状态（spec §4.13.4；plant3d-web ADR 0067 / 计划 2026-09-20）。
+/// 给抽屉「按房间过滤」画可搜索下拉：`status` 不是 `ready` / `degraded` 时清单为空、`reason` 说为什么，客户端整块收起。
+/// 只过身份门、只读常驻房间模型，不看空间树状态、不碰 `GLOBAL_AABB_TREE`；名字经 `DirectTreeService::name_of` 只对在册房间补（百级）。
+pub async fn spatial_rooms(
+    State(state): State<AppState>,
+    Query(request): Query<ProjectReq>,
+) -> Result<Json<crate::fast_model::spatial_rooms::RoomsResponse>, SpatialApiError> {
+    resolve_identity(&state, &request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = tokio::task::spawn_blocking(move || {
+        crate::fast_model::spatial_rooms::list_rooms(service.as_ref())
+    })
+    .await
+    .map_err(|join| ApiError::from_domain(anyhow::anyhow!("rooms task aborted: {join}")))?;
+    Ok(Json(response))
 }
 
 /// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。
@@ -1484,8 +1566,103 @@ pub async fn spatial_nearby_refnos(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response =
-        spatial_query::nearby_refnos(&params, centerline.as_ref(), service.as_ref()).await?;
+    let response = spatial_query::nearby_refnos(&params, centerline.as_ref(), service).await?;
+    Ok(Json(response))
+}
+
+/// 树路由的叶子选择器原文（叶子超上限后只取一组：`unit=<单元 refno>` / `other_noun=<NOUN>`）+ `tubes=`（BRAN 单元下补直段行，
+/// 缺省关；spec §4.13.5「`tubes=1`」，计划 `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`）。
+#[derive(Debug, Default, Deserialize)]
+pub struct RawLeafSelector {
+    pub unit: Option<String>,
+    pub other_noun: Option<String>,
+    pub tubes: Option<String>,
+}
+
+/// `GET /api/v1/spatial/nearby/tree` 与 `rooms/{refno}/tree` 的 query 串：身份三格 + `nearby` 全部参数原文 + 叶子选择器。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialTreeReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_query::RawSpatialQuery,
+    #[serde(flatten)]
+    pub leaves: RawLeafSelector,
+}
+
+fn tree_options(
+    raw: &RawLeafSelector,
+) -> Result<crate::fast_model::spatial_tree_view::TreeOptions, SpatialApiError> {
+    use crate::fast_model::spatial_tree_view::{LeafSelector, TreeOptions};
+    let only = LeafSelector::parse(raw.unit.as_deref(), raw.other_noun.as_deref())
+        .map_err(ApiError::bad_request)?;
+    let tubes = spatial_query::parse_flag("tubes", raw.tubes.as_deref(), false)
+        .map_err(ApiError::bad_request)?;
+    Ok(TreeOptions {
+        only,
+        tubes,
+        ..TreeOptions::default()
+    })
+}
+
+/// GET /api/v1/spatial/nearby/tree — 同 `nearby` 的一次查询折成房间层级树（spec §4.13.5；plant3d-web ADR 0068）：
+/// `rooms=` 必填，命中不分页、按 refno 去重，折成 房间 → 专业 → 最小交付单元类型 → 单元 → 构件；`sort` / `page` /
+/// `per_page` 收下不生效。后半程（过滤 + 派生专业 / 单元根 + 折树）与 `nearby` 一样在阻塞线程上跑；`tubes=1` 时中间多一步
+/// 按树里出现的 BRAN 单元读直段（spec §4.13.5「`tubes=1`」，2026-09-22），缺省关、关着时响应逐字节不变。
+pub async fn spatial_nearby_tree(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialTreeReq>,
+) -> Result<Json<crate::fast_model::spatial_tree_view::TreeResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let options = tree_options(&request.leaves)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_tree(
+        &params,
+        centerline.as_ref(),
+        service,
+        crate::data_interface::generation_root::configured_delivery_unit_types(),
+        options,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/rooms/{refno}/tree — 一间在册房间的房间层级树（spec §4.13.6；plant3d-web ADR 0068，给模型树
+/// ROOM 标签页浏览一间房）：以房间自身的包围盒为范围（`radius` 是外扩量、缺省 0）、`rooms=` 它自己、不算它自己的面板；
+/// 响应同 `nearby/tree`，`rooms[]` 恒一条。房间从没生成过面板模型（投影与树里都没有盒）→ 404，不在册 → 400。
+pub async fn spatial_room_tree(
+    State(state): State<AppState>,
+    Path(refno): Path<String>,
+    Query(request): Query<SpatialTreeReq>,
+) -> Result<Json<crate::fast_model::spatial_tree_view::TreeResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let room = RefU64::from_str(refno.trim())
+        .ok()
+        .filter(RefU64::is_valid)
+        .ok_or_else(|| ApiError::bad_request(format!("房间 refno 格式非法（应为 a_b）: {refno}")))?;
+    let params = crate::fast_model::spatial_tree_view::room_tree_params(room, &request.query)
+        .map_err(ApiError::bad_request)?;
+    let options = tree_options(&request.leaves)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_tree(
+        &params,
+        None,
+        service,
+        crate::data_interface::generation_root::configured_delivery_unit_types(),
+        options,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1550,7 +1727,7 @@ pub async fn spatial_surface_clearance(
         ),
         Err(_) => (String::new(), String::new()),
     };
-    let meshes_dir = aios_core::get_db_option().get_meshes_path();
+    let meshes_dir = crate::options::meshes_dir();
     let response = surface_clearance::run(&aios_core::SUL_DB, meshes_dir, &params, nouns)
         .await
         .map_err(|error| match error {
@@ -1770,9 +1947,13 @@ pub struct HistoricalQueryReq {
 
 fn historical_error(error: crate::fast_model::historical_model::HistoricalModelError) -> ApiError {
     let status = match error.code {
-        "INVALID_SELECTOR" => StatusCode::BAD_REQUEST,
-        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" => StatusCode::NOT_FOUND,
-        "TIME_BEFORE_OLDEST_SESSION" => StatusCode::UNPROCESSABLE_ENTITY,
+        "INVALID_SELECTOR" | "INVALID_REFNO" => StatusCode::BAD_REQUEST,
+        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" | "SNAPSHOT_NOT_FOUND" => {
+            StatusCode::NOT_FOUND
+        }
+        "TIME_BEFORE_OLDEST_SESSION" | "REFNO_OUTSIDE_SNAPSHOT" => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         "GENERATION_LIMIT_EXCEEDED" => StatusCode::PAYLOAD_TOO_LARGE,
         "GENERATION_CANCELLED" => StatusCode::REQUEST_TIMEOUT,
         "SESSION_TIME_UNAVAILABLE" | "SOURCE_NOT_FOUND" | "SOURCE_CHANGED" => {
@@ -1839,6 +2020,262 @@ pub async fn model_history_generate(
     Ok((StatusCode::ACCEPTED, Json(json!({"task_id": task_id}))))
 }
 
+/// `GET /api/v1/model/versions` 的查询串：与 `/tree/*` 同一套请求身份 + `dbnum` + `refno`（`a/b` 或 `a_b`）。
+#[derive(Debug, Deserialize)]
+pub struct ModelVersionsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    /// 只列链序在它之后的会话（翻页游标）；不在链上是 404 `SESSION_NOT_FOUND`。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 缺省 500、上限 5000；尾部截断回 `truncated: true`。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+fn unit_versions_error(error: crate::fast_model::unit_versions::UnitVersionsError) -> ApiError {
+    let status = match error.code {
+        "INVALID_REFNO" | "INVALID_VERSION_PAIR" => StatusCode::BAD_REQUEST,
+        "REFNO_NOT_FOUND" | "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "NOT_A_DELIVERY_UNIT_ROOT" => StatusCode::UNPROCESSABLE_ENTITY,
+        "COMPUTATION_TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
+        "SOURCE_NOT_FOUND" | "SESSION_TIME_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let api = ApiError::coded(status, error.code, error.message);
+    match error.detail {
+        Some(detail) => api.with_detail(detail),
+        None => api,
+    }
+}
+
+/// GET /api/v1/model/versions — 某最小交付单元的模型版本表（ADR-081）。
+///
+/// 从 dabacon 会话链按需算（e3d-io 索引差分 × 单元子树归属 × 元素级模型影响），只进进程内缓存、不落库；
+/// 五态 `impact_kind` 沿用 legacy 词表。单元根合法性由服务端按项目 `delivery_unit_types` 判，
+/// 前端不再持类型清单。整条链冷算是重 I/O，放 `spawn_blocking`。
+pub async fn model_versions(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::unit_versions::UnitVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::unit_versions::unit_versions(dbnum, refno, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// GET /api/v1/element/versions — 某个**构件**的模型版本表。
+///
+/// 与上面那条的分工：`model/versions` 折整棵单元子树，这条只认 `refno == 目标` 那一条变化，
+/// 并把所属单元那一列并排放在同一行（`element_impact` 为空 = 这一版单元变了、构件自己没变）。
+/// 任意 refno 都受理——非交付单元根在这里不是错误，那正是它存在的理由。同样是重 I/O，放 `spawn_blocking`。
+pub async fn element_versions(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::element_versions::ElementVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::element_versions::element_versions(dbnum, refno, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("构件版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// GET /api/v1/element/attribute-history — 某个**节点**的属性变化时间线（plant3d-web ADR 0066）。
+///
+/// 与 `element/versions` 的分工：那张表只说「这一版它变没变」（两列五态）；这条说「谁在哪一版改了什么」——
+/// 每行一个它自身记录被改过的会话，带会话页 user / comment，展开是逐属性 before / after（与属性面板
+/// 同一个渲染器出字）。任意 refno 都受理。重 I/O，放 `spawn_blocking`。
+pub async fn element_attribute_history(
+    State(state): State<AppState>,
+    Query(req): Query<ModelVersionsReq>,
+) -> Result<Json<crate::fast_model::attribute_history::AttributeHistoryReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let attributes = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let dbnum = req.dbnum;
+    let since_sesno = req.since_sesno;
+    let limit = req.limit;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::attribute_history::attribute_history(
+            dbnum,
+            refno,
+            since_sesno,
+            limit,
+            &attributes,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("属性时间线计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// `GET /api/v1/node/diff-summary` 的查询串：节点 + 两个会话 + 对比范围。
+#[derive(Debug, Deserialize)]
+pub struct NodeDiffSummaryReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    /// 较早的一版（链序在 `b` 之前，否则 400 `INVALID_VERSION_PAIR`）
+    pub a: u32,
+    /// 较新的一版
+    pub b: u32,
+    /// `self` / `subtree`，缺省 `subtree`
+    #[serde(default)]
+    pub scope: crate::fast_model::node_diff_summary::DiffScope,
+}
+
+/// GET /api/v1/node/diff-summary — 节点在 A→B 之间的差异摘要（plant3d-web ADR 0066）。
+///
+/// 不生成几何：一次索引差分 + 逐候选按生成路同一把尺子判新增 / 删除 / 修改 / noop，按最小交付单元分组，
+/// 附「变了的单元数」与要不要确认（阈值 `MODEL_HISTORY_CONFIRM_UNITS`）。前端拿变了的单元去逐个
+/// `history/generate`，未变的一份都不算。重 I/O，放 `spawn_blocking`。
+pub async fn node_diff_summary(
+    State(state): State<AppState>,
+    Query(req): Query<NodeDiffSummaryReq>,
+) -> Result<Json<crate::fast_model::node_diff_summary::DiffSummaryReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let NodeDiffSummaryReq {
+        dbnum, a, b, scope, ..
+    } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::node_diff_summary::node_diff_summary(dbnum, refno, a, b, scope)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("差异摘要计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
+/// `GET /api/v1/node/versions` 的查询串：节点 + 对比范围 + 分页。
+#[derive(Debug, Deserialize)]
+pub struct NodeVersionsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` / `a_b`，任意节点（构件 / 单元根 / SITE、ZONE 容器）
+    pub refno: String,
+    /// `self` / `subtree`，缺省 `subtree`
+    #[serde(default)]
+    pub scope: crate::fast_model::node_diff_summary::DiffScope,
+    /// 只给链序在它之后的版本；它必须在链上。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 缺省 500、上限 5000；尾部截断回 `truncated: true`。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/node/versions — 任意**节点**按对比范围折叠的模型版本表（plant3d-web ADR 0066）。
+///
+/// 与前两张表的分工：`model/versions` 只收单元根、折整棵单元子树；`element/versions` 只认构件自己那一条；这条任意节点都
+/// 受理——`scope=self` 是节点自身那一格，`scope=subtree` 是节点 + 其下整棵子树折成一版，并给「这一会话动了几个最小交付
+/// 单元」。容器（SITE / ZONE）「所有子节点」下的时间线只有它能列。整条链冷算是重 I/O，放 `spawn_blocking`。
+pub async fn node_versions(
+    State(state): State<AppState>,
+    Query(req): Query<NodeVersionsReq>,
+) -> Result<Json<crate::fast_model::node_versions::NodeVersionsReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let NodeVersionsReq {
+        dbnum,
+        scope,
+        since_sesno,
+        limit,
+        ..
+    } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::node_versions::node_versions(dbnum, refno, scope, since_sesno, limit)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("节点版本表计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// GET /api/v1/model/history/{snapshot_key}
 pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()
@@ -1853,13 +2290,41 @@ pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<
 }
 
 /// POST /api/v1/model/history/query
+///
+/// `tool=attributes`（ADR-081 候选条，契约 2026-09-18）另走一条：`arguments.refno`（`a/b`）在快照那个
+/// 会话下的属性，与 `element/attributes` 同一个渲染器；文件 I/O 在 `spawn_blocking` 里。
 pub async fn model_history_query(
+    State(state): State<AppState>,
     Json(req): Json<HistoricalQueryReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = req.arguments;
     let store = crate::fast_model::historical_model::HistoricalModelStore::global()
         .await
         .map_err(ApiError::from_domain)?;
+    if req.tool == "attributes" {
+        let refno = req
+            .arguments
+            .get("refno")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::coded(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_REFNO",
+                    "tool=attributes 需要 arguments.refno（a/b）",
+                )
+            })?;
+        let service = state
+            .element_attributes
+            .get()
+            .await
+            .map_err(ApiError::from_domain)?;
+        return store
+            .attributes_at(&req.snapshot_key, refno, service)
+            .await
+            .map(Json)
+            .map_err(historical_error);
+    }
     store
         .query(&req.snapshot_key, &req.tool)
         .await
@@ -2404,17 +2869,33 @@ pub async fn dbnum_data_reinitialize(
         .map_err(|e| ApiError::from_domain(e.into()))
 }
 
+/// 在 `anyhow` 链上找某个领域错误：先看顶层（`Error::new(E)` 与 `.context(..)` 包着的
+/// `downcast_ref` 都认得），再沿 `source()` 逐级往下看。
+///
+/// 后一半是为 `generation_flight::Flights` 留的：并发的 `/model/ensure` 共用一个生产者，
+/// 失败被包成 `OutcomeError`、原错只挂在它的 `source()` 上，顶层 `downcast_ref` 一个字都
+/// 看不见——2026-09-20 夹具实测：启动批次正在生成某根时再来一次 `/model/ensure`，
+/// 「生成根 … 正在后台生成」回的是 500 `internal`，不是约定的 409。
+fn domain_cause<T: std::error::Error + Send + Sync + 'static>(error: &anyhow::Error) -> Option<&T> {
+    error
+        .downcast_ref::<T>()
+        .or_else(|| error.chain().find_map(|cause| cause.downcast_ref::<T>()))
+}
+
 /// 解不出生成根不是服务端的错，客户端对这三种的出路也各不相同——都压成
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
     let message = format!("{error:#}");
-    if error.downcast_ref::<InitializationNotReady>().is_some() {
+    if domain_cause::<InitializationNotReady>(&error).is_some() {
         return ApiError::initialization_not_ready(message);
     }
-    if error.downcast_ref::<ModelGenerationInProgress>().is_some() {
+    if domain_cause::<ModelGenerationInProgress>(&error).is_some()
+        || domain_cause::<ModelStaleAfterGeneration>(&error).is_some()
+    {
+        // 两种都是「重试就好」的 409；文案不同，排障时分得开（后者说得出是源前移还是目标核对不过）。
         return ApiError::conflict(message);
     }
-    match error.downcast_ref::<UnresolvableRoot>() {
+    match domain_cause::<UnresolvableRoot>(&error) {
         Some(UnresolvableRoot::Container) => ApiError::container(message),
         Some(UnresolvableRoot::NotFound) => ApiError::not_found(message),
         Some(UnresolvableRoot::NoRoot) => ApiError::precondition(message),
@@ -3074,7 +3555,7 @@ pub async fn model_records(
         }
     }
     let mut memory_overlay_used = false;
-    let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
+    let mut per_root: Vec<(String, Vec<crate::fast_model::model_record_reader::ModelRecord>)> =
         Vec::with_capacity(roots.len());
     for (name, root) in roots.iter().zip(&parsed_roots) {
         // Durable reads never hydrate kv-mem.  A resident receipt is a complete
@@ -3083,10 +3564,14 @@ pub async fn model_records(
         let memory_overlay = store.receipt(scope, *root).is_some();
         memory_overlay_used |= memory_overlay;
         let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-        let records =
-            crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
-                .await
-                .map_err(ApiError::from_domain)?;
+        // 每条记录 = `GeomInstQuery` 原形 + 隐式管身才有的 `tube{ordinal, from, to}`（spec §4.5，方案 B T2）：
+        // 与树路由 `tubes=1` 的直段同一身份四元组，前端据此把直段行对上场景对象。
+        let records = crate::fast_model::model_record_reader::model_records_of_root(
+            &aios_core::SUL_DB,
+            refno,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
@@ -3445,8 +3930,8 @@ mod tests {
             "必须过 geo_hash 字符集门再拼路径: {body}"
         );
         assert!(
-            body.contains("get_meshes_path()"),
-            "网格目录必须与生成侧同一份配置（meshes_path）: {body}"
+            body.contains("crate::options::meshes_dir()"),
+            "网格目录必须与生成侧走同一个解析口（options::meshes_dir，ADR-068 D7）: {body}"
         );
     }
 
@@ -3904,6 +4389,80 @@ mod tests {
             .0;
         assert!(ensure.contains("InitializationNotReady"));
         assert!(ensure.contains("initialization_not_ready"));
+        // 后验失败（生成完了却判成不新）与「正在后台生成」是两种错，都得认得出、都回 409。
+        assert!(ensure.contains("ModelGenerationInProgress"));
+        assert!(ensure.contains("ModelStaleAfterGeneration"));
+    }
+
+    /// 领域错误穿过 `generation_flight::Flights` 之后只挂在 `source()` 上；`ensure_error`
+    /// 必须沿链找，否则并发第二个 `/model/ensure` 撞上「正在后台生成」回的是 500 而不是 409
+    ///（2026-09-20 夹具实测）。四种领域错各走一遍：直给、`.context` 包着、经共享航班。
+    #[tokio::test]
+    async fn ensure_error_classifies_domain_causes_buried_under_the_shared_flight() {
+        use crate::data_interface::generation_flight::Flights;
+        use crate::data_interface::on_demand_model::UnresolvableRoot;
+
+        async fn through_flight(error: anyhow::Error) -> anyhow::Error {
+            Flights::<usize>::default()
+                .run("shared".into(), async move { Err(error) })
+                .await
+                .expect_err("the flight relays the producer's failure")
+        }
+
+        let in_progress = || {
+            anyhow::Error::new(ModelGenerationInProgress {
+                root_refno: "24382/124".into(),
+            })
+        };
+        // 直给与 `.context` 包着的：原本就认得，改法不得把它们弄丢。
+        assert_eq!(ensure_error(in_progress()).code, "conflict");
+        assert_eq!(
+            ensure_error(in_progress().context("按需生成 24382/124")).code,
+            "conflict"
+        );
+        // 经共享航班：顶层是 `OutcomeError`，原错在 `source()` 上。
+        let shared = through_flight(in_progress()).await;
+        assert!(
+            shared.downcast_ref::<ModelGenerationInProgress>().is_none(),
+            "前提：共享航班的顶层 downcast 看不见原错，否则这条钉没在钉任何东西"
+        );
+        let classified = ensure_error(shared);
+        assert_eq!(classified.status, StatusCode::CONFLICT);
+        assert_eq!(classified.code, "conflict");
+        assert!(
+            classified.message.contains("正在后台生成"),
+            "{}",
+            classified.message
+        );
+
+        let stale = through_flight(anyhow::Error::new(ModelStaleAfterGeneration {
+            root_refno: "24382/124".into(),
+            reason: "源文件版本在生成期间前移",
+        }))
+        .await;
+        assert_eq!(ensure_error(stale).code, "conflict");
+
+        let container = through_flight(
+            anyhow::Error::new(UnresolvableRoot::Container)
+                .context("构件 24384/22400 无法解析生成根"),
+        )
+        .await;
+        assert_eq!(ensure_error(container).code, "container");
+
+        let not_ready = through_flight(anyhow::Error::new(InitializationNotReady {
+            snapshot:
+                crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                    .snapshot(),
+        }))
+        .await;
+        assert_eq!(ensure_error(not_ready).code, "initialization_not_ready");
+
+        // 链上什么领域错都没有 → 照旧 internal。
+        let plain = through_flight(anyhow::anyhow!("fixture failure")).await;
+        assert_eq!(
+            ensure_error(plain).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// 队列行只带 `blocked_by_phase`，说得出「在等哪一相」、说不出「是谁挡的」。

@@ -467,7 +467,55 @@ DB_Element::putAtt(attr, [qualifier,] value)
 
 `??_7DB_ElementChangesPlugger@@6B@ = 0x5d19234`：+52 `PostSetAttribute(el, attr, qual)` `0x591e5b0`、+56 两参版 `0x591e530`（只是构造空 qualifier 转 +52）、
 +60 `PostSetRefAttribute` `0x591e720`、+64 `PostSetRefListAttribute` `0x591e780`、+68 `PostSetName` `0x591e6c0`。广播体都是「过 `DB_Attribute::wnoevt(attr)` 闸门 → 逐订阅者虚调用」
-（0007 记录读过 RefList 版，本轮读 Ref 版同款）。**`wnoevt` 为真的属性不发任何变更事件**——这是 DCHC 之前的又一道门，哪些属性置了它本轮未导。
+（0007 记录读过 RefList 版，本轮读 Ref 版同款）。**`wnoevt` 为真的属性不发任何变更事件**——这是 DCHC 之前的又一道门。
+
+★0917 `wnoevt` 的来源读通了：`DB_Attribute::wnoevt`（`core.dll 0x58D5290`）只是 `return this[+184]`，那一格由
+虚表 +20 的 `DB_Attribute::ReadData`（`0x58CE1F0`）从字典字段 **`WNOEVT`（`299311034`）** 读入（`sub_55BB6C3` 逻辑字段读，
+出参 `& 1`）；紧挨着的 `+185` 来自 `WNOCLM`（`193514909`）。同一个 `ReadData` 里 `DCHC`（`596407`）落 `+92`，
+所以 **`WNOEVT` 与 `DCHC` 是同一条字典记录上的两格**。此前 ADR-008 导出器把 `+185` 的 `WNOCLM` 导成了
+`noun_layout.json` 的 `noClaim`（191 个为真），**唯独跳过了 `+184`**。
+
+★0917-b 导出器已补上（`scripts/e3d/NounLayoutExport.cs` 的 `UnnamedFields`）：`DbAttributeField` 枚举漏了
+`WNOEVT`/`WNOCLM`，但**它的成员值就是 PDMS 字段选择器 hash**（`DCHC=596407`、`PLCF=652066`、`CASC=604371`… 全对得上，
+反编译 `Aveva.Core.Database.dll` 的枚举实证），而 `DbAttributeImpl.GetInteger` 把 `(int)field` 直接转给
+`DB_Attribute::getField`——所以把 `299311034`/`193514909` 强转成 `DbAttributeField` 再 `GetInteger` 就能读到，和 `DCHC`
+一条路。重编 x86 通过（此 3.1 版还需加 `Aveva.Core.Geometry.dll` 引用）。**但本轮无人值守跑不出数据**：`des.exe -tty` 下
+PML.NET 建对象根本不成（连已知能用的 `object RVMEXPORT()` 也 `import` 成功、建对象失败，是 `-tty`/PMLNet 桥的问题），
+detached/隐藏 GUI 会话在第一个 idle 前就退出。于是改走**纯离线**，见下。
+
+★0917-c **`WNOEVT`/`WNOCLM` 已从 `attlib.dat` 纯离线解出，不再依赖活 E3D。** 把读取链逆到底
+（ida-bridge，`core.dll = idalib-33060`）：`ReadData` 的每个字段都走 `sub_55BB6C3`/`sub_55BB60C`（PDMS **ATNLOG**），
+`value = pool[512*page + base + header[ordinal]]`；`ATTOPE`（`sub_55F4290`）证实 `pool`（`dword_6C3F6C0`）与它的索引就是
+`attlib.dat` 的 **ATGTDF**（`dir[0]` → 有序字段表 `dword_6BE26E0` + 计数 `dword_6C08EB4`=63，给出字段序号）与 **ATGTIX**
+（`dir[2]` → 属性索引，`(hash, packed=page*512+word_offset)`）——正是 `vendor/e3d-attlib` 已经在解的那套。记录布局：一行
+= `[N 个字段偏移头][值]`，`FHDBRN` 块号 1-indexed，故记录落在文件 `(page-1)` 页、`base` 字处：
+
+```
+row   = (page-1)*512 + base - 2          # 0-based file words（大端）
+off   = word[row + ordinal]              # 头槽：-1=用 schema 默认(0)，0=继承(0)
+value = word[row + off]
+```
+
+生成器 `output/gen_wnoevt_flags.py` 实现了它并**自校准**：解 `DCHC`（序号 49）对齐 `dchc_change_classes.json`
+**4270/4270 逐条精确**、解 `PLCF`（序号 50）对齐 `plcf_flags.json` **58/58**——对不上就拒绝出数（防 attlib 版本漂）。
+结论：全字典 **只有 7 个属性置了 `WNOEVT`**（`DPOSCA EVITCA EVITCP EXTEMP LIGTCA LIGTCP TEMPLI`）、6 个置 `WNOCLM`
+（`EXTEMP HANOFF HANPOS LIGTCA LIGTCP TEMPLI`），**全是激光/照明/温度属性，没有一个在模型生成的属性集里**。也就是说
+增量判决看到的每个属性 `WNOEVT` 都为 0，这道门永不触发。产物 `src/data_interface/wnoevt_flags.json` 随源码入库，
+`attribute-verdict-explorer.html` 的 `WNOEVT` 面板已换成这个权威结论、命中这 7 个之一时行上打 `WNOEVT` 徽章。
+（`WNOCLM` 与 ADR-008 导出器的 `noClaim` = `DB_Attribute::noclaim(attr, elementType)` 不是一回事：后者按元素类型算，58 个 noun 级为真；前者是纯字典字段，只 6 个。）
+
+★0917-d 同一套离线解码**落成了 Rust**（`vendor/e3d-attlib/src/dict.rs` 的 `e3d_attlib::dict::AttrDict`，忠实复刻
+`sub_55BB6C3`：字段序号取自系统 ATGTDF、记录 `(page,base)` 取自**系统** ATGTIX `dir[2]`、`value=word[row+header[ordinal]]`，
+`-1`→schema 默认、`0`→SYNO 继承、UDA→只给默认）。带可移植校准测试 `tests/dict_calibration.rs` 与 `cargo run --example
+wnoevt -- <attlib.dat>`；对影子 `attlib.dat` 跑出 WNOEVT=7 / WNOCLM=6，与 Python 生成器逐字一致。**注意 `dir[2]`（系统属性
+索引）与 `dir[6]`（元素类型/名词索引：`SBOX TUBE LINE`… 82 个元素类型也带 `WNOEVT`）是两个命名空间**——逐属性门只算
+`dir[2]`，故是 7；一度量出的「89」是把两者混数所致。
+
+★0917-e **`WNOEVT` 事件门已接进增量判决**（用户 2026-09-17 拍板）：`model_impact::attribute_no_event` 在
+`attribute_is_metadata_only` 首行、**DCHC 两票之前**把置位属性无条件短路为「不动模型」（对齐 core `putAtt` 里 `wnoevt`
+先于 `DCHC` 的门序）。预览与 direct 窗口规划器共用这一道谓词，故同口径。因这 7 个都不在模型 schema / 读取集合里，对
+现有语料是**恒等变换（回执基线不变）**，只在它们万一出现时把「未知→保守 Regen」纠正为「不动模型」；
+`model_impact::tests::wnoevt_gate_is_disjoint_from_reads_and_geometry` 钉住这条安全不变量（WNOEVT ∩ 读取集合 = ∅、且均无正 DCHC 码）。
 
 Core3D 侧，**订阅者就是 `DESDRA_SCPlugs`**（单例 `Instance` `0x10409440`；`Init` `0x10409160` 一次订阅 `DB_LegalityChecksPlugger` 16 项、
 `DB_ElementChangesPlugger` 12 项、`DB_ProjectEventsPlugger::PostOpenProject`、`DB_MDBPlugger::addPlug`）。每个 Post 钩子只按**库类型**分流：

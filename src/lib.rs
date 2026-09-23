@@ -8,6 +8,9 @@
 #![cfg_attr(windows, feature(windows_by_handle))]
 // 暂时屏蔽warnings
 #![allow(warnings)]
+// 上一行把 warn 级全放行，`clippy.toml` 的 `disallowed-methods`（网格目录只许经 `options::meshes_dir*`，
+// ADR-068 D7）在 lib 里就成了空挡——这里单独抬到 deny，`cargo clippy` 才真的会拦。
+#![deny(clippy::disallowed_methods)]
 #![recursion_limit = "256"]
 
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -181,6 +184,31 @@ fn process_instance_lock_path() -> Option<PathBuf> {
 
 static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
 
+static STORE_MODE_NOTICES_PRINTED: std::sync::Once = std::sync::Once::new();
+
+/// 介质那一头所有过期来源的点名（[`options::store_mode_notices`]，ADR-083 D2）。
+///
+/// 放在这里而不是某一条臂里：`run_app` 有三条出口，只有一条走到 `run_cli`——设置模式与
+/// read-through（也就是 `mem` 这个**默认**档）都提前返回。只在 `run_cli` 打的话，最该看见
+/// 这句话的现场反而看不见：文件里写着 `store_mode = "rocksdb"`、服务按 mem 起来、控制台一个
+/// 字不提，正是 2026-09-18 那次查了半天的形状。
+///
+/// `run_app`（服务正门）与 `run_cli`（python 绑定、l3 夹具直接调的那道门）会各调一次，
+/// 这几句只该出现一遍——同 `NO_INSTANCE_LOCK_NOTICE` 的纪律。
+fn print_store_mode_notices_once() {
+    STORE_MODE_NOTICES_PRINTED.call_once(|| {
+        for notice in crate::options::store_mode_notices() {
+            eprintln!("*** {notice} ***");
+        }
+        // 网格目录同一条纪律（ADR-068 D7）：配置里的 `meshes_path` 被 `PLANT_ASSET_ROOT` 压掉时
+        // 当场点名——生成落盘、/assets/meshes、房间面板预热此后都按压过之后的那个目录走，
+        // 人若照着文件里那句去翻目录，翻到的是个空的。
+        if let Some(notice) = crate::options::meshes_dir_notice() {
+            eprintln!("*** {notice} ***");
+        }
+    });
+}
+
 /// 这一趟要不要拿锁；不拿时返回那句给人看的理由。
 ///
 /// **只有 `mem` 不拿。** 锁挡的是「两个进程驱动同一份持久状态」，而
@@ -196,7 +224,7 @@ static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
 /// 所以并排跑之前得先让两份配置的 `meshes_path` 分家。
 fn instance_lock_skip_reason(store_mode: crate::options::StoreMode) -> Option<&'static str> {
     matches!(store_mode, crate::options::StoreMode::Mem).then_some(
-        "store_mode=mem，持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
+        "介质 mem（AIOS_STORE_MODE），持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
     )
 }
 
@@ -297,7 +325,7 @@ fn acquire_database_writer_lock(db_option: &DbOption) -> Result<(), String> {
             wanted
         )),
         (Ok(None), Some(wanted)) => Err(format!(
-            "本进程以 store_mode=mem 起过、没有写者锁，不能再以 {} {}/{} 写库",
+            "本进程以介质 mem（AIOS_STORE_MODE）起过、没有写者锁，不能再以 {} {}/{} 写库",
             wanted.endpoint, wanted.namespace, wanted.database
         )),
         (Err(error), _) => Err(error.clone()),
@@ -461,7 +489,7 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
         crate::options::data_face().as_str(),
     );
     let room_key_words = db_option.get_room_key_word();
-    let mesh_dir = db_option.get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir_for(db_option);
     let result = room_resident::initialize_at_startup(
         crate::options::data_face(),
         hierarchy,
@@ -1001,10 +1029,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::options::data_read_mode_notice() {
         eprintln!("*** {notice} ***");
     }
-    // 另外两个形态键拼错同样要出声（`store_mode_notice` 此前有定义没人打；顺手接上）。
-    if let Some(notice) = crate::options::store_mode_notice() {
-        eprintln!("*** {notice} ***");
-    }
+    // 介质那一头所有该出声的：环境变量拼错 / 退役写法，以及配置文件里还残留的
+    // `store_mode` / `in_memory_db`（2026-09-18 起不再生效，ADR-083）——逐条打，不许只挑一条。
+    // 走 `run_app` 进来的那条路上已经打过了，这里是 python 绑定 / l3 夹具直接调时的出口。
+    print_store_mode_notices_once();
     if let Some(notice) = crate::options::data_face_notice() {
         eprintln!("*** {notice} ***");
     }
@@ -1439,6 +1467,30 @@ fn startup_data_wait_is_stalled(
 
 #[cfg(test)]
 mod startup_data_wait_tests {
+    /// 过期的介质来源要在**每一条**启动臂上都被点名（ADR-083 D2）。`run_app` 有三条出口：
+    /// 设置模式、read-through（`mem` 这个默认档）、`run_cli`；点名只挂在最后一条上的话，
+    /// 前两条就是「文件里写着 rocksdb、服务按 mem 起来、控制台一个字不提」——正是这次要
+    /// 根除的那个形状。所以钉住它在分臂**之前**。
+    #[test]
+    fn every_startup_arm_names_a_stale_store_mode_key() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .rsplit_once("pub async fn run_app(")
+            .expect("run_app exists")
+            .1;
+        let notices = body
+            .find("print_store_mode_notices_once();")
+            .expect("run_app 必须自己打这几句");
+        for (arm, needle) in [
+            ("设置模式", "setup::setup_mode_reason(&db_option)"),
+            ("read-through", "run_read_through_core(db_option)"),
+            ("run_cli", "run_cli(db_option).await"),
+        ] {
+            let split = body.find(needle).unwrap_or_else(|| panic!("{arm} 那条臂还在吗"));
+            assert!(notices < split, "点名要在分出「{arm}」这条臂之前");
+        }
+    }
+
     #[test]
     fn read_through_startup_reports_each_waiting_stage() {
         let source = include_str!("lib.rs");
@@ -1677,14 +1729,18 @@ fn print_startup_complete_banner(
     if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
         println!("  *** {notice}");
     }
+    // 介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083）；横幅带上「谁定的」——配置文件里
+    // 若还残留着过期的 store_mode，翻文件得出的结论会与这里相反。
     match crate::options::store_mode() {
         crate::options::StoreMode::Mem => println!(
-            "  *** 内存模式（store_mode=mem）：持久层是进程内嵌 kv-mem，\
-             进程一退整库即消失，外部无端口可连"
+            "  *** 内存模式（mem，{}）：持久层是进程内嵌 kv-mem，\
+             进程一退整库即消失，外部无端口可连",
+            crate::options::store_mode_source()
         ),
         crate::options::StoreMode::RocksDb => {
             println!(
-                "  存储介质：rocksdb（store_mode=rocksdb，连配置指的 {}——本进程不拉起它）",
+                "  存储介质：rocksdb（{}，连配置指的 {}——本进程不拉起它）",
+                crate::options::store_mode_source(),
                 db_option.get_version_db_conn_str()
             )
         }
@@ -1711,7 +1767,8 @@ fn print_startup_complete_banner(
     println!("{RULE}");
 }
 
-/// 把进程全局 `SUL_DB` 接到进程内嵌的 kv-mem 引擎上（[`options::in_memory_db`]）。
+/// 把进程全局 `SUL_DB` 接到进程内嵌的 kv-mem 引擎上（[`options::StoreMode::Mem`]，
+/// 由环境变量 `AIOS_STORE_MODE` 选出，ADR-083）。
 ///
 /// 换掉的只是介质。`SUL_DB` 是 `Surreal<Any>`，引擎选择对调用方不可见，所以初始化
 /// 解析、增量窗口写回、模型与房间派生数据全部走原来那条路，只是落点从 rocksdb 变成
@@ -1736,7 +1793,8 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
         eprintln!("内存库预装磁盘 surql 函数未成（{error:#}），等 run_cli 的内置快照兜底");
     }
     println!(
-        "*** 内存模式：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
+        "*** 内存模式（这一档由 {} 定的）：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
+        crate::options::store_mode_source(),
         db_option.surreal_ns,
         db_option.project_name,
         db_option.get_version_db_conn_str()
@@ -1744,7 +1802,18 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
     println!(
         "*** 进程一退整库即消失，外部没有端口可连（rvm_verify / /sql 探针 / \
          Capture-*Evidence 与 plant-ui 的「库供数」读面都够不着）。\
-         要留证据请改 store_mode = \"rocksdb\" 并把 v_ip:v_port 指到一台真在跑的库。"
+         要留证据请以 AIOS_STORE_MODE=rocksdb 启动，并把 v_ip:v_port 指到一台真在跑的库\
+         （介质只认这个环境变量，DbOption.toml 里的 store_mode 不再生效，ADR-083）。"
+    );
+    // 这一句是 2026-09-18 补的：现场改了属性、模型跟着变了、库里的属性行却一动不动，
+    // 查了半天才发现服务跑在 mem 上。数据面形态是 store_mode 派生的，不是另一个开关，
+    // 横幅上不说，人就只会盯着增量窗口找原因。
+    println!(
+        "*** 数据面随之是 read-through：**不做基线、不开数据窗口、水位不动**，\
+         `pe` / `ATT_<noun>` / `pe_owner` 行只有「模型生成时写透」一个来源\
+         （`POST /api/v1/element/ensure` 在这一档直接回 skipped-memory）。\
+         所以改了属性之后库里那一行不会跟着变——属性由 /api/v1/element/attributes 从 E3D 文件现读，\
+         值是对的。要让属性行真的进库，只有 AIOS_STORE_MODE=rocksdb 这一条路。"
     );
     Ok(())
 }
@@ -2179,6 +2248,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
         .unwrap_or_else(|| get_db_option_ext().inner);
+    // 分臂之前先把介质那一头的过期来源点名（ADR-083 D2）：下面三条出口里只有一条走到
+    // `run_cli`，而「文件里还写着 store_mode」在设置模式与 mem 那两条上一样会骗人。
+    print_store_mode_notices_once();
     // Public entrypoint guard: take the deny-share handle before connecting a
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.

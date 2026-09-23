@@ -20,7 +20,8 @@
 //! | `lazy`    | `(roots_T \ roots_S) \ touched` | 什么都不做：从未生成过又没被波及，等按需 `ensure` |
 //!
 //! 护栏（ADR-056 实施约束 5）：闭包不完整、`plan_update` 报 `unresolved`、或候选数超过
-//! 索引键数的 [`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`] → **不信闭包**：`advance` 清空、
+//! 索引键数的 [`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`]（候选数按**净数**算：只有戳跳了的候选
+//! `cache_stamp` 不计，2026-09-19，见 [`WindowImpact::cache_stamp`]）→ **不信闭包**：`advance` 清空、
 //! `roots_S ∩ roots_T` 全部进 `regen`（「全部根过期」的行为），[`WindowRootPlan::degraded`]
 //! 记原因，回执字段 `credential_advance_degraded`。`lazy` 在退化时也不动——没生成过的根
 //! 即便波及不明也只需等按需生成，不必 eager。
@@ -28,6 +29,11 @@
 //! 执行端：`RegenRoot` / `DeleteCleanup` 随计划交回任务在内存里执行（ADR-072 D5）；`advance`
 //! 名单只进回执（`DataBatchResult.credential_advance`：这一窗省掉了多少根的重生成），库里
 //! 没有任何一行要为它改。
+//!
+//! 覆盖账（`docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` D3，2026-09-18）：变更账本
+//! [`UpdatePlan::remove`] 里每个被删的模型单元，自身或 S 端属主链上必须有一级落在 `delete` 或 `regen`
+//! 里（[`WindowRootSources::removed_units`] 在 `collect` 里带上 S 端属主链，[`uncovered_removed_units`]
+//! 算差集，[`delete_coverage_gap_warning`] 进回执 `warnings`）——只点名，不改任何桶、不判 `Partial`。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -96,6 +102,13 @@ pub struct WindowImpact {
     pub unresolved: usize,
     /// 索引差分候选数（`IncrementReport::candidates`）。
     pub candidates: usize,
+    /// `candidates` 里**只有戳跳了**的候选数（`IncrementReport::cache_stamp`，Q6 第三档 [`NoModelTier::CacheStamp`]；
+    /// 元数据门关着时恒 0）。比例护栏的分子把它们净掉（2026-09-19，计划 §8 Q6 题 B / t-334，用户拍板）：
+    /// 整库缓存 / 空间索引重建的扫写（`CACHID` / `SPAMAP` 逐元素 `+1`）能让一窗的候选数超过索引键数的 30%，
+    /// 而这些候选去向 `NoModel`、不上卷、不级联，对闭包可不可信一个字都没说——ams7997 52→53 / 54→55 两窗
+    /// 5819 个只 `SPAMAP` 候选把 7328 / 8535 顶过 5993 / 7652 的线、整窗退化 regen 216 根，净掉后 5161 / 5534
+    /// 不再退化，216 根量到红 0（`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md` §4 读法 4）。
+    pub cache_stamp: usize,
     /// target 端索引键总数（护栏分母）。
     pub index_keys: usize,
 }
@@ -103,7 +116,8 @@ pub struct WindowImpact {
 impl WindowImpact {
     /// 不能前移凭证的原因；`None` = 闭包可信、可以前移。
     ///
-    /// 比例护栏是「超过」不是「达到」：空库（0 键 0 候选）不算退化。
+    /// 比例护栏是「超过」不是「达到」：空库（0 键 0 候选）不算退化。分子是**净候选数**
+    /// `candidates − cache_stamp`（[`Self::cache_stamp`]）；`cache_stamp` 为 0 时与 2026-09-19 之前逐位相同。
     pub fn degraded_reason(&self) -> Option<String> {
         let mut reasons = Vec::new();
         if !self.closure_complete {
@@ -118,15 +132,29 @@ impl WindowImpact {
             ));
         }
         let limit = CREDENTIAL_ADVANCE_CANDIDATE_RATIO * self.index_keys as f64;
-        if self.candidates as f64 > limit {
+        let net_candidates = self.net_candidates();
+        if net_candidates as f64 > limit {
+            let stamp_note = if self.cache_stamp > 0 {
+                format!(
+                    " ({} indexed minus {} stamp-only)",
+                    self.candidates, self.cache_stamp
+                )
+            } else {
+                String::new()
+            };
             reasons.push(format!(
-                "too many candidates: {} > {:.0}% of {} index keys",
-                self.candidates,
+                "too many candidates: {net_candidates}{stamp_note} > {:.0}% of {} index keys",
                 CREDENTIAL_ADVANCE_CANDIDATE_RATIO * 100.0,
                 self.index_keys
             ));
         }
         (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+
+    /// 比例护栏的分子：索引差分候选数减去只有戳跳了的候选数（[`Self::cache_stamp`]）。
+    /// `cache_stamp ⊆ no_model ⊆ candidates`（e3d-model `IncrementReport::accounts_for` 钉），饱和减只是防御。
+    pub fn net_candidates(&self) -> usize {
+        self.candidates.saturating_sub(self.cache_stamp)
     }
 }
 
@@ -240,6 +268,75 @@ pub fn plan_window_roots(
     plan
 }
 
+/// 覆盖账（`docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` D3）：变更账本说要删的
+/// 模型单元（e3d-model [`UpdatePlan::remove`]，几何挂在它身上的那一级——BOX / CYLI / FTUB…）里，
+/// 根规划两个会清旧行的桶都没盖住的那些。
+///
+/// 「盖住」= 单元自身或它 S 端属主链上的某一级落在 `delete`（`roots_S \ roots_T` → `DeleteCleanup`，
+/// 按 `anc` 清整根）或 `regen`（`RegenRoot`，整根重算、旧行随根级墓碑退掉）里。删掉一个成员、根还在
+/// → 根在 `regen`，盖住；删掉整根 → 根在 `delete`，盖住。都不在只有两种可能——`roots_S` 漏了根
+/// （09-15 S5 那四行孤儿：`gen_root` 里没有增量新建的 EQUI，`delete = ∅`、`regen = ∅` 而账本
+/// `remove = {BOX}`，两个数并排躺在同一行日志里三天没人看见），或闭包 / 属主链读挂。哪一种都要在
+/// 回执里点名。只比对、不改任何桶；输出按账本 `remove` 的键序。
+pub fn uncovered_removed_units(
+    removed: &[RemovedUnit],
+    delete: &[PersistedRoot],
+    regen: &[GenerationRoot],
+) -> Vec<RefnoEnum> {
+    let covering: BTreeSet<RefnoEnum> = delete
+        .iter()
+        .map(|root| root.refno)
+        .chain(regen.iter().map(|root| root.root))
+        .collect();
+    removed
+        .iter()
+        .filter(|unit| {
+            !covering.contains(&unit.refno)
+                && !unit
+                    .ancestors_s
+                    .iter()
+                    .any(|ancestor| covering.contains(ancestor))
+        })
+        .map(|unit| unit.refno)
+        .collect()
+}
+
+/// [`uncovered_removed_units`] 非空时进窗口回执 `warnings` 的那一行。只点名、不判 `Partial`、
+/// 不进 `/health`（计划 D4）：模型行残留不影响数据面正确性，它是单窗的账。点名最多前 12 个，
+/// 带账本记的 noun（账本没记的只出 refno）。
+pub fn delete_coverage_gap_warning(
+    dbnum: u32,
+    gap: &[RefnoEnum],
+    removed: &[RemovedUnit],
+    roots_s: usize,
+    roots_t: usize,
+    delete: usize,
+    regen: usize,
+) -> String {
+    const NAMED: usize = 12;
+    let noun_of = |refno: &RefnoEnum| -> String {
+        removed
+            .iter()
+            .find(|unit| unit.refno == *refno)
+            .map(|unit| unit.noun.as_str())
+            .filter(|noun| !noun.is_empty())
+            .map(|noun| format!("{} {noun}", refno.to_pdms_str()))
+            .unwrap_or_else(|| refno.to_pdms_str())
+    };
+    let mut named: Vec<String> = gap.iter().take(NAMED).map(noun_of).collect();
+    if gap.len() > NAMED {
+        named.push(format!("… (+{} more)", gap.len() - NAMED));
+    }
+    format!(
+        "dbnum={dbnum}: delete-coverage gap — the change ledger removes {} model unit(s) that no \
+         DeleteCleanup root and no RegenRoot covers: {}; their model rows are not cleaned by this \
+         window (roots_S={roots_s} roots_T={roots_t} delete={delete} regen={regen} remove={})",
+        gap.len(),
+        named.join(", "),
+        removed.len()
+    )
+}
+
 /// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08；
 /// 2026-09-15 S6 起回答带档）。
 ///
@@ -248,8 +345,10 @@ pub fn plan_window_roots(
 /// （E3D 字典 DCHC=0 ∧ 生成器不读；S6 之前是效果表 DataOnly ∧ DCHC=0 的五个名字）。名单与分档只有
 /// [`crate::data_interface::model_impact::metadata_only_tier`] 那一份：全部落在老名单
 /// `NAME / DESC / PURP / FUNC / LCHKDA` 上回 [`NoModelTier::MetadataOnly`]，否则
-/// [`NoModelTier::UnreadAttribute`]——档位只进回执两个计数，不改去向。`attributes` 为空回 `None`
-/// ——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+/// [`NoModelTier::UnreadAttribute`]；**只有戳**（`CACHID`，2026-09-19 起还有 `SPAMAP`——名单只有 e3d-model
+/// `PLACEMENT_STAMP_ATTRIBUTES` 那一份）跳了回 [`NoModelTier::CacheStamp`]（2026-09-17 Q6：
+/// 戳由 e3d-model 的戳表拿第一票、读取集合守卫拿第二票，跟着别的放行属性时不改档）——档位只进回执三个计数，
+/// 不改去向；第三档另有一处用：护栏分子把它净掉（[`WindowImpact::cache_stamp`]）。`attributes` 为空回 `None`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
 ///
 /// 它只决定**上卷与级联**：账本照记、闭包种子照收（候选与它的祖先链照进闭包，候选所在的根凭证前移
 /// 一个都不少收），房间结构触发照读账本（FRMW 改名命中关键字仍出 `RoomRecalcPanel`），设计引用级联照读
@@ -313,15 +412,54 @@ pub struct WindowRootSources {
     /// 反查判不了时把原因交给 [`WindowImpact::cascade_degraded`]（放弃凭证前移）。开关
     /// `model_design_reference_cascade` 关着时是 `DesignReferenceCascade::off()`（零 I/O）。
     pub design_reference: crate::data_interface::reverse_reference::DesignReferenceCascade,
-    /// 刚体前移（ADR-066，S4b）的文件侧输入：候选（两端属主链、`Δ`、三条排除的判决）与每个根在
-    /// T 端的属主链。开关 `model_transform_cheap_path` 关着时 `enabled = false`、两个集合都空——
-    /// 一次 `world_matrix` 都不算，`impact` / `plan_window_roots` 的产物与今天逐位相同。
+    /// 按根归因的候选表（刚体前移 ADR-066 S4b 与单元级发布 ADR-080 D10 共用）：候选（两端属主链、
+    /// 去向；刚体开关开着时另有 `Δ` 与三条排除的判决）与每个根在 T 端的属主链。两个开关
+    /// （`model_transform_cheap_path` / `model_unit_level_publish`）都关着时两个集合都空；刚体开关关着时
+    /// `enabled = false`、一次 `world_matrix` 都不算——`impact` / `plan_window_roots` 的产物与今天逐位相同。
     pub(crate) rigid: RigidMotionSources,
+    /// 覆盖账（计划 D3）的输入：账本 [`UpdatePlan::remove`] 里每个被删的模型单元，连同它在 **S 端**
+    /// 的属主链——删掉的东西只有 S 端说得出它曾挂在谁下面。分桶之后由 [`uncovered_removed_units`]
+    /// 拿它对 `delete` / `regen` 两桶比。
+    pub removed_units: Vec<RemovedUnit>,
 }
 
-/// [`WindowRootSources::rigid`] 的形状。纯数据；分桶在 `rigid_motion::classify_transform_roots`。
+/// 账本 [`UpdatePlan::remove`] 里的一个被删模型单元（几何挂在它身上的那一级：BOX / CYLI / FTUB…，
+/// 不是生成根），带 S 端属主链（不含自身，最近的属主在前）与账本记的 noun。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedUnit {
+    pub refno: RefnoEnum,
+    pub noun: String,
+    pub ancestors_s: Vec<RefnoEnum>,
+}
+
+/// 账本 `remove` 集 → [`RemovedUnit`]：noun 取账本 `Deleted` 条目的，属主链沿 `DbSet@S` 上溯
+/// （[`owner_chain_in_set`]）。链读挂时按空链记——那一件会被判成没盖住而出声，宁可多叫一次。
+fn collect_removed_units(plan: &UpdatePlan, base: &Arc<DbSet>) -> Vec<RemovedUnit> {
+    let nouns: BTreeMap<(u32, u32), &str> = plan
+        .ledger
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == ChangeKind::Deleted)
+        .map(|entry| ((entry.refno.word0, entry.refno.word1), entry.noun.as_str()))
+        .collect();
+    plan.remove
+        .iter()
+        .map(|&(word0, word1)| {
+            let refno = RefNo::new(word0, word1);
+            RemovedUnit {
+                refno: refno_from_e3d(refno),
+                noun: nouns.get(&(word0, word1)).map(|noun| noun.to_string()).unwrap_or_default(),
+                ancestors_s: owner_chain_in_set(base, refno).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// [`WindowRootSources::rigid`] 的形状。纯数据；刚体分桶在 `rigid_motion::classify_transform_roots`，
+/// D10 分桶在 [`classify_no_model_only_roots`]。
 #[derive(Debug, Default)]
 pub(crate) struct RigidMotionSources {
+    /// 刚体开关（`model_transform_cheap_path`）：假时候选表可能非空（单元级开关开着），但没有 `Δ`。
     pub enabled: bool,
     pub candidates: Vec<WindowCandidate>,
     pub root_ancestors_t: BTreeMap<RefnoEnum, Vec<RefnoEnum>>,
@@ -563,20 +701,25 @@ fn no_model_candidates(ledger: &ChangeLedger) -> BTreeSet<(u32, u32)> {
     no_model.difference(&otherwise).copied().collect()
 }
 
-/// 把 e3d-model 的账本折成刚体前移的候选表（只在开关开着时调）。每个 refno 一条：账本里只动了
-/// 摆放的（`placement_only`）算 `Anchor`；去向 `no_model` 的（[`no_model_candidates`]）算 `NoModel`——不是锚点
-/// 也不挡路；其余一律 `Other`（新建 / 删除 / 改挂 / 换类型 / 动成员 / 动了别的属性 / opaque / 读不出来）。
+/// 把 e3d-model 的账本折成按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用，任一开关开着才调）。
+/// 每个 refno 一条：账本里只动了摆放的（`placement_only`）算 `Anchor`；去向 `no_model` 的
+/// （[`no_model_candidates`]）算 `NoModel`——不是锚点也不挡路；其余一律 `Other`（新建 / 删除 / 改挂 /
+/// 换类型 / 动成员 / 动了别的属性 / opaque / 读不出来）。
 /// 锚点先于去向：`Δ` 是真的，乘上去永远不错；去向 `no_model` 的锚点名下本就没有单元，也就没有记录可乘。
 /// 删除 / 改挂 / 换类型的候选另走一遍 S 端属主链——旧根只有它说得出。
+///
+/// `rigid_enabled` = `model_transform_cheap_path`：关着时**一次 `world_matrix` 都不算**，只动了摆放的候选
+/// 记成 `Other`（对 D10 它本就不是 `no_model`，判法相同），`enabled` 也随之为假——刚体分桶照旧空。
 fn collect_rigid_motion_sources(
     plan: &UpdatePlan,
     base: &Arc<DbSet>,
     target: &Arc<DbSet>,
     owners: &BTreeMap<(u32, u32), RefNo>,
     roots_t: &[GenerationRoot],
+    rigid_enabled: bool,
 ) -> RigidMotionSources {
     let mut out = RigidMotionSources {
-        enabled: true,
+        enabled: rigid_enabled,
         ..Default::default()
     };
     let anchors = plan.ledger.placement_only();
@@ -607,13 +750,20 @@ fn collect_rigid_motion_sources(
             Vec::new()
         };
         let kind = if anchors.contains(&key) {
-            match rigid_anchor(base, target, refno, &chain_t) {
-                Ok(kind) => kind,
-                Err(error) => {
-                    out.notes
-                        .push(format!("placement anchor {refno} unreadable: {error:#}"));
-                    CandidateKind::Other(format!("placement anchor unreadable: {error:#}"))
+            if rigid_enabled {
+                match rigid_anchor(base, target, refno, &chain_t) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        out.notes
+                            .push(format!("placement anchor {refno} unreadable: {error:#}"));
+                        CandidateKind::Other(format!("placement anchor unreadable: {error:#}"))
+                    }
                 }
+            } else {
+                CandidateKind::Other(format!(
+                    "placement-only (Δ not computed: model_transform_cheap_path off): {}",
+                    details.join("; ")
+                ))
             }
         } else if no_model.contains(&key) {
             CandidateKind::NoModel(details.join("; "))
@@ -838,11 +988,24 @@ impl WindowRootSources {
             })?;
         let (nested_roots, duplicate_coverage_elements) =
             nested_root_observation(&roots_t, index.owners.as_ref());
-        // 刚体前移（ADR-066）：开关关 = 一次 `world_matrix` 都不算、候选表空，下游产物与今天逐位相同。
-        // 开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链 / `Δ` / 三条排除一次算完，
-        // 执行体从此一个文件都不必读。
-        let rigid = if crate::options::model_transform_cheap_path() {
-            collect_rigid_motion_sources(&plan, base, target, index.owners.as_ref(), &roots_t)
+        // 按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用）：两个开关都关 = 候选表空，下游产物
+        // 与今天逐位相同。任一开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链一次算完；
+        // `Δ` / 三条排除只在刚体开关开着时算（关着一次 `world_matrix` 都不算），执行体从此一个文件都不必读。
+        // D10 那一半还要三条级联都开（`no_model_only_cascades_off`）——有关着的就不分桶，表也不必收。
+        let rigid_enabled = crate::options::model_transform_cheap_path();
+        let unit_level_enabled = crate::options::model_unit_level_publish()
+            && crate::options::model_structural_connection_cascade()
+            && crate::options::model_cable_endpoint_cascade()
+            && crate::options::model_design_reference_cascade();
+        let rigid = if rigid_enabled || unit_level_enabled {
+            collect_rigid_motion_sources(
+                &plan,
+                base,
+                target,
+                index.owners.as_ref(),
+                &roots_t,
+                rigid_enabled,
+            )
         } else {
             RigidMotionSources::default()
         };
@@ -884,6 +1047,8 @@ impl WindowRootSources {
         } else {
             crate::data_interface::reverse_reference::DesignReferenceCascade::off()
         };
+        // 覆盖账（计划 D3）：被删单元的 S 端属主链在这里取——两端 `DbSet` 都在手，之后只剩纯比对。
+        let removed_units = collect_removed_units(&plan, base);
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -891,6 +1056,7 @@ impl WindowRootSources {
             roots_t,
             plan,
             closure,
+            removed_units,
             index_keys: index.owners.len(),
             xgeometry_observed,
             xgeometry_unreadable,
@@ -937,6 +1103,67 @@ impl WindowRootSources {
         )
     }
 
+    /// 三条级联扩展（C2 / C8 / P4）各自要并进 `touched` 的根——**按各自的目标集取**，不是 `touched \ direct`：
+    /// 一根可以既被闭包直接命中、又是某条级联的对端，`touched \ direct` 会把它算成「直接命中」，而它在
+    /// 级联那一头的理由（对端变了、几何要跟）局部 DESI 差分看不见。开关关着的级联目标集为空。
+    pub(crate) fn cascaded_roots(&self) -> BTreeSet<RefnoEnum> {
+        let mut out = BTreeSet::new();
+        if self.structural_connection.enabled {
+            out.extend(self.structural_connection.far_end_roots.iter().copied());
+        }
+        if self.cable_endpoint.enabled {
+            out.extend(self.cable_endpoint.referrer_roots.iter().copied());
+        }
+        if self.design_reference.enabled {
+            out.extend(self.design_reference.referrer_roots.iter().copied());
+        }
+        out
+    }
+
+    /// D10 的前置（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」，安全优先）：三条级联 C2 / C8 / P4 **都开着**
+    /// 才分桶。理由：跨根设计引用（`JOIS` / `JOIE` / `CREF` / `CFRA` / `STAREF` / `ENDREF` / `POSREF`）的引用者
+    /// 只被盖戳这一形状，今天靠戳做种子整根 regen 收住；D10 把它变成只推回执之后，唯一能把引用者的根挡在
+    /// 桶外的就是级联的目标集（条件 ③）——级联关着，那一格是空的，条件 ③ 形同虚设。回 `Some(哪几条关着)`。
+    pub(crate) fn no_model_only_cascades_off(&self) -> Option<String> {
+        let off: Vec<&str> = [
+            (
+                self.structural_connection.enabled,
+                "model_structural_connection_cascade",
+            ),
+            (self.cable_endpoint.enabled, "model_cable_endpoint_cascade"),
+            (
+                self.design_reference.enabled,
+                "model_design_reference_cascade",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, name)| (!enabled).then_some(name))
+        .collect();
+        (!off.is_empty()).then(|| off.join(" / "))
+    }
+
+    /// 单元级发布 D10 的分桶，在 [`Self::impact`] 与 `plan_window_roots` 之后调：`plan.regen` 里哪些根这一窗
+    /// **只被 `no_model` 候选碰到**（[`classify_no_model_only_roots`]）。候选表随 `model_unit_level_publish`
+    /// 开关（且三条级联都开）收集；关着时表空，每根都判不出候选、一根都不合格；任一级联关着时
+    /// （[`Self::no_model_only_cascades_off`]）整窗一根都不点名。
+    pub(crate) fn no_model_only(
+        &self,
+        roots_s: &[PersistedRoot],
+        settled: &BTreeSet<RefnoEnum>,
+        impact: &WindowImpact,
+        plan: &WindowRootPlan,
+    ) -> NoModelOnlyClassification {
+        classify_no_model_only_roots(
+            &plan.regen,
+            settled,
+            &self.directly_touched(roots_s),
+            &self.cascaded_roots(),
+            impact.degraded_reason().as_deref(),
+            self.no_model_only_cascades_off().as_deref(),
+            &self.rigid.candidates,
+        )
+    }
+
     /// `roots_S ∪ roots_T` 里哪些根被这一窗波及（`UpdatePlan::touches_roots` 的判据），
     /// 连同护栏要看的三个数。
     pub fn impact(&self, roots_s: &[PersistedRoot]) -> WindowImpact {
@@ -954,6 +1181,7 @@ impl WindowRootSources {
             cascade_degraded: self.design_reference.degraded.clone(),
             unresolved: self.plan.report.unresolved.len(),
             candidates: self.plan.report.candidates,
+            cache_stamp: self.plan.report.cache_stamp,
             index_keys: self.index_keys,
         }
     }
@@ -1042,6 +1270,169 @@ fn rigid_motion_summary_line(
     )
 }
 
+/// [`classify_no_model_only_roots`] 的产物（ADR-080 D10）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NoModelOnlyClassification {
+    /// 这一窗只被 `no_model` 候选碰到的 regen 根：单元路上切出的空子计划许当「没有一件几何要变」
+    /// 发一份空 `Partial`、只推回执。
+    pub roots: BTreeSet<RefnoEnum>,
+    /// 不合格的 regen 根与第一条原因——只供 warnings / 探针，它们照旧走完整的单元路（子计划非空就
+    /// 局部重建，为空就回退整根 regen）。
+    pub rejected: Vec<(RefnoEnum, String)>,
+}
+
+/// 纯函数（ADR-080 D10）：`regen` 里哪些根这一窗**只被账本去向 `no_model` 的候选碰到**。这样的根在
+/// 单元路上切出的子计划必然为空——Q6 第一手（元数据门三档：`NAME` 一类 / 生成器不读的属性 / 只跳
+/// `CACHID` 戳）已把它名下要重建的单元归零——今天的执行体把空子计划一律当「选根看得比 `plan_update`
+/// 远」回退整根 regen；对这一类根那一退是白算：整根重算出来的几何与 S 端逐字相同，只有回执前移了。
+///
+/// **前置**（用户 2026-09-17 拍板「级联关着 ⇒ D10 不分桶」）：`cascades_off` 非空 = C2 / C8 / P4 里有关着的，
+/// 整窗一根都不点名——条件 3 靠级联目标集挡「引用者只被盖戳」的根，级联关着那一格是空的。
+///
+/// 五条缺一不可，任一不成就留在 `rejected`（照旧整根 regen，回退永远正确）：
+/// 1. 窗口没退化（`degraded`）——退化窗把每个持久根都判成 regen，那不是「这几件变了」；
+/// 2. 根在 `settled` 里：S 端已发布且安定（`settled_base_roots`，ADR-079）——新根 / 上一窗欠着的根
+///    没有「S 上的全集」可叠；
+/// 3. 根是闭包**直接**命中的（`direct`），且**不在**任何一条级联的目标集里（`cascaded`：C2 / C8 / P4）
+///    ——级联把它并进来的理由（对端 / 被引用者变了）在这根自己的 DESI 差分里看不见，空清单不是「没变」；
+/// 4. 归到它名下的候选至少一个——一个都归不到是被别的机制选进来的（恢复 / 目录名单），同上；
+/// 5. 归到它名下的候选**全部**是 [`CandidateKind::NoModel`]——只要有一个 `Anchor` / `Other`（`RolledUp` /
+///    `Unresolved` 去向），它名下就有单元要重建（或分类不可信），空子计划另有原因。
+///
+/// 归因只看两个方向：候选就是根、候选的 T 端链或 S 端链经过根。**不看根之上的候选**（与刚体路
+/// `classify_one` 差这一条，故意的）：祖先闭包按构造不因根之上的种子把根收进来；根之上的改动若真波及
+/// 根下的几何（挪 ZONE / 换类型 / 删除），e3d-model 的级联会把根下的单元放进动作集、子计划就不空，
+/// 这里的判决在那条路上根本用不到；反过来把 `WORL` 的 `UPDT` 一类每窗必跳的祖先候选算进来，这条路在
+/// 真库上一次都打不着。
+pub(crate) fn classify_no_model_only_roots(
+    regen: &[GenerationRoot],
+    settled: &BTreeSet<RefnoEnum>,
+    direct: &BTreeSet<RefnoEnum>,
+    cascaded: &BTreeSet<RefnoEnum>,
+    degraded: Option<&str>,
+    cascades_off: Option<&str>,
+    candidates: &[WindowCandidate],
+) -> NoModelOnlyClassification {
+    let mut out = NoModelOnlyClassification::default();
+    for root in regen {
+        match classify_no_model_only_root(
+            root.root,
+            settled,
+            direct,
+            cascaded,
+            degraded,
+            cascades_off,
+            candidates,
+        ) {
+            Ok(()) => {
+                out.roots.insert(root.root);
+            }
+            Err(reason) => out.rejected.push((root.root, reason)),
+        }
+    }
+    out
+}
+
+fn classify_no_model_only_root(
+    root: RefnoEnum,
+    settled: &BTreeSet<RefnoEnum>,
+    direct: &BTreeSet<RefnoEnum>,
+    cascaded: &BTreeSet<RefnoEnum>,
+    degraded: Option<&str>,
+    cascades_off: Option<&str>,
+    candidates: &[WindowCandidate],
+) -> Result<(), String> {
+    if let Some(off) = cascades_off {
+        return Err(format!(
+            "cascade(s) off: {off}; D10 needs C2 / C8 / P4 all on so that referrers reached only \
+             through a stamp are kept out of the bucket"
+        ));
+    }
+    if let Some(reason) = degraded {
+        return Err(format!("window degraded: {reason}"));
+    }
+    if !settled.contains(&root) {
+        return Err("root is not a settled persisted root".into());
+    }
+    if !direct.contains(&root) {
+        return Err("root is not directly hit by the closure".into());
+    }
+    if cascaded.contains(&root) {
+        return Err(
+            "root is a target of a cascade expansion (C2 / C8 / P4); its DESI delta cannot see why"
+                .into(),
+        );
+    }
+    let mut no_model = 0usize;
+    for candidate in candidates {
+        let touching = candidate.refno == root
+            || candidate.chain_t.contains(&root)
+            || candidate.chain_s.contains(&root);
+        if !touching {
+            continue;
+        }
+        match &candidate.kind {
+            CandidateKind::NoModel(_) => no_model += 1,
+            CandidateKind::Anchor { .. } => {
+                return Err(format!(
+                    "{}: placement-only candidate under the root (rolled up)",
+                    candidate.refno.to_pdms_str()
+                ));
+            }
+            CandidateKind::Other(reason) => {
+                return Err(format!("{}: {reason}", candidate.refno.to_pdms_str()));
+            }
+        }
+    }
+    if no_model == 0 {
+        return Err("touched, but no candidate could be attributed to it".into());
+    }
+    Ok(())
+}
+
+/// warnings 里那一行 D10 的账；开关关着时不出这一行（计划与今天逐字相同）。级联关着时只报一句为什么没分桶。
+fn no_model_only_summary_line(
+    dbnum: u32,
+    classification: &NoModelOnlyClassification,
+    regen: usize,
+    cascades_off: Option<&str>,
+) -> String {
+    const SHOWN: usize = 6;
+    if let Some(off) = cascades_off {
+        return format!(
+            "dbnum={dbnum}: unit-level publish (model_unit_level_publish) — no_model_only roots not \
+             classified: cascade(s) off ({off}); D10 needs model_structural_connection_cascade / \
+             model_cable_endpoint_cascade / model_design_reference_cascade all on, every empty \
+             sub-plan falls back to regen"
+        );
+    }
+    let shown = classification
+        .roots
+        .iter()
+        .take(SHOWN)
+        .map(|root| root.to_pdms_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = classification.roots.len().saturating_sub(SHOWN);
+    format!(
+        "dbnum={dbnum}: unit-level publish (model_unit_level_publish) — no_model_only roots={} of \
+         regen={}{}{}; these publish an empty Partial (receipt only) on the unit path, the rest \
+         rebuild their named units or fall back to regen",
+        classification.roots.len(),
+        regen,
+        if shown.is_empty() {
+            String::new()
+        } else {
+            format!(" [{shown}]")
+        },
+        if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        },
+    )
+}
+
 /// DESI 窗口 S→T 的模型计划，输入全部来自文件与进程内账本（P2-1 / ADR-079）。
 ///
 /// 非 DESI 库返回空计划：CATA 窗口仍走 `build_cata_cascade_plan`（`ref_rev` 反查，P2-3），
@@ -1121,15 +1512,34 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
-    if sources.plan.report.metadata_only + sources.plan.report.unread_attribute > 0 {
+    // 覆盖账（计划 D3，2026-09-18）：账本说要删的单元，自身或 S 端属主链上得有一级落在 `delete`
+    // 或 `regen` 里，否则它的旧行这一窗没人清——09-15 S5 那窗 `remove=1` / `delete=0` 就并排在
+    // 上面那一行里躺了三天没人看见。排在 `carry_unsettled_generation` 之后：欠着的根并进 regen 也算盖住。只告警。
+    let coverage_gap = uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen);
+    if !coverage_gap.is_empty() {
+        warnings.push(delete_coverage_gap_warning(
+            dbnum,
+            &coverage_gap,
+            &sources.removed_units,
+            roots_s.len(),
+            sources.roots_t.len(),
+            plan.delete.len(),
+            plan.regen.len(),
+        ));
+    }
+    let gated = sources.plan.report.metadata_only
+        + sources.plan.report.unread_attribute
+        + sources.plan.report.cache_stamp;
+    if gated > 0 {
         warnings.push(format!(
-            "dbnum={dbnum}: metadata-only gate — {} modified candidate(s) changed nothing but \
-             attributes with dictionary DCHC=0 that the generator never reads and were not rolled \
-             up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, unread_attribute={} on the wider \
-             S6 tier); ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
-            sources.plan.report.metadata_only + sources.plan.report.unread_attribute,
+            "dbnum={dbnum}: metadata-only gate — {gated} modified candidate(s) changed nothing but \
+             attributes with dictionary DCHC=0 that the generator never reads (or only the CACHID / \
+             SPAMAP stamps) and were not rolled up (metadata_only={} on NAME/DESC/PURP/FUNC/LCHKDA, \
+             unread_attribute={} on the wider S6 tier, cache_stamp={} on the stamp-only Q6 tier); \
+             ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
             sources.plan.report.metadata_only,
-            sources.plan.report.unread_attribute
+            sources.plan.report.unread_attribute,
+            sources.plan.report.cache_stamp
         ));
     }
     if sources.plan.report.unread_attribute > 0 {
@@ -1173,12 +1583,30 @@ pub(crate) async fn build_model_update_plan_from_window(
             ..Default::default()
         })
         .collect();
-    // 单元级发布（ADR-078 D9）的窗口基线只在开关开着、且本窗的根规划没退化时带上：退化窗把每个
+    // 单元级发布（ADR-080 D9）的窗口基线只在开关开着、且本窗的根规划没退化时带上：退化窗把每个
     // 持久根都判成 regen，那不是「这几件变了」，局部清单没有对应的口径；开关关着时这一格是 `None`，
     // 执行体一次都不被叫到，计划与今天逐位相同（实施约束 9）。选根一个字不改（实施约束 6）。
     let unit_publish_base_sesno = (crate::options::model_unit_level_publish()
         && plan.degraded.is_none())
     .then_some(base_sesno);
+    // D10：基线带上了才分桶——`regen` 里只被 `no_model` 候选碰到的根随计划点名，单元路对它们的空子计划
+    // 只推回执。它也是 `regen` 的子集加提示，`work_items` / `units` 一字不改。
+    let unit_publish_no_model_only_roots = if unit_publish_base_sesno.is_some() {
+        let classification = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+        warnings.push(no_model_only_summary_line(
+            dbnum,
+            &classification,
+            plan.regen.len(),
+            sources.no_model_only_cascades_off().as_deref(),
+        ));
+        classification
+            .roots
+            .iter()
+            .map(|root| root.to_pdms_str())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut out =
         plan.into_model_update_plan(dbnum, db_type, target_sesno as i32, roots_s.len(), warnings);
     // The queue consumer still speaks in delivery-unit summaries.  The window
@@ -1190,6 +1618,7 @@ pub(crate) async fn build_model_update_plan_from_window(
     // `transform_units` 为空，计划与今天逐位相同。
     out.transform_units = transform_units;
     out.unit_publish_base_sesno = unit_publish_base_sesno;
+    out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;
     // 面板自身的变化（d-819 / ADR-073 D13）：本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL /
     // CFLOOR）→ 给本库排一条 `RoomOnly`——任务在本批根刷盘之后用现有几何重算本库全部根的两张
     // 房间边。逐根路径只算「本根在哪些面板里」，面板那一侧变了、它名下别的根点不着，这是那个盲区
@@ -1359,6 +1788,35 @@ pub(crate) async fn enumerate_target_roots(
     .map_err(|error| anyhow::anyhow!("target root enumeration task failed: {error}"))?
 }
 
+/// `refnos` 里在本库 `DbSet@T` 上**已不存在**的元素（审核 M2，2026-09-19）。房间反查命中却折不出根的元素分两类：
+/// 元素还在 T 上、祖先链却对不上根清单 = 枚举不一致，反查不可信、退整库；元素在 T 上已经没了（本窗删掉的，树 / 库上
+/// 的残留还没刷掉）= 它没有边要维护（对账删除那一半清），忽略即可。这里只答后一问，与 [`enumerate_target_roots`] 同一个
+/// `DbSet@T`（`build_set` 走生成输入缓存）。dabacon 没有墓碑位，「不存在」就是这个时点上键集里没有它。
+pub(crate) async fn missing_at_target(
+    dbnum: u32,
+    target_sesno: u32,
+    refnos: Vec<RefNo>,
+) -> anyhow::Result<Vec<RefNo>> {
+    if refnos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let service = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
+    tokio::task::spawn_blocking(move || {
+        let target = service.build_set(dbnum, Some(target_sesno))?;
+        let mut missing = Vec::new();
+        for refno in refnos {
+            if !target.element_exists(refno).with_context(|| {
+                format!("checking whether {refno} still exists in DbSet@{target_sesno}")
+            })? {
+                missing.push(refno);
+            }
+        }
+        Ok(missing)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("target existence check task failed: {error}"))?
+}
+
 /// 纯函数：一窗左端怎么取（ADR-079）。`model_sesno` 是这个库模型面唯一的持久事实：
 /// `0` = 从没追平过 → 不开窗，`DbSet@T` 全部根重排；`>= T` = 已追平 → 不开窗，只重排账本里欠着的；
 /// 其余 → 开 `model_sesno → T` 的窗。
@@ -1521,6 +1979,7 @@ mod tests {
             cascade_degraded: None,
             unresolved: 0,
             candidates: 3,
+            cache_stamp: 0,
             index_keys: 1000,
         }
     }
@@ -1616,6 +2075,147 @@ mod tests {
         assert!(plan.regen.is_empty() && plan.advance.is_empty());
     }
 
+    fn removed(id: u32, noun: &str, ancestors: &[u32]) -> RemovedUnit {
+        RemovedUnit {
+            refno: r(id),
+            noun: noun.into(),
+            ancestors_s: ancestors.iter().map(|id| r(*id)).collect(),
+        }
+    }
+
+    /// 覆盖账（2026-09-18 计划 D3）——09-15 S5 那一窗的数：账本 `remove = {BOX 24384/26481}`（几何挂在
+    /// BOX 上，它的 S 端属主链是 EQUI 26480 → ZONE 24775 → SITE），`8adec7169` 的根规划 `delete = ∅`、
+    /// `regen = ∅`（`roots_S` 读 `gen_root`，增量新建的 EQUI 不在里面）。那件 BOX 要被点出来，warning
+    /// 要带上名字与两边的数，让「`remove=1` / `delete=0` 并排躺在同一行里」不再需要人眼去比。
+    #[test]
+    fn a_removed_unit_with_no_cleanup_root_above_it_is_named() {
+        let box_s5 = removed(26481, "BOX", &[26480, 24775, 24774]);
+        let gap = uncovered_removed_units(&[box_s5.clone()], &[], &[]);
+        assert_eq!(gap, vec![r(26481)]);
+
+        // 盖住了一件、漏了一件：只点漏的那件，按账本 `remove` 的顺序。
+        let ftub = removed(9, "FTUB", &[7, 5]);
+        let gap = uncovered_removed_units(
+            &[ftub.clone(), box_s5.clone()],
+            &[persisted(7, "BRAN")],
+            &[],
+        );
+        assert_eq!(gap, vec![r(26481)]);
+
+        let line = delete_coverage_gap_warning(
+            8000,
+            &[r(26481)],
+            &[box_s5.clone()],
+            952,
+            952,
+            0,
+            0,
+        );
+        assert!(
+            line.starts_with("dbnum=8000: delete-coverage gap — ")
+                && line.contains("removes 1 model unit(s)")
+                && line.contains("24384/26481 BOX")
+                && line.ends_with("(roots_S=952 roots_T=952 delete=0 regen=0 remove=1)"),
+            "{line}"
+        );
+
+        // 账本没记 noun 的只出 refno；点名有上限：13 件只点 12 件，尾巴说明还有几件。
+        let many: Vec<RemovedUnit> = (1..=13).map(|id| removed(id, "", &[])).collect();
+        let gap: Vec<RefnoEnum> = many.iter().map(|unit| unit.refno).collect();
+        let line = delete_coverage_gap_warning(8000, &gap, &many, 0, 0, 0, 0);
+        assert!(
+            line.contains("removes 13 model unit(s)")
+                && line.contains(": 24384/1, 24384/2,")
+                && line.contains("24384/12")
+                && !line.contains("24384/13")
+                && line.contains("… (+1 more)"),
+            "{line}"
+        );
+    }
+
+    /// 盖住了就一个字都不说：整根删掉 → 根在 `delete`（单元自身是根、或链上有根都算）；删成员、根还在
+    /// → 根在 `regen`（269→270 删 FTUB 的形状）；本窗没删东西 → 空。多删几根 / 多重算几根都无妨。
+    #[test]
+    fn a_removed_unit_under_a_delete_or_regen_root_raises_no_gap() {
+        let box_s5 = removed(26481, "BOX", &[26480, 24775, 24774]);
+        let ftub = removed(9, "FTUB", &[7, 5]);
+        let bran = removed(7, "BRAN", &[5]);
+        // 整根删掉：EQUI 在 delete 桶，BOX 由链盖住；BRAN 自身就是被删的根。
+        assert!(
+            uncovered_removed_units(
+                &[box_s5.clone(), bran.clone(), ftub.clone()],
+                &[persisted(26480, "EQUI"), persisted(7, "BRAN")],
+                &[]
+            )
+            .is_empty()
+        );
+        // 删成员、根还在：BRAN 整根重算。
+        assert!(
+            uncovered_removed_units(
+                &[ftub.clone()],
+                &[],
+                &[root(7, "BRAN", GenerationRootKind::DeliveryUnit)]
+            )
+            .is_empty()
+        );
+        // 多删 / 多重算别的根不影响。
+        assert!(
+            uncovered_removed_units(
+                &[box_s5.clone()],
+                &[persisted(26480, "EQUI"), persisted(3, "EQUI")],
+                &[root(7, "BRAN", GenerationRootKind::DeliveryUnit)]
+            )
+            .is_empty()
+        );
+        assert!(uncovered_removed_units(&[], &[persisted(7, "BRAN")], &[]).is_empty());
+        assert!(uncovered_removed_units(&[], &[], &[]).is_empty());
+    }
+
+    /// 源码钉（计划 S1）：比对接在窗口规划器里、排在分桶与 `carry_unsettled_generation` 之后、折成
+    /// `ModelUpdatePlan` 之前，拿的是账本被删单元（带 S 端属主链）与根规划的 `delete` / `regen` 两桶，
+    /// 不许换成别的几个数。
+    #[test]
+    fn the_window_planner_reports_delete_coverage_gaps() {
+        let body = include_str!("window_root_plan.rs")
+            .split_once("pub(crate) async fn build_model_update_plan_from_window(")
+            .expect("window planner exists")
+            .1
+            .split_once("// ---- 未触根的「前移」：只剩回执（ADR-079）----")
+            .expect("window planner boundary")
+            .0;
+        let buckets = body
+            .find("plan_window_roots(&sources.roots_t, &roots_s, &impact)")
+            .expect("root buckets are planned");
+        let carried = body
+            .find("carry_unsettled_generation(")
+            .expect("unsettled roots are carried into regen");
+        let gap = body
+            .find("uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen)")
+            .expect("coverage gap is computed from the removed units and the delete / regen buckets");
+        let warning = body
+            .find("delete_coverage_gap_warning(")
+            .expect("coverage gap is reported as a warning");
+        let folded = body
+            .find("into_model_update_plan(")
+            .expect("plan is folded into ModelUpdatePlan");
+        assert!(
+            buckets < carried && carried < gap && gap < warning && warning < folded,
+            "coverage gap must be compared after bucketing / carrying and reported before folding: {body}"
+        );
+        // 属主链在 `collect` 里取（两端 DbSet 在手），规划器不再开文件。
+        let collect = include_str!("window_root_plan.rs")
+            .split_once("    pub fn collect(")
+            .expect("collect exists")
+            .1
+            .split_once("    fn directly_touched(")
+            .expect("collect boundary")
+            .0;
+        assert!(
+            collect.contains("collect_removed_units(&plan, base)"),
+            "removed units and their S-side owner chains are gathered in collect: {collect}"
+        );
+    }
+
     /// 三条护栏任一触发都退化：`advance` 清空，`roots_S ∩ roots_T` 全部 regen；
     /// `delete` 与 `lazy` 不受影响。
     #[test]
@@ -1670,6 +2270,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(empty.degraded_reason(), None);
+    }
+
+    /// 比例护栏的分子是**净候选数**（2026-09-19，Q6 题 B）：只有戳跳了的候选（`cache_stamp`）不计。
+    /// ams7997 52→53 的形状：7328 候选里 2167 只 `SPAMAP`，index_keys 19975 → 毛数 7328 > 5993 退化，
+    /// 净数 5161 不退化。`cache_stamp` 为 0 时与之前逐位相同（前一条测试）；净数恰在线上仍是「超过」才退化。
+    #[test]
+    fn the_candidate_ratio_guard_nets_out_stamp_only_candidates() {
+        let mut window = impact(&[]);
+        window.candidates = 7328;
+        window.index_keys = 19975;
+        let gross = window.degraded_reason().expect("毛数 7328 > 5993 退化");
+        assert!(
+            gross.contains("too many candidates: 7328 > 30% of 19975 index keys"),
+            "{gross}"
+        );
+        assert!(!gross.contains("stamp-only"), "没有戳就别提戳：{gross}");
+
+        window.cache_stamp = 2167;
+        assert_eq!(window.net_candidates(), 5161);
+        assert_eq!(window.degraded_reason(), None, "净数 5161 ≤ 5993 不退化");
+
+        // 净掉之后仍超线：原因里把毛数与戳数都写出来，读回执的人对得上账。
+        window.cache_stamp = 1000;
+        let net = window.degraded_reason().expect("净数 6328 > 5993 仍退化");
+        assert!(
+            net.contains("too many candidates: 6328 (7328 indexed minus 1000 stamp-only) > 30% of 19975 index keys"),
+            "{net}"
+        );
+
+        // 「超过」不是「达到」：净数恰好压线不退化。
+        window.candidates = 6000;
+        window.index_keys = 20000;
+        window.cache_stamp = 0;
+        assert_eq!(window.degraded_reason(), None);
+        window.candidates = 6001;
+        assert!(window.degraded_reason().is_some());
+        window.cache_stamp = 1;
+        assert_eq!(window.degraded_reason(), None);
+
+        // 防御：戳数不可能大于候选数（e3d-model `accounts_for` 钉），真出现也只饱和到 0，不 panic。
+        window.candidates = 3;
+        window.cache_stamp = 5;
+        assert_eq!(window.net_candidates(), 0);
+        assert_eq!(window.degraded_reason(), None);
     }
 
     /// 工作项：regen → `RegenRoot`（noun 取 T 端）、delete → `DeleteCleanup`（noun 取
@@ -2055,6 +2699,420 @@ mod tests {
         assert!(no_model_candidates(&ChangeLedger::new()).is_empty());
     }
 
+    /// ADR-080 D10：`regen` 里只被 `no_model` 候选碰到的根才点名——五条缺一不可。
+    ///
+    /// 层级：ZONE 1 ─┬─ EQUI 10（根）─── BOX 11
+    ///               └─ PIPE 20 ─── BRAN 21（根）─── ELBO 22
+    ///          ZONE 2 ─── EQUI 30（根）─── SUBE 31；EQUI 40（根，S 端有、T 端删了 BOX 41）
+    #[test]
+    fn no_model_only_roots_need_every_one_of_the_five_conditions() {
+        use crate::data_interface::rigid_motion::{CandidateKind, WindowCandidate};
+
+        let candidate =
+            |id: u32, kind: CandidateKind, chain_t: &[u32], chain_s: &[u32]| WindowCandidate {
+                refno: r(id),
+                kind,
+                chain_t: chain_t.iter().map(|n| r(*n)).collect(),
+                chain_s: chain_s.iter().map(|n| r(*n)).collect(),
+            };
+        let no_model = |id: u32, chain_t: &[u32]| {
+            candidate(
+                id,
+                CandidateKind::NoModel("AttributesModified: CACHID 变了".into()),
+                chain_t,
+                &[],
+            )
+        };
+        let other = |id: u32, chain_t: &[u32], chain_s: &[u32]| {
+            candidate(
+                id,
+                CandidateKind::Other("AttributesModified: DIAM 变了".into()),
+                chain_t,
+                chain_s,
+            )
+        };
+        let set = |ids: &[u32]| -> BTreeSet<RefnoEnum> { ids.iter().map(|n| r(*n)).collect() };
+        let regen = vec![
+            root(10, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(21, "BRAN", GenerationRootKind::DeliveryUnit),
+            root(30, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(40, "EQUI", GenerationRootKind::DeliveryUnit),
+        ];
+        let settled = set(&[10, 21, 30, 40]);
+        let direct = set(&[10, 21, 30, 40]);
+        let candidates = vec![
+            // EQUI 10：名下只有一个只跳戳的 BOX —— 合格。
+            no_model(11, &[10, 1]),
+            // BRAN 21：只戳的 ELBO 之外还有一个 Other（ELBO 22 的 DIAM）—— 不合格，点名它。
+            no_model(22, &[21, 20, 1]),
+            other(22, &[21, 20, 1], &[]),
+            // EQUI 30：只戳的 SUBE —— 合格；ZONE 2 自己 `Other`（成员表变了）在根之上，不算。
+            no_model(31, &[30, 2]),
+            other(2, &[], &[]),
+            // EQUI 40：只戳的 SUBE 之外还删了 BOX 41（只在 S 端链上）—— 靠 chain_s 归因，不合格。
+            no_model(42, &[40, 2]),
+            other(41, &[], &[40, 2]),
+        ];
+
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            None,
+            &candidates,
+        );
+        assert_eq!(out.roots, set(&[10, 30]), "{:?}", out.rejected);
+        let rejected = out.rejected.into_iter().collect::<BTreeMap<_, _>>();
+        assert!(
+            rejected[&r(21)].contains("24384/22"),
+            "{}",
+            rejected[&r(21)]
+        );
+        assert!(rejected[&r(21)].contains("DIAM"), "{}", rejected[&r(21)]);
+        assert!(
+            rejected[&r(40)].contains("24384/41"),
+            "{}",
+            rejected[&r(40)]
+        );
+
+        // 条件 3：级联目标集里的根不合格，哪怕它名下的候选全是 no_model。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &set(&[10]),
+            None,
+            None,
+            &candidates,
+        );
+        assert_eq!(out.roots, set(&[30]));
+        assert!(
+            out.rejected
+                .iter()
+                .any(|(root, reason)| *root == r(10) && reason.contains("cascade expansion")),
+            "{:?}",
+            out.rejected
+        );
+
+        // 条件 2 / 3：没安定的根、闭包没直接命中的根都不合格。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &set(&[10]),
+            &set(&[30]),
+            &BTreeSet::new(),
+            None,
+            None,
+            &candidates,
+        );
+        assert!(out.roots.is_empty(), "{:?}", out.roots);
+        let rejected = out.rejected.into_iter().collect::<BTreeMap<_, _>>();
+        assert!(
+            rejected[&r(10)].contains("not directly hit"),
+            "{}",
+            rejected[&r(10)]
+        );
+        assert!(
+            rejected[&r(30)].contains("not a settled"),
+            "{}",
+            rejected[&r(30)]
+        );
+
+        // 条件 4：一个候选都归不到的根（被恢复 / 目录名单选进来的）不合格。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            None,
+            &[no_model(11, &[10, 1])],
+        );
+        assert_eq!(out.roots, set(&[10]));
+        assert!(
+            out.rejected
+                .iter()
+                .any(|(root, reason)| *root == r(30) && reason.contains("no candidate")),
+            "{:?}",
+            out.rejected
+        );
+
+        // 条件 1：退化窗一根都不合格。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            Some("unresolved=1"),
+            None,
+            &candidates,
+        );
+        assert!(out.roots.is_empty());
+        assert!(
+            out.rejected
+                .iter()
+                .all(|(_, reason)| reason.contains("degraded"))
+        );
+
+        // 前置（用户 0917 拍板）：三条级联有一条关着，整窗一根都不点名，原因点名关着的那条。
+        let out = classify_no_model_only_roots(
+            &regen,
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            Some("model_cable_endpoint_cascade"),
+            &candidates,
+        );
+        assert!(out.roots.is_empty(), "{:?}", out.roots);
+        assert_eq!(out.rejected.len(), regen.len());
+        assert!(
+            out.rejected.iter().all(|(_, reason)| {
+                reason.contains("cascade(s) off: model_cable_endpoint_cascade")
+            }),
+            "{:?}",
+            out.rejected
+        );
+
+        // 只动了摆放的锚点（RolledUp）也不是 no_model：刚体开关关着时它记成 Other，开着时是 Anchor，两种都挡。
+        let anchor = candidate(
+            11,
+            CandidateKind::Anchor {
+                delta: glam::DMat4::IDENTITY,
+                rigid: Ok(()),
+            },
+            &[10, 1],
+            &[],
+        );
+        let out = classify_no_model_only_roots(
+            &regen[..1],
+            &settled,
+            &direct,
+            &BTreeSet::new(),
+            None,
+            None,
+            &[anchor],
+        );
+        assert!(out.roots.is_empty());
+        assert!(
+            out.rejected[0].1.contains("placement-only"),
+            "{}",
+            out.rejected[0].1
+        );
+    }
+
+    /// 源码钉：D10 的前置「级联关着 ⇒ 不分桶」（用户 2026-09-17 拍板）写在三处，缺一处就红——
+    /// `no_model_only_cascades_off` 看齐三条级联的 `enabled`；`no_model_only` 把它喂给分桶；`collect` 收候选表
+    /// 时也按三个开关同开才为单元级收（关着连表都不收，与今天逐位相同）。
+    #[test]
+    fn d10_refuses_to_classify_unless_all_three_cascades_are_on() {
+        // 本文件是 CRLF：先归一成 LF 再按缩进找函数尾。
+        let source = include_str!("window_root_plan.rs").replace("\r\n", "\n");
+        let body = |start: &str| {
+            let rest = source.split_once(start).expect(start).1;
+            &rest[..rest.find("\n    }\n").expect("fn end")]
+        };
+        let off = body("fn no_model_only_cascades_off(&self)");
+        for field in [
+            "self.structural_connection.enabled",
+            "self.cable_endpoint.enabled",
+            "self.design_reference.enabled",
+        ] {
+            assert!(off.contains(field), "级联 {field} 没被 D10 的前置看齐");
+        }
+        let classify = body("pub(crate) fn no_model_only(");
+        assert!(
+            classify.contains("self.no_model_only_cascades_off().as_deref()"),
+            "分桶必须吃级联开关态"
+        );
+        let collect = body("pub fn collect(");
+        for switch in [
+            "crate::options::model_structural_connection_cascade()",
+            "crate::options::model_cable_endpoint_cascade()",
+            "crate::options::model_design_reference_cascade()",
+        ] {
+            assert!(
+                collect.contains(switch),
+                "候选表为单元级收集时必须要求 {switch}"
+            );
+        }
+    }
+
+    /// ADR-080 实施约束 9 的守卫：`model_unit_level_publish` 关着时行为必须**逐位**等于今天——计划上没有基线、
+    /// 没有一个单元带 `unit_publish` 提示、单元级执行体一次都不被叫到。整条链只有规划器一处读开关，往下全靠
+    /// 「基线 `None` ⇒ 提示 `None` ⇒ 分桶为空 ⇒ 执行体不叫」传下去，所以钉四处，缺一处就红：
+    /// ① 规划器（本文件）：`unit_publish_base_sesno` 只从 `model_unit_level_publish() ∧ 没退化` 得出，D10 名单
+    ///    只在基线在时算，两格原样搬进 `ModelUpdatePlan`，文件里再没有第二处给它们赋值；`collect` 为单元级收候选表
+    ///    也要开关开。
+    /// ② 提示（`manual_update.rs`）：生产代码里 `UnitPublishHint` 只在 `collect_unit_tasks` 里、且只在
+    ///    `unit_publish_base_sesno.map(…)` 之下构造；合并工作单只搬已有的提示。行为也核一遍：基线 `None` 时
+    ///    D10 名单上的根也不带提示，基线 `Some` 时才带（免得这条守卫空转）。
+    /// ③ 分流（`batch_worker.rs`）：`run_unit_worklist` 按 `unit_publish.is_some()` 分桶，桶空不叫
+    ///    `run_unit_publish_units`；`republish_roots_by_unit_delta_from_window` 的生产调用点只有它里面那一处。
+    #[test]
+    fn switching_unit_level_publish_off_leaves_no_hint_and_never_reaches_the_executor() {
+        // 三个文件行尾不一（本文件 CRLF），先归一；只看 `#[cfg(test)]` 之前的生产半边。
+        let planner = include_str!("window_root_plan.rs").replace("\r\n", "\n");
+        let planner = planner
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("planner production half")
+            .0;
+        let hints = include_str!("manual_update.rs").replace("\r\n", "\n");
+        let hints = hints
+            .split_once("\n#[cfg(test)]\nmod ")
+            .expect("manual_update production half")
+            .0;
+        let worker = include_str!("batch_worker.rs").replace("\r\n", "\n");
+        let worker = worker
+            .split_once("\n#[cfg(test)]\n")
+            .expect("batch_worker production half")
+            .0;
+        // 顶层 fn 的正文：从签名起到第一个列 0 的 `}`。
+        let top_level_fn = |source: &str, start: &str| -> String {
+            let rest = source.split_once(start).expect(start).1;
+            rest[..rest.find("\n}\n").expect("fn end")].to_owned()
+        };
+
+        // ① 规划器：基线与 D10 名单都只从开关得出，且只赋值一次。
+        let build = top_level_fn(
+            planner,
+            "pub(crate) async fn build_model_update_plan_from_window(",
+        );
+        assert!(
+            build.contains(
+                "let unit_publish_base_sesno = (crate::options::model_unit_level_publish()\n        \
+                 && plan.degraded.is_none())\n    .then_some(base_sesno);"
+            ),
+            "基线只在开关开着且本窗没退化时带上"
+        );
+        assert!(
+            build.contains(
+                "let unit_publish_no_model_only_roots = if unit_publish_base_sesno.is_some() {"
+            ),
+            "D10 名单只在基线在时算"
+        );
+        assert!(
+            build.contains("out.unit_publish_base_sesno = unit_publish_base_sesno;")
+                && build.contains(
+                    "out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;"
+                ),
+            "两格原样搬进计划"
+        );
+        assert_eq!(
+            planner.matches("unit_publish_base_sesno =").count(),
+            2,
+            "本文件生产代码里给基线赋值的只有 `let` 与搬进计划那两处"
+        );
+        assert_eq!(
+            planner
+                .matches(".unit_publish_no_model_only_roots =")
+                .count(),
+            1,
+            "D10 名单只在搬进计划时赋一次"
+        );
+        let collect = {
+            let rest = planner
+                .split_once("    pub fn collect(")
+                .expect("collect")
+                .1;
+            &rest[..rest.find("\n    }\n").expect("collect end")]
+        };
+        assert!(
+            collect.contains("let unit_level_enabled = crate::options::model_unit_level_publish()"),
+            "为单元级收候选表也要开关开着"
+        );
+
+        // ② 提示：生产代码里只有 `collect_unit_tasks` 在基线之下造 `UnitPublishHint`。
+        assert_eq!(
+            hints.matches("UnitPublishHint {").count()
+                - hints.matches("pub struct UnitPublishHint {").count(),
+            1,
+            "生产代码里构造 UnitPublishHint 的只许有 collect_unit_tasks 一处（另一处是它的定义）"
+        );
+        assert!(
+            hints.contains(
+                "unit_publish: unit_publish_base_sesno.map(|source_start_sesno| UnitPublishHint {"
+            ),
+            "那一处必须挂在基线的 map 之下"
+        );
+        assert!(
+            hints.contains("existing.unit_publish = task.unit_publish;"),
+            "合并工作单只搬已有的提示，不另造"
+        );
+        let unit = DeliveryUnitSummary {
+            root_refno: r(6).to_pdms_str(),
+            noun: "BRAN".into(),
+            will_generate: true,
+            ..Default::default()
+        };
+        let named = vec![unit.root_refno.clone()];
+        let off = crate::data_interface::manual_update::collect_unit_tasks(
+            std::slice::from_ref(&unit),
+            &[],
+            7997,
+            42,
+            None,
+            &named,
+        );
+        assert_eq!(off.len(), 1);
+        assert!(
+            off[0].unit_publish.is_none(),
+            "基线 None：D10 名单上的根也不带提示"
+        );
+        let on = crate::data_interface::manual_update::collect_unit_tasks(
+            std::slice::from_ref(&unit),
+            &[],
+            7997,
+            42,
+            Some(41),
+            &named,
+        );
+        assert!(
+            matches!(
+                on[0].unit_publish,
+                Some(crate::data_interface::manual_update::UnitPublishHint {
+                    source_start_sesno: 41,
+                    no_model_only: true,
+                })
+            ),
+            "基线 Some 才带提示——这条守卫不是空转"
+        );
+
+        // ③ 分流：按提示分桶，桶空不叫执行体；执行体的生产调用点只有一处。
+        let worklist = top_level_fn(worker, "async fn run_unit_worklist(");
+        let partition = worklist
+            .find(".partition(|task| task.unit_publish.is_some());")
+            .expect("按 unit_publish 提示分桶");
+        let guard = worklist
+            .find("if !unit_tasks.is_empty() {")
+            .expect("桶空不进单元路");
+        let call = worklist
+            .find("run_unit_publish_units(")
+            .expect("单元路分流");
+        assert!(
+            partition < guard && guard < call,
+            "分桶 → 判空 → 才叫 run_unit_publish_units，顺序不能乱"
+        );
+        assert_eq!(
+            worker.matches("run_unit_publish_units(").count(),
+            2,
+            "run_unit_publish_units 只有定义与 run_unit_worklist 里那一次调用"
+        );
+        assert_eq!(
+            worker
+                .matches("republish_roots_by_unit_delta_from_window(")
+                .count(),
+            1,
+            "单元级执行体的生产调用点只有 run_unit_publish_units 里那一处"
+        );
+        let stage = top_level_fn(worker, "async fn run_unit_publish_units(");
+        assert!(
+            stage.contains("republish_roots_by_unit_delta_from_window("),
+            "那一处就在 run_unit_publish_units 里"
+        );
+    }
+
     /// 探针（手动）：钉一窗、开着 `model_transform_cheap_path` 跑一遍**生产同款**选根 + 刚体分桶
     /// （`WindowRootSources::collect` → `impact` → `plan_window_roots` → `rigid_motion`），把候选表按类
     /// （合格锚点 / 被排除锚点 / `no_model` / `Other`，`Other` 里单列「只 `CACHID`」）与每个被波及根的判决
@@ -2127,7 +3185,8 @@ mod tests {
             return;
         }
 
-        // 候选表按类。`Other` 的字串是 `format!("{kind:?}: {detail}")` 拼的，「只 CACHID」= 唯一一条且是 CACHID 变了。
+        // 候选表按类。`Other` 的字串是 `format!("{kind:?}: {detail}")` 拼的，「只 CACHID」= 唯一一条且是 CACHID 变了
+        // ——Q6 落地（2026-09-17）后这一类该走 `no_model`（第三档 `CacheStamp`），单列出来是让回归一眼可见。
         let noun_of = |refno: RefnoEnum| -> String {
             target
                 .element(refno_to_e3d(refno))
@@ -2143,9 +3202,10 @@ mod tests {
                     rigid: Err(reason), ..
                 } => ("锚点·被排除", reason.clone()),
                 CandidateKind::NoModel(detail) => ("no_model（不挡路）", detail.clone()),
-                CandidateKind::Other(detail) if detail == "AttributesModified: CACHID 变了" => {
-                    ("Other·只 CACHID（挡路，Q6 未落地）", detail.clone())
-                }
+                CandidateKind::Other(detail) if detail == "AttributesModified: CACHID 变了" => (
+                    "Other·只 CACHID（挡路——Q6 落地后不该再出现）",
+                    detail.clone(),
+                ),
                 CandidateKind::Other(detail) => ("Other（挡路）", detail.clone()),
             };
             by_class.entry(class).or_default().push(format!(
@@ -2175,8 +3235,11 @@ mod tests {
         let impact = sources.impact(&roots_s);
         let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
         let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
+        // 覆盖账（计划 D3 / S2）：账本被删单元里 `delete` / `regen` 两桶都没盖住的，生产会为它们出一条 warning。
+        let coverage_gap =
+            uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen);
         println!(
-            "{label}: roots_S={} roots_T={} touched={} regen={} delete={} advance={} lazy={} degraded={:?} | transform={} rejected={}",
+            "{label}: roots_S={} roots_T={} touched={} regen={} delete={} advance={} lazy={} degraded={:?} | transform={} rejected={} | remove={} gap={}{}",
             roots_s.len(),
             sources.roots_t.len(),
             impact.touched.len(),
@@ -2186,7 +3249,20 @@ mod tests {
             plan.lazy.len(),
             plan.degraded,
             rigid.transform.len(),
-            rigid.rejected.len()
+            rigid.rejected.len(),
+            sources.plan.remove.len(),
+            coverage_gap.len(),
+            if coverage_gap.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {:?}",
+                    coverage_gap
+                        .iter()
+                        .map(RefnoEnum::to_pdms_str)
+                        .collect::<Vec<_>>()
+                )
+            }
         );
         for (root, anchors) in &rigid.transform {
             println!(
@@ -2748,6 +3824,8 @@ mod tests {
                     .collect();
             let impact = sources.impact(&roots_s);
             let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+            let coverage_gap =
+                uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen);
             for entry in sources.plan.ledger.entries() {
                 println!(
                     "  ledger: {} {} {:?} {}",
@@ -2761,7 +3839,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             println!(
-                "window {}→{} [{}]: roots_S={} roots_T={} touched={:?} regen={:?} delete={:?} advance={} lazy={:?} degraded={:?} | {}",
+                "window {}→{} [{}]: roots_S={} roots_T={} touched={:?} regen={:?} delete={:?} advance={} lazy={:?} degraded={:?} | remove={} gap={:?} | {}",
                 expect.base,
                 expect.target,
                 expect.label,
@@ -2780,10 +3858,27 @@ mod tests {
                 plan.advance.len(),
                 describe(&plan.lazy),
                 plan.degraded,
+                sources.plan.remove.len(),
+                coverage_gap
+                    .iter()
+                    .map(RefnoEnum::to_pdms_str)
+                    .collect::<Vec<_>>(),
                 sources.plan.report.totals_line()
             );
 
             assert_eq!(plan.degraded, None, "{}", expect.label);
+            // 覆盖账（计划 D3 / S2）：账本被删的每个单元，自身或 S 端属主链上得有一级在 `delete` / `regen`
+            // 里——24→26 删 EQUI 子树（BOX 由 delete 里的 EQUI 盖住）、269→270 删 FTUB（由 regen 里的 BRAN
+            // 盖住）、270→271 删整条支管（成员由 delete 里的 BRAN 盖住）；其余窗口账本没删东西。
+            assert!(
+                coverage_gap.is_empty(),
+                "{}: the change ledger removes {:?} but the root plan does not delete them",
+                expect.label,
+                coverage_gap
+                    .iter()
+                    .map(RefnoEnum::to_pdms_str)
+                    .collect::<Vec<_>>()
+            );
             assert_eq!(
                 plan.regen.len(),
                 expect.regen,
@@ -2846,8 +3941,9 @@ mod tests {
         }
     }
 
-    /// 元数据门谓词的真值表（2026-09-08；S6 两票 + 分档）：四条结构条件缺一不可，属性全部过
-    /// 「字典 DCHC=0 ∧ 生成器不读」才放行；全在老名单上是 `MetadataOnly`，否则 `UnreadAttribute`。
+    /// 元数据门谓词的真值表（2026-09-08；S6 两票 + 分档；2026-09-17 Q6 戳）：四条结构条件缺一不可，属性全部过
+    /// 「字典 DCHC=0 ∧ 生成器不读」才放行；全在老名单上是 `MetadataOnly`，否则 `UnreadAttribute`；戳（`CACHID`）
+    /// 的第一票由 e3d-model 戳表给，放行不改档，只有戳跳了记 `CacheStamp`。
     #[test]
     fn a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved() {
         use e3d_model::element_diff::MemberDelta;
@@ -2891,9 +3987,17 @@ mod tests {
         assert!(change_metadata_tier(&diff(&["NAME", "DIAM"])).is_none());
         assert!(change_metadata_tier(&diff(&["NAME", "POS"])).is_none());
         assert!(change_metadata_tier(&diff(&["NAME", "SPRE"])).is_none());
-        // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
-        assert!(!change_is_metadata_only(&diff(&["CACHID"])));
-        assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
+        // 戳（Q6，2026-09-17）：字典没收 `CACHID`，第一票由戳表给——只有戳跳了记第三档，跟着 NAME 记老档；
+        // 跟着摆放走的是锚点那条路（`is_placement_only`），这里不放行。
+        assert_eq!(
+            change_metadata_tier(&diff(&["CACHID"])),
+            Some(NoModelTier::CacheStamp)
+        );
+        assert_eq!(
+            change_metadata_tier(&diff(&["NAME", "CACHID"])),
+            Some(NoModelTier::MetadataOnly)
+        );
+        assert!(change_metadata_tier(&diff(&["POS", "CACHID"])).is_none());
         // UDA 不放行。
         assert!(!change_is_metadata_only(&diff(&["UDA:42"])));
         // 没有属性变化不是「只改了元数据」：那是没变，或只动了结构。
@@ -2947,7 +4051,11 @@ mod tests {
         // 一票否决：混进一个生成侧读得到的名字，整个元素照旧上卷。
         assert!(change_metadata_tier(&diff(&["SUPP", "DIR"])).is_none());
         assert!(change_metadata_tier(&diff(&["SUPP", "DIAM"])).is_none());
-        assert!(change_metadata_tier(&diff(&["SUPP", "CACHID"])).is_none());
+        // 戳跟着新档名字一起跳：记新档，不改档（Q6）。
+        assert_eq!(
+            change_metadata_tier(&diff(&["SUPP", "CACHID"])),
+            Some(NoModelTier::UnreadAttribute)
+        );
         // 结构四条对新档一视同仁。
         let mut members = diff(&["SUPP"]);
         members.members = Some(MemberDelta {
@@ -3022,6 +4130,8 @@ mod tests {
         candidates: usize,
         metadata_only: usize,
         unread_attribute: usize,
+        /// 只有戳跳了的候选（Q6 第三档，2026-09-17）。
+        cache_stamp: usize,
         regen_off: usize,
         regen_on: usize,
         saved_units: usize,
@@ -3032,7 +4142,7 @@ mod tests {
 
     impl GateWindowOutcome {
         fn admitted(&self) -> usize {
-            self.metadata_only + self.unread_attribute
+            self.metadata_only + self.unread_attribute + self.cache_stamp
         }
     }
 
@@ -3156,11 +4266,11 @@ mod tests {
         off.accounts_for()
             .unwrap_or_else(|error| panic!("{label}: {error}"));
         assert_eq!(
-            off.report.metadata_only + off.report.unread_attribute,
+            off.report.metadata_only + off.report.unread_attribute + off.report.cache_stamp,
             0,
             "{label}: 关着的那一态没有门"
         );
-        let admitted = on.report.metadata_only + on.report.unread_attribute;
+        let admitted = on.report.metadata_only + on.report.unread_attribute + on.report.cache_stamp;
         let saved = off.regenerate.len() - on.regenerate.len()
             + (off.regenerate_derived.len() - on.regenerate_derived.len());
         let (no_model_on, no_model_off) = (
@@ -3170,9 +4280,10 @@ mod tests {
         assert_eq!(on.report.unchanged, off.report.unchanged, "{label}");
         assert!(
             no_model_on >= no_model_off && no_model_on - no_model_off <= admitted,
-            "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={} unread_attribute={}",
+            "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={} unread_attribute={} cache_stamp={}",
             on.report.metadata_only,
-            on.report.unread_attribute
+            on.report.unread_attribute,
+            on.report.cache_stamp
         );
         if saved > 0 {
             assert!(
@@ -3191,6 +4302,7 @@ mod tests {
             candidates: on.report.candidates,
             metadata_only: on.report.metadata_only,
             unread_attribute: on.report.unread_attribute,
+            cache_stamp: on.report.cache_stamp,
             regen_off: off.regenerate.len(),
             regen_on: on.regenerate.len(),
             saved_units: saved,
@@ -3465,6 +4577,7 @@ mod tests {
         let mut admitted_candidates = 0usize;
         let mut metadata_only = 0usize;
         let mut unread_attribute = 0usize;
+        let mut cache_stamp = 0usize;
         let mut regen_off = 0usize;
         let mut regen_on = 0usize;
         let mut saved_units = 0usize;
@@ -3545,6 +4658,7 @@ mod tests {
                     admitted_candidates += window_admitted;
                     metadata_only += outcome.metadata_only;
                     unread_attribute += outcome.unread_attribute;
+                    cache_stamp += outcome.cache_stamp;
                     regen_off += outcome.regen_off;
                     regen_on += outcome.regen_on;
                     saved_units += outcome.saved_units;
@@ -3604,8 +4718,9 @@ mod tests {
             "| 项 | 数 |\n|---|---:|\n| DESI 库（目录里认出的） | {dbs_seen} |\n| 有会话链可走的库 | {dbs_measured} |\n\
              | 两态跑过的窗 | {windows} |\n| 跳过的窗（窗口收集失败 / 端点钉不住） | {windows_skipped} |\n\
              | 门放行过候选的窗 | {windows_admitting} |\n| 索引候选总数 | {candidates} |\n\
-             | 做了 L2 差分且真变了的 Modified 候选 | {diffed} |\n| 其中门放行（两档合计） | {admitted_candidates} |\n\
+             | 做了 L2 差分且真变了的 Modified 候选 | {diffed} |\n| 其中门放行（三档合计） | {admitted_candidates} |\n\
              | `metadata_only`（老名单） | {metadata_only} |\n| `unread_attribute`（S6 新档） | {unread_attribute} |\n\
+             | `cache_stamp`（Q6 只戳） | {cache_stamp} |\n\
              | 关着 `regenerate` 合计 | {regen_off} |\n| 开着 `regenerate` 合计 | {regen_on} |\n\
              | 省下的单元（regen + 派生） | {saved_units} |\n\
              | 闭包少收过 refno 的窗（粗级联扇出被放行候选省掉） | {windows_closure_dropped} |\n\
@@ -4484,6 +5599,13 @@ mod tests {
         let mut stamp_blocked: BTreeMap<&'static str, usize> = BTreeMap::new();
         // `CACHID` 混进差分把我方判定从「若忽略它」推到了哪里：`(忽略它的判定, 实际判定)`。
         let mut verdict_shifts: BTreeMap<(ProbeVerdict, ProbeVerdict), usize> = BTreeMap::new();
+        // Q5 的地（2026-09-19 `SPAMAP` 进戳表之后加的桶）：只动了摆放的候选里，戳跟着跳的是哪几个——
+        // 形状（[`placement_stamp_shape`]）× 我方判定 `[transform, regen, skip]`，再按 noun / 库 / 被排除的原因拆。
+        let mut placement_shapes: BTreeMap<String, [usize; 3]> = BTreeMap::new();
+        let mut placement_shape_nouns: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut placement_shape_anchor_nouns: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut placement_shape_dbs: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut placement_shape_excluded: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut cachid_only_causes: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut cachid_only_examples: Vec<String> = Vec::new();
         let mut cachid_only_examples_per_noun: BTreeMap<String, usize> = BTreeMap::new();
@@ -4648,6 +5770,31 @@ mod tests {
                         let (verdict, excluded) = probe_verdict(&base, &target, refno, &diff);
                         if excluded.is_some() {
                             placement_excluded += 1;
+                        }
+                        if diff.is_placement_only() {
+                            let shape = placement_stamp_shape(&diff);
+                            let slot = placement_shapes.entry(shape.clone()).or_default();
+                            slot[match verdict {
+                                ProbeVerdict::Transform => 0,
+                                ProbeVerdict::Regen => 1,
+                                ProbeVerdict::Skip => 2,
+                            }] += 1;
+                            *placement_shape_nouns
+                                .entry((shape.clone(), diff.noun.clone()))
+                                .or_default() += 1;
+                            if verdict == ProbeVerdict::Transform {
+                                *placement_shape_anchor_nouns
+                                    .entry((shape.clone(), diff.noun.clone()))
+                                    .or_default() += 1;
+                            }
+                            *placement_shape_dbs
+                                .entry((shape.clone(), name.clone()))
+                                .or_default() += 1;
+                            if let Some(reason) = &excluded {
+                                *placement_shape_excluded
+                                    .entry((shape, anonymize_refnos(reason)))
+                                    .or_default() += 1;
+                            }
                         }
                         let transition = values.as_ref().map(|(before, after)| {
                             *shapes
@@ -5115,6 +6262,65 @@ mod tests {
              我方两票门也不放行（字典没投票）→ regen。同一列的读法同上。\n\n",
         );
         report.push_str(&attribute_state_table(&non_dictionary_names, 30));
+        report.push_str(&format!(
+            "\n## 只动了摆放的候选（`is_placement_only`）：戳跟着跳的形状 × 我方判定（Q5 的地）\n\n\
+             `is_placement_only` = 至少一项摆放属性变了、其余只允许 `PLACEMENT_STAMP_ATTRIBUTES` 里的戳（今天 = {:?}）。\
+             形状标签按常量现算：「摆放」= 一个戳都没跟着跳，「摆放 + X」= X 跟着跳了；2026-09-19 `SPAMAP` 进表之后，\
+             带 `SPAMAP` 的那几行就是**新放进这一档的候选**（之前判 regen、进不了 `transform` 桶）。\
+             transform = `rigid_anchor` 判刚的合格锚点；regen = 被排除或算不出（原因在下面按规则并行，refno 抹成 `#`）；\
+             按候选判，不问 `model_transform_cheap_path` 开关。\n\n",
+            e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES
+        ));
+        report.push_str(
+            "| 形状 | 候选 | transform（合格锚点） | regen（被排除 / 算不出） | skip |\n|---|---:|---:|---:|---:|\n",
+        );
+        let mut placement_total = [0usize; 3];
+        for (shape, slot) in &placement_shapes {
+            for (sum, value) in placement_total.iter_mut().zip(slot) {
+                *sum += value;
+            }
+            report.push_str(&format!(
+                "| {shape} | {} | {} | {} | {} |\n",
+                slot.iter().sum::<usize>(),
+                slot[0],
+                slot[1],
+                slot[2]
+            ));
+        }
+        report.push_str(&format!(
+            "| **合计** | **{}** | **{}** | **{}** | **{}** |\n",
+            placement_total.iter().sum::<usize>(),
+            placement_total[0],
+            placement_total[1],
+            placement_total[2]
+        ));
+        for (title, rows, limit) in [
+            ("候选按 noun", &placement_shape_nouns, 15usize),
+            (
+                "transform（合格锚点）按 noun",
+                &placement_shape_anchor_nouns,
+                15,
+            ),
+            ("候选按库", &placement_shape_dbs, 15),
+            ("regen 的原因（按规则并行）", &placement_shape_excluded, 20),
+        ] {
+            report.push_str(&format!("\n### {title}（每形状前 {limit}）\n\n"));
+            report.push_str("| 形状 | 键 | 候选数 |\n|---|---|---:|\n");
+            for shape in placement_shapes.keys() {
+                let mut hits: Vec<(&String, &usize)> = rows
+                    .iter()
+                    .filter(|((slot, _), _)| slot == shape)
+                    .map(|((_, key), count)| (key, count))
+                    .collect();
+                hits.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                if hits.is_empty() {
+                    report.push_str(&format!("| {shape} | （无） | 0 |\n"));
+                }
+                for (key, count) in hits.into_iter().take(limit) {
+                    report.push_str(&format!("| {shape} | `{key}` | {count} |\n"));
+                }
+            }
+        }
         if !extra_stamp.is_empty() {
             // 旋钮没给时这一整节不出现：缺省口径下本报告与 S8 那一跑逐字节相同。
             let joined = extra_stamp.join(" / ");
@@ -7286,7 +8492,8 @@ mod tests {
 
     /// 「只动了戳」的候选（口径 §1.1 五条）：记录真变了，没换类型 / 没改挂 / 成员表没动 / 不 `opaque`，
     /// 且**每一个**变了的属性都在 [`e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES`]
-    /// （今天 = `["CACHID"]`，t-47 落地的常量）里。名单只写一份——引用常量，不写字面量。
+    /// （t-47 落地的常量；今天 = `["CACHID", "SPAMAP"]`——`SPAMAP` 2026-09-19 用户拍板同档进表，N2 / t-334）里。
+    /// 名单只写一份——引用常量，不写字面量。
     ///
     /// 与 `ElementDiff::is_placement_only` **互斥**，别混用：那个问「除了摆放还动了别的没有」（戳跟着
     /// 摆放一起变不算数，Q5 / t-47），要求 `POS`/`ORI` 至少动一项；这个问「除了戳还动了没有」，要求
@@ -7298,8 +8505,9 @@ mod tests {
     /// [`stamp_only`] 的参数化版本：`extra` 里的名字**也**当成戳。`extra` 为空时与 `stamp_only`
     /// 逐位相同——五条判据只写这一份，缺省路径不另开分支。
     ///
-    /// 只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问：`extra` 由探针旋钮
-    /// `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 给，缺省空。生产常量 `PLACEMENT_STAMP_ATTRIBUTES` 不动。
+    /// 原本只服务 N2 / t-334 的「若 `SPAMAP` 也算第二个戳会多出多少盘」这一问：`extra` 由探针旋钮
+    /// `AIOS_*_PROBE_EXTRA_STAMP_NAMES` 给，缺省空。2026-09-19 `SPAMAP` 已进生产常量，那一问结了；旋钮留着，
+    /// 下次再有候选戳名字时照旧「先量后接」——缺省口径永远等于生产常量。
     fn stamp_only_with(diff: &ElementDiff, extra: &[String]) -> bool {
         !diff.is_unchanged()
             && diff.type_changed.is_none()
@@ -7327,6 +8535,89 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// 只动了摆放的候选里戳跟着跳的**形状**标签（S8 探针 Q5 那一节）：「摆放」+ 每个在
+    /// `e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES` 里且这次也变了的名字（按常量的顺序），
+    /// 如「摆放 + SPAMAP」「摆放 + CACHID + SPAMAP」。名单引用常量，不写字面量。
+    fn placement_stamp_shape(diff: &ElementDiff) -> String {
+        let mut label = String::from("摆放");
+        for stamp in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
+            if diff.attributes.iter().any(|name| name == stamp) {
+                label.push_str(" + ");
+                label.push_str(stamp);
+            }
+        }
+        label
+    }
+
+    /// 排除原因里的 refno（`RefNo` 印成 `2013287545/4294`、`RefnoEnum` 印成 `21909_17035` 一类）抹成 `#`
+    /// ——同一条规则挡下的原因才能并成一行。
+    fn anonymize_refnos(reason: &str) -> String {
+        reason
+            .split(' ')
+            .map(|token| {
+                let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                let looks_like_refno = core.chars().any(|c| c == '/' || c == '_')
+                    && core.chars().any(|c| c.is_ascii_digit())
+                    && core
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == '/' || c == '_');
+                if looks_like_refno {
+                    token.replacen(core, "#", 1)
+                } else {
+                    token.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn the_placement_stamp_shape_names_the_stamps_that_rode_along() {
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "NOZZ".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        assert_eq!(placement_stamp_shape(&diff(&["POS"])), "摆放");
+        assert_eq!(placement_stamp_shape(&diff(&["POS", "ORI"])), "摆放");
+        assert_eq!(
+            placement_stamp_shape(&diff(&["POS", "CACHID"])),
+            "摆放 + CACHID"
+        );
+        assert_eq!(
+            placement_stamp_shape(&diff(&["POS", "SPAMAP"])),
+            "摆放 + SPAMAP"
+        );
+        // 顺序跟常量走，不跟属性在差分里的顺序走。
+        assert_eq!(
+            placement_stamp_shape(&diff(&["SPAMAP", "POS", "CACHID"])),
+            "摆放 + CACHID + SPAMAP"
+        );
+        assert_eq!(
+            anonymize_refnos(
+                "anchor 2013287545/4294 is negative geometry (NCYL); its owner's mesh consumes it"
+            ),
+            "anchor # is negative geometry (NCYL); its owner's mesh consumes it"
+        );
+        assert_eq!(
+            anonymize_refnos("anchor under structural member PANE =24384/1234; rule M"),
+            "anchor under structural member PANE =#; rule M"
+        );
+        assert_eq!(
+            anonymize_refnos("anchor inside route container BRAN 21909_17035"),
+            "anchor inside route container BRAN #"
+        );
+        // 不是 refno 的数字 / 下划线不动。
+        assert_eq!(
+            anonymize_refnos("P23, 0x1022EAEE rule_M 4"),
+            "P23, 0x1022EAEE rule_M 4"
+        );
+    }
+
     #[test]
     fn stamp_only_takes_the_stamp_alone_and_nothing_else() {
         let diff = |attributes: &[&str]| ElementDiff {
@@ -7339,10 +8630,15 @@ mod tests {
             opaque: false,
         };
         assert!(stamp_only(&diff(&["CACHID"])));
+        // 第二个戳（2026-09-19）：单独跳、两个一起跳都是只动了戳。
+        assert!(stamp_only(&diff(&["SPAMAP"])));
+        assert!(stamp_only(&diff(&["CACHID", "SPAMAP"])));
         // 戳 + 业务元数据：那是 S6 元数据门的地（S8「含戳的只 DCHC=0 候选」），不是只动了戳。
         assert!(!stamp_only(&diff(&["CACHID", "NAME"])));
+        assert!(!stamp_only(&diff(&["SPAMAP", "NAME"])));
         // 戳 + 摆放：那是 Q5 的地（`is_placement_only` 为真），不是只动了戳。
         assert!(!stamp_only(&diff(&["POS", "CACHID"])));
+        assert!(!stamp_only(&diff(&["POS", "SPAMAP"])));
     }
 
     #[test]
@@ -7356,15 +8652,28 @@ mod tests {
             attributes: attributes.iter().map(|name| name.to_string()).collect(),
             opaque: false,
         };
-        let spamap = vec!["SPAMAP".to_string()];
-        // 空名单 = 今天的口径，逐位不变（t-194 的复现靠这一条）。
-        assert!(!stamp_only_with(&diff(&["SPAMAP"]), &[]));
-        assert!(!stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &[]));
+        // 一个不在生产常量里、也永远不该进去的名字，专门用来量「旋钮关着时放不放行」。
+        // 原先这里用的是 `SPAMAP`——它 2026-09-20 起进了 `PLACEMENT_STAMP_ATTRIBUTES`
+        //（e3d-model `cf6d8b6`），成了生产口径的一部分，不再能当「名单外」的样本。
+        let probe = vec!["PROBESTAMP".to_string()];
+        // 空名单 = 今天的口径，逐位不变（t-194 的复现靠这一条）：常量里的两枚戳放行，
+        // 常量外的一个都不放行。
         assert!(stamp_only_with(&diff(&["CACHID"]), &[]));
+        assert!(stamp_only_with(&diff(&["SPAMAP"]), &[]));
+        assert!(stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &[]));
+        assert!(!stamp_only_with(&diff(&["PROBESTAMP"]), &[]));
+        assert!(!stamp_only_with(&diff(&["CACHID", "PROBESTAMP"]), &[]));
         // 给了名单才多放行，而且只多放行名单里的那些。
-        assert!(stamp_only_with(&diff(&["SPAMAP"]), &spamap));
-        assert!(stamp_only_with(&diff(&["CACHID", "SPAMAP"]), &spamap));
-        assert!(!stamp_only_with(&diff(&["SPAMAP", "NAME"]), &spamap));
+        assert!(stamp_only_with(&diff(&["PROBESTAMP"]), &probe));
+        assert!(stamp_only_with(&diff(&["CACHID", "PROBESTAMP"]), &probe));
+        assert!(!stamp_only_with(&diff(&["PROBESTAMP", "NAME"]), &probe));
+        // 名单是照抄常量来的：常量里有什么，这里就放行什么——别在测试里再写一份字面量。
+        for name in e3d_model::element_diff::PLACEMENT_STAMP_ATTRIBUTES {
+            assert!(
+                stamp_only_with(&diff(&[name]), &[]),
+                "{name} 在生产常量里却没被当成戳"
+            );
+        }
     }
 
     /// 每个多算根量到的一行（T4）。
@@ -7449,14 +8758,16 @@ mod tests {
     /// 做法是 S6 / S4 同款的**两态**，逐窗各选一次根：
     /// - **A 态** = 今天的生产口径（`WindowRootSources::collect` → [`plan_window_roots`]，开关按默认，
     ///   `roots_S` = S 端枚举出的根，与 S7 探针同口径）；
-    /// - **B 态** = 只 `CACHID` 的候选既**不上卷**（谓词回 `Some`，探针里借
-    ///   [`NoModelTier::UnreadAttribute`] 计数，**不动 e3d-model**）也**不做闭包种子**
+    /// - **B 态** = 只 `CACHID` 的候选既**不上卷**（谓词回 `Some(`[`NoModelTier::CacheStamp`]`)`；
+    ///   接线前那一档还不存在，探针借 `UnreadAttribute` 计数）也**不做闭包种子**
     ///   （`affected_closure_filtering_ledger` 把它们从账本种子里过滤掉）。两手缺一不可：
     ///   只做前一手时候选自己若是单元会留在 `regenerate` 集里，而那三个动作集恒为种子，根级一根都省不下。
     ///
     /// `regen_A \ regen_B0` 就是**多算的根**（主指标）。护栏（[`CREDENTIAL_ADVANCE_CANDIDATE_RATIO`]）
-    /// 的分子今天按 `report.candidates` 算（含只 CACHID）：**B0** 照旧、**B1** 按净候选数再判一次，
-    /// 两列并排——回答「接线时护栏分子要不要跟着改」。
+    /// 的分子 2026-09-19 之前按 `report.candidates` 算（含只戳）：**B0** 照旧、**B1** 按净候选数再判一次，
+    /// 两列并排——回答「接线时护栏分子要不要跟着改」。**2026-09-19 已接线**（用户拍板，随 `SPAMAP` 进戳表一起：
+    /// [`WindowImpact::cache_stamp`]，生产分子从此是净候选数），A 态与 B0 态都按净数判，**B1 列从此恒等于 B0、
+    /// 「B1 额外」恒 0**——列位留着只为让报告与 09-16 / 09-19 的几份对得上。
     ///
     /// 每个多算根再走 S7 的尺子 [`unit_rebuild_of_root`]（两端各整根生成一次、逐件按 `GeometryId` 配对、
     /// [`ParityInvariants`] 全等，S4 同容差）做**安全自检**：全等 = 绿（确实白算）；不全等 = 红
@@ -7464,6 +8775,8 @@ mod tests {
     ///
     /// **只量不接线**：生产 `metadata_only_tier` / `change_metadata_tier` /
     /// `model_skip_metadata_only_changes` 的语义一字不动，[`WindowRootPlan`] 与回执一字不动。
+    /// **2026-09-17 Q6 第一手已接线**（`change_metadata_tier` 对只戳的候选回 `CacheStamp`，不上卷不级联）：
+    /// A 态从此已含那一手，`regen_A \ regen_B` 量的只剩第二手——「不做闭包种子」能再省多少根（选根的题）。
     ///
     /// 旋钮：`AIOS_Q6_PROBE_CORPUS=1` 全语料（缺省只走 `AIOS_PROJAMS_GEOMETRY_FILE`，ams8000_0001 整条链）；
     /// `AIOS_Q6_PROBE_STEPS_PER_DB`（0 = 整条链）；`AIOS_Q6_PROBE_BUDGET_SECS`（默认 2400，S7 同值）；
@@ -7800,7 +9113,7 @@ mod tests {
                 let plan_b =
                     plan_update_with(&base, &target, &window, PlanLimits::default(), |diff| {
                         if stamp_only_with(diff, &extra_stamp) {
-                            Some(NoModelTier::UnreadAttribute)
+                            Some(NoModelTier::CacheStamp)
                         } else if skip_metadata {
                             change_metadata_tier(diff)
                         } else {
@@ -7827,10 +9140,12 @@ mod tests {
                     cascade_degraded: impact_a.cascade_degraded.clone(),
                     unresolved: plan_b.report.unresolved.len(),
                     candidates: plan_b.report.candidates,
+                    // 2026-09-19 起生产护栏按净候选数判（`WindowImpact::cache_stamp`），B0 跟生产同口径。
+                    cache_stamp: plan_b.report.cache_stamp,
                     index_keys: sources.index_keys,
                 };
-                let mut impact_b1 = impact_b0.clone();
-                impact_b1.candidates = impact_b0.candidates.saturating_sub(stamp_here);
+                // B1 = 「护栏按净候选数再判」——接线后与 B0 相同，这一列恒 0（见函数文档）。
+                let impact_b1 = impact_b0.clone();
                 let plan_b0 = plan_window_roots(&sources.roots_t, &roots_s, &impact_b0);
                 let plan_b1 = plan_window_roots(&sources.roots_t, &roots_s, &impact_b1);
 
@@ -7931,12 +9246,13 @@ mod tests {
                         plan_b.remove.len()
                     ));
                 }
-                let unread_delta = plan_b.report.unread_attribute as i64
-                    - sources.plan.report.unread_attribute as i64;
-                if unread_delta != stamp_here as i64 {
+                // B 态的谓词对每个只戳候选都回 `CacheStamp`，所以它的 `cache_stamp` 计数就该等于
+                // 这里独立数出来的只 CACHID 候选数（A 态开着门时也一样，关着门时 A 为 0）。
+                let stamp_gated_b = plan_b.report.cache_stamp;
+                if stamp_gated_b != stamp_here {
                     contracts_ok = false;
                     red_unread_reconcile.push(format!(
-                        "{label}: unread_attribute 差 {unread_delta} ≠ 只 CACHID 候选 {stamp_here}"
+                        "{label}: B 态 cache_stamp {stamp_gated_b} ≠ 只 CACHID 候选 {stamp_here}"
                     ));
                 }
 
@@ -8552,7 +9868,7 @@ mod tests {
             contract(&red_remove_same)
         ));
         report.push_str(&format!(
-            "| 对账 | `unread_attribute` 两态差 == 只 CACHID 候选数 | {} |\n",
+            "| 对账 | B 态 `cache_stamp` == 只 CACHID 候选数 | {} |\n",
             contract(&red_unread_reconcile)
         ));
         report.push_str(&format!(

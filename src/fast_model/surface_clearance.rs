@@ -33,7 +33,7 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point, Real, Vector};
 use parry3d::query::{self, ClosestPoints, PointQuery, Ray, RayCast};
-use parry3d::shape::{FeatureId, TriMesh, TriMeshFlags};
+use parry3d::shape::{FeatureId, TriMesh, TriMeshFlags, Triangle};
 use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
@@ -55,7 +55,8 @@ pub const WALL_NOUNS: [&str; 5] = ["CWALL", "WALL", "PANE", "GWALL", "STWALL"];
 
 /// 单位网格缓存上限（按 geo_hash 内容寻址，永不过期；超过就整体清空，下次再热）。
 const UNIT_MESH_CACHE_CAP: usize = 8_192;
-/// 世界网格缓存上限（键 = 叶子行 key + model_sesno，换版自然失效）。
+/// 世界网格缓存上限（键 = 叶子行 key + model_sesno + 摆放指纹：换版换 sesno，`model/ensure force=true`
+/// 重算不换 sesno 只换摆放——两种都要自然失效）。
 const LEAF_MESH_CACHE_CAP: usize = 1_024;
 
 pub fn is_wall_noun(noun: &str) -> bool {
@@ -190,13 +191,15 @@ pub struct SurfaceClearanceOptions {
     pub max_distance: f32,
 }
 
-/// 命中墙面的分类。直墙两侧对称，只分得出 `side`；弧墙分内（凹）/ 外（凸）。
+/// 命中墙面的分类。直墙两侧对称，只分得出 `side`；弧墙分内（凹）/ 外（凸）；`opening` 是洞壁
+/// （门窗 / 套管孔等布尔掏出来的面，构件在洞里时命中的就是它，2026-09-18 定的口径）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FaceKind {
     Inner,
     Outer,
     Side,
+    Opening,
     Top,
     Bottom,
     End,
@@ -204,9 +207,9 @@ pub enum FaceKind {
 }
 
 impl FaceKind {
-    /// 主面：可以从源侧最近点沿法向打垂距的那几种面。
+    /// 主面：可以从源侧最近点沿法向打垂距的那几种面。洞壁也算——构件在洞里时要的就是到洞壁的垂距。
     fn is_main_face(self) -> bool {
-        matches!(self, Self::Inner | Self::Outer | Self::Side)
+        matches!(self, Self::Inner | Self::Outer | Self::Side | Self::Opening)
     }
 }
 
@@ -224,6 +227,9 @@ pub struct Perpendicular {
     pub distance: f32,
     pub from: Point<Real>,
     pub to: Point<Real>,
+    /// 垂距怎么来的：`ray` 从源侧最近点沿命中主面法向打到墙面；`contact` 贴合（距离 ≤ 容差），取最近点
+    /// 连线；`edge` 最近点在棱 / 角上、垂足落在面外，但连线与面法向几乎平行（差在容差内），取连线本身。
+    pub method: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -364,16 +370,14 @@ pub fn surface_clearance(
     };
 
     let target_leaf = &target[hit.target_leaf];
-    let face = classify_target_face(target_leaf, hit.target_point, hit.source_point);
-    if opts.perpendicular && face.kind.is_main_face() {
-        match perpendicular_ray(&target_leaf.mesh, hit.source_point, face.normal, hit.distance) {
-            Some(perpendicular) => hit.perpendicular = Some(perpendicular),
-            None => warnings.push(
-                "perpendicular_ray_missed: 源侧最近点沿墙面法向的射线没有落回墙面，最近点在墙的棱 / 角上，垂距置空"
-                    .to_string(),
-            ),
-        }
-    }
+    let (face, perpendicular) = resolve_target_face(
+        target_leaf,
+        hit.target_point,
+        hit.source_point,
+        hit.distance,
+        opts.perpendicular,
+    );
+    hit.perpendicular = perpendicular;
     hit.target_face = Some(face);
 
     ClearanceOutcome {
@@ -388,22 +392,144 @@ fn unit_or_none(v: Vector<Real>) -> Option<Vector<Real>> {
     (n > 1e-9).then(|| v / n)
 }
 
-/// 命中点所在三角的法向，翻成指向源侧；取不到三角时退到「源点 − 命中点」方向。
-fn hit_normal(mesh: &TriMesh, q: Point<Real>, p: Point<Real>) -> (Vector<Real>, &'static str) {
-    let toward_source = unit_or_none(p - q);
+/// 命中点 q 所在的三角，按「法向与指向源侧方向的贴合度」降序。最近点落在棱 / 角上时 parry 只报其中一片，
+/// 这里把所有到 q 距离 ≤ eps 的三角都列出来，第一片就是最贴合的——洞壁与开孔面共棱时先选洞壁而不是外皮，
+/// 墙角处先选正对构件的那面；后面几片留给垂距落空时换面读（见 `resolve_target_face`）。
+fn hit_candidates(
+    mesh: &TriMesh,
+    q: Point<Real>,
+    toward_source: Option<Vector<Real>>,
+) -> Vec<Triangle> {
     let (_, feature) = mesh.project_local_point_and_get_feature(&q);
-    let tri_normal = match feature {
+    let primary = match feature {
         FeatureId::Face(index) if (index as usize) < mesh.num_triangles() => {
-            mesh.triangle(index).normal().map(|n| n.into_inner())
+            Some(mesh.triangle(index))
         }
         _ => None,
     };
+    let Some(dir) = toward_source else {
+        return primary.into_iter().collect();
+    };
+    // 「共点」= 三角到 q 的距离 ≤ eps。f32 在世界坐标（|坐标| ~ 1e4 mm）下 1 ulp 已是 2e-3 mm，邻面三角把 q
+    // 投影回来的残差常有几个 ulp——eps 得随坐标量级放大，不然墙角处只剩 parry 报的那一片，棱上另一面永远找不到
+    // （live 里 PANE 板角的 FTUB 就是这样只剩 side、没得换面）。
+    let scale = mesh.local_aabb().extents().norm().max(q.coords.abs().max());
+    let eps = (scale * 4e-6).max(1e-3);
+    let mut scored: Vec<(f32, Triangle)> = mesh
+        .triangles()
+        .filter(|tri| (tri.project_local_point(&q, false).point - q).norm() <= eps)
+        .filter_map(|tri| tri.normal().map(|n| (n.dot(&dir).abs(), tri)))
+        .collect();
+    if scored.is_empty() {
+        return primary.into_iter().collect();
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(_, tri)| tri).collect()
+}
+
+/// 面分类 + 垂距一起定（2026-09-18 用户口径，按序）。主面且要垂距时：
+/// 1. **贴合**（距离 ≤ 垂距容差，型钢坐在板上的 0 mm）不打射线：垂距 = 距离本身（0 mm 就是 0）、
+///    垂足 = 目标侧最近点（`contact`）——从贴合点出发的射线打不出 toi，打了只会被当成落空。
+/// 2. 从源侧最近点沿 −n 打垂距（`ray`）。
+/// 3. **射线落空**（垂足落在面外，最近点在棱 / 角上）：
+///    a. 最近点连线与面法向几乎平行——`distance × (1 − cos θ)` ≤ 垂距容差，即连线长度与到面所在平面的
+///       垂距在容差内相等——就认这面，垂距 = 距离本身、垂足 = 棱上的最近点（`edge`）。live 里斜过 PANE
+///       板角 1–2° 的 FTUB 就是这种，不再是「`side` + 落空」。
+///    b. 否则换那条棱上的另一面读：另一面是端 / 顶 / 底这类非主面就直接读它（棱本来也属于它，不用垂距），
+///       斜靠墙端竖棱的构件由此读 `end`；另一面也是主面就沿它的法向再打一次。
+///    c. 都不成（源在两片主面之间的楔形区里，哪面都没有真垂足）：留第一面、垂距置空，**不报 warning**——
+///       主面 + 空垂距本身就说明了这一点。
+fn resolve_target_face(
+    target: &LeafMesh,
+    q: Point<Real>,
+    p: Point<Real>,
+    distance: f32,
+    want_perpendicular: bool,
+) -> (FaceInfo, Option<Perpendicular>) {
+    let toward_source = unit_or_none(p - q);
+    let candidates = hit_candidates(&target.mesh, q, toward_source);
+    let face = classify_face(target, q, candidates.first(), toward_source);
+    if !(want_perpendicular && face.kind.is_main_face()) {
+        return (face, None);
+    }
+    let tolerance = perpendicular_tolerance(distance);
+    let closest_segment = |method: &'static str| Perpendicular {
+        distance,
+        from: p,
+        to: q,
+        method,
+    };
+    if distance <= tolerance {
+        return (face, Some(closest_segment("contact")));
+    }
+    let cast = |face: &FaceInfo, interior: Option<Point<Real>>| {
+        perpendicular_ray(&target.mesh, p, face.normal, distance, interior)
+    };
+    // 连线在面法向上的投影就是到面所在平面的垂距；两者差在容差内 = 连线本身可以当垂距用。
+    let hugs_normal = |face: &FaceInfo| distance - (p - q).dot(&face.normal) <= tolerance;
+    let Some(first) = candidates.first() else {
+        let perpendicular = cast(&face, None)
+            .or_else(|| hugs_normal(&face).then(|| closest_segment("edge")));
+        return (face, perpendicular);
+    };
+    if let Some(perpendicular) = cast(&face, Some(first.center())) {
+        return (face, Some(perpendicular));
+    }
+    if hugs_normal(&face) {
+        return (face, Some(closest_segment("edge")));
+    }
+    for alt in candidates.iter().skip(1) {
+        let alt_face = classify_face(target, q, Some(alt), toward_source);
+        if !alt_face.kind.is_main_face() {
+            return (alt_face, None);
+        }
+        if let Some(perpendicular) = cast(&alt_face, Some(alt.center())) {
+            return (alt_face, Some(perpendicular));
+        }
+    }
+    (face, None)
+}
+
+/// 命中三角的法向，翻成指向源侧；取不到三角时退到「源点 − 命中点」方向。
+fn hit_normal(
+    tri: Option<&Triangle>,
+    toward_source: Option<Vector<Real>>,
+) -> (Vector<Real>, &'static str) {
+    let tri_normal = tri.and_then(|t| t.normal()).map(|n| n.into_inner());
     match (tri_normal, toward_source) {
         (Some(n), Some(dir)) => (if n.dot(&dir) < 0.0 { -n } else { n }, "triangle"),
         (Some(n), None) => (n, "triangle"),
         (None, Some(dir)) => (dir, "normal-only"),
         (None, None) => (Vector::z(), "normal-only"),
     }
+}
+
+/// 一组点沿方向 `dir` 的支撑区间 [min, max]。
+fn support_interval<'a>(points: impl Iterator<Item = &'a Point<Real>>, dir: &Vector<Real>) -> (f32, f32) {
+    points.fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+        let d = p.coords.dot(dir);
+        (lo.min(d), hi.max(d))
+    })
+}
+
+/// 洞壁判定（2026-09-18 口径）：命中三角沿自己法向 n 的位置**严格在墙 AABB 内部**（不在外皮上——外皮
+/// 一定贴着 AABB 的某一侧），且从命中点沿 n（指向源侧、朝洞里）再往前会**撞回本墙**（对面还有一片洞壁，
+/// 法向与之反向）。两条同时成立才算洞壁：单看第一条，台阶墙低一级的顶面也在内部；单看第二条，
+/// U 形叶子的两腿也互相照面。
+fn is_opening_face(mesh: &TriMesh, tri: &Triangle, normal: &Vector<Real>, q: Point<Real>) -> bool {
+    let aabb = mesh.local_aabb();
+    let (wall_min, wall_max) = support_interval(aabb.vertices().iter(), normal);
+    let (tri_min, tri_max) = support_interval([tri.a, tri.b, tri.c].iter(), normal);
+    let eps = ((wall_max - wall_min) * 1e-3).max(0.05);
+    if tri_min <= wall_min + eps || tri_max >= wall_max - eps {
+        return false;
+    }
+    // 起点离开自身三角一点，免得 toi = 0 撞回自己；最远只需走到 AABB 另一侧。
+    let step = eps.max(0.01);
+    let ray = Ray::new(q + normal * step, *normal);
+    let max_toi = (wall_max - q.coords.dot(normal)) + eps;
+    mesh.cast_local_ray_and_get_normal(&ray, max_toi, false)
+        .is_some_and(|hit| hit.normal.dot(normal).abs() > 0.5)
 }
 
 /// 一片墙的水平骨架：主轴（行进方向）、厚度方向、是否弧墙及弧轴（xy）。
@@ -485,9 +611,31 @@ fn wall_frame(mesh: &TriMesh) -> WallFrame {
     }
 }
 
-/// 命中墙面分类（§4.3）。世界 Up = +Z（E3D 的 U）。
-fn classify_target_face(target: &LeafMesh, q: Point<Real>, p: Point<Real>) -> FaceInfo {
-    let (normal, normal_source) = hit_normal(&target.mesh, q, p);
+/// 命中墙面分类（§4.3）。世界 Up = +Z（E3D 的 U）。`tri` 是 q 处选定的那片三角（见 `hit_candidates`）。
+fn classify_face(
+    target: &LeafMesh,
+    q: Point<Real>,
+    tri: Option<&Triangle>,
+    toward_source: Option<Vector<Real>>,
+) -> FaceInfo {
+    let (normal, normal_source) = hit_normal(tri, toward_source);
+    let frame = wall_frame(&target.mesh);
+    // 洞壁先于顶 / 底 / 端 / 侧判：洞底 / 洞顶的法向也是竖直的，竖洞壁的法向也平行于行进方向。
+    // 弧墙上与径向平行的面就是内 / 外弧面本身（凹面对着的也是本墙），不参与洞壁判定。
+    if let Some(tri) = tri {
+        let radial_like = match (frame.arc_center_xy, horizontal_unit(normal)) {
+            (Some((cx, cy)), Some(h)) => horizontal_unit(Vector::new(cx - q.x, cy - q.y, 0.0))
+                .is_some_and(|radial| h.dot(&radial).abs() >= 0.707),
+            _ => false,
+        };
+        if !radial_like && is_opening_face(&target.mesh, tri, &normal, q) {
+            return FaceInfo {
+                kind: FaceKind::Opening,
+                normal,
+                confidence: "geometric",
+            };
+        }
+    }
     if normal.z.abs() >= 0.7 {
         return FaceInfo {
             kind: if normal.z > 0.0 {
@@ -506,7 +654,6 @@ fn classify_target_face(target: &LeafMesh, q: Point<Real>, p: Point<Real>) -> Fa
             confidence: normal_source,
         };
     };
-    let frame = wall_frame(&target.mesh);
     if let Some((cx, cy)) = frame.arc_center_xy {
         let Some(radial) = horizontal_unit(Vector::new(cx - q.x, cy - q.y, 0.0)) else {
             return FaceInfo {
@@ -544,25 +691,43 @@ fn classify_target_face(target: &LeafMesh, q: Point<Real>, p: Point<Real>) -> Fa
     }
 }
 
+/// 垂距与最近距离允许差多少：1%，最小 0.05 mm（弦高 0.5 mm 的十分之一）。
+fn perpendicular_tolerance(distance: f32) -> f32 {
+    (distance * 0.01).max(0.05)
+}
+
 /// 从源侧最近点沿 −n 打到墙面（§4.4）。落点与最近距离对不上（差 > 1% 且 > 0.05 mm）视为落空。
+/// 最近点正落在命中三角的棱 / 角上时（洞壁与开孔面共棱、构件与墙同宽），射线擦着棱会打空——
+/// 给了 `face_interior`（命中三角重心）就把起点朝它在面内挪一丁点再打一次；面垂直于射线，toi 不变，
+/// 结果里 `from` / `to` 仍按原起点算。
 fn perpendicular_ray(
     wall: &TriMesh,
     from: Point<Real>,
     normal: Vector<Real>,
     distance: f32,
+    face_interior: Option<Point<Real>>,
 ) -> Option<Perpendicular> {
     let dir = unit_or_none(-normal)?;
-    let ray = Ray::new(from, dir);
-    let hit = wall.cast_local_ray_and_get_normal(&ray, distance * 4.0 + 1.0, false)?;
-    let toi = hit.time_of_impact;
-    let tolerance = (distance * 0.01).max(0.05);
-    if (toi - distance).abs() > tolerance {
+    let max_toi = distance * 4.0 + 1.0;
+    let cast = |origin: Point<Real>| {
+        wall.cast_local_ray_and_get_normal(&Ray::new(origin, dir), max_toi, false)
+            .map(|hit| hit.time_of_impact)
+    };
+    let toi = cast(from).or_else(|| {
+        let interior = face_interior?;
+        let lateral = interior - (from + dir * distance);
+        let lateral = unit_or_none(lateral - dir * lateral.dot(&dir))?;
+        let nudge = (distance * 1e-3).clamp(0.01, 1.0);
+        cast(from + lateral * nudge)
+    })?;
+    if (toi - distance).abs() > perpendicular_tolerance(distance) {
         return None;
     }
     Some(Perpendicular {
         distance: toi,
         from,
         to: from + dir * toi,
+        method: "ray",
     })
 }
 
@@ -579,6 +744,27 @@ pub struct LeafRow {
     /// `(geo_hash, 本地变换)`；布尔后的行与隐式管身只有一项、无本地变换。
     pub insts: Vec<(String, Option<serde_json::Value>)>,
     pub model_sesno: Option<i64>,
+    /// `world_trans` + `insts` 的指纹（[`placement_fingerprint`]）。`model/ensure force=true` 重算一个根
+    /// 不换源会话号，`model_sesno` 分不出重算前后的摆放——2026-09-18 `:8022` 上 FIXING `17496/137183`
+    /// 重算后 `world_trans` 已对、同进程仍从缓存拿到旧网格；世界网格缓存键里要带上它。
+    pub placement_fingerprint: u64,
+}
+
+/// 一行叶子「拼网格要用的那几格」的指纹：`world_trans` 与每个实例的 `geo_hash` / 本地变换。
+/// 只在进程内当缓存键用，不落库、不进响应，所以用标准库的 hasher 就够。
+fn placement_fingerprint(
+    world_trans: Option<&serde_json::Value>,
+    insts: &[(String, Option<serde_json::Value>)],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    world_trans.map(|v| v.to_string()).hash(&mut hasher);
+    insts.len().hash(&mut hasher);
+    for (geo_hash, local) in insts {
+        geo_hash.hash(&mut hasher);
+        local.as_ref().map(|v| v.to_string()).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn json_str(v: &serde_json::Value) -> Option<String> {
@@ -636,6 +822,7 @@ fn row_to_leaf(row: &serde_json::Value, tube: bool) -> Option<LeafRow> {
             insts.push((hash, transform));
         }
     }
+    let placement_fingerprint = placement_fingerprint(world_trans.as_ref(), &insts);
     Some(LeafRow {
         key,
         refno,
@@ -643,6 +830,7 @@ fn row_to_leaf(row: &serde_json::Value, tube: bool) -> Option<LeafRow> {
         world_trans,
         insts,
         model_sesno,
+        placement_fingerprint,
     })
 }
 
@@ -807,7 +995,17 @@ fn mat_from_trans(t: Option<&serde_json::Value>) -> Mat4 {
 }
 
 static UNIT_MESHES: Lazy<DashMap<String, Arc<PlantMesh>>> = Lazy::new(DashMap::new);
-static LEAF_MESHES: Lazy<DashMap<(String, i64), Arc<TriMesh>>> = Lazy::new(DashMap::new);
+/// 键 = (叶子行 key, model_sesno, 摆放指纹)。见 [`LeafRow::placement_fingerprint`]。
+static LEAF_MESHES: Lazy<DashMap<(String, i64, u64), Arc<TriMesh>>> = Lazy::new(DashMap::new);
+
+/// 世界网格缓存键：没有 `model_sesno`（老数据）或 key 为空的行不进缓存。
+fn leaf_cache_key(row: &LeafRow) -> Option<(String, i64, u64)> {
+    if row.key.is_empty() {
+        return None;
+    }
+    row.model_sesno
+        .map(|sesno| (row.key.clone(), sesno, row.placement_fingerprint))
+}
 
 fn load_unit_mesh(meshes_dir: &Path, geo_hash: &str) -> Result<Arc<PlantMesh>> {
     if let Some(hit) = UNIT_MESHES.get(geo_hash) {
@@ -830,13 +1028,11 @@ fn build_leaf_mesh(
     meshes_dir: &Path,
     warnings: &mut Vec<String>,
 ) -> Option<Arc<TriMesh>> {
-    let cache_key = row.model_sesno.map(|sesno| (row.key.clone(), sesno));
-    if let Some(key) = cache_key.as_ref() {
-        if !key.0.is_empty() {
-            if let Some(hit) = LEAF_MESHES.get(key) {
-                return Some(hit.clone());
-            }
-        }
+    let cache_key = leaf_cache_key(row);
+    if let Some(key) = cache_key.as_ref()
+        && let Some(hit) = LEAF_MESHES.get(key)
+    {
+        return Some(hit.clone());
     }
     let world = mat_from_trans(row.world_trans.as_ref());
     let mut verts: Vec<Point<Real>> = Vec::new();
@@ -872,12 +1068,10 @@ fn build_leaf_mesh(
     }
     let mesh = Arc::new(TriMesh::with_flags(verts, idx, TriMeshFlags::empty()));
     if let Some(key) = cache_key {
-        if !key.0.is_empty() {
-            if LEAF_MESHES.len() >= LEAF_MESH_CACHE_CAP {
-                LEAF_MESHES.clear();
-            }
-            LEAF_MESHES.insert(key, mesh.clone());
+        if LEAF_MESHES.len() >= LEAF_MESH_CACHE_CAP {
+            LEAF_MESHES.clear();
         }
+        LEAF_MESHES.insert(key, mesh.clone());
     }
     Some(mesh)
 }
@@ -959,6 +1153,8 @@ pub struct PerpendicularJson {
     pub distance_mm: f32,
     pub from: PointJson,
     pub to: PointJson,
+    /// `ray` 沿面法向打到 / `contact` 贴合 / `edge` 棱上最近点连线（见 [`Perpendicular::method`]）。
+    pub method: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1238,6 +1434,7 @@ pub async fn run(
                     distance_mm: perp.distance,
                     from: perp.from.into(),
                     to: perp.to.into(),
+                    method: perp.method,
                 }),
                 witness: hit.witness,
             })
@@ -1387,6 +1584,22 @@ mod tests {
         TriMesh::with_flags(verts, idx, TriMeshFlags::empty())
     }
 
+    /// `box_mesh` 再绕过 `pivot`（xy）的竖轴转 `yaw_deg`——顶点坐标不再是整数，世界量级下 f32 会有残差，
+    /// 复现 live 里转了 30° 的 PANE 板。
+    fn yawed_box_mesh(min: [f32; 3], max: [f32; 3], pivot: [f32; 2], yaw_deg: f32) -> TriMesh {
+        let base = box_mesh(min, max);
+        let (s, c) = yaw_deg.to_radians().sin_cos();
+        let verts = base
+            .vertices()
+            .iter()
+            .map(|v| {
+                let (dx, dy) = (v.x - pivot[0], v.y - pivot[1]);
+                Point::new(pivot[0] + dx * c - dy * s, pivot[1] + dx * s + dy * c, v.z)
+            })
+            .collect();
+        TriMesh::with_flags(verts, base.indices().to_vec(), TriMeshFlags::empty())
+    }
+
     /// 直墙盒 `[min, max]` 沿 X（厚度方向）开一个矩形通孔 `y ∈ hole_y, z ∈ hole_z`——手搭的「布尔后」
     /// 墙网格：外皮 8 点 + 两张开孔面上各 4 个孔角；±Y / ±Z 外面各 2 三角，−X / +X 开孔面各按
     /// 「外角连最近孔角」切成四条梯形 8 三角，四片洞壁各 2 三角，共 32 三角。法向一律朝实体外
@@ -1457,6 +1670,20 @@ mod tests {
         TriMesh::with_flags(verts, idx, TriMeshFlags::empty())
     }
 
+    /// 两片网格拼成一片叶子（顶点直接接上、索引偏移），拼接处不缝合——只用来搭台阶墙这类非凸形状。
+    fn merged_mesh(a: TriMesh, b: TriMesh) -> TriMesh {
+        let mut verts = a.vertices().to_vec();
+        let offset = verts.len() as u32;
+        verts.extend_from_slice(b.vertices());
+        let mut idx = a.indices().to_vec();
+        idx.extend(
+            b.indices()
+                .iter()
+                .map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]),
+        );
+        TriMesh::with_flags(verts, idx, TriMeshFlags::empty())
+    }
+
     fn opts() -> SurfaceClearanceOptions {
         SurfaceClearanceOptions {
             perpendicular: true,
@@ -1498,6 +1725,7 @@ mod tests {
         );
         let perp = hit.perpendicular.expect("perpendicular");
         assert!(approx(perp.distance, 300.0, 1e-2), "perp {}", perp.distance);
+        assert_eq!(perp.method, "ray");
         assert!(approx(perp.to.x, 200.0, 1e-2));
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
@@ -1525,20 +1753,221 @@ mod tests {
         assert!(
             approx(hit.target_point.x, 200.0, 1e-2) && approx(hit.target_point.y, 5000.0, 1e-2)
         );
+        // 竖棱上两面共点：hit_candidates 先选法向更贴合「指向源侧」方向的那面——源在 (0.6, 0.8, 0) 方向，
+        // 端面（+Y）胜出读 end（不是主面，不打垂距、无 warning）。
         let face = hit.target_face.expect("face");
-        assert!(
-            matches!(face.kind, FaceKind::Side | FaceKind::End),
-            "{face:?}"
-        );
+        assert_eq!(face.kind, FaceKind::End, "{face:?}");
         assert!(
             hit.perpendicular.is_none(),
-            "ray along a face normal must miss at the edge"
+            "no face here is perpendicular to the closest line"
         );
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 共棱上先选中的是主面、但垂距射线落空时，退回那条棱上的非主面读法（2026-09-18 口径）：
+    /// 源在 (0.95, 0.32, 0) 方向 → 侧面（+X）贴合度高先被选中，可从源点沿 −X 打回去落在墙端之外（y 5100 > 5000）
+    /// → 落空（连线偏离法向 18°，也过不了 3a）→ 改读同一条竖棱上的 `end`，无 warning。
+    #[test]
+    fn edge_hit_falls_back_to_end_when_the_side_ray_misses() {
+        let wall = leaf(
+            "1/1",
+            "STWALL",
+            box_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0]),
+        );
+        let part = leaf(
+            "2/2",
+            "EQUI",
+            box_mesh([500.0, 5100.0, 500.0], [900.0, 5500.0, 900.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
         assert!(
-            out.warnings
-                .iter()
-                .any(|w| w.starts_with("perpendicular_ray_missed"))
+            approx(hit.target_point.x, 200.0, 1e-2) && approx(hit.target_point.y, 5000.0, 1e-2),
+            "{:?}",
+            hit.target_point
         );
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::End, "{face:?}");
+        assert!(face.normal.y > 0.99, "{:?}", face.normal);
+        assert!(hit.perpendicular.is_none());
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 贴合（2026-09-18 口径）：距离在垂距容差（max(1%, 0.05 mm)）内就不打射线——垂距 = 距离本身、
+    /// 垂足 = 目标侧最近点，无 warning。live 里型钢坐在 PANE 板上的 0 mm 对就是这种；这里用离墙面
+    /// 0.02 mm 的盒复现（正好贴着的两片三角 parry 可能直接判相交，那是 G4 的事）。
+    #[test]
+    fn touching_component_gets_a_zero_length_perpendicular_without_a_ray() {
+        let wall = leaf(
+            "1/1",
+            "STWALL",
+            box_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0]),
+        );
+        let part = leaf(
+            "2/2",
+            "BOX",
+            box_mesh([200.02, 1000.0, 500.0], [600.0, 1400.0, 900.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "{hit:?}");
+        assert!(hit.distance <= 0.05, "distance {}", hit.distance);
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Side, "{face:?}");
+        let perp = hit.perpendicular.expect("贴合也该有垂距");
+        assert_eq!(perp.distance, hit.distance);
+        assert_eq!(perp.method, "contact");
+        assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
+        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// live 里 PANE `17496/135244` 的布局：25 × 300 × 300 的板绕竖轴转了 30°，+n+r 那条竖棱在世界坐标
+    /// (−10425, 11746.9)。返回 `(板, 从那条棱沿「法向偏 phi_deg 朝端面方向」退 distance 的 FTUB 条)`，
+    /// 两者同一个 30° 朝向、z 都盖住 1000–1045。最近点对就是「条的角 ↔ 板的竖棱」，坐标在 1e4 量级、
+    /// 顶点不是整数——跟 live 一样吃 f32 精度。
+    fn yawed_pane_and_bar(phi_deg: f32, distance: f32) -> (LeafMesh, LeafMesh) {
+        let corner = [-10425.0f32, 11746.9f32];
+        let yaw = 30.0f32;
+        let pane = yawed_box_mesh(
+            [corner[0] - 25.0, corner[1] - 300.0, 970.0],
+            [corner[0], corner[1], 1270.0],
+            corner,
+            yaw,
+        );
+        let (s, c) = phi_deg.to_radians().sin_cos();
+        let tip = [corner[0] + distance * c, corner[1] + distance * s];
+        let bar = yawed_box_mesh(
+            [tip[0], tip[1], 1000.0],
+            [tip[0] + 400.0, tip[1] + 50.0, 1045.0],
+            corner,
+            yaw,
+        );
+        (leaf("1/1", "PANE", pane), leaf("2/2", "FTUB", bar))
+    }
+
+    /// 棱上落空、但最近点连线与面法向几乎平行（2026-09-18 口径 3a）：FTUB 条的角离 PANE 板的竖棱 46.6 mm、
+    /// 方向只偏离侧面法向 1°，沿法向的垂足落在板角外 0.8 mm → 射线落空；`distance × (1 − cos 1°)` = 0.007 mm
+    /// ≪ 容差 0.47 mm → 仍读 `side`，垂距 = 距离本身、垂足 = 棱上最近点、`method = edge`、无 warning。
+    /// 就是 live 里 FTUB `24384/24671` × PANE `17496/135244` 那 46.6 mm。
+    #[test]
+    fn edge_hit_nearly_along_the_face_normal_keeps_the_face_and_takes_the_closest_segment() {
+        let (pane, bar) = yawed_pane_and_bar(1.0, 46.6);
+        let out = surface_clearance(&[bar], &[pane], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "{hit:?}");
+        assert!(approx(hit.distance, 46.6, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Side, "{face:?}");
+        assert!(approx(face.normal.x, 0.866, 1e-3) && approx(face.normal.y, 0.5, 1e-3), "{:?}", face.normal);
+        let perp = hit.perpendicular.expect("连线几乎沿法向，该有垂距");
+        assert_eq!(perp.method, "edge");
+        assert_eq!(perp.distance, hit.distance);
+        assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
+        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 同一块转了 30° 的 PANE，FTUB 条改从偏离法向 18° 的方向斜过板角（G2 的情形）：3a 过不了
+    /// （100 × (1 − cos 18°) = 4.9 mm > 1 mm），要换棱上另一面读 `end`。板转过角、坐标又在 1e4 量级，
+    /// `end` 三角把 q 投影回来的残差有几个 ulp——`hit_candidates` 的 eps 得随坐标放大才找得到它，
+    /// 找不到就只剩 `side`、垂距空。
+    #[test]
+    fn edge_fallback_to_end_survives_world_scale_yawed_coordinates() {
+        let (pane, bar) = yawed_pane_and_bar(18.0, 100.0);
+        let out = surface_clearance(&[bar], &[pane], opts());
+        let hit = out.hit.expect("hit");
+        assert!(approx(hit.distance, 100.0, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::End, "{face:?}");
+        assert!(approx(face.normal.x, -0.5, 1e-3) && approx(face.normal.y, 0.866, 1e-3), "{:?}", face.normal);
+        assert!(hit.perpendicular.is_none(), "{:?}", hit.perpendicular);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 真楔形（2026-09-18 口径 3c）：构件在开孔正前方、斜对着洞口的一条竖棱——棱两侧是外皮（`side`）和
+    /// 洞壁（`opening`），都是主面；沿外皮法向的射线穿过洞、沿洞壁法向的射线在墙外走，都落空；连线偏离
+    /// 外皮法向 39°，3a 也不成。留第一面（外皮）、垂距置空、**不报 warning**。
+    #[test]
+    fn wedge_between_two_main_faces_leaves_perpendicular_empty_without_warning() {
+        let wall = leaf(
+            "1/1",
+            "STWALL",
+            box_with_hole_mesh(
+                [0.0, 0.0, 0.0],
+                [200.0, 5000.0, 3000.0],
+                [2000.0, 2400.0],
+                [1000.0, 1400.0],
+            ),
+        );
+        let part = leaf(
+            "2/2",
+            "TUBI",
+            box_mesh([-500.0, 2120.0, 1100.0], [-100.0, 2320.0, 1300.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(!hit.intersects, "{hit:?}");
+        assert!(approx(hit.distance, 128.0625, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.target_point.x, 0.0, 1e-2) && approx(hit.target_point.y, 2400.0, 1e-2),
+            "{:?}",
+            hit.target_point
+        );
+        let face = hit.target_face.expect("face");
+        assert!(face.kind.is_main_face(), "{face:?}");
+        assert_eq!(face.kind, FaceKind::Side, "{face:?}");
+        assert!(hit.perpendicular.is_none(), "{:?}", hit.perpendicular);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// live 里 FTUB `24384/24671` × PANE `17496/135244` 为什么没能换面读 `end`：把那块板照 live 管线搭出来
+    /// （局部盒 ±12.5 / ±150 / ±150 经 30° 旋转 + 平移到 (−10360.825, 11610.75, 1120)），q 用接口回的那个
+    /// f32 值——板角处 `end` 三角把 q 投影回来的残差 1.4e-3 mm，比 `hit_candidates` 原来的 eps（1e-3）还大，
+    /// 于是候选里只剩 `side` 一片、没得换。eps 随坐标量级放大后两片都在，且 `side` 排前。
+    #[test]
+    fn hit_candidates_keeps_the_adjacent_face_under_world_scale_rounding() {
+        let (s, c) = 30f32.to_radians().sin_cos();
+        let t = [-10360.825f32, 11610.75f32, 1120.0f32];
+        let local = box_mesh([-12.5, -150.0, -150.0], [12.5, 150.0, 150.0]);
+        let verts: Vec<Point<Real>> = local
+            .vertices()
+            .iter()
+            .map(|v| Point::new(t[0] + v.x * c - v.y * s, t[1] + v.x * s + v.y * c, t[2] + v.z))
+            .collect();
+        let pane = TriMesh::with_flags(verts, local.indices().to_vec(), TriMeshFlags::empty());
+        let q = Point::new(-10424.999f32, 11746.903f32, 999.99994f32);
+        let dir = Vector::new(0.857f32, 0.515f32, 0.0f32).normalize();
+
+        let end_residual = pane
+            .triangles()
+            .filter(|tri| tri.normal().is_some_and(|n| n.x < -0.4))
+            .map(|tri| (tri.project_local_point(&q, false).point - q).norm())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            end_residual > 1e-3 && end_residual < 1e-2,
+            "end 三角到 q 的残差该在 (1e-3, 1e-2) 之间才复现得了 live：{end_residual:e}"
+        );
+
+        let candidates = hit_candidates(&pane, q, Some(dir));
+        let normals: Vec<_> = candidates
+            .iter()
+            .filter_map(|tri| tri.normal())
+            .map(|n| (n.x, n.y))
+            .collect();
+        assert_eq!(candidates.len(), 2, "{normals:?}");
+        assert!(approx(normals[0].0, 0.866, 1e-3) && approx(normals[0].1, 0.5, 1e-3), "side 该排前：{normals:?}");
+        assert!(approx(normals[1].0, -0.5, 1e-3) && approx(normals[1].1, 0.866, 1e-3), "end 该在后：{normals:?}");
     }
 
     #[test]
@@ -1642,8 +2071,9 @@ mod tests {
         assert!(out.stats.pruned >= 1, "{:?}", out.stats);
     }
 
+    /// `max_distance` 剪枝：唯一一对的 AABB 下界就超了阈值 → 不算、无命中。（不是计划表的 G 编号。）
     #[test]
-    fn g6_beyond_max_distance_gives_no_hit() {
+    fn beyond_max_distance_gives_no_hit() {
         let wall = leaf(
             "1/1",
             "STWALL",
@@ -1666,8 +2096,10 @@ mod tests {
         assert_eq!(out.stats.pruned, 1);
     }
 
+    /// 顶面分类：构件骑在墙顶上方 → `top`，顶面不是主面、不打垂距。（不是计划表的 G 编号；
+    /// 计划 G7「源为 BRAN owner」要库里的 `tubi_relate` 行，只有 live 用例。）
     #[test]
-    fn g7_top_face_is_classified_without_perpendicular() {
+    fn top_face_is_classified_without_perpendicular() {
         let wall = leaf(
             "1/1",
             "STWALL",
@@ -1685,11 +2117,10 @@ mod tests {
         assert!(hit.perpendicular.is_none());
     }
 
-    /// 09-17 计划 §7 表的 G6：带洞墙、构件在洞里 → 报到洞壁的距离，不是未开洞墙的 0。
-    /// （上面那条 `g6_beyond_max_distance_gives_no_hit` 测的是 `max_distance` 剪枝，与计划表的
-    /// G6 编号不对应；计划 G6 的几何用例是这一条。）
-    /// 墙 = 200 厚直墙沿厚度方向开 400 × 400 方孔；管 = 穿过孔的盒，离 y 小侧洞壁 50 mm、
-    /// 离 y 大侧 100 mm、上下各 80 mm。对照：同一根管对没开孔的同尺寸墙就是 G4（0 + intersects）。
+    /// 09-17 计划 §7 表的 G6：带洞墙、构件在洞里 → 报到洞壁的距离，不是未开洞墙的 0；命中面是
+    /// `opening`（洞壁，主面），垂距 = 距离。墙 = 200 厚直墙沿厚度方向开 400 × 400 方孔；管 = 穿过孔的盒，
+    /// 离 y 小侧洞壁 50 mm、离 y 大侧 100 mm、上下各 80 mm。对照：同一根管对没开孔的同尺寸墙就是 G4
+    /// （0 + intersects）。
     #[test]
     fn g6_component_in_wall_hole_measures_to_hole_wall_not_zero() {
         let (hole_y, hole_z) = ([2000.0, 2400.0], [1000.0, 1400.0]);
@@ -1731,7 +2162,15 @@ mod tests {
             "source {:?}",
             hit.source_point
         );
-        assert!(hit.target_face.is_some());
+        // 洞壁 = 主面：分类 opening、法向朝管（+Y），从管侧最近点沿 −Y 打回洞壁的垂距就是 50。
+        // 最近点落在洞壁与开孔面共棱处时 hit_triangle 也要选洞壁那片，不能选外皮。
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Opening, "{face:?}");
+        assert!(face.normal.y > 0.99, "{:?}", face.normal);
+        let perp = hit.perpendicular.expect("洞壁是主面，该有垂距");
+        assert!(approx(perp.distance, 50.0, 1e-2), "perp {}", perp.distance);
+        assert!(approx(perp.to.y, hole_y[0], 1e-2), "perp lands on the hole wall: {:?}", perp.to);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
         assert_eq!((out.stats.total, out.stats.evaluated), (1, 1));
 
         // 对照：没开孔的同一堵墙，同一根管就是 G4。
@@ -1745,6 +2184,107 @@ mod tests {
         assert_eq!(hit.distance, 0.0);
         assert!(hit.intersects, "{hit:?}");
         assert_eq!(hit.witness, "aabb-overlap-center");
+    }
+
+    /// 洞壁口径（2026-09-18 定）：四片洞壁——竖洞壁（法向 ±Y，与行进方向平行，以前读 `end`）和洞底 / 洞顶
+    /// （法向 ±Z，以前读 `top` / `bottom`）——都是 **`opening`**（geometric），法向指向源侧；洞壁是主面，
+    /// 垂距 = 距离、垂足落在那片洞壁上，无 warning。
+    /// 构件用不穿墙的短盒（x 50–150）贴近某一片洞壁，让最近点落在那片洞壁内部而不是棱上。
+    #[test]
+    fn hole_wall_faces_classify_as_opening_with_perpendicular() {
+        let (hole_y, hole_z) = ([2000.0, 2400.0], [1000.0, 1400.0]);
+        let wall = || {
+            leaf(
+                "1/1",
+                "STWALL",
+                box_with_hole_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0], hole_y, hole_z),
+            )
+        };
+        // （短盒 y 范围, z 范围, 期望法向——已翻成指向源侧, 垂足所在洞壁：(坐标轴, 值)）
+        let cases: [([f32; 2], [f32; 2], Vector<Real>, (usize, f32)); 4] = [
+            // 贴 y 小侧洞壁 50 mm：法向 +Y。
+            ([2050.0, 2250.0], [1100.0, 1300.0], Vector::y(), (1, hole_y[0])),
+            // 贴 y 大侧洞壁：法向 −Y。
+            ([2150.0, 2350.0], [1100.0, 1300.0], -Vector::y(), (1, hole_y[1])),
+            // 贴洞底：法向 +Z。
+            ([2100.0, 2300.0], [1050.0, 1250.0], Vector::z(), (2, hole_z[0])),
+            // 贴洞顶：法向 −Z。
+            ([2100.0, 2300.0], [1150.0, 1350.0], -Vector::z(), (2, hole_z[1])),
+        ];
+        for (ys, zs, normal, (axis, foot)) in cases {
+            let stub = leaf(
+                "2/2",
+                "BOX",
+                box_mesh([50.0, ys[0], zs[0]], [150.0, ys[1], zs[1]]),
+            );
+            let out = surface_clearance(&[stub], &[wall()], opts());
+            let hit = out.hit.expect("hit");
+            assert!(
+                !hit.intersects && approx(hit.distance, 50.0, 1e-2),
+                "{ys:?} {zs:?}: {hit:?}"
+            );
+            let face = hit.target_face.expect("face");
+            assert_eq!(face.kind, FaceKind::Opening, "{ys:?} {zs:?}: {face:?}");
+            assert_eq!(face.confidence, "geometric", "{ys:?} {zs:?}: {face:?}");
+            assert!(
+                face.normal.dot(&normal) > 0.99,
+                "{ys:?} {zs:?}: normal {:?}",
+                face.normal
+            );
+            let perp = hit
+                .perpendicular
+                .unwrap_or_else(|| panic!("{ys:?} {zs:?}: 洞壁是主面，该有垂距"));
+            assert!(approx(perp.distance, 50.0, 1e-2), "{ys:?} {zs:?}: perp {}", perp.distance);
+            assert!(
+                approx(perp.to[axis], foot, 1e-2),
+                "{ys:?} {zs:?}: 垂足该落在那片洞壁上 {:?}",
+                perp.to
+            );
+            assert!(out.warnings.is_empty(), "{ys:?} {zs:?}: {:?}", out.warnings);
+        }
+    }
+
+    /// 洞壁判定两条都得成立，缺一条就不是洞壁：台阶墙低一级的顶面在墙 AABB 内部、但沿法向对面没有本墙
+    /// （仍是 `top`，无垂距）；350° 弧墙的凹面沿法向对面隔着 2R 还是本墙、但它与径向平行（仍是 `inner`）。
+    #[test]
+    fn opening_needs_both_interior_position_and_a_facing_wall() {
+        // 台阶墙：高段 y 0–5000 高 3000 + 低段 y 5000–8000 高 2000，拼成一片叶子；构件骑在低段顶上方 50 mm。
+        let stepped = merged_mesh(
+            box_mesh([0.0, 0.0, 0.0], [200.0, 5000.0, 3000.0]),
+            box_mesh([0.0, 5000.0, 0.0], [200.0, 8000.0, 2000.0]),
+        );
+        let wall = leaf("1/1", "STWALL", stepped);
+        let part = leaf(
+            "2/2",
+            "BOX",
+            box_mesh([50.0, 6000.0, 2050.0], [150.0, 6400.0, 2250.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(approx(hit.distance, 50.0, 1e-2), "{}", hit.distance);
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Top, "{face:?}");
+        assert!(hit.perpendicular.is_none());
+
+        // 350° 弧墙 R 5000–5300：构件在 135° 处、半径 4500，贴凹面 500 mm。
+        let wall = leaf(
+            "1/1",
+            "WALL",
+            ring_sector_mesh([0.0, 0.0], 5000.0, 5300.0, [0.0, 3000.0], [0.0, 350.0], 140),
+        );
+        let (s, c) = 135f32.to_radians().sin_cos();
+        let (cx, cy) = (4500.0 * c, 4500.0 * s);
+        let part = leaf(
+            "2/2",
+            "EQUI",
+            box_mesh([cx - 1.0, cy - 1.0, 1000.0], [cx + 1.0, cy + 1.0, 1200.0]),
+        );
+        let out = surface_clearance(&[part], &[wall], opts());
+        let hit = out.hit.expect("hit");
+        assert!(approx(hit.distance, 500.0, 3.0), "{}", hit.distance);
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Inner, "{face:?}");
+        assert!(hit.perpendicular.is_some(), "{:?}", out.warnings);
     }
 
     #[test]
@@ -1818,12 +2358,14 @@ mod tests {
     }
 
     fn leaf_row(key: &str, refno: &str, noun: &str) -> LeafRow {
+        let insts = vec![(format!("hash_{refno}"), None)];
         LeafRow {
             key: key.to_string(),
             refno: refno.to_string(),
             noun: noun.to_string(),
             world_trans: None,
-            insts: vec![(format!("hash_{refno}"), None)],
+            placement_fingerprint: placement_fingerprint(None, &insts),
+            insts,
             model_sesno: Some(1),
         }
     }
@@ -1899,6 +2441,127 @@ mod tests {
         let p = m.transform_point3(Vec3::new(1.0, 0.0, 0.0));
         assert!((p - Vec3::new(12.0, 0.0, 0.0)).length() < 1e-5, "{p:?}");
         assert_eq!(mat_from_trans(None), Mat4::IDENTITY);
+    }
+
+    /// 摆放指纹：同一行两次读出来一样；`world_trans`、实例的本地变换、`geo_hash` 任一变了就不一样。
+    /// `row_to_leaf` 算出来的就是它，世界网格缓存键的第三格靠它把重算前后分开。
+    #[test]
+    fn placement_fingerprint_tracks_world_trans_and_instances() {
+        let row = |wt: serde_json::Value, insts: serde_json::Value| {
+            serde_json::json!({
+                "key": "17496_137183", "refno": "pe:17496_137183", "noun": "FIXING",
+                "wt": wt, "insts_flat": insts, "booled_id": null, "model_sesno": 729
+            })
+        };
+        let stale = serde_json::json!({"translation": [-2593.8, 12222.1, -5345.0], "rotation": [0.0, 0.0, 0.0, 1.0]});
+        let fixed = serde_json::json!({"translation": [-15559.96, -2743.64, 2150.0], "rotation": [0.0, 0.0, 0.0, 1.0]});
+        let inst = serde_json::json!([{"geo_hash": "e3d_baked_v2_c3edc9", "transform": {"translation": [0.0, 0.0, 0.0]}}]);
+        let inst_moved = serde_json::json!([{"geo_hash": "e3d_baked_v2_c3edc9", "transform": {"translation": [1.0, 0.0, 0.0]}}]);
+        let inst_other = serde_json::json!([{"geo_hash": "e3d_baked_v2_other", "transform": {"translation": [0.0, 0.0, 0.0]}}]);
+
+        let a = row_to_leaf(&row(stale.clone(), inst.clone()), false).expect("row");
+        let a_again = row_to_leaf(&row(stale.clone(), inst.clone()), false).expect("row");
+        let b = row_to_leaf(&row(fixed, inst.clone()), false).expect("row");
+        let c = row_to_leaf(&row(stale.clone(), inst_moved), false).expect("row");
+        let d = row_to_leaf(&row(stale, inst_other), false).expect("row");
+        assert_eq!(
+            a.placement_fingerprint, a_again.placement_fingerprint,
+            "同一行要稳定"
+        );
+        assert_eq!(
+            a.placement_fingerprint,
+            placement_fingerprint(a.world_trans.as_ref(), &a.insts)
+        );
+        assert_ne!(
+            a.placement_fingerprint, b.placement_fingerprint,
+            "world_trans 变了"
+        );
+        assert_ne!(
+            a.placement_fingerprint, c.placement_fingerprint,
+            "实例本地变换变了"
+        );
+        assert_ne!(
+            a.placement_fingerprint, d.placement_fingerprint,
+            "geo_hash 变了"
+        );
+        // 缓存键三格：key / sesno / 指纹——同 key 同 sesno 摆放不同，键必须不同；老数据没 sesno 不进缓存。
+        let ka = leaf_cache_key(&a).expect("key");
+        let kb = leaf_cache_key(&b).expect("key");
+        assert_eq!((ka.0.as_str(), ka.1), ("17496_137183", 729));
+        assert_eq!((ka.0.as_str(), ka.1), (kb.0.as_str(), kb.1));
+        assert_ne!(ka.2, kb.2);
+        let mut no_sesno = a.clone();
+        no_sesno.model_sesno = None;
+        assert!(leaf_cache_key(&no_sesno).is_none());
+        let mut no_key = a;
+        no_key.key.clear();
+        assert!(leaf_cache_key(&no_key).is_none());
+    }
+
+    /// 2026-09-18 `:8022` 实测的那个坑：`model/ensure force=true` 重算一个根，库里 `world_trans` 已换、
+    /// `model_sesno` 仍是 729，旧键 `(key, sesno)` 命中重算前的世界网格，FIXING × WALL 照旧回 10 358 mm。
+    /// 现在同 key 同 sesno、只换 `world_trans` 的第二行必须拼出新位置的网格，而不是缓存里的旧网格。
+    #[test]
+    fn leaf_mesh_cache_misses_when_placement_changes_under_the_same_sesno() {
+        let dir = std::env::temp_dir().join(format!(
+            "gmmc-surface-clearance-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp meshes dir");
+        let geo_hash = "unit_tri_for_cache_test";
+        let unit = PlantMesh {
+            indices: vec![0, 1, 2],
+            vertices: vec![
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            normals: vec![Vec3::Z, Vec3::Z, Vec3::Z],
+            ..PlantMesh::default()
+        };
+        unit.ser_to_file(&dir.join(format!("{geo_hash}.mesh")))
+            .expect("write unit mesh");
+
+        let row_at = |x: f64| {
+            let json = serde_json::json!({
+                "key": "cache_test_17496_137183", "refno": "pe:17496_137183", "noun": "FIXING",
+                "wt": {"translation": [x, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0, 1.0]},
+                "insts_flat": [{"geo_hash": geo_hash}], "booled_id": null, "model_sesno": 729
+            });
+            row_to_leaf(&json, false).expect("row")
+        };
+        let mut warnings = Vec::new();
+        let before = build_leaf_mesh(&row_at(0.0), &dir, &mut warnings).expect("mesh before regen");
+        let after =
+            build_leaf_mesh(&row_at(1000.0), &dir, &mut warnings).expect("mesh after regen");
+        let same_again =
+            build_leaf_mesh(&row_at(0.0), &dir, &mut warnings).expect("mesh before regen again");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let min_x = |mesh: &TriMesh| {
+            mesh.vertices()
+                .iter()
+                .map(|v| v.x)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            (min_x(&before) - 0.0).abs() < 1e-3,
+            "重算前的网格在原位: {}",
+            min_x(&before)
+        );
+        assert!(
+            (min_x(&after) - 1000.0).abs() < 1e-3,
+            "同 key 同 sesno 换了 world_trans，必须拼新网格而不是命中旧缓存: {}",
+            min_x(&after)
+        );
+        assert!(
+            Arc::ptr_eq(&before, &same_again),
+            "摆放没变的行仍要命中同一份缓存"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// live 8009（ns 1516 / AvevaMarineSample，与 `_runs/*-8022|8023` 两台服务同一个库）：

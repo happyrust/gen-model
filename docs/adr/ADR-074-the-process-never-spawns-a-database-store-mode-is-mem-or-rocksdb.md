@@ -2,6 +2,11 @@
 
 状态：**已接受**（2026-09-13 用户拍板：「mem 进程内，rocksdb 连配置里的远端库，不再自己拉子进程」；
 字面值用新名 `mem` / `rocksdb`、默认 `mem`、旧写法当别名认但启动时大声告警。**号到提交时复核**——ADR-060 曾撞号两次。）
+**2026-09-18 修订（ADR-083）**：介质**只由环境变量 `AIOS_STORE_MODE` 决定**，`DbOption.toml` 的 `store_mode` / `in_memory_db`
+退出配置文件、向导第②步只展示不选。本文 D3 **整条被取代**：「`in_memory_db` 两态映射」作废，且**默认档由 `mem` 翻成 `rocksdb`**（ADR-083 D6，同日修订——漏设的代价要落在「当场报连不上」而不是「悄悄跑在内存库上」；「解压即跑」改由 `Start-AMS.ps1` 显式回填 `mem` 保住）；D4 的别名与告警只对
+**环境变量里**的退役写法生效，「向导只写新名」读作「向导一个字都不写」；实施约束 1 的护栏反转为
+`no_db_option_fixture_still_carries_a_store_mode_key`，约束 3 的向导用例换成 `the_wizard_shows_the_effective_store_mode_and_never_writes_it`。
+两档本身、只连不拉、durable 谓词与 `data_face` 派生（D1 / D2 / D5 / D6）不变。
 日期：2026-09-13
 落地：`src/options.rs`（`StoreMode { Mem, RocksDb }`、别名解析、`retired_store_mode_meaning` 告警、`has_endpoint()` 删除）、
 `src/lib.rs`（`ensure_store_connected` 两分支：`connect_in_memory_store` / `connect_configured_store`；`ensure_own_store` 删除）、
@@ -46,7 +51,7 @@ memory 还是 rocksdb。为了「本进程负责把那台库拉起来并收尸�
 没有」，最难查的那一类。`store_process.rs` 整个删除；`AIOS_SURREAL_EXE` 环境变量服务端不再读（只有 `Start-Surreal8009.ps1` 与
 兼容性测试还认它）。
 
-### D3　默认 `mem`；旧开关 `in_memory_db` 的两态原样映射
+### D3　默认 `mem`；旧开关 `in_memory_db` 的两态原样映射（**整条已被 ADR-083 取代，2026-09-18**：默认翻成 `rocksdb`，旧开关退役）
 
 两个键都不写 → `mem`（开箱即用：不配任何东西就能起来）。没写 `store_mode` 但写了 `in_memory_db = true` → `mem`；写了
 `in_memory_db = false` → `rocksdb`——那句显式的 `false` 是人的意图，不能被默认覆盖。两个键都写且矛盾时以 `store_mode` 为准并由

@@ -87,7 +87,7 @@ if ($WatchDbnums) { $svcArgs = @('serve', '--watch-dbnum', $WatchDbnums) }
 
 $stdout = Join-Path $out 'aios-database.stdout.log'
 $stderr = Join-Path $out 'aios-database.stderr.log'
-Write-Host "起服务：$Exe $($svcArgs -join ' ')（配置 $Config，store_mode=mem，autorun=0）"
+Write-Host "起服务：$Exe $($svcArgs -join ' ')（配置 $Config，AIOS_STORE_MODE=mem，autorun=0）"
 # 起之前记下机器上已有的 surreal 进程：之后多出来的任何一个都算服务违规拉起。
 $surrealBefore = @(Get-CimInstance Win32_Process -Filter "Name='surreal.exe'" -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty ProcessId)

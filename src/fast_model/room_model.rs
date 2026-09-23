@@ -22,7 +22,7 @@ use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
-use parry3d::shape::{TriMesh, TriMeshFlags};
+use parry3d::shape::TriMesh;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -995,7 +995,7 @@ async fn recalc_panel_membership_inner(
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
     let members = match cal_room_refnos_from(
-        &db_option.get_meshes_path(),
+        &crate::options::meshes_dir_for(db_option),
         panel,
         &exclude,
         resident,
@@ -1115,9 +1115,9 @@ impl PanelMeshes {
                         continue;
                     }
                 };
-                let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
+                let Some(tri_mesh) = crate::fast_model::room_predicate::panel_tri_mesh(
+                    &mesh,
                     (inst.world_trans * geo.transform).compute_matrix(),
-                    TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
                 ) else {
                     built
                         .failures
@@ -1292,7 +1292,7 @@ async fn load_panel_index_from(
     resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
     let mut index = PanelIndex {
-        mesh_dir: db_option.get_meshes_path(),
+        mesh_dir: crate::options::meshes_dir_for(db_option),
         resident,
         ..Default::default()
     };
@@ -1956,6 +1956,16 @@ pub(crate) fn durable_room_inputs(rows: &[GeomInstQuery]) -> Vec<DurableRoomGeom
 pub struct MemoryRoomCalculator {
     panels: PanelIndex,
     definition_version: String,
+}
+
+// 它随任务回执（`batch_worker::DataBatchTaskResult::room_calculator`）走一段，回执要 `Debug`；索引本体不打印，
+// 只报代号——日志里认的就是它。
+impl std::fmt::Debug for MemoryRoomCalculator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryRoomCalculator")
+            .field("definition_version", &self.definition_version)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 一个闭合且朝外的盒子。`TriMeshFlags::ORIENTED` 下 `contains_point` 依赖法线朝向，
@@ -2684,6 +2694,14 @@ impl MemoryRoomCalculator {
             }
         }
         out
+    }
+
+    /// 一块面板此刻的 `room_panel_relate` 那一半（与 [`Self::render_root_room_edges`] 对面板元素写的同一句：先删指向它的
+    /// 旧入边，在册再写回本代的；不在册 = 只删）。定向重算拿它给要反查的面板（`PanelDelta::recalc`）补自己的拓扑边
+    /// （F2，2026-09-19）：命中的是成员的根，面板自己的根多半不在集合里，逐根路径那一句到不了它。语句不带句尾分号。
+    pub(crate) fn render_panel_topology_statements(&self, panel: RefnoEnum) -> Vec<String> {
+        let map = self.room_panel_map();
+        render_panel_room_topology_statements(panel, map.room_of_panel(panel))
     }
 
     fn calculate_edges<G: RoomInput>(

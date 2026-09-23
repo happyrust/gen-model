@@ -21,7 +21,7 @@ use e3d_model::increment::{
     IncrementReport, PlanLimits, UpdatePlan, collect_window, execute_plan, increment_update,
     plan_update, plan_update_with,
 };
-use e3d_model::ledger::ChangeLedger;
+use e3d_model::ledger::{ChangeLedger, Disposition};
 use e3d_model::pipeline::{Report, generate_subtree_with_cache};
 use e3d_model::primitive_instance::canonical_primitive_mesh;
 use e3d_model::transform::dmat4_to_affine4x3;
@@ -37,7 +37,7 @@ use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::data_interface::mdb_membership;
 use crate::data_interface::model_source;
 use crate::data_interface::rigid_motion::{
-    RepublishGate, TransformAnchor, republish_gate, republish_records,
+    RepublishGate, TransformAnchor, bounds_of_points, republish_gate, republish_records,
 };
 use crate::fast_model::model_memory_store::{
     CommitScope, ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube,
@@ -64,26 +64,35 @@ pub struct RigidMotionUnit {
     pub anchors: Vec<TransformAnchor>,
 }
 
-/// 单元级发布执行体（ADR-078 D4）一轮的结果，与 [`RigidMotionReport`] 同形：`completed` 走成了局部提交，
+/// 单元级发布执行体（ADR-080 D4）一轮的结果，与 [`RigidMotionReport`] 同形：`completed` 走成了局部提交，
 /// `replayed` 是「回执已在 T」的窗口重放（投影一字未动、按已完成计），`fallbacks` 回退整根重算（带原因；
-/// D8：任何一件不成都整根回退，回退永远正确、只是不省）。
+/// D8：任何一件不成都整根回退，回退永远正确、只是不省）。`receipt_only` 是 `completed` 的**子集**——
+/// 局部清单为空、只把回执推到 T 的那几根（ADR-080 D10：只被 `no_model` 候选碰到的根，一件几何都没重建），
+/// 只作观测。
 #[derive(Debug, Default)]
 pub struct UnitPublishReport {
     pub completed: Vec<String>,
     pub replayed: Vec<String>,
     pub fallbacks: Vec<(String, String)>,
+    pub receipt_only: Vec<String>,
 }
 
 /// 单元级发布执行体一次吃的一根。`source_start_sesno` 是 `plan_update(S→T)` 的窗口基线 S：局部清单只对
 /// 「投影还停在 S」的根成立——回执已在 T 是重放，既不在 S 也不在 T 是半截状态或别的路径动过它，两者
-/// 都不许把局部清单叠上去（[`republish_gate`]，ADR-078 D4）。
+/// 都不许把局部清单叠上去（[`republish_gate`]，ADR-080 D4）。
+///
+/// `no_model_only`（ADR-080 D10）：规划器判这根这一窗**只被账本去向 `no_model` 的候选碰到**——闭包直接命中、
+/// 不是级联（C2 / C8 / P4）扩进来的、S 端已发布且安定、归到它名下的每个候选都是 `no_model`。只有带着它，
+/// 生产方切出来的**空**子计划才许当「这根名下没有一件几何要变」发一份空的 `Partial`（只推回执）；不带它的
+/// 空子计划照旧回退整根 regen——选根看得比 `plan_update` 远，空清单不是「没变」。
 #[derive(Debug, Clone)]
 pub struct UnitPublishUnit {
     pub root_refno: String,
     pub source_start_sesno: u32,
+    pub no_model_only: bool,
 }
 
-/// 单元级发布一根的**局部**产出（ADR-078 D2 的 `Partial`）：只点名这几件，缺席什么也不证明，要删的
+/// 单元级发布一根的**局部**产出（ADR-080 D2 的 `Partial`）：只点名这几件，缺席什么也不证明，要删的
 /// 必须写进 `removals`。`scope` 与回执由执行体盖——生产方给不出整根的章（D5：存储在写锁里算），
 /// 也不该替执行体决定这一笔是不是局部。
 #[derive(Debug, Default)]
@@ -100,7 +109,15 @@ pub struct UnitDelta {
     pub tube_segments: BTreeMap<(u32, u32), usize>,
 }
 
-/// 管段完整性门（ADR-078 D6 / 实施约束 4）：一次 `Partial` 若触到某条 BRAN 的管身，它的管身按**整段**处理——
+impl UnitDelta {
+    /// 一件几何都不动：不插、不删、不整段重写。这样的产出只有一个合法来源——生产方对一根**只被
+    /// `no_model` 候选碰到**的根切出空子计划（ADR-080 D10）；发出去就是「只推回执」。
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.removals.is_empty() && self.tube_branch_resets.is_empty()
+    }
+}
+
+/// 管段完整性门（ADR-080 D6 / 实施约束 4）：一次 `Partial` 若触到某条 BRAN 的管身，它的管身按**整段**处理——
 /// 存储那边 `tube_branch_resets` 一碰就清光那条分支的全部旧段，`upserts` 里没带上的段不会有人替它留着，
 /// 而且两边都不报错（`a_partial_commit_that_resets_a_branch_still_clears_every_segment_of_it` 演的就是这个）。
 ///
@@ -160,7 +177,7 @@ pub(crate) fn tube_segment_completeness(delta: &UnitDelta) -> Result<(), String>
     Ok(())
 }
 
-/// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-078 D1：单元级发布
+/// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-080 D1：单元级发布
 /// **直接吃 `plan_update` 的产出**，不引入第二套变更检测）。`UpdatePlan` 会被 `execute_plan` 整个吃掉、
 /// 又不 `Clone`，所以一窗算一次放在这里，逐根切出子计划再执行。
 struct WindowPlanSets {
@@ -168,16 +185,20 @@ struct WindowPlanSets {
     remove: BTreeSet<(u32, u32)>,
     regenerate_derived: BTreeSet<(u32, u32)>,
     derived_stale: BTreeSet<GeometryId>,
-    /// 规划器退化成整库重建的原因（ADR-078 Q4）：非空时四个集合全空，一根都不许走局部——
+    /// 规划器退化成整库重建的原因（ADR-080 Q4）：非空时四个集合全空，一根都不许走局部——
     /// 空产出不是「没变」。
     full_rebuild: Option<String>,
     /// 计划期就读挂的候选 / 容器数（`unresolved` + `derived_stale_unreadable`）：非零时这一窗的
     /// 分类不可信，一根都不许走局部（D8）。
     unreadable: usize,
+    /// 账本上每个候选的去向（`ChangeLedger::dispositions`，`(word0, word1)` 键）。D10 的生产方守卫拿它
+    /// 复核「这根名下的候选全是 `no_model`」——规划器的提示与生产方的计划是两次独立算的（实施约束 12），
+    /// 空子计划能不能当「没变」发，两边都得点头。
+    dispositions: Vec<((u32, u32), Disposition)>,
 }
 
 impl WindowPlanSets {
-    /// 这一窗的计划能不能给局部发布切子计划（ADR-078 D8 ① ②）：退化成整库重建的计划四个集合全空，
+    /// 这一窗的计划能不能给局部发布切子计划（ADR-080 D8 ① ②）：退化成整库重建的计划四个集合全空，
     /// 切出来的子计划执行后是**空产出**，把它当「没变」盖一个 T 章就是静默缺件（Q4）；计划期有读挂的
     /// 分类不可信，整窗一根都不许走局部。
     fn admits_partial_publish(&self) -> anyhow::Result<()> {
@@ -197,7 +218,52 @@ impl WindowPlanSets {
     }
 }
 
-/// 一根子计划里 `execute_plan` 的 `removals` **唯一**许来自的三处（ADR-078 D6 第一条）：
+/// D10 的生产方守卫：这根名下（两端属主链任一端经过它，或候选就是它）的账本候选**全部**去向
+/// `no_model`，且至少有一个。成立时「子计划为空」才读得成「这一窗 DESI 侧没有一件几何要变」——
+/// 去向 `no_model` 的候选是两票元数据门放行的（字典 DCHC=0 ∨ 是戳，∧ 生成器不读），按构造不改几何。
+///
+/// 两种不成立各是一种「空清单不是没变」：名下一个候选都没有 = 这根不是被账本碰到的（级联 / 恢复 /
+/// 目录名单——选根看得比 `plan_update` 远）；名下有 `rolled_up` / `unresolved` 的候选却切出空子计划 =
+/// 它折进的单元不在这根之下（嵌套根）或分类不可信，都不许拿空清单盖 T 章。
+///
+/// **不看候选在根之上的方向**（与刚体路的归因差这一条，故意的）：祖先闭包按构造不因根之上的种子把根
+/// 收进来；根之上的改动若真波及根下几何（挪 ZONE / 换类型 / 删除），e3d-model 的级联会把根下的单元放进
+/// 动作集，子计划就不空——空子计划这一支根本走不到。反过来把 `WORL` 的 `UPDT` 一类每窗必跳的祖先候选算
+/// 进来，这条路在真库上一次都打不着。
+pub(crate) fn root_touched_only_by_no_model_candidates(
+    dispositions: &[((u32, u32), Disposition)],
+    root: RefNo,
+    owners_s: &BTreeMap<(u32, u32), RefNo>,
+    owners_t: &BTreeMap<(u32, u32), RefNo>,
+) -> anyhow::Result<()> {
+    let packed_root = packed_refno(root);
+    // 链含自身：候选就是根也算「名下」；两端表里都没有的候选链上只有它自己，除了它是根之外归不到谁。
+    let under = |unit: (u32, u32), owners: &BTreeMap<(u32, u32), RefNo>| {
+        ancestor_chain(RefNo::new(unit.0, unit.1), owners).map(|chain| chain.contains(&packed_root))
+    };
+    let mut attributed = 0usize;
+    for (key, disposition) in dispositions {
+        if !(under(*key, owners_t)? || under(*key, owners_s)?) {
+            continue;
+        }
+        attributed += 1;
+        anyhow::ensure!(
+            *disposition == Disposition::NoModel,
+            "candidate {}/{} under root {root} is {disposition:?}, not no_model; an empty partial \
+             manifest cannot stand for its change",
+            key.0,
+            key.1
+        );
+    }
+    anyhow::ensure!(
+        attributed > 0,
+        "no ledger candidate is attributed to root {root}; it was selected for a reason a partial \
+         DESI delta cannot see (cascade / recovery)"
+    );
+    Ok(())
+}
+
+/// 一根子计划里 `execute_plan` 的 `removals` **唯一**许来自的三处（ADR-080 D6 第一条）：
 /// `remove` 的单元（窗里删掉的 + 迁出这根的）、`regenerate` 里画不出 / 画失败而被擦掉的单元、
 /// 派生容器 base 端的旧管段键（要重算的 + 迁出这根而退休的容器，见 [`RootSubplan`]）。
 struct RootPlanSets {
@@ -246,7 +312,74 @@ fn same_target_outside_the_design_window(published: &ModelTarget, current: &Mode
         && published.tessellation_profile == current.tessellation_profile
 }
 
-/// 单元级发布的**真生产方**（ADR-078 D1 / D5 / D6 / D8）：`plan_update(S→T)` 一窗算一次，逐根切出子计划 →
+/// 刚体前移回执的落款（ADR-066 D4「与重生成同款」）。`current` 是按 pin@T 现算的目标；只有设计窗之外
+/// 每一格（项目 / 设计文件身份 / 目录依赖含会话 / 模板 / 生成器指纹 / 细分档）都与旧回执相同、且设计会话
+/// 确实落在 T 上，才许拿它当这根的新落款——目录变了核对拍里 `Δ` 前移的记录与 regen@T 就不是同一份几何，
+/// core 对目录 / 几何集变化走的也是 `REPALL`。旧回执没带目标就证不了目录没动，一律回退整根重算。
+pub(crate) fn rigid_motion_target_at(
+    old_receipt: &RootReceipt,
+    current: ModelTarget,
+    target_sesno: u32,
+) -> anyhow::Result<ModelTarget> {
+    let Some(published) = old_receipt.model_target.as_ref() else {
+        bail!("cached receipt carries no model target; cannot prove the catalogue did not move");
+    };
+    anyhow::ensure!(
+        same_target_outside_the_design_window(published, &current),
+        "immutable target changed outside the design window (catalogue / template / generator / \
+         tessellation); rigid motion cannot cover it"
+    );
+    anyhow::ensure!(
+        current.design.session == target_sesno,
+        "model target pins design session {} but the window targets {target_sesno}",
+        current.design.session
+    );
+    Ok(current)
+}
+
+/// 含旋转的刚体前移重算盒（ADR-066 D3）：`bake_element` 存的 `world_bounds` 是世界网格顶点的紧 AABB，
+/// 本地盒过矩阵对含旋转的 `Δ` 一律偏松、过不了对拍门，所以读回这条记录自己的网格，顶点乘到新世界系
+/// `world` 再取 AABB（[`bounds_of_points`]）。网格到世界的矩阵见 [`rigid_motion_mesh_to_world`]。
+/// 读不到网格 / 网格没有顶点都是这根的回退理由（`republish_records` 整根 `Err`，不留半套）。
+pub(crate) fn rigid_motion_mesh_bounds(
+    mesh_dir: &Path,
+    record: &ProjectedGeometry,
+    world: DMat4,
+) -> anyhow::Result<[[f32; 3]; 2]> {
+    let path = mesh_dir.join(format!("{}.mesh", record.mesh_id));
+    let mesh = read_mesh_file(&path)
+        .with_context(|| format!("record {} rotated: bounds need its mesh", record.record_id))?;
+    let mesh_to_world = rigid_motion_mesh_to_world(record, world);
+    bounds_of_points(
+        mesh.vertices
+            .iter()
+            .map(|vertex| mesh_to_world.transform_point3(vertex.as_dvec3())),
+    )
+    .with_context(|| {
+        format!(
+            "record {} rotated: mesh {} has no vertices",
+            record.record_id,
+            path.display()
+        )
+    })
+}
+
+/// 记录的网格顶点到世界系，与生成时 [`persisted_world_transform`] / `bake_element` 同口径：烘焙件
+/// （`Baked`）的网格已按 `world⁻¹` 本地化，直接乘世界矩阵；标准图元（`Canonical`）先乘 `local_transform`；
+/// 隐式管身的 `local_transform` 生成时已折进存下来的世界矩阵（`persisted_world_transform`），不再乘。
+pub(crate) fn rigid_motion_mesh_to_world(record: &ProjectedGeometry, world: DMat4) -> DMat4 {
+    match (&record.shape, record.tube.is_some()) {
+        (
+            ProjectedShape::Canonical {
+                local_transform, ..
+            },
+            false,
+        ) => world * *local_transform,
+        _ => world,
+    }
+}
+
+/// 单元级发布的**真生产方**（ADR-080 D1 / D5 / D6 / D8）：`plan_update(S→T)` 一窗算一次，逐根切出子计划 →
 /// `execute_plan` → 烘焙 → `project_geometry_delta`，管段账与 removals 来源核过之后交给执行体
 /// （[`E3dModelService::republish_roots_by_unit_delta`] 的 `produce`）。
 ///
@@ -306,7 +439,7 @@ impl<'a> UnitDeltaProducer<'a> {
             remove,
             regenerate_derived,
             derived_stale,
-            ledger: _,
+            ledger,
             full_rebuild,
             report,
         } = plan;
@@ -324,6 +457,7 @@ impl<'a> UnitDeltaProducer<'a> {
                 derived_stale,
                 full_rebuild,
                 unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
+                dispositions: ledger.dispositions().to_vec(),
             },
         })
     }
@@ -338,10 +472,16 @@ impl<'a> UnitDeltaProducer<'a> {
     }
 
     /// 一根的局部产出。执行体已过完幂等闸（回执停在 S）才会叫到这里。
+    ///
+    /// `no_model_only` 是规划器随 unit 带来的提示（[`UnitPublishUnit::no_model_only`]，D10）：为真且这根的
+    /// 子计划为空时，再经 [`root_touched_only_by_no_model_candidates`] 对账本复核一遍，成立就回一份**空**
+    /// [`UnitDelta`]（只带本轮的 `model_target`）——执行体拿它发一份空的 `Partial`，存储在写锁里把回执推到 T、
+    /// 章按原记录重算（逐字不变）。为假的空子计划照旧 `bail!` 回退。
     pub(crate) fn produce(
         &mut self,
         root: RefNo,
         old_receipt: &RootReceipt,
+        no_model_only: bool,
     ) -> anyhow::Result<UnitDelta> {
         self.plan.admits_partial_publish()?;
         // 不可变目标先算、先核（便宜）：设计窗之外任何一格变了，都不是局部能覆盖的。
@@ -371,15 +511,39 @@ impl<'a> UnitDeltaProducer<'a> {
             self.target.index.owners.as_ref(),
         )?;
         // 选根比 `plan_update` 看得更远（结构连接 / 电缆端点 / 设计引用级联、目录级联、带过来的
-        // 未完成生成）：那些根这一窗没有一个自己的单元变了，几何却可能变了。子计划为空就不是
+        // 未完成生成）：那些根这一窗没有一个自己的单元变了，几何却可能变了。子计划为空默认就不是
         // 「没变」，是局部清单覆盖不到的理由——空 delta 盖一个 T 章正是 Q4 那种静默缺件。
-        anyhow::ensure!(
-            !subplan.is_empty(),
-            "window plan {}→{} names no unit under root {root}; the root was selected for a reason a \
-             partial DESI delta cannot see (cascade / recovery); falling back to regen",
-            self.base_sesno,
-            self.target_sesno
-        );
+        //
+        // 唯一的例外（D10）：规划器判这根**只被 `no_model` 候选碰到**（闭包直接命中、非级联、S 端安定、
+        // 名下候选全是两票门放行的），且这里对账本复核也成立——那空子计划读作「DESI 侧没有一件几何要变」，
+        // 回一份空 delta 只推回执。设计窗之外的目标（目录 / 模板 / 生成器）已在上面核过没变。
+        if subplan.is_empty() {
+            anyhow::ensure!(
+                no_model_only,
+                "window plan {}→{} names no unit under root {root}; the root was selected for a reason a \
+                 partial DESI delta cannot see (cascade / recovery) and the planner did not mark it \
+                 no_model_only; falling back to regen",
+                self.base_sesno,
+                self.target_sesno
+            );
+            root_touched_only_by_no_model_candidates(
+                &self.plan.dispositions,
+                root,
+                self.base.index.owners.as_ref(),
+                self.target.index.owners.as_ref(),
+            )
+            .with_context(|| {
+                format!(
+                    "window plan {}→{} names no unit under root {root} and the no_model_only hint \
+                     does not hold against the ledger; falling back to regen",
+                    self.base_sesno, self.target_sesno
+                )
+            })?;
+            return Ok(UnitDelta {
+                model_target: Some(model_target),
+                ..UnitDelta::default()
+            });
+        }
         let (plan, sets) = subplan.into_update_plan(self.base_sesno, self.target_sesno);
         let outcome = execute_plan(&self.target.set, plan);
         let failed = outcome.report.regen_failed.len() + outcome.report.derived_failed.len();
@@ -575,9 +739,30 @@ pub struct ModelTarget {
     pub generator_fingerprint: String,
     pub tessellation_profile: String,
 }
+
+impl ModelFileTarget {
+    /// 这一项记了会话没有。`session == 0` 是「没记」：字典库（DICT）按约定会话位固定 0、身份只按
+    /// 文件记（[`E3dModelService::model_target`]）；目录库没被这根打开过、又没钉住时也落 0。没记的
+    /// 会话不能拿去对文件最新会话——永远不等：`/model/ensure` 会把每一根都判成过期、生成完再判一次
+    /// 照样过期、抛 409。判新旧只比摘要；库级目录落款（ADR-079）也收不了它。
+    pub fn session_tracked(&self) -> bool {
+        self.session != 0
+    }
+}
+
+impl ModelTarget {
+    /// 库级目录落款要收的项（ADR-079，`目录 dbnum → 会话`）：只有记了会话的目录项。会话位 0 的项
+    /// （字典库）收进去就是 `0 → 文件最新` 这一窗，永远收不了，目录核对每次冷启动都把整库判成前移。
+    pub fn catalogue_sessions(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.catalogue
+            .iter()
+            .filter(|file| file.session_tracked())
+            .map(|file| (file.dbnum, file.session))
+    }
+}
 use crate::fast_model::e3d_mesh_store::{
     E3dPersistReport, MeshWrite, baked_mesh_id, canonical_mesh_id, ensure_mesh_file,
-    geometry_record_id,
+    geometry_record_id, read_mesh_file,
 };
 
 /// One database's element index at a pinned session: its top-level elements
@@ -918,16 +1103,118 @@ struct GenerationInput {
 
 type GenerationInputKey = (u32, u32, String);
 
-static GENERATION_INPUT_CACHE: OnceLock<
-    std::sync::Mutex<HashMap<GenerationInputKey, GenerationInput>>,
-> = OnceLock::new();
+/// 生成输入缓存的表（ADR-084）：键 `(dbnum, source_sesno, identity)`，**每库最多一条**（同库换 sesno / 换 identity
+/// 就替换——换库 = 换时点，旧条不能再喂），再按**库数**设上限：每条记「最近一次被生成用到」的单调序号，
+/// 命中也刷新（保护的正是「最近在生成的库」这份热度；一窗内同库只刷一次，成本可忽略），库数超过上限时
+/// 最久没用的库整份出。值是 `Arc` 的句柄：被逐出的那份由还握着它的切片继续用完，这里只是不再喂新调用方。
+/// `max_dbnums == 0` = 不限（与 2026-09-22 之前逐位相同）。泛型只为了单测不用开真文件。
+struct DbnumLru<V> {
+    entries: HashMap<GenerationInputKey, (V, u64)>,
+    next_tick: u64,
+    evicted_dbnums: u64,
+}
+
+impl<V: Clone> DbnumLru<V> {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_tick: 0,
+            evicted_dbnums: 0,
+        }
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.next_tick += 1;
+        self.next_tick
+    }
+
+    /// 命中即刷新：这一库刚被生成用到。
+    fn get_touch(&mut self, key: &GenerationInputKey) -> Option<V> {
+        let tick = self.tick();
+        let (value, last_used) = self.entries.get_mut(key)?;
+        *last_used = tick;
+        Some(value.clone())
+    }
+
+    /// 装入：先把同库的旧条替掉（换 sesno / identity），再按库数上限把最久没用的**别的**库整份出。
+    /// 返回被替 / 被逐的值，调用方在锁外 drop（`DbSet` 的析构要关文件、放元素缓存，不该在缓存锁里做）。
+    fn insert(&mut self, key: GenerationInputKey, value: V, max_dbnums: usize) -> Vec<V> {
+        let dbnum = key.0;
+        let mut displaced: Vec<V> = Vec::new();
+        let same_dbnum: Vec<GenerationInputKey> = self
+            .entries
+            .keys()
+            .filter(|(cached, _, _)| *cached == dbnum)
+            .cloned()
+            .collect();
+        for stale in same_dbnum {
+            if let Some((old, _)) = self.entries.remove(&stale) {
+                displaced.push(old);
+            }
+        }
+        let tick = self.tick();
+        self.entries.insert(key, (value, tick));
+        if max_dbnums > 0 {
+            while self.dbnum_count() > max_dbnums {
+                let Some(oldest) = self
+                    .entries
+                    .iter()
+                    .filter(|((cached, _, _), _)| *cached != dbnum)
+                    .min_by_key(|(_, (_, last_used))| *last_used)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                if let Some((old, _)) = self.entries.remove(&oldest) {
+                    displaced.push(old);
+                }
+                self.evicted_dbnums += 1;
+            }
+        }
+        displaced
+    }
+
+    /// 整库忘掉（初始化收尾、常驻房间换代），不计入按上限的逐出数。
+    fn forget_dbnum(&mut self, dbnum: u32) -> Vec<V> {
+        let keys: Vec<GenerationInputKey> = self
+            .entries
+            .keys()
+            .filter(|(cached, _, _)| *cached == dbnum)
+            .cloned()
+            .collect();
+        keys.iter()
+            .filter_map(|key| self.entries.remove(key).map(|(value, _)| value))
+            .collect()
+    }
+
+    fn dbnum_count(&self) -> usize {
+        self.entries
+            .keys()
+            .map(|(dbnum, _, _)| *dbnum)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&GenerationInputKey, &V, u64)> {
+        self.entries
+            .iter()
+            .map(|(key, (value, last_used))| (key, value, *last_used))
+    }
+}
+
+static GENERATION_INPUT_CACHE: OnceLock<std::sync::Mutex<DbnumLru<GenerationInput>>> =
+    OnceLock::new();
+
+fn generation_input_cache() -> &'static std::sync::Mutex<DbnumLru<GenerationInput>> {
+    GENERATION_INPUT_CACHE.get_or_init(|| std::sync::Mutex::new(DbnumLru::new()))
+}
 
 fn generation_input(
     service: &E3dModelService,
     dbnum: u32,
     source_sesno: u32,
 ) -> anyhow::Result<GenerationInput> {
-    let cache = GENERATION_INPUT_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let cache = generation_input_cache();
     let identity = service.generation_identity.clone().unwrap_or_else(|| {
         let pin = service
             .pin(dbnum)
@@ -941,37 +1228,132 @@ fn generation_input(
     if let Some(value) = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .cloned()
+        .get_touch(&key)
     {
         return Ok(value);
     }
     let pin = service.pin(dbnum)?;
     let index = Arc::new(scan_index(&pin.file, Some(source_sesno))?);
     let set = service.build_set(dbnum, Some(source_sesno))?;
-    let mut guard = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.retain(|(cached_dbnum, _, _), _| *cached_dbnum != dbnum);
     let input = GenerationInput {
         set,
         index,
         dependency_sessions: service.dependency_sessions.clone(),
     };
-    guard.insert(key, input.clone());
+    // 按库数上限（ADR-084，`model_generation_input_max_dbnums`，0 = 不限）：被替 / 被逐的那几份在锁外 drop。
+    let max_dbnums = crate::options::model_generation_input_max_dbnums();
+    let (displaced, resident_dbnums) = {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let displaced = guard.insert(key, input.clone(), max_dbnums);
+        (displaced, guard.dbnum_count())
+    };
+    if max_dbnums > 0 && !displaced.is_empty() {
+        log::info!(
+            "dbnum={dbnum} 生成输入缓存按库数上限收回：放掉 {} 份，现留 {resident_dbnums} 库，上限 {max_dbnums}",
+            displaced.len()
+        );
+    }
+    drop(displaced);
     Ok(input)
+}
+
+/// 生成输入缓存这一维的现值（ADR-084，`/health.model_cache.element_cache`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GenerationInputCacheLimits {
+    /// 生效的库数上限（0 = 不限）。
+    pub max_dbnums: usize,
+    /// 此刻留着几个库的 `GenerationInput`。
+    pub resident_dbnums: usize,
+    /// 进程起来以来按库数上限逐出了几份（同库换 sesno 的替换与 `forget_generation_input` 不计）。
+    pub evicted_dbnums_total: u64,
+}
+
+pub(crate) fn generation_input_cache_limits() -> GenerationInputCacheLimits {
+    let max_dbnums = crate::options::model_generation_input_max_dbnums();
+    let Some(cache) = GENERATION_INPUT_CACHE.get() else {
+        return GenerationInputCacheLimits {
+            max_dbnums,
+            resident_dbnums: 0,
+            evicted_dbnums_total: 0,
+        };
+    };
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    GenerationInputCacheLimits {
+        max_dbnums,
+        resident_dbnums: guard.dbnum_count(),
+        evicted_dbnums_total: guard.evicted_dbnums,
+    }
+}
+
+/// 生成输入缓存里一份 `DbSet` 的池级元素缓存此刻的体量（d-149 观测用，
+/// `/health.model_cache.element_cache.databases[]`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GenerationInputFootprint {
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    /// 已缓存的解析记录条数——元素数上限数的就是它。
+    pub parsed_entries: usize,
+    /// 已缓存的描述符抽取条数（解析条数的子集）。
+    pub extraction_entries: usize,
+    /// 估算字节（`DbSet::element_cache_stats`：`Arc` 块 + 表槽 + 内联结构 + 字串 / 数组载荷）。
+    pub approx_bytes: usize,
+    /// 这份 `DbSet` 生效的元素数上限（0 = 不限 / 没开缓存）。
+    pub max_entries: usize,
+    /// 最近一次被生成用到的序号（进程内单调计数，不是时刻；越大越新）——按库数上限逐出时最小的先出（ADR-084）。
+    pub last_used_tick: u64,
+}
+
+/// 生成输入缓存里每库那份 `DbSet` 的元素缓存体量，按 `dbnum` 升序（d-149 观测用）。
+///
+/// 查时现算、不缓存、不落库：先在缓存锁里把各份 `Arc<DbSet>` 抄出来，再在锁外逐份走它的缓存
+/// （`element_cache_stats`，每份 O(条数)，各库缓存各自的读锁）——`GENERATION_INPUT_CACHE` 那把锁
+/// 不被观测拖住。按观测频率调，别放进生成路径。
+pub(crate) fn generation_input_cache_footprint() -> Vec<GenerationInputFootprint> {
+    let Some(cache) = GENERATION_INPUT_CACHE.get() else {
+        return Vec::new();
+    };
+    let sets: Vec<(u32, u32, Arc<DbSet>, u64)> = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|((dbnum, sesno, _), input, last_used)| {
+            (*dbnum, *sesno, input.set.clone(), last_used)
+        })
+        .collect();
+    let mut out: Vec<GenerationInputFootprint> = sets
+        .into_iter()
+        .map(|(dbnum, source_sesno, set, last_used_tick)| {
+            let stats = set.element_cache_stats();
+            GenerationInputFootprint {
+                dbnum,
+                source_sesno,
+                parsed_entries: stats.parsed_entries,
+                extraction_entries: stats.extraction_entries,
+                approx_bytes: stats.approx_bytes,
+                max_entries: stats.limit,
+                last_used_tick,
+            }
+        })
+        .collect();
+    out.sort_by_key(|footprint| (footprint.dbnum, footprint.source_sesno));
+    out
 }
 
 /// Drop every cached generation input of one database.
 ///
-/// The cache is keyed by `(dbnum, sesno, identity)` and only ever evicts the
-/// *same* dbnum's older entry when a new one is inserted, so an entry outlives
-/// the run that built it for as long as the process lives.  An initialization
-/// run keys its entry by the digest of its frozen tokens — a key no later
-/// service (`from_current`, `from_frozen_source`) asks for again — which makes
-/// the entry dead weight once the run has finished: one parsed `attlib.dat`,
-/// one open `DbSet` over every MDB design file, and one whole-database owner
-/// table per initialized dbnum, held until exit.
+/// The cache is keyed by `(dbnum, sesno, identity)`; a new entry only replaces
+/// the *same* dbnum's older one, and beyond that the only bound is the dbnum
+/// count limit (`model_generation_input_max_dbnums`, ADR-084, default unbounded),
+/// so an entry can outlive the run that built it for as long as the process
+/// lives.  An initialization run keys its entry by the digest of its frozen
+/// tokens — a key no later service (`from_current`, `from_frozen_source`) asks
+/// for again — which makes the entry dead weight once the run has finished:
+/// one parsed `attlib.dat`, one open `DbSet` over every MDB design file, and
+/// one whole-database owner table per initialized dbnum, held until exit.
 ///
 /// Callers still holding an `Arc` clone keep their input alive; the next
 /// `generation_input` for the dbnum rebuilds from the file.  The removed values
@@ -980,17 +1362,10 @@ pub(crate) fn forget_generation_input(dbnum: u32) -> usize {
     let Some(cache) = GENERATION_INPUT_CACHE.get() else {
         return 0;
     };
-    let removed: Vec<GenerationInput> = {
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let keys = guard
-            .keys()
-            .filter(|(cached_dbnum, _, _)| *cached_dbnum == dbnum)
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.iter().filter_map(|key| guard.remove(key)).collect()
-    };
+    let removed: Vec<GenerationInput> = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .forget_dbnum(dbnum);
     removed.len()
 }
 
@@ -1038,6 +1413,10 @@ pub struct E3dModelService {
     /// Initialization reuses the verified, durable source token, not mutable
     /// file length/mtime that may advance while the pinned session is generated.
     frozen_file_digests: BTreeMap<(u32, u32), String>,
+    /// The MDB's Dictionary UDA definitions, so `build_set` can answer project
+    /// attributes (`:HXYsize`) by name. `None` = no dictionary was readable;
+    /// that is a degraded read, not a reason to refuse to generate geometry.
+    uda: Option<Arc<e3d_io::uda_catalog::UdaCatalog>>,
 }
 
 #[cfg(test)]
@@ -1128,6 +1507,7 @@ impl E3dModelService {
         let option = aios_core::get_db_option();
         let (pins, locator, project_files) = current_mdb_source_inventory()?;
         Ok(Self {
+            uda: current_uda_catalog(),
             schema: DirectSchema::open_from_env()?,
             // CATA identity stays with the project-aware locator (see `build_set`
             // and `model_target`); the pins carry the design-side files only, as
@@ -1139,7 +1519,7 @@ impl E3dModelService {
             locator,
             project_files,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
-            mesh_dir: option.get_meshes_path(),
+            mesh_dir: crate::options::meshes_dir_for(option),
             generation_identity: None,
             frozen_file_digests: BTreeMap::new(),
         })
@@ -1166,6 +1546,12 @@ impl E3dModelService {
         let target_dbnum = source.dbnum() as u32;
         for token in dependencies.iter().chain(tokens.clone().iter()) {
             let frozen = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
+            // 摘要故意记 sha256(commit_token_json) 而不是 `model_file_identity_digest`（路径 + 长度 +
+            // 修改时间 + 会话）：token 里全是冻结那一刻的值，同一份 token 之后重开、文件被 SAVEWORK
+            // 追加过也算得出同一个数（`initialization_target_tests::initialization_target_survives_append_…`），
+            // `room_resident` 的 room-input-cache 就靠它让没变的文件只付重开校验的钱。它与
+            // `room_read_through::target_current` 现场重算的公式对不上没关系：初始化的回执不进投影
+            // （ADR-077 D5），`target_current` 只会看到按需 / 批次那条路写的、按现场公式记的回执。
             service.frozen_file_digests.insert(
                 (frozen.dbnum() as u32, frozen.target_sesno()),
                 hex::encode(Sha256::digest(frozen.commit_token_json()?.as_bytes())),
@@ -1672,8 +2058,9 @@ impl E3dModelService {
     /// 刚体前移执行体（ADR-066 B6）的**存储半边**：把「只动摆放」的根从整根重算改成「投影记录左乘
     /// Δ + 前移回执到 T」，只左乘并提交进内存投影——**生成服务不碰数据库**（登记 / durable flush 由
     /// 调用方在 batch_worker 里做，见 `run_rigid_motion_units`）。**保守优先**：任一前置不满足就把这根
-    /// 放进 `fallbacks` 退回整根重算，回退永远正确。本轮只做**纯平移**（`republish_records` 内部走
-    /// `translate_bounds`）；含旋转（要读网格重算盒）让盒闭包报错 → 回退。`completed` 的根已把左乘后的
+    /// 放进 `fallbacks` 退回整根重算，回退永远正确。盒按 D3：纯平移直接加 `t`（`republish_records` 内部走
+    /// `translate_bounds`）；含旋转读回记录自己的网格、顶点乘到新世界系再取紧 AABB
+    /// （[`rigid_motion_mesh_bounds`]），网格读不到 / 没有顶点就回退。`completed` 的根已把左乘后的
     /// 记录与前移到 T 的回执提交进投影，等调用方登记后由 `publish_completed_file_round` 统一刷 durable。
     /// 开关 `model_transform_cheap_path` 关着时规划器不产 transform 单元，本函数不会被调到。
     ///
@@ -1681,8 +2068,11 @@ impl E3dModelService {
     /// 回执已在 T（发布成功但回合没收尾的窗口重放）跳过、按已完成计（`replayed`）；回执不在规划
     /// 基线 S 上（半截状态 / 旧计划 / 别的路径动过它）`Δ` 对不上，回退整根重算。
     ///
-    /// 待补（开关翻开前 B8 对拍门会挡住）：含旋转时读网格顶点重算盒；`model_target.design` 落款推进到
-    /// pin@T（现在沿用旧的，最坏是下一窗不命中缓存、照旧重算，安全）。
+    /// 落款按 D4「与重生成同款」：回执的 `model_target` 是按 pin@T 现算的（与 regen / 单元级同一条
+    /// `hydrate_published_dependencies → model_target` 路，目录会话沿旧回执补水），且只在设计窗之外
+    /// 每一格都没变时才落（[`rigid_motion_target_at`]）——目录 / 模板 / 生成器 / 细分档任一变了，左乘
+    /// 一个 `Δ` 覆盖不了，回退整根重算。于是下一窗 `generation_root_cache_current` 看到的就是一根
+    /// 在 T 上完成的根，与一次 regen 落地后一模一样。
     pub(crate) async fn republish_roots_by_rigid_motion(
         &self,
         dbnum: u32,
@@ -1691,9 +2081,38 @@ impl E3dModelService {
     ) -> anyhow::Result<RigidMotionReport> {
         let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
         ensure_not_older_than_persisted(dbnum, target_sesno).await?;
-        let store = ModelMemoryStore::global();
+        run_blocking(|| {
+            self.republish_roots_by_rigid_motion_on(
+                ModelMemoryStore::global(),
+                dbnum,
+                target_sesno,
+                units,
+                |commits| {
+                    super::model_write_behind::publish(commits)?;
+                    Ok(())
+                },
+            )
+        })
+    }
+
+    /// [`Self::republish_roots_by_rigid_motion`] 的无锁本体：投影与发布口由调用方注入——生产给全局投影 +
+    /// write-behind，门 3 探针（`probe_rigid_motion_gate3_for_window`）给本地投影 + 直接提交，两边跑的是
+    /// 同一段闸 → 目标核对 → 左乘 → 回执。与单元级的 `republish_roots_by_unit_delta_on` 同形；同步 CPU +
+    /// 文件 IO，调用方负责在 [`run_blocking`] 里跑。
+    pub(crate) fn republish_roots_by_rigid_motion_on(
+        &self,
+        store: &ModelMemoryStore,
+        dbnum: u32,
+        target_sesno: u32,
+        units: &[RigidMotionUnit],
+        mut publish: impl FnMut(Vec<ProjectionCommit>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<RigidMotionReport> {
         let mesh_dir = self.mesh_dir.as_path();
         let mut report = RigidMotionReport::default();
+        // 目录会话表整轮共用（与单元级 `produce` 用窗口的 `dependency_sessions` 同形）：
+        // `hydrate_published_dependencies` 已有的键不重开文件。
+        let dependency_sessions: DependencySessions =
+            Arc::new(std::sync::Mutex::new(BTreeMap::new()));
         for unit in units {
             let root_refno = &unit.root_refno;
             let anchors = unit.anchors.as_slice();
@@ -1742,11 +2161,30 @@ impl E3dModelService {
                     continue;
                 }
             }
+            // 落款先算、先核（便宜，且不动任何记录）：pin@T 的目标与旧回执在设计窗之外逐格相同才往下走。
+            let model_target = match self
+                .hydrate_published_dependencies(&old_receipt, &dependency_sessions)
+                .and_then(|()| self.model_target(dbnum, target_sesno, &dependency_sessions))
+                .and_then(|current| rigid_motion_target_at(&old_receipt, current, target_sesno))
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    report
+                        .fallbacks
+                        .push((root_refno.clone(), format!("model target: {error:#}")));
+                    continue;
+                }
+            };
             let records = store.records_of_root(ProjectionScope::Current, root);
-            // 左乘 Δ：纯平移直接加 t；含旋转让盒闭包报错 → 回退（读网格那半边留作 B6 后续）。
-            let moved = match republish_records(records, anchors, target_sesno, |_, _| {
-                anyhow::bail!("rotation bounds read not yet wired; falling back to regen")
-            }) {
+            // 左乘 Δ：纯平移直接加 t；含旋转读回记录自己的网格重算盒（D3），读不到就回退。已在 T 的记录
+            // （嵌套根共有、同窗别的根落的、窗口重放）按记录的闸放过、不再乘（S4b §9 B8 首跑那条红）。
+            let moved = match republish_records(
+                records,
+                anchors,
+                unit.source_start_sesno,
+                target_sesno,
+                |record, world| rigid_motion_mesh_bounds(mesh_dir, record, world),
+            ) {
                 Ok(moved) => moved,
                 Err(error) => {
                     report
@@ -1764,15 +2202,15 @@ impl E3dModelService {
                     continue;
                 }
             };
-            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。发布调用只同步
+            // 回执整根前移到 T，落款是 pin@T 的目标（D4）。生产的发布口只同步
             // 提交内存投影并登记 write-behind；后台 worker 独立完成 durable flush。
-            super::model_write_behind::publish(vec![ProjectionCommit {
+            publish(vec![ProjectionCommit {
                 upserts: moved,
                 receipt: Some((
                     root,
                     RootReceipt {
                         source_sesno: target_sesno,
-                        model_target: old_receipt.model_target.clone(),
+                        model_target: Some(model_target),
                         manifest_hash: manifest_digest,
                         geometry_count,
                         published_via: "transform".into(),
@@ -1786,7 +2224,7 @@ impl E3dModelService {
         Ok(report)
     }
 
-    /// 单元级发布执行体（ADR-078 D4 / D5 / D8）：每一根**先过闸，再要局部产出，再以 `Partial` 提交发布**。
+    /// 单元级发布执行体（ADR-080 D4 / D5 / D8）：每一根**先过闸，再要局部产出，再以 `Partial` 提交发布**。
     ///
     /// 顺序钉死为 闸 → 产出 → 提交（实施约束 5，与 [`Self::republish_roots_by_rigid_motion`] 同序）。
     /// 局部清单不像 regen 天然幂等——它只对「投影还停在规划基线 S」的根成立：回执已在 T 是窗口重放
@@ -1854,7 +2292,7 @@ impl E3dModelService {
                     .map_err(|error| format!("{error:#}"))
             });
             match producer {
-                Ok(producer) => producer.produce(root, old),
+                Ok(producer) => producer.produce(root, old, unit.no_model_only),
                 Err(reason) => bail!("window producer {base_sesno}→{target_sesno} failed to open: {reason}"),
             }
         })
@@ -2030,6 +2468,8 @@ impl E3dModelService {
             mesh_dir,
             generation_identity: None,
             frozen_file_digests: BTreeMap::new(),
+            // 这条口子是拿显式文件清单建的，身边没有 MDB，也就没有字典库名单。
+            uda: None,
         })
     }
 
@@ -2305,6 +2745,9 @@ impl E3dModelService {
                 ));
             }
         }
+        // 两道门判不画的那几根在这里离开生成层：报告里有点名账，回执与日志靠它才说得出
+        // 「少的是哪一根」。渲染在序列化之前，`generation` 之后就被 JSON 吃掉了。
+        total.tubes_not_drawn = generation.implied_tubes.not_drawn_line();
         total.generation_report = serde_json::to_value(generation)?;
         Ok(total)
     }
@@ -2421,6 +2864,21 @@ impl E3dModelService {
                 file_target(dependency_dbnum, &selected.db_type, &selected.path, session)?,
             );
         }
+        // 字典库（DICT）也是几何的不可变输入：`build_set` 把 MDB 声明的字典库挂进 `DbSet`
+        // （`7d8e88c29`），目录表达式里的 UDA 从此按字典的键求值（e3d-io `9508ac4`，
+        // `( :HXYsize[2] )` 一类）——字典换一版，同一段目录程序可能求出别的数。身份按文件
+        // （长度 + 修改时间）记，会话位固定 0：字典库由 `add_db` 预开、不经 `E3dDbResolver`
+        // 懒开，没有谁往 `dependency_sessions` 里记它，让它跟会话走只会在两次算目标之间漂。
+        for pin in self
+            .pins
+            .iter()
+            .filter(|pin| pin.db_type.eq_ignore_ascii_case("DICT"))
+        {
+            catalogue.insert(
+                pin.dbnum as u32,
+                file_target(pin.dbnum as u32, &pin.db_type, &pin.file, 0)?,
+            );
+        }
         let project = self
             .locator
             .file_of(dbnum)
@@ -2435,7 +2893,7 @@ impl E3dModelService {
                 0,
             )?,
             generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
+                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-pml-uda-key-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION")
             ),
@@ -2455,6 +2913,11 @@ impl E3dModelService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for dependency in &published.catalogue {
+            // 目标里的字典库（DICT）按文件记身份、会话位固定 0（见 `model_target`），
+            // 不进依赖会话表——开它只为读一个不会用到的会话号。
+            if !dependency.db_type.eq_ignore_ascii_case("CATA") {
+                continue;
+            }
             let key = (published.design.dbnum, dependency.dbnum);
             if sessions.contains_key(&key) {
                 continue;
@@ -2514,10 +2977,19 @@ impl E3dModelService {
         // 同一批目录件反复查索引反复解析（AMS 7999 实测：15,968 个元素跑出 537 万次点查、
         // 264 s，占生成 CPU 的 85%；开着之后生成 71.0 → 3.84 s）。关掉只是慢回去，
         // 落下去的行逐字不变——它换的是内存（7997 峰值 768 MB → 1.55 GB），所以留了关位。
+        // 元素数上限（[`crate::options::model_element_cache_max_entries`]，d-149，默认 0 = 不限）：
+        // 满了整张清、下一次读再从文件装——产物仍逐字不变，只是清空之后那一小段重新变冷。
         let set = if crate::options::model_element_cache() {
-            set.with_element_cache()
+            set.with_element_cache_limit(crate::options::model_element_cache_max_entries())
         } else {
             set
+        };
+        // 字典库的 UDA 定义（`:HXYsize` 一类）。系统属性来自 attlib 与 `*vir.dat`，
+        // 项目属性不在那儿——名字 → 键那张表在 MDB 声明的 DICT 库里，名单只能由这一层给，
+        // `DbSet` 自己不去找（见 `DbSet::with_uda_catalog`）。
+        let set = match self.uda.clone() {
+            Some(catalog) => set.with_uda_catalog(catalog),
+            None => set,
         };
         let set = Arc::new(set);
         for pin in &self.pins {
@@ -2547,6 +3019,38 @@ impl E3dModelService {
 /// used by both current and historical generation.  Current projection replaces
 /// the returned pins with watermark-pinned DESI pins, while historical generation
 /// keeps these paths and selects a session per request.
+/// 当前 MDB 声明的字典库合成的一份 UDA 定义表，按 `CURD` 序合并。
+///
+/// 名单走 [`mdb_membership::MdbMembership::dictionary_paths`]，不扫项目目录：MDB 是跨项目的，
+/// `AvevaMarineSample /ALL` 声明的六个字典库有四个在 `AvevaCatalogue` 与 `SCB` 底下，
+/// 猜错不报错，而少一个字典库跟「这个 UDA 没值」长得一模一样。
+///
+/// 读不出来**不拦生成**：几何目前一格都不靠 UDA，为一份读不开的字典库把整轮生成判死
+/// 是更坏的交换。但它也不能没声音——问题原样进 `log::warn!`。
+fn current_uda_catalog() -> Option<Arc<e3d_io::uda_catalog::UdaCatalog>> {
+    let option = aios_core::get_db_option();
+    let membership = mdb_membership::get(&option.project_name, &option.mdb_name)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            mdb_membership::resolve(option, &option.project_name, &option.mdb_name).map(Arc::new)
+        });
+    let catalog = membership.and_then(|membership| {
+        let schema = Arc::new(DirectSchema::open_from_env()?);
+        crate::data_interface::uda_catalog_provider::UdaCatalogProvider::shared(
+            &membership,
+            schema,
+        )
+        .get()
+    });
+    match catalog {
+        Ok(catalog) => Some(catalog),
+        Err(error) => {
+            log::warn!("模型生成拿不到字典库的 UDA 定义，本轮按「没有 UDA」读：{error:#}");
+            None
+        }
+    }
+}
+
 fn current_mdb_source_inventory()
 -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator, ProjectDbFiles)> {
     let option = aios_core::get_db_option();
@@ -2975,6 +3479,10 @@ impl E3dPersistReport {
         self.unique_meshes = self.mesh_ids.len();
         self.source_sesno = self.source_sesno.or(other.source_sesno);
         self.visited_by_root.extend(other.visited_by_root);
+        self.tubes_not_drawn = match (self.tubes_not_drawn.take(), other.tubes_not_drawn) {
+            (Some(mine), Some(theirs)) => Some(format!("{mine} | {theirs}")),
+            (mine, theirs) => mine.or(theirs),
+        };
     }
 }
 
@@ -2999,7 +3507,7 @@ pub async fn apply_geometry_delta(
 }
 
 /// 「上一版有、这一版没有」= 删掉了——**只有当 `generated` 确实是这根的全集时这句才成立**
-/// （ADR-078 D2，[`CommitScope::WholeRoot`]）。
+/// （ADR-080 D2，[`CommitScope::WholeRoot`]）。
 ///
 /// 这是整个发布链路上**唯一**一处拿缺席推删除的地方，所以单独拎出来命名：单元级发布只重建变了
 /// 的那几件，同一条推导会把没重建的全部删掉，而且投影与库两边都不会报错——静默丢件。
@@ -3110,9 +3618,24 @@ pub(crate) fn republish_roots_by_unit_delta_on(
             ));
             continue;
         }
+        // D10：空清单（不插、不删、不重写管段）只许来自带 `no_model_only` 提示的根——生产方对那种根切出
+        // 空子计划、对账本复核过才回空 delta；别的根回出空 delta 是生产方的 bug，不许拿它盖 T 章。
+        let receipt_only = delta.is_empty();
+        if receipt_only && !unit.no_model_only {
+            report.fallbacks.push((
+                root_refno.clone(),
+                format!(
+                    "partial manifest for root {root} is empty but the root was not planned as \
+                     no_model_only; an empty delta is not proof of \"unchanged\" (D10); falling back \
+                     to regen"
+                ),
+            ));
+            continue;
+        }
         // D2：一根被删空（最后一件也删了）不走 `Partial`，退回根级路径。执行体不读记录，判据只用
         // 回执上的记录数与清单本身：带了 upsert 的清单落完必有记录；一件不带、又删了不少于整根记录数
         // 的 id，或整段清了某条分支的管身（清多少段这里看不见），都可能把这根删空——按可能算，回退。
+        // 什么都不删的空清单（D10 只推回执）不在此列：它留下的记录就是原来那些，零记录的根也照旧零记录。
         if partial_delta_may_empty_the_root(&delta, old_receipt.geometry_count) {
             report.fallbacks.push((
                 root_refno.clone(),
@@ -3146,28 +3669,38 @@ pub(crate) fn republish_roots_by_unit_delta_on(
             )),
             scope: CommitScope::Partial,
         });
-        landing.push(root_refno.clone());
+        landing.push((root_refno.clone(), receipt_only));
     }
     if !commits.is_empty() {
         // 一次发布调用 = 一个原子边界（D4）：改挂两端的根一起落地。发布口不收件整轮上抛，与刚体路一致
         // ——没有一根算走成。
         publish(commits)?;
-        report.completed = landing;
+        for (root_refno, receipt_only) in landing {
+            if receipt_only {
+                report.receipt_only.push(root_refno.clone());
+            }
+            report.completed.push(root_refno);
+        }
     }
     Ok(report)
 }
 
-/// ADR-078 D2 第二条的判据：一份 `Partial` 清单**可能**把这根删空吗？执行体不读记录，能用的只有回执上
+/// ADR-080 D2 第二条的判据：一份 `Partial` 清单**可能**把这根删空吗？执行体不读记录，能用的只有回执上
 /// 的记录数（投影完整时就是这根此刻的记录数）与清单本身。
 ///
 /// - 带了 upsert → 落完必有记录，不可能删空；
-/// - 一件不带、显式删除的 id 数 ≥ 记录数 → 可能删空（多出来的 id 若是无效 id 就删不到，那是保守多退一次）；
-/// - 一件不带、还整段清了某条分支的管身 → 一条重置清掉几段这里看不见，按可能删空算。
+/// - 一件不带、显式删除的 id 数 ≥ 记录数（且真删了东西）→ 可能删空（多出来的 id 若是无效 id 就删不到，
+///   那是保守多退一次）；
+/// - 一件不带、还整段清了某条分支的管身 → 一条重置清掉几段这里看不见，按可能删空算；
+/// - 什么都不删、什么都不插（D10 的只推回执）→ 记录集合原样不动，**不是**删空——零记录的根照旧零记录，
+///   那是它本来的样子，不是这份清单删出来的。
 ///
-/// 只在「可能」这一侧保守：判 `false` 的清单落完至少留一条记录，判 `true` 的回退整根重算，回退永远正确。
+/// 只在「可能」这一侧保守：判 `false` 的清单落完记录集合非空或与落之前相同，判 `true` 的回退整根重算，
+/// 回退永远正确。
 fn partial_delta_may_empty_the_root(delta: &UnitDelta, records_on_receipt: usize) -> bool {
     delta.upserts.is_empty()
-        && (!delta.tube_branch_resets.is_empty() || delta.removals.len() >= records_on_receipt)
+        && (!delta.tube_branch_resets.is_empty()
+            || (!delta.removals.is_empty() && delta.removals.len() >= records_on_receipt))
 }
 
 /// 目标没变、投影也还完整时这一根的全部改动：只重盖一次章。
@@ -3418,7 +3951,7 @@ pub(crate) fn manifest_hash(records: &[ProjectedGeometry]) -> anyhow::Result<(St
 
 /// [`manifest_hash`] 的借用形——同一份配方、同一个函数体，只是不要求记录连成一片。
 ///
-/// 单元级发布（ADR-078 D5）的回执是存储在**写锁里**、delta 落进去之后按这根此刻的全部记录
+/// 单元级发布（ADR-080 D5）的回执是存储在**写锁里**、delta 落进去之后按这根此刻的全部记录
 /// 盖的；那时记录散在 `BTreeMap` 里，按 record_id 一条条取出来的是借用，整根克隆一遍再喂
 /// `&[ProjectedGeometry]` 就是白扛一次 O(根内记录数) 的复制。三条路（重生成 / 刚体前移 /
 /// 单元级）从这里取的章对同一批记录逐字相同，对拍门比的正是它。
@@ -3676,6 +4209,60 @@ mod tests {
     use super::*;
     use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
+
+    /// ADR-084（内存控制计划 P3）：生成输入缓存按**库数**设上限——每库一条（同库换 sesno 替换、不算逐出），
+    /// 超过上限时最久没被生成用到的库整份出，**命中也刷新**；0 = 不限；`forget_dbnum` 不计入逐出数；
+    /// 被替 / 被逐的值原样交还给调用方（在锁外 drop）。
+    #[test]
+    fn the_generation_input_cache_keeps_at_most_n_dbnums_and_evicts_the_least_recently_used() {
+        let key = |dbnum: u32, sesno: u32| (dbnum, sesno, format!("id-{dbnum}"));
+        let mut cache: DbnumLru<&'static str> = DbnumLru::new();
+
+        // 0 = 不限：三个库都留着。
+        assert!(cache.insert(key(7997, 1), "7997@1", 0).is_empty());
+        assert!(cache.insert(key(8000, 1), "8000@1", 0).is_empty());
+        assert!(cache.insert(key(1112, 1), "1112@1", 0).is_empty());
+        assert_eq!(cache.dbnum_count(), 3);
+        assert_eq!(cache.evicted_dbnums, 0);
+
+        // 同库换 sesno：替换，不算逐出，旧值交还。
+        assert_eq!(cache.insert(key(7997, 2), "7997@2", 0), vec!["7997@1"]);
+        assert_eq!(cache.dbnum_count(), 3);
+        assert_eq!(cache.evicted_dbnums, 0);
+        assert_eq!(cache.get_touch(&key(7997, 1)), None, "旧 sesno 的键已不在");
+
+        // 命中刷新：8000 最旧 → 摸一下 8000，最旧变成 1112。
+        assert_eq!(cache.get_touch(&key(8000, 1)), Some("8000@1"));
+
+        // 上限 3、再进第四个库：最久没用的 1112 出，刚进的 7998 一定留。
+        assert_eq!(cache.insert(key(7998, 1), "7998@1", 3), vec!["1112@1"]);
+        assert_eq!(cache.dbnum_count(), 3);
+        assert_eq!(cache.evicted_dbnums, 1);
+        assert_eq!(cache.get_touch(&key(1112, 1)), None);
+
+        // 上限收到 1：留刚进的那一份，其余按序出（7997@2 比 8000@1 更旧——8000 被摸过）。
+        let displaced = cache.insert(key(5052, 1), "5052@1", 1);
+        assert_eq!(displaced.len(), 3, "{displaced:?}");
+        assert!(displaced.contains(&"7997@2") && displaced.contains(&"8000@1") && displaced.contains(&"7998@1"));
+        assert_eq!(cache.dbnum_count(), 1);
+        assert_eq!(cache.evicted_dbnums, 4);
+        assert_eq!(cache.get_touch(&key(5052, 1)), Some("5052@1"));
+
+        // 序在别的库之间也成立：上限 2，最旧的先出、被摸过的留。
+        assert!(cache.insert(key(6000, 1), "6000@1", 2).is_empty());
+        assert_eq!(cache.get_touch(&key(5052, 1)), Some("5052@1"));
+        assert_eq!(cache.insert(key(6001, 1), "6001@1", 2), vec!["6000@1"]);
+        assert_eq!(cache.evicted_dbnums, 5);
+
+        // forget：整库拿走、不计逐出。
+        assert_eq!(cache.forget_dbnum(5052), vec!["5052@1"]);
+        assert_eq!(cache.forget_dbnum(5052), Vec::<&str>::new());
+        assert_eq!(cache.dbnum_count(), 1);
+        assert_eq!(cache.evicted_dbnums, 5);
+        let ticks: Vec<(u32, u64)> = cache.iter().map(|(key, _, tick)| (key.0, tick)).collect();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].0, 6001);
+    }
 
     /// f32 印进 SQL 时只许带 f32 有的那几位。`json!` 的 `value as f64` 会把二进制展开的
     /// 尾巴一起印出来，而落库时间几乎全按字节走——这条钉住的是**字节**，不是数值。
@@ -3984,6 +4571,134 @@ mod tests {
             "ZERO_LENGTH_SECTION root=23714/997 elements={} failed={}",
             snapshot.elements.len(),
             snapshot.report.failed.len()
+        );
+        Ok(())
+    }
+
+    /// 字典库挂进 `build_set` 之后：UDA 按名字读得出，而几何**一根管也没多**。
+    ///
+    /// `:HXYsize` 是 H 族头槽位那条目录表达式 `( :HXYsize[n] )` 要的那一格。挂上字典库
+    /// 之前它根本不是个名字（`UnknownAttribute`），挂上之后是。两件事要一起成立：
+    /// 读得出，且这 7 个「只差这一格」的头槽位仍然一根管都不长——E3D 在本库自己也不画
+    /// （6 条报 `Catalogue error`、`30297` 连报都不报），所以长出来的会是我们凭空造的几何。
+    /// 它们不长，是因为风管隐式管身的求值环境**不挂设计元素**（`PREV` 才是那个构件），
+    /// UDA 在的是 BRAN 身上——挂字典库并不能把 BRAN 放进那个环境。
+    ///
+    /// 取证：`_runs/ams-init-1112-7997-20260917-mc/ledger-seg15-frameall.md` §16 / §18。
+    #[tokio::test]
+    #[ignore = "real AMS 7997 + the project Dictionary databases"]
+    async fn ams7997_dictionary_uda_reads_by_name_and_grows_no_duct() -> anyhow::Result<()> {
+        use e3d_io::record::descriptor::DescriptorValue;
+        use e3d_model::hvac_tube::duct_departure_section;
+        use e3d_model::route::RouteEnd;
+
+        let service = E3dModelService::from_current().await?;
+        anyhow::ensure!(
+            service.uda.is_some(),
+            "MDB 声明的字典库一个都没读出来，这条用例证明不了任何事"
+        );
+        let set = service.build_set(7997, None)?;
+
+        // 读得出：E3D 的 `Q :HXYsize` 在这条支管上答 675 600。
+        let branch = set.element(RefNo::new(24381, 59287));
+        assert_eq!(
+            branch.attribute(":HXYsize")?,
+            Some(DescriptorValue::RealArray(vec![675.0, 600.0]))
+        );
+
+        // 一根也没多：这 7 个头槽位就是「接上 UDA 就会长出来」的全部。
+        for word1 in [30297, 47065, 58284, 59287, 59302, 79980, 91034] {
+            let container = set.element(RefNo::new(24381, word1));
+            let grown = duct_departure_section(&RouteEnd::ContainerHead(container))?;
+            anyhow::ensure!(
+                grown.is_none(),
+                "24381/{word1} 的头槽位长出了一节 E3D 不画的管身：{grown:?}"
+            );
+        }
+
+        // 已经在画的那一支照旧：中段走的是构件自己的 `LSTU` 与离开 P 点，不碰 UDA。
+        let departure = set.element(RefNo::new(24381, 30293));
+        let section = duct_departure_section(&RouteEnd::MemberLeave {
+            member: departure,
+            ppoint: None,
+        })?
+        .context("TAPE 24381/30293 的离开侧断面")?;
+        assert_eq!(section.source, "/RTUBE2 BOXI /RTUBE2-BOXI");
+        match section.section {
+            e3d_model::route::TubeSection::Rectangular {
+                x_length, z_length, ..
+            } => {
+                assert_eq!((x_length, z_length), (1460.0, 1520.0));
+            }
+            other => anyhow::bail!("24381/30293 的中段断面变了：{other:?}"),
+        }
+
+        // 管道那一侧也数一遍：ZONE 24381/147826 的 13 条支管，E3D 导出 103 根隐式管身，
+        // 引擎在 `e1745dc` 之后逐根对上（§4 / §5）。挂字典库不该动这个数。
+        let pin = service.pin(7997)?;
+        let session = service.source_session(pin)?;
+        let index = scan_index(&pin.file, Some(session))?;
+        let snapshot = generate_snapshot_from_set(
+            &service.build_set(7997, Some(session))?,
+            &index,
+            RefNo::new(24381, 147826),
+            &mut CatalogueMeshCache::default(),
+        )?;
+        let tubes = snapshot
+            .elements
+            .iter()
+            .filter(|element| matches!(element.geometry_id, GeometryId::ImpliedTube { .. }))
+            .count();
+        assert_eq!(tubes, 103, "ZONE 24381/147826 的隐式管身根数变了");
+        Ok(())
+    }
+
+    /// 头槽位「一根也没多」不只靠求值环境不挂设计元素——**把 BRAN 挂上也长不出来**。
+    ///
+    /// 目录表达式里的 UDA 按字典的键求值（e3d-io `9508ac4`）：`/HRTUBE1-BOXI.PXLE` 写的键
+    /// `0x17EF4B61` 是 `AvevaCatalogue` 字典（acp7006）那条 `HXYsize` 的 `OLDKEY`，而支管的
+    /// `675 600` 存在本项目字典（ams5100）那条同名定义的键 `0x2652AB52` 下。六本字典按 CURD
+    /// 序合起来，键认成 acp 那条 → 对 BRAN 有效、元素上没值 → unset → 公式未解，印成 E3D
+    /// 的写法。这正是 E3D 自己对这些槽位报 `Catalogue error … unable to evaluate … PXLE`
+    /// 的落点；同一条支管 `Q :HXYsize` 却答 `675 600`。
+    #[tokio::test]
+    #[ignore = "real AMS 7997 + the project Dictionary databases"]
+    async fn ams7997_head_slot_expression_stays_unset_by_key_even_with_the_bran_attached()
+    -> anyhow::Result<()> {
+        use e3d_io::db_param_env::DbElementParamEnv;
+        use e3d_io::record::catalogue_eval::{AttributeNumber, ExpressionForm};
+        use e3d_io::record::descriptor::DescriptorValue;
+
+        let service = E3dModelService::from_current().await?;
+        let set = service.build_set(7997, None)?;
+        let dictionary = set.uda_catalog().context("MDB 声明的字典库一个都没读出来")?;
+        assert_eq!(
+            dictionary.by_key(0x17EF_4B61).map(|definition| definition.refno),
+            Some(RefNo::new(15198, 55)),
+            "目录写下的键该由 acp7006 的 /UDA/HVAC/HXYsize（OLDKEY）认下"
+        );
+
+        let branch = set.element(RefNo::new(24381, 59287));
+        assert_eq!(
+            branch.uda_by_key(0x2652_AB52)?,
+            Some(DescriptorValue::RealArray(vec![675.0, 600.0])),
+            "本项目字典那条键下有值"
+        );
+        assert_eq!(branch.uda_by_key(0x17EF_4B61)?, None, "目录指的那条键下没值");
+
+        let boxi = set
+            .find_named(7002, "/HRTUBE1-BOXI")?
+            .into_iter()
+            .map(|refno| set.element(refno))
+            .next()
+            .context("/HRTUBE1-BOXI 在 acp7002 里")?;
+        let attached = DbElementParamEnv::new(Some(branch), Some(boxi.clone()));
+        assert_eq!(
+            boxi.get_number("PXLE", &attached)?,
+            AttributeNumber::Unresolved {
+                form: ExpressionForm::Pml,
+                text: Some("( :HXYsize[2 ] )".into()),
+            }
         );
         Ok(())
     }
@@ -4791,7 +5506,7 @@ mod tests {
         owners
     }
 
-    /// ADR-078 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执不在规划基线 S 上的根
+    /// ADR-080 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执不在规划基线 S 上的根
     /// **回退**整根 regen 并说明原因；两种都不叫生产方、不发布、投影一字不动。残缺 / 解析不了的根在闸之前
     /// 就回退；生产方报错的根照 D8 回退并记原因。
     #[test]
@@ -4830,11 +5545,13 @@ mod tests {
             .map(|root| UnitPublishUnit {
                 root_refno: root.to_string(),
                 source_start_sesno: 42,
+                no_model_only: false,
             })
             .collect::<Vec<_>>();
         units.push(UnitPublishUnit {
             root_refno: "not-a-refno".into(),
             source_start_sesno: 42,
+            no_model_only: false,
         });
 
         let mut produced = Vec::new();
@@ -4884,7 +5601,7 @@ mod tests {
         }
     }
 
-    /// ADR-078 D4 / D5 / A4：回执停在 S 的根走成局部提交——`scope = Partial`、`published_via = "unit"`、
+    /// ADR-080 D4 / D5 / A4：回执停在 S 的根走成局部提交——`scope = Partial`、`published_via = "unit"`、
     /// `source_sesno` 前移到 T、章由存储盖、没点名的那件原地不动（还停在旧会话上，正是 D3 放宽 `<=` 要接住的形状）。
     /// 同一个计划再提一次：回执已在 T，闸判 `replayed`，生产方一次都不被叫到，投影一字不动。
     #[test]
@@ -4896,6 +5613,7 @@ mod tests {
         let unit = UnitPublishUnit {
             root_refno: root.to_string(),
             source_start_sesno: 42,
+            no_model_only: false,
         };
 
         let stamped = std::cell::RefCell::new(Vec::new());
@@ -5007,7 +5725,282 @@ mod tests {
         );
     }
 
-    /// ADR-078 D6 / 实施约束 4 的三条判据，直接对门本身：不重置就带段、重置了没账、账与段数不符，
+    /// ADR-080 D10：带 `no_model_only` 提示的根，生产方回一份**空** delta，执行体照样以 `Partial` 发出去
+    /// ——一件几何都不动（三条记录原地、`source_sesno` 停在 S），回执推到 T、章按原记录重算逐字不变，
+    /// `receipt_only` 点名它；同一份计划再提是重放。不带提示的根回出空 delta 是生产方的 bug：回退、不发。
+    #[test]
+    fn a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt() {
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let root = RefNo::new(24383, 800);
+        seed_complete_root(&store, &mesh_dir, root, 42);
+        let receipt_at_s = store.receipt(ProjectionScope::Current, root).unwrap();
+        let records_at_s = store.records_of_root(ProjectionScope::Current, root);
+        assert_eq!(records_at_s.len(), 3);
+
+        // 不带提示：空 delta 不许当「没变」发。
+        let unhinted = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: 42,
+            no_model_only: false,
+        };
+        let before = store.root_snapshot(ProjectionScope::Current, root);
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unhinted),
+            |_, _, _| Ok(UnitDelta::default()),
+            |_| panic!("空 delta 没有 no_model_only 提示不该发布"),
+        )
+        .unwrap();
+        assert!(report.completed.is_empty() && report.receipt_only.is_empty());
+        assert_eq!(report.fallbacks.len(), 1);
+        let reason = &report.fallbacks[0].1;
+        assert!(
+            reason.contains("not planned as no_model_only")
+                && reason.contains("falling back to regen"),
+            "{reason}"
+        );
+        assert_eq!(store.root_snapshot(ProjectionScope::Current, root), before);
+
+        // 带提示：空 Partial 发出去，只推回执。
+        let hinted = UnitPublishUnit {
+            no_model_only: true,
+            ..unhinted.clone()
+        };
+        let mut published = Vec::new();
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&hinted),
+            |unit, produced_root, old_receipt| {
+                assert!(unit.no_model_only);
+                assert_eq!(produced_root, root);
+                assert_eq!(old_receipt.source_sesno, 42);
+                Ok(UnitDelta::default())
+            },
+            |commits| {
+                assert_eq!(commits.len(), 1);
+                let commit = &commits[0];
+                assert_eq!(commit.scope, CommitScope::Partial);
+                assert!(
+                    commit.upserts.is_empty()
+                        && commit.removals.is_empty()
+                        && commit.tube_branch_resets.is_empty(),
+                    "空清单：不插、不删、不重写管段"
+                );
+                let (_, placeholder) = commit.receipt.as_ref().expect("回执照盖");
+                assert_eq!(
+                    (placeholder.source_sesno, placeholder.published_via.as_str()),
+                    (43, "unit")
+                );
+                published.extend(store.try_commit_current(commits));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed, vec![root.to_string()]);
+        assert_eq!(
+            report.receipt_only,
+            vec![root.to_string()],
+            "只推回执的根单列出来，供回执 / 面板观测"
+        );
+        assert!(report.replayed.is_empty() && report.fallbacks.is_empty());
+
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        assert_eq!(
+            records, records_at_s,
+            "一件几何都没动，`source_sesno` 停在 S"
+        );
+        let receipt = store.receipt(ProjectionScope::Current, root).unwrap();
+        assert_eq!(
+            (receipt.source_sesno, receipt.published_via.as_str()),
+            (43, "unit")
+        );
+        assert_eq!(
+            (receipt.manifest_hash.as_str(), receipt.geometry_count),
+            (
+                receipt_at_s.manifest_hash.as_str(),
+                receipt_at_s.geometry_count
+            ),
+            "章按原记录重算，与 S 上的逐字相同"
+        );
+        assert_eq!(published.as_slice(), &[(root, receipt.clone())]);
+        assert!(store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir));
+
+        // 再提一次：重放。
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&hinted),
+            |_, _, _| panic!("重放不该再要产出"),
+            |_| panic!("重放不该再发布"),
+        )
+        .unwrap();
+        assert_eq!(report.replayed, vec![root.to_string()]);
+    }
+
+    /// ADR-080 D10 的典型形状——**零记录的根**（HANG / SUPPO 那类没有 builder 的根，Q6 语料里 9172 个多算根有
+    /// 8486 个是它）：回执 `geometry_count = 0`、投影按定义完整。空 delta 对它**不是**「删空」（D2 那条判据
+    /// 只看真删了东西的清单），照样只推回执；显式删除 / 整段重写才按可能删空回退。
+    #[test]
+    fn an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root() {
+        // 判据本身：什么都不删的空清单不算「可能删空」，零记录的根也一样。
+        assert!(!partial_delta_may_empty_the_root(&UnitDelta::default(), 0));
+        assert!(!partial_delta_may_empty_the_root(&UnitDelta::default(), 3));
+        assert!(partial_delta_may_empty_the_root(
+            &UnitDelta {
+                removals: vec!["x".into()],
+                ..UnitDelta::default()
+            },
+            1
+        ));
+        assert!(partial_delta_may_empty_the_root(
+            &UnitDelta {
+                tube_branch_resets: vec![RefNo::new(24383, 1)],
+                ..UnitDelta::default()
+            },
+            0
+        ));
+        assert!(!partial_delta_may_empty_the_root(
+            &UnitDelta {
+                removals: vec!["x".into()],
+                ..UnitDelta::default()
+            },
+            2
+        ));
+
+        // 执行体上走一遍：零记录的根、回执停在 S。
+        let store = ModelMemoryStore::default();
+        let mesh_dir = unit_publish_mesh_dir();
+        let root = RefNo::new(24383, 900);
+        let (empty_hash, zero) = manifest_hash(&[]).unwrap();
+        assert_eq!(zero, 0);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: empty_hash.clone(),
+                        geometry_count: 0,
+                        published_via: "regen".into(),
+                        room: None,
+                    },
+                )),
+                ..ProjectionCommit::default()
+            }],
+        );
+        assert!(
+            store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir),
+            "零记录 + 回执数 0 = 完整"
+        );
+        let unit = UnitPublishUnit {
+            root_refno: root.to_string(),
+            source_start_sesno: 42,
+            no_model_only: true,
+        };
+        let report = republish_roots_by_unit_delta_on(
+            &store,
+            &mesh_dir,
+            43,
+            std::slice::from_ref(&unit),
+            |_, _, _| Ok(UnitDelta::default()),
+            |commits| {
+                store.try_commit_current(commits);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            report.completed,
+            vec![root.to_string()],
+            "{:?}",
+            report.fallbacks
+        );
+        assert_eq!(report.receipt_only, vec![root.to_string()]);
+        let receipt = store.receipt(ProjectionScope::Current, root).unwrap();
+        assert_eq!(receipt.source_sesno, 43);
+        assert_eq!(
+            (receipt.manifest_hash, receipt.geometry_count),
+            (empty_hash, 0),
+            "零记录的章就是空清单的章"
+        );
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        assert!(records.is_empty(), "零记录的根照旧零记录");
+    }
+
+    /// ADR-080 D10 生产方守卫 [`root_touched_only_by_no_model_candidates`]：只看两个方向（候选就是根、
+    /// 候选的 T 端 / S 端链经过根），根之上的候选不算；名下候选全是 `no_model` 且至少一个才成立。
+    ///
+    /// 层级（T 端）：ZONE 1 ─┬─ EQUI 10（根）─── BOX 11 / SUBE 12
+    ///                     └─ EQUI 20（根）─── BOX 21
+    /// S 端另有 BOX 13 在 EQUI 10 下（T 端删了）。
+    #[test]
+    fn the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain() {
+        let e = |n: u32| RefNo::new(24383, n);
+        let key = |n: u32| (24383u32, n);
+        let owners_t = BTreeMap::from([
+            (key(1), e(1)),
+            (key(10), e(1)),
+            (key(11), e(10)),
+            (key(12), e(10)),
+            (key(20), e(1)),
+            (key(21), e(20)),
+        ]);
+        let mut owners_s = owners_t.clone();
+        owners_s.insert(key(13), e(10));
+        let guard = |dispositions: &[((u32, u32), Disposition)]| {
+            root_touched_only_by_no_model_candidates(dispositions, e(10), &owners_s, &owners_t)
+        };
+
+        // 名下一个只戳的候选：成立。候选就是根自己：成立。
+        guard(&[(key(11), Disposition::NoModel)]).unwrap();
+        guard(&[(key(10), Disposition::NoModel)]).unwrap();
+        // 别的根名下的候选不算进来；根之上（ZONE 1）的 RolledUp 候选也不算——两个都不拦。
+        guard(&[
+            (key(11), Disposition::NoModel),
+            (key(21), Disposition::RolledUp),
+            (key(1), Disposition::RolledUp),
+        ])
+        .unwrap();
+        // 名下有一个 RolledUp / Unresolved：不成立，点名它。
+        let err = guard(&[
+            (key(11), Disposition::NoModel),
+            (key(12), Disposition::RolledUp),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("24383/12") && err.contains("RolledUp"),
+            "{err}"
+        );
+        let err = guard(&[(key(12), Disposition::Unresolved)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Unresolved"), "{err}");
+        // T 端删掉的 BOX 13 只在 S 端链上：照样归到这根名下。
+        let err = guard(&[
+            (key(11), Disposition::NoModel),
+            (key(13), Disposition::RolledUp),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("24383/13"), "{err}");
+        // 一个都归不到：不成立。
+        let err = guard(&[(key(21), Disposition::NoModel)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no ledger candidate is attributed"), "{err}");
+        assert!(guard(&[]).is_err());
+    }
+
+    /// ADR-080 D6 / 实施约束 4 的三条判据，直接对门本身：不重置就带段、重置了没账、账与段数不符，
     /// 三种都拦；重置 + 有账 + 段数对上才放行。只数段数，`route_ordinal` 有洞不算错（退化槽位本就不出几何）。
     #[test]
     fn the_tube_segment_gate_rejects_unreset_unaccounted_and_short_branches() {
@@ -5095,7 +6088,7 @@ mod tests {
         assert_eq!(tube_segment_completeness(&retired), Ok(()));
     }
 
-    /// ADR-078 A3：构造缺一段的 `Partial`，执行体必须在产出与提交之间回退 regen 并报出原因，**不得**发布——
+    /// ADR-080 A3：构造缺一段的 `Partial`，执行体必须在产出与提交之间回退 regen 并报出原因，**不得**发布——
     /// 两段旧管身原地不动。补齐那一段再来，同一条 BRAN 就走成局部提交。
     #[test]
     fn a_partial_delta_missing_one_tube_segment_falls_back_before_publishing() {
@@ -5142,6 +6135,7 @@ mod tests {
         let unit = UnitPublishUnit {
             root_refno: root.to_string(),
             source_start_sesno: 42,
+            no_model_only: false,
         };
         let rebuilt_segments = |ordinals: &[u32]| -> anyhow::Result<UnitDelta> {
             let (delta, _) = project_geometry_delta(
@@ -5223,7 +6217,7 @@ mod tests {
         assert_eq!((receipt.source_sesno, receipt.geometry_count), (43, 3));
     }
 
-    /// ADR-078 D6 第一条：产出里每一条 removal 都要回溯到子计划（`remove` / 画不出的 `regenerate` /
+    /// ADR-080 D6 第一条：产出里每一条 removal 都要回溯到子计划（`remove` / 画不出的 `regenerate` /
     /// 派生旧键）。多出来的一条就是 `execute_plan` 在别处推出了删除——局部提交下等于静默丢件。
     #[test]
     fn a_removal_that_does_not_trace_back_to_the_plan_is_refused() {
@@ -5259,7 +6253,7 @@ mod tests {
         assert!(err.to_string().contains("24383/22"), "{err:#}");
     }
 
-    /// ADR-078 D8 ① ② / Q4：退化成整库重建的窗计划切出来的子计划是空产出，不许当「没变」发；计划期有读挂的
+    /// ADR-080 D8 ① ② / Q4：退化成整库重建的窗计划切出来的子计划是空产出，不许当「没变」发；计划期有读挂的
     /// 一窗也不许。两种都在叫 `execute_plan` 之前拦下。
     #[test]
     fn a_degraded_or_unreadable_window_plan_admits_no_partial_publish() {
@@ -5270,6 +6264,7 @@ mod tests {
             derived_stale: BTreeSet::new(),
             full_rebuild: None,
             unreadable: 0,
+            dispositions: Vec::new(),
         };
         clean.admits_partial_publish().unwrap();
 
@@ -5280,6 +6275,7 @@ mod tests {
             derived_stale: BTreeSet::new(),
             full_rebuild: Some("candidates 30000 > max_candidates 20000".into()),
             unreadable: 0,
+            dispositions: Vec::new(),
         };
         let err = degraded.admits_partial_publish().unwrap_err().to_string();
         assert!(
@@ -5295,7 +6291,7 @@ mod tests {
         assert!(err.contains("2 unreadable"), "{err}");
     }
 
-    /// ADR-078 生产方守卫 3：只有 `design.session` / `design.digest` 前移是局部发布该看到的那一格；
+    /// ADR-080 生产方守卫 3：只有 `design.session` / `design.digest` 前移是局部发布该看到的那一格；
     /// 目录会话、模板、生成器指纹、细分档任何一格变了都不是一窗 DESI 差分能覆盖的。
     #[test]
     fn a_target_change_outside_the_design_window_disqualifies_a_partial_delta() {
@@ -5346,12 +6342,17 @@ mod tests {
         ));
     }
 
-    /// ADR-078 真库探针（手动）：一窗 S→T 里挑一根 regen 根，S 端整根重算灌进本地投影当基线（回执停在 S、
+    /// ADR-080 真库探针（手动）：一窗 S→T 里挑一根 regen 根，S 端整根重算灌进本地投影当基线（回执停在 S、
     /// 目标是 S 的），再走单元级发布（真生产方 [`UnitDeltaProducer`] → 执行体），最后与 T 端整根重算比
     /// **整根 `manifest_hash`**（D9 ①：逐字相同；不等时按 `geometry_id` 逐条报差异）。
     ///
     /// 旋钮：`AIOS_UNIT_PUBLISH_PROBE_DBNUM`（默认 8000）、`AIOS_UNIT_PUBLISH_PROBE_WINDOW=S:T`（默认该库
-    /// 最新两个会话）、`AIOS_UNIT_PUBLISH_PROBE_ROOT=a/b`（默认：规划器 regen 名单里第一根 S 端也有的）。
+    /// 最新两个会话）、`AIOS_UNIT_PUBLISH_PROBE_ROOT=a/b`（默认：规划器 regen 名单里第一根 S 端也有的）、
+    /// `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>`（MDB 没声明的语料库挂成额外的 DESI pin，目录依赖仍经当前 MDB 解；
+    /// Q6 那六个库要配 `DB_OPTION_FILE=db_options/DbOption-aps.toml`）。D10 的分桶随 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`
+    /// **且三条级联同开**（`AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE=1` / `AIOS_MODEL_CABLE_ENDPOINT_CASCADE=1` /
+    /// `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=1`，用户 0917 拍板「级联关着 ⇒ D10 不分桶」）收候选表——缺一个候选表为空、
+    /// `no_model_only` 恒假，空子计划照旧回退。
     /// 要配置好的 MDB（`from_current`）与 E3D 模板目录。烘焙写的是真 mesh 目录（内容寻址，与整根重算同一处）。
     #[tokio::test]
     #[ignore = "manual live: needs the configured MDB and the E3D template directory; run with --ignored --nocapture"]
@@ -5372,7 +6373,22 @@ mod tests {
                 .and_then(|value| value.parse::<u32>().ok())
         };
         let dbnum = env_u32("AIOS_UNIT_PUBLISH_PROBE_DBNUM").unwrap_or(8000);
-        let service = E3dModelService::from_current().await?;
+        let mut service = E3dModelService::from_current().await?;
+        // `AIOS_UNIT_PUBLISH_PROBE_FILE=<DESI 文件>`：MDB 没声明的语料库（Q6 那六个库都是）挂成一枚
+        // 额外的 DESI pin，目录依赖仍经当前 MDB 的定位器解——文件所属项目的 CATA / PROP 得在 MDB 里。
+        if let Ok(file) = std::env::var("AIOS_UNIT_PUBLISH_PROBE_FILE") {
+            use crate::data_interface::direct_store::DbPin;
+
+            let file = PathBuf::from(file);
+            anyhow::ensure!(file.is_file(), "{} is not a file", file.display());
+            service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+            service.pins.push(DbPin {
+                dbnum: dbnum as i32,
+                db_type: "DESI".into(),
+                file,
+                sesno: None,
+            });
+        }
         let pin = service.pin(dbnum)?;
         let (base_sesno, target_sesno) = match std::env::var("AIOS_UNIT_PUBLISH_PROBE_WINDOW") {
             Ok(window) => {
@@ -5428,6 +6444,20 @@ mod tests {
             plan.regen.len(),
             plan.degraded
         );
+        // D10 分桶：探针没有进程内账本，S 端根全算安定。候选表随 `model_unit_level_publish` 开关收集——
+        // 开关关着（没设 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`）时表空、一根都判不出来，探针照旧走老路。
+        let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
+        let no_model_only = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+        println!(
+            "planner: no_model_only roots {} of regen {} (D10; unit-level switch {}; candidates {})",
+            no_model_only.roots.len(),
+            plan.regen.len(),
+            crate::options::model_unit_level_publish(),
+            sources.rigid.candidates.len()
+        );
+        for root in &no_model_only.roots {
+            println!("  no_model_only {}", root.to_pdms_str());
+        }
         let root = match std::env::var("AIOS_UNIT_PUBLISH_PROBE_ROOT") {
             Ok(text) => parse_refno(&text)?,
             Err(_) => {
@@ -5512,9 +6542,19 @@ mod tests {
         println!(
             "window plan: regenerate {planned_regenerate} remove {planned_remove} derived {planned_derived} ({plan_secs:.2}s)"
         );
+        let root_enum = crate::data_interface::generation_root::refno_from_e3d(root);
+        let root_no_model_only = no_model_only.roots.contains(&root_enum);
+        if let Some((_, reason)) = no_model_only
+            .rejected
+            .iter()
+            .find(|(candidate, _)| refno_to_e3d(*candidate) == root)
+        {
+            println!("root is not no_model_only: {reason}");
+        }
         let unit = UnitPublishUnit {
             root_refno: root.to_string(),
             source_start_sesno: base_sesno,
+            no_model_only: root_no_model_only,
         };
         let delta_shape = std::cell::RefCell::new((0usize, 0usize, 0usize));
         let clock = Instant::now();
@@ -5523,7 +6563,7 @@ mod tests {
             &mesh_dir,
             target_sesno,
             std::slice::from_ref(&unit),
-            |_, root, old_receipt| producer.produce(root, old_receipt),
+            |unit, root, old_receipt| producer.produce(root, old_receipt, unit.no_model_only),
             |commits| {
                 let commit = &commits[0];
                 *delta_shape.borrow_mut() = (
@@ -5537,8 +6577,9 @@ mod tests {
         )?;
         let unit_secs = clock.elapsed().as_secs_f64();
         println!(
-            "unit path: completed {:?} replayed {:?} fallbacks {:?} ({unit_secs:.2}s); delta upserts / removals / branch resets = {:?}",
+            "unit path: completed {:?} (receipt-only {:?}) replayed {:?} fallbacks {:?} ({unit_secs:.2}s); delta upserts / removals / branch resets = {:?}",
             report.completed,
+            report.receipt_only,
             report.replayed,
             report.fallbacks,
             delta_shape.borrow()
@@ -5607,7 +6648,1346 @@ mod tests {
         Ok(())
     }
 
-    /// ADR-078 实施约束 5：单元级执行体里闸在产出之前、产出在提交之前，且执行体自己**不读任何记录、
+    /// `x` 这个量级上 f32 相邻两个数的间距（`world_bounds` 存 f32，盒差小于这一格就是舍入、不是几何）。
+    fn f32_ulp(x: f32) -> f32 {
+        let x = x.abs();
+        if !x.is_finite() {
+            return f32::INFINITY;
+        }
+        if x == 0.0 {
+            return f32::MIN_POSITIVE;
+        }
+        f32::from_bits(x.to_bits() + 1) - x
+    }
+
+    /// ADR-066 验收 1 的**生产记录半边** = S4b 计划 §5 门 3（手动，真库）：钉一窗 S→T、开着 `model_transform_cheap_path`
+    /// 跑生产同款选根 + 刚体分桶（`WindowRootSources::collect` → `impact` → `plan_window_roots` → `rigid_motion`），对每个
+    /// 判成 transform 的根：S 端整根重算灌进本地投影当基线（回执停在 S、目标是 S 的），走**真执行体**
+    /// （[`E3dModelService::republish_roots_by_rigid_motion_on`]：闸 → pin@T 目标核对 → `republish_records` + 盒闭包 → 回执），
+    /// 再与 T 端整根重算的投影记录逐条比。**判死三条**（§5 门 3，09-20 改口）：`record_id` 集合相同；`world_transform`
+    /// 逐元素 `|Δ| < 1e-9`；`world_bounds` 逐分量 `|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`——1e-3 是绝对底线，
+    /// 坐标量级上去了按 f32 ulp 放行（两边各自舍入最多 2 ulp；`t_c` 是该记录命中锚点的平移在这一分量上的值）。`mesh_id`：
+    /// Canonical 按 id 判死；Baked **一律按内容判**——id 不等时读两份网格，顶点数同、顶点 / 法线最大偏差 < 1e-3、索引逐位同
+    /// 记 `DRIFT`（CAS id 漂、几何同，观察项），否则判死。`manifest_hash` 相等只作观察项。另核 D4 回执：`source_sesno == T`、
+    /// `published_via == "transform"`、`model_target` 与 regen@T 会落的那份逐字段相等。另印每根盒差的最大值与该量级下
+    /// f32 的 ulp、以及「≥ 1e-3 mm 但被 ulp 臂放过」的分量数——改口前后的差别就在这一格。
+    ///
+    /// 旋钮：`AIOS_TRANSFORM_WINDOW=S:T`（必填）、`AIOS_RIGID_PROBE_DBNUM`（默认 8000）、`AIOS_RIGID_PROBE_FILE`（MDB 没声明的
+    /// 库挂成额外 DESI pin）、`AIOS_RIGID_PROBE_ROOTS=w0/w1,…`（只执行这几根；嵌套根共有记录时用它挑最内层）；
+    /// 开关 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=1` 必须开，否则分桶为空。要配置好的 MDB（`from_current`）
+    /// 与 E3D 模板目录；烘焙写真 mesh 目录（内容寻址，与整根重算同一处）。
+    #[tokio::test]
+    #[ignore = "manual live: AIOS_TRANSFORM_WINDOW=S:T on the configured MDB with AIOS_MODEL_TRANSFORM_CHEAP_PATH=1; run with --ignored --nocapture"]
+    async fn probe_rigid_motion_gate3_for_window() -> anyhow::Result<()> {
+        use std::time::Instant;
+
+        use crate::data_interface::generation_root::{
+            enumerate_generation_roots, resolve_delivery_unit_types,
+        };
+        use crate::data_interface::rigid_motion::pure_translation;
+        use crate::data_interface::window_root_plan::{
+            PersistedRoot, WindowRootSources, plan_window_roots,
+        };
+
+        let env_u32 = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+        };
+        let dbnum = env_u32("AIOS_RIGID_PROBE_DBNUM").unwrap_or(8000);
+        anyhow::ensure!(
+            crate::options::model_transform_cheap_path(),
+            "set AIOS_MODEL_TRANSFORM_CHEAP_PATH=1: with the switch off the planner classifies nothing"
+        );
+        let window = std::env::var("AIOS_TRANSFORM_WINDOW")
+            .context("AIOS_TRANSFORM_WINDOW=S:T is required")?;
+        let (base_sesno, target_sesno) = {
+            let (base, target) = window
+                .split_once(':')
+                .context("AIOS_TRANSFORM_WINDOW=S:T")?;
+            (base.trim().parse::<u32>()?, target.trim().parse::<u32>()?)
+        };
+        let mut service = E3dModelService::from_current().await?;
+        if let Ok(file) = std::env::var("AIOS_RIGID_PROBE_FILE") {
+            use crate::data_interface::direct_store::DbPin;
+
+            let file = PathBuf::from(file);
+            anyhow::ensure!(file.is_file(), "{} is not a file", file.display());
+            service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+            service.pins.push(DbPin {
+                dbnum: dbnum as i32,
+                db_type: "DESI".into(),
+                file,
+                sesno: None,
+            });
+        }
+        let pin = service.pin(dbnum)?;
+        println!(
+            "probe dbnum={dbnum} file={} window {base_sesno}→{target_sesno}",
+            pin.file.display()
+        );
+
+        // 生产同款选根 + 刚体分桶（探针没有进程内账本：S 端根全算安定）。
+        let base = generation_input(&service, dbnum, base_sesno)?;
+        let target = generation_input(&service, dbnum, target_sesno)?;
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let sources = WindowRootSources::collect(
+            &pin.file,
+            base_sesno,
+            target_sesno,
+            &base.set,
+            &target.set,
+            &unit_types,
+            &[],
+        )?;
+        let roots_s: Vec<PersistedRoot> =
+            enumerate_generation_roots(&base.set, &base.index.roots, &unit_types)?
+                .into_iter()
+                .map(|root| PersistedRoot {
+                    refno: root.root,
+                    noun: root.noun,
+                })
+                .collect();
+        let impact = sources.impact(&roots_s);
+        let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+        let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
+        let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
+        println!(
+            "planner: regen {} degraded {:?} | transform {} rejected {} | placement candidates {}",
+            plan.regen.len(),
+            plan.degraded,
+            rigid.transform.len(),
+            rigid.rejected.len(),
+            sources.rigid.candidates.len()
+        );
+        for (root, reason) in rigid.rejected.iter().take(10) {
+            println!("  rejected {} : {reason}", root.to_pdms_str());
+        }
+        anyhow::ensure!(
+            !rigid.transform.is_empty(),
+            "no root classified transform in {base_sesno}→{target_sesno}"
+        );
+        // `AIOS_RIGID_PROBE_ROOTS=w0/w1,w0/w1`：只把这几根交给执行体（嵌套根共有记录时挑最内层那根，
+        // 把「两根各乘一次 Δ」与几何 / f32 的题分开量）；不给 = 规划器判成 transform 的全部。
+        let only_roots: Option<BTreeSet<String>> =
+            std::env::var("AIOS_RIGID_PROBE_ROOTS").ok().map(|value| {
+                value
+                    .split(',')
+                    .map(|root| root.trim().to_string())
+                    .filter(|root| !root.is_empty())
+                    .collect()
+            });
+        let units: Vec<RigidMotionUnit> = rigid
+            .transform
+            .iter()
+            .map(|(root, anchors)| RigidMotionUnit {
+                root_refno: root.to_pdms_str(),
+                source_start_sesno: base_sesno,
+                anchors: anchors.clone(),
+            })
+            .filter(|unit| {
+                only_roots
+                    .as_ref()
+                    .is_none_or(|roots| roots.contains(&unit.root_refno))
+            })
+            .collect();
+        if let Some(roots) = &only_roots {
+            println!(
+                "  AIOS_RIGID_PROBE_ROOTS={roots:?}: executing {} of {} transform root(s)",
+                units.len(),
+                rigid.transform.len()
+            );
+            anyhow::ensure!(
+                !units.is_empty(),
+                "none of AIOS_RIGID_PROBE_ROOTS was classified transform"
+            );
+        }
+        for unit in &units {
+            let shapes = unit
+                .anchors
+                .iter()
+                .map(|anchor| match pure_translation(&anchor.delta) {
+                    Some(t) => format!(
+                        "{} t=({:.3}, {:.3}, {:.3})",
+                        anchor.refno.to_pdms_str(),
+                        t.x,
+                        t.y,
+                        t.z
+                    ),
+                    None => format!("{} rotation", anchor.refno.to_pdms_str()),
+                })
+                .collect::<Vec<_>>();
+            println!("  transform {} anchors {:?}", unit.root_refno, shapes);
+        }
+
+        // 基线：每根 S 端整根重算 → 本地投影，回执停在 S、目标是 S 的。
+        let store = ModelMemoryStore::default();
+        let mesh_dir = service.mesh_dir.clone();
+        let mut cache = CatalogueMeshCache::default();
+        let regen_at = |root: RefNo,
+                        sesno: u32,
+                        input: &GenerationInput,
+                        cache: &mut CatalogueMeshCache|
+         -> anyhow::Result<ProjectionCommit> {
+            let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, cache)?;
+            anyhow::ensure!(
+                snapshot.report.failed.is_empty(),
+                "regen of {root} at {sesno} has {} failed element(s)",
+                snapshot.report.failed.len()
+            );
+            let owners = snapshot.owners.clone();
+            let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
+            let (commit, _) =
+                project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
+            Ok(commit)
+        };
+        // 两端都先整根重算完再落款：目录会话表是生成时按需填的（`E3dDbResolver` 开到哪个目录库才登记哪个），
+        // `model_target` 的 `catalogue` 列就是「此刻表里有什么」——逐根边生成边落款，早生成的根落款里目录少几行，
+        // 与 regen@T 的落款比就是假阴性。表填满之后 S / T 两端各算一次，所有根共用。
+        let clock = Instant::now();
+        let mut seeds = Vec::new();
+        let mut regen_t_by_root = BTreeMap::<String, ProjectionCommit>::new();
+        for unit in &units {
+            let root = parse_refno(&unit.root_refno)?;
+            seeds.push((
+                root,
+                unit.root_refno.clone(),
+                regen_at(root, base_sesno, &base, &mut cache)?,
+            ));
+            regen_t_by_root.insert(
+                unit.root_refno.clone(),
+                regen_at(root, target_sesno, &target, &mut cache)?,
+            );
+        }
+        let target_at_s = service.model_target(dbnum, base_sesno, &base.dependency_sessions)?;
+        let target_at_t = service.model_target(dbnum, target_sesno, &target.dependency_sessions)?;
+        // 嵌套根（STRU ⊃ FRMW ⊃ SBFR 一类）名下记录互相包含：`records_of_root` 按祖先链取，两根共有的记录
+        // 会被两根各处理一遍。先把重叠数出来，对拍失败时好归因。
+        let seed_ids: Vec<(String, BTreeSet<String>)> = seeds
+            .iter()
+            .map(|(_, root_refno, seed)| {
+                (
+                    root_refno.clone(),
+                    seed.upserts
+                        .iter()
+                        .map(|record| record.record_id.clone())
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut shared_records = BTreeMap::<String, usize>::new();
+        for (i, (root_a, ids_a)) in seed_ids.iter().enumerate() {
+            for (root_b, ids_b) in seed_ids.iter().skip(i + 1) {
+                let shared = ids_a.intersection(ids_b).count();
+                if shared > 0 {
+                    println!(
+                        "  NESTED  {root_a} ∩ {root_b}: {shared} shared record(s) (both roots will republish them)"
+                    );
+                    *shared_records.entry(root_a.clone()).or_default() += shared;
+                    *shared_records.entry(root_b.clone()).or_default() += shared;
+                }
+            }
+        }
+        for (root, _, mut seed) in seeds {
+            let (hash, count) = manifest_hash(&seed.upserts)?;
+            seed.receipt = Some((
+                root,
+                RootReceipt {
+                    source_sesno: base_sesno,
+                    model_target: Some(target_at_s.clone()),
+                    manifest_hash: hash,
+                    geometry_count: count,
+                    published_via: "regen".into(),
+                    room: None,
+                },
+            ));
+            store.commit(ProjectionScope::Current, vec![seed]);
+            anyhow::ensure!(
+                store.root_projection_complete(ProjectionScope::Current, root, &mesh_dir),
+                "seed projection of {root} incomplete"
+            );
+        }
+        println!(
+            "seed@{base_sesno}: {} root(s) regenerated into the local projection; regen@{target_sesno} reference ready ({:.2}s); nested roots sharing records: {}",
+            units.len(),
+            clock.elapsed().as_secs_f64(),
+            shared_records.len()
+        );
+
+        // 真执行体（无锁本体；探针自己是唯一写者），发布口直接提交本地投影。
+        let clock = Instant::now();
+        let report = service.republish_roots_by_rigid_motion_on(
+            &store,
+            dbnum,
+            target_sesno,
+            &units,
+            |commits| {
+                store.try_commit_current(commits);
+                Ok(())
+            },
+        )?;
+        let transform_secs = clock.elapsed().as_secs_f64();
+        println!(
+            "executor: completed {:?} replayed {:?} fallbacks {:?} ({transform_secs:.2}s)",
+            report.completed, report.replayed, report.fallbacks
+        );
+
+        // 门 3：与 T 端整根重算的投影记录逐条比。
+        let mut failures = Vec::new();
+        let mut total_ulp_arm_passes = 0usize;
+        let mut total_drift = 0usize;
+        let clock = Instant::now();
+        for root_refno in &report.completed {
+            let root = parse_refno(root_refno)?;
+            let unit = units
+                .iter()
+                .find(|unit| &unit.root_refno == root_refno)
+                .context("unit of a completed root")?;
+            let pure = unit
+                .anchors
+                .iter()
+                .all(|anchor| pure_translation(&anchor.delta).is_some());
+            let moved: BTreeMap<String, ProjectedGeometry> = store
+                .records_of_root(ProjectionScope::Current, root)
+                .into_iter()
+                .map(|record| (record.record_id.clone(), record))
+                .collect();
+            let regen_t = regen_t_by_root
+                .get(root_refno)
+                .context("regen@T reference of a completed root")?;
+            let regen: BTreeMap<String, ProjectedGeometry> = regen_t
+                .upserts
+                .iter()
+                .cloned()
+                .map(|record| (record.record_id.clone(), record))
+                .collect();
+            let receipt = store
+                .receipt(ProjectionScope::Current, root)
+                .context("receipt after transform")?;
+            let (regen_hash, _) = manifest_hash(&regen_t.upserts)?;
+            // D4：transform 落地后的回执要与一次 regen@T 落地后一模一样——凭证在 T、目标是 pin@T 的。
+            let receipt_target_equal = receipt.model_target.as_ref() == Some(&target_at_t);
+            let receipt_ok = receipt.source_sesno == target_sesno
+                && receipt.published_via == "transform"
+                && receipt_target_equal;
+            println!(
+                "    receipt: source_sesno {} published_via {} model_target.design.session {:?} | == regen@{target_sesno} target: {}",
+                receipt.source_sesno,
+                receipt.published_via,
+                receipt
+                    .model_target
+                    .as_ref()
+                    .map(|target| target.design.session),
+                if receipt_target_equal { "yes" } else { "NO" }
+            );
+            if !receipt_target_equal {
+                if let Some(stamped) = receipt.model_target.as_ref() {
+                    let differing: Vec<&str> = [
+                        ("project", stamped.project == target_at_t.project),
+                        ("design", stamped.design == target_at_t.design),
+                        ("catalogue", stamped.catalogue == target_at_t.catalogue),
+                        (
+                            "template_attlib_digest",
+                            stamped.template_attlib_digest == target_at_t.template_attlib_digest,
+                        ),
+                        (
+                            "generator_fingerprint",
+                            stamped.generator_fingerprint == target_at_t.generator_fingerprint,
+                        ),
+                        (
+                            "tessellation_profile",
+                            stamped.tessellation_profile == target_at_t.tessellation_profile,
+                        ),
+                    ]
+                    .into_iter()
+                    .filter_map(|(name, equal)| (!equal).then_some(name))
+                    .collect();
+                    println!(
+                        "    TARGET  fields differing from regen@{target_sesno}: {differing:?} (catalogue rows: transform {} vs regen {})",
+                        stamped.catalogue.len(),
+                        target_at_t.catalogue.len()
+                    );
+                }
+            }
+
+            let only_moved: Vec<_> = moved
+                .keys()
+                .filter(|key| !regen.contains_key(*key))
+                .cloned()
+                .collect();
+            let only_regen: Vec<_> = regen
+                .keys()
+                .filter(|key| !moved.contains_key(*key))
+                .cloned()
+                .collect();
+            let mut max_matrix = 0f64;
+            let mut max_bounds = 0f32;
+            let mut max_bounds_ulps = 0f32;
+            let mut magnitude = 0f32;
+            // §5 门 3 `world_bounds` 判法（09-20 改口）：逐分量 `|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`。
+            // 1e-3 的绝对底线保留，坐标量级上去了按 ulp 放行：两边各自 f32 舍入——transform 侧纯平移是 f32(f32(盒_S) + t_c)
+            // （S 端一次、T 端一次，S 端量级 ≤ |a| + |t_c|），regen 侧 f32(f64 紧盒) 一次，最多 2 ulp（按两端量级较大者）；
+            // 含旋转两边都是 f32(f64 紧盒)，`+ |t_c|` 只是多给一点余量。超容差的分量判死；≥ 1e-3 但被 ulp 臂放过的记观察项。
+            let mut bounds_over: Vec<(String, &'static str, f32, f32, f32)> = Vec::new();
+            let mut ulp_arm_passes = 0usize;
+            let mut mesh_mismatch = Vec::new();
+            // Baked 网格是「世界求值 → 乘 world⁻¹ 本地化」存 CAS 的：位置一变，本地化后的顶点末位就可能翻，regen@T
+            // 落出内容相同、id 不同的新网格——纯平移也漂（09-20 270→271 四条）。§5 门 3（09-20 改口）：Baked **一律按内容判**，
+            // 不再分纯平移 / 含旋转：id 不等时读两份网格，顶点数同、顶点 / 法线最大偏差 < 1e-3、索引逐位同 = 同一份几何、
+            // 只是 CAS id 漂（`DRIFT` 观察项），否则判死。Canonical 的 `mesh_id` 是标准网格，仍按 id 判死。
+            let mut mesh_drift = Vec::new();
+            let mut matrix_diffs: Vec<(f64, String)> = Vec::new();
+            // 盒差最大的那一格：(记录, 分量名, regen 值, transform 值)——看 1e-3 是撞在哪个量级上。
+            let mut worst_bounds: Option<(String, &'static str, f32, f32)> = None;
+            let mut worst_ulps: Option<(String, &'static str, f32, f32)> = None;
+            const COMPONENTS: [&str; 6] = ["min.x", "min.y", "min.z", "max.x", "max.y", "max.z"];
+            for (key, after) in &moved {
+                let Some(expected) = regen.get(key) else {
+                    continue;
+                };
+                let matrix = expected
+                    .world_transform
+                    .to_cols_array()
+                    .iter()
+                    .zip(after.world_transform.to_cols_array().iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0f64, f64::max);
+                max_matrix = max_matrix.max(matrix);
+                matrix_diffs.push((matrix, key.clone()));
+                // 这条记录命中的锚点的平移列——容差里的 `t_c` 按分量取；不在任何锚点之下的记录 t = 0。
+                let translation =
+                    crate::data_interface::rigid_motion::nearest_anchor(after, &unit.anchors)
+                        .map(|anchor| anchor.delta.w_axis.truncate())
+                        .unwrap_or(glam::DVec3::ZERO);
+                for (component, (x, y)) in expected
+                    .world_bounds
+                    .iter()
+                    .flatten()
+                    .zip(after.world_bounds.iter().flatten())
+                    .enumerate()
+                {
+                    let diff = (x - y).abs();
+                    let scale = x.abs().max(y.abs());
+                    let t_c = translation[component % 3].abs() as f32;
+                    let tolerance = 1e-3f32.max(2.0 * f32_ulp(scale + t_c));
+                    if diff > max_bounds {
+                        worst_bounds = Some((key.clone(), COMPONENTS[component], *x, *y));
+                    }
+                    let ulps = diff / f32_ulp(scale);
+                    if ulps > max_bounds_ulps {
+                        worst_ulps = Some((key.clone(), COMPONENTS[component], *x, *y));
+                    }
+                    max_bounds = max_bounds.max(diff);
+                    magnitude = magnitude.max(scale);
+                    max_bounds_ulps = max_bounds_ulps.max(ulps);
+                    if diff > tolerance {
+                        bounds_over.push((key.clone(), COMPONENTS[component], *x, *y, tolerance));
+                    } else if diff >= 1e-3 {
+                        ulp_arm_passes += 1;
+                    }
+                }
+                let canonical = matches!(expected.shape, ProjectedShape::Canonical { .. });
+                if expected.mesh_id != after.mesh_id {
+                    // (顶点数, 顶点数', 顶点最大偏差 mm, 法线最大偏差, 索引是否逐位相同)
+                    let verdict = if canonical {
+                        None
+                    } else {
+                        let read = |mesh_id: &str| {
+                            read_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")))
+                        };
+                        let max_delta = |ours: &[glam::Vec3], theirs: &[glam::Vec3]| {
+                            if ours.len() != theirs.len() {
+                                return f32::INFINITY;
+                            }
+                            ours.iter()
+                                .zip(theirs.iter())
+                                .map(|(a, b)| (*a - *b).abs().max_element())
+                                .fold(0f32, f32::max)
+                        };
+                        match (read(&after.mesh_id), read(&expected.mesh_id)) {
+                            (Ok(ours), Ok(theirs)) => Some((
+                                ours.vertices.len(),
+                                theirs.vertices.len(),
+                                max_delta(&ours.vertices, &theirs.vertices),
+                                max_delta(&ours.normals, &theirs.normals),
+                                ours.indices == theirs.indices,
+                            )),
+                            _ => None,
+                        }
+                    };
+                    match verdict {
+                        Some((n, m, delta, normal_delta, same_indices))
+                            if n == m && delta < 1e-3 && normal_delta < 1e-3 && same_indices =>
+                        {
+                            mesh_drift.push((key.clone(), n, delta, normal_delta));
+                        }
+                        _ => mesh_mismatch.push((key.clone(), verdict)),
+                    }
+                }
+            }
+            let bounds_ok = bounds_over.is_empty();
+            total_ulp_arm_passes += ulp_arm_passes;
+            total_drift += mesh_drift.len();
+            let records_off = matrix_diffs
+                .iter()
+                .filter(|(diff, _)| *diff >= 1e-9)
+                .count();
+            println!(
+                "root {root_refno} ({} records, {} anchor(s), {}{}): ids +{} −{} | world_transform max |Δ| {max_matrix:.3e} ({records_off} record(s) ≥ 1e-9) | world_bounds max diff {max_bounds:.6} mm = {max_bounds_ulps:.2} ulp (|coord| ≤ {magnitude:.1} mm, ulp there {:.6} mm; over tolerance {}, ≥ 1e-3 passed by ulp arm {ulp_arm_passes}) | mesh_id mismatches {} + drift {} | manifest_hash {}",
+                moved.len(),
+                unit.anchors.len(),
+                if pure { "pure translation" } else { "rotation" },
+                match shared_records.get(root_refno) {
+                    Some(shared) => format!(", {shared} record(s) shared with nested root(s)"),
+                    None => String::new(),
+                },
+                only_moved.len(),
+                only_regen.len(),
+                f32_ulp(magnitude),
+                bounds_over.len(),
+                mesh_mismatch.len(),
+                mesh_drift.len(),
+                if receipt.manifest_hash == regen_hash {
+                    "equal"
+                } else {
+                    "DIFFERENT (observation only)"
+                }
+            );
+            if max_bounds > 0.0 {
+                if let Some((key, component, regen_value, transform_value)) = &worst_bounds {
+                    println!(
+                        "    BOUNDS  worst abs: {key} {component} regen {regen_value:.6} vs transform {transform_value:.6} (diff {:.6} mm = {:.2} ulp at that magnitude)",
+                        (regen_value - transform_value).abs(),
+                        (regen_value - transform_value).abs()
+                            / f32_ulp(regen_value.abs().max(transform_value.abs()))
+                    );
+                }
+                if let Some((key, component, regen_value, transform_value)) = &worst_ulps {
+                    println!(
+                        "    BOUNDS  worst ulp: {key} {component} regen {regen_value:.6} vs transform {transform_value:.6} (diff {:.6} mm = {:.2} ulp at that magnitude)",
+                        (regen_value - transform_value).abs(),
+                        (regen_value - transform_value).abs()
+                            / f32_ulp(regen_value.abs().max(transform_value.abs()))
+                    );
+                }
+            }
+            for (key, component, regen_value, transform_value, tolerance) in
+                bounds_over.iter().take(3)
+            {
+                println!(
+                    "    BOUNDS  OVER: {key} {component} regen {regen_value:.6} vs transform {transform_value:.6} (diff {:.6} mm > tolerance {tolerance:.6} mm = max(1e-3, 2 ulp))",
+                    (regen_value - transform_value).abs()
+                );
+            }
+            for key in only_moved.iter().take(5) {
+                println!("    EXTRA   {key} (transform has it, regen@T does not)");
+            }
+            for key in only_regen.iter().take(5) {
+                println!("    MISSING {key} (regen@T has it, transform does not)");
+            }
+            for (key, verdict) in mesh_mismatch.iter().take(5) {
+                println!(
+                    "    MESH    {key}: transform {} vs regen {} | content: {}",
+                    moved[key].mesh_id,
+                    regen[key].mesh_id,
+                    match verdict {
+                        Some((n, m, delta, normal_delta, same_indices)) => format!(
+                            "{n} vs {m} vertices, max |Δv| {delta:.6} mm, max |Δn| {normal_delta:.3e}, indices {}",
+                            if *same_indices { "same" } else { "DIFFER" }
+                        ),
+                        None => "unreadable / canonical".to_string(),
+                    }
+                );
+            }
+            for (key, n, delta, normal_delta) in mesh_drift.iter().take(3) {
+                println!(
+                    "    DRIFT   {key}: Baked mesh id differs, content equal ({n} vertices, max |Δv| {delta:.3e} mm, max |Δn| {normal_delta:.3e}, indices same) — transform {} vs regen {}",
+                    moved[key].mesh_id, regen[key].mesh_id
+                );
+            }
+            // 矩阵不等的记录：印最差的三条——它在哪条祖先链上、命中了哪个锚点、两边的平移列各是什么。
+            matrix_diffs.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for (diff, key) in matrix_diffs
+                .iter()
+                .filter(|(diff, _)| *diff >= 1e-9)
+                .take(3)
+            {
+                let after = &moved[key];
+                let expected = &regen[key];
+                let chain: Vec<String> = after
+                    .ancestors
+                    .iter()
+                    .map(|packed| {
+                        let packed = *packed as u64;
+                        format!("{}/{}", packed >> 32, packed as u32)
+                    })
+                    .collect();
+                let anchor =
+                    crate::data_interface::rigid_motion::nearest_anchor(after, &unit.anchors)
+                        .map(|anchor| anchor.refno.to_pdms_str());
+                println!(
+                    "    OFF     {key} {} source_sesno {} |Δ| {diff:.3e}: transform t=({:.3}, {:.3}, {:.3}) vs regen t=({:.3}, {:.3}, {:.3}) | nearest anchor {:?} | ancestors {}",
+                    after.noun,
+                    after.source_sesno,
+                    after.world_transform.w_axis.x,
+                    after.world_transform.w_axis.y,
+                    after.world_transform.w_axis.z,
+                    expected.world_transform.w_axis.x,
+                    expected.world_transform.w_axis.y,
+                    expected.world_transform.w_axis.z,
+                    anchor,
+                    chain.join(" → ")
+                );
+            }
+            if !only_moved.is_empty() || !only_regen.is_empty() {
+                failures.push(format!(
+                    "{root_refno}: record_id sets differ (+{} −{})",
+                    only_moved.len(),
+                    only_regen.len()
+                ));
+            }
+            if max_matrix >= 1e-9 {
+                failures.push(format!(
+                    "{root_refno}: world_transform max |Δ| {max_matrix:.3e} ≥ 1e-9"
+                ));
+            }
+            if !bounds_ok {
+                failures.push(format!(
+                    "{root_refno}: {} world_bounds component(s) over max(1e-3 mm, 2 ulp) — max diff {max_bounds:.6} mm = {max_bounds_ulps:.2} ulp at |coord| ≤ {magnitude:.1} mm",
+                    bounds_over.len()
+                ));
+            }
+            if !mesh_mismatch.is_empty() {
+                failures.push(format!(
+                    "{root_refno}: {} mesh_id(s) differ (Canonical id / Baked content)",
+                    mesh_mismatch.len()
+                ));
+            }
+            if !receipt_ok {
+                failures.push(format!(
+                    "{root_refno}: receipt not stamped at T (source_sesno {} published_via {} target == regen@T: {})",
+                    receipt.source_sesno,
+                    receipt.published_via,
+                    receipt.model_target.as_ref() == Some(&target_at_t)
+                ));
+            }
+        }
+        println!(
+            "parity check {:.2}s; bounds components ≥ 1e-3 mm passed by the ulp arm: {total_ulp_arm_passes}; Baked mesh_id drift with equal content: {total_drift} record(s)",
+            clock.elapsed().as_secs_f64()
+        );
+        anyhow::ensure!(
+            !report.completed.is_empty(),
+            "no root went the transform path (fallbacks {:?})",
+            report.fallbacks
+        );
+        if failures.is_empty() {
+            println!(
+                "GATE 3 OK: {} root(s) transform == regen@{target_sesno} (record_id / 1e-9 / bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content / receipt@T){}",
+                report.completed.len(),
+                if total_drift > 0 {
+                    format!(
+                        " — {total_drift} Baked mesh_id drift(s) counted as observation (content equal)"
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+        for failure in &failures {
+            println!("GATE 3 FAIL: {failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "gate 3 failed on {} check(s); see GATE 3 FAIL lines",
+            failures.len()
+        );
+        Ok(())
+    }
+
+    /// ADR-080 A6 / D9 ②（手动，全语料）：沿每个 DESI 库的会话链逐窗走**生产口径**选根，对 `plan.regen` 里
+    /// **S 端也有**的根（跨名单等距抽样）各做一遍 [`probe_unit_publish_one_root_against_regen`] 那三步——
+    /// S 端整根重算灌基线 → 单元路（真生产方 + 执行体）→ 与 T 端整根重算比整根 `manifest_hash`——按库汇总进证据档。
+    /// **一根 DIFF 即红**（D9 ①）；回退 / 重放 / 生成失败只计数不判红（回退永远正确、只是不省）。
+    ///
+    /// 目录依赖仍经**当前 MDB**（`DB_OPTION_FILE`）解，所以一次只覆盖 MDB 解得出目录的那些库；语料五个目录里
+    /// 别的项目的库要换 `DB_OPTION_FILE` 再跑一遍——pin 不进 / 开不了窗的库记 `skip`，不算红。
+    /// 旋钮：`AIOS_POSREF_DIRS`（`;` 分隔，默认 S7 那五个目录）、`AIOS_UNIT_PUBLISH_STEPS_PER_DB`（每库会话链最后 K 步，
+    /// 0 = 整条链）、`AIOS_UNIT_PUBLISH_ROOTS_PER_WINDOW`（默认 40，0 = 全量；一窗上千根时跨 regen 名单等距抽）、
+    /// `AIOS_UNIT_PUBLISH_BUDGET_SECS`（默认 2400，到了只数不量）、`AIOS_UNIT_PUBLISH_MESH_DIR`（烘焙目录，默认临时目录、
+    /// 跑完删；`AIOS_UNIT_PUBLISH_KEEP_MESHES=1` 留着）、`AIOS_UNIT_PUBLISH_REPORT`（默认
+    /// `docs/evidence/2026-09-17-unit-publish-parity-corpus.md`，每跑一次追加一节；目录按政策不入库）、
+    /// `AIOS_UNIT_PUBLISH_SHARD=k/n`（全语料按**窗**轮流分给 n 个进程并行跑，本进程只量第 k 份；末尾一行
+    /// `SUMMARY_JSON` 几份相加就是全语料——ams8000 一条链六百多窗，按库分片会让一个进程吃光预算）。
+    /// D10 分桶随 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1` 且三条级联同开（同单根探针）。
+    #[tokio::test]
+    #[ignore = "manual live: walks every DESI chain of the corpus; needs DB_OPTION_FILE (MDB) and the E3D template directory"]
+    async fn probe_unit_publish_corpus_against_regen() -> anyhow::Result<()> {
+        use std::io::Write as _;
+        use std::time::Instant;
+
+        use crate::data_interface::direct_store::DbPin;
+        use crate::data_interface::generation_root::{
+            GenerationRoot, enumerate_generation_roots, refno_from_e3d, refno_to_e3d,
+            resolve_delivery_unit_types,
+        };
+        use crate::data_interface::reverse_reference::sources_in_dir;
+        use crate::data_interface::window_root_plan::{
+            PersistedRoot, WindowRootSources, plan_window_roots,
+        };
+        use e3d_io::engine::ReadOnlyEngine;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        let env_usize = |name: &str, default: usize| -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let per_db = env_usize("AIOS_UNIT_PUBLISH_STEPS_PER_DB", 0);
+        let roots_per_window = env_usize("AIOS_UNIT_PUBLISH_ROOTS_PER_WINDOW", 40);
+        let budget_secs = env_usize("AIOS_UNIT_PUBLISH_BUDGET_SECS", 2400) as f64;
+        // `AIOS_UNIT_PUBLISH_SHARD=k/n`：全语料按**窗**（不是按库——ams8000 一条链就有六百多窗）轮流分给 n 个进程，
+        // 本进程只量第 k 份；别的窗一概不数。几份的 `SUMMARY_JSON` 相加就是全语料。
+        let (shard, shards) = std::env::var("AIOS_UNIT_PUBLISH_SHARD")
+            .ok()
+            .and_then(|value| {
+                let (k, n) = value.split_once('/')?;
+                Some((k.trim().parse::<usize>().ok()?, n.trim().parse::<usize>().ok()?))
+            })
+            .filter(|(k, n)| *n > 0 && k < n)
+            .unwrap_or((0, 1));
+        let mut window_index = 0usize;
+        let keep_meshes = std::env::var("AIOS_UNIT_PUBLISH_KEEP_MESHES").is_ok_and(|v| v == "1");
+        let report_path = PathBuf::from(std::env::var("AIOS_UNIT_PUBLISH_REPORT").unwrap_or_else(
+            |_| {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/docs/evidence/2026-09-17-unit-publish-parity-corpus.md"
+                )
+                .into()
+            },
+        ));
+        let mesh_dir = std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("unit-publish-parity-meshes"));
+        std::fs::create_dir_all(&mesh_dir)?;
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+        let db_option_file = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "(default)".into());
+        let switches = format!(
+            "unit_level_publish={} structural_connection={} cable_endpoint={} design_reference={} \
+             skip_metadata_only={} transform_cheap_path={}",
+            crate::options::model_unit_level_publish(),
+            crate::options::model_structural_connection_cascade(),
+            crate::options::model_cable_endpoint_cascade(),
+            crate::options::model_design_reference_cascade(),
+            crate::options::model_skip_metadata_only_changes(),
+            crate::options::model_transform_cheap_path(),
+        );
+
+        let mut service = E3dModelService::from_current().await?;
+        service.mesh_dir = mesh_dir.clone();
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let started = Instant::now();
+        println!("corpus probe: DB_OPTION_FILE={db_option_file}; {switches}; mesh_dir={}", mesh_dir.display());
+
+        /// 一根的结局。
+        enum Outcome {
+            Parity {
+                ok: bool,
+                receipt_only: bool,
+                records: usize,
+                unit_secs: f64,
+                regen_t_secs: f64,
+                diff: usize,
+                extra: usize,
+                missing: usize,
+                /// 两端整根重算里画不出的件数（S, T）——不拦对拍，只记。
+                failed_elements: (usize, usize),
+            },
+            Fallback(String),
+            Replayed,
+            SeedFailed(String),
+            RegenTargetFailed(String),
+        }
+        /// 回退原因归桶：同一类只按类计，不按根展开。
+        fn fallback_bucket(reason: &str) -> &'static str {
+            const BUCKETS: [(&str, &str); 10] = [
+                ("no_model_only hint does not hold", "空子计划·no_model_only 复核不成立"),
+                ("names no unit under root", "空子计划·级联 / 恢复选进来的根（非 no_model_only）"),
+                ("immutable target", "设计窗之外的目标变了（目录 / 模板 / 生成器 / 细分档）"),
+                ("carries no model target", "旧回执没带目标"),
+                ("execute_plan under root", "execute_plan 报失败"),
+                ("tube segment", "管段完整性门"),
+                ("does not trace back", "removal 回溯不到子计划"),
+                ("full_rebuild", "窗计划退化成整库重建"),
+                ("unreadable", "计划期读挂"),
+                ("baseline", "回执不在规划基线上"),
+            ];
+            BUCKETS
+                .iter()
+                .find(|(needle, _)| reason.contains(needle))
+                .map(|(_, bucket)| *bucket)
+                .unwrap_or("其它")
+        }
+        #[derive(Default)]
+        struct FileStats {
+            windows: usize,
+            windows_skipped: usize,
+            windows_degraded: usize,
+            regen_roots: usize,
+            roots_at_s: usize,
+            tried: usize,
+            parity_ok: usize,
+            receipt_only: usize,
+            diff: usize,
+            fallback: usize,
+            replayed: usize,
+            seed_failed: usize,
+            regen_failed: usize,
+            with_failed_elements: usize,
+            over_budget: usize,
+            unit_secs: f64,
+            regen_t_secs: f64,
+            plan_secs: f64,
+        }
+        let mut per_file: Vec<(String, FileStats)> = Vec::new();
+        let mut skipped_files: Vec<(String, String)> = Vec::new();
+        let mut diffs: Vec<String> = Vec::new();
+        let mut fallback_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut fallback_examples: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut budget_exhausted = false;
+
+        for dir in dirs.iter().filter(|dir| dir.is_dir()) {
+            let sources = match sources_in_dir(dir, &["DESI"]) {
+                Ok(sources) => sources,
+                Err(error) => {
+                    skipped_files.push((dir.display().to_string(), format!("scan: {error}")));
+                    continue;
+                }
+            };
+            for source in sources {
+                let dbnum = source.dbnum;
+                let file = source.file.clone();
+                let name = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // 语料库挂成一枚 DESI pin（MDB 没声明的也一样）；目录依赖经当前 MDB 解。
+                service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+                service.pins.push(DbPin {
+                    dbnum: dbnum as i32,
+                    db_type: "DESI".into(),
+                    file: file.clone(),
+                    sesno: None,
+                });
+                let sessions: Vec<u32> = match ReadOnlyEngine::open(&file) {
+                    Ok(mut engine) => match engine.sessions() {
+                        Ok(sessions) => sessions
+                            .iter()
+                            .map(|session| session.session_id)
+                            .collect(),
+                        Err(error) => {
+                            skipped_files.push((name, format!("sessions: {error}")));
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        skipped_files.push((name, format!("open: {error}")));
+                        continue;
+                    }
+                };
+                // 新→旧链取链头 K 对，再倒回旧→新（与 S7 同款）。
+                let mut steps: Vec<(u32, u32)> = sessions
+                    .windows(2)
+                    .take(if per_db == 0 { usize::MAX } else { per_db })
+                    .map(|pair| (pair[1], pair[0]))
+                    .collect();
+                steps.reverse();
+                if steps.is_empty() {
+                    skipped_files.push((name, "fewer than two sessions".into()));
+                    continue;
+                }
+                let mut stats = FileStats::default();
+                for (base_sesno, target_sesno) in steps {
+                    let mine = window_index % shards == shard;
+                    window_index += 1;
+                    if !mine {
+                        continue;
+                    }
+                    let label = format!("{name} {base_sesno}→{target_sesno}");
+                    if started.elapsed().as_secs_f64() > budget_secs {
+                        budget_exhausted = true;
+                        stats.windows_skipped += 1;
+                        continue;
+                    }
+                    let clock = Instant::now();
+                    let mut producer =
+                        match UnitDeltaProducer::open(&service, dbnum, base_sesno, target_sesno) {
+                            Ok(producer) => producer,
+                            Err(error) => {
+                                stats.windows_skipped += 1;
+                                println!("skip {label}: open: {error:#}");
+                                continue;
+                            }
+                        };
+                    stats.plan_secs += clock.elapsed().as_secs_f64();
+                    let base = producer.base.clone();
+                    let target = producer.target.clone();
+                    let sources = match WindowRootSources::collect(
+                        &file,
+                        base_sesno,
+                        target_sesno,
+                        &base.set,
+                        &target.set,
+                        &unit_types,
+                        &[],
+                    ) {
+                        Ok(sources) => sources,
+                        Err(error) => {
+                            stats.windows_skipped += 1;
+                            println!("skip {label}: collect: {error:#}");
+                            continue;
+                        }
+                    };
+                    let roots_s: Vec<PersistedRoot> =
+                        match enumerate_generation_roots(&base.set, &base.index.roots, &unit_types) {
+                            Ok(roots) => roots
+                                .into_iter()
+                                .map(|root| PersistedRoot {
+                                    refno: root.root,
+                                    noun: root.noun,
+                                })
+                                .collect(),
+                            Err(error) => {
+                                stats.windows_skipped += 1;
+                                println!("skip {label}: base roots: {error:#}");
+                                continue;
+                            }
+                        };
+                    stats.windows += 1;
+                    let impact = sources.impact(&roots_s);
+                    let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+                    stats.regen_roots += plan.regen.len();
+                    if plan.degraded.is_some() {
+                        // 退化窗把每个持久根都判成 regen，单元路对它一根都不许走（Q4）——只数不量。
+                        stats.windows_degraded += 1;
+                        continue;
+                    }
+                    let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
+                    let no_model_only = sources.no_model_only(&roots_s, &settled, &impact, &plan);
+                    let at_s: BTreeSet<(u32, u32)> = roots_s
+                        .iter()
+                        .map(|root| {
+                            let refno = refno_to_e3d(root.refno);
+                            (refno.word0, refno.word1)
+                        })
+                        .collect();
+                    let candidates: Vec<&GenerationRoot> = plan
+                        .regen
+                        .iter()
+                        .filter(|root| {
+                            let refno = refno_to_e3d(root.root);
+                            at_s.contains(&(refno.word0, refno.word1))
+                        })
+                        .collect();
+                    stats.roots_at_s += candidates.len();
+                    let stride = match roots_per_window {
+                        0 => 1,
+                        limit => candidates.len().div_ceil(limit.max(1)).max(1),
+                    };
+                    let mut cache = CatalogueMeshCache::default();
+                    for root in candidates.iter().step_by(stride) {
+                        if started.elapsed().as_secs_f64() > budget_secs {
+                            budget_exhausted = true;
+                            stats.over_budget += 1;
+                            continue;
+                        }
+                        let refno = refno_to_e3d(root.root);
+                        let root_no_model_only = no_model_only.roots.contains(&refno_from_e3d(refno));
+                        stats.tried += 1;
+
+                        // 与单根探针同一套三步；每根一份干净的本地投影。
+                        let store = ModelMemoryStore::default();
+                        // 整根重算里画不出的件（e3d-model 没有 builder / 读挂）**不拦**：生产的整根重算对这种根也是
+                        // 「能画的照发、失败的记账」，两端同一套生成器，失败集相同则章仍该相同；件数记进报告。
+                        let regen_at = |sesno: u32,
+                                        input: &GenerationInput,
+                                        cache: &mut CatalogueMeshCache|
+                         -> anyhow::Result<(ProjectionCommit, usize)> {
+                            let snapshot =
+                                generate_snapshot_from_set(&input.set, &input.index, refno, cache)?;
+                            let failed = snapshot.report.failed.len();
+                            let owners = snapshot.owners.clone();
+                            let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
+                            let (commit, _) = project_geometry_delta(
+                                dbnum,
+                                sesno,
+                                baked.elements,
+                                Vec::new(),
+                                None,
+                                &owners,
+                            )?;
+                            Ok((commit, failed))
+                        };
+                        let outcome: Outcome = (|| -> anyhow::Result<Outcome> {
+                            let (mut seed, seed_failed) = match regen_at(base_sesno, &base, &mut cache) {
+                                Ok(seed) => seed,
+                                Err(error) => return Ok(Outcome::SeedFailed(format!("{error:#}"))),
+                            };
+                            let (seed_hash, seed_count) = manifest_hash(&seed.upserts)?;
+                            seed.receipt = Some((
+                                refno,
+                                RootReceipt {
+                                    source_sesno: base_sesno,
+                                    model_target: Some(service.model_target(
+                                        dbnum,
+                                        base_sesno,
+                                        &base.dependency_sessions,
+                                    )?),
+                                    manifest_hash: seed_hash,
+                                    geometry_count: seed_count,
+                                    published_via: "regen".into(),
+                                    room: None,
+                                },
+                            ));
+                            store.commit(ProjectionScope::Current, vec![seed]);
+                            if !store.root_projection_complete(ProjectionScope::Current, refno, &mesh_dir) {
+                                return Ok(Outcome::SeedFailed("seed projection incomplete".into()));
+                            }
+                            let unit = UnitPublishUnit {
+                                root_refno: refno.to_string(),
+                                source_start_sesno: base_sesno,
+                                no_model_only: root_no_model_only,
+                            };
+                            let clock = Instant::now();
+                            let report = republish_roots_by_unit_delta_on(
+                                &store,
+                                &mesh_dir,
+                                target_sesno,
+                                std::slice::from_ref(&unit),
+                                |unit, root, old_receipt| {
+                                    producer.produce(root, old_receipt, unit.no_model_only)
+                                },
+                                |commits| {
+                                    store.try_commit_current(commits);
+                                    Ok(())
+                                },
+                            )?;
+                            let unit_secs = clock.elapsed().as_secs_f64();
+                            if let Some((_, reason)) = report.fallbacks.first() {
+                                return Ok(Outcome::Fallback(reason.clone()));
+                            }
+                            if !report.replayed.is_empty() {
+                                return Ok(Outcome::Replayed);
+                            }
+                            let receipt_only = !report.receipt_only.is_empty();
+                            let clock = Instant::now();
+                            let (regen_t, target_failed) =
+                                match regen_at(target_sesno, &target, &mut cache) {
+                                    Ok(regen_t) => regen_t,
+                                    Err(error) => {
+                                        return Ok(Outcome::RegenTargetFailed(format!("{error:#}")));
+                                    }
+                                };
+                            let regen_t_secs = clock.elapsed().as_secs_f64();
+                            let (regen_hash, regen_count) = manifest_hash(&regen_t.upserts)?;
+                            let receipt = store
+                                .receipt(ProjectionScope::Current, refno)
+                                .context("unit receipt")?;
+                            let records = store.records_of_root(ProjectionScope::Current, refno);
+                            let ok = receipt.manifest_hash == regen_hash
+                                && receipt.geometry_count == regen_count;
+                            let (mut diff, mut extra, mut missing) = (0usize, 0usize, 0usize);
+                            if !ok {
+                                let unit_entries = records
+                                    .iter()
+                                    .map(manifest_entry)
+                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+                                let regen_entries = regen_t
+                                    .upserts
+                                    .iter()
+                                    .map(manifest_entry)
+                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+                                for key in unit_entries
+                                    .keys()
+                                    .chain(regen_entries.keys())
+                                    .collect::<BTreeSet<_>>()
+                                {
+                                    match (unit_entries.get(key), regen_entries.get(key)) {
+                                        (Some(unit), Some(regen)) if unit == regen => {}
+                                        (Some(_), Some(_)) => diff += 1,
+                                        (Some(_), None) => extra += 1,
+                                        (None, Some(_)) => missing += 1,
+                                        (None, None) => unreachable!(),
+                                    }
+                                }
+                            }
+                            Ok(Outcome::Parity {
+                                ok,
+                                receipt_only,
+                                records: records.len(),
+                                unit_secs,
+                                regen_t_secs,
+                                diff,
+                                extra,
+                                missing,
+                                failed_elements: (seed_failed, target_failed),
+                            })
+                        })()
+                        .unwrap_or_else(|error| Outcome::SeedFailed(format!("probe error: {error:#}")));
+
+                        match outcome {
+                            Outcome::Parity {
+                                ok,
+                                receipt_only,
+                                records,
+                                unit_secs,
+                                regen_t_secs,
+                                diff,
+                                extra,
+                                missing,
+                                failed_elements,
+                            } => {
+                                stats.unit_secs += unit_secs;
+                                stats.regen_t_secs += regen_t_secs;
+                                if failed_elements != (0, 0) {
+                                    stats.with_failed_elements += 1;
+                                }
+                                let note = format!(
+                                    "{}{}",
+                                    if receipt_only { " (receipt-only, D10)" } else { "" },
+                                    if failed_elements != (0, 0) {
+                                        format!(
+                                            " [failed elements S {} / T {}]",
+                                            failed_elements.0, failed_elements.1
+                                        )
+                                    } else {
+                                        String::new()
+                                    }
+                                );
+                                if ok {
+                                    stats.parity_ok += 1;
+                                    if receipt_only {
+                                        stats.receipt_only += 1;
+                                    }
+                                    println!(
+                                        "{label}: PARITY OK {refno} `{}` {records} records{note} unit {unit_secs:.2}s regen {regen_t_secs:.2}s",
+                                        root.noun
+                                    );
+                                } else {
+                                    stats.diff += 1;
+                                    let line = format!(
+                                        "{label}: root {refno} `{}` DIFF {diff} EXTRA {extra} MISSING {missing}{note}",
+                                        root.noun
+                                    );
+                                    println!("RED {line}");
+                                    diffs.push(line);
+                                }
+                            }
+                            Outcome::Fallback(reason) => {
+                                stats.fallback += 1;
+                                let bucket = fallback_bucket(&reason);
+                                *fallback_buckets.entry(bucket).or_default() += 1;
+                                fallback_examples
+                                    .entry(bucket)
+                                    .or_insert_with(|| format!("{label} {refno} `{}`: {reason}", root.noun));
+                                println!("{label}: fallback {refno} `{}`: {bucket}", root.noun);
+                            }
+                            Outcome::Replayed => {
+                                stats.replayed += 1;
+                                println!("{label}: replayed {refno} (unexpected: seed receipt is at S)");
+                            }
+                            Outcome::SeedFailed(error) => {
+                                stats.seed_failed += 1;
+                                failures.push(format!("{label} {refno} `{}` seed@S: {error}", root.noun));
+                            }
+                            Outcome::RegenTargetFailed(error) => {
+                                stats.regen_failed += 1;
+                                failures.push(format!("{label} {refno} `{}` regen@T: {error}", root.noun));
+                            }
+                        }
+                    }
+                }
+                per_file.push((name, stats));
+            }
+        }
+
+        // 汇总。
+        let total = |pick: fn(&FileStats) -> usize| -> usize {
+            per_file.iter().map(|(_, stats)| pick(stats)).sum()
+        };
+        let total_f = |pick: fn(&FileStats) -> f64| -> f64 {
+            per_file.iter().map(|(_, stats)| pick(stats)).sum()
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let mut report = String::new();
+        report.push_str(&format!(
+            "\n## 运行 {}：`DB_OPTION_FILE={db_option_file}`{}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            if shards > 1 {
+                format!("，分片 {shard}/{shards}（按窗轮流）")
+            } else {
+                String::new()
+            }
+        ));
+        report.push_str(&format!(
+            "- 开关：{switches}\n- 语料目录：{}\n- 抽样：每库最后 {} 步（0 = 整条链），每窗最多 {} 根（跨 regen 名单等距抽，只抽 S 端也有的根）；预算 {budget_secs:.0}s{}；总耗时 {elapsed:.0}s\n\n",
+            dirs.iter().map(|dir| dir.display().to_string()).collect::<Vec<_>>().join("; "),
+            per_db,
+            roots_per_window,
+            if budget_exhausted { "（**已用尽**，其后只数不量）" } else { "" },
+        ));
+        report.push_str("| 合计 | 值 |\n|---|---|\n");
+        for (name, value) in [
+            ("有窗的库", per_file.iter().filter(|(_, s)| s.windows > 0).count()),
+            ("跳过的库（pin 不进 / 会话不足 / 扫描失败）", skipped_files.len()),
+            ("窗（规划成功）", total(|s| s.windows)),
+            ("窗（跳过：开不了 / 收不了 / 预算）", total(|s| s.windows_skipped)),
+            ("窗（退化，只数不量）", total(|s| s.windows_degraded)),
+            ("regen 根（全量）", total(|s| s.regen_roots)),
+            ("其中 S 端也有的根（可走单元路）", total(|s| s.roots_at_s)),
+            ("量到的根", total(|s| s.tried)),
+            ("**PARITY OK**", total(|s| s.parity_ok)),
+            ("其中 receipt-only（D10 空 Partial）", total(|s| s.receipt_only)),
+            ("**DIFF（红）**", total(|s| s.diff)),
+            ("回退整根 regen", total(|s| s.fallback)),
+            ("重放（不该出现）", total(|s| s.replayed)),
+            ("S 端整根生成报错（量不了）", total(|s| s.seed_failed)),
+            ("T 端整根生成报错（量不了）", total(|s| s.regen_failed)),
+            ("对拍过的根里两端带画不出的件的（照常对拍，只记）", total(|s| s.with_failed_elements)),
+            ("预算用尽未量", total(|s| s.over_budget)),
+        ] {
+            report.push_str(&format!("| {name} | {value} |\n"));
+        }
+        report.push_str(&format!(
+            "| 单元路总耗时 / T 端整根重算总耗时（只算走成对拍的根） | {:.1}s / {:.1}s |\n| 开窗（两端 DbSet + plan_update）总耗时 | {:.1}s |\n\n",
+            total_f(|s| s.unit_secs),
+            total_f(|s| s.regen_t_secs),
+            total_f(|s| s.plan_secs),
+        ));
+        report.push_str("### 逐库\n\n| 库 | 窗 | 退化窗 | regen 根 | S 端也有 | 量到 | OK | receipt-only | DIFF | 回退 | 生成失败 | unit s | regen s |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+        for (name, s) in &per_file {
+            // 一根 regen 都没有、也没跳过什么的库不占行（语料里大半是这种）。
+            if s.regen_roots == 0 && s.windows_skipped == 0 && s.windows_degraded == 0 {
+                continue;
+            }
+            report.push_str(&format!(
+                "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} | {:.1} |\n",
+                s.windows,
+                s.windows_degraded,
+                s.regen_roots,
+                s.roots_at_s,
+                s.tried,
+                s.parity_ok,
+                s.receipt_only,
+                s.diff,
+                s.fallback,
+                s.seed_failed + s.regen_failed,
+                s.unit_secs,
+                s.regen_t_secs,
+            ));
+        }
+        report.push_str("\n### 回退原因（按类）\n\n| 类 | 根数 | 一例 |\n|---|---|---|\n");
+        for (bucket, count) in &fallback_buckets {
+            let example = fallback_examples
+                .get(bucket)
+                .map(|line| line.replace('|', "\\|"))
+                .unwrap_or_default();
+            report.push_str(&format!("| {bucket} | {count} | {example} |\n"));
+        }
+        if !diffs.is_empty() {
+            report.push_str("\n### **红：DIFF**\n\n");
+            for line in &diffs {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
+        if !failures.is_empty() {
+            report.push_str(&format!("\n### 生成失败（量不了，非红）：{} 根，前 40 条\n\n", failures.len()));
+            for line in failures.iter().take(40) {
+                report.push_str(&format!("- {}\n", line.replace('\n', " ")));
+            }
+        }
+        if !skipped_files.is_empty() {
+            report.push_str(&format!("\n### 跳过的库：{} 个\n\n", skipped_files.len()));
+            for (name, reason) in &skipped_files {
+                report.push_str(&format!("- {name}: {}\n", reason.replace('\n', " ")));
+            }
+        }
+        if let Some(parent) = report_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let fresh = !report_path.exists();
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&report_path)?;
+        if fresh {
+            out.write_all(
+                "# ADR-080 A6 / D9 ②：单元级发布全语料对拍（`probe_unit_publish_corpus_against_regen`）\n\n\
+                 每根：S 端整根重算灌基线 → 单元路（真生产方 + 执行体）→ 与 T 端整根重算比整根 `manifest_hash`。\
+                 一根 DIFF 即红；回退 / 重放 / 生成失败只计数。目录依赖经当前 MDB 解，一次一个 `DB_OPTION_FILE`。\n"
+                    .as_bytes(),
+            )?;
+        }
+        out.write_all(report.as_bytes())?;
+        println!("{report}");
+        println!("report appended to {}", report_path.display());
+        // 机器可读的一行汇总：几份分片相加就是全语料。
+        println!(
+            "SUMMARY_JSON {}",
+            json!({
+                "db_option_file": db_option_file,
+                "shard": format!("{shard}/{shards}"),
+                "elapsed_secs": elapsed,
+                "budget_exhausted": budget_exhausted,
+                "dbs_with_windows": per_file.iter().filter(|(_, s)| s.windows > 0).count(),
+                "dbs_skipped": skipped_files.len(),
+                "windows": total(|s| s.windows),
+                "windows_skipped": total(|s| s.windows_skipped),
+                "windows_degraded": total(|s| s.windows_degraded),
+                "regen_roots": total(|s| s.regen_roots),
+                "roots_at_s": total(|s| s.roots_at_s),
+                "tried": total(|s| s.tried),
+                "parity_ok": total(|s| s.parity_ok),
+                "receipt_only": total(|s| s.receipt_only),
+                "diff": total(|s| s.diff),
+                "fallback": total(|s| s.fallback),
+                "replayed": total(|s| s.replayed),
+                "seed_failed": total(|s| s.seed_failed),
+                "regen_failed": total(|s| s.regen_failed),
+                "with_failed_elements": total(|s| s.with_failed_elements),
+                "over_budget": total(|s| s.over_budget),
+                "unit_secs": total_f(|s| s.unit_secs),
+                "regen_t_secs": total_f(|s| s.regen_t_secs),
+                "plan_secs": total_f(|s| s.plan_secs),
+                "fallback_buckets": fallback_buckets,
+            })
+        );
+        if !keep_meshes && std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR").is_err() {
+            let _ = std::fs::remove_dir_all(&mesh_dir);
+        }
+        assert!(total(|s| s.tried) > 0, "一根都没量到——DB_OPTION_FILE / AIOS_POSREF_DIRS 不对，或全被跳过");
+        assert!(
+            diffs.is_empty(),
+            "D9 ①：单元路与 regen 路的整根 manifest_hash 必须逐字相同，红了 {} 根：\n{}",
+            diffs.len(),
+            diffs.join("\n")
+        );
+        Ok(())
+    }
+
+    /// ADR-080 实施约束 5：单元级执行体里闸在产出之前、产出在提交之前，且执行体自己**不读任何记录、
     /// 不自己算章**——删什么由产出点名，整根的章由存储在写锁里盖（D5）。闸后面要是长出一个
     /// `records_of_root`，就又多了一个能读到旧状态的窗口。闸与刚体路同一道、同一个枚举，不另造判据。
     #[test]
@@ -5630,14 +8010,19 @@ mod tests {
         let tube_gate = body
             .find("tube_segment_completeness(&delta)")
             .expect("tube segment completeness gate");
+        // D10：空清单只许来自带 `no_model_only` 提示的根，判在管段门之后、提交之前。
+        let empty_guard = body
+            .find("receipt_only && !unit.no_model_only")
+            .expect("D10 empty-delta guard");
         // 提交攒成一批、循环结束一次发（D4 的原子边界）。
         let publication = body.find("publish(commits)?").expect("publication");
         assert!(
             complete < gate
                 && gate < production
                 && production < tube_gate
-                && tube_gate < publication,
-            "顺序必须是 完整性前置 → 闸 → 产出 → 管段完整性门 → 提交"
+                && tube_gate < empty_guard
+                && empty_guard < publication,
+            "顺序必须是 完整性前置 → 闸 → 产出 → 管段完整性门 → 空清单守卫（D10）→ 提交"
         );
         for forbidden in [
             "records_of_root(",
@@ -5875,6 +8260,60 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// 初始化服务记进 `frozen_file_digests` 的是 **token 摘要**，不是现场文件身份：同一份冻结 token
+    /// 重开、文件被追加过也得算出同一个数（room-input-cache 的前提，见
+    /// `initialization_target_tests::initialization_target_survives_append_and_reopen_but_rejects_replacement`）。
+    /// 2026-09-19 差一点被改成 `model_file_identity_digest`——那会让每次 SAVEWORK 都把面板几何缓存打掉。
+    #[test]
+    fn initialization_keeps_the_token_digest_so_appends_do_not_change_the_target() {
+        let body = include_str!("e3d_model_service.rs")
+            .split_once("pub async fn from_initialization_sources(")
+            .expect("from_initialization_sources exists")
+            .1
+            .split_once("pub fn initialization_target_hash(")
+            .expect("from_initialization_sources end")
+            .0;
+        assert!(body.contains("Sha256::digest(frozen.commit_token_json()"), "{body}");
+        assert!(!body.contains("model_file_identity_digest(frozen.path()"), "{body}");
+    }
+
+    /// 7bde2aeea 把字典库按会话位 0 塞进 `catalogue` 之后，凡把 `session` 当真会话用的地方
+    /// （`target_current` 对文件最新会话、库级目录落款）都得绕开它：0 不是任何一个真会话。
+    #[test]
+    fn dictionary_entries_carry_no_session_and_stay_out_of_catalogue_stamps() {
+        let file = |dbnum: u32, db_type: &str, session: u32| ModelFileTarget {
+            dbnum,
+            db_type: db_type.into(),
+            file: format!("{db_type}-{dbnum}"),
+            session,
+            digest: format!("{db_type}@{session}"),
+        };
+        let target = ModelTarget {
+            project: "AMS".into(),
+            design: file(7997, "DESI", 332),
+            catalogue: vec![
+                file(5100, "DICT", 0),
+                file(7000, "CATA", 11),
+                file(7006, "DICT", 0),
+                file(7043, "CATA", 0),
+            ],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "gen".into(),
+            tessellation_profile: "e3d-default-v1".into(),
+        };
+        assert!(target.design.session_tracked());
+        assert_eq!(
+            target
+                .catalogue
+                .iter()
+                .map(ModelFileTarget::session_tracked)
+                .collect::<Vec<_>>(),
+            [false, true, false, false],
+            "会话位 0 的项——字典库、没钉住也没打开过的目录库——都算没记会话"
+        );
+        assert_eq!(target.catalogue_sessions().collect::<Vec<_>>(), [(7000, 11)]);
+    }
+
     #[test]
     fn element_and_implied_tubes_have_disjoint_persistence_ids() {
         let source = RefNo::new(17496, 152095);
@@ -5928,6 +8367,266 @@ mod tests {
             persisted_world_transform(&element, Some(&primitive), world),
             world,
             "ordinary elements keep the separate local-transform branch"
+        );
+    }
+
+    fn fixture_target(design_session: u32) -> ModelTarget {
+        ModelTarget {
+            project: "fixture".into(),
+            design: ModelFileTarget {
+                dbnum: 8000,
+                db_type: "DESI".into(),
+                file: "design.db".into(),
+                session: design_session,
+                digest: format!("design@{design_session}"),
+            },
+            catalogue: vec![ModelFileTarget {
+                dbnum: 7000,
+                db_type: "CATA".into(),
+                file: "cata.db".into(),
+                session: 7,
+                digest: "cata@7".into(),
+            }],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "generator".into(),
+            tessellation_profile: "tessellation".into(),
+        }
+    }
+
+    fn receipt_at(source_sesno: u32, model_target: Option<ModelTarget>) -> RootReceipt {
+        RootReceipt {
+            source_sesno,
+            model_target,
+            manifest_hash: "manifest".into(),
+            geometry_count: 3,
+            published_via: "regen".into(),
+            room: None,
+        }
+    }
+
+    /// ADR-066 D4：刚体前移的回执落款是 pin@T 现算的目标，不是旧回执那份；设计窗之外任何一格变了、
+    /// 目标没钉在 T 上、或旧回执根本没带目标，都是这根的回退理由。
+    #[test]
+    fn the_rigid_motion_receipt_takes_the_target_at_t_only_when_nothing_outside_the_window_moved() {
+        let old = receipt_at(41, Some(fixture_target(41)));
+        let at_t = rigid_motion_target_at(&old, fixture_target(42), 42)
+            .expect("only the design window moved");
+        assert_eq!(at_t.design.session, 42);
+        assert_eq!(at_t.design.digest, "design@42");
+        assert_ne!(
+            Some(&at_t),
+            old.model_target.as_ref(),
+            "the receipt must not reuse the old stamp"
+        );
+
+        let mut catalogue_moved = fixture_target(42);
+        catalogue_moved.catalogue[0].session = 8;
+        let error = rigid_motion_target_at(&old, catalogue_moved, 42).unwrap_err();
+        assert!(error.to_string().contains("outside the design window"));
+
+        let mut generator_changed = fixture_target(42);
+        generator_changed.generator_fingerprint = "generator-v2".into();
+        assert!(rigid_motion_target_at(&old, generator_changed, 42).is_err());
+
+        let error = rigid_motion_target_at(&old, fixture_target(41), 42).unwrap_err();
+        assert!(error.to_string().contains("pins design session 41"));
+
+        let error =
+            rigid_motion_target_at(&receipt_at(41, None), fixture_target(42), 42).unwrap_err();
+        assert!(error.to_string().contains("no model target"));
+    }
+
+    /// 盒 [0,1]×[0,2]×[0,3] 的八个角点，写成 `dir/<mesh_id>.mesh`。
+    fn box_mesh_file(dir: &Path, mesh_id: &str) {
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+            [1.0, 0.0, 3.0],
+            [0.0, 2.0, 3.0],
+            [1.0, 2.0, 3.0],
+        ];
+        let mesh = PlantMesh {
+            indices: vec![0, 1, 2],
+            vertices: corners
+                .iter()
+                .map(|[x, y, z]| glam::Vec3::new(*x, *y, *z))
+                .collect(),
+            normals: vec![glam::Vec3::Z; corners.len()],
+            wire_vertices: Vec::new(),
+            aabb: None,
+        };
+        ensure_mesh_file(&dir.join(format!("{mesh_id}.mesh")), &mesh).expect("fixture mesh");
+    }
+
+    fn projected(
+        record_id: &str,
+        mesh_id: &str,
+        shape: ProjectedShape,
+        tube: Option<ProjectedTube>,
+    ) -> ProjectedGeometry {
+        let source = RefNo::new(24384, 11);
+        ProjectedGeometry {
+            record_id: record_id.into(),
+            geometry_id: GeometryId::Element {
+                refno: source.to_string(),
+            },
+            source_refno: source,
+            dbnum: 7997,
+            source_sesno: 41,
+            noun: "BOX".into(),
+            mesh_id: mesh_id.into(),
+            world_transform: DMat4::IDENTITY,
+            world_bounds: [[0.0; 3], [1.0, 2.0, 3.0]],
+            ancestors: vec![packed_refno(source)],
+            shape,
+            tube,
+        }
+    }
+
+    fn assert_bounds_close(actual: [[f32; 3]; 2], expected: [[f32; 3]; 2]) {
+        for (a, e) in actual.iter().flatten().zip(expected.iter().flatten()) {
+            assert!((a - e).abs() < 1e-4, "bounds {actual:?} != {expected:?}");
+        }
+    }
+
+    /// ADR-066 D3：含旋转的 `Δ` 不拿盒过矩阵凑数——读回记录自己的网格、顶点乘到新世界系再取紧 AABB。
+    /// 烘焙件直接乘世界矩阵；标准图元先乘 `local_transform`；隐式管身的 `local_transform` 已折进世界矩阵，
+    /// 不再乘（与 `persisted_world_transform` 互为镜像）。网格不在是这根的回退理由，不是 panic。
+    #[test]
+    fn rotating_a_record_rebuilds_its_bounds_from_the_mesh_vertices() {
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh_file(dir.path(), "fixture_box");
+        // 绕 Z 转 90° 再平移 (10, 20, 30)：(x, y, z) → (−y + 10, x + 20, z + 30)。
+        let world = DMat4::from_translation(glam::DVec3::new(10.0, 20.0, 30.0))
+            * DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2);
+
+        let baked = projected("11", "fixture_box", ProjectedShape::Baked, None);
+        assert_bounds_close(
+            rigid_motion_mesh_bounds(dir.path(), &baked, world).unwrap(),
+            [[8.0, 20.0, 30.0], [10.0, 21.0, 33.0]],
+        );
+
+        let scaled = ProjectedShape::Canonical {
+            key: e3d_model::primitive_instance::PrimitiveMeshKey::CylinderV3 { segments: 32 },
+            local_transform: DMat4::from_scale(glam::DVec3::splat(2.0)),
+            local_bounds: [[0.0; 3], [1.0, 2.0, 3.0]],
+        };
+        let canonical = projected("12", "fixture_box", scaled.clone(), None);
+        assert_bounds_close(
+            rigid_motion_mesh_bounds(dir.path(), &canonical, world).unwrap(),
+            [[6.0, 20.0, 30.0], [10.0, 22.0, 36.0]],
+        );
+
+        let tube = projected(
+            "13",
+            "fixture_box",
+            scaled,
+            Some(ProjectedTube {
+                route_ordinal: 0,
+                from: RefNo::new(24384, 1),
+                to: RefNo::new(24384, 2),
+                invalid: false,
+            }),
+        );
+        assert_bounds_close(
+            rigid_motion_mesh_bounds(dir.path(), &tube, world).unwrap(),
+            [[8.0, 20.0, 30.0], [10.0, 21.0, 33.0]],
+        );
+
+        let missing = projected("14", "fixture_missing", ProjectedShape::Baked, None);
+        let error = rigid_motion_mesh_bounds(dir.path(), &missing, world).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("fixture_missing.mesh"),
+            "{error:#}"
+        );
+    }
+
+    /// 执行体喂给 `republish_records` 的就是这只闭包：旋转的锚点让记录的盒从网格重算、矩阵左乘 `Δ`；
+    /// 纯平移的锚点不碰文件（网格不存在也过）。
+    #[test]
+    fn the_executor_bounds_callback_rebuilds_rotated_records_through_republish_records() {
+        use crate::data_interface::generation_root::refno_from_e3d;
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh_file(dir.path(), "fixture_box");
+        let anchor_refno = refno_from_e3d(RefNo::new(24384, 11));
+        let rotate = DMat4::from_translation(glam::DVec3::new(10.0, 20.0, 30.0))
+            * DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2);
+
+        let moved = republish_records(
+            vec![projected("11", "fixture_box", ProjectedShape::Baked, None)],
+            &[TransformAnchor {
+                refno: anchor_refno,
+                delta: rotate,
+            }],
+            41,
+            42,
+            |record, world| rigid_motion_mesh_bounds(dir.path(), record, world),
+        )
+        .expect("rotated record republished");
+        assert_eq!(moved[0].world_transform, rotate);
+        assert_eq!(moved[0].source_sesno, 42);
+        assert_bounds_close(
+            moved[0].world_bounds,
+            [[8.0, 20.0, 30.0], [10.0, 21.0, 33.0]],
+        );
+
+        let shifted = republish_records(
+            vec![projected(
+                "11",
+                "fixture_missing",
+                ProjectedShape::Baked,
+                None,
+            )],
+            &[TransformAnchor {
+                refno: anchor_refno,
+                delta: DMat4::from_translation(glam::DVec3::new(1.0, 2.0, 3.0)),
+            }],
+            41,
+            42,
+            |record, world| rigid_motion_mesh_bounds(dir.path(), record, world),
+        )
+        .expect("a pure translation never opens the mesh");
+        assert_eq!(shifted[0].world_bounds, [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]);
+    }
+
+    /// ADR-066 D3 / D4 两处「待补」已补：执行体对旋转读网格而不是 bail，回执落款是 pin@T 的目标而不是
+    /// 旧回执那份，而且目标核对排在读任何记录之前。
+    #[test]
+    fn the_rigid_motion_executor_rebuilds_rotated_bounds_and_stamps_the_target_at_t() {
+        let source = service_source();
+        let body = source
+            .split_once("pub(crate) async fn republish_roots_by_rigid_motion(")
+            .expect("rigid-motion executor")
+            .1
+            .split_once("pub(crate) async fn republish_roots_by_unit_delta(")
+            .expect("rigid-motion executor end")
+            .0;
+        assert!(
+            !body.contains("not yet wired"),
+            "rotation must rebuild bounds from the mesh, not bail"
+        );
+        assert!(body.contains("rigid_motion_mesh_bounds(mesh_dir, record, world)"));
+        assert!(body.contains("rigid_motion_target_at(&old_receipt, current, target_sesno)"));
+        assert!(
+            !body.contains("old_receipt.model_target.clone()"),
+            "the transform receipt must carry the target at T"
+        );
+        let target_check = body.find("rigid_motion_target_at(").expect("target check");
+        let records = body.find("store.records_of_root(").expect("record read");
+        assert!(
+            target_check < records,
+            "the immutable-target check precedes touching any record"
+        );
+        // 按记录的幂等闸要拿到规划基线 S 才判得出「比基线新又不在 T」：执行体必须把
+        // `unit.source_start_sesno` 传给 `republish_records`（嵌套根共有记录只乘一次 Δ）。
+        let republish = body.find("republish_records(").expect("record republish");
+        let republish_call = &body[republish..republish + 400];
+        assert!(
+            republish_call.contains("unit.source_start_sesno,"),
+            "republish_records must receive the planned baseline: {republish_call}"
         );
     }
 
@@ -6333,7 +9032,7 @@ mod tests {
         }
     }
 
-    /// ADR-078 D2：拿「缺席」推删除**只许有一处**，就是 [`whole_root_removals`]。
+    /// ADR-080 D2：拿「缺席」推删除**只许有一处**，就是 [`whole_root_removals`]。
     ///
     /// 那条推导（`上一版有的 \ 这一版生成的`）只在 `upserts` 是这根全集时成立。单元级发布
     /// 只重建变了的那几件，谁要是顺手在别处又写一遍同样的做差，就会把没重建的全删掉——

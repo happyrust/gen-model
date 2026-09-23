@@ -545,19 +545,20 @@ async fn model_half_inner(
                 .map(|(root, commit, _)| (root, commit))
                 .collect::<Vec<_>>();
             // 这一片的根照哪一版目录算出来的（回执里的 `ModelTarget.catalogue`）：整库初始化完、
-            // 收尾盖 `model_sesno` 时一并盖成库级目录落款（ADR-079，取最旧那一版）。
+            // 收尾盖 `model_sesno` 时一并盖成库级目录落款（ADR-079，取最旧那一版）。只收记了会话的项
+            // （`ModelTarget::catalogue_sessions`）：字典库会话位固定 0，收进去就是每次冷启动都误判前移。
             for (_, commit) in &commits {
                 if let Some(target) = commit
                     .receipt
                     .as_ref()
                     .and_then(|(_, receipt)| receipt.model_target.as_ref())
                 {
-                    for file in &target.catalogue {
+                    for (dbnum, session) in target.catalogue_sessions() {
                         report
                             .catalogue_sessions
-                            .entry(file.dbnum)
-                            .and_modify(|kept| *kept = (*kept).min(file.session))
-                            .or_insert(file.session);
+                            .entry(dbnum)
+                            .and_modify(|kept| *kept = (*kept).min(session))
+                            .or_insert(session);
                     }
                 }
             }

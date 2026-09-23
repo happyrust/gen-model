@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
+use crate::data_interface::db_file_header::DbFileHeader;
+use crate::data_interface::element_attributes::{ElementAttributeService, PinnedRead};
 use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::fast_model::e3d_model_service::{
     E3dModelService, SnapshotSourceError, apply_geometry_delta_on, current_mdb_sources,
@@ -95,10 +97,38 @@ impl std::fmt::Display for HistoricalModelError {
 
 impl std::error::Error for HistoricalModelError {}
 
+/// `tool=attributes` 裁决完入参之后要读的东西：哪份回执、哪个构件、单元根是谁。
+#[derive(Debug)]
+struct AttributesTarget {
+    report: HistoricalModelReport,
+    target: RefNo,
+    unit: RefNo,
+}
+
 /// 快照回执表。几何本身不在这里，在投影存储的 `Historical(<key>)` 命名空间里。
+///
+/// 按**条数**封顶（内存控制计划 P4 / D4，2026-09-22，`options::model_historical_snapshots_max`，默认 16、0 = 不限）：
+/// 每格是一个单元子树的完整投影，此前只有显式 `DELETE` / 同 key 重生成才丢、`/health` 也看不见。发布第 N+1 格时
+/// 按最近一次 generate 的先后把最旧的那格连回执一起丢——走的就是 `drop_snapshot`，之后再查是既有的 `SNAPSHOT_NOT_FOUND`。
 #[derive(Default)]
 pub struct HistoricalModelStore {
     reports: RwLock<HashMap<String, HistoricalModelReport>>,
+    /// 每个快照最近一次 `publish` 的序号（进程内单调计数，不是时刻）——封顶时最小的先出。
+    publish_ticks: RwLock<HashMap<String, u64>>,
+    next_tick: std::sync::atomic::AtomicU64,
+    /// 进程起来以来按条数上限顶掉了几格（显式 `DELETE` 与同 key 重生成不计）。
+    evicted_total: std::sync::atomic::AtomicU64,
+}
+
+/// `HistoricalModelStore` 这一维的现值（`/health.model_cache.historical`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HistoricalStoreStats {
+    /// 此刻有回执的快照格数。
+    pub snapshots: usize,
+    /// 生效的条数上限（0 = 不限）。
+    pub max_snapshots: usize,
+    /// 按上限顶掉的累计格数。
+    pub evicted_total: u64,
 }
 
 static STORE: OnceCell<HistoricalModelStore> = OnceCell::const_new();
@@ -112,6 +142,11 @@ impl HistoricalModelStore {
         STORE.get_or_try_init(Self::open).await
     }
 
+    /// 同步拿全局表：还没人 generate 过就是 `None`（`/health` 这种同步观测用，不去初始化）。
+    pub fn try_global() -> Option<&'static Self> {
+        STORE.get()
+    }
+
     /// 丢掉一个快照：回执与它那一格几何一起走。共享的 mesh 文件不动——它们是内容寻址的，
     /// 由可达性 GC 收，不跟着某一个快照走。
     pub async fn drop_snapshot(&self, snapshot_key: &str) -> anyhow::Result<()> {
@@ -121,7 +156,26 @@ impl HistoricalModelStore {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(snapshot_key);
+        self.publish_ticks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(snapshot_key);
         Ok(())
+    }
+
+    /// 条数 / 上限 / 累计顶掉——查时现读，不落库。
+    pub fn stats(&self) -> HistoricalStoreStats {
+        HistoricalStoreStats {
+            snapshots: self
+                .reports
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            max_snapshots: crate::options::model_historical_snapshots_max(),
+            evicted_total: self
+                .evicted_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     pub async fn snapshot(&self, snapshot_key: &str) -> anyhow::Result<Option<Value>> {
@@ -164,18 +218,223 @@ impl HistoricalModelStore {
                 meshes
             }
             other => anyhow::bail!(
-                "unknown historical query tool {other:?}; expected snapshot/instances/tubes/geometry"
+                "unknown historical query tool {other:?}; expected snapshot/instances/tubes/geometry/attributes"
             ),
         };
         Ok(Value::Array(rows))
     }
 
+    /// `tool=attributes` 的入参裁决，不碰文件：快照回执在不在、refno 合不合法、是不是快照所在库。
+    /// 抽出来是为了让这几档错误码在没有真库的环境里也测得到。
+    fn attributes_target(
+        &self,
+        snapshot_key: &str,
+        refno: &str,
+    ) -> Result<AttributesTarget, HistoricalModelError> {
+        // 键格式不对的快照不可能存在——与 DELETE 之后再问同一档。
+        validate_snapshot_key(snapshot_key)
+            .map_err(|error| HistoricalModelError::new("SNAPSHOT_NOT_FOUND", error))?;
+        let report = self
+            .reports
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(snapshot_key)
+            .cloned()
+            .ok_or_else(|| {
+                HistoricalModelError::new(
+                    "SNAPSHOT_NOT_FOUND",
+                    format!("snapshot 不存在（已 DELETE 或从未 generate）: {snapshot_key}"),
+                )
+            })?;
+        let target = crate::fast_model::e3d_model_service::parse_refno(refno)
+            .map_err(|error| HistoricalModelError::new("INVALID_REFNO", format!("{error:#}")))?;
+        if target.dbno() != report.dbnum {
+            return Err(HistoricalModelError::new(
+                "INVALID_REFNO",
+                format!(
+                    "refno {}/{} 不属于快照 {} 所在的库 dbnum {}",
+                    target.word0, target.word1, snapshot_key, report.dbnum
+                ),
+            ));
+        }
+        let unit =
+            crate::fast_model::e3d_model_service::parse_refno(&report.refno).map_err(|error| {
+                HistoricalModelError::new(
+                    "SNAPSHOT_NOT_FOUND",
+                    format!(
+                        "快照 {snapshot_key} 的单元根 {} 解析失败: {error:#}",
+                        report.refno
+                    ),
+                )
+            })?;
+        Ok(AttributesTarget {
+            report,
+            target,
+            unit,
+        })
+    }
+
+    /// `tool=attributes`：某构件在快照那个会话下的属性（ADR-081 候选条，契约 2026-09-18）。
+    ///
+    /// 取数 = 快照回执里的 `(source_file, resolved_session.sesno)` → 会话钉死的单库 `DbSet`
+    /// → 与 `POST element/attributes` **同一个渲染器**（[`ElementAttributeService::read_pinned`]），
+    /// 属性面板与属性历史对比对同一个属性印同一个字。**不落库、不进生产投影、不建缓存表**（d-179）。
+    ///
+    /// - 该 refno 在那个会话不存在（还没建 / 已删）→ `exists: false, noun: null, attributes: []`，
+    ///   **不是错误**——对比面板把「该版本不存在」当一种正常态显示。
+    /// - refno 存在但不在单元子树里（owner 链上溯到不了单元根）→ `REFNO_OUTSIDE_SNAPSHOT`。
+    /// - 快照不在 / 已 DELETE → `SNAPSHOT_NOT_FOUND`；refno 非法或不属于快照所在库 → `INVALID_REFNO`。
+    pub async fn attributes_at(
+        &self,
+        snapshot_key: &str,
+        refno: &str,
+        service: std::sync::Arc<ElementAttributeService>,
+    ) -> Result<Value, HistoricalModelError> {
+        let AttributesTarget {
+            report,
+            target,
+            unit,
+        } = self.attributes_target(snapshot_key, refno)?;
+        let started = Instant::now();
+        let sesno = report.resolved_session.sesno;
+        let file = PathBuf::from(&report.source_file);
+        let dbnum = report.dbnum;
+        let outcome = tokio::task::spawn_blocking(move || {
+            let header = DbFileHeader::read(&file).map_err(|error| {
+                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+            })?;
+            let pin = PinnedRead {
+                dbnum: dbnum as i32,
+                db_type: header.db_type,
+                file,
+                sesno,
+            };
+            let set = service.open_pinned(&pin).map_err(|error| {
+                HistoricalModelError::new("SESSION_NOT_FOUND", format!("{error:#}"))
+            })?;
+            let element = set.element(target);
+            let exists = element.exists().map_err(|error| {
+                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+            })?;
+            if !exists {
+                return Ok(None);
+            }
+            if target != unit {
+                let root = set.element(unit);
+                let inside = element.is_descendant_of(&root).map_err(|error| {
+                    HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+                })?;
+                if !inside {
+                    return Err(HistoricalModelError::new(
+                        "REFNO_OUTSIDE_SNAPSHOT",
+                        format!(
+                            "{}/{} 在会话 {sesno} 不在单元 {}/{} 的子树里",
+                            target.word0, target.word1, unit.word0, unit.word1
+                        ),
+                    ));
+                }
+            }
+            service.read_pinned(&set, &pin, target).map_err(|error| {
+                HistoricalModelError::new("SOURCE_NOT_FOUND", format!("{error:#}"))
+            })
+        })
+        .await
+        .map_err(|error| {
+            HistoricalModelError::new("internal", format!("属性历史读取线程异常退出: {error}"))
+        })??;
+        let refno_text = format!("{}/{}", target.word0, target.word1);
+        Ok(match outcome {
+            Some(response) => json!({
+                "snapshot_key": snapshot_key,
+                "dbnum": dbnum,
+                "sesno": sesno,
+                "refno": refno_text,
+                "exists": true,
+                "noun": response.noun,
+                "complete": response.complete,
+                "attributes": response.attributes,
+                "diagnostics": response.diagnostics,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }),
+            None => json!({
+                "snapshot_key": snapshot_key,
+                "dbnum": dbnum,
+                "sesno": sesno,
+                "refno": refno_text,
+                "exists": false,
+                "noun": Value::Null,
+                "complete": true,
+                "attributes": [],
+                "diagnostics": Value::Null,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }),
+        })
+    }
+
     async fn publish(&self, report: &HistoricalModelReport) -> anyhow::Result<()> {
+        let evicted = self
+            .publish_capped(report, crate::options::model_historical_snapshots_max())
+            .await?;
+        if !evicted.is_empty() {
+            log::info!(
+                "historical snapshots capped: published {} and dropped the oldest {} ({}); cap {}",
+                report.snapshot_key,
+                evicted.len(),
+                evicted.join(", "),
+                crate::options::model_historical_snapshots_max()
+            );
+        }
+        Ok(())
+    }
+
+    /// 登记回执并按条数封顶：刚发布的这格永远留，超出上限时最久没 generate 的先丢（连它那一格几何，
+    /// 与 `DELETE` 同一条路）。同 key 重生成只是刷新序号、不算新格。`max_snapshots == 0` = 不限。
+    /// 返回被顶掉的键（调用方打日志）。
+    async fn publish_capped(
+        &self,
+        report: &HistoricalModelReport,
+        max_snapshots: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let tick = self
+            .next_tick
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.reports
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(report.snapshot_key.clone(), report.clone());
-        Ok(())
+        self.publish_ticks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(report.snapshot_key.clone(), tick);
+        let mut evicted = Vec::new();
+        if max_snapshots == 0 {
+            return Ok(evicted);
+        }
+        loop {
+            let oldest = {
+                let ticks = self
+                    .publish_ticks
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if ticks.len() <= max_snapshots {
+                    break;
+                }
+                ticks
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != report.snapshot_key)
+                    .min_by_key(|(_, tick)| **tick)
+                    .map(|(key, _)| key.clone())
+            };
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.drop_snapshot(&oldest).await?;
+            self.evicted_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            evicted.push(oldest);
+        }
+        Ok(evicted)
     }
 }
 
@@ -346,7 +605,7 @@ pub async fn generate_historical(
         generated.elements,
         Vec::new(),
         &generated.owners,
-        &option.get_meshes_path(),
+        &crate::options::meshes_dir_for(option),
     )
     .await
     .map_err(|e| HistoricalModelError::new("SNAPSHOT_COMMIT_FAILED", e))?;
@@ -405,10 +664,10 @@ fn classify_generation_error(error: anyhow::Error) -> HistoricalModelError {
     HistoricalModelError::new(code, format!("{error:#}"))
 }
 
-fn source_service() -> anyhow::Result<E3dModelService> {
+pub(crate) fn source_service() -> anyhow::Result<E3dModelService> {
     let option = aios_core::get_db_option();
     let (pins, locator) = current_mdb_sources()?;
-    E3dModelService::from_source_files(pins, locator, option.get_meshes_path())
+    E3dModelService::from_source_files(pins, locator, crate::options::meshes_dir_for(option))
 }
 
 /// 解一个库文件上的时点选择。**当前投影解「最新」也走这里**（ADR-054 实施约束 1：一把尺子），
@@ -522,7 +781,7 @@ fn time_of(chain: &[ChainTime], sesno: u32) -> Option<String> {
         .map(|entry| entry.time.clone())
 }
 
-fn source_fingerprint(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn source_fingerprint(path: &Path) -> anyhow::Result<String> {
     let meta = std::fs::metadata(path)?;
     let modified = meta
         .modified()
@@ -766,6 +1025,67 @@ mod tests {
         );
     }
 
+    /// 用户 2026-09-18 拍：「历史查询出来的、生成的模型数据，除了 mesh 文件，其他都不要存到数据库——一次性的，
+    /// 传给前端的。」代码上这条落在 `apply_geometry_delta_on` 的分派：`Historical(_)` 只进进程内
+    /// `ModelMemoryStore`，`Current` 才走 `model_write_behind::publish`（durable）；mesh 在两条路之前就已
+    /// `bake_elements` 落成盘上的 `.mesh` 文件（内容寻址、共享）。这条守卫钉住分派的形状，谁把历史那一臂
+    /// 也接到 write-behind 上，这里先红。
+    #[test]
+    fn historical_scope_never_reaches_the_durable_publisher() {
+        let service = include_str!("e3d_model_service.rs");
+        let body = service
+            .split_once("pub(crate) async fn apply_geometry_delta_on(")
+            .expect("apply_geometry_delta_on must exist")
+            .1
+            .split_once("\n}\n")
+            .expect("function body must end")
+            .0;
+        let historical_arm = body
+            .split_once("ProjectionScope::Historical(_) =>")
+            .expect("historical arm must exist")
+            .1
+            .split_once("}")
+            .expect("arm must close")
+            .0;
+        assert!(
+            historical_arm.contains("ModelMemoryStore::global().commit(scope"),
+            "historical projections must land in the in-process store only: {historical_arm}"
+        );
+        assert!(
+            !historical_arm.contains("write_behind") && !historical_arm.contains("publish("),
+            "historical projections must never reach the durable publisher: {historical_arm}"
+        );
+        let current_arm = body
+            .split_once("ProjectionScope::Current =>")
+            .expect("current arm must exist")
+            .1
+            .split_once("}")
+            .expect("arm must close")
+            .0;
+        assert!(
+            current_arm.contains("model_write_behind::publish("),
+            "only the current projection goes durable: {current_arm}"
+        );
+        // 合并后 `bake_elements` 多了房间计算器那一位（ADR-073 D1，B/T2）；历史快照不算房间归属，传 `None`。
+        assert!(
+            body.contains("bake_elements(upserts, mesh_dir, None)"),
+            "meshes are the one on-disk artifact, baked before the scope dispatch"
+        );
+        // 本模块自己：快照回执只活在进程内的 `RwLock<HashMap>`，没有任何库句柄
+        let this = include_str!("historical_model.rs");
+        let store = this
+            .split_once("pub struct HistoricalModelStore {")
+            .expect("store struct")
+            .1
+            .split_once("}")
+            .expect("struct end")
+            .0;
+        assert!(
+            store.contains("RwLock<HashMap<String, HistoricalModelReport>>"),
+            "snapshot reports stay in memory: {store}"
+        );
+    }
+
     #[test]
     fn a_session_time_is_looked_up_by_number_not_by_position() {
         let chain = chain_of(&[
@@ -860,5 +1180,220 @@ mod tests {
             "别的快照不该被这一次丢连累"
         );
         projection.drop_scope(ProjectionScope::Historical(neighbour));
+    }
+
+    fn attributes_fixture_report(key: &str, unit: RefNo, sesno: u32) -> HistoricalModelReport {
+        HistoricalModelReport {
+            snapshot_key: key.to_string(),
+            dbnum: unit.dbno(),
+            refno: format!("{}/{}", unit.word0, unit.word1),
+            resolved_session: ResolvedSession {
+                requested: format!("sesno:{sesno}"),
+                sesno,
+                session_time: None,
+            },
+            source_file: "fixture".to_string(),
+            source_fingerprint: "fingerprint".to_string(),
+            visited: 1,
+            generated: 1,
+            failed: 0,
+            skipped: 0,
+            upserted: 1,
+            shared_instances: 1,
+            baked_instances: 0,
+            mesh_written: 0,
+            mesh_reused: 1,
+            unique_meshes: 1,
+            elapsed_ms: 1,
+        }
+    }
+
+    /// `tool=attributes` 的入参裁决（ADR-081 候选条的三档错误码）在没有真库的环境里就能判：
+    /// 快照不在 / 键格式不对 → SNAPSHOT_NOT_FOUND；refno 非法或不属于快照所在库 → INVALID_REFNO；
+    /// 合法则把单元根与目标一起交出去，子树归属留给钉死的池判。
+    #[tokio::test]
+    async fn attributes_target_settles_the_contract_error_codes_before_touching_any_file() {
+        let store = HistoricalModelStore::open().await.expect("report store");
+        let unit = RefNo::new(24384, 23257);
+        assert_eq!(unit.dbno(), 8000, "夹具单元根应落在 dbnum 8000");
+        let key = "24384_23257@573";
+        store
+            .publish(&attributes_fixture_report(key, unit, 573))
+            .await
+            .expect("publish fixture report");
+
+        let missing = store
+            .attributes_target("24384_23257@574", "24384/23262")
+            .expect_err("没 generate 过的快照");
+        assert_eq!(missing.code, "SNAPSHOT_NOT_FOUND");
+        let malformed = store
+            .attributes_target("24384_23257@573';DELETE", "24384/23262")
+            .expect_err("键格式不对的快照不可能存在");
+        assert_eq!(malformed.code, "SNAPSHOT_NOT_FOUND");
+
+        let garbage = store
+            .attributes_target(key, "not-a-refno")
+            .expect_err("refno 解析失败");
+        assert_eq!(garbage.code, "INVALID_REFNO");
+        let other_db = RefNo::new(24381, 145018);
+        assert_ne!(other_db.dbno(), unit.dbno(), "夹具需要一个别的库的 refno");
+        let foreign = store
+            .attributes_target(key, "24381/145018")
+            .expect_err("别的库的 refno 不属于这个快照");
+        assert_eq!(foreign.code, "INVALID_REFNO");
+        assert!(
+            foreign.message.contains("dbnum 8000"),
+            "{}",
+            foreign.message
+        );
+
+        let member = store
+            .attributes_target(key, "24384_23262")
+            .expect("a_b 写法也收");
+        assert_eq!(member.target, RefNo::new(24384, 23262));
+        assert_eq!(member.unit, unit);
+        assert_eq!(member.report.resolved_session.sesno, 573);
+        let root = store
+            .attributes_target(key, "24384/23257")
+            .expect("单元根自己也允许");
+        assert_eq!(root.target, root.unit);
+    }
+
+    /// 内存控制计划 P4 / D4（2026-09-22）：历史快照按条数封顶——发布第 N+1 格时最久没 generate 的先丢，连它那一格
+    /// 几何一起（与 `DELETE` 同一条路，之后再问是 `SNAPSHOT_NOT_FOUND`）；刚发布的永远留；同 key 重生成只刷新序号、
+    /// 不算新格、不顶别人；0 = 不限；显式 `DELETE` 不计入顶掉数。
+    #[tokio::test]
+    async fn the_snapshot_cap_drops_the_oldest_generated_first_and_a_regenerated_key_takes_no_new_slot() {
+        use crate::fast_model::model_memory_store::ProjectionCommit;
+
+        let store = HistoricalModelStore::open().await.expect("report store");
+        let projection = ModelMemoryStore::global();
+        let unit = RefNo::new(24384, 23257);
+        let seed = |key: &str| ProjectionCommit {
+            upserts: vec![ProjectedGeometry {
+                record_id: format!("cap-{key}"),
+                geometry_id: e3d_model::elmodl::GeometryId::Element {
+                    refno: "24384/23257".into(),
+                },
+                source_refno: unit,
+                dbnum: 8000,
+                source_sesno: 1,
+                noun: "EQUI".into(),
+                mesh_id: "cap_mesh".into(),
+                world_transform: glam::DMat4::IDENTITY,
+                world_bounds: [[0.0; 3], [1.0; 3]],
+                ancestors: vec![crate::fast_model::model_memory_store::packed_refno(unit)],
+                shape: ProjectedShape::Baked,
+                tube: None,
+            }],
+            ..ProjectionCommit::default()
+        };
+        let keys = ["24384_23257@7001", "24384_23257@7002", "24384_23257@7003", "24384_23257@7004"];
+        let store = &store;
+        let seed = &seed;
+        let publish = move |key: &'static str, cap: usize| async move {
+            projection.commit(ProjectionScope::Historical(key), vec![seed(key)]);
+            store
+                .publish_capped(&attributes_fixture_report(key, unit, 7000), cap)
+                .await
+                .expect("publish")
+        };
+
+        // 0 = 不限：三格都留。
+        for key in &keys[..3] {
+            assert!(publish(key, 0).await.is_empty());
+        }
+        assert_eq!(store.stats().snapshots, 3);
+
+        // 同 key 重生成：序号刷新、不算新格——上限 3 下不顶任何人；7001 从此不是最旧的。
+        assert!(publish(keys[0], 3).await.is_empty());
+        assert_eq!(store.stats().snapshots, 3);
+        assert_eq!(store.stats().evicted_total, 0);
+
+        // 第四格、上限 3：最久没 generate 的是 7002，连几何一起走；刚发布的 7004 留。
+        assert_eq!(publish(keys[3], 3).await, vec![keys[1].to_string()]);
+        assert_eq!(store.stats().snapshots, 3);
+        assert_eq!(store.stats().evicted_total, 1);
+        assert!(store.snapshot(keys[1]).await.expect("read").is_none());
+        assert!(
+            projection
+                .records(ProjectionScope::Historical(keys[1]))
+                .is_empty(),
+            "被顶掉的那格几何一起走"
+        );
+        assert_eq!(
+            store
+                .attributes_target(keys[1], "24384/23257")
+                .expect_err("被顶掉 = DELETE 过")
+                .code,
+            "SNAPSHOT_NOT_FOUND"
+        );
+        for kept in [keys[0], keys[2], keys[3]] {
+            assert!(store.snapshot(kept).await.expect("read").is_some(), "{kept}");
+            assert_eq!(projection.records(ProjectionScope::Historical(kept)).len(), 1);
+        }
+
+        // 上限收到 1：刚发布的那格留，其余按最近一次 generate 的先后走——7003 最旧、7001（重生成过）次之、7004 最新。
+        let dropped = publish(keys[1], 1).await;
+        assert_eq!(
+            dropped,
+            vec![keys[2].to_string(), keys[0].to_string(), keys[3].to_string()],
+            "最久没 generate 的先出"
+        );
+        assert_eq!(store.stats().snapshots, 1);
+        assert_eq!(store.stats().evicted_total, 4);
+        assert!(store.snapshot(keys[1]).await.expect("read").is_some());
+
+        // 显式 DELETE 不计入顶掉数。
+        store.drop_snapshot(keys[1]).await.expect("drop");
+        assert_eq!(store.stats().snapshots, 0);
+        assert_eq!(store.stats().evicted_total, 4);
+        for key in keys {
+            projection.drop_scope(ProjectionScope::Historical(key));
+        }
+    }
+
+    /// 快照 DELETE 之后再问属性，回的是 SNAPSHOT_NOT_FOUND，不是一份空表。
+    #[tokio::test]
+    async fn attributes_after_drop_is_snapshot_not_found() {
+        let store = HistoricalModelStore::open().await.expect("report store");
+        let unit = RefNo::new(24384, 23257);
+        let key = "24384_23257@626";
+        store
+            .publish(&attributes_fixture_report(key, unit, 626))
+            .await
+            .expect("publish fixture report");
+        assert!(store.attributes_target(key, "24384/23262").is_ok());
+        store.drop_snapshot(key).await.expect("drop");
+        let gone = store
+            .attributes_target(key, "24384/23262")
+            .expect_err("DELETE 之后回执一起走");
+        assert_eq!(gone.code, "SNAPSHOT_NOT_FOUND");
+    }
+
+    /// 守卫：`tool=attributes` 的错误码只有契约那三档 + 文件层的 SOURCE/SESSION，
+    /// 且 `exists: false` 是正常回执不是错误——谁把「不存在」改成 404 先红。
+    #[test]
+    fn attributes_at_keeps_absence_as_a_normal_response() {
+        let source = include_str!("historical_model.rs");
+        let body = source
+            .split_once("pub async fn attributes_at(")
+            .expect("attributes_at exists")
+            .1
+            .split_once("async fn publish(")
+            .expect("publish follows attributes_at")
+            .0;
+        assert!(
+            body.contains("return Ok(None);"),
+            "构件在该会话不存在必须走正常回执，不是错误"
+        );
+        assert!(body.contains("\"exists\": false"));
+        assert!(body.contains("\"REFNO_OUTSIDE_SNAPSHOT\""));
+        for forbidden in ["write_behind", "publish(", "SUL_DB", "commit("] {
+            assert!(
+                !body.contains(forbidden),
+                "属性历史读取不得碰持久层 / 生产投影（d-179）: {forbidden}"
+            );
+        }
     }
 }

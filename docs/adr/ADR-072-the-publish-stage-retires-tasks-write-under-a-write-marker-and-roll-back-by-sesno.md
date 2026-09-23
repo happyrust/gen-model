@@ -109,6 +109,11 @@ ADR-071 D4「模型失败不拦数据水位」只对**没崩、走到收尾**的
 `inst_relate` 指针重建（不再 `DegradedBlocked`），落盘改「任务收尾置脏 + 空闲轮落盘」。房间门读本任务的模型结果，三道 CAS 退成普通写。
 `model_complete` 段与任务内 `verdict_for` 删。拓扑源分片只进内存 `GroupCache` 与磁盘工件（d-89），不再写库。
 
+> 追记（2026-09-22，plant3d-web 方案 B）：隐式管身仍**不进**空间树（`aabb_tree::projected_tree_entry` 见 `tube.is_some()` 回 `None`，
+> `tubi_relate` 从来不在树上）。房间层级树要列直段（spec §4.13.5 `tubes=1`）走的是**树路由按单元补**：折完管件之后按树里出现的 BRAN 单元
+> 读根名下的管身记录（投影有回执取投影，否则冷读 `tubi_relate` 只按 `in` 一路），对单个盒复算取候选的判据（`spatial_query::measure_box_in_range`）
+> ——不给管身另建一棵树、不改快照格式 / 启动判据 / `/health`。计划 `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`。
+
 ### D5　库读白名单
 
 对 SurrealDB 的读只允许：`dbnum_watermark`（三水位 / `sesno` / `state_revision`）、`dbnum_write_state`、启动水化一次（ADR-071 D7：

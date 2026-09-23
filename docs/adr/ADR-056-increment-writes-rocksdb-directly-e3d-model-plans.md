@@ -10,8 +10,11 @@
 **被 [ADR-079](ADR-079-generation-root-outcomes-live-in-process-and-the-model-watermark-is-the-only-durable-model-fact.md)
 修订（2026-09-15）**：`gen_root` 表退役——P2-2「未触根凭证前移」（`UPDATE gen_root SET source_end_sesno = T`）不再写库，`advance`
 去向只进回执，「到 T 仍有效」由任务收尾盖到 T 的 `model_sesno` 承诺；P2-1 选根的 `roots_S` 改为 `DbSet@model_sesno` 枚举；
-D9 / N7 与实施约束 5 的护栏不动
-日期：2026-09-02（状态行 2026-09-15 更新）
+D9 / N7 与实施约束 5 的护栏不动；
+**被 [ADR-080](ADR-080-unit-level-publish-rebuilds-only-changed-units-under-a-root-receipt.md) 修订（2026-09-16 立，2026-09-17 补记）**：
+N3 从「模型发布根级原子：一个根一次 CAS 发布」改写为「一次发布调用是一个原子边界」（ADR-080 D4）；D3 的「根级」降为**默认档**，
+例外两个——ADR-066 刚体前移与 ADR-080 单元级 `Partial`；D3 行末「单元级落库另立 ADR」指的就是它
+日期：2026-09-02（状态行 2026-09-15 更新；2026-09-17 补 ADR-080 修订）
 关联：
 - **取代** ADR-017（kv-mem 暂存 + 整窗口写回，含其 2026-08-06 / 08-07 / 08-12 / 08-14 / 08-19 全部修订）、
   ADR-038（有界暂存写回）、ADR-017 2026-08-19 修订二的「触顶收窄拆窗」；
@@ -19,7 +22,8 @@ D9 / N7 与实施约束 5 的护栏不动
   ADR-053 R6（「direct 与 staging 读上下文互斥」随 staging 读上下文退役而失效）；
 - **不动** ADR-001（`applied_sesno` 是数据水位）、ADR-025 §7（数据批次只提交数据、水位与模型意图）、
   ADR-054（生成时点 = 显式指定或文件最新；凭证单调，共识 d-38）、ADR-014（分支原子替换，
-  以根级 CAS 发布的形态继续成立）、ADR-009（改挂两端根都重算）、ADR-021（水位须有数据支撑）；
+  以根级 CAS 发布的形态继续成立；★0917 ADR-080 之后原子边界是一次发布调用，一批可混整根与局部提交，见 N3）、
+  ADR-009（改挂两端根都重算）、ADR-021（水位须有数据支撑）；
 - 证据：`docs/plans/2026-09-02-increment-update-audit-and-next-plan.md`（S1–S8）、
   `docs/evidence/2026-09-02-planner-parity.md`（五窗对拍；old-pdms-io 幻删 / 漏增 / 整窗报错）。
 
@@ -50,7 +54,7 @@ ADR-017 在 2026-08-05 把稳态增量窗口放进进程内 `mem://` 暂存库�
 |---|---|---|
 | D1 | 模型生成失败对数据水位的影响 | **模型失败不阻断水位**。根级失败进 `model_update_pending` 重试账（ADR-050 进程本地；跨重启由「`gen_root.source_end_sesno` < 文件最新」重新发现）。ADR-017 的「窗口阻断」作为模型侧概念退役；数据侧确定性失败（收集器报错、写回被持久层确定性拒绝）仍以 `window_block` 记终态 |
 | D2 | 「新属性 + 旧模型」中间态 | **承认并可观测**：属性面板 / 搜索按 `applied_sesno`，模型按 `gen_root.source_end_sesno`，每窗日志记 `data_committed_at` / `model_caught_up_at`。「先算后写」（e3d-model 纯函数先算出受影响根的快照，再数据块 → 模型块 → 尾事务）留作可选收紧，不作为本 ADR 的要求 |
-| D3 | 模型增量执行粒度 | **根级**：e3d-model `plan_update(S→T)` 只用来选根（`touches_roots`）与未变根凭证前移；执行仍是 `E3dModelService::generate_roots`（根级 CAS、`ModelTarget` 指纹、manifest 哈希去重、scoped delete）。单元级落库（`execute_plan` 直写）另立 ADR |
+| D3 | 模型增量执行粒度 | **根级**：e3d-model `plan_update(S→T)` 只用来选根（`touches_roots`）与未变根凭证前移；执行仍是 `E3dModelService::generate_roots`（根级 CAS、`ModelTarget` 指纹、manifest 哈希去重、scoped delete）。单元级落库（`execute_plan` 直写）另立 ADR。★0917 追记：那份 ADR 即 **ADR-080**（单元级发布，2026-09-16 立、分段落地）——「根级」从此是**默认档**，例外两个：ADR-066 刚体前移与 ADR-080 单元级 `Partial`；`execute_plan` 由「可执行规格」转正为生产执行体（`e3d_model_service::UnitDeltaProducer::produce` 切子计划喂它），开关 `model_unit_level_publish` 默认关、关着时逐位等于本行 |
 | D4 | 数据收集器底座 | **P1–P3 沿用 old-pdms-io，P4 换 e3d-io**（`IndexDiff` + `element_diff` + `ChangeLedger` → `EleOperationData` 适配，`render_persist_statements` 不换）。P4 不是可选项：ams7999 45→46 须出 22 Add / 0 Delete，ams1112 721→722 须能收集并出 24673 Delete，两窗过门前不得宣称数据增量正确 |
 | D5 | Cargo `kv-mem` feature | **保留**。它是 `in_memory_db` 持久层介质与全部 `mem://` 单测 / `fork_surreal_compat` 的依赖；退役的是「暂存」这一用法，不是介质 |
 | D6 | 过渡期回退开关 | **不留**。`GEN_MODEL_DIRECT_INCREMENT`、`use_staged_increment_window` 与整套 staging 代码一并删除；回退靠 git tag |
@@ -64,8 +68,11 @@ ADR-017 在 2026-08-05 把稳态增量窗口放进进程内 `mem://` 暂存库�
   `gen_root.source_end_sesno` 单独表达（ADR-001 原义、ADR-025 §7 现行）。
 - **N2 数据写回分块 + 水位门控**：TX_CHUNK 分块、幂等 UPSERT / 先删后插 / 软删 UPDATE、任一块失败水位不动、
   整窗口按同一区间重放——即今天 `persist_latest_main_data` + `finalize_attempt` 的纪律，一个字不改。
-- **N3 模型发布根级原子**：一个根一次 CAS 发布；`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本；
-  同库串行 `db_generation_lock(dbnum)`。
+- **N3 模型发布的原子边界 = 一次发布调用**（★0917 按 ADR-080 D4 改写；原文「模型发布根级原子：一个根一次 CAS 发布」）：
+  一次 `model_write_behind::publish(commits)` 是一个原子边界，一批里可以混整根（`WholeRoot`）与局部（`Partial`）提交、
+  可以跨多根（改挂两端根、一个 PIPE 下几条 BRAN 一起落地）；`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本、
+  同库串行 `db_generation_lock(dbnum)` 两条不变，regen / transform / unit 三条路同一把锁。回执仍是根级（ADR-080 D5），
+  局部提交后由存储在写锁里按整根重算 `manifest_hash` 盖章。
 - **N4 模型失败不阻断水位**（D1）。
 - **N5 两枚凭证表达读者一致性**（D2）。
 - **N6 只有一套变更检测**：数据面与模型面对同一文件窗口 S→T 的「谁变了」最终来自同一份 e3d-io / e3d-model 差分

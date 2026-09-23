@@ -4,6 +4,9 @@
 **2026-09-13 修订（ADR-074）**：向导第②步只剩 `mem`（默认，不用地址）/ `rocksdb`（连一台已在跑的库，须通过「测试连接」）两档，
 `external` / `spawned-rocksdb` / `spawned-mem` / `embedded-mem` 四档退役；写口 `validate_patch` 只认新名，读旧配置时折到两档显示。
 D3 的设置模式判据读作「`rocksdb` × 空地址 = 设置模式，`mem` 不看地址」；D5 / D8 与实施约束 2、5、7 里的四档措辞按此读。
+**2026-09-18 修订（ADR-083）**：「配置真值仍是 `DbOption.toml` 文件」有一个例外——**介质**（`mem` / `rocksdb`）不在文件里、
+也不在向导里改，只由环境变量 `AIOS_STORE_MODE` 决定。第②步只展示生效档与出处、提醒文件里残留的过期键，地址两格与
+「测试连接」保留；`PUT /api/v1/setup/config` 收下 `store_mode` 但不写盘。D3 判据不变，只是「是不是 `rocksdb`」由环境变量说。
 「端口预检」按钮随 spawn 两档一起删除——服务不再在那个端口上建库，预检没有对象。
 日期：2026-09-09
 落地：`src/web_service/setup.rs`（setup API + 设置模式）、`web/setup.html`（向导页）、`src/lib.rs`（启动臂分支 + 单实例锁交接窗）、`scripts/templates/DbOption.factory.toml` + `scripts/New-LocalRelease.ps1`（出厂形态 + 冒烟两腿）。

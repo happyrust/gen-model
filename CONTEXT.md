@@ -15,7 +15,7 @@ _Avoid_: 局部更新、局部刷新
 _Avoid_: 流水线模式、跳步开关、增量总开关、把 `room_membership` 当模型消费门、三阶段
 
 **生成根 (Generation Root)**：
-一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 RefNo 位解码得到（见「RefNo 库归属」），`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
+一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 RefNo 位解码得到（见「RefNo 库归属」），`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。**`TMPL`（目录模板在设计侧实例化出来的壳）**：位表 `significant=true` / `toplevel=true`，交付单元之外它自己成根，成员（`BOX` / `CYLI` / `EXTR` / 负体 / `GENSEC` / `SCTN` / `PANE` / `NOZZ` …）位表里都不显著、全归它——与 core `UPGRPH` 对 `topNoun == TMPL` 整件 `REPELE` 同口径；交付单元之内归那个交付单元（core 整件 `TMPL`、我们整台 EQUI，多算不漏算）。真库（APS + AMS 388 个 DESI 库）3209 个 `TMPL`：交付单元之外 2563 个全部成根、38,116 个成员 0 个自己成根、变更元素解析口径与枚举口径 0 处不一致（GitHub #44 探针 `live_probe_tmpl_members_roll_up_to_the_tmpl_root`）。
 _Avoid_: 重生成根、regen root、目标根
 
 **RefNo 库归属 (RefNo Database Affiliation)**：
@@ -95,8 +95,12 @@ _Avoid_: 单位体、unit solid（当单位几何已定为截面时）
 _Avoid_: 斜切、is_sloped、端面方向（当指属性时）
 
 **模型影响 (Model Impact)**：
-一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（属性 put → `DESDRA_SCPlugs::PostSetAttribute` → `descases/VDESPT` 按字典 DCHC 类别进 `change/EVALAT`，在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`VDESPT` 就不进 `EVALAT`，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」的两档各要两票：`Skip` = 字典 DCHC=0 **∧** 生成读取集合不含它（`attribute_is_metadata_only`，2026-09-15 S6；之前是效果表 DataOnly ∧ DCHC=0 的五个名字，那张手写表退成报表分类与 `no_model` 的 `metadata_only` / `unread_attribute` 分档依据），`TransformOnly` = 效果表 ∧ DCHC=3。预览（`change_impact` / `model_affecting`）与执行（窗口规划器的元数据门）问同一个谓词。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（§9 为 `putAtt` 入口链与 `VDESPT` 的属性专项规则）。
+一次元素操作对模型的处理动作三态：`Regen`（重生成几何）/ `TransformOnly`（仅更新 world transform，网格不变）/ `Skip`（纯业务元数据，不处理）。由单一权威 `classify_operation_impact` 判定，取「宁多勿漏」。core 会话内交互路的对应物（属性 put → `DESDRA_SCPlugs::PostSetAttribute` → `descases/VDESPT` 按字典 DCHC 类别进 `change/EVALAT`，在 Core3D `change/UPGRPH` 上执行）：`Skip` ≈ 类别 0（`VDESPT` 就不进 `EVALAT`，不动）；`TransformOnly` ≈ 类别 3（`POS`/`ORI`/`BFORI`，`css/STRTRA`·`css/SEGTRA` 只改图形段矩阵）；`Regen` ≈ 类别 4 / 1 / 2（`add/REPELE` 整件、`css/SEGREP` 单图元重建）。但 core 在 GETWORK 路（跨会话收变更，与我们的场景同构）**不分属性**——任何记录重写都整件重画；我方三档是在交互路语义上做的细分，「少算」的两档各要两票：`Skip` = 字典 DCHC=0 **∧** 生成读取集合不含它（`attribute_is_metadata_only`，2026-09-15 S6；之前是效果表 DataOnly ∧ DCHC=0 的五个名字，那张手写表退成报表分类与 `no_model` 的 `metadata_only` / `unread_attribute` 分档依据），`TransformOnly` = 效果表 ∧ DCHC=3。预览（`change_impact` / `model_affecting`）与执行（窗口规划器的元数据门）问同一个谓词。取证见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md`（§9 为 `putAtt` 入口链与 `VDESPT` 的属性专项规则）。**祖先读点纪律**（2026-09-22，GitHub issue #39）：读取集合那一票只钉「读了哪个属性」、不钉「从谁身上读」，而选根按候选的**祖先闭包**上卷——根之上的祖先属性变了不进任何根的闭包，只有 `POS` / `ORI` 走锚点；所以生成器沿 owner 链向上只许读 `POS` / `ORI` 与 noun / refno，此外每一处祖先读都要在 e3d-model `tests/ancestor_reads_guard.rs` 登记它读的是谁、增量怎么覆盖（单元内 / 单元之上）。今天唯一一条「单元之上」的读：FIXING 实例标架读 `JLDATU.ZDIS` 与宿主 `WALL` 的 spine——整棵子树重算的根口径覆盖，单元级发布（ADR-080）不覆盖，开门前要补进单元规划。
 _Avoid_: 几何影响、is_geometry_update
+
+**单元级发布 (Unit-Level Publish)**：
+拿到一个要重算的生成根之后，只重建 `plan_update(S→T)` 点名的那几件单元（单元 = 投影里的一条记录，键 `GeometryId`，与 `manifest_hash` 的去重键同一个），以局部清单（`Partial`，见「局部清单」）叠在同一份**根级**回执之下发布，其余记录原地不动（ADR-080）。它是 ADR-056 D3「根级整根重算」的第二个例外（第一个是 ADR-066 刚体前移），三条路的优先序定死为 transform 优先、unit 兜底、整根重算保底；闸（回执 vs 计划基线）/ 管段完整性门 / 设计窗之外的目标变化 / 生产方任一条不成就回退整根 regen，回退永远正确、只是不省。core 的对应物是 `css/SEGREP`（单图元重建）而不是 `add/REPELE`（整件重画）——「模型影响」里 `Regen` 一档在 core 交互路本就分这两级，本词条把我方的 `Regen` 也拆成整根 / 单元两档；选根一个字不改，它只改「拿到一根之后在根内做什么」。只被 `no_model` 候选碰到的根（本窗名下没有一件几何要变）发一份空 `Partial` 只推回执（D10）。开关 `model_unit_level_publish` **默认关**，开门要过两态对拍全绿、全语料、净收益为正三道门（D9）；D10 另要三条级联同开。
+_Avoid_: 局部生成（当指 ADR-066「局部生成、整根 upsert」时）、单元级回执、单元级 CAS（回执与 CAS 仍是根级，ADR-080 D5）、增量发布（泛指时）
 
 **净变化 (Net Change)**：
 一个 `refno` 在整个待更新会话窗口内所有操作合并后的最终结果：`Added / Modified / Deleted / Cancelled`（新增后删除=无净变化）。
@@ -113,6 +117,30 @@ _Avoid_: 水位、sesno 水位（泛指时）
 **生成源版本 (Model Source Version)**：
 一个库在当前投影下用来生成模型的那一版数据：调用方显式指定的会话号 / 时刻（历史投影、增量窗口右端），或——未指定时——库文件此刻自报的最新会话。它不是应用水位：水位只说数据已摄入，生成时点不从它取；完成凭证记的是模型按哪一版生成，判「当前」看它是否**不早于**要求的版本，不判等值。它也**不是模型水位**（ADR-060）：这一个记「这份几何按哪一版**文件**算出来的」、判不早于，那一枚记「到哪一版**数据窗口**为止数据与模型一致」、判等值；模型按文件最新生成到更新的版本时，两者取值本就不同。
 _Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
+
+**单元版本表 (Unit Version Table)**：
+一个最小交付单元在其库文件会话链上**被触及过**的会话序列（旧 → 新），每条带一个五态 `impact_kind`：`delivery`（单元根在这一会话出现）/ `tombstone`（单元根被删）/ `mesh`（子树里任一元素按「模型影响」判为 `Regen`）/ `placement`（否则任一 `TransformOnly`）/ `noop`（碰到了、全是 `Skip`——plant3d-web 词汇表的「无几何变化提交」）。一个会话没碰到这个单元就不在表里。它是从会话链**算出来的派生量**（ADR-081），不是持久事实，库里没有它的表；同一份「模型影响」判据保证它与生成路不会各说一套。plant3d-web 的「模型版本」`(dbnum, unit_refno, sesno)` 就是这张表的一行。
+_Avoid_: 版本列表（泛指）、逐单元版本索引表、release、把它当模型水位或生成源版本
+
+**历史投影 (Historical Projection)**：
+按需把一个单元子树在某个生成源版本下的几何算出来给前端看的那一份：只活在进程内自己的命名空间（`<refno>@<sesno>`）里，**不进库、不进生产投影、不进任何水位或回执**，前端用完 `DELETE` 或进程重启就没了；它留在盘上的只有内容寻址、跟生产共享的 mesh 文件（用户 2026-09-18：「除了 mesh 文件，其他都不要存到数据库，相当于是一次性的，传递给前端的」）。plant3d-web 版本对比的 A/B 几何就是两份历史投影；「模型版本」是身份，历史投影是把它算出来的一种方式，两个词不互换。
+_Avoid_: 历史模型、历史快照落库、把它当版本身份、把它的记录算进 `model_sesno` 或生成根账本
+
+**属性历史对比 (Attribute History Diff)**：
+同一个构件在 A / B 两个模型版本（两份历史投影的 `sesno`）下的属性逐项 before / after。取数是 `POST model/history/query tool=attributes { snapshot_key, arguments: { refno } }`：按快照回执里的 `(source_file, sesno)` 开一个会话钉死的单库 `DbSet`，与属性面板 `element/attributes` **同一个渲染器**出行——两边对同一个属性印同一个字，字不同就是变了。该构件在那个会话不存在（还没建 / 已删）是一种**正常回执**（`exists: false`），不是错误；存在但不在单元子树里才是 `REFNO_OUTSIDE_SNAPSHOT`。与历史投影同一条纪律：按需算、不落库、不进备份库（ADR-081 候选条，2026-09-18）。
+_Avoid_: 属性快照落库、legacy `/api/model-history/*`（anchors / resolve-anchor / snapshot，plant3d-web 已删）、用另一套简化渲染出行
+
+**属性变化时间线 (Attribute Change Timeline)**：
+一个节点（任意 refno）按会话链列出的「谁在哪一版改了什么」：每行一个它**自身记录**被改过的会话，带会话页的 `user` / `comment`（e3d-io `SessionPage`）、`kind`（created / modified / deleted）、与版本表同一词表的 `impact`（同一个 `classify_operation_impact`），展开是逐属性 before / after——由属性面板同一个渲染器在两端各出一次（`ElementAttributeService::read_pinned`），字不同就是变了；成员增删 / 重排与 owner 改挂另列（成员序在 E3D 里就是管路走向）。索引说记录重写了但两端一字没差 = 原样换页，不成一行。它回答的是「谁改的、为什么改」，任意两版的净差看属性历史对比。`GET element/attribute-history`，按需算、只进进程内缓存（ADR-081，plant3d-web ADR 0066）。
+_Avoid_: 属性历史对比（那是 A / B 两版逐项，不是时间线）、会话列表（漏掉了改了什么）、把 `CACHID` 一类的戳当业务变化（回执里单独标 `stamp`）
+
+**差异摘要 (Node Diff Summary)**：
+节点在 A→B 之间**不生成几何**的一张账：一次会话索引差分，候选按对比范围过滤（`self` = 节点自己；`subtree` = 变化那一侧 owner 链上溯到节点），逐个按生成路同一把尺子判 added / deleted / modified（mesh · placement）/ noop，再按所属最小交付单元分组，附范围内单元总数、变了的单元数与 `needs_confirm` / `estimated_projections`（阈值 `MODEL_HISTORY_CONFIRM_UNITS`，服务端成本策略）。前端拿「变了的单元」去逐个生成历史投影，未变的一份都不算。`GET node/diff-summary`，按需算、不落库。
+_Avoid_: 预对比、干跑对比、把它当模型几何差异（那是几何生成之后的差）、前端写死阈值
+
+**节点版本表 (Node Version Table)**：
+任意节点（构件、单元根、SITE / ZONE 容器）按**对比范围**折叠的模型版本表：`scope=self` 每行是它自身记录变过的会话；`scope=subtree` 每行是节点自身或其下整棵子树里任何记录变过的会话，影响取子树里最重的一档（节点自身出现 / 被删压过一切，成员新增 / 删除按重生成记——与单元表同一把尺子 `fold_window_impact`），并给 `units_changed`（折叠影响不是 noop 的最小交付单元数）/ `units_touched`（记录被动过的单元数）与 `self_impact`（节点自身那一格）。归属不建子树集而是每个候选沿 owner 链上溯一趟，同时解出所属单元根——容器子树几万个元素 × 几百个窗口建不起子树集。它是容器节点「所有子节点」下时间线的唯一来源（容器没有单元表可查）。`GET node/versions`，按需算、只进进程内缓存，键含 scope（ADR-081，plant3d-web ADR 0066）。
+_Avoid_: 子树版本表（漏掉了 `self` 这一档）、容器版本表（它也收构件与单元根）、把它当单元表的并集（并集丢了「节点自身那一格」和单元数）
 
 **模型水位 (Model Watermark)**：
 某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。**它是模型面唯一的持久事实**（ADR-079）：库里不再有逐根的凭证行，重启后「这个库欠到哪」只有它一个说法——落后于 `applied_sesno` 就排 `model_sesno → 文件最新`，`0` 就整库重排；上调只由任务收尾一笔做，回退由写入标记 / 回退到水位做，没有第二个写者对它「对账」。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败——但承诺只覆盖**在册且有几何**的面板：常驻模型带「房间输入缺口」（缺文件的 DESI、缺几何的面板）时生命周期 `Degraded`，根照常算、边照常写、缺口点名的面板 / 库不在承诺内，`/health.degraded_sections` 含 `room`（ADR-073 2026-09-16 D11）；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（`http_422` 一类永久判定，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——前三格来自**生成根账本**（进程内，ADR-079），已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
@@ -291,8 +319,12 @@ _Avoid_: gb 标志（当指语义时）、图形忽略位、XGEOMETRY
 _Avoid_: 生成任务状态、pending 终态、实例计数
 
 **分支原子替换 (Branch-Atomic Replacement)**：
-单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以根级 CAS 发布的形态成立（ADR-056 N3）：一个根一次发布，`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。
+单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以 CAS 发布的形态成立（ADR-056 N3，★0917 按 ADR-080 D4 改口）：原子边界是**一次发布调用**——一批提交一次落地，可混整根与局部（见「局部清单」）、可跨多根；`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。触到某条 BRAN 管身的局部提交按整段重写，计划必须带齐该 BRAN 在 T 端的全部管段才发（ADR-080 D6）。
 _Avoid_: 生成根快照事务、先删后补
+
+**局部清单 (Partial Manifest)**：
+一次模型提交里 `CommitScope::Partial` 的那一档：`upserts` 只点名这根里重建过的那几件，缺席**什么也不证明**，要删什么必须显式写进 `removals`（合法来源只有三处：`plan_update.remove` 的单元、重建时画不出 / 画失败而被擦掉的单元、派生容器 base 端的旧管段键；回溯不到就回退）。与之相对的 `WholeRoot`（默认档，今天所有整根提交）是「`upserts` 是这根的全集，缺席 = 删除」——拿缺席推删除在生产代码里只许有 `whole_root_removals` 一处。局部提交之后没动的记录停在旧会话上、回执前移到 T，所以记录对回执的对账是 `record.source_sesno <= receipt.source_sesno`（ADR-080 D3；比回执新的记录仍是错）；整根 `manifest_hash` / `geometry_count` 由存储在写锁里按提交后的全部记录重算盖章（D5，调用方填的只是占位）。触到某条 BRAN 的管身按整段重写（`tube_branch_resets`），账上的段数 == 带上的段数才发（D6）。空清单只许来自规划器点了名的 `no_model_only` 根（D10），别的根回出空清单是生产方的 bug、回退不发。
+_Avoid_: 部分清单、增量清单、把 `Partial` 当成未完成写入（那是写入标记的事，见「未完成写入重初始化」）、把缺席当删除
 
 **合批重生成 (Batched Root Regeneration)**：
 一次生成调用同时承载多个生成根的重算方式，与「逐根重生成」相对。整批同成同败；批失败后回退逐根，以定位真正坏掉的那个根。
@@ -325,6 +357,26 @@ _Avoid_: 分块、chunk、execution group（指内存预算时）、ZONE 切片
 **生成窗口 (Generation Window)**：
 生成端 worker 最多能跑在装配端前面多少根（`model_regen_execution_group`）。它同时是两件事的答案：**无栏并行**——worker 不在 cohort 边界上停下来等这一批里最慢的那根（几何负载长尾，设栏等于每批都赔上尾巴），只有队头能挡住人；**内存有界**——在飞的已生成几何最多一个窗口，加上正在攒的那一片。窗口满时 worker 把许可**还回去**再退出，由装配端滑动窗口后重新派出，绝不攥着许可等（那是 ADR-052 开篇那个容量倒置）。装配严格按源顺序，所以切片边界与 `Required` 裁决与「谁先算完」无关，`geometry_workers = 1` 逐字节复现串行路径。
 _Avoid_: 批、wave、in-flight（泛指时）、并发度（那是闸额度）
+
+**投影 overlay 根数上限 (Overlay Root Limit)**：
+进程内模型投影（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个有回执的根（`model_overlay_max_roots`，环境变量 `AIOS_MODEL_OVERLAY_MAX_ROOTS` 压过；**没写 = 50,000**（2026-09-20 mem 档实测 ≈ 13.8 KB/根 → ≈ 0.7 GB，数字见 ADR-082 D5——原始采样件未入库，`docs/evidence/2026-09-20-d149-mem-footprint.md` 这个文件从没存在过），**写 0 = 不限**）。overlay 此前无界——一个根进来就一直在。超了按**最近一次盖回执**的先后逐出**已 durable ACK 且与回执逐字相符**的根：整根记录（与仍常驻的回执共有的留下）+ 回执 + ACK 一起掉，是缓存态的收回不是删除——库里那一份不动、不产生删除 delta、不进房间变化账；读路对它直读 RocksDB，单元级发布 / 刚体前移拿不到 S 端基线回退 regen，整库房间重算从库里读它的几何行（见「冷根」）。未落盘的根永远不在候选里，候选用尽仍超限就只报数（「设了上限却一直不逐」= 常驻的全是还没落盘的根）；**ACK 是房间边唯一证据的根也不在候选里**（2026-09-22 补丁：房间代号是本进程写过的 stray 代号、库上又还没盖到这一代的，`ScopeState::ack_is_stray_room_evidence`；房间开关开着却没带房间代号的，`ack_owes_room_edges`——定向房间重算 `stale_acked_roots` / 就绪判定 `room_calculation_status` 都靠这枚 ACK 点名它，逐了它们就把另一代算的边当成这一代的；库上盖到它那一代之后自然放行）；只在 durable 介质下动（嵌入 kv-mem 时 overlay 是唯一一份）；读不刷新序。时机：write-behind 每次发布之后、每批 durable ACK 记下之后。现值 `/health.model_cache.resident_roots`，上限与累计逐出数在 `write_behind.overlay_root_limit` / `overlay_evicted_total`；`/health.model_cache.overlay.approx_bytes` 是被查时现算的估算字节（记录那半插入加 / 删除减记账，回执 / ACK 走一遍；不含盘上网格——每库房间空间树 `room_spatial` 2026-09-22 已删，它没有生产读者却每次提交 / 逐出都在写锁里整棵重建），只回前端、不落库（ADR-082 D1 / D5，d-149）。
+_Avoid_: overlay LRU（读不刷新序）、按字节的内存预算、投影淘汰（当指 `evict_missing_root` 那种「库里没了」的收回时）、overlay 硬上限 503（旧设计残词，从未有过）
+
+**冷根 (Cold Root)**：
+库里有几何行、进程投影里没有回执的生成根——按根数上限逐出过的、进程重启后没回填的（`model_cache_mode=incremental-overlay` 启动不回填），两种同一形态。读路对它直读 RocksDB、不回填；整库房间重算把它的几何行读回来折成房间计算的输入（`model_record_reader::durable_records_of_root` → `room_model::durable_room_inputs`，ADR-073 D13 U1 第二半；2026-09-21 合并前主线短暂有过一份 `durable_room_records_of_root`「房间视图」，已并成这一条）：只有房间计算读的那几样忠实——构件、世界盒、网格、变换；**不装回 overlay**、不发布。根的全集不从库里猜（`gen_root` 已退役、几何行的 `anc` 分不出谁是根），从本任务冻结的源按 `DbSet@T` 枚举（`batch_worker::library_generation_roots`，与规划器同一条枚举）；枚举不出就是 `PartialCoverage`——只算投影那一半、D14 那一格不盖、电平型触发下一个任务再点（ADR-082 D3，修订 ADR-073 D13）。
+_Avoid_: 缺根、未生成的根（那是从没生成过的）、冷读回填、把房间视图当投影记录
+
+**元素缓存元素数上限 (Element Cache Entry Limit)**：
+生成用 `DbSet` 池级元素缓存（`model_element_cache`，默认开）最多装多少个元素（`model_element_cache_max_entries`，环境变量 `AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES` 压过；**没写 = 200,000**（2026-09-20 mem 档实测 3.6–4.7 KB/元素 → ≈ 0.7–0.95 GB/库，样例最大库整库一遍 177k 条不会清一次），**写 0 = 不限**）。缓存体在 vendor e3d-io `DbSet::with_element_cache_limit`：全池跨库合计，一枚原子计数器（只数 `parsed`，与 `cached_element_count` 同一口径，近似值）；满了**整张清**再装下一个——与四张版本表缓存同一个做法，零簿记，不做 LRU（每元素上百次命中的读路径上不写一笔），代价只是清空之后那一小段重新变冷。每份 `DbSet` 各算，生成输入缓存每库留一份，进程里的上限是「库数 × 这个数」。产物逐字不变（缓存只省重复的 open + parse；7997 一轮这块实测 768 MB → 1.55 GB）；缓存关着时这个数没有意义。现值 `/health.model_cache.element_cache`（每库一行：条数、抽取条数、估算字节、上限），估算是被查时逐份走缓存现算的、只回前端、不落库（ADR-082 D4 / D5，d-149）。
+_Avoid_: 元素缓存 LRU、按字节的缓存预算、把它当成生成输入缓存的上限（那个每库一条、不归它管——见下一条）
+
+**生成输入缓存库数上限 (Generation Input Dbnum Limit)**：
+生成输入缓存（`e3d_model_service::GENERATION_INPUT_CACHE`，键 `(dbnum, sesno, identity)`，每库一条：一份开着 MDB 全部 DESI 文件的 `DbSet` + 它的池级元素缓存 + 一份源索引，≈ 0.7–0.95 GB / 库）最多同时留多少个**库**（`model_generation_input_max_dbnums`，环境变量 `AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS` 压过；**没写 = 0 = 不限**，ADR-084 D3：先只加能力、真机量过每窗重开一份的代价再定默认值，候选 2–4）。此前这一维无界：同库换 sesno 只替换那一条，`forget_generation_input` 只有初始化收尾与常驻房间换代两处在调，长驻进程碰过 N 个 DESI 库就留 N 份，CATA 链元素在每份里各缓存一遍。设了之后按**最近一次生成用到**的先后逐库整份出（`DbnumLru`，命中也刷新——与 overlay 那道「读不刷新」相反，这里保护的正是「最近在生成的库」这份热度；同库换 sesno 的替换与 `forget` 不计入逐出数），上限 ≥ 活跃库数时与不设逐位相同；被逐的那份由还握着 `Arc` 的切片用完，库下一窗从文件重开（元素缓存重新变冷，产物逐字不变）；被替 / 被逐的值在缓存锁外 drop。按库数不按字节、零簿记（d-149 口径）。现值 `/health.model_cache.element_cache.{max_dbnums, resident_dbnums, evicted_dbnums_total}`，`databases[].last_used_tick` 是进程内单调序号（越大越新）。
+_Avoid_: 每窗收尾无条件释放（改默认行为，ADR-082 §不做）、生成输入 TTL、把它与元素缓存元素数上限混为一道（那是每份 `DbSet` 里的元素数，这是份数）
+
+**历史快照格数上限 (Historical Snapshot Cap)**：
+`POST /model/history/generate` 造的每一格 `Historical(<snapshot_key>)` 作用域（一个单元子树在某一会话的完整投影 + `HistoricalModelStore` 里的一份回执）最多同时留几格（`model_historical_snapshots_max`，环境变量 `AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX` 压过；**没写 = 16**，**写 0 = 不限**；内存控制计划 P4 / D4，2026-09-22）。此前只有显式 `DELETE` 或同 key 重生成才丢，没条数上限、没 TTL，`overlay_footprint` 只数 `Current`、`/health` 看不见这几格。设了之后 `generate` 发布第 N+1 格时按**最近一次 generate** 的先后把最旧的那格连回执一起丢（`HistoricalModelStore::publish_capped` → `drop_snapshot`，与 `DELETE` 同一条路），刚发布的永远留，同 key 重生成只刷新序号、不算新格、不顶别人；被顶掉的格再 `query` 是既有的 `SNAPSHOT_NOT_FOUND`（前端重新 `generate` 即可）。按条数不按字节、不做 TTL（d-149 口径）。现值 `/health.model_cache.historical`：回执表的 `snapshots / max_snapshots / evicted_total`（显式 `DELETE` 不计入）+ 投影里每格的 `records / approx_bytes`（`ModelMemoryStore::historical_footprint`，与 overlay 同一把尺）。
+_Avoid_: 快照 TTL、快照落库、把它当成 overlay 根数上限的一部分（那道只数 `Current`）
 
 **几何 CPU 执行域 (Geometry CPU Domain)**：
 几何计算跑的那个私有线程池（线程数 = 几何并发闸额度，**不是**全局 Rayon 池——那个被 `room_model` / `db_model` 的 `par_iter` 共用，宽度不归闸管，接进来就是第二套并发口径）。唯一入口 `run_gated_cpu`，只收**同步闭包**：闭包里写不出 `.await`，「攥着许可去 await 另一个过闸子任务」这条会死锁的写法在类型层就不成立。等库、等锁一律留在 async 侧，不占额度。fan-out 宽度只来自 `resident_workers(件数) = min(额度, 件数)` 个**常驻 worker 从共享队列动态领取**，不是静态均分（几何负载长尾，一块里摆两个重 BRAN 就把其余 worker 空在那儿），也不是「每件一个 task 挤信号量」。
@@ -563,6 +615,10 @@ _Avoid_: 中心线包围盒、BRAN 盒、管线走廊、TUBI 走廊、走廊盒�
 以一条 BRAN 为源，在给定半径内**按目标分桶**、每桶各取最近的若干个构件，每条候选带一对可直接画尺寸的端点（源侧落在中心线上——扣管外径时推到管外表面，目标侧落在候选包围盒面上）与这段距离。分桶两种口径：预置目标组（墙 = WALL / PANE / GWALL / STWALL，柱 = COLU / SCTN / GENSEC；空桶保留）或按 NOUN 每类一桶；各类型截断前的计数（`noun_counts`）供前端做类型 facet。目标侧只到包围盒、不是网格精算（spec §4.13.2）。
 _Avoid_: 最近距离（泛指时）、管墙距、净空、碰撞检查、clearance 查询
 
+**直段行 (Tube Row)**：
+房间层级树（`nearby/tree` / `rooms/{refno}/tree`）在 `tubes=1` 时挂在 **BRAN 单元**下的一行隐式管身：身份是 `(单元 refno, 离开侧构件, 到达侧构件, 序号)` 四元组——直管没有自己的 refno，所以它不是构件、不计入任何 `count`，另立 `tube_count` / `total_tube_count`。来源是**按单元补**：折完管件后按树里出现的 BRAN 单元读根名下的管身记录（投影有回执取投影，否则冷读 `tubi_relate`），对单个盒复算与管件同一把尺的范围判据，按两端管件任一属该房归房；管身仍不进空间树（ADR-072 D4）。管件全在范围外、只有直段穿过的「孤直段」列不出（spec §4.13.5）。`/model/records` 的管身记录在记录一级带同一个四元组的 `tube{ordinal, from, to}`（spec §4.5.2；`route_ordinal` 随 `tubi_relate` 行落盘，老行读侧按出现序补号），前端拿它把直段行对上场景里的直管对象。
+_Avoid_: 直管构件、TUBI 叶子、管身条目（指树上条目时）、直段节点（前端节点模型另有叫法）
+
 ## 实机端到端测试（Live E2E Testing）
 
 **金基线对 (Golden Baseline Pair)**：
@@ -658,7 +714,7 @@ _Avoid_: 重盖章（泛指时）、迁移 epoch、队列重建（那是周期�
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=mem`：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、再把配置切到 `rocksdb`（服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再在向导改选 `rocksdb`；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档由 `Start-AMS.ps1` 显式以 `mem` 起（服务自身默认档是 `rocksdb`，包不靠它）：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、在向导填好 `v_ip:v_port`、再以 `Start-AMS.ps1 -StoreMode rocksdb` 启动（介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置里改，ADR-083；服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再以 `-StoreMode rocksdb` 起服务；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -670,7 +726,7 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（默认 `mem`，`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式（**有意不设介质**，考的是「落到默认档 rocksdb 也仍然拐进设置模式、向导打得开」这条逃生门）；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（`-SmokeStoreMode` 缺省取 `mem` 并显式递给服务，不是靠服务的默认档；`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `AIOS_STORE_MODE=rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。三腿的介质都以环境变量递给服务，不往临时配置里写 `store_mode`（ADR-083）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
 
@@ -688,13 +744,13 @@ _Avoid_: 监听地址、绑定地址、反向代理监听
 
 # 配置向导 (Setup Wizard)
 
-exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（两档：`mem` 内存库不用地址 / `rocksdb` 连已有库带连通 + 版本硬闸）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
+exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（**只展示**生效介质与出处——介质由环境变量 `AIOS_STORE_MODE` 决定、不在向导里选，ADR-083；`rocksdb` 档下填地址并过连通 + 版本硬闸，`mem` 不用地址；文件里残留过期 `store_mode` 时提醒删掉）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`；唯一例外是介质，它的真值在启动命令的环境里）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
 
 _Avoid_: 安装向导（没有安装动作）、配置中心 / 配置页（真值在文件，不在服务里）、首跑向导（向导也服务于日常改配置）。
 
 # 设置模式 (Setup Mode)
 
-启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或 `store_mode=rocksdb` 而 `v_ip` 空 / `v_port=0`；`mem` 不看地址）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；库地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
+启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或介质为 `rocksdb`（由环境变量 `AIOS_STORE_MODE` 决定）而 `v_ip` 空 / `v_port=0`；`mem` 不看地址）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；库地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
 
 _Avoid_: 安全模式 / 降级模式（正常启动链的失败语义没改）、维护模式（没有这一档）。
 
@@ -706,13 +762,13 @@ _Avoid_: 锁文件（不互斥任何东西）、初始化标记（初始化完�
 
 # 存储形态 (Store Mode)
 
-`DbOption.toml` 的 `store_mode`，**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。默认 `mem`。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：仍认，但启动时大声告警说清换成了什么；向导只写新名。
+持久层的介质，**只由环境变量 `AIOS_STORE_MODE` 决定**（ADR-083，2026-09-18；`DbOption.toml` 的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB` 不再参与，写了只会在启动时被整行点名），**只有两档**（ADR-074，2026-09-13）：`mem` = 持久层是进程内嵌的 `mem://`，没有端口、活不过重启、只有本进程读得到，数据面派生为 read-through；`rocksdb` = 连配置 `v_ip:v_port` 上一台**已经在跑**的 SurrealDB（rocksdb 后端），活得过重启、别的进程也连得上，数据面派生为 ingest。**本进程在任何一档都不拉起数据库**——`rocksdb` 档端口上没库就是启动失败，不自己起一台空库糊弄过去；要一台本地库先跑 `Start-Surreal8009.ps1` / 包内 `Start-Surreal.ps1`。**不设 = `rocksdb`**（ADR-083 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻过来：漏设的代价要落在「当场报连不上」而不是「服务起来了、属性行却一直不进库」那一侧）；发布包不靠这个默认，`Start-AMS.ps1` 不给 `-StoreMode` 时显式回填 `mem`，解压即跑照旧。「持久」与「别的进程连得上」在两档下是同一个问题，只留 `is_durable()` 一个谓词。退役写法 `embedded-mem` / `spawned-mem` → `mem`，`external` / `spawned-rocksdb` → `rocksdb`：写在环境变量里仍认，但启动时大声告警说清换成了什么。介质是「这一次进程怎么起」的事，跟启动命令走（`Start-AMS.ps1 -StoreMode` / systemd `Environment=` / `$env:`）；配置文件描述「这个工程长什么样」，`v_ip:v_port` 留在文件里是「rocksdb 档连哪儿」，不是「要不要 rocksdb」。仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写这一行。
 
-_Avoid_: 自带持久库 / 自带存储 / spawned-*（服务不再拉库，那一套署名 / 心跳 / 四格裁决 / 孤儿回收随 `store_process.rs` 整个删除）、external（已更名 rocksdb）、embedded-mem / kv-mem（已更名 mem）、创建数据库实例（没有这个动作，库由人起、服务只连）。
+_Avoid_: `DbOption.toml` 里的 `store_mode`（2026-09-18 起不生效）、向导第②步改选（向导只展示）、自带持久库 / 自带存储 / spawned-*（服务不再拉库，那一套署名 / 心跳 / 四格裁决 / 孤儿回收随 `store_process.rs` 整个删除）、external（已更名 rocksdb）、embedded-mem / kv-mem（已更名 mem）、创建数据库实例（没有这个动作，库由人起、服务只连）。
 
 # 引导子集 (Guided Subset)
 
-配置向导管的那部分 `DbOption.toml` 键：`project_path` / `project_search_paths`（ADR-078，取代退役的 `included_projects`；向导第①步改成「搜索根 + 主项目 + MDB → 看闭包」，`POST /api/v1/setup/probe/mdb`） / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
+配置向导管的那部分 `DbOption.toml` 键：`project_path` / `project_search_paths`（ADR-078，取代退役的 `included_projects`；向导第①步改成「搜索根 + 主项目 + MDB → 看闭包」，`POST /api/v1/setup/probe/mdb`） / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。`store_mode` 已不在其内（ADR-083：介质由环境变量决定；`PUT` 仍收下这一格但不写盘，与 `included_projects` 同一处理）。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
 
 _Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。
 
@@ -726,7 +782,7 @@ _Avoid_: 审核 / 审批（那是校审流程里的节点动作，不是这个�
 
 # 持久化闸 (Review Persistence Gate)
 
-校审域挂路由之前对**落点**的一次裁决（`src/web_service/review/db.rs::review_persistence`，ADR-075 × ADR-074，d-398）。判据只有一条 `StoreMode::is_durable()`——全仓「这一档活不活得过重启」的唯一出处，校审不另立标准，否则会与 `/health.sul_db.durable` 讲两套话。`rocksdb` → 挂业务路由；`mem`（出厂默认，d-368）且未放行 → 四个前缀整体换成拒绝路由：任意路径、任意方法一律 **503** + `code=review.persistence.refused`（不是 404——404 分不清「没移植」和「配置不让跑」），启动打多行横幅点名介质、四个前缀、原因与改法；`fresh_review_db()` 同样先过闸再取句柄。三处文案（横幅 / 503 正文 / Err）共用同一份事实 `ReviewPersistenceRefusal`。闸在单测里照常活着（d-410）：`platform::tests` 的 `mem://` 夹具用 `cfg(test)` 进程级开关 `TEST_ALLOW_EPHEMERAL_STORE` 显式声明「知道会丢」，不许用 `#[cfg(not(test))]` 把闸编掉。生产启用校审的路径是先起持久 SurrealDB（`scripts/Start-Surreal8009.ps1`）、再把 `store_mode` 改成 `rocksdb`。
+校审域挂路由之前对**落点**的一次裁决（`src/web_service/review/db.rs::review_persistence`，ADR-075 × ADR-074，d-398）。判据只有一条 `StoreMode::is_durable()`——全仓「这一档活不活得过重启」的唯一出处，校审不另立标准，否则会与 `/health.sul_db.durable` 讲两套话。`rocksdb` → 挂业务路由；`mem`（出厂默认，d-368）且未放行 → 四个前缀整体换成拒绝路由：任意路径、任意方法一律 **503** + `code=review.persistence.refused`（不是 404——404 分不清「没移植」和「配置不让跑」），启动打多行横幅点名介质、四个前缀、原因与改法；`fresh_review_db()` 同样先过闸再取句柄。三处文案（横幅 / 503 正文 / Err）共用同一份事实 `ReviewPersistenceRefusal`。闸在单测里照常活着（d-410）：`platform::tests` 的 `mem://` 夹具用 `cfg(test)` 进程级开关 `TEST_ALLOW_EPHEMERAL_STORE` 显式声明「知道会丢」，不许用 `#[cfg(not(test))]` 把闸编掉。生产启用校审的路径是先起持久 SurrealDB（`scripts/Start-Surreal8009.ps1`）、把 `v_ip:v_port` 指过去、再以 `AIOS_STORE_MODE=rocksdb` 重启服务（介质只认这个环境变量，ADR-083）。
 
 _Avoid_: 校审开关 / 功能开关（它不是配置项，是介质派生的裁决）、降级 / 只读模式（拒绝就是整域 503，没有半开档）、`mem` 下静默放行（那是判据 A9 要禁的一行告警式失效）。
 

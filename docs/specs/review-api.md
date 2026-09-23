@@ -43,7 +43,8 @@
 | `platform_auth`（PMS S2S） | §8 六条 | 请求体字段 `token`（不是 header） | `[platform_auth] enabled / debug_token`；`enabled=true` 校验 JWT；`enabled=false` 要求与 `debug_token` **精确相等**，`debug_token` 为空则一律拒绝 |
 | `aux-data` 口令 | §9 `POST /api/review/aux-data` | 请求头 `UCode` / `UKey` | 环境变量 `AUX_DATA_UCODE`（缺省 `ZY`）/ `AUX_DATA_UKEY`（缺省空串） |
 
-JWT：HS256，密钥来自 `JWT_SECRET` 环境变量（缺省 `default-jwt-secret-key`，启动告警），过期由配置的 `expiration_hours` 决定。
+JWT：HS256。密钥与有效期由 `review/auth.rs::JwtConfig::from_config_file` 取：**配置文件能载入时**（`DB_OPTION_FILE` → `db_options/DbOption` → `DbOption`，服务器上恒成立）只读 `[model_center].token_secret` / `token_expiration_hours`（缺省 24 小时），此时环境变量 `JWT_SECRET` **不生效**；找不到任何配置文件才退到 `JwtConfig::default()` 读 `JWT_SECRET`。两路都没给 → 缺省 `default-jwt-secret-key`（启动告警；知道这个串的人不连服务器就能签出任意 `project_id` / `user_id` / `role` 的 token）。
+现状：生产 `:8022` 在 2026-09-21 00:31 之前一直没配 `[model_center]`、实际跑在默认串上；此后补成旧 `:3100`（plant-model-gen `[model_center].token_secret`）同一把。注意 PMS **不持有**密钥：它的 S2S `token` 是先调 `POST /api/auth/token` 取的（`plant3d-web/scripts/pms-contract-sequence.ts` 第 0 步就是它），所以密钥只需本机签 / 验一致、跨重启与重部署稳定，值与旧端是否相同并不影响 PMS；换密钥 = 已发 token 全部失效，PMS 重取、前端重登即可。也因此 §8 六条的 JWT 校验挡住的只是「没先调 `/api/auth/token`」——真正的信任边界是**谁能打到 `/api/auth/token`**（它不要密码）。仓库 `DbOption.toml` 末尾有本段的注释模板；`github/deploy/backend-20260918` 分支的 `render_dboption.py` 尚未追加本段、`install_backend.sh` 写进 `service.env` 的 `JWT_SECRET` 按上面的口径不会被读到——重部署前要补（`changelog.md` 2026-09-21）。
 claims：`{project_id, user_id, user_name, role?, workflow_mode?, exp, iat}`；**`form_id` 不进 JWT payload**（单据维度只走 URL / query，
 `verify_platform_api_json.sh` 第 1b 步钉住）。`workflow_mode` 只在旧端 `review-internal-workflow` feature 构建里出现，本仓不移植：
 `/api/auth/token` 收到该字段**只告警忽略**，claims 不携带。
