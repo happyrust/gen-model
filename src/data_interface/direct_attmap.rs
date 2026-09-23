@@ -280,11 +280,17 @@ fn natural(value: &DescriptorValue) -> Option<NamedAttrValue> {
         D::WordArray(v) => NamedAttrValue::IntArrayType(v.iter().map(|w| *w as i32).collect()),
         D::RealArray(v) => NamedAttrValue::F32VecType(v.iter().map(|x| *x as f32).collect()),
         D::BoolArray(v) => NamedAttrValue::BoolArrayType(v.clone()),
+        D::TextList(v) => NamedAttrValue::StringArrayType(text_list(v)),
         D::RefNoArray(v) => {
             NamedAttrValue::RefU64Array(v.iter().map(|r| RefnoEnum::from(refu64(*r))).collect())
         }
         D::Unset => return None,
     })
+}
+
+/// 串列表（类型 19，e3d-io `TextList`）→ 字符串数组：逐项走与 `Text` 同一条归一化。
+fn text_list(items: &[String]) -> Vec<String> {
+    items.iter().map(|s| normalize_text(s)).collect()
 }
 
 /// 没有值时，哪些状态算「本就没有值」，哪些算「该有却没解出来」。
@@ -358,6 +364,7 @@ fn coerce(value: &DescriptorValue, declared: &AttrVal) -> Option<NamedAttrValue>
         (AttrVal::StringArrayType(_), D::IntArray(v)) => {
             NamedAttrValue::StringArrayType(v.iter().map(|w| word_text(*w as u32, None)).collect())
         }
+        (AttrVal::StringArrayType(_), D::TextList(v)) => NamedAttrValue::StringArrayType(text_list(v)),
 
         (AttrVal::RefU64Type(_) | AttrVal::ElementType(_), D::RefNo(r)) => {
             NamedAttrValue::RefU64Type(refu64(*r))
@@ -436,6 +443,7 @@ fn shape_of(value: &DescriptorValue) -> String {
         D::RefNoArray(v) => format!("RefNoArray[{}]", v.len()),
         D::WordArray(v) => format!("WordArray[{}]", v.len()),
         D::BoolArray(v) => format!("BoolArray[{}]", v.len()),
+        D::TextList(v) => format!("TextList[{}]", v.len()),
         D::RawWords(v) => format!("RawWords[{}]", v.len()),
     }
 }

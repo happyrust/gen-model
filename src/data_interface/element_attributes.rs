@@ -1110,6 +1110,12 @@ fn descriptor_json(value: &DescriptorValue) -> (String, Value, String, bool) {
             display_array(value),
             true,
         ),
+        D::TextList(value) => (
+            "text-array".into(),
+            json!(value),
+            display_array(value),
+            true,
+        ),
         D::RawWords(value) => (
             "raw-words".into(),
             json!(value),
@@ -1139,6 +1145,12 @@ fn explicit_json(value: &ExplicitValue) -> (String, Value, String, bool) {
             let values = value.iter().copied().map(pdms).collect::<Vec<_>>();
             ("ref-array".into(), json!(values), values.join(", "), true)
         }
+        ExplicitValue::TextList(value) => (
+            "text-array".into(),
+            json!(value),
+            display_array(value),
+            true,
+        ),
         ExplicitValue::RawWords(value) => (
             "raw-words".into(),
             json!(value),
