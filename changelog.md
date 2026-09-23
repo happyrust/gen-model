@@ -2,6 +2,25 @@
 
 ## 2026-09-23
 
+### `GET /api/v1/datacenter/deletes`：交付删除记录的对外只读口（spec §4.14；plant-ui #1 后续）
+
+- **为什么**：`datacenter_delete` 落地后只有写者（增量随窗语句），读它的 rs-server §6 还没开工；用户要一条给外部（提资 / 中台侧）拉「该删什么」的接口。
+  2026-09-23 拍板三条：放 gen-model、**只读**、**不带 `instance_code`**（那是 rs-server `change_name_into_illegal(name)` 的编码规则，本仓不复制，计划 D3），
+  鉴权同 `/api/v1`。gen-model 对这张表仍只写不删（D7）：这条路由一个 `DELETE` 都没有。
+- **改动**：新模块 `data_interface::datacenter_delete_reader`——`DeleteRecordFilter { zone_refnos, dbnum, reason, since_sesno, start, limit }` 渲成两条
+  字面量 `SELECT`（页 + `count() GROUP ALL` 总数；refno 先解成 `RefU64` 再渲 `pe:⟨…⟩`、`reason` 只认 `deleted | renamed` 两个枚举、数字是数字，
+  没有拼进去的原文字串），行序 `dbnum, sesno, name` 稳定；`limit` 缺省 500、上限 5000 夹住不报错。每行附 `published` / `published_status`：
+  按 `datacenter_version:{refno}` 显式 record id 分批（200）点查 `record::exists`，表还不存在的新库稳定回 `false`。`handlers::datacenter_deletes`
+  （`DatacenterDeletesReq`：`zone_refno` 逗号分隔、`a/b` / `a_b` 都收；解不出 / `reason` 不认 → 400 `bad_request`）→ `list_delete_records(&SUL_DB, …)`
+  → `DeleteRecordsPage { items, total, start, limit, has_more }` 原样透传；路由挂在 `/api/v1/dbnums` 旁。spec 新 §4.14（参数表 / 响应样例 / 字段表 /
+  与 `status = 'Delete'` 行并存、改回原名不判）；CONTEXT「交付删除记录」词条补这一口。
+- **验证**：单测 +3——`the_sql_shape_is_literal_and_stable`（空过滤无 WHERE、满过滤的 WHERE 顺序与 ZONE 去重、`LIMIT/START`、上限夹、`reason` 解析）、
+  `lists_pages_filters_and_the_published_flag`（`mem://` 用生产渲染器落 4 行：整表序、按 ZONE、`reason + since_sesno`、`start=1 limit=2` 翻页 `has_more`、
+  链断 `zone_refno = null`、转义位号原样回、`datacenter_version` 表不存在时全 `false`、UPSERT 一行后只对那个 refno 翻真带 `Insert`、读完行数仍 4）、
+  `datacenter_deletes_filter_validates_the_query_string`（两种 refno 写法 / 大小写 / 缺省 / 两种 400）。全量 `cargo test --lib` **2436 passed / 0 failed /
+  128 ignored**；`rustfmt --check` 改到的每一段干净；`cargo clippy --lib --tests` 触及文件 0 告警。**未 live**：`:8022` 在跑的是别的工作树的二进制，换二进制归用户；
+  换上后 `curl "http://127.0.0.1:8022/api/v1/datacenter/deletes?limit=20"` 即可看。
+
 ### 交付单元删除 / 改位号的中台删除记录 `datacenter_delete` 落地（plant-ui #1「增加删除标记」；plan 2026-09-22 T1–T5）
 
 - **为什么**：元数据提资时，最小交付单元（`BRAN / SUPPO / EQUI …`）被删或 `NAME`（位号）改了，中台仍留着旧位号那一份、要通知它删。

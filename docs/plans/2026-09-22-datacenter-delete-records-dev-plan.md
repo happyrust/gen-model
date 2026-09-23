@@ -16,6 +16,8 @@
 > **21 绿**——fork 双跑首跑红：`SELECT VALUE count() … GROUP ALL` 在 2.1.4 上回的是 `{ count: n }` 对象、不是裸整数，探针改按 id 第二位
 > （老位号）数行后绿；全量 `cargo test --lib` **2433 绿 / 0 红 / 128 ignored**；`rustfmt --check` 改到的每一段干净（同文件 HEAD 上就有的
 > 5 处旧 diff 不动）。**跨仓 §6（rs-server 消费端）未开工**；Q1 `HANG` 待确认。
+> 追记（2026-09-23，同会话）：对外**只读**口 `GET /api/v1/datacenter/deletes`（spec §4.14，`data_interface::datacenter_delete_reader`）——用户拍板
+> 放 gen-model、只读、不带 `instance_code`、鉴权同 `/api/v1`；每行附 `published`（join `datacenter_version`）。D7 不变：删行仍归 rs-server。
 
 ## 0. 一句话
 

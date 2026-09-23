@@ -633,6 +633,12 @@ async fn serve_with_ready(
         // 单位网格的 GLB 形态。与下面 `/assets` 的 ServeDir 是同一份 `.mesh` 的两种口径：
         // 那条给 plant-ui（原生读 rkyv），这条给浏览器（只认 glTF）。
         .route("/api/v1/meshes/{file}", get(handlers::mesh_glb))
+        // 交付删除记录（`datacenter_delete`，plant-ui #1）的对外口：只读分页、每行附 `published`，
+        // 不带 `instance_code`、不删行（spec §4.14；鉴权同本组其余 `/api/v1` 路由）。
+        .route(
+            "/api/v1/datacenter/deletes",
+            get(handlers::datacenter_deletes),
+        )
         .route("/api/v1/dbnums", get(handlers::dbnums))
         .route(
             "/api/v1/dbnums/{dbnum}/data",

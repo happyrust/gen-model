@@ -1382,6 +1382,56 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 （`DirectTreeService` 取不到、MBD 服务不可用等）按 §3 统一信封 500。
 > 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`、`/files/review_attachments/*`；plant3d-web 写死的契约路径，不在 `/api/v1` 下，响应沿用旧端 `{success,…}` 信封而非 §3 的 `ApiError`）另见 `docs/specs/review-api.md`（自 plant-model-gen `:3100` 移植，`docs/plans/2026-09-12-review-backend-port-plan.md` Q10）。
 
+### 4.14 `GET /api/v1/datacenter/deletes` — 交付删除记录（`datacenter_delete`）只读分页（2026-09-23，plant-ui #1）
+
+- 读的是 **交付删除记录**（CONTEXT 词条）：交付单元自身被删 / 改位号时，增量随窗语句落下的「这个 refno 曾以哪个位号
+  发布过、如今该位号要从中台删掉」（表 `datacenter_delete`，主键 `[pe:⟨refno⟩, 老位号]`；写者只有增量，
+  `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`）。给外部提资 / 中台侧拉「该删什么」用。
+- **只读**：本服务对这张表只写不删（计划 D7），这条路由一个 `DELETE` 都没有——删行归 rs-server 在中台 `remove-apply`
+  成功之后。**不带 `instance_code`**：那是 rs-server `change_name_into_illegal(name)`（去首 `/`、非法字符换 `_`）的编码规则，
+  本服务不复制（计划 D3），调用方拿 `name` 原文自己编。鉴权 / 身份与本组其余 `/api/v1` 路由同门（`project` / `mdb` / `namespace`
+  照 §3 校验）。
+- 查询串（列表按本服务惯例**逗号分隔**）：
+
+  | 参数 | 类型 | 含义 |
+  |---|---|---|
+  | `zone_refno` | `a/b[,a/b…]` | 只要 `zone_refno` 在其中的行（走 `idx_datacenter_delete_zone`）。`a_b` 也收。缺省不按 ZONE 筛 |
+  | `dbnum` | int | 只要这个库的行 |
+  | `reason` | `deleted` \| `renamed` | 大小写不敏感；缺省两种都要 |
+  | `since_sesno` | int | 只要 `sesno >= since_sesno`（发生在这一版及之后）的行 |
+  | `limit` | int | 一页几条：缺省 500、上限 5000（超过夹到上限、不报错） |
+  | `start` | int | 跳过前几条 |
+
+- 响应（`DeleteRecordsPage` 原样透传；行序 `dbnum, sesno, name` 稳定，翻页不漂）：
+
+```json
+{ "items": [
+    { "refno": "7997/3", "name": "/A-OLD", "type": "BRAN", "zone_refno": "7997/5",
+      "dbnum": 7997, "sesno": 12, "sesno_time": "2026-09-22T10:00:00+08:00",
+      "reason": "renamed", "published": true, "published_status": "Insert" },
+    { "refno": "7997/21", "name": "/E-101", "type": "EQUI", "zone_refno": null,
+      "dbnum": 7997, "sesno": 30, "sesno_time": null,
+      "reason": "deleted", "published": false, "published_status": null } ],
+  "total": 2, "start": 0, "limit": 500, "has_more": false }
+```
+
+  | 字段 | 含义 |
+  |---|---|
+  | `refno` | 交付单元参考号 `a/b` |
+  | `name` | **要在中台删掉的那个位号**（E3D `NAME` 原文，含首位 `/`）：被删 → 删前的位号；改名 → 改前的位号 |
+  | `type` | 交付单元 noun（`BRAN` / `SUPPO` / `EQUI` / `HANG` …，按项目 `delivery_unit_types` 配置） |
+  | `zone_refno` | 沿 owner 链最近的 ZONE `a/b`；链断 `null`（按 ZONE 筛时自然漏掉，调用方要兜底就按 `dbnum` 拉） |
+  | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版、那一版在 E3D 里被写入的时刻（RFC3339，读不到 `null`） |
+  | `reason` | `deleted` \| `renamed` |
+  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端） |
+  | `published_status` | 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null` |
+  | `total` / `start` / `limit` / `has_more` | 过滤后总数（不分页）/ 起点 / 实际生效的页大小 / `start + items.len() < total` |
+
+- 与 `datacenter_version` 的 `status = 'Delete'` 行**并存**（计划 D9）：被删单元两边都有，消费端按位号去重；改位号只有这里有。
+  改回原名（待删位号 == 该单元当前已发布的 `instance_code`）这条路由不判——调用方自己比对再跳过。
+- 错误：400 `bad_request`（`zone_refno` 解不出 refno、`reason` 不是两个枚举之一、数字参数非数字）、422 `identity_mismatch`（§3）；
+  库读不到按 §3 统一信封。
+
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
 ### 5.1 信封

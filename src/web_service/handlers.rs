@@ -2903,6 +2903,87 @@ fn ensure_error(error: anyhow::Error) -> ApiError {
     }
 }
 
+/// `GET /api/v1/datacenter/deletes` 的查询串（spec §4.14）。列表参数按本服务惯例逗号分隔。
+#[derive(Debug, Default, Deserialize)]
+pub struct DatacenterDeletesReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// 逗号分隔的 ZONE refno（`a/b` / `a_b`）：只要 `zone_refno` 在其中的行。缺省不按 ZONE 筛。
+    #[serde(default)]
+    pub zone_refno: Option<String>,
+    #[serde(default)]
+    pub dbnum: Option<u32>,
+    /// `deleted` | `renamed`（大小写不敏感）。缺省两种都要。
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// 只要发生在这一版及之后（`sesno >= since_sesno`）的行。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 一页几条：缺省 500、上限 5000（超过夹到上限，不报错）。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 跳过前几条。
+    #[serde(default)]
+    pub start: Option<usize>,
+}
+
+/// 查询串 → 校验过的过滤条件。refno 解不出 / `reason` 不是两个枚举之一 → 400 `bad_request`。
+pub(super) fn datacenter_deletes_filter(
+    req: &DatacenterDeletesReq,
+) -> Result<crate::data_interface::datacenter_delete_reader::DeleteRecordFilter, ApiError> {
+    use crate::data_interface::datacenter_delete_reader::{DeleteReason, DeleteRecordFilter};
+    let mut zone_refnos = Vec::new();
+    for raw in req
+        .zone_refno
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        let refno = RefU64::from_str(raw)
+            .ok()
+            .filter(RefU64::is_valid)
+            .ok_or_else(|| ApiError::bad_request(format!("zone_refno 不是合法的 refno: {raw}")))?;
+        zone_refnos.push(refno);
+    }
+    let reason = match req.reason.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(DeleteReason::parse(raw).ok_or_else(|| {
+            ApiError::bad_request(format!("reason 只认 deleted / renamed，收到 {raw}"))
+        })?),
+    };
+    Ok(DeleteRecordFilter {
+        zone_refnos,
+        dbnum: req.dbnum,
+        reason,
+        since_sesno: req.since_sesno,
+        start: req.start.unwrap_or(0),
+        limit: req.limit.unwrap_or(0),
+    })
+}
+
+/// GET /api/v1/datacenter/deletes — 交付删除记录只读分页（spec §4.14；plant-ui #1 的对外口）。
+///
+/// 读 `datacenter_delete`（交付单元自身被删 / 改位号时增量随窗落下的「这个 refno 曾以哪个位号
+/// 发布过、如今该位号要从中台删掉」），每行附 `published`（`datacenter_version:{refno}` 有没有行）。
+/// **只读**：gen-model 对这张表只写不删（plan 2026-09-22 D7），删行归 rs-server 在中台 `remove-apply`
+/// 成功之后；不带 `instance_code`（那是 rs-server 的编码规则，调用方拿 `name` 原文自己编）。
+pub async fn datacenter_deletes(
+    State(state): State<AppState>,
+    Query(req): Query<DatacenterDeletesReq>,
+) -> Result<Json<crate::data_interface::datacenter_delete_reader::DeleteRecordsPage>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let filter = datacenter_deletes_filter(&req)?;
+    let page = crate::data_interface::datacenter_delete_reader::list_delete_records(
+        &aios_core::SUL_DB,
+        &filter,
+    )
+    .await
+    .map_err(ApiError::from_domain)?;
+    Ok(Json(page))
+}
+
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
 ///
 /// 登记表 ∪ 项目扫描，每行带 `anomaly` / `blocked` / `excluded`：阻断与排除的库
@@ -3652,6 +3733,58 @@ pub async fn model_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GET /api/v1/datacenter/deletes` 的查询串校验（spec §4.14）：逗号分隔的 ZONE 两种写法都收、
+    /// `reason` 大小写不敏感、缺省全空；refno 解不出 / `reason` 不认 → 400 `bad_request`。
+    #[test]
+    fn datacenter_deletes_filter_validates_the_query_string() {
+        use crate::data_interface::datacenter_delete_reader::{DeleteReason, DeleteRecordFilter};
+
+        let empty = datacenter_deletes_filter(&DatacenterDeletesReq::default()).expect("empty ok");
+        assert_eq!(empty, DeleteRecordFilter::default());
+
+        let full = datacenter_deletes_filter(&DatacenterDeletesReq {
+            zone_refno: Some(" 7997/5, 7997_6 ,".into()),
+            dbnum: Some(7997),
+            reason: Some("Renamed".into()),
+            since_sesno: Some(12),
+            limit: Some(20),
+            start: Some(40),
+            ..Default::default()
+        })
+        .expect("full ok");
+        assert_eq!(
+            full,
+            DeleteRecordFilter {
+                zone_refnos: vec![RefU64((7997u64 << 32) | 5), RefU64((7997u64 << 32) | 6)],
+                dbnum: Some(7997),
+                reason: Some(DeleteReason::Renamed),
+                since_sesno: Some(12),
+                start: 40,
+                limit: 20,
+            }
+        );
+
+        let bad_zone = datacenter_deletes_filter(&DatacenterDeletesReq {
+            zone_refno: Some("not-a-refno".into()),
+            ..Default::default()
+        })
+        .expect_err("bad zone rejected");
+        assert_eq!(bad_zone.status, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_zone.code, "bad_request");
+
+        let bad_reason = datacenter_deletes_filter(&DatacenterDeletesReq {
+            reason: Some("dropped".into()),
+            ..Default::default()
+        })
+        .expect_err("bad reason rejected");
+        assert_eq!(bad_reason.status, StatusCode::BAD_REQUEST);
+        assert!(
+            bad_reason.message.contains("deleted / renamed"),
+            "{}",
+            bad_reason.message
+        );
+    }
 
     fn roots(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()

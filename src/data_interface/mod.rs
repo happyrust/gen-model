@@ -123,6 +123,8 @@ pub mod data_face_signature;
 pub mod database_writer_lock;
 
 pub mod fast_delete;
+/// 交付删除记录（`datacenter_delete`）的只读读者：`GET /api/v1/datacenter/deletes` 的数据面（spec §4.14）。
+pub mod datacenter_delete_reader;
 
 pub mod manual_update;
 
