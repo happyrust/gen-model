@@ -2,6 +2,11 @@
 
 ## 2026-09-24
 
+### 交付删除记录计划 Q1 已决：`HANG` 算提资交付单元（plan 2026-09-22 D8 / §7）
+
+- 用户拍板：`HANG` 算提资的最小交付单元，`datacenter_delete` 按 `configured_delivery_unit_types()` 全收（默认 `BRAN / HANG / SUPPO / EQUI`）。
+  现行代码就是这样，只改计划 D8 / §7 与追记；09-23「`datacenter_delete` 落地」那条里的「`HANG` 算不算提资交付单元待确认」自此作废。
+
 ### `datacenter/deletes` 审查跟进：「改回原名」判据更正、`since_sesno` 须配 `dbnum`、行序补 `id`（spec §4.14 / 计划 §6）
 
 - **为什么**：spec §4.14 与计划 §6 把「改回原名」写成「待删位号 == `datacenter_version` 行上已发布的 `instance_code`」。那是上次提资的值：

@@ -20,6 +20,7 @@
 > 放 gen-model、只读、不带 `instance_code`、鉴权同 `/api/v1`；每行附 `published`（join `datacenter_version`）。D7 不变：删行仍归 rs-server。
 > 追记（2026-09-24，审查）：§6「改回原名」判据更正为比**当前 `NAME`** 推出的 `instance_code`（原写法比 `datacenter_version` 行上的，会吞掉普通改名），
 > 并补「查无此实例按成功」；读口 `since_sesno` 须配 `dbnum`（缺则 400）、行序补 `id` 成全序、spec §4.14 写明边删边拉始终 `start=0`。
+> 追记（2026-09-24）：**Q1 已决**——用户拍板 `HANG` 算提资交付单元、按配置全收（D8 / §7 已改；现行代码即如此，不动）。
 
 ## 0. 一句话
 
@@ -132,8 +133,8 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
 
 ### D8　交付单元类型来自配置
 
-判据用 `configured_delivery_unit_types()`（默认 `BRAN / HANG / SUPPO / EQUI`），不按 issue 硬编码三种。issue 写的 `SUPP` 在本仓对应 `SUPPO`；`HANG` 是否也算
-提资的最小交付单元，**待用户确认**（不确认就按配置全收，多记不漏记）。
+判据用 `configured_delivery_unit_types()`（默认 `BRAN / HANG / SUPPO / EQUI`），不按 issue 硬编码三种。issue 写的 `SUPP` 在本仓对应 `SUPPO`；`HANG` 也算
+提资的最小交付单元（**2026-09-24 用户拍板，Q1 已决**）：按配置全收，现行代码就是这样，不用改。
 
 ### D9　与 `datacenter_version` 的 Delete 分支并存
 
@@ -203,6 +204,6 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
 
 ## 7. 开放问题
 
-- **Q1** `HANG` 是否算提资交付单元（D8）——不确认按配置全收。
+- **Q1**（**已决**，2026-09-24 用户拍板）`HANG` 是否算提资交付单元（D8）——算，按配置全收（默认 `BRAN / HANG / SUPPO / EQUI`），代码不动。
 - **Q2** 消费端是否需要按 `dbnum` 而不是 ZONE 过滤（跨 ZONE 搬迁后老 ZONE 可能不在所选范围里）——rs-server 侧决定，本仓两个字段都给。
 - **Q3** 老库里已经发生过、但本计划落地前的改位号，中台残留怎么补——一次性脚本对比 `datacenter_version.instance_code` 与当前 `NAME`，不在本计划内。
