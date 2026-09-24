@@ -1399,15 +1399,30 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   | `dbnum` | int | 只要这个库的行 |
   | `reason` | `deleted` \| `renamed` | 大小写不敏感；缺省两种都要 |
   | `since_sesno` | int | 只要 `sesno >= since_sesno`（发生在这一版及之后）的行。**须同时给 `dbnum`**：sesno 是各库自己的会话号，跨库比大小没有意义，缺 `dbnum` → 400 |
+  | `from` | RFC3339 \| `YYYY-MM-DD` | 只要 `sesno_time >= from` 的行（含）。RFC3339 须带时区；纯日期按**北京时间零点**。不要求 `dbnum`（时刻跨库可比） |
+  | `to` | RFC3339 \| `YYYY-MM-DD` | 只要 `sesno_time < to` 的行（**不含**），写法同 `from`。`to=2026-09-28` = 到 9/28 北京时间零点为止，即含 9/27 全天 |
   | `limit` | int | 一页几条：缺省（或 `0`）500、上限 5000（超过夹到上限、不报错） |
   | `start` | int | 跳过前几条 |
+
+- **按时间范围查**（`from` / `to`，2026-09-24）：半开区间 `[from, to)`，按天 / 按周连着查不重不漏；两个都可只给一个。按真实时刻比、不按文本比，
+  存的文本带什么时区都对。带了任一个，`sesno_time` 为 `null` 的行就不出。查询串里时区的 `+` 必须写成 `%2B`（否则被解成空格、回 400），或者直接用 `Z`：
+
+```text
+GET /api/v1/datacenter/deletes?from=2026-09-21&to=2026-09-28                                    # 北京时间 9/21–9/27，所有库
+GET /api/v1/datacenter/deletes?zone_refno=7997/5&reason=renamed&from=2026-09-23T00:00:00%2B08:00&to=2026-09-24
+GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
+```
+
+  这个时刻的边界：它是窗口 T 端那一版在 E3D 会话页上的写入时刻，同一窗里的变化共用一个时刻；来自写会话那台 E3D 的时钟，gen-model 按本机时区
+  解释后存 UTC；同一 `[refno, 老位号]` 在更晚一窗再落一次，时刻跟着挪到后面那次。**别拿它做增量游标**：watcher 停过、整窗重放时，晚落库的行
+  时刻反而更早，按「上次拉到的时刻之后」轮询会漏行——增量消费用 `dbnum + since_sesno`。
 
 - 响应（`DeleteRecordsPage` 原样透传；行序 `dbnum, sesno, name, id` 是全序，表不动时翻页不漂）：
 
 ```json
 { "items": [
     { "refno": "7997/3", "name": "/A-OLD", "type": "BRAN", "zone_refno": "7997/5",
-      "dbnum": 7997, "sesno": 12, "sesno_time": "2026-09-22T10:00:00+08:00",
+      "dbnum": 7997, "sesno": 12, "sesno_time": "2026-09-22T02:00:00+00:00",
       "reason": "renamed", "published": true, "published_status": "Insert" },
     { "refno": "7997/21", "name": "/E-101", "type": "EQUI", "zone_refno": null,
       "dbnum": 7997, "sesno": 30, "sesno_time": null,
@@ -1421,7 +1436,7 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   | `name` | **要在中台删掉的那个位号**（E3D `NAME` 原文，含首位 `/`）：被删 → 删前的位号；改名 → 改前的位号 |
   | `type` | 交付单元 noun（`BRAN` / `SUPPO` / `EQUI` / `HANG` …，按项目 `delivery_unit_types` 配置） |
   | `zone_refno` | 沿 owner 链最近的 ZONE `a/b`；链断 `null`（按 ZONE 筛时自然漏掉，调用方要兜底就按 `dbnum` 拉） |
-  | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版、那一版在 E3D 里被写入的时刻（RFC3339，读不到 `null`） |
+  | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版、那一版在 E3D 里被写入的时刻（RFC3339，增量落的是 UTC 文本 `…+00:00`，要本地时间自己换；读不到 `null`） |
   | `reason` | `deleted` \| `renamed` |
   | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端）。按 **refno** 算、不按位号：以 X 提资后连改 X→Y→Z 没再提资，`Y` 那行也是 `true`，但 Y 从没上过中台——调用方对 `remove-apply` 回「查无此实例」要按成功处理 |
   | `published_status` | 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null` |
@@ -1433,7 +1448,8 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   改回原名这条路由不判——调用方自己比对再跳过，判据是**待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`**
   （即本次要发布的那个）。**别拿 `datacenter_version` 行上的 `instance_code` 比**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）
   时它仍是 X，会把该删的 X 误判成改回原名跳过。
-- 错误：400 `bad_request`（`zone_refno` 解不出 refno、`reason` 不是两个枚举之一、带 `since_sesno` 没带 `dbnum`、数字参数非数字）、422 `identity_mismatch`（§3）；
+- 错误：400 `bad_request`（`zone_refno` 解不出 refno、`reason` 不是两个枚举之一、带 `since_sesno` 没带 `dbnum`、`from` / `to` 解不出或
+  `from >= to`、数字参数非数字）、422 `identity_mismatch`（§3）；
   库读不到按 §3 统一信封。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）

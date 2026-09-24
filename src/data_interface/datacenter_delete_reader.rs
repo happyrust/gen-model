@@ -9,13 +9,14 @@
 //! 每行多带 `published`（`datacenter_version:{refno}` 有没有行）与 `published_status`（那行的
 //! `status`）：从未提资过的单元被删 / 改名也会落行（D6，gen-model 不判「发布过没有」），调用方靠
 //! 这一格跳过它们。过滤条件全是字面量（refno 先解成 [`RefU64`] 再渲成 `pe:⟨…⟩`、`reason` 只认两个
-//! 枚举、其余是整数），没有拼进去的原文字串。
+//! 枚举、时间先解成 `DateTime<Utc>` 再渲成 `d'…'`、其余是整数），没有拼进去的原文字串。
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 
 use aios_core::pdms_types::{RefU64, RefnoEnum};
 use anyhow::Context;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
@@ -65,6 +66,11 @@ pub struct DeleteRecordFilter {
     /// 只要 `sesno >= since_sesno` 的行（发生在这一版及之后）。sesno 是各库自己的会话号，只有和
     /// `dbnum` 同用才有意义（HTTP 口缺 `dbnum` 回 400）。
     pub since_sesno: Option<u32>,
+    /// 只要 `sesno_time >= from` 的行（含）。按真实时刻比，不按文本比：存的文本带什么时区都对。
+    /// 带了 `from` / `to` 任一个，`sesno_time` 为空的行就不出。
+    pub from: Option<DateTime<Utc>>,
+    /// 只要 `sesno_time < to` 的行（不含）：与 `from` 组成半开区间，按天 / 按周连着查不重不漏。
+    pub to: Option<DateTime<Utc>>,
     /// 跳过前几条（`START`）。
     pub start: usize,
     /// 一页几条；`0` 按 [`DEFAULT_LIMIT`]，超过 [`MAX_LIMIT`] 夹到上限。
@@ -104,6 +110,19 @@ impl DeleteRecordFilter {
         if let Some(since) = self.since_sesno {
             conditions.push(format!("sesno >= {since}"));
         }
+        if self.from.is_some() || self.to.is_some() {
+            // 必须排在转换之前：AND 短路才挡得住 `<datetime> NONE`（那一行会让整条查询报错）。
+            conditions.push("sesno_time != NONE".to_string());
+        }
+        if let Some(from) = self.from {
+            conditions.push(format!(
+                "<datetime> sesno_time >= {}",
+                datetime_literal(from)
+            ));
+        }
+        if let Some(to) = self.to {
+            conditions.push(format!("<datetime> sesno_time < {}", datetime_literal(to)));
+        }
         if conditions.is_empty() {
             String::new()
         } else {
@@ -132,6 +151,10 @@ impl DeleteRecordFilter {
     }
 }
 
+fn datetime_literal(time: DateTime<Utc>) -> String {
+    format!("d'{}'", time.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+}
+
 /// 一行交付删除记录的对外形状（spec §3：refno 一律 `a/b`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteRecordRow {
@@ -147,7 +170,7 @@ pub struct DeleteRecordRow {
     pub dbnum: u32,
     /// 发生在哪一版（本窗 T 端会话号）。
     pub sesno: u32,
-    /// 那一版在 E3D 里被写入的时刻（RFC3339）；读不到为 `null`。
+    /// 那一版在 E3D 里被写入的时刻（RFC3339；增量落的是 UTC 文本 `…+00:00`）；读不到为 `null`。
     pub sesno_time: Option<String>,
     /// `deleted` | `renamed`。
     pub reason: String,
@@ -295,6 +318,12 @@ mod tests {
         RefU64((7997u64 << 32) | n)
     }
 
+    fn utc(raw: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(raw)
+            .expect("rfc3339")
+            .with_timezone(&Utc)
+    }
+
     /// 过滤条件全是字面量、顺序固定；空过滤没有 WHERE；`limit` 缺省 / 夹上限；`START` 跟着 `start`。
     #[test]
     fn the_sql_shape_is_literal_and_stable() {
@@ -316,6 +345,7 @@ mod tests {
             since_sesno: Some(12),
             start: 40,
             limit: 20,
+            ..Default::default()
         };
         assert_eq!(
             narrow.page_sql(),
@@ -328,6 +358,19 @@ mod tests {
             narrow.count_sql(),
             "SELECT count() AS n FROM datacenter_delete WHERE zone_refno IN [pe:7997_5, pe:7997_6] \
              AND dbnum = 7997 AND reason = 'renamed' AND sesno >= 12 GROUP ALL;"
+        );
+
+        let timed = DeleteRecordFilter {
+            from: Some(utc("2026-09-21T00:00:00+08:00")),
+            to: Some(utc("2026-09-22T00:00:00+08:00")),
+            ..Default::default()
+        };
+        assert_eq!(
+            timed.count_sql(),
+            "SELECT count() AS n FROM datacenter_delete WHERE sesno_time != NONE \
+             AND <datetime> sesno_time >= d'2026-09-20T16:00:00Z' \
+             AND <datetime> sesno_time < d'2026-09-21T16:00:00Z' GROUP ALL;",
+            "时间界换成 UTC 字面量；空值守卫排在转换之前"
         );
 
         let capped = DeleteRecordFilter {
@@ -513,5 +556,100 @@ mod tests {
             .take(0)
             .expect("count rows");
         assert_eq!(still[0].n, 4, "读者不删行");
+    }
+
+    /// 时间界按真实时刻比、不按文本比；`[from, to)` 半开；带了时间界时 `sesno_time` 为空的行不出，
+    /// 也不会让整条查询报错。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn time_bounds_compare_instants_not_text() {
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("dc_delete").use_db("time").await.expect("use db");
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .expect("schema transport")
+            .check()
+            .expect("schema");
+        // /T-A 是北京时间 09-22 10:00（= 02:00Z）；/T-B 的文本排在 /T-A 前面，真实时刻（09:00Z）却在它后面；
+        // /T-C 正好是北京时间 09-23 零点；/T-D 没有时刻。
+        let rows = [
+            (1u64, "/T-A", 10u32, Some("2026-09-22T10:00:00+08:00")),
+            (2, "/T-B", 11, Some("2026-09-22T09:00:00+00:00")),
+            (3, "/T-C", 12, Some("2026-09-23T00:00:00+08:00")),
+            (4, "/T-D", 13, None),
+        ];
+        for (n, name, sesno, sesno_time) in rows {
+            db.query(render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+                refno: refu(n),
+                name,
+                noun: "BRAN",
+                zone: None,
+                dbnum: 7997,
+                sesno,
+                sesno_time,
+                reason: "deleted",
+            }))
+            .await
+            .expect("upsert transport")
+            .check()
+            .expect("upsert");
+        }
+        let names = |page: &DeleteRecordsPage| {
+            page.items
+                .iter()
+                .map(|row| row.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let after_five_utc = list_delete_records(
+            &db,
+            &DeleteRecordFilter {
+                from: Some(utc("2026-09-22T05:00:00Z")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("from only");
+        assert_eq!(
+            names(&after_five_utc),
+            vec!["/T-B", "/T-C"],
+            "/T-A 的文本比 05:00Z 大，真实时刻（02:00Z）却更早，不能出"
+        );
+
+        let beijing_22nd = list_delete_records(
+            &db,
+            &DeleteRecordFilter {
+                from: Some(utc("2026-09-22T00:00:00+08:00")),
+                to: Some(utc("2026-09-23T00:00:00+08:00")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("from + to");
+        assert_eq!(
+            names(&beijing_22nd),
+            vec!["/T-A", "/T-B"],
+            "to 不含：/T-C 正好落在 to 上"
+        );
+        assert_eq!(beijing_22nd.total, 2, "总数与页用同一个 WHERE");
+
+        let from_c = list_delete_records(
+            &db,
+            &DeleteRecordFilter {
+                from: Some(utc("2026-09-23T00:00:00+08:00")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("from inclusive");
+        assert_eq!(
+            names(&from_c),
+            vec!["/T-C"],
+            "from 含：/T-C 正好落在 from 上"
+        );
+
+        let unbounded = list_delete_records(&db, &DeleteRecordFilter::default())
+            .await
+            .expect("no bounds");
+        assert_eq!(unbounded.total, 4, "不带时间界时，没有时刻的行照常出");
     }
 }

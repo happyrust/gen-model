@@ -2,6 +2,18 @@
 
 ## 2026-09-24
 
+### `GET /api/v1/datacenter/deletes` 加 `from` / `to`：按时间范围查交付删除记录（spec §4.14）
+
+- **为什么**：用户要按时间范围取交付删除记录（「这周删了哪些」）。原来只能 `dbnum + since_sesno`，而 sesno 各库各算、跨库不可比。
+- **改动**：`DeleteRecordFilter` 加 `from` / `to: Option<DateTime<Utc>>`，渲成 `sesno_time != NONE AND <datetime> sesno_time >= d'…' AND
+  <datetime> sesno_time < d'…'`——半开区间 `[from, to)`，按真实时刻比、不按文本比；空值守卫排在转换之前，靠 AND 短路挡住 `<datetime> NONE`。
+  `handlers::datacenter_deletes_time_bound`：RFC3339 带时区，或纯日期 `YYYY-MM-DD`（北京时间零点）；解不出、`from >= to` → 400，报错里提示 `+` 须写成
+  `%2B`。不要求 `dbnum`。spec §4.14 补两行参数、用法与示例，写明这个时刻的边界（窗口粒度、E3D 端时钟、同键重写挪时刻）和「别拿它做增量游标」；
+  顺手把响应例子里的 `sesno_time` 改成生产里的真实形状（UTC `…+00:00`：`SessionStamp::rfc3339` 按本机时区解释后换成 UTC）。CONTEXT 词条、计划追记。
+- **验证**：`cargo test --lib -- datacenter_delete_reader datacenter_deletes_filter` **4 passed**。新增 `time_bounds_compare_instants_not_text`：`mem://` 里混落
+  `+08:00` / `+00:00` 文本，文本序与真实时刻相反的那一行按时刻判；`[from, to)` 两端各钉一次；`null` 行被排除且不让查询报错；总数与页同一个 WHERE。
+  另有 SQL 形状钉；查询串校验加「纯日期 = 北京时间零点」、未转义的 `+`、空区间两种 400。`rustfmt --check` 改到的每一段干净。没跑全量、没跑 clippy、未 live。
+
 ### 交付删除记录计划 Q2 已决：消费端取数分三路（plan 2026-09-22 §6 / §7）
 
 - 用户拍板：`renamed` 记录跟着单元走（本次提资要发新数据的单元按 refno 带上，老位号的删除与新数据同批，不看会过期的 `zone_refno`）；`deleted` 记录按存的

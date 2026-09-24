@@ -2920,6 +2920,14 @@ pub struct DatacenterDeletesReq {
     /// 会话号，跨库比大小没有意义，缺 `dbnum` → 400。
     #[serde(default)]
     pub since_sesno: Option<u32>,
+    /// 只要 `sesno_time >= from` 的行（含）。RFC3339 带时区，或纯日期 `YYYY-MM-DD`（北京时间零点）。
+    /// 不要求 `dbnum`：时刻跨库可比。
+    #[serde(default)]
+    pub from: Option<String>,
+    /// 只要 `sesno_time < to` 的行（不含），写法同 `from`：`to=2026-09-28` 到 9/28 北京时间零点为止，
+    /// 即含 9/27 全天。
+    #[serde(default)]
+    pub to: Option<String>,
     /// 一页几条：缺省 500、上限 5000（超过夹到上限，不报错）。
     #[serde(default)]
     pub limit: Option<usize>,
@@ -2928,8 +2936,34 @@ pub struct DatacenterDeletesReq {
     pub start: Option<usize>,
 }
 
+/// `from` / `to` 的两种写法：RFC3339 带时区，或纯日期 `YYYY-MM-DD`（按北京时间零点）。
+fn datacenter_deletes_time_bound(
+    name: &str,
+    raw: Option<&str>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, ApiError> {
+    use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(time) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(time.with_timezone(&Utc)));
+    }
+    let beijing = FixedOffset::east_opt(8 * 3600).expect("+08:00 is a valid offset");
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| beijing.from_local_datetime(&midnight).single())
+        .map(|time| Some(time.with_timezone(&Utc)))
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "{name} 要 RFC3339 带时区（如 2026-09-21T00:00:00+08:00，查询串里 + 须写成 %2B）\
+                 或纯日期 YYYY-MM-DD，收到 {raw}"
+            ))
+        })
+}
+
 /// 查询串 → 校验过的过滤条件。refno 解不出 / `reason` 不是两个枚举之一 / `since_sesno` 没带
-/// `dbnum` → 400 `bad_request`。
+/// `dbnum` / `from`、`to` 解不出或 `from >= to` → 400 `bad_request`。
 pub(super) fn datacenter_deletes_filter(
     req: &DatacenterDeletesReq,
 ) -> Result<crate::data_interface::datacenter_delete_reader::DeleteRecordFilter, ApiError> {
@@ -2960,11 +2994,22 @@ pub(super) fn datacenter_deletes_filter(
             "since_sesno 须与 dbnum 同用：sesno 是各库自己的会话号",
         ));
     }
+    let from = datacenter_deletes_time_bound("from", req.from.as_deref())?;
+    let to = datacenter_deletes_time_bound("to", req.to.as_deref())?;
+    if let Some((from, to)) = from.zip(to).filter(|(from, to)| from >= to) {
+        return Err(ApiError::bad_request(format!(
+            "from 必须早于 to（半开区间 [from, to)），收到 from={} to={}",
+            from.to_rfc3339(),
+            to.to_rfc3339()
+        )));
+    }
     Ok(DeleteRecordFilter {
         zone_refnos,
         dbnum: req.dbnum,
         reason,
         since_sesno: req.since_sesno,
+        from,
+        to,
         start: req.start.unwrap_or(0),
         limit: req.limit.unwrap_or(0),
     })
@@ -3768,6 +3813,8 @@ mod tests {
                 dbnum: Some(7997),
                 reason: Some(DeleteReason::Renamed),
                 since_sesno: Some(12),
+                from: None,
+                to: None,
                 start: 40,
                 limit: 20,
             }
@@ -3804,6 +3851,53 @@ mod tests {
             since_without_dbnum.message.contains("dbnum"),
             "{}",
             since_without_dbnum.message
+        );
+
+        let date_only = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-21".into()),
+            to: Some("2026-09-28".into()),
+            ..Default::default()
+        })
+        .expect("date-only ok");
+        let explicit = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-21T00:00:00+08:00".into()),
+            to: Some("2026-09-27T16:00:00Z".into()),
+            ..Default::default()
+        })
+        .expect("rfc3339 ok");
+        assert_eq!(
+            (date_only.from, date_only.to),
+            (explicit.from, explicit.to),
+            "纯日期 = 北京时间零点"
+        );
+        assert_eq!(
+            date_only.from.map(|time| time.to_rfc3339()).as_deref(),
+            Some("2026-09-20T16:00:00+00:00")
+        );
+
+        let unencoded_plus = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-21T00:00:00 08:00".into()),
+            ..Default::default()
+        })
+        .expect_err("a + decoded into a space is rejected");
+        assert_eq!(unencoded_plus.status, StatusCode::BAD_REQUEST);
+        assert!(
+            unencoded_plus.message.contains("%2B"),
+            "{}",
+            unencoded_plus.message
+        );
+
+        let empty_interval = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-22".into()),
+            to: Some("2026-09-22".into()),
+            ..Default::default()
+        })
+        .expect_err("from >= to rejected");
+        assert_eq!(empty_interval.status, StatusCode::BAD_REQUEST);
+        assert!(
+            empty_interval.message.contains("[from, to)"),
+            "{}",
+            empty_interval.message
         );
     }
 
