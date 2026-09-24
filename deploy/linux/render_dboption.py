@@ -37,7 +37,10 @@ text = src.read_text(encoding="utf-8")
 overrides = {
     "project_path": f'"{os.environ["E3D_PROJECT_DIR"]}"',   # Windows 的 D:/AVEVA/... 在这儿不存在
     "v_ip": '"127.0.0.1"',
-    "store_mode": '"rocksdb"',                              # mem 档下校审四前缀一律 503
+    # store_mode 不再在这里改：ADR-083（2026-09-18）把它从 DbOption.toml 退役，介质只由环境变量
+    # AIOS_STORE_MODE 决定（mem / rocksdb，不设 = rocksdb），文件里写了一个字都不生效。并入
+    # codex/model-projection-cache 之后模板里已没有这个键，install_backend.sh 在 aios-database.service
+    # 里显式写 Environment=AIOS_STORE_MODE=rocksdb（mem 档下校审四前缀一律 503）。
     "http_api_addr": f'"0.0.0.0:{os.environ["HTTP_PORT"]}"',
     "startup_autorun": "false",                             # 首发别让它一上来就消化积压
     "gen_model": "false",
@@ -49,6 +52,12 @@ for key, value in overrides.items():
     if not re.search(pattern, text):
         sys.exit(f"DbOption.toml 里没有顶层键 {key}：模板变了，先对一遍再部署")
     text = re.sub(pattern, f"{key} = {value}", text, count=1)
+
+# 退役的介质键要是又活回来了（有人把 store_mode = ... 写回模板），这里点名而不是默默带到服务器：
+# 服务读到只会在启动日志抱怨，介质仍由 AIOS_STORE_MODE 决定，两处口径打架的配置不该发出去。
+for retired in ("store_mode", "in_memory_db"):
+    if re.search(rf"(?m)^{retired}\s*=", text):
+        sys.exit(f"DbOption.toml 里又出现了已退役的顶层键 {retired}（ADR-083：介质只由 AIOS_STORE_MODE 决定）：先对一遍再部署")
 
 review_web = os.environ.get("REVIEW_WEB_BASE_URL", "").strip() \
     or f'http://{os.environ["REMOTE_HOST"]}'

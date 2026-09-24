@@ -138,7 +138,8 @@ jobs:
           python3 -c "
           import tomllib, os
           c = tomllib.load(open('bundle/DbOption.toml', 'rb'))
-          print('TOML OK；store_mode=', c['store_mode'], 'http_api_addr=', c['http_api_addr'])
+          assert 'store_mode' not in c, 'store_mode 已随 ADR-083 退出 DbOption.toml，介质只由 AIOS_STORE_MODE 决定'
+          print('TOML OK；model_cache_mode=', c.get('model_cache_mode'), 'http_api_addr=', c['http_api_addr'])
           assert c['model_center']['token_secret'] == os.environ['JWT_SECRET'], '渲染出的 token_secret 与 JWT_SECRET 不一致'
           assert c['model_center']['token_expiration_hours'] == 24
           print('[model_center].token_secret 已渲染进配置（', len(c['model_center']['token_secret']), '个字符）')

@@ -7,7 +7,8 @@
 # 幂等：重复跑只是把二进制与配置换成包里那份再重启；上一版二进制留在 bin/aios-database.prev，
 # ROLLBACK=1 再跑一次就换回去。
 #
-# 一件必须知道的事：store_mode = "rocksdb" 的部署里，数据库是**外部进程**，服务只连不拉
+# 一件必须知道的事：介质 rocksdb（环境变量 AIOS_STORE_MODE，ADR-083 起 DbOption.toml 里的
+# store_mode 不再生效）的部署里，数据库是**外部进程**，服务只连不拉
 # （ADR-074）。所以这里装两个 systemd 单元：aios-surrealdb 与 aios-database，后者依赖前者。
 # 两个名字都带 aios- 前缀、surreal 二进制也落在 ${INSTALL_DIR}/bin 下，都是为了跟机器上
 # 已有的东西错开——123.57.182.243 上既有一个别人的 surrealdb.service，/usr/local/bin/surreal
@@ -223,6 +224,9 @@ WorkingDirectory=${INSTALL_DIR}
 Environment=DB_OPTION_FILE=${INSTALL_DIR}/DbOption.toml
 Environment=PLANT_ASSET_ROOT=${DATA_DIR}/assets
 Environment=RUST_LOG=${RUST_LOG_LEVEL}
+# 介质只由这一个环境变量决定（ADR-083 把 store_mode 从 DbOption.toml 退役；不设也是 rocksdb，
+# 但显式写上，免得哪天单元环境里残留一个 mem 把校审四前缀全打成 503）。
+Environment=AIOS_STORE_MODE=rocksdb
 UNIT
   # 监听地址是 0.0.0.0，embed-url 回给 PMS 的地址得靠这一句推出公网 IP，
   # 否则它会拿 UDP 探出来的内网地址去拼（platform/config.rs）。
