@@ -21,6 +21,7 @@
 > 追记（2026-09-24，审查）：§6「改回原名」判据更正为比**当前 `NAME`** 推出的 `instance_code`（原写法比 `datacenter_version` 行上的，会吞掉普通改名），
 > 并补「查无此实例按成功」；读口 `since_sesno` 须配 `dbnum`（缺则 400）、行序补 `id` 成全序、spec §4.14 写明边删边拉始终 `start=0`。
 > 追记（2026-09-24）：**Q1 已决**——用户拍板 `HANG` 算提资交付单元、按配置全收（D8 / §7 已改；现行代码即如此，不动）。
+> 追记（2026-09-24）：**Q2 已决**——消费端取数分三路：改名跟 refno、删除按 ZONE、孤儿按 dbnum 兜底进提资预览要确认（§6 rs-server / plant-ui 两条与 §7 已改；本仓不动）。
 
 ## 0. 一句话
 
@@ -192,18 +193,23 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
 
 ## 6. 跨仓后续（不在本仓计划内，随 T2 落地后开）
 
-- **rs-server**（≈ 0.5 天）：`get_datacenter_delete_data` 除 `status='Delete'` 行外，再读 `datacenter_delete WHERE zone_refno IN [所选 ZONE]`；每行 join
+- **rs-server**（≈ 0.5 天）：`get_datacenter_delete_data` 除 `status='Delete'` 行外，再读 `datacenter_delete`，取数口径按 Q2（2026-09-24 已决）分三路：
+  ① `reason='renamed'` **跟着单元走**：本次提资要发新数据的那些单元，按 refno 带上它们的改名记录，不看存的 `zone_refno`（搬迁后会过期），老位号的删除与新数据同批；
+  单元已不存在的改名记录（改名后又被删）归 ②。② `reason='deleted'` 按存的 `zone_refno IN [所选 ZONE]`（删前的 ZONE，与 `status='Delete'` 的 `belong_zone` 同口径）。
+  ③ **孤儿兜底**：对本次涉及的每个 dbnum，再收 `zone_refno` 为 `NONE` 或指向当前树里已不存在的 ZONE 的删除记录（`status='Delete'` 行同样处理）；
+  它们不属于任何还能被选中的 ZONE，放进这次不算越界，但要在提资预览里单列、**用户确认后才发**。每行 join
   `datacenter_version:{refno}`——没有行 → 从未提资，直接删掉这条记录、不发；有行 → `instance_code = change_name_into_illegal(name)`、`object_model_code` 取行上的，
   发 `remove-apply`；**若待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`（改回原名，即本次要发布的那个）则跳过并删行**，
   否则中台先删后建、历史丢。**不能比 `datacenter_version` 行上的 `instance_code`**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）时它仍是 X，
   按它比会把该删的 X 当成改回原名跳过（2026-09-24 审查更正）。`remove-apply` 回「查无此实例」按成功处理：「有行」是按 refno 判的，以 X 提资后连改
   X→Y→Z 没再提资时，从没上过中台的 Y 也会出行。成功后 `DELETE` 这些 `datacenter_delete` 行。
   两条来源按 `instance_code` 去重。顺序：同一次提资里 `remove-apply` 先于新数据的插入 / 修改。`object_model_code` 为空今天是静默跳过，至少补一行日志。
-- **plant-ui**：不必改；可选在提资预览里显示「本次将提删 N 条」。
+- **plant-ui**：提资预览要单列 ③ 的孤儿删除、用户确认后才发（Q2 已决，原「不必改」作废）；「本次将提删 N 条」照旧可选。
 - issue 开在 plant-ui，回一条评论说明表名 / 主键与两仓分工。
 
 ## 7. 开放问题
 
 - **Q1**（**已决**，2026-09-24 用户拍板）`HANG` 是否算提资交付单元（D8）——算，按配置全收（默认 `BRAN / HANG / SUPPO / EQUI`），代码不动。
-- **Q2** 消费端是否需要按 `dbnum` 而不是 ZONE 过滤（跨 ZONE 搬迁后老 ZONE 可能不在所选范围里）——rs-server 侧决定，本仓两个字段都给。
+- **Q2**（**已决**，2026-09-24 用户拍板）消费端是否需要按 `dbnum` 而不是 ZONE 过滤（跨 ZONE 搬迁后老 ZONE 可能不在所选范围里）——分记录类型：
+  `renamed` 跟 refno（随单元新数据同批）、`deleted` 按存的 `zone_refno`、孤儿（`NONE` / ZONE 已不存在）按 dbnum 兜底、提资预览里确认后才发。细则见 §6；本仓两个字段都已给，不用改。
 - **Q3** 老库里已经发生过、但本计划落地前的改位号，中台残留怎么补——一次性脚本对比 `datacenter_version.instance_code` 与当前 `NAME`，不在本计划内。

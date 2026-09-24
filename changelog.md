@@ -2,6 +2,14 @@
 
 ## 2026-09-24
 
+### 交付删除记录计划 Q2 已决：消费端取数分三路（plan 2026-09-22 §6 / §7）
+
+- 用户拍板：`renamed` 记录跟着单元走（本次提资要发新数据的单元按 refno 带上，老位号的删除与新数据同批，不看会过期的 `zone_refno`）；`deleted` 记录按存的
+  `zone_refno IN [所选 ZONE]`，与 `status='Delete'` 的 `belong_zone` 同口径；孤儿（`zone_refno` 为 `NONE` 或指向当前树里已不存在的 ZONE，含同样情况的
+  `status='Delete'` 行）按 dbnum 兜底，提资预览单列、用户确认后才发。理由：只按 ZONE 会永远漏掉整区删除后的记录；只按 dbnum 会把没选的 ZONE 的删除一起发出去，
+  改名还会出「老位号删了、新数据没到」的空档。本仓不用改（每行已带 `refno / zone_refno / dbnum`）；计划 §6 的 rs-server 条目按三路重写，plant-ui 条目从
+  「不必改」改成要做孤儿确认。
+
 ### 交付删除记录计划 Q1 已决：`HANG` 算提资交付单元（plan 2026-09-22 D8 / §7）
 
 - 用户拍板：`HANG` 算提资的最小交付单元，`datacenter_delete` 按 `configured_delivery_unit_types()` 全收（默认 `BRAN / HANG / SUPPO / EQUI`）。
