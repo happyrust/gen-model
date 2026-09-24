@@ -3,9 +3,12 @@
 该目录由 `l3_suite --fixture-manifest` 使用。运行器会：
 
 1. 校验目标文件确实是指定编号的 DESI DB，并读取其 WORLD REF。
-2. 通过 TTY 执行 `setup.mac`，在该 WORLD 下创建九个独立 SITE。
+2. 通过 TTY 执行 `setup.mac`，在该 WORLD 下创建十个独立 SITE。
 3. 启动本次运行专用的 RocksDB，执行 SYS 同步和目标 dbnum 基线解析。
-4. 解析稳定名称到本次 E3D REFNO，依次执行 apply/restore 宏和四平面断言。
+4. 解析稳定名称到本次 E3D REFNO，依次执行 apply/restore 宏和四平面断言；每一窗之后再经
+   `GET /api/v1/datacenter/deletes` 核交付删除记录：本案范围内的行必须恰好是 `datacenter_delete` /
+   `datacenter_delete_after_restore` 声明的那几行（没声明 = 一行都不许有），新落的行 `sesno` 是这一窗、
+   `published = false`，并用 `from` / `to` 夹住它的 `sesno_time` 查回来。
 5. 生成 `summary.json`、`junit.xml`、`report.md`、`report.html` 及逐案例证据。
 
 ## 一条命令运行

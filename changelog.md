@@ -2,6 +2,19 @@
 
 ## 2026-09-24
 
+### E3D TTY 夹具套件核交付删除记录：真机确认增量在维护 `datacenter_delete`（plan 2026-09-22 §4）
+
+- **为什么**：用户要确认当前增量是不是真的在维护 `datacenter_delete`；计划 §4 的真机验收一直没跑。
+- **改动**：`l3_suite` 夹具（`src/bin/l3_suite/fixture.rs`）每一窗之后经 `GET /api/v1/datacenter/deletes` 核本案范围内的交付删除记录：必须**恰好**是清单
+  `expected.datacenter_delete` / `datacenter_delete_after_restore` 声明的行（没声明 = 一行都不许有）；新落的行 `sesno` 落在这次保存的会话里、`published = false`、
+  用 `from` / `to` 夹住 `sesno_time` 查得回。清单：data 案（EQUI 改名再改回）声明两行 `renamed`；新增 `delete-unit` 案（新夹具 SITE `/AIOS-INC-UNITDEL`，删整台 EQUI）
+  声明一行 `deleted`；`validate_manifest` 允许末尾连着排几个不可复原的案。
+- **验证**：`scripts/Run-E3DFixtureSuite.ps1` 对样例工程 `ams7998_0001` 真跑 **10/10 PASS**（`output/e3d-fixture/20260924-123508`，约 6 分钟）：改名、改回两窗各落一行
+  `renamed`（老位号、EQUI、ZONE 都对），删整台 EQUI 落一行 `deleted`，其余 8 案本案范围内一行不落（删设备下的 BOX 不记），跑完全表恰好 3 行、全部 `published = false`。
+  首轮 8/10 暴露的是两处断言写错：TTY 一次保存写两个会话，行上 `sesno` 取的是变化所在的会话、不是窗口末端；删整台单元时任务结果不列被删的根（模型行确已清掉）。
+- **发现、未改**：行上 `sesno` 是变化所在会话，`sesno_time` 却取窗口末端会话的时刻，两者可能不是同一版（这次改名行 `sesno` 171、时刻取自窗口末端 172）；
+  spec §4.14 写的「本窗 T 端会话号」与实现不符，改法待定。
+
 ### `GET /api/v1/datacenter/deletes` 加 `from` / `to`：按时间范围查交付删除记录（spec §4.14）
 
 - **为什么**：用户要按时间范围取交付删除记录（「这周删了哪些」）。原来只能 `dbnum + since_sesno`，而 sesno 各库各算、跨库不可比。

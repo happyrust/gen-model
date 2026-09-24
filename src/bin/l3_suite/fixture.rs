@@ -103,6 +103,22 @@ pub(super) struct ExpectedChanges {
     pub room_before: Vec<String>,
     #[serde(default)]
     pub room_after: Vec<String>,
+    /// apply 这一窗之后，本案范围内的交付删除记录（`datacenter_delete`）应当**恰好**是这几行；
+    /// 缺省 = 一行都不该有。
+    #[serde(default)]
+    pub datacenter_delete: Vec<ExpectedDeleteRecord>,
+    /// restore 那一窗再多出来的行；apply 落的行照旧在（gen-model 对这张表只写不删）。
+    #[serde(default)]
+    pub datacenter_delete_after_restore: Vec<ExpectedDeleteRecord>,
+}
+
+/// 一行交付删除记录：`object` / `zone` 是夹具符号，`name` 是要从中台删掉的老位号。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct ExpectedDeleteRecord {
+    pub object: String,
+    pub name: String,
+    pub reason: String,
+    pub zone: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1076,8 +1092,28 @@ fn validate_manifest(manifest: &FixtureManifest, repo: &Path) -> Result<()> {
                 scenario.id
             );
         }
+        for record in scenario
+            .expected
+            .datacenter_delete
+            .iter()
+            .chain(&scenario.expected.datacenter_delete_after_restore)
+        {
+            for symbol in std::iter::once(&record.object).chain(&record.zone) {
+                ensure!(
+                    manifest.objects.contains_key(symbol),
+                    "{}: unknown datacenter_delete symbol {symbol}",
+                    scenario.id
+                );
+            }
+        }
         ensure!(
-            !destructive,
+            scenario.restore_macro.is_some()
+                || scenario.expected.datacenter_delete_after_restore.is_empty(),
+            "{}: datacenter_delete_after_restore requires restore_macro",
+            scenario.id
+        );
+        ensure!(
+            !destructive || scenario.destructive_last,
             "{} appears after a destructive-last scenario",
             scenario.id
         );
@@ -1162,6 +1198,10 @@ fn run_case(
         dir.join("preview.json"),
         serde_json::to_vec_pretty(&preview)?,
     )?;
+    let identity_query = format!(
+        "project={project}&mdb={}&namespace={ns}",
+        driver.mdb.trim_start_matches('/')
+    );
     let mut apply_attempted = false;
     let mutation = (|| -> Result<Vec<AssertionRecord>> {
         let apply = render_case_macro(
@@ -1233,7 +1273,22 @@ fn run_case(
         fs::write(dir.join("tasks.json"), serde_json::to_vec_pretty(&tasks)?)?;
         let after = fixture_snapshot(ns, project, dbnum, scenario, map)?;
         fs::write(dir.join("after.json"), serde_json::to_vec_pretty(&after)?)?;
-        let assertions = assert_case(scenario, &before, &after, &tasks, map, &log)?;
+        let mut assertions = assert_case(scenario, &before, &after, &tasks, map, &log)?;
+        assertions.push(assert_datacenter_deletes(
+            "apply",
+            &dir,
+            scenario,
+            map,
+            &identity_query,
+            dbnum,
+            &scenario
+                .expected
+                .datacenter_delete
+                .iter()
+                .collect::<Vec<_>>(),
+            &scenario.expected.datacenter_delete,
+            &mutation_report,
+        )?);
         fs::write(
             dir.join("assertions.json"),
             serde_json::to_vec_pretty(&assertions)?,
@@ -1266,6 +1321,7 @@ fn run_case(
         }
         Ok(assertions)
     })();
+    let mut revert_assertions = Vec::new();
     if apply_attempted && let Some(restore) = &scenario.restore_macro {
         let restore = render_case_macro(repo, restore, &dir.join("restore.mac"), prefix, map)?;
         let restore_report = run_guarded_mutation(
@@ -1310,8 +1366,30 @@ fn run_case(
             fixture_restorable_payload(&before) == fixture_restorable_payload(&restored),
             "restore did not reproduce the baseline payload"
         );
+        if mutation.is_ok() {
+            // Phase label must not say "restore": run_fixture_cases stops the whole suite on
+            // errors that do, and a ledger mismatch here leaves the fixture itself restored.
+            let expected = scenario
+                .expected
+                .datacenter_delete
+                .iter()
+                .chain(&scenario.expected.datacenter_delete_after_restore)
+                .collect::<Vec<_>>();
+            revert_assertions.push(assert_datacenter_deletes(
+                "revert",
+                &dir,
+                scenario,
+                map,
+                &identity_query,
+                dbnum,
+                &expected,
+                &scenario.expected.datacenter_delete_after_restore,
+                &restore_report,
+            )?);
+        }
     }
-    let assertions = mutation?;
+    let mut assertions = mutation?;
+    assertions.extend(revert_assertions);
     Ok(FixtureCaseReport {
         id: scenario.id.clone(),
         passed: true,
@@ -1733,13 +1811,11 @@ fn prime_room_structure_baselines(
     Ok(())
 }
 
-fn fixture_snapshot(
-    ns: &str,
-    project: &str,
-    dbnum: u32,
+/// The fixture symbols a scenario is allowed to affect.
+fn scenario_symbols(
     scenario: &FixtureScenario,
     map: &BTreeMap<String, ResolvedFixture>,
-) -> Result<Value> {
+) -> BTreeSet<String> {
     let mut symbols = BTreeSet::from([scenario.site.clone(), scenario.target.clone()]);
     symbols.extend(scenario.roots.iter().cloned());
     // A change to one member can legitimately regenerate another member under
@@ -1754,6 +1830,17 @@ fn fixture_snapshot(
                 .map(|(symbol, _)| symbol.clone()),
         );
     }
+    symbols
+}
+
+fn fixture_snapshot(
+    ns: &str,
+    project: &str,
+    dbnum: u32,
+    scenario: &FixtureScenario,
+    map: &BTreeMap<String, ResolvedFixture>,
+) -> Result<Value> {
+    let symbols = scenario_symbols(scenario, map);
     let names = symbols
         .iter()
         .filter_map(|s| map.get(s))
@@ -1985,6 +2072,158 @@ fn assert_case(
         _ => {}
     }
     Ok(records)
+}
+
+/// Delivery delete records (`datacenter_delete`, plan 2026-09-22), read through
+/// `GET /datacenter/deletes` so the read API is exercised too. The rows inside the
+/// scenario's scope must be exactly `expected`: a scenario that declares none
+/// (moves, resizes, member deletes …) must not produce any. Each `fresh` row carries
+/// one of the sessions this mutation saved (a TTY run saves more than one, and the
+/// row keeps the session of the change itself, not the window end), is unpublished
+/// (the incremental path only `update`s `datacenter_version`, so it must never create
+/// a row there), and comes back from a one-second `from` / `to` window around its
+/// `sesno_time`.
+#[allow(clippy::too_many_arguments)]
+fn assert_datacenter_deletes(
+    phase: &str,
+    dir: &Path,
+    scenario: &FixtureScenario,
+    map: &BTreeMap<String, ResolvedFixture>,
+    identity: &str,
+    dbnum: u32,
+    expected: &[&ExpectedDeleteRecord],
+    fresh: &[ExpectedDeleteRecord],
+    saved: &MutationRunReport,
+) -> Result<AssertionRecord> {
+    let sessions = (saved.before_sesno + 1)..=saved.after_sesno;
+    let url = |query: &str| {
+        format!(
+            "{}/datacenter/deletes?{identity}&dbnum={dbnum}&{query}",
+            fixture_api()
+        )
+    };
+    let text = |row: &Value, key: &str| {
+        row.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let refno_of = |symbol: &str| {
+        map.get(symbol)
+            .and_then(|fixture| fixture.refno.clone())
+            .with_context(|| format!("datacenter_delete symbol {symbol} has no baseline refno"))
+    };
+    let page = http_json("GET", &url("limit=5000"), None)?;
+    fs::write(
+        dir.join(format!("datacenter-delete-{phase}.json")),
+        serde_json::to_vec_pretty(&page)?,
+    )?;
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .context("datacenter/deletes answered without items")?;
+    let scope = scenario_symbols(scenario, map)
+        .iter()
+        .filter_map(|symbol| map.get(symbol)?.refno.clone())
+        .collect::<BTreeSet<_>>();
+    let actual = items
+        .iter()
+        .filter(|row| scope.contains(&text(row, "refno")))
+        .map(|row| {
+            format!(
+                "{} {} {} {} zone={}",
+                text(row, "refno"),
+                text(row, "name"),
+                text(row, "reason"),
+                text(row, "type"),
+                row.get("zone_refno")
+                    .and_then(Value::as_str)
+                    .unwrap_or("null")
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let wanted = expected
+        .iter()
+        .map(|record| -> Result<String> {
+            let zone = record.zone.as_deref().map(refno_of).transpose()?;
+            Ok(format!(
+                "{} {} {} {} zone={}",
+                refno_of(&record.object)?,
+                record.name,
+                record.reason,
+                map[&record.object].noun,
+                zone.as_deref().unwrap_or("null")
+            ))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    ensure!(
+        actual == wanted,
+        "{phase}: datacenter_delete rows in scope: expected {wanted:?}, actual {actual:?}"
+    );
+    let stamp = |time: chrono::DateTime<chrono::Utc>| {
+        time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    for record in fresh {
+        let refno = refno_of(&record.object)?;
+        let row = items
+            .iter()
+            .find(|row| text(row, "refno") == refno && text(row, "name") == record.name)
+            .with_context(|| {
+                format!(
+                    "{phase}: no datacenter_delete row for {refno} {}",
+                    record.name
+                )
+            })?;
+        ensure!(
+            row.get("sesno")
+                .and_then(Value::as_i64)
+                .and_then(|sesno| i32::try_from(sesno).ok())
+                .is_some_and(|sesno| sessions.contains(&sesno)),
+            "{phase}: {refno} {} does not carry one of the saved sessions {sessions:?}: {row}",
+            record.name
+        );
+        ensure!(
+            row.get("published").and_then(Value::as_bool) == Some(false),
+            "{phase}: never-published fixture unit {refno} reads as published: {row}"
+        );
+        let at = chrono::DateTime::parse_from_rfc3339(&text(row, "sesno_time"))
+            .with_context(|| {
+                format!(
+                    "{phase}: {refno} {} has no RFC3339 sesno_time: {row}",
+                    record.name
+                )
+            })?
+            .with_timezone(&chrono::Utc);
+        let window = http_json(
+            "GET",
+            &url(&format!(
+                "from={}&to={}",
+                stamp(at),
+                stamp(at + chrono::Duration::seconds(1))
+            )),
+            None,
+        )?;
+        ensure!(
+            window
+                .get("items")
+                .and_then(Value::as_array)
+                .is_some_and(|rows| rows.iter().any(|candidate| {
+                    text(candidate, "refno") == refno && text(candidate, "name") == record.name
+                })),
+            "{phase}: from/to around sesno_time {} does not return {refno} {}: {window}",
+            stamp(at),
+            record.name
+        );
+    }
+    Ok(AssertionRecord {
+        plane: "datacenter_delete",
+        passed: true,
+        detail: format!(
+            "{phase}: {} row(s) in scope, {} written by sessions {sessions:?}",
+            actual.len(),
+            fresh.len()
+        ),
+    })
 }
 
 /// The generation roots a window's tasks regenerated (or removed).
