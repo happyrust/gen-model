@@ -2,6 +2,25 @@
 
 ## 2026-09-24
 
+### GENSEC 两端按 SPINE `DRNS` / `DRNE` 斜接、圆弧墙 JLDATU 越过端点沿端切向外推（vendor e3d-model `0322074` / `66b3635`）：aps250110 两端斜切的 GENSEC 对 E3D 由 21 / 114 变 106 / 114；WF03 RR001 FIXING `/1RS03LL0018T` 6.17 → 0.0005 mm
+
+- **为什么**：接 09-23 那条留下的两件——① GENSEC 斜接没接（当时 APS 的 E3D TTY「起不来」，没有基准）；② WF03 RR001 两处残差（GWALL 13 x 差 20 mm、FIXING `/1RS03LL0018T` 差 6 mm）。
+- **APS TTY 其实起得来**：detached 模式下宏里任何一句报错，E3D 都会回到交互输入，没有 stdin 就 0xC0000005；`L3_E3D_LAUNCH_MODE=attached` 正常跑。真正的卡点是 **250209 没注册进 APS 项目**：`LIST DBS` 列出 243 个库，有 250110 / 250164，没有 250209；
+  `aps250209_0001` 是 E3D 3.1 样例（2022）的文件，`apssys` 是 2016 年 2.1 样例的。那 178 根要在 E3D 里对拍，得先用 ADMIN 把这个库注册进 apssys（改项目系统库，待用户定），这次改用 aps250110 对拍。
+- **GENSEC 斜接**（`0322074`，`section::spine_swept_solid`）：与圆弧 WALL（`4bf4110`）同一条规则、同一组 helper——`spine_mitre_plane` 定切面 → `mitre_extension_solid` 沿端切向补挤 → `cut_by_plane`；终点端标架用走完全部弧段后传递过来的 Ydir；
+  端向与切向垂直 / 平行的照旧平头、记 note。gen_ams 改前 / 改后逐件：aps250209 381 根带非零 DRNS/DRNE，其中 178 根两端斜切（356 端），134 根几何变，GENSEC 以外一件不动；aps250110 114 根斜切；aps250164 没有。
+  E3D 对拍（APS TTY attached 只读导出 aps250110 全部 584 根带非零 DRNS/DRNE 的 GENSEC，8 s，无 SAVEWORK；RVM 对世界 AABB，容差 2 mm）：两端被斜切的 114 根 **21 → 106 根对上**（最大差 245.9 → 16.0 mm，94 根变好、0 根变差）；
+  保持平头的 470 根（配上 468）改前改后同为 317 根对上、一根不变。
+- **剩下 8 根是节点端板退让，不是斜接**：`/AREA02_WS_AXIS_WS.1`–`.4` 的人字屋架斜梁，屋脊端分毫不差，檐口端 E3D 沿 y 短 16 mm（z 最低点差 4.13 mm = 16 × 坡度 1000 / 3872）。那一端 `Joiend` 挂在
+  `FIXING …/J2S4-EAV-PFI-PFI-003`（目录描述 Eaves Haunch 15mm Plate）上，FIXING 自身 `Cutback 0`，退让来自节点目录；15 mm 板为什么退 16 mm 没挖到（节点点集里只有螺栓孔位的表达式）。同一现象的老问题：
+  平头件里 110 根梁两端各差 8.0 mm，两端都挂在 `/J2S5-FEP-PFI-PFI-150x8`（柔性端板 150 × 8）的 FIXING 上。gen 尚未建节点端板退让，另议；另有 21 根柱底差 30 mm（两端都没挂节点）、14 根 FIXING 模板（TMPLATE）下的 GENSEC 差到 4340 mm，都没查。
+- **WF03 RR001 残差**（`66b3635`，`elmodl::wall_joint_frame`）：`/1RS03LL0018T` 所在 WALL 4 弧长 2378 mm，JLDATU `ZDIS` 2440 越过终点；E3D 越过端点后沿端切向直线外推、沿墙向钉在端切向（TTY `Q ORI` 的 `E 9.0681 S` 即终点切向），
+  旧代码一直沿弧走。改后 WF03 111 → 112 / 113，`LL0018T` 6.169 → 0.0005 mm；WF05 130 / 130 不变；ams1112 全库对 `4bf4110` 只动 2 件（这只 FIXING；WALL 4 体积 +606.8 mm³，开孔跟着挪，AABB 不变）。
+  GWALL 13 的 20.15 mm 不改：E3D 自己的 RVM 在 +x 角有一片约 20.8 mm 长、约 5 µm 厚的布尔残渣（NXTR `17496/116928` 一条边离墙边界 8 µm），gen 自 `ff88882` 起丢这类亚分辨率薄片。
+- **验证**：e3d-model 单测各 +1；两个提交各自的干净树（`4bf4110` + 提交）上 `cargo test --lib` 341 / 342 过，rustfmt 干净；共享工作树（含别的会话未提交的改动）上 343 过。别的会话在 vendor 里未提交的
+  `Cargo.lock` / `increment.rs` / `pipeline.rs` / 两个 hvac 真库测试 / recheck-4 文档原样未动。证据 `output/wf05-rr001-20260923/`（`aps250110-gensec.mac` / `.rvm`、`comparison-aps250110-{premitre,mitre}.json`、
+  `ws-axis-ends.log`、`joint-*.log`、`commit1-elmodl.patch` / `commit2-section.patch`）。
+
 ### 本地发布 0.1.31：model-cache 分支并入主线 0.1.30 之后的第一个包——交付删除记录、房间层级树、内存闸、字典库 UDA；干净树、隔离 worktree 打包、冒烟 A / B / C 三腿全过
 
 - 后端 `0.1.31` 构建自 `dbc23ae4c343`（`chore(release): 0.1.31`，**干净树**，`git_dirty:false`）。覆盖 0.1.30（`3c04f0ddb`）之后本支的 134 个非合并提交：0.1.28 之后本支的全部工作（房间 D1 / D13、射线奇偶、`surface-clearance`、隐式管身两修、校审三修——0.1.29 / 0.1.30 没有的那几条）、F1–F3 房间反查收口、房间层级树与 `tubes=1`、`model/records` 直段身份、ADR-084 内存控制 P1–P7、ADR-082 冷读 SQL 拆两路、字典库进模型生成、交付删除记录 `datacenter_delete` 与 `GET /api/v1/datacenter/deletes`，以及 `b9993a17d`（讲解 PPT 入库，纯文档）。用户口径见 `docs/release-notes/0.1.31.md`（升级注意：生成器指纹多了 `catalogue-pml-uda-key-v1`，旧回执的根下次 ensure 整根重算；从 0.1.29 / 0.1.30 换过来的现场每个 DESI 库 `model/rebuild` 一次，`room_relate` 才换成射线奇偶口径）。
