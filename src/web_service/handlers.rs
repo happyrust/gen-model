@@ -2916,7 +2916,8 @@ pub struct DatacenterDeletesReq {
     /// `deleted` | `renamed`（大小写不敏感）。缺省两种都要。
     #[serde(default)]
     pub reason: Option<String>,
-    /// 只要发生在这一版及之后（`sesno >= since_sesno`）的行。
+    /// 只要发生在这一版及之后（`sesno >= since_sesno`）的行。须同时给 `dbnum`：sesno 是各库自己的
+    /// 会话号，跨库比大小没有意义，缺 `dbnum` → 400。
     #[serde(default)]
     pub since_sesno: Option<u32>,
     /// 一页几条：缺省 500、上限 5000（超过夹到上限，不报错）。
@@ -2927,7 +2928,8 @@ pub struct DatacenterDeletesReq {
     pub start: Option<usize>,
 }
 
-/// 查询串 → 校验过的过滤条件。refno 解不出 / `reason` 不是两个枚举之一 → 400 `bad_request`。
+/// 查询串 → 校验过的过滤条件。refno 解不出 / `reason` 不是两个枚举之一 / `since_sesno` 没带
+/// `dbnum` → 400 `bad_request`。
 pub(super) fn datacenter_deletes_filter(
     req: &DatacenterDeletesReq,
 ) -> Result<crate::data_interface::datacenter_delete_reader::DeleteRecordFilter, ApiError> {
@@ -2953,6 +2955,11 @@ pub(super) fn datacenter_deletes_filter(
             ApiError::bad_request(format!("reason 只认 deleted / renamed，收到 {raw}"))
         })?),
     };
+    if req.since_sesno.is_some() && req.dbnum.is_none() {
+        return Err(ApiError::bad_request(
+            "since_sesno 须与 dbnum 同用：sesno 是各库自己的会话号",
+        ));
+    }
     Ok(DeleteRecordFilter {
         zone_refnos,
         dbnum: req.dbnum,
@@ -3735,7 +3742,8 @@ mod tests {
     use super::*;
 
     /// `GET /api/v1/datacenter/deletes` 的查询串校验（spec §4.14）：逗号分隔的 ZONE 两种写法都收、
-    /// `reason` 大小写不敏感、缺省全空；refno 解不出 / `reason` 不认 → 400 `bad_request`。
+    /// `reason` 大小写不敏感、缺省全空；refno 解不出 / `reason` 不认 / `since_sesno` 缺 `dbnum`
+    /// → 400 `bad_request`。
     #[test]
     fn datacenter_deletes_filter_validates_the_query_string() {
         use crate::data_interface::datacenter_delete_reader::{DeleteReason, DeleteRecordFilter};
@@ -3783,6 +3791,19 @@ mod tests {
             bad_reason.message.contains("deleted / renamed"),
             "{}",
             bad_reason.message
+        );
+
+        let since_without_dbnum = datacenter_deletes_filter(&DatacenterDeletesReq {
+            since_sesno: Some(12),
+            ..Default::default()
+        })
+        .expect_err("since_sesno without dbnum rejected");
+        assert_eq!(since_without_dbnum.status, StatusCode::BAD_REQUEST);
+        assert_eq!(since_without_dbnum.code, "bad_request");
+        assert!(
+            since_without_dbnum.message.contains("dbnum"),
+            "{}",
+            since_without_dbnum.message
         );
     }
 

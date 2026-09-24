@@ -18,6 +18,8 @@
 > 5 处旧 diff 不动）。**跨仓 §6（rs-server 消费端）未开工**；Q1 `HANG` 待确认。
 > 追记（2026-09-23，同会话）：对外**只读**口 `GET /api/v1/datacenter/deletes`（spec §4.14，`data_interface::datacenter_delete_reader`）——用户拍板
 > 放 gen-model、只读、不带 `instance_code`、鉴权同 `/api/v1`；每行附 `published`（join `datacenter_version`）。D7 不变：删行仍归 rs-server。
+> 追记（2026-09-24，审查）：§6「改回原名」判据更正为比**当前 `NAME`** 推出的 `instance_code`（原写法比 `datacenter_version` 行上的，会吞掉普通改名），
+> 并补「查无此实例按成功」；读口 `since_sesno` 须配 `dbnum`（缺则 400）、行序补 `id` 成全序、spec §4.14 写明边删边拉始终 `start=0`。
 
 ## 0. 一句话
 
@@ -191,7 +193,10 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
 
 - **rs-server**（≈ 0.5 天）：`get_datacenter_delete_data` 除 `status='Delete'` 行外，再读 `datacenter_delete WHERE zone_refno IN [所选 ZONE]`；每行 join
   `datacenter_version:{refno}`——没有行 → 从未提资，直接删掉这条记录、不发；有行 → `instance_code = change_name_into_illegal(name)`、`object_model_code` 取行上的，
-  发 `remove-apply`；**若待删位号 == 该行当前 `instance_code`（改回原名）则跳过并删行**，否则中台先删后建、历史丢；成功后 `DELETE` 这些 `datacenter_delete` 行。
+  发 `remove-apply`；**若待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`（改回原名，即本次要发布的那个）则跳过并删行**，
+  否则中台先删后建、历史丢。**不能比 `datacenter_version` 行上的 `instance_code`**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）时它仍是 X，
+  按它比会把该删的 X 当成改回原名跳过（2026-09-24 审查更正）。`remove-apply` 回「查无此实例」按成功处理：「有行」是按 refno 判的，以 X 提资后连改
+  X→Y→Z 没再提资时，从没上过中台的 Y 也会出行。成功后 `DELETE` 这些 `datacenter_delete` 行。
   两条来源按 `instance_code` 去重。顺序：同一次提资里 `remove-apply` 先于新数据的插入 / 修改。`object_model_code` 为空今天是静默跳过，至少补一行日志。
 - **plant-ui**：不必改；可选在提资预览里显示「本次将提删 N 条」。
 - issue 开在 plant-ui，回一条评论说明表名 / 主键与两仓分工。

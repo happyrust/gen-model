@@ -1,5 +1,20 @@
 # 变更记录
 
+## 2026-09-24
+
+### `datacenter/deletes` 审查跟进：「改回原名」判据更正、`since_sesno` 须配 `dbnum`、行序补 `id`（spec §4.14 / 计划 §6）
+
+- **为什么**：spec §4.14 与计划 §6 把「改回原名」写成「待删位号 == `datacenter_version` 行上已发布的 `instance_code`」。那是上次提资的值：
+  以 X 提资后改成 Y、还没再提资时它仍是 X，rs-server 照这条写会把该删的 X 判成改回原名跳过——普通改名全被吞掉。另外 sesno 是各库自己的会话号，
+  `since_sesno` 不带 `dbnum` 等于拿同一个数截所有库；`ORDER BY dbnum, sesno, name` 不是严格全序。
+- **改动**：判据改成「待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的」，并写明 `remove-apply` 回「查无此实例」按成功（`published` 按 refno 算，
+  连改几次名时中间没上过中台的位号也会出行）；§4.14 补「边处理边删的调用方始终 `start=0` 拉到空」、`limit=0` 同缺省。
+  `handlers::datacenter_deletes_filter`：带 `since_sesno` 没带 `dbnum` → 400 `bad_request`；`DeleteRecordFilter::page_sql` 投影与排序补 `id`
+  （`ORDER BY dbnum, sesno, name, id`；ORDER BY 引用投影外字段会被解析器拒）。
+- **验证**：`cargo test --lib -- datacenter_delete_reader datacenter_deletes_filter` **3 passed**（SQL 形状钉换成带 `id` 的新形状；`mem://` 用例在真引擎上跑
+  新的 `SELECT id, … ORDER BY …, id`，整表序 / 按 ZONE / 翻页结果不变；查询串校验多一种 400）；`rustfmt --check` 改到的每一段干净（`handlers.rs` HEAD
+  上就有的旧 diff 不动）。没跑全量、没跑 clippy、未 live。
+
 ## 2026-09-23
 
 ### `GET /api/v1/datacenter/deletes`：交付删除记录的对外只读口（spec §4.14；plant-ui #1 后续）

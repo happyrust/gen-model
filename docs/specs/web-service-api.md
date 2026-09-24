@@ -1398,11 +1398,11 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   | `zone_refno` | `a/b[,a/b…]` | 只要 `zone_refno` 在其中的行（走 `idx_datacenter_delete_zone`）。`a_b` 也收。缺省不按 ZONE 筛 |
   | `dbnum` | int | 只要这个库的行 |
   | `reason` | `deleted` \| `renamed` | 大小写不敏感；缺省两种都要 |
-  | `since_sesno` | int | 只要 `sesno >= since_sesno`（发生在这一版及之后）的行 |
-  | `limit` | int | 一页几条：缺省 500、上限 5000（超过夹到上限、不报错） |
+  | `since_sesno` | int | 只要 `sesno >= since_sesno`（发生在这一版及之后）的行。**须同时给 `dbnum`**：sesno 是各库自己的会话号，跨库比大小没有意义，缺 `dbnum` → 400 |
+  | `limit` | int | 一页几条：缺省（或 `0`）500、上限 5000（超过夹到上限、不报错） |
   | `start` | int | 跳过前几条 |
 
-- 响应（`DeleteRecordsPage` 原样透传；行序 `dbnum, sesno, name` 稳定，翻页不漂）：
+- 响应（`DeleteRecordsPage` 原样透传；行序 `dbnum, sesno, name, id` 是全序，表不动时翻页不漂）：
 
 ```json
 { "items": [
@@ -1423,13 +1423,17 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
   | `zone_refno` | 沿 owner 链最近的 ZONE `a/b`；链断 `null`（按 ZONE 筛时自然漏掉，调用方要兜底就按 `dbnum` 拉） |
   | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版、那一版在 E3D 里被写入的时刻（RFC3339，读不到 `null`） |
   | `reason` | `deleted` \| `renamed` |
-  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端） |
+  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端）。按 **refno** 算、不按位号：以 X 提资后连改 X→Y→Z 没再提资，`Y` 那行也是 `true`，但 Y 从没上过中台——调用方对 `remove-apply` 回「查无此实例」要按成功处理 |
   | `published_status` | 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null` |
   | `total` / `start` / `limit` / `has_more` | 过滤后总数（不分页）/ 起点 / 实际生效的页大小 / `start + items.len() < total` |
 
+- **边处理边删的调用方别推进 `start`**：删掉的行会让后面的行整体前移，按「已读条数」翻下一页会整页跳过；这种用法始终 `start=0`
+  反复拉，直到 `items` 为空。同一 `[refno, 老位号]` 在更晚一窗再落一次（同键重写、`sesno` 变大）也会让那行在序里挪位。
 - 与 `datacenter_version` 的 `status = 'Delete'` 行**并存**（计划 D9）：被删单元两边都有，消费端按位号去重；改位号只有这里有。
-  改回原名（待删位号 == 该单元当前已发布的 `instance_code`）这条路由不判——调用方自己比对再跳过。
-- 错误：400 `bad_request`（`zone_refno` 解不出 refno、`reason` 不是两个枚举之一、数字参数非数字）、422 `identity_mismatch`（§3）；
+  改回原名这条路由不判——调用方自己比对再跳过，判据是**待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`**
+  （即本次要发布的那个）。**别拿 `datacenter_version` 行上的 `instance_code` 比**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）
+  时它仍是 X，会把该删的 X 误判成改回原名跳过。
+- 错误：400 `bad_request`（`zone_refno` 解不出 refno、`reason` 不是两个枚举之一、带 `since_sesno` 没带 `dbnum`、数字参数非数字）、422 `identity_mismatch`（§3）；
   库读不到按 §3 统一信封。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）

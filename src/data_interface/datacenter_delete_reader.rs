@@ -62,7 +62,8 @@ pub struct DeleteRecordFilter {
     pub zone_refnos: Vec<RefU64>,
     pub dbnum: Option<u32>,
     pub reason: Option<DeleteReason>,
-    /// 只要 `sesno >= since_sesno` 的行（发生在这一版及之后）。
+    /// 只要 `sesno >= since_sesno` 的行（发生在这一版及之后）。sesno 是各库自己的会话号，只有和
+    /// `dbnum` 同用才有意义（HTTP 口缺 `dbnum` 回 400）。
     pub since_sesno: Option<u32>,
     /// 跳过前几条（`START`）。
     pub start: usize,
@@ -110,11 +111,12 @@ impl DeleteRecordFilter {
         }
     }
 
-    /// 这一页的行：按 `dbnum, sesno, name` 稳定排序，翻页不漂。
+    /// 这一页的行：按 `dbnum, sesno, name, id` 排成全序（`id` 兜底），表不动时翻页不漂。
+    /// `id` 必须在投影里：ORDER BY 引用投影外的字段会被解析器拒掉（Missing order idiom）。
     pub(crate) fn page_sql(&self) -> String {
         format!(
-            "SELECT refno, name, type, zone_refno, dbnum, sesno, sesno_time, reason \
-             FROM {DATACENTER_DELETE}{} ORDER BY dbnum, sesno, name LIMIT {} START {};",
+            "SELECT id, refno, name, type, zone_refno, dbnum, sesno, sesno_time, reason \
+             FROM {DATACENTER_DELETE}{} ORDER BY dbnum, sesno, name, id LIMIT {} START {};",
             self.where_clause(),
             self.effective_limit(),
             self.start,
@@ -299,8 +301,8 @@ mod tests {
         let all = DeleteRecordFilter::default();
         assert_eq!(
             all.page_sql(),
-            "SELECT refno, name, type, zone_refno, dbnum, sesno, sesno_time, reason \
-             FROM datacenter_delete ORDER BY dbnum, sesno, name LIMIT 500 START 0;"
+            "SELECT id, refno, name, type, zone_refno, dbnum, sesno, sesno_time, reason \
+             FROM datacenter_delete ORDER BY dbnum, sesno, name, id LIMIT 500 START 0;"
         );
         assert_eq!(
             all.count_sql(),
@@ -317,9 +319,9 @@ mod tests {
         };
         assert_eq!(
             narrow.page_sql(),
-            "SELECT refno, name, type, zone_refno, dbnum, sesno, sesno_time, reason \
+            "SELECT id, refno, name, type, zone_refno, dbnum, sesno, sesno_time, reason \
              FROM datacenter_delete WHERE zone_refno IN [pe:7997_5, pe:7997_6] AND dbnum = 7997 \
-             AND reason = 'renamed' AND sesno >= 12 ORDER BY dbnum, sesno, name LIMIT 20 START 40;",
+             AND reason = 'renamed' AND sesno >= 12 ORDER BY dbnum, sesno, name, id LIMIT 20 START 40;",
             "重复的 ZONE 去重、顺序保留"
         );
         assert_eq!(
