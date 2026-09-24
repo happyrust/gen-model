@@ -2,6 +2,31 @@
 
 ## 2026-09-24
 
+### 本地发布 0.1.31：model-cache 分支并入主线 0.1.30 之后的第一个包——交付删除记录、房间层级树、内存闸、字典库 UDA；干净树、隔离 worktree 打包、冒烟 A / B / C 三腿全过
+
+- 后端 `0.1.31` 构建自 `dbc23ae4c343`（`chore(release): 0.1.31`，**干净树**，`git_dirty:false`）。覆盖 0.1.30（`3c04f0ddb`）之后本支的 134 个非合并提交：0.1.28 之后本支的全部工作（房间 D1 / D13、射线奇偶、`surface-clearance`、隐式管身两修、校审三修——0.1.29 / 0.1.30 没有的那几条）、F1–F3 房间反查收口、房间层级树与 `tubes=1`、`model/records` 直段身份、ADR-084 内存控制 P1–P7、ADR-082 冷读 SQL 拆两路、字典库进模型生成、交付删除记录 `datacenter_delete` 与 `GET /api/v1/datacenter/deletes`，以及 `b9993a17d`（讲解 PPT 入库，纯文档）。用户口径见 `docs/release-notes/0.1.31.md`（升级注意：生成器指纹多了 `catalogue-pml-uda-key-v1`，旧回执的根下次 ensure 整根重算；从 0.1.29 / 0.1.30 换过来的现场每个 DESI 库 `model/rebuild` 一次，`room_relate` 才换成射线奇偶口径）。
+- 产物 `releases/ams-local-0.1.31_release.20260924094903.gdbc23ae4c343-runtime.zip`（121.4 MB / 127,328,868 B），
+  SHA-256 `1757f9df7cbbeca530073743d1bcabf6cdd7b7fb3908f1d52f3b970a2e541a48`（另行独立重算一致）；包内 `aios-database.exe` 自报
+  `0.1.31+release.20260924094903.gdbc23ae4c343`、`git_dirty:false`，SHA-256 `c3d4b7a865f2e854f15061673ce663bbc6d8ea25cdc535b769c4d714c3cfc9d0`
+  （214,807,040 B）。包型 `runtime`，78 个文件 + `release.json`：`aios-database.exe` / `web\`（13）/ `bin\surreal.exe`（2.1.4+20250317.45013fc9）/
+  `resource\`（7）/ `schema\`（48）/ 出厂 `DbOption.toml`（无 `store_mode` / `in_memory_db` 行；四道内存闸 `model_overlay_max_roots = 50000` /
+  `model_element_cache_max_entries = 200000` / `model_generation_input_max_dbnums = 0` / `model_historical_snapshots_max = 16`）/ `.first-run-pending` /
+  `Start-AMS.ps1` / `.cmd` / `Start-Surreal` / `Rollback` / README / CHANGELOG（后端 0.1.31 + 前端 0.1.11 两节）。
+- Web 与 0.1.28 / 0.1.29 / 0.1.30 同源：复用 0.1.26 包（plant-ui `0.1.11`，`web_source = reused-from:ams-local-0.1.26…-runtime-workspace.zip`，脚本校过来源包哈希
+  `195b4280…`，13 个文件），`index.html` / CHANGELOG 取自 plant-ui 干净 worktree `786187947`。
+- 冒烟（口 19099，`-StrictSmoke`）三腿全过：A 出厂配置起服务 = 设置模式 + 向导页；B 本机配置（`test-worklspace\bin`）全启动 `medium=mem` / `durable=false` /
+  服务没拉 surreal 子进程；C 包内 `surreal.exe` 在 18010 起 rocksdb 库、服务以 `AIOS_STORE_MODE=rocksdb` 连上，`medium=rocksdb` / `durable=true`、数据目录落了
+  7 个文件（0.1.29 / 0.1.30 这一腿按档跳过，本支 `15f6e252c` 起总是执行）。脚本全程 7 分 53 秒，其中 release 构建 7 分 32 秒——共享 target
+  `D:\Rust\target` 里没有现成的 release 产物，三方依赖整套重编。
+- **构建输入（与主工作树隔离，照 0.1.29 / 0.1.30 的做法）**：`D:\work\plant-code\rel-0.1.31\` 下七个 worktree——gen-model `dbc23ae4c`；vendor 各取 committed HEAD：
+  e3d-io `5245654`（0.3.0，带 `TextList`）、e3d-model `4bf4110`（圆弧墙斜接）、e3d-attlib `f37be2e`、plant-mbd `f888a50`、old-aios-core `a438029` + 0.1.26 起每个包都带着的
+  那一处稳定未提交增量（rkyv `validation` 特性 + `pdms_shape.rs` 47 行；两个文件拷自主工作树，与主工作树 `git diff` 逐字相同）；plant-ui `786187947`。
+  `cargo metadata --locked` 在这棵树上通过，构建后除 old-aios-core 那两个拷入文件外六棵树全干净（Cargo.lock 只有 `chore(release)` 改的那一行）。
+  **没进包**的在途改动：e3d-io 5 文件 +214/−6、e3d-model 6 文件 +483/−35（另 9 个未跟踪）、e3d-attlib 2 文件 +78/−67、plant-mbd 15 文件 +892/−414、
+  plant-ui 36 文件；gen-model 主工作树除一个 `.pid` 外无在途改动。打包完七个 worktree 已删。
+- **未验**：`cargo test --lib` 没在打包树上重跑；新接口（`datacenter/deletes`、树路由 `tubes=1` 等）没在这份包上做 live 调用，冒烟只考起服务与 health / 首页 / 介质；
+  包没上传 GitHub Release（v0.1.22 之后都是本地发布）。
+
 ### 交付删除记录的 `sesno_time` 改取变化所在那一版的时刻（plan 2026-09-22 D3）
 
 - **为什么**：E3D TTY 夹具真机跑出来，行上 `sesno` 是变化所在的会话（op 的 last-touch），`sesno_time` 却取的是窗口末端会话的写入时刻。TTY 一次保存写两个会话，
