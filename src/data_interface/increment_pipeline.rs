@@ -1160,10 +1160,15 @@ impl IncrementPipeline {
 
         // 水位推进要顺手存下右端那条保存的写入时刻（plant-ui ADR-0019 Q6）：文件被换回
         // 旧版本之后这一页就读不到了，这一刻是唯一能存下来的时机。一页会话页，每批一次。
-        // 交付删除记录的 `sesno_time` 也用它（plan 2026-09-22 D3，不用 `time::now()`），所以在
-        // 随窗语句渲染之前就读。
         let end_sesno_time =
             crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
+        // 交付删除记录的 `sesno_time` 取变化所在那一版的写入时刻（plan 2026-09-22 D3，不用
+        // `time::now()`，重放读到的还是同一页）。
+        let session_time_of = |sesno: u32| {
+            i32::try_from(sesno).ok().and_then(|sesno| {
+                crate::data_interface::manual_update::session_time_rfc3339("", path, sesno)
+            })
+        };
 
         // Resolve-then-render（W3）：这个计时槽现在只含**窗口前持久态的点查**
         // （overlay 兜不住的祖先 noun/owner/name），产出的语句是固定目标 id 的纯
@@ -1171,7 +1176,7 @@ impl IncrementPipeline {
         // 灌了 fn::find_ancestor_types。
         let mut window_statements = StageTimings::measure(
             &mut timings.datacenter,
-            Self::datacenter_statements(&range_eles, db_type, dbnum, end_sesno_time.as_deref()),
+            Self::datacenter_statements(&range_eles, db_type, dbnum, &session_time_of),
         )
         .await?;
         // OWNER 搬迁的定点 anc 重算先于水位提交、失败即拦住水位
@@ -1636,16 +1641,19 @@ impl IncrementPipeline {
     /// `UPSERT datacenter_delete:[pe:⟨…⟩, '<老位号>'] SET …`，无条件写（D6：发布过没有由
     /// rs-server join `datacenter_version` 判）；`zone_refno` 沿 owner 链上溯到最近 `ZONE`（D5）。
     /// 下属管件的增删改名不记（issue 原文「不包含其下属管件」），照旧只让单元记 Modify。
-    async fn resolve_datacenter_statements_with<F, Fut>(
+    /// 每条记录的 `sesno` 是变化所在的会话，`sesno_time` 取**同一版**的写入时刻（`session_time`，
+    /// 读不到给 `None`）：一窗常跨好几个会话，窗口末端那一版的时刻对不上记录上的 `sesno`。
+    async fn resolve_datacenter_statements_with<F, Fut, S>(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         delivery_unit_types: &[String],
         dbnum: u32,
-        sesno_time: Option<&str>,
+        session_time: S,
         mut load_pe: F,
     ) -> anyhow::Result<Vec<String>>
     where
         F: FnMut(Vec<RefU64>) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<HashMap<RefU64, PeChainView>>>,
+        S: Fn(u32) -> Option<String>,
     {
         /// 防御性走链上限（owner 环 / 数据损坏的最后一道闸）。
         const ROLLUP_WALK_CAP: usize = 64;
@@ -1713,6 +1721,8 @@ impl IncrementPipeline {
         let overlay = Self::window_net_states(data);
         // 持久层窗口前态缓存：None = 行不存在（问过了）。
         let mut persistent: HashMap<RefU64, Option<PeChainView>> = HashMap::new();
+        // 会话 → 写入时刻，只问真落记录的会话，一个会话问一次。
+        let mut session_times: HashMap<u32, Option<String>> = HashMap::new();
 
         let mut statements = Vec::new();
         // Modify 状态归组（plan 2026-09-06 §1.1 #7 / P3）：同状态、无别的字段的目标攒成一条多目标
@@ -1759,6 +1769,10 @@ impl IncrementPipeline {
                                     view.owner,
                                 )
                                 .await?;
+                                let sesno_time = session_times
+                                    .entry(d.sesno)
+                                    .or_insert_with(|| session_time(d.sesno))
+                                    .clone();
                                 statements.push(render_datacenter_delete_upsert(
                                     &DatacenterDeleteRecord {
                                         refno: d.refno,
@@ -1767,7 +1781,7 @@ impl IncrementPipeline {
                                         zone,
                                         dbnum,
                                         sesno: d.sesno,
-                                        sesno_time,
+                                        sesno_time: sesno_time.as_deref(),
                                         reason: "deleted",
                                     },
                                 ));
@@ -1840,6 +1854,10 @@ impl IncrementPipeline {
                                         view.owner,
                                     )
                                     .await?;
+                                    let sesno_time = session_times
+                                        .entry(d.sesno)
+                                        .or_insert_with(|| session_time(d.sesno))
+                                        .clone();
                                     statements.push(render_datacenter_delete_upsert(
                                         &DatacenterDeleteRecord {
                                             refno: d.refno,
@@ -1848,7 +1866,7 @@ impl IncrementPipeline {
                                             zone,
                                             dbnum,
                                             sesno: d.sesno,
-                                            sesno_time,
+                                            sesno_time: sesno_time.as_deref(),
                                             reason: "renamed",
                                         },
                                     ));
@@ -1935,12 +1953,15 @@ impl IncrementPipeline {
     /// watermark-advancing tail transaction — a failure keeps the watermark
     /// unmoved so the window replays and the idempotent updates converge
     /// (`increment_tail::FinalizeRender` has the full argument).
-    async fn datacenter_statements(
+    async fn datacenter_statements<S>(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
         dbnum: u32,
-        sesno_time: Option<&str>,
-    ) -> anyhow::Result<Vec<String>> {
+        session_time: S,
+    ) -> anyhow::Result<Vec<String>>
+    where
+        S: Fn(u32) -> Option<String>,
+    {
         if db_type != "DESI" {
             return Ok(Vec::new());
         }
@@ -1951,7 +1972,7 @@ impl IncrementPipeline {
             data,
             &delivery_unit_types,
             dbnum,
-            sesno_time,
+            session_time,
             Self::load_pe_chain_view_from_persistent,
         )
         .await
@@ -1959,14 +1980,14 @@ impl IncrementPipeline {
 
     /// 预览回执的 `datacenter_delete_rows`（plan 2026-09-22 T4）：这一窗会落几条交付删除记录。
     /// 走与执行体**同一条**渲染路（[`Self::datacenter_statements`]，含持久层窗口前态点查），
-    /// 数出来的就是执行会写的——只计数、不改任何判定；非 DESI 窗口恒为 0。`sesno_time` 传
-    /// `None`：它只是记录上的一个字段，不影响条数。
+    /// 数出来的就是执行会写的——只计数、不改任何判定；非 DESI 窗口恒为 0。会话时刻一律不读：
+    /// 它只是记录上的一个字段，不影响条数。
     pub(crate) async fn count_datacenter_delete_records(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
         dbnum: u32,
     ) -> anyhow::Result<usize> {
-        let statements = Self::datacenter_statements(data, db_type, dbnum, None).await?;
+        let statements = Self::datacenter_statements(data, db_type, dbnum, |_| None).await?;
         Ok(count_datacenter_delete_statements(&statements))
     }
 
@@ -2061,9 +2082,8 @@ mod cache_tests {
         let cata = at("cata_dependency::resolve_dependency_rows(");
         let invalidate = at("Self::invalidate_caches(&cache_refnos)");
         let reverse_index = at("build_reverse_index_statements(&range_eles)");
-        let datacenter = at(
-            "Self::datacenter_statements(&range_eles, db_type, dbnum, end_sesno_time.as_deref())",
-        );
+        let datacenter =
+            at("Self::datacenter_statements(&range_eles, db_type, dbnum, &session_time_of)");
         let artifact = at("IncrementWindowArtifact::from_window(");
         let landed = at("land_increment_window(");
         let recheck = at("reopen_verified()");
@@ -3263,7 +3283,7 @@ mod datacenter_tests {
             &BTreeMap::from([(1u32, ops)]),
             &unit_types,
             7997,
-            None,
+            |_| None,
             chain_loader(chain),
         )
         .await
@@ -3644,7 +3664,7 @@ mod datacenter_tests {
             .expect("转义后的位号仍是固定目标 UPSERT");
     }
 
-    /// 同一批语句渲两遍逐字相同（整窗重放收敛）；`sesno_time` 给了就原样带上。
+    /// 同一批语句渲两遍逐字相同（整窗重放收敛）；`sesno_time` 是记录那一版（`renamed` 的 12）的时刻。
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_records_render_deterministically_and_carry_the_session_time() {
         let mut chain = pre_window_chain();
@@ -3657,7 +3677,7 @@ mod datacenter_tests {
                 &BTreeMap::from([(1u32, ops)]),
                 &unit_types,
                 7997,
-                Some("2026-09-22T10:00:00+08:00"),
+                |sesno| (sesno == 12).then(|| "2026-09-22T10:00:00+08:00".to_string()),
                 chain_loader(chain),
             )
             .await
@@ -3670,6 +3690,66 @@ mod datacenter_tests {
             delete_rows(&first)[0].contains("sesno_time = '2026-09-22T10:00:00+08:00'"),
             "{first:?}"
         );
+    }
+
+    /// 一窗跨几个会话时，每条记录的 `sesno_time` 跟着它自己的 `sesno` 走，不是窗口末端那一版；
+    /// 读不到时刻的那一版落 NONE；同一个会话只问一次。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_records_carry_the_time_of_their_own_session() {
+        let mut chain = pre_window_chain();
+        let mut in_session = |refno: u64, old: &str, sesno: u32| {
+            chain.insert(refu(refno), row("BRAN", Some(refu(6))));
+            let mut op = renamed(refu(refno), "BRAN", refu(6), old, "/NEW");
+            op.sesno = sesno;
+            op
+        };
+        let window = BTreeMap::from([
+            (12u32, vec![in_session(3, "/A-OLD", 12)]),
+            (
+                13,
+                vec![in_session(7, "/B-OLD", 13), in_session(8, "/C-OLD", 13)],
+            ),
+            (14, vec![in_session(10, "/D-OLD", 14)]),
+        ]);
+        let asked = std::sync::Mutex::new(Vec::new());
+        let statements = IncrementPipeline::resolve_datacenter_statements_with(
+            &window,
+            &crate::data_interface::generation_root::resolve_delivery_unit_types(&[]),
+            7997,
+            |sesno| {
+                asked.lock().unwrap().push(sesno);
+                (sesno != 14).then(|| format!("2026-09-22T10:00:{sesno:02}+08:00"))
+            },
+            chain_loader(chain),
+        )
+        .await
+        .expect("resolve");
+        let rows = delete_rows(&statements);
+        let row_of = |old: &str| {
+            rows.iter()
+                .find(|row| row.contains(&format!("'{old}']")))
+                .unwrap_or_else(|| panic!("no delete record for {old}: {rows:?}"))
+                .to_string()
+        };
+        for (old, tail) in [
+            (
+                "/A-OLD",
+                "sesno = 12, sesno_time = '2026-09-22T10:00:12+08:00'",
+            ),
+            (
+                "/B-OLD",
+                "sesno = 13, sesno_time = '2026-09-22T10:00:13+08:00'",
+            ),
+            (
+                "/C-OLD",
+                "sesno = 13, sesno_time = '2026-09-22T10:00:13+08:00'",
+            ),
+            ("/D-OLD", "sesno = 14, sesno_time = NONE"),
+        ] {
+            let row = row_of(old);
+            assert!(row.contains(tail), "{row}");
+        }
+        assert_eq!(*asked.lock().unwrap(), vec![12, 13, 14], "一个会话只问一次");
     }
 
     /// 预览回执的计数与渲染同口径（T4）：单元改名一条 + 单元被删一条 + 下属管件改名零条 = 2；
@@ -3775,7 +3855,7 @@ mod datacenter_tests {
             )]),
             &crate::data_interface::generation_root::resolve_delivery_unit_types(&[]),
             7997,
-            None,
+            |_| None,
             move |refnos| {
                 let db = loader_db.clone();
                 async move {

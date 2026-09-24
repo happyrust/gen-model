@@ -2,6 +2,18 @@
 
 ## 2026-09-24
 
+### 交付删除记录的 `sesno_time` 改取变化所在那一版的时刻（plan 2026-09-22 D3）
+
+- **为什么**：E3D TTY 夹具真机跑出来，行上 `sesno` 是变化所在的会话（op 的 last-touch），`sesno_time` 却取的是窗口末端会话的写入时刻。TTY 一次保存写两个会话，
+  改名行 `sesno` 171、时刻却取自 172，不是同一版。用户拍板：时刻跟着 `sesno` 走。
+- **改动**：`resolve_datacenter_statements_with` / `datacenter_statements` 的时刻入参从一个 `Option<&str>` 换成 `session_time: Fn(u32) -> Option<String>`，每条记录按
+  自己的 `sesno` 取时刻，只问真落记录的会话、同一会话只问一次；窗口调用点传 `session_time_of`（`manual_update::session_time_rfc3339` 读那一版的会话页，读不到落 `NONE`），
+  预览计数传 `|_| None`，`end_sesno_time` 只剩水位那一处用。源码钉 `apply_one_has_no_staging_fork` 跟着改。spec §4.14 字段表与「时刻的边界」、reader 文档、
+  计划 D3 表与追记同步。夹具套件对每条新行再核「`sesno_time` == E3D 文件里同一会话页的时刻」。
+- **验证**：`cargo test --lib -- datacenter apply_one_has_no_staging_fork` **25 passed**（新增 `delete_records_carry_the_time_of_their_own_session`：一窗 12 / 13 / 14
+  三个会话四条记录各取各的时刻、读不到的落 `NONE`、同一会话只问一次）；E3D TTY 夹具套件 **10/10 PASS**（`output/e3d-fixture/20260924-130105`：三行的 `sesno_time`
+  都与各自会话页逐秒一致，全表仍恰好 3 行）；`rustfmt --check` 改到的每一段干净。
+
 ### E3D TTY 夹具套件核交付删除记录：真机确认增量在维护 `datacenter_delete`（plan 2026-09-22 §4）
 
 - **为什么**：用户要确认当前增量是不是真的在维护 `datacenter_delete`；计划 §4 的真机验收一直没跑。

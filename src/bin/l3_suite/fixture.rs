@@ -1288,6 +1288,7 @@ fn run_case(
                 .collect::<Vec<_>>(),
             &scenario.expected.datacenter_delete,
             &mutation_report,
+            live_target_db,
         )?);
         fs::write(
             dir.join("assertions.json"),
@@ -1385,6 +1386,7 @@ fn run_case(
                 &expected,
                 &scenario.expected.datacenter_delete_after_restore,
                 &restore_report,
+                live_target_db,
             )?);
         }
     }
@@ -2079,9 +2081,10 @@ fn assert_case(
 /// scenario's scope must be exactly `expected`: a scenario that declares none
 /// (moves, resizes, member deletes …) must not produce any. Each `fresh` row carries
 /// one of the sessions this mutation saved (a TTY run saves more than one, and the
-/// row keeps the session of the change itself, not the window end), is unpublished
-/// (the incremental path only `update`s `datacenter_version`, so it must never create
-/// a row there), and comes back from a one-second `from` / `to` window around its
+/// row keeps the session of the change itself, not the window end), a `sesno_time`
+/// equal to that same session's page in the E3D file, is unpublished (the
+/// incremental path only `update`s `datacenter_version`, so it must never create a
+/// row there), and comes back from a one-second `from` / `to` window around its
 /// `sesno_time`.
 #[allow(clippy::too_many_arguments)]
 fn assert_datacenter_deletes(
@@ -2094,6 +2097,7 @@ fn assert_datacenter_deletes(
     expected: &[&ExpectedDeleteRecord],
     fresh: &[ExpectedDeleteRecord],
     saved: &MutationRunReport,
+    target_db: &Path,
 ) -> Result<AssertionRecord> {
     let sessions = (saved.before_sesno + 1)..=saved.after_sesno;
     let url = |query: &str| {
@@ -2174,14 +2178,17 @@ fn assert_datacenter_deletes(
                     record.name
                 )
             })?;
-        ensure!(
-            row.get("sesno")
-                .and_then(Value::as_i64)
-                .and_then(|sesno| i32::try_from(sesno).ok())
-                .is_some_and(|sesno| sessions.contains(&sesno)),
-            "{phase}: {refno} {} does not carry one of the saved sessions {sessions:?}: {row}",
-            record.name
-        );
+        let sesno = row
+            .get("sesno")
+            .and_then(Value::as_i64)
+            .and_then(|sesno| i32::try_from(sesno).ok())
+            .filter(|sesno| sessions.contains(sesno))
+            .with_context(|| {
+                format!(
+                    "{phase}: {refno} {} does not carry one of the saved sessions {sessions:?}: {row}",
+                    record.name
+                )
+            })?;
         ensure!(
             row.get("published").and_then(Value::as_bool) == Some(false),
             "{phase}: never-published fixture unit {refno} reads as published: {row}"
@@ -2194,6 +2201,21 @@ fn assert_datacenter_deletes(
                 )
             })?
             .with_timezone(&chrono::Utc);
+        let written = aios_database::data_interface::db_file_header::session_at(
+            target_db,
+            u32::try_from(sesno)?,
+        )?
+        .local_time()
+        .with_context(|| {
+            format!("{phase}: session {sesno} of the target DB has no readable time")
+        })?;
+        ensure!(
+            at == written,
+            "{phase}: {refno} {} carries sesno_time {} but its session {sesno} was written at {}",
+            record.name,
+            stamp(at),
+            stamp(written)
+        );
         let window = http_json(
             "GET",
             &url(&format!(

@@ -25,6 +25,7 @@
 > 追记（2026-09-24）：读口加 `from` / `to` 按 `sesno_time` 查时间范围（半开区间、按真实时刻比、纯日期按北京时间零点，spec §4.14）；只用于查询，增量消费仍用 `dbnum + since_sesno`。
 > 追记（2026-09-24）：§4 真机验收用 E3D TTY 夹具套件跑了（`output/e3d-fixture/20260924-123508`，10/10）：改名、改回两窗各一行 `renamed`，删整台 EQUI 一行 `deleted`，
 > 其余 8 案一行不落，全表恰好 3 行、`published = false`；kill 重放那一条仍未跑。实现上 `sesno` 取变化所在会话、`sesno_time` 取窗口末端会话的时刻，两者可能不是同一版，待定。
+> 追记（2026-09-24）：上一条的「待定」已决（用户拍板）——`sesno_time` 改取变化所在会话、与 `sesno` 同一版的写入时刻（D3 表已改），夹具套件改为逐行对 E3D 会话页核时刻。
 
 ## 0. 一句话
 
@@ -88,8 +89,8 @@ datacenter_delete:[pe:⟨7997_1⟩, "/1RCP-001-B1"]
 | `type` | 交付单元 noun（`BRAN` / `EQUI` / `SUPPO` / `HANG` …） | issue 的 `type` |
 | `zone_refno` | `pe:⟨…⟩` 或 `NONE` | issue 的 `zone_refno`；求法见 D5 |
 | `dbnum` | u32 | 库号，方便按库排查 |
-| `sesno` | 本窗 T 端会话号（op 的 last-touch） | 发生在哪一版；不做键 |
-| `sesno_time` | 本窗 `end_sesno_time`（字串，已随窗携带） | 不用 `time::now()`（重放不确定、白名单拒） |
+| `sesno` | 变化所在的会话（op 的 last-touch，不是窗口末端） | 发生在哪一版；不做键 |
+| `sesno_time` | **同一版**会话页上的写入时刻（字串；只读真落记录的会话，一个会话读一次；2026-09-24 起，此前误取窗口末端 `end_sesno_time`） | 不用 `time::now()`（重放不确定、白名单拒） |
 | `reason` | `'deleted'` \| `'renamed'` | 两个分支各写各的 |
 
 不写 `instance_code` / `object_model_code`：前者由 `name` 用 rs-server 同一个 `change_name_into_illegal` 推，后者改名不变、消费端从 `datacenter_version:{refno}` 取；

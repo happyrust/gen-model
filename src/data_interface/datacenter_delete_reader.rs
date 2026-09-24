@@ -168,7 +168,7 @@ pub struct DeleteRecordRow {
     /// 沿 owner 链最近的 ZONE `a/b`；链断为 `null`。
     pub zone_refno: Option<String>,
     pub dbnum: u32,
-    /// 发生在哪一版（本窗 T 端会话号）。
+    /// 发生在哪一版：这次改名 / 删除所在的会话，不是窗口末端。
     pub sesno: u32,
     /// 那一版在 E3D 里被写入的时刻（RFC3339；增量落的是 UTC 文本 `…+00:00`）；读不到为 `null`。
     pub sesno_time: Option<String>,

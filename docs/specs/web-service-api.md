@@ -1413,7 +1413,7 @@ GET /api/v1/datacenter/deletes?zone_refno=7997/5&reason=renamed&from=2026-09-23T
 GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
 ```
 
-  这个时刻的边界：它是窗口 T 端那一版在 E3D 会话页上的写入时刻，同一窗里的变化共用一个时刻；来自写会话那台 E3D 的时钟，gen-model 按本机时区
+  这个时刻的边界：它是变化所在那一版（与 `sesno` 同一版）在 E3D 会话页上的写入时刻；来自写会话那台 E3D 的时钟，gen-model 按本机时区
   解释后存 UTC；同一 `[refno, 老位号]` 在更晚一窗再落一次，时刻跟着挪到后面那次。**别拿它做增量游标**：watcher 停过、整窗重放时，晚落库的行
   时刻反而更早，按「上次拉到的时刻之后」轮询会漏行——增量消费用 `dbnum + since_sesno`。
 
@@ -1436,7 +1436,7 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
   | `name` | **要在中台删掉的那个位号**（E3D `NAME` 原文，含首位 `/`）：被删 → 删前的位号；改名 → 改前的位号 |
   | `type` | 交付单元 noun（`BRAN` / `SUPPO` / `EQUI` / `HANG` …，按项目 `delivery_unit_types` 配置） |
   | `zone_refno` | 沿 owner 链最近的 ZONE `a/b`；链断 `null`（按 ZONE 筛时自然漏掉，调用方要兜底就按 `dbnum` 拉） |
-  | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版、那一版在 E3D 里被写入的时刻（RFC3339，增量落的是 UTC 文本 `…+00:00`，要本地时间自己换；读不到 `null`） |
+  | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版（这次改名 / 删除所在的会话，不是窗口末端）、同一版在 E3D 里被写入的时刻（RFC3339，增量落的是 UTC 文本 `…+00:00`，要本地时间自己换；读不到 `null`） |
   | `reason` | `deleted` \| `renamed` |
   | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端）。按 **refno** 算、不按位号：以 X 提资后连改 X→Y→Z 没再提资，`Y` 那行也是 `true`，但 Y 从没上过中台——调用方对 `remove-apply` 回「查无此实例」要按成功处理 |
   | `published_status` | 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null` |
