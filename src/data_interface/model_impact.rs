@@ -476,7 +476,8 @@ pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
 /// 它是元数据门的**第二票**：S6 起 [`attribute_is_metadata_only`] 改成「字典 DCHC == 0 ∧ 不在这里」；
 /// 本轮（S5）只交付产物与护栏，判决还没换。2026-09-15：138 个名字（2026-09-19 重生成后 139——e3d-model 09-18
 /// 风管那条带进的 `LBOR`），DCHC=0 的恰好六个
-/// `DIR FILL GTYP PKEY UKEY VXREF`（core 不重画、我们却真读的输入，正是第二票要挡的那几个），
+/// `DIR FILL GTYP PKEY UKEY VXREF`（core 不重画、我们却真读的输入，正是第二票要挡的那几个；2026-09-27
+/// 宿主 FIXING 扫描读目录件的 `NGMR`，成了第七个），
 /// 老五个元数据名 `NAME DESC PURP FUNC LCHKDA` 一个都不在。
 ///
 /// e3d-io 目录求值环境读到的名字（`e3d_io_catalogue_eval`，`ANGL RADI HEIG DESP UNIPAR` 与目录侧
@@ -535,11 +536,11 @@ fn wnoevt_no_event_names() -> &'static HashSet<String> {
 ///
 /// S6 之前这里问的是「效果表 [`AttributeEffect::DataOnly`] ∧ DCHC = 0」，恰好放行五个名字；
 /// 那张手写表退成报表分类与 `no_model` 的分档依据（[`attribute_is_curated_metadata`]），不再是判决输入。
-/// 字典 3941 个 DCHC = 0 的名字里，读取集合只挡 `DIR FILL GTYP PKEY UKEY VXREF` 六个（core 不重画、
-/// 我们却真拿来生成的输入），其余 3935 个都放行。其中 16 个被手写表登记成几何 / 级联输入
-/// （`HREF TREF PSPE DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `SIZE MAXA NGMR ORRF PTOF`）：
+/// 字典 3941 个 DCHC = 0 的名字里，读取集合只挡 `DIR FILL GTYP NGMR PKEY UKEY VXREF` 七个（core 不重画、
+/// 我们却真拿来生成的输入），其余 3934 个都放行。其中 15 个被手写表登记成几何 / 级联输入
+/// （`HREF TREF PSPE DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `SIZE MAXA ORRF PTOF`）：
 /// 它们既不是 core 的重画输入、生成器也不读——手写表那一格是当年按语义猜的，判决以两票为准；
-/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`] 逐个点名钉住，名单变了就得重新问
+/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_fifteen_names`] 逐个点名钉住，名单变了就得重新问
 /// 「新名字真的没人读吗」。
 ///
 /// **戳是第一票的唯一例外**（2026-09-17 Q6，用户拍板）：`CACHID` 不在字典快照里（`raw_dchc_code` 回
@@ -1275,7 +1276,7 @@ mod tests {
                 "{name}"
             );
             // S6：字典 DCHC=0 且生成器不读的名字（`HREF TREF PSPE …`）两票放行，手写表那一格只剩报表意义，
-            // 见 `the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`。
+            // 见 `the_two_votes_override_the_hand_tables_for_exactly_fifteen_names`。
             let expected = if attribute_is_metadata_only(name) {
                 OperationImpact::Skip
             } else {
@@ -2185,7 +2186,7 @@ mod tests {
                 AttributeEffect::DirectGeometry,
                 "{name}"
             );
-            // S6：`SIZE MAXA NGMR ORRF PTOF` 字典 DCHC=0 且生成器不读，两票放行；其余照旧重算。
+            // S6：`SIZE MAXA ORRF PTOF` 字典 DCHC=0 且生成器不读，两票放行；其余照旧重算。
             let expected = if attribute_is_metadata_only(name) {
                 OperationImpact::Skip
             } else {
@@ -2597,9 +2598,10 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天六个，全来自 e3d-model：`DIR` catalogue_point、
-    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron——core 会话内不为它们重画，我们却
-    /// 真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都不在（S6 「`NAME` 等仍放行」的前提）。
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天七个，全来自 e3d-model：`DIR` catalogue_point、
+    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减
+    /// ——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都
+    /// 不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
     fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
         let mut zero: Vec<&str> = generation_read_set()
@@ -2608,7 +2610,7 @@ mod tests {
             .map(String::as_str)
             .collect();
         zero.sort_unstable();
-        assert_eq!(zero, ["DIR", "FILL", "GTYP", "PKEY", "UKEY", "VXREF"]);
+        assert_eq!(zero, ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF"]);
         for name in DATA_ONLY_ATTR_NAMES {
             assert!(
                 !generation_reads_attribute(name),
@@ -2625,8 +2627,8 @@ mod tests {
         // ——多出的一个是 `LBOR`（e3d-model 09-18 `226154c` 风管那条带进的读点，那边的产物早已 134，这边的副本
         // 一直没重生成）；两个戳都在 `stamp_literals` 里，一个都不进 `names`（上面那条循环钉住）。
         // 2026-09-27：GENSEC datum 标架带进 `HPREF`（140，当时漏改这里）；关节负体带进 `JOIS` / `JOIE` / `CREF` /
-        // `NAPP`，前三个本就在模型面那一半里，并集只多 `NAPP`（141）。
-        assert_eq!(generation_read_set().len(), 141, "读取集合条数漂移");
+        // `NAPP`，前三个本就在模型面那一半里，并集只多 `NAPP`（141）；宿主 FIXING 扫描带进目录件的 `NGMR`（142）。
+        assert_eq!(generation_read_set().len(), 142, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2756,8 +2758,8 @@ mod tests {
             assert!(attribute_is_metadata_only(name), "{name}");
             assert!(!attribute_is_curated_metadata(name), "{name}");
         }
-        // 读取集合那一票：字典说 0、我们却真拿来生成的六个输入，一个都不放行。
-        for name in ["DIR", "FILL", "GTYP", "PKEY", "UKEY", "VXREF", "att.dir"] {
+        // 读取集合那一票：字典说 0、我们却真拿来生成的七个输入，一个都不放行。
+        for name in ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF", "att.dir"] {
             assert_eq!(raw_dchc_code(name), Some(0), "{name}");
             assert!(generation_reads_attribute(name), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
@@ -2826,7 +2828,7 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡六个，其余全部放行。
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡七个，其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2839,7 +2841,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 6,
+            3941 - 7,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
@@ -2899,14 +2901,14 @@ mod tests {
     }
 
     /// 两票压过手写表：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字
-    /// **恰好 16 个**，逐个点名。它们是当年按语义猜进表的（`HREF`/`TREF` 分支头尾引用——几何
+    /// **恰好 15 个**，逐个点名。它们是当年按语义猜进表的（`HREF`/`TREF` 分支头尾引用——几何
     /// 读的是 `HPOS HDIR HBOR …` 这些 DCHC=1/2 的存储属性；`PSPE` 管道规格默认值——元件各有
-    /// 自己的 `SPRE`；`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；`NGMR` 负体几何集引用——负体走
-    /// `GMRE`；其余同理），core 不为它们重画、我们也不读，判决以两票为准，手写表那一格只剩报表
-    /// 意义（`classify_attribute_effect` 照旧回级联 / 几何，建边资格不变）。名单变了就得重新问
-    /// 「新名字真的没人读吗」——多出来一个是读取集合漏了、少一个是有人开始读它了。
+    /// 自己的 `SPRE`；`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；其余同理），core 不为它们重画、我们
+    /// 也不读，判决以两票为准，手写表那一格只剩报表意义（`classify_attribute_effect` 照旧回级联 /
+    /// 几何，建边资格不变）。名单变了就得重新问「新名字真的没人读吗」——多出来一个是读取集合漏了、
+    /// 少一个是有人开始读它了：2026-09-27 少了 `NGMR`（e3d-model 宿主 FIXING 扫描读目录件的负体集）。
     #[test]
-    fn the_two_votes_override_the_hand_tables_for_exactly_sixteen_names() {
+    fn the_two_votes_override_the_hand_tables_for_exactly_fifteen_names() {
         let mut overridden: Vec<&str> = ATTRIBUTE_EFFECT_TABLES
             .iter()
             .filter(|(_, effect)| *effect != AttributeEffect::DataOnly)
@@ -2917,8 +2919,8 @@ mod tests {
         assert_eq!(
             overridden,
             [
-                "CURD", "DDPR", "DKEY", "FSPREF", "HREF", "JFRE", "MAXA", "NGMR", "ORRF", "PSPE",
-                "PTOF", "PTYP", "SCREF", "SIZE", "STYP", "TREF",
+                "CURD", "DDPR", "DKEY", "FSPREF", "HREF", "JFRE", "MAXA", "ORRF", "PSPE", "PTOF",
+                "PTYP", "SCREF", "SIZE", "STYP", "TREF",
             ]
         );
         for name in &overridden {

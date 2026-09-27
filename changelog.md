@@ -2,6 +2,19 @@
 
 ## 2026-09-27
 
+### GENSEC 扫自己 datum 树里的 FIXING 扣负体（vendor e3d-model `db6894f`、e3d-io `b7c4860`）：柱底板让位修好 24 根柱底、柱身螺栓孔与 E3D 逐根同数，aps250110 整站 RVM 1155 → 1179 / 2995
+
+- **为什么**：24 根柱底比 E3D 低 30 / 20 mm（底板厚）；E3D 的柱身有螺栓孔（柱 `/277` 那组面片亏格 20），我们一个都没有。E3D `DB_Gensec::makeCSG` 在 JOIS / JOIE 之后对自己 datum 树里每只 FIXING 走一次 mode 9：
+  几何源是首个 TMPL（端板）→ mode 1，是 SFIT 目录件（柱底板）→ mode 3，是 JOIN（檐口 / 加腋节点）→ mode 1；负体按出身过设计 / 目录两道 NAPP 门（只差 -1 在 mode 9 上）。
+- **改动**：e3d-model `elmodl::collect_host_fixing_negatives`——TMPL 设计负体交回直属负体那条路（端板让位 NBOX / NXTR 挡下，螺栓孔 NCYL 放行）；目录件 `NGMR` 走新的 `catalogue::catalogue_host_cuts`（刀在局部系让 0.001 再放世界系，
+  柱底板 NSBO 放行、锚栓孔 NSCY 挡下；JOIN 的 NSCY 放行）。NSBO 的尺寸是 `ATTRIB OPAR[2 ]` × `OPAR[1 ]`（柱截面），e3d-io 的参数环境补上 `OPAR/ODES/APAR/ADES`（Core3D `DESPRE` 口径：属主截面 / CREF 的参数）。
+- **整站对拍**：GENSEC 579 → 603 / 1449，修好 24、坏 0；这次刀数变了的 59 根 GENSEC，孔数（面片亏格）与 E3D 逐根相等（`/900` 88 个孔）。剩下的非模板 GENSEC 失败：檐口 16 mm 8 根、`/594` 8.3 mm、`/1819` 假坏。
+- **增量**：FIXING 是单元，改它或它模板里的 NCYL 只重建 FIXING 自己；`increment::datum_fixing_host_of` 把要重建 / 删除的 FIXING 上溯到挂着它的 GENSEC，一并重建。护栏登记齐：`NGMR` 归进有反向表的一档（acp250702 会话表实测有）；
+  读取集合 +`NGMR`（本仓并集 141 → 142）。它是字典 DCHC=0 的名字，所以 `model_impact.rs` 里第二票挡的名单由六个变七个、「两票压过手写表」的名单由 16 个变 15 个（测试改名 `..._exactly_fifteen_names`），放行数 3941 − 7。
+- **没做**：底板 FIXING 自己那块板——SFIT 的 SBOX `PXLE/PZLE` 存成全零元组、PML 体 e3d-io 找不到，E3D 画的 329.2 × 340.4 × 30 我们照旧跳过。
+- **验证**：e3d-model 干净树（`d510253` + `db6894f`，e3d-io `b7c4860`）`cargo test --release --lib --tests` 全过（lib 347、真库门 `gensec_host_fixing_real` / `gensec_joint_real`、increment_real 3）；e3d-io lib 363 过；
+  本仓 `cargo test --lib data_interface::model_impact` 49 过。证据 `output/gensec-joint-20260927/`（`cmp-host.json`、`aps250110-host/`、`genus_check.py`）。
+
 ### GENSEC 两端扣 JOIS / JOIE 关节 FIXING 名下 TMPL 的负体（vendor e3d-model `d510253`）：端板梁两端各长 8 mm 修好 113 根，aps250110 整站 RVM 1043 → 1155 / 2995
 
 - **为什么**：框架梁的 JOIS / JOIE 指向柱（或主梁）datum 下的 FIXING，FIXING 名下节点模板（Flexible / Full Depth End Plate 150×8、Web Cleats）里的 NBOX（NAPP -1，端板让位 8 mm）、NCYL（螺栓孔）、NXTR（翼缘切角）是给梁扣的。
