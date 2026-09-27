@@ -2,6 +2,20 @@
 
 ## 2026-09-27
 
+### GENSEC 两端扣 JOIS / JOIE 关节 FIXING 名下 TMPL 的负体（vendor e3d-model `d510253`）：端板梁两端各长 8 mm 修好 113 根，aps250110 整站 RVM 1043 → 1155 / 2995
+
+- **为什么**：框架梁的 JOIS / JOIE 指向柱（或主梁）datum 下的 FIXING，FIXING 名下节点模板（Flexible / Full Depth End Plate 150×8、Web Cleats）里的 NBOX（NAPP -1，端板让位 8 mm）、NCYL（螺栓孔）、NXTR（翼缘切角）是给梁扣的。
+  E3D `DB_Sctn::DB_makeCSG` 切完两端后对 JOIS、JOIE 的目标各走一次关节负体路径（mode 0，过 `sub_1072B780` 的 NAPP 门）；我们原先只把这些负体记进 `host_negatives`，梁两端各长 8 mm。
+- **改动**：`elmodl::collect_joint_negatives`——GENSEC 取 JOIS / JOIE → FIXING → 名下 TMPL 的负体，NAPP 门按 mode 0（读不到 / -1 放行，否则看 `& 1`），再走直属负体同一条表现级门、世界放置与扣减。
+  只接了设计侧 TMPL 这一种来源；FIXING 的 `SPRE → CATR` 是目录 JOIN 的那批（檐口节点）负体在目录 NGMS 里，未做。
+- **整站对拍**：GENSEC 467 → 579 / 1449，修好 113、坏 1。坏的那根 `2013286654/1819` 是包围盒假坏（斜梁翼缘尖在刀侧面外漂 0.002 mm，E3D 留零厚尖条撑满原长、我们让刀后起点推到 4.53 mm；两边刀口一致）。
+  剩下的 GENSEC 失败：栏杆模板 828、柱底 30 mm 24、檐口 16 mm 9、爬梯护笼 8。
+- **增量**：梁的几何从此吃 FIXING 整棵子树与它的世界标架（在另一根构件的 datum 下）。JOIS / JOIE / CREF 都没有反向引用表，`increment::joint_consumer_of` 经 FIXING 的 `CREF` 回指找梁、再用梁自己的 JOIS / JOIE 核对，
+  要重建或删除的 FIXING 把梁一起带进计划；CREF 跨库时记 note。护栏登记齐；读取集合重生成（本仓 `generation_read_set.json` 只多 `NAPP`，140 → 141，
+  `model_impact.rs` 钉的条数一并改，顺带补上 `HPREF` 那次漏改的一格）。
+- **验证**：e3d-model 干净树（`a42d5a1` + `d510253`）`cargo test --release --lib --tests` 全过（lib 345、真库门 `gensec_joint_real` 2、increment_real 3）；本仓 `the_generation_read_set_*` 两条过。
+  证据 `output/gensec-joint-20260927/`（`cmp-joint.json`、`aps250110-joint/`）。
+
 ### SCTN / STWALL 名下 FITT 的现算标架（vendor e3d-model `a42d5a1`）：直墙上 FITTING 模板件 235 件归位，aps250110 整站 RVM 808 → 1043 / 2995
 
 - **为什么**：整站对拍里「直墙 STWALL 上的 FITTING 模板件」235 件全落在 CWALL 原点附近（差约 32 万 mm）。FITT 没有 POS/ORI，标架由宿主现算；SCTN builder 装配 FITT 时早就用 `world(SCTN) * section_fitting_placement`，
