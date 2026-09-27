@@ -1,5 +1,21 @@
 # 变更记录
 
+## 2026-09-27
+
+### GENSEC 名下 JLDATU / PLDATU 的现算标架（vendor e3d-model `fb77659`）：挂在梁柱上的 FIXING 连同模板件归位，aps250110 整站 RVM 574 → 808 / 2995 对上；增量补 GENSEC datum 子树级联
+
+- **为什么**：接 09-24 那条的遗留「14 根 FIXING 模板下的 GENSEC 差到 4340 mm」。FIXING 挂在 GENSEC 的 JLDATU → PLDATU 下时，这两级模板里没有 POS/ORI，`world_matrix` 乘进的是单位阵，FIXING 连同 TMPL 里的端板、GENSEC 全落在宿主原点附近。
+- **规则**（新模块 `datum`，E3D 现算口径 `pllib/GPLDOP` / `pllib/GPLDAT`）：JLDATU 从 `HPREF` 那只 POINSP 沿 SPINE 走 `ZDIS`，标架跟截面放置同一套（含 BANG + 中性轴角）；PLDATU 落在 `POSL` 那条 p-line 上，Z 取该线 PLAX 方向，Y 取 `YDIR`（截面放置标架里的向量），
+  退化取切向；`POSL` 未设或截面里没有这条线时留在 JUSL 线、角取 0。`transform::world_matrix` 链上遇到它们就截住改用这份标架。
+- **真值**：E3D TTY 宏（PML `!!ce.pos/ori.wrt(world)` 全精度）打出 APS 全部 4100 只 FIXING 的属主链世界标架逐件对：JLDATU 2490 / 2490、PLDATU 2630 / 2720、挂 GENSEC 的 FIXING 3641 / 3734。剩 90 只 PLDATU 在圆管截面
+  「Circumference 225° / 315°」两条线上（PX/PY 的表达式 e3d-io 读不出），ENDATU 354 只未做、23714 库 3 只 FIXING 方向不对未查——都不在 aps250110。
+- **整站对拍**（这次导出了 `/SITE-STRUCTURAL-AREA02` 整站 RVM，不再只看那 584 根）：配对 2995 件里 574 → 808 件对上，修好 234、变坏 0（FIXING 模板里的端板 PANEL 220、GENSEC 14）。
+  剩下的大头按属主链归类：栏杆 HRPOST / HRTERM / HRGATE 模板件约 1780（全挤在 HANDRA 原点）；直墙 STWALL 上的 FITTING 模板件 235（缺墙上 FITT 的标架）；框架 GENSEC 端头 143（8 / 16 / 30 mm 的端板、檐口节点、柱底板负体）；零星约 25。
+- **增量**：datum 标架的输入不是 POS/ORI、或在宿主的兄弟子树（SPINE 路径）里，`placement_input_changed` 认不出。照桥架那条腿加 `increment::gensec_datum_host_of`：候选是带 JLDATU 的 GENSEC、或上溯只穿过 SPINE / POINSP / CURVE / JLDATU / PLDATU 到它，就整棵 GENSEC 子树级联进计划。
+  护栏登记齐（ancestor / reference 两个守卫；读取集合 +`HPREF`，本仓 `src/data_interface/generation_read_set.json` 同步重生成）。
+- **没做**：生成器指纹没加新项（加了会让现场所有根下次 ensure 整根重算），待定。
+- **验证**：e3d-model 干净树（`0322074` + `fb77659`）`cargo test --lib` 343 过，源码扫描护栏与 noun_coverage 过；共享工作树上 increment_real 的门过。证据 `output/gensec-joint-20260927/`（`datum-frames.*`、`datum-check.jsonl`、`aps250110-site.rvm`、`cmp-head.json` / `cmp-datum.json`）。
+
 ## 2026-09-24
 
 ### GENSEC 两端按 SPINE `DRNS` / `DRNE` 斜接、圆弧墙 JLDATU 越过端点沿端切向外推（vendor e3d-model `0322074` / `66b3635`）：aps250110 两端斜切的 GENSEC 对 E3D 由 21 / 114 变 106 / 114；WF03 RR001 FIXING `/1RS03LL0018T` 6.17 → 0.0005 mm
