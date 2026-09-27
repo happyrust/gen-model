@@ -2,6 +2,15 @@
 
 ## 2026-09-27
 
+### SCTN / STWALL 名下 FITT 的现算标架（vendor e3d-model `a42d5a1`）：直墙上 FITTING 模板件 235 件归位，aps250110 整站 RVM 808 → 1043 / 2995
+
+- **为什么**：整站对拍里「直墙 STWALL 上的 FITTING 模板件」235 件全落在 CWALL 原点附近（差约 32 万 mm）。FITT 没有 POS/ORI，标架由宿主现算；SCTN builder 装配 FITT 时早就用 `world(SCTN) * section_fitting_placement`，
+  但 `world_matrix(FITT)` 仍乘单位阵，STWALL 名下 FITT 模板里的件自成单元、走的正是这条。
+- **改动**：`transform` 的现算标架收成 `ImplicitFrame`（GENSEC 名下 JLDATU / PLDATU + SCTN / STWALL 名下 FITT）；增量那条级联推广成 `implicit_frame_host_of`（名下有 FITT 的 SCTN / STWALL 与 FITT 自己也命中）。
+- **真值**：TTY 打出 APS 全部 680 只 FITT 的世界标架，SCTN 名下 521 / 521、STWALL 名下 126 / 126 逐件对上（另 33 只在 db 7015，不在 APS 项目目录，没核）。
+- **整站对拍**：修好 235、坏 0（SCTN 40 / 40、CTOR 85 / 85、REVO 10 / 10、DISH +10、CYLI +65、EXTR +20、PANE +5）。剩余大头：栏杆模板件约 1780、框架 GENSEC 端头 146（8 / 10 / 16 / 20 / 24 / 30 mm）。
+- **验证**：`cargo test --release --lib` 344 过，源码扫描护栏与 increment_real 的门过。证据 `output/gensec-joint-20260927/`（`fitt-frames.*`、`fitt-check.jsonl`、`cmp-fitt.json`）。
+
 ### GENSEC 名下 JLDATU / PLDATU 的现算标架（vendor e3d-model `fb77659`）：挂在梁柱上的 FIXING 连同模板件归位，aps250110 整站 RVM 574 → 808 / 2995 对上；增量补 GENSEC datum 子树级联
 
 - **为什么**：接 09-24 那条的遗留「14 根 FIXING 模板下的 GENSEC 差到 4340 mm」。FIXING 挂在 GENSEC 的 JLDATU → PLDATU 下时，这两级模板里没有 POS/ORI，`world_matrix` 乘进的是单位阵，FIXING 连同 TMPL 里的端板、GENSEC 全落在宿主原点附近。
