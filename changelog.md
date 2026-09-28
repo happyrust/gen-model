@@ -1,5 +1,20 @@
 # 变更记录
 
+## 2026-09-29
+
+### 墙上的 FITT 自己成件（vendor e3d-model `2a0a3f6`、e3d-io `6bbcff9`）：aps250110 整站 RVM 配对 3300 → 3357、通过 3246 → 3303，57 只 `FITTING n of STWALL m` 全部 0.04 mm 内对上
+
+- **为什么**：E3D 的 TTY RVM 把 STWALL 上的门窗各写一组（`FITTING 1 of STWALL 5 of CWALL /B01_LEV01_INT_WALLS`：门扇 SEXT 按 `DESP[2] = 20°` 转开 + 三根门框 SEXT），我们把 63 只全记在 `catalog_pending`——RVM 有而 gen 没有的 139 组里它占 57。
+- **改动**：e3d-model `category::builds_from_catalogue_component` 认 `FITT`（与 FIXING 同路：`SPRE → SPCO --CATR--> SFIT --GMRE-->`，`DESP=[ISET, ANGL]` 经 DTSE 表进 `RPRO`），`is_model_unit` 名单加 `FITT`；新增 `is_model_unit_of(&DbElement)`——noun 说「可以成件」后再看属主，只有 STWALL 名下的算（`fitting_stands_alone_under`）：
+  SCTN 名下的 FITT 由 `section_fitting_parts` 并进梁体（SCTN gb==0，全量遍历走得到它，不能再让它自己成件），CMPF 等属主下的没有现算标架、照旧欠着。管线 `Category::Catalog` 臂、增量 `nearest_unit` / `collect_unit_subtree` / `execute_plan` 四处同改。标架就是 FITT 模板件此前对上的那份 `transform::ImplicitFrame::SectionFitting`。
+  e3d-io `catalogue_pml::parse_number` 认八词的带型数字记录 `101 7 <四词> 11 1`——门目录 `/IS-SRO-NS/900x2045` 的门框 SVER 把整数字面量（`( ( ATTRIB RPRO WIDT - ATTRIB RPRO DWID - 2 ) * 0.5 + 15 )` 里的 2 与 15、`PRAD = 5`、`( ATTRIB RPRO THK + 1 ) * -1` 里的 1）全写成这一形，
+  此前整段不可读、顶点落回全零元组，95 × 61 带 5 mm 圆角的门框只建出 35 × 10 的门挡。
+- **整站对拍**：`generated 3300 → 3357、skipped 565 → 571`（6 只 FITT：5 只 `SPRE 15193/27649` 走不到目录件、1 只 GMSE 空——RVM 里同样是 6 组无几何）、`failed 13` 不动、`catalog_pending` 只剩 PFIT 6；配对 3357 / 通过 3303 / 失败 54（全是在案的 HRPANE 栏板模板件），FITT 57 / 57。
+  RVM 有而 gen 没有的还剩 82 组：BPANEL 52、TREAD 25、WALL 2（DESP 长度 1）、RAIL 2（centreline_only）、PFITTING 1。
+- **对拍脚本**：两份 `compare_gen_ams.py`（`output/gensec-joint-20260927/`、`output/wf05-rr001-20260923/`，不入库）的 alias 表补 `SUBS / RUNGSE / BRAN / EQUI / TREADS / HRPANEL`——261 组「gen 有而 RVM 没有」原是属主 noun 长短名没对上，补齐后配对 3039 → 3300、新露出 54 只 HRPANE 栏板（`implicit_frame` 没接 HRPANE，整片堆在 HANDRA 原点旁，与 9/28 修前的 HRPOST 同型）。
+- **护栏**：ancestor 登记 `category.rs::is_model_unit_of`（只核 owner 的 noun）；读取集合不变（本仓并集仍 144）。
+- **验证**：e3d-io lib 398 过；e3d-model 共享树 lib 351、ancestor 4 / attribute 2 / reference 2、increment_real 3、gensec_joint_real 2、gensec_host_fixing_real 1、hvac 两道、noun_coverage 8 全过。证据 `%TEMP%\aps-verify-20260928\`（`cmp-fitt2.json`、`compare-fitt2.log`、`gen_ams-fitt2.log`、`e3dmodel-fitt3.log`）。
+
 ## 2026-09-28
 
 ### 檐口加腋节点：目录 JOIN 的 NGMS 负体扣梁、FIXING 的 AANGXZ / AANGYZ 现算（vendor e3d-model `6ff5dac` 落地 + `b820a4a` 收口、e3d-io `3031902`）：8 根檐口斜梁 16 mm → 0，aps250110 整站 RVM 1179 → 1223 / 3039
