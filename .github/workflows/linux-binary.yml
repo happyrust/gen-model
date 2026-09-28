@@ -174,10 +174,40 @@ jobs:
           } > "$out/BUILD.txt"
           ls -la "$out"
 
-      - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: aios-database-linux-x64
-          path: dist/aios-database-linux-x64
-          if-no-files-found: error
-          retention-days: 30
+      - name: Assemble direct deployment bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JWT_SECRET: ${{ secrets.REVIEW_JWT_SECRET }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch deploy/backend-20260918 "https://x-access-token:${GH_TOKEN}@github.com/happyrust/gen-model.git" deploysrc
+          (cd deploysrc && python3 deploy/linux/render_dboption.py)
+          cp deploysrc/deploy/linux/install_backend.sh dist/aios-database-linux-x64/install_backend.sh
+          cp deploysrc/bundle/DbOption.toml dist/aios-database-linux-x64/DbOption.toml
+          chmod +x dist/aios-database-linux-x64/install_backend.sh
+          mkdir -p dist/aios-database-linux-x64/resource
+          cp -r gen-model/resource/surreal dist/aios-database-linux-x64/resource/
+          mkdir -p surrealbin
+          gh run download 361126901 --repo happyrust/gen-model --name surreal-linux-x64-fork --dir surrealbin
+          cp surrealbin/surreal dist/aios-database-linux-x64/surreal
+          chmod +x dist/aios-database-linux-x64/surreal
+
+      - name: Direct deploy to Ubuntu
+        env:
+          REMOTE_HOST: '123.57.182.243'
+          REMOTE_USER: 'root'
+          REMOTE_PASS: ${{ secrets.DEPLOY_REMOTE_PASS }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y sshpass rsync
+          test -n "$REMOTE_PASS"
+          opts='-o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15'
+          remote_dir="/tmp/aios-deploy-${GITHUB_RUN_ID}"
+          sshpass -p "$REMOTE_PASS" ssh $opts "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$remote_dir'"
+          sshpass -p "$REMOTE_PASS" rsync -az -e "ssh $opts" dist/aios-database-linux-x64/ "$REMOTE_USER@$REMOTE_HOST:$remote_dir/"
+          sshpass -p "$REMOTE_PASS" ssh $opts "$REMOTE_USER@$REMOTE_HOST" "INSTALL_DIR=/opt/aios-database DATA_DIR=/var/lib/aios-database SURREAL_BIND=127.0.0.1:8009 SURREAL_DATA_DIR=/var/lib/surrealdb/ams-8009 HTTP_PORT=8022 PUBLIC_HOST=$REMOTE_HOST REVIEW_SPLIT_PREFIXES='api/review api/auth' SKIP_NGINX=0 bash '$remote_dir/install_backend.sh'"
+          code="$(curl -sS -o /tmp/review-health -w '%{http_code}' --max-time 30 "http://$REMOTE_HOST/api/review/health" || true)"
+          cat /tmp/review-health
+          test "$code" = 200
+          test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "http://$REMOTE_HOST/api/v1/health" || true)" = 200
