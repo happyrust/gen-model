@@ -43,7 +43,6 @@ use nom::combinator::map;
 use serde_json::from_str;
 use std::any::TypeId;
 use std::collections::BTreeSet;
-#[cfg(windows)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::ops::Deref;
