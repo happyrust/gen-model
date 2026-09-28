@@ -24,7 +24,14 @@
   RVM 却按未扣的 `parts` 逐件对上；此前看不出来是因为对拍吃 `parts`，它唯一露头处是扣空时的 `EmptyManifold`——ams7997 59 只 STWALL 上的 `/W-HOLE` 墙洞 FITT 与 10 只 FIXING 因此整件 failed。
 - **验证**：aps250110 逐件不变（3357 / 3303 / 54，FITT 57 / 57）；ams7997 `generated 51851 → 51920`（+1132 FITT +10 FIXING −1073 假梁）、`failed 154 → 85`（69 条「catalogue component after negatives 生成的流形为空」全消，剩 3 只 FITT 是 db 6000 不在）；
   e3d-model lib 351、ancestor 4 / attribute 2 / reference 2、increment_real 3、gensec 两道、hvac 两道、noun_coverage 8 全过，提交在干净 worktree 里单独编过。
-- **在案**：KX-CAM-S4001.rvm 的两块端板与 gen 各差 17.4 mm（y / z 各一）——`section_fitting_placement` 对 L40 角钢的滚转口径（E3D 把板心放在截面包围盒中心的一侧，我们绕梁轴转了 90°），拆前拼在梁里就是这个位置，不是这次引入的。
+- **在案 → 已收**：KX-CAM-S4001.rvm 的两块端板与 gen 各差 17.4 mm（y / z 各一），拆前拼在梁里就是这个位置——见下一条。
+
+### FITT 标架在截面目录不在时的兜底径向按 π/2 算（vendor e3d-model `9ec27b9`）：ams7997 三块角钢端板与 E3D RVM 逐分量 0.0 mm
+
+- **为什么**：`section_fitting_placement` 解得开截面目录时 `radial_angle = π/2 − neutral_angle + mount.rotation + π/2`，`POSL = NA` 时两项相消恒为 π/2；截面链断（本机没有 ams7997 角钢用的 db 7600 会话 12，`aps7600_0001` 是另一份）走兜底那一档却是 0——同一只 FITT 的滚转随目录库在不在而差 90°。
+  `/-KX-CAM-S4001-V1/F1` 的板心偏移是设计参数 `DESP[8..9] = (−8.7, 8.7)`，E3D 把它落在 L40 角钢截面包围盒中心（板心 (−14560, −44690, 5965)），我们绕梁轴转到另一侧。
+- **改动**：兜底改成 π/2，只有 NA 的 PLAX 转角与 JUSL 偏移读不到按 0。新真库门 `tests/section_fitting_real.rs`：三块端板（`-V1/F1`、`-V3/F1`、`/-KX-CAM-S4003-BAR-1/F1`）对 `test_data/rvm/KX-CAM-S4001.rvm` 的 Box 与 `fitting_mount_matches_cam_native_axes_and_origin` 钉的中心 0.1 mm 内逐分量相等，并钉 SCTN 名下的 FITT 是自己一件；兜底按 0 时它在第 1 分量差 17.4 mm 处红。
+- **验证**：aps250110 逐件不变（目录全解得开，3357 / 3303 / 54）；ams7997 1073 只走兜底的端板随之转正（中位 24.4 mm，最大 157.4 mm，`/-KX-CAM-S2001-BAR-1/F1`）；lib 351 + 全套门过。
 
 ## 2026-09-28
 
