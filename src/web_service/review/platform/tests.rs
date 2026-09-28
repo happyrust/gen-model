@@ -14,9 +14,9 @@
 //! | --- | --- | --- |
 //! | `…includes_workflow_role…` / `…accepts_workflow_role_field_name` / `…accepts_legacy_json_key_role` / `…defaults_role_sj…` | 请求体不带 `token`，`[platform_auth]` 缺省 `enabled=true` 必然 401 | 补一枚合法 S2S JWT，其余不变 |
 //! | `test_workflow_verify_active_requires_next_step` | verify 早已**静默忽略** `next_step`（同文件 3.6.8 也这么断言） | 不传 `next_step` 照样 200 passed，`next_step` 由静态推算为 `jd` |
-//! | `test_workflow_verify_blank_form_without_task_returns_soft_block` | handler 对 `active` + 空白主单据有显式放行分支（「表单尚未创建 task，active 可继续」） | 200 passed=true，`task_status=blank`，`next_step=jd` |
+//! | `test_workflow_verify_blank_form_without_task_returns_soft_block` | handler 对 `active` + 空白主单据有显式放行分支（「表单尚未创建 task，active 可继续」） | 移植时曾断言 200 passed=true；**2026-09-29 起改回软阻断**：verify 是 sync 的干跑，`sync active` 对同一状态本来就 409，放行分支删掉，断言 passed=false + `TASK_NOT_CREATED`（计划 `2026-09-28-review-workflow-defects-fix-plan.md` D3 / T3） |
 //! | `test_workflow_verify_active_on_non_sj_node_returns_soft_block` | verify 的节点闸（`ensure_action_allowed_on_node`）不带 `task_status` / `next_step` | 这两格为 None，其余不变 |
-//! | `test_workflow_verify_missing_form_returns_404` | `active` + 主单据不存在也走上面那条放行分支 | 改用 `agree` 复现 404；另加一条钉住 `active` 的放行 |
+//! | `test_workflow_verify_missing_form_returns_404` | `active` + 主单据不存在也走上面那条放行分支 | 移植时改用 `agree` 复现 404、另钉 `active` 放行；**2026-09-29 起**放行分支删掉，`active` 同样 404 |
 //! | `test_workflow_verify_agree_owner_mismatch_returns_structured_diagnostics` | 外部驱动模式（claims 无 `workflow_mode`）**跳过** owner 校验（单测 `external_workflow_verify_skips_owner_match` 同口径） | 断言外部模式放行；OWNER_MISMATCH 由 `workflow_sync::tests` 的内部模式单测覆盖 |
 //! | `test_workflow_verify_agree_returns_annotation_gate_block_without_mutation` | verify 不读 `next_step`，诊断里 `next_step` / `requested_next_step` 为 None | 这两格为 None，其余不变 |
 //! | `test_verify_active_blocks_when_open_exists` / `test_verify_return_blocks_when_no_problem` | verify 对 `active` / `return` **不跑**批注闸门（`verify_action_intent_for_node`） | 断言放行。**2026-09-17 c8d5f6b92 之后 `active` 那一半改回来**：`annotation_check_intent_for_action` 把 `(Active, _)` 收进 ActiveSubmit，verify 带 open 批注 → 200 + passed=false + `ANNOTATION_CHECK_FAILED`（3.6.1）；`return` 照旧放行 |
@@ -742,10 +742,12 @@ async fn test_workflow_verify_active_does_not_require_next_step() {
     cleanup_form(form_id).await;
 }
 
-/// 旧名 `test_workflow_verify_blank_form_without_task_returns_soft_block`：handler 对
-/// `active` + 空白主单据（尚未建 task）有显式放行分支。
+/// 旧名 `test_workflow_verify_blank_form_without_task_returns_soft_block`（再往前一版曾断言
+/// 「active + 空白主单据放行」）。2026-09-29 起 verify 是 sync 的干跑：`active` 对尚未建 task 的
+/// 主单据回 `passed=false, block_code=TASK_NOT_CREATED`——同一状态下 `sync active` 本来就 409
+/// （`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D3 / T3，Q1=A）。
 #[tokio::test]
-async fn test_workflow_verify_blank_form_without_task_passes_through_for_active() {
+async fn test_workflow_verify_blank_form_without_task_soft_blocks_active() {
     let form_id = "FORM-VERIFY-BLANK-NO-TASK";
     cleanup_form(form_id).await;
     seed_form_stub(form_id, "SJ", Some("sj")).await;
@@ -762,16 +764,15 @@ async fn test_workflow_verify_blank_form_without_task_passes_through_for_active(
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload.code, 200);
     let data = payload.data.expect("verify data");
-    assert!(data.passed);
+    assert!(!data.passed, "空白主单据的 active 不再放行");
     assert_eq!(data.action, "active");
-    assert_eq!(data.current_node, None);
+    assert_eq!(data.block_code.as_deref(), Some("TASK_NOT_CREATED"));
     assert_eq!(data.task_status.as_deref(), Some("blank"));
-    assert_eq!(data.next_step.as_deref(), Some("jd"));
-    assert_eq!(data.expected_next_node.as_deref(), Some("jd"));
-    assert_eq!(data.recommended_action, "proceed");
-    assert!(data.reason.contains("尚未创建 task"));
+    assert_eq!(data.next_step, None);
+    assert_eq!(data.recommended_action, "block");
+    assert!(data.reason.contains("表单尚未保存编校审数据"), "{}", data.reason);
 
-    // 非 active 动作对空白主单据仍是 soft block（旧断言想钉的那一半）。
+    // 非 active 动作对空白主单据同样 soft block，同一 block_code。
     let (status, payload) = post_verify(serde_json::json!({
         "form_id": form_id,
         "token": s2s_token("JH", "jd"),
@@ -783,10 +784,110 @@ async fn test_workflow_verify_blank_form_without_task_passes_through_for_active(
     let data = payload.data.expect("verify data");
     assert!(!data.passed);
     assert_eq!(data.action, "agree");
+    assert_eq!(data.block_code.as_deref(), Some("TASK_NOT_CREATED"));
     assert_eq!(data.current_node.as_deref(), Some("sj"));
     assert_eq!(data.task_status.as_deref(), Some("blank"));
     assert_eq!(data.recommended_action, "block");
     assert!(data.reason.contains("尚未创建活动 review task"));
+
+    cleanup_form(form_id).await;
+}
+
+/// V5 对拍：同一夹具、同一 (form_id, action, actor) 跑 verify 与 sync，`verify.passed` 必须等于
+/// `sync` 是否 2xx——差别只在 verify 不写库。三格：空白主单据 active（都挡）、不存在的主单据
+/// active（都 404）、sj 草稿 active（都过；sync 之后任务到 jd，verify 之前任务不动）。
+#[tokio::test]
+async fn test_workflow_verify_matches_sync_outcome_for_active() {
+    let actor = serde_json::json!({ "id": "SJ", "name": "SJ", "roles": "sj" });
+    let next_step = serde_json::json!({ "assignee_id": "JH", "name": "JH", "roles": "jd" });
+    let body = |form_id: &str| {
+        serde_json::json!({
+            "form_id": form_id,
+            "token": s2s_token("SJ", "sj"),
+            "action": "active",
+            "actor": actor,
+            "next_step": next_step
+        })
+    };
+
+    // 1. 主单据存在、未建 task
+    let blank_form = "FORM-PARITY-BLANK";
+    cleanup_form(blank_form).await;
+    seed_form_stub(blank_form, "SJ", Some("sj")).await;
+    let (verify_status, verify) = post_verify(body(blank_form)).await;
+    let (sync_status, sync) = post_sync(body(blank_form)).await;
+    assert_eq!(verify_status, StatusCode::OK);
+    let verify_data = verify.data.expect("verify data");
+    assert!(!verify_data.passed);
+    assert_eq!(sync_status, StatusCode::CONFLICT, "{}", sync.message);
+    assert_eq!(verify_data.passed, sync_status.is_success());
+    assert!(sync.message.contains("尚未创建活动 review task"), "{}", sync.message);
+    assert!(
+        super::review_form::find_task_by_form_id(blank_form)
+            .await
+            .expect("query")
+            .is_none(),
+        "两条路都不该建 task"
+    );
+    cleanup_form(blank_form).await;
+
+    // 2. 主单据不存在
+    let missing_form = "FORM-PARITY-MISSING";
+    cleanup_form(missing_form).await;
+    let (verify_status, verify) = post_verify(body(missing_form)).await;
+    let (sync_status, _sync) = post_sync(body(missing_form)).await;
+    assert_eq!(verify_status, StatusCode::NOT_FOUND);
+    assert!(verify.data.is_none());
+    assert_eq!(sync_status, StatusCode::NOT_FOUND);
+
+    // 3. sj 草稿：verify 过且不动库，sync 过且推进到 jd
+    let draft_form = "FORM-PARITY-DRAFT";
+    insert_task_seed(draft_form, "SJ", "JH", "SH", "sj", "draft").await;
+    seed_form_stub(draft_form, "SJ", Some("sj")).await;
+    let (verify_status, verify) = post_verify(body(draft_form)).await;
+    assert_eq!(verify_status, StatusCode::OK);
+    let verify_data = verify.data.expect("verify data");
+    assert!(verify_data.passed, "{}", verify_data.reason);
+    let before = super::review_form::find_task_by_form_id(draft_form)
+        .await
+        .expect("query")
+        .expect("task");
+    assert_eq!(before.current_node, "sj");
+    let (sync_status, sync) = post_sync(body(draft_form)).await;
+    assert_eq!(sync_status, StatusCode::OK, "{}", sync.message);
+    assert_eq!(verify_data.passed, sync_status.is_success());
+    let after = super::review_form::find_task_by_form_id(draft_form)
+        .await
+        .expect("query")
+        .expect("task");
+    assert_eq!(after.current_node, "jd");
+    cleanup_form(draft_form).await;
+}
+
+/// V6：external 模式（S2S JWT 不带 `workflow_mode`）verify 通过时也回填 `actor_id / owner_id /
+/// owner_source`——只是诊断，判定仍不校 owner（非负责人 JH 对 sj 节点 active 照样 passed）。
+/// 旧端这三格恒空，PMS「目标人预选」拿不到平台侧负责人（计划 D4 / T4）。
+#[tokio::test]
+async fn test_workflow_verify_pass_carries_owner_diagnostics_in_external_mode() {
+    let form_id = "FORM-VERIFY-OWNER-DIAG";
+    insert_task_seed(form_id, "SJ", "JH", "SH", "sj", "draft").await;
+
+    let (status, payload) = post_verify(serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("JH", "jd"),
+        "action": "active",
+        "actor": { "id": "JH", "name": "JH", "roles": "jd" }
+    }))
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = payload.data.expect("verify data");
+    assert!(data.passed, "external 模式不校 owner：{}", data.reason);
+    assert_eq!(data.actor_id.as_deref(), Some("JH"));
+    assert_eq!(data.owner_id.as_deref(), Some("SJ"));
+    assert_eq!(data.owner_source.as_deref(), Some("requester"));
+    assert_eq!(data.current_node.as_deref(), Some("sj"));
+    assert_eq!(data.next_step.as_deref(), Some("jd"));
 
     cleanup_form(form_id).await;
 }
@@ -827,10 +928,10 @@ async fn test_workflow_verify_active_on_non_sj_node_returns_soft_block() {
     cleanup_form(form_id).await;
 }
 
-/// 旧名 `test_workflow_verify_missing_form_returns_404`：`active` + 主单据不存在走的是
-/// 「空白放行」分支，404 只对非 active 动作成立；两半都钉住。
+/// 旧名 `test_workflow_verify_missing_form_returns_404`。主单据不存在时任何 action 都 404
+/// （2026-09-29 之前 `active` 走「空白放行」分支被放过去，见 D3 / T3）。
 #[tokio::test]
-async fn test_workflow_verify_missing_form_returns_404_for_non_active() {
+async fn test_workflow_verify_missing_form_returns_404_for_every_action() {
     let form_id = "FORM-VERIFY-FORM-NOT-FOUND";
     cleanup_form(form_id).await;
 
@@ -855,10 +956,10 @@ async fn test_workflow_verify_missing_form_returns_404_for_non_active() {
         "actor": { "id": "SJ", "name": "SJ", "roles": "sj" }
     }))
     .await;
-    assert_eq!(status, StatusCode::OK, "active 对不存在的主单据按空白放行");
-    let data = payload.data.expect("verify data");
-    assert!(data.passed);
-    assert_eq!(data.task_status.as_deref(), Some("blank"));
+    assert_eq!(status, StatusCode::NOT_FOUND, "active 对不存在的主单据不再按空白放行");
+    assert_eq!(payload.code, 404);
+    assert!(payload.data.is_none());
+    assert!(payload.message.contains("未找到 review form"));
 }
 
 #[tokio::test]

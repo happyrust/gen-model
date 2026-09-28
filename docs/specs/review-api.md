@@ -207,6 +207,28 @@ updatedById, updatedByName, updatedByRole, updatedAt(毫秒), history:[…]}`。
 端到端判据：`scripts/review/test_workflow_e2e.sh`（embed-url → 建单 → sync active/agree/return/stop → delete，13 段断言）与
 `scripts/review/verify_platform_api_json.sh`（夹具 `scripts/review/platform_api_json/*.json`）指向 `:8022`（计划 A8）。
 
+### 8.1 信任边界与 owner 校验（external 模式）
+
+- `workflow_mode` 来自 S2S JWT claims；claims 里**没有** `workflow_mode`（PMS 现网口径）或写 `external` 时即 **external 模式**。`manual` / `internal` 只在 `review-internal-workflow` 特性下有意义，本仓不移植（计划 Q7），这里只描述 external。
+- external 模式下平台**不校验 actor 是否为当前节点负责人**（`workflow_sync.rs::ensure_owner_matches` 首行短路）：谁能推进由 PMS 的流程引擎决定，平台只按 `next_step` 记下负责人（`active` 写 `checker_*`、`agree@jd` 写 `approver_*`……）并把 `actor` 原样写进 `review_workflow_history`。**信任边界 = 能签出 S2S JWT 的一方**——而 S2S JWT 与 embed-url 签给浏览器的 token 是同一密钥、同一 `verify_token`，`actor` 由请求体自报、不与 claims 比对，所以这条边界事实上覆盖到任一持嵌入 token 的浏览器（计划 D8，收口方案见 Q6，本节随之修订）。
+- `verify` / `sync` 的响应仍**回填诊断**：`data.actor_id`（请求人）、`data.owner_id / owner_source`（平台侧记的当前节点负责人：`sj`→`requester`，`jd`→`checker`（空则 `reviewer`），`sh` / `pz`→`approver`）。通过时也回（2026-09-29 起；此前 external 模式恒空），字段为空时不编造、缺省 `null`。PMS 可用它做「目标人预选」，但它**不影响判定**。
+
+### 8.2 `verify` ≡ `sync` 的干跑
+
+- 对同一 `(form_id, action, actor)`，`workflow/verify` 的 `data.passed` **恒等于**随后 `workflow/sync` 同参数是否 2xx；差别只有两条：verify 不写库、verify 静默忽略 `next_step / comments / metadata`（所以 `next_step` 缺失这类只有 sync 才查的 400 不在 verify 里出现）。
+- verify 把 sync 的 403 / 409 折成 **HTTP 200 + `data.passed=false`**（软阻断，`block_code` / `reason` / `recommended_action` 说明原因）；404（主单据不存在）、401、400、500 两边**同码**。
+- 主单据存在但尚未建 task（`form_status=blank`，设计端还没在三维页保存）：`active` 也是软阻断，`block_code="TASK_NOT_CREATED"`，`task_status="blank"`，`reason` 含「表单尚未保存编校审数据，请设计人员先在三维页保存」；sync 同状态 409。2026-09-29 之前 verify 对这一格（以及主单据不存在）有一条 `active` 放行分支，PMS PreValidate 过了送审却失败——已删（计划 D3 / T3，Q1=A）。
+- 批注闸门口径两边同一张表（`annotation_check_intent_for_action`）：`active` 与 `agree@sj` 走 ActiveSubmit（open == 0），`agree@jd/sh/pz` 走 AgreeAdvance（0 open / 0 rejected / 0 pending），`return` / `stop` 不跑闸门。
+
+### 8.3 设计端「二次保存」语义（`POST /api/review/tasks` 带 `formId`）
+
+- 嵌入态设计端每次点「保存」都是 `POST /api/review/tasks {formId, …}`（前端不区分首建与修改）。后端按 `formId` 查**最近更新**的活动任务（与 §8 `workflow/sync` 找任务同一口径 `updated_at DESC`）：
+  - 没有 → 新建（`current_node=sj`, `status=draft`），并按 `components` 回填 `review_form_model`；
+  - 有且 `current_node=sj` → **更新**该任务的 `title / description / modelName / priority / components`（`attachments` / `dueDate` 只在请求带了时覆盖），`review_form_model` 整体换成新构件集，写一条 `action="resave"` 历史；**不动** `checker_* / approver_* / reviewer_*`（它们由 PMS `next_step` 指定）、不动 `status / current_node`。返回更新后的任务，`task.id` 不变；
+  - 有但 `current_node≠sj` → **HTTP 409** `{success:false, error_message:"单据已送审（当前节点 jd · 校对），不可修改；如需修改请由 PMS 驳回到编制节点"}`，不写库。
+- `workflow/sync query` 的 `data.models` 与 `GET /api/review/tasks/{id}` 的 `components` 在任何一次保存 / `PATCH components` 之后一致（计划 G5）。
+- `review_forms.project_id` 只来自 embed-url 的 `project_id` 与 JWT claims 的 `project_id`；`modelName`（用户填的数据包名称）只落 `review_tasks.model_name`，不再写进 `review_forms`（计划 D2 / T2）。
+
 ## 9. 模型侧集成（`review/integration.rs`）
 
 旧端 `review_integration.rs`。两条都**不经** `review_auth_middleware`（旧端注册在 JWT 之外）：`aux-data` 用 §1.1 的 `UCode` / `UKey` 口令，`collision-data` 匿名可读。
@@ -264,3 +286,9 @@ CollisionItem = { ObjectOneLoc, ObjectOne, ObjectTowLoc, ObjectTow,   // "Tow" �
 - `annotations/check` 使用 `success/data` 信封；未闭环批注使 `workflow/verify` 返回 HTTP 200 且 `data.passed=false`，不是 HTTP 409。
 - A3 清单共 46 条：37 核心方法·路径、1 静态附件挂载、6 PMS、2 集成。资源 404 必须检查业务错误体，不能当作路由未注册，也不能仅凭非 404 宣称业务通过。
 - 完整重启验收由 `scripts/review/persistence.mjs seed|verify` 比较 7 组非空快照，包含附件文件 SHA256；任务元数据复读不等同于完整持久化通过。
+
+### 2026-09-29 校审流程缺陷修复（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` T1–T4）
+
+- §8 新增 8.1 / 8.2 / 8.3 三小节：external 模式的信任边界与 owner 诊断、`verify` ≡ `sync` 干跑、设计端「二次保存」语义。
+- `workflow/verify`：`active` 对「主单据存在但未建 task」不再放行，改 `passed=false, block_code="TASK_NOT_CREATED"`；主单据不存在一律 404；通过响应新回填 `actor_id / owner_id / owner_source`（诊断）。
+- `POST /api/review/tasks` 带 `formId` 命中 `sj` 节点活动任务 → 更新而非返回旧任务；非 `sj` → 409（新错误文本，键集不变）。`PATCH /api/review/tasks/{id}` 改 `components` 同步 `review_form_model`。`review_forms.project_id` 不再被 `modelName` 覆盖。

@@ -188,6 +188,12 @@ impl WorkflowSyncActionError {
         self
     }
 
+    /// 只给 verify 响应的 `data.block_code` 定名，不动 `error_code`（sync 侧信封不变）。
+    fn with_verify_block_code(mut self, block_code: impl Into<String>) -> Self {
+        self.verify_block_code = Some(block_code.into());
+        self
+    }
+
     fn into_sync_response(self) -> (StatusCode, Json<SyncWorkflowResponse>) {
         (
             self.status,
@@ -650,6 +656,12 @@ pub async fn verify_workflow_handler(
         }
     };
 
+    // verify ≡ sync 的干跑：同一 (form_id, action, actor) 下，这里的 passed 与随后 sync 的 2xx / 非 2xx
+    // 必须一致，差别只在不写库。旧端给 `active` + 空白主单据（尚未建 task）留了一条显式放行分支
+    // （「表单尚未创建 task，active 可继续」），而 sync active 对同一状态回 409——PMS PreValidate
+    // 通过、送审却失败、单据停在原节点看不到原因。2026-09-29 起删掉那条分支，空白主单据按
+    // `load_task_for_workflow` 的 TASK_NOT_CREATED 软阻断回 passed=false；主单据不存在一律 404
+    //（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D3 / T3，Q1=A）。
     let (result, outcome_passed, outcome_block_code, outcome_reason) =
         match validate_workflow_for_verify(&request, kind).await {
             Ok(precheck) => {
@@ -662,6 +674,7 @@ pub async fn verify_workflow_handler(
                             &action,
                             kind,
                             &precheck,
+                            &request.actor().id,
                             "验证通过，可继续流转",
                         )),
                         error_code: None,
@@ -669,48 +682,6 @@ pub async fn verify_workflow_handler(
                     }),
                 );
                 (response, true, None::<String>, "ok".to_string())
-            }
-            Err(error)
-                if kind == WorkflowMutationKind::Active
-                    && error
-                        .verify_task_status
-                        .as_deref()
-                        .is_some_and(|s| s == "blank") =>
-            {
-                info!(
-                    "[WORKFLOW_VERIFY] active on blank form - form_id={}, 放行（尚未创建 task）",
-                    request.form_id
-                );
-                let response = (
-                    StatusCode::OK,
-                    Json(VerifyWorkflowResponse {
-                        code: 200,
-                        message: "ok".to_string(),
-                        data: Some(VerifyWorkflowData {
-                            passed: true,
-                            action: "active".to_string(),
-                            block_code: None,
-                            current_node: None,
-                            task_status: Some("blank".to_string()),
-                            next_step: Some("jd".to_string()),
-                            actor_id: None,
-                            owner_id: None,
-                            owner_source: None,
-                            expected_next_node: Some("jd".to_string()),
-                            requested_next_step: None,
-                            reason: "表单尚未创建 task，active 可继续".to_string(),
-                            recommended_action: "proceed".to_string(),
-                        }),
-                        error_code: None,
-                        annotation_check: None,
-                    }),
-                );
-                (
-                    response,
-                    true,
-                    None::<String>,
-                    "blank_passthrough".to_string(),
-                )
             }
             Err(error) => {
                 let block_code = error
@@ -920,15 +891,22 @@ async fn validate_workflow_for_verify(
 
 /// verify 通过时构造 `VerifyWorkflowData`。诊断字段 `next_step`/`expected_next_node`
 /// 来自静态推算，不依赖客户端请求体。
+///
+/// `actor_id / owner_id / owner_source` 在 external 模式下也回填（旧端通过响应恒空，PMS 端
+/// 「目标人预选」拿不到平台侧负责人）——**只是诊断**，不参与判定：external 模式的 owner 校验
+/// 仍由 `ensure_owner_matches` 首行短路（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md`
+/// D4 / T4；契约见 `docs/specs/review-api.md` §8.1）。负责人字段为空时回 `None`，不编造。
 fn build_verify_pass_data(
     action: &str,
     kind: WorkflowMutationKind,
     precheck: &WorkflowVerifyPrecheck,
+    actor_id: &str,
     reason: impl Into<String>,
 ) -> VerifyWorkflowData {
     let next_step = verify_expected_next_node(kind, &precheck.current_node);
-    let _ = &precheck.task; // 仅保留所有权一致性，task 字段未来可能用于扩展诊断。
     let _ = precheck.intent; // 当前 pass 路径不输出 intent；future-proof。
+    let (owner_id, owner_source) = current_node_owner(&precheck.task, &precheck.current_node);
+    let owner_id = owner_id.trim();
     VerifyWorkflowData {
         passed: true,
         action: action.to_string(),
@@ -936,9 +914,9 @@ fn build_verify_pass_data(
         current_node: Some(precheck.current_node.clone()),
         task_status: Some(precheck.task_status.clone()),
         next_step,
-        actor_id: None,
-        owner_id: None,
-        owner_source: None,
+        actor_id: Some(actor_id.trim().to_string()).filter(|value| !value.is_empty()),
+        owner_id: (!owner_id.is_empty()).then(|| owner_id.to_string()),
+        owner_source: (!owner_id.is_empty()).then(|| owner_source.to_string()),
         expected_next_node: None,
         requested_next_step: None,
         reason: reason.into(),
@@ -1499,39 +1477,55 @@ async fn load_task_for_workflow(form_id: &str) -> Result<ReviewTask, WorkflowSyn
     })?;
 
     let Some(form) = form else {
+        // 主单据不存在：404，**不**带 task_status=blank——旧端这里也填 blank，verify 的
+        // 「active + blank 放行」分支就把不存在的 form 也放过去了（计划 D3 / T3）。404 不是
+        // 软阻断，verify 与 sync 都原样 404。
         return Err(WorkflowSyncActionError::blocked(
             StatusCode::NOT_FOUND,
             format!("form_id={} 未找到 review form", form_id),
             None,
-            Some("blank".to_string()),
+            None,
             None,
             "block",
         ));
     };
 
     let form_status = normalize_review_form_status(&form.status);
-    let message = if form_status == "deleted" {
-        format!("form_id={} 对应主单据已删除，不可继续流转", form_id)
+    let (message, block_code) = if form_status == "deleted" {
+        (
+            format!("form_id={} 对应主单据已删除，不可继续流转", form_id),
+            None,
+        )
     } else if form.task_created {
-        format!(
-            "form_id={} 当前主单据状态为 {}，但未找到活动 review task",
-            form_id, form_status
+        (
+            format!(
+                "form_id={} 当前主单据状态为 {}，但未找到活动 review task",
+                form_id, form_status
+            ),
+            None,
         )
     } else {
-        format!(
-            "form_id={} 当前主单据状态为 {}，尚未创建活动 review task",
-            form_id, form_status
+        (
+            format!(
+                "form_id={} 当前主单据状态为 {}，尚未创建活动 review task：表单尚未保存编校审数据，请设计人员先在三维页保存",
+                form_id, form_status
+            ),
+            Some("TASK_NOT_CREATED"),
         )
     };
 
-    Err(WorkflowSyncActionError::blocked(
+    let error = WorkflowSyncActionError::blocked(
         StatusCode::CONFLICT,
         message,
         form.role.clone(),
         Some(form_status),
         None,
         "block",
-    ))
+    );
+    Err(match block_code {
+        Some(code) => error.with_verify_block_code(code),
+        None => error,
+    })
 }
 
 fn resolve_required_next_step(
