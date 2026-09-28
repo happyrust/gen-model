@@ -261,10 +261,19 @@ impl AiosDBManager {
         });
         let mut result = tokio::time::timeout(std::time::Duration::from_secs(110), future).await
             .map_err(|_| ModelGenerationInProgress { root_refno: root.to_pdms_str() })??;
+        // 两道后验失败都不是「正在后台生成」：生成已经完成，只是世界变了（源文件在生成期间前移）
+        // 或判据说这根不算新。报成 `ModelGenerationInProgress` 会把这两种都藏在同一句 409 里
+        // （2026-09-19 字典库会话位 0 那一桩就是这么被盖了一天）。
         anyhow::ensure!(generation_source_identity(root).await? == version,
-            ModelGenerationInProgress { root_refno: root.to_pdms_str() });
+            ModelStaleAfterGeneration {
+                root_refno: root.to_pdms_str(),
+                reason: "源文件版本在生成期间前移",
+            });
         anyhow::ensure!(memory_root_current(root).await?,
-            ModelGenerationInProgress { root_refno: root.to_pdms_str() });
+            ModelStaleAfterGeneration {
+                root_refno: root.to_pdms_str(),
+                reason: "投影回执的模型目标核对不过，原因见日志 [模型目标核对]",
+            });
         result.requested_refno = requested_refno.to_pdms_str();
         Ok(result)
     }
@@ -490,6 +499,23 @@ impl std::fmt::Display for ModelGenerationInProgress {
 
 impl std::error::Error for ModelGenerationInProgress {}
 
+/// 按需生成**已经跑完**，后验却说这根不是最新：源文件在生成期间前移，或投影回执的模型目标
+/// 核对不过。与 [`ModelGenerationInProgress`]（还有人在生成 / 等超时）是两回事——客户端同样
+/// 该重试，但排障时要能一眼分开。HTTP 面照旧映射 409。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelStaleAfterGeneration {
+    pub root_refno: String,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for ModelStaleAfterGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "生成根 {} 刚生成完就被判成不是最新：{}", self.root_refno, self.reason)
+    }
+}
+
+impl std::error::Error for ModelStaleAfterGeneration {}
+
 fn try_generation_root(
     root_refno: &str,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>, ModelGenerationInProgress> {
@@ -588,7 +614,15 @@ fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool) -> bool {
                 return true;
             }
             receipt.model_target.as_ref().is_some_and(|target|
-                super::room_read_through::target_current(target).unwrap_or(false))
+                super::room_read_through::target_current(target).unwrap_or_else(|error| {
+                    // 核对不了（文件 stat 不到、会话解不出）按过期处理，但要说出来：此前这一句被吞成
+                    // 「正在后台生成」，日志里一行不剩。
+                    println!(
+                        "[模型目标核对] 生成根 {} 的目标核对不了，按过期处理: {error:#}",
+                        root.to_pdms_str()
+                    );
+                    false
+                }))
         })
 }
 

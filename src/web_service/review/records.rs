@@ -658,38 +658,66 @@ pub(super) async fn create_record(
     let sync_operator_name = operator_name.clone();
     let sync_role = claims.role.clone().unwrap_or_default();
 
-    match await_review_query(
+    // 语句级失败不再被吞：`await_review_query` 回 Ok 只说明这条查询发出去了，语句自己
+    // 的错误要 `take(0)` 才交出来——旧写法 `unwrap_or_default()` 把它压成空结果，于是
+    // 写冲突一律显示成「数据库未返回确认记录」，真因看不见（RUS-244 驳回前保存就是这么
+    // 丢的）。顺带按 SurrealDB 乐观事务的口径重试冲突：失败的写没有落库，重跑是安全的。
+    let write_outcome = crate::surreal_retry::retry_surreal_write_operation(
         "review.records.write",
-        db.query(write_sql)
-            .bind(("id", record_id.clone()))
-            .bind(("task_id", request.task_id.clone()))
-            .bind(("form_id", form_id))
-            .bind(("type", record_type))
-            .bind(("annotations", request.annotations.clone()))
-            .bind(("cloud_annotations", request.cloud_annotations.clone()))
-            .bind(("rect_annotations", request.rect_annotations.clone()))
-            .bind(("obb_annotations", request.obb_annotations.clone()))
-            .bind(("measurements", request.measurements.clone()))
-            .bind(("dimension_document", request.dimension_document.clone()))
-            .bind((
-                "base_dimension_document_version",
-                base_dimension_document_version,
-            ))
-            .bind((
-                "next_dimension_document_version",
-                next_dimension_document_version,
-            ))
-            .bind(("note", note))
-            .bind(("current_node", current_node))
-            .bind(("operator_id", operator_id))
-            .bind(("operator_name", operator_name))
-            .bind(("slot_key", slot_key))
-            .bind(("snapshot_hash", snapshot_hash)),
+        || {
+            let db = &db;
+            let request = &request;
+            let record_id = record_id.clone();
+            let form_id = form_id.clone();
+            let record_type = record_type.clone();
+            let note = note.clone();
+            let current_node = current_node.clone();
+            let operator_id = operator_id.clone();
+            let operator_name = operator_name.clone();
+            let slot_key = slot_key.clone();
+            let snapshot_hash = snapshot_hash.clone();
+            async move {
+                await_review_query(
+                    "review.records.write",
+                    db.query(write_sql)
+                        .bind(("id", record_id))
+                        .bind(("task_id", request.task_id.clone()))
+                        .bind(("form_id", form_id))
+                        .bind(("type", record_type))
+                        .bind(("annotations", request.annotations.clone()))
+                        .bind(("cloud_annotations", request.cloud_annotations.clone()))
+                        .bind(("rect_annotations", request.rect_annotations.clone()))
+                        .bind(("obb_annotations", request.obb_annotations.clone()))
+                        .bind(("measurements", request.measurements.clone()))
+                        .bind(("dimension_document", request.dimension_document.clone()))
+                        .bind((
+                            "base_dimension_document_version",
+                            base_dimension_document_version,
+                        ))
+                        .bind((
+                            "next_dimension_document_version",
+                            next_dimension_document_version,
+                        ))
+                        .bind(("note", note))
+                        .bind(("current_node", current_node))
+                        .bind(("operator_id", operator_id))
+                        .bind(("operator_name", operator_name))
+                        .bind(("slot_key", slot_key))
+                        .bind(("snapshot_hash", snapshot_hash)),
+                )
+                .await
+                .and_then(|mut response| {
+                    response
+                        .take::<Vec<ReviewRecordRow>>(0)
+                        .map_err(anyhow::Error::from)
+                })
+            }
+        },
     )
-    .await
-    {
-        Ok(mut response) => {
-            let rows: Vec<ReviewRecordRow> = response.take(0).unwrap_or_default();
+    .await;
+
+    match write_outcome {
+        Ok(rows) => {
             if let Some(row) = rows.into_iter().next() {
                 sync_annotation_states_from_snapshot(
                     &sync_form_id,
@@ -1091,6 +1119,34 @@ mod tests {
             .check()
             .expect("删不存在的记录不报错");
         assert_eq!(record_ids(&db).await, vec!["rec-b".to_string()]);
+    }
+
+    /// 保存确认记录走 `CREATE ONLY … RETURN AFTER`，handler 用
+    /// `take::<Vec<ReviewRecordRow>>(0)` 读回写入的那一行。`CREATE ONLY` 回的是**单对象**
+    /// 而不是数组，两者在本仓 2.1.4 fork 下能否对上，决定了「写进去了却报
+    /// 保存失败」这条路存不存在——RUS-244 的 pre_action 保存就挂在这儿。
+    #[tokio::test]
+    async fn create_only_return_after_reads_back_as_rows() {
+        let db = probe_db("records_create_only").await;
+        let mut response = db
+            .query(
+                "CREATE ONLY type::thing('review_records', $id) CONTENT { \
+                 task_id: $task_id, form_id: 'F-1', type: 'batch', annotations: [], \
+                 dimension_document: { documentId: 'doc-1', records: [], schemaVersion: 2 }, \
+                 dimension_document_version: 1, note: 'probe', current_node: 'jd', \
+                 operator_id: 'JH', operator_name: 'JH', slot_key: 'F-1::jd::JH', \
+                 snapshot_hash: 'h', confirmed_at: time::now() } RETURN AFTER",
+            )
+            .bind(("id", "slot-probe"))
+            .bind(("task_id", "task-1"))
+            .await
+            .expect("CREATE ONLY 必须能被本仓解析器接受");
+
+        let rows: Vec<ReviewRecordRow> = response
+            .take(0)
+            .expect("CREATE ONLY 写进去的那一行必须能被 take::<Vec<_>> 读回来");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].dimension_document_version, Some(1));
     }
 
     /// `DELETE /api/review/records/clear-task/{task_id}`：`LET $ids = SELECT VALUE id …; DELETE $ids`

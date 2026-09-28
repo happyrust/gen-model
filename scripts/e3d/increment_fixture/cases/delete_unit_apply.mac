@@ -1,0 +1,12 @@
+ALPHA LOG "{{LOG_PATH}}" OVER
+={{REF:unitdel_eq}}
+Q CE
+Q TYPE
+Q OWNE
+DELETE EQUI
+SAVEWORK 'AIOS fixture delete unit apply'
+ALPHA LOG END
+
+
+
+

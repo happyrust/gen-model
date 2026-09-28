@@ -242,6 +242,11 @@ impl PersistTarget<'_> {
     pub fn medium(&self) -> PersistMedium {
         self.medium
     }
+
+    /// 这个目标写的那个库的句柄（反向传播的反查要拿它读 `tubi_relate` / `inst_relate.anc`，与随后写边的是同一个库）。
+    pub fn db(&self) -> &Surreal<Any> {
+        self.db
+    }
 }
 
 /// 一次落库落了多少行、落在哪。行数口径与旧 `E3dPersistReport` 的 `upserted` 相同：
@@ -580,6 +585,10 @@ pub struct BatchedPersist {
     pub groups: usize,
     /// 随模型行同事务写下的房间归属边数（ADR-073 D1）。
     pub room_edges: usize,
+    /// 房间边直接用回执带来的（bake 时算好，B/T4）的根数。
+    pub room_carried: usize,
+    /// 房间边在 flush 时用投影记录现算（回读 `.mesh`）的根数——回执没带 / 代号不等 / 构件集不等。
+    pub room_recomputed: usize,
     /// 本批真正提交过的最大一笔 SurrealQL 事务字节数。
     pub max_transaction_bytes: usize,
 }
@@ -668,13 +677,57 @@ struct LiveShare<'a> {
     room_statements: String,
     /// 算出来的成员边数（`room_relate`）。
     room_edges: usize,
+    /// 这一根的边是从哪来的（回执带来的 / 这里现算的 / 没算）。
+    room_source: RoomEdgeSource,
 }
 
-/// 房间关卡（ADR-073 D1 / D2）：写库**之前**逐根算房间归属——输入只有该根的内存投影与任务开工时
-/// 冻住的计算器，一句库不读。算不出来（盒子不可用、面板网格不全）的根在这里就剔出本组、带原因
-/// 记进失败名单，房间失败 = 该根失败；其余根照常往下走。与组大小无关：一组一根或一组几百根都是
-/// 同一条路。`rooms` 为 `None`（房间开关关闭，或显式的底层适配器调用）时不算也不写新边，模型根仍
-/// 往下持久化，只由对账那一半清掉被删来源的旧边。
+/// 一根在 [`room_stage`] 里房间边的来源（B/T4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomEdgeSource {
+    /// bake 时算好、随回执带来的（`RootReceipt::room`），三道闸都过了，这里只渲染。
+    Carried,
+    /// 这里用投影记录现算（回执没带 / 代号不等 / 构件集不等）——回读 `.mesh` 取点。
+    Recomputed,
+    /// 没有计算器（房间开关关 / 底层适配器直调）或这一根没有几何：不算也不写新边。
+    NotComputed,
+}
+
+/// 回执带来的边能不能直接用（B/T4 三道闸，纯函数）：`carried.generation` 与此刻计算器代号相等；
+/// `carried.elements` 与本根记录的构件集**相等**（少一个多一个都不行——渲染对 `claimed` 的每个构件先删后插，
+/// 拿只覆盖部分构件的边去渲，没动的构件的边会被删掉而不补；嵌套根共享记录、局部发布后的整根形状都在
+/// 这里被挡下）；都过了 → `Some(边)`，否则 `None`，调用方现算。
+fn carried_edges_for<G: crate::fast_model::room_model::RoomInput>(
+    carried: Option<&crate::fast_model::model_memory_store::CarriedRoomEdges>,
+    resident_generation: &str,
+    claimed: &[G],
+) -> Option<Vec<crate::fast_model::room_model::ElementRoomEdge>> {
+    let carried = carried?;
+    if carried.generation != resident_generation {
+        return None;
+    }
+    let elements: BTreeSet<String> = claimed
+        .iter()
+        .map(|record| record.element().to_string())
+        .collect();
+    let listed: BTreeSet<&str> = carried.elements.iter().map(String::as_str).collect();
+    if elements.len() != listed.len() || !elements.iter().all(|e| listed.contains(e.as_str())) {
+        return None;
+    }
+    Some(
+        carried
+            .edges
+            .iter()
+            .map(crate::fast_model::room_model::ElementRoomEdge::from_carried)
+            .collect(),
+    )
+}
+
+/// 房间关卡（ADR-073 D1 / D2）：写库**之前**逐根拿到房间归属——输入只有该根的内存投影、任务开工时
+/// 冻住的计算器与回执带来的边，一句库不读。回执带了边且三道闸都过（[`carried_edges_for`]）就只渲染
+/// （B/T4：bake 时已算，不再回读 `.mesh`）；否则用投影记录现算。算不出来（盒子不可用、面板网格不全）的
+/// 根在这里就剔出本组、带原因记进失败名单，房间失败 = 该根失败；其余根照常往下走。与组大小无关：
+/// 一组一根或一组几百根都是同一条路。`rooms` 为 `None`（房间开关关闭，或显式的底层适配器调用）时不算
+/// 也不写新边，模型根仍往下持久化，只由对账那一半清掉被删来源的旧边。
 fn room_stage<'a>(
     group: &'a [RootShare],
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
@@ -684,33 +737,47 @@ fn room_stage<'a>(
     for share in group {
         // 每根事务携带自己的全集。祖先根失败后，随后嵌套根仍能独立写下共享记录与房间边。
         let claimed = share.records.clone();
-        let (room_statements, room_edges) = match rooms {
+        let (room_statements, room_edges, room_source) = match rooms {
             Some(calculator) if !claimed.is_empty() => {
-                match calculator.calculate_for_root(&claimed) {
-                    Ok(edges) => (
-                        calculator.render_root_room_edges(&claimed, &edges),
-                        edges.len(),
-                    ),
-                    Err(error) => {
-                        // 这一根一行都不落；同组更晚的根始终携带自己的完整记录。
-                        failed.push((
-                            share.root,
-                            format!(
-                                "room membership of root {} could not be computed: {error:#}",
-                                share.root
-                            ),
-                        ));
-                        continue;
-                    }
-                }
+                let carried = carried_edges_for(
+                    share
+                        .receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.room.as_ref()),
+                    calculator.resident_generation(),
+                    &claimed,
+                );
+                let (edges, source) = match carried {
+                    Some(edges) => (edges, RoomEdgeSource::Carried),
+                    None => match calculator.calculate_for_root(&claimed) {
+                        Ok(edges) => (edges, RoomEdgeSource::Recomputed),
+                        Err(error) => {
+                            // 这一根一行都不落；同组更晚的根始终携带自己的完整记录。
+                            failed.push((
+                                share.root,
+                                format!(
+                                    "room membership of root {} could not be computed: {error:#}",
+                                    share.root
+                                ),
+                            ));
+                            continue;
+                        }
+                    },
+                };
+                (
+                    calculator.render_root_room_edges(&claimed, &edges),
+                    edges.len(),
+                    source,
+                )
             }
-            _ => (String::new(), 0),
+            _ => (String::new(), 0, RoomEdgeSource::NotComputed),
         };
         live.push(LiveShare {
             share,
             claimed,
             room_statements,
             room_edges,
+            room_source,
         });
     }
     (live, failed)
@@ -891,16 +958,97 @@ pub fn frozen_room_calculator()
         return Ok(None);
     }
     let model = crate::fast_model::room_resident::current_for_calculation()?;
-    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir();
     crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir).map(Some)
+}
+
+/// **一任务一台**（ADR-073 D1「任务期间不换代」的字面形态，2026-09-17 B/T1）：dbnum 任务的执行体在
+/// 开工前对齐（D12）之后冻**一次**，显式传给单元工作单 → 生成 → bake，整个任务的每一根都用它；
+/// 此前是 write-behind 每次 flush 各冻一台，任务中途常驻换代（`/model/ensure` 并发对齐）就会让同一任务
+/// 各批根的边不是同一代算的（P2-3 为此打的补丁从此只是富余安全网）。三态各自的处置：
+///
+/// - [`Self::Disabled`]：房间开关关着——模型照常生成、不写新边（与 [`frozen_room_calculator`] 的 `Ok(None)` 同义）。
+/// - [`Self::Frozen`]：冻好的那台，`Arc` 让并行 bake 只读共享；`resident_generation()` 就是本任务的房间代号。
+/// - [`Self::Unavailable`]：冻不出（常驻 `Loading` / `Blocked`）——本任务每一根的房间都算不出来，
+///   D2「房间失败 = 该根失败」在**开工时**就定了：单元工作单入口把全部单元记 Failed、账本记同一句原因，
+///   不再白跑几何等到 flush 才判死。
+#[derive(Clone)]
+pub enum TaskRoomCalculator {
+    Disabled,
+    Frozen(std::sync::Arc<crate::fast_model::room_model::MemoryRoomCalculator>),
+    Unavailable(String),
+}
+
+impl TaskRoomCalculator {
+    /// 冻本任务那一台：[`frozen_room_calculator`] 的三态形。开工前对齐**之后**调（钉 15）。
+    pub fn freeze() -> Self {
+        match frozen_room_calculator() {
+            Ok(None) => Self::Disabled,
+            Ok(Some(calculator)) => Self::Frozen(std::sync::Arc::new(calculator)),
+            Err(error) => Self::Unavailable(format!(
+                "room calculator unavailable for this task: {error:#}"
+            )),
+        }
+    }
+
+    /// 冻好的那台（`Disabled` / `Unavailable` 都是 `None`）。
+    pub fn frozen(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::fast_model::room_model::MemoryRoomCalculator>> {
+        match self {
+            Self::Frozen(calculator) => Some(calculator),
+            Self::Disabled | Self::Unavailable(_) => None,
+        }
+    }
+
+    /// 冻不出时的那句原因；能算（或不用算）是 `None`。
+    pub fn unavailable(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable(reason) => Some(reason),
+            Self::Disabled | Self::Frozen(_) => None,
+        }
+    }
+
+    /// 本任务的房间代号 = 冻好的那台的 `resident_generation()`；`Disabled` / `Unavailable` 没有代号。
+    /// 第三条触发（D13 ③）与定向准入（`room_recompute::durable_alignment` / `scope_for_task`）的「此刻常驻代号」从
+    /// 这里取，不再另读一次生命周期（2026-09-19 H1）：准入链的终点与收尾定向重算用的计算器必须是同一台。
+    pub fn generation(&self) -> Option<&str> {
+        self.frozen().map(|rooms| rooms.resident_generation())
+    }
+}
+
+impl std::fmt::Debug for TaskRoomCalculator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("Disabled"),
+            Self::Frozen(calculator) => f
+                .debug_tuple("Frozen")
+                .field(&calculator.resident_generation())
+                .finish(),
+            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+        }
+    }
 }
 
 /// 一次整库房间边重算的账（[`recompute_dbnum_room_edges`]）。
 #[derive(Debug, Clone, Default)]
 pub struct RoomEdgeRecompute {
-    /// 本库在投影里有回执的根数。
+    /// 这一轮覆盖到的根数（= `covered_roots.len()` = `projected_roots + durable_roots`）。
     pub roots: usize,
-    /// 真重算并重写了边的根数（有几何的、算得出的）。
+    /// 这一轮**覆盖到**的根，按 refno 序：投影里有回执的根 + 调用方点名、不在投影里而从库上读回几何的根。
+    /// 投影只装本进程生成过的根（初始化的模型行不进投影，ADR-077 D5；落盘形态冷重启后是空的），
+    /// 不在投影里的那些由调用方拿 `DbSet@T` 的根清单点名（`library_roots`），这里回读库上的模型行补算；
+    /// 调用方再拿它对 `DbSet@T` 自证覆盖面（`RoomRecomputeVerdict`）。
+    pub covered_roots: Vec<RefNo>,
+    /// 投影里有回执的根数。
+    pub projected_roots: usize,
+    /// 点名了、不在投影里、从库上读回几何的根数（含读回来一行几何都没有的）。
+    pub durable_roots: usize,
+    /// 从库上读回的几何条数（`inst_relate` / `tubi_relate` 行里的实例）。
+    pub durable_records: usize,
+    /// 回读库上几何花的时间（含在 `elapsed_ms` 里）。
+    pub durable_read_ms: u128,
+    /// 真重算并重写了边的根数（有几何的、算得出的；两种来源合计）。
     pub recomputed: usize,
     /// 重写出的成员边数（`room_relate`）。
     pub room_edges: usize,
@@ -908,31 +1056,118 @@ pub struct RoomEdgeRecompute {
     pub max_transaction_bytes: usize,
     /// 算不出归属的根与原因：边原样留着（陈旧可恢复），调用方按 D2 记失败。
     pub failed: Vec<(RefNo, String)>,
-    /// 房间代号对齐到本台计算器的 ACK 数。
+    /// 房间代号对齐到本台计算器的 ACK 数：重算了的根 + 投影里一条几何都没有的根（没有边可陈旧，代号照样对齐——
+    /// 否则它永远挂着旧代号，F3 每个任务都会再点名一次、读侧一票否决它）。
     pub acks_refreshed: usize,
-    /// `roots` 里**不在 overlay 里**、几何行从库里读回来算的根数（d-149：按根数上限逐出过的、
-    /// 进程重启后没回填的——两种冷根同一个形态）。它们没有进程内 ACK 可对齐，不计入 `acks_refreshed`。
-    pub cold_roots: usize,
+    /// 面板级处置语句数（[`RootScope::Targeted`] 的 `panel_statements`：不在册清边 / 只改号改列），进第一笔。
+    pub panel_statements: usize,
     pub elapsed_ms: u128,
+}
+
+/// [`recompute_dbnum_room_edges`] 的根范围（ADR-073 D13）。
+#[derive(Debug, Clone, Copy)]
+pub enum RootScope<'a> {
+    /// 整库：投影里本库有回执的根 + `library_roots` 里不在投影里的根（回读库上几何）。
+    All,
+    /// 反向传播命中的根（`room_reverse::AffectedRoots::roots`，2026-09-17；加上停放链折出的、准入时点名的 ACK 代号不在
+    /// 链上的——F3 2026-09-19）：投影里的按集合筛、集合里不在投影里的
+    /// 回读库；`library_roots` 不看（命中的根本就来自它）。`panel_statements` 是面板级的处置
+    /// （[`render_panel_delta_statements`]：不在册清边 / 只改号改列；[`render_recalc_panel_topology_statements`]：
+    /// 要反查的面板自己的 `room_panel_relate`），作 **epilogue 进最后一笔**事务（2026-09-19 F1）：命中的每一根都重写
+    /// 之后才删面板级的边——不在册面板名下的成员边正是下一个任务重走同一段时 `room_reverse::durable_panel_members`
+    /// 要取的证据，装在第一笔的话中途一笔写库失败（`Failed`、不盖、下一个任务沿账本**仍是定向**）就把证据先销毁了，
+    /// 那些成员该落到别的房间也没人算。三类语句与逐根块的先后无关：重算的根不会插向不在册面板的边、改号 UPDATE
+    /// 幂等、面板拓扑边按面板先删后插。
+    Targeted {
+        roots: &'a [RefNo],
+        panel_statements: &'a str,
+    },
+}
+
+/// 面板级的两类处置渲成语句（ADR-073 D13 反查，2026-09-17）：不在册的面板清它全部出边（它名下的成员，
+/// `{panel}->room_relate`）与指向它的 `room_panel_relate` 入边；只改房间号的房间对交集里的面板改列
+/// （`room_resident::render_renumber_statements`）。**不查空间、不算几何**——这两类与成员的几何无关。
+/// 每句以 `;\n` 收尾，直接当 [`RootScope::Targeted::panel_statements`]。要反查的那一类（`recalc`）不在这里：
+/// 它们的处置是命中根的逐根重算。
+pub(crate) fn render_panel_delta_statements(
+    delta: &crate::fast_model::room_resident::PanelDelta,
+) -> String {
+    let mut out = String::new();
+    // 两个渲染器一个带句尾分号一个不带；这里统一成「一句一个 `;\n`」。
+    let mut push = |statement: &str| {
+        out.push_str(statement.trim_end().trim_end_matches(';'));
+        out.push_str(";\n");
+    };
+    for panel in &delta.removed {
+        for statement in crate::fast_model::room_model::render_unregistered_panel_statements(*panel)
+        {
+            push(&statement);
+        }
+    }
+    for renumber in &delta.renumbered {
+        for statement in crate::fast_model::room_resident::render_renumber_statements(renumber) {
+            push(&statement);
+        }
+    }
+    out
+}
+
+/// 要反查的那一类面板（`PanelDelta::recalc`：新在册 / 换了房 / 几何变了）**自己的** `room_panel_relate`
+/// （F2，2026-09-19）。逐根路径只在面板所在的根被重算时写这一句（[`MemoryRoomCalculator::render_root_room_edges`]
+/// 对面板元素），而定向命中的是**成员**的根——面板自己的根多半不在集合里（PANE 从树命中里剔掉、它的兄弟元素也不一定
+/// 在盒里）：FRMW / SBFR 改名进关键字（NAME 是元数据、根不重生成）→ 面板新在册 → 成员的 `room_relate` 齐了，
+/// 「房间 → 面板」那一半却一条没有；换了房同理（旧边留着、新边没有）。整库路与从零初始化都写，「两张边 == 从零初始化」
+/// 在第二张表上就此不成立。按本任务计算器的在册视图（= 准入链尾那一代）渲：在册 = 先删后插，不在册 = 只删；链上多段
+/// 点到同一块只渲一次（面板 refno 序、去重）。每句 `;\n` 收尾，拼在 [`render_panel_delta_statements`] 之后同进最后一笔。
+///
+/// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
+pub(crate) fn render_recalc_panel_topology_statements(
+    rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+    recalc_panels: impl IntoIterator<Item = aios_core::RefnoEnum>,
+) -> String {
+    let mut panels: Vec<aios_core::RefnoEnum> = recalc_panels.into_iter().collect();
+    panels.sort();
+    panels.dedup();
+    let mut out = String::new();
+    for panel in panels {
+        for statement in rooms.render_panel_topology_statements(panel) {
+            out.push_str(statement.trim_end().trim_end_matches(';'));
+            out.push_str(";\n");
+        }
+    }
+    out
 }
 
 /// 用本库全部根的**现有几何**重算两张房间边（`RoomOnly`，d-819 / ADR-073 D13）。
 ///
-/// 根的全集 = overlay 里有回执的根 ∪ `library_roots`（调用方从源文件枚举出的本库生成根——
-/// 与从零初始化 `initialization_roots` 同一份，d-149 2026-09-20 改口）。在 overlay 里的根拿它在
-/// 投影里的记录；**不在**的（按根数上限逐出过、进程重启后没回填）把库里的几何行读回来
-/// （[`crate::fast_model::model_record_reader::durable_room_records_of_root`]，与读路的冷读同一条 SQL），
-/// 两种来源都 → [`MemoryRoomCalculator::calculate_for_root`] → [`MemoryRoomCalculator::render_root_room_edges`]
+/// 不重生几何、不动模型行、不动空间树：每个有回执的根拿它在投影里的记录
+/// → [`MemoryRoomCalculator::calculate_for_root`] → [`MemoryRoomCalculator::render_root_room_edges`]
 /// （按构件先删后插，缺几何面板的边受保护，D9），按 [`PERSIST_CHUNK`] 装块、一串事务提交
 /// ——与逐根路径同一套渲染，所以「整库重算 == 从零初始化」逐边相等的硬验收（ADR-010 §9）
-/// 不多一条口径，overlay 逐出之后也仍成立。不重生几何、不动模型行、不动空间树。没有几何的根跳过
-/// （它的边由对账删除那一半清过了）；算不出的根边原样留、进 `failed`，同批其余根照常。提交全过后把
-/// overlay 里这些根 ACK 的 `room_generation` 对齐到本台计算器（只改这一格，几何身份不动），
-/// `e3d.room.lookup` 对它们重新回 `ready`；冷根没有进程内 ACK，读路对它们本来就直读库。
+/// 不多一条口径。没有几何的根跳过（它的边由对账删除那一半清过了）；算不出的根边原样留、
+/// 进 `failed`，同批其余根照常。提交全过后把这些根 ACK 的 `room_generation` 对齐到本台计算器
+/// （只改这一格，几何身份不动），`e3d.room.lookup` 对它们重新回 `ready`。
 ///
-/// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——那一刻本库
-/// 没有第二个写者。`library_roots` 给空就是只算 overlay 里的（今天之前的口径）：冷根一根不算、
-/// 也不报错——**整库**的承诺由调用方枚举根集来兑现。
+/// **不在投影里的根回读库上几何**（U1 第二半，2026-09-17）：投影只装本进程生成过的根——初始化的模型行
+/// 不进投影（ADR-077 D5）、落盘形态冷重启后投影是空的——`library_roots` 是调用方拿 `DbSet@T` 枚举出的
+/// 本库全部根（`None` = 枚举不出来，只算投影）；其中投影里没有回执的，逐根经
+/// `model_record_reader::durable_records_of_root` 读回库上的 `inst_relate` / `tubi_relate` 行、折成
+/// `room_model::durable_room_inputs`，走**同一个** `calculate_for_root` / `render_root_room_edges`：
+/// 语句形状与逐根落库逐字相同。读回一行几何都没有的根（从没生成过 / 没有几何）与投影里没记录的根同一
+/// 处置——跳过、算覆盖到（它没有边可陈旧）。这些根没有进程内 ACK，它们的就绪由 durable 侧 D14 那一格
+/// 作答（调用方按 `WholeLibrary` 盖上）。回读一根失败（库读不出）整轮 `Err`，与写库失败同一处置。
+///
+/// 调用时机归调用方守：本批根**刷盘之后**（durable ACK 齐了）、任务收尾之前——本任务的根都已
+/// 落库；同库别的根（`/model/ensure` 按需生成的）可能仍在 write-behind 队列里，两边对同一构件都是
+/// 先删后插、同一台计算器下幂等，后写的那份与先写的逐字相同。回读库上几何的那些根同理：读的是
+/// 此刻已落库的行。
+///
+/// 回执里的 [`RoomEdgeRecompute::covered_roots`] 就是这一轮算过的全部根（投影里的 + 点名回读的）；它是不是
+/// 本库的全部根，仍由调用方对 `DbSet@T` 的根清单判——这里不枚举文件。
+///
+/// **定向**（[`RootScope::Targeted`]，反向传播，2026-09-17）：根集换成反查命中的那几根——投影里的按集合筛、
+/// 集合里不在投影里的回读库——其余一字不改：同一个判定入口、同一套渲染、同一种装块，多的只是最后一笔事务末尾
+/// 的面板级处置语句（不在册清边 / 只改号改列 / 要反查的面板自己的拓扑边；F1 2026-09-19 从第一笔挪到最后一笔）。
 ///
 /// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
 /// [`MemoryRoomCalculator::render_root_room_edges`]: crate::fast_model::room_model::MemoryRoomCalculator::render_root_room_edges
@@ -940,67 +1175,141 @@ pub async fn recompute_dbnum_room_edges(
     target: PersistTarget<'_>,
     store: &ModelMemoryStore,
     dbnum: u32,
-    library_roots: &[RefNo],
     rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+    library_roots: Option<&[RefNo]>,
+    root_scope: RootScope<'_>,
 ) -> anyhow::Result<RoomEdgeRecompute> {
     let started = std::time::Instant::now();
     let scope = ProjectionScope::Current;
-    // (根, 在 overlay 里吗)：常驻的先、冷根后，各自去重；不属于本库的库根不收。
-    let mut seen = std::collections::BTreeSet::<i64>::new();
-    let mut roots: Vec<(RefNo, bool)> = Vec::new();
-    for root in store.roots(scope) {
+    // 定向：命中集合（打包 refno）+ 面板级语句（进最后一笔）；整库：`None`、空。
+    let (targeted, panel_statements): (Option<BTreeSet<i64>>, &str) = match root_scope {
+        RootScope::All => (None, ""),
+        RootScope::Targeted {
+            roots,
+            panel_statements,
+        } => (
+            Some(roots.iter().map(|root| packed_refno(*root)).collect()),
+            panel_statements,
+        ),
+    };
+    let projected: Vec<RefNo> = store
+        .roots(scope)
+        .into_iter()
+        .filter(|root| root.dbno() == dbnum && store.receipt(scope, *root).is_some())
+        .filter(|root| {
+            targeted
+                .as_ref()
+                .is_none_or(|targeted| targeted.contains(&packed_refno(*root)))
+        })
+        .collect();
+    let projected_set: BTreeSet<i64> = projected.iter().map(|root| packed_refno(*root)).collect();
+    // 点名的、不在投影里的根：去重、只认本库的、按 refno 序。整库点名的是 `DbSet@T` 的清单，定向点名的是命中集合。
+    let named_roots: &[RefNo] = match root_scope {
+        RootScope::All => library_roots.unwrap_or_default(),
+        RootScope::Targeted { roots, .. } => roots,
+    };
+    let mut durable: Vec<RefNo> = Vec::new();
+    let mut named = BTreeSet::new();
+    for root in named_roots {
         if root.dbno() == dbnum
-            && store.receipt(scope, root).is_some()
-            && seen.insert(packed_refno(root))
+            && !projected_set.contains(&packed_refno(*root))
+            && named.insert(packed_refno(*root))
         {
-            roots.push((root, true));
+            durable.push(*root);
         }
     }
-    for root in library_roots {
-        if root.dbno() == dbnum && seen.insert(packed_refno(*root)) {
-            roots.push((*root, false));
-        }
-    }
+    durable.sort_by_key(|root| packed_refno(*root));
+    let mut covered_roots: Vec<RefNo> = projected.iter().chain(durable.iter()).copied().collect();
+    covered_roots.sort_by_key(|root| packed_refno(*root));
     let mut out = RoomEdgeRecompute {
-        roots: roots.len(),
-        cold_roots: roots.iter().filter(|(_, resident)| !resident).count(),
+        roots: covered_roots.len(),
+        covered_roots,
+        projected_roots: projected.len(),
+        durable_roots: durable.len(),
+        panel_statements: panel_statements.matches(";\n").count(),
         ..Default::default()
     };
     let mut pieces: Vec<(usize, String)> = Vec::new();
     let mut recomputed = Vec::new();
-    for (root, resident) in &roots {
-        let records = if *resident {
-            store.records_of_root(scope, *root)
-        } else {
-            crate::fast_model::model_record_reader::durable_room_records_of_root(target.db, *root)
-                .await?
-        };
-        if records.is_empty() {
-            continue;
-        }
-        match rooms.calculate_for_root(&records) {
+    // 投影里一条几何都没有的根（空根 / 几何全删了）：没有边可陈旧、什么都不写，ACK 的房间代号照样对齐到本台——
+    // 否则它永远挂着旧代号，F3 每个任务都会再点名一次、读侧一票否决它（2026-09-19）。
+    let mut empty_projected = Vec::new();
+    // 两种来源共用一段：算得出 → 渲成这一根的语句块（装块按构件数：一构件一句 DELETE、成员边一句
+    // INSERT，不按几何条数）；算不出 → 进 `failed`，边原样留。
+    fn recompute_root<G: crate::fast_model::room_model::RoomInput>(
+        rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+        root: RefNo,
+        records: &[G],
+        out: &mut RoomEdgeRecompute,
+        pieces: &mut Vec<(usize, String)>,
+        recomputed: &mut Vec<RefNo>,
+    ) {
+        match rooms.calculate_for_root(records) {
             Ok(edges) => {
                 out.room_edges += edges.len();
-                // 装块按构件数（一构件一句 DELETE、成员边一句 INSERT），不按几何条数。
-                pieces.push((
-                    records.len(),
-                    rooms.render_root_room_edges(&records, &edges),
-                ));
-                recomputed.push(*root);
+                pieces.push((records.len(), rooms.render_root_room_edges(records, &edges)));
+                recomputed.push(root);
             }
             Err(error) => out.failed.push((
-                *root,
+                root,
                 format!("room membership of root {root} could not be recomputed: {error:#}"),
             )),
         }
     }
-    let transactions = pack_publication_transactions("", &pieces, "", false);
+    for root in &projected {
+        let records = store.records_of_root(scope, *root);
+        if records.is_empty() {
+            empty_projected.push(*root);
+            continue;
+        }
+        recompute_root(
+            rooms,
+            *root,
+            &records,
+            &mut out,
+            &mut pieces,
+            &mut recomputed,
+        );
+    }
+    let mut durable_read = Duration::ZERO;
+    for root in &durable {
+        let read_started = Instant::now();
+        let rows = crate::fast_model::model_record_reader::durable_records_of_root(
+            target.db,
+            refno_from_e3d(*root),
+        )
+        .await
+        .with_context(|| {
+            format!("reading the durable geometry of root {root} for the room recompute")
+        })?;
+        durable_read += read_started.elapsed();
+        let records = crate::fast_model::room_model::durable_room_inputs(&rows);
+        out.durable_records += records.len();
+        if records.is_empty() {
+            continue;
+        }
+        recompute_root(
+            rooms,
+            *root,
+            &records,
+            &mut out,
+            &mut pieces,
+            &mut recomputed,
+        );
+    }
+    out.durable_read_ms = durable_read.as_millis();
+    // 面板级处置（定向才有）作 epilogue 进**最后一笔**（F1，2026-09-19）：命中的每一根都重写之后才删面板级的边。
+    // 中途一笔写库失败留下的是「重算了、面板级还没删」的多算形状，不在册面板名下的成员边（下一个任务重走同一段时
+    // `durable_panel_members` 的证据）还在；装第一笔的话失败之后那些成员就没人找得到了（`Failed` 不盖，
+    // 下一个任务沿账本仍是定向，不是整库）。
+    let transactions = pack_publication_transactions("", &pieces, panel_statements, false);
     for statements in &transactions {
         out.max_transaction_bytes = out.max_transaction_bytes.max(statements.len());
         commit_publication_transaction(target.db, statements, "room membership recompute").await?;
         out.commits += 1;
     }
-    for root in &recomputed {
+    // 只有投影里的根有进程内 ACK 可对齐；回读库的那些根没有 ACK，就绪由 D14 那一格作答。空根一并对齐（见上）。
+    for root in recomputed.iter().chain(&empty_projected) {
         if let Some(mut ack) = store.publication_ack(scope, *root) {
             ack.room_membership = true;
             ack.room_generation = Some(rooms.resident_generation().to_string());
@@ -1012,6 +1321,143 @@ pub async fn recompute_dbnum_room_edges(
     out.recomputed = recomputed.len();
     out.elapsed_ms = started.elapsed().as_millis();
     Ok(out)
+}
+
+/// 库上 D14 那一格与 F3 落库那一格（`dbnum_watermark.model_room_generation` / `model_room_stray_generations`）：
+/// 生产库走水位镜像（`DbnumState::read`，与 `model_coverage::library_credential_on` 同一条路），旁路连接 / 测试夹具
+/// 直接点读那一行。`None` = 没有水位行。
+async fn room_alignment_row_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<Option<(Option<String>, Vec<String>)>> {
+    if std::ptr::eq(db, &*aios_core::SUL_DB) {
+        return Ok(crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+            .await?
+            .map(|state| {
+                (
+                    state.model_room_generation,
+                    state.model_room_stray_generations,
+                )
+            }));
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(default)]
+        model_room_generation: Option<String>,
+        #[serde(default)]
+        model_room_stray_generations: Option<Vec<String>>,
+    }
+    let row: Option<Row> = db
+        .query(format!(
+            "SELECT model_room_generation, model_room_stray_generations FROM ONLY dbnum_watermark:{dbnum};"
+        ))
+        .await?
+        .check()?
+        .take(0)?;
+    Ok(row.map(|row| {
+        (
+            row.model_room_generation,
+            row.model_room_stray_generations.unwrap_or_default(),
+        )
+    }))
+}
+
+/// F3 落库（ADR-073 D14 追记，2026-09-19）：本批按 `generation` 这一代写边，库上盖章的却是另一代——把这一代记进水位行的
+/// `model_room_stray_generations`，随本组的行**同一笔事务**提交（[`persist_group`] 的 epilogue）。它替**重启后丢了进程内 ACK**
+/// 的那几根说话：库上 == 常驻、③ 不欠、账本没段，而这一格非空 = 有根的边是另一代算的，下一个任务欠一次
+/// （`room_recompute::DurableAlignment::owed`）；盖章（`Aligned` / `Cleared`）时清空。
+///
+/// 不写的几种：没有水位行、库上从没盖过（`None`——③ 本来就欠着、整库一次就盖上）、与盖章同代（稳态）、这一格已含这一代
+/// （每 (库, 代) 只写一次，不靠进程内去重——那一格被盖章清掉之后再按这一代写就得再记）。读不出水位行只 warn、不写：
+/// 读错不是「没欠」的证据，但也不能凭它写一格说不清的东西。
+async fn stray_room_generation_statement(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    generation: &str,
+) -> String {
+    let (library, stray) = match room_alignment_row_on(db, dbnum).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return String::new(),
+        Err(error) => {
+            log::warn!(
+                "dbnum={dbnum} 读不出水位行上的房间对齐代号，这一批按 {} 写的边不记进 model_room_stray_generations: {error:#}",
+                generation.chars().take(12).collect::<String>()
+            );
+            return String::new();
+        }
+    };
+    let Some(library) = library else {
+        return String::new();
+    };
+    if library == generation || stray.iter().any(|recorded| recorded == generation) {
+        return String::new();
+    }
+    // `array::union` 而不是 `+`：这一版 SurrealDB 不给数组做加法（"Cannot perform addition with '[]' and '[…]'"）。
+    format!(
+        "UPDATE dbnum_watermark:{dbnum} SET model_room_stray_generations = \
+         array::union(model_room_stray_generations ?? [], ['{}']);\n",
+        escape_surql_str(generation)
+    )
+}
+
+/// 带着 [`stray_room_generation_statement`] 的那一组提交成功之后：水位镜像那一格作废，下一次读回填（生产库才有镜像；
+/// 旁路连接 / 测试夹具不影响主库镜像——`invalidate_mirrored_on` 自己判）。空 epilogue = 这一批没写那一格，不动镜像。
+/// 那一句随本组提交成功之后的两件事：作废水位镜像（那一格变了）；在投影上记下「本进程这一世按这一代写过这一格」
+/// （`ModelMemoryStore::note_stray_generation_written`，F3 落库收口 2026-09-19 晚）——准入据此分辨那一格里哪些代号的根
+/// 在投影里有 ACK 可点名、哪些是重启前那一世写的（点不到，整库）。这不是 ACK 状态：`persist_roots_batched_unacked`
+/// 那道缝「不动进程内 ACK」照旧成立；这一笔说的是那一格写过什么，与那一句 UPDATE 同时成立、同时随重启消失。
+fn note_stray_generation_written(
+    db: &Surreal<Any>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+    stray_epilogue: &str,
+) {
+    if stray_epilogue.is_empty() {
+        return;
+    }
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
+    if let Some(rooms) = rooms {
+        store.note_stray_generation_written(dbnum, rooms.resident_generation());
+    }
+}
+
+/// 定向重算成功盖章那一刻（`batch_worker::run_targeted_room_recompute`，F3 2026-09-19）：投影里本库 ACK 房间代号在准入链上
+/// 任一代（`on_chain`）、又不是链尾那一代的根，代号一并对齐到链尾 `generation`——它那一代到链尾之间面板动了什么链上各段都
+/// 反查过、没命中就是边没变，与库上那一格「整库对齐到这一代」是同一句话的逐根形态。链外的代号**不动**：那是盖章之后中间
+/// 那一代写的（`/model/ensure` 在空段那一代生成的根），正是下一个任务要点名、读侧要一票否决的证据；没算房间的
+/// （`room_membership = false`）同样不动。候选前移了的（回执与 ACK 对不上）`record_publication_ack` 拒收，由它自己的刷盘另记。
+/// 只改代号那一格，几何身份不动。返回对齐了几根。
+pub fn align_room_acks_along_chain(
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    on_chain: &BTreeSet<String>,
+    generation: &str,
+) -> usize {
+    let scope = ProjectionScope::Current;
+    let mut aligned = 0;
+    for root in store.roots(scope) {
+        if root.dbno() != dbnum {
+            continue;
+        }
+        let Some(mut ack) = store.publication_ack(scope, root) else {
+            continue;
+        };
+        if ack.dbnum != dbnum || !ack.room_membership {
+            continue;
+        }
+        let Some(current) = ack.room_generation.as_deref() else {
+            continue;
+        };
+        if current == generation || !on_chain.contains(current) {
+            continue;
+        }
+        ack.room_generation = Some(generation.to_owned());
+        if store.record_publication_ack(scope, root, ack) {
+            aligned += 1;
+        }
+    }
+    aligned
 }
 
 /// 任务准入时冻结的 resident generation；房间开关关闭时没有这道完成要求。
@@ -1093,18 +1539,30 @@ async fn persist_roots_batched_unacked_impl(
     let mut boxes_all = Vec::<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>::new();
     let mut cleared_all = Vec::<aios_core::RefnoEnum>::new();
 
+    // F3 落库（ADR-073 D14 追记，2026-09-19）：本批按 `rooms` 这一代写边，而库上盖章的是另一代——这一代记进
+    // `dbnum_watermark.model_room_stray_generations`，与各组的行同一笔事务；库上已含这一代 / 与盖章同代 / 从没盖过
+    // （③ 本来就欠着）都不写。稳态一个字都不写。
+    let stray_epilogue = match rooms {
+        Some(rooms) => {
+            stray_room_generation_statement(db, dbnum, rooms.resident_generation()).await
+        }
+        None => String::new(),
+    };
+
     // 多写者（`AIOS_MODEL_PERSIST_WRITERS` > 1）：每根一个写者、并发提交，不合块、不二分。
     // 单写者走下面原来的 512 根合块 + 二分重试那一路，行为不变。
     let writers = persist_writers();
     let concurrent_groups = if writers > 1 {
         persist_shares_concurrently(
             db,
+            store,
             dbnum,
             target.medium,
             rooms,
             record_ledger,
             &shares,
             writers,
+            &stray_epilogue,
             &mut total,
             &mut out,
             &mut refresh_all,
@@ -1131,20 +1589,23 @@ async fn persist_roots_batched_unacked_impl(
         // 正常路径把最多 512 根合进同一笔原子事务，避免大库退化成几万次网络往返。
         // 若 SQL 硬上限、数据事件或传输错误让整组失败，事务本身零提交；随后二分重试，
         // 直到定位到单根。于是成功路径保留合块吞吐，异常路径仍以根为赔付边界。
-        match persist_group(db, &live).await {
-            Ok(outcome) => accept_group_outcome(
-                &live,
-                dbnum,
-                target.medium,
-                rooms,
-                record_ledger,
-                outcome,
-                &mut total,
-                &mut out,
-                &mut refresh_all,
-                &mut boxes_all,
-                &mut cleared_all,
-            ),
+        match persist_group(db, &live, &stray_epilogue).await {
+            Ok(outcome) => {
+                accept_group_outcome(
+                    &live,
+                    dbnum,
+                    target.medium,
+                    rooms,
+                    record_ledger,
+                    outcome,
+                    &mut total,
+                    &mut out,
+                    &mut refresh_all,
+                    &mut boxes_all,
+                    &mut cleared_all,
+                );
+                note_stray_generation_written(db, store, dbnum, rooms, &stray_epilogue);
+            }
             Err(error) if live.len() == 1 => {
                 out.push_failure(
                     live[0].share.root,
@@ -1163,20 +1624,23 @@ async fn persist_roots_batched_unacked_impl(
                 retries.push_back((middle, live.len()));
                 while let Some((start, end)) = retries.pop_front() {
                     let retry = &live[start..end];
-                    match persist_group(db, retry).await {
-                        Ok(outcome) => accept_group_outcome(
-                            retry,
-                            dbnum,
-                            target.medium,
-                            rooms,
-                            record_ledger,
-                            outcome,
-                            &mut total,
-                            &mut out,
-                            &mut refresh_all,
-                            &mut boxes_all,
-                            &mut cleared_all,
-                        ),
+                    match persist_group(db, retry, &stray_epilogue).await {
+                        Ok(outcome) => {
+                            accept_group_outcome(
+                                retry,
+                                dbnum,
+                                target.medium,
+                                rooms,
+                                record_ledger,
+                                outcome,
+                                &mut total,
+                                &mut out,
+                                &mut refresh_all,
+                                &mut boxes_all,
+                                &mut cleared_all,
+                            );
+                            note_stray_generation_written(db, store, dbnum, rooms, &stray_epilogue);
+                        }
                         Err(error) if retry.len() == 1 => {
                             out.push_failure(
                                 retry[0].share.root,
@@ -1221,6 +1685,9 @@ struct GroupOutcome {
     commits: usize,
     /// 随模型行同事务写下的房间归属边数。
     room_edges: usize,
+    /// 边直接用回执带来的根数 / flush 现算的根数（B/T4）。
+    room_carried: usize,
+    room_recomputed: usize,
     max_transaction_bytes: usize,
     /// 写了新几何的来源（隐式管身不算）。
     refresh: Vec<aios_core::RefnoEnum>,
@@ -1242,12 +1709,14 @@ struct GroupOutcome {
 #[allow(clippy::too_many_arguments)]
 async fn persist_shares_concurrently(
     db: &Surreal<Any>,
+    store: &ModelMemoryStore,
     dbnum: u32,
     medium: PersistMedium,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
     record_ledger: bool,
     shares: &[RootShare],
     writers: usize,
+    stray_epilogue: &str,
     total: &mut PersistedRows,
     out: &mut BatchedPersist,
     refresh_all: &mut Vec<aios_core::RefnoEnum>,
@@ -1274,7 +1743,7 @@ async fn persist_shares_concurrently(
     let mut pending = Vec::with_capacity(live.len());
     for (index, one) in live.iter().enumerate() {
         pending.push(async move {
-            let outcome = persist_group(db, std::slice::from_ref(one)).await;
+            let outcome = persist_group(db, std::slice::from_ref(one), stray_epilogue).await;
             (index, outcome)
         });
     }
@@ -1283,19 +1752,22 @@ async fn persist_shares_concurrently(
         out.groups += 1;
         let one = &live[index..index + 1];
         match outcome {
-            Ok(outcome) => accept_group_outcome(
-                one,
-                dbnum,
-                medium,
-                rooms,
-                record_ledger,
-                outcome,
-                total,
-                out,
-                refresh_all,
-                boxes_all,
-                cleared_all,
-            ),
+            Ok(outcome) => {
+                accept_group_outcome(
+                    one,
+                    dbnum,
+                    medium,
+                    rooms,
+                    record_ledger,
+                    outcome,
+                    total,
+                    out,
+                    refresh_all,
+                    boxes_all,
+                    cleared_all,
+                );
+                note_stray_generation_written(db, store, dbnum, rooms, stray_epilogue);
+            }
             Err(error) => out.push_failure(
                 one[0].share.root,
                 publication_failure_kind(&error),
@@ -1347,6 +1819,8 @@ fn accept_group_outcome(
     total.receipts += outcome.receipts;
     total.commits += outcome.commits;
     out.room_edges += outcome.room_edges;
+    out.room_carried += outcome.room_carried;
+    out.room_recomputed += outcome.room_recomputed;
     out.max_transaction_bytes = out.max_transaction_bytes.max(outcome.max_transaction_bytes);
     refresh_all.extend(outcome.refresh);
     boxes_all.extend(outcome.boxes);
@@ -1378,9 +1852,12 @@ fn publication_failure_kind(error: &anyhow::Error) -> PersistFailureKind {
 
 /// 一组过了房间关卡的根：渲一笔、发一笔。失败即返回 Err，调用方把这一组记成失败。
 /// 每根的顺序：最终几何 → 房间归属 → 同事务写模型行与房间边（回执不落库，ADR-079）。
+/// `epilogue` 是调用方要随本组**最后一笔**一起提交的语句（[`stray_room_generation_statement`]：本组按另一代写边时
+/// 在水位行上记一笔，F3 落库）；本组一条几何都没有（只有回执没有几何的根）时不带——没有边可陈旧，不必记。
 async fn persist_group(
     db: &Surreal<Any>,
     group: &[LiveShare<'_>],
+    epilogue: &str,
 ) -> anyhow::Result<GroupOutcome> {
     // 本根要渲的完整记录；跨根重复由数据库幂等语义收敛。
     let records = group
@@ -1476,21 +1953,37 @@ async fn persist_group(
         .filter(|live| live.share.receipt.is_some())
         .count();
 
-    // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份）。
+    // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份），以及边是带来的还是现算的。
     let room_edge_count = group.iter().map(|live| live.room_edges).sum::<usize>();
+    let room_carried = group
+        .iter()
+        .filter(|live| live.room_source == RoomEdgeSource::Carried)
+        .count();
+    let room_recomputed = group
+        .iter()
+        .filter(|live| live.room_source == RoomEdgeSource::Recomputed)
+        .count();
 
     // **一组一串事务，按条数装块。** 删整片与清边进第一笔；中途崩就是「有行没账」，那几根
     // 下一轮重新生成、重新整片删，自愈。完成与否不看某一笔，看水位（任务收尾只在这个库一根
     // 不剩时才推进 `dbnum_watermark.model_sesno`）。
     let mut prelude = String::new();
+    // 整片删排在分支重置**之前**：它靠 `tubi_relate` 行上的 `aabb` / `world_trans` 指针去删
+    // 管身的盒与变换，重置先把关系行删光的话，它读到的就是空集（管身的盒与变换按身份做键、
+    // 插入又是 `INSERT IGNORE`，没删掉就等于把第一次发布的几何永久钉在那条槽位上）。
+    prelude.push_str(&render_slice_delete(&sliced_roots));
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 本轮要插的管身按身份再删一遍盒 / 变换：重置只捞得到还有关系行指着的，没人指着的
+    // 孤儿（身份消失过又建回来）只有这一句够得着（见 [`render_tube_identity_sweep`]）。
+    prelude.push_str(&render_tube_identity_sweep(&records)?);
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
-    let transactions = pack_publication_transactions(&prelude, &pieces, "", touches_geometry);
+    // F3 落库那一句（调用方给的 epilogue）随本组最后一笔；一条几何都没有的组不带——没有边可陈旧。
+    let epilogue = if pieces.is_empty() { "" } else { epilogue };
+    let transactions = pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry);
     if transactions.is_empty() {
         return Ok(GroupOutcome {
             upserted: 0,
@@ -1498,6 +1991,8 @@ async fn persist_group(
             receipts: receipted,
             commits: 0,
             room_edges: 0,
+            room_carried: 0,
+            room_recomputed: 0,
             max_transaction_bytes: 0,
             refresh: Vec::new(),
             boxes: Vec::new(),
@@ -1548,6 +2043,8 @@ async fn persist_group(
         receipts: receipted,
         commits,
         room_edges: room_edge_count,
+        room_carried,
+        room_recomputed,
         max_transaction_bytes,
         refresh: deferred_refresh,
         boxes: tree_boxes,
@@ -1718,10 +2215,16 @@ async fn persist_root_impl(
     let pieces = render_record_chunks(&records, mode, &mut tube_slots)?;
 
     let mut prelude = String::new();
+    // 整片删排在分支重置**之前**：它靠 `tubi_relate` 行上的 `aabb` / `world_trans` 指针去删
+    // 管身的盒与变换，重置先把关系行删光的话，它读到的就是空集（管身的盒与变换按身份做键、
+    // 插入又是 `INSERT IGNORE`，没删掉就等于把第一次发布的几何永久钉在那条槽位上）。
+    prelude.push_str(&render_slice_delete(&sliced_roots));
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
-    prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 本轮要插的管身按身份再删一遍盒 / 变换：重置只捞得到还有关系行指着的，没人指着的
+    // 孤儿（身份消失过又建回来）只有这一句够得着（见 [`render_tube_identity_sweep`]）。
+    prelude.push_str(&render_tube_identity_sweep(&records)?);
     // 清边跟着删几何走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
     prelude.push_str(&render_room_edge_clear(&cleared_room_edges));
     let touches_geometry = !pieces.is_empty() || !sliced_roots.is_empty() || !branches.is_empty();
@@ -1956,6 +2459,7 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
         .map(|record| record.source_refno)
         .collect::<Vec<_>>();
     statements.push_str(&render_tube_branch_resets(&branches));
+    statements.push_str(&render_tube_identity_sweep(&records)?);
     statements.push_str(&render_records(&records, WriteMode::Initial)?);
     statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     statements.push('\n');
@@ -2156,9 +2660,13 @@ fn collect_record(
                 format!("{{id:inst_geo:⟨{mesh_id}⟩,meshed:true,visible:true,bad:false}}"),
             );
         }
+        // `route_ordinal`（2026-09-22，方案 B T2）：同 `(leave, arrive)` 站点对内的序号，与投影 `ProjectedTube::route_ordinal` /
+        // `GeometryId::ImpliedTube` 同一份——`/model/records` 与房间层级树 `tubes=1` 的直段身份四元组 `(BRAN, from, to, ordinal)`
+        // 在冷读路上从此不必再按出现序补号。老行没有这一格，读侧 `Option`。
         batch.tubi_relate.push(format!(
-            "{{id:tubi_relate:[pe:⟨{source_id}⟩,{slot}],in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,aabb:aabb:⟨{id}⟩,world_trans:trans:⟨{id}⟩,bore_size:0,invalid:{},anc:{anc},dbnum:{dbnum},model_sesno:{source_sesno}}}",
+            "{{id:tubi_relate:[pe:⟨{source_id}⟩,{slot}],in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,route_ordinal:{},aabb:aabb:⟨{id}⟩,world_trans:trans:⟨{id}⟩,bore_size:0,invalid:{},anc:{anc},dbnum:{dbnum},model_sesno:{source_sesno}}}",
             tube.from.word0, tube.from.word1, tube.to.word0, tube.to.word1,
+            tube.route_ordinal,
             tube.invalid,
         ));
         return Ok(());
@@ -2380,6 +2888,7 @@ fn collect_bound_record(
             ("out", sur_thing("inst_geo", mesh_id)),
             ("leave", sur_thing("pe", &refno_key(tube.from))),
             ("arrive", sur_thing("pe", &refno_key(tube.to))),
+            ("route_ordinal", SurValue::Number(SurNumber::Int(i64::from(tube.route_ordinal)))),
             ("aabb", sur_thing("aabb", id)),
             ("world_trans", sur_thing("trans", id)),
             ("bore_size", SurValue::Number(SurNumber::Int(0))),
@@ -2472,6 +2981,16 @@ fn collect_bound_record(
 }
 
 /// 一个 BRAN 的隐式管身整段清空。旧发布事务在插新段之前发的就是这一条。
+///
+/// **关系行与它的盒 / 变换要一起删**：管身的 `aabb` / `trans` 按**身份**做键
+/// （`geometry_record_id` = `GeometryId::ImpliedTube` 的 SHA-256，不是内容摘要），
+/// 而插入一律是 `INSERT IGNORE`。只删关系行的话，同一条槽位下一轮重新插出来的关系
+/// 仍指向那条**没被覆盖的旧**变换——槽位还在，几何却永远停在第一次发布的那个值。
+///
+/// 这一条以前指望 [`render_slice_delete`] 顺着行上的指针去删，但那条整片删是
+/// `SELECT … FROM tubi_relate WHERE anc CONTAINSANY …`，而**它排在本重置之后**：
+/// 关系行已经被这里删光，整片删读到的是空集，三句 `DELETE $slice_tubes.map(…)`
+/// 删的都是空数组。所以重置自己把指针捞出来删，不依赖语句顺序。
 pub fn render_tube_branch_resets(branches: &[RefNo]) -> String {
     let mut statements = String::new();
     let unique = branches
@@ -2485,10 +3004,51 @@ pub fn render_tube_branch_resets(branches: &[RefNo]) -> String {
 }
 
 fn append_tube_branch_reset(statements: &mut String, branch: RefNo) {
+    let key = format!("{}_{}", branch.word0, branch.word1);
+    // 走 `pe:⟨…⟩->tubi_relate` 而不是 `WHERE in = …`：前者吃 `in` 上的边索引，
+    // 后者在部署引擎上整表扫（`rvm_baseline::compare` 的文档里记着同一条）。
+    // `WHERE` 那一句挡住历史行——没有指针的行 `map` 出来是 NONE，`DELETE` 见到 NONE 整笔事务失败。
     statements.push_str(&format!(
-        "DELETE pe:⟨{}_{}⟩->tubi_relate;\n",
-        branch.word0, branch.word1
+        "LET $tube_reset_{key} = SELECT aabb, world_trans FROM pe:⟨{key}⟩->tubi_relate \
+         WHERE aabb != NONE AND world_trans != NONE;\n\
+         DELETE $tube_reset_{key}.map(|$row| $row.aabb);\n\
+         DELETE $tube_reset_{key}.map(|$row| $row.world_trans);\n\
+         DELETE pe:⟨{key}⟩->tubi_relate;\n"
     ));
+}
+
+/// 本轮要插的管身，按**身份**先把同 id 的盒与变换删一遍（`aabb:⟨id⟩` / `trans:⟨id⟩`，
+/// id 就是它的记录 id）。
+///
+/// 分支重置只删得到**当前关系行还指着的**那些盒 / 变换。此前只删关系行的版本留下过一批
+/// 没人指着的孤儿——身份消失过一轮（缝退化成 0、成员被删）、之后又建回来的那种；重置
+/// 沿指针捞不到它们，`INSERT IGNORE` 撞上同 id 新几何就整行落空，而管身的身份键在几何变了
+/// 之后也**不变**（e3d-model 故意如此，键的局部性）。所以「这条身份马上要插」就是
+/// 「库里同 id 的旧行必须先走」的充分条件；不存在的 id `DELETE` 是空操作。
+///
+/// 只管管身：元素行的盒 / 变换与 `inst_relate` 同键，整片删 / 按 id 删都顺手带走。
+/// 这一句进 prelude（第一笔），`render_records` 的 `Initial` 形态照旧只插不删。
+fn render_tube_identity_sweep(records: &[ProjectedGeometry]) -> anyhow::Result<String> {
+    let ids = records
+        .iter()
+        .filter(|record| record.tube.is_some())
+        .map(|record| bracketed_id(record.record_id.as_str()))
+        .collect::<anyhow::Result<BTreeSet<_>>>()?;
+    if ids.is_empty() {
+        return Ok(String::new());
+    }
+    let mut statements = String::new();
+    for table in ["aabb", "trans"] {
+        let refs = ids
+            .iter()
+            .map(|id| format!("{table}:⟨{id}⟩"))
+            .collect::<Vec<_>>()
+            .join(",");
+        statements.push_str(&format!(
+            "LET $tube_sweep_{table} = [{refs}];\nDELETE $tube_sweep_{table};\n"
+        ));
+    }
+    Ok(statements)
 }
 
 /// 从库里删掉这些记录 id 的全部表示。
@@ -2694,6 +3254,66 @@ fn bracketed_id(id: &str) -> anyhow::Result<&str> {
 mod tests {
     use super::*;
 
+    /// 分支重置必须**连盒带变换一起删**，而且删在关系行之前。
+    ///
+    /// 管身的 `aabb` / `trans` 按身份做键（`GeometryId::ImpliedTube` 的 SHA-256），插入又一律
+    /// `INSERT IGNORE`：只删关系行的话，同一条槽位下一轮插出来的关系仍指向那条没被覆盖的旧
+    /// 变换，几何永远停在第一次发布的值。2026-09-18 实测就是这样——库里那条 `trans` 被手工
+    /// 改成 999mm 之后，`/model/ensure force=true` 整根重生成也没把它写回来。
+    #[test]
+    fn a_branch_reset_clears_the_tube_boxes_and_transforms_before_the_relations() {
+        let sql = render_tube_branch_resets(&[RefNo::new(24381, 103320)]);
+        let pointers = sql
+            .find("DELETE $tube_reset_24381_103320.map(|$row| $row.aabb);")
+            .expect(&format!("盒要顺指针删: {sql}"));
+        let transforms = sql
+            .find("DELETE $tube_reset_24381_103320.map(|$row| $row.world_trans);")
+            .expect(&format!("变换要顺指针删: {sql}"));
+        let relations = sql
+            .find("DELETE pe:⟨24381_103320⟩->tubi_relate;")
+            .expect(&format!("关系行照旧整段删: {sql}"));
+        assert!(
+            pointers < relations && transforms < relations,
+            "指针要在关系行之前捞出来删，否则读到的是空集: {sql}"
+        );
+        assert!(
+            sql.contains("FROM pe:⟨24381_103320⟩->tubi_relate"),
+            "走边索引，不用 `WHERE in = …`（部署引擎上那是整表扫）: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE aabb != NONE AND world_trans != NONE"),
+            "历史行没有指针，map 出 NONE 会让整笔事务失败: {sql}"
+        );
+    }
+
+    /// 整片删也顺着 `tubi_relate` 行上的指针删管身的盒与变换，所以它必须排在分支重置**之前**：
+    /// 重置先把关系行删光，整片删读到的就是空集，三句 `DELETE $slice_tubes.map(…)` 全落空。
+    #[test]
+    fn the_slice_delete_is_emitted_before_the_branch_resets() {
+        // 只看生产那一半：本测试自己也写着这几个字面量，连测试一起数会多出两处。
+        let production = include_str!("model_db_adapter.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("测试模块的起点")
+            .0;
+        let prelude_sites = production
+            .match_indices("let mut prelude = String::new();")
+            .count();
+        assert_eq!(prelude_sites, 2, "两条落库路径各一处 prelude");
+        for (start, _) in production.match_indices("let mut prelude = String::new();") {
+            let block = &production[start..];
+            let slice = block
+                .find("render_slice_delete(&sliced_roots)")
+                .expect("prelude 必须发整片删");
+            let reset = block
+                .find("append_tube_branch_reset(")
+                .expect("prelude 必须发分支重置");
+            assert!(
+                slice < reset,
+                "整片删要排在分支重置之前，否则它读不到管身行上的 aabb / world_trans 指针"
+            );
+        }
+    }
+
     /// 整片删只圈模型面写下的行（`model_sesno != NONE`），属性面独有的行碰不到；
     /// 多根一条 `CONTAINSANY`，不随根数展开成一堆语句。
     #[test]
@@ -2858,7 +3478,7 @@ mod tests {
         let (live, failed) = room_stage(&shares, None);
         assert!(failed.is_empty());
         let db = Surreal::<Any>::init();
-        let error = persist_group(&db, &live).await.err().unwrap();
+        let error = persist_group(&db, &live, "").await.err().unwrap();
         assert_eq!(
             publication_failure_kind(&error),
             PersistFailureKind::Blocked
@@ -2897,6 +3517,7 @@ mod tests {
                 manifest_hash: format!("test-{geometry_count}"),
                 geometry_count,
                 published_via: "regen".into(),
+                room: None,
             },
         )
     }
@@ -3182,6 +3803,8 @@ mod tests {
         assert!(sql.contains("id:tubi_relate:[pe:⟨24383_73948⟩,0]"));
         assert!(sql.contains("leave:pe:⟨24383_10⟩"));
         assert!(sql.contains("arrive:pe:⟨24383_20⟩"));
+        // 2026-09-22（方案 B T2）：直段身份四元组的序号随行落盘，冷读不再按出现序补号
+        assert!(sql.contains("arrive:pe:⟨24383_20⟩,route_ordinal:0,aabb:"), "{sql}");
         assert!(sql.contains("out:inst_geo:⟨e3d_baked_v2_deadbeef⟩"));
         assert!(sql.contains(&format!(
             "aabb:aabb:⟨{TUBE_A}⟩,world_trans:trans:⟨{TUBE_A}⟩"
@@ -3523,6 +4146,29 @@ mod tests {
             "{error}"
         );
         assert!(error.to_string().contains("statement"), "{error}");
+
+        // 回滚本身也钉住：`BEGIN … COMMIT` 里一句报错——显式 `THROW` 或表达式算不出（F3 落库
+        // epilogue 当初就是数组 `+` 报的错）——前面已执行的几句一并作废。写库路径「随本组的行
+        // 同一笔事务」（房间边跟着几何走、stray 那一句跟着最后一笔）全靠这一条；memory 与
+        // rocksdb 是同一台执行器在管（2026-09-19 用 bin/surreal.exe 2.1.4+45013fc9 两边都核过）。
+        let response = db
+            .query(
+                "BEGIN TRANSACTION; CREATE publication_probe:two; \
+                 UPDATE publication_probe:two SET x = [] + ['a']; COMMIT TRANSACTION;",
+            )
+            .await
+            .expect("transaction response");
+        let error = check_publication_response(response).expect_err("must fail");
+        assert!(error.to_string().contains("addition"), "{error}");
+        let mut response = db
+            .query("SELECT * FROM publication_probe;")
+            .await
+            .expect("probe rows");
+        let rows = response.take::<Vec<Value>>(0).expect("probe rows");
+        assert!(
+            rows.is_empty(),
+            "a failed transaction must commit nothing, not even the statements before the failing one: {rows:?}"
+        );
     }
 
     /// Plant UI 的平表快路要的三件（`aabb_d` / `world_trans_d` / `insts_flat`）都在
@@ -3638,6 +4284,7 @@ mod tests {
             manifest_hash: "abc123".into(),
             geometry_count: 2,
             published_via: "regen".into(),
+            room: None,
         }
     }
 
@@ -3975,6 +4622,146 @@ mod tests {
         );
     }
 
+    /// 库里全部管身行的 `world_trans.d.scale.z`——单位圆柱的长度就写在这一格。
+    async fn tube_scale_z(db: &Surreal<Any>) -> Vec<f32> {
+        let mut response = db
+            .query("SELECT VALUE world_trans.d.scale FROM tubi_relate;")
+            .await
+            .expect("scale")
+            .check()
+            .expect("scale statement");
+        response
+            .take::<Vec<[f32; 3]>>(0)
+            .expect("scale rows")
+            .into_iter()
+            .map(|scale| scale[2])
+            .collect()
+    }
+
+    fn tube_of_length(length_mm: f64) -> ProjectedGeometry {
+        let mut record = tube_record(0, TUBE_A);
+        record.world_transform = DMat4::from_scale(glam::DVec3::new(1.0, 1.0, length_mm));
+        record
+    }
+
+    /// 2026-09-18 现场（BRAN 103320 / 145128 / 159862）：HPOS 沿管轴挪了，头段管**该不该有**判对了、
+    /// **多长**却还是基线那个值，停服务重启、`force` 重生成都不动。机理：管身的 `aabb` / `trans`
+    /// 按身份做键（身份在几何变了之后也不变），插入是 `INSERT IGNORE`，而 HEAD 的分支重置只删关系行、
+    /// 整片删又排在重置之后读到空集——第一次发布的那条 `trans` 从此没人删得到，每一轮的新变换都落空。
+    /// 这里钉的就是那一根管：同一条身份、第二次发布换了长度，库里读回来必须是新长度，且旧行不留。
+    #[tokio::test]
+    async fn a_regenerated_tube_overwrites_its_previous_transform_under_the_same_identity() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        let store = ModelMemoryStore::default();
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), tube_of_length(144.875)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &store, root)
+            .await
+            .expect("first persist");
+        assert_eq!(tube_scale_z(&db).await, vec![144.875]);
+
+        // HPOS 退了 94.875mm：容器、序号、两端都没变，身份（记录 id）一字不变，只有长度变了。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                tube_branch_resets: vec![BRANCH],
+                upserts: vec![tube_of_length(50.0)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &store, root)
+            .await
+            .expect("second persist");
+        assert_eq!(
+            tube_scale_z(&db).await,
+            vec![50.0],
+            "同一条身份第二次发布，库里必须是新长度，不许被第一次发布的那条 trans 钉住"
+        );
+        assert_eq!(
+            count(&db, "trans").await,
+            2,
+            "元素一条 + 管身一条：旧变换要被删掉，不许留成孤儿"
+        );
+        assert_eq!(count(&db, "aabb").await, 2, "盒同理");
+    }
+
+    /// 修法之前的分支重置只删关系行，库里已经留下一批**没人指着**的旧 `trans` / `aabb`
+    /// （身份消失过一轮——缝退化成 0、成员被删——之后又建回来的那种，E1→E2）。重置沿指针捞不到
+    /// 它们，所以本轮要插的管身还得按身份把同 id 的旧行先删一遍（[`render_tube_identity_sweep`]），
+    /// 否则 `INSERT IGNORE` 撞上孤儿，建回来的管又是旧长度。
+    #[tokio::test]
+    async fn an_orphaned_identity_row_does_not_pin_a_returning_tube() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        let store = ModelMemoryStore::default();
+        let target = PersistTarget::new(&db, PersistMedium::Mem);
+
+        // 孤儿：同一条身份上一世的变换，关系行早没了。
+        let stale = sql_value(&transform_value(DMat4::from_scale(glam::DVec3::new(
+            1.0, 1.0, 144.875,
+        ))));
+        db.query(format!("CREATE trans:⟨{TUBE_A}⟩ SET d = {stale};"))
+            .await
+            .expect("seed orphan")
+            .check()
+            .expect("seed orphan statement");
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), tube_of_length(50.0)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        persist_root_on(target, &store, root)
+            .await
+            .expect("persist");
+        assert_eq!(
+            tube_scale_z(&db).await,
+            vec![50.0],
+            "建回来的管身要带自己的长度，不许被没人指着的旧 trans 钉住"
+        );
+        assert_eq!(count(&db, "trans").await, 2);
+    }
+
+    /// spool 重放那一路同样先按身份清管身的盒 / 变换，再插 `Initial` 那批行。
+    #[test]
+    fn a_spooled_root_sweeps_tube_identities_before_inserting() {
+        let root = RefNo::new(24383, 1);
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), tube_record(0, TUBE_A)],
+                receipt: Some(test_receipt(root, 2)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let sql = render_spooled_root(&store, root).expect("render");
+        let sweep = sql
+            .find(&format!("LET $tube_sweep_trans = [trans:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_trans;"))
+            .expect(&format!("管身变换按身份先删: {sql}"));
+        assert!(
+            sql.contains(&format!("LET $tube_sweep_aabb = [aabb:⟨{TUBE_A}⟩];\nDELETE $tube_sweep_aabb;")),
+            "盒同理: {sql}"
+        );
+        let insert = sql.find("INSERT IGNORE INTO trans [").expect("插变换");
+        assert!(sweep < insert, "先删后插: {sql}");
+    }
+
     /// 不完整投影没有根回执时，缺席不能被解释成孤儿。
     ///
     /// 两种走法落到这里——有人把「生成是整棵子树的」优化成「祖先根跳过嵌套根省重复计算」
@@ -4168,6 +4955,7 @@ mod tests {
             manifest_hash: format!("test-{geometry_count}"),
             geometry_count,
             published_via: via.into(),
+            room: None,
         };
 
         async fn rows_without_model_sesno(db: &Surreal<Any>, table: &str) -> Vec<SurValue> {
@@ -5264,6 +6052,123 @@ mod tests {
             .expect("room calculator")
     }
 
+    /// B/T4 三道闸（纯函数）：代号相等 + 构件集相等 + 回执带了边 → 用带来的；代号不等 / 少一个构件 /
+    /// 多一个构件 / 没带 → `None`（现算）。
+    #[test]
+    fn carried_edges_pass_only_when_generation_and_element_set_both_match() {
+        use crate::fast_model::room_model::{RoomInput, carry_root_edges};
+        let dir = tempfile::tempdir().unwrap();
+        let calculator = room_calculator(dir.path());
+        let records = vec![
+            room_record(ROOM_ROOT_A, 100., 200.),
+            room_record(RefNo::new(24383, 11), 300., 400.),
+        ];
+        let edges = calculator.calculate_for_root(&records).unwrap();
+        assert!(!edges.is_empty(), "夹具前提：两件都在 R1 里");
+        let carried = carry_root_edges(
+            calculator.resident_generation(),
+            records.iter().map(RoomInput::element),
+            edges.clone(),
+        );
+        let generation = calculator.resident_generation();
+
+        assert_eq!(
+            carried_edges_for(Some(&carried), generation, &records).as_deref(),
+            Some(edges.as_slice()),
+            "三道闸都过 → 带来的边逐字回来"
+        );
+        assert!(
+            carried_edges_for(None, generation, &records).is_none(),
+            "没带"
+        );
+        assert!(
+            carried_edges_for(Some(&carried), "other-generation", &records).is_none(),
+            "代号不等（常驻中途换代 / 重启后旧产物）"
+        );
+        assert!(
+            carried_edges_for(Some(&carried), generation, &records[..1]).is_none(),
+            "回执覆盖的构件比本根记录多（局部发布后的整根形状）→ 现算"
+        );
+        let mut more = records.clone();
+        more.push(room_record(RefNo::new(24383, 12), 700., 800.));
+        assert!(
+            carried_edges_for(Some(&carried), generation, &more).is_none(),
+            "本根记录比回执覆盖的多（嵌套根共享记录）→ 现算，否则没动的构件的边会被删而不补"
+        );
+    }
+
+    /// B/T4：`room_stage` 对带边的回执只渲染（`Carried`），渲出的语句与现算（`Recomputed`）**逐字相同**；
+    /// 任一道闸没过就现算；没有计算器 `NotComputed`。
+    #[test]
+    fn room_stage_renders_carried_edges_and_recomputes_when_a_gate_fails() {
+        use crate::fast_model::room_model::{RoomInput, carry_root_edges};
+        let dir = tempfile::tempdir().unwrap();
+        let calculator = room_calculator(dir.path());
+        let records = vec![
+            room_record(ROOM_ROOT_A, 100., 200.),
+            room_record(RefNo::new(24383, 11), 600., 700.),
+        ];
+        let edges = calculator.calculate_for_root(&records).unwrap();
+        let carried = carry_root_edges(
+            calculator.resident_generation(),
+            records.iter().map(RoomInput::element),
+            edges,
+        );
+        let share = |room: Option<crate::fast_model::model_memory_store::CarriedRoomEdges>| {
+            let mut receipt = test_receipt(ROOM_ROOT_A, records.len()).1;
+            receipt.room = room;
+            RootShare {
+                root: ROOM_ROOT_A,
+                records: records.clone(),
+                receipt: Some(receipt),
+            }
+        };
+
+        let carried_share = [share(Some(carried.clone()))];
+        let (with, failed) = room_stage(&carried_share, Some(&calculator));
+        assert!(failed.is_empty());
+        assert_eq!(with[0].room_source, RoomEdgeSource::Carried);
+        let bare_share = [share(None)];
+        let (without, failed) = room_stage(&bare_share, Some(&calculator));
+        assert!(failed.is_empty());
+        assert_eq!(without[0].room_source, RoomEdgeSource::Recomputed);
+        assert_eq!(
+            with[0].room_statements, without[0].room_statements,
+            "带来的边渲出的语句与现算逐字相同（ADR-010 §9 的前提）"
+        );
+        assert_eq!(with[0].room_edges, without[0].room_edges);
+        assert!(
+            with[0]
+                .room_statements
+                .contains("INSERT RELATION INTO room_relate"),
+            "{}",
+            with[0].room_statements
+        );
+
+        let mut stale = carried.clone();
+        stale.generation = "another-generation".into();
+        let stale_share = [share(Some(stale))];
+        let (stale, _) = room_stage(&stale_share, Some(&calculator));
+        assert_eq!(
+            stale[0].room_source,
+            RoomEdgeSource::Recomputed,
+            "代号不等 → 现算"
+        );
+        let mut partial = carried.clone();
+        partial.elements.pop();
+        let partial_share = [share(Some(partial))];
+        let (partial, _) = room_stage(&partial_share, Some(&calculator));
+        assert_eq!(
+            partial[0].room_source,
+            RoomEdgeSource::Recomputed,
+            "构件集不等 → 现算"
+        );
+        let no_calculator = [share(Some(carried))];
+        let (none, _) = room_stage(&no_calculator, None);
+        assert_eq!(none[0].room_source, RoomEdgeSource::NotComputed);
+        assert!(none[0].room_statements.is_empty());
+    }
+
     /// 库里全部房间边，`面板->构件` 形态、按字典序。
     async fn room_edges(db: &Surreal<Any>) -> Vec<String> {
         #[derive(serde::Deserialize)]
@@ -5443,8 +6348,9 @@ mod tests {
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
-            &[],
             &after_move,
+            None,
+            RootScope::All,
         )
         .await
         .expect("recompute after the panel moved");
@@ -5476,8 +6382,9 @@ mod tests {
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
-            &[],
             &before_move,
+            None,
+            RootScope::All,
         )
         .await
         .expect("recompute after the panel moved back");
@@ -5527,12 +6434,14 @@ mod tests {
             )],
         );
 
+        // 调用方点名的 DbSet@T 根清单里两根都在投影里：一根都不回读库。
         let report = recompute_dbnum_room_edges(
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
-            &[],
             &rooms,
+            Some(&[ROOM_ROOT_A, ROOM_ROOT_B]),
+            RootScope::All,
         )
         .await
         .expect("recompute the library's room edges");
@@ -5540,6 +6449,20 @@ mod tests {
             (report.roots, report.recomputed, report.room_edges),
             (2, 1, 1),
             "{report:?}"
+        );
+        assert_eq!(
+            (
+                report.projected_roots,
+                report.durable_roots,
+                report.durable_records
+            ),
+            (2, 0, 0),
+            "投影里有回执的根不回读库: {report:?}"
+        );
+        assert_eq!(
+            report.covered_roots,
+            vec![ROOM_ROOT_A, ROOM_ROOT_B],
+            "覆盖到的根 = 投影里有回执的根（含算不出的那根），按 refno 序——调用方拿它对 DbSet@T 自证覆盖面"
         );
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert_eq!(report.failed[0].0, ROOM_ROOT_B);
@@ -5574,14 +6497,456 @@ mod tests {
         );
     }
 
-    /// d-149 / ADR-073 D13（2026-09-20 改口），`mem://` 真测：一根从 overlay 里逐出之后（按根数上限收回 /
-    /// 进程重启都是这个形态），整库房间重算把它的几何行从库里读回来算——面板搬走，它的旧边照样删；搬回来，
-    /// 边又从库里的几何算回来、与逐根落库逐字相同。库根名单给空就只算 overlay（冷根一根不算）；同一根
-    /// 既常驻又在名单里，overlay 那份说了算、不算冷根。冷根没有进程内 ACK，`acks_refreshed` 不计它。
+    /// ADR-073 D13 / U1 第二半（2026-09-17）：**不在投影里的根回读库上几何**补算。A 经逐根路径落库（行 + 边）
+    /// 之后从投影里消失（模拟初始化的模型行 / 落盘形态重启前生成的根：库里有、投影里没有），面板搬家 → 整库
+    /// 重算点名 `DbSet@T = [A]` → A 的几何从 `inst_relate` 读回、用新计算器算：旧边删掉、模型行不动；搬回来
+    /// 再算，边逐字回来——回读那条路与逐根落库同一形状。回读的根没有进程内 ACK 可对齐（就绪由 D14 那一格
+    /// 作答）；点名里库上一行几何都没有的根算覆盖到、什么都不写；不是本库的根不认。
     #[tokio::test]
-    async fn a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows() {
+    async fn a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows() {
         let dir = tempfile::tempdir().unwrap();
         let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let seeded = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &seeded,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A inside R1 through the per-root path");
+        let before = room_edges(&db).await;
+        assert_eq!(before, vec!["pe:24383_500->pe:24383_10".to_string()]);
+
+        // 库里有 A 的行、投影里没有 A：空投影 = 落盘形态冷重启 / 初始化的模型行（ADR-077 D5）。
+        let empty = room_store(vec![]);
+
+        // 面板搬走：R1 现在占 x 2000–3000，A（x 100–200）不在里面了。点名 DbSet@T = [A] → 回读库上几何。
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &empty,
+            BATCH_DBNUM,
+            &after_move,
+            Some(&[ROOM_ROOT_A]),
+            RootScope::All,
+        )
+        .await
+        .expect("recompute A from its durable rows");
+        assert_eq!(
+            (
+                report.projected_roots,
+                report.durable_roots,
+                report.durable_records
+            ),
+            (0, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            (
+                report.roots,
+                report.recomputed,
+                report.room_edges,
+                report.failed.len(),
+                report.acks_refreshed
+            ),
+            (1, 1, 0, 0, 0),
+            "回读的根算了、边为空、没有 ACK 可对齐: {report:?}"
+        );
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A]);
+        assert!(
+            room_edges(&db).await.is_empty(),
+            "A 不再在任何面板里，它的旧边随回读重算删掉"
+        );
+        assert_eq!(
+            count_record(&db, "inst_relate", "24383_10").await,
+            1,
+            "回读重算不动模型行"
+        );
+
+        // 搬回来：边逐字回来——回读库的那条路与逐根落库同一形状。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &empty,
+            BATCH_DBNUM,
+            &before_move,
+            Some(&[ROOM_ROOT_A]),
+            RootScope::All,
+        )
+        .await
+        .expect("recompute A after the panel moved back");
+        assert_eq!(
+            (report.durable_roots, report.recomputed, report.room_edges),
+            (1, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            before,
+            "整库重算（回读库）== 逐根落库，逐边相等"
+        );
+
+        // 点名里的 B 库上一行几何都没有（从没生成过）：算覆盖到、什么都不写；别的库的根不认。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &empty,
+            BATCH_DBNUM,
+            &before_move,
+            Some(&[ROOM_ROOT_B, ROOM_ROOT_A, RefNo::new(24384, 10)]),
+            RootScope::All,
+        )
+        .await
+        .expect("recompute with an ungenerated root named");
+        assert_eq!(
+            report.covered_roots,
+            vec![ROOM_ROOT_A, ROOM_ROOT_B],
+            "按 refno 序、只认本库: {report:?}"
+        );
+        assert_eq!(
+            (
+                report.durable_roots,
+                report.durable_records,
+                report.recomputed,
+                report.room_edges
+            ),
+            (2, 1, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(room_edges(&db).await, before);
+    }
+
+    /// ADR-073 D13 反查（D/3）：面板级的两类处置渲成一串 `;\n` 收尾的语句——不在册的面板清它的出边与
+    /// `room_panel_relate` 入边、只改号的房间改列；要反查的那一类（`recalc`）不在这里。两个渲染器一个带句尾分号
+    /// 一个不带，这里统一。
+    #[test]
+    fn panel_level_statements_clear_unregistered_panels_and_renumber_rooms_only() {
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove, RoomRenumber};
+        let delta = PanelDelta {
+            removed: vec![refno_from_e3d(RefNo::new(24383, 777))],
+            renumbered: vec![RoomRenumber {
+                room: "24383_501".into(),
+                old_num: "R1".into(),
+                new_num: "R1X".into(),
+                panels: vec![refno_from_e3d(PANEL_R1)],
+            }],
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R2),
+                old: None,
+                new: Some(PanelBounds([[0.0; 3], [1.0; 3]])),
+            }],
+            geometry_changed: 1,
+        };
+        let sql = render_panel_delta_statements(&delta);
+        assert_eq!(
+            sql,
+            "DELETE pe:24383_777->room_relate;\n\
+             DELETE pe:24383_777<-room_panel_relate;\n\
+             UPDATE (SELECT VALUE id FROM pe:24383_500->room_relate WHERE room_num = 'R1') SET room_num = 'R1X';\n\
+             UPDATE (SELECT VALUE id FROM pe:24383_500<-room_panel_relate WHERE room_num = 'R1') SET room_num = 'R1X';\n"
+        );
+        assert!(!sql.contains("24383_600"), "要反查的面板不在面板级语句里");
+        assert!(render_panel_delta_statements(&PanelDelta::default()).is_empty());
+    }
+
+    /// ADR-073 D13 反查（D/3），`mem://` 真测：**定向**重算只碰命中的根。A、B 都在 R1 里落库；面板搬家后只点名 A
+    /// → A 的旧边删掉、ACK 换代，B 的边与 ACK**一字不动**（B 不在集合里，哪怕它同样陈旧——那是反查该不该命中它
+    /// 的事，不是这里的）；面板级语句与逐根语句同一串事务、装在**最后一笔**（F1 2026-09-19，此前是第一笔）：
+    /// 不在册的 777 的出边与 `room_panel_relate` 入边随最后一笔一起清掉。再点名 B，B 也收敛——两次定向 == 一次整库。
+    #[tokio::test]
+    async fn a_targeted_recompute_rewrites_only_the_named_roots_and_runs_the_panel_statements_last()
+    {
+        use crate::fast_model::room_resident::PanelDelta;
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
+            root_commit(ROOM_ROOT_B, vec![room_record(ROOM_ROOT_B, 300., 400.)]),
+        ]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A, ROOM_ROOT_B],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed A and B inside R1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_20".to_string(),
+            ]
+        );
+        // 一块不在册了的面板 777 留下的旧边：指向 A 的成员边，以及房间 778 → 777 的拓扑边。
+        db.query(
+            "INSERT RELATION INTO room_relate [{ id: room_relate:stale_777, in: pe:⟨24383_777⟩, out: pe:⟨24383_10⟩, room_num: 'R9', inside_count: 8, center_dist: 0.0 }];\n\
+             INSERT RELATION INTO room_panel_relate [{ id: room_panel_relate:778_777, in: pe:⟨24383_778⟩, out: pe:⟨24383_777⟩, room_num: 'R9' }];",
+        )
+        .await
+        .expect("seed the stale edges of an unregistered panel")
+        .check()
+        .expect("seed statements");
+        assert_eq!(room_edges(&db).await.len(), 3);
+        assert_eq!(
+            count(&db, "room_panel_relate").await,
+            1,
+            "逐根路径只对构件本身是面板的写 room_panel_relate；这里只有种进去的 778→777"
+        );
+
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        let delta = PanelDelta {
+            removed: vec![refno_from_e3d(RefNo::new(24383, 777))],
+            ..PanelDelta::default()
+        };
+        let panel_statements = render_panel_delta_statements(&delta);
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &[ROOM_ROOT_A],
+                panel_statements: &panel_statements,
+            },
+        )
+        .await
+        .expect("targeted recompute of A");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A], "{report:?}");
+        assert_eq!(
+            (
+                report.roots,
+                report.projected_roots,
+                report.durable_roots,
+                report.recomputed,
+                report.room_edges,
+                report.failed.len(),
+                report.panel_statements,
+                report.commits,
+                report.acks_refreshed
+            ),
+            (1, 1, 0, 1, 0, 0, 2, 1, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_20".to_string()],
+            "A 的旧边删了、777 的旧边随 prelude 清了、B 的边一字不动"
+        );
+        assert_eq!(
+            count(&db, "room_panel_relate").await,
+            0,
+            "778→777 那条拓扑边随 prelude 清掉"
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+        assert_eq!(
+            ack(ROOM_ROOT_A).as_deref(),
+            Some(after_move.resident_generation())
+        );
+        assert_eq!(
+            ack(ROOM_ROOT_B).as_deref(),
+            Some(before_move.resident_generation()),
+            "没点名的根 ACK 不动"
+        );
+
+        // 再点名 B：收敛到与整库重算相同的终态。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &[ROOM_ROOT_B],
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("targeted recompute of B");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_B]);
+        assert_eq!(report.panel_statements, 0);
+        assert!(room_edges(&db).await.is_empty(), "两次定向 == 一次整库");
+    }
+
+    /// F2（2026-09-19）：要反查的面板（`PanelDelta::recalc`）**自己的** `room_panel_relate` 由面板级语句补，不靠面板
+    /// 所在的根被命中。纯函数半截：在册的先删后插（房间、房间号来自计算器的在册视图）、不在册的只删、同一块给两次只渲
+    /// 一次、按面板 refno 序、空输入空串。
+    #[test]
+    fn recalc_panel_topology_statements_follow_the_calculators_registered_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator_with(dir.path(), 0., None);
+        let unregistered = refno_from_e3d(RefNo::new(24383, 777));
+        let sql = render_recalc_panel_topology_statements(
+            &rooms,
+            [
+                refno_from_e3d(PANEL_R2),
+                unregistered,
+                refno_from_e3d(PANEL_R1),
+                refno_from_e3d(PANEL_R2),
+            ],
+        );
+        let statements: Vec<&str> = sql.split(";\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(
+            statements.len(),
+            5,
+            "R1 删 + 插、R2 删 + 插（只一次）、777 只删: {sql}"
+        );
+        assert!(sql.ends_with(";\n"), "{sql}");
+        let r1 = refno_from_e3d(PANEL_R1).to_pe_key();
+        let r2 = refno_from_e3d(PANEL_R2).to_pe_key();
+        assert_eq!(
+            statements[0],
+            format!("DELETE {r1}<-room_panel_relate"),
+            "按面板 refno 序、先删"
+        );
+        assert!(
+            statements[1].starts_with("INSERT RELATION INTO room_panel_relate [")
+                && statements[1].contains(&format!("out: {r1}"))
+                && statements[1].contains("room_num: 'R1'"),
+            "{}",
+            statements[1]
+        );
+        assert_eq!(statements[2], format!("DELETE {r2}<-room_panel_relate"));
+        assert!(
+            statements[3].contains(&format!("out: {r2}"))
+                && statements[3].contains("room_num: 'R2'"),
+            "{}",
+            statements[3]
+        );
+        assert_eq!(
+            statements[4],
+            format!("DELETE {}<-room_panel_relate", unregistered.to_pe_key()),
+            "不在册的只删、不插"
+        );
+        assert_eq!(sql.matches("INSERT RELATION").count(), 2, "同一块只渲一次");
+        assert!(render_recalc_panel_topology_statements(&rooms, []).is_empty());
+    }
+
+    /// F2（2026-09-19），`mem://` 真测：R2 新在册（FRMW 改名进关键字的形状——它的根不重生成、盒里的成员 A 才是命中
+    /// 的根）。库上先种一条指向 R2 的陈旧拓扑边（旧房间 999 → R2）与一条别的面板的现行边（501 → R1）；只点名 A、
+    /// 面板级语句带 R2 的拓扑边 → 999 → R2 删掉、601 → R2 写上、501 → R1 一字不动、A 的成员边照常重写；再跑一次幂等。
+    /// 此前定向路一条 `room_panel_relate` 都不写：整库路 / 从零初始化都会写，「两张边 == 从零初始化」在第二张表上不成立。
+    #[tokio::test]
+    async fn a_targeted_recompute_writes_the_recalc_panels_own_topology_edge() {
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 700., 800.)],
+        )]);
+        let r1 = refno_from_e3d(PANEL_R1).to_pe_key();
+        let r2 = refno_from_e3d(PANEL_R2).to_pe_key();
+        db.query(format!(
+            "INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:stale_999_600, in: pe:⟨24383_999⟩, out: {r2}, room_num: 'OLD' }}];\n\
+             INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:live_501_500, in: pe:⟨24383_501⟩, out: {r1}, room_num: 'R1' }}];"
+        ))
+        .await
+        .expect("seed topology edges")
+        .check()
+        .expect("seed statements");
+        assert_eq!(count(&db, "room_panel_relate").await, 2);
+
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R2),
+                old: None,
+                new: Some(PanelBounds([[500., 0., 0.], [1500., 1000., 1000.]])),
+            }],
+            ..PanelDelta::default()
+        };
+        let mut panel_statements = render_panel_delta_statements(&delta);
+        assert!(panel_statements.is_empty(), "recalc 不在两类面板级语句里");
+        panel_statements.push_str(&render_recalc_panel_topology_statements(
+            &rooms,
+            delta.recalc.iter().map(|entry| entry.panel),
+        ));
+        async fn topology(db: &Surreal<Any>) -> Vec<String> {
+            #[derive(serde::Deserialize)]
+            struct Edge {
+                i: String,
+                o: String,
+                room_num: String,
+            }
+            let mut response = db
+                .query("SELECT <string>in AS i, <string>out AS o, room_num FROM room_panel_relate;")
+                .await
+                .expect("topology edges")
+                .check()
+                .expect("topology statement");
+            let mut edges = response
+                .take::<Vec<Edge>>(0)
+                .expect("topology rows")
+                .into_iter()
+                .map(|edge| format!("{}->{} {}", edge.i, edge.o, edge.room_num))
+                .collect::<Vec<_>>();
+            edges.sort();
+            edges
+        }
+        for pass in 1..=2 {
+            let report = recompute_dbnum_room_edges(
+                PersistTarget::new(&db, PersistMedium::Mem),
+                &store,
+                BATCH_DBNUM,
+                &rooms,
+                None,
+                RootScope::Targeted {
+                    roots: &[ROOM_ROOT_A],
+                    panel_statements: &panel_statements,
+                },
+            )
+            .await
+            .expect("targeted recompute of A");
+            assert_eq!(
+                (report.recomputed, report.panel_statements, report.commits),
+                (1, 2, 1),
+                "第 {pass} 遍: {report:?}"
+            );
+            assert_eq!(
+                room_edges(&db).await,
+                vec![
+                    "pe:24383_500->pe:24383_10".to_string(),
+                    "pe:24383_600->pe:24383_10".to_string(),
+                ],
+                "第 {pass} 遍：A 在 R1 / R2 重叠段，成员边照常"
+            );
+            assert_eq!(
+                topology(&db).await,
+                vec![
+                    "pe:24383_501->pe:24383_500 R1".to_string(),
+                    "pe:24383_601->pe:24383_600 R2".to_string(),
+                ],
+                "第 {pass} 遍：999 → R2 删掉、601 → R2 写上、501 → R1 不动"
+            );
+        }
+    }
+
+    /// L1-P（2026-09-19），`mem://` 端到端：面板保护期不带盒、旧盒 `None`——「离开的成员」从库上按面板取。R1 收着 A1（边在库上）；
+    /// R1 恢复几何时挪到 x 2000–3000（`PanelMove { old: None, new: 新盒 }`，与「`.mesh` 读不出 → 重启 → 恢复并挪位」同形）：
+    /// 新盒里没人（树的答案空），成员那一路从 `pe:R1->room_relate` 取到 A1 → 只重算 A1 → 陈旧边删掉，与整库同一终态。
+    /// 对照：不带成员、只问新盒，一根都命中不到——陈旧边留着，这正是 L1 / L1-R 之前的漏算形状。
+    #[tokio::test]
+    async fn a_panel_that_regains_geometry_elsewhere_drops_its_stale_members_through_the_durable_edges()
+     {
+        use crate::data_interface::room_reverse::{self, ReverseLookup};
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let before = room_calculator_with(dir.path(), 0., None);
         let db = surreal_mem().await;
         let store = room_store(vec![root_commit(
             ROOM_ROOT_A,
@@ -5592,116 +6957,132 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[ROOM_ROOT_A],
-            Some(&before_move),
+            Some(&before),
         )
         .await
-        .expect("seed A inside R1");
-        let seeded = vec!["pe:24383_500->pe:24383_10".to_string()];
-        assert_eq!(room_edges(&db).await, seeded);
-
-        // 逐出：overlay 里不再有 A 的回执与记录，库里那一份不动。
-        store.drop_cached_root(ROOM_ROOT_A);
-        assert!(
-            store
-                .receipt(ProjectionScope::Current, ROOM_ROOT_A)
-                .is_none()
-        );
-        assert!(
-            store
-                .records_of_root(ProjectionScope::Current, ROOM_ROOT_A)
-                .is_empty()
-        );
-        assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 1);
-
-        // 面板搬走（R1 → x 2000–3000）。只看 overlay：一根都没有，什么都不算，旧边留在原处。
-        let after_move = room_calculator_with(dir.path(), 2000., None);
-        let report = recompute_dbnum_room_edges(
-            PersistTarget::new(&db, PersistMedium::Mem),
-            &store,
-            BATCH_DBNUM,
-            &[],
-            &after_move,
-        )
-        .await
-        .expect("recompute with no library roots");
-        assert_eq!(
-            (
-                report.roots,
-                report.cold_roots,
-                report.recomputed,
-                report.commits
-            ),
-            (0, 0, 0, 0),
-            "{report:?}"
-        );
-        assert_eq!(room_edges(&db).await, seeded, "没人告诉它库里还有 A");
-
-        // 带上库根：A 的几何行从库里读回来算——搬走的面板不再装着 A，旧边删掉；模型行不动。
-        let report = recompute_dbnum_room_edges(
-            PersistTarget::new(&db, PersistMedium::Mem),
-            &store,
-            BATCH_DBNUM,
-            &[ROOM_ROOT_A],
-            &after_move,
-        )
-        .await
-        .expect("recompute the cold root from its durable rows");
-        assert_eq!(
-            (
-                report.roots,
-                report.cold_roots,
-                report.recomputed,
-                report.room_edges,
-                report.failed.len(),
-                report.acks_refreshed,
-            ),
-            (1, 1, 1, 0, 0, 0),
-            "{report:?}"
-        );
-        assert!(room_edges(&db).await.is_empty(), "A 的旧边随冷根重算删掉");
-        assert_eq!(
-            count_record(&db, "inst_relate", "24383_10").await,
-            1,
-            "整库房间重算不动模型行"
-        );
-        assert!(
-            store
-                .receipt(ProjectionScope::Current, ROOM_ROOT_A)
-                .is_none(),
-            "冷根不装回 overlay"
-        );
-
-        // 搬回来：边从库里的几何再算回来——与逐根落库逐字相同。
-        let report = recompute_dbnum_room_edges(
-            PersistTarget::new(&db, PersistMedium::Mem),
-            &store,
-            BATCH_DBNUM,
-            &[ROOM_ROOT_A, ROOM_ROOT_A, RefNo::new(24384, 10)],
-            &before_move,
-        )
-        .await
-        .expect("recompute the cold root after the panel moved back");
-        assert_eq!(
-            (
-                report.roots,
-                report.cold_roots,
-                report.recomputed,
-                report.room_edges
-            ),
-            (1, 1, 1, 1),
-            "重复的与别的库的库根不收: {report:?}"
-        );
+        .expect("seed A1 inside R1");
         assert_eq!(
             room_edges(&db).await,
-            seeded,
-            "整库重算 == 逐根落库，逐边相等"
+            vec!["pe:24383_500->pe:24383_10".to_string()]
         );
 
-        // 同一根既常驻又在名单里：overlay 那份说了算，不算冷根、ACK 照常对齐。
-        let store = room_store(vec![root_commit(
-            ROOM_ROOT_A,
-            vec![room_record(ROOM_ROOT_A, 100., 200.)],
-        )]);
+        // R1 恢复几何、挪到 x 2000–3000：旧盒 None（保护期不带盒 / 重启后无从知道）。
+        let after = room_calculator_with(dir.path(), 2000., None);
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: None,
+                new: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        assert_eq!(delta.query_boxes().len(), 1, "只有新盒");
+        assert_eq!(delta.leaving_panels(), vec![refno_from_e3d(PANEL_R1)]);
+
+        // 对照：只问新盒、不带成员 → 新盒里没人、一根都命中不到 → A1 的陈旧边没人清（此前的漏算）。
+        let ReverseLookup::Resolved(boxes_only) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &delta.query_boxes(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            &[ROOM_ROOT_A],
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert!(boxes_only.roots.is_empty(), "{boxes_only:?}");
+
+        // 成员那一路：库上 R1 名下此刻就是 A1。
+        let members = room_reverse::durable_panel_members(&db, &delta.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, BTreeSet::from([packed_refno(ROOM_ROOT_A)]));
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &delta.query_boxes(),
+            BTreeSet::new(),
+            members,
+            &[ROOM_ROOT_A],
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![ROOM_ROOT_A]);
+        assert_eq!(
+            (affected.tree_hits, affected.member_hits),
+            (0, 1),
+            "新盒里没人，A1 只靠成员那一路进来"
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("targeted recompute on the regained panel");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A]);
+        assert!(
+            room_edges(&db).await.is_empty(),
+            "A1 不在 R1 的新位置里：陈旧边删掉，不靠旧盒"
+        );
+        // 对照：整库重算得到同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &after,
+            Some(&[ROOM_ROOT_A]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole-library recompute");
+        assert!(room_edges(&db).await.is_empty(), "定向 == 整库");
+    }
+
+    /// ADR-073 D13 U3 b 档，`mem://` 两库端到端：面板 R1 在 A 库（7999）的任务里搬家。A 的反查（树的答案模拟：旧盒里
+    /// 有 A1 与 B 库的 B1）只折出 A1、B1 进 `foreign[B]`；A 定向重算只碰 A1，B 的两条边一字不动；结论 `Targeted` 后把
+    /// B1 连同这一段换代（g1 → g2）停进 B 的槽。B 的下一个任务：`Unchanged`、库上 = g1、常驻 = g2、槽里 g1 → g2 →
+    /// 准入链接上、只有停放链；折成 B1 一根、只重算它——B1 的陈旧边删了、B2（只在 R2 里）的边与 ACK 一字不动；
+    /// 与整库重算 B 同一终态；成功清槽。槽空（重启后）→ 整库；链断 → 整库。
+    #[tokio::test]
+    async fn a_panel_move_parks_the_other_librarys_hits_and_its_next_task_recomputes_only_those_roots()
+     {
+        use crate::data_interface::room_recompute::{RoomRecomputeScope, scope_for_task};
+        use crate::data_interface::room_reverse::{
+            self, ReverseLookup, RoomRoots, fold_parked, park_foreign_hits,
+        };
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        use std::collections::{BTreeMap, BTreeSet};
+        const LIB_B: u32 = RefNo::new(24382, 1).dbno();
+        let b1 = RefNo::new(24382, 10);
+        let b2 = RefNo::new(24382, 20);
+        let record_in_b = |root: RefNo, min: f32, max: f32| ProjectedGeometry {
+            dbnum: LIB_B,
+            ancestors: vec![packed_refno(root), packed_refno(RefNo::new(24382, 1))],
+            ..room_record(root, min, max)
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let before_move = room_calculator_with(dir.path(), 0., None);
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
+            root_commit(b1, vec![record_in_b(b1, 300., 400.)]),
+            root_commit(b2, vec![record_in_b(b2, 1200., 1300.)]),
+        ]);
         persist_roots_batched(
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
@@ -5710,27 +7091,1114 @@ mod tests {
             Some(&before_move),
         )
         .await
-        .expect("re-seed A resident");
+        .expect("seed A1 inside R1");
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            LIB_B,
+            &[b1, b2],
+            Some(&before_move),
+        )
+        .await
+        .expect("seed B1 inside R1, B2 inside R2");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24382_10".to_string(),
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_600->pe:24382_20".to_string(),
+            ]
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+
+        // R1 搬到 x 2000–3000：常驻 g1 → g2。
+        let after_move = room_calculator_with(dir.path(), 2000., None);
+        let g1 = before_move.resident_generation().to_string();
+        let g2 = after_move.resident_generation().to_string();
+        assert_ne!(g1, g2);
+        let delta = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: Some(PanelBounds([[0., 0., 0.], [1000., 1000., 1000.]])),
+                new: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+
+        // A 的任务：反查（树的答案模拟——旧盒里有 A1 与 B1，新盒里没人）。离开的成员那一路从库上取（L1-P）：R1 此刻名下的
+        // 成员边正是 A1 与 B1——与树的答案同一批，不靠旧盒也找得齐。
+        let tree_hits = BTreeSet::from([packed_refno(ROOM_ROOT_A), packed_refno(b1)]);
+        let members = room_reverse::durable_panel_members(&db, &delta.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, tree_hits, "库上 R1 名下的成员 == 旧盒里的人");
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &delta.query_boxes(),
+            tree_hits,
+            members,
+            &[ROOM_ROOT_A],
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![ROOM_ROOT_A]);
+        assert_eq!(affected.member_hits, 2);
+        assert_eq!(
+            affected.foreign,
+            BTreeMap::from([(
+                LIB_B,
+                BTreeMap::from([(
+                    packed_refno(b1),
+                    vec![packed_refno(b1), packed_refno(RefNo::new(24382, 1))]
+                )])
+            )]),
+            "B1 是 B 库的：存元素带祖先链、不折根"
+        );
         let report = recompute_dbnum_room_edges(
             PersistTarget::new(&db, PersistMedium::Mem),
             &store,
             BATCH_DBNUM,
-            &[ROOM_ROOT_A],
-            &before_move,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
         )
         .await
-        .expect("recompute with A both resident and listed");
+        .expect("A's targeted recompute");
+        assert_eq!(report.covered_roots, vec![ROOM_ROOT_A]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24382_10".to_string(),
+                "pe:24383_600->pe:24382_20".to_string(),
+            ],
+            "A1 的边删了；B1 的边此刻陈旧却还在——A 的任务只碰 A 的根"
+        );
+        // 结论 Targeted → 停放给 B（执行体在 `run_targeted_room_recompute` 的那一臂里做）。
+        let lines = park_foreign_hits(BATCH_DBNUM, &g1, &g2, &affected.foreign);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("dbnum={LIB_B} 停放 1 个元素")),
+            "{lines:?}"
+        );
+
+        // B 的下一个任务：没换代、库上 g1、冻 g2、槽里 g1 → g2 → 定向，只有停放链（账本空——这里没经 install 记段）。
+        let parked = room_reverse::pending(LIB_B);
+        assert_eq!(parked.len(), 1);
         assert_eq!(
             (
-                report.roots,
-                report.cold_roots,
-                report.recomputed,
-                report.acks_refreshed,
+                parked[0].from_generation.as_str(),
+                parked[0].to_generation.as_str(),
+                parked[0].parked_by
             ),
-            (1, 0, 1, 1),
+            (g1.as_str(), g2.as_str(), BATCH_DBNUM)
+        );
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g2), &[], &parked, &[]),
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: parked.clone(),
+                stale_roots: Vec::new(),
+                generation: g2.clone(),
+            }
+        );
+        let (roots, unresolved) = fold_parked(&parked, &[b1, b2]);
+        assert_eq!(
+            (roots.as_slice(), unresolved.as_slice()),
+            ([b1].as_slice(), [].as_slice())
+        );
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            LIB_B,
+            &after_move,
+            None,
+            RootScope::Targeted {
+                roots: &roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("B's targeted recompute from the parked chain");
+        assert_eq!(report.covered_roots, vec![b1]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_600->pe:24382_20".to_string()],
+            "B1 的陈旧边删了；B2 一字不动"
+        );
+        assert_eq!(ack(b1).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(b2).as_deref(), Some(g1.as_str()), "没点名的根 ACK 不动");
+        // 成功 → 只清消费过的那一段（执行体在 `run_room_recompute` 按结论做；快照 = 接进准入链的 `parked`，L3）。
+        assert_eq!(room_reverse::clear_consumed(LIB_B, &parked), (1, 0));
+        assert!(room_reverse::pending(LIB_B).is_empty());
+        // 对照：整库重算 B 得到同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            LIB_B,
+            &after_move,
+            Some(&[b1, b2]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole-library recompute of B");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_600->pe:24382_20".to_string()],
+            "定向（停放链）== 整库"
+        );
+
+        // 槽空、账本空（重启后都丢了）→ 整库；链断（槽里只有 g0 → g1，接不到 g2）→ 整库。
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g2), &[], &[], &[]),
+            RoomRecomputeScope::WholeLibrary
+        );
+        room_reverse::park(
+            LIB_B,
+            RoomRoots {
+                from_generation: "g0".into(),
+                to_generation: g1.clone(),
+                elements: BTreeMap::from([(packed_refno(b2), vec![packed_refno(b2)])]),
+                parked_by: BATCH_DBNUM,
+                parked_at: std::time::Instant::now(),
+            },
+        );
+        assert_eq!(
+            scope_for_task(
+                Some(&g1),
+                Some(&g2),
+                &[],
+                &room_reverse::pending(LIB_B),
+                &[]
+            ),
+            RoomRecomputeScope::WholeLibrary
+        );
+        room_reverse::clear(LIB_B);
+    }
+
+    /// H1 / M1（2026-09-19，ADR-073 D13 追记）`mem://` 端到端：定向路的计算器是**本任务开工冻的那台**，scope、边、盖的代号
+    /// 三者同一代；任务中途常驻又换了代（`/model/ensure` 并发对齐 g2 → g3，面板 Q 又动了）不许把 scope 按 g2 定的
+    /// 命中根用 g3 算、再盖 g3——那会让 g2 → g3 命中的根永久陈旧、③ 哑掉。换代段账本（M1）让 ensure 那一次重建记下的
+    /// g2 → g3 也能被下一个任务接上：T2 不再整库。
+    ///
+    /// 夹具：A1 在 R1@0 里、A2 在 R1@2000 里、A3 在 R1@4000 里；g1 / g2 / g3 = R1 在三处的三代。库上 g1（三根都按 g1 算过）。
+    /// 任务 T1：对齐 g1 → g2（P = R1 0–1000 → 2000–3000，记进账本）、冻 g2；中途 ensure 把常驻换到 g3
+    /// （Q = R1 2000–3000 → 4000–5000，也记进账本）。
+    /// 断言：① 准入按冻的那一代：账本 g1 → g2 + 冻 g2 → 定向、终点 g2；账本只有 g1 → g2 + 冻 g3 → 整库；账本有 g2 → g3 + 冻 g3
+    /// → 两段定向；② 反查 P 命中 A1 / A2、按 **g2** 重算 → A1 的边删、A2 的边补、A3 不动；③ 盖 g2 之后库上 g2 ≠ 常驻 g3，
+    /// ③ 仍欠（盖 g3 就不欠了——这正是漏算）；④ 下一个任务 T2（Unchanged、库上 g2、冻 g3、槽空、账本有 g2 → g3）→ 定向沿
+    /// 账本接 Q、反查命中 A2 / A3、按 g3 算 → 只剩 R1→A3，== 整库按 g3 == 从零。
+    #[tokio::test]
+    async fn a_mid_task_generation_swap_keeps_the_targeted_recompute_on_the_task_calculator() {
+        use crate::data_interface::room_recompute::{
+            PanelSwap, RoomRecomputeScope, library_alignment_owed, scope_for_task,
+        };
+        use crate::data_interface::room_reverse::{self, ReverseLookup};
+        use crate::fast_model::room_resident::{PanelBounds, PanelDelta, PanelMove};
+        use std::collections::BTreeSet;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+        let a3 = RefNo::new(24383, 40);
+        let library_roots = [a1, a2, a3];
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let calc_g3 = room_calculator_with(dir.path(), 4000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+        let g3 = calc_g3.resident_generation().to_string();
+        assert!(g1 != g2 && g2 != g3 && g1 != g3, "三代代号两两不同");
+
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+            root_commit(a3, vec![room_record(a3, 4100., 4200.)]),
+        ]);
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &library_roots,
+            Some(&calc_g1),
+        )
+        .await
+        .expect("seed the library at g1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "库上 g1：只有 A1 在 R1@0 里"
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+
+        // T1 开工前对齐：g1 → g2，面板 P 动了——这一段进账本（`ResidentRooms::install` 记的，这里直接造）。
+        let p = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: Some(PanelBounds([[0., 0., 0.], [1000., 1000., 1000.]])),
+                new: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let own = PanelSwap {
+            from_generation: g1.clone(),
+            to_generation: g2.clone(),
+            panels: p.clone(),
+        };
+        // ① 准入按本任务冻的那一代（`durable_alignment` 收的就是它）：账本 g1 → g2、冻 g2 → 定向、终点 g2。
+        let scope = scope_for_task(Some(&g1), Some(&g2), &[own.clone()], &[], &[]);
+        assert_eq!(
+            scope,
+            RoomRecomputeScope::Targeted {
+                swaps: vec![own.clone()],
+                parked: Vec::new(),
+                stale_roots: Vec::new(),
+                generation: g2.clone(),
+            }
+        );
+        assert_eq!(scope.targeted_generation(), Some(g2.as_str()));
+        // 对齐装上 g2、冻计算器时常驻却已是 g3（ensure 插在两次读之间）、账本里还没有 g2 → g3：接不到冻的那一代，整库。
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g3), &[own.clone()], &[], &[]),
+            RoomRecomputeScope::WholeLibrary,
+            "账本只有 g1 → g2 却冻了 g3：接不到冻的那一代"
+        );
+        // 收尾那一步的同一道门（`run_targeted_room_recompute` 入口）：终点 g2 ≠ 中途换上的 g3，定不了。
+        assert_ne!(
+            scope.targeted_generation(),
+            Some(calc_g3.resident_generation()),
+            "此刻常驻（g3）不是准入链的终点，收尾不许拿它算"
+        );
+        // ensure 中途重建 g2 → g3（面板 Q 动了）也记进账本；冻的若是 g3，两段接起来定向（M1）。
+        let q = PanelDelta {
+            recalc: vec![PanelMove {
+                panel: refno_from_e3d(PANEL_R1),
+                old: Some(PanelBounds([[2000., 0., 0.], [3000., 1000., 1000.]])),
+                new: Some(PanelBounds([[4000., 0., 0.], [5000., 1000., 1000.]])),
+            }],
+            geometry_changed: 1,
+            ..PanelDelta::default()
+        };
+        let ensure = PanelSwap {
+            from_generation: g2.clone(),
+            to_generation: g3.clone(),
+            panels: q.clone(),
+        };
+        let ledger = [own.clone(), ensure.clone()];
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g3), &ledger, &[], &[]),
+            RoomRecomputeScope::Targeted {
+                swaps: vec![own.clone(), ensure.clone()],
+                parked: Vec::new(),
+                stale_roots: Vec::new(),
+                generation: g3.clone(),
+            },
+            "账本里两段接起来：库上 g1 → 冻的 g3，两段都反查、按 g3 算"
+        );
+
+        // ② 反查 P（树的答案模拟：旧盒里 A1、新盒里 A2；库上 R1 名下此刻只有 A1——离开的成员那一路，L1-P）→ 只重算
+        // A1 / A2，按**开工冻的 g2**。
+        let tree_hits = BTreeSet::from([packed_refno(a1), packed_refno(a2)]);
+        let members = room_reverse::durable_panel_members(&db, &p.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, BTreeSet::from([packed_refno(a1)]));
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &p.query_boxes(),
+            tree_hits,
+            members,
+            &library_roots,
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![a1, a2]);
+        assert!(affected.unresolved.is_empty());
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g2,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("T1's targeted recompute on the task calculator");
+        assert_eq!(report.covered_roots, vec![a1, a2]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_30".to_string()],
+            "按 g2：A1 离开 R1、A2 进来；A3 没点名，一字不动"
+        );
+        assert_eq!(ack(a1).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(a2).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(a3).as_deref(), Some(g1.as_str()), "没点名的根 ACK 不动");
+
+        // ③ 结论 `Targeted(g2)` → 库上盖 g2：此刻常驻 g3 ≠ g2，③ 仍欠着——g2 → g3 那一段（A3 进 R1）由下一个任务补。
+        let stamped = calc_g2.resident_generation();
+        assert_eq!(stamped, g2);
+        assert!(
+            library_alignment_owed(Some(stamped), Some(&g3)).is_some(),
+            "盖的是边真正用的那一代，③ 才看得见 g2 → g3 还欠着"
+        );
+        assert!(
+            library_alignment_owed(Some(&g3), Some(&g3)).is_none(),
+            "反例：按此刻常驻盖 g3，③ 就哑了——A3 的边永远补不上（这正是 H1）"
+        );
+
+        // ④ T2：Unchanged（g3 早已装上）、库上 g2、冻 g3、槽空、账本有 ensure 记的 g2 → g3 → 定向沿账本接 Q（M1）；
+        // 账本空（重启后）才整库。
+        assert_eq!(
+            scope_for_task(Some(&g2), Some(&g3), &[], &[], &[]),
+            RoomRecomputeScope::WholeLibrary,
+            "账本空：整库兜底"
+        );
+        let scope = scope_for_task(Some(&g2), Some(&g3), &ledger, &[], &[]);
+        assert_eq!(
+            scope,
+            RoomRecomputeScope::Targeted {
+                swaps: vec![ensure.clone()],
+                parked: Vec::new(),
+                stale_roots: Vec::new(),
+                generation: g3.clone(),
+            },
+            "T2 自己没重建（Unchanged），沿 ensure 记的那一段定向"
+        );
+        // 反查 Q（树的答案模拟：旧盒里 A2、新盒里 A3；库上 R1 名下此刻是 A2）→ 只重算 A2 / A3，按冻的 g3。
+        let tree_hits = BTreeSet::from([packed_refno(a2), packed_refno(a3)]);
+        let members = room_reverse::durable_panel_members(&db, &q.leaving_panels())
+            .await
+            .expect("members of R1");
+        assert_eq!(members, BTreeSet::from([packed_refno(a2)]));
+        let ReverseLookup::Resolved(affected) = room_reverse::resolve(
+            &db,
+            &store,
+            BATCH_DBNUM,
+            &q.query_boxes(),
+            tree_hits,
+            members,
+            &library_roots,
+        )
+        .await
+        .expect("reverse lookup") else {
+            panic!("树就绪与否不在这一半判")
+        };
+        assert_eq!(affected.roots, vec![a2, a3]);
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g3,
+            None,
+            RootScope::Targeted {
+                roots: &affected.roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("T2's targeted recompute along the ledger segment");
+        assert_eq!(report.covered_roots, vec![a2, a3]);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_40".to_string()],
+            "g2 → g3 那一段补上：A2 离开、A3 进来；A1 没点名、一字不动"
+        );
+        assert_eq!(ack(a1).as_deref(), Some(g2.as_str()), "没点名的根 ACK 不动");
+        assert_eq!(ack(a3).as_deref(), Some(g3.as_str()));
+        assert!(
+            library_alignment_owed(Some(&g3), Some(&g3)).is_none(),
+            "定向算齐、盖 g3，③ 安静"
+        );
+        // 对照：整库按 g3 得到同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g3,
+            Some(&library_roots),
+            RootScope::All,
+        )
+        .await
+        .expect("whole-library recompute on g3");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_40".to_string()],
+            "两段定向（T1 按 g2、T2 沿账本按 g3）== 整库按 g3"
+        );
+    }
+
+    /// ADR-073 D13 追记 F3（2026-09-19），`mem://` 端到端：常驻代号是输入摘要、不单调。库上 g1（R1 @0–1000，A1 在里面）
+    /// → 中间一代 g2（R1 挪到 2000–3000；当作「进保护集」那种空段——不进账本）期间 `/model/ensure` 按 g2 生成了 A2
+    /// （2100–2200，按 g2 在 R1 里、写了边）与空根 A3 → 常驻回到 g1：库上 g1 == 常驻 g1，③ 不欠、账本没段，此前
+    /// `request_for_task` 回 `None`，A2 的边却是 g2 算的（按 g1 它不在任何面板里），读侧第二层还替它说「就绪」。
+    /// 现在：`acked_roots` 读出 A2 / A3 的 ACK 是 g2 → 空段定向只点名它们 → 按 g1 重算：A2 的陈旧边删掉、A1 一字不动、
+    /// A3 没几何什么都不写但 ACK 一并对齐 → 再问一次不欠；与整库按 g1 同一终态。链上 ACK 的对齐
+    /// （`align_room_acks_along_chain`）：链上任一代的对齐到链尾，链外的（正是这种证据）与没算房间的不动。
+    #[tokio::test]
+    async fn a_root_generated_in_a_transient_generation_is_repaired_when_the_resident_returns() {
+        use crate::data_interface::room_recompute::{
+            AckedRoot, DurableAlignment, RoomRecomputeScope, acked_roots, request_for_task,
+            scope_for_task,
+        };
+        use crate::fast_model::room_resident::RoomReferenceRefresh;
+        use std::collections::BTreeSet;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+        let a3 = RefNo::new(24383, 40);
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+        assert_ne!(g1, g2);
+
+        let db = surreal_mem().await;
+        let store = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+            root_commit(a3, Vec::new()),
+        ]);
+        // 库上 g1：批次任务按 g1 发布 A1、盖 g1。
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[a1],
+            Some(&calc_g1),
+        )
+        .await
+        .expect("seed A1 at g1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()]
+        );
+        let aligned = DurableAlignment {
+            library: Some(g1.clone()),
+            resident: g1.clone(),
+            stray: Vec::new(),
+            stray_written_here: Vec::new(),
+        };
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        assert_eq!(
+            acked_roots(&store, BATCH_DBNUM),
+            vec![AckedRoot {
+                root: a1,
+                room_generation: Some(g1.clone()),
+            }]
+        );
+        assert!(
+            request_for_task(
+                &[],
+                Some(&unchanged),
+                Some(&aligned),
+                &[],
+                &[],
+                &acked_roots(&store, BATCH_DBNUM),
+            )
+            .is_none(),
+            "库上 g1 == 常驻 g1、ACK 都是 g1：不欠"
+        );
+
+        // 中间那一代（空段、不进账本）：ensure 按 g2 生成 A2（按 g2 在 R1 里）与空根 A3。
+        persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[a2, a3],
+            Some(&calc_g2),
+        )
+        .await
+        .expect("ensure publishes at g2");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_30".to_string(),
+            ],
+            "A2 的边是 g2 算的——按 g1 它不在任何面板里"
+        );
+        let ack = |root: RefNo| {
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK stays")
+                .room_generation
+        };
+        assert_eq!(ack(a2).as_deref(), Some(g2.as_str()));
+        assert_eq!(ack(a3).as_deref(), Some(g2.as_str()), "空根也有 ACK");
+
+        // 常驻回到 g1：库上 g1 == 常驻 g1、账本没段——投影里 ACK 的代号是唯一证据。
+        let acked = acked_roots(&store, BATCH_DBNUM);
+        assert_eq!(
+            acked
+                .iter()
+                .map(|entry| (entry.root, entry.room_generation.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (a1, Some(g1.clone())),
+                (a2, Some(g2.clone())),
+                (a3, Some(g2.clone())),
+            ]
+        );
+        let scope = scope_for_task(Some(&g1), Some(&g1), &[], &[], &acked);
+        assert_eq!(
+            scope,
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: Vec::new(),
+                stale_roots: vec![a2, a3],
+                generation: g1.clone(),
+            },
+            "空段定向：只点名 ACK 不是 g1 的两根"
+        );
+        let request = request_for_task(&[], Some(&unchanged), Some(&aligned), &[], &[], &acked)
+            .expect("F3 alone triggers");
+        assert_eq!(request.scope, scope);
+        assert!(
+            request
+                .reason
+                .contains("投影里 2 根的 ACK 房间代号不在准入链上"),
+            "{}",
+            request.reason
+        );
+
+        // 收尾按开工冻的 g1 只重算点名的根：A2 的陈旧边删掉、A1 一字不动；A3 没几何什么都不写，ACK 照样对齐。
+        let RoomRecomputeScope::Targeted { stale_roots, .. } = &scope else {
+            unreachable!()
+        };
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g1,
+            None,
+            RootScope::Targeted {
+                roots: stale_roots,
+                panel_statements: "",
+            },
+        )
+        .await
+        .expect("empty-segment targeted recompute on g1");
+        assert_eq!(report.covered_roots, vec![a2, a3]);
+        assert_eq!(
+            (
+                report.recomputed,
+                report.room_edges,
+                report.acks_refreshed,
+                report.failed.len()
+            ),
+            (1, 0, 2, 0),
             "{report:?}"
         );
-        assert_eq!(room_edges(&db).await, seeded);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "A2 按 g1 不在 R1 里：陈旧边删掉；A1 没点名，不动"
+        );
+        assert_eq!(ack(a1).as_deref(), Some(g1.as_str()));
+        assert_eq!(ack(a2).as_deref(), Some(g1.as_str()));
+        assert_eq!(
+            ack(a3).as_deref(),
+            Some(g1.as_str()),
+            "空根的 ACK 也对齐——否则每个任务都再点名一次、读侧一票否决它"
+        );
+        assert!(
+            request_for_task(
+                &[],
+                Some(&unchanged),
+                Some(&aligned),
+                &[],
+                &[],
+                &acked_roots(&store, BATCH_DBNUM),
+            )
+            .is_none(),
+            "算齐之后不欠"
+        );
+        // 对照：整库按 g1 同一终态。
+        recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &calc_g1,
+            Some(&[a1, a2, a3]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole library on g1");
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "空段定向 == 整库按 g1"
+        );
+
+        // 链上 ACK 的对齐：A1 留在 g1、A2 拨到链外的 gx、A3 改成没算房间；链 {g1, g2}、链尾 g2 → 只有 A1 对齐到 g2。
+        let set_ack = |root: RefNo, membership: bool, generation: Option<&str>| {
+            let mut ack = store
+                .publication_ack(ProjectionScope::Current, root)
+                .expect("ACK");
+            ack.room_membership = membership;
+            ack.room_generation = generation.map(str::to_owned);
+            assert!(store.record_publication_ack(ProjectionScope::Current, root, ack));
+        };
+        set_ack(a2, true, Some("gx"));
+        set_ack(a3, false, None);
+        let on_chain = BTreeSet::from([g1.clone(), g2.clone()]);
+        assert_eq!(
+            align_room_acks_along_chain(&store, BATCH_DBNUM, &on_chain, &g2),
+            1
+        );
+        assert_eq!(
+            ack(a1).as_deref(),
+            Some(g2.as_str()),
+            "链上的 g1 对齐到链尾 g2"
+        );
+        assert_eq!(
+            ack(a2).as_deref(),
+            Some("gx"),
+            "链外的代号不动——那是下一个任务要点名的证据"
+        );
+        assert_eq!(ack(a3), None, "没算房间的不动");
+        assert_eq!(
+            align_room_acks_along_chain(&store, BATCH_DBNUM, &on_chain, &g2),
+            0,
+            "再来一遍没有可对齐的"
+        );
+        // 它们此刻在准入里的形状：库上 g2 == 常驻 g2 → 点名 A2（链外）与 A3（没算房间），A1 不点。
+        assert_eq!(
+            scope_for_task(
+                Some(&g2),
+                Some(&g2),
+                &[],
+                &[],
+                &acked_roots(&store, BATCH_DBNUM)
+            ),
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: Vec::new(),
+                stale_roots: vec![a2, a3],
+                generation: g2.clone(),
+            }
+        );
+    }
+
+    /// ADR-073 D13 追记 F3 落库（2026-09-19），`mem://` 端到端：F3 的证据（ACK 代号）是进程内的，重启即丢——库上 g1、
+    /// 中间那一代 g2 刷进库的根、常驻回到 g1、重启：③ 不欠、账本没段、投影空，读侧第二层替那几根说「就绪」，没人再点名它们。
+    /// 现在：刷盘一组按 g2 写边、而库上盖章的是 g1 → 随那一组同一笔事务在水位行记 `model_room_stray_generations += [g2]`
+    /// （与盖章同代不写、已含不再写、没盖过不写）；重启后 `durable_alignment` 读到它 → 欠一次 → 进程内没有 ACK 就整库
+    /// （多算不漏算）→ A2 的陈旧边删掉；盖章时那一格清空（`task_end` 那边钉）。
+    #[tokio::test]
+    async fn a_stray_generation_survives_a_restart_on_the_watermark_row_and_rearms_the_recompute() {
+        use crate::data_interface::room_recompute::{
+            DurableAlignment, RoomRecomputeScope, acked_roots, request_for_task,
+        };
+        use crate::fast_model::room_resident::RoomReferenceRefresh;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+
+        let db = surreal_mem().await;
+        async fn row(db: &Surreal<Any>) -> Option<(Option<String>, Vec<String>)> {
+            room_alignment_row_on(db, BATCH_DBNUM)
+                .await
+                .expect("watermark row")
+        }
+        // 没有水位行：不写（③ 本来就欠着——库上没盖过章）。
+        assert_eq!(row(&db).await, None);
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g2)
+                .await
+                .is_empty()
+        );
+        db.query(format!(
+            "UPSERT dbnum_watermark:{BATCH_DBNUM} SET dbnum={BATCH_DBNUM}, applied_sesno=1, model_sesno=1;"
+        ))
+        .await
+        .expect("seed watermark")
+        .check()
+        .expect("seed watermark statement");
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g2)
+                .await
+                .is_empty(),
+            "库上从没盖过：③ 欠着，整库一次就盖上，不必记"
+        );
+        db.query(format!(
+            "UPDATE dbnum_watermark:{BATCH_DBNUM} SET model_room_generation = '{g1}';"
+        ))
+        .await
+        .expect("stamp g1")
+        .check()
+        .expect("stamp statement");
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g1)
+                .await
+                .is_empty(),
+            "与盖章同代（稳态）：一个字都不写"
+        );
+        let statement = stray_room_generation_statement(&db, BATCH_DBNUM, &g2).await;
+        assert!(
+            statement.starts_with(&format!(
+                "UPDATE dbnum_watermark:{BATCH_DBNUM} SET model_room_stray_generations = array::union("
+            )) && statement.contains(&g2),
+            "{statement}"
+        );
+
+        let store = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+        ]);
+        // 库上 g1：按 g1 发 A1——同代，那一格不动。
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[a1],
+            Some(&calc_g1),
+        )
+        .await
+        .expect("A1 at g1");
+        assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        assert_eq!(row(&db).await, Some((Some(g1.clone()), Vec::new())));
+        // 中间那一代：按 g2 刷 A2——与它的行同一笔事务，那一格记下 g2。
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &store,
+            BATCH_DBNUM,
+            &[a2],
+            Some(&calc_g2),
+        )
+        .await
+        .expect("A2 at g2");
+        assert!(
+            batched.failed.is_empty(),
+            "那一句随本组同一笔事务，语句不合法整组就判失败——这里要它一字不错: {:?}",
+            batched.failed
+        );
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_30".to_string(),
+            ],
+            "A2 的边是 g2 算的"
+        );
+        assert_eq!(row(&db).await, Some((Some(g1.clone()), vec![g2.clone()])));
+        assert!(
+            stray_room_generation_statement(&db, BATCH_DBNUM, &g2)
+                .await
+                .is_empty(),
+            "已含这一代：不再写"
+        );
+
+        // 重启：投影空、ACK 全丢；常驻回到 g1、库上 g1——只有水位行上那一格还记得。
+        let fresh = ModelMemoryStore::default();
+        assert!(acked_roots(&fresh, BATCH_DBNUM).is_empty());
+        let (library, stray) = row(&db).await.expect("watermark row");
+        let alignment = DurableAlignment {
+            library,
+            resident: g1.clone(),
+            stray,
+            stray_written_here: fresh.stray_generations_written(BATCH_DBNUM),
+        };
+        assert!(
+            alignment
+                .owed()
+                .is_some_and(|reason| reason.contains("F3 落库")),
+            "{alignment:?}"
+        );
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let request = request_for_task(
+            &[],
+            Some(&unchanged),
+            Some(&alignment),
+            &[],
+            &[],
+            &acked_roots(&fresh, BATCH_DBNUM),
+        )
+        .expect("the watermark cell rearms the recompute after a restart");
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::WholeLibrary,
+            "进程内没有 ACK 可点名：整库（多算不漏算）"
+        );
+        // 整库按 g1（投影空，两根都回读库上几何）：A2 的陈旧边删掉、A1 的边照旧。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &fresh,
+            BATCH_DBNUM,
+            &calc_g1,
+            Some(&[a1, a2]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole library on g1 after the restart");
+        assert_eq!((report.projected_roots, report.durable_roots), (0, 2));
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "重启后那几根照样被补上"
+        );
+
+        // 源码钉：那一句随本组的行同一笔事务（epilogue），三处提交成功之后都作废镜像；一条几何都没有的组不带。
+        let source = include_str!("model_db_adapter.rs");
+        let group = source
+            .split_once("async fn persist_group(")
+            .expect("persist_group")
+            .1
+            .split_once("\n}\n")
+            .expect("persist_group end")
+            .0;
+        assert!(
+            group.contains("let epilogue = if pieces.is_empty() { \"\" } else { epilogue };")
+                && group.contains(
+                    "pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry)"
+                ),
+            "F3 落库那一句作 epilogue 随本组最后一笔提交；没有几何的组不带: {group}"
+        );
+        let batched = source
+            .split_once("async fn persist_roots_batched_unacked_impl(")
+            .expect("batched impl")
+            .1
+            .split_once("\n}\n")
+            .expect("batched impl end")
+            .0;
+        let statement_at = batched
+            .find("stray_room_generation_statement(db, dbnum, rooms.resident_generation())")
+            .expect("那一句在分组之前算一次");
+        let first_group = batched
+            .find("persist_group(db, &live, &stray_epilogue)")
+            .expect("合块那一路带着它");
+        assert!(statement_at < first_group, "{batched}");
+        assert_eq!(
+            batched
+                .matches("note_stray_generation_written(db, store, dbnum, rooms, &stray_epilogue)")
+                .count(),
+            2,
+            "合块 + 二分重试两处提交成功之后作废镜像、在投影上记下本进程写过这一代: {batched}"
+        );
+        assert!(
+            source
+                .split_once("async fn persist_shares_concurrently(")
+                .expect("fan-out")
+                .1
+                .split_once("\n}\n")
+                .expect("fan-out end")
+                .0
+                .contains("note_stray_generation_written(db, store, dbnum, rooms, stray_epilogue)"),
+            "多写者那一路同样"
+        );
+    }
+
+    /// F3 落库收口（2026-09-19 晚，ADR-073 D13 收口总表第 11 行）的 `mem://` 复现：库上 g1；重启前那一世按 g2 刷了 A2（格里 `[g2]`）；
+    /// 重启（投影、ACK、「这一世写过什么」全丢）；下一个任务之前又按 g3 刷了 A3（格里 `[g2, g3]`，这一世只写过 g3）；常驻回 g1。
+    /// 投影里代号不等的 ACK 只有 A3——准入单看投影是「空段定向只点名 A3」，定向盖章会把整格清掉、A2 那条 g2 的陈旧边无人认领；
+    /// `request_for_task` 见格里的 g2 既不在链上、也不是这一世写的 → 整库，三根都按 g1 算，A2 / A3 的陈旧边都删掉。
+    #[tokio::test]
+    async fn a_stray_generation_written_before_the_restart_forces_the_whole_library_even_when_another_generation_is_witnessed()
+     {
+        use crate::data_interface::room_recompute::{
+            DurableAlignment, RoomRecomputeScope, acked_roots, request_for_task, scope_for_task,
+        };
+        use crate::fast_model::room_resident::RoomReferenceRefresh;
+        let a1 = ROOM_ROOT_A;
+        let a2 = RefNo::new(24383, 30);
+        let a3 = RefNo::new(24383, 40);
+
+        let dir = tempfile::tempdir().unwrap();
+        let calc_g1 = room_calculator_with(dir.path(), 0., None);
+        let calc_g2 = room_calculator_with(dir.path(), 2000., None);
+        let calc_g3 = room_calculator_with(dir.path(), 4000., None);
+        let g1 = calc_g1.resident_generation().to_string();
+        let g2 = calc_g2.resident_generation().to_string();
+        let g3 = calc_g3.resident_generation().to_string();
+        assert!(g1 != g2 && g2 != g3 && g1 != g3);
+
+        let db = surreal_mem().await;
+        db.query(format!(
+            "UPSERT dbnum_watermark:{BATCH_DBNUM} SET dbnum={BATCH_DBNUM}, applied_sesno=1, model_sesno=1, model_room_generation='{g1}';"
+        ))
+        .await
+        .expect("seed watermark")
+        .check()
+        .expect("seed watermark statement");
+
+        // 重启前那一世：按 g1 发 A1（同代，不记）、按 g2 刷 A2（记下 g2，且这一世知道是自己写的）。
+        let before = room_store(vec![
+            root_commit(a1, vec![room_record(a1, 100., 200.)]),
+            root_commit(a2, vec![room_record(a2, 2100., 2200.)]),
+        ]);
+        for (roots, calc) in [(&[a1][..], &calc_g1), (&[a2][..], &calc_g2)] {
+            let batched = persist_roots_batched(
+                PersistTarget::new(&db, PersistMedium::Mem),
+                &before,
+                BATCH_DBNUM,
+                roots,
+                Some(calc),
+            )
+            .await
+            .expect("persist before the restart");
+            assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        }
+        assert_eq!(
+            before.stray_generations_written(BATCH_DBNUM),
+            vec![g2.clone()],
+            "这一世写过 g2"
+        );
+        assert_eq!(
+            room_alignment_row_on(&db, BATCH_DBNUM).await.unwrap(),
+            Some((Some(g1.clone()), vec![g2.clone()]))
+        );
+
+        // 重启：新投影只带 A3、这一世什么都没写过；下一个任务之前按 g3 刷了它。
+        let after = room_store(vec![root_commit(a3, vec![room_record(a3, 4100., 4200.)])]);
+        assert!(after.stray_generations_written(BATCH_DBNUM).is_empty());
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &after,
+            BATCH_DBNUM,
+            &[a3],
+            Some(&calc_g3),
+        )
+        .await
+        .expect("A3 at g3");
+        assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        assert_eq!(
+            after.stray_generations_written(BATCH_DBNUM),
+            vec![g3.clone()]
+        );
+        let (library, stray) = room_alignment_row_on(&db, BATCH_DBNUM)
+            .await
+            .unwrap()
+            .expect("watermark row");
+        assert_eq!(library.as_deref(), Some(g1.as_str()));
+        let mut remembered = stray.clone();
+        remembered.sort();
+        let mut expected = vec![g2.clone(), g3.clone()];
+        expected.sort();
+        assert_eq!(remembered, expected, "格里两代都在");
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_30".to_string(),
+                "pe:24383_500->pe:24383_40".to_string(),
+            ],
+            "A2 的边是 g2 算的、A3 的边是 g3 算的"
+        );
+
+        // 常驻回 g1：投影里代号不等的 ACK 只有 A3——准入单看投影只点名它。
+        let acked = acked_roots(&after, BATCH_DBNUM);
+        assert_eq!(
+            scope_for_task(Some(&g1), Some(&g1), &[], &[], &acked),
+            RoomRecomputeScope::Targeted {
+                swaps: Vec::new(),
+                parked: Vec::new(),
+                stale_roots: vec![a3],
+                generation: g1.clone(),
+            },
+            "光看 ACK：空段定向只点得到 A3，A2 点不到"
+        );
+        // 格里的 g2 没人认领（不在链上、这一世没写过）→ 整库。
+        let alignment = DurableAlignment {
+            library,
+            resident: g1.clone(),
+            stray,
+            stray_written_here: after.stray_generations_written(BATCH_DBNUM),
+        };
+        let unchanged = RoomReferenceRefresh::Unchanged { key: "k".into() };
+        let request = request_for_task(&[], Some(&unchanged), Some(&alignment), &[], &[], &acked)
+            .expect("the cell owes");
+        assert_eq!(
+            request.scope,
+            RoomRecomputeScope::WholeLibrary,
+            "{}",
+            request.reason
+        );
+        assert!(
+            request.reason.contains("F3 落库") && request.reason.contains("也不是本进程这一世写的"),
+            "{}",
+            request.reason
+        );
+
+        // 整库按 g1（A3 在投影里、A1 / A2 回读库上几何）：A2 / A3 的陈旧边都删掉，A1 照旧。
+        let report = recompute_dbnum_room_edges(
+            PersistTarget::new(&db, PersistMedium::Mem),
+            &after,
+            BATCH_DBNUM,
+            &calc_g1,
+            Some(&[a1, a2, a3]),
+            RootScope::All,
+        )
+        .await
+        .expect("whole library on g1");
+        assert_eq!((report.projected_roots, report.durable_roots), (1, 2));
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "重启前按 g2 写的 A2 也被补上了"
+        );
+
+        // 源码钉：这一世写过什么随本库 ACK 整体作废一并清掉（重启的进程内形态）。
+        let store_source = include_str!("model_memory_store.rs");
+        for function in [
+            "pub(crate) fn restore_dbnum(",
+            "pub fn clear_dbnum(",
+            "pub fn invalidate_receipts_of_dbnum(",
+        ] {
+            let body = store_source
+                .split_once(function)
+                .unwrap_or_else(|| panic!("{function}"))
+                .1
+                .split_once("\n    }\n")
+                .expect("function end")
+                .0;
+            assert!(
+                body.contains("stray_generations_written.remove(&dbnum)"),
+                "{function} 作废本库 ACK 时一并忘掉这一世写过什么: {body}"
+            );
+        }
+        assert!(
+            store_source
+                .split_once("pub fn invalidate_all_receipts(")
+                .expect("invalidate_all_receipts")
+                .1
+                .split_once("\n    }\n")
+                .expect("function end")
+                .0
+                .contains("stray_generations_written.clear()"),
+            "全部作废同样"
+        );
     }
 
     /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
@@ -6233,9 +8701,14 @@ mod tests {
         let attach_at = group
             .find("sql.push_str(&live.room_statements)")
             .expect("房间边拼进这一根的末块");
+        // 收尾段没有逐根的章要盖（ADR-079）；唯一的 epilogue 是调用方给的 F3 落库那一句（水位行上一格，不是逐根回执）。
         let pack_at = group
-            .find("pack_publication_transactions(&prelude, &pieces, \"\", touches_geometry)")
-            .expect("装块时收尾段为空：没有逐根的章要盖");
+            .find("pack_publication_transactions(&prelude, &pieces, epilogue, touches_geometry)")
+            .expect("装块：收尾段只有调用方给的 F3 落库那一句，没有逐根的章");
+        assert!(
+            !group.contains("pack_publication_transactions(&prelude, &pieces, \"\", "),
+            "{group}"
+        );
         // 提交走 `commit_publication_transaction`（整笔原子 + 冲突重试），钉它的调用处。
         let commit_at = group
             .find("commit_publication_transaction(db, statements")
@@ -6298,14 +8771,48 @@ mod tests {
                 );
             }
         }
-        for (file, source) in [
+        // B/T4：回执带来的边先过三道闸（`carried_edges_for`：代号相等、构件集相等、带了），过了只渲染；
+        // `calculate_for_root(` 只剩兑底那一臂，渲染仍是同一台 `render_root_room_edges`。
+        assert!(
+            stage.contains("carried_edges_for(")
+                && stage.contains("RoomEdgeSource::Carried")
+                && stage.contains("RoomEdgeSource::Recomputed"),
+            "room_stage 先问回执带来的边，再兑底现算: {stage}"
+        );
+        assert_eq!(
+            stage.matches("calculate_for_root(").count(),
+            1,
+            "现算只剩兑底那一臂: {stage}"
+        );
+        assert_eq!(
+            stage.matches("render_root_room_edges(").count(),
+            1,
+            "带来的与现算的边都经同一台渲染器: {stage}"
+        );
+        let gate = production
+            .split_once("fn carried_edges_for<")
+            .expect("三道闸")
+            .1
+            .split_once("\n}\n")
+            .expect("gate end")
+            .0;
+        assert!(
+            gate.contains("carried.generation != resident_generation")
+                && gate.contains("elements.len() != listed.len()"),
+            "闸：代号相等、构件集相等（少一个多一个都不行）: {gate}"
+        );
+        // 生产调用方：dbnum 任务在开工时冻一次（`TaskRoomCalculator::freeze()`，一任务一台，B/T1）；
+        // 没有任务语境的 process-store 发布仍按组冻一次（`frozen_room_calculator()`）。
+        for (file, source, freeze) in [
             (
                 "model_refresh.rs",
                 include_str!("../data_interface/model_refresh.rs"),
+                "frozen_room_calculator()",
             ),
             (
                 "batch_worker.rs",
                 include_str!("../data_interface/batch_worker.rs"),
+                "TaskRoomCalculator::freeze()",
             ),
         ] {
             let production = source
@@ -6313,8 +8820,8 @@ mod tests {
                 .next()
                 .expect("production half");
             assert!(
-                production.contains("frozen_room_calculator()"),
-                "{file}: 生产调用方要在任务开工时冻一次房间计算器"
+                production.contains(freeze),
+                "{file}: 生产调用方要在任务开工时冻一次房间计算器（{freeze}）"
             );
         }
     }

@@ -28,7 +28,8 @@
 //!
 //! 失败分两档（plant-mbd ADR-0002）：单个成员端口解不出 / 缺方向 → 记 `Suppress` issue、成员照常
 //! 下发；整条 BRAN 没有任何带几何的成员、或连近似 Head 都建不起来 → [`BranchQueryError::RootError`]
-//! （宿主映射 422）。refno 不存在 → `NotFound`（404）；不是派生隐式管身的路由容器 → `NotRouteContainer`（422）。
+//! （宿主映射 422）。refno 不存在 → `NotFound`（404）；不是派生隐式管身的路由容器 →
+//! `NotRouteContainer`（422）；是风管那一支 → `NotPipeRoute`（422）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,14 +37,14 @@ use std::sync::Arc;
 use e3d_io::db_element::{DbElementError, DbSet};
 use e3d_io::refno::RefNo;
 use e3d_model::CataloguePoints;
-use e3d_model::category::derives_implied_tubes;
+use e3d_model::category::{RouteDiscipline, derives_implied_tubes, route_discipline};
 use e3d_model::route::{
     ArriveCheck, PPointResolver, RouteEnd, RoutePoint, SlotAlignment, ZERO_LENGTH_TOL_MM,
     departure_tube_outer_diameter, resolve_end, slot_alignment, tube_length, tube_outer_diameter,
     walk_route,
 };
 use e3d_model::transform::world_matrix;
-use glam::DVec3;
+use glam::{DMat4, DVec3};
 use plant_mbd::{
     BranchMember, BranchQueryResult, ConnectionRef, MbdV2Issue, PPoint, root_error_issue,
     suppress_issue,
@@ -60,8 +61,18 @@ pub enum BranchQueryError {
     NotFound {
         refno: RefNo,
     },
-    /// 元素存在，但不是派生隐式管身的路由容器（`derives_implied_tubes` 为假，如 HVAC 下的 BRAN）。
+    /// 元素存在，但不是派生隐式管身的路由容器（`derives_implied_tubes` 为假，如 EQUI）。
     NotRouteContainer {
+        refno: RefNo,
+        noun: String,
+    },
+    /// 是派生隐式管身的路由容器，但属主是 HVAC（`route_discipline` 为 `Hvac`）。
+    ///
+    /// 2026-09-18 之前这一档落在 `NotRouteContainer` 里——那时派生门自己把风管关在外面。
+    /// e3d-model `f93fd66` 让风管 BRAN 也派生隐式直段（断面是矩形 / 圆两制）之后门开了，
+    /// 而 MBD 是管道等轴测的量具：外径会按 `tube_outer_diameter` 回落成 `PBOR = 宽 + 高`，
+    /// 答出来的尺寸标注没有意义。学科在这一层挡，不动派生门（`ledger-seg15-frameall.md` §13.5）。
+    NotPipeRoute {
         refno: RefNo,
         noun: String,
     },
@@ -85,6 +96,10 @@ impl std::fmt::Display for BranchQueryError {
             Self::NotRouteContainer { refno, noun } => write!(
                 f,
                 "refno {refno}（{noun}）不是派生隐式管身的路由容器，没有管道尺寸标注"
+            ),
+            Self::NotPipeRoute { refno, noun } => write!(
+                f,
+                "refno {refno}（{noun}）的属主是 HVAC，风管不出管道尺寸标注"
             ),
             Self::RootError { refno, issues } => write!(
                 f,
@@ -129,6 +144,12 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             noun: container_noun,
         });
     }
+    if route_discipline(&container)? == RouteDiscipline::Hvac {
+        return Err(BranchQueryError::NotPipeRoute {
+            refno,
+            noun: container_noun,
+        });
+    }
 
     let branch_refno = wire_refno(refno);
     let route = walk_route(&container)?;
@@ -167,13 +188,33 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     let tail_pos = container.get_position("TPOS")?;
     let tail_dir = container.get_direction("TDIR")?;
 
+    // 这四个读数是**属主相对**的，而构件端走 `CataloguePoints` / `world_matrix(&member)` 给的是
+    // 世界系。两端不折到同一个系里，属主链非单位阵的支管上头 / 尾段整条都落在系与系之间
+    // （e3d-model `route::container_point` 是同一处修复）。折不出来时如实记一笔，不拿单位阵冒充。
+    let container_world = match world_matrix(&container) {
+        Ok(matrix) => matrix,
+        Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => {
+            issues.push(suppress_issue(
+                &branch_refno,
+                &branch_refno,
+                "adapter.container_frame_unresolved",
+                "the container's owner chain could not be folded into world; head / tail points are \
+                 reported in the owner frame",
+            ));
+            DMat4::IDENTITY
+        }
+        Err(error) => return Err(error.into()),
+    };
+
     // 隐式管身的起点：上一站的离开点（Head 从 HPOS 起步；HDIR 缺时只判长度不判共轴）。
     let mut last_leave: Option<(String, RoutePoint, bool)> = head_pos.map(|pos| {
         (
             "Head".to_string(),
             RoutePoint {
-                pos: DVec3::from_array(pos),
-                dir: head_dir.map(DVec3::from_array).unwrap_or(DVec3::Z),
+                pos: container_world.transform_point3(DVec3::from_array(pos)),
+                dir: head_dir
+                    .map(|d| container_world.transform_vector3(DVec3::from_array(d)))
+                    .unwrap_or(DVec3::Z),
                 bore: container.get_double("HBOR").ok().flatten(),
             },
             head_dir.is_some(),
@@ -324,8 +365,10 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     if let (Some(tail), Some((from_refno, from, from_dir_known))) = (tail_pos, last_leave.as_ref())
     {
         let tail_point = RoutePoint {
-            pos: DVec3::from_array(tail),
-            dir: tail_dir.map(DVec3::from_array).unwrap_or(DVec3::Z),
+            pos: container_world.transform_point3(DVec3::from_array(tail)),
+            dir: tail_dir
+                .map(|d| container_world.transform_vector3(DVec3::from_array(d)))
+                .unwrap_or(DVec3::Z),
             bore: container.get_double("TBOR").ok().flatten(),
         };
         let arrive_check = if tail_dir.is_some() {

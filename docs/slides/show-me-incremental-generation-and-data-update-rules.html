@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gen-model · 什么时候会重新生成模型：属性更新 vs 模型更新</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel-2: #243044; --line: #334155;
+    --text: #e2e8f0; --muted: #94a3b8;
+    --data: #38bdf8;   /* 属性更新 / 数据面 */
+    --model: #fbbf24;  /* 模型更新 / 模型面 */
+    --room: #34d399;   /* 房间归属 */
+    --wm: #c084fc;     /* 水位 / 版本 */
+    --skip: #94a3b8; --xform: #60a5fa; --regen: #f97316; --bad: #f87171;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+    --sans: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); }
+  body { overflow: hidden; }
+  .deck { position: relative; width: 100vw; height: 100vh; }
+  .slide { position: absolute; inset: 0; display: none; flex-direction: column; padding: 36px 56px 64px; overflow: auto; }
+  .slide.active { display: flex; }
+  .kicker { font-size: 13px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+  h1 { font-size: 32px; margin: 0 0 4px; font-weight: 650; }
+  h1 small { font-size: 16px; color: var(--muted); font-weight: 400; margin-left: 12px; }
+  .lede { color: var(--muted); font-size: 15px; margin: 0 0 20px; max-width: 1150px; line-height: 1.5; }
+  .lede b { color: var(--text); }
+  .grid { display: grid; gap: 18px; flex: 1; min-height: 0; }
+  .cols-2 { grid-template-columns: 1fr 1fr; }
+  .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .cols-7-5 { grid-template-columns: 1.4fr 1fr; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+  .card h3 { margin: 0 0 10px; font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .c-data { color: var(--data); } .c-model { color: var(--model); } .c-room { color: var(--room); } .c-wm { color: var(--wm); }
+  .c-skip { color: var(--skip); } .c-xform { color: var(--xform); } .c-regen { color: var(--regen); } .c-bad { color: var(--bad); }
+  .b-data { border-color: var(--data) !important; } .b-model { border-color: var(--model) !important; } .b-wm { border-color: var(--wm) !important; }
+  pre { margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: #dbeafe; background: #0b1220; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow: auto; white-space: pre; }
+  pre .k { color: #7dd3fc; } pre .f { color: #fde68a; } pre .c { color: #64748b; } pre .s { color: #86efac; } pre .r { color: #fca5a5; }
+  code { font-family: var(--mono); font-size: 12.5px; background: #0b1220; padding: 1px 5px; border-radius: 4px; color: #e0f2fe; }
+  ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.55; font-size: 14px; }
+  li { margin: 4px 0; } li b { color: #fff; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: .04em; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; white-space: nowrap; }
+  table.dense { font-size: 12px; } table.dense th, table.dense td { padding: 4px 7px; } table.dense .pill { font-size: 11px; padding: 0 6px; }
+  table.dense tr.grp td { background: var(--panel-2); color: var(--model); font-weight: 600; font-size: 11.5px; letter-spacing: .06em; padding: 3px 8px; }
+  .note { color: var(--muted); font-size: 12.5px; margin-top: 10px; line-height: 1.5; }
+  .ex { background: var(--panel-2); border-left: 3px solid var(--model); border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.5; margin-top: 10px; }
+  .ex.data { border-left-color: var(--data); } .ex .t { font-weight: 600; color: #fff; margin-bottom: 2px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .face { border-radius: 12px; padding: 16px 18px; border: 1px solid var(--line); background: var(--panel); }
+  .face h2 { margin: 0 0 8px; font-size: 20px; }
+  .face .sub { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  .tree { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: #dbeafe; background: #0b1220; border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; white-space: pre; overflow: auto; }
+  .tree .hit { color: var(--regen); font-weight: 600; } .tree .root { color: var(--model); font-weight: 600; } .tree .dim { color: #64748b; } .tree .mv { color: var(--xform); }
+  .foot { position: absolute; left: 56px; right: 56px; bottom: 18px; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  .foot .nav { user-select: none; } .foot .nav span { cursor: pointer; padding: 0 6px; }
+  @media (max-width: 1100px) {
+    .slide { padding: 24px 22px 60px; } .cols-2, .cols-3, .cols-7-5, .two { grid-template-columns: 1fr; }
+    h1 { font-size: 24px; } .foot { left: 22px; right: 22px; }
+  }
+  @media print { body { overflow: visible; } .deck { height: auto; } .slide { display: flex !important; position: relative; height: 100vh; page-break-after: always; } .foot .nav { display: none; } }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<!-- ============ 1 / 5 ============ -->
+<section class="slide active" data-n="1">
+  <div class="kicker">gen-model · 增量模型生成 · 1 / 5</div>
+  <h1>两类更新：属性更新 ≠ 模型更新 <small>每一次 SAVEWORK 都是属性更新，但只有一部分会变成模型更新</small></h1>
+  <p class="lede">E3D 里任何一次改动（新增 / 修改 / 删除 / 搬迁）落到库文件里都是<b>属性记录</b>的变化——数据面照单全收、每个元素一条净变化。<b>模型</b>是从属性算出来的<b>派生物</b>：只有当变化会改变几何或位姿时，才值得重算；而且重算的单位不是「这个元素」，而是它所属的<b>生成根</b>。</p>
+
+  <div class="two">
+    <div class="face" style="border-color: var(--data)">
+      <h2 class="c-data">属性更新（数据面）</h2>
+      <div class="sub">「库里的数据是不是最新的」</div>
+      <ul>
+        <li><b>触发</b>：库文件会话号前进（<code>file_latest_sesno &gt; applied_sesno</code>），无条件。</li>
+        <li><b>范围</b>：这一窗 S→T 里<b>每个</b>被改过的元素，各一条净变化 <code>Add / Modified / Deleted</code>。改了 <code>NAME</code> 也算、只改了描述也算。</li>
+        <li><b>做什么</b>：把 T 时刻的属性记录整行替换进库；删掉的元素留墓碑。</li>
+        <li><b>凭证</b>：<span class="c-wm"><code>applied_sesno</code></span> —— 数据追平到哪个会话。</li>
+      </ul>
+      <div class="ex data"><div class="t">例</div>设计员把 <code>/P-101-B1</code> 这条 BRAN 的 <code>DESC</code> 从「主蒸汽」改成「主蒸汽 A 线」并 SAVEWORK。→ 属性面板下一秒就能看到新描述；<b>模型一个三角面都没动</b>。</div>
+    </div>
+    <div class="face" style="border-color: var(--model)">
+      <h2 class="c-model">模型更新（模型面）</h2>
+      <div class="sub">「已生成的三维模型还对不对」</div>
+      <ul>
+        <li><b>触发</b>：只在变化被判为 <span class="pill c-regen">Regen</span> 或 <span class="pill c-xform">TransformOnly</span> 时；<span class="pill c-skip">Skip</span> 的变化模型不动。</li>
+        <li><b>范围</b>：变化元素<b>上卷</b>到它的生成根（默认 BRAN / HANG / SUPPO / EQUI 这类交付单元），整根重算或整根刚体移动。</li>
+        <li><b>做什么</b>：直接按 T 时刻的库文件重新求几何（模型面是纯函数，不依赖库里的属性行）。</li>
+        <li><b>凭证</b>：<span class="c-wm"><code>model_sesno</code></span> —— 模型追平到哪一版数据；永不超过 <code>applied_sesno</code>。</li>
+      </ul>
+      <div class="ex"><div class="t">例</div>同一条 BRAN，设计员把一个弯头 <code>ELBO</code> 换成另一个规格（<code>SPRE</code> 变）。→ 属性照常更新；同时<b>整条 BRAN</b> 的几何按新文件重新生成，不是只重画那个弯头。</div>
+    </div>
+  </div>
+
+  <div class="note">所以同一个 SAVEWORK 之后，可能出现「新属性 + 旧模型」的短暂中间态——这是被<b>承认并可观测</b>的设计（两枚水位分别表达），不是数据污染。两枚水位相等时，数据与模型一致。</div>
+
+  <div class="foot"><span>来源：<code>../gen-model-model-cache/CONTEXT.md</code>（增量模型生成 / 模型影响 / 生成根 / 应用水位 / 模型水位）· ADR-056 · ADR-060</span><span class="nav"><span data-go="prev">‹</span> 1 / 5 <span data-go="next">›</span></span></div>
+</section>
+
+<!-- ============ 2 / 5 ============ -->
+<section class="slide" data-n="2">
+  <div class="kicker">模型面 · 2 / 5</div>
+  <h1>什么时候会触发模型重新生成 <small>一次变化对模型只有三种意义：Skip · TransformOnly · Regen</small></h1>
+  <p class="lede">判定原则是<b>宁多勿漏</b>：新增、删除、成员变化、看不清改了什么 —— 一律重生成。想「少算」必须拿到证据：<b>只动位姿</b>才能走 TransformOnly；<b>字典说它不影响图形（DCHC = 0）∧ 生成器根本不读它</b>，两票齐才算 Skip。</p>
+
+  <div class="grid" style="grid-template-columns: 1.85fr 1fr">
+    <div class="card b-model">
+      <h3><span class="tag c-model">例子</span>各专业的改动 → 不同结论</h3>
+      <table class="dense">
+        <tr><th style="width:40%">设计员做了什么</th><th style="width:14%">模型影响</th><th>为什么</th></tr>
+        <tr class="grp"><td colspan="3">管道 / 设备</td></tr>
+        <tr><td>EQUI 改 <code>NAME</code> / <code>DESC</code> / <code>PURP</code>；或只有 <code>CACHID</code> / <code>SPAMAP</code> 戳跳了一下</td><td><span class="pill c-skip">Skip</span></td><td>纯业务元数据 / E3D 的图形缓存计数戳：DCHC=0，生成器一处不读</td></tr>
+        <tr><td>EQUI 整体挪位：只改 <code>POS</code> / <code>ORI</code>（子件一个字没动）</td><td><span class="pill c-xform">TransformOnly</span></td><td>网格不变，只给整棵子树换一个世界变换（刚体前移）</td></tr>
+        <tr><td>EQUI 挪位 <b>并且</b> 某个子件 BOX 改了 <code>XLEN</code></td><td><span class="pill c-regen">Regen</span></td><td>子树里出现了非位姿变化，regen 吞掉 transform，整根重算</td></tr>
+        <tr><td>BRAN 换弯头规格 <code>SPRE</code>、改口径 <code>HBOR</code>、改 <code>HPOS</code>/<code>TPOS</code>；新建 / 删除元素、成员增删或重排</td><td><span class="pill c-regen">Regen</span></td><td>几何输入 / 结构成员变了；管路走向就是成员顺序</td></tr>
+        <tr><td>把 ELBO 从 BRAN-1 挂到 BRAN-2（<code>OWNER</code> 变）</td><td><span class="pill c-regen">Regen ×2</span></td><td>搬迁：旧根少了一件、新根多了一件，两端都重算</td></tr>
+        <tr><td>改了一个 UDA（<code>:MYTAG</code>）</td><td><span class="pill c-regen">Regen</span></td><td>UDA 是否参与几何未知 → 保守重生成</td></tr>
+        <tr><td>管道 BRAN 里一个 ELBO 只挪了位（<code>POS</code>）</td><td><span class="pill c-regen">Regen</span></td><td>两侧隐含管段 FTUB 要重连、长度变 → 便宜路径改判整根重算</td></tr>
+        <tr class="grp"><td colspan="3">通风 (HVAC)</td></tr>
+        <tr><td>风管件 STRT / BEND / TRNS 改设计参数 <code>DESP</code>（如风管宽 × 高）</td><td><span class="pill c-regen">Regen</span></td><td>设计参数是目录几何展开的输入，尺寸变 = 形状变</td></tr>
+        <tr><td>HVAC 分支里一个 STRT 只挪了位（<code>POS</code> / <code>ORI</code>）</td><td><span class="pill c-xform">TransformOnly</span></td><td>与管道相反：HVAC 分支<b>没有隐含管段</b>，每段风管都是显式构件，挪一件只换这一件的矩阵</td></tr>
+        <tr><td>HVAC 分支下新增 / 删除风阀 DAMP、变径 TRNS；整个 HVAC 容器挪位</td><td><span class="pill c-regen">Regen</span> / <span class="pill c-xform">Transform</span></td><td>成员变化整根重算；容器位姿传给子树各 BRAN。风管件归到最近的 BRAN，HVAC 容器像 PIPE 一样不是根</td></tr>
+        <tr class="grp"><td colspan="3">结构</td></tr>
+        <tr><td>SCTN / GENSEC 换截面规格 <code>SPRE</code>，改 <code>BANG</code>（β 角）、<code>DRNS</code>/<code>DRNE</code>（端部斜切方向）</td><td><span class="pill c-regen">Regen</span></td><td>型材是截面沿路径扫掠出的实体，截面或扫掠参数变 = 形状变</td></tr>
+        <tr><td>SCTN 改 <code>POSS</code> / <code>POSE</code>（起点 / 终点）</td><td><span class="pill c-regen">Regen</span></td><td>型材沿起点→终点拉出来，起终点是<b>几何定义</b>参数，不是摆放参数</td></tr>
+        <tr><td>FLOOR / WALL 改 <code>HEIG</code> / <code>FRAD</code>；PANE 顶点 <code>PAVE</code> 改局部 <code>POS</code></td><td><span class="pill c-regen">Regen</span></td><td>厚度、圆角是形状；顶点不是独立实例，其 POS 是父面板网格的输入</td></tr>
+        <tr><td>整块 WALL / PANE 只改 <code>POS</code>；整个 FRMW 框架挪位</td><td><span class="pill c-xform">TransformOnly</span></td><td>整体挪位只换矩阵；容器位姿传给子树里每根 SCTN / GENSEC</td></tr>
+        <tr><td>FRMW 改名命中房间关键字、PANE 换属主</td><td><span class="pill c-skip">Skip</span> <span class="pill c-room">+ 房间</span></td><td>几何输入没变；但房间定义变了 → 该库构件的<b>房间归属</b>整库重算，几何不重生成</td></tr>
+        <tr class="grp"><td colspan="3">电气 / 桥架</td></tr>
+        <tr><td>桥架路径点 <code>POINTR</code>（RPATH 下）位移</td><td><span class="pill c-regen">Regen</span></td><td>RPATH 是点容器，路径点的 POS 是 CWBRAN 桥架几何的输入，不能当位姿</td></tr>
+        <tr><td>CTMTRL 下新增 / 删除直段 <code>CTSTRA</code>；CTSTRA 从 B1 挂到 B2</td><td><span class="pill c-regen">Regen</span> / ×2</td><td>成员变化 / 搬迁，与管道同一套规则（CWBRAN 配为交付单元时整条桥架为一根）</td></tr>
+        <tr><td>整条 CWBRAN / CWAY 抬高 500（容器位姿）；配电柜等电气 EQUI 挪位</td><td><span class="pill c-xform">TransformOnly</span></td><td>子树各根只换矩阵；电气设备与工艺设备同一规则</td></tr>
+        <tr><td>电缆 CABLE 改起止点 <code>STAREF</code>/<code>ENDREF</code>；EQUI / ELCONN 的接线变</td><td><span class="pill c-regen">Regen</span> <span class="pill c-skip">联动</span></td><td>电缆自己重算，且接在这台设备上的电缆都要重画（E3D 同此）；本系统电缆几何尚未按路由落地，几何上暂无表现</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3><span class="tag c-model">原理</span>判据从哪来</h3>
+<pre><span class="f">impact</span>(一次元素操作):
+  <span class="k">if</span> 新增 <span class="k">or</span> 删除 <span class="k">or</span> 成员/顺序变 <span class="k">or</span> 看不清改了什么
+    <span class="k">return</span> <span class="r">Regen</span>
+  <span class="k">for</span> 每个变化的属性 a:
+    <span class="k">if</span> 字典DCHC(a) == 0 <span class="k">and</span> 生成器不读(a)   <span class="c"># 两票</span>
+      记 Skip                                <span class="c"># 少算要证据</span>
+    <span class="k">elif</span> a ∈ {POS, ORI} <span class="k">and</span> 元素不是几何容器
+      记 TransformOnly
+    <span class="k">else</span>
+      记 <span class="r">Regen</span>                               <span class="c"># 默认方向</span>
+  <span class="k">return</span> 最重的一档                        <span class="c"># Regen &gt; TransformOnly &gt; Skip</span></pre>
+      <ul>
+        <li><b>与 E3D 自己一致</b>：core 交互路按属性字典的 DCHC 类别决定「不动 / 只改矩阵 / 整件重画」，我们的三态就是它的映射；但 core 在跨会话 GETWORK 上是<b>任何记录重写都整件重画</b>——我们比它更省，所以「少算」的两档才要两票。</li>
+        <li>预览（改动前问「会影响模型吗」）与真正执行用<b>同一个判据</b>，不会一边说不影响、一边又重算。</li>
+      </ul>
+      <div class="ex"><div class="t">一句话</div>属性面板关心「值变了没」；模型只关心「形状或位置变了没」。</div>
+    </div>
+  </div>
+
+  <div class="foot"><span>词条：模型影响 (Model Impact) · 净变化 · 搬迁 · 图形行为 · 取证 <code>docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md</code></span><span class="nav"><span data-go="prev">‹</span> 2 / 5 <span data-go="next">›</span></span></div>
+</section>
+
+<!-- ============ 3 / 5 ============ -->
+<section class="slide" data-n="3">
+  <div class="kicker">模型面 · 3 / 5</div>
+  <h1>重算的单位是「生成根」，不是被改的那个元素 <small>变化元素向上归一到恰好一个根；一根一窗只算一次</small></h1>
+  <p class="lede">属性更新的粒度是<b>元素</b>（一个 refno 一行）；模型更新的粒度是<b>生成根</b>——一个<b>具备独立成败与独立交付语义</b>的模型单元。这样做的原因：几何是整体求出来的（管段随弯头走、面板随顶点走），部件级重画既不安全也不省。</p>
+
+  <div class="grid cols-2">
+    <div class="card b-model">
+      <h3><span class="tag c-model">规则</span>变化元素怎么找到它的根</h3>
+<pre><span class="f">root_of</span>(e):
+  <span class="c"># 1. 最近的「最小交付单元」祖先（含自身）</span>
+  <span class="c">#    默认 BRAN / HANG / SUPPO / EQUI，可按项目配置</span>
+  <span class="k">if</span> e 或其祖先 ∈ MDU: <span class="k">return</span> 最近的那个        <span class="c"># 交付单元根</span>
+  <span class="c"># 2. 没有 MDU 祖先：跨过 LOOP/PLOO/VERT/PAVE 这类</span>
+  <span class="c">#    几何容器，上溯到最近的非 SITE/ZONE 属主</span>
+  <span class="k">if</span> 找到: <span class="k">return</span> 它                             <span class="c"># 正常颗粒根</span>
+  <span class="c"># 3. 自己就是 SITE / ZONE / WORL：不生成</span>
+  <span class="k">return</span> 不整区重算</pre>
+      <ul>
+        <li><code>FTUB</code>（隐含管段）永远不是根，继续往上找 BRAN。</li>
+        <li>「父模型输入」型子元素（GENSEC 的 <code>SPINE/POINSP</code>、PANE 的顶点）自身不出模型，变化归到父级根。</li>
+        <li>几何数据容器（<code>graphicsBehaviour = 1</code>，如 LOOP）不独立成件；层级容器（= 2，如 ZONE）永不单独重画。</li>
+        <li><b>桥架</b>：把 <code>CWBRAN</code> 配成交付单元后，托盘 CTRAY / 直段 CTSTRA / 路径点 POINTR 全部归到 CWBRAN；默认集下托盘只归到直接属主 CTSTRA。</li>
+        <li><b>同一根一窗只生成一次</b>：一条 BRAN 里改了 5 个件，仍只重算 1 次。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="tag c-model">例子</span>一棵树上的几种改动，各自波及谁</h3>
+<div class="tree">SITE /S1
+└─ ZONE /Z1                          <span class="mv">← 改 ZONE 的 POS：子树里每个根只换矩阵（TransformOnly）</span>
+   ├─ <span class="root">EQUI /E-101</span>                  ← 生成根（MDU）
+   │  ├─ BOX  ...                     <span class="hit">← 改 XLEN → 整个 /E-101 重算</span>
+   │  └─ CYLI ...
+   ├─ PIPE /P-101
+   │  ├─ <span class="root">BRAN /P-101-B1</span>            ← 生成根（MDU）
+   │  │  ├─ ELBO ...                  <span class="hit">← 换规格 → 整条 /P-101-B1 重算</span>
+   │  │  ├─ TEE  ...
+   │  │  └─ (FTUB 隐含管段)           <span class="dim">← 永不成根，跟着 BRAN 走</span>
+   │  └─ <span class="root">BRAN /P-101-B2</span>
+   ├─ STRU /ST1
+   │  └─ FRMW /F1
+   │     └─ <span class="root">GENSEC /G1</span>             ← 正常颗粒根（无 MDU 祖先，Significant Owner）
+   │        └─ SPINE → POINSP        <span class="hit">← 改点坐标 → /G1 重算（父模型输入）</span>
+   └─ <span class="root">PANE /PN1</span>                    ← 正常颗粒根
+      └─ PLOO → PAVE                  <span class="hit">← 改顶点 → /PN1 重算（跨过 loop 容器）</span></div>
+      <div class="ex"><div class="t">搬迁的例子</div>把 <code>TEE</code> 从 <code>/P-101-B1</code> 挂到 <code>/P-101-B2</code>：这一窗<b>两条 BRAN 都</b>重算——旧根少了一件（管段要重连），新根多了一件。</div>
+      <div class="ex"><div class="t">不重算的例子</div>新建一个空 <code>ZONE</code>、给 <code>SITE</code> 改名：属性更新照做；模型侧没有任何根被触到。</div>
+    </div>
+  </div>
+
+  <div class="foot"><span>词条：生成根 · 最小交付单元 (MDU) · 交付单元根 · 正常颗粒 · Significant Owner · Loop 容器 · 父模型输入 · 搬迁</span><span class="nav"><span data-go="prev">‹</span> 3 / 5 <span data-go="next">›</span></span></div>
+</section>
+
+<!-- ============ 4 / 5 ============ -->
+<section class="slide" data-n="4">
+  <div class="kicker">模型面 · 4 / 5</div>
+  <h1>一次保存会波及多远 <small>本窗触到的根 · 不再是根的 · 没被碰到的 · 别人变了却牵连到我的（联动）</small></h1>
+  <p class="lede">把窗口 S→T 两端的根集合并起来看，每个候选根只有一种去向。<b>没被碰到的根什么都不做</b>——这是增量比全量省的全部来源；「被碰到」除了自己子树里有变化，还包括<b>联动</b>：别处的变化改变了我的形状或位置。</p>
+
+  <div class="grid cols-2">
+    <div class="card b-model">
+      <h3><span class="tag c-model">去向</span>一个根在这一窗的五种结局</h3>
+      <table>
+        <tr><th style="width:18%">去向</th><th style="width:38%">条件</th><th>例子</th></tr>
+        <tr><td><span class="pill c-regen">regen</span></td><td>T 端是根，且子树里有 Regen 级变化（或被联动点名）</td><td>BRAN 换了弯头</td></tr>
+        <tr><td><span class="pill c-xform">transform</span></td><td>已发布根，子树里本窗<b>只有</b>位姿变化</td><td>EQUI 整体挪了 2 m</td></tr>
+        <tr><td><span class="pill c-bad">delete</span></td><td>S 端是根、T 端不再是根</td><td>删掉整个 EQUI；或 BRAN 被挂到别的 MDU 之下</td></tr>
+        <tr><td><span class="pill c-skip">advance</span></td><td>两端都是根、没被碰到</td><td>这次 SAVEWORK 只改了别的 ZONE；这份几何到 T 仍有效，<b>零成本</b></td></tr>
+        <tr><td><span class="pill c-skip">lazy</span></td><td>T 端新出现的根、从没生成过、也没被碰到</td><td>刚导入一个库但没人看它 → 等第一次被打开时按需生成</td></tr>
+      </table>
+      <div class="ex data"><div class="t">典型的一次 SAVEWORK</div>一个 900 根的库，设计员改了 3 条 BRAN、挪了 1 台 EQUI、把 2 个 SITE 改了名：属性侧写入这一窗的全部变化行；模型侧 <b>3 regen + 1 transform + 896 advance</b>，896 根一个三角面都不碰。</div>
+      <p class="note"><b>安全阀</b>：若这一窗变化太大（候选超过索引的 30%）或依赖关系解析不全，就不再相信「没被碰到」的判断，把两端都在的根全部重算——宁可多算，不留陈旧几何。</p>
+    </div>
+
+    <div class="card">
+      <h3><span class="tag c-model">联动</span>别人变了，为什么我要重算</h3>
+      <table>
+        <tr><th style="width:40%">变化发生在</th><th>牵连到</th></tr>
+        <tr><td>容器（ZONE / SITE）的 <code>POS</code> / <code>ORI</code></td><td>子树里每个根：整体换矩阵（不重网格）</td></tr>
+        <tr><td>删除一个容器</td><td>它下面全部子孙的根：清掉几何；被搬走的后代按搬迁算，不按删除</td></tr>
+        <tr><td>改挂（<code>OWNER</code> 变）</td><td>旧根 + 新根都重算</td></tr>
+        <tr><td><b>元件库</b>（CATA：SCOM / GMSET / 截面 / 规格）改了</td><td>引用它的<b>所有</b>设计根都过期 → 按目录版本核对整库排重算</td></tr>
+        <tr><td>隐含管段的邻居只动了位姿</td><td>管段要重连 → 便宜路径改判整根重算</td></tr>
+        <tr><td class="c-room">房间定义（PANE / FRMW / SBFR / CWALL / CFLOOR）变了</td><td class="c-room">该库全部构件的<b>房间归属</b>重算；几何本身不重生成</td></tr>
+        <tr><td>结构连接：SCTN-A 端头连在 SCTN-B 上（A 的 <code>CREF</code> → B，B 的 <code>JOIS</code>/<code>JOIE</code> 回指 A）；B 挪位或换截面</td><td>A 的端头是贴着 B 定位 / 切割的 → <b>对端 A 的根也重算</b>（E3D EVALAT 同此；本系统同库版已接线，开关默认关）</td></tr>
+        <tr><td>电缆端点：EQUI / ELCONN 挪位或接线变；CWBRAN 桥架分支变</td><td>接在它上面的 CABLE（<code>STAREF</code>/<code>ENDREF</code> 反向查）、路过这条桥架的电缆都要重画；电缆几何尚未按路由落地，几何上暂无表现</td></tr>
+        <tr><td>管道连接（<code>HREF</code> / <code>TREF</code>）</td><td>不需要额外联动：E3D 把接头位置回写进 BRAN 自己的 <code>HPOS/TPOS</code>，变的是 BRAN 自己</td></tr>
+        <tr><td>UDA 定义依赖、<code>XRPNTR</code> 交叉引用</td><td class="c-bad">明确不做（不参与几何）</td></tr>
+      </table>
+      <div class="ex"><div class="t">元件库的例子</div>规格员把 <code>/SPEC-A/ELBO-90-100</code> 这个 SCOM 的几何集改了一个参数：设计库里没有任何一行属性变化，但所有用了它的 BRAN 形状都变了——所以模型侧记「这个设计库照的是哪一版目录」，目录版本一变，整库引用它的根重算。</div>
+    </div>
+  </div>
+
+  <div class="foot"><span>词条：模型凭证前移 (advance) · 联动更新（唯一索引 <code>docs/2026-09-04_model-cascade-update-inventory.md</code> §1）· 反向引用 · 关联展开链 · 整库房间重算</span><span class="nav"><span data-go="prev">‹</span> 4 / 5 <span data-go="next">›</span></span></div>
+</section>
+
+<!-- ============ 5 / 5 ============ -->
+<section class="slide" data-n="5">
+  <div class="kicker">对照 · 5 / 5</div>
+  <h1>属性更新 vs 模型更新：差别一览 <small>触发 · 粒度 · 版本 · 失败 · 一致性</small></h1>
+  <p class="lede">两者共用<b>同一份</b>「S→T 谁变了」的文件差分，从那一刻起分道：数据面追求<b>每一版都到</b>，模型面追求<b>只算该算的</b>。</p>
+
+  <div class="grid cols-7-5">
+    <div class="card">
+      <table>
+        <tr><th style="width:16%"></th><th class="c-data" style="width:42%">属性更新（数据面）</th><th class="c-model">模型更新（模型面）</th></tr>
+        <tr><td><b>什么时候发生</b></td><td>库文件每前进一个会话就发生，无条件</td><td>只在变化被判为 Regen / TransformOnly、或被联动点名时</td></tr>
+        <tr><td><b>更新的单位</b></td><td>元素（refno）：一行一条净变化</td><td>生成根：整根重算 / 整根刚体移动 / 整根删除</td></tr>
+        <tr><td><b>输入</b></td><td>库文件 S→T 两端记录的差分</td><td>库文件 T 时刻本身（纯函数，不看库里的属性行）</td></tr>
+        <tr><td><b>结果长什么样</b></td><td>属性行整行替换；删除留墓碑</td><td>几何记录 + 世界变换 + 房间归属边；未变根原样保留</td></tr>
+        <tr><td><b>版本凭证</b></td><td><code class="c-wm">applied_sesno</code>：数据追平到哪个会话</td><td><code class="c-wm">model_sesno</code>：模型追平到哪一版数据；≤ applied_sesno</td></tr>
+        <tr><td><b>失败了会怎样</b></td><td>整窗不推进水位，下次按同一区间重放（幂等）</td><td>只这一根留痕、不阻断数据水位；下一窗碰到 / 按需打开 / 启动补算时再算</td></tr>
+        <tr><td><b>用户看到什么</b></td><td>属性面板 / 搜索立刻是新值</td><td>模型稍后追平；期间「新属性 + 旧模型」是被承认的中间态</td></tr>
+        <tr><td><b>什么叫「一致」</b></td><td colspan="2"><code>applied_sesno &gt; 0</code> ∧ <code>model_sesno == applied_sesno</code> ∧ 没有还在算的根 → 数据与模型一致；落后是常态不是告警</td></tr>
+      </table>
+    </div>
+
+    <div class="card b-wm">
+      <h3><span class="tag c-wm">推论</span>「模型版本」比「属性版本」稀疏</h3>
+      <p class="note" style="margin-top:0">一个交付单元的<b>模型版本表</b>只列它被碰到过的会话，每条带一档影响：<code>delivery</code>（单元出现）/ <code>tombstone</code>（被删）/ <code>mesh</code>（形状变）/ <code>placement</code>（只挪位）/ <code>noop</code>（碰到了但全是 Skip）。</p>
+      <div class="ex"><div class="t">例：BRAN /P-101-B1 的一生</div>
+        <div>sesno 12 建成 → <code>delivery</code></div>
+        <div>sesno 15 改 <code>DESC</code> → <code>noop</code>（属性版本 +1，模型版本不变）</div>
+        <div>sesno 18 换弯头 → <code>mesh</code></div>
+        <div>sesno 21 整条挪位 → <code>placement</code></div>
+        <div>sesno 30 被删 → <code>tombstone</code></div>
+        <div class="note" style="margin-top:6px">属性历史有 5 个版本，模型对比只需要看 12 / 18 / 21 / 30 四个；版本对比时 15 那一版不必重新生成几何。</div>
+      </div>
+      <ul>
+        <li>模型版本是从会话链<b>按需算出来</b>的派生量，不落库；判据与生成路是同一把尺子，两边不会各说一套。</li>
+        <li>历史投影（看某一版的几何）也按需算、不进库、不进水位。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="foot"><span>词条：应用水位 · 模型水位 · 库一致性判决 · 生成源版本 · 单元版本表 · 历史投影（ADR-060 · ADR-079 · ADR-081）</span><span class="nav"><span data-go="prev">‹</span> 5 / 5 <span data-go="next">›</span></span></div>
+</section>
+
+</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var i = Math.max(0, Math.min(slides.length - 1, (parseInt(location.hash.slice(1), 10) || 1) - 1));
+  function show(n) {
+    i = (n + slides.length) % slides.length;
+    slides.forEach(function (s, k) { s.classList.toggle('active', k === i); });
+    history.replaceState(null, '', '#' + (i + 1));
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); show(i + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); show(i - 1); }
+    else if (e.key === 'Home') { show(0); }
+    else if (e.key === 'End') { show(slides.length - 1); }
+  });
+  document.querySelectorAll('[data-go]').forEach(function (el) {
+    el.addEventListener('click', function () { show(el.dataset.go === 'next' ? i + 1 : i - 1); });
+  });
+  show(i);
+})();
+</script>
+</body>
+</html>

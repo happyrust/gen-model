@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.1.30"
+version = "0.1.31"
 edition = "2024"
 description = "AVEVA E3D incremental parsing and geometry service"
 build = "build.rs"
@@ -288,6 +288,17 @@ aios_core = { path = "../vendor/old-aios-core" }
 # 曾经还有第四路：parse_pdms_db → pdmsdb_engine_v2（git = pdms-io.git）。它是
 # old-pdms-io 那个仓留在依赖图里的最后一条尾巴，2026-09-04 随 parse_pdms_db 一起断了，
 # 手动 patch 那两行注释也一并删除——图里没有这个包，patch 无处可打。
+
+# 配置向导第③步问「这个端口有人占着吗」，判据必须与 Start-AMS.ps1 的
+# GetActiveTcpListeners() 一致：查监听表，不靠绑定试探。通配监听不设
+# SO_EXCLUSIVEADDRUSE，别人持着 0.0.0.0:P 时再绑 127.0.0.1:P 在 Windows 上照样成功，
+# 拿绑定当判据就会把占着的端口报成可用（web_service/setup.rs::listening_ports）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
 
 [dev-dependencies]
 # 校审域 handler 级单测用 `tower::ServiceExt::oneshot` 直接打 Router（旧端 82 个单测同一写法，

@@ -15,8 +15,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
-use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
-use crate::fast_model::{spatial_clearance, spatial_query};
+use crate::data_interface::on_demand_model::{
+    ModelGenerationInProgress, ModelStaleAfterGeneration, UnresolvableRoot,
+};
+use crate::fast_model::{spatial_clearance, spatial_query, surface_clearance};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
 #[derive(Debug, Default, Deserialize)]
@@ -207,6 +209,18 @@ fn model_cache_health(store_reachable: bool) -> Value {
     // 在读锁里走一遍（根 / 元素的量级）；上限（0 = 不限）并排给，现场对着 RSS 定数字。
     let overlay = store.overlay_footprint();
     let element_cache = crate::fast_model::e3d_model_service::generation_input_cache_footprint();
+    // ADR-084：生成输入缓存这一维（库数）——上限 / 现留几库 / 累计逐出；`databases[]` 每条带 `last_used_tick`。
+    let generation_inputs = crate::fast_model::e3d_model_service::generation_input_cache_limits();
+    // 内存控制计划 P4：历史快照那几格——回执表的条数 / 上限 / 累计顶掉，加投影里每格的记录数与估算字节
+    // （与 overlay 同一把尺；此前 `/health` 只数 `Current`，这几格看不见）。
+    let historical_scopes = store.historical_footprint();
+    let historical_store = crate::fast_model::historical_model::HistoricalModelStore::try_global()
+        .map(|store| store.stats())
+        .unwrap_or(crate::fast_model::historical_model::HistoricalStoreStats {
+            snapshots: 0,
+            max_snapshots: crate::options::model_historical_snapshots_max(),
+            evicted_total: 0,
+        });
     let mut health = json!({
         "resident_records": resident_records,
         "resident_roots": resident_roots,
@@ -215,6 +229,7 @@ fn model_cache_health(store_reachable: bool) -> Value {
             "roots": overlay.roots,
             "acks": overlay.acks,
             "approx_bytes": overlay.approx_bytes,
+            "receipt_room_bytes": overlay.receipt_room_bytes,
             "max_roots": crate::options::model_overlay_max_roots(),
             "evicted_total": store.overlay_evictions_total(),
         },
@@ -223,7 +238,19 @@ fn model_cache_health(store_reachable: bool) -> Value {
             "max_entries": crate::options::model_element_cache_max_entries(),
             "parsed_entries": element_cache.iter().map(|db| db.parsed_entries).sum::<usize>(),
             "approx_bytes": element_cache.iter().map(|db| db.approx_bytes).sum::<usize>(),
+            "max_dbnums": generation_inputs.max_dbnums,
+            "resident_dbnums": generation_inputs.resident_dbnums,
+            "evicted_dbnums_total": generation_inputs.evicted_dbnums_total,
             "databases": element_cache,
+        },
+        "historical": {
+            "snapshots": historical_store.snapshots,
+            "max_snapshots": historical_store.max_snapshots,
+            "evicted_total": historical_store.evicted_total,
+            "scopes": historical_scopes.len(),
+            "records": historical_scopes.iter().map(|scope| scope.footprint.records).sum::<usize>(),
+            "approx_bytes": historical_scopes.iter().map(|scope| scope.footprint.approx_bytes).sum::<usize>(),
+            "snapshots_detail": historical_scopes,
         },
     });
     health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
@@ -870,6 +897,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "bootstrap": crate::data_interface::initialization_phase::InitializationCoordinator::global()
             .snapshot()
             .room_bootstrap,
+        // 反向传播停放给别的库的根级工作项（ADR-073 D13，U3 b 档）：`{dbnum: {entries, elements, oldest_age_ms,
+        // segments}}`，进程内读数；`{}` = 谁也不欠谁。停放物由那个库的下一个任务消费、成功后清空。
+        "parked": crate::data_interface::room_reverse::parked_health(),
     });
     let read_through = state.element_attributes.health().await;
     Json(json!({
@@ -1244,9 +1274,7 @@ pub async fn mesh_glb(
             "geo_hash 只允许字母、数字与下划线: {stem}"
         )));
     }
-    let path = aios_core::get_db_option()
-        .get_meshes_path()
-        .join(format!("{stem}.mesh"));
+    let path = crate::options::meshes_dir().join(format!("{stem}.mesh"));
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1345,6 +1373,22 @@ impl From<spatial_query::SpatialQueryError> for SpatialApiError {
             SpatialQueryError::BadRequest(message) => Self::Api(ApiError::bad_request(message)),
             SpatialQueryError::NotFound(message) => Self::Api(ApiError::not_found(message)),
             SpatialQueryError::NotReady(state) => Self::NotReady(state),
+            // 给了 `rooms=` 而房间体制答不出来（开关关 / 模型未就绪 / 非 hd·hh 构建）：422，`detail.status`
+            // 与 `GET /spatial/rooms` 的 `status` 同一套字面值，客户端据此收起房间块并写原因（ADR 0067，Q5）。
+            SpatialQueryError::RoomsUnavailable { status, reason } => Self::Api(
+                ApiError::precondition(format!(
+                    "房间过滤此刻不可用（{status}）{}",
+                    reason
+                        .as_deref()
+                        .map(|reason| format!("：{reason}"))
+                        .unwrap_or_default()
+                ))
+                .with_detail(json!({
+                    "reason": "rooms_unavailable",
+                    "status": status,
+                    "message": reason,
+                })),
+            ),
             SpatialQueryError::Internal(error) => Self::Api(ApiError::from_domain(error)),
         }
     }
@@ -1474,7 +1518,7 @@ pub async fn spatial_nearby(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response = spatial_query::nearby(&params, centerline.as_ref(), service.as_ref()).await?;
+    let response = spatial_query::nearby(&params, centerline.as_ref(), service).await?;
     Ok(Json(response))
 }
 
@@ -1485,6 +1529,27 @@ fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
         spatial_query::Target::Refno(refno) => Some(refno),
         spatial_query::Target::Position(_) => None,
     }
+}
+
+/// GET /api/v1/spatial/rooms — 在册房间清单 + 房间体制此刻的状态（spec §4.13.4；plant3d-web ADR 0067 / 计划 2026-09-20）。
+/// 给抽屉「按房间过滤」画可搜索下拉：`status` 不是 `ready` / `degraded` 时清单为空、`reason` 说为什么，客户端整块收起。
+/// 只过身份门、只读常驻房间模型，不看空间树状态、不碰 `GLOBAL_AABB_TREE`；名字经 `DirectTreeService::name_of` 只对在册房间补（百级）。
+pub async fn spatial_rooms(
+    State(state): State<AppState>,
+    Query(request): Query<ProjectReq>,
+) -> Result<Json<crate::fast_model::spatial_rooms::RoomsResponse>, SpatialApiError> {
+    resolve_identity(&state, &request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = tokio::task::spawn_blocking(move || {
+        crate::fast_model::spatial_rooms::list_rooms(service.as_ref())
+    })
+    .await
+    .map_err(|join| ApiError::from_domain(anyhow::anyhow!("rooms task aborted: {join}")))?;
+    Ok(Json(response))
 }
 
 /// GET /api/v1/spatial/nearby/refnos — 同参、不分页的完整命中 refno 集（spec §4.13）。
@@ -1501,8 +1566,103 @@ pub async fn spatial_nearby_refnos(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let response =
-        spatial_query::nearby_refnos(&params, centerline.as_ref(), service.as_ref()).await?;
+    let response = spatial_query::nearby_refnos(&params, centerline.as_ref(), service).await?;
+    Ok(Json(response))
+}
+
+/// 树路由的叶子选择器原文（叶子超上限后只取一组：`unit=<单元 refno>` / `other_noun=<NOUN>`）+ `tubes=`（BRAN 单元下补直段行，
+/// 缺省关；spec §4.13.5「`tubes=1`」，计划 `docs/plans/2026-09-22-room-tree-tube-segments-backend-dev-plan.md`）。
+#[derive(Debug, Default, Deserialize)]
+pub struct RawLeafSelector {
+    pub unit: Option<String>,
+    pub other_noun: Option<String>,
+    pub tubes: Option<String>,
+}
+
+/// `GET /api/v1/spatial/nearby/tree` 与 `rooms/{refno}/tree` 的 query 串：身份三格 + `nearby` 全部参数原文 + 叶子选择器。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialTreeReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: spatial_query::RawSpatialQuery,
+    #[serde(flatten)]
+    pub leaves: RawLeafSelector,
+}
+
+fn tree_options(
+    raw: &RawLeafSelector,
+) -> Result<crate::fast_model::spatial_tree_view::TreeOptions, SpatialApiError> {
+    use crate::fast_model::spatial_tree_view::{LeafSelector, TreeOptions};
+    let only = LeafSelector::parse(raw.unit.as_deref(), raw.other_noun.as_deref())
+        .map_err(ApiError::bad_request)?;
+    let tubes = spatial_query::parse_flag("tubes", raw.tubes.as_deref(), false)
+        .map_err(ApiError::bad_request)?;
+    Ok(TreeOptions {
+        only,
+        tubes,
+        ..TreeOptions::default()
+    })
+}
+
+/// GET /api/v1/spatial/nearby/tree — 同 `nearby` 的一次查询折成房间层级树（spec §4.13.5；plant3d-web ADR 0068）：
+/// `rooms=` 必填，命中不分页、按 refno 去重，折成 房间 → 专业 → 最小交付单元类型 → 单元 → 构件；`sort` / `page` /
+/// `per_page` 收下不生效。后半程（过滤 + 派生专业 / 单元根 + 折树）与 `nearby` 一样在阻塞线程上跑；`tubes=1` 时中间多一步
+/// 按树里出现的 BRAN 单元读直段（spec §4.13.5「`tubes=1`」，2026-09-22），缺省关、关着时响应逐字节不变。
+pub async fn spatial_nearby_tree(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialTreeReq>,
+) -> Result<Json<crate::fast_model::spatial_tree_view::TreeResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params =
+        spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    let options = tree_options(&request.leaves)?;
+    let centerline = prepare_centerline(params.source_mode, branch_of(&params)).await?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_tree(
+        &params,
+        centerline.as_ref(),
+        service,
+        crate::data_interface::generation_root::configured_delivery_unit_types(),
+        options,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// GET /api/v1/spatial/rooms/{refno}/tree — 一间在册房间的房间层级树（spec §4.13.6；plant3d-web ADR 0068，给模型树
+/// ROOM 标签页浏览一间房）：以房间自身的包围盒为范围（`radius` 是外扩量、缺省 0）、`rooms=` 它自己、不算它自己的面板；
+/// 响应同 `nearby/tree`，`rooms[]` 恒一条。房间从没生成过面板模型（投影与树里都没有盒）→ 404，不在册 → 400。
+pub async fn spatial_room_tree(
+    State(state): State<AppState>,
+    Path(refno): Path<String>,
+    Query(request): Query<SpatialTreeReq>,
+) -> Result<Json<crate::fast_model::spatial_tree_view::TreeResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let room = RefU64::from_str(refno.trim())
+        .ok()
+        .filter(RefU64::is_valid)
+        .ok_or_else(|| ApiError::bad_request(format!("房间 refno 格式非法（应为 a_b）: {refno}")))?;
+    let params = crate::fast_model::spatial_tree_view::room_tree_params(room, &request.query)
+        .map_err(ApiError::bad_request)?;
+    let options = tree_options(&request.leaves)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = spatial_query::nearby_tree(
+        &params,
+        None,
+        service,
+        crate::data_interface::generation_root::configured_delivery_unit_types(),
+        options,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1533,6 +1693,77 @@ pub async fn spatial_nearest_clearance(
     let response =
         spatial_clearance::nearest_clearance(&params, centerline.as_ref(), service.as_ref())
             .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/v1/spatial/surface-clearance` 的 query 串：身份三格 + 参数原文。
+#[derive(Debug, Default, Deserialize)]
+pub struct SpatialSurfaceClearanceReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(flatten)]
+    pub query: surface_clearance::RawSurfaceClearanceQuery,
+}
+
+/// GET /api/v1/spatial/surface-clearance — 一对构件（典型是选中构件 × 选中的墙）用两侧真实三角
+/// 网格算外表面最近距离与两侧最近点，命中墙主面时附一条沿法向的垂距射线（plant3d-web
+/// `docs/plans/2026-09-17-component-to-wall-surface-clearance-plan.md`，决策 d-428）。
+///
+/// 只读：网格来自磁盘 `.mesh` + `inst_relate` / `tubi_relate` 行，不碰 `GLOBAL_AABB_TREE`。
+/// 404 `not_found`（detail.reason = `no_model_mesh`）：任一侧没有模型面行或网格文件；
+/// 422 `precondition`（detail.reason = `target_not_wall`）：`target_kind=wall` 而目标不在墙族。
+pub async fn spatial_surface_clearance(
+    State(state): State<AppState>,
+    Query(request): Query<SpatialSurfaceClearanceReq>,
+) -> Result<Json<surface_clearance::SurfaceClearanceResponse>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params = surface_clearance::SurfaceClearanceParams::parse(&request.query)
+        .map_err(ApiError::bad_request)?;
+    // TYPE 从属性面读；读不出（零解析库 / 元素不在本 MDB）就给空串，模块里用叶子行的 `generic` 兜底。
+    let nouns = match state.direct_tree.get().await {
+        Ok(service) => (
+            service.noun_of(params.source).unwrap_or_default(),
+            service.noun_of(params.target).unwrap_or_default(),
+        ),
+        Err(_) => (String::new(), String::new()),
+    };
+    let meshes_dir = crate::options::meshes_dir();
+    let response = surface_clearance::run(&aios_core::SUL_DB, meshes_dir, &params, nouns)
+        .await
+        .map_err(|error| match error {
+            surface_clearance::SurfaceClearanceError::NoModelMesh { refno, detail } => {
+                ApiError::not_found(format!("{refno} 没有可用的模型网格: {detail}"))
+                    .with_detail(serde_json::json!({ "reason": "no_model_mesh", "refno": refno }))
+            }
+            surface_clearance::SurfaceClearanceError::TargetNotWall { refno, noun } => {
+                ApiError::precondition(format!(
+                    "target_kind=wall 要求目标是墙族（{}），{refno} 是 {}",
+                    surface_clearance::WALL_NOUNS.join(" / "),
+                    if noun.is_empty() {
+                        "未知类型"
+                    } else {
+                        noun.as_str()
+                    }
+                ))
+                .with_detail(serde_json::json!({
+                    "reason": "target_not_wall", "refno": refno, "noun": noun,
+                    "wall_nouns": surface_clearance::WALL_NOUNS,
+                }))
+            }
+            surface_clearance::SurfaceClearanceError::SharedLeavesOnly {
+                source,
+                target,
+                trimmed_side,
+            } => ApiError::precondition(format!(
+                "{source} 与 {target} 在模型面上是同一批叶子（{} 侧剔除与另一侧重合的叶子后为空），没有可比的第二个表面",
+                trimmed_side.as_str()
+            ))
+            .with_detail(serde_json::json!({
+                "reason": "shared_leaves_only", "source": source, "target": target,
+                "trimmed_side": trimmed_side.as_str(),
+            })),
+            surface_clearance::SurfaceClearanceError::Other(error) => ApiError::from_domain(error),
+        })?;
     Ok(Json(response))
 }
 
@@ -2638,22 +2869,171 @@ pub async fn dbnum_data_reinitialize(
         .map_err(|e| ApiError::from_domain(e.into()))
 }
 
+/// 在 `anyhow` 链上找某个领域错误：先看顶层（`Error::new(E)` 与 `.context(..)` 包着的
+/// `downcast_ref` 都认得），再沿 `source()` 逐级往下看。
+///
+/// 后一半是为 `generation_flight::Flights` 留的：并发的 `/model/ensure` 共用一个生产者，
+/// 失败被包成 `OutcomeError`、原错只挂在它的 `source()` 上，顶层 `downcast_ref` 一个字都
+/// 看不见——2026-09-20 夹具实测：启动批次正在生成某根时再来一次 `/model/ensure`，
+/// 「生成根 … 正在后台生成」回的是 500 `internal`，不是约定的 409。
+fn domain_cause<T: std::error::Error + Send + Sync + 'static>(error: &anyhow::Error) -> Option<&T> {
+    error
+        .downcast_ref::<T>()
+        .or_else(|| error.chain().find_map(|cause| cause.downcast_ref::<T>()))
+}
+
 /// 解不出生成根不是服务端的错，客户端对这三种的出路也各不相同——都压成
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
     let message = format!("{error:#}");
-    if error.downcast_ref::<InitializationNotReady>().is_some() {
+    if domain_cause::<InitializationNotReady>(&error).is_some() {
         return ApiError::initialization_not_ready(message);
     }
-    if error.downcast_ref::<ModelGenerationInProgress>().is_some() {
+    if domain_cause::<ModelGenerationInProgress>(&error).is_some()
+        || domain_cause::<ModelStaleAfterGeneration>(&error).is_some()
+    {
+        // 两种都是「重试就好」的 409；文案不同，排障时分得开（后者说得出是源前移还是目标核对不过）。
         return ApiError::conflict(message);
     }
-    match error.downcast_ref::<UnresolvableRoot>() {
+    match domain_cause::<UnresolvableRoot>(&error) {
         Some(UnresolvableRoot::Container) => ApiError::container(message),
         Some(UnresolvableRoot::NotFound) => ApiError::not_found(message),
         Some(UnresolvableRoot::NoRoot) => ApiError::precondition(message),
         None => ApiError::from_domain(error),
     }
+}
+
+/// `GET /api/v1/datacenter/deletes` 的查询串（spec §4.14）。列表参数按本服务惯例逗号分隔。
+#[derive(Debug, Default, Deserialize)]
+pub struct DatacenterDeletesReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    /// 逗号分隔的 ZONE refno（`a/b` / `a_b`）：只要 `zone_refno` 在其中的行。缺省不按 ZONE 筛。
+    #[serde(default)]
+    pub zone_refno: Option<String>,
+    #[serde(default)]
+    pub dbnum: Option<u32>,
+    /// `deleted` | `renamed`（大小写不敏感）。缺省两种都要。
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// 只要发生在这一版及之后（`sesno >= since_sesno`）的行。须同时给 `dbnum`：sesno 是各库自己的
+    /// 会话号，跨库比大小没有意义，缺 `dbnum` → 400。
+    #[serde(default)]
+    pub since_sesno: Option<u32>,
+    /// 只要 `sesno_time >= from` 的行（含）。RFC3339 带时区，或纯日期 `YYYY-MM-DD`（北京时间零点）。
+    /// 不要求 `dbnum`：时刻跨库可比。
+    #[serde(default)]
+    pub from: Option<String>,
+    /// 只要 `sesno_time < to` 的行（不含），写法同 `from`：`to=2026-09-28` 到 9/28 北京时间零点为止，
+    /// 即含 9/27 全天。
+    #[serde(default)]
+    pub to: Option<String>,
+    /// 一页几条：缺省 500、上限 5000（超过夹到上限，不报错）。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 跳过前几条。
+    #[serde(default)]
+    pub start: Option<usize>,
+}
+
+/// `from` / `to` 的两种写法：RFC3339 带时区，或纯日期 `YYYY-MM-DD`（按北京时间零点）。
+fn datacenter_deletes_time_bound(
+    name: &str,
+    raw: Option<&str>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, ApiError> {
+    use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(time) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(time.with_timezone(&Utc)));
+    }
+    let beijing = FixedOffset::east_opt(8 * 3600).expect("+08:00 is a valid offset");
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| beijing.from_local_datetime(&midnight).single())
+        .map(|time| Some(time.with_timezone(&Utc)))
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "{name} 要 RFC3339 带时区（如 2026-09-21T00:00:00+08:00，查询串里 + 须写成 %2B）\
+                 或纯日期 YYYY-MM-DD，收到 {raw}"
+            ))
+        })
+}
+
+/// 查询串 → 校验过的过滤条件。refno 解不出 / `reason` 不是两个枚举之一 / `since_sesno` 没带
+/// `dbnum` / `from`、`to` 解不出或 `from >= to` → 400 `bad_request`。
+pub(super) fn datacenter_deletes_filter(
+    req: &DatacenterDeletesReq,
+) -> Result<crate::data_interface::datacenter_delete_reader::DeleteRecordFilter, ApiError> {
+    use crate::data_interface::datacenter_delete_reader::{DeleteReason, DeleteRecordFilter};
+    let mut zone_refnos = Vec::new();
+    for raw in req
+        .zone_refno
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        let refno = RefU64::from_str(raw)
+            .ok()
+            .filter(RefU64::is_valid)
+            .ok_or_else(|| ApiError::bad_request(format!("zone_refno 不是合法的 refno: {raw}")))?;
+        zone_refnos.push(refno);
+    }
+    let reason = match req.reason.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(DeleteReason::parse(raw).ok_or_else(|| {
+            ApiError::bad_request(format!("reason 只认 deleted / renamed，收到 {raw}"))
+        })?),
+    };
+    if req.since_sesno.is_some() && req.dbnum.is_none() {
+        return Err(ApiError::bad_request(
+            "since_sesno 须与 dbnum 同用：sesno 是各库自己的会话号",
+        ));
+    }
+    let from = datacenter_deletes_time_bound("from", req.from.as_deref())?;
+    let to = datacenter_deletes_time_bound("to", req.to.as_deref())?;
+    if let Some((from, to)) = from.zip(to).filter(|(from, to)| from >= to) {
+        return Err(ApiError::bad_request(format!(
+            "from 必须早于 to（半开区间 [from, to)），收到 from={} to={}",
+            from.to_rfc3339(),
+            to.to_rfc3339()
+        )));
+    }
+    Ok(DeleteRecordFilter {
+        zone_refnos,
+        dbnum: req.dbnum,
+        reason,
+        since_sesno: req.since_sesno,
+        from,
+        to,
+        start: req.start.unwrap_or(0),
+        limit: req.limit.unwrap_or(0),
+    })
+}
+
+/// GET /api/v1/datacenter/deletes — 交付删除记录只读分页（spec §4.14；plant-ui #1 的对外口）。
+///
+/// 读 `datacenter_delete`（交付单元自身被删 / 改位号时增量随窗落下的「这个 refno 曾以哪个位号
+/// 发布过、如今该位号要从中台删掉」），每行附 `published`（`datacenter_version:{refno}` 有没有行）。
+/// **只读**：gen-model 对这张表只写不删（plan 2026-09-22 D7），删行归 rs-server 在中台 `remove-apply`
+/// 成功之后；不带 `instance_code`（那是 rs-server 的编码规则，调用方拿 `name` 原文自己编）。
+pub async fn datacenter_deletes(
+    State(state): State<AppState>,
+    Query(req): Query<DatacenterDeletesReq>,
+) -> Result<Json<crate::data_interface::datacenter_delete_reader::DeleteRecordsPage>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let filter = datacenter_deletes_filter(&req)?;
+    let page = crate::data_interface::datacenter_delete_reader::list_delete_records(
+        &aios_core::SUL_DB,
+        &filter,
+    )
+    .await
+    .map_err(ApiError::from_domain)?;
+    Ok(Json(page))
 }
 
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
@@ -3308,7 +3688,7 @@ pub async fn model_records(
         }
     }
     let mut memory_overlay_used = false;
-    let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
+    let mut per_root: Vec<(String, Vec<crate::fast_model::model_record_reader::ModelRecord>)> =
         Vec::with_capacity(roots.len());
     for (name, root) in roots.iter().zip(&parsed_roots) {
         // Durable reads never hydrate kv-mem.  A resident receipt is a complete
@@ -3317,10 +3697,14 @@ pub async fn model_records(
         let memory_overlay = store.receipt(scope, *root).is_some();
         memory_overlay_used |= memory_overlay;
         let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-        let records =
-            crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
-                .await
-                .map_err(ApiError::from_domain)?;
+        // 每条记录 = `GeomInstQuery` 原形 + 隐式管身才有的 `tube{ordinal, from, to}`（spec §4.5，方案 B T2）：
+        // 与树路由 `tubes=1` 的直段同一身份四元组，前端据此把直段行对上场景对象。
+        let records = crate::fast_model::model_record_reader::model_records_of_root(
+            &aios_core::SUL_DB,
+            refno,
+        )
+        .await
+        .map_err(ApiError::from_domain)?;
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
@@ -3401,6 +3785,121 @@ pub async fn model_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GET /api/v1/datacenter/deletes` 的查询串校验（spec §4.14）：逗号分隔的 ZONE 两种写法都收、
+    /// `reason` 大小写不敏感、缺省全空；refno 解不出 / `reason` 不认 / `since_sesno` 缺 `dbnum`
+    /// → 400 `bad_request`。
+    #[test]
+    fn datacenter_deletes_filter_validates_the_query_string() {
+        use crate::data_interface::datacenter_delete_reader::{DeleteReason, DeleteRecordFilter};
+
+        let empty = datacenter_deletes_filter(&DatacenterDeletesReq::default()).expect("empty ok");
+        assert_eq!(empty, DeleteRecordFilter::default());
+
+        let full = datacenter_deletes_filter(&DatacenterDeletesReq {
+            zone_refno: Some(" 7997/5, 7997_6 ,".into()),
+            dbnum: Some(7997),
+            reason: Some("Renamed".into()),
+            since_sesno: Some(12),
+            limit: Some(20),
+            start: Some(40),
+            ..Default::default()
+        })
+        .expect("full ok");
+        assert_eq!(
+            full,
+            DeleteRecordFilter {
+                zone_refnos: vec![RefU64((7997u64 << 32) | 5), RefU64((7997u64 << 32) | 6)],
+                dbnum: Some(7997),
+                reason: Some(DeleteReason::Renamed),
+                since_sesno: Some(12),
+                from: None,
+                to: None,
+                start: 40,
+                limit: 20,
+            }
+        );
+
+        let bad_zone = datacenter_deletes_filter(&DatacenterDeletesReq {
+            zone_refno: Some("not-a-refno".into()),
+            ..Default::default()
+        })
+        .expect_err("bad zone rejected");
+        assert_eq!(bad_zone.status, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_zone.code, "bad_request");
+
+        let bad_reason = datacenter_deletes_filter(&DatacenterDeletesReq {
+            reason: Some("dropped".into()),
+            ..Default::default()
+        })
+        .expect_err("bad reason rejected");
+        assert_eq!(bad_reason.status, StatusCode::BAD_REQUEST);
+        assert!(
+            bad_reason.message.contains("deleted / renamed"),
+            "{}",
+            bad_reason.message
+        );
+
+        let since_without_dbnum = datacenter_deletes_filter(&DatacenterDeletesReq {
+            since_sesno: Some(12),
+            ..Default::default()
+        })
+        .expect_err("since_sesno without dbnum rejected");
+        assert_eq!(since_without_dbnum.status, StatusCode::BAD_REQUEST);
+        assert_eq!(since_without_dbnum.code, "bad_request");
+        assert!(
+            since_without_dbnum.message.contains("dbnum"),
+            "{}",
+            since_without_dbnum.message
+        );
+
+        let date_only = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-21".into()),
+            to: Some("2026-09-28".into()),
+            ..Default::default()
+        })
+        .expect("date-only ok");
+        let explicit = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-21T00:00:00+08:00".into()),
+            to: Some("2026-09-27T16:00:00Z".into()),
+            ..Default::default()
+        })
+        .expect("rfc3339 ok");
+        assert_eq!(
+            (date_only.from, date_only.to),
+            (explicit.from, explicit.to),
+            "纯日期 = 北京时间零点"
+        );
+        assert_eq!(
+            date_only.from.map(|time| time.to_rfc3339()).as_deref(),
+            Some("2026-09-20T16:00:00+00:00")
+        );
+
+        let unencoded_plus = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-21T00:00:00 08:00".into()),
+            ..Default::default()
+        })
+        .expect_err("a + decoded into a space is rejected");
+        assert_eq!(unencoded_plus.status, StatusCode::BAD_REQUEST);
+        assert!(
+            unencoded_plus.message.contains("%2B"),
+            "{}",
+            unencoded_plus.message
+        );
+
+        let empty_interval = datacenter_deletes_filter(&DatacenterDeletesReq {
+            from: Some("2026-09-22".into()),
+            to: Some("2026-09-22".into()),
+            ..Default::default()
+        })
+        .expect_err("from >= to rejected");
+        assert_eq!(empty_interval.status, StatusCode::BAD_REQUEST);
+        assert!(
+            empty_interval.message.contains("[from, to)"),
+            "{}",
+            empty_interval.message
+        );
+    }
 
     fn roots(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()
@@ -3679,8 +4178,8 @@ mod tests {
             "必须过 geo_hash 字符集门再拼路径: {body}"
         );
         assert!(
-            body.contains("get_meshes_path()"),
-            "网格目录必须与生成侧同一份配置（meshes_path）: {body}"
+            body.contains("crate::options::meshes_dir()"),
+            "网格目录必须与生成侧走同一个解析口（options::meshes_dir，ADR-068 D7）: {body}"
         );
     }
 
@@ -4138,6 +4637,80 @@ mod tests {
             .0;
         assert!(ensure.contains("InitializationNotReady"));
         assert!(ensure.contains("initialization_not_ready"));
+        // 后验失败（生成完了却判成不新）与「正在后台生成」是两种错，都得认得出、都回 409。
+        assert!(ensure.contains("ModelGenerationInProgress"));
+        assert!(ensure.contains("ModelStaleAfterGeneration"));
+    }
+
+    /// 领域错误穿过 `generation_flight::Flights` 之后只挂在 `source()` 上；`ensure_error`
+    /// 必须沿链找，否则并发第二个 `/model/ensure` 撞上「正在后台生成」回的是 500 而不是 409
+    ///（2026-09-20 夹具实测）。四种领域错各走一遍：直给、`.context` 包着、经共享航班。
+    #[tokio::test]
+    async fn ensure_error_classifies_domain_causes_buried_under_the_shared_flight() {
+        use crate::data_interface::generation_flight::Flights;
+        use crate::data_interface::on_demand_model::UnresolvableRoot;
+
+        async fn through_flight(error: anyhow::Error) -> anyhow::Error {
+            Flights::<usize>::default()
+                .run("shared".into(), async move { Err(error) })
+                .await
+                .expect_err("the flight relays the producer's failure")
+        }
+
+        let in_progress = || {
+            anyhow::Error::new(ModelGenerationInProgress {
+                root_refno: "24382/124".into(),
+            })
+        };
+        // 直给与 `.context` 包着的：原本就认得，改法不得把它们弄丢。
+        assert_eq!(ensure_error(in_progress()).code, "conflict");
+        assert_eq!(
+            ensure_error(in_progress().context("按需生成 24382/124")).code,
+            "conflict"
+        );
+        // 经共享航班：顶层是 `OutcomeError`，原错在 `source()` 上。
+        let shared = through_flight(in_progress()).await;
+        assert!(
+            shared.downcast_ref::<ModelGenerationInProgress>().is_none(),
+            "前提：共享航班的顶层 downcast 看不见原错，否则这条钉没在钉任何东西"
+        );
+        let classified = ensure_error(shared);
+        assert_eq!(classified.status, StatusCode::CONFLICT);
+        assert_eq!(classified.code, "conflict");
+        assert!(
+            classified.message.contains("正在后台生成"),
+            "{}",
+            classified.message
+        );
+
+        let stale = through_flight(anyhow::Error::new(ModelStaleAfterGeneration {
+            root_refno: "24382/124".into(),
+            reason: "源文件版本在生成期间前移",
+        }))
+        .await;
+        assert_eq!(ensure_error(stale).code, "conflict");
+
+        let container = through_flight(
+            anyhow::Error::new(UnresolvableRoot::Container)
+                .context("构件 24384/22400 无法解析生成根"),
+        )
+        .await;
+        assert_eq!(ensure_error(container).code, "container");
+
+        let not_ready = through_flight(anyhow::Error::new(InitializationNotReady {
+            snapshot:
+                crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                    .snapshot(),
+        }))
+        .await;
+        assert_eq!(ensure_error(not_ready).code, "initialization_not_ready");
+
+        // 链上什么领域错都没有 → 照旧 internal。
+        let plain = through_flight(anyhow::anyhow!("fixture failure")).await;
+        assert_eq!(
+            ensure_error(plain).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// 队列行只带 `blocked_by_phase`，说得出「在等哪一相」、说不出「是谁挡的」。

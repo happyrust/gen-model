@@ -9,11 +9,23 @@
 #                                     此字段恒为 true（2026-09-10 已改成只报持久标志本身）；
 #   3. `$h.model_publish_queue.*` / `$h.local_runtime.*` —— 两节随发布队列 / backup lane 一起删了。
 #
+# 2026-09-18 又补一处同类的：行上的 `room_sesno` 也已经不存在了。ADR-073 W3 / D14 之后
+# **行上只有两枚水位**（`applied_sesno` / `model_sesno`），房间那一枚退役，收尾事务里连写都写不出
+# （`task_end.rs` 的护栏点名禁止 `room_sesno` / `room_settled_at` / … 出现在 SQL 里）。
+# 读不到的字段在 `[int]$null` 下是 0，于是「房间水位追平」这一条恒假——DONE 永远不成立，
+# 初始化明明跑完了也只会等到 TIMEOUT。现在改读行上的 `room_alignment.current`：
+# 它报的是「这个库的房间边对齐到的代号 == 常驻房间模型当前那一代」，正是房间这一路今天的判据。
+# 房间那一路整体就绪与否仍由 `room_build.resident.status` 说（DONE 里那一条没变）。
+#
 # 另有一处 PowerShell 的坑：原脚本用 `$Dbnums | Where-Object { … [int]$_.dbnum -eq $_ … }`，
 # 内层 `$_` 把外层的库号遮住了，那个判据实际恒真。
 param(
     [int]$Port = 18422,
-    [int[]]$Dbnums = @(1112, 7997),
+    # 既接受 `pwsh -Command … -Dbnums 1112,7997`（到手是数组）也接受 `pwsh -File … -Dbnums 1112,7997`
+    # （-File 下参数是**一个**字面字串 "1112,7997"）。此前声明成 [int[]]，-File 那种写法会被
+    # PowerShell 按千分位读成一个数 11127997（2026-09-19 f20 部署实测），守望的库就一个也对不上。
+    # 所以先按字串收，下面再拆逗号 / 空白转 int。
+    [string[]]$Dbnums = @('1112', '7997'),
     [string]$Project = 'AvevaMarineSample',
     [int]$TimeoutMins = 150,
     [int]$PollSecs = 20,
@@ -21,6 +33,8 @@ param(
     [switch]$Once
 )
 $ErrorActionPreference = 'Continue'
+$Dbnums = @($Dbnums | ForEach-Object { "$_" -split '[,\s]+' } | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
+if ($Dbnums.Count -eq 0) { throw '-Dbnums 至少要一个库号' }
 $log = Join-Path $RunDir 'monitor.log'
 $snapDir = Join-Path $RunDir 'snapshots'
 New-Item -ItemType Directory -Force $snapDir | Out-Null
@@ -32,8 +46,8 @@ function Log([string]$line) {
 
 function RowText($r) {
     if (-not $r) { return '(no row)' }
-    'applied={0} file={1} model={2} room={3} verdict={4}{5} chasing={6} dead={7}' -f `
-        $r.applied_sesno, $r.file_latest_sesno, $r.model_sesno, $r.room_sesno, $r.model_verdict,
+    'applied={0} file={1} model={2} room_aligned={3} verdict={4}{5} chasing={6} dead={7}' -f `
+        $r.applied_sesno, $r.file_latest_sesno, $r.model_sesno, $r.room_alignment.current, $r.model_verdict,
     $(if ($r.model_verdict_reason) { "($($r.model_verdict_reason))" } else { '' }),
     $r.model_chasing_roots, $r.model_dead_roots
 }
@@ -97,7 +111,7 @@ while ((Get-Date) -lt $deadline) {
 
     $dataTasks = @($t.tasks | Where-Object { $_.kind -eq 'data_batch' })
     $terminal = @($dataTasks | Where-Object { $_.state -in 'succeeded', 'partial', 'failed' })
-    # 每个点名的库都要：水位建立、追平文件、三水位齐、判词 in_sync。
+    # 每个点名的库都要：水位建立、追平文件、两水位齐、判词 in_sync、房间边对齐到常驻那一代。
     $rowsDone = $true
     foreach ($n in $Dbnums) {
         $row = $d.dbnums | Where-Object { [int]$_.dbnum -eq $n } | Select-Object -First 1
@@ -105,7 +119,7 @@ while ((Get-Date) -lt $deadline) {
             [int]$row.applied_sesno -le 0 -or
             [int]$row.applied_sesno -ne [int]$row.file_latest_sesno -or
             [int]$row.model_sesno -ne [int]$row.applied_sesno -or
-            [int]$row.room_sesno -ne [int]$row.applied_sesno -or
+            (Field $row 'room_alignment.current') -ne $true -or
             $row.model_verdict -ne 'in_sync') {
             $rowsDone = $false
         }

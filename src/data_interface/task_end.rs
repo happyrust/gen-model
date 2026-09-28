@@ -168,15 +168,22 @@ fn render_watermark_update(end: &TaskEnd) -> String {
             {
                 sets.push(render_catalogue_stamp_merge(stamps));
             }
+            // 盖章（`Aligned`）/ 清空（`Cleared`）都把「盖章之后按另一代写过根」那一格一并清掉（ADR-073 F3 落库）：
+            // 整库 / 定向盖到这一代 = 库上每条边都与这一代一致，此前记的另几代已被覆盖；关着开关这一格也没有意义。
+            // `Untouched` 两格都不碰。
             match &model.room_generation {
                 RoomGenerationStamp::Untouched => {}
                 RoomGenerationStamp::Cleared => {
                     sets.push("model_room_generation = NONE".to_owned());
+                    sets.push("model_room_stray_generations = []".to_owned());
                 }
-                RoomGenerationStamp::Aligned(generation) => sets.push(format!(
-                    "model_room_generation = '{}'",
-                    escape_surql_str(generation)
-                )),
+                RoomGenerationStamp::Aligned(generation) => {
+                    sets.push(format!(
+                        "model_room_generation = '{}'",
+                        escape_surql_str(generation)
+                    ));
+                    sets.push("model_room_stray_generations = []".to_owned());
+                }
             }
         }
         // 根观测是现场记录，不是承诺：失败的那一版也要留下痕迹。
@@ -294,6 +301,46 @@ pub(crate) async fn commit_task_end_on(
     db: &Surreal<Any>,
     end: &TaskEnd,
 ) -> anyhow::Result<TaskEndReceipt> {
+    let stamped = commit_task_end_via(end, |sql| async move { db.query(sql).await }).await?;
+
+    DbnumState::invalidate_mirrored_on(db, end.dbnum);
+
+    let wanted_stamp = end.model_stamps();
+    // 库上 `model_room_generation` 真盖上 / 真清空之后，告诉投影这一代（d-149 补丁 2026-09-22）：按根数限额逐出
+    // 时，ACK 房间代号是本进程写过的 stray 代号、又不是库上这一代的根是 F3 的证据、不进候选；盖到这一代之后
+    // 同代的 ACK 才放行。`Untouched` 不说话——普通增量窗口替不了整库。
+    if stamped && wanted_stamp {
+        match end.model.as_ref().map(|model| &model.room_generation) {
+            Some(RoomGenerationStamp::Aligned(generation)) => {
+                crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                    .note_room_generation_stamped(end.dbnum, Some(generation));
+            }
+            Some(RoomGenerationStamp::Cleared) => {
+                crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                    .note_room_generation_stamped(end.dbnum, None);
+            }
+            Some(RoomGenerationStamp::Untouched) | None => {}
+        }
+    }
+    Ok(TaskEndReceipt {
+        model_sesno: (stamped && wanted_stamp).then_some(end.target_sesno),
+        info_rows: end.info.as_ref().map(|snapshot| snapshot.rows.len()),
+        blocked_by_data: wanted_stamp && !stamped,
+    })
+}
+
+/// 收尾那一笔的发送与回执解读，`run` 是「把这段 SQL 发出去」（生产是 `db.query`；钉用它注入一次冲突）。
+/// 回 `stamped`：水位那一句有没有碰到行（数据水位闸挡下时为假）。
+///
+/// 与刷盘那一笔同一个冲突重试（ADR-073 D13 收口总表第 10 行，2026-09-19 晚）：收尾是一笔 `BEGIN … COMMIT`，
+/// 与 write-behind 刷盘的 stray epilogue 同写水位行，两台引擎（surrealkv / rocksdb）都是**谁后提交谁输**、
+/// 输的那一笔整笔零提交；这里的语句都是绝对值的 UPSERT / UPDATE，重发安全。只有「read or write conflict」
+/// 那句才重试（16 次、25 ms 起指数退避），`THROW` / 语法错照旧第一次就报。
+async fn commit_task_end_via<F, Fut>(end: &TaskEnd, mut run: F) -> anyhow::Result<bool>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = surrealdb::Result<surrealdb::Response>>,
+{
     let sql = render_task_end_tail(end);
     anyhow::ensure!(
         sql.len() <= max_tail_bytes(),
@@ -306,46 +353,43 @@ pub(crate) async fn commit_task_end_on(
         sql.len(),
         max_tail_bytes()
     );
-    let mut response = db
-        .query(sql)
-        .await
-        .with_context(|| format!("commit task end of dbnum {}", end.dbnum))?;
-    // 先数再取：`take_errors` 会把出错的条目从响应里摘走。回滚掉的事务会给**出错语句
-    // 之前**的每一条都报一句笼统的「事务失败」，只看第一条就永远看不到 `THROW` 的原话。
-    let index = response.num_statements().saturating_sub(1);
-    let mut errors = response.take_errors().into_iter().collect::<Vec<_>>();
-    errors.sort_by_key(|(index, _)| *index);
-    if !errors.is_empty() {
-        anyhow::bail!(
-            "任务收尾事务失败 dbnum={}: {}",
-            end.dbnum,
-            errors
-                .into_iter()
-                .map(|(index, error)| format!("statement {index}: {error}"))
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
-
     #[derive(serde::Deserialize)]
     struct Touched {
         #[allow(dead_code)]
         id: surrealdb::sql::Thing,
     }
-    // 统计块在前，水位那一句是最后一条带回执的语句。
-    let touched: Vec<Touched> = response
-        .take(index)
-        .with_context(|| format!("decode task end watermark write of dbnum {}", end.dbnum))?;
-    let stamped = !touched.is_empty();
-
-    DbnumState::invalidate_mirrored_on(db, end.dbnum);
-
-    let wanted_stamp = end.model_stamps();
-    Ok(TaskEndReceipt {
-        model_sesno: (stamped && wanted_stamp).then_some(end.target_sesno),
-        info_rows: end.info.as_ref().map(|snapshot| snapshot.rows.len()),
-        blocked_by_data: wanted_stamp && !stamped,
-    })
+    let dbnum = end.dbnum;
+    crate::surreal_retry::retry_surreal_write_operation(
+        &format!("commit task end of dbnum {dbnum}"),
+        || {
+            // 每次尝试重发同一段 SQL（输的那一笔什么都没提交）。
+            let attempt = run(sql.clone());
+            async move {
+                let mut response = attempt.await.map_err(anyhow::Error::from)?;
+                // 先数再取：`take_errors` 会把出错的条目从响应里摘走。回滚掉的事务会给**出错语句
+                // 之前**的每一条都报一句笼统的「事务失败」，只看第一条就永远看不到 `THROW` 的原话。
+                let index = response.num_statements().saturating_sub(1);
+                let mut errors = response.take_errors().into_iter().collect::<Vec<_>>();
+                errors.sort_by_key(|(index, _)| *index);
+                if !errors.is_empty() {
+                    anyhow::bail!(
+                        "任务收尾事务失败 dbnum={dbnum}: {}",
+                        errors
+                            .into_iter()
+                            .map(|(index, error)| format!("statement {index}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                }
+                // 统计块在前，水位那一句是最后一条带回执的语句。
+                let touched: Vec<Touched> = response
+                    .take(index)
+                    .with_context(|| format!("decode task end watermark write of dbnum {dbnum}"))?;
+                Ok::<bool, anyhow::Error>(!touched.is_empty())
+            }
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -451,6 +495,10 @@ mod tests {
         assert!(
             !sql.contains("model_room_generation"),
             "说不了整库对齐的任务不碰 model_room_generation：{sql}"
+        );
+        assert!(
+            !sql.contains("model_room_stray_generations"),
+            "同一条纪律：说不了整库对齐的任务也不清「盖章之后按另一代写过根」那一格（F3 落库）：{sql}"
         );
         // 时刻子句排在赋值之前（SurrealDB 的 SET 顺序求值）。
         let model_time = sql
@@ -811,15 +859,19 @@ mod tests {
 
     /// ADR-073 D14：`model_room_generation` 随 `model_sesno` 同盖、同一条纪律——能替整库说话的
     /// 任务 `Aligned` 写代号，关着开关盖章 `Cleared` 清空，普通增量窗口 `Untouched` 原样不动，
-    /// 模型没成一律不写。
+    /// 模型没成一律不写。F3 落库（2026-09-19）：「盖章之后按另一代写过根」那一格 `model_room_stray_generations`
+    /// 随 `Aligned` / `Cleared` 一并清空，`Untouched` / 模型没成同样不碰。
     #[tokio::test]
     async fn the_room_generation_stamp_follows_the_model_watermark() {
         let db = database().await;
-        db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20, \
+             model_room_stray_generations=['g2'];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
         async fn stamp(db: &Surreal<Any>) -> Option<String> {
             db.query("SELECT VALUE model_room_generation FROM ONLY dbnum_watermark:8000;")
                 .await
@@ -829,6 +881,22 @@ mod tests {
                 .take::<Option<String>>(0)
                 .unwrap()
         }
+        async fn stray(db: &Surreal<Any>) -> Vec<String> {
+            db.query(
+                "SELECT VALUE model_room_stray_generations ?? [] FROM ONLY dbnum_watermark:8000;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take::<Vec<String>>(0)
+            .unwrap()
+        }
+
+        // 普通增量窗口：两格都原样（盖章之前记下的另一代还在）。
+        commit_task_end_on(&db, &end()).await.unwrap();
+        assert_eq!(stamp(&db).await, None);
+        assert_eq!(stray(&db).await, vec!["g2".to_string()]);
 
         let mut aligned = end();
         aligned.model = Some(TaskModelOutcome {
@@ -842,8 +910,16 @@ mod tests {
             sql.contains("model_room_generation = 'efd4\\'ebe1'"),
             "代号按字符串转义写入：{sql}"
         );
+        assert!(
+            sql.contains("model_room_stray_generations = []"),
+            "盖章一并清掉「盖章之后按另一代写过根」那一格：{sql}"
+        );
         commit_task_end_on(&db, &aligned).await.unwrap();
         assert_eq!(stamp(&db).await.as_deref(), Some("efd4'ebe1"));
+        assert!(
+            stray(&db).await.is_empty(),
+            "盖到这一代 = 此前记的另几代都被覆盖"
+        );
 
         // 普通增量窗口：那一格原样。
         commit_task_end_on(&db, &end()).await.unwrap();
@@ -869,12 +945,132 @@ mod tests {
             room_generation: RoomGenerationStamp::Cleared,
         });
         assert!(
-            render_task_end_tail(&cleared).contains("model_room_generation = NONE"),
+            render_task_end_tail(&cleared).contains("model_room_generation = NONE")
+                && render_task_end_tail(&cleared).contains("model_room_stray_generations = []"),
             "{}",
             render_task_end_tail(&cleared)
         );
         commit_task_end_on(&db, &cleared).await.unwrap();
         assert_eq!(stamp(&db).await, None);
+        assert!(stray(&db).await.is_empty());
+    }
+
+    /// ADR-073 D13 收口总表第 10 行（2026-09-19 晚）：收尾那一笔与 write-behind 刷盘的 stray epilogue 同写水位行，
+    /// 实测两台引擎都是**谁后提交谁输**、输的一方整笔零提交、错误就是 `Error::TxRetryable`（「read or write conflict …
+    /// can be retried」）。这里让收尾输一次：第一次发送时竞争者先改了同一行、引擎回冲突错，第二次才真发——那一路必须
+    /// 重发成功、行上是收尾的值（`Aligned` 盖的代号、清空的格、模型水位），而不是回 `Err` 让任务落 `Partial`；
+    /// `THROW` 那种错第一次就报、不重发。（本进程内同一个 `mem://` 句柄上的请求是串行的，撞不出真冲突，所以冲突由
+    /// `run` 注入；引擎那一侧「真会撞、撞了零提交」的证据是钉 36 记的 8009 实测。）
+    #[tokio::test]
+    async fn the_tail_retries_past_a_conflict_with_the_flush_epilogue_on_the_same_row() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let db = database().await;
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20, \
+             model_room_generation='g0', model_room_stray_generations=['g2'];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let mut aligned = end();
+        aligned.model = Some(TaskModelOutcome {
+            all_roots_ok: true,
+            dead_roots: 0,
+            catalogue_sessions: None,
+            room_generation: RoomGenerationStamp::Aligned("g1".to_owned()),
+        });
+
+        let attempts = AtomicUsize::new(0);
+        let stamped = commit_task_end_via(&aligned, |sql| {
+            let attempt = attempts.fetch_add(1, SeqCst);
+            let db = db.clone();
+            async move {
+                if attempt == 0 {
+                    // 竞争者（刷盘的 epilogue）赶在前面提交了同一行；引擎让收尾这一笔输，整笔零提交。
+                    db.query(
+                        "UPDATE dbnum_watermark:8000 SET model_room_stray_generations = \
+                         array::union(model_room_stray_generations ?? [], ['g3']);",
+                    )
+                    .await
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                    return Err(surrealdb::Error::Db(surrealdb::error::Db::TxRetryable));
+                }
+                db.query(sql).await
+            }
+        })
+        .await
+        .expect("the tail must retry past the conflict instead of failing the task");
+        assert!(stamped, "重发那一笔碰到了水位行");
+        assert_eq!(attempts.load(SeqCst), 2, "输一次、重发一次");
+
+        #[derive(Debug, serde::Deserialize)]
+        struct Row {
+            model_sesno: Option<i32>,
+            model_room_generation: Option<String>,
+            model_room_stray_generations: Option<Vec<String>>,
+        }
+        let row = db
+            .query("SELECT * FROM ONLY dbnum_watermark:8000;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take::<Option<Row>>(0)
+            .unwrap()
+            .expect("watermark row");
+        assert_eq!(row.model_sesno, Some(26));
+        assert_eq!(row.model_room_generation.as_deref(), Some("g1"));
+        assert_eq!(
+            row.model_room_stray_generations.unwrap_or_default(),
+            Vec::<String>::new(),
+            "重发在竞争者之后落：`Aligned` 把格清空，竞争者的 g2 / g3 都被盖掉"
+        );
+
+        // 不是冲突的错第一次就报，不重发。
+        let attempts = AtomicUsize::new(0);
+        let error = commit_task_end_via(&aligned, |_sql| {
+            attempts.fetch_add(1, SeqCst);
+            async {
+                Err(surrealdb::Error::Db(surrealdb::error::Db::Thrown(
+                    "specific-tail-cause".to_owned(),
+                )))
+            }
+        })
+        .await
+        .expect_err("a non-conflict error is not retried");
+        assert_eq!(attempts.load(SeqCst), 1);
+        assert!(error.to_string().contains("specific-tail-cause"), "{error}");
+
+        // 源码钉：生产那一路 `commit_task_end_on` 就是经 `commit_task_end_via` 发的，后者包在冲突重试里、每次重发同一段 SQL。
+        // 本文件是 CRLF：先归一再切函数体。
+        let source = include_str!("task_end.rs").replace("\r\n", "\n");
+        let production = source
+            .split_once("pub(crate) async fn commit_task_end_on(")
+            .expect("commit_task_end_on")
+            .1
+            .split_once("\n}\n")
+            .expect("commit_task_end_on end")
+            .0;
+        assert!(
+            production
+                .contains("commit_task_end_via(end, |sql| async move { db.query(sql).await })"),
+            "{production}"
+        );
+        let via = source
+            .split_once("async fn commit_task_end_via<")
+            .expect("commit_task_end_via")
+            .1
+            .split_once("\n}\n")
+            .expect("commit_task_end_via end")
+            .0;
+        assert!(
+            via.contains("crate::surreal_retry::retry_surreal_write_operation(")
+                && via.contains("let attempt = run(sql.clone());"),
+            "收尾那一笔要包进冲突重试、每次尝试重发同一段 SQL: {via}"
+        );
     }
 
     #[tokio::test]

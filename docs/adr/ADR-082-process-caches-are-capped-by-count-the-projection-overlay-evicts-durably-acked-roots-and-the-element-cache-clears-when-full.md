@@ -45,11 +45,19 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - **候选**：有回执、且 `publication_acks` 里那枚 ACK **介质是 durable** 且 **与回执逐字相符**（`ack.medium.is_durable() && ack.matches(receipt)`）
   ——库里已经有这一版，逐出不丢任何东西。没落盘的（ACK 缺 / 又提交过一版让 ACK 失效 / 介质是 kv-mem）**永远不在候选里**；
   候选用尽仍在上限之上就停手，只把数字报出来（`OverlayEviction::still_over_limit`）。
+  **2026-09-22 补丁（d-149 审核 A / D7）**：再排除两类——库里有它的几何、但「它的房间边是另一代算的 / 还没算」这句话**只有这枚 ACK 说得出**：
+  (a) ACK 房间代号是本进程这一世写进 `model_room_stray_generations` 的 stray 代号（`ScopeState::stray_generations_written`）、而库上最近一次
+  `model_room_generation` 盖的不是这一代（`stamped_room_generations`，`task_end::commit_task_end_on` 真盖上之后记）——`ScopeState::ack_is_stray_room_evidence`；
+  (b) 房间开关开着（`options::room_membership()`，由 `model_write_behind` 传进 `enforce_root_limit(limit, room_membership_enabled)`，store 对配置无知）
+  却 `!(ack.room_membership && ack.room_generation.is_some())`——`ScopeState::ack_owes_room_edges`。
+  这类根很少，定向 / 整库盖章把库上那一格对齐到它们那一代之后自然放行。
 - **序**：每根记「最近一次盖回执」的单调序号（`ScopeState::commit_ticks`），最旧的先出。**读不刷新它**——被逐出的根读路直读 RocksDB，
   刷新读序只会让「常读的旧根」把「刚生成的新根」挤出去。
 - **逐出 = 整根从缓存态掉**：回执、ACK、失效标记、序号，以及名下**不与别的常驻回执共有**的记录（嵌套根共有的记录归另一个回执继续持有）
   ——与 `drop_cached_root` 同一段代码（`ScopeState::drop_root`）；记录走 `evict` 不走 `remove`（不记成模型删除、不进房间变化账）；
-  随后 `flush_room_spatial`。**库里那一份不动**——这是缓存态的收回，不是生成出来的删除 delta。
+  ~~随后 `flush_room_spatial`~~（2026-09-22 P1b：每库房间空间树 `room_spatial` 已删——没有生产读者，房间候选走 `GLOBAL_AABB_TREE`，
+  却在每次提交 / 逐出后对脏库整棵重建、全在写锁里；同日 P1a 把 `drop_root` 的共有判定从「按回执表查祖先链」换成「按祖先链查回执表」，
+  O(回执数) → O(祖先数 × log 回执数)，同一个谓词）。**库里那一份不动**——这是缓存态的收回，不是生成出来的删除 delta。
 - **时机**归 `model_write_behind` 守：每次发布之后（刚发布的这批还没 ACK、不在候选里，被挤出去的是更早落盘的根）、
   每批 durable ACK 记下之后（刚落盘的根成为候选，上限之上这时才收得动）。**只在 `store_mode().is_durable()` 下动**：
   嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。逐了就按批打一行日志；收不下去不吵。
@@ -62,8 +70,17 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 | 单元级发布 / 刚体前移（便宜路） | 拿不到 S 端基线 → 回退整根 regen | ADR-080 约束 / ADR-066 规则，既有 |
 | 按需生成 `/model/ensure` | overlay 没回执就生成，与冷启动同一形态 | 既有 |
 | `RoomOnly` 整库房间重算 | 此前只遍历「投影里有回执的根」，逐出后会**漏算**——本文 D3 改口 | **本文** |
+| 定向房间重算的准入与点名（`room_recompute::request_for_task` 的 `unaccounted_stray_generations` 靠「本进程写过的根 ACK 都在投影里」放行 stray 代号、`stale_acked_roots` 靠 ACK 点名）与 `query_service::room_calculation_status`（`ProcessAck::Stale` 一票否决） | **没有去处**：ACK 是唯一证据，逐出 = 证据消失——定向重算漏根、就绪误判。所以这类 ACK 的根**不进候选**（D1 2026-09-22 补丁），不是给它另找去处 | 2026-09-22 审核 A / D7 |
 
 ### D3　`RoomOnly` 整库房间重算：根全集从源文件枚举，冷根从库里读几何行（修订 ADR-073 D13）
+
+> **2026-09-21 合并追记**：`codex/model-projection-cache` 并入主线时发现那边 2026-09-17 已独立落了同一件事（ADR-073 D13「U1 第二半」：
+> `library_roots: Option<&[RefNo]>` 从 `DbSet@T` 枚举、不在投影里的根经 `model_record_reader::durable_records_of_root` 读库、
+> `room_model::durable_room_inputs` 折形状、回执 `covered_roots` / `projected_roots` / `durable_roots`，覆盖面对不上是
+> `RoomRecomputeVerdict::PartialCoverage`——D14 那一格不盖、电平型触发 ③ 下一个任务再点）。合并取了那一套，本节 2026-09-20 落的
+> `durable_room_records_of_root` / `RoomEdgeRecompute::cold_roots` / `RoomOnlyRecompute::Incomplete` / `library_generation_roots(dbnum)`
+> 与源码钉随之退役；**D3 的结论不变**（根全集不从库里猜、冷根从库读几何再算、逐出之后「整库重算 == 从零初始化」仍成立），
+> 下面按 2026-09-20 写的实现细节只作历史记录，现行接线见 ADR-073 D13 与源码钉 17 / 18。
 
 - `recompute_dbnum_room_edges(target, store, dbnum, library_roots, rooms)` 多收一份 `library_roots`：根的全集 = overlay 里有回执的根 ∪
   `library_roots`。在 overlay 里的根拿投影里的记录；不在的（按根数上限逐出过、进程重启后没回填——两种冷根同一形态）
@@ -97,7 +114,8 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 
 - 落地那一刻（d-149 第 4 条）两个上限默认 0——只加能力，行为一个字不变，先量再配。**同日 17:0x 用户要求量了定默认值**
   （「在 mem 档实例上跑一窗，把 `/health.model_cache.overlay.approx_bytes` 与 `process_rss_bytes` 对着记一组数，给两个上限定默认值」），
-  证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`：release 二进制、mem 档、整库即时生成 8000 / 7998 / 7997 / 1112 四库
+  ~~证据档 `docs/evidence/2026-09-20-d149-mem-footprint.md`~~（**2026-09-22 勘误**：这份证据档从未入库、git 历史里也没有——原始采样件（`/health` JSON 与 RSS 记录）
+  丢在会话里没落盘，本段的数字是唯一留下的记录，按原样保留；D6 拍板不按这些数字复原一份假证据档）：release 二进制、mem 档、整库即时生成 8000 / 7998 / 7997 / 1112 四库
   → 7,743 根 / 59,929 条记录，overlay 106.5 MB（≈ **13.8 KB / 根**、1.8 KB / 记录），元素缓存 219,623 条 820.6 MB
   （≈ **3.6–4.7 KB / 元素**，7997 单库整库一遍 176,982 条 643.8 MB），RSS 2.04 GB 里这两块合计 46%（其余是 mem 档的 kv-mem 模型行）。
 - **`model_overlay_max_roots` 默认 50,000**（`options::MODEL_OVERLAY_MAX_ROOTS_DEFAULT`）：≈ 0.7 GB；整套 AMS 样例 MDB 装得下六遍
@@ -116,7 +134,7 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
   两个 `approx_bytes` 都是**被查时现算、直接回给前端**的数，不落库、不缓存、不进任何表：
   - overlay（`ModelMemoryStore::overlay_footprint`）：记录那一半是插入 / 删除时随手记的账（`ScopeState::record_bytes`，每条按
     `approx_record_bytes` = 内联结构 + 自己的字串与祖先链 + 四张索引里的 `record_id` 副本与树节点），O(1) 读；回执与 ACK 在读锁里
-    走一遍（根的量级）。**不含**每库房间空间树与盘上的网格。
+    走一遍（根的量级）。**不含**盘上的网格（每库房间空间树此前也不在里面，2026-09-22 已删，见 D1 追记——D5 的 13.8 KB / 根从此不再低估）。
   - 元素缓存（`e3d_model_service::generation_input_cache_footprint` → e3d-io `DbSet::element_cache_stats`）：在缓存锁里抄出各份
     `Arc<DbSet>`、锁外逐份走它的两张表（`Arc` 块 + 表槽 + 内联结构 + `ParsedElement` / `ElementExtraction::approx_heap_bytes`
     的字串 / 数组载荷），O(条数)，按 `/health` 的观测频率付，不进生成路径。
@@ -156,6 +174,12 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
    `a_mem_ack_or_a_root_republished_after_its_ack_does_not_make_it_evictable`、
    `evicting_a_nested_root_keeps_the_records_its_resident_parent_still_holds`、
    `recommitting_a_root_moves_it_to_the_newest_end_of_the_eviction_order`。
+   2026-09-22 补丁：`ScopeState::{stamped_room_generations, ack_is_stray_room_evidence, ack_owes_room_edges}`、
+   `ModelMemoryStore::note_room_generation_stamped`（`task_end::commit_task_end_on` 真盖上 / 真清空之后调；`clear_dbnum` 连带清）、
+   `enforce_root_limit(limit, room_membership_enabled)` 多一位由 `model_write_behind::enforce_overlay_root_limit` 传 `options::room_membership()`；
+   钉 `a_root_whose_ack_carries_an_unstamped_stray_room_generation_is_not_evictable`、
+   `a_root_published_without_room_membership_while_the_switch_is_on_is_not_evictable`。
+   后续（写锁热点、`GenerationInput` 按库数上限、`Historical` 封顶、孤儿 ACK）见 `docs/plans/2026-09-22-incremental-memory-control-dev-plan.md`。
 2. `model_write_behind.rs`：`enforce_overlay_root_limit(store, moment)` 两处调（`publish` 之后、`persist_batch` 记 durable ACK 之后），
    `store_mode().is_durable()` 门内；`WriteBehindSnapshot` 多三格。
 3. `options.rs`：`model_overlay_max_roots` / `model_element_cache_max_entries` / `effective_count_limit`（环境变量合法非负整数压过配置、
@@ -164,13 +188,15 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 5. vendor e3d-io `db_element.rs`：`DbSet::with_element_cache_limit` / `element_cache_limit` / `element_cache_entries` 计数、`store_parsed` 满则清、
    `forget_cached_db` 饱和减、`fork_without` 重数；钉 `tests/dbset_element_cache_limit.rs::the_element_cache_limit_clears_the_whole_pool_when_full_and_zero_means_unbounded`
    （单开一个测试二进制：`read_stats` 是进程全局的，`dbset_generations.rs` 断言精确的打开次数）。vendor 提交 `d51c3dd`。
-6. `model_record_reader.rs`：`durable_room_records_of_root` + `room_record_from_durable`；钉 `the_durable_room_view_keeps_only_what_the_room_calculator_reads`。
+6. （2026-09-21 合并后改口）冷根读路是 `model_record_reader::durable_records_of_root` → `room_model::durable_room_inputs`
+   （ADR-073 D13 U1 第二半那一套）；`model_db_adapter.rs`：`recompute_dbnum_room_edges(…, rooms, library_roots: Option<&[RefNo]>, RootScope)`、
+   回执 `projected_roots` / `durable_roots` / `covered_roots`；钉 `a_root_outside_the_projection_gets_its_room_edges_recomputed_from_the_durable_rows`。
+   `batch_worker.rs`：`library_generation_roots(dbnum, target_sesno)` → `run_room_only_recompute`，枚举不出 = `RoomRecomputeVerdict::PartialCoverage`。
+   2026-09-20 落的 `durable_room_records_of_root` / `cold_roots` / `RoomOnlyRecompute` 已随合并退役（主线钉 `the_durable_room_view_keeps_only_what_the_room_calculator_reads`
+   随之删除）。
    冷读 SQL 本身（读路与 `RoomOnly` 冷根共用）在 `durable_records_sql` / `durable_scope_reads`：每张表拆成 `anc CONTAINS` 与 `in =` 两句各走
    `idx_<表>_anc` / `idx_<表>_in`，库端 `array::union` 再 `ORDER BY record_order`——**不许合成一条 `… OR …`**（2026-09-21 追记）；
    钉 `durable_cold_read_scopes_are_planned_through_indexes`（四路 `EXPLAIN FULL` 不出现 `Iterate Table`、落在对应索引，并反证旧 OR 形态退回扫表）。
-   `model_db_adapter.rs`：`recompute_dbnum_room_edges(…, library_roots, …)`、`RoomEdgeRecompute::cold_roots`；
-   钉 `a_root_evicted_from_the_overlay_is_still_recomputed_from_its_durable_rows`。
-   `batch_worker.rs`：`library_generation_roots` → `run_room_only_recompute`（`Incomplete` 第四处）；源码钉里 `RoomOnlyRecompute::Incomplete` 计 4。
 7. `DbOption.toml`：`model_overlay_max_roots = 0` / `model_element_cache_max_entries = 0` 与注释；ADR-073 D13 段与源码钉 18 同步改口；
    CONTEXT「投影 overlay 根数上限」「冷根」「元素缓存元素数上限」。
 8. 估算字节（D5 追加）：`model_memory_store.rs` `ScopeState::record_bytes`（`insert` 加 / `remove_internal` 减）、`approx_record_bytes`、
@@ -185,6 +211,8 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
 - **不做**字节记账、不做 overlay 的读刷新 LRU、不做元素缓存 LRU（D6 / D4 已说明）。
 - **不在本文**让稳态窗口收尾释放 `GenerationInput`（`forget_generation_input`，初始化那一路已经这么做）：它会改今天默认行为
   （每窗重开 MDB、元素缓存重新变冷），与 D5「一个字不变」冲突——要做单开决策卡，先量每窗重开的代价。
+  → **2026-09-22 那张卡是 ADR-084**：按**库数**设上限（`model_generation_input_max_dbnums`，最近一次生成用到的先后逐库整份出、命中刷新），
+  落地默认 0 = 不限，默认值等两库交替窗量过重开代价再定；「每窗收尾释放」仍不做。
 - 默认值已按 mem 档实测定下（D5）；**没量**的是 rocksdb 档下逐出真正发生之后的三条回退路与稳态小窗口的增量——现场先看
   `/health.model_cache.overlay.evicted_total` 有没有动。`/dbnums` 面板没有 overlay 那一格，只有 `/health`。估算字节只在 `/health` 上
   现算，**不做**任何持久化 / 历史曲线（2026-09-20 用户拍板）。

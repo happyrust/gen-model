@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aios_database::data_interface::direct_store::TEMPLATE_DIR_ENV;
-use aios_database::mbd::{branch_query, layout_pipe};
+use aios_database::mbd::{BranchQueryError, branch_query, layout_pipe};
 use e3d_io::db_element::{DbFilePin, DbSet, template_file_for};
 use e3d_io::refno::RefNo;
 use e3d_model::db_discovery::DirectoryDbResolver;
@@ -22,12 +22,19 @@ use plant_mbd::{BranchMember, MbdPrimitive, MemberKind, SplitMember, member_kind
 
 const AMS000: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000";
 const AMS7999: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7999_0001";
+/// 风管与管道混在一起的那座库，学科门的靶都在里面。
+const AMS7997: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001";
 const TEMPLATE_DIR_DEFAULT: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all";
 /// rs-mbd 2026-08-20 勘察选定的首选候选：31 个成序成员（BEND/ELBO/FTUB/ATTA 混排）。
 const BRAN: RefNo = RefNo::new(24383, 99996);
 /// 源模型里真实的断点（`100018 → 100019`，85° 拐角、缺管件、还差 50 mm），
 /// 朝外不变量在这一对上不成立是数据事实，不是适配层的错。
 const KNOWN_BREAK: (&str, &str) = ("24383_100018", "24383_100019");
+/// ams7997 的风管支管 `/-VES-E-2-L-3807`：E3D 给它画了 300 / 280 两段 1460×1520 的矩形隐式直段，
+/// 引擎从 e3d-model `f93fd66` 起也建这两段（`ledger-seg15-frameall.md` §13）。
+const HVAC_BRAN: RefNo = RefNo::new(24381, 30278);
+/// 同一座库里的管道支管 `/Copy-of-1RCS0204-1R80005`，学科门不该误伤它。
+const PIPE_BRAN: RefNo = RefNo::new(24381, 147888);
 
 fn fixtures() -> Option<(PathBuf, PathBuf)> {
     let db = PathBuf::from(AMS7999);
@@ -56,6 +63,24 @@ fn open_set(db: &Path, templates: &Path) -> Arc<DbSet> {
         sesno: None,
     })
     .expect("pin ams7999");
+    Arc::new(set)
+}
+
+/// 同一姿势，钉的是 ams7997（风管与管道混在一起那座）。
+fn open_ams7997(templates: &Path) -> Arc<DbSet> {
+    let resolver = DirectoryDbResolver::scan(&[PathBuf::from(AMS000)], templates)
+        .expect("scan AvevaMarineSample ams000");
+    let set =
+        DbSet::with_attlib_file_and_resolver(templates.join("attlib.dat"), Box::new(resolver))
+            .expect("DbSet opens")
+            .with_element_cache();
+    set.add_db(DbFilePin {
+        file: PathBuf::from(AMS7997),
+        template: template_file_for(templates, "DESI").expect("DESI template"),
+        db_type: Some("DESI".to_string()),
+        sesno: None,
+    })
+    .expect("pin ams7997");
     Arc::new(set)
 }
 
@@ -508,5 +533,35 @@ fn real_branch_carries_tag_texts_and_lays_out_labels() {
             .count()
             == 2,
         "Head 与 Tail 各一条坐标标签"
+    );
+}
+
+/// 学科门：风管支管不进 MBD。
+///
+/// 2026-09-02 到 2026-09-18 之间是派生门自己把风管关在外面的，这里只问 `derives_implied_tubes`
+/// 就够。e3d-model `f93fd66` 让属主 HVAC 的 BRAN 也派生隐式直段之后那道门开了，而 MBD 量的是
+/// 管道等轴测：风管断面是矩形 / 圆两制，外径会回落成 `PBOR = 宽 + 高`，答出来的标注没有意义。
+#[test]
+fn a_duct_branch_is_refused_although_it_now_derives_implied_straights() {
+    let Some((_db, templates)) = fixtures() else {
+        return;
+    };
+    if !Path::new(AMS7997).is_file() {
+        eprintln!("SKIP: {AMS7997} not present");
+        return;
+    }
+    let set = open_ams7997(&templates);
+
+    let error = branch_query(&set, HVAC_BRAN).expect_err("HVAC-owned BRAN must be refused");
+    assert!(
+        matches!(&error, BranchQueryError::NotPipeRoute { noun, .. } if noun.trim() == "BRAN"),
+        "got {error:?}"
+    );
+
+    // 挡的是学科，不是派生门——同一座库里的管道支管照答。
+    let query = branch_query(&set, PIPE_BRAN).expect("pipe branch in the same db still answers");
+    assert!(
+        !query.members.is_empty(),
+        "pipe branch {PIPE_BRAN} came back empty"
     );
 }

@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 
 // The portable fixture owns its stack. Keep it off the legacy golden-suite
 // ports so a retained 8048/8028 process cannot make assertions hit stale data.
@@ -102,6 +103,22 @@ pub(super) struct ExpectedChanges {
     pub room_before: Vec<String>,
     #[serde(default)]
     pub room_after: Vec<String>,
+    /// apply 这一窗之后，本案范围内的交付删除记录（`datacenter_delete`）应当**恰好**是这几行；
+    /// 缺省 = 一行都不该有。
+    #[serde(default)]
+    pub datacenter_delete: Vec<ExpectedDeleteRecord>,
+    /// restore 那一窗再多出来的行；apply 落的行照旧在（gen-model 对这张表只写不删）。
+    #[serde(default)]
+    pub datacenter_delete_after_restore: Vec<ExpectedDeleteRecord>,
+}
+
+/// 一行交付删除记录：`object` / `zone` 是夹具符号，`name` 是要从中台删掉的老位号。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct ExpectedDeleteRecord {
+    pub object: String,
+    pub name: String,
+    pub reason: String,
+    pub zone: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -486,6 +503,12 @@ fn run_fixture_cases(
         .iter()
         .map(|v| (v.symbol.clone(), v.clone()))
         .collect::<BTreeMap<_, _>>();
+    // The baseline initializer leaves the model watermark behind the data
+    // watermark (`gen_model = false` in the fixture config), so the service's
+    // startup reconcile opens a model catch-up task for the whole window the
+    // moment it comes up. Let it settle before seeding: otherwise seeding races
+    // it for the same roots and every `/model/ensure` answers `409 正在后台生成`.
+    wait_fixture_pending(run_dir, namespace, project, target_dbnum, "startup")?;
     seed_fixture_models(manifest, &map, project, &driver.mdb, namespace, run_dir)?;
     wait_fixture_pending(run_dir, namespace, project, target_dbnum, "baseline")?;
     prime_room_structure_baselines(
@@ -643,6 +666,7 @@ fn start_fixture_stack(
         &cli.e3d_mdb,
     )?;
     let config_no_ext = config.with_extension("");
+    stage_surreal_scripts(repo, run_dir)?;
     stack.push(
         "service",
         spawn_logged(
@@ -704,6 +728,50 @@ fn start_fixture_stack(
     Ok((stack, mirror_target_db))
 }
 
+/// Copy the checkout's `resource/surreal/*.surql` into `<run_dir>/resource/surreal`.
+///
+/// The fixture service runs with `run_dir` as its CWD (own instance lock), but
+/// `aios_core` still loads the SurrealQL function scripts **relative to the CWD**
+/// while it connects and fails the whole connect when the directory is missing
+/// (`Failed to define common functions: … (os error 3)`) — the guard in
+/// `aios_database::run_app` comes later and never gets a say. Staging the scripts
+/// gives the isolated service the same function set a service started from the
+/// checkout would load; the files are a handful of small text scripts, so a copy
+/// (not a junction) keeps the run directory self-contained and safe to delete.
+fn stage_surreal_scripts(repo: &Path, run_dir: &Path) -> Result<PathBuf> {
+    let source = repo.join("resource").join("surreal");
+    ensure!(
+        source.is_dir(),
+        "runtime SurrealQL directory missing: {}",
+        source.display()
+    );
+    let target = run_dir.join("resource").join("surreal");
+    fs::create_dir_all(&target)?;
+    let mut copied = 0usize;
+    for entry in fs::read_dir(&source)
+        .with_context(|| format!("read SurrealQL scripts {}", source.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        fs::copy(entry.path(), target.join(entry.file_name())).with_context(|| {
+            format!(
+                "stage SurrealQL script {} into {}",
+                entry.path().display(),
+                target.display()
+            )
+        })?;
+        copied += 1;
+    }
+    ensure!(
+        copied > 0,
+        "no SurrealQL scripts found under {}",
+        source.display()
+    );
+    Ok(target)
+}
+
 fn create_service_project_mirror(
     project_dir: &Path,
     target_db: &Path,
@@ -728,8 +796,57 @@ fn create_service_project_mirror(
         mirror_target.is_file(),
         "target DB was not linked into fixture mirror"
     );
+    mirror_project_meta_dbs(source_db_dir, &mirror_db_dir, target_name)?;
     Ok((mirror_project, mirror_target))
 }
+
+/// Copy the project's meta databases (`<code>sys` / `<code>com` / `<code>mis`)
+/// next to the mirrored target DB.
+///
+/// The service reads the MDB declaration from the **SYS file** of the project
+/// it is pointed at (`mdb_membership::read_unbound_declaration`, ADR-078 MDB
+/// closure); a mirror holding only the target DESI file makes it start with
+/// `在项目 … 的 SYS 库里找不到名为 /ALL 的 MDB … 已尝试 SYS 库：（没有找到任何
+/// SYS 库文件）`, every `/model/ensure` then fails and the room resident model
+/// never builds. The meta files are snapshots taken once at stack start — the
+/// declaration does not change while the fixture runs — and stay copies for the
+/// same reason the target does (E3D rewrites them in place at SAVEWORK).
+fn mirror_project_meta_dbs(
+    source_db_dir: &Path,
+    mirror_db_dir: &Path,
+    target_name: &OsStr,
+) -> Result<()> {
+    let mut copied = Vec::new();
+    for entry in fs::read_dir(source_db_dir)
+        .with_context(|| format!("read project DB directory {}", source_db_dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() || entry.file_name() == target_name {
+            continue;
+        }
+        let name = entry.file_name();
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        if !META_DB_SUFFIXES
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        {
+            continue;
+        }
+        copy_fixture_db_snapshot(&entry.path(), &mirror_db_dir.join(&name))?;
+        copied.push(lower);
+    }
+    ensure!(
+        copied.iter().any(|name| name.ends_with("sys")),
+        "no SYS database next to the target DB in {}; the service cannot read the MDB declaration without it",
+        source_db_dir.display()
+    );
+    Ok(())
+}
+
+/// Meta database name suffixes the service may need to open from the mirrored
+/// project (`amssys`, `amscom`, `amsmis`). Backup copies like
+/// `amscom.codex-before-…` do not end with these and are skipped.
+const META_DB_SUFFIXES: [&str; 3] = ["sys", "com", "mis"];
 
 fn copy_fixture_db_snapshot(source: &Path, target: &Path) -> Result<()> {
     // Do not hard-link the live E3D database into the service directory. During
@@ -818,7 +935,12 @@ fn write_runtime_config(
         ("gen_spatial_tree", "true".into()),
         // `room-member` asserts that a transform recomputes room membership. Room
         // membership is computed per generated root inside the task (ADR-073 D1);
-        // there is no separate room stage to opt into any more.
+        // there is no separate room stage to opt into any more — but the whole
+        // room lane sits behind `room_membership` (default false since ADR-073,
+        // `options::room_membership`). The production base config keeps it off,
+        // so the fixture pins it on: the two `room: true` scenarios assert on
+        // `room_relate` edges that only exist when the switch is on.
+        ("room_membership", "true".into()),
         ("load_spatial_tree", "false".into()),
         ("save_spatial_tree_to_db", "false".into()),
     ]);
@@ -970,8 +1092,28 @@ fn validate_manifest(manifest: &FixtureManifest, repo: &Path) -> Result<()> {
                 scenario.id
             );
         }
+        for record in scenario
+            .expected
+            .datacenter_delete
+            .iter()
+            .chain(&scenario.expected.datacenter_delete_after_restore)
+        {
+            for symbol in std::iter::once(&record.object).chain(&record.zone) {
+                ensure!(
+                    manifest.objects.contains_key(symbol),
+                    "{}: unknown datacenter_delete symbol {symbol}",
+                    scenario.id
+                );
+            }
+        }
         ensure!(
-            !destructive,
+            scenario.restore_macro.is_some()
+                || scenario.expected.datacenter_delete_after_restore.is_empty(),
+            "{}: datacenter_delete_after_restore requires restore_macro",
+            scenario.id
+        );
+        ensure!(
+            !destructive || scenario.destructive_last,
             "{} appears after a destructive-last scenario",
             scenario.id
         );
@@ -1056,6 +1198,10 @@ fn run_case(
         dir.join("preview.json"),
         serde_json::to_vec_pretty(&preview)?,
     )?;
+    let identity_query = format!(
+        "project={project}&mdb={}&namespace={ns}",
+        driver.mdb.trim_start_matches('/')
+    );
     let mut apply_attempted = false;
     let mutation = (|| -> Result<Vec<AssertionRecord>> {
         let apply = render_case_macro(
@@ -1127,7 +1273,23 @@ fn run_case(
         fs::write(dir.join("tasks.json"), serde_json::to_vec_pretty(&tasks)?)?;
         let after = fixture_snapshot(ns, project, dbnum, scenario, map)?;
         fs::write(dir.join("after.json"), serde_json::to_vec_pretty(&after)?)?;
-        let assertions = assert_case(scenario, &before, &after, &tasks, map, &log)?;
+        let mut assertions = assert_case(scenario, &before, &after, &tasks, map, &log)?;
+        assertions.push(assert_datacenter_deletes(
+            "apply",
+            &dir,
+            scenario,
+            map,
+            &identity_query,
+            dbnum,
+            &scenario
+                .expected
+                .datacenter_delete
+                .iter()
+                .collect::<Vec<_>>(),
+            &scenario.expected.datacenter_delete,
+            &mutation_report,
+            live_target_db,
+        )?);
         fs::write(
             dir.join("assertions.json"),
             serde_json::to_vec_pretty(&assertions)?,
@@ -1160,6 +1322,7 @@ fn run_case(
         }
         Ok(assertions)
     })();
+    let mut revert_assertions = Vec::new();
     if apply_attempted && let Some(restore) = &scenario.restore_macro {
         let restore = render_case_macro(repo, restore, &dir.join("restore.mac"), prefix, map)?;
         let restore_report = run_guarded_mutation(
@@ -1204,8 +1367,31 @@ fn run_case(
             fixture_restorable_payload(&before) == fixture_restorable_payload(&restored),
             "restore did not reproduce the baseline payload"
         );
+        if mutation.is_ok() {
+            // Phase label must not say "restore": run_fixture_cases stops the whole suite on
+            // errors that do, and a ledger mismatch here leaves the fixture itself restored.
+            let expected = scenario
+                .expected
+                .datacenter_delete
+                .iter()
+                .chain(&scenario.expected.datacenter_delete_after_restore)
+                .collect::<Vec<_>>();
+            revert_assertions.push(assert_datacenter_deletes(
+                "revert",
+                &dir,
+                scenario,
+                map,
+                &identity_query,
+                dbnum,
+                &expected,
+                &scenario.expected.datacenter_delete_after_restore,
+                &restore_report,
+                live_target_db,
+            )?);
+        }
     }
-    let assertions = mutation?;
+    let mut assertions = mutation?;
+    assertions.extend(revert_assertions);
     Ok(FixtureCaseReport {
         id: scenario.id.clone(),
         passed: true,
@@ -1317,6 +1503,9 @@ fn is_empty_fixture_relation_shell(row: &Value) -> bool {
     })
 }
 
+/// One plane of a snapshot, with the empty relation shells and the volatile
+/// stamps taken out — so "did this plane change" answers about content, not
+/// about which session last touched or regenerated a row.
 fn fixture_plane(snapshot: &Value, path: &str) -> Value {
     let mut value = snapshot.pointer(path).cloned().unwrap_or(Value::Null);
     if path != "/payload/pe"
@@ -1324,6 +1513,7 @@ fn fixture_plane(snapshot: &Value, path: &str) -> Value {
     {
         rows.retain(|row| !is_empty_fixture_relation_shell(row));
     }
+    strip_fixture_volatile(&mut value);
     value
 }
 
@@ -1333,6 +1523,12 @@ fn strip_fixture_volatile(value: &mut Value) {
             object.remove("sesno");
             object.remove("SESNO");
             object.remove("CACHID");
+            // The model rows (`inst_relate` / `inst_info`) carry the source session they
+            // were generated at. A root whose subtree only saw a metadata change is still
+            // regenerated (its candidate seeds the affected closure, e3d-model
+            // `affected_closure`), so the stamp moves while the geometry does not — it is a
+            // watermark, not model content.
+            object.remove("model_sesno");
             for child in object.values_mut() {
                 strip_fixture_volatile(child);
             }
@@ -1474,6 +1670,7 @@ fn seed_fixture_models(
         .filter_map(|object| object.refno.as_deref())
         .collect::<BTreeSet<_>>();
     let mut evidence = Vec::new();
+    let deadline = Instant::now() + SEED_CONFLICT_BUDGET;
     for refno in roots {
         let mut body = fixture_identity(project, mdb, ns);
         body.as_object_mut()
@@ -1482,7 +1679,8 @@ fn seed_fixture_models(
         body.as_object_mut()
             .unwrap()
             .insert("force".into(), Value::Bool(true));
-        let response = http_json("POST", &format!("{}/model/ensure", fixture_api()), Some(body))?;
+        let response = ensure_root_model(body, deadline)
+            .with_context(|| format!("seed fixture model for root {refno}"))?;
         evidence.push(response);
     }
     fs::write(
@@ -1490,6 +1688,39 @@ fn seed_fixture_models(
         serde_json::to_vec_pretty(&evidence)?,
     )?;
     Ok(())
+}
+
+/// How long seeding keeps retrying `409` answers before it gives up on a root.
+const SEED_CONFLICT_BUDGET: Duration = Duration::from_secs(300);
+
+/// `POST /model/ensure` for one root, retrying while the service answers `409`.
+///
+/// `409` is the service's "retry is the answer" code (`ModelGenerationInProgress` /
+/// `ModelStaleAfterGeneration`, ADR-0009): the startup catch-up task, or the
+/// neighbouring root's generation, may still hold this root's lock when seeding
+/// starts, and the fixture must not turn that into a failed run — it only needs
+/// the model to be there before the scenarios begin. Every other failure is
+/// returned as-is.
+fn ensure_root_model(body: Value, deadline: Instant) -> Result<Value> {
+    loop {
+        match http_json(
+            "POST",
+            &format!("{}/model/ensure", fixture_api()),
+            Some(body.clone()),
+        ) {
+            Ok(response) => return Ok(response),
+            Err(error) if is_retryable_conflict(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_secs(3));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// `http_json` folds curl's `--fail-with-body` verdict into its message; a `409`
+/// is the only status seeding may wait out.
+fn is_retryable_conflict(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("returned error: 409")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1582,13 +1813,11 @@ fn prime_room_structure_baselines(
     Ok(())
 }
 
-fn fixture_snapshot(
-    ns: &str,
-    project: &str,
-    dbnum: u32,
+/// The fixture symbols a scenario is allowed to affect.
+fn scenario_symbols(
     scenario: &FixtureScenario,
     map: &BTreeMap<String, ResolvedFixture>,
-) -> Result<Value> {
+) -> BTreeSet<String> {
     let mut symbols = BTreeSet::from([scenario.site.clone(), scenario.target.clone()]);
     symbols.extend(scenario.roots.iter().cloned());
     // A change to one member can legitimately regenerate another member under
@@ -1603,6 +1832,17 @@ fn fixture_snapshot(
                 .map(|(symbol, _)| symbol.clone()),
         );
     }
+    symbols
+}
+
+fn fixture_snapshot(
+    ns: &str,
+    project: &str,
+    dbnum: u32,
+    scenario: &FixtureScenario,
+    map: &BTreeMap<String, ResolvedFixture>,
+) -> Result<Value> {
+    let symbols = scenario_symbols(scenario, map);
     let names = symbols
         .iter()
         .filter_map(|s| map.get(s))
@@ -1622,21 +1862,30 @@ fn fixture_snapshot(
         .map(|refno| format!("pe:{}", refno.replace('/', "_")))
         .collect::<Vec<_>>()
         .join(",");
+    // Model rows are looked up by field, not by graph hop: `inst_relate` is written as a
+    // plain table (`INSERT IGNORE`, no `RELATION` — the baked-solid row has no `out`), so
+    // `pe->inst_relate` is empty by construction, and `geo_relate` hangs off `inst_info`,
+    // not `pe` (`model_db_adapter::RowBatch::render`). The rows carry the source element
+    // in `in` / `geom_refno` and, since ADR-056, the world placement (`world_trans_d` /
+    // `aabb_d`) and the mesh ids (`insts_flat`) inline — exactly what the model plane
+    // has to compare. Reading them through `->` made every fixture's model plane an
+    // empty list on both sides, so "model changed" could never come out true.
     let sql = format!(
         "LET $ids = array::union([{records}], (SELECT VALUE id FROM pe WHERE name IN [{names}])); \
+         LET $unrelated = [{unrelated}]; \
          RETURN {{ \
            watermark: (SELECT * FROM dbnum_watermark:{dbnum})[0], \
            pe: (SELECT *, refno.* AS attributes FROM $ids ORDER BY id), \
            owner: (SELECT id, ->pe_owner.{{id,in,out}} AS outgoing, <-pe_owner.{{id,in,out}} AS incoming FROM $ids ORDER BY id), \
-           inst: (SELECT id, ->inst_relate.{{id,in,out,aabb,world_trans}} AS outgoing, <-inst_relate.{{id,in,out,aabb,world_trans}} AS incoming FROM $ids ORDER BY id), \
-           geo: (SELECT id, ->geo_relate.{{id,in,out}} AS outgoing, <-geo_relate.{{id,in,out}} AS incoming FROM $ids ORDER BY id), \
+           inst: (SELECT * FROM inst_relate WHERE in IN $ids ORDER BY id), \
+           geo: (SELECT * FROM geo_relate WHERE geom_refno IN $ids ORDER BY id), \
            room: (SELECT id, ->room_relate.{{id,in,out,room_num,inside_count,center_dist}} AS outgoing, <-room_relate.{{id,in,out,room_num,inside_count,center_dist}} AS incoming FROM $ids ORDER BY id), \
            room_panel: (SELECT id, ->room_panel_relate.{{id,in,out,room_num}} AS outgoing, <-room_panel_relate.{{id,in,out,room_num}} AS incoming FROM $ids ORDER BY id), \
-           unrelated_pe: (SELECT *, refno.* AS attributes FROM [{unrelated}] ORDER BY id), \
-           unrelated_owner: (SELECT id, ->pe_owner.{{id,in,out}} AS outgoing, <-pe_owner.{{id,in,out}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           unrelated_inst: (SELECT id, ->inst_relate.{{id,in,out,aabb,world_trans}} AS outgoing, <-inst_relate.{{id,in,out,aabb,world_trans}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           unrelated_geo: (SELECT id, ->geo_relate.{{id,in,out}} AS outgoing, <-geo_relate.{{id,in,out}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           unrelated_room: (SELECT id, ->room_relate.{{id,in,out,room_num}} AS outgoing, <-room_relate.{{id,in,out,room_num}} AS incoming FROM [{unrelated}] ORDER BY id) \
+           unrelated_pe: (SELECT *, refno.* AS attributes FROM $unrelated ORDER BY id), \
+           unrelated_owner: (SELECT id, ->pe_owner.{{id,in,out}} AS outgoing, <-pe_owner.{{id,in,out}} AS incoming FROM $unrelated ORDER BY id), \
+           unrelated_inst: (SELECT * FROM inst_relate WHERE in IN $unrelated ORDER BY id), \
+           unrelated_geo: (SELECT * FROM geo_relate WHERE geom_refno IN $unrelated ORDER BY id), \
+           unrelated_room: (SELECT id, ->room_relate.{{id,in,out,room_num}} AS outgoing, <-room_relate.{{id,in,out,room_num}} AS incoming FROM $unrelated ORDER BY id) \
          }};"
     );
     let response = fixture_surreal_sql(ns, project, &sql)?;
@@ -1694,11 +1943,7 @@ fn assert_case(
             "unrelated fixture state changed in {key}"
         );
     }
-    let model_tasks = tasks
-        .iter()
-        .filter(|task| task.get("kind").and_then(Value::as_str) == Some("model_drain"))
-        .collect::<Vec<_>>();
-    let task_text = serde_json::to_string(&model_tasks)?;
+    let regenerated = regenerated_roots(tasks);
     for root in s
         .roots
         .iter()
@@ -1710,8 +1955,8 @@ fn assert_case(
             .and_then(|root| root.refno.as_deref())
         {
             ensure!(
-                task_text.contains(refno) || task_text.contains(&refno.replace('/', "_")),
-                "expected generation root {root} ({refno}) is absent from model_drain.detail.roots"
+                regenerated.contains(refno) || regenerated.contains(&refno.replace('/', "_")),
+                "expected generation root {root} ({refno}) was not regenerated by the window's tasks: {regenerated:?}"
             );
         }
     }
@@ -1831,6 +2076,208 @@ fn assert_case(
     Ok(records)
 }
 
+/// Delivery delete records (`datacenter_delete`, plan 2026-09-22), read through
+/// `GET /datacenter/deletes` so the read API is exercised too. The rows inside the
+/// scenario's scope must be exactly `expected`: a scenario that declares none
+/// (moves, resizes, member deletes …) must not produce any. Each `fresh` row carries
+/// one of the sessions this mutation saved (a TTY run saves more than one, and the
+/// row keeps the session of the change itself, not the window end), a `sesno_time`
+/// equal to that same session's page in the E3D file, is unpublished (the
+/// incremental path only `update`s `datacenter_version`, so it must never create a
+/// row there), and comes back from a one-second `from` / `to` window around its
+/// `sesno_time`.
+#[allow(clippy::too_many_arguments)]
+fn assert_datacenter_deletes(
+    phase: &str,
+    dir: &Path,
+    scenario: &FixtureScenario,
+    map: &BTreeMap<String, ResolvedFixture>,
+    identity: &str,
+    dbnum: u32,
+    expected: &[&ExpectedDeleteRecord],
+    fresh: &[ExpectedDeleteRecord],
+    saved: &MutationRunReport,
+    target_db: &Path,
+) -> Result<AssertionRecord> {
+    let sessions = (saved.before_sesno + 1)..=saved.after_sesno;
+    let url = |query: &str| {
+        format!(
+            "{}/datacenter/deletes?{identity}&dbnum={dbnum}&{query}",
+            fixture_api()
+        )
+    };
+    let text = |row: &Value, key: &str| {
+        row.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let refno_of = |symbol: &str| {
+        map.get(symbol)
+            .and_then(|fixture| fixture.refno.clone())
+            .with_context(|| format!("datacenter_delete symbol {symbol} has no baseline refno"))
+    };
+    let page = http_json("GET", &url("limit=5000"), None)?;
+    fs::write(
+        dir.join(format!("datacenter-delete-{phase}.json")),
+        serde_json::to_vec_pretty(&page)?,
+    )?;
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .context("datacenter/deletes answered without items")?;
+    let scope = scenario_symbols(scenario, map)
+        .iter()
+        .filter_map(|symbol| map.get(symbol)?.refno.clone())
+        .collect::<BTreeSet<_>>();
+    let actual = items
+        .iter()
+        .filter(|row| scope.contains(&text(row, "refno")))
+        .map(|row| {
+            format!(
+                "{} {} {} {} zone={}",
+                text(row, "refno"),
+                text(row, "name"),
+                text(row, "reason"),
+                text(row, "type"),
+                row.get("zone_refno")
+                    .and_then(Value::as_str)
+                    .unwrap_or("null")
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let wanted = expected
+        .iter()
+        .map(|record| -> Result<String> {
+            let zone = record.zone.as_deref().map(refno_of).transpose()?;
+            Ok(format!(
+                "{} {} {} {} zone={}",
+                refno_of(&record.object)?,
+                record.name,
+                record.reason,
+                map[&record.object].noun,
+                zone.as_deref().unwrap_or("null")
+            ))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    ensure!(
+        actual == wanted,
+        "{phase}: datacenter_delete rows in scope: expected {wanted:?}, actual {actual:?}"
+    );
+    let stamp = |time: chrono::DateTime<chrono::Utc>| {
+        time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    for record in fresh {
+        let refno = refno_of(&record.object)?;
+        let row = items
+            .iter()
+            .find(|row| text(row, "refno") == refno && text(row, "name") == record.name)
+            .with_context(|| {
+                format!(
+                    "{phase}: no datacenter_delete row for {refno} {}",
+                    record.name
+                )
+            })?;
+        let sesno = row
+            .get("sesno")
+            .and_then(Value::as_i64)
+            .and_then(|sesno| i32::try_from(sesno).ok())
+            .filter(|sesno| sessions.contains(sesno))
+            .with_context(|| {
+                format!(
+                    "{phase}: {refno} {} does not carry one of the saved sessions {sessions:?}: {row}",
+                    record.name
+                )
+            })?;
+        ensure!(
+            row.get("published").and_then(Value::as_bool) == Some(false),
+            "{phase}: never-published fixture unit {refno} reads as published: {row}"
+        );
+        let at = chrono::DateTime::parse_from_rfc3339(&text(row, "sesno_time"))
+            .with_context(|| {
+                format!(
+                    "{phase}: {refno} {} has no RFC3339 sesno_time: {row}",
+                    record.name
+                )
+            })?
+            .with_timezone(&chrono::Utc);
+        let written = aios_database::data_interface::db_file_header::session_at(
+            target_db,
+            u32::try_from(sesno)?,
+        )?
+        .local_time()
+        .with_context(|| {
+            format!("{phase}: session {sesno} of the target DB has no readable time")
+        })?;
+        ensure!(
+            at == written,
+            "{phase}: {refno} {} carries sesno_time {} but its session {sesno} was written at {}",
+            record.name,
+            stamp(at),
+            stamp(written)
+        );
+        let window = http_json(
+            "GET",
+            &url(&format!(
+                "from={}&to={}",
+                stamp(at),
+                stamp(at + chrono::Duration::seconds(1))
+            )),
+            None,
+        )?;
+        ensure!(
+            window
+                .get("items")
+                .and_then(Value::as_array)
+                .is_some_and(|rows| rows.iter().any(|candidate| {
+                    text(candidate, "refno") == refno && text(candidate, "name") == record.name
+                })),
+            "{phase}: from/to around sesno_time {} does not return {refno} {}: {window}",
+            stamp(at),
+            record.name
+        );
+    }
+    Ok(AssertionRecord {
+        plane: "datacenter_delete",
+        passed: true,
+        detail: format!(
+            "{phase}: {} row(s) in scope, {} written by sessions {sessions:?}",
+            actual.len(),
+            fresh.len()
+        ),
+    })
+}
+
+/// The generation roots a window's tasks regenerated (or removed).
+///
+/// Since ADR-071 D1 the model is generated **inside** the dbnum task: the roots are the
+/// `data_batch` result's `units[].root_refno` (`kind` regen / remove …). The older
+/// `model_drain` task with `detail.roots` is still honoured for services that emit it.
+fn regenerated_roots(tasks: &[Value]) -> BTreeSet<String> {
+    tasks
+        .iter()
+        .flat_map(|task| {
+            let units = task
+                .pointer("/result/units")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|unit| unit.get("root_refno").and_then(Value::as_str))
+                .map(str::to_owned);
+            let drained = (task.get("kind").and_then(Value::as_str) == Some("model_drain"))
+                .then(|| task.pointer("/detail/roots").and_then(Value::as_array))
+                .flatten()
+                .into_iter()
+                .flatten()
+                .map(|root| match root.as_str() {
+                    Some(text) => text.to_owned(),
+                    None => root.to_string(),
+                });
+            units.chain(drained).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn room_numbers(snapshot: &Value, target_refno: Option<&str>) -> BTreeSet<String> {
     let Some(target_refno) = target_refno else {
         return BTreeSet::new();
@@ -1882,7 +2329,8 @@ fn execute_fixture_and_wait(
     min_expected_sesno: i32,
 ) -> Result<(Value, Vec<Value>)> {
     fs::create_dir_all(dir)?;
-    let model_before = model_drain_task_ids()?;
+    let api = fixture_api();
+    let model_before = model_drain_task_ids(&api)?;
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
     let mirror_latest = file_latest_sesno(mirror_target_db, project)?;
     fs::write(
@@ -1926,7 +2374,7 @@ fn execute_fixture_and_wait(
         "one or more fixture tasks failed: {}",
         serde_json::to_string(&tasks)?
     );
-    tasks.extend(wait_model_drain_settlement(&model_before)?);
+    tasks.extend(wait_model_drain_settlement(&api, &model_before)?);
     Ok((receipt, tasks))
 }
 
@@ -2273,6 +2721,41 @@ mod tests {
         assert_ne!(restorable_payload(&a), restorable_payload(&c));
     }
 
+    /// The model plane is compared by content: a regenerated row with the same
+    /// geometry and placement only moves `model_sesno`, and that must read as
+    /// "unchanged"; a moved placement (`world_trans_d`) or a new row must not.
+    #[test]
+    fn model_plane_comparison_ignores_the_generation_stamp_but_not_the_content() {
+        let row = |stamp: i64, east: f64| {
+            json!({
+                "id": "inst_relate:24382_257", "in": "pe:24382_257", "out": "inst_info:24382_257",
+                "model_sesno": stamp, "aabb_d": {"mins": [east - 500.0, 4500.0, -500.0], "maxs": [east + 500.0, 5500.0, 500.0]},
+                "world_trans_d": {"translation": [east, 5000.0, 0.0]},
+                "insts_flat": [{"geo_hash": "12296242654610097853"}]
+            })
+        };
+        let before = json!({"payload": {"inst": [row(71, -5000.0)]}});
+        let regenerated = json!({"payload": {"inst": [row(77, -5000.0)]}});
+        let moved = json!({"payload": {"inst": [row(77, 1000.0)]}});
+        let added = json!({"payload": {"inst": [row(77, -5000.0), {"id": "inst_relate:24382_301", "model_sesno": 77}]}});
+        assert_eq!(
+            fixture_plane(&before, "/payload/inst"),
+            fixture_plane(&regenerated, "/payload/inst")
+        );
+        assert_ne!(
+            fixture_plane(&before, "/payload/inst"),
+            fixture_plane(&moved, "/payload/inst")
+        );
+        assert_ne!(
+            fixture_plane(&before, "/payload/inst"),
+            fixture_plane(&added, "/payload/inst")
+        );
+        assert_eq!(
+            fixture_restorable_payload(&before),
+            fixture_restorable_payload(&regenerated)
+        );
+    }
+
     #[test]
     fn fixture_restore_comparison_ignores_element_session_metadata() {
         let before = json!({"payload":{"pe":[{"id":"pe:1_2","sesno":10,"name":"/A"}]}});
@@ -2328,8 +2811,9 @@ mod tests {
     }
 
     /// The fixture pins the spatial tree on and never writes the retired
-    /// `room_incremental` key (ADR-073 D7): room membership has no switch of its
-    /// own in the fixture config any more.
+    /// `room_incremental` key (ADR-073 D7): room membership has no stage switch
+    /// of its own in the fixture config any more — only the lane switch
+    /// `room_membership`, which the fixture pins on.
     #[test]
     fn fixture_service_uses_the_run_directory_for_its_instance_lock() {
         let source = include_str!("fixture.rs");
@@ -2354,6 +2838,163 @@ mod tests {
         );
     }
 
+    /// The service starts from `run_dir`, where `aios_core` looks for
+    /// `resource/surreal` while connecting; the stack must stage the checkout's
+    /// scripts there **before** spawning the service, or the connect fails with
+    /// `Failed to define common functions … (os error 3)` and the suite never
+    /// reaches a scenario.
+    #[test]
+    fn fixture_stack_stages_surreal_scripts_before_spawning_the_service() {
+        let source = include_str!("fixture.rs");
+        let stack = source
+            .split_once("fn start_fixture_stack(")
+            .expect("fixture stack")
+            .1
+            .split_once("fn stage_surreal_scripts(")
+            .expect("stack boundary")
+            .0;
+        let staged = stack
+            .find("stage_surreal_scripts(repo, run_dir)?;")
+            .expect("stack stages the scripts");
+        let spawned = stack
+            .find("Command::new(service)")
+            .expect("stack spawns the service");
+        assert!(
+            staged < spawned,
+            "scripts must be staged before the service is spawned"
+        );
+
+        let dir = std::env::temp_dir().join(format!("e3d-fixture-surql-{}", std::process::id()));
+        let repo = dir.join("repo");
+        let run_dir = dir.join("run");
+        fs::create_dir_all(repo.join("resource").join("surreal").join("nested")).unwrap();
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(
+            repo.join("resource").join("surreal").join("common.surql"),
+            "DEFINE FUNCTION OVERWRITE fn::probe() { RETURN 1; };",
+        )
+        .unwrap();
+        let target = stage_surreal_scripts(&repo, &run_dir).unwrap();
+        assert_eq!(target, run_dir.join("resource").join("surreal"));
+        assert_eq!(
+            fs::read_to_string(target.join("common.surql")).unwrap(),
+            "DEFINE FUNCTION OVERWRITE fn::probe() { RETURN 1; };"
+        );
+        assert!(
+            !target.join("nested").exists(),
+            "only the script files are staged, never sub-directories"
+        );
+        // Re-running against the same run directory is idempotent.
+        stage_surreal_scripts(&repo, &run_dir).unwrap();
+        assert!(
+            stage_surreal_scripts(&dir.join("elsewhere"), &run_dir).is_err(),
+            "a checkout without resource/surreal is an error, not a silent no-op"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The fixture owns its ports (18048 / 18028 by default). Nothing on its
+    /// production path may reach for the golden suite's `API` / `SURREAL_SQL`
+    /// constants — the drain helpers did until 2026-09-20 and every scenario
+    /// died on `Could not connect to 127.0.0.1:8028`.
+    #[test]
+    fn fixture_never_talks_to_the_golden_suite_ports() {
+        let source = include_str!("fixture.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("fixture.rs has a test module")
+            .0;
+        for (index, line) in production.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            assert!(
+                !code.contains("{API}")
+                    && !code.contains("{DATA_API}")
+                    && !code.contains(" SURREAL_SQL"),
+                "fixture.rs:{} reaches for a golden-suite endpoint: {line}",
+                index + 1
+            );
+        }
+        // Both drain helpers are called with the fixture's own API prefix.
+        assert!(production.contains("model_drain_task_ids(&api)"));
+        assert!(production.contains("wait_model_drain_settlement(&api, &model_before)"));
+    }
+
+    /// Seeding waits out `409` only; anything else is the run's verdict.
+    #[test]
+    fn seeding_retries_only_the_conflict_status() {
+        let conflict = anyhow!(
+            "HTTP POST http://127.0.0.1:18028/api/v1/model/ensure failed: curl: (22) The requested URL returned error: 409"
+        );
+        assert!(is_retryable_conflict(&conflict));
+        let internal = anyhow!(
+            "HTTP POST http://127.0.0.1:18028/api/v1/model/ensure failed: curl: (22) The requested URL returned error: 500"
+        );
+        assert!(!is_retryable_conflict(&internal));
+        assert!(!is_retryable_conflict(&anyhow!(
+            "decode HTTP response: not json"
+        )));
+
+        // The settle-before-seed order is what keeps seeding off the startup task.
+        let source = include_str!("fixture.rs");
+        let cases = source
+            .split_once("fn run_fixture_cases(")
+            .expect("run_fixture_cases exists")
+            .1
+            .split_once("fn start_fixture_stack(")
+            .expect("run_fixture_cases end exists")
+            .0;
+        let startup = cases.find("\"startup\")?;").expect("startup settlement");
+        let seed = cases
+            .find("seed_fixture_models(manifest")
+            .expect("seeding call");
+        let baseline = cases.find("\"baseline\")?;").expect("baseline settlement");
+        assert!(startup < seed && seed < baseline);
+    }
+
+    /// The mirrored project must carry the SYS / COMM / MISC meta databases next
+    /// to the target DESI copy — the service reads the MDB declaration from the
+    /// SYS **file** — while every other DESI and any backup copy stays out.
+    #[test]
+    fn fixture_project_mirror_carries_the_meta_databases_next_to_the_target() {
+        let dir = std::env::temp_dir().join(format!("e3d-fixture-mirror-{}", std::process::id()));
+        let project = dir.join("AvevaMarineSample");
+        let db_dir = project.join("ams000");
+        fs::create_dir_all(&db_dir).unwrap();
+        for name in [
+            "ams7998_0001",
+            "ams8000_0001",
+            "amssys",
+            "amscom",
+            "amsmis",
+            "amscom.codex-before-d03-relaunch-20260727",
+        ] {
+            fs::write(db_dir.join(name), name.as_bytes()).unwrap();
+        }
+        let target = db_dir.join("ams7998_0001");
+        let (mirror_project, mirror_target) =
+            create_service_project_mirror(&project, &target, &dir.join("project-mirror")).unwrap();
+        let mirror_db_dir = mirror_project.join("ams000");
+        assert_eq!(mirror_target, mirror_db_dir.join("ams7998_0001"));
+        let mut mirrored = fs::read_dir(&mirror_db_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        mirrored.sort();
+        assert_eq!(mirrored, vec!["ams7998_0001", "amscom", "amsmis", "amssys"]);
+        assert_eq!(fs::read(mirror_db_dir.join("amssys")).unwrap(), b"amssys");
+
+        // A project directory without a SYS file cannot feed the service its MDB.
+        fs::remove_file(db_dir.join("amssys")).unwrap();
+        let error = create_service_project_mirror(&project, &target, &dir.join("project-mirror-2"))
+            .err()
+            .expect("missing SYS is an error");
+        assert!(
+            format!("{error:#}").contains("no SYS database"),
+            "{error:#}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn fixture_runtime_config_enables_spatial_tree_and_writes_no_room_switch() {
         let dir = std::env::temp_dir().join(format!("e3d-fixture-config-{}", std::process::id()));
@@ -2365,7 +3006,7 @@ mod tests {
         let target = db_dir.join("ams8000_0001");
         fs::write(
             &base,
-            "gen_spatial_tree = false\nwatch_dbnums = [7998, 8000]\n",
+            "gen_spatial_tree = false\nwatch_dbnums = [7998, 8000]\nroom_membership = false\n",
         )
         .unwrap();
         fs::write(&target, []).unwrap();
@@ -2391,6 +3032,14 @@ mod tests {
             rendered
                 .lines()
                 .any(|line| line == "gen_spatial_tree = true")
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("room_membership = "))
+                .collect::<Vec<_>>(),
+            vec!["room_membership = true"],
+            "the room lane must be on for the two `room: true` scenarios, whatever the base config says"
         );
         assert!(
             rendered

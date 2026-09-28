@@ -1,0 +1,20 @@
+# 行尾约定：仓库里一律 LF，检出也是 LF（不分平台）。
+# 背景：2026-09-20 之前 core.autocrlf=false 又没有这份文件，索引里 284 个 CRLF + 17 个混杂行尾的文本 blob
+# 与 1577 个 LF 的混在一起；同一份文件在不同 worktree / 编辑器里来回翻行尾，diff 与合并都跟着遭殃。
+* text=auto eol=lf
+
+# 证据包：历史 JSON 转储、patch、运行时副本——按抓到时的原样保存，不做行尾归一。
+verification/** -text
+*.patch -text
+# E3D PML 宏：在 E3D 里跑，按写出时的原样保存。
+*.mac -text
+
+# 二进制：不做任何行尾 / 差异处理。
+*.png binary
+*.xlsx binary
+*.xls binary
+*.pdf binary
+*.rvm binary
+*.xkt binary
+*.dat binary
+*.mesh binary

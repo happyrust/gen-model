@@ -106,9 +106,29 @@ struct AttributesTarget {
 }
 
 /// 快照回执表。几何本身不在这里，在投影存储的 `Historical(<key>)` 命名空间里。
+///
+/// 按**条数**封顶（内存控制计划 P4 / D4，2026-09-22，`options::model_historical_snapshots_max`，默认 16、0 = 不限）：
+/// 每格是一个单元子树的完整投影，此前只有显式 `DELETE` / 同 key 重生成才丢、`/health` 也看不见。发布第 N+1 格时
+/// 按最近一次 generate 的先后把最旧的那格连回执一起丢——走的就是 `drop_snapshot`，之后再查是既有的 `SNAPSHOT_NOT_FOUND`。
 #[derive(Default)]
 pub struct HistoricalModelStore {
     reports: RwLock<HashMap<String, HistoricalModelReport>>,
+    /// 每个快照最近一次 `publish` 的序号（进程内单调计数，不是时刻）——封顶时最小的先出。
+    publish_ticks: RwLock<HashMap<String, u64>>,
+    next_tick: std::sync::atomic::AtomicU64,
+    /// 进程起来以来按条数上限顶掉了几格（显式 `DELETE` 与同 key 重生成不计）。
+    evicted_total: std::sync::atomic::AtomicU64,
+}
+
+/// `HistoricalModelStore` 这一维的现值（`/health.model_cache.historical`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HistoricalStoreStats {
+    /// 此刻有回执的快照格数。
+    pub snapshots: usize,
+    /// 生效的条数上限（0 = 不限）。
+    pub max_snapshots: usize,
+    /// 按上限顶掉的累计格数。
+    pub evicted_total: u64,
 }
 
 static STORE: OnceCell<HistoricalModelStore> = OnceCell::const_new();
@@ -122,6 +142,11 @@ impl HistoricalModelStore {
         STORE.get_or_try_init(Self::open).await
     }
 
+    /// 同步拿全局表：还没人 generate 过就是 `None`（`/health` 这种同步观测用，不去初始化）。
+    pub fn try_global() -> Option<&'static Self> {
+        STORE.get()
+    }
+
     /// 丢掉一个快照：回执与它那一格几何一起走。共享的 mesh 文件不动——它们是内容寻址的，
     /// 由可达性 GC 收，不跟着某一个快照走。
     pub async fn drop_snapshot(&self, snapshot_key: &str) -> anyhow::Result<()> {
@@ -131,7 +156,26 @@ impl HistoricalModelStore {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(snapshot_key);
+        self.publish_ticks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(snapshot_key);
         Ok(())
+    }
+
+    /// 条数 / 上限 / 累计顶掉——查时现读，不落库。
+    pub fn stats(&self) -> HistoricalStoreStats {
+        HistoricalStoreStats {
+            snapshots: self
+                .reports
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            max_snapshots: crate::options::model_historical_snapshots_max(),
+            evicted_total: self
+                .evicted_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     pub async fn snapshot(&self, snapshot_key: &str) -> anyhow::Result<Option<Value>> {
@@ -328,11 +372,69 @@ impl HistoricalModelStore {
     }
 
     async fn publish(&self, report: &HistoricalModelReport) -> anyhow::Result<()> {
+        let evicted = self
+            .publish_capped(report, crate::options::model_historical_snapshots_max())
+            .await?;
+        if !evicted.is_empty() {
+            log::info!(
+                "historical snapshots capped: published {} and dropped the oldest {} ({}); cap {}",
+                report.snapshot_key,
+                evicted.len(),
+                evicted.join(", "),
+                crate::options::model_historical_snapshots_max()
+            );
+        }
+        Ok(())
+    }
+
+    /// 登记回执并按条数封顶：刚发布的这格永远留，超出上限时最久没 generate 的先丢（连它那一格几何，
+    /// 与 `DELETE` 同一条路）。同 key 重生成只是刷新序号、不算新格。`max_snapshots == 0` = 不限。
+    /// 返回被顶掉的键（调用方打日志）。
+    async fn publish_capped(
+        &self,
+        report: &HistoricalModelReport,
+        max_snapshots: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let tick = self
+            .next_tick
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         self.reports
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(report.snapshot_key.clone(), report.clone());
-        Ok(())
+        self.publish_ticks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(report.snapshot_key.clone(), tick);
+        let mut evicted = Vec::new();
+        if max_snapshots == 0 {
+            return Ok(evicted);
+        }
+        loop {
+            let oldest = {
+                let ticks = self
+                    .publish_ticks
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if ticks.len() <= max_snapshots {
+                    break;
+                }
+                ticks
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != report.snapshot_key)
+                    .min_by_key(|(_, tick)| **tick)
+                    .map(|(key, _)| key.clone())
+            };
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.drop_snapshot(&oldest).await?;
+            self.evicted_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            evicted.push(oldest);
+        }
+        Ok(evicted)
     }
 }
 
@@ -503,7 +605,7 @@ pub async fn generate_historical(
         generated.elements,
         Vec::new(),
         &generated.owners,
-        &option.get_meshes_path(),
+        &crate::options::meshes_dir_for(option),
     )
     .await
     .map_err(|e| HistoricalModelError::new("SNAPSHOT_COMMIT_FAILED", e))?;
@@ -565,7 +667,7 @@ fn classify_generation_error(error: anyhow::Error) -> HistoricalModelError {
 pub(crate) fn source_service() -> anyhow::Result<E3dModelService> {
     let option = aios_core::get_db_option();
     let (pins, locator) = current_mdb_sources()?;
-    E3dModelService::from_source_files(pins, locator, option.get_meshes_path())
+    E3dModelService::from_source_files(pins, locator, crate::options::meshes_dir_for(option))
 }
 
 /// 解一个库文件上的时点选择。**当前投影解「最新」也走这里**（ADR-054 实施约束 1：一把尺子），
@@ -964,8 +1066,9 @@ mod tests {
             current_arm.contains("model_write_behind::publish("),
             "only the current projection goes durable: {current_arm}"
         );
+        // 合并后 `bake_elements` 多了房间计算器那一位（ADR-073 D1，B/T2）；历史快照不算房间归属，传 `None`。
         assert!(
-            body.contains("bake_elements(upserts, mesh_dir)"),
+            body.contains("bake_elements(upserts, mesh_dir, None)"),
             "meshes are the one on-disk artifact, baked before the scope dispatch"
         );
         // 本模块自己：快照回执只活在进程内的 `RwLock<HashMap>`，没有任何库句柄
@@ -1154,6 +1257,100 @@ mod tests {
             .attributes_target(key, "24384/23257")
             .expect("单元根自己也允许");
         assert_eq!(root.target, root.unit);
+    }
+
+    /// 内存控制计划 P4 / D4（2026-09-22）：历史快照按条数封顶——发布第 N+1 格时最久没 generate 的先丢，连它那一格
+    /// 几何一起（与 `DELETE` 同一条路，之后再问是 `SNAPSHOT_NOT_FOUND`）；刚发布的永远留；同 key 重生成只刷新序号、
+    /// 不算新格、不顶别人；0 = 不限；显式 `DELETE` 不计入顶掉数。
+    #[tokio::test]
+    async fn the_snapshot_cap_drops_the_oldest_generated_first_and_a_regenerated_key_takes_no_new_slot() {
+        use crate::fast_model::model_memory_store::ProjectionCommit;
+
+        let store = HistoricalModelStore::open().await.expect("report store");
+        let projection = ModelMemoryStore::global();
+        let unit = RefNo::new(24384, 23257);
+        let seed = |key: &str| ProjectionCommit {
+            upserts: vec![ProjectedGeometry {
+                record_id: format!("cap-{key}"),
+                geometry_id: e3d_model::elmodl::GeometryId::Element {
+                    refno: "24384/23257".into(),
+                },
+                source_refno: unit,
+                dbnum: 8000,
+                source_sesno: 1,
+                noun: "EQUI".into(),
+                mesh_id: "cap_mesh".into(),
+                world_transform: glam::DMat4::IDENTITY,
+                world_bounds: [[0.0; 3], [1.0; 3]],
+                ancestors: vec![crate::fast_model::model_memory_store::packed_refno(unit)],
+                shape: ProjectedShape::Baked,
+                tube: None,
+            }],
+            ..ProjectionCommit::default()
+        };
+        let keys = ["24384_23257@7001", "24384_23257@7002", "24384_23257@7003", "24384_23257@7004"];
+        let store = &store;
+        let seed = &seed;
+        let publish = move |key: &'static str, cap: usize| async move {
+            projection.commit(ProjectionScope::Historical(key), vec![seed(key)]);
+            store
+                .publish_capped(&attributes_fixture_report(key, unit, 7000), cap)
+                .await
+                .expect("publish")
+        };
+
+        // 0 = 不限：三格都留。
+        for key in &keys[..3] {
+            assert!(publish(key, 0).await.is_empty());
+        }
+        assert_eq!(store.stats().snapshots, 3);
+
+        // 同 key 重生成：序号刷新、不算新格——上限 3 下不顶任何人；7001 从此不是最旧的。
+        assert!(publish(keys[0], 3).await.is_empty());
+        assert_eq!(store.stats().snapshots, 3);
+        assert_eq!(store.stats().evicted_total, 0);
+
+        // 第四格、上限 3：最久没 generate 的是 7002，连几何一起走；刚发布的 7004 留。
+        assert_eq!(publish(keys[3], 3).await, vec![keys[1].to_string()]);
+        assert_eq!(store.stats().snapshots, 3);
+        assert_eq!(store.stats().evicted_total, 1);
+        assert!(store.snapshot(keys[1]).await.expect("read").is_none());
+        assert!(
+            projection
+                .records(ProjectionScope::Historical(keys[1]))
+                .is_empty(),
+            "被顶掉的那格几何一起走"
+        );
+        assert_eq!(
+            store
+                .attributes_target(keys[1], "24384/23257")
+                .expect_err("被顶掉 = DELETE 过")
+                .code,
+            "SNAPSHOT_NOT_FOUND"
+        );
+        for kept in [keys[0], keys[2], keys[3]] {
+            assert!(store.snapshot(kept).await.expect("read").is_some(), "{kept}");
+            assert_eq!(projection.records(ProjectionScope::Historical(kept)).len(), 1);
+        }
+
+        // 上限收到 1：刚发布的那格留，其余按最近一次 generate 的先后走——7003 最旧、7001（重生成过）次之、7004 最新。
+        let dropped = publish(keys[1], 1).await;
+        assert_eq!(
+            dropped,
+            vec![keys[2].to_string(), keys[0].to_string(), keys[3].to_string()],
+            "最久没 generate 的先出"
+        );
+        assert_eq!(store.stats().snapshots, 1);
+        assert_eq!(store.stats().evicted_total, 4);
+        assert!(store.snapshot(keys[1]).await.expect("read").is_some());
+
+        // 显式 DELETE 不计入顶掉数。
+        store.drop_snapshot(keys[1]).await.expect("drop");
+        assert_eq!(store.stats().snapshots, 0);
+        assert_eq!(store.stats().evicted_total, 4);
+        for key in keys {
+            projection.drop_scope(ProjectionScope::Historical(key));
+        }
     }
 
     /// 快照 DELETE 之后再问属性，回的是 SNAPSHOT_NOT_FOUND，不是一份空表。

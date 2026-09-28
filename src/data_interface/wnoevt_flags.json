@@ -1,0 +1,27 @@
+{
+"field":"WNOEVT",
+"field_hash":299311034,
+"reader":"core.dll DB_Attribute::ReadData 0x58CE1F0 -> sub_55BB6C3 (ATNLOG), this+184; DB_Attribute::wnoevt 0x58D5290 returns it. WNOEVT=1 => a put fires no change event (the gate before DCHC).",
+"source":"attlib.dat offline decode (ATGTDF field list + ATGTIX record index); DCHC parity 4270/4270 and PLCF parity 58/58 vs the committed snapshots. Generator: output/gen_wnoevt_flags.py",
+"note":"None of these are in the model-generation attribute schema, so no attribute the increment logic classifies is silent; they are laser/lighting/temperature attributes.",
+"count":7,
+"names":[
+"DPOSCA",
+"EVITCA",
+"EVITCP",
+"EXTEMP",
+"LIGTCA",
+"LIGTCP",
+"TEMPLI"
+],
+"wnoclm_field_hash":193514909,
+"wnoclm_count":6,
+"wnoclm_names":[
+"EXTEMP",
+"HANOFF",
+"HANPOS",
+"LIGTCA",
+"LIGTCP",
+"TEMPLI"
+]
+}

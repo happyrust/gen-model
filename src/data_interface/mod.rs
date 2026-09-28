@@ -123,6 +123,8 @@ pub mod data_face_signature;
 pub mod database_writer_lock;
 
 pub mod fast_delete;
+/// 交付删除记录（`datacenter_delete`）的只读读者：`GET /api/v1/datacenter/deletes` 的数据面（spec §4.14）。
+pub mod datacenter_delete_reader;
 
 pub mod manual_update;
 
@@ -189,6 +191,8 @@ pub(crate) mod room_read_through;
 /// 面板自身的变化 → 本库整库房间归属重算（`RoomOnly`，d-819 / ADR-073 D13）：变更集里的房间定义族
 /// 与开工前对齐换代两条触发，任务在本批根刷盘之后、收尾之前用现有几何重写两张边。
 pub(crate) mod room_recompute;
+/// 反向传播（ADR-073 D13 反查）：面板变了 → 拿新盒查全局树 / 管身（谁进来）+ 库上名下的成员边（谁离开）→ 折成本库受影响的根，整库重算降为兜底。
+pub(crate) mod room_reverse;
 pub(crate) mod generation_flight;
 
 /// Core3D 粒度/去重规则的可执行参考模型。**不在生产路径上**——它是给

@@ -65,7 +65,7 @@ core 的 `UPGRPH` 对类别 4 的变化分三种落法：顶层件整件 `REPELE
 | 生成 | e3d-model `execute_plan(target, plan) -> IncrementOutcome { upserts, removals, report }` | **单元级**（已有，仅作可执行规格） |
 | 投影入口 | `e3d_model_service::apply_geometry_delta(dbnum, sesno, upserts, removals, …)` | **单元级**（已有，唯一生产外调用点是已死的 `apply_window`） |
 | 存储 | `ProjectionCommit { tube_branch_resets, removals: Vec<record_id>, upserts, receipt }`；durable 侧 ADR-060 按记录 id 先删后插 | **记录级**（已有） |
-| 房间 / 空间 overlay | `ScopeState::room_changes: BTreeMap<dbnum, BTreeMap<record, GeometryChange>>` + `flush_room_spatial` | **记录级**（已有） |
+| 房间 / 空间 overlay | `ScopeState::room_changes: BTreeMap<dbnum, BTreeMap<record, GeometryChange>>` + ~~`flush_room_spatial`~~（每库房间空间树 2026-09-22 已删，见 ADR-082 D1 追记；`room_changes` 照旧） | **记录级**（已有） |
 | **回执** | `RootReceipt { source_sesno, model_target, manifest_hash, geometry_count, published_via }` | **根级** ← 缺口 |
 | **发布原子边界** | 一次 `generate_roots` = 一个 cohort，整批 `model_write_behind::publish` | **根级 cohort** ← 缺口 |
 | **清单语义** | 「upserts 就是这根的全部；`prior \ generated` 就是要删的」，`IncompleteRoot::Discard` 专为它设的护栏 | **根级** ← 缺口（最危险的一条） |

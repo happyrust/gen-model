@@ -6,12 +6,15 @@
 //!
 //! 新语义（对齐 `plant-model-gen`）：
 //! - 未知属性 / UDA 一律**保守触发**（漏判=正确性 bug；误判=多算一次，成本可控）；
+//! - **WNOEVT 事件门**（core `putAtt` 流程里 DCHC 之前的第一道门）：字典置 `wnoevt` 的属性被写时
+//!   core 连变更事件都不发，故增量判决把它**无条件短路**为「不动模型」，不再问 DCHC / 读取集合两票
+//!   （[`attribute_no_event`]，attlib.dat 离线解出，全 7 个是激光/照明/温度属性，均不在模型 schema）；
 //! - 「不影响模型、可跳过」要两票：E3D 字典 DCHC = 0 **且** 生成器不读它
 //!   （[`attribute_is_metadata_only`]，2026-09-15 S6；此前只放行 `NAME`/`DESC`/`PURP`/`FUNC`/`LCHKDA`）；
 //! - noun/类型不再作为分类前置门，只用于最终生成器路由。
 //!
 //! 属性清单来源：AVEVA Everything3D `core.dll` / `Core3D.dll` 逆向（`DCHC/EVALAT`
-//! 设计变化层，非 `wnoevt` 事件门）+ 运行库 `att_meta`(702) 交叉校验（100% 命中），
+//! 设计变化层为主，`wnoevt` 事件门作 DCHC 之前的短路）+ 运行库 `att_meta`(702) 交叉校验（100% 命中），
 //! 详见 `plant-model-gen/docs/reverse/core_dll_noun_att_model_update.md` §13/§14。
 
 use std::collections::{HashMap, HashSet};
@@ -378,6 +381,21 @@ pub fn raw_plcf(raw_name: &str) -> Option<bool> {
         .then(|| plcf_flagged_names().contains(name.as_str()))
 }
 
+/// E3D 字典 `WNOEVT` 字段（299311034）：core `putAtt` 流程里 **DCHC 之前的第一道门**——
+/// `DB_Attribute::wnoevt`（`core.dll 0x58D5290`）为真的属性被写时 `DB_ElementChangesPlugger`
+/// 一个变更事件都不广播（`sub_55BB6C3` 读进 `+184`）。因此这类属性改动 core 侧没有任何下游重算，
+/// 我们的增量判决也应把它当作「什么都不用动」，且这判定**在 DCHC / 读取集合两票之前**、无条件成立。
+///
+/// 名单由 `attlib.dat` 纯离线解出（`e3d_attlib::dict::AttrDict` / `output/gen_wnoevt_flags.py`，
+/// 解 DCHC 4270/4270 · PLCF 58/58 逐条校准后同批导出 `wnoevt_flags.json` 随源码入库）。E3D 3.1 全字典
+/// 只有 7 个属性置了它（`DPOSCA EVITCA EVITCP EXTEMP LIGTCA LIGTCP TEMPLI`），全是激光/照明/温度属性，
+/// 没有一个在模型生成的 schema 或读取集合里——所以本门当前对模型语料是恒等变换（回执基线不变），
+/// 只在这些「静默」属性万一出现时把它们从「未知→保守重算」纠正为「不动模型」。
+/// [`tests::wnoevt_gate_is_disjoint_from_reads_and_geometry`] 钉住这份不变量。
+pub fn attribute_no_event(raw_name: &str) -> bool {
+    wnoevt_no_event_names().contains(&normalize_attribute_name(raw_name))
+}
+
 /// gen-model 侧的模型面读点模块（开发计划 2026-09-15 D2 / S5）：目录求值入口、房间、结构连接、电缆端点、
 /// direct 窗口规划器与刚体前移。生成读取集合的第二半从这些文件里扫（第一半是 e3d-model 整个 `src`，
 /// 由它自己的 `data/attribute-read-set.json` 交付）。与 `output/gen_read_set.py::GEN_MODEL_READ_MODULES`
@@ -458,7 +476,8 @@ pub fn generation_read_set_file() -> &'static GenerationReadSetFile {
 /// 它是元数据门的**第二票**：S6 起 [`attribute_is_metadata_only`] 改成「字典 DCHC == 0 ∧ 不在这里」；
 /// 本轮（S5）只交付产物与护栏，判决还没换。2026-09-15：138 个名字（2026-09-19 重生成后 139——e3d-model 09-18
 /// 风管那条带进的 `LBOR`），DCHC=0 的恰好六个
-/// `DIR FILL GTYP PKEY UKEY VXREF`（core 不重画、我们却真读的输入，正是第二票要挡的那几个），
+/// `DIR FILL GTYP PKEY UKEY VXREF`（core 不重画、我们却真读的输入，正是第二票要挡的那几个；2026-09-27
+/// 宿主 FIXING 扫描读目录件的 `NGMR`，成了第七个），
 /// 老五个元数据名 `NAME DESC PURP FUNC LCHKDA` 一个都不在。
 ///
 /// e3d-io 目录求值环境读到的名字（`e3d_io_catalogue_eval`，`ANGL RADI HEIG DESP UNIPAR` 与目录侧
@@ -494,6 +513,21 @@ fn plcf_flagged_names() -> &'static HashSet<String> {
     })
 }
 
+/// `wnoevt_flags.json` 里 `WNOEVT == 1` 的属性名集合（事件门），懒解析一次。
+/// 与 DCHC/PLCF 同批由 `output/gen_wnoevt_flags.py`（及 `e3d_attlib::dict`）从 `attlib.dat` 导出。
+fn wnoevt_no_event_names() -> &'static HashSet<String> {
+    #[derive(Deserialize)]
+    struct WnoevtFlags {
+        names: Vec<String>,
+    }
+    static TABLE: OnceLock<HashSet<String>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let flags: WnoevtFlags = serde_json::from_str(include_str!("wnoevt_flags.json"))
+            .expect("wnoevt_flags.json 随源码入库，必须是合法 JSON");
+        flags.names.into_iter().collect()
+    })
+}
+
 /// 「只改了这个属性，模型一个字都不用动」的**两票**判据（direct 窗口规划器的元数据门，
 /// 2026-09-08 立、2026-09-15 S6 改口径）：E3D 字典的设计变化码说它是 0（core 自己也不为它重画，
 /// `IDCHNG` 门），**并且**生成器不读它（[`generation_read_set`]：e3d-model 整个 `src` 与 gen-model
@@ -502,11 +536,11 @@ fn plcf_flagged_names() -> &'static HashSet<String> {
 ///
 /// S6 之前这里问的是「效果表 [`AttributeEffect::DataOnly`] ∧ DCHC = 0」，恰好放行五个名字；
 /// 那张手写表退成报表分类与 `no_model` 的分档依据（[`attribute_is_curated_metadata`]），不再是判决输入。
-/// 字典 3941 个 DCHC = 0 的名字里，读取集合只挡 `DIR FILL GTYP PKEY UKEY VXREF` 六个（core 不重画、
-/// 我们却真拿来生成的输入），其余 3935 个都放行。其中 16 个被手写表登记成几何 / 级联输入
-/// （`HREF TREF PSPE DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `SIZE MAXA NGMR ORRF PTOF`）：
+/// 字典 3941 个 DCHC = 0 的名字里，读取集合只挡 `DIR FILL GTYP NGMR PKEY UKEY VXREF` 七个（core 不重画、
+/// 我们却真拿来生成的输入），其余 3934 个都放行。其中 15 个被手写表登记成几何 / 级联输入
+/// （`HREF TREF PSPE DKEY DDPR FSPREF SCREF STYP CURD JFRE PTYP` 与 `SIZE MAXA ORRF PTOF`）：
 /// 它们既不是 core 的重画输入、生成器也不读——手写表那一格是当年按语义猜的，判决以两票为准；
-/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`] 逐个点名钉住，名单变了就得重新问
+/// [`tests::the_two_votes_override_the_hand_tables_for_exactly_fifteen_names`] 逐个点名钉住，名单变了就得重新问
 /// 「新名字真的没人读吗」。
 ///
 /// **戳是第一票的唯一例外**（2026-09-17 Q6，用户拍板）：`CACHID` 不在字典快照里（`raw_dchc_code` 回
@@ -523,6 +557,11 @@ fn plcf_flagged_names() -> &'static HashSet<String> {
 /// 四库全量两态 1718 根 0 红（归 `SPAMAP` 的 1034 根）、全语料 453 库命中 36 库、四门与 `CACHID` 同向无一格反向
 /// （`docs/evidence/2026-09-16-q6-spamap-denominator-audit.md` §4.1）。名单仍只有 e3d-model 那一份，这里不点名。
 pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
+    // WNOEVT 事件门（DCHC 之前的第一道门）：core 对置位属性不发任何变更事件，
+    // 直接短路为「不动模型」，不再问 DCHC / 读取集合两票（见 [`attribute_no_event`]）。
+    if attribute_no_event(raw_name) {
+        return true;
+    }
     (raw_dchc_code(raw_name) == Some(0) || attribute_is_cache_stamp(raw_name))
         && !generation_reads_attribute(raw_name)
 }
@@ -1237,7 +1276,7 @@ mod tests {
                 "{name}"
             );
             // S6：字典 DCHC=0 且生成器不读的名字（`HREF TREF PSPE …`）两票放行，手写表那一格只剩报表意义，
-            // 见 `the_two_votes_override_the_hand_tables_for_exactly_sixteen_names`。
+            // 见 `the_two_votes_override_the_hand_tables_for_exactly_fifteen_names`。
             let expected = if attribute_is_metadata_only(name) {
                 OperationImpact::Skip
             } else {
@@ -2147,7 +2186,7 @@ mod tests {
                 AttributeEffect::DirectGeometry,
                 "{name}"
             );
-            // S6：`SIZE MAXA NGMR ORRF PTOF` 字典 DCHC=0 且生成器不读，两票放行；其余照旧重算。
+            // S6：`SIZE MAXA ORRF PTOF` 字典 DCHC=0 且生成器不读，两票放行；其余照旧重算。
             let expected = if attribute_is_metadata_only(name) {
                 OperationImpact::Skip
             } else {
@@ -2559,9 +2598,10 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天六个，全来自 e3d-model：`DIR` catalogue_point、
-    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron——core 会话内不为它们重画，我们却
-    /// 真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都不在（S6 「`NAME` 等仍放行」的前提）。
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天七个，全来自 e3d-model：`DIR` catalogue_point、
+    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减
+    /// ——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都
+    /// 不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
     fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
         let mut zero: Vec<&str> = generation_read_set()
@@ -2570,7 +2610,7 @@ mod tests {
             .map(String::as_str)
             .collect();
         zero.sort_unstable();
-        assert_eq!(zero, ["DIR", "FILL", "GTYP", "PKEY", "UKEY", "VXREF"]);
+        assert_eq!(zero, ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF"]);
         for name in DATA_ONLY_ATTR_NAMES {
             assert!(
                 !generation_reads_attribute(name),
@@ -2586,7 +2626,9 @@ mod tests {
         // 2026-09-15 的规模：133 + 8 − 重叠 = 138。2026-09-19 随 `SPAMAP` 进戳表重生成产物：134 + 8 − 重叠 = 139
         // ——多出的一个是 `LBOR`（e3d-model 09-18 `226154c` 风管那条带进的读点，那边的产物早已 134，这边的副本
         // 一直没重生成）；两个戳都在 `stamp_literals` 里，一个都不进 `names`（上面那条循环钉住）。
-        assert_eq!(generation_read_set().len(), 139, "读取集合条数漂移");
+        // 2026-09-27：GENSEC datum 标架带进 `HPREF`（140，当时漏改这里）；关节负体带进 `JOIS` / `JOIE` / `CREF` /
+        // `NAPP`，前三个本就在模型面那一半里，并集只多 `NAPP`（141）；宿主 FIXING 扫描带进目录件的 `NGMR`（142）。
+        assert_eq!(generation_read_set().len(), 142, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2652,6 +2694,47 @@ mod tests {
         );
     }
 
+    /// WNOEVT 事件门（用户 2026-09-17 拍板接进增量判决）：core 对置位属性不发变更事件，
+    /// [`attribute_is_metadata_only`] 在 DCHC 之前无条件短路它。这道门是 core `putAtt` 的第一关，
+    /// 但对模型语料必须是恒等变换——本测试钉住：全部 7 个 WNOEVT 属性既不被生成器读、也不携带任何
+    /// 正设计变化码（DCHC 0 或 None），所以无条件短路它不会漏算任何几何输入（守住「宁多勿漏」）。
+    #[test]
+    fn wnoevt_gate_is_disjoint_from_reads_and_geometry() {
+        let names = wnoevt_no_event_names();
+        // 快照口径：E3D 3.1 字典恰好 7 个（变了要重新确认它们仍非模型属性）。
+        assert_eq!(names.len(), 7, "WNOEVT==1 的条数漂移");
+        for name in ["DPOSCA", "EVITCA", "EVITCP", "EXTEMP", "LIGTCA", "LIGTCP", "TEMPLI"] {
+            assert!(names.contains(name), "{name} 应在 WNOEVT 名单里");
+            // 事件门命中 → 无条件走「不动模型」，且这判定在 DCHC 之前（归一化 / att. 前缀同答）。
+            assert!(attribute_no_event(name), "{name}");
+            assert!(attribute_no_event(&format!("att.{name}")), "att.{name}");
+            assert!(
+                attribute_is_metadata_only(name),
+                "{name} 事件门应短路为不动模型"
+            );
+            // 不动模型的安全前提：生成器不读它、字典也没有正的设计变化码（否则短路会漏算）。
+            assert!(
+                !generation_reads_attribute(name),
+                "{name} 竟被生成器读取——无条件短路会漏算，需人工复核"
+            );
+            assert!(
+                matches!(raw_dchc_code(name), None | Some(0)),
+                "{name} 竟带正 DCHC 码——不该无条件短路"
+            );
+            // 端到端：单独改这一个 WNOEVT 属性 → 增量判决 Skip（接进 DCHC 之前那道短路的净效果；
+            // 没接门时这些名字落 Unknown 会保守 Regen）。
+            assert_eq!(
+                classify_operation_impact(&modified_operation(name)),
+                OperationImpact::Skip,
+                "{name} 应短路为 Skip"
+            );
+        }
+        // 模型属性不受影响：事件门对它们一律 false。
+        for name in ["POS", "ORI", "BORE", "DIAM", "HEIG", "NAME", "UDA:7"] {
+            assert!(!attribute_no_event(name), "{name} 不该命中 WNOEVT 事件门");
+        }
+    }
+
     /// S6 真值表（开发计划 2026-09-15 D2）：元数据门要两票——字典 DCHC=0 **且** 生成器不读。
     /// 任一票缺席就照旧重算：读取集合里的 DCHC=0 属性不放行；`NAME` 等老五个仍放行；
     /// UDA / 字典没收的名字不放行。**唯一例外**是戳（2026-09-17 Q6）：`CACHID` 字典按构造收不到，
@@ -2675,8 +2758,8 @@ mod tests {
             assert!(attribute_is_metadata_only(name), "{name}");
             assert!(!attribute_is_curated_metadata(name), "{name}");
         }
-        // 读取集合那一票：字典说 0、我们却真拿来生成的六个输入，一个都不放行。
-        for name in ["DIR", "FILL", "GTYP", "PKEY", "UKEY", "VXREF", "att.dir"] {
+        // 读取集合那一票：字典说 0、我们却真拿来生成的七个输入，一个都不放行。
+        for name in ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF", "att.dir"] {
             assert_eq!(raw_dchc_code(name), Some(0), "{name}");
             assert!(generation_reads_attribute(name), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
@@ -2745,7 +2828,7 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡六个，其余全部放行。
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡七个，其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2758,7 +2841,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 6,
+            3941 - 7,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
@@ -2818,14 +2901,14 @@ mod tests {
     }
 
     /// 两票压过手写表：五张手写表里登记为几何 / 级联输入、却字典 DCHC=0 且生成器不读的名字
-    /// **恰好 16 个**，逐个点名。它们是当年按语义猜进表的（`HREF`/`TREF` 分支头尾引用——几何
+    /// **恰好 15 个**，逐个点名。它们是当年按语义猜进表的（`HREF`/`TREF` 分支头尾引用——几何
     /// 读的是 `HPOS HDIR HBOR …` 这些 DCHC=1/2 的存储属性；`PSPE` 管道规格默认值——元件各有
-    /// 自己的 `SPRE`；`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；`NGMR` 负体几何集引用——负体走
-    /// `GMRE`；其余同理），core 不为它们重画、我们也不读，判决以两票为准，手写表那一格只剩报表
-    /// 意义（`classify_attribute_effect` 照旧回级联 / 几何，建边资格不变）。名单变了就得重新问
-    /// 「新名字真的没人读吗」——多出来一个是读取集合漏了、少一个是有人开始读它了。
+    /// 自己的 `SPRE`；`DKEY`/`MAXA` 目录侧 `DATA`/`SELE` 才读；其余同理），core 不为它们重画、我们
+    /// 也不读，判决以两票为准，手写表那一格只剩报表意义（`classify_attribute_effect` 照旧回级联 /
+    /// 几何，建边资格不变）。名单变了就得重新问「新名字真的没人读吗」——多出来一个是读取集合漏了、
+    /// 少一个是有人开始读它了：2026-09-27 少了 `NGMR`（e3d-model 宿主 FIXING 扫描读目录件的负体集）。
     #[test]
-    fn the_two_votes_override_the_hand_tables_for_exactly_sixteen_names() {
+    fn the_two_votes_override_the_hand_tables_for_exactly_fifteen_names() {
         let mut overridden: Vec<&str> = ATTRIBUTE_EFFECT_TABLES
             .iter()
             .filter(|(_, effect)| *effect != AttributeEffect::DataOnly)
@@ -2836,8 +2919,8 @@ mod tests {
         assert_eq!(
             overridden,
             [
-                "CURD", "DDPR", "DKEY", "FSPREF", "HREF", "JFRE", "MAXA", "NGMR", "ORRF", "PSPE",
-                "PTOF", "PTYP", "SCREF", "SIZE", "STYP", "TREF",
+                "CURD", "DDPR", "DKEY", "FSPREF", "HREF", "JFRE", "MAXA", "ORRF", "PSPE", "PTOF",
+                "PTYP", "SCREF", "SIZE", "STYP", "TREF",
             ]
         );
         for name in &overridden {

@@ -8,6 +8,9 @@
 #![cfg_attr(windows, feature(windows_by_handle))]
 // 暂时屏蔽warnings
 #![allow(warnings)]
+// 上一行把 warn 级全放行，`clippy.toml` 的 `disallowed-methods`（网格目录只许经 `options::meshes_dir*`，
+// ADR-068 D7）在 lib 里就成了空挡——这里单独抬到 deny，`cargo clippy` 才真的会拦。
+#![deny(clippy::disallowed_methods)]
 #![recursion_limit = "256"]
 
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -197,6 +200,12 @@ static STORE_MODE_NOTICES_PRINTED: std::sync::Once = std::sync::Once::new();
 fn print_store_mode_notices_once() {
     STORE_MODE_NOTICES_PRINTED.call_once(|| {
         for notice in crate::options::store_mode_notices() {
+            eprintln!("*** {notice} ***");
+        }
+        // 网格目录同一条纪律（ADR-068 D7）：配置里的 `meshes_path` 被 `PLANT_ASSET_ROOT` 压掉时
+        // 当场点名——生成落盘、/assets/meshes、房间面板预热此后都按压过之后的那个目录走，
+        // 人若照着文件里那句去翻目录，翻到的是个空的。
+        if let Some(notice) = crate::options::meshes_dir_notice() {
             eprintln!("*** {notice} ***");
         }
     });
@@ -482,7 +491,7 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
         crate::options::data_face().as_str(),
     );
     let room_key_words = db_option.get_room_key_word();
-    let mesh_dir = db_option.get_meshes_path();
+    let mesh_dir = crate::options::meshes_dir_for(db_option);
     let result = room_resident::initialize_at_startup(
         crate::options::data_face(),
         hierarchy,
@@ -2020,6 +2029,7 @@ async fn targeted_model_refresh(
         match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
             manager,
             &root_names,
+            None,
         )
         .await
         {

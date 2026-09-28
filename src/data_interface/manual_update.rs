@@ -2621,9 +2621,20 @@ pub(crate) async fn generate_unit_model(
     mgr: &AiosDBManager,
     root_refno: &str,
 ) -> anyhow::Result<()> {
-    crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots(
+    generate_unit_model_with_rooms(mgr, root_refno, None).await
+}
+
+/// 同 [`generate_unit_model`]，但带上**本任务**开工时冻住的那台房间计算器（一任务一台，ADR-073 D1 / D12，
+/// B/T1）：批次任务里失败过的根逐根重试走这里，与同任务的批量重生成用同一台。没有任务语境给 `None`。
+pub(crate) async fn generate_unit_model_with_rooms(
+    mgr: &AiosDBManager,
+    root_refno: &str,
+    rooms: Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
+) -> anyhow::Result<()> {
+    crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_with_rooms(
         mgr,
         &[root_refno.to_string()],
+        rooms,
     )
     .await
 }
@@ -2743,6 +2754,11 @@ pub struct DbnumPreview {
     /// never counted here — they ride the `Transform` path
     /// (`transform_targets`) even on ZONE/SITE containers.
     pub no_generation: u32,
+    /// 这一窗会落几条**交付删除记录**（`datacenter_delete`，plan 2026-09-22 T4）：交付单元自身
+    /// 被删或改位号各一条、按 `[refno, 老位号]` 去重，与执行体同一条渲染路数出来的。只是报告
+    /// 口径——不改任何判定、不进 `dbnum + sesno` 执行边界；非 DESI 恒为 0。
+    #[serde(default)]
+    pub datacenter_delete_rows: usize,
     /// File-identity anomaly, if any (rollback/duplicate/etc.).
     pub anomaly: Option<FileAnomaly>,
     /// When `true` this `dbnum` is blocked (e.g. rollback/duplicate) and no data
@@ -2849,6 +2865,10 @@ pub struct RoomAlignmentColumns {
     /// 两者同一代且形态落盘——为真时 `e3d.room.lookup` 对这个库的根答得出 `ready_*`，
     /// 哪怕进程内一条 ACK 都没有。判据与那一层共用一处（`query_service`）。
     pub current: bool,
+    /// 库上那一格盖章之后本库有根按哪几代写过边（`dbnum_watermark.model_room_stray_generations`，ADR-073 F3 落库）：
+    /// 非空 = 下一个任务欠一次房间重算（点名 / 整库），盖章即清。空时不出这一格——形状对既有读者不变。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stray_generations: Vec<String>,
 }
 
 /// `/dbnums` 每行 `write_state` 格的形状（spec §4.7 的字段表）。`dbnum` 是行主键、不重复出；
@@ -3664,10 +3684,19 @@ impl AiosDBManager {
         );
         let registered = DbnumState::list_registered().await?;
         let registered_dbnums: HashSet<u32> = registered.iter().map(|s| s.dbnum).collect();
-        // durable 侧的房间就绪承诺（ADR-073 D14）：与两枚水位同一行读回，逐行贴在下面。
-        let room_generations: HashMap<u32, Option<String>> = registered
+        // durable 侧的房间就绪承诺（ADR-073 D14）与盖章之后按另一代写过根的那一格（F3 落库）：与两枚水位同一行读回，
+        // 逐行贴在下面。
+        let room_generations: HashMap<u32, (Option<String>, Vec<String>)> = registered
             .iter()
-            .map(|state| (state.dbnum, state.model_room_generation.clone()))
+            .map(|state| {
+                (
+                    state.dbnum,
+                    (
+                        state.model_room_generation.clone(),
+                        state.model_room_stray_generations.clone(),
+                    ),
+                )
+            })
             .collect();
         let project_prefix = format!(
             "{}\\",
@@ -3816,13 +3845,17 @@ impl AiosDBManager {
             if !row.db_type.eq_ignore_ascii_case("DESI") {
                 continue;
             }
-            let generation = room_generations.get(&row.dbnum).cloned().flatten();
+            let (generation, stray_generations) = room_generations
+                .get(&row.dbnum)
+                .cloned()
+                .unwrap_or_default();
             row.room_alignment = Some(RoomAlignmentColumns {
                 current: crate::query_service::library_room_alignment_is_current(
                     generation.as_deref(),
                 ),
                 generation,
                 resident_generation: resident_room_generation.clone(),
+                stray_generations,
             });
         }
 
@@ -4405,6 +4438,21 @@ impl AiosDBManager {
                         preview.zones = zones;
                         preview.sites = sites;
                         warnings.extend(model_plan.warnings);
+                        // 交付删除记录只计数（plan 2026-09-22 T4）：与执行体同一条渲染路；
+                        // 数不出来不拖垮预览主体，落 warning、格子留 0。
+                        match IncrementPipeline::count_datacenter_delete_records(
+                            range_eles,
+                            &cand.db_type,
+                            cand.db_num,
+                        )
+                        .await
+                        {
+                            Ok(rows) => preview.datacenter_delete_rows = rows,
+                            Err(error) => warnings.push(format!(
+                                "统计 dbnum={} 交付删除记录失败（不影响预览主体）: {error:#}",
+                                cand.db_num
+                            )),
+                        }
                     }
                 }
                 None => {}
@@ -6413,6 +6461,7 @@ mod tests {
                 generation: Some("efd4ebe1".to_owned()),
                 resident_generation: Some("efd4ebe1".to_owned()),
                 current: true,
+                stray_generations: Vec::new(),
             }),
             ..Default::default()
         };
@@ -6423,6 +6472,30 @@ mod tests {
                 "generation": "efd4ebe1",
                 "resident_generation": "efd4ebe1",
                 "current": true,
+            }),
+            "F3 落库那一格空时不出，形状对既有读者不变"
+        );
+        // 库上记着盖章之后按另一代写过根（F3 落库）：多出一格 `stray_generations`——下一个任务欠一次房间重算。
+        let stray = DbnumStatus {
+            dbnum: 7997,
+            room_alignment: Some(RoomAlignmentColumns {
+                generation: Some("efd4ebe1".to_owned()),
+                resident_generation: Some("efd4ebe1".to_owned()),
+                current: true,
+                stray_generations: vec!["00aa11bb22cc".to_owned()],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&stray)
+                .unwrap()
+                .get("room_alignment")
+                .expect("room_alignment cell"),
+            &serde_json::json!({
+                "generation": "efd4ebe1",
+                "resident_generation": "efd4ebe1",
+                "current": true,
+                "stray_generations": ["00aa11bb22cc"],
             })
         );
         assert!(
@@ -6442,8 +6515,9 @@ mod tests {
             .expect("函数体到下一个条目为止")
             .0;
         assert!(
-            report.contains("state.model_room_generation.clone()"),
-            "库上那一格与两枚水位同一趟读回，不另开一趟: {report}"
+            report.contains("state.model_room_generation.clone()")
+                && report.contains("state.model_room_stray_generations.clone()"),
+            "库上那一格与 F3 落库那一格都与两枚水位同一趟读回，不另开一趟: {report}"
         );
         assert!(
             report.contains("query_service::library_room_alignment_is_current("),

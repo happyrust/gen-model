@@ -334,16 +334,6 @@ pub(crate) async fn initialize(
     let receipt = crate::data_interface::task_end::commit_task_end_on(&aios_core::SUL_DB, &end)
         .await
         .with_context(|| format!("dbnum={dbnum} 初始化收尾一笔未落（写入标记仍是 writing，下次启动整库重来）"))?;
-    // 整库房间重算的欠账（审核 P1-2）随 `Aligned` 一并销掉：这一库的每一根都是这台计算器算的，
-    // 上一窗欠下的那次整库重算已经没有意义。没盖 `Aligned`（有根失败 / 开关关着）就留着。
-    if model_outcome.as_ref().is_some_and(|outcome| {
-        matches!(outcome.room_generation, RoomGenerationStamp::Aligned(_))
-    }) && let Err(error) = crate::data_interface::room_recompute::discharge(dbnum).await
-    {
-        warnings.push(format!(
-            "dbnum={dbnum} 整库房间重算欠账未销（初始化已把每一根对齐；下一个任务会多跑一次整库重算）: {error:#}"
-        ));
-    }
 
     println!(
         "dbnum={dbnum} 初始化完成 耗时={}ms pe={pe_count} worl={root_count} 属性 lane: tx={} bytes={} 冲突重试={} 超时={}；模型 lane: tx={} bytes={} 冲突重试={} 超时={} 根={} 失败根={} 记录={} 房间边={} model_sesno={}",
@@ -540,7 +530,7 @@ async fn model_half_inner(
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let produce = async {
         let outcome = service
-            .produce_slices(dbnum, &root_strings, failure_policy, &tx)
+            .produce_slices(dbnum, &root_strings, failure_policy, &tx, None)
             .await;
         drop(tx);
         outcome
@@ -555,19 +545,20 @@ async fn model_half_inner(
                 .map(|(root, commit, _)| (root, commit))
                 .collect::<Vec<_>>();
             // 这一片的根照哪一版目录算出来的（回执里的 `ModelTarget.catalogue`）：整库初始化完、
-            // 收尾盖 `model_sesno` 时一并盖成库级目录落款（ADR-079，取最旧那一版）。
+            // 收尾盖 `model_sesno` 时一并盖成库级目录落款（ADR-079，取最旧那一版）。只收记了会话的项
+            // （`ModelTarget::catalogue_sessions`）：字典库会话位固定 0，收进去就是每次冷启动都误判前移。
             for (_, commit) in &commits {
                 if let Some(target) = commit
                     .receipt
                     .as_ref()
                     .and_then(|(_, receipt)| receipt.model_target.as_ref())
                 {
-                    for file in &target.catalogue {
+                    for (dbnum, session) in target.catalogue_sessions() {
                         report
                             .catalogue_sessions
-                            .entry(file.dbnum)
-                            .and_modify(|kept| *kept = (*kept).min(file.session))
-                            .or_insert(file.session);
+                            .entry(dbnum)
+                            .and_modify(|kept| *kept = (*kept).min(session))
+                            .or_insert(session);
                     }
                 }
             }

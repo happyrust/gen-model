@@ -427,6 +427,27 @@ impl DirectTreeService {
         let name = attrs.get_as_string("NAME")?.trim().to_string();
         (!name.is_empty()).then_some(name)
     }
+
+    /// 属主链上的一级：这个元素的 `TYPE` / `NAME` 与 `OWNER`，一次记录读（与 [`Self::name_of`] 同代价）。
+    /// 空间查询派生「所属专业」沿它往上爬到 SITE（`fast_model::spatial_discipline`），逐级记忆后每个元素只读一次。
+    /// 读不出记录回 `None`；`OWNER` 为 0 / 指向自己按到顶处理（`owner: None`）。
+    pub fn lineage_step(&self, refno: RefU64) -> Option<crate::fast_model::spatial_discipline::LineageStep> {
+        let attrs = self.store.named_attmap(refno).ok()?;
+        let owner = attrs
+            .get_refu64("OWNER")
+            .filter(|owner| owner.0 != 0 && *owner != refno);
+        Some(crate::fast_model::spatial_discipline::LineageStep {
+            noun: attrs.get_as_string("TYPE").unwrap_or_default().trim().to_string(),
+            name: attrs.get_as_string("NAME").unwrap_or_default().trim().to_string(),
+            owner,
+        })
+    }
+
+    /// 这份服务钉住的会话指纹的哈希：`spatial_discipline` 的共享记忆按它换代（会话前进 = 属主链可能变了）。
+    /// 元数据读不出时回 0——记忆键退化成常数，语义是「不换代」，宁可多命中一次记忆也别每次查询都清空。
+    pub fn lineage_epoch(&self) -> u64 {
+        self.metadata().map(|metadata| metadata.epoch()).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

@@ -680,6 +680,8 @@ function dur(ms){
   return h ? `${h}:${m}:${ss}` : `${m}:${ss}`;
 }
 function n(v){ return Number(v || 0).toLocaleString("zh-CN"); }
+// 估算字节 → 「x.x MiB」（/health.model_cache 的 approx_bytes 是查时现算的估算，不是分配器审计）。
+function mib(bytes){ const v = Number(bytes || 0) / 1048576; return `${v >= 100 ? Math.round(v) : v.toFixed(1)} MiB`; }
 function pct(applied, latest){
   if(!(latest > 0)) return applied > 0 ? 100 : 0;
   return Math.max(0, Math.min(100, applied / latest * 100));
@@ -1555,6 +1557,11 @@ function renderSysbar(m){
   const sul = m.h.sul_db || {};
   const tree = m.h.spatial_tree || {};
   const pe = m.h.parse_errors;
+  // 进程内三块按数量设闸的常驻（ADR-082 / ADR-084 / 内存控制计划 P4）：现值 / 上限 · 估算字节 · 累计逐出。
+  // 上限 0 = 不限（不显示分母）；「逐出 / 逐库 / 顶掉」有数才亮成 warn——不是坏事，是提醒人看一眼 RSS。
+  const mc = m.h.model_cache || {};
+  const ov = mc.overlay, ec = mc.element_cache, hs = mc.historical;
+  const capped = (value, max) => max ? `${n(value)} / ${n(max)}` : n(value);
   const cell = (label, value, level) =>
     `<span class="${level || ""}"><span>${esc(label)}</span><b>${esc(value)}</b></span>`;
 
@@ -1568,6 +1575,12 @@ function renderSysbar(m){
     tree.state || tree.drift ? cell("空间树", tree.drift ? `漂移 file ${tree.file_epoch} ≠ db ${tree.db_epoch}`
       : `${tree.state} · ${n(tree.entries)} 条`, tree.drift ? "warn" : "") : "",
     pe && pe.total ? cell("解析错误", `${n(pe.total)} 类 · ${n(pe.occurrences)} 次`, "warn") : "",
+    ov ? cell("overlay", `${capped(ov.roots, ov.max_roots)} 根 · ${mib(ov.approx_bytes)}${ov.evicted_total ? ` · 逐出 ${n(ov.evicted_total)}` : ""}`,
+      ov.evicted_total ? "warn" : "") : "",
+    ec ? cell("元素缓存", `${capped(ec.resident_dbnums, ec.max_dbnums)} 库 · ${n(ec.parsed_entries)} 条 · ${mib(ec.approx_bytes)}${ec.evicted_dbnums_total ? ` · 逐库 ${n(ec.evicted_dbnums_total)}` : ""}`,
+      ec.evicted_dbnums_total ? "warn" : "") : "",
+    hs ? cell("历史快照", `${capped(hs.snapshots, hs.max_snapshots)} 格 · ${mib(hs.approx_bytes)}${hs.evicted_total ? ` · 顶掉 ${n(hs.evicted_total)}` : ""}`,
+      hs.evicted_total ? "warn" : "") : "",
     m.h.queue_paused ? cell("队列", "已暂停", "warn") : "",
     cell("epoch", `${m.init.epoch_id ?? "—"} · ${m.init.status ?? "—"}`),
   ].filter(Boolean).join("");

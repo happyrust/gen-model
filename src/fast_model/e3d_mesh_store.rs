@@ -37,6 +37,13 @@ pub struct E3dPersistReport {
     /// 本次生成读的是哪一版设计文件（一次调用一个 dbnum、一个会话）。读透写行时钉的
     /// 就是它——写透与生成必须看同一版文件。
     pub source_sesno: Option<u32>,
+    /// 这一跑被两道门（共轴 / 通径）或缺件判**不画**的隐式管身，点名一行；没有就 `None`。
+    ///
+    /// 它不是失败：E3D 自己在同一份数据上也不画（2026-09-18 原生 RVM 对拍）。但少一根管
+    /// 在 `failed=0 failures=[]` 的账面上完全看不出来，下游只看得见模型少了一节——
+    /// 这一行就是给日志与任务回执用的线索，来源是 e3d-model 的
+    /// `ImpliedTubes::not_drawn_line()`。
+    pub tubes_not_drawn: Option<String>,
     /// 失败根的稳定身份与原因。`failed` 保留历史的元素/根计数，这一格让上层只扣真正失败的根，
     /// 不把同批所有兄弟一起判死。
     #[serde(skip)]

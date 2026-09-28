@@ -220,6 +220,27 @@
       "noun": "PANE",
       "owner": "room_frame_b",
       "geometry": true
+    },
+    "unitdel_site": {
+      "name": "/AIOS-INC-UNITDEL",
+      "noun": "SITE"
+    },
+    "unitdel_zone": {
+      "name": "/AIOS-INC-UNITDEL-Z",
+      "noun": "ZONE",
+      "owner": "unitdel_site"
+    },
+    "unitdel_eq": {
+      "name": "/AIOS-INC-UNITDEL-EQ",
+      "noun": "EQUI",
+      "owner": "unitdel_zone",
+      "geometry": true
+    },
+    "unitdel_box": {
+      "name": "/AIOS-INC-UNITDEL-BOX",
+      "noun": "BOX",
+      "owner": "unitdel_eq",
+      "geometry": true
     }
   },
   "scenarios": [
@@ -237,6 +258,22 @@
         "attributes": true,
         "after_contains": [
           "/AIOS-INC-DATA-EQ-CHANGED"
+        ],
+        "datacenter_delete": [
+          {
+            "object": "data_eq",
+            "name": "/AIOS-INC-DATA-EQ",
+            "reason": "renamed",
+            "zone": "data_zone"
+          }
+        ],
+        "datacenter_delete_after_restore": [
+          {
+            "object": "data_eq",
+            "name": "/AIOS-INC-DATA-EQ-CHANGED",
+            "reason": "renamed",
+            "zone": "data_zone"
+          }
         ]
       }
     },
@@ -399,6 +436,27 @@
         "tree": true,
         "attributes": true,
         "model": true
+      }
+    },
+    {
+      "id": "delete-unit",
+      "site": "unitdel_site",
+      "target": "unitdel_eq",
+      "apply_macro": "scripts/e3d/increment_fixture/cases/delete_unit_apply.mac",
+      "change": "delete",
+      "destructive_last": true,
+      "expected": {
+        "tree": true,
+        "attributes": true,
+        "model": true,
+        "datacenter_delete": [
+          {
+            "object": "unitdel_eq",
+            "name": "/AIOS-INC-UNITDEL-EQ",
+            "reason": "deleted",
+            "zone": "unitdel_zone"
+          }
+        ]
       }
     }
   ]

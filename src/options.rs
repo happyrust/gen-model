@@ -115,6 +115,13 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub room_membership: Option<bool>,
 
+    /// 空间查询「所属专业」的派生规则（plant3d-web ADR 0067 / 计划 2026-09-20 §4.1）：
+    /// 候选属主链上 SITE 的 `NAME` 含哪组关键字（大小写不敏感）就落哪个专业值，首个命中的规则生效，
+    /// 都不中为 0「其他」。缺省即 legacy 后端 `spec_info.rs::site_name_to_spec_value` 那张表
+    /// （见 [`default_spec_value_rules`]），两种数据源对同一构件报同一个专业。
+    #[serde(default)]
+    pub spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
+
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
@@ -158,6 +165,12 @@ pub struct DbOptionExt {
     /// 生成用 `DbSet` 池级元素缓存最多装多少个元素（没写 = 200,000；0 = 不限）。详见 [`model_element_cache_max_entries`]。
     #[serde(default)]
     pub model_element_cache_max_entries: Option<usize>,
+    /// 生成输入缓存最多同时留多少个库的 `GenerationInput`（没写 = 0 = 不限）。详见 [`model_generation_input_max_dbnums`]。
+    #[serde(default)]
+    pub model_generation_input_max_dbnums: Option<usize>,
+    /// 历史快照（`POST /model/history/generate` 造的 `Historical(*)` 作用域）最多同时留几格（没写 = 16；0 = 不限）。详见 [`model_historical_snapshots_max`]。
+    #[serde(default)]
+    pub model_historical_snapshots_max: Option<usize>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -512,6 +525,7 @@ impl From<DbOption> for DbOptionExt {
             model_incremental: None,
             model_incremental_types: None,
             room_membership: None,
+            spec_value_rules: None,
             catalogue_project_priority: None,
             project_search_paths: None,
             watch_dbnums: None,
@@ -523,6 +537,8 @@ impl From<DbOption> for DbOptionExt {
             model_memory_slice_elements: None,
             model_overlay_max_roots: None,
             model_element_cache_max_entries: None,
+            model_generation_input_max_dbnums: None,
+            model_historical_snapshots_max: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -592,6 +608,8 @@ struct DbOptionExtFields {
     #[serde(default)]
     room_membership: Option<bool>,
     #[serde(default)]
+    spec_value_rules: Option<Vec<SpecValueRuleConfig>>,
+    #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
     project_search_paths: Option<Vec<String>>,
@@ -613,6 +631,10 @@ struct DbOptionExtFields {
     model_overlay_max_roots: Option<usize>,
     #[serde(default)]
     model_element_cache_max_entries: Option<usize>,
+    #[serde(default)]
+    model_generation_input_max_dbnums: Option<usize>,
+    #[serde(default)]
+    model_historical_snapshots_max: Option<usize>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -792,10 +814,103 @@ fn meshes_dir_from_asset_root(asset_root: Option<OsString>) -> Option<PathBuf> {
         .map(|root| root.join("meshes"))
 }
 
-pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
-    if let Some(meshes_dir) = meshes_dir_from_asset_root(std::env::var_os("PLANT_ASSET_ROOT")) {
-        option.meshes_path = Some(meshes_dir.to_string_lossy().into_owned());
+/// 网格目录的**唯一解析口**（ADR-068 追记 D7，2026-09-19）。
+///
+/// 顺序：`PLANT_ASSET_ROOT`（非空白）→ `<root>\meshes`；否则配置里的 `meshes_path`；否则
+/// [`asset_root`] 兜底出来的那个 `assets` 下的 `meshes`。与 `/assets` ServeDir 认同一枚环境变量、
+/// 同一条优先级——浏览器端取 `.mesh` 走 `/assets/meshes/<hash>.mesh`，挂的是 `asset_root()`；
+/// 生成侧落盘、`/api/v1/meshes/{hash}` 直读、常驻房间模型预热面板网格，都得是同一个目录。
+///
+/// 此前只有 `DbOptionExt.inner`（[`get_db_option_ext`] 经 [`apply_asset_root`]）带这一层覆盖，而
+/// 生成侧与十几处读侧直接拿 `aios_core::get_db_option().get_meshes_path()`（只认配置 `meshes_path`）。
+/// 配了 `meshes_path` 又设了 `PLANT_ASSET_ROOT` 的部署（2026-09-19 f13 实测）：初始化把网格写到
+/// `<ws>\meshes`，房间常驻模型到 `<ws>\assets\meshes` 找面板网格 → 230 块面板 `stage=mesh-warm`
+/// 全缺、房间 degraded，而两库初始化照样 in_sync——两条路径各自都「成功」，正是 ADR-075 D6 记过的
+/// 那种静默失效。所以它是一个函数而不是两处各算各的。
+///
+/// 只解析、不碰磁盘；要顺手建目录用 [`meshes_dir`] / [`meshes_dir_for`]。
+pub fn meshes_dir_of(option: &DbOption) -> PathBuf {
+    resolve_meshes_dir(
+        std::env::var_os("PLANT_ASSET_ROOT"),
+        option.meshes_path.as_deref(),
+        || asset_root(),
+    )
+}
+
+fn resolve_meshes_dir(
+    asset_root_env: Option<OsString>,
+    configured: Option<&str>,
+    fallback_asset_root: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    if let Some(dir) = meshes_dir_from_asset_root(asset_root_env) {
+        return dir;
     }
+    match configured.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(configured) => PathBuf::from(configured),
+        None => fallback_asset_root().join("meshes"),
+    }
+}
+
+/// 全局配置下的网格目录，**并保证目录存在**——沿用 `DbOption::get_meshes_path` 的建目录语义，
+/// 生成侧与读侧此前都靠它。全仓只许经这里（或 [`meshes_dir_for`]）拿网格目录，不许再直接调
+/// `get_meshes_path()`：`clippy.toml` 的 `disallowed-methods` 与 `meshes_dir_is_the_only_resolver`
+/// 两道钉守着。
+pub fn meshes_dir() -> PathBuf {
+    meshes_dir_for(aios_core::get_db_option())
+}
+
+/// 同 [`meshes_dir`]，按给定的那份配置解析（历史模型服务、用例夹具带着自己的 `DbOption` 时）。
+pub fn meshes_dir_for(option: &DbOption) -> PathBuf {
+    let dir = meshes_dir_of(option);
+    if let Err(error) = fs::create_dir_all(&dir) {
+        // 不像 `get_meshes_path` 那样 unwrap：目录建不出来的现场，随后第一笔落盘会用它自己的
+        // 错误说清是哪个文件；解析口本身不该成为 panic 源，但也不能一声不响。
+        eprintln!("⚠ 网格目录 {} 建不出来：{error}", dir.display());
+    }
+    dir
+}
+
+/// `PLANT_ASSET_ROOT` 把配置里的 `meshes_path` 压掉时给人看的那一句；两边同一个目录或没配
+/// `meshes_path` 时不出声。与 [`store_mode_notices`] 同一条纪律：设了却没生效的配置必须当场点名。
+pub fn meshes_dir_notice() -> Option<String> {
+    meshes_dir_notice_for(
+        std::env::var_os("PLANT_ASSET_ROOT"),
+        aios_core::get_db_option().meshes_path.as_deref(),
+    )
+}
+
+fn meshes_dir_notice_for(
+    asset_root_env: Option<OsString>,
+    configured: Option<&str>,
+) -> Option<String> {
+    let effective = meshes_dir_from_asset_root(asset_root_env)?;
+    let configured = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if same_dir(Path::new(configured), &effective) {
+        return None;
+    }
+    Some(format!(
+        "⚠ DbOption.toml 里的 meshes_path = {configured:?} 被环境变量 PLANT_ASSET_ROOT 压过：网格目录按 {} 生效\
+         （生成落盘、/assets/meshes、房间面板预热同一个目录，ADR-068 D7）。要用配置里那个目录，就别设 PLANT_ASSET_ROOT，\
+         或把它指到那个目录的上一级。",
+        effective.display()
+    ))
+}
+
+/// 两个目录是不是同一个：都在盘上就按规范化路径比（junction / 大小写 / 斜杠方向都吸掉），
+/// 有一个还不存在就退回字面比较。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// `DbOptionExt.inner` 那一格 `meshes_path` 写成解析后的**生效值**：`run_app` 往下传的
+/// `db_option`、设置向导的回显，读到的与 [`meshes_dir`] 是同一个答案，而不是各自再算一遍。
+pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
+    option.meshes_path = Some(meshes_dir_of(&option).to_string_lossy().into_owned());
     option
 }
 
@@ -829,6 +944,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_incremental: ext.model_incremental,
         model_incremental_types: ext.model_incremental_types.clone(),
         room_membership: ext.room_membership,
+        spec_value_rules: ext.spec_value_rules.clone(),
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         project_search_paths: ext.project_search_paths.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
@@ -840,6 +956,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_memory_slice_elements: ext.model_memory_slice_elements,
         model_overlay_max_roots: ext.model_overlay_max_roots,
         model_element_cache_max_entries: ext.model_element_cache_max_entries,
+        model_generation_input_max_dbnums: ext.model_generation_input_max_dbnums,
+        model_historical_snapshots_max: ext.model_historical_snapshots_max,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -937,6 +1055,10 @@ pub fn model_memory_slice_elements() -> usize {
 pub const MODEL_OVERLAY_MAX_ROOTS_ENV: &str = "AIOS_MODEL_OVERLAY_MAX_ROOTS";
 /// 环境变量名：一次性覆盖 [`model_element_cache_max_entries`]，不必改配置文件。
 pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV: &str = "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES";
+/// 环境变量名：一次性覆盖 [`model_generation_input_max_dbnums`]，不必改配置文件。
+pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV: &str = "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS";
+/// 环境变量名：一次性覆盖 [`model_historical_snapshots_max`]，不必改配置文件。
+pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV: &str = "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX";
 
 /// [`model_overlay_max_roots`] 没写时的默认值（ADR-082 D5，2026-09-20 mem 档实测定的）：
 /// 4 库 7,743 根 / 59,929 条记录量 106.5 MB ≈ **13.8 KB / 根**（7997 单库 6,772 根 94.2 MB），
@@ -947,6 +1069,13 @@ pub const MODEL_OVERLAY_MAX_ROOTS_DEFAULT: usize = 50_000;
 /// 200,000 条 ≈ 0.7–0.95 GB / 库；样例里最大的 7997 整库一遍只装到 177k，默认值下一遍生成不会清一次，
 /// 清的只是长驻之后越过一整遍的累积。
 pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
+/// [`model_generation_input_max_dbnums`] 没写时的默认值：**0 = 不限**（ADR-084 D3，2026-09-22）。
+/// 与 ADR-082 D5 同一条路——先只加能力、行为一个字不变，真机量过「每窗重开一份 `GenerationInput` 的代价」
+/// （两库交替窗 × 上限 1）再定数字；候选 2–4（一个长驻实例通常同时活跃的 DESI 库数）。
+pub const MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT: usize = 0;
+/// [`model_historical_snapshots_max`] 没写时的默认值（内存控制计划 P4 / D4，2026-09-22）：一次分析开几个时点对照，
+/// 十几格够用；每格是一个单元子树的完整投影（一根到一库不等），此前无界、`/health` 也看不见。
+pub const MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT: usize = 16;
 
 /// 进程内模型投影 overlay（`ModelMemoryStore` 的 `Current` 作用域）最多常驻多少个**根**
 /// （`DbOption.toml` 的 `model_overlay_max_roots`，环境变量 [`MODEL_OVERLAY_MAX_ROOTS_ENV`] 压过；
@@ -955,8 +1084,10 @@ pub const MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT: usize = 200_000;
 ///
 /// overlay 此前无界——一个根进来就一直在，直到显式失效或整库清空；长驻进程碰过的根越多它越大。
 /// 设了上限之后，每次发布与每次 durable ACK 之后按**最近一次提交**的先后（LRU）逐出**已 durable
-/// ACK 且不在 write-behind 待刷**的根（`root_needs_persist == false`），整根记录 + 回执 + ACK 一起掉；
-/// 没有可逐出的就不逐（未落盘的一条不丢）。只在 durable 介质（`store_mode().is_durable()`）下生效：
+/// ACK 且与回执逐字相符**的根（`ack.medium.is_durable() && ack.matches(receipt)`——「不在 write-behind 待刷」
+/// 就是这句话的另一种说法：待刷的根要么还没 ACK、要么 ACK 已被新一版提交作废；2026-09-22 起 ACK 是房间边
+/// 唯一证据的根也排除，见 `ScopeState::ack_is_stray_room_evidence` / `ack_owes_room_edges`），
+/// 整根记录 + 回执 + ACK 一起掉；没有可逐出的就不逐（未落盘的一条不丢）。只在 durable 介质（`store_mode().is_durable()`）下生效：
 /// 嵌入 kv-mem 时 overlay 就是唯一一份，没有可回退的冷读。逐出之后读路对该根直读 RocksDB
 /// （本来就支持），单元级发布 / 刚体前移拿不到 S 端基线回退 regen，`RoomOnly` 整库房间重算对
 /// 冷根从库里读行再算（ADR-073 D13 2026-09-20 改口）。
@@ -987,6 +1118,43 @@ pub fn model_element_cache_max_entries() -> usize {
             .as_deref(),
         load_ext_fields().model_element_cache_max_entries,
         MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+    )
+}
+
+/// 生成输入缓存（`e3d_model_service::GENERATION_INPUT_CACHE`）最多同时留多少个**库**的 `GenerationInput`
+/// （`DbOption.toml` 的 `model_generation_input_max_dbnums`，环境变量 [`MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV`]
+/// 压过；没写 = [`MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT`] = **0 = 不限**，ADR-084）。
+///
+/// 每份 `GenerationInput` = 一份 `DbSet`（MDB 全部 DESI 文件都开着 + 池级元素缓存，≤ `model_element_cache_max_entries`
+/// × 3.6–4.7 KB ≈ 0.7–0.95 GB）+ 一份 `SourceIndex`；此前只在同库换 sesno 时替换、初始化收尾时释放，长驻进程碰过
+/// N 个 DESI 库就留 N 份——ADR-082 D4 管住了单份的元素数，管不住这一维。设了上限之后按**最近一次生成用到**的先后
+/// 逐库整份出（命中也刷新——保护的正是「最近在生成的库」这份热度），上限 ≥ 活跃库数时与不设逐位相同；被逐的库
+/// 下一窗从文件重开（元素缓存重新变冷，产物逐字不变）。按库数不按字节：与 d-149 同一口径，零簿记。
+pub fn model_generation_input_max_dbnums() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_generation_input_max_dbnums,
+        MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
+    )
+}
+
+/// 历史快照最多同时留几格（`DbOption.toml` 的 `model_historical_snapshots_max`，环境变量
+/// [`MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV`] 压过；没写 = [`MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT`] = 16，**写 0 = 不限**）。
+///
+/// `POST /model/history/generate` 每个不同的 `snapshot_key` 在投影存储里造一格完整的 `Historical(<key>)` 作用域，
+/// 此前只有显式 `DELETE` 或同 key 重生成才丢——没 TTL、没条数上限，`/health` 也看不见。设了上限之后，
+/// 发布第 N+1 格时按**最近一次 generate** 的先后把最旧的那格连回执一起丢（与 `DELETE` 同一条路，
+/// 之后再查它是既有的 `SNAPSHOT_NOT_FOUND`）；同 key 重生成不算新格。按条数不按字节、不做 TTL（d-149 口径）。
+/// 现值 `/health.model_cache.historical`。
+pub fn model_historical_snapshots_max() -> usize {
+    effective_count_limit(
+        std::env::var(MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV)
+            .ok()
+            .as_deref(),
+        load_ext_fields().model_historical_snapshots_max,
+        MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
     )
 }
 
@@ -1744,6 +1912,64 @@ fn effective_spatial_compute(env_override: Option<&str>) -> bool {
 // 随房间流程退役（ADR-073 D7、源码钉 6）：房间归属随每个生成根算出、与模型行同事务落库，
 // 「房间阶段」没了，开关只剩一个永远不被问的布尔；常驻房间模型是逐根计算的算法输入，
 // 只随 `spatial_compute` 与 project_hd / project_hh 特性一道门走。
+
+/// `DbOption.toml` 里 `spec_value_rules` 的一条：`{ value = 1, keywords = ["PIPE"] }`。
+///
+/// `value` 是专业值（前端 `SiteSpecValue`：1 管道 / 2 电气 / 3 仪表 / 4 暖通 / 5 土建 / 6 结构，0 = 其他），
+/// `keywords` 是 SITE 名里要含的片段（大小写不敏感；中文原样比较）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecValueRuleConfig {
+    pub value: i64,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+/// 缺省的专业派生规则 = legacy 后端 `plant-model-gen/src/fast_model/export_model/spec_info.rs::site_name_to_spec_value`
+/// 那张表，逐字搬过来、顺序也一样（首个命中生效；`INST` 排在 `HVAC` 前，`CIVI` 之后才是 `STRU`）。
+pub fn default_spec_value_rules() -> Vec<SpecValueRuleConfig> {
+    let rule = |value: i64, keywords: &[&str]| SpecValueRuleConfig {
+        value,
+        keywords: keywords.iter().map(|word| word.to_string()).collect(),
+    };
+    vec![
+        rule(1, &["PIPE"]),
+        rule(2, &["ELEC", "DIANQI", "电气"]),
+        rule(3, &["INST", "INSTR"]),
+        rule(4, &["HVAC"]),
+        rule(5, &["CIVI", "CIVIL", "ARCH"]),
+        rule(6, &["STRU", "STRUCT"]),
+    ]
+}
+
+/// 生效的专业派生规则：配置里写了（且非空）用配置的，否则缺省表。
+/// 关键字为空的规则不算（永远匹配不上，也不该把后面的规则挡住）。
+pub fn spec_value_rules() -> Vec<SpecValueRuleConfig> {
+    effective_spec_value_rules(load_ext_fields().spec_value_rules.as_deref())
+}
+
+fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec<SpecValueRuleConfig> {
+    let rules: Vec<SpecValueRuleConfig> = configured
+        .filter(|rules| !rules.is_empty())
+        .map(|rules| rules.to_vec())
+        .unwrap_or_else(default_spec_value_rules)
+        .into_iter()
+        .map(|rule| SpecValueRuleConfig {
+            value: rule.value,
+            keywords: rule
+                .keywords
+                .into_iter()
+                .map(|word| word.trim().to_string())
+                .filter(|word| !word.is_empty())
+                .collect(),
+        })
+        .filter(|rule| !rule.keywords.is_empty())
+        .collect();
+    if rules.is_empty() {
+        default_spec_value_rules()
+    } else {
+        rules
+    }
+}
 
 /// 环境变量名：一次性覆盖 [`room_membership`]，不必改配置文件。
 pub const ROOM_MEMBERSHIP_ENV: &str = "AIOS_ROOM_MEMBERSHIP";
@@ -3177,6 +3403,33 @@ mod tests {
             .and_then(toml::Value::as_array)
             .expect("模板写了 project_search_paths（ADR-078）");
         assert!(search_paths.is_empty(), "出厂模板的搜索根应为空数组");
+        // 四道按数量的内存闸（ADR-082 / ADR-084 / 内存控制计划 P4）：模板写的值必须就是代码默认，
+        // 不然「模板起的现场」与「没写键的现场」两套行为——2026-09-15 那次事故的同一种分叉。
+        for (key, default) in [
+            ("model_overlay_max_roots", MODEL_OVERLAY_MAX_ROOTS_DEFAULT),
+            (
+                "model_element_cache_max_entries",
+                MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT,
+            ),
+            (
+                "model_generation_input_max_dbnums",
+                MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT,
+            ),
+            (
+                "model_historical_snapshots_max",
+                MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT,
+            ),
+        ] {
+            let configured = table
+                .get(key)
+                .and_then(toml::Value::as_integer)
+                .unwrap_or_else(|| panic!("模板写了 {key}"));
+            assert_eq!(
+                configured,
+                default as i64,
+                "出厂模板的 {key} 与代码默认分叉了"
+            );
+        }
     }
 
     /// 测试覆盖两个方向都得能摁住，且离开作用域即恢复「按配置来」。
@@ -3829,6 +4082,127 @@ mod tests {
         assert_eq!(meshes_dir_from_asset_root(Some(OsString::from("  "))), None);
     }
 
+    /// 网格目录的三级优先级（ADR-068 D7）：`PLANT_ASSET_ROOT` 压过配置 `meshes_path`，配置压过
+    /// `asset_root()` 兜底；空白一律当没设。这是 f13 那次「生成写 `<ws>\meshes`、房间去 `<ws>\assets\meshes`
+    /// 找」分家的对照物——三处读法现在只剩这一个函数，它的优先级就是全仓的优先级。
+    #[test]
+    fn meshes_dir_prefers_asset_root_then_configured_path_then_fallback() {
+        let fallback = || PathBuf::from(r"D:\run\assets");
+        assert_eq!(
+            resolve_meshes_dir(
+                Some(OsString::from(r"D:\run\assets")),
+                Some(r"D:/run/meshes"),
+                fallback
+            ),
+            PathBuf::from(r"D:\run\assets").join("meshes"),
+            "环境变量在，配置里的 meshes_path 不再各算各的"
+        );
+        assert_eq!(
+            resolve_meshes_dir(Some(OsString::from("  ")), Some(r"D:/run/meshes"), fallback),
+            PathBuf::from(r"D:/run/meshes"),
+            "空白环境变量当没设，配置生效"
+        );
+        assert_eq!(
+            resolve_meshes_dir(None, Some("   "), fallback),
+            PathBuf::from(r"D:\run\assets").join("meshes"),
+            "配置留空白也当没配，落到 asset_root()/meshes"
+        );
+        assert_eq!(
+            resolve_meshes_dir(None, None, fallback),
+            PathBuf::from(r"D:\run\assets").join("meshes")
+        );
+    }
+
+    /// 配置被环境变量压掉时必须出声；两边同一个目录、或者根本没配 `meshes_path`，不出声。
+    #[test]
+    fn meshes_dir_notice_only_when_the_configured_path_is_overridden() {
+        let notice = meshes_dir_notice_for(
+            Some(OsString::from(r"D:\run\assets")),
+            Some(r"D:\run\meshes"),
+        )
+        .expect("被压掉要点名");
+        assert!(notice.contains("meshes_path"), "{notice}");
+        assert!(notice.contains("PLANT_ASSET_ROOT"), "{notice}");
+        assert!(notice.contains(r"D:\run\assets\meshes"), "{notice}");
+        assert_eq!(
+            meshes_dir_notice_for(
+                Some(OsString::from(r"D:\run\assets")),
+                Some(r"D:\run\assets\meshes")
+            ),
+            None,
+            "同一个目录不算被压"
+        );
+        assert_eq!(
+            meshes_dir_notice_for(Some(OsString::from(r"D:\run\assets")), None),
+            None
+        );
+        assert_eq!(meshes_dir_notice_for(None, Some(r"D:\run\meshes")), None);
+    }
+
+    /// `apply_asset_root` 只是把解析口的答案写回 `meshes_path`，不另有一套算法：
+    /// 没设环境变量时它落的就是解析口的兜底 / 配置值，而不是保留 `None`。
+    #[test]
+    fn apply_asset_root_materializes_the_resolver_answer() {
+        let mut option = DbOption::default();
+        option.meshes_path = Some(r"D:\somewhere\meshes".into());
+        let applied = apply_asset_root(option.clone());
+        assert_eq!(
+            applied.meshes_path.as_deref().map(PathBuf::from),
+            Some(meshes_dir_of(&option)),
+            "写回的必须与 meshes_dir_of 同一个答案"
+        );
+    }
+
+    /// 全仓拿网格目录只许经 `options::meshes_dir*`——`get_meshes_path()` 只认配置里的 `meshes_path`，
+    /// 与 `PLANT_ASSET_ROOT` 那一层覆盖各算各的，正是 2026-09-19 房间面板预热全缺的根因。
+    /// `clippy.toml` 的 `disallowed-methods` 在 clippy 侧守同一件事；这里在 `cargo test` 侧再守一次，
+    /// 免得只跑测试的机器放它过去。
+    #[test]
+    fn meshes_dir_is_the_only_resolver() {
+        fn walk(dir: &Path, offenders: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).expect("src 可读") {
+                let path = entry.expect("目录项可读").path();
+                if path.is_dir() {
+                    walk(&path, offenders);
+                    continue;
+                }
+                if path.extension().and_then(OsStr::to_str) != Some("rs") {
+                    continue;
+                }
+                if path.file_name().and_then(OsStr::to_str) == Some("options.rs")
+                    && path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(OsStr::to_str)
+                        == Some("src")
+                {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).expect("源码可读");
+                for (index, line) in source.lines().enumerate() {
+                    if line.contains("get_meshes_path(") && !line.trim_start().starts_with("//") {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            path.display(),
+                            index + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        let mut offenders = Vec::new();
+        walk(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut offenders,
+        );
+        assert!(
+            offenders.is_empty(),
+            "网格目录只许经 options::meshes_dir / meshes_dir_for / meshes_dir_of 拿（ADR-068 D7）：\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[test]
     fn extension_fields_follow_the_core_db_option_override() {
         assert_eq!(
@@ -4010,10 +4384,23 @@ dir = "review_attachments"
         assert_eq!(effective_count_limit(Some(""), None, 9), 9);
         assert_eq!(MODEL_OVERLAY_MAX_ROOTS_DEFAULT, 50_000);
         assert_eq!(MODEL_ELEMENT_CACHE_MAX_ENTRIES_DEFAULT, 200_000);
+        assert_eq!(
+            MODEL_GENERATION_INPUT_MAX_DBNUMS_DEFAULT, 0,
+            "ADR-084 D3：先 0 不限落地，真机量过每窗重开代价再定"
+        );
         assert_eq!(MODEL_OVERLAY_MAX_ROOTS_ENV, "AIOS_MODEL_OVERLAY_MAX_ROOTS");
         assert_eq!(
             MODEL_ELEMENT_CACHE_MAX_ENTRIES_ENV,
             "AIOS_MODEL_ELEMENT_CACHE_MAX_ENTRIES"
+        );
+        assert_eq!(
+            MODEL_GENERATION_INPUT_MAX_DBNUMS_ENV,
+            "AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS"
+        );
+        assert_eq!(MODEL_HISTORICAL_SNAPSHOTS_MAX_DEFAULT, 16);
+        assert_eq!(
+            MODEL_HISTORICAL_SNAPSHOTS_MAX_ENV,
+            "AIOS_MODEL_HISTORICAL_SNAPSHOTS_MAX"
         );
     }
 }
