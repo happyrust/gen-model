@@ -1558,3 +1558,498 @@ async fn all_six_platform_paths_are_reachable_not_404() {
     let (status, _) = post_json("/api/review/not-a-real-endpoint", body).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ============================================================================
+// 设计端二次保存 / `review_forms.project_id` 护栏
+// （docs/plans/2026-09-28-review-workflow-defects-fix-plan.md T1 / T2；验收 V1–V4）
+// ============================================================================
+//
+// 这几条跨两张 router：`tasks::routes()`（设计端 `/api/review/tasks*`，Bearer JWT）与本模块的
+// `/api/review/workflow/sync`（PMS 侧 S2S）——所以放在有 `mem://` 夹具的这里，而不是 `tasks.rs`。
+
+fn tasks_app() -> Router<()> {
+    super::super::tasks::routes::<()>()
+}
+
+/// 设计端 token（`review_auth_middleware` 校验的那枚；与 PMS S2S 同一密钥、同一 `create_token`）。
+fn designer_token(project_id: &str, user_id: &str) -> String {
+    create_token(project_id, user_id, Some(user_id), Some("sj"), None)
+        .expect("designer token")
+        .0
+}
+
+async fn tasks_request(
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    ensure_test_db().await;
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"));
+    let body = match body {
+        Some(json) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = tasks_app()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("tasks body: {e}: {}", String::from_utf8_lossy(&bytes)));
+    (status, json)
+}
+
+fn component(refno: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": refno,
+        "name": format!("构件 {refno}"),
+        "refNo": refno,
+        "type": "EQUI"
+    })
+}
+
+fn create_task_body(
+    form_id: &str,
+    title: &str,
+    description: &str,
+    refnos: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({
+        "title": title,
+        "description": description,
+        "modelName": title,
+        "checkerId": "JH",
+        "approverId": "SH",
+        "formId": form_id,
+        "components": refnos.iter().map(|refno| component(refno)).collect::<Vec<_>>(),
+    })
+}
+
+fn sorted(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values
+}
+
+fn task_refnos(task: &serde_json::Value) -> Vec<String> {
+    sorted(
+        task["components"]
+            .as_array()
+            .expect("components array")
+            .iter()
+            .map(|component| component["refNo"].as_str().expect("refNo").to_string())
+            .collect(),
+    )
+}
+
+async fn take_strings(sql: &str, key: &str, value: &str) -> Vec<String> {
+    let mut response = test_db()
+        .await
+        .query(sql)
+        .bind((key.to_string(), value.to_string()))
+        .await
+        .unwrap_or_else(|e| panic!("query `{sql}`: {e}"));
+    let rows: Vec<String> = response
+        .take(0)
+        .unwrap_or_else(|e| panic!("take `{sql}`: {e}"));
+    sorted(rows)
+}
+
+/// `review_form_model` 里该 form 的构件集（PMS `workflow/sync` 的 `data.models` 读的就是它）。
+async fn form_model_refnos(form_id: &str) -> Vec<String> {
+    take_strings(
+        "SELECT VALUE model_refno FROM review_form_model WHERE form_id = $form_id",
+        "form_id",
+        form_id,
+    )
+    .await
+}
+
+async fn history_actions(task_id: &str) -> Vec<String> {
+    take_strings(
+        "SELECT VALUE action FROM review_workflow_history WHERE task_id = $task_id",
+        "task_id",
+        task_id,
+    )
+    .await
+}
+
+async fn active_task_ids(form_id: &str) -> Vec<String> {
+    take_strings(
+        "SELECT VALUE record::id(id) FROM review_tasks WHERE form_id = $form_id AND (deleted IS NONE OR deleted = false)",
+        "form_id",
+        form_id,
+    )
+    .await
+}
+
+async fn task_attachment_ids(task_id: &str) -> Vec<String> {
+    let mut response = test_db()
+        .await
+        .query("SELECT VALUE attachments FROM review_tasks WHERE record::id(id) = $task_id")
+        .bind(("task_id", task_id.to_string()))
+        .await
+        .expect("query attachments");
+    let rows: Vec<Option<Vec<serde_json::Value>>> = response.take(0).expect("take attachments");
+    sorted(
+        rows.into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|attachment| attachment["id"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+async fn review_form_project_id(form_id: &str) -> Option<String> {
+    super::review_form::get_review_form_by_form_id(form_id)
+        .await
+        .expect("query review_forms")
+        .map(|form| form.project_id)
+}
+
+/// `cleanup_form` 不管 `review_form_model`，这里补上。
+async fn cleanup_form_bundle(form_id: &str) {
+    cleanup_form(form_id).await;
+    let _ = test_db()
+        .await
+        .query(
+            "LET $ids = SELECT VALUE id FROM review_form_model WHERE form_id = $form_id; DELETE $ids;",
+        )
+        .bind(("form_id", form_id.to_string()))
+        .await;
+}
+
+/// V1：同 `form_id` 在 `sj` 节点二次保存 → 200、同一 task、字段与 `review_form_model` 都是新值；
+/// `GET /api/review/tasks/{id}` 与 `workflow/sync action=query` 两条读路一致；历史是 `resave` 而不是
+/// 旧端那条假的 `resubmit→jd`；请求不带 `attachments` 时保留旧附件。
+#[tokio::test]
+async fn test_create_task_resave_in_sj_updates_fields_and_form_models() {
+    let form_id = "FORM-RESAVE-SJ";
+    cleanup_form_bundle(form_id).await;
+    seed_form_stub(form_id, "SJ", Some("sj")).await;
+    let token = designer_token("project-1", "SJ");
+
+    let mut first_body = create_task_body(form_id, "包A", "第一次保存", &["24381/1", "24381/2"]);
+    first_body["attachments"] = serde_json::json!([{
+        "id": "att-1",
+        "name": "a.png",
+        "url": "/review_attachments/att-1.png",
+        "size": 10,
+        "mimeType": "image/png"
+    }]);
+    let (status, first) = tasks_request("POST", "/api/review/tasks", &token, Some(first_body)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["success"], true);
+    let task_id = first["task"]["id"].as_str().expect("task id").to_string();
+    assert_eq!(form_model_refnos(form_id).await, vec!["24381/1", "24381/2"]);
+    assert_eq!(task_attachment_ids(&task_id).await, vec!["att-1"]);
+
+    // 二次保存：改标题 / 描述 / 构件（含一个重复 refno），不带 attachments
+    let (status, second) = tasks_request(
+        "POST",
+        "/api/review/tasks",
+        &token,
+        Some(create_task_body(
+            form_id,
+            "包B",
+            "第二次保存改了构件",
+            &["24381/2", "24381/3", "24381/3"],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["success"], true);
+    assert_eq!(second["task"]["id"], task_id.as_str(), "同 form_id 不新建任务");
+    assert_eq!(second["task"]["title"], "包B");
+    assert_eq!(second["task"]["modelName"], "包B");
+    assert_eq!(second["task"]["description"], "第二次保存改了构件");
+    assert_eq!(second["task"]["currentNode"], "sj");
+    assert_eq!(second["task"]["status"], "draft");
+    assert_eq!(second["task"]["checkerId"], "JH", "负责人字段不动");
+    assert_eq!(
+        task_refnos(&second["task"]),
+        vec!["24381/2", "24381/3", "24381/3"]
+    );
+    assert_eq!(active_task_ids(form_id).await, vec![task_id.clone()]);
+    assert_eq!(task_attachment_ids(&task_id).await, vec!["att-1"], "请求没带 attachments → 保留");
+
+    // GET /api/review/tasks/{id} 读回的是新值
+    let (status, fetched) =
+        tasks_request("GET", &format!("/api/review/tasks/{task_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["task"]["title"], "包B");
+    assert_eq!(
+        task_refnos(&fetched["task"]),
+        vec!["24381/2", "24381/3", "24381/3"]
+    );
+
+    // workflow/sync action=query 的 data.models 与之一致（review_form_model 已重刷、按 refno 去重）
+    let (status, payload) = post_sync(serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("SJ", "sj"),
+        "action": "query",
+        "actor": { "id": "SJ", "name": "SJ", "roles": "sj" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", payload.message);
+    let data = payload.data.expect("sync data");
+    let models: Vec<String> = serde_json::from_value(data["models"].clone()).expect("models");
+    assert_eq!(sorted(models), vec!["24381/2", "24381/3"]);
+    assert_eq!(data["task_id"], task_id.as_str());
+    assert_eq!(data["current_node"], "sj");
+    assert_eq!(form_model_refnos(form_id).await, vec!["24381/2", "24381/3"]);
+
+    // 历史：恰好一条 resave；没有旧端那条假的 resubmit
+    assert_eq!(history_actions(&task_id).await, vec!["resave"]);
+
+    cleanup_form_bundle(form_id).await;
+}
+
+/// V2：任务已在 `jd`，二次保存 → 409 + 含当前节点中文名的原文；`review_tasks` /
+/// `review_workflow_history` / `review_form_model` 一个字节不变。
+#[tokio::test]
+async fn test_create_task_resave_off_sj_node_is_rejected_without_writes() {
+    let form_id = "FORM-RESAVE-JD";
+    cleanup_form_bundle(form_id).await;
+    insert_task_seed(form_id, "SJ", "JH", "SH", "jd", "submitted").await;
+    let task_id = format!("task-{}", form_id.to_lowercase());
+    let token = designer_token("project-1", "SJ");
+
+    let (status, payload) = tasks_request(
+        "POST",
+        "/api/review/tasks",
+        &token,
+        Some(create_task_body(form_id, "改了标题", "改了描述", &["24381/9"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(payload["success"], false);
+    assert!(payload.get("task").is_none(), "409 不回任务：{payload}");
+    let message = payload["error_message"].as_str().expect("error_message");
+    assert!(message.contains("jd") && message.contains("校对"), "{message}");
+    assert!(message.contains("不可修改"), "{message}");
+
+    let task = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("seeded task");
+    assert_eq!(task.id, task_id);
+    assert_eq!(task.title, format!("Task for {form_id}"));
+    assert_eq!(task.description, "seeded verify task");
+    assert!(task.components.is_empty());
+    assert_eq!(task.current_node, "jd");
+    assert_eq!(task.status, "submitted");
+    assert_eq!(active_task_ids(form_id).await, vec![task_id.clone()]);
+    assert!(history_actions(&task_id).await.is_empty());
+    assert!(form_model_refnos(form_id).await.is_empty());
+
+    cleanup_form_bundle(form_id).await;
+}
+
+/// G5：`PATCH /api/review/tasks/{id}` 改 `components` 后 `review_form_model` 与之一致（按 refno 去重）。
+#[tokio::test]
+async fn test_update_task_components_refreshes_review_form_model() {
+    let form_id = "FORM-PATCH-MODELS";
+    cleanup_form_bundle(form_id).await;
+    seed_form_stub(form_id, "SJ", Some("sj")).await;
+    let token = designer_token("project-1", "SJ");
+
+    let (status, created) = tasks_request(
+        "POST",
+        "/api/review/tasks",
+        &token,
+        Some(create_task_body(form_id, "包C", "PATCH 前", &["24381/1"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let task_id = created["task"]["id"].as_str().expect("task id").to_string();
+    assert_eq!(form_model_refnos(form_id).await, vec!["24381/1"]);
+
+    let (status, patched) = tasks_request(
+        "PATCH",
+        &format!("/api/review/tasks/{task_id}"),
+        &token,
+        Some(serde_json::json!({
+            "components": [component("24381/5"), component("24381/6"), component("24381/6")]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["success"], true);
+    assert!(
+        patched.get("error_message").is_none(),
+        "同步 review_form_model 不该报错：{patched}"
+    );
+    assert_eq!(
+        task_refnos(&patched["task"]),
+        vec!["24381/5", "24381/6", "24381/6"]
+    );
+    assert_eq!(form_model_refnos(form_id).await, vec!["24381/5", "24381/6"]);
+
+    // 不带 components 的 PATCH 不碰 review_form_model
+    let (status, patched_title) = tasks_request(
+        "PATCH",
+        &format!("/api/review/tasks/{task_id}"),
+        &token,
+        Some(serde_json::json!({ "title": "只改标题" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched_title}");
+    assert_eq!(form_model_refnos(form_id).await, vec!["24381/5", "24381/6"]);
+
+    cleanup_form_bundle(form_id).await;
+}
+
+/// V3：两条同 `form_id` 的活动任务，`create_task` 去重与 `find_task_by_form_id` 选中同一条
+/// （`updated_at DESC`；旧去重口径 `created_at ASC` 会选到另一条）。
+#[tokio::test]
+async fn test_create_task_dedup_and_find_task_by_form_id_pick_the_same_task() {
+    let form_id = "FORM-DEDUP-ORDER";
+    cleanup_form_bundle(form_id).await;
+    seed_form_stub(form_id, "SJ", Some("sj")).await;
+    test_db()
+        .await
+        .query(
+            r#"
+            CREATE ONLY type::thing('review_tasks', 'task-dedup-older') SET
+                form_id = $form_id, title = 'older', description = '', model_name = 'older',
+                status = 'draft', priority = 'medium', requester_id = 'SJ', requester_name = 'SJ',
+                checker_id = 'JH', checker_name = 'JH', approver_id = 'SH', approver_name = 'SH',
+                reviewer_id = 'JH', reviewer_name = 'JH', components = [], attachments = NONE,
+                current_node = 'sj', workflow_history = [],
+                created_at = time::now() - 2h, updated_at = time::now() - 2h;
+            CREATE ONLY type::thing('review_tasks', 'task-dedup-newer') SET
+                form_id = $form_id, title = 'newer', description = '', model_name = 'newer',
+                status = 'draft', priority = 'medium', requester_id = 'SJ', requester_name = 'SJ',
+                checker_id = 'JH', checker_name = 'JH', approver_id = 'SH', approver_name = 'SH',
+                reviewer_id = 'JH', reviewer_name = 'JH', components = [], attachments = NONE,
+                current_node = 'sj', workflow_history = [],
+                created_at = time::now() - 1h, updated_at = time::now() - 1h;
+            "#,
+        )
+        .bind(("form_id", form_id.to_string()))
+        .await
+        .expect("seed duplicate tasks")
+        .check()
+        .expect("seed duplicate tasks statements");
+
+    let lookup = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("task");
+    assert_eq!(lookup.id, "task-dedup-newer");
+
+    let token = designer_token("project-1", "SJ");
+    let (status, saved) = tasks_request(
+        "POST",
+        "/api/review/tasks",
+        &token,
+        Some(create_task_body(form_id, "resaved", "", &["24381/7"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["task"]["id"], "task-dedup-newer",
+        "去重与 find_task_by_form_id 同源"
+    );
+    assert_eq!(
+        active_task_ids(form_id).await,
+        vec!["task-dedup-newer", "task-dedup-older"],
+        "不新建第三条"
+    );
+
+    let after = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("task");
+    assert_eq!(after.id, "task-dedup-newer");
+    assert_eq!(after.title, "resaved");
+    let older = take_strings(
+        "SELECT VALUE title FROM review_tasks WHERE record::id(id) = $id",
+        "id",
+        "task-dedup-older",
+    )
+    .await;
+    assert_eq!(older, vec!["older"], "另一条一个字节没动");
+
+    cleanup_form_bundle(form_id).await;
+}
+
+/// V4：embed-url 建存根写入的 `review_forms.project_id`，在设计端首次保存（含 claims 无项目号的
+/// 「保留」分支）、二次保存、内部 `submit` 之后全程不变；`modelName`（数据包名称）不再流向它。
+#[tokio::test]
+async fn test_review_forms_project_id_survives_create_task_and_internal_submit() {
+    let form_id = "FORM-PROJECT-ID-GUARD";
+    cleanup_form_bundle(form_id).await;
+    super::review_form::ensure_review_form_stub(form_id, "P-REAL", "SJ", Some("sj"), "pms")
+        .await
+        .expect("embed-url stub");
+    assert_eq!(
+        review_form_project_id(form_id).await.as_deref(),
+        Some("P-REAL")
+    );
+
+    // 首次保存：claims 没带项目号 → 传空串 → 保留存根里的值
+    let token_without_project = designer_token("", "SJ");
+    let (status, created) = tasks_request(
+        "POST",
+        "/api/review/tasks",
+        &token_without_project,
+        Some(create_task_body(form_id, "某数据包名称", "", &["24381/1"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["task"]["modelName"], "某数据包名称");
+    assert_eq!(
+        review_form_project_id(form_id).await.as_deref(),
+        Some("P-REAL"),
+        "数据包名称不得流入 review_forms.project_id"
+    );
+
+    // 二次保存：claims 带同一项目号（embed-url 签发的 token 就是这样）
+    let token = designer_token("P-REAL", "SJ");
+    let (status, resaved) = tasks_request(
+        "POST",
+        "/api/review/tasks",
+        &token,
+        Some(create_task_body(form_id, "改名后的数据包", "", &["24381/1"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resaved}");
+    assert_eq!(resaved["task"]["modelName"], "改名后的数据包");
+    assert_eq!(
+        review_form_project_id(form_id).await.as_deref(),
+        Some("P-REAL")
+    );
+
+    // 内部流转 submit（sj → jd）走 apply_internal_workflow_mutation_transaction，同样保留
+    let task_id = created["task"]["id"].as_str().expect("task id").to_string();
+    let (status, submitted) = tasks_request(
+        "POST",
+        &format!("/api/review/tasks/{task_id}/submit"),
+        &token,
+        Some(serde_json::json!({ "comment": "送审" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    assert_eq!(
+        review_form_project_id(form_id).await.as_deref(),
+        Some("P-REAL")
+    );
+    let task = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("task");
+    assert_eq!(task.current_node, "jd");
+
+    cleanup_form_bundle(form_id).await;
+}
