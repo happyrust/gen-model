@@ -1889,22 +1889,19 @@ async fn dual_multi_target_update_sets_every_listed_record_only() {
     );
 }
 
-/// 交付删除记录 `datacenter_delete:[pe:⟨…⟩, '<老位号>']`（plan 2026-09-22 D1 / D2）：数组 id 里
-/// **混记录链接 + 字串**这一格此前没证过（`pe_owner:[owner, 槽位]` 证的是链接 + 整数）。用生产渲染器
-/// `render_datacenter_delete_upsert` 出的语句在两引擎上：DEFINE TABLE / INDEX 建得进、UPSERT 写得进、
-/// 同键重写只刷字段不多一行（整窗重放收敛）、`zone_refno` 等值与 `IN [...]` 查得回、id 数组往返保真、
-/// 位号里的 `'` / `\` 转义后原样落库；fork 上 `zone_refno = …` 的 EXPLAIN 走 `idx_datacenter_delete_zone`
-/// （rs-server 消费端按所选 ZONE 收行押在这上面）。
+/// 交付删除事件的 ID 只取 refno 值，`INSERT IGNORE` 让首次事件赢。生产渲染器在两引擎上须满足：
+/// DEFINE / INDEX 建得进；同一 refno 重放、再次改名都不覆盖也不增行；不同 refno 各一行；位号里的
+/// `'` / `\` 原样往返；`zone_refno` 索引仍可用。
 #[tokio::test(flavor = "multi_thread")]
-async fn dual_datacenter_delete_array_ids_round_trip() {
+async fn dual_datacenter_delete_refno_ids_insert_ignore() {
     use crate::data_interface::increment_pipeline::{
-        DatacenterDeleteRecord, render_datacenter_delete_upsert,
+        DatacenterDeleteRecord, render_datacenter_delete_insert_ignore,
     };
     let Some((mem, fork, _guard)) = dual_dbs("datacenter_delete").await else {
         return;
     };
     let refno = |n: u64| RefU64((8000u64 << 32) | n);
-    let renamed = render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+    let renamed = render_datacenter_delete_insert_ignore(&DatacenterDeleteRecord {
         refno: refno(3),
         name: "/A-OLD",
         noun: "BRAN",
@@ -1914,7 +1911,7 @@ async fn dual_datacenter_delete_array_ids_round_trip() {
         sesno_time: Some("2026-09-22T10:00:00+08:00"),
         reason: "renamed",
     });
-    let deleted = render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+    let deleted = render_datacenter_delete_insert_ignore(&DatacenterDeleteRecord {
         refno: refno(21),
         name: "/E'Q\\1",
         noun: "EQUI",
@@ -1924,8 +1921,8 @@ async fn dual_datacenter_delete_array_ids_round_trip() {
         sesno_time: None,
         reason: "deleted",
     });
-    // 同一 refno 再改一次位号：另一把键，两行并存（D2：按位号做键，历史不互相覆盖）。
-    let renamed_again = render_datacenter_delete_upsert(&DatacenterDeleteRecord {
+    // 同一 refno 再改一次位号：ID 相同，首次事件保留，后续事件忽略。
+    let renamed_again = render_datacenter_delete_insert_ignore(&DatacenterDeleteRecord {
         refno: refno(3),
         name: "/A-MID",
         noun: "BRAN",
@@ -1946,7 +1943,7 @@ async fn dual_datacenter_delete_array_ids_round_trip() {
             &renamed,
             &deleted,
             probe_rows,
-            // 同键重写：字段刷新、行数不变。
+            // 重放与同 refno 后续事件都不覆盖首次记录。
             &renamed,
             "SELECT count() AS n FROM datacenter_delete GROUP ALL;",
             &renamed_again,
@@ -1955,9 +1952,9 @@ async fn dual_datacenter_delete_array_ids_round_trip() {
             "SELECT name FROM datacenter_delete WHERE zone_refno = pe:⟨8000_5⟩ ORDER BY name;",
             "SELECT name FROM datacenter_delete WHERE zone_refno IN [pe:⟨8000_5⟩, pe:⟨8000_6⟩] ORDER BY name;",
             "SELECT name FROM datacenter_delete WHERE zone_refno = NONE ORDER BY name;",
-            // id 数组往返：第 0 位是 pe 记录链接、第 1 位是位号原文。
+            // id 只包含 refno 值，不包含 pe 记录链接或 name。
             "SELECT VALUE record::id(id) FROM datacenter_delete ORDER BY name;",
-            // 消费端 join：`datacenter_version:{refno}` 与 `pe:{refno}` 同一个键串。
+            // 消费端仍可用 refno 字段 join datacenter_version。
             "SELECT VALUE type::thing('datacenter_version', record::id(refno)) FROM datacenter_delete ORDER BY name;",
         ],
     )
@@ -1977,19 +1974,12 @@ async fn dual_datacenter_delete_array_ids_round_trip() {
     .await;
     assert_eq!(
         zoned,
-        vec![
-            Row {
-                name: "/A-MID".into(),
-                reason: "renamed".into(),
-                zone: "8000_5".into(),
-            },
-            Row {
-                name: "/A-OLD".into(),
-                reason: "renamed".into(),
-                zone: "8000_5".into(),
-            },
-        ],
-        "同一 refno 两把位号键两行并存、同键重写不多行、zone 链接往返保真"
+        vec![Row {
+            name: "/A-OLD".into(),
+            reason: "renamed".into(),
+            zone: "8000_5".into(),
+        }],
+        "同一 refno 只保留首次事件，zone 链接往返保真"
     );
     let unzoned: Vec<String> = sorted_values(
         &fork,
@@ -2001,28 +1991,23 @@ async fn dual_datacenter_delete_array_ids_round_trip() {
         vec!["/E'Q\\1".to_string()],
         "转义后的位号原样落库、链断的 zone_refno 是 NONE"
     );
-    // 总行数按 id 数（`SELECT VALUE count() … GROUP ALL` 在 2.1.4 上回的是 `{ count: n }` 对象、
-    // 不是裸整数；`count() AS n` 那一形状已在上面的双跑里比过）。
+    // ID 就是 refno 值，两个不同 refno 两行；同一 refno 的后续位号没有进入 ID，也没有新增行。
     let total: Vec<String> = sorted_values(
         &fork,
-        "SELECT VALUE record::id(id)[1] FROM datacenter_delete;",
+        "SELECT VALUE <string> record::id(id) FROM datacenter_delete;",
     )
     .await;
     assert_eq!(
         total,
-        vec![
-            "/A-MID".to_string(),
-            "/A-OLD".to_string(),
-            "/E'Q\\1".to_string()
-        ],
-        "三把键三行：同键重写不多行、两把位号键并存、链断那一行也在"
+        vec!["8000_21".to_string(), "8000_3".to_string()],
+        "ID 只取 refno 值；同 refno 的重放和后续事件均被忽略"
     );
     let by_zone: Vec<String> = sorted_values(
         &fork,
         "SELECT VALUE name FROM datacenter_delete WHERE zone_refno = pe:⟨8000_5⟩;",
     )
     .await;
-    assert_eq!(by_zone, vec!["/A-MID".to_string(), "/A-OLD".to_string()]);
+    assert_eq!(by_zone, vec!["/A-OLD".to_string()]);
 
     let plan = exec_capture(
         &fork,

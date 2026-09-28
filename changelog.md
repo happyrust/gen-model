@@ -9886,3 +9886,10 @@ D1–D7 全按推荐项）。plant3d-web 要把模型树与三维显示的数据
 ### 修复
 
 - 初始化模型生成将受数据就绪门控，避免 DESI 或模型越过尚未完成的元数据、元件库阶段。
+
+# 2026-09-28：`datacenter_delete` 收窄为 refno 单键事件表
+
+- ID 改为 `datacenter_delete:⟨ref0_ref1⟩`，只取 refno 值，不再把 `pe` 记录链接和 `name` 放进数组 ID。
+- 写入从 `UPSERT` 改为 `INSERT IGNORE`：同一 refno 只保留首次删除或改名事件；重放、再次改名或随后删除均不覆盖、不增行。
+- 按 issue #1 最新“插入判断”补发布存在性门：窗口内 refno 分块点查同 ID 的 `datacenter_version`，只为已发布单元生成事件；未发布单元不落行。
+- `refno / name / type / zone_refno / dbnum / sesno / sesno_time / reason` 保留为首次事件的普通字段；本仓只记录“曾发生过”，消费与后续处理交给第三方，`rs-server` 未改。

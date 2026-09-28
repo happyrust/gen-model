@@ -1384,8 +1384,9 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 
 ### 4.14 `GET /api/v1/datacenter/deletes` — 交付删除记录（`datacenter_delete`）只读分页（2026-09-23，plant-ui #1）
 
-- 读的是 **交付删除记录**（CONTEXT 词条）：交付单元自身被删 / 改位号时，增量随窗语句落下的「这个 refno 曾以哪个位号
-  发布过、如今该位号要从中台删掉」（表 `datacenter_delete`，主键 `[pe:⟨refno⟩, 老位号]`；写者只有增量，
+- 读的是 **交付删除事件**（CONTEXT 词条）：交付单元自身被删 / 改位号时，增量随窗语句记录「这个 refno 曾发生过删除或改名」。
+  表 `datacenter_delete` 的主键只取 refno 值 `datacenter_delete:⟨ref0_ref1⟩`，不含 `pe` 或 `name`；写入使用 `INSERT IGNORE`，同一
+  refno 只保留首次事件。增量写入前会按同一 refno ID 批量点查 `datacenter_version`，仅已发布过的单元落事件。写者只有增量，
   `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`）。给外部提资 / 中台侧拉「该删什么」用。
 - **只读**：本服务对这张表只写不删（计划 D7），这条路由一个 `DELETE` 都没有——删行归 rs-server 在中台 `remove-apply`
   成功之后。**不带 `instance_code`**：那是 rs-server `change_name_into_illegal(name)`（去首 `/`、非法字符换 `_`）的编码规则，
@@ -1426,7 +1427,7 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
       "reason": "renamed", "published": true, "published_status": "Insert" },
     { "refno": "7997/21", "name": "/E-101", "type": "EQUI", "zone_refno": null,
       "dbnum": 7997, "sesno": 30, "sesno_time": null,
-      "reason": "deleted", "published": false, "published_status": null } ],
+      "reason": "deleted", "published": true, "published_status": "Delete" } ],
   "total": 2, "start": 0, "limit": 500, "has_more": false }
 ```
 
@@ -1438,12 +1439,12 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
   | `zone_refno` | 沿 owner 链最近的 ZONE `a/b`；链断 `null`（按 ZONE 筛时自然漏掉，调用方要兜底就按 `dbnum` 拉） |
   | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版（这次改名 / 删除所在的会话，不是窗口末端）、同一版在 E3D 里被写入的时刻（RFC3339，增量落的是 UTC 文本 `…+00:00`，要本地时间自己换；读不到 `null`） |
   | `reason` | `deleted` \| `renamed` |
-  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端）。按 **refno** 算、不按位号：以 X 提资后连改 X→Y→Z 没再提资，`Y` 那行也是 `true`，但 Y 从没上过中台——调用方对 `remove-apply` 回「查无此实例」要按成功处理 |
-  | `published_status` | 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null` |
+  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。新写事件在写前已过存在性门，正常恒为 `true`；`false` 只用于兼容旧行或异常诊断 |
+  | `published_status` | 那行的 `status`（`Insert` / `Modify` / `Delete`）；旧行或异常情况下 `published = false` 时 `null` |
   | `total` / `start` / `limit` / `has_more` | 过滤后总数（不分页）/ 起点 / 实际生效的页大小 / `start + items.len() < total` |
 
 - **边处理边删的调用方别推进 `start`**：删掉的行会让后面的行整体前移，按「已读条数」翻下一页会整页跳过；这种用法始终 `start=0`
-  反复拉，直到 `items` 为空。同一 `[refno, 老位号]` 在更晚一窗再落一次（同键重写、`sesno` 变大）也会让那行在序里挪位。
+  反复拉，直到 `items` 为空。同一 refno 后续事件由 `INSERT IGNORE` 忽略，已有行不会改字段或挪位。
 - 与 `datacenter_version` 的 `status = 'Delete'` 行**并存**（计划 D9）：被删单元两边都有，消费端按位号去重；改位号只有这里有。
   改回原名这条路由不判——调用方自己比对再跳过，判据是**待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`**
   （即本次要发布的那个）。**别拿 `datacenter_version` 行上的 `instance_code` 比**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）
