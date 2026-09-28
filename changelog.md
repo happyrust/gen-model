@@ -15,6 +15,17 @@
 - **护栏**：ancestor 登记 `category.rs::is_model_unit_of`（只核 owner 的 noun）；读取集合不变（本仓并集仍 144）。
 - **验证**：e3d-io lib 398 过；e3d-model 共享树 lib 351、ancestor 4 / attribute 2 / reference 2、increment_real 3、gensec_joint_real 2、gensec_host_fixing_real 1、hvac 两道、noun_coverage 8 全过。证据 `%TEMP%\aps-verify-20260928\`（`cmp-fitt2.json`、`compare-fitt2.log`、`gen_ams-fitt2.log`、`e3dmodel-fitt3.log`）。
 
+### SCTN 上的 FITT 也自己成件、目录件的 NGMR 不再扣自己（vendor e3d-model `b64fcec`）：ams7997 `failed 154 → 85`、`catalog_pending FITT 1189 → 0`，aps250110 逐件不变
+
+- **为什么**：E3D 的 RVM 给 SCTN 上的每只 FITT 各开一组、梁的组里只有梁——`test_data/rvm/KX-CAM-S4001.rvm` 里 `/-KX-CAM-S4001-V1/F1` 是自己一条 Box 270 × 20 × 270，`SCTN-HW150-C80.rvm` 里 `FITTING 1 / 2 of SCTN /1TFA004MP-SUPP-01-V1` 各自一组（无几何）。
+  我们此前把 FITT 的目录几何拼进梁的 `parts`（SCTN 的 gb 是 0，不是注释里说的 gb==1 容器），梁体退化时还拿 FITT 的几何「保留」成一件假梁——ams7997 目录库 7600 不在，1073 只 SCTN 就是这样以端板冒充梁体的。
+- **改动**：`category::fitting_stands_alone_under` 认 `SCTN | STWALL`（= `ImplicitFrame::SectionFitting` 的两个宿主），`elmodl` 删掉 `section_fitting_parts` / `section_fitting_parts_of`。
+  顺带删掉 `6ff5dac` 加在 `model_catalogue_member_with_cache` 里的**组件级 NGMR 自扣**：NGMS 是给宿主扣的刀（`catalogue_host_cuts`），aps250110 的 E3D TTY RVM 里 57 只门窗中 50 只、50 只 FIXING 中 8 只的正体会被自己的 NGMS 扣掉一截（门洞 NSBO 扣完只剩门扇伸出墙外那一角，檐口加腋节点 `/208` 只剩 31 mm 一片），
+  RVM 却按未扣的 `parts` 逐件对上；此前看不出来是因为对拍吃 `parts`，它唯一露头处是扣空时的 `EmptyManifold`——ams7997 59 只 STWALL 上的 `/W-HOLE` 墙洞 FITT 与 10 只 FIXING 因此整件 failed。
+- **验证**：aps250110 逐件不变（3357 / 3303 / 54，FITT 57 / 57）；ams7997 `generated 51851 → 51920`（+1132 FITT +10 FIXING −1073 假梁）、`failed 154 → 85`（69 条「catalogue component after negatives 生成的流形为空」全消，剩 3 只 FITT 是 db 6000 不在）；
+  e3d-model lib 351、ancestor 4 / attribute 2 / reference 2、increment_real 3、gensec 两道、hvac 两道、noun_coverage 8 全过，提交在干净 worktree 里单独编过。
+- **在案**：KX-CAM-S4001.rvm 的两块端板与 gen 各差 17.4 mm（y / z 各一）——`section_fitting_placement` 对 L40 角钢的滚转口径（E3D 把板心放在截面包围盒中心的一侧，我们绕梁轴转了 90°），拆前拼在梁里就是这个位置，不是这次引入的。
+
 ## 2026-09-28
 
 ### 檐口加腋节点：目录 JOIN 的 NGMS 负体扣梁、FIXING 的 AANGXZ / AANGYZ 现算（vendor e3d-model `6ff5dac` 落地 + `b820a4a` 收口、e3d-io `3031902`）：8 根檐口斜梁 16 mm → 0，aps250110 整站 RVM 1179 → 1223 / 3039
