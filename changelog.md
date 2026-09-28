@@ -1,5 +1,31 @@
 # 变更记录
 
+## 2026-09-28
+
+### 檐口加腋节点：目录 JOIN 的 NGMS 负体扣梁、FIXING 的 AANGXZ / AANGYZ 现算（vendor e3d-model `6ff5dac` 落地 + `b820a4a` 收口、e3d-io `3031902`）：8 根檐口斜梁 16 mm → 0，aps250110 整站 RVM 1179 → 1223 / 3039
+
+- **为什么**：`/AREA02_WS_AXIS_WS.1`–`.4` 人字屋架斜梁的檐口端比 E3D 长 16 mm（z 最低点差 4.13 mm = 16 × 坡度）。JOIE 指的 FIXING 的 `SPRE → CATR` 是目录 JOIN `/J2S4_EAV_PFI_PFI_003`，负体在目录 NGMS（NSEX，`Pz = -(PARA[1]+1)`），
+  环用设计表 `RPRO BONE / BTWO`，而设计表按 `ANYZ = -AANGYZ` 选深度——`AANGYZ` 是 Core3D `pllib/PATANG` 按世界几何现算的伪属性（连接梁在关节那一端的截面轴换到 FIXING 标架的转角），库里没有。
+- **改动**：e3d-io `catalogue_pml` 认带单位的数字记录 `101 9 …`（`+ 20mm`、`+ 1mm`）、比较 LT / GE / LE（core.dll 解释器 `sub_51B4976` 同款 EXRCTL slack）、`DbElementParamEnv::with_derived`；
+  e3d-model `elmodl::attachment_angles`（CREF 梁 SPINE 端切向 → FIXING 标架，`yz = atan2(-y, z)`，E3D TTY 四只檐口 FIXING `Q AANGYZ = -14.481°` 逐只相等）、`catalogue_point::member_env` 统一目录求值环境并交 AANG、
+  `elmodl::fixing_negatives` 统一关节（mode 0）与宿主扫描（mode 9）的取源与两道 NAPP 门，关节路径也吃目录 JOIN 的 NGMR。
+- **整站对拍**：光「带单位的数字」一条就多对上 36 只 FIXING（柱底板自己那块板 329.2 × 340.4 × 30 也画出来了），配对 2995 → 3039、1179 → 1215；檐口 8 根修好、坏 0 → 1223。
+- **增量**：FIXING 的目录件经 CREF 读梁的 APAR / ADES / AANG，却挂在柱的 datum 下、不在梁子树里——`increment::joint_fixings_of`（`joint_consumer_of` 的反方向）把要重建 / 删除的梁的关节 FIXING 一并重建。
+  护栏：reference 三条登记补新读者；读取集合非属性字面量 +`AANGXZ` +`AANGYZ`（本仓并集不变）。
+- **验证**：e3d-io lib 369 过；e3d-model 干净树（`b820a4a`，e3d-io `3031902`）编过；共享树 lib 350、真库门 `gensec_joint_real` 2 / `gensec_host_fixing_real` 1 / `increment_real` 3、三道护栏全过。
+  证据 `output/gensec-joint-20260927/`（`cmp-unit.json`、`cmp-eaves.json`、`eaves-angles.mac/.log`）。
+
+### 9/28 收口：目录件 NGMR 读法回归、多分量亏格、栏杆提交的护栏登记、NOZZ 设计规则（vendor e3d-model `c1a687e` / `4847973`、e3d-io `ad379a5`）：aps250110 整站 RVM 3039 / 3039 全过
+
+- **NGMR 回归**（e3d-model `c1a687e`）：`6ff5dac` 起 `model_catalogue_member_with_cache` 对每个目录件 `get_element("NGMR")?`，管件 SCOM / HVAC / 桥架构件的模板没这个属性，e3d-io 报 `UnknownAttribute` 整件打死——aps250110 少了 34 只
+  FLAN / ELBO / VALV / NOZZ / REDU / TEE（generated 3266、failed 47），`increment_real` 两条门红（HVAC STRT / BRCO 0 件、ams251142 桥架 0 件）。改成 `has_attribute("NGMR")?` 为假当没有负体集；generated 回到 3300 / failed 13。
+- **三道门**（e3d-model `4847973`，本仓 `63938e29d`）：9/28 栏杆那批提交（`128e831`…`d3355a8`）让 ancestor / attribute / `gensec_joint_real` 红了。`transform::handrail_post_world` 登记为 AboveUnit（HRPOST / HRTERM / HRGATE 的现算标架读 HANDRA 的 RPATH，
+  在立柱模板件的单元之上，`implicit_frame_host_of` 还没接 HANDRA 这支——在案缺口）；`fixing_host_frame` 补登记 WALL 的 `DESP[0]` 与墙厚 `PARA[0]`；读取集合 +`HRJUSL` +`WIDT`（e3d-model 140 → 142，本仓并集 142 → 144，`model_impact` 钉数跟改）；
+  `GeneratedElement::genus()` 改为按分量求和——`d3355a8` 的 `restore_sloped_joint_tips` 给斜接梁补的零厚尖条是独立分量，`1 − χ/2` 把 `/1819` 两只腹板螺栓孔数成一只。
+- **NOZZ**（e3d-io `ad379a5`）：`/P_S_01/N1 N2`、`/P_D_01/N1 N2` 差 148–151 mm——它们的 `HEIG` 在取负哈希下挂着一条设计侧属性规则 `( ATTRIB CDPR NHEI )`（两词包头 + 整段 PML），`get_number` 把它当元组解不开报 Unresolved，
+  目录颈段 `SCYL.PHEI = DDHEIGHT` 因此求不出。与 `extract_attribute` 同口径：既不是整段 PML 也不是元组的正文当它不存在、读槽位（`HEIG = 180`，TTY 与 RVM 都对着它）。NOZZ 0 / 4 → 4 / 4。
+- **整站对拍**：配对 3039 / 通过 3039 / 失败 0，最大差 1.63 mm（2 mm 口径）。RVM 有而 gen 没有的 404 组（BOX 70、FITTING 57、GENSEC 56、BPANEL 52…）与 gen 有而 RVM 没有的 231 组照旧，不在这一批里。
+
 ## 2026-09-27
 
 ### GENSEC 扫自己 datum 树里的 FIXING 扣负体（vendor e3d-model `db6894f`、e3d-io `b7c4860`）：柱底板让位修好 24 根柱底、柱身螺栓孔与 E3D 逐根同数，aps250110 整站 RVM 1155 → 1179 / 2995
