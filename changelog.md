@@ -25,6 +25,8 @@
 - **NOZZ**（e3d-io `ad379a5`）：`/P_S_01/N1 N2`、`/P_D_01/N1 N2` 差 148–151 mm——它们的 `HEIG` 在取负哈希下挂着一条设计侧属性规则 `( ATTRIB CDPR NHEI )`（两词包头 + 整段 PML），`get_number` 把它当元组解不开报 Unresolved，
   目录颈段 `SCYL.PHEI = DDHEIGHT` 因此求不出。与 `extract_attribute` 同口径：既不是整段 PML 也不是元组的正文当它不存在、读槽位（`HEIG = 180`，TTY 与 RVM 都对着它）。NOZZ 0 / 4 → 4 / 4。
 - **整站对拍**：配对 3039 / 通过 3039 / 失败 0，最大差 1.63 mm（2 mm 口径）。RVM 有而 gen 没有的 404 组（BOX 70、FITTING 57、GENSEC 56、BPANEL 52…）与 gen 有而 RVM 没有的 231 组照旧，不在这一批里。
+- **栏杆立柱的增量缺口关掉**（e3d-model `f21dab9`）：`increment::implicit_frame_host_of` 加第三支——候选落在带立柱的 HANDRA 子树里（RPATH / POINTR / CURVE、POSTSE / RAILSE / HRFEAT、HRPOST / HRTERM / HRGATE）就把整棵 HANDRA 子树级联重建，
+  与 GENSEC datum 那支同型；只有 RPATH 的布局式 HANDRA（自己就是单元）与立柱 TMPL 里的件（owner 链够得着）不算。ancestor 护栏里 `handrail_post_world` 那条改记「单元规划已补上」。真库单测 `handrail_post_inputs_climb_to_their_handrail`。
 
 ## 2026-09-27
 
