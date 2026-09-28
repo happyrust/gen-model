@@ -26,7 +26,10 @@ use super::super::auth::{REVIEW_AUTH_CONFIG, ReviewAuthConfig, verify_token};
 use super::super::common::{await_review_query, fresh_review_db, record_id_to_string};
 use super::{auth::verify_s2s_token, review_form::find_task_by_form_id};
 
-const SUPPORTED_ANNOTATION_TYPES: [&str; 3] = ["text", "cloud", "rect"];
+/// 闸门认的批注类型，与处理状态接口 `comments.rs::is_valid_annotation_type` 同一张表：前端把 obb（箱体）
+/// 当正式批注类型、确认记录写 `obb_annotations`、reviewState 也能改，闸门若漏掉它，审核人只画 OBB
+/// 并标 open 时 `agree` 照样放行（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D7 / T6，Q7=A）。
+const SUPPORTED_ANNOTATION_TYPES: [&str; 4] = ["text", "cloud", "rect", "obb"];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnnotationCheckRequest {
@@ -143,6 +146,7 @@ struct AnnotationCheckRecordRow {
     annotations: Option<Vec<Value>>,
     cloud_annotations: Option<Vec<Value>>,
     rect_annotations: Option<Vec<Value>>,
+    obb_annotations: Option<Vec<Value>>,
     #[allow(dead_code)]
     confirmed_at: Option<Datetime>,
 }
@@ -728,16 +732,35 @@ async fn load_effective_annotations(
     context: &AnnotationCheckContext,
     included_types: &HashSet<String>,
 ) -> Result<Vec<EffectiveAnnotation>, (StatusCode, String)> {
-    let query_sql = r#"
+    // 取记录口径与 `workflow_sync::query_workflow_data` 对齐：按 form 取（PMS 那边看到的 records 就是
+    // 按 form_id 挂的），同时兼收只挂了 task_id 的旧记录。旧端只按 task_id 取，form 下出现重复 task
+    // （历史数据）时闸门评估的是 active task 名下的记录——可能为空而「无批注，直接放行」，PMS 看到的
+    // records 却挂在另一条 task 上（计划 D5b / T7）。form_id 为空（旧任务）时退回只按 task_id。
+    let query_sql = if context.form_id.trim().is_empty() {
+        r#"
         SELECT
             annotations,
             cloud_annotations,
             rect_annotations,
+            obb_annotations,
             confirmed_at
         FROM review_records
         WHERE task_id = $task_id
         ORDER BY confirmed_at ASC
-    "#;
+        "#
+    } else {
+        r#"
+        SELECT
+            annotations,
+            cloud_annotations,
+            rect_annotations,
+            obb_annotations,
+            confirmed_at
+        FROM review_records
+        WHERE form_id = $form_id OR task_id = $task_id
+        ORDER BY confirmed_at ASC
+        "#
+    };
 
     let db = fresh_review_db().await.map_err(|error| {
         (
@@ -748,7 +771,8 @@ async fn load_effective_annotations(
     let mut response = await_review_query(
         "review.annotation_check.records",
         db.query(query_sql)
-            .bind(("task_id", context.task_id.clone())),
+            .bind(("task_id", context.task_id.clone()))
+            .bind(("form_id", context.form_id.trim().to_string())),
     )
     .await
     .map_err(|error| {
@@ -777,6 +801,7 @@ async fn load_effective_annotations(
             ("text", row.annotations.unwrap_or_default()),
             ("cloud", row.cloud_annotations.unwrap_or_default()),
             ("rect", row.rect_annotations.unwrap_or_default()),
+            ("obb", row.obb_annotations.unwrap_or_default()),
         ];
 
         for (annotation_type, items) in bundles {

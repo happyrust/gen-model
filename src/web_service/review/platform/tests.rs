@@ -997,31 +997,106 @@ async fn test_workflow_verify_agree_terminal_task_returns_soft_block() {
 
 /// 旧名 `test_workflow_verify_agree_owner_mismatch_returns_structured_diagnostics`：
 /// S2S JWT 不带 `workflow_mode`（外部驱动模式），owner 校验跳过，非负责人也放行；
-/// OWNER_MISMATCH 的结构化诊断由 `workflow_sync::tests::internal_workflow_owner_mismatch_is_forbidden` 钉住。
+/// 旧名 `test_workflow_verify_agree_external_mode_skips_owner_match`（移植时曾断言 external 放行）。
+/// 2026-09-29 Q6=A 起 external 模式 `agree` / `return` 也校 owner：jd 节点负责人是 JH（上一步 PMS
+/// `next_step` 写进 `checker_id` 的人），SH 来 agree → 200 + passed=false + OWNER_MISMATCH，诊断带
+/// `actor_id / owner_id / owner_source`；同参数 `sync agree` 403 且任务不动
+/// （`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D4 / D8 / T7）。
 #[tokio::test]
-async fn test_workflow_verify_agree_external_mode_skips_owner_match() {
+async fn test_workflow_agree_external_mode_rejects_non_owner() {
     let form_id = "FORM-VERIFY-OWNER-MISMATCH";
     insert_task_seed(form_id, "SJ", "JH", "SH", "jd", "submitted").await;
-
-    let (status, payload) = post_verify(serde_json::json!({
+    seed_form_stub(form_id, "SJ", Some("sj")).await;
+    let body = serde_json::json!({
         "form_id": form_id,
         "token": s2s_token("SH", "sh"),
         "action": "agree",
         "actor": { "id": "SH", "name": "SH", "roles": "sh" },
-        "next_step": { "assignee_id": "SH", "name": "SH", "roles": "sh" }
-    }))
-    .await;
+        "next_step": { "assignee_id": "PZ", "name": "PZ", "roles": "pz" }
+    });
 
+    let (status, payload) = post_verify(body.clone()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload.code, 200);
     let data = payload.data.expect("verify data");
-    assert!(data.passed, "external workflow skips owner match: {data:?}");
+    assert!(!data.passed, "external agree by a non-owner must be blocked: {data:?}");
     assert_eq!(data.action, "agree");
-    assert_eq!(data.block_code, None);
+    assert_eq!(data.block_code.as_deref(), Some("OWNER_MISMATCH"));
     assert_eq!(data.current_node.as_deref(), Some("jd"));
     assert_eq!(data.task_status.as_deref(), Some("submitted"));
-    assert_eq!(data.next_step.as_deref(), Some("sh"));
-    assert_eq!(data.recommended_action, "proceed");
+    assert_eq!(data.actor_id.as_deref(), Some("SH"));
+    assert_eq!(data.owner_id.as_deref(), Some("JH"));
+    assert_eq!(data.owner_source.as_deref(), Some("checker"));
+    assert_eq!(data.recommended_action, "block");
+    assert!(data.reason.contains("权限不足"), "{}", data.reason);
+
+    let (status, sync) = post_sync(body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", sync.message);
+    let task_after = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("task");
+    assert_eq!(task_after.current_node, "jd");
+    assert_eq!(task_after.status, "submitted");
+
+    // 负责人本人 JH 照常通过
+    let (status, payload) = post_verify(serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("JH", "jd"),
+        "action": "agree",
+        "actor": { "id": "JH", "name": "JH", "roles": "jd" },
+        "next_step": { "assignee_id": "SH", "name": "SH", "roles": "sh" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data = payload.data.expect("verify data");
+    assert!(data.passed, "{}", data.reason);
+    assert_eq!(data.owner_id.as_deref(), Some("JH"));
+
+    cleanup_form(form_id).await;
+}
+
+/// D8 / T7：请求体自报的 `actor.id` 必须是 token 持有人。持 SJ 的嵌入 token 冒 JH 来 agree → verify /
+/// sync 都 403 ACTOR_MISMATCH，任务不动；PMS 按人领 token 再送审的现网口径不受影响（上一条用例）。
+#[tokio::test]
+async fn test_workflow_actor_must_match_token_holder() {
+    let form_id = "FORM-ACTOR-MISMATCH";
+    insert_task_seed(form_id, "SJ", "JH", "SH", "jd", "submitted").await;
+    seed_form_stub(form_id, "SJ", Some("sj")).await;
+    let body = serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("SJ", "sj"),
+        "action": "agree",
+        "actor": { "id": "JH", "name": "JH", "roles": "jd" },
+        "next_step": { "assignee_id": "SH", "name": "SH", "roles": "sh" }
+    });
+
+    let (status, verify) = post_verify(body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(verify.code, 403);
+    assert_eq!(verify.error_code.as_deref(), Some("ACTOR_MISMATCH"));
+    assert!(verify.data.is_none());
+    assert!(verify.message.contains("JH") && verify.message.contains("SJ"), "{}", verify.message);
+
+    let (status, sync) = post_sync(body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(sync.error_code.as_deref(), Some("ACTOR_MISMATCH"));
+    let task_after = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("task");
+    assert_eq!(task_after.current_node, "jd");
+
+    // actor.id 与 token 持有人只差大小写 → 同一人（HumanCode 统一按大写比）
+    let (status, payload) = post_verify(serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("JH", "jd"),
+        "action": "agree",
+        "actor": { "id": "jh", "name": "JH", "roles": "jd" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", payload.message);
+    assert!(payload.data.expect("verify data").passed);
 
     cleanup_form(form_id).await;
 }
@@ -1168,6 +1243,164 @@ async fn post_sync(body: serde_json::Value) -> (StatusCode, SyncWorkflowResponse
     let payload: SyncWorkflowResponseBody = serde_json::from_slice(&bytes)
         .unwrap_or_else(|e| panic!("sync body: {e}: {}", String::from_utf8_lossy(&bytes)));
     (status, payload)
+}
+
+/// 只有 obb 批注的确认记录（`obb_annotations` 有一条 open，其余三类为空）。
+async fn insert_obb_only_record(task_id: &str, form_id: &str, annotation_id: &str) {
+    test_db()
+        .await
+        .query(
+            r#"
+            CREATE ONLY type::thing('review_records', $id) CONTENT {
+                task_id: $task_id,
+                form_id: $form_id,
+                type: "batch",
+                annotations: [],
+                cloud_annotations: [],
+                rect_annotations: [],
+                obb_annotations: [
+                    {
+                        id: $annotation_id,
+                        annotationType: "obb",
+                        title: "箱体批注",
+                        refnos: ["24381/145018"],
+                        reviewState: NONE
+                    }
+                ],
+                measurements: [],
+                note: "seed obb only",
+                current_node: "jd",
+                operator_id: "JH",
+                operator_name: "JH",
+                slot_key: "slot-obb-only",
+                snapshot_hash: "hash-obb-only",
+                confirmed_at: time::now()
+            }
+            "#,
+        )
+        .bind(("id", format!("record-{}-obb-only", form_id.to_lowercase())))
+        .bind(("task_id", task_id.to_string()))
+        .bind(("form_id", form_id.to_string()))
+        .bind(("annotation_id", annotation_id.to_string()))
+        .await
+        .expect("seed obb record")
+        .check()
+        .expect("seed obb record statements");
+}
+
+/// T6（D7，Q7=A）：只画了 OBB 批注并留着 open 时，`agree` 必须被闸门挡下、blocker 类型是 `obb`；
+/// `annotations/check` 显式 `included_types:["obb"]` 也不再 400。旧闸门 `SUPPORTED_ANNOTATION_TYPES`
+/// 没有 obb，这一格 agree 照样放行。
+#[tokio::test]
+async fn test_obb_only_open_annotation_blocks_agree() {
+    let form_id = "FORM-OBB-ONLY-GATE";
+    insert_task_seed(form_id, "SJ", "JH", "SH", "jd", "submitted").await;
+    let task = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("seeded task");
+    insert_obb_only_record(&task.id, form_id, "ann-obb-open-1").await;
+
+    let (status, payload) = post_verify(serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("JH", "jd"),
+        "action": "agree",
+        "actor": { "id": "JH", "name": "JH", "roles": "jd" },
+        "next_step": { "assignee_id": "SH", "name": "SH", "roles": "sh" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data = payload.data.expect("verify data");
+    assert!(!data.passed, "obb open 批注必须挡住 agree：{}", data.reason);
+    assert_eq!(data.block_code.as_deref(), Some("ANNOTATION_CHECK_FAILED"));
+    let annotation_check = payload.annotation_check.expect("annotation_check");
+    assert_eq!(annotation_check["summary"]["total"], 1);
+    assert_eq!(annotation_check["summary"]["open"], 1);
+    assert_eq!(annotation_check["blockers"][0]["annotation_id"], "ann-obb-open-1");
+    assert_eq!(annotation_check["blockers"][0]["annotation_type"], "obb");
+
+    // 独立闸门接口：显式只查 obb 也认
+    let (status, bytes) = post_json(
+        "/api/review/annotations/check",
+        serde_json::json!({
+            "form_id": form_id,
+            "token": s2s_token("JH", "jd"),
+            "intent": "agree_advance",
+            "included_types": ["obb"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let check: serde_json::Value = serde_json::from_slice(&bytes).expect("check body");
+    assert_eq!(check["success"], true);
+    assert_eq!(check["data"]["passed"], false);
+    assert_eq!(check["data"]["summary"]["open"], 1);
+
+    cleanup_form(form_id).await;
+}
+
+/// D5b（T7）：闸门取记录与 `workflow/sync query` 同口径——按 form_id 取，兼收 task_id。form 下有两条
+/// 活动 task、记录挂在旧 task 上时，对 active task 的 agree 仍看得见那条 open 批注。
+#[tokio::test]
+async fn test_annotation_gate_sees_records_hung_on_sibling_task_of_same_form() {
+    let form_id = "FORM-GATE-SIBLING-TASK";
+    // 旧 task（记录挂它）+ 新 task（active，updated_at 更新）
+    insert_task_seed(form_id, "SJ", "JH", "SH", "jd", "submitted").await;
+    test_db()
+        .await
+        .query(
+            r#"
+            UPDATE type::thing('review_tasks', $old_id) SET updated_at = time::now() - 1h;
+            CREATE ONLY type::thing('review_tasks', $new_id) SET
+                form_id = $form_id, title = 'newer', description = '', model_name = 'demo-model',
+                status = 'submitted', priority = 'medium', requester_id = 'SJ', requester_name = 'SJ',
+                checker_id = 'JH', checker_name = 'JH', approver_id = 'SH', approver_name = 'SH',
+                reviewer_id = 'JH', reviewer_name = 'JH', components = [], attachments = NONE,
+                current_node = 'jd', workflow_history = [],
+                created_at = time::now(), updated_at = time::now();
+            "#,
+        )
+        .bind(("old_id", format!("task-{}", form_id.to_lowercase())))
+        .bind(("new_id", format!("task-{}-newer", form_id.to_lowercase())))
+        .bind(("form_id", form_id.to_string()))
+        .await
+        .expect("seed sibling task")
+        .check()
+        .expect("seed sibling task statements");
+    let active = super::review_form::find_task_by_form_id(form_id)
+        .await
+        .expect("query task")
+        .expect("task");
+    assert_eq!(active.id, format!("task-{}-newer", form_id.to_lowercase()));
+    insert_review_record_with_state(
+        &format!("task-{}", form_id.to_lowercase()),
+        form_id,
+        "ann-sibling-open-1",
+        "挂在旧 task 上的未处理批注",
+        None,
+        None,
+        "sibling-open",
+    )
+    .await;
+
+    let (status, payload) = post_verify(serde_json::json!({
+        "form_id": form_id,
+        "token": s2s_token("JH", "jd"),
+        "action": "agree",
+        "actor": { "id": "JH", "name": "JH", "roles": "jd" },
+        "next_step": { "assignee_id": "SH", "name": "SH", "roles": "sh" }
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data = payload.data.expect("verify data");
+    assert!(!data.passed, "记录挂在同 form 的旧 task 上也必须进闸门：{}", data.reason);
+    assert_eq!(data.block_code.as_deref(), Some("ANNOTATION_CHECK_FAILED"));
+    assert_eq!(
+        payload.annotation_check.expect("annotation_check")["blockers"][0]["annotation_id"],
+        "ann-sibling-open-1"
+    );
+
+    cleanup_form(form_id).await;
 }
 
 // 3.6.1：verify 对 active 走 ActiveSubmit 批注闸门（c8d5f6b92，2026-09-17：`annotation_check_intent_for_action`

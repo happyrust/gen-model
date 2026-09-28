@@ -536,6 +536,24 @@ fn fill_actor_from_claims(
         if actor.name.trim().is_empty() {
             actor.name = actor.id.trim().to_string();
         }
+        // actor 绑 claims：请求体自报的 actor.id 必须就是签出这枚 token 的人。PMS 是按人经
+        // `/api/auth/token` 取 token 再送审的（e2e 与 online-review-acceptance 都是每个角色各领一枚），
+        // 不受影响；嵌入页拿自己的 user_token 只能以自己的身份推进。旧端不比对，任一持嵌入 token
+        // 的浏览器都能冒任意 actor（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D8 / T7，Q6=A）。
+        // debug_token 模式（claims=None）没有可比对的身份，照旧只要求 actor 必传。
+        if let Some(c) = claims.as_ref() {
+            let claimed = c.user_id.trim();
+            if !claimed.is_empty() && !claimed.eq_ignore_ascii_case(actor.id.trim()) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "actor.id={} 与 token 持有人 {} 不一致；workflow 动作只能以 token 持有人的身份执行",
+                        actor.id.trim(),
+                        claimed
+                    ),
+                ));
+            }
+        }
         return Ok(());
     }
     let c = claims.ok_or_else(|| {
@@ -561,6 +579,16 @@ fn fill_actor_from_claims(
         roles: role,
     });
     Ok(())
+}
+
+/// `fill_actor_from_claims` 失败时的 `error_code`：400 是「没 actor 又推不出」（ACTOR_REQUIRED），
+/// 403 是「actor 与 token 持有人不一致」（ACTOR_MISMATCH）。
+fn actor_error_code(status: StatusCode) -> &'static str {
+    if status == StatusCode::FORBIDDEN {
+        "ACTOR_MISMATCH"
+    } else {
+        "ACTOR_REQUIRED"
+    }
 }
 
 fn is_external_workflow(request: &SyncWorkflowRequest) -> bool {
@@ -631,7 +659,7 @@ pub async fn verify_workflow_handler(
                 code: status.as_u16() as i32,
                 message: msg,
                 data: None,
-                error_code: Some("ACTOR_REQUIRED".to_string()),
+                error_code: Some(actor_error_code(status).to_string()),
                 annotation_check: None,
             }),
         );
@@ -962,7 +990,7 @@ pub async fn sync_workflow_handler(
                 code: status.as_u16() as i32,
                 message: msg,
                 data: None,
-                error_code: Some("ACTOR_REQUIRED".to_string()),
+                error_code: Some(actor_error_code(status).to_string()),
                 annotation_check: None,
             }),
         );
@@ -1407,41 +1435,49 @@ mod tests {
         }
     }
 
+    /// Q6=A（2026-09-29）：external 模式 `return` / `agree` 也校 owner——负责人是上一步 PMS `next_step`
+    /// 写进 task 的人，非负责人一律 403 OWNER_MISMATCH（此前 external 一律短路放行）。
     #[test]
-    fn external_workflow_return_skips_owner_match() {
+    fn external_workflow_return_and_agree_check_owner() {
         let task = review_task_with_owners("jd", "JH", "SH");
-        let result = ensure_owner_matches(
+        let err = ensure_owner_matches(
             "return",
             &task,
             "jd",
-            "EXT_USER_THAT_DOES_NOT_MATCH",
+            "EXT-USER-THAT-DOES-NOT-MATCH",
             None,
             None,
             None,
             true,
-        );
-        assert!(
-            result.is_ok(),
-            "external workflow return should skip owner match even when actor != owner"
-        );
+        )
+        .expect_err("external return by a non-owner must be rejected");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.verify_block_code.as_deref(), Some("OWNER_MISMATCH"));
+        assert_eq!(err.verify_owner_id.as_deref(), Some("JH"));
+        assert_eq!(err.verify_owner_source.as_deref(), Some("checker"));
+
+        let err = ensure_owner_matches("agree", &task, "jd", "SH", None, None, None, true)
+            .expect_err("external agree by the approver at jd must be rejected");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.verify_block_code.as_deref(), Some("OWNER_MISMATCH"));
+
+        // 负责人本人照常放行（大小写不敏感：HumanCode 统一按大写比）
+        assert!(ensure_owner_matches("agree", &task, "jd", "jh", None, None, None, true).is_ok());
+        assert!(ensure_owner_matches("return", &task, "jd", "JH", None, None, None, true).is_ok());
     }
 
+    /// external 模式下 `active` / `stop` 仍全信 PMS（负责人是建单设计人 / PMS 终止无节点归属）。
     #[test]
-    fn external_workflow_verify_skips_owner_match() {
-        let task = review_task_with_owners("sh", "JH", "SH");
-        let result = ensure_owner_matches(
-            "verify",
-            &task,
-            "sh",
-            "external_proofreader_99",
-            None,
-            None,
-            None,
-            true,
-        );
+    fn external_workflow_active_and_stop_still_skip_owner_match() {
+        let task = review_task_with_owners("sj", "JH", "SH");
         assert!(
-            result.is_ok(),
-            "external workflow verify should skip owner match for non-PMS actor id"
+            ensure_owner_matches("active", &task, "sj", "NOT-SJ", None, None, None, true).is_ok(),
+            "external active keeps trusting PMS"
+        );
+        let task = review_task_with_owners("sh", "JH", "SH");
+        assert!(
+            ensure_owner_matches("stop", &task, "sh", "external_proofreader_99", None, None, None, true).is_ok(),
+            "external stop keeps trusting PMS"
         );
     }
 
@@ -1613,7 +1649,12 @@ fn ensure_owner_matches(
     requested_next_step: Option<WorkflowVerifyNextStepDiagnostic>,
     external_workflow: bool,
 ) -> Result<(), WorkflowSyncActionError> {
-    if external_workflow {
+    // external 模式（PMS 驱动）：`agree` / `return` 也校 owner——当前节点负责人就是上一步 PMS 经
+    // `next_step` 写进 `checker_* / approver_*` 的那个人，平台侧有据可查；`active`（sj 首次 / 驳回后
+    // 重提，负责人是建单的设计人）与 `stop`（PMS 终止）照旧全信 PMS。2026-09-29 之前 external 一律
+    // 短路，配合「嵌入 token ≡ S2S token」任何持 token 的浏览器都能推进任意单据
+    // （`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D4 / D8 / T7，Q6=A）。
+    if external_workflow && !matches!(action_label, "agree" | "return") {
         return Ok(());
     }
 
