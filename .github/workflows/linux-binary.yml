@@ -178,6 +178,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           JWT_SECRET: ${{ secrets.REVIEW_JWT_SECRET }}
+          E3D_PROJECT_DIR: /var/lib/aios-database/e3d
+          HTTP_PORT: '8022'
+          REMOTE_HOST: '123.57.182.243'
         run: |
           set -euo pipefail
           git clone --quiet --depth 1 --branch deploy/backend-20260918 "https://x-access-token:${GH_TOKEN}@github.com/happyrust/gen-model.git" deploysrc
@@ -211,3 +214,106 @@ jobs:
           cat /tmp/review-health
           test "$code" = 200
           test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "http://$REMOTE_HOST/api/v1/health" || true)" = 200
+
+      - name: Cut over backend port 3100 to the refactor service
+        env:
+          REMOTE_HOST: '123.57.182.243'
+          REMOTE_USER: 'root'
+          REMOTE_PASS: ${{ secrets.DEPLOY_REMOTE_PASS }}
+        run: |
+          set -euo pipefail
+          test -n "$REMOTE_PASS"
+          opts='-o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15'
+          cat > /tmp/cutover-3100.sh <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          readonly PUBLIC_PORT=3100
+          readonly TARGET_PORT=8022
+          readonly SOCKET_UNIT=aios-backend-3100.socket
+          readonly PROXY_UNIT=aios-backend-3100.service
+          readonly STATE_FILE=/etc/aios-backend-3100.previous-unit
+
+          target_health="$(curl -fsS --max-time 10 "http://127.0.0.1:${TARGET_PORT}/api/review/health")"
+          case "$target_health" in
+            *'"status":"ok"'*'"database":"healthy"'*) ;;
+            *) echo "refactor backend on :${TARGET_PORT} is not healthy: ${target_health}" >&2; exit 1 ;;
+          esac
+
+          managed_before=0
+          old_unit=""
+          if systemctl is-active --quiet "$SOCKET_UNIT"; then
+            managed_before=1
+            systemctl stop "$SOCKET_UNIT" "$PROXY_UNIT" 2>/dev/null || true
+          fi
+
+          old_pid="$(ss -H -ltnp "sport = :${PUBLIC_PORT}" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+          if [ -n "$old_pid" ]; then
+            old_exe="$(readlink -f "/proc/${old_pid}/exe" 2>/dev/null || true)"
+            old_unit="$(sed -n 's#^.*/\([^/]*\.service\)$#\1#p' "/proc/${old_pid}/cgroup" 2>/dev/null | head -1)"
+            case "$(basename "$old_exe")" in
+              plant-web-server|plant-model-gen) ;;
+              *)
+                echo "refusing to replace unexpected :${PUBLIC_PORT} listener: pid=${old_pid} exe=${old_exe:-unknown} unit=${old_unit:-unknown}" >&2
+                exit 1
+                ;;
+            esac
+            [ -n "$old_unit" ] || { echo "listener pid ${old_pid} is not owned by a systemd service" >&2; exit 1; }
+            printf '%s\n' "$old_unit" > "$STATE_FILE"
+            systemctl disable --now "$old_unit"
+          fi
+
+          rollback() {
+            systemctl stop "$SOCKET_UNIT" "$PROXY_UNIT" 2>/dev/null || true
+            if [ "$managed_before" = 1 ]; then
+              systemctl start "$SOCKET_UNIT" || true
+            elif [ -n "$old_unit" ]; then
+              systemctl enable --now "$old_unit" || true
+            fi
+          }
+          trap rollback ERR
+
+          cat > "/etc/systemd/system/${SOCKET_UNIT}" <<UNIT
+          # managed-by: gen-model ci/linux-build-refactor-20260928
+          [Unit]
+          Description=Public backend socket :${PUBLIC_PORT} for aios-database
+
+          [Socket]
+          ListenStream=0.0.0.0:${PUBLIC_PORT}
+          NoDelay=true
+
+          [Install]
+          WantedBy=sockets.target
+          UNIT
+
+          cat > "/etc/systemd/system/${PROXY_UNIT}" <<UNIT
+          # managed-by: gen-model ci/linux-build-refactor-20260928
+          [Unit]
+          Description=Forward public backend :${PUBLIC_PORT} to aios-database :${TARGET_PORT}
+          Requires=aios-database.service
+          After=aios-database.service
+
+          [Service]
+          ExecStart=/lib/systemd/systemd-socket-proxyd 127.0.0.1:${TARGET_PORT}
+          StandardInput=socket
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now "$SOCKET_UNIT"
+
+          public_health="$(curl -fsS --max-time 15 "http://127.0.0.1:${PUBLIC_PORT}/api/review/health")"
+          case "$public_health" in
+            *'"status":"ok"'*'"database":"healthy"'*) ;;
+            *) echo "cutover verification failed: ${public_health}" >&2; false ;;
+          esac
+          curl -fsS --max-time 15 "http://127.0.0.1:${PUBLIC_PORT}/api/v1/health" >/dev/null
+          trap - ERR
+          echo "port ${PUBLIC_PORT} now forwards to refactor backend :${TARGET_PORT}; previous unit=${old_unit:-none}"
+          REMOTE_SCRIPT
+          sshpass -p "$REMOTE_PASS" ssh $opts "$REMOTE_USER@$REMOTE_HOST" 'bash -s' < /tmp/cutover-3100.sh
+          public_review="$(curl -fsS --max-time 30 "http://$REMOTE_HOST:3100/api/review/health")"
+          echo "$public_review"
+          case "$public_review" in
+            *'"status":"ok"'*'"database":"healthy"'*) ;;
+            *) echo "public :3100 review health did not reach the refactor backend" >&2; exit 1 ;;
+          esac
+          test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "http://$REMOTE_HOST:3100/api/v1/health" || true)" = 200
