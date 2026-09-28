@@ -1,6 +1,6 @@
 # ADR-084：生成输入缓存按**库数**设上限——每库一份 `GenerationInput`，超过上限按「最近一次生成用到」的先后逐库整份出；默认 0 = 不限，默认值待真机量过每窗重开的代价再定
 
-- 状态：**已接受、已实施（能力）；默认值未定**（2026-09-22 用户拍板 `docs/plans/2026-09-22-incremental-memory-control-dev-plan.md` D2「按库数 LRU」/ D3「先 0 不限落地，真机量每窗重开代价后定」；
+- 状态：**已接受、已实施并完成本地验收（能力）；默认值未定，实机验收延期**（2026-09-22 用户拍板 `docs/plans/2026-09-22-incremental-memory-control-dev-plan.md` D2「按库数 LRU」/ D3「先 0 不限落地，真机量每窗重开代价后定」；
   同日落地——`options::model_generation_input_max_dbnums`、`e3d_model_service::DbnumLru`、`/health.model_cache.element_cache` 三格、`DbOption.toml` 一键；实施记录见文末源码钉）。
 - 日期：2026-09-22
 - 关联：
@@ -45,6 +45,7 @@ ADR-082 当时没做，理由是「稳态窗口收尾释放」会改今天的默
 ### D3　默认 **0 = 不限**；默认值待真机
 
 - 落地这一刻行为一个字不变（与 ADR-082 D5 落地那一刻同一条路：先只加能力，先量再配）。
+- 2026-09-28 本地验收已完成：`model_memory_store`、`e3d_model_service`、`historical_model` 相关测试通过，代码默认仍为 `0`。d149live 当前无运行进程，本轮不启动外部服务；因此未产生两库交替窗口证据，也不提前把默认值改成候选值。
 - **量法**（计划 §3.4 / §5）：d149live 私有实例（rocksdb，`D:\d149live`），**两个 DESI 库交替出窗**、`AIOS_MODEL_GENERATION_INPUT_MAX_DBNUMS=1`，每窗记任务耗时、
   `/health.core.source_reads.db_opens` 增量、RSS 前后峰、`element_cache.databases[].parsed_entries` 从 0 起的爬升；对照不限时同一组窗。最接近的既有数是 W5 / W6 里
   `RoomOnly` 枚举根集那一步（RSS +90 MB、解析 70,084 元素、十几秒），但它复用了本窗的生成输入、不是从零开池。数进 `docs/evidence/2026-09-2x-generation-input-reopen-cost.md`，
