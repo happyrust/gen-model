@@ -144,7 +144,7 @@ jobs:
           # RUSTFLAGS 一旦给了就整体顶掉 .cargo/config.toml 的 build.rustflags，-Z threads=8 要带回来。
           RUSTFLAGS: "-Z threads=8 --cfg rustix_use_libc"
         run: >-
-          cargo build --release --locked --bin aios-database
+          cargo build --release --bin aios-database
           --no-default-features
           --features ws,gen_model,manifold,project_hd,http_api
 
