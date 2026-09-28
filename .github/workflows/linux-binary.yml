@@ -143,10 +143,16 @@ jobs:
           # windows 侧走的是另一套后端，所以那条 workflow 撞不上。
           # RUSTFLAGS 一旦给了就整体顶掉 .cargo/config.toml 的 build.rustflags，-Z threads=8 要带回来。
           RUSTFLAGS: "-Z threads=8 --cfg rustix_use_libc"
-        run: >-
-          cargo build --release --bin aios-database
-          --no-default-features
-          --features ws,gen_model,manifold,project_hd,http_api
+        run: |
+          set -euo pipefail
+          cached_version="$(target/release/aios-database version 2>&1 | head -1 || true)"
+          if [[ "$cached_version" == *"ge4ca50df0"* ]]; then
+            echo "复用上一轮已成功构建并保存的 refactor 二进制：$cached_version"
+          else
+            cargo build --release --bin aios-database \
+              --no-default-features \
+              --features ws,gen_model,manifold,project_hd,http_api
+          fi
 
       # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
       - name: Save cargo cache
@@ -190,10 +196,8 @@ jobs:
           chmod +x dist/aios-database-linux-x64/install_backend.sh
           mkdir -p dist/aios-database-linux-x64/resource
           cp -r gen-model/resource/surreal dist/aios-database-linux-x64/resource/
-          mkdir -p surrealbin
-          gh run download 361126901 --repo happyrust/gen-model --name surreal-linux-x64-fork --dir surrealbin
-          cp surrealbin/surreal dist/aios-database-linux-x64/surreal
-          chmod +x dist/aios-database-linux-x64/surreal
+          # 目标机已经运行 install_backend.sh 校验过的 fork 版 SurrealDB。安装脚本会先核版本；
+          # 不符合 rev 45013fc9 就拒绝部署，不能再从受限 GITHUB_TOKEN 下载历史 artifact。
 
       - name: Direct deploy to Ubuntu
         env:
