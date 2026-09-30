@@ -1,5 +1,33 @@
 # 变更记录
 
+## 2026-09-30
+
+### 结构连接级联：跨库对端单独记账、回执点名（GitHub #34 前置 1）；aps250110 验收窗改钉「开关关着已全覆盖」
+
+- **为什么**：#33 的结论是跨库对端「读得到、上卷不到」，账却混在 `far_end_without_root` 里，与「对端已删 / 无根族」分不开；
+  #34 把「拆账：跨库对端拆成 `far_end_cross_db` 单独计数、回执点名」列为翻默认的前置 1。另外 09-30 在当前 HEAD + vendor
+  e3d-model `9ec27b9` 上复跑 `structural_connection::tests::live`，`live_aps_one_ended_windows_pull_the_far_end_roots_into_regen`
+  挂在 aps250110 29→30「开关开必须多出至少一根」：开 / 关都是 258 根（09-07 是关 251 / 开 258）。原因是 e3d-model
+  `plan_update` 在 09-27 补了同库关节级联（`increment::joint_consumer_of`，`d510253`；反方向 `joint_fixings_of`，`b820a4a`）：
+  FIXING 进计划集，`JOIS` / `JOIE` 指着它的 GENSEC 一并进，成了闭包种子，开关关着对端根也全在 `regen` 里。这不是回归，是断言过时。
+- **改动**（`src/data_interface/structural_connection.rs`）：
+  - `StructuralConnectionCascade` 新增 `far_end_cross_db: Vec<CrossDbFarEnd>`：会级联的边里对端 `RefNo::dbno()` 与源不同的，
+    不再拿本窗的 owner 索引查根链、也不进 `far_end_without_root`（那一格只剩同库的「对端已删 / 无根族」）。比库号不比 `word0`
+    （同一个库换 extent，`word0` 就变）。只记账、不上卷：`touched` / `regen` 与改前逐字相同。
+  - `summary_line` 加 `far_end_cross_db=N`，非空时逐条点名（`FIXING 2013286652/390.CREF -> 2013286654/1819 (dbnum 250110)` 这种形状，
+    封顶 12 条、多出来的报条数），随窗口回执 `warnings` 出去。
+  - live 验收窗按窗分口径：aps7200 3→4（`SJOI` → SCTN，e3d-model 盖不住）仍要求开关开严格多出根；aps250110 29→30（FIXING → GENSEC）
+    改钉「开关关着对端根已全在 `regen`、两态 `regen` 集合相等」，e3d-model 那条级联哪天掉了这一窗先红。两窗都断言跨库账为空。
+  - #33 探针补一段：同一批跨库边交给生产同一段 `from_edges`，会级联的全进 `far_end_cross_db`、`far_end_without_root` 为 0、
+    本窗根链一次不查。
+  - 模块头改写「跨库对端」「几何显不显」两段；联动清单 #12、对齐计划 C2 与 `CONTEXT.md`「联动更新」各补一句。
+- **没做**：跨 dbnum 工作交接（#34 前置 2，形态待拍板）；翻默认；SCTN 关节负体（e3d-model `elmodl::collect_joint_negatives`
+  只对 GENSEC 调用，`SJOI` / `PJOI` → SCTN 这一类几何上仍不显）。
+- **验证**（`59edac0bd` + 本改动，vendor e3d-model `9ec27b9`）：`cargo test --lib structural_connection -- --include-ignored`
+  13 passed / 0 failed（新增 `a_cross_db_far_end_is_counted_and_named_but_not_rolled_up`；live 三条：九窗两态逐字相同，aps7200 关 6 / 开 8，
+  aps250110 两态 258，#33 探针拆账后 `far_end_cross_db=12 far_end_without_root=0`，12 条逐条点名）；`cargo test --lib window_root_plan`
+  39 passed / 0 failed / 11 ignored；`cargo clippy --lib --tests` 无新告警；`rustfmt --edition 2024 --check` 干净。
+
 ## 2026-09-29
 
 ### 本期执行范围不再每次现算（ADR-085）：`mdb_scope` 阶段行稳态零行，MDB 新加的库 SYST 落库后即进范围

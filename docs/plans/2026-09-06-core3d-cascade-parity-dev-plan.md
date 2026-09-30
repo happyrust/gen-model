@@ -324,3 +324,20 @@ C8 电缆端点/路由反向级联  ◐(0907 同库版接线，开关默认关�
 
 Issue #34 的“默认关闭”前置验收证据已具备；级联开关的默认值与跨库窗口验收仍按 issue 中列出的独立运行时门执行。
 
+## 2026-09-30 C2 复跑与拆账（#34 前置 1）
+
+在 gen-model `59edac0bd`（0.1.34）+ 本条拆账改动、vendor e3d-model `9ec27b9`（含 `d3355a8`）上复跑 `structural_connection::tests::live`
+（改动前在 `e23bf45fe` 上跑过一遍，数字相同）：
+
+- 九个钉死窗口两态 `regen` 逐字相同（都是 0 个结构变更元素）。
+- `aps7200_0001` 3→4：回指 94/94，对端根 6 个全在 `regen`，关 6 / 开 8——`SJOI` → SCTN 仍只有本开关补得上。
+- `aps250110_0001` 29→30：回指 371/371，对端根 31 个全在 `regen`，但**开 / 关都是 258**（09-07 是关 251 / 开 258）。
+  e3d-model `plan_update` 09-27 起自带同库关节级联（`increment::joint_consumer_of`，`d510253`；反方向 `joint_fixings_of`，`b820a4a`），
+  FIXING → GENSEC 这一类开关关着也已覆盖。原断言「开关开必须多出至少一根」过时，改为这一窗钉「关着已全覆盖、两态集合相等」。
+- #33 探针：跨库边 12 条，回指 12/12，生产口径上卷 0/12，对端库自己能找到根 12/12（与 09-22 相同）。
+
+同日落地 #34 前置 1「拆账」：会级联的跨库对端记进 `StructuralConnectionCascade::far_end_cross_db`，`summary_line` 逐条点名、随窗口回执
+`warnings` 出去；`far_end_without_root` 只剩同库的「对端已删 / 无根族」。只记账、不上卷。
+
+翻默认仍差：前置 2（跨 dbnum 工作交接，形态待拍板）、真机 SAVEWORK 改一端看对端端部切割、SCTN 关节负体（e3d-model
+`elmodl::collect_joint_negatives` 只对 GENSEC 调用）。
