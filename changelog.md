@@ -34,6 +34,54 @@
   实测补记：E3D 每个会话都会在 SYS 里记一笔 `Saving Meta Data.`（按会话记，不按保存记），现场控制台预期是启动一行 + 每个 E3D 会话一行，
   不是零行（ADR-085 后果 2 已补）。没跑：现场包（V6），以及 E3D Admin 真往 `/ALL` 加一个库（仓里没有改 MDB 的宏）。
 
+### 房间归属计算默认开（`room_membership` 缺键 = true）：构件挪了位置，它的生成根重算时房间边跟着重写
+
+- **为什么**：现场在 E3D 里挪了 `CAP 1 of BRAN /1WCC1135/B2/2`（`24383/101306`，dbnum 7999），BRAN 整根重算了，房间边却一条没动。
+  `room_membership` 自 2026-09-11 起缺省 false，仓里 `DbOption.toml` 与出厂模板也写 false：`frozen_room_calculator()` 回 `Ok(None)`，
+  `room_stage` 走 `NotComputed`，这一根一句 `room_relate` 都不写；CAP 还有几何，`room_edges_to_clear` 也不清它，旧边原样留着。
+  当初关它是因为 0.1.25 缺 6003 SCBDESI 就整批根判死——这个形状已由 ADR-073 D8–D11（2026-09-16，输入不全 = 降级不判死）收掉。
+- **改动**：
+  - `options::room_membership` 缺键、缺环境变量时取 `true`（`ROOM_MEMBERSHIP_DEFAULT`）；环境变量 > 配置 > 缺省的顺序不变。
+  - 能力门 `room_membership_capable`：`AIOS_SPATIAL_COMPUTE=0` 或没编 `project_hd` / `project_hh` 的进程不建常驻房间模型（`Unsupported`），
+    此时不论键与环境变量怎么写都按关（此前显式开 = 每根「room calculator unavailable」判死）；要求开而没生效由启动横幅
+    `room_membership_notice()` 点名来源与原因。
+  - `DbOption.toml`、`scripts/templates/DbOption.factory.toml` 改写 `room_membership = true` 与注释；`factory_template_room_membership_matches_code_default`
+    照旧钉「模板 == 代码默认」。
+  - L3 夹具（`l3_suite` fixture）不再钉 `room_membership = true`：渲染出的配置去掉这一行、各子进程 `env_remove(AIOS_ROOM_MEMBERSHIP)`，
+    两个 `room: true` 场景直接考代码默认，默认一旦退回关就红。
+- **不改**：`db_options/DbOption-aps.toml` 等显式写 `false` 的项目配置照旧关；`verification/`、`docs/baselines/` 下的历史快照不动；
+  本仓 `DbOption.toml` 的 `watch_dbnums = [7998, 8000]`（调试限定，不含 7999）不在本条。
+- **验证**：`cargo test --lib` 2453 passed / 0 failed / 128 ignored（新增 `room_membership_is_on_unless_someone_turns_it_off`、
+  `a_process_that_cannot_compute_rooms_keeps_room_membership_off`、`the_room_membership_notice_names_the_request_and_why_it_did_not_take`）；
+  `cargo test --bin l3_suite` 当时 38 / 39，唯一红的 `manifest_rejects_unknown_owner_and_non_terminal_destructive_case` 是既有问题，
+  已在下一条修掉（42 / 42）。
+  E3D TTY 夹具（`scripts/Run-E3DFixtureSuite.ps1`，靶 `ams7998_0001` / 7998，E3D 3.1 shadow TTY，夹具 SITE 跑完即删）10 / 10 PASS：
+  渲染出的两份配置 0 行 `room_membership`，服务 `/health.room_membership = true`、`features.room = degraded`（镜像里只有 7998 一个 DESI，
+  D8 降级照算）；`room-member` 用 TTY 把 EQUI 从 R101 挪到 R102 再挪回，BOX 的 `room_relate` R101 → R102 → R101（`inside_count = 8`），
+  `room-structure` 房间面照变。夹具跑在能力门扩到显式取值之前的那一版上；算得了房间的进程两版逐位相同。证据 `output/e3d-fixture/20260929-184111/`。
+  另用 cua-driver 驱动 plant-ui 看同一只 EQUI（隔离栈、TTY 挪 E 10000 再挪回、`/api/v1/update/execute` 各一窗）：「房间」页 R101 → R102 → R101，
+  与库上 BOX 的 `room_relate` 一致（证据 `output/cua-verify/ui-3.png` / `ui-4.png` / `ui-5.png`）。
+
+### L3 夹具 `--fixture-ui` 两处 harness 问题：界面与播种 SQL 跟着夹具实际绑的端口走，`--output` 写正斜杠也能建资产联接
+
+- **为什么**：上一条用 cua 验证时，`l3_suite --fixture-manifest … --fixture-ui` 在默认端口下起不来——`write_ui_project_config` 拿服务配置的
+  Surreal 端口去比金套件的 `SURREAL_PORT`（8048），夹具绑的是 18048，一比就停；界面设置与 `PLANT_MODEL_API_URL` 也写死 8028。改用
+  `L3_FIXTURE_*_PORT=8028 / 8048` 绕过去，又撞上 `FIXTURE_SURREAL_SQL` 是字面量 `http://127.0.0.1:18048/sql`：栈挪了端口，播种和断言还敲 18048
+  （`curl: (7)`）。另一处：`--output D:/x/run` 拼出的联接路径带 `/`，cmd 把 `/x` 当开关，`mklink /J` 失败（`failed to link …\fonts`）。
+- **改动**（只动运行器，不动服务）：`UiEndpoints { api_base, surreal_port }` 显式传给 `prepare_plant_ui_runtime` / `write_ui_project_config`，
+  金套件传 `UiEndpoints::golden()`（8028 / 8048），夹具传 `fixture_ui_endpoints()`（跟 `L3_FIXTURE_API_PORT` / `L3_FIXTURE_SURREAL_PORT`）；
+  项目配置的 `api_host`、设置文件的 `model_api_url` / `data_api_url` 都从它出。`FIXTURE_SURREAL_SQL` 换成 `fixture_surreal_sql_url()`。
+  `link_directory` 交给 cmd 之前按组件重拼路径，分隔符统一成 `\`。
+- **顺带修的既有红测**：`manifest_rejects_unknown_owner_and_non_terminal_destructive_case` 自 `b65f5614e`（09-24 允许多个 destructive 案连成尾段）起
+  就过时——它克隆 destructive 案当「后面那一案」，新规则照放行。改成后一案 `destructive_last = false` 才拒，并补一句「尾段两案都 destructive = 放行」。
+- **新钉**：`fixture_endpoints_follow_the_ports_the_fixture_binds`（生产代码里 `127.0.0.1:` 后面只许跟 `{`）、`plant_ui_runtime_follows_the_endpoints_it_is_given`、
+  `staging_accepts_an_output_path_written_with_forward_slashes`（Windows）。
+- **验证**：`cargo test --bin l3_suite` 42 / 42；`cargo test --lib` 在 `786fddf67`（ADR-085）之上连同上一条重跑 2457 passed / 0 failed / 129 ignored；
+  `rustfmt --check` 本条改到的段落干净（`fixture.rs` 余下三处是 HEAD 上就有的）。live：默认端口、`--output` 用正斜杠、`--fixture-ui --keep-stack` 跑房间两案
+  （`output/cua-verify/room-manifest.json`，靶 `ams7998_0001` / 7998）2 / 2 PASS、`L3_EXIT=0`；渲染出的项目配置 `db_host = ws://localhost:18048`、
+  `api_host = http://127.0.0.1:18028`，plant-ui 进程只连 18028，模型树列出 10 个 `/AIOS-INC-*` SITE；夹具 SITE 跑完即删，联接先解再删目录，
+  mesh 目录文件数前后都是 49232。证据 `output/cua-verify/run3-evidence/`、`run3-ui-1.png`。
+
 ### 墙上的 FITT 自己成件（vendor e3d-model `2a0a3f6`、e3d-io `6bbcff9`）：aps250110 整站 RVM 配对 3300 → 3357、通过 3246 → 3303，57 只 `FITTING n of STWALL m` 全部 0.04 mm 内对上
 
 - **为什么**：E3D 的 TTY RVM 把 STWALL 上的门窗各写一组（`FITTING 1 of STWALL 5 of CWALL /B01_LEV01_INT_WALLS`：门扇 SEXT 按 `DESP[2] = 20°` 转开 + 三根门框 SEXT），我们把 63 只全记在 `catalog_pending`——RVM 有而 gen 没有的 139 组里它占 57。

@@ -934,8 +934,13 @@ fn start_stack(
     wait_http(&format!("{API}/health"), Duration::from_secs(180))?;
 
     if ui {
-        let ui_runtime =
-            prepare_plant_ui_runtime(&paths.repo, &paths.plant_ui_root, out, &paths.db_option)?;
+        let ui_runtime = prepare_plant_ui_runtime(
+            &paths.repo,
+            &paths.plant_ui_root,
+            out,
+            &paths.db_option,
+            &UiEndpoints::golden(),
+        )?;
         stack.push(
             "plant-ui",
             spawn_logged(
@@ -1038,11 +1043,32 @@ struct PlantUiRuntime {
     asset_root: PathBuf,
 }
 
+/// 界面这一轮该连的服务：模型、数据两条 URL 都指 `api_base`；服务配置里的 Surreal 端口
+/// 必须等于 `surreal_port`，即套件实际绑定的那个。
+///
+/// 金套件传 8028 / 8048（[`UiEndpoints::golden`]），夹具传它自己那对（默认 18028 / 18048，
+/// `L3_FIXTURE_*_PORT` 可改）。2026-09-29 之前这两处写死金套件那对，`--fixture-ui` 在默认
+/// 端口下一对照服务配置就停（18048 ≠ 8048）。
+struct UiEndpoints {
+    api_base: String,
+    surreal_port: u16,
+}
+
+impl UiEndpoints {
+    fn golden() -> Self {
+        Self {
+            api_base: DATA_API.to_owned(),
+            surreal_port: SURREAL_PORT,
+        }
+    }
+}
+
 fn prepare_plant_ui_runtime(
     repo: &Path,
     plant_ui_root: &Path,
     out: &Path,
     service_config: &Path,
+    endpoints: &UiEndpoints,
 ) -> Result<PlantUiRuntime> {
     let source_assets = plant_ui_root.join("assets");
     let mesh_dir = source_assets.join("meshes");
@@ -1063,13 +1089,14 @@ fn prepare_plant_ui_runtime(
         surreal_assets.display()
     );
     let asset_root = stage_ui_asset_root(&source_assets, out)?;
-    write_ui_project_config(&asset_root, service_config)?;
+    write_ui_project_config(&asset_root, service_config, endpoints)?;
     let settings_file = out.join("plant-ui-settings.ron");
     let mesh = serde_json::to_string(&mesh_dir.to_string_lossy().replace('\\', "/"))?;
+    let api = serde_json::to_string(&endpoints.api_base)?;
     fs::write(
         &settings_file,
         format!(
-            "(theme: Dark, density: Compact, model_api_url: \"http://127.0.0.1:8028\", data_api_url: \"http://127.0.0.1:8028\", mesh_dir: {mesh})\n"
+            "(theme: Dark, density: Compact, model_api_url: {api}, data_api_url: {api}, mesh_dir: {mesh})\n"
         ),
     )?;
     ensure!(
@@ -1114,6 +1141,11 @@ fn stage_ui_asset_root(source: &Path, out: &Path) -> Result<PathBuf> {
 }
 
 fn link_directory(target: &Path, link: &Path) -> Result<()> {
+    // cmd 把 `/` 开头的片段当开关：`--output D:/x/run` 拼出的 `D:/x/run\plant-ui-assets\fonts`
+    // 会让 mklink 报 Invalid switch、链接没建。按组件重拼一遍，分隔符统一成平台的 `\`。
+    let target: PathBuf = target.components().collect();
+    let link: PathBuf = link.components().collect();
+    let (target, link) = (target.as_path(), link.as_path());
     let status = Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(link)
@@ -1132,21 +1164,27 @@ fn link_directory(target: &Path, link: &Path) -> Result<()> {
 }
 
 /// 按**服务自己那份配置**给 UI 现写项目配置，两边因此不可能指到不同的库上。
-fn write_ui_project_config(asset_root: &Path, service_config: &Path) -> Result<PathBuf> {
+fn write_ui_project_config(
+    asset_root: &Path,
+    service_config: &Path,
+    endpoints: &UiEndpoints,
+) -> Result<PathBuf> {
     let endpoint = read_service_endpoint(service_config)?;
-    // 套件把 Surreal 钉在 8048。配置漂到别处时宁可当场停，也不要让界面安静地连上
-    // 另一个库——那种失败在证据里跟「元素真的不存在」一模一样。
+    // 服务配置里的 Surreal 端口必须就是套件绑定的那个。配置漂到别处时宁可当场停，也不要让界面
+    // 安静地连上另一个库——那种失败在证据里跟「元素真的不存在」一模一样。
     ensure!(
-        endpoint.port == SURREAL_PORT,
-        "service config {} points at Surreal port {} but the suite binds {SURREAL_PORT}",
+        endpoint.port == endpoints.surreal_port,
+        "service config {} points at Surreal port {} but the suite binds {}",
         service_config.display(),
-        endpoint.port
+        endpoint.port,
+        endpoints.surreal_port
     );
     let path = asset_root.join("config").join("e3d.project.ron");
     fs::write(
         &path,
         format!(
-            "(\n    api_host: \"{DATA_API}\",\n    db_host: \"{}\",\n    mdb_name: \"{}\",\n    project_name: \"{}\",\n    project_code: \"{}\",\n    module: \"DESI\",\n    auto_gen_mesh: false,\n)\n",
+            "(\n    api_host: \"{}\",\n    db_host: \"{}\",\n    mdb_name: \"{}\",\n    project_name: \"{}\",\n    project_code: \"{}\",\n    module: \"DESI\",\n    auto_gen_mesh: false,\n)\n",
+            endpoints.api_base,
             endpoint.db_host(),
             endpoint.mdb,
             endpoint.project,
@@ -2474,7 +2512,12 @@ mod tests {
         assert!(staged.join("manifest.json").is_file());
         assert!(stage_ui_asset_root(&source, &out).is_err());
 
-        write_ui_project_config(&staged, &service_config(&scratch, SURREAL_PORT)).unwrap();
+        write_ui_project_config(
+            &staged,
+            &service_config(&scratch, SURREAL_PORT),
+            &UiEndpoints::golden(),
+        )
+        .unwrap();
         let written = fs::read_to_string(staged.join("config/e3d.project.ron")).unwrap();
         assert!(
             written.contains("db_host: \"ws://localhost:8048\""),
@@ -2499,11 +2542,34 @@ mod tests {
         fs::create_dir_all(&out).unwrap();
         let staged = stage_ui_asset_root(&source, &out).unwrap();
 
-        let error = write_ui_project_config(&staged, &service_config(&scratch, 8009))
-            .unwrap_err()
-            .to_string();
+        let error = write_ui_project_config(
+            &staged,
+            &service_config(&scratch, 8009),
+            &UiEndpoints::golden(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("8009") && error.contains("8048"), "{error}");
         assert!(!staged.join("config/e3d.project.ron").exists());
+
+        let _ = fs::remove_dir_all(scratch);
+    }
+
+    /// `--output D:/x/run` 这种正斜杠写法：cmd 把 `/x` 当开关，mklink 报 Invalid switch、
+    /// 联接没建（2026-09-29 cua 验证撞上）。交给 cmd 之前分隔符统一成 `\`。
+    #[cfg(windows)]
+    #[test]
+    fn staging_accepts_an_output_path_written_with_forward_slashes() {
+        let scratch = scratch("forward-slash");
+        let source = source_assets(&scratch);
+        let out = PathBuf::from(scratch.join("run").to_string_lossy().replace('\\', "/"));
+        fs::create_dir_all(&out).unwrap();
+
+        let staged = stage_ui_asset_root(&source, &out).unwrap();
+        assert_eq!(
+            fs::read_to_string(staged.join("fonts/regular.ttf")).unwrap(),
+            "font"
+        );
 
         let _ = fs::remove_dir_all(scratch);
     }
@@ -2558,7 +2624,8 @@ mod tests {
         fs::create_dir_all(&out).unwrap();
         let config = service_config(&root, SURREAL_PORT);
 
-        let runtime = prepare_plant_ui_runtime(&repo, &ui, &out, &config).unwrap();
+        let runtime =
+            prepare_plant_ui_runtime(&repo, &ui, &out, &config, &UiEndpoints::golden()).unwrap();
         assert!(runtime.settings_file.is_absolute());
         assert!(runtime.settings_file.starts_with(&out));
         // 资产根也必须是本轮自己的：共用仓库那份就等于共用它写死的库地址。
@@ -2570,6 +2637,55 @@ mod tests {
         let settings = fs::read_to_string(runtime.settings_file).unwrap();
         assert!(settings.contains("http://127.0.0.1:8028"));
         assert!(settings.contains("assets/meshes"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 夹具那对端口（默认 18028 / 18048）也得一路写进界面配置，不能在哪一步退回金套件的
+    /// 8028 / 8048：服务配置、项目配置、界面设置三处必须指同一个栈。
+    #[test]
+    fn plant_ui_runtime_follows_the_endpoints_it_is_given() {
+        let root = scratch("ui-runtime-fixture");
+        let repo = root.join("gen-model");
+        let ui = root.join("plant-ui");
+        let out = root.join("evidence");
+        fs::create_dir_all(repo.join("resource/surreal")).unwrap();
+        fs::create_dir_all(ui.join("assets/meshes")).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        let endpoints = UiEndpoints {
+            api_base: "http://127.0.0.1:18028".into(),
+            surreal_port: 18048,
+        };
+
+        // 服务配置还指着金套件的 8048：当场停，而不是让界面连过去。
+        let golden_config = service_config(&root, SURREAL_PORT);
+        let error = prepare_plant_ui_runtime(&repo, &ui, &out, &golden_config, &endpoints)
+            .err()
+            .expect("a service config on 8048 must not pass for a stack bound to 18048")
+            .to_string();
+        assert!(error.contains("8048") && error.contains("18048"), "{error}");
+
+        let out = root.join("evidence-2");
+        fs::create_dir_all(&out).unwrap();
+        let config = service_config(&root, 18048);
+        let runtime = prepare_plant_ui_runtime(&repo, &ui, &out, &config, &endpoints).unwrap();
+        let project =
+            fs::read_to_string(runtime.asset_root.join("config/e3d.project.ron")).unwrap();
+        assert!(
+            project.contains("db_host: \"ws://localhost:18048\""),
+            "{project}"
+        );
+        assert!(
+            project.contains("api_host: \"http://127.0.0.1:18028\""),
+            "{project}"
+        );
+        let settings = fs::read_to_string(runtime.settings_file).unwrap();
+        assert!(
+            settings.contains("model_api_url: \"http://127.0.0.1:18028\"")
+                && settings.contains("data_api_url: \"http://127.0.0.1:18028\""),
+            "{settings}"
+        );
+        assert!(!settings.contains(":8028"), "{settings}");
 
         let _ = fs::remove_dir_all(root);
     }
