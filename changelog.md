@@ -2,6 +2,15 @@
 
 ## 2026-09-30
 
+### `pe_owner` 唯一性收口：P0 / P1 已修，P2（身份改 `[owner, child]` + `ordinal`）决定不做（GitHub #14）
+
+- 审计档 `docs/2026-08-06_pe-owner-uniqueness-fix-audit.md` 追加「2026-09-30 收口」。P0-1 / P0-2 / P1 由 `58e4bb2d9` 的「owner 前缀范围整块替换」
+  修掉（`DELETE pe_owner:[owner, NONE]..=[owner, ..]` 与整块重插同一事务），09 月 `element_batch` 同一形状，fork / mem 双跑与
+  `direct_window_replay_parity` 钉终态。
+- P2 不做：整块替换下换槽撞索引 / 留尾槽 / 删插不同事务三类从写法上不再出现；槽位有读者（`rvm_baseline/resolve.rs::load_subtree`
+  用 `record::id(id)[1]` 排成员序还原默认命名），改身份要连它一起改外加 778,925 条边迁移。复议触发：出现不经整块替换写 `pe_owner`
+  的新路径，或 `unique_pe_owner` 在生产再报错。只动文档。
+
 ### 模型类型矩阵：ANCI / FIXING / GENSEC 改标 `blocked-by-e3d-crash`，覆盖门单列不红（GitHub #22）
 
 - **为什么**：des.exe 3.1.9.0 的 TTY 会话对这三类任何属性求值都崩（0xC0000005 @ `core.dll+0x0074d982`，08-11 十六会话矩阵 15/15，
