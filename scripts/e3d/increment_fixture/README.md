@@ -8,7 +8,8 @@
 4. 解析稳定名称到本次 E3D REFNO，依次执行 apply/restore 宏和四平面断言；每一窗之后再经
    `GET /api/v1/datacenter/deletes` 核交付删除记录：本案范围内的行必须恰好是 `datacenter_delete` /
    `datacenter_delete_after_restore` 声明的那几行（没声明 = 一行都不许有），新落的行 `sesno` 是这一窗、
-   `published = false`，并用 `from` / `to` 夹住它的 `sesno_time` 查回来。
+   `published = true`（运行器只为声明了事件的对象预置同 refno 的 `datacenter_version`），并用 `from` / `to`
+   夹住它的 `sesno_time` 查回来；同一 refno 的恢复改名由 `INSERT IGNORE` 忽略，仍只保留首次事件。
 5. 生成 `summary.json`、`junit.xml`、`report.md`、`report.html` 及逐案例证据。
 
 ## 一条命令运行

@@ -7,8 +7,8 @@
 //! 都没有，删者仍是 rs-server（中台 `remove-apply` 成功之后）。
 //!
 //! 每行多带 `published`（`datacenter_version:{refno}` 有没有行）与 `published_status`（那行的
-//! `status`）：从未提资过的单元被删 / 改名也会落行（D6，gen-model 不判「发布过没有」），调用方靠
-//! 这一格跳过它们。过滤条件全是字面量（refno 先解成 [`RefU64`] 再渲成 `pe:⟨…⟩`、`reason` 只认两个
+//! `status`）。最新 issue #1 要求写事件前先确认版本行存在，因此新写入正常恒为 `published=true`；
+//! 这两格继续兼容旧数据和异常诊断。过滤条件全是字面量（refno 先解成 [`RefU64`] 再渲成 `pe:⟨…⟩`、`reason` 只认两个
 //! 枚举、时间先解成 `DateTime<Utc>` 再渲成 `d'…'`、其余是整数），没有拼进去的原文字串。
 
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub const MAX_LIMIT: usize = 5000;
 const PUBLISHED_LOOKUP_CHUNK: usize = 200;
 const DATACENTER_VERSION: &str = "datacenter_version";
 
-/// 记录为什么要删：交付单元自身被删 / 自身改了位号（`render_datacenter_delete_upsert` 的 `reason`）。
+/// 记录首次发生的事件：交付单元自身被删 / 自身改了位号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteReason {
@@ -174,9 +174,9 @@ pub struct DeleteRecordRow {
     pub sesno_time: Option<String>,
     /// `deleted` | `renamed`。
     pub reason: String,
-    /// `datacenter_version:{refno}` 有行 = 这个单元提资过。`false` 的行中台没见过，调用方跳过。
+    /// `datacenter_version:{refno}` 有行 = 这个单元提资过；新写事件正常恒为 `true`。
     pub published: bool,
-    /// 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null`。
+    /// 那行的 `status`；旧数据或异常情况下 `published = false` 时为 `null`。
     pub published_status: Option<String>,
 }
 
@@ -310,7 +310,7 @@ async fn published_status_of(
 mod tests {
     use super::*;
     use crate::data_interface::increment_pipeline::{
-        DatacenterDeleteRecord, render_datacenter_delete_upsert,
+        DatacenterDeleteRecord, render_datacenter_delete_insert_ignore,
     };
     use surrealdb::engine::any::connect;
 
@@ -403,20 +403,22 @@ mod tests {
             (40, "/S-1", "SUPPO", Some(refu(6)), 31, "deleted"),
         ];
         for (n, name, noun, zone, sesno, reason) in rows {
-            db.query(render_datacenter_delete_upsert(&DatacenterDeleteRecord {
-                refno: refu(n),
-                name,
-                noun,
-                zone,
-                dbnum: 7997,
-                sesno,
-                sesno_time: (sesno == 12).then_some("2026-09-22T10:00:00+08:00"),
-                reason,
-            }))
+            db.query(render_datacenter_delete_insert_ignore(
+                &DatacenterDeleteRecord {
+                    refno: refu(n),
+                    name,
+                    noun,
+                    zone,
+                    dbnum: 7997,
+                    sesno,
+                    sesno_time: (sesno == 12).then_some("2026-09-22T10:00:00+08:00"),
+                    reason,
+                },
+            ))
             .await
-            .expect("upsert transport")
+            .expect("insert ignore transport")
             .check()
-            .expect("upsert");
+            .expect("insert ignore");
         }
         db
     }
@@ -431,7 +433,7 @@ mod tests {
         let all = list_delete_records(&db, &DeleteRecordFilter::default())
             .await
             .expect("list all");
-        assert_eq!(all.total, 4);
+        assert_eq!(all.total, 3, "同一 refno 的后续事件由 INSERT IGNORE 忽略");
         assert_eq!(all.limit, DEFAULT_LIMIT);
         assert!(!all.has_more);
         assert_eq!(
@@ -439,12 +441,7 @@ mod tests {
                 .iter()
                 .map(|row| (row.sesno, row.name.as_str()))
                 .collect::<Vec<_>>(),
-            vec![
-                (12, "/A-OLD"),
-                (14, "/A-MID"),
-                (30, "/E'Q\\1"),
-                (31, "/S-1")
-            ],
+            vec![(12, "/A-OLD"), (30, "/E'Q\\1"), (31, "/S-1")],
             "按 dbnum, sesno, name 稳定排序"
         );
         let first = &all.items[0];
@@ -461,7 +458,7 @@ mod tests {
             all.items.iter().all(|row| !row.published),
             "datacenter_version 表还不存在：没人提资过，一行都不算 published"
         );
-        let orphan = &all.items[2];
+        let orphan = &all.items[1];
         assert_eq!(orphan.zone_refno, None, "链断的 zone_refno 是 NONE → null");
         assert_eq!(orphan.name, "/E'Q\\1", "转义过的位号原样回来");
 
@@ -474,7 +471,7 @@ mod tests {
         )
         .await
         .expect("by zone");
-        assert_eq!(by_zone.total, 2);
+        assert_eq!(by_zone.total, 1);
         assert!(by_zone.items.iter().all(|row| row.refno == "7997/3"));
 
         let deleted_since_31 = list_delete_records(
@@ -512,10 +509,10 @@ mod tests {
                 .iter()
                 .map(|row| row.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["/A-MID", "/E'Q\\1"]
+            vec!["/E'Q\\1", "/S-1"]
         );
-        assert_eq!((page.total, page.start, page.limit), (4, 1, 2));
-        assert!(page.has_more, "1 + 2 < 4");
+        assert_eq!((page.total, page.start, page.limit), (3, 1, 2));
+        assert!(!page.has_more, "1 + 2 == 3");
 
         // 只有 EQUI 21 提资过：published 只对它翻真、带 status。
         db.query("UPSERT datacenter_version:7997_21 CONTENT { instance_code: 'E_Q_1', status: 'Insert' };")
@@ -541,7 +538,6 @@ mod tests {
             flags,
             vec![
                 ("7997/3", false, None),
-                ("7997/3", false, None),
                 ("7997/21", true, Some("Insert")),
                 ("7997/40", false, None),
             ]
@@ -555,7 +551,7 @@ mod tests {
             .expect("count")
             .take(0)
             .expect("count rows");
-        assert_eq!(still[0].n, 4, "读者不删行");
+        assert_eq!(still[0].n, 3, "读者不删行，同一 refno 只保留首次事件");
     }
 
     /// 时间界按真实时刻比、不按文本比；`[from, to)` 半开；带了时间界时 `sesno_time` 为空的行不出，
@@ -578,20 +574,22 @@ mod tests {
             (4, "/T-D", 13, None),
         ];
         for (n, name, sesno, sesno_time) in rows {
-            db.query(render_datacenter_delete_upsert(&DatacenterDeleteRecord {
-                refno: refu(n),
-                name,
-                noun: "BRAN",
-                zone: None,
-                dbnum: 7997,
-                sesno,
-                sesno_time,
-                reason: "deleted",
-            }))
+            db.query(render_datacenter_delete_insert_ignore(
+                &DatacenterDeleteRecord {
+                    refno: refu(n),
+                    name,
+                    noun: "BRAN",
+                    zone: None,
+                    dbnum: 7997,
+                    sesno,
+                    sesno_time,
+                    reason: "deleted",
+                },
+            ))
             .await
-            .expect("upsert transport")
+            .expect("insert ignore transport")
             .check()
-            .expect("upsert");
+            .expect("insert ignore");
         }
         let names = |page: &DeleteRecordsPage| {
             page.items

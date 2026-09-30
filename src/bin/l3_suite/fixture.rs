@@ -107,7 +107,7 @@ pub(super) struct ExpectedChanges {
     /// 缺省 = 一行都不该有。
     #[serde(default)]
     pub datacenter_delete: Vec<ExpectedDeleteRecord>,
-    /// restore 那一窗再多出来的行；apply 落的行照旧在（gen-model 对这张表只写不删）。
+    /// restore 后额外存在的行；同一 refno 的后续事件会被 `INSERT IGNORE` 忽略。
     #[serde(default)]
     pub datacenter_delete_after_restore: Vec<ExpectedDeleteRecord>,
 }
@@ -511,6 +511,7 @@ fn run_fixture_cases(
     wait_fixture_pending(run_dir, namespace, project, target_dbnum, "startup")?;
     seed_fixture_models(manifest, &map, project, &driver.mdb, namespace, run_dir)?;
     wait_fixture_pending(run_dir, namespace, project, target_dbnum, "baseline")?;
+    seed_fixture_datacenter_versions(manifest, &map, namespace, project, run_dir)?;
     prime_room_structure_baselines(
         repo,
         run_dir,
@@ -1690,6 +1691,58 @@ fn seed_fixture_models(
     Ok(())
 }
 
+/// The current delete-event contract only records units already represented in
+/// `datacenter_version`. Seed exactly the fixture objects whose scenarios expect
+/// events, so the TTY suite exercises that gate instead of relying on unpublished
+/// rows that production now deliberately ignores.
+fn seed_fixture_datacenter_versions(
+    manifest: &FixtureManifest,
+    map: &BTreeMap<String, ResolvedFixture>,
+    ns: &str,
+    project: &str,
+    run_dir: &Path,
+) -> Result<()> {
+    let refnos = manifest
+        .scenarios
+        .iter()
+        .flat_map(|scenario| {
+            scenario
+                .expected
+                .datacenter_delete
+                .iter()
+                .chain(&scenario.expected.datacenter_delete_after_restore)
+        })
+        .map(|record| {
+            map.get(&record.object)
+                .and_then(|object| object.refno.as_deref())
+                .with_context(|| {
+                    format!(
+                        "datacenter_delete fixture object {} has no baseline refno",
+                        record.object
+                    )
+                })
+                .map(|refno| refno.replace('/', "_"))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    if refnos.is_empty() {
+        return Ok(());
+    }
+
+    let rows = refnos
+        .iter()
+        .map(|refno| format!("{{ id: datacenter_version:{refno}, status: 'Insert' }}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("INSERT IGNORE INTO datacenter_version [{rows}];");
+    let response = fixture_surreal_sql(ns, project, &sql)?;
+    surreal_result(&response)?;
+    fs::write(
+        run_dir.join("baseline-datacenter-versions.json"),
+        serde_json::to_vec_pretty(&json!({"sql": sql, "response": response}))?,
+    )?;
+    Ok(())
+}
+
 /// How long seeding keeps retrying `409` answers before it gives up on a root.
 const SEED_CONFLICT_BUDGET: Duration = Duration::from_secs(300);
 
@@ -2082,9 +2135,9 @@ fn assert_case(
 /// (moves, resizes, member deletes …) must not produce any. Each `fresh` row carries
 /// one of the sessions this mutation saved (a TTY run saves more than one, and the
 /// row keeps the session of the change itself, not the window end), a `sesno_time`
-/// equal to that same session's page in the E3D file, is unpublished (the
-/// incremental path only `update`s `datacenter_version`, so it must never create a
-/// row there), and comes back from a one-second `from` / `to` window around its
+/// equal to that same session's page in the E3D file, is published (the fixture
+/// explicitly seeds `datacenter_version` so the production existence gate is
+/// exercised), and comes back from a one-second `from` / `to` window around its
 /// `sesno_time`.
 #[allow(clippy::too_many_arguments)]
 fn assert_datacenter_deletes(
@@ -2190,8 +2243,8 @@ fn assert_datacenter_deletes(
                 )
             })?;
         ensure!(
-            row.get("published").and_then(Value::as_bool) == Some(false),
-            "{phase}: never-published fixture unit {refno} reads as published: {row}"
+            row.get("published").and_then(Value::as_bool) == Some(true),
+            "{phase}: seeded fixture unit {refno} does not read as published: {row}"
         );
         let at = chrono::DateTime::parse_from_rfc3339(&text(row, "sesno_time"))
             .with_context(|| {
@@ -2703,6 +2756,7 @@ mod tests {
         m.scenarios[0].destructive_last = true;
         let mut after = m.scenarios[0].clone();
         after.id = "after-delete".into();
+        after.destructive_last = false;
         m.scenarios.push(after);
         assert!(
             validate_manifest(&m, repo)

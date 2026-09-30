@@ -26,8 +26,9 @@ use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
 
 const DATACENTER_VERSION: &str = "datacenter_version";
 /// 交付删除记录表（plan `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md` D1）：
-/// 交付单元被删 / 改位号时，记「这个 refno 曾以哪个位号发布过、如今该位号要从中台删掉」。
-/// 主键 `datacenter_delete:[pe:⟨…⟩, '<老位号>']`（D2）；写者只有增量随窗语句，删者只有 rs-server（D7）。
+/// 交付单元被删 / 改位号时，记「这个 refno 曾发生过删除或改名事件」。
+/// 主键只取 refno 值：`datacenter_delete:⟨ref0_ref1⟩`；`INSERT IGNORE` 让首次事件赢，
+/// 写者只有增量随窗语句，消费与后续处理交给第三方。
 pub(crate) const DATACENTER_DELETE: &str = "datacenter_delete";
 
 /// datacenter 上溯用的 `pe` 行视图：noun / owner / name。overlay（本窗净态）与持久层
@@ -688,11 +689,13 @@ pub(crate) struct DatacenterDeleteRecord<'a> {
     pub reason: &'static str,
 }
 
-/// `UPSERT datacenter_delete:[pe:⟨…⟩, '<老位号>'] SET …;`——固定目标、字段全是字面量
-/// （`replay_safe` R1；不带 `time::now()`），整窗重放落同一条。位号进单引号字串，`\` 与 `'`
-/// 转义（`dbnum_state::escape_surql_str`）。数组 id 混记录链接 + 字串在 2.1.4 fork 上可写可查、
-/// 两引擎同款，由 `fork_surreal_compat::dual_datacenter_delete_array_ids_round_trip` 钉住。
-pub(crate) fn render_datacenter_delete_upsert(record: &DatacenterDeleteRecord<'_>) -> String {
+/// `INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:⟨ref0_ref1⟩, … };`——ID
+/// 只取 refno 的值，不把 `pe` 记录链接或 `name` 放进 ID。同一 refno 后续再删除、再改名或整窗
+/// 重放都忽略，事件表只保留“曾经发生过”的首次事实。字段全是字面量且不带 `time::now()`；位号里的
+/// `\` 与 `'` 仍按 SurrealQL 字串规则转义。
+pub(crate) fn render_datacenter_delete_insert_ignore(
+    record: &DatacenterDeleteRecord<'_>,
+) -> String {
     use crate::data_interface::dbnum_state::escape_surql_str;
     let pe = record.refno.to_pe_key();
     let name = escape_surql_str(record.name);
@@ -705,9 +708,10 @@ pub(crate) fn render_datacenter_delete_upsert(record: &DatacenterDeleteRecord<'_
         .map(|time| format!("'{}'", escape_surql_str(time)))
         .unwrap_or_else(|| "NONE".into());
     format!(
-        "UPSERT {DATACENTER_DELETE}:[{pe}, '{name}'] SET refno = {pe}, name = '{name}', \
-         type = '{noun}', zone_refno = {zone}, dbnum = {dbnum}, sesno = {sesno}, \
-         sesno_time = {sesno_time}, reason = '{reason}';",
+        "INSERT IGNORE INTO {DATACENTER_DELETE} {{ id: {id}, refno: {pe}, name: '{name}', \
+         type: '{noun}', zone_refno: {zone}, dbnum: {dbnum}, sesno: {sesno}, \
+         sesno_time: {sesno_time}, reason: '{reason}' }};",
+        id = record.refno.to_table_key(DATACENTER_DELETE),
         noun = escape_surql_str(record.noun),
         dbnum = record.dbnum,
         sesno = record.sesno,
@@ -716,10 +720,10 @@ pub(crate) fn render_datacenter_delete_upsert(record: &DatacenterDeleteRecord<'_
 }
 
 /// 预览回执用（plan 2026-09-22 T4）：一批随窗语句里有几条**交付删除记录**。只认
-/// [`render_datacenter_delete_upsert`] 出的形状（`UPSERT datacenter_delete:` 开头）；语句已过
-/// `dedup_statements_keep_last`，同键重写不多行，数出来的就是会落库的行数。
+/// [`render_datacenter_delete_insert_ignore`] 出的形状。这里只报告本窗口尝试写入的事件数；同一
+/// refno 已经存在时数据库会忽略，事件表行数不会增加。
 pub(crate) fn count_datacenter_delete_statements(statements: &[String]) -> usize {
-    let prefix = format!("UPSERT {DATACENTER_DELETE}:");
+    let prefix = format!("INSERT IGNORE INTO {DATACENTER_DELETE} ");
     statements
         .iter()
         .filter(|statement| statement.starts_with(&prefix))
@@ -1638,8 +1642,9 @@ impl IncrementPipeline {
     ///
     /// 同一趟还渲染**交付删除记录**（[`DATACENTER_DELETE`]，plan 2026-09-22 D4）：交付单元
     /// **自身**被删 → 记删除前的位号；交付单元自身 `NAME` 变 → 记改前的位号。固定目标
-    /// `UPSERT datacenter_delete:[pe:⟨…⟩, '<老位号>'] SET …`，无条件写（D6：发布过没有由
-    /// rs-server join `datacenter_version` 判）；`zone_refno` 沿 owner 链上溯到最近 `ZONE`（D5）。
+    /// `INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:⟨refno⟩, … }`，同一 refno
+    /// 只保留首次事件；写前须确认 `datacenter_version:{refno}` 已存在（最新 issue #1）；
+    /// `zone_refno` 沿 owner 链上溯到最近 `ZONE`（D5）。
     /// 下属管件的增删改名不记（issue 原文「不包含其下属管件」），照旧只让单元记 Modify。
     /// 每条记录的 `sesno` 是变化所在的会话，`sesno_time` 取**同一版**的写入时刻（`session_time`，
     /// 读不到给 `None`）：一窗常跨好几个会话，窗口末端那一版的时刻对不上记录上的 `sesno`。
@@ -1648,6 +1653,7 @@ impl IncrementPipeline {
         delivery_unit_types: &[String],
         dbnum: u32,
         session_time: S,
+        published_refnos: &HashSet<RefU64>,
         mut load_pe: F,
     ) -> anyhow::Result<Vec<String>>
     where
@@ -1761,7 +1767,10 @@ impl IncrementPipeline {
                         if let (Some(noun), Some(name)) =
                             (view.noun.as_deref(), view.name.as_deref())
                         {
-                            if is_delivery_unit(noun) && !name.is_empty() {
+                            if is_delivery_unit(noun)
+                                && !name.is_empty()
+                                && published_refnos.contains(&d.refno)
+                            {
                                 let zone = nearest_zone(
                                     &overlay,
                                     &mut persistent,
@@ -1773,7 +1782,7 @@ impl IncrementPipeline {
                                     .entry(d.sesno)
                                     .or_insert_with(|| session_time(d.sesno))
                                     .clone();
-                                statements.push(render_datacenter_delete_upsert(
+                                statements.push(render_datacenter_delete_insert_ignore(
                                     &DatacenterDeleteRecord {
                                         refno: d.refno,
                                         name,
@@ -1835,7 +1844,9 @@ impl IncrementPipeline {
 
                         // D4 改名分支：交付单元自身的 NAME 变了 → 记改前的位号。
                         // 老值不存在（NAME 是本窗新出现的）不记：中台没有按空位号发布过的东西。
-                        if is_delivery_unit(&modify_data.noun) {
+                        if is_delivery_unit(&modify_data.noun)
+                            && published_refnos.contains(&d.refno)
+                        {
                             if let Some((old_name, new_name)) =
                                 delivery_unit_name_change(modify_data)
                             {
@@ -1858,7 +1869,7 @@ impl IncrementPipeline {
                                         .entry(d.sesno)
                                         .or_insert_with(|| session_time(d.sesno))
                                         .clone();
-                                    statements.push(render_datacenter_delete_upsert(
+                                    statements.push(render_datacenter_delete_insert_ignore(
                                         &DatacenterDeleteRecord {
                                             refno: d.refno,
                                             name: &old_name,
@@ -1934,6 +1945,38 @@ impl IncrementPipeline {
         Ok(out)
     }
 
+    /// 最新 issue #1 的插入门：只记录已经发布到中台的交付单元。`datacenter_version` 与事件表
+    /// 使用同一个 refno 值作 ID，因此对窗口内变更 refno 做一轮分块显式点查即可。
+    async fn load_published_datacenter_refnos(
+        refnos: Vec<RefU64>,
+    ) -> anyhow::Result<HashSet<RefU64>> {
+        Self::load_published_datacenter_refnos_on(&SUL_DB, refnos).await
+    }
+
+    async fn load_published_datacenter_refnos_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        refnos: Vec<RefU64>,
+    ) -> anyhow::Result<HashSet<RefU64>> {
+        let mut out = HashSet::new();
+        for chunk in refnos.chunks(200) {
+            let keys = chunk
+                .iter()
+                .map(|refno| refno.to_table_key(DATACENTER_VERSION))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut response = db
+                .query(format!(
+                    "SELECT VALUE id FROM [{keys}] WHERE record::exists(id);"
+                ))
+                .await?
+                .check()?;
+            for id in response.take::<Vec<RefnoEnum>>(0)? {
+                out.insert(id.refno());
+            }
+        }
+        Ok(out)
+    }
+
     /// The statements marking this window's delivery records Modify / Delete in
     /// `datacenter_version`, empty for a window that cannot have any.
     ///
@@ -1968,11 +2011,20 @@ impl IncrementPipeline {
 
         let delivery_unit_types =
             crate::data_interface::generation_root::configured_delivery_unit_types();
+        let changed_refnos = data
+            .values()
+            .flatten()
+            .map(|operation| operation.refno)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let published_refnos = Self::load_published_datacenter_refnos(changed_refnos).await?;
         Self::resolve_datacenter_statements_with(
             data,
             &delivery_unit_types,
             dbnum,
             session_time,
+            &published_refnos,
             Self::load_pe_chain_view_from_persistent,
         )
         .await
@@ -3278,12 +3330,22 @@ mod datacenter_tests {
     }
 
     async fn render_with(ops: Vec<EleOperationData>, chain: ChainMap) -> Vec<String> {
+        let published_refnos = ops.iter().map(|operation| operation.refno).collect();
+        render_with_published(ops, chain, published_refnos).await
+    }
+
+    async fn render_with_published(
+        ops: Vec<EleOperationData>,
+        chain: ChainMap,
+        published_refnos: HashSet<RefU64>,
+    ) -> Vec<String> {
         let unit_types = crate::data_interface::generation_root::resolve_delivery_unit_types(&[]);
         IncrementPipeline::resolve_datacenter_statements_with(
             &BTreeMap::from([(1u32, ops)]),
             &unit_types,
             7997,
             |_| None,
+            &published_refnos,
             chain_loader(chain),
         )
         .await
@@ -3523,8 +3585,8 @@ mod datacenter_tests {
             .collect()
     }
 
-    /// 改位号：一条固定目标 UPSERT，键是 `[refno, 老位号]`，字段齐（D2 / D3），原有 Modify 照旧；
-    /// 语句过 `replay_safe` 白名单（R1 显式目标、无随机 / 时间函数）。
+    /// 改位号：一条 `INSERT IGNORE`，ID 只取 refno 值，原有 Modify 照旧；语句过
+    /// `replay_safe` 白名单（显式 id、无随机 / 时间函数）。
     #[tokio::test(flavor = "multi_thread")]
     async fn renaming_a_delivery_unit_records_the_old_name_for_deletion() {
         let mut chain = pre_window_chain();
@@ -3539,17 +3601,72 @@ mod datacenter_tests {
         let delete = delete_rows(&statements).remove(0);
         assert_eq!(
             delete,
-            "UPSERT datacenter_delete:[pe:7997_3, '/A-OLD'] SET refno = pe:7997_3, name = '/A-OLD', \
-             type = 'BRAN', zone_refno = pe:7997_5, dbnum = 7997, sesno = 12, sesno_time = NONE, \
-             reason = 'renamed';"
+            "INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:7997_3, refno: pe:7997_3, \
+             name: '/A-OLD', type: 'BRAN', zone_refno: pe:7997_5, dbnum: 7997, sesno: 12, \
+             sesno_time: NONE, reason: 'renamed' };"
         );
         crate::data_interface::staging::replay_safe::validate_statement(delete)
-            .expect("交付删除记录是固定目标 UPSERT，必须过重放安全白名单");
+            .expect("交付删除记录带显式 id，必须过重放安全白名单");
         assert!(
             statements
                 .iter()
                 .any(|s| s == "update datacenter_version:7997_3 set status = 'Modify';"),
             "改位号的单元照旧标 Modify，新数据按正常提资走: {statements:?}"
+        );
+    }
+
+    /// 最新 issue #1：只有 `datacenter_version:{refno}` 已存在的单元才进事件表。未发布单元的
+    /// Modify / Delete 状态语句沿用既有逻辑，但不得生成 `datacenter_delete` 写入。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unpublished_delivery_units_do_not_record_delete_events() {
+        let mut chain = pre_window_chain();
+        chain.insert(refu(3), row("BRAN", Some(refu(6))));
+        let statements = render_with_published(
+            vec![renamed(refu(3), "BRAN", refu(6), "/A-OLD", "/A-NEW")],
+            chain,
+            HashSet::new(),
+        )
+        .await;
+
+        assert!(delete_rows(&statements).is_empty(), "{statements:?}");
+        assert_eq!(
+            statements,
+            vec!["update datacenter_version:7997_3 set status = 'Modify';".to_string()]
+        );
+    }
+
+    /// 发布存在性门按与事件表相同的 refno ID 点查；表尚不存在时为空，存在时只回命中的行。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn published_event_gate_reads_datacenter_version_by_refno_id() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("datacenter_delete_gate")
+            .use_db("refno_ids")
+            .await
+            .expect("use db");
+        let candidates = vec![refu(3), refu(4), refu(21)];
+        assert!(
+            IncrementPipeline::load_published_datacenter_refnos_on(&db, candidates.clone())
+                .await
+                .expect("missing table is empty")
+                .is_empty()
+        );
+
+        db.query(
+            "INSERT IGNORE INTO datacenter_version [\
+             { id: datacenter_version:7997_3 },\
+             { id: datacenter_version:7997_21 }];",
+        )
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seed versions");
+        assert_eq!(
+            IncrementPipeline::load_published_datacenter_refnos_on(&db, candidates)
+                .await
+                .expect("load published"),
+            HashSet::from([refu(3), refu(21)])
         );
     }
 
@@ -3609,12 +3726,12 @@ mod datacenter_tests {
         );
         assert_eq!(
             statements[1],
-            "UPSERT datacenter_delete:[pe:7997_21, '/SUPP-001'] SET refno = pe:7997_21, \
-             name = '/SUPP-001', type = 'SUPPO', zone_refno = pe:7997_5, dbnum = 7997, sesno = 30, \
-             sesno_time = NONE, reason = 'deleted';"
+            "INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:7997_21, refno: pe:7997_21, \
+             name: '/SUPP-001', type: 'SUPPO', zone_refno: pe:7997_5, dbnum: 7997, sesno: 30, \
+             sesno_time: NONE, reason: 'deleted' };"
         );
         crate::data_interface::staging::replay_safe::validate_statement(&statements[1])
-            .expect("固定目标 UPSERT 过白名单");
+            .expect("带显式 id 的 INSERT IGNORE 过白名单");
     }
 
     /// 删的不是交付单元（DAMP）、或单元没名字：只有原来的 Delete 那一条。
@@ -3647,7 +3764,7 @@ mod datacenter_tests {
         assert!(delete_rows(&unnamed).is_empty());
     }
 
-    /// 链断（owner 行不在）：`zone_refno = NONE`，语句仍出；位号里的 `'` / `\` 转义后仍过白名单。
+    /// 链断（owner 行不在）：`zone_refno: NONE`，语句仍出；位号里的 `'` / `\` 转义后仍过白名单。
     #[tokio::test(flavor = "multi_thread")]
     async fn orphan_units_record_none_zone_and_names_are_escaped() {
         let statements = render_with(
@@ -3657,11 +3774,11 @@ mod datacenter_tests {
         .await;
         let delete = delete_rows(&statements).remove(0);
         assert!(
-            delete.contains("zone_refno = NONE") && delete.contains("'/E\\'Q\\\\1'"),
+            delete.contains("zone_refno: NONE") && delete.contains("'/E\\'Q\\\\1'"),
             "{delete}"
         );
         crate::data_interface::staging::replay_safe::validate_statement(delete)
-            .expect("转义后的位号仍是固定目标 UPSERT");
+            .expect("转义后的位号仍是带显式 id 的 INSERT IGNORE");
     }
 
     /// 同一批语句渲两遍逐字相同（整窗重放收敛）；`sesno_time` 是记录那一版（`renamed` 的 12）的时刻。
@@ -3678,6 +3795,7 @@ mod datacenter_tests {
                 &unit_types,
                 7997,
                 |sesno| (sesno == 12).then(|| "2026-09-22T10:00:00+08:00".to_string()),
+                &HashSet::from([refu(3)]),
                 chain_loader(chain),
             )
             .await
@@ -3687,7 +3805,7 @@ mod datacenter_tests {
         let second = render(ops(), chain).await;
         assert_eq!(first, second);
         assert!(
-            delete_rows(&first)[0].contains("sesno_time = '2026-09-22T10:00:00+08:00'"),
+            delete_rows(&first)[0].contains("sesno_time: '2026-09-22T10:00:00+08:00'"),
             "{first:?}"
         );
     }
@@ -3720,6 +3838,7 @@ mod datacenter_tests {
                 asked.lock().unwrap().push(sesno);
                 (sesno != 14).then(|| format!("2026-09-22T10:00:{sesno:02}+08:00"))
             },
+            &HashSet::from([refu(3), refu(7), refu(8), refu(10)]),
             chain_loader(chain),
         )
         .await
@@ -3727,24 +3846,24 @@ mod datacenter_tests {
         let rows = delete_rows(&statements);
         let row_of = |old: &str| {
             rows.iter()
-                .find(|row| row.contains(&format!("'{old}']")))
+                .find(|row| row.contains(&format!("name: '{old}'")))
                 .unwrap_or_else(|| panic!("no delete record for {old}: {rows:?}"))
                 .to_string()
         };
         for (old, tail) in [
             (
                 "/A-OLD",
-                "sesno = 12, sesno_time = '2026-09-22T10:00:12+08:00'",
+                "sesno: 12, sesno_time: '2026-09-22T10:00:12+08:00'",
             ),
             (
                 "/B-OLD",
-                "sesno = 13, sesno_time = '2026-09-22T10:00:13+08:00'",
+                "sesno: 13, sesno_time: '2026-09-22T10:00:13+08:00'",
             ),
             (
                 "/C-OLD",
-                "sesno = 13, sesno_time = '2026-09-22T10:00:13+08:00'",
+                "sesno: 13, sesno_time: '2026-09-22T10:00:13+08:00'",
             ),
-            ("/D-OLD", "sesno = 14, sesno_time = NONE"),
+            ("/D-OLD", "sesno: 14, sesno_time: NONE"),
         ] {
             let row = row_of(old);
             assert!(row.contains(tail), "{row}");
@@ -3856,6 +3975,7 @@ mod datacenter_tests {
             &crate::data_interface::generation_root::resolve_delivery_unit_types(&[]),
             7997,
             |_| None,
+            &HashSet::from([refu(1), refu(3)]),
             move |refnos| {
                 let db = loader_db.clone();
                 async move {
@@ -4203,5 +4323,4 @@ mod live_tests {
 
         assert_eq!(count, 2, "重放后 children 关系应恰好各一条，不得重复累积");
     }
-
 }

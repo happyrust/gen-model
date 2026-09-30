@@ -382,13 +382,13 @@ mod tests {
             "UPDATE pe:a SET deleted = true",
             "INSERT RELATION INTO pe_owner [{ id: pe_owner:[pe:a, 0], in: pe:a, out: pe:b }]",
             "LET $pe = pe:⟨1_2⟩; UPDATE type::thing('datacenter_version', $pe) SET status = 'Delete'",
-            // 交付删除记录（plan 2026-09-22 D2）：数组 id 混记录链接 + 位号字串，字段全是字面量。
-            "UPSERT datacenter_delete:[pe:7997_3, '/A-OLD'] SET refno = pe:7997_3, name = '/A-OLD', \
-             type = 'BRAN', zone_refno = pe:7997_5, dbnum = 7997, sesno = 12, \
-             sesno_time = '2026-09-22T10:00:00+08:00', reason = 'renamed';",
-            "UPSERT datacenter_delete:[pe:7997_21, '/E\\'Q\\\\1'] SET refno = pe:7997_21, \
-             name = '/E\\'Q\\\\1', type = 'EQUI', zone_refno = NONE, dbnum = 7997, sesno = 30, \
-             sesno_time = NONE, reason = 'deleted';",
+            // 交付删除事件：ID 只取 refno 值，INSERT IGNORE 让首次事件赢。
+            "INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:7997_3, refno: pe:7997_3, \
+             name: '/A-OLD', type: 'BRAN', zone_refno: pe:7997_5, dbnum: 7997, sesno: 12, \
+             sesno_time: '2026-09-22T10:00:00+08:00', reason: 'renamed' };",
+            "INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:7997_21, refno: pe:7997_21, \
+             name: '/E\\'Q\\\\1', type: 'EQUI', zone_refno: NONE, dbnum: 7997, sesno: 30, \
+             sesno_time: NONE, reason: 'deleted' };",
         ] {
             validate_statement(sql).unwrap_or_else(|e| panic!("应接受：{sql}\n{e}"));
         }

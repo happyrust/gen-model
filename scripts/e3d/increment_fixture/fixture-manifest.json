@@ -266,14 +266,6 @@
             "reason": "renamed",
             "zone": "data_zone"
           }
-        ],
-        "datacenter_delete_after_restore": [
-          {
-            "object": "data_eq",
-            "name": "/AIOS-INC-DATA-EQ-CHANGED",
-            "reason": "renamed",
-            "zone": "data_zone"
-          }
         ]
       }
     },
