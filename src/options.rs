@@ -2673,6 +2673,28 @@ fn retired_unread_attribute_tier_notice_for(
     }
 }
 
+/// 已退役的环境变量名（ADR-085 D4，2026-09-29）：执行范围缓存的 TTL（秒，`0` = 每次都重查）。
+pub const RETIRED_SCOPE_CACHE_SECS_ENV: &str = "AIOS_SCOPE_CACHE_SECS";
+
+/// 退役开关探测（ADR-085 D4）：执行范围不再有独立缓存——取范围读进程内登记的 MDB 声明，声明随
+/// SYST 批次落库刷新——这个 TTL 已无处可用。它只有环境变量一种写法，没有配置键。
+///
+/// 与 [`retired_net_window_notice`] 同一条理由：留着它的部署会以为范围还按这个节奏刷新
+/// （尤其是设成 `0` 的，那本是「每次事件都重查」的排障开关）。
+///
+/// 返回 `Some(告警文本)` 时调用方**必须**把它打出来；`None` 表示环境干净。
+pub fn retired_scope_cache_notice() -> Option<String> {
+    retired_scope_cache_notice_for(std::env::var_os(RETIRED_SCOPE_CACHE_SECS_ENV).as_deref())
+}
+
+fn retired_scope_cache_notice_for(env_value: Option<&OsStr>) -> Option<String> {
+    let value = env_value?;
+    Some(format!(
+        "⚠ 环境变量 {RETIRED_SCOPE_CACHE_SECS_ENV} = {value:?} 已退役、不再生效（ADR-085）：执行范围\
+         不再有独立缓存，取范围读进程内登记的 MDB 声明，声明随 SYST 批次落库刷新。请从环境中移除它。"
+    ))
+}
+
 /// 独立读取 DbOption 的原始 TOML，取一个退役键的字面值。这里故意不复用 [`load_ext_fields`]：
 /// 任一扩展字段类型漂移都不应把退役键的告警一起吞掉。
 fn probe_retired_net_window_config(configured: Option<OsString>) -> Result<Option<String>, String> {
@@ -3926,6 +3948,19 @@ mod tests {
             notice.contains(RETIRED_MODEL_SKIP_UNREAD_ATTRIBUTE_CHANGES_ENV),
             "{notice}"
         );
+    }
+
+    /// ADR-085 D4：执行范围缓存的 TTL 退役后，设着这个变量要出声（设成空白也算设了），没设就一个字不说。
+    #[test]
+    fn a_retired_scope_cache_env_is_named_not_swallowed() {
+        assert_eq!(retired_scope_cache_notice_for(None), None);
+        for value in ["0", "300", ""] {
+            let notice = retired_scope_cache_notice_for(Some(OsStr::new(value)))
+                .expect("设着就要出声");
+            assert!(notice.contains(RETIRED_SCOPE_CACHE_SECS_ENV), "{notice}");
+            assert!(notice.contains(&format!("{value:?}")), "要念出原值: {notice}");
+            assert!(notice.contains("ADR-085"), "{notice}");
+        }
     }
 
     /// 没配就是「用默认」，两种没配（缺文件 / 缺键）都不许被读成错误：

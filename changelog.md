@@ -2,6 +2,38 @@
 
 ## 2026-09-29
 
+### 本期执行范围不再每次现算（ADR-085）：`mdb_scope` 阶段行稳态零行，MDB 新加的库 SYST 落库后即进范围
+
+- **为什么**：现场增量运行时控制台连刷 `[ams-phase] phase=mdb_scope project=AvevaMarineSample mdb=/ALL source=sys-file dbnums=29 elapsed_ms≈4000`。
+  `UpdateScope::fetch` 对配置的 MDB 每取一次范围就 `mdb_membership::resolve` + `install`，而取范围的入口全是现取：每轮重扫、
+  `GET /api/v1/dbnums?project&mdb`、`/update/preview`、`/update/execute`（运维面板 `ops.html` 每 3 个周期拉一次 `/dbnums`）。
+  09-15 ADR-078 起声明进了进程缓存，这一趟只剩重扫搜索根与逐库重找文件，范围一个库号都不变；同一份缓存从不刷新，
+  SYST 落库时作废的是 08-14 起就没人读的范围缓存，MDB 里新加的库要重启才进范围。
+- **改动**（计划 `docs/plans/2026-09-29-update-scope-reads-the-registered-declaration-fix-plan.md` S1–S6）：
+  - `mdb_membership::rebind` 成为成员绑定唯一的重做入口，也是唯一打 `mdb_scope` 阶段行的地方（带 `reason=startup|syst-refresh|remount|fallback`、
+    `unbound=`，SYST 刷新再带 `added` / `removed`）；`init_mdb` 改走它。
+  - `fetch` 对配置的 MDB 只读登记表（`mdb_membership::get`），未登记才 `spawn_blocking` 现做一次（`reason=fallback`）。
+  - SYST 批次 `applied`：`reload_declaration_and_rebind`——`mdb_closure::reload_declaration` 先读后换（读失败留旧声明），再重做绑定；
+    失败原文进本批回执 `warnings`；随后照旧置 `SCOPE_DIRTY`。
+  - 重挂轮补上目录后、补扫之前重做绑定（`reason=remount`）。
+  - 执行范围缓存退役：`SCOPE_CACHE` / `resolve_cached` / `update_scope_cached` / `invalidate_scope_cache` / `finish` 的陈旧回退；
+    `AIOS_SCOPE_CACHE_SECS` 仍在环境里时启动点名已退役（`options::retired_scope_cache_notice`）。
+  - `web/setup.html` 执行初始化后的水位轮询改成 `setTimeout` 串行、每拍一次 `/dbnums`（此前 `setInterval` 每 4 s 两次、不等上一轮）。
+  - live 用例 `live_scope_refresh_baselines_a_db_the_mdb_just_declared` 改为声明驱动（09-09 起范围不看库侧 `MDB` 表，改库侧 CURD 已驱动不了它），
+    CURD 夹具三件删除。CONTEXT.md 新增「MDB 声明」「成员绑定」，改写「本期执行范围」「MDB 闭包」。
+- **验证**：`cargo test --lib` 2457 passed / 0 failed / 128 ignored（上一条记录 2453 / 0 / 128；+9 新增 −5 缓存用例）。负例：`fetch` 临时改回
+  每次现做绑定，`the_configured_mdb_scope_reads_the_registered_declaration` 红（拿到本机 AMS 真名单 29 个库）。真 AMS 文件、不连库的
+  `ams_mdb_initialization_scope_without_database` 绿，兜底那一行 `reason=fallback dbnums=29 unbound=0 elapsed_ms=1244`（本地盘）。
+  `setup.html` 脚本 `node --check` 通过。本机起服务（一次性内存 SurrealDB 占 8009，服务 `rocksdb` + `ingest`，PowerShell 按 `ops.html`
+  节奏轮询 150 s）：改前（09-28 release 包）一次 `/dbnums` 一行、共 33 行，`/dbnums` 中位数 883 ms；改后只有启动那一行
+  `reason=startup dbnums=29 unbound=0 elapsed_ms=862`，稳态 35 次 `/dbnums` 零行，中位数 27 ms（计划 V3 / V4）。live 用例（V5）绿：
+  摘掉 7998 后 `reason=syst-refresh removed=[7998]`、重扫不排它，装回后 `added=[7998]`、`scope-refresh` 新排 `1..=465` 并走完首次初始化。
+  09-30 本机端到端验收（计划 §10.2「端到端 A / B / C」）：E3D TTY 夹具套件 10/10 PASS（`output/e3d-fixture/20260930-102755`），
+  控制台 `mdb_scope` 全程 1 行，09-29 改前同一套件 70 行；真实 E3D 保存由 watcher 自己应用（7998 511→514，没有 `/update/execute`），
+  E3D 会话写进 SYS 的那一笔落库后走了从盘重读声明的真路径（两行 `reason=syst-refresh added=[] removed=[]`，1.3 s）。
+  实测补记：E3D 每个会话都会在 SYS 里记一笔 `Saving Meta Data.`（按会话记，不按保存记），现场控制台预期是启动一行 + 每个 E3D 会话一行，
+  不是零行（ADR-085 后果 2 已补）。没跑：现场包（V6），以及 E3D Admin 真往 `/ALL` 加一个库（仓里没有改 MDB 的宏）。
+
 ### 墙上的 FITT 自己成件（vendor e3d-model `2a0a3f6`、e3d-io `6bbcff9`）：aps250110 整站 RVM 配对 3300 → 3357、通过 3246 → 3303，57 只 `FITTING n of STWALL m` 全部 0.04 mm 内对上
 
 - **为什么**：E3D 的 TTY RVM 把 STWALL 上的门窗各写一组（`FITTING 1 of STWALL 5 of CWALL /B01_LEV01_INT_WALLS`：门扇 SEXT 按 `DESP[2] = 20°` 转开 + 三根门框 SEXT），我们把 63 只全记在 `catalog_pending`——RVM 有而 gen 没有的 139 组里它占 57。

@@ -842,6 +842,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::options::retired_unread_attribute_tier_notice() {
         eprintln!("{notice}");
     }
+    // 退役的执行范围缓存 TTL（ADR-085 D4）：范围不再有独立缓存，设着它的部署会以为范围还按它的节奏刷新。
+    if let Some(notice) = crate::options::retired_scope_cache_notice() {
+        eprintln!("{notice}");
+    }
     // 几何并发闸额度（specs/023）：非法值启动失败而非静默回退——额度是唯一的
     // 性能旋钮兼回滚开关（=1 即串行），必须在任何生成路径起跑之前定死。
     let geometry_workers =

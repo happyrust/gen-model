@@ -1134,6 +1134,43 @@ mod tests {
         );
     }
 
+    /// 执行初始化之后的水位轮询：每拍只拉一次 `/dbnums`，上一拍回来才排下一拍
+    /// （`docs/plans/2026-09-29-update-scope-reads-the-registered-declaration-fix-plan.md` S6）。
+    /// 此前用 `setInterval` 每 4 秒拉两次（`loadDbnums` 里已经拉过一次），而且不等上一轮返回——
+    /// 服务端慢的时候请求会叠起来，每一次还都要重算一遍本期执行范围。
+    #[test]
+    fn the_init_poll_asks_for_dbnums_once_per_tick_and_never_overlaps() {
+        let body = SETUP_PANEL_EMBEDDED
+            .split_once("async function executeInit(")
+            .expect("executeInit 还在")
+            .1
+            .split_once("async function finish(")
+            .expect("executeInit 收尾在 finish 之前")
+            .0;
+        assert!(
+            !body.contains("setInterval("),
+            "轮询不许用 setInterval：它不等上一拍回来"
+        );
+        assert!(body.contains("setTimeout(tick"), "上一拍回来才排下一拍");
+        assert_eq!(
+            body.matches("loadDbnums()").count(),
+            1,
+            "每拍只拉一次 /dbnums"
+        );
+        assert!(
+            !body.contains(r#"api("/api/v1/dbnums"#),
+            "不许绕过 loadDbnums 再拉一次"
+        );
+        let finish = SETUP_PANEL_EMBEDDED
+            .split_once("async function finish(")
+            .expect("finish 还在")
+            .1;
+        assert!(
+            finish.contains("S.pollGen++"),
+            "完成向导要让在途的那条轮询链自己停下"
+        );
+    }
+
     // ---------- 写盘 ----------
 
     const FIXTURE: &str = r#"# 顶部注释：决策史，一个字都不能丢

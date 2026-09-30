@@ -17,11 +17,13 @@
 //! An empty vector selects the declaring project. Never substitute another
 //! project merely because it contains a file with the same dbnum.
 //!
-//! [`crate::data_interface::update_scope::UpdateScope`] answers the same
-//! question for `STYP = DESI` through SurrealDB, which needs the SYS database
-//! parsed and synced first. This reads the file, so it is available during
-//! initialization — before anything has been synced — which is the point at
-//! which the Dictionary set has to be known.
+//! For the configured MDB, [`crate::data_interface::update_scope::UpdateScope`]
+//! reads the membership registered here (ADR-085): the execution scope and the
+//! Dictionary set come from one SYS declaration. This reads the file, so it is
+//! available during initialization — before anything has been synced — which is
+//! the point at which the Dictionary set has to be known. The registered copy is
+//! rebuilt only by [`rebind`]: at startup, after a SYST batch lands (the
+//! declaration is re-read first), and after a share remount.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -287,18 +289,7 @@ fn named_attr_value_kind(value: &NamedAttrValue) -> &'static str {
 pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result<MdbMembership> {
     let closure = crate::data_interface::mdb_closure::resolve_for(db_option);
     let plan = closure.watch_dir_plan();
-    let own_dirs: Vec<PathBuf> = plan
-        .projects
-        .iter()
-        .filter(|entry| entry.project == project)
-        .flat_map(|entry| entry.db_dirs.iter().cloned())
-        .collect();
-    if own_dirs.is_empty() {
-        anyhow::bail!(
-            "项目 {project} 没有解析出任何库目录，无从读取它的 SYS 库；监控目录解析：{}",
-            plan.problems().join(" / ")
-        );
-    }
+    let own_dirs = own_db_dirs(&plan, project)?;
     // Kept per project rather than flattened into one directory list: a dbnum
     // is unique inside a project only, so "which file" cannot be answered
     // before "which project".
@@ -337,6 +328,27 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         databases,
         problems,
     })
+}
+
+/// `project`'s own database directories in `plan` — where its SYS file lives.
+/// Empty is an error rather than an empty answer: there is no SYS to read.
+fn own_db_dirs(
+    plan: &crate::data_interface::project_paths::WatchDirPlan,
+    project: &str,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let own_dirs: Vec<PathBuf> = plan
+        .projects
+        .iter()
+        .filter(|entry| entry.project == project)
+        .flat_map(|entry| entry.db_dirs.iter().cloned())
+        .collect();
+    if own_dirs.is_empty() {
+        anyhow::bail!(
+            "项目 {project} 没有解析出任何库目录，无从读取它的 SYS 库；监控目录解析：{}",
+            plan.problems().join(" / ")
+        );
+    }
+    Ok(own_dirs)
 }
 
 /// A declaration read from SYS with nothing bound yet: every entry's `path` /
@@ -1624,9 +1636,10 @@ pub fn install(membership: MdbMembership) -> Arc<MdbMembership> {
     shared
 }
 
-/// The declaration `init_mdb` resolved, or `None` if it has not run for this
-/// pair. Deliberately not a lazy resolve: reading a SYS database is not
-/// something that should happen behind an innocent-looking getter.
+/// The membership last bound for this pair — by [`rebind`] at startup, after a
+/// SYST batch landed, or after a remount — or `None` if none has been. Deliberately
+/// not a lazy resolve: reading a SYS database is not something that should happen
+/// behind an innocent-looking getter.
 pub fn get(project: &str, mdb: &str) -> Option<Arc<MdbMembership>> {
     let wanted = format!("/{}", mdb.trim_start_matches('/'));
     let cache = registry().read().ok()?;
@@ -1634,6 +1647,160 @@ pub fn get(project: &str, mdb: &str) -> Option<Arc<MdbMembership>> {
         .iter()
         .find(|(known_project, known_mdb, _)| known_project == project && *known_mdb == wanted)
         .map(|(_, _, membership)| membership.clone())
+}
+
+/// 这一次为什么要重做**成员绑定**——打在 `mdb_scope` 阶段行的 `reason=` 上（ADR-085 D5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebindReason {
+    /// 启动时 `init_mdb` 那一次。
+    Startup,
+    /// SYST 批次落库后重读了声明（ADR-085 D2）。
+    SystRefresh,
+    /// 共享盘重挂轮补上了目录（ADR-085 D3）。
+    Remount,
+    /// 取范围时登记表里没有（`init_mdb` 失败过），现做一次（ADR-085 D1）。
+    Fallback,
+}
+
+impl RebindReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::SystRefresh => "syst-refresh",
+            Self::Remount => "remount",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// 重做一次**成员绑定**并登记（ADR-085）：[`resolve`] → [`install`]，打一行 `mdb_scope` 阶段行。
+///
+/// 全仓只有这里打那一行：取范围（`UpdateScope::fetch`）只读登记表、不经过这里，所以稳态下它一行不出——
+/// 2026-09-29 现场那种「每取一次范围就重扫一遍盘、打一行」正是取范围直接调 [`resolve`] 的结果。
+/// 声明本身取 `mdb_closure` 的缓存，这里不重读 SYS；要换声明先走 [`reload_declaration_and_rebind`]。
+///
+/// 同步 I/O（重扫搜索根、逐库 `read_dir`），async 侧必须放进 `spawn_blocking`。
+pub fn rebind(
+    db_option: &DbOption,
+    project: &str,
+    mdb: &str,
+    reason: RebindReason,
+) -> anyhow::Result<Arc<MdbMembership>> {
+    let started = std::time::Instant::now();
+    let previous = get(project, mdb);
+    let membership = install(resolve(db_option, project, mdb)?);
+    println!(
+        "{}",
+        rebind_phase_line(
+            &membership,
+            previous.as_deref(),
+            reason,
+            started.elapsed().as_millis()
+        )
+    );
+    Ok(membership)
+}
+
+/// SYST 批次落库后的声明刷新（ADR-085 D2）：先从主项目库目录重读 SYS 里 `mdb` 的声明
+/// （[`crate::data_interface::mdb_closure::reload_declaration`]，读成功才替换），再按新声明重做
+/// 成员绑定并登记。任何一步失败都原样返回，旧声明与旧登记表不动——调用方把原因写进那一批的回执。
+///
+/// 同步 I/O，async 侧放进 `spawn_blocking`。
+pub fn reload_declaration_and_rebind(
+    db_option: &DbOption,
+    project: &str,
+    mdb: &str,
+) -> anyhow::Result<Arc<MdbMembership>> {
+    let plan = crate::data_interface::mdb_closure::resolve_for(db_option).watch_dir_plan();
+    let own_dirs = own_db_dirs(&plan, project)?;
+    crate::data_interface::mdb_closure::reload_declaration(&own_dirs, project, mdb)?;
+    rebind(db_option, project, mdb, RebindReason::SystRefresh)
+}
+
+/// `mdb_scope` 阶段行本身（纯函数，单测直接比字符串）。`dbnums` / `unbound` 只数元素库（DESI / ISOD）
+/// ——与本期执行范围同一口径；新增 / 移除只在 SYST 刷新时带，别的时刻声明没换，比了也是空。
+fn rebind_phase_line(
+    membership: &MdbMembership,
+    previous: Option<&MdbMembership>,
+    reason: RebindReason,
+    elapsed_ms: u128,
+) -> String {
+    let dbnums: BTreeSet<u32> = membership
+        .element_databases()
+        .map(|database| database.dbnum)
+        .collect();
+    let unbound = membership
+        .element_databases()
+        .filter(|database| database.path.is_none())
+        .count();
+    let mut line = format!(
+        "[ams-phase] phase=mdb_scope project={} mdb={} source=sys-file reason={} dbnums={} unbound={unbound}",
+        membership.project(),
+        membership.mdb(),
+        reason.as_str(),
+        dbnums.len()
+    );
+    if reason == RebindReason::SystRefresh {
+        let before: BTreeSet<u32> = previous
+            .map(|previous| {
+                previous
+                    .element_databases()
+                    .map(|database| database.dbnum)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let added: Vec<u32> = dbnums.difference(&before).copied().collect();
+        let removed: Vec<u32> = before.difference(&dbnums).copied().collect();
+        line.push_str(&format!(" added={added:?} removed={removed:?}"));
+    }
+    line.push_str(&format!(" elapsed_ms={elapsed_ms}"));
+    line
+}
+
+/// 读写登记表的用例串成一条跑：登记表是进程级单例，并行的用例会互相覆盖对方装进去的那一份。
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 从登记表里拿掉 `(project, mdb)`——只给用例还原现场用；生产路径只换不删。
+#[cfg(test)]
+pub(crate) fn uninstall(project: &str, mdb: &str) {
+    let wanted = format!("/{}", mdb.trim_start_matches('/'));
+    if let Ok(mut cache) = registry().write() {
+        cache.retain(|(known_project, known_mdb, _)| {
+            !(known_project == project && *known_mdb == wanted)
+        });
+    }
+}
+
+/// 用例结束（含 panic）时把登记表里的 `(project, mdb)` 恢复成用例开始前的样子。
+#[cfg(test)]
+pub(crate) struct RegistryRestore {
+    project: String,
+    mdb: String,
+    previous: Option<Arc<MdbMembership>>,
+}
+
+#[cfg(test)]
+impl RegistryRestore {
+    pub(crate) fn capture(project: &str, mdb: &str) -> Self {
+        Self {
+            project: project.to_string(),
+            mdb: mdb.to_string(),
+            previous: get(project, mdb),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegistryRestore {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => {
+                install((*previous).clone());
+            }
+            None => uninstall(&self.project, &self.mdb),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1892,6 +2059,84 @@ mod tests {
             ],
             problems: Vec::new(),
         }
+    }
+
+    /// `mdb_scope` 阶段行只数元素库：字典库既不进 `dbnums` 也不进 `unbound`（与本期执行范围同一口径）；
+    /// 新增 / 移除只在 SYST 刷新时带（ADR-085 D5）。
+    #[test]
+    fn the_rebind_line_counts_element_databases_and_diffs_only_on_syst_refresh() {
+        let before = MdbMembership::test_with_databases(
+            "AvevaMarineSample",
+            "/ALL",
+            vec![
+                db(8000, DESI_STYP, "*AMS/DESIGN", true),
+                db(7999, DESI_STYP, "*AMS/OLD", true),
+                db(6002, DICT_STYP, "*MASTER/SCBDICT", false),
+            ],
+        );
+        let after = MdbMembership::test_with_databases(
+            "AvevaMarineSample",
+            "/ALL",
+            vec![
+                db(8000, DESI_STYP, "*AMS/DESIGN", true),
+                db(9001, ISOD_STYP, "*AMS/ISO", false),
+                db(6002, DICT_STYP, "*MASTER/SCBDICT", false),
+            ],
+        );
+
+        let refreshed =
+            rebind_phase_line(&after, Some(&before), RebindReason::SystRefresh, 4120);
+        // 拆开写：下一条用例全仓数这一行的字面量，只许生产代码那一处。
+        assert_eq!(
+            refreshed,
+            concat!(
+                "[ams-phase] phase=",
+                "mdb_scope project=AvevaMarineSample mdb=/ALL source=sys-file ",
+                "reason=syst-refresh dbnums=2 unbound=1 added=[9001] removed=[7999] elapsed_ms=4120"
+            )
+        );
+
+        let remounted = rebind_phase_line(&after, Some(&before), RebindReason::Remount, 7);
+        assert!(
+            remounted.contains("reason=remount dbnums=2 unbound=1 elapsed_ms=7"),
+            "声明没换的时刻不带新增 / 移除: {remounted}"
+        );
+        let started = rebind_phase_line(&after, None, RebindReason::Startup, 1);
+        assert!(
+            started.contains("reason=startup") && !started.contains("added="),
+            "{started}"
+        );
+    }
+
+    /// ADR-085 D5：`mdb_scope` 阶段行只记真实的成员绑定，全仓只许 [`rebind_phase_line`] 一处拼它。
+    /// 取范围那条路（`UpdateScope::fetch`）再打一次，2026-09-29 那种稳态刷屏就回来了。
+    #[test]
+    fn the_mdb_scope_phase_line_is_built_only_by_rebind() {
+        fn collect(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>) {
+            let entries = std::fs::read_dir(dir).expect("read src dir");
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, needle, hits);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    hits.extend(text.matches(needle).map(|_| path.clone()));
+                }
+            }
+        }
+        // 拆开写：这条用例自己的字面量不许算一处。
+        let needle = concat!("phase=", "mdb_scope");
+        let mut hits = Vec::new();
+        collect(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            needle,
+            &mut hits,
+        );
+        assert_eq!(hits.len(), 1, "只许一处: {hits:?}");
+        assert!(
+            hits[0].ends_with("mdb_membership.rs"),
+            "唯一那一处必须在成员绑定入口里: {hits:?}"
+        );
     }
 
     /// CURD order decides which definition wins a duplicated UKEY, so the
