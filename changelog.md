@@ -2,6 +2,18 @@
 
 ## 2026-09-30
 
+### 整棵子树被删的生产路回归：每个成员落墓碑、noun 行与 `pe_owner` 边清干净（GitHub #30 / #18）
+
+- **为什么**：#30 报的是 old-pdms-io 时代「删 EQUI 只给根打墓碑、子树 pe / 名词行 / 属主边全残留」；那段渲染 09-04 已退出生产路，
+  生产落库换成 e3d-io 两端索引差分 + `element_batch`，但 `direct_window_replay_parity` 原有用例只删叶子 BOX，没有钉「带成员的元素整棵删」。
+  #18（删一条 BRAN 保存后处理 failed）同样缺一条删 BRAN 的回归。
+- **改动**：`direct_window_replay_parity` 新增 `a_deleted_subtree_tombstones_every_member_and_leaves_no_rows_or_edges`，两种形状——
+  `equi_box`（#30 现场：EQUI 连同名下 BOX 一起删）与 `bran_members`（#18：删 BRAN，名下 ELBO / FLAN 跟着走）。输入按收集器给生产路的形状：
+  子树每个 refno 一条 `Deleted`（带基侧状态），属主一条 `Modified`（成员表摘掉子树顶）。断言：子树每个成员 `deleted = true`、noun / owner
+  保留、sesno = 删除会话、noun 行没了、`pe_owner` 里既没有它们的出边也没有它们名下的槽位；属主名下只剩兄弟、属主自己的入边不动；
+  每个事务边界崩一次再整窗重放，终态与一次成功逐表相等。只加测试，生产代码不动。
+- **验证**：`cargo test --lib -- direct_window_replay_parity` 15 passed / 0 failed（含新增一条）。
+
 ### 跨根引用普查加 Hole Management（`PFIT`）一列，联动清单登记 #15b 不排期（GitHub #43）
 
 - **为什么**：#43 要把「Hole Management 穿孔件引用被穿件」登记成联动清单一行，并让普查探针能数出这类边——今天语料为 0 就登记不排期，
