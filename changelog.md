@@ -2,6 +2,19 @@
 
 ## 2026-09-30
 
+### 跨根引用普查加 Hole Management（`PFIT`）一列，联动清单登记 #15b 不排期（GitHub #43）
+
+- **为什么**：#43 要把「Hole Management 穿孔件引用被穿件」登记成联动清单一行，并让普查探针能数出这类边——今天语料为 0 就登记不排期，
+  哪天有项目启用 Hole Management、普查一跑就能看见。
+- **改动**（`src/bin/cross_root_reference_census.rs`）：`PFIT` 发出的每条引用单独记一张账（`pfit`），口径与孔洞边相同——被穿件变了、
+  穿孔件的根没被碰才算缺口，跨 DESI 库另记；窗口统计分「被穿件单独改 / 穿孔件单独改 / 两端都改」；每库一行、合计表、JSON
+  （`hole_management_nouns` / `pfit`）都带上。HOLC 位本身未导出，仍按 12 个负实体 noun 代理。联动清单 `docs/2026-09-04_model-cascade-update-inventory.md`
+  加 #15b：登记不排期，复议触发 = PFIT 列出现指向 DESI 设计元素的边或 `pfit_dst_only` 窗口 > 0。
+- **验证**：release 构建后全语料复跑（E3D3.1 六个工程 AMS / APS / SCB / TEST / YCYK / ZDJ，487 个 DESI 库、85 库 4146 步，17.4 s）：
+  结构边 55,503（严格缺口 21,161）、孔洞边 9,329（跨根 20 条 `NCYL.RREF → SUBS`）与 0907 逐数相同；PFIT 发出 632 条引用，629 条指向
+  目录 / 属性库（`SPRE` / `MATR`），3 条同库 `PFIT.CREF → FITT`（`zdj7209`，结构连接边，归 #12），没有一条指向 DESI 设计元素；PFIT 窗口 0。
+  `rustfmt --edition 2024 --check` 干净。JSON 产物按政策不入库。
+
 ### 删除窗模型孤儿计划（09-18 改小版）批准并收口（GitHub #40）
 
 - `docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` 状态行改「已批准并收口」：D3 覆盖账已随 `b904292e2`（09-18）落地；

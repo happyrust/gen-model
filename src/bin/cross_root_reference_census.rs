@@ -28,6 +28,10 @@
 //!    （GETWORK 是先 `FNDTOP` 再 `EVALAT(top)`，所以 `EQUI` 下面一个 BOX 动了 core 也会重画接在 `EQUI` 上的电缆）。
 //!    两档都要求电缆那一端最近的根**没有**任何变更——有的话整根重生成本来就覆盖。边是从链尾会话扫出来的，
 //!    电缆那端在这一步的 `to` 会话里还没 `Inserted` 的（电缆后建）边当时不存在，不算窗口，单独记 `cable_dst_only_unborn`。
+//! 7. ★0930（GitHub #43）Hole Management 两列：`HOLC`（孔洞构件位，未导出，仍按第 3 条的 12 个负实体 noun 代理，即 `holes`）
+//!    与 `PFIT`（Hole Management 的穿孔件 = 面板上的目录件，引用被穿件）。`PFIT` 发出的每条引用都单独记一张账（`pfit`），
+//!    口径与孔洞边相同：被引用端（被穿件，如管道）变了、穿孔件的根没被碰才算缺口（`rev_uncovered_nearest`），跨 DESI 库另记；
+//!    窗口统计同样分「被穿件单独改 / 穿孔件单独改 / 两端都改」。这两列今天为 0 就登记不排期（联动清单 #15b），一旦非零即立项。
 //!
 //! 用法：
 //! ```text
@@ -75,6 +79,9 @@ const CABLE_ENDPOINT_TARGET_NOUNS: &[&str] = &["EQUI", "ELCONN"];
 
 /// 规则 E 的被引用端 noun（都在 `CWBRAN` 之下；`CAB_DB_BranchCableList_pseudo` 收的正是这四种成员）。
 const CABLE_ROUTE_NODE_NOUNS: &[&str] = &["HATTA", "TATTA", "RNODE", "RATTA"];
+
+/// ★0930（GitHub #43）Hole Management 的穿孔件 noun：它发出的引用指向被穿件，被穿件挪了孔要跟着动。
+const HOLE_MANAGEMENT_NOUNS: &[&str] = &["PFIT"];
 
 /// owner 链最多走多长；超过按成环 / 坏数据处理。
 const MAX_DEPTH: usize = 64;
@@ -282,6 +289,10 @@ struct WindowStats {
     hole_dst_only: u64,
     hole_src_only: u64,
     hole_both: u64,
+    /// ★0930 跨根 `PFIT` 边（反向 nearest 不覆盖）：被穿件单独改动 / 穿孔件单独改动 / 两端都改。
+    pfit_dst_only: u64,
+    pfit_src_only: u64,
+    pfit_both: u64,
     /// ★0907 C8 跨根电缆端点边（反向 nearest 不覆盖）：被引用端（`EQUI` / `ELCONN`，或规则 E 的 `CWBRAN` /
     /// 路由节点）**自己的记录**改了而电缆那端最近的根没被碰 → C8 该拉进来的窗口；
     cable_dst_only: u64,
@@ -308,6 +319,9 @@ impl WindowStats {
         self.hole_dst_only += other.hole_dst_only;
         self.hole_src_only += other.hole_src_only;
         self.hole_both += other.hole_both;
+        self.pfit_dst_only += other.pfit_dst_only;
+        self.pfit_src_only += other.pfit_src_only;
+        self.pfit_both += other.pfit_both;
         self.cable_dst_only += other.cable_dst_only;
         self.cable_dst_root_only += other.cable_dst_root_only;
         self.cable_src_only += other.cable_src_only;
@@ -341,6 +355,8 @@ struct DbReport {
     structural: BTreeMap<String, Tally>,
     /// 负实体（HOLC 代理）发出的边。
     holes: BTreeMap<String, Tally>,
+    /// ★0930 Hole Management 穿孔件（`PFIT`）发出的边，按 `SRC.ATTR->DST` 键。
+    pfit: BTreeMap<String, Tally>,
     /// ★0907 C8 电缆端点边（`STAREF` / `ENDREF` → `EQUI` / `ELCONN`，或 → `CWBRAN` 之下的路由节点），
     /// 按 `SRC.ATTR->DST` 键；键尾带 `[F]` / `[E]` 标规则。
     cable_endpoint: BTreeMap<String, Tally>,
@@ -670,7 +686,9 @@ struct CrossEdge {
     backref_ok: bool,
     fwd_uncovered: bool,
     rev_uncovered: bool,
-    /// ★0907 C8：电缆端点边才有。`structural` 与它互斥；两者都不是的就是孔洞边。
+    /// ★0930：`PFIT` 发出的边（Hole Management 穿孔件）。与孔洞边同口径，窗口单独计数。
+    pfit: bool,
+    /// ★0907 C8：电缆端点边才有。`structural` 与它互斥；三者都不是的就是孔洞边。
     cable: Option<CableEdge>,
 }
 
@@ -728,6 +746,10 @@ fn main() -> anyhow::Result<()> {
         .map(|name| db1_hash(name))
         .collect();
     let cwbran_hash = db1_hash("CWBRAN");
+    let pfit_hashes: HashSet<u32> = HOLE_MANAGEMENT_NOUNS
+        .iter()
+        .map(|name| db1_hash(name))
+        .collect();
     let unit_types = resolve_delivery_unit_types(&[]);
     let mut attr_names: HashMap<u32, String> = HashMap::new();
 
@@ -778,6 +800,7 @@ fn main() -> anyhow::Result<()> {
     let mut examples: Vec<WindowExample> = Vec::new();
     let mut total_structural: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_holes: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut total_pfit: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_cable: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_all: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_topf: BTreeMap<String, TopfStat> = BTreeMap::new();
@@ -905,6 +928,7 @@ fn main() -> anyhow::Result<()> {
             let attr = attr_name(&mut attr_names, edge.attr, edge.is_uda);
             let structural = structural_hashes.contains_key(&edge.attr);
             let hole = hole_nouns.contains(&scanned.elements[&edge.src].noun);
+            let pfit = pfit_hashes.contains(&scanned.elements[&edge.src].noun);
             // ★0907 C8：STAREF / ENDREF 指向同库的 EQUI / ELCONN（F），或指向 CWBRAN 之下的路由节点（E；
             // `RATTA` / `RNODE` 常常不是 CWBRAN 的直接成员，沿 owner 链找最近的 CWBRAN 祖先）。
             let cable_rule: Option<(&'static str, RefNo)> =
@@ -993,7 +1017,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                if (structural || hole) && (!fwd_covered || !rev_covered) {
+                if (structural || hole || pfit) && (!fwd_covered || !rev_covered) {
                     cross_edges.push(CrossEdge {
                         src: edge.src,
                         attr: edge.attr,
@@ -1002,6 +1026,7 @@ fn main() -> anyhow::Result<()> {
                         backref_ok: ok,
                         fwd_uncovered: !fwd_covered,
                         rev_uncovered: !rev_covered,
+                        pfit: pfit && !structural,
                         cable: None,
                     });
                 }
@@ -1018,6 +1043,7 @@ fn main() -> anyhow::Result<()> {
                         backref_ok: false,
                         fwd_uncovered: !fwd_covered,
                         rev_uncovered: true,
+                        pfit: false,
                         cable: Some(CableEdge {
                             rule,
                             subject,
@@ -1041,6 +1067,9 @@ fn main() -> anyhow::Result<()> {
             }
             if hole {
                 report.holes.entry(key.clone()).or_default().add(&tally);
+            }
+            if pfit {
+                report.pfit.entry(key.clone()).or_default().add(&tally);
             }
             if let Some((rule, _)) = cable_rule {
                 report
@@ -1098,6 +1127,9 @@ fn main() -> anyhow::Result<()> {
         for (key, tally) in &report.holes {
             total_holes.entry(key.clone()).or_default().add(tally);
         }
+        for (key, tally) in &report.pfit {
+            total_pfit.entry(key.clone()).or_default().add(tally);
+        }
         for (key, tally) in &report.cable_endpoint {
             total_cable.entry(key.clone()).or_default().add(tally);
         }
@@ -1124,6 +1156,12 @@ fn main() -> anyhow::Result<()> {
             .sum();
         let hole_edges: u64 = report.holes.values().map(|t| t.edges).sum();
         let hole_gap: u64 = report.holes.values().map(|t| t.rev_uncovered_nearest).sum();
+        let pfit_edges: u64 = report.pfit.values().map(|t| t.edges).sum();
+        let pfit_gap: u64 = report
+            .pfit
+            .values()
+            .map(|t| t.rev_uncovered_nearest + t.cross_db_desi)
+            .sum();
         let cable_edges: u64 = report.cable_endpoint.values().map(|t| t.edges).sum();
         let cable_gap: u64 = report
             .cable_endpoint
@@ -1131,7 +1169,7 @@ fn main() -> anyhow::Result<()> {
             .map(|t| t.rev_uncovered_nearest)
             .sum();
         println!(
-            "{:<24} dbnum={:<6} ses={:<5} el={:<8} roots={:<6} 无根={:<6} 引用边={:<8} 结构边={:<6} 结构缺口={:<5} 孔洞边={:<5} 孔洞缺口={:<4} 电缆边={:<5} 电缆缺口={:<4} 窗口(结构/孔洞/电缆/电缆根级)={}/{}/{}/{} {:.1}s",
+            "{:<24} dbnum={:<6} ses={:<5} el={:<8} roots={:<6} 无根={:<6} 引用边={:<8} 结构边={:<6} 结构缺口={:<5} 孔洞边={:<5} 孔洞缺口={:<4} PFIT边={:<4} PFIT缺口={:<4} 电缆边={:<5} 电缆缺口={:<4} 窗口(结构/孔洞/PFIT/电缆/电缆根级)={}/{}/{}/{}/{} {:.1}s",
             report.file,
             report.dbnum,
             report.sesno,
@@ -1143,10 +1181,13 @@ fn main() -> anyhow::Result<()> {
             structural_gap,
             hole_edges,
             hole_gap,
+            pfit_edges,
+            pfit_gap,
             cable_edges,
             cable_gap,
             report.windows.structural_src_only,
             report.windows.hole_dst_only,
+            report.windows.pfit_dst_only,
             report.windows.cable_dst_only,
             report.windows.cable_dst_root_only,
             started.elapsed().as_secs_f32()
@@ -1168,7 +1209,11 @@ fn main() -> anyhow::Result<()> {
         started_all.elapsed().as_secs_f32()
     );
     print_tallies("结构连接边（ADSTCH 五属性）", &total_structural);
-    print_tallies("孔洞边（负实体 noun 发出的引用）", &total_holes);
+    print_tallies("孔洞边（负实体 noun 发出的引用，HOLC 代理）", &total_holes);
+    print_tallies(
+        "Hole Management 穿孔件边（PFIT 发出的引用 → 被穿件；缺口 = 被穿件变了穿孔件的根不被碰，另看跨DESI库）",
+        &total_pfit,
+    );
     print_tallies(
         "电缆端点边（STAREF / ENDREF → EQUI / ELCONN [F]，或 → CWBRAN 之下的路由节点 [E]；只算同库）",
         &total_cable,
@@ -1237,6 +1282,7 @@ fn main() -> anyhow::Result<()> {
     println!(
         "\n会话逐步 diff：{} 个库 {} 步；跨根结构边（回指成立）持属性端单独改动 {} / 被引用端单独改动 {} / 两端都改 {}；\
          跨根孔洞边 被打孔件单独改动 {} / 孔洞件单独改动 {} / 两端都改 {}；\
+         跨根 PFIT 边 被穿件单独改动 {} / 穿孔件单独改动 {} / 两端都改 {}；\
          跨根电缆端点边 被引用端记录改了·电缆根没被碰 {} / 被引用端的根被碰·记录没改·电缆根没被碰 {} / 只电缆端改 {} / 两端都碰 {}\
          （另 {} 处被引用端改了但电缆那端当时还没建，边不存在，不算）；失败 {} 库",
         total_windows.dbs_stepped,
@@ -1247,6 +1293,9 @@ fn main() -> anyhow::Result<()> {
         total_windows.hole_dst_only,
         total_windows.hole_src_only,
         total_windows.hole_both,
+        total_windows.pfit_dst_only,
+        total_windows.pfit_src_only,
+        total_windows.pfit_both,
         total_windows.cable_dst_only,
         total_windows.cable_dst_root_only,
         total_windows.cable_src_only,
@@ -1279,6 +1328,7 @@ fn main() -> anyhow::Result<()> {
             "cable_endpoint_target_nouns": CABLE_ENDPOINT_TARGET_NOUNS,
             "cable_route_node_nouns": CABLE_ROUTE_NODE_NOUNS,
             "hole_nouns_proxy": hole_nouns.iter().map(|h| noun_name(&noun_names, *h)).collect::<std::collections::BTreeSet<_>>(),
+            "hole_management_nouns": HOLE_MANAGEMENT_NOUNS,
             "files_seen": files.len(),
             "desi_files": desi_files.len(),
             "desi_dbnums": desi_dbnums.len(),
@@ -1292,6 +1342,7 @@ fn main() -> anyhow::Result<()> {
             "elements_without_template": total_template_missing,
             "structural": total_structural,
             "holes": total_holes,
+            "pfit": total_pfit,
             "cable_endpoint": total_cable,
             "all_edges": total_all,
             "topf": total_topf,
@@ -1415,6 +1466,18 @@ fn step_windows(
                     }
                     (false, true) => stats.structural_dst_only += 1,
                     (true, true) => stats.structural_both += 1,
+                    _ => {}
+                }
+            } else if edge.pfit {
+                match (src_changed, dst_changed) {
+                    (false, true) => {
+                        stats.pfit_dst_only += 1;
+                        if edge.rev_uncovered {
+                            found.push((step.from.sesno, step.to.sesno, *edge, "dst[PFIT]"));
+                        }
+                    }
+                    (true, false) => stats.pfit_src_only += 1,
+                    (true, true) => stats.pfit_both += 1,
                     _ => {}
                 }
             } else if !edge.structural {
