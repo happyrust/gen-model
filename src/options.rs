@@ -107,7 +107,8 @@ pub struct DbOptionExt {
     // 两个键随房间流程退役（ADR-073 D7；ADR-067 D9 作废）：房间归属随每个生成根算出、与模型行
     // 同事务落库，没有独立的房间阶段可开关；常驻房间模型是那一步的算法输入，随 `spatial_compute`
     // 一道门走。配置里再写这两个键会进「未知键」告警名单。
-    /// 房间归属计算的总开关（默认 `false`；ADR-073 D1 的逐根房间归属）。
+    /// 房间归属计算的总开关（缺键默认 `true`，2026-09-29 起；进程算不了房间时恒关；
+    /// ADR-073 D1 的逐根房间归属）。
     ///
     /// 关掉时生成路径不算房间归属、不写 `room_relate` / `room_panel_relate` 新边，
     /// 但模型根与 `model_sesno` 照常推进；启动也不建常驻房间模型，被对账掉的来源
@@ -1974,7 +1975,14 @@ fn effective_spec_value_rules(configured: Option<&[SpecValueRuleConfig]>) -> Vec
 /// 环境变量名：一次性覆盖 [`room_membership`]，不必改配置文件。
 pub const ROOM_MEMBERSHIP_ENV: &str = "AIOS_ROOM_MEMBERSHIP";
 
-/// 房间归属计算开不开（`DbOption.toml` 的 `room_membership`，**默认 false**）。
+/// 房间归属计算开不开（`DbOption.toml` 的 `room_membership`，**缺键默认 true**，2026-09-29 起；
+/// 2026-09-11 ~ 2026-09-28 默认 false）。
+///
+/// 只有「这个进程算得了房间」时才可能是开（[`room_membership_capable`]）：`AIOS_SPATIAL_COMPUTE=0`
+/// 或编译时没有 `project_hd` / `project_hh` 特性的进程根本不建常驻房间模型（`Unsupported`），此时
+/// 不论键与环境变量怎么写都按关——开着只会让每个任务都冻不出计算器、全部根按「房间算不出来」判死，
+/// 正是 0.1.25 那次全库瘫痪的形状。要求开而没生效由启动横幅点名来源与原因（[`room_membership_notice`]）。
+/// 输入不全（缺 DESI 文件、面板缺几何）不在此列，那是 `Degraded`，照算（ADR-073 D8–D11）。
 ///
 /// ADR-073 D1 之后房间不是一条独立流程：一个生成根算完几何，紧接着用常驻房间模型里的
 /// 面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行同一笔事务落库。本开关门的
@@ -2003,7 +2011,80 @@ pub fn room_membership() -> bool {
     effective_room_membership(
         load_ext_fields().room_membership,
         std::env::var(ROOM_MEMBERSHIP_ENV).ok().as_deref(),
+        room_membership_capable(),
     )
+}
+
+/// 缺键、也没有环境变量时 [`room_membership`] 要求的取值。
+const ROOM_MEMBERSHIP_DEFAULT: bool = true;
+
+/// 编译时有没有房间层级特性（`project_hd` / `project_hh`，与 `room_topology::RoomHierarchy::configured`
+/// 同一对）。
+const ROOM_HIERARCHY_COMPILED: bool = cfg!(any(feature = "project_hd", feature = "project_hh"));
+
+/// 这个进程有没有房间体制可用：空间计算开着（[`spatial_compute`]）、且编进了房间层级特性。两道门
+/// 与启动段 `prepare_room_resident_at_startup` 判 `Unsupported` 的那两道逐字对应。
+fn room_membership_capable() -> bool {
+    spatial_compute() && ROOM_HIERARCHY_COMPILED
+}
+
+/// [`room_membership`] 的要求值从哪来（只给横幅点名用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomMembershipOrigin {
+    Env,
+    Config,
+    Default,
+}
+
+/// 要求值：环境变量（认得出的取值）压过配置，配置压过缺省 [`ROOM_MEMBERSHIP_DEFAULT`]。
+fn requested_room_membership(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> (bool, RoomMembershipOrigin) {
+    if let Some(value) = env_override.and_then(parse_bool_flag) {
+        return (value, RoomMembershipOrigin::Env);
+    }
+    match configured {
+        Some(value) => (value, RoomMembershipOrigin::Config),
+        None => (ROOM_MEMBERSHIP_DEFAULT, RoomMembershipOrigin::Default),
+    }
+}
+
+/// 要求开、这个进程却算不了房间时给人看的那一句（启动横幅）；其余情形不出声。与
+/// [`meshes_dir_notice`] 同一条纪律：设了却没生效的配置必须当场点名。
+pub fn room_membership_notice() -> Option<String> {
+    room_membership_notice_for(
+        load_ext_fields().room_membership,
+        std::env::var(ROOM_MEMBERSHIP_ENV).ok().as_deref(),
+        spatial_compute(),
+        ROOM_HIERARCHY_COMPILED,
+    )
+}
+
+fn room_membership_notice_for(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+    spatial: bool,
+    hierarchy: bool,
+) -> Option<String> {
+    let (requested, origin) = requested_room_membership(configured, env_override);
+    if !requested || (spatial && hierarchy) {
+        return None;
+    }
+    let origin = match origin {
+        RoomMembershipOrigin::Env => format!("环境变量 {ROOM_MEMBERSHIP_ENV}"),
+        RoomMembershipOrigin::Config => "DbOption.toml 的 room_membership".to_string(),
+        RoomMembershipOrigin::Default => "缺省".to_string(),
+    };
+    let reason = if spatial {
+        "编译时没有 project_hd / project_hh 特性".to_string()
+    } else {
+        format!("{SPATIAL_COMPUTE_ENV}=0")
+    };
+    Some(format!(
+        "房间归属计算：要求开（{origin}），但本进程算不了房间（{reason}，常驻房间模型不建）——\
+         按关处理：模型根与 model_sesno 照常推进，不写房间边"
+    ))
 }
 
 /// 单测里把 [`room_membership`] 摁成某个取值的进程内覆盖（0 = 按配置来）。
@@ -2040,11 +2121,13 @@ impl Drop for RoomMembershipOverride {
     }
 }
 
-fn effective_room_membership(configured: Option<bool>, env_override: Option<&str>) -> bool {
-    env_override
-        .and_then(parse_bool_flag)
-        .or(configured)
-        .unwrap_or(false)
+/// 生效值 = 要求值（[`requested_room_membership`]）∧ 进程算得了房间。
+fn effective_room_membership(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+    capable: bool,
+) -> bool {
+    requested_room_membership(configured, env_override).0 && capable
 }
 
 /// 环境变量名：一次性覆盖 [`model_xgeometry_gate`]，不必改配置文件。
@@ -3376,26 +3459,71 @@ mod tests {
         assert_eq!(MODEL_UNIT_LEVEL_PUBLISH_ENV, "AIOS_MODEL_UNIT_LEVEL_PUBLISH");
     }
 
-    /// 房间归属计算默认关：缺配置时不做房间增量更新；配置或环境变量能显式打开，
+    /// 房间归属计算默认开（2026-09-29 起）：缺配置时照算房间；配置或环境变量能显式关掉，
     /// 环境变量两个方向都压过配置，拼错的值退回配置值或默认值。
     #[test]
-    fn room_membership_is_off_unless_someone_turns_it_on() {
-        assert!(!effective_room_membership(None, None));
-        assert!(effective_room_membership(Some(true), None));
-        assert!(!effective_room_membership(Some(false), None));
-        assert!(effective_room_membership(None, Some("1")));
-        assert!(!effective_room_membership(None, Some("0")));
-        assert!(!effective_room_membership(Some(true), Some("off")));
-        assert!(effective_room_membership(Some(false), Some("on")));
-        assert!(effective_room_membership(Some(true), Some("ture")));
-        assert!(!effective_room_membership(Some(false), Some("ture")));
-        assert!(!effective_room_membership(None, Some("ture")));
+    fn room_membership_is_on_unless_someone_turns_it_off() {
+        assert!(effective_room_membership(None, None, true));
+        assert!(effective_room_membership(Some(true), None, true));
+        assert!(!effective_room_membership(Some(false), None, true));
+        assert!(effective_room_membership(None, Some("1"), true));
+        assert!(!effective_room_membership(None, Some("0"), true));
+        assert!(!effective_room_membership(Some(true), Some("off"), true));
+        assert!(effective_room_membership(Some(false), Some("on"), true));
+        assert!(effective_room_membership(Some(true), Some("ture"), true));
+        assert!(!effective_room_membership(Some(false), Some("ture"), true));
+        assert!(effective_room_membership(None, Some("ture"), true));
         assert!(
             ext_field_names()
                 .iter()
                 .any(|name| name == "room_membership"),
             "配置读坏时的告警名单从结构体导出，新键得在里面"
         );
+    }
+
+    /// 算不了房间的进程（`AIOS_SPATIAL_COMPUTE=0` / 没编房间层级特性）常驻房间模型根本不建：不论键与
+    /// 环境变量怎么写都按关，免得每根都按「房间算不出来」判死（0.1.25 的全库瘫痪形状）。本构建（带
+    /// `project_hd`）在空间计算开着时就是算得了。
+    #[test]
+    fn a_process_that_cannot_compute_rooms_keeps_room_membership_off() {
+        for (configured, env) in [
+            (None, None),
+            (None, Some("ture")),
+            (Some(true), None),
+            (None, Some("1")),
+            (Some(false), Some("on")),
+            (Some(false), None),
+        ] {
+            assert!(
+                !effective_room_membership(configured, env, false),
+                "configured={configured:?} env={env:?}"
+            );
+        }
+        assert_eq!(
+            ROOM_HIERARCHY_COMPILED && spatial_compute(),
+            room_membership_capable()
+        );
+    }
+
+    /// 要求开而没生效时横幅点名来源与原因；要求关、或算得了房间，一律不出声。
+    #[test]
+    fn the_room_membership_notice_names_the_request_and_why_it_did_not_take() {
+        assert_eq!(room_membership_notice_for(None, None, true, true), None);
+        assert_eq!(room_membership_notice_for(Some(false), None, false, true), None);
+        assert_eq!(room_membership_notice_for(None, Some("0"), false, false), None);
+
+        let spatial_off = room_membership_notice_for(None, None, false, true).expect("缺省开要点名");
+        assert!(spatial_off.contains("缺省"), "{spatial_off}");
+        assert!(spatial_off.contains("AIOS_SPATIAL_COMPUTE=0"), "{spatial_off}");
+
+        let no_feature =
+            room_membership_notice_for(Some(true), None, true, false).expect("显式开要点名");
+        assert!(no_feature.contains("DbOption.toml 的 room_membership"), "{no_feature}");
+        assert!(no_feature.contains("project_hd"), "{no_feature}");
+
+        let from_env =
+            room_membership_notice_for(Some(false), Some("1"), false, true).expect("环境变量开要点名");
+        assert!(from_env.contains("AIOS_ROOM_MEMBERSHIP"), "{from_env}");
     }
 
     /// 出厂模板（`scripts/templates/DbOption.factory.toml`，向导与本地发布的起点）写的
@@ -3417,7 +3545,8 @@ mod tests {
             .expect("模板写了 room_membership");
         assert_eq!(
             configured,
-            effective_room_membership(None, None),
+            // 发布包都带 `project_hd`、不关空间计算：按「算得了房间」的进程比。
+            effective_room_membership(None, None, true),
             "出厂模板的 room_membership 与代码默认（缺键时的取值）分叉了"
         );
         let search_paths = table

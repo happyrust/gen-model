@@ -28,7 +28,21 @@ fn fixture_surreal_port() -> u16 {
 fn fixture_api() -> String {
     format!("http://127.0.0.1:{}/api/v1", fixture_api_port())
 }
-const FIXTURE_SURREAL_SQL: &str = "http://127.0.0.1:18048/sql";
+
+/// Follows the port the fixture actually binds. Until 2026-09-29 this was a
+/// literal 18048, so overriding `L3_FIXTURE_SURREAL_PORT` moved the stack but
+/// left seeding and assertions talking to 18048 (`curl: (7)`).
+fn fixture_surreal_sql_url() -> String {
+    format!("http://127.0.0.1:{}/sql", fixture_surreal_port())
+}
+
+/// plant-ui under `--fixture-ui` talks to the fixture's own service and store.
+fn fixture_ui_endpoints() -> UiEndpoints {
+    UiEndpoints {
+        api_base: format!("http://127.0.0.1:{}", fixture_api_port()),
+        surreal_port: fixture_surreal_port(),
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct FixtureManifest {
@@ -690,6 +704,8 @@ fn start_fixture_stack(
                     // 所以真正定它的是上面那一行；这一行只是把意图写出来，与介质给出的
                     // 那一档不符时会被 `data_face_notice` 当场点名。
                     .env("AIOS_DATA_FACE", "ingest")
+                    // Room membership runs on the code default (see `FIXTURE_DROPPED_KEYS`).
+                    .env_remove(aios_database::options::ROOM_MEMBERSHIP_ENV)
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
                     // 整套断言都建立在「批次真的被执行」之上。
@@ -711,7 +727,9 @@ fn start_fixture_stack(
             "L3_PLANT_UI_ROOT",
             repo.parent().unwrap_or(repo).join("plant-ui"),
         );
-        let ui_runtime = prepare_plant_ui_runtime(repo, &plant_ui_root, run_dir, &config)?;
+        let endpoints = fixture_ui_endpoints();
+        let ui_runtime =
+            prepare_plant_ui_runtime(repo, &plant_ui_root, run_dir, &config, &endpoints)?;
         stack.push(
             "plant-ui",
             spawn_logged(
@@ -720,7 +738,7 @@ fn start_fixture_stack(
                     .env("EGUI_INSPECTION", "1")
                     .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
                     .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
-                    .env("PLANT_MODEL_API_URL", format!("http://127.0.0.1:{}", fixture_api_port())),
+                    .env("PLANT_MODEL_API_URL", &endpoints.api_base),
                 &run_dir.join("stack-plant-ui.log"),
             )?,
         );
@@ -870,6 +888,18 @@ fn copy_fixture_db_snapshot(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Keys removed from the base config instead of being overridden, so the isolated
+/// stack runs on the **code default** for them.
+///
+/// `room_membership`: the `room-member` / `room-structure` scenarios assert on
+/// `room_relate` edges, which only exist when room membership is on. Since
+/// 2026-09-29 that is the default (`options::room_membership`), so the fixture no
+/// longer pins it: whatever the base config says, the rendered config carries no
+/// such line and every fixture process is started without
+/// `aios_database::options::ROOM_MEMBERSHIP_ENV` — a default that regresses to off
+/// fails those two scenarios loudly.
+const FIXTURE_DROPPED_KEYS: [&str; 1] = ["room_membership"];
+
 fn write_runtime_config(
     base: &Path,
     output: &Path,
@@ -934,14 +964,6 @@ fn write_runtime_config(
         ("gen_model", "false".into()),
         ("gen_mesh", "false".into()),
         ("gen_spatial_tree", "true".into()),
-        // `room-member` asserts that a transform recomputes room membership. Room
-        // membership is computed per generated root inside the task (ADR-073 D1);
-        // there is no separate room stage to opt into any more — but the whole
-        // room lane sits behind `room_membership` (default false since ADR-073,
-        // `options::room_membership`). The production base config keeps it off,
-        // so the fixture pins it on: the two `room: true` scenarios assert on
-        // `room_relate` edges that only exist when the switch is on.
-        ("room_membership", "true".into()),
         ("load_spatial_tree", "false".into()),
         ("save_spatial_tree_to_db", "false".into()),
     ]);
@@ -949,6 +971,9 @@ fn write_runtime_config(
     let mut lines = Vec::new();
     for line in source.lines() {
         let key = line.split_once('=').map(|(key, _)| key.trim());
+        if key.is_some_and(|key| FIXTURE_DROPPED_KEYS.contains(&key)) {
+            continue;
+        }
         if let Some((key, value)) = key.and_then(|key| values.get_key_value(key)) {
             if seen.insert(*key) {
                 lines.push(format!("{key} = {value}"));
@@ -977,6 +1002,8 @@ pub(super) fn run_fixture_bin(
         .args(args)
         .current_dir(cwd)
         .env("DB_OPTION_FILE", config)
+        // Room membership runs on the code default (see `FIXTURE_DROPPED_KEYS`).
+        .env_remove(aios_database::options::ROOM_MEMBERSHIP_ENV)
         .output()?;
     let mut bytes = output.stdout;
     bytes.extend_from_slice(&output.stderr);
@@ -2519,7 +2546,7 @@ fn fixture_surreal_sql(ns: &str, project: &str, sql: &str) -> Result<Value> {
             &format!("surreal-db: {project}"),
             "--data-binary",
             sql,
-            FIXTURE_SURREAL_SQL,
+            &fixture_surreal_sql_url(),
         ])
         .output()?;
     ensure!(
@@ -2752,6 +2779,7 @@ mod tests {
                 .to_string()
                 .contains("unknown owner")
         );
+        // Destructive cases form the tail: a non-destructive case after one is rejected.
         let mut m = manifest();
         m.scenarios[0].destructive_last = true;
         let mut after = m.scenarios[0].clone();
@@ -2764,6 +2792,11 @@ mod tests {
                 .to_string()
                 .contains("appears after")
         );
+        // Since 2026-09-24 the tail may hold several destructive cases — the real
+        // manifest runs `delete` then `unitdel`. (This test used to clone the
+        // destructive case unchanged and so kept expecting the pre-09-24 rule.)
+        m.scenarios[1].destructive_last = true;
+        validate_manifest(&m, repo).unwrap();
     }
 
     #[test]
@@ -2867,7 +2900,8 @@ mod tests {
     /// The fixture pins the spatial tree on and never writes the retired
     /// `room_incremental` key (ADR-073 D7): room membership has no stage switch
     /// of its own in the fixture config any more — only the lane switch
-    /// `room_membership`, which the fixture pins on.
+    /// `room_membership`, which the fixture leaves on the code default (no config
+    /// line, no environment override for the service).
     #[test]
     fn fixture_service_uses_the_run_directory_for_its_instance_lock() {
         let source = include_str!("fixture.rs");
@@ -2889,6 +2923,10 @@ mod tests {
         assert!(
             !service.lines().any(|line| line.trim() == ".current_dir(repo)"),
             "fixture service must not share the checkout instance lock"
+        );
+        assert!(
+            service.contains(".env_remove(aios_database::options::ROOM_MEMBERSHIP_ENV)"),
+            "a stray AIOS_ROOM_MEMBERSHIP in the developer shell must not mask the code default"
         );
     }
 
@@ -2971,6 +3009,39 @@ mod tests {
         // Both drain helpers are called with the fixture's own API prefix.
         assert!(production.contains("model_drain_task_ids(&api)"));
         assert!(production.contains("wait_model_drain_settlement(&api, &model_before)"));
+    }
+
+    /// Every endpoint the fixture talks to is formatted from the port it binds.
+    /// A literal URL is how the Surreal SQL endpoint stayed on 18048 after
+    /// `L3_FIXTURE_SURREAL_PORT` moved the stack, and how `--fixture-ui` kept
+    /// pointing plant-ui at the golden suite's 8028 / 8048.
+    #[test]
+    fn fixture_endpoints_follow_the_ports_the_fixture_binds() {
+        assert_eq!(
+            fixture_surreal_sql_url(),
+            format!("http://127.0.0.1:{}/sql", fixture_surreal_port())
+        );
+        let ui = fixture_ui_endpoints();
+        assert_eq!(ui.surreal_port, fixture_surreal_port());
+        assert_eq!(
+            ui.api_base,
+            format!("http://127.0.0.1:{}", fixture_api_port())
+        );
+
+        let source = include_str!("fixture.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("fixture.rs has a test module")
+            .0;
+        for (index, line) in production.lines().enumerate() {
+            for (at, _) in line.match_indices("127.0.0.1:") {
+                assert!(
+                    line[at + "127.0.0.1:".len()..].starts_with('{'),
+                    "fixture.rs:{} hard-codes an endpoint port: {line}",
+                    index + 1
+                );
+            }
+        }
     }
 
     /// Seeding waits out `409` only; anything else is the run's verdict.
@@ -3087,13 +3158,11 @@ mod tests {
                 .lines()
                 .any(|line| line == "gen_spatial_tree = true")
         );
-        assert_eq!(
-            rendered
+        assert!(
+            !rendered
                 .lines()
-                .filter(|line| line.starts_with("room_membership = "))
-                .collect::<Vec<_>>(),
-            vec!["room_membership = true"],
-            "the room lane must be on for the two `room: true` scenarios, whatever the base config says"
+                .any(|line| line.trim_start().starts_with("room_membership")),
+            "the fixture must run room membership on the code default, whatever the base config says: {rendered}"
         );
         assert!(
             rendered

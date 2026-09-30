@@ -130,12 +130,14 @@ puhua_database_password = "root"
 replace_mesh = true
 room_key_word = ["-RM"]
 
-# 数据、模型增量缺省开启；房间归属计算缺省关（与代码默认一致，2026-09-11 起）：
-# 开着时常驻房间要 MDB 声明的全部设计库都在，缺一个库整批模型根都会被判死。
-# 要开用 room_membership = true 或环境变量 AIOS_ROOM_MEMBERSHIP=1（环境变量压过本键）。
+# 数据、模型增量与房间归属计算缺省开启（与代码默认一致，房间 2026-09-29 起）：
+# 构件挪了位置，它所属生成根重算时顺带重算房间归属、与模型行同一笔事务落库。
+# MDB 声明的设计库缺文件、在册面板缺几何只让房间降级（/health 的 features.room = degraded），
+# 不拦模型（ADR-073 D8–D11）。要关用 room_membership = false 或环境变量 AIOS_ROOM_MEMBERSHIP=0
+#（环境变量压过本键）；关着时房间边不更新，重新打开后要对相应库执行一次模型重建补齐。
 data_incremental = true
 model_incremental = true
-room_membership = false
+room_membership = true
 
 # 文件身份冲突只记录并跳过，不阻断其它库初始化。
 block_file_identity_conflicts = false

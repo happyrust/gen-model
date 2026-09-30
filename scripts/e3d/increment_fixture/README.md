@@ -27,7 +27,8 @@ powershell -File scripts\Run-E3DFixtureSuite.ps1 `
 
 目标 DB 必须已加入 MDB 且对登录用户可写。默认结束时删除夹具 SITE；失败证据和该次
 RocksDB 保留在 `output/e3d-fixture/<run-id>`。加 `-KeepSites` 可保留 E3D 夹具，
-加 `-Ui` 才启动 plant-ui 冒烟检查。
+加 `-Ui` 才启动 plant-ui 冒烟检查。界面连的是夹具自己的栈（默认 18028 / 18048，`L3_FIXTURE_API_PORT` /
+`L3_FIXTURE_SURREAL_PORT` 可改），项目配置与设置文件都按这对端口现写（2026-09-29 之前写死金套件的 8028 / 8048）。
 
 本机没有 `E3D31-L3` 副本时，直接对 `D:\AVEVA\Projects\E3D3.1\AvevaMarineSample` 跑也行——
 选一个小的 DESI 做靶（`ams7998_0001` / 7998，基线解析几秒钟），夹具 SITE 都建在它的 WORLD 下、
@@ -36,8 +37,9 @@ RocksDB 保留在 `output/e3d-fixture/<run-id>`。加 `-KeepSites` 可保留 E3D
 
 运行器给隔离服务准备的东西（2026-09-20 起，之前三处都断在起服务 / 播种）：`<run>/resource/surreal`
 （aios_core 连库时按 CWD 找函数脚本）、`project-mirror` 里目标 DB 旁的 `amssys` / `amscom` / `amsmis`
-（服务从 SYS **文件**读 MDB 声明）、配置里钉 `room_membership = true`（两个 `room: true` 场景断言的
-是 `room_relate` 边）；播种前先等启动的模型补齐任务落定，撞上 409 只重试不判死。
+（服务从 SYS **文件**读 MDB 声明）；播种前先等启动的模型补齐任务落定，撞上 409 只重试不判死。
+房间归属按**代码默认**跑（2026-09-29 起默认开）：渲染出的配置里去掉 `room_membership` 这一行，
+各进程也不带 `AIOS_ROOM_MEMBERSHIP`——两个 `room: true` 场景断言的是 `room_relate` 边，默认一旦退回关它们就红。
 
 ## 只读预检
 
