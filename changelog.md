@@ -2,6 +2,13 @@
 
 ## 2026-09-30
 
+### 删除窗模型孤儿计划（09-18 改小版）批准并收口（GitHub #40）
+
+- `docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` 状态行改「已批准并收口」：D3 覆盖账已随 `b904292e2`（09-18）落地；
+  「自身或 S 端属主链上任一级落在 `delete ∪ regen` 即算盖住」的收窄口径批准；维持 D4（只进回执 `warnings` 与服务日志，
+  不加回执独立字段、不进 `/health`）；验收第 4 条改以单测 `a_removed_unit_with_no_cleanup_root_above_it_is_named`（S5 的数点名）
+  + 真库九窗 gap=0 为证，S3（E3D TTY 造窗）不做。只动文档。
+
 ### `pe_owner` 唯一性收口：P0 / P1 已修，P2（身份改 `[owner, child]` + `ordinal`）决定不做（GitHub #14）
 
 - 审计档 `docs/2026-08-06_pe-owner-uniqueness-fix-audit.md` 追加「2026-09-30 收口」。P0-1 / P0-2 / P1 由 `58e4bb2d9` 的「owner 前缀范围整块替换」
