@@ -2,6 +2,18 @@
 
 ## 2026-09-30
 
+### 模型类型矩阵：ANCI / FIXING / GENSEC 改标 `blocked-by-e3d-crash`，覆盖门单列不红（GitHub #22）
+
+- **为什么**：des.exe 3.1.9.0 的 TTY 会话对这三类任何属性求值都崩（0xC0000005 @ `core.dll+0x0074d982`，08-11 十六会话矩阵 15/15，
+  换样本换库都躲不开），manifest 里却还标 `verified`；消费它的 `Run-RoomE3DE2E.ps1` 09-20 已退役，这是一个没人刷新的静态绿。
+- **改动**：`scripts/e3d/ams_model_type_cases.json` 的 `noun-anci` / `noun-fixing` / `noun-gensec` 改标 `blocked-by-e3d-crash` 并带
+  `blocked_by` 原因；`scripts/Test-AmsModelTypeCoverage.ps1` 认这个终态——不进 stale / pending、单列打印、`-RequireVerified` 不因它红，
+  blocked 行缺 `blocked_by` 才红；台账 `docs/e3d-model-type-verification-ledger.md` §2.2 记原因与回补口径（换了能跑的运行时改回 `pending` 重跑）。
+  E3D 侧（AVEVA 产品问题）不再追。
+- **验证**：manifest 解析 58 行（verified 55 / blocked 3，`blocked_by` 齐）；覆盖门脚本本体在 PS 5.1 下用桩掉 Surreal 查询的副本跑五种形状：
+  全在 / 全在 + `-RequireVerified` / blocked 的 ANCI 不在库里 + `-RequireVerified` 三种 exit 0，verified 的 BOX 不在（Stale）、
+  blocked 行缺 `blocked_by` 两种 exit 1。没有连真 Surreal 跑。
+
 ### 结构连接级联：跨库对端单独记账、回执点名（GitHub #34 前置 1）；aps250110 验收窗改钉「开关关着已全覆盖」
 
 - **为什么**：#33 的结论是跨库对端「读得到、上卷不到」，账却混在 `far_end_without_root` 里，与「对端已删 / 无根族」分不开；
