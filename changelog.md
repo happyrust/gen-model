@@ -2,6 +2,24 @@
 
 ## 2026-09-30
 
+### 移出 MDB 的库：启动核对与 SYST 刷新点名，不自动清（GitHub #41）
+
+- **为什么**：库从 CURD 移出之后，它留在库里的 `pe` / noun 行、模型行、房间边、空间树条目与水位行没有任何路径处理，也没有 ADR 说
+  「明确不做」。ADR-085 的 `removed=` 只在那一次 SYST 刷新的阶段行里出现一次，启动时不比、`/health` 也没有这一栏。
+- **决定**（ADR-078 追记 2026-09-30）：只检测、只点名，不自动清——移出可能是误改 MDB，自动删掉的数据要整库重新初始化才回得来；
+  清理走现成的人工出口：暂停队列 → 逐库 `DELETE /api/v1/dbnums/{dbnum}/data` → 重启一次（空间树快照指纹含各库水位数对，删了水位行就按指针重建）。
+  换路径不是移出：抽取家族内改挂文件是 PathMigrated（ADR-028 D4），会话空间换了走整库重建（ADR-021）。
+- **改动**：
+  - `startup_reconcile::dbnums_retired_from_mdb`：登记表里盖过水位（`applied_sesno` 或 `model_sesno` > 0）、当前 MDB 却不再声明的元素库
+    （DESI / ISOD，与 `is_element_db` 同一把尺子），写进新栏 `/health.startup.reconcile.retired_from_mdb`（升序库号；早退路径与收尾都带上），
+    非空时打一行「MDB 退出核对：…」横幅（≤ 12 个）。不参与 `result` 取重、不排工作。SYST / DICT / CATA 不在这一栏。
+  - `mdb_membership::rebind`：`reason=syst-refresh` 时新声明少了元素库，另起一行 `[mdb-scope] 移出 MDB 的元素库 […]`，说清不自动清与人工出口；
+    阶段行的 `removed=` 改用同一个 `removed_element_dbnums`，两处不会各算各的。
+  - `CONTEXT.md` 新词条「移出 MDB 的库」。
+- **验证**：`cargo test --lib -- startup_reconcile mdb_membership initialization_phase retired_from_mdb` 58 passed / 0 failed（新增
+  `retired_from_mdb_names_stamped_element_rows_the_current_mdb_no_longer_declares`、
+  `a_syst_refresh_that_drops_element_databases_names_them_and_cleans_nothing`）。没在真库上造「移出 MDB」的现场（要改共享工程的 CURD）。
+
 ### 整棵子树被删的生产路回归：每个成员落墓碑、noun 行与 `pe_owner` 边清干净（GitHub #30 / #18）
 
 - **为什么**：#30 报的是 old-pdms-io 时代「删 EQUI 只给根打墓碑、子树 pe / 名词行 / 属主边全残留」；那段渲染 09-04 已退出生产路，

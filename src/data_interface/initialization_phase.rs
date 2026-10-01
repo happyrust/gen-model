@@ -179,6 +179,11 @@ pub struct StartupReconcile {
     /// 这一栏数的是 `gen_root` 里有凭证却不在当前 MDB 的历史行）。它们没有文件可核，只能点名；
     /// 此前与 `unreadable` 混在一栏，留着一行历史库 `result` 就一辈子出不来 `ok`。
     pub not_in_mdb: usize,
+    /// 反方向那一栏（GitHub #41，ADR-078 追记 2026-09-30）：登记表里盖过水位（`applied_sesno` 或
+    /// `model_sesno` > 0）、当前 MDB 却**不再声明**的元素库（DESI / ISOD），升序。它们的数据 / 模型面状态
+    /// （`pe` / noun 行、模型行、房间边、空间树条目）与水位行都还在，本期执行范围不再管；**不自动清**，
+    /// 人工出口是 `DELETE /api/v1/dbnums/{dbnum}/data`（整库快删，先暂停队列）。不参与 `result` 取重。
+    pub retired_from_mdb: Vec<u32>,
     /// 开了退化窗口但收口失败的库数。人工出口是
     /// `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
     pub window_failed: usize,
@@ -223,6 +228,7 @@ impl Default for StartupReconcile {
             result: "pending",
             unreadable: 0,
             not_in_mdb: 0,
+            retired_from_mdb: Vec::new(),
             window_failed: 0,
             lagging: 0,
             windows_opened: 0,

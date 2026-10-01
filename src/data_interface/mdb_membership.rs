@@ -1698,7 +1698,47 @@ pub fn rebind(
             started.elapsed().as_millis()
         )
     );
+    if reason == RebindReason::SystRefresh
+        && let Some(notice) =
+            retired_element_dbnums_notice(&removed_element_dbnums(&membership, previous.as_deref()))
+    {
+        println!("{notice}");
+    }
     Ok(membership)
+}
+
+/// 新声明比旧声明少了的元素库（DESI / ISOD），升序。没有旧登记（首次绑定）时为空。
+fn removed_element_dbnums(
+    membership: &MdbMembership,
+    previous: Option<&MdbMembership>,
+) -> Vec<u32> {
+    let Some(previous) = previous else {
+        return Vec::new();
+    };
+    let now: BTreeSet<u32> = membership
+        .element_databases()
+        .map(|database| database.dbnum)
+        .collect();
+    previous
+        .element_databases()
+        .map(|database| database.dbnum)
+        .filter(|dbnum| !now.contains(dbnum))
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .collect()
+}
+
+/// SYST 刷新移出了元素库时的那一行（GitHub #41，ADR-078 追记 2026-09-30）：它们离开本期执行范围，库里的
+/// 数据 / 模型面状态与水位行**不自动清**；下次启动在 `/health.startup.reconcile.retired_from_mdb` 点名，
+/// 人工出口是整库快删。空列表不出声。
+fn retired_element_dbnums_notice(removed: &[u32]) -> Option<String> {
+    (!removed.is_empty()).then(|| {
+        format!(
+            "[mdb-scope] 移出 MDB 的元素库 {removed:?}：离开本期执行范围，库里的数据 / 模型面状态与水位行不自动清\
+             （GitHub #41）；下次启动在 /health.startup.reconcile.retired_from_mdb 点名，确认不再需要时先暂停队列，\
+             再逐库 DELETE /api/v1/dbnums/{{dbnum}}/data"
+        )
+    })
 }
 
 /// SYST 批次落库后的声明刷新（ADR-085 D2）：先从主项目库目录重读 SYS 里 `mdb` 的声明
@@ -1750,7 +1790,8 @@ fn rebind_phase_line(
             })
             .unwrap_or_default();
         let added: Vec<u32> = dbnums.difference(&before).copied().collect();
-        let removed: Vec<u32> = before.difference(&dbnums).copied().collect();
+        // 与 GitHub #41 那一行点名同一份口径：阶段行的 `removed=` 与「移出 MDB 的元素库」不许各算各的。
+        let removed = removed_element_dbnums(membership, previous);
         line.push_str(&format!(" added={added:?} removed={removed:?}"));
     }
     line.push_str(&format!(" elapsed_ms={elapsed_ms}"));
@@ -2106,6 +2147,53 @@ mod tests {
             started.contains("reason=startup") && !started.contains("added="),
             "{started}"
         );
+    }
+
+    /// GitHub #41：SYST 刷新把元素库移出声明时单独点名一行、**不自动清**。只数元素库（DESI / ISOD）——字典库
+    /// 移出不算；首次绑定（没有旧登记）与声明没少时不出声。
+    #[test]
+    fn a_syst_refresh_that_drops_element_databases_names_them_and_cleans_nothing() {
+        let before = MdbMembership::test_with_databases(
+            "AvevaMarineSample",
+            "/ALL",
+            vec![
+                db(8000, DESI_STYP, "*AMS/DESIGN", true),
+                db(7999, DESI_STYP, "*AMS/OLD", true),
+                db(9002, ISOD_STYP, "*AMS/ISO-OLD", true),
+                db(6002, DICT_STYP, "*MASTER/SCBDICT", true),
+            ],
+        );
+        let after = MdbMembership::test_with_databases(
+            "AvevaMarineSample",
+            "/ALL",
+            vec![
+                db(8000, DESI_STYP, "*AMS/DESIGN", true),
+                db(9001, ISOD_STYP, "*AMS/ISO", false),
+            ],
+        );
+
+        let removed = removed_element_dbnums(&after, Some(&before));
+        assert_eq!(removed, vec![7999, 9002], "字典库 6002 移出不算元素库");
+        let notice = retired_element_dbnums_notice(&removed).expect("移出了元素库要出声");
+        assert!(
+            notice.contains("[7999, 9002]")
+                && notice.contains("不自动清")
+                && notice.contains("retired_from_mdb")
+                && notice.contains("DELETE /api/v1/dbnums/{dbnum}/data"),
+            "{notice}"
+        );
+        let refreshed = rebind_phase_line(&after, Some(&before), RebindReason::SystRefresh, 1);
+        assert!(
+            refreshed.contains("removed=[7999, 9002]"),
+            "阶段行与点名同一份口径: {refreshed}"
+        );
+
+        assert!(
+            removed_element_dbnums(&after, None).is_empty(),
+            "首次绑定没有旧登记，谈不上移出"
+        );
+        assert!(removed_element_dbnums(&before, Some(&before)).is_empty());
+        assert!(retired_element_dbnums_notice(&[]).is_none(), "空列表不出声");
     }
 
     /// ADR-085 D5：`mdb_scope` 阶段行只记真实的成员绑定，全仓只许 [`rebind_phase_line`] 一处拼它。

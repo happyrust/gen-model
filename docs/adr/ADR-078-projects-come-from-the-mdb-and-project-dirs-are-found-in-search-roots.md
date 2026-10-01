@@ -75,3 +75,30 @@ ADR-046 把 `included_projects` 定为唯一名单并拒绝 UNC，理由是「�
      （目标 DESI 所在项目）选——两处选法不是同一个函数，`build_set` 注释里 APS7600 vs ZDJ7600 就是这一形状；观察到的会话与生成读的会话可能不是同一份文件。
      → 同上追踪。
 - 退路 (ii)（目录库没有反向引用表 → 该库全部依赖根判过期）按 dbnum 在 `reverse_reference::expand_reverse_cascade` 里做，不分本项目 / 外项目。
+
+## 追记 2026-09-30：库被移出 MDB / 库文件换路径时，留在库里的状态怎么处置（GitHub #41）
+
+**决定：只检测、只点名，不自动清；清理走现成的人工出口。**
+
+- **检测两处。**
+  1. 启动核对（`startup_reconcile::dbnums_retired_from_mdb`）：登记表里盖过水位（`applied_sesno` 或 `model_sesno` > 0）、当前 MDB 声明却不再列它的元素库
+     （DESI / ISOD，与 `model_source::is_element_db` 同一把尺子），升序写进 `/health.startup.reconcile.retired_from_mdb`，非空时打一行
+     「MDB 退出核对：…」横幅（≤ 12 个库号）。它**不参与** `result` 取重——不是复核没跑成；也不排任何工作。SYST / DICT / CATA 不在这一栏：
+     它们不产生根，依赖入库的 CATA 行由依赖状态表管（plan 2026-09-15 D6）。
+  2. SYST 刷新（ADR-085 D2，`mdb_membership::rebind` 在 `reason=syst-refresh` 时）：新声明比旧声明少了元素库，`mdb_scope` 阶段行照旧带 `removed=[…]`，
+     另起一行 `[mdb-scope] 移出 MDB 的元素库 […]` 说清「不自动清、下次启动在 `retired_from_mdb` 点名、人工出口是什么」。两处用同一个
+     `removed_element_dbnums`，阶段行的 `removed=` 与点名不会各算各的。
+- **为什么不自动清。** 移出 MDB 可能是误操作（CURD 改错、换 MDB 试一下）；自动删掉的 `pe` / noun 行、模型行、房间边要整库重新初始化才回得来，
+  而留着的代价只是占空间——它已经离开本期执行范围，监听、启动复核、模型凭证核对都不再处理它。E3D 里把库移出 MDB 与删库也是两个操作：
+  移出之后库文件还在项目目录里。
+- **人工出口（现成，不新增端点）。** 暂停队列 → 逐库 `DELETE /api/v1/dbnums/{dbnum}/data`（`fast_delete::delete_dbnum_fast`，`DropRow`：
+  `pe` / noun 行、`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `ref_rev` / `geo_relate` / `inst_info` / `aabb` / `trans` 的
+  Ref0 区间、`dbnum_info_table` / 统计行 / **水位行整行**一并删；进程内投影 `clear_dbnum`、生成根账本 `forget_dbnum`、CATA 已落库 memo 作废）
+  → 重启一次。最后一步是为了空间树：快删不动内存树，但空间树快照的指纹含各库的水位数对，水位行删了，下次启动按指针重建，那一库的条目随之消失。
+  交付台账（`datacenter_version` / `datacenter_delete`）不在快删范围里，照旧（plan 2026-09-22 D7）。
+- **换路径不是移出，已有处置。** MDB 声明不含文件位置（成员绑定才含），所以「库文件换路径」不改变范围：同一 dbnum 在抽取家族内改挂文件判
+  PathMigrated（ADR-028 D4），会话空间换了走整库重建（ADR-021）；共享盘重挂补上目录后重做绑定（ADR-085 D3）。家族之外把另一份同号文件挂进来，
+  按文件头身份对账，不是本追记的范围。
+- **护栏**：`startup_reconcile::tests::retired_from_mdb_names_stamped_element_rows_the_current_mdb_no_longer_declares`（盖过水位的移出元素库才点名；
+  声明着的、CATA、从没盖过水位的历史行不算；横幅 ≤ 12 个）、`mdb_membership::tests::a_syst_refresh_that_drops_element_databases_names_them_and_cleans_nothing`
+  （只数元素库、首次绑定不出声、阶段行与点名同口径）。词条见 `CONTEXT.md`「移出 MDB 的库」。
