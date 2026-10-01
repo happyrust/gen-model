@@ -3125,6 +3125,56 @@ pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataL
     Ok((pins, locator))
 }
 
+/// 目录文件的选法（GitHub #47）：生成读哪一份、MDB 声明的是哪一份。与 [`E3dDbResolver`] 同一张 locator、
+/// 同一份项目副本表、同一个函数（[`select_dependency_file`]），只是不开库、不读 schema。
+///
+/// 同一个 CATA 库号在闭包里有几份文件时，设计库所在项目里那份才是它的模型真读的（AMS `/ALL` 实测：ACP 的
+/// 设计库读 `acp7000`、AMS 的读 `ams7355`，MDB 声明的却是 `ams7000` / `aps7355`）。目录版本核对拿它比会话、
+/// 在它上面收窗、给它盖落款——不拿 MDB 声明那份去比别的文件记下的会话号。
+pub(crate) struct CatalogueFileChoice {
+    locator: InMemoryCataLocator,
+    project_files: ProjectDbFiles,
+}
+
+impl CatalogueFileChoice {
+    pub(crate) fn current() -> anyhow::Result<Self> {
+        let (_, locator, project_files) = current_mdb_source_inventory()?;
+        Ok(Self {
+            locator,
+            project_files,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_parts(locator: InMemoryCataLocator, project_files: ProjectDbFiles) -> Self {
+        Self {
+            locator,
+            project_files,
+        }
+    }
+
+    /// 设计库 `design_dbnum` 生成时目录库 `catalogue_dbnum` 读的那份文件；`None` = 生成也解不出它
+    /// （MDB 没声明——resolver 只认 MDB 声明的库，GitHub #46）。
+    pub(crate) fn for_library(&self, design_dbnum: u32, catalogue_dbnum: u32) -> Option<PathBuf> {
+        let preferred_project = self
+            .locator
+            .file_of(design_dbnum)
+            .map(|(project, _)| project);
+        select_dependency_file(
+            &self.locator,
+            &self.project_files,
+            preferred_project.as_deref(),
+            catalogue_dbnum,
+        )
+        .map(|file| file.path)
+    }
+
+    /// MDB 声明的那份。
+    pub(crate) fn declared(&self, dbnum: u32) -> Option<PathBuf> {
+        self.locator.file_of(dbnum).map(|(_, path)| path)
+    }
+}
+
 fn styp_name(value: i64) -> Option<&'static str> {
     match value {
         1 => Some("DESI"),
@@ -4661,6 +4711,179 @@ mod tests {
     /// 序合起来，键认成 acp 那条 → 对 BRAN 有效、元素上没值 → unset → 公式未解，印成 E3D
     /// 的写法。这正是 E3D 自己对这些槽位报 `Catalogue error … unable to evaluate … PXLE`
     /// 的落点；同一条支管 `Q :HXYsize` 却答 `675 600`。
+    /// GitHub #46 / #47 探针（只读真部署闭包）：同一个 CATA 库号在闭包里有几份文件时，三处各认哪一份——
+    /// sweep 观察（监控目录里按文件头认出的 CATA 经 `select_catalogue_candidates` + `catalogue_project_priority`
+    /// 选正本，数据面依赖行同一份清单）、目录版本核对（`model_source::source_file_lookup` = MDB 声明那份）、
+    /// 生成（`select_dependency_file`：目标 DESI 所在项目里有同类型副本就用它）。逐个 (DESI 项目, CATA) 打印，
+    /// 末行 `CATA_SELECTION_SUMMARY` 汇总；另数 sweep 观察得到、生成却解不出的未声明 CATA（#46）。
+    #[tokio::test]
+    #[ignore = "real MDB closure from DbOption.toml"]
+    async fn live_catalogue_file_selection_across_observation_reconcile_and_generation()
+    -> anyhow::Result<()> {
+        use crate::data_interface::initialization_phase::{
+            CatalogueCandidate, select_catalogue_candidates,
+        };
+        let same_file = |a: &Path, b: &Path| {
+            a.to_string_lossy().to_ascii_lowercase() == b.to_string_lossy().to_ascii_lowercase()
+        };
+        let option = aios_core::get_db_option();
+        let (pins, locator, project_files) = current_mdb_source_inventory()?;
+        // 设计库按所在项目分组：生成时 `preferred_project` 就是它。
+        let mut library_projects: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+        for pin in pins
+            .iter()
+            .filter(|pin| crate::data_interface::model_source::is_element_db(&pin.db_type))
+        {
+            let dbnum = pin.dbnum as u32;
+            if let Some((project, _)) = locator.file_of(dbnum) {
+                library_projects
+                    .entry(project.to_ascii_lowercase())
+                    .or_default()
+                    .push(dbnum);
+            }
+        }
+        // 观察那一份：与 sweep 同一个选主函数、同一个闭包项目序、同一个优先级配置。
+        let plan = crate::data_interface::project_paths::plan_watch_dirs(option);
+        let mut candidates = Vec::new();
+        for dir in plan.dirs() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if !path.is_file() {
+                    continue;
+                }
+                let Ok(header) = crate::data_interface::db_file_header::DbFileHeader::read(&path)
+                else {
+                    continue;
+                };
+                if !header.db_type.eq_ignore_ascii_case("CATA") {
+                    continue;
+                }
+                let Some(project) = crate::data_interface::project_paths::project_of_path(&path)
+                else {
+                    continue;
+                };
+                candidates.push(CatalogueCandidate {
+                    project,
+                    dbnum: header.dbnum as u32,
+                    path,
+                });
+            }
+        }
+        let selection = select_catalogue_candidates(
+            candidates.clone(),
+            &crate::data_interface::project_paths::project_names(option),
+            &crate::options::catalogue_project_priority(),
+        );
+        let observed: BTreeMap<u32, (String, PathBuf)> = selection
+            .selected
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.dbnum,
+                    (candidate.project.clone(), candidate.path.clone()),
+                )
+            })
+            .collect();
+        // 同号多份：生成能看见的副本（MDB 声明 + 遮蔽）与监控目录里的候选，按项目去重。
+        let mut copies: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for ((project, dbnum), file) in project_files.iter() {
+            if file.db_type.eq_ignore_ascii_case("CATA") {
+                copies.entry(*dbnum).or_default().insert(project.clone());
+            }
+        }
+        for candidate in &candidates {
+            copies
+                .entry(candidate.dbnum)
+                .or_default()
+                .insert(candidate.project.to_ascii_lowercase());
+        }
+        let mut same_number = 0usize;
+        let mut pairs = 0usize;
+        let mut against_reconcile = 0usize;
+        let mut against_observed = 0usize;
+        for (&cata, projects) in copies.iter().filter(|(_, projects)| projects.len() > 1) {
+            same_number += 1;
+            let reconcile = crate::data_interface::model_source::source_file_lookup(cata)?;
+            let observed_file = observed.get(&cata);
+            let latest = |path: &Path| {
+                crate::data_interface::model_source::latest_source_version_of_file(
+                    cata, "CATA", path,
+                )
+                .map(|version| version.sesno.to_string())
+                .unwrap_or_else(|error| format!("? ({error})"))
+            };
+            println!(
+                "CATA {cata}: copies in {projects:?}; observed {:?}; reconcile (MDB pin) {:?}",
+                observed_file.map(|(project, path)| format!(
+                    "{project} {} @{}",
+                    path.display(),
+                    latest(path)
+                )),
+                reconcile
+                    .as_ref()
+                    .map(|(_, path)| format!("{} @{}", path.display(), latest(path))),
+            );
+            for ((project, dbnum), file) in project_files.iter() {
+                if *dbnum == cata {
+                    println!(
+                        "  copy {project}: {} @{}",
+                        file.path.display(),
+                        latest(&file.path)
+                    );
+                }
+            }
+            for (project, libraries) in &library_projects {
+                pairs += 1;
+                let Some(generated) =
+                    select_dependency_file(&locator, &project_files, Some(project), cata)
+                else {
+                    println!(
+                        "  DESI project {project} ({} libs): generation resolves nothing",
+                        libraries.len()
+                    );
+                    continue;
+                };
+                let off_reconcile = reconcile
+                    .as_ref()
+                    .is_none_or(|(_, path)| !same_file(path, &generated.path));
+                let off_observed =
+                    observed_file.is_none_or(|(_, path)| !same_file(path, &generated.path));
+                against_reconcile += usize::from(off_reconcile);
+                against_observed += usize::from(off_observed);
+                println!(
+                    "  DESI project {project} ({} libs, e.g. {:?}): generation reads {} {}{}{}",
+                    libraries.len(),
+                    &libraries[..libraries.len().min(3)],
+                    generated.project,
+                    generated.path.display(),
+                    if off_reconcile { " ≠reconcile" } else { "" },
+                    if off_observed { " ≠observed" } else { "" },
+                );
+            }
+        }
+        // #46：sweep 观察得到、MDB 没声明的 CATA——生成的 resolver 只认 MDB 声明的库，解不出它。
+        let undeclared: Vec<String> = observed
+            .iter()
+            .filter(|(dbnum, _)| locator.db_type_of(**dbnum).is_none())
+            .map(|(dbnum, (project, _))| format!("{dbnum}@{project}"))
+            .collect();
+        println!(
+            "undeclared CATA observed by the sweep (generation cannot resolve them): {} {:?}",
+            undeclared.len(),
+            &undeclared[..undeclared.len().min(40)]
+        );
+        println!(
+            "CATA_SELECTION_SUMMARY: DESI projects {} / CATA with >1 copy {same_number} / (DESI project, CATA) pairs {pairs} / generation != reconcile {against_reconcile} / generation != observed {against_observed} / observed {} / undeclared observed {} / selection blockers {}",
+            library_projects.len(),
+            observed.len(),
+            undeclared.len(),
+            selection.blockers.len()
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "real AMS 7997 + the project Dictionary databases"]
     async fn ams7997_head_slot_expression_stays_unset_by_key_even_with_the_bran_attached()
@@ -9138,5 +9361,53 @@ mod tests {
         assert_eq!(pin.sesno, Some(42));
         assert_eq!(pin.db_type.as_deref(), Some("CATA"));
         assert!(pin.template.ends_with("catvir.dat"));
+    }
+
+    /// GitHub #47：目录版本核对问「这个设计库读哪一份目录文件」，答案必须与 resolver 逐字相同——
+    /// 所在项目有同类型副本读副本，没有读 MDB 声明那份；MDB 没声明的库两边都答不出（#46）。
+    #[test]
+    fn catalogue_file_choice_answers_like_the_resolver_per_design_library() {
+        let declared = PathBuf::from(r"D:\selected\AMS\ams7000_0001");
+        let copy = PathBuf::from(r"D:\selected\ACP\acp7000_0001");
+        let locator = InMemoryCataLocator::from_parts(
+            HashMap::new(),
+            HashMap::from([
+                (7000, ("CATA".into(), "AMS".into(), declared.clone())),
+                (
+                    7015,
+                    (
+                        "DESI".into(),
+                        "ACP".into(),
+                        PathBuf::from(r"D:\selected\ACP\acp7015_0001"),
+                    ),
+                ),
+                (
+                    8000,
+                    (
+                        "DESI".into(),
+                        "AMS".into(),
+                        PathBuf::from(r"D:\selected\AMS\ams8000_0001"),
+                    ),
+                ),
+            ]),
+        );
+        let project_files: ProjectDbFiles = Arc::new(HashMap::from([(
+            project_db_key("ACP", 7000),
+            ProjectDbFile {
+                db_type: "CATA".into(),
+                project: "ACP".into(),
+                path: copy.clone(),
+            },
+        )]));
+        let resolver_file = select_dependency_file(&locator, &project_files, Some("ACP"), 7000)
+            .expect("resolver answers")
+            .path;
+        let choice = CatalogueFileChoice::from_parts(locator, project_files);
+        assert_eq!(choice.for_library(7015, 7000), Some(copy.clone()));
+        assert_eq!(choice.for_library(7015, 7000), Some(resolver_file));
+        assert_eq!(choice.for_library(8000, 7000), Some(declared.clone()));
+        assert_eq!(choice.declared(7000), Some(declared));
+        assert_eq!(choice.for_library(7015, 7016), None, "MDB 没声明的目录库");
+        assert_eq!(choice.declared(7016), None);
     }
 }

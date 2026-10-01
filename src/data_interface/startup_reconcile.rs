@@ -346,6 +346,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         windows: catalogue_windows,
         cascade: catalogue_cascade,
         dependency_refresh: catalogue_dependency_refresh,
+        ..
     } = reconcile_catalogue_versions().await;
     // 目录那一位的语义（P3 起）：前移了**且**反查没能精确回答——某个库退化、或整个反查没跑成。
     // 精确命中只排引用根的启动不算退化。

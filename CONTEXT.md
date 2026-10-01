@@ -191,7 +191,7 @@ _Avoid_: 模型水位播种（只说了接管那一格）、把接管当成盖�
 _Avoid_: `gen_root`（已退役的表）、根凭证表、把账本持久化、拿账本当恢复输入、模型元数据
 
 **库级目录落款 (Library Catalogue Stamp)**：
-水位行上的 `model_catalogue_sessions = [{ dbnum, session }, …]`（ADR-079）：「这个库的整份模型与该目录到这一版一致」，逐根 `published_model_target.catalogue` 的库级替身。合并写（点名的目录换新值、其余原样留），只在 `all_roots_ok` 时随 `model_sesno` 同一笔盖；有资格盖的只有整库重生成的任务（初始化、起点 0 的 ModelOnly：从回执取最旧）与目录级联排的任务（入队时定下的 `X → T_X`，随行名单全成才盖，不从回执反推）。目录版本核对读它点名过期目录库、按库过滤排工；按需 `ensure` 的库级凭证判据读它核目录那一半。空 = 这个库还没有任何目录落款，不算过期、不参与核对。
+水位行上的 `model_catalogue_sessions = [{ dbnum, session }, …]`（ADR-079）：「这个库的整份模型与该目录到这一版一致」，逐根 `published_model_target.catalogue` 的库级替身。合并写（点名的目录换新值、其余原样留），只在 `all_roots_ok` 时随 `model_sesno` 同一笔盖；有资格盖的只有整库重生成的任务（初始化、起点 0 的 ModelOnly：从回执取最旧）与目录级联排的任务（入队时定下的 `X → T_X`，随行名单全成才盖，不从回执反推）。目录版本核对读它点名过期目录库、按库过滤排工；按需 `ensure` 的库级凭证判据读它核目录那一半。空 = 这个库还没有任何目录落款，不算过期、不参与核对。`session` 是**这个库生成真读的那份文件**的会话：同一个 CATA 库号在闭包里有几份文件时，生成按目标设计库所在项目选（所在项目有同号副本读副本，否则读 MDB 声明那份，`select_dependency_file`），核对也按同一个选法分组比、在同一份文件上收窗盖章，不拿 MDB 声明那份去比别的文件记下的会话号（ADR-078 追记 2026-09-30，GitHub #47）。`catalogue_project_priority` 只决定数据面正本，不决定模型面读哪份。MDB 没声明的 CATA 生成读不到，落款里不会有它（#46）。
 _Avoid_: 逐根目录落款、`root_dependency`（已退役的表）、目录版本表、把它当第三枚水位
 
 **整库房间对齐代号 (Library Room Alignment)**：

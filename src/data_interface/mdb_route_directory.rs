@@ -93,6 +93,15 @@ pub fn explain_unregistered_dbs_with(message: &str, directory: &MdbRouteDirector
     let reasons: Vec<String> = dbnums
         .into_iter()
         .filter_map(|dbnum| match directory.route_dbno(dbnum) {
+            // GitHub #46：路由目录里有它，却是依赖目录扫描补上的（MDB 没声明）。生成的 resolver 只认 MDB
+            // 声明的库，所以这几件画不出——与 E3D 用这个 MDB 打开时一样读不到它；它前移也就不会让任何已发布的根过期。
+            Ok(route) if route.origin == RouteOrigin::Dependency => Some(format!(
+                "dbnum {dbnum}：MDB {} 没声明它，只在依赖目录扫描里找到（项目 {}，{}）——生成只读 MDB 声明的库，\
+                 E3D 用这个 MDB 同样读不到它",
+                directory.mdb(),
+                route.project,
+                route.path.display()
+            )),
             Ok(_) => None,
             Err(error) => Some(format!("dbnum {dbnum}：{error}")),
         })
@@ -1716,6 +1725,30 @@ mod tests {
         assert_eq!(explain_unregistered_dbs_with("nothing to see", &directory), "nothing to see");
         let not_in_mdb = explain_unregistered_dbs_with("db 9999 没注册进这个 DbSet", &directory);
         assert!(not_in_mdb.contains("不在 MDB /ALL 的声明里"), "{not_in_mdb}");
+
+        // GitHub #46：依赖目录扫描补上的路由（MDB 没声明）也要说清——它有路由，但生成不读它。
+        let mut directory = directory;
+        directory.routes.insert(
+            7_016,
+            DbRoute {
+                dbnum: 7_016,
+                db_type: "CATA".to_string(),
+                project: "AvevaCatalogue".to_string(),
+                path: PathBuf::from(r"D:\acp000\acp7016_0001"),
+                shadowed: Vec::new(),
+                origin: RouteOrigin::Dependency,
+            },
+        );
+        let undeclared = explain_unregistered_dbs_with(
+            "db 7016 没注册进这个 DbSet，resolver 也给不出它的文件",
+            &directory,
+        );
+        assert!(
+            undeclared.contains(
+                "dbnum 7016：MDB /ALL 没声明它，只在依赖目录扫描里找到（项目 AvevaCatalogue"
+            ) && undeclared.contains("E3D 用这个 MDB 同样读不到它"),
+            "{undeclared}"
+        );
     }
 
     /// 真库门（手动）：当前 DbOption 指向的 MDB，目录构造零元素扫描、每条路由的文件头自证一致、

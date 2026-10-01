@@ -2,6 +2,32 @@
 
 ## 2026-09-30
 
+### 目录版本核对按「生成真读的那份」CATA 比；MDB 未声明的 CATA 不级联、失败处点名（GitHub #47 / #46）
+
+- **为什么**：新探针 `live_catalogue_file_selection_across_observation_reconcile_and_generation`（只读，AMS `/ALL`）量出 4 个同号多份的 CATA，
+  12 个（设计库项目, CATA）对里生成 ≠ 目录版本核对 2 对、≠ sweep 观察 3 对：ACP 的 8 个设计库读 `acp7000`（@272），核对拿 MDB 声明的
+  `ams7000`（@274）比——落款永远「落后」，每次核对在别的文件上收窗、按 AMS 的目录变动排 ACP 的根，`acp7000` 自己前移反而看不见；
+  AMS 的 20 个库读 `ams7355`，核对比的是 MDB 声明的 `aps7355`（今天同在 15）。#46：sweep 观察得到 16 个 MDB 未声明的 CATA，
+  而生成的 resolver 只认 MDB 声明的库——它们生成读不到，不会让任何已发布的根过期。
+- **改动**：
+  - `e3d_model_service::CatalogueFileChoice`：与 `E3dDbResolver` 同一张 locator、同一份项目副本表、同一个 `select_dependency_file`，
+    给核对答「这个设计库读哪份目录文件」——一处函数、两处调用。
+  - `model_coverage::reconcile_published_root_stamps`：按 `group_libraries_by_catalogue_files` 把设计库分成目录文件宇宙相同的几组，
+    每组在自己读的文件上点名、收窗（`collect_stale_catalogue_windows` 收调用方给的文件）、反查（`run_catalogue_cascade` 的目录源随组换副本）、
+    只给组里的库排工并按那份文件的会话盖落款（`enqueue_catalogue_cascade` 收组里的落款，不再另读一次），几组并成一份回执
+    （`CatalogueReconcile::absorb` / `CatalogueCascadeReport::absorb`）。全按 MDB 声明读的库仍是原来那一遍。
+  - sweep 目录观察按文件记（`ObservedCatalogueFiles = (库号, 文件) → 最新会话`）：被 `catalogue_project_priority` 遮蔽的同号副本也观察，
+    它前移同样开一次核对；回执的 `advanced_catalogue_dbnums` 仍按库号。
+  - `mdb_route_directory::explain_unregistered_dbs_with`：失败原文点到 `Dependency` 路由（MDB 没声明）的库号时补一句
+    「只在依赖目录扫描里找到（项目、文件）——生成只读 MDB 声明的库，E3D 用这个 MDB 同样读不到它」。
+  - ADR-078 追记 2026-09-30（#47 / #46）：模型读哪份核对就比哪份；决策 5 的 `catalogue_project_priority` 改口为只决定数据面正本；
+    未声明 CATA 不级联。`CONTEXT.md`「库级目录落款」补这一句。
+- **验证**：`cargo test --lib -- model_coverage catalogue_file_choice reverse_reference startup_reconcile cata_dependency catalogue
+  mdb_route_directory the_ingest_sweep_hands_catalogue_sessions_to_the_model_face` 104 passed / 0 failed / 10 ignored（新增
+  `catalogue_file_choice_answers_like_the_resolver_per_design_library`、`libraries_group_by_the_catalogue_files_their_generation_reads`、
+  `grouped_reconcile_parts_merge_into_one_report`，`unregistered_db_messages_get_the_route_directory_reason_appended` 加 `Dependency` 一态，
+  两条源码钉随结构改口）；探针在 AMS `/ALL` 上跑过（数字见上）。没有在真服务上走一遍分组后的启动核对（要一个有落款的现场库）。
+
 ### 刚体前移补三类越过锚点边界的排除，验收 1 全语料复跑（GitHub #36）
 
 - **为什么**：e3d-model 09-27 `d510253` 起 GENSEC 两端扣 `JOIS` / `JOIE` 关节 FIXING 名下的负体，09-15 起 WALL / GWALL 扣名下刀的世界体，

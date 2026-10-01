@@ -3806,11 +3806,13 @@ impl AiosDBManager {
         // sweep 是文件驱动的：从盘上有的文件出发逐个过门，所以「MDB 声明了却没文件」
         // 的库在上面三个桶里都不会出现——这张表是收尾那一句唯一的依据。
         let mut seen_design_dbnums: BTreeSet<u32> = BTreeSet::new();
-        // 选中的目录库正本 → 文件最新会话。目录库不进数据面（ADR-058 D1），但它的会话前移
+        // 目录库文件 → 文件最新会话。目录库不进数据面（ADR-058 D1），但它的会话前移
         // 是模型面目录级联的触发源（H1，2026-09-08）：收尾交给
         // `reconcile_catalogue_versions_after_sweep` 与上一轮比，前移了才开一次目录版本核对。
+        // 选中的正本与被项目优先级遮蔽的同号副本都记（GitHub #47：设计库所在项目里有副本时，生成读的是副本）。
         // 读不到头的不进表（未知，不触发）。
-        let mut catalogue_observed: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut catalogue_observed: crate::data_interface::model_coverage::ObservedCatalogueFiles =
+            BTreeMap::new();
         let mut catalogue_unreadable: Vec<String> = Vec::new();
         let mut manifest_totals = Vec::new();
         let time = Instant::now();
@@ -3911,6 +3913,13 @@ impl AiosDBManager {
                 if (db_type.eq_ignore_ascii_case("DICT") || db_type.eq_ignore_ascii_case("CATA"))
                     && !selected_catalogue_paths.contains(path)
                 {
+                    // 被遮蔽的 CATA 副本不进数据面，但照样观察：模型面按目标设计库所在项目选目录文件
+                    // （GitHub #47），它前移了也要开一次核对。读不到头就不记（未知，不触发）。
+                    if db_type.eq_ignore_ascii_case("CATA")
+                        && let Ok(sesno) = db_file_header::latest_sesno(path)
+                    {
+                        catalogue_observed.insert((db_no, path.to_path_buf()), sesno);
+                    }
                     continue;
                 }
                 // 选中的目录库正本：不进数据面（`UpdateScope::admits` 只认 SYS meta 与 MDB 声明的
@@ -3921,7 +3930,7 @@ impl AiosDBManager {
                 if db_type.eq_ignore_ascii_case("CATA") {
                     match db_file_header::latest_sesno(path) {
                         Ok(sesno) => {
-                            catalogue_observed.insert(db_no, sesno);
+                            catalogue_observed.insert((db_no, path.to_path_buf()), sesno);
                         }
                         Err(error) => {
                             catalogue_unreadable.push(format!("CATA:{db_no}"));
