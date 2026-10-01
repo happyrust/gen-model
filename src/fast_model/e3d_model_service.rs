@@ -6824,22 +6824,26 @@ mod tests {
         let store = ModelMemoryStore::default();
         let mesh_dir = service.mesh_dir.clone();
         let mut cache = CatalogueMeshCache::default();
+        // 两端整根重算里画不出的件（生成器本来就画不出的那几件）不拦对拍，只记——与全语料单元级对拍同一口径：
+        // 生产路照样按已画出的件发布（`partial_roots`），刚体前移挪的也只是这些记录。两端画不出的不是同一批时，
+        // 逐条比对自然对不上（多一条 / 少一条），照样判红。
         let regen_at = |root: RefNo,
                         sesno: u32,
                         input: &GenerationInput,
                         cache: &mut CatalogueMeshCache|
-         -> anyhow::Result<ProjectionCommit> {
+         -> anyhow::Result<(ProjectionCommit, usize)> {
             let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, cache)?;
-            anyhow::ensure!(
-                snapshot.report.failed.is_empty(),
-                "regen of {root} at {sesno} has {} failed element(s)",
-                snapshot.report.failed.len()
-            );
+            let failed = snapshot.report.failed.len();
+            if failed > 0 {
+                println!(
+                    "  regen of {root} at {sesno}: {failed} element(s) failed to evaluate (kept out of both sides)"
+                );
+            }
             let owners = snapshot.owners.clone();
             let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
             let (commit, _) =
                 project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
-            Ok(commit)
+            Ok((commit, failed))
         };
         // 两端都先整根重算完再落款：目录会话表是生成时按需填的（`E3dDbResolver` 开到哪个目录库才登记哪个），
         // `model_target` 的 `catalogue` 列就是「此刻表里有什么」——逐根边生成边落款，早生成的根落款里目录少几行，
@@ -6847,17 +6851,15 @@ mod tests {
         let clock = Instant::now();
         let mut seeds = Vec::new();
         let mut regen_t_by_root = BTreeMap::<String, ProjectionCommit>::new();
+        let mut failed_elements = (0usize, 0usize);
         for unit in &units {
             let root = parse_refno(&unit.root_refno)?;
-            seeds.push((
-                root,
-                unit.root_refno.clone(),
-                regen_at(root, base_sesno, &base, &mut cache)?,
-            ));
-            regen_t_by_root.insert(
-                unit.root_refno.clone(),
-                regen_at(root, target_sesno, &target, &mut cache)?,
-            );
+            let (seed, seed_failed) = regen_at(root, base_sesno, &base, &mut cache)?;
+            let (regen_t, target_failed) = regen_at(root, target_sesno, &target, &mut cache)?;
+            failed_elements.0 += seed_failed;
+            failed_elements.1 += target_failed;
+            seeds.push((root, unit.root_refno.clone(), seed));
+            regen_t_by_root.insert(unit.root_refno.clone(), regen_t);
         }
         let target_at_s = service.model_target(dbnum, base_sesno, &base.dependency_sessions)?;
         let target_at_t = service.model_target(dbnum, target_sesno, &target.dependency_sessions)?;
@@ -7283,11 +7285,19 @@ mod tests {
         );
         if failures.is_empty() {
             println!(
-                "GATE 3 OK: {} root(s) transform == regen@{target_sesno} (record_id / 1e-9 / bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content / receipt@T){}",
+                "GATE 3 OK: {} root(s) transform == regen@{target_sesno} (record_id / 1e-9 / bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content / receipt@T){}{}",
                 report.completed.len(),
                 if total_drift > 0 {
                     format!(
                         " — {total_drift} Baked mesh_id drift(s) counted as observation (content equal)"
+                    )
+                } else {
+                    String::new()
+                },
+                if failed_elements != (0, 0) {
+                    format!(
+                        " [failed elements S {} / T {} kept out of both sides]",
+                        failed_elements.0, failed_elements.1
                     )
                 } else {
                     String::new()

@@ -2,6 +2,28 @@
 
 ## 2026-09-30
 
+### 刚体前移补三类越过锚点边界的排除，验收 1 全语料复跑（GitHub #36）
+
+- **为什么**：e3d-model 09-27 `d510253` 起 GENSEC 两端扣 `JOIS` / `JOIE` 关节 FIXING 名下的负体，09-15 起 WALL / GWALL 扣名下刀的世界体，
+  WALL 名下 FIXING 的实例标架沿墙 spine 现算——三处都读锚点子树**之外**的东西。`rigid_anchor` 原有五类排除只看锚点及其祖先的 noun，
+  挪梁所在的框架、挪墙上的刀时，Δ 前移的结果与 regen@T 不等。
+- **改动**（`window_root_plan.rs`）：`anchor_subtree_facts` 沿 T 端成员表把锚点子树走一遍（超过 20 万元素不审、判不刚），
+  `anchor_subtree_exclusion` 排在前五类与路由容器之后：(d) 宿主墙上的刀（WALL 名下 `DESP` ≥ 10 项的 FIXING、GWALL 名下的 SBFI，
+  锚点之上有那面墙、中间没隔着同名刀）；(e) WALL datum 的现算标架（锚点之上有 WALL 名下的 `JLDATU` / `PLDATU`）；(f) 跨锚点边界的结构连接
+  （子树里 GENSEC 的关节 FIXING 在子树外，或子树里的关节 FIXING 被子树外的 GENSEC 用着；跨库一端算在外面）。SCTN 的关节 e3d-model 今天
+  不扣负体，不在此列。原因文本 `host cutter owner …` / `implicit datum frame` / `structural connection` 进回执 `transform_fallback_reason`。
+  ADR-066 规则 3 末注加 (d)(e)(f) 与状态行；`CONTEXT.md` 新词条「刚体前移发布」。
+- **门 3 探针改口径**（`probe_rigid_motion_gate3_for_window`）：两端整根重算里画不出的件不拦对拍、只记（与全语料单元级对拍同口径），
+  两端不是同一批时逐条比对照样判红。此前 YCYK `acw5525` 的根两端各有 2–4 件画不出，25 窗全判不了。
+- **验证**：
+  - 文件侧对拍门 `probe_rigid_exclusion_windows`（全语料 3722 窗，971 s）：只动方位候选 1750，合格锚点 240、对拍 210 根**不等·锚点 0**；
+    新三类在自然窗口上 0 触发。
+  - 生产记录门 3（B8）：3722 窗里有 transform 根的 190 窗全跑，**180 窗 242 根 GATE 3 OK、0 FAIL**；6 窗文件侧本就不等、4 窗是备份文件跳过。
+  - 专造样本 `live_rigid_anchor_rejects_cross_boundary_joints_and_host_cutters`：aps250110 关节框架、ams1112 WALL 刀 / GWALL 套管各点名一例。
+  - 开关开态九个钉死窗口桶位不变（`live_ams8000_pinned_windows_land_in_the_expected_buckets`）；
+    `cargo test --lib -- window_root_plan rigid_motion direct_window_replay_parity startup_reconcile mdb_membership` 117 passed / 0 failed / 13 ignored。
+  - `model_transform_cheap_path` 默认**仍关**：live #2 真机链与验收 3（Task 时长省 ≥ 30%）没跑。
+
 ### 移出 MDB 的库：启动核对与 SYST 刷新点名，不自动清（GitHub #41）
 
 - **为什么**：库从 CURD 移出之后，它留在库里的 `pe` / noun 行、模型行、房间边、空间树条目与水位行没有任何路径处理，也没有 ADR 说

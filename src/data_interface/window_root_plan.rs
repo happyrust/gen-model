@@ -639,10 +639,219 @@ fn anchor_lineage_exclusion(
     Ok(())
 }
 
+/// e3d-model `elmodl::SBFI_DESP_MIN`：墙名下的刀凑得齐这么多项 `DESP` 才开洞（`collect_host_fixings` /
+/// `collect_host_sleeves` 同一道门）。
+const HOST_CUTTER_DESP_MIN: usize = 10;
+
+/// 宿主墙与它开洞用的刀：`(刀 noun, 宿主 noun)`。宿主的网格扣的是刀的**世界体**（e3d-model `elmodl.rs`：
+/// WALL → `collect_host_fixings` → `fixing_world_cutter`，GWALL → `collect_host_sleeves` → `sleeve_world_cutter`），
+/// 两边的收刀都是「沿成员往下钻，遇到刀 noun 就停」。
+const HOST_CUTTERS: [(&str, &str); 2] = [("FIXING", "WALL"), ("SBFI", "GWALL")];
+
+/// 墙 datum 的两级：没有 POS/ORI，标架由属主现算。
+const WALL_DATUM_NOUNS: [&str; 2] = ["JLDATU", "PLDATU"];
+
+/// 锚点子树最多审多少个元素；再大就不审、判不刚（审不起的宁可整根重算）。
+const ANCHOR_SUBTREE_CAP: usize = 200_000;
+
+/// 锚点子树（含锚点自己，T 端成员表自上而下）里与「越过锚点边界的几何依赖」有关的事实，
+/// 由 [`anchor_subtree_facts`] 读文件收集，[`anchor_subtree_exclusion`] 只看它判——判法是纯函数，单测直接喂。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct AnchorSubtreeFacts {
+    /// 子树里全部元素的 `(word0, word1)`。
+    inside: BTreeSet<(u32, u32)>,
+    /// 子树里、从锚点往下钻没穿过同名刀也没穿过同类宿主就碰到的刀：`(刀, 刀 noun)`——只有这些会被锚点**之上**的
+    /// 宿主收走（子树里自带的宿主连刀一起挪，不算）。
+    host_cutters: Vec<(RefNo, &'static str)>,
+    /// 子树里 GENSEC 的关节：`(梁, JOIS | JOIE, 关节元素)`，只收指着 FIXING 或指到别的库的（后者读不了 noun，算关节）。
+    beam_joints: Vec<(RefNo, &'static str, RefNo)>,
+    /// 子树里的关节 FIXING 被哪根梁用：`(FIXING, 梁)`——`CREF` 回指的 GENSEC 的 `JOIS` / `JOIE` 指回它才算；
+    /// `CREF` 指到别的库的也收（读不了梁，算关节）。
+    joint_consumers: Vec<(RefNo, RefNo)>,
+    /// 子树超过 [`ANCHOR_SUBTREE_CAP`]，没审完。
+    truncated: bool,
+}
+
+/// 读 T 端文件收集 [`AnchorSubtreeFacts`]。只读成员表、noun、`DESP`、`JOIS` / `JOIE` / `CREF`。
+fn anchor_subtree_facts(target: &Arc<DbSet>, anchor: RefNo) -> anyhow::Result<AnchorSubtreeFacts> {
+    let mut facts = AnchorSubtreeFacts::default();
+    // `(元素, 已穿过的刀 / 宿主 noun)`：收刀照 e3d-model 的下钻——遇到刀 noun 就停；子树里自带的宿主
+    // 连同名下的刀一起挪，它下面的刀不归锚点之上的宿主。
+    let mut stack: Vec<(RefNo, Vec<&'static str>)> = vec![(anchor, Vec::new())];
+    let desp_len = |element: &e3d_io::db_element::DbElement| -> anyhow::Result<usize> {
+        Ok(element
+            .get_double_array("DESP")
+            .with_context(|| format!("DESP of {}", element.refno()))?
+            .map_or(0, |desp| desp.len()))
+    };
+    while let Some((refno, crossed)) = stack.pop() {
+        if !facts.inside.insert((refno.word0, refno.word1)) {
+            continue;
+        }
+        if facts.inside.len() > ANCHOR_SUBTREE_CAP {
+            facts.truncated = true;
+            return Ok(facts);
+        }
+        let element = target.element(refno);
+        let noun = element
+            .element_type()
+            .with_context(|| format!("noun of {refno} in anchor {anchor} subtree"))?;
+        let mut below = crossed.clone();
+        for (cutter, host) in HOST_CUTTERS {
+            if noun == cutter {
+                if !crossed.contains(&cutter)
+                    && !crossed.contains(&host)
+                    && desp_len(&element)? >= HOST_CUTTER_DESP_MIN
+                {
+                    facts.host_cutters.push((refno, cutter));
+                }
+                below.push(cutter);
+            } else if noun == host {
+                below.push(host);
+            }
+        }
+        match noun.as_str() {
+            "GENSEC" => {
+                for attribute in ["JOIS", "JOIE"] {
+                    let Some(joint) = element
+                        .get_ref(attribute)
+                        .with_context(|| format!("{attribute} of GENSEC {refno}"))?
+                    else {
+                        continue;
+                    };
+                    let is_fixing = joint.dbno() != refno.dbno()
+                        || target
+                            .element(joint)
+                            .element_type()
+                            .is_ok_and(|joint_noun| joint_noun == "FIXING");
+                    if is_fixing {
+                        facts.beam_joints.push((refno, attribute, joint));
+                    }
+                }
+            }
+            "FIXING" => {
+                if let Some(beam) = element
+                    .get_ref("CREF")
+                    .with_context(|| format!("CREF of FIXING {refno}"))?
+                {
+                    let consumes = if beam.dbno() != refno.dbno() {
+                        true
+                    } else {
+                        let beam_element = target.element(beam);
+                        beam_element
+                            .element_type()
+                            .is_ok_and(|beam_noun| beam_noun == "GENSEC")
+                            && ["JOIS", "JOIE"].iter().any(|attribute| {
+                                beam_element
+                                    .get_ref(attribute)
+                                    .is_ok_and(|joint| joint == Some(refno))
+                            })
+                    };
+                    if consumes {
+                        facts.joint_consumers.push((refno, beam));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let members = element
+            .member_refnos()
+            .with_context(|| format!("members of {refno} in anchor {anchor} subtree"))?;
+        for member in members.into_iter().rev() {
+            stack.push((member, below.clone()));
+        }
+    }
+    Ok(facts)
+}
+
+/// 锚点子树**越过锚点边界**的几何依赖（ADR-066 D1 规则 3 · 2026-09-30 补的三类，GitHub #36）。`lineage` 同
+/// [`anchor_lineage_exclusion`]：T 端严格祖先 `(refno, noun)`，自下而上。
+///
+/// 1. **宿主墙上的刀**：锚点之上有 WALL / GWALL（中间没隔着同名刀），锚点自己或名下有那面墙开洞用的刀——墙扣的是
+///    刀的世界体，挪刀不挪墙，洞停在原处，墙要整根重算。原因带 `host cutter owner <宿主 noun>`。
+/// 2. **WALL datum 的现算标架**：锚点之上有 WALL 名下的 `JLDATU` / `PLDATU`——这两级没有 POS/ORI，FIXING 的实例标架由
+///    e3d-model `fixing_host_frame` 沿墙 spine 现算，`world_matrix` 在这条链上折出的 Δ 不是它真正的位移。
+///    （GENSEC 名下的 datum `world_matrix` 认得，而且规则 M 已经挡在前面。）
+/// 3. **跨锚点边界的结构连接**：子树里的 GENSEC 从 `JOIS` / `JOIE` 指着的关节 FIXING 取负体扣梁端（e3d-model
+///    `collect_joint_negatives`），FIXING 在子树外——刀口不随 Δ 走；反过来子树里的关节 FIXING 被子树外的梁用着——
+///    梁端的刀跟着 Δ 走了、梁没动（子树外的梁由 e3d-model 关节级联 `joint_consumer_of` 拉进计划，但**同一根里**的
+///    兄弟梁只能靠这里把整根踢回 `regen`）。跨库的一端一律算在外面。SCTN 的关节（`SJOI` / `PJOI`）e3d-model 今天
+///    不扣负体，不在此列。原因带 `structural connection`。
+fn anchor_subtree_exclusion(
+    refno: RefNo,
+    lineage: &[(RefnoEnum, String)],
+    facts: &AnchorSubtreeFacts,
+) -> Result<(), String> {
+    if facts.truncated {
+        return Err(format!(
+            "anchor {refno} subtree exceeds {ANCHOR_SUBTREE_CAP} elements; host cutters / structural connections not vetted"
+        ));
+    }
+    for (cutter_noun, host_noun) in HOST_CUTTERS {
+        // 最近的宿主；中间隔着同名刀就收不到锚点这一支（e3d-model 的下钻遇刀就停）。
+        let host = lineage
+            .iter()
+            .take_while(|(_, noun)| noun != cutter_noun)
+            .find(|(_, noun)| noun == host_noun);
+        let Some((host, _)) = host else {
+            continue;
+        };
+        if let Some((cutter, _)) = facts
+            .host_cutters
+            .iter()
+            .find(|(_, noun)| *noun == cutter_noun)
+        {
+            return Err(format!(
+                "anchor {refno} moves host cutter {cutter_noun} {cutter} but not its host cutter owner {host_noun} {host}; \
+                 the host cuts its hole from the cutter's world solid (e3d-model collect_host_fixings / collect_host_sleeves)"
+            ));
+        }
+    }
+    for (index, (datum, datum_noun)) in lineage.iter().enumerate() {
+        if !WALL_DATUM_NOUNS.contains(&datum_noun.as_str()) {
+            continue;
+        }
+        let host = lineage[index + 1..]
+            .iter()
+            .find(|(_, noun)| !WALL_DATUM_NOUNS.contains(&noun.as_str()));
+        if let Some((wall, _)) = host.filter(|(_, noun)| noun == "WALL") {
+            return Err(format!(
+                "anchor {refno} sits in the implicit datum frame of {datum_noun} {datum} on WALL {wall}; \
+                 e3d-model fixing_host_frame computes that frame from the wall spine, so world_matrix's Δ is not its motion"
+            ));
+        }
+    }
+    let inside = |other: RefNo| {
+        other.dbno() == refno.dbno() && facts.inside.contains(&(other.word0, other.word1))
+    };
+    if let Some((beam, attribute, joint)) = facts
+        .beam_joints
+        .iter()
+        .find(|(_, _, joint)| !inside(*joint))
+    {
+        return Err(format!(
+            "anchor {refno} carries GENSEC {beam} whose {attribute} joint FIXING {joint} lies outside it; \
+             the beam's end cut comes from that structural connection (e3d-model collect_joint_negatives) and does not move with Δ"
+        ));
+    }
+    if let Some((fixing, beam)) = facts
+        .joint_consumers
+        .iter()
+        .find(|(_, beam)| !inside(*beam))
+    {
+        return Err(format!(
+            "anchor {refno} carries joint FIXING {fixing} of GENSEC {beam} outside it; \
+             that structural connection moves the beam's end cut with Δ while the beam stays"
+        ));
+    }
+    Ok(())
+}
+
 /// 一个只动了摆放的候选：`Δ = W_T·W_S⁻¹`（两端世界矩阵都在文件侧算），外加排除的判决
-/// （ADR-066 D1 规则 3 及其 2026-09-15 补条）——noun 级的全部判决在 [`anchor_lineage_exclusion`]
+/// （ADR-066 D1 规则 3 及其 2026-09-15 / 2026-09-30 补条）——noun 级的全部判决在 [`anchor_lineage_exclusion`]
 /// （候选自己：桥架件 / P23 / 负体 / 剖面数据 / 几何集；直接属主消费成员；祖先：`CWBRAN` / 点环容器 / 规则 M 结构件），
-/// 之后再沿 T 端**严格祖先**读元素查路由容器（`derives_implied_tubes`）。
+/// 之后再沿 T 端**严格祖先**读元素查路由容器（`derives_implied_tubes`），最后读锚点子树查越过锚点边界的依赖
+/// （[`anchor_subtree_exclusion`]：宿主墙上的刀、WALL datum 现算标架、跨边界的结构连接）。
 fn rigid_anchor(
     base: &Arc<DbSet>,
     target: &Arc<DbSet>,
@@ -677,6 +886,10 @@ fn rigid_anchor(
                 break;
             }
         }
+    }
+    if rigid.is_ok() {
+        let facts = anchor_subtree_facts(target, refno)?;
+        rigid = anchor_subtree_exclusion(refno, &lineage, &facts);
     }
     Ok(CandidateKind::Anchor { delta, rigid })
 }
@@ -3627,6 +3840,289 @@ mod tests {
         }
     }
 
+    /// ADR-066 D1 规则 3 · 2026-09-30 补的三类（GitHub #36）的纯判决：把子树事实表直接喂给
+    /// [`anchor_subtree_exclusion`]，看原因。读文件收事实的那一半由下面的真库对照钉。
+    #[test]
+    fn subtree_exclusion_rejects_host_cutters_wall_datum_frames_and_cross_boundary_joints() {
+        let anchor = RefNo::new(24381, 100);
+        let chain = |nouns: &[(u32, &str)]| -> Vec<(RefnoEnum, String)> {
+            nouns
+                .iter()
+                .map(|(word1, noun)| (refno_from_e3d(RefNo::new(24381, *word1)), noun.to_string()))
+                .collect()
+        };
+        let facts_with = |extra: &[RefNo]| {
+            let mut facts = AnchorSubtreeFacts::default();
+            facts.inside.insert((anchor.word0, anchor.word1));
+            for refno in extra {
+                facts.inside.insert((refno.word0, refno.word1));
+            }
+            facts
+        };
+
+        // 1) 宿主墙上的刀：WALL 在锚点之上，锚点自己是带得齐 DESP 的 FIXING。
+        let mut cutter = facts_with(&[]);
+        cutter.host_cutters.push((anchor, "FIXING"));
+        let wall_datum = chain(&[
+            (201, "PLDATU"),
+            (202, "JLDATU"),
+            (203, "WALL"),
+            (204, "STRU"),
+        ]);
+        let reason = anchor_subtree_exclusion(anchor, &wall_datum, &cutter).unwrap_err();
+        assert!(reason.contains("host cutter owner WALL"), "{reason}");
+        // 同一把刀、锚点之上没有 WALL（刀连墙一起挪）：不排除。
+        let above_the_wall = chain(&[(204, "STRU"), (205, "SITE")]);
+        assert_eq!(
+            anchor_subtree_exclusion(anchor, &above_the_wall, &cutter),
+            Ok(())
+        );
+        // 锚点与墙之间隔着一只 FIXING：e3d-model 的收刀停在那只 FIXING，锚点这一支不归墙。
+        let behind_a_fixing = chain(&[(208, "FIXING"), (203, "WALL")]);
+        assert_eq!(
+            anchor_subtree_exclusion(anchor, &behind_a_fixing, &cutter),
+            Ok(())
+        );
+        // GWALL 收 SBFI、不收 FIXING。
+        let gwall = chain(&[(206, "CMPF"), (207, "GWALL"), (204, "STRU")]);
+        assert_eq!(anchor_subtree_exclusion(anchor, &gwall, &cutter), Ok(()));
+        let mut sleeve = facts_with(&[]);
+        sleeve.host_cutters.push((anchor, "SBFI"));
+        let reason = anchor_subtree_exclusion(anchor, &gwall, &sleeve).unwrap_err();
+        assert!(reason.contains("host cutter owner GWALL"), "{reason}");
+
+        // 2) WALL datum 的现算标架：没有刀也不刚；GENSEC 名下的 datum 不归这一条（world_matrix 认得，规则 M 在前面挡）。
+        let plain = facts_with(&[]);
+        let reason = anchor_subtree_exclusion(anchor, &wall_datum, &plain).unwrap_err();
+        assert!(reason.contains("implicit datum frame"), "{reason}");
+        let gensec_datum = chain(&[(201, "PLDATU"), (202, "JLDATU"), (209, "GENSEC")]);
+        assert_eq!(
+            anchor_subtree_exclusion(anchor, &gensec_datum, &plain),
+            Ok(())
+        );
+
+        // 3) 结构连接：梁的关节在子树外 / 子树里的关节被子树外的梁用 / 关节在别的库——都排除；两端都在子树里放行。
+        let frame = chain(&[(204, "STRU"), (205, "SITE")]);
+        let (beam, fixing) = (RefNo::new(24381, 300), RefNo::new(24381, 301));
+        let mut leaving = facts_with(&[beam]);
+        leaving.beam_joints.push((beam, "JOIE", fixing));
+        let reason = anchor_subtree_exclusion(anchor, &frame, &leaving).unwrap_err();
+        assert!(
+            reason.contains("structural connection") && reason.contains("JOIE"),
+            "{reason}"
+        );
+        let mut consumed = facts_with(&[fixing]);
+        consumed.joint_consumers.push((fixing, beam));
+        let reason = anchor_subtree_exclusion(anchor, &frame, &consumed).unwrap_err();
+        assert!(reason.contains("structural connection"), "{reason}");
+        let mut closed = facts_with(&[beam, fixing]);
+        closed.beam_joints.push((beam, "JOIE", fixing));
+        closed.joint_consumers.push((fixing, beam));
+        assert_eq!(anchor_subtree_exclusion(anchor, &frame, &closed), Ok(()));
+        let elsewhere = RefNo::new(24384, 301);
+        assert_ne!(
+            anchor.dbno(),
+            elsewhere.dbno(),
+            "夹具前提：两个 refno 不同库"
+        );
+        let mut cross_db = facts_with(&[beam]);
+        cross_db.inside.insert((elsewhere.word0, elsewhere.word1));
+        cross_db.beam_joints.push((beam, "JOIS", elsewhere));
+        let reason = anchor_subtree_exclusion(anchor, &frame, &cross_db).unwrap_err();
+        assert!(reason.contains("structural connection"), "{reason}");
+
+        // 4) 子树大到审不完：不刚。
+        let mut truncated = facts_with(&[]);
+        truncated.truncated = true;
+        let reason = anchor_subtree_exclusion(anchor, &frame, &truncated).unwrap_err();
+        assert!(reason.contains("not vetted"), "{reason}");
+    }
+
+    /// 真库对照（`#[ignore]`，手动）：ADR-066 D1 规则 3 在 2026-09-29 补的两类排除，拿真库里的形状当**假想锚点**问
+    /// [`rigid_anchor`]（S = T = 同一份 `DbSet`，Δ 是单位阵，只看判决）：
+    ///
+    /// - aps250110：GENSEC 的 `JOIS` / `JOIE` 关节 FIXING 挂在**别的**框架下，挪梁所在的那个框架——梁端头的负体取自
+    ///   不动的 FIXING（e3d-model `elmodl::collect_joint_negatives`），左乘 Δ 的刀口是错的；
+    /// - ams1112：带 `DESP` 的 FIXING 在 WALL 下（`collect_host_fixings` → `fixing_world_cutter` 在墙上开洞）、SBFI 在
+    ///   GWALL 下（`collect_host_sleeves` → `sleeve_world_cutter`）——挪刀不挪墙，墙上的洞停在原处。
+    ///
+    /// 三种形状都必须判 `rigid: Err`，原因分别带 `structural connection` 与 `host cutter owner`；顺带数出语料里这种框架 /
+    /// 刀有多少个。
+    #[test]
+    #[ignore = "manual live: reads aps250110 / ams1112 and the E3D template directory"]
+    fn live_rigid_anchor_rejects_cross_boundary_joints_and_host_cutters() {
+        use std::path::PathBuf;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+
+        use crate::data_interface::direct_store::DirectSchema;
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi = template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+        let dirs: Vec<PathBuf> = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .collect();
+        let resolver = Arc::new(
+            e3d_model::DirectoryDbResolver::scan(&dirs, schema.template_dir())
+                .expect("scan the corpus directories into a dbno → file table"),
+        );
+        let open = |file: &Path| -> (Arc<DbSet>, Arc<BTreeMap<(u32, u32), RefNo>>) {
+            let set = Arc::new(
+                DbSet::with_attlib_file_and_resolver(
+                    &attlib,
+                    Box::new(ProbeResolver(resolver.clone())),
+                )
+                .expect("attlib"),
+            );
+            set.add_db(DbFilePin {
+                file: file.to_path_buf(),
+                template: desi.clone(),
+                db_type: Some("DESI".into()),
+                sesno: None,
+            })
+            .expect("pin the DESI file");
+            let index = scan_index(file, None).expect("scan the file index");
+            (set, index.owners)
+        };
+        let verdict = |set: &Arc<DbSet>, owners: &BTreeMap<(u32, u32), RefNo>, anchor: RefNo| {
+            match rigid_anchor(set, set, anchor, &owner_chain_t(owners, anchor)) {
+                Ok(CandidateKind::Anchor { rigid, .. }) => rigid,
+                Ok(other) => Err(format!("not an anchor: {other:?}")),
+                Err(error) => Err(format!("unreadable: {error:#}")),
+            }
+        };
+        // 最近的、noun 在名单里的严格祖先（T 端索引）。
+        let nearest = |set: &Arc<DbSet>,
+                       owners: &BTreeMap<(u32, u32), RefNo>,
+                       refno: RefNo,
+                       nouns: &[&str]| {
+            owner_chain_t(owners, refno)
+                .into_iter()
+                .map(refno_to_e3d)
+                .find(|ancestor| {
+                    set.element(*ancestor)
+                        .element_type()
+                        .is_ok_and(|noun| nouns.contains(&noun.as_str()))
+                })
+        };
+        let descends = |owners: &BTreeMap<(u32, u32), RefNo>, refno: RefNo, ancestor: RefNo| {
+            (refno.word0, refno.word1) == (ancestor.word0, ancestor.word1)
+                || owner_chain_t(owners, refno)
+                    .into_iter()
+                    .map(refno_to_e3d)
+                    .any(|a| (a.word0, a.word1) == (ancestor.word0, ancestor.word1))
+        };
+        let mut failures = Vec::new();
+
+        // 1) aps250110：梁的关节伸出梁所在的框架。
+        let (set, owners_arc) = open(Path::new(
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000\aps250110_0001",
+        ));
+        let owners: &BTreeMap<(u32, u32), RefNo> = &owners_arc;
+        let mut joints = 0usize;
+        let mut frames: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut leaving: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut first: Option<(RefNo, RefNo, RefNo)> = None;
+        for &(word0, word1) in owners.keys() {
+            let beam = RefNo::new(word0, word1);
+            let element = set.element(beam);
+            if !element.element_type().is_ok_and(|noun| noun == "GENSEC") {
+                continue;
+            }
+            let Some(frame) = nearest(&set, owners, beam, &["SBFR", "FRMW", "STRU"]) else {
+                continue;
+            };
+            frames.insert((frame.word0, frame.word1));
+            for attribute in ["JOIS", "JOIE"] {
+                let Ok(Some(fixing)) = element.get_ref(attribute) else {
+                    continue;
+                };
+                if !set
+                    .element(fixing)
+                    .element_type()
+                    .is_ok_and(|noun| noun == "FIXING")
+                {
+                    continue;
+                }
+                joints += 1;
+                if !descends(owners, fixing, frame) {
+                    leaving.insert((frame.word0, frame.word1));
+                    first.get_or_insert((frame, beam, fixing));
+                }
+            }
+        }
+        println!(
+            "aps250110: {joints} GENSEC → FIXING joints; {} of {} framing containers have a joint leaving them",
+            leaving.len(),
+            frames.len()
+        );
+        match first {
+            Some((frame, beam, fixing)) => {
+                let rigid = verdict(&set, owners, frame);
+                println!("  frame {frame} (beam {beam} → FIXING {fixing}): {rigid:?}");
+                if !rigid
+                    .as_ref()
+                    .err()
+                    .is_some_and(|reason| reason.contains("structural connection"))
+                {
+                    failures.push(format!("frame {frame}: {rigid:?}"));
+                }
+            }
+            None => failures.push("aps250110: no GENSEC joint leaves its frame".to_string()),
+        }
+
+        // 2) ams1112：墙上的 FIXING 刀、GWALL 上的 SBFI 套管。
+        let (set, owners_arc) = open(Path::new(
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams1112_0001",
+        ));
+        let owners: &BTreeMap<(u32, u32), RefNo> = &owners_arc;
+        for (cutter, host) in [("FIXING", "WALL"), ("SBFI", "GWALL")] {
+            let mut count = 0usize;
+            let mut sample = None;
+            for &(word0, word1) in owners.keys() {
+                let refno = RefNo::new(word0, word1);
+                let element = set.element(refno);
+                if !element.element_type().is_ok_and(|noun| noun == cutter) {
+                    continue;
+                }
+                if !element
+                    .get_double_array("DESP")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|desp| desp.len() >= 10)
+                {
+                    continue;
+                }
+                if nearest(&set, owners, refno, &[host]).is_none() {
+                    continue;
+                }
+                count += 1;
+                sample.get_or_insert(refno);
+            }
+            println!("ams1112: {count} {cutter} with DESP under {host}");
+            match sample {
+                Some(refno) => {
+                    let rigid = verdict(&set, owners, refno);
+                    println!("  {cutter} {refno}: {rigid:?}");
+                    if !rigid.as_ref().err().is_some_and(|reason| {
+                        reason.contains("host cutter owner") && reason.contains(host)
+                    }) {
+                        failures.push(format!("{cutter} {refno} under {host}: {rigid:?}"));
+                    }
+                }
+                None => failures.push(format!("ams1112: no {cutter} with DESP under {host}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[test]
     fn effective_increment_planner_has_no_legacy_read_route() {
         let source = include_str!("window_root_plan.rs");
@@ -6535,6 +7031,14 @@ mod tests {
             "规则 M 结构件之下"
         } else if reason.contains("route container") {
             "路由容器之内"
+        } else if reason.contains("host cutter owner") {
+            "宿主墙上的刀（09-30）"
+        } else if reason.contains("implicit datum frame") {
+            "WALL datum 现算标架（09-30）"
+        } else if reason.contains("structural connection") {
+            "跨锚点边界的结构连接（09-30）"
+        } else if reason.contains("not vetted") {
+            "子树过大未审（09-30）"
         } else {
             "其它（世界矩阵 / 属主链算不出）"
         }
