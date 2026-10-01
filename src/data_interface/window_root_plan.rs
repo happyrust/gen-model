@@ -1668,18 +1668,19 @@ pub(crate) async fn build_model_update_plan_from_window(
         let target = service.build_set(dbnum, Some(target_sesno))?;
         // P4 逐库并集的输入：一张反向表只答它自己那个库的引用者，跨库引用者只有逐个开
         // MDB 的设计成员才找得到。开关关着时连成员名单都不解——`design_sources` 要为每个
-        // 未钉住的库开一次文件问最新会话。
+        // 未钉住的库开一次文件问最新会话。问不出会话的成员不让这一窗规划失败（`sesno: None`
+        // = 反查按文件最新自己开，开不了记进 `unreadable_dbs`、整窗退化点名；GitHub #32）。
         let design_dbs: Vec<crate::data_interface::reverse_reference::SourceDb> =
             if crate::options::model_design_reference_cascade() {
                 service
-                    .design_sources()?
+                    .design_sources()
                     .into_iter()
                     .map(|(dbnum, file, sesno)| {
                         crate::data_interface::reverse_reference::SourceDb {
                             dbnum,
                             db_type: "DESI".to_string(),
                             file,
-                            sesno: Some(sesno),
+                            sesno,
                         }
                     })
                     .collect()

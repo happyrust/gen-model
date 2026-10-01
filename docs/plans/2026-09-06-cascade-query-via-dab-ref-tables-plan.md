@@ -207,7 +207,8 @@ GETWORK 刷新路径不调引用表。所以 core 里「联动查询的更新处
 > `expand_reverse_cascade` 同模块、同判据（`reference_tables_of`）、同点查（`ReadOnlyEngine::referrers_of`），
 > 分开的只是种子从哪来（一窗的变更设计元素 vs 变动目录件）与结果排给谁。挂在 `WindowRootSources` 上，
 > 形状与 C2 `structural_connection` / C8 `cable_endpoint` 一致；开关 `model_design_reference_cascade`
-> （`AIOS_MODEL_DESIGN_REFERENCE_CASCADE`）**默认关**，关着时连 MDB 成员名单都不解。
+> （`AIOS_MODEL_DESIGN_REFERENCE_CASCADE`）~~**默认关**~~（**2026-09-30 起默认开**，GitHub #32，见本节末），
+> 关着时连 MDB 成员名单都不解。
 >
 > - **逐库并集**：`E3dModelService::design_sources()` 给出 MDB 的全部设计成员（含各自的生成会话，ADR-054 Q1），
 >   本库换成钉住窗口 T 端的那一份。一张反向表只答它自己那个库的引用者（表在引用方的库里），跨库引用者
@@ -259,6 +260,25 @@ GETWORK 刷新路径不调引用表。所以 core 里「联动查询的更新处
 > - 两态门只证了「开关不改今天任何一窗的结果」，**没有**证「改了被参照件、参照它的根会进 `regen`」——
 >   语料里没有这种自然窗口，要么自造一个会话，要么等真项目里出现。
 > - 跨库排工、以及 P5 那条 live 验收，都还在原地。
+>
+> **默认翻开（2026-09-30，GitHub #32）**：`model_design_reference_cascade` 由默认关改为**默认开**——代码默认
+> （`options::effective_default_on_switch`：环境变量 > 配置 > `true`）、`DbOption.toml`、出厂模板
+> `scripts/templates/DbOption.factory.toml` 三处同为 `true`，单测 `the_design_reference_cascade_defaults_on_and_stays_switchable`
+> 钉住真值表与「模板 = 代码默认」。依据是上面三道门在当天的树上重跑全绿：
+> - `live_every_posref_table_answers_its_own_referrers`：查过 31 个库，「表在但零边」的 0 个；
+> - `live_existing_windows_never_lose_a_root_with_the_cascade_on`：对拍 93 窗，两态不同的 0 窗（215 s）；
+> - `live_ams8000_pinned_windows_land_in_the_expected_buckets` 在 `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=1` 与 `=0`
+>   下各跑一遍都过，9 个钉死窗口的 touched / regen / delete 两态逐字相同。
+>
+> 翻开时补了一处只有默认开才会撞上的失败面：`E3dModelService::design_sources()` 原来对每个未钉住的设计成员问
+> 最新会话，一个问不出（文件不在、被占）就 `?` 让这一窗规划报错——默认关时这条路不走，默认开之后一个成员出事
+> 会让**所有**设计库的窗口规划一起停。现在问不出交 `sesno: None`，由反查按文件最新自己开；开不了记进
+> `unreadable_dbs`，按 §2 原则 3 整窗退化并点名（单测
+> `an_unreadable_design_member_degrades_the_reference_cascade_instead_of_failing_the_window`）。
+>
+> 回退：配置 `model_design_reference_cascade = false`，或环境变量 `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=0`
+> （压过配置，不必改文件）。上面「未做」三条不因翻开而变：「改了被参照件 → 引用者进 `regen`」的正向证据仍只有
+> 单测三态契约、语料里没有自然窗口；跨库排工仍记账不排。
 
 ### P5 · `ref_rev` 降级（1 天 + 一份 ADR）
 

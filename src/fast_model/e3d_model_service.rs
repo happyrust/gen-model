@@ -2768,20 +2768,14 @@ impl E3dModelService {
 
     /// Every design database of the current MDB as `(dbnum, file, source session)`,
     /// the session being the one generation would read right now (ADR-054 Q1).
-    /// Derived faces that must not depend on parsed `pe` rows (room topology,
-    /// `room_topology`) enumerate the files through this.
-    pub(crate) fn design_sources(&self) -> anyhow::Result<Vec<(u32, PathBuf, u32)>> {
-        self.pins
-            .iter()
-            .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
-            .map(|pin| {
-                Ok((
-                    pin.dbnum as u32,
-                    pin.file.clone(),
-                    self.source_session(pin)?,
-                ))
-            })
-            .collect()
+    ///
+    /// `None` = 未钉住的成员此刻问不出最新会话（文件不在、被占、会话头读挂）。**不让调用方整个失败**：
+    /// 唯一的调用方是 P4 设计引用级联（`window_root_plan` 的窗口规划），`None` 交给反查按「文件最新」
+    /// 自己去开——开得了，读到的就是生成此刻会读的那个会话；开不了，记进 `unreadable_dbs`，整窗按
+    /// 计划 §2 原则 3 退化（已持久化的根全部重算）并在回执点名。2026-09-30 P4 翻默认开（GitHub #32）
+    /// 时补的：此前这里一个成员问不出会话，`?` 就让**每一个**设计库的窗口规划一起报错。
+    pub(crate) fn design_sources(&self) -> Vec<(u32, PathBuf, Option<u32>)> {
+        design_members(&self.pins, |pin| self.source_session(pin))
     }
 
     /// The session a database is generated from (ADR-054 Q1): an explicit pin
@@ -3123,6 +3117,18 @@ fn current_mdb_source_inventory()
 pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator)> {
     let (pins, locator, _) = current_mdb_source_inventory()?;
     Ok((pins, locator))
+}
+
+/// [`E3dModelService::design_sources`] 的纯核：MDB 的设计成员，各带生成此刻读的会话
+/// （`session` 即 `source_session`：钉住的照钉、没钉的问文件最新）；问不出的交 `None`，不中断。
+fn design_members(
+    pins: &[DbPin],
+    mut session: impl FnMut(&DbPin) -> anyhow::Result<u32>,
+) -> Vec<(u32, PathBuf, Option<u32>)> {
+    pins.iter()
+        .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
+        .map(|pin| (pin.dbnum as u32, pin.file.clone(), session(pin).ok()))
+        .collect()
 }
 
 /// 目录文件的选法（GitHub #47）：生成读哪一份、MDB 声明的是哪一份。与 [`E3dDbResolver`] 同一张 locator、
@@ -9409,5 +9415,67 @@ mod tests {
         assert_eq!(choice.declared(7000), Some(declared));
         assert_eq!(choice.for_library(7015, 7016), None, "MDB 没声明的目录库");
         assert_eq!(choice.declared(7016), None);
+    }
+
+    /// GitHub #32：P4 翻默认开之后每一窗规划都要列 MDB 的设计成员。一个成员问不出会话（文件不在 /
+    /// 被占）不能让这一窗的规划报错——交 `None`，反查按文件最新自己开；开不了记进 `unreadable_dbs`、
+    /// 整窗退化并点名（计划 §2 原则 3），而不是让所有设计库的模型更新一起停。
+    #[test]
+    fn an_unreadable_design_member_degrades_the_reference_cascade_instead_of_failing_the_window() {
+        use crate::data_interface::reverse_reference::{
+            DesignReferenceCascade, SourceDb, read_design_referrer_edges,
+        };
+        let pin = |dbnum: i32, db_type: &str, sesno: Option<u32>| DbPin {
+            dbnum,
+            db_type: db_type.into(),
+            file: PathBuf::from(format!(r"Z:\gm32\{dbnum}_0001")),
+            sesno,
+        };
+        let pins = vec![
+            pin(8000, "DESI", None),
+            pin(8001, "DESI", Some(7)),
+            pin(7351, "CATA", None),
+            pin(8002, "DESI", None),
+        ];
+        let mut asked = Vec::new();
+        let members = design_members(&pins, |pin| {
+            asked.push(pin.dbnum);
+            match (pin.sesno, pin.dbnum) {
+                (Some(sesno), _) => Ok(sesno),
+                (None, 8000) => Ok(42),
+                (None, dbnum) => anyhow::bail!("dbnum {dbnum} 的库文件被占用"),
+            }
+        });
+        assert_eq!(asked, vec![8000, 8001, 8002], "只问设计成员");
+        assert_eq!(
+            members,
+            vec![
+                (8000, pins[0].file.clone(), Some(42)),
+                (8001, pins[1].file.clone(), Some(7)),
+                (8002, pins[3].file.clone(), None),
+            ]
+        );
+
+        // 交出去的 `None` 走反查自己的开库：开不了 → 记账 → 判不了（不是「没有引用者」）。
+        let design_dbs: Vec<SourceDb> = members
+            .into_iter()
+            .filter(|(dbnum, ..)| *dbnum == 8002)
+            .map(|(dbnum, file, sesno)| SourceDb {
+                dbnum,
+                db_type: "DESI".into(),
+                file,
+                sesno,
+            })
+            .collect();
+        let edges =
+            read_design_referrer_edges(&[e3d_io::RefNo::new(1, 1)], &design_dbs, usize::MAX);
+        assert!(
+            edges.unreadable_dbs.contains_key(&8002),
+            "{:?}",
+            edges.unreadable_dbs
+        );
+        let cascade = DesignReferenceCascade::from_edges(&edges, 8000, |_| Vec::new());
+        let reason = cascade.degraded.expect("打不开就是判不了");
+        assert!(reason.contains("8002"), "{reason}");
     }
 }

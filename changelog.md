@@ -2,6 +2,27 @@
 
 ## 2026-09-30
 
+### 设计→设计引用级联（P4）默认开；问不出会话的设计成员让这一窗退化，不再让规划报错（GitHub #32）
+
+- **为什么**：P4 灰度的三道门在今天的树上重跑全绿——`live_every_posref_table_answers_its_own_referrers` 查过 31 个带 `POSREF` 表的
+  设计库、「表在但零边」0 个；`live_existing_windows_never_lose_a_root_with_the_cascade_on` 对拍 93 个真库窗口、两态不同 0 窗（215 s）；
+  `live_ams8000_pinned_windows_land_in_the_expected_buckets` 在 `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=1` 与 `=0` 下各跑一遍都过，
+  9 个钉死窗口 touched / regen / delete 两态逐字相同。关着的代价是被 `POSREF` 参照的件挪了，参照它的件不跟着动。
+- **改动**：
+  - `options::model_design_reference_cascade` 改走新的 `effective_default_on_switch`（环境变量 > 配置 > `true`）；
+    `DbOption.toml` 与出厂模板 `scripts/templates/DbOption.factory.toml` 显式写 `model_design_reference_cascade = true`。
+  - `E3dModelService::design_sources()` 不再因为一个未钉住的设计成员问不出最新会话就整体报错：问不出的交 `sesno: None`，
+    反查按文件最新自己开，开不了记进 `unreadable_dbs`，整窗按计划 §2 原则 3 退化并在回执点名。默认关时这条路不走；
+    默认开之后，原来的 `?` 会让一个被占 / 丢失的成员拖停**所有**设计库的窗口规划。
+  - 级联查询换源计划 P4 节追记「默认翻开」；`CONTEXT.md`「联动更新」补设计→设计引用这一类的现行形态。
+- **回退**：`model_design_reference_cascade = false`，或环境变量 `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=0`（压过配置）。
+- **验证**：`cargo test --lib -- options the_design_reference_cascade reverse_reference window_root_plan model_coverage an_unreadable_design_member`
+  153 passed / 0 failed / 15 ignored；全库 `cargo test --lib` 2466 passed / 0 failed / 130 ignored。新增
+  `the_design_reference_cascade_defaults_on_and_stays_switchable`（真值表 + 出厂模板 = 代码默认）与
+  `an_unreadable_design_member_degrades_the_reference_cascade_instead_of_failing_the_window`。`live_ams8000_pinned_windows_land_in_the_expected_buckets`
+  不设环境变量（即新默认）再跑一遍通过。上面三道真库门跑在设计成员容错那处改动之前：那处只改「问不出会话」这一支，语料里没有这样的成员，
+  成功路径逐字不变。
+
 ### 目录版本核对按「生成真读的那份」CATA 比；MDB 未声明的 CATA 不级联、失败处点名（GitHub #47 / #46）
 
 - **为什么**：新探针 `live_catalogue_file_selection_across_observation_reconcile_and_generation`（只读，AMS `/ALL`）量出 4 个同号多份的 CATA，
