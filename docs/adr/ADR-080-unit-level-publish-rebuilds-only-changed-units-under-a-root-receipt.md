@@ -4,6 +4,7 @@
 本文把设计摆出来，**D2 / D3 / D7 / D9 四条要用户逐条过目才算已接受**）；**A1 / A2 / D5 / D4（闸）/ A4 / D6（门 + removals 守卫）/ A3 /
 D1（真生产方 `UnitDeltaProducer`）已落地，真库探针 5 窗 5 根对拍全等；D9 开关与生产分流已接线（默认关，`4ee0000ab` 随另一路会话的
 在途改动落库，未单列 changelog）；D10（只被 `no_model` 候选碰到的根空 `Partial` 只推回执）2026-09-17 落地；D7 / A5 / A6 全语料 / A7 未实施**
+（**★2026-10-01：A6 全语料过（DIFF 0）、A7 逐根过整窗不过，D9 定为不翻——见文末追记；GitHub #37**）
 （同日会话 opus-5-10 按用户「按 A1 开工」「接着做 D2」执行；接班会话 fable-5-1-21 按「接着做 D5」「接着做 D4」「接着做 D6 / A3」
 「接真的生产方」执行；fable-5-1-10 按用户 0917「开 ADR-078（即本文，今 ADR-080）那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」做 D10）。
 **★0917 改号 ADR-078 → ADR-080**（用户拍板，会话 opus-5-18）：本文 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了
@@ -446,8 +447,8 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
 | A3 ✅ | 管段完整性门：构造缺一段的 `Partial`，必须回退 regen 且报出原因，**不得**发布。`a_partial_delta_missing_one_tube_segment_falls_back_before_publishing`（一条 BRAN 两段 + 一件元素、回执停在 S；只带 0 号段来：`fallbacks` 一条、原因含 `BRAN 24383/721` / `carries 1 tube segment(s), plan expects 2` / `falling back to regen`、发布口一次没被叫到、`root_snapshot` 前后逐字相同；补齐两段再来：走成局部提交，两段整段换新、元素原地不动、回执前移到 43 / 数 3）+ 对门本身的 `the_tube_segment_gate_rejects_unreset_unaccounted_and_short_branches`（不重置就带段 / 重置了没账 / 少一段 / 只重置不带段 四种拦下；重置 + 有账 + 段数对上放行，序号 0 / 2 有洞不算错；没触管身与「账上 0 段的整段清空」都放行）+ 守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records` 多核一格：产出 < 管段门 < 提交。把门短路成恒放行后 A3 那条红（mutation 核过）。★0916 会话 fable-5-1-21：gen-model `cargo test --lib` **2143 绿 / 0 红 / 114 ignored**、e3d-model **320 绿 / 0 红**、`rustfmt --check` 我改到的每一段都干净、行尾 LF 未变 |
 | A4 ✅ | 幂等：同一个 `Partial` 计划连提两次，第二次判 `replayed`，投影一字不动。`a_unit_root_on_its_baseline_publishes_a_partial_commit_and_replays_idempotently`（第一次：`Partial` / `"unit"` / `source_sesno` 前移到 T / 章由存储盖 / 没点名那件停在旧会话上 / 提交后仍 `root_projection_complete`；第二次：`replayed`，生产方与发布口一次都没被叫到，`root_snapshot` 前后逐字相同）+ `the_unit_gate_sorts_replays_and_baseline_mismatches_before_anything_is_produced`（重放 / 基线不符 / 残缺 / 解析不了 / 生产方报错五种一次排开：只有过了闸的那根叫到生产方，没有一根走到发布，投影一字不动，原因逐条核文本）+ 守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records`（完整性前置 < 闸 < 产出 < 提交；执行体不读记录不算章；与刚体路同锁同闸）。把闸的 `continue` 拿掉后两条行为测试全红（mutation 核过）。★0916 会话 fable-5-1-21：gen-model `cargo test --lib` **2141 绿 / 0 红 / 114 ignored**、e3d-model **320 绿 / 0 红**、`rustfmt --check` 我改到的每一段都干净、行尾 LF 未变 |
 | A5 ✅ | 落盘：`Partial` 之后 `persist_root` 不报「outside its receipt scope」，回读记录逐字等于 regen 路。★0917 会话 fable-5-1-18：`model_db_adapter::tests::a_partial_commit_persists_the_same_rows_as_a_regen_commit_and_only_model_sesno_lags`——两条路同一份 S=42 基线（烘焙件 + 共享图元件 + 一段管身）各先落一次库；T=43 只有烘焙件换网格，regen 路整根重投三件、unit 路只以 `Partial` 投那一件（回执两格占位，存储盖成 3 / 43 / `"unit"`）；两边再 `persist_root_on` 一次：unit 路放行，`upserted == 3`（D7 整根刷）、`removed == 0`、一笔事务；七张表（`inst_relate` / `inst_info` / `geo_relate` / `inst_geo` / `aabb` / `trans` / `tubi_relate`）按 id 回读成 SurrealDB 值、剥掉 `model_sesno` 后逐行逐字相同；`model_sesno` 单独核：regen 路三处表全是 43，unit 路只有换了网格那件的 `inst_relate` 是 43、另三行（共享图元件的 `inst_relate` / `inst_info`、管身的 `tubi_relate`）停在 42。**mutation**：把 `persist_root_impl` 那道对账改回 `==`，unit 路那一步红在「outside its receipt scope」上（核过再改回）。「逐字相同」的口径是**除 `model_sesno` 之外**——那一列正是 D3 放宽的地方，D3 的语义就是让它落后。gen-model `cargo test --lib -- model_db_adapter::` **66 过 0 败 1 ignored**、整套 **2223 过 0 败 118 ignored**、`rustfmt --check` 新增段干净、LF 未变 |
-| A6 ◐ | 对拍门（D9 ①②）全语料全绿。★0916 会话 fable-5-1-21 只跑了**单根探针** `probe_unit_publish_one_root_against_regen`（`#[ignore]`）：ams8000_0001 五窗五根整根 `manifest_hash` 逐字相同——609→610 / 614→615（EQUI `24384/24776`，2 件）、45→46（改挂，新根 EQUI `24384/25803`）、195→196（级联，EQUI `24384/26186`）、249→250（BRAN `24384/26229`，16 件，含管段整段重写）。全语料多根 / 多窗那一档没跑，A6 仍开着。配套单测：`a_removal_that_does_not_trace_back_to_the_plan_is_refused`（D6 第一条三处来源放行、计划外单元 / 别的容器旧键拒收）、`a_target_change_outside_the_design_window_disqualifies_a_partial_delta`（设计会话前移放行；目录 / 生成器 / 模板 / 细分档各变一格都拒）、`a_degraded_or_unreadable_window_plan_admits_no_partial_publish`（Q4）。gen-model `cargo test --lib` **2146 绿 / 0 红 / 115 ignored**、e3d-model **321 绿**（新增 `per_container_tube_segments_must_split_the_tube_upserts`）、e3d-model 真库门 `an_increment_says_what_two_full_generations_say` 等三条 22 min 全绿 |
-| A7 | 净收益（D9 ③）：一窗端到端时延不慢于 regen 路，数字进证据档 |
+| A6 ✅ | 对拍门（D9 ①②）全语料全绿。★0916 会话 fable-5-1-21 只跑了**单根探针** `probe_unit_publish_one_root_against_regen`（`#[ignore]`）：ams8000_0001 五窗五根整根 `manifest_hash` 逐字相同——609→610 / 614→615（EQUI `24384/24776`，2 件）、45→46（改挂，新根 EQUI `24384/25803`）、195→196（级联，EQUI `24384/26186`）、249→250（BRAN `24384/26229`，16 件，含管段整段重写）。~~全语料多根 / 多窗那一档没跑，A6 仍开着。~~ **★1001 全语料过（A6 ✅）**：五个目录全部会话链、两份 MDB，2,480 根量到、**DIFF 0**，数字见文末「追记 2026-10-01」。配套单测：`a_removal_that_does_not_trace_back_to_the_plan_is_refused`（D6 第一条三处来源放行、计划外单元 / 别的容器旧键拒收）、`a_target_change_outside_the_design_window_disqualifies_a_partial_delta`（设计会话前移放行；目录 / 生成器 / 模板 / 细分档各变一格都拒）、`a_degraded_or_unreadable_window_plan_admits_no_partial_publish`（Q4）。gen-model `cargo test --lib` **2146 绿 / 0 红 / 115 ignored**、e3d-model **321 绿**（新增 `per_container_tube_segments_must_split_the_tube_upserts`）、e3d-model 真库门 `an_increment_says_what_two_full_generations_say` 等三条 22 min 全绿 |
+| A7 ✗（量了，不过） | 净收益（D9 ③）：一窗端到端时延不慢于 regen 路，数字进证据档。★1001：**逐根过、整窗不过**，数字见文末「追记 2026-10-01」——逐根单元路 24.7 s 对整根路 82.4 s（1,908 根）；但单元路每窗多付一次生产方开窗（再算一遍计划 + 生成输入缓存每库一条逼出的一端 `DbSet` 重建），969 窗合计 300.5 s，比省下的 57.8 s 多，910 / 969 窗单元路更慢 |
 | A8 ✅ | D10：只被 `no_model` 候选碰到的根发空 `Partial` 只推回执。规划器 `no_model_only_roots_need_every_one_of_the_five_conditions`（五条各缺一条都不点名；`Other` / `Anchor` / S 端链上的删除都挡；级联目标集里的挡）+ 生产方守卫 `the_producer_guard_attributes_ledger_candidates_to_the_root_by_owner_chain`（两个方向归因、根之上的不算、`RolledUp` / `Unresolved` 点名、归不到一个就拒）+ 执行体 `a_no_model_only_root_publishes_an_empty_partial_that_only_advances_the_receipt`（不带提示的空 delta 回退不发；带提示的以 `Partial` 发出：三条记录原地、`source_sesno` 停在 S、回执到 T、章与 S 逐字相同、`receipt_only` 点名、再提是重放）+ `an_empty_partial_on_a_zero_record_root_is_not_an_emptied_root`（D2 判据改口；零记录根走成）+ `merging_the_worklist_keeps_the_unit_publish_hint` / `collect_unit_tasks` 的名单测试；守卫 `the_unit_publish_gate_precedes_production_and_the_executor_reads_no_records` 多钉一格：空清单守卫在管段门之后、提交之前。把空清单守卫短路 / 把 D2 判据改回旧形，两条行为测试全红（mutation 核过）。★0917 会话 fable-5-1-10：gen-model `cargo test --lib -- e3d_model_service:: window_root_plan:: rigid_motion:: manual_update:: model_update_plan:: batch_worker:: …` **432 过 0 败 31 ignored**。**真库探针**（`probe_unit_publish_one_root_against_regen`，`DB_OPTION_FILE=db_options/DbOption-aps.toml` + `AIOS_UNIT_PUBLISH_PROBE_FILE` 挂文件 + `AIOS_MODEL_UNIT_LEVEL_PUBLISH=1`）：aps7343 6→7 规划器 `no_model_only 100 / regen 100`（== Q6 量表的 100 多算根），根 `23727/3` STRU 零单元 receipt-only、章 == regen@7，PARITY OK；aps250209 16→17 `373 / 373`，根 `2013286753/40174` STRU 50 件 receipt-only 0.04 s、章 `1c6dc19a…` 与 regen@17（0.86 s）逐字相同，PARITY OK；aps250209 15→16 混合窗 `311 / 373`（== Q6 的 311 多算 / 62 真变），根 `40094` 4 件 PARITY OK（以上三跑在「级联关着 ⇒ 不分桶」写死**之前**，级联关着）。**规则写死之后**（三条级联同开）：aps250209 16→17 `350 / 373`，`40174` 被判级联对端、回退 regen（原因「target of a cascade expansion」），`40094` 4 件 receipt-only PARITY OK；aps7343 6→7 `26 / 100`，`23727/3` PARITY OK；级联关着时 `0 / 373`、原因「cascade(s) off: …」、空子计划回退 regen |
 
 ## 不做
@@ -482,3 +483,58 @@ D2 那条「可能删空」判据顺带改口：`partial_delta_may_empty_the_roo
   （条件 ③）。三条级联今天都默认关。要不要写死「级联关着 ⇒ 规划器不分桶 D10」（安全，但默认配置下 D10 一根都打不着），
   还是让 D9 开门的三道门里加一条「C2 / C8 同开」，或干脆接受这条已知差异？~~ ★0917 **已拍：写死成规则**（用户原话「把『级联关着 ⇒
   D10 不分桶』写死成规则（安全优先，默认配置下 D10 不生效）」），落在 D10 的「前置」段与 `no_model_only_cascades_off`。
+
+## 追记 2026-10-01：A6 全语料过、A7 整窗不过——D9 不翻（GitHub #37）
+
+**跑法**。`probe_unit_publish_corpus_against_regen`，五个语料目录**全部会话链**（`AIOS_UNIT_PUBLISH_STEPS_PER_DB=0`），每窗最多 10 根
+（跨 regen 名单等距抽，只抽 S 端也有的根），单元级发布开、三条级联同开（D10 分桶要求）。两份 MDB：默认 `DbOption.toml`（AMS `/ALL`：
+ams000 / acp000 / ZDJ000 / acw000）5 个分片，`db_options/DbOption-aps.toml`（aps000）2 个分片；分片直接跑拷出来的测试可执行文件
+（本仓 `build.rs` 盯着 `.git/HEAD`，工作树里那是个文件，经 cargo 并发会互相重链接）。e3d-model 用 `fix/wall-implicit-frame-host`
+（`18537eb`，`implicit_frame_host_of` 补 WALL 支、关掉 `fixing_host_frame` 那条 `AboveUnit` 缺口；**未推送**），gen-model 为 sweep 分支
+`9b8d234e4` 加本次探针改动。预算 3000 s 一个分片都没用完。
+
+**A6（D9 ①②）——过。**
+
+| 合计 | 值 |
+|---|---|
+| 规划成功的窗 / 其中退化（只数不量） | 3,722 / 1,190（全是比例护栏：净候选 > 30% 索引键——建库与整库导入那几窗） |
+| regen 根（全量）/ 其中 S 端也有（可走单元路） | 264,003 / 22,836 |
+| 量到的根 | 2,480（969 窗、62 个库） |
+| **PARITY OK** / 其中 receipt-only（D10 空 `Partial`） | **1,908** / 673 |
+| **DIFF（红）** | **0** |
+| 回退整根 regen | 572：D2「局部清单会清空整根、归整根路」288，`execute_plan` 报失败（D8）216，级联 / 恢复选进来的空子计划 68 |
+| S / T 端整根生成报错（量不了） | 0 / 0 |
+| 两端带画不出的件、照常对拍的根 | 118 |
+
+回退全是设计内的退路（D2 / D8 / D10 判据 ③④），没有一根「单元路发出去了、章不一样」。
+
+**A7（D9 ③）——逐根过，整窗不过。** 逐根（对拍里走成的 1,908 根，含 D5 的盖章、不含 D7 落盘——D7 两条路同为整根刷，不分高下）：
+
+| 根的记录数 | 根数 | 单元路 | 整根路 | 比 | 单元路更慢的根 |
+|---|---|---|---|---|---|
+| 0–9 | 783 | 8.01 s | 4.76 s | 1.68 | 231 |
+| 10–99 | 409 | 11.22 s | 26.85 s | 0.42 | 64 |
+| 100–999 | 38 | 4.01 s | 32.30 s | 0.12 | 4 |
+| ≥ 1000 | 5 | 0.31 s | 5.22 s | 0.06 | 0 |
+| receipt-only（D10） | 673 | 1.13 s | 13.30 s | 0.08 | 46 |
+| **合计** | **1,908** | **24.7 s** | **82.4 s** | **0.30** | |
+
+但逐根那张表少算了一笔：单元路的生产方（`UnitDeltaProducer::open`，每窗第一根走单元路的根触发一次）要在同一窗上**再算一遍计划**
+（`collect_window` + `plan_update`），而生成输入缓存每库只留一条（ADR-084），S 与 T 同库，开窗至少要重建一端 `DbSet` / 索引。
+`probe_unit_producer_open_cost_per_window` 对上面 969 个有 PARITY OK 的窗逐个开一次：**合计 300.5 s**（AMS 911 窗 277.3 s、APS 58 窗 23.2 s，
+平均 0.31 s；ams7997 150 窗 130.9 s，大窗约 1.05 s）。同一批窗逐根省下的是 **57.8 s**（其中 915 窗可走单元路的根不到 10 个、全量到了，
+省 54.5 s 对开窗 251.4 s）——**910 / 969 窗单元路比整根路慢**。赚的只有大根成片的窗：aps250110 / 250112 / 250558 / 250560 的 500+ 记录
+`STRU`、ams1112 的千记录 `STRU`（逐库净值 aps250110 +12.1 s、aps250112 +5.7 s、ams1112 +12.2 s）；ams8000（293 窗，小 `BRAN` 为主）
+逐根就省不出来（−0.3 s），再加开窗 45.9 s。
+回退的那 572 根还白跑了一次单元路（D8 那 216 根跑完 `execute_plan` 才回退），这一笔探针没计时，只会让单元路更亏。
+
+**D9 决定：不翻，`model_unit_level_publish` 保持默认关。** D9 写明了三道门缺一不可，③ 不过就不是硬开的时候。原因不是 D5 / D7（盖章与
+整根刷在逐根那张表里已经含着或两边相同），是**生产方重复规划**——这是本文 D1 实现上的一笔，不是单元级发布本身的代价。
+
+开门前要做的（另开票，见 GitHub #37 收口评论）：
+1. 生产方复用规划器那一份：选根时 `WindowRootSources::collect` 已经有 `DbSet@S` / `DbSet@T` 与 `UpdatePlan`，把它们（或按窗缓存的同一份）
+   交给执行体，单元路就不再付第二次 `collect_window` + `plan_update`、也不逼出 `DbSet` 重建；
+2. 按根的记录数设门（< 10 条的根单元路逐根就慢 1.68 倍，直接走整根路），或按窗估「省下的 > 开窗」再开生产方；
+3. e3d-model `fix/wall-implicit-frame-host`（`18537eb`）进 vendor main——今天 vendor 里没有它，`fixing_host_frame` 那条 `AboveUnit` 缺口还在，
+   开关开着 JLDATU / 墙变了 FIXING 不会被单元规划点名；
+4. 1–3 之后重跑本节两支探针（A6 全语料 + 开窗计时），③ 按「整窗」口径过了再翻。

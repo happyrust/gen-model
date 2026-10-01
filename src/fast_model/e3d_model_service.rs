@@ -7660,7 +7660,8 @@ mod tests {
         }
         /// 回退原因归桶：同一类只按类计，不按根展开。
         fn fallback_bucket(reason: &str) -> &'static str {
-            const BUCKETS: [(&str, &str); 10] = [
+            const BUCKETS: [(&str, &str); 11] = [
+                ("may leave root", "D2：局部清单会清空整根，归整根路发布"),
                 ("no_model_only hint does not hold", "空子计划·no_model_only 复核不成立"),
                 ("names no unit under root", "空子计划·级联 / 恢复选进来的根（非 no_model_only）"),
                 ("immutable target", "设计窗之外的目标变了（目录 / 模板 / 生成器 / 细分档）"),
@@ -7671,6 +7672,20 @@ mod tests {
                 ("full_rebuild", "窗计划退化成整库重建"),
                 ("unreadable", "计划期读挂"),
                 ("baseline", "回执不在规划基线上"),
+            ];
+            BUCKETS
+                .iter()
+                .find(|(needle, _)| reason.contains(needle))
+                .map(|(_, bucket)| *bucket)
+                .unwrap_or("其它")
+        }
+        /// 退化窗的原因归桶（`WindowImpact::degraded_reason` 的四类；几类同时成立时取这里排在前面的那一类）。
+        fn degraded_bucket(reason: &str) -> &'static str {
+            const BUCKETS: [(&str, &str); 4] = [
+                ("too many candidates", "比例护栏（净候选 > 30% 索引键）"),
+                ("closure incomplete", "闭包读挂"),
+                ("unresolved=", "plan_update 分类不了的候选"),
+                ("design-reference cascade", "设计引用反查判不了"),
             ];
             BUCKETS
                 .iter()
@@ -7704,6 +7719,8 @@ mod tests {
         let mut diffs: Vec<String> = Vec::new();
         let mut fallback_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut fallback_examples: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut degraded_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut degraded_examples: BTreeMap<&'static str, String> = BTreeMap::new();
         let mut failures: Vec<String> = Vec::new();
         let mut budget_exhausted = false;
 
@@ -7818,9 +7835,15 @@ mod tests {
                     let impact = sources.impact(&roots_s);
                     let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
                     stats.regen_roots += plan.regen.len();
-                    if plan.degraded.is_some() {
-                        // 退化窗把每个持久根都判成 regen，单元路对它一根都不许走（Q4）——只数不量。
+                    if let Some(reason) = &plan.degraded {
+                        // 退化窗把每个持久根都判成 regen，单元路对它一根都不许走（Q4）——只数不量；原因按类记账。
                         stats.windows_degraded += 1;
+                        let bucket = degraded_bucket(reason);
+                        *degraded_buckets.entry(bucket).or_default() += 1;
+                        degraded_examples
+                            .entry(bucket)
+                            .or_insert_with(|| format!("{label}: {reason}"));
+                        println!("{label}: degraded: {reason}");
                         continue;
                     }
                     let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
@@ -8145,6 +8168,16 @@ mod tests {
                 .unwrap_or_default();
             report.push_str(&format!("| {bucket} | {count} | {example} |\n"));
         }
+        report.push_str(
+            "\n### 退化窗原因（按类，只数不量）\n\n| 类 | 窗数 | 一例 |\n|---|---|---|\n",
+        );
+        for (bucket, count) in &degraded_buckets {
+            let example = degraded_examples
+                .get(bucket)
+                .map(|line| line.replace('|', "\\|"))
+                .unwrap_or_default();
+            report.push_str(&format!("| {bucket} | {count} | {example} |\n"));
+        }
         if !diffs.is_empty() {
             report.push_str("\n### **红：DIFF**\n\n");
             for line in &diffs {
@@ -8211,6 +8244,7 @@ mod tests {
                 "regen_t_secs": total_f(|s| s.regen_t_secs),
                 "plan_secs": total_f(|s| s.plan_secs),
                 "fallback_buckets": fallback_buckets,
+                "degraded_buckets": degraded_buckets,
             })
         );
         if !keep_meshes && std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR").is_err() {
@@ -8222,6 +8256,82 @@ mod tests {
             "D9 ①：单元路与 regen 路的整根 manifest_hash 必须逐字相同，红了 {} 根：\n{}",
             diffs.len(),
             diffs.join("\n")
+        );
+        Ok(())
+    }
+
+    /// ADR-080 A7 / D9 ③（手动）：单元路一窗的**固定开销**。生产里规划器已在同一窗上跑过 `collect_window` +
+    /// `plan_update`，单元路的生产方（`UnitDeltaProducer::open`，每窗第一根单元路的根触发一次）再开一次：两端
+    /// `generation_input` + 再算一遍计划。生成输入缓存**每库只留一条**（ADR-084），S 与 T 同库，所以这一开至少要
+    /// 重建一端 `DbSet` / 索引——上面那支全语料对拍只比了逐根的单元路 vs 整根路，这一笔没进去。这里对给定的窗各开
+    /// 一次、计时，就是单元路比整根路多付的那一笔。
+    ///
+    /// 窗口清单 `AIOS_A7_WINDOWS_FILE` 一行一个 `文件名 S T`（取自对拍日志里有 PARITY OK 的窗），文件在
+    /// `AIOS_POSREF_DIRS` 里找；目录依赖经当前 MDB（`DB_OPTION_FILE`）。每窗一行 `A7_OPEN 文件名 S T 秒`，末尾 `A7_SUMMARY`。
+    #[tokio::test]
+    #[ignore = "manual live: needs DB_OPTION_FILE (MDB), the corpus directories and AIOS_A7_WINDOWS_FILE"]
+    async fn probe_unit_producer_open_cost_per_window() -> anyhow::Result<()> {
+        use std::time::Instant;
+
+        use crate::data_interface::direct_store::DbPin;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        let list = std::fs::read_to_string(std::env::var("AIOS_A7_WINDOWS_FILE")?)?;
+        let dirs: Vec<PathBuf> = std::env::var("AIOS_POSREF_DIRS")
+            .map(|value| value.split(';').map(PathBuf::from).collect())
+            .unwrap_or_default();
+        let mut files: BTreeMap<String, (u32, PathBuf)> = BTreeMap::new();
+        for dir in dirs.iter().filter(|dir| dir.is_dir()) {
+            for source in sources_in_dir(dir, &["DESI"])? {
+                let name = source
+                    .file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                files.insert(name, (source.dbnum, source.file.clone()));
+            }
+        }
+        let mut service = E3dModelService::from_current().await?;
+        let (mut total, mut windows, mut skipped) = (0.0f64, 0usize, 0usize);
+        for line in list.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let [name, base, target] = parts.as_slice() else {
+                continue;
+            };
+            let (Ok(base), Ok(target)) = (base.parse::<u32>(), target.parse::<u32>()) else {
+                continue;
+            };
+            let Some((dbnum, file)) = files.get(*name).cloned() else {
+                println!("A7_SKIP {line}: not in AIOS_POSREF_DIRS");
+                skipped += 1;
+                continue;
+            };
+            service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+            service.pins.push(DbPin {
+                dbnum: dbnum as i32,
+                db_type: "DESI".into(),
+                file,
+                sesno: None,
+            });
+            let clock = Instant::now();
+            let opened = UnitDeltaProducer::open(&service, dbnum, base, target);
+            let secs = clock.elapsed().as_secs_f64();
+            match opened {
+                Ok(_) => {
+                    println!("A7_OPEN {name} {base} {target} {secs:.4}");
+                    total += secs;
+                    windows += 1;
+                }
+                Err(error) => {
+                    println!("A7_SKIP {line}: {error:#}");
+                    skipped += 1;
+                }
+            }
+        }
+        println!("A7_SUMMARY windows={windows} skipped={skipped} open_secs={total:.1}");
+        assert!(
+            windows > 0,
+            "一窗都没开成——清单 / AIOS_POSREF_DIRS / DB_OPTION_FILE 不对"
         );
         Ok(())
     }

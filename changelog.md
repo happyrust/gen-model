@@ -1,5 +1,36 @@
 # 变更记录
 
+## 2026-10-01
+
+### 跨库交接：级联命中别的设计库的元素，落地后给那个库排只带名单的 ModelOnly；电缆端点级联补跨库版（GitHub #34 前置 2 / #35）
+
+- **为什么**：结构连接级联的跨库对端（APS 12 条 `FIXING.CREF ↔ GENSEC.JOIE`，GENSEC 已扣关节负体）与电缆端点的跨库引用者（C6 普查 196 条
+  `CABLE.STAREF` / `ENDREF`）都属于另一个库的根，本窗的计划装不下——开关开着也是 0 上卷，改这种 FIXING，另一个库里的梁端停在旧刀口。
+- **改动**：
+  - 新模块 `data_interface::cross_db_handoff`：`elements_by_dbnum`（按库分组去重）、`fold_elements_to_roots`（在对端库 T 端 owner 索引上折根，
+    链上每一个根，与同库对端同口径）、`hand_off`（执行体在窗口落地后调：对端库取文件最新会话、折根、`BatchScheduler::enqueue` 一条只带名单的
+    `ModelOnly`，与目录级联同一条路；交不成逐库一行进回执，不阻断本窗）。
+  - `ModelUpdatePlan::cross_db_elements`（serde 默认空）：规划器把 C2 `far_end_cross_db` 与 C8 跨库引用者放进计划；规划器与预览不排工，
+    `manual_update` 落地成功分支在 `collect_unit_tasks` 之后交一次。
+  - `cable_endpoint::read_foreign_referrers` / `CableEndpointCascade::with_foreign_members`：同一批键到 MDB 其余设计成员各自的
+    `STAREF` / `ENDREF` 表点查（成员名单与 P4 同一份，C8 开着也解）；打不开的成员点名、不判退化。回执多一段 `cross-db (GitHub #35)`。
+  - 文档：CONTEXT 新词条「跨库交接」、「联动更新」两句改口；联动清单 #12 / #13；联动对齐计划追记 2026-10-01（含 #34 翻默认前置清单）。
+- **验证**：`cargo test --lib -- cross_db_handoff cable_endpoint structural_connection window_root_plan model_update_plan manual_update reverse_reference`
+  234 passed / 0 failed / 33 ignored（新增 6 条）。真库：#33 探针加一段——12 个跨库对端全部折得出根（8 个对端库、18 个根），与对端库自己算的逐字
+  相同；`live_aps_a_cross_db_endpoint_finds_its_cable_in_the_other_library`：APS 电缆正向读出跨库端点边 196 条，前 8 条的端点 `ELCONN` 假定变了，
+  各自查回电缆库 250176 的 `CABLE` 根；`aps7200` / `aps250110` 两窗、zdj7200 假定源与九窗两态、ams8000 九个钉死窗口都照旧过。
+  两个开关仍默认关；没有在真服务上走一遍 `ModelOnly` 交接（要一个能 SAVEWORK 的现场库）。
+
+### ADR-080 A6 全语料过、A7 整窗不过：单元级发布不翻默认（GitHub #37）
+
+- **A6**：`probe_unit_publish_corpus_against_regen` 五目录全部会话链、两份 MDB、e3d-model `fix/wall-implicit-frame-host`（`18537eb`，未推送）：
+  3,722 窗、2,480 根量到，PARITY OK 1,908（receipt-only 673），**DIFF 0**；回退 572 根全是设计内的退路。
+- **A7**：逐根单元路 24.7 s 对整根路 82.4 s；但新探针 `probe_unit_producer_open_cost_per_window` 量出生产方每窗再规划一次（含生成输入缓存
+  每库一条逼出的一端 `DbSet` 重建）合计 300.5 s，比同批窗省下的 57.8 s 多，910 / 969 窗单元路更慢。
+- **决定**：`model_unit_level_publish` 保持默认关；先让生产方复用规划器那一份、按根大小设门、e3d-model WALL 支进 vendor，再重跑。ADR-080 追记
+  2026-10-01、CONTEXT「单元级发布」同步。
+- 探针改动（只在测试里）：退化窗按原因归桶并打印、回退桶多一类 D2「局部清单会清空整根」、`SUMMARY_JSON` 带 `degraded_buckets`。
+
 ## 2026-09-30
 
 ### 设计→设计引用级联（P4）默认开；问不出会话的设计成员让这一窗退化，不再让规划报错（GitHub #32）
