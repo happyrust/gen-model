@@ -212,10 +212,14 @@ pub mod rigid_motion;
 /// 正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指，把对端的生成根并进 `touched`。开关默认关。
 pub mod structural_connection;
 
-/// 电缆端点 / 路由反向级联（core 规则 F `ELCXRF` / E `CLIST` 同形，联动对齐计划 C8 同库版）：窗口里的
+/// 电缆端点 / 路由反向级联（core 规则 F `ELCXRF` / E `CLIST` 同形，联动对齐计划 C8）：窗口里的
 /// `EQUI` / `ELCONN` / `CWBRAN` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用它的电缆，
-/// 把电缆的生成根并进 `touched`。只查本库；开关默认关。
+/// 把电缆的生成根并进 `touched`；MDB 其余设计成员的同名表也查，跨库引用者交给 [`cross_db_handoff`]。开关默认关。
 pub mod cable_endpoint;
+
+/// 跨库交接（GitHub #34 前置 2 / #35）：级联命中、却落在别的设计库里的元素，窗口落地之后在那个库的文件最新会话上
+/// 折成根，排一条只带名单的 `ModelOnly`（与目录级联同一条路）。
+pub mod cross_db_handoff;
 
 /// CATA 窗口 S→T 的变动目录件集合 + T 端反向引用表清单——目录反向级联的触发源
 /// （ADR-058 D2；2026-09-06 计划 P2）。文件侧纯函数，不碰库。

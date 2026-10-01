@@ -2325,7 +2325,8 @@ pub const MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV: &str =
 /// 联动对齐计划（`2026-09-06-core3d-cascade-parity-dev-plan.md` §3 C2）的灰度开关：direct 窗口
 /// 规划器对变更的 `SCTN` / `GENSEC` / `STWALL` / `WALL`（`JOIS` / `JOIE`）、`PJOI` / `SJOI` / `SUBJ` /
 /// `FIXING`（`CREF`）、`CMPF`（`CFRA`）正向读连接属性、到对端核对回指，把对端 owner 链上的生成根
-/// 并进 `touched`——core `change/EVALAT` 规则 K → `ADSTCH` 的同形。关着时一次文件读都不发生，
+/// 并进 `touched`——core `change/EVALAT` 规则 K → `ADSTCH` 的同形。对端落在别的设计库时本窗不上卷，计划带着它
+/// 交给跨库交接（`cross_db_handoff`，2026-10-01，GitHub #34 前置 2）。关着时一次文件读都不发生，
 /// `regen` 与引入前逐字相同；三态契约在 `structural_connection::tests`，真库窗口
 /// （`aps7200_0001` 3→4、`aps250110_0001` 29→30）与九个钉死窗口两态逐字相同在
 /// `structural_connection::tests::live`。
@@ -2355,9 +2356,11 @@ pub const MODEL_CABLE_ENDPOINT_CASCADE_ENV: &str = "AIOS_MODEL_CABLE_ENDPOINT_CA
 /// 窗口规划器对变更的 `EQUI` / `ELCONN`（core 规则 F `ELCXRF`）与 `CWBRAN`（规则 E `CLIST`）到本库
 /// T 端文件自带的 `STAREF` / `ENDREF` 反向引用表点查引用它们的电缆（`CABLE` 或其 `EXTGEO` 段），把
 /// 电缆 owner 链上的生成根并进 `touched`——core 那两个伪属性底下就是 `DB_RefTableIterator`
-/// （证据 `2026-09-06-ida-core3d-change-evalat-cascade.md` §8.6）。只查本库，跨库边不在此版。
-/// 关着时不开引擎、不查表，`regen` 与引入前逐字相同；三态契约在 `cable_endpoint::tests`，真库
-/// （`zdj7200_0001` 六根电缆的假定源 + 现有窗口两态逐字相同）在 `cable_endpoint::tests::live`。
+/// （证据 `2026-09-06-ida-core3d-change-evalat-cascade.md` §8.6）。跨库版（2026-10-01，GitHub #35）：同一批键
+/// 到 MDB 其余设计成员各自的同名表点查，别的库里的电缆随计划交给跨库交接（`cross_db_handoff`），落地之后给
+/// 那个库排一条只带名单的 `ModelOnly`。关着时不开引擎、不查表，`regen` 与引入前逐字相同；三态契约在
+/// `cable_endpoint::tests`，真库（`zdj7200_0001` 六根电缆的假定源 + 现有窗口两态逐字相同、APS 跨库端点
+/// 查回别的库的电缆）在 `cable_endpoint::tests::live`。
 ///
 /// 环境变量 [`MODEL_CABLE_ENDPOINT_CASCADE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_cable_endpoint_cascade() -> bool {

@@ -1234,7 +1234,9 @@ impl WindowRootSources {
         } else {
             crate::data_interface::structural_connection::StructuralConnectionCascade::off()
         };
-        // C8（同库版）：电缆端点 / 路由反向级联。开关关 = 不开引擎、不查表（`off()`），touched 一字不改。
+        // C8：电缆端点 / 路由反向级联。开关关 = 不开引擎、不查表（`off()`），touched 一字不改。
+        // 本库的引用者并进 touched；MDB 其余设计成员表里的引用者（跨库版，GitHub #35）只记下来，
+        // 随计划交给跨库交接（`cross_db_handoff`）。
         let cable_endpoint = if crate::options::model_cable_endpoint_cascade() {
             crate::data_interface::cable_endpoint::CableEndpointCascade::collect(
                 &plan,
@@ -1243,6 +1245,7 @@ impl WindowRootSources {
                 &index.owners,
                 &roots_t,
             )
+            .with_foreign_members(&plan, &index.owners, index.dbnum, design_dbs)
         } else {
             crate::data_interface::cable_endpoint::CableEndpointCascade::off()
         };
@@ -1667,11 +1670,13 @@ pub(crate) async fn build_model_update_plan_from_window(
         let base = service.build_set(dbnum, Some(base_sesno))?;
         let target = service.build_set(dbnum, Some(target_sesno))?;
         // P4 逐库并集的输入：一张反向表只答它自己那个库的引用者，跨库引用者只有逐个开
-        // MDB 的设计成员才找得到。开关关着时连成员名单都不解——`design_sources` 要为每个
-        // 未钉住的库开一次文件问最新会话。问不出会话的成员不让这一窗规划失败（`sesno: None`
-        // = 反查按文件最新自己开，开不了记进 `unreadable_dbs`、整窗退化点名；GitHub #32）。
+        // MDB 的设计成员才找得到。C8 的跨库版（电缆端点，GitHub #35）用同一份名单。两个开关都关着时
+        // 连成员名单都不解——`design_sources` 要为每个未钉住的库开一次文件问最新会话。问不出会话的成员
+        // 不让这一窗规划失败（`sesno: None` = 反查按文件最新自己开，开不了记进 `unreadable_dbs`、整窗退化点名；GitHub #32）。
         let design_dbs: Vec<crate::data_interface::reverse_reference::SourceDb> =
-            if crate::options::model_design_reference_cascade() {
+            if crate::options::model_design_reference_cascade()
+                || crate::options::model_cable_endpoint_cascade()
+            {
                 service
                     .design_sources()
                     .into_iter()
@@ -1833,6 +1838,16 @@ pub(crate) async fn build_model_update_plan_from_window(
     out.transform_units = transform_units;
     out.unit_publish_base_sesno = unit_publish_base_sesno;
     out.unit_publish_no_model_only_roots = unit_publish_no_model_only_roots;
+    // 跨库交接（GitHub #34 前置 2 / #35）：结构连接的跨库对端与电缆端点的跨库引用者随计划走，执行体在本窗落地之后
+    // 交给那个库的任务（`cross_db_handoff::hand_off`）。规划器自己不排工——预览与执行共用这一份计划。
+    out.cross_db_elements = crate::data_interface::cross_db_handoff::elements_by_dbnum(
+        sources
+            .structural_connection
+            .far_end_cross_db
+            .iter()
+            .map(|far_end| far_end.target)
+            .chain(sources.cable_endpoint.foreign_referrer_elements()),
+    );
     // 面板自身的变化（d-819 / ADR-073 D13）：本窗变更集碰到房间定义族（PANE / FRMW / SBFR / CWALL /
     // CFLOOR）→ 给本库排一条 `RoomOnly`——任务在本批根刷盘之后用现有几何重算本库全部根的两张
     // 房间边。逐根路径只算「本根在哪些面板里」，面板那一侧变了、它名下别的根点不着，这是那个盲区

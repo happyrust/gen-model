@@ -29,8 +29,10 @@
 //! （`FIXING.CREF ↔ GENSEC.JOIE`，250104↔250112 / 250108↔250110 / 250558↔250564 / 250560↔250562）12/12 `Some(true)`。
 //! 但 [`StructuralConnectionCascade::collect`] 拿到的 `owners` 与 `roots_T` 是**窗口那一个文件**的索引与根集
 //! （`WindowRootSources::collect` 只扫 `file`），对端的根（对端库自己的索引能找到，12/12）**一个都进不了 `touched`**。
-//! 要覆盖它得有跨 dbnum 的工作交接——对端的根属于另一个库的任务，本窗的计划装不下它——与房间反查的跨库停放
-//! （ADR-073 D13 U3 b `RoomRoots`）同型，形态待拍板（#34 前置 2）。
+//! 要覆盖它得有跨 dbnum 的工作交接——对端的根属于另一个库的任务，本窗的计划装不下它。**2026-10-01 落地（#34 前置 2）**：
+//! 形态没有照房间反查的停放槽（ADR-073 D13 U3 b `RoomRoots`，那是按「代」计欠账才要的），而是走目录级联同一条路——
+//! 计划带着跨库对端（`ModelUpdatePlan::cross_db_elements`），窗口落地之后 [`crate::data_interface::cross_db_handoff`]
+//! 在对端库的文件最新会话上折根，给那个库排一条只带名单的 `ModelOnly`。
 //!
 //! **跨库的账单独记（2026-09-30，#34 前置 1）**：会级联的边里，对端库号（[`RefNo::dbno`]；不比 `word0`——同一个库
 //! 换 extent `word0` 就变）与源不同的，不再拿本窗的 owner 索引去查、也不再混进 `far_end_without_root`（那一格只剩
@@ -286,7 +288,8 @@ pub struct StructuralConnectionCascade {
     /// 跨库的对端不在这一格，见 [`Self::far_end_cross_db`]。
     pub far_end_without_root: usize,
     /// 会级联的边里，对端落在**别的库**（[`RefNo::dbno`] 与源不同）：它的根属于另一个库的任务，本窗的计划装不下，
-    /// 只记账、不上卷（#34 前置 1；跨 dbnum 交接是前置 2，未做）。按出现序，[`Self::summary_line`] 逐条点名。
+    /// 本窗不上卷（#34 前置 1）；计划带着它们（`ModelUpdatePlan::cross_db_elements`），落地之后交给那个库的任务
+    /// （[`crate::data_interface::cross_db_handoff`]，#34 前置 2，2026-10-01）。按出现序，[`Self::summary_line`] 逐条点名。
     pub far_end_cross_db: Vec<CrossDbFarEnd>,
     /// 要并进 `touched` 的对端根（都在 `roots_T` 里）。
     pub far_end_roots: BTreeSet<RefnoEnum>,
@@ -435,8 +438,8 @@ impl StructuralConnectionCascade {
                 .len()
                 .saturating_sub(CROSS_DB_NAMED_LIMIT);
             line.push_str(&format!(
-                "; cross-db far ends not rolled up (their roots belong to another dbnum's task, \
-                 GitHub #34): [{}]{}",
+                "; cross-db far ends not rolled up here — their roots belong to another dbnum's task \
+                 and are handed off to it after the window lands (GitHub #34): [{}]{}",
                 named.join(", "),
                 if more > 0 {
                     format!(" (+{more} more)")
@@ -978,14 +981,16 @@ mod tests {
             struct Lib {
                 owners: Arc<BTreeMap<(u32, u32), RefNo>>,
                 roots: BTreeSet<(u32, u32)>,
+                root_list: Vec<GenerationRoot>,
                 elements: Vec<RefNo>,
             }
             let mut libs: BTreeMap<u32, Lib> = BTreeMap::new();
             for (dbnum, path, sesno) in &desi {
                 let index = scan_index(path, Some(*sesno)).expect("scan index");
-                let roots = enumerate_generation_roots(&all, &index.roots, &unit_types)
-                    .expect("enumerate roots")
-                    .into_iter()
+                let root_list = enumerate_generation_roots(&all, &index.roots, &unit_types)
+                    .expect("enumerate roots");
+                let roots = root_list
+                    .iter()
                     .map(|root| {
                         let refno = refno_to_e3d(root.root);
                         (refno.word0, refno.word1)
@@ -1002,6 +1007,7 @@ mod tests {
                     Lib {
                         owners: index.owners.clone(),
                         roots,
+                        root_list,
                         elements,
                     },
                 );
@@ -1157,6 +1163,65 @@ mod tests {
             assert_eq!(accounted.far_end_cross_db.len(), cascading);
             assert_eq!(accounted.far_end_without_root, 0);
             assert!(accounted.far_end_roots.is_empty());
+
+            // 跨库交接（#34 前置 2，2026-10-01）：同一批会级联的对端按库分组（计划上的 `cross_db_elements` 同一段），
+            // 在对端库自己的索引与根集上用交接同一段折根——每一个都得折得出根，而且与上面逐条算的「对端库自己的根」
+            // 逐字相同。
+            use crate::data_interface::cross_db_handoff::{
+                elements_by_dbnum, fold_elements_to_roots, parse_refno,
+            };
+            let handoff = elements_by_dbnum(
+                accounted
+                    .far_end_cross_db
+                    .iter()
+                    .map(|far_end| far_end.target),
+            );
+            let mut handed_roots = 0usize;
+            for (dbnum, refnos) in &handoff {
+                let Some(lib) = libs.get(dbnum) else {
+                    println!(
+                        "[probe #34] dbnum {dbnum} 不在目录里，交接会在 latest_source_version 那一步点名"
+                    );
+                    continue;
+                };
+                let elements: Vec<RefNo> =
+                    refnos.iter().filter_map(|text| parse_refno(text)).collect();
+                assert_eq!(elements.len(), refnos.len(), "名单拼得回 refno");
+                let folded = fold_elements_to_roots(&lib.owners, &lib.root_list, &elements);
+                println!(
+                    "[probe #34] 交给 dbnum {dbnum}：{} 个对端 → {} 个根 {:?}；折不出 {:?}",
+                    elements.len(),
+                    folded.roots.len(),
+                    folded
+                        .roots
+                        .iter()
+                        .map(|root| format!("{} {}", root.refno, root.noun))
+                        .collect::<Vec<_>>(),
+                    folded.unresolved
+                );
+                assert!(
+                    folded.unresolved.is_empty(),
+                    "对端库自己能找到根（#33 量过 12/12），交接也必须折得出：{:?}",
+                    folded.unresolved
+                );
+                let expected: BTreeSet<String> = elements
+                    .iter()
+                    .flat_map(|element| roots_on_owner_chain(&lib.owners, &lib.roots, *element))
+                    .map(|root| refno_from_e3d(root).to_pdms_str())
+                    .collect();
+                let got: BTreeSet<String> =
+                    folded.roots.iter().map(|root| root.refno.clone()).collect();
+                assert_eq!(got, expected, "交接折根与同库对端同一口径");
+                handed_roots += folded.roots.len();
+            }
+            println!(
+                "[probe #34] 跨库交接：{} 个对端库、{handed_roots} 个根",
+                handoff.len()
+            );
+            assert!(
+                cascading == 0 || handed_roots > 0,
+                "有会级联的跨库边就该交得出根"
+            );
         }
 
         /// 九个钉死窗口（`window_root_plan::tests::live_ams8000_pinned_windows_land_in_the_expected_buckets`
