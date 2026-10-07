@@ -2167,6 +2167,58 @@ pub async fn element_attribute_history(
     Ok(Json(report))
 }
 
+/// `GET /api/v1/element/attribute-diff` 的查询串：节点 + 两个会话。
+#[derive(Debug, Deserialize)]
+pub struct ElementAttributeDiffReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` / `a_b`，任意节点
+    pub refno: String,
+    /// 较早的一版（链序在 `b` 之前，否则 400 `INVALID_VERSION_PAIR`）
+    pub a: u32,
+    /// 较新的一版
+    pub b: u32,
+}
+
+/// GET /api/v1/element/attribute-diff — 节点 A 与 B 两版之间的属性净差（plant3d-web ADR 0066 第四条）。
+///
+/// 两个会话各钉一个 `DbSet`，属性面板同一个渲染器两端各出一次字，字不同就是变了；成员增删 / 重排与 owner 改挂另列，
+/// `impact` 走生成路同一把尺子。不折时间线、不要快照——前端此前用 (A, B] 逐会话 before / after 折净差顶着，这条把它换掉。
+/// A 侧不存在 → `created`，B 侧不存在 → `deleted`，两端都不存在 404。两个会话集 + 两次渲染，放 `spawn_blocking`。
+pub async fn element_attribute_diff(
+    State(state): State<AppState>,
+    Query(req): Query<ElementAttributeDiffReq>,
+) -> Result<Json<crate::fast_model::attribute_diff::AttributeDiffReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let attributes = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let ElementAttributeDiffReq { dbnum, a, b, .. } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::attribute_diff::attribute_diff(dbnum, refno, a, b, &attributes)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("属性净差计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// `GET /api/v1/node/diff-summary` 的查询串：节点 + 两个会话 + 对比范围。
 #[derive(Debug, Deserialize)]
 pub struct NodeDiffSummaryReq {

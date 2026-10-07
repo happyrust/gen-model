@@ -9,6 +9,8 @@ pub mod unit_versions;
 pub mod element_versions;
 /// 一个节点的属性变化时间线：谁在哪一版改了什么（会话 user / comment + 逐属性 before / after）。
 pub mod attribute_history;
+/// 一个节点两版之间的属性净差：A / B 各钉一个会话、同一个渲染器两端各出一次字，不折时间线、不要快照。
+pub mod attribute_diff;
 /// 节点两版之间的差异摘要：索引差分 + 模型影响，按最小交付单元分组，不生成几何。
 pub mod node_diff_summary;
 /// 任意节点按对比范围（自身 / 整棵子树）折叠的模型版本表：容器节点的时间线靠它，每版附动了几个单元。

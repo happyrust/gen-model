@@ -573,6 +573,12 @@ async fn serve_with_ready(
             "/api/v1/element/attribute-history",
             get(handlers::element_attribute_history),
         )
+        // 同一节 ADR 0066 的第四条：节点 A / B 两版之间的属性净差——两个会话各钉一个集、同一个渲染器两端各出一次字，
+        // 不折时间线、不要快照。「仅自身」的属性对比与「所有子节点」下点开一个构件都吃它。
+        .route(
+            "/api/v1/element/attribute-diff",
+            get(handlers::element_attribute_diff),
+        )
         .route(
             "/api/v1/node/diff-summary",
             get(handlers::node_diff_summary),
