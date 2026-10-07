@@ -14,8 +14,8 @@
 //! 源与目标有祖先关系时两侧叶子会重合（FIXING × 它所在的 WALL），重合叶子从祖先那一侧剔掉再算
 //! （[`split_shared_leaves`]），否则自对必回 0；剔完一侧空了 → `SharedLeavesOnly`（422）。
 //!
-//! **算法**（§4.2–§4.4）：叶子对按 AABB 距离升序，`aabb_distance >= best` 即停；每对调
-//! parry `closest_points(max_dist = best)`（TriMesh × TriMesh 走 composite 嵌套 BVH，精确三角对）；
+//! **算法**（§4.2–§4.4）：叶子对按 AABB 距离升序，有命中后 `aabb_distance >= best` 剪枝；每对调
+//! parry `closest_points`（TriMesh × TriMesh 走 composite 嵌套 BVH，精确三角对）；
 //! 命中三角法向给面分类（顶 / 底 / 端 / 侧；弧墙内 / 外），再从源侧最近点沿 −n 打 `cast_ray`
 //! 得垂距。顶点是 f32：世界 mm 量级 1e5 下 ~1e-2 mm 误差，低于弦高容差 0.5 mm。
 
@@ -290,7 +290,8 @@ pub fn surface_clearance(
     let mut best: Option<ClearanceHit> = None;
     let mut best_distance = opts.max_distance;
     for (lower_bound, i, j) in pairs {
-        if lower_bound >= best_distance {
+        // max_distance is inclusive. Only prune an equal bound after a hit exists.
+        if lower_bound > best_distance || (best.is_some() && lower_bound >= best_distance) {
             stats.pruned += 1;
             continue;
         }
@@ -338,7 +339,7 @@ pub fn surface_clearance(
             }
             Ok(ClosestPoints::WithinMargin(p, q)) => {
                 let distance = (p - q).norm();
-                if distance < best_distance {
+                if distance < best_distance || (best.is_none() && distance <= best_distance) {
                     best_distance = distance;
                     best = Some(ClearanceHit {
                         distance,

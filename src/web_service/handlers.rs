@@ -1712,6 +1712,23 @@ fn branch_of(params: &spatial_query::SpatialQueryParams) -> Option<RefU64> {
     }
 }
 
+/// GET /api/v1/spatial/nearby/branches: loaded BRAN owners, including implicit tubes.
+pub async fn spatial_nearby_branches(
+    State(state): State<AppState>, Query(request): Query<SpatialNearbyReq>,
+) -> Result<Json<crate::fast_model::spatial_branches::NearbyBranchesResponse>, SpatialApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let params = spatial_query::SpatialQueryParams::parse(&request.query).map_err(ApiError::bad_request)?;
+    // This route has one fixed coverage contract; do not silently ignore filters.
+    if request.query.source_mode.is_some() || request.query.nouns.is_some() || request.query.rooms.is_some()
+        || request.query.dbnums.is_some() || request.query.spec_values.is_some() || request.query.keyword.is_some()
+        || request.query.shape.is_some() || request.query.sort.is_some()
+        || params.include_self || params.include_negative {
+        return Err(ApiError::bad_request("周边管道查询仅接受 BRAN refno、radius、page/per_page，默认覆盖全部已加载库").into());
+    }
+    let service = state.direct_tree.get().await.map_err(ApiError::from_domain)?;
+    Ok(Json(crate::fast_model::spatial_branches::nearby(&params, service).await?))
+}
+
 /// GET /api/v1/spatial/rooms — 在册房间清单 + 房间体制此刻的状态（spec §4.13.4；plant3d-web ADR 0067 / 计划 2026-09-20）。
 /// 给抽屉「按房间过滤」画可搜索下拉：`status` 不是 `ready` / `degraded` 时清单为空、`reason` 说为什么，客户端整块收起。
 /// 只过身份门、只读常驻房间模型，不看空间树状态、不碰 `GLOBAL_AABB_TREE`；名字经 `DirectTreeService::name_of` 只对在册房间补（百级）。

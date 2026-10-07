@@ -400,6 +400,10 @@ impl std::fmt::Display for SpatialQueryError {
 /// 候选补属性的来源：生产是 [`DirectTreeService`]，单测用查表实现。`Send + Sync`：`nearby` / `nearby_refnos`
 /// 把它装进 `Arc` 带到阻塞线程上跑后半程（[`assemble_off_runtime`]）。
 pub trait ElementAttributes: Send + Sync {
+    /// Nearest BRAN, independent of configurable delivery unit types.
+    fn branch_root_of(&self, refno: RefU64) -> Option<RefU64> {
+        self.unit_root_of(refno).filter(|unit| unit.noun == "BRAN").map(|unit| unit.refno)
+    }
     /// 库号：答不出为 `None`（Ref0 非法、或其库不在本 MDB 路由目录）。
     fn dbnum_of(&self, refno: RefU64) -> Option<u32>;
     /// `NAME`：没有名字或读不出记录为 `None`。只对本页调（§5-2 按 (a)）。
@@ -422,6 +426,12 @@ pub trait ElementAttributes: Send + Sync {
 }
 
 impl ElementAttributes for DirectTreeService {
+    fn branch_root_of(&self, refno: RefU64) -> Option<RefU64> {
+        self.ancestors(refno).ok()?.into_iter().find_map(|ancestor| {
+            let root = ancestor.refno();
+            (ElementAttributes::noun_of(self, root).as_deref() == Some("BRAN")).then_some(root)
+        })
+    }
     fn dbnum_of(&self, refno: RefU64) -> Option<u32> {
         DirectTreeService::dbnum_of(self, refno)
     }

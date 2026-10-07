@@ -81,6 +81,7 @@ pub mod aabb_tree;
 pub mod spatial_state;
 
 pub mod spatial_query;
+pub mod spatial_branches;
 
 pub mod spatial_discipline;
 

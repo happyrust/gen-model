@@ -622,6 +622,7 @@ async fn serve_with_ready(
         // `surface-clearance` 只读库 + 磁盘网格、`rooms` 只读常驻房间模型，都不碰树；`nearby/tree` 与
         // `rooms/{refno}/tree` 是同一条流水线折成房间层级树，plant3d-web ADR 0068）。
         .route("/api/v1/spatial/nearby", get(handlers::spatial_nearby))
+        .route("/api/v1/spatial/nearby/branches", get(handlers::spatial_nearby_branches))
         .route(
             "/api/v1/spatial/nearby/refnos",
             get(handlers::spatial_nearby_refnos),
