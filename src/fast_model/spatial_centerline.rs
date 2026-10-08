@@ -350,6 +350,7 @@ pub struct CenterlineSegmentJson {
 /// 坐标与 `/nearest-clearance` 的 `annotation` 端点同一坐标系（E3D 世界 mm）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CenterlineResponse {
+    pub source_version: Option<crate::mbd::branch_query::BranchReadVersion>,
     /// `a_b`
     pub refno: String,
     pub dbnum: Option<u32>,
@@ -425,6 +426,7 @@ pub fn centerline_response_with_diameters(
     let first_od = result.members.iter().find(|member| member.outside_diameter
         .is_some_and(|od| od.is_finite() && od > 0.0));
     CenterlineResponse {
+        source_version: None,
         refno: centerline.branch_refno.to_string(),
         dbnum,
         segment_count: segments.len(),

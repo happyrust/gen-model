@@ -927,6 +927,9 @@ impl QueryService {
                     maxs[axis] = maxs[axis].max(record.world_bounds[1][axis]);
                 }
             }
+            let record_source_sessions = records.iter().map(|record| (record.dbnum, record.source_sesno))
+                .collect::<std::collections::BTreeSet<_>>().into_iter()
+                .map(|(dbnum, sesno)| json!({ "dbnum": dbnum, "sesno": sesno })).collect::<Vec<_>>();
             return Ok(json!({
                 "refno": refno.to_string(),
                 "scope": match args.scope { BoundsScope::Exact => "exact", BoundsScope::Subtree => "subtree" },
@@ -934,6 +937,7 @@ impl QueryService {
                 "min_mm": mins,
                 "max_mm": maxs,
                 "source": "model-memory",
+                "record_source_sessions": record_source_sessions,
                 "published_version": Value::Null,
                 "stale": Value::Null,
                 "publication_status": "unsupported",

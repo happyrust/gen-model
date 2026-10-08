@@ -57,6 +57,7 @@ pub fn wire_refno(refno: RefNo) -> String {
 
 #[derive(Debug)]
 pub enum BranchQueryError {
+    SourceChanged { dbnum: u32 },
     /// refno 在所钉会话里不存在。
     NotFound {
         refno: RefNo,
@@ -92,6 +93,7 @@ pub enum BranchQueryError {
 impl std::fmt::Display for BranchQueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SourceChanged { dbnum } => write!(f, "库 {dbnum} 在管道读取期间变化，请重新读取"),
             Self::NotFound { refno } => write!(f, "refno {refno} 在所钉会话里不存在"),
             Self::NotRouteContainer { refno, noun } => write!(
                 f,
@@ -147,6 +149,22 @@ pub struct DiameterEvidence {
 pub struct BranchQueryWithDiameters {
     pub result: BranchQueryResult,
     pub diameters: HashMap<String, DiameterEvidence>,
+    pub source_version: BranchReadVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DatabaseReadVersion {
+    pub dbnum: u32,
+    pub sesno: u32,
+    pub db_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BranchReadVersion {
+    pub dbnum: u32,
+    pub sesno: u32,
+    /// All files actually opened by this read, including catalogue/owner dependencies.
+    pub databases: Vec<DatabaseReadVersion>,
 }
 
 pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryWithDiameters, BranchQueryError> {
@@ -476,6 +494,17 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
     let head_connection = connection_ref(container.get_element("HREF")?)?;
     let tail_connection = connection_ref(container.get_element("TREF")?)?;
 
+    let mut databases = Vec::new();
+    for (dbnum, source) in set.opened_sources()? {
+        if !source.is_current().unwrap_or(false) {
+            return Err(BranchQueryError::SourceChanged { dbnum });
+        }
+        databases.push(DatabaseReadVersion { dbnum, sesno: source.sesno,
+            db_type: set.db_type(dbnum).unwrap_or_default() });
+    }
+    databases.sort_by_key(|database| database.dbnum);
+    let sesno = set.pinned_sesno(refno.dbno()).ok_or(BranchQueryError::SourceChanged { dbnum: refno.dbno() })?;
+    let source_version = BranchReadVersion { dbnum: refno.dbno(), sesno, databases };
     Ok(BranchQueryWithDiameters { result: BranchQueryResult {
         branch_refno,
         members,
@@ -490,7 +519,7 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
         tail_connection,
         split_members: None,
         issues,
-    }, diameters })
+    }, diameters, source_version })
 }
 
 /// 引用目标在别的库、库没注册 / 元素不在所钉会话：按「没有」，不算错（同 [`catalogue_od`]）。

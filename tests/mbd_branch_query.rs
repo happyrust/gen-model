@@ -410,6 +410,13 @@ fn real_branch_members_carry_ppoints_and_catalogue_od() {
     let set = open_set(&db, &templates);
     let enriched = branch_query_with_diameters(&set, BRAN).expect("branch query");
     let query = &enriched.result;
+    assert_eq!(enriched.source_version.dbnum, BRAN.dbno());
+    assert_eq!(Some(enriched.source_version.sesno), set.pinned_sesno(BRAN.dbno()));
+    assert!(enriched.source_version.databases.iter().any(|database| database.dbnum == BRAN.dbno()
+        && database.sesno == enriched.source_version.sesno && database.db_type == "DESI"));
+    for database in &enriched.source_version.databases {
+        assert_eq!(Some(database.sesno), set.pinned_sesno(database.dbnum));
+    }
     assert_eq!(enriched.diameters.len(), query.members.len());
     let mut catalogue_count = 0;
     let mut estimate_count = 0;

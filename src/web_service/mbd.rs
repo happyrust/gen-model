@@ -111,5 +111,6 @@ pub async fn respond(
             Err(ApiError::precondition(error.to_string()))
         }
         Err(BranchQueryError::Db(error)) => Err(ApiError::from_domain(error.into())),
+        Err(error @ BranchQueryError::SourceChanged { .. }) => Err(ApiError::precondition(error.to_string())),
     }
 }

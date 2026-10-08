@@ -1666,7 +1666,9 @@ pub async fn spatial_centerline(
     let (query, dbnum) = query_branch(branch).await?;
     let centerline = BranCenterline::from_branch(branch, &query.result)
         .map_err(|message| SpatialApiError::from(ApiError::precondition(message)))?;
-    Ok(Json(centerline_response_with_diameters(&centerline, &query.result, dbnum, &query.diameters)))
+    let mut response = centerline_response_with_diameters(&centerline, &query.result, dbnum, &query.diameters);
+    response.source_version = Some(query.source_version);
+    Ok(Json(response))
 }
 
 /// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页
