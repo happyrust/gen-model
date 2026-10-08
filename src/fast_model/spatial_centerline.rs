@@ -339,8 +339,9 @@ pub struct CenterlineSegmentJson {
     pub start: crate::fast_model::spatial_clearance::PointJson,
     pub end: crate::fast_model::spatial_clearance::PointJson,
     pub length_mm: f32,
-    /// 这一段成员自己的外径（mm）；隐式管身没有成员，为 `null`，用顶层 `outside_diameter_mm`。
+    /// 这一段自己的外径（mm），包括隐式直段；不得以首个成员的外径替代变径段。
     pub outside_diameter_mm: Option<f32>,
+    pub diameter_evidence: Option<crate::mbd::branch_query::DiameterEvidence>,
 }
 
 /// `GET /api/v1/spatial/centerline` 的响应：一条 BRAN 的中心线线段表原样给前端。
@@ -353,8 +354,11 @@ pub struct CenterlineResponse {
     pub refno: String,
     pub dbnum: Option<u32>,
     pub segment_count: usize,
-    /// 首个给出外径的成员的外径（mm）；隐式管身按它算半径。
+    /// 首个给出外径的成员的外径（mm），仅为旧消费者保留。隐式直段应取自己的段外径。
     pub outside_diameter_mm: Option<f32>,
+    /// 首个外径仅供兼容；验收应逐段读取，并检查来源是否为估算。
+    pub outside_diameter_refno: Option<String>,
+    pub diameter_evidence: Option<crate::mbd::branch_query::DiameterEvidence>,
     pub centerline_bbox: Option<crate::fast_model::spatial_clearance::AabbJson>,
     /// 按成员序排好
     pub segments: Vec<CenterlineSegmentJson>,
@@ -367,6 +371,15 @@ pub fn centerline_response(
     centerline: &BranCenterline,
     result: &BranchQueryResult,
     dbnum: Option<u32>,
+) -> CenterlineResponse {
+    centerline_response_with_diameters(centerline, result, dbnum, &std::collections::HashMap::new())
+}
+
+pub fn centerline_response_with_diameters(
+    centerline: &BranCenterline,
+    result: &BranchQueryResult,
+    dbnum: Option<u32>,
+    diameters: &std::collections::HashMap<String, crate::mbd::branch_query::DiameterEvidence>,
 ) -> CenterlineResponse {
     let mut noun_by_refno = std::collections::HashMap::with_capacity(result.members.len());
     let mut od_by_refno = std::collections::HashMap::with_capacity(result.members.len());
@@ -404,19 +417,20 @@ pub fn centerline_response(
                 start: segment.start.into(),
                 end: segment.end.into(),
                 length_mm: segment.start.distance(segment.end),
-                outside_diameter_mm: if implicit {
-                    None
-                } else {
-                    od_by_refno.get(segment.refno.as_str()).copied().flatten()
-                },
+                outside_diameter_mm: od_by_refno.get(segment.refno.as_str()).copied().flatten(),
+                diameter_evidence: diameters.get(&segment.refno).cloned(),
             }
         })
         .collect::<Vec<_>>();
+    let first_od = result.members.iter().find(|member| member.outside_diameter
+        .is_some_and(|od| od.is_finite() && od > 0.0));
     CenterlineResponse {
         refno: centerline.branch_refno.to_string(),
         dbnum,
         segment_count: segments.len(),
         outside_diameter_mm: centerline.outside_diameter_mm,
+        outside_diameter_refno: first_od.map(|member| member.refno.clone()),
+        diameter_evidence: first_od.and_then(|member| diameters.get(&member.refno)).cloned(),
         centerline_bbox: centerline.bbox().as_ref().map(Into::into),
         segments,
         warnings: centerline.warnings.clone(),
@@ -565,7 +579,7 @@ mod tests {
             branch_refno: "1_100".to_string(),
             members: vec![
                 elbow,
-                member("1_401~1_402", 1, [10.0, 0.0, 0.0], [90.0, 0.0, 0.0], None),
+                member("1_401~1_402", 1, [10.0, 0.0, 0.0], [90.0, 0.0, 0.0], Some(219.1)),
                 member("1_777", 2, [50.0, 0.0, 0.0], [50.0, 0.0, 0.0], None),
                 valve,
             ],
@@ -590,12 +604,28 @@ mod tests {
             summary,
             vec![
                 ("1_401", 0, "ELBO", false, 10.0, Some(114.3)),
-                ("1_401~1_402", 1, "TUBI", true, 80.0, None),
+                ("1_401~1_402", 1, "TUBI", true, 80.0, Some(219.1)),
                 ("1_402", 3, "VALV", false, 10.0, None),
             ]
         );
         assert_eq!(response.segments[1].start.x, 10.0);
         assert_eq!(response.segments[1].end.x, 90.0);
+        // Keep catalogue and bore-estimate evidence distinct, including implicit tubes.
+        let evidence = std::collections::HashMap::from([
+            ("1_401".to_string(), crate::mbd::branch_query::DiameterEvidence {
+                source: "bore-estimate", catalogue_od_mm: None, arrive_bore_mm: Some(104.3),
+            }),
+            ("1_401~1_402".to_string(), crate::mbd::branch_query::DiameterEvidence {
+                source: "catalogue", catalogue_od_mm: Some(219.1), arrive_bore_mm: Some(200.0),
+            }),
+        ]);
+        let enriched = centerline_response_with_diameters(&centerline, &result, Some(7997), &evidence);
+        assert_eq!(enriched.outside_diameter_refno.as_deref(), Some("1_401"));
+        assert_eq!(enriched.diameter_evidence.as_ref().unwrap().source, "bore-estimate");
+        assert_eq!(enriched.segments[1].diameter_evidence.as_ref().unwrap().source, "catalogue");
+        assert!(enriched.segments[2].diameter_evidence.is_none());
+        let json = serde_json::to_value(&enriched).unwrap();
+        assert_eq!(json["segments"][1]["diameter_evidence"]["catalogue_od_mm"], 219.1);
         // 成员没给 noun → UNKNOWN，不猜
         let mut bare = member("1_401", 0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], None);
         bare.noun = None;

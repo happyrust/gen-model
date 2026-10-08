@@ -18,7 +18,7 @@ use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
 use plant_mbd::{InMemoryDataSource, LayoutRequest, MbdV2PipeData, layout_branch};
 
-pub use branch_query::{BranchQueryError, branch_query, wire_refno};
+pub use branch_query::{BranchQueryError, branch_query, branch_query_with_diameters, wire_refno};
 
 /// `source_mm → design_m`：16 元素**列主序**（THREE `Matrix4.fromArray` 布局，平移在 12–14）。
 /// 对角矩阵转置不变，顺序约定由前端 `fixtures/mbd-v2/source-to-design-translation.json` 钉死。
