@@ -522,8 +522,12 @@ rebuild、不推进应用/模型水位。
   `leave` / `arrive` / `route_ordinal`——`route_ordinal` 自本日起随行落盘（`model_db_adapter::render_records`），此前的老行没有这一格，
   读侧按同 `(容器, from, to)` 内的出现序（记录 id 序）补 0、1、2…；两端缺失的历史行没有 `tube`。放在记录一级而不是 `insts[]` 里：
   `ModelHashInst` 是 `aios_core` 的类型，这一格只属于本仓的读面，且一条管身记录恰好一个实例。
-- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
-  `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
+- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`。
+- **根按祖先理解（ADR-086，2026-10-09）**：`generation_root` 不必是生成根——给 ZONE / SITE 也行，给生成根以下的一个件
+  （BRAN 里的一个 VALV）也行。库路由本来就按 `anc CONTAINS` 取子树；内存形态下没有回执的节点分两种：在根之上的展成投影里
+  它名下盖过章的生成根再逐根取，在根之下的取它头上那根的记录、按祖先链只留它名下的（每条记录的 `owner` 两种情形下都是
+  生成根）。名下一条都没有 → **`200` 空数组**；`409 conflict` 只剩该库正被整库任务占用。`not_generated:` 退役——
+  「没生成过」在读接口上不是错误，要生成走 §4.5 `/model/generate`。
 
 **多根批量（已实现，2026-09-09）**
 
@@ -546,8 +550,8 @@ plant-ui 的单根调用零影响。
 - 响应回显 `"generation_roots": [...]`（替代单根的 `generation_root`），并多一格
   `"roots": [{"generation_root":"24381/100677","total":22}, …]`——整批逐根总数，每页都带，
   让「这根就是 0 条」显式可见，不用靠 `items` 里缺席去猜。
-- 批里任一根还没 `ensure` 过（服务端手里没有它的记录）→ **整批** `409 conflict`，消息仍以 `not_generated:` 开头
-  并列出缺的根；客户端对缺的那几根补 `ensure` 后重发。**空数组仍不表达「没生成过」。**
+- 批里的根同样按祖先理解（ADR-086）：没有回执的根展成名下的生成根，一根都没有的那一项 `total = 0`、`items` 里缺席，
+  **不再整批 409 `not_generated`**。
 - 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
 - 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
 - 实现说明：所属库逐根解（`dbnum_for_roots`，跨库 400）→ 一次 `route_for(dbnum)` → 内存形态先按 receipt 收齐缺的根
@@ -958,9 +962,9 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   kv-mem（仍不落 rocksdb），连同房间边（逐根回执不落库，ADR-079）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
   不是“没有写 process store”）；`publication_status` 取 `ready` / `empty`。
-- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里
-  没有这根（还没 ensure 过）回 `409 conflict`，消息以 `not_generated:` 开头——客户端先去
-  `/model/ensure`，它今天本来就是这个顺序。空数组**不**用来表达「没生成过」。
+- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；请求的根按祖先理解，
+  投影里它名下盖过章的生成根逐根取；一根都没有回 `200` 空数组（ADR-086，2026-10-09 起；此前是 409
+  `not_generated:`，客户端先 ensure 再查的顺序已随 plant-ui ADR-0030 取消）。
 - **`database` 库上**两条接口与 §4.5 逐字相同：`records` 读 rocksdb（`source = "model-database"`），
   `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
