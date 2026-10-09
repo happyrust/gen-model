@@ -2480,9 +2480,12 @@ pub async fn model_ensure(
     state: State<AppState>,
     req: Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    tracing::warn!(
-        refno = %req.refno,
-        "deprecated: POST /api/v1/model/ensure is an alias of /api/v1/model/generate and will be removed next version"
+    // 走控制台（与 `[http.model.generate]` 诊断行、启动的 `***` 点名同一条路）：`tracing` 在服务进程里
+    // 没有订阅者，`log` 在 read-through 形态下也没装日志器——2026-10-09 本机实测两者都打了等于没打。
+    println!(
+        "*** deprecated: POST /api/v1/model/ensure is an alias of /api/v1/model/generate and will be removed next \
+         version (refno={}) ***",
+        req.refno
     );
     model_generate(state, req).await
 }
