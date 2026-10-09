@@ -345,7 +345,11 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - 这类任务与投影一样只活在进程内。终态根快照短期、有界保留，服务重启后旧 task id 与快照
   同时返回 404。
 
-### 4.5 `POST /api/v1/model/ensure` — 按需生成单构件模型（同步）
+### 4.5 `POST /api/v1/model/generate`（旧名 `/api/v1/model/ensure`）— 按需生成节点范围的模型（同步）
+
+> 2026-10-09 ADR-086 D4 改名：请求体、回执、`force` 语义一字不变，只是名字说的事从「确保有」改成「生成」。
+> `/api/v1/model/ensure` 作为别名指向同一 handler、每次命中打一行 `deprecated`，保留一个版本后删除。下文凡写
+> `/model/ensure` 处均同时适用于 `/model/generate`。
 - HTTP 层从 e3d-io direct tree 枚举请求子树的生成根，再交给同一模型执行层。
 - 每根所属库先经 `model_read_route::route_for(dbnum)`；读源与发布目标分开判：
   ingest 中尚未完成的 durable 库使用 `ProjectionOnly`，read-through 的 spawned/embedded

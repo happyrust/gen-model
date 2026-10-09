@@ -2443,8 +2443,9 @@ pub async fn model_delete_subtree(
 #[derive(Debug, Deserialize)]
 pub struct EnsureModelReq {
     pub refno: String,
-    /// 人明确要求重生成时置 true（S4-C 的「重试」）。显示补齐不传：已经生成过、
-    /// 只是画不出来的生成根直接回状态，不必每次显示都把生成再跑一遍。
+    /// 人明确要求重生成时置 true（plant-ui 右键「重新生成模型」就是 `force = true`，ADR-0030 D2）。
+    /// 不传时凭证当前的根直接回 `AlreadyAvailable`，不把生成再跑一遍。显示从 2026-10-09 起不再调这条接口
+    /// （只按祖先查 `/model/records`，ADR-086 D1）。
     #[serde(default)]
     pub force: bool,
     #[serde(flatten)]
@@ -2473,12 +2474,26 @@ where
     }
 }
 
-/// POST /api/v1/model/ensure — 确保节点范围全部生成根为最新模型（幂等同步，spec §4.5）。
+/// POST /api/v1/model/ensure — `/api/v1/model/generate` 的旧名（ADR-086 D4）：同一 handler、同一请求体、同一回执，
+/// 只多打一行 deprecated。留一个版本给还在调旧名的客户端（plant3d-web 的 e2e 钉着这条路径），下一版删。
 pub async fn model_ensure(
+    state: State<AppState>,
+    req: Json<EnsureModelReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::warn!(
+        refno = %req.refno,
+        "deprecated: POST /api/v1/model/ensure is an alias of /api/v1/model/generate and will be removed next version"
+    );
+    model_generate(state, req).await
+}
+
+/// POST /api/v1/model/generate — 对节点范围内全部生成根生成最新模型（同步，spec §4.5；旧名 `/model/ensure`，ADR-086 D4）。
+/// 服务端自己解根、判新旧（`force = false` 时凭证当前的根直接命中）、删旧、重算；客户端只说「生成这个范围」。
+pub async fn model_generate(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.ensure",
+    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.generate",
         format!("refno={} force={}", req.refno, req.force));
     resolve_identity(&state, &req.identity)?;
     let Ok(refu) = RefU64::from_str(&req.refno) else {
@@ -2515,7 +2530,7 @@ pub async fn model_ensure(
             .active_dbnum_model_ensure(dbnum)
     {
         return Err(ApiError::conflict(format!(
-            "dbnum={dbnum} 已有整库模型任务 {} 在运行；单根 ensure 不与它并发写同一库",
+            "dbnum={dbnum} 已有整库模型任务 {} 在运行；单根 generate 不与它并发写同一库",
             task.task_id
         )));
     }
@@ -2579,7 +2594,7 @@ pub async fn model_ensure(
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
     if let Some(route) = route {
         let object = payload.as_object_mut().ok_or_else(|| {
-            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+            ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
         })?;
         // 回执说清这一批模型现在从哪读、活不活得过重启：`durable = false` 的读透档
         // 仍会发布到本进程 kv-mem，只是不跨重启保存。
@@ -2593,7 +2608,7 @@ pub async fn model_ensure(
     }
     if crate::options::data_face().is_read_through() {
         let object = payload.as_object_mut().ok_or_else(|| {
-            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+            ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
         })?;
         object.insert("generation_roots".into(), json!(result.generation_roots));
         object.insert(
@@ -2623,7 +2638,7 @@ pub async fn model_ensure(
         // 只写内存（摄入形态、库未初始化）：`gen_root` 上没有这根的行，发布状态由投影里
         // 有没有可画的东西说话；`/model/records` 会从同一份投影供数。
         let object = payload.as_object_mut().ok_or_else(|| {
-            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+            ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
         })?;
         object.insert("generation_roots".into(), json!(result.generation_roots));
         object.insert(
@@ -2642,7 +2657,7 @@ pub async fn model_ensure(
     Ok(Json(payload))
 }
 
-/// `/model/ensure` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
+/// `/model/generate` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
 ///
 /// 来源两处、都在进程内：投影里有这根的落库 ACK 就是 `ready`，有回执没 ACK 是 `stale`（与退役前
 /// `gen_root.publication_status` 同一口径）；投影里什么都没有时看进程内账本——失败 / 永久放弃的根
@@ -2703,7 +2718,7 @@ async fn append_publication_state(
 ) -> anyhow::Result<()> {
     let object = payload
         .as_object_mut()
-        .context("model ensure response is not an object")?;
+        .context("model generate response is not an object")?;
     let model_available = object
         .get("model_available")
         .and_then(serde_json::Value::as_bool)
@@ -4183,8 +4198,8 @@ mod tests {
                 "mod tests {",
             ),
             (
-                "model_ensure",
-                "pub async fn model_ensure(",
+                "model_generate",
+                "pub async fn model_generate(",
                 "async fn append_publication_state(",
             ),
         ] {
@@ -4204,6 +4219,27 @@ mod tests {
                 "{name} 必须经 model_read_route::route_for 取路由"
             );
         }
+    }
+
+    /// ADR-086 D4：`/model/ensure` 只是 `/model/generate` 的别名——同一请求体进同一个 handler，多一行 deprecated。
+    #[test]
+    fn the_ensure_handler_is_a_deprecated_alias_of_generate() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_ensure(")
+            .expect("ensure alias must exist")
+            .1
+            .split_once("pub async fn model_generate(")
+            .expect("generate handler must follow the alias")
+            .0;
+        assert!(
+            body.contains("deprecated"),
+            "alias must log deprecated: {body}"
+        );
+        assert!(
+            body.contains("model_generate(state, req).await"),
+            "alias must forward unchanged to generate: {body}"
+        );
     }
 
     /// `/api/v1/meshes/{file}` 的路径门：只认 `{hash}.glb`，hash 只放行内容键字符集。
