@@ -2443,9 +2443,10 @@ pub async fn model_delete_subtree(
 #[derive(Debug, Deserialize)]
 pub struct EnsureModelReq {
     pub refno: String,
-    /// 人明确要求重生成时置 true（plant-ui 右键「重新生成模型」就是 `force = true`，ADR-0030 D2）。
-    /// 不传时凭证当前的根直接回 `AlreadyAvailable`，不把生成再跑一遍。显示从 2026-10-09 起不再调这条接口
-    /// （只按祖先查 `/model/records`，ADR-086 D1）。
+    /// 人明确要求重生成时置 true（plant-ui 右键「重新生成模型」就是 `force = true`，ADR-0030 D2）：
+    /// **先删后生成**——先把请求子树下已发布的产物全部清掉，再逐根重新发布（2026-10-10 定，
+    /// `AiosDBManager::clear_scope_for_regeneration`）。不传时凭证当前的根直接回 `AlreadyAvailable`，
+    /// 不把生成再跑一遍。显示从 2026-10-09 起不再调这条接口（只按祖先查 `/model/records`，ADR-086 D1）。
     #[serde(default)]
     pub force: bool,
     #[serde(flatten)]

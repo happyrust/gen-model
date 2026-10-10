@@ -1,5 +1,37 @@
 # 变更记录
 
+## 2026-10-10
+
+### 右键「重新生成模型」（`/model/generate` `force=true`）改为先删后生成：先清整个请求子树的已发布产物，再逐根重新发布
+
+- **为什么**：`force` 此前只跳过凭证命中（`ensure_exact_generation_root_inner` 不看 `cache_current`），几何照常重新 bake，
+  但发布那一步仍拿着旧回执走两条捷径——「模型目标没变、投影完整 → `cached_root_commit` 只重盖章」和「清单 hash 没变 →
+  `project_geometry_delta` 几何一条不动」——库里的产物根本换不掉；根已经解不出来的旧产物（孤儿）没人删；某根重算失败时
+  `IncompleteRoot::Discard` 还会「保旧」。用户要的是「确保重新生成」：宁可失败后留空，也不要旧产物无声存活（决策 d-6）。
+- **改动**（`src/data_interface/on_demand_model.rs`）：
+  - `ensure_model_scope_generated_from_roots` 在 `force` 时、解完根逐根加锁之前先调 `clear_scope_for_regeneration(requested_refno, &roots)`。
+  - 三路清之前都先对范围内的生成根 `try_generation_root`，被占回 `409 conflict`、一行不删（摄入形态原本就在
+    `delete_model_subtree` 里拿）。只写内存 / 读透这一支此前只等库级锁 `lock_db_generation`，而同库每一次生成
+    全程都攥着它：会排队等完同库任何在飞的生成（可能吃满 120 s 回 504），再把别的请求刚发布的那一根清掉重算，
+    与 §4.5「范围内有根正在生成按 409 回」对不上。
+  - `clear_scope_for_regeneration`：「只写内存」作用域（读透形态下 `/model/generate` 一律在此作用域里）/ 读透形态走
+    `delete_projected_subtree`——只清进程内投影（记录按祖先链取、隐式管身分支重置、受影响根含嵌套根回执作废），不过初始化门、
+    不碰 durable 权威库，读透另进 mirror spool 墓碑；摄入形态走原 `delete_model_subtree`（库 + 投影 + 账本，过门）。
+  - `delete_model_subtree` 的读透分支抽成 `delete_projected_subtree(.., spool_tombstone = true)`，`DELETE /model/subtree` 行为不变。
+  - 清掉之后每根 `prior` 为空、回执为空：`incomplete_root_policy` 判 `Publish`，部分失败的根落下算得出的成员并在回执 `failed` 记账，
+    不再被整根丢弃。
+  - 文档：`docs/specs/web-service-api.md` §4.5 `force` 条目改写；`EnsureModelReq.force` 注释。客户端（plant-ui）不改：照旧只发
+    `generate force=true`、不删产物（ADR-0030 D2）。
+- **代价（有意为之）**：清掉到重新发布之间该范围在 `/model/records` 上为空（plant-ui 自己在回执落地前不卸场景，别的读者会看到空）；
+  某根重算失败时旧产物不再保留，回执按失败报、要重试再点一次。
+- **验证**：新增源码钉 `forced_regeneration_clears_the_requested_scope_before_generating`。`cargo check --lib` 过；
+  `cargo test --lib -- on_demand_model production_current_projection_writes_use_admission_and_generation_fence web_service::handlers::tests`
+  52 passed / 0 failed / 1 ignored（含原有四条 on-demand 源码钉与 write-behind 的 `lock_db_generation` / `publish` 钉）；
+  全量 `cargo test --lib` 2464 passed / 0 failed / 129 ignored（0.1.38 封包时 2463 / 0 / 128，+1 新钉）。
+  补上根锁之后（同一钉子加「投影删法之前先 try-lock」一条断言）复跑：`cargo check --lib` 过；
+  `cargo test --lib -- on_demand_model web_service::handlers::tests model_write_behind` 75 / 0 / 2；全量 2464 / 0 / 129。
+  未做：真机端到端（起后端对 AMS 右键重新生成、看 `/model/records` 先空后满、失败根留空、读透形态并发两发一个 409）。
+
 ## 2026-09-29
 
 ### 本期执行范围不再每次现算（ADR-085）：`mdb_scope` 阶段行稳态零行，MDB 新加的库 SYST 落库后即进范围
