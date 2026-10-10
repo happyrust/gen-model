@@ -146,7 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           cached_version="$(target/release/aios-database version 2>&1 | head -1 || true)"
-          if [[ "$cached_version" == *"ge4ca50df0"* ]]; then
+          if [[ "$cached_version" == *"g86f8c7a1b"* || "$cached_version" == *"ge4ca50df0"* ]]; then
             echo "复用上一轮已成功构建并保存的 refactor 二进制：$cached_version"
           else
             cargo build --release --bin aios-database \

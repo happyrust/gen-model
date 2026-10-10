@@ -3627,6 +3627,191 @@ mod tests {
         }
     }
 
+    /// 真库对照（`#[ignore]`，手动）：ADR-066 D1 规则 3 在 2026-09-29 补的两类排除，拿真库里的形状当**假想锚点**问
+    /// [`rigid_anchor`]（S = T = 同一份 `DbSet`，Δ 是单位阵，只看判决）：
+    ///
+    /// - aps250110：GENSEC 的 `JOIS` / `JOIE` 关节 FIXING 挂在**别的**框架下，挪梁所在的那个框架——梁端头的负体取自
+    ///   不动的 FIXING（e3d-model `elmodl::collect_joint_negatives`），左乘 Δ 的刀口是错的；
+    /// - ams1112：带 `DESP` 的 FIXING 在 WALL 下（`collect_host_fixings` → `fixing_world_cutter` 在墙上开洞）、SBFI 在
+    ///   GWALL 下（`collect_host_sleeves` → `sleeve_world_cutter`）——挪刀不挪墙，墙上的洞停在原处。
+    ///
+    /// 三种形状都必须判 `rigid: Err`，原因分别带 `structural connection` 与 `host cutter owner`；顺带数出语料里这种框架 /
+    /// 刀有多少个。
+    #[test]
+    #[ignore = "manual live: reads aps250110 / ams1112 and the E3D template directory"]
+    fn live_rigid_anchor_rejects_cross_boundary_joints_and_host_cutters() {
+        use std::path::PathBuf;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+
+        use crate::data_interface::direct_store::DirectSchema;
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi = template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+        let dirs: Vec<PathBuf> = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .collect();
+        let resolver = Arc::new(
+            e3d_model::DirectoryDbResolver::scan(&dirs, schema.template_dir())
+                .expect("scan the corpus directories into a dbno → file table"),
+        );
+        let open = |file: &Path| -> (Arc<DbSet>, Arc<BTreeMap<(u32, u32), RefNo>>) {
+            let set = Arc::new(
+                DbSet::with_attlib_file_and_resolver(
+                    &attlib,
+                    Box::new(ProbeResolver(resolver.clone())),
+                )
+                .expect("attlib"),
+            );
+            set.add_db(DbFilePin {
+                file: file.to_path_buf(),
+                template: desi.clone(),
+                db_type: Some("DESI".into()),
+                sesno: None,
+            })
+            .expect("pin the DESI file");
+            let index = scan_index(file, None).expect("scan the file index");
+            (set, index.owners)
+        };
+        let verdict = |set: &Arc<DbSet>, owners: &BTreeMap<(u32, u32), RefNo>, anchor: RefNo| {
+            match rigid_anchor(set, set, anchor, &owner_chain_t(owners, anchor)) {
+                Ok(CandidateKind::Anchor { rigid, .. }) => rigid,
+                Ok(other) => Err(format!("not an anchor: {other:?}")),
+                Err(error) => Err(format!("unreadable: {error:#}")),
+            }
+        };
+        // 最近的、noun 在名单里的严格祖先（T 端索引）。
+        let nearest = |set: &Arc<DbSet>,
+                       owners: &BTreeMap<(u32, u32), RefNo>,
+                       refno: RefNo,
+                       nouns: &[&str]| {
+            owner_chain_t(owners, refno)
+                .into_iter()
+                .map(refno_to_e3d)
+                .find(|ancestor| {
+                    set.element(*ancestor)
+                        .element_type()
+                        .is_ok_and(|noun| nouns.contains(&noun.as_str()))
+                })
+        };
+        let descends = |owners: &BTreeMap<(u32, u32), RefNo>, refno: RefNo, ancestor: RefNo| {
+            (refno.word0, refno.word1) == (ancestor.word0, ancestor.word1)
+                || owner_chain_t(owners, refno)
+                    .into_iter()
+                    .map(refno_to_e3d)
+                    .any(|a| (a.word0, a.word1) == (ancestor.word0, ancestor.word1))
+        };
+        let mut failures = Vec::new();
+
+        // 1) aps250110：梁的关节伸出梁所在的框架。
+        let (set, owners_arc) = open(Path::new(
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000\aps250110_0001",
+        ));
+        let owners: &BTreeMap<(u32, u32), RefNo> = &owners_arc;
+        let mut joints = 0usize;
+        let mut frames: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut leaving: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut first: Option<(RefNo, RefNo, RefNo)> = None;
+        for &(word0, word1) in owners.keys() {
+            let beam = RefNo::new(word0, word1);
+            let element = set.element(beam);
+            if !element.element_type().is_ok_and(|noun| noun == "GENSEC") {
+                continue;
+            }
+            let Some(frame) = nearest(&set, owners, beam, &["SBFR", "FRMW", "STRU"]) else {
+                continue;
+            };
+            frames.insert((frame.word0, frame.word1));
+            for attribute in ["JOIS", "JOIE"] {
+                let Ok(Some(fixing)) = element.get_ref(attribute) else {
+                    continue;
+                };
+                if !set
+                    .element(fixing)
+                    .element_type()
+                    .is_ok_and(|noun| noun == "FIXING")
+                {
+                    continue;
+                }
+                joints += 1;
+                if !descends(owners, fixing, frame) {
+                    leaving.insert((frame.word0, frame.word1));
+                    first.get_or_insert((frame, beam, fixing));
+                }
+            }
+        }
+        println!(
+            "aps250110: {joints} GENSEC → FIXING joints; {} of {} framing containers have a joint leaving them",
+            leaving.len(),
+            frames.len()
+        );
+        match first {
+            Some((frame, beam, fixing)) => {
+                let rigid = verdict(&set, owners, frame);
+                println!("  frame {frame} (beam {beam} → FIXING {fixing}): {rigid:?}");
+                if !rigid
+                    .as_ref()
+                    .err()
+                    .is_some_and(|reason| reason.contains("structural connection"))
+                {
+                    failures.push(format!("frame {frame}: {rigid:?}"));
+                }
+            }
+            None => failures.push("aps250110: no GENSEC joint leaves its frame".to_string()),
+        }
+
+        // 2) ams1112：墙上的 FIXING 刀、GWALL 上的 SBFI 套管。
+        let (set, owners_arc) = open(Path::new(
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams1112_0001",
+        ));
+        let owners: &BTreeMap<(u32, u32), RefNo> = &owners_arc;
+        for (cutter, host) in [("FIXING", "WALL"), ("SBFI", "GWALL")] {
+            let mut count = 0usize;
+            let mut sample = None;
+            for &(word0, word1) in owners.keys() {
+                let refno = RefNo::new(word0, word1);
+                let element = set.element(refno);
+                if !element.element_type().is_ok_and(|noun| noun == cutter) {
+                    continue;
+                }
+                if !element
+                    .get_double_array("DESP")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|desp| desp.len() >= 10)
+                {
+                    continue;
+                }
+                if nearest(&set, owners, refno, &[host]).is_none() {
+                    continue;
+                }
+                count += 1;
+                sample.get_or_insert(refno);
+            }
+            println!("ams1112: {count} {cutter} with DESP under {host}");
+            match sample {
+                Some(refno) => {
+                    let rigid = verdict(&set, owners, refno);
+                    println!("  {cutter} {refno}: {rigid:?}");
+                    if !rigid.as_ref().err().is_some_and(|reason| {
+                        reason.contains("host cutter owner") && reason.contains(host)
+                    }) {
+                        failures.push(format!("{cutter} {refno} under {host}: {rigid:?}"));
+                    }
+                }
+                None => failures.push(format!("ams1112: no {cutter} with DESP under {host}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[test]
     fn effective_increment_planner_has_no_legacy_read_route() {
         let source = include_str!("window_root_plan.rs");
