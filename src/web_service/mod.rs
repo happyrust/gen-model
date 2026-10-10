@@ -589,6 +589,10 @@ async fn serve_with_ready(
         // 每版附「动了几个最小交付单元」。同样按需算、只活在进程内。
         .route("/api/v1/node/versions", get(handlers::node_versions))
         .route(
+            "/api/v1/dbnums/{dbnum}/model",
+            delete(handlers::dbnum_model_delete),
+        )
+        .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
         )

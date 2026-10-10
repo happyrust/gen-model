@@ -3470,6 +3470,36 @@ pub struct PruneAboveWatermarkReq {
     pub confirm: Option<String>,
 }
 
+/// 整库模型清理的闸门（E4）：同库队列行、在飞整库重建、在飞整库即时生成，任一即 409。
+/// 不要求队列暂停——不碰数据面。
+fn ensure_model_face_idle(dbnum: u32) -> Result<(), ApiError> {
+    if let Some(row) = crate::data_interface::batch_scheduler::BatchScheduler::global()
+        .snapshot()
+        .into_iter()
+        .find(|row| row.dbnum == dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} 有任务在跑（{}，task_id={}），稍后再清理模型",
+            row.state, row.task_id
+        )));
+    }
+    if let Some(receipt) = crate::data_interface::model_rebuild::active_for_dbnum(dbnum) {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} 有整库重建在飞（task_id={}），稍后再清理模型",
+            receipt.task_id
+        )));
+    }
+    if let Some(entry) =
+        crate::data_interface::task_registry::TaskRegistry::global().active_dbnum_model_ensure(dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum {dbnum} 有整库即时生成在飞（task_id={}），稍后再清理模型",
+            entry.task_id
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_dbnum_mutation_idle(dbnum: u32) -> Result<(), ApiError> {
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
     if !scheduler.is_paused() {
@@ -3488,6 +3518,51 @@ fn ensure_dbnum_mutation_idle(dbnum: u32) -> Result<(), ApiError> {
         )));
     }
     Ok(())
+}
+
+/// DELETE /api/v1/dbnums/{dbnum}/model — 只清这个库的模型面（清理模型计划 G3）。
+///
+/// `confirm` 必须等于路径 dbnum。不要求暂停队列：不碰数据面。同库有排队 / 运行中的批次、
+/// 在飞整库重建或整库即时生成、或生成锁拿不到，都是 409、一行不删。
+pub async fn dbnum_model_delete(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Query(query): Query<FastDeleteDbnumReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    if query.confirm != Some(dbnum) {
+        return Err(ApiError::bad_request(format!(
+            "confirm must equal path dbnum: confirm={:?}, dbnum={dbnum}",
+            query.confirm
+        )));
+    }
+    if !crate::data_interface::watch_scope::admits(dbnum) {
+        return Err(ApiError::bad_request(
+            crate::data_interface::watch_scope::excluded_reason(dbnum),
+        ));
+    }
+    ensure_model_face_idle(dbnum)?;
+    let result = crate::data_interface::fast_delete::wipe_dbnum_model_face(dbnum)
+        .await
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::data_interface::fast_delete::ModelFaceGenerationBusy>()
+                .is_some()
+            {
+                ApiError::conflict(error.to_string())
+            } else {
+                ApiError::from_domain(error)
+            }
+        })?;
+    Ok(Json(json!({
+        "dbnum": result.dbnum,
+        "scope": "model_face",
+        "status": "deleted",
+        "ref0s": result.ref0s,
+        "range_statements": result.range_statements,
+        "elapsed_ms": result.elapsed_ms,
+        "model_source_after": "memory",
+    })))
 }
 
 /// DELETE /api/v1/dbnums/{dbnum}/data — Ref0 record-id range fast delete.
@@ -5135,6 +5210,42 @@ mod tests {
                 && health.contains(concat!("catalogue_reconcile_", "snapshot()")),
             "health 必须露运行期目录核对的最近一次回执: {health}"
         );
+    }
+
+    /// 整库模型清理：confirm → watch_scope → 闸门 → 删。不要求队列暂停。
+    #[test]
+    fn dbnum_model_delete_checks_confirm_then_scope_then_the_gate_then_deletes() {
+        let source = include_str!("handlers.rs").replace("\r\n", "\n");
+        let body = source
+            .split_once("pub async fn dbnum_model_delete(")
+            .expect("model delete handler exists")
+            .1
+            .split_once("pub async fn dbnum_fast_delete(")
+            .expect("data delete follows")
+            .0;
+        let confirm = body.find("query.confirm != Some(dbnum)").expect("confirm");
+        let scope = body.find("watch_scope::admits(dbnum)").expect("scope");
+        let gate = body.find("ensure_model_face_idle(dbnum)").expect("gate");
+        let wipe = body.find("wipe_dbnum_model_face(").expect("wipe");
+        assert!(
+            confirm < scope && scope < gate && gate < wipe,
+            "顺序必须是 confirm → scope → 闸门 → 删: {body}"
+        );
+        assert!(
+            !body.contains("is_paused"),
+            "整库模型清理不要求暂停队列: {body}"
+        );
+        let gate_fn = source
+            .split_once("fn ensure_model_face_idle(")
+            .expect("gate")
+            .1
+            .split_once("fn ensure_dbnum_mutation_idle(")
+            .expect("data-face gate follows")
+            .0;
+        assert!(gate_fn.contains("active_for_dbnum(dbnum)"));
+        assert!(gate_fn.contains("active_dbnum_model_ensure(dbnum)"));
+        assert!(gate_fn.contains(".snapshot()"));
+        assert!(!gate_fn.contains("is_paused"));
     }
 
     #[test]

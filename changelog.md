@@ -2,6 +2,16 @@
 
 ## 2026-10-10
 
+### `DELETE /dbnums/{dbnum}/model` 只清一个库的模型面（清理模型计划 G3）
+
+- **为什么**：右键「清理模型」清的是一棵子树。整库要清掉再重算时，没有一条只动模型面的端点——`DELETE /dbnums/{n}/data` 连数据面一起删，还要求先暂停队列。
+- **改动**：
+  - `fast_delete.rs`：模型表区间删 + 房间两边 + 模型水位半边 + spatial epoch 抽成 `render_model_face_wipe`，`ResetForReinit` 改调它，原清库语句逐字不变。新增 `wipe_dbnum_model_face`：`Database` 路由写库并核对八张表归零；其余只作废进程内投影。读透另对投影里该库每个根渲一条 spool 墓碑。不调 `forget_persisted_catalogue_rows`。
+  - `handlers.rs` / `web_service/mod.rs`：`DELETE /api/v1/dbnums/{dbnum}/model`，`confirm` 必须等于路径 dbnum；`watch_scope` 外 400；同库队列行 / 在飞整库重建 / 在飞整库即时生成 / 生成锁拿不到 → 409，一行不删。不要求队列暂停。
+- **钉子**：表清单 = `RANGE_TABLES` 去掉 `pe` / `ref_rev`；水位半边与 `ResetForReinit` 逐字相同；`mem://` 上两根几何 + 房间边清完八张表为零、`pe` 不动、`model_sesno = 0`、`state_revision + 1`；handler 顺序 confirm → scope → 闸门 → 删。
+- **验证**：`cargo test --lib -- fast_delete web_service::handlers::tests model_read_route` 69 / 0；全量 `cargo test --lib` 2470 / 0 / 129（G1 当时 2466 / 0 / 129，多出来的是本条四条钉子）。
+- **不变**：`DELETE /dbnums/{n}/data` 与回退重建的清库语句。
+
 ### `DELETE /model/subtree` 与 `force=true` 的「先删」共用一份范围清理（清理模型计划 G1）：按读路由分路、三种形态都先对生成根 try-lock
 
 - **为什么**：plant-ui 要在右键「重新生成模型」下方加「清理模型」（只删产物、不重算），调的就是 §4.5.1。核对时发现这条

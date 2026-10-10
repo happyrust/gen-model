@@ -500,6 +500,24 @@ rebuild、不推进应用/模型水位。
 }
 ```
 
+### 4.5.1D `DELETE /api/v1/dbnums/{dbnum}/model` — 整库模型清理
+
+只删这个库的模型面，不重算、不碰数据面。与 `DELETE /dbnums/{dbnum}/data` 的分界：那条清的是整个库（含 `pe` / noun / 数据水位），而且要求队列先暂停；这条不要求暂停。
+
+- 查询参数：`confirm={dbnum}`，必须与路径 dbnum 相等，否则 `400 bad_request`。身份三件套同 §4.5。
+- `watch_scope` 之外 `400`，与 §4.5.1A 同一判据。
+- 闸门（任一不满足则 `409 conflict`、一行不删）：队列快照里该库有行；该库有在飞整库重建（§4.5.1A）或整库即时生成（§4.5.1B）；该库生成锁拿不到（有按需生成在飞）。
+- 删什么：`RANGE_TABLES` 去掉 `pe` / `ref_rev` 的表按 Ref0 区间删（`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `geo_relate` / `inst_info` / `aabb` / `trans`；`aabb:<mesh id>` 共享盒不在区间内），再按 `in.dbnum` 删房间两边。不碰 `pe`、noun 表、`ref_rev`、`dbnum_info_table`、`dbnum_stats_state`、交付台账、目录 memo。
+- 水位：只把模型半边归零（`model_sesno = 0` 及 `model_sesno_time` / `model_settled_at` / `model_lazy_roots` / `model_dead_roots` / `model_roots_observed_at = NONE`），与回退重建那一句的模型半边逐字相同；`state_revision` 加一。数据水位不动。
+- 路由：`route_for(dbnum)` 不是 `Database` 时不写库，只作废进程内投影、生成根账本并标空间树脏；读透另对该库投影里每个根渲一条 spool 墓碑。水位行在读透下不写。
+- 成功 `200`：
+
+```json
+{"dbnum":8000,"scope":"model_face","status":"deleted","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory"}
+```
+
+清完之后库行是「落后 + 内存」。要把模型算回来，调用方再点 §4.5.1A，或等服务重启的自动恢复。本端点不排重算。
+
 ### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
 
 实现 `handlers::model_records`；取数源按**这根所属的库**选（§4.12），不按进程介质。

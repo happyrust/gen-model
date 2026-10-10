@@ -1384,6 +1384,13 @@ pub(crate) async fn lock_db_generation(dbnum: u32) -> tokio::sync::OwnedMutexGua
     db_generation_lock(dbnum).lock_owned().await
 }
 
+/// 拿不到就立刻返回，不等。整库模型清理用它：有生成在飞就 409，一行不删。
+pub(crate) fn try_lock_db_generation(
+    dbnum: u32,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, tokio::sync::TryLockError> {
+    db_generation_lock(dbnum).try_lock_owned()
+}
+
 /// 把一段同步的 CPU 活从 tokio 工作线程上让出去，**借用照常**（不必 `'static`，这是不走
 /// `spawn_blocking` 的原因：单元级发布的生产方借着 `&E3dModelService` 与两端 `DbSet`）。
 ///
