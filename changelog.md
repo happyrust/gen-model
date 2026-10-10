@@ -2,6 +2,32 @@
 
 ## 2026-10-10
 
+### `.mesh` 与身份不符即原子重写（重新生成计划 S1；ADR-087 D3 拟稿）：盘上同名文件读不出 / 被截断 / 装着另一份网格时不再报错，重写后照常复用
+
+- **为什么**：mesh 文件名就是内容摘要（`e3d_baked_v2_<sha256>`），同名只可能是同一份内容。此前 `ensure_mesh_file` 见到已有
+  同名文件就逐位比对，不一致（掉电截断、拷坏、旧 bug 写出的字节）直接报「内容 ID 对应文件的 vertices/normals/indices 不一致」
+  或「mesh 文件损坏」——这件几何就此失败，而且文件一直坏着，谁来都失败。用户要的是「重新生成能修掉 mesh 文件引起的问题」：
+  名字下该是哪份内容是确定的，覆盖永远安全。
+- **改动**（`src/fast_model/e3d_mesh_store.rs`）：
+  - `MeshWrite` 加 `Repaired`。`ensure_mesh_file` 已有文件校验失败 → `repair_mesh_file`：记一行 `warn`（路径 + 原因；
+    mesh id 就是文件名）→ 同目录写临时文件、校验、`sync_all`（抽成 `stage_mesh_file`，与新建共用）→ `std::fs::rename`
+    覆盖目标（Windows 覆盖、POSIX 原子替换；与新建时「硬链接、不顶掉并发胜者」相反，这里要的正是覆盖）→ 重校验 → `Repaired`。
+    「并发写入胜者校验失败」那一支走同一段。
+  - 进程内的重写排成一队（全局 `Mutex`）：同一批里许多元素共用一份坏网格同时烘焙时恰好一个重写，后到的复核后 `Reused`，
+    多个 `rename` 抢同一目标在 Windows 上互拒的问题由此避开；另一个进程抢先修好也按 `Reused` 收。
+  - `E3dPersistReport` / `HistoricalModelReport` 加 `mesh_repaired`（`#[serde(default)]`），`note_mesh_write` 与 `merge` 两处计数
+    （修了要看得见）；`direct_model_persist` 把 `Repaired` 并入「写了文件」。
+  - 新建文件仍用硬链接；只有「已存在且不符」才覆盖。重启重建 mesh 账本用的 `verify_content_addressed_mesh` 不动（那时手上没有网格可写）。
+- **用例**：`a_damaged_content_addressed_file_is_rewritten_in_place`（垃圾字节 / 截断 / 另一份合法网格占名 → 都 `Repaired`、
+  之后 `Reused`、无残留 `.tmp`）；`concurrent_repairs_rewrite_once_and_nobody_fails`（8 线程并发修同一份，恰好 1 次 `Repaired`）；
+  原「坏文件必须报错」那条改成「+0.0 / -0.0 按位不同要重写」；取代 `damaged_existing_content_addressed_file_is_rejected`。
+- **代价 / 边界**：浏览器端 `/api/v1/meshes/{id}` 回 `Cache-Control: immutable` 一年，已经缓存了坏字节的浏览器这里修不到，
+  遇到时清浏览器缓存。图元档 mesh id 是 64 位截断摘要，理论上撞 id 时两份网格会来回覆盖——日志里同一 id 反复 repaired 就是信号。
+- **验证**：`cargo check --lib` 过；`cargo test --lib -- fast_model::e3d_mesh_store` 7 / 0 / 0；全量 `cargo test --lib`
+  2465 passed / 0 failed / 129 ignored（S0 提交时 2464 / 0 / 129，+1 新用例）。
+  真机（备份一个 `.mesh` 后写垃圾字节、`POST /model/generate force=true` → 200、日志 repaired、回执 `mesh_repaired ≥ 1`）未做，
+  放到 S2 / S3 落地后一起。
+
 ### 右键「重新生成模型」（`/model/generate` `force=true`）改为先删后生成：先清整个请求子树的已发布产物，再逐根重新发布
 
 - **为什么**：`force` 此前只跳过凭证命中（`ensure_exact_generation_root_inner` 不看 `cache_current`），几何照常重新 bake，

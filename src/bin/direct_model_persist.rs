@@ -194,11 +194,12 @@ fn geometry_record_raw_id(geometry_id: &GeometryId, source_refno: RefNo) -> Stri
 }
 
 /// 内容寻址 mesh 的跨进程写入：胜者原子发布，失败方校验胜者后清理临时文件。
-/// 返回 true 表示本调用写入了新文件，false 表示复用了完整一致的现有文件。
+/// 返回 true 表示本调用写了文件（新建或重写坏掉的旧文件），false 表示复用了完整一致的现有文件。
 fn write_and_verify_mesh(path: &Path, mesh: &PlantMesh) -> anyhow::Result<bool> {
+    use aios_database::fast_model::e3d_mesh_store::{MeshWrite, ensure_mesh_file};
     Ok(matches!(
-        aios_database::fast_model::e3d_mesh_store::ensure_mesh_file(path, mesh)?,
-        aios_database::fast_model::e3d_mesh_store::MeshWrite::Written
+        ensure_mesh_file(path, mesh)?,
+        MeshWrite::Written | MeshWrite::Repaired
     ))
 }
 

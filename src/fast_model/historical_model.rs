@@ -70,6 +70,8 @@ pub struct HistoricalModelReport {
     pub baked_instances: usize,
     pub mesh_written: usize,
     pub mesh_reused: usize,
+    #[serde(default)]
+    pub mesh_repaired: usize,
     pub unique_meshes: usize,
     pub elapsed_ms: u128,
 }
@@ -626,6 +628,7 @@ pub async fn generate_historical(
         baked_instances: persisted.baked_instances,
         mesh_written: persisted.mesh_written,
         mesh_reused: persisted.mesh_reused,
+        mesh_repaired: persisted.mesh_repaired,
         unique_meshes: persisted.unique_meshes,
         elapsed_ms: started.elapsed().as_millis(),
     };
@@ -1130,6 +1133,7 @@ mod tests {
             baked_instances: 0,
             mesh_written: 0,
             mesh_reused: 1,
+            mesh_repaired: 0,
             unique_meshes: 1,
             elapsed_ms: 1,
         };
@@ -1203,6 +1207,7 @@ mod tests {
             baked_instances: 0,
             mesh_written: 0,
             mesh_reused: 1,
+            mesh_repaired: 0,
             unique_meshes: 1,
             elapsed_ms: 1,
         }

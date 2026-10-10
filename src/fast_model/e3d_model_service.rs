@@ -3473,6 +3473,7 @@ impl E3dPersistReport {
         self.baked_instances += other.baked_instances;
         self.mesh_reused += other.mesh_reused;
         self.mesh_written += other.mesh_written;
+        self.mesh_repaired += other.mesh_repaired;
         self.mesh_ids.extend(other.mesh_ids);
         self.failed_roots.extend(other.failed_roots);
         self.partial_roots.extend(other.partial_roots);
@@ -4102,6 +4103,7 @@ fn note_mesh_write(report: &mut E3dPersistReport, outcome: MeshWrite) {
     match outcome {
         MeshWrite::Written => report.mesh_written += 1,
         MeshWrite::Reused => report.mesh_reused += 1,
+        MeshWrite::Repaired => report.mesh_repaired += 1,
     }
 }
 
