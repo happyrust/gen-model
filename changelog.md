@@ -2,6 +2,29 @@
 
 ## 2026-10-10
 
+### `DELETE /model/subtree` 与 `force=true` 的「先删」共用一份范围清理（清理模型计划 G1）：按读路由分路、三种形态都先对生成根 try-lock
+
+- **为什么**：plant-ui 要在右键「重新生成模型」下方加「清理模型」（只删产物、不重算），调的就是 §4.5.1。核对时发现这条
+  端点与 `force=true` 的清理是两套写法：handler 直调摄入形态的 `delete_model_subtree`，**不按 `model_read_route` 路由**——
+  Memory 路由的库（初始化未落 / 数据任务在飞 / 读透）上会撞初始化门或删到 durable 库那边，而同一库上 `force=true`
+  清的是进程内投影；读透分支也**不先对范围内生成根 try-lock**，spec 写的「范围内有根正在生成回 409」在读透不成立
+  （只等库级锁、可能等完同库在飞的生成再清掉人家刚发布的根；S0 只给 `force` 那一路补了这一步）。
+- **改动**：
+  - `on_demand_model.rs`：`clear_scope_for_regeneration` → `pub clear_model_scope(requested, roots)`，范围清理的唯一实现；
+    「只写内存」/ 读透那一路抽成 `clear_projected_scope(requested, roots, spool_tombstone)`（先 try-lock 再
+    `delete_projected_subtree`），`delete_model_subtree` 的读透分支改转给它、不再自己删投影（也避开 async 互递归）。
+  - `handlers.rs::model_delete_subtree`：路由段照 `model_generate`（`dbnum_for_roots → route_for → 非 Database 进
+    `scope_memory_only`；同库有整库模型任务回 409），范围内生成根由 e3d-io 骨架给，调 `clear_model_scope`；
+    回执多三格 `dbnum / model_source / model_source_reason`（§4.12 口径）。
+  - 文档：spec §4.5.1 改写；`EnsureModelReq.force` 注释。
+- **钉子**：`scope_cleanup_has_exactly_one_implementation`（投影删法只一条路、根锁只两处、读透分支转给
+  `clear_projected_scope`）；handler 钉改钉 `clear_model_scope` + 路由顺序（route → 骨架解根 → 作用域内清）。
+- **不变**：增量窗口 `DeleteCleanup`（`batch_worker.rs`）与 CLI 仍直调 `delete_model_subtree`（摄入形态语义）；
+  `DELETE /model/subtree` 对摄入形态已追平的库行为逐字不变。
+- **验证**：`cargo check --lib` 过；`cargo test --lib -- on_demand_model web_service::handlers::tests model_write_behind`
+  76 / 0 / 2（+1 新钉）；全量 `cargo test --lib` 2466 / 0 / 129。真机（读透：生成中清理回 409；Memory 路由库上清理不撞门）
+  放到 C1–C3 落地后一起。
+
 ### `.mesh` 与身份不符即原子重写（重新生成计划 S1；ADR-087 D3 拟稿）：盘上同名文件读不出 / 被截断 / 装着另一份网格时不再报错，重写后照常复用
 
 - **为什么**：mesh 文件名就是内容摘要（`e3d_baked_v2_<sha256>`），同名只可能是同一份内容。此前 `ensure_mesh_file` 见到已有

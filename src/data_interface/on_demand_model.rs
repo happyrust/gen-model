@@ -55,8 +55,10 @@ pub struct OnDemandModelResult {
 }
 
 impl AiosDBManager {
-    /// 右键「重新生成模型」（`force = true`）的第一步：先把 `requested_refno` 范围内已发布的产物
-    /// **全部清掉**，再逐根重算（2026-10-10 定：重新生成 = 先删后生成）。
+    /// 清掉 `requested_refno` 范围内已发布的产物——**范围清理的唯一实现**，两条入口共用：
+    /// 右键「重新生成模型」（`force = true`）在逐根重算之前先调它（2026-10-10 定：重新生成 =
+    /// 先删后生成），右键「清理模型」（`DELETE /model/subtree`，`handlers::model_delete_subtree`）
+    /// 只调它、不生成。`roots` 是调用方从 e3d-io 骨架解出的范围内生成根（只用来拿锁）。
     ///
     /// 不清直接重算是替换不掉库里产物的：生成流水线拿着旧回执会走两条捷径——「目标没变、投影完整
     /// → 只重盖章」（`e3d_model_service::cached_root_commit`）和「清单逐位没变 → 几何一条不动」
@@ -77,7 +79,7 @@ impl AiosDBManager {
     ///
     /// 代价（有意为之）：清掉到重新发布之间，这个范围在 `/model/records` 上是空的；某根重算失败时
     /// 它的旧产物也不再保留（原来 `IncompleteRoot::Discard` 会「保旧」），回执按失败报、要重试再点一次。
-    async fn clear_scope_for_regeneration(
+    pub async fn clear_model_scope(
         &self,
         requested_refno: RefnoEnum,
         roots: &[crate::data_interface::generation_root::GenerationRoot],
@@ -85,24 +87,37 @@ impl AiosDBManager {
         let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
         let read_through = crate::options::data_face().is_read_through();
         if memory_only || read_through {
-            let mut lock_roots = roots
-                .iter()
-                .map(|root| root.root.to_pdms_str())
-                .collect::<Vec<_>>();
-            if lock_roots.is_empty() {
-                lock_roots.push(requested_refno.to_pdms_str());
-            }
-            lock_roots.sort_unstable();
-            lock_roots.dedup();
-            let _guards = lock_roots
-                .iter()
-                .map(|root| try_generation_root(root))
-                .collect::<Result<Vec<_>, _>>()?;
             return self
-                .delete_projected_subtree(requested_refno, read_through)
+                .clear_projected_scope(requested_refno, roots, read_through)
                 .await;
         }
         self.delete_model_subtree(requested_refno).await
+    }
+
+    /// 「只写内存」/ 读透那一路的范围清理：先对范围内的生成根逐个 `try_generation_root`（没解出根就对
+    /// 请求节点自己拿），被占回 409、一行不删；拿齐再进 [`Self::delete_projected_subtree`]。根锁清完即放。
+    /// 从 [`Self::clear_model_scope`] 与读透形态的 [`Self::delete_model_subtree`] 两处进，投影删法只有这一条路。
+    async fn clear_projected_scope(
+        &self,
+        requested_refno: RefnoEnum,
+        roots: &[crate::data_interface::generation_root::GenerationRoot],
+        spool_tombstone: bool,
+    ) -> anyhow::Result<()> {
+        let mut lock_roots = roots
+            .iter()
+            .map(|root| root.root.to_pdms_str())
+            .collect::<Vec<_>>();
+        if lock_roots.is_empty() {
+            lock_roots.push(requested_refno.to_pdms_str());
+        }
+        lock_roots.sort_unstable();
+        lock_roots.dedup();
+        let _guards = lock_roots
+            .iter()
+            .map(|root| try_generation_root(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.delete_projected_subtree(requested_refno, spool_tombstone)
+            .await
     }
 
     /// 只清**进程内投影**里 `requested_refno` 子树下已发布的产物：记录按祖先链取、隐式管身所在的分支
@@ -214,11 +229,17 @@ impl AiosDBManager {
     ///
     /// Root resolution is used only to share the same concurrency locks as
     /// generation. The deletion scope remains the requested PE subtree.
+    ///
+    /// 摄入形态的删法（库 + 投影 + 账本，过初始化门）。读透形态没有 `pe` 可解根、也没有权威库可删，
+    /// 转给 [`Self::clear_projected_scope`]（对请求节点 try-lock 后只清投影、进 spool 墓碑）——
+    /// 不在这里另写一份投影删法。HTTP 入口 `DELETE /model/subtree` 不直接调这里，走
+    /// [`Self::clear_model_scope`]（带骨架解出的根与读路由作用域）；这里剩下的直接调用方是增量窗口的
+    /// `DeleteCleanup` 与 CLI，都是摄入形态语义。
     pub async fn delete_model_subtree(&self, requested_refno: RefnoEnum) -> anyhow::Result<()> {
         crate::data_interface::initialization_phase::require_model_generation()?;
 
         if crate::options::data_face().is_read_through() {
-            return self.delete_projected_subtree(requested_refno, true).await;
+            return self.clear_projected_scope(requested_refno, &[], true).await;
         }
 
         let mut subtree =
@@ -451,9 +472,9 @@ impl AiosDBManager {
         roots.sort_by_key(|root| root.root.to_pdms_str());
         roots.dedup_by_key(|root| root.root);
         if force {
-            // 先删后生成（见 `clear_scope_for_regeneration`）。放在解根之后、逐根加锁之前：清理自己拿
+            // 先删后生成（见 `clear_model_scope`）。放在解根之后、逐根加锁之前：清理自己拿
             // 根锁 / 库级锁，范围内有根正在生成就按「正在后台生成」回，不与它抢。
-            self.clear_scope_for_regeneration(requested_refno, &roots).await?;
+            self.clear_model_scope(requested_refno, &roots).await?;
         }
         if roots.is_empty() {
             return self.ensure_model_generated(requested_refno, force).await;
@@ -857,7 +878,7 @@ mod tests {
             .expect("direct scope entry end exists")
             .0;
         let clear_at = scope
-            .find("self.clear_scope_for_regeneration(requested_refno, &roots).await?")
+            .find("self.clear_model_scope(requested_refno, &roots).await?")
             .expect("force must clear the requested scope first");
         let fallback_at = scope
             .find("ensure_model_generated(requested_refno, force)")
@@ -871,7 +892,7 @@ mod tests {
         );
 
         let clear = source
-            .split_once("async fn clear_scope_for_regeneration(")
+            .split_once("pub async fn clear_model_scope(")
             .expect("clear helper exists")
             .1
             .split_once("async fn delete_projected_subtree(")
@@ -879,8 +900,12 @@ mod tests {
             .0;
         assert!(clear.contains("memory_only_scope()"), "{clear}");
         assert!(clear.contains("is_read_through()"), "{clear}");
+        assert!(
+            clear.contains(".clear_projected_scope(requested_refno, roots, read_through)"),
+            "memory-only / read-through clear the projection: {clear}"
+        );
         let projected_at = clear
-            .find(".delete_projected_subtree(requested_refno, read_through)")
+            .find(".delete_projected_subtree(requested_refno, spool_tombstone)")
             .expect("memory-only / read-through clear the projection");
         let root_locks_at = clear
             .find("try_generation_root(root)")
@@ -914,6 +939,41 @@ mod tests {
         assert!(
             !projected.contains("SUL_DB"),
             "投影删法不碰 durable 权威库: {projected}"
+        );
+    }
+
+    /// 范围清理只有一份实现（2026-10-10 清理模型计划 G1）：`DELETE /model/subtree` 与 `force = true` 都从
+    /// `clear_model_scope` 进；投影那一路只有 `clear_projected_scope`（先 try-lock 再删），摄入形态的
+    /// `delete_model_subtree` 读透分支也转给它——此前那一支不先对生成根 try-lock，spec §4.5.1 写的
+    /// 「范围内有根正在生成回 409」在读透形态不成立。
+    #[test]
+    fn scope_cleanup_has_exactly_one_implementation() {
+        let source = include_str!("on_demand_model.rs");
+        let production = source.split_once("#[cfg(test)]").expect("tests follow").0;
+        assert_eq!(
+            production.matches(".delete_projected_subtree(").count(),
+            1,
+            "投影删法只从 clear_projected_scope 进: {production}"
+        );
+        assert_eq!(
+            production.matches("try_generation_root(root)").count(),
+            2,
+            "根锁只在 clear_projected_scope 与摄入形态的 delete_model_subtree 两处拿: {production}"
+        );
+        let delete = production
+            .split_once("pub async fn delete_model_subtree(")
+            .expect("delete exists")
+            .1
+            .split_once("pub async fn ensure_model_generated(")
+            .expect("ensure follows")
+            .0;
+        assert!(
+            delete.contains("return self.clear_projected_scope(requested_refno, &[], true).await;"),
+            "读透分支转给 clear_projected_scope: {delete}"
+        );
+        assert!(
+            !delete.contains("delete_projected_subtree("),
+            "delete_model_subtree 不再自己删投影: {delete}"
         );
     }
 

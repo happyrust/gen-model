@@ -387,19 +387,29 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   不取消后台生成。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
   客户端自身超时不能设得比它更短。
 
-### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树
+### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树（plant-ui 右键「清理模型」）
 
 - 查询参数：`refno=24381%2F100677&confirm=24381%2F100677`；`confirm` 必须与
-  `refno` 原文完全一致，否则返回 `400 bad_request`。
+  `refno` 原文完全一致，否则返回 `400 bad_request`。身份三件套（`project` / `mdb` / `namespace`）同 §4.5。
+- **与 §4.5 `force=true` 的「先删」是同一份实现**（2026-10-10 定，`AiosDBManager::clear_model_scope`）：
+  入口先按 `model_read_route::route_for(dbnum)` 路由，与 `/model/generate` 同一段——
+  - `Database`（摄入形态、已追平的库）：库 + 投影 + 账本一起清，过初始化门；
+  - `Memory`（初始化未落 / 数据任务在飞 / 模型落后 / 读透）：进「只写内存」作用域，只清进程内投影、不过初始化门、
+    不碰 durable 权威库；读透形态另把同一笔删除渲成墓碑进 mirror spool。此前这条端点不路由，在这些库上会撞初始化门
+    或删到 durable 库那边，而同一库上 `force=true` 清的是投影——同一个范围两条入口两种行为。
+  - 同库已有整库模型任务（§4.5.1B）在飞时 `409 conflict`。
 - 删除范围严格是传入 refno 自身及其全部 PE 后代，不向上归一到 generation root。
-  generation root 解析只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
-  返回 `409 conflict`，不与生成并发互相覆盖。
+  范围内的 generation root（e3d-io 骨架解出）只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
+  **三种形态都**返回 `409 conflict`、一行不删，不与生成并发互相覆盖（读透形态此前只等库级锁、不回 409，2026-10-10 修）。
 - 删除模型关系、无剩余引用的实例信息、直管边和空间树条目；不删除 PE、
-  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。被删除来源的 `room_relate` /
+  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`（d-8：清理只针对产物行）。被删除来源的 `room_relate` /
   `room_panel_relate` 随模型对账同事务清理（§4.7.2）。
 - 重复调用幂等，响应
-  `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
-- 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
+  `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted", "dbnum": 8000,
+  "model_source": "database" | "memory", "model_source_reason": null | "read-through" | … }`
+  （后三格只在解得出所属库时有，口径同 §4.12）。
+- 本端点只清理、不重算。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
+- 同步执行、没有 120 s 预算包装：客户端超时时服务端可能已删一部分；重查 §4.5.2 即知。
 
 ### 4.5.1A `POST /api/v1/dbnums/{dbnum}/model/rebuild` — 指定库模型全量重建
 

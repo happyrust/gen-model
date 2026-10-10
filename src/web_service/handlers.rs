@@ -2409,7 +2409,15 @@ pub struct DeleteModelSubtreeReq {
     pub identity: ProjectReq,
 }
 
-/// DELETE /api/v1/model/subtree — delete generated data below exactly one refno.
+/// DELETE /api/v1/model/subtree — delete generated data below exactly one refno（spec §4.5.1；
+/// plant-ui 右键「清理模型」）。
+///
+/// 与 `/model/generate` 的 `force = true` 共用**同一份**清理 `AiosDBManager::clear_model_scope`
+/// （2026-10-10 清理模型计划 G1）：此前这里直调摄入形态的 `delete_model_subtree`，既不按
+/// `model_read_route` 路由（Memory 路由的库——初始化未落 / 读透——会撞初始化门或删到 durable 库那边，
+/// 而同一库上 `force = true` 清的是进程内投影），读透分支也不先对范围内生成根 try-lock（spec 写的
+/// 「范围内有根正在生成回 409」在读透不成立）。现在路由段照 `model_generate`：解出所属库 →
+/// 非 Database 进「只写内存」作用域；范围内生成根由 e3d-io 骨架给，只用来拿锁。
 pub async fn model_delete_subtree(
     State(state): State<AppState>,
     Query(query): Query<DeleteModelSubtreeReq>,
@@ -2428,16 +2436,68 @@ pub async fn model_delete_subtree(
         )));
     };
     let refno = RefnoEnum::from(refu);
-    state
-        .mgr
-        .delete_model_subtree(refno)
+    // 读路由（与 `model_generate` 同一段）：解不出所属库就不路由，交给清理路径报它该报的错。
+    let route = match crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
+        std::slice::from_ref(&query.refno),
+    )
+    .await
+    {
+        Ok(dbnum) => Some(
+            crate::data_interface::model_read_route::route_for(dbnum)
+                .await
+                .map_err(ApiError::from_domain)?,
+        ),
+        Err(_) => None,
+    };
+    let memory_only_dbnum = route
+        .filter(|route| !route.is_database())
+        .map(|route| route.dbnum);
+    if let Some(dbnum) = memory_only_dbnum
+        && let Some(task) = crate::data_interface::task_registry::TaskRegistry::global()
+            .active_dbnum_model_ensure(dbnum)
+    {
+        return Err(ApiError::conflict(format!(
+            "dbnum={dbnum} 已有整库模型任务 {} 在运行；范围清理不与它并发写同一库",
+            task.task_id
+        )));
+    }
+    let mgr = state.mgr.clone();
+    let direct_tree = state.direct_tree.clone();
+    let clear = async move {
+        let tree = direct_tree.get().await?;
+        let root = refno.refno();
+        let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
+        let roots = tokio::task::spawn_blocking(move || {
+            tree.generation_roots_in_subtree(root, &unit_types)
+        })
         .await
-        .map_err(ensure_error)?;
-    Ok(Json(json!({
+        .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
+        mgr.clear_model_scope(refno, &roots).await
+    };
+    match memory_only_dbnum {
+        Some(dbnum) => {
+            crate::data_interface::model_read_route::scope_memory_only(dbnum, clear).await
+        }
+        None => clear.await,
+    }
+    .map_err(ensure_error)?;
+    let mut payload = json!({
         "requested_refno": refno.to_pdms_str(),
         "scope": "exact_subtree",
         "status": "deleted",
-    })))
+    });
+    if let Some(route) = route
+        && let Some(object) = payload.as_object_mut()
+    {
+        // 回执说清清的是哪一面：`memory` = 只清了进程内投影（读透另进 spool 墓碑），`database` = 库 + 投影 + 账本。
+        object.insert("dbnum".into(), json!(route.dbnum));
+        object.insert("model_source".into(), json!(route.source.as_str()));
+        object.insert(
+            "model_source_reason".into(),
+            json!(route.reason.map(|reason| reason.as_str())),
+        );
+    }
+    Ok(Json(payload))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2445,7 +2505,7 @@ pub struct EnsureModelReq {
     pub refno: String,
     /// 人明确要求重生成时置 true（plant-ui 右键「重新生成模型」就是 `force = true`，ADR-0030 D2）：
     /// **先删后生成**——先把请求子树下已发布的产物全部清掉，再逐根重新发布（2026-10-10 定，
-    /// `AiosDBManager::clear_scope_for_regeneration`）。不传时凭证当前的根直接回 `AlreadyAvailable`，
+    /// `AiosDBManager::clear_model_scope`，与 `DELETE /model/subtree` 同一份清理）。不传时凭证当前的根直接回 `AlreadyAvailable`，
     /// 不把生成再跑一遍。显示从 2026-10-09 起不再调这条接口（只按祖先查 `/model/records`，ADR-086 D1）。
     #[serde(default)]
     pub force: bool,
@@ -4447,14 +4507,35 @@ mod tests {
             body.contains("query.confirm.as_deref() != Some(query.refno.as_str())"),
             "destructive model cleanup must require an exact refno confirmation: {body}"
         );
+        // 范围清理只有一份实现（2026-10-10 清理模型计划 G1）：与 `force = true` 同一个 `clear_model_scope`，
+        // 请求的 refno 原样传入；不再直调摄入形态的 `delete_model_subtree`。
         assert!(
-            body.contains(".delete_model_subtree(refno)"),
-            "handler must pass the requested refno unchanged to the delete service: {body}"
+            body.contains("mgr.clear_model_scope(refno, &roots).await"),
+            "handler must pass the requested refno unchanged to the shared scope cleanup: {body}"
+        );
+        assert!(
+            !body.contains("delete_model_subtree("),
+            "handler must not bypass the shared cleanup: {body}"
+        );
+        // 路由段与 `model_generate` 同一套：先解所属库、非 Database 进「只写内存」作用域，再清。
+        let route_at = body
+            .find("model_read_route::route_for(dbnum)")
+            .expect("delete must resolve the model read route");
+        let scope_at = body
+            .find("model_read_route::scope_memory_only(dbnum, clear)")
+            .expect("memory-routed dbnums clear inside the memory-only scope");
+        let roots_at = body
+            .find("generation_roots_in_subtree(root, &unit_types)")
+            .expect("covered generation roots come from the e3d-io skeleton");
+        assert!(
+            route_at < roots_at && roots_at < scope_at,
+            "route → skeleton roots → scoped clear must stay ordered: {body}"
         );
         for field in [
             "\"requested_refno\"",
             "\"scope\": \"exact_subtree\"",
             "\"status\": \"deleted\"",
+            "\"model_source\"",
         ] {
             assert!(
                 body.contains(field),
