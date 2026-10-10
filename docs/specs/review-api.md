@@ -134,8 +134,10 @@ requester / checker / approver / reviewer **全部为空**（PMS 外部驱动、
 | `DELETE /api/review/records/item/{record_id}` | — | `{success, error_message?}` |
 | `DELETE /api/review/records/clear-task/{task_id}` | — | `{success, error_message?}` |
 
-`ConfirmedRecordWithMeta = {id, taskId, formId, type, annotations, cloudAnnotations, rectAnnotations, obbAnnotations, measurements,
+`ConfirmedRecordWithMeta = {recordRevision?, currentNode, operatorId, id, taskId, formId, type, annotations, cloudAnnotations, rectAnnotations, obbAnnotations, measurements,
 dimensionDocument?, dimensionDocumentVersion, note, confirmedAt(毫秒)}`。
+
+`recordRevision` 在每次成功写入时换成新的非空字符串，`POST` 的 `record` 一定带上。库里还没有修订号的旧行，`GET` 省略该字段。`currentNode` / `operatorId` 两条读写都返回。
 
 ## 5. 评论与批注状态（`review/comments.rs`、`review/annotation_state.rs`）
 
@@ -255,6 +257,7 @@ CollisionItem = { ObjectOneLoc, ObjectOne, ObjectTowLoc, ObjectTow,   // "Tow" �
 
 ## 12. 变更记录
 
+- 2026-10-10 · §4 `ConfirmedRecordWithMeta` 补 `recordRevision` / `currentNode` / `operatorId`。确认写入每次换新修订号；前端没有修订号会把 HTTP 200 当成确认失败。
 - 2026-09-13 · 初版（T4 / T5 文档半边）。§1–§7、§10 按 T2 已落地代码；§8 按旧端 `platform_api/types.rs` 与 T3 在途实现，T3 交付后如有出入以代码为准并回写本节；§9 为 T4 落地形状（`reason` 新增，Q4）。
 
 ### 2026-09-14 闭环验收补充
