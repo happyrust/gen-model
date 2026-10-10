@@ -247,6 +247,13 @@ pub struct ConfirmedRecordResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmedRecordWithMeta {
+    /// 每次成功写入都换一个新值。前端用它判断「这次确认真的落上了」；空着会被拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_revision: Option<String>,
+    #[serde(default)]
+    pub current_node: String,
+    #[serde(default)]
+    pub operator_id: String,
     pub id: String,
     pub task_id: String,
     pub form_id: String,
@@ -265,6 +272,8 @@ pub struct ConfirmedRecordWithMeta {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReviewRecordRow {
+    #[serde(default)]
+    pub(super) record_revision: Option<String>,
     pub(super) id: surrealdb::sql::Thing,
     pub(super) task_id: Option<String>,
     pub(super) form_id: Option<String>,
@@ -286,7 +295,16 @@ pub(super) struct ReviewRecordRow {
 }
 
 pub(super) fn confirmed_record_with_meta_from_row(row: ReviewRecordRow) -> ConfirmedRecordWithMeta {
+    let record_revision = row
+        .record_revision
+        .as_deref()
+        .map(str::trim)
+        .filter(|revision| !revision.is_empty())
+        .map(str::to_string);
     ConfirmedRecordWithMeta {
+        record_revision,
+        current_node: row.current_node.unwrap_or_default(),
+        operator_id: row.operator_id.unwrap_or_default(),
         id: record_id_to_string(row.id),
         task_id: row.task_id.unwrap_or_default(),
         form_id: row.form_id.unwrap_or_default(),
@@ -453,6 +471,8 @@ pub(super) async fn create_record(
     };
 
     let record_existed = existing_row.is_some();
+    // 每次写入换一个修订号。前端收到空的 recordRevision 会把 HTTP 200 当成确认失败。
+    let record_revision = uuid::Uuid::new_v4().to_string();
     let dimension_version_plan = match plan_dimension_document_version(
         record_existed,
         existing_row
@@ -518,7 +538,8 @@ pub(super) async fn create_record(
                         operator_id: $operator_id,
                         operator_name: $operator_name,
                         slot_key: $slot_key,
-                        snapshot_hash: $snapshot_hash
+                        snapshot_hash: $snapshot_hash,
+                        record_revision: $record_revision
                     } RETURN AFTER
                     "#,
                 )
@@ -536,7 +557,8 @@ pub(super) async fn create_record(
                 .bind(("operator_id", operator_id.clone()))
                 .bind(("operator_name", operator_name.clone()))
                 .bind(("slot_key", slot_key.clone()))
-                .bind(("snapshot_hash", snapshot_hash.clone())),
+                .bind(("snapshot_hash", snapshot_hash.clone()))
+                .bind(("record_revision", record_revision.clone())),
             )
             .await
             {
@@ -589,6 +611,7 @@ pub(super) async fn create_record(
                 operator_name: $operator_name,
                 slot_key: $slot_key,
                 snapshot_hash: $snapshot_hash,
+                record_revision: $record_revision,
                 confirmed_at: time::now()
             }
             WHERE (
@@ -618,6 +641,7 @@ pub(super) async fn create_record(
                 operator_name: $operator_name,
                 slot_key: $slot_key,
                 snapshot_hash: $snapshot_hash,
+                record_revision: $record_revision,
                 confirmed_at: time::now()
             } RETURN AFTER
             "#
@@ -642,6 +666,7 @@ pub(super) async fn create_record(
                 operator_name: $operator_name,
                 slot_key: $slot_key,
                 snapshot_hash: $snapshot_hash,
+                record_revision: $record_revision,
                 confirmed_at: time::now()
             } RETURN AFTER
             "#
@@ -708,7 +733,8 @@ pub(super) async fn create_record(
                         .bind(("operator_id", operator_id))
                         .bind(("operator_name", operator_name))
                         .bind(("slot_key", slot_key))
-                        .bind(("snapshot_hash", snapshot_hash)),
+                        .bind(("snapshot_hash", snapshot_hash))
+                        .bind(("record_revision", record_revision)),
                 )
                 .await
                 .and_then(|mut response| {
