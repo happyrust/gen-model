@@ -701,6 +701,7 @@ pub(super) async fn create_record(
             let operator_name = operator_name.clone();
             let slot_key = slot_key.clone();
             let snapshot_hash = snapshot_hash.clone();
+            let record_revision = record_revision.clone();
             async move {
                 await_review_query(
                     "review.records.write",
