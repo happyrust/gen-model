@@ -211,7 +211,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const S = { state: null, cfg: null, effective: null, step: 1, storeTestOk: false, portOk: false, selected: new Set(), pollTimer: null };
+const S = { state: null, cfg: null, effective: null, step: 1, storeTestOk: false, portOk: false, selected: new Set(), pollTimer: null, pollGen: 0 };
 
 function overlay(msg) { $("overlay").style.display = msg ? "flex" : "none"; if (msg) $("overlay-msg").innerHTML = msg; }
 function note(el, cls, html) { el.innerHTML = '<div class="note ' + cls + '">' + html + "</div>"; }
@@ -544,7 +544,7 @@ async function loadDbnums() {
   const out = await api("/api/v1/dbnums?project=" + encodeURIComponent(project || ""));
   const rows = out.dbnums || [];
   const host = $("dbnums-out");
-  if (!rows.length) { note(host, "warn", "没拿到库列表（服务可能还在装载骨架，稍后「刷新库列表」）"); return; }
+  if (!rows.length) { note(host, "warn", "没拿到库列表（服务可能还在装载骨架，稍后「刷新库列表」）"); return rows; }
   const awaiting = rows.filter((r) => r.awaiting_manual_initialization);
   if (!S.selected.size) awaiting.forEach((r) => S.selected.add(r.dbnum));
   let html = "<table><tr><th></th><th>dbnum</th><th>状态</th><th>水位 应用/模型/文件</th></tr>";
@@ -566,6 +566,7 @@ async function loadDbnums() {
     const n = Number(box.dataset.db);
     if (box.checked) S.selected.add(n); else S.selected.delete(n);
   }));
+  return rows;
 }
 async function previewInit() {
   note($("preview-out"), "", "预览中…");
@@ -589,19 +590,24 @@ async function executeInit() {
       body: JSON.stringify({ dbnums }),
     });
     note($("exec-out"), "ok", "已入队：" + dbnums.join(", ") + "。下方水位会自动刷新，全部「已同步」即完成。");
-    if (S.pollTimer) clearInterval(S.pollTimer);
-    S.pollTimer = setInterval(async () => {
+    // 每拍只拉一次 /dbnums（loadDbnums 画表并交回行），上一拍回来才排下一拍：setInterval 不等
+    // await，服务端慢的时候请求会叠起来。pollGen 让重复点「执行」或完成向导之后，旧的那条链自己停下。
+    if (S.pollTimer) clearTimeout(S.pollTimer);
+    const generation = ++S.pollGen;
+    const tick = async () => {
+      S.pollTimer = null;
+      let rows = [];
       try {
-        await loadDbnums();
-        const project = (S.cfg && S.cfg.project_name) || "";
-        const out = await api("/api/v1/dbnums?project=" + encodeURIComponent(project));
-        const rows = (out.dbnums || []).filter((r) => dbnums.includes(r.dbnum));
-        if (rows.length && rows.every(rowSync)) {
-          clearInterval(S.pollTimer); S.pollTimer = null;
-          note($("exec-out"), "ok", "勾选的 " + rows.length + " 库全部同步完成 ✅ 可以「完成向导」了。");
-        }
+        rows = (await loadDbnums()).filter((r) => dbnums.includes(r.dbnum));
       } catch (_) { /* 下一轮再试 */ }
-    }, 4000);
+      if (generation !== S.pollGen) return;
+      if (rows.length && rows.every(rowSync)) {
+        note($("exec-out"), "ok", "勾选的 " + rows.length + " 库全部同步完成 ✅ 可以「完成向导」了。");
+        return;
+      }
+      S.pollTimer = setTimeout(tick, 4000);
+    };
+    S.pollTimer = setTimeout(tick, 4000);
   } catch (e) { note($("exec-out"), "bad", e.message); }
 }
 async function finish() {
@@ -621,7 +627,9 @@ async function finish() {
       return;
     }
     await api("/api/v1/setup/complete", { method: "POST" });
-    if (S.pollTimer) clearInterval(S.pollTimer);
+    if (S.pollTimer) clearTimeout(S.pollTimer);
+    S.pollTimer = null;
+    S.pollGen++;
     goto(6);
   } catch (e) { alert(e.message); }
 }

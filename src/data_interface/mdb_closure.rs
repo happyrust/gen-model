@@ -127,6 +127,19 @@ pub fn declaration(
     if let Some(cached) = cached_declaration(project, mdb) {
         return Ok(cached);
     }
+    reload_declaration(main_db_dirs, project, mdb)
+}
+
+/// 从 `main_db_dirs` 里的 SYS 重读 `mdb` 的声明，**读成功才替换**缓存（ADR-085 D2：先读后换）。
+///
+/// 读失败原样返回、缓存不动：SYST 刚落库时读不动 SYS（被 E3D 占着、共享盘抖一下）不该让进程
+/// 丢掉手里那份还能用的声明——先清后读的话，在下一次读成功之前，闭包、路由目录与本期执行范围
+/// 全都会退化成「主项目 SYS 未读到」。
+pub fn reload_declaration(
+    main_db_dirs: &[PathBuf],
+    project: &str,
+    mdb: &str,
+) -> anyhow::Result<Arc<MdbDeclaration>> {
     let read = super::mdb_membership::read_unbound_declaration(main_db_dirs, project, mdb)?;
     Ok(install_declaration(MdbDeclaration {
         project: project.to_string(),
@@ -969,6 +982,23 @@ mod tests {
         assert!(plan.is_degraded());
         let watch = plan.watch_dir_plan();
         assert!(watch.problems().iter().any(|p| p.contains("Ghost-no-main")), "{:?}", watch.problems());
+    }
+
+    /// ADR-085 D2：先读后换。SYST 落库后重读 SYS 失败（目录里压根没有 SYS）时，手里那份声明原样留着；
+    /// 改成「先清后读」，这一条就红——闭包、路由目录与本期执行范围会一起退化成「SYS 未读到」。
+    #[test]
+    fn a_failed_declaration_reload_keeps_the_previous_declaration() {
+        let project = "Reload-keeps-previous";
+        seed_declaration(project, "ALL", &[(None, 8000, "/D")]);
+        let fixture = Fixture::new("reload-no-sys");
+        let empty = fixture.dir("Marine/ams000");
+
+        let error = reload_declaration(&[empty], project, "ALL").expect_err("目录里没有 SYS，必须报错");
+        assert!(error.to_string().contains("/ALL"), "错误要点名是哪个 MDB：{error:#}");
+
+        let kept = cached_declaration(project, "ALL").expect("旧声明必须还在");
+        assert_eq!(kept.databases.iter().map(|db| db.dbnum).collect::<Vec<_>>(), [8000]);
+        forget_declaration(project, "ALL");
     }
 
     /// `project_name` 写成项目码也认（§8 Q4）。

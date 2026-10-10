@@ -27,8 +27,16 @@ _Avoid_: Ref0 库归属、ref0 反查、ref0 → dbnum 表、把 word0 当作 db
 _Avoid_: 定位器（泛指时）、ref0 定位器、`InMemoryCataLocator`（生产路径）、骨架的 `locator_parts()`
 
 **MDB 闭包 (MDB Closure)**：
-这个服务要开哪些项目——由主项目 SYS 里该 MDB 的 CURD 声明按项目码（SYS `PROJ` 字符向量，空 = 主项目）分组得出（`data_interface::mdb_closure::ClosurePlan`，ADR-078 D1）。闭包从 SYS 现算、只缓存在进程内（声明按 `(project, mdb)` 记一次；`latest()` 留最近一份给 `/health.mdb_closure` 与启动横幅），配置文件里不写第二份真值。core.dll 同形：`DB_DB::makeDirectoryName` 拿声明自带的项目码拼 `/%<PROJ>000%`，没有「项目名单」这回事。声明了却没定位到目录的项目码进 `unresolved`（带 dbnum 清单与找过的根），进 `degraded_sections`，**不拒绝启动**。
+这个服务要开哪些项目——由主项目 SYS 里该 MDB 的 CURD 声明按项目码（SYS `PROJ` 字符向量，空 = 主项目）分组得出（`data_interface::mdb_closure::ClosurePlan`，ADR-078 D1）。闭包由 **MDB 声明**现算、只缓存在进程内（声明按 `(project, mdb)` 登记一份，SYST 批次落库后先读后换，ADR-085；`latest()` 留最近一份给 `/health.mdb_closure` 与启动横幅），配置文件里不写第二份真值。core.dll 同形：`DB_DB::makeDirectoryName` 拿声明自带的项目码拼 `/%<PROJ>000%`，没有「项目名单」这回事。声明了却没定位到目录的项目码进 `unresolved`（带 dbnum 清单与找过的根），进 `degraded_sections`，**不拒绝启动**。
 _Avoid_: `included_projects`（已退役，字段只为旧配置不炸；非空时启动打一句已忽略）、`project_dirs`、纳入的项目、勾选项目、项目名单。
+
+**MDB 声明 (MDB Declaration)**：
+主项目 SYS 里该 MDB 的 CURD 名单：每项是库号、类型（STYP）、项目码（`PROJ`，空 = 主项目），**不含文件位置**。它回答「这个 MDB 有哪些库」，**本期执行范围**、**MDB 闭包**、字典库名单都从它取。启动时读一次并登记；SYST 批次落库后先读后换——新的读成功才替换，读失败沿用旧的，并在那一批的回执里说出来（ADR-085）。两次刷新之间取它不读盘。
+_Avoid_: 解析 MDB、MDB 成员解析（泛指时——分不清说的是读声明还是做绑定）、库侧 `MDB` 表（那是摄入进来的副本，不是声明本身）
+
+**成员绑定 (Member Binding)**：
+给 **MDB 声明**里的每个库，在它所属项目的库目录里选定一个文件（项目内按 extract 族取工作层，ADR-028；同号的其余副本记为遮蔽）。声明了却没绑到文件的库仍是声明的成员——那是缺件，不是「不在 MDB 里」。绑定只在启动、声明刷新、共享盘重挂补上目录这三个时刻重做（ADR-085）。**本期执行范围**不看绑定；dbnum 路由目录、房间参照的缺件清单、生成来源清单看它。
+_Avoid_: 定位（泛指时）、解析 MDB、把「没绑到文件」说成「不在 MDB 里」
 
 **搜索根 (Search Root)**：
 人指定的、装着项目目录的地方：`[project_path] ++ project_search_paths`（本地路径或 UNC，`normalize_path_input` 归一，顺序即优先级；ADR-078 D2）。范围仍由人定（搜索根外不进扫描），只是「哪些项目」由 MDB 定。每个根在独立线程里扫、带超时（`project_locator::DEFAULT_ROOT_SCAN_TIMEOUT` 15 s），掉线的共享盘只让它自己缺席并报出来。
@@ -51,7 +59,7 @@ _Avoid_: 交付单元类型、delivery type、内置交付单元
 _Avoid_: 单元根、unit root
 
 **交付删除记录 (Delivery Delete Record)**：
-`datacenter_delete` 表的一行：某个交付单元曾以某个位号发布到中台、如今该位号要从中台删掉。主键 `[pe:⟨refno⟩, 老位号]`（同一单元多次改位号各留一行，历史不互相覆盖），字段 `refno / name（老位号）/ type（单元 noun）/ zone_refno（沿 owner 链最近的 ZONE，链断为 NONE）/ dbnum / sesno / sesno_time / reason（deleted | renamed）`。两种来源、都只看交付单元**自身**：被删（S 侧墓碑上的位号）、`NAME` 改了（改前的位号）；下属管件的增删改名不记。写者只有增量的随窗语句（`increment_pipeline::render_datacenter_delete_upsert`：固定目标 UPSERT、整窗重放收敛、无条件写——发布过没有由消费端 join `datacenter_version` 判）；删者只有 rs-server（中台 `remove-apply` 成功之后）。不进 `fast_delete::RANGE_TABLES`：回退 / 重初始化 / 删库都不清。预览回执 `DbnumPreview.datacenter_delete_rows` 只计数。对外只有一条**只读**口 `GET /api/v1/datacenter/deletes`（spec §4.14，`datacenter_delete_reader`）：分页、按 ZONE / dbnum / reason / sesno 起点 / 时间范围（`sesno_time`，`[from, to)`）筛，每行附 `published`（`datacenter_version:{refno}` 有没有行），不带 `instance_code`（rs-server 的编码规则，调用方拿 `name` 原文自己编）。来源 plant-ui #1，计划 `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`。
+`datacenter_delete` 是“曾发生过删除或改名”的事件表。主键只取 refno 值：`datacenter_delete:⟨ref0_ref1⟩`，不把 `pe` 记录链接或 `name` 放进 ID；写入用 `INSERT IGNORE`，同一 refno 只保留首次事件，重放与后续再改名均忽略。写前批量点查同 ID 的 `datacenter_version`，只有已经发布到中台的 refno 才记录。字段 `refno / name（首次事件的老位号）/ type（单元 noun）/ zone_refno（沿 owner 链最近的 ZONE，链断为 NONE）/ dbnum / sesno / sesno_time / reason（deleted | renamed）`。两种来源、都只看交付单元**自身**：被删（S 侧墓碑上的位号）、`NAME` 改了（改前的位号）；下属管件的增删改名不记。写者只有增量的随窗语句（`increment_pipeline::render_datacenter_delete_insert_ignore`）；本仓不消费也不删除，后续处理交给第三方。不进 `fast_delete::RANGE_TABLES`：回退 / 重初始化 / 删库都不清。预览回执 `DbnumPreview.datacenter_delete_rows` 只计本窗口实际符合发布存在性门的尝试写入数。对外只有一条**只读**口 `GET /api/v1/datacenter/deletes`（spec §4.14，`datacenter_delete_reader`）：分页、按 ZONE / dbnum / reason / sesno 起点 / 时间范围（`sesno_time`，`[from, to)`）筛，每行附 `published` 和版本状态（新写事件正常恒为已发布），不带 `instance_code`。来源 plant-ui #1，计划 `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`。
 _Avoid_: 删除标记、`datacent_delete`（issue 原文的笔误）、把它当 `datacenter_version` 的 Delete 状态（那条照旧并存，消费端按 `instance_code` 去重）
 
 **正常颗粒 (Normal Granularity)**：
@@ -195,8 +203,8 @@ _Avoid_: 模型追平（只说了一半）、`model_caught_up`（行内那一半
 _Avoid_: 重建任务、对齐批次、realign 批次
 
 **本期执行范围 (Update Scope)**：
-增量摄入认哪些库的**唯一 MDB 口径**（`update_scope.rs`）：当前 MDB 的 CURD 里 STYP=DESI/ISOD 的库号，取**声明口径**而不是「已解析出 SITE 的库」——MDB 列了却从没导入过的库正是 `initialization_required` 那一档，该出现在范围里等人确认。库侧 `MDB` 表为空（全新命名空间）时回落到 `init_mdb` 已 `install` 的文件侧成员名单（同一判据 `DESI_STYP | ISOD_STYP`）。SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受它门控——成员名单本身就存在这些库里，挡掉它们范围定义会自己冻住。`manual_db_nums` / `exclude_db_nums` 自 2026-08-06 起不再参与这个判定（issue #10），只供全量模型生成与按需基线解析。它与**监听限定域**是**叠加**关系，不是二选一：数据批次入队走 `in_scope_with` 四道门串联（外项目运行态 sys 永不进 → 监听限定 → 调试限定 → MDB 范围），`[库一致性]`、模型凭证核对、`/health` 与按需 `sync_and_seed_model_coverage` 同样套监听门，所以**增量数据面的有效范围 = MDB 声明的 DESI ∩ watch_dbnums**（2026-09-08 共识 d-25）。限定时 `[init] N 个库被 watch_dbnums 监听限定跳过`、`[库一致性]` 只出域内几行，是**预期输出而非缺陷**；审核与改动都不得拿「MDB 全量」去要求数据面。已知且允许的残余：范围之内声明了、盘上却没有文件的设计库，文件驱动的 `sweep_dirs` 在三个「跳过」桶里都不会碰到它，只在整面重扫收尾点名一句（「没有解析到文件」，不记 blocker、不改范围定义），此外只有骨架装载的 `problems` 与手动预览的 `not_in_project` 看得见它。
-_Avoid_: 增量范围（泛指时）、MDB 范围（当指监听限定域时）、按 MDB 全量核对数据面、把 `watch_dbnums` 当范围定义、把 `manual_db_nums` 当范围
+增量摄入认哪些库的**唯一 MDB 口径**（`update_scope.rs`）：当前 MDB 的 CURD 里 STYP=DESI/ISOD 的库号，取**声明口径**而不是「已解析出 SITE 的库」——MDB 列了却从没导入过的库正是 `initialization_required` 那一档，该出现在范围里等人确认。名单取自进程内登记的 **MDB 声明**（主项目 SYS 文件，2026-09-09 起；ADR-085），不取库侧 `MDB` 表，也不看**成员绑定**——声明了却没绑到文件的库照样在范围里，缺件是初始化阻断，不是缩小范围的依据。取范围本身不读盘，名单在 SYST 批次落库后刷新，不用重启（ADR-085；2026-09-09 ~ 09-29 每次取范围都重做一遍成员绑定，09-15 起 MDB 变更要重启才进范围）。库侧 `MDB` 表只服务查询别的 MDB 的旧管理入口（那张表空时回落到已登记的声明）。SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受它门控——成员名单本身就存在这些库里，挡掉它们范围定义会自己冻住。`manual_db_nums` / `exclude_db_nums` 自 2026-08-06 起不再参与这个判定（issue #10），只供全量模型生成与按需基线解析。它与**监听限定域**是**叠加**关系，不是二选一：数据批次入队走 `in_scope_with` 四道门串联（外项目运行态 sys 永不进 → 监听限定 → 调试限定 → MDB 范围），`[库一致性]`、模型凭证核对、`/health` 与按需 `sync_and_seed_model_coverage` 同样套监听门，所以**增量数据面的有效范围 = MDB 声明的 DESI ∩ watch_dbnums**（2026-09-08 共识 d-25）。限定时 `[init] N 个库被 watch_dbnums 监听限定跳过`、`[库一致性]` 只出域内几行，是**预期输出而非缺陷**；审核与改动都不得拿「MDB 全量」去要求数据面。已知且允许的残余：范围之内声明了、盘上却没有文件的设计库，文件驱动的 `sweep_dirs` 在三个「跳过」桶里都不会碰到它，只在整面重扫收尾点名一句（「没有解析到文件」，不记 blocker、不改范围定义），此外只有骨架装载的 `problems` 与手动预览的 `not_in_project` 看得见它。
+_Avoid_: 增量范围（泛指时）、MDB 范围（当指监听限定域时）、按 MDB 全量核对数据面、把 `watch_dbnums` 当范围定义、把 `manual_db_nums` 当范围、把库侧 `MDB` 表当配置 MDB 的范围来源
 
 **监听限定域 (Watch Scope)**：
 把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。按 dbnum **点名**的初始化入口（`initialize_project_dbnum` / `initialize_project_dbnum_baseline`，`UpdateScope::unrestricted`；`bin/initialize_ams_dbnums`、Python 绑定与 l3 套件走它）不在此列：那个库是调用方指定的、不是 watcher 扫出来的，`in_scope_with` 对它只留跨项目那两道数据域过滤，监听 / 调试两道门都不管（2026-09-15 起；此前 1112 不在名单里被挡、报的却是「未找到 dbnum」，`DbOption.toml` 里那条把它写进名单的绕法已撤）。它叠在**本期执行范围**之上而不是替代它：有效范围是两者的交集（d-25），域外的库在 sweep 里落「监听限定跳过」那个桶，**不**进「不在 MDB 声明名单里」也**不**进「声明了却没解析到文件」那两句——它们不是没文件、不是不在名单，是本轮没有问过。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。

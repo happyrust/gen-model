@@ -69,7 +69,7 @@ pub struct MemberChanges {
 }
 
 impl MemberChanges {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && !self.reordered
     }
 }
@@ -350,14 +350,16 @@ pub fn changed_count(
         + usize::from(owner.is_some())
 }
 
-struct SideRead {
-    attributes: Option<Vec<AttributeValue>>,
-    members: Vec<RefNo>,
-    owner: Option<RefNo>,
-    unavailable: Option<String>,
+/// 一端读出来的东西：属性表（渲染失败为 `None`，原因在 `unavailable`）+ 成员表 + owner。
+/// 与 [`crate::fast_model::attribute_diff`] 共用——两端各读一次是两条路由同一个动作。
+pub(crate) struct SideRead {
+    pub(crate) attributes: Option<Vec<AttributeValue>>,
+    pub(crate) members: Vec<RefNo>,
+    pub(crate) owner: Option<RefNo>,
+    pub(crate) unavailable: Option<String>,
 }
 
-fn read_side(
+pub(crate) fn read_side(
     attributes: &ElementAttributeService,
     set: &Arc<DbSet>,
     pin: &crate::data_interface::element_attributes::PinnedRead,

@@ -478,8 +478,13 @@ pub async fn soft_delete_review_bundle(form_id: &str) -> anyhow::Result<()> {
 // Task lookup by form_id (used by embed_url & workflow_sync)
 // ============================================================================
 
-/// 按 `form_id` 取最近更新的一条**活动**任务（软删过滤 [`REVIEW_TASK_ACTIVE_SQL`]），并水合附件。
-pub async fn find_task_by_form_id(form_id: &str) -> anyhow::Result<Option<ReviewTask>> {
+/// 按 `form_id` 取最近更新的一条**活动**任务的原始行（软删过滤 [`REVIEW_TASK_ACTIVE_SQL`]），
+/// **不**水合附件。这是 `form_id → 活动任务` 的唯一排序口径：`workflow_sync` / `embed_url`
+/// 经 [`find_task_by_form_id`] 走它，`tasks::create_task` 的 form_id 去重也走它，两路对同一组
+/// 重复行永远选中同一条（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D5）。
+pub(in crate::web_service::review) async fn find_active_task_row_by_form_id(
+    form_id: &str,
+) -> anyhow::Result<Option<TaskRow>> {
     let db = fresh_review_db().await?;
     let mut response = await_review_query(
         "review.forms.find_task_by_form_id",
@@ -498,7 +503,14 @@ pub async fn find_task_by_form_id(form_id: &str) -> anyhow::Result<Option<Review
     .await?;
 
     let rows: Vec<TaskRow> = response.take(0)?;
-    let task = rows.into_iter().next().map(TaskRow::to_review_task);
+    Ok(rows.into_iter().next())
+}
+
+/// 按 `form_id` 取最近更新的一条**活动**任务（软删过滤 [`REVIEW_TASK_ACTIVE_SQL`]），并水合附件。
+pub async fn find_task_by_form_id(form_id: &str) -> anyhow::Result<Option<ReviewTask>> {
+    let task = find_active_task_row_by_form_id(form_id)
+        .await?
+        .map(TaskRow::to_review_task);
 
     if let Some(task) = task {
         return Ok(Some(hydrate_task_attachments(task).await));

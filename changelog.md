@@ -1,5 +1,146 @@
 # 变更记录
 
+## 2026-09-29
+
+### 本期执行范围不再每次现算（ADR-085）：`mdb_scope` 阶段行稳态零行，MDB 新加的库 SYST 落库后即进范围
+
+- **为什么**：现场增量运行时控制台连刷 `[ams-phase] phase=mdb_scope project=AvevaMarineSample mdb=/ALL source=sys-file dbnums=29 elapsed_ms≈4000`。
+  `UpdateScope::fetch` 对配置的 MDB 每取一次范围就 `mdb_membership::resolve` + `install`，而取范围的入口全是现取：每轮重扫、
+  `GET /api/v1/dbnums?project&mdb`、`/update/preview`、`/update/execute`（运维面板 `ops.html` 每 3 个周期拉一次 `/dbnums`）。
+  09-15 ADR-078 起声明进了进程缓存，这一趟只剩重扫搜索根与逐库重找文件，范围一个库号都不变；同一份缓存从不刷新，
+  SYST 落库时作废的是 08-14 起就没人读的范围缓存，MDB 里新加的库要重启才进范围。
+- **改动**（计划 `docs/plans/2026-09-29-update-scope-reads-the-registered-declaration-fix-plan.md` S1–S6）：
+  - `mdb_membership::rebind` 成为成员绑定唯一的重做入口，也是唯一打 `mdb_scope` 阶段行的地方（带 `reason=startup|syst-refresh|remount|fallback`、
+    `unbound=`，SYST 刷新再带 `added` / `removed`）；`init_mdb` 改走它。
+  - `fetch` 对配置的 MDB 只读登记表（`mdb_membership::get`），未登记才 `spawn_blocking` 现做一次（`reason=fallback`）。
+  - SYST 批次 `applied`：`reload_declaration_and_rebind`——`mdb_closure::reload_declaration` 先读后换（读失败留旧声明），再重做绑定；
+    失败原文进本批回执 `warnings`；随后照旧置 `SCOPE_DIRTY`。
+  - 重挂轮补上目录后、补扫之前重做绑定（`reason=remount`）。
+  - 执行范围缓存退役：`SCOPE_CACHE` / `resolve_cached` / `update_scope_cached` / `invalidate_scope_cache` / `finish` 的陈旧回退；
+    `AIOS_SCOPE_CACHE_SECS` 仍在环境里时启动点名已退役（`options::retired_scope_cache_notice`）。
+  - `web/setup.html` 执行初始化后的水位轮询改成 `setTimeout` 串行、每拍一次 `/dbnums`（此前 `setInterval` 每 4 s 两次、不等上一轮）。
+  - live 用例 `live_scope_refresh_baselines_a_db_the_mdb_just_declared` 改为声明驱动（09-09 起范围不看库侧 `MDB` 表，改库侧 CURD 已驱动不了它），
+    CURD 夹具三件删除。CONTEXT.md 新增「MDB 声明」「成员绑定」，改写「本期执行范围」「MDB 闭包」。
+- **验证**：`cargo test --lib` 2457 passed / 0 failed / 128 ignored（上一条记录 2453 / 0 / 128；+9 新增 −5 缓存用例）。负例：`fetch` 临时改回
+  每次现做绑定，`the_configured_mdb_scope_reads_the_registered_declaration` 红（拿到本机 AMS 真名单 29 个库）。真 AMS 文件、不连库的
+  `ams_mdb_initialization_scope_without_database` 绿，兜底那一行 `reason=fallback dbnums=29 unbound=0 elapsed_ms=1244`（本地盘）。
+  `setup.html` 脚本 `node --check` 通过。本机起服务（一次性内存 SurrealDB 占 8009，服务 `rocksdb` + `ingest`，PowerShell 按 `ops.html`
+  节奏轮询 150 s）：改前（09-28 release 包）一次 `/dbnums` 一行、共 33 行，`/dbnums` 中位数 883 ms；改后只有启动那一行
+  `reason=startup dbnums=29 unbound=0 elapsed_ms=862`，稳态 35 次 `/dbnums` 零行，中位数 27 ms（计划 V3 / V4）。live 用例（V5）绿：
+  摘掉 7998 后 `reason=syst-refresh removed=[7998]`、重扫不排它，装回后 `added=[7998]`、`scope-refresh` 新排 `1..=465` 并走完首次初始化。
+  09-30 本机端到端验收（计划 §10.2「端到端 A / B / C」）：E3D TTY 夹具套件 10/10 PASS（`output/e3d-fixture/20260930-102755`），
+  控制台 `mdb_scope` 全程 1 行，09-29 改前同一套件 70 行；真实 E3D 保存由 watcher 自己应用（7998 511→514，没有 `/update/execute`），
+  E3D 会话写进 SYS 的那一笔落库后走了从盘重读声明的真路径（两行 `reason=syst-refresh added=[] removed=[]`，1.3 s）。
+  实测补记：E3D 每个会话都会在 SYS 里记一笔 `Saving Meta Data.`（按会话记，不按保存记），现场控制台预期是启动一行 + 每个 E3D 会话一行，
+  不是零行（ADR-085 后果 2 已补）。没跑：现场包（V6），以及 E3D Admin 真往 `/ALL` 加一个库（仓里没有改 MDB 的宏）。
+
+### 房间归属计算默认开（`room_membership` 缺键 = true）：构件挪了位置，它的生成根重算时房间边跟着重写
+
+- **为什么**：现场在 E3D 里挪了 `CAP 1 of BRAN /1WCC1135/B2/2`（`24383/101306`，dbnum 7999），BRAN 整根重算了，房间边却一条没动。
+  `room_membership` 自 2026-09-11 起缺省 false，仓里 `DbOption.toml` 与出厂模板也写 false：`frozen_room_calculator()` 回 `Ok(None)`，
+  `room_stage` 走 `NotComputed`，这一根一句 `room_relate` 都不写；CAP 还有几何，`room_edges_to_clear` 也不清它，旧边原样留着。
+  当初关它是因为 0.1.25 缺 6003 SCBDESI 就整批根判死——这个形状已由 ADR-073 D8–D11（2026-09-16，输入不全 = 降级不判死）收掉。
+- **改动**：
+  - `options::room_membership` 缺键、缺环境变量时取 `true`（`ROOM_MEMBERSHIP_DEFAULT`）；环境变量 > 配置 > 缺省的顺序不变。
+  - 能力门 `room_membership_capable`：`AIOS_SPATIAL_COMPUTE=0` 或没编 `project_hd` / `project_hh` 的进程不建常驻房间模型（`Unsupported`），
+    此时不论键与环境变量怎么写都按关（此前显式开 = 每根「room calculator unavailable」判死）；要求开而没生效由启动横幅
+    `room_membership_notice()` 点名来源与原因。
+  - `DbOption.toml`、`scripts/templates/DbOption.factory.toml` 改写 `room_membership = true` 与注释；`factory_template_room_membership_matches_code_default`
+    照旧钉「模板 == 代码默认」。
+  - L3 夹具（`l3_suite` fixture）不再钉 `room_membership = true`：渲染出的配置去掉这一行、各子进程 `env_remove(AIOS_ROOM_MEMBERSHIP)`，
+    两个 `room: true` 场景直接考代码默认，默认一旦退回关就红。
+- **不改**：`db_options/DbOption-aps.toml` 等显式写 `false` 的项目配置照旧关；`verification/`、`docs/baselines/` 下的历史快照不动；
+  本仓 `DbOption.toml` 的 `watch_dbnums = [7998, 8000]`（调试限定，不含 7999）不在本条。
+- **验证**：`cargo test --lib` 2453 passed / 0 failed / 128 ignored（新增 `room_membership_is_on_unless_someone_turns_it_off`、
+  `a_process_that_cannot_compute_rooms_keeps_room_membership_off`、`the_room_membership_notice_names_the_request_and_why_it_did_not_take`）；
+  `cargo test --bin l3_suite` 当时 38 / 39，唯一红的 `manifest_rejects_unknown_owner_and_non_terminal_destructive_case` 是既有问题，
+  已在下一条修掉（42 / 42）。
+  E3D TTY 夹具（`scripts/Run-E3DFixtureSuite.ps1`，靶 `ams7998_0001` / 7998，E3D 3.1 shadow TTY，夹具 SITE 跑完即删）10 / 10 PASS：
+  渲染出的两份配置 0 行 `room_membership`，服务 `/health.room_membership = true`、`features.room = degraded`（镜像里只有 7998 一个 DESI，
+  D8 降级照算）；`room-member` 用 TTY 把 EQUI 从 R101 挪到 R102 再挪回，BOX 的 `room_relate` R101 → R102 → R101（`inside_count = 8`），
+  `room-structure` 房间面照变。夹具跑在能力门扩到显式取值之前的那一版上；算得了房间的进程两版逐位相同。证据 `output/e3d-fixture/20260929-184111/`。
+  另用 cua-driver 驱动 plant-ui 看同一只 EQUI（隔离栈、TTY 挪 E 10000 再挪回、`/api/v1/update/execute` 各一窗）：「房间」页 R101 → R102 → R101，
+  与库上 BOX 的 `room_relate` 一致（证据 `output/cua-verify/ui-3.png` / `ui-4.png` / `ui-5.png`）。
+
+### L3 夹具 `--fixture-ui` 两处 harness 问题：界面与播种 SQL 跟着夹具实际绑的端口走，`--output` 写正斜杠也能建资产联接
+
+- **为什么**：上一条用 cua 验证时，`l3_suite --fixture-manifest … --fixture-ui` 在默认端口下起不来——`write_ui_project_config` 拿服务配置的
+  Surreal 端口去比金套件的 `SURREAL_PORT`（8048），夹具绑的是 18048，一比就停；界面设置与 `PLANT_MODEL_API_URL` 也写死 8028。改用
+  `L3_FIXTURE_*_PORT=8028 / 8048` 绕过去，又撞上 `FIXTURE_SURREAL_SQL` 是字面量 `http://127.0.0.1:18048/sql`：栈挪了端口，播种和断言还敲 18048
+  （`curl: (7)`）。另一处：`--output D:/x/run` 拼出的联接路径带 `/`，cmd 把 `/x` 当开关，`mklink /J` 失败（`failed to link …\fonts`）。
+- **改动**（只动运行器，不动服务）：`UiEndpoints { api_base, surreal_port }` 显式传给 `prepare_plant_ui_runtime` / `write_ui_project_config`，
+  金套件传 `UiEndpoints::golden()`（8028 / 8048），夹具传 `fixture_ui_endpoints()`（跟 `L3_FIXTURE_API_PORT` / `L3_FIXTURE_SURREAL_PORT`）；
+  项目配置的 `api_host`、设置文件的 `model_api_url` / `data_api_url` 都从它出。`FIXTURE_SURREAL_SQL` 换成 `fixture_surreal_sql_url()`。
+  `link_directory` 交给 cmd 之前按组件重拼路径，分隔符统一成 `\`。
+- **顺带修的既有红测**：`manifest_rejects_unknown_owner_and_non_terminal_destructive_case` 自 `b65f5614e`（09-24 允许多个 destructive 案连成尾段）起
+  就过时——它克隆 destructive 案当「后面那一案」，新规则照放行。改成后一案 `destructive_last = false` 才拒，并补一句「尾段两案都 destructive = 放行」。
+- **新钉**：`fixture_endpoints_follow_the_ports_the_fixture_binds`（生产代码里 `127.0.0.1:` 后面只许跟 `{`）、`plant_ui_runtime_follows_the_endpoints_it_is_given`、
+  `staging_accepts_an_output_path_written_with_forward_slashes`（Windows）。
+- **验证**：`cargo test --bin l3_suite` 42 / 42；`cargo test --lib` 在 `786fddf67`（ADR-085）之上连同上一条重跑 2457 passed / 0 failed / 129 ignored；
+  `rustfmt --check` 本条改到的段落干净（`fixture.rs` 余下三处是 HEAD 上就有的）。live：默认端口、`--output` 用正斜杠、`--fixture-ui --keep-stack` 跑房间两案
+  （`output/cua-verify/room-manifest.json`，靶 `ams7998_0001` / 7998）2 / 2 PASS、`L3_EXIT=0`；渲染出的项目配置 `db_host = ws://localhost:18048`、
+  `api_host = http://127.0.0.1:18028`，plant-ui 进程只连 18028，模型树列出 10 个 `/AIOS-INC-*` SITE；夹具 SITE 跑完即删，联接先解再删目录，
+  mesh 目录文件数前后都是 49232。证据 `output/cua-verify/run3-evidence/`、`run3-ui-1.png`。
+
+### 墙上的 FITT 自己成件（vendor e3d-model `2a0a3f6`、e3d-io `6bbcff9`）：aps250110 整站 RVM 配对 3300 → 3357、通过 3246 → 3303，57 只 `FITTING n of STWALL m` 全部 0.04 mm 内对上
+
+- **为什么**：E3D 的 TTY RVM 把 STWALL 上的门窗各写一组（`FITTING 1 of STWALL 5 of CWALL /B01_LEV01_INT_WALLS`：门扇 SEXT 按 `DESP[2] = 20°` 转开 + 三根门框 SEXT），我们把 63 只全记在 `catalog_pending`——RVM 有而 gen 没有的 139 组里它占 57。
+- **改动**：e3d-model `category::builds_from_catalogue_component` 认 `FITT`（与 FIXING 同路：`SPRE → SPCO --CATR--> SFIT --GMRE-->`，`DESP=[ISET, ANGL]` 经 DTSE 表进 `RPRO`），`is_model_unit` 名单加 `FITT`；新增 `is_model_unit_of(&DbElement)`——noun 说「可以成件」后再看属主，只有 STWALL 名下的算（`fitting_stands_alone_under`）：
+  SCTN 名下的 FITT 由 `section_fitting_parts` 并进梁体（SCTN gb==0，全量遍历走得到它，不能再让它自己成件），CMPF 等属主下的没有现算标架、照旧欠着。管线 `Category::Catalog` 臂、增量 `nearest_unit` / `collect_unit_subtree` / `execute_plan` 四处同改。标架就是 FITT 模板件此前对上的那份 `transform::ImplicitFrame::SectionFitting`。
+  e3d-io `catalogue_pml::parse_number` 认八词的带型数字记录 `101 7 <四词> 11 1`——门目录 `/IS-SRO-NS/900x2045` 的门框 SVER 把整数字面量（`( ( ATTRIB RPRO WIDT - ATTRIB RPRO DWID - 2 ) * 0.5 + 15 )` 里的 2 与 15、`PRAD = 5`、`( ATTRIB RPRO THK + 1 ) * -1` 里的 1）全写成这一形，
+  此前整段不可读、顶点落回全零元组，95 × 61 带 5 mm 圆角的门框只建出 35 × 10 的门挡。
+- **整站对拍**：`generated 3300 → 3357、skipped 565 → 571`（6 只 FITT：5 只 `SPRE 15193/27649` 走不到目录件、1 只 GMSE 空——RVM 里同样是 6 组无几何）、`failed 13` 不动、`catalog_pending` 只剩 PFIT 6；配对 3357 / 通过 3303 / 失败 54（全是在案的 HRPANE 栏板模板件），FITT 57 / 57。
+  RVM 有而 gen 没有的还剩 82 组：BPANEL 52、TREAD 25、WALL 2（DESP 长度 1）、RAIL 2（centreline_only）、PFITTING 1。
+- **对拍脚本**：两份 `compare_gen_ams.py`（`output/gensec-joint-20260927/`、`output/wf05-rr001-20260923/`，不入库）的 alias 表补 `SUBS / RUNGSE / BRAN / EQUI / TREADS / HRPANEL`——261 组「gen 有而 RVM 没有」原是属主 noun 长短名没对上，补齐后配对 3039 → 3300、新露出 54 只 HRPANE 栏板（`implicit_frame` 没接 HRPANE，整片堆在 HANDRA 原点旁，与 9/28 修前的 HRPOST 同型）。
+- **护栏**：ancestor 登记 `category.rs::is_model_unit_of`（只核 owner 的 noun）；读取集合不变（本仓并集仍 144）。
+- **验证**：e3d-io lib 398 过；e3d-model 共享树 lib 351、ancestor 4 / attribute 2 / reference 2、increment_real 3、gensec_joint_real 2、gensec_host_fixing_real 1、hvac 两道、noun_coverage 8 全过。证据 `%TEMP%\aps-verify-20260928\`（`cmp-fitt2.json`、`compare-fitt2.log`、`gen_ams-fitt2.log`、`e3dmodel-fitt3.log`）。
+
+### SCTN 上的 FITT 也自己成件、目录件的 NGMR 不再扣自己（vendor e3d-model `b64fcec`）：ams7997 `failed 154 → 85`、`catalog_pending FITT 1189 → 0`，aps250110 逐件不变
+
+- **为什么**：E3D 的 RVM 给 SCTN 上的每只 FITT 各开一组、梁的组里只有梁——`test_data/rvm/KX-CAM-S4001.rvm` 里 `/-KX-CAM-S4001-V1/F1` 是自己一条 Box 270 × 20 × 270，`SCTN-HW150-C80.rvm` 里 `FITTING 1 / 2 of SCTN /1TFA004MP-SUPP-01-V1` 各自一组（无几何）。
+  我们此前把 FITT 的目录几何拼进梁的 `parts`（SCTN 的 gb 是 0，不是注释里说的 gb==1 容器），梁体退化时还拿 FITT 的几何「保留」成一件假梁——ams7997 目录库 7600 不在，1073 只 SCTN 就是这样以端板冒充梁体的。
+- **改动**：`category::fitting_stands_alone_under` 认 `SCTN | STWALL`（= `ImplicitFrame::SectionFitting` 的两个宿主），`elmodl` 删掉 `section_fitting_parts` / `section_fitting_parts_of`。
+  顺带删掉 `6ff5dac` 加在 `model_catalogue_member_with_cache` 里的**组件级 NGMR 自扣**：NGMS 是给宿主扣的刀（`catalogue_host_cuts`），aps250110 的 E3D TTY RVM 里 57 只门窗中 50 只、50 只 FIXING 中 8 只的正体会被自己的 NGMS 扣掉一截（门洞 NSBO 扣完只剩门扇伸出墙外那一角，檐口加腋节点 `/208` 只剩 31 mm 一片），
+  RVM 却按未扣的 `parts` 逐件对上；此前看不出来是因为对拍吃 `parts`，它唯一露头处是扣空时的 `EmptyManifold`——ams7997 59 只 STWALL 上的 `/W-HOLE` 墙洞 FITT 与 10 只 FIXING 因此整件 failed。
+- **验证**：aps250110 逐件不变（3357 / 3303 / 54，FITT 57 / 57）；ams7997 `generated 51851 → 51920`（+1132 FITT +10 FIXING −1073 假梁）、`failed 154 → 85`（69 条「catalogue component after negatives 生成的流形为空」全消，剩 3 只 FITT 是 db 6000 不在）；
+  e3d-model lib 351、ancestor 4 / attribute 2 / reference 2、increment_real 3、gensec 两道、hvac 两道、noun_coverage 8 全过，提交在干净 worktree 里单独编过。
+- **在案 → 已收**：KX-CAM-S4001.rvm 的两块端板与 gen 各差 17.4 mm（y / z 各一），拆前拼在梁里就是这个位置——见下一条。
+
+### FITT 标架在截面目录不在时的兜底径向按 π/2 算（vendor e3d-model `9ec27b9`）：ams7997 三块角钢端板与 E3D RVM 逐分量 0.0 mm
+
+- **为什么**：`section_fitting_placement` 解得开截面目录时 `radial_angle = π/2 − neutral_angle + mount.rotation + π/2`，`POSL = NA` 时两项相消恒为 π/2；截面链断（本机没有 ams7997 角钢用的 db 7600 会话 12，`aps7600_0001` 是另一份）走兜底那一档却是 0——同一只 FITT 的滚转随目录库在不在而差 90°。
+  `/-KX-CAM-S4001-V1/F1` 的板心偏移是设计参数 `DESP[8..9] = (−8.7, 8.7)`，E3D 把它落在 L40 角钢截面包围盒中心（板心 (−14560, −44690, 5965)），我们绕梁轴转到另一侧。
+- **改动**：兜底改成 π/2，只有 NA 的 PLAX 转角与 JUSL 偏移读不到按 0。新真库门 `tests/section_fitting_real.rs`：三块端板（`-V1/F1`、`-V3/F1`、`/-KX-CAM-S4003-BAR-1/F1`）对 `test_data/rvm/KX-CAM-S4001.rvm` 的 Box 与 `fitting_mount_matches_cam_native_axes_and_origin` 钉的中心 0.1 mm 内逐分量相等，并钉 SCTN 名下的 FITT 是自己一件；兜底按 0 时它在第 1 分量差 17.4 mm 处红。
+- **验证**：aps250110 逐件不变（目录全解得开，3357 / 3303 / 54）；ams7997 1073 只走兜底的端板随之转正（中位 24.4 mm，最大 157.4 mm，`/-KX-CAM-S2001-BAR-1/F1`）；lib 351 + 全套门过。
+
+## 2026-09-28
+
+### 檐口加腋节点：目录 JOIN 的 NGMS 负体扣梁、FIXING 的 AANGXZ / AANGYZ 现算（vendor e3d-model `6ff5dac` 落地 + `b820a4a` 收口、e3d-io `3031902`）：8 根檐口斜梁 16 mm → 0，aps250110 整站 RVM 1179 → 1223 / 3039
+
+- **为什么**：`/AREA02_WS_AXIS_WS.1`–`.4` 人字屋架斜梁的檐口端比 E3D 长 16 mm（z 最低点差 4.13 mm = 16 × 坡度）。JOIE 指的 FIXING 的 `SPRE → CATR` 是目录 JOIN `/J2S4_EAV_PFI_PFI_003`，负体在目录 NGMS（NSEX，`Pz = -(PARA[1]+1)`），
+  环用设计表 `RPRO BONE / BTWO`，而设计表按 `ANYZ = -AANGYZ` 选深度——`AANGYZ` 是 Core3D `pllib/PATANG` 按世界几何现算的伪属性（连接梁在关节那一端的截面轴换到 FIXING 标架的转角），库里没有。
+- **改动**：e3d-io `catalogue_pml` 认带单位的数字记录 `101 9 …`（`+ 20mm`、`+ 1mm`）、比较 LT / GE / LE（core.dll 解释器 `sub_51B4976` 同款 EXRCTL slack）、`DbElementParamEnv::with_derived`；
+  e3d-model `elmodl::attachment_angles`（CREF 梁 SPINE 端切向 → FIXING 标架，`yz = atan2(-y, z)`，E3D TTY 四只檐口 FIXING `Q AANGYZ = -14.481°` 逐只相等）、`catalogue_point::member_env` 统一目录求值环境并交 AANG、
+  `elmodl::fixing_negatives` 统一关节（mode 0）与宿主扫描（mode 9）的取源与两道 NAPP 门，关节路径也吃目录 JOIN 的 NGMR。
+- **整站对拍**：光「带单位的数字」一条就多对上 36 只 FIXING（柱底板自己那块板 329.2 × 340.4 × 30 也画出来了），配对 2995 → 3039、1179 → 1215；檐口 8 根修好、坏 0 → 1223。
+- **增量**：FIXING 的目录件经 CREF 读梁的 APAR / ADES / AANG，却挂在柱的 datum 下、不在梁子树里——`increment::joint_fixings_of`（`joint_consumer_of` 的反方向）把要重建 / 删除的梁的关节 FIXING 一并重建。
+  护栏：reference 三条登记补新读者；读取集合非属性字面量 +`AANGXZ` +`AANGYZ`（本仓并集不变）。
+- **验证**：e3d-io lib 369 过；e3d-model 干净树（`b820a4a`，e3d-io `3031902`）编过；共享树 lib 350、真库门 `gensec_joint_real` 2 / `gensec_host_fixing_real` 1 / `increment_real` 3、三道护栏全过。
+  证据 `output/gensec-joint-20260927/`（`cmp-unit.json`、`cmp-eaves.json`、`eaves-angles.mac/.log`）。
+
+### 9/28 收口：目录件 NGMR 读法回归、多分量亏格、栏杆提交的护栏登记、NOZZ 设计规则（vendor e3d-model `c1a687e` / `4847973`、e3d-io `ad379a5`）：aps250110 整站 RVM 3039 / 3039 全过
+
+- **NGMR 回归**（e3d-model `c1a687e`）：`6ff5dac` 起 `model_catalogue_member_with_cache` 对每个目录件 `get_element("NGMR")?`，管件 SCOM / HVAC / 桥架构件的模板没这个属性，e3d-io 报 `UnknownAttribute` 整件打死——aps250110 少了 34 只
+  FLAN / ELBO / VALV / NOZZ / REDU / TEE（generated 3266、failed 47），`increment_real` 两条门红（HVAC STRT / BRCO 0 件、ams251142 桥架 0 件）。改成 `has_attribute("NGMR")?` 为假当没有负体集；generated 回到 3300 / failed 13。
+- **三道门**（e3d-model `4847973`，本仓 `63938e29d`）：9/28 栏杆那批提交（`128e831`…`d3355a8`）让 ancestor / attribute / `gensec_joint_real` 红了。`transform::handrail_post_world` 登记为 AboveUnit（HRPOST / HRTERM / HRGATE 的现算标架读 HANDRA 的 RPATH，
+  在立柱模板件的单元之上，`implicit_frame_host_of` 还没接 HANDRA 这支——在案缺口）；`fixing_host_frame` 补登记 WALL 的 `DESP[0]` 与墙厚 `PARA[0]`；读取集合 +`HRJUSL` +`WIDT`（e3d-model 140 → 142，本仓并集 142 → 144，`model_impact` 钉数跟改）；
+  `GeneratedElement::genus()` 改为按分量求和——`d3355a8` 的 `restore_sloped_joint_tips` 给斜接梁补的零厚尖条是独立分量，`1 − χ/2` 把 `/1819` 两只腹板螺栓孔数成一只。
+- **NOZZ**（e3d-io `ad379a5`）：`/P_S_01/N1 N2`、`/P_D_01/N1 N2` 差 148–151 mm——它们的 `HEIG` 在取负哈希下挂着一条设计侧属性规则 `( ATTRIB CDPR NHEI )`（两词包头 + 整段 PML），`get_number` 把它当元组解不开报 Unresolved，
+  目录颈段 `SCYL.PHEI = DDHEIGHT` 因此求不出。与 `extract_attribute` 同口径：既不是整段 PML 也不是元组的正文当它不存在、读槽位（`HEIG = 180`，TTY 与 RVM 都对着它）。NOZZ 0 / 4 → 4 / 4。
+- **整站对拍**：配对 3039 / 通过 3039 / 失败 0，最大差 1.63 mm（2 mm 口径）。RVM 有而 gen 没有的 404 组（BOX 70、FITTING 57、GENSEC 56、BPANEL 52…）与 gen 有而 RVM 没有的 231 组照旧，不在这一批里。
+- **栏杆立柱的增量缺口关掉**（e3d-model `f21dab9`）：`increment::implicit_frame_host_of` 加第三支——候选落在带立柱的 HANDRA 子树里（RPATH / POINTR / CURVE、POSTSE / RAILSE / HRFEAT、HRPOST / HRTERM / HRGATE）就把整棵 HANDRA 子树级联重建，
+  与 GENSEC datum 那支同型；只有 RPATH 的布局式 HANDRA（自己就是单元）与立柱 TMPL 里的件（owner 链够得着）不算。ancestor 护栏里 `handrail_post_world` 那条改记「单元规划已补上」。真库单测 `handrail_post_inputs_climb_to_their_handrail`。
+
 ## 2026-09-27
 
 ### GENSEC 扫自己 datum 树里的 FIXING 扣负体（vendor e3d-model `db6894f`、e3d-io `b7c4860`）：柱底板让位修好 24 根柱底、柱身螺栓孔与 E3D 逐根同数，aps250110 整站 RVM 1155 → 1179 / 2995
@@ -9886,3 +10027,10 @@ D1–D7 全按推荐项）。plant3d-web 要把模型树与三维显示的数据
 ### 修复
 
 - 初始化模型生成将受数据就绪门控，避免 DESI 或模型越过尚未完成的元数据、元件库阶段。
+
+# 2026-09-28：`datacenter_delete` 收窄为 refno 单键事件表
+
+- ID 改为 `datacenter_delete:⟨ref0_ref1⟩`，只取 refno 值，不再把 `pe` 记录链接和 `name` 放进数组 ID。
+- 写入从 `UPSERT` 改为 `INSERT IGNORE`：同一 refno 只保留首次删除或改名事件；重放、再次改名或随后删除均不覆盖、不增行。
+- 按 issue #1 最新“插入判断”补发布存在性门：窗口内 refno 分块点查同 ID 的 `datacenter_version`，只为已发布单元生成事件；未发布单元不落行。
+- `refno / name / type / zone_refno / dbnum / sesno / sesno_time / reason` 保留为首次事件的普通字段；本仓只记录“曾发生过”，消费与后续处理交给第三方，`rs-server` 未改。

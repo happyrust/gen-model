@@ -1677,62 +1677,6 @@ mod tests {
         );
     }
 
-    /// 摘除态的备份行。
-    ///
-    /// 放在 `queue_control`（暂停旗标与播种标记的同表邻居）：那张表的每个消费者
-    /// 都按记录 id 直取，多一行谁都碰不到；暂存窗口的数据面对拍也把整张表列进了
-    /// 控制面豁免。
-    const MDB_CURD_BACKUP: &str = "queue_control:test_mdb_curd_backup";
-
-    /// 把 `dbnum` 从 `mdb` 当前的 CURD 里摘掉，原样 CURD 存进备份行以便还原。
-    ///
-    /// 「取哪一条 MDB」与 [`UpdateScope`] 同口径：同名多条取 CURD 最长的那条
-    /// （目录侧那条同名 `/ALL` 的 CURD 往往只剩一两项）。只动 `CURD`——范围查询
-    /// 读的就是它；`DBLS`（全部库）保持不动，摘除态因此是一个「这个库存在、
-    /// 只是本期不在成员名单里」的合法现场，而不是把库从项目里抹掉。
-    ///
-    /// 返回摘掉的条目数。不是 1 就说明夹具前提不成立（这个库压根不在这个 MDB
-    /// 里，或者 CURD 里有重复项），调用方必须当场失败——否则「摘掉之后没入队」
-    /// 是一条假绿。
-    async fn detach_dbnum_from_mdb(mdb: &str, dbnum: u32) -> anyhow::Result<usize> {
-        let sql = format!(
-            "LET $m = (SELECT id, CURD, n FROM (SELECT id, CURD, \
-               array::len(CURD ?? []) AS n FROM MDB WHERE NAME = $mdb) \
-               ORDER BY n DESC LIMIT 1)[0];\
-             LET $t = (SELECT VALUE id FROM $m.CURD WHERE refno.DBNO = $dbnum);\
-             UPSERT {MDB_CURD_BACKUP} SET mdb = $m.id, curd = $m.CURD, \
-               dbnum = $dbnum, saved_at = time::now();\
-             UPDATE $m.id SET CURD = array::complement($m.CURD, $t);\
-             RETURN array::len($t);"
-        );
-        let mut response = SUL_DB
-            .query(sql)
-            .bind(("mdb", aios_core::helper::to_e3d_name(mdb).into_owned()))
-            .bind(("dbnum", dbnum))
-            .await?
-            .check()?;
-        let removed: Option<usize> = response.take(4)?;
-        Ok(removed.unwrap_or_default())
-    }
-
-    /// 还原 [`detach_dbnum_from_mdb`] 摘掉的那一项：整份 CURD 按原样写回（顺序
-    /// 与内容都不变），随后删掉备份行。
-    ///
-    /// 幂等：没有备份行时什么都不做并返回 `false`。用例开头也调它一次——上一轮
-    /// 崩在摘除与还原之间会留下一个摘除态的 MDB，就地自愈比让下一轮红在莫名其妙
-    /// 的地方好。
-    async fn restore_mdb_curd() -> anyhow::Result<bool> {
-        let sql = format!(
-            "LET $b = (SELECT mdb, curd FROM {MDB_CURD_BACKUP})[0];\
-             IF $b != NONE {{ UPDATE $b.mdb SET CURD = $b.curd; }};\
-             DELETE {MDB_CURD_BACKUP};\
-             RETURN $b != NONE;"
-        );
-        let mut response = SUL_DB.query(sql).await?.check()?;
-        let restored: Option<bool> = response.take(3)?;
-        Ok(restored.unwrap_or(false))
-    }
-
     /// 存量库与新库在**同一轮启动重扫**里各走各的路由。
     ///
     /// 场景就是现场那句「8000 早就解析过了，现在监控目录里多出来一个库」：存量
@@ -1879,24 +1823,29 @@ mod tests {
     /// MDB 才是增量范围的定义：库文件一直躺在监控目录里，声明与否决定它跑不跑。
     ///
     /// 两拍：
-    /// 1. 把这个库从当前 MDB 的 CURD 里摘掉 → 重扫一行都不排，而且**连观察值都
+    /// 1. 从登记的 **MDB 声明**里摘掉这个库 → 重扫一行都不排，而且**连观察值都
     ///    不写**（范围门排在 `record_observation` 之前，那条断言正是它的证据）。
-    /// 2. 装回 CURD → [`AiosDBManager::resweep_for_scope_change`]（SYS meta 落库后
-    ///    那条 `scope-refresh` 重扫）把它发现出来，照样走首次导入基线（全程显式
-    ///    开着 `auto_initialize_new_dbnums`——关掉时刚进范围的新库同样等
-    ///    前端手动初始化，本用例钉的是范围门，不是初始化准入门）。
+    /// 2. 装回原声明、按 SYST 刷新的口径重做成员绑定 →
+    ///    [`AiosDBManager::resweep_for_scope_change`]（SYST 落库后那条 `scope-refresh`
+    ///    重扫）把它发现出来，照样走首次导入基线（全程显式开着
+    ///    `auto_initialize_new_dbnums`——关掉时刚进范围的新库同样等前端手动初始化，
+    ///    本用例钉的是范围门，不是初始化准入门）。
     ///
-    /// 第二拍复刻的是生产里「有人往 MDB 里加一个库」的形状：那些**刚刚进入范围**
+    /// 第二拍复刻的是生产里「有人往 MDB 里加一个库」的形状（ADR-085 D2）：那些**刚刚进入范围**
     /// 的设计库自己没有任何文件变更事件，不重扫就得等下次重启才会被发现。
     ///
-    /// 夹具直接改沙箱库里那条 MDB 的 `CURD`，用完按原样写回；用例开头先无条件
-    /// 还原一次，上一轮崩在中途留下的摘除态就地自愈。库号与上一条用例同源。
+    /// 夹具只动进程内的声明缓存与登记表：09-09 起配置 MDB 的范围不看库侧 `MDB` 表，改库侧 CURD
+    /// 驱动不了它（此前的写法就是那么做的，从那天起这条用例测的已经不是生产路径）。SYS 文件本身
+    /// 不动，所以第二拍不走 `reload_declaration_and_rebind`（它会从盘上读回同一份），而是直接装回
+    /// 原声明再 `rebind`——两者对范围的效果相同。用完无论红绿都装回原样。库号与上一条用例同源。
     #[tokio::test]
-    #[ignore = "manual live: mutates the sandbox MDB CURD and rebuilds AIOS_STARTUP_NEW_DBNUM (default 7998)"]
+    #[ignore = "manual live: needs SurrealDB + the configured MDB's SYS files; rebuilds AIOS_STARTUP_NEW_DBNUM (default 7998)"]
     async fn live_scope_refresh_baselines_a_db_the_mdb_just_declared() {
         use crate::data_interface::batch_scheduler::BatchScheduler;
         use crate::data_interface::dbnum_state::DbnumState;
         use crate::data_interface::manual_update::dbnum_has_any_pe_row;
+        use crate::data_interface::mdb_closure;
+        use crate::data_interface::mdb_membership::{self, RebindReason};
         use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 
         aios_core::init_test_surreal()
@@ -1907,15 +1856,21 @@ mod tests {
         let new_dbnum = env_dbnum("AIOS_STARTUP_NEW_DBNUM", 7998);
         assert_ne!(applied_dbnum, new_dbnum, "存量库与新库必须是两个不同的库");
 
-        // 上一轮若崩在摘除与还原之间，这里就地把 MDB 扶正。
-        restore_mdb_curd()
-            .await
-            .expect("heal any leftover MDB CURD backup");
-
         let mut manager = AiosDBManager::init_form_config()
             .await
             .expect("init manager");
+        let project_name = manager.db_option.project_name.clone();
         let mdb_name = manager.db_option.mdb_name.clone();
+        // 与启动时 `init_mdb` 同一条路：从 SYS 读声明、绑定、登记。之后两拍都拿这份原声明做底。
+        mdb_membership::rebind(
+            &manager.db_option,
+            &project_name,
+            &mdb_name,
+            RebindReason::Startup,
+        )
+        .expect("bind the configured MDB from its SYS file");
+        let original = mdb_closure::cached_declaration(&project_name, &mdb_name)
+            .expect("the declaration is cached once bound");
         let applied_file = locate_watched_db(&manager, &project, applied_dbnum);
         let new_file = locate_watched_db(&manager, &project, new_dbnum);
 
@@ -1931,16 +1886,26 @@ mod tests {
         BatchScheduler::global().arm_auto_work();
 
         // 摘除态是一个必须还原的现场：主体的断言包在隔离壳里，无论红绿都先把
-        // MDB 扶正，再把失败原样抛出去。
+        // 声明与登记表装回原样，再把失败原样抛出去。
         let outcome = crate::data_interface::batch_worker::isolate_panic(async {
-            let removed = detach_dbnum_from_mdb(&mdb_name, new_dbnum)
-                .await
-                .expect("detach the target dbnum from the MDB");
+            let mut undeclared = (*original).clone();
+            let before = undeclared.databases.len();
+            undeclared
+                .databases
+                .retain(|database| database.dbnum != new_dbnum);
             assert_eq!(
-                removed, 1,
-                "夹具前提：dbnum={new_dbnum} 本来就该在 MDB {mdb_name} 的 CURD 里，且只有一项"
+                before - undeclared.databases.len(),
+                1,
+                "夹具前提：dbnum={new_dbnum} 本来就该在 MDB {mdb_name} 的声明里，且只有一项"
             );
-            crate::data_interface::update_scope::invalidate_scope_cache();
+            mdb_closure::install_declaration(undeclared);
+            mdb_membership::rebind(
+                &mgr.db_option,
+                &project_name,
+                &mdb_name,
+                RebindReason::SystRefresh,
+            )
+            .expect("rebind without the target dbnum");
 
             mgr.sweep_watch_dirs("live-scope-refresh-undeclared", false)
                 .await
@@ -1957,12 +1922,21 @@ mod tests {
                 "范围外的库连观察值都不许写：范围门排在 record_observation 之前"
             );
 
-            // 第二拍：MDB 声明它。
+            // 第二拍：MDB 声明它（SYST 落库后的刷新口径：换声明 → 重做绑定 → scope-refresh 重扫）。
+            mdb_closure::install_declaration((*original).clone());
+            let rebound = mdb_membership::rebind(
+                &mgr.db_option,
+                &project_name,
+                &mdb_name,
+                RebindReason::SystRefresh,
+            )
+            .expect("rebind with the target dbnum");
             assert!(
-                restore_mdb_curd().await.expect("re-declare in the MDB"),
-                "还原必须真的写回了 CURD"
+                rebound
+                    .element_databases()
+                    .any(|database| database.dbnum == new_dbnum),
+                "装回的声明必须重新含有 dbnum={new_dbnum}"
             );
-            crate::data_interface::update_scope::invalidate_scope_cache();
 
             mgr.resweep_for_scope_change()
                 .await
@@ -2006,8 +1980,15 @@ mod tests {
         })
         .await;
 
-        restore_mdb_curd().await.expect("restore the MDB CURD");
-        crate::data_interface::update_scope::invalidate_scope_cache();
+        mdb_closure::install_declaration((*original).clone());
+        if let Err(error) = mdb_membership::rebind(
+            &mgr.db_option,
+            &project_name,
+            &mdb_name,
+            RebindReason::SystRefresh,
+        ) {
+            eprintln!("还原 MDB {mdb_name} 的成员绑定失败（进程内状态，重启即恢复）: {error:#}");
+        }
         let _ = fs::remove_dir_all(&fixture);
         if let Err(reason) = outcome {
             panic!("{reason}");
@@ -2178,6 +2159,25 @@ mod tests {
             "子集轮询 {DEFAULT_WATCH_POLL_SECS}s 不得慢于全集对账 \
              {DEFAULT_WATCH_RECONCILE_SECS}s"
         );
+    }
+
+    /// ADR-085 D3：重挂轮补上目录后，**先**重做成员绑定、**再**补扫。反过来的话，补扫这一轮与
+    /// 之后的房间参照、生成来源清单看到的仍是启动时那份「这个库缺件」的绑定，直到下一次重启。
+    /// 取范围不再顺带重绑（D1）之后，这里是共享盘晚上线时唯一能把缺件补回来的地方。
+    #[test]
+    fn a_remount_rebinds_members_before_the_catch_up_sweep() {
+        let source = include_str!("increment_manager.rs");
+        let body = source
+            .split_once(concat!("async fn ", "remount_watch_dirs("))
+            .expect("remount_watch_dirs 还在")
+            .1;
+        let rebind = body
+            .find(concat!("RebindReason::", "Remount"))
+            .expect("补上目录后必须重做成员绑定（ADR-085 D3）");
+        let sweep = body
+            .find(concat!("\"share", "-remount\""))
+            .expect("补扫还在");
+        assert!(rebind < sweep, "先重做绑定、再补扫");
     }
 
     /// 闸的核心语义：一串 burst 合成一轮，但**闸内到达的变化一次都不能被吞掉**。
@@ -4858,6 +4858,32 @@ impl AiosDBManager {
             .cloned()
             .collect();
         println!("重挂轮补挂了 {added} 个监控目录，开始补扫停机期间的会话: {added_dirs:?}");
+        // 补上的目录里可能正躺着启动时没绑到文件的声明成员（共享盘晚上线）：补扫之前先按当前
+        // 声明重做成员绑定（ADR-085 D3），房间参照的缺件清单与生成来源清单才看得见它们。
+        // 失败不挡补扫——补扫走文件、不看绑定；旧登记表照用，下一次重挂或 SYST 刷新再试。
+        let db_option = self.db_option.clone();
+        let rebound = tokio::task::spawn_blocking(move || {
+            crate::data_interface::mdb_membership::rebind(
+                &db_option,
+                &db_option.project_name,
+                &db_option.mdb_name,
+                crate::data_interface::mdb_membership::RebindReason::Remount,
+            )
+        })
+        .await;
+        let rebind_failure = match rebound {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(format!("{error:#}")),
+            Err(join_error) => Some(format!("绑定线程异常退出: {join_error}")),
+        };
+        if let Some(reason) = rebind_failure {
+            let message = format!(
+                "重挂轮补上目录后重做 MDB {} 的成员绑定失败，沿用旧绑定照常补扫: {reason}",
+                self.db_option.mdb_name
+            );
+            log::warn!("{message}");
+            eprintln!("{message}");
+        }
         if let Err(error) = self
             .sweep_dirs(
                 "share-remount",

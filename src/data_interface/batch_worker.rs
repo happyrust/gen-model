@@ -3391,11 +3391,37 @@ async fn execute_frozen_batch_body(
     let acked =
         crate::data_interface::room_recompute::acked_roots_for_task(job.dbnum, alignment.as_ref());
 
-    // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
+    // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽。先重读 SYS 里的
+    // MDB 声明、按新声明重做成员绑定（ADR-085 D2：读成功才换，失败留旧并写进本批回执），再让
+    // 空闲轮重扫——刚进范围的库没有自己的文件事件。顺序不能反：重扫要看到新声明。
+    // 2026-09-15 ~ 09-29 这里作废的是一份早就没人读的范围缓存，MDB 里新加的库要重启才进得了范围。
     // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
     // 原先排进补偿队列的 SYST 派生作业是空转，随非空间补偿队列一起删掉（ADR-071 D9，d-300）。
     if applied && job.db_type == "SYST" {
-        crate::data_interface::update_scope::invalidate_scope_cache();
+        let option = aios_core::get_db_option();
+        let reloaded = tokio::task::spawn_blocking(move || {
+            crate::data_interface::mdb_membership::reload_declaration_and_rebind(
+                option,
+                &option.project_name,
+                &option.mdb_name,
+            )
+        })
+        .await;
+        let failure = match reloaded {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(format!("{error:#}")),
+            Err(join_error) => Some(format!("重读线程异常退出: {join_error}")),
+        };
+        if let Some(reason) = failure {
+            let message = format!(
+                "SYST 已落库，但重读 MDB {} 的声明失败，本期执行范围沿用旧声明\
+                 （下一次 SYST 落库或重启时重试）: {reason}",
+                option.mdb_name
+            );
+            log::warn!("{message}");
+            eprintln!("{message}");
+            warnings.push(message);
+        }
         SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
 
@@ -6116,18 +6142,16 @@ mod tests {
         );
     }
 
-    /// SYST 批次落库后必须做两件事：把 TEAM 派生同步记进补偿队列，把执行范围
-    /// 缓存作废。两件事各有各的失效方式，所以分开钉。
+    /// SYST 批次落库后必须先重读 MDB 声明并重做成员绑定（ADR-085 D2），再让空闲轮重扫。
     ///
-    /// 漏掉入队，TEAM 表从此不再跟着 SYST 变，而且没有任何东西会发现——派生同步
-    /// 不产模型工作，模型积压是空的，/health 也干净。漏掉作废，新加进 MDB 的库要
-    /// 等 `AIOS_SCOPE_CACHE_SECS`（默认 300s）过期或者等重启才进得了执行范围，
-    /// 现场只表现为「这个库怎么不更新」——issue #10 那种查不出所以然的形状。
+    /// 漏掉重读，新加进 MDB 的库要等重启才进得了执行范围，现场只表现为「这个库怎么不更新」
+    /// ——issue #10 那种查不出所以然的形状。2026-09-15 ~ 09-29 就是这样：这里作废的是一份
+    /// 早就没人读的范围缓存，声明本身从启动起就没换过。顺序反了，重扫看到的还是旧声明。
     ///
     /// SYST 派生（TEAM_DATA 镜像）已于 2026-09-07 退役，它的补偿队列于 2026-09-10 随非空间副作用
-    /// 队列一起删除（ADR-071 D9，d-300）：SYST 批次落库后只剩「作废执行范围缓存 + 让空闲轮重扫」。
+    /// 队列一起删除（ADR-071 D9，d-300）：SYST 批次落库后只剩「重读声明 + 让空闲轮重扫」。
     #[test]
-    fn a_syst_batch_invalidates_the_scope_cache_without_booking_a_derived_sync() {
+    fn a_syst_batch_rereads_the_mdb_declaration_without_booking_a_derived_sync() {
         let source = include_str!("batch_worker.rs");
         let executor = source
             .split_once("async fn execute_frozen_batch(")
@@ -6148,13 +6172,16 @@ mod tests {
             !direct.contains("enqueue_syst(") && !direct.contains("SideEffectCompensator::drain("),
             "非空间补偿队列已退役（ADR-071 D9，d-300）：直写路径不得再排 SYST 派生作业或 drain 补偿队列"
         );
+        let reload = direct
+            .find("mdb_membership::reload_declaration_and_rebind(")
+            .expect("直写路径必须在 SYST 落库后重读 MDB 声明（ADR-085 D2）");
+        let dirty = direct
+            .find("SCOPE_DIRTY.store(true, Ordering::SeqCst)")
+            .expect("直写路径必须让空闲轮重扫：新进范围的库没有自己的文件事件");
+        assert!(reload < dirty, "先重读声明、再置重扫位：重扫要看到新声明");
         assert!(
-            direct.contains("update_scope::invalidate_scope_cache()"),
-            "直写路径必须作废执行范围缓存"
-        );
-        assert!(
-            direct.contains("SCOPE_DIRTY.store(true, Ordering::SeqCst)"),
-            "直写路径必须让空闲轮重扫：新进范围的库没有自己的文件事件"
+            !source.contains(concat!("invalidate_", "scope_cache")),
+            "执行范围缓存已退役（ADR-085 D4）"
         );
         assert!(
             !executor.contains("enqueue_syst("),

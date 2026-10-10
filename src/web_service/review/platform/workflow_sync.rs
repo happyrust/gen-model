@@ -188,6 +188,12 @@ impl WorkflowSyncActionError {
         self
     }
 
+    /// 只给 verify 响应的 `data.block_code` 定名，不动 `error_code`（sync 侧信封不变）。
+    fn with_verify_block_code(mut self, block_code: impl Into<String>) -> Self {
+        self.verify_block_code = Some(block_code.into());
+        self
+    }
+
     fn into_sync_response(self) -> (StatusCode, Json<SyncWorkflowResponse>) {
         (
             self.status,
@@ -530,6 +536,24 @@ fn fill_actor_from_claims(
         if actor.name.trim().is_empty() {
             actor.name = actor.id.trim().to_string();
         }
+        // actor 绑 claims：请求体自报的 actor.id 必须就是签出这枚 token 的人。PMS 是按人经
+        // `/api/auth/token` 取 token 再送审的（e2e 与 online-review-acceptance 都是每个角色各领一枚），
+        // 不受影响；嵌入页拿自己的 user_token 只能以自己的身份推进。旧端不比对，任一持嵌入 token
+        // 的浏览器都能冒任意 actor（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D8 / T7，Q6=A）。
+        // debug_token 模式（claims=None）没有可比对的身份，照旧只要求 actor 必传。
+        if let Some(c) = claims.as_ref() {
+            let claimed = c.user_id.trim();
+            if !claimed.is_empty() && !claimed.eq_ignore_ascii_case(actor.id.trim()) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "actor.id={} 与 token 持有人 {} 不一致；workflow 动作只能以 token 持有人的身份执行",
+                        actor.id.trim(),
+                        claimed
+                    ),
+                ));
+            }
+        }
         return Ok(());
     }
     let c = claims.ok_or_else(|| {
@@ -555,6 +579,16 @@ fn fill_actor_from_claims(
         roles: role,
     });
     Ok(())
+}
+
+/// `fill_actor_from_claims` 失败时的 `error_code`：400 是「没 actor 又推不出」（ACTOR_REQUIRED），
+/// 403 是「actor 与 token 持有人不一致」（ACTOR_MISMATCH）。
+fn actor_error_code(status: StatusCode) -> &'static str {
+    if status == StatusCode::FORBIDDEN {
+        "ACTOR_MISMATCH"
+    } else {
+        "ACTOR_REQUIRED"
+    }
 }
 
 fn is_external_workflow(request: &SyncWorkflowRequest) -> bool {
@@ -625,7 +659,7 @@ pub async fn verify_workflow_handler(
                 code: status.as_u16() as i32,
                 message: msg,
                 data: None,
-                error_code: Some("ACTOR_REQUIRED".to_string()),
+                error_code: Some(actor_error_code(status).to_string()),
                 annotation_check: None,
             }),
         );
@@ -650,6 +684,12 @@ pub async fn verify_workflow_handler(
         }
     };
 
+    // verify ≡ sync 的干跑：同一 (form_id, action, actor) 下，这里的 passed 与随后 sync 的 2xx / 非 2xx
+    // 必须一致，差别只在不写库。旧端给 `active` + 空白主单据（尚未建 task）留了一条显式放行分支
+    // （「表单尚未创建 task，active 可继续」），而 sync active 对同一状态回 409——PMS PreValidate
+    // 通过、送审却失败、单据停在原节点看不到原因。2026-09-29 起删掉那条分支，空白主单据按
+    // `load_task_for_workflow` 的 TASK_NOT_CREATED 软阻断回 passed=false；主单据不存在一律 404
+    //（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D3 / T3，Q1=A）。
     let (result, outcome_passed, outcome_block_code, outcome_reason) =
         match validate_workflow_for_verify(&request, kind).await {
             Ok(precheck) => {
@@ -662,6 +702,7 @@ pub async fn verify_workflow_handler(
                             &action,
                             kind,
                             &precheck,
+                            &request.actor().id,
                             "验证通过，可继续流转",
                         )),
                         error_code: None,
@@ -669,48 +710,6 @@ pub async fn verify_workflow_handler(
                     }),
                 );
                 (response, true, None::<String>, "ok".to_string())
-            }
-            Err(error)
-                if kind == WorkflowMutationKind::Active
-                    && error
-                        .verify_task_status
-                        .as_deref()
-                        .is_some_and(|s| s == "blank") =>
-            {
-                info!(
-                    "[WORKFLOW_VERIFY] active on blank form - form_id={}, 放行（尚未创建 task）",
-                    request.form_id
-                );
-                let response = (
-                    StatusCode::OK,
-                    Json(VerifyWorkflowResponse {
-                        code: 200,
-                        message: "ok".to_string(),
-                        data: Some(VerifyWorkflowData {
-                            passed: true,
-                            action: "active".to_string(),
-                            block_code: None,
-                            current_node: None,
-                            task_status: Some("blank".to_string()),
-                            next_step: Some("jd".to_string()),
-                            actor_id: None,
-                            owner_id: None,
-                            owner_source: None,
-                            expected_next_node: Some("jd".to_string()),
-                            requested_next_step: None,
-                            reason: "表单尚未创建 task，active 可继续".to_string(),
-                            recommended_action: "proceed".to_string(),
-                        }),
-                        error_code: None,
-                        annotation_check: None,
-                    }),
-                );
-                (
-                    response,
-                    true,
-                    None::<String>,
-                    "blank_passthrough".to_string(),
-                )
             }
             Err(error) => {
                 let block_code = error
@@ -920,15 +919,22 @@ async fn validate_workflow_for_verify(
 
 /// verify 通过时构造 `VerifyWorkflowData`。诊断字段 `next_step`/`expected_next_node`
 /// 来自静态推算，不依赖客户端请求体。
+///
+/// `actor_id / owner_id / owner_source` 在 external 模式下也回填（旧端通过响应恒空，PMS 端
+/// 「目标人预选」拿不到平台侧负责人）——**只是诊断**，不参与判定：external 模式的 owner 校验
+/// 仍由 `ensure_owner_matches` 首行短路（`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md`
+/// D4 / T4；契约见 `docs/specs/review-api.md` §8.1）。负责人字段为空时回 `None`，不编造。
 fn build_verify_pass_data(
     action: &str,
     kind: WorkflowMutationKind,
     precheck: &WorkflowVerifyPrecheck,
+    actor_id: &str,
     reason: impl Into<String>,
 ) -> VerifyWorkflowData {
     let next_step = verify_expected_next_node(kind, &precheck.current_node);
-    let _ = &precheck.task; // 仅保留所有权一致性，task 字段未来可能用于扩展诊断。
     let _ = precheck.intent; // 当前 pass 路径不输出 intent；future-proof。
+    let (owner_id, owner_source) = current_node_owner(&precheck.task, &precheck.current_node);
+    let owner_id = owner_id.trim();
     VerifyWorkflowData {
         passed: true,
         action: action.to_string(),
@@ -936,9 +942,9 @@ fn build_verify_pass_data(
         current_node: Some(precheck.current_node.clone()),
         task_status: Some(precheck.task_status.clone()),
         next_step,
-        actor_id: None,
-        owner_id: None,
-        owner_source: None,
+        actor_id: Some(actor_id.trim().to_string()).filter(|value| !value.is_empty()),
+        owner_id: (!owner_id.is_empty()).then(|| owner_id.to_string()),
+        owner_source: (!owner_id.is_empty()).then(|| owner_source.to_string()),
         expected_next_node: None,
         requested_next_step: None,
         reason: reason.into(),
@@ -984,7 +990,7 @@ pub async fn sync_workflow_handler(
                 code: status.as_u16() as i32,
                 message: msg,
                 data: None,
-                error_code: Some("ACTOR_REQUIRED".to_string()),
+                error_code: Some(actor_error_code(status).to_string()),
                 annotation_check: None,
             }),
         );
@@ -1429,41 +1435,49 @@ mod tests {
         }
     }
 
+    /// Q6=A（2026-09-29）：external 模式 `return` / `agree` 也校 owner——负责人是上一步 PMS `next_step`
+    /// 写进 task 的人，非负责人一律 403 OWNER_MISMATCH（此前 external 一律短路放行）。
     #[test]
-    fn external_workflow_return_skips_owner_match() {
+    fn external_workflow_return_and_agree_check_owner() {
         let task = review_task_with_owners("jd", "JH", "SH");
-        let result = ensure_owner_matches(
+        let err = ensure_owner_matches(
             "return",
             &task,
             "jd",
-            "EXT_USER_THAT_DOES_NOT_MATCH",
+            "EXT-USER-THAT-DOES-NOT-MATCH",
             None,
             None,
             None,
             true,
-        );
-        assert!(
-            result.is_ok(),
-            "external workflow return should skip owner match even when actor != owner"
-        );
+        )
+        .expect_err("external return by a non-owner must be rejected");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.verify_block_code.as_deref(), Some("OWNER_MISMATCH"));
+        assert_eq!(err.verify_owner_id.as_deref(), Some("JH"));
+        assert_eq!(err.verify_owner_source.as_deref(), Some("checker"));
+
+        let err = ensure_owner_matches("agree", &task, "jd", "SH", None, None, None, true)
+            .expect_err("external agree by the approver at jd must be rejected");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.verify_block_code.as_deref(), Some("OWNER_MISMATCH"));
+
+        // 负责人本人照常放行（大小写不敏感：HumanCode 统一按大写比）
+        assert!(ensure_owner_matches("agree", &task, "jd", "jh", None, None, None, true).is_ok());
+        assert!(ensure_owner_matches("return", &task, "jd", "JH", None, None, None, true).is_ok());
     }
 
+    /// external 模式下 `active` / `stop` 仍全信 PMS（负责人是建单设计人 / PMS 终止无节点归属）。
     #[test]
-    fn external_workflow_verify_skips_owner_match() {
-        let task = review_task_with_owners("sh", "JH", "SH");
-        let result = ensure_owner_matches(
-            "verify",
-            &task,
-            "sh",
-            "external_proofreader_99",
-            None,
-            None,
-            None,
-            true,
-        );
+    fn external_workflow_active_and_stop_still_skip_owner_match() {
+        let task = review_task_with_owners("sj", "JH", "SH");
         assert!(
-            result.is_ok(),
-            "external workflow verify should skip owner match for non-PMS actor id"
+            ensure_owner_matches("active", &task, "sj", "NOT-SJ", None, None, None, true).is_ok(),
+            "external active keeps trusting PMS"
+        );
+        let task = review_task_with_owners("sh", "JH", "SH");
+        assert!(
+            ensure_owner_matches("stop", &task, "sh", "external_proofreader_99", None, None, None, true).is_ok(),
+            "external stop keeps trusting PMS"
         );
     }
 
@@ -1499,39 +1513,55 @@ async fn load_task_for_workflow(form_id: &str) -> Result<ReviewTask, WorkflowSyn
     })?;
 
     let Some(form) = form else {
+        // 主单据不存在：404，**不**带 task_status=blank——旧端这里也填 blank，verify 的
+        // 「active + blank 放行」分支就把不存在的 form 也放过去了（计划 D3 / T3）。404 不是
+        // 软阻断，verify 与 sync 都原样 404。
         return Err(WorkflowSyncActionError::blocked(
             StatusCode::NOT_FOUND,
             format!("form_id={} 未找到 review form", form_id),
             None,
-            Some("blank".to_string()),
+            None,
             None,
             "block",
         ));
     };
 
     let form_status = normalize_review_form_status(&form.status);
-    let message = if form_status == "deleted" {
-        format!("form_id={} 对应主单据已删除，不可继续流转", form_id)
+    let (message, block_code) = if form_status == "deleted" {
+        (
+            format!("form_id={} 对应主单据已删除，不可继续流转", form_id),
+            None,
+        )
     } else if form.task_created {
-        format!(
-            "form_id={} 当前主单据状态为 {}，但未找到活动 review task",
-            form_id, form_status
+        (
+            format!(
+                "form_id={} 当前主单据状态为 {}，但未找到活动 review task",
+                form_id, form_status
+            ),
+            None,
         )
     } else {
-        format!(
-            "form_id={} 当前主单据状态为 {}，尚未创建活动 review task",
-            form_id, form_status
+        (
+            format!(
+                "form_id={} 当前主单据状态为 {}，尚未创建活动 review task：表单尚未保存编校审数据，请设计人员先在三维页保存",
+                form_id, form_status
+            ),
+            Some("TASK_NOT_CREATED"),
         )
     };
 
-    Err(WorkflowSyncActionError::blocked(
+    let error = WorkflowSyncActionError::blocked(
         StatusCode::CONFLICT,
         message,
         form.role.clone(),
         Some(form_status),
         None,
         "block",
-    ))
+    );
+    Err(match block_code {
+        Some(code) => error.with_verify_block_code(code),
+        None => error,
+    })
 }
 
 fn resolve_required_next_step(
@@ -1619,7 +1649,12 @@ fn ensure_owner_matches(
     requested_next_step: Option<WorkflowVerifyNextStepDiagnostic>,
     external_workflow: bool,
 ) -> Result<(), WorkflowSyncActionError> {
-    if external_workflow {
+    // external 模式（PMS 驱动）：`agree` / `return` 也校 owner——当前节点负责人就是上一步 PMS 经
+    // `next_step` 写进 `checker_* / approver_*` 的那个人，平台侧有据可查；`active`（sj 首次 / 驳回后
+    // 重提，负责人是建单的设计人）与 `stop`（PMS 终止）照旧全信 PMS。2026-09-29 之前 external 一律
+    // 短路，配合「嵌入 token ≡ S2S token」任何持 token 的浏览器都能推进任意单据
+    // （`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D4 / D8 / T7，Q6=A）。
+    if external_workflow && !matches!(action_label, "agree" | "return") {
         return Ok(());
     }
 

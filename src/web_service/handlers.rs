@@ -2167,6 +2167,58 @@ pub async fn element_attribute_history(
     Ok(Json(report))
 }
 
+/// `GET /api/v1/element/attribute-diff` 的查询串：节点 + 两个会话。
+#[derive(Debug, Deserialize)]
+pub struct ElementAttributeDiffReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    /// `a/b` / `a_b`，任意节点
+    pub refno: String,
+    /// 较早的一版（链序在 `b` 之前，否则 400 `INVALID_VERSION_PAIR`）
+    pub a: u32,
+    /// 较新的一版
+    pub b: u32,
+}
+
+/// GET /api/v1/element/attribute-diff — 节点 A 与 B 两版之间的属性净差（plant3d-web ADR 0066 第四条）。
+///
+/// 两个会话各钉一个 `DbSet`，属性面板同一个渲染器两端各出一次字，字不同就是变了；成员增删 / 重排与 owner 改挂另列，
+/// `impact` 走生成路同一把尺子。不折时间线、不要快照——前端此前用 (A, B] 逐会话 before / after 折净差顶着，这条把它换掉。
+/// A 侧不存在 → `created`，B 侧不存在 → `deleted`，两端都不存在 404。两个会话集 + 两次渲染，放 `spawn_blocking`。
+pub async fn element_attribute_diff(
+    State(state): State<AppState>,
+    Query(req): Query<ElementAttributeDiffReq>,
+) -> Result<Json<crate::fast_model::attribute_diff::AttributeDiffReport>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno).map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REFNO",
+            format!("{error:#}"),
+        )
+    })?;
+    let attributes = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let ElementAttributeDiffReq { dbnum, a, b, .. } = req;
+    let report = tokio::task::spawn_blocking(move || {
+        crate::fast_model::attribute_diff::attribute_diff(dbnum, refno, a, b, &attributes)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("属性净差计算线程异常退出: {error}"),
+        )
+    })?
+    .map_err(unit_versions_error)?;
+    Ok(Json(report))
+}
+
 /// `GET /api/v1/node/diff-summary` 的查询串：节点 + 两个会话 + 对比范围。
 #[derive(Debug, Deserialize)]
 pub struct NodeDiffSummaryReq {
@@ -2391,8 +2443,9 @@ pub async fn model_delete_subtree(
 #[derive(Debug, Deserialize)]
 pub struct EnsureModelReq {
     pub refno: String,
-    /// 人明确要求重生成时置 true（S4-C 的「重试」）。显示补齐不传：已经生成过、
-    /// 只是画不出来的生成根直接回状态，不必每次显示都把生成再跑一遍。
+    /// 人明确要求重生成时置 true（plant-ui 右键「重新生成模型」就是 `force = true`，ADR-0030 D2）。
+    /// 不传时凭证当前的根直接回 `AlreadyAvailable`，不把生成再跑一遍。显示从 2026-10-09 起不再调这条接口
+    /// （只按祖先查 `/model/records`，ADR-086 D1）。
     #[serde(default)]
     pub force: bool,
     #[serde(flatten)]
@@ -2421,12 +2474,29 @@ where
     }
 }
 
-/// POST /api/v1/model/ensure — 确保节点范围全部生成根为最新模型（幂等同步，spec §4.5）。
+/// POST /api/v1/model/ensure — `/api/v1/model/generate` 的旧名（ADR-086 D4）：同一 handler、同一请求体、同一回执，
+/// 只多打一行 deprecated。留一个版本给还在调旧名的客户端（plant3d-web 的 e2e 钉着这条路径），下一版删。
 pub async fn model_ensure(
+    state: State<AppState>,
+    req: Json<EnsureModelReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // 走控制台（与 `[http.model.generate]` 诊断行、启动的 `***` 点名同一条路）：`tracing` 在服务进程里
+    // 没有订阅者，`log` 在 read-through 形态下也没装日志器——2026-10-09 本机实测两者都打了等于没打。
+    println!(
+        "*** deprecated: POST /api/v1/model/ensure is an alias of /api/v1/model/generate and will be removed next \
+         version (refno={}) ***",
+        req.refno
+    );
+    model_generate(state, req).await
+}
+
+/// POST /api/v1/model/generate — 对节点范围内全部生成根生成最新模型（同步，spec §4.5；旧名 `/model/ensure`，ADR-086 D4）。
+/// 服务端自己解根、判新旧（`force = false` 时凭证当前的根直接命中）、删旧、重算；客户端只说「生成这个范围」。
+pub async fn model_generate(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.ensure",
+    let mut diagnostic = crate::process_diagnostics::Operation::begin("http.model.generate",
         format!("refno={} force={}", req.refno, req.force));
     resolve_identity(&state, &req.identity)?;
     let Ok(refu) = RefU64::from_str(&req.refno) else {
@@ -2463,7 +2533,7 @@ pub async fn model_ensure(
             .active_dbnum_model_ensure(dbnum)
     {
         return Err(ApiError::conflict(format!(
-            "dbnum={dbnum} 已有整库模型任务 {} 在运行；单根 ensure 不与它并发写同一库",
+            "dbnum={dbnum} 已有整库模型任务 {} 在运行；单根 generate 不与它并发写同一库",
             task.task_id
         )));
     }
@@ -2527,7 +2597,7 @@ pub async fn model_ensure(
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
     if let Some(route) = route {
         let object = payload.as_object_mut().ok_or_else(|| {
-            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+            ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
         })?;
         // 回执说清这一批模型现在从哪读、活不活得过重启：`durable = false` 的读透档
         // 仍会发布到本进程 kv-mem，只是不跨重启保存。
@@ -2541,7 +2611,7 @@ pub async fn model_ensure(
     }
     if crate::options::data_face().is_read_through() {
         let object = payload.as_object_mut().ok_or_else(|| {
-            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+            ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
         })?;
         object.insert("generation_roots".into(), json!(result.generation_roots));
         object.insert(
@@ -2571,7 +2641,7 @@ pub async fn model_ensure(
         // 只写内存（摄入形态、库未初始化）：`gen_root` 上没有这根的行，发布状态由投影里
         // 有没有可画的东西说话；`/model/records` 会从同一份投影供数。
         let object = payload.as_object_mut().ok_or_else(|| {
-            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+            ApiError::from_domain(anyhow::anyhow!("model generate response is not an object"))
         })?;
         object.insert("generation_roots".into(), json!(result.generation_roots));
         object.insert(
@@ -2590,7 +2660,7 @@ pub async fn model_ensure(
     Ok(Json(payload))
 }
 
-/// `/model/ensure` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
+/// `/model/generate` 回执上这根的发布状态（ADR-079：`gen_root` 退役，库里没有逐根的行可问）。
 ///
 /// 来源两处、都在进程内：投影里有这根的落库 ACK 就是 `ready`，有回执没 ACK 是 `stale`（与退役前
 /// `gen_root.publication_status` 同一口径）；投影里什么都没有时看进程内账本——失败 / 永久放弃的根
@@ -2651,7 +2721,7 @@ async fn append_publication_state(
 ) -> anyhow::Result<()> {
     let object = payload
         .as_object_mut()
-        .context("model ensure response is not an object")?;
+        .context("model generate response is not an object")?;
     let model_available = object
         .get("model_available")
         .and_then(serde_json::Value::as_bool)
@@ -3656,55 +3726,70 @@ pub async fn model_records(
         .map_err(ApiError::from_domain)?;
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
-    if !route.is_database() {
-        // 投影里没有的根（还没 ensure 过）：空数组会被读成「这一根本来就没有几何」，
-        // 那是另一句话。409 让客户端先去 `/model/ensure`——它今天本来就是这个顺序。
-        // 批量时任一根缺就整批 409，并把缺的根全部列出来，客户端一次补齐。
-        let missing = roots
-            .iter()
-            .zip(&parsed_roots)
-            .filter(|(_, root)| store.receipt(scope, **root).is_none())
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            let reason = route
-                .reason
-                .map(|reason| reason.as_str())
-                .unwrap_or("unknown");
-            let message = if batch {
-                format!(
-                    "not_generated: generation roots [{}] of dbnum {dbnum} are not in the process projection yet \
-                     (model_source = memory, reason = {reason}); call /api/v1/model/ensure for them first",
-                    missing.join(", ")
-                )
+    // 请求里的根按**祖先**理解（ADR-086 D1），与库路由 `durable_scope_reads` 的 `anc CONTAINS` 同口径。库路由天然如此；
+    // 内存投影路由分三种：节点自己有回执 → 精确根；节点在根之上（ZONE / SITE）→ 展成名下盖过章的生成根逐根取；
+    // 节点在根之下（BRAN 里的一个 VALV）→ 取它头上那根的记录、按祖先链只留它名下的。`owner` 三种情形下都是生成根。
+    // 展开为空就是空结果——「没生成过」是 200 空，不再是 409（ADR-086 D2）；客户端要生成走 `/model/generate`。
+    let expanded_roots: Vec<(
+        String,
+        Vec<(e3d_io::refno::RefNo, Option<e3d_io::refno::RefNo>)>,
+    )> = roots
+        .iter()
+        .zip(&parsed_roots)
+        .map(|(name, root)| {
+            let under = if route.is_database() || store.receipt(scope, *root).is_some() {
+                vec![(*root, None)]
             } else {
-                format!(
-                    "not_generated: generation root {} of dbnum {dbnum} is not in the process projection yet \
-                     (model_source = memory, reason = {reason}); call /api/v1/model/ensure first",
-                    missing[0]
-                )
+                let above = store.receipt_roots_under(scope, *root);
+                if !above.is_empty() {
+                    above
+                        .into_iter()
+                        .map(|generation_root| (generation_root, None))
+                        .collect()
+                } else {
+                    store
+                        .receipt_root_above(scope, *root)
+                        .map(|generation_root| (generation_root, Some(*root)))
+                        .into_iter()
+                        .collect()
+                }
             };
-            return Err(ApiError::conflict(message));
-        }
-    }
+            (name.clone(), under)
+        })
+        .collect();
     let mut memory_overlay_used = false;
     let mut per_root: Vec<(String, Vec<crate::fast_model::model_record_reader::ModelRecord>)> =
         Vec::with_capacity(roots.len());
-    for (name, root) in roots.iter().zip(&parsed_roots) {
-        // Durable reads never hydrate kv-mem.  A resident receipt is a complete
-        // newer root snapshot and shadows the RocksDB root; cold roots continue
-        // to be served directly by RocksDB.
-        let memory_overlay = store.receipt(scope, *root).is_some();
-        memory_overlay_used |= memory_overlay;
-        let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-        // 每条记录 = `GeomInstQuery` 原形 + 隐式管身才有的 `tube{ordinal, from, to}`（spec §4.5，方案 B T2）：
-        // 与树路由 `tubes=1` 的直段同一身份四元组，前端据此把直段行对上场景对象。
-        let records = crate::fast_model::model_record_reader::model_records_of_root(
-            &aios_core::SUL_DB,
-            refno,
-        )
-        .await
-        .map_err(ApiError::from_domain)?;
+    for (name, under) in &expanded_roots {
+        let mut records = Vec::new();
+        for (root, below) in under {
+            // Durable reads never hydrate kv-mem.  A resident receipt is a complete
+            // newer root snapshot and shadows the RocksDB root; cold roots continue
+            // to be served directly by RocksDB.
+            let memory_overlay = store.receipt(scope, *root).is_some();
+            memory_overlay_used |= memory_overlay;
+            // 每条记录 = `GeomInstQuery` 原形 + 隐式管身才有的 `tube{ordinal, from, to}`（spec §4.5，方案 B T2）：
+            // 与树路由 `tubes=1` 的直段同一身份四元组，前端据此把直段行对上场景对象。
+            match below {
+                Some(node) => records.extend(
+                    crate::fast_model::model_record_reader::overlay_records_under_node(
+                        store, *root, *node,
+                    )
+                    .map_err(ApiError::from_domain)?,
+                ),
+                None => {
+                    let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+                    records.extend(
+                        crate::fast_model::model_record_reader::model_records_of_root(
+                            &aios_core::SUL_DB,
+                            refno,
+                        )
+                        .await
+                        .map_err(ApiError::from_domain)?,
+                    );
+                }
+            }
+        }
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
@@ -3722,20 +3807,21 @@ pub async fn model_records(
         let room_generation = crate::fast_model::model_db_adapter::required_room_generation()
             .ok()
             .flatten();
-        roots
+        // 按展开后的生成根逐根对账：祖先 / 叶子请求下报的是**哪一根**没发布完，不是请求的节点本身。
+        expanded_roots
             .iter()
-            .zip(&parsed_roots)
-            .filter_map(|(name, root)| {
-                let receipt = store.receipt(scope, *root)?;
+            .flat_map(|(_, under)| under.iter().map(|(root, _)| *root))
+            .filter_map(|root| {
+                let receipt = store.receipt(scope, root)?;
                 let complete = (!room_required || room_generation.is_some())
-                    && store.publication_ack(scope, *root).is_some_and(|ack| {
+                    && store.publication_ack(scope, root).is_some_and(|ack| {
                         ack.dbnum == dbnum
                             && ack.source_sesno >= receipt.source_sesno
                             && ack.geometry_count == receipt.geometry_count
                             && ack.room_membership == room_required
                             && ack.room_generation.as_deref() == room_generation.as_deref()
                     });
-                (!complete).then(|| name.clone())
+                (!complete).then(|| format!("{}/{}", root.word0, root.word1))
             })
             .collect::<Vec<_>>()
     };
@@ -4131,8 +4217,8 @@ mod tests {
                 "mod tests {",
             ),
             (
-                "model_ensure",
-                "pub async fn model_ensure(",
+                "model_generate",
+                "pub async fn model_generate(",
                 "async fn append_publication_state(",
             ),
         ] {
@@ -4152,6 +4238,54 @@ mod tests {
                 "{name} 必须经 model_read_route::route_for 取路由"
             );
         }
+    }
+
+    /// ADR-086 D1 / D2：`/model/records` 对内存路由把没有回执的根展成祖先名下盖过章的生成根再取；
+    /// 「没生成过」是 200 空，handler 里不再有 409 `not_generated`。
+    #[test]
+    fn model_records_answer_by_ancestor_and_never_say_not_generated() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_records(")
+            .expect("records handler must exist")
+            .1
+            .split_once("mod tests {")
+            .expect("records handler end marker")
+            .0;
+        assert!(
+            body.contains("receipt_roots_under("),
+            "memory route must expand an ancestor into its committed roots: {body}"
+        );
+        assert!(
+            body.contains("receipt_root_above(") && body.contains("overlay_records_under_node("),
+            "a node below a generation root (a VALV inside a BRAN) must answer from its root, \
+             filtered by ancestry: {body}"
+        );
+        assert!(
+            !body.contains("not_generated"),
+            "a scope without products is an empty result, not a 409: {body}"
+        );
+    }
+
+    /// ADR-086 D4：`/model/ensure` 只是 `/model/generate` 的别名——同一请求体进同一个 handler，多一行 deprecated。
+    #[test]
+    fn the_ensure_handler_is_a_deprecated_alias_of_generate() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_ensure(")
+            .expect("ensure alias must exist")
+            .1
+            .split_once("pub async fn model_generate(")
+            .expect("generate handler must follow the alias")
+            .0;
+        assert!(
+            body.contains("deprecated"),
+            "alias must log deprecated: {body}"
+        );
+        assert!(
+            body.contains("model_generate(state, req).await"),
+            "alias must forward unchanged to generate: {body}"
+        );
     }
 
     /// `/api/v1/meshes/{file}` 的路径门：只认 `{hash}.glb`，hash 只放行内容键字符集。

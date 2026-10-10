@@ -345,7 +345,11 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - 这类任务与投影一样只活在进程内。终态根快照短期、有界保留，服务重启后旧 task id 与快照
   同时返回 404。
 
-### 4.5 `POST /api/v1/model/ensure` — 按需生成单构件模型（同步）
+### 4.5 `POST /api/v1/model/generate`（旧名 `/api/v1/model/ensure`）— 按需生成节点范围的模型（同步）
+
+> 2026-10-09 ADR-086 D4 改名：请求体、回执、`force` 语义一字不变，只是名字说的事从「确保有」改成「生成」。
+> `/api/v1/model/ensure` 作为别名指向同一 handler、每次命中打一行 `deprecated`，保留一个版本后删除。下文凡写
+> `/model/ensure` 处均同时适用于 `/model/generate`。
 - HTTP 层从 e3d-io direct tree 枚举请求子树的生成根，再交给同一模型执行层。
 - 每根所属库先经 `model_read_route::route_for(dbnum)`；读源与发布目标分开判：
   ingest 中尚未完成的 durable 库使用 `ProjectionOnly`，read-through 的 spawned/embedded
@@ -518,8 +522,12 @@ rebuild、不推进应用/模型水位。
   `leave` / `arrive` / `route_ordinal`——`route_ordinal` 自本日起随行落盘（`model_db_adapter::render_records`），此前的老行没有这一格，
   读侧按同 `(容器, from, to)` 内的出现序（记录 id 序）补 0、1、2…；两端缺失的历史行没有 `tube`。放在记录一级而不是 `insts[]` 里：
   `ModelHashInst` 是 `aios_core` 的类型，这一格只属于本仓的读面，且一条管身记录恰好一个实例。
-- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
-  `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
+- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`。
+- **根按祖先理解（ADR-086，2026-10-09）**：`generation_root` 不必是生成根——给 ZONE / SITE 也行，给生成根以下的一个件
+  （BRAN 里的一个 VALV）也行。库路由本来就按 `anc CONTAINS` 取子树；内存形态下没有回执的节点分两种：在根之上的展成投影里
+  它名下盖过章的生成根再逐根取，在根之下的取它头上那根的记录、按祖先链只留它名下的（每条记录的 `owner` 两种情形下都是
+  生成根）。名下一条都没有 → **`200` 空数组**；`409 conflict` 只剩该库正被整库任务占用。`not_generated:` 退役——
+  「没生成过」在读接口上不是错误，要生成走 §4.5 `/model/generate`。
 
 **多根批量（已实现，2026-09-09）**
 
@@ -542,8 +550,8 @@ plant-ui 的单根调用零影响。
 - 响应回显 `"generation_roots": [...]`（替代单根的 `generation_root`），并多一格
   `"roots": [{"generation_root":"24381/100677","total":22}, …]`——整批逐根总数，每页都带，
   让「这根就是 0 条」显式可见，不用靠 `items` 里缺席去猜。
-- 批里任一根还没 `ensure` 过（服务端手里没有它的记录）→ **整批** `409 conflict`，消息仍以 `not_generated:` 开头
-  并列出缺的根；客户端对缺的那几根补 `ensure` 后重发。**空数组仍不表达「没生成过」。**
+- 批里的根同样按祖先理解（ADR-086）：没有回执的根展成名下的生成根，一根都没有的那一项 `total = 0`、`items` 里缺席，
+  **不再整批 409 `not_generated`**。
 - 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
 - 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
 - 实现说明：所属库逐根解（`dbnum_for_roots`，跨库 400）→ 一次 `route_for(dbnum)` → 内存形态先按 receipt 收齐缺的根
@@ -954,9 +962,9 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   kv-mem（仍不落 rocksdb），连同房间边（逐根回执不落库，ADR-079）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
   不是“没有写 process store”）；`publication_status` 取 `ready` / `empty`。
-- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里
-  没有这根（还没 ensure 过）回 `409 conflict`，消息以 `not_generated:` 开头——客户端先去
-  `/model/ensure`，它今天本来就是这个顺序。空数组**不**用来表达「没生成过」。
+- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；请求的根按祖先理解，
+  投影里它名下盖过章的生成根逐根取；一根都没有回 `200` 空数组（ADR-086，2026-10-09 起；此前是 409
+  `not_generated:`，客户端先 ensure 再查的顺序已随 plant-ui ADR-0030 取消）。
 - **`database` 库上**两条接口与 §4.5 逐字相同：`records` 读 rocksdb（`source = "model-database"`），
   `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
@@ -1384,8 +1392,9 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 
 ### 4.14 `GET /api/v1/datacenter/deletes` — 交付删除记录（`datacenter_delete`）只读分页（2026-09-23，plant-ui #1）
 
-- 读的是 **交付删除记录**（CONTEXT 词条）：交付单元自身被删 / 改位号时，增量随窗语句落下的「这个 refno 曾以哪个位号
-  发布过、如今该位号要从中台删掉」（表 `datacenter_delete`，主键 `[pe:⟨refno⟩, 老位号]`；写者只有增量，
+- 读的是 **交付删除事件**（CONTEXT 词条）：交付单元自身被删 / 改位号时，增量随窗语句记录「这个 refno 曾发生过删除或改名」。
+  表 `datacenter_delete` 的主键只取 refno 值 `datacenter_delete:⟨ref0_ref1⟩`，不含 `pe` 或 `name`；写入使用 `INSERT IGNORE`，同一
+  refno 只保留首次事件。增量写入前会按同一 refno ID 批量点查 `datacenter_version`，仅已发布过的单元落事件。写者只有增量，
   `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md`）。给外部提资 / 中台侧拉「该删什么」用。
 - **只读**：本服务对这张表只写不删（计划 D7），这条路由一个 `DELETE` 都没有——删行归 rs-server 在中台 `remove-apply`
   成功之后。**不带 `instance_code`**：那是 rs-server `change_name_into_illegal(name)`（去首 `/`、非法字符换 `_`）的编码规则，
@@ -1426,7 +1435,7 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
       "reason": "renamed", "published": true, "published_status": "Insert" },
     { "refno": "7997/21", "name": "/E-101", "type": "EQUI", "zone_refno": null,
       "dbnum": 7997, "sesno": 30, "sesno_time": null,
-      "reason": "deleted", "published": false, "published_status": null } ],
+      "reason": "deleted", "published": true, "published_status": "Delete" } ],
   "total": 2, "start": 0, "limit": 500, "has_more": false }
 ```
 
@@ -1438,12 +1447,12 @@ GET /api/v1/datacenter/deletes?dbnum=7997&from=2026-09-22T16:00:00Z
   | `zone_refno` | 沿 owner 链最近的 ZONE `a/b`；链断 `null`（按 ZONE 筛时自然漏掉，调用方要兜底就按 `dbnum` 拉） |
   | `dbnum` / `sesno` / `sesno_time` | 发生在哪个库、哪一版（这次改名 / 删除所在的会话，不是窗口末端）、同一版在 E3D 里被写入的时刻（RFC3339，增量落的是 UTC 文本 `…+00:00`，要本地时间自己换；读不到 `null`） |
   | `reason` | `deleted` \| `renamed` |
-  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。**`false` 的行中台没见过、直接跳过**（增量无条件写，计划 D6：判「发布过没有」的是消费端）。按 **refno** 算、不按位号：以 X 提资后连改 X→Y→Z 没再提资，`Y` 那行也是 `true`，但 Y 从没上过中台——调用方对 `remove-apply` 回「查无此实例」要按成功处理 |
-  | `published_status` | 那行的 `status`（rs-server 写的 `Insert` / `Modify` / `Delete`）；`published = false` 时 `null` |
+  | `published` | `datacenter_version:{refno}` 有行 = 这个单元提资过。新写事件在写前已过存在性门，正常恒为 `true`；`false` 只用于兼容旧行或异常诊断 |
+  | `published_status` | 那行的 `status`（`Insert` / `Modify` / `Delete`）；旧行或异常情况下 `published = false` 时 `null` |
   | `total` / `start` / `limit` / `has_more` | 过滤后总数（不分页）/ 起点 / 实际生效的页大小 / `start + items.len() < total` |
 
 - **边处理边删的调用方别推进 `start`**：删掉的行会让后面的行整体前移，按「已读条数」翻下一页会整页跳过；这种用法始终 `start=0`
-  反复拉，直到 `items` 为空。同一 `[refno, 老位号]` 在更晚一窗再落一次（同键重写、`sesno` 变大）也会让那行在序里挪位。
+  反复拉，直到 `items` 为空。同一 refno 后续事件由 `INSERT IGNORE` 忽略，已有行不会改字段或挪位。
 - 与 `datacenter_version` 的 `status = 'Delete'` 行**并存**（计划 D9）：被删单元两边都有，消费端按位号去重；改位号只有这里有。
   改回原名这条路由不判——调用方自己比对再跳过，判据是**待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`**
   （即本次要发布的那个）。**别拿 `datacenter_version` 行上的 `instance_code` 比**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）

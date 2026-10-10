@@ -7,8 +7,8 @@
 > 基线：本仓 `main@bb3274e63`（2026-09-22）；rs-server `7a6cb6f`；plant-ui `137f34560`（rs-core `data_center.rs`）。
 > 状态：**T1–T5 已落地**（T1 / T2 2026-09-22 会话 fable-5-1-43，用户「计划通过，从 T1 开工」；T3 验证 + T4 / T5 2026-09-23 会话 fable-5-1-7）。
 > T1 / T2：`PeChainView` 换掉 `(noun, owner)` 二元组、`load_pe_chain_view_from_persistent` 多选 `name`、`resolve_datacenter_statements_with`
-> 两个分支 + `nearest_zone`、`render_datacenter_delete_upsert`、调用点多传 `dbnum` / `end_sesno_time`。T3：白名单两条「应接受」、
-> `INST_RELATE_INDEX_SQL` 建表建索引、fork 双跑 `dual_datacenter_delete_array_ids_round_trip`。T4：`fast_delete` 源码钉
+> 两个分支 + `nearest_zone`、`render_datacenter_delete_insert_ignore`、调用点多传 `dbnum` / `end_sesno_time`。T3：白名单两条「应接受」、
+> `INST_RELATE_INDEX_SQL` 建表建索引、fork 双跑 `dual_datacenter_delete_refno_ids_insert_ignore`。T4：`fast_delete` 源码钉
 > `the_wipe_never_touches_the_delivery_ledgers`（`datacenter_version` 一并钉住）、预览回执 `DbnumPreview.datacenter_delete_rows`
 > （`IncrementPipeline::count_datacenter_delete_records` 走执行体同一条渲染路，只计数）。T5：`CONTEXT.md` 词条「交付删除记录」、changelog。
 > 验证（2026-09-23，e3d-io `TextList` 编译期阻塞已随 `direct_attmap.rs` / `element_attributes.rs` 补分支解除）：`cargo check --lib` 绿；
@@ -23,16 +23,21 @@
 > 追记（2026-09-24）：**Q1 已决**——用户拍板 `HANG` 算提资交付单元、按配置全收（D8 / §7 已改；现行代码即如此，不动）。
 > 追记（2026-09-24）：**Q2 已决**——消费端取数分三路：改名跟 refno、删除按 ZONE、孤儿按 dbnum 兜底进提资预览要确认（§6 rs-server / plant-ui 两条与 §7 已改；本仓不动）。
 > 追记（2026-09-24）：读口加 `from` / `to` 按 `sesno_time` 查时间范围（半开区间、按真实时刻比、纯日期按北京时间零点，spec §4.14）；只用于查询，增量消费仍用 `dbnum + since_sesno`。
+> 追记（2026-09-28，用户重新拍板）：`datacenter_delete` 是“发生过”事件表，ID **只用 refno 值**，不含 `pe` / `name`；写入改为
+> `INSERT IGNORE`，同一 refno 首次事件赢；按最新 issue，写前还须确认同 ID 的 `datacenter_version` 已存在。剩余消费与处理交给第三方。
+> 此前 D2 的数组主键、UPSERT 和 D6 无条件写方案作废；`rs-server` 不动。
 > 追记（2026-09-24）：§4 真机验收用 E3D TTY 夹具套件跑了（`output/e3d-fixture/20260924-123508`，10/10）：改名、改回两窗各一行 `renamed`，删整台 EQUI 一行 `deleted`，
 > 其余 8 案一行不落，全表恰好 3 行、`published = false`；kill 重放那一条仍未跑。实现上 `sesno` 取变化所在会话、`sesno_time` 取窗口末端会话的时刻，两者可能不是同一版，待定。
 > 追记（2026-09-24）：上一条的「待定」已决（用户拍板）——`sesno_time` 改取变化所在会话、与 `sesno` 同一版的写入时刻（D3 表已改），夹具套件改为逐行对 E3D 会话页核时刻。
+> 验证（2026-09-28）：最新契约的 E3D TTY 夹具 10/10 通过（`output/e3d-fixture/20260928-datacenter-delete-refno-event`）。预置两个同 refno
+> `datacenter_version` 后，改名 apply 写 1 行、恢复改名写 0 行且首次字段不变，删除交付单元写 1 行，其余 8 案均 0 行；两条事件均 `published = true`。
 
 ## 0. 一句话
 
 在 gen-model 增量的**随窗语句批**里（与 `datacenter_version` 的 Modify / Delete 同一批、水位之前、整窗重放收敛），对**交付单元自身**的两种变化各写一条
-固定目标 `UPSERT`：被删 → 记删除前的位号；改位号 → 记改前的位号。表叫 **`datacenter_delete`**，主键 **`[refno, old_name]`**。
-rs-server 提资时读这张表、按老位号发 `remove-apply`、成功后删行；改后的新数据照旧走 `status = 'Modify'` → 正常提资。
-gen-model 不读这张表、不判「发布过没有」、不清它（与 `datacenter_version` 同一条纪律）。
+显式 ID 的 `INSERT IGNORE`：被删 → 记删除前的位号；改位号 → 记改前的位号。表叫 **`datacenter_delete`**，主键只用 **refno 值**。
+gen-model 不读事件表消费状态，但写前批量点查 `datacenter_version`，未发布过的 refno 不记录；事件表不清。
+本轮不改 rs-server，消费、提交与后续清理由第三方负责。
 
 ## 1. 基线盘点（行号对 `main@bb3274e63`）
 
@@ -44,10 +49,10 @@ gen-model 不读这张表、不判「发布过没有」、不清它（与 `datac
 | `datacenter_statements` 只对 `db_type == "DESI"` 渲染；`delivery_unit_types = generation_root::configured_delivery_unit_types()`（默认 `BRAN / HANG / SUPPO / EQUI`，项目可配） | `increment_pipeline.rs` L1718–1734 | 同门；「哪些 noun 算交付单元」吃配置，不硬编码 issue 里的 `BRAN / SUPP / EQUI` |
 | 窗口折叠：同 refno 多次操作折成一条净变化，`modified_explicit_attrs["NAME"] = (old, new)`（`added` → `modified` 的搬迁也折对） | `increment_pipeline.rs` L240–270；测试 L2676–2712 | 改位号的 (old, new) 现成；房间改名判定已在用同一份（`model_update_plan.rs` L686–695） |
 | `normalize_attribute_name`：`att.NAME` / `NAME` 归一 | `src/data_interface/model_impact.rs` L268–276 | 判「是不是 NAME」用它 |
-| 重放安全白名单 `replay_safe::validate_statement`：**R1** `CREATE` / `UPSERT` 目标必须是显式 record id；拒随机发号、`time::now()`、无界 UPDATE | `src/data_interface/staging/replay_safe.rs` L9、L70–175、测试 L375–461 | 新语句形状 `UPSERT datacenter_delete:[pe:⟨…⟩, "…"] SET …` 要过这道门；**不能**写 `recorded_at = time::now()` |
+| 重放安全白名单 `replay_safe::validate_statement`：带显式 `id` 的 `INSERT IGNORE` 可重放；拒随机发号、`time::now()`、无界 UPDATE | `src/data_interface/staging/replay_safe.rs` L9、L70–175、测试 L375–461 | 新语句形状 `INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:⟨refno⟩, … }` 要过这道门；**不能**写 `recorded_at = time::now()` |
 | 整库清空 `RANGE_TABLES`（`pe / inst_relate / tubi_relate / room_relate / room_panel_relate / ref_rev …`）**不含 `datacenter_version`**——提资状态是 rs-server 的账，回退 / 重初始化不清 | `src/data_interface/fast_delete.rs` L13–30、L594–652 | `datacenter_delete` 同一条纪律：**不进** `RANGE_TABLES`，清库不碰 |
 | 墓碑：被删元素的 `pe` 行 `deleted = true`、noun / owner / name 照 S 侧保留；随窗语句在元素批**之后**、但 `datacenter_statements` 的持久层点查在**落库之前**（artifact 先渲后落） | `ele_ops.rs` L1608–1612；`increment_pipeline.rs` L1057–1060 → `land_increment_window` | 删除分支读到的是窗口前态那一行，名字在 |
-| rs-server：发布成功 `save_datacenter_record` → `upsert datacenter_version:{refno} set instance_code, status='Insert'`；`instance_code = change_name_into_illegal(NAME)`（去首 `/`、非法字符换 `_`）；`get_datacenter_delete_data(select_refnos)` 按所选 ZONE 收 `status='Delete'` 行，`object_model_code` 为空**静默跳过**，发 `operate:"remove-apply"`；`get_datacenter_handled_data` 把 Insert / Delete 当「已处理」 | rs-server `src/datacenter/query.rs` L564–596、L1274–1312；`src/datacenter/mod.rs` L430–465；rs-core `data_center.rs` L805–851 | 消费端改动在 §6（跨仓）；`instance_code` 可由老位号用同一函数推出、`object_model_code` 从 `datacenter_version:{refno}` 取（改名不改它） |
+| rs-server：发布成功 `save_datacenter_record` → `upsert datacenter_version:{refno} set instance_code, status='Insert'`；`instance_code = change_name_into_illegal(NAME)`（去首 `/`、非法字符换 `_`） | rs-server `src/datacenter/query.rs` L564–596 | 本仓只依赖该同 refno 版本行作为“已发布”存在性门；本轮不改 rs-server，事件消费交给第三方 |
 
 **现状结论**：删除那一半今天已经能走（老位号还留在 `datacenter_version` 行上、状态 Delete）；**改位号是真空白**——只标 Modify → 下次按新位号提交 → 中台
 旧位号永久残留，且 `save_datacenter_record` 的 UPSERT 会把 `instance_code` 覆盖成新值，旧位号在库里也没了。
@@ -66,19 +71,15 @@ DEFINE INDEX IF NOT EXISTS idx_datacenter_delete_zone ON TABLE datacenter_delete
 
 放在 `pdms_inst.rs` 那组 `DEFINE INDEX IF NOT EXISTS` 旁（启动灌 schema 的同一处），不新开 `.surql`。
 
-### D2　主键：`datacenter_delete:[<refno 记录链接>, <old_name>]`
+### D2　主键：`datacenter_delete:<refno 值>`；首次事件赢
 
 ```text
-datacenter_delete:[pe:⟨7997_1⟩, "/1RCP-001-B1"]
+datacenter_delete:⟨7997_1⟩
 ```
 
-- 第一位是交付单元的 `pe` 记录链接（与 `datacenter_version:7997_1` 同一个 `{dbnum}_{ref1}` 键串，消费端 `type::thing('datacenter_version', record::id(refno))` 就能 join）；
-  第二位是**要在中台删掉的那个位号**（E3D `NAME` 原文，含首位 `/`）。
-- 为什么不是 issue 里的「`id` = 参考号」：同一单元两次改位号（A→B 提资过，再 B→C），按 refno 一把键第二次会把 A 覆盖掉，中台的 A 永远删不到。
-- 为什么不是 `[refno, sesno]`：A→B（10）、B→A（12）、A→B（14）会给 A 攒两行、发两次 `remove-apply`；按位号做键天然去重——「这个 refno 曾经叫 A、A 要删」这句话
-  说一次就够，UPSERT 重复落同一条只是刷新字段。`sesno` 留作普通字段（§D3）。
-- 同一窗口内 A→B→C 折叠后只剩净变化 (A, C)：中间的 B 从没落过库、中台不可能见过它，只记 A 正确。
-- 整窗重放：同一窗口渲出同一批键、同一份字段 → UPSERT 收敛（`replay_safe` R1 显式目标）。
+- ID 只取 `RefU64` 的 `{dbnum}_{ref1}` 值，与 `datacenter_version` 的 ID 口径一致；不把 `pe` 记录链接或 `name` 放进 ID。
+- 写入使用 `INSERT IGNORE`。同一 refno 重放、再次改名或随后删除都不覆盖、不新增，只保留首次“曾发生过”的事实。
+- `refno` 记录链接和首次事件的老位号仍作为普通字段返回，第三方按自身规则处理；本仓不维护消费状态。
 
 ### D3　字段
 
@@ -105,11 +106,11 @@ for op in 本窗净变化（DESI 窗口）:
     Deleted:
       (noun, owner, name) = S 侧（窗口前态 / 墓碑）
       if noun ∈ unit_types and name 非空:
-        UPSERT datacenter_delete:[refno, name] SET reason = 'deleted', …
+        INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:<refno值>, reason: 'deleted', … }
     Modified where noun ∈ unit_types:
       (old, new) = modified_attrs ∪ modified_explicit_attrs 里 normalize == "NAME" 的那一条
       if old 非空 and old != new:
-        UPSERT datacenter_delete:[refno, old] SET reason = 'renamed', …
+        INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:<refno值>, reason: 'renamed', … }
     其余（下属管件的增删改名、Add）:
       不写                                              # issue 原文「不包含其下属管件」；管件变化照旧只让单元记 Modify
 ```
@@ -124,11 +125,10 @@ for op in 本窗净变化（DESI 窗口）:
 第一个 noun == `ZONE` 的祖先即是；到顶 / 链断 → `NONE`（issue 表允许为空，消费端按 ZONE 过滤时自然漏掉，日志点名）。
 删除分支从 S 侧链上溯（被删单元的 owner 边在墓碑上还留着），改名分支按 overlay 优先（与 Modify 上溯同口径）。
 
-### D6　无条件写；「发布过没有」由消费端判
+### D6　写前检查 `datacenter_version`；只记录已发布 refno
 
-gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染期读库或写条件语句（`IF … THEN UPSERT`），前者违背「任务不回问库」（ADR-071 D1 推论），
-后者过不了 `replay_safe` 的固定目标形状。从未提资过的单元被删 / 改名也会落一行；rs-server 消费时 join 不到 `datacenter_version` 行就跳过并删掉它（§6）。
-代价是这张表在从未提资过的库上也长，量 = 交付单元级的删除 / 改名次数，可忽略。
+收集本窗口变更 refno 后，按 `datacenter_version:⟨ref0_ref1⟩` 分块显式点查 `record::exists(id)`；只有命中的 refno 才渲染
+`INSERT IGNORE`。检查发生在生成固定随窗 SQL 之前，写语句本身仍不含条件查询，重放安全不变。未发布过的单元被删 / 改名不进事件表。
 
 ### D7　生命周期：gen-model 只写不删；清库不碰
 
@@ -152,7 +152,7 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
   `PeChainView { noun, owner, name }`（`load_pe_chain_view_from_persistent`：`SELECT id, noun, owner, name FROM […] WHERE record::exists(id)`）；
   `effective_view` 同步。既有 `resolve_datacenter_statements_with` 的渲染测试只换夹具形状（`row()` / `PeChainView`），断言不改、仍绿。
 - **T2 渲染**（✅ 已落）：`resolve_datacenter_statements_with` 加 D4 两个分支 + D5 的 `nearest_zone(start)`；渲染器
-  `render_datacenter_delete_upsert(&DatacenterDeleteRecord) -> String`，位号进单引号字串、`\` / `'` 转义（`dbnum_state::escape_surql_str`），id 第二位同样转义。
+  `render_datacenter_delete_insert_ignore(&DatacenterDeleteRecord) -> String`，ID 只取 refno 值，位号进普通字段并对 `\` / `'` 转义。
   语句加进现有 `statements`（Delete 逐条那一路），去重沿用 `dedup_statements_keep_last`。调用点 `datacenter_statements(data, db_type, dbnum, end_sesno_time)`
   ——`end_sesno_time` 的读取从尾事务前挪到随窗渲染前（同一页会话页，读一次）。§3.1 的 10 条用例落成 6 个测试函数，每条新语句都过
   `replay_safe::validate_statement`。
@@ -160,9 +160,9 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
   `cargo test --lib -- datacenter_delete datacenter_tests accepts_the_persist_path_statement_shapes planned_through`）：
   `replay_safe::accepts_the_persist_path_statement_shapes` 加两条「应接受」（改名 / 删除各一，含转义位号）；`pdms_inst::INST_RELATE_INDEX_SQL` 末尾加
   `DEFINE TABLE IF NOT EXISTS datacenter_delete SCHEMALESS` + `DEFINE INDEX IF NOT EXISTS idx_datacenter_delete_zone … COLUMNS zone_refno`（生产启动、
-  暂存建库、四处 EXPLAIN 钉测试共用这一份）；`fork_surreal_compat::dual_datacenter_delete_array_ids_round_trip` 用生产渲染器
-  `render_datacenter_delete_upsert`（为此转 `pub(crate)`）在 mem + fork 双跑：DEFINE 建得进、UPSERT 写得进、同键重写不多行、同 refno 两把位号键两行并存、
-  `zone_refno` 等值 / `IN [...]` / `= NONE` 查得回、id 数组与 `type::thing('datacenter_version', record::id(refno))` join 往返、`'` / `\` 转义原样落库、
+  暂存建库、四处 EXPLAIN 钉测试共用这一份）；`fork_surreal_compat::dual_datacenter_delete_refno_ids_insert_ignore` 用生产渲染器
+  `render_datacenter_delete_insert_ignore` 在 mem + fork 双跑：DEFINE 建得进、`INSERT IGNORE` 写得进、同一 refno 的重放与后续事件均不覆盖不增行、
+  `zone_refno` 等值 / `IN [...]` / `= NONE` 查得回、refno ID 往返、`'` / `\` 转义原样落库、
   fork 上等值 EXPLAIN 走 `idx_datacenter_delete_zone`。
 - **T4 护栏**：`fast_delete` 加源码钉「`RANGE_TABLES` 不含 `datacenter_delete`」（与 `datacenter_version` 并排一句）；`manual_update` 预览回执加一格
   `datacenter_delete_rows: usize`（只计数，不改判定）。
@@ -173,13 +173,13 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
 
 | 用例 | 期望 |
 | --- | --- |
-| BRAN 自身 `NAME` `/A → /B` | 一条 `UPSERT datacenter_delete:[pe:⟨7997_3⟩, "/A"] SET reason = 'renamed', type = 'BRAN', zone_refno = pe:⟨7997_5⟩, …` + 原有 `Modify` |
+| BRAN 自身 `NAME` `/A → /B` | 一条 `INSERT IGNORE INTO datacenter_delete { id: datacenter_delete:⟨7997_3⟩, reason: 'renamed', … }` + 原有 `Modify` |
 | BRAN 下 ELBO 改 `NAME` | **不**出 `datacenter_delete`，只出 BRAN 的 `Modify` |
 | BRAN `NAME` 从 `added_explicit_attrs` 出现（老值无） | 不出 |
 | EQUI 被删（S 侧 name `/E-101`，owner 链 EQUI → ZONE） | `reason = 'deleted'`、`zone_refno` = 那个 ZONE；原有 `status = 'Delete', belong_zone = …` 照旧 |
 | SUPPO 被删，owner 链 SUPPO → STRU → ZONE | `zone_refno` = 隔两层的 ZONE（D5 与 `belong_zone` 的差别就在这条） |
 | 链断（owner 行不在） | `zone_refno = NONE`，语句仍出 |
-| 同一窗口 A→B、B→C 折叠 | 只一条键 `[refno, "/A"]` |
+| 同一 refno 重放或后续再次改名 | 仍只有一行，首次事件字段不变 |
 | 同一批语句渲两遍 | 逐字相同（重放收敛） |
 | 位号含 `"` / `\` | 转义后 `validate_statement` 接受 |
 | 非 DESI 窗口 | 零语句（同现有门） |
@@ -187,29 +187,19 @@ gen-model 不查 `datacenter_version:{refno}` 存不存在——那要在渲染�
 ## 4. 验收
 
 1. `cargo test --lib` 全绿、`cargo clippy` 触及文件 0 告警。
-2. `mem://` 真跑：TTY 把 AMS 8000 某条 BRAN 改位号 + 删一台 EQUI → 一窗之后 `SELECT * FROM datacenter_delete` 恰两行、字段齐；同窗 kill 重放后行数与内容不变。
-3. 从未提资过的库照样出行（D6 的预期，不是缺陷）；`Reinitialize` 之后行仍在（D7）。
+2. TTY 真跑前为目标 BRAN / EQUI 预置同 refno 的 `datacenter_version` 行；改位号 + 删除各产生一条事件，字段齐；同窗重放及同 refno 后续事件不改变首次记录。
+3. 从未提资过的单元不出行（D6）；`Reinitialize` 之后已有事件行仍在（D7）。
 
 ## 5. 不做
 
-- 不改 `datacenter_version` 的 Delete / Modify 语义（D9）；不写 `instance_code` / `object_model_code`（D3）；不在 gen-model 判「发布过没有」（D6）；
+- 不改 `datacenter_version` 的 Delete / Modify 语义（D9）；不写 `instance_code` / `object_model_code`（D3）；
   不为下属管件记删除记录（D4）；不清表（D7）；不给这张表加水位或回执。
 
-## 6. 跨仓后续（不在本仓计划内，随 T2 落地后开）
+## 6. 跨仓后续（本仓不实现）
 
-- **rs-server**（≈ 0.5 天）：`get_datacenter_delete_data` 除 `status='Delete'` 行外，再读 `datacenter_delete`，取数口径按 Q2（2026-09-24 已决）分三路：
-  ① `reason='renamed'` **跟着单元走**：本次提资要发新数据的那些单元，按 refno 带上它们的改名记录，不看存的 `zone_refno`（搬迁后会过期），老位号的删除与新数据同批；
-  单元已不存在的改名记录（改名后又被删）归 ②。② `reason='deleted'` 按存的 `zone_refno IN [所选 ZONE]`（删前的 ZONE，与 `status='Delete'` 的 `belong_zone` 同口径）。
-  ③ **孤儿兜底**：对本次涉及的每个 dbnum，再收 `zone_refno` 为 `NONE` 或指向当前树里已不存在的 ZONE 的删除记录（`status='Delete'` 行同样处理）；
-  它们不属于任何还能被选中的 ZONE，放进这次不算越界，但要在提资预览里单列、**用户确认后才发**。每行 join
-  `datacenter_version:{refno}`——没有行 → 从未提资，直接删掉这条记录、不发；有行 → `instance_code = change_name_into_illegal(name)`、`object_model_code` 取行上的，
-  发 `remove-apply`；**若待删位号推出的 `instance_code` == 该单元当前 `NAME` 推出的 `instance_code`（改回原名，即本次要发布的那个）则跳过并删行**，
-  否则中台先删后建、历史丢。**不能比 `datacenter_version` 行上的 `instance_code`**：那是上次提资的值，普通改名（以 X 提资后改成 Y、还没再提资）时它仍是 X，
-  按它比会把该删的 X 当成改回原名跳过（2026-09-24 审查更正）。`remove-apply` 回「查无此实例」按成功处理：「有行」是按 refno 判的，以 X 提资后连改
-  X→Y→Z 没再提资时，从没上过中台的 Y 也会出行。成功后 `DELETE` 这些 `datacenter_delete` 行。
-  两条来源按 `instance_code` 去重。顺序：同一次提资里 `remove-apply` 先于新数据的插入 / 修改。`object_model_code` 为空今天是静默跳过，至少补一行日志。
-- **plant-ui**：提资预览要单列 ③ 的孤儿删除、用户确认后才发（Q2 已决，原「不必改」作废）；「本次将提删 N 条」照旧可选。
-- issue 开在 plant-ui，回一条评论说明表名 / 主键与两仓分工。
+- `gen-model` 只维护事件表：确认同 refno 的 `datacenter_version` 已存在后，以 `INSERT IGNORE` 记录首次删除或改名事件。
+- `rs-server` 本轮不改；消费、提交、确认和清理策略全部交给第三方实现。
+- `plant-ui` issue 只作为需求来源；本仓不替第三方规定事件的消费顺序或删除时机。
 
 ## 7. 开放问题
 

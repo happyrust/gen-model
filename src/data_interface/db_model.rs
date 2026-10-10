@@ -296,7 +296,13 @@ impl AiosDBManager {
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
         use crate::data_interface::mdb_membership;
 
-        let membership = mdb_membership::resolve(&self.db_option, project, mdb)?;
+        // 绑定并登记（ADR-085：启动是成员绑定的三个重做时刻之一，阶段行 `reason=startup` 由它打）。
+        let membership = mdb_membership::rebind(
+            &self.db_option,
+            project,
+            mdb,
+            mdb_membership::RebindReason::Startup,
+        )?;
         let counts = membership.counts_by_type();
         let dictionaries = membership.dictionary_paths();
         let missing_dicts: Vec<&mdb_membership::MdbDatabase> = membership
@@ -388,7 +394,6 @@ impl AiosDBManager {
             println!("  {line}");
             log::warn!("MDB {} {line}", membership.mdb());
         }
-        mdb_membership::install(membership);
         Ok(())
     }
 

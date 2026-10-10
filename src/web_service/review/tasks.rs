@@ -30,8 +30,63 @@ use super::platform::{
         evaluate_annotation_check,
     },
     derive_review_form_status_from_task_status, mark_review_form_deleted,
-    sync_review_form_with_task_status,
+    review_form::find_active_task_row_by_form_id, sync_review_form_with_task_status,
 };
+
+/// 把 `review_form_model` 里某个 `form_id` 的构件集整体换成 `$model_refnos`（删旧插新）。
+/// 只是一段语句，不带事务边界——嵌进调用方自己的 `BEGIN … COMMIT` 里，
+/// 与任务行的更新同一笔事务落库。绑定变量：`$form_id: string`、`$model_refnos: array<string>`。
+///
+/// `workflow/sync` 回给 PMS 的 `data.models` 读的就是这张表（`platform/workflow_sync.rs`
+/// `query_workflow_models`），所以任何一条改 `review_tasks.components` 的写路径都得跟着刷它
+/// （`docs/plans/2026-09-28-review-workflow-defects-fix-plan.md` D6 / G5）。
+const REPLACE_FORM_MODELS_SQL: &str = r#"
+        LET $stale_form_models = SELECT VALUE id FROM review_form_model WHERE form_id = $form_id;
+        DELETE $stale_form_models;
+        FOR $model_refno IN $model_refnos {
+            CREATE review_form_model SET
+                form_id = $form_id,
+                model_refno = $model_refno,
+                created_at = time::now();
+        };
+"#;
+
+/// 构件列表 → 去重、去空白后的 refno 列表（保持首次出现的顺序），供 [`REPLACE_FORM_MODELS_SQL`]
+/// 与 `create_task` 首建回填共用同一口径。
+fn distinct_component_refnos(components: &[ReviewComponent]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    components
+        .iter()
+        .map(|component| component.ref_no.trim())
+        .filter(|refno| !refno.is_empty() && seen.insert(refno.to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// 把 `form_id` 名下的 `review_form_model` 整体换成 `components` 的 refno 集合（独立一笔事务）。
+/// `PATCH /api/review/tasks/{id}` 改 `components` 后调用；`create_task` 二次保存那一路把同一段
+/// 语句嵌进自己的事务里，不走这个函数。
+async fn replace_form_models(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    form_id: &str,
+    components: &[ReviewComponent],
+) -> anyhow::Result<usize> {
+    let model_refnos = distinct_component_refnos(components);
+    let count = model_refnos.len();
+    let sql = format!(
+        "BEGIN TRANSACTION;{}COMMIT TRANSACTION;",
+        REPLACE_FORM_MODELS_SQL
+    );
+    await_review_query(
+        "review.form_model.replace",
+        db.query(sql)
+            .bind(("form_id", form_id.to_string()))
+            .bind(("model_refnos", model_refnos)),
+    )
+    .await
+    .and_then(|response| response.check().map_err(anyhow::Error::from))?;
+    Ok(count)
+}
 
 // ============================================================================
 // Routes
@@ -509,124 +564,30 @@ async fn create_task(
         .unwrap_or_else(generate_form_id);
 
     // form_id 唯一性兜底：调用方显式传了 form_id 时（PMS 嵌入态、外部流程驱动），
-    // 若已有非 deleted 的 review_task 关联同一 form_id，直接返回该 task 并复用，
-    // 避免在 SJ 驳回回到 sj 节点后重复 createReviewTask 累积重复 task 数据
-    // （bug-resubmit-creates-duplicate-task simulator 场景）。
-    // 同时给 review_workflow_history 写一条 action='resubmit' 事件，保持 form_id 全生命周期可追溯。
+    // 若已有非 deleted 的 review_task 关联同一 form_id，**不再新建**（避免 SJ 驳回回到 sj 节点后
+    // 重复 createReviewTask 累积重复 task；bug-resubmit-creates-duplicate-task simulator 场景），
+    // 而是把这次提交当作设计端对同一单据的**二次保存**：
+    // - 任务仍在编制节点（sj）→ UPDATE 设计端可编辑字段、重刷 review_form_model、写一条
+    //   action='resave' 历史，返回更新后的任务；
+    // - 任务已离开编制节点 → 409，一个字节都不写。
+    // 旧端这里只写一条 resubmit 历史就把**旧任务**原样返回，新请求里的 title / description /
+    // components / attachments 全部静默丢弃（宪法 III）。查找与 `find_task_by_form_id` 同一排序
+    // 口径，两路对同一组重复行选中同一条。
+    // 计划：docs/plans/2026-09-28-review-workflow-defects-fix-plan.md T1（D1 / D1b / D5 / D6）。
     if form_id_was_provided {
-        let db = match fresh_review_db().await {
-            Ok(db) => db,
-            Err(e) => {
-                warn!(
-                    "[REVIEW_API.create_task] DEDUP_CONNECT_FAIL form_id={} actor_id={} elapsed_ms={} reason={}（继续走 CREATE 路径）",
+        match find_active_task_row_by_form_id(form_id.as_str()).await {
+            Ok(Some(existing)) => {
+                return resave_existing_task(
+                    &claims,
+                    request,
+                    existing,
                     form_id,
-                    claims.user_id,
-                    started.elapsed().as_millis(),
-                    e
-                );
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(TaskResponse {
-                        success: false,
-                        task: None,
-                        error_message: Some(format!("连接校审数据库超时: {}", e)),
-                    }),
-                );
+                    requester_name,
+                    started,
+                )
+                .await;
             }
-        };
-        match await_review_query(
-            "review.create_task.dedup",
-            db.query(
-                "SELECT * FROM review_tasks WHERE form_id = $form_id AND (deleted IS NONE OR deleted = false) ORDER BY created_at ASC LIMIT 1",
-            )
-            .bind(("form_id", form_id.clone())),
-        )
-        .await
-        {
-            Ok(mut resp) => {
-                let rows: Vec<TaskRow> = resp.take(0).unwrap_or_default();
-                if let Some(row) = rows.into_iter().next() {
-                    let existing = row.to_review_task();
-                    info!(
-                        "[REVIEW_API.create_task] DEDUP_REUSE form_id={} existing_task_id={} existing_node={} existing_status={} actor_id={} elapsed_ms={} reason=同 form_id 已存在非删除 task，复用现有 task 不新建",
-                        form_id,
-                        existing.id,
-                        existing.current_node,
-                        existing.status,
-                        claims.user_id,
-                        started.elapsed().as_millis()
-                    );
-                    if !review_workflow_history_schema_ready() {
-                        warn!(
-                            "[REVIEW_API.create_task] workflow history schema warmup is not ready; resubmit history write uses current schema"
-                        );
-                    }
-                    let history_sql = r#"
-                        CREATE review_workflow_history CONTENT {
-                            task_id: $task_id,
-                            form_id: $form_id,
-                            node: $from_node,
-                            target_node: $target_node,
-                            action: 'resubmit',
-                            actor_id: $actor_id,
-                            actor_role: $actor_role,
-                            actor_name: $actor_name,
-                            source: $source,
-                            comment: $comment,
-                            created_at: time::now()
-                        }
-                    "#;
-                    let actor_role_resubmit = claims
-                        .role
-                        .as_ref()
-                        .map(|r| r.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    if let Err(e) = await_review_query(
-                        "review.create_task.resubmit_history",
-                        db.query(history_sql)
-                            .bind(("task_id", existing.id.clone()))
-                            .bind(("form_id", Some(form_id.clone())))
-                            .bind(("from_node", existing.current_node.clone()))
-                            .bind(("target_node", Some("jd".to_string())))
-                            .bind(("actor_id", claims.user_id.clone()))
-                            .bind(("actor_role", actor_role_resubmit))
-                            .bind(("actor_name", requester_name.clone()))
-                            .bind(("source", "plant3d-internal".to_string()))
-                            .bind(("comment", Some("再次发起编校审（form_id 复用）".to_string()))),
-                    )
-                    .await
-                    .and_then(|response| response.check().map_err(anyhow::Error::from))
-                    {
-                        warn!(
-                            "[REVIEW_API.create_task] FAIL form_id={} existing_task_id={} actor_id={} elapsed_ms={} reason=resubmit_history_error: {}",
-                            form_id,
-                            existing.id,
-                            claims.user_id,
-                            started.elapsed().as_millis(),
-                            e
-                        );
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(TaskResponse {
-                                success: false,
-                                task: None,
-                                error_message: Some(format!(
-                                    "写入 review_workflow_history 失败: {}",
-                                    e
-                                )),
-                            }),
-                        );
-                    }
-                    return (
-                        StatusCode::OK,
-                        Json(TaskResponse {
-                            success: true,
-                            task: Some(existing),
-                            error_message: None,
-                        }),
-                    );
-                }
-            }
+            Ok(None) => {}
             Err(e) => {
                 warn!(
                     "[REVIEW_API.create_task] DEDUP_QUERY_FAIL form_id={} actor_id={} elapsed_ms={} reason={}（继续走 CREATE 路径，不阻塞调用方）",
@@ -718,12 +679,7 @@ async fn create_task(
                 started.elapsed().as_millis()
             );
 
-            let mut seen_refnos = HashSet::new();
-            for comp in &request.components {
-                let refno = comp.ref_no.trim();
-                if refno.is_empty() || !seen_refnos.insert(refno.to_string()) {
-                    continue;
-                }
+            for refno in distinct_component_refnos(&request.components) {
                 match await_review_query(
                     "review.form_model.backfill_create",
                     db.query(
@@ -735,7 +691,7 @@ async fn create_task(
                         "#,
                     )
                     .bind(("form_id", form_id.clone()))
-                    .bind(("model_refno", refno.to_string())),
+                    .bind(("model_refno", refno.clone())),
                 )
                 .await
                 {
@@ -747,11 +703,15 @@ async fn create_task(
                 }
             }
 
+            // `review_forms.project_id` 只认可信来源（token claims 里的 PMS 项目号）；
+            // 旧端在这里传的是 `request.model_name`——前端填的是「数据包名称」，embed-url 建存根时
+            // 写进去的真 project_id 随即被它覆盖（计划 D2 / T2）。claims 无项目号时传空串 =
+            // `review_form.rs` UPDATE 里 `IF string::len(...) > 0` 的「保留现值」语义。
             match timeout(
                 Duration::from_secs(2),
                 sync_review_form_with_task_status(
                     form_id.as_str(),
-                    Some(request.model_name.as_str()),
+                    Some(claims.project_id.as_str()),
                     Some(requester_id.as_str()),
                     "create_task_backfill",
                     "draft",
@@ -819,6 +779,274 @@ async fn create_task(
                     success: false,
                     task: None,
                     error_message: Some(format!("创建提资单失败: {}", e)),
+                }),
+            )
+        }
+    }
+}
+
+/// 二次保存被拒时给设计端的原文（前端 `notification.details` 原样展示；T5 依赖这句的措辞）。
+fn resave_rejected_message(current_node: &str) -> String {
+    format!(
+        "单据已送审（当前节点 {} · {}），不可修改；如需修改请由 PMS 驳回到编制节点",
+        current_node,
+        get_node_display_name(current_node)
+    )
+}
+
+/// `create_task` 命中同 `form_id` 活动任务时的分支：设计端对同一单据的二次保存（计划 T1）。
+///
+/// - 任务在 `sj`：一笔事务里 UPDATE 设计端可编辑字段（`title / description / model_name /
+///   priority / components`，`attachments / due_date` 只在请求带了时才覆盖）、按 `components`
+///   重刷 `review_form_model`、写一条 `action='resave'` 历史；**不碰** `checker_* / approver_* /
+///   reviewer_*`（它们由 PMS `next_step` 指定）、不改 `status / current_node`。
+///   `WHERE current_node = 'sj'` 与流转事务同款乐观并发保护：并发送审抢先则整笔回滚、409。
+/// - 任务不在 `sj`：409 + 可读原文，不写库。
+async fn resave_existing_task(
+    claims: &TokenClaims,
+    request: CreateTaskRequest,
+    existing: TaskRow,
+    form_id: String,
+    requester_name: String,
+    started: std::time::Instant,
+) -> (StatusCode, Json<TaskResponse>) {
+    let existing_id = record_id_to_string(existing.id.clone());
+    let existing_node = existing
+        .current_node
+        .as_deref()
+        .map(str::trim)
+        .filter(|node| !node.is_empty())
+        .unwrap_or("sj")
+        .to_lowercase();
+    let existing_status = existing.status.clone().unwrap_or_default();
+
+    if existing_node != "sj" {
+        warn!(
+            "[REVIEW_API.create_task] RESAVE_REJECTED form_id={} existing_task_id={} existing_node={} existing_status={} actor_id={} elapsed_ms={} reason=任务已离开编制节点，二次保存不落库",
+            form_id,
+            existing_id,
+            existing_node,
+            existing_status,
+            claims.user_id,
+            started.elapsed().as_millis()
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(TaskResponse {
+                success: false,
+                task: None,
+                error_message: Some(resave_rejected_message(&existing_node)),
+            }),
+        );
+    }
+
+    info!(
+        "[REVIEW_API.create_task] RESAVE form_id={} existing_task_id={} existing_status={} actor_id={} components={} attachments_set={} reason=同 form_id 已存在 sj 节点活动 task，按二次保存 UPDATE 不新建",
+        form_id,
+        existing_id,
+        existing_status,
+        claims.user_id,
+        request.components.len(),
+        request.attachments.is_some(),
+    );
+    if !review_workflow_history_schema_ready() {
+        warn!(
+            "[REVIEW_API.create_task] workflow history schema warmup is not ready; resave history write uses current schema"
+        );
+    }
+
+    let mut set_clauses = vec![
+        "title = $title",
+        "description = $description",
+        "model_name = $model_name",
+        "priority = $priority",
+        "components = $components",
+        "updated_at = time::now()",
+    ];
+    if request.attachments.is_some() {
+        set_clauses.push("attachments = $attachments");
+    }
+    if request.due_date.is_some() {
+        set_clauses.push("due_date = $due_date");
+    }
+    // 位置占位 `{}`（而不是命名占位）：`common.rs` 的 SurrealQL 字面量护栏靠 `{}` 认出 format! 模板。
+    let sql = format!(
+        r#"
+        BEGIN TRANSACTION;
+
+        LET $updated_task = UPDATE review_tasks SET
+            {}
+        WHERE record::id(id) = $task_id
+          AND (deleted IS NONE OR deleted = false)
+          AND (current_node IS NONE OR current_node = 'sj');
+        IF array::len($updated_task) = 0 {{
+            THROW "REVIEW_RESAVE_STATE_CHANGED";
+        }};
+        {}
+        CREATE review_workflow_history CONTENT {{
+            task_id: $task_id,
+            form_id: $form_id,
+            node: 'sj',
+            target_node: NONE,
+            action: 'resave',
+            operator_id: $actor_id,
+            operator_name: $actor_name,
+            actor_id: $actor_id,
+            actor_role: $actor_role,
+            actor_name: $actor_name,
+            source: 'plant3d-internal',
+            comment: $comment,
+            timestamp: time::now(),
+            created_at: time::now()
+        }};
+
+        COMMIT TRANSACTION;
+        "#,
+        set_clauses.join(",\n            "),
+        REPLACE_FORM_MODELS_SQL,
+    );
+
+    let db = match fresh_review_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(TaskResponse {
+                    success: false,
+                    task: None,
+                    error_message: Some(format!("连接校审数据库超时: {}", e)),
+                }),
+            );
+        }
+    };
+    let actor_role = claims
+        .role
+        .as_ref()
+        .map(|r| r.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut query = db
+        .query(sql)
+        .bind(("task_id", existing_id.clone()))
+        .bind(("form_id", form_id.clone()))
+        .bind(("title", request.title.clone()))
+        .bind(("description", request.description.clone()))
+        .bind(("model_name", request.model_name.clone()))
+        .bind(("priority", request.priority.clone()))
+        .bind(("components", request.components.clone()))
+        .bind((
+            "model_refnos",
+            distinct_component_refnos(&request.components),
+        ))
+        .bind(("actor_id", claims.user_id.clone()))
+        .bind(("actor_role", actor_role))
+        .bind(("actor_name", requester_name))
+        .bind((
+            "comment",
+            Some("设计端重新保存编校审单（form_id 复用，构件 / 描述 / 附件以本次为准）".to_string()),
+        ));
+    if let Some(attachments) = request.attachments.clone() {
+        query = query.bind(("attachments", attachments));
+    }
+    if let Some(due_date) = request.due_date {
+        query = query.bind((
+            "due_date",
+            chrono::DateTime::from_timestamp_millis(due_date).map(|dt| dt.to_rfc3339()),
+        ));
+    }
+
+    if let Err(e) = await_review_query("review.create_task.resave", query)
+        .await
+        .and_then(|response| response.check().map_err(anyhow::Error::from))
+    {
+        let message = e.to_string();
+        if message.contains("REVIEW_RESAVE_STATE_CHANGED") {
+            // 读到 sj、写时已不在 sj：并发送审抢先。按「已离开编制节点」口径拒绝，
+            // 节点名用刷新后的值（读不到就退回读时的值）。
+            let node_now = find_active_task_row_by_form_id(form_id.as_str())
+                .await
+                .ok()
+                .flatten()
+                .and_then(|row| row.current_node)
+                .map(|node| node.trim().to_lowercase())
+                .filter(|node| !node.is_empty())
+                .unwrap_or(existing_node);
+            warn!(
+                "[REVIEW_API.create_task] RESAVE_STATE_CHANGED form_id={} existing_task_id={} node_now={} actor_id={} elapsed_ms={}",
+                form_id,
+                existing_id,
+                node_now,
+                claims.user_id,
+                started.elapsed().as_millis()
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(TaskResponse {
+                    success: false,
+                    task: None,
+                    error_message: Some(resave_rejected_message(&node_now)),
+                }),
+            );
+        }
+        warn!(
+            "[REVIEW_API.create_task] FAIL form_id={} existing_task_id={} actor_id={} elapsed_ms={} reason=resave_transaction_error: {}",
+            form_id,
+            existing_id,
+            claims.user_id,
+            started.elapsed().as_millis(),
+            message
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(TaskResponse {
+                success: false,
+                task: None,
+                error_message: Some(format!("保存编校审单失败: {}", message)),
+            }),
+        );
+    }
+
+    let get_sql = "SELECT * FROM review_tasks WHERE record::id(id) = $id AND (deleted IS NONE OR deleted = false) LIMIT 1";
+    let reread = await_review_query(
+        "review.create_task.resave_get",
+        db.query(get_sql).bind(("id", existing_id.clone())),
+    )
+    .await
+    .ok()
+    .and_then(|mut resp| resp.take::<Vec<TaskRow>>(0).ok())
+    .and_then(|rows| rows.into_iter().next());
+    match reread {
+        Some(row) => {
+            let task = hydrate_task_attachments(row.to_review_task()).await;
+            info!(
+                "[REVIEW_API.create_task] RESAVE_OK task_id={} form_id={} actor_id={} components={} elapsed_ms={}",
+                task.id,
+                form_id,
+                claims.user_id,
+                task.components.len(),
+                started.elapsed().as_millis()
+            );
+            (
+                StatusCode::OK,
+                Json(TaskResponse {
+                    success: true,
+                    task: Some(task),
+                    error_message: None,
+                }),
+            )
+        }
+        None => {
+            warn!(
+                "[REVIEW_API.create_task] RESAVE_OK_BUT_LOST task_id={} form_id={} elapsed_ms={} reason=updated但读取失败",
+                existing_id,
+                form_id,
+                started.elapsed().as_millis()
+            );
+            (
+                StatusCode::OK,
+                Json(TaskResponse {
+                    success: true,
+                    task: None,
+                    error_message: Some("保存成功但无法读取任务（可能已删除）".to_string()),
                 }),
             )
         }
@@ -1126,6 +1354,29 @@ async fn update_task(
                 let rows: Vec<TaskRow> = resp.take(0).unwrap_or_default();
                 if let Some(row) = rows.into_iter().next() {
                     let task = row.to_review_task();
+                    // `components` 变了就同步 `review_form_model`（PMS `workflow/sync` 的 `data.models`
+                    // 读的是它；计划 D6 / T1-4）。失败不回滚任务行——与 `create_task` 首建回填同口径，
+                    // 但要响亮：进响应 `error_message`，前端会原文展示。
+                    let mut form_model_error = None;
+                    if request.components.is_some() && !task.form_id.trim().is_empty() {
+                        match replace_form_models(&db, task.form_id.trim(), &task.components).await
+                        {
+                            Ok(count) => info!(
+                                "[REVIEW_API.update_task] FORM_MODEL_REPLACED task_id={} form_id={} refnos={}",
+                                id, task.form_id, count
+                            ),
+                            Err(error) => {
+                                warn!(
+                                    "[REVIEW_API.update_task] FORM_MODEL_REPLACE_FAIL task_id={} form_id={} reason={}",
+                                    id, task.form_id, error
+                                );
+                                form_model_error = Some(format!(
+                                    "任务已更新，但同步 review_form_model 失败（PMS 侧看到的构件清单可能滞后）: {}",
+                                    error
+                                ));
+                            }
+                        }
+                    }
                     info!(
                         "[REVIEW_API.update_task] OK task_id={} form_id={} status={} current_node={} elapsed_ms={}",
                         id,
@@ -1139,7 +1390,7 @@ async fn update_task(
                         Json(TaskResponse {
                             success: true,
                             task: Some(task),
-                            error_message: None,
+                            error_message: form_model_error,
                         }),
                     );
                 }
@@ -2000,7 +2251,9 @@ async fn submit_to_next_node(
         apply_internal_workflow_mutation_transaction(InternalWorkflowMutationWrite {
             task_id: id.clone(),
             form_id: task_row.form_id.clone(),
-            project_id: task_row.model_name.clone().unwrap_or_default(),
+            // 空串 = 事务里 `IF string::len(...) > 0` 的「保留 review_forms.project_id 现值」；
+            // 旧端传 `model_name`（数据包名称）会把真项目号盖掉（计划 D2 / T2）。
+            project_id: String::new(),
             requester_id: task_row.requester_id.clone().unwrap_or_default(),
             next_node: next_node_str.clone(),
             next_status,
@@ -2236,7 +2489,9 @@ async fn return_to_node(
         apply_internal_workflow_mutation_transaction(InternalWorkflowMutationWrite {
             task_id: id.clone(),
             form_id: task_row.form_id.clone(),
-            project_id: task_row.model_name.clone().unwrap_or_default(),
+            // 空串 = 事务里 `IF string::len(...) > 0` 的「保留 review_forms.project_id 现值」；
+            // 旧端传 `model_name`（数据包名称）会把真项目号盖掉（计划 D2 / T2）。
+            project_id: String::new(),
             requester_id: task_row.requester_id.clone().unwrap_or_default(),
             next_node: request.target_node.clone(),
             next_status,

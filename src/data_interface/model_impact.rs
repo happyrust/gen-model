@@ -2628,7 +2628,9 @@ mod tests {
         // 一直没重生成）；两个戳都在 `stamp_literals` 里，一个都不进 `names`（上面那条循环钉住）。
         // 2026-09-27：GENSEC datum 标架带进 `HPREF`（140，当时漏改这里）；关节负体带进 `JOIS` / `JOIE` / `CREF` /
         // `NAPP`，前三个本就在模型面那一半里，并集只多 `NAPP`（141）；宿主 FIXING 扫描带进目录件的 `NGMR`（142）。
-        assert_eq!(generation_read_set().len(), 142, "读取集合条数漂移");
+        // 2026-09-28：详图式扶手立柱 / 端头 / 门的现算标架（e3d-model `transform::handrail_post_world`，
+        // 09-28 `128e831` 起那批栏杆提交）带进 `HRJUSL`（对正 LEFT / RIGH / FORW）与 `WIDT`（HRGATE 门宽）（144）。
+        assert_eq!(generation_read_set().len(), 144, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——

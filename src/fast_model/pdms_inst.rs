@@ -146,7 +146,7 @@ pub async fn init_inst_relate_indices() -> anyhow::Result<()> {
 /// 末两行是**交付删除记录**表 `datacenter_delete`（plan
 /// `docs/plans/2026-09-22-datacenter-delete-records-dev-plan.md` D1）：与 `datacenter_version`
 /// 同样 SCHEMALESS，只给 rs-server 消费端按所选 ZONE 过滤的那一条 `zone_refno` 索引；
-/// 写者只有增量随窗语句（`increment_pipeline::render_datacenter_delete_upsert`）。
+/// 写者只有增量随窗语句（`increment_pipeline::render_datacenter_delete_insert_ignore`）。
 pub const INST_RELATE_INDEX_SQL: &str = "\
     REMOVE INDEX IF EXISTS idx_inst_relate_zone_refno ON TABLE inst_relate;\n\
     REMOVE INDEX IF EXISTS inst_relate_zone_refno_index ON TABLE inst_relate;\n\

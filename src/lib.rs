@@ -43,7 +43,6 @@ use nom::combinator::map;
 use serde_json::from_str;
 use std::any::TypeId;
 use std::collections::BTreeSet;
-#[cfg(windows)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::ops::Deref;
@@ -537,7 +536,7 @@ async fn prepare_room_resident_at_startup(db_option: &DbOption) {
     }
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
 
-    // 房间归属开关（`room_membership`，默认关）关着：空间树照装（它不只服务房间），常驻房间
+    // 房间归属开关（`room_membership`，缺键默认开，2026-09-29 起）关着：空间树照装（它不只服务房间），常驻房间
     // 模型不建；`frozen_room_calculator` 返回 None，生成根与 model_sesno 照常推进，只跳过
     // 房间边重算。生命周期记 Disabled 并点名来源，/health 看得见。
     if !crate::options::room_membership() {
@@ -841,6 +840,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 退役的元数据门第二档开关（S6 定稿 2026-09-17）：同一条理由——留着
     // `model_skip_unread_attribute_changes = false` 的部署以为只放行老五个名字，实际两票常开。
     if let Some(notice) = crate::options::retired_unread_attribute_tier_notice() {
+        eprintln!("{notice}");
+    }
+    // 退役的执行范围缓存 TTL（ADR-085 D4）：范围不再有独立缓存，设着它的部署会以为范围还按它的节奏刷新。
+    if let Some(notice) = crate::options::retired_scope_cache_notice() {
         eprintln!("{notice}");
     }
     // 几何并发闸额度（specs/023）：非法值启动失败而非静默回退——额度是唯一的
@@ -1716,7 +1719,10 @@ fn print_startup_complete_banner(
     }
     // 非正常运行状态才出声（与 watch_dbnums / model_incremental_types 同一条纪律）：
     // 关着时「没算房间」与「房间没变」在库上长得一模一样，横幅这一行是最先被翻到的证据。
-    if !crate::options::room_membership() {
+    // 要求开、进程却算不了房间（AIOS_SPATIAL_COMPUTE=0 / 没编 project_hd）时点名来源与原因。
+    if let Some(notice) = crate::options::room_membership_notice() {
+        println!("  *** {notice}");
+    } else if !crate::options::room_membership() {
         println!(
             "  房间归属计算：关（DbOption.toml 的 room_membership / 环境变量 {}）——\
              模型根与 model_sesno 照常推进，不重算房间边；\

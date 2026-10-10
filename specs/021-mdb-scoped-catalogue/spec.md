@@ -177,6 +177,7 @@ AvevaCatalogue 项目里，SCB / ZDJ 又各有各的用途），我希望服务�
   MDB 名字打错 → 照旧上抛配置错误。**MUST NOT** 把前两者合并成同一句话。
 - **FR-007**: 范围缓存（`SCOPE_CACHE`、`invalidate_scope_cache`）MUST 同时覆盖
   DESI 与 CATA 两份名单——它们来自同一次查询，不得出现一份新一份旧。
+  （2026-09-29 起由 ADR-085 取代：执行范围不再有独立缓存，名单取自进程内登记的同一份 MDB 声明。）
 - **FR-008**: `/health` 与手动 preview / execute 回执 MUST 报出本期声明的 CATA 数量，
   与既有 `declared_desi()` 同一处出口。
 - **FR-009**: 监听限定域生效时的既有路径 MUST 逐位不变（不建立全量 Catalogue 批次）。

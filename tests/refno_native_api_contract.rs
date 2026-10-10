@@ -117,7 +117,7 @@ fn element_attributes_response_shape_is_frozen() {
 }
 
 #[test]
-fn model_ensure_base_shape_and_route_enrichment_are_frozen() {
+fn model_generate_base_shape_and_route_enrichment_are_frozen() {
     let result = OnDemandModelResult {
         requested_refno: "24381/145018".to_string(),
         generation_root: "24381/145018".to_string(),
@@ -131,7 +131,7 @@ fn model_ensure_base_shape_and_route_enrichment_are_frozen() {
         cached_root_count: 0,
         generated_root_count: 1,
     };
-    let value = serde_json::to_value(result).expect("serialize model ensure result");
+    let value = serde_json::to_value(result).expect("serialize model generate result");
     assert_eq!(
         object_keys(&value),
         keys(&[
@@ -149,13 +149,14 @@ fn model_ensure_base_shape_and_route_enrichment_are_frozen() {
         ])
     );
 
-    let ensure = source_section(
+    // ADR-086 D4：`/model/ensure` 只是别名，回执字段钉在 `model_generate` 上。
+    let generate = source_section(
         HANDLERS,
-        "pub async fn model_ensure(",
+        "pub async fn model_generate(",
         "async fn append_publication_state(",
     );
     assert_json_keys_are_rendered(
-        ensure,
+        generate,
         &[
             "dbnum",
             "model_source",

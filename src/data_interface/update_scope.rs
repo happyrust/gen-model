@@ -15,8 +15,6 @@
 //! 永远进不来。
 
 use std::collections::BTreeSet;
-use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
 
 use aios_core::{DBType, SUL_DB};
 
@@ -44,81 +42,20 @@ pub struct UpdateScope {
     warning: Option<String>,
 }
 
-/// 看门狗事件路径的范围缓存（单槽）。
+/// 这个 MDB 声明的 DESI / ISOD 库号，取自 **SYS 库文件**那一份——进程内登记的
+/// [`super::mdb_membership`]（**MDB 声明** + 成员绑定），没登记过就是 `None`。
 ///
-/// 名单只在 SYS meta 批次落库时才会变——那一刻 `batch_worker` 会调
-/// [`invalidate_scope_cache`]，TTL 只是漏失效的兜底。缓存要解决两件事：
-/// 文件事件不再每次都去查一遍几乎不变的名单；SUL_DB 瞬时不可用（连接抖动、
-/// 服务器重启）时用暖缓存放行并告警，别让一次抖动把整批文件事件丢掉
-/// （2026-08-06 现场：范围解析撞上断连，事件不入队且无重试）。
-struct CachedScope {
-    scope: UpdateScope,
-    resolved_at: Instant,
-}
-
-static SCOPE_CACHE: RwLock<Option<CachedScope>> = RwLock::new(None);
-
-/// 缓存视为新鲜的时长。`AIOS_SCOPE_CACHE_SECS` 覆盖，0 = 关闭缓存
-/// （每次事件都重查，回到旧行为）。
-fn scope_cache_ttl() -> Duration {
-    static TTL: OnceLock<Duration> = OnceLock::new();
-    *TTL.get_or_init(|| {
-        let secs = std::env::var("AIOS_SCOPE_CACHE_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(300);
-        Duration::from_secs(secs)
-    })
-}
-
-/// SYS meta 批次刚落库、MDB/CURD 可能已变时调用（`batch_worker` 与
-/// `SCOPE_DIRTY` 同点置位）。
-pub fn invalidate_scope_cache() {
-    if let Ok(mut guard) = SCOPE_CACHE.write() {
-        *guard = None;
-    }
-}
-
-/// 取同名缓存；`max_age` 为 `None` 时不限时（陈旧回退用）。
-fn cache_get(name: &str, max_age: Option<Duration>) -> Option<UpdateScope> {
-    let guard = SCOPE_CACHE.read().ok()?;
-    let cached = guard.as_ref()?;
-    if cached.scope.mdb != name {
-        return None;
-    }
-    if let Some(limit) = max_age {
-        if cached.resolved_at.elapsed() >= limit {
-            return None;
-        }
-    }
-    Some(cached.scope.clone())
-}
-
-fn cache_store(scope: &UpdateScope) {
-    if let Ok(mut guard) = SCOPE_CACHE.write() {
-        *guard = Some(CachedScope {
-            scope: scope.clone(),
-            resolved_at: Instant::now(),
-        });
-    }
-}
-
-/// 这个 MDB 声明的 DESI / ISOD 库号，取自 **SYS 库文件**那一份——`init_mdb` 启动时
-/// 解析并 `install` 进进程内存的 [`super::mdb_membership`]，没登记过就是 `None`。
+/// 只服务库侧那条路（请求的不是配置里的 MDB）：全新命名空间上 `MDB` 表是空的，而这个 MDB
+/// 若恰好登记过，同一份名单已经在内存里了。两份名单的成员判据本来就同一个——文件侧
+/// `element_databases()` 过滤 `DESI_STYP | ISOD_STYP`，库侧 [`MDB_DBNOS`] 绑的
+/// `element_db_types` 正是这两个值。配置的 MDB 不走这里，[`UpdateScope::fetch`] 直接读登记表。
 ///
-/// 它存在的理由只有一个：全新命名空间上 `MDB` 表是空的，而同一个进程在几十毫秒之前
-/// 已经从 `<项目>sys` 文件里把同一份名单读出来了。库侧那句「尚未解析」在事实上只对库
-/// 成立，两份名单的成员判据本来就同一个——文件侧 `element_databases()` 过滤
-/// `DESI_STYP | ISOD_STYP`，库侧 [`MDB_DBNOS`] 绑的 `element_db_types` 正是这两个值。
+/// **用 `get` 而不是 `resolve`**：`get` 只读一次进程内的登记表，`resolve` 会重扫搜索根、
+/// 逐库重找文件（ADR-085：成员绑定只在启动、SYST 刷新、重挂补目录三个时刻重做）。
+/// 拿不到就回 `None`，由调用方维持退化行为。
 ///
-/// **用 `get` 而不是 `resolve`**：`get` 只读一次进程内的登记表，`resolve` 会把 SYS 库整棵树
-/// 扫一遍。看门狗事件路径每隔几秒就会走到这里（缓存未命中时），在它背后藏一次全树扫
-/// 不能接受——`mdb_membership::get` 自己的文档也把这条定成纪律。拿不到就回 `None`，
-/// 由调用方维持退化行为：`run_cli` 里 `init_mdb` 失败只告警不中止，「没登记」是真会
-/// 发生的状态，不是兜底摆设。
-///
-/// `get` 按 `(project, mdb)` 精确匹配，所以「请求带的 MDB 名与配置里的不是同一个」自然
-/// 回 `None`。这一档必须落空：拿配置那个 MDB 的名单去服务另一个 MDB 的请求，正是
+/// `get` 按 `(project, mdb)` 精确匹配，所以「请求带的 MDB 名与登记的不是同一个」自然
+/// 回 `None`。这一档必须落空：拿一个 MDB 的名单去服务另一个 MDB 的请求，正是
 /// `manual_update::update_scope` 明文要挡的「界面显示一个 MDB 的范围、服务端跑另一个」。
 fn file_side_declared(name: &str) -> Option<Vec<u32>> {
     let project = aios_core::get_db_option().project_name.clone();
@@ -145,49 +82,44 @@ impl UpdateScope {
     pub async fn resolve(mdb: &str) -> anyhow::Result<Self> {
         let name = aios_core::helper::to_e3d_name(mdb).into_owned();
         let fetched = Self::fetch(&name).await;
-        Self::finish(name, fetched, false)
+        Self::finish(name, fetched)
     }
 
-    /// [`Self::resolve`] 的看门狗事件版：名单几乎不变，事件却按 mtime 轮询源源
-    /// 不断，先吃缓存（TTL 内直接命中，SYS meta 落库时被显式失效）；查询失败且有
-    /// 同名暖缓存时**放行并告警**——瞬时的连接故障不该把整批文件事件丢掉。
-    /// 配置错误（MDB 名不存在）不吃缓存也不进缓存，照常上抛，见 [`Self::finish`]。
-    pub async fn resolve_cached(mdb: &str) -> anyhow::Result<Self> {
-        let name = aios_core::helper::to_e3d_name(mdb).into_owned();
-        let ttl = scope_cache_ttl();
-        if ttl.is_zero() {
-            // 缓存被配置关掉：与 resolve 完全同义。
-            let fetched = Self::fetch(&name).await;
-            return Self::finish(name, fetched, false);
-        }
-        if let Some(hit) = cache_get(&name, Some(ttl)) {
-            return Ok(hit);
-        }
-        let fetched = Self::fetch(&name).await;
-        Self::finish(name, fetched, true)
-    }
-
-    /// 当前 MDB 的范围来自 SYS 源文件，与房间预加载共用成员解析器。
-    /// 每次 fresh 扫描重新解析，事件路径仍由 TTL 和 SYS 更新失效控制频率。
-    /// 历史 MDB 表即使非空，也不能覆盖当前源声明；源读取失败直接返回错误。
+    /// 配置的 MDB：读进程内登记的 **MDB 声明**（主项目 SYS 文件，ADR-085 D1），与房间参照、
+    /// 路由目录同一份——**只读登记表**，不重做成员绑定、不读盘。登记表只在启动（`init_mdb`）、
+    /// SYST 批次落库（重读声明，D2）、共享盘重挂补上目录（D3）时重做；这里拿不到（`init_mdb`
+    /// 失败过）才现做一次并登记（`reason=fallback`）。
+    ///
+    /// 2026-09-09 ~ 09-29 这里每次都现做成员绑定：09-15 起声明进了进程缓存，那约 4 s 只花在
+    /// 重扫搜索根与逐库重找文件上，范围一个库号都不会变，每轮重扫与每次 `/dbnums` 却都要付一遍、
+    /// 打一行（2026-09-29 现场刷屏）。
+    ///
+    /// 历史 MDB 表即使非空，也不能覆盖当前源声明；声明了却没绑到文件的库照样在范围里。
     /// 查询其他 MDB 的旧管理入口暂时保留持久层解析。
     async fn fetch(name: &str) -> anyhow::Result<(Vec<String>, Vec<u32>)> {
         let option = aios_core::get_db_option();
         if name == aios_core::helper::to_e3d_name(&option.mdb_name).as_ref() {
-            let started = Instant::now();
-            let membership = super::mdb_membership::resolve(option, &option.project_name, name)?;
+            let membership = match super::mdb_membership::get(&option.project_name, name) {
+                Some(registered) => registered,
+                None => {
+                    let mdb = name.to_owned();
+                    tokio::task::spawn_blocking(move || {
+                        super::mdb_membership::rebind(
+                            option,
+                            &option.project_name,
+                            &mdb,
+                            super::mdb_membership::RebindReason::Fallback,
+                        )
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("成员绑定线程异常退出: {error}"))??
+                }
+            };
             // 保留所有声明成员，包括缺件库；缺件是初始化阻断，不是缩小范围的依据。
             let dbnos = membership
                 .element_databases()
                 .map(|database| database.dbnum)
                 .collect::<Vec<_>>();
-            println!(
-                "[ams-phase] phase=mdb_scope project={} mdb={name} source=sys-file dbnums={} elapsed_ms={}",
-                option.project_name,
-                dbnos.len(),
-                started.elapsed().as_millis()
-            );
-            super::mdb_membership::install(membership);
             return Ok((vec![name.to_owned()], dbnos));
         }
         let mut response = SUL_DB
@@ -272,48 +204,17 @@ impl UpdateScope {
         })
     }
 
-    /// 解释查询结果并维护缓存。三种出口：
+    /// 解释取数结果。两种错误原样上抛：取数本身失败（读不到登记表也现做不成绑定、库侧查询断连），
+    /// 与配置错误（名字打错，见 [`Self::interpret`]）——宁可这一轮不跑，也不能凭空造一份范围。
     ///
-    /// - 查询成功 → 解释。配置错误（名字打错）**清缓存**并上抛——陈旧名单会把
-    ///   改名后的现实装成没事；成功则写缓存并返回。
-    /// - 查询失败（基础设施）且 `stale_fallback` → 有同名缓存（不限时）就放行并
-    ///   告警，没有就上抛（冷缓存维持 fail-closed：宁可这轮不跑）。
-    /// - 查询失败且不许回退（fresh 路径：启动重扫 / 手动触发 / 周期对账）→ 上抛。
+    /// 这里曾经维护一份执行范围缓存（2026-08-06 ~ 09-29：TTL、断连时拿陈旧名单放行）。它唯一的
+    /// 读者 08-14 就被拿掉了；配置的 MDB 如今读登记表、不再每次查库，缓存无事可做，随 ADR-085 D4 退役。
     fn finish(
         name: String,
         fetched: anyhow::Result<(Vec<String>, Vec<u32>)>,
-        stale_fallback: bool,
     ) -> anyhow::Result<Self> {
-        match fetched {
-            // `name` 只 clone 不移动：下面的 `Err` 分支还要用它取缓存与拼错误。
-            Ok((known, dbnos)) => {
-                match Self::interpret(name.clone(), known, dbnos, || file_side_declared(&name)) {
-                    Ok(scope) => {
-                        cache_store(&scope);
-                        Ok(scope)
-                    }
-                    Err(config_error) => {
-                        invalidate_scope_cache();
-                        Err(config_error)
-                    }
-                }
-            }
-            Err(infra_error) => {
-                if stale_fallback {
-                    if let Some(stale) = cache_get(&name, None) {
-                        let msg = format!(
-                            "解析 MDB {name} 的执行范围失败，暂用缓存名单放行（{} 个 DESI 库）。\
-                             缓存会在 SYS meta 批次落库或下一次成功解析时刷新: {infra_error:#}",
-                            stale.desi.len()
-                        );
-                        log::warn!("{msg}");
-                        eprintln!("{msg}");
-                        return Ok(stale);
-                    }
-                }
-                Err(infra_error)
-            }
-        }
+        let (known, dbnos) = fetched?;
+        Self::interpret(name.clone(), known, dbnos, || file_side_declared(&name))
     }
 
     /// 直接给一份声明名单，只给测试用：`resolve` 要连真库，而范围门的调用方
@@ -391,6 +292,7 @@ impl UpdateScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[tokio::test]
     #[ignore = "requires AMS source files and an isolated DB_OPTION_FILE; no database connection"]
@@ -660,94 +562,83 @@ mod tests {
         assert!(scope.warning().is_none());
     }
 
-    // ---- 范围缓存（2026-08-06：连接抖动把文件事件整批丢掉的对症）----
-    //
-    // 缓存是进程级单槽，下面的用例都要先清场并全程持锁串行，防止并行测试互踩。
+    // ---- 配置的 MDB 读登记表（ADR-085，2026-09-29：取范围每次现做成员绑定、约 4 s 一行刷屏的对症）----
 
-    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn fetched(known: &[&str], dbnos: &[u32]) -> anyhow::Result<(Vec<String>, Vec<u32>)> {
-        Ok((
-            known.iter().map(|s| s.to_string()).collect(),
-            dbnos.to_vec(),
-        ))
-    }
-
-    /// 事件路径的核心承诺：SUL_DB 瞬时不可用时，暖缓存放行、fresh 路径照常上抛。
+    /// ADR-085 D1：取范围只读登记表。登记一份假声明，拿回来的必须正是它——现做绑定的旧写法
+    /// （每次 `mdb_membership::resolve`）会拿到盘上的真名单或者报错，这条就红。
+    ///
+    /// 同步用例自建运行时：登记表是进程级单例，锁要从登记一直持到断言完，不能跨 `.await` 拿着 std 锁。
     #[test]
-    fn a_warm_cache_admits_events_through_an_infra_outage() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap();
-        invalidate_scope_cache();
+    fn the_configured_mdb_scope_reads_the_registered_declaration() {
+        use super::super::mdb_membership::{
+            self, DESI_STYP, DICT_STYP, ISOD_STYP, MdbDatabase, MdbMembership,
+        };
+        let _lock = mdb_membership::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let option = aios_core::get_db_option();
+        let mdb = aios_core::helper::to_e3d_name(&option.mdb_name).into_owned();
+        let _restore = mdb_membership::RegistryRestore::capture(&option.project_name, &mdb);
 
-        // 一次成功解析把缓存焐热。
-        let scope =
-            UpdateScope::finish("/T".into(), fetched(&["/T"], &[7999]), false).expect("成功解析");
-        assert!(scope.admits("DESI", 7999));
+        let declared = |dbnum: u32, styp: i64| MdbDatabase {
+            dbnum,
+            styp,
+            proj: 0,
+            declared_project_code: None,
+            name: format!("/FAKE{dbnum}"),
+            path: None,
+            project: None,
+            shadowed: Vec::new(),
+        };
+        mdb_membership::install(MdbMembership::test_with_databases(
+            &option.project_name,
+            &mdb,
+            vec![
+                declared(7001, DESI_STYP),
+                declared(7002, ISOD_STYP),
+                declared(5001, DICT_STYP),
+            ],
+        ));
 
-        // 基础设施错误 + 允许回退（事件路径）→ 暖缓存放行。
-        let stale = UpdateScope::finish("/T".into(), Err(anyhow::anyhow!("断连")), true)
-            .expect("暖缓存必须放行");
-        assert!(stale.admits("DESI", 7999));
-        assert!(!stale.admits("DESI", 3001), "放行的是缓存名单，不是不设限");
-
-        // 同样的错误、不许回退（启动重扫 / 手动 / 周期对账）→ 原样上抛。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let scope = runtime
+            .block_on(UpdateScope::resolve(&option.mdb_name))
+            .expect("读登记表不该失败");
+        assert_eq!(
+            scope.declared_desi().collect::<Vec<_>>(),
+            [7001, 7002],
+            "范围必须正是登记的那份声明里的元素库——没绑到文件的也算"
+        );
+        assert!(scope.warning().is_none(), "读到名单就不该有告警");
         assert!(
-            UpdateScope::finish("/T".into(), Err(anyhow::anyhow!("断连")), false).is_err(),
-            "fresh 路径不吃缓存"
+            !scope.admits("DESI", 8000),
+            "盘上的真名单不许混进来：取范围不重做成员绑定"
         );
     }
 
-    /// 冷缓存维持 fail-closed：宁可这轮不跑，也不能凭空造一份范围。
+    /// 取数本身失败原样上抛：宁可这一轮不跑，也不能凭空造一份范围（缓存退役后没有陈旧名单可放行）。
     #[test]
-    fn a_cold_cache_still_fails_closed() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap();
-        invalidate_scope_cache();
-        assert!(UpdateScope::finish("/T".into(), Err(anyhow::anyhow!("断连")), true).is_err());
+    fn a_fetch_error_is_raised_not_papered_over() {
+        let err = UpdateScope::finish("/T".into(), Err(anyhow::anyhow!("断连")))
+            .expect_err("取数失败必须上抛");
+        assert!(err.to_string().contains("断连"), "{err}");
     }
 
-    /// 名字打错是配置错误：不吃缓存、还要把缓存清掉——陈旧名单会把改名后的现实
-    /// 装成没事，后续连断连都探测不到。
+    /// ADR-085 D4：执行范围缓存退役，别让它从这个文件里长回来。字面量拆开写，免得这条自己算一处。
     #[test]
-    fn an_unknown_mdb_is_a_config_error_and_clears_the_cache() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap();
-        invalidate_scope_cache();
-
-        UpdateScope::finish("/T".into(), fetched(&["/T"], &[7999]), false).expect("焐热");
-        let err = UpdateScope::finish("/T".into(), fetched(&["/OTHER"], &[]), true)
-            .expect_err("名字不存在必须报错，即便有暖缓存");
-        assert!(err.to_string().contains("/T"), "错误要点名: {err}");
-
-        // 缓存已被清掉：再遇断连没有可放行的东西。
-        assert!(UpdateScope::finish("/T".into(), Err(anyhow::anyhow!("断连")), true).is_err());
-    }
-
-    /// 缓存按 MDB 名配对：别人的名单救不了你。
-    #[test]
-    fn the_cache_only_serves_its_own_mdb() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap();
-        invalidate_scope_cache();
-
-        UpdateScope::finish("/A".into(), fetched(&["/A"], &[1]), false).expect("焐热 /A");
-        assert!(
-            UpdateScope::finish("/B".into(), Err(anyhow::anyhow!("断连")), true).is_err(),
-            "/B 的失败不能拿 /A 的名单放行"
-        );
-    }
-
-    /// TTL 语义：限时命中按新鲜度判，回退取用不限时。
-    #[test]
-    fn cache_freshness_is_only_enforced_for_direct_hits() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap();
-        invalidate_scope_cache();
-
-        UpdateScope::finish("/T".into(), fetched(&["/T"], &[7999]), false).expect("焐热");
-        assert!(
-            cache_get("/T", Some(Duration::ZERO)).is_none(),
-            "零 TTL 下直接命中永远失效"
-        );
-        assert!(
-            cache_get("/T", None).is_some(),
-            "回退取用不限时——陈旧也好过丢事件"
-        );
+    fn the_scope_cache_stays_retired() {
+        let source = include_str!("update_scope.rs");
+        for retired in [
+            concat!("SCOPE_", "CACHE"),
+            concat!("resolve_", "cached"),
+            concat!("invalidate_", "scope_cache"),
+            concat!("AIOS_SCOPE_", "CACHE_SECS"),
+            concat!("stale_", "fallback"),
+        ] {
+            assert!(!source.contains(retired), "已退役（ADR-085 D4）：{retired}");
+        }
     }
 }
