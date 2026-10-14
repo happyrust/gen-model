@@ -155,6 +155,14 @@
     <div id="probe-port-out"></div>
     <label>对外展示地址 http_public_addr <span class="hint">只用于日志、自动打开和分享链接，不参与监听；如 192.168.1.9:9099</span></label>
     <input type="text" id="f-http_public_addr" placeholder="留空 = 从监听地址派生本机可访问地址">
+    <div id="offline-ports" hidden>
+      <h2 style="margin-top:20px">Plant3D-Web 离线包</h2>
+      <div class="row">
+        <div><label>前端端口 frontend_port</label><input type="number" id="f-frontend_port" min="1" max="65535" value="80"></div>
+        <div><label>兼容端口 frontend_compat_port</label><input type="number" id="f-frontend_compat_port" min="0" max="65535" value="3100"></div>
+      </div>
+      <div class="note">兼容端口填 0 可关闭。三个端口必须互不相同；保存并重启时同步 nginx 监听与后端代理，不再需要另改 deploy.env。</div>
+    </div>
     <div class="actions"><button id="back-3">上一步</button><button class="primary" id="next-3">下一步</button></div>
   </section>
 
@@ -202,7 +210,7 @@
 
   <section class="card" id="stepdone" hidden>
     <h2>✅ 完成</h2>
-    <p>配置与初始化都好了。<a href="/">进入 plant-ui</a> 开始使用；以后要改配置，随时回 <code>/setup.html</code>。</p>
+    <p>配置与初始化都好了。<a href="/">进入 plant-ui</a> <a id="plant3d-entry" hidden>进入 plant3d-web</a>；以后要改配置，随时回 <code>/setup.html</code>。</p>
   </section>
 </main>
 
@@ -289,6 +297,16 @@ function fillForm(v) {
   put("f-v_port", v.v_port);
   put("f-http_api_addr", v.http_api_addr || "0.0.0.0:9099");
   put("f-http_public_addr", v.http_public_addr);
+  $("offline-ports").hidden = !S.effective.offline_package;
+  put("f-frontend_port", v.frontend_port ?? 80);
+  put("f-frontend_compat_port", v.frontend_compat_port ?? 3100);
+  const frontendUrl = new URL(location.href);
+  frontendUrl.port = String(v.frontend_port ?? 80);
+  frontendUrl.pathname = "/";
+  frontendUrl.search = "";
+  frontendUrl.hash = "";
+  $("plant3d-entry").href = frontendUrl.href;
+  $("plant3d-entry").hidden = !S.effective.offline_package;
   put("f-watch_dbnums", v.watch_dbnums);
   put("f-manual_db_nums", v.manual_db_nums);
   renderEffectiveStore();
@@ -484,6 +502,18 @@ function gatherPatch() {
     watch_dbnums: intsOf("f-watch_dbnums"),
     manual_db_nums: intsOf("f-manual_db_nums"),
   };
+  if (S.effective.offline_package) {
+    const frontend = Number(val("f-frontend_port"));
+    const compat = Number(val("f-frontend_compat_port"));
+    const backend = Number(val("f-http_api_addr").split(":").pop());
+    if (!Number.isInteger(frontend) || frontend < 1 || frontend > 65535 ||
+        !Number.isInteger(compat) || compat < 0 || compat > 65535 ||
+        frontend === backend || (compat !== 0 && (compat === frontend || compat === backend))) {
+      throw new Error("前端端口须为 1–65535，兼容端口须为 0–65535，且不能与其他服务端口重复");
+    }
+    patch.frontend_port = frontend;
+    patch.frontend_compat_port = compat;
+  }
   const code = val("f-project_code");
   if (code) patch.project_code = parseInt(code, 10);
   return patch;
@@ -502,10 +532,10 @@ function closureGate() {
   return confirm("MDB 闭包有缺口：\n- " + gaps.join("\n- ") + "\n\n这些项目的库启动后会报「声明了没文件」，它们引用的模型生成不出来。仍然保存？");
 }
 async function saveAndRestart() {
-  const patch = gatherPatch();
-  if (!closureGate()) return;
-  overlay("正在写入配置…");
   try {
+    const patch = gatherPatch();
+    if (!closureGate()) return;
+    overlay("正在写入配置…");
     await api("/api/v1/setup/config", {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(patch),
     });
@@ -518,8 +548,9 @@ async function saveAndRestart() {
       seconds += 3;
       $("overlay-msg").innerHTML = "配置已保存，服务重启中…<br><span class='hint'>首次启动要装载项目骨架，可能要几分钟。已等 " + seconds + "s</span>";
       try {
-        const health = await fetch(base + "/api/v1/health", { cache: "no-store" });
-        if (health.ok) {
+        const crossOrigin = new URL(base).origin !== location.origin;
+        const health = await fetch(base + "/api/v1/health", { cache: "no-store", mode: crossOrigin ? "no-cors" : "same-origin" });
+        if (health.ok || health.type === "opaque") {
           clearInterval(timer);
           location.href = base + "/setup.html?resume=init";
         }
