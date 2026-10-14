@@ -215,14 +215,14 @@ fn window_plan_cache(
     WINDOW_PLAN_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// 把 `UpdatePlan` 拆成 `WindowPlanSets` 并按 `(dbnum, base_sesno, target_sesno)` 存入缓存。
+/// 把 `UpdatePlan` 拆成 `WindowPlanSets` 并按 `(dbnum, base_sesno, target_sesno)` 存入缓存，返回存入的 `Arc`。
 /// 规划器路径（`build_model_update_plan_from_window`）在 `WindowRootSources::collect` 之后调用。
 pub(crate) fn cache_window_plan_sets(
     dbnum: u32,
     base_sesno: u32,
     target_sesno: u32,
     plan: UpdatePlan,
-) {
+) -> Arc<WindowPlanSets> {
     let UpdatePlan {
         regenerate,
         remove,
@@ -232,7 +232,7 @@ pub(crate) fn cache_window_plan_sets(
         full_rebuild,
         report,
     } = plan;
-    let sets = WindowPlanSets {
+    let sets = Arc::new(WindowPlanSets {
         regenerate,
         remove,
         regenerate_derived,
@@ -240,9 +240,10 @@ pub(crate) fn cache_window_plan_sets(
         full_rebuild,
         unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
         dispositions: ledger.dispositions().to_vec(),
-    };
+    });
     let mut cache = window_plan_cache().lock().unwrap();
-    cache.insert((dbnum, base_sesno, target_sesno), Arc::new(sets));
+    cache.insert((dbnum, base_sesno, target_sesno), sets.clone());
+    sets
 }
 
 /// 从窗口计划缓存取一份 `Arc`。命中返回 `Some`，未命中返回 `None`（调用方自行计算并回填）。
@@ -503,7 +504,7 @@ impl<'a> UnitDeltaProducer<'a> {
                 plan,
             });
         }
-        // 缓存未命中：现算并回填
+        // 缓存未命中：现算并回填，直接拿返回的 Arc（省一次锁）
         let pin = service.pin(dbnum)?;
         let window = collect_window(&pin.file, base_sesno, target_sesno).with_context(|| {
             format!(
@@ -522,9 +523,7 @@ impl<'a> UnitDeltaProducer<'a> {
         } else {
             plan_update(&base.set, &target.set, &window)
         };
-        cache_window_plan_sets(dbnum, base_sesno, target_sesno, plan);
-        let plan = cached_window_plan_sets(dbnum, base_sesno, target_sesno)
-            .expect("cache_window_plan_sets just inserted this key");
+        let plan = cache_window_plan_sets(dbnum, base_sesno, target_sesno, plan);
         Ok(Self {
             service,
             dbnum,
