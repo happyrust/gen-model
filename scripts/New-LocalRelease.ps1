@@ -486,8 +486,8 @@ New-Item -ItemType Directory -Force $stageSurrealDir | Out-Null
 foreach ($source in $surqlSources) {
     $destination = Join-Path $stageSurrealDir $source.Name
     Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
-    if ((Get-FileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash -ne
-        (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) {
+    if ((Get-Sha256Compat $source.FullName) -ne
+        (Get-Sha256Compat $destination)) {
         throw "SurrealQL 资源复制后校验失败：$($source.Name)"
     }
 }
@@ -521,8 +521,8 @@ foreach ($release in 'e3d210', 'e3d31') {
             $destination = Join-Path $destRelease $rel
             New-Item -ItemType Directory -Force (Split-Path -Parent $destination) | Out-Null
             Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
-            if ((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash -ne
-                (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) {
+            if ((Get-Sha256Compat $_.FullName) -ne
+                (Get-Sha256Compat $destination)) {
                 throw "E3D schema 复制后校验失败：$release\$rel"
             }
             [void]$schemaSources.Add($_)
@@ -552,8 +552,8 @@ $surrealBinDir = Join-Path $stage 'bin'
 New-Item -ItemType Directory -Force $surrealBinDir | Out-Null
 $packagedSurrealExe = Join-Path $surrealBinDir 'surreal.exe'
 Copy-Item -LiteralPath $SurrealExe -Destination $packagedSurrealExe -Force
-if ((Get-FileHash -LiteralPath $SurrealExe -Algorithm SHA256).Hash -ne
-    (Get-FileHash -LiteralPath $packagedSurrealExe -Algorithm SHA256).Hash) {
+if ((Get-Sha256Compat $SurrealExe) -ne
+    (Get-Sha256Compat $packagedSurrealExe)) {
     throw "surreal.exe 复制后校验失败：$packagedSurrealExe"
 }
 Write-Step "SurrealDB 二进制已就绪：$packagedSurrealExe / $surrealVersion"
@@ -620,9 +620,18 @@ if ($existing) {
         Select-Object -First 1
     if ($listener) { throw "Port $httpPort is already in use. Stop the prior release first." }
     $env:DB_OPTION_FILE = $configPath
+    $offlineRoot = Split-Path -Parent $root
+    if (Test-Path -LiteralPath (Join-Path $offlineRoot 'Sync-OfflineConfig.ps1')) { $env:AIOS_OFFLINE_ROOT = $offlineRoot }
     $env:PLANT_UI_WEB_ROOT = Join-Path $root 'web'
     $env:PLANT_ASSET_ROOT = Join-Path $Workspace 'assets'
     $env:AIOS_E3D_SCHEMA_ROOT = Join-Path $root 'schema'
+    # 房间归属默认开（服务缺键即 true，DbOption.toml 也是 true）：AIOS_ROOM_MEMBERSHIP /
+    # AIOS_SKIP_STARTUP_ROOM_BUILD 是「压配置」的一次性覆盖，调用方环境里漏进来会让服务
+    # 静默降级——/health 报 room_membership=false、房间边一条不写。部署包清掉这两个临时
+    # 开关，让配置说了算；要关请在 DbOption.toml 里关。AIOS_SPATIAL_COMPUTE 是能力开关
+    # （机器算不了房间时的主动降级），不动。
+    Remove-Item Env:AIOS_ROOM_MEMBERSHIP -ErrorAction SilentlyContinue
+    Remove-Item Env:AIOS_SKIP_STARTUP_ROOM_BUILD -ErrorAction SilentlyContinue
     # 服务不拉库（ADR-074）：rocksdb 档要先自己跑 Start-Surreal.ps1，这里不再递 AIOS_SURREAL_EXE。
     # 介质随环境变量 AIOS_STORE_MODE 进服务（cmd → 服务两层都继承）；日志里点一句，免得对着配置猜。
     # 上面已经保证它非空（不给 -StoreMode 也会回填 mem），所以这里打出来的就是服务实际吃到的那一档。

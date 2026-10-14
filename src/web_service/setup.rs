@@ -210,6 +210,8 @@ pub struct SetupConfigPatch {
     pub v_port: Option<String>,
     pub http_api_addr: Option<String>,
     pub http_public_addr: Option<String>,
+    pub frontend_port: Option<u16>,
+    pub frontend_compat_port: Option<u16>,
     pub gen_model: Option<bool>,
     pub gen_mesh: Option<bool>,
     pub watch_dbnums: Option<Vec<u32>>,
@@ -272,7 +274,11 @@ fn apply_patch(
             .map(|root| root.trim().trim_matches('"').to_string())
             .filter(|root| !root.is_empty())
             .collect();
-        set(document, "project_search_paths", value(string_array(&roots)));
+        set(
+            document,
+            "project_search_paths",
+            value(string_array(&roots)),
+        );
     }
     // `included_projects` 有意不写：它已不参与解析（ADR-078），向导也不再替人勾名单。
     if let Some(name) = &patch.project_name {
@@ -313,6 +319,12 @@ fn apply_patch(
     }
     if let Some(addr) = &patch.http_public_addr {
         set(document, "http_public_addr", value(addr.as_str()));
+    }
+    if let Some(port) = patch.frontend_port {
+        set(document, "frontend_port", value(i64::from(port)));
+    }
+    if let Some(port) = patch.frontend_compat_port {
+        set(document, "frontend_compat_port", value(i64::from(port)));
     }
     if let Some(gen_model) = patch.gen_model {
         set(document, "gen_model", value(gen_model));
@@ -359,6 +371,7 @@ fn write_config(config_path: &Path, patch: &SetupConfigPatch) -> anyhow::Result<
         .parse()
         .map_err(|error| anyhow::anyhow!("解析配置 {} 失败：{error}", config_path.display()))?;
     let changed = apply_patch(&mut document, patch);
+    validate_service_ports(&document)?;
     if changed.is_empty() {
         return Ok(changed);
     }
@@ -374,6 +387,82 @@ fn write_config(config_path: &Path, patch: &SetupConfigPatch) -> anyhow::Result<
         )
     })?;
     Ok(changed)
+}
+
+fn validate_service_ports(document: &toml_edit::DocumentMut) -> anyhow::Result<()> {
+    let backend = document
+        .get("http_api_addr")
+        .and_then(toml_edit::Item::as_str)
+        .filter(|addr| !addr.trim().is_empty())
+        .or_else(|| {
+            document
+                .get("server_release_ip")
+                .and_then(toml_edit::Item::as_str)
+        })
+        .unwrap_or("127.0.0.1:9099")
+        .parse::<SocketAddr>()?;
+    anyhow::ensure!(backend.port() != 0, "后端端口不能为 0");
+    if offline_root().is_none()
+        && document.get("frontend_port").is_none()
+        && document.get("frontend_compat_port").is_none()
+    {
+        return Ok(());
+    }
+    let port = |key: &str, default: i64| -> anyhow::Result<u16> {
+        let number = match document.get(key) {
+            Some(item) => item
+                .as_integer()
+                .ok_or_else(|| anyhow::anyhow!("{key} 必须是整数"))?,
+            None => default,
+        };
+        u16::try_from(number).map_err(Into::into)
+    };
+    let frontend = port("frontend_port", 80)?;
+    let compat = port("frontend_compat_port", 3100)?;
+    anyhow::ensure!(frontend != 0, "前端端口不能为 0");
+    anyhow::ensure!(frontend != backend.port(), "前端端口不能与后端端口相同");
+    anyhow::ensure!(
+        compat == 0 || (compat != frontend && compat != backend.port()),
+        "兼容端口必须与前后端端口不同（0 表示关闭）"
+    );
+    Ok(())
+}
+
+fn offline_root() -> Option<PathBuf> {
+    std::env::var_os("AIOS_OFFLINE_ROOT")
+        .map(PathBuf::from)
+        .filter(|root| root.join("Sync-OfflineConfig.ps1").is_file())
+}
+
+fn sync_offline_config(config_path: &Path, bound_port: Option<u16>) -> anyhow::Result<()> {
+    let Some(root) = offline_root() else {
+        return Ok(());
+    };
+    let document: toml_edit::DocumentMut = std::fs::read_to_string(config_path)?.parse()?;
+    validate_service_ports(&document)?;
+    let addr = document
+        .get("http_api_addr")
+        .and_then(toml_edit::Item::as_str)
+        .unwrap_or("127.0.0.1:9099")
+        .parse::<SocketAddr>()?;
+    if Some(addr.port()) != bound_port {
+        std::net::TcpListener::bind(addr)
+            .map_err(|error| anyhow::anyhow!("后端地址 {addr} 不可用：{error}"))?;
+    }
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(root.join("Sync-OfflineConfig.ps1"))
+        .arg("-ConfigPath")
+        .arg(config_path)
+        .arg("-Reload")
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "nginx 配置同步失败：{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 fn backup_path(config_path: &Path) -> PathBuf {
@@ -407,6 +496,8 @@ fn subset_values(document: &toml_edit::DocumentMut) -> serde_json::Value {
         "v_port",
         "http_api_addr",
         "http_public_addr",
+        "frontend_port",
+        "frontend_compat_port",
         "gen_model",
         "gen_mesh",
         "save_db",
@@ -716,6 +807,7 @@ async fn setup_get_config(
             "store_mode_env": crate::options::STORE_MODE_ENV,
             "store_mode_env_value": std::env::var(crate::options::STORE_MODE_ENV).ok(),
             "stale_config_store_mode": stale_config_store_mode,
+            "offline_package": offline_root().is_some(),
         },
     })))
 }
@@ -763,9 +855,7 @@ async fn setup_probe_mdb(
     // 扫搜索根会碰共享盘、读 SYS 会开文件，都不能在 runtime 线程上做。
     let out = tokio::task::spawn_blocking(move || probe_mdb_closure(&request))
         .await
-        .map_err(|error| {
-            ApiError::from_domain(anyhow::anyhow!("MDB 闭包探测线程失败：{error}"))
-        })?;
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("MDB 闭包探测线程失败：{error}")))?;
     Ok(Json(out))
 }
 
@@ -793,6 +883,12 @@ async fn setup_restart(
     ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     State(ctx): State<SetupCtx>,
 ) -> Result<Response, ApiError> {
+    let config_path = ctx.config_path.clone();
+    let bound_port = ctx.bound_port;
+    tokio::task::spawn_blocking(move || sync_offline_config(&config_path, bound_port))
+        .await
+        .map_err(|error| ApiError::precondition(format!("{error:#}")))?
+        .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
     let poll_hint = restart_poll_hint(&ctx.config_path);
     println!("[setup] 收到重启请求，300ms 后交接给新进程（{poll_hint}）");
     tokio::spawn(async move {
@@ -963,7 +1059,10 @@ async fn setup_mode_health(State(reason): State<&'static str>) -> Json<serde_jso
 pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
     let ext = crate::get_db_option_ext();
     let addr = super::effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
-    let automatic = ext.http_api_addr.as_deref().is_none_or(|value| value.trim().is_empty());
+    let automatic = ext
+        .http_api_addr
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty());
     let listener = super::bind_http_address(&addr, automatic).await?;
     let addr = listener.local_addr()?.to_string();
     let ui_root = PathBuf::from(
@@ -1034,19 +1133,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("DbOption.toml");
         std::fs::write(&config_path, "http_api_addr = \"0.0.0.0:2001\"\n").unwrap();
-        let ctx = SetupCtx { mode: "setup", config_path,
-            ui_root: dir.path().join("web"), bound_port: Some(2001) };
+        let ctx = SetupCtx {
+            mode: "setup",
+            config_path,
+            ui_root: dir.path().join("web"),
+            bound_port: Some(2001),
+        };
         for address in ["10.30.230.42:41234", "[2001:db8::1]:41234"] {
             let peer = address.parse().unwrap();
-            assert!(setup_state(ConnectInfo(peer), State(ctx.clone())).await.is_ok());
-            assert!(setup_get_config(ConnectInfo(peer), State(ctx.clone())).await.is_ok());
+            assert!(
+                setup_state(ConnectInfo(peer), State(ctx.clone()))
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                setup_get_config(ConnectInfo(peer), State(ctx.clone()))
+                    .await
+                    .is_ok()
+            );
         }
         assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2001");
         let saved = setup_put_config(
-            ConnectInfo("10.30.230.42:41234".parse().unwrap()), State(ctx.clone()),
-            Json(SetupConfigPatch { http_api_addr: Some("0.0.0.0:2002".into()),
-                ..Default::default() }),
-        ).await;
+            ConnectInfo("10.30.230.42:41234".parse().unwrap()),
+            State(ctx.clone()),
+            Json(SetupConfigPatch {
+                http_api_addr: Some("0.0.0.0:2002".into()),
+                ..Default::default()
+            }),
+        )
+        .await;
         assert!(saved.is_ok());
         assert_eq!(restart_poll_hint(&ctx.config_path), "0.0.0.0:2002");
         std::fs::copy(backup_path(&ctx.config_path), &ctx.config_path).unwrap();
@@ -1086,8 +1201,11 @@ mod tests {
                 ui_root: dir.path().join("web"),
                 bound_port: Some(9099),
             };
-            let result =
-                setup_complete(ConnectInfo("10.30.230.42:41234".parse().unwrap()), State(ctx)).await;
+            let result = setup_complete(
+                ConnectInfo("10.30.230.42:41234".parse().unwrap()),
+                State(ctx),
+            )
+            .await;
             assert!(result.is_err(), "mode={mode} 不得完成无效配置");
             assert!(marker.is_file(), "拒绝完成时不得删除首跑哨兵");
         }
@@ -1305,9 +1423,16 @@ room_key_word = ["-RM"]
             store_mode: Some("rocksdb".into()),
             ..Default::default()
         };
-        assert!(write_config(&path, &only_store).expect("收下但不写").is_empty());
+        assert!(
+            write_config(&path, &only_store)
+                .expect("收下但不写")
+                .is_empty()
+        );
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("store_mode"), "向导不许把 store_mode 写进文件：{text}");
+        assert!(
+            !text.contains("store_mode"),
+            "向导不许把 store_mode 写进文件：{text}"
+        );
         assert!(!backup_path(&path).exists(), "没改键就不该碰盘");
 
         let rocks = SetupConfigPatch {
@@ -1335,7 +1460,11 @@ room_key_word = ["-RM"]
             write_config(&path, &blank).expect("空地址放行"),
             vec!["v_ip", "v_port"]
         );
-        assert!(std::fs::read_to_string(&path).unwrap().contains(r#"v_port = "0""#));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(r#"v_port = "0""#)
+        );
 
         // 退役写法也不再由向导校验：这一格根本不落盘，值域交给环境变量那一头。
         let retired = SetupConfigPatch {
@@ -1453,7 +1582,11 @@ room_key_word = ["-RM"]
     async fn the_config_endpoint_reports_the_effective_store_mode_and_names_a_stale_key() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("DbOption.toml");
-        std::fs::write(&config_path, "store_mode = \"rocksdb\"\nv_ip = \"127.0.0.1\"\n").unwrap();
+        std::fs::write(
+            &config_path,
+            "store_mode = \"rocksdb\"\nv_ip = \"127.0.0.1\"\n",
+        )
+        .unwrap();
         let ctx = SetupCtx {
             mode: "setup",
             config_path,
@@ -1481,8 +1614,14 @@ room_key_word = ["-RM"]
             crate::options::STORE_MODE_ENV,
             "{effective}"
         );
-        assert!(effective.get("store_mode_env_value").is_some(), "{effective}");
-        assert_eq!(effective["stale_config_store_mode"], "rocksdb", "{effective}");
+        assert!(
+            effective.get("store_mode_env_value").is_some(),
+            "{effective}"
+        );
+        assert_eq!(
+            effective["stale_config_store_mode"], "rocksdb",
+            "{effective}"
+        );
         // 过期键不混进「向导管的值」：混进去页面会把它当成一个可改的格子。
         assert!(
             payload["values"].get("store_mode").is_none(),
@@ -1552,10 +1691,7 @@ room_key_word = ["-RM"]
 
         let out = probe_mdb_closure(&MdbProbeRequest {
             project_path: first.path().to_string_lossy().into_owned(),
-            project_search_paths: vec![
-                second.path().to_string_lossy().into_owned(),
-                String::new(),
-            ],
+            project_search_paths: vec![second.path().to_string_lossy().into_owned(), String::new()],
             project_name: "main".into(),
             mdb_name: None,
         });
