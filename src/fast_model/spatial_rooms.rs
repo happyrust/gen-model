@@ -444,6 +444,44 @@ pub fn ensure_rooms_registered(requested: &BTreeSet<RefU64>) -> Result<(), Spati
     select_rooms(&model, requested).map(|_| ())
 }
 
+pub async fn resolve_tree_room_scope(
+    requested: Option<&BTreeSet<RefU64>>,
+    candidates: &[RefU64],
+    attrs: &dyn ElementAttributes,
+) -> Result<RoomScope, SpatialQueryError> {
+    if let Some(rooms) = requested {
+        return resolve_room_scope(rooms, candidates, attrs).await;
+    }
+    let availability = rooms_availability();
+    let mut scope = if let Some(model) = availability.model {
+        let rooms = model.map.rooms.iter().map(|room| room.room.refno()).collect();
+        resolve_room_scope(&rooms, candidates, attrs).await?
+    } else {
+        RoomScope {
+            rooms: Vec::new(),
+            members: HashSet::new(),
+            member_rooms: HashMap::new(),
+            unresolved: dedup(candidates).len(),
+            source: "unavailable",
+            definition_version: None,
+            library_alignment_current: None,
+        }
+    };
+    let unassigned = scope.rooms.len();
+    for refno in dedup(candidates) {
+        let rooms = scope.member_rooms.entry(refno).or_default();
+        if rooms.is_empty() {
+            rooms.push(unassigned);
+        }
+        scope.members.insert(refno);
+    }
+    scope.rooms.push(RoomRef {
+        refno: "unassigned".to_string(),
+        room_num: "未归属房间".to_string(),
+    });
+    Ok(scope)
+}
+
 /// `rooms=` 的解算入口：`requested` 是参数里的房间 refno，`candidates` 是这次扫出来的候选 refno（可重复）。
 pub async fn resolve_room_scope(
     requested: &BTreeSet<RefU64>,

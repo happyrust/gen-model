@@ -1414,19 +1414,18 @@ pub async fn nearby_tree(
     unit_types: Vec<String>,
     options: crate::fast_model::spatial_tree_view::TreeOptions,
 ) -> Result<crate::fast_model::spatial_tree_view::TreeResponse, SpatialQueryError> {
-    let Some(rooms) = &params.rooms else {
-        return Err(SpatialQueryError::BadRequest(
-            "nearby/tree 需要 rooms=（房间层级树以所选房间为根；不按房间过滤请用 nearby）".to_string(),
-        ));
-    };
+    if let Some(rooms) = &params.rooms {
+        crate::fast_model::spatial_rooms::ensure_rooms_registered(rooms)?;
+    }
     // 先核房间（不在册 400 / 体制不可用 422），再扫树（中心没盒 404）：`rooms/{refno}/tree` 的房间既是范围又是过滤，
     // 不在册的房间自然也没有盒，扫在前就会答成 404。
-    crate::fast_model::spatial_rooms::ensure_rooms_registered(rooms)?;
     let scan = scan_global_tree(params, centerline).await?;
+    let candidates = scan.candidates
+        .iter().map(|candidate| candidate.entry.refno).collect::<Vec<_>>();
     let room_scope = Arc::new(
-        resolve_rooms_for_scan(&scan, params, attrs.as_ref())
-            .await?
-            .ok_or_else(|| SpatialQueryError::Internal(anyhow::anyhow!("rooms= 给了却没有解出成员集")))?,
+        crate::fast_model::spatial_rooms::resolve_tree_room_scope(
+            params.rooms.as_ref(), &candidates, attrs.as_ref(),
+        ).await?,
     );
     // 折树分两段（`spatial_tree_view::TreeDraft`，计划 `2026-09-22-room-tree-tube-segments-backend-dev-plan.md` §2.2）：
     // 第一段过滤 / 排 / 去重 / 单元；`tubes=1` 时中间按树里出现的 BRAN 单元读直段（投影有回执取投影，否则冷读要 await，
