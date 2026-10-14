@@ -139,6 +139,11 @@ data_incremental = true
 model_incremental = true
 room_membership = true
 
+# 设计→设计引用级联（P4，2026-09-30 起默认开，GitHub #32）：被 POSREF 参照的件挪了，参照它的件所在的根跟着重算。
+# 反查判不了时整窗已持久化的根重算并在回执点名。要关用 model_design_reference_cascade = false
+# 或环境变量 AIOS_MODEL_DESIGN_REFERENCE_CASCADE=0（环境变量压过本键）。
+model_design_reference_cascade = true
+
 # 文件身份冲突只记录并跳过，不阻断其它库初始化。
 block_file_identity_conflicts = false
 

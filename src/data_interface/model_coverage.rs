@@ -15,7 +15,8 @@
 //! （`DiscoveredBatch::catalogue_stamps`）。
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{Mutex, MutexGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use aios_core::SUL_DB;
@@ -444,6 +445,42 @@ pub(crate) async fn published_catalogue_sessions_on(
     ))
 }
 
+/// 一组设计库共用的「目录文件宇宙」：与 MDB 声明那份**不同**的目录库 → 这组库生成真读的副本。
+/// 空 = 全按 MDB 声明（绝大多数库）。
+pub(crate) type CatalogueFileOverrides = BTreeMap<u32, PathBuf>;
+
+/// 按目录文件把设计库分组（纯函数，GitHub #47）：库级落款记的是生成**真读的那份**文件的会话，
+/// 核对要在同一份文件上比。`file_for(设计库, 目录库)` 是生成的选法（[`crate::fast_model::e3d_model_service::CatalogueFileChoice::for_library`]），
+/// `declared(目录库)` 是 MDB 声明那份；两者不同（路径不分大小写比）的目录库进这一库的覆盖表，覆盖表相同的库
+/// 进同一组。生成解不出的目录库不进覆盖表——它在核对里照旧落「读不到」。
+pub(crate) fn group_libraries_by_catalogue_files(
+    libraries: &BTreeMap<u32, BTreeMap<u32, u32>>,
+    file_for: impl Fn(u32, u32) -> Option<PathBuf>,
+    declared: impl Fn(u32) -> Option<PathBuf>,
+) -> BTreeMap<CatalogueFileOverrides, BTreeMap<u32, BTreeMap<u32, u32>>> {
+    let same_file = |a: &Path, b: &Path| {
+        a.to_string_lossy().to_ascii_lowercase() == b.to_string_lossy().to_ascii_lowercase()
+    };
+    let mut groups: BTreeMap<CatalogueFileOverrides, BTreeMap<u32, BTreeMap<u32, u32>>> =
+        BTreeMap::new();
+    for (&library, stamps) in libraries {
+        let overrides: CatalogueFileOverrides = stamps
+            .keys()
+            .filter_map(|&catalogue| {
+                let read = file_for(library, catalogue)?;
+                let is_copy =
+                    declared(catalogue).is_none_or(|declared| !same_file(&declared, &read));
+                is_copy.then_some((catalogue, read))
+            })
+            .collect();
+        groups
+            .entry(overrides)
+            .or_default()
+            .insert(library, stamps.clone());
+    }
+    groups
+}
+
 /// **落款仍在旧目录上**的设计库（纯函数，ADR-079 的库级替身，原 `roots_behind_catalogue_on`）：
 /// 库级落款里记着 `cata_dbnum` 且 `session < target_sesno` 的库。没有该目录落款的库不在名单上
 /// （它的模型没照过这个目录，或从没生成过）。
@@ -508,6 +545,8 @@ pub(crate) struct CatalogueReconcile {
     pub(crate) stale: Vec<u32>,
     /// 读不到最新会话的 CATA 库数（未知，不算过期）。
     pub(crate) unreadable: usize,
+    /// 同上的库号——按目录文件分组核对（GitHub #47）之后几组并起来时去重用，不上回执。
+    unreadable_dbnums: BTreeSet<u32>,
     /// 每个过期库一条：`记在案的最旧会话 → 文件最新` 这一窗变了哪些目录件、该库有没有
     /// 反向引用表可供反查。收不了的窗口也在，带 `error`。
     pub(crate) windows: Vec<crate::data_interface::cata_cascade_window::CatalogueWindowReport>,
@@ -518,6 +557,26 @@ pub(crate) struct CatalogueReconcile {
     /// 与上面模型面的「过期」名单无关。
     pub(crate) dependency_refresh:
         crate::data_interface::cata_dependency::CatalogueDependencyRefreshReport,
+}
+
+impl CatalogueReconcile {
+    /// 按目录文件分组核对（GitHub #47）之后把一组的结果并进来：过期库号与读不到的库号取并集，
+    /// 窗口挨个接上（同一个库号读两份文件就有两窗），反查回执相加。`dependency_refresh` 不在组里，不动。
+    fn absorb(&mut self, other: CatalogueReconcile) {
+        self.stale.extend(other.stale);
+        self.stale.sort_unstable();
+        self.stale.dedup();
+        self.unreadable_dbnums.extend(other.unreadable_dbnums);
+        self.unreadable = self.unreadable_dbnums.len();
+        self.windows.extend(other.windows);
+        self.cascade = match (self.cascade.take(), other.cascade) {
+            (Some(mut mine), Some(theirs)) => {
+                mine.absorb(theirs);
+                Some(mine)
+            }
+            (mine, theirs) => mine.or(theirs),
+        };
+    }
 }
 
 /// 收成的一窗：回执 + 窗口本体（逐件清单是反查的种子，不上 `/health`）。
@@ -565,9 +624,16 @@ pub(crate) async fn reconcile_catalogue_versions() -> CatalogueReconcile {
 
 /// 模型面那一半：点名 → 收窗 → 反查排工（三步见 [`reconcile_catalogue_versions`] 的文档）。
 /// 只在串行闸里被调；`dependency_refresh` 留空，由调用方补数据面那一半。
+///
+/// **按目录文件分组**（GitHub #47）：库级落款记的是生成**真读的那份**目录文件的会话。同一个 CATA 库号在
+/// 闭包里有几份文件时（AMS `/ALL` 实测：ACP 的 8 个设计库读 `acp7000`、AMS 的 20 个读 `ams7355`，MDB 声明的却是
+/// `ams7000` / `aps7355`），拿 MDB 声明那份去比，比的是两份文件的会话号——判过期、收窗、盖落款全落在别的文件上。
+/// 所以先按生成的选法（[`crate::fast_model::e3d_model_service::CatalogueFileChoice`]）把设计库分成「目录文件
+/// 宇宙」相同的几组（[`group_libraries_by_catalogue_files`]），每组在自己读的那几份文件上走一遍三步，结果合并。
+/// 全按 MDB 声明的库（绝大多数）走的仍是原来那一份。
 async fn reconcile_published_root_stamps() -> CatalogueReconcile {
-    let recorded = match published_catalogue_sessions_on(&SUL_DB).await {
-        Ok(recorded) => recorded,
+    let libraries = match library_catalogue_stamps_on(&SUL_DB).await {
+        Ok(libraries) => libraries,
         Err(error) => {
             println!(
                 "目录版本核对失败：读不到已发布根的目录落款，本次说不出目录有没有前移\
@@ -576,43 +642,125 @@ async fn reconcile_published_root_stamps() -> CatalogueReconcile {
             return CatalogueReconcile::default();
         }
     };
+    let recorded = oldest_catalogue_sessions(&libraries);
     if recorded.is_empty() {
         return CatalogueReconcile::default();
     }
-    let dbnums: Vec<u32> = recorded.keys().copied().collect();
-    let latest = tokio::task::spawn_blocking(move || {
-        dbnums
-            .into_iter()
-            .map(|dbnum| {
-                let sesno = crate::data_interface::model_source::latest_source_version(dbnum)
-                    .ok()
-                    .map(|version| version.sesno);
-                (dbnum, sesno)
-            })
-            .collect::<BTreeMap<u32, Option<u32>>>()
-    })
+    // 选法读不到（MDB 成员名单读挂）：每个记在案的目录库这次都是未知——与此前逐库 `latest_source_version`
+    // 全部失败时同一个结论。
+    let unknown = |error: String| {
+        println!(
+            "目录版本核对失败：读不到当前 MDB 的目录文件选法，{} 个记在案的 CATA 库这次都是未知: {error}",
+            recorded.len()
+        );
+        CatalogueReconcile {
+            unreadable: recorded.len(),
+            unreadable_dbnums: recorded.keys().copied().collect(),
+            ..CatalogueReconcile::default()
+        }
+    };
+    let choice = match tokio::task::spawn_blocking(
+        crate::fast_model::e3d_model_service::CatalogueFileChoice::current,
+    )
     .await
-    .unwrap_or_default();
+    {
+        Ok(Ok(choice)) => Arc::new(choice),
+        Ok(Err(error)) => return unknown(format!("{error:#}")),
+        Err(error) => return unknown(format!("blocking task failed: {error}")),
+    };
+    let groups = group_libraries_by_catalogue_files(
+        &libraries,
+        |library, catalogue| choice.for_library(library, catalogue),
+        |catalogue| choice.declared(catalogue),
+    );
+    let mut merged = CatalogueReconcile::default();
+    for (overrides, members) in groups {
+        let part = reconcile_catalogue_group(choice.clone(), overrides, members).await;
+        merged.absorb(part);
+    }
+    merged
+}
+
+/// 一组目录文件宇宙相同的设计库走一遍点名 → 收窗 → 反查排工（GitHub #47 之前这就是整个核对）。
+/// 目录库读哪份文件：覆盖表里有就是那份副本，没有就是 MDB 声明那份；落款、窗口、排工都只在这组库里。
+async fn reconcile_catalogue_group(
+    choice: Arc<crate::fast_model::e3d_model_service::CatalogueFileChoice>,
+    overrides: CatalogueFileOverrides,
+    members: BTreeMap<u32, BTreeMap<u32, u32>>,
+) -> CatalogueReconcile {
+    let recorded = oldest_catalogue_sessions(&members);
+    if recorded.is_empty() {
+        return CatalogueReconcile::default();
+    }
+    let files: BTreeMap<u32, Option<PathBuf>> = recorded
+        .keys()
+        .map(|&dbnum| {
+            let file = overrides
+                .get(&dbnum)
+                .cloned()
+                .or_else(|| choice.declared(dbnum));
+            (dbnum, file)
+        })
+        .collect();
+    let latest = {
+        let files = files.clone();
+        tokio::task::spawn_blocking(move || {
+            files
+                .into_iter()
+                .map(|(dbnum, file)| {
+                    let sesno = file.and_then(|file| {
+                        crate::data_interface::model_source::latest_source_version_of_file(
+                            dbnum, "CATA", &file,
+                        )
+                        .ok()
+                        .map(|version| version.sesno)
+                    });
+                    (dbnum, sesno)
+                })
+                .collect::<BTreeMap<u32, Option<u32>>>()
+        })
+        .await
+        .unwrap_or_default()
+    };
     let (stale, unreadable) =
         stale_catalogue_dbnums(&recorded, |dbnum| latest.get(&dbnum).copied().flatten());
-    // 每个过期库收一窗：S = 记在案的最旧会话，T = 文件最新。只读文件，阻塞任务里做。
-    let spans: Vec<(u32, u32, u32)> = stale
+    let unreadable_dbnums: BTreeSet<u32> = recorded
+        .keys()
+        .copied()
+        .filter(|dbnum| latest.get(dbnum).copied().flatten().is_none())
+        .collect();
+    debug_assert_eq!(unreadable, unreadable_dbnums.len());
+    // 只在这组真有过期库时出声：周期复核 300 s 一拍，没事的那一拍一个字不打。
+    if !overrides.is_empty() && !stale.is_empty() {
+        println!(
+            "目录版本核对：设计库 {:?} 读的是目录库副本 {}——这一组按副本比会话、收窗、盖落款（GitHub #47）",
+            members.keys().collect::<Vec<_>>(),
+            overrides
+                .iter()
+                .map(|(dbnum, file)| format!("{dbnum}={}", file.display()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    // 每个过期库收一窗：S = 记在案的最旧会话，T = 这组读的那份文件最新。只读文件，阻塞任务里做。
+    let spans: Vec<(u32, u32, u32, Option<PathBuf>)> = stale
         .iter()
         .filter_map(|&dbnum| {
             let base = *recorded.get(&dbnum)?;
             let target = latest.get(&dbnum).copied().flatten()?;
-            Some((dbnum, base, target))
+            Some((dbnum, base, target, files.get(&dbnum).cloned().flatten()))
         })
         .collect();
     let collected = tokio::task::spawn_blocking(move || collect_stale_catalogue_windows(&spans))
         .await
         .unwrap_or_default();
     // P3：反查 + 排工。窗口本体在这里用掉，回执留给 `/health`。
-    let cascade = cascade_stale_catalogue_windows(&collected).await;
+    let cascade = cascade_stale_catalogue_windows(&collected, &overrides, &members).await;
     let windows = collected.into_iter().map(|item| item.report).collect();
     CatalogueReconcile {
         stale,
         unreadable,
+        unreadable_dbnums,
         windows,
         cascade,
         ..CatalogueReconcile::default()
@@ -670,6 +818,7 @@ impl CatalogueReconcileSnapshot {
             windows,
             cascade,
             dependency_refresh,
+            ..
         } = reconcile;
         Self {
             origin: origin.to_string(),
@@ -750,7 +899,7 @@ impl CatalogueReconcileSnapshot {
 struct CatalogueReconcileState {
     latest: Option<CatalogueReconcileSnapshot>,
     /// `None` = 还没有任何一轮 sweep 记过观察（进程刚起）。
-    observed: Option<BTreeMap<u32, u32>>,
+    observed: Option<ObservedCatalogueFiles>,
 }
 
 static CATALOGUE_RECONCILE_STATE: Mutex<CatalogueReconcileState> =
@@ -787,28 +936,33 @@ pub enum CatalogueSweepVerdict {
 ///
 /// 只看这一轮观察到的：上一轮见过、这一轮读不到头的库不算前移——读不到是未知，
 /// 而未知不触发任何工作（与 [`crate::data_interface::model_coverage::stale_catalogue_dbnums`] 同一口径）。
-pub(crate) fn catalogue_files_advanced(
-    previous: Option<&BTreeMap<u32, u32>>,
-    observed: &BTreeMap<u32, u32>,
-) -> Vec<u32> {
+pub(crate) fn catalogue_files_advanced<K: Ord + Clone>(
+    previous: Option<&BTreeMap<K, u32>>,
+    observed: &BTreeMap<K, u32>,
+) -> Vec<K> {
     observed
         .iter()
-        .filter(|(dbnum, now)| {
+        .filter(|(key, now)| {
             previous
-                .and_then(|previous| previous.get(*dbnum))
+                .and_then(|previous| previous.get(*key))
                 .is_none_or(|seen| *now > seen)
         })
-        .map(|(dbnum, _)| *dbnum)
+        .map(|(key, _)| key.clone())
         .collect()
 }
 
+/// sweep 一轮观察到的目录库文件：`(库号, 文件) → 最新会话`。按**文件**记（GitHub #47）：同号的项目副本
+/// 也在里面——设计库所在项目里有副本时，生成读的就是那份，它前移同样要开一次核对；同一个项目里
+/// extract family 的下层也各占一格，彼此不覆盖。
+pub type ObservedCatalogueFiles = BTreeMap<(u32, PathBuf), u32>;
+
 /// 这一轮 sweep 要不要跑目录核对（纯函数）：第一轮只记观察；看见前移就跑；`force`
 /// （周期对账那一拍）没看见也跑。
-pub(crate) fn catalogue_sweep_verdict(
-    previous: Option<&BTreeMap<u32, u32>>,
-    observed: &BTreeMap<u32, u32>,
+pub(crate) fn catalogue_sweep_verdict<K: Ord + Clone>(
+    previous: Option<&BTreeMap<K, u32>>,
+    observed: &BTreeMap<K, u32>,
     force: bool,
-) -> (CatalogueSweepVerdict, Vec<u32>) {
+) -> (CatalogueSweepVerdict, Vec<K>) {
     let Some(previous) = previous else {
         return (CatalogueSweepVerdict::Seeded, Vec::new());
     };
@@ -835,7 +989,7 @@ pub(crate) fn catalogue_sweep_verdict(
 /// 返回裁决给调用方写日志。
 pub fn reconcile_catalogue_versions_after_sweep(
     origin: &str,
-    observed: BTreeMap<u32, u32>,
+    observed: ObservedCatalogueFiles,
     force: bool,
 ) -> CatalogueSweepVerdict {
     let (verdict, advanced) = {
@@ -843,6 +997,13 @@ pub fn reconcile_catalogue_versions_after_sweep(
         let (verdict, advanced) =
             catalogue_sweep_verdict(state.observed.as_ref(), &observed, force);
         state.observed = Some(observed);
+        // 回执按库号点名：同一个库号两份文件都前移只记一次。
+        let advanced: Vec<u32> = advanced
+            .into_iter()
+            .map(|(dbnum, _)| dbnum)
+            .collect::<BTreeSet<u32>>()
+            .into_iter()
+            .collect();
         (verdict, advanced)
     };
     if let CatalogueSweepVerdict::Run { trigger } = verdict {
@@ -1007,24 +1168,29 @@ fn the_runtime_catalogue_reconcile_speaks_only_when_it_has_something_to_say() {
 }
 
 /// 逐个过期目录库收窗；收不了的记 `error`，**不**让一个库的失败挡住别的库。
-fn collect_stale_catalogue_windows(spans: &[(u32, u32, u32)]) -> Vec<StaleCatalogueWindow> {
+///
+/// 每窗收在调用方给的那份文件上（GitHub #47：这组设计库生成真读的那份，不一定是 MDB 声明那份）；
+/// `None` = 当前 MDB 里没有这个库的文件。
+fn collect_stale_catalogue_windows(
+    spans: &[(u32, u32, u32, Option<PathBuf>)],
+) -> Vec<StaleCatalogueWindow> {
     use crate::data_interface::cata_cascade_window::{
         CatalogueWindowReport, collect_catalogue_window_bounded,
     };
     spans
         .iter()
-        .map(|&(dbnum, base, target)| {
+        .map(|(dbnum, base, target, file)| {
+            let (dbnum, base, target) = (*dbnum, *base, *target);
             let failed = |error: String| StaleCatalogueWindow {
                 report: CatalogueWindowReport::failed(dbnum, base, target, error),
                 window: None,
             };
-            let file = match crate::data_interface::model_source::source_file_of(dbnum) {
-                Ok((_, file)) => file,
-                Err(error) => return failed(format!("{error:#}")),
+            let Some(file) = file else {
+                return failed(format!("当前 MDB 没有 dbnum {dbnum} 的库文件"));
             };
             match collect_catalogue_window_bounded(
                 dbnum,
-                &file,
+                file,
                 base,
                 target,
                 STARTUP_CATALOGUE_WINDOW_RECORD_CAP,
@@ -1117,6 +1283,8 @@ fn split_catalogue_seeds(
 /// 指纹失配兜底——这与 P3 之前的行为逐位相同，只是现在会说出来。
 async fn cascade_stale_catalogue_windows(
     collected: &[StaleCatalogueWindow],
+    overrides: &CatalogueFileOverrides,
+    members: &BTreeMap<u32, BTreeMap<u32, u32>>,
 ) -> Option<crate::data_interface::reverse_reference::CatalogueCascadeReport> {
     use crate::data_interface::reverse_reference::CatalogueCascadeReport;
     if collected.is_empty() {
@@ -1137,20 +1305,30 @@ async fn cascade_stale_catalogue_windows(
             )));
         }
     };
-    let cascade =
-        match tokio::task::spawn_blocking(move || run_catalogue_cascade(&service, &pinned, &seeds))
-            .await
-        {
-            Ok(Ok(cascade)) => cascade,
-            Ok(Err(error)) => {
-                return Some(CatalogueCascadeReport::failed(format!("{error:#}")));
-            }
-            Err(error) => {
-                return Some(CatalogueCascadeReport::failed(format!(
-                    "reverse cascade task failed: {error}"
-                )));
-            }
-        };
+    let catalogue_files = overrides.clone();
+    let mut cascade = match tokio::task::spawn_blocking(move || {
+        run_catalogue_cascade(&service, &pinned, &seeds, &catalogue_files)
+    })
+    .await
+    {
+        Ok(Ok(cascade)) => cascade,
+        Ok(Err(error)) => {
+            return Some(CatalogueCascadeReport::failed(format!("{error:#}")));
+        }
+        Err(error) => {
+            return Some(CatalogueCascadeReport::failed(format!(
+                "reverse cascade task failed: {error}"
+            )));
+        }
+    };
+    // 设计侧引用者在 MDB 每个设计库里找；这一组只认组里的库（GitHub #47），别组的库在别组那一遍里各算各的。
+    cascade.roots.retain(|dbnum, _| members.contains_key(dbnum));
+    cascade
+        .design_referrers
+        .retain(|dbnum, _| members.contains_key(dbnum));
+    cascade
+        .unrooted
+        .retain(|dbnum, _| members.contains_key(dbnum));
     let mut report = CatalogueCascadeReport::from_cascade(&cascade);
     for (dbnum, reason) in window_degraded {
         report.degraded.entry(dbnum).or_insert(reason);
@@ -1159,6 +1337,7 @@ async fn cascade_stale_catalogue_windows(
         &cascade,
         &report.degraded.keys().copied().collect(),
         collected,
+        members,
     )
     .await
     {
@@ -1178,10 +1357,13 @@ async fn cascade_stale_catalogue_windows(
 
 /// 反查本体（阻塞）：MDB 成员 → [`crate::data_interface::reverse_reference::SourceDb`]，
 /// 上卷用一份 `DbSet@最新`（设计库都在里面，目录经 locator 解）。
+///
+/// 目录库读哪份文件随这一组（GitHub #47）：`catalogue_files` 里有的读那份副本，其余读 MDB 声明那份。
 fn run_catalogue_cascade(
     service: &crate::fast_model::e3d_model_service::E3dModelService,
     pinned: &BTreeMap<u32, u32>,
     seeds: &[crate::data_interface::reverse_reference::CatalogueSeed],
+    catalogue_files: &CatalogueFileOverrides,
 ) -> anyhow::Result<crate::data_interface::reverse_reference::ReverseCascade> {
     use crate::data_interface::reverse_reference::{
         SourceDb, expand_reverse_cascade, resolve_root_from_set,
@@ -1192,11 +1374,19 @@ fn run_catalogue_cascade(
         .filter(|pin| {
             pin.db_type.eq_ignore_ascii_case("DESI") || pin.db_type.eq_ignore_ascii_case("CATA")
         })
-        .map(|pin| SourceDb {
-            dbnum: pin.dbnum as u32,
-            sesno: pinned.get(&(pin.dbnum as u32)).copied(),
-            db_type: pin.db_type,
-            file: pin.file,
+        .map(|pin| {
+            let dbnum = pin.dbnum as u32;
+            let file = if pin.db_type.eq_ignore_ascii_case("CATA") {
+                catalogue_files.get(&dbnum).cloned().unwrap_or(pin.file)
+            } else {
+                pin.file
+            };
+            SourceDb {
+                dbnum,
+                sesno: pinned.get(&dbnum).copied(),
+                db_type: pin.db_type,
+                file,
+            }
         })
         .collect();
     let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
@@ -1244,15 +1434,16 @@ async fn enqueue_catalogue_cascade(
     cascade: &crate::data_interface::reverse_reference::ReverseCascade,
     degraded: &BTreeSet<u32>,
     collected: &[StaleCatalogueWindow],
+    libraries: &BTreeMap<u32, BTreeMap<u32, u32>>,
 ) -> anyhow::Result<CatalogueCascadeEnqueue> {
     let mut account = CatalogueCascadeEnqueue::default();
-    let libraries = library_catalogue_stamps_on(&SUL_DB).await?;
+    // `libraries` = 这一组设计库的库级落款（GitHub #47：按目录文件分组，窗口的 `T_X` 是这组读的那份文件上的）。
     // 设计库 → 它要盖到的落款 `X → T_X`（只收落款仍旧的那几个目录库）；退化目录库另记一份。
     let mut behind: BTreeMap<u32, BTreeMap<u32, u32>> = BTreeMap::new();
     let mut behind_degraded: BTreeSet<u32> = BTreeSet::new();
     for item in collected {
         let (cata, target) = (item.report.dbnum, item.report.target_sesno);
-        for dbnum in libraries_behind_catalogue(&libraries, cata, target) {
+        for dbnum in libraries_behind_catalogue(libraries, cata, target) {
             behind.entry(dbnum).or_default().insert(cata, target);
             if degraded.contains(&cata) {
                 behind_degraded.insert(dbnum);
@@ -1447,8 +1638,13 @@ mod tests {
             .expect("collector follows")
             .0;
         assert!(
-            reconcile.contains("let spans: Vec<(u32, u32, u32)> = stale"),
-            "只对过期库收窗，S/T 各取记在案与文件最新: {reconcile}"
+            reconcile.contains("let spans: Vec<(u32, u32, u32, Option<PathBuf>)> = stale"),
+            "只对过期库收窗，S/T 各取记在案与这组读的那份文件最新（GitHub #47）: {reconcile}"
+        );
+        assert!(
+            reconcile.contains("group_libraries_by_catalogue_files(")
+                && !reconcile.contains("model_source::latest_source_version(dbnum)"),
+            "过期判据按设计库真读的那份文件比，不拿 MDB 声明那份比（GitHub #47）: {reconcile}"
         );
         assert!(
             reconcile.contains("spawn_blocking(move || collect_stale_catalogue_windows(&spans))"),
@@ -1543,11 +1739,115 @@ mod tests {
     /// 没有过期库就没有反查——`None`，而不是一份全 0 的回执（`/health` 上 `null` 与 0 是两句话）。
     #[tokio::test]
     async fn no_stale_catalogue_means_no_cascade_report() {
-        assert!(cascade_stale_catalogue_windows(&[]).await.is_none());
+        assert!(
+            cascade_stale_catalogue_windows(&[], &CatalogueFileOverrides::new(), &BTreeMap::new())
+                .await
+                .is_none()
+        );
     }
 
     /// 「落款仍在旧目录上」的过滤器（ADR-079：库级）真跑一遍：水位行上 `model_catalogue_sessions`
     /// 记着 `dbnum = X 且 session < T` 的设计库进名单；落款已到 T 的、记的是别的目录库的、没有落款的都不进。
+    /// GitHub #47：设计库按「生成真读的目录文件」分组——AMS `/ALL` 的形状：ACP 的库读 `acp7000`、AMS 的库读
+    /// `ams7355`，MDB 声明的是 `ams7000` / `aps7355`；全按声明读的库（SCB）自成一组、覆盖表为空。
+    /// 路径不分大小写比；生成解不出的目录库不进覆盖表（核对里照旧落「读不到」）。
+    #[test]
+    fn libraries_group_by_the_catalogue_files_their_generation_reads() {
+        let file = |name: &str| PathBuf::from(format!(r"D:\proj\{name}"));
+        let libraries = BTreeMap::from([
+            (7015, BTreeMap::from([(7000, 272), (7355, 15)])),
+            (7022, BTreeMap::from([(7000, 272)])),
+            (8000, BTreeMap::from([(7000, 274), (7355, 15)])),
+            (6003, BTreeMap::from([(7000, 274), (7016, 3)])),
+        ]);
+        let declared = |catalogue: u32| match catalogue {
+            7000 => Some(file("ams7000_0001")),
+            7355 => Some(file("aps7355_0001")),
+            _ => None,
+        };
+        let file_for = |library: u32, catalogue: u32| match (library, catalogue) {
+            (7015 | 7022, 7000) => Some(file("acp7000_0001")),
+            (8000, 7355) => Some(file("ams7355_0001")),
+            // 同一份文件、大小写不同：不算副本。
+            (6003, 7000) => Some(PathBuf::from(r"d:\PROJ\AMS7000_0001")),
+            (_, 7016) => None,
+            (_, catalogue) => declared(catalogue),
+        };
+        let groups = group_libraries_by_catalogue_files(&libraries, file_for, declared);
+        let shape: Vec<(Vec<(u32, PathBuf)>, Vec<u32>)> = groups
+            .iter()
+            .map(|(overrides, members)| {
+                (
+                    overrides
+                        .iter()
+                        .map(|(dbnum, path)| (*dbnum, path.clone()))
+                        .collect(),
+                    members.keys().copied().collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (vec![], vec![6003]),
+                (vec![(7000, file("acp7000_0001"))], vec![7015, 7022]),
+                (vec![(7355, file("ams7355_0001"))], vec![8000]),
+            ]
+        );
+        // 分组之后每组各取最旧：ACP 那组的 7000 是 272、不再把 AMS / SCB 的 274 拖成「落在旧目录上」。
+        assert_eq!(
+            oldest_catalogue_sessions(&groups[&CatalogueFileOverrides::new()]),
+            BTreeMap::from([(7000, 274), (7016, 3)])
+        );
+        let acp = CatalogueFileOverrides::from([(7000, file("acp7000_0001"))]);
+        assert_eq!(
+            oldest_catalogue_sessions(&groups[&acp]),
+            BTreeMap::from([(7000, 272), (7355, 15)])
+        );
+    }
+
+    /// GitHub #47：几组的核对结果并成一份——过期库号取并集、读不到的库号去重计数、窗口挨个接上、反查回执相加。
+    #[test]
+    fn grouped_reconcile_parts_merge_into_one_report() {
+        use crate::data_interface::cata_cascade_window::CatalogueWindowReport;
+        use crate::data_interface::reverse_reference::CatalogueCascadeReport;
+        let mut merged = CatalogueReconcile::default();
+        merged.absorb(CatalogueReconcile {
+            stale: vec![7000],
+            unreadable: 1,
+            unreadable_dbnums: BTreeSet::from([7016]),
+            windows: vec![CatalogueWindowReport::failed(7000, 272, 274, "a".into())],
+            cascade: Some(CatalogueCascadeReport {
+                seeds: 2,
+                enqueued: BTreeMap::from([(7015, 3)]),
+                stamp_only: vec![7022],
+                ..CatalogueCascadeReport::default()
+            }),
+            ..CatalogueReconcile::default()
+        });
+        merged.absorb(CatalogueReconcile {
+            stale: vec![7355, 7000],
+            unreadable: 1,
+            unreadable_dbnums: BTreeSet::from([7016]),
+            windows: vec![CatalogueWindowReport::failed(7355, 14, 15, "b".into())],
+            cascade: Some(CatalogueCascadeReport {
+                seeds: 1,
+                enqueued: BTreeMap::from([(8000, 4), (7015, 1)]),
+                error: Some("x".into()),
+                ..CatalogueCascadeReport::default()
+            }),
+            ..CatalogueReconcile::default()
+        });
+        assert_eq!(merged.stale, vec![7000, 7355]);
+        assert_eq!(merged.unreadable, 1, "两组都读不到 7016，只算一个库");
+        assert_eq!(merged.windows.len(), 2);
+        let cascade = merged.cascade.expect("cascade merged");
+        assert_eq!(cascade.seeds, 3);
+        assert_eq!(cascade.enqueued, BTreeMap::from([(7015, 4), (8000, 4)]));
+        assert_eq!(cascade.stamp_only, vec![7022]);
+        assert_eq!(cascade.error.as_deref(), Some("x"));
+    }
+
     /// 同一行上一个目录库只留最旧的会话；`published_catalogue_sessions_on` 再跨库取最旧。
     #[tokio::test]
     async fn libraries_behind_a_catalogue_are_those_still_stamped_before_its_target() {

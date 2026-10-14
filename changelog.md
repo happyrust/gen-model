@@ -90,6 +90,204 @@
   补上根锁之后（同一钉子加「投影删法之前先 try-lock」一条断言）复跑：`cargo check --lib` 过；
   `cargo test --lib -- on_demand_model web_service::handlers::tests model_write_behind` 75 / 0 / 2；全量 2464 / 0 / 129。
   未做：真机端到端（起后端对 AMS 右键重新生成、看 `/model/records` 先空后满、失败根留空、读透形态并发两发一个 409）。
+## 2026-10-01
+
+### 跨库交接：级联命中别的设计库的元素，落地后给那个库排只带名单的 ModelOnly；电缆端点级联补跨库版（GitHub #34 前置 2 / #35）
+
+- **为什么**：结构连接级联的跨库对端（APS 12 条 `FIXING.CREF ↔ GENSEC.JOIE`，GENSEC 已扣关节负体）与电缆端点的跨库引用者（C6 普查 196 条
+  `CABLE.STAREF` / `ENDREF`）都属于另一个库的根，本窗的计划装不下——开关开着也是 0 上卷，改这种 FIXING，另一个库里的梁端停在旧刀口。
+- **改动**：
+  - 新模块 `data_interface::cross_db_handoff`：`elements_by_dbnum`（按库分组去重）、`fold_elements_to_roots`（在对端库 T 端 owner 索引上折根，
+    链上每一个根，与同库对端同口径）、`hand_off`（执行体在窗口落地后调：对端库取文件最新会话、折根、`BatchScheduler::enqueue` 一条只带名单的
+    `ModelOnly`，与目录级联同一条路；交不成逐库一行进回执，不阻断本窗）。
+  - `ModelUpdatePlan::cross_db_elements`（serde 默认空）：规划器把 C2 `far_end_cross_db` 与 C8 跨库引用者放进计划；规划器与预览不排工，
+    `manual_update` 落地成功分支在 `collect_unit_tasks` 之后交一次。
+  - `cable_endpoint::read_foreign_referrers` / `CableEndpointCascade::with_foreign_members`：同一批键到 MDB 其余设计成员各自的
+    `STAREF` / `ENDREF` 表点查（成员名单与 P4 同一份，C8 开着也解）；打不开的成员点名、不判退化。回执多一段 `cross-db (GitHub #35)`。
+  - 文档：CONTEXT 新词条「跨库交接」、「联动更新」两句改口；联动清单 #12 / #13；联动对齐计划追记 2026-10-01（含 #34 翻默认前置清单）。
+- **验证**：`cargo test --lib -- cross_db_handoff cable_endpoint structural_connection window_root_plan model_update_plan manual_update reverse_reference`
+  234 passed / 0 failed / 33 ignored（新增 6 条）。真库：#33 探针加一段——12 个跨库对端全部折得出根（8 个对端库、18 个根），与对端库自己算的逐字
+  相同；`live_aps_a_cross_db_endpoint_finds_its_cable_in_the_other_library`：APS 电缆正向读出跨库端点边 196 条，前 8 条的端点 `ELCONN` 假定变了，
+  各自查回电缆库 250176 的 `CABLE` 根；`aps7200` / `aps250110` 两窗、zdj7200 假定源与九窗两态、ams8000 九个钉死窗口都照旧过。
+  两个开关仍默认关；没有在真服务上走一遍 `ModelOnly` 交接（要一个能 SAVEWORK 的现场库）。
+
+### ADR-080 A6 全语料过、A7 整窗不过：单元级发布不翻默认（GitHub #37）
+
+- **A6**：`probe_unit_publish_corpus_against_regen` 五目录全部会话链、两份 MDB、e3d-model `fix/wall-implicit-frame-host`（`18537eb`，未推送）：
+  3,722 窗、2,480 根量到，PARITY OK 1,908（receipt-only 673），**DIFF 0**；回退 572 根全是设计内的退路。
+- **A7**：逐根单元路 24.7 s 对整根路 82.4 s；但新探针 `probe_unit_producer_open_cost_per_window` 量出生产方每窗再规划一次（含生成输入缓存
+  每库一条逼出的一端 `DbSet` 重建）合计 300.5 s，比同批窗省下的 57.8 s 多，910 / 969 窗单元路更慢。
+- **决定**：`model_unit_level_publish` 保持默认关；先让生产方复用规划器那一份、按根大小设门、e3d-model WALL 支进 vendor，再重跑。ADR-080 追记
+  2026-10-01、CONTEXT「单元级发布」同步。
+- 探针改动（只在测试里）：退化窗按原因归桶并打印、回退桶多一类 D2「局部清单会清空整根」、`SUMMARY_JSON` 带 `degraded_buckets`。
+
+## 2026-09-30
+
+### 设计→设计引用级联（P4）默认开；问不出会话的设计成员让这一窗退化，不再让规划报错（GitHub #32）
+
+- **为什么**：P4 灰度的三道门在今天的树上重跑全绿——`live_every_posref_table_answers_its_own_referrers` 查过 31 个带 `POSREF` 表的
+  设计库、「表在但零边」0 个；`live_existing_windows_never_lose_a_root_with_the_cascade_on` 对拍 93 个真库窗口、两态不同 0 窗（215 s）；
+  `live_ams8000_pinned_windows_land_in_the_expected_buckets` 在 `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=1` 与 `=0` 下各跑一遍都过，
+  9 个钉死窗口 touched / regen / delete 两态逐字相同。关着的代价是被 `POSREF` 参照的件挪了，参照它的件不跟着动。
+- **改动**：
+  - `options::model_design_reference_cascade` 改走新的 `effective_default_on_switch`（环境变量 > 配置 > `true`）；
+    `DbOption.toml` 与出厂模板 `scripts/templates/DbOption.factory.toml` 显式写 `model_design_reference_cascade = true`。
+  - `E3dModelService::design_sources()` 不再因为一个未钉住的设计成员问不出最新会话就整体报错：问不出的交 `sesno: None`，
+    反查按文件最新自己开，开不了记进 `unreadable_dbs`，整窗按计划 §2 原则 3 退化并在回执点名。默认关时这条路不走；
+    默认开之后，原来的 `?` 会让一个被占 / 丢失的成员拖停**所有**设计库的窗口规划。
+  - 级联查询换源计划 P4 节追记「默认翻开」；`CONTEXT.md`「联动更新」补设计→设计引用这一类的现行形态。
+- **回退**：`model_design_reference_cascade = false`，或环境变量 `AIOS_MODEL_DESIGN_REFERENCE_CASCADE=0`（压过配置）。
+- **验证**：`cargo test --lib -- options the_design_reference_cascade reverse_reference window_root_plan model_coverage an_unreadable_design_member`
+  153 passed / 0 failed / 15 ignored；全库 `cargo test --lib` 2466 passed / 0 failed / 130 ignored。新增
+  `the_design_reference_cascade_defaults_on_and_stays_switchable`（真值表 + 出厂模板 = 代码默认）与
+  `an_unreadable_design_member_degrades_the_reference_cascade_instead_of_failing_the_window`。`live_ams8000_pinned_windows_land_in_the_expected_buckets`
+  不设环境变量（即新默认）再跑一遍通过。上面三道真库门跑在设计成员容错那处改动之前：那处只改「问不出会话」这一支，语料里没有这样的成员，
+  成功路径逐字不变。
+
+### 目录版本核对按「生成真读的那份」CATA 比；MDB 未声明的 CATA 不级联、失败处点名（GitHub #47 / #46）
+
+- **为什么**：新探针 `live_catalogue_file_selection_across_observation_reconcile_and_generation`（只读，AMS `/ALL`）量出 4 个同号多份的 CATA，
+  12 个（设计库项目, CATA）对里生成 ≠ 目录版本核对 2 对、≠ sweep 观察 3 对：ACP 的 8 个设计库读 `acp7000`（@272），核对拿 MDB 声明的
+  `ams7000`（@274）比——落款永远「落后」，每次核对在别的文件上收窗、按 AMS 的目录变动排 ACP 的根，`acp7000` 自己前移反而看不见；
+  AMS 的 20 个库读 `ams7355`，核对比的是 MDB 声明的 `aps7355`（今天同在 15）。#46：sweep 观察得到 16 个 MDB 未声明的 CATA，
+  而生成的 resolver 只认 MDB 声明的库——它们生成读不到，不会让任何已发布的根过期。
+- **改动**：
+  - `e3d_model_service::CatalogueFileChoice`：与 `E3dDbResolver` 同一张 locator、同一份项目副本表、同一个 `select_dependency_file`，
+    给核对答「这个设计库读哪份目录文件」——一处函数、两处调用。
+  - `model_coverage::reconcile_published_root_stamps`：按 `group_libraries_by_catalogue_files` 把设计库分成目录文件宇宙相同的几组，
+    每组在自己读的文件上点名、收窗（`collect_stale_catalogue_windows` 收调用方给的文件）、反查（`run_catalogue_cascade` 的目录源随组换副本）、
+    只给组里的库排工并按那份文件的会话盖落款（`enqueue_catalogue_cascade` 收组里的落款，不再另读一次），几组并成一份回执
+    （`CatalogueReconcile::absorb` / `CatalogueCascadeReport::absorb`）。全按 MDB 声明读的库仍是原来那一遍。
+  - sweep 目录观察按文件记（`ObservedCatalogueFiles = (库号, 文件) → 最新会话`）：被 `catalogue_project_priority` 遮蔽的同号副本也观察，
+    它前移同样开一次核对；回执的 `advanced_catalogue_dbnums` 仍按库号。
+  - `mdb_route_directory::explain_unregistered_dbs_with`：失败原文点到 `Dependency` 路由（MDB 没声明）的库号时补一句
+    「只在依赖目录扫描里找到（项目、文件）——生成只读 MDB 声明的库，E3D 用这个 MDB 同样读不到它」。
+  - ADR-078 追记 2026-09-30（#47 / #46）：模型读哪份核对就比哪份；决策 5 的 `catalogue_project_priority` 改口为只决定数据面正本；
+    未声明 CATA 不级联。`CONTEXT.md`「库级目录落款」补这一句。
+- **验证**：`cargo test --lib -- model_coverage catalogue_file_choice reverse_reference startup_reconcile cata_dependency catalogue
+  mdb_route_directory the_ingest_sweep_hands_catalogue_sessions_to_the_model_face` 104 passed / 0 failed / 10 ignored（新增
+  `catalogue_file_choice_answers_like_the_resolver_per_design_library`、`libraries_group_by_the_catalogue_files_their_generation_reads`、
+  `grouped_reconcile_parts_merge_into_one_report`，`unregistered_db_messages_get_the_route_directory_reason_appended` 加 `Dependency` 一态，
+  两条源码钉随结构改口）；探针在 AMS `/ALL` 上跑过（数字见上）。没有在真服务上走一遍分组后的启动核对（要一个有落款的现场库）。
+
+### 刚体前移补三类越过锚点边界的排除，验收 1 全语料复跑（GitHub #36）
+
+- **为什么**：e3d-model 09-27 `d510253` 起 GENSEC 两端扣 `JOIS` / `JOIE` 关节 FIXING 名下的负体，09-15 起 WALL / GWALL 扣名下刀的世界体，
+  WALL 名下 FIXING 的实例标架沿墙 spine 现算——三处都读锚点子树**之外**的东西。`rigid_anchor` 原有五类排除只看锚点及其祖先的 noun，
+  挪梁所在的框架、挪墙上的刀时，Δ 前移的结果与 regen@T 不等。
+- **改动**（`window_root_plan.rs`）：`anchor_subtree_facts` 沿 T 端成员表把锚点子树走一遍（超过 20 万元素不审、判不刚），
+  `anchor_subtree_exclusion` 排在前五类与路由容器之后：(d) 宿主墙上的刀（WALL 名下 `DESP` ≥ 10 项的 FIXING、GWALL 名下的 SBFI，
+  锚点之上有那面墙、中间没隔着同名刀）；(e) WALL datum 的现算标架（锚点之上有 WALL 名下的 `JLDATU` / `PLDATU`）；(f) 跨锚点边界的结构连接
+  （子树里 GENSEC 的关节 FIXING 在子树外，或子树里的关节 FIXING 被子树外的 GENSEC 用着；跨库一端算在外面）。SCTN 的关节 e3d-model 今天
+  不扣负体，不在此列。原因文本 `host cutter owner …` / `implicit datum frame` / `structural connection` 进回执 `transform_fallback_reason`。
+  ADR-066 规则 3 末注加 (d)(e)(f) 与状态行；`CONTEXT.md` 新词条「刚体前移发布」。
+- **门 3 探针改口径**（`probe_rigid_motion_gate3_for_window`）：两端整根重算里画不出的件不拦对拍、只记（与全语料单元级对拍同口径），
+  两端不是同一批时逐条比对照样判红。此前 YCYK `acw5525` 的根两端各有 2–4 件画不出，25 窗全判不了。
+- **验证**：
+  - 文件侧对拍门 `probe_rigid_exclusion_windows`（全语料 3722 窗，971 s）：只动方位候选 1750，合格锚点 240、对拍 210 根**不等·锚点 0**；
+    新三类在自然窗口上 0 触发。
+  - 生产记录门 3（B8）：3722 窗里有 transform 根的 190 窗全跑，**180 窗 242 根 GATE 3 OK、0 FAIL**；6 窗文件侧本就不等、4 窗是备份文件跳过。
+  - 专造样本 `live_rigid_anchor_rejects_cross_boundary_joints_and_host_cutters`：aps250110 关节框架、ams1112 WALL 刀 / GWALL 套管各点名一例。
+  - 开关开态九个钉死窗口桶位不变（`live_ams8000_pinned_windows_land_in_the_expected_buckets`）；
+    `cargo test --lib -- window_root_plan rigid_motion direct_window_replay_parity startup_reconcile mdb_membership` 117 passed / 0 failed / 13 ignored。
+  - `model_transform_cheap_path` 默认**仍关**：live #2 真机链与验收 3（Task 时长省 ≥ 30%）没跑。
+
+### 移出 MDB 的库：启动核对与 SYST 刷新点名，不自动清（GitHub #41）
+
+- **为什么**：库从 CURD 移出之后，它留在库里的 `pe` / noun 行、模型行、房间边、空间树条目与水位行没有任何路径处理，也没有 ADR 说
+  「明确不做」。ADR-085 的 `removed=` 只在那一次 SYST 刷新的阶段行里出现一次，启动时不比、`/health` 也没有这一栏。
+- **决定**（ADR-078 追记 2026-09-30）：只检测、只点名，不自动清——移出可能是误改 MDB，自动删掉的数据要整库重新初始化才回得来；
+  清理走现成的人工出口：暂停队列 → 逐库 `DELETE /api/v1/dbnums/{dbnum}/data` → 重启一次（空间树快照指纹含各库水位数对，删了水位行就按指针重建）。
+  换路径不是移出：抽取家族内改挂文件是 PathMigrated（ADR-028 D4），会话空间换了走整库重建（ADR-021）。
+- **改动**：
+  - `startup_reconcile::dbnums_retired_from_mdb`：登记表里盖过水位（`applied_sesno` 或 `model_sesno` > 0）、当前 MDB 却不再声明的元素库
+    （DESI / ISOD，与 `is_element_db` 同一把尺子），写进新栏 `/health.startup.reconcile.retired_from_mdb`（升序库号；早退路径与收尾都带上），
+    非空时打一行「MDB 退出核对：…」横幅（≤ 12 个）。不参与 `result` 取重、不排工作。SYST / DICT / CATA 不在这一栏。
+  - `mdb_membership::rebind`：`reason=syst-refresh` 时新声明少了元素库，另起一行 `[mdb-scope] 移出 MDB 的元素库 […]`，说清不自动清与人工出口；
+    阶段行的 `removed=` 改用同一个 `removed_element_dbnums`，两处不会各算各的。
+  - `CONTEXT.md` 新词条「移出 MDB 的库」。
+- **验证**：`cargo test --lib -- startup_reconcile mdb_membership initialization_phase retired_from_mdb` 58 passed / 0 failed（新增
+  `retired_from_mdb_names_stamped_element_rows_the_current_mdb_no_longer_declares`、
+  `a_syst_refresh_that_drops_element_databases_names_them_and_cleans_nothing`）。没在真库上造「移出 MDB」的现场（要改共享工程的 CURD）。
+
+### 整棵子树被删的生产路回归：每个成员落墓碑、noun 行与 `pe_owner` 边清干净（GitHub #30 / #18）
+
+- **为什么**：#30 报的是 old-pdms-io 时代「删 EQUI 只给根打墓碑、子树 pe / 名词行 / 属主边全残留」；那段渲染 09-04 已退出生产路，
+  生产落库换成 e3d-io 两端索引差分 + `element_batch`，但 `direct_window_replay_parity` 原有用例只删叶子 BOX，没有钉「带成员的元素整棵删」。
+  #18（删一条 BRAN 保存后处理 failed）同样缺一条删 BRAN 的回归。
+- **改动**：`direct_window_replay_parity` 新增 `a_deleted_subtree_tombstones_every_member_and_leaves_no_rows_or_edges`，两种形状——
+  `equi_box`（#30 现场：EQUI 连同名下 BOX 一起删）与 `bran_members`（#18：删 BRAN，名下 ELBO / FLAN 跟着走）。输入按收集器给生产路的形状：
+  子树每个 refno 一条 `Deleted`（带基侧状态），属主一条 `Modified`（成员表摘掉子树顶）。断言：子树每个成员 `deleted = true`、noun / owner
+  保留、sesno = 删除会话、noun 行没了、`pe_owner` 里既没有它们的出边也没有它们名下的槽位；属主名下只剩兄弟、属主自己的入边不动；
+  每个事务边界崩一次再整窗重放，终态与一次成功逐表相等。只加测试，生产代码不动。
+- **验证**：`cargo test --lib -- direct_window_replay_parity` 15 passed / 0 failed（含新增一条）。
+
+### 跨根引用普查加 Hole Management（`PFIT`）一列，联动清单登记 #15b 不排期（GitHub #43）
+
+- **为什么**：#43 要把「Hole Management 穿孔件引用被穿件」登记成联动清单一行，并让普查探针能数出这类边——今天语料为 0 就登记不排期，
+  哪天有项目启用 Hole Management、普查一跑就能看见。
+- **改动**（`src/bin/cross_root_reference_census.rs`）：`PFIT` 发出的每条引用单独记一张账（`pfit`），口径与孔洞边相同——被穿件变了、
+  穿孔件的根没被碰才算缺口，跨 DESI 库另记；窗口统计分「被穿件单独改 / 穿孔件单独改 / 两端都改」；每库一行、合计表、JSON
+  （`hole_management_nouns` / `pfit`）都带上。HOLC 位本身未导出，仍按 12 个负实体 noun 代理。联动清单 `docs/2026-09-04_model-cascade-update-inventory.md`
+  加 #15b：登记不排期，复议触发 = PFIT 列出现指向 DESI 设计元素的边或 `pfit_dst_only` 窗口 > 0。
+- **验证**：release 构建后全语料复跑（E3D3.1 六个工程 AMS / APS / SCB / TEST / YCYK / ZDJ，487 个 DESI 库、85 库 4146 步，17.4 s）：
+  结构边 55,503（严格缺口 21,161）、孔洞边 9,329（跨根 20 条 `NCYL.RREF → SUBS`）与 0907 逐数相同；PFIT 发出 632 条引用，629 条指向
+  目录 / 属性库（`SPRE` / `MATR`），3 条同库 `PFIT.CREF → FITT`（`zdj7209`，结构连接边，归 #12），没有一条指向 DESI 设计元素；PFIT 窗口 0。
+  `rustfmt --edition 2024 --check` 干净。JSON 产物按政策不入库。
+
+### 删除窗模型孤儿计划（09-18 改小版）批准并收口（GitHub #40）
+
+- `docs/plans/2026-09-15-delete-window-model-orphans-dev-plan.md` 状态行改「已批准并收口」：D3 覆盖账已随 `b904292e2`（09-18）落地；
+  「自身或 S 端属主链上任一级落在 `delete ∪ regen` 即算盖住」的收窄口径批准；维持 D4（只进回执 `warnings` 与服务日志，
+  不加回执独立字段、不进 `/health`）；验收第 4 条改以单测 `a_removed_unit_with_no_cleanup_root_above_it_is_named`（S5 的数点名）
+  + 真库九窗 gap=0 为证，S3（E3D TTY 造窗）不做。只动文档。
+
+### `pe_owner` 唯一性收口：P0 / P1 已修，P2（身份改 `[owner, child]` + `ordinal`）决定不做（GitHub #14）
+
+- 审计档 `docs/2026-08-06_pe-owner-uniqueness-fix-audit.md` 追加「2026-09-30 收口」。P0-1 / P0-2 / P1 由 `58e4bb2d9` 的「owner 前缀范围整块替换」
+  修掉（`DELETE pe_owner:[owner, NONE]..=[owner, ..]` 与整块重插同一事务），09 月 `element_batch` 同一形状，fork / mem 双跑与
+  `direct_window_replay_parity` 钉终态。
+- P2 不做：整块替换下换槽撞索引 / 留尾槽 / 删插不同事务三类从写法上不再出现；槽位有读者（`rvm_baseline/resolve.rs::load_subtree`
+  用 `record::id(id)[1]` 排成员序还原默认命名），改身份要连它一起改外加 778,925 条边迁移。复议触发：出现不经整块替换写 `pe_owner`
+  的新路径，或 `unique_pe_owner` 在生产再报错。只动文档。
+
+### 模型类型矩阵：ANCI / FIXING / GENSEC 改标 `blocked-by-e3d-crash`，覆盖门单列不红（GitHub #22）
+
+- **为什么**：des.exe 3.1.9.0 的 TTY 会话对这三类任何属性求值都崩（0xC0000005 @ `core.dll+0x0074d982`，08-11 十六会话矩阵 15/15，
+  换样本换库都躲不开），manifest 里却还标 `verified`；消费它的 `Run-RoomE3DE2E.ps1` 09-20 已退役，这是一个没人刷新的静态绿。
+- **改动**：`scripts/e3d/ams_model_type_cases.json` 的 `noun-anci` / `noun-fixing` / `noun-gensec` 改标 `blocked-by-e3d-crash` 并带
+  `blocked_by` 原因；`scripts/Test-AmsModelTypeCoverage.ps1` 认这个终态——不进 stale / pending、单列打印、`-RequireVerified` 不因它红，
+  blocked 行缺 `blocked_by` 才红；台账 `docs/e3d-model-type-verification-ledger.md` §2.2 记原因与回补口径（换了能跑的运行时改回 `pending` 重跑）。
+  E3D 侧（AVEVA 产品问题）不再追。
+- **验证**：manifest 解析 58 行（verified 55 / blocked 3，`blocked_by` 齐）；覆盖门脚本本体在 PS 5.1 下用桩掉 Surreal 查询的副本跑五种形状：
+  全在 / 全在 + `-RequireVerified` / blocked 的 ANCI 不在库里 + `-RequireVerified` 三种 exit 0，verified 的 BOX 不在（Stale）、
+  blocked 行缺 `blocked_by` 两种 exit 1。没有连真 Surreal 跑。
+
+### 结构连接级联：跨库对端单独记账、回执点名（GitHub #34 前置 1）；aps250110 验收窗改钉「开关关着已全覆盖」
+
+- **为什么**：#33 的结论是跨库对端「读得到、上卷不到」，账却混在 `far_end_without_root` 里，与「对端已删 / 无根族」分不开；
+  #34 把「拆账：跨库对端拆成 `far_end_cross_db` 单独计数、回执点名」列为翻默认的前置 1。另外 09-30 在当前 HEAD + vendor
+  e3d-model `9ec27b9` 上复跑 `structural_connection::tests::live`，`live_aps_one_ended_windows_pull_the_far_end_roots_into_regen`
+  挂在 aps250110 29→30「开关开必须多出至少一根」：开 / 关都是 258 根（09-07 是关 251 / 开 258）。原因是 e3d-model
+  `plan_update` 在 09-27 补了同库关节级联（`increment::joint_consumer_of`，`d510253`；反方向 `joint_fixings_of`，`b820a4a`）：
+  FIXING 进计划集，`JOIS` / `JOIE` 指着它的 GENSEC 一并进，成了闭包种子，开关关着对端根也全在 `regen` 里。这不是回归，是断言过时。
+- **改动**（`src/data_interface/structural_connection.rs`）：
+  - `StructuralConnectionCascade` 新增 `far_end_cross_db: Vec<CrossDbFarEnd>`：会级联的边里对端 `RefNo::dbno()` 与源不同的，
+    不再拿本窗的 owner 索引查根链、也不进 `far_end_without_root`（那一格只剩同库的「对端已删 / 无根族」）。比库号不比 `word0`
+    （同一个库换 extent，`word0` 就变）。只记账、不上卷：`touched` / `regen` 与改前逐字相同。
+  - `summary_line` 加 `far_end_cross_db=N`，非空时逐条点名（`FIXING 2013286652/390.CREF -> 2013286654/1819 (dbnum 250110)` 这种形状，
+    封顶 12 条、多出来的报条数），随窗口回执 `warnings` 出去。
+  - live 验收窗按窗分口径：aps7200 3→4（`SJOI` → SCTN，e3d-model 盖不住）仍要求开关开严格多出根；aps250110 29→30（FIXING → GENSEC）
+    改钉「开关关着对端根已全在 `regen`、两态 `regen` 集合相等」，e3d-model 那条级联哪天掉了这一窗先红。两窗都断言跨库账为空。
+  - #33 探针补一段：同一批跨库边交给生产同一段 `from_edges`，会级联的全进 `far_end_cross_db`、`far_end_without_root` 为 0、
+    本窗根链一次不查。
+  - 模块头改写「跨库对端」「几何显不显」两段；联动清单 #12、对齐计划 C2 与 `CONTEXT.md`「联动更新」各补一句。
+- **没做**：跨 dbnum 工作交接（#34 前置 2，形态待拍板）；翻默认；SCTN 关节负体（e3d-model `elmodl::collect_joint_negatives`
+  只对 GENSEC 调用，`SJOI` / `PJOI` → SCTN 这一类几何上仍不显）。
+- **验证**（`59edac0bd` + 本改动，vendor e3d-model `9ec27b9`）：`cargo test --lib structural_connection -- --include-ignored`
+  13 passed / 0 failed（新增 `a_cross_db_far_end_is_counted_and_named_but_not_rolled_up`；live 三条：九窗两态逐字相同，aps7200 关 6 / 开 8，
+  aps250110 两态 258，#33 探针拆账后 `far_end_cross_db=12 far_end_without_root=0`，12 条逐条点名）；`cargo test --lib window_root_plan`
+  39 passed / 0 failed / 11 ignored；`cargo clippy --lib --tests` 无新告警；`rustfmt --edition 2024 --check` 干净。
 
 ## 2026-09-29
 

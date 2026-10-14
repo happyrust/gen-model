@@ -139,3 +139,18 @@ MDB → DB 清单的合法多父引用，不是幽灵边。设计库（DESI）�
 | 其中两头都不存在的 | 10,292 | 未定性 |
 
 同样的四条查询将来再跑一遍，就能直接看出有没有退化。
+
+## 2026-09-30 收口（gen-model#14）
+
+- **P0-1 / P0-2 / P1 已修**：`58e4bb2d9`（2026-08-07）改成「按 owner 前缀范围整块替换」——`DELETE pe_owner:[owner, NONE]..=[owner, ..]`
+  与整块重插同一事务（`cata_closure.rs`），`dedupe_members` 在解析边界去重并带属主报错；fork 2.1.4 / mem 双跑
+  `dual_pe_owner_owner_range_delete_agrees`（`src/test/fork_surreal_compat.rs`）逐引擎钉终态。09 月 DESI 数据面换成 e3d-io 净窗口后，
+  `element_batch` 对每个元素用同一形状（id 区间删子槽位再重插），`direct_window_replay_parity::the_production_window_lands_the_expected_shapes`
+  断言属主 children 边等于终态。换槽撞索引、成员表变短留尾槽、删插不同事务这三类都已从写法上堵住。
+- **P2 决定暂不做**（身份仍是 `pe_owner:[owner, 槽位]`）。理由：
+  1. 上面的整块替换已经让「成员表一改、后面成员集体换 id」不再撞唯一索引、也不再留尾槽——P2 想消灭的那一类 bug 在现有写法下已不出现；
+  2. 槽位现在有读者依赖：`rvm_baseline/resolve.rs::load_subtree` 用复合 id 的 `record::id(id)[1]` 排成员序，还原 E3D 默认命名里的
+     「第 n 个」（`BEND 3 of BRANCH /x`）；换成 `[owner, child]` + `ordinal` 要连它一起改，另加 778,925 条边的迁移；
+  3. 收益只剩「身份更干净」，代价是一次全库迁移加读者改写，不划算。
+- **复议触发**：出现不经「owner 前缀范围整块替换」写 `pe_owner` 的新写入路径（例如只改一段成员表的局部更新），或 `unique_pe_owner`
+  再次在生产里报错——届时按本文 P2 的形状重新评估。

@@ -8,7 +8,8 @@
     "room": null,
     "panel": null,
     "mode": "relative_position",
-    "coverage": "verified",
+    "coverage": "blocked-by-e3d-crash",
+    "blocked_by": "GitHub #22: E3D 3.1 TTY (des.exe 3.1.9.0) crashes 0xC0000005 @ core.dll+0x0074d982 on any attribute evaluation of ANCI / FIXING / GENSEC",
     "expect_geometry": false
   },
   {
@@ -188,7 +189,8 @@
     "room": "K270",
     "panel": "17496_230790",
     "mode": "relative_position",
-    "coverage": "verified"
+    "coverage": "blocked-by-e3d-crash",
+    "blocked_by": "GitHub #22: E3D 3.1 TTY (des.exe 3.1.9.0) crashes 0xC0000005 @ core.dll+0x0074d982 on any attribute evaluation of ANCI / FIXING / GENSEC"
   },
   {
     "id": "noun-floor",
@@ -221,7 +223,8 @@
     "room": "K270",
     "panel": "17496_230790",
     "mode": "relative_position",
-    "coverage": "verified"
+    "coverage": "blocked-by-e3d-crash",
+    "blocked_by": "GitHub #22: E3D 3.1 TTY (des.exe 3.1.9.0) crashes 0xC0000005 @ core.dll+0x0074d982 on any attribute evaluation of ANCI / FIXING / GENSEC"
   },
   {
     "id": "noun-gwall",
