@@ -216,6 +216,18 @@ room_membership = true
 # 环境变量 AIOS_MODEL_DESIGN_REFERENCE_CASCADE 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
 model_design_reference_cascade = true
 
+#【默认值 2026-10-14 改为 true，GitHub #36】model_transform_cheap_path —— 刚体前移（ADR-066）
+# 只动了方位的窗口不重算网格：锚点子树的已发布记录左乘 Δ，盒按「纯平移加 t / 含旋转读网格顶点」重算。
+# 判不刚（规则 3 排除命中：宿主刀 / 现算标架 / 跨边界结构连接等）或执行体任一步不成都回退整根 regen。
+#   false：关回旧路（整根重算）。环境变量 AIOS_MODEL_TRANSFORM_CHEAP_PATH 压过本键。
+model_transform_cheap_path = true
+
+#【默认值 2026-10-14 改为 true，GitHub #50】model_unit_level_publish —— 单元级发布（ADR-080）
+# 拿到要重算的生成根后只重建 plan_update 点名的单元，以局部清单叠在同一份根级回执之下发布；
+# 生产方复用规划器的窗口计划（WINDOW_PLAN_CACHE），根几何记录 < 10 条时回退整根重算。
+#   false：关回旧路（整根重算）。环境变量 AIOS_MODEL_UNIT_LEVEL_PUBLISH 压过本键。
+model_unit_level_publish = true
+
 #【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
 # 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。
 # SYS meta（SYST/DICT/GLB/GLOB）不受限：MDB 的成员名单就存在那些库里，圈掉它们
