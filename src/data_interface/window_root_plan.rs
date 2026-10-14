@@ -1485,6 +1485,28 @@ pub(crate) async fn build_model_update_plan_from_window(
     })
     .await
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
+    // Issue #50：把窗口计划存入缓存，供单元级发布执行体（`UnitDeltaProducer::open`）复用，
+    // 省掉重复 `collect_window` + `plan_update` 的 300.5s 开销。`UpdatePlan` 不可 `Clone`，
+    // 逐字段克隆构造 `WindowPlanSets`（几 KB ~ 几十 KB，相对 300.5s 可忽略）。
+    {
+        use std::sync::Arc;
+        let plan_sets = Arc::new(crate::fast_model::e3d_model_service::WindowPlanSets {
+            regenerate: sources.plan.regenerate.clone(),
+            remove: sources.plan.remove.clone(),
+            regenerate_derived: sources.plan.regenerate_derived.clone(),
+            derived_stale: sources.plan.derived_stale.clone(),
+            full_rebuild: sources.plan.full_rebuild.clone(),
+            unreadable: sources.plan.report.unresolved.len()
+                + sources.plan.report.derived_stale_unreadable.len(),
+            dispositions: sources.plan.ledger.dispositions().to_vec(),
+        });
+        crate::fast_model::e3d_model_service::insert_window_plan_cache(
+            dbnum,
+            base_sesno,
+            target_sesno,
+            plan_sets,
+        );
+    }
     // `roots_S` 来自 `DbSet@S`（ADR-079）；「哪些根安定」= S 端根集减去账本里还欠着的根。
     // 欠着的根要随本窗重排，刚体前移那一臂另要「安定」集合。
     let roots_s = sources.roots_s.clone();

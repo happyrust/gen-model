@@ -180,21 +180,92 @@ pub(crate) fn tube_segment_completeness(delta: &UnitDelta) -> Result<(), String>
 /// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-080 D1：单元级发布
 /// **直接吃 `plan_update` 的产出**，不引入第二套变更检测）。`UpdatePlan` 会被 `execute_plan` 整个吃掉、
 /// 又不 `Clone`，所以一窗算一次放在这里，逐根切出子计划再执行。
-struct WindowPlanSets {
-    regenerate: BTreeSet<(u32, u32)>,
-    remove: BTreeSet<(u32, u32)>,
-    regenerate_derived: BTreeSet<(u32, u32)>,
-    derived_stale: BTreeSet<GeometryId>,
+///
+/// `Clone` 是为 Issue #50 的窗口计划缓存：规划器（`WindowRootSources::collect`）与单元级发布执行体
+/// （`UnitDeltaProducer::open`）对同一窗各算一次 `plan_update`，300.5s 重复开销。缓存用 `Arc` 共享，
+/// `Clone` 只在缓存未命中时兜底构造用。
+#[derive(Clone)]
+pub(crate) struct WindowPlanSets {
+    pub(crate) regenerate: BTreeSet<(u32, u32)>,
+    pub(crate) remove: BTreeSet<(u32, u32)>,
+    pub(crate) regenerate_derived: BTreeSet<(u32, u32)>,
+    pub(crate) derived_stale: BTreeSet<GeometryId>,
     /// 规划器退化成整库重建的原因（ADR-080 Q4）：非空时四个集合全空，一根都不许走局部——
     /// 空产出不是「没变」。
-    full_rebuild: Option<String>,
+    pub(crate) full_rebuild: Option<String>,
     /// 计划期就读挂的候选 / 容器数（`unresolved` + `derived_stale_unreadable`）：非零时这一窗的
     /// 分类不可信，一根都不许走局部（D8）。
-    unreadable: usize,
+    pub(crate) unreadable: usize,
     /// 账本上每个候选的去向（`ChangeLedger::dispositions`，`(word0, word1)` 键）。D10 的生产方守卫拿它
     /// 复核「这根名下的候选全是 `no_model`」——规划器的提示与生产方的计划是两次独立算的（实施约束 12），
     /// 空子计划能不能当「没变」发，两边都得点头。
-    dispositions: Vec<((u32, u32), Disposition)>,
+    pub(crate) dispositions: Vec<((u32, u32), Disposition)>,
+}
+
+/// Issue #50：窗口计划缓存。规划器（`build_model_update_plan_from_window` → `WindowRootSources::collect`）
+/// 算出的 `plan_update(S→T)` 结果按 `(dbnum, base_sesno, target_sesno)` 存一份 `Arc`，单元级发布执行体
+/// （`UnitDeltaProducer::open`）同一窗直接拿，省掉重复 `collect_window` + `plan_update` 的 300.5s 开销。
+/// 缓存不主动清除：键是窗口三元组，随 sesno 单调增长，服务重启即清空；单进程生命周期内条目数
+/// = 窗口数，内存可控（每条几 KB ~ 几十 KB）。
+static WINDOW_PLAN_CACHE: OnceLock<std::sync::Mutex<HashMap<(u32, u32, u32), Arc<WindowPlanSets>>>> =
+    OnceLock::new();
+
+fn window_plan_cache(
+) -> &'static std::sync::Mutex<HashMap<(u32, u32, u32), Arc<WindowPlanSets>>> {
+    WINDOW_PLAN_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// 把 `UpdatePlan` 拆成 `WindowPlanSets` 并按 `(dbnum, base_sesno, target_sesno)` 存入缓存。
+/// 规划器路径（`build_model_update_plan_from_window`）在 `WindowRootSources::collect` 之后调用。
+pub(crate) fn cache_window_plan_sets(
+    dbnum: u32,
+    base_sesno: u32,
+    target_sesno: u32,
+    plan: UpdatePlan,
+) {
+    let UpdatePlan {
+        regenerate,
+        remove,
+        regenerate_derived,
+        derived_stale,
+        ledger,
+        full_rebuild,
+        report,
+    } = plan;
+    let sets = WindowPlanSets {
+        regenerate,
+        remove,
+        regenerate_derived,
+        derived_stale,
+        full_rebuild,
+        unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
+        dispositions: ledger.dispositions().to_vec(),
+    };
+    let mut cache = window_plan_cache().lock().unwrap();
+    cache.insert((dbnum, base_sesno, target_sesno), Arc::new(sets));
+}
+
+/// 从窗口计划缓存取一份 `Arc`。命中返回 `Some`，未命中返回 `None`（调用方自行计算并回填）。
+pub(crate) fn cached_window_plan_sets(
+    dbnum: u32,
+    base_sesno: u32,
+    target_sesno: u32,
+) -> Option<Arc<WindowPlanSets>> {
+    let cache = window_plan_cache().lock().unwrap();
+    cache.get(&(dbnum, base_sesno, target_sesno)).cloned()
+}
+
+/// 直接插入一份已构造好的 `WindowPlanSets` 到缓存。供规划器路径（`window_root_plan.rs`）在
+/// `WindowRootSources::collect` 之后调用——`UpdatePlan` 不可 `Clone`，无法整体移动进缓存，
+/// 只能逐字段克隆构造。
+pub(crate) fn insert_window_plan_cache(
+    dbnum: u32,
+    base_sesno: u32,
+    target_sesno: u32,
+    sets: Arc<WindowPlanSets>,
+) {
+    let mut cache = window_plan_cache().lock().unwrap();
+    cache.insert((dbnum, base_sesno, target_sesno), sets);
 }
 
 impl WindowPlanSets {
@@ -400,7 +471,7 @@ pub(crate) struct UnitDeltaProducer<'a> {
     target_sesno: u32,
     base: GenerationInput,
     target: GenerationInput,
-    plan: WindowPlanSets,
+    plan: Arc<WindowPlanSets>,
 }
 
 impl<'a> UnitDeltaProducer<'a> {
@@ -408,12 +479,31 @@ impl<'a> UnitDeltaProducer<'a> {
     /// 计划口径与选根那一步（`WindowRootSources::collect`）**同一份**：元数据门开着就走两票门的
     /// `plan_update_with`，关着就是裸 `plan_update`——两边口径不同，选出来要局部发布的根与切给它的子计划
     /// 就对不上。
+    ///
+    /// Issue #50：先查窗口计划缓存（`cached_window_plan_sets`），命中则直接拿 `Arc` 共享的
+    /// `WindowPlanSets`，省掉重复 `collect_window` + `plan_update` 的 300.5s 开销；未命中才现算
+    /// 并回填缓存（`cache_window_plan_sets`）。
     pub(crate) fn open(
         service: &'a E3dModelService,
         dbnum: u32,
         base_sesno: u32,
         target_sesno: u32,
     ) -> anyhow::Result<Self> {
+        let base = generation_input(service, dbnum, base_sesno)?;
+        let target = generation_input(service, dbnum, target_sesno)?;
+        // Issue #50：缓存命中直接拿 Arc，不再重复 collect_window + plan_update
+        if let Some(plan) = cached_window_plan_sets(dbnum, base_sesno, target_sesno) {
+            return Ok(Self {
+                service,
+                dbnum,
+                base_sesno,
+                target_sesno,
+                base,
+                target,
+                plan,
+            });
+        }
+        // 缓存未命中：现算并回填
         let pin = service.pin(dbnum)?;
         let window = collect_window(&pin.file, base_sesno, target_sesno).with_context(|| {
             format!(
@@ -421,8 +511,6 @@ impl<'a> UnitDeltaProducer<'a> {
                 pin.file.display()
             )
         })?;
-        let base = generation_input(service, dbnum, base_sesno)?;
-        let target = generation_input(service, dbnum, target_sesno)?;
         let plan = if crate::options::model_skip_metadata_only_changes() {
             plan_update_with(
                 &base.set,
@@ -434,15 +522,9 @@ impl<'a> UnitDeltaProducer<'a> {
         } else {
             plan_update(&base.set, &target.set, &window)
         };
-        let UpdatePlan {
-            regenerate,
-            remove,
-            regenerate_derived,
-            derived_stale,
-            ledger,
-            full_rebuild,
-            report,
-        } = plan;
+        cache_window_plan_sets(dbnum, base_sesno, target_sesno, plan);
+        let plan = cached_window_plan_sets(dbnum, base_sesno, target_sesno)
+            .expect("cache_window_plan_sets just inserted this key");
         Ok(Self {
             service,
             dbnum,
@@ -450,15 +532,7 @@ impl<'a> UnitDeltaProducer<'a> {
             target_sesno,
             base,
             target,
-            plan: WindowPlanSets {
-                regenerate,
-                remove,
-                regenerate_derived,
-                derived_stale,
-                full_rebuild,
-                unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
-                dispositions: ledger.dispositions().to_vec(),
-            },
+            plan,
         })
     }
 
@@ -484,6 +558,17 @@ impl<'a> UnitDeltaProducer<'a> {
         no_model_only: bool,
     ) -> anyhow::Result<UnitDelta> {
         self.plan.admits_partial_publish()?;
+        // Issue #50：按根大小设门——记录数 < 10 的根走单元级发布不划算（切子计划、
+        // 校验、提交的固定开销摊不过来），直接回退整根重算。阈值拍脑袋定 10：
+        // 小根局部重建本身就快，单元路省不下多少，反而多一道闸。
+        const MIN_RECORDS_FOR_UNIT_PUBLISH: usize = 10;
+        if old_receipt.geometry_count < MIN_RECORDS_FOR_UNIT_PUBLISH {
+            bail!(
+                "root {root} has {} geometry record(s) (< {MIN_RECORDS_FOR_UNIT_PUBLISH}); \
+                 unit-level publish overhead exceeds its benefit, falling back to regen",
+                old_receipt.geometry_count
+            );
+        }
         // 不可变目标先算、先核（便宜）：设计窗之外任何一格变了，都不是局部能覆盖的。
         self.service
             .hydrate_published_dependencies(old_receipt, &self.target.dependency_sessions)?;
