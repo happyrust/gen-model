@@ -2583,7 +2583,7 @@ mod tests {
         zero.sort_unstable();
         assert_eq!(
             zero,
-            ["ANSW", "DKEY", "MAXA", "PSPE", "PURP", "QUES", "TANS"],
+            ["ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS"],
             "e3d-io 目录求值读到的 DCHC=0 名字变了：核一遍新名字是不是在设计元素上读的"
         );
         // 它单独读到、而两票之外的名字里，没有一个是设计侧 DCHC=0 的：设计侧那几个要么 DCHC≠0 要么已在 e3d_model。
