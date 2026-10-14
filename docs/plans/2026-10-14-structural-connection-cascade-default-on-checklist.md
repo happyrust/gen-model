@@ -24,7 +24,7 @@
 
 | # | 前置项 | 状态 | 说明 |
 |---|--------|------|------|
-| E1 | **e3d-model 第 4 阶段落地** | ⏳ 待定 | SCTN 关节负体 / 端部切割接上 e3d-model，几何上才显出正确性缺口 |
+| E1 | **e3d-model 第 4 阶段落地** | ⚠️ 部分落地（2026-10-15，vendor main `a7ec940`） | SCTN 负体链路已接通（`elmodl.rs`：JOIS/JOIE→mode 2、成员链 FITT/CMFI→3·SBFI→6·SNOD→SJOI→1·SCOJ→2·SUBJ→1、TMPL 属主→mode 7、宿主 FIXING 扫描、`attachment_angles` 直段臂、`ImplicitFrame::SectionNode`）。真库实测：aps7200 对拍 137 条变化全在 SCTN——4 根真减体（/5907、/5910 各 −6125 mm³；/8622、/8626 各 −206753 mm³，成员链 mode-3/6 + 宿主扫描），133 根记账；aps250110 46 条全记账。**关键发现**：两个语料里的 SJOI/PJOI 全无 TMPL/SPRE 几何源——其端切语义在 `CUTP`/`CUTB` 属性上（DB_Sjoi 负体 builder 内部未翻），现按 skipped 记账、对 RVM 可观测；若 E3D 真对这些关节出端切，缺口显在这 416+70 条记账上。**未闭**：SAVEWORK/RVM 对拍验证 E3D 是否真切 |
 | E2 | **Issue #33 核查完成** | ✅ 已关（09-22） | 结论：跨库对端读得到（12/12 回指成立）、生产口径上卷不到（0/12）→ 由此才有跨库交接（前置 2） |
 
 ### 2.2 内部前置（可准备项）
@@ -32,8 +32,8 @@
 | # | 前置项 | 状态 | 验收标准 |
 |---|--------|------|---------|
 | I1 | **跨库可读验证** | ✅ 已验证（2026-10-14 复跑） | `live_probe_cross_db_structural_connection_edges`：12/12 读到、拆账 `far_end_cross_db=12 / far_end_without_root=0`、跨库交接 8 库 18 根（合并进 refactor 后真库重跑通过） |
-| I2 | **两真库窗口两态对拍** | ⬜ 待验证 | `aps7200_0001` 3→4、`aps250110_0001` 29→30：对端根全进 `regen` |
-| I3 | **九窗两态一致性** | ⬜ 待验证 | 九个钉死窗口桶位不变（开关开态） |
+| I2 | **两真库窗口两态对拍** | ✅ 已验证（2026-10-15） | `live_aps_one_ended_windows_pull_the_far_end_roots_into_regen`：aps7200 `94/94` 回指、对端 6 根全进 regen（关6/开8）；aps250110 `371` 边、对端 31 根全进（两态 258） |
+| I3 | **九窗两态一致性** | ✅ 已验证（2026-10-15） | `live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off`：九窗两态逐字相同（本批窗口无边） |
 | I4 | **源码钉守卫** | ✅ 已存在 | `window_root_plan.rs` 中的级联守卫测试 |
 | I5 | **单元测试覆盖** | ✅ 已存在 | `cargo test --lib -- structural_connection` 全绿 |
 
@@ -53,24 +53,27 @@
 ### 3.1 代码级验收
 
 ```bash
-# 1. 开关开着复跑两真库窗口
+# 1. 级联单元测试与守卫
 cargo test --lib -- structural_connection -- --nocapture
 
-# 2. 验证对端根全进 regen
-cargo test --lib -- probe_structural_connection_cascade_windows
+# 2. 两真库窗口：对端根进 regen（aps7200 3→4 / aps250110 29→30）
+cargo test --lib -- live_aps_one_ended_windows_pull_the_far_end_roots_into_regen
 
-# 3. 九窗两态一致性（开关开态）
-cargo test --lib -- live_ams8000_pinned_windows_land_in_the_expected_buckets
+# 3. 九窗两态一致性（开关开/关各一态，钉死桶位）
+cargo test --lib -- live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off
 
-# 4. 全量测试
+# 4. 跨库边探针（12 条跨库边、交接账）
+cargo test --lib -- live_probe_cross_db_structural_connection_edges
+
+# 5. 全量测试
 cargo test --lib
 ```
 
 **检查点**：
-- [ ] `aps7200_0001` 3→4：对端根全进 `regen`
-- [ ] `aps250110_0001` 29→30：对端根全进 `regen`
-- [ ] 九个钉死窗口桶位不变
-- [ ] 全量测试绿（2472+ passed, 0 failed）
+- [x] `aps7200_0001` 3→4：对端根全进 `regen`（2026-10-15，关6/开8，6 根对端全进）
+- [x] `aps250110_0001` 29→30：对端根全进 `regen`（2026-10-15，两态 258，对端 31 根全在）
+- [x] 九个钉死窗口桶位不变（2026-10-15，两态逐字相同）
+- [x] 全量测试绿（2026-10-15，gen-model 2492 passed / 0 failed；e3d-model lib 366 passed / 0 failed）
 
 ### 3.2 真机级验收（第 4 阶段落地后）
 
@@ -190,10 +193,10 @@ e3d-model 第 4 阶段落地（外部前置 E1）
 - [ ] 提交本文档到 git
 - [ ] 更新 Issue #34，链接本文档
 - [ ] 更新 Issue #31（父），标记 #34 前置清单已完成
-- [ ] 等待 e3d-model 第 4 阶段落地
+- [x] ~~等待 e3d-model 第 4 阶段落地~~（2026-10-15 部分落地：SCTN 负体链全通、真库实测 4 根减体；SJOI/PJOI 的 CUTP/CUTB 端切语义仍待 DB_Sjoi 逆向 + RVM 对拍，缺口已在 negatives_skipped 记账可观测）
 - [x] ~~等待 Issue #33 核查完成~~（2026-09-22 已关）
 - [x] I1 跨库可读验证（2026-10-14 合并后复跑通过）
-- [ ] 执行内部前置 I2-I3 验证
+- [x] 执行内部前置 I2-I3 验证（2026-10-15，两窗两态对拍 + 九窗钉死全过）
 - [ ] 执行真机级验收
 - [ ] 翻默认值
 - [ ] 关闭 Issue #34
