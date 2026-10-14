@@ -26,6 +26,10 @@ fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_mode
 `world_bounds` 1e-3 mm 这一轮全过但最大 0.000977 mm = 1 ulp、离线 2.3%，坐标 ≥ 16384 mm 段同样的差就判死，**§5 门 3 改口**：`|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`。
 两处改口后 7 窗 19 根复跑全过（含旋转两窗的 Baked 按内容判也 0 不等）。
 `model_transform_cheap_path` 默认仍关；live #2 / 验收 3 未跑。
+**2026-10-14 更新**（分支 `feat/issues-36-50-34`）：live #2 真机链验证清单与验收 3 性能测试方案已备好
+（`docs/evidence/2026-10-14-adr066-live2-verification-checklist.md` /
+`docs/evidence/2026-10-14-adr066-live2-performance-test-plan.md`），待真机环境执行；
+翻默认值仍待 live #2 与验收 3（Task 时长省 ≥ 30%）双绿。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，

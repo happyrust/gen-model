@@ -1,5 +1,31 @@
 # 变更记录
 
+## 2026-10-14
+
+### Issue #50 性能优化：窗口计划缓存 + 按根大小设门（ADR-080 D9 前置）
+
+- **为什么**：单元级发布执行体（`UnitDeltaProducer::open`）与窗口规划器（`WindowRootSources::collect`）对同一窗各算一次 `plan_update`，969 窗重复计算开销 300.5s；且小根走单元级发布固定开销摊不过来。
+- **改动**：
+  - `src/fast_model/e3d_model_service.rs`：
+    - `WindowPlanSets` 改为 `pub(crate) + Clone`，字段 `pub(crate)`；新增 `WINDOW_PLAN_CACHE` 全局缓存（键 `(dbnum, base_sesno, target_sesno)`，值 `Arc<WindowPlanSets>`）；新增 `cache_window_plan_sets` / `cached_window_plan_sets` / `insert_window_plan_cache` 三个公共函数。
+    - `UnitDeltaProducer.plan` 改为 `Arc<WindowPlanSets>`；`UnitDeltaProducer::open` 先查缓存，命中直接拿 `Arc` 共享，未命中才现算并回填。
+    - `UnitDeltaProducer::produce` 增加按根大小设门：`MIN_RECORDS_FOR_UNIT_PUBLISH = 10`，根的 `geometry_count < 10` 时 `bail!` 回退整根 regen。
+  - `src/data_interface/window_root_plan.rs`：`build_model_update_plan_from_window` 在 `WindowRootSources::collect` 之后将 `plan` 逐字段克隆构造 `WindowPlanSets` 存入缓存。
+- **验证**：`cargo check --lib` 过；`cargo test --lib` **2476 / 0 / 129**。
+- **不变**：开关 `model_unit_level_publish` 默认仍关；A6 全语料对拍 / A7 性能测试待真机环境执行（指南见 `docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`）。
+- **提交**：`e47f748e`（分支 `feat/issues-36-50-34`）
+
+### Issue #36 / #34 文档：真机验证清单、性能测试方案、前置清单
+
+- **改动**：
+  - `docs/evidence/2026-10-14-adr066-live2-verification-checklist.md`：live #2 真机链验证清单（回执 / 水位 / 房间 / plant-ui / RVM 对比）。
+  - `docs/evidence/2026-10-14-adr066-live2-performance-test-plan.md`：验收 3 性能测试方案（Task 时长省 ≥ 30% 才翻默认）。
+  - `docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`：Issue #50 A6 全语料对拍 + A7 性能测试运行指南。
+  - `docs/plans/2026-10-14-structural-connection-cascade-default-on-checklist.md`：结构连接级联翻默认前置清单（外部前置 E1/E2 + 内部前置 I1-I5）。
+  - `docs/adr/ADR-066-*.md` / `docs/adr/ADR-080-*.md`：状态行更新。
+  - `CONTEXT.md`：「单元级发布」词条更新。
+- **提交**：`dbc0b7f5`（分支 `feat/issues-36-50-34`）
+
 ## 2026-10-10
 
 ### `DELETE /dbnums/{dbnum}/model` 只清一个库的模型面（清理模型计划 G3）

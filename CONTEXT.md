@@ -112,6 +112,7 @@ _Avoid_: 几何影响、is_geometry_update
 
 **单元级发布 (Unit-Level Publish)**：
 拿到一个要重算的生成根之后，只重建 `plan_update(S→T)` 点名的那几件单元（单元 = 投影里的一条记录，键 `GeometryId`，与 `manifest_hash` 的去重键同一个），以局部清单（`Partial`，见「局部清单」）叠在同一份**根级**回执之下发布，其余记录原地不动（ADR-080）。它是 ADR-056 D3「根级整根重算」的第二个例外（第一个是 ADR-066 刚体前移），三条路的优先序定死为 transform 优先、unit 兜底、整根重算保底；闸（回执 vs 计划基线）/ 管段完整性门 / 设计窗之外的目标变化 / 生产方任一条不成就回退整根 regen，回退永远正确、只是不省。core 的对应物是 `css/SEGREP`（单图元重建）而不是 `add/REPELE`（整件重画）——「模型影响」里 `Regen` 一档在 core 交互路本就分这两级，本词条把我方的 `Regen` 也拆成整根 / 单元两档；选根一个字不改，它只改「拿到一根之后在根内做什么」。只被 `no_model` 候选碰到的根（本窗名下没有一件几何要变）发一份空 `Partial` 只推回执（D10）。开关 `model_unit_level_publish` **默认关**，开门要过两态对拍全绿、全语料、净收益为正三道门（D9）；D10 另要三条级联同开。
+**2026-10-14 性能优化落地**（分支 `feat/issues-36-50-34`，提交 `e47f748e`）：① 窗口计划缓存——规划器（`WindowRootSources::collect`）与执行体（`UnitDeltaProducer::open`）对同一窗共享 `Arc<WindowPlanSets>`，消除重复 `plan_update` 的 300.5s 开销；② 按根大小设门——根的 `geometry_count < 10` 时单元路开销大于收益，直接回退整根 regen。A6/A7 验证指南见 `docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`。
 _Avoid_: 局部生成（当指 ADR-066「局部生成、整根 upsert」时）、单元级回执、单元级 CAS（回执与 CAS 仍是根级，ADR-080 D5）、增量发布（泛指时）
 
 **净变化 (Net Change)**：

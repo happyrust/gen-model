@@ -4,6 +4,15 @@
 本文把设计摆出来，**D2 / D3 / D7 / D9 四条要用户逐条过目才算已接受**）；**A1 / A2 / D5 / D4（闸）/ A4 / D6（门 + removals 守卫）/ A3 /
 D1（真生产方 `UnitDeltaProducer`）已落地，真库探针 5 窗 5 根对拍全等；D9 开关与生产分流已接线（默认关，`4ee0000ab` 随另一路会话的
 在途改动落库，未单列 changelog）；D10（只被 `no_model` 候选碰到的根空 `Partial` 只推回执）2026-09-17 落地；D7 / A5 / A6 全语料 / A7 未实施**
+**2026-10-14 更新**（分支 `feat/issues-36-50-34`，提交 `e47f748e`）：**性能优化落地**——
+① 窗口计划缓存（`WINDOW_PLAN_CACHE`）：规划器与执行体共享 `Arc<WindowPlanSets>`，
+消除同一窗重复 `collect_window` + `plan_update` 的 300.5s 开销（969 窗量级）；
+② 按根大小设门（`MIN_RECORDS_FOR_UNIT_PUBLISH = 10`）：根的 `geometry_count < 10`
+时单元级发布开销大于收益，直接回退整根重算。
+`cargo test --lib` **2476 绿 / 0 红**。
+**A6 / A7 验证指南已备好**（`docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`），
+待真机环境执行全语料对拍（`probe_unit_publish_corpus_against_regen`，一根 DIFF 即红）
+与性能测试（净收益为正）；翻默认值 `model_unit_level_publish` 仍待 A6 / A7 双绿。
 （同日会话 opus-5-10 按用户「按 A1 开工」「接着做 D2」执行；接班会话 fable-5-1-21 按「接着做 D5」「接着做 D4」「接着做 D6 / A3」
 「接真的生产方」执行；fable-5-1-10 按用户 0917「开 ADR-078（即本文，今 ADR-080）那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」做 D10）。
 **★0917 改号 ADR-078 → ADR-080**（用户拍板，会话 opus-5-18）：本文 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了
