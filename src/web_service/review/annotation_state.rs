@@ -15,6 +15,8 @@
 //! ns/db，无此需要，这里不再挂。SDK 差异同 [`super::common`]。
 //! 文件归 T2（`docs/plans/2026-09-12-review-backend-port-plan.md` §5）。
 
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Extension, Query},
@@ -797,12 +799,18 @@ pub async fn sync_annotation_states_from_snapshot(
 }
 
 /// 供 `annotation_check` 调用：按 form_id+task_id 查询独立状态表。
+///
+/// 只返回每个 `annotation_id` 的**最新轮次**（`review_round` 最大）状态，
+/// 避免旧轮次（如驳回前的 open）覆盖新轮次（如驳回后 SJ 标记的 fixed），
+/// 导致门禁检查误判。详见 `docs/verification/annotation-workflow-test-report-2026-10-14.md`。
 pub async fn load_annotation_states_by_task(
     form_id: &str,
     task_id: &str,
 ) -> Result<Vec<AnnotationStateView>, String> {
-    let sql =
-        "SELECT * FROM review_annotation_states WHERE form_id = $form_id AND task_id = $task_id";
+    // 按 review_round DESC 排序，确保最新轮次排在前面
+    let sql = "SELECT * FROM review_annotation_states \
+               WHERE form_id = $form_id AND task_id = $task_id \
+               ORDER BY review_round DESC, updated_at DESC";
 
     let db = fresh_review_db()
         .await
@@ -817,7 +825,9 @@ pub async fn load_annotation_states_by_task(
     .map_err(|e| format!("查询独立批注状态失败: {}", e))?;
 
     let rows: Vec<AnnotationStateRow> = response.take(0).unwrap_or_default();
-    Ok(rows.into_iter().map(state_view_from_row).collect())
+    // 转换为 View 并去重：每个 annotation_id 只保留最新轮次
+    let all_states: Vec<AnnotationStateView> = rows.into_iter().map(state_view_from_row).collect();
+    Ok(dedup_latest_round(all_states))
 }
 
 /// 供 `soft_delete_review_bundle` 调用：按 form_id 删除所有批注状态。
@@ -836,4 +846,99 @@ pub async fn delete_annotation_states_by_form_id(form_id: &str) -> Result<(), St
 
     info!("Deleted annotation states for form_id={}", form_id);
     Ok(())
+}
+
+/// 去重辅助：每个 `annotation_id` 只保留第一条记录（调用方需保证输入已按
+/// `review_round DESC` 排序，这样第一条就是最新轮次）。
+fn dedup_latest_round(states: Vec<AnnotationStateView>) -> Vec<AnnotationStateView> {
+    let mut seen: HashSet<String> = HashSet::new();
+    states
+        .into_iter()
+        .filter(|s| seen.insert(s.annotation_id.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state(annotation_id: &str, review_round: u32, resolution: &str, decision: &str) -> AnnotationStateView {
+        AnnotationStateView {
+            form_id: "FORM-TEST".to_string(),
+            task_id: "task-test".to_string(),
+            annotation_id: annotation_id.to_string(),
+            annotation_type: "text".to_string(),
+            workflow_node: "jd".to_string(),
+            review_round,
+            resolution_status: resolution.to_string(),
+            decision_status: decision.to_string(),
+            note: None,
+            updated_by_id: "SJ".to_string(),
+            updated_by_name: "设计".to_string(),
+            updated_by_role: "designer".to_string(),
+            updated_at: 1000 + review_round as i64,
+            history: vec![],
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_only_latest_review_round() {
+        // 模拟数据库返回：已按 review_round DESC 排序
+        // r2(fixed) 在前，r1(open) 在后
+        let states = vec![
+            make_state("ann-1", 2, "fixed", "pending"),  // 最新轮次，应保留
+            make_state("ann-1", 1, "open", "pending"),   // 旧轮次，应去重
+            make_state("ann-2", 2, "fixed", "agreed"),   // 另一个批注的最新轮次
+            make_state("ann-2", 1, "open", "pending"),   // 旧轮次，应去重
+        ];
+
+        let result = dedup_latest_round(states);
+
+        assert_eq!(result.len(), 2, "应只保留每个 annotation_id 的最新轮次");
+        assert_eq!(result[0].annotation_id, "ann-1");
+        assert_eq!(result[0].review_round, 2, "应保留 r2（最新轮次）");
+        assert_eq!(result[0].resolution_status, "fixed");
+        assert_eq!(result[1].annotation_id, "ann-2");
+        assert_eq!(result[1].review_round, 2);
+        assert_eq!(result[1].decision_status, "agreed");
+    }
+
+    #[test]
+    fn dedup_handles_single_round() {
+        // 只有单轮次的情况
+        let states = vec![
+            make_state("ann-1", 1, "open", "pending"),
+        ];
+
+        let result = dedup_latest_round(states);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].review_round, 1);
+        assert_eq!(result[0].resolution_status, "open");
+    }
+
+    #[test]
+    fn dedup_handles_empty() {
+        let states: Vec<AnnotationStateView> = vec![];
+        let result = dedup_latest_round(states);
+        assert!(result.is_empty(), "空输入应返回空输出");
+    }
+
+    #[test]
+    fn dedup_preserves_order_of_first_occurrence() {
+        // 验证去重后保持首次出现的顺序（即最新轮次的顺序）
+        let states = vec![
+            make_state("ann-c", 3, "fixed", "agreed"),
+            make_state("ann-a", 2, "fixed", "pending"),
+            make_state("ann-b", 2, "fixed", "pending"),
+            make_state("ann-a", 1, "open", "pending"),  // 旧轮次，去重
+        ];
+
+        let result = dedup_latest_round(states);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].annotation_id, "ann-c");
+        assert_eq!(result[1].annotation_id, "ann-a");
+        assert_eq!(result[2].annotation_id, "ann-b");
+    }
 }
