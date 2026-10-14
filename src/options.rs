@@ -238,15 +238,15 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_skip_metadata_only_changes: Option<bool>,
 
-    /// 刚体前移便宜路径（ADR-066，**默认关**，2026-09-08）：一窗里只动了 `POS / ORI` 的锚点名下、
+    /// 刚体前移便宜路径（ADR-066，**默认开**，2026-10-14 翻）：一窗里只动了 `POS / ORI` 的锚点名下、
     /// 已安定的生成根不整根重算，改为对投影记录左乘刚体增量并按 regen 同款发布一次。
-    /// `true` 才开；关着时窗口规划器的产物与今天逐位相同。详见 [`model_transform_cheap_path`]。
+    /// `false` 才关；关着时窗口规划器的产物与今天逐位相同。详见 [`model_transform_cheap_path`]。
     #[serde(default)]
     pub model_transform_cheap_path: Option<bool>,
 
-    /// 单元级发布（ADR-080 D9，**默认关**，2026-09-16）：一窗里被判要重算的生成根不整根重算，改为
+    /// 单元级发布（ADR-080 D9，**默认开**，2026-10-14 翻）：一窗里被判要重算的生成根不整根重算，改为
     /// 只重建 `plan_update(S→T)` 点名的那几件，以 `Partial` 提交叠在根回执之下发布。
-    /// `true` 才开；关着时计划与执行体的产物与今天逐位相同。详见 [`model_unit_level_publish`]。
+    /// `false` 才关；关着时计划与执行体的产物与今天逐位相同。详见 [`model_unit_level_publish`]。
     #[serde(default)]
     pub model_unit_level_publish: Option<bool>,
 
@@ -2261,8 +2261,9 @@ pub const MODEL_TRANSFORM_CHEAP_PATH_ENV: &str = "AIOS_MODEL_TRANSFORM_CHEAP_PAT
 /// `Δ = W_T(a)·W_S(a)⁻¹`（规划期算好随计划携带），再按 regen 同一条路发布一次（同锁、同守卫、
 /// 同回执、同房间 / 空间收尾）。关着时 `transform` 桶为空、一切进 `regen`，计划与今天逐位相同。
 ///
-/// 这是「少算」方向的开关，而且一次实证都还没有（对拍门在 ADR-066 §验收），所以**默认关**：
-/// ams8000 与 live #2 的对拍过了再翻默认。环境变量 [`MODEL_TRANSFORM_CHEAP_PATH_ENV`] 压过配置，
+/// 这是「少算」方向的开关。**2026-10-14 翻默认开**（Issue #36，分支 `feat/issues-36-50-34`）：
+/// live #2 真机链验证清单与验收 3 性能测试方案已备好（`docs/evidence/2026-10-14-adr066-live2-*.md`），
+/// 用户拍板先翻默认、跑验证、不通过再回退。环境变量 [`MODEL_TRANSFORM_CHEAP_PATH_ENV`] 压过配置，
 /// 取值规则同 [`startup_autorun`]。与元数据门 [`model_skip_metadata_only_changes`] 彼此独立。
 pub fn model_transform_cheap_path() -> bool {
     effective_model_transform_cheap_path(
@@ -2280,7 +2281,7 @@ fn effective_model_transform_cheap_path(
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
-        .unwrap_or(false)
+        .unwrap_or(true) // 2026-10-14 翻默认开（Issue #36）
 }
 
 /// 环境变量名：一次性覆盖 [`model_unit_level_publish`]，不必改配置文件。
@@ -2307,10 +2308,13 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 只有级联的目标集能把引用者的根挡在桶外；有一条关着，整窗一根都不点名、空子计划照旧回退整根 regen，
 /// 计划 warnings 里报一句为什么。
 ///
-/// 这是「少算」方向的开关，开门要过 ADR-080 D9 的三道门（两态对拍全绿、全语料、净收益为正），所以
-/// **默认关**。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+/// 这是「少算」方向的开关。**2026-10-14 翻默认开**（Issue #50，分支 `feat/issues-36-50-34`）：
+/// 窗口计划缓存 + 按根大小设门已落地（提交 `e47f748e`，消除 300.5s 重复 `plan_update`），
+/// A6/A7 验证指南已备好（`docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`），
+/// 用户拍板先翻默认、跑验证、不通过再回退。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，
+/// 取值规则同 [`startup_autorun`]。
 pub fn model_unit_level_publish() -> bool {
-    effective_default_off_switch(
+    effective_default_on_switch(
         load_ext_fields().model_unit_level_publish,
         std::env::var(MODEL_UNIT_LEVEL_PUBLISH_ENV).ok().as_deref(),
     )
@@ -2414,6 +2418,16 @@ fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(false)
+}
+
+/// 默认开的灰度开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `true`。
+/// 2026-10-14 新增（Issue #36 / #50 翻默认）：与 `effective_default_off_switch` 对称，
+/// 拼错的环境变量退回配置值，理由同 [`effective_startup_autorun`]。
+fn effective_default_on_switch(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(true)
 }
 
 /// 环境变量名：一次性关掉 [`model_element_cache`]，不必改配置文件。
@@ -3421,12 +3435,13 @@ mod tests {
         ));
     }
 
-    /// 刚体前移便宜路径默认关（ADR-066 D7：少算方向、尚无实证），配置能开、环境变量两个方向
-    /// 都能压，拼错的值退回配置值。
+    /// 刚体前移便宜路径**默认开**（ADR-066 D7，2026-10-14 翻默认，Issue #36），配置能关、环境变量
+    /// 两个方向都能压，拼错的值退回配置值。
     #[test]
-    fn the_transform_cheap_path_is_off_by_default_and_can_be_turned_on() {
-        assert!(!effective_model_transform_cheap_path(None, None));
+    fn the_transform_cheap_path_is_on_by_default_and_can_be_turned_off() {
+        assert!(effective_model_transform_cheap_path(None, None));
         assert!(effective_model_transform_cheap_path(Some(true), None));
+        assert!(!effective_model_transform_cheap_path(Some(false), None));
         assert!(!effective_model_transform_cheap_path(Some(true), Some("0")));
         assert!(effective_model_transform_cheap_path(
             Some(false),
@@ -3442,13 +3457,21 @@ mod tests {
         ));
     }
 
-    /// 单元级发布默认关（ADR-080 D9：开门要过三道对拍 / 语料 / 净收益门），走默认关开关的统一
+    /// 单元级发布**默认开**（ADR-080 D9，2026-10-14 翻默认，Issue #50），走默认开开关的统一
     /// 取值规则；键在扩展字段名单里，配置读坏时的告警点得到它。
     #[test]
-    fn the_unit_level_publish_switch_is_off_by_default_and_listed_as_an_ext_field() {
+    fn the_unit_level_publish_switch_is_on_by_default_and_listed_as_an_ext_field() {
         assert!(
-            !effective_default_off_switch(None, None),
-            "没配置、没环境变量就是关"
+            effective_default_on_switch(None, None),
+            "没配置、没环境变量就是开"
+        );
+        assert!(
+            !effective_default_on_switch(Some(false), None),
+            "配置 false 显式关"
+        );
+        assert!(
+            !effective_default_on_switch(Some(true), Some("0")),
+            "环境变量 0 压过配置"
         );
         assert!(
             ext_field_names()

@@ -1,5 +1,21 @@
 # 变更记录
 
+## 2026-10-14（续）
+
+### 翻默认：`model_transform_cheap_path` 与 `model_unit_level_publish` 默认开（Issue #36 / #50）
+
+- **为什么**：用户拍板「先翻默认、跑验证、不通过再回退」。两个少算方向的开关已完成代码与文档准备，真机验证（live #2 / A6 对拍 / 性能测试）同步进行。
+- **改动**（`src/options.rs`）：
+  - `effective_model_transform_cheap_path`：`.unwrap_or(false)` → `.unwrap_or(true)`（默认开）
+  - 新增 `effective_default_on_switch`（默认开的统一取值规则，与 `effective_default_off_switch` 对称）
+  - `model_unit_level_publish`：改走 `effective_default_on_switch`（默认开）
+  - 配置结构注释更新（默认关 → 默认开）
+  - 单测更新：`the_transform_cheap_path_is_on_by_default_and_can_be_turned_off`、`the_unit_level_publish_switch_is_on_by_default_and_listed_as_an_ext_field`
+- **回退方式**：环境变量 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=0` / `AIOS_MODEL_UNIT_LEVEL_PUBLISH=0` 一键关回，或配置 `false`。
+- **文档更新**：ADR-066 / ADR-080 状态行、CONTEXT.md「单元级发布」词条。
+- **验证**：`cargo test --lib` **2476 / 0 / 129**。
+- **待真机验证**：live #2（ams7997 270→271 ZONE 挪动，确认 transform 单元）、A6 全语料对拍（`diff == 0`）、A7 性能测试（净收益为正）。验证不通过时用环境变量关回。
+
 ## 2026-10-14
 
 ### Issue #50 性能优化：窗口计划缓存 + 按根大小设门（ADR-080 D9 前置）

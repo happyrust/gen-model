@@ -12,7 +12,10 @@ D1（真生产方 `UnitDeltaProducer`）已落地，真库探针 5 窗 5 根对�
 `cargo test --lib` **2476 绿 / 0 红**。
 **A6 / A7 验证指南已备好**（`docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`），
 待真机环境执行全语料对拍（`probe_unit_publish_corpus_against_regen`，一根 DIFF 即红）
-与性能测试（净收益为正）；翻默认值 `model_unit_level_publish` 仍待 A6 / A7 双绿。
+与性能测试（净收益为正）。
+**★2026-10-14 翻默认开**（用户拍板「先翻默认、跑验证、不通过再回退」）：
+`model_unit_level_publish` 改走 `effective_default_on_switch`，未配置时默认开；
+环境变量 `AIOS_MODEL_UNIT_LEVEL_PUBLISH=0` 可一键关回。
 （同日会话 opus-5-10 按用户「按 A1 开工」「接着做 D2」执行；接班会话 fable-5-1-21 按「接着做 D5」「接着做 D4」「接着做 D6 / A3」
 「接真的生产方」执行；fable-5-1-10 按用户 0917「开 ADR-078（即本文，今 ADR-080）那条：RegenRoot 只重建变了的单元，把『touched 但 0 单元』的根变便宜」做 D10）。
 **★0917 改号 ADR-078 → ADR-080**（用户拍板，会话 opus-5-18）：本文 0916 立稿时误用了 ADR-078，而那个号 0915 已经给了

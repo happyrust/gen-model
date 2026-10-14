@@ -30,6 +30,8 @@ fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_mode
 （`docs/evidence/2026-10-14-adr066-live2-verification-checklist.md` /
 `docs/evidence/2026-10-14-adr066-live2-performance-test-plan.md`），待真机环境执行；
 翻默认值仍待 live #2 与验收 3（Task 时长省 ≥ 30%）双绿。
+**★2026-10-14 翻默认开**（用户拍板「先翻默认、跑验证、不通过再回退」）：`effective_model_transform_cheap_path`
+的 `.unwrap_or(false)` → `.unwrap_or(true)`，环境变量 `AIOS_MODEL_TRANSFORM_CHEAP_PATH=0` 可一键关回。
 逐条理由与实位见 `docs/plans/2026-09-08-s4b-transform-republish-by-rigid-motion-plan.md` §2。
 计划 `docs/plans/2026-09-08-external-increment-refactor-plan.md` §7.1 **G5 已拍 (a) 搬**，
 本文是那份「小 ADR」：把 ADR-056 D7 早就决定保留、却从未在 direct 路径上落地的 `Transform` 便宜路径，
