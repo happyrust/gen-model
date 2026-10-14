@@ -1,5 +1,96 @@
 # 变更记录
 
+## 2026-10-10
+
+### `DELETE /dbnums/{dbnum}/model` 只清一个库的模型面（清理模型计划 G3）
+
+- **为什么**：右键「清理模型」清的是一棵子树。整库要清掉再重算时，没有一条只动模型面的端点——`DELETE /dbnums/{n}/data` 连数据面一起删，还要求先暂停队列。
+- **改动**：
+  - `fast_delete.rs`：模型表区间删 + 房间两边 + 模型水位半边 + spatial epoch 抽成 `render_model_face_wipe`，`ResetForReinit` 改调它，原清库语句逐字不变。新增 `wipe_dbnum_model_face`：`Database` 路由写库并核对八张表归零；其余只作废进程内投影。读透另对投影里该库每个根渲一条 spool 墓碑。不调 `forget_persisted_catalogue_rows`。
+  - `handlers.rs` / `web_service/mod.rs`：`DELETE /api/v1/dbnums/{dbnum}/model`，`confirm` 必须等于路径 dbnum；`watch_scope` 外 400；同库队列行 / 在飞整库重建 / 在飞整库即时生成 / 生成锁拿不到 → 409，一行不删。不要求队列暂停。
+- **钉子**：表清单 = `RANGE_TABLES` 去掉 `pe` / `ref_rev`；水位半边与 `ResetForReinit` 逐字相同；`mem://` 上两根几何 + 房间边清完八张表为零、`pe` 不动、`model_sesno = 0`、`state_revision + 1`；handler 顺序 confirm → scope → 闸门 → 删。
+- **验证**：`cargo test --lib -- fast_delete web_service::handlers::tests model_read_route` 69 / 0；全量 `cargo test --lib` 2470 / 0 / 129（G1 当时 2466 / 0 / 129，多出来的是本条四条钉子）。
+- **不变**：`DELETE /dbnums/{n}/data` 与回退重建的清库语句。
+
+### `DELETE /model/subtree` 与 `force=true` 的「先删」共用一份范围清理（清理模型计划 G1）：按读路由分路、三种形态都先对生成根 try-lock
+
+- **为什么**：plant-ui 要在右键「重新生成模型」下方加「清理模型」（只删产物、不重算），调的就是 §4.5.1。核对时发现这条
+  端点与 `force=true` 的清理是两套写法：handler 直调摄入形态的 `delete_model_subtree`，**不按 `model_read_route` 路由**——
+  Memory 路由的库（初始化未落 / 数据任务在飞 / 读透）上会撞初始化门或删到 durable 库那边，而同一库上 `force=true`
+  清的是进程内投影；读透分支也**不先对范围内生成根 try-lock**，spec 写的「范围内有根正在生成回 409」在读透不成立
+  （只等库级锁、可能等完同库在飞的生成再清掉人家刚发布的根；S0 只给 `force` 那一路补了这一步）。
+- **改动**：
+  - `on_demand_model.rs`：`clear_scope_for_regeneration` → `pub clear_model_scope(requested, roots)`，范围清理的唯一实现；
+    「只写内存」/ 读透那一路抽成 `clear_projected_scope(requested, roots, spool_tombstone)`（先 try-lock 再
+    `delete_projected_subtree`），`delete_model_subtree` 的读透分支改转给它、不再自己删投影（也避开 async 互递归）。
+  - `handlers.rs::model_delete_subtree`：路由段照 `model_generate`（`dbnum_for_roots → route_for → 非 Database 进
+    `scope_memory_only`；同库有整库模型任务回 409），范围内生成根由 e3d-io 骨架给，调 `clear_model_scope`；
+    回执多三格 `dbnum / model_source / model_source_reason`（§4.12 口径）。
+  - 文档：spec §4.5.1 改写；`EnsureModelReq.force` 注释。
+- **钉子**：`scope_cleanup_has_exactly_one_implementation`（投影删法只一条路、根锁只两处、读透分支转给
+  `clear_projected_scope`）；handler 钉改钉 `clear_model_scope` + 路由顺序（route → 骨架解根 → 作用域内清）。
+- **不变**：增量窗口 `DeleteCleanup`（`batch_worker.rs`）与 CLI 仍直调 `delete_model_subtree`（摄入形态语义）；
+  `DELETE /model/subtree` 对摄入形态已追平的库行为逐字不变。
+- **验证**：`cargo check --lib` 过；`cargo test --lib -- on_demand_model web_service::handlers::tests model_write_behind`
+  76 / 0 / 2（+1 新钉）；全量 `cargo test --lib` 2466 / 0 / 129。真机（读透：生成中清理回 409；Memory 路由库上清理不撞门）
+  放到 C1–C3 落地后一起。
+
+### `.mesh` 与身份不符即原子重写（重新生成计划 S1；ADR-087 D3 拟稿）：盘上同名文件读不出 / 被截断 / 装着另一份网格时不再报错，重写后照常复用
+
+- **为什么**：mesh 文件名就是内容摘要（`e3d_baked_v2_<sha256>`），同名只可能是同一份内容。此前 `ensure_mesh_file` 见到已有
+  同名文件就逐位比对，不一致（掉电截断、拷坏、旧 bug 写出的字节）直接报「内容 ID 对应文件的 vertices/normals/indices 不一致」
+  或「mesh 文件损坏」——这件几何就此失败，而且文件一直坏着，谁来都失败。用户要的是「重新生成能修掉 mesh 文件引起的问题」：
+  名字下该是哪份内容是确定的，覆盖永远安全。
+- **改动**（`src/fast_model/e3d_mesh_store.rs`）：
+  - `MeshWrite` 加 `Repaired`。`ensure_mesh_file` 已有文件校验失败 → `repair_mesh_file`：记一行 `warn`（路径 + 原因；
+    mesh id 就是文件名）→ 同目录写临时文件、校验、`sync_all`（抽成 `stage_mesh_file`，与新建共用）→ `std::fs::rename`
+    覆盖目标（Windows 覆盖、POSIX 原子替换；与新建时「硬链接、不顶掉并发胜者」相反，这里要的正是覆盖）→ 重校验 → `Repaired`。
+    「并发写入胜者校验失败」那一支走同一段。
+  - 进程内的重写排成一队（全局 `Mutex`）：同一批里许多元素共用一份坏网格同时烘焙时恰好一个重写，后到的复核后 `Reused`，
+    多个 `rename` 抢同一目标在 Windows 上互拒的问题由此避开；另一个进程抢先修好也按 `Reused` 收。
+  - `E3dPersistReport` / `HistoricalModelReport` 加 `mesh_repaired`（`#[serde(default)]`），`note_mesh_write` 与 `merge` 两处计数
+    （修了要看得见）；`direct_model_persist` 把 `Repaired` 并入「写了文件」。
+  - 新建文件仍用硬链接；只有「已存在且不符」才覆盖。重启重建 mesh 账本用的 `verify_content_addressed_mesh` 不动（那时手上没有网格可写）。
+- **用例**：`a_damaged_content_addressed_file_is_rewritten_in_place`（垃圾字节 / 截断 / 另一份合法网格占名 → 都 `Repaired`、
+  之后 `Reused`、无残留 `.tmp`）；`concurrent_repairs_rewrite_once_and_nobody_fails`（8 线程并发修同一份，恰好 1 次 `Repaired`）；
+  原「坏文件必须报错」那条改成「+0.0 / -0.0 按位不同要重写」；取代 `damaged_existing_content_addressed_file_is_rejected`。
+- **代价 / 边界**：浏览器端 `/api/v1/meshes/{id}` 回 `Cache-Control: immutable` 一年，已经缓存了坏字节的浏览器这里修不到，
+  遇到时清浏览器缓存。图元档 mesh id 是 64 位截断摘要，理论上撞 id 时两份网格会来回覆盖——日志里同一 id 反复 repaired 就是信号。
+- **验证**：`cargo check --lib` 过；`cargo test --lib -- fast_model::e3d_mesh_store` 7 / 0 / 0；全量 `cargo test --lib`
+  2465 passed / 0 failed / 129 ignored（S0 提交时 2464 / 0 / 129，+1 新用例）。
+  真机（备份一个 `.mesh` 后写垃圾字节、`POST /model/generate force=true` → 200、日志 repaired、回执 `mesh_repaired ≥ 1`）未做，
+  放到 S2 / S3 落地后一起。
+
+### 右键「重新生成模型」（`/model/generate` `force=true`）改为先删后生成：先清整个请求子树的已发布产物，再逐根重新发布
+
+- **为什么**：`force` 此前只跳过凭证命中（`ensure_exact_generation_root_inner` 不看 `cache_current`），几何照常重新 bake，
+  但发布那一步仍拿着旧回执走两条捷径——「模型目标没变、投影完整 → `cached_root_commit` 只重盖章」和「清单 hash 没变 →
+  `project_geometry_delta` 几何一条不动」——库里的产物根本换不掉；根已经解不出来的旧产物（孤儿）没人删；某根重算失败时
+  `IncompleteRoot::Discard` 还会「保旧」。用户要的是「确保重新生成」：宁可失败后留空，也不要旧产物无声存活（决策 d-6）。
+- **改动**（`src/data_interface/on_demand_model.rs`）：
+  - `ensure_model_scope_generated_from_roots` 在 `force` 时、解完根逐根加锁之前先调 `clear_scope_for_regeneration(requested_refno, &roots)`。
+  - 三路清之前都先对范围内的生成根 `try_generation_root`，被占回 `409 conflict`、一行不删（摄入形态原本就在
+    `delete_model_subtree` 里拿）。只写内存 / 读透这一支此前只等库级锁 `lock_db_generation`，而同库每一次生成
+    全程都攥着它：会排队等完同库任何在飞的生成（可能吃满 120 s 回 504），再把别的请求刚发布的那一根清掉重算，
+    与 §4.5「范围内有根正在生成按 409 回」对不上。
+  - `clear_scope_for_regeneration`：「只写内存」作用域（读透形态下 `/model/generate` 一律在此作用域里）/ 读透形态走
+    `delete_projected_subtree`——只清进程内投影（记录按祖先链取、隐式管身分支重置、受影响根含嵌套根回执作废），不过初始化门、
+    不碰 durable 权威库，读透另进 mirror spool 墓碑；摄入形态走原 `delete_model_subtree`（库 + 投影 + 账本，过门）。
+  - `delete_model_subtree` 的读透分支抽成 `delete_projected_subtree(.., spool_tombstone = true)`，`DELETE /model/subtree` 行为不变。
+  - 清掉之后每根 `prior` 为空、回执为空：`incomplete_root_policy` 判 `Publish`，部分失败的根落下算得出的成员并在回执 `failed` 记账，
+    不再被整根丢弃。
+  - 文档：`docs/specs/web-service-api.md` §4.5 `force` 条目改写；`EnsureModelReq.force` 注释。客户端（plant-ui）不改：照旧只发
+    `generate force=true`、不删产物（ADR-0030 D2）。
+- **代价（有意为之）**：清掉到重新发布之间该范围在 `/model/records` 上为空（plant-ui 自己在回执落地前不卸场景，别的读者会看到空）；
+  某根重算失败时旧产物不再保留，回执按失败报、要重试再点一次。
+- **验证**：新增源码钉 `forced_regeneration_clears_the_requested_scope_before_generating`。`cargo check --lib` 过；
+  `cargo test --lib -- on_demand_model production_current_projection_writes_use_admission_and_generation_fence web_service::handlers::tests`
+  52 passed / 0 failed / 1 ignored（含原有四条 on-demand 源码钉与 write-behind 的 `lock_db_generation` / `publish` 钉）；
+  全量 `cargo test --lib` 2464 passed / 0 failed / 129 ignored（0.1.38 封包时 2463 / 0 / 128，+1 新钉）。
+  补上根锁之后（同一钉子加「投影删法之前先 try-lock」一条断言）复跑：`cargo check --lib` 过；
+  `cargo test --lib -- on_demand_model web_service::handlers::tests model_write_behind` 75 / 0 / 2；全量 2464 / 0 / 129。
+  未做：真机端到端（起后端对 AMS 右键重新生成、看 `/model/records` 先空后满、失败根留空、读透形态并发两发一个 409）。
+
 ## 2026-09-29
 
 ### 本期执行范围不再每次现算（ADR-085）：`mdb_scope` 阶段行稳态零行，MDB 新加的库 SYST 落库后即进范围

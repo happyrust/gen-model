@@ -210,7 +210,7 @@ impl ApiError {
     }
 
     /// 容器（WORL / SITE / ZONE）不能做生成根。单列一个 code 是给客户端用的：
-    /// 它拿到这条该展开一层、对子节点逐个 ensure，而不是把这次显示当成失败。
+    /// 它拿到这条该展开一层、对子节点逐个 generate，而不是把这次生成当成失败。
     pub fn container(message: impl Into<String>) -> Self {
         Self::coded(StatusCode::UNPROCESSABLE_ENTITY, "container", message)
     }
@@ -537,6 +537,8 @@ async fn serve_with_ready(
             "/api/v1/model/subtree",
             delete(handlers::model_delete_subtree),
         )
+        .route("/api/v1/model/generate", post(handlers::model_generate))
+        // 旧名，别名一版（ADR-086 D4）；handler 打 deprecated。
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
         .route("/api/v1/model/records", post(handlers::model_records))
         .route(
@@ -586,6 +588,10 @@ async fn serve_with_ready(
         // 任意节点按对比范围折叠的版本表（同一节 ADR 0066 的第三条）：容器「所有子节点」下的时间线只有它能列，
         // 每版附「动了几个最小交付单元」。同样按需算、只活在进程内。
         .route("/api/v1/node/versions", get(handlers::node_versions))
+        .route(
+            "/api/v1/dbnums/{dbnum}/model",
+            delete(handlers::dbnum_model_delete),
+        )
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
@@ -1122,6 +1128,27 @@ mod tests {
         assert!(
             !serve.contains("post(handlers::spatial_") && !serve.contains("delete(handlers::spatial_"),
             "spatial routes must stay read-only"
+        );
+    }
+
+    /// ADR-086 D4：生成接口叫 `/model/generate`；`/model/ensure` 是别名（同一 handler 族），留一版。
+    #[test]
+    fn the_ensure_path_is_an_alias_of_generate() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(
+            serve.contains("\"/api/v1/model/generate\", post(handlers::model_generate)"),
+            "generate route must exist"
+        );
+        assert!(
+            serve.contains("\"/api/v1/model/ensure\", post(handlers::model_ensure)"),
+            "ensure alias must stay for one version"
         );
     }
 

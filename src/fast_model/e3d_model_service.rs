@@ -1384,6 +1384,13 @@ pub(crate) async fn lock_db_generation(dbnum: u32) -> tokio::sync::OwnedMutexGua
     db_generation_lock(dbnum).lock_owned().await
 }
 
+/// 拿不到就立刻返回，不等。整库模型清理用它：有生成在飞就 409，一行不删。
+pub(crate) fn try_lock_db_generation(
+    dbnum: u32,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, tokio::sync::TryLockError> {
+    db_generation_lock(dbnum).try_lock_owned()
+}
+
 /// 把一段同步的 CPU 活从 tokio 工作线程上让出去，**借用照常**（不必 `'static`，这是不走
 /// `spawn_blocking` 的原因：单元级发布的生产方借着 `&E3dModelService` 与两端 `DbSet`）。
 ///
@@ -3473,6 +3480,7 @@ impl E3dPersistReport {
         self.baked_instances += other.baked_instances;
         self.mesh_reused += other.mesh_reused;
         self.mesh_written += other.mesh_written;
+        self.mesh_repaired += other.mesh_repaired;
         self.mesh_ids.extend(other.mesh_ids);
         self.failed_roots.extend(other.failed_roots);
         self.partial_roots.extend(other.partial_roots);
@@ -4033,20 +4041,45 @@ fn persisted_world_transform(
 }
 
 /// Remove every projected e3d-model geometry owned by one generation root,
-/// and retire that root's overlay receipt in the same write lock.
+/// and retire that root's overlay receipt in the same outcome.
 ///
 /// Derived geometry (implied tubes) lives under the root's ancestor index, so
 /// it is dropped with the rest of the root. Shared content-addressed `.mesh`
 /// files are not deleted; the durable rows are removed by the caller's
 /// tombstone (`render_spooled_scope_deletion`).
 ///
-/// A removal that leaves the receipt in place makes `/model/records` fail with
+/// Record removals still go through [`apply_geometry_delta`] so a durable
+/// write-behind sees the deletion. That commit does not replace the resident
+/// receipt. Leaving the receipt in place makes `/model/records` fail with
 /// `memory overlay root … is incomplete: receipt expects N, store has 0`.
 /// The second delete then finds no records and would return `deleted` while
 /// that receipt stays. Retiring the receipt even when the store is already
 /// empty closes that hole.
 pub async fn delete_persisted_geometry_root(root: RefNo) -> anyhow::Result<usize> {
-    Ok(ModelMemoryStore::global().retire_deleted_root(ProjectionScope::Current, root))
+    let store = ModelMemoryStore::global();
+    let mut by_dbnum = BTreeMap::<u32, Vec<GeometryId>>::new();
+    for record in store.records_of_root(ProjectionScope::Current, root) {
+        by_dbnum
+            .entry(record.dbnum)
+            .or_default()
+            .push(record.geometry_id);
+    }
+
+    let mut removed = 0;
+    for (dbnum, geometry_ids) in by_dbnum {
+        removed += apply_geometry_delta(
+            dbnum,
+            0,
+            Vec::new(),
+            geometry_ids,
+            &BTreeMap::new(),
+            Path::new("."),
+        )
+        .await?
+        .removed;
+    }
+    store.retire_deleted_root(ProjectionScope::Current, root);
+    Ok(removed)
 }
 
 /// Full generation must never regress the projection. With the source pinned to
@@ -4088,6 +4121,7 @@ fn note_mesh_write(report: &mut E3dPersistReport, outcome: MeshWrite) {
     match outcome {
         MeshWrite::Written => report.mesh_written += 1,
         MeshWrite::Reused => report.mesh_reused += 1,
+        MeshWrite::Repaired => report.mesh_repaired += 1,
     }
 }
 

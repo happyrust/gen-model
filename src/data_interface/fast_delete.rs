@@ -589,33 +589,101 @@ pub(crate) enum WatermarkDisposal {
     RestartInitializationData,
 }
 
+/// 模型水位那半句（ADR-060 D8）。整库清库的 `ResetForReinit` 把它接在数据水位后面、
+/// 同一句 `UPDATE` 里；整库模型清理单独成句，字面量必须同一份。
+const MODEL_WATERMARK_RESET: &str = "model_sesno = 0, model_sesno_time = NONE, \
+     model_settled_at = NONE, model_lazy_roots = NONE, model_dead_roots = NONE, \
+     model_roots_observed_at = NONE";
+
+fn is_model_face_range_table(table: &str) -> bool {
+    table != "pe" && table != "ref_rev"
+}
+
+/// 整库模型面要删 / 要改的语句。区间删的表清单就是 `RANGE_TABLES` 去掉 `pe` / `ref_rev`
+/// （不另抄一份）；房间两边再按 `in.dbnum` 删一次——边上没有 `dbnum` 列，Ref0 区间
+/// 够不着「id 前缀不在本库 Ref0 集合里」的边。元数据是 spatial epoch 与模型水位半边，
+/// 并让 `state_revision` 前进一步。
+pub(crate) struct ModelFaceRender {
+    pub range_deletes: Vec<String>,
+    pub room_predicates: Vec<String>,
+    pub metadata: Vec<String>,
+}
+
+pub(crate) fn render_model_face_wipe(dbnum: u32, ref0s: &[String]) -> ModelFaceRender {
+    let mut range_deletes = Vec::new();
+    for ref0 in ref0s {
+        for table in RANGE_TABLES
+            .iter()
+            .copied()
+            .filter(|table| is_model_face_range_table(table))
+        {
+            range_deletes.push(format!("DELETE {};", range_of(table, ref0)));
+        }
+    }
+    let room_predicates = vec![
+        format!("DELETE room_relate WHERE in.dbnum = {dbnum};"),
+        format!("DELETE room_panel_relate WHERE in.dbnum = {dbnum};"),
+    ];
+    let metadata = vec![
+        crate::fast_model::aabb_tree::render_spatial_epoch_bump(),
+        format!(
+            "UPDATE dbnum_watermark:{dbnum} SET {MODEL_WATERMARK_RESET}, \
+             state_revision = (state_revision ?? 0) + 1;"
+        ),
+    ];
+    ModelFaceRender {
+        range_deletes,
+        room_predicates,
+        metadata,
+    }
+}
+
 /// Render separate checked phases. A giant optimistic transaction conflicts
 /// with the watcher's periodic observation write on large DBNUMs. Metadata is
 /// deliberately last, so a failed data phase never advertises an initialized
 /// database as cleanly deleted; within it the watermark disposal is the final
 /// statement — it is the wipe's commit point, so a half-done wipe keeps the
 /// old watermark and the next verdict retries idempotently.
+///
+/// 模型面的区间删与 spatial epoch 来自 [`render_model_face_wipe`]，和整库模型清理
+/// 是同一份渲染。`ref_rev` / noun / `pe` 仍是数据面，按原顺序插回去，整段语句与
+/// 抽出之前逐字相同。
 fn render_delete_phases(
     dbnum: u32,
     ref0s: &[String],
     noun_tables: &[String],
     watermark: WatermarkDisposal,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let model = render_model_face_wipe(dbnum, ref0s);
+    let mut model_deletes = model.range_deletes.iter();
     let mut relations = Vec::new();
     let mut ranges = Vec::new();
     for ref0 in ref0s {
         relations.push(format!("DELETE {};", owner_range_of(ref0)));
-        for table in RANGE_TABLES.iter().filter(|table| **table != "pe") {
-            if watermark == WatermarkDisposal::RestartInitializationData && *table != "ref_rev" {
+        for table in RANGE_TABLES.iter().copied().filter(|table| *table != "pe") {
+            if watermark == WatermarkDisposal::RestartInitializationData && table != "ref_rev" {
+                if is_model_face_range_table(table) {
+                    let _ = model_deletes.next();
+                }
                 continue;
             }
-            ranges.push(format!("DELETE {};", range_of(table, ref0)));
+            if is_model_face_range_table(table) {
+                ranges.push(
+                    model_deletes
+                        .next()
+                        .expect("model-face range delete")
+                        .clone(),
+                );
+            } else {
+                ranges.push(format!("DELETE {};", range_of(table, ref0)));
+            }
         }
         for table in noun_tables {
             ranges.push(format!("DELETE {};", range_of(table, ref0)));
         }
         ranges.push(format!("DELETE {};", range_of("pe", ref0)));
     }
+    debug_assert!(model_deletes.next().is_none());
     // 第二条异步账的三张表（模型意图队列 / 恢复记录 / 副作用队列）不再逐库清：它们整体退役
     // （ADR-072 D5），随 `retire_publish_run_tables` 的 `REMOVE TABLE IF EXISTS` 一次删掉，
     // 清库路上再点名它们只是给退役表续命。
@@ -634,21 +702,14 @@ fn render_delete_phases(
             // 清库删掉了 room_relate / inst_relate 行：epoch 不递增的话，崩溃
             // 重启会按指纹相等复用一棵还留着被删构件包围盒的树（ADR-010 D4 的
             // 幽灵形态借崩溃复活）。放在水位处置之前、同一元数据阶段提交。
-            metadata.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-            // 同时抹掉指向旧历史的 applied_sesno_time（那条保存在当前文件里已
-            // 不存在），基线收口会写上新的；legacy `sesno` 字段与 applied 同步
-            // 归零，读侧迁移才不会把旧值当水位捞回来。
-            //
-            // 模型水位那一组同一句归零（ADR-060 D8）：清库把这个库的模型产物一并
-            // 删了，水位留着就是「水位说模型追平过、模型面一行都没有」的幽灵形态。
-            // 四格计数回到 NONE 而不是 0——清完还没观察过，「未观察」不是「观察到
-            // 零个」（M5）。
+            // 与整库模型清理同一句 epoch。模型水位半边接在数据水位后面，仍是同一句
+            // UPDATE（分开写就有半清状态）。四格计数回到 NONE 而不是 0——清完还没
+            // 观察过，「未观察」不是「观察到零个」（M5）。
+            metadata.push(model.metadata[0].clone());
             metadata.push(format!(
                 "UPDATE dbnum_watermark:{dbnum} SET applied_sesno = 0, sesno = 0, \
                  applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE, \
-                 model_sesno = 0, model_sesno_time = NONE, model_settled_at = NONE, \
-                 model_lazy_roots = NONE, model_dead_roots = NONE, \
-                 model_roots_observed_at = NONE;"
+                 {MODEL_WATERMARK_RESET};"
             ));
         }
     }
@@ -745,23 +806,231 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 /// 幂等重放。
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
-    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
-    // D6：行刚被清空，「这一版已经落过库」的记忆整份作废——被清的是 DESI 库时，它的目录链
-    // 依赖行也一起没了，按目录库分不出哪些该留。
+    // 进程内模型面与整库模型清理同一串。目录 memo 是数据面，只有整库重建才作废。
+    forget_dbnum_model_in_process(dbnum);
     crate::data_interface::cata_dependency::forget_persisted_catalogue_rows(
         crate::data_interface::cata_dependency::ForgetScope::Everything,
     );
-    // 生成根账本整页作废（ADR-079）：整库清空之后「这根已经生成到 T」的旧说法只可能活在这里，
-    // 留着它，重排的初始化会把失败根当欠账、把成功根当追平。
+    Ok(result)
+}
+
+/// 进程内「这个库的模型」作废：投影、生成根账本、空间树，并把读路由翻到内存。
+/// 整库重建与整库模型清理共用；**不**动目录 memo（那是数据面）。
+fn forget_dbnum_model_in_process(dbnum: u32) {
+    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
     crate::data_interface::model_root_ledger::forget_dbnum(dbnum);
     crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
-    // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
-    // 按需请求改由进程内投影供数，直到重建的初始化任务跑完。
     crate::data_interface::model_read_route::announce_source_changed(
         dbnum,
         crate::data_interface::model_read_route::ModelReadSource::Memory,
     );
-    Ok(result)
+}
+
+/// 整库生成锁拿不到：有按需 / 整库生成在飞。一行都不删。
+#[derive(Debug)]
+pub struct ModelFaceGenerationBusy {
+    pub dbnum: u32,
+}
+
+impl std::fmt::Display for ModelFaceGenerationBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dbnum {} 有生成在飞，整库模型清理拒绝、一行不删",
+            self.dbnum
+        )
+    }
+}
+
+impl std::error::Error for ModelFaceGenerationBusy {}
+
+/// `DELETE /api/v1/dbnums/{dbnum}/model` 的回执。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelFaceWipeResult {
+    pub dbnum: u32,
+    pub ref0s: Vec<String>,
+    pub range_statements: usize,
+    pub elapsed_ms: u64,
+}
+
+/// 只清一个库的模型面：模型表区间、房间两边、模型水位归零。不碰 `pe` / noun / 数据水位 /
+/// 目录 memo。`Database` 路由才写库；其余只作废进程内投影，读透另把每个根渲成 spool 墓碑。
+pub async fn wipe_dbnum_model_face(dbnum: u32) -> anyhow::Result<ModelFaceWipeResult> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    let _generation = crate::fast_model::e3d_model_service::try_lock_db_generation(dbnum)
+        .map_err(|_| ModelFaceGenerationBusy { dbnum })?;
+    let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
+        .lock()
+        .await;
+    let _state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE
+        .write()
+        .await;
+    let started = Instant::now();
+    let route = crate::data_interface::model_read_route::route_for(dbnum).await?;
+    if !route.is_database() {
+        if crate::options::data_face().is_read_through() {
+            spool_dbnum_model_tombstones(dbnum)?;
+        }
+        forget_dbnum_model_in_process(dbnum);
+        return Ok(ModelFaceWipeResult {
+            dbnum,
+            ref0s: Vec::new(),
+            range_statements: 0,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+    let result = wipe_dbnum_model_face_on(&SUL_DB, dbnum).await?;
+    forget_dbnum_model_in_process(dbnum);
+    Ok(ModelFaceWipeResult {
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        ..result
+    })
+}
+
+/// [`wipe_dbnum_model_face`] 的库那一半，给 `mem://` 行为用例在自己的实例上跑同一份渲染。
+pub(crate) async fn wipe_dbnum_model_face_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<ModelFaceWipeResult> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    let started = Instant::now();
+    let (_pe_rows, ref0s, _noun_tables) = collect_dbnum_ref0s_on(db, dbnum).await?;
+    let rendered = render_model_face_wipe(dbnum, &ref0s);
+    let mut statements = rendered.range_deletes;
+    statements.extend(rendered.room_predicates);
+    execute_phase(db, "delete model face", &statements).await?;
+    execute_transactional_phase(db, "reset model watermark", &rendered.metadata).await?;
+
+    let mut verify = db
+        .query(render_model_face_verify(dbnum, &ref0s))
+        .await
+        .context("verify model face wipe")?
+        .check()
+        .context("verify model face wipe statement")?;
+    let range_tables = RANGE_TABLES
+        .iter()
+        .filter(|table| is_model_face_range_table(table))
+        .count();
+    let queries = range_tables * ref0s.len() + 2;
+    for index in 0..queries {
+        let remaining = verify
+            .take::<Vec<CountRow>>(index)
+            .with_context(|| format!("decode model face residue {index}"))?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+        if remaining != 0 {
+            bail!(
+                "dbnum {dbnum} model face wipe incomplete: query {index} still has {remaining} rows"
+            );
+        }
+    }
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
+    Ok(ModelFaceWipeResult {
+        dbnum,
+        ref0s,
+        range_statements: statements.len(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+fn render_model_face_verify(dbnum: u32, ref0s: &[String]) -> String {
+    let mut sql = String::new();
+    for table in RANGE_TABLES
+        .iter()
+        .copied()
+        .filter(|table| is_model_face_range_table(table))
+    {
+        for ref0 in ref0s {
+            sql.push_str(&format!(
+                "SELECT count() AS count FROM {} GROUP ALL;\n",
+                range_of(table, ref0)
+            ));
+        }
+    }
+    sql.push_str(&format!(
+        "SELECT count() AS count FROM room_relate WHERE in.dbnum = {dbnum} GROUP ALL;\n\
+         SELECT count() AS count FROM room_panel_relate WHERE in.dbnum = {dbnum} GROUP ALL;"
+    ));
+    sql
+}
+
+fn projected_roots_for_dbnum(dbnum: u32) -> Vec<e3d_io::refno::RefNo> {
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
+    store
+        .roots(scope)
+        .into_iter()
+        .filter(|root| {
+            store.receipt(scope, *root).is_some_and(|receipt| {
+                receipt
+                    .model_target
+                    .as_ref()
+                    .is_some_and(|target| target.design.dbnum == dbnum)
+            }) || store
+                .records_of_root(scope, *root)
+                .iter()
+                .any(|record| record.dbnum == dbnum)
+        })
+        .collect()
+}
+
+fn spool_dbnum_model_tombstones(dbnum: u32) -> anyhow::Result<()> {
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
+    let roots = projected_roots_for_dbnum(dbnum);
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let option = aios_core::get_db_option();
+    let spool = crate::data_interface::mirror_spool::MirrorSpool::for_process(
+        &option.surreal_ns,
+        &option.project_name,
+        &option.mdb_name,
+    )?;
+    for root in roots {
+        let records = store
+            .records_of_root(scope, root)
+            .into_iter()
+            .filter(|record| record.dbnum == dbnum)
+            .collect::<Vec<_>>();
+        let tube_branches = records
+            .iter()
+            .filter(|record| record.tube.is_some())
+            .map(|record| record.source_refno)
+            .collect::<Vec<_>>();
+        let transaction = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
+            root,
+            &[root],
+            &tube_branches,
+        );
+        let sessions = records
+            .iter()
+            .map(|record| (record.dbnum, record.source_sesno))
+            .collect::<Vec<_>>();
+        let source_sesno_epoch = sessions
+            .iter()
+            .map(|(_, sesno)| u64::from(*sesno))
+            .max()
+            .unwrap_or_default();
+        let epoch = crate::data_interface::mdb_memory_store::get(
+            &option.project_name,
+            &option.mdb_name,
+        )
+        .map(|snapshot| snapshot.epoch())
+        .unwrap_or(source_sesno_epoch);
+        spool.persist(
+            epoch,
+            sessions,
+            format!("model-tombstone-dbnum:{dbnum}:{root}"),
+            vec![transaction],
+        )?;
+    }
+    Ok(())
 }
 
 async fn wipe_dbnum_rows(
@@ -787,21 +1056,12 @@ async fn wipe_dbnum_rows(
     })
 }
 
-/// [`wipe_dbnum_rows`] 的持久层那一半：Ref0 区间圈定 → 三个删除阶段 → 核对，在给定实例上跑。
-///
-/// 单拎出来是为了让 `mem://` 崩溃点重放对拍能在自己的实例上跑同一份渲染——初始化在第 k 块
-/// kill → 回退 = 整库 wipe → 重排（计划 §4.3-1），对拍的是生产写法，不是测试自己拼的 SQL。
-/// 锁、`pe` 事件核对与按需读路翻面都在公开入口那边；镜像作废按实例判（`_on` 纪律）。
-pub(crate) async fn wipe_dbnum_rows_on(
+/// `wipe_dbnum_rows_on` 开头那三句：PE 前缀、noun、`dbnum_info_table` 的 Ref0，取并集。
+/// 整库快删与整库模型清理共用，避免两份圈定。
+async fn collect_dbnum_ref0s_on(
     db: &Surreal<Any>,
     dbnum: u32,
-    watermark: WatermarkDisposal,
-) -> anyhow::Result<FastDeleteDbnumResult> {
-    if dbnum == 0 {
-        bail!("dbnum must be greater than zero");
-    }
-    let started = Instant::now();
-
+) -> anyhow::Result<(usize, Vec<String>, Vec<String>)> {
     let mut response = db
         .query(format!(
             "SELECT string::split(<string>id, '_')[0] AS prefix, count() AS count \
@@ -823,14 +1083,12 @@ pub(crate) async fn wipe_dbnum_rows_on(
     let info_ref0_rows = response
         .take::<Vec<InfoRef0Row>>(2)
         .context("decode dbnum_info_table Ref0 groups")?;
-
     // `dbnum_info_table` 的 record id 才是这个 dbnum 所属的 Ref0。不能把 dbnum
     // 数值直接拼进 record range；例如 dbnum=7333 的真实 Ref0 是 23717/31909。
     // 同时从 PE 与统计表取并集：正常库由 PE 覆盖，PE 零行的幽灵水位仍能依靠
     // 启动播种所用的统计行找到 Ref0，继续走同一套 id-range 清理。
     let (pe_rows, ref0s) = collect_ref0s(prefix_rows, info_ref0_rows)
         .with_context(|| format!("resolve Ref0 ranges for dbnum {dbnum}"))?;
-
     let mut noun_tables = noun_rows
         .into_iter()
         .map(|row| row.noun)
@@ -840,6 +1098,24 @@ pub(crate) async fn wipe_dbnum_rows_on(
     if let Some(invalid) = noun_tables.iter().find(|name| !valid_table_name(name)) {
         bail!("invalid noun table name for dbnum {dbnum}: {invalid}");
     }
+    Ok((pe_rows, ref0s, noun_tables))
+}
+
+/// [`wipe_dbnum_rows`] 的持久层那一半：Ref0 区间圈定 → 三个删除阶段 → 核对，在给定实例上跑。
+///
+/// 单拎出来是为了让 `mem://` 崩溃点重放对拍能在自己的实例上跑同一份渲染——初始化在第 k 块
+/// kill → 回退 = 整库 wipe → 重排（计划 §4.3-1），对拍的是生产写法，不是测试自己拼的 SQL。
+/// 锁、`pe` 事件核对与按需读路翻面都在公开入口那边；镜像作废按实例判（`_on` 纪律）。
+pub(crate) async fn wipe_dbnum_rows_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    watermark: WatermarkDisposal,
+) -> anyhow::Result<FastDeleteDbnumResult> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    let started = Instant::now();
+    let (pe_rows, ref0s, noun_tables) = collect_dbnum_ref0s_on(db, dbnum).await?;
 
     let (relations, ranges, metadata) =
         render_delete_phases(dbnum, &ref0s, &noun_tables, watermark);
@@ -1467,5 +1743,184 @@ mod tests {
             render_delete_phases(7333, &ref0s, &[], WatermarkDisposal::ResetForReinit);
         assert!(ranges.contains(&"DELETE pe:23717_0..23717_9999999999;".into()));
         assert!(ranges.contains(&"DELETE pe:31909_0..31909_9999999999;".into()));
+    }
+
+    /// 模型面的表清单从 `RANGE_TABLES` 滤出来，不另抄一份。整库清库把 `ref_rev` 插回原位，
+    /// 所以抽完之后三种处置的语句与抽出前逐字相同——这条钉住「清库语句里没有房间谓词删」。
+    #[test]
+    fn model_face_tables_are_range_tables_without_pe_and_ref_rev() {
+        let filtered = RANGE_TABLES
+            .iter()
+            .copied()
+            .filter(|table| is_model_face_range_table(table))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filtered,
+            vec![
+                "inst_relate",
+                "tubi_relate",
+                "room_relate",
+                "room_panel_relate",
+                "geo_relate",
+                "inst_info",
+                "aabb",
+                "trans",
+            ]
+        );
+        let rendered = render_model_face_wipe(7997, &["24381".into()]);
+        for table in &filtered {
+            assert!(
+                rendered
+                    .range_deletes
+                    .iter()
+                    .any(|sql| sql.starts_with(&format!("DELETE {table}:"))),
+                "{table} 必须在模型面区间删里: {:?}",
+                rendered.range_deletes
+            );
+        }
+        assert!(rendered.range_deletes.iter().all(|sql| !sql.contains("WHERE")));
+        assert_eq!(
+            rendered.room_predicates,
+            vec![
+                "DELETE room_relate WHERE in.dbnum = 7997;".to_string(),
+                "DELETE room_panel_relate WHERE in.dbnum = 7997;".to_string(),
+            ]
+        );
+        for disposal in [
+            WatermarkDisposal::DropRow,
+            WatermarkDisposal::ResetForReinit,
+            WatermarkDisposal::RestartInitializationData,
+        ] {
+            let (relations, ranges, metadata) =
+                render_delete_phases(7997, &["24381".into()], &["BRAN".into()], disposal);
+            for statement in relations.iter().chain(&ranges).chain(&metadata) {
+                assert!(
+                    !statement.contains("WHERE in.dbnum"),
+                    "整库清库仍走 Ref0 区间，不改用房间谓词: {statement}"
+                );
+            }
+        }
+    }
+
+    /// 模型水位半边与 `ResetForReinit` 逐字相同；整库模型清理不碰 pe、noun、交付台账、数据水位行。
+    #[test]
+    fn the_model_face_wipe_matches_the_reinit_watermark_and_leaves_the_data_face() {
+        let (_, _, metadata) = render_delete_phases(
+            7997,
+            &["24381".into()],
+            &["EQUI".into()],
+            WatermarkDisposal::ResetForReinit,
+        );
+        let full = metadata.last().expect("watermark update");
+        assert!(
+            full.contains(MODEL_WATERMARK_RESET),
+            "回退重建的水位句必须含同一段模型半边: {full}"
+        );
+        let rendered = render_model_face_wipe(7997, &["24381".into()]);
+        assert_eq!(
+            rendered.metadata[0],
+            metadata
+                .iter()
+                .find(|sql| sql.contains("spatial_epoch:current"))
+                .expect("epoch")
+                .as_str()
+        );
+        assert!(
+            rendered.metadata[1].contains(MODEL_WATERMARK_RESET),
+            "模型清理的水位句必须是同一段: {}",
+            rendered.metadata[1]
+        );
+        assert!(rendered.metadata[1].contains("state_revision = (state_revision ?? 0) + 1"));
+        let sql = [
+            rendered.range_deletes.clone(),
+            rendered.room_predicates.clone(),
+            rendered.metadata.clone(),
+        ]
+        .concat()
+        .join("\n");
+        assert!(!sql.contains("DELETE pe:") && !sql.contains("DELETE pe;"), "{sql}");
+        assert!(!sql.contains("datacenter"), "{sql}");
+        assert!(!sql.contains("dbnum_info_table"), "{sql}");
+        assert!(!sql.contains("DELETE dbnum_watermark"), "{sql}");
+        assert!(!sql.contains("applied_sesno"), "{sql}");
+        for noun in ["EQUI", "BRAN", "PANE", "ATT_UDA"] {
+            assert!(!sql.contains(&format!("DELETE {noun}")), "{noun}: {sql}");
+        }
+        assert!(
+            !sql.contains("forget_persisted_catalogue_rows"),
+            "渲染层不该点目录 memo"
+        );
+    }
+
+    /// 写两根几何和房间边，清掉模型面：八张表该库为零，`pe` / noun / 别的库不动，
+    /// 模型水位归零且 `state_revision` 加一，数据水位留着。
+    #[tokio::test]
+    async fn wiping_the_model_face_on_mem_zeroes_eight_tables_and_keeps_pe() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("model_face").use_db("test").await.unwrap();
+        db.query(
+            "CREATE pe:24381_1 SET dbnum = 8000, sesno = 4, noun = 'BRAN';\
+             CREATE pe:24381_10 SET dbnum = 8000, noun = 'BRAN';\
+             CREATE pe:24381_20 SET dbnum = 8000, noun = 'BRAN';\
+             CREATE inst_relate:24381_10 SET in = pe:24381_10, dbnum = 8000;\
+             CREATE inst_relate:24381_20 SET in = pe:24381_20, dbnum = 8000;\
+             CREATE inst_info:24381_10 SET dbnum = 8000;\
+             CREATE tubi_relate:24381_20 SET in = pe:24381_20, dbnum = 8000;\
+             CREATE geo_relate:24381_10 SET dbnum = 8000;\
+             CREATE aabb:24381_10 SET dbnum = 8000;\
+             CREATE trans:24381_10 SET dbnum = 8000;\
+             CREATE ref_rev:24381_1 SET dbnum = 8000;\
+             CREATE BRAN:24381_10 SET dbnum = 8000;\
+             CREATE room_relate SET in = pe:24381_1, out = pe:24381_10;\
+             CREATE room_panel_relate SET in = pe:24381_1, out = pe:24381_20;\
+             CREATE aabb:deadbeef SET mesh = true;\
+             CREATE pe:31909_1 SET dbnum = 8001, noun = 'EQUI';\
+             CREATE inst_relate:31909_1 SET in = pe:31909_1, dbnum = 8001;\
+             CREATE dbnum_watermark:8000 SET applied_sesno = 4, sesno = 4, model_sesno = 4, \
+                 state_revision = 2;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let result = wipe_dbnum_model_face_on(&db, 8000).await.unwrap();
+        assert_eq!(result.dbnum, 8000);
+        assert_eq!(result.ref0s, vec!["24381".to_string()]);
+
+        #[derive(Debug, serde::Deserialize)]
+        struct Mark {
+            applied_sesno: i64,
+            model_sesno: i64,
+            state_revision: i64,
+        }
+        let mut response = db
+            .query(
+                "SELECT applied_sesno, model_sesno, state_revision FROM ONLY dbnum_watermark:8000;\
+                 SELECT count() AS count FROM pe WHERE dbnum = 8000 GROUP ALL;\
+                 SELECT count() AS count FROM ref_rev:24381_0..24381_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM BRAN:24381_0..24381_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM inst_relate:31909_0..31909_9999999999 GROUP ALL;\
+                 SELECT count() AS count FROM aabb:deadbeef GROUP ALL;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mark: Option<Mark> = response.take(0).unwrap();
+        let mark = mark.expect("水位行还在");
+        assert_eq!(mark.model_sesno, 0, "模型水位归零");
+        assert_eq!(mark.state_revision, 3, "state_revision 加一");
+        assert_eq!(mark.applied_sesno, 4, "数据水位不动");
+        for (index, label) in [(1, "pe"), (2, "ref_rev"), (3, "BRAN"), (4, "别的库"), (5, "共享盒")]
+        {
+            let count = response
+                .take::<Vec<CountRow>>(index)
+                .unwrap()
+                .first()
+                .map(|row| row.count)
+                .unwrap_or_default();
+            assert!(count >= 1, "{label} 不该被整库模型清理删掉，剩下 {count}");
+        }
     }
 }

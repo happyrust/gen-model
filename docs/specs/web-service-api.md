@@ -345,7 +345,11 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - 这类任务与投影一样只活在进程内。终态根快照短期、有界保留，服务重启后旧 task id 与快照
   同时返回 404。
 
-### 4.5 `POST /api/v1/model/ensure` — 按需生成单构件模型（同步）
+### 4.5 `POST /api/v1/model/generate`（旧名 `/api/v1/model/ensure`）— 按需生成节点范围的模型（同步）
+
+> 2026-10-09 ADR-086 D4 改名：请求体、回执、`force` 语义一字不变，只是名字说的事从「确保有」改成「生成」。
+> `/api/v1/model/ensure` 作为别名指向同一 handler、每次命中打一行 `deprecated`，保留一个版本后删除。下文凡写
+> `/model/ensure` 处均同时适用于 `/model/generate`。
 - HTTP 层从 e3d-io direct tree 枚举请求子树的生成根，再交给同一模型执行层。
 - 每根所属库先经 `model_read_route::route_for(dbnum)`；读源与发布目标分开判：
   ingest 中尚未完成的 durable 库使用 `ProjectionOnly`，read-through 的 spawned/embedded
@@ -358,9 +362,16 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   - `NoRenderableGeometry` — 这次跑了生成，但没有一条画得出来（`model_available` 为 false）。两种形态都归这里：写出了实例却全都画不出来，以及**一条都没写出**（无子件的 BRAN、纯作层级用的 STRU，`generated_instance_count` 为 0）。这是数据的终局不是失败，所以走 200 而不是 5xx：底下的几何不修好，重发只会把同样的生成再跑一遍。
 - HTTP 等待预算为 120 秒；超时返回 `504 timeout`，但后台生成不取消。客户端稍后以
   `force=false` 重查，命中已经落下的投影回执时直接复用。
-- `force` 只给「人明确要求重生成」用（S4-C 的重试）：它跳过实例与成功结果复用并新增
-  一次重生成，但仍服从共享根锁。显示补齐**不要**传，否则每显示一次都会重算；超时后的
-  重查也不得继续携带 `force=true`。
+- `force` 只给「人明确要求重生成」用（S4-C 的重试；plant-ui 右键「重新生成模型」）：
+  **先删后生成**（2026-10-10 定）——解完根、逐根加锁之前，先把请求子树下已发布的产物全部
+  清掉（范围与 §4.5.1 相同：按祖先链取记录，含根已解不出来的孤儿产物；受影响根的回执作废），
+  再逐根重新发布。不先清的话执行层会拿旧回执走「目标没变只重盖章」/「清单没变几何不动」
+  两条捷径，库里的产物根本换不掉。清理按形态分路：「只写内存」作用域只清进程内投影、不过
+  初始化门；读透形态另进 mirror spool 墓碑；摄入形态走 §4.5.1 同一条删法（库 + 投影 + 账本）。
+  范围内任一根正在生成时整次请求按 `409 conflict` 回，不与它抢。代价有意为之：清掉到重新
+  发布之间该范围在 §4.5.2 上为空；某根重算失败时其旧产物不再保留，回执按失败报、要重试再发
+  一次。显示补齐**不要**传，否则每显示一次都会清掉重算；超时后的重查也不得继续携带
+  `force=true`。
 - 按需边界使用一个最小领域错误枚举完成以下分型，不把所有 `anyhow::Error` 压成
   `not_found` 或 `internal`，也不扩建全局错误框架：
   - `422 container` — WORL / SITE / ZONE，按契约恒被拒绝做生成根。**这不是失败**：客户端应展开一层，对子节点逐个 ensure（ADR-0009）。
@@ -376,23 +387,33 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   不取消后台生成。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
   客户端自身超时不能设得比它更短。
 
-### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树
+### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树（plant-ui 右键「清理模型」）
 
 - 查询参数：`refno=24381%2F100677&confirm=24381%2F100677`；`confirm` 必须与
-  `refno` 原文完全一致，否则返回 `400 bad_request`。
+  `refno` 原文完全一致，否则返回 `400 bad_request`。身份三件套（`project` / `mdb` / `namespace`）同 §4.5。
+- **与 §4.5 `force=true` 的「先删」是同一份实现**（2026-10-10 定，`AiosDBManager::clear_model_scope`）：
+  入口先按 `model_read_route::route_for(dbnum)` 路由，与 `/model/generate` 同一段——
+  - `Database`（摄入形态、已追平的库）：库 + 投影 + 账本一起清，过初始化门；
+  - `Memory`（初始化未落 / 数据任务在飞 / 模型落后 / 读透）：进「只写内存」作用域，只清进程内投影、不过初始化门、
+    不碰 durable 权威库；读透形态另把同一笔删除渲成墓碑进 mirror spool。此前这条端点不路由，在这些库上会撞初始化门
+    或删到 durable 库那边，而同一库上 `force=true` 清的是投影——同一个范围两条入口两种行为。
+  - 同库已有整库模型任务（§4.5.1B）在飞时 `409 conflict`。
 - 删除范围严格是传入 refno 自身及其全部 PE 后代，不向上归一到 generation root。
-  generation root 解析只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
-  返回 `409 conflict`，不与生成并发互相覆盖。
+  范围内的 generation root（e3d-io 骨架解出）只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
+  **三种形态都**返回 `409 conflict`、一行不删，不与生成并发互相覆盖（读透形态此前只等库级锁、不回 409，2026-10-10 修）。
 - 删除模型关系、无剩余引用的实例信息、直管边和空间树条目；不删除 PE、
-  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。被删除来源的 `room_relate` /
+  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`（d-8：清理只针对产物行）。被删除来源的 `room_relate` /
   `room_panel_relate` 随模型对账同事务清理（§4.7.2）。
 - 进程内 overlay 上，这一根的几何记录与发布回执在同一把写锁里一起摘掉。只摘记录、
   留下回执会让 `/model/records` 报 `memory overlay root … is incomplete: receipt expects N, store has 0`；
   记录已经是 0 的再次删除仍然摘掉残留回执。摘掉之后该根不再挡住冷读，库侧墓碑落完则为空
   （与 d-6「清掉到重新发布之间为空」一致），直到再次发布。
 - 重复调用幂等，响应
-  `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
-- 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
+  `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted", "dbnum": 8000,
+  "model_source": "database" | "memory", "model_source_reason": null | "read-through" | … }`
+  （后三格只在解得出所属库时有，口径同 §4.12）。
+- 本端点只清理、不重算。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
+- 同步执行、没有 120 s 预算包装：客户端超时时服务端可能已删一部分；重查 §4.5.2 即知。
 
 ### 4.5.1A `POST /api/v1/dbnums/{dbnum}/model/rebuild` — 指定库模型全量重建
 
@@ -483,6 +504,24 @@ rebuild、不推进应用/模型水位。
 }
 ```
 
+### 4.5.1D `DELETE /api/v1/dbnums/{dbnum}/model` — 整库模型清理
+
+只删这个库的模型面，不重算、不碰数据面。与 `DELETE /dbnums/{dbnum}/data` 的分界：那条清的是整个库（含 `pe` / noun / 数据水位），而且要求队列先暂停；这条不要求暂停。
+
+- 查询参数：`confirm={dbnum}`，必须与路径 dbnum 相等，否则 `400 bad_request`。身份三件套同 §4.5。
+- `watch_scope` 之外 `400`，与 §4.5.1A 同一判据。
+- 闸门（任一不满足则 `409 conflict`、一行不删）：队列快照里该库有行；该库有在飞整库重建（§4.5.1A）或整库即时生成（§4.5.1B）；该库生成锁拿不到（有按需生成在飞）。
+- 删什么：`RANGE_TABLES` 去掉 `pe` / `ref_rev` 的表按 Ref0 区间删（`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `geo_relate` / `inst_info` / `aabb` / `trans`；`aabb:<mesh id>` 共享盒不在区间内），再按 `in.dbnum` 删房间两边。不碰 `pe`、noun 表、`ref_rev`、`dbnum_info_table`、`dbnum_stats_state`、交付台账、目录 memo。
+- 水位：只把模型半边归零（`model_sesno = 0` 及 `model_sesno_time` / `model_settled_at` / `model_lazy_roots` / `model_dead_roots` / `model_roots_observed_at = NONE`），与回退重建那一句的模型半边逐字相同；`state_revision` 加一。数据水位不动。
+- 路由：`route_for(dbnum)` 不是 `Database` 时不写库，只作废进程内投影、生成根账本并标空间树脏；读透另对该库投影里每个根渲一条 spool 墓碑。水位行在读透下不写。
+- 成功 `200`：
+
+```json
+{"dbnum":8000,"scope":"model_face","status":"deleted","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory"}
+```
+
+清完之后库行是「落后 + 内存」。要把模型算回来，调用方再点 §4.5.1A，或等服务重启的自动恢复。本端点不排重算。
+
 ### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
 
 实现 `handlers::model_records`；取数源按**这根所属的库**选（§4.12），不按进程介质。
@@ -522,8 +561,12 @@ rebuild、不推进应用/模型水位。
   `leave` / `arrive` / `route_ordinal`——`route_ordinal` 自本日起随行落盘（`model_db_adapter::render_records`），此前的老行没有这一格，
   读侧按同 `(容器, from, to)` 内的出现序（记录 id 序）补 0、1、2…；两端缺失的历史行没有 `tube`。放在记录一级而不是 `insts[]` 里：
   `ModelHashInst` 是 `aios_core` 的类型，这一格只属于本仓的读面，且一条管身记录恰好一个实例。
-- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
-  `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
+- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`。
+- **根按祖先理解（ADR-086，2026-10-09）**：`generation_root` 不必是生成根——给 ZONE / SITE 也行，给生成根以下的一个件
+  （BRAN 里的一个 VALV）也行。库路由本来就按 `anc CONTAINS` 取子树；内存形态下没有回执的节点分两种：在根之上的展成投影里
+  它名下盖过章的生成根再逐根取，在根之下的取它头上那根的记录、按祖先链只留它名下的（每条记录的 `owner` 两种情形下都是
+  生成根）。名下一条都没有 → **`200` 空数组**；`409 conflict` 只剩该库正被整库任务占用。`not_generated:` 退役——
+  「没生成过」在读接口上不是错误，要生成走 §4.5 `/model/generate`。
 
 **多根批量（已实现，2026-09-09）**
 
@@ -546,8 +589,8 @@ plant-ui 的单根调用零影响。
 - 响应回显 `"generation_roots": [...]`（替代单根的 `generation_root`），并多一格
   `"roots": [{"generation_root":"24381/100677","total":22}, …]`——整批逐根总数，每页都带，
   让「这根就是 0 条」显式可见，不用靠 `items` 里缺席去猜。
-- 批里任一根还没 `ensure` 过（服务端手里没有它的记录）→ **整批** `409 conflict`，消息仍以 `not_generated:` 开头
-  并列出缺的根；客户端对缺的那几根补 `ensure` 后重发。**空数组仍不表达「没生成过」。**
+- 批里的根同样按祖先理解（ADR-086）：没有回执的根展成名下的生成根，一根都没有的那一项 `total = 0`、`items` 里缺席，
+  **不再整批 409 `not_generated`**。
 - 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
 - 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
 - 实现说明：所属库逐根解（`dbnum_for_roots`，跨库 400）→ 一次 `route_for(dbnum)` → 内存形态先按 receipt 收齐缺的根
@@ -958,9 +1001,9 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   kv-mem（仍不落 rocksdb），连同房间边（逐根回执不落库，ADR-079）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
   不是“没有写 process store”）；`publication_status` 取 `ready` / `empty`。
-- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里
-  没有这根（还没 ensure 过）回 `409 conflict`，消息以 `not_generated:` 开头——客户端先去
-  `/model/ensure`，它今天本来就是这个顺序。空数组**不**用来表达「没生成过」。
+- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；请求的根按祖先理解，
+  投影里它名下盖过章的生成根逐根取；一根都没有回 `200` 空数组（ADR-086，2026-10-09 起；此前是 409
+  `not_generated:`，客户端先 ensure 再查的顺序已随 plant-ui ADR-0030 取消）。
 - **`database` 库上**两条接口与 §4.5 逐字相同：`records` 读 rocksdb（`source = "model-database"`），
   `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。

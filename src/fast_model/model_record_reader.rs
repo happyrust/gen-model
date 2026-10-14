@@ -98,6 +98,35 @@ pub async fn model_records_of_root(
     durable_model_records_of_root(db, root).await
 }
 
+/// 投影里一根**名下、某个节点以下**的记录（ADR-086 D1：`/model/records` 拿根以下的节点——BRAN 里的一个 VALV——来问时，
+/// 内存路由等价于库上的 `anc CONTAINS <节点>`）。记录仍按整根的序排，`owner` 仍是根；根没有回执时为空
+/// （调用方只在 [`ModelMemoryStore::receipt_root_above`] 给出了根时才走到这里）。
+pub fn overlay_records_under_node(
+    store: &ModelMemoryStore,
+    root: e3d_io::refno::RefNo,
+    node: e3d_io::refno::RefNo,
+) -> anyhow::Result<Vec<ModelRecord>> {
+    let Some(records) = overlay_records_of_root(store, root)? else {
+        return Ok(Vec::new());
+    };
+    let packed_node = crate::fast_model::model_memory_store::packed_refno(node);
+    Ok(records
+        .into_iter()
+        .filter(|record| record.ancestors.contains(&packed_node))
+        .map(|record| {
+            let tube = record.tube.as_ref().map(|tube| TubeMeta {
+                ordinal: tube.route_ordinal,
+                from: refno_text(tube.from),
+                to: refno_text(tube.to),
+            });
+            ModelRecord {
+                inst: projection_record_to_query(record, root),
+                tube,
+            }
+        })
+        .collect())
+}
+
 fn refno_text(refno: e3d_io::refno::RefNo) -> String {
     RefU64::from_two_nums(refno.word0, refno.word1).to_string()
 }

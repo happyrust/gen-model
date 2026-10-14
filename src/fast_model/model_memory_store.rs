@@ -1540,6 +1540,62 @@ impl ModelMemoryStore {
             .unwrap_or_default()
     }
 
+    /// 一个祖先名下**盖过章的生成根**（ADR-086 D1）：`/model/records` 拿一个不是生成根的节点（ZONE / SITE）来问时，
+    /// 先把它展成投影里有回执的根，再按根取记录——记录的 `owner` 仍是各自的生成根，与库上 `inst_relate.in` 同口径。
+    ///
+    /// 判据是记录的祖先链（`by_ancestor` 就是旧 `anc CONTAINS` 的索引形态）：根自己等于祖先、或根名下任一条记录的
+    /// 祖先链含这个祖先。没有记录的空根（`NoRenderableGeometry` 的回执）判不出归属，但它本来也贡献不了记录，略过。
+    /// 结果按打包 refno 升序，与 [`Self::roots`] 同序。
+    pub fn receipt_roots_under(&self, scope: ProjectionScope<'_>, ancestor: RefNo) -> Vec<RefNo> {
+        let packed_ancestor = packed_refno(ancestor);
+        let scopes = self.read();
+        let Some(state) = scopes.get(&scope.key()) else {
+            return Vec::new();
+        };
+        state
+            .receipts
+            .keys()
+            .filter(|&&packed_root| {
+                if packed_root == packed_ancestor {
+                    return true;
+                }
+                state
+                    .by_ancestor
+                    .get(&packed_root)
+                    .and_then(|bucket| bucket.iter().next())
+                    .and_then(|record_id| state.geometries.get(record_id))
+                    .is_some_and(|record| record.ancestors.contains(&packed_ancestor))
+            })
+            .map(|&packed| RefNo::new((packed >> 32) as u32, packed as u32))
+            .collect()
+    }
+
+    /// 一个**生成根以下**的节点（BRAN 里的一个 VALV）所属的、盖过章的生成根（ADR-086 D1 的另一半）：
+    /// `/model/records` 拿叶子来问时，先找到它头上的根，再从根的记录里按祖先链筛出它名下那几条。
+    ///
+    /// 判据仍是祖先链（自己 → owner → … 向上）：名下任一条记录的链里，排在这个节点**之后**的第一个有回执的
+    /// 就是它头上的根。节点自己就是根、节点在根之上（ZONE）、或名下一条记录都没有 → `None`
+    /// （分别走精确根 / [`Self::receipt_roots_under`] / 「没生成过」那三条路）。
+    pub fn receipt_root_above(&self, scope: ProjectionScope<'_>, node: RefNo) -> Option<RefNo> {
+        let packed_node = packed_refno(node);
+        let scopes = self.read();
+        let state = scopes.get(&scope.key())?;
+        if state.receipts.contains_key(&packed_node) {
+            return None;
+        }
+        let record_id = state.by_ancestor.get(&packed_node)?.iter().next()?;
+        let record = state.geometries.get(record_id)?;
+        let position = record
+            .ancestors
+            .iter()
+            .position(|&packed| packed == packed_node)?;
+        record.ancestors[position + 1..]
+            .iter()
+            .copied()
+            .find(|packed| state.receipts.contains_key(packed))
+            .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
+    }
+
     /// Called only after source absence and output deletion have succeeded.
     pub fn forget_retired_root(&self, scope: ProjectionScope<'_>, root: RefNo) {
         if let Some(state) = self.write().get_mut(&scope.key()) {
@@ -3311,6 +3367,65 @@ mod tests {
             }],
         );
         receipt
+    }
+
+    /// ADR-086 D1：拿一个不是生成根的祖先来问，展成投影里它名下盖过章的根（按打包 refno 升序）；
+    /// 祖先自己就是根时只有它自己；名下一根都没有就是空——`/model/records` 据此回 200 空而不是 409。
+    #[test]
+    fn receipt_roots_under_an_ancestor_lists_the_committed_roots_below_it() {
+        let store = store();
+        let zone = RefNo::new(7997, 10);
+        let other_zone = RefNo::new(7997, 20);
+        let bran_a = RefNo::new(7997, 11);
+        let bran_b = RefNo::new(7997, 12);
+        let bran_c = RefNo::new(7997, 21);
+        for (root, zone_of, id) in [
+            (bran_a, zone, "a"),
+            (bran_b, zone, "b"),
+            (bran_c, other_zone, "c"),
+        ] {
+            let mut geometry = record(id, RefNo::new(root.word0, root.word1 + 1000), root, 7997);
+            geometry.ancestors.push(packed_refno(zone_of));
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: vec![geometry],
+                    receipt: Some((root, limit_receipt(&format!("manifest-{id}"), 1))),
+                    ..Default::default()
+                }],
+            );
+        }
+        assert_eq!(
+            store.receipt_roots_under(ProjectionScope::Current, zone),
+            vec![bran_a, bran_b]
+        );
+        assert_eq!(
+            store.receipt_roots_under(ProjectionScope::Current, bran_a),
+            vec![bran_a]
+        );
+        assert!(store
+            .receipt_roots_under(ProjectionScope::Current, RefNo::new(7997, 99))
+            .is_empty());
+        // 根以下的节点：顺着它名下记录的祖先链找到头上盖过章的根；根自己、没记录的节点都不算。
+        assert_eq!(
+            store.receipt_root_above(ProjectionScope::Current, RefNo::new(7997, 1011)),
+            Some(bran_a),
+            "BRAN 里的一个件要找到它的 BRAN"
+        );
+        assert_eq!(
+            store.receipt_root_above(ProjectionScope::Current, bran_a),
+            None,
+            "根自己走精确根那条路"
+        );
+        assert_eq!(
+            store.receipt_root_above(ProjectionScope::Current, zone),
+            None,
+            "祖先不是「根以下」"
+        );
+        assert_eq!(
+            store.receipt_root_above(ProjectionScope::Current, RefNo::new(7997, 99)),
+            None
+        );
     }
 
     /// d-149：按根数限额只逐出**已 durable ACK 且与回执逐字相符**的根，最旧一次盖回执的先出；

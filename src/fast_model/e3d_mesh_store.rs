@@ -18,6 +18,8 @@ static TEMP_MESH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub enum MeshWrite {
     Written,
     Reused,
+    /// 盘上已有同名文件，但读不出或与这份网格不符，已原子重写（ADR-087 D3）。
+    Repaired,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -32,6 +34,8 @@ pub struct E3dPersistReport {
     pub unique_meshes: usize,
     pub mesh_reused: usize,
     pub mesh_written: usize,
+    /// 盘上内容与身份不符、本次原子重写了的 mesh 数；每一个都另有一行 warn 点名。
+    pub mesh_repaired: usize,
     #[serde(skip)]
     pub(crate) mesh_ids: std::collections::BTreeSet<String>,
     /// 本次生成读的是哪一版设计文件（一次调用一个 dbnum、一个会话）。读透写行时钉的
@@ -95,30 +99,15 @@ pub fn geometry_record_id(geometry_id: &GeometryId, source_refno: RefNo) -> Stri
 
 pub fn ensure_mesh_file(path: &Path, mesh: &PlantMesh) -> anyhow::Result<MeshWrite> {
     if path.exists() {
-        verify_mesh_file(path, mesh)?;
-        return Ok(MeshWrite::Reused);
+        return match verify_mesh_file(path, mesh) {
+            Ok(()) => Ok(MeshWrite::Reused),
+            Err(mismatch) => repair_mesh_file(path, mesh, &mismatch),
+        };
     }
 
     let parent = path.parent().context("mesh 路径没有父目录")?;
     std::fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("mesh"),
-        std::process::id(),
-        TEMP_MESH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    mesh.ser_to_file(&temp)?;
-    verify_mesh_file(&temp, mesh)?;
-    // 校验过的是页缓存里的字节，不落盘等于没写：发布队列的 Result 帧 fsync 过、引用着
-    // 这个 mesh id，掉电后帧还在而文件缺了半截，那条结果就只能作废重生成。所以先把临时
-    // 文件本身刷下去，再建硬链接。
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&temp)?
-        .sync_all()
-        .with_context(|| format!("落盘 {}", temp.display()))?;
+    let temp = stage_mesh_file(parent, path, mesh)?;
     // `rename` overwrites an existing destination on Windows, so it is not a
     // create-if-absent primitive there. A same-directory hard-link publishes
     // the fully closed inode atomically without replacing a concurrent winner;
@@ -134,15 +123,86 @@ pub fn ensure_mesh_file(path: &Path, mesh: &PlantMesh) -> anyhow::Result<MeshWri
         }
         Err(error) if path.exists() => {
             let _ = std::fs::remove_file(&temp);
-            verify_mesh_file(path, mesh)
-                .with_context(|| format!("{} 并发写入胜者校验失败: {error}", path.display()))?;
-            Ok(MeshWrite::Reused)
+            match verify_mesh_file(path, mesh) {
+                Ok(()) => Ok(MeshWrite::Reused),
+                Err(mismatch) => repair_mesh_file(
+                    path,
+                    mesh,
+                    &mismatch.context(format!("并发写入胜者校验失败: {error}")),
+                ),
+            }
         }
         Err(error) => {
             let _ = std::fs::remove_file(&temp);
             Err(error).with_context(|| format!("发布 {}", path.display()))
         }
     }
+}
+
+/// 在目标同目录写一份校验过、刷过盘的临时文件，返回它的路径。
+fn stage_mesh_file(parent: &Path, path: &Path, mesh: &PlantMesh) -> anyhow::Result<std::path::PathBuf> {
+    let temp = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("mesh"),
+        std::process::id(),
+        TEMP_MESH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let staged = mesh
+        .ser_to_file(&temp)
+        .and_then(|()| verify_mesh_file(&temp, mesh))
+        // 校验过的是页缓存里的字节，不落盘等于没写：发布队列的 Result 帧 fsync 过、引用着
+        // 这个 mesh id，掉电后帧还在而文件缺了半截，那条结果就只能作废重生成。所以先把临时
+        // 文件本身刷下去，再发布到目标名上。
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)?
+                .sync_all()
+                .with_context(|| format!("落盘 {}", temp.display()))
+        });
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(temp)
+}
+
+/// 盘上的同名文件读不出、或与这份网格逐位不符：原子重写（ADR-087 D3）。
+///
+/// 名字就是内容摘要，这个名字下只可能该是这一份内容，所以覆盖永远安全——别的引用者指着同一个
+/// id，拿到的正是它们本该拿到的那份。这里要的正是覆盖，与新建时「不顶掉并发胜者」相反：
+/// `rename` 在 Windows 上覆盖已有目标、在 POSIX 上原子替换。
+fn repair_mesh_file(
+    path: &Path,
+    mesh: &PlantMesh,
+    mismatch: &anyhow::Error,
+) -> anyhow::Result<MeshWrite> {
+    // 一份共享网格常被同一批里的许多元素同时烘焙：进程内的重写排成一队，后到的先复核，
+    // 前面那个已经修好了就直接复用——多个 rename 抢同一个目标在 Windows 上会互相拒绝。
+    static REPAIRS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = REPAIRS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if verify_mesh_file(path, mesh).is_ok() {
+        return Ok(MeshWrite::Reused);
+    }
+    log::warn!("[mesh] {} 与它的身份不符，原子重写: {mismatch:#}", path.display());
+    let parent = path.parent().context("mesh 路径没有父目录")?;
+    let temp = stage_mesh_file(parent, path, mesh)?;
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        // 另一个进程抢先把它修好了。
+        if verify_mesh_file(path, mesh).is_ok() {
+            return Ok(MeshWrite::Reused);
+        }
+        return Err(error).with_context(|| format!("重写 {}（原文件: {mismatch:#}）", path.display()));
+    }
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    verify_mesh_file(path, mesh).with_context(|| format!("{} 重写后校验失败", path.display()))?;
+    Ok(MeshWrite::Repaired)
 }
 
 fn update_mesh_digest(hash: &mut Sha256, mesh: &PlantMesh) {
@@ -367,14 +427,73 @@ mod tests {
         }));
     }
 
+    /// 名字就是内容：同名文件读不出、被截断、或换成了另一份合法网格，都原样重写回这一份，
+    /// 之后就是普通复用（ADR-087 D3）。此前这三种都让这件几何报错失败、文件一直坏着。
     #[test]
-    fn damaged_existing_content_addressed_file_is_rejected() {
+    fn a_damaged_content_addressed_file_is_rewritten_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = box_mesh();
         let path = dir.path().join(format!("{}.mesh", baked_mesh_id(&mesh)));
-        ensure_mesh_file(&path, &mesh).unwrap();
+        assert_eq!(ensure_mesh_file(&path, &mesh).unwrap(), MeshWrite::Written);
+        let good = std::fs::read(&path).unwrap();
+
+        let mut other = mesh.clone();
+        other.vertices[0].x += 1.0;
+        let damages: [(&str, Vec<u8>); 3] = [
+            ("garbage", b"damaged".to_vec()),
+            ("truncated", good[..good.len() / 2].to_vec()),
+            ("another valid mesh", other.ser_to_bytes().to_vec()),
+        ];
+        for (label, bytes) in damages {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                ensure_mesh_file(&path, &mesh).unwrap(),
+                MeshWrite::Repaired,
+                "{label}"
+            );
+            verify_mesh_file(&path, &mesh).unwrap();
+            assert_eq!(
+                ensure_mesh_file(&path, &mesh).unwrap(),
+                MeshWrite::Reused,
+                "{label}: 修好之后就是普通复用"
+            );
+        }
+        assert!(dir.path().read_dir().unwrap().all(|entry| {
+            !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")
+        }));
+    }
+
+    /// 一批里许多元素共用一份坏掉的网格、同时烘焙：恰好一个重写，其余复核后复用，没人失败。
+    #[test]
+    fn concurrent_repairs_rewrite_once_and_nobody_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = box_mesh();
+        let path = dir.path().join(format!("{}.mesh", baked_mesh_id(&mesh)));
         std::fs::write(&path, b"damaged").unwrap();
-        assert!(ensure_mesh_file(&path, &mesh).is_err());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let outcomes = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                let mesh = mesh.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_mesh_file(&path, &mesh).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == MeshWrite::Repaired)
+                .count(),
+            1,
+            "{outcomes:?}"
+        );
+        verify_mesh_file(&path, &mesh).unwrap();
     }
 
     #[test]
@@ -388,7 +507,15 @@ mod tests {
             .path()
             .join(format!("{}.mesh", baked_mesh_id(&expected)));
         wrong_zero.ser_to_file(&path).unwrap();
-        assert!(ensure_mesh_file(&path, &expected).is_err());
+        assert_eq!(
+            ensure_mesh_file(&path, &expected).unwrap(),
+            MeshWrite::Repaired,
+            "+0.0 与 -0.0 按位不同，不能当同一份复用"
+        );
+        assert_eq!(
+            PlantMesh::des_mesh_file(&path).unwrap().vertices[0].x.to_bits(),
+            (-0.0f32).to_bits()
+        );
 
         let mut nan_mesh = box_mesh();
         nan_mesh.normals[0].x = f32::from_bits(0x7fc0_0123);
