@@ -345,6 +345,11 @@ fn web_content_type(path: &str) -> &'static str {
             Some("json") => "application/json; charset=utf-8",
             Some("ron") => "text/plain; charset=utf-8",
             Some("mesh") => "application/octet-stream",
+            // 磁盘副本里的脚本与 wasm 不在内嵌清单里（如 virtual-hole/ 的 Worker 资源），
+            // 扩展名兜底必须给对：浏览器拒收 application/octet-stream 的 module Worker 脚本，
+            // 虚拟孔洞布尔预览会整页卡死在「计算中」（2026-10-15 浏览器验收发现）。
+            Some("js" | "mjs") => "text/javascript; charset=utf-8",
+            Some("wasm") => "application/wasm",
             _ => "application/octet-stream",
         })
 }
@@ -4246,6 +4251,40 @@ mod tests {
         assert!(index.contains("current.data_api_url = configuredDataUrl || window.location.origin"));
         assert!(index.contains(": window.location.origin"));
 
+    }
+
+    #[test]
+    fn disk_served_virtual_hole_assets_get_executable_mime_types() {
+        // 浏览器拒收 application/octet-stream 的 module Worker 脚本与 instantiateStreaming 的
+        // wasm：磁盘副本（virtual-hole/）必须按扩展名给出可执行 MIME，否则虚拟孔洞预览
+        // 整页卡死在「计算中」（2026-10-15 真浏览器验收发现）。
+        for path in [
+            "virtual-hole/worker.js",
+            "virtual-hole/boolean.js",
+            "virtual-hole/vendor/manifold.js",
+        ] {
+            assert_eq!(
+                web_content_type(path),
+                "text/javascript; charset=utf-8",
+                "磁盘副本脚本必须带 JS MIME: {path}"
+            );
+        }
+        assert_eq!(
+            web_content_type("virtual-hole/vendor/manifold.wasm"),
+            "application/wasm",
+            "磁盘副本 wasm 必须带 application/wasm（instantiateStreaming 要求）"
+        );
+        // 内嵌清单与既有兜底不受影响。
+        assert_eq!(
+            web_content_type("index.html"),
+            "text/html; charset=utf-8",
+            "内嵌入口页仍走清单里的显式类型"
+        );
+        assert_eq!(
+            web_content_type("assets/meshes/11649145690927941167.mesh"),
+            "application/octet-stream",
+            "mesh 仍按二进制兜底"
+        );
     }
 
     #[test]
