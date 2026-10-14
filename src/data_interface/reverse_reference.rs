@@ -248,6 +248,44 @@ impl CatalogueCascadeReport {
         }
     }
 
+    /// 按目录文件分组核对（GitHub #47）的几次反查并成一份回执：数相加，按库的表并起来，
+    /// 退化原因与错误都留着（同一个目录库两组都退化时留先到的那句）。
+    pub fn absorb(&mut self, other: CatalogueCascadeReport) {
+        let add = |mine: &mut BTreeMap<u32, usize>, theirs: BTreeMap<u32, usize>| {
+            for (dbnum, count) in theirs {
+                *mine.entry(dbnum).or_default() += count;
+            }
+        };
+        self.seeds += other.seeds;
+        self.catalogue_closure += other.catalogue_closure;
+        self.design_referrers += other.design_referrers;
+        add(&mut self.roots, other.roots);
+        self.unrooted += other.unrooted;
+        for (dbnum, reason) in other.degraded {
+            self.degraded.entry(dbnum).or_insert(reason);
+        }
+        for (dbnum, tables) in other.tables_used {
+            let kept = self.tables_used.entry(dbnum).or_default();
+            kept.extend(tables);
+            kept.sort();
+            kept.dedup();
+        }
+        self.point_queries += other.point_queries;
+        self.unreadable += other.unreadable;
+        add(&mut self.enqueued, other.enqueued);
+        add(&mut self.enqueued_degraded, other.enqueued_degraded);
+        self.already_current += other.already_current;
+        self.stamp_only.extend(other.stamp_only);
+        self.stamp_only.sort_unstable();
+        self.stamp_only.dedup();
+        self.lazy_roots += other.lazy_roots;
+        self.skipped_out_of_scope += other.skipped_out_of_scope;
+        self.error = match (self.error.take(), other.error) {
+            (Some(mine), Some(theirs)) => Some(format!("{mine}；{theirs}")),
+            (mine, theirs) => mine.or(theirs),
+        };
+    }
+
     pub fn enqueued_total(&self) -> usize {
         self.enqueued.values().sum::<usize>() + self.enqueued_degraded.values().sum::<usize>()
     }

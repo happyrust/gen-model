@@ -1,4 +1,5 @@
-//! C8（同库版）—— direct 窗口规划器的电缆端点 / 路由反向级联（core `change/EVALAT` 规则 F / E 同形）。
+//! C8 —— direct 窗口规划器的电缆端点 / 路由反向级联（core `change/EVALAT` 规则 F / E 同形）。同库版 2026-09-07，
+//! 跨库版 2026-10-01（GitHub #35，见下面「跨库版」一节）。
 //!
 //! 窗口 S→T 里的变更元素若是 `EQUI` / `ELCONN`（规则 F：`GATREF(ELCXRF)`）或 `CWBRAN`（规则 E：
 //! `GATREF(CLIST)`），到 T 端文件**自带的反向引用表**里点查「`STAREF` / `ENDREF` 指向它的元素」——
@@ -14,9 +15,8 @@
 //! （`ReadOnlyEngine::referrers_of`，`docs/evidence/2026-09-03-dabacon-named-tables-and-reference-tables.md`）。
 //!
 //! 边界与护栏（计划 `2026-09-06-core3d-cascade-parity-dev-plan.md` §3 C8、共识 d-168）：
-//! - **只查本库**：一张反向表只答它自己那个库的引用者（表存在引用方的库里）。语料里 `CABLE.STAREF` /
-//!   `ENDREF` 的 196 条跨库边（电缆在电缆库、`ELCONN` 在电气库）这里查不到——那是跨库版的活，
-//!   要 MDB 逐库并（core `DB_MDB::dbs` 也是逐库迭代）；
+//! - **本库的表只答本库的引用者**（表存在引用方的库里）。语料里 `CABLE.STAREF` / `ENDREF` 的 196 条跨库边
+//!   （电缆在电缆库、`ELCONN` 在电气库）在本库表里查不到——跨库版（下一节）逐个开 MDB 其余设计成员查它们自己的表；
 //! - 表在哪一端：只查 T。引用者的记录和表都在引用方那边，被引用的 `EQUI` 删了表项还在（电缆仍指着它），
 //!   电缆自己删了则走删除路径，不归这里；
 //! - 账本 noun 零 I/O 粗筛：没有 `EQUI` / `ELCONN` / `CWBRAN` 改动的窗口连引擎都不开；
@@ -27,6 +27,13 @@
 //!
 //! 几何上今天不显：电缆几何没按路由落地（`CABLE` 现走 cata_model，e3d-model 的 `EXTGEO` 段未接），
 //! 拉进来的电缆根重算出来的还是今天那份；先接线，电缆几何一落地这里就是正确性项（计划 §3 C8）。
+//!
+//! **跨库版（GitHub #35，2026-10-01）**：同一批键到 MDB **其余**设计成员各自的 `STAREF` / `ENDREF` 反向表点查
+//! （[`read_foreign_referrers`]）——core 的 `DB_PseudoBACKRE` 也是 `DB_MDB::dbs` 逐库迭代，与 P4 逐库并集同一个形状，
+//! 成员名单也是同一份（`E3dModelService::design_sources()`）。命中的引用者（`CABLE` / 它的 `EXTGEO` 段）在那个库里，
+//! 本窗的根集装不下：记进 [`CableEndpointCascade::foreign`]，计划带着交给跨库交接
+//! （[`crate::data_interface::cross_db_handoff`]），落地之后在那个库的文件最新会话上折根、排一条只带名单的 `ModelOnly`。
+//! 打不开的成员库点名、**不判退化**：电缆几何落地前几何上不显，为它整窗重算全部根不值；几何落地翻默认时再收紧。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -38,7 +45,11 @@ use e3d_io::refno::RefNo;
 use e3d_model::increment::UpdatePlan;
 
 use crate::data_interface::generation_root::{GenerationRoot, refno_from_e3d, refno_to_e3d};
+use crate::data_interface::reverse_reference::SourceDb;
 use crate::data_interface::structural_connection::roots_on_owner_chain;
+
+/// 回执里逐库点名的跨库引用者上限，多出来的只报个数。
+const FOREIGN_NAMED_LIMIT: usize = 12;
 
 /// 要点查的两张反向表：core `ELCXRF` = `BACKRE{ENDREF, STAREF}`，`LALCAB::takeCables` 同两个。
 pub const REFERENCE_ATTRIBUTES: [&str; 2] = ["STAREF", "ENDREF"];
@@ -224,6 +235,73 @@ pub fn read_referrer_edges(
     out
 }
 
+/// 跨库版点查的账（[`CableEndpointCascade::foreign`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignReferrers {
+    /// 真点查过的成员库数（开得了、两张表至少有一张）。
+    pub members_queried: usize,
+    /// (键, 属性) 点查次数，各成员相加。
+    pub queries: usize,
+    /// 表在、读挂了的点查次数。
+    pub query_failures: usize,
+    /// 打不开的成员库 → 原因。**不是**「这个库没有引用者」，是未知；回执点名。
+    pub unreadable_members: BTreeMap<u32, String>,
+    /// 引用者所在库 → 引用者（`CABLE` 或它的 `EXTGEO` 段），去重。
+    pub referrers: BTreeMap<u32, BTreeSet<(u32, u32)>>,
+}
+
+impl ForeignReferrers {
+    /// 跨库引用者总数。
+    pub fn referrer_count(&self) -> usize {
+        self.referrers.values().map(BTreeSet::len).sum()
+    }
+}
+
+/// I/O（跨库版，GitHub #35）：同一批变更元素的同一批键（规则 E 的子树取自**本库** T 端 owner 索引——路由节点在本库），
+/// 到 MDB 其余设计成员各自的 `STAREF` / `ENDREF` 反向表点查。一个成员打不开只记账不中断；本库与非设计库跳过。
+pub fn read_foreign_referrers(
+    sources: &[CascadeSource],
+    owners: &BTreeMap<(u32, u32), RefNo>,
+    own_dbnum: u32,
+    members: &[SourceDb],
+) -> ForeignReferrers {
+    let mut out = ForeignReferrers::default();
+    if sources.is_empty() {
+        return out;
+    }
+    for member in members
+        .iter()
+        .filter(|member| member.db_type.eq_ignore_ascii_case("DESI") && member.dbnum != own_dbnum)
+    {
+        let opened = match member.sesno {
+            Some(sesno) => ReadOnlyEngine::open_at(&member.file, sesno),
+            None => ReadOnlyEngine::open(&member.file),
+        };
+        let mut engine = match opened {
+            Ok(engine) => engine,
+            Err(error) => {
+                out.unreadable_members
+                    .insert(member.dbnum, format!("{error:#}"));
+                continue;
+            }
+        };
+        let edges = read_referrer_edges(sources, &mut engine, owners);
+        if edges.tables_present.is_empty() {
+            continue;
+        }
+        out.members_queried += 1;
+        out.queries += edges.queries;
+        out.query_failures += edges.query_failures;
+        for edge in edges.edges {
+            out.referrers
+                .entry(edge.referrer.dbno())
+                .or_default()
+                .insert((edge.referrer.word0, edge.referrer.word1));
+        }
+    }
+    out
+}
+
 /// 一窗的电缆端点 / 路由级联：账 + 要并进 `touched` 的引用者根。挂在 `WindowRootSources` 上。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CableEndpointCascade {
@@ -243,9 +321,36 @@ pub struct CableEndpointCascade {
     pub referrer_without_root: usize,
     /// 要并进 `touched` 的引用者根（都在 `roots_T` 里）。
     pub referrer_roots: BTreeSet<RefnoEnum>,
+    /// 跨库版（GitHub #35）：MDB 其余设计成员表里的引用者。本窗不上卷，随计划交给跨库交接。
+    pub foreign: ForeignReferrers,
 }
 
 impl CableEndpointCascade {
+    /// 跨库版（GitHub #35）：在同库版的结果上补 MDB 其余设计成员的点查（[`read_foreign_referrers`]）。
+    /// 开关关（`off()`）或成员名单空 = 原样返回，一个成员库都不开。
+    pub fn with_foreign_members(
+        mut self,
+        plan: &UpdatePlan,
+        owners: &BTreeMap<(u32, u32), RefNo>,
+        own_dbnum: u32,
+        members: &[SourceDb],
+    ) -> Self {
+        if !self.enabled || members.is_empty() {
+            return self;
+        }
+        let sources = sources_from_plan(plan);
+        self.foreign = read_foreign_referrers(&sources, owners, own_dbnum, members);
+        self
+    }
+
+    /// 跨库引用者（跨库交接的输入，[`crate::data_interface::cross_db_handoff::elements_by_dbnum`]）。
+    pub fn foreign_referrer_elements(&self) -> impl Iterator<Item = RefNo> + '_ {
+        self.foreign
+            .referrers
+            .values()
+            .flatten()
+            .map(|&(word0, word1)| RefNo::new(word0, word1))
+    }
     /// 开关关：零 I/O、零改动。
     pub fn off() -> Self {
         Self::default()
@@ -355,7 +460,7 @@ impl CableEndpointCascade {
                  (model_cable_endpoint_cascade=false)"
             );
         }
-        format!(
+        let mut line = format!(
             "dbnum={dbnum}: cable-endpoint cascade on (same-db) — sources={} (endpoint={} route={}) \
              tables_present={} queries={} query_failures={} engine_unavailable={} edges={} \
              referrer_without_root={} referrer_roots={}",
@@ -369,7 +474,40 @@ impl CableEndpointCascade {
             self.edges,
             self.referrer_without_root,
             self.referrer_roots.len()
-        )
+        );
+        let foreign = &self.foreign;
+        if foreign.members_queried > 0
+            || !foreign.unreadable_members.is_empty()
+            || !foreign.referrers.is_empty()
+        {
+            let named: Vec<String> = foreign
+                .referrers
+                .iter()
+                .flat_map(|(db, keys)| {
+                    keys.iter().map(move |&(word0, word1)| {
+                        format!("{} (dbnum {db})", RefNo::new(word0, word1))
+                    })
+                })
+                .take(FOREIGN_NAMED_LIMIT)
+                .collect();
+            let more = foreign.referrer_count().saturating_sub(FOREIGN_NAMED_LIMIT);
+            line.push_str(&format!(
+                "; cross-db (GitHub #35) — members_queried={} queries={} query_failures={} \
+                 unreadable_members={:?} referrers={} handed off to their own dbnum's task: [{}]{}",
+                foreign.members_queried,
+                foreign.queries,
+                foreign.query_failures,
+                foreign.unreadable_members.keys().collect::<Vec<_>>(),
+                foreign.referrer_count(),
+                named.join(", "),
+                if more > 0 {
+                    format!(" (+{more} more)")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        line
     }
 }
 
@@ -576,6 +714,92 @@ mod tests {
         assert!(
             line.contains("cascade on") && line.contains("referrer_roots=1"),
             "{line}"
+        );
+        assert!(
+            !line.contains("cross-db"),
+            "没查过别的库就不出跨库那一段: {line}"
+        );
+    }
+
+    /// 低 13 位放不下的库号（APS 的 2501xx）在第一个 extent 上的 `word0`：高半截挪到 26..30 位。
+    fn word0_of(dbno: u32) -> u32 {
+        (dbno & 0x1FFF) | ((dbno & 0x3E000) << 13) | (1 << 13)
+    }
+
+    /// 跨库版（GitHub #35）能纯内存钉的两态：没有要查的键 → 一个成员库都不开；成员库打不开 → 点名
+    /// （是「未知」，不是「没有引用者」）；本库与非设计库不开。第一态（别的库表里有引用者 → 交给那个库）在
+    /// `tests::live::live_aps_a_cross_db_endpoint_finds_its_cable_in_the_other_library` 真库上。
+    #[test]
+    fn the_cross_db_lookup_opens_only_the_other_design_members_and_names_the_unreadable_ones() {
+        assert_eq!(r(1).dbno(), 7200, "测试库号");
+        let member = |dbnum: u32, db_type: &str| SourceDb {
+            dbnum,
+            db_type: db_type.into(),
+            file: std::path::PathBuf::from(format!(r"Z:\gm35\{dbnum}_0001")),
+            sesno: None,
+        };
+        let members = [
+            member(7200, "DESI"),
+            member(250152, "DESI"),
+            member(7351, "CATA"),
+        ];
+        assert_eq!(
+            read_foreign_referrers(&[], &BTreeMap::new(), 7200, &members),
+            ForeignReferrers::default(),
+            "没有要查的键，一个成员库都不开"
+        );
+        let foreign = read_foreign_referrers(&[equi(1)], &BTreeMap::new(), 7200, &members);
+        assert_eq!(
+            foreign
+                .unreadable_members
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![250152],
+            "只开别的设计成员：本库与 CATA 不开"
+        );
+        assert_eq!(foreign.members_queried, 0);
+        assert!(foreign.referrers.is_empty());
+        assert_eq!(foreign.referrer_count(), 0);
+    }
+
+    /// 跨库引用者只记账、不并进本窗：`touched` 照旧，回执点名（含打不开的成员），跨库交接拿到按库分好的名单。
+    #[test]
+    fn cross_db_referrers_are_named_and_handed_off_instead_of_rolled_up() {
+        let cable = RefNo::new(word0_of(250176), 55);
+        let segment = RefNo::new(word0_of(250176), 61);
+        assert_eq!(cable.dbno(), 250176);
+        let mut cascade = CableEndpointCascade::from_edges(&[equi(1)], &endpoint_edges(&[]), chain);
+        cascade.foreign = ForeignReferrers {
+            members_queried: 2,
+            queries: 4,
+            query_failures: 0,
+            unreadable_members: BTreeMap::from([(250164, "locked".to_string())]),
+            referrers: BTreeMap::from([(
+                250176,
+                BTreeSet::from([(cable.word0, cable.word1), (segment.word0, segment.word1)]),
+            )]),
+        };
+        let mut touched = set(&[1]);
+        assert_eq!(
+            cascade.expand_touched(&mut touched),
+            0,
+            "跨库引用者不并进本窗"
+        );
+        assert_eq!(regen_with(&cascade), vec![e(1)]);
+        let line = cascade.summary_line(7200);
+        assert!(
+            line.contains("cross-db (GitHub #35)")
+                && line.contains("referrers=2")
+                && line.contains("(dbnum 250176)")
+                && line.contains("250164"),
+            "{line}"
+        );
+        assert_eq!(
+            crate::data_interface::cross_db_handoff::elements_by_dbnum(
+                cascade.foreign_referrer_elements()
+            ),
+            BTreeMap::from([(250176, vec![cable.to_string(), segment.to_string()])])
         );
     }
 
@@ -824,6 +1048,175 @@ mod tests {
                     file.display()
                 );
             }
+        }
+
+        /// 跨库版（GitHub #35）真库：AvevaPlantSample 里电缆在电缆库、端点 `EQUI` / `ELCONN` 在别的库（C6 普查
+        /// `CABLE.STAREF` / `ENDREF` 跨库 196 条，端点库 250152/154/156/160/162/164 及副本）。语料里没有「只改端点」的
+        /// 自然窗口，与同库版同一手法：从电缆正向读出跨库端点边，**假定**那台设备变了，用生产同一段
+        /// [`read_foreign_referrers`] 到其余设计库的反向表去查——必须查回那根电缆（或它的 `EXTGEO` 段），再用跨库交接
+        /// 同一段 [`crate::data_interface::cross_db_handoff::fold_elements_to_roots`] 在电缆库的 T 端索引上折回 `CABLE` 根。
+        /// 只读文件：`AIOS_APS_PROJECT_DIR`（默认 `D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000`）+ `AIOS_E3D_TEMPLATE_DIR`。
+        #[test]
+        #[ignore = "manual live: needs the AvevaPlantSample DESI files and the E3D template directory"]
+        fn live_aps_a_cross_db_endpoint_finds_its_cable_in_the_other_library() {
+            use crate::data_interface::db_file_header::DbFileHeader;
+
+            let dir =
+                PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
+                    r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
+                }));
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let unit_types = resolve_delivery_unit_types(&[]);
+            let mut desi: Vec<(u32, PathBuf, u32)> = std::fs::read_dir(&dir)
+                .expect("read project dir")
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_file())
+                .filter_map(|path| {
+                    let header = DbFileHeader::read(&path).ok()?;
+                    header
+                        .db_type
+                        .eq_ignore_ascii_case("DESI")
+                        .then(|| (header.dbnum as u32, path, header.latest_sesno()))
+                })
+                .collect();
+            desi.sort();
+            desi.dedup_by_key(|(dbnum, _, _)| *dbnum);
+            assert!(!desi.is_empty(), "{} 下没有 DESI 库文件", dir.display());
+
+            // MDB 同款：全部 DESI 钉最新放进一份 DbSet，正向读得到跨库的端点。
+            let all = Arc::new(
+                DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
+            );
+            for (_, path, sesno) in &desi {
+                all.add_db(DbFilePin {
+                    file: path.clone(),
+                    template: template_file_for(schema.template_dir(), "DESI")
+                        .expect("DESI template"),
+                    db_type: Some("DESI".into()),
+                    sesno: Some(*sesno),
+                })
+                .expect("pin DESI");
+            }
+            struct Lib {
+                owners: Arc<BTreeMap<(u32, u32), RefNo>>,
+                roots: Vec<GenerationRoot>,
+            }
+            let mut libs: BTreeMap<u32, Lib> = BTreeMap::new();
+            for (dbnum, path, sesno) in &desi {
+                let index = scan_index(path, Some(*sesno)).expect("scan index");
+                let roots = enumerate_generation_roots(&all, &index.roots, &unit_types)
+                    .expect("enumerate roots");
+                libs.insert(
+                    *dbnum,
+                    Lib {
+                        owners: index.owners.clone(),
+                        roots,
+                    },
+                );
+            }
+
+            // 电缆根正向读 STAREF / ENDREF，留指向别的库、且那个库在目录里的端点边。
+            let mut edges: Vec<(RefNo, &'static str, RefNo)> = Vec::new();
+            for (dbnum, lib) in &libs {
+                for root in lib
+                    .roots
+                    .iter()
+                    .filter(|root| root.noun.eq_ignore_ascii_case("CABLE"))
+                {
+                    let cable = refno_to_e3d(root.root);
+                    let element = all.element(cable);
+                    for attribute in REFERENCE_ATTRIBUTES {
+                        let Ok(Some(target)) = element.get_ref(attribute) else {
+                            continue;
+                        };
+                        if target.is_valid()
+                            && target.dbno() != *dbnum
+                            && libs.contains_key(&target.dbno())
+                        {
+                            edges.push((cable, attribute, target));
+                        }
+                    }
+                }
+            }
+            println!(
+                "[#35] {} 个 DESI 库；跨库电缆端点边 {} 条（目标库在目录里的）",
+                desi.len(),
+                edges.len()
+            );
+            assert!(
+                !edges.is_empty(),
+                "C6 普查说 APS 有跨库端点边——一条都没找到，先看语料是否换过"
+            );
+
+            let members: Vec<SourceDb> = desi
+                .iter()
+                .map(|(dbnum, path, sesno)| SourceDb {
+                    dbnum: *dbnum,
+                    db_type: "DESI".into(),
+                    file: path.clone(),
+                    sesno: Some(*sesno),
+                })
+                .collect();
+            let mut checked = 0usize;
+            for (cable, attribute, target) in edges.iter().take(8) {
+                let own = target.dbno();
+                let noun = all.element(*target).element_type().unwrap_or_default();
+                let Some(rule) = rule_for(&noun) else {
+                    println!(
+                        "[#35] skip {cable}.{attribute} -> {target}: 端点 noun `{noun}` 不在规则 F 里"
+                    );
+                    continue;
+                };
+                let source = CascadeSource {
+                    refno: *target,
+                    noun: noun.clone(),
+                    rule,
+                };
+                let foreign = read_foreign_referrers(&[source], &libs[&own].owners, own, &members);
+                let cable_db = cable.dbno();
+                let found: Vec<RefNo> = foreign
+                    .referrers
+                    .get(&cable_db)
+                    .map(|keys| {
+                        keys.iter()
+                            .map(|&(word0, word1)| RefNo::new(word0, word1))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let folded = crate::data_interface::cross_db_handoff::fold_elements_to_roots(
+                    &libs[&cable_db].owners,
+                    &libs[&cable_db].roots,
+                    &found,
+                );
+                println!(
+                    "[#35] 假定 {noun} {target}（dbnum {own}）变了：members_queried={} queries={} \
+                     unreadable={:?} 引用者 {:?} → 折回电缆库 {cable_db} 的根 {:?}",
+                    foreign.members_queried,
+                    foreign.queries,
+                    foreign.unreadable_members.keys().collect::<Vec<_>>(),
+                    foreign.referrers,
+                    folded.roots
+                );
+                assert!(
+                    foreign.unreadable_members.is_empty(),
+                    "目录里的设计库都该开得了：{:?}",
+                    foreign.unreadable_members
+                );
+                assert!(
+                    !foreign.referrers.contains_key(&own),
+                    "本库的表不在跨库版里查"
+                );
+                assert!(
+                    folded
+                        .roots
+                        .iter()
+                        .any(|root| root.refno == refno_from_e3d(*cable).to_pdms_str()),
+                    "{cable}.{attribute} -> {target}：跨库点查必须查回这根电缆的根，实得 {:?}",
+                    folded.roots
+                );
+                checked += 1;
+            }
+            assert!(checked > 0, "前 8 条跨库端点边的端点都不在规则 F 里");
         }
     }
 }

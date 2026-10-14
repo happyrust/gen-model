@@ -1923,10 +1923,11 @@ mod tests {
             !reconcile.contains("stale") && !reconcile.contains("if "),
             "数据面那一半不看模型面的过期名单、不带条件——两半各自对文件: {reconcile}"
         );
+        // 解构末尾的 `..` 是 GitHub #47 按目录文件分组时加的私有格（`unreadable_dbnums`），不上回执。
         for probe in [
-            "dependency_refresh,\n        } = reconcile;",
+            "dependency_refresh,\n            ..\n        } = reconcile;",
             "catalogue_dependency_refresh: dependency_refresh,",
-            "dependency_refresh: catalogue_dependency_refresh,\n    } = reconcile_catalogue_versions().await;",
+            "dependency_refresh: catalogue_dependency_refresh,\n        ..\n    } = reconcile_catalogue_versions().await;",
             "coverage.reconcile.catalogue_dependency_refresh = catalogue_dependency_refresh;",
             "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };",
         ] {

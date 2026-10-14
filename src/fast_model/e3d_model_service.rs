@@ -2859,20 +2859,14 @@ impl E3dModelService {
 
     /// Every design database of the current MDB as `(dbnum, file, source session)`,
     /// the session being the one generation would read right now (ADR-054 Q1).
-    /// Derived faces that must not depend on parsed `pe` rows (room topology,
-    /// `room_topology`) enumerate the files through this.
-    pub(crate) fn design_sources(&self) -> anyhow::Result<Vec<(u32, PathBuf, u32)>> {
-        self.pins
-            .iter()
-            .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
-            .map(|pin| {
-                Ok((
-                    pin.dbnum as u32,
-                    pin.file.clone(),
-                    self.source_session(pin)?,
-                ))
-            })
-            .collect()
+    ///
+    /// `None` = 未钉住的成员此刻问不出最新会话（文件不在、被占、会话头读挂）。**不让调用方整个失败**：
+    /// 唯一的调用方是 P4 设计引用级联（`window_root_plan` 的窗口规划），`None` 交给反查按「文件最新」
+    /// 自己去开——开得了，读到的就是生成此刻会读的那个会话；开不了，记进 `unreadable_dbs`，整窗按
+    /// 计划 §2 原则 3 退化（已持久化的根全部重算）并在回执点名。2026-09-30 P4 翻默认开（GitHub #32）
+    /// 时补的：此前这里一个成员问不出会话，`?` 就让**每一个**设计库的窗口规划一起报错。
+    pub(crate) fn design_sources(&self) -> Vec<(u32, PathBuf, Option<u32>)> {
+        design_members(&self.pins, |pin| self.source_session(pin))
     }
 
     /// The session a database is generated from (ADR-054 Q1): an explicit pin
@@ -3214,6 +3208,68 @@ fn current_mdb_source_inventory()
 pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator)> {
     let (pins, locator, _) = current_mdb_source_inventory()?;
     Ok((pins, locator))
+}
+
+/// [`E3dModelService::design_sources`] 的纯核：MDB 的设计成员，各带生成此刻读的会话
+/// （`session` 即 `source_session`：钉住的照钉、没钉的问文件最新）；问不出的交 `None`，不中断。
+fn design_members(
+    pins: &[DbPin],
+    mut session: impl FnMut(&DbPin) -> anyhow::Result<u32>,
+) -> Vec<(u32, PathBuf, Option<u32>)> {
+    pins.iter()
+        .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
+        .map(|pin| (pin.dbnum as u32, pin.file.clone(), session(pin).ok()))
+        .collect()
+}
+
+/// 目录文件的选法（GitHub #47）：生成读哪一份、MDB 声明的是哪一份。与 [`E3dDbResolver`] 同一张 locator、
+/// 同一份项目副本表、同一个函数（[`select_dependency_file`]），只是不开库、不读 schema。
+///
+/// 同一个 CATA 库号在闭包里有几份文件时，设计库所在项目里那份才是它的模型真读的（AMS `/ALL` 实测：ACP 的
+/// 设计库读 `acp7000`、AMS 的读 `ams7355`，MDB 声明的却是 `ams7000` / `aps7355`）。目录版本核对拿它比会话、
+/// 在它上面收窗、给它盖落款——不拿 MDB 声明那份去比别的文件记下的会话号。
+pub(crate) struct CatalogueFileChoice {
+    locator: InMemoryCataLocator,
+    project_files: ProjectDbFiles,
+}
+
+impl CatalogueFileChoice {
+    pub(crate) fn current() -> anyhow::Result<Self> {
+        let (_, locator, project_files) = current_mdb_source_inventory()?;
+        Ok(Self {
+            locator,
+            project_files,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_parts(locator: InMemoryCataLocator, project_files: ProjectDbFiles) -> Self {
+        Self {
+            locator,
+            project_files,
+        }
+    }
+
+    /// 设计库 `design_dbnum` 生成时目录库 `catalogue_dbnum` 读的那份文件；`None` = 生成也解不出它
+    /// （MDB 没声明——resolver 只认 MDB 声明的库，GitHub #46）。
+    pub(crate) fn for_library(&self, design_dbnum: u32, catalogue_dbnum: u32) -> Option<PathBuf> {
+        let preferred_project = self
+            .locator
+            .file_of(design_dbnum)
+            .map(|(project, _)| project);
+        select_dependency_file(
+            &self.locator,
+            &self.project_files,
+            preferred_project.as_deref(),
+            catalogue_dbnum,
+        )
+        .map(|file| file.path)
+    }
+
+    /// MDB 声明的那份。
+    pub(crate) fn declared(&self, dbnum: u32) -> Option<PathBuf> {
+        self.locator.file_of(dbnum).map(|(_, path)| path)
+    }
 }
 
 fn styp_name(value: i64) -> Option<&'static str> {
@@ -4765,6 +4821,179 @@ mod tests {
     /// 序合起来，键认成 acp 那条 → 对 BRAN 有效、元素上没值 → unset → 公式未解，印成 E3D
     /// 的写法。这正是 E3D 自己对这些槽位报 `Catalogue error … unable to evaluate … PXLE`
     /// 的落点；同一条支管 `Q :HXYsize` 却答 `675 600`。
+    /// GitHub #46 / #47 探针（只读真部署闭包）：同一个 CATA 库号在闭包里有几份文件时，三处各认哪一份——
+    /// sweep 观察（监控目录里按文件头认出的 CATA 经 `select_catalogue_candidates` + `catalogue_project_priority`
+    /// 选正本，数据面依赖行同一份清单）、目录版本核对（`model_source::source_file_lookup` = MDB 声明那份）、
+    /// 生成（`select_dependency_file`：目标 DESI 所在项目里有同类型副本就用它）。逐个 (DESI 项目, CATA) 打印，
+    /// 末行 `CATA_SELECTION_SUMMARY` 汇总；另数 sweep 观察得到、生成却解不出的未声明 CATA（#46）。
+    #[tokio::test]
+    #[ignore = "real MDB closure from DbOption.toml"]
+    async fn live_catalogue_file_selection_across_observation_reconcile_and_generation()
+    -> anyhow::Result<()> {
+        use crate::data_interface::initialization_phase::{
+            CatalogueCandidate, select_catalogue_candidates,
+        };
+        let same_file = |a: &Path, b: &Path| {
+            a.to_string_lossy().to_ascii_lowercase() == b.to_string_lossy().to_ascii_lowercase()
+        };
+        let option = aios_core::get_db_option();
+        let (pins, locator, project_files) = current_mdb_source_inventory()?;
+        // 设计库按所在项目分组：生成时 `preferred_project` 就是它。
+        let mut library_projects: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+        for pin in pins
+            .iter()
+            .filter(|pin| crate::data_interface::model_source::is_element_db(&pin.db_type))
+        {
+            let dbnum = pin.dbnum as u32;
+            if let Some((project, _)) = locator.file_of(dbnum) {
+                library_projects
+                    .entry(project.to_ascii_lowercase())
+                    .or_default()
+                    .push(dbnum);
+            }
+        }
+        // 观察那一份：与 sweep 同一个选主函数、同一个闭包项目序、同一个优先级配置。
+        let plan = crate::data_interface::project_paths::plan_watch_dirs(option);
+        let mut candidates = Vec::new();
+        for dir in plan.dirs() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if !path.is_file() {
+                    continue;
+                }
+                let Ok(header) = crate::data_interface::db_file_header::DbFileHeader::read(&path)
+                else {
+                    continue;
+                };
+                if !header.db_type.eq_ignore_ascii_case("CATA") {
+                    continue;
+                }
+                let Some(project) = crate::data_interface::project_paths::project_of_path(&path)
+                else {
+                    continue;
+                };
+                candidates.push(CatalogueCandidate {
+                    project,
+                    dbnum: header.dbnum as u32,
+                    path,
+                });
+            }
+        }
+        let selection = select_catalogue_candidates(
+            candidates.clone(),
+            &crate::data_interface::project_paths::project_names(option),
+            &crate::options::catalogue_project_priority(),
+        );
+        let observed: BTreeMap<u32, (String, PathBuf)> = selection
+            .selected
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.dbnum,
+                    (candidate.project.clone(), candidate.path.clone()),
+                )
+            })
+            .collect();
+        // 同号多份：生成能看见的副本（MDB 声明 + 遮蔽）与监控目录里的候选，按项目去重。
+        let mut copies: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for ((project, dbnum), file) in project_files.iter() {
+            if file.db_type.eq_ignore_ascii_case("CATA") {
+                copies.entry(*dbnum).or_default().insert(project.clone());
+            }
+        }
+        for candidate in &candidates {
+            copies
+                .entry(candidate.dbnum)
+                .or_default()
+                .insert(candidate.project.to_ascii_lowercase());
+        }
+        let mut same_number = 0usize;
+        let mut pairs = 0usize;
+        let mut against_reconcile = 0usize;
+        let mut against_observed = 0usize;
+        for (&cata, projects) in copies.iter().filter(|(_, projects)| projects.len() > 1) {
+            same_number += 1;
+            let reconcile = crate::data_interface::model_source::source_file_lookup(cata)?;
+            let observed_file = observed.get(&cata);
+            let latest = |path: &Path| {
+                crate::data_interface::model_source::latest_source_version_of_file(
+                    cata, "CATA", path,
+                )
+                .map(|version| version.sesno.to_string())
+                .unwrap_or_else(|error| format!("? ({error})"))
+            };
+            println!(
+                "CATA {cata}: copies in {projects:?}; observed {:?}; reconcile (MDB pin) {:?}",
+                observed_file.map(|(project, path)| format!(
+                    "{project} {} @{}",
+                    path.display(),
+                    latest(path)
+                )),
+                reconcile
+                    .as_ref()
+                    .map(|(_, path)| format!("{} @{}", path.display(), latest(path))),
+            );
+            for ((project, dbnum), file) in project_files.iter() {
+                if *dbnum == cata {
+                    println!(
+                        "  copy {project}: {} @{}",
+                        file.path.display(),
+                        latest(&file.path)
+                    );
+                }
+            }
+            for (project, libraries) in &library_projects {
+                pairs += 1;
+                let Some(generated) =
+                    select_dependency_file(&locator, &project_files, Some(project), cata)
+                else {
+                    println!(
+                        "  DESI project {project} ({} libs): generation resolves nothing",
+                        libraries.len()
+                    );
+                    continue;
+                };
+                let off_reconcile = reconcile
+                    .as_ref()
+                    .is_none_or(|(_, path)| !same_file(path, &generated.path));
+                let off_observed =
+                    observed_file.is_none_or(|(_, path)| !same_file(path, &generated.path));
+                against_reconcile += usize::from(off_reconcile);
+                against_observed += usize::from(off_observed);
+                println!(
+                    "  DESI project {project} ({} libs, e.g. {:?}): generation reads {} {}{}{}",
+                    libraries.len(),
+                    &libraries[..libraries.len().min(3)],
+                    generated.project,
+                    generated.path.display(),
+                    if off_reconcile { " ≠reconcile" } else { "" },
+                    if off_observed { " ≠observed" } else { "" },
+                );
+            }
+        }
+        // #46：sweep 观察得到、MDB 没声明的 CATA——生成的 resolver 只认 MDB 声明的库，解不出它。
+        let undeclared: Vec<String> = observed
+            .iter()
+            .filter(|(dbnum, _)| locator.db_type_of(**dbnum).is_none())
+            .map(|(dbnum, (project, _))| format!("{dbnum}@{project}"))
+            .collect();
+        println!(
+            "undeclared CATA observed by the sweep (generation cannot resolve them): {} {:?}",
+            undeclared.len(),
+            &undeclared[..undeclared.len().min(40)]
+        );
+        println!(
+            "CATA_SELECTION_SUMMARY: DESI projects {} / CATA with >1 copy {same_number} / (DESI project, CATA) pairs {pairs} / generation != reconcile {against_reconcile} / generation != observed {against_observed} / observed {} / undeclared observed {} / selection blockers {}",
+            library_projects.len(),
+            observed.len(),
+            undeclared.len(),
+            selection.blockers.len()
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "real AMS 7997 + the project Dictionary databases"]
     async fn ams7997_head_slot_expression_stays_unset_by_key_even_with_the_bran_attached()
@@ -6928,22 +7157,26 @@ mod tests {
         let store = ModelMemoryStore::default();
         let mesh_dir = service.mesh_dir.clone();
         let mut cache = CatalogueMeshCache::default();
+        // 两端整根重算里画不出的件（生成器本来就画不出的那几件）不拦对拍，只记——与全语料单元级对拍同一口径：
+        // 生产路照样按已画出的件发布（`partial_roots`），刚体前移挪的也只是这些记录。两端画不出的不是同一批时，
+        // 逐条比对自然对不上（多一条 / 少一条），照样判红。
         let regen_at = |root: RefNo,
                         sesno: u32,
                         input: &GenerationInput,
                         cache: &mut CatalogueMeshCache|
-         -> anyhow::Result<ProjectionCommit> {
+         -> anyhow::Result<(ProjectionCommit, usize)> {
             let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, cache)?;
-            anyhow::ensure!(
-                snapshot.report.failed.is_empty(),
-                "regen of {root} at {sesno} has {} failed element(s)",
-                snapshot.report.failed.len()
-            );
+            let failed = snapshot.report.failed.len();
+            if failed > 0 {
+                println!(
+                    "  regen of {root} at {sesno}: {failed} element(s) failed to evaluate (kept out of both sides)"
+                );
+            }
             let owners = snapshot.owners.clone();
             let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
             let (commit, _) =
                 project_geometry_delta(dbnum, sesno, baked.elements, Vec::new(), None, &owners)?;
-            Ok(commit)
+            Ok((commit, failed))
         };
         // 两端都先整根重算完再落款：目录会话表是生成时按需填的（`E3dDbResolver` 开到哪个目录库才登记哪个），
         // `model_target` 的 `catalogue` 列就是「此刻表里有什么」——逐根边生成边落款，早生成的根落款里目录少几行，
@@ -6951,17 +7184,15 @@ mod tests {
         let clock = Instant::now();
         let mut seeds = Vec::new();
         let mut regen_t_by_root = BTreeMap::<String, ProjectionCommit>::new();
+        let mut failed_elements = (0usize, 0usize);
         for unit in &units {
             let root = parse_refno(&unit.root_refno)?;
-            seeds.push((
-                root,
-                unit.root_refno.clone(),
-                regen_at(root, base_sesno, &base, &mut cache)?,
-            ));
-            regen_t_by_root.insert(
-                unit.root_refno.clone(),
-                regen_at(root, target_sesno, &target, &mut cache)?,
-            );
+            let (seed, seed_failed) = regen_at(root, base_sesno, &base, &mut cache)?;
+            let (regen_t, target_failed) = regen_at(root, target_sesno, &target, &mut cache)?;
+            failed_elements.0 += seed_failed;
+            failed_elements.1 += target_failed;
+            seeds.push((root, unit.root_refno.clone(), seed));
+            regen_t_by_root.insert(unit.root_refno.clone(), regen_t);
         }
         let target_at_s = service.model_target(dbnum, base_sesno, &base.dependency_sessions)?;
         let target_at_t = service.model_target(dbnum, target_sesno, &target.dependency_sessions)?;
@@ -7387,11 +7618,19 @@ mod tests {
         );
         if failures.is_empty() {
             println!(
-                "GATE 3 OK: {} root(s) transform == regen@{target_sesno} (record_id / 1e-9 / bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content / receipt@T){}",
+                "GATE 3 OK: {} root(s) transform == regen@{target_sesno} (record_id / 1e-9 / bounds ≤ max(1e-3, 2 ulp) / mesh: Canonical id · Baked content / receipt@T){}{}",
                 report.completed.len(),
                 if total_drift > 0 {
                     format!(
                         " — {total_drift} Baked mesh_id drift(s) counted as observation (content equal)"
+                    )
+                } else {
+                    String::new()
+                },
+                if failed_elements != (0, 0) {
+                    format!(
+                        " [failed elements S {} / T {} kept out of both sides]",
+                        failed_elements.0, failed_elements.1
                     )
                 } else {
                     String::new()
@@ -7525,7 +7764,8 @@ mod tests {
         }
         /// 回退原因归桶：同一类只按类计，不按根展开。
         fn fallback_bucket(reason: &str) -> &'static str {
-            const BUCKETS: [(&str, &str); 10] = [
+            const BUCKETS: [(&str, &str); 11] = [
+                ("may leave root", "D2：局部清单会清空整根，归整根路发布"),
                 ("no_model_only hint does not hold", "空子计划·no_model_only 复核不成立"),
                 ("names no unit under root", "空子计划·级联 / 恢复选进来的根（非 no_model_only）"),
                 ("immutable target", "设计窗之外的目标变了（目录 / 模板 / 生成器 / 细分档）"),
@@ -7536,6 +7776,20 @@ mod tests {
                 ("full_rebuild", "窗计划退化成整库重建"),
                 ("unreadable", "计划期读挂"),
                 ("baseline", "回执不在规划基线上"),
+            ];
+            BUCKETS
+                .iter()
+                .find(|(needle, _)| reason.contains(needle))
+                .map(|(_, bucket)| *bucket)
+                .unwrap_or("其它")
+        }
+        /// 退化窗的原因归桶（`WindowImpact::degraded_reason` 的四类；几类同时成立时取这里排在前面的那一类）。
+        fn degraded_bucket(reason: &str) -> &'static str {
+            const BUCKETS: [(&str, &str); 4] = [
+                ("too many candidates", "比例护栏（净候选 > 30% 索引键）"),
+                ("closure incomplete", "闭包读挂"),
+                ("unresolved=", "plan_update 分类不了的候选"),
+                ("design-reference cascade", "设计引用反查判不了"),
             ];
             BUCKETS
                 .iter()
@@ -7569,6 +7823,8 @@ mod tests {
         let mut diffs: Vec<String> = Vec::new();
         let mut fallback_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut fallback_examples: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut degraded_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut degraded_examples: BTreeMap<&'static str, String> = BTreeMap::new();
         let mut failures: Vec<String> = Vec::new();
         let mut budget_exhausted = false;
 
@@ -7683,9 +7939,15 @@ mod tests {
                     let impact = sources.impact(&roots_s);
                     let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
                     stats.regen_roots += plan.regen.len();
-                    if plan.degraded.is_some() {
-                        // 退化窗把每个持久根都判成 regen，单元路对它一根都不许走（Q4）——只数不量。
+                    if let Some(reason) = &plan.degraded {
+                        // 退化窗把每个持久根都判成 regen，单元路对它一根都不许走（Q4）——只数不量；原因按类记账。
                         stats.windows_degraded += 1;
+                        let bucket = degraded_bucket(reason);
+                        *degraded_buckets.entry(bucket).or_default() += 1;
+                        degraded_examples
+                            .entry(bucket)
+                            .or_insert_with(|| format!("{label}: {reason}"));
+                        println!("{label}: degraded: {reason}");
                         continue;
                     }
                     let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
@@ -8010,6 +8272,16 @@ mod tests {
                 .unwrap_or_default();
             report.push_str(&format!("| {bucket} | {count} | {example} |\n"));
         }
+        report.push_str(
+            "\n### 退化窗原因（按类，只数不量）\n\n| 类 | 窗数 | 一例 |\n|---|---|---|\n",
+        );
+        for (bucket, count) in &degraded_buckets {
+            let example = degraded_examples
+                .get(bucket)
+                .map(|line| line.replace('|', "\\|"))
+                .unwrap_or_default();
+            report.push_str(&format!("| {bucket} | {count} | {example} |\n"));
+        }
         if !diffs.is_empty() {
             report.push_str("\n### **红：DIFF**\n\n");
             for line in &diffs {
@@ -8076,6 +8348,7 @@ mod tests {
                 "regen_t_secs": total_f(|s| s.regen_t_secs),
                 "plan_secs": total_f(|s| s.plan_secs),
                 "fallback_buckets": fallback_buckets,
+                "degraded_buckets": degraded_buckets,
             })
         );
         if !keep_meshes && std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR").is_err() {
@@ -8087,6 +8360,82 @@ mod tests {
             "D9 ①：单元路与 regen 路的整根 manifest_hash 必须逐字相同，红了 {} 根：\n{}",
             diffs.len(),
             diffs.join("\n")
+        );
+        Ok(())
+    }
+
+    /// ADR-080 A7 / D9 ③（手动）：单元路一窗的**固定开销**。生产里规划器已在同一窗上跑过 `collect_window` +
+    /// `plan_update`，单元路的生产方（`UnitDeltaProducer::open`，每窗第一根单元路的根触发一次）再开一次：两端
+    /// `generation_input` + 再算一遍计划。生成输入缓存**每库只留一条**（ADR-084），S 与 T 同库，所以这一开至少要
+    /// 重建一端 `DbSet` / 索引——上面那支全语料对拍只比了逐根的单元路 vs 整根路，这一笔没进去。这里对给定的窗各开
+    /// 一次、计时，就是单元路比整根路多付的那一笔。
+    ///
+    /// 窗口清单 `AIOS_A7_WINDOWS_FILE` 一行一个 `文件名 S T`（取自对拍日志里有 PARITY OK 的窗），文件在
+    /// `AIOS_POSREF_DIRS` 里找；目录依赖经当前 MDB（`DB_OPTION_FILE`）。每窗一行 `A7_OPEN 文件名 S T 秒`，末尾 `A7_SUMMARY`。
+    #[tokio::test]
+    #[ignore = "manual live: needs DB_OPTION_FILE (MDB), the corpus directories and AIOS_A7_WINDOWS_FILE"]
+    async fn probe_unit_producer_open_cost_per_window() -> anyhow::Result<()> {
+        use std::time::Instant;
+
+        use crate::data_interface::direct_store::DbPin;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        let list = std::fs::read_to_string(std::env::var("AIOS_A7_WINDOWS_FILE")?)?;
+        let dirs: Vec<PathBuf> = std::env::var("AIOS_POSREF_DIRS")
+            .map(|value| value.split(';').map(PathBuf::from).collect())
+            .unwrap_or_default();
+        let mut files: BTreeMap<String, (u32, PathBuf)> = BTreeMap::new();
+        for dir in dirs.iter().filter(|dir| dir.is_dir()) {
+            for source in sources_in_dir(dir, &["DESI"])? {
+                let name = source
+                    .file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                files.insert(name, (source.dbnum, source.file.clone()));
+            }
+        }
+        let mut service = E3dModelService::from_current().await?;
+        let (mut total, mut windows, mut skipped) = (0.0f64, 0usize, 0usize);
+        for line in list.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let [name, base, target] = parts.as_slice() else {
+                continue;
+            };
+            let (Ok(base), Ok(target)) = (base.parse::<u32>(), target.parse::<u32>()) else {
+                continue;
+            };
+            let Some((dbnum, file)) = files.get(*name).cloned() else {
+                println!("A7_SKIP {line}: not in AIOS_POSREF_DIRS");
+                skipped += 1;
+                continue;
+            };
+            service.pins.retain(|pin| pin.dbnum != dbnum as i32);
+            service.pins.push(DbPin {
+                dbnum: dbnum as i32,
+                db_type: "DESI".into(),
+                file,
+                sesno: None,
+            });
+            let clock = Instant::now();
+            let opened = UnitDeltaProducer::open(&service, dbnum, base, target);
+            let secs = clock.elapsed().as_secs_f64();
+            match opened {
+                Ok(_) => {
+                    println!("A7_OPEN {name} {base} {target} {secs:.4}");
+                    total += secs;
+                    windows += 1;
+                }
+                Err(error) => {
+                    println!("A7_SKIP {line}: {error:#}");
+                    skipped += 1;
+                }
+            }
+        }
+        println!("A7_SUMMARY windows={windows} skipped={skipped} open_secs={total:.1}");
+        assert!(
+            windows > 0,
+            "一窗都没开成——清单 / AIOS_POSREF_DIRS / DB_OPTION_FILE 不对"
         );
         Ok(())
     }
@@ -9232,5 +9581,115 @@ mod tests {
         assert_eq!(pin.sesno, Some(42));
         assert_eq!(pin.db_type.as_deref(), Some("CATA"));
         assert!(pin.template.ends_with("catvir.dat"));
+    }
+
+    /// GitHub #47：目录版本核对问「这个设计库读哪一份目录文件」，答案必须与 resolver 逐字相同——
+    /// 所在项目有同类型副本读副本，没有读 MDB 声明那份；MDB 没声明的库两边都答不出（#46）。
+    #[test]
+    fn catalogue_file_choice_answers_like_the_resolver_per_design_library() {
+        let declared = PathBuf::from(r"D:\selected\AMS\ams7000_0001");
+        let copy = PathBuf::from(r"D:\selected\ACP\acp7000_0001");
+        let locator = InMemoryCataLocator::from_parts(
+            HashMap::new(),
+            HashMap::from([
+                (7000, ("CATA".into(), "AMS".into(), declared.clone())),
+                (
+                    7015,
+                    (
+                        "DESI".into(),
+                        "ACP".into(),
+                        PathBuf::from(r"D:\selected\ACP\acp7015_0001"),
+                    ),
+                ),
+                (
+                    8000,
+                    (
+                        "DESI".into(),
+                        "AMS".into(),
+                        PathBuf::from(r"D:\selected\AMS\ams8000_0001"),
+                    ),
+                ),
+            ]),
+        );
+        let project_files: ProjectDbFiles = Arc::new(HashMap::from([(
+            project_db_key("ACP", 7000),
+            ProjectDbFile {
+                db_type: "CATA".into(),
+                project: "ACP".into(),
+                path: copy.clone(),
+            },
+        )]));
+        let resolver_file = select_dependency_file(&locator, &project_files, Some("ACP"), 7000)
+            .expect("resolver answers")
+            .path;
+        let choice = CatalogueFileChoice::from_parts(locator, project_files);
+        assert_eq!(choice.for_library(7015, 7000), Some(copy.clone()));
+        assert_eq!(choice.for_library(7015, 7000), Some(resolver_file));
+        assert_eq!(choice.for_library(8000, 7000), Some(declared.clone()));
+        assert_eq!(choice.declared(7000), Some(declared));
+        assert_eq!(choice.for_library(7015, 7016), None, "MDB 没声明的目录库");
+        assert_eq!(choice.declared(7016), None);
+    }
+
+    /// GitHub #32：P4 翻默认开之后每一窗规划都要列 MDB 的设计成员。一个成员问不出会话（文件不在 /
+    /// 被占）不能让这一窗的规划报错——交 `None`，反查按文件最新自己开；开不了记进 `unreadable_dbs`、
+    /// 整窗退化并点名（计划 §2 原则 3），而不是让所有设计库的模型更新一起停。
+    #[test]
+    fn an_unreadable_design_member_degrades_the_reference_cascade_instead_of_failing_the_window() {
+        use crate::data_interface::reverse_reference::{
+            DesignReferenceCascade, SourceDb, read_design_referrer_edges,
+        };
+        let pin = |dbnum: i32, db_type: &str, sesno: Option<u32>| DbPin {
+            dbnum,
+            db_type: db_type.into(),
+            file: PathBuf::from(format!(r"Z:\gm32\{dbnum}_0001")),
+            sesno,
+        };
+        let pins = vec![
+            pin(8000, "DESI", None),
+            pin(8001, "DESI", Some(7)),
+            pin(7351, "CATA", None),
+            pin(8002, "DESI", None),
+        ];
+        let mut asked = Vec::new();
+        let members = design_members(&pins, |pin| {
+            asked.push(pin.dbnum);
+            match (pin.sesno, pin.dbnum) {
+                (Some(sesno), _) => Ok(sesno),
+                (None, 8000) => Ok(42),
+                (None, dbnum) => anyhow::bail!("dbnum {dbnum} 的库文件被占用"),
+            }
+        });
+        assert_eq!(asked, vec![8000, 8001, 8002], "只问设计成员");
+        assert_eq!(
+            members,
+            vec![
+                (8000, pins[0].file.clone(), Some(42)),
+                (8001, pins[1].file.clone(), Some(7)),
+                (8002, pins[3].file.clone(), None),
+            ]
+        );
+
+        // 交出去的 `None` 走反查自己的开库：开不了 → 记账 → 判不了（不是「没有引用者」）。
+        let design_dbs: Vec<SourceDb> = members
+            .into_iter()
+            .filter(|(dbnum, ..)| *dbnum == 8002)
+            .map(|(dbnum, file, sesno)| SourceDb {
+                dbnum,
+                db_type: "DESI".into(),
+                file,
+                sesno,
+            })
+            .collect();
+        let edges =
+            read_design_referrer_edges(&[e3d_io::RefNo::new(1, 1)], &design_dbs, usize::MAX);
+        assert!(
+            edges.unreadable_dbs.contains_key(&8002),
+            "{:?}",
+            edges.unreadable_dbs
+        );
+        let cascade = DesignReferenceCascade::from_edges(&edges, 8000, |_| Vec::new());
+        let reason = cascade.degraded.expect("打不开就是判不了");
+        assert!(reason.contains("8002"), "{reason}");
     }
 }

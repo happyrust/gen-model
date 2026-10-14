@@ -206,6 +206,16 @@ model_incremental = true
 # 用 AIOS_ROOM_MEMBERSHIP=0，不必改文件。
 room_membership = true
 
+#【默认值 2026-09-30 改为 true，GitHub #32】model_design_reference_cascade —— 设计→设计引用级联（级联查询换源计划 P4）
+# 窗口里每个变更元素到 MDB 每个设计库自带的反向引用表点查「谁引用它」；生成器真读的跨单元设计引用只有
+# POSREF 一条（电缆桥架成员的位置参照），它的引用者上卷成根一起重算——被参照件挪了，参照它的件跟着动。
+# 反查判不了（变更件数超上限、成员库打不开、表读挂）时整窗已持久化的根重算，回执点名（宁多算不漏算）。
+#   true ：默认开启。2026-09-30 验收：31 个带 POSREF 表的设计库各自答得出引用者；93 个真库窗口开关两态逐字相同；
+#          ams8000 九个钉死窗口桶位逐字相同。
+#   false：不开成员库、不查表，被参照件挪了引用者不重算（2026-09-30 之前的默认）。
+# 环境变量 AIOS_MODEL_DESIGN_REFERENCE_CASCADE 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
+model_design_reference_cascade = true
+
 #【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
 # 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。
 # SYS meta（SYST/DICT/GLB/GLOB）不受限：MDB 的成员名单就存在那些库里，圈掉它们

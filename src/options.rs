@@ -262,7 +262,7 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_cable_endpoint_cascade: Option<bool>,
 
-    /// 设计侧通用一跳反查（级联查询换源计划 P4，默认关闭）：窗口里的变更元素到 MDB 每个设计库
+    /// 设计侧通用一跳反查（级联查询换源计划 P4，**默认开**，2026-09-30 起，GitHub #32）：窗口里的变更元素到 MDB 每个设计库
     /// 的每张 kind-16 反向引用表点查引用者，`POSREF` 的引用者上卷成根并进 `touched`。
     /// 详见 [`model_design_reference_cascade`]。
     #[serde(default)]
@@ -2329,7 +2329,8 @@ pub const MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV: &str =
 /// 联动对齐计划（`2026-09-06-core3d-cascade-parity-dev-plan.md` §3 C2）的灰度开关：direct 窗口
 /// 规划器对变更的 `SCTN` / `GENSEC` / `STWALL` / `WALL`（`JOIS` / `JOIE`）、`PJOI` / `SJOI` / `SUBJ` /
 /// `FIXING`（`CREF`）、`CMPF`（`CFRA`）正向读连接属性、到对端核对回指，把对端 owner 链上的生成根
-/// 并进 `touched`——core `change/EVALAT` 规则 K → `ADSTCH` 的同形。关着时一次文件读都不发生，
+/// 并进 `touched`——core `change/EVALAT` 规则 K → `ADSTCH` 的同形。对端落在别的设计库时本窗不上卷，计划带着它
+/// 交给跨库交接（`cross_db_handoff`，2026-10-01，GitHub #34 前置 2）。关着时一次文件读都不发生，
 /// `regen` 与引入前逐字相同；三态契约在 `structural_connection::tests`，真库窗口
 /// （`aps7200_0001` 3→4、`aps250110_0001` 29→30）与九个钉死窗口两态逐字相同在
 /// `structural_connection::tests::live`。
@@ -2359,9 +2360,11 @@ pub const MODEL_CABLE_ENDPOINT_CASCADE_ENV: &str = "AIOS_MODEL_CABLE_ENDPOINT_CA
 /// 窗口规划器对变更的 `EQUI` / `ELCONN`（core 规则 F `ELCXRF`）与 `CWBRAN`（规则 E `CLIST`）到本库
 /// T 端文件自带的 `STAREF` / `ENDREF` 反向引用表点查引用它们的电缆（`CABLE` 或其 `EXTGEO` 段），把
 /// 电缆 owner 链上的生成根并进 `touched`——core 那两个伪属性底下就是 `DB_RefTableIterator`
-/// （证据 `2026-09-06-ida-core3d-change-evalat-cascade.md` §8.6）。只查本库，跨库边不在此版。
-/// 关着时不开引擎、不查表，`regen` 与引入前逐字相同；三态契约在 `cable_endpoint::tests`，真库
-/// （`zdj7200_0001` 六根电缆的假定源 + 现有窗口两态逐字相同）在 `cable_endpoint::tests::live`。
+/// （证据 `2026-09-06-ida-core3d-change-evalat-cascade.md` §8.6）。跨库版（2026-10-01，GitHub #35）：同一批键
+/// 到 MDB 其余设计成员各自的同名表点查，别的库里的电缆随计划交给跨库交接（`cross_db_handoff`），落地之后给
+/// 那个库排一条只带名单的 `ModelOnly`。关着时不开引擎、不查表，`regen` 与引入前逐字相同；三态契约在
+/// `cable_endpoint::tests`，真库（`zdj7200_0001` 六根电缆的假定源 + 现有窗口两态逐字相同、APS 跨库端点
+/// 查回别的库的电缆）在 `cable_endpoint::tests::live`。
 ///
 /// 环境变量 [`MODEL_CABLE_ENDPOINT_CASCADE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_cable_endpoint_cascade() -> bool {
@@ -2382,9 +2385,11 @@ pub fn model_cable_endpoint_cascade() -> bool {
 /// 环境变量名：一次性覆盖 [`model_design_reference_cascade`]，不必改配置文件。
 pub const MODEL_DESIGN_REFERENCE_CASCADE_ENV: &str = "AIOS_MODEL_DESIGN_REFERENCE_CASCADE";
 
-/// 设计侧通用一跳反查（`DbOption.toml` 的 `model_design_reference_cascade`，**默认 false**）。
+/// 设计侧通用一跳反查（`DbOption.toml` 的 `model_design_reference_cascade`，**默认开**——2026-09-30 翻开，
+/// GitHub #32：31 个带 `POSREF` 表的设计库各自答得出自己的引用者、93 个真库窗口两态逐字相同、ams8000
+/// 九个钉死窗口开关两态桶位逐字相同；此前默认关）。
 ///
-/// 级联查询换源计划（`2026-09-06-cascade-query-via-dab-ref-tables-plan.md` P4）的灰度开关：direct
+/// 级联查询换源计划（`2026-09-06-cascade-query-via-dab-ref-tables-plan.md` P4）的开关：direct
 /// 窗口规划器对 `plan_update` 报出的每个变更元素，到 **MDB 每个设计库**自带的 kind-16 反向引用表
 /// 逐库点查「谁引用它」（表在就查，判据与 P1 同一条）。783 库差表里设计→设计、跨单元、e3d-model
 /// 几何真读的引用属性只有 `POSREF` 一条（`docs/evidence/2026-09-06-ref-rev-vs-file-table-coverage.md`
@@ -2392,8 +2397,9 @@ pub const MODEL_DESIGN_REFERENCE_CASCADE_ENV: &str = "AIOS_MODEL_DESIGN_REFERENC
 /// 读它们那天入口已经在原位。
 ///
 /// 反查判不了（变更件数超上限、成员库打不开、表读挂）时按计划 §2 原则 3「宁多算不漏算」退化：
-/// 放弃凭证前移，这一窗所有已持久化的根重算。关着时不开任何成员库、不查表，`regen` 与引入前
-/// 逐字相同；三态契约在 `reverse_reference::tests`，真库两态对拍在 `reverse_reference::tests::live`。
+/// 放弃凭证前移，这一窗所有已持久化的根重算，回执点名原因。关掉（`= false` 或环境变量置 0）时不开任何
+/// 成员库、不查表，`regen` 与引入前逐字相同；三态契约在 `reverse_reference::tests`，真库两态对拍在
+/// `reverse_reference::tests::live`。
 ///
 /// 环境变量 [`MODEL_DESIGN_REFERENCE_CASCADE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_design_reference_cascade() -> bool {
@@ -2403,12 +2409,22 @@ pub fn model_design_reference_cascade() -> bool {
         2 => return false,
         _ => {}
     }
-    effective_default_off_switch(
+    effective_default_on_switch(
         load_ext_fields().model_design_reference_cascade,
         std::env::var(MODEL_DESIGN_REFERENCE_CASCADE_ENV)
             .ok()
             .as_deref(),
     )
+}
+
+/// 默认开的开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `true`。
+/// 拼错的环境变量退回配置值，理由同 [`effective_startup_autorun`]；与 [`effective_default_off_switch`] 对称
+/// （2026-09-30 随 `model_design_reference_cascade` 翻默认引入，2026-10-14 复用于 Issue #36 / #50 翻默认）。
+fn effective_default_on_switch(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(true)
 }
 
 /// 默认关的灰度开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `false`。
@@ -2418,16 +2434,6 @@ fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(false)
-}
-
-/// 默认开的灰度开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `true`。
-/// 2026-10-14 新增（Issue #36 / #50 翻默认）：与 `effective_default_off_switch` 对称，
-/// 拼错的环境变量退回配置值，理由同 [`effective_startup_autorun`]。
-fn effective_default_on_switch(configured: Option<bool>, env_override: Option<&str>) -> bool {
-    env_override
-        .and_then(parse_bool_flag)
-        .or(configured)
-        .unwrap_or(true)
 }
 
 /// 环境变量名：一次性关掉 [`model_element_cache`]，不必改配置文件。
@@ -3714,6 +3720,45 @@ mod tests {
             let _off = DesignReferenceCascadeOverride::set(false);
             assert!(!model_design_reference_cascade());
         }
+    }
+
+    /// GitHub #32：P4 设计引用级联翻成默认开——没配、没设环境变量就是开；配置 `false` 关得掉，
+    /// 环境变量双向压过配置，拼错的环境变量退回配置值（与默认关那一族同一个取值顺序，只是兜底是 `true`）。
+    #[test]
+    fn the_design_reference_cascade_defaults_on_and_stays_switchable() {
+        assert!(effective_default_on_switch(None, None), "没配就是开");
+        assert!(
+            !effective_default_on_switch(Some(false), None),
+            "配置关得掉"
+        );
+        assert!(effective_default_on_switch(Some(true), None));
+        assert!(
+            !effective_default_on_switch(Some(true), Some("0")),
+            "环境变量压过配置"
+        );
+        assert!(effective_default_on_switch(Some(false), Some("1")));
+        assert!(
+            !effective_default_on_switch(Some(false), Some("ture")),
+            "拼错回配置"
+        );
+        assert!(
+            effective_default_on_switch(None, Some("ture")),
+            "拼错且没配回默认开"
+        );
+        // 同一族的默认关开关不受影响。
+        assert!(!effective_default_off_switch(None, None));
+        // 出厂模板写的与代码默认（缺键时的取值）一致——room_membership 那次分叉的教训（2026-09-15）。
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/templates/DbOption.factory.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("出厂模板可读");
+        let document = toml::from_str::<toml::Value>(&text).expect("出厂模板是合法 TOML");
+        let configured = document
+            .get("model_design_reference_cascade")
+            .and_then(toml::Value::as_bool)
+            .expect("模板写了 model_design_reference_cascade");
+        assert_eq!(configured, effective_default_on_switch(None, None));
     }
 
     /// 缺配置文件走默认值，而且不出声。单测环境与最小部署都没有 `DbOption.toml`，

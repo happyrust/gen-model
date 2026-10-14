@@ -30,8 +30,13 @@ if ($LASTEXITCODE) { throw 'Failed to query AMS model nouns' }
 # stale 只约束 verified 行：pending 行的实例可能来自探针的按需生成，金基线恢复
 # （ADR-018）会把它们抹掉，等用例跑绿并铸进基线才要求常驻（实测 2026-08-07：
 # 一次恢复把 7999 的探针产物 57 条清回 2 条）。
+# blocked-by-e3d-crash = E3D 自己在这个 noun 上崩、TTY 驱动做不了 apply（GitHub #22：
+# des.exe 3.1.9.0 对 ANCI / FIXING / GENSEC 任何属性求值都在 core.dll+0x0074d982 崩）。
+# 它既不是 verified 也不是欠账：单列打印，不进 stale、不让 -RequireVerified 红；
+# 行里的 blocked_by 写明原因，E3D 侧修好或换了能跑的运行时再改回 pending 重验。
 $noGeometry = $manifest | Where-Object coverage -eq 'no_geometry'
-$expected = $manifest | Where-Object coverage -ne 'no_geometry'
+$blocked = $manifest | Where-Object coverage -eq 'blocked-by-e3d-crash'
+$expected = $manifest | Where-Object { $_.coverage -notin 'no_geometry', 'blocked-by-e3d-crash' }
 $verified = $expected | Where-Object coverage -eq 'verified'
 
 $duplicate = $manifest | Group-Object noun | Where-Object Count -ne 1 | ForEach-Object Name
@@ -39,12 +44,15 @@ $missing = $actual | Where-Object { $_ -notin $manifest.noun }
 $stale = $verified.noun | Where-Object { $_ -notin $actual }
 $contradicted = $noGeometry.noun | Where-Object { $_ -in $actual }
 $pending = $expected | Where-Object coverage -ne 'verified' | ForEach-Object noun
+$unexplained = $blocked | Where-Object { -not $_.blocked_by } | ForEach-Object noun
 
-Write-Host "AMS model nouns: actual=$($actual.Count) manifest=$($manifest.Count) verified=$($verified.Count) pending=$($pending.Count) no_geometry=$($noGeometry.Count)"
+Write-Host "AMS model nouns: actual=$($actual.Count) manifest=$($manifest.Count) verified=$($verified.Count) pending=$($pending.Count) no_geometry=$($noGeometry.Count) blocked=$($blocked.Count)"
 if ($missing) { Write-Host "Missing: $($missing -join ', ')" }
 if ($stale) { Write-Host "Stale: $($stale -join ', ')" }
 if ($duplicate) { Write-Host "Duplicate: $($duplicate -join ', ')" }
 if ($contradicted) { Write-Host "Contradicted no_geometry (now has instances): $($contradicted -join ', ')" }
 if ($pending) { Write-Host "Pending: $($pending -join ', ')" }
+if ($blocked) { Write-Host "Blocked by E3D crash (not verified, not pending): $(($blocked | ForEach-Object noun) -join ', ')" }
+if ($unexplained) { Write-Host "Blocked rows without blocked_by: $($unexplained -join ', ')" }
 
-if ($missing -or $stale -or $duplicate -or $contradicted -or ($RequireVerified -and $pending)) { exit 1 }
+if ($missing -or $stale -or $duplicate -or $contradicted -or $unexplained -or ($RequireVerified -and $pending)) { exit 1 }

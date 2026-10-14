@@ -75,3 +75,72 @@ ADR-046 把 `included_projects` 定为唯一名单并拒绝 UNC，理由是「�
      （目标 DESI 所在项目）选——两处选法不是同一个函数，`build_set` 注释里 APS7600 vs ZDJ7600 就是这一形状；观察到的会话与生成读的会话可能不是同一份文件。
      → 同上追踪。
 - 退路 (ii)（目录库没有反向引用表 → 该库全部依赖根判过期）按 dbnum 在 `reverse_reference::expand_reverse_cascade` 里做，不分本项目 / 外项目。
+
+## 追记 2026-09-30：库被移出 MDB / 库文件换路径时，留在库里的状态怎么处置（GitHub #41）
+
+**决定：只检测、只点名，不自动清；清理走现成的人工出口。**
+
+- **检测两处。**
+  1. 启动核对（`startup_reconcile::dbnums_retired_from_mdb`）：登记表里盖过水位（`applied_sesno` 或 `model_sesno` > 0）、当前 MDB 声明却不再列它的元素库
+     （DESI / ISOD，与 `model_source::is_element_db` 同一把尺子），升序写进 `/health.startup.reconcile.retired_from_mdb`，非空时打一行
+     「MDB 退出核对：…」横幅（≤ 12 个库号）。它**不参与** `result` 取重——不是复核没跑成；也不排任何工作。SYST / DICT / CATA 不在这一栏：
+     它们不产生根，依赖入库的 CATA 行由依赖状态表管（plan 2026-09-15 D6）。
+  2. SYST 刷新（ADR-085 D2，`mdb_membership::rebind` 在 `reason=syst-refresh` 时）：新声明比旧声明少了元素库，`mdb_scope` 阶段行照旧带 `removed=[…]`，
+     另起一行 `[mdb-scope] 移出 MDB 的元素库 […]` 说清「不自动清、下次启动在 `retired_from_mdb` 点名、人工出口是什么」。两处用同一个
+     `removed_element_dbnums`，阶段行的 `removed=` 与点名不会各算各的。
+- **为什么不自动清。** 移出 MDB 可能是误操作（CURD 改错、换 MDB 试一下）；自动删掉的 `pe` / noun 行、模型行、房间边要整库重新初始化才回得来，
+  而留着的代价只是占空间——它已经离开本期执行范围，监听、启动复核、模型凭证核对都不再处理它。E3D 里把库移出 MDB 与删库也是两个操作：
+  移出之后库文件还在项目目录里。
+- **人工出口（现成，不新增端点）。** 暂停队列 → 逐库 `DELETE /api/v1/dbnums/{dbnum}/data`（`fast_delete::delete_dbnum_fast`，`DropRow`：
+  `pe` / noun 行、`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `ref_rev` / `geo_relate` / `inst_info` / `aabb` / `trans` 的
+  Ref0 区间、`dbnum_info_table` / 统计行 / **水位行整行**一并删；进程内投影 `clear_dbnum`、生成根账本 `forget_dbnum`、CATA 已落库 memo 作废）
+  → 重启一次。最后一步是为了空间树：快删不动内存树，但空间树快照的指纹含各库的水位数对，水位行删了，下次启动按指针重建，那一库的条目随之消失。
+  交付台账（`datacenter_version` / `datacenter_delete`）不在快删范围里，照旧（plan 2026-09-22 D7）。
+- **换路径不是移出，已有处置。** MDB 声明不含文件位置（成员绑定才含），所以「库文件换路径」不改变范围：同一 dbnum 在抽取家族内改挂文件判
+  PathMigrated（ADR-028 D4），会话空间换了走整库重建（ADR-021）；共享盘重挂补上目录后重做绑定（ADR-085 D3）。家族之外把另一份同号文件挂进来，
+  按文件头身份对账，不是本追记的范围。
+- **护栏**：`startup_reconcile::tests::retired_from_mdb_names_stamped_element_rows_the_current_mdb_no_longer_declares`（盖过水位的移出元素库才点名；
+  声明着的、CATA、从没盖过水位的历史行不算；横幅 ≤ 12 个）、`mdb_membership::tests::a_syst_refresh_that_drops_element_databases_names_them_and_cleans_nothing`
+  （只数元素库、首次绑定不出声、阶段行与点名同口径）。词条见 `CONTEXT.md`「移出 MDB 的库」。
+
+## 追记 2026-09-30：同号跨项目的 CATA 按「生成真读的那份」核对；MDB 未声明的 CATA 不级联（GitHub #47 / #46）
+
+上面 #42 追记留下的两条边界，在真部署闭包上量过之后各给一个处置。探针
+`e3d_model_service::tests::live_catalogue_file_selection_across_observation_reconcile_and_generation`（只读，AMS `/ALL`）：
+
+| CATA | 闭包里的副本（最新会话） | MDB 声明 | 生成按目标设计库所在项目读 |
+|---|---|---|---|
+| 7000 | AMS `ams7000_0001` @274、ACP `acp7000_0001` @272 | AMS | ACP 的 8 个设计库读 **ACP**；AMS 20 个 + SCB 1 个读 AMS |
+| 7355 | AMS `ams7355_0001` @15、APS `aps7355_0001` @15 | **APS** | AMS 的 20 个读 **AMS**；ACP / SCB 读 APS |
+| 7351 | AMS @116、APS @116 | AMS | 全读 AMS |
+| 7600 | APS @12、ZDJ @17 | ZDJ | 全读 ZDJ |
+
+12 个（设计库项目, 同号 CATA）对里，生成 ≠ 目录版本核对的 2 对、生成 ≠ sweep 观察的 3 对。后果是实打实的：库级落款记的是生成**真读的那份**
+文件的会话，核对却拿 MDB 声明那份的最新会话去比——ACP 的库落款 7000@272 永远「落后」于 `ams7000` 的 274，每次核对都在 `ams7000` 上收一窗、
+按 AMS 的目录变动去排 ACP 的根并把落款盖成 274；`acp7000` 自己前移反倒看不见。7355 今天两份同在 15，`ams7355` 一前移，比的仍是 `aps7355`。
+
+**#47 决定：模型读哪份，核对就比哪份。**
+
+- 唯一的选法是生成那一个——`select_dependency_file`：目标设计库所在项目里有同类型的同号副本就读副本，否则读 MDB 声明那份
+  （`E3dDbResolver` 早就这样选，`build_set` 注释里 ACP 7015 要 ACP CATA 7000 就是这一形状）。新的 `CatalogueFileChoice`（只读视图，
+  与 resolver 同一张 locator、同一份项目副本表）把它给核对用：一处函数，两处调用。
+- 目录版本核对（启动 / sweep / `/update/execute` 三条入口共用的 `reconcile_published_root_stamps`）先按这个选法把设计库分成「目录文件宇宙」
+  相同的几组（`group_libraries_by_catalogue_files`：与 MDB 声明那份不同的目录库 → 副本文件，覆盖表相同的库一组），每组在自己读的文件上
+  点名过期、收窗、反查（目录侧闭包读同一份）、只给组里的库排工、按那份文件的会话盖落款，几组结果合并进同一份回执。全按 MDB 声明读的库
+  （绝大多数）走的还是原来那一份。
+- sweep 的目录观察改按**文件**记（`ObservedCatalogueFiles`：`(库号, 文件) → 最新会话`）：被 `catalogue_project_priority` 遮蔽的同号副本也观察，
+  它前移同样开一次核对（此前只能等周期对账那一拍）。
+- **决策 5 的 `catalogue_project_priority` 改口**：它只决定 sweep 选哪份当**数据面**的正本（依赖行、`pe` 的目录行按 refno 存，同号两份只能入一份；
+  被遮蔽的副本照旧不进数据面），**不**决定模型面读哪份——模型面按目标设计库所在项目选，核对跟着模型面走。
+
+**#46 决定：不级联，失败处点名。** 生成的 resolver 只认 MDB 声明的库（`current_mdb_source_inventory` 的 locator 只装 MDB 成员与它们在别的项目里的同号副本），
+决策 6 的 `Dependency` 路由只服务数据面读（`mdb_read_store`、依赖行刷新 A3 的 locator）。所以 MDB 没声明的 CATA（AMS `/ALL` 上 sweep 观察得到
+16 个：7016 / 7018 / 7041 @ACP、7161 @ZDJ、7505 与 250106… @APS）**生成读不到**——模型面不依赖它们，它们前移不会让任何已发布的根过期，
+库级落款里也不会有它们（所以也不会落进 `unreadable_catalogue_dbnums`；上面 #42 追记那句「落 unreadable」只在曾有落款时成立）。这与 core 一致：
+不在 MDB 里的库，E3D 用这个 MDB 打开时同样读不到。设计元素真引用到它们时，那几件生成失败，失败原文 `db N 没注册进这个 DbSet` 之后补一句
+「MDB 没声明它，只在依赖目录扫描里找到（项目 X，文件）——生成只读 MDB 声明的库，E3D 用这个 MDB 同样读不到它」（`explain_unregistered_dbs_with`），
+进回执的失败根与日志。数据面那一半随 A3 照常前移，不受影响。
+
+护栏：`catalogue_file_choice_answers_like_the_resolver_per_design_library`、`libraries_group_by_the_catalogue_files_their_generation_reads`、
+`grouped_reconcile_parts_merge_into_one_report`、`unregistered_db_messages_get_the_route_directory_reason_appended`（加了 `Dependency` 路由那一态）、
+目录核对源码钉改钉「按这组读的那份文件收窗、不拿 MDB 声明那份比」。

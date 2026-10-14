@@ -324,3 +324,60 @@ C8 电缆端点/路由反向级联  ◐(0907 同库版接线，开关默认关�
 
 Issue #34 的“默认关闭”前置验收证据已具备；级联开关的默认值与跨库窗口验收仍按 issue 中列出的独立运行时门执行。
 
+## 2026-09-30 C2 复跑与拆账（#34 前置 1）
+
+在 gen-model `59edac0bd`（0.1.34）+ 本条拆账改动、vendor e3d-model `9ec27b9`（含 `d3355a8`）上复跑 `structural_connection::tests::live`
+（改动前在 `e23bf45fe` 上跑过一遍，数字相同）：
+
+- 九个钉死窗口两态 `regen` 逐字相同（都是 0 个结构变更元素）。
+- `aps7200_0001` 3→4：回指 94/94，对端根 6 个全在 `regen`，关 6 / 开 8——`SJOI` → SCTN 仍只有本开关补得上。
+- `aps250110_0001` 29→30：回指 371/371，对端根 31 个全在 `regen`，但**开 / 关都是 258**（09-07 是关 251 / 开 258）。
+  e3d-model `plan_update` 09-27 起自带同库关节级联（`increment::joint_consumer_of`，`d510253`；反方向 `joint_fixings_of`，`b820a4a`），
+  FIXING → GENSEC 这一类开关关着也已覆盖。原断言「开关开必须多出至少一根」过时，改为这一窗钉「关着已全覆盖、两态集合相等」。
+- #33 探针：跨库边 12 条，回指 12/12，生产口径上卷 0/12，对端库自己能找到根 12/12（与 09-22 相同）。
+
+同日落地 #34 前置 1「拆账」：会级联的跨库对端记进 `StructuralConnectionCascade::far_end_cross_db`，`summary_line` 逐条点名、随窗口回执
+`warnings` 出去；`far_end_without_root` 只剩同库的「对端已删 / 无根族」。只记账、不上卷。
+
+翻默认仍差：前置 2（跨 dbnum 工作交接，形态待拍板）、真机 SAVEWORK 改一端看对端端部切割、SCTN 关节负体（e3d-model
+`elmodl::collect_joint_negatives` 只对 GENSEC 调用）。
+
+## 2026-10-01 跨库交接落地（#34 前置 2）、C8 跨库版（#35）、C2 翻默认前置清单
+
+**跨库交接**（`src/data_interface/cross_db_handoff.rs`，CONTEXT「跨库交接」）。形态没有照房间反查的停放槽（ADR-073 D13 U3 b
+`RoomRoots`——那是房间欠账按「代」计、要接准入链才需要的），走目录级联已有的那条路：
+
+1. 规划器把本窗级联命中、却落在别的设计库的元素按库分组放进计划（`ModelUpdatePlan::cross_db_elements`：C2 的
+   `far_end_cross_db` 对端 + C8 跨库版的引用者）。规划器自己不排工——预览与执行共用这一份计划。
+2. 执行体（`manual_update` 的落地成功分支，`collect_unit_tasks` 之后）调 `hand_off`：逐个对端库取文件最新会话，
+   `build_set` + `scan_index` + 根枚举之后把元素沿 owner 链折成根（链上每一个根，与同库对端 `roots_on_owner_chain` 同口径），
+   给那个库排一条只带名单的 `ModelOnly`（`BatchScheduler::enqueue`；已有排队行就并进去、名单取并集）。
+3. 交不成（不在监听范围 / 不在 MDB / 不是元素库 / 折不出根 / `model_incremental=false`）逐库一行进本窗回执，不阻断本窗。
+
+验：单测 `cross_db_handoff::tests` 四条（分组去重、折根口径、任务形状、只在落地后交一次且规划器不排工）；#33 探针
+`live_probe_cross_db_structural_connection_edges` 加一段：APS 98 库 12 条跨库 `FIXING.CREF ↔ GENSEC.JOIE`，交接同一段
+`fold_elements_to_roots` 把 12 个对端全部折出根（8 个对端库、18 个根），与对端库自己算的逐字相同。
+
+**C8 跨库版**（`cable_endpoint::read_foreign_referrers` / `CableEndpointCascade::with_foreign_members`）：同一批键（规则 E 的
+子树取本库 T 端索引）到 MDB **其余**设计成员各自的 `STAREF` / `ENDREF` 表点查，成员名单与 P4 同一份
+（`design_sources()`，C8 开着也解）。别的库里的引用者记进 `CableEndpointCascade::foreign`、交给跨库交接；打不开的成员点名、
+不判退化（几何落地前不显，为它整窗重算不值）。验：单测两条（只开别的设计成员、打不开点名；跨库引用者不并进本窗、回执点名、
+交接名单按库分好）；真库 `live_aps_a_cross_db_endpoint_finds_its_cable_in_the_other_library`：APS 电缆正向读出跨库端点边
+**196 条**（= C6 普查），假定前 8 条的端点 `ELCONN`（250154 / 250160）变了，各自查回电缆库 250176 的那根 `CABLE`、折回它的根。
+
+### C2 翻默认的前置清单（#34 验收第 1 条）
+
+| # | 前置 | 状态 | 证据 / 落点 |
+|---|---|---|---|
+| 1 | 拆账：跨库对端单独记账、回执点名 | ✅ 09-30 | PR #48，`far_end_cross_db` |
+| 2 | 跨 dbnum 工作交接 | ✅ 10-01 | 本节「跨库交接」 |
+| 3 | 两个真库窗口对端根全进 `regen` | ✅ 09-30 | `aps7200_0001` 3→4 对端根 6/6（关 6 / 开 8）；`aps250110_0001` 29→30 对端根 31/31 |
+| 4 | 九个钉死窗口两态逐字相同 | ✅ 09-30 / 10-01 复跑 | `live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off` |
+| 5 | e3d-model GENSEC 关节负体 | ✅ 09-28 | e3d-model v0.1.31 `d3355a8`，APS250110 RVM 3035/3035 |
+| 6 | e3d-model SCTN 关节负体（`SJOI` / `PJOI` → SCTN） | ❌ 外部 | `elmodl::collect_joint_negatives` 只对 GENSEC 调用；跨根边大头在 SCTN（PJOI↔SCTN 14,577、SJOI↔SCTN/GENSEC 4,484） |
+| 7 | 真机：改一端 SAVEWORK，对端端部切割跟着变 | ❌ 需人 | 共享工程上 SAVEWORK 要用户许可；能看出差别的只有跨库 FIXING → GENSEC（同库那类 e3d-model 自己的关节级联已接住）与 6 落地之后的 SCTN |
+| 8 | 翻默认：代码默认 / `DbOption.toml` / 出厂模板 / `CONTEXT.md` 四处一致 | 待 6、7 | 照 #32 的做法（`effective_default_on_switch` + 模板对拍单测） |
+
+今天开关开着补得上的：跨库 FIXING ↔ GENSEC（APS 12 条，GENSEC 已扣关节负体，这一类开着才不留旧刀口）、同库 `SJOI` / `PJOI` → SCTN
+（几何上要等 6）、`CMPF.CFRA`。代价：`aps7200_0001` 那一窗多 2 根。建议：6 落地或用户确认 7 之后翻；在那之前需要跨库那 12 条的项目可以
+单独开（`model_structural_connection_cascade = true` 或 `AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE=1`），开着交接就生效。

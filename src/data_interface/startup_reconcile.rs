@@ -220,6 +220,47 @@ fn dbnums_without_model_watermark(
         .collect()
 }
 
+/// 登记表里还留着数据 / 模型面状态（`applied_sesno > 0` 或 `model_sesno > 0`）、当前 MDB 却不再声明的元素库
+/// （DESI / ISOD），升序（GitHub #41，ADR-078 追记 2026-09-30）。
+///
+/// 这是「库被移出 MDB」的反方向账：[`dbnums_without_model_watermark`] 数的是声明了没盖水位的，这里数的是盖过水位
+/// 却不再声明的。它们的 `pe` / noun 行、模型行、房间边、空间树条目与水位行都还在库里，本期执行范围已经不管它们
+/// （ADR-085），也**不自动清**——点名之后由人决定：要清走 `DELETE /api/v1/dbnums/{dbnum}/data`（整库快删，先暂停队列）。
+/// 只看元素库：SYST / DICT / CATA 不产生根，依赖入库的 CATA 行由依赖状态表管（ADR-078 D6），不在这一栏。
+fn dbnums_retired_from_mdb(
+    declared: &BTreeSet<u32>,
+    registered: &BTreeMap<u32, crate::data_interface::dbnum_state::DbnumState>,
+) -> Vec<u32> {
+    registered
+        .values()
+        .filter(|state| {
+            crate::data_interface::model_source::is_element_db(&state.db_type)
+                && (state.applied_sesno > 0 || state.model_sesno > 0)
+                && !declared.contains(&state.dbnum)
+        })
+        .map(|state| state.dbnum)
+        .collect()
+}
+
+/// [`dbnums_retired_from_mdb`] 的启动横幅（空列表不出声）。
+fn retired_from_mdb_banner(retired: &[u32]) -> Option<String> {
+    if retired.is_empty() {
+        return None;
+    }
+    let sample = retired
+        .iter()
+        .take(12)
+        .map(|dbnum| dbnum.to_string())
+        .collect::<Vec<_>>()
+        .join("、");
+    Some(format!(
+        "MDB 退出核对：{} 个元素库已不在当前 MDB 的声明里，库里仍留着它们的数据 / 模型面状态与水位行：{sample}{}。\
+         不自动清（GitHub #41）；确认不再需要时先暂停队列，再逐库 DELETE /api/v1/dbnums/{{dbnum}}/data 整库快删",
+        retired.len(),
+        if retired.len() > 12 { " …" } else { "" }
+    ))
+}
+
 async fn current_mdb_design_dbnums() -> anyhow::Result<BTreeSet<u32>> {
     tokio::task::spawn_blocking(crate::data_interface::model_source::mdb_design_dbnums)
         .await
@@ -292,6 +333,11 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         &registered_by_dbnum,
         crate::data_interface::watch_scope::admits,
     ));
+    // GitHub #41：反方向那一栏——盖过水位、却不再被当前 MDB 声明的元素库。只点名，不清、不排工。
+    let retired_from_mdb = dbnums_retired_from_mdb(&mdb_design_dbnums, &registered_by_dbnum);
+    if let Some(banner) = retired_from_mdb_banner(&retired_from_mdb) {
+        println!("{banner}");
+    }
     // 目录那一格挂在开窗之前、也挂在候选为空的早退之前：目录前移与本库有没有落后是两件
     // 独立的事，一个库模型水位追平、目录却换了版，照样要点名。
     let CatalogueReconcile {
@@ -300,6 +346,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         windows: catalogue_windows,
         cascade: catalogue_cascade,
         dependency_refresh: catalogue_dependency_refresh,
+        ..
     } = reconcile_catalogue_versions().await;
     // 目录那一位的语义（P3 起）：前移了**且**反查没能精确回答——某个库退化、或整个反查没跑成。
     // 精确命中只排引用根的启动不算退化。
@@ -334,6 +381,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
     if candidate_dbnums.is_empty() {
         println!("模型水位核对：没有需要恢复的库");
         coverage.reconcile.result = "ok";
+        coverage.reconcile.retired_from_mdb = retired_from_mdb;
         coverage.reconcile.catalogue_cascade_degraded = catalogue_cascade_degraded;
         coverage.reconcile.stale_catalogue_dbnums = stale_catalogue;
         coverage.reconcile.unreadable_catalogue_dbnums = unreadable_catalogue;
@@ -482,6 +530,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         result: startup_reconcile_result(window_failed, unreadable),
         unreadable,
         not_in_mdb: not_in_mdb.len(),
+        retired_from_mdb,
         window_failed,
         lagging: windows,
         windows_opened: windows - window_failed,
@@ -552,6 +601,50 @@ mod tests {
         assert_eq!(
             dbnums_without_model_watermark(&declared, &registered, |dbnum| dbnum != 8003),
             vec![8001, 8002]
+        );
+    }
+
+    /// GitHub #41：反方向那一栏——登记表里盖过水位（数据或模型任一）、当前 MDB 却不再声明的元素库才点名；
+    /// 声明着的、非元素库（CATA 由依赖状态表管）、从没盖过水位的历史行都不算。只点名，不清、不排工。
+    #[test]
+    fn retired_from_mdb_names_stamped_element_rows_the_current_mdb_no_longer_declares() {
+        use crate::data_interface::dbnum_state::DbnumState;
+        let state = |dbnum: u32, db_type: &str, applied: i32, model: i32| DbnumState {
+            dbnum,
+            db_type: db_type.to_string(),
+            applied_sesno: applied,
+            model_sesno: model,
+            ..Default::default()
+        };
+        let registered: BTreeMap<u32, DbnumState> = [
+            state(8000, "DESI", 10, 10), // 还声明着
+            state(7999, "DESI", 12, 12), // 移出：数据、模型都盖过
+            state(7998, "DESI", 0, 5),   // 移出：只剩模型水位
+            state(9002, "ISOD", 3, 0),   // 移出的 ISOD：只有数据水位
+            state(7355, "CATA", 40, 0),  // 目录库不在这一栏
+            state(7997, "DESI", 0, 0),   // 从没盖过水位的历史行没有东西可清
+        ]
+        .into_iter()
+        .map(|state| (state.dbnum, state))
+        .collect();
+        let declared: BTreeSet<u32> = [8000, 8001].into_iter().collect();
+
+        let retired = dbnums_retired_from_mdb(&declared, &registered);
+        assert_eq!(retired, vec![7998, 7999, 9002]);
+        let banner = retired_from_mdb_banner(&retired).expect("有移出的库要出声");
+        assert!(
+            banner.contains("3 个元素库")
+                && banner.contains("7998、7999、9002。")
+                && banner.contains("不自动清")
+                && banner.contains("DELETE /api/v1/dbnums/{dbnum}/data"),
+            "{banner}"
+        );
+        assert!(retired_from_mdb_banner(&[]).is_none(), "空列表不出声");
+        let many: Vec<u32> = (1..=13).collect();
+        let truncated = retired_from_mdb_banner(&many).expect("13 个");
+        assert!(
+            truncated.contains("13 个元素库") && truncated.contains("11、12 …。"),
+            "超过 12 个只列前 12 个: {truncated}"
         );
     }
 }

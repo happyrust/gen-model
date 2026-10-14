@@ -26,6 +26,16 @@ fable-5-1-37 / fable-5-1-42 接力）：只 `CACHID` 跳动的候选进 `no_mode
 `world_bounds` 1e-3 mm 这一轮全过但最大 0.000977 mm = 1 ulp、离线 2.3%，坐标 ≥ 16384 mm 段同样的差就判死，**§5 门 3 改口**：`|Δ| ≤ max(1e-3 mm, 2·ulp_f32(max(|a|,|b|) + |t_c|))`。
 两处改口后 7 窗 19 根复跑全过（含旋转两窗的 Baked 按内容判也 0 不等）。
 `model_transform_cheap_path` 默认仍关；live #2 / 验收 3 未跑。
+**2026-09-30 修订**（GitHub #36，PR #49）：e3d-model 09-27 `d510253` 起 GENSEC 扣 `JOIS` / `JOIE` 关节负体之后，D1 规则 3 补第六 / 七 / 八类排除——
+越过锚点边界的几何依赖：宿主墙上的刀、WALL datum 的现算标架、跨锚点边界的结构连接，见规则 3 末注。**验收 1 两半在当前 vendor 上复跑**：
+文件侧对拍门 `probe_rigid_exclusion_windows` 全语料 3722 窗 / 只动方位候选 1750，合格锚点 240、对拍 210 根**不等·锚点 0**（相等 193、无判别力 10、
+窗内另改 7），新三类在自然窗口上 0 触发；生产记录半边 `probe_rigid_motion_gate3_for_window` 跑遍这 3722 窗里有 transform 根的 190 窗（B8）：
+**180 窗 242 根过门 3、0 FAIL**；另 6 窗文件侧本就不等、没有 transform 根，4 窗落在 ams7997 的备份文件上（不是 MDB 成员）跳过。九个钉死窗口
+开关开态桶位不变（`live_ams8000_pinned_windows_land_in_the_expected_buckets` 过）。门 3 自本日起
+对两端整根重算里**画不出的件**不拦、只记（YCYK `acw5525` 的根两端各有 2–4 件画不出、是同一批），与全语料单元级对拍同一口径；两端不是同一批时逐条比对照样判红。
+专造样本 `live_rigid_anchor_rejects_cross_boundary_joints_and_host_cutters` 三类各点名一例（aps250110 关节、ams1112 WALL 刀 / GWALL 套管）。
+`model_transform_cheap_path` 默认**仍关**：live #2 真机链与验收 3（Task 时长省 ≥ 30%）没跑。
+
 **2026-10-14 更新**（分支 `feat/issues-36-50-34`）：live #2 真机链验证清单与验收 3 性能测试方案已备好
 （`docs/evidence/2026-10-14-adr066-live2-verification-checklist.md` /
 `docs/evidence/2026-10-14-adr066-live2-performance-test-plan.md`），待真机环境执行；
@@ -137,7 +147,20 @@ e3d-model `ElementDiff::is_placement_only` 现成，四项排除（类型 / 属�
    (c) core `EVALAT` 规则 M 的**严格祖先**半边：锚点的 T 端祖先含 `PANE`/`GENSEC`/`SCTN`/`BPANEL` → 那个结构件重建——`FIXING` 今天**是**模型单元
    （2026-09-14 起走目录构件 GMRE），只有这一条接得住「FIXING 在 SCTN 下挪位」；我们今天不把它的 `TMPL` 负体扣到宿主上，但 core 那一票是「重建」，
    少算方向两票缺一不放行。结构件**自己**挪位不在此列（它的网格只依赖自身属性 + 目录）。
-   五类排除的原因文本各不相同，回执 `transform_fallback_reason` 原样带出。开关 `model_transform_cheap_path` 仍默认关，S4 对拍样本过了再翻（D7）。
+   **第六 / 七 / 八类（2026-09-30 修订 · GitHub #36）：越过锚点边界的几何依赖。** e3d-model 09-27 起 GENSEC 两端扣 `JOIS` / `JOIE`
+   关节 FIXING 名下的负体（`elmodl::collect_joint_negatives`），09-15 起 WALL / GWALL 扣名下刀的世界体（`collect_host_fixings` /
+   `collect_host_sleeves`），WALL 名下 FIXING 的实例标架由 `fixing_host_frame` 沿墙 spine 现算——三处都读锚点子树**之外**的东西，
+   前五类只看锚点及其祖先的 noun，接不住。判在 `window_root_plan::anchor_subtree_exclusion`（事实由 `anchor_subtree_facts` 沿 T 端
+   成员表把锚点子树走一遍收齐，子树超过 20 万元素就不审、判不刚），排在前五类与路由容器之后：
+   (d) **宿主墙上的刀**：锚点之上有 WALL / GWALL（中间没隔着同名刀），锚点自己或名下有那面墙开洞用的刀（WALL 名下 `DESP` 凑得齐
+   10 项的 FIXING、GWALL 名下的 SBFI，与 e3d-model 的收刀同一种下钻）——挪刀不挪墙，洞停在原处。原因带 `host cutter owner <宿主>`；
+   (e) **WALL datum 的现算标架**：锚点之上有 WALL 名下的 `JLDATU` / `PLDATU`——这两级没有 POS/ORI，`world_matrix` 在这条链上折出的 Δ
+   不是 FIXING 真正的位移（GENSEC 名下的 datum `world_matrix` 认得，且已被规则 M 挡住）；
+   (f) **跨锚点边界的结构连接**：子树里的 GENSEC 的关节 FIXING 在子树外（梁端的刀口不随 Δ 走），或子树里的关节 FIXING 被子树外的
+   GENSEC 用着（`CREF` 回指、梁的 `JOIS` / `JOIE` 指回它——梁端的刀跟着 Δ 走了、梁没动；子树外的梁由 e3d-model 关节级联拉进计划，
+   同一根里的兄弟梁只能靠本条把整根踢回 `regen`）；跨库的一端一律算在外面。原因带 `structural connection`。SCTN 的关节
+   （`SJOI` / `PJOI`）e3d-model 今天不扣负体，不在此列——扣上的那天本条要跟着加。
+   八类排除的原因文本各不相同，回执 `transform_fallback_reason` 原样带出。开关 `model_transform_cheap_path` 仍默认关，S4 对拍样本过了再翻（D7）。
 4. 窗口没有退化（`WindowImpact::degraded_reason() == None`）。退化时一切进 `regen`，与今天一样。
    **（2026-09-19 末注）** 退化四因里的「候选数超过索引键数 30%」自本日起按**净候选数**判（`candidates − cache_stamp`，
    只有戳跳了的候选不计——它们去向 `NoModel`、不上卷不级联，对闭包可不可信一个字都没说；`cache_stamp` 为 0 时逐位同前）。

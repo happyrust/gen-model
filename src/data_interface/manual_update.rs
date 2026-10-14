@@ -5494,6 +5494,16 @@ impl AiosDBManager {
                         })
                         .cloned(),
                 );
+                // 跨库交接（GitHub #34 前置 2 / #35）：级联命中、却落在别的设计库里的元素交给那个库的任务——
+                // 本窗已经落地才交（规划器与预览不交），在那个库的文件最新会话上折根、排一条只带名单的
+                // `ModelOnly`；每个对端库一行进本窗回执。
+                warnings.extend(
+                    crate::data_interface::cross_db_handoff::hand_off(
+                        dbnum,
+                        &success.model_plan.cross_db_elements,
+                    )
+                    .await,
+                );
             }
         }
 

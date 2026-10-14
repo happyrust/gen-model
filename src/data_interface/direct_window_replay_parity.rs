@@ -1037,6 +1037,363 @@ async fn the_production_window_lands_the_expected_shapes() {
     );
 }
 
+// ───────────────────── 整棵子树被删（GitHub #30 EQUI + BOX、#18 BRAN + 管件）─────────────────────
+//
+// 上面那条删的是叶子 BOX。E3D 删一个带成员的元素时，两端索引差分给子树里**每个** refno 各一条
+// `Deleted`（成员表净减少的子树在索引里就是 Deleted，`e3d_collector` 模块头），属主那一级是
+// `Modified`（成员表摘掉子树顶）。这里把这个形状原样喂给生产路，钉住 #30 报的三类残留都不再出现：
+// 子树每个成员落墓碑、noun 行全删、子树内外的 `pe_owner` 边全清；属主名下的兄弟与属主自己的入边不动。
+
+/// 一棵待删子树：`root → owner → { top → children…, keep }`，窗口里删掉 `top` 整棵。
+struct SubtreeCase {
+    label: &'static str,
+    /// 属主的属主，只用来验证属主自己那条入边不被碰。
+    root: (RefU64, &'static str),
+    owner: (RefU64, &'static str),
+    top: (RefU64, &'static str),
+    children: Vec<(RefU64, &'static str)>,
+    /// 属主名下不动的兄弟。
+    keep: (RefU64, &'static str),
+}
+
+fn subtree_cases() -> Vec<SubtreeCase> {
+    vec![
+        // #30 的现场形状：EQUI 连同名下的 BOX 一起删（`DELETE EQUIPMENT`）。
+        SubtreeCase {
+            label: "equi_box",
+            root: (refu(782001), "SITE"),
+            owner: (refu(782002), "ZONE"),
+            top: (refu(782003), "EQUI"),
+            children: vec![(refu(782004), "BOX")],
+            keep: (refu(782005), "EQUI"),
+        },
+        // #18：删一条 BRAN，名下管件跟着走。
+        SubtreeCase {
+            label: "bran_members",
+            root: (refu(782101), "ZONE"),
+            owner: (refu(782102), "PIPE"),
+            top: (refu(782103), "BRAN"),
+            children: vec![(refu(782104), "ELBO"), (refu(782105), "FLAN")],
+            keep: (refu(782106), "BRAN"),
+        },
+    ]
+}
+
+fn subtree_name(refno: RefU64) -> String {
+    format!("/ST-{refno}")
+}
+
+/// 窗口前：五级都在、成员边齐全、水位在 `BASE_SESNO`、开工标记已落。
+fn subtree_base_statements(case: &SubtreeCase) -> Vec<String> {
+    let mut rows: Vec<(RefU64, &str, Option<RefU64>)> = vec![
+        (case.root.0, case.root.1, None),
+        (case.owner.0, case.owner.1, Some(case.root.0)),
+        (case.top.0, case.top.1, Some(case.owner.0)),
+        (case.keep.0, case.keep.1, Some(case.owner.0)),
+    ];
+    rows.extend(
+        case.children
+            .iter()
+            .map(|(refno, noun)| (*refno, *noun, Some(case.top.0))),
+    );
+    let mut statements = Vec::new();
+    for (refno, noun, owner) in rows {
+        let owner = owner.map_or_else(String::new, |owner| format!(", owner: {}", pe(owner)));
+        statements.push(format!(
+            "UPSERT {} CONTENT {{ noun: '{noun}', deleted: false{owner}, refno: {noun}:⟨{refno}⟩ }};",
+            pe(refno)
+        ));
+        statements.push(format!(
+            "UPSERT {noun}:⟨{refno}⟩ CONTENT {{ TYPE: '{noun}', NAME: '{}' }};",
+            subtree_name(refno)
+        ));
+    }
+    let edge = |owner: RefU64, slot: usize, child: RefU64| {
+        format!(
+            "{{ id: [{}, {slot}], in: {}, out: {} }}",
+            pe(owner),
+            pe(child),
+            pe(owner)
+        )
+    };
+    let mut edges = vec![
+        edge(case.root.0, 0, case.owner.0),
+        edge(case.owner.0, 0, case.top.0),
+        edge(case.owner.0, 1, case.keep.0),
+    ];
+    edges.extend(
+        case.children
+            .iter()
+            .enumerate()
+            .map(|(slot, (child, _))| edge(case.top.0, slot, *child)),
+    );
+    statements.push(format!(
+        "INSERT RELATION INTO pe_owner [ {} ];",
+        edges.join(", ")
+    ));
+    statements.push(format!(
+        "UPSERT dbnum_watermark:{DBNUM} SET dbnum = {DBNUM}, applied_sesno = {BASE_SESNO};"
+    ));
+    statements.push(render_mark_writing(
+        DBNUM,
+        BASE_SESNO,
+        END_SESNO,
+        WriteIntent::ApplyWindow,
+    ));
+    statements
+}
+
+/// 收集器交给生产路的形状：子树每个成员一条 `Deleted`（带基侧状态），属主一条 `Modified`（完整终态，
+/// 成员表只剩 `keep`）。
+fn subtree_delete_changes(
+    case: &SubtreeCase,
+) -> Vec<crate::data_interface::ele_ops::PersistElementChange> {
+    let sesno = END_SESNO as u32;
+    let owner_modified = ModifiedElement {
+        current_data: full_element(
+            case.owner.0,
+            case.root.0,
+            case.owner.1,
+            &subtree_name(case.owner.0),
+            &[],
+            &[case.keep.0],
+        ),
+        added_attrs: Default::default(),
+        deleted_attrs: Default::default(),
+        modified_attrs: Default::default(),
+        added_explicit_attrs: Default::default(),
+        deleted_explicit_attrs: Default::default(),
+        modified_explicit_attrs: Default::default(),
+        added_uda_attrs: Default::default(),
+        deleted_uda_attrs: Default::default(),
+        modified_uda_attrs: Default::default(),
+        noun: case.owner.1.into(),
+        children_changed: Some((
+            RefU64Vec(vec![case.top.0, case.keep.0]),
+            RefU64Vec(vec![case.keep.0]),
+        )),
+    };
+    let mut operations = vec![
+        EleOperationData::new(case.top.0, sesno, EleOperationDetail::Deleted),
+        EleOperationData::new(
+            case.owner.0,
+            sesno,
+            EleOperationDetail::Modified(owner_modified),
+        ),
+    ];
+    operations.extend(
+        case.children
+            .iter()
+            .map(|(child, _)| EleOperationData::new(*child, sesno, EleOperationDetail::Deleted)),
+    );
+    let child_refnos: Vec<RefU64> = case.children.iter().map(|(child, _)| *child).collect();
+    let mut tombstones: HashMap<RefU64, EleData> = HashMap::from([(
+        case.top.0,
+        full_element(
+            case.top.0,
+            case.owner.0,
+            case.top.1,
+            &subtree_name(case.top.0),
+            &[],
+            &child_refnos,
+        ),
+    )]);
+    for (child, noun) in &case.children {
+        tombstones.insert(
+            *child,
+            full_element(*child, case.top.0, noun, &subtree_name(*child), &[], &[]),
+        );
+    }
+    crate::data_interface::ele_ops::terminal_persist_changes(
+        &BTreeMap::from([(sesno, operations)]),
+        &tombstones,
+    )
+}
+
+async fn subtree_db(case: &SubtreeCase, label: &str) -> Surreal<Any> {
+    let db = fresh_mem_db("replay_parity", &format!("subtree_{}_{label}", case.label))
+        .await
+        .expect("mem boots");
+    init_schema_on(&db).await.expect("production schema");
+    apply_all(&db, &subtree_base_statements(case))
+        .await
+        .expect("subtree base fixture");
+    db.query(format!("UPDATE pe SET dbnum={DBNUM}, sesno={BASE_SESNO};"))
+        .await
+        .expect("stamp dbnum transport")
+        .check()
+        .expect("stamp dbnum");
+    db
+}
+
+/// GitHub #30 / #18：整棵子树被删之后，子树里每个成员都是墓碑（noun / owner 保留、`deleted = true`、
+/// sesno = 删除会话）、noun 行没了、`pe_owner` 里既没有它们的出边也没有它们名下的槽位；属主名下只剩
+/// 兄弟、属主自己的入边还在。每个事务边界崩一次再重放，终态与一次成功逐表相等。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_subtree_tombstones_every_member_and_leaves_no_rows_or_edges() {
+    for case in subtree_cases() {
+        let label = case.label;
+        let changes = subtree_delete_changes(&case);
+        let (batches, report) = IncrementPipeline::terminal_persist_batches(
+            &changes,
+            &[],
+            DBNUM as i32,
+            &crate::data_interface::uda_keys::UdaKeyMap::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.tombstones,
+            1 + case.children.len(),
+            "{label}: 子树每个成员一块墓碑"
+        );
+        assert_eq!(report.tombstones_without_base, 0, "{label}");
+
+        let db = subtree_db(&case, "shapes").await;
+        run_batches(&db, &batches).await;
+        finalize(&db).await;
+        assert_eq!(watermark(&db).await, Some(END_SESNO), "{label}");
+
+        let mut members = vec![(case.top.0, case.top.1, case.owner.0)];
+        members.extend(
+            case.children
+                .iter()
+                .map(|(child, noun)| (*child, *noun, case.top.0)),
+        );
+        for (refno, noun, owner) in &members {
+            let key = pe(*refno);
+            let mut response = db
+                .query(format!(
+                    "RETURN {key}.deleted; RETURN {key}.noun; RETURN record::id({key}.owner); \
+                     RETURN {key}.sesno; RETURN {noun}:⟨{refno}⟩.NAME;"
+                ))
+                .await
+                .expect("tombstone transport");
+            assert_eq!(
+                response.take::<Option<bool>>(0).unwrap(),
+                Some(true),
+                "{label} {noun} {refno}: 子树成员都得落墓碑（#30：子元素 deleted=false）"
+            );
+            assert_eq!(
+                response.take::<Option<String>>(1).unwrap().as_deref(),
+                Some(*noun),
+                "{label} {refno}: 墓碑保留 noun"
+            );
+            assert_eq!(
+                response.take::<Option<String>>(2).unwrap(),
+                Some(owner.to_string()),
+                "{label} {refno}: 墓碑保留 owner"
+            );
+            assert_eq!(
+                response.take::<Option<i64>>(3).unwrap(),
+                Some(END_SESNO as i64),
+                "{label} {refno}: 墓碑 sesno = 删除会话"
+            );
+            assert_eq!(
+                response.take::<Option<String>>(4).unwrap(),
+                None,
+                "{label} {noun}:{refno}: noun 行随删除块消失（#30：名词属性行完整残留）"
+            );
+
+            let out_edges = ids(
+                &db,
+                format!("SELECT VALUE record::id(out) FROM pe_owner WHERE in = {key};"),
+            )
+            .await;
+            assert!(
+                out_edges.is_empty(),
+                "{label} {refno}: 被删成员挂在属主名下的边要清掉（#30：pe_owner 残留）: {out_edges:?}"
+            );
+            let slots = ids(
+                &db,
+                format!("SELECT VALUE record::id(in) FROM pe_owner WHERE out = {key};"),
+            )
+            .await;
+            assert!(
+                slots.is_empty(),
+                "{label} {refno}: 被删成员名下的子槽位要清掉: {slots:?}"
+            );
+        }
+
+        // 属主名下只剩兄弟；属主自己在它的属主名下那条边不动；兄弟与属主都是活行、noun 行在。
+        let owner_children = ids(
+            &db,
+            format!(
+                "SELECT VALUE record::id(in) FROM pe_owner WHERE out = {};",
+                pe(case.owner.0)
+            ),
+        )
+        .await;
+        assert_eq!(owner_children, vec![case.keep.0.to_string()], "{label}");
+        let owner_owner = ids(
+            &db,
+            format!(
+                "SELECT VALUE record::id(out) FROM pe_owner WHERE in = {};",
+                pe(case.owner.0)
+            ),
+        )
+        .await;
+        assert_eq!(owner_owner, vec![case.root.0.to_string()], "{label}");
+        for (refno, noun) in [case.owner, case.keep] {
+            let key = pe(refno);
+            let mut response = db
+                .query(format!(
+                    "RETURN {key}.deleted; RETURN {noun}:⟨{refno}⟩.NAME;"
+                ))
+                .await
+                .expect("survivor transport");
+            assert_eq!(
+                response.take::<Option<bool>>(0).unwrap(),
+                Some(false),
+                "{label} {noun} {refno}: 不在被删子树里的元素不许被连带"
+            );
+            assert_eq!(
+                response.take::<Option<String>>(1).unwrap(),
+                Some(subtree_name(refno)),
+                "{label} {noun} {refno}"
+            );
+        }
+
+        // 每个事务边界崩一次 → 整窗口重放：终态与一次成功逐表相等。
+        let limits = crate::data_interface::tx_limits::DataTxLimits {
+            elements: 1,
+            ..Default::default()
+        };
+        let (small, _) = crate::data_interface::element_batch::render_transactions_with_limits(
+            &changes,
+            &[],
+            DBNUM as i32,
+            &crate::data_interface::uda_keys::UdaKeyMap::empty(),
+            crate::data_interface::element_batch::WriteMode::Replace,
+            limits,
+        )
+        .unwrap();
+        let clean = subtree_db(&case, "clean").await;
+        run_batches(&clean, &small).await;
+        finalize(&clean).await;
+        let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+        let one_pass = snapshot_data_tables(&db)
+            .await
+            .expect("production snapshot");
+        assert!(
+            changed_data_tables(&expected, &one_pass).is_empty(),
+            "{label}: 元素上限只改切块、不改终态"
+        );
+        for crashed_after in 0..=small.len() {
+            let db = subtree_db(&case, &format!("crash_{crashed_after}")).await;
+            run_batches(&db, &small[..crashed_after]).await;
+            assert_eq!(watermark(&db).await, Some(BASE_SESNO), "{label}");
+            run_batches(&db, &small).await;
+            finalize(&db).await;
+            let replayed = snapshot_data_tables(&db).await.expect("replayed snapshot");
+            let changed = changed_data_tables(&expected, &replayed);
+            assert!(
+                changed.is_empty(),
+                "{label} crash_after={crashed_after}: 重放终态与一次成功不一致，差异表 {changed:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_production_batches_replay_statistics_before_watermark() {
     let f = fixture();

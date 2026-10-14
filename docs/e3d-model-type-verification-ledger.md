@@ -130,6 +130,16 @@ ConvertFrom-Json 两代形状差异（本轮 5.1/7 双跑 exit 0）。
 `ensure_model_generated` 重新生成，不依赖探针产物常驻；checker 的 stale 检查也因此只
 约束 verified 行。
 
+### 2.2 E3D 自己崩的三类 · 2026-09-30 改标 `blocked-by-e3d-crash`（GitHub #22）
+
+R-d 轮（08-07）记过绿的 ANCI `24384_25727` / FIXING `24384_25748` / GENSEC `24384_25743`，08-11 起在
+des.exe 3.1.9.0 的 TTY 会话里对这三类**任何属性求值**都崩（0xC0000005 @ `core.dll+0x0074d982`，16 会话矩阵 15/15、
+换样本换库都躲不开，证据 `.codex-artifacts/issue22-crash-matrix-20260811/`）。TTY 驱动在这个运行时上做不了 apply，
+所以 manifest 里这三行改标 `blocked-by-e3d-crash` 并带 `blocked_by` 原因：它们既不算 verified 也不算欠账，
+`Test-AmsModelTypeCoverage.ps1` 单列打印，不进 stale、不让 `-RequireVerified` 红；缺 `blocked_by` 的 blocked 行才红。
+这三类的树 / 属性回归走 plant-ui + 解析器路径（08-11 已跑一轮）。E3D 侧（AVEVA 产品问题）不再追；换了能跑的运行时，
+把这三行改回 `pending` 重跑两腿再回写。
+
 ## 3. 传统房间用例（5 / 5 通过，runner 默认集）
 
 | 用例 | 内容 | 验证时间 / 证据 |
