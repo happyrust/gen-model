@@ -287,24 +287,24 @@ const PLANT_UI_WEB: &[EmbeddedWebAsset] = &[
         bytes: include_bytes!("../../../plant-ui/web/public/config.example.json"),
     },
     EmbeddedWebAsset {
-        path: "pkg/plant_ui_app.js",
+        path: "pkg/rs-plant.js",
         content_type: "text/javascript; charset=utf-8",
-        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app.js"),
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/rs-plant.js"),
     },
     EmbeddedWebAsset {
-        path: "pkg/plant_ui_app.d.ts",
+        path: "pkg/rs-plant.d.ts",
         content_type: "text/plain; charset=utf-8",
-        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app.d.ts"),
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/rs-plant.d.ts"),
     },
     EmbeddedWebAsset {
-        path: "pkg/plant_ui_app_bg.wasm",
+        path: "pkg/rs-plant_bg.wasm",
         content_type: "application/wasm",
-        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app_bg.wasm"),
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/rs-plant_bg.wasm"),
     },
     EmbeddedWebAsset {
-        path: "pkg/plant_ui_app_bg.wasm.d.ts",
+        path: "pkg/rs-plant_bg.wasm.d.ts",
         content_type: "text/plain; charset=utf-8",
-        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app_bg.wasm.d.ts"),
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/rs-plant_bg.wasm.d.ts"),
     },
     EmbeddedWebAsset {
         path: "assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf",
@@ -4053,8 +4053,8 @@ mod tests {
     fn plant_ui_web_bundle_contains_bootstrap_and_runtime_assets() {
         let expected = [
             "index.html",
-            "pkg/plant_ui_app.js",
-            "pkg/plant_ui_app_bg.wasm",
+            "pkg/rs-plant.js",
+            "pkg/rs-plant_bg.wasm",
             "assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf",
             "assets/textures/viewport-placeholder.jpg",
         ];
@@ -4066,7 +4066,7 @@ mod tests {
         let index = std::str::from_utf8(embedded_web_asset("index.html").unwrap().bytes)
             .expect("index.html 必须是 UTF-8");
         assert!(
-            index.contains("./pkg/plant_ui_app.js"),
+            index.contains("./pkg/rs-plant.js"),
             "入口页必须加载内嵌 WASM 启动器"
         );
         // Assert the URL fallbacks themselves, not an incidental total count:

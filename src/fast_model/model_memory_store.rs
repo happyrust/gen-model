@@ -619,6 +619,50 @@ impl ScopeState {
         }
     }
 
+    /// 用户删掉这一根：记录与回执在同一把写锁里一起摘掉。
+    ///
+    /// 只摘记录、留下回执，`/model/records` 会报
+    /// `memory overlay root … is incomplete: receipt expects N, store has 0`。
+    /// 记录已经是 0 的再次删除仍然要把残留回执摘掉，否则第二次删除回执是
+    /// `deleted`、读侧却继续报 incomplete。不碰共享 `.mesh`。
+    /// 与 [`Self::drop_root`] 不同：这是生成出来的删除，记录走 `remove`（进房间变化账），
+    /// 并且这根名下的记录全部摘掉，不因嵌套回执而留下。
+    fn retire_deleted_root(&mut self, root: RefNo) -> usize {
+        let packed = packed_refno(root);
+        let ids = self.record_ids_under(root);
+        let branches = ids
+            .iter()
+            .filter_map(|id| {
+                let record = self.geometries.get(id)?;
+                record
+                    .tube
+                    .is_some()
+                    .then(|| packed_refno(record.source_refno))
+            })
+            .collect::<BTreeSet<_>>();
+        let mut removed = 0usize;
+        for branch in branches {
+            let stale = self.by_tube_branch.remove(&branch).unwrap_or_default();
+            for id in stale {
+                if self.remove(&id).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        for id in self.record_ids_under(root) {
+            if self.remove(&id).is_some() {
+                removed += 1;
+            }
+        }
+        self.publication_acks.remove(&packed);
+        self.commit_ticks.remove(&packed);
+        self.invalidated_roots.remove(&packed);
+        if self.receipts.remove(&packed).is_some() && removed == 0 {
+            self.bump_epoch(root.dbno());
+        }
+        removed
+    }
+
     /// 这枚 ACK 是不是 F3 的证据（ADR-073 F3；d-149 补丁 2026-09-22）：房间代号是本进程这一世写进
     /// `model_room_stray_generations` 的代号之一（`stray_generations_written`），而库上最近一次盖章
     /// （`stamped_room_generations`）不是这一代。`room_recompute::request_for_task` 靠「本进程写过的根 ACK 都在
@@ -1505,6 +1549,17 @@ impl ModelMemoryStore {
         }
     }
 
+    /// 删掉一根的进程内投影：记录与回执同一把写锁。记录已经没了也要摘回执。
+    ///
+    /// 返回摘掉的记录数。没有这个投影域时是 0。
+    pub(crate) fn retire_deleted_root(&self, scope: ProjectionScope<'_>, root: RefNo) -> usize {
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&scope.key()) else {
+            return 0;
+        };
+        state.retire_deleted_root(root)
+    }
+
     pub fn receipt(&self, scope: ProjectionScope<'_>, root: RefNo) -> Option<RootReceipt> {
         let current = matches!(scope, ProjectionScope::Current);
         let receipt = {
@@ -1748,6 +1803,106 @@ mod tests {
 
     fn store() -> ModelMemoryStore {
         ModelMemoryStore::default()
+    }
+
+    fn receipt_for(count: usize, hash: &str) -> RootReceipt {
+        RootReceipt {
+            source_sesno: 12,
+            model_target: None,
+            manifest_hash: hash.into(),
+            geometry_count: count,
+            published_via: "regen".into(),
+            room: None,
+        }
+    }
+
+    /// 删根必须把回执和记录一起摘掉。旧删除只按几何 id 摘记录、不盖新回执，
+    /// 留下 `receipt expects 9, store has 0`；第二次删除已经没有记录可摘，回执还挂着。
+    #[test]
+    fn retiring_a_deleted_root_drops_a_receipt_whose_records_are_already_gone() {
+        let store = store();
+        let root = RefNo::new(24384, 26312);
+        let other = RefNo::new(24384, 1);
+        let upserts = (0..9u32)
+            .map(|index| {
+                let source = RefNo::new(24384, 26313 + index);
+                record(
+                    &format!("24384_{}", 26313 + index),
+                    source,
+                    root,
+                    8000,
+                )
+            })
+            .collect::<Vec<_>>();
+        let sibling = record("24384_9", RefNo::new(24384, 9), other, 8000);
+        store.commit(
+            ProjectionScope::Current,
+            vec![
+                ProjectionCommit {
+                    upserts,
+                    receipt: Some((root, receipt_for(9, "nine"))),
+                    ..Default::default()
+                },
+                ProjectionCommit {
+                    upserts: vec![sibling],
+                    receipt: Some((other, receipt_for(1, "one"))),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let ids = store
+            .records_of_root(ProjectionScope::Current, root)
+            .into_iter()
+            .map(|row| row.record_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 9);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: ids,
+                ..Default::default()
+            }],
+        );
+        let (torn, left) = store
+            .root_snapshot(ProjectionScope::Current, root)
+            .expect("torn overlay still has a receipt");
+        assert_eq!(torn.geometry_count, 9);
+        assert!(left.is_empty());
+
+        assert_eq!(store.retire_deleted_root(ProjectionScope::Current, root), 0);
+        assert!(store.receipt(ProjectionScope::Current, root).is_none());
+        assert!(store.root_snapshot(ProjectionScope::Current, root).is_none());
+        assert_eq!(
+            store.retire_deleted_root(ProjectionScope::Current, root),
+            0,
+            "a second delete is a no-op"
+        );
+        assert_eq!(store.records_of_root(ProjectionScope::Current, other).len(), 1);
+        assert!(store.receipt(ProjectionScope::Current, other).is_some());
+
+        let again = (0..9u32)
+            .map(|index| {
+                record(
+                    &format!("again_{index}"),
+                    RefNo::new(24384, 27000 + index),
+                    root,
+                    8000,
+                )
+            })
+            .collect::<Vec<_>>();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: again,
+                receipt: Some((root, receipt_for(9, "nine-again"))),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(store.retire_deleted_root(ProjectionScope::Current, root), 9);
+        assert!(store.root_snapshot(ProjectionScope::Current, root).is_none());
+        assert!(store.records_of_root(ProjectionScope::Current, root).is_empty());
+        assert_eq!(store.records_of_root(ProjectionScope::Current, other).len(), 1);
     }
 
     /// `Current` 里某个库、盒与给定任一盒相交的记录的构件（打包 refno）。替代 2026-09-22 删掉的每库房间

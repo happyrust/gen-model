@@ -822,4 +822,124 @@ mod tests {
             );
         }
     }
+
+    /// 8022 `/test`（24384/26312）：生成后的 overlay 回执还在、记录已被删光时，
+    /// `/model/records` 报 incomplete；第二次删除必须摘掉这张回执，而不是再回 `deleted`
+    /// 却把残缺回执留着。修前这条在第二次删除之后仍然是 Err。
+    #[tokio::test]
+    async fn second_delete_of_overlay_root_24384_26312_does_not_report_incomplete() {
+        use super::super::e3d_mesh_store::geometry_record_id;
+        use super::super::model_memory_store::{
+            packed_refno, ModelMemoryStore, ProjectionCommit, ProjectionScope, RootReceipt,
+        };
+        use crate::fast_model::e3d_model_service::delete_persisted_geometry_root;
+
+        let root = RefNo::new(24384, 26312);
+        let store = ModelMemoryStore::global();
+        struct Guard(RefNo);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                ModelMemoryStore::global().retire_deleted_root(ProjectionScope::Current, self.0);
+            }
+        }
+        let _guard = Guard(root);
+        store.retire_deleted_root(ProjectionScope::Current, root);
+
+        let seed = |store: &ModelMemoryStore| {
+            let upserts = (0..9u32)
+                .map(|index| {
+                    let source = RefNo::new(24384, 26313 + index);
+                    let geometry_id = GeometryId::Element {
+                        refno: format!("{}/{}", source.word0, source.word1),
+                    };
+                    let record_id = geometry_record_id(&geometry_id, source);
+                    ProjectedGeometry {
+                        record_id,
+                        geometry_id,
+                        source_refno: source,
+                        dbnum: 8000,
+                        source_sesno: 12,
+                        noun: "EQUI".into(),
+                        mesh_id: format!("mesh-{index}"),
+                        world_transform: DMat4::IDENTITY,
+                        world_bounds: [[0.0; 3], [1.0; 3]],
+                        ancestors: vec![packed_refno(source), packed_refno(root)],
+                        shape: ProjectedShape::Baked,
+                        tube: None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let ids = upserts
+                .iter()
+                .map(|row| row.record_id.clone())
+                .collect::<Vec<_>>();
+            store.try_commit_current(vec![ProjectionCommit {
+                upserts,
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 12,
+                        model_target: None,
+                        manifest_hash: "24384/26312".into(),
+                        geometry_count: 9,
+                        published_via: "regen".into(),
+                        room: None,
+                    },
+                )),
+                ..Default::default()
+            }]);
+            ids
+        };
+
+        let ids = seed(store);
+        let ready = super::overlay_records_of_root(store, root)
+            .expect("complete overlay")
+            .expect("receipt present");
+        assert_eq!(ready.len(), 9);
+
+        store.try_commit_current(vec![ProjectionCommit {
+            removals: ids,
+            ..Default::default()
+        }]);
+        let torn = super::overlay_records_of_root(store, root)
+            .expect_err("torn overlay must still be rejected")
+            .to_string();
+        assert!(
+            torn.contains("is incomplete")
+                && torn.contains("expects 9")
+                && torn.contains("store has 0"),
+            "{torn}"
+        );
+
+        delete_persisted_geometry_root(root)
+            .await
+            .expect("second delete");
+        assert!(
+            super::overlay_records_of_root(store, root)
+                .expect("healed overlay")
+                .is_none(),
+            "second delete must drop the leftover receipt"
+        );
+
+        seed(store);
+        delete_persisted_geometry_root(root)
+            .await
+            .expect("first delete");
+        assert!(
+            super::overlay_records_of_root(store, root)
+                .expect("delete of a complete root")
+                .is_none()
+        );
+        delete_persisted_geometry_root(root)
+            .await
+            .expect("delete again");
+        assert!(
+            super::overlay_records_of_root(store, root)
+                .expect("second delete of a clean root")
+                .is_none()
+        );
+        assert!(store
+            .records_of_root(ProjectionScope::Current, root)
+            .is_empty());
+    }
 }

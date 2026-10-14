@@ -386,6 +386,10 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - 删除模型关系、无剩余引用的实例信息、直管边和空间树条目；不删除 PE、
   内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。被删除来源的 `room_relate` /
   `room_panel_relate` 随模型对账同事务清理（§4.7.2）。
+- 进程内 overlay 上，这一根的几何记录与发布回执在同一把写锁里一起摘掉。只摘记录、
+  留下回执会让 `/model/records` 报 `memory overlay root … is incomplete: receipt expects N, store has 0`；
+  记录已经是 0 的再次删除仍然摘掉残留回执。摘掉之后该根不再挡住冷读，库侧墓碑落完则为空
+  （与 d-6「清掉到重新发布之间为空」一致），直到再次发布。
 - 重复调用幂等，响应
   `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
 - 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。

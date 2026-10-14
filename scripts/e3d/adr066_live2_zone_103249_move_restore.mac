@@ -1,0 +1,21 @@
+-- ADR-066 验收 2 · 还原：把 adr066_live2_zone_103249_move_apply.mac 东移的 ZONE 24381/103249 再西移 1000 mm 回原位。
+-- 这也是第二个「只动 POS」的窗——顺手当 live #2「背靠背两次 SAVEWORK」那一条的第二窗。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_zone_103249_move_restore.log" OVER
+ONERROR GOLABEL /fail
+$P ADR066-LIVE2-RESTORE-ALIVE
+=24381/103249
+Q CE
+Q NAME
+Q TYPE
+Q POS WRT /*
+BY W 1000 WRT /*
+Q POS WRT /*
+SAVEWORK 'ADR-066 live #2 restore: ZONE 24381/103249 BY W 1000 WRT /* (POS only; back to original)'
+$P ADR066-LIVE2-RESTORE-DONE
+GOLABEL /end
+LABEL /fail
+$P ADR066-LIVE2-RESTORE-FAILED
+LABEL /end
+ALPHA LOG END

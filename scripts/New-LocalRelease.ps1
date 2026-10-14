@@ -5,7 +5,7 @@
 .DESCRIPTION
     全链路（Q6=本机脚本 / Q7=全链路）：
         构建 backend + web(wasm)  →  组包（程序 + Web）  →  组装 CHANGELOG
-        →  冒烟门（起服务、health + 首页含 plant_ui_app.js）  →  zip + sha256 清单
+        →  冒烟门（起服务、health + 首页含 rs-plant.js）  →  zip + sha256 清单
 
     包内布局（只有这一档 runtime）：
         <包根>\
@@ -107,6 +107,7 @@ param(
     [string]$OutDir,
     [string]$Name,
     [switch]$SkipBuild,
+    [switch]$IncludePc,
     [string]$ReuseWebFromZip,
     [switch]$SkipSmoke,
     [ValidateSet('mem', 'rocksdb')][string]$SmokeStoreMode,
@@ -339,6 +340,17 @@ if (-not (Test-Path -LiteralPath $Workspace)) {
 }
 
 # ── 2. 程序产物：构建 或 复用（Q1=A 复用包内已验证那份） ─────────────────────
+if ($IncludePc) {
+    Push-Location $PlantUiRoot
+    try {
+        Write-Step "构建 Windows PC 客户端"
+        cargo build --release --locked -p rs-plant --bin rs-plant
+        if ($LASTEXITCODE) { throw "PC 构建失败" }
+        $pcTarget = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
+        if ($LASTEXITCODE) { throw "无法读取 PC 构建目录" }
+        $pcExe = Join-Path $pcTarget 'release\rs-plant.exe'
+    } finally { Pop-Location }
+}
 $webStage = Join-Path $stage 'web'
 if ($SkipBuild) {
     Write-Step "复用现成程序产物：$SourcePackage"
@@ -415,8 +427,8 @@ else {
         }
     }
 }
-if (-not (Test-Path -LiteralPath (Join-Path $webStage 'pkg\plant_ui_app_bg.wasm'))) {
-    throw "web 组装后缺 pkg\plant_ui_app_bg.wasm，无法继续"
+if (-not (Test-Path -LiteralPath (Join-Path $webStage 'pkg\rs-plant_bg.wasm'))) {
+    throw "web 组装后缺 pkg\rs-plant_bg.wasm，无法继续"
 }
 $backendBuildInfo = Get-AiosBuildInfo (Join-Path $stage 'aios-database.exe')
 if ([string]$backendBuildInfo.version -ne [string]$BackendVersion) {
@@ -574,7 +586,7 @@ if (-not $Workspace) {
     $Workspace = if (Test-Path -LiteralPath $bundledWorkspace) { $bundledWorkspace } else { $root }
 }
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing backend: $exe" }
-if (-not (Test-Path -LiteralPath (Join-Path $root 'web/pkg/plant_ui_app_bg.wasm'))) { throw 'Web package missing' }
+if (-not (Test-Path -LiteralPath (Join-Path $root 'web/pkg/rs-plant_bg.wasm'))) { throw 'Web package missing' }
 $rootConfig = Join-Path $root 'DbOption.toml'
 $configPath = if (Test-Path -LiteralPath $rootConfig) { $rootConfig } else { Join-Path $Workspace 'DbOption.toml' }
 if (-not (Test-Path -LiteralPath $configPath)) { throw "Missing workspace config: $Workspace" }
@@ -642,7 +654,7 @@ do {
         $health = Invoke-WebRequest -Uri ($probeUrl + 'api/v1/health') -UseBasicParsing -TimeoutSec 3
         $page = Invoke-WebRequest -Uri $probeUrl -UseBasicParsing -TimeoutSec 3
         # 首跑（哨兵在场）首页 302 到 /setup.html（含 ams-setup-wizard）；配置完成后是 plant-ui。
-        if ($health.StatusCode -eq 200 -and ($page.Content.Contains('plant_ui_app.js') -or $page.Content.Contains('ams-setup-wizard'))) {
+        if ($health.StatusCode -eq 200 -and ($page.Content.Contains('rs-plant.js') -or $page.Content.Contains('ams-setup-wizard'))) {
             Write-Output "READY PID=$($process.Id) URL=$browserUrl (probe $probeUrl)"
             if (-not $NoBrowser) { Start-Process $browserUrl }
             exit 0
@@ -940,9 +952,9 @@ function Invoke-Smoke {
                     Where-Object { $_.Name -eq 'surreal.exe' } | Select-Object -First 1
                 $modeOk = $health.sul_db.medium -eq $SmokeStoreMode
                 $durableOk = [bool]$health.sul_db.durable -eq ($SmokeStoreMode -eq 'rocksdb')
-                if ($h.StatusCode -eq 200 -and $p.Content.Contains('plant_ui_app.js') -and $modeOk -and $durableOk -and -not $childStore) {
+                if ($h.StatusCode -eq 200 -and $p.Content.Contains('rs-plant.js') -and $modeOk -and $durableOk -and -not $childStore) {
                     $result.status = 'passed'
-                    $result.reason = "health 200 + 首页含 plant_ui_app.js + medium=$SmokeStoreMode + durable=$($health.sul_db.durable) + 服务没拉 surreal 子进程"
+                    $result.reason = "health 200 + 首页含 rs-plant.js + medium=$SmokeStoreMode + durable=$($health.sul_db.durable) + 服务没拉 surreal 子进程"
                     break
                 }
             }
@@ -1148,6 +1160,27 @@ $smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed') -
     ($rocksSmoke.status -eq 'passed'))
 
 # ── 6. 组 zip + sha256 清单（assets 从源直灌，省磁盘） ───────────────────────
+if ($IncludePc) {
+    $pcStage = Join-Path $stage 'pc'
+    New-Item -ItemType Directory -Force $pcStage | Out-Null
+    Copy-Item -LiteralPath $pcExe -Destination (Join-Path $pcStage 'rs-plant.exe')
+    Copy-Item -LiteralPath (Join-Path $stage 'DbOption.toml') -Destination $pcStage
+    foreach ($asset in @('fonts', 'textures')) {
+        $assetSource = Join-Path $webStage "assets\$asset"
+        $assetDestination = Join-Path $pcStage "assets\$asset"
+        New-Item -ItemType Directory -Force $assetDestination | Out-Null
+        Copy-Item -Path "$assetSource\*" -Destination $assetDestination -Recurse
+    }
+    @'
+param([string]$ModelApiUrl = 'http://127.0.0.1:9099')
+$ErrorActionPreference = 'Stop'
+$env:PLANT_MODEL_API_URL = $ModelApiUrl
+$env:PLANT_DATA_API_URL = $ModelApiUrl
+Start-Process -FilePath (Join-Path $PSScriptRoot 'pc\rs-plant.exe') -WorkingDirectory (Join-Path $PSScriptRoot 'pc') -WindowStyle Hidden
+'@ | Set-Content -LiteralPath (Join-Path $stage 'Start-PC.ps1') -Encoding utf8
+    "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0Start-PC.ps1`" %*`r`n" | Set-Content -LiteralPath (Join-Path $stage 'Start-PC.cmd') -Encoding ascii
+    "`n## Windows PC 客户端`n先用 Start-AMS.cmd 完成服务配置，再双击 Start-PC.cmd。客户端默认连接 http://127.0.0.1:9099；可通过 Start-PC.ps1 -ModelApiUrl 指定服务地址。在客户端设置中配置项目与数据库接入点。`n" | Add-Content -LiteralPath (Join-Path $stage 'README.md') -Encoding utf8
+}
 $free = (Get-PSDrive (Split-Path $OutDir -Qualifier).TrimEnd(':')).Free
 Write-Step ("组 zip（{0} 压缩）；目标盘剩余 {1:N1} GB" -f $CompressionLevel, ($free / 1GB))
 
@@ -1203,6 +1236,13 @@ try {
         resources        = $resources
     }
     $mjson = $manifest | ConvertTo-Json -Depth 8
+    if ($IncludePc) {
+        $manifest.pc_version = $WebVersion
+        $manifest.pc_executable = 'pc/rs-plant.exe'
+        $manifest.pc_sha256 = Get-Sha256Compat (Join-Path $pcStage 'rs-plant.exe')
+        $manifest.pc_smoke = @{ status = 'not_run'; reason = 'PC release build passed; interactive desktop startup not tested' }
+        $mjson = $manifest | ConvertTo-Json -Depth 8
+    }
     $mentry = $archive.CreateEntry('release.json', $cl)
     $sw = New-Object System.IO.StreamWriter($mentry.Open(), [System.Text.UTF8Encoding]::new($false))
     $sw.Write($mjson); $sw.Flush(); $sw.Dispose()

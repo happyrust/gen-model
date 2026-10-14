@@ -4032,35 +4032,21 @@ fn persisted_world_transform(
     }
 }
 
-/// Remove every projected e3d-model geometry owned by one generation root.
+/// Remove every projected e3d-model geometry owned by one generation root,
+/// and retire that root's overlay receipt in the same write lock.
 ///
-/// Derived geometry (for example implied tubes) has a content-addressed record
-/// id, so removing only the PE subtree's ordinary `<refno>` records would leave
-/// it behind.  Go through the same geometry-id path as regeneration so every
-/// representation of the root is dropped together.
+/// Derived geometry (implied tubes) lives under the root's ancestor index, so
+/// it is dropped with the rest of the root. Shared content-addressed `.mesh`
+/// files are not deleted; the durable rows are removed by the caller's
+/// tombstone (`render_spooled_scope_deletion`).
+///
+/// A removal that leaves the receipt in place makes `/model/records` fail with
+/// `memory overlay root … is incomplete: receipt expects N, store has 0`.
+/// The second delete then finds no records and would return `deleted` while
+/// that receipt stays. Retiring the receipt even when the store is already
+/// empty closes that hole.
 pub async fn delete_persisted_geometry_root(root: RefNo) -> anyhow::Result<usize> {
-    let mut by_dbnum = BTreeMap::<u32, Vec<GeometryId>>::new();
-    for record in ModelMemoryStore::global().records_of_root(ProjectionScope::Current, root) {
-        by_dbnum
-            .entry(record.dbnum)
-            .or_default()
-            .push(record.geometry_id);
-    }
-
-    let mut removed = 0;
-    for (dbnum, geometry_ids) in by_dbnum {
-        removed += apply_geometry_delta(
-            dbnum,
-            0,
-            Vec::new(),
-            geometry_ids,
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await?
-        .removed;
-    }
-    Ok(removed)
+    Ok(ModelMemoryStore::global().retire_deleted_root(ProjectionScope::Current, root))
 }
 
 /// Full generation must never regress the projection. With the source pinned to

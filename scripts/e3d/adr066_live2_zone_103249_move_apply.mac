@@ -1,0 +1,25 @@
+-- ADR-066 验收 2（live #2 加一类变化）· 刚体前移便宜路：ams7997 挪一个 ZONE 的 POS → SAVEWORK。
+-- ZONE 24381/103249 名下 9 根 BRAN（237 记录，含 128 隐式管身）——09-19 窗 270→271 就是它被挪出来的那一窝，
+-- 规划器对它们全判 transform（docs/evidence/2026-09-20-s4b-gate3-rigid-motion-parity.md）。
+-- 这一窗只动 POS（相对世界东移 1000 mm），差分应当 is_placement_only 为真 → 9 根走 transform 单元。
+-- 恰好一个 SAVEWORK；出错跳到 /fail 仍闭合日志。配套还原：adr066_live2_zone_103249_move_restore.mac（西移 1000 mm）。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_zone_103249_move_apply.log" OVER
+ONERROR GOLABEL /fail
+$P ADR066-LIVE2-MOVE-ALIVE
+=24381/103249
+Q CE
+Q NAME
+Q TYPE
+Q OWNE
+Q POS WRT /*
+Q ORI WRT /*
+BY E 1000 WRT /*
+Q POS WRT /*
+SAVEWORK 'ADR-066 live #2: ZONE 24381/103249 BY E 1000 WRT /* (POS only; rigid transform window)'
+$P ADR066-LIVE2-MOVE-DONE
+GOLABEL /end
+LABEL /fail
+$P ADR066-LIVE2-MOVE-FAILED
+LABEL /end
+ALPHA LOG END

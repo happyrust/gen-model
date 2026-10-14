@@ -753,7 +753,7 @@ fn parse_open_browser(value: &str) -> Option<bool> {
 }
 
 fn packaged_runtime_layout(root: &Path) -> bool {
-    root.join("DbOption.toml").is_file() && root.join("web/pkg/plant_ui_app_bg.wasm").is_file()
+    root.join("DbOption.toml").is_file() && root.join("web/pkg/rs-plant_bg.wasm").is_file()
 }
 
 fn should_open_plant_ui() -> bool {

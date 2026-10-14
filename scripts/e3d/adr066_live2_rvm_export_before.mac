@@ -1,0 +1,40 @@
+$(
+------------------------------------------------------------------------
+ADR-066 live #2 · RVM 真值导出（挪动之前）：ZONE =24381/103249（ams7997）及其名下 9 根 BRAN。
+
+命令序列取自 E3D 3.1 自带的 PMLUI/intf/review/mexpmain（Design Export 表单点 Run 时生成的
+临时宏），与 rvm_export_c_iy_1r330_b.mac 同一套；窄口径（repre insu/obst off），与
+rvm_verify 的 AABB 判定同口径。挪动之后再导一份 adr066_live2_rvm_export_after.mac，
+两份之差应当恰是刚体平移 (1000, 0, 0)。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_rvm_export_before.log" OVER
+$P ADR066-RVM-BEFORE-BEGIN
+=24381/103249
+Q CE
+Q NAME
+Q TYPE
+Q OWNE
+Q POS WRT /*
+Q ORI WRT /*
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model-refactor/output/e3d-live2/zone_103249_before.rvm"
+export filenote 'ADR-066 live #2 baseline: ZONE 24381/103249 before BY E 1000'
+
+export holes on
+export autocolour displayexport on
+export repr on
+
+export =24381/103249
+
+export finish
+
+$P ADR066-RVM-BEFORE-DONE
+ALPHA LOG END

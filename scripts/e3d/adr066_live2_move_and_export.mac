@@ -1,0 +1,15 @@
+-- ADR-066 live #2 · 一次 TTY 会话里做完「挪 ZONE + SAVEWORK + 导 RVM 真值」：
+--   1) adr066_live2_zone_103249_move_apply.mac   ZONE =24381/103249 BY E 1000 WRT /*，一次 SAVEWORK（自带 ALPHA LOG）
+--   2) adr066_live2_rvm_export_after.mac         同一会话紧跟着把挪完的 ZONE 导成 output/e3d-live2/zone_103249_after.rvm（自带 ALPHA LOG）
+-- 走 l3_suite --check-driver（有 SAVEWORK → guarded mutation：跑完核 ams7997 文件 sesno 前进、身份不变）。
+-- ALPHA LOG 一次只开一份，所以这里不把子宏包在自己的日志里：开头 / 结尾各落一个小标记文件。
+-- 本宏不 QUIT——收尾由 driver 的 wrapper 负责。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_move_and_export.log" OVER
+$P ADR066-LIVE2-CHAIN-BEGIN
+ALPHA LOG END
+$M "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_zone_103249_move_apply.mac"
+$M "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_rvm_export_after.mac"
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_move_and_export-done.log" OVER
+$P ADR066-LIVE2-CHAIN-DONE
+ALPHA LOG END

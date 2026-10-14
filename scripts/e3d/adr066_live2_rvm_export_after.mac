@@ -1,0 +1,33 @@
+$(
+------------------------------------------------------------------------
+ADR-066 live #2 · RVM 真值导出（挪动之后，与 adr066_live2_zone_103249_move_apply.mac 同一会话里紧跟 SAVEWORK）：
+ZONE =24381/103249（ams7997）及其名下 9 根 BRAN。口径与 _before 同（窄口径）。
+这一份就是 rvm_verify compare 的真值：transform 前移后的投影记录要与它逐件对得上。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-refactor/scripts/e3d/adr066_live2_rvm_export_after.log" OVER
+$P ADR066-RVM-AFTER-BEGIN
+=24381/103249
+Q CE
+Q POS WRT /*
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model-refactor/output/e3d-live2/zone_103249_after.rvm"
+export filenote 'ADR-066 live #2 truth: ZONE 24381/103249 after BY E 1000 WRT /*'
+
+export holes on
+export autocolour displayexport on
+export repr on
+
+export =24381/103249
+
+export finish
+
+$P ADR066-RVM-AFTER-DONE
+ALPHA LOG END
