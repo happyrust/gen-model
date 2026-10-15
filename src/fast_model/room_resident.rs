@@ -2894,7 +2894,7 @@ fn set_rebuild_backoff(state: Option<RebuildBackoff>) {
 /// 常驻里的面板比本窗几何新一版；下一窗任务追上来即合一。与 ADR-067 D3 当年接受的口径相同。
 pub(crate) async fn refresh_before_task() -> RoomReferenceRefresh {
     // `Loading` = 启动段正在建：那份归启动段装，这里不抢着再建一份（任务本来也进不来——worker
-    // 排在它之后；读透侧的即时生成由 `require_room_bootstrap_ready` 挡在门外）。
+    // 排在它之后；即时生成由 `require_room_resident_ready` 挡在门外）。
     if !crate::options::room_membership()
         || matches!(
             lifecycle(),

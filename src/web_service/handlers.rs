@@ -656,12 +656,14 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     }
 }
 
-fn require_room_bootstrap_ready() -> Result<(), ApiError> {
-    if !crate::options::room_membership() || !crate::options::data_face().is_read_through() {
+/// 生成前的常驻房间模型门：`room_membership` 开着时，每次生成的落库 flush 都会冻房间计算器
+/// （`persist_roots_batched` → `frozen_room_calculator`），常驻 `Loading`/`Blocked` 时等不到它——
+/// 不加这道门，请求会跑完整趟几何再让 write-behind flush 把全部根记 `Blocked`，响应却已经回 200。
+/// 在开工前快败成 409/updating（可重试冲突），与 `ensure_error` 归的同一码，任何介质、任何路由同判。
+fn require_room_resident_ready() -> Result<(), ApiError> {
+    if !crate::options::room_membership() {
         return Ok(());
     }
-    // Point generation needs the room geometry, not publication of every MDB root.
-    // `UPDATING` 语义与 `ensure_error` 归的同一码：409 可重试冲突，不是服务端故障。
     crate::fast_model::room_resident::current_for_calculation()
         .map(|_| ())
         .map_err(|error| ApiError::coded(StatusCode::CONFLICT, "updating", error.to_string()))
@@ -674,7 +676,7 @@ fn require_room_bootstrap_ready() -> Result<(), ApiError> {
 /// 与启动首建同一份初始化路径（`rebuild_resident_model`），区别是这里先占门再清账：
 /// - `try_begin_rebuild` 原子地「判 + 翻 `Loading`」——startup 首建或上一趟重建在跑就 409。
 /// - 清边插在 `record_startup_init` 翻 `Ready` **之前**：`Loading` 还拦着生成
-///   （`ensure_ready`/`require_room_bootstrap_ready`），不会有人把新边写进来再被清掉。
+///   （`ensure_ready`/`require_room_resident_ready`），不会有人把新边写进来再被清掉。
 /// - 逐库重算在 `Ready` 下跑：生成照常放行（两边写的都是同一代的边，幂等），
 ///   单库失败不盖 `model_room_generation`——电平型欠账留着，下个任务自动补。
 pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -2796,9 +2798,7 @@ pub async fn model_generate(
     let memory_only_dbnum = route
         .filter(|route| !route.is_database())
         .map(|route| route.dbnum);
-    if memory_only_dbnum.is_some() {
-        require_room_bootstrap_ready()?;
-    }
+    require_room_resident_ready()?;
     if let Some(dbnum) = memory_only_dbnum
         && let Some(task) = crate::data_interface::task_registry::TaskRegistry::global()
             .active_dbnum_model_ensure(dbnum)
