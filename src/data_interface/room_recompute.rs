@@ -939,7 +939,16 @@ pub(crate) async fn refresh_room_update_record_with_model(
     };
     let room_dbnums = model.room_dbnums();
     let now = chrono::Local::now().to_rfc3339();
-    let record = build_latest_room_update_record(&room_dbnums, &states, &model.input_version(), &now);
+    let mut record =
+        build_latest_room_update_record(&room_dbnums, &states, &model.input_version(), &now);
+    let source_sessions = model.stats().source_sessions;
+    for (&dbnum, sesno_slot) in &mut record.room_dbnum_sesnos {
+        if *sesno_slot <= 0 {
+            if let Some(&src_sesno) = source_sessions.get(&dbnum) {
+                *sesno_slot = src_sesno as i32;
+            }
+        }
+    }
     match crate::fast_model::room_resident::write_room_update_record_on(&aios_core::SUL_DB, &record)
         .await
     {

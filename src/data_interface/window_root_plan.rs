@@ -2029,10 +2029,11 @@ pub(crate) async fn enumerate_target_roots(
 ) -> anyhow::Result<Vec<GenerationRoot>> {
     let service = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
     let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
+    let sesno = (target_sesno > 0).then_some(target_sesno);
     tokio::task::spawn_blocking(move || {
         let file = service.source_file(dbnum)?.to_path_buf();
-        let target = service.build_set(dbnum, Some(target_sesno))?;
-        let index = scan_index(&file, Some(target_sesno))?;
+        let target = service.build_set(dbnum, sesno)?;
+        let index = scan_index(&file, sesno)?;
         enumerate_generation_roots(&target, &index.roots, &unit_types)
     })
     .await
@@ -2052,8 +2053,9 @@ pub(crate) async fn missing_at_target(
         return Ok(Vec::new());
     }
     let service = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
+    let sesno = (target_sesno > 0).then_some(target_sesno);
     tokio::task::spawn_blocking(move || {
-        let target = service.build_set(dbnum, Some(target_sesno))?;
+        let target = service.build_set(dbnum, sesno)?;
         let mut missing = Vec::new();
         for refno in refnos {
             if !target.element_exists(refno).with_context(|| {

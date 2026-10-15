@@ -810,22 +810,45 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
         .map(|state| state.file_latest_sesno.max(state.applied_sesno))
         .unwrap_or_default()
         .max(0) as u32;
-    let roots = match crate::data_interface::window_root_plan::enumerate_target_roots(
-        dbnum,
-        target_sesno,
-    )
-    .await
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let has_projected = store
+        .roots(crate::fast_model::model_memory_store::ProjectionScope::Current)
+        .into_iter()
+        .any(|root| root.dbno() == dbnum);
+    let has_durable = match aios_core::SUL_DB
+        .query(format!(
+            "SELECT VALUE record::id(id) FROM inst_relate WHERE dbnum = {dbnum} LIMIT 1; \
+             SELECT VALUE record::id(id) FROM tubi_relate WHERE dbnum = {dbnum} LIMIT 1;"
+        ))
+        .await
+        .and_then(|r| r.check())
     {
-        Ok(roots) => roots
-            .iter()
-            .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
-            .collect::<Vec<_>>(),
-        Err(error) => {
-            eprintln!("dbnum={dbnum} 枚举不出 DbSet@{target_sesno} 的根清单，整库房间重算跳过: {error:#}");
-            return false;
+        Ok(mut resp) => {
+            let insts: Vec<String> = resp.take(0).unwrap_or_default();
+            let tubis: Vec<String> = resp.take(1).unwrap_or_default();
+            !insts.is_empty() || !tubis.is_empty()
+        }
+        Err(_) => true,
+    };
+    let roots = if !has_projected && !has_durable {
+        Vec::new()
+    } else {
+        match crate::data_interface::window_root_plan::enumerate_target_roots(
+            dbnum,
+            target_sesno,
+        )
+        .await
+        {
+            Ok(roots) => roots
+                .iter()
+                .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                eprintln!("dbnum={dbnum} 枚举不出 DbSet@{target_sesno} 的根清单，整库房间重算跳过: {error:#}");
+                return false;
+            }
         }
     };
-    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     match recompute_dbnum_room_edges(
         PersistTarget::process(),
         store,
