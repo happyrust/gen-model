@@ -77,6 +77,10 @@ pub struct DirectTreeService {
     store: Arc<MdbReadStore>,
     reader: Arc<MdbReadProvider>,
     metadata: std::sync::Mutex<Option<Arc<TreeMetadata>>>,
+    /// `children()` 的整层记忆。成员表与树行都钉在本服务那只冻结会话上——文件
+    /// 一动 `is_current()` 就否、provider 换一整只服务，所以这张表与服务同寿命
+    /// 即正确，不需要也不允许跨服务携带。
+    children_memo: std::sync::Mutex<HashMap<RefU64, Arc<Vec<EleTreeNode>>>>,
 }
 
 impl DirectTreeService {
@@ -91,6 +95,7 @@ impl DirectTreeService {
             project: project.to_string(), mdb: format!("/{}", mdb.trim_start_matches('/')),
             membership: reader.membership.clone(), store, reader,
             metadata: std::sync::Mutex::new(None),
+            children_memo: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -142,13 +147,31 @@ impl DirectTreeService {
     }
 
     /// Direct members in the exact order stored in the element record.
+    ///
+    /// 整层结果记进 `children_memo`：同一冻结会话下成员表不变，重复展开、祖先
+    /// 侧查（`node()` 经属主拿兄弟）与 `subtree_refnos` 的 BFS 都不必重付。
+    /// 失败的不记——下一次调用重读。
     pub fn children(&self, parent: RefU64) -> anyhow::Result<Vec<EleTreeNode>> {
-        self.store
+        if let Some(hit) = self
+            .children_memo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tree children memo lock poisoned"))?
+            .get(&parent)
+        {
+            return Ok((**hit).clone());
+        }
+        let nodes = self
+            .store
             .members(parent)?
             .into_iter()
             .enumerate()
             .map(|(order, child)| self.node(child, Some(parent), order))
-            .collect()
+            .collect::<anyhow::Result<Vec<EleTreeNode>>>()?;
+        self.children_memo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tree children memo lock poisoned"))?
+            .insert(parent, Arc::new(nodes.clone()));
+        Ok(nodes)
     }
 
     /// Root plus its complete member subtree, read from e3d-io in stored order.
@@ -291,32 +314,26 @@ impl DirectTreeService {
         expected_owner: Option<RefU64>,
         order: usize,
     ) -> anyhow::Result<EleTreeNode> {
-        let attrs = self.store.named_attmap(refno)?;
-        let noun = attrs
-            .get_as_string("TYPE")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        anyhow::ensure!(!noun.is_empty(), "{refno} 的 direct TYPE 为空");
-        let mut name = attrs
-            .get_as_string("NAME")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        // 树行四格（TYPE / NAME / OWNER / 成员数）全在已解析记录里：`tree_node_parts`
+        // 一份 `parsed` 取齐，跳过整张属性表与描述符抽取——那才是展开一层的主要开销。
+        // 与 `named_attmap` 三键同值（P2-1 对拍见 `generation_root.rs`）。
+        let parts = self.store.tree_node_parts(refno)?;
+        anyhow::ensure!(!parts.noun.is_empty(), "{refno} 的 direct TYPE 为空");
+        let mut name = parts.name.trim().to_string();
         if name.is_empty() {
-            name.clone_from(&noun);
+            name.clone_from(&parts.noun);
         }
-        let owner = attrs.get_refu64("OWNER").unwrap_or_default();
+        let owner = parts.owner;
         if let Some(expected) = expected_owner {
             anyhow::ensure!(
                 owner == expected,
                 "{refno} 的成员表 OWNER={expected}，元素记录 OWNER={owner}"
             );
         }
-        let children_count = self.store.members(refno)?.len();
+        let children_count = parts.members.len();
         Ok(EleTreeNode {
             refno: RefnoEnum::from(refno),
-            noun,
+            noun: parts.noun,
             name,
             owner: RefnoEnum::from(owner),
             order: u16::try_from(order).unwrap_or(u16::MAX),

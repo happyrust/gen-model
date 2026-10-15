@@ -1392,6 +1392,8 @@ fn tree_nodes_with_dbnum(
 }
 
 /// GET /api/v1/tree/roots — SITE roots decoded from DESI files by e3d-io.
+///
+/// 逐库读 WORL 成员表是文件 I/O，放 `spawn_blocking`。
 pub async fn tree_roots(
     State(state): State<AppState>,
     Query(request): Query<TreeReq>,
@@ -1402,7 +1404,11 @@ pub async fn tree_roots(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let nodes = service.roots().map_err(ApiError::from_domain)?;
+    let worker = service.clone();
+    let nodes = tokio::task::spawn_blocking(move || worker.roots())
+        .await
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree roots 任务异常结束: {error}")))?
+        .map_err(ApiError::from_domain)?;
     let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
         "source": "direct",
@@ -1413,6 +1419,8 @@ pub async fn tree_roots(
 }
 
 /// GET /api/v1/tree/children?refno=a/b — exact stored member order.
+///
+/// 逐成员解析元素记录是文件 I/O（大成员表更明显），放 `spawn_blocking`。
 pub async fn tree_children(
     State(state): State<AppState>,
     Query(request): Query<TreeReq>,
@@ -1424,7 +1432,11 @@ pub async fn tree_children(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let nodes = service.children(parent).map_err(ApiError::from_domain)?;
+    let worker = service.clone();
+    let nodes = tokio::task::spawn_blocking(move || worker.children(parent))
+        .await
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree children 任务异常结束: {error}")))?
+        .map_err(ApiError::from_domain)?;
     let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
         "source": "direct",
@@ -1511,6 +1523,8 @@ pub async fn mesh_glb(
 }
 
 /// GET /api/v1/tree/ancestors?refno=a/b — self first, then OWNER chain.
+///
+/// 逐级点查元素记录是文件 I/O，放 `spawn_blocking`。
 pub async fn tree_ancestors(
     State(state): State<AppState>,
     Query(request): Query<TreeReq>,
@@ -1522,7 +1536,10 @@ pub async fn tree_ancestors(
         .get()
         .await
         .map_err(ApiError::from_domain)?;
-    let refnos = service.ancestors(start).map_err(ApiError::from_domain)?;
+    let refnos = tokio::task::spawn_blocking(move || service.ancestors(start))
+        .await
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("tree ancestors 任务异常结束: {error}")))?
+        .map_err(ApiError::from_domain)?;
     Ok(Json(json!({
         "source": "direct",
         "refnos": refnos,

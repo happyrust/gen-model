@@ -18,6 +18,22 @@ pub struct MdbReadStore {
     indexes: DirectStore,
 }
 
+/// 树行一次取齐的字段：noun、存的名字、属主、成员原序——**不走描述符抽取**。
+///
+/// 展开一层只对每个成员要这四样，而它们都在已解析记录里（noun_hash / 显式 NAME /
+/// 记录头 owner / 成员表）；`named_attmap` 那张全属性表是给属性面板的，为树行付
+/// 一次描述符抽取换不来任何一格数据。与 `named_attmap` 的 TYPE / NAME / OWNER /
+/// members 等价：`generation_root` 的 P2-1 对拍在真库上逐条比过 `element_type` /
+/// `stored_name` / `member_refnos` 与 attmap 输出。
+pub struct TreeNodeParts {
+    pub noun: String,
+    /// 显式 NAME 原文（未 trim）；没存名字是空串——回落到 noun 是调用方的事。
+    pub name: String,
+    pub owner: RefU64,
+    /// 成员 refno，文件原序，空槽已滤——与 [`MdbReadStore::members`] 同一口径。
+    pub members: Vec<RefU64>,
+}
+
 impl MdbReadStore {
     fn new(schema: Arc<DirectSchema>, directory: Arc<MdbRouteDirectory>, set: Arc<DbSet>, epoch: u64) -> Self {
         Self { set, epoch, indexes: DirectStore::new(schema, directory.clone()), directory }
@@ -64,6 +80,33 @@ impl MdbReadStore {
         Ok(element.member_refnos().map_err(|error| domain_error(element.db_no(), error))?
             .into_iter().filter(|member| member.is_valid())
             .map(|member| RefU64::from_two_nums(member.word0, member.word1)).collect())
+    }
+
+    /// 一个元素的树行字段，一份记录解析全出——零描述符抽取。
+    ///
+    /// 树接口（`DirectTreeService::node`）专用：`element_type` / `stored_name` /
+    /// 记录头 owner / 成员表都挂在 `parsed` 上，池级元素缓存命中时整行是几次查表。
+    pub fn tree_node_parts(&self, refno: RefU64) -> Result<TreeNodeParts, DirectStoreError> {
+        let element = self.element(refno)?;
+        let parsed = element.parsed().map_err(|error| domain_error(element.db_no(), error))?;
+        let noun = element
+            .element_type()
+            .map_err(|error| domain_error(element.db_no(), error))?;
+        let name = element
+            .stored_name()
+            .map_err(|error| domain_error(element.db_no(), error))?
+            .unwrap_or_default();
+        Ok(TreeNodeParts {
+            noun,
+            name,
+            owner: RefU64::from_two_nums(parsed.owner.word0, parsed.owner.word1),
+            members: parsed
+                .members
+                .iter()
+                .filter(|member| member.is_valid())
+                .map(|member| RefU64::from_two_nums(member.word0, member.word1))
+                .collect(),
+        })
     }
 
     pub fn metadata(&self, dbnum: u32) -> Result<DbMetadata, DirectStoreError> {
