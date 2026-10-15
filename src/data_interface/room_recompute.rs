@@ -1022,7 +1022,7 @@ async fn apply_targeted_room_update_for_dbnum(
     dbnum: u32,
     outcome: &crate::fast_model::room_resident::StartupInitOutcome,
     window_delta: Option<&crate::fast_model::room_resident::PanelDelta>,
-) {
+) -> bool {
     use crate::data_interface::room_reverse::ReverseLookup;
     use crate::fast_model::model_db_adapter::{
         PersistTarget, RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
@@ -1099,7 +1099,7 @@ async fn apply_targeted_room_update_for_dbnum(
                                     report.room_edges,
                                     report.elapsed_ms
                                 );
-                                return;
+                                return true;
                             }
                             Ok(report) => {
                                 eprintln!(
@@ -1119,7 +1119,7 @@ async fn apply_targeted_room_update_for_dbnum(
         }
     }
 
-    crate::web_service::handlers::recompute_dbnum_room_edges_now(dbnum).await;
+    crate::web_service::handlers::recompute_dbnum_room_edges_now(dbnum).await
 }
 
 /// 启动时的房间初始化与基于时间戳的增量检测入口（在常驻房间模型就绪后调用）：
@@ -1170,13 +1170,22 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 "[房间启动检查] 未发现房间更新时间记录，开始执行首次房间初始化（共 {} 个 dbnum）...",
                 target_dbnums.len()
             );
+            let mut all_ok = true;
             for dbnum in &target_dbnums {
-                crate::web_service::handlers::recompute_dbnum_room_edges_now(*dbnum).await;
+                if !crate::web_service::handlers::recompute_dbnum_room_edges_now(*dbnum).await {
+                    all_ok = false;
+                }
             }
-            refresh_room_update_record_with_model(&outcome.model).await;
-            println!(
-                "[房间启动检查] 首次房间初始化完成，已记录最新房间更新时间"
-            );
+            if all_ok {
+                refresh_room_update_record_with_model(&outcome.model).await;
+                println!(
+                    "[房间启动检查] 首次房间初始化完成，已记录最新房间更新时间"
+                );
+            } else {
+                eprintln!(
+                    "[房间启动检查] 首次房间初始化有部分 dbnum 未全部完成，暂不写入 room_updated_at，下次启动继续补检"
+                );
+            }
         }
         StartupRoomCheckPlan::UpToDate { room_updated_at } => {
             if let Some(record) = existing_record {
@@ -1197,6 +1206,7 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 outdated_dbnums.len(),
                 room_updated_at
             );
+            let mut all_ok = true;
             for (dbnum, from_sesno, to_sesno) in outdated_dbnums {
                 if !crate::data_interface::watch_scope::admits(dbnum) {
                     println!(
@@ -1216,8 +1226,15 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                             detection.reason,
                             window_delta.summary()
                         );
-                        apply_targeted_room_update_for_dbnum(dbnum, outcome, Some(&window_delta))
-                            .await;
+                        if !apply_targeted_room_update_for_dbnum(
+                            dbnum,
+                            outcome,
+                            Some(&window_delta),
+                        )
+                        .await
+                        {
+                            all_ok = false;
+                        }
                     }
                     Ok(None) => {
                         println!(
@@ -1233,17 +1250,26 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                             dbnum,
                             &[],
                         );
-                        apply_targeted_room_update_for_dbnum(
+                        if !apply_targeted_room_update_for_dbnum(
                             dbnum,
                             outcome,
                             (!fallback_delta.is_empty()).then_some(&fallback_delta),
                         )
-                        .await;
+                        .await
+                        {
+                            all_ok = false;
+                        }
                     }
                 }
             }
-            refresh_room_update_record_with_model(&outcome.model).await;
-            println!("[房间启动检查] 含房 dbnum 增量检测完成，已更新最新房间时间戳");
+            if all_ok {
+                refresh_room_update_record_with_model(&outcome.model).await;
+                println!("[房间启动检查] 含房 dbnum 增量检测完成，已更新最新房间时间戳");
+            } else {
+                eprintln!(
+                    "[房间启动检查] 含房 dbnum 增量更新存在未完成项，暂不推进 room_updated_at，下次启动继续补检"
+                );
+            }
         }
     }
 }

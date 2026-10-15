@@ -768,18 +768,23 @@ async fn run_rooms_rebuild() {
     resident::record_startup_init(Ok(&outcome)).await;
     // 逐库整库重算房间边。生命周期已 `Ready`，这段不进 `ensure_ready` 的拦截面；
     // 进度只走 `progress` 槽的 `edge-recompute` 相位。
+    let mut all_ok = true;
     for dbnum in &dbnums {
-        recompute_dbnum_room_edges_now(*dbnum).await;
+        if !recompute_dbnum_room_edges_now(*dbnum).await {
+            all_ok = false;
+        }
         resident::note_recompute_dbnum_done();
     }
-    crate::data_interface::room_recompute::refresh_room_update_record_with_model(&outcome.model).await;
+    if all_ok {
+        crate::data_interface::room_recompute::refresh_room_update_record_with_model(&outcome.model).await;
+    }
     println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
 }
 
 /// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体
 /// `recompute_dbnum_room_edges`）；算齐整库才盖 `model_room_generation`，
 /// 算不齐 / 失败只记日志——欠账留着，下一个任务按 D14 兜底再算。
-pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
+pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
     use crate::fast_model::model_db_adapter::{
         PersistTarget, RootScope, recompute_dbnum_room_edges,
     };
@@ -787,18 +792,18 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
         Ok(Some(rooms)) => rooms,
         Ok(None) => {
             println!("dbnum={dbnum} 整库房间重算跳过：room_membership=false");
-            return;
+            return false;
         }
         Err(error) => {
             eprintln!("dbnum={dbnum} 整库房间重算冻不出计算器: {error:#}");
-            return;
+            return false;
         }
     };
     let state = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
         Ok(state) => state,
         Err(error) => {
             eprintln!("dbnum={dbnum} 读不出水位行，整库房间重算跳过（欠账仍在）: {error:#}");
-            return;
+            return false;
         }
     };
     let target_sesno = state
@@ -817,7 +822,7 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
             .collect::<Vec<_>>(),
         Err(error) => {
             eprintln!("dbnum={dbnum} 枚举不出 DbSet@{target_sesno} 的根清单，整库房间重算跳过: {error:#}");
-            return;
+            return false;
         }
     };
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
@@ -841,7 +846,7 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
             } =>
         {
             // 整库算齐：盖章（`Aligned`）并把「按别代写过」的杂记清空，与 task_end 同一笔纪律。
-            match aios_core::SUL_DB
+            let stamped = match aios_core::SUL_DB
                 .query(format!(
                     "UPDATE dbnum_watermark:{dbnum} SET model_room_generation = '{}', model_room_stray_generations = [];",
                     crate::data_interface::dbnum_state::escape_surql_str(
@@ -855,11 +860,13 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
                     // 盖章直查 SUL_DB、绕过了 DbnumState 的写者：库上确认成功后
                     // 作废这一格的进程镜像，免得后续读还拿盖章前的旧代号判欠。
                     crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+                    true
                 }
                 Err(error) => {
                     eprintln!("dbnum={dbnum} 房间边已整库重算，但对齐代号没盖上（下个任务会再欠一次）: {error:#}");
+                    false
                 }
-            }
+            };
             println!(
                 "dbnum={dbnum} 整库房间重算完成：根 {}、成员边 {}、算不出 {}，耗时 {}ms",
                 report.recomputed,
@@ -867,6 +874,7 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
                 report.failed.len(),
                 report.elapsed_ms
             );
+            stamped
         }
         Ok(report) => {
             if !report.failed.is_empty() {
@@ -893,9 +901,11 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
                     roots.len()
                 );
             }
+            false
         }
         Err(error) => {
             eprintln!("dbnum={dbnum} 整库房间重算失败（欠账仍在）: {error:#}");
+            false
         }
     }
 }
