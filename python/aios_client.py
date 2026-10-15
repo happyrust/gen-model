@@ -33,7 +33,7 @@ from typing import Any, Iterator
 # 手抄常量，靠测试自锁：`python/tests/test_client_offline.py::
 # test_expected_version_tracks_the_crate_version` 会拿它跟 Cargo.toml 对表，
 # release bump 忘了同步这里，CI 的离线档立刻红。
-EXPECTED_SERVER_VERSION = "0.1.21"
+EXPECTED_SERVER_VERSION = "0.1.40"
 
 
 class AiosVersionWarning(UserWarning):

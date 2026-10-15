@@ -661,9 +661,197 @@ fn require_room_bootstrap_ready() -> Result<(), ApiError> {
         return Ok(());
     }
     // Point generation needs the room geometry, not publication of every MDB root.
+    // `UPDATING` 语义与 `ensure_error` 归的同一码：409 可重试冲突，不是服务端故障。
     crate::fast_model::room_resident::current_for_calculation()
         .map(|_| ())
-        .map_err(|error| ApiError::service_unavailable("room_reference_unavailable", error.to_string()))
+        .map_err(|error| ApiError::coded(StatusCode::CONFLICT, "updating", error.to_string()))
+}
+
+/// POST /api/v1/rooms/rebuild — 「重新生成房间」：删掉全部房间数据、换代重建常驻参照模型、
+/// 逐库整库重算房间边。202 立即返回；进度与阶段看 `/health.room_build.resident.progress`
+/// （`source-snapshot` → `mesh-warm` → `edge-recompute`），生命周期在 `status` 里。
+///
+/// 与启动首建同一份初始化路径（`rebuild_resident_model`），区别是这里先占门再清账：
+/// - `try_begin_rebuild` 原子地「判 + 翻 `Loading`」——startup 首建或上一趟重建在跑就 409。
+/// - 清边插在 `record_startup_init` 翻 `Ready` **之前**：`Loading` 还拦着生成
+///   （`ensure_ready`/`require_room_bootstrap_ready`），不会有人把新边写进来再被清掉。
+/// - 逐库重算在 `Ready` 下跑：生成照常放行（两边写的都是同一代的边，幂等），
+///   单库失败不盖 `model_room_generation`——电平型欠账留着，下个任务自动补。
+pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    use crate::fast_model::room_resident as resident;
+    if resident::ResidentInputs::configured().is_none() {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "unsupported",
+            "本进程没有房间体制（spatial_compute 关着 / project_hd·hh 特性不在）",
+        ));
+    }
+    if !crate::options::room_membership() {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "unsupported",
+            "room_membership=false：房间归属计算关着，没有可重建的参照模型",
+        ));
+    }
+    if !resident::try_begin_rebuild() {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "updating",
+            "房间参照模型正在装载或重建中，等它翻篇再试",
+        ));
+    }
+    tokio::spawn(run_rooms_rebuild());
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "accepted",
+            "phase": "source-snapshot",
+            "progress_in": "/api/v1/health -> room_build.resident",
+        })),
+    ))
+}
+
+/// 「重新生成房间」的后台本体。任何一步失败都不回滚也不重试——`record_startup_init`
+/// 已把生命周期翻成 `Blocked`/`Ready`，欠账靠 `model_room_generation` 与常驻代号的不等兜底。
+async fn run_rooms_rebuild() {
+    use crate::fast_model::room_resident as resident;
+    let outcome = match resident::rebuild_resident_model().await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("[房间重建] 常驻参照模型重建失败（旧边原样保留，生成按 blocked 拒）: {error:#}");
+            resident::record_startup_init(Err(&error)).await;
+            return;
+        }
+    };
+    // 仍在 `Loading`：清持久面。两张边表全库归零（「所有删除」的字面），停放链里
+    // 旧代的段对不上新代准入链一并清掉。
+    if let Err(error) = aios_core::SUL_DB
+        .query("DELETE room_relate; DELETE room_panel_relate;")
+        .await
+        .and_then(|response| response.check())
+    {
+        eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑）: {error:#}");
+    }
+    let cleared = crate::data_interface::room_reverse::clear_all();
+    if cleared > 0 {
+        println!("[房间重建] 清掉停放链 {cleared} 条");
+    }
+    // 第三段的相位与库数在翻 `Ready` **之前**就位：就绪与「逐库重算在跑」必须同时被
+    // `/health` 看见，不然客户端会拿 `ready` + 旧相位（`mesh-warm`）当「全做完了」提前收摊。
+    let dbnums: Vec<u32> = outcome
+        .expected_dbnums()
+        .iter()
+        .copied()
+        .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
+        .collect();
+    resident::note_progress_phase("edge-recompute");
+    resident::note_recompute_dbnums_total(dbnums.len());
+    resident::record_startup_init(Ok(&outcome)).await;
+    // 逐库整库重算房间边。生命周期已 `Ready`，这段不进 `ensure_ready` 的拦截面；
+    // 进度只走 `progress` 槽的 `edge-recompute` 相位。
+    for dbnum in &dbnums {
+        recompute_dbnum_room_edges_now(*dbnum).await;
+        resident::note_recompute_dbnum_done();
+    }
+    println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
+}
+
+/// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体
+/// `recompute_dbnum_room_edges`）；算齐整库才盖 `model_room_generation`，
+/// 算不齐 / 失败只记日志——欠账留着，下一个任务按 D14 兜底再算。
+async fn recompute_dbnum_room_edges_now(dbnum: u32) {
+    use crate::fast_model::model_db_adapter::{
+        PersistTarget, RootScope, recompute_dbnum_room_edges,
+    };
+    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) => {
+            println!("dbnum={dbnum} 整库房间重算跳过：room_membership=false");
+            return;
+        }
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 整库房间重算冻不出计算器: {error:#}");
+            return;
+        }
+    };
+    let state = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 读不出水位行，整库房间重算跳过（欠账仍在）: {error:#}");
+            return;
+        }
+    };
+    let target_sesno = state
+        .map(|state| state.file_latest_sesno.max(state.applied_sesno))
+        .unwrap_or_default()
+        .max(0) as u32;
+    let roots = match crate::data_interface::window_root_plan::enumerate_target_roots(
+        dbnum,
+        target_sesno,
+    )
+    .await
+    {
+        Ok(roots) => roots
+            .iter()
+            .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 枚举不出 DbSet@{target_sesno} 的根清单，整库房间重算跳过: {error:#}");
+            return;
+        }
+    };
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    match recompute_dbnum_room_edges(
+        PersistTarget::process(),
+        store,
+        dbnum,
+        &rooms,
+        Some(&roots),
+        RootScope::All,
+    )
+    .await
+    {
+        Ok(report)
+            if report.failed.is_empty() && {
+                // 覆盖面自证（与 `batch_worker::room_recompute_uncovered` 同义）：
+                // `DbSet@T` 清单上的每一根都被这轮覆盖到——投影里的 + 回读库的。
+                let covered: std::collections::HashSet<_> =
+                    report.covered_roots.iter().copied().collect();
+                roots.iter().all(|root| covered.contains(root))
+            } =>
+        {
+            // 整库算齐：盖章（`Aligned`）并把「按别代写过」的杂记清空，与 task_end 同一笔纪律。
+            if let Err(error) = aios_core::SUL_DB
+                .query(format!(
+                    "UPDATE dbnum_watermark:{dbnum} SET model_room_generation = '{}', model_room_stray_generations = [];",
+                    crate::data_interface::dbnum_state::escape_surql_str(
+                        rooms.resident_generation()
+                    )
+                ))
+                .await
+                .and_then(|response| response.check())
+            {
+                eprintln!("dbnum={dbnum} 房间边已整库重算，但对齐代号没盖上（下个任务会再欠一次）: {error:#}");
+            }
+            println!(
+                "dbnum={dbnum} 整库房间重算完成：根 {}、成员边 {}、算不出 {}，耗时 {}ms",
+                report.recomputed,
+                report.room_edges,
+                report.failed.len(),
+                report.elapsed_ms
+            );
+        }
+        Ok(report) => {
+            eprintln!(
+                "dbnum={dbnum} 整库房间重算覆盖面不齐（{}/{} 根）：对齐代号不盖，欠账留给下个任务",
+                report.covered_roots.len(),
+                roots.len()
+            );
+        }
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 整库房间重算失败（欠账仍在）: {error:#}");
+        }
+    }
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -3022,6 +3210,16 @@ fn domain_cause<T: std::error::Error + Send + Sync + 'static>(error: &anyhow::Er
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
     let message = format!("{error:#}");
+    // 房间参照模型还在建 / 建死：语义与查询侧的 `UPDATING` 同码——409 可重试冲突，
+    // 不是服务端故障（此前落进 500 internal，客户端只能当失败报）。扫整条 cause 链：
+    // 上游 `.context(...)` 包一层时 `message` 的前缀不再以标记开头。
+    if error.chain().any(|cause| {
+        cause
+            .to_string()
+            .starts_with(crate::fast_model::room_resident::RESIDENT_MODEL_UPDATING)
+    }) {
+        return ApiError::coded(StatusCode::CONFLICT, "updating", message);
+    }
     if domain_cause::<InitializationNotReady>(&error).is_some() {
         return ApiError::initialization_not_ready(message);
     }

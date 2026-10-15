@@ -657,6 +657,7 @@ impl ResidentRoomModel {
         self.mesh_warm.warmed = 0;
         self.mesh_warm.failed = 0;
         self.mesh_warm.bytes = 0;
+        note_mesh_warm_total(work.len());
 
         let mut failures = Vec::<String>::new();
 
@@ -693,6 +694,7 @@ impl ResidentRoomModel {
                         }
                         Err(reason) => failed.push((index, panel, geo_hash, reason)),
                     }
+                    note_mesh_warm_done();
                 }
                 (warmed, bytes, failed)
             }));
@@ -715,6 +717,7 @@ impl ResidentRoomModel {
         }
         failed.sort_by_key(|(index, ..)| *index);
         self.mesh_warm.failed += failed.len();
+        note_mesh_warm_failed(self.mesh_warm.failed);
         // 面板级失败：搬进保护集、留痕，不阻代（D9）。共用同一份 `.mesh` 的面板一并搬走——
         // 它们的三角网同样取不到。
         let mut demoted = BTreeSet::new();
@@ -2139,6 +2142,8 @@ async fn initialize_file_backed_at_startup(
         load_file_backed(form, hierarchy, room_key_words, match_room_fn, meshes).await?;
     // 拓扑分片（`room_topology_source`）随房间流程退役（t-678）：没有分片要冻，回执那一格空着。
     let frozen = Vec::new();
+    // 与 `ensure_current` 同一处分阶段：网格预热是构建的第二段，`/health` 的进度条跟着换段。
+    mark_loading("mesh-warm");
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let InstallOutcome {
@@ -2177,6 +2182,7 @@ async fn initialize_latest_at_startup(
     let mut model = load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?;
     // 见 `initialize_file_backed_at_startup`：分片退役，回执那一格空着。
     let frozen = Vec::new();
+    mark_loading("mesh-warm");
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let InstallOutcome {
@@ -2266,8 +2272,10 @@ pub(crate) fn mark_unsupported(reason: impl Into<String>) {
 }
 
 pub(crate) fn mark_loading(phase: impl Into<String>) {
+    let phase = phase.into();
+    reset_progress(&phase);
     set_lifecycle(ResidentLifecycle::Loading {
-        phase: phase.into(),
+        phase,
         started_at: chrono::Local::now().to_rfc3339(),
     });
 }
@@ -2381,6 +2389,158 @@ pub(crate) fn ensure_ready() -> anyhow::Result<()> {
             )
         }
     }
+}
+
+/// `/health.room_build.resident.progress`：这一次 / 正在进行的 resident 构建的进度快照。
+/// 只计数、不决策——`Loading` 期间实时前进，翻篇后留最后一帧给事后对账与客户端进度条。
+/// 三段各有一对 done/total：`source-snapshot` 数 MDB 设计库文件，`mesh-warm` 数唯一网格键，
+/// `edge-recompute` 数整库房间边重算的库数（「重新生成房间」菜单的第三段，生命周期已回
+/// `Ready`、不进 `ensure_ready` 的拦截面）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ResidentProgress {
+    /// 进度属于哪个阶段（与 `Loading.phase` 同一串字面，`edge-recompute` 例外：那段在 `Ready` 下跑）。
+    pub phase: String,
+    /// 阶段开始的 RFC3339 时刻。
+    pub started_at: String,
+    /// `source-snapshot`：已处理完的 MDB 设计库文件 / 总数。
+    pub files_done: usize,
+    pub files_total: usize,
+    /// `mesh-warm`：已预热的唯一网格键 / 总数 / 其中失败数。
+    pub meshes_done: usize,
+    pub meshes_total: usize,
+    pub meshes_failed: usize,
+    /// `edge-recompute`：「重新生成房间」收尾那一半——整库房间边重算完的库数 / 要重算的库数。
+    pub dbnums_done: usize,
+    pub dbnums_total: usize,
+}
+
+fn progress_slot() -> &'static RwLock<ResidentProgress> {
+    static PROGRESS: OnceLock<RwLock<ResidentProgress>> = OnceLock::new();
+    PROGRESS.get_or_init(|| RwLock::new(ResidentProgress::default()))
+}
+
+/// 当前构建进度（进程内一份，`/health` 直读）。
+pub(crate) fn progress() -> ResidentProgress {
+    progress_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// `mark_loading` 进新阶段时清零重记：阶段名与生命周期共用同一串字面。
+fn reset_progress(phase: &str) {
+    *progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = ResidentProgress {
+        phase: phase.to_owned(),
+        started_at: chrono::Local::now().to_rfc3339(),
+        ..ResidentProgress::default()
+    };
+}
+
+/// 只改进度槽的阶段名，不动生命周期：`edge-recompute` 那段跑在 `Ready` 下（换代已装上，
+/// 生成照常放行），不能用 `mark_loading`——那会把它重新拉回 `Loading` 把生成拒掉。
+pub(crate) fn note_progress_phase(phase: &str) {
+    progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .phase = phase.to_owned();
+}
+
+/// `room_topology::load_room_groups_from_files` 报数：这一轮要处理几个 MDB 设计库文件。
+/// 进程级快照——换代重建（`ensure_current` / `rebuild_resident_now`）经过同一段时同样报数。
+pub(crate) fn note_source_files_total(total: usize) {
+    progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .files_total = total;
+}
+
+/// 每处理完一个源文件推进一格——内存 / 磁盘工件命中与重解析都算处理完。
+pub(crate) fn note_source_file_done() {
+    progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .files_done += 1;
+}
+
+/// `warm_meshes` 开工时报这一轮的唯一网格键总数。
+pub(crate) fn note_mesh_warm_total(total: usize) {
+    let mut progress = progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    progress.meshes_total = total;
+    progress.meshes_done = 0;
+    progress.meshes_failed = 0;
+}
+
+/// 每个网格键预热完（成败都算完）推进一格。
+pub(crate) fn note_mesh_warm_done() {
+    progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .meshes_done += 1;
+}
+
+/// 预热收尾记失败总数（与 `mesh_warm.failed` 同源）。
+pub(crate) fn note_mesh_warm_failed(failed: usize) {
+    progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .meshes_failed = failed;
+}
+
+/// `edge-recompute` 段开工：报要重算的库数。`note_progress_phase` 已换段名。
+pub(crate) fn note_recompute_dbnums_total(total: usize) {
+    let mut progress = progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    progress.dbnums_total = total;
+    progress.dbnums_done = 0;
+}
+
+/// 每个库的房间边重算完（成败都算完）推进一格。
+pub(crate) fn note_recompute_dbnum_done() {
+    progress_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .dbnums_done += 1;
+}
+
+/// 「重新生成房间」（`POST /api/v1/rooms/rebuild`）的开闸门：一把锁里「判 + 翻」——
+/// 已是 `Loading`（startup 首建 / 上一趟重建 / 开工前对齐的换代）就不放第二趟进。
+/// 其余各态（含 `Blocked`、`Degraded`）都许进：这一按就是让人把坏掉的那代换掉。
+pub(crate) fn try_begin_rebuild() -> bool {
+    let mut slot = lifecycle_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    if matches!(*slot, ResidentLifecycle::Loading { .. }) {
+        return false;
+    }
+    reset_progress("source-snapshot");
+    *slot = ResidentLifecycle::Loading {
+        phase: "source-snapshot".to_owned(),
+        started_at: chrono::Local::now().to_rfc3339(),
+    };
+    true
+}
+
+/// 「重新生成房间」的重建本体（**不翻生命周期**）：与启动段同一份口径
+/// （`ResidentInputs::configured` 取配置 → [`initialize_at_startup`] 建模并装进单例）。
+/// 生命周期何时翻由调用方定：「重新生成房间」要在 [`record_startup_init`] 翻 `Ready`
+/// 之前把两张房间边表清掉——`Loading` 还拦着生成，不会有人把新边写进来再被清掉。
+pub(crate) async fn rebuild_resident_model() -> anyhow::Result<StartupInitOutcome> {
+    let Some(inputs) = ResidentInputs::configured() else {
+        anyhow::bail!("本进程没有 resident 体制（spatial_compute 关着 / project_hd·hh 特性不在）");
+    };
+    initialize_at_startup(
+        crate::options::data_face(),
+        inputs.hierarchy,
+        &inputs.room_key_words,
+        inputs.match_room_fn,
+        &inputs.mesh_dir,
+    )
+    .await
 }
 
 /// 本进程最近一次启动房间初始化的结局（`/health.room_build.resident.startup`）。
@@ -2979,6 +3139,12 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
         );
         // 换代段账本（审核 M1）：本进程记下的每一段 `from → to`（面板动了什么），定向准入沿它接段。
         target.insert("swap_ledger".to_string(), swap_ledger);
+        // 构建进度（「重新生成房间」那一屏与启动首建的数据源）：`Loading` 期间实时前进，
+        // 翻篇后留最后一帧；`edge-recompute` 段在 `Ready` 下跑，只有这里看得见它在哪。
+        target.insert(
+            "progress".to_string(),
+            serde_json::to_value(progress()).unwrap_or(serde_json::Value::Null),
+        );
         if let Some(stat) = active {
             target.insert("rooms".to_string(), serde_json::json!(stat.rooms));
             target.insert(

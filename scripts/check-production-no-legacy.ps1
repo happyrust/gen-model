@@ -8,15 +8,21 @@ $production = @(
   'python/src'
 )
 $forbidden = 'fast_model::legacy|fast_model::mesh_generate|fast_model::gen_model|use\s+[^;]*gen_all_geos_data|process_meshes_update_db_deep\s*\(|process_meshes_by_dbnos\s*\('
-$hits = & rg -n --glob '*.rs' $forbidden @production
-if ($LASTEXITCODE -eq 0) {
-  $hits
+
+# 不用 rg：GitHub 的 Windows runner 上没有它，这一步会在生产构建已经通过之后误红。
+$files = foreach ($root in $production) {
+  if (Test-Path -LiteralPath $root -PathType Leaf) {
+    Get-Item -LiteralPath $root
+  } elseif (Test-Path -LiteralPath $root -PathType Container) {
+    Get-ChildItem -LiteralPath $root -Recurse -Filter *.rs -File
+  } else {
+    throw "production path missing: $root"
+  }
+}
+$hits = @($files | Select-String -Pattern $forbidden)
+if ($hits.Count -gt 0) {
+  $hits | ForEach-Object { '{0}:{1}:{2}' -f $_.Path, $_.LineNumber, $_.Line.Trim() }
   throw 'production source references legacy model generation'
 }
-if ($LASTEXITCODE -ne 1) {
-  throw "rg failed with exit code $LASTEXITCODE"
-}
 'PRODUCTION_LEGACY_SCAN_OK'
-# rg 的「无命中」出口是 1，正是本检查的通过态；不清掉它，GitHub Actions 的 pwsh
-# 包装（结尾 exit $LASTEXITCODE）会把绿的一步标红。
 exit 0

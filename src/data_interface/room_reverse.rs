@@ -466,6 +466,15 @@ pub(crate) fn clear(dbnum: u32) -> usize {
     parked_write().remove(&dbnum).map_or(0, |slot| slot.len())
 }
 
+/// 「重新生成房间」一次清全部库的停放链：换代重建之后，停放物记的 `from → to` 说的都是
+/// 旧世界的事，接不进新代的准入链——停着只会让下一个任务白折一段旧账。回清掉的总条数。
+pub(crate) fn clear_all() -> usize {
+    let mut slots = parked_write();
+    let count = slots.values().map(Vec::len).sum();
+    slots.clear();
+    count
+}
+
 /// 定向成功之后只清**消费过的**那几段（审核 L3，2026-09-19）：`consumed` 是这个任务开工时从槽里取走、接进准入链、
 /// 折过根的停放物（快照）；按 `from → to` 对上槽里的那一条，从中去掉快照里有的元素，去空了整条撤掉。任务跑着的时候
 /// 别的库停进来的（新的一段、或同一段并进来的新元素）都不在快照里，**留着**给下一个任务接——此前这里 `clear(dbnum)`

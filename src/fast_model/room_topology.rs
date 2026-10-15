@@ -438,6 +438,8 @@ pub(crate) async fn load_room_groups_from_files(
     let service =
         crate::fast_model::e3d_model_service::E3dModelService::from_frozen_sources(&sources, true)
             .await?;
+    // `source-snapshot` 段的进度条数据源（`/health.room_build.resident.progress`）：逐文件计数。
+    crate::fast_model::room_resident::note_source_files_total(sources.len());
     let mut by_file: Vec<(u32, Vec<RoomGroup>)> = Vec::new();
     for source in sources {
         let started = std::time::Instant::now();
@@ -474,6 +476,7 @@ pub(crate) async fn load_room_groups_from_files(
                         started.elapsed().as_millis()
                     );
                     by_file.push((dbnum, groups.as_ref().clone()));
+                    crate::fast_model::room_resident::note_source_file_done();
                     continue;
                 }
                 let set = service.build_set(dbnum, Some(sesno))?;
@@ -504,6 +507,7 @@ pub(crate) async fn load_room_groups_from_files(
             started.elapsed().as_millis()
         );
         by_file.push((dbnum, cached.as_ref().clone()));
+        crate::fast_model::room_resident::note_source_file_done();
     }
     Ok(RoomGroupsFromFiles {
         composite,

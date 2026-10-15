@@ -596,6 +596,9 @@ async fn serve_with_ready(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
         )
+        // 「重新生成房间」（全库）：清掉两张房间边表 + 换代常驻参照模型 + 逐库整库重算。
+        // 202 立即返回，进度看 /health.room_build.resident.progress。
+        .route("/api/v1/rooms/rebuild", post(handlers::rooms_rebuild))
         .route(
             "/api/v1/dbnums/{dbnum}/model/ensure",
             post(handlers::dbnum_model_ensure),
