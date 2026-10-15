@@ -679,6 +679,8 @@ fn require_room_resident_ready() -> Result<(), ApiError> {
 ///   （`ensure_ready`/`require_room_resident_ready`），不会有人把新边写进来再被清掉。
 /// - 逐库重算在 `Ready` 下跑：生成照常放行（两边写的都是同一代的边，幂等），
 ///   单库失败不盖 `model_room_generation`——电平型欠账留着，下个任务自动补。
+/// - 收尾（写 `room_update_record`）落定之后才放下「在飞」：准入闸重开的那一刻，库上的
+///   账（边 + 水位 + 记录）必须已经一致，不然第二趟能踩着一个「说已最新」的记录清账。
 pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     use crate::fast_model::room_resident as resident;
     if resident::ResidentInputs::configured().is_none() {
@@ -777,9 +779,6 @@ async fn run_rooms_rebuild() {
         }
         resident::note_recompute_dbnum_done();
     }
-    // 循环跑完（成败都算）：「在飞」放下，重建准入闸由它重开。那一格是准入判据——展示帧
-    // 可能已被同期的换代（`mark_loading`）清零重写成别的相位，拿它说「跑完没有」不算（2026-10-15）。
-    resident::note_edge_recompute_finished();
     if all_ok {
         // 整库重建没有「没看」的库：空集合 + 上一笔记录为空（这一路开头就把记录清了）。
         crate::data_interface::room_recompute::refresh_room_update_record_with_model(
@@ -795,6 +794,11 @@ async fn run_rooms_rebuild() {
             dbnums.len()
         );
     }
+    // 收尾落定之后才放下「在飞」（2026-10-15，第五笔）：那一格是准入判据，重建闸由它重开——展示帧
+    // 可能已被同期的换代（`mark_loading`）清零重写成别的相位，拿它说「跑完没有」不算；反过来说，
+    // 放下得早也不行：第二趟会被放进来先清账（两张边表全删 / 水位整表 NONE / 记录 NONE），而第一趟
+    // 随后写下的收尾记录是**清边之前那一刻**的账——两趟叠在一起，库里只剩「边没了、记录却说已最新」。
+    resident::note_edge_recompute_finished();
 }
 
 /// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体

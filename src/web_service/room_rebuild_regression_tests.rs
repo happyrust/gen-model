@@ -286,3 +286,33 @@ fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
         "留白在记录构造里落地（排在 source_sessions 回填之后，免得回填替没看的库说话）: {refresh}"
     );
 }
+
+/// 「在飞」要到**收尾落定**才放下（2026-10-15，第五笔）：`note_edge_recompute_finished` 是准入闸重开的
+/// 那一刻，而收尾还要把 `room_update_record` 写进库（`refresh_room_update_record_with_model`）。放下得早，
+/// 第二趟「重新生成房间」就能被放进来先清账（两张边表全删、水位整表 NONE、记录 NONE），第一趟随后写下的
+/// 却是**清边之前那一刻**的账——说「所有含房库都已做完」。第二趟若没跑完（`all_ok=false`，或进程被杀），
+/// 库里留下的就是「边没了、水位 NONE、记录却说已最新」：下次启动检查只信记录，判 `UpToDate`，
+/// 那批库从此不补（只剩逐库任务的自愈）。因此收尾那一笔必须排在放下「在飞」之前。
+#[test]
+fn room_rebuild_regression_the_flight_is_held_until_the_settle_lands() {
+    let source = include_str!("handlers.rs");
+    let rebuild = source
+        .split_once("async fn run_rooms_rebuild(")
+        .expect("rebuild body exists")
+        .1;
+    let end = rebuild
+        .find("\n}\r\n")
+        .or_else(|| rebuild.find("\n}\n"))
+        .unwrap_or(rebuild.len());
+    let body = &rebuild[..end];
+    let settle = body
+        .find("refresh_room_update_record_with_model(")
+        .expect("收尾要把「这一版全好了」写成记录");
+    let finished = body
+        .find("note_edge_recompute_finished(")
+        .expect("逐库循环跑完要放下「在飞」——准入闸由它重开");
+    assert!(
+        settle < finished,
+        "收尾落定之后才放下「在飞」：闸重开的那一刻，库上的账（边 + 水位 + 记录）必须已经一致: {body}"
+    );
+}

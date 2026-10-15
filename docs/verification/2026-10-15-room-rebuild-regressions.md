@@ -174,3 +174,34 @@ composite，文件真变过时换代必发生，而这一按正是用户改完 M
 - 范围外：`changelog.md` 仍未改（同上一条线未提交）；换代期间 `/health` 显示换代的相位（`mesh-warm`）
   是如实，未改；循环中途 panic 会把新那一格留在「在飞」——与修前「帧停在 `edge-recompute` 没跑完」
   同一条失效面，未扩大（未加 RAII 兜底）。
+
+## 后续修复（2026-10-15，第五轮）：收尾落定之后才放下「在飞」
+
+**缺陷**：第四轮把「在飞」单列一格守住了第三段的起点与全程，**终点却画在收尾之前**——
+`note_edge_recompute_finished()`（准入闸重开的那一刻）排在 `refresh_room_update_record_with_model`
+（收尾往库里写 `room_update_record`）之前。循环一跑完闸就开，而第一趟还没把账记完。窗口里第二趟
+「重新生成房间」能被放进来：它先清账（`record_room_update_record(None)` + `clear_room_rebuild_edges_on`：
+两张边表全删、水位整表 NONE、记录 NONE），composite 没变时它的第一段只是一次探针（零重建），很快就能
+走到清边；第一趟随后写下的收尾记录却是**清边之前那一刻**的账（它自己的 model + 当时读到的 states），
+说「所有含房库都已做完」。第二趟若没跑完（`all_ok=false`，或进程被杀），库里留下的是：**边没了、水位
+NONE、记录却说已最新**——下次启动检查只信记录（`is_dbnum_timestamp_newer_than_room`）判 `UpToDate`，
+那批库从此不补，只剩逐库任务（D14 电平型欠账）的自愈。
+
+**修法与证据等级**：
+
+- `run_rooms_rebuild`：`note_edge_recompute_finished()` 移到 if/else 收尾**之后**；`rooms_rebuild` 的
+  函数文档补一条（「准入闸重开的那一刻，库上的账（边 + 水位 + 记录）必须已经一致」）。
+- 红：新增源码契约红钉
+  `web_service::handlers::room_rebuild_regression_tests::room_rebuild_regression_the_flight_is_held_until_the_settle_lands`
+  （切 `run_rooms_rebuild` 函数体，断言 `refresh_room_update_record_with_model(` 在
+  `note_edge_recompute_finished(` 之前）→ 修复前
+  `cargo test --offline --lib room_rebuild_regression_the_flight_is_held_until_the_settle_lands`
+  = 退出码 101，`0 passed; 1 failed; 2651 filtered out`（断言把整个函数体打出来）。
+- 绿：`cargo test --offline --lib room_rebuild_regression` → `8 passed; 0 failed`；全量
+  `cargo test --offline --lib` → `2520 passed; 0 failed; 132 ignored`（当前工作树，含另一条线未提交
+  改动）；两个改动文件编辑器诊断 errors 0 / warnings 0。
+- 证据等级：源码契约（接线位置）+ 隔离回归；「两趟真的交错」要真机——窗口是第一趟收尾那几笔 DB 写
+  （毫秒量级）而对面的第一段通常很长，只有 composite 没变的探针路才走得进去，本轮不碰。
+- 证据原文（按约定不入库）：`verification/room-rebuild-settle-order-20261015/verification.md`。
+- 范围外：`changelog.md` 仍未改（另一条线未提交改动在里面）；循环中途 panic 把「在飞」留在原处
+  （未加 RAII / 超时自愈）仍在，未扩大。
