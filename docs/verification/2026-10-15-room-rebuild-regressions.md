@@ -98,3 +98,38 @@ cargo test --offline --lib room_rebuild_regression_ -- --nocapture --test-thread
   含三个文件的 SHA256 与三条复现命令。
 - 范围外：`changelog.md` 本轮未改——它当前带着另一条线（ADR-085 / 更新范围声明）的未提交改动，
   混入会把两件事装进一笔。
+
+## 后续修复（2026-10-15，第三轮）：房间初始化不受限定域限定
+
+用户面授口径：**「watch 目前只是作为增量监测的范围，不要限定房间的初始化」**。仓库里本有同一条
+源码钉（`room_resident.rs::room_files_never_consult_the_watch_scope`：「房间是参照系，不是增量的一部分」），
+房间侧却有三处没照它办：
+
+1. `check_and_init_rooms_at_startup` 的 `NeedsFullInit` 臂：目标集合曾是（初始化覆盖库 ∪ 含房库）
+   **∩ 限定域**，全被滤掉时才退回含房库——未监听库的房间因此**从没被初始化过**；
+2. `run_rooms_rebuild` 的逐库列表：`expected_dbnums()` 同样经 `admits` 过滤；
+3. 增量臂：限定域外的库打印「跳过」后 `continue`，但收尾的记录刷新仍把它写成本轮水位——
+   「欠一次增量检查」的证据被抹掉，之后它进了监听范围也再判不出来。
+
+修法与证据等级：
+
+- ① ② 去过滤：新增纯函数 `startup_full_init_targets`（并集，不看限定域），
+  `run_rooms_rebuild` 直接用 `outcome.expected_dbnums()`。
+- ③ 留白：新增纯函数 `hold_unchecked_room_sesnos`，跳过的库在记录里保留上一笔会话号（上一笔没有写 `0`），
+  `refresh_room_update_record_with_model` 多两个参数（`unchecked` / `previous`），留白排在 `source_sessions`
+  回填**之后**；增量臂如实出声「其中 N 个库…本轮未检查，欠账留存」。
+- 顺带把 `run_rooms_rebuild` 收尾日志改成如实：`all_ok` 才说「完成」，否则 eprintln「有未完成项，
+  `room_updated_at` 不推进」（此前无条件说「完成」，日志撒谎）。
+- 红：`cargo test --offline --lib room_initialization_and_the_full_rebuild_never_consult_the_watch_scope
+  -- --nocapture --test-threads=1` → 修复前 `0 passed; 1 failed`，失败断言「整库重建不得按限定域圈库」
+  （消息里回显的 `run_rooms_rebuild` 函数体中 `watch_scope::admits` 过滤正排在 `expected_dbnums()` 之后）；
+- 绿：同批七条 `7 passed; 0 failed`；全量 `cargo test --offline --lib` → `2514 passed; 0 failed; 132 ignored`
+  （较上一轮 +3，即本轮新增三条）；`room_recompute.rs` / `handlers.rs` / `room_rebuild_regression_tests.rs`
+  编辑器诊断 errors 0 / warnings 0。
+- 证据等级：新增的源码契约守卫只钉接线位置（`run_rooms_rebuild` 不含 `watch_scope`、
+  `NeedsFullInit` 臂不含且走纯函数、增量臂保留 `admits` 并把跳过的库交给 `unchecked`、刷新函数含留白调用）；
+  另两条是纯函数真值表 / 行为测试。「运行时按留白记录判欠」要 `SUL_DB` 与项目配置，本轮不碰。
+- 证据原文（按约定不入库）：`verification/room-init-watch-scope-20261015/verification.md`，
+  含三个文件 SHA256 与四条复现命令。
+- 范围外：`changelog.md` 仍未改（同上一条线未提交）；`blocked_by_data` / `room_only_work_item` 那两处
+  `admits` 属**增量**触发侧，归限定域管，未动。

@@ -792,6 +792,41 @@ pub(crate) fn build_latest_room_update_record(
     }
 }
 
+/// 启动整库房间初始化的目标库集合：本次初始化覆盖到的设计库号 ∪ 常驻模型现在含房的库。
+///
+/// **不看 `watch_scope`**（2026-10-15 口径）：限定域只是增量监测的范围，不许限定房间的初始化——
+/// `room_resident` 的源码钉 `room_files_never_consult_the_watch_scope` 说的同一条
+/// （「房间是参照系，不是增量的一部分」）。此前这里按 `admits` 过滤（全被滤掉时才退回
+/// `room_dbnums`），未监听库的房间因此从没被初始化过；`run_rooms_rebuild` 的逐库列表同病。
+pub(crate) fn startup_full_init_targets(
+    room_dbnums: &BTreeSet<u32>,
+    expected_dbnums: &[u32],
+) -> BTreeSet<u32> {
+    room_dbnums
+        .iter()
+        .copied()
+        .chain(expected_dbnums.iter().copied())
+        .collect()
+}
+
+/// 增量监测这一轮**没看**的库（不在 `watch_dbnums` 监听范围内被跳过）在水位记录里的留白。
+///
+/// 跳掉检查是限定域的本分，但记录不许替它说「已看过最新」：那一格保留上一笔记录里的会话号
+/// （上一笔没有就写 `0`），下一个启动仍把它算成「欠一次增量检查」。`room_updated_at` 照旧推进，
+/// 别的库照旧写当前水位。「不看，也不替它说已看过」（2026-10-15 口径）。
+pub(crate) fn hold_unchecked_room_sesnos(
+    record: &mut crate::fast_model::room_resident::RoomUpdateRecord,
+    previous: Option<&crate::fast_model::room_resident::RoomUpdateRecord>,
+    unchecked: &BTreeSet<u32>,
+) {
+    for dbnum in unchecked {
+        let previous_sesno = previous
+            .and_then(|previous| previous.room_dbnum_sesnos.get(dbnum).copied())
+            .unwrap_or(0);
+        record.room_dbnum_sesnos.insert(*dbnum, previous_sesno);
+    }
+}
+
 /// 更新窗口内命中的单个房间定义族元素。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoomWindowHit {
@@ -927,8 +962,14 @@ pub(crate) fn build_panel_delta_from_window_hits(
 }
 
 /// 按给定常驻模型汇总所有含房 `dbnum` 的最新时间戳并写入 `room_build:main`。
+///
+/// `unchecked`：这一轮**没看**的库（增量分支里被 `watch_scope` 跳过）——构造之后经
+/// [`hold_unchecked_room_sesnos`] 把它们的会话号还原成上一笔记录的值，不推进。整库初始化与整库重建
+/// 没有「没看」的库，传空集合与 `None`。
 pub(crate) async fn refresh_room_update_record_with_model(
     model: &crate::fast_model::room_resident::ResidentRoomModel,
+    unchecked: &BTreeSet<u32>,
+    previous: Option<&crate::fast_model::room_resident::RoomUpdateRecord>,
 ) {
     let states = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
         Ok(states) => states,
@@ -949,6 +990,8 @@ pub(crate) async fn refresh_room_update_record_with_model(
             }
         }
     }
+    // 留白排在回填之后：没看的库连「常驻模型知道的那一代」都不算数——那一格说的是「看过的最新」。
+    hold_unchecked_room_sesnos(&mut record, previous, unchecked);
     match crate::fast_model::room_resident::write_room_update_record_on(&aios_core::SUL_DB, &record)
         .await
     {
@@ -1166,15 +1209,9 @@ pub(crate) async fn check_and_init_rooms_at_startup(
     }
     match plan_startup_room_check(&room_dbnums, &states, existing_record.as_ref()) {
         StartupRoomCheckPlan::NeedsFullInit => {
-            let mut target_dbnums: BTreeSet<u32> = outcome
-                .expected_dbnums()
-                .into_iter()
-                .chain(room_dbnums.iter().copied())
-                .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
-                .collect();
-            if target_dbnums.is_empty() {
-                target_dbnums = room_dbnums;
-            }
+            // 目标集合 =「本次初始化覆盖到的库 ∪ 现在含房的库」，**不看限定域**：watch 只是增量监测的
+            // 范围，房间初始化不归它圈（[`startup_full_init_targets`]，2026-10-15 口径）。
+            let target_dbnums = startup_full_init_targets(&room_dbnums, &outcome.expected_dbnums());
             println!(
                 "[房间启动检查] 未发现房间更新时间记录，开始执行首次房间初始化（共 {} 个 dbnum）...",
                 target_dbnums.len()
@@ -1186,7 +1223,8 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 }
             }
             if all_ok {
-                refresh_room_update_record_with_model(&outcome.model).await;
+                // 整库初始化没有「没看」的库：空集合 + 上一笔记录为空（这条支路本来就没有记录）。
+                refresh_room_update_record_with_model(&outcome.model, &BTreeSet::new(), None).await;
                 println!(
                     "[房间启动检查] 首次房间初始化完成，已记录最新房间更新时间"
                 );
@@ -1216,11 +1254,14 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 room_updated_at
             );
             let mut all_ok = true;
+            // 这一轮没看的库：限定域圈的是增量监测，跳过的库在记录里留白（`hold_unchecked_room_sesnos`）。
+            let mut unchecked: BTreeSet<u32> = BTreeSet::new();
             for (dbnum, from_sesno, to_sesno) in outdated_dbnums {
                 if !crate::data_interface::watch_scope::admits(dbnum) {
                     println!(
-                        "[房间启动检查] dbnum={dbnum} 时间戳超过房间记录，但不在 watch_dbnums 监听范围内，跳过"
+                        "[房间启动检查] dbnum={dbnum} 时间戳超过房间记录，但不在 watch_dbnums 监听范围内，跳过（本轮不检查，水位不推进）"
                     );
+                    unchecked.insert(dbnum);
                     continue;
                 }
                 match detect_room_window_hits_on(&aios_core::SUL_DB, dbnum, from_sesno, to_sesno).await {
@@ -1272,8 +1313,15 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 }
             }
             if all_ok {
-                refresh_room_update_record_with_model(&outcome.model).await;
+                refresh_room_update_record_with_model(&outcome.model, &unchecked, existing_record.as_ref())
+                    .await;
                 println!("[房间启动检查] 含房 dbnum 增量检测完成，已更新最新房间时间戳");
+                if !unchecked.is_empty() {
+                    println!(
+                        "[房间启动检查] 其中 {} 个库不在 watch_dbnums 监听范围内，本轮未检查：其水位保持上一笔记录，欠账留存",
+                        unchecked.len()
+                    );
+                }
             } else {
                 eprintln!(
                     "[房间启动检查] 含房 dbnum 增量更新存在未完成项，暂不推进 room_updated_at，下次启动继续补检"
@@ -2914,5 +2962,57 @@ mod tests {
         assert_eq!(delta.recalc.len(), 1);
         assert_eq!(delta.recalc[0].panel, p1);
         assert_eq!(delta.removed, vec![p_removed]);
+    }
+
+    /// 口径（2026-10-15）：整库初始化的目标集合是并集，**不看限定域**——watch 只是增量监测的范围。
+    #[test]
+    fn the_full_init_targets_are_the_union_and_never_the_watch_scope() {
+        let rooms: BTreeSet<u32> = [7997, 8000].into_iter().collect();
+        let expected = [8000, 8210, 24381];
+        assert_eq!(
+            startup_full_init_targets(&rooms, &expected),
+            BTreeSet::from([7997, 8000, 8210, 24381]),
+            "并集：含房的库一个不落 + 本次初始化覆盖到的库"
+        );
+        assert_eq!(
+            startup_full_init_targets(&BTreeSet::new(), &[]),
+            BTreeSet::new(),
+            "两边都空就是空"
+        );
+        assert_eq!(
+            startup_full_init_targets(&rooms, &[]),
+            rooms,
+            "初始化覆盖不到任何库时，含房的库也不能被甩掉"
+        );
+    }
+
+    /// 增量这轮没看的库（限定域外被跳过）在记录里留白：保留上一笔会话号，上一笔没有就 0；
+    /// 看过的库照旧写当前水位，整体时间戳照旧推进。
+    #[test]
+    fn an_unchecked_library_keeps_its_previous_sesno_in_the_record() {
+        let mut record = crate::fast_model::room_resident::RoomUpdateRecord {
+            room_updated_at: "2026-10-15T22:00:00+08:00".into(),
+            room_dbnum_sesnos: std::collections::BTreeMap::from([(7997, 401), (8000, 77), (8210, 12)]),
+            generation: "g9".into(),
+        };
+        let previous = crate::fast_model::room_resident::RoomUpdateRecord {
+            room_updated_at: "2026-10-15T20:00:00+08:00".into(),
+            room_dbnum_sesnos: std::collections::BTreeMap::from([(7997, 399), (8000, 0)]),
+            generation: "g8".into(),
+        };
+        hold_unchecked_room_sesnos(&mut record, Some(&previous), &BTreeSet::from([7997, 8210]));
+        assert_eq!(
+            record.room_dbnum_sesnos[&7997], 399,
+            "上一笔有基线：留着，不许推进"
+        );
+        assert_eq!(
+            record.room_dbnum_sesnos[&8210], 0,
+            "上一笔没有基线：写 0，不替它说看过最新"
+        );
+        assert_eq!(record.room_dbnum_sesnos[&8000], 77, "看过的库照旧写当前水位");
+        assert_eq!(
+            record.room_updated_at, "2026-10-15T22:00:00+08:00",
+            "整体时间戳照旧推进"
+        );
     }
 }

@@ -762,12 +762,9 @@ async fn run_rooms_rebuild() {
     }
     // 第三段的相位与库数在翻 `Ready` **之前**就位：就绪与「逐库重算在跑」必须同时被
     // `/health` 看见，不然客户端会拿 `ready` + 旧相位（`mesh-warm`）当「全做完了」提前收摊。
-    let dbnums: Vec<u32> = outcome
-        .expected_dbnums()
-        .iter()
-        .copied()
-        .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
-        .collect();
+    // 逐库列表不看限定域：整库重建属房间侧，watch 只是增量监测的范围
+    // （房间是参照系，不是增量的一部分，2026-10-15 口径）。
+    let dbnums: Vec<u32> = outcome.expected_dbnums();
     resident::note_progress_phase("edge-recompute");
     resident::note_recompute_dbnums_total(dbnums.len());
     resident::record_startup_init(Ok(&outcome)).await;
@@ -781,9 +778,20 @@ async fn run_rooms_rebuild() {
         resident::note_recompute_dbnum_done();
     }
     if all_ok {
-        crate::data_interface::room_recompute::refresh_room_update_record_with_model(&outcome.model).await;
+        // 整库重建没有「没看」的库：空集合 + 上一笔记录为空（这一路开头就把记录清了）。
+        crate::data_interface::room_recompute::refresh_room_update_record_with_model(
+            &outcome.model,
+            &std::collections::BTreeSet::new(),
+            None,
+        )
+        .await;
+        println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
+    } else {
+        eprintln!(
+            "[房间重建] 收尾：{} 个库里有未完成项（见上面逐库日志），未全部重算完成，room_updated_at 不推进",
+            dbnums.len()
+        );
     }
-    println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
 }
 
 /// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体

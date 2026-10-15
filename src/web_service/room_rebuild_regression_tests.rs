@@ -154,3 +154,77 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
         .expect("清边把整表写成 NONE，进程逐出镜像要跟着整表清（否则旧代号仍放行逐出）");
     assert!(wipe > clear, "清库成功之后才清镜像");
 }
+
+/// 限定域口径（2026-10-15，用户）：**watch 目前只是作为增量监测的范围，不要限定房间的初始化**。
+/// `room_resident` 早有同一条源码钉（`room_files_never_consult_the_watch_scope`：房间是参照系，
+/// 限定域圈的是数据批次）。这里把房间侧另外两处也钉上：
+///
+/// - 启动整库房间初始化（`check_and_init_rooms_at_startup` 的 `NeedsFullInit` 臂）：目标库集合是
+///   `room_dbnums ∪ expected_dbnums`，**不看 `watch_scope`**。此前它按 `admits` 过滤（全被滤掉时才退回
+///   `room_dbnums`），未监听库的房间因此从没被初始化过；
+/// - 整库重建（`run_rooms_rebuild` 的逐库列表）：同上，此前也按 `admits` 过滤。
+///
+/// 增量那一臂**保留** `watch_scope`（监测范围）——但它跳过的库必须在记录里留白
+/// （`hold_unchecked_room_sesnos`），不得替它说「已看过最新」。
+#[test]
+fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
+    let source = include_str!("handlers.rs");
+    let rebuild = source
+        .split_once("async fn run_rooms_rebuild(")
+        .expect("rebuild body exists")
+        .1
+        .split_once("\n}\r\n")
+        .or_else(|| source.split_once("async fn run_rooms_rebuild(").expect("rebuild body exists").1.split_once("\n}\n"))
+        .expect("rebuild body ends")
+        .0;
+    assert!(
+        rebuild.contains("expected_dbnums()"),
+        "重建逐库列表来自本次初始化覆盖到的设计库号: {rebuild}"
+    );
+    assert!(
+        !rebuild.contains("watch_scope"),
+        "整库重建不得按限定域圈库（房间是参照系，不是增量的一部分）: {rebuild}"
+    );
+
+    let room_recompute = include_str!("../data_interface/room_recompute.rs");
+    let startup = room_recompute
+        .split_once("pub(crate) async fn check_and_init_rooms_at_startup(")
+        .expect("startup room check exists")
+        .1;
+    let full_init = startup
+        .split_once("StartupRoomCheckPlan::NeedsFullInit => {")
+        .expect("full init arm exists")
+        .1
+        .split_once("StartupRoomCheckPlan::UpToDate")
+        .expect("full init arm ends at the up-to-date arm")
+        .0;
+    assert!(
+        full_init.contains("startup_full_init_targets("),
+        "首次整库初始化的目标集合走那个纯函数（∪，不看限定域）: {full_init}"
+    );
+    assert!(
+        !full_init.contains("watch_scope"),
+        "首次整库初始化不得被限定域过滤: {full_init}"
+    );
+
+    let incremental = startup
+        .split_once("StartupRoomCheckPlan::NeedsIncrementalCheck {")
+        .expect("incremental arm exists")
+        .1;
+    assert!(
+        incremental.contains("watch_scope::admits(dbnum)"),
+        "增量监测的范围仍是限定域（这一条保留）: {incremental}"
+    );
+    assert!(
+        incremental.contains("unchecked.insert(dbnum)") && incremental.contains("&unchecked,"),
+        "被限定域跳过、这一轮没看的库要进留白集合，并随记录构造交下去: {incremental}"
+    );
+    let refresh = room_recompute
+        .split_once("pub(crate) async fn refresh_room_update_record_with_model(")
+        .expect("watermark refresh exists")
+        .1;
+    assert!(
+        refresh.contains("hold_unchecked_room_sesnos("),
+        "留白在记录构造里落地（排在 source_sessions 回填之后，免得回填替没看的库说话）: {refresh}"
+    );
+}
