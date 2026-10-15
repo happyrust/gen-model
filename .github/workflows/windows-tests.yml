@@ -123,6 +123,36 @@ jobs:
           path: vendor/old-aios-core
           ref: codex/libgm-snout-caliber
 
+      # handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 嵌进二进制。
+      # 路径相对 src/web_service，落到本仓库检出目录的同级：$GITHUB_WORKSPACE/plant-ui。
+      - name: Check out plant-ui web assets
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GH_PAT)) {
+            throw 'secret GH_PAT 未设置：嵌前端资源需要拉取 plant-ui'
+          }
+          git clone --quiet --depth 1 --filter=blob:none --sparse --branch master "https://x-access-token:$($env:GH_PAT)@github.com/happyrust/plant-ui.git" plant-ui
+          git -C plant-ui sparse-checkout set web/public
+          $needed = @(
+            'web/public/index.html',
+            'web/public/config.example.json',
+            'web/public/pkg/rs-plant.js',
+            'web/public/pkg/rs-plant.d.ts',
+            'web/public/pkg/rs-plant_bg.wasm',
+            'web/public/pkg/rs-plant_bg.wasm.d.ts',
+            'web/public/assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf',
+            'web/public/assets/fonts/AlibabaPuHuiTi-2-65-Medium.ttf',
+            'web/public/assets/fonts/AlibabaPuHuiTi-2-75-SemiBold.ttf',
+            'web/public/assets/textures/viewport-placeholder.jpg'
+          )
+          foreach ($rel in $needed) {
+            $path = Join-Path plant-ui $rel
+            if (-not (Test-Path -LiteralPath $path)) { throw "plant-ui 缺少内嵌资源 $rel" }
+          }
+
       - name: Install Python
         uses: actions/setup-python@v6
         with:
@@ -370,6 +400,36 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: vendor/old-aios-core
           ref: codex/libgm-snout-caliber
+
+      # handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 嵌进二进制。
+      # 路径相对 src/web_service，落到本仓库检出目录的同级：$GITHUB_WORKSPACE/plant-ui。
+      - name: Check out plant-ui web assets
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GH_PAT)) {
+            throw 'secret GH_PAT 未设置：嵌前端资源需要拉取 plant-ui'
+          }
+          git clone --quiet --depth 1 --filter=blob:none --sparse --branch master "https://x-access-token:$($env:GH_PAT)@github.com/happyrust/plant-ui.git" plant-ui
+          git -C plant-ui sparse-checkout set web/public
+          $needed = @(
+            'web/public/index.html',
+            'web/public/config.example.json',
+            'web/public/pkg/rs-plant.js',
+            'web/public/pkg/rs-plant.d.ts',
+            'web/public/pkg/rs-plant_bg.wasm',
+            'web/public/pkg/rs-plant_bg.wasm.d.ts',
+            'web/public/assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf',
+            'web/public/assets/fonts/AlibabaPuHuiTi-2-65-Medium.ttf',
+            'web/public/assets/fonts/AlibabaPuHuiTi-2-75-SemiBold.ttf',
+            'web/public/assets/textures/viewport-placeholder.jpg'
+          )
+          foreach ($rel in $needed) {
+            $path = Join-Path plant-ui $rel
+            if (-not (Test-Path -LiteralPath $path)) { throw "plant-ui 缺少内嵌资源 $rel" }
+          }
 
       - name: Install Python
         uses: actions/setup-python@v6
