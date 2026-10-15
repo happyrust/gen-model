@@ -35,11 +35,13 @@
     让后续二进制 patch 始终有精确的源包可取。
 
     存储只有两档（2026-09-13 拍板，ADR-074）：**出厂是 mem**（库在后端进程内，无 Surreal
-    TCP 端口，真正解压即跑——Start-AMS.ps1 不给 -StoreMode 时显式设 AIOS_STORE_MODE=mem，不靠服务那边的
-    默认档，它 2026-09-18 起是 rocksdb）。介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083），
-    不在 DbOption.toml 里、也不在向导里改：要数据活过重启的现场以 Start-AMS.ps1 -StoreMode rocksdb
-    启动——**服务只连、不拉起**那台库，包根附 bin\surreal.exe 与 Start-Surreal.ps1 让人先把它
-    起起来。包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
+    TCP 端口，真正解压即跑——出厂 DbOption.toml 不写 store_mode，Start-AMS.ps1 不给 -StoreMode、
+    环境也没有时回填 AIOS_STORE_MODE=mem，不靠服务那边的默认档，它 2026-09-18 起是 rocksdb）。
+    介质分层裁决（ADR-083 修订，2026-10）：AIOS_STORE_MODE > DbOption.toml 的 store_mode >
+    默认 rocksdb——向导第②步选的档写进 store_mode 持久化，环境变量是显式覆盖层。
+    要数据活过重启的现场：在向导第②步选 external（写 store_mode="rocksdb"）或
+    Start-AMS.ps1 -StoreMode rocksdb 启动——**服务只连、不拉起**那台库，包根附 bin\surreal.exe
+    与 Start-Surreal.ps1 让人先把它起起来。包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
     health + 首页 + medium；C 腿由脚本用包内 surreal.exe 在 18010 起一台
