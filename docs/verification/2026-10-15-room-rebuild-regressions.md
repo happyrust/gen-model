@@ -63,4 +63,38 @@ cargo test --offline --lib room_rebuild_regression_ -- --nocapture --test-thread
   - 单测：`cargo test --offline --lib room_rebuild_regression_success_stamp_has_mirror_invalidation_contract -- --nocapture --test-threads=1`，结果为 1 passed。
   - 三条回归一起跑：`3 passed; 0 failed`。至此，本文件中的三条回归已全部完成修复。
   - `handlers.rs` 在编辑器的诊断为 errors 0、warnings 0。
-  - 本次代码修改尚未提交，仍在当前工作区内。
+  - 本次代码修改（本文件的第 1–3 条）随后以 `3cf1e2728` 入库；下面第二轮是同一条的尾巴。
+
+## 后续修复（2026-10-15，第二轮）：盖章路径的第二层镜像
+
+第 3 条当时明确留下一句「未连带调用 `note_room_generation_stamped`，理由是它只影响 ACK 逐出候选、
+后果保守且无测试覆盖」。第二轮把它读完，结论是**后果不总是保守**：
+
+`ScopeState::ack_is_stray_room_evidence`（`src/fast_model/model_memory_store.rs`）拿
+`stamped_room_generations[dbnum]`（库上那一格的进程镜像）判一枚 ACK 还能不能进逐出候选。
+`task_end::commit_task_end_on` 会同步这一格，但两处绕开 `task_end` 的写库点没有：
+`recompute_dbnum_room_edges_now` 盖章（库上盖成**新**代、镜像还留**旧**代）与
+`clear_room_rebuild_edges_on`（整表写 `NONE`、镜像没清）。两种情况下旧代的 ACK 都被当成
+「库上已经是这一代」放行逐出——而它是「那几根的边是另一代算的」的唯一凭据，
+`room_recompute::request_for_task` 的空段定向准入与 `query_service::room_calculation_status`
+的一票否决都点它（ADR-073 F3 / d-149 补丁）。
+
+- 修复：`handlers.rs` 两处各追加一行镜像 —— 盖章成功后
+  `note_room_generation_stamped(dbnum, Some(rooms.resident_generation()))`（与写库同一个 `rooms`，代号同源）；
+  清边成功那一支追加 `clear_stamped_room_generations()`；`ModelMemoryStore` 新增该方法（整表清 = 库上整表 `NONE`）。
+  共 +144 行，全部为新增，未改任何既有语义。
+- 红：`cargo test --offline --lib room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror -- --nocapture --test-threads=1`
+  → 修复前 exit `101`、`0 passed; 1 failed`，panic 在 `src\web_service\room_rebuild_regression_tests.rs:138`
+  （断言失败，不是编译失败）。
+- 绿：`cargo test --offline --lib room_rebuild_regression_ -- --nocapture --test-threads=1` → `4 passed; 0 failed`；
+  `cargo test --offline --lib the_eviction_mirror_follows_the_durable_room_generation -- --nocapture --test-threads=1` → `1 passed`；
+  全量 `cargo test --offline --lib` → `2511 passed; 0 failed; 132 ignored`。
+- 编辑器诊断：`handlers.rs`、`model_memory_store.rs`、`room_rebuild_regression_tests.rs` 均 errors 0 / warnings 0。
+- 证据等级照实记：`web_service` 新增那条仍是**源码契约守卫**（证明两处镜像调用都排在写库/清库之后、
+  且盖章那处在成功分支一侧——写库与镜像之间不出现 `Err(` 文本；证不了运行时真的走到那一支）；
+  `model_memory_store` 新增那条是**行为测试**，走真实 `enforce_root_limit` 逐出面钉两个方向
+  （镜像整表清时 stray 代号的 ACK 不进候选；镜像同步到该代号后它不再是证据、按提交序出）。
+- 证据原文（按约定不入库）：`verification/room-eviction-mirror-20261015/verification.md`，
+  含三个文件的 SHA256 与三条复现命令。
+- 范围外：`changelog.md` 本轮未改——它当前带着另一条线（ADR-085 / 更新范围声明）的未提交改动，
+  混入会把两件事装进一笔。

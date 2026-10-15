@@ -746,6 +746,11 @@ async fn run_rooms_rebuild() {
             // 水位已整表改写：进程内镜像整表作废，免得 `DbnumState::read`
             // 还拿旧代号冒充已对齐（整表清理正是 `invalidate_mirror` 的用途）。
             crate::data_interface::dbnum_state::DbnumState::invalidate_mirror();
+            // 逐出候选看的另一层镜像也整表清：库上那一格现在是 `NONE`，留着旧代号就等于替库里说
+            // 「已经是那一代了」——那一代的 ACK 会被放行逐出，而它是「那几根的边是另一代算的」的
+            // 唯一凭据（ADR-073 F3，2026-10-15）。
+            crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                .clear_stamped_room_generations();
         }
         Err(error) => {
             eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑）: {error:#}");
@@ -883,6 +888,12 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
                     // 盖章直查 SUL_DB、绕过了 DbnumState 的写者：库上确认成功后
                     // 作废这一格的进程镜像，免得后续读还拿盖章前的旧代号判欠。
                     crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+                    // 同一格的第二个镜像：按根数限额逐出的候选判据（`stamped_room_generations`，
+                    // `ack_is_stray_room_evidence`）。不同步 = 镜像里还留着**上一**代，那一代的 ACK 被当成
+                    // 「库上已经是这一代」放行逐出，而它是「那几根的边是另一代算的」的唯一证据（ADR-073 F3，
+                    // 2026-10-15）。
+                    crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                        .note_room_generation_stamped(dbnum, Some(rooms.resident_generation()));
                     true
                 }
                 Err(error) => {

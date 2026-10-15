@@ -971,6 +971,20 @@ impl ModelMemoryStore {
         }
     }
 
+    /// 房间重建的清边那一笔把**整表** `dbnum_watermark.model_room_generation` 写成 `NONE`
+    /// （`web_service::handlers::clear_room_rebuild_edges_on`）**成功之后**调（2026-10-15）。
+    ///
+    /// 库上那一格整表清掉，这一层镜像若还留着旧代号，[`ScopeState::ack_is_stray_room_evidence`] 会把
+    /// 那个旧代号的 ACK 当成「库上已经是这一代」放行逐出——而它正是「那几根的边是另一代算的」的唯一证据
+    /// （`room_recompute::request_for_task` 的空段定向准入与 `query_service::room_calculation_status` 的
+    /// 一票否决都靠它，逐出了就会把另一代算的边当成这一代的）。整表清 = 镜像整表清；逐库清（`Cleared`）
+    /// 走 [`Self::note_room_generation_stamped`] 传 `None`。不改任何 ACK、不动 `stray_generations_written`。
+    pub(crate) fn clear_stamped_room_generations(&self) {
+        let mut scopes = self.write();
+        let state = scopes.entry(ScopeKey::Current).or_default();
+        state.stamped_room_generations.clear();
+    }
+
     /// 本进程这一世写进 `dbnum` 那一格的代号（字典序）。重启 / 本库 ACK 整体作废之后为空。
     pub(crate) fn stray_generations_written(&self, dbnum: u32) -> Vec<String> {
         self.read()
@@ -3685,6 +3699,79 @@ mod tests {
                 .is_some()
         );
         assert_eq!(store.overlay_evictions_total(), 2);
+    }
+
+    /// 库上那一格的**逐出镜像**要跟着库走（2026-10-15）：重建清边那一笔把整表写成 `NONE`
+    /// （[`ModelMemoryStore::clear_stamped_room_generations`]），整库重算盖章换成新代
+    /// （[`ModelMemoryStore::note_room_generation_stamped`]）。镜像落后的后果在第二相里钉住：
+    /// 它按镜像判「库上是不是这一代」，镜像说「是」，那一代的 ACK 就不再是证据、可被逐出
+    /// ——而它是 `room_recompute::request_for_task` 的空段定向与 `query_service::room_calculation_status`
+    /// 的一票否决点得到那几根的唯一证据（ADR-073 F3）。所以两个写库点都得同步这一格。
+    #[test]
+    fn the_eviction_mirror_follows_the_durable_room_generation() {
+        use crate::fast_model::model_db_adapter::PersistMedium;
+        let store = store();
+        let ack_with_rooms = |receipt: &RootReceipt, generation: &str| {
+            let mut ack = ack_matching(receipt, 7997, PersistMedium::RocksDb);
+            ack.room_membership = true;
+            ack.room_generation = Some(generation.into());
+            ack
+        };
+        // 提交序 = 逐出序：另一代的证据根最旧，两根普通根在后。
+        let evidence = RefNo::new(7997, 1);
+        let plain_a = RefNo::new(7997, 2);
+        let plain_b = RefNo::new(7997, 3);
+        for (root, name, generation) in [
+            (evidence, "evidence", "g2"),
+            (plain_a, "plain-a", "g1"),
+            (plain_b, "plain-b", "g1"),
+        ] {
+            let receipt = commit_root(&store, root, name);
+            assert!(store.record_publication_ack(
+                ProjectionScope::Current,
+                root,
+                ack_with_rooms(&receipt, generation),
+            ));
+        }
+        store.note_stray_generation_written(7997, "g2");
+
+        // 清边那一笔之后：库上那一格整表是 `NONE`，镜像跟着整表清 —— g2 照旧是证据，
+        // 出的是最旧的**普通**根，证据根留在投影里。
+        store.note_room_generation_stamped(7997, Some("g2"));
+        store.clear_stamped_room_generations();
+        let cleared = store.enforce_root_limit(2, false);
+        assert_eq!(
+            (cleared.evicted, cleared.resident_after),
+            (1, 2),
+            "{cleared:?}"
+        );
+        assert!(
+            store.receipt(ProjectionScope::Current, evidence).is_some(),
+            "库上没有那一代时，本进程写过代号的那枚 ACK 仍是 F3 证据，不进候选"
+        );
+        assert!(
+            store.receipt(ProjectionScope::Current, plain_a).is_none(),
+            "出的是最旧的普通根"
+        );
+
+        // 镜像落后一相：库上盖到 g2，而镜像还停在别处——这一代的 ACK 就被当成库上那一代放行逐出。
+        assert!(
+            store.receipt(ProjectionScope::Current, evidence).is_some()
+                && store.receipt(ProjectionScope::Current, plain_b).is_some(),
+            "控制：这一相开始前两根都在"
+        );
+        store.note_room_generation_stamped(7997, Some("g2"));
+        let stamped = store.enforce_root_limit(1, false);
+        assert_eq!(
+            (stamped.evicted, stamped.resident_after),
+            (1, 1),
+            "{stamped:?}"
+        );
+        assert!(
+            store.receipt(ProjectionScope::Current, evidence).is_none(),
+            "盖到同一代之后这一代不再是证据，按提交序出"
+        );
+        assert!(store.receipt(ProjectionScope::Current, plain_b).is_some());
     }
 
     /// d-149 补丁 D7（2026-09-22）：房间开关开着时，ACK 没带房间代号的根（发布时没算房间）是
