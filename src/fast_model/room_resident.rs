@@ -576,6 +576,39 @@ impl ResidentRoomModel {
         self
     }
 
+    /// 房间算在哪个文件库号名下：先查 `room_files`，纯测未填时退回 refno 头一段。
+    pub(crate) fn file_of_room(&self, room: RefnoEnum) -> u32 {
+        self.room_files
+            .get(&room)
+            .copied()
+            .unwrap_or_else(|| room.refno().get_0())
+    }
+
+    /// 当前模型中所有定义了在册房间的 `dbnum` 集合。
+    pub(crate) fn room_dbnums(&self) -> BTreeSet<u32> {
+        self.map
+            .rooms
+            .iter()
+            .map(|room| self.file_of_room(room.room))
+            .collect()
+    }
+
+    /// 提取指定 `dbnum` 名下的在册 `RoomPanelMap` 子集（供单库增量对比）。
+    pub(crate) fn map_for_dbnum(&self, dbnum: u32) -> RoomPanelMap {
+        let rooms: Vec<RoomPanels> = self
+            .map
+            .rooms
+            .iter()
+            .filter(|room| self.file_of_room(room.room) == dbnum)
+            .cloned()
+            .collect();
+        let all_panels = rooms
+            .iter()
+            .flat_map(|room| room.panels.iter().copied())
+            .collect();
+        RoomPanelMap { rooms, all_panels }
+    }
+
     /// 这块在册面板算在哪个**文件**库号名下：先看它归属的房间来自哪个文件，没有文件归属
     /// （纯测模型）才退回 refno 的头一段。启动对比的回执按它给「无几何」分组
     /// （`room_startup::split_recalc_by_geometry`），与 [`ResidentStats::missing_panels_by_dbnum`] 同口径。
@@ -1551,6 +1584,118 @@ pub(crate) async fn read_resident_reference_on(
     Ok(rows.into_iter().flatten().next())
 }
 
+mod serde_dbnum_sesnos {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S>(map: &BTreeMap<u32, i32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let string_map: BTreeMap<String, i32> =
+            map.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<u32, i32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let string_map = BTreeMap::<String, i32>::deserialize(deserializer)?;
+        let mut out = BTreeMap::new();
+        for (k, v) in string_map {
+            if let Ok(dbnum) = k.parse::<u32>() {
+                out.insert(dbnum, v);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// 房间启动初始化与增量检测的时间戳记录，落在 `room_build:main.room_update_record` 与 `room_updated_at`。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RoomUpdateRecord {
+    /// 最近一次所有含房 dbnum 完成房间初始化或增量检测的时间戳（RFC3339）。
+    pub room_updated_at: String,
+    /// 上次完成检测时各含房 dbnum 对应的 applied_sesno 基线（dbnum -> sesno）。
+    #[serde(default, with = "serde_dbnum_sesnos")]
+    pub room_dbnum_sesnos: BTreeMap<u32, i32>,
+    /// 上次完成时的常驻模型代号（`ResidentRoomModel::input_version`）。
+    #[serde(default)]
+    pub generation: String,
+}
+
+fn room_update_record_slot() -> &'static RwLock<Option<RoomUpdateRecord>> {
+    static RECORD: OnceLock<RwLock<Option<RoomUpdateRecord>>> = OnceLock::new();
+    RECORD.get_or_init(|| RwLock::new(None))
+}
+
+pub(crate) fn last_room_update_record() -> Option<RoomUpdateRecord> {
+    room_update_record_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+pub(crate) fn record_room_update_record(record: Option<RoomUpdateRecord>) {
+    *room_update_record_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = record;
+}
+
+pub(crate) fn render_room_update_record_write(record: &RoomUpdateRecord) -> String {
+    let json = serde_json::to_string(record).expect("room update record serializes");
+    let ts = serde_json::to_string(&record.room_updated_at).expect("room_updated_at serializes");
+    format!("UPSERT room_build:main SET room_update_record = {json}, room_updated_at = {ts};")
+}
+
+pub(crate) const fn render_room_update_record_clear() -> &'static str {
+    "UPSERT room_build:main SET room_update_record = NONE, room_updated_at = NONE;"
+}
+
+pub(crate) async fn write_room_update_record_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    record: &RoomUpdateRecord,
+) -> anyhow::Result<()> {
+    db.query(render_room_update_record_write(record))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+pub(crate) async fn clear_room_update_record_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<()> {
+    db.query(render_room_update_record_clear())
+        .await?
+        .check()?;
+    Ok(())
+}
+
+pub(crate) async fn read_room_update_record_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<Option<RoomUpdateRecord>> {
+    let mut response = db
+        .query("SELECT VALUE room_update_record FROM room_build:main; SELECT VALUE room_updated_at FROM room_build:main;")
+        .await?
+        .check()?;
+    let records: Vec<Option<RoomUpdateRecord>> = response.take(0)?;
+    if let Some(record) = records.into_iter().flatten().next() {
+        if !record.room_updated_at.is_empty() {
+            return Ok(Some(record));
+        }
+    }
+    let timestamps: Vec<Option<String>> = response.take(1)?;
+    if let Some(ts) = timestamps.into_iter().flatten().find(|s| !s.is_empty()) {
+        return Ok(Some(RoomUpdateRecord {
+            room_updated_at: ts,
+            room_dbnum_sesnos: BTreeMap::new(),
+            generation: String::new(),
+        }));
+    }
+    Ok(None)
+}
+
 
 /// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比；臂表 d-42，两形态同一张）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2093,10 +2238,12 @@ impl StartupInitOutcome {
     /// 清单去向表里的每个文件；读透 = 冻结令牌的每个文件。启动只探一次（§2.1），进程内
     /// 之后的换代不再重新枚举 MDB。
     pub(crate) fn expected_dbnums(&self) -> Vec<u32> {
-        if self.steps.is_empty() {
+        if !self.steps.is_empty() {
+            self.steps.iter().map(|step| step.dbnum).collect()
+        } else if !self.frozen.is_empty() {
             self.frozen.iter().map(|(dbnum, _, _)| *dbnum).collect()
         } else {
-            self.steps.iter().map(|step| step.dbnum).collect()
+            self.model.expected_dbnums.clone()
         }
     }
 }
@@ -3171,6 +3318,15 @@ pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::V
         target.insert(
             "progress".to_string(),
             serde_json::to_value(progress()).unwrap_or(serde_json::Value::Null),
+        );
+        let room_record = last_room_update_record();
+        target.insert(
+            "room_updated_at".to_string(),
+            serde_json::json!(room_record.as_ref().map(|r| r.room_updated_at.as_str())),
+        );
+        target.insert(
+            "room_update_record".to_string(),
+            serde_json::to_value(room_record).unwrap_or(serde_json::Value::Null),
         );
         if let Some(stat) = active {
             target.insert("rooms".to_string(), serde_json::json!(stat.rooms));
@@ -5875,5 +6031,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn resident_room_model_exposes_room_dbnums_and_per_dbnum_map() {
+        let r1 = RefnoEnum::from(RefU64::from_two_nums(7001, 10));
+        let r2 = RefnoEnum::from(RefU64::from_two_nums(7002, 20));
+        let p1 = RefnoEnum::from(RefU64::from_two_nums(7001, 11));
+        let p2 = RefnoEnum::from(RefU64::from_two_nums(7002, 21));
+        let model = model_of(
+            vec![
+                RoomGroup {
+                    room: r1,
+                    name: "/1RX-RM03-R301".into(),
+                    panels: vec![p1],
+                },
+                RoomGroup {
+                    room: r2,
+                    name: "/1RX-RM03-R302".into(),
+                    panels: vec![p2],
+                },
+            ],
+            vec![],
+            Arc::default(),
+        )
+        .with_room_files(BTreeMap::from([(r1, 7001), (r2, 7002)]));
+
+        assert_eq!(model.room_dbnums(), BTreeSet::from([7001, 7002]));
+        let map_7001 = model.map_for_dbnum(7001);
+        assert_eq!(map_7001.rooms.len(), 1);
+        assert_eq!(map_7001.rooms[0].room, r1);
+        assert_eq!(map_7001.all_panels, std::collections::HashSet::from([p1]));
     }
 }

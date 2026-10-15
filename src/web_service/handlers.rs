@@ -718,10 +718,10 @@ pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoRe
 // `library_alignment_owed` 只比代号就会判「不欠」，逐库重算失败 / 被跳过的库
 // 便永不补（#52）。`NONE` + 空 stray 与 `task_end` 的 `Cleared` 同一种写法；
 // 没有水位行时 UPDATE 不建行，算齐的库随后在 `recompute_dbnum_room_edges_now` 盖回。
-async fn clear_room_rebuild_edges_on(
+pub(crate) async fn clear_room_rebuild_edges_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
 ) -> Result<surrealdb::Response, surrealdb::Error> {
-    db.query("DELETE room_relate; DELETE room_panel_relate; UPDATE dbnum_watermark SET model_room_generation = NONE, model_room_stray_generations = [];")
+    db.query("DELETE room_relate; DELETE room_panel_relate; UPDATE dbnum_watermark SET model_room_generation = NONE, model_room_stray_generations = []; UPSERT room_build:main SET room_update_record = NONE, room_updated_at = NONE;")
         .await
         .and_then(|response| response.check())
 }
@@ -740,6 +740,7 @@ async fn run_rooms_rebuild() {
     };
     // 仍在 `Loading`：清持久面。两张边表全库归零（「所有删除」的字面），停放链里
     // 旧代的段对不上新代准入链一并清掉。
+    resident::record_room_update_record(None);
     match clear_room_rebuild_edges_on(&aios_core::SUL_DB).await {
         Ok(_) => {
             // 水位已整表改写：进程内镜像整表作废，免得 `DbnumState::read`
@@ -771,13 +772,14 @@ async fn run_rooms_rebuild() {
         recompute_dbnum_room_edges_now(*dbnum).await;
         resident::note_recompute_dbnum_done();
     }
+    crate::data_interface::room_recompute::refresh_room_update_record_with_model(&outcome.model).await;
     println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
 }
 
 /// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体
 /// `recompute_dbnum_room_edges`）；算齐整库才盖 `model_room_generation`，
 /// 算不齐 / 失败只记日志——欠账留着，下一个任务按 D14 兜底再算。
-async fn recompute_dbnum_room_edges_now(dbnum: u32) {
+pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) {
     use crate::fast_model::model_db_adapter::{
         PersistTarget, RootScope, recompute_dbnum_room_edges,
     };
@@ -867,11 +869,30 @@ async fn recompute_dbnum_room_edges_now(dbnum: u32) {
             );
         }
         Ok(report) => {
-            eprintln!(
-                "dbnum={dbnum} 整库房间重算覆盖面不齐（{}/{} 根）：对齐代号不盖，欠账留给下个任务",
-                report.covered_roots.len(),
-                roots.len()
-            );
+            if !report.failed.is_empty() {
+                let sample = report
+                    .failed
+                    .iter()
+                    .take(3)
+                    .map(|(root, err)| format!("{root}: {err}"))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                eprintln!(
+                    "dbnum={dbnum} 整库房间重算有 {} 根失败（覆盖 {}/{} 根，重算 {}、成员边 {}；例如 {}）：对齐代号不盖，欠账留给下个任务",
+                    report.failed.len(),
+                    report.covered_roots.len(),
+                    roots.len(),
+                    report.recomputed,
+                    report.room_edges,
+                    sample
+                );
+            } else {
+                eprintln!(
+                    "dbnum={dbnum} 整库房间重算覆盖面不齐（{}/{} 根）：对齐代号不盖，欠账留给下个任务",
+                    report.covered_roots.len(),
+                    roots.len()
+                );
+            }
         }
         Err(error) => {
             eprintln!("dbnum={dbnum} 整库房间重算失败（欠账仍在）: {error:#}");

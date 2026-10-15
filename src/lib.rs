@@ -506,6 +506,9 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
         ),
     }
     room_resident::record_startup_init(result.as_ref()).await;
+    if let Ok(outcome) = &result {
+        crate::data_interface::room_recompute::check_and_init_rooms_at_startup(outcome).await;
+    }
 }
 
 /// Shared room-capability preparation for ingest and read-through. Callers have

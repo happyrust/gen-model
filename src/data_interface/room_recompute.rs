@@ -648,6 +648,606 @@ pub(crate) fn request_for_task(
     })
 }
 
+/// 启动房间检查的四步计划结果：
+/// 1. 未发现房间更新时间记录（`room_updated_at` 缺失或空）→ `NeedsFullInit`（执行全量房间初始化）；
+/// 2. 存在房间更新时间记录，且所有有房间的 `dbnum` 时间戳均未超过该记录 → `UpToDate`；
+/// 3. 存在房间更新时间记录，且部分有房间的 `dbnum` 时间戳超过该记录 → `NeedsIncrementalCheck`，
+///    列出需要检查窗口 `(from_sesno, to_sesno]` 是否包含房间数据的 `(dbnum, from_sesno, to_sesno)`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartupRoomCheckPlan {
+    NeedsFullInit,
+    UpToDate {
+        room_updated_at: String,
+    },
+    NeedsIncrementalCheck {
+        room_updated_at: String,
+        outdated_dbnums: Vec<(u32, i32, i32)>,
+    },
+}
+
+/// 判断单个有房间的 `dbnum` 的水位时间戳是否超过房间更新时间记录（`RoomUpdateRecord`）。
+///
+/// 优先使用 `applied_sesno_time`，缺省回退 `model_sesno_time`，按 RFC3339 时刻比较：
+/// - 若 `dbnum` 的时刻严格晚于 `record.room_updated_at`，返回 `true`；
+/// - 若时刻不晚于 `record.room_updated_at`，但 `record.room_dbnum_sesnos` 记录的会话号小于当前 `applied_sesno`
+///   （例如同一秒内多次保存），同样返回 `true`；
+/// - 若 `dbnum` 无有效时间戳，则按 `record.room_dbnum_sesnos` 中的会话号兜底比对。
+pub(crate) fn is_dbnum_timestamp_newer_than_room(
+    dbnum: u32,
+    applied_sesno: i32,
+    applied_sesno_time: Option<&str>,
+    model_sesno_time: Option<&str>,
+    record: &crate::fast_model::room_resident::RoomUpdateRecord,
+) -> bool {
+    if record.room_updated_at.trim().is_empty() {
+        return true;
+    }
+    let recorded_sesno = record.room_dbnum_sesnos.get(&dbnum).copied();
+    let candidate_time = applied_sesno_time
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| model_sesno_time.filter(|s| !s.trim().is_empty()));
+    if let (Ok(room_dt), Some(Ok(dbnum_dt))) = (
+        chrono::DateTime::parse_from_rfc3339(&record.room_updated_at),
+        candidate_time.map(chrono::DateTime::parse_from_rfc3339),
+    ) {
+        if dbnum_dt > room_dt {
+            return true;
+        }
+        if let Some(prev_sesno) = recorded_sesno {
+            return applied_sesno > prev_sesno;
+        }
+        return false;
+    }
+    match recorded_sesno {
+        Some(prev_sesno) => applied_sesno > prev_sesno,
+        None => applied_sesno > 0,
+    }
+}
+
+/// 根据当前含房 `dbnum` 集合、各库水位状态与持久化的 `RoomUpdateRecord` 生成启动房间检查计划。
+pub(crate) fn plan_startup_room_check(
+    room_dbnums: &BTreeSet<u32>,
+    states: &[crate::data_interface::dbnum_state::DbnumState],
+    existing_record: Option<&crate::fast_model::room_resident::RoomUpdateRecord>,
+) -> StartupRoomCheckPlan {
+    let Some(record) = existing_record.filter(|r| !r.room_updated_at.trim().is_empty()) else {
+        return StartupRoomCheckPlan::NeedsFullInit;
+    };
+    let state_by_dbnum: std::collections::BTreeMap<u32, &crate::data_interface::dbnum_state::DbnumState> =
+        states.iter().map(|s| (s.dbnum, s)).collect();
+    let mut outdated_dbnums = Vec::new();
+    for &dbnum in room_dbnums {
+        let Some(state) = state_by_dbnum.get(&dbnum).copied() else {
+            continue;
+        };
+        if is_dbnum_timestamp_newer_than_room(
+            dbnum,
+            state.applied_sesno,
+            state.applied_sesno_time.as_deref(),
+            state.model_sesno_time.as_deref(),
+            record,
+        ) {
+            let from_sesno = record
+                .room_dbnum_sesnos
+                .get(&dbnum)
+                .copied()
+                .unwrap_or(0)
+                .max(0);
+            let to_sesno = state.applied_sesno.max(0);
+            outdated_dbnums.push((dbnum, from_sesno, to_sesno));
+        }
+    }
+    if outdated_dbnums.is_empty() {
+        StartupRoomCheckPlan::UpToDate {
+            room_updated_at: record.room_updated_at.clone(),
+        }
+    } else {
+        StartupRoomCheckPlan::NeedsIncrementalCheck {
+            room_updated_at: record.room_updated_at.clone(),
+            outdated_dbnums,
+        }
+    }
+}
+
+/// 构造最新的 `RoomUpdateRecord`：汇总所有含房 `dbnum` 的 `applied_sesno`，并取当前挂钟与各含房 `dbnum`
+/// 最新保存时刻的最大值作为 `room_updated_at`，确保更新后 `room_updated_at >= max(applied_sesno_time)`。
+pub(crate) fn build_latest_room_update_record(
+    room_dbnums: &BTreeSet<u32>,
+    states: &[crate::data_interface::dbnum_state::DbnumState],
+    generation: &str,
+    now_rfc3339: &str,
+) -> crate::fast_model::room_resident::RoomUpdateRecord {
+    let state_by_dbnum: std::collections::BTreeMap<u32, &crate::data_interface::dbnum_state::DbnumState> =
+        states.iter().map(|s| (s.dbnum, s)).collect();
+    let mut room_dbnum_sesnos = std::collections::BTreeMap::new();
+    let mut latest_ts = now_rfc3339.to_string();
+    let mut latest_dt = chrono::DateTime::parse_from_rfc3339(now_rfc3339).ok();
+
+    for &dbnum in room_dbnums {
+        if let Some(state) = state_by_dbnum.get(&dbnum).copied() {
+            room_dbnum_sesnos.insert(dbnum, state.applied_sesno);
+            for candidate in [
+                state.applied_sesno_time.as_deref(),
+                state.model_sesno_time.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(candidate) {
+                    if latest_dt.is_none_or(|cur| dt > cur) {
+                        latest_dt = Some(dt);
+                        latest_ts = candidate.to_string();
+                    }
+                }
+            }
+        } else {
+            room_dbnum_sesnos.insert(dbnum, 0);
+        }
+    }
+
+    crate::fast_model::room_resident::RoomUpdateRecord {
+        room_updated_at: latest_ts,
+        room_dbnum_sesnos,
+        generation: generation.to_string(),
+    }
+}
+
+/// 更新窗口内命中的单个房间定义族元素。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoomWindowHit {
+    pub refno: aios_core::RefnoEnum,
+    pub noun: String,
+}
+
+/// 更新窗口 `(from_sesno, to_sesno]` 的房间数据检测结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoomWindowDetection {
+    pub reason: String,
+    pub hits: Vec<RoomWindowHit>,
+}
+
+/// 查询指定 `dbnum` 在更新窗口 `(from_sesno, to_sesno]` 的 `pe` 表中是否包含房间定义族元素
+/// （`PANE` / `FRMW` / `SBFR` / `CWALL` / `CFLOOR`），并返回全部命中元素及摘要。
+/// 若 `from_sesno >= to_sesno` 且 `to_sesno > 0`（例如仅时间戳前移而旧记录未存 `room_dbnum_sesnos`），
+/// 则检查 `sesno == to_sesno` 那一版的数据。
+pub(crate) async fn detect_room_window_hits_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+    from_sesno: i32,
+    to_sesno: i32,
+) -> anyhow::Result<Option<RoomWindowDetection>> {
+    #[derive(serde::Deserialize)]
+    struct PeRoomHit {
+        id: String,
+        noun: String,
+    }
+
+    let cond = if from_sesno < to_sesno {
+        format!("<int>sesno > {from_sesno} AND <int>sesno <= {to_sesno}")
+    } else if to_sesno > 0 {
+        format!("<int>sesno = {to_sesno}")
+    } else {
+        "<int>sesno >= 0".to_string()
+    };
+    let sql = format!(
+        "SELECT record::id(id) AS id, noun FROM pe \
+         WHERE dbnum = {dbnum} AND ({cond}) \
+         AND noun IN ['PANE', 'FRMW', 'SBFR', 'CWALL', 'CFLOOR'] \
+         ORDER BY id;"
+    );
+    let mut response = db.query(sql).await?.check()?;
+    let raw_hits: Vec<PeRoomHit> = response.take(0)?;
+    if raw_hits.is_empty() {
+        return Ok(None);
+    }
+    let sample = raw_hits
+        .iter()
+        .take(5)
+        .map(|h| format!("{} {}", h.noun.to_ascii_uppercase(), h.id))
+        .collect::<Vec<_>>()
+        .join("、");
+    let hits = raw_hits
+        .into_iter()
+        .map(|h| RoomWindowHit {
+            refno: aios_core::RefnoEnum::from(h.id.as_str()),
+            noun: h.noun.to_ascii_uppercase(),
+        })
+        .collect();
+    Ok(Some(RoomWindowDetection {
+        reason: format!(
+            "dbnum={dbnum} 窗口 ({from_sesno}, {to_sesno}] 命中房间定义族元素：{sample}"
+        ),
+        hits,
+    }))
+}
+
+/// 查询指定 `dbnum` 在更新窗口 `(from_sesno, to_sesno]` 的 `pe` 表中是否包含房间定义族元素
+/// （`PANE` / `FRMW` / `SBFR` / `CWALL` / `CFLOOR`）。
+pub(crate) async fn detect_room_data_in_pe_window_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+    from_sesno: i32,
+    to_sesno: i32,
+) -> anyhow::Result<Option<String>> {
+    Ok(detect_room_window_hits_on(db, dbnum, from_sesno, to_sesno)
+        .await?
+        .map(|det| det.reason))
+}
+
+/// 根据更新窗口内命中的房间定义族元素与当前常驻房间模型构造针对性 [`PanelDelta`]：
+/// - 命中的 `PANE` 直接作为受影响面板；
+/// - 命中的房间节点（`FRMW` / `SBFR`）展开为其在常驻模型（在册 `map` 与原始 `groups`）名下的所有面板；
+/// - 若仅命中中间层容器（如 `CWALL` / `CFLOOR`）且未直接匹配到顶层房间号，则退回取该 `dbnum` 在常驻模型名下的全部在册面板；
+/// - 当前在册的面板归入 `recalc`（附带当前世界盒供 `room_reverse` 反查），不在册的面板归入 `removed`（清边并重算原成员）。
+pub(crate) fn build_panel_delta_from_window_hits(
+    model: &crate::fast_model::room_resident::ResidentRoomModel,
+    dbnum: u32,
+    hits: &[RoomWindowHit],
+) -> crate::fast_model::room_resident::PanelDelta {
+    use crate::fast_model::room_resident::{PanelDelta, PanelMove};
+
+    let mut touched_panels = BTreeSet::new();
+    for hit in hits {
+        if hit.noun == "PANE" {
+            touched_panels.insert(hit.refno);
+        } else {
+            for room in &model.map.rooms {
+                if room.room == hit.refno {
+                    touched_panels.extend(room.panels.iter().copied());
+                }
+            }
+            for group in &model.groups {
+                if group.room == hit.refno {
+                    touched_panels.extend(group.panels.iter().copied());
+                }
+            }
+        }
+    }
+    if touched_panels.is_empty() && !hits.is_empty() {
+        touched_panels.extend(model.map_for_dbnum(dbnum).all_panels);
+    }
+
+    let mut delta = PanelDelta::default();
+    for panel in touched_panels {
+        if model.map.all_panels.contains(&panel) {
+            delta.recalc.push(PanelMove {
+                panel,
+                old: None,
+                new: model.current_bounds(panel),
+            });
+        } else {
+            delta.removed.push(panel);
+        }
+    }
+    delta.recalc.sort_by_key(|entry| entry.panel);
+    delta.recalc.dedup_by_key(|entry| entry.panel);
+    delta.removed.sort();
+    delta.removed.dedup();
+    delta
+}
+
+/// 按给定常驻模型汇总所有含房 `dbnum` 的最新时间戳并写入 `room_build:main`。
+pub(crate) async fn refresh_room_update_record_with_model(
+    model: &crate::fast_model::room_resident::ResidentRoomModel,
+) {
+    let states = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
+        Ok(states) => states,
+        Err(error) => {
+            eprintln!("[房间启动检查] 读取 dbnum_watermark 列表失败，无法刷新房间更新时间记录: {error:#}");
+            return;
+        }
+    };
+    let room_dbnums = model.room_dbnums();
+    let now = chrono::Local::now().to_rfc3339();
+    let record = build_latest_room_update_record(&room_dbnums, &states, &model.input_version(), &now);
+    match crate::fast_model::room_resident::write_room_update_record_on(&aios_core::SUL_DB, &record)
+        .await
+    {
+        Ok(()) => {
+            crate::fast_model::room_resident::record_room_update_record(Some(record));
+        }
+        Err(error) => {
+            eprintln!("[房间启动检查] 写入 room_build:main.room_update_record 失败: {error:#}");
+        }
+    }
+}
+
+/// 校验 `affected_roots` 中的 `unresolved` 元素是否全部可忽略（已不在 `DbSet@T` 上，或祖先链完整但不在生成范围内）。
+async fn unresolved_elements_are_ignorable(
+    dbnum: u32,
+    target_sesno: u32,
+    unresolved: &[aios_core::RefnoEnum],
+    unresolved_ancestors: &std::collections::BTreeMap<
+        aios_core::RefnoEnum,
+        Vec<aios_core::RefnoEnum>,
+    >,
+) -> bool {
+    if unresolved.is_empty() {
+        return true;
+    }
+    let candidates: Vec<RefNo> = unresolved
+        .iter()
+        .map(|r| crate::data_interface::generation_root::refno_to_e3d(*r))
+        .collect();
+    let Ok(gone) =
+        crate::data_interface::window_root_plan::missing_at_target(dbnum, target_sesno, candidates)
+            .await
+    else {
+        return false;
+    };
+    let gone_set: std::collections::HashSet<aios_core::RefnoEnum> = gone
+        .into_iter()
+        .map(crate::data_interface::generation_root::refno_from_e3d)
+        .collect();
+    let stuck: Vec<aios_core::RefnoEnum> = unresolved
+        .iter()
+        .copied()
+        .filter(|r| !gone_set.contains(r))
+        .collect();
+    if stuck.is_empty() {
+        return true;
+    }
+    let mut seen = BTreeSet::new();
+    let ancestor_refnos: Vec<RefNo> = stuck
+        .iter()
+        .flat_map(|r| unresolved_ancestors.get(r).into_iter().flatten())
+        .filter(|level| seen.insert(**level))
+        .map(|level| crate::data_interface::generation_root::refno_to_e3d(*level))
+        .collect();
+    let Ok(gone_ancestors) = crate::data_interface::window_root_plan::missing_at_target(
+        dbnum,
+        target_sesno,
+        ancestor_refnos,
+    )
+    .await
+    else {
+        return false;
+    };
+    let gone_anc_set: std::collections::HashSet<aios_core::RefnoEnum> = gone_ancestors
+        .into_iter()
+        .map(crate::data_interface::generation_root::refno_from_e3d)
+        .collect();
+    stuck.iter().all(|r| {
+        unresolved_ancestors
+            .get(r)
+            .is_some_and(|chain| !chain.is_empty() && chain.iter().all(|lvl| !gone_anc_set.contains(lvl)))
+    })
+}
+
+/// 对检测到房间数据变更的 `dbnum` 执行针对性房间增量更新：
+/// - 若存在 `PanelDelta`（常驻模型换代差分或窗口命中构造的面板增量），优先通过 `room_reverse::affected_roots`
+///   做面板包围盒 + 存量成员反向定位，仅对受影响根执行 `RootScope::Targeted` 边更新；
+/// - 若空间树未就绪或无细分 `PanelDelta`，则对该 `dbnum` 执行 `recompute_dbnum_room_edges_now` 兜底。
+async fn apply_targeted_room_update_for_dbnum(
+    dbnum: u32,
+    outcome: &crate::fast_model::room_resident::StartupInitOutcome,
+    window_delta: Option<&crate::fast_model::room_resident::PanelDelta>,
+) {
+    use crate::data_interface::room_reverse::ReverseLookup;
+    use crate::fast_model::model_db_adapter::{
+        PersistTarget, RootScope, frozen_room_calculator, recompute_dbnum_room_edges,
+        render_panel_delta_statements, render_recalc_panel_topology_statements,
+    };
+
+    let effective_delta = outcome
+        .panels
+        .as_ref()
+        .filter(|d| !d.is_empty())
+        .or_else(|| window_delta.filter(|d| !d.is_empty()));
+
+    if let Some(delta) = effective_delta {
+        if let Ok(Some(rooms)) = frozen_room_calculator() {
+            let state = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+                .await
+                .ok()
+                .flatten();
+            let target_sesno = state
+                .map(|s| s.file_latest_sesno.max(s.applied_sesno))
+                .unwrap_or_default()
+                .max(0) as u32;
+            if let Ok(roots) =
+                crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, target_sesno)
+                    .await
+            {
+                let library_roots: Vec<RefNo> = roots
+                    .iter()
+                    .map(|r| crate::data_interface::generation_root::refno_to_e3d(r.root))
+                    .collect();
+                let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+                let mut panel_statements = render_panel_delta_statements(delta);
+                panel_statements.push_str(&render_recalc_panel_topology_statements(
+                    &rooms,
+                    delta.recalc.iter().map(|m| m.panel),
+                ));
+                if let Ok(ReverseLookup::Resolved(affected)) =
+                    crate::data_interface::room_reverse::affected_roots(
+                        &aios_core::SUL_DB,
+                        store,
+                        dbnum,
+                        delta,
+                        &library_roots,
+                    )
+                    .await
+                {
+                    if unresolved_elements_are_ignorable(
+                        dbnum,
+                        target_sesno,
+                        &affected.unresolved,
+                        &affected.unresolved_ancestors,
+                    )
+                    .await
+                    {
+                        match recompute_dbnum_room_edges(
+                            PersistTarget::process(),
+                            store,
+                            dbnum,
+                            &rooms,
+                            None,
+                            RootScope::Targeted {
+                                roots: &affected.roots,
+                                panel_statements: &panel_statements,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(report) if report.failed.is_empty() => {
+                                println!(
+                                    "[房间启动检查] dbnum={dbnum} 针对性房间增量更新完成（{}）：命中根 {}、重算 {}、成员边 {}，耗时 {}ms",
+                                    delta.summary(),
+                                    affected.roots.len(),
+                                    report.recomputed,
+                                    report.room_edges,
+                                    report.elapsed_ms
+                                );
+                                return;
+                            }
+                            Ok(report) => {
+                                eprintln!(
+                                    "[房间启动检查] dbnum={dbnum} 针对性房间增量部分根失败（{} 根），回退单库重算",
+                                    report.failed.len()
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[房间启动检查] dbnum={dbnum} 针对性房间增量写库失败（{error:#}），回退单库重算"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    crate::web_service::handlers::recompute_dbnum_room_edges_now(dbnum).await;
+}
+
+/// 启动时的房间初始化与基于时间戳的增量检测入口（在常驻房间模型就绪后调用）：
+/// 1. 先检查房间是否初始化（`room_build:main` 是否存在 `room_update_record` / `room_updated_at`）：
+///    若未初始化，则对各库执行房间初始化并记录最新房间时间戳；
+/// 2. 若已存在房间更新时间记录，则找出所有有房间的 `dbnum`（`ResidentRoomModel::room_dbnums` 并上上次记录的含房库），
+///    用各含房 `dbnum` 的水位时间戳与房间更新时间记录做对比；
+/// 3. 若某个含房 `dbnum` 的时间戳超过房间更新时间记录，则检查该 `dbnum` 更新窗口内的数据是否包含
+///    房间相关数据（`PANE` / `FRMW` / `SBFR` / `CWALL` / `CFLOOR`），若有则按命中面板执行针对性房间增量更新；
+/// 4. 所有含房 `dbnum` 检测（及按需增量更新）完成后，推进并持久化最新房间更新时间记录。
+pub(crate) async fn check_and_init_rooms_at_startup(
+    outcome: &crate::fast_model::room_resident::StartupInitOutcome,
+) {
+    let existing_record =
+        match crate::fast_model::room_resident::read_room_update_record_on(&aios_core::SUL_DB).await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                eprintln!(
+                    "[房间启动检查] 读取 room_build:main.room_update_record 失败: {error:#}"
+                );
+                None
+            }
+        };
+    let states = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
+        Ok(states) => states,
+        Err(error) => {
+            eprintln!("[房间启动检查] 读取 dbnum_watermark 列表失败: {error:#}");
+            return;
+        }
+    };
+    let mut room_dbnums = outcome.model.room_dbnums();
+    if let Some(record) = &existing_record {
+        room_dbnums.extend(record.room_dbnum_sesnos.keys().copied());
+    }
+    match plan_startup_room_check(&room_dbnums, &states, existing_record.as_ref()) {
+        StartupRoomCheckPlan::NeedsFullInit => {
+            let mut target_dbnums: BTreeSet<u32> = outcome
+                .expected_dbnums()
+                .into_iter()
+                .chain(room_dbnums.iter().copied())
+                .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
+                .collect();
+            if target_dbnums.is_empty() {
+                target_dbnums = room_dbnums;
+            }
+            println!(
+                "[房间启动检查] 未发现房间更新时间记录，开始执行首次房间初始化（共 {} 个 dbnum）...",
+                target_dbnums.len()
+            );
+            for dbnum in &target_dbnums {
+                crate::web_service::handlers::recompute_dbnum_room_edges_now(*dbnum).await;
+            }
+            refresh_room_update_record_with_model(&outcome.model).await;
+            println!(
+                "[房间启动检查] 首次房间初始化完成，已记录最新房间更新时间"
+            );
+        }
+        StartupRoomCheckPlan::UpToDate { room_updated_at } => {
+            if let Some(record) = existing_record {
+                crate::fast_model::room_resident::record_room_update_record(Some(record));
+            }
+            println!(
+                "[房间启动检查] 所有含房 dbnum（{} 个）时间戳均未超过房间更新时间 {}，无需增量更新",
+                room_dbnums.len(),
+                room_updated_at
+            );
+        }
+        StartupRoomCheckPlan::NeedsIncrementalCheck {
+            room_updated_at,
+            outdated_dbnums,
+        } => {
+            println!(
+                "[房间启动检查] 发现 {} 个含房 dbnum 时间戳超过房间更新时间 {}，开始检测房间数据变更...",
+                outdated_dbnums.len(),
+                room_updated_at
+            );
+            for (dbnum, from_sesno, to_sesno) in outdated_dbnums {
+                if !crate::data_interface::watch_scope::admits(dbnum) {
+                    println!(
+                        "[房间启动检查] dbnum={dbnum} 时间戳超过房间记录，但不在 watch_dbnums 监听范围内，跳过"
+                    );
+                    continue;
+                }
+                match detect_room_window_hits_on(&aios_core::SUL_DB, dbnum, from_sesno, to_sesno).await {
+                    Ok(Some(detection)) => {
+                        let window_delta = build_panel_delta_from_window_hits(
+                            &outcome.model,
+                            dbnum,
+                            &detection.hits,
+                        );
+                        println!(
+                            "[房间启动检查] {} → 执行针对性房间增量更新（面板增量: {}）",
+                            detection.reason,
+                            window_delta.summary()
+                        );
+                        apply_targeted_room_update_for_dbnum(dbnum, outcome, Some(&window_delta))
+                            .await;
+                    }
+                    Ok(None) => {
+                        println!(
+                            "[房间启动检查] dbnum={dbnum} 时间戳超过房间记录，但窗口 ({from_sesno}, {to_sesno}] 未包含房间定义元素，跳过"
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[房间启动检查] dbnum={dbnum} 检查窗口房间数据失败（{error:#}），保守执行房间增量更新"
+                        );
+                        let fallback_delta = build_panel_delta_from_window_hits(
+                            &outcome.model,
+                            dbnum,
+                            &[],
+                        );
+                        apply_targeted_room_update_for_dbnum(
+                            dbnum,
+                            outcome,
+                            (!fallback_delta.is_empty()).then_some(&fallback_delta),
+                        )
+                        .await;
+                    }
+                }
+            }
+            refresh_room_update_record_with_model(&outcome.model).await;
+            println!("[房间启动检查] 含房 dbnum 增量检测完成，已更新最新房间时间戳");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2065,5 +2665,219 @@ mod tests {
             1,
             "两种来源走同一套渲染: {body}"
         );
+    }
+
+    #[test]
+    fn startup_room_check_plans_full_init_when_room_update_record_is_absent_or_empty() {
+        use crate::data_interface::dbnum_state::DbnumState;
+        use crate::fast_model::room_resident::RoomUpdateRecord;
+
+        let room_dbnums = BTreeSet::from([7001, 7002]);
+        let states = vec![DbnumState {
+            dbnum: 7001,
+            applied_sesno: 10,
+            applied_sesno_time: Some("2026-10-15T10:00:00+08:00".to_string()),
+            initialized: true,
+            ..Default::default()
+        }];
+        assert_eq!(
+            plan_startup_room_check(&room_dbnums, &states, None),
+            StartupRoomCheckPlan::NeedsFullInit
+        );
+        let empty_record = RoomUpdateRecord {
+            room_updated_at: String::new(),
+            room_dbnum_sesnos: Default::default(),
+            generation: "g1".to_string(),
+        };
+        assert_eq!(
+            plan_startup_room_check(&room_dbnums, &states, Some(&empty_record)),
+            StartupRoomCheckPlan::NeedsFullInit
+        );
+    }
+
+    #[test]
+    fn startup_room_check_only_compares_dbnums_that_have_rooms_and_detects_newer_timestamps() {
+        use crate::data_interface::dbnum_state::DbnumState;
+        use crate::fast_model::room_resident::RoomUpdateRecord;
+        use std::collections::BTreeMap;
+
+        // 7001、7002 有房间；7999 无房间（即使 7999 时间戳更新，也不应触发房间增量检查）。
+        let room_dbnums = BTreeSet::from([7001, 7002]);
+        let record = RoomUpdateRecord {
+            room_updated_at: "2026-10-15T12:00:00+08:00".to_string(),
+            room_dbnum_sesnos: BTreeMap::from([(7001, 10), (7002, 20)]),
+            generation: "g1".to_string(),
+        };
+
+        let states_up_to_date = vec![
+            DbnumState {
+                dbnum: 7001,
+                applied_sesno: 10,
+                applied_sesno_time: Some("2026-10-15T11:30:00+08:00".to_string()),
+                initialized: true,
+                ..Default::default()
+            },
+            DbnumState {
+                dbnum: 7002,
+                applied_sesno: 20,
+                applied_sesno_time: Some("2026-10-15T12:00:00+08:00".to_string()),
+                initialized: true,
+                ..Default::default()
+            },
+            DbnumState {
+                dbnum: 7999,
+                applied_sesno: 99,
+                applied_sesno_time: Some("2026-10-15T15:00:00+08:00".to_string()),
+                initialized: true,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            plan_startup_room_check(&room_dbnums, &states_up_to_date, Some(&record)),
+            StartupRoomCheckPlan::UpToDate {
+                room_updated_at: "2026-10-15T12:00:00+08:00".to_string(),
+            }
+        );
+
+        // 7002 的时间戳推进到 13:00（sesno 20 -> 25），应只点名 7002 的窗口 (20, 25]。
+        let mut states_outdated = states_up_to_date.clone();
+        states_outdated[1].applied_sesno = 25;
+        states_outdated[1].applied_sesno_time = Some("2026-10-15T13:00:00+08:00".to_string());
+        assert_eq!(
+            plan_startup_room_check(&room_dbnums, &states_outdated, Some(&record)),
+            StartupRoomCheckPlan::NeedsIncrementalCheck {
+                room_updated_at: "2026-10-15T12:00:00+08:00".to_string(),
+                outdated_dbnums: vec![(7002, 20, 25)],
+            }
+        );
+
+        // 完成检测后构造最新记录：room_updated_at 至少不早于所有含房 dbnum 的最新时刻，且会话号已推进到 25。
+        let updated = build_latest_room_update_record(
+            &room_dbnums,
+            &states_outdated,
+            "g2",
+            "2026-10-15T12:30:00+08:00",
+        );
+        assert_eq!(updated.room_updated_at, "2026-10-15T13:00:00+08:00");
+        assert_eq!(updated.room_dbnum_sesnos.get(&7001), Some(&10));
+        assert_eq!(updated.room_dbnum_sesnos.get(&7002), Some(&25));
+        assert_eq!(
+            plan_startup_room_check(&room_dbnums, &states_outdated, Some(&updated)),
+            StartupRoomCheckPlan::UpToDate {
+                room_updated_at: "2026-10-15T13:00:00+08:00".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_room_data_in_pe_window_and_room_update_record_roundtrip_on_surreal() {
+        use crate::fast_model::room_resident::{
+            RoomUpdateRecord, clear_room_update_record_on, read_room_update_record_on,
+            write_room_update_record_on,
+        };
+        use std::collections::BTreeMap;
+
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem surreal");
+        db.use_ns("room_startup_check")
+            .use_db("window_and_record")
+            .await
+            .expect("ns/db");
+
+        // 1. 初始未写 room_update_record 时读取为 None。
+        assert_eq!(read_room_update_record_on(&db).await.unwrap(), None);
+
+        // 2. 写入 RoomUpdateRecord 后可读回。
+        let record = RoomUpdateRecord {
+            room_updated_at: "2026-10-15T12:00:00+08:00".to_string(),
+            room_dbnum_sesnos: BTreeMap::from([(7001, 10), (7002, 20)]),
+            generation: "gen-v1".to_string(),
+        };
+        write_room_update_record_on(&db, &record).await.unwrap();
+        assert_eq!(
+            read_room_update_record_on(&db).await.unwrap(),
+            Some(record.clone())
+        );
+
+        // 3. 在 pe 表中写入 7001 窗口 (10, 15] 的普通构件（BRAN / EQUI）和 7002 窗口 (20, 25] 的房间元素（PANE）。
+        db.query(
+            "CREATE pe:7001_100 SET dbnum = 7001, sesno = 12, noun = 'BRAN';              CREATE pe:7001_101 SET dbnum = 7001, sesno = 15, noun = 'EQUI';              CREATE pe:7002_200 SET dbnum = 7002, sesno = 20, noun = 'PANE';              CREATE pe:7002_201 SET dbnum = 7002, sesno = 23, noun = 'PANE';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert_eq!(
+            detect_room_data_in_pe_window_on(&db, 7001, 10, 15)
+                .await
+                .unwrap(),
+            None,
+            "仅包含 BRAN/EQUI 的更新窗口不应触发房间增量"
+        );
+        let hit = detect_room_data_in_pe_window_on(&db, 7002, 20, 25)
+            .await
+            .unwrap()
+            .expect("窗口 (20, 25] 含 PANE 必须命中");
+        assert!(hit.contains("PANE") && hit.contains("7002_201"), "{hit}");
+
+        // 4. 清理后读回为 None。
+        clear_room_update_record_on(&db).await.unwrap();
+        assert_eq!(read_room_update_record_on(&db).await.unwrap(), None);
+    }
+
+    #[test]
+    fn window_hits_build_targeted_panel_delta_for_registered_and_removed_panels() {
+        use crate::fast_model::room_model::{RoomPanelMap, RoomPanels};
+        use crate::fast_model::room_resident::{
+            ResidentForm, ResidentManifest, ResidentRoomModel,
+        };
+        use crate::fast_model::room_topology::RoomGroup;
+        use std::sync::Arc;
+
+        let r1 = aios_core::RefnoEnum::from("24384_26248");
+        let p1 = aios_core::RefnoEnum::from("24384_26250");
+        let p_removed = aios_core::RefnoEnum::from("24384_99999");
+
+        let groups = vec![RoomGroup {
+            room: r1,
+            name: "/1RX-RM03-R972".to_string(),
+            panels: vec![p1],
+        }];
+        let map = RoomPanelMap {
+            rooms: vec![RoomPanels {
+                room: r1,
+                room_num: "R972".to_string(),
+                panels: vec![p1],
+            }],
+            all_panels: [p1].into_iter().collect(),
+        };
+        let model = ResidentRoomModel::assemble(
+            ResidentManifest {
+                form: ResidentForm::Published,
+                key: "k1".to_string(),
+            },
+            groups,
+            map,
+            vec![],
+            Arc::default(),
+        )
+        .with_room_files(std::collections::BTreeMap::from([(r1, 8000)]));
+
+        let hits = vec![
+            RoomWindowHit {
+                refno: r1,
+                noun: "FRMW".to_string(),
+            },
+            RoomWindowHit {
+                refno: p_removed,
+                noun: "PANE".to_string(),
+            },
+        ];
+        let delta = build_panel_delta_from_window_hits(&model, 8000, &hits);
+        assert_eq!(delta.recalc.len(), 1);
+        assert_eq!(delta.recalc[0].panel, p1);
+        assert_eq!(delta.removed, vec![p_removed]);
     }
 }
