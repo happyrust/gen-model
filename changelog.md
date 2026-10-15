@@ -1,5 +1,27 @@
 # 变更记录
 
+## 2026-10-15
+
+### 房间重算盖章与重建清边补齐进程逐出镜像（ADR-073 F3 / d-149 补丁续）
+
+- **为什么**：`ack_is_stray_room_evidence` 靠 `ModelMemoryStore::stamped_room_generations`（库上 `model_room_generation` 那一格的进程镜像）判一枚 ACK 还能不能进按根数限额的逐出候选；`task_end::commit_task_end_on` 会同步这一格，但两处绕开 `task_end` 的写库点没有——整库重算盖章（库上盖**新**代、镜像留**旧**代）与重建清边（整表写 `NONE`、镜像没清）。两种情况都会把旧代的 ACK 当成「库上已经是这一代」放行逐出，而它是「那几根的边是另一代算的」的唯一凭据（`room_recompute::request_for_task` 的空段定向准入与 `query_service::room_calculation_status` 的一票否决都点它）。
+- **改动**（`web_service/handlers.rs` + `fast_model/model_memory_store.rs`）：
+  - `recompute_dbnum_room_edges_now`：UPDATE 确认成功后追加 `note_room_generation_stamped(dbnum, Some(rooms.resident_generation()))`（与写库同一个 `rooms`，代号同源）；
+  - `run_rooms_rebuild`：清边成功那一支追加 `clear_stamped_room_generations()`（新增；整表清 = 库上整表 `NONE`）。
+- **验证**：新增源码契约守卫 `room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror`（修复前 `0 passed; 1 failed`、exit 101，是断言失败不是编译失败）与行为测试 `the_eviction_mirror_follows_the_durable_room_generation`（走真实 `enforce_root_limit`，钉镜像整表清 / 同步到该代两个方向）；全量 `cargo test --lib` **2511 / 0 / 132**；三个文件编辑器诊断 errors 0 / warnings 0。证据 `verification/room-eviction-mirror-20261015/`（按约定不入库）。
+- **提交**：`ccc18ad5a`
+
+### 房间初始化不受 watch 限定域限定：未监听库也要初始化，增量跳过的库在记录里留白
+
+- **为什么**：口径——watch 只是增量监测的范围，不限定房间的初始化（与 `room_resident::room_files_never_consult_the_watch_scope` 那条源码钉同源）。此前三处没照办：① `check_and_init_rooms_at_startup` 的 `NeedsFullInit` 臂把（初始化覆盖库 ∪ 含房库）再 ∩ 限定域（全滤空才退回含房库），未监听库的房间**从没被初始化过**；② `run_rooms_rebuild` 的逐库列表同样经 `admits` 过滤；③ 增量臂把限定域外的库打印「跳过」后 `continue`，收尾仍写成本轮水位——「欠一次增量检查」的证据被抹掉，该库之后进了监听范围也再判不出来。
+- **改动**（`data_interface/room_recompute.rs` + `web_service/handlers.rs`）：
+  - 新增纯函数 `startup_full_init_targets`（并集，不看限定域）与 `hold_unchecked_room_sesnos`（跳过的库保留上一笔会话号，上一笔没有写 `0`）；
+  - `refresh_room_update_record_with_model` 收 `unchecked` / `previous`，留白排在 `source_sessions` 回填**之后**；整库初始化与整库重建传空集合 + `None`；
+  - 增量臂维护 `unchecked` 并如实出声「其中 N 个库…本轮未检查，欠账留存」；`run_rooms_rebuild` 收尾日志改成只有 `all_ok` 才说「完成」，否则 eprintln「有未完成项，`room_updated_at` 不推进」。
+- **验证**：新增源码契约守卫 `room_initialization_and_the_full_rebuild_never_consult_the_watch_scope`（修复前 `0 passed; 1 failed`）+ 两条纯函数真值表 / 行为测试；全量 `cargo test --lib` **2514 / 0 / 132**；三个文件编辑器诊断 errors 0 / warnings 0。证据 `verification/room-init-watch-scope-20261015/`（按约定不入库）。
+- **范围外**：`blocked_by_data` / `room_only_work_item` 那两处 `admits` 属**增量触发**侧，归限定域管，未动。
+- **提交**：`3b075d95`
+
 ## 0.1.40 — 2026-10-15
 
 ### 配置向导恢复介质两档选择（external / memory）——`store_mode` 回到配置文件当向导持久化层（ADR-083 二次修订）
