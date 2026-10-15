@@ -1823,7 +1823,8 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
          `pe` / `ATT_<noun>` / `pe_owner` 行只有「模型生成时写透」一个来源\
          （`POST /api/v1/element/ensure` 在这一档直接回 skipped-memory）。\
          所以改了属性之后库里那一行不会跟着变——属性由 /api/v1/element/attributes 从 E3D 文件现读，\
-         值是对的。要让属性行真的进库，只有 AIOS_STORE_MODE=rocksdb 这一条路。"
+         值是对的。要让属性行真的进库，切到 rocksdb（向导第②步选 external，或 \
+         AIOS_STORE_MODE=rocksdb）这一条路。"
     );
     Ok(())
 }
