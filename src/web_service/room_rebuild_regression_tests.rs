@@ -89,13 +89,13 @@ async fn room_rebuild_regression_same_generation_failure_keeps_alignment_owed() 
 fn room_rebuild_regression_success_stamp_has_mirror_invalidation_contract() {
     // Structural contract, not a cache-behavior test. Do not initialize the
     // process-global database/mirror to inspect this write boundary.
-    let source = include_str!("handlers.rs");
+    let source = include_str!("../data_interface/room_recompute.rs");
     let body = source
         .split_once("async fn recompute_dbnum_room_edges_now(")
         .expect("recompute boundary exists")
         .1
-        .split_once("\npub async fn health(")
-        .expect("recompute boundary ends before health")
+        .split_once("\n#[cfg(test)]")
+        .expect("recompute boundary ends before the test module")
         .0;
     let write = body
         .find("UPDATE dbnum_watermark:")
@@ -122,13 +122,13 @@ fn room_rebuild_regression_success_stamp_has_mirror_invalidation_contract() {
 /// 「真的跑到那一支」靠代码评审。
 #[test]
 fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() {
-    let source = include_str!("handlers.rs");
+    let source = include_str!("../data_interface/room_recompute.rs");
     let body = source
         .split_once("async fn recompute_dbnum_room_edges_now(")
         .expect("recompute boundary exists")
         .1
-        .split_once("\npub async fn health(")
-        .expect("recompute boundary ends before health")
+        .split_once("\n#[cfg(test)]")
+        .expect("recompute boundary ends before the test module")
         .0;
     let write = body
         .find("UPDATE dbnum_watermark:")
@@ -142,7 +142,7 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
         "镜像要落在成功分支那一侧（写库与镜像之间不该出现失败分支）"
     );
 
-    let rebuild = source
+    let rebuild = include_str!("handlers.rs")
         .split_once("async fn run_rooms_rebuild(")
         .expect("rebuild body exists")
         .1;

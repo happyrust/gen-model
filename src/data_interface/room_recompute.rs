@@ -1171,7 +1171,7 @@ async fn apply_targeted_room_update_for_dbnum(
         }
     }
 
-    crate::web_service::handlers::recompute_dbnum_room_edges_now(dbnum).await
+    recompute_dbnum_room_edges_now(dbnum).await
 }
 
 /// 启动时的房间初始化与基于时间戳的增量检测入口（在常驻房间模型就绪后调用）：
@@ -1218,7 +1218,7 @@ pub(crate) async fn check_and_init_rooms_at_startup(
             );
             let mut all_ok = true;
             for dbnum in &target_dbnums {
-                if !crate::web_service::handlers::recompute_dbnum_room_edges_now(*dbnum).await {
+                if !recompute_dbnum_room_edges_now(*dbnum).await {
                     all_ok = false;
                 }
             }
@@ -1327,6 +1327,164 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                     "[房间启动检查] 含房 dbnum 增量更新存在未完成项，暂不推进 room_updated_at，下次启动继续补检"
                 );
             }
+        }
+    }
+}
+
+/// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体
+/// `recompute_dbnum_room_edges`）；算齐整库才盖 `model_room_generation`，
+/// 算不齐 / 失败只记日志——欠账留着，下一个任务按 D14 兜底再算。
+pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
+    use crate::fast_model::model_db_adapter::{
+        PersistTarget, RootScope, recompute_dbnum_room_edges,
+    };
+    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) => {
+            println!("dbnum={dbnum} 整库房间重算跳过：room_membership=false");
+            return false;
+        }
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 整库房间重算冻不出计算器: {error:#}");
+            return false;
+        }
+    };
+    let state = match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 读不出水位行，整库房间重算跳过（欠账仍在）: {error:#}");
+            return false;
+        }
+    };
+    let target_sesno = state
+        .map(|state| state.file_latest_sesno.max(state.applied_sesno))
+        .unwrap_or_default()
+        .max(0) as u32;
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let has_projected = store
+        .roots(crate::fast_model::model_memory_store::ProjectionScope::Current)
+        .into_iter()
+        .any(|root| root.dbno() == dbnum);
+    let has_durable = match aios_core::SUL_DB
+        .query(format!(
+            "SELECT VALUE record::id(id) FROM inst_relate WHERE dbnum = {dbnum} LIMIT 1; \
+             SELECT VALUE record::id(id) FROM tubi_relate WHERE dbnum = {dbnum} LIMIT 1;"
+        ))
+        .await
+        .and_then(|r| r.check())
+    {
+        Ok(mut resp) => {
+            let insts: Vec<String> = resp.take(0).unwrap_or_default();
+            let tubis: Vec<String> = resp.take(1).unwrap_or_default();
+            !insts.is_empty() || !tubis.is_empty()
+        }
+        Err(_) => true,
+    };
+    let roots = if !has_projected && !has_durable {
+        Vec::new()
+    } else {
+        match crate::data_interface::window_root_plan::enumerate_target_roots(
+            dbnum,
+            target_sesno,
+        )
+        .await
+        {
+            Ok(roots) => roots
+                .iter()
+                .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                eprintln!("dbnum={dbnum} 枚举不出 DbSet@{target_sesno} 的根清单，整库房间重算跳过: {error:#}");
+                return false;
+            }
+        }
+    };
+    match recompute_dbnum_room_edges(
+        PersistTarget::process(),
+        store,
+        dbnum,
+        &rooms,
+        Some(&roots),
+        RootScope::All,
+    )
+    .await
+    {
+        Ok(report)
+            if report.failed.is_empty() && {
+                // 覆盖面自证（与 `batch_worker::room_recompute_uncovered` 同义）：
+                // `DbSet@T` 清单上的每一根都被这轮覆盖到——投影里的 + 回读库的。
+                let covered: std::collections::HashSet<_> =
+                    report.covered_roots.iter().copied().collect();
+                roots.iter().all(|root| covered.contains(root))
+            } =>
+        {
+            // 整库算齐：盖章（`Aligned`）并把「按别代写过」的杂记清空，与 task_end 同一笔纪律。
+            let stamped = match aios_core::SUL_DB
+                .query(format!(
+                    "UPDATE dbnum_watermark:{dbnum} SET model_room_generation = '{}', model_room_stray_generations = [];",
+                    crate::data_interface::dbnum_state::escape_surql_str(
+                        rooms.resident_generation()
+                    )
+                ))
+                .await
+                .and_then(|response| response.check())
+            {
+                Ok(_) => {
+                    // 盖章直查 SUL_DB、绕过了 DbnumState 的写者：库上确认成功后
+                    // 作废这一格的进程镜像，免得后续读还拿盖章前的旧代号判欠。
+                    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+                    // 同一格的第二个镜像：按根数限额逐出的候选判据（`stamped_room_generations`，
+                    // `ack_is_stray_room_evidence`）。不同步 = 镜像里还留着**上一**代，那一代的 ACK 被当成
+                    // 「库上已经是这一代」放行逐出，而它是「那几根的边是另一代算的」的唯一证据（ADR-073 F3，
+                    // 2026-10-15）。
+                    crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                        .note_room_generation_stamped(dbnum, Some(rooms.resident_generation()));
+                    true
+                }
+                Err(error) => {
+                    eprintln!("dbnum={dbnum} 房间边已整库重算，但对齐代号没盖上（下个任务会再欠一次）: {error:#}");
+                    false
+                }
+            };
+            println!(
+                "dbnum={dbnum} 整库房间重算完成：根 {}、成员边 {}、算不出 {}，耗时 {}ms",
+                report.recomputed,
+                report.room_edges,
+                report.failed.len(),
+                report.elapsed_ms
+            );
+            stamped
+        }
+        Ok(report) => {
+            if !report.failed.is_empty() {
+                let sample = report
+                    .failed
+                    .iter()
+                    .take(3)
+                    .map(|(root, err)| format!("{root}: {err}"))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                eprintln!(
+                    "dbnum={dbnum} 整库房间重算有 {} 根失败（覆盖 {}/{} 根，重算 {}、成员边 {}；例如 {}）：对齐代号不盖，欠账留给下个任务",
+                    report.failed.len(),
+                    report.covered_roots.len(),
+                    roots.len(),
+                    report.recomputed,
+                    report.room_edges,
+                    sample
+                );
+            } else {
+                eprintln!(
+                    "dbnum={dbnum} 整库房间重算覆盖面不齐（{}/{} 根）：对齐代号不盖，欠账留给下个任务",
+                    report.covered_roots.len(),
+                    roots.len()
+                );
+            }
+            false
+        }
+        Err(error) => {
+            eprintln!("dbnum={dbnum} 整库房间重算失败（欠账仍在）: {error:#}");
+            false
         }
     }
 }

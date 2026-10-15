@@ -2598,9 +2598,10 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天七个，全来自 e3d-model：`DIR` catalogue_point、
-    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减
-    /// ——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十个，全来自 e3d-model：`DIR` catalogue_point、
+    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减、
+    /// 电缆在途段的 `CMPR`/`OUTD`/`MINBEN`——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票
+    /// 就是为它们立的）；老五个元数据名一个都
     /// 不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
     fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
@@ -2610,7 +2611,13 @@ mod tests {
             .map(String::as_str)
             .collect();
         zero.sort_unstable();
-        assert_eq!(zero, ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF"]);
+        assert_eq!(
+            zero,
+            [
+                "CMPR", "DIR", "FILL", "GTYP", "MINBEN", "NGMR", "OUTD", "PKEY", "UKEY",
+                "VXREF"
+            ]
+        );
         for name in DATA_ONLY_ATTR_NAMES {
             assert!(
                 !generation_reads_attribute(name),
@@ -2630,7 +2637,9 @@ mod tests {
         // `NAPP`，前三个本就在模型面那一半里，并集只多 `NAPP`（141）；宿主 FIXING 扫描带进目录件的 `NGMR`（142）。
         // 2026-09-28：详图式扶手立柱 / 端头 / 门的现算标架（e3d-model `transform::handrail_post_world`，
         // 09-28 `128e831` 起那批栏杆提交）带进 `HRJUSL`（对正 LEFT / RIGH / FORW）与 `WIDT`（HRGATE 门宽）（144）。
-        assert_eq!(generation_read_set().len(), 144, "读取集合条数漂移");
+        // 2026-10-16：e3d-model 电缆 EXTGEO 锚点解算在途（vendor cable.rs）带进 `CMPR` / `ENDPOI` /
+        // `MINBEN` / `OUTD` / `STAPOI` / `YGAP`（150）。
+        assert_eq!(generation_read_set().len(), 150, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2830,7 +2839,7 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡七个，其余全部放行。
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十个，其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2843,7 +2852,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 7,
+            3941 - 10,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
