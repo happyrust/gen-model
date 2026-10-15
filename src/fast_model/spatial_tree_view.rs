@@ -546,7 +546,7 @@ pub fn draft_tree(
         HashSet::new()
     };
     let Filtered { mut hits, .. } =
-        filter_candidates(scan.candidates, params, &scan.center, attrs, Some(scope));
+        filter_candidates(scan.candidates, params, &scan.center, attrs, params.rooms.as_ref().map(|_| scope));
     sort_hits(&mut hits, SortBy::Distance);
     let mut seen = HashSet::new();
     hits.retain(|hit| seen.insert(hit.refno));
@@ -978,6 +978,9 @@ impl TreeDraft {
                     },
                 });
             }
+            if params.rooms.is_none() && room_total == 0 && room_tubes == 0 {
+                continue;
+            }
             rooms_out.push(TreeRoom {
                 refno: room_ref.refno.clone(),
                 room_num: room_ref.room_num.clone(),
@@ -990,7 +993,18 @@ impl TreeDraft {
             });
         }
 
-        let mut warnings = response_warnings(&center, Some(scope)).unwrap_or_default();
+        let mut warnings = response_warnings(&center, params.rooms.as_ref().map(|_| scope)).unwrap_or_default();
+        if params.rooms.is_none() {
+            if scope.unresolved > 0 {
+                warnings.push(format!("{} 个候选暂时无法解析房间归属，保留在「未归属房间」中", scope.unresolved));
+            }
+            if scope.source == "unavailable" {
+                warnings.push("房间归属服务暂不可用，命中构件保留在「未归属房间」中".to_string());
+            }
+            if scope.library_alignment_current == Some(false) {
+                warnings.push("房间归属不是当前代，分组可能过期；未归属构件仍保留".to_string());
+            }
+        }
         if tubes_on && supplement.truncated {
             warnings.push(format!(
                 "直段：BRAN 单元 {} 个超过读根预算 {}，只为最近的 {} 个补了直段（tubes_truncated）",
@@ -1000,6 +1014,16 @@ impl TreeDraft {
             ));
         }
 
+        let mut room_status = scope.status_json();
+        if params.rooms.is_none() {
+            room_status.rooms = rooms_out.iter()
+                .filter(|room| room.refno != "unassigned")
+                .map(|room| crate::fast_model::spatial_rooms::RoomRef {
+                    refno: room.refno.clone(),
+                    room_num: room.room_num.clone(),
+                }).collect();
+            room_status.matched = total_count;
+        }
         TreeResponse {
             center: CenterJson::from(&center),
             radius: params.radius,
@@ -1016,7 +1040,7 @@ impl TreeDraft {
             inlined: options.only.as_ref().map(LeafSelector::label),
             delivery_unit_types: unit_types.to_vec(),
             rooms: rooms_out,
-            room_status: scope.status_json(),
+            room_status,
             warnings: (!warnings.is_empty()).then_some(warnings),
             spatial_state: state.as_str(),
             coverage: COVERAGE,

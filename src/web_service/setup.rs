@@ -6,7 +6,9 @@
 //! 1. **配置真值是 `DbOption.toml` 文件**，本模块只是它的 HTTP 读写口。写盘走 `toml_edit`
 //!    外科手术式改键——注释是决策史、未知键可能是别的版本的键，两者都原样保留；写前
 //!    先落 `DbOption.toml.bak`。唯一的例外是**介质**（`mem` / `rocksdb`）：它不在文件里、
-//!    也不在向导里改，只由环境变量 `AIOS_STORE_MODE` 决定（ADR-083）；向导只展示生效的那一档。
+//!    由 `AIOS_STORE_MODE` > 配置文件 `store_mode` > 默认 rocksdb 分层决定（ADR-083 修订）；
+//!    向导第②步提供两档选择（external / memory），选中档写进 `store_mode` 持久化，
+//!    向导触发的重启把它显式递给孩子进程，保证所选档生效。
 //! 2. **setup 与应用面均允许远程访问**，默认监听所有网卡。部署方应使用可信网络、
 //!    防火墙或认证代理限制管理入口的访问。
 //! 3. **两个判据各管一件事**：设置模式（启动臂）= 配置无效（`project_path` 缺/不存在，或
@@ -116,7 +118,7 @@ pub(crate) fn setup_mode_reason_for(
     }
     if store != crate::options::StoreMode::Mem && (v_ip.trim().is_empty() || v_port == 0) {
         return Some(format!(
-            "介质 {}（由环境变量 AIOS_STORE_MODE 决定）需要 v_ip / v_port，当前未设置（v_port=0 是未设置哨兵值）",
+            "介质 {} 需要 v_ip / v_port，当前未设置（v_port=0 是未设置哨兵值）",
             store.as_str()
         ));
     }
@@ -160,9 +162,13 @@ fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()>
             .trim()
             .to_string()
     };
-    // 介质不从文件里读（ADR-083）：它只由环境变量 AIOS_STORE_MODE 决定，与本进程实际跑的
-    // 那一档就是同一个值——文件里若还残留 `store_mode`，那一行不生效，这里也不看它。
-    let store = crate::options::store_mode();
+    // 下一进程跑哪一档：文件里向导持久化的 `store_mode` 优先——`spawn_replacement` 把它
+    // 显式递给孩子，孩子按它跑；文件没写才轮到本进程裁决出的那一档（env > file > 默认）。
+    let store = values
+        .get("store_mode")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| crate::options::parse_store_mode(Some(raw)))
+        .unwrap_or_else(crate::options::store_mode);
     let v_port = values
         .get("v_port")
         .and_then(|value| {
@@ -202,8 +208,8 @@ pub struct SetupConfigPatch {
     pub module: Option<String>,
     pub project_code: Option<i64>,
     pub surreal_ns: Option<String>,
-    /// 已退役（ADR-083）：介质只由环境变量 `AIOS_STORE_MODE` 决定，不在配置文件里、也不在向导里改。
-    /// 旧页面还会带这一格，收下但**不写盘**——写进去的那一行一个字都不生效，只会误导读配置的人。
+    /// 介质选择（ADR-083 修订，2026-10）：向导第②步的两档之一（`mem` / `rocksdb`，
+    /// 旧别名照认），写进 `DbOption.toml` 持久化；环境变量 `AIOS_STORE_MODE` 仍能盖它。
     #[serde(default)]
     pub store_mode: Option<String>,
     pub v_ip: Option<String>,
@@ -221,7 +227,15 @@ pub struct SetupConfigPatch {
 /// 写盘前的形状校验。只拦「写进去必然坏」的：值域交给探测口与正常启动去说。
 fn validate_patch(patch: &SetupConfigPatch) -> Vec<String> {
     let mut problems = Vec::new();
-    // `store_mode` 不校验：它不写盘（ADR-083），值域交给环境变量那一头。
+    // `store_mode` 是向导持久化的介质档：认不出的值拦在写盘前，空白当没带这一格。
+    if let Some(mode) = patch.store_mode.as_deref()
+        && !mode.trim().is_empty()
+        && crate::options::parse_store_mode(Some(mode)).is_none()
+    {
+        problems.push(format!(
+            "store_mode 不是可识别的介质（mem / rocksdb）：{mode:?}"
+        ));
+    }
     if let Some(port) = patch.v_port.as_deref()
         && !port.trim().is_empty()
         && port.trim().parse::<u16>().is_err()
@@ -300,8 +314,13 @@ fn apply_patch(
         };
         set(document, "surreal_ns", item);
     }
-    // `store_mode` 有意不写：介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083），文件里
-    // 这一行不生效；向导替人写进去，等于在文件里留一句必定与实际相反的话。
+    // `store_mode` 落盘成规范写法（`mem` / `rocksdb`）：它是向导持久化的介质档，
+    // 环境变量没说时按这一行跑（ADR-083 修订）。空白当没带，认不出的已被校验拦下。
+    if let Some(mode) = patch.store_mode.as_deref()
+        && let Some(parsed) = crate::options::parse_store_mode(Some(mode))
+    {
+        set(document, "store_mode", value(parsed.as_str()));
+    }
     if let Some(ip) = &patch.v_ip {
         set(document, "v_ip", value(ip.as_str()));
     }
@@ -490,8 +509,9 @@ fn subset_values(document: &toml_edit::DocumentMut) -> serde_json::Value {
         "module",
         "project_code",
         "surreal_ns",
-        // `store_mode` 不在子集里（ADR-083）：文件里若残留这一行，由 `setup_get_config` 的
-        // `effective.stale_config_store_mode` 单独点名，不混进「向导管的值」里。
+        // `store_mode` 是向导持久化的介质档（ADR-083 修订）：属于「向导管的值」，
+        // 页面用它预选第②步的 radio；生效档另有 `effective.store_mode`。
+        "store_mode",
         "v_ip",
         "v_port",
         "http_api_addr",
@@ -791,10 +811,10 @@ async fn setup_get_config(
             ctx.config_path.display()
         ))
     })?;
-    // 介质只由环境变量决定（ADR-083）：向导只**展示**这一档与它的出处，不提供改口。
-    // 文件里若还残留 `store_mode = "..."`，把原文念给页面，让它提醒人删掉——那一行不生效，
-    // 留着只会让读配置的人得出与实际相反的结论。
-    let stale_config_store_mode = document
+    // 介质按「环境变量 > 配置文件 > 默认」裁决（ADR-083 修订）：页面要同时知道
+    // 生效档（env 可能盖着文件）与文件里向导持久化的那一行——radio 预选走文件值，
+    // 没有文件值时回落生效档。
+    let config_store_mode = document
         .get("store_mode")
         .and_then(toml_edit::Item::as_value)
         .map(toml_value_to_json);
@@ -806,7 +826,7 @@ async fn setup_get_config(
             "store_mode_source": crate::options::store_mode_source(),
             "store_mode_env": crate::options::STORE_MODE_ENV,
             "store_mode_env_value": std::env::var(crate::options::STORE_MODE_ENV).ok(),
-            "stale_config_store_mode": stale_config_store_mode,
+            "config_store_mode": config_store_mode,
             "offline_package": offline_root().is_some(),
         },
     })))
@@ -893,7 +913,7 @@ async fn setup_restart(
     println!("[setup] 收到重启请求，300ms 后交接给新进程（{poll_hint}）");
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        match spawn_replacement() {
+        match spawn_replacement(&ctx.config_path) {
             Ok(pid) => {
                 println!("[setup] 新进程已拉起（pid {pid}），本进程退出交出端口与单实例锁");
                 std::process::exit(0);
@@ -936,12 +956,26 @@ pub(crate) fn browser_facing(addr: &str) -> String {
 
 /// spawn 同一个二进制、同参数、同环境 + 交接窗口标记。子进程继承 stdout/stderr 句柄，
 /// `Start-AMS.ps1` 重定向的日志文件因此接着写。
-fn spawn_replacement() -> anyhow::Result<u32> {
+///
+/// 介质是「环境变量 > 配置文件」裁决：向导刚把选择写进 `store_mode`，父进程环境里若
+/// 残留相反的 `AIOS_STORE_MODE`，孩子会照样被压——把文件里的档显式递过去，让向导
+/// 保存的那一档在重启后一定生效；文件没写就靠环境继承，与冷启动同一口径。
+fn spawn_replacement(config_path: &Path) -> anyhow::Result<u32> {
     let exe = std::env::current_exe()?;
-    let child = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(std::env::args_os().skip(1))
-        .env(RESTART_HANDOFF_ENV, "1")
-        .spawn()?;
+        .env(RESTART_HANDOFF_ENV, "1");
+    if let Ok(text) = std::fs::read_to_string(config_path)
+        && let Ok(document) = text.parse::<toml_edit::DocumentMut>()
+        && let Some(mode) = document
+            .get("store_mode")
+            .and_then(toml_edit::Item::as_str)
+            .and_then(|raw| crate::options::parse_store_mode(Some(raw)))
+    {
+        command.env(crate::options::STORE_MODE_ENV, mode.as_str());
+    }
+    let child = command.spawn()?;
     Ok(child.id())
 }
 
@@ -1409,45 +1443,43 @@ room_key_word = ["-RM"]
     }
 
     /// 空地址不再是「写进去必然坏」的形态：本进程一台库都不拉，没有 bind 这回事，
-    /// 空地址只会安全地回设置模式，所以地址照写。而 `store_mode` **一个字都不落盘**
-    /// （ADR-083）：旧页面带过来也只是被收下，文件里原有的那一行原样留着，不改、不补。
+    /// 空地址只会安全地回设置模式，所以地址照写。`store_mode` 是向导持久化的介质档
+    /// （ADR-083 修订）：给了就写成规范值，没带或空白就不动文件里那行。
     #[test]
-    fn write_config_never_writes_store_mode_and_accepts_a_blank_address() {
+    fn write_config_persists_store_mode_and_accepts_a_blank_address() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("DbOption.toml");
         let factory_shape = "# 出厂注释\nproject_path = \"D:/X\"\nv_ip = \"\"\nv_port = \"0\"\n";
         std::fs::write(&path, factory_shape).unwrap();
 
-        // 只带 store_mode 的补丁 = 什么都没改：不落盘、不备份。
+        // 只带 store_mode 的补丁：写规范值，别的一格不动。
         let only_store = SetupConfigPatch {
             store_mode: Some("rocksdb".into()),
             ..Default::default()
         };
-        assert!(
-            write_config(&path, &only_store)
-                .expect("收下但不写")
-                .is_empty()
+        assert_eq!(
+            write_config(&path, &only_store).expect("store_mode 落盘"),
+            vec!["store_mode"]
         );
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("store_mode"),
-            "向导不许把 store_mode 写进文件：{text}"
-        );
-        assert!(!backup_path(&path).exists(), "没改键就不该碰盘");
+        assert!(text.contains(r#"store_mode = "rocksdb""#), "{text}");
 
         let rocks = SetupConfigPatch {
-            store_mode: Some("rocksdb".into()),
+            store_mode: Some("external".into()),
             v_ip: Some("127.0.0.1".into()),
             v_port: Some("8010".into()),
             ..Default::default()
         };
         assert_eq!(
             write_config(&path, &rocks).expect("地址放行"),
-            vec!["v_ip", "v_port"]
+            vec!["store_mode", "v_ip", "v_port"]
         );
         let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(r#"store_mode = "rocksdb""#),
+            "别名 external 落盘成规范值：{text}"
+        );
         assert!(text.contains(r#"v_port = "8010""#));
-        assert!(!text.contains("store_mode"), "{text}");
         assert!(text.contains("# 出厂注释"), "出厂注释不许被改写掉");
 
         // 空地址同样放行——回设置模式是安全的逃生门。
@@ -1466,27 +1498,35 @@ room_key_word = ["-RM"]
                 .contains(r#"v_port = "0""#)
         );
 
-        // 退役写法也不再由向导校验：这一格根本不落盘，值域交给环境变量那一头。
-        let retired = SetupConfigPatch {
-            store_mode: Some("spawned-rocksdb".into()),
+        // 空白 store_mode 当没带这一格；认不出的值被校验拦下，落不进文件。
+        let blank_mode = SetupConfigPatch {
+            store_mode: Some("  ".into()),
             ..Default::default()
         };
-        assert!(validate_patch(&retired).is_empty());
+        assert!(
+            write_config(&path, &blank_mode)
+                .expect("空白当没带")
+                .is_empty()
+        );
+        let bad_mode = SetupConfigPatch {
+            store_mode: Some("sqlite".into()),
+            ..Default::default()
+        };
+        assert!(!validate_patch(&bad_mode).is_empty());
     }
 
-    /// PUT 的形状校验：v_port 非数字、监听/展示地址不成形都拦在写盘前；`store_mode` 不在
-    /// 校验之列（不落盘，ADR-083），拼错也不算一条问题。
+    /// PUT 的形状校验：v_port 非数字、监听/展示地址不成形、介质档认不出，都拦在写盘前。
     #[test]
     fn patch_validation_rejects_malformed_values() {
         let bad = SetupConfigPatch {
-            store_mode: Some("embedded-mem".into()),
+            store_mode: Some("sqlite".into()),
             v_port: Some("eight".into()),
             http_api_addr: Some("9099".into()),
             http_public_addr: Some("host:9099".into()),
             ..Default::default()
         };
         let problems = validate_patch(&bad);
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 4, "{problems:?}");
         let good = SetupConfigPatch {
             store_mode: Some("rocksdb".into()),
             v_port: Some("8010".into()),
@@ -1495,6 +1535,12 @@ room_key_word = ["-RM"]
             ..Default::default()
         };
         assert!(validate_patch(&good).is_empty());
+        // 退役别名照认——解析层兼容，落盘时折成规范值。
+        let retired = SetupConfigPatch {
+            store_mode: Some("embedded-mem".into()),
+            ..Default::default()
+        };
+        assert!(validate_patch(&retired).is_empty());
     }
 
     // ---------- 杂项 ----------
@@ -1528,18 +1574,19 @@ room_key_word = ["-RM"]
         );
     }
 
-    /// 向导第②步不再选介质（ADR-083，2026-09-18）：介质只由环境变量 `AIOS_STORE_MODE` 决定，
-    /// 页面只**展示**生效的那一档与出处、提醒文件里残留的过期键，地址那两格随生效档启停。
-    /// 写盘那一包里不许再有 `store_mode`——写进去的那一行必定与实际相反。
-    /// 两档本身（`mem` 不用地址 / `rocksdb` 须通过「测试连接」）不变。
+    /// 向导第②步恢复介质两档选择（ADR-083 修订，2026-10）：external / memory 两个 radio，
+    /// 选中档随保存写进 `store_mode`（落规范值），同时展示当前生效档与出处
+    /// （环境变量仍能盖文件）。`mem` 不用地址 / `rocksdb` 须通过「测试连接」的联动不变。
     #[test]
-    fn the_wizard_shows_the_effective_store_mode_and_never_writes_it() {
+    fn the_wizard_offers_two_store_modes_and_persists_the_choice() {
         for needle in [
-            r#"id="effective-store""#,
+            r#"name="store-mode""#,
+            r#"value="rocksdb""#,
+            r#"value="mem""#,
             "S.effective = config.effective",
-            r#"S.effective.store_mode) === "rocksdb""#,
-            "stale_config_store_mode",
-            "AIOS_STORE_MODE",
+            r#"e.store_mode === "mem""#,
+            "v.store_mode",
+            "store_mode: storeTier()",
             r#"id="f-http_public_addr""#,
             r#"http_public_addr: val("f-http_public_addr")"#,
         ] {
@@ -1548,38 +1595,29 @@ room_key_word = ["-RM"]
                 "web/setup.html 缺接线：{needle}"
             );
         }
-        // 选介质的那套接线（radio、写盘键、退役字面值）一处不留——它们一回来，向导就又会
-        // 往文件里写一句不生效的 store_mode。
+        // 退役字面值不许回到页面上当选项——解析层认它们是兼容，UI 只给两档。
         for forbidden in [
-            "store_mode:",
-            r#""store_mode":"#,
-            r#"id="store-mem""#,
-            r#"id="store-rocksdb""#,
-            r#"name="store""#,
-            "storeTierOf",
             r#"value="embedded-mem""#,
             r#"value="spawned-mem""#,
             r#"value="spawned-rocksdb""#,
             r#"value="external""#,
-            "btn-precheck-store",
-            "rocks-dir",
         ] {
             assert!(
                 !SETUP_PANEL_EMBEDDED.contains(forbidden),
-                "web/setup.html 不许再出现选介质的接线：{forbidden}"
+                "web/setup.html 不许出现退役介质选项：{forbidden}"
             );
         }
     }
 
     /// 上一条钉的是页面读哪几格，这一条钉服务端真发出这几格——两边只钉一头的话，
     /// 改名字那一下两条都不红，而页面拿到 `undefined`：介质栏画成默认的 `mem`、
-    /// 残留键的提醒整条消失，看上去像「文件里那行已经删了」。
+    /// 持久化档的预选整条消失，看上去像「文件里那行没写过」。
     ///
-    /// 生效档与出处按 `options::store_mode()` 现算（介质只由环境变量决定，ADR-083），
-    /// 所以这里不比对具体字面值，只钉住「与本进程的裁决同一个答案」；
-    /// `stale_config_store_mode` 念的是文件里那一行的原文，没有这一行就是 `null`。
+    /// 生效档与出处按 `options::store_mode()` 现算（env > file > 默认），所以这里不比对
+    /// 具体字面值，只钉住「与本进程的裁决同一个答案」；`config_store_mode` 念的是文件里
+    /// 向导持久化的那一行原文，没有这一行就是 `null`。
     #[tokio::test]
-    async fn the_config_endpoint_reports_the_effective_store_mode_and_names_a_stale_key() {
+    async fn the_config_endpoint_reports_effective_and_persisted_store_mode() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("DbOption.toml");
         std::fs::write(
@@ -1618,13 +1656,10 @@ room_key_word = ["-RM"]
             effective.get("store_mode_env_value").is_some(),
             "{effective}"
         );
+        assert_eq!(effective["config_store_mode"], "rocksdb", "{effective}");
+        // 持久化档属于「向导管的值」：页面靠它预选第②步的 radio。
         assert_eq!(
-            effective["stale_config_store_mode"], "rocksdb",
-            "{effective}"
-        );
-        // 过期键不混进「向导管的值」：混进去页面会把它当成一个可改的格子。
-        assert!(
-            payload["values"].get("store_mode").is_none(),
+            payload["values"]["store_mode"], "rocksdb",
             "{}",
             payload["values"]
         );
@@ -1635,7 +1670,7 @@ room_key_word = ["-RM"]
             .await
             .expect("读配置");
         assert!(
-            payload["effective"]["stale_config_store_mode"].is_null(),
+            payload["effective"]["config_store_mode"].is_null(),
             "{}",
             payload["effective"]
         );

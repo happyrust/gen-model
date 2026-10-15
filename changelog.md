@@ -1,5 +1,46 @@
 # 变更记录
 
+## 0.1.40 — 2026-10-15
+
+### 配置向导恢复介质两档选择（external / memory）——`store_mode` 回到配置文件当向导持久化层（ADR-083 二次修订）
+
+- **为什么**：介质此前只由环境变量 `AIOS_STORE_MODE` 决定（ADR-083），向导只能展示不能改——
+  现场想切内存/外部库得去翻启动脚本或 deploy.env。用户拍板：介质就两档（默认 external、
+  嵌入 memory），向导里要可以直接选。
+- **改动**：
+  - `options.rs`：裁决恢复分层 `AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 默认 `rocksdb`；
+    `store_mode_source()` 新增「配置文件（向导持久化）」答案；`store_mode_notices()` 改为——
+    环境变量压过文件档时并排点名「两边不是同一档」，文件正常说了算时不吵；
+    `in_memory_db` / `AIOS_IN_MEMORY_DB` 维持退役只点名。
+  - `web_service/setup.rs`：`SetupConfigPatch.store_mode` 恢复校验与写盘（落规范值 `mem`/`rocksdb`，
+    别名照认）；`subset_values` 含 `store_mode`（radio 预选）；`effective` 报 `config_store_mode`；
+    `ensure_completion_ready` 按「文件档优先」预测下一进程介质；`spawn_replacement` 把文件里
+    那一档显式递给孩子进程 `AIOS_STORE_MODE`——向导保存的选择重启后一定生效，父进程残留的
+    环境变量压不动。
+  - `web/setup.html`：第②步恢复两档 radio（外部库 external 默认 / 内存库 memory 嵌入进程），
+    选中档随保存写 `store_mode`；仍展示生效档与出处；地址两格随所选档启停。
+  - `New-LocalRelease.ps1`（`Start-AMS.ps1` 模板）：缺省回填改为文件优先——文件写了
+    `store_mode` 就按它进环境变量，文件没写才回填 `mem`。
+  - 离线包：`build-offline-release.mjs` 往出厂 `DbOption.toml` 注入 `store_mode = "rocksdb"`；
+    `start.bat` 的 `STORE_MODE` 默认留空（降为 deploy.env 运维 pin）；
+    `Start-BundledStore.ps1` 按 pin > 文件 > 默认判档，mem 直接放行。
+- **钉子**：`the_store_mode_layers_are_env_then_file_then_default`、
+  `the_persisted_store_mode_is_quiet_until_the_env_overrides_it`（env 压文件才出声）、
+  `the_effective_store_mode_can_name_who_decided_it`（三种来源）、
+  `write_config_persists_store_mode_and_accepts_a_blank_address`（落规范值、别名折换）、
+  `the_wizard_offers_two_store_modes_and_persists_the_choice`（radio + 写盘键钉住，
+  退役字面值不许回页面）、`the_config_endpoint_reports_effective_and_persisted_store_mode`
+  （`config_store_mode` 与 `values.store_mode` 两头都发）。`cargo test --lib`：
+  除 `generation_read_set` 与 e3d-model 工作区既有漂移一条外全绿（与本次无关，未动）。
+- **现场注意**：跑 rocksdb 的现场若在环境/启动脚本里 pin 了 `AIOS_STORE_MODE=mem`，
+  向导里选 external 不会生效——pin 是更高一层，启动日志会点名两边不同档。
+
+## 0.1.39 — 2026-10-15
+
+- 范围查询的房间层级树支持省略 `rooms=`，按实际房间归属聚合专业与最小交付单元；未归属构件保留在独立分组，跨房构件的总数按 refno 去重。
+- 离线包安装向导统一管理后端、前端及兼容端口，保存并重启时校验端口并同步 nginx；兼容端口支持设为 0 关闭。
+- 发布主线为 `refactor`；发布包记录提交与独立构建号。
+
 ## 2026-10-14（续）
 
 ### 翻默认：`model_transform_cheap_path` 与 `model_unit_level_publish` 默认开（Issue #36 / #50）

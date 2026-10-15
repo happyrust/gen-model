@@ -35,11 +35,13 @@
     让后续二进制 patch 始终有精确的源包可取。
 
     存储只有两档（2026-09-13 拍板，ADR-074）：**出厂是 mem**（库在后端进程内，无 Surreal
-    TCP 端口，真正解压即跑——Start-AMS.ps1 不给 -StoreMode 时显式设 AIOS_STORE_MODE=mem，不靠服务那边的
-    默认档，它 2026-09-18 起是 rocksdb）。介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083），
-    不在 DbOption.toml 里、也不在向导里改：要数据活过重启的现场以 Start-AMS.ps1 -StoreMode rocksdb
-    启动——**服务只连、不拉起**那台库，包根附 bin\surreal.exe 与 Start-Surreal.ps1 让人先把它
-    起起来。包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
+    TCP 端口，真正解压即跑——出厂 DbOption.toml 不写 store_mode，Start-AMS.ps1 不给 -StoreMode、
+    环境也没有时回填 AIOS_STORE_MODE=mem，不靠服务那边的默认档，它 2026-09-18 起是 rocksdb）。
+    介质分层裁决（ADR-083 修订，2026-10）：AIOS_STORE_MODE > DbOption.toml 的 store_mode >
+    默认 rocksdb——向导第②步选的档写进 store_mode 持久化，环境变量是显式覆盖层。
+    要数据活过重启的现场：在向导第②步选 external（写 store_mode="rocksdb"）或
+    Start-AMS.ps1 -StoreMode rocksdb 启动——**服务只连、不拉起**那台库，包根附 bin\surreal.exe
+    与 Start-Surreal.ps1 让人先把它起起来。包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
     health + 首页 + medium；C 腿由脚本用包内 surreal.exe 在 18010 起一台
@@ -564,12 +566,12 @@ Write-Step "生成 Start-AMS / Rollback / Start-Surreal / README / CHANGELOG"
 $startAms = @'
 param(
     [string]$Workspace = $env:AMS_WORKSPACE,
-    # 存储介质（mem / rocksdb）。介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083），不在
-    # DbOption.toml 里、也不在向导里改：这里给了就设给服务；不给、且调用方环境里也没有时，
-    # 本脚本**显式回填 mem**（库在进程内，进程一退即清空）。
-    # 为什么要显式回填：服务自己的默认 2026-09-18 起是 rocksdb（ADR-083 D6，漏设要当场报错
-    # 而不是悄悄跑在内存库上）。发布包是唯一「机器上多半没有库」的场景，靠那个默认就成了
-    # 双击即连不上、连向导都打不开——所以这一档由包自己说出来，不靠默认兜。
+    # 存储介质（mem / rocksdb）。分层裁决（ADR-083 修订，2026-10）：环境变量
+    # AIOS_STORE_MODE > DbOption.toml 的 store_mode > 默认。这里给了就设给服务；
+    # 不给、且调用方环境里也没有时，文件里写了 store_mode（向导持久化的档）就按它，
+    # 文件没写才**显式回填 mem**（库在进程内，进程一退即清空）。
+    # 为什么文件缺省仍回填 mem 而不是交给服务的默认 rocksdb：发布包是唯一「机器上
+    # 多半没有库」的场景，连不上是当场失败——所以出厂形态由包自己说出来，不靠默认兜。
     [ValidateSet('mem', 'rocksdb')][string]$StoreMode,
     [switch]$NoBrowser,
     [int]$TimeoutSeconds = 600
@@ -577,7 +579,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 if ($StoreMode) { $env:AIOS_STORE_MODE = $StoreMode }
-elseif (-not $env:AIOS_STORE_MODE) { $env:AIOS_STORE_MODE = 'mem' }
 $exe = Join-Path $root 'aios-database.exe'
 $logRoot = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force $logRoot | Out-Null
@@ -591,6 +592,12 @@ $rootConfig = Join-Path $root 'DbOption.toml'
 $configPath = if (Test-Path -LiteralPath $rootConfig) { $rootConfig } else { Join-Path $Workspace 'DbOption.toml' }
 if (-not (Test-Path -LiteralPath $configPath)) { throw "Missing workspace config: $Workspace" }
 $configText = Get-Content -LiteralPath $configPath -Raw
+if (-not $env:AIOS_STORE_MODE) {
+    # 介质分层（ADR-083 修订）：环境变量 > 配置文件 store_mode > 默认。文件里写了就
+    # 按文件（向导第②步选完保存的档必须说了算），文件没写才回填 mem。
+    $fileMode = [regex]::Match($configText, '(?m)^\s*store_mode\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
+    $env:AIOS_STORE_MODE = if ($fileMode) { $fileMode } else { 'mem' }
+}
 $addr = [regex]::Match($configText, '(?m)^\s*http_api_addr\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
 if (-not $addr) {
     $addr = [regex]::Match($configText, '(?m)^\s*server_release_ip\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
@@ -634,8 +641,9 @@ if ($existing) {
     Remove-Item Env:AIOS_SKIP_STARTUP_ROOM_BUILD -ErrorAction SilentlyContinue
     # 服务不拉库（ADR-074）：rocksdb 档要先自己跑 Start-Surreal.ps1，这里不再递 AIOS_SURREAL_EXE。
     # 介质随环境变量 AIOS_STORE_MODE 进服务（cmd → 服务两层都继承）；日志里点一句，免得对着配置猜。
-    # 上面已经保证它非空（不给 -StoreMode 也会回填 mem），所以这里打出来的就是服务实际吃到的那一档。
-    Write-Output ("STORE_MODE=" + $env:AIOS_STORE_MODE + $(if ($StoreMode) { ' (-StoreMode)' } else { ' (包默认；要落盘用 -StoreMode rocksdb)' }))
+    # 上面已经保证它非空（不给 -StoreMode 时按文件 store_mode 或回填 mem），所以这里打出来的
+    # 就是服务实际吃到的那一档。
+    Write-Output ("STORE_MODE=" + $env:AIOS_STORE_MODE + $(if ($StoreMode) { ' (-StoreMode)' } elseif ($fileMode) { ' (配置文件 store_mode)' } elseif ($env:AIOS_STORE_MODE -ne 'mem') { ' (环境变量)' } else { ' (包默认/环境变量；要落盘在向导第②步选 external，或 -StoreMode rocksdb)' }))
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $stdoutLog = Join-Path $logRoot "$stamp.stdout.log"
     $stderrLog = Join-Path $logRoot "$stamp.stderr.log"

@@ -1034,8 +1034,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::options::data_read_mode_notice() {
         eprintln!("*** {notice} ***");
     }
-    // 介质那一头所有该出声的：环境变量拼错 / 退役写法，以及配置文件里还残留的
-    // `store_mode` / `in_memory_db`（2026-09-18 起不再生效，ADR-083）——逐条打，不许只挑一条。
+    // 介质那一头所有该出声的：环境变量拼错 / 退役写法、环境变量压了配置文件
+    // `store_mode`（向导持久化的档），以及 `in_memory_db` / `AIOS_IN_MEMORY_DB`
+    // （ADR-083 起不再生效）——逐条打，不许只挑一条。
     // 走 `run_app` 进来的那条路上已经打过了，这里是 python 绑定 / l3 夹具直接调时的出口。
     print_store_mode_notices_once();
     if let Some(notice) = crate::options::data_face_notice() {
@@ -1737,8 +1738,8 @@ fn print_startup_complete_banner(
     if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
         println!("  *** {notice}");
     }
-    // 介质只由环境变量 AIOS_STORE_MODE 决定（ADR-083）；横幅带上「谁定的」——配置文件里
-    // 若还残留着过期的 store_mode，翻文件得出的结论会与这里相反。
+    // 介质按 环境变量 > 配置文件 store_mode > 默认 裁决（ADR-083 修订）；横幅带上
+    // 「谁定的」——环境变量压了向导选的档时，翻文件得出的结论会与这里相反。
     match crate::options::store_mode() {
         crate::options::StoreMode::Mem => println!(
             "  *** 内存模式（mem，{}）：持久层是进程内嵌 kv-mem，\
@@ -1776,7 +1777,7 @@ fn print_startup_complete_banner(
 }
 
 /// 把进程全局 `SUL_DB` 接到进程内嵌的 kv-mem 引擎上（[`options::StoreMode::Mem`]，
-/// 由环境变量 `AIOS_STORE_MODE` 选出，ADR-083）。
+/// 由 `AIOS_STORE_MODE` > 配置文件 `store_mode` > 默认 分层选出，ADR-083 修订）。
 ///
 /// 换掉的只是介质。`SUL_DB` 是 `Surreal<Any>`，引擎选择对调用方不可见，所以初始化
 /// 解析、增量窗口写回、模型与房间派生数据全部走原来那条路，只是落点从 rocksdb 变成
@@ -1810,8 +1811,9 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
     println!(
         "*** 进程一退整库即消失，外部没有端口可连（rvm_verify / /sql 探针 / \
          Capture-*Evidence 与 plant-ui 的「库供数」读面都够不着）。\
-         要留证据请以 AIOS_STORE_MODE=rocksdb 启动，并把 v_ip:v_port 指到一台真在跑的库\
-         （介质只认这个环境变量，DbOption.toml 里的 store_mode 不再生效，ADR-083）。"
+         要留证据请在向导第②步选 external（写进 store_mode），或临时以 \
+         AIOS_STORE_MODE=rocksdb 启动，并把 v_ip:v_port 指到一台真在跑的库\
+         （介质按 环境变量 > 配置文件 > 默认 裁决，ADR-083 修订）。"
     );
     // 这一句是 2026-09-18 补的：现场改了属性、模型跟着变了、库里的属性行却一动不动，
     // 查了半天才发现服务跑在 mem 上。数据面形态是 store_mode 派生的，不是另一个开关，
@@ -1821,7 +1823,8 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
          `pe` / `ATT_<noun>` / `pe_owner` 行只有「模型生成时写透」一个来源\
          （`POST /api/v1/element/ensure` 在这一档直接回 skipped-memory）。\
          所以改了属性之后库里那一行不会跟着变——属性由 /api/v1/element/attributes 从 E3D 文件现读，\
-         值是对的。要让属性行真的进库，只有 AIOS_STORE_MODE=rocksdb 这一条路。"
+         值是对的。要让属性行真的进库，切到 rocksdb（向导第②步选 external，或 \
+         AIOS_STORE_MODE=rocksdb）这一条路。"
     );
     Ok(())
 }
