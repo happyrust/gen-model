@@ -81,13 +81,14 @@ v_password = "root"
 # rocksdb 档要连的那台 SurrealDB 的端口；这一格是数字，不能写空串。mem 档不用它，
 # 预填 8009 只为切档时少填一格。
 v_port = "8009"
-# 介质（mem / rocksdb）**不在本文件里**（ADR-083，2026-09-18）：只由启动服务时的环境变量
-# AIOS_STORE_MODE 决定，不设 = rocksdb（ADR-083 D6：漏设要当场报连不上，而不是悄悄跑在内存库上）。
-# 本包不靠那个默认：Start-AMS.ps1 不给 -StoreMode 时会显式设成 mem，双击即跑照旧。
-# 这里写 store_mode = "..." 一个字都不生效，只会在启动日志被点名。
+# 介质（mem / rocksdb）分层裁决（ADR-083 修订，2026-10）：环境变量 AIOS_STORE_MODE >
+# 本文件的 store_mode > 默认 rocksdb（漏设要当场报连不上，而不是悄悄跑在内存库上）。
+# store_mode 是向导第②步「外部库 external / 内存库 memory」落盘的那一格——本包出厂不写它，
+# Start-AMS.ps1 不给 -StoreMode、文件也没写时回填 mem，双击即跑照旧；向导里选了档就写进
+# 这里，冷启动与向导重启都按它走。环境变量 pin 了相反档时启动日志会并排点名两边。
 # 出厂 mem：数据库在后端进程内，无子进程、无 Surreal TCP 端口，进程一退数据即清空。
-# 要数据活过重启：先用包内 Start-Surreal.ps1 / bin\surreal.exe 起一台 rocksdb 库（本服务不拉起它），
-# 把上面 v_ip:v_port 指过去，再以 Start-AMS.ps1 -StoreMode rocksdb（= AIOS_STORE_MODE=rocksdb）启动。
+# 要数据活过重启：在向导第②步选「外部库（external）」并把上面 v_ip:v_port 指到一台
+# 已在跑的 SurrealDB 2.x——本服务只连、不拉起；或先用包内 Start-Surreal.ps1 起一台。
 # 持久模式：kv-mem 只保存新生成的 root overlay，冷 root 直接查 RocksDB，不回填。
 model_cache_mode = "incremental-overlay"
 
