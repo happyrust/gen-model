@@ -2392,7 +2392,9 @@ pub(crate) fn ensure_ready() -> anyhow::Result<()> {
 }
 
 /// `/health.room_build.resident.progress`：这一次 / 正在进行的 resident 构建的进度快照。
-/// 只计数、不决策——`Loading` 期间实时前进，翻篇后留最后一帧给事后对账与客户端进度条。
+/// 只计数——`Loading` 期间实时前进，翻篇后留最后一帧给事后对账与客户端进度条。
+/// 唯一的决策用途是重建准入借 `edge-recompute` 的 done/total 判断上一趟逐库重算
+/// 是否还在飞（#53）：只看那一段的完成计数，其余计数仍只报数、不做决策。
 /// 三段各有一对 done/total：`source-snapshot` 数 MDB 设计库文件，`mesh-warm` 数唯一网格键，
 /// `edge-recompute` 数整库房间边重算的库数（「重新生成房间」菜单的第三段，生命周期已回
 /// `Ready`、不进 `ensure_ready` 的拦截面）。
@@ -2429,7 +2431,12 @@ pub(crate) fn progress() -> ResidentProgress {
 
 /// `mark_loading` 进新阶段时清零重记：阶段名与生命周期共用同一串字面。
 fn reset_progress(phase: &str) {
-    *progress_slot()
+    reset_progress_in(progress_slot(), phase);
+}
+
+/// 把指定的进度槽清零重记（生产用全局槽，测试用本地槽）。
+fn reset_progress_in(progress: &RwLock<ResidentProgress>, phase: &str) {
+    *progress
         .write()
         .unwrap_or_else(PoisonError::into_inner) = ResidentProgress {
         phase: phase.to_owned(),
@@ -2508,16 +2515,36 @@ pub(crate) fn note_recompute_dbnum_done() {
 }
 
 /// 「重新生成房间」（`POST /api/v1/rooms/rebuild`）的开闸门：一把锁里「判 + 翻」——
-/// 已是 `Loading`（startup 首建 / 上一趟重建 / 开工前对齐的换代）就不放第二趟进。
+/// 已是 `Loading`（startup 首建 / 上一趟重建 / 开工前对齐的换代）就不放第二趟进；
+/// 上一趟已翻 `Ready` 但逐库边重算（`edge-recompute`）还没跑完，同样不放——那一段
+/// 在 `Ready` 下跑，只看生命周期会漏守，两趟交错会互相清边、覆盖盖章（#53）。
 /// 其余各态（含 `Blocked`、`Degraded`）都许进：这一按就是让人把坏掉的那代换掉。
 pub(crate) fn try_begin_rebuild() -> bool {
-    let mut slot = lifecycle_slot()
+    try_begin_rebuild_in(lifecycle_slot(), progress_slot())
+}
+
+// Tests own the lifecycle and progress slots instead of process-global state.
+fn try_begin_rebuild_in(
+    lifecycle: &RwLock<ResidentLifecycle>,
+    progress: &RwLock<ResidentProgress>,
+) -> bool {
+    let mut slot = lifecycle
         .write()
         .unwrap_or_else(PoisonError::into_inner);
     if matches!(*slot, ResidentLifecycle::Loading { .. }) {
         return false;
     }
-    reset_progress("source-snapshot");
+    {
+        let in_flight = progress
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if in_flight.phase == "edge-recompute"
+            && in_flight.dbnums_done < in_flight.dbnums_total
+        {
+            return false;
+        }
+    }
+    reset_progress_in(progress, "source-snapshot");
     *slot = ResidentLifecycle::Loading {
         phase: "source-snapshot".to_owned(),
         started_at: chrono::Local::now().to_rfc3339(),
@@ -3258,6 +3285,10 @@ pub(crate) fn resident_health_from(
         "unwatched_missing_geometry_notice": notice,
     })
 }
+
+#[cfg(test)]
+#[path = "room_rebuild_regression_tests.rs"]
+mod room_rebuild_regression_tests;
 
 #[cfg(test)]
 mod tests {

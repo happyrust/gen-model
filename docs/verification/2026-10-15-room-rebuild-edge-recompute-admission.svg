@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="880" viewBox="0 0 1280 880" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c62828"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e7d32"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="880" fill="#f7fafc"/>
+
+  <text x="48" y="58" font-size="34" font-weight="700" fill="#17202a">边重算没跑完，第二趟重建就被放进来了</text>
+  <text x="48" y="90" font-size="18" fill="#546e7a">缺陷 #2 · room_rebuild_regression_second_request_rejected_during_edge_recompute</text>
+  <rect x="922" y="34" width="310" height="44" rx="22" fill="#ffebee" stroke="#ef9a9a" stroke-width="1.5"/>
+  <text x="1077" y="62" text-anchor="middle" font-size="17" font-weight="700" fill="#c62828">Ready ≠ 全部做完</text>
+
+  <text x="48" y="132" font-size="21" font-weight="700" fill="#c62828">实际发生（错误链）</text>
+
+  <!-- box1 -->
+  <g>
+    <rect x="40" y="152" width="258" height="238" rx="14" fill="#ffffff" stroke="#90a4ae" stroke-width="2"/>
+    <rect x="40" y="152" width="258" height="46" rx="14" fill="#eceff1"/>
+    <rect x="40" y="184" width="258" height="14" fill="#eceff1"/>
+    <text x="169" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#37474f">① 第一趟占门 ✓</text>
+    <text x="62" y="226" font-size="15" fill="#263238">POST /rooms/rebuild</text>
+    <text x="62" y="254" font-size="15" fill="#263238">try_begin_rebuild：</text>
+    <rect x="62" y="266" width="214" height="32" rx="8" fill="#e3f2fd"/>
+    <text x="169" y="287" text-anchor="middle" font-size="15" font-weight="700" fill="#1565c0">Ready → Loading</text>
+    <text x="62" y="324" font-size="15" fill="#263238">此期间第二请求</text>
+    <rect x="188" y="302" width="88" height="30" rx="8" fill="#e8f5e9"/>
+    <text x="232" y="322" text-anchor="middle" font-size="14" font-weight="700" fill="#2e7d32">被拒 ✓</text>
+    <text x="62" y="356" font-size="13" fill="#607d8b">控制组：门在这一段有效</text>
+    <text x="62" y="376" font-size="13" fill="#607d8b">room_resident.rs:2519</text>
+  </g>
+
+  <line x1="304" y1="271" x2="344" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="324" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">翻 Ready</text>
+
+  <!-- box2 -->
+  <g>
+    <rect x="350" y="152" width="258" height="238" rx="14" fill="#fff8e1" stroke="#ef6c00" stroke-width="2.5"/>
+    <rect x="350" y="152" width="258" height="46" rx="14" fill="#ffe0b2"/>
+    <rect x="350" y="184" width="258" height="14" fill="#ffe0b2"/>
+    <text x="479" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#e65100">② 边循环还在跑 ⚠</text>
+    <text x="372" y="224" font-size="15" fill="#263238">生命周期（故意的）</text>
+    <rect x="486" y="202" width="100" height="30" rx="8" fill="#e3f2fd"/>
+    <text x="536" y="222" text-anchor="middle" font-size="15" font-weight="700" fill="#1565c0">Ready</text>
+    <text x="372" y="258" font-size="15" fill="#263238">进度相位</text>
+    <rect x="466" y="236" width="120" height="30" rx="8" fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.5"/>
+    <text x="526" y="256" text-anchor="middle" font-size="13" font-weight="700" fill="#e65100">edge-recompute</text>
+    <text x="372" y="292" font-size="15" fill="#263238">逐库重算进度</text>
+    <rect x="372" y="302" width="214" height="18" rx="9" fill="#eceff1"/>
+    <rect x="372" y="302" width="86" height="18" rx="9" fill="#fb8c00"/>
+    <text x="479" y="342" text-anchor="middle" font-size="15" font-weight="700" fill="#e65100">dbnums_done 2 / 5，没完</text>
+    <text x="372" y="368" font-size="13" fill="#8d6e63">生成已放行，边还在逐库补</text>
+    <text x="372" y="386" font-size="12" fill="#8d6e63">handlers.rs:763 起的循环</text>
+  </g>
+
+  <line x1="614" y1="271" x2="654" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="634" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">再按一次</text>
+
+  <!-- box3 -->
+  <g>
+    <rect x="660" y="152" width="258" height="238" rx="14" fill="#ffffff" stroke="#c62828" stroke-width="2.5"/>
+    <rect x="660" y="152" width="258" height="46" rx="14" fill="#ffebee"/>
+    <rect x="660" y="184" width="258" height="14" fill="#ffebee"/>
+    <text x="789" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#c62828">③ 第二趟被放行 ✕</text>
+    <text x="682" y="224" font-size="15" fill="#37474f">准入只问一件事：</text>
+    <rect x="682" y="236" width="214" height="32" rx="8" fill="#eceff1"/>
+    <text x="789" y="257" text-anchor="middle" font-size="14" font-family="Consolas,monospace" fill="#37474f">lifecycle == Loading ?</text>
+    <text x="682" y="292" font-size="15" fill="#37474f">此刻是 Ready → 不拦</text>
+    <rect x="682" y="304" width="214" height="34" rx="8" fill="#ffebee"/>
+    <text x="789" y="326" text-anchor="middle" font-size="15" font-weight="700" fill="#c62828">reset 进度 + 翻 Loading</text>
+    <text x="682" y="356" font-size="14" fill="#bf360c">在飞那趟的进度被清零</text>
+    <text x="682" y="376" font-size="13" fill="#8d6e63">spawn 第二个 run_rooms_rebuild</text>
+  </g>
+
+  <line x1="924" y1="271" x2="964" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="944" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">交错</text>
+
+  <!-- box4 -->
+  <g>
+    <rect x="970" y="152" width="270" height="238" rx="14" fill="#ffebee" stroke="#c62828" stroke-width="3"/>
+    <rect x="970" y="152" width="270" height="46" rx="14" fill="#ef9a9a"/>
+    <rect x="970" y="184" width="270" height="14" fill="#ef9a9a"/>
+    <text x="1105" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#7f0000">④ 两趟互相踩 ✕</text>
+    <text x="992" y="224" font-size="15" fill="#7f0000">· 第二趟再清边：第一趟刚</text>
+    <text x="992" y="248" font-size="15" fill="#7f0000">　算好的边被删、章被作废</text>
+    <text x="992" y="276" font-size="15" fill="#7f0000">· 两趟同时逐库写边、盖章</text>
+    <text x="992" y="304" font-size="15" fill="#7f0000">· done 计数串账，/health</text>
+    <text x="992" y="328" font-size="15" fill="#7f0000">　进度不再属于任何一趟</text>
+    <rect x="992" y="342" width="226" height="32" rx="8" fill="#ffffff" stroke="#c62828" stroke-width="1.5"/>
+    <text x="1105" y="363" text-anchor="middle" font-size="15" font-weight="700" fill="#c62828">结果取决于交错时序</text>
+  </g>
+
+  <g>
+    <rect x="40" y="424" width="1200" height="74" rx="14" fill="#c62828"/>
+    <text x="640" y="456" text-anchor="middle" font-size="22" font-weight="700" fill="#ffffff">结果：第一趟还没收尾，第二趟已经重开——清边、重算、盖章互相覆盖，谁赢看时序</text>
+    <text x="640" y="484" text-anchor="middle" font-size="16" fill="#ffcdd2">准入门只守住了 Loading 那一段，Ready 之后最长的收尾阶段反而无人守</text>
+  </g>
+
+  <text x="48" y="552" font-size="21" font-weight="700" fill="#2e7d32">期望行为（修复方案）</text>
+
+  <rect x="40" y="572" width="1200" height="218" rx="14" fill="#f1f8e9" stroke="#81c784" stroke-width="2" stroke-dasharray="7 5"/>
+
+  <g>
+    <rect x="70" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="235" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">准入加第二道门</text>
+    <text x="92" y="672" font-size="15" fill="#263238">lifecycle 为 Loading，或</text>
+    <text x="92" y="696" font-size="14" font-family="Consolas,monospace" fill="#263238">phase="edge-recompute"</text>
+    <text x="92" y="720" font-size="15" fill="#263238">且 done &lt; total → 拒绝（409）</text>
+    <text x="92" y="744" font-size="13" fill="#607d8b">拒绝时不 reset 进度、不翻 Loading</text>
+  </g>
+
+  <line x1="406" y1="679" x2="462" y2="679" stroke="#2e7d32" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <text x="434" y="660" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">循环跑完</text>
+
+  <g>
+    <rect x="468" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="633" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">门自动放开，不会卡死</text>
+    <rect x="490" y="656" width="286" height="18" rx="9" fill="#eceff1"/>
+    <rect x="490" y="656" width="286" height="18" rx="9" fill="#66bb6a"/>
+    <text x="633" y="698" text-anchor="middle" font-size="15" font-weight="700" fill="#2e7d32">dbnums_done 5 / 5</text>
+    <text x="490" y="726" font-size="14" fill="#37474f">done == total → 下一趟可进；最后一帧</text>
+    <text x="490" y="746" font-size="14" fill="#37474f">进度留作对账，不需要谁去清标志</text>
+  </g>
+
+  <line x1="804" y1="679" x2="860" y2="679" stroke="#2e7d32" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <text x="832" y="660" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">Ready 不变</text>
+
+  <g>
+    <rect x="866" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="1031" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">不拖住生成，不改时序</text>
+    <text x="888" y="672" font-size="15" fill="#263238">边循环仍在 Ready 下跑</text>
+    <text x="888" y="696" font-size="15" fill="#263238">生成照常放行，/health 照常</text>
+    <text x="888" y="720" font-size="15" fill="#263238">看见 Ready + 重算进度</text>
+    <rect x="888" y="730" width="286" height="10" rx="5" fill="#e8f5e9"/>
+  </g>
+
+  <text x="640" y="836" text-anchor="middle" font-size="16" fill="#546e7a">一句话：门守的是“整趟活干完”，不是“生命周期恰好停在哪一格”。</text>
+</svg>

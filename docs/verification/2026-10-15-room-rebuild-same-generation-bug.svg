@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="880" viewBox="0 0 1280 880" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c62828"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e7d32"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#607d8b"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="880" fill="#f7fafc"/>
+
+  <!-- title -->
+  <text x="48" y="58" font-size="34" font-weight="700" fill="#17202a">同代重建失败：边已删，却判「不欠」</text>
+  <text x="48" y="90" font-size="18" fill="#546e7a">缺陷 #1 · room_rebuild_regression_same_generation_failure_keeps_alignment_owed</text>
+  <rect x="922" y="34" width="310" height="44" rx="22" fill="#ffebee" stroke="#ef9a9a" stroke-width="1.5"/>
+  <text x="1077" y="62" text-anchor="middle" font-size="17" font-weight="700" fill="#c62828">代号同为 g1，是触发条件</text>
+
+  <!-- actual behaviour -->
+  <text x="48" y="132" font-size="21" font-weight="700" fill="#c62828">实际发生（错误链）</text>
+
+  <!-- box 1 -->
+  <g>
+    <rect x="40" y="152" width="258" height="238" rx="14" fill="#ffffff" stroke="#90a4ae" stroke-width="2"/>
+    <rect x="40" y="152" width="258" height="46" rx="14" fill="#eceff1"/>
+    <rect x="40" y="184" width="258" height="14" fill="#eceff1"/>
+    <text x="169" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#37474f">① 起点：本来对齐</text>
+    <text x="62" y="228" font-size="13" fill="#263238">水位 model_room_generation</text>
+    <rect x="62" y="240" width="92" height="34" rx="17" fill="#e3f2fd"/>
+    <text x="108" y="263" text-anchor="middle" font-size="17" font-weight="700" fill="#1565c0">g1</text>
+    <text x="164" y="263" font-size="16" fill="#607d8b">= 常驻代号</text>
+    <rect x="226" y="240" width="52" height="34" rx="17" fill="#e3f2fd"/>
+    <text x="252" y="263" text-anchor="middle" font-size="17" font-weight="700" fill="#1565c0">g1</text>
+    <text x="62" y="302" font-size="16" fill="#263238">room_relate 边</text>
+    <circle cx="252" cy="296" r="10" fill="#43a047"/>
+    <text x="62" y="332" font-size="16" fill="#263238">room_panel_relate 边</text>
+    <circle cx="252" cy="326" r="10" fill="#43a047"/>
+    <rect x="62" y="348" width="214" height="28" rx="8" fill="#e8f5e9"/>
+    <text x="169" y="368" text-anchor="middle" font-size="14" fill="#2e7d32">事实与承诺一致 ✓</text>
+  </g>
+
+  <line x1="304" y1="271" x2="344" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="324" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">清边</text>
+
+  <!-- box 2 -->
+  <g>
+    <rect x="350" y="152" width="258" height="238" rx="14" fill="#fff8e1" stroke="#ef6c00" stroke-width="2.5"/>
+    <rect x="350" y="152" width="258" height="46" rx="14" fill="#ffe0b2"/>
+    <rect x="350" y="184" width="258" height="14" fill="#ffe0b2"/>
+    <text x="479" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#e65100">② 清边，不动水位 ⚠</text>
+    <text x="372" y="226" font-size="15" font-family="Consolas,monospace" fill="#4e342e">DELETE room_relate;</text>
+    <text x="372" y="250" font-size="15" font-family="Consolas,monospace" fill="#4e342e">DELETE room_panel_relate;</text>
+    <text x="372" y="286" font-size="16" fill="#263238">两张边表</text>
+    <rect x="486" y="264" width="100" height="30" rx="8" fill="#ffebee"/>
+    <text x="536" y="285" text-anchor="middle" font-size="15" font-weight="700" fill="#c62828">已清空 ∅</text>
+    <text x="372" y="316" font-size="13" fill="#263238">水位 model_room_generation</text>
+    <rect x="372" y="326" width="100" height="28" rx="8" fill="#ffebee" stroke="#c62828" stroke-width="1.5"/>
+    <text x="422" y="346" text-anchor="middle" font-size="15" font-weight="700" fill="#c62828">仍是 g1 ✕</text>
+    <text x="484" y="346" font-size="14" fill="#bf360c">承诺还在，事实已没</text>
+    <text x="372" y="374" font-size="12" fill="#8d6e63">handlers.rs:714 清边 helper</text>
+  </g>
+
+  <line x1="614" y1="271" x2="654" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="634" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">重算</text>
+
+  <!-- box 3 -->
+  <g>
+    <rect x="660" y="152" width="258" height="238" rx="14" fill="#ffffff" stroke="#c62828" stroke-width="2.5"/>
+    <rect x="660" y="152" width="258" height="46" rx="14" fill="#ffebee"/>
+    <rect x="660" y="184" width="258" height="14" fill="#ffebee"/>
+    <text x="789" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#c62828">③ 重算失败 / 跳过</text>
+    <text x="682" y="224" font-size="15" fill="#37474f">· 冻不出计算器 / 开关关</text>
+    <text x="682" y="248" font-size="15" fill="#37474f">· 读不出水位行</text>
+    <text x="682" y="272" font-size="15" fill="#37474f">· 根清单枚举失败</text>
+    <text x="682" y="296" font-size="15" fill="#37474f">· 覆盖面不全 / 有根算不出</text>
+    <rect x="682" y="312" width="214" height="34" rx="8" fill="#eceff1"/>
+    <text x="789" y="334" text-anchor="middle" font-size="15" font-weight="700" fill="#37474f">只记日志，不盖章</text>
+    <text x="682" y="368" font-size="12" fill="#8d6e63">handlers.rs:766 起逐库重算</text>
+    <text x="682" y="386" font-size="13" fill="#8d6e63">本应留下的“欠账”没有被记下</text>
+  </g>
+
+  <line x1="924" y1="271" x2="964" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="944" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">下个任务</text>
+
+  <!-- box 4 -->
+  <g>
+    <rect x="970" y="152" width="270" height="238" rx="14" fill="#ffebee" stroke="#c62828" stroke-width="3"/>
+    <rect x="970" y="152" width="270" height="46" rx="14" fill="#ef9a9a"/>
+    <rect x="970" y="184" width="270" height="14" fill="#ef9a9a"/>
+    <text x="1105" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#7f0000">④ 判定“不欠” ✕</text>
+    <text x="992" y="226" font-size="14" font-family="Consolas,monospace" fill="#263238">library_alignment_owed(</text>
+    <text x="992" y="250" font-size="14" font-family="Consolas,monospace" fill="#263238">  Some("g1"), Some("g1"))</text>
+    <rect x="992" y="264" width="226" height="34" rx="8" fill="#ffffff" stroke="#c62828" stroke-width="1.5"/>
+    <text x="1105" y="286" text-anchor="middle" font-size="16" font-weight="700" fill="#c62828">= None → 不欠</text>
+    <text x="992" y="326" font-size="15" fill="#7f0000">它只比代号，不看边表</text>
+    <text x="992" y="350" font-size="15" fill="#7f0000">→ 不触发整库重算</text>
+    <text x="992" y="374" font-size="13" fill="#8d6e63">room_recompute.rs:125</text>
+  </g>
+
+  <!-- result banner -->
+  <g>
+    <rect x="40" y="424" width="1200" height="74" rx="14" fill="#c62828"/>
+    <text x="640" y="456" text-anchor="middle" font-size="22" font-weight="700" fill="#ffffff">结果：边已删 / 缺失，但“已对齐 g1”的承诺还在 → 每个后续任务都放行 → 永不补</text>
+    <text x="640" y="484" text-anchor="middle" font-size="16" fill="#ffcdd2">只有等常驻代号偶然换成 g2，代号不等才会被发现——在此之前，房间边一直是旧的或空的</text>
+  </g>
+
+  <!-- expected behaviour -->
+  <text x="48" y="552" font-size="21" font-weight="700" fill="#2e7d32">期望行为（方案 A）</text>
+
+  <g stroke-dasharray="7 5" stroke="#81c784" stroke-width="2" fill="#f1f8e9">
+    <rect x="40" y="572" width="1200" height="218" rx="14"/>
+  </g>
+
+  <g>
+    <rect x="70" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="235" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">清边的同一笔里作废承诺</text>
+    <text x="92" y="672" font-size="15" font-family="Consolas,monospace" fill="#263238">UPDATE dbnum_watermark SET</text>
+    <text x="92" y="696" font-size="15" font-family="Consolas,monospace" fill="#263238">  model_room_generation = NONE,</text>
+    <text x="92" y="720" font-size="15" font-family="Consolas,monospace" fill="#263238">  model_room_stray_generations = [];</text>
+    <text x="92" y="744" font-size="13" fill="#607d8b">+ 生产路径清整个 DbnumState 镜像</text>
+  </g>
+
+  <line x1="406" y1="679" x2="462" y2="679" stroke="#2e7d32" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <text x="434" y="660" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">失败后</text>
+
+  <g>
+    <rect x="468" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="633" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">欠账被电平型触发记住</text>
+    <text x="490" y="672" font-size="15" font-family="Consolas,monospace" fill="#263238">library_alignment_owed(</text>
+    <text x="490" y="696" font-size="15" font-family="Consolas,monospace" fill="#263238">  None, Some("g1"))</text>
+    <rect x="490" y="708" width="286" height="32" rx="8" fill="#e8f5e9"/>
+    <text x="633" y="729" text-anchor="middle" font-size="15" font-weight="700" fill="#2e7d32">= Some(欠) → 每个任务再点一次</text>
+  </g>
+
+  <line x1="804" y1="679" x2="860" y2="679" stroke="#2e7d32" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <text x="832" y="660" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">算齐后</text>
+
+  <g>
+    <rect x="866" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="1031" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">只有整库算齐才重新盖章</text>
+    <text x="888" y="672" font-size="15" font-family="Consolas,monospace" fill="#263238">UPDATE … SET</text>
+    <text x="888" y="696" font-size="15" font-family="Consolas,monospace" fill="#263238">  model_room_generation = '新代号'</text>
+    <rect x="888" y="708" width="286" height="32" rx="8" fill="#e8f5e9"/>
+    <text x="1031" y="729" text-anchor="middle" font-size="15" font-weight="700" fill="#2e7d32">代号相等 → 不欠，安静下来 ✓</text>
+  </g>
+
+  <text x="640" y="836" text-anchor="middle" font-size="16" fill="#546e7a">一句话：清边作废了“事实”，却没作废“承诺”；而唯一的补课触发器只认承诺，不认事实。</text>
+</svg>

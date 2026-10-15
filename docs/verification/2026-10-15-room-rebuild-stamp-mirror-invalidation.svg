@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="880" viewBox="0 0 1280 880" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c62828"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e7d32"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="880" fill="#f7fafc"/>
+
+  <text x="48" y="58" font-size="34" font-weight="700" fill="#17202a">盖章写进了库，进程镜像还停在旧代号</text>
+  <text x="48" y="90" font-size="18" fill="#546e7a">缺陷 #3 · room_rebuild_regression_success_stamp_has_mirror_invalidation_contract</text>
+  <rect x="922" y="34" width="310" height="44" rx="22" fill="#ffebee" stroke="#ef9a9a" stroke-width="1.5"/>
+  <text x="1077" y="62" text-anchor="middle" font-size="17" font-weight="700" fill="#c62828">库与镜像，两本账不一致</text>
+
+  <text x="48" y="132" font-size="21" font-weight="700" fill="#c62828">实际发生（错误链）</text>
+
+  <!-- box1 -->
+  <g>
+    <rect x="40" y="152" width="258" height="238" rx="14" fill="#ffffff" stroke="#90a4ae" stroke-width="2"/>
+    <rect x="40" y="152" width="258" height="46" rx="14" fill="#eceff1"/>
+    <rect x="40" y="184" width="258" height="14" fill="#eceff1"/>
+    <text x="169" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#37474f">① 整库算齐 ✓</text>
+    <text x="62" y="226" font-size="15" fill="#263238">逐库房间边重算完成</text>
+    <text x="62" y="254" font-size="15" fill="#263238">report.failed 为空</text>
+    <text x="62" y="282" font-size="15" fill="#263238">根覆盖面自证齐全</text>
+    <rect x="62" y="298" width="214" height="32" rx="8" fill="#e8f5e9"/>
+    <text x="169" y="319" text-anchor="middle" font-size="15" font-weight="700" fill="#2e7d32">够格盖 Aligned 章</text>
+    <text x="62" y="352" font-size="13" fill="#607d8b">recompute_dbnum_room_</text>
+    <text x="62" y="372" font-size="13" fill="#607d8b">edges_now（handlers.rs）</text>
+  </g>
+
+  <line x1="304" y1="271" x2="344" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="324" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">盖章</text>
+
+  <!-- box2 -->
+  <g>
+    <rect x="350" y="152" width="258" height="238" rx="14" fill="#ffffff" stroke="#90a4ae" stroke-width="2"/>
+    <rect x="350" y="152" width="258" height="46" rx="14" fill="#eceff1"/>
+    <rect x="350" y="184" width="258" height="14" fill="#eceff1"/>
+    <text x="479" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#37474f">② 直查 SUL_DB 写库</text>
+    <text x="372" y="222" font-size="14" font-family="Consolas,monospace" fill="#263238">UPDATE dbnum_watermark</text>
+    <text x="372" y="246" font-size="14" font-family="Consolas,monospace" fill="#263238">SET model_room_generation</text>
+    <text x="372" y="270" font-size="14" font-family="Consolas,monospace" fill="#263238">  = 'g2', stray = [];</text>
+    <text x="372" y="304" font-size="15" fill="#263238">数据库里那一格</text>
+    <rect x="486" y="282" width="100" height="30" rx="8" fill="#e3f2fd"/>
+    <text x="536" y="302" text-anchor="middle" font-size="15" font-weight="700" fill="#1565c0">g2 ✓</text>
+    <text x="372" y="338" font-size="14" fill="#bf360c">绕过了 DbnumState 的写者</text>
+    <text x="372" y="362" font-size="13" fill="#8d6e63">成功时原代码什么都不做</text>
+    <text x="372" y="380" font-size="13" fill="#8d6e63">失败才打一行日志</text>
+  </g>
+
+  <line x1="614" y1="271" x2="654" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="634" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">没人通知</text>
+
+  <!-- box3 -->
+  <g>
+    <rect x="660" y="152" width="258" height="238" rx="14" fill="#fff8e1" stroke="#ef6c00" stroke-width="2.5"/>
+    <rect x="660" y="152" width="258" height="46" rx="14" fill="#ffe0b2"/>
+    <rect x="660" y="184" width="258" height="14" fill="#ffe0b2"/>
+    <text x="789" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#e65100">③ 镜像还留着旧账 ⚠</text>
+    <text x="682" y="224" font-size="15" fill="#263238">DbnumState 进程镜像</text>
+    <rect x="682" y="236" width="214" height="32" rx="8" fill="#ffebee" stroke="#ef6c00" stroke-width="1.5"/>
+    <text x="789" y="257" text-anchor="middle" font-size="15" font-weight="700" fill="#c62828">仍是 g1 / 旧 stray ✕</text>
+    <text x="682" y="292" font-size="15" fill="#37474f">全仓纪律本是：落库成功</text>
+    <text x="682" y="316" font-size="15" fill="#37474f">就作废这一格镜像</text>
+    <rect x="682" y="328" width="214" height="32" rx="8" fill="#eceff1"/>
+    <text x="789" y="349" text-anchor="middle" font-size="14" font-family="Consolas,monospace" fill="#37474f">invalidate_mirrored</text>
+    <text x="682" y="378" font-size="13" fill="#8d6e63">task_end / fast_delete 都有，唯独这处缺</text>
+  </g>
+
+  <line x1="924" y1="271" x2="964" y2="271" stroke="#c62828" stroke-width="4" marker-end="url(#arrowRed)"/>
+  <text x="944" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828">读者读到</text>
+
+  <!-- box4 -->
+  <g>
+    <rect x="970" y="152" width="270" height="238" rx="14" fill="#ffebee" stroke="#c62828" stroke-width="3"/>
+    <rect x="970" y="152" width="270" height="46" rx="14" fill="#ef9a9a"/>
+    <rect x="970" y="184" width="270" height="14" fill="#ef9a9a"/>
+    <text x="1105" y="182" text-anchor="middle" font-size="18" font-weight="700" fill="#7f0000">④ 按旧账判欠 ✕</text>
+    <text x="992" y="224" font-size="15" fill="#7f0000">DbnumState::read 读镜像：</text>
+    <text x="992" y="252" font-size="15" fill="#7f0000">镜像 g1 ≠ 常驻 g2</text>
+    <rect x="992" y="264" width="226" height="32" rx="8" fill="#ffffff" stroke="#c62828" stroke-width="1.5"/>
+    <text x="1105" y="285" text-anchor="middle" font-size="15" font-weight="700" fill="#c62828">→ 判欠，重复整库重算</text>
+    <text x="992" y="320" font-size="15" fill="#7f0000">没有 ACK 的根被报</text>
+    <text x="992" y="344" font-size="15" fill="#7f0000">not_computed</text>
+    <text x="992" y="372" font-size="13" fill="#8d6e63">durable_alignment / room 查询</text>
+  </g>
+
+  <g>
+    <rect x="40" y="424" width="1200" height="74" rx="14" fill="#c62828"/>
+    <text x="640" y="456" text-anchor="middle" font-size="22" font-weight="700" fill="#ffffff">结果：库里已经对齐，进程却以为没对齐 → 反复整库重算、查询误报未算</text>
+    <text x="640" y="484" text-anchor="middle" font-size="16" fill="#ffcdd2">镜像只能等别的写者顺带作废、或进程重启，才偶然和库里对上</text>
+  </g>
+
+  <text x="48" y="552" font-size="21" font-weight="700" fill="#2e7d32">期望行为（已实施的修复）</text>
+
+  <rect x="40" y="572" width="1200" height="218" rx="14" fill="#f1f8e9" stroke="#81c784" stroke-width="2" stroke-dasharray="7 5"/>
+
+  <g>
+    <rect x="70" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="235" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">盖章改成 match 分支</text>
+    <text x="92" y="672" font-size="15" fill="#263238">UPDATE 经 .check() 确认</text>
+    <text x="92" y="696" font-size="15" fill="#263238">Ok → 作废镜像（见中）</text>
+    <text x="92" y="720" font-size="15" fill="#263238">Err → 只记日志，不作废</text>
+    <text x="92" y="744" font-size="13" fill="#607d8b">库没改成时，镜像本来就是准的</text>
+  </g>
+
+  <line x1="406" y1="679" x2="462" y2="679" stroke="#2e7d32" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <text x="434" y="660" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">成功后</text>
+
+  <g>
+    <rect x="468" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="633" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">只作废这一个库的镜像格</text>
+    <rect x="490" y="656" width="286" height="34" rx="8" fill="#e8f5e9"/>
+    <text x="633" y="678" text-anchor="middle" font-size="14" font-family="Consolas,monospace" fill="#2e7d32">invalidate_mirrored(dbnum)</text>
+    <text x="490" y="716" font-size="14" fill="#37474f">下一次读回库里最新值回填</text>
+    <text x="490" y="738" font-size="14" fill="#37474f">不碰别的库，不动 ACK 记账</text>
+  </g>
+
+  <line x1="804" y1="679" x2="860" y2="679" stroke="#2e7d32" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <text x="832" y="660" text-anchor="middle" font-size="13" font-weight="700" fill="#2e7d32">再读时</text>
+
+  <g>
+    <rect x="866" y="604" width="330" height="150" rx="12" fill="#ffffff" stroke="#2e7d32" stroke-width="2"/>
+    <text x="1031" y="638" text-anchor="middle" font-size="18" font-weight="700" fill="#2e7d32">两本账重新一致</text>
+    <text x="888" y="672" font-size="15" fill="#263238">库上 g2 == 镜像 g2 == 常驻 g2</text>
+    <rect x="888" y="688" width="286" height="32" rx="8" fill="#e8f5e9"/>
+    <text x="1031" y="709" text-anchor="middle" font-size="15" font-weight="700" fill="#2e7d32">不欠 → 安静，不再重复重算 ✓</text>
+    <text x="888" y="738" font-size="13" fill="#607d8b">三条回归现已全绿（3 passed）</text>
+  </g>
+
+  <text x="640" y="836" text-anchor="middle" font-size="16" fill="#546e7a">一句话：谁绕过了带镜像的写者直查数据库，谁就得自己负责作废那一格镜像。</text>
+</svg>

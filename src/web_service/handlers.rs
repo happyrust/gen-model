@@ -713,6 +713,19 @@ pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoRe
     ))
 }
 
+// Explicit connection seam for isolated tests; production still passes SUL_DB.
+// 清边必须在同一笔里作废整库对齐承诺：边已全库归零，水位若还留着旧代号，
+// `library_alignment_owed` 只比代号就会判「不欠」，逐库重算失败 / 被跳过的库
+// 便永不补（#52）。`NONE` + 空 stray 与 `task_end` 的 `Cleared` 同一种写法；
+// 没有水位行时 UPDATE 不建行，算齐的库随后在 `recompute_dbnum_room_edges_now` 盖回。
+async fn clear_room_rebuild_edges_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> Result<surrealdb::Response, surrealdb::Error> {
+    db.query("DELETE room_relate; DELETE room_panel_relate; UPDATE dbnum_watermark SET model_room_generation = NONE, model_room_stray_generations = [];")
+        .await
+        .and_then(|response| response.check())
+}
+
 /// 「重新生成房间」的后台本体。任何一步失败都不回滚也不重试——`record_startup_init`
 /// 已把生命周期翻成 `Blocked`/`Ready`，欠账靠 `model_room_generation` 与常驻代号的不等兜底。
 async fn run_rooms_rebuild() {
@@ -727,12 +740,15 @@ async fn run_rooms_rebuild() {
     };
     // 仍在 `Loading`：清持久面。两张边表全库归零（「所有删除」的字面），停放链里
     // 旧代的段对不上新代准入链一并清掉。
-    if let Err(error) = aios_core::SUL_DB
-        .query("DELETE room_relate; DELETE room_panel_relate;")
-        .await
-        .and_then(|response| response.check())
-    {
-        eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑）: {error:#}");
+    match clear_room_rebuild_edges_on(&aios_core::SUL_DB).await {
+        Ok(_) => {
+            // 水位已整表改写：进程内镜像整表作废，免得 `DbnumState::read`
+            // 还拿旧代号冒充已对齐（整表清理正是 `invalidate_mirror` 的用途）。
+            crate::data_interface::dbnum_state::DbnumState::invalidate_mirror();
+        }
+        Err(error) => {
+            eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑）: {error:#}");
+        }
     }
     let cleared = crate::data_interface::room_reverse::clear_all();
     if cleared > 0 {
@@ -823,7 +839,7 @@ async fn recompute_dbnum_room_edges_now(dbnum: u32) {
             } =>
         {
             // 整库算齐：盖章（`Aligned`）并把「按别代写过」的杂记清空，与 task_end 同一笔纪律。
-            if let Err(error) = aios_core::SUL_DB
+            match aios_core::SUL_DB
                 .query(format!(
                     "UPDATE dbnum_watermark:{dbnum} SET model_room_generation = '{}', model_room_stray_generations = [];",
                     crate::data_interface::dbnum_state::escape_surql_str(
@@ -833,7 +849,14 @@ async fn recompute_dbnum_room_edges_now(dbnum: u32) {
                 .await
                 .and_then(|response| response.check())
             {
-                eprintln!("dbnum={dbnum} 房间边已整库重算，但对齐代号没盖上（下个任务会再欠一次）: {error:#}");
+                Ok(_) => {
+                    // 盖章直查 SUL_DB、绕过了 DbnumState 的写者：库上确认成功后
+                    // 作废这一格的进程镜像，免得后续读还拿盖章前的旧代号判欠。
+                    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+                }
+                Err(error) => {
+                    eprintln!("dbnum={dbnum} 房间边已整库重算，但对齐代号没盖上（下个任务会再欠一次）: {error:#}");
+                }
             }
             println!(
                 "dbnum={dbnum} 整库房间重算完成：根 {}、成员边 {}、算不出 {}，耗时 {}ms",
@@ -4223,6 +4246,10 @@ pub async fn model_records(
     }
     Ok(Json(payload))
 }
+
+#[cfg(test)]
+#[path = "room_rebuild_regression_tests.rs"]
+mod room_rebuild_regression_tests;
 
 #[cfg(test)]
 mod tests {
