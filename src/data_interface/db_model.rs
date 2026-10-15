@@ -297,12 +297,21 @@ impl AiosDBManager {
         use crate::data_interface::mdb_membership;
 
         // 绑定并登记（ADR-085：启动是成员绑定的三个重做时刻之一，阶段行 `reason=startup` 由它打）。
-        let membership = mdb_membership::rebind(
-            &self.db_option,
-            project,
-            mdb,
-            mdb_membership::RebindReason::Startup,
-        )?;
+        // `rebind` 是纯同步 IO（重扫搜索根 + 逐目录枚举），按它自己的注释要求进
+        // spawn_blocking——共享盘上这一步可达几十秒，不能押着 tokio worker。
+        let db_option = self.db_option.clone();
+        let project_owned = project.to_string();
+        let mdb_owned = mdb.to_string();
+        let membership = tokio::task::spawn_blocking(move || {
+            mdb_membership::rebind(
+                &db_option,
+                &project_owned,
+                &mdb_owned,
+                mdb_membership::RebindReason::Startup,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("MDB 成员绑定任务异常结束: {error}"))??;
         let counts = membership.counts_by_type();
         let dictionaries = membership.dictionary_paths();
         let missing_dicts: Vec<&mdb_membership::MdbDatabase> = membership

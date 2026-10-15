@@ -90,9 +90,13 @@ impl RootScan {
 }
 
 /// 扫全部搜索根。每个根一个线程、共用一个截止时刻；超时的根按不可达处理，线程自行收尾。
+///
+/// 逐根打开始 / 结果行：掉线共享盘上这一段能静默挂满整个超时窗，只有「完成」的话
+/// 现场看不出是哪个根在卡（2026-10-15 JEU 现场：控制台外观就是「启动冻结」）。
 pub fn scan_roots(roots: &[PathBuf], timeout: Duration) -> Vec<RootScan> {
     let mut receivers = Vec::with_capacity(roots.len());
     for root in roots {
+        println!("[root-scan] 搜索根扫描开始: root={}", root.display());
         let (sender, receiver) = mpsc::channel();
         let root = root.clone();
         let spawned = std::thread::Builder::new()
@@ -114,6 +118,7 @@ pub fn scan_roots(roots: &[PathBuf], timeout: Duration) -> Vec<RootScan> {
             let receiver = match receiver {
                 Ok(receiver) => receiver,
                 Err(error) => {
+                    println!("[root-scan] 搜索根扫描起不了线程: root={} reason={error}", root.display());
                     return RootScan::unreachable(
                         root.clone(),
                         format!("起不了扫描线程: {error}"),
@@ -123,26 +128,48 @@ pub fn scan_roots(roots: &[PathBuf], timeout: Duration) -> Vec<RootScan> {
             };
             let remaining = deadline.saturating_duration_since(Instant::now());
             match receiver.recv_timeout(remaining) {
-                Ok((Ok(hits), elapsed)) => RootScan {
-                    root: root.clone(),
-                    reachable: true,
-                    problem: None,
-                    hits,
-                    elapsed,
-                },
-                Ok((Err(error), elapsed)) => RootScan::unreachable(
-                    root.clone(),
-                    format!("目录不可读（共享盘掉线 / 路径写错 / 无权限）: {error}"),
-                    elapsed,
-                ),
-                Err(_) => RootScan::unreachable(
-                    root.clone(),
-                    format!(
-                        "扫描 {} s 未答，按不可达处理（共享盘掉线时 read_dir 会挂很久）；重挂轮会再试",
+                Ok((Ok(hits), elapsed)) => {
+                    println!(
+                        "[root-scan] 搜索根扫描完成: root={} hits={} elapsed_ms={}",
+                        root.display(),
+                        hits.len(),
+                        elapsed.as_millis()
+                    );
+                    RootScan {
+                        root: root.clone(),
+                        reachable: true,
+                        problem: None,
+                        hits,
+                        elapsed,
+                    }
+                }
+                Ok((Err(error), elapsed)) => {
+                    println!(
+                        "[root-scan] 搜索根不可达: root={} reason={error} elapsed_ms={}",
+                        root.display(),
+                        elapsed.as_millis()
+                    );
+                    RootScan::unreachable(
+                        root.clone(),
+                        format!("目录不可读（共享盘掉线 / 路径写错 / 无权限）: {error}"),
+                        elapsed,
+                    )
+                }
+                Err(_) => {
+                    println!(
+                        "[root-scan] 搜索根扫描超时: root={} timeout_s={}",
+                        root.display(),
                         timeout.as_secs()
-                    ),
-                    timeout,
-                ),
+                    );
+                    RootScan::unreachable(
+                        root.clone(),
+                        format!(
+                            "扫描 {} s 未答，按不可达处理（共享盘掉线时 read_dir 会挂很久）；重挂轮会再试",
+                            timeout.as_secs()
+                        ),
+                        timeout,
+                    )
+                }
             }
         })
         .collect()

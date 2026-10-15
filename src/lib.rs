@@ -2114,12 +2114,21 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     // 属性与树服务按目标 RefNo 惰性访问，不建立全 MDB 元素骨架。
     let step_started = Instant::now();
     println!("[startup] stage=route-directory event=begin");
-    let directory = startup_route_directory(&db_option).map_err(|error| {
-        anyhow!(
-            "build dbnum route directory for MDB {}: {error:#}",
-            db_option.mdb_name
-        )
-    })?;
+    // 路由目录构造是纯同步 IO（`verify_all_headers` 逐路由读文件头），进 spawn_blocking：
+    // 共享盘上逐文件 stat 不是秒级以内的事，不能占 tokio worker。块内遮蔽一份克隆，
+    // 外层 `db_option` 留给错误信息与后续阶段原样使用。
+    let directory = tokio::task::spawn_blocking({
+        let db_option = db_option.clone();
+        move || startup_route_directory(&db_option)
+    })
+        .await
+        .map_err(|error| anyhow!("路由目录构造任务异常结束: {error}"))?
+        .map_err(|error| {
+            anyhow!(
+                "build dbnum route directory for MDB {}: {error:#}",
+                db_option.mdb_name
+            )
+        })?;
     print_route_directory_banner(&directory, step_started);
     println!("[startup] stage=route-directory event=done elapsed_ms={}", step_started.elapsed().as_millis());
 
@@ -2158,7 +2167,12 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     // 先叫一次把每个库的基线记进账本：第一次见只记不报，之后每轮返回的才是「自上次以来变了的库」。
     let stage_started = Instant::now();
     println!("[startup] stage=session-baseline event=begin");
-    let seeded = directory.poll_generations();
+    // 基线轮询对每条路由 `stat` 一次文件——共享盘上是逐文件网络往返，进 spawn_blocking
+    // （2 s 轮询循环内已是这个写法，启动这次之前漏了）。
+    let seeded_directory = directory.clone();
+    let seeded = tokio::task::spawn_blocking(move || seeded_directory.poll_generations())
+        .await
+        .map_err(|error| anyhow!("会话基线轮询任务异常结束: {error}"))?;
     println!("[startup] stage=session-baseline event=done elapsed_ms={} total_ms={}",
         stage_started.elapsed().as_millis(), startup_started.elapsed().as_millis());
     debug_assert!(seeded.is_empty(), "第一次轮询只记基线，不该报变化");

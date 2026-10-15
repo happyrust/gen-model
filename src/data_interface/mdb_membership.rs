@@ -27,7 +27,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use aios_core::RefU64;
 use aios_core::options::DbOption;
@@ -287,8 +289,20 @@ fn named_attr_value_kind(value: &NamedAttrValue) -> &'static str {
 /// project code is located in the configured search roots, and only then is
 /// each declaration bound to a file inside its own project's directories.
 pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result<MdbMembership> {
+    // 绑定前的远程 IO 各打边界：闭包定位（搜索根重扫 + 主项目 SYS 首读，见
+    // `mdb_closure::resolve`/`reload_declaration` 内的行）与后面的目录枚举。
+    // 远程盘上这三段每一段都能卡——只给 bind_declared 打行的话，
+    // 前一段静默照旧看不出停在哪（2026-10-15 JEU 现场的教训）。
+    let closure_started = Instant::now();
+    report_sys_info(&format!("[mdb-bind] 闭包定位开始: project={project} mdb={mdb}"));
     let closure = crate::data_interface::mdb_closure::resolve_for(db_option);
     let plan = closure.watch_dir_plan();
+    report_sys_info(&format!(
+        "[mdb-bind] 闭包定位完成: project={project} mdb={mdb} projects={} dirs={} elapsed_ms={}",
+        plan.projects.len(),
+        plan.dirs().len(),
+        closure_started.elapsed().as_millis()
+    ));
     let own_dirs = own_db_dirs(&plan, project)?;
     // Kept per project rather than flattened into one directory list: a dbnum
     // is unique inside a project only, so "which file" cannot be answered
@@ -300,8 +314,10 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         .map(|entry| (entry.project.clone(), entry.db_dirs.clone()))
         .collect();
     let declaration = crate::data_interface::mdb_closure::declaration(&own_dirs, project, mdb)?;
-    let databases = bind_declared(&declaration.databases, &projects, project)?;
+    let bound = bind_declared(&declaration.databases, &projects, project)?;
+    let databases = bound.databases;
     let mut problems = declaration.problems.clone();
+    problems.extend(bound.problems);
     for db in databases.iter().filter(|db| db.path.is_none()) {
         let reason = db
             .declared_project_code
@@ -445,20 +461,57 @@ pub(crate) fn read_unbound_declaration(
     anyhow::bail!(message)
 }
 
+/// `bind_declared` 的产物：绑定完的清单 + 目录枚举期的问题。
+///
+/// 目录枚举失败不走错误返回——那个目录缺席而已，其余目录照常绑定；但「读不动」
+/// 与「里面没有」在下游都长成「声明了没文件」，所以失败必须以 problems 的形式进
+/// membership，跟声明解析问题同一个出口。
+pub(crate) struct BindOutcome {
+    pub databases: Vec<MdbDatabase>,
+    pub problems: Vec<String>,
+    /// 实际枚举过的目录数（`DirInventory` 全程的磁盘触点）：「每目录一次」的
+    /// 结构性断言钉在它上面。
+    pub dirs_scanned: usize,
+    /// 收到的文件条目总数，进完成行的体量证据。
+    pub entries: usize,
+}
+
 /// Bind an unbound declaration to files: each entry is looked up only inside
 /// the project its `PROJ` names (`None` = `declaring`), through
 /// [`locate_declared`]. Entries whose project has no directory in `projects`
 /// stay unbound (`path: None`) and are reported by the caller; a same-numbered
 /// file in another project is never substituted.
+///
+/// 磁盘触点集中在开头的 `DirInventory::from_dirs`：每个项目目录各枚举**一次**，
+/// 之后几百条声明全部在内存索引上定位。曾经这里是逐声明 `read_dir` + 逐文件
+/// `is_file()`——共享盘上是几百次全枚举加几十万次 stat 往返，SMB 半死时单次调用
+/// 无超时可无限阻塞（2026-10-15 现场：JEU /ALL 480 库，UNC 根，启动静默于此）。
 pub(crate) fn bind_declared(
     databases: &[MdbDatabase],
     projects: &[(String, Vec<PathBuf>)],
     declaring: &str,
-) -> anyhow::Result<Vec<MdbDatabase>> {
+) -> anyhow::Result<BindOutcome> {
+    let started = Instant::now();
+    report_sys_info(&format!(
+        "[mdb-bind] 成员绑定开始: declaring={declaring} declarations={} projects={} dirs={}",
+        databases.len(),
+        projects.len(),
+        projects.iter().map(|(_, dirs)| dirs.len()).sum::<usize>()
+    ));
+    let inventories: Vec<(String, DirInventory)> = projects
+        .iter()
+        .map(|(project, dirs)| (project.clone(), DirInventory::from_dirs(project, dirs)))
+        .collect();
+    let scan_problems: Vec<String> = inventories
+        .iter()
+        .flat_map(|(_, inventory)| inventory.problems.iter().cloned())
+        .collect();
+    let dirs_scanned = inventories.iter().map(|(_, i)| i.dirs_scanned).sum();
+    let entries = inventories.iter().map(|(_, i)| i.entries).sum();
     let mut bound = Vec::with_capacity(databases.len());
     for db in databases {
         let located = locate_declared(
-            projects,
+            &inventories,
             declaring,
             db.declared_project_code.as_deref(),
             db.dbnum,
@@ -482,7 +535,20 @@ pub(crate) fn bind_declared(
             shadowed: located.map(|found| found.shadowed).unwrap_or_default(),
         });
     }
-    Ok(bound)
+    let unbound = bound.iter().filter(|db| db.path.is_none()).count();
+    report_sys_info(&format!(
+        "[mdb-bind] 成员绑定完成: declaring={declaring} declarations={} bound={} unbound={unbound} \
+         dirs_scanned={dirs_scanned} entries={entries} elapsed_ms={}",
+        databases.len(),
+        bound.len() - unbound,
+        started.elapsed().as_millis()
+    ));
+    Ok(BindOutcome {
+        databases: bound,
+        problems: scan_problems,
+        dirs_scanned,
+        entries,
+    })
 }
 
 /// Files whose name ends in `sys`, which is how E3D names the SYSTEM database
@@ -701,7 +767,7 @@ fn read_declaration(
     sys: &Path,
     project: &str,
     wanted: &str,
-    projects: &[(String, Vec<PathBuf>)],
+    projects: &[(String, DirInventory)],
 ) -> anyhow::Result<Option<(Vec<MdbDatabase>, Vec<String>)>> {
     // e3d-io 读法（parse_pdms_db 退役清单 §B5）：SYS 库按最新会话钉进 `DbSet`
     // （模板 `sysvir.dat`）；Global Project 的 MDB 在本地 SYS、DB 声明在同目录 GLB，
@@ -1511,18 +1577,136 @@ fn decode_project_code(
     ))
 }
 
+/// 单个库目录的枚举限时，与根扫描同值：掉线 SMB 的 `read_dir` 实测挂 20–40 s
+/// （`project_locator` 头注），15 s 给慢共享盘留了余量，又比「等它自然报错」短得多。
+const DIR_BIND_SCAN_TIMEOUT: Duration =
+    crate::data_interface::project_locator::DEFAULT_ROOT_SCAN_TIMEOUT;
+
+/// 一个项目若干库目录的一次性快照：`dbnum → (extract 号, 文件路径)`。
+///
+/// 存在的原因：`bind_declared` 要给几百个声明库各挑一份文件，而库名里读不出
+/// dbnum→文件的可靠映射（后缀匹配会撞号，见 [`pick_within_project`] 的注释），只能
+/// 枚举目录逐名解析。「每问一个库就重扫一次目录、对每个目录项各发一次 stat」在
+/// 共享盘（UNC）上等于几百次全枚举加几十万次 SMB 往返——2026-10-15 现场
+/// （JEU /ALL 480 库，`\\服务器\共享` 根）启动在这一步静默几十分钟；SMB 会话
+/// 半死时单次 `read_dir`/`is_file` 无超时可无限挂死。磁盘 IO 收成**每目录一次
+/// 枚举**之后，定位全部走内存。
+#[derive(Debug, Default)]
+struct DirInventory {
+    /// `dbnum → (extract 号, 路径)`；无后缀 master 的 extract 是 `None`。
+    /// 一个 dbnum 可能对应多份文件（各层 extract + master），全留着交给
+    /// [`pick_within_project`] 按原规则挑。
+    by_dbnum: BTreeMap<u32, Vec<(Option<u32>, PathBuf)>>,
+    /// 枚举不动 / 超时的目录及原因——进 `BindOutcome::problems` 再上 membership。
+    problems: Vec<String>,
+    /// 成功枚举的目录数与文件条目总数：诊断计数，进 `[mdb-bind]` 明细行。
+    dirs_scanned: usize,
+    entries: usize,
+}
+
+impl DirInventory {
+    /// 逐目录各枚举一遍收齐库文件名。`dirs` 内顺序枚举；单目录失败只让它自己
+    /// 缺席并记 `problems`，不连累其余目录（与 [`scan_roots`] 各根独立的纪律一致）。
+    fn from_dirs(project: &str, dirs: &[PathBuf]) -> Self {
+        let mut inventory = Self::default();
+        for dir in dirs {
+            // 枚举前先出声：远程盘上 `read_dir` 真卡死时，15 s 超时到达之前这一句是唯一能
+            // 指着「哪个目录在卡」的证据——只有完成行的话，现场又是一段无特征静默。
+            report_sys_info(&format!(
+                "[mdb-bind] 目录枚举开始: project={project} dir={}",
+                dir.display()
+            ));
+            let started = Instant::now();
+            match scan_db_dir(dir, DIR_BIND_SCAN_TIMEOUT) {
+                Ok(paths) => {
+                    let entry_count = paths.len();
+                    let mut kept = 0usize;
+                    inventory.dirs_scanned += 1;
+                    inventory.entries += entry_count;
+                    for path in paths {
+                        let Some(parsed) = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(
+                                crate::data_interface::extract_family::parse_extract_file_name,
+                            )
+                        else {
+                            continue;
+                        };
+                        kept += 1;
+                        inventory
+                            .by_dbnum
+                            .entry(parsed.dbnum)
+                            .or_default()
+                            .push((parsed.extract, path));
+                    }
+                    report_sys_info(&format!(
+                        "[mdb-bind] 目录枚举完成: project={project} dir={} entries={entry_count} db_files={kept} elapsed_ms={}",
+                        dir.display(),
+                        started.elapsed().as_millis()
+                    ));
+                }
+                Err(error) => {
+                    let problem = format!("库目录 {}（项目 {project}）枚举失败：{error}", dir.display());
+                    report_sys_error(&format!("[mdb-bind] {problem}"));
+                    inventory.problems.push(problem);
+                }
+            }
+        }
+        inventory
+    }
+}
+
+/// 单个库目录的限时枚举：工作线程干活、调用方 `recv_timeout` 等截止，超时按该
+/// 目录不可达处理，线程自行收尾（与 `scan_roots` 同一模式——接收方放弃后发送
+/// 自然落空）。
+///
+/// 目录项判文件用枚举自带的 `entry.file_type()`（SMB 上零额外往返）；`file_type`
+/// 读不到才回落 `path.is_file()` 补一次 stat——`SysMetadataResolver::discover` 与
+/// `project_locator::subdirs` 已是这个写法。
+fn scan_db_dir(dir: &Path, timeout: Duration) -> Result<Vec<PathBuf>, String> {
+    let (sender, receiver) = mpsc::channel();
+    let dir_owned = dir.to_path_buf();
+    std::thread::Builder::new()
+        .name(format!("mdb-bind-scan {}", dir.display()))
+        .spawn(move || {
+            let result = match std::fs::read_dir(&dir_owned) {
+                Ok(entries) => Ok(entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_type()
+                            .map(|kind| kind.is_file())
+                            .unwrap_or_else(|_| entry.path().is_file())
+                    })
+                    .map(|entry| entry.path())
+                    .collect::<Vec<PathBuf>>()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("起不了目录枚举线程: {error}"))?;
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "枚举 {} s 未答，按目录不可达处理（共享盘掉线时 read_dir 会挂很久）",
+            timeout.as_secs()
+        )),
+    }
+}
+
 /// Bind only the declared project. A similarly numbered file in another
 /// project is diagnostic evidence, never a fallback input.
 fn locate_declared(
-    projects: &[(String, Vec<PathBuf>)],
+    projects: &[(String, DirInventory)],
     declaring: &str,
     code: Option<&str>,
     dbnum: u32,
 ) -> anyhow::Result<Option<Located>> {
     let mut matches = Vec::new();
     let mut shadowed = Vec::new();
-    for (project, dirs) in projects {
-        let Some((path, rest)) = pick_within_project(dirs, dbnum) else {
+    for (project, inventory) in projects {
+        let Some((path, rest)) = pick_within_project(inventory, dbnum) else {
             continue;
         };
         let selected = match code {
@@ -1565,32 +1749,20 @@ fn locate_declared(
 /// suffix — or an extract other than `_0001` — is a legal identity for the
 /// same logical database, yet never matched at all and got reported as a
 /// deployment gap.
-fn pick_within_project(dirs: &[PathBuf], dbnum: u32) -> Option<(PathBuf, Vec<PathBuf>)> {
+///
+/// 纯内存操作：目录枚举在 [`DirInventory::from_dirs`] 已经做完，这里只查索引。
+/// 排序口径不变——`leaves`/`masters` 各自排序、最高 extract 叶胜出、其余全进
+/// `rest`——与枚举先后无关，所以索引化不改动任何选主结果。
+fn pick_within_project(
+    inventory: &DirInventory,
+    dbnum: u32,
+) -> Option<(PathBuf, Vec<PathBuf>)> {
     let mut masters: Vec<PathBuf> = Vec::new();
     let mut leaves: Vec<(u32, PathBuf)> = Vec::new();
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(parsed) = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(crate::data_interface::extract_family::parse_extract_file_name)
-            else {
-                continue;
-            };
-            if parsed.dbnum != dbnum {
-                continue;
-            }
-            match parsed.extract {
-                Some(number) => leaves.push((number, path)),
-                None => masters.push(path),
-            }
+    for (extract, path) in inventory.by_dbnum.get(&dbnum)? {
+        match extract {
+            Some(number) => leaves.push((*number, path.clone())),
+            None => masters.push(path.clone()),
         }
     }
     // `read_dir` order is not a contract; sorting pins the pick when several
@@ -2301,15 +2473,15 @@ mod tests {
     #[test]
     fn locate_reads_the_whole_dbnum_not_a_name_suffix() {
         let dir = dir_with(&["ams8100_0001"]);
-        let dirs = vec![dir.path().to_path_buf()];
+        let inventory = DirInventory::from_dirs("T", &[dir.path().to_path_buf()]);
 
         assert_eq!(
-            pick_within_project(&dirs, 100),
+            pick_within_project(&inventory, 100),
             None,
             "8100 的文件不属于 100"
         );
         assert_eq!(
-            pick_within_project(&dirs, 8100).map(|(path, _)| path),
+            pick_within_project(&inventory, 8100).map(|(path, _)| path),
             Some(dir.path().join("ams8100_0001"))
         );
     }
@@ -2320,9 +2492,9 @@ mod tests {
     #[test]
     fn locate_accepts_masters_and_other_extracts_and_prefers_the_leaf() {
         let dir = dir_with(&["scb100", "scb100_0002", "scb100_0002 copy"]);
-        let dirs = vec![dir.path().to_path_buf()];
+        let inventory = DirInventory::from_dirs("T", &[dir.path().to_path_buf()]);
 
-        let (winner, shadowed) = pick_within_project(&dirs, 100).expect("解得出");
+        let (winner, shadowed) = pick_within_project(&inventory, 100).expect("解得出");
         assert_eq!(
             winner,
             dir.path().join("scb100_0002"),
@@ -2335,11 +2507,132 @@ mod tests {
         );
 
         let master_only = dir_with(&["scb100"]);
+        let master_inventory = DirInventory::from_dirs("T", &[master_only.path().to_path_buf()]);
         assert_eq!(
-            pick_within_project(&[master_only.path().to_path_buf()], 100).map(|(path, _)| path),
+            pick_within_project(&master_inventory, 100).map(|(path, _)| path),
             Some(master_only.path().join("scb100")),
             "没有抽取时主库本身就是答案，不该被报成缺件"
         );
+    }
+
+    /// 结构性约束：一个项目的库目录在整轮绑定里只枚举一次，声明再多也不重扫。
+    /// 2026-10-15 现场：480 个声明 × 每次一整遍 UNC 枚举 + 逐文件 `is_file()`
+    /// stat，把 `init_mdb` 拖成几十分钟静默直至假死。
+    #[test]
+    fn each_directory_is_enumerated_once_for_all_declarations() {
+        let own = dir_with(&["ams7000_0001", "ams7355_0001"]);
+        let other = dir_with(&["acp7000_0001"]);
+        let projects = vec![
+            ("Main".to_string(), vec![own.path().to_path_buf()]),
+            ("Catalogue".to_string(), vec![other.path().to_path_buf()]),
+        ];
+        let declared: Vec<MdbDatabase> = (7000..7480)
+            .map(|dbnum| MdbDatabase {
+                dbnum,
+                styp: DESI_STYP,
+                proj: 0,
+                declared_project_code: None,
+                name: format!("*DB{dbnum}"),
+                path: None,
+                project: None,
+                shadowed: Vec::new(),
+            })
+            .collect();
+
+        let outcome = bind_declared(&declared, &projects, "Main").unwrap();
+
+        assert_eq!(outcome.dirs_scanned, 2, "每个项目目录只枚举一次");
+        assert_eq!(outcome.entries, 3, "枚举条目数是目录内容、不是声明数");
+        assert_eq!(outcome.databases.len(), 480);
+        let bound7000 = &outcome.databases[0];
+        assert_eq!(
+            bound7000.path.as_deref(),
+            Some(own.path().join("ams7000_0001").as_path()),
+            "无 PROJ 的声明绑主项目的文件"
+        );
+        assert_eq!(
+            bound7000.shadowed,
+            vec![other.path().join("acp7000_0001")],
+            "别项目同号文件进 shadowed，不顶替"
+        );
+        assert!(
+            outcome.databases[100].path.is_none(),
+            "声明了没文件的库照旧 unbound"
+        );
+    }
+
+    /// 目录枚举不动不连累其余目录，也不静默：进 `problems`，与「声明了没文件」区分
+    /// ——两者在下游都长成「库里没值」，修法完全不同。
+    #[test]
+    fn an_unreadable_directory_surfaces_as_a_problem_and_the_rest_still_bind() {
+        let own = dir_with(&["ams7000_0001"]);
+        let missing = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("no-such-dir");
+        let projects = vec![
+            ("Main".to_string(), vec![own.path().to_path_buf()]),
+            ("Gone".to_string(), vec![missing.clone()]),
+        ];
+        let declared = vec![
+            MdbDatabase {
+                dbnum: 7000,
+                styp: DESI_STYP,
+                proj: 0,
+                declared_project_code: None,
+                name: "*MAIN/DESIGN".into(),
+                path: None,
+                project: None,
+                shadowed: Vec::new(),
+            },
+            MdbDatabase {
+                dbnum: 7001,
+                styp: DESI_STYP,
+                proj: 3,
+                declared_project_code: Some("GON".into()),
+                name: "*GONE/DESIGN".into(),
+                path: None,
+                project: None,
+                shadowed: Vec::new(),
+            },
+        ];
+
+        let outcome = bind_declared(&declared, &projects, "Main").unwrap();
+
+        assert_eq!(outcome.dirs_scanned, 1, "只枚举通了主项目目录");
+        assert_eq!(outcome.problems.len(), 1, "读不动的目录要留痕");
+        assert!(
+            outcome.problems[0].contains("no-such-dir"),
+            "{:?}",
+            outcome.problems
+        );
+        assert_eq!(
+            outcome.databases[0].path.as_deref(),
+            Some(own.path().join("ams7000_0001").as_path())
+        );
+        assert!(
+            outcome.databases[1].path.is_none(),
+            "目录缺席的项目的声明保持 unbound"
+        );
+    }
+
+    /// 源码钉：定位层（`locate_declared` + `pick_within_project`）不得再出现任何
+    /// 文件系统调用——目录枚举集中在 `DirInventory::from_dirs`/`scan_db_dir` 一处，
+    /// 定位只查内存索引。
+    #[test]
+    fn declaration_locating_never_touches_the_disk() {
+        let source = include_str!("mdb_membership.rs");
+        let body = source
+            .split_once("fn locate_declared(")
+            .expect("locate_declared 还在")
+            .1
+            .split_once("type Cache")
+            .expect("定位层收尾在 Cache 之前")
+            .0;
+        // 只禁调用形态——注释里提到 `read_dir` 字样不算触盘。
+        for banned in ["std::fs::", "read_dir(", "is_file(", "is_dir(", "metadata("] {
+            assert!(!body.contains(banned), "定位层不得触盘: {banned}");
+        }
     }
 
     /// An in-memory SYS tree for the CURD expansion: noun, members and the two
@@ -2524,11 +2817,17 @@ mod tests {
     fn two_projects(
         main_dir: &Path,
         other_dir: &Path,
-    ) -> (Vec<(String, Vec<PathBuf>)>, Vec<String>) {
+    ) -> (Vec<(String, DirInventory)>, Vec<String>) {
         (
             vec![
-                ("Main".to_string(), vec![main_dir.to_path_buf()]),
-                ("Catalogue".to_string(), vec![other_dir.to_path_buf()]),
+                (
+                    "Main".to_string(),
+                    DirInventory::from_dirs("Main", &[main_dir.to_path_buf()]),
+                ),
+                (
+                    "Catalogue".to_string(),
+                    DirInventory::from_dirs("Catalogue", &[other_dir.to_path_buf()]),
+                ),
             ],
             vec!["Main".into(), "Catalogue".into()],
         )

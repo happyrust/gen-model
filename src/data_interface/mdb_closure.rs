@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use aios_core::options::DbOption;
 use serde_json::json;
@@ -140,7 +140,19 @@ pub fn reload_declaration(
     project: &str,
     mdb: &str,
 ) -> anyhow::Result<Arc<MdbDeclaration>> {
+    // 远程盘上这是绑定链里最重的一段读：列 SYS 候选（read_dir）+ SysDb 建索引 +
+    // 逐 DB 属性读，全无超时。打一对边界，卡住时知道停在「读 SYS」而不是目录枚举
+    // （2026-10-15 JEU 现场排查缺的就是这一句）。
+    let started = Instant::now();
+    println!("[mdb-bind] 声明解析开始: project={project} mdb={mdb} dirs={main_db_dirs:?}");
     let read = super::mdb_membership::read_unbound_declaration(main_db_dirs, project, mdb)?;
+    println!(
+        "[mdb-bind] 声明解析完成: project={project} mdb={mdb} sys={} declarations={} problems={} elapsed_ms={}",
+        read.sys.display(),
+        read.databases.len(),
+        read.problems.len(),
+        started.elapsed().as_millis()
+    );
     Ok(install_declaration(MdbDeclaration {
         project: project.to_string(),
         mdb: normalize_mdb(mdb),
