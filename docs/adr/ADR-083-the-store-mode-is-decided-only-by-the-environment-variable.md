@@ -5,6 +5,16 @@
 **同日修订（2026-09-18，用户拍板「走乙」）**：D6 的默认档由 `mem` 翻成 **`rocksdb`**，同时 D5 的 `Start-AMS.ps1`
 在不给 `-StoreMode` 时**显式回填** `AIOS_STORE_MODE=mem`。改的只是「漏设时落到哪一档」，D1–D4 一个字没动。
 初版落地当天就翻，是因为真机复验把两种漏法的代价量出来了——见改写后的 D6。
+**二次修订（2026-10，用户拍板「向导里可选 external / memory」）**：裁决恢复分层——
+**`AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 默认 `rocksdb`**。
+`store_mode` 回到配置文件，但身份变了：不再是没人认领的残留键，而是**配置向导第②步持久化的用户选择**
+（两档：external / memory，external 为默认）。向导恢复 radio 并把它写盘；向导触发的重启把文件里那一档
+**显式**递给孩子进程的 `AIOS_STORE_MODE`，保证所选档生效；环境变量压过文件时 `store_mode_notices` 仍并排
+点名「两边不是同一档」。`in_memory_db` 与 `AIOS_IN_MEMORY_DB` 维持退役，只留点名。`Start-AMS.ps1` 的回填
+改为**文件优先**：文件写了 `store_mode` 就按它进环境变量，文件没写才回填 `mem`。离线包出厂
+`DbOption.toml` 注入 `store_mode = "rocksdb"`（external 默认走文件层，不再靠 `deploy.env` pin）。
+修订点：D1（签名里有配置那一格了）、D2（`store_mode` 恢复生效，`in_memory_db` 仍只点名）、
+D3（夹具仍不许带——现在是**生效键**，预置=静默定介质，更不许）、D5（回填改为文件优先）。
 日期：2026-09-18
 落地：`src/options.rs`（`store_mode()` 只读环境变量；`effective_store_mode(env)` 签名里没有配置那一格；
 `store_mode_notices()` 逐条点名文件里残留的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB`；

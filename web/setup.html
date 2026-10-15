@@ -127,10 +127,18 @@
   <!-- ② 存储 -->
   <section class="card" id="step2" hidden>
     <h2>② 存储：模型数据放哪</h2>
-    <!-- 介质不在这里选（ADR-083，2026-09-18）：它只由启动服务时的环境变量 AIOS_STORE_MODE 决定
-         （mem / rocksdb，不设 = rocksdb），配置文件里的 store_mode 一个字都不生效。向导只展示生效的
-         那一档与出处、提醒文件里残留的过期键；地址那两格只在 rocksdb 档下可填。
-         两档本身不变（2026-09-13 拍板）：本服务从不拉起任何数据库进程——内存就在进程里，落盘就连配置指的那台。 -->
+    <!-- 介质两档在这里选（ADR-083 修订，2026-10）：选中档随保存写进 DbOption.toml 的
+         store_mode 持久化、重启生效；环境变量 AIOS_STORE_MODE 是唯一更高的优先来源，
+         两边不同档时启动日志点名。两档本身不变：本服务从不拉起任何数据库进程——
+         内存就在进程里，落盘就连配置指的那台。 -->
+    <div class="radio-line">
+      <input type="radio" name="store-mode" id="store-rocksdb" value="rocksdb" checked>
+      <div><b>外部库（external，默认）</b><br><span class="hint">连一台<b>已经在跑</b>的 SurrealDB（rocksdb 后端），<b>数据活得过重启</b>。本服务只连、不拉起：地址上没有库就是启动失败。必须是 SurrealDB 2.x，不能用官方 3.x。</span></div>
+    </div>
+    <div class="radio-line">
+      <input type="radio" name="store-mode" id="store-mem" value="mem">
+      <div><b>内存库（memory，嵌入进程）</b><br><span class="hint">数据库直接嵌在后端进程里，<b>无数据库子进程、无数据库端口</b>；数据不落盘，<b>重启即清空</b>。浏览器、树、属性和模型均走本服务同源 API。</span></div>
+    </div>
     <div id="effective-store"></div>
     <div class="row" style="margin-top:12px">
       <div><label id="lbl-v_ip">地址 v_ip</label><input type="text" id="f-v_ip" placeholder="127.0.0.1"></div>
@@ -264,7 +272,8 @@ async function boot() {
   $("chip-ver").textContent = "v" + state.version;
   const config = await api("/api/v1/setup/config");
   S.cfg = config.values || {};
-  // 介质只由环境变量决定（ADR-083）：页面拿到的是「本进程实际跑的那一档」与它的出处，不是文件里的字。
+  // 介质按「环境变量 > 配置文件 > 默认」裁决：effective 是本进程实际跑的那档与出处；
+  // values.store_mode 是向导持久化的那一行，用来预选 radio。
   S.effective = config.effective || {};
   fillForm(S.cfg);
   const resume = new URLSearchParams(location.search).get("resume");
@@ -309,6 +318,9 @@ function fillForm(v) {
   $("plant3d-entry").hidden = !S.effective.offline_package;
   put("f-watch_dbnums", v.watch_dbnums);
   put("f-manual_db_nums", v.manual_db_nums);
+  // 介质 radio 预选：文件里持久化的档优先（那是上次向导选的），没有就按当前生效档。
+  const persisted = String(v.store_mode ?? S.effective.store_mode ?? "rocksdb").toLowerCase();
+  $(persisted.includes("mem") ? "store-mem" : "store-rocksdb").checked = true;
   renderEffectiveStore();
   updateStoreUi();
   if (v.gen_model === true || v.gen_mesh === true) $("tier-full").checked = true; else $("tier-data").checked = true;
@@ -316,38 +328,31 @@ function fillForm(v) {
   if (v.project_name) renderProjects([{ name: v.project_name, e3d_shape: true, db_files: null }], v.project_name);
 }
 
-// ---------- ② 介质展示与地址联动 ----------
-// 介质是后端按环境变量 AIOS_STORE_MODE 定下的（ADR-083），页面不选、只读回来。
+// ---------- ② 介质选择与地址联动 ----------
+// 页面选档（两档 radio），保存时写进 store_mode 持久化；同时展示后端裁决出的生效档与出处。
 function storeTier() {
-  return (S.effective && S.effective.store_mode) === "rocksdb" ? "rocksdb" : "mem";
+  const picked = document.querySelector('input[name="store-mode"]:checked');
+  return picked ? picked.value : "rocksdb";
 }
 function renderEffectiveStore() {
   const e = S.effective || {};
-  const tier = storeTier();
+  const effective = e.store_mode === "mem" ? "mem" : "rocksdb";
   const envName = e.store_mode_env || "AIOS_STORE_MODE";
-  let html = '<div class="note"><b>当前介质：' + (tier === "mem" ? "内存库（mem）" : "连接 SurrealDB 持久库（rocksdb）") + '</b>' +
+  let html = '<div class="note"><b>当前生效介质：' + (effective === "mem" ? "内存库（mem）" : "外部库 SurrealDB（rocksdb）") + '</b>' +
     '<span class="hint">　由 ' + esc(e.store_mode_source || envName) + ' 决定</span><br>' +
-    (tier === "mem"
-      ? '数据库直接嵌在后端进程中，<b>无数据库子进程、无数据库端口</b>；数据不落盘，重启即清空。浏览器、树、属性和模型均走本服务同源 API。'
-      : '连一台<b>已经在跑</b>的 SurrealDB（rocksdb 后端），<b>数据活得过重启</b>。本服务只连、不拉起：地址上没有库就是启动失败。必须是本套发布配套的 SurrealDB 2.1.x（包内 bin\\surreal.exe），不能用官方 3.x。') +
-    '<br>介质<b>不在本页改、也不在 DbOption.toml 里改</b>：启动服务前设环境变量 <code>' + esc(envName) + '=mem</code> 或 <code>' + esc(envName) + '=rocksdb</code>' +
-    '（<code>Start-AMS.ps1 -StoreMode rocksdb</code>、systemd 单元的 <code>Environment=</code>、PowerShell 的 <code>$env:</code> 都行），改完重启服务，本页跟着变。</div>';
-  if (e.stale_config_store_mode !== null && e.stale_config_store_mode !== undefined) {
-    html += '<div class="note warn">配置文件里还写着 <code>store_mode = ' + esc(JSON.stringify(e.stale_config_store_mode)) +
-      '</code>——这一行<b>已不生效</b>（2026-09-18 起，ADR-083），留着只会让读配置的人得出与实际相反的结论，建议删掉。</div>';
-  }
+    '这里选的档保存时写进 <code>DbOption.toml</code> 的 <code>store_mode</code>，重启后生效；' +
+    '环境变量 <code>' + esc(envName) + '</code> 设了的话以它为准——两边不同档时启动日志会点名。</div>';
   $("effective-store").innerHTML = html;
 }
 function updateStoreUi() {
-  const tier = storeTier();
-  const mem = tier === "mem";
+  const mem = storeTier() === "mem";
   $("btn-probe-store").hidden = mem;
   $("f-v_ip").disabled = mem;
   $("f-v_port").disabled = mem;
-  $("lbl-v_ip").textContent = mem ? "地址 v_ip（mem 不使用）" : "地址 v_ip（连接目标）";
-  $("lbl-v_port").textContent = mem ? "端口 v_port（mem 不使用）" : "端口 v_port（连接目标）";
+  $("lbl-v_ip").textContent = mem ? "地址 v_ip（memory 不使用）" : "地址 v_ip（连接目标）";
+  $("lbl-v_port").textContent = mem ? "端口 v_port（memory 不使用）" : "端口 v_port（连接目标）";
   if (mem) {
-    $("store-note").innerHTML = '<div class="note">库在后端进程里，外部 <code>surreal sql</code> / rvm_verify / plant-ui 的「库供数」读面都<b>连不到</b>它；需要这类诊断或要数据活过重启，以 <code>AIOS_STORE_MODE=rocksdb</code> 重启服务并连一台真在跑的库。</div>';
+    $("store-note").innerHTML = '<div class="note warn">库在后端进程里，<b>重启即清空</b>；外部 <code>surreal sql</code> / rvm_verify / plant-ui 的「库供数」读面都<b>连不到</b>它。</div>';
   } else {
     $("store-note").innerHTML = '<div class="note">本服务<b>不会</b>自己把库拉起来。还没有库？用包里带的脚本先起一台（数据落在脚本所在目录的 <code>.surreal\\</code>），再回来点「测试连接」：<br>' +
       "<code>powershell -ExecutionPolicy Bypass -File .\\workspace\\Start-Surreal.ps1</code><br>" +
@@ -484,9 +489,10 @@ async function probePort() {
 
 // ---------- ④ 保存并重启 ----------
 function gatherPatch() {
-  // 不带 store_mode：介质由环境变量决定（ADR-083），向导不往文件里写这一格。
   const full = $("tier-full").checked;
   const patch = {
+    // 介质两档：选中档写进 store_mode 持久化（ADR-083 修订）。
+    store_mode: storeTier(),
     project_path: val("f-project_path"),
     project_search_paths: searchPaths(),
     project_name: val("f-project_name"),
@@ -675,6 +681,8 @@ $("btn-preview").addEventListener("click", previewInit);
 $("btn-execute").addEventListener("click", executeInit);
 $("btn-finish").addEventListener("click", finish);
 ["f-v_ip", "f-v_port"].forEach((id) => $(id).addEventListener("input", () => { S.storeTestOk = false; }));
+document.querySelectorAll('input[name="store-mode"]').forEach((r) =>
+  r.addEventListener("change", () => { S.storeTestOk = false; updateStoreUi(); }));
 $("f-http_api_addr").addEventListener("input", () => { S.portOk = false; });
 
 $("btn-probe-mdb").addEventListener("click", probeMdb);

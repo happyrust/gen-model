@@ -187,15 +187,15 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub data_tx_elements: Option<u64>,
 
-    /// **已退出配置文件（ADR-083，2026-09-18）**：介质只由环境变量 [`STORE_MODE_ENV`] 决定，
-    /// 这一键与下面的 `store_mode` 都**不再参与裁决**。字段留着只为了旧配置照常解析、
+    /// **已退出配置文件（ADR-083，2026-09-18）**：介质由环境变量 [`STORE_MODE_ENV`] 与
+    /// `store_mode` 分层决定，这一键**不再参与裁决**。字段留着只为了旧配置照常解析、
     /// 并在启动时由 [`store_mode_notices`] 点名「这一行已不生效」。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
 
-    /// **已退出配置文件（ADR-083，2026-09-18）**：介质只由环境变量 [`STORE_MODE_ENV`] 决定。
-    /// 配置里再写 `store_mode = "..."` 不改变任何行为，只会在启动时被 [`store_mode_notices`]
-    /// 点名。字段留着是让旧配置照常解析、并能把那句过期的值念出来。详见 [`store_mode`]。
+    /// **向导持久化的介质选择（ADR-083 修订，2026-10）**：环境变量 [`STORE_MODE_ENV`]
+    /// 没设（或认不出）时按这一行跑；环境变量说了就以环境变量为准，两边不同档时由
+    /// [`store_mode_notices`] 并排念出来。不写 = 落到默认 `rocksdb`。详见 [`store_mode`]。
     #[serde(default)]
     pub store_mode: Option<String>,
 
@@ -1271,34 +1271,40 @@ impl StoreMode {
     }
 }
 
-/// 本进程生效的存储形态。**只由环境变量 [`STORE_MODE_ENV`] 决定**（ADR-083，2026-09-18）：
-/// `AIOS_STORE_MODE=mem` / `AIOS_STORE_MODE=rocksdb`，不设 = **`rocksdb`**。
+/// 本进程生效的存储形态。**环境变量 [`STORE_MODE_ENV`] > 配置文件 `store_mode` > 默认 `rocksdb`**
+/// （ADR-083 分层修订，2026-10）。
 ///
-/// `DbOption.toml` 里的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB`
-/// **都不再参与裁决**。2026-09-18 之前它们与这个环境变量分层叠加（环境变量 > 配置 > 旧开关），
-/// 现场就真踩过「配置写 rocksdb、环境里残留 mem、服务按 mem 起来、属性行一直不进库、日志一个字
-/// 没提」。介质是「这一次进程怎么起」的事，跟启动命令走；配置文件描述的是「这个工程长什么样」，
-/// 它不该替进程挑介质。旧键还留在文件里的，由 [`store_mode_notices`] 逐条点名，
-/// 仓内夹具由 `no_db_option_fixture_still_carries_a_store_mode_key` 钉住不许再写。
+/// - `AIOS_STORE_MODE=mem` / `AIOS_STORE_MODE=rocksdb`：启动命令那一层的显式覆盖，
+///   说了就以它为准——开发隔离与运维 pin 都走这层。
+/// - `DbOption.toml` 的 `store_mode`：配置向导第②步落盘的用户选择。环境变量没说时按它跑；
+///   两边都在且不同档，[`store_mode_notices`] 启动时并排念出来——2026-09-18 现场踩过
+///   「配置 rocksdb、环境残留 mem、服务按 mem 起来、属性行一直不进库」的静默覆盖，不许再无声。
+/// - 都没说 = **`rocksdb`**（ADR-083 D6）：漏设要落在「地址上没库就当场连不上」那一侧，
+///   不能落在「起来了、属性行不进库、日志没人喊」那一侧。
 ///
-/// **不设 = `rocksdb`**（ADR-083 D6，2026-09-18 当日把 ADR-074 D3 的 `mem` 翻了过来）。这个值同时
-/// 决定 [`data_face`]（`rocksdb` → `ingest`，`mem` → `read-through`），所以漏设它换掉的不只是介质，
-/// 还有整个数据面——而两种漏法的代价差得很远：兜底 `mem` 时服务照常起、模型照常对，只有属性行
-/// 一直不进库、校审域整域 503，症状要几个小时才浮出来；兜底 `rocksdb` 时地址上没库就当场
-/// `SurrealDB 连接失败` 退出，一眼就知道漏了什么。所以让默认落在会当场喊的那一侧。
+/// `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB` 仍然不参与裁决，写了由
+/// [`store_mode_notices`] 逐条点名。这个值同时决定 [`data_face`]（`rocksdb` → `ingest`，
+/// `mem` → `read-through`），所以漏设换掉的不只是介质，还有整个数据面。
 ///
-/// 代价是「解压即跑」不再靠默认兜着：发布包由 `Start-AMS.ps1` 在不给 `-StoreMode` 时**显式**
-/// 回填 `AIOS_STORE_MODE=mem`（ADR-083 D5），出厂体验一个字没变。认不出的值当没设，并出声。
+/// 「解压即跑」不靠默认兜：发布包的 `Start-AMS.ps1` 在不给 `-StoreMode`、环境也没有时回填
+/// `AIOS_STORE_MODE`——文件里写了 `store_mode` 就按文件，文件没写才回填 `mem`。
+/// 认不出的值当没设，并出声。
 pub fn store_mode() -> StoreMode {
-    effective_store_mode(std::env::var(STORE_MODE_ENV).ok().as_deref())
+    effective_store_mode(
+        std::env::var(STORE_MODE_ENV).ok().as_deref(),
+        load_ext_fields().store_mode.as_deref(),
+    )
 }
 
-/// 签名里**只有环境变量这一格**：配置文件想参与裁决，得先改这个签名——那就是在改 ADR-083。
+/// 三层裁决：**环境变量 > 配置文件 `store_mode` > 默认 `rocksdb`**。
 ///
 /// 兜底那一档是 `rocksdb`（ADR-083 D6，2026-09-18 当日翻过来的）：漏设的代价要落在
 /// 「起不来、当场报连不上」这一侧，不能落在「起来了、但属性行不进库、日志没人喊」那一侧。
-fn effective_store_mode(env_value: Option<&str>) -> StoreMode {
-    parse_store_mode(env_value).unwrap_or(StoreMode::RocksDb)
+/// 配置那一层 2026-10 起是向导持久化的介质选择（ADR-083 修订），不再是只读不回的退役键。
+fn effective_store_mode(env_value: Option<&str>, file_value: Option<&str>) -> StoreMode {
+    parse_store_mode(env_value)
+        .or_else(|| parse_store_mode(file_value))
+        .unwrap_or(StoreMode::RocksDb)
 }
 
 /// `Some(mode)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值
@@ -1341,10 +1347,10 @@ fn retired_store_mode_meaning(raw: &str) -> Option<&'static str> {
 /// 介质这一件事上所有该出声的地方（[`data_read_mode_notice`] 同款纪律：静默吃掉一个设了的
 /// 开关是最高级别缺陷之一）。返回非空时调用方必须**逐条**打出来。
 ///
-/// 四种情形：环境变量认不出 / 是退役写法；配置文件里还写着 `store_mode` 或 `in_memory_db`
-/// （2026-09-18 起它们不再生效，ADR-083）；旧环境变量 `AIOS_IN_MEMORY_DB` 还设着。
-/// 后三种要把「文件里那句」与「实际跑的那档」并排念出来——两边不一样时人第一反应是去翻配置，
-/// 翻到的还是那句过期的值。
+/// 四种情形：环境变量认不出 / 是退役写法；环境变量与配置文件 `store_mode` 不同档（环境变量
+/// 压了向导持久化的选择，ADR-083 修订后这是唯一会被盖的正常来源）；配置文件 `store_mode`
+/// 认不出；`in_memory_db` / 旧环境变量 `AIOS_IN_MEMORY_DB` 还设着（ADR-083 起它们不再生效）。
+/// 「文件里那句」与「实际跑的那档」不一样时要并排念出来——人第一反应是去翻配置。
 pub fn store_mode_notices() -> Vec<String> {
     let ext = load_ext_fields();
     store_mode_notices_for(
@@ -1361,7 +1367,7 @@ fn store_mode_notices_for(
     configured_in_memory_db: Option<bool>,
     in_memory_db_env: Option<&str>,
 ) -> Vec<String> {
-    let effective = effective_store_mode(env_value);
+    let effective = effective_store_mode(env_value, configured_store_mode);
     let mut notices = Vec::new();
 
     // 1. 环境变量本身：认不出 → 按默认；退役写法 → 仍认，但落到的介质变了，必须当场说清。
@@ -1385,26 +1391,27 @@ fn store_mode_notices_for(
         }
     }
 
-    // 2. 配置文件里还写着 store_mode：2026-09-18 起它一个字都不决定（ADR-083）。
-    //    2026-09-18 之前真踩过的坑：配置写着 `store_mode = "rocksdb"`，上一条命令残留的
-    //    `AIOS_STORE_MODE=mem` 把它压成了内存库——服务照常起、模型照常对，只有属性行一直不进库，
-    //    而启动日志里没有一个字提过配置被压。现在配置不参与裁决了，但文件里那句还会骗人，
-    //    所以两边不一样时要**并排念出来**并说清该设哪个环境变量。
+    // 2. 配置文件里的 store_mode：2026-10 起它是向导持久化的那一层（ADR-083 修订）——环境变量
+    //    没说时按它跑，不吵；环境变量说了且与文件不同档，就是当年那个静默覆盖的形状，
+    //    要把两边并排念出来。文件里那句认不出的，也当没设，但同样要出声。
     if let Some(raw) = configured_store_mode.filter(|raw| !raw.trim().is_empty()) {
-        let mut line = format!(
-            "⚠ DbOption.toml 里的 store_mode = {raw:?} 已不再生效——介质只由环境变量 {STORE_MODE_ENV} 决定\
-             （ADR-083，2026-09-18）；本进程按 {} 跑（{}）。",
-            effective.as_str(),
-            store_mode_source_for(env_value)
-        );
-        if let Some(wanted) = parse_store_mode(Some(raw)).filter(|wanted| *wanted != effective) {
-            line.push_str(&format!(
-                "**两边不是同一档**：要按配置里那一档跑，启动前设 {STORE_MODE_ENV}={}。",
-                wanted.as_str()
-            ));
+        match parse_store_mode(Some(raw)) {
+            Some(file_mode) => {
+                if parse_store_mode(env_value).is_some() && file_mode != effective {
+                    notices.push(format!(
+                        "⚠ 环境变量 {STORE_MODE_ENV} 压过了配置文件里的 store_mode = {raw:?}：\
+                         本进程按 {} 跑（两边不是同一档）。要按文件那一档跑，去掉 {STORE_MODE_ENV} 再启动。",
+                        effective.as_str()
+                    ));
+                }
+            }
+            None => notices.push(format!(
+                "⚠ DbOption.toml 里的 store_mode = {raw:?} 认不出来（只认 mem / rocksdb），按 {} 跑（{}）。\
+                 改成 mem / rocksdb，或在向导第②步重选让它重写。",
+                effective.as_str(),
+                store_mode_source_for(env_value, configured_store_mode)
+            )),
         }
-        line.push_str("请把这一行从配置里删掉");
-        notices.push(line);
     }
 
     // 3. 更老的那个开关同理：配置键与旧环境变量都只剩「点名」这一个用途。
@@ -1425,20 +1432,25 @@ fn store_mode_notices_for(
     notices
 }
 
-/// 生效的 [`store_mode`] 是**谁定的**：环境变量，还是没设（或认不出）时的默认。
+/// 生效的 [`store_mode`] 是**谁定的**：环境变量、配置文件 `store_mode`，还是都没说时的默认。
 ///
-/// 启动横幅只说「现在是哪一档」，说不清「这一档是谁定的」——配置文件里那句过期的
-/// `store_mode = "rocksdb"` 还在时，人第一反应是去翻配置，翻到的还是它。横幅带上这一句，
-/// 一眼就知道下一步该动的是启动命令，不是文件。
+/// 启动横幅只说「现在是哪一档」，说不清「这一档是谁定的」——环境变量压了向导选的档时，
+/// 人第一反应是去翻配置，翻到的是文件里那句被压的值。横幅带上这一句，一眼就知道下一步
+/// 该动的是启动命令还是向导里的选择。
 pub fn store_mode_source() -> &'static str {
-    store_mode_source_for(std::env::var(STORE_MODE_ENV).ok().as_deref())
+    store_mode_source_for(
+        std::env::var(STORE_MODE_ENV).ok().as_deref(),
+        load_ext_fields().store_mode.as_deref(),
+    )
 }
 
-fn store_mode_source_for(env_value: Option<&str>) -> &'static str {
+fn store_mode_source_for(env_value: Option<&str>, file_value: Option<&str>) -> &'static str {
     if parse_store_mode(env_value).is_some() {
         "环境变量 AIOS_STORE_MODE"
+    } else if parse_store_mode(file_value).is_some() {
+        "配置文件 DbOption.toml 的 store_mode（向导持久化的选择）"
     } else {
-        "默认 rocksdb（环境变量 AIOS_STORE_MODE 没设或认不出）"
+        "默认 rocksdb（环境变量与配置文件都没设）"
     }
 }
 
@@ -3105,11 +3117,14 @@ mod tests {
     /// 不再靠这个默认兜着。
     #[test]
     fn the_default_store_mode_is_rocksdb() {
-        assert_eq!(effective_store_mode(None), StoreMode::RocksDb);
-        assert_eq!(effective_store_mode(Some("")), StoreMode::RocksDb);
-        assert_eq!(effective_store_mode(Some("   ")), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(None, None), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some(""), None), StoreMode::RocksDb);
         assert_eq!(
-            effective_store_mode(Some("mem")),
+            effective_store_mode(Some("   "), Some("  ")),
+            StoreMode::RocksDb
+        );
+        assert_eq!(
+            effective_store_mode(Some("mem"), None),
             StoreMode::Mem,
             "内存档仍然可显式选择——它只是不再是漏设时的那一档"
         );
@@ -3133,24 +3148,33 @@ mod tests {
         );
     }
 
-    /// **介质只由环境变量决定**（ADR-083）。`effective_store_mode` 的签名里根本没有配置那一格，
-    /// 这条用例钉的是「配置文件里写什么都换不了介质」这件事本身；下划线与大小写都认
-    /// （`ROCKSDB` 是环境变量里最自然的写法，认不出它只会让人以为开关没生效）。
+    /// 三层裁决（ADR-083 修订，2026-10）：**环境变量 > 配置文件 `store_mode` > 默认**。
+    /// 环境变量是启动命令那一层的显式覆盖——开发隔离与运维 pin 都走它；配置文件里
+    /// 是配置向导第②步落盘的用户选择，环境变量没说（或认不出）时按它跑。
+    /// 下划线与大小写都认（`ROCKSDB` 是环境变量里最自然的写法）。
     #[test]
-    fn only_the_environment_variable_decides_the_store_mode() {
-        assert_eq!(effective_store_mode(Some("ROCKSDB")), StoreMode::RocksDb);
-        assert_eq!(effective_store_mode(Some(" Mem ")), StoreMode::Mem);
+    fn the_store_mode_layers_are_env_then_file_then_default() {
+        // 环境变量压过文件——包括两边是相反档。
         assert_eq!(
-            effective_store_mode(Some("mem_")),
-            StoreMode::RocksDb,
-            "认不出的值当没设，落到默认那一档"
+            effective_store_mode(Some("ROCKSDB"), Some("mem")),
+            StoreMode::RocksDb
         );
-        // 配置里那两个键就算写了、就算与环境变量相反，也一个字都不改介质：
-        // 它们只出现在告警的参数表里，不出现在裁决的参数表里。
-        assert_eq!(effective_store_mode(Some("mem")), StoreMode::Mem);
-        assert!(
-            !store_mode_notices_for(Some("mem"), Some("rocksdb"), Some(false), None).is_empty(),
-            "写了却不生效的键必须出声"
+        assert_eq!(
+            effective_store_mode(Some(" Mem "), Some("rocksdb")),
+            StoreMode::Mem
+        );
+        // 环境变量没说，或说了但认不出：文件那一层说了算（向导持久化的选择）。
+        assert_eq!(effective_store_mode(None, Some("mem")), StoreMode::Mem);
+        assert_eq!(effective_store_mode(Some("mem_"), Some("mem")), StoreMode::Mem);
+        assert_eq!(
+            effective_store_mode(None, Some("external")),
+            StoreMode::RocksDb,
+            "退役别名在文件里同样认"
+        );
+        // 两边都认不出 → 默认。
+        assert_eq!(
+            effective_store_mode(Some("mem_"), Some("bad")),
+            StoreMode::RocksDb
         );
     }
 
@@ -3158,7 +3182,12 @@ mod tests {
     /// 一个 `memm` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
     #[test]
     fn an_unrecognised_store_mode_is_ignored_but_never_silent() {
-        assert_eq!(effective_store_mode(Some("memm")), StoreMode::RocksDb);
+        assert_eq!(effective_store_mode(Some("memm"), None), StoreMode::RocksDb);
+        assert_eq!(
+            effective_store_mode(Some("memm"), Some("mem")),
+            StoreMode::Mem,
+            "环境变量认不出时落给文件那一层，不是直接落默认"
+        );
         let notices = store_mode_notices_for(Some("memm"), None, None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("memm"), "{notices:?}");
@@ -3212,50 +3241,47 @@ mod tests {
         assert!(store_mode_notices_for(Some("rocksdb"), None, None, None).is_empty());
     }
 
-    /// 配置文件里还写着 `store_mode` 时必须出声，并且要把文件里那句与实际跑的那档并排念出来。
-    ///
-    /// 2026-09-18 真踩过（还是分层叠加那会儿）：配置 `store_mode = "rocksdb"`、环境里残留
-    /// `AIOS_STORE_MODE=mem`，服务按 mem 起来，模型照常对、属性行一直不进库，日志里没有一个字
-    /// 提过配置被压——人只会对着那句 `rocksdb` 反复怀疑增量窗口。现在配置根本不参与裁决，
-    /// 但那句过期的值还躺在文件里，人翻到的还是它。
+    /// 配置文件 `store_mode` 是向导持久化的那一层（ADR-083 修订，2026-10）：环境变量没说时
+    /// 按它跑，不吵；环境变量说了且不同档——2026-09-18 现场踩过的静默覆盖形状——必须
+    /// 把两边并排念出来。
     #[test]
-    fn a_stale_store_mode_key_in_the_config_is_named_not_swallowed() {
-        // 文件说 rocksdb、实际 mem：点名「两边不是同一档」并给出该设的环境变量值。
+    fn the_persisted_store_mode_is_quiet_until_the_env_overrides_it() {
+        // 环境变量没说，文件说了算：这是向导选完保存后的正常形态，一声不出。
+        assert!(store_mode_notices_for(None, Some("mem"), None, None).is_empty());
+        assert!(store_mode_notices_for(None, Some("rocksdb"), None, None).is_empty());
+        // 两边同档：不吵。
+        assert!(store_mode_notices_for(Some("rocksdb"), Some("rocksdb"), None, None).is_empty());
+        // 环境变量压了文件的档：点名「两边不是同一档」并给出该去掉的环境变量。
         let notices = store_mode_notices_for(Some("mem"), Some("rocksdb"), None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains(r#"store_mode = "rocksdb""#), "{notices:?}");
-        assert!(notices[0].contains("不再生效"), "{notices:?}");
         assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
-        assert!(notices[0].contains("AIOS_STORE_MODE=rocksdb"), "{notices:?}");
-        // 环境变量没设、文件说 mem：实际是默认 rocksdb，同样是两边不一样，且要说清这一档是默认给的。
-        let notices = store_mode_notices_for(None, Some("mem"), None, None);
+        assert!(notices[0].contains("AIOS_STORE_MODE"), "{notices:?}");
+        // 文件里那句认不出：当没设，但要出声。
+        let notices = store_mode_notices_for(None, Some("external-db"), None, None);
         assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains("两边不是同一档"), "{notices:?}");
-        assert!(notices[0].contains("默认"), "{notices:?}");
-        assert!(notices[0].contains("AIOS_STORE_MODE=mem"), "{notices:?}");
-        // 两边恰好一样：仍要说「这一行已不生效、请删掉」，但不必喊「不一样」。
-        let notices = store_mode_notices_for(Some("rocksdb"), Some("rocksdb"), None, None);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains("不再生效"), "{notices:?}");
-        assert!(notices[0].contains("删掉"), "{notices:?}");
-        assert!(!notices[0].contains("两边不是同一档"), "{notices:?}");
+        assert!(notices[0].contains("认不出来"), "{notices:?}");
         // 文件里没这一行（或只是空白）：不吵。
         assert!(store_mode_notices_for(Some("mem"), None, None, None).is_empty());
         assert!(store_mode_notices_for(Some("mem"), Some("  "), None, None).is_empty());
     }
 
-    /// 横幅要说得出「这一档是谁定的」——只剩两种答案：环境变量，或默认。
-    /// 配置文件不再是候选（ADR-083），这里一个「配置」字都不许回来。
+    /// 横幅要说得出「这一档是谁定的」：环境变量、配置文件（向导持久化），或都没说时的默认。
     #[test]
     fn the_effective_store_mode_can_name_who_decided_it() {
         assert_eq!(
-            store_mode_source_for(Some("rocksdb")),
+            store_mode_source_for(Some("rocksdb"), Some("mem")),
             "环境变量 AIOS_STORE_MODE"
         );
-        assert_eq!(store_mode_source_for(Some("MEM")), "环境变量 AIOS_STORE_MODE");
-        assert!(store_mode_source_for(None).contains("默认"));
-        // 认不出的值按没设处理，来源也得跟着退回去（与 effective_store_mode 同一口径）。
-        assert!(store_mode_source_for(Some("memm")).contains("默认"));
+        assert_eq!(
+            store_mode_source_for(Some("MEM"), None),
+            "环境变量 AIOS_STORE_MODE"
+        );
+        assert!(store_mode_source_for(None, Some("mem")).contains("配置文件"));
+        assert!(store_mode_source_for(None, None).contains("默认"));
+        // 认不出的值按没设处理，来源跟着退到下一层（与 effective_store_mode 同一口径）。
+        assert!(store_mode_source_for(Some("memm"), Some("mem")).contains("配置文件"));
+        assert!(store_mode_source_for(Some("memm"), Some("bad")).contains("默认"));
     }
 
     /// 更老的那个开关（配置 `in_memory_db` / 环境变量 `AIOS_IN_MEMORY_DB`）同样不再决定介质，
@@ -3271,10 +3297,11 @@ mod tests {
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("AIOS_IN_MEMORY_DB"), "{notices:?}");
         assert!(notices[0].contains("AIOS_STORE_MODE"), "{notices:?}");
-        // 几个过期来源同时在场：一条一条都要念，不许只挑一条。
+        // 几个过期来源同时在场：一条一条都要念，不许只挑一条。文件里那句
+        // `store_mode = "rocksdb"` 是生效层（环境变量认不出、落给文件），不是过期来源。
         let notices =
             store_mode_notices_for(Some("memm"), Some("rocksdb"), Some(false), Some("0"));
-        assert_eq!(notices.len(), 4, "{notices:?}");
+        assert_eq!(notices.len(), 3, "{notices:?}");
     }
 
     /// `rocksdb` 的行活得过进程重启，`mem` 的活不过。
@@ -3332,10 +3359,10 @@ mod tests {
         assert!(data_face_notice_for(None, None).is_none());
     }
 
-    /// **形态键不许再出现在配置文件里的护栏。** 2026-09-18 之前它反过来（每份夹具必须显式写
-    /// `store_mode`——默认值翻过四次，漏写的配置会静默换介质）。ADR-083 之后介质只由环境变量
-    /// `AIOS_STORE_MODE` 决定，文件里那一行**一个字都不生效**——留着它，读配置的人得出的结论
-    /// 就与实际跑的介质相反，正是 2026-09-18 现场踩过的坑。所以现在护的是「文件里不许有」。
+    /// **形态键不许出现在仓内夹具里的护栏。** `store_mode` 在文件里是生效层（向导持久化，
+    /// ADR-083 修订）——夹具里预置一行就是给所有用这份配置跑的进程**静默定介质**：
+    /// 开发环境与测试进程没设环境变量时会被悄悄换成夹具写的档。文件层归用户现场写，
+    /// 仓内出厂模板与夹具一律不许带——缺省走默认与启动器回填。
     ///
     /// 仓根 `DbOption.toml`、`db_options/`、出厂模板一起扫；注释掉的行放过（历史与说明都靠注释留）。
     /// 只认 `key =` 这一形状：`store_mode_xxx` 之类别的键不在此列。
