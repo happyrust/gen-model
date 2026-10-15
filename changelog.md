@@ -22,6 +22,28 @@
 - **范围外**：`blocked_by_data` / `room_only_work_item` 那两处 `admits` 属**增量触发**侧，归限定域管，未动。
 - **提交**：`3b075d95`
 
+### 第三段的「在飞」单列一格：换代清零展示帧不许放第二趟重建进闸
+
+- **为什么**：准入闸原来看展示帧（`phase == "edge-recompute"` 且逐库计数没跑满）。可第三段跑在 `Ready` 下，而任务开工前对齐的换代（`refresh_before_task` → `initialize_file_backed_at_startup` → `mark_loading("mesh-warm")`）会把展示帧**清零重写**成别的相位——换代一过判据就消失，第二趟「重新生成房间」踩着第一趟的逐库循环进来，两趟交错清边、互相覆盖盖章（#53 的老面孔）。
+- **改动**（`fast_model/room_resident.rs` + `web_service/handlers.rs`）：`ResidentProgress` 新增 `edge_recompute_in_flight` 一格；`reset_progress_in` 清零展示帧时从被换掉的那一帧**接手**这一格；`try_begin_rebuild_in` 只读它判准入；第三段开工在 `run_rooms_rebuild` 逐库循环之前立起相位 / 库数 / 这一格。
+- **验证**：行为红钉 `room_rebuild_regression_a_generation_swap_must_not_reopen_the_edge_loop_gate`（修前 `0 passed; 1 failed`、exit 101）→ 绿 `6 passed`；全量 `cargo test --lib` **2516 / 0 / 132**；四文件编辑器诊断 errors 0 / warnings 0。证据 `verification/room-rebuild-flight-gate-20261015/verification.md`（按约定不入库）。
+- **提交**：`f9b3af190`
+
+### 收尾落定之后才放下「在飞」——准入闸重开时库上的账必须已经一致
+
+- **为什么**：放开「在飞」原在逐库循环跑完那一刻，而收尾还要把 `room_update_record` 写进库。闸重开得早，第二趟「重新生成房间」就能被放进来先清账（两张边表全删、水位整表 NONE、记录 NONE），第一趟随后写下的却是**清边之前那一刻**的账——说「所有含房库都已做完」。第二趟若没跑完（`all_ok=false`，或进程被杀），库里留下的是「边没了、水位 NONE、记录却说已最新」：下次启动检查只信记录（`is_dbnum_timestamp_newer_than_room`）判 `UpToDate`，那批库从此不补，只剩逐库任务的自愈。
+- **改动**（`web_service/handlers.rs`）：`run_rooms_rebuild` 的「放」移到 if/else 收尾**之后**；`rooms_rebuild` 的函数文档补一条——「准入闸重开的那一刻，库上的账（边 + 水位 + 记录）必须已经一致」。
+- **验证**：源码契约红钉 `room_rebuild_regression_the_flight_is_held_until_the_settle_lands`（切 `run_rooms_rebuild` 函数体，断言收尾在放之前；修前 exit 101，断言把整个函数体打出来）→ 绿 `8 passed`；全量 `cargo test --lib` **2520 / 0 / 132**。证据 `verification/room-rebuild-settle-order-20261015/verification.md`（按约定不入库）。
+- **提交**：`a519d2c9`
+
+### 第三段的「在飞」收口：守卫持有、Drop 放开——循环里 panic 展开也不许把重建口焊死（RAII）
+
+- **为什么**：第三处未闭面——逐库循环 / 收尾里 panic 展开时，「在飞」那一格留在原处，此后每一枚 `POST /api/v1/rooms/rebuild` 都 409「正在重建中」直到进程重启。同一把焊枪还有第二个扳机：准入曾拿展示帧兜底，而循环里炸掉之后展示帧会**如实停在死的地方**（`phase` 还写着 `edge-recompute`、计数停在半路）——那一帧谁也不会再去改，而下一趟重建正是被它挡在门外的那个。
+- **改动**（`fast_model/room_resident.rs` + `web_service/handlers.rs`）：新增 `RoomRebuildFlight<'a>`（`#[must_use]`；开工一次就位「相位 + 逐库总数 + 在飞」，`Drop` 走 `note_edge_recompute_finished_in`）与生产入口 `start_edge_recompute(total)` / 测试入口 `start_edge_recompute_in`；**删除** `note_progress_phase` / `note_recompute_dbnums_total` / `note_edge_recompute_finished` 三个公开项——收工只剩守卫 Drop 一条路；`reset_progress_in` 只接手那一格、`try_begin_rebuild_in` 不再读相位 / 计数；`run_rooms_rebuild` 把 `let _flight = resident::start_edge_recompute(dbnums.len());` 绑在循环之前，活到函数末尾（收尾也在守卫作用域内）。
+- **验证**：行为红钉 `room_rebuild_regression_a_frame_frozen_by_a_panicked_loop_is_not_a_lifetime_sentence`（帧停在 `edge-recompute` / `done=1`、在飞格 = false ⇒ 必须放行；修前 `0 passed; 1 failed`、exit 101）＋展开路 `room_rebuild_regression_a_panicking_edge_loop_must_not_shut_the_gate_forever`（`catch_unwind` 里循环中途 `panic!` ⇒ 格落下、展示帧照停、闸放行）；两条 `web_service` 源码契约钉改成守卫形态；顺手把上一轮丢了 `#[test]`、因而**从没跑过**的限定域钉 `room_initialization_and_the_full_rebuild_never_consult_the_watch_scope` 归位；全量 `cargo test --lib` **2522 / 0 / 132**；四文件编辑器诊断 errors 0 / warnings 0。证据 `verification/room-rebuild-in-flight-guard-20261015/verification.md`（按约定不入库）。
+- **强杀面**：库里没有持久化的「正在重建」标记——开工写下的持久面（清边 + 水位整表 NONE + 记录 NONE）本身就是欠账，重启后判 `NeedsFullInit` 自愈；进程内那一格随进程消失。因此这一面由「欠账 + 重启」兜着，不需要再加超时层。
+
+
 ## 0.1.40 — 2026-10-15
 
 ### 配置向导恢复介质两档选择（external / memory）——`store_mode` 回到配置文件当向导持久化层（ADR-083 二次修订）
