@@ -2561,6 +2561,14 @@ pub(crate) struct ResidentProgress {
     /// `edge-recompute`：「重新生成房间」收尾那一半——整库房间边重算完的库数 / 要重算的库数。
     pub dbnums_done: usize,
     pub dbnums_total: usize,
+    /// `edge-recompute` 这一趟**在飞**：这一格不是展示，是准入判据。
+    ///
+    /// 为什么不能只凭 `phase` 与逐库计数判在飞（2026-10-15）：那一趟跑在 `Ready` 下，而任务
+    /// 开工前对齐的换代（`refresh_before_task` → `initialize_file_backed_at_startup` →
+    /// `mark_loading`）会把展示帧**清零重写成别的相位**——换代一过闸就被抹开，第二趟
+    /// 「重新生成房间」踩着第一趟的逐库循环进来，两趟交错清边、互相覆盖盖章（#53 的老面孔）。
+    /// 展示帧可以清零，这一格不许：[`reset_progress_in`] 清零时从被换掉的那帧**接手**这个事实。
+    pub edge_recompute_in_flight: bool,
 }
 
 fn progress_slot() -> &'static RwLock<ResidentProgress> {
@@ -2582,12 +2590,20 @@ fn reset_progress(phase: &str) {
 }
 
 /// 把指定的进度槽清零重记（生产用全局槽，测试用本地槽）。
+///
+/// 清零**不抹在飞**（2026-10-15）：换代装载走的就是这条清零（`mark_loading("mesh-warm")`），
+/// 展示帧换走之后 `edge-recompute` 那一趟可能还在跑。`edge_recompute_in_flight` 是准入判据，
+/// 这里从被换掉的那帧**接手**：帧上写着 `edge-recompute` 且还没跑完，就是还在飞。
 fn reset_progress_in(progress: &RwLock<ResidentProgress>, phase: &str) {
-    *progress
+    let mut slot = progress
         .write()
-        .unwrap_or_else(PoisonError::into_inner) = ResidentProgress {
+        .unwrap_or_else(PoisonError::into_inner);
+    let in_flight = slot.edge_recompute_in_flight
+        || (slot.phase == "edge-recompute" && slot.dbnums_done < slot.dbnums_total);
+    *slot = ResidentProgress {
         phase: phase.to_owned(),
         started_at: chrono::Local::now().to_rfc3339(),
+        edge_recompute_in_flight: in_flight,
         ..ResidentProgress::default()
     };
 }
@@ -2644,13 +2660,20 @@ pub(crate) fn note_mesh_warm_failed(failed: usize) {
         .meshes_failed = failed;
 }
 
-/// `edge-recompute` 段开工：报要重算的库数。`note_progress_phase` 已换段名。
+/// `edge-recompute` 段开工：报要重算的库数并立起「在飞」。`note_progress_phase` 已换段名。
+/// 「在飞」为什么单列一格见 [`ResidentProgress::edge_recompute_in_flight`]。
 pub(crate) fn note_recompute_dbnums_total(total: usize) {
-    let mut progress = progress_slot()
+    note_recompute_dbnums_total_in(progress_slot(), total);
+}
+
+/// 本地槽版本（测试用；生产走 [`note_recompute_dbnums_total`]）。
+fn note_recompute_dbnums_total_in(progress: &RwLock<ResidentProgress>, total: usize) {
+    let mut slot = progress
         .write()
         .unwrap_or_else(PoisonError::into_inner);
-    progress.dbnums_total = total;
-    progress.dbnums_done = 0;
+    slot.dbnums_total = total;
+    slot.dbnums_done = 0;
+    slot.edge_recompute_in_flight = true;
 }
 
 /// 每个库的房间边重算完（成败都算完）推进一格。
@@ -2661,10 +2684,26 @@ pub(crate) fn note_recompute_dbnum_done() {
         .dbnums_done += 1;
 }
 
+/// `edge-recompute` 段收工：逐库循环跑完（成败都算），放下「在飞」——重建准入闸由它重开。
+/// 只看展示帧的话，这一趟被换代清零之后就再也说不清自己跑完没有（2026-10-15）。
+pub(crate) fn note_edge_recompute_finished() {
+    note_edge_recompute_finished_in(progress_slot());
+}
+
+/// 本地槽版本（测试用；生产走 [`note_edge_recompute_finished`]）。
+fn note_edge_recompute_finished_in(progress: &RwLock<ResidentProgress>) {
+    progress
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .edge_recompute_in_flight = false;
+}
+
 /// 「重新生成房间」（`POST /api/v1/rooms/rebuild`）的开闸门：一把锁里「判 + 翻」——
 /// 已是 `Loading`（startup 首建 / 上一趟重建 / 开工前对齐的换代）就不放第二趟进；
 /// 上一趟已翻 `Ready` 但逐库边重算（`edge-recompute`）还没跑完，同样不放——那一段
-/// 在 `Ready` 下跑，只看生命周期会漏守，两趟交错会互相清边、覆盖盖章（#53）。
+/// 在 `Ready` 下跑，只看生命周期会漏守，两趟交错会互相清边、覆盖盖章（#53）。在飞判据是
+/// [`ResidentProgress::edge_recompute_in_flight`]：同期的换代（`mark_loading`）会清零展示帧，
+/// 拿相位当判据会被它抹开（2026-10-15）。
 /// 其余各态（含 `Blocked`、`Degraded`）都许进：这一按就是让人把坏掉的那代换掉。
 pub(crate) fn try_begin_rebuild() -> bool {
     try_begin_rebuild_in(lifecycle_slot(), progress_slot())
@@ -2685,8 +2724,11 @@ fn try_begin_rebuild_in(
         let in_flight = progress
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        if in_flight.phase == "edge-recompute"
-            && in_flight.dbnums_done < in_flight.dbnums_total
+        // 两条都看：`edge_recompute_in_flight` 是判据（换代清零展示帧也抹不掉它，
+        // 2026-10-15）；相位 + 计数是兜底，也覆盖「那一格立起来之前」的那一瞬。
+        if in_flight.edge_recompute_in_flight
+            || (in_flight.phase == "edge-recompute"
+                && in_flight.dbnums_done < in_flight.dbnums_total)
         {
             return false;
         }

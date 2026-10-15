@@ -777,6 +777,9 @@ async fn run_rooms_rebuild() {
         }
         resident::note_recompute_dbnum_done();
     }
+    // 循环跑完（成败都算）：「在飞」放下，重建准入闸由它重开。那一格是准入判据——展示帧
+    // 可能已被同期的换代（`mark_loading`）清零重写成别的相位，拿它说「跑完没有」不算（2026-10-15）。
+    resident::note_edge_recompute_finished();
     if all_ok {
         // 整库重建没有「没看」的库：空集合 + 上一笔记录为空（这一路开头就把记录清了）。
         crate::data_interface::room_recompute::refresh_room_update_record_with_model(

@@ -133,3 +133,44 @@ cargo test --offline --lib room_rebuild_regression_ -- --nocapture --test-thread
   含三个文件 SHA256 与四条复现命令。
 - 范围外：`changelog.md` 仍未改（同上一条线未提交）；`blocked_by_data` / `room_only_work_item` 那两处
   `admits` 属**增量**触发侧，归限定域管，未动。
+
+## 后续修复（2026-10-15，第四轮）：第三段的「在飞」不许只活在展示帧里
+
+**缺陷**：#53 那条准入纪律（上一趟逐库边重算还在飞时不许放第二趟「重新生成房间」进）判「在飞」靠的是
+`ResidentProgress` 的**展示帧**（`phase == "edge-recompute"` 且 `dbnums_done < dbnums_total`）。
+第三段跑在 `Ready` 下——注释自己写着「那一段在 `Ready` 下跑，只看生命周期会漏守」——而**任务开工前
+对齐的换代**（`refresh_before_task` → `initialize_file_backed_at_startup` → `mark_loading("mesh-warm")`，
+`room_resident.rs` 三处）会把**同一帧**清零重写成别的相位（`reset_progress`）。于是：第三段还在飞，
+另一枚 `POST /api/v1/rooms/rebuild` 照进（相位已被换代抹成 `mesh-warm`、计数归 0）→ 两趟重建交错
+清边、互相覆盖盖章 = #53 要挡的事重新出现；`/health` 这时也如实报不出来（显示 `mesh-warm 0/0`，
+客户端会当空闲/已完成）。触发面不是边角：第三段按库逐个整库重算（分钟量级），任务开工每个都探一次
+composite，文件真变过时换代必发生，而这一按正是用户改完 MBD 之后按的。
+
+**修法与证据等级**：
+
+- `ResidentProgress` 增 `edge_recompute_in_flight: bool`：这一格**不是展示，是准入判据**；
+- `note_recompute_dbnums_total`（第三段开工）立起它；新增 `note_edge_recompute_finished()` 在逐库循环
+  跑完（成败都算）时放下它，`run_rooms_rebuild` 的循环由这一对括起来；
+- `reset_progress_in` 清零展示帧时**从被换掉的那帧接手**：帧上写着 `edge-recompute` 且还没跑完 →
+  新帧的 `edge_recompute_in_flight = true`（展示帧可以清零，判据不许被抹掉）；
+- `try_begin_rebuild_in` 两条都看：新那一格是判据，`phase` + 计数留作兜底（也覆盖立起来之前的一瞬）。
+- 红：新增行为红钉
+  `fast_model::room_resident::room_rebuild_regression_tests::room_rebuild_regression_a_generation_swap_must_not_reopen_the_edge_loop_gate`
+  （只用现成符号：把帧摆成第三段在飞 → 用 `mark_loading` 走的那一步 `reset_progress_in` 清零 →
+  断言闸仍拒）→ 修复前 `cargo test --offline --lib room_rebuild_regression_` = `5 passed; 1 failed`，
+  panic 在 `src/fast_model/room_rebuild_regression_tests.rs:101:5`；第一条 `control` 断言（帧还写着
+  `edge-recompute` 时拒）通过，失败在清零之后那条。
+- 绿：同批六条 `6 passed; 0 failed`（红钉转绿，并补上「循环跑完闸重开、不许焊死」的收工方向）；
+  全量 `cargo test --offline --lib` → `2516 passed; 0 failed; 132 ignored`（较上一轮 +2：行为红钉 +
+  源码契约钉 `room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact`）；
+  四个改动文件编辑器诊断 errors 0 / warnings 0。
+- 证据等级：红钉是**行为**证据（真调 `try_begin_rebuild_in` / `reset_progress_in`，fixture 自持生命周期
+  与进度槽，不碰进程单例、不碰库）；源码契约钉只钉接线位置（`run_rooms_rebuild` 的
+  `note_recompute_dbnums_total` 在循环前、`note_edge_recompute_finished` 在循环后；`reset_progress_in`
+  含接手；闸读那一格）。「运行时换代真的落在第三段期间」要真机（任务开工 + composite 变化 + 第二枚
+  `POST`），本轮不碰。
+- 证据原文（按约定不入库）：`verification/room-rebuild-flight-gate-20261015/verification.md`，
+  含四个文件 SHA256 与复现命令。
+- 范围外：`changelog.md` 仍未改（同上一条线未提交）；换代期间 `/health` 显示换代的相位（`mesh-warm`）
+  是如实，未改；循环中途 panic 会把新那一格留在「在飞」——与修前「帧停在 `edge-recompute` 没跑完」
+  同一条失效面，未扩大（未加 RAII 兜底）。

@@ -167,6 +167,64 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
 /// 增量那一臂**保留** `watch_scope`（监测范围）——但它跳过的库必须在记录里留白
 /// （`hold_unchecked_room_sesnos`），不得替它说「已看过最新」。
 #[test]
+/// 「在飞」不许只活在展示帧里（2026-10-15）：整库重建的第三段跑在 `Ready` 下，而任务开工前对齐的
+/// 换代（`refresh_before_task` → `initialize_file_backed_at_startup` → `mark_loading`）会把展示帧
+/// **清零重写成别的相位**——拿 `phase` 与逐库计数当准入判据，换代一过闸就被抹开，第二趟
+/// 「重新生成房间」踩着第一趟的逐库循环进来，两趟交错清边、互相覆盖盖章（#53 的老面孔）。
+/// 因此：「在飞」单列一格（`ResidentProgress::edge_recompute_in_flight`），清零展示帧时由
+/// `reset_progress_in` 从被换掉的那帧接手，准入读那一格；`run_rooms_rebuild` 的逐库循环由
+/// `note_recompute_dbnums_total` 开工 / `note_edge_recompute_finished` 收工括起来。
+/// 行为侧（换代清零之后闸仍拒、循环跑完闸重开）见
+/// `fast_model::room_resident::room_rebuild_regression_tests::room_rebuild_regression_a_generation_swap_must_not_reopen_the_edge_loop_gate`。
+#[test]
+fn room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact() {
+    let source = include_str!("handlers.rs");
+    let rebuild = source
+        .split_once("async fn run_rooms_rebuild(")
+        .expect("rebuild body exists")
+        .1;
+    let total = rebuild
+        .find("note_recompute_dbnums_total(")
+        .expect("第三段开工报库数：那一格就此立起");
+    let loop_start = rebuild.find("for dbnum in &dbnums {").expect("逐库循环存在");
+    let finished = rebuild
+        .find("note_edge_recompute_finished(")
+        .expect("逐库循环跑完要放下「在飞」——准入闸由它重开，展示帧说了不算");
+    assert!(total < loop_start, "开工在循环之前: {rebuild}");
+    assert!(loop_start < finished, "收工在循环之后: {rebuild}");
+
+    let resident = include_str!("../fast_model/room_resident.rs");
+    let reset = resident
+        .split_once("fn reset_progress_in(progress: &RwLock<ResidentProgress>, phase: &str) {")
+        .expect("reset_progress_in exists")
+        .1;
+    let reset_body = reset
+        .split_once("\r\n}\r\n")
+        .or_else(|| reset.split_once("\n}\n"))
+        .expect("reset_progress_in body ends")
+        .0;
+    assert!(
+        reset_body.contains("edge_recompute_in_flight: in_flight"),
+        "清零展示帧要接手「在飞」那一格: {reset_body}"
+    );
+    assert!(
+        reset_body.contains("slot.phase == \"edge-recompute\" && slot.dbnums_done < slot.dbnums_total"),
+        "接手判据 = 被换掉的那帧写着 edge-recompute 且还没跑完: {reset_body}"
+    );
+
+    let gate = resident
+        .split_once("fn try_begin_rebuild_in(")
+        .expect("rebuild gate exists")
+        .1;
+    let gate_head = &gate[..gate
+        .find("reset_progress_in(progress, \"source-snapshot\")")
+        .expect("gate admits after the checks")];
+    assert!(
+        gate_head.contains("in_flight.edge_recompute_in_flight"),
+        "准入读那一格，不只读相位: {gate_head}"
+    );
+}
+
 fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
     let source = include_str!("handlers.rs");
     let rebuild = source
