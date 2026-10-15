@@ -628,6 +628,8 @@ pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
                     dbnum,
                     &roots,
                     aios_database::data_interface::geom_error::GeometryFailurePolicy::Required,
+                    // 没有开工时冻住的房间计算器：归属留到 flush 的 room_stage。
+                    None,
                 )
                 .await?;
             // 生成只写进程内投影，这一步才让 Plant UI 看得见（ADR-060）。
