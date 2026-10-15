@@ -36,8 +36,6 @@ import json
 import pathlib
 import sys
 
-import frida
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -151,6 +149,9 @@ def parse_fields(specs: list[str] | None) -> dict[str, int]:
 def collect_live(
     pid: int, rows: list[dict], fields: dict[str, int]
 ) -> tuple[pathlib.Path, dict[str, list[dict]], dict[str, int]]:
+    # 真机附着才需要 frida。模块顶层不导入，CI 上的纯函数测试才能在没有 frida 时装进来。
+    import frida
+
     session = frida.attach(pid)
     script = session.create_script(AGENT_SOURCE)
     script.on("message", lambda message, data: print("frida", message, file=sys.stderr))
