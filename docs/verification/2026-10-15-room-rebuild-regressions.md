@@ -205,3 +205,58 @@ NONE、记录却说已最新**——下次启动检查只信记录（`is_dbnum_t
 - 证据原文（按约定不入库）：`verification/room-rebuild-settle-order-20261015/verification.md`。
 - 范围外：`changelog.md` 仍未改（另一条线未提交改动在里面）；循环中途 panic 把「在飞」留在原处
   （未加 RAII / 超时自愈）仍在，未扩大。
+
+## 六、「在飞」收口：守卫持有、Drop 放开（2026-10-15，第六笔）
+
+**为什么**：第三处未闭面——逐库循环 / 收尾里 panic 展开时，「在飞」那一格留在原处，此后每一枚
+`POST /api/v1/rooms/rebuild` 都 409「正在重建中」，直到重启。第五笔把判据从展示帧搬到
+`edge_recompute_in_flight` 一格之后，这一格的「放」仍是手工成对（`note_edge_recompute_finished_in`）：
+**panic 展开的路上根本走不到**。另外，准入闸此前还拿相位 / 逐库计数兜底，而循环里炸掉之后
+展示帧会如实停在死的地方（`edge-recompute`、`done=1`）——同一把焊枪的第二个扳机。
+
+**修法（守卫 = RAII 收口，"在飞"只有一个所有权明确的判据）**：
+
+- `fast_model::room_resident::RoomRebuildFlight<'a>`（`#[must_use]`）：起手一次就位「相位 + 逐库
+  总数 + 在飞」，`Drop` 走 `note_edge_recompute_finished_in`（放下那一格、相位回 `idle`）。
+- 生产入口 `start_edge_recompute(total) -> RoomRebuildFlight<'static>`；测试入口
+  `start_edge_recompute_in(&RwLock<ResidentProgress>, total)`。
+- 三个公开项 `note_progress_phase` / `note_recompute_dbnums_total` / `note_edge_recompute_finished`
+  **删除**——收工只剩守卫 Drop 一条路，谁都不许提前手工放开。
+- `handlers.rs::run_rooms_rebuild`：`let _flight = resident::start_edge_recompute(dbnums.len());`
+  在逐库循环**之前** → 循环 → 收尾 `refresh_room_update_record_with_model` → 函数末尾 Drop 才放开
+  （第五笔「收尾落定之后才放」由守卫的作用域一并保持）。
+- `reset_progress_in`（换代清零展示帧）与 `try_begin_rebuild_in`（准入闸）都**只读那一格**；准入不再
+  拿相位 / 计数兜底——收口时特意没有把判据建回展示帧上，展示帧停在哪都不是「在飞」的证据。
+
+**红 → 绿**：
+
+- 行为红钉（`fast_model`）：`room_rebuild_regression_a_frame_frozen_by_a_panicked_loop_is_not_a_lifetime_sentence`
+  —— 帧停在 `edge-recompute`、`done=1 / total=3`、格 = false ⇒ 必须放行。修前
+  `cargo test --offline --lib room_rebuild_regression_a_frame_frozen_by_a_panicked_loop_is_not_a_lifetime_sentence`
+  = 退出码 101。
+- 展开路新钉：`room_rebuild_regression_a_panicking_edge_loop_must_not_shut_the_gate_forever` ——
+  `catch_unwind` 包住 `start_edge_recompute_in` + 循环中途 `panic!` ⇒ 格落下、展示帧照旧停在死处、闸放行。
+- 源码契约钉（`web_service`）：`room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact`
+  改成守卫形态（`let _flight = resident::start_edge_recompute(` 在循环前、文件里不许再出现
+  `note_edge_recompute_finished(`、清零只读那一格、准入不许读相位 / 计数）；
+  `room_rebuild_regression_the_flight_is_held_until_the_settle_lands` 改成「守卫活到函数末尾」形态。
+- 绿：`cargo test --offline --lib room_rebuild_regression` → `10 passed; 0 failed`；全量
+  `cargo test --offline --lib` → `2522 passed; 0 failed; 132 ignored`（15.66s；工作树含另一条线
+  未提交改动）；四个改动文件编辑器诊断 errors 0 / warnings 0。
+
+**顺手抓到的假绿**：上一轮的编辑把限定域源码契约钉
+`room_initialization_and_the_full_rebuild_never_consult_the_watch_scope` 的 `#[test]` 弄丢了——文档注释
+落在别处、`#[test]` 粘到相邻测试上（那个测试因此跑了两遍），**这条钉从没跑过**。本轮把属性与注释归位，
+现在 10 条钉全在列表里、名字可核对。
+
+**强杀这一面（为什么不需要超时自愈）**：库里没有被持久化的「正在重建」标记。开工时写下的持久面是
+**两张边表清空 + 水位整表 `NONE` + `room_update_record` NONE**——它本身就是欠账信号
+（`library_alignment_owed` 比代号判 NONE ≠ 代号即欠；下次启动检查信记录、记录 NONE ⇒
+`NeedsFullInit`，目标集 `room_dbnums ∪ expected_dbnums`）。强杀只是让进程内那一格随进程一起消失：
+重启后格是默认的 false，重建口不再 409，欠下的库由启动初始化 / 逐库任务补齐。所以这一面由「欠账 +
+重启」兜着，不需要再加一层超时；RAII 只管住**同一个进程还在跑**的那些路（panic 展开）——这正是它
+能覆盖、也是唯一需要它的地方。
+
+**证据等级 / 范围外**：源码契约 + 隔离回归（panic 展开实测；「两趟真的交错」与真机强杀不在本轮）。
+证据原文（按约定不入库）：`verification/room-rebuild-in-flight-guard-20261015/verification.md`。
+

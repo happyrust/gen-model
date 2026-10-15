@@ -155,25 +155,14 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
     assert!(wipe > clear, "清库成功之后才清镜像");
 }
 
-/// 限定域口径（2026-10-15，用户）：**watch 目前只是作为增量监测的范围，不要限定房间的初始化**。
-/// `room_resident` 早有同一条源码钉（`room_files_never_consult_the_watch_scope`：房间是参照系，
-/// 限定域圈的是数据批次）。这里把房间侧另外两处也钉上：
-///
-/// - 启动整库房间初始化（`check_and_init_rooms_at_startup` 的 `NeedsFullInit` 臂）：目标库集合是
-///   `room_dbnums ∪ expected_dbnums`，**不看 `watch_scope`**。此前它按 `admits` 过滤（全被滤掉时才退回
-///   `room_dbnums`），未监听库的房间因此从没被初始化过；
-/// - 整库重建（`run_rooms_rebuild` 的逐库列表）：同上，此前也按 `admits` 过滤。
-///
-/// 增量那一臂**保留** `watch_scope`（监测范围）——但它跳过的库必须在记录里留白
-/// （`hold_unchecked_room_sesnos`），不得替它说「已看过最新」。
-#[test]
 /// 「在飞」不许只活在展示帧里（2026-10-15）：整库重建的第三段跑在 `Ready` 下，而任务开工前对齐的
 /// 换代（`refresh_before_task` → `initialize_file_backed_at_startup` → `mark_loading`）会把展示帧
 /// **清零重写成别的相位**——拿 `phase` 与逐库计数当准入判据，换代一过闸就被抹开，第二趟
 /// 「重新生成房间」踩着第一趟的逐库循环进来，两趟交错清边、互相覆盖盖章（#53 的老面孔）。
 /// 因此：「在飞」单列一格（`ResidentProgress::edge_recompute_in_flight`），清零展示帧时由
-/// `reset_progress_in` 从被换掉的那帧接手，准入读那一格；`run_rooms_rebuild` 的逐库循环由
-/// `note_recompute_dbnums_total` 开工 / `note_edge_recompute_finished` 收工括起来。
+/// `reset_progress_in` 从被换掉的那帧接手，准入读那一格；`run_rooms_rebuild` 的第三段由守卫
+/// （`start_edge_recompute`，见 `fast_model::room_resident::RoomRebuildFlight`）开工、由它的
+/// `Drop` 放开——手工成对在 panic 展开的路上到不了（第五笔）。
 /// 行为侧（换代清零之后闸仍拒、循环跑完闸重开）见
 /// `fast_model::room_resident::room_rebuild_regression_tests::room_rebuild_regression_a_generation_swap_must_not_reopen_the_edge_loop_gate`。
 #[test]
@@ -183,15 +172,15 @@ fn room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact() {
         .split_once("async fn run_rooms_rebuild(")
         .expect("rebuild body exists")
         .1;
-    let total = rebuild
-        .find("note_recompute_dbnums_total(")
-        .expect("第三段开工报库数：那一格就此立起");
+    let guard = rebuild
+        .find("let _flight = resident::start_edge_recompute(")
+        .expect("第三段开工：相位 / 库数 / 「在飞」由守卫一次立起，且要绑在名字上活到函数末尾");
     let loop_start = rebuild.find("for dbnum in &dbnums {").expect("逐库循环存在");
-    let finished = rebuild
-        .find("note_edge_recompute_finished(")
-        .expect("逐库循环跑完要放下「在飞」——准入闸由它重开，展示帧说了不算");
-    assert!(total < loop_start, "开工在循环之前: {rebuild}");
-    assert!(loop_start < finished, "收工在循环之后: {rebuild}");
+    assert!(guard < loop_start, "开工在循环之前: {rebuild}");
+    assert!(
+        !rebuild.contains("note_edge_recompute_finished("),
+        "放开只许走守卫 Drop（panic 展开的那条路上手工成对到不了）: {rebuild}"
+    );
 
     let resident = include_str!("../fast_model/room_resident.rs");
     let reset = resident
@@ -208,8 +197,9 @@ fn room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact() {
         "清零展示帧要接手「在飞」那一格: {reset_body}"
     );
     assert!(
-        reset_body.contains("slot.phase == \"edge-recompute\" && slot.dbnums_done < slot.dbnums_total"),
-        "接手判据 = 被换掉的那帧写着 edge-recompute 且还没跑完: {reset_body}"
+        reset_body.contains("let in_flight = slot.edge_recompute_in_flight;")
+            && !reset_body.contains("dbnums_done"),
+        "接手只读「在飞」那一格；相位 + 计数是展示，停在中途不是判据（第五笔）: {reset_body}"
     );
 
     let gate = resident
@@ -220,11 +210,56 @@ fn room_rebuild_regression_the_edge_loop_flight_is_not_a_display_frame_fact() {
         .find("reset_progress_in(progress, \"source-snapshot\")")
         .expect("gate admits after the checks")];
     assert!(
-        gate_head.contains("in_flight.edge_recompute_in_flight"),
+        gate_head.contains("edge_recompute_in_flight"),
         "准入读那一格，不只读相位: {gate_head}"
+    );
+    assert!(
+        !gate_head.contains("edge-recompute") && !gate_head.contains("dbnums_done"),
+        "准入不许再读相位 / 计数兜底——循环里炸掉之后停在半路的展示帧会把重建口焊死到重启: {gate_head}"
     );
 }
 
+/// 收尾那一笔落定之前不许放开「在飞」（第五笔）：守卫活到函数末尾，`run_rooms_rebuild` 里既没有
+/// 提前的手工放开，收尾（写 `room_update_record`）也落在守卫的作用域之内。
+#[test]
+fn room_rebuild_regression_the_flight_is_held_until_the_settle_lands() {
+    let source = include_str!("handlers.rs");
+    let rebuild = source
+        .split_once("async fn run_rooms_rebuild(")
+        .expect("rebuild body exists")
+        .1;
+    let end = rebuild
+        .find("\n}\r\n")
+        .or_else(|| rebuild.find("\n}\n"))
+        .unwrap_or(rebuild.len());
+    let body = &rebuild[..end];
+    let guard = body
+        .find("start_edge_recompute(")
+        .expect("守卫开工：第三段的「在飞」由它持有");
+    let loop_start = body.find("for dbnum in &dbnums {").expect("逐库循环存在");
+    let settle = body
+        .find("refresh_room_update_record_with_model(")
+        .expect("收尾要把「这一版全好了」写成记录");
+    assert!(guard < loop_start, "守卫在循环之前立起: {body}");
+    assert!(loop_start < settle, "收尾在循环之后: {body}");
+    assert!(
+        !body.contains("note_edge_recompute_finished("),
+        "放开只走守卫 Drop——它活到函数末尾（收尾之后），谁都不许提前手工放开: {body}"
+    );
+}
+
+/// 限定域口径（2026-10-15，用户）：**watch 目前只是作为增量监测的范围，不要限定房间的初始化**。
+/// `room_resident` 早有同一条源码钉（`room_files_never_consult_the_watch_scope`：房间是参照系，
+/// 限定域圈的是数据批次）。这里把房间侧另外两处也钉上：
+///
+/// - 启动整库房间初始化（`check_and_init_rooms_at_startup` 的 `NeedsFullInit` 臂）：目标库集合是
+///   `room_dbnums ∪ expected_dbnums`，**不看 `watch_scope`**。此前它按 `admits` 过滤（全被滤掉时才退回
+///   `room_dbnums`），未监听库的房间因此从没被初始化过；
+/// - 整库重建（`run_rooms_rebuild` 的逐库列表）：同上，此前也按 `admits` 过滤。
+///
+/// 增量那一臂**保留** `watch_scope`（监测范围）——但它跳过的库必须在记录里留白
+/// （`hold_unchecked_room_sesnos`），不得替它说「已看过最新」。
+#[test]
 fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
     let source = include_str!("handlers.rs");
     let rebuild = source
@@ -284,35 +319,5 @@ fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
     assert!(
         refresh.contains("hold_unchecked_room_sesnos("),
         "留白在记录构造里落地（排在 source_sessions 回填之后，免得回填替没看的库说话）: {refresh}"
-    );
-}
-
-/// 「在飞」要到**收尾落定**才放下（2026-10-15，第五笔）：`note_edge_recompute_finished` 是准入闸重开的
-/// 那一刻，而收尾还要把 `room_update_record` 写进库（`refresh_room_update_record_with_model`）。放下得早，
-/// 第二趟「重新生成房间」就能被放进来先清账（两张边表全删、水位整表 NONE、记录 NONE），第一趟随后写下的
-/// 却是**清边之前那一刻**的账——说「所有含房库都已做完」。第二趟若没跑完（`all_ok=false`，或进程被杀），
-/// 库里留下的就是「边没了、水位 NONE、记录却说已最新」：下次启动检查只信记录，判 `UpToDate`，
-/// 那批库从此不补（只剩逐库任务的自愈）。因此收尾那一笔必须排在放下「在飞」之前。
-#[test]
-fn room_rebuild_regression_the_flight_is_held_until_the_settle_lands() {
-    let source = include_str!("handlers.rs");
-    let rebuild = source
-        .split_once("async fn run_rooms_rebuild(")
-        .expect("rebuild body exists")
-        .1;
-    let end = rebuild
-        .find("\n}\r\n")
-        .or_else(|| rebuild.find("\n}\n"))
-        .unwrap_or(rebuild.len());
-    let body = &rebuild[..end];
-    let settle = body
-        .find("refresh_room_update_record_with_model(")
-        .expect("收尾要把「这一版全好了」写成记录");
-    let finished = body
-        .find("note_edge_recompute_finished(")
-        .expect("逐库循环跑完要放下「在飞」——准入闸由它重开");
-    assert!(
-        settle < finished,
-        "收尾落定之后才放下「在飞」：闸重开的那一刻，库上的账（边 + 水位 + 记录）必须已经一致: {body}"
     );
 }

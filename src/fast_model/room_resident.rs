@@ -2568,6 +2568,8 @@ pub(crate) struct ResidentProgress {
     /// `mark_loading`）会把展示帧**清零重写成别的相位**——换代一过闸就被抹开，第二趟
     /// 「重新生成房间」踩着第一趟的逐库循环进来，两趟交错清边、互相覆盖盖章（#53 的老面孔）。
     /// 展示帧可以清零，这一格不许：[`reset_progress_in`] 清零时从被换掉的那帧**接手**这个事实。
+    /// 所有权只有一个：[`RoomRebuildFlight`] 的守卫——开工立起、`Drop` 放下（正常返回、`?`、
+    /// panic 展开都走同一条路）。展示帧停在「死在哪一步」是如实，准入不许拿它当判据。
     pub edge_recompute_in_flight: bool,
 }
 
@@ -2592,14 +2594,15 @@ fn reset_progress(phase: &str) {
 /// 把指定的进度槽清零重记（生产用全局槽，测试用本地槽）。
 ///
 /// 清零**不抹在飞**（2026-10-15）：换代装载走的就是这条清零（`mark_loading("mesh-warm")`），
-/// 展示帧换走之后 `edge-recompute` 那一趟可能还在跑。`edge_recompute_in_flight` 是准入判据，
-/// 这里从被换掉的那帧**接手**：帧上写着 `edge-recompute` 且还没跑完，就是还在飞。
+/// 展示帧换走之后 `edge-recompute` 那一趟可能还在跑。接手只读 [`RoomRebuildFlight`] 立的那一格
+/// （第五笔）：相位与计数是展示——停在中途也可能只是那一趟炸在循环里，谁也不会再改它；拿展示
+/// 当「还在飞」等于把重建口焊死到进程重启
+/// （`room_rebuild_regression_a_frame_frozen_by_a_panicked_loop_is_not_a_lifetime_sentence`）。
 fn reset_progress_in(progress: &RwLock<ResidentProgress>, phase: &str) {
     let mut slot = progress
         .write()
         .unwrap_or_else(PoisonError::into_inner);
-    let in_flight = slot.edge_recompute_in_flight
-        || (slot.phase == "edge-recompute" && slot.dbnums_done < slot.dbnums_total);
+    let in_flight = slot.edge_recompute_in_flight;
     *slot = ResidentProgress {
         phase: phase.to_owned(),
         started_at: chrono::Local::now().to_rfc3339(),
@@ -2608,13 +2611,43 @@ fn reset_progress_in(progress: &RwLock<ResidentProgress>, phase: &str) {
     };
 }
 
-/// 只改进度槽的阶段名，不动生命周期：`edge-recompute` 那段跑在 `Ready` 下（换代已装上，
-/// 生成照常放行），不能用 `mark_loading`——那会把它重新拉回 `Loading` 把生成拒掉。
-pub(crate) fn note_progress_phase(phase: &str) {
-    progress_slot()
+/// 第三段「在飞」的守卫：**开工即立、销毁即放**。
+///
+/// [`ResidentProgress::edge_recompute_in_flight`] 是准入判据，重建闸由它重开。手工成对地
+/// 「立 / 放」在正常返回的那条路上够用，但逐库循环或收尾里 panic 展开时那次「放」根本走不到：
+/// 此后每一枚 `POST /api/v1/rooms/rebuild` 都 409「正在重建中」，直到进程重启（2026-10-15，
+/// 第三处未闭面的收口——上一趟炸在循环里，展示帧如实停在半路，而准入曾拿它当判据）。
+/// 守卫把这一格的所有权绑在作用域上：`run_rooms_rebuild` 让它活到函数末尾（收尾之后）落下去，
+/// 闸必然重开；「那一格立起来之前」也不再有缝——相位 / 库数 / 在飞由开工那一次一起就位。
+#[must_use = "守卫一落就放开重建准入闸：它要活到第三段（含收尾）走完"]
+pub(crate) struct RoomRebuildFlight<'a> {
+    slot: &'a RwLock<ResidentProgress>,
+}
+
+impl Drop for RoomRebuildFlight<'_> {
+    fn drop(&mut self) {
+        note_edge_recompute_finished_in(self.slot);
+    }
+}
+
+/// 第三段开工：换段名（只改相位、不动生命周期——那一段跑在 `Ready` 下，换代已装上、生成照常
+/// 放行，不能用 `mark_loading` 把它拉回 `Loading` 拒生成）、报要重算的库数、立起「在飞」，
+/// 返回守卫（见 [`RoomRebuildFlight`]）。
+pub(crate) fn start_edge_recompute(total: usize) -> RoomRebuildFlight<'static> {
+    start_edge_recompute_in(progress_slot(), total)
+}
+
+/// 本地槽版本（测试用；生产走 [`start_edge_recompute`]）。
+fn start_edge_recompute_in(
+    progress: &RwLock<ResidentProgress>,
+    total: usize,
+) -> RoomRebuildFlight<'_> {
+    progress
         .write()
         .unwrap_or_else(PoisonError::into_inner)
-        .phase = phase.to_owned();
+        .phase = "edge-recompute".to_owned();
+    note_recompute_dbnums_total_in(progress, total);
+    RoomRebuildFlight { slot: progress }
 }
 
 /// `room_topology::load_room_groups_from_files` 报数：这一轮要处理几个 MDB 设计库文件。
@@ -2660,13 +2693,8 @@ pub(crate) fn note_mesh_warm_failed(failed: usize) {
         .meshes_failed = failed;
 }
 
-/// `edge-recompute` 段开工：报要重算的库数并立起「在飞」。`note_progress_phase` 已换段名。
-/// 「在飞」为什么单列一格见 [`ResidentProgress::edge_recompute_in_flight`]。
-pub(crate) fn note_recompute_dbnums_total(total: usize) {
-    note_recompute_dbnums_total_in(progress_slot(), total);
-}
-
-/// 本地槽版本（测试用；生产走 [`note_recompute_dbnums_total`]）。
+/// 第三段开工的账：报要重算的库数、立起「在飞」。只有 [`start_edge_recompute_in`] 会走它；
+/// 放开走 [`RoomRebuildFlight`] 的 [`Drop`]，没有第二个写者（2026-10-15）。
 fn note_recompute_dbnums_total_in(progress: &RwLock<ResidentProgress>, total: usize) {
     let mut slot = progress
         .write()
@@ -2684,13 +2712,9 @@ pub(crate) fn note_recompute_dbnum_done() {
         .dbnums_done += 1;
 }
 
-/// `edge-recompute` 段收工：逐库循环跑完（成败都算），放下「在飞」——重建准入闸由它重开。
-/// 只看展示帧的话，这一趟被换代清零之后就再也说不清自己跑完没有（2026-10-15）。
-pub(crate) fn note_edge_recompute_finished() {
-    note_edge_recompute_finished_in(progress_slot());
-}
-
-/// 本地槽版本（测试用；生产走 [`note_edge_recompute_finished`]）。
+/// `edge-recompute` 段收工：放下「在飞」——重建准入闸由它重开。生产里只有
+/// [`RoomRebuildFlight`] 的 [`Drop`] 走这条路（正常返回、`?`、panic 展开同一条）；
+/// 测试可以直接调它（2026-10-15）。
 fn note_edge_recompute_finished_in(progress: &RwLock<ResidentProgress>) {
     progress
         .write()
@@ -2702,8 +2726,9 @@ fn note_edge_recompute_finished_in(progress: &RwLock<ResidentProgress>) {
 /// 已是 `Loading`（startup 首建 / 上一趟重建 / 开工前对齐的换代）就不放第二趟进；
 /// 上一趟已翻 `Ready` 但逐库边重算（`edge-recompute`）还没跑完，同样不放——那一段
 /// 在 `Ready` 下跑，只看生命周期会漏守，两趟交错会互相清边、覆盖盖章（#53）。在飞判据是
-/// [`ResidentProgress::edge_recompute_in_flight`]：同期的换代（`mark_loading`）会清零展示帧，
-/// 拿相位当判据会被它抹开（2026-10-15）。
+/// [`ResidentProgress::edge_recompute_in_flight`]（[`RoomRebuildFlight`] 持有）：同期的换代
+/// （`mark_loading`）会清零展示帧，拿相位当判据会被它抹开；反过来，循环里炸掉之后停在半路的
+/// 展示帧同样不是判据——它会把重建口焊死到重启（2026-10-15）。
 /// 其余各态（含 `Blocked`、`Degraded`）都许进：这一按就是让人把坏掉的那代换掉。
 pub(crate) fn try_begin_rebuild() -> bool {
     try_begin_rebuild_in(lifecycle_slot(), progress_slot())
@@ -2720,18 +2745,14 @@ fn try_begin_rebuild_in(
     if matches!(*slot, ResidentLifecycle::Loading { .. }) {
         return false;
     }
+    // 只看「在飞」那一格（2026-10-15 第五笔）：相位 + 计数是展示——循环里 panic 展开之后那一帧
+    // 会如实停在半路（此后谁也不会再改它），拿它当判据等于把重建口焊死到进程重启。
+    if progress
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .edge_recompute_in_flight
     {
-        let in_flight = progress
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
-        // 两条都看：`edge_recompute_in_flight` 是判据（换代清零展示帧也抹不掉它，
-        // 2026-10-15）；相位 + 计数是兜底，也覆盖「那一格立起来之前」的那一瞬。
-        if in_flight.edge_recompute_in_flight
-            || (in_flight.phase == "edge-recompute"
-                && in_flight.dbnums_done < in_flight.dbnums_total)
-        {
-            return false;
-        }
+        return false;
     }
     reset_progress_in(progress, "source-snapshot");
     *slot = ResidentLifecycle::Loading {

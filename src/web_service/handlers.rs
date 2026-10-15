@@ -679,8 +679,10 @@ fn require_room_resident_ready() -> Result<(), ApiError> {
 ///   （`ensure_ready`/`require_room_resident_ready`），不会有人把新边写进来再被清掉。
 /// - 逐库重算在 `Ready` 下跑：生成照常放行（两边写的都是同一代的边，幂等），
 ///   单库失败不盖 `model_room_generation`——电平型欠账留着，下个任务自动补。
-/// - 收尾（写 `room_update_record`）落定之后才放下「在飞」：准入闸重开的那一刻，库上的
-///   账（边 + 水位 + 记录）必须已经一致，不然第二趟能踩着一个「说已最新」的记录清账。
+/// - 第三段开工拿守卫（`room_resident::start_edge_recompute`）：相位 / 库数 / 「在飞」一次
+///   就位，守卫活到函数末尾（收尾之后）——它 `Drop` 的那一刻才是准入闸重开的那一刻（正常
+///   返回与 panic 展开同一条路，手工成对在展开的路上到不了）；那一刻库上的账（边 + 水位 +
+///   记录）必须已经一致，不然第二趟能踩着一个「说已最新」的记录清账。
 pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     use crate::fast_model::room_resident as resident;
     if resident::ResidentInputs::configured().is_none() {
@@ -767,8 +769,9 @@ async fn run_rooms_rebuild() {
     // 逐库列表不看限定域：整库重建属房间侧，watch 只是增量监测的范围
     // （房间是参照系，不是增量的一部分，2026-10-15 口径）。
     let dbnums: Vec<u32> = outcome.expected_dbnums();
-    resident::note_progress_phase("edge-recompute");
-    resident::note_recompute_dbnums_total(dbnums.len());
+    // 第三段开工：相位 / 库数 / 「在飞」一格一次就位，守卫由它交付；放开只走它的 Drop
+    // （2026-10-15，`room_resident::RoomRebuildFlight`）。
+    let _flight = resident::start_edge_recompute(dbnums.len());
     resident::record_startup_init(Ok(&outcome)).await;
     // 逐库整库重算房间边。生命周期已 `Ready`，这段不进 `ensure_ready` 的拦截面；
     // 进度只走 `progress` 槽的 `edge-recompute` 相位。
@@ -794,11 +797,8 @@ async fn run_rooms_rebuild() {
             dbnums.len()
         );
     }
-    // 收尾落定之后才放下「在飞」（2026-10-15，第五笔）：那一格是准入判据，重建闸由它重开——展示帧
-    // 可能已被同期的换代（`mark_loading`）清零重写成别的相位，拿它说「跑完没有」不算；反过来说，
-    // 放下得早也不行：第二趟会被放进来先清账（两张边表全删 / 水位整表 NONE / 记录 NONE），而第一趟
-    // 随后写下的收尾记录是**清边之前那一刻**的账——两趟叠在一起，库里只剩「边没了、记录却说已最新」。
-    resident::note_edge_recompute_finished();
+    // 「在飞」不在这里手工放下：`_flight` 活到函数末尾，Drop 才是放开的那一刻——第五笔的
+    // 「收尾落定之后才放」与第三处未闭面的「panic 展开也要放下」由它同一条路保证。
 }
 
 /// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体
