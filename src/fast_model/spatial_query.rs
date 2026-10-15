@@ -590,6 +590,29 @@ pub fn resolve_center(
                     union = Some(merge(union, entry.aabb));
                 }
             }
+            if union.is_none() {
+                // 在册房间是纯 owner 元素（FRMW/SBFR/CWALL/CFLOOR）：自身没有
+                // `inst_relate` 指针行（树只收有指针的叶子），落盘形态下投影又只装
+                // overlay——两处都取不到盒时，房间的包围盒就是它在册面板世界盒的并集
+                // （常驻房间模型启动时装载）。`rooms/{refno}/tree` 与 `nearby?refno=<房间>`
+                // 在 rocksdb 档下只有这一条取盒路；面板 refno 并入 `subtree`，
+                // `include_self=false` 照旧把「房间自己的面板」剔出结果。
+                if let Ok(model) = crate::fast_model::room_resident::current_for_calculation() {
+                    if let Some(room) = model
+                        .map
+                        .rooms
+                        .iter()
+                        .find(|room| room.room.refno() == refno)
+                    {
+                        for panel in &room.panels {
+                            subtree.insert(panel.refno());
+                            if let Some(resident) = model.panels.get(panel) {
+                                union = Some(merge(union, resident.world_aabb));
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(centerline) = centerline {
                 let corridor = centerline.bbox().ok_or_else(|| {
                     SpatialQueryError::BadRequest(format!(
