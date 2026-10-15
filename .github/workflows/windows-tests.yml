@@ -18,8 +18,10 @@ name: Windows tests
 #     vendor/old-aios-core  ← happyrust/old-aios-core
 #     target/               ← CARGO_TARGET_DIR（缓存键照旧叫 target）
 #
-# 兄弟仓是私有仓时，给本仓配一个 `VENDOR_REPOS_TOKEN` secret（对 happyrust/*
-# 有读权限的 PAT）；公开仓不需要。跑之前的硬前提：**五个兄弟仓的默认分支必须
+# 兄弟仓是私有仓。`GITHUB_TOKEN` 只能读本仓，拿去拉 happyrust/e3d-io 等会在
+# 「Determining the default branch」得到 404 Not Found。检出用仓库 secret
+# `GH_PAT`（与 linux 打包同一把、对 happyrust/* 有读权限的 PAT）。
+# 跑之前的硬前提：**五个兄弟仓的默认分支必须
 # 推到 GitHub 且与本仓当前提交互相兼容**——本地未提交/未推送的 vendor 改动，
 # CI 一概看不见。
 #
@@ -75,30 +77,39 @@ jobs:
         with:
           path: gen-model
 
+      - name: Require GH_PAT for private vendor repos
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GH_PAT)) {
+            throw 'secret GH_PAT 未设置：e3d-io / e3d-attlib / e3d-model / plant-mbd / old-aios-core 都是私有仓，GITHUB_TOKEN 读不到'
+          }
+
       # ../vendor 兄弟仓：形状必须与本地 old/vendor 一致（见文件头说明）。
       - name: Check out vendor/e3d-io
         uses: actions/checkout@v6
         with:
           repository: happyrust/e3d-io
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/e3d-io
       - name: Check out vendor/e3d-attlib
         uses: actions/checkout@v6
         with:
           repository: happyrust/e3d-attlib
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/e3d-attlib
       - name: Check out vendor/e3d-model
         uses: actions/checkout@v6
         with:
           repository: happyrust/e3d-model
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/e3d-model
       - name: Check out vendor/plant-mbd
         uses: actions/checkout@v6
         with:
           repository: happyrust/plant-mbd
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/plant-mbd
       # aios_core 的在途工作在 codex/libgm-snout-caliber 分支上（Cargo.toml [patch]
       # 用本地树、git 依赖 rev 钉在该分支提交），checkout 必须跟着这条分支走，
@@ -107,7 +118,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: happyrust/old-aios-core
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/old-aios-core
           ref: codex/libgm-snout-caliber
 
@@ -317,36 +328,45 @@ jobs:
         with:
           path: gen-model
 
+      - name: Require GH_PAT for private vendor repos
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GH_PAT)) {
+            throw 'secret GH_PAT 未设置：e3d-io / e3d-attlib / e3d-model / plant-mbd / old-aios-core 都是私有仓，GITHUB_TOKEN 读不到'
+          }
+
       - name: Check out vendor/e3d-io
         uses: actions/checkout@v6
         with:
           repository: happyrust/e3d-io
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/e3d-io
       - name: Check out vendor/e3d-attlib
         uses: actions/checkout@v6
         with:
           repository: happyrust/e3d-attlib
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/e3d-attlib
       - name: Check out vendor/e3d-model
         uses: actions/checkout@v6
         with:
           repository: happyrust/e3d-model
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/e3d-model
       - name: Check out vendor/plant-mbd
         uses: actions/checkout@v6
         with:
           repository: happyrust/plant-mbd
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/plant-mbd
       # 同上：aios_core 在途工作在 codex/libgm-snout-caliber 分支上。
       - name: Check out vendor/old-aios-core
         uses: actions/checkout@v6
         with:
           repository: happyrust/old-aios-core
-          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.GH_PAT }}
           path: vendor/old-aios-core
           ref: codex/libgm-snout-caliber
 
