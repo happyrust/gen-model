@@ -1,5 +1,13 @@
 # 变更记录
 
+## 2026-10-16
+
+### 全表清边失败不得被逐库成功覆盖
+
+- **为什么**：`run_rooms_rebuild` 原本对全表清边失败只打日志、仍继续逐库重算，而 `all_ok` 无条件从 `true` 起步。只要列出的库随后算成功，收尾仍会写 `room_update_record` 宣告整库结果最新；但逐库清单不能证明未枚举 / 已消失根上的旧边已经清掉。
+- **改动**：保留清边失败后的逐库恢复尝试；把清边结果存为 `clear_succeeded`，失败时仍返回 `false`，并用它初始化 `all_ok`。全表清边失败即不写最新记录，欠账留待后续恢复。
+- **验证**：新增源码契约钉 `room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp`，修前 `0 passed; 1 failed`、exit 101 → 绿 `11 passed; 0 failed`；全量 `cargo test --offline --lib` **2524 / 0 / 132**；两个改动文件诊断 errors 0 / warnings 0。证据 `verification/room-rebuild-clear-failure-20261016/verification.md`（不入库）。本轮未注入真实数据库故障。
+
 ## 2026-10-15
 
 ### 介质裁决补齐：文件层退役别名点名 + ADR-083 二次修订的文档漂移清理

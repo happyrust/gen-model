@@ -745,7 +745,7 @@ async fn run_rooms_rebuild() {
     // 仍在 `Loading`：清持久面。两张边表全库归零（「所有删除」的字面），停放链里
     // 旧代的段对不上新代准入链一并清掉。
     resident::record_room_update_record(None);
-    match clear_room_rebuild_edges_on(&aios_core::SUL_DB).await {
+    let clear_succeeded = match clear_room_rebuild_edges_on(&aios_core::SUL_DB).await {
         Ok(_) => {
             // 水位已整表改写：进程内镜像整表作废，免得 `DbnumState::read`
             // 还拿旧代号冒充已对齐（整表清理正是 `invalidate_mirror` 的用途）。
@@ -755,11 +755,13 @@ async fn run_rooms_rebuild() {
             // 唯一凭据（ADR-073 F3，2026-10-15）。
             crate::fast_model::model_memory_store::ModelMemoryStore::global()
                 .clear_stamped_room_generations();
+            true
         }
         Err(error) => {
-            eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑）: {error:#}");
+            eprintln!("[房间重建] 清房间边表失败，边里可能混着旧代数据（逐库重算照跑，但整轮不盖最新记录）: {error:#}");
+            false
         }
-    }
+    };
     let cleared = crate::data_interface::room_reverse::clear_all();
     if cleared > 0 {
         println!("[房间重建] 清掉停放链 {cleared} 条");
@@ -775,7 +777,8 @@ async fn run_rooms_rebuild() {
     resident::record_startup_init(Ok(&outcome)).await;
     // 逐库整库重算房间边。生命周期已 `Ready`，这段不进 `ensure_ready` 的拦截面；
     // 进度只走 `progress` 槽的 `edge-recompute` 相位。
-    let mut all_ok = true;
+    // 全表清边失败时仍逐库尝试恢复，但不能把本轮盖成「最新」：未枚举到的旧根没有逐库重算兜底。
+    let mut all_ok = clear_succeeded;
     for dbnum in &dbnums {
         if !recompute_dbnum_room_edges_now(*dbnum).await {
             all_ok = false;

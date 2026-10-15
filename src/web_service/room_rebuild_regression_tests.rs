@@ -321,3 +321,25 @@ fn room_initialization_and_the_full_rebuild_never_consult_the_watch_scope() {
         "留白在记录构造里落地（排在 source_sessions 回填之后，免得回填替没看的库说话）: {refresh}"
     );
 }
+
+/// 整库清边是清掉本轮不会枚举到的旧根之唯一保证；清边失败不能仍从 all_ok=true 起步，
+/// 否则列出的库即使逐一算齐，run_rooms_rebuild 仍会把整轮盖成最新。
+#[test]
+fn room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp() {
+    let source = include_str!("handlers.rs");
+    let rebuild = source
+        .split_once("async fn run_rooms_rebuild(")
+        .expect("rebuild body exists")
+        .1;
+    let clear_result = rebuild
+        .find("let clear_succeeded = match clear_room_rebuild_edges_on(")
+        .expect("清边结果必须流入整轮成功判据；失败时不能盖最新记录");
+    let all_ok = rebuild
+        .find("let mut all_ok = clear_succeeded;")
+        .expect("逐库全成功也不能盖过全表清边失败");
+    let loop_start = rebuild.find("for dbnum in &dbnums {").expect("逐库循环存在");
+    let stamp = rebuild
+        .find("if all_ok {")
+        .expect("成功记录只在全表清边 + 逐库重算都成功时写入");
+    assert!(clear_result < all_ok && all_ok < loop_start && loop_start < stamp);
+}

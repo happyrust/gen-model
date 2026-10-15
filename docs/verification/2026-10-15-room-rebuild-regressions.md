@@ -260,3 +260,20 @@ NONE、记录却说已最新**——下次启动检查只信记录（`is_dbnum_t
 **证据等级 / 范围外**：源码契约 + 隔离回归（panic 展开实测；「两趟真的交错」与真机强杀不在本轮）。
 证据原文（按约定不入库）：`verification/room-rebuild-in-flight-guard-20261015/verification.md`。
 
+## 七、全表清边失败不得被逐库成功覆盖（2026-10-16）
+
+**为什么**：`run_rooms_rebuild` 对全表清边失败只写错误日志、仍照跑逐库重算；但原先 `all_ok` 无条件从 `true` 起步。若全表 DELETE / 水位作废 / 记录清空这笔失败，而列入 `expected_dbnums` 的库随后都算成功，收尾仍会写 `room_update_record`，向启动检查宣告「整库房间结果是最新的」。逐库回算只覆盖可枚举清单，不能证明没有枚举到的旧根也已清掉；这会把「全表清理未完成」伪装成整库完成。
+
+**修法**：保留清边失败后继续逐库尝试恢复；把 `clear_room_rebuild_edges_on` 的结果存成 `clear_succeeded`，失败支路返回 `false`，并以它初始化 `all_ok`。只要清边没有成功，逐库循环即使全成功，收尾也不写最新记录、打印未完成项，水位欠账留着供后续恢复。
+
+**红 → 绿**：
+
+- 红钉 `room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp`（源码契约）：断言清边结果被捕获、`all_ok` 以 `clear_succeeded` 起步，并且顺序早于逐库循环 / 成功盖章。修前命令
+  `cargo test --offline --lib room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp`
+  → 退出码 101，`0 passed; 1 failed`，失败原文：`清边结果必须流入整轮成功判据；失败时不能盖最新记录`。
+- 绿：`cargo test --offline --lib room_rebuild_regression` → **11 passed; 0 failed**；全量
+  `cargo test --offline --lib` → **2524 passed; 0 failed; 132 ignored**（14.71s，含另一条线的共享工作树改动）；
+  两个改动文件编辑器诊断 errors 0 / warnings 0。
+
+**证据等级 / 范围外**：源码接线契约（本轮没有对 `clear_room_rebuild_edges_on` 注入真实 DB 故障；未声称跑过故障注入）。证据原文（按约定不入库）：`verification/room-rebuild-clear-failure-20261016/verification.md`。
+
