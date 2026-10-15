@@ -23,7 +23,8 @@ name: Windows tests
 # `GH_PAT`（与 linux 打包同一把、对 happyrust/* 有读权限的 PAT）。
 # 跑之前的硬前提：**五个兄弟仓的默认分支必须
 # 推到 GitHub 且与本仓当前提交互相兼容**——本地未提交/未推送的 vendor 改动，
-# CI 一概看不见。
+# CI 一概看不见。e3d-io 的 `noun_catalog` 会调 `AttlibData::catalogue_value_nouns`，
+# e3d-attlib 默认分支须含 `f37be2e`，否则生产构建在 e3d-io 上编不过。
 #
 # E3D schema 资产（attlib.dat + desvir.dat）不再依赖装机：随仓走
 # `tests/fixtures/e3d-templates/`（见该目录 README），AIOS_E3D_TEMPLATE_DIR
