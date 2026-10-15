@@ -8,6 +8,9 @@ D3 的设置模式判据读作「`rocksdb` × 空地址 = 设置模式，`mem` �
 也不在向导里改，只由环境变量 `AIOS_STORE_MODE` 决定。第②步只展示生效档与出处、提醒文件里残留的过期键，地址两格与
 「测试连接」保留；`PUT /api/v1/setup/config` 收下 `store_mode` 但不写盘。D3 判据不变，只是「是不是 `rocksdb`」由环境变量说。
 「端口预检」按钮随 spawn 两档一起删除——服务不再在那个端口上建库，预检没有对象。
+**2026-10 修订（ADR-083 二次修订）**：介质回到「配置真值」之内——第②步恢复两档 radio（external / memory，
+external 默认），选中档校验后写盘成 `store_mode` 规范值；介质按 `AIOS_STORE_MODE` > `store_mode` > 默认 `rocksdb`
+裁决，`PUT` 收下 `store_mode` **写盘**。D3 判据仍不变（「是不是 `rocksdb`」按生效介质说）。
 日期：2026-09-09
 落地：`src/web_service/setup.rs`（setup API + 设置模式）、`web/setup.html`（向导页）、`src/lib.rs`（启动臂分支 + 单实例锁交接窗）、`scripts/templates/DbOption.factory.toml` + `scripts/New-LocalRelease.ps1`（出厂形态 + 冒烟两腿）。
 关联：

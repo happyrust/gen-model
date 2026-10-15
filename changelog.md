@@ -2,6 +2,16 @@
 
 ## 2026-10-15
 
+### 介质裁决补齐：文件层退役别名点名 + ADR-083 二次修订的文档漂移清理
+
+- **为什么**：ADR-083 二次修订（2026-10，`AIOS_STORE_MODE` > `store_mode` > 默认 rocksdb）落地后有两类欠账：① 点名不对称——退役写法（`external` / `spawned-rocksdb` / `kv-mem` / `embedded-mem` / `memory`）只在**环境变量层**被 `store_mode_notices` 点名，写进 `DbOption.toml` 的 `store_mode` 却静默按新含义生效，而 `spawned-rocksdb` 的含义恰从「自己拉一台」变成「只连」，正是 ADR 要消灭的那类沉默；② 文档漂移——`database-storage-modes.md`、ADR-069/074/075 修订注记与 ADR-083 正文、CONTEXT.md 六个词条、仓内 15 份 `DbOption*.toml` 的注释、`New-LocalRelease.ps1` 的说明文案都还在说「介质只由环境变量决定、`store_mode` 不生效」，与现行三层裁决相反。
+- **改动**：
+  - `src/options.rs`：`store_mode_notices` 对配置文件里的退役写法同样点名（改法指向改该行或让向导重写）；`in_memory_db` / `AIOS_IN_MEMORY_DB` 点名文案去掉「随 store_mode 一起退出」的旧说法、补上向导路径；夹具护栏失败信息改为「生效键，预置 = 静默定介质」；
+  - `scripts/start-local-release.ps1`：回填改**文件优先**（与 `Start-AMS.ps1` 同口径）——原来在环境变量缺省时无条件回填 `mem`，会把向导持久化的 `store_mode` 静默压掉；
+  - 死代码：删 `local` feature 及其门后 4 处内嵌 `rocksdb://*.rdb` connect（`lib.rs` ×1、`test_performance.rs` ×3）——surrealdb 依赖没编 `kv-rocksdb`，这一支从未能跑通；
+  - 文档同步：ADR-083 正文 D1–D5 / 后果 / 实施约束改写成三层裁决现状（实施约束换成真实测试名）；ADR-069 / 074 / 075 各补一条 2026-10 修订注记；`database-storage-modes.md` 的表头与「怎么选介质」改写；CONTEXT.md 七处词条订正（含「向导只展示」→ 两档可选落盘、「store_mode 不在引导子集」→ 在其内）；15 份 `DbOption*.toml` 注释、`New-LocalRelease.ps1` 三处措辞与 `$startupInstruction`、`docs/2026-08-04_dboption-config-changelog.md` 表格行同步。
+- **验证**：新增 `a_retired_store_mode_in_the_config_file_is_named_too`（文件层退役写法点名；env 压文件时两条并排念）；介质相关 13 条测试全过；全量 `cargo test --lib` **2520 / 0 / 132**；`cargo check --lib` 0 error。
+
 ### 房间重算盖章与重建清边补齐进程逐出镜像（ADR-073 F3 / d-149 补丁续）
 
 - **为什么**：`ack_is_stray_room_evidence` 靠 `ModelMemoryStore::stamped_room_generations`（库上 `model_room_generation` 那一格的进程镜像）判一枚 ACK 还能不能进按根数限额的逐出候选；`task_end::commit_task_end_on` 会同步这一格，但两处绕开 `task_end` 的写库点没有——整库重算盖章（库上盖**新**代、镜像留**旧**代）与重建清边（整表写 `NONE`、镜像没清）。两种情况都会把旧代的 ACK 当成「库上已经是这一代」放行逐出，而它是「那几根的边是另一代算的」的唯一凭据（`room_recompute::request_for_task` 的空段定向准入与 `query_service::room_calculation_status` 的一票否决都点它）。

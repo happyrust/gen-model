@@ -2298,15 +2298,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     if crate::options::data_face().is_read_through() {
         return run_read_through_core(db_option).await;
     }
-    let config = surrealdb::opt::Config::default()
-    .ast_payload()  // 启用AST格式
-    ; // 设置容
-    #[cfg(feature = "local")]
-    SUL_DB
-        .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
-        .with_capacity(1000)
-        .await?;
-    println!("数据库连接中...");
+    // 内嵌 rocksdb:// 那一支已随 `local` feature 删除：surrealdb 依赖没编 kv-rocksdb，
+    // 这段连不上任何东西；持久层只有「连 v_ip:v_port 那台」与「进程内嵌 mem://」两档
+    // （`ensure_store_connected`，ADR-074 / ADR-083）。
     #[cfg(feature = "ws")]
     {
         // 服务主进程是唯一给 `Spawn` 的调用方：只有它有资格把库拉起来、收自己的孤儿。

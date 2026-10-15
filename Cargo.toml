@@ -22,7 +22,8 @@ path = "src/lib.rs"
 [features]
 default = ["ws", "gen_model", "manifold", "project_hd", "http_api"]
 console = ["ws", "gen_model", "manifold", "project_hd", "mqtt"]
-local = []
+# `local`（内嵌 rocksdb:// 连接臂）2026-10-15 删除：surrealdb 依赖不开 kv-rocksdb，门后的
+# connect 从未能跑通；持久层只有「连 v_ip:v_port 那台」与「进程内嵌 mem://」两档（ADR-074）。
 ws = []
 debug_obj_export = []
 debug_model = []

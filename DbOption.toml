@@ -113,22 +113,24 @@ v_password = "root"
 #【修订 2026-09-13，ADR-074】只有 mem / rocksdb 两档：mem = 数据库在服务进程内，退出即消失；
 # rocksdb = 连 v_ip:v_port 上那台**已经在跑、以 RocksDB 后端起的** surreal
 #（scripts/Start-Surreal8009.ps1），服务只连接、不拉起数据库。
-#【退役 2026-09-18，ADR-083】store_mode 已退出本文件：介质**只由环境变量 AIOS_STORE_MODE 决定**
-#（mem / rocksdb，不设 = rocksdb）。这里再写 store_mode = "..." 一个字都不生效，只会在启动日志被点名。
-# 为什么：介质是「这一次进程怎么起」的事，跟启动命令走；本文件描述的是「这个工程长什么样」。
-# 同一份文件配置 + 环境变量分层叠加时，2026-09-18 现场真踩过「文件写 rocksdb、环境残留 mem、
-# 服务按 mem 起来、属性行一直不进库、日志一个字没提」——从此只留一个决定者。
-# 本机开发档要落盘：启动服务前 $env:AIOS_STORE_MODE = 'rocksdb'（Start-AiosDatabaseManual.ps1 /
-# Run-*.ps1 已经这么带），并先跑 Start-Surreal8009.ps1。配合下面的 incremental-overlay：
+#【变更 2026-10，ADR-083 二次修订】store_mode 在本文件**生效**，但身份是配置向导第②步
+#「外部库 external / 内存库 memory」落盘的那一格：介质按 环境变量 AIOS_STORE_MODE > 本键 >
+# 默认 rocksdb 三层裁决——环境变量没说时按这里写的跑，两边不同档启动会并排点名「两边不是同一档」。
+# 退役别名（external / spawned-* / kv-mem / embedded-mem / memory）写了仍认但会被点名；
+# in_memory_db 与 AIOS_IN_MEMORY_DB 只点名不生效。
+# 本文件当前不写它：本机开发档由启动脚本递 AIOS_STORE_MODE（Start-AiosDatabaseManual.ps1 /
+# Run-*.ps1 已带 rocksdb），先跑 Start-Surreal8009.ps1 把库起起来。配合下面的 incremental-overlay：
 # kv-mem 只留新生成的 root overlay，冷 root 直接查 RocksDB。
-# 2026-09-18 前这里写的是 store_mode = "rocksdb"。
+# 沿革：2026-09-18 前这里写的是 store_mode = "rocksdb"；2026-09-18~2026-10 期间本键曾随
+#「介质只由环境变量决定」退出，后随「向导里可选 external / memory」恢复生效。
 # RocksDB durable mode keeps only newly generated root overlays in kv-mem.
 # Cold roots are queried directly from RocksDB and never hydrated into kv-mem.
 model_cache_mode = "incremental-overlay"
 
 #【新增 2026-08-27；退役 2026-09-18，ADR-083】in_memory_db —— store_mode 之前的旧开关，
-# 只表达得了 mem 那一档。随 store_mode 一起退出本文件：写了不生效、只会在启动日志被点名；
-# 环境变量 AIOS_IN_MEMORY_DB 同样不再决定介质。要选介质只有 AIOS_STORE_MODE 一条路。
+# 只表达得了 mem 那一档。写了不生效、只会在启动日志被点名；
+# 环境变量 AIOS_IN_MEMORY_DB 同样不再决定介质。要选介质：向导第②步（写进 store_mode），
+# 或启动前设 AIOS_STORE_MODE=mem / rocksdb。
 # /health 的 in_memory_db 栏仍在（按生效介质派生），供老客户端读。
 # in_memory_db = true
 pe_chunk = 300

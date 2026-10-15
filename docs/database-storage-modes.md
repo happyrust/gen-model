@@ -1,12 +1,12 @@
 # 数据库存储形态与备份范围
 
 2026-09-13（ADR-074）：介质只剩两档，**本进程从不拉起数据库**。存储介质决定备份范围（2026-09-05 的口径不变）。
-2026-09-18（ADR-083）：介质**只由环境变量 `AIOS_STORE_MODE` 决定**，`DbOption.toml` 里的 `store_mode` / `in_memory_db` 不再生效。
+2026-10（ADR-083 二次修订）：介质按三层裁决——**环境变量 `AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode`（配置向导第②步落盘的选择）> 默认 `rocksdb`**。`in_memory_db` 与 `AIOS_IN_MEMORY_DB` 不再参与裁决，写了只会在启动时被点名。
 
 | `AIOS_STORE_MODE` | 库在哪 | 端口 | 活得过重启 | 数据库内容 | 属性读取 |
 | --- | --- | --- | --- | --- | --- |
 | `mem` | 本进程内嵌 `mem://` | 没有 | 否 | 模型及其发布所需数据；不摄入 `pe`、`ATT_*`、`pe_owner` | 从源文件读取（read-through） |
-| `rocksdb`（**不设 = 这一档**） | 配置 `v_ip:v_port` 上**已经在跑**的 SurrealDB（rocksdb 后端） | 有 | 是 | 基线与增量数据、属性、模型 | 文件读取仍可用；数据库保留备份（ingest） |
+| `rocksdb`（**不设 = 这一档**；向导里的 external） | 配置 `v_ip:v_port` 上**已经在跑**的 SurrealDB（rocksdb 后端） | 有 | 是 | 基线与增量数据、属性、模型 | 文件读取仍可用；数据库保留备份（ingest） |
 
 `rocksdb` 档服务**只连、不拉起**：端口上没有库就是启动失败，不会自己起一台空库。要一台本地库先跑
 `scripts/Start-Surreal8009.ps1`（仓内）或包内 `Start-Surreal.ps1`，它们会挡住版本不匹配的二进制（必须是本仓 fork 的 2.1.x）。
@@ -14,17 +14,19 @@
 
 ## 怎么选介质
 
-只有一个地方：**启动服务的那条命令的环境**。
+三层裁决：**`AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 默认 `rocksdb`**。前两层各管一件事——
+环境变量是「这一次进程怎么起」的显式覆盖（开发隔离与运维 pin 走它），`store_mode` 是配置向导第②步
+**落盘的用户选择**（两档：external / memory，external 为默认）。
 
 | 场景 | 写法 |
 | --- | --- |
+| 配置向导（持久化选择） | 第②步选 external / memory，保存写进 `store_mode`；向导触发的重启把它显式递给孩子进程的 `AIOS_STORE_MODE` |
 | PowerShell 手起 | `$env:AIOS_STORE_MODE = 'rocksdb'; cargo run --release -- serve`（仓内 `Start-AiosDatabaseManual.ps1` / `Run-*.ps1` 已带） |
-| 发布包 | `Start-AMS.ps1 -StoreMode rocksdb`（不给时脚本**显式回填 `mem`**，解压即跑照旧） |
-| Linux systemd | 单元里 `Environment=AIOS_STORE_MODE=rocksdb`（`deploy/linux/install_backend.sh` 已写） |
+| 发布包 | `Start-AMS.ps1 -StoreMode rocksdb`；不给时按文件里的 `store_mode`，文件也没写才**显式回填 `mem`**（解压即跑照旧） |
+| Linux systemd | 单元里 `Environment=AIOS_STORE_MODE=rocksdb`（`deploy/linux/install_backend.sh` 已写）——pin 住后向导改档会输给环境变量，启动日志并排点名两边 |
 
-**不在 `DbOption.toml` 里、也不在配置向导里改。** 文件里再写 `store_mode = "..."` 一个字都不生效，启动时会被整行点名
-（「已不再生效——本进程按 X 跑（谁定的）；两边不是同一档，要按配置那档跑请设 `AIOS_STORE_MODE=…`；请删掉这一行」）。
-向导第②步只展示生效的那一档与出处，`v_ip` / `v_port` 与「测试连接」在 `rocksdb` 档下照常可用。
+环境里设了与文件不同档的值：压过它，且启动横幅逐条点名「两边不是同一档、这一档是谁定的」——
+2026-09-18 现场踩过静默覆盖，不许再无声。
 
 ## 漏设会怎样：落到 `rocksdb`，当场报错
 
@@ -56,9 +58,9 @@ Error: SurrealDB 连接失败（ws://localhost:8009）: 由于目标计算机积
 | `external` | `rocksdb` | 只是改名 |
 | `spawned-rocksdb` | `rocksdb` | **变了**：以前服务自己拉一台落盘库，现在只连——端口上得先有一台 |
 
-旧写法写在 `AIOS_STORE_MODE` 里仍然解析得出来，但启动时 `store_mode_notices` 会把「你写的是退役写法，已按 X 生效，
-含义变成了什么，请改成 `AIOS_STORE_MODE=X`」打出来。`in_memory_db`（配置键）与 `AIOS_IN_MEMORY_DB`（旧环境变量）
-不再决定介质，设了同样只会被点名。
+旧写法写在 `AIOS_STORE_MODE` 或配置文件 `store_mode` 里都解析得出来，但启动时 `store_mode_notices` 会把
+「你写的是退役写法，已按 X 生效，含义变成了什么，请改成规范值」打出来（文件层给的改法是改这一行或让向导重写）。
+`in_memory_db`（配置键）与 `AIOS_IN_MEMORY_DB`（旧环境变量）不再决定介质，设了同样只会被点名。
 
 ## 数据面
 

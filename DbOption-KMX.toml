@@ -65,8 +65,9 @@ v_password = "root"
 # 就静默换一回介质，护栏因此逼着每一份夹具 / 现场配置都把它写出来。
 # 取值：external / spawned-mem / embedded-mem；环境变量 AIOS_STORE_MODE 压过本键。
 # 计划：docs/plans/2026-09-04-spawned-memory-store-out-of-box.md
-#【退役 2026-09-18 / ADR-083】store_mode 已退出配置文件：介质只由环境变量 AIOS_STORE_MODE 决定
-#（mem / rocksdb，不设 = rocksdb），文件里写这一行一个字都不生效、只会在启动日志被点名。
+#【变更 2026-10 / ADR-083 二次修订】store_mode 在本文件**生效**：介质按 环境变量 AIOS_STORE_MODE
+# > 本键 > 默认 rocksdb 三层裁决——所以仓内夹具一律不许带它（预置 = 替所有用这份配置跑的进程
+# 静默定介质，护栏 no_db_option_fixture_still_carries_a_store_mode_key 钉死）。退役别名写了仍认但会被点名。
 # 这份配置此前写的是 store_mode = "rocksdb"——配套脚本启动服务时要带 AIOS_STORE_MODE=rocksdb。
 # 上面关于「环境变量压过本键」的老话随之作废，留作决策史。
 #【新增 2026-09-05；2026-09-07 订正】data_face —— 数据面形态。这一份配置是摄入部署（整库基线

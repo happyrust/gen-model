@@ -1347,9 +1347,10 @@ fn retired_store_mode_meaning(raw: &str) -> Option<&'static str> {
 /// 介质这一件事上所有该出声的地方（[`data_read_mode_notice`] 同款纪律：静默吃掉一个设了的
 /// 开关是最高级别缺陷之一）。返回非空时调用方必须**逐条**打出来。
 ///
-/// 四种情形：环境变量认不出 / 是退役写法；环境变量与配置文件 `store_mode` 不同档（环境变量
-/// 压了向导持久化的选择，ADR-083 修订后这是唯一会被盖的正常来源）；配置文件 `store_mode`
-/// 认不出；`in_memory_db` / 旧环境变量 `AIOS_IN_MEMORY_DB` 还设着（ADR-083 起它们不再生效）。
+/// 五种情形：环境变量认不出 / 是退役写法；配置文件 `store_mode` 是退役写法（向导只写规范值，
+/// 这一形态只可能来自手改）；环境变量与配置文件 `store_mode` 不同档（环境变量压了向导持久化
+/// 的选择，ADR-083 修订后这是唯一会被盖的正常来源）；配置文件 `store_mode` 认不出；
+/// `in_memory_db` / 旧环境变量 `AIOS_IN_MEMORY_DB` 还设着（ADR-083 起它们不再生效）。
 /// 「文件里那句」与「实际跑的那档」不一样时要并排念出来——人第一反应是去翻配置。
 pub fn store_mode_notices() -> Vec<String> {
     let ext = load_ext_fields();
@@ -1393,10 +1394,23 @@ fn store_mode_notices_for(
 
     // 2. 配置文件里的 store_mode：2026-10 起它是向导持久化的那一层（ADR-083 修订）——环境变量
     //    没说时按它跑，不吵；环境变量说了且与文件不同档，就是当年那个静默覆盖的形状，
-    //    要把两边并排念出来。文件里那句认不出的，也当没设，但同样要出声。
+    //    要把两边并排念出来。文件里那句认不出的、或是退役写法的（向导只写规范值，这两种
+    //    形态只可能来自手改），也当没设 / 按新含义跑，但同样要出声。
     if let Some(raw) = configured_store_mode.filter(|raw| !raw.trim().is_empty()) {
         match parse_store_mode(Some(raw)) {
             Some(file_mode) => {
+                // 文件里的退役别名与环境变量同一条纪律（`spawned-rocksdb` 从「自己拉一台」
+                // 变成「只连」）：静默按新含义跑正是要消灭的那类沉默。
+                if let Some(meaning) =
+                    retired_store_mode_meaning(&normalized_store_mode(Some(raw)).unwrap_or_default())
+                {
+                    notices.push(format!(
+                        "⚠ DbOption.toml 里的 store_mode = {raw:?} 是退役写法，已按 {} 生效：{meaning}。\
+                         改成 store_mode = {:?}，或在向导第②步重选让它重写。",
+                        file_mode.as_str(),
+                        file_mode.as_str()
+                    ));
+                }
                 if parse_store_mode(env_value).is_some() && file_mode != effective {
                     notices.push(format!(
                         "⚠ 环境变量 {STORE_MODE_ENV} 压过了配置文件里的 store_mode = {raw:?}：\
@@ -1417,15 +1431,17 @@ fn store_mode_notices_for(
     // 3. 更老的那个开关同理：配置键与旧环境变量都只剩「点名」这一个用途。
     if let Some(flag) = configured_in_memory_db {
         notices.push(format!(
-            "⚠ DbOption.toml 里的 in_memory_db = {flag} 已不再生效（旧开关，随 store_mode 一起退出配置文件，\
-             ADR-083）；本进程按 {} 跑。请删掉这一行，要选介质用 {STORE_MODE_ENV}=mem / rocksdb",
-            effective.as_str()
+            "⚠ DbOption.toml 里的 in_memory_db = {flag} 已不再生效（旧开关，ADR-083 起不参与裁决）；\
+             本进程按 {} 跑（{}）。请删掉这一行；要选介质：向导第②步写 store_mode，\
+             或启动前设 {STORE_MODE_ENV}=mem / rocksdb",
+            effective.as_str(),
+            store_mode_source_for(env_value, configured_store_mode)
         ));
     }
     if let Some(raw) = in_memory_db_env.filter(|raw| !raw.trim().is_empty()) {
         notices.push(format!(
             "⚠ 环境变量 {IN_MEMORY_DB_ENV} = {raw:?} 已不再决定介质（ADR-083），本进程按 {} 跑；\
-             请改用 {STORE_MODE_ENV}=mem / rocksdb",
+             请改用 {STORE_MODE_ENV}=mem / rocksdb，或在向导第②步重选让它写进 store_mode",
             effective.as_str()
         ));
     }
@@ -3246,6 +3262,29 @@ mod tests {
         assert!(store_mode_notices_for(Some("rocksdb"), None, None, None).is_empty());
     }
 
+    /// 文件层的退役写法同样点名——向导只写规范值，这一行只可能来自手改；
+    /// 静默按新含义跑（`spawned-rocksdb` 从「自己拉一台」变「只连」）正是要消灭的那类沉默。
+    #[test]
+    fn a_retired_store_mode_in_the_config_file_is_named_too() {
+        let notices = store_mode_notices_for(None, Some("spawned-rocksdb"), None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("spawned-rocksdb"), "{notices:?}");
+        assert!(notices[0].contains("不再拉起"), "{notices:?}");
+        assert!(
+            notices[0].contains(r#"store_mode = "rocksdb""#),
+            "给的是文件层的改法（改这行 / 向导向导重写），不是只指环境变量：{notices:?}"
+        );
+        let notices = store_mode_notices_for(None, Some("external"), None, None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("external"), "{notices:?}");
+        // 环境变量压了它时：退役点名与「两边不是同一档」并排念，一条不丢。
+        let notices = store_mode_notices_for(Some("mem"), Some("external"), None, None);
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        // 规范值不吵。
+        assert!(store_mode_notices_for(None, Some("rocksdb"), None, None).is_empty());
+        assert!(store_mode_notices_for(None, Some("mem"), None, None).is_empty());
+    }
+
     /// 配置文件 `store_mode` 是向导持久化的那一层（ADR-083 修订，2026-10）：环境变量没说时
     /// 按它跑，不吵；环境变量说了且不同档——2026-09-18 现场踩过的静默覆盖形状——必须
     /// 把两边并排念出来。
@@ -3410,8 +3449,8 @@ mod tests {
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
             offending.is_empty(),
-            "这些配置里还写着已退出配置文件的形态键（ADR-083：介质只由 AIOS_STORE_MODE 决定，\
-             文件里这一行不生效、只会误导读配置的人）：{offending:?}"
+            "这些配置里还写着形态键（ADR-083 修订：store_mode 是生效层，夹具预置 = \
+             替所有用它跑的进程静默定介质；in_memory_db 已退役）：{offending:?}"
         );
     }
 

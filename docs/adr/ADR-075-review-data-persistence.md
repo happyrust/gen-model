@@ -5,6 +5,9 @@
 **2026-09-18 修订（ADR-083）**：判据一个字没动（仍是 `is_durable()`），但改法的说法变了——介质只由环境变量
 `AIOS_STORE_MODE` 决定，`DbOption.toml` 的 `store_mode` 不再生效。本文里「配置 / 改成 `store_mode=rocksdb`」
 一律读作「以 `AIOS_STORE_MODE=rocksdb` 重启」，「默认 `store_mode=mem`」读作「不设这个环境变量 = `mem`」。
+**2026-10 修订（ADR-083 二次修订）**：`store_mode` 恢复生效（向导第②步 external / memory 落盘）。
+「改成 `store_mode=rocksdb`」重新可按字面读（向导选 external 即写它），`AIOS_STORE_MODE=rocksdb` 仍是
+等价的命令行覆盖；默认档维持 `rocksdb` 不变（不设 = 连不上当场报错，不会落在 mem）。
 日期：2026-09-13
 计划：`docs/plans/2026-09-12-review-backend-port-plan.md`（§1.4 第 2 条、§2 G3、§6 判据 A4/A6/A9、§7 风险 2/3、Q4/Q6）
 落地：T1b —— `src/web_service/review/db.rs`、`src/web_service/review/schema.rs`、`rs_surreal/review/review_tables.surql`、

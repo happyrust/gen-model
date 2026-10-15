@@ -78,9 +78,9 @@
     Workspace 路径自动寻找。放进包根 bin\。
 
 .PARAMETER SmokeStoreMode
-    B 腿冒烟时后端的存储形态（mem / rocksdb），以环境变量 AIOS_STORE_MODE 递给服务（介质只认它，
-    ADR-083）。省略时两档都用 mem；给 rocksdb 时脚本会先用包内 surreal.exe 在 18011 起一台库给
-    服务连（服务自己不拉库）。
+    B 腿冒烟时后端的存储形态（mem / rocksdb），以环境变量 AIOS_STORE_MODE 递给服务（三层裁决里
+    最高一层，ADR-083 修订：env > 配置 store_mode > 默认）。省略时两档都用 mem；给 rocksdb 时脚本
+    会先用包内 surreal.exe 在 18011 起一台库给服务连（服务自己不拉库）。
 
 .PARAMETER BackendTargetDir
     可选的独立 Cargo target 目录；机器上已有 release exe 正在运行、Windows 锁住默认输出时使用。
@@ -591,7 +591,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $root 'web/pkg/rs-plant_bg.wasm'))) 
 $rootConfig = Join-Path $root 'DbOption.toml'
 $configPath = if (Test-Path -LiteralPath $rootConfig) { $rootConfig } else { Join-Path $Workspace 'DbOption.toml' }
 if (-not (Test-Path -LiteralPath $configPath)) { throw "Missing workspace config: $Workspace" }
-$configText = Get-Content -LiteralPath $configPath -Raw
+$configText = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
 if (-not $env:AIOS_STORE_MODE) {
     # 介质分层（ADR-083 修订）：环境变量 > 配置文件 store_mode > 默认。文件里写了就
     # 按文件（向导第②步选完保存的档必须说了算），文件没写才回填 mem。
@@ -681,7 +681,7 @@ do {
 } while ((Get-Date) -lt $deadline)
 throw "Startup still pending; process left running. Inspect $logRoot"
 '@
-Set-Content -LiteralPath (Join-Path $stage 'Start-AMS.ps1') -Value $startAms -Encoding UTF8
+[System.IO.File]::WriteAllText((Join-Path $stage 'Start-AMS.ps1'), $startAms, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
 
 $startCmd = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0Start-AMS.ps1`"`r`nif errorlevel 1 pause`r`n"
 Set-Content -LiteralPath (Join-Path $stage 'Start-AMS.cmd') -Value $startCmd -Encoding ascii
@@ -704,7 +704,7 @@ if (-not ($running | Where-Object { $_.ExecutablePath -eq $oldExe })) {
 }
 Write-Output 'Prior installation restored; files and database were not replaced.'
 '@
-Set-Content -LiteralPath (Join-Path $stage 'Rollback.ps1') -Value $rollback -Encoding UTF8
+[System.IO.File]::WriteAllText((Join-Path $stage 'Rollback.ps1'), $rollback, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
 
 $startSurreal = @'
 # 用包内 surreal.exe（本仓 fork 的 2.1.x）起一台本地持久库（rocksdb 后端）。
@@ -722,7 +722,7 @@ $root = $PSScriptRoot
 $exe = Join-Path $root 'bin\surreal.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "包内没有 surreal.exe：$exe" }
 if (-not $Port) {
-    $dbo = Get-Content -LiteralPath (Join-Path $root 'DbOption.toml') -Raw
+    $dbo = Get-Content -LiteralPath (Join-Path $root 'DbOption.toml') -Raw -Encoding UTF8
     $m = [regex]::Match($dbo, '(?m)^\s*v_port\s*=\s*"?(\d+)"?')
     $Port = if ($m.Success) { [int]$m.Groups[1].Value } else { 8010 }
 }
@@ -741,14 +741,14 @@ if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
 Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buffer $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE"
 & $exe start --user $User --pass $Password --bind "127.0.0.1:$Port" $Datastore
 '@
-Set-Content -LiteralPath (Join-Path $stage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
+[System.IO.File]::WriteAllText((Join-Path $stage 'Start-Surreal.ps1'), $startSurreal, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
 
 # README
 # 只剩 runtime 这一档（workspace 档随 -IncludeWorkspace / -ExcludeMeshes 于 2026-09-15 退役）。
 # 下面这几段以前是按档分叉的，而那两个开关删掉后变量再没被赋过值，分叉恒走 runtime 那一侧；
 # 留着只会让人以为还有第二档可走，索性摊平。
 $meshRuntimeNote = '- **本包不含 workspace 与 meshes。** 三维网格从外部 workspace 读取，或由目标环境连接 E3D 项目后生成。'
-$startupInstruction = '本包默认不带 workspace，由 ``Start-AMS.ps1`` 显式以 ``mem`` 启动：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质只由环境变量 ``AIOS_STORE_MODE`` 决定，不在 DbOption.toml 里改。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、把配置里 v_ip:v_port 指过去，再以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
+$startupInstruction = '本包默认不带 workspace，由 ``Start-AMS.ps1`` 显式以 ``mem`` 启动：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质按 ``AIOS_STORE_MODE`` > DbOption.toml 的 ``store_mode`` > 默认裁决（ADR-083 修订）——向导第②步选 external / memory 会写进 ``store_mode`` 持久化。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、在向导填好 v_ip:v_port 并选 external，或以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
 $rootSurrealLayoutLine = '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切到 rocksdb 档、需要自己起一台库时使用'
 $workspaceLayoutLines = '- 默认不含 ``workspace\``；索引、快照与 assets 由外部 workspace 提供'
 $configLayoutLine = '- ``DbOption.toml`` —— 默认运行包唯一一份、不含本机路径的出厂配置'
@@ -921,8 +921,9 @@ function Invoke-Smoke {
     # 这一腿换回本机 workspace 的配置、摘掉首跑哨兵；出厂形态由 Invoke-SetupSmoke 那一腿考。
     $smokeConfigPath = Join-Path $smokeWs 'DbOption.toml'
     $smokeConfig = Get-Content -LiteralPath $machineConfig -Raw
-    # 介质不写进配置（ADR-083）：由下面 $env:AIOS_STORE_MODE 递给服务，配置里只改地址。
-    # 本机配置若还残留 store_mode 那一行，这里顺手拿掉——留着服务启动只会多一句「已不生效」。
+    # 介质不写进冒烟配置：由下面 $env:AIOS_STORE_MODE 显式递给服务（ADR-083 修订后 store_mode 是
+    # 生效层——本机配置里那一行是向导持久化的档，留着它的话冒烟腿照样被 env 压过去，只是多一句
+    # 「两边不是同一档」点名；顺手拿掉让冒烟介质只有一个来源，免得误读）。
     $smokeConfig = [regex]::Replace($smokeConfig, '(?m)^\s*store_mode\s*=.*\r?\n?', '')
     # rocksdb 档：服务只连不拉，所以脚本先在隔离端口起一台，再把配置指过去。
     $smokeSurrealProc = $null
@@ -1087,7 +1088,7 @@ function Invoke-RocksSmoke {
     $env:DB_OPTION_FILE = Join-Path $rocksWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
     $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
-    # 这一腿考的就是 rocksdb 档，而介质只认这个环境变量（ADR-083）。
+    # 这一腿考的就是 rocksdb 档：介质按 env > 配置 store_mode > 默认裁决，显式 pin 环境变量（ADR-083 修订）。
     $env:AIOS_STORE_MODE = 'rocksdb'
     Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $rocksWs -WindowStyle Hidden -PassThru `

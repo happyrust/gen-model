@@ -24,6 +24,11 @@ D3（夹具仍不许带——现在是**生效键**，预置=静默定介质，�
 `GET /api/v1/setup/config` 的 `effective` 多出 `store_mode_source` / `store_mode_env` / `store_mode_env_value` / `stale_config_store_mode`；
 `ensure_completion_ready` 以 `options::store_mode()` 为准，不再从文件读）、
 `web/setup.html`（第②步不再选介质，只展示生效档与出处、提醒文件里的过期键；地址两格随生效档启停）、
+**2026-10 修订再落地**：`effective_store_mode` 签名恢复配置那一格（env > file > 默认）；向导第②步恢复两档
+radio（external / memory），选中档校验后写盘成规范值 `store_mode`；`spawn_replacement` 把文件档显式递给孩子
+进程的 `AIOS_STORE_MODE`；`ensure_completion_ready` 按「下一进程跑哪档」文件优先判；`Start-AMS.ps1` 回填改为
+文件优先；`subset_values` 收进 `store_mode`，`effective` 的 `stale_config_store_mode` 换成 `config_store_mode`；
+`store_mode_notices` 对文件层的退役写法与「env 压文件」同样点名（2026-10-15 补齐文件层退役别名点名）。
 `src/web_service/review/db.rs`（拒绝启用的三处文案改法指到 `AIOS_STORE_MODE=rocksdb`）、
 仓内全部 `DbOption*.toml` 夹具与 `scripts/templates/DbOption.factory.toml`（`store_mode = ...` 换成退役注释、记下原值）、
 `scripts/New-LocalRelease.ps1`（生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`、不给时回填 `mem`；冒烟 B / C 腿不再往配置里写 `store_mode`，只递环境变量；A 腿有意不设，考默认档下的设置模式逃生门）、`scripts/start-local-release.ps1`（老启动器同样显式回填 `mem`）、
@@ -52,44 +57,58 @@ D3（夹具仍不许带——现在是**生效键**，预置=静默定介质，�
 
 ## 决定
 
-### D1　介质只由 `AIOS_STORE_MODE` 决定
+### D1　介质三层裁决：`AIOS_STORE_MODE` > `store_mode` > 默认 `rocksdb`（2026-10 修订）
 
-`store_mode()` 只读环境变量 `AIOS_STORE_MODE`：`mem` / `rocksdb`（下划线、大小写、退役别名照 ADR-074 D4 认），不设或空白 = **`rocksdb`**（同日修订，见 D6），
-认不出 = 当没设并出声。`effective_store_mode(env)` 的签名里**没有配置那一格**——配置文件想参与裁决，得先改这个签名，那就是在改本文。
+`store_mode()` = `effective_store_mode(env, file)`：`mem` / `rocksdb`（下划线、大小写、退役别名照 ADR-074 D4 认，
+两层都在认），两层都没说或都认不出 = **`rocksdb`**（见 D6），认不出 = 当没设并出声。三层各管一件事：
 
-介质是「这一次进程怎么起」的事，跟启动命令走；配置文件描述的是「这个工程长什么样」（项目路径、MDB、库地址、监听端口……），
-它不该替进程挑介质。`v_ip:v_port` 留在文件里：它是「rocksdb 档连哪儿」，不是「要不要 rocksdb」。
+- **`AIOS_STORE_MODE`**：启动命令那一层的显式覆盖——开发隔离与运维 pin（systemd `Environment=`）都走它，
+  它在且认得出就以它为准；
+- **`DbOption.toml` 的 `store_mode`**：配置向导第②步落盘的用户选择（external / memory 两档）。环境变量没说时
+  按它跑；两边都在且不同档，`store_mode_notices` 启动时并排念出来——那是 2026-09-18 现场踩过的静默覆盖形状；
+- **默认 `rocksdb`**：兜住「人没说」，落在会喊的那一侧。
 
-### D2　配置键与旧环境变量只剩「点名」一个用途
+介质仍是「这一次进程怎么起」的事；`store_mode` 那一格不是「配置文件替进程挑介质」，是**用户经向导显式存下的
+那一档**，环境变量始终能盖它。`v_ip:v_port` 留在文件里：它是「rocksdb 档连哪儿」，不是「要不要 rocksdb」。
 
-`DbOption.toml` 的 `store_mode` / `in_memory_db` 与环境变量 `AIOS_IN_MEMORY_DB` **不再参与裁决**。`DbOptionExtFields` 里的两个字段
-留着（旧配置照常解析），但唯一的消费者是 `store_mode_notices()`：文件里还写着，启动时逐条点名「这一行已不生效——介质只由
-`AIOS_STORE_MODE` 决定；本进程按 X 跑（谁定的）」，文件里那档与实际跑的那档不一样时并排念出来、说清该设哪个环境变量。
-`in_memory_db()` 函数删除（此前已无调用者）。
+（2026-09-18 初版是「介质只由环境变量决定，`effective_store_mode(env)` 签名里没有配置那一格」；2026-10 用户拍板
+「向导里可选 external / memory」，配置层恢复——`store_mode` 回到文件，但身份变成向导持久化的选择。）
+
+### D2　`in_memory_db` 与旧环境变量只剩「点名」一个用途（2026-10 修订）
+
+`DbOption.toml` 的 `in_memory_db` 与环境变量 `AIOS_IN_MEMORY_DB` **不参与裁决**：`DbOptionExtFields` 里的字段
+留着（旧配置照常解析），还写着就逐条点名「已不生效——本进程按 X 跑（谁定的）」并指到向导 / `AIOS_STORE_MODE`。
+`store_mode` 已恢复生效（D1）——它不再是残留键，但文件里的**退役别名**（`external` / `spawned-*` / `kv-mem` /
+`embedded-mem` / `memory`）解析得出仍要点名：向导只写规范值，这种行只可能来自手改，而 `spawned-rocksdb`
+的含义从「自己拉一台」变成了「只连」，不许静默改道（2026-10-15 补齐：此前退役写法只在环境变量层点名，
+文件层静默生效）。`in_memory_db()` 函数删除（此前已无调用者）。
 
 ### D3　夹具与模板里不许再有这一行
 
-护栏反转：`no_db_option_fixture_still_carries_a_store_mode_key` 扫仓根、`db_options/`、`scripts/templates/` 下全部 `DbOption*.toml`，
-任何一份出现未注释的 `store_mode =` / `in_memory_db =` 即红。此前那条「每份夹具必须显式写 `store_mode`」（ADR-074 实施约束 1）
-护的是「不许依赖会翻的默认」；现在默认是 `rocksdb`（D6 同日修订）且不再翻，而文件里那一行**必定**与某次实际启动相反，留着只会骗人。
-每份夹具把原值记进注释（「此前写的是 rocksdb——配套脚本启动服务时要带 `AIOS_STORE_MODE=rocksdb`」），配套脚本本来就带着这个环境变量。
+护栏照旧：`no_db_option_fixture_still_carries_a_store_mode_key` 扫仓根、`db_options/`、`scripts/templates/` 下全部 `DbOption*.toml`，
+任何一份出现未注释的 `store_mode =` / `in_memory_db =` 即红。2026-10 起 `store_mode` 是**生效键**——夹具里预置它
+等于替每一次夹具启动静默定介质，比退役残留更不许。出厂模板同样不写：`Start-AMS.ps1` 在文件没写时显式回填
+`mem`（D5），「解压即跑」不靠文件预置；每份夹具把原值记进注释。
 
-### D4　向导只展示、不选、不写
+### D4　向导第②步两档可选、落盘 `store_mode`（2026-10 修订）
 
-`web/setup.html` 第②步不再有两个 radio：页面读 `GET /api/v1/setup/config` 的 `effective.store_mode` / `store_mode_source`，
-展示「当前介质 X，由 Y 决定」，说明改法是启动前设环境变量（`Start-AMS.ps1 -StoreMode rocksdb` / systemd `Environment=` / `$env:`），
-文件里残留 `store_mode` 时用 `effective.stale_config_store_mode` 提醒删掉。`v_ip` / `v_port` 与「测试连接」保留，只在生效档是 `rocksdb`
-时可用；第②步的闸不变（`rocksdb` 须通过测试连接）。`SetupConfigPatch.store_mode` 收下但**不写盘、不校验**（与 `included_projects`
-同一处理：旧页面带过来不能把保存搞坏），`apply_patch` 里没有它。`ensure_completion_ready` 以 `options::store_mode()` 为准，
-不再从文件文本里解析 `store_mode`。
+`web/setup.html` 第②步恢复两个 radio（**external / memory**，external 为默认），预选文件里持久化的档
+（没有就按生效档）；保存时 `SetupConfigPatch.store_mode` 校验（认不出的值拦在写盘前）后落盘成规范值
+`mem` / `rocksdb`。页面同时展示后端裁决出的生效档与出处（`GET /api/v1/setup/config` 的 `effective.store_mode` /
+`store_mode_source` / `store_mode_env` / `store_mode_env_value` / `config_store_mode`），环境变量 pin 了相反档时
+照实说「由环境变量决定」。向导触发的重启把文件里那一档**显式**递给孩子进程的 `AIOS_STORE_MODE`
+（`spawn_replacement`）——父进程环境里残留相反档也压不掉刚保存的选择；文件没写就靠环境继承，与冷启动同口径。
+`v_ip` / `v_port` 与「测试连接」只在 rocksdb 档可用；第②步的闸不变（`rocksdb` 须通过测试连接）。
+`ensure_completion_ready` 按「下一进程跑哪档」判：文件里写了 `store_mode` 优先，否则本进程裁决出的那一档。
 
 ### D5　发布包与部署脚本把介质递给环境变量
 
-生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`：给了就设 `AIOS_STORE_MODE` 再拉服务（cmd → 服务两层都继承）；不给时沿用调用方环境里已有的那一档，调用方也没有就**显式回填 `mem`**（同日修订：服务默认档翻成 rocksdb 之后，包不再靠默认兜「解压即跑」），
-两处都没有 = `mem`；日志打一句 `STORE_MODE=…`。冒烟 B 腿本来就设 `$env:AIOS_STORE_MODE`，C 腿改为显式 `rocksdb`；两腿都不再往
-临时配置里写 `store_mode`（本机配置若残留这一行，顺手删掉）。Linux 部署（`deploy/linux/install_backend.sh`）在 `aios-database`
-单元里加 `Environment=AIOS_STORE_MODE=rocksdb`，`render_dboption.py` 不再渲染 `store_mode`——现役 0.1.27 二进制也认这个环境变量，
-两版二进制同一套脚本。
+生成的 `Start-AMS.ps1` 新增 `-StoreMode mem|rocksdb`：给了就设 `AIOS_STORE_MODE` 再拉服务（cmd → 服务两层都继承）；
+不给时**文件优先**——`DbOption.toml` 写了 `store_mode`（向导持久化的档）就按它进环境变量，文件没写才显式回填 `mem`
+（服务默认档 2026-09-18 起是 rocksdb，包不靠默认兜「解压即跑」）；日志打 `STORE_MODE=…` 并标出来源。
+冒烟 B 腿本来就设 `$env:AIOS_STORE_MODE`，C 腿显式 `rocksdb`；两腿都不往临时配置里写 `store_mode`；
+A 腿有意不设，考默认档下的设置模式逃生门。Linux 部署（`deploy/linux/install_backend.sh`）在 `aios-database`
+单元里加 `Environment=AIOS_STORE_MODE=rocksdb`——env pin 压过向导改档是运维显式接管介质，启动 notice 会并排念出两边。
 
 ### D6　漏设时落到 `rocksdb`（同日翻的，取代 ADR-074 D3 的 `mem`）
 
@@ -116,28 +135,35 @@ D3（夹具仍不许带——现在是**生效键**，预置=静默定介质，�
 
 ## 后果
 
-- **凡是「起服务」的地方都得带环境变量**：仓内 `Start-AiosDatabaseManual.ps1` / `Run-*.ps1` / `Verify-RocksDb8000.ps1` /
-  `l3_suite/fixture.rs` / `review/acceptance.ps1` 此前就带 `AIOS_STORE_MODE`，一个都不必改；只靠配置文件写 `rocksdb` 起服务的
-  手工习惯要改——不改的话服务按 `mem` 起来，启动日志会用一整行点名文件里那句 `rocksdb` 已不生效并给出该设的值。
-- 发布包用户要持久库：先起库、向导第②步填地址并测试连接、再 `Start-AMS.ps1 -StoreMode rocksdb`；向导里没有「改选 rocksdb」这一步了。
-- `/health` 与 `/api/v1/setup/config` 报的介质与进程实际一致（它们本来就读 `store_mode()`）；`setup/config` 多出的四个 `effective.*`
-  字段是加法，老客户端不受影响。
-- 少了一张优先级表：`effective_store_mode` 从四参数变成一参数，`store_mode_source` 从五种答案变成两种。
+- 生效链三层：`AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode`（向导持久化）> 默认 `rocksdb`；
+  `effective_store_mode(env, file)` 两参数，`store_mode_source` 答得出「环境变量 / 配置文件 / 默认」三种出处。
+- **凡是想 pin 介质的地方走环境变量**：仓内 `Start-AiosDatabaseManual.ps1` / `Run-*.ps1` /
+  `Verify-RocksDb8000.ps1` / `l3_suite/fixture.rs` / `review/acceptance.ps1` 与 systemd 单元都显式带
+  `AIOS_STORE_MODE`；它压过向导选的档时启动日志并排点名「两边不是同一档」。
+- 向导第②步是持久化的正路：选 external / memory 写 `store_mode`，向导触发的重启把它显式递给孩子进程。
+  发布包用户要持久库：向导选 external 并把 `v_ip:v_port` 指到一台在跑的 SurrealDB，或 `Start-AMS.ps1 -StoreMode rocksdb`。
+- `/health` 与 `/api/v1/setup/config` 报的介质与进程实际一致；`effective.*` 五格把「生效档 / 谁定的 /
+  环境变量名 / 环境变量值 / 文件里那句」分开报，老客户端不受影响。
 
 ## 实施约束
 
-1. `the_default_store_mode_is_rocksdb`（不设 / 空白 / 拼错都落 rocksdb；`mem` 仍可显式选）、`only_the_environment_variable_decides_the_store_mode`（签名里没有配置那一格；`ROCKSDB` / ` Mem ` 都认）、
+1. 裁决：`the_default_store_mode_is_rocksdb`（不设 / 空白 / 拼错都落 rocksdb；`mem` 仍可显式选）、
+   `the_store_mode_layers_are_env_then_file_then_default`（env 压文件含相反档；env 缺或认不出落给文件；
+   两边都认不出落默认；`ROCKSDB` / ` Mem ` / 退役别名两层都认）、
    `an_unrecognised_store_mode_is_ignored_but_never_silent`。
-2. 点名：`a_stale_store_mode_key_in_the_config_is_named_not_swallowed`（文件说 rocksdb、实际 mem → 「两边不是同一档」+ `AIOS_STORE_MODE=rocksdb`；
-   两边一样 → 仍说「不再生效、删掉」）、`the_legacy_in_memory_db_switch_is_named_not_swallowed`（配置键与旧环境变量各一条；四个过期来源同时在场 = 四条）、
-   `a_retired_store_mode_still_parses_but_says_what_it_became`（改法指到环境变量）。
+2. 点名：`a_retired_store_mode_still_parses_but_says_what_it_became`（env 层四种旧字面值逐条说出落到的介质与含义变化）、
+   `a_retired_store_mode_in_the_config_file_is_named_too`（文件层同一纪律——向导只写规范值，退役行只可能来自手改；
+   2026-10-15 补）、`the_persisted_store_mode_is_quiet_until_the_env_overrides_it`（文件是生效层：env 没说按它跑不吵；
+   env 压了它并排念「两边不是同一档」）、`the_legacy_in_memory_db_switch_is_named_not_swallowed`
+   （`in_memory_db` / `AIOS_IN_MEMORY_DB` 只点名）、`the_effective_store_mode_can_name_who_decided_it`（三种出处）。
 3. 护栏：`no_db_option_fixture_still_carries_a_store_mode_key`。
-4. 向导：`the_wizard_shows_the_effective_store_mode_and_never_writes_it`（页面含 `effective-store` / `stale_config_store_mode` / `AIOS_STORE_MODE`；
-   不含 `store_mode:`、`id="store-mem"`、`id="store-rocksdb"`、`storeTierOf`）；`write_config_never_writes_store_mode_and_accepts_a_blank_address`
-   （只带 `store_mode` 的补丁 = 没改、不备份）；`patch_validation_rejects_malformed_values`（`store_mode` 拼错不算问题）。
-   页面读哪几格与服务端发哪几格要**两头都钉**：`the_config_endpoint_reports_the_effective_store_mode_and_names_a_stale_key`
-   钉住 `GET /api/v1/setup/config` 真发出那四格、与 `options::store_mode()` 同一个答案、过期键念原文且不混进 `values`
-   （**已按负例验过**：把 `store_mode_source` 改名即红，失败信息里带整段 `effective`）。只钉页面那一头的话，改名字两条都不红，
-   而页面拿到 `undefined`——介质栏画成默认的 `mem`、残留键的提醒整条消失，看上去像「文件里那行已经删了」。
-5. 校审：拒绝启用的 503 正文含 `AIOS_STORE_MODE=rocksdb`（`the_refusal_router_answers_every_review_path_with_503_and_a_reason`）。
-6. 服务端源码里不得再有 `options::in_memory_db()`；`effective_store_mode` 保持单参数。
+4. 向导：`the_wizard_offers_two_store_modes_and_persists_the_choice`（页面含 radio 预选持久档 / `effective-store` /
+   `store_mode: storeTier()`）、`write_config_persists_store_mode_and_accepts_a_blank_address`（只带 `store_mode`
+   的补丁落盘成规范值）、`patch_validation_rejects_malformed_values`（`store_mode` 拼错拦在写盘前）、
+   `the_config_endpoint_reports_effective_and_persisted_store_mode`（`effective` 五格与 `options::store_mode()`
+   同一答案、`config_store_mode` 念文件里那句原文）。
+5. 校审：拒绝启用的 503 正文与横幅给出向导第②步与 `AIOS_STORE_MODE=rocksdb` 两条改法
+   （`the_refusal_router_answers_every_review_path_with_503_and_a_reason` /
+   `the_refusal_banner_says_which_medium_which_routes_why_and_how_to_fix`）。
+6. 服务端源码里不得再有 `options::in_memory_db()`；`effective_store_mode` 保持「env > file > 默认」两参数签名，
+   第三层想插队得先改这个签名——那就是在改本文。

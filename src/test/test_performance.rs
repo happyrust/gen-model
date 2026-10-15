@@ -1161,15 +1161,6 @@ pub async fn test_gen_geos_data_performance(
         }
     }
 
-    #[cfg(feature = "local")]
-    {
-        let config = surrealdb::opt::Config::default().ast_payload();
-        SUL_DB
-            .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
-            .with_capacity(1000)
-            .await?;
-        info!("本地数据库连接成功: {}", db_option.project_name);
-    }
 
     let init_time = init_start.elapsed();
     info!("数据库初始化耗时: {}ms", init_time.as_millis());
@@ -1371,15 +1362,6 @@ pub async fn test_parallel_cata_geos_performance(
         }
     }
 
-    #[cfg(feature = "local")]
-    {
-        let config = surrealdb::opt::Config::default().ast_payload();
-        SUL_DB
-            .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
-            .with_capacity(1000)
-            .await?;
-        info!("本地数据库连接成功: {}", db_option.project_name);
-    }
     stats.db_connection_time_ms = db_init_start.elapsed().as_millis();
 
     // 第二步：查询元件库相关数据
@@ -1970,15 +1952,6 @@ pub async fn test_gen_geos_data_from_database(
         }
     }
 
-    #[cfg(feature = "local")]
-    {
-        let config = surrealdb::opt::Config::default().ast_payload();
-        SUL_DB
-            .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
-            .with_capacity(1000)
-            .await?;
-        info!("本地数据库连接成功: {}", db_option.project_name);
-    }
 
     // 查询参考号
     let mut all_refnos = Vec::new();
