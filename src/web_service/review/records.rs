@@ -232,6 +232,7 @@ pub struct ConfirmedRecordData {
     pub note: String,
     /// 校审模型版本上下文（前端按它防串版本确认）。后端原样落盘并在响应里回显——
     /// 前端把「写了但没回显」当保存失败，所以不能只收不返。
+    /// 注意：SurrealDB 存对象会抹掉值为 NONE 的键（如 `dbnum:null`），透传保真只能存字符串。
     #[serde(default)]
     pub model_context: Option<serde_json::Value>,
     /// 三类净距结果快照，同 model_context：原样存、原样回。
@@ -262,6 +263,7 @@ pub struct ConfirmedRecordWithMeta {
     #[serde(default)]
     pub operator_id: String,
     /// 写入时随记录落盘的模型版本上下文 / 净距快照，读时原样回显（前端回执比对依赖）。
+    /// 库里存的是 JSON 字符串（见 model_context 透传注释），读出时解回对象。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_context: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,10 +306,26 @@ pub(super) struct ReviewRecordRow {
     pub(super) operator_name: Option<String>,
     pub(super) slot_key: Option<String>,
     pub(super) snapshot_hash: Option<String>,
+    /// 透传字段在库里存 JSON 字符串：SurrealDB 会抹掉对象里值为 NONE 的键
+    /// （`{dbnum:null}` → `{}`），前端 key 比对会判丢字段，只能整段存字符串保真。
+    /// 兼容旧行：曾按对象落盘的行读出的是 Object，照常回显。
     #[serde(default)]
     pub(super) model_context: Option<serde_json::Value>,
     #[serde(default)]
     pub(super) clearance_snapshot: Option<serde_json::Value>,
+}
+
+/// 透传字段两种库内形态归一成回显对象：新行是 JSON 字符串（保 null 键），旧行是对象。
+fn decode_review_passthrough_field(raw: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match raw? {
+        serde_json::Value::String(text) => serde_json::from_str(&text).ok(),
+        other => Some(other),
+    }
+}
+
+/// 透传字段写库时一律序列化成 JSON 字符串（SurrealDB 会丢对象里的 NONE 键）。
+fn encode_review_passthrough_field(raw: &Option<serde_json::Value>) -> Option<String> {
+    raw.as_ref().map(|v| v.to_string())
 }
 
 pub(super) fn confirmed_record_with_meta_from_row(row: ReviewRecordRow) -> ConfirmedRecordWithMeta {
@@ -321,8 +339,8 @@ pub(super) fn confirmed_record_with_meta_from_row(row: ReviewRecordRow) -> Confi
         record_revision,
         current_node: row.current_node.unwrap_or_default(),
         operator_id: row.operator_id.unwrap_or_default(),
-        model_context: row.model_context,
-        clearance_snapshot: row.clearance_snapshot,
+        model_context: decode_review_passthrough_field(row.model_context),
+        clearance_snapshot: decode_review_passthrough_field(row.clearance_snapshot),
         id: record_id_to_string(row.id),
         task_id: row.task_id.unwrap_or_default(),
         form_id: row.form_id.unwrap_or_default(),
@@ -574,8 +592,8 @@ pub(super) async fn create_record(
                 .bind(("slot_key", slot_key.clone()))
                 .bind(("snapshot_hash", snapshot_hash.clone()))
                 .bind(("record_revision", record_revision.clone()))
-                .bind(("model_context", request.model_context.clone()))
-                .bind(("clearance_snapshot", request.clearance_snapshot.clone())),
+                .bind(("model_context", encode_review_passthrough_field(&request.model_context)))
+                .bind(("clearance_snapshot", encode_review_passthrough_field(&request.clearance_snapshot))),
             )
             .await
             {
@@ -730,8 +748,8 @@ pub(super) async fn create_record(
             let slot_key = slot_key.clone();
             let snapshot_hash = snapshot_hash.clone();
             let record_revision = record_revision.clone();
-            let model_context = request.model_context.clone();
-            let clearance_snapshot = request.clearance_snapshot.clone();
+            let model_context = encode_review_passthrough_field(&request.model_context);
+            let clearance_snapshot = encode_review_passthrough_field(&request.clearance_snapshot);
             async move {
                 await_review_query(
                     "review.records.write",
