@@ -1,0 +1,9 @@
+HTTP/1.1 400 Bad Request
+content-type: application/json
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-allow-origin: *
+access-control-expose-headers: *
+content-length: 109
+date: Fri, 11 Sep 2026 17:21:04 GMT
+
+{"code":"bad_request","message":"refno `not-a-refno` 无法解析：invalid refno not-a-refno","detail":null}

@@ -499,8 +499,14 @@ async fn query_annotation_states(
     match await_review_query("review.annotation_states.query", q).await {
         Ok(mut response) => {
             let rows: Vec<AnnotationStateRow> = response.take(0).unwrap_or_default();
-            let states: Vec<AnnotationStateView> =
+            let mut states: Vec<AnnotationStateView> =
                 rows.into_iter().map(state_view_from_row).collect();
+            states.sort_by(|a, b| {
+                b.review_round
+                    .cmp(&a.review_round)
+                    .then_with(|| b.updated_at.cmp(&a.updated_at))
+            });
+            let states = dedup_latest_round(states);
             (
                 StatusCode::OK,
                 Json(QueryAnnotationStatesResponse {
@@ -697,6 +703,7 @@ pub async fn sync_annotation_states_from_snapshot(
     annotations: &[Value],
     cloud_annotations: &[Value],
     rect_annotations: &[Value],
+    obb_annotations: &[Value],
 ) {
     let review_round = compute_review_round(task_id).await.unwrap_or(1);
     let db = match fresh_review_db().await {
@@ -710,10 +717,11 @@ pub async fn sync_annotation_states_from_snapshot(
         }
     };
 
-    let bundles: [(&str, &[Value]); 3] = [
+    let bundles: [(&str, &[Value]); 4] = [
         ("text", annotations),
         ("cloud", cloud_annotations),
         ("rect", rect_annotations),
+        ("obb", obb_annotations),
     ];
 
     for (anno_type, items) in bundles {
@@ -807,10 +815,26 @@ pub async fn load_annotation_states_by_task(
     form_id: &str,
     task_id: &str,
 ) -> Result<Vec<AnnotationStateView>, String> {
-    // 按 review_round DESC 排序，确保最新轮次排在前面
-    let sql = "SELECT * FROM review_annotation_states \
-               WHERE form_id = $form_id AND task_id = $task_id \
-               ORDER BY review_round DESC, updated_at DESC";
+    let trimmed_form_id = form_id.trim();
+    let trimmed_task_id = task_id.trim();
+    let sql = match (!trimmed_form_id.is_empty(), !trimmed_task_id.is_empty()) {
+        (true, true) => {
+            "SELECT * FROM review_annotation_states \
+             WHERE form_id = $form_id OR task_id = $task_id \
+             ORDER BY review_round DESC, updated_at DESC"
+        }
+        (true, false) => {
+            "SELECT * FROM review_annotation_states \
+             WHERE form_id = $form_id \
+             ORDER BY review_round DESC, updated_at DESC"
+        }
+        (false, true) => {
+            "SELECT * FROM review_annotation_states \
+             WHERE task_id = $task_id \
+             ORDER BY review_round DESC, updated_at DESC"
+        }
+        (false, false) => return Ok(Vec::new()),
+    };
 
     let db = fresh_review_db()
         .await
@@ -818,14 +842,14 @@ pub async fn load_annotation_states_by_task(
     let mut response = await_review_query(
         "review.annotation_states.by_task",
         db.query(sql)
-            .bind(("form_id", form_id.to_string()))
-            .bind(("task_id", task_id.to_string())),
+            .bind(("form_id", trimmed_form_id.to_string()))
+            .bind(("task_id", trimmed_task_id.to_string())),
     )
     .await
     .map_err(|e| format!("查询独立批注状态失败: {}", e))?;
 
     let rows: Vec<AnnotationStateRow> = response.take(0).unwrap_or_default();
-    // 转换为 View 并去重：每个 annotation_id 只保留最新轮次
+    // 转换为 View 并去重：每个 (annotation_type, annotation_id) 只保留最新轮次
     let all_states: Vec<AnnotationStateView> = rows.into_iter().map(state_view_from_row).collect();
     Ok(dedup_latest_round(all_states))
 }
@@ -848,13 +872,13 @@ pub async fn delete_annotation_states_by_form_id(form_id: &str) -> Result<(), St
     Ok(())
 }
 
-/// 去重辅助：每个 `annotation_id` 只保留第一条记录（调用方需保证输入已按
+/// 去重辅助：每个 `(annotation_type, annotation_id)` 只保留第一条记录（调用方需保证输入已按
 /// `review_round DESC` 排序，这样第一条就是最新轮次）。
 fn dedup_latest_round(states: Vec<AnnotationStateView>) -> Vec<AnnotationStateView> {
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
     states
         .into_iter()
-        .filter(|s| seen.insert(s.annotation_id.clone()))
+        .filter(|s| seen.insert((s.annotation_type.clone(), s.annotation_id.clone())))
         .collect()
 }
 

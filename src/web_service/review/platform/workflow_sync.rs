@@ -314,6 +314,7 @@ async fn apply_workflow_mutation_transaction(
         LET $updated_task = UPDATE review_tasks SET
             current_node = $next_node,
             status = $status,
+            requester_id = IF string::len(string::trim($requester_id)) > 0 THEN $requester_id ELSE requester_id END,
             checker_id = IF string::len(string::trim($checker_id)) > 0 THEN $checker_id ELSE checker_id END,
             checker_name = IF string::len(string::trim($checker_name)) > 0 THEN $checker_name ELSE checker_name END,
             reviewer_id = IF string::len(string::trim($reviewer_id)) > 0 THEN $reviewer_id ELSE reviewer_id END,
@@ -2155,11 +2156,17 @@ async fn apply_workflow_return(
         .unwrap_or_else(|| "流程已退回".to_string());
 
     let review_form = load_review_form_for_mutation(&request.form_id).await?;
+    let return_requester_id =
+        if next_step.target_node == "sj" && !next_step.assignee_id.trim().is_empty() {
+            next_step.assignee_id.trim().to_string()
+        } else {
+            task.requester_id.clone()
+        };
     apply_workflow_mutation_transaction(WorkflowMutationWrite {
         task_id: task.id.clone(),
         form_id: request.form_id.clone(),
         project_id: review_form.project_id.trim().to_string(),
-        requester_id: task.requester_id.clone(),
+        requester_id: return_requester_id,
         expected_current_node: current_node,
         expected_status: precheck.task_status.clone(),
         next_node: next_step.target_node.clone(),

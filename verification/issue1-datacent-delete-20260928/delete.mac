@@ -1,0 +1,11 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/verification/issue1-datacent-delete-20260928/delete.log" OVER
+$P ISSUE1-DELETE-BEGIN
+/CODEX_I1_20260928_B
+Q CE
+Q REF
+Q NAME
+Q OWNE
+DELETE BRAN
+SAVEWORK 'Issue 1 datacent_delete delete scratch BRAN'
+$P ISSUE1-DELETE-END
+ALPHA LOG END

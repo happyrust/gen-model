@@ -649,8 +649,8 @@ pub(crate) fn request_for_task(
 }
 
 /// 启动房间检查的四步计划结果：
-/// 1. 未发现房间更新时间记录（`room_updated_at` 缺失或空）→ `NeedsFullInit`（执行全量房间初始化）；
-/// 2. 存在房间更新时间记录，且所有有房间的 `dbnum` 时间戳均未超过该记录 → `UpToDate`；
+/// 1. 记录缺失、模型代号不匹配或含房库缺少水位 → `NeedsFullInit`（执行完整房间初始化）；
+/// 2. 同代且各含房库水位完整，时间戳与会话号均未推进 → `UpToDate`；
 /// 3. 存在房间更新时间记录，且部分有房间的 `dbnum` 时间戳超过该记录 → `NeedsIncrementalCheck`，
 ///    列出需要检查窗口 `(from_sesno, to_sesno]` 是否包含房间数据的 `(dbnum, from_sesno, to_sesno)`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -704,21 +704,27 @@ pub(crate) fn is_dbnum_timestamp_newer_than_room(
     }
 }
 
-/// 根据当前含房 `dbnum` 集合、各库水位状态与持久化的 `RoomUpdateRecord` 生成启动房间检查计划。
+/// 根据当前参照代号、含房库集合、水位与持久记录制定启动计划。
+/// 先核验凭据再比较时间：跨代时没有持久化旧拓扑可供可靠差分，保守完整初始化；
+/// 同代保留原窗口增量检查。含房库缺少水位不能当作「已检查」，即使已有全局完成记录。
 pub(crate) fn plan_startup_room_check(
     room_dbnums: &BTreeSet<u32>,
     states: &[crate::data_interface::dbnum_state::DbnumState],
     existing_record: Option<&crate::fast_model::room_resident::RoomUpdateRecord>,
+    current_generation: &str,
 ) -> StartupRoomCheckPlan {
     let Some(record) = existing_record.filter(|r| !r.room_updated_at.trim().is_empty()) else {
         return StartupRoomCheckPlan::NeedsFullInit;
     };
+    if current_generation.trim().is_empty() || record.generation != current_generation {
+        return StartupRoomCheckPlan::NeedsFullInit;
+    }
     let state_by_dbnum: std::collections::BTreeMap<u32, &crate::data_interface::dbnum_state::DbnumState> =
         states.iter().map(|s| (s.dbnum, s)).collect();
     let mut outdated_dbnums = Vec::new();
     for &dbnum in room_dbnums {
         let Some(state) = state_by_dbnum.get(&dbnum).copied() else {
-            continue;
+            return StartupRoomCheckPlan::NeedsFullInit;
         };
         if is_dbnum_timestamp_newer_than_room(
             dbnum,
@@ -1066,10 +1072,49 @@ async fn unresolved_elements_are_ignorable(
     })
 }
 
+/// 启动反查不可用时的覆盖面：MDB 设计库 ∪ 含房库 ∪ 当前源库，不受增量监听范围过滤。
+pub(crate) fn startup_room_fallback_targets(
+    source_dbnum: u32,
+    expected_dbnums: &[u32],
+    room_dbnums: &BTreeSet<u32>,
+) -> BTreeSet<u32> {
+    let mut targets = startup_full_init_targets(room_dbnums, expected_dbnums);
+    targets.insert(source_dbnum);
+    targets
+}
+
+/// 外库先补齐，本库的破坏性面板写入后执行。同代也适用，不依赖换代停放链。
+/// 回调是隔离测试入口；生产传真实逐库重算与本库执行体。外库失败时不调用本库，
+/// false 直接传给启动收尾，禁止把跨库未完成项盖成最新记录。
+pub(crate) async fn startup_room_update_after_foreign<F, Fut, L, LocalFut>(
+    foreign_dbnums: impl IntoIterator<Item = u32>,
+    mut recompute_foreign: F,
+    local_update: L,
+) -> bool
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+    L: FnOnce() -> LocalFut,
+    LocalFut: std::future::Future<Output = bool>,
+{
+    let mut all_ok = true;
+    for dbnum in foreign_dbnums.into_iter().collect::<BTreeSet<_>>() {
+        if !recompute_foreign(dbnum).await {
+            eprintln!("[房间启动检查] dbnum={dbnum} 跨库房间补算未完成，本轮不推进完成记录");
+            all_ok = false;
+        }
+    }
+    if !all_ok {
+        return false;
+    }
+    local_update().await
+}
+
 /// 对检测到房间数据变更的 `dbnum` 执行针对性房间增量更新：
 /// - 若存在 `PanelDelta`（常驻模型换代差分或窗口命中构造的面板增量），优先通过 `room_reverse::affected_roots`
 ///   做面板包围盒 + 存量成员反向定位，仅对受影响根执行 `RootScope::Targeted` 边更新；
-/// - 若空间树未就绪或无细分 `PanelDelta`，则对该 `dbnum` 执行 `recompute_dbnum_room_edges_now` 兜底。
+/// - 反查命中的外库先整库补齐，全部成功后才允许本库面板级写入；
+/// - 空间树未就绪、反查失败或无细分增量时，完整 MDB 目标集合兜底，不只补定义所在库。
 async fn apply_targeted_room_update_for_dbnum(
     dbnum: u32,
     outcome: &crate::fast_model::room_resident::StartupInitOutcome,
@@ -1121,62 +1166,81 @@ async fn apply_targeted_room_update_for_dbnum(
                     )
                     .await
                 {
-                    if unresolved_elements_are_ignorable(
-                        dbnum,
-                        target_sesno,
-                        &affected.unresolved,
-                        &affected.unresolved_ancestors,
-                    )
-                    .await
-                    {
-                        match recompute_dbnum_room_edges(
-                            PersistTarget::process(),
-                            store,
-                            dbnum,
-                            &rooms,
-                            None,
-                            RootScope::Targeted {
-                                roots: &affected.roots,
-                                panel_statements: &panel_statements,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(report) if report.failed.is_empty() => {
-                                println!(
-                                    "[房间启动检查] dbnum={dbnum} 针对性房间增量更新完成（{}）：命中根 {}、重算 {}、成员边 {}，耗时 {}ms",
-                                    delta.summary(),
-                                    affected.roots.len(),
-                                    report.recomputed,
-                                    report.room_edges,
-                                    report.elapsed_ms
-                                );
-                                return true;
+                    // Same-generation startup work cannot rely on the swap parking
+                    // chain: finish foreign libraries before panel deletes consume evidence.
+                    let foreign_dbnums = affected.foreign.keys().copied().collect::<Vec<_>>();
+                    return startup_room_update_after_foreign(
+                        foreign_dbnums,
+                        recompute_dbnum_room_edges_now,
+                        || async {
+                            if unresolved_elements_are_ignorable(
+                                dbnum,
+                                target_sesno,
+                                &affected.unresolved,
+                                &affected.unresolved_ancestors,
+                            )
+                            .await
+                            {
+                                match recompute_dbnum_room_edges(
+                                    PersistTarget::process(),
+                                    store,
+                                    dbnum,
+                                    &rooms,
+                                    None,
+                                    RootScope::Targeted {
+                                        roots: &affected.roots,
+                                        panel_statements: &panel_statements,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(report) if report.failed.is_empty() => {
+                                        println!(
+                                            "[房间启动检查] dbnum={dbnum} 针对性房间增量更新完成（{}）：命中根 {}、重算 {}、成员边 {}，耗时 {}ms",
+                                            delta.summary(),
+                                            affected.roots.len(),
+                                            report.recomputed,
+                                            report.room_edges,
+                                            report.elapsed_ms
+                                        );
+                                        return true;
+                                    }
+                                    Ok(report) => {
+                                        eprintln!(
+                                            "[房间启动检查] dbnum={dbnum} 针对性房间增量部分根失败（{} 根），回退单库重算",
+                                            report.failed.len()
+                                        );
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[房间启动检查] dbnum={dbnum} 针对性房间增量写库失败（{error:#}），回退单库重算"
+                                        );
+                                    }
+                                }
                             }
-                            Ok(report) => {
-                                eprintln!(
-                                    "[房间启动检查] dbnum={dbnum} 针对性房间增量部分根失败（{} 根），回退单库重算",
-                                    report.failed.len()
-                                );
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "[房间启动检查] dbnum={dbnum} 针对性房间增量写库失败（{error:#}），回退单库重算"
-                                );
-                            }
-                        }
-                    }
+                            recompute_dbnum_room_edges_now(dbnum).await
+                        },
+                    ).await;
                 }
             }
         }
     }
 
-    recompute_dbnum_room_edges_now(dbnum).await
+    // No complete reverse lookup: recomputing only the defining library cannot
+    // prove that members in other MDB libraries are current. Do not use watch scope.
+    let targets = startup_room_fallback_targets(
+        dbnum, &outcome.expected_dbnums(), &outcome.model.room_dbnums(),
+    );
+    startup_room_update_after_foreign(
+        targets,
+        recompute_dbnum_room_edges_now,
+        || async { true },
+    ).await
 }
 
 /// 启动时的房间初始化与基于时间戳的增量检测入口（在常驻房间模型就绪后调用）：
-/// 1. 先检查房间是否初始化（`room_build:main` 是否存在 `room_update_record` / `room_updated_at`）：
-///    若未初始化，则对各库执行房间初始化并记录最新房间时间戳；
+/// 1. 先核对初始化记录、当前参照代号和含房库水位：
+///    记录缺失、跨代或水位缺失时执行完整初始化；不以时间戳替代模型对齐证明；
 /// 2. 若已存在房间更新时间记录，则找出所有有房间的 `dbnum`（`ResidentRoomModel::room_dbnums` 并上上次记录的含房库），
 ///    用各含房 `dbnum` 的水位时间戳与房间更新时间记录做对比；
 /// 3. 若某个含房 `dbnum` 的时间戳超过房间更新时间记录，则检查该 `dbnum` 更新窗口内的数据是否包含
@@ -1207,13 +1271,18 @@ pub(crate) async fn check_and_init_rooms_at_startup(
     if let Some(record) = &existing_record {
         room_dbnums.extend(record.room_dbnum_sesnos.keys().copied());
     }
-    match plan_startup_room_check(&room_dbnums, &states, existing_record.as_ref()) {
+    match plan_startup_room_check(
+        &room_dbnums,
+        &states,
+        existing_record.as_ref(),
+        &outcome.model.input_version(),
+    ) {
         StartupRoomCheckPlan::NeedsFullInit => {
             // 目标集合 =「本次初始化覆盖到的库 ∪ 现在含房的库」，**不看限定域**：watch 只是增量监测的
             // 范围，房间初始化不归它圈（[`startup_full_init_targets`]，2026-10-15 口径）。
             let target_dbnums = startup_full_init_targets(&room_dbnums, &outcome.expected_dbnums());
             println!(
-                "[房间启动检查] 未发现房间更新时间记录，开始执行首次房间初始化（共 {} 个 dbnum）...",
+                "[房间启动检查] 启动对齐凭据不适用（记录、参照代号或含房库水位），开始完整房间初始化（共 {} 个 dbnum）...",
                 target_dbnums.len()
             );
             let mut all_ok = true;
@@ -1223,14 +1292,14 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 }
             }
             if all_ok {
-                // 整库初始化没有「没看」的库：空集合 + 上一笔记录为空（这条支路本来就没有记录）。
+                // 完整初始化覆盖全部目标，不留 unchecked；旧记录可能存在，但不能沿用其对齐凭据。
                 refresh_room_update_record_with_model(&outcome.model, &BTreeSet::new(), None).await;
                 println!(
-                    "[房间启动检查] 首次房间初始化完成，已记录最新房间更新时间"
+                    "[房间启动检查] 完整房间初始化重算已完成"
                 );
             } else {
                 eprintln!(
-                    "[房间启动检查] 首次房间初始化有部分 dbnum 未全部完成，暂不写入 room_updated_at，下次启动继续补检"
+                    "[房间启动检查] 完整房间初始化有部分 dbnum 未全部完成，暂不写入 room_updated_at，下次启动继续补检"
                 );
             }
         }
@@ -2922,7 +2991,7 @@ mod tests {
             ..Default::default()
         }];
         assert_eq!(
-            plan_startup_room_check(&room_dbnums, &states, None),
+            plan_startup_room_check(&room_dbnums, &states, None, "g1"),
             StartupRoomCheckPlan::NeedsFullInit
         );
         let empty_record = RoomUpdateRecord {
@@ -2931,7 +3000,7 @@ mod tests {
             generation: "g1".to_string(),
         };
         assert_eq!(
-            plan_startup_room_check(&room_dbnums, &states, Some(&empty_record)),
+            plan_startup_room_check(&room_dbnums, &states, Some(&empty_record), "g1"),
             StartupRoomCheckPlan::NeedsFullInit
         );
     }
@@ -2974,7 +3043,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            plan_startup_room_check(&room_dbnums, &states_up_to_date, Some(&record)),
+            plan_startup_room_check(&room_dbnums, &states_up_to_date, Some(&record), "g1"),
             StartupRoomCheckPlan::UpToDate {
                 room_updated_at: "2026-10-15T12:00:00+08:00".to_string(),
             }
@@ -2985,7 +3054,7 @@ mod tests {
         states_outdated[1].applied_sesno = 25;
         states_outdated[1].applied_sesno_time = Some("2026-10-15T13:00:00+08:00".to_string());
         assert_eq!(
-            plan_startup_room_check(&room_dbnums, &states_outdated, Some(&record)),
+            plan_startup_room_check(&room_dbnums, &states_outdated, Some(&record), "g1"),
             StartupRoomCheckPlan::NeedsIncrementalCheck {
                 room_updated_at: "2026-10-15T12:00:00+08:00".to_string(),
                 outdated_dbnums: vec![(7002, 20, 25)],
@@ -3003,7 +3072,7 @@ mod tests {
         assert_eq!(updated.room_dbnum_sesnos.get(&7001), Some(&10));
         assert_eq!(updated.room_dbnum_sesnos.get(&7002), Some(&25));
         assert_eq!(
-            plan_startup_room_check(&room_dbnums, &states_outdated, Some(&updated)),
+            plan_startup_room_check(&room_dbnums, &states_outdated, Some(&updated), "g2"),
             StartupRoomCheckPlan::UpToDate {
                 room_updated_at: "2026-10-15T13:00:00+08:00".to_string(),
             }

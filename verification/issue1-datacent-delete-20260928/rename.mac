@@ -1,0 +1,15 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/verification/issue1-datacent-delete-20260928/rename.log" OVER
+$P ISSUE1-RENAME-BEGIN
+/CODEX_I1_20260928_A
+Q CE
+Q REF
+Q NAME
+Q OWNE
+NAME /CODEX_I1_20260928_B
+Q CE
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'Issue 1 datacent_delete rename scratch BRAN A to B'
+$P ISSUE1-RENAME-END
+ALPHA LOG END

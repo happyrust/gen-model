@@ -1,0 +1,4568 @@
+{
+  "cable_errors": [],
+  "cables": 116,
+  "corpus_dirs": [
+    "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000",
+    "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000",
+    "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000",
+    "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000",
+    "D:\\AVEVA\\Projects\\E3D3.1\\YCYK-E3D\\acw000"
+  ],
+  "extgeo": 280,
+  "geometry_validated": false,
+  "nonzero_offset_samples": 0,
+  "resolved": 108,
+  "samples": [
+    {
+      "cable": "2013286720/3",
+      "end_ref": "2013286720/408",
+      "extgeo": "2013286720/10",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/409（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/412 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/409",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/92",
+      "end_ref": "2013286720/461",
+      "extgeo": "2013286720/100",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/462（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/465 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/462",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/105",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286720/110",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286720/105",
+      "end_mm": [
+        -288500.0,
+        306849.9999999999,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/294",
+      "extgeo": "2013286720/111",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/105",
+      "end_ref": "2013286720/235",
+      "extgeo": "2013286720/112",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/240（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/242 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/240",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/105",
+      "end_ref": "2013286720/259",
+      "extgeo": "2013286720/113",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/260（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/263 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/260",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/117",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286720/122",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286720/117",
+      "end_mm": [
+        -288500.0,
+        291397.99,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/293",
+      "extgeo": "2013286720/123",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/117",
+      "end_ref": "2013286720/329",
+      "extgeo": "2013286720/124",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/330（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/333 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/330",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/128",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286720/133",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286720/128",
+      "end_mm": [
+        -288500.0,
+        291397.99,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/293",
+      "extgeo": "2013286720/134",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/128",
+      "end_ref": "2013286720/329",
+      "extgeo": "2013286720/135",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/330（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/333 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/330",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/139",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286720/144",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286720/139",
+      "end_mm": [
+        -288500.0,
+        305684.0,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/292",
+      "extgeo": "2013286720/145",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/139",
+      "end_ref": "2013286720/314",
+      "extgeo": "2013286720/146",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/315（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/318 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/315",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/150",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286720/155",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286720/150",
+      "end_mm": [
+        -288500.0,
+        305684.0,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/292",
+      "extgeo": "2013286720/156",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/150",
+      "end_ref": "2013286720/314",
+      "extgeo": "2013286720/157",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/315（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/318 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/315",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/14",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/19",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/700（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/700",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/14",
+      "end_ref": "2013286720/364",
+      "extgeo": "2013286720/20",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/14",
+      "end_ref": "2013286720/408",
+      "extgeo": "2013286720/21",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/409（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/412 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/409",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/25",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/30",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/700（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/700",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/25",
+      "end_ref": "2013286720/364",
+      "extgeo": "2013286720/31",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/25",
+      "end_ref": "2013286720/408",
+      "extgeo": "2013286720/32",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/409（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/412 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/409",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/36",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/41",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/752（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/752",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/36",
+      "end_ref": "2013286720/364",
+      "extgeo": "2013286720/42",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/36",
+      "end_ref": "2013286720/408",
+      "extgeo": "2013286720/43",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/409（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/412 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/409",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/47",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/52",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/47",
+      "end_ref": "2013286720/363",
+      "extgeo": "2013286720/53",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/47",
+      "end_ref": "2013286720/390",
+      "extgeo": "2013286720/54",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/391（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/394 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/391",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 167.5,
+      "before_gap_mm": 167.5,
+      "cable": "2013286720/575",
+      "end_mm": [
+        -290150.0,
+        295040.0,
+        103400.0
+      ],
+      "end_ref": "2013286720/564",
+      "extgeo": "2013286720/580",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -290150.0,
+        299920.0,
+        103400.0
+      ],
+      "start_ref": "2013286720/565",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 167.5,
+      "before_gap_mm": 109.91810951794932,
+      "cable": "2013286720/584",
+      "end_mm": [
+        -290150.0,
+        299920.0,
+        103400.0
+      ],
+      "end_ref": "2013286720/565",
+      "extgeo": "2013286720/589",
+      "file": "aps250176_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_mm": [
+        -290150.0,
+        304493.4,
+        103400.0
+      ],
+      "start_ref": "2013286720/566",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/58",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/63",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/58",
+      "end_ref": "2013286720/363",
+      "extgeo": "2013286720/64",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/58",
+      "end_ref": "2013286720/390",
+      "extgeo": "2013286720/65",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/391（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/394 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/391",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/69",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/74",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/69",
+      "end_ref": "2013286720/363",
+      "extgeo": "2013286720/75",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/69",
+      "end_ref": "2013286720/390",
+      "extgeo": "2013286720/76",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/391（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/394 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/391",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/3",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/8",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/700（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/700",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/80",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/85",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/80",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286720/86",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/80",
+      "end_ref": "2013286720/435",
+      "extgeo": "2013286720/87",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/439（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/443 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/439",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/80",
+      "end_ref": "2013286720/461",
+      "extgeo": "2013286720/88",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/462（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/465 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/462",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/3",
+      "end_ref": "2013286720/364",
+      "extgeo": "2013286720/9",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/92",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286720/97",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/92",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286720/98",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286720/92",
+      "end_ref": "2013286720/435",
+      "extgeo": "2013286720/99",
+      "file": "aps250176_0001",
+      "reason": "元素 2013286720/439（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/443 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250176_0001",
+      "start_ref": "2013286720/439",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/102",
+      "end_ref": "2013286723/701",
+      "extgeo": "2013286723/107",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/749（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/749",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286723/102",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        112700.0
+      ],
+      "end_ref": "2013286723/377",
+      "extgeo": "2013286723/108",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013286723/378",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/102",
+      "end_ref": "2013286723/488",
+      "extgeo": "2013286723/109",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/491（HATTA）的伪属性 POS 现算失败: 路径点 2013286723/494 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/491",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013286723/6",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013286723/205",
+      "extgeo": "2013286723/11",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013286723/206",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/113",
+      "end_ref": "2013286723/701",
+      "extgeo": "2013286723/118",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286723/113",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        112700.0
+      ],
+      "end_ref": "2013286723/377",
+      "extgeo": "2013286723/119",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013286723/378",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/6",
+      "end_ref": "2013286723/298",
+      "extgeo": "2013286723/12",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/297（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/302 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/297",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/113",
+      "end_ref": "2013286723/490",
+      "extgeo": "2013286723/120",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/491（HATTA）的伪属性 POS 现算失败: 路径点 2013286723/494 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/491",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/124",
+      "end_ref": "2013286723/701",
+      "extgeo": "2013286723/129",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/749（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/749",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286723/124",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        112700.0
+      ],
+      "end_ref": "2013286723/377",
+      "extgeo": "2013286723/130",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013286723/378",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/124",
+      "end_ref": "2013286723/487",
+      "extgeo": "2013286723/131",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/491（HATTA）的伪属性 POS 现算失败: 路径点 2013286723/494 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/491",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 890.8062500000233,
+      "before_gap_mm": 4490.0,
+      "cable": "2013286723/135",
+      "end_mm": [
+        -298650.4,
+        320546.0,
+        99100.0
+      ],
+      "end_ref": "2013286723/615",
+      "extgeo": "2013286723/140",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -299500.0,
+        343303.0,
+        99100.0
+      ],
+      "start_ref": "2013286723/618",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1010.7500000000891,
+      "before_gap_mm": 890.8062500000233,
+      "cable": "2013286723/135",
+      "end_mm": [
+        -297759.59375,
+        320546.00000000006,
+        104020.0
+      ],
+      "end_ref": "2013286723/639",
+      "extgeo": "2013286723/141",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -297759.59375,
+        320546.00000000006,
+        99100.0
+      ],
+      "start_ref": "2013286723/640",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013286723/16",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013286723/205",
+      "extgeo": "2013286723/21",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013286723/206",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/16",
+      "end_ref": "2013286723/315",
+      "extgeo": "2013286723/22",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/297（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/302 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/297",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013286723/26",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013286723/205",
+      "extgeo": "2013286723/31",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013286723/206",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/26",
+      "end_ref": "2013286723/315",
+      "extgeo": "2013286723/32",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/297（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/302 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/297",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013286723/36",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013286723/205",
+      "extgeo": "2013286723/41",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013286723/206",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/36",
+      "end_ref": "2013286723/299",
+      "extgeo": "2013286723/42",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/297（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/302 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/297",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/46",
+      "end_ref": "2013286723/701",
+      "extgeo": "2013286723/51",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/752（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/752",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286723/46",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        107883.23
+      ],
+      "end_ref": "2013286723/363",
+      "extgeo": "2013286723/52",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013286723/378",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/46",
+      "end_ref": "2013286723/572",
+      "extgeo": "2013286723/53",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/570（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/579 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/570",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/57",
+      "end_ref": "2013286723/749",
+      "extgeo": "2013286723/62",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/752（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/752",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/66",
+      "end_ref": "2013286723/749",
+      "extgeo": "2013286723/71",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/752（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/752",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/75",
+      "end_ref": "2013286723/779",
+      "extgeo": "2013286723/80",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/783（HATTA）的伪属性 POS 现算失败: 路径点 2013286723/786 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/783",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/817",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286723/822",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/749（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/749",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/817",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286723/823",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286720/373（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286720/373",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/817",
+      "end_ref": "2013286720/501",
+      "extgeo": "2013286723/824",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286720/534（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/538 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286720/534",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 167.5,
+      "before_gap_mm": null,
+      "cable": "2013286723/817",
+      "end_mm": [
+        -290150.0,
+        304493.4,
+        103400.0
+      ],
+      "end_ref": "2013286720/566",
+      "extgeo": "2013286723/825",
+      "file": "aps250179_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_mm": [
+        -290150.0,
+        305750.0,
+        104510.0
+      ],
+      "start_ref": "2013286720/568",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/829",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286723/834",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/749（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/749",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/829",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286723/835",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/829",
+      "end_ref": "2013286720/532",
+      "extgeo": "2013286723/836",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286720/534（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/538 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286720/534",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/84",
+      "end_ref": "2013286723/350",
+      "extgeo": "2013286723/89",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/340（HATTA）的伪属性 POS 现算失败: 路径点 2013286723/344 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/340",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286723/93",
+      "end_ref": "2013286723/351",
+      "extgeo": "2013286723/98",
+      "file": "aps250179_0001",
+      "reason": "元素 2013286723/340（HATTA）的伪属性 POS 现算失败: 路径点 2013286723/344 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250179_0001",
+      "start_ref": "2013286723/340",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/198",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286726/203",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/198",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286726/204",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/198",
+      "end_ref": "2013286720/440",
+      "extgeo": "2013286726/205",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/439（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/443 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/439",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/198",
+      "end_mm": [
+        -308137.0000000002,
+        305750.0014506605,
+        105950.00782032013
+      ],
+      "end_ref": "2013286726/150",
+      "extgeo": "2013286726/206",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013286726/154",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/198",
+      "end_ref": "2013286726/191",
+      "extgeo": "2013286726/207",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286726/192（HATTA）的伪属性 POS 现算失败: 路径点 2013286726/195 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286726/192",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/211",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286726/216",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/211",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286726/217",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/211",
+      "end_ref": "2013286720/440",
+      "extgeo": "2013286726/218",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/439（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/443 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/439",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/211",
+      "end_mm": [
+        -308137.0000000002,
+        305750.0014506605,
+        105950.00782032013
+      ],
+      "end_ref": "2013286726/150",
+      "extgeo": "2013286726/219",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013286726/154",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/211",
+      "end_ref": "2013286726/191",
+      "extgeo": "2013286726/220",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286726/192（HATTA）的伪属性 POS 现算失败: 路径点 2013286726/195 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286726/192",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/224",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286726/229",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286723/750（RNODE）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286723/750",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/224",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286726/230",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/224",
+      "end_ref": "2013286720/440",
+      "extgeo": "2013286726/231",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/439（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/443 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/439",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/224",
+      "end_mm": [
+        -313545.0000000001,
+        305750.0008407583,
+        105950.00782032013
+      ],
+      "end_ref": "2013286726/149",
+      "extgeo": "2013286726/232",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013286726/154",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/224",
+      "end_ref": "2013286726/172",
+      "extgeo": "2013286726/233",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286726/173（HATTA）的伪属性 POS 现算失败: 路径点 2013286726/176 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286726/173",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/237",
+      "end_ref": "2013286723/755",
+      "extgeo": "2013286726/242",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286723/700（RATTA）的伪属性 POS 现算失败: 路径点 2013286723/758 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286723/700",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/237",
+      "end_ref": "2013286720/365",
+      "extgeo": "2013286726/243",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/372（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/375 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/372",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/237",
+      "end_ref": "2013286720/440",
+      "extgeo": "2013286726/244",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/439（TATTA）的伪属性 POS 现算失败: 路径点 2013286720/443 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/439",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/237",
+      "end_mm": [
+        -313545.0000000001,
+        305750.0008407583,
+        105950.00782032013
+      ],
+      "end_ref": "2013286726/149",
+      "extgeo": "2013286726/245",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013286726/154",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/237",
+      "end_ref": "2013286726/172",
+      "extgeo": "2013286726/246",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286726/173（HATTA）的伪属性 POS 现算失败: 路径点 2013286726/176 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286726/173",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/250",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286726/255",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/250",
+      "end_mm": [
+        -288500.0,
+        306849.9999999999,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/294",
+      "extgeo": "2013286726/256",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/250",
+      "end_ref": "2013286720/239",
+      "extgeo": "2013286726/257",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/240（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/242 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/240",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/250",
+      "end_mm": [
+        -307651.0000000001,
+        306850.000141694,
+        106399.999890831
+      ],
+      "end_ref": "2013286726/31",
+      "extgeo": "2013286726/258",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        306850.00203,
+        106399.99843597412
+      ],
+      "start_ref": "2013286726/36",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/250",
+      "end_ref": "2013286726/121",
+      "extgeo": "2013286726/259",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286726/122（HATTA）的伪属性 POS 现算失败: 路径点 2013286726/125 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286726/122",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/263",
+      "end_ref": "2013286723/665",
+      "extgeo": "2013286726/268",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286723/664（TATTA）的伪属性 POS 现算失败: 路径点 2013286723/668 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286723/664",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/263",
+      "end_mm": [
+        -288500.0,
+        306849.9999999999,
+        104309.9999999999
+      ],
+      "end_ref": "2013286720/294",
+      "extgeo": "2013286726/269",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013286720/298",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/263",
+      "end_ref": "2013286720/239",
+      "extgeo": "2013286726/270",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/240（HATTA）的伪属性 POS 现算失败: 路径点 2013286720/242 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/240",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013286726/263",
+      "end_mm": [
+        -312958.9999999987,
+        306849.997986646,
+        106400.00155120087
+      ],
+      "end_ref": "2013286726/30",
+      "extgeo": "2013286726/271",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        306850.00203,
+        106399.99843597412
+      ],
+      "start_ref": "2013286726/36",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/263",
+      "end_ref": "2013286726/102",
+      "extgeo": "2013286726/272",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286726/103（HATTA）的伪属性 POS 现算失败: 路径点 2013286726/106 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286726/103",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013286726/325",
+      "end_ref": "2013286720/535",
+      "extgeo": "2013286726/332",
+      "file": "aps250182_0001",
+      "reason": "元素 2013286720/531（RNODE）的伪属性 POS 现算失败: 路径点 2013286720/538 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_ref": "2013286720/531",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 727.8099999999977,
+      "before_gap_mm": null,
+      "cable": "2013286726/325",
+      "end_mm": [
+        -305360.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013286726/311",
+      "extgeo": "2013286726/333",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -303000.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013286726/313",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 710.0099999999948,
+      "before_gap_mm": 710.0099999999948,
+      "cable": "2013286726/340",
+      "end_mm": [
+        -310540.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013286726/310",
+      "extgeo": "2013286726/348",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -305360.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013286726/311",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 710.0099999999948,
+      "before_gap_mm": 710.0099999999948,
+      "cable": "2013286726/355",
+      "end_mm": [
+        -315720.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013286726/309",
+      "extgeo": "2013286726/363",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -310540.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013286726/310",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 710.0099999999948,
+      "before_gap_mm": 710.0099999999948,
+      "cable": "2013286726/370",
+      "end_mm": [
+        -321000.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013286726/314",
+      "extgeo": "2013286726/375",
+      "file": "aps250182_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250182_0001",
+      "start_mm": [
+        -315720.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013286726/309",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/247",
+      "end_ref": "2013287064/581",
+      "extgeo": "2013287058/255",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/577（RNODE）的伪属性 POS 现算失败: 路径点 2013287064/584 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/577",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 727.8099999999977,
+      "before_gap_mm": null,
+      "cable": "2013287058/247",
+      "end_mm": [
+        -305360.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013287058/163",
+      "extgeo": "2013287058/256",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013287058/165",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 710.0099999999948,
+      "before_gap_mm": 710.0099999999948,
+      "cable": "2013287058/264",
+      "end_mm": [
+        -310540.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013287058/162",
+      "extgeo": "2013287058/273",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -305360.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013287058/163",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 710.0099999999948,
+      "before_gap_mm": 710.0099999999948,
+      "cable": "2013287058/281",
+      "end_mm": [
+        -315720.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013287058/161",
+      "extgeo": "2013287058/290",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -310540.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013287058/162",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 710.0099999999948,
+      "before_gap_mm": 710.0099999999948,
+      "cable": "2013287058/298",
+      "end_mm": [
+        -321000.0,
+        305750.0,
+        105600.01
+      ],
+      "end_ref": "2013287058/166",
+      "extgeo": "2013287058/304",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -315720.0,
+        305750.0,
+        105600.01
+      ],
+      "start_ref": "2013287058/161",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/311",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287058/317",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/311",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287058/318",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/311",
+      "end_ref": "2013287064/518",
+      "extgeo": "2013287058/319",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/517（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/521 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/517",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/311",
+      "end_mm": [
+        -308137.0000000002,
+        305750.0014506605,
+        105950.00782032013
+      ],
+      "end_ref": "2013287058/199",
+      "extgeo": "2013287058/320",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013287058/203",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/311",
+      "end_ref": "2013287058/240",
+      "extgeo": "2013287058/321",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287058/241（HATTA）的伪属性 POS 现算失败: 路径点 2013287058/244 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287058/241",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/326",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287058/332",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/326",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287058/333",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/326",
+      "end_ref": "2013287064/518",
+      "extgeo": "2013287058/334",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/517（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/521 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/517",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/326",
+      "end_mm": [
+        -308137.0000000002,
+        305750.0014506605,
+        105950.00782032013
+      ],
+      "end_ref": "2013287058/199",
+      "extgeo": "2013287058/335",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013287058/203",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/326",
+      "end_ref": "2013287058/240",
+      "extgeo": "2013287058/336",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287058/241（HATTA）的伪属性 POS 现算失败: 路径点 2013287058/244 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287058/241",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/341",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287058/347",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/341",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287058/348",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/341",
+      "end_ref": "2013287064/518",
+      "extgeo": "2013287058/349",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/517（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/521 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/517",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/341",
+      "end_mm": [
+        -313545.0000000001,
+        305750.0008407583,
+        105950.00782032013
+      ],
+      "end_ref": "2013287058/198",
+      "extgeo": "2013287058/350",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013287058/203",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/341",
+      "end_ref": "2013287058/221",
+      "extgeo": "2013287058/351",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287058/222（HATTA）的伪属性 POS 现算失败: 路径点 2013287058/225 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287058/222",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/356",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287058/362",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287061/756（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287061/756",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/356",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287058/363",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/356",
+      "end_ref": "2013287064/518",
+      "extgeo": "2013287058/364",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/517（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/521 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/517",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/356",
+      "end_mm": [
+        -313545.0000000001,
+        305750.0008407583,
+        105950.00782032013
+      ],
+      "end_ref": "2013287058/198",
+      "extgeo": "2013287058/365",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        305750.00203,
+        105950.00782032013
+      ],
+      "start_ref": "2013287058/203",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/356",
+      "end_ref": "2013287058/221",
+      "extgeo": "2013287058/366",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287058/222（HATTA）的伪属性 POS 现算失败: 路径点 2013287058/225 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287058/222",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/371",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287058/377",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/371",
+      "end_mm": [
+        -288500.0,
+        306849.9999999999,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/368",
+      "extgeo": "2013287058/378",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/371",
+      "end_ref": "2013287064/303",
+      "extgeo": "2013287058/379",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/304（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/306 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/304",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/371",
+      "end_mm": [
+        -307651.0000000001,
+        306850.000141694,
+        106399.999890831
+      ],
+      "end_ref": "2013287058/31",
+      "extgeo": "2013287058/380",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        306850.00203,
+        106399.99843597412
+      ],
+      "start_ref": "2013287058/36",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/371",
+      "end_ref": "2013287058/133",
+      "extgeo": "2013287058/381",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287058/134（HATTA）的伪属性 POS 现算失败: 路径点 2013287058/137 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287058/134",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/386",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287058/392",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/386",
+      "end_mm": [
+        -288500.0,
+        306849.9999999999,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/368",
+      "extgeo": "2013287058/393",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/386",
+      "end_ref": "2013287064/303",
+      "extgeo": "2013287058/394",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287064/304（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/306 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287064/304",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287058/386",
+      "end_mm": [
+        -312958.9999999987,
+        306849.997986646,
+        106400.00155120087
+      ],
+      "end_ref": "2013287058/30",
+      "extgeo": "2013287058/395",
+      "file": "aps250514_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_mm": [
+        -303000.0,
+        306850.00203,
+        106399.99843597412
+      ],
+      "start_ref": "2013287058/36",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287058/386",
+      "end_ref": "2013287058/114",
+      "extgeo": "2013287058/396",
+      "file": "aps250514_0001",
+      "reason": "元素 2013287058/115（HATTA）的伪属性 POS 现算失败: 路径点 2013287058/118 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250514_0001",
+      "start_ref": "2013287058/115",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/4",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287061/10",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/807（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/807",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/94",
+      "end_ref": "2013287061/807",
+      "extgeo": "2013287061/100",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/810（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/810",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/4",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287061/11",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287064/448（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287064/448",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/105",
+      "end_ref": "2013287061/807",
+      "extgeo": "2013287061/111",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/810（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/810",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/4",
+      "end_ref": "2013287064/547",
+      "extgeo": "2013287061/12",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287064/580（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/584 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287064/580",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/116",
+      "end_ref": "2013287061/837",
+      "extgeo": "2013287061/122",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/841（HATTA）的伪属性 POS 现算失败: 路径点 2013287061/844 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/841",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 167.5,
+      "before_gap_mm": null,
+      "cable": "2013287061/4",
+      "end_mm": [
+        -290150.0,
+        304493.4,
+        103400.0
+      ],
+      "end_ref": "2013287064/612",
+      "extgeo": "2013287061/13",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -290150.0,
+        305750.0,
+        104510.0
+      ],
+      "start_ref": "2013287064/614",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/127",
+      "end_ref": "2013287061/405",
+      "extgeo": "2013287061/133",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/395（HATTA）的伪属性 POS 现算失败: 路径点 2013287061/399 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/395",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/138",
+      "end_ref": "2013287061/406",
+      "extgeo": "2013287061/144",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/395（HATTA）的伪属性 POS 现算失败: 路径点 2013287061/399 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/395",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/149",
+      "end_ref": "2013287061/757",
+      "extgeo": "2013287061/155",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287061/149",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        112700.0
+      ],
+      "end_ref": "2013287061/432",
+      "extgeo": "2013287061/156",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013287061/433",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/149",
+      "end_ref": "2013287061/545",
+      "extgeo": "2013287061/157",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/546（HATTA）的伪属性 POS 现算失败: 路径点 2013287061/549 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/546",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/162",
+      "end_ref": "2013287061/757",
+      "extgeo": "2013287061/168",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/807（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/807",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287061/162",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        112700.0
+      ],
+      "end_ref": "2013287061/432",
+      "extgeo": "2013287061/169",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013287061/433",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/162",
+      "end_ref": "2013287061/543",
+      "extgeo": "2013287061/170",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/546（HATTA）的伪属性 POS 现算失败: 路径点 2013287061/549 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/546",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/175",
+      "end_ref": "2013287061/757",
+      "extgeo": "2013287061/181",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/807（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/807",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287061/175",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        112700.0
+      ],
+      "end_ref": "2013287061/432",
+      "extgeo": "2013287061/182",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013287061/433",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/175",
+      "end_ref": "2013287061/542",
+      "extgeo": "2013287061/183",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/546（HATTA）的伪属性 POS 现算失败: 路径点 2013287061/549 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/546",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 890.8062500000233,
+      "before_gap_mm": 4490.0,
+      "cable": "2013287061/188",
+      "end_mm": [
+        -298650.4,
+        320546.0,
+        99100.0
+      ],
+      "end_ref": "2013287061/670",
+      "extgeo": "2013287061/194",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -299500.0,
+        343303.0,
+        99100.0
+      ],
+      "start_ref": "2013287061/673",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1010.7500000000891,
+      "before_gap_mm": 890.8062500000233,
+      "cable": "2013287061/188",
+      "end_mm": [
+        -297759.59375,
+        320546.00000000006,
+        104020.0
+      ],
+      "end_ref": "2013287061/694",
+      "extgeo": "2013287061/195",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -297759.59375,
+        320546.00000000006,
+        99100.0
+      ],
+      "start_ref": "2013287061/695",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/18",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287061/24",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/807（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/807",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/18",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287061/25",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/18",
+      "end_ref": "2013287064/578",
+      "extgeo": "2013287061/26",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287064/580（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/584 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287064/580",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013287061/33",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013287061/260",
+      "extgeo": "2013287061/39",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013287061/261",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/33",
+      "end_ref": "2013287061/353",
+      "extgeo": "2013287061/40",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/352（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/357 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/352",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013287061/45",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013287061/260",
+      "extgeo": "2013287061/51",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013287061/261",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/45",
+      "end_ref": "2013287061/370",
+      "extgeo": "2013287061/52",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/352（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/357 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/352",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013287061/57",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013287061/260",
+      "extgeo": "2013287061/63",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013287061/261",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/57",
+      "end_ref": "2013287061/370",
+      "extgeo": "2013287061/64",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/352（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/357 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/352",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": 2080.0,
+      "cable": "2013287061/69",
+      "end_mm": [
+        -299301.0,
+        321900.0,
+        102620.0
+      ],
+      "end_ref": "2013287061/260",
+      "extgeo": "2013287061/75",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -298545.0,
+        321900.0,
+        102620.0
+      ],
+      "start_ref": "2013287061/261",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/69",
+      "end_ref": "2013287061/354",
+      "extgeo": "2013287061/76",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/352（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/357 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/352",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/81",
+      "end_ref": "2013287061/757",
+      "extgeo": "2013287061/87",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/810（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/810",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287061/81",
+      "end_mm": [
+        -289250.0,
+        318717.0,
+        107883.23
+      ],
+      "end_ref": "2013287061/418",
+      "extgeo": "2013287061/88",
+      "file": "aps250517_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_mm": [
+        -289250.0,
+        318717.0,
+        104020.0
+      ],
+      "start_ref": "2013287061/433",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287061/81",
+      "end_ref": "2013287061/627",
+      "extgeo": "2013287061/89",
+      "file": "aps250517_0001",
+      "reason": "元素 2013287061/625（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/634 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250517_0001",
+      "start_ref": "2013287061/625",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/3",
+      "end_ref": "2013287064/438",
+      "extgeo": "2013287064/10",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/94",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/100",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/94",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287064/101",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/94",
+      "end_ref": "2013287064/513",
+      "extgeo": "2013287064/102",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/517（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/521 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/517",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/94",
+      "end_ref": "2013287064/539",
+      "extgeo": "2013287064/103",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/540（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/543 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/540",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/3",
+      "end_ref": "2013287064/483",
+      "extgeo": "2013287064/11",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/484（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/487 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/484",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/108",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/114",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/108",
+      "end_ref": "2013287064/439",
+      "extgeo": "2013287064/115",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/108",
+      "end_ref": "2013287064/513",
+      "extgeo": "2013287064/116",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/517（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/521 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/517",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/108",
+      "end_ref": "2013287064/539",
+      "extgeo": "2013287064/117",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/540（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/543 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/540",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 167.5,
+      "before_gap_mm": 167.5,
+      "cable": "2013287064/122",
+      "end_mm": [
+        -290150.0,
+        295040.0,
+        103400.0
+      ],
+      "end_ref": "2013287064/610",
+      "extgeo": "2013287064/128",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -290150.0,
+        299920.0,
+        103400.0
+      ],
+      "start_ref": "2013287064/611",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 167.5,
+      "before_gap_mm": 109.91810951794932,
+      "cable": "2013287064/133",
+      "end_mm": [
+        -290150.0,
+        299920.0,
+        103400.0
+      ],
+      "end_ref": "2013287064/611",
+      "extgeo": "2013287064/139",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -290150.0,
+        304493.4,
+        103400.0
+      ],
+      "start_ref": "2013287064/612",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/145",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287064/151",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287064/145",
+      "end_mm": [
+        -288500.0,
+        306849.9999999999,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/368",
+      "extgeo": "2013287064/152",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/145",
+      "end_ref": "2013287064/299",
+      "extgeo": "2013287064/153",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/304（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/306 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/304",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/145",
+      "end_ref": "2013287064/323",
+      "extgeo": "2013287064/154",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/324（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/327 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/324",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/159",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287064/165",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287064/159",
+      "end_mm": [
+        -288500.0,
+        291397.99,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/367",
+      "extgeo": "2013287064/166",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/159",
+      "end_ref": "2013287064/403",
+      "extgeo": "2013287064/167",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/404（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/407 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/404",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/172",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287064/178",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287064/172",
+      "end_mm": [
+        -288500.0,
+        291397.99,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/367",
+      "extgeo": "2013287064/179",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/172",
+      "end_ref": "2013287064/403",
+      "extgeo": "2013287064/180",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/404（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/407 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/404",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/185",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287064/191",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287064/185",
+      "end_mm": [
+        -288500.0,
+        305684.0,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/366",
+      "extgeo": "2013287064/192",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/185",
+      "end_ref": "2013287064/388",
+      "extgeo": "2013287064/193",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/389（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/392 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/389",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/198",
+      "end_ref": "2013287061/721",
+      "extgeo": "2013287064/204",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/720（TATTA）的伪属性 POS 现算失败: 路径点 2013287061/724 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/720",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": null,
+      "before_gap_mm": null,
+      "cable": "2013287064/198",
+      "end_mm": [
+        -288500.0,
+        305684.0,
+        104309.9999999999
+      ],
+      "end_ref": "2013287064/366",
+      "extgeo": "2013287064/205",
+      "file": "aps250520_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_mm": [
+        -288500.0,
+        311000.0,
+        104309.9999999999
+      ],
+      "start_ref": "2013287064/372",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/198",
+      "end_ref": "2013287064/388",
+      "extgeo": "2013287064/206",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/389（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/392 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/389",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/16",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/22",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/756（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/756",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/16",
+      "end_ref": "2013287064/438",
+      "extgeo": "2013287064/23",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/16",
+      "end_ref": "2013287064/483",
+      "extgeo": "2013287064/24",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/484（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/487 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/484",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/29",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/35",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/756（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/756",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/29",
+      "end_ref": "2013287064/438",
+      "extgeo": "2013287064/36",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/29",
+      "end_ref": "2013287064/483",
+      "extgeo": "2013287064/37",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/484（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/487 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/484",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/42",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/48",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/810（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/810",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/42",
+      "end_ref": "2013287064/438",
+      "extgeo": "2013287064/49",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/42",
+      "end_ref": "2013287064/483",
+      "extgeo": "2013287064/50",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/484（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/487 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/484",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/55",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/61",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/55",
+      "end_ref": "2013287064/437",
+      "extgeo": "2013287064/62",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/55",
+      "end_ref": "2013287064/465",
+      "extgeo": "2013287064/63",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/466（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/469 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/466",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/68",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/74",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/68",
+      "end_ref": "2013287064/437",
+      "extgeo": "2013287064/75",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/68",
+      "end_ref": "2013287064/465",
+      "extgeo": "2013287064/76",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/466（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/469 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/466",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/81",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/87",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/808（RNODE）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/808",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/81",
+      "end_ref": "2013287064/437",
+      "extgeo": "2013287064/88",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/447（TATTA）的伪属性 POS 现算失败: 路径点 2013287064/450 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/447",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/81",
+      "end_ref": "2013287064/465",
+      "extgeo": "2013287064/89",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287064/466（HATTA）的伪属性 POS 现算失败: 路径点 2013287064/469 FRAD=300：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287064/466",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "cable": "2013287064/3",
+      "end_ref": "2013287061/813",
+      "extgeo": "2013287064/9",
+      "file": "aps250520_0001",
+      "reason": "元素 2013287061/756（RATTA）的伪属性 POS 现算失败: 路径点 2013287061/816 FRAD=600：倒圆拐点的 PPOS/PDIR 语义未钉死，不猜",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250520_0001",
+      "start_ref": "2013287061/756",
+      "status": "unresolved",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 100.0,
+      "before_gap_mm": 58.18994100345392,
+      "cable": "23584/10343",
+      "end_mm": [
+        11600.0,
+        12900.0,
+        5400.0
+      ],
+      "end_ref": "23584/10283",
+      "extgeo": "23584/10347",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        14377.0,
+        3400.0,
+        2800.0
+      ],
+      "start_ref": "23584/10284",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0031897899982595845,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10351",
+      "end_mm": [
+        1999.5268102100017,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10301",
+      "extgeo": "23584/10356",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10305",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0031897899982595845,
+      "cable": "23584/10351",
+      "end_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "end_ref": "23584/10312",
+      "extgeo": "23584/10357",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        1999.53,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10313",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1050.0000000302177,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10351",
+      "end_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "end_ref": "23584/10312",
+      "extgeo": "23584/10358",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "start_ref": "23584/10312",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.005327979998583032,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10361",
+      "end_mm": [
+        7850.274672020001,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10303",
+      "extgeo": "23584/10366",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10305",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.005327979998583032,
+      "cable": "23584/10361",
+      "end_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10319",
+      "extgeo": "23584/10367",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        7850.28,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10320",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1286.3319941736167,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10361",
+      "end_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10319",
+      "extgeo": "23584/10368",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "start_ref": "23584/10319",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.003056669998841244,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10372",
+      "end_mm": [
+        9680.27694333,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10302",
+      "extgeo": "23584/10377",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10305",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.003056669998841244,
+      "cable": "23584/10372",
+      "end_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10325",
+      "extgeo": "23584/10378",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        9680.279999999999,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10326",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1286.3319941736165,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10372",
+      "end_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10325",
+      "extgeo": "23584/10379",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "start_ref": "23584/10325",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0030000000006111804,
+      "before_gap_mm": 150.0,
+      "cable": "23584/10383",
+      "end_mm": [
+        15561.747,
+        13050.0,
+        5500.0
+      ],
+      "end_ref": "23584/10292",
+      "extgeo": "23584/10387",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        12000.0,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10295",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0030000000006111804,
+      "cable": "23584/10383",
+      "end_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10337",
+      "extgeo": "23584/10388",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        15561.75,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10338",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1303.082497630295,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10383",
+      "end_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10337",
+      "extgeo": "23584/10389",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "start_ref": "23584/10337",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0010000000002037268,
+      "before_gap_mm": 150.0,
+      "cable": "23584/10393",
+      "end_mm": [
+        13171.751,
+        13050.0,
+        5500.0
+      ],
+      "end_ref": "23584/10293",
+      "extgeo": "23584/10397",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        12000.0,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10295",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0010000000002037268,
+      "cable": "23584/10393",
+      "end_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10331",
+      "extgeo": "23584/10398",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        13171.75,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10332",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1303.082497630295,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10393",
+      "end_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10331",
+      "extgeo": "23584/10399",
+      "file": "aps7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "start_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "start_ref": "23584/10331",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 100.0,
+      "before_gap_mm": 58.18994100345392,
+      "cable": "23584/10273",
+      "end_mm": [
+        11600.0,
+        12900.0,
+        5400.0
+      ],
+      "end_ref": "23584/10213",
+      "extgeo": "23584/10277",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        14377.0,
+        3400.0,
+        2800.0
+      ],
+      "start_ref": "23584/10214",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0031897899982595845,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10281",
+      "end_mm": [
+        1999.5268102100017,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10231",
+      "extgeo": "23584/10286",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10235",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0031897899982595845,
+      "cable": "23584/10281",
+      "end_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "end_ref": "23584/10242",
+      "extgeo": "23584/10287",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        1999.53,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10243",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1050.0000000302177,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10281",
+      "end_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "end_ref": "23584/10242",
+      "extgeo": "23584/10288",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "start_ref": "23584/10242",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.005327979998583032,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10291",
+      "end_mm": [
+        7850.274672020001,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10233",
+      "extgeo": "23584/10296",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10235",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.005327979998583032,
+      "cable": "23584/10291",
+      "end_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10249",
+      "extgeo": "23584/10297",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        7850.28,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10250",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1286.3319941736167,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10291",
+      "end_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10249",
+      "extgeo": "23584/10298",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "start_ref": "23584/10249",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.003056669998841244,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10302",
+      "end_mm": [
+        9680.27694333,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10232",
+      "extgeo": "23584/10307",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10235",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.003056669998841244,
+      "cable": "23584/10302",
+      "end_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10255",
+      "extgeo": "23584/10308",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        9680.279999999999,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10256",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1286.3319941736165,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10302",
+      "end_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10255",
+      "extgeo": "23584/10309",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "start_ref": "23584/10255",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0030000000006111804,
+      "before_gap_mm": 150.0,
+      "cable": "23584/10313",
+      "end_mm": [
+        15561.747,
+        13050.0,
+        5500.0
+      ],
+      "end_ref": "23584/10222",
+      "extgeo": "23584/10317",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        12000.0,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10225",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0030000000006111804,
+      "cable": "23584/10313",
+      "end_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10267",
+      "extgeo": "23584/10318",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        15561.75,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10268",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1303.082497630295,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10313",
+      "end_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10267",
+      "extgeo": "23584/10319",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "start_ref": "23584/10267",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0010000000002037268,
+      "before_gap_mm": 150.0,
+      "cable": "23584/10323",
+      "end_mm": [
+        13171.751,
+        13050.0,
+        5500.0
+      ],
+      "end_ref": "23584/10223",
+      "extgeo": "23584/10327",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        12000.0,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10225",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0010000000002037268,
+      "cable": "23584/10323",
+      "end_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10261",
+      "extgeo": "23584/10328",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        13171.75,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10262",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1303.082497630295,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10323",
+      "end_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10261",
+      "extgeo": "23584/10329",
+      "file": "zdj7200_0001",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7200_0001",
+      "start_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "start_ref": "23584/10261",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 100.0,
+      "before_gap_mm": 58.18994100345392,
+      "cable": "23584/10273",
+      "end_mm": [
+        11600.0,
+        12900.0,
+        5400.0
+      ],
+      "end_ref": "23584/10213",
+      "extgeo": "23584/10277",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        14377.0,
+        3400.0,
+        2800.0
+      ],
+      "start_ref": "23584/10214",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0031897899982595845,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10281",
+      "end_mm": [
+        1999.5268102100017,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10231",
+      "extgeo": "23584/10286",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10235",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0031897899982595845,
+      "cable": "23584/10281",
+      "end_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "end_ref": "23584/10242",
+      "extgeo": "23584/10287",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        1999.53,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10243",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1050.0000000302177,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10281",
+      "end_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "end_ref": "23584/10242",
+      "extgeo": "23584/10288",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        2000.0,
+        16450.0,
+        3050.0
+      ],
+      "start_ref": "23584/10242",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.005327979998583032,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10291",
+      "end_mm": [
+        7850.274672020001,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10233",
+      "extgeo": "23584/10296",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10235",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.005327979998583032,
+      "cable": "23584/10291",
+      "end_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10249",
+      "extgeo": "23584/10297",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        7850.28,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10250",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1286.3319941736167,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10291",
+      "end_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10249",
+      "extgeo": "23584/10298",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        7850.0,
+        13350.0,
+        1350.0
+      ],
+      "start_ref": "23584/10249",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.003056669998841244,
+      "before_gap_mm": 595.4699999999993,
+      "cable": "23584/10302",
+      "end_mm": [
+        9680.27694333,
+        13350.0,
+        6000.0
+      ],
+      "end_ref": "23584/10232",
+      "extgeo": "23584/10307",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        11204.53,
+        13350.0,
+        5300.0
+      ],
+      "start_ref": "23584/10235",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.003056669998841244,
+      "cable": "23584/10302",
+      "end_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10255",
+      "extgeo": "23584/10308",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        9680.279999999999,
+        13350.0,
+        6000.0
+      ],
+      "start_ref": "23584/10256",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1286.3319941736165,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10302",
+      "end_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "end_ref": "23584/10255",
+      "extgeo": "23584/10309",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        9680.0,
+        13350.0,
+        1350.0
+      ],
+      "start_ref": "23584/10255",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0030000000006111804,
+      "before_gap_mm": 150.0,
+      "cable": "23584/10313",
+      "end_mm": [
+        15561.747,
+        13050.0,
+        5500.0
+      ],
+      "end_ref": "23584/10222",
+      "extgeo": "23584/10317",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        12000.0,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10225",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0030000000006111804,
+      "cable": "23584/10313",
+      "end_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10267",
+      "extgeo": "23584/10318",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        15561.75,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10268",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1303.082497630295,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10313",
+      "end_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10267",
+      "extgeo": "23584/10319",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        15562.0,
+        13050.0,
+        1350.0
+      ],
+      "start_ref": "23584/10267",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0010000000002037268,
+      "before_gap_mm": 150.0,
+      "cable": "23584/10323",
+      "end_mm": [
+        13171.751,
+        13050.0,
+        5500.0
+      ],
+      "end_ref": "23584/10223",
+      "extgeo": "23584/10327",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        12000.0,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10225",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 0.0,
+      "before_gap_mm": 0.0010000000002037268,
+      "cable": "23584/10323",
+      "end_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10261",
+      "extgeo": "23584/10328",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        13171.75,
+        13050.0,
+        5500.0
+      ],
+      "start_ref": "23584/10262",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    },
+    {
+      "after_gap_mm": 1303.082497630295,
+      "before_gap_mm": 0.0,
+      "cable": "23584/10323",
+      "end_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "end_ref": "23584/10261",
+      "extgeo": "23584/10329",
+      "file": "zdj7210",
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000\\zdj7210",
+      "start_mm": [
+        13172.0,
+        13050.0,
+        1350.0
+      ],
+      "start_ref": "23584/10261",
+      "status": "anchors_only",
+      "xoff_mm": 0.0,
+      "ygap_mm": 0.0
+    }
+  ],
+  "scanned_cables": 116,
+  "scanned_extgeo": 280,
+  "unresolved": 172
+}

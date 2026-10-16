@@ -2180,6 +2180,30 @@ mod tests {
         assert!(rebind < sweep, "先重做绑定、再补扫");
     }
 
+    /// 健康闸必须在重解析之前（ADR-085 D3 追记）：`plan_watch_dirs` 每被调一次就把全部
+    /// 搜索根真扫一遍（远程 IO），闸的意义就是全健康时整轮跳过。闸若排在解析后面、
+    /// 或没有早退出口，远程现场就是「每 `AIOS_WATCH_REMOUNT_SECS` 秒押着事件循环扫一遍根」。
+    #[test]
+    fn a_remount_tick_gates_the_replan_behind_plan_health() {
+        let source = include_str!("increment_manager.rs");
+        let body = source
+            .split_once(concat!("async fn ", "remount_watch_dirs("))
+            .expect("remount_watch_dirs 还在")
+            .1;
+        let health = body.find("refresh_health").expect("健康复查还在");
+        let gate = body.find("has_watch_gaps").expect("健康闸还在");
+        // 钉调用形态而不是裸名——函数顶部的 use 导入行也带 `plan_watch_dirs`。
+        let replan = body.find("plan_watch_dirs(&db_option)").expect("重解析还在");
+        assert!(
+            health < gate && gate < replan,
+            "必须先做免费的健康复查、再过健康闸，有缺口才重解析搜索根"
+        );
+        assert!(
+            body[gate..replan].contains("return"),
+            "健康闸要有早退出口：全健康的一拍在重解析之前就该返回"
+        );
+    }
+
     /// 闸的核心语义：一串 burst 合成一轮，但**闸内到达的变化一次都不能被吞掉**。
     ///
     /// 限频最容易写成「刚扫完 N 秒内直接 continue」，那就把「上一轮重扫之后才发生
@@ -4792,12 +4816,13 @@ impl AiosDBManager {
         !crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed()
     }
 
-    /// 重挂轮：重新解析配置、补挂缺席的目录，挂上了就补一次重扫。
+    /// 重挂轮：复查已挂目录的健康；有缺口时重新解析配置、补挂缺席的目录，挂上了就补一次重扫。
     ///
-    /// 重新解析是必须的而不是「顺手」：共享盘在启动那一刻不可达时，
-    /// `plan_watch_dirs` 连它的 `*000` 子目录都列不出来，那些目录压根没进过启动列表，
-    /// 只重试老列表永远等不到它们。新解析出来的目录同时登记进
-    /// `project_paths::record_discovered_watch_dirs`，摄入侧才看得见它们。
+    /// 重新解析不是每拍都做的了：健康闸（`has_watch_gaps` ∪ 缺席目录）拦掉全健康轮——
+    /// 搜索根扫描是远程 IO，稳态下每拍重扫不会发现任何新东西（ADR-085 D3 追记）。
+    /// 有缺口时重解析照旧是必须的：共享盘在启动那一刻不可达时，`plan_watch_dirs` 连它的
+    /// `*000` 子目录都列不出来，那些目录压根没进过启动列表，只重试老列表永远等不到它们。
+    /// 新解析出来的目录同时登记进 `project_paths::record_discovered_watch_dirs`，摄入侧才看得见它们。
     ///
     /// 补挂之后要重扫：PollWatcher 只报「挂载之后」的变化，停机 / 掉线期间攒下的
     /// 会话不会有任何事件，不重扫就要等下一次有人动那个库才被发现。
@@ -4805,6 +4830,33 @@ impl AiosDBManager {
         use crate::data_interface::project_paths::{
             path_identity, plan_watch_dirs, record_discovered_watch_dirs, record_watch_dir_owners,
         };
+
+        // 先复查已挂目录还在不在——这一段不碰搜索根：「挂上过」不等于「还在被监听」，
+        // 中途掉线的目录不降级的话永远不会被这一轮回头看。失联目录恢复前必须先 unwatch
+        // 再重挂——直接重挂会让 PollWatcher 把同一个目录列两遍，F6 立刻整库阻断。
+        let dirs = self.watch_dirs();
+        let newly_lost = mounted.refresh_health(&dirs);
+        if !newly_lost.is_empty() {
+            log::warn!("监控目录失联，降级等待恢复: {newly_lost:?}");
+            eprintln!("监控目录失联，降级等待恢复: {newly_lost:?}");
+        }
+        let released = mounted.unwatch_lost(watcher);
+        if released > 0 {
+            println!("重挂轮解除了 {released} 个失联目录的旧监听，准备重挂");
+        }
+        // 失联目录已被 unwatch，自然落进 missing。
+        let missing = mounted.missing(dirs);
+
+        // 健康闸：最近一份闭包有缺口（根不可达 / 声明的项目没定位到 / 主项目没了 /
+        // 声明读不到）或仍有目录该挂没挂上，才值得重扫搜索根。没缓存过闭包按
+        // 「有缺口」处理——去现算一份正是这里的职责。全健康时整轮就到此为止：
+        // 零搜索根 IO，一行日志也不打。
+        let plan_has_gaps = crate::data_interface::mdb_closure::cached_plan_for(&self.db_option)
+            .map(|plan| plan.has_watch_gaps())
+            .unwrap_or(true);
+        if !plan_has_gaps && missing.is_empty() {
+            return;
+        }
 
         let known: HashSet<String> = self
             .watcher
@@ -4827,21 +4879,8 @@ impl AiosDBManager {
             println!("重挂轮发现新的监控目录: {discovered:?}");
         }
 
-        // 先复查已挂目录还在不在：「挂上过」不等于「还在被监听」，中途掉线的目录
-        // 不降级的话永远不会被这一轮回头看。恢复时必须先 unwatch 再重挂——直接重挂
-        // 会让 PollWatcher 把同一个目录列两遍，F6 立刻整库阻断。
-        let dirs = self.watch_dirs();
-        let newly_lost = mounted.refresh_health(&dirs);
-        if !newly_lost.is_empty() {
-            log::warn!("监控目录失联，降级等待恢复: {newly_lost:?}");
-            eprintln!("监控目录失联，降级等待恢复: {newly_lost:?}");
-        }
-        let released = mounted.unwatch_lost(watcher);
-        if released > 0 {
-            println!("重挂轮解除了 {released} 个失联目录的旧监听，准备重挂");
-        }
-
-        let missing = mounted.missing(dirs);
+        // 新发现的目录已并入 `self.watch_dirs()`，缺席判定要对合并后的清单重算。
+        let missing = mounted.missing(self.watch_dirs());
         if missing.is_empty() {
             return;
         }
@@ -5015,8 +5054,10 @@ impl AiosDBManager {
 
         // 共享盘不会挑着服务启动的那一秒在线：晚上线、维护重启、网络抖动都是常态。
         // 因此挂载不是一次性动作——挂不上的目录进重挂轮，每 AIOS_WATCH_REMOUNT_SECS
-        // 秒重试一次（含重新解析：盘不在时连它的 `*000` 目录都列不出来），挂上就补一次
-        // 重扫把停机期间的会话追回来。设为 0 关闭重挂，退回「一个都挂不上就报错退出」。
+        // 秒复查一次挂载健康；只有最近一份闭包带缺口或有目录缺席时才重新解析
+        // （盘不在时连它的 `*000` 目录都列不出来），健康态整轮零搜索根 IO。
+        // 挂上就补一次重扫把停机期间的会话追回来。设为 0 关闭重挂，退回
+        // 「一个都挂不上就报错退出」。
         let remount_secs = std::env::var("AIOS_WATCH_REMOUNT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())

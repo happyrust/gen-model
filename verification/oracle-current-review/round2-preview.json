@@ -1,0 +1,53 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "[dry-run] Oracle (0.20.0) would launch browser mode (target=Latest; requested=gpt-6-astra) with ~181,688 tokens (prompt only; 1 attachment excluded).\n[dry-run] Browser control: launch visible Chrome; may focus/control the browser UI.\n[dry-run] Browser guidance: Manual-login mode may show the persistent Oracle Chrome profile for sign-in or automation.\n[dry-run] Browser guidance: Use --browser-hide-window, --browser-attach-running, or --remote-chrome to reduce desktop disruption.\n[dry-run] Cookies: Chrome copy disabled (use --browser-manual-login, inline cookies, or --browser-cookie-sync).\n[dry-run] ChatGPT archive policy: auto.\n[dry-run] Bundled upload:\n  • C:\\Users\\dpc\\AppData\\Local\\Temp\\oracle-browser-bundle-Pl6A5h\\attachments-bundle.txt (655.4 KB)\n  (bundled 16 files into C:\\Users\\dpc\\AppData\\Local\\Temp\\oracle-browser-bundle-Pl6A5h\\attachments-bundle.txt)\n[dry-run] MCP resolved request:\n  engine: browser\n  model: gpt-6-astra\n  files: 16\n  browser desired model: Latest\n  browser thinking time: pro\n  browser model strategy: select\n  browser research mode: off\n  browser attachments: auto\n  browser bundle files: no\n  browser bundle format: auto\n  browser keep browser: no\n  browser manual login: yes\n  ChatGPT URL: https://chatgpt.com/\n  follow-ups: 0\n  guidance: Browser engine uses the signed-in ChatGPT profile; run dryRun:true before live use.\n  guidance: Manual-login browser mode uses Oracle's private Chrome profile at ~/.oracle/browser-profile, separate from your normal Chrome profile.\n  guidance: First-time setup: run oracle --engine browser --browser-manual-login --browser-keep-browser --browser-manual-login-profile-dir \"~/.oracle/browser-profile\" -p \"HI\", sign into ChatGPT in that window, then retry the consult.\n  guidance: If this profile is not signed in, non-setup MCP/browser runs fail fast instead of waiting for the full browser timeout."
+    }
+  ],
+  "structuredContent": {
+    "status": "dry-run",
+    "output": "[dry-run] Oracle (0.20.0) would launch browser mode (target=Latest; requested=gpt-6-astra) with ~181,688 tokens (prompt only; 1 attachment excluded).\n[dry-run] Browser control: launch visible Chrome; may focus/control the browser UI.\n[dry-run] Browser guidance: Manual-login mode may show the persistent Oracle Chrome profile for sign-in or automation.\n[dry-run] Browser guidance: Use --browser-hide-window, --browser-attach-running, or --remote-chrome to reduce desktop disruption.\n[dry-run] Cookies: Chrome copy disabled (use --browser-manual-login, inline cookies, or --browser-cookie-sync).\n[dry-run] ChatGPT archive policy: auto.\n[dry-run] Bundled upload:\n  • C:\\Users\\dpc\\AppData\\Local\\Temp\\oracle-browser-bundle-Pl6A5h\\attachments-bundle.txt (655.4 KB)\n  (bundled 16 files into C:\\Users\\dpc\\AppData\\Local\\Temp\\oracle-browser-bundle-Pl6A5h\\attachments-bundle.txt)\n[dry-run] MCP resolved request:\n  engine: browser\n  model: gpt-6-astra\n  files: 16\n  browser desired model: Latest\n  browser thinking time: pro\n  browser model strategy: select\n  browser research mode: off\n  browser attachments: auto\n  browser bundle files: no\n  browser bundle format: auto\n  browser keep browser: no\n  browser manual login: yes\n  ChatGPT URL: https://chatgpt.com/\n  follow-ups: 0\n  guidance: Browser engine uses the signed-in ChatGPT profile; run dryRun:true before live use.\n  guidance: Manual-login browser mode uses Oracle's private Chrome profile at ~/.oracle/browser-profile, separate from your normal Chrome profile.\n  guidance: First-time setup: run oracle --engine browser --browser-manual-login --browser-keep-browser --browser-manual-login-profile-dir \"~/.oracle/browser-profile\" -p \"HI\", sign into ChatGPT in that window, then retry the consult.\n  guidance: If this profile is not signed in, non-setup MCP/browser runs fail fast instead of waiting for the full browser timeout.",
+    "dryRun": true,
+    "resolved": {
+      "resolvedEngine": "browser",
+      "model": "gpt-6-astra",
+      "files": [
+        "src/data_interface/direct_store_registry.rs",
+        "src/data_interface/mdb_route_directory.rs",
+        "src/data_interface/direct_store.rs",
+        "src/data_interface/direct_tree.rs",
+        "src/data_interface/element_attributes.rs",
+        "src/data_interface/mdb_membership.rs",
+        "src/data_interface/mdb_memory_store.rs",
+        "src/data_interface/model_source.rs",
+        "src/data_interface/read_through.rs",
+        "src/data_interface/on_demand_db.rs",
+        "src/web_service/mod.rs",
+        "src/web_service/handlers.rs",
+        "src/lib.rs",
+        "verification/http-runtime/verify_ams_metrics.py",
+        "verification/http-runtime/acceptance-gaps.md",
+        "C:/Users/dpc/.oracle/sessions/refno-current-gpt6-review/artifacts/transcript.md"
+      ],
+      "followUpCount": 0,
+      "browser": {
+        "desiredModel": "Latest",
+        "thinkingTime": "pro",
+        "modelStrategy": "select",
+        "researchMode": null,
+        "keepBrowser": false,
+        "manualLogin": true,
+        "profileDir": null,
+        "chatgptUrl": "https://chatgpt.com/",
+        "imageOutputPath": null
+      },
+      "guidance": [
+        "Browser engine uses the signed-in ChatGPT profile; run dryRun:true before live use.",
+        "Manual-login browser mode uses Oracle's private Chrome profile at ~/.oracle/browser-profile, separate from your normal Chrome profile.",
+        "First-time setup: run oracle --engine browser --browser-manual-login --browser-keep-browser --browser-manual-login-profile-dir \"~/.oracle/browser-profile\" -p \"HI\", sign into ChatGPT in that window, then retry the consult.",
+        "If this profile is not signed in, non-setup MCP/browser runs fail fast instead of waiting for the full browser timeout."
+      ]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "cleaned_at": "2026-09-12T01:27:43.3236834+08:00",
+  "stopped_pid": 72048,
+  "stopped_executable": "D:\\Rust\\target\\debug\\aios-database.exe",
+  "pre_stop_health_status": 200,
+  "children_before": [
+    {
+      "ProcessId": 2672,
+      "Name": "conhost.exe",
+      "ExecutablePath": "C:\\WINDOWS\\system32\\conhost.exe"
+    }
+  ],
+  "pid_absent": true,
+  "http_port_18084_free": true,
+  "isolated_store": "embedded:mem",
+  "isolated_store_external_port": null,
+  "run_dir": "C:\\Users\\dpc\\AppData\\Local\\Temp\\gen-model-mbd-held-51455fff2d5446b594a045cafbdadd30",
+  "run_dir_absent": true,
+  "children_after": [],
+  "existing_8022_pid": 79984,
+  "existing_8022_process_unchanged": true,
+  "existing_8022_port_listening": true
+}

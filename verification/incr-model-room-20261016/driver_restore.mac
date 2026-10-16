@@ -1,0 +1,8 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/incr-room-equi/driver_alive_restore.log" OVER
+$P L3-ALIVE
+ALPHA LOG END
+$M "D:/work/plant-code/old/gen-model/output/incr-room-equi/restore.mac"
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/incr-room-equi/driver_done_restore.log" OVER
+$P L3-DONE
+ALPHA LOG END
+QUIT

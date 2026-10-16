@@ -60,7 +60,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $out = if ([IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path $repo $Out }
 New-Item -ItemType Directory -Force $out | Out-Null
 
-$schema = 'd:\work\plant-code\old\vendor\e3d-io\schema\e3d31\binaries'
+$schema = Join-Path $repo 'vendor\shared\e3d-io\schema\e3d31\binaries'
 $acw = 'D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000'
 $bin = 'D:\Rust\target\debug'
 

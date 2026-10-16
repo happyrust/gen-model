@@ -115,7 +115,11 @@ async fn export_review_data(Json(request): Json<ExportRequest>) -> impl IntoResp
     let tasks: Vec<ReviewTask> = match await_review_query("review.sync.export.tasks", q).await {
         Ok(mut resp) => {
             let rows: Vec<TaskRow> = resp.take(0).unwrap_or_default();
-            rows.into_iter().map(|r| r.to_review_task()).collect()
+            let mut hydrated = Vec::with_capacity(rows.len());
+            for row in rows {
+                hydrated.push(hydrate_task_attachments(row.to_review_task()).await);
+            }
+            hydrated
         }
         Err(e) => {
             warn!("Failed to export tasks: {}", e);
@@ -297,15 +301,25 @@ async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResp
             r#"UPDATE review_tasks SET
                 title = $title,
                 description = $description,
+                model_name = $model_name,
                 status = $status,
                 priority = $priority,
                 form_id = $form_id,
+                requester_id = $requester_id,
+                requester_name = $requester_name,
+                checker_id = $checker_id,
+                checker_name = $checker_name,
+                approver_id = $approver_id,
+                approver_name = $approver_name,
+                reviewer_id = $reviewer_id,
+                reviewer_name = $reviewer_name,
+                components = $components,
+                attachments = $attachments,
                 current_node = $current_node,
                 updated_at = time::now()
             WHERE record::id(id) = $id"#
         } else {
-            r#"CREATE review_tasks SET
-                id = $id,
+            r#"CREATE type::thing('review_tasks', $id) SET
                 form_id = $form_id,
                 title = $title,
                 description = $description,
@@ -314,11 +328,28 @@ async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResp
                 priority = $priority,
                 requester_id = $requester_id,
                 requester_name = $requester_name,
+                checker_id = $checker_id,
+                checker_name = $checker_name,
+                approver_id = $approver_id,
+                approver_name = $approver_name,
                 reviewer_id = $reviewer_id,
                 reviewer_name = $reviewer_name,
+                components = $components,
+                attachments = $attachments,
                 current_node = $current_node,
                 created_at = time::now(),
                 updated_at = time::now()"#
+        };
+
+        let checker_id = if task.checker_id.trim().is_empty() {
+            task.reviewer_id.clone()
+        } else {
+            task.checker_id.clone()
+        };
+        let checker_name = if task.checker_name.trim().is_empty() {
+            task.reviewer_name.clone()
+        } else {
+            task.checker_name.clone()
         };
 
         let result = await_review_query(
@@ -333,8 +364,14 @@ async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResp
                 .bind(("priority", task.priority.clone()))
                 .bind(("requester_id", task.requester_id.clone()))
                 .bind(("requester_name", task.requester_name.clone()))
+                .bind(("checker_id", checker_id))
+                .bind(("checker_name", checker_name))
+                .bind(("approver_id", task.approver_id.clone()))
+                .bind(("approver_name", task.approver_name.clone()))
                 .bind(("reviewer_id", task.reviewer_id.clone()))
                 .bind(("reviewer_name", task.reviewer_name.clone()))
+                .bind(("components", task.components.clone()))
+                .bind(("attachments", task.attachments.clone().unwrap_or_default()))
                 .bind(("current_node", task.current_node.clone())),
         )
         .await;

@@ -1,0 +1,177 @@
+diff --git a/DbOption.toml b/DbOption.toml
+index 1bbee5889..9acf12c42 100644
+--- a/DbOption.toml
++++ b/DbOption.toml
+@@ -23,7 +23,11 @@ replace_dbs = true
+ enable_index = false
+ sync_chunk_size = 10_0000
+ 
+-#项目设置
++#项目设置
++#【新增 2026-09-11】显式选择 E3D 模板版本：e3d210 / e3d31。
++# 设置后跳过自动识别，优先于 AIOS_E3D_TEMPLATE_DIR；无效版本或缺失模板会报错。
++# 删除此项则保留原有环境目录 / 默认目录行为。
++e3d_version = "e3d31"
+ #【变更 2026-07-27】E3D2.1→E3D3.1：AMS 样例工程迁移到 E3D3.1 项目目录。
+ project_path = "D:/AVEVA/Projects/E3D3.1"
+ # project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
+diff --git a/src/data_interface/direct_store.rs b/src/data_interface/direct_store.rs
+index 0815fef0e..a4a067412 100644
+--- a/src/data_interface/direct_store.rs
++++ b/src/data_interface/direct_store.rs
+@@ -187,14 +187,35 @@ impl std::fmt::Debug for DirectSchema {
+ }
+ 
+ impl DirectSchema {
+-    /// 从 [`TEMPLATE_DIR_ENV`] 指定的目录加载，未设时用本机默认值。
++    /// DbOption.toml 的显式版本优先；未设时保留环境目录 / 本机默认目录。
+     pub fn open_from_env() -> anyhow::Result<Self> {
++        let version = crate::options::configured_e3d_version().map_err(anyhow::Error::msg)?;
++        if let Some(version) = version {
++            return Self::open_version(&version);
++        }
+         let dir = std::env::var_os(TEMPLATE_DIR_ENV)
+             .map(PathBuf::from)
+             .unwrap_or_else(|| PathBuf::from(TEMPLATE_DIR_DEFAULT));
+         Self::open(dir)
+     }
+ 
++    /// 直接打开该版本的整套模板，不读取工程或数据库进行版本识别。
++    fn open_version(version: &str) -> anyhow::Result<Self> {
++        let version = e3d_io::schema::version_by_id(version.trim()).ok_or_else(|| {
++            anyhow::anyhow!("e3d_version={version:?} 无效：支持 e3d210 / e3d31")
++        })?;
++        let pack = e3d_io::SchemaPack::open_version(e3d_io::bundled_schema_root(), version.id)?;
++        let attlib = pack.attlib()?;
++        let dir = attlib.parent().ok_or_else(|| anyhow::anyhow!("attlib 缺少父目录"))?;
++        let schema = Self::open(dir)?;
++        log::info!(
++            "[e3d-schema] source=DbOption e3d_version={} template_dir={} auto_detect=false",
++            version.id,
++            dir.display()
++        );
++        Ok(schema)
++    }
++
+     pub fn open(template_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
+         let template_dir = template_dir.into();
+         let attlib_path = template_dir.join("attlib.dat");
+@@ -858,6 +879,50 @@ mod tests {
+     use super::*;
+     use std::sync::atomic::{AtomicUsize, Ordering};
+ 
++    #[test]
++    fn explicit_e3d_version_overrides_legacy_directory_in_shared_loader() {
++        const CHILD: &str = "AIOS_TEST_EXPLICIT_E3D_VERSION";
++        if std::env::var_os(CHILD).is_some() {
++            let schema = DirectSchema::open_from_env().unwrap();
++            assert!(schema.template_dir().ends_with("e3d210/binaries"));
++            return;
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let config = dir.path().join("DbOption.toml");
++        std::fs::write(&config, "e3d_version = \"e3d210\"\n").unwrap();
++        let output = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--exact",
++                "data_interface::direct_store::tests::explicit_e3d_version_overrides_legacy_directory_in_shared_loader",
++                "--nocapture",
++            ])
++            .env(CHILD, "1")
++            .env("DB_OPTION_FILE", config)
++            .env("AIOS_E3D_TEMPLATE_DIR", dir.path().join("missing-templates"))
++            .env_remove("E3D210_SCHEMA_DIR")
++            .output()
++            .unwrap();
++        assert!(output.status.success(), "{output:?}");
++    }
++
++    #[test]
++    fn explicit_e3d_version_opens_templates_without_a_database() {
++        for version in ["e3d210", "e3d31"] {
++            let schema = DirectSchema::open_version(version).unwrap();
++            let template = schema.template_file("DESI").unwrap();
++            let mut provider = TemplateProvider::open(template, None).unwrap();
++            assert!(provider.template_for(e3d_attlib::db1_hash("BRAN")).unwrap().is_some());
++        }
++    }
++
++    #[test]
++    fn explicit_e3d_version_typo_does_not_fall_back() {
++        for version in ["e3d99", "", "auto"] {
++            let error = DirectSchema::open_version(version).unwrap_err().to_string();
++            assert!(error.contains("e3d_version"), "{error}");
++        }
++    }
++
+     #[derive(Default)]
+     struct FakeLocator {
+         ref0_to_dbnum: BTreeMap<u32, u32>,
+diff --git a/src/options.rs b/src/options.rs
+index eb16bc6f2..4c1304ac3 100644
+--- a/src/options.rs
++++ b/src/options.rs
+@@ -12,6 +12,10 @@ pub struct DbOptionExt {
+     #[serde(flatten)]
+     pub inner: DbOption,
+ 
++    /// 显式选择模板包（e3d210 / e3d31）；设置后不探测数据库版本。
++    #[serde(default)]
++    pub e3d_version: Option<String>,
++
+     /// MQTT服务器地址，用于异地部署
+     #[serde(default)]
+     pub mqtt_server: Option<String>,
+@@ -242,6 +246,7 @@ impl From<DbOption> for DbOptionExt {
+     fn from(option: DbOption) -> Self {
+         Self {
+             inner: option,
++            e3d_version: None,
+             mqtt_server: None,
+             mqtt_port: None,
+             http_server: None,
+@@ -295,6 +300,8 @@ impl From<DbOption> for DbOptionExt {
+ /// 唯一途径——加字段时那句告警要自动跟上，靠的就是它。
+ #[derive(Debug, Default, Deserialize, Serialize)]
+ struct DbOptionExtFields {
++    #[serde(default)]
++    e3d_version: Option<String>,
+     #[serde(default)]
+     mqtt_server: Option<String>,
+     #[serde(default)]
+@@ -519,11 +526,17 @@ pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
+     option
+ }
+ 
++/// 模板版本必须严格读配置；不能经过扩展表解析失败后回落默认值的路径。
++pub(crate) fn configured_e3d_version() -> Result<Option<String>, String> {
++    Ok(read_ext_fields(std::env::var_os("DB_OPTION_FILE"))?.e3d_version)
++}
++
+ /// 获取扩展的数据库选项
+ pub fn get_db_option_ext() -> DbOptionExt {
+     let ext = load_ext_fields();
+     DbOptionExt {
+         inner: apply_asset_root(aios_core::get_db_option().clone()),
++        e3d_version: ext.e3d_version.clone(),
+         mqtt_server: ext.mqtt_server.clone(),
+         mqtt_port: ext.mqtt_port,
+         http_server: ext.http_server.clone(),
+@@ -1989,6 +2002,17 @@ fn parse_bool_flag(raw: &str) -> Option<bool> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn explicit_e3d_version_is_read_from_the_selected_toml() {
++        let (_dir, path) = write_probe_config("custom.toml", "e3d_version = \"e3d210\"\n");
++        let fields = read_ext_fields(Some(path.into())).unwrap();
++        assert_eq!(fields.e3d_version.as_deref(), Some("e3d210"));
++        let (_dir, path) = write_probe_config("missing-key.toml", "startup_autorun = false\n");
++        assert!(read_ext_fields(Some(path.into())).unwrap().e3d_version.is_none());
++        let (_dir, path) = write_probe_config("bad.toml", "e3d_version = []\n");
++        assert!(read_ext_fields(Some(path.into())).is_err());
++    }
++
+     #[test]
+     fn data_batch_worker_limit_defaults_and_clamps_to_supported_range() {
+         assert_eq!(effective_data_batch_workers(None), 1);

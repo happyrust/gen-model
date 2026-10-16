@@ -53,6 +53,13 @@ SYST 批次 `applied` 那一刻（`batch_worker` 现有的范围失效点）：�
 
 启动（`init_mdb`）、D2 声明刷新、共享盘重挂轮补上了目录（`added > 0`，补扫之前）。不做周期重绑。
 
+**2026-10-15 追记**：重挂轮里「重新解析监控目录」加了健康闸——每拍先复查已挂目录，只有最近一份闭包带缺口
+（`ClosurePlan::has_watch_gaps`：根不可达 / 声明的项目未定位 / 主项目没定位到 / 声明读不到）或仍有目录缺席时
+才 `plan_watch_dirs` 重扫搜索根；全健康的拍整轮零搜索根 IO。此前每 `AIOS_WATCH_REMOUNT_SECS`（默认 60 s）一拍
+无条件重解析：本地盘上只是日志噪音，远程根上是每拍押着事件循环的远程 IO。取舍边界：全健康运行期往根里新拷进的
+项目目录不再被兜底发现（重启或下一个缺口拍才看见）。同一计划里 `current_mdb_source_inventory` 的开工探针也改走
+`latest_for` 闭包缓存，与 `get()` 成员清单同一代——它本来每个任务开工都真扫一遍根。
+
 ### D4　执行范围缓存退役
 
 `SCOPE_CACHE`、`UpdateScope::resolve_cached`、`AiosDBManager::update_scope_cached`（`manual_update.rs`）、`invalidate_scope_cache`、`finish` 的陈旧回退档，
@@ -96,3 +103,7 @@ SYST 批次 `applied` 那一刻（`batch_worker` 现有的范围失效点）：�
 4. 重挂：`remount_watch_dirs` 里成员绑定重做排在 `share-remount` 补扫之前（源码顺序钉）。
 5. 日志：`phase=mdb_scope` 只在 `mdb_membership::rebind` 一处出现（源码钉）。
 6. live：`live_scope_refresh_baselines_a_db_the_mdb_just_declared` 改为声明驱动，不再改库侧 CURD。
+7. 健康闸（2026-10-15 追记）：`a_remount_tick_gates_the_replan_behind_plan_health`（闸排在重解析之前且有早退）、
+   `the_task_probe_reads_the_cached_watch_dir_plan`（开工探针只读 `latest_for`，源码里不再出现 `plan_watch_dirs`）、
+   `watch_gaps_cover_every_way_a_plan_can_be_incomplete`（闸判据真值表）、
+   `cached_plan_for_never_computes_and_hits_after_resolve_for`（只读缓存口不现算）。
