@@ -230,6 +230,13 @@ pub struct ConfirmedRecordData {
     pub dimension_document_base_version: u64,
     #[serde(default)]
     pub note: String,
+    /// 校审模型版本上下文（前端按它防串版本确认）。后端原样落盘并在响应里回显——
+    /// 前端把「写了但没回显」当保存失败，所以不能只收不返。
+    #[serde(default)]
+    pub model_context: Option<serde_json::Value>,
+    /// 三类净距结果快照，同 model_context：原样存、原样回。
+    #[serde(default)]
+    pub clearance_snapshot: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,6 +261,11 @@ pub struct ConfirmedRecordWithMeta {
     pub current_node: String,
     #[serde(default)]
     pub operator_id: String,
+    /// 写入时随记录落盘的模型版本上下文 / 净距快照，读时原样回显（前端回执比对依赖）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance_snapshot: Option<serde_json::Value>,
     pub id: String,
     pub task_id: String,
     pub form_id: String,
@@ -292,6 +304,10 @@ pub(super) struct ReviewRecordRow {
     pub(super) operator_name: Option<String>,
     pub(super) slot_key: Option<String>,
     pub(super) snapshot_hash: Option<String>,
+    #[serde(default)]
+    pub(super) model_context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(super) clearance_snapshot: Option<serde_json::Value>,
 }
 
 pub(super) fn confirmed_record_with_meta_from_row(row: ReviewRecordRow) -> ConfirmedRecordWithMeta {
@@ -305,6 +321,8 @@ pub(super) fn confirmed_record_with_meta_from_row(row: ReviewRecordRow) -> Confi
         record_revision,
         current_node: row.current_node.unwrap_or_default(),
         operator_id: row.operator_id.unwrap_or_default(),
+        model_context: row.model_context,
+        clearance_snapshot: row.clearance_snapshot,
         id: record_id_to_string(row.id),
         task_id: row.task_id.unwrap_or_default(),
         form_id: row.form_id.unwrap_or_default(),
@@ -534,7 +552,9 @@ pub(super) async fn create_record(
                         operator_name: $operator_name,
                         slot_key: $slot_key,
                         snapshot_hash: $snapshot_hash,
-                        record_revision: $record_revision
+                        record_revision: $record_revision,
+                        model_context: $model_context,
+                        clearance_snapshot: $clearance_snapshot
                     } RETURN AFTER
                     "#,
                 )
@@ -553,7 +573,9 @@ pub(super) async fn create_record(
                 .bind(("operator_name", operator_name.clone()))
                 .bind(("slot_key", slot_key.clone()))
                 .bind(("snapshot_hash", snapshot_hash.clone()))
-                .bind(("record_revision", record_revision.clone())),
+                .bind(("record_revision", record_revision.clone()))
+                .bind(("model_context", request.model_context.clone()))
+                .bind(("clearance_snapshot", request.clearance_snapshot.clone())),
             )
             .await
             {
@@ -607,6 +629,8 @@ pub(super) async fn create_record(
                 slot_key: $slot_key,
                 snapshot_hash: $snapshot_hash,
                 record_revision: $record_revision,
+                model_context: $model_context,
+                clearance_snapshot: $clearance_snapshot,
                 confirmed_at: time::now()
             }
             WHERE (
@@ -637,6 +661,8 @@ pub(super) async fn create_record(
                 slot_key: $slot_key,
                 snapshot_hash: $snapshot_hash,
                 record_revision: $record_revision,
+                model_context: $model_context,
+                clearance_snapshot: $clearance_snapshot,
                 confirmed_at: time::now()
             } RETURN AFTER
             "#
@@ -662,6 +688,8 @@ pub(super) async fn create_record(
                 slot_key: $slot_key,
                 snapshot_hash: $snapshot_hash,
                 record_revision: $record_revision,
+                model_context: $model_context,
+                clearance_snapshot: $clearance_snapshot,
                 confirmed_at: time::now()
             } RETURN AFTER
             "#
@@ -702,6 +730,8 @@ pub(super) async fn create_record(
             let slot_key = slot_key.clone();
             let snapshot_hash = snapshot_hash.clone();
             let record_revision = record_revision.clone();
+            let model_context = request.model_context.clone();
+            let clearance_snapshot = request.clearance_snapshot.clone();
             async move {
                 await_review_query(
                     "review.records.write",
@@ -730,7 +760,9 @@ pub(super) async fn create_record(
                         .bind(("operator_name", operator_name))
                         .bind(("slot_key", slot_key))
                         .bind(("snapshot_hash", snapshot_hash))
-                        .bind(("record_revision", record_revision)),
+                        .bind(("record_revision", record_revision))
+                        .bind(("model_context", model_context))
+                        .bind(("clearance_snapshot", clearance_snapshot)),
                 )
                 .await
                 .and_then(|mut response| {
