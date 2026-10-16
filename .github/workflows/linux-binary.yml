@@ -90,8 +90,8 @@ jobs:
           git -C plant-ui sparse-checkout set web/public
           echo "plant-ui -> $(git -C plant-ui rev-parse --short HEAD)"
           for f in index.html config.example.json \
-                   pkg/plant_ui_app.js pkg/plant_ui_app.d.ts \
-                   pkg/plant_ui_app_bg.wasm pkg/plant_ui_app_bg.wasm.d.ts \
+                   pkg/rs-plant.js pkg/rs-plant.d.ts \
+                   pkg/rs-plant_bg.wasm pkg/rs-plant_bg.wasm.d.ts \
                    assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf \
                    assets/fonts/AlibabaPuHuiTi-2-65-Medium.ttf \
                    assets/fonts/AlibabaPuHuiTi-2-75-SemiBold.ttf \
