@@ -1163,7 +1163,7 @@ pub(crate) fn render_recalc_panel_topology_statements(
 /// 此刻已落库的行。
 ///
 /// 回执里的 [`RoomEdgeRecompute::covered_roots`] 就是这一轮算过的全部根（投影里的 + 点名回读的）；它是不是
-/// 本库的全部根，仍由调用方对 `DbSet@T` 的根清单判——这里不枚举文件。
+/// 本库的全部根，仍由调用方对 `library_target_roots`（文件侧 `DbSet@T` ∪ 持久层 `pe`，issue #56）的根清单判——这里不枚举。
 ///
 /// **定向**（[`RootScope::Targeted`]，反向传播，2026-09-17）：根集换成反查命中的那几根——投影里的按集合筛、
 /// 集合里不在投影里的回读库——其余一字不改：同一个判定入口、同一套渲染、同一种装块，多的只是最后一笔事务末尾
@@ -1203,7 +1203,7 @@ pub async fn recompute_dbnum_room_edges(
         })
         .collect();
     let projected_set: BTreeSet<i64> = projected.iter().map(|root| packed_refno(*root)).collect();
-    // 点名的、不在投影里的根：去重、只认本库的、按 refno 序。整库点名的是 `DbSet@T` 的清单，定向点名的是命中集合。
+    // 点名的、不在投影里的根：去重、只认本库的、按 refno 序。整库点名的是 `library_target_roots` 的并集清单，定向点名的是命中集合。
     let named_roots: &[RefNo] = match root_scope {
         RootScope::All => library_roots.unwrap_or_default(),
         RootScope::Targeted { roots, .. } => roots,

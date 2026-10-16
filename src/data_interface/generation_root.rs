@@ -716,6 +716,108 @@ pub fn enumerate_generation_roots(
     Ok(out)
 }
 
+/// `pe` 持久层重建的本库生成根清单（issue #56，2026-10-19）。
+///
+/// [`enumerate_generation_roots`] 要 E3D 源文件（`DbSet@T`）——部署包不带工程文件、
+/// 只带库的数据节点上文件侧枚举走不通。持久层元素（`pe` 的 `noun` / `owner`）里同一棵
+/// 层级树还在：拿 `owner` 反查出成员表，跑 [`enumerate_generation_roots_in_subtree`]
+/// 同一段遍历——判据逐字不变（交付单元是根、单元之内不再出根、显著 noun 各成根、
+/// 层级容器永不为根），成员序只影响输出顺序、不影响根的集合，零几何行的根照样在
+/// 清单里。与文件侧的口径差只有一处：根集是「库上此刻的元素」而不是「文件此刻的
+/// 元素」。
+///
+/// 树顶 = `owner` 缺失 / 无效（`pe:0_0`）/ 指向库外 / 自指的元素。属主在别库的
+/// 元素从它自己起枚举——它的祖先一侧天然是层级容器，对根集没有影响。refno 解析
+/// 不了的行跳过：一行坏最多漏一根，整体报错会让整库房间永远无法对齐。
+pub async fn enumerate_durable_generation_roots(
+    dbnum: u32,
+    unit_types: &[String],
+) -> anyhow::Result<Vec<GenerationRoot>> {
+    use std::str::FromStr;
+    #[derive(Debug, Deserialize)]
+    struct PeRow {
+        refno: String,
+        noun: Option<String>,
+        owner: Option<String>,
+    }
+    let mut resp = aios_core::SUL_DB
+        .query(format!(
+            "SELECT record::id(id) AS refno, noun, record::id(owner) AS owner \
+             FROM pe WHERE dbnum = {dbnum}"
+        ))
+        .await?
+        .check()?;
+    let rows: Vec<PeRow> = resp.take(0)?;
+    let rows = rows
+        .iter()
+        .filter_map(|row| {
+            let refno = RefU64::from_str(&row.refno).ok().map(RefnoEnum::from)?;
+            let owner = row
+                .owner
+                .as_deref()
+                .and_then(|raw| RefU64::from_str(raw).ok())
+                .map(RefnoEnum::from);
+            Some((refno, row.noun.clone().unwrap_or_default(), owner))
+        })
+        .collect::<Vec<_>>();
+    durable_roots_from_pe_rows(&rows, unit_types)
+}
+
+/// `pe` 行（refno / noun / owner）→ 根清单：[`enumerate_durable_generation_roots`]
+/// 的纯函数部分。行序无关；`members` 按 `owner` 反查装回。属主缺失 / 指向表外 /
+/// 自指的元素按树顶处理——`scan_index(..).roots` 的持久侧替身。
+fn durable_roots_from_pe_rows(
+    rows: &[(RefnoEnum, String, Option<RefnoEnum>)],
+    unit_types: &[String],
+) -> anyhow::Result<Vec<GenerationRoot>> {
+    let mut elements: HashMap<RefnoEnum, SubtreeElement> = HashMap::with_capacity(rows.len());
+    let mut owners: HashMap<RefnoEnum, RefnoEnum> = HashMap::with_capacity(rows.len());
+    for (refno, noun, owner) in rows {
+        elements
+            .entry(*refno)
+            .or_insert_with(|| SubtreeElement {
+                noun: noun.clone(),
+                name: String::new(),
+                members: Vec::new(),
+            });
+        if let Some(owner) = owner.filter(|owner| owner.is_valid() && owner != refno) {
+            owners.insert(*refno, owner);
+        }
+    }
+    // 成员按 `pe` 行序装回（`owners` 是 HashMap、迭代序不定）：输出顺序确定即可，
+    // 根集与序无关。
+    for (refno, _, _) in rows {
+        if let Some(owner) = owners.get(refno) {
+            if let Some(parent) = elements.get_mut(owner) {
+                parent.members.push(*refno);
+            }
+        }
+    }
+    let mut tops: Vec<RefnoEnum> = elements
+        .keys()
+        .filter(|refno| {
+            owners
+                .get(refno)
+                .is_none_or(|owner| !elements.contains_key(owner))
+        })
+        .copied()
+        .collect();
+    tops.sort_by_key(|refno| refno.refno().0);
+    let mut out = Vec::new();
+    for top in tops {
+        out.extend(enumerate_generation_roots_in_subtree(
+            top,
+            unit_types,
+            |refno| {
+                elements.get(&refno).cloned().with_context(|| {
+                    format!("pe row for {refno} missing from durable root plan")
+                })
+            },
+        )?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1783,6 +1885,61 @@ mod tests {
                 (r(30), "FOOB".into(), GenerationRootKind::Normal),
                 (r(31), "FOOB".into(), GenerationRootKind::Normal),
             ]
+        );
+    }
+
+    /// issue #56：持久侧 `pe` 行（refno / noun / owner）重建的根集，与上面同一棵
+    /// members 树的文件侧枚举逐根相同——`owner` 反查装成员、属主缺失 / 指向表外 /
+    /// 自指的元素自己当树顶。
+    #[test]
+    fn durable_rows_rebuild_the_same_root_set_as_file_enumeration() {
+        // 与 enumeration_prefers_delivery_units_and_falls_back_to_significant_nouns_outside_them
+        // 同一棵树（members 反转成 owner），另加两个表外 / 自指属主的顶。
+        let rows: Vec<(RefnoEnum, String, Option<RefnoEnum>)> = vec![
+            (r(1), "WORL".into(), None),
+            (r(2), "SITE".into(), Some(r(1))),
+            (r(3), "ZONE".into(), Some(r(2))),
+            (r(5), "BRAN".into(), Some(r(3))),
+            (r(6), "FTUB".into(), Some(r(5))),
+            (r(7), "TUBE".into(), Some(r(6))),
+            (r(20), "FOOB".into(), Some(r(5))),
+            (r(8), "equi ".into(), Some(r(3))),
+            (r(9), "FOOB".into(), Some(r(8))),
+            (r(30), "FOOB".into(), Some(r(3))),
+            (r(31), "FOOB".into(), Some(r(30))),
+            // 属主不在本库元素表里（跨库属主）：自己就是顶，从它起枚举。
+            (r(40), "BRAN".into(), Some(r(999))),
+            // 自指属主：按无属主处理，不当环、不丢根。
+            (r(41), "BRAN".into(), Some(r(41))),
+            // 无 noun 的行：归一化后空串，「未知即显著」兜底把它抬成根——与文件侧
+            // 同一个保守判据（多当一次根是多做，不是漏画）。
+            (r(50), "".into(), Some(r(3))),
+        ];
+        assert_eq!(
+            core_significant_bit("FOOB"),
+            None,
+            "test premise: FOOB is off the bit table"
+        );
+
+        let roots =
+            durable_roots_from_pe_rows(&rows, &resolve_delivery_unit_types(&[])).unwrap();
+        assert_eq!(
+            keys(&roots),
+            vec![
+                (r(5), "BRAN".into(), GenerationRootKind::DeliveryUnit),
+                (r(8), "EQUI".into(), GenerationRootKind::DeliveryUnit),
+                (r(30), "FOOB".into(), GenerationRootKind::Normal),
+                (r(31), "FOOB".into(), GenerationRootKind::Normal),
+                (r(50), "".into(), GenerationRootKind::Normal),
+                (r(40), "BRAN".into(), GenerationRootKind::DeliveryUnit),
+                (r(41), "BRAN".into(), GenerationRootKind::DeliveryUnit),
+            ]
+        );
+        // 空表 = 空根集（本库还没有任何元素），不是错。
+        assert!(
+            durable_roots_from_pe_rows(&[], &resolve_delivery_unit_types(&[]))
+                .unwrap()
+                .is_empty()
         );
     }
 

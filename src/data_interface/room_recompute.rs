@@ -1452,18 +1452,17 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
     let roots = if !has_projected && !has_durable {
         Vec::new()
     } else {
-        match crate::data_interface::window_root_plan::enumerate_target_roots(
+        // 覆盖面分母 = 文件侧 DbSet@T ∪ 持久层 pe 的同口径并集（issue #56）：部署包不带
+        // E3D 工程文件的纯数据节点上文件侧枚举必败，持久清单是唯一拿得到的根集。
+        match crate::data_interface::window_root_plan::library_target_roots(
             dbnum,
             target_sesno,
         )
         .await
         {
-            Ok(roots) => roots
-                .iter()
-                .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
-                .collect::<Vec<_>>(),
+            Ok(roots) => roots,
             Err(error) => {
-                eprintln!("dbnum={dbnum} 枚举不出 DbSet@{target_sesno} 的根清单，整库房间重算跳过: {error:#}");
+                eprintln!("dbnum={dbnum} 根清单取不出，整库房间重算跳过: {error:#}");
                 return false;
             }
         }
@@ -1480,8 +1479,8 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
     {
         Ok(report)
             if report.failed.is_empty() && {
-                // 覆盖面自证（与 `batch_worker::room_recompute_uncovered` 同义）：
-                // `DbSet@T` 清单上的每一根都被这轮覆盖到——投影里的 + 回读库的。
+                // 覆盖面自证（与 `batch_worker::n` 同义）：
+                // 并集清单（`library_target_roots`，issue #56）上的每一根都被这轮覆盖到——投影里的 + 回读库的。
                 let covered: std::collections::HashSet<_> =
                     report.covered_roots.iter().copied().collect();
                 roots.iter().all(|root| covered.contains(root))

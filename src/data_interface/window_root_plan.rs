@@ -2047,6 +2047,53 @@ pub(crate) async fn enumerate_target_roots(
     .map_err(|error| anyhow::anyhow!("target root enumeration task failed: {error}"))?
 }
 
+/// `RootScope::All` 的覆盖面分母（issue #56，2026-10-19）：文件侧 `DbSet@T` 枚举
+/// （[`enumerate_target_roots`]）∪ 持久层 `pe` 枚举
+/// （[`enumerate_durable_generation_roots`]）的同口径并集，按打包 refno 序去重。
+///
+/// 文件在的节点上源清单是权威；部署包不带 E3D 工程文件的纯数据节点上
+/// `enumerate_target_roots` 必败，持久层清单是唯一拿得到的同口径根集。只有两路
+/// 都拿不出清单才 `Err`——分母里多一根只是多点名一次回读（库上确有那些根），
+/// 漏一根则 `roots ⊆ covered_roots` 永假、`model_room_generation` 永不盖。
+///
+/// [`enumerate_durable_generation_roots`]: crate::data_interface::generation_root::enumerate_durable_generation_roots
+pub(crate) async fn library_target_roots(
+    dbnum: u32,
+    target_sesno: u32,
+) -> anyhow::Result<Vec<RefNo>> {
+    let (enumerated, enumerated_error) = match enumerate_target_roots(dbnum, target_sesno).await
+    {
+        Ok(roots) => (roots, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let (durable, durable_error) = match crate::data_interface::generation_root::enumerate_durable_generation_roots(
+        dbnum,
+        &crate::data_interface::generation_root::configured_delivery_unit_types(),
+    )
+    .await
+    {
+        Ok(roots) => (roots, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    if let (Some(file_error), Some(durable_error)) = (&enumerated_error, &durable_error) {
+        anyhow::bail!(
+            "dbnum={dbnum} 文件侧根清单取不出（{file_error:#}）、持久侧也取不出（{durable_error:#}）"
+        );
+    }
+    for error in [enumerated_error, durable_error].into_iter().flatten() {
+        eprintln!("dbnum={dbnum} 根清单有一路取不出，用另一路兜底: {error:#}");
+    }
+    let mut seen = BTreeSet::new();
+    let mut roots = Vec::new();
+    for root in enumerated.into_iter().chain(durable) {
+        let e3d = refno_to_e3d(root.root);
+        if seen.insert(crate::fast_model::model_memory_store::packed_refno(e3d)) {
+            roots.push(e3d);
+        }
+    }
+    Ok(roots)
+}
+
 /// `refnos` 里在本库 `DbSet@T` 上**已不存在**的元素（审核 M2，2026-09-19）。房间反查命中却折不出根的元素分两类：
 /// 元素还在 T 上、祖先链却对不上根清单 = 枚举不一致，反查不可信、退整库；元素在 T 上已经没了（本窗删掉的，树 / 库上
 /// 的残留还没刷掉）= 它没有边要维护（对账删除那一半清），忽略即可。这里只答后一问，与 [`enumerate_target_roots`] 同一个

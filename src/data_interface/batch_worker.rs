@@ -1996,21 +1996,19 @@ fn split_stuck_by_ancestry(
     (still_stuck, out_of_scope)
 }
 
-/// 本库 `DbSet@T` 上的全部生成根（e3d-io `RefNo`）：覆盖面自证的对照物，也是回读库上几何的靶子
-/// （不在投影里的根从这里点名），走规划器同一条枚举（`window_root_plan::enumerate_target_roots`），不回读库。
+/// 本库全部生成根（e3d-io `RefNo`）：覆盖面自证的对照物，也是回读库上几何的靶子
+/// （不在投影里的根从这里点名）。`window_root_plan::library_target_roots` 的文件侧
+/// `DbSet@T` ∪ 持久层 `pe` 并集（issue #56）——部署包不带工程文件的纯数据节点上
+/// 文件侧枚举必败，持久清单是唯一拿得到的同口径根集。
 async fn library_generation_roots(
     dbnum: u32,
     target_sesno: i32,
 ) -> anyhow::Result<Vec<e3d_io::refno::RefNo>> {
-    let roots = crate::data_interface::window_root_plan::enumerate_target_roots(
+    crate::data_interface::window_root_plan::library_target_roots(
         dbnum,
         target_sesno.max(0) as u32,
     )
-    .await?;
-    Ok(roots
-        .into_iter()
-        .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root))
-        .collect())
+    .await
 }
 
 /// 整库房间边重算（`RoomOnly`，d-819 / ADR-073 D13）的执行体那一步：冻一台计算器，先枚举本库 `DbSet@T`
