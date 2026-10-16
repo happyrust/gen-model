@@ -11,7 +11,8 @@ on:
   # workflow_dispatch 只认默认分支上的 workflow，这条还没并回去；push 触发按被推的那个
   # commit 上的定义跑，所以调这条链的期间靠 push 触发。
   push:
-    branches: ['ci/linux-build-*']
+    # publish = 常驻发布线（refactor 收口后合入）；ci/linux-build-* 保留给一次性部署分支。
+    branches: ['ci/linux-build-*', 'publish']
   workflow_dispatch:
     inputs:
       vendor_ref:
