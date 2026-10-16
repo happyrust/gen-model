@@ -1,0 +1,12 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/verification/issue1-datacent-delete-20260928/create.log" OVER
+$P ISSUE1-CREATE-BEGIN
+/1RX-345
+NEW BRAN /CODEX_I1_20260928_A
+COPY /C-OR-1R345-C
+Q CE
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'Issue 1 datacent_delete create scratch BRAN'
+$P ISSUE1-CREATE-END
+ALPHA LOG END

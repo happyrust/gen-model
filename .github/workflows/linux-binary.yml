@@ -2,6 +2,7 @@ name: Linux binary
 
 # 目标：在 ubuntu runner 上构出 aios-database 的 x86_64-linux 可执行文件，供 123.57.182.243 部署。
 # 与 windows-binary.yml 的差别有三处：一是 path 依赖的五个 vendor 仓要自己克隆到 ../vendor
+# （另把 gen-model/vendor/shared 软链过去：运行期/编译期路径——include_str!、fixture——走它）
 # （windows 那条从 2026-09-11 起就是因为少了这一步在 34 秒里挂掉的），二是 plant-ui 的
 # web/public 要落在同级目录（web_service 用 include_bytes! 嵌它），三是 protoc / libclang
 # 换成 linux 版。工具链版本、feature 组合与 windows 那条保持一致。
@@ -53,7 +54,8 @@ jobs:
         with:
           path: gen-model
 
-      # Cargo.toml 用 path = "../vendor/..." 吃五个仓，其中四个是私有的，GITHUB_TOKEN 够不着。
+      # Cargo.toml 用 path = "../vendor/..." 吃五个仓（仓内 path 依赖会被 cargo 强制
+      # 收编成 workspace 成员，所以只能放仓外兄弟目录），其中四个是私有的，GITHUB_TOKEN 够不着。
       - name: Checkout vendor path dependencies
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -69,6 +71,10 @@ jobs:
               "https://x-access-token:${GH_PAT}@github.com/happyrust/${repo}.git" "vendor/${repo}"
             echo "${repo} -> $(git -C "vendor/${repo}" rev-parse --short HEAD)"
           done
+          # 运行期路径（include_str!、测试 fixture）走仓内 vendor/shared——软链到兄弟 vendor/，
+          # 和本地 vendor/shared junction 同形状。
+          mkdir -p gen-model/vendor
+          ln -sfn "${GITHUB_WORKSPACE}/vendor" gen-model/vendor/shared
 
       # web_service/handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 整个嵌进二进制，
       # 路径是 ../../../plant-ui/...，即 gen-model 检出目录的同级。只要 web/public 这一棵，

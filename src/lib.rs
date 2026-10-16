@@ -629,6 +629,82 @@ fn mark_process_start() -> Instant {
     *PROCESS_STARTED.get_or_init(Instant::now)
 }
 
+/// 启动步骤打点：每个初始化步骤开始与完成各打一行——`println!` 上控制台（部署里
+/// stdout 重定向进运行日志文件），`log::info!` 进 `enable_log` 开的 `*_dblog.txt`
+/// （WriteLogger 收 Info 档；TermLogger 是 Warn 档，不会在终端二次回显）。
+///
+/// `run_app` 公共段、`run_cli` 与 `run_read_through_core` 三条启动路共用同一套
+/// 机器可读格式：`[startup] stage=<名> event=begin <这步干什么>` 与
+/// `... event=done elapsed_ms=<毫秒> [detail]`——同名步骤两条臂用同名 stage，
+/// 「哪一步在吃启动时间」一行 grep 就出来。
+fn startup_step_begin(stage: &str, what: &str) -> Instant {
+    let line = format!("[startup] stage={stage} event=begin {what}");
+    println!("{line}");
+    log::info!("{line}");
+    Instant::now()
+}
+
+/// `event=done` 收尾行；`detail` 带这一步的关键产出数字（路由数、dbnum 数……），
+/// 没有就传 `""`。
+fn startup_step_done(stage: &str, started: Instant, detail: &str) {
+    let line = format!(
+        "[startup] stage={stage} event=done elapsed_ms={}{}",
+        started.elapsed().as_millis(),
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" {detail}")
+        }
+    );
+    println!("{line}");
+    log::info!("{line}");
+}
+
+/// 条件步骤本次不跑时的单行出声：没有它，「没跑」与「跑完没打出来」长得一模一样。
+fn startup_step_skip(stage: &str, reason: &str) {
+    let line = format!("[startup] stage={stage} event=skip {reason}");
+    println!("{line}");
+    log::info!("{line}");
+}
+
+/// `enable_log` 的 CombinedLogger 装载，`run_cli` 与 `run_read_through_core` 共用：
+/// 终端 Warn 档防刷屏，`*_dblog.txt` 收 Info 档——`[startup]` 打点经 `log::info!`
+/// 落在这里。此前只有 `run_cli` 装它，read-through（mem 部署形态）开 `enable_log`
+/// 也写不出 dblog。幂等：进程里已装过 logger（python 绑定两条臂都可能进门）时安静
+/// 返回，不抢先那一份。
+fn install_dblog_logger(db_option: &DbOption) {
+    if !db_option.enable_log {
+        return;
+    }
+    let now = Local::now();
+    let filename = format!(
+        "{}-{}-{}-{}-{}-{}_dblog.txt",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
+
+    // 创建日志文件
+    let file = File::create(&filename).unwrap();
+
+    if CombinedLogger::init(vec![
+        TermLogger::new(
+            LevelFilter::Warn,
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        ),
+        WriteLogger::new(LevelFilter::Info, Config::default(), file),
+    ])
+    .is_ok()
+    {
+        println!("dblog 日志已开：{filename}");
+    }
+}
+
 /// 启动步骤耗时的人类可读渲染："0.42s" / "3m07.3s" / "1h23m45s"。
 pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
     let secs = elapsed.as_secs_f64();
@@ -834,7 +910,13 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // here instead of becoming another consumer of the same durable pending
     // table. In-memory mode takes no lock at all — see
     // `instance_lock_skip_reason`, there is no shared durable state to guard.
+    let stage = startup_step_begin("instance-lock", "单实例锁与机器级写者锁（重复点名幂等）");
     acquire_process_instance_lock(&db_option)?;
+    startup_step_done("instance-lock", stage, "");
+    let stage = startup_step_begin(
+        "option-checks",
+        "退役键点名、几何并发闸额度、调度延迟采样、监听范围出声",
+    );
     // 退役的收集口径开关（ADR-031）：留着它的部署以为自己关着净收集，实际相反。
     // 配置层吃掉未知键是静默的，这里把它变成有声的。
     if let Some(notice) = crate::options::retired_net_window_notice() {
@@ -869,33 +951,20 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
         eprintln!("*** {notice} ***");
     }
+    startup_step_done(
+        "option-checks",
+        stage,
+        &format!("geometry_workers={geometry_workers}"),
+    );
     // dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {
-        let now = Local::now();
-        let filename = format!(
-            "{}-{}-{}-{}-{}-{}_dblog.txt",
-            now.year(),
-            now.month(),
-            now.day(),
-            now.hour(),
-            now.minute(),
-            now.second()
+        let stage = startup_step_begin(
+            "log-init",
+            "初始化 CombinedLogger（终端 Warn + dblog.txt Info）",
         );
-
-        // 创建日志文件
-        let file = File::create(filename).unwrap();
-
-        CombinedLogger::init(vec![
-            TermLogger::new(
-                LevelFilter::Warn,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            ),
-            WriteLogger::new(LevelFilter::Info, Config::default(), file),
-        ])
-        .unwrap();
+        install_dblog_logger(&db_option);
+        startup_step_done("log-init", stage, "");
     }
 
     // progress_sender.send(5).await?;
@@ -904,23 +973,24 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 磁盘脚本先加载：站点自有的额外 surql 继续生效。目录不存在不再是致命错——
     // 下面的内置快照兜底，部署包可以不带 resource/surreal。
     let preload_started = Instant::now();
-    let step_started = Instant::now();
+    let stage = startup_step_begin(
+        "surql-functions",
+        "加载磁盘 resource/surreal 脚本（缺失时二进制内置兜底）",
+    );
     if std::path::Path::new("resource/surreal").is_dir() {
         aios_core::function::define_common_functions().await?;
-        println!(
-            "磁盘 surql 函数脚本加载完成，耗时 {}",
-            fmt_elapsed(step_started.elapsed())
-        );
+        startup_step_done("surql-functions", stage, "source=disk");
     } else {
         println!("resource/surreal 不存在：磁盘脚本跳过，函数集完全来自二进制内置快照");
         if aios_core::function::ensure_inst_meta_functions_on(&SUL_DB).await? {
             println!("已从二进制内置定义补装缺失的 inst_meta 兼容函数");
         }
+        startup_step_done("surql-functions", stage, "source=builtin-fallback");
     }
     // 内置快照收尾（含 D11 的 hd/hh 矫正，见模块 doc）：部署包的 resource/surreal
     // 会漂移——现场 bin 停在 2025-06、common.surql 差 3KB——磁盘加载之后再灌一遍
     // 编译期快照，同名函数以内置版为准，旧运行环境被抬到当前函数集。
-    let step_started = Instant::now();
+    let stage = startup_step_begin("surql-embedded", "灌入编译期内置 surql 函数快照并核验缺失");
     crate::data_interface::embedded_surql::define_embedded_functions().await?;
     match crate::data_interface::embedded_surql::missing_embedded_functions().await {
         Ok(missing) if missing.is_empty() => {}
@@ -931,41 +1001,47 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         ),
         Err(e) => eprintln!("内置函数集核验未跑成（{e}），不据此定罪"),
     }
-    println!(
-        "内置函数快照灌入并核验完成，耗时 {}",
-        fmt_elapsed(step_started.elapsed())
-    );
-    let step_started = Instant::now();
+    startup_step_done("surql-embedded", stage, "");
+    let stage = startup_step_begin("surql-selfcheck", "surreal 函数自检");
     crate::data_interface::increment_pipeline::selfcheck_surreal_functions().await?;
-    println!(
-        "surreal 函数自检完成，耗时 {}",
-        fmt_elapsed(step_started.elapsed())
+    startup_step_done("surql-selfcheck", stage, "");
+    let stage = startup_step_begin(
+        "increment-state",
+        "检查增量状态表（dbnum 水位存储兼容）",
     );
-    let step_started = Instant::now();
     let migrated =
         crate::data_interface::dbnum_state::DbnumState::ensure_increment_state_storage().await?;
-    println!(
-        "增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位），耗时 {}",
-        fmt_elapsed(step_started.elapsed())
-    );
+    startup_step_done("increment-state", stage, &format!("migrated={migrated}"));
     // 数据窗口的结构行由 dbnum 任务自己同步落库（ADR-071 D1 / D11）：这里没有本地 journal 要对账、
     // 没有绑定要刷新、也没有 backup lane 要起。进程内镜像的水化在下面的统一水化段（D7 / S6）。
+    let stage = startup_step_begin(
+        "dbnum-event-retire",
+        "退役 dbnum_event 旧结构行（水位由 dbnum 任务自落库）",
+    );
     retire_dbnum_event().await?;
-    println!("预加载方法完成。");
+    startup_step_done("dbnum-event-retire", stage, "");
 
     // 初始化数据库索引（开始/完成与耗时日志在函数内部，python full_init 同样受益）
+    let stage = startup_step_begin("inst-indices", "初始化 inst_relate 索引");
     if let Err(e) = crate::fast_model::pdms_inst::init_inst_relate_indices().await {
         eprintln!("初始化inst_relate索引失败: {}", e);
     }
+    startup_step_done("inst-indices", stage, "");
     // 存量行 anc/dbnum 自愈回填（幂等；全新库与已回填库一轮空转即返回）
+    let stage = startup_step_begin("inst-anc-backfill", "存量行 anc/dbnum 自愈回填（幂等）");
     if let Err(e) = crate::fast_model::pdms_inst::backfill_inst_relate_anc().await {
         eprintln!("inst_relate anc/dbnum 回填失败（下次启动重试）: {}", e);
     }
+    startup_step_done("inst-anc-backfill", stage, "");
     // 模型 / 房间水位的兼容播种（用户 2026-09-10 拍板「模型水位 + 房间水位默认按数据水位
     // 保持一致」，ADR-060 D10）：已有数据且旧管线留有模型投影、模型水位从未写过的库，两枚
     // 水位填成数据水位；数据在模型无的记 0。排在索引与 anc/dbnum 回填**之后**——投影探针要走
     // idx_inst_relate_dbnum / idx_inst_relate_in，没索引时是逐 pe 行全表扫；排在启动模型核对
     // **之前**——否则那一轮会给这些库排从 0 起的恢复 Task。失败只提示，下次启动幂等重来。
+    let stage = startup_step_begin(
+        "watermark-seed",
+        "模型/房间水位兼容播种（数据水位兜底两枚水位）",
+    );
     match crate::data_interface::dbnum_state::DbnumState::seed_legacy_model_watermarks().await {
         Ok(seeds) => {
             for line in
@@ -976,10 +1052,14 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         }
         Err(e) => eprintln!("模型 / 房间水位兼容播种失败（下次启动重试）: {e:#}"),
     }
+    startup_step_done("watermark-seed", stage, "");
     // 写入标记回退（ADR-072 D2）：上一进程死在写库中途的库，先按各自的 `writing{S,T}` 退回 S、
     // 再排 S→T 重跑。排在镜像水化**之前**——镜像是一次整表替换，先水化再回退，发布出去的
     // 就是一版已经被删掉痕迹的水位，而且那几格再没有人来作废（理由见 `rollback_unfinished_writes`）。
-    let step_started = Instant::now();
+    let stage = startup_step_begin(
+        "write-marker-rollback",
+        "写入标记回退：崩溃在写库中途的库退回 S 并排重跑",
+    );
     let rollbacks =
         crate::data_interface::startup_reconcile::schedule_unfinished_writes_for_reinitialize()
             .await;
@@ -987,37 +1067,50 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         for line in &rollbacks {
             println!("{line}");
         }
-        println!(
-            "写入标记回退完成，耗时 {}",
-            fmt_elapsed(step_started.elapsed())
-        );
     }
+    startup_step_done(
+        "write-marker-rollback",
+        stage,
+        &format!("rollbacks={}", rollbacks.len()),
+    );
     // ---- 统一水化段：启动只水化小型控制面。模型投影绝不从 RocksDB 回填 kv-mem；
     // RocksDB 直接服务冷根，kv-mem 只保留生成出的增量 overlay。
-    let step_started = Instant::now();
+    let stage = startup_step_begin("watermark-mirror", "水位内存镜像水化");
     crate::data_interface::dbnum_state::DbnumState::enable_watermark_mirror();
     let hydrated_states =
         crate::data_interface::dbnum_state::DbnumState::hydrate_watermark_mirror().await?;
-    println!(
-        "水位内存镜像已水化 {} 个 dbnum，耗时 {}",
-        hydrated_states.len(),
-        fmt_elapsed(step_started.elapsed())
+    startup_step_done(
+        "watermark-mirror",
+        stage,
+        &format!("dbnums={}", hydrated_states.len()),
+    );
+    let stage = startup_step_begin(
+        "retired-tables",
+        "确认退役表与函数不存在（一次性幂等迁移）",
     );
     retire_publish_run_tables().await;
+    startup_step_done("retired-tables", stage, "");
     // 存量行平表副本清扫（P4 写时物化；幂等——pre-P4 库首轮付清，之后空转即返回。
     // 崩溃在空闲轮清扫前留下的 NONE 行也在这里自愈）
+    let stage = startup_step_begin("inst-flat-sweep", "inst_relate 平表副本清扫（幂等）");
     if let Err(e) = crate::fast_model::pdms_inst::sweep_inst_relate_flat().await {
         eprintln!("inst_relate 平表副本清扫失败（下次启动重试）: {}", e);
     }
+    startup_step_done("inst-flat-sweep", stage, "");
     // 老格式再现探针（Spec 025 FR-9 盲区补口）：迁移标记已落的库上又出现
     // booled_id 与 insts_flat 不符的行，只可能来自旧 writer 混跑——migration
     // 按库上标记跳过、清扫两段也够不着，FR-8/T20 读侧自检落地前这里是唯一报告点。
     // 只挂启动序列（FR-1：inst_relate 全表谓词只许启动序列与人工诊断入口）。
+    let stage = startup_step_begin(
+        "flat-regression-probe",
+        "布尔平表老格式再现探针（迁移标记后仍有不符行才报）",
+    );
     if let Err(e) =
         crate::fast_model::pdms_inst::probe_booled_flat_regression_after_migration().await
     {
         eprintln!("布尔平表老格式再现探针失败（下次启动再探）: {}", e);
     }
+    startup_step_done("flat-regression-probe", stage, "");
     println!(
         "启动预加载与自愈维护全部完成，总耗时 {}",
         fmt_elapsed(preload_started.elapsed())
@@ -1054,8 +1147,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // e3d-io 摄入，首载 / 重建由数据批次 worker 按单个文件调
     // `versioned_db::baseline_ingest::ingest_file`（同日 `sync_total_async_threaded` 壳也退役）。
 
-    println!("正在初始化 db manager（解析监控目录配置）...");
-    let step_started = Instant::now();
+    let stage = startup_step_begin(
+        "db-manager",
+        "初始化 AiosDBManager 并解析 MDB 成员名单（搜索根发现 + SYS 声明 + 逐库绑定）",
+    );
     let mut manager = AiosDBManager::init_form_config().await?;
     // 本 MDB 声明了哪些库，在这里解一次并登记。位置是有讲究的：它读的是 SYS 库
     // 文件而不是 SurrealDB，所以能在任何东西被同步之前回答——而字典库名单恰恰
@@ -1079,6 +1174,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             db_option.mdb_name
         );
     }
+    startup_step_done(
+        "db-manager",
+        stage,
+        &format!("mdb={}", db_option.mdb_name),
+    );
     // 成员名单解完，紧接着造这个 MDB 的 **dbnum 路由目录**并打横幅：SYS/CURD 成员 →
     // `dbnum → 文件`，再核一遍每个成员文件的 60 字节头。**不读任何元素**——此前这里预热的是
     // 整份元素骨架（`ref0 → dbnum` / `refno → 属主` / `refno → noun` 三张表，每个 DESI 一次头
@@ -1088,19 +1188,19 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     //
     // 放在这里而不是更早：它吃 `init_mdb` 刚登记的成员名单。失败只告警不中止：横幅不是启动门，
     // 各服务开自己那份目录时会再报一次。
-    let step_started = Instant::now();
+    let stage = startup_step_begin(
+        "route-directory",
+        "构造 dbnum 路由目录并核验每个成员文件头（零元素 I/O）",
+    );
     match startup_route_directory(&db_option) {
-        Ok(directory) => print_route_directory_banner(&directory, step_started),
+        Ok(directory) => print_route_directory_banner(&directory, stage),
         Err(error) => {
             log::warn!("MDB dbnum 路由目录构造失败，各服务首次使用时会再试：{error:#}");
             eprintln!("*** MDB dbnum 路由目录构造失败（各服务首次使用时会再试）：{error:#} ***");
         }
     }
+    startup_step_done("route-directory", stage, "");
     let mgr = Arc::new(manager);
-    println!(
-        "db manager 初始化完成，耗时 {}",
-        fmt_elapsed(step_started.elapsed())
-    );
     /// 创建db manager
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
     let initialization =
@@ -1122,16 +1222,13 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if crate::options::data_face().is_read_through() {
         initialization.mark_data_ready_without_manifest();
     }
-    let step_started = Instant::now();
+    let stage = startup_step_begin("pause-restore", "恢复队列暂停标志（重启前暂停则只入队不消费）");
     match scheduler.restore_persisted_pause().await {
         Ok(true) => println!("队列处于暂停状态（重启前设置），启动重扫只入队不消费"),
         Ok(false) => {}
         Err(error) => println!("启动时恢复队列暂停标志失败（worker 启动前会重试）: {error:#}"),
     }
-    println!(
-        "队列暂停标志恢复完成，耗时 {}",
-        fmt_elapsed(step_started.elapsed())
-    );
+    startup_step_done("pause-restore", stage, "");
     if !scheduler.is_auto_work_armed() {
         println!(
             "startup_autorun=false 且未声明 watch_dbnums：本次启动不执行任何增量与\
@@ -1141,17 +1238,32 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         println!("启动模型凭证复核仍照常执行；发现的缺口只入队，不越过上弦门消费");
     }
 
+    let stage = startup_step_begin(
+        "tag-summary",
+        "dabacon noun 字典快照后台装载（分类 flag + 能力矩阵）",
+    );
     crate::data_interface::dabacon_tag_summary::start_at_startup(std::path::PathBuf::from(
         &db_option.project_path,
     ));
+    startup_step_done("tag-summary", stage, "spawned 后台任务自报耗时");
 
     // 先把健康接口起起来，再做 watcher 的首次全目录扫描。扫描慢或阻断时，外部仍能
     // 从 /health 看到初始化快照，而不是只能等到扫描结束才连得上服务。
     #[cfg(feature = "http_api")]
     let web_task = {
+        let stage = startup_step_begin(
+            "http",
+            "绑定 HTTP 监听地址并起 Web 服务（bind 失败就地失败）",
+        );
         let mgr = mgr.clone();
+        // `start_configured` 等 bind 成功才返回：bind 失败此前是 spawn 任务里一句
+        // stderr、主进程带着没 Web 的服务继续跑——那才是最难查的挂法。
+        let task = crate::web_service::start_configured(mgr)
+            .await
+            .map_err(|error| anyhow::anyhow!("HTTP 服务绑定失败: {error:#}"))?;
+        startup_step_done("http", stage, "");
         tokio::spawn(async move {
-            if let Err(e) = crate::web_service::serve_if_configured(mgr).await {
+            if let Err(e) = task.await {
                 eprintln!("Web 服务异常退出: {e:?}");
             }
         })
@@ -1169,20 +1281,25 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 快照文件，不依赖数据清单——`run_app` 那条正门本来就在进 `run_cli` 之前装过一次，这里
     // 多半是同进程短路复用；直接调 `run_cli` 的那几条路（python `full_init`、l3 夹具）从此
     // 与正门同序。此前它压在等数据清单之后，房间初始化要「树在位」就得跟着排到最后。
+    let stage = startup_step_begin(
+        "spatial-room",
+        "装载空间树并预建常驻房间参照模型（正门多半是同进程复用，近零耗时）",
+    );
     prepare_room_resident_at_startup(&db_option).await;
+    startup_step_done("spatial-room", stage, "");
 
     if crate::options::data_face().is_read_through() {
-        println!(
-            "read-through：跳过启动数据重扫与 Meta→Design 摄入清单；data_ready 已就绪，watcher 仅作为后续文件脏信号"
+        startup_step_skip(
+            "watcher-init",
+            "read-through：跳过启动数据重扫与 Meta→Design 摄入清单；data_ready 已就绪，watcher 仅作为后续文件脏信号",
         );
     } else {
-        println!("正在启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）...");
-        let step_started = Instant::now();
-        mgr.init_watcher().await?;
-        println!(
-            "监控目录 watcher 启动完成，耗时 {}",
-            fmt_elapsed(step_started.elapsed())
+        let stage = startup_step_begin(
+            "watcher-init",
+            "启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）",
         );
+        mgr.init_watcher().await?;
+        startup_step_done("watcher-init", stage, "");
     }
 
     // Worker is started as soon as the immutable manifest is installed.  The
@@ -1197,7 +1314,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 人工执行（`POST /update/execute`）与文件事件排进同一个队列。
     let startup_data_ready =
         crate::options::data_face().is_read_through() || scheduler.is_auto_work_armed();
+    let stage = startup_step_begin("batch-worker", "起批次 worker（队列唯一消费者）");
     crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
+    startup_step_done("batch-worker", stage, "");
 
     // Watcher events are dirtiness signals only; `async_watch` debounces them
     // into the same full manifest scan used by startup and reconciliation.
@@ -1235,16 +1354,21 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // “从未生成过的根”误判成完成；这里只补缺失工作，并为已有属性与模型投影但缺少
     // 水位追踪的历史库统一初始化两枚水位；不删旧模型，也不越过 watch_dbnums。
     // 任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
+    let stage = startup_step_begin(
+        "model-coverage",
+        "模型凭证复核：水位 vs 文件最新会话号，只补缺失工作",
+    );
     crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup().await;
+    startup_step_done("model-coverage", stage, "");
     // 数据等待的退出口（09-04 审核 #10）：判据是「受阻」不是「久」——Design 基线在大项目上
     // 合法地跑几小时，按时长降级会误伤；只有 `blockers` 非空**且**队列里没有任何批次在
     // `queued/running`、连续 [`STARTUP_DATA_STALL_DEGRADE_SECS`] 之后，才放弃等待降级进入监听。
     // 降级不清阻断、不改 `data_ready`：模型收敛等待与房间段随之跳过，完成横幅标 blocked。
     let mut data_wait_degraded: Option<String> = None;
     if startup_data_ready {
-        println!(
-            "等待 Meta → Design 数据清单完成...（模型面已并行开工：门随清单装好即开，\
-             积压在数据队列空隙消化，按需生成不受数据阶段阻挡）"
+        let stage = startup_step_begin(
+            "data-wait",
+            "等 Meta → Design 数据清单完成（模型面已并行开工；受阻且无批次在跑 180s 降级）",
         );
         let mut waited_secs = 0u64;
         let mut stalled_secs = 0u64;
@@ -1321,9 +1445,26 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 last_wait_emitted_secs = waited_secs;
             }
         }
+        startup_step_done(
+            "data-wait",
+            stage,
+            &format!(
+                "outcome={}",
+                if data_wait_degraded.is_some() {
+                    "degraded"
+                } else {
+                    "ready"
+                }
+            ),
+        );
         if data_wait_degraded.is_none() {
             println!("数据链已就绪；模型面自清单装好起已在跑，下面等模型积压收敛");
         }
+    } else {
+        startup_step_skip(
+            "data-wait",
+            "startup_autorun=false 且非 read-through：清单不装，等待无意义",
+        );
     }
 
     // 空间树装载此前在这里（等数据清单之后）；2026-09-07 起前移到 watcher / worker 之前，
@@ -1339,6 +1480,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(reason) = data_wait_degraded.as_deref() {
         scheduler.wake();
         println!("数据初始化受阻（{reason}）：不等模型收敛，积压由 worker 后台消化");
+        startup_step_skip("model-converge", &format!("data_wait_degraded: {reason}"));
     } else if startup_data_ready {
         if !initialization.open_model_phase() {
             println!(
@@ -1358,11 +1500,16 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 "模型增量阶段已关闭（model_incremental=false）：跳过启动模型收敛等待\
                  （重新开启后由恢复任务按凭证缺口回补；按需生成不受影响）"
             );
+            startup_step_skip("model-converge", "model_incremental=false");
         } else {
             // 模型工作随各库任务同步做完（ADR-072 D5，没有 pending 积压可数），收敛只剩
             // worker 空闲轮那几步（认领迟到批次、AABB 落盘、模型门）。主线可能要等在飞的
             // 任务跑完；干等会让启动看起来像挂死——在飞任务变化时报实际进展，完全不变时
             // 最多每 300s 提醒一次。
+            let stage = startup_step_begin(
+                "model-converge",
+                "等模型积压收敛（空闲轮宣告 model_ready）",
+            );
             let mut waited_secs = 0u64;
             let mut last_wait_fingerprint: Option<String> = None;
             let mut last_wait_emitted_secs = 0u64;
@@ -1398,7 +1545,13 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 }
             }
             println!("模型阶段已收敛");
+            startup_step_done("model-converge", stage, "");
         }
+    } else {
+        startup_step_skip(
+            "model-converge",
+            "startup_autorun=false 且非 read-through：没有可收敛的模型工作",
+        );
     }
 
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
@@ -1421,7 +1574,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
+        let stage = startup_step_begin("material", "生成材料表单");
         save_all_material_data().await?;
+        startup_step_done("material", stage, "");
     }
     // TEAM_DATA 生成随 `only_sync_sys` 一起退役（ADR-058 D8）：它的唯一开关是那个
     // legacy 全量键，仓里没有一份配置打开过，因此这段从来没跑过。2026-09-07 连本体也
@@ -1430,6 +1585,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // Surreal，给它自己的写入路径，别再把这条 MySQL 镜像接回来。
 
     if db_option.rebuild_ssc_tree {
+        let stage = startup_step_begin("ssc-tree", "生成 PBS 节点树");
         println!("生成PBS节点...");
         set_pdms_major_code(&aios_mgr).await?;
         let mut handles = vec![];
@@ -1438,6 +1594,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         set_pbs_room_major_node(&rooms, &mut handles).await?;
         set_pbs_node(&mut handles).await?;
         futures::future::join_all(handles).await;
+        startup_step_done("ssc-tree", stage, "");
     }
 
     // 到这里为止的每一步都只在启动跑一次；再往下 `watch_task.await` 就只是挂着
@@ -1500,18 +1657,110 @@ mod startup_data_wait_tests {
         }
     }
 
+    /// 打点调用允许折行（`startup_step_begin(\n    "stage",`），匹配前先把空白收掉。
+    fn compact(source: &str) -> String {
+        source.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
     #[test]
     fn read_through_startup_reports_each_waiting_stage() {
         let source = include_str!("lib.rs");
-        let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
-            .split_once("pub async fn run_app(").unwrap().0;
-        for stage in ["store", "mdb", "http", "route-directory", "spatial-room", "session-baseline"] {
-            let begin = body.find(&format!("stage={stage} event=begin")).unwrap();
-            let done = body.find(&format!("stage={stage} event=done elapsed_ms=")).unwrap();
+        let body = compact(
+            source
+                .rsplit_once("async fn run_read_through_core(")
+                .unwrap()
+                .1
+                .split_once("pub async fn run_app(")
+                .unwrap()
+                .0,
+        );
+        for stage in [
+            "store-connect",
+            "surql-embedded",
+            "db-manager",
+            "mdb",
+            "http",
+            "route-directory",
+            "spatial-room",
+            "session-baseline",
+        ] {
+            let begin = body
+                .find(&format!("startup_step_begin(\"{stage}\""))
+                .unwrap_or_else(|| panic!("{stage} 缺 begin 打点"));
+            let done = body
+                .find(&format!("startup_step_done(\"{stage}\""))
+                .unwrap_or_else(|| panic!("{stage} 缺 done 打点"));
             assert!(begin < done, "{stage} must bracket its operation");
         }
-        assert!(body.find("stage=http event=done").unwrap()
-            < body.find("stage=session-baseline event=begin").unwrap());
+        assert!(
+            body.find("startup_step_done(\"http\"").unwrap()
+                < body.find("startup_step_begin(\"session-baseline\"").unwrap()
+        );
+    }
+
+    /// 打点的双出口是需求本身：控制台（stdout，部署里重定向进运行日志）与
+    /// `enable_log` 的 dblog.txt 要同时收到，少了哪一头都会有人看不到。
+    #[test]
+    fn startup_step_helpers_emit_to_console_and_log() {
+        let source = include_str!("lib.rs");
+        for helper in [
+            "fn startup_step_begin(",
+            "fn startup_step_done(",
+            "fn startup_step_skip(",
+        ] {
+            let body = source.split_once(helper).unwrap().1.split_once("\nfn ").unwrap().0;
+            assert!(body.contains("println!"), "{helper} 丢了控制台出口");
+            assert!(body.contains("log::info!"), "{helper} 丢了日志文件出口");
+        }
+        // begin/done 行的机器可读 token 形状是测试与 grep 共用的契约。
+        assert!(source.contains("[startup] stage={stage} event=begin"));
+        assert!(source.contains("[startup] stage={stage} event=done elapsed_ms="));
+    }
+
+    /// run_cli（持久介质臂）的关键步骤同样按 begin/done 配对——这条臂此前只有
+    /// 零散「耗时」行，哪天被精简掉一段都没人知道。
+    #[test]
+    fn run_cli_startup_reports_each_stage() {
+        let source = include_str!("lib.rs");
+        let body = compact(
+            source
+                .split_once("pub async fn run_cli(")
+                .expect("run_cli exists")
+                .1
+                .split_once("\nfn print_startup_complete_banner(")
+                .expect("完成横幅紧跟 run_cli")
+                .0,
+        );
+        for stage in [
+            "instance-lock",
+            "option-checks",
+            "surql-functions",
+            "surql-embedded",
+            "surql-selfcheck",
+            "increment-state",
+            "dbnum-event-retire",
+            "inst-indices",
+            "watermark-mirror",
+            "db-manager",
+            "route-directory",
+            "pause-restore",
+            "http",
+            "spatial-room",
+            "batch-worker",
+            "model-coverage",
+        ] {
+            let begin = body
+                .find(&format!("startup_step_begin(\"{stage}\""))
+                .unwrap_or_else(|| panic!("{stage} 缺 begin 打点"));
+            let done = body
+                .find(&format!("startup_step_done(\"{stage}\""))
+                .unwrap_or_else(|| panic!("{stage} 缺 done 打点"));
+            assert!(begin < done, "{stage} must bracket its operation");
+        }
+        // 等待阶段必有出路说明：跑（done）、受阻降级（done outcome=degraded）或跳过（skip）。
+        assert!(body.contains("startup_step_skip(\"data-wait\""));
+        assert!(body.contains("startup_step_skip(\"model-converge\""));
+        assert!(body.contains("startup_step_skip(\"watcher-init\""));
     }
 
     #[test]
@@ -2082,17 +2331,35 @@ async fn targeted_model_refresh(
 #[cfg(feature = "ws")]
 async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     let startup_started = Instant::now();
-    let stage_started = Instant::now();
-    println!("[startup] stage=store event=begin");
+    // dblog 要在第一段打点之前装好——`[startup]` 行经 `log::info!` 落 `*_dblog.txt`，
+    // 装晚了前面几段就只存在于控制台。`install_dblog_logger` 幂等，`enable_log=false`
+    // 时一步直返。
+    if db_option.enable_log {
+        let stage = startup_step_begin(
+            "log-init",
+            "初始化 CombinedLogger（终端 Warn + dblog.txt Info）",
+        );
+        install_dblog_logger(&db_option);
+        startup_step_done("log-init", stage, "");
+    }
     // 内存库承载模型发布，必须在接受模型请求前就绪；属性始终从文件读取。
+    let stage = startup_step_begin("store-connect", "连接进程内嵌持久层（kv-mem）");
     if !crate::options::store_mode().is_durable() {
         ensure_store_connected(&db_option).await?;
+    }
+    startup_step_done("store-connect", stage, "");
+    let stage = startup_step_begin("surql-embedded", "灌入编译期内置 surql 函数快照");
+    if !crate::options::store_mode().is_durable() {
         crate::data_interface::embedded_surql::define_embedded_functions().await?;
     }
-    println!("[startup] stage=store event=done elapsed_ms={}", stage_started.elapsed().as_millis());
-    let stage_started = Instant::now();
-    println!("[startup] stage=mdb event=begin");
+    startup_step_done("surql-embedded", stage, "");
+    let stage = startup_step_begin("db-manager", "构造 AiosDBManager（读配置，不碰项目目录）");
     let mut manager = AiosDBManager::init_form_config().await?;
+    startup_step_done("db-manager", stage, "");
+    let stage = startup_step_begin(
+        "mdb",
+        "解析 MDB 成员名单：搜索根发现项目目录、读 SYS 声明、逐库绑定到文件",
+    );
     manager
         .init_mdb(
             &db_option.project_name,
@@ -2107,16 +2374,27 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
             )
         })?;
     let manager = Arc::new(manager);
-    println!("[startup] stage=mdb event=done elapsed_ms={}", stage_started.elapsed().as_millis());
-    let stage_started = Instant::now();
-    println!("[startup] stage=http event=begin enabled={}", cfg!(feature = "http_api"));
+    startup_step_done(
+        "mdb",
+        stage,
+        &format!("mdb={}", db_option.mdb_name),
+    );
+    let stage = startup_step_begin(
+        "http",
+        &format!(
+            "绑定 HTTP 监听地址并起 Web 服务 enabled={}",
+            cfg!(feature = "http_api")
+        ),
+    );
     #[cfg(feature = "http_api")]
     let web_task = crate::web_service::start_configured(manager.clone()).await?;
-    println!("[startup] stage=http event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    startup_step_done("http", stage, "");
     // HTTP 已就绪；这里只建立 dbnum 路由目录，不读取元素。
     // 属性与树服务按目标 RefNo 惰性访问，不建立全 MDB 元素骨架。
-    let step_started = Instant::now();
-    println!("[startup] stage=route-directory event=begin");
+    let stage = startup_step_begin(
+        "route-directory",
+        "构造 dbnum 路由目录并核验每个成员文件头（零元素 I/O）",
+    );
     // 路由目录构造是纯同步 IO（`verify_all_headers` 逐路由读文件头），进 spawn_blocking：
     // 共享盘上逐文件 stat 不是秒级以内的事，不能占 tokio worker。块内遮蔽一份克隆，
     // 外层 `db_option` 留给错误信息与后续阶段原样使用。
@@ -2132,8 +2410,12 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
                 db_option.mdb_name
             )
         })?;
-    print_route_directory_banner(&directory, step_started);
-    println!("[startup] stage=route-directory event=done elapsed_ms={}", step_started.elapsed().as_millis());
+    print_route_directory_banner(&directory, stage);
+    startup_step_done(
+        "route-directory",
+        stage,
+        &format!("routes={}", directory.stats().routes),
+    );
 
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
@@ -2145,10 +2427,12 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     if rooms_required {
         initialization.begin_startup_rooms();
     }
-    let stage_started = Instant::now();
-    println!("[startup] stage=spatial-room event=begin room_membership={rooms_required}");
+    let stage = startup_step_begin(
+        "spatial-room",
+        &format!("装载空间树并预建常驻房间参照模型 room_membership={rooms_required}"),
+    );
     prepare_room_resident_at_startup(&db_option).await;
-    println!("[startup] stage=spatial-room event=done elapsed_ms={}", stage_started.elapsed().as_millis());
+    startup_step_done("spatial-room", stage, "");
     let room_bootstrap_ready = !rooms_required
         || crate::fast_model::room_resident::current_for_calculation().is_ok();
     if rooms_required {
@@ -2168,16 +2452,21 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     // 此前这里是 `refresh_if_stale`——任一库的会话号一变就重解 MDB 成员、整份重扫全 MDB 重建
     // 元素骨架，再把**全部**发布回执作废；一个 DESI 的 SAVEWORK = 重扫 AMS 28 库 / JEU 417 库。
     // 先叫一次把每个库的基线记进账本：第一次见只记不报，之后每轮返回的才是「自上次以来变了的库」。
-    let stage_started = Instant::now();
-    println!("[startup] stage=session-baseline event=begin");
+    let stage = startup_step_begin(
+        "session-baseline",
+        "对每条路由 stat 一次文件头，把各库当前会话号记成基线（只记不报）",
+    );
     // 基线轮询对每条路由 `stat` 一次文件——共享盘上是逐文件网络往返，进 spawn_blocking
     // （2 s 轮询循环内已是这个写法，启动这次之前漏了）。
     let seeded_directory = directory.clone();
     let seeded = tokio::task::spawn_blocking(move || seeded_directory.poll_generations())
         .await
         .map_err(|error| anyhow!("会话基线轮询任务异常结束: {error}"))?;
-    println!("[startup] stage=session-baseline event=done elapsed_ms={} total_ms={}",
-        stage_started.elapsed().as_millis(), startup_started.elapsed().as_millis());
+    startup_step_done(
+        "session-baseline",
+        stage,
+        &format!("total_ms={}", startup_started.elapsed().as_millis()),
+    );
     debug_assert!(seeded.is_empty(), "第一次轮询只记基线，不该报变化");
     let refresh_manager = manager.clone();
     let refresh_directory = directory.clone();
@@ -2273,16 +2562,32 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 
     mark_process_start();
     // 如果传入的是DbOptionExt，则取其内部的DbOption
+    let stage = startup_step_begin(
+        "config",
+        "装载 DbOption.toml 与环境变量覆盖、裁决资产根",
+    );
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
         .unwrap_or_else(|| get_db_option_ext().inner);
+    startup_step_done(
+        "config",
+        stage,
+        &format!(
+            "project={} mdb={} face={}",
+            db_option.project_name,
+            db_option.mdb_name,
+            crate::options::data_face().as_str()
+        ),
+    );
     // 分臂之前先把介质那一头的过期来源点名（ADR-083 D2）：下面三条出口里只有一条走到
     // `run_cli`，而「文件里还写着 store_mode」在设置模式与 mem 那两条上一样会骗人。
     print_store_mode_notices_once();
     // Public entrypoint guard: take the deny-share handle before connecting a
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.
+    let stage = startup_step_begin("instance-lock", "单实例锁与机器级写者锁（deny-share/flock）");
     acquire_process_instance_lock(&db_option)?;
+    startup_step_done("instance-lock", stage, "");
     // 设置模式（配置向导，计划 2026-09-09-setup-wizard-web-frontend.md / ADR-069，
     // 判据在 ADR-070 扩到 spawn 两档）：配置无效（project_path 缺/不存在，或需要端点
     // 的档位库地址留空——external 空地址是出厂模板形态，spawn 档空地址是必坏手改
@@ -2301,18 +2606,26 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // 内嵌 rocksdb:// 那一支已随 `local` feature 删除：surrealdb 依赖没编 kv-rocksdb，
     // 这段连不上任何东西；持久层只有「连 v_ip:v_port 那台」与「进程内嵌 mem://」两档
     // （`ensure_store_connected`，ADR-074 / ADR-083）。
+    let stage = startup_step_begin(
+        "store-connect",
+        "连接持久层（配置端点的 SurrealDB；本进程只连不拉起）",
+    );
     #[cfg(feature = "ws")]
     {
         // 服务主进程是唯一给 `Spawn` 的调用方：只有它有资格把库拉起来、收自己的孤儿。
         // 两档介质的分派全在 `ensure_store_connected` 里，旁路入口共用同一条。
         ensure_store_connected(&db_option).await?;
     }
+    startup_step_done("store-connect", stage, "");
 
+    let stage =
+        startup_step_begin("data-face-claim", "数据面签名校验/认领（同一持久库不许多面孔）");
     crate::data_interface::data_face_signature::validate_or_claim(
         &db_option.project_name,
         &db_option.surreal_ns,
     )
     .await?;
+    startup_step_done("data-face-claim", stage, "");
 
     // ADR-050: this table is only a scheduler ledger for the current process.
     // Clear it after the database connection exists but before spatial loading,
@@ -2326,15 +2639,24 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 
     // 启动分层判据装载空间树，与 run_app 同一失败语义（方案决策 D3）：树是可
     // 重建的派生数据，加载失败告警降级空树，不阻断启动；降级两态交给后台复检。
+    let stage = startup_step_begin(
+        "spatial-tree",
+        "装载空间树（指纹一致复用，失配/缺失重建；失败降级空树不拦启动）",
+    );
     if crate::options::spatial_compute() {
         if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
             eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
         }
         crate::fast_model::spatial_state::spawn_spatial_revalidator();
+        startup_step_done("spatial-tree", stage, "");
     } else {
         println!(
             "空间计算已关闭（{}=0）：跳过空间树装载、后台复检和后置 AABB，只运行模型生成",
             crate::options::SPATIAL_COMPUTE_ENV
+        );
+        startup_step_skip(
+            "spatial-tree",
+            &format!("{}=0", crate::options::SPATIAL_COMPUTE_ENV),
         );
     }
     // let (tx, mut rx) = mpsc::channel::<i32>();

@@ -532,6 +532,19 @@ impl ClosurePlan {
         plan
     }
 
+    /// 这份闭包在监控口径上有没有缺口：有搜索根不可达，或 [`Self::watch_dir_plan`] 里有
+    /// problem 条目（主项目没定位到 / 声明的项目码没目录 / 项目目录下没有 `*000` / 声明读不到）。
+    ///
+    /// 重挂轮的健康闸用它决定要不要重扫搜索根：缺口存在 = 盘上可能有没见过面的目录
+    /// （启动时掉线的盘连它的 `*000` 都列不出来），值得重解析；全健康 = 重扫不会发现
+    /// 任何新东西，整轮跳过。`roots` 可达性单查是因为「根掉了但它下面没有声明项目」
+    /// 折不出 problem 条目，可那根恢复后正要靠重解析发现新目录，不能漏。
+    /// 纯内存判定，不碰盘。
+    pub fn has_watch_gaps(&self) -> bool {
+        self.roots.iter().any(|root| !root.reachable)
+            || !self.watch_dir_plan().problems().is_empty()
+    }
+
     /// 启动横幅那一句（D6）。
     pub fn banner_line(&self) -> String {
         let unreachable: Vec<String> = self
@@ -801,6 +814,22 @@ pub fn latest_for(db_option: &DbOption) -> Arc<ClosurePlan> {
         return plan.clone();
     }
     resolve_for(db_option)
+}
+
+/// 这份配置的最近闭包，**只查缓存、不现算**：没有或 key 不符返回 `None`。
+///
+/// 给「要不要重新解析」的判定口用（重挂轮的健康闸）——它问的是盘上有没有可能藏着
+/// 没见过面的目录，查不到缓存本身就算一种缺口，该交给 [`resolve_for`] 去现算；
+/// 这里绝不能为了回答这个问题自己去碰盘（调用方是每 `AIOS_WATCH_REMOUNT_SECS`
+/// 一拍的事件循环）。
+pub fn cached_plan_for(db_option: &DbOption) -> Option<Arc<ClosurePlan>> {
+    let roots = search_roots(db_option);
+    let key = plan_key(&roots, &db_option.project_name, &db_option.mdb_name);
+    latest_slot()
+        .read()
+        .ok()?
+        .as_ref()
+        .and_then(|(known, plan)| (*known == key).then(|| plan.clone()))
 }
 
 /// `included_projects` 非空时启动打的那一句（D3）：它已不再参与解析，本次由 MDB 派生了什么。
@@ -1098,5 +1127,99 @@ mod tests {
         assert_eq!(online.len(), 3, "根 + 主项目 + MDB");
         assert_eq!(online[1], "main");
         assert_eq!(online[2], "/ALL");
+    }
+
+    /// 监控口径的缺口判定真值表（重挂轮健康闸的判据）：干净闭包 false；根不可达、
+    /// 声明的码定位不到、主项目没定位到、声明读不到，各是一格 true。
+    #[test]
+    fn watch_gaps_cover_every_way_a_plan_can_be_incomplete() {
+        // 干净：主项目 + 外部项目都定位到，唯一的根可达。
+        let fixture = Fixture::new("gaps-clean");
+        fixture.dir("Marine/ams000");
+        fixture.dir("Cat/acp000");
+        let decl = declaration(
+            "gaps-clean-Marine",
+            &[(None, 8000, "/D"), (Some("ACP"), 7001, "/A")],
+        );
+        let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
+        let main = locate_project_folder(&scans, "Marine");
+        let clean = ClosurePlan::build("Marine", "ALL", scans, main, Ok(decl));
+        assert!(
+            !clean.has_watch_gaps(),
+            "{:?}",
+            clean.watch_dir_plan().problems()
+        );
+
+        // 根不可达但项目侧没有问题条目（那根下没有声明项目）也要算缺口——
+        // 它恢复之后，重解析是发现它下面目录的唯一机会。
+        let fixture = Fixture::new("gaps-dead-root");
+        fixture.dir("Main/mai000");
+        let decl = declaration("gaps-dead-root-Main", &[(None, 8000, "/D")]);
+        let mut scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
+        let main = locate_project_folder(&scans, "Main");
+        let dead = fixture.root.join("dead-share"); // 不存在 → 扫描按不可达记
+        scans.extend(scan_roots(&[dead], DEFAULT_ROOT_SCAN_TIMEOUT));
+        let plan = ClosurePlan::build("Main", "ALL", scans, main, Ok(decl));
+        assert!(
+            plan.watch_dir_plan().problems().is_empty(),
+            "{:?}",
+            plan.watch_dir_plan().problems()
+        );
+        assert!(plan.has_watch_gaps(), "不可达的根单靠自己就算缺口");
+
+        // 声明的码定位不到 → unresolved → problem 条目。
+        let fixture = Fixture::new("gaps-unresolved");
+        fixture.dir("Main/mai000");
+        let decl = declaration(
+            "gaps-unresolved-Main",
+            &[(None, 8000, "/D"), (Some("ACP"), 7001, "/A")],
+        );
+        let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
+        let main = locate_project_folder(&scans, "Main");
+        let plan = ClosurePlan::build("Main", "ALL", scans, main, Ok(decl));
+        assert!(!plan.unresolved.is_empty());
+        assert!(plan.has_watch_gaps());
+
+        // 主项目没定位到。
+        let fixture = Fixture::new("gaps-no-main");
+        fixture.dir("Main/mai000");
+        let decl = declaration("gaps-no-main-Ghost", &[(None, 8000, "/D")]);
+        let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
+        let main = locate_project_folder(&scans, "Ghost");
+        let plan = ClosurePlan::build("Ghost", "ALL", scans, main, Ok(decl));
+        assert!(plan.main.is_none());
+        assert!(plan.has_watch_gaps());
+
+        // 声明读不到。
+        let fixture = Fixture::new("gaps-no-decl");
+        fixture.dir("Main/mai000");
+        let scans = scan_roots(&[fixture.root.clone()], DEFAULT_ROOT_SCAN_TIMEOUT);
+        let main = locate_project_folder(&scans, "Main");
+        let plan = ClosurePlan::build("Main", "ALL", scans, main, Err("SYS 读不到".to_string()));
+        assert!(plan.has_watch_gaps());
+    }
+
+    /// 重挂轮闸用的只读缓存口：查不到就是 `None`（不许为了回答而现算扫盘），
+    /// `resolve_for` 写过之后同 key 命中同一份；配置换了（key 不符）照旧 `None`。
+    #[test]
+    fn cached_plan_for_never_computes_and_hits_after_resolve_for() {
+        let fixture = Fixture::new("cached-plan");
+        fixture.dir("Marine/ams000");
+        let mut option = aios_core::get_db_option().clone();
+        option.project_path = fixture.root.to_string_lossy().into_owned();
+        option.project_name = "Marine".to_string();
+        option.mdb_name = format!("CACHED-{}", std::process::id());
+        option.project_dirs = None;
+
+        // 这个 key 没人算过：None——它不会去扫 fixture.root（有别的测试写过 latest
+        // 也一样，key 不符就是 None）。
+        assert!(cached_plan_for(&option).is_none());
+
+        let plan = resolve_for(&option);
+        let cached = cached_plan_for(&option).expect("resolve_for 之后必须命中");
+        assert!(Arc::ptr_eq(&plan, &cached), "命中的必须就是写进去的那份");
+
+        option.project_name = "Other".to_string();
+        assert!(cached_plan_for(&option).is_none(), "key 不符不命中、也不现算");
     }
 }

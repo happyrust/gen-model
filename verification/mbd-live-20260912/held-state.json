@@ -1,0 +1,43 @@
+{
+  "started_at": "2026-09-12T01:24:17.5926819+08:00",
+  "base_url": "http://127.0.0.1:18084",
+  "pid": 72048,
+  "run_dir": "C:\\Users\\dpc\\AppData\\Local\\Temp\\gen-model-mbd-held-51455fff2d5446b594a045cafbdadd30",
+  "config": "D:\\work\\plant-code\\old\\gen-model\\verification\\mbd-live-20260912\\isolated-18084-config.toml",
+  "executable": "D:\\Rust\\target\\debug\\aios-database.exe",
+  "executable_sha256": "C2A41AB6988E75BEE0DFAF5CBD65C316E122C963C2EE1F98CDC7BA03021EF46E",
+  "git_revision": "cf168862aadf9d2744dd2be9dc20a8c2ff270ed3",
+  "git_dirty": true,
+  "health_status": 200,
+  "service_status": "ok",
+  "project": "AvevaMarineSample",
+  "mdb": "/ALL",
+  "data_read_mode": "direct",
+  "store_medium": "embedded-mem",
+  "readiness_refno": "24383_99996",
+  "readiness_status": 200,
+  "readiness_primitives": 58,
+  "existing_8022_pid": 79984,
+  "checked_at": "2026-09-12T01:24:36.1086903+08:00",
+  "core_status": "ready",
+  "branch_statuses": {
+    "24383_99996": {
+      "status": 200,
+      "version": "v2",
+      "primitives": 58,
+      "issues": 13
+    },
+    "24381_145018": {
+      "status": 200,
+      "version": "v2",
+      "primitives": 77,
+      "issues": 0
+    },
+    "24384_26229": {
+      "status": 200,
+      "version": "v2",
+      "primitives": 39,
+      "issues": 5
+    }
+  }
+}

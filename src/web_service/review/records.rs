@@ -405,7 +405,12 @@ pub(super) async fn create_record(
         request.r#type.trim().to_string()
     };
     let note = request.note.trim().to_string();
-    let slot_key = build_confirmed_record_slot_key(&form_id, &current_node, &operator_id);
+    let slot_scope = if form_id.trim().is_empty() {
+        request.task_id.trim()
+    } else {
+        form_id.trim()
+    };
+    let slot_key = build_confirmed_record_slot_key(slot_scope, &current_node, &operator_id);
     let record_id = build_confirmed_record_stable_id(&slot_key);
     let db = match fresh_review_db().await {
         Ok(db) => db,
@@ -729,6 +734,7 @@ pub(super) async fn create_record(
                     &request.annotations,
                     &request.cloud_annotations,
                     &request.rect_annotations,
+                    &request.obb_annotations,
                 )
                 .await;
 
@@ -910,7 +916,10 @@ const CLEAR_TASK_RECORDS_SQL: &str = r#"
     "#;
 
 /// DELETE /api/review/records/:record_id - 删除记录
-pub(super) async fn delete_record(Path(record_id): Path<String>) -> impl IntoResponse {
+pub(super) async fn delete_record(
+    Extension(claims): Extension<TokenClaims>,
+    Path(record_id): Path<String>,
+) -> impl IntoResponse {
     info!("Deleting record: {}", record_id);
 
     let sql = DELETE_RECORD_SQL;
@@ -928,6 +937,60 @@ pub(super) async fn delete_record(Path(record_id): Path<String>) -> impl IntoRes
             );
         }
     };
+
+    #[derive(Debug, Deserialize)]
+    struct RecordAuthRow {
+        task_id: Option<String>,
+        operator_id: Option<String>,
+    }
+
+    let is_admin = claims
+        .role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("admin"))
+        .unwrap_or(false);
+    if !is_admin {
+        let lookup_sql = "SELECT task_id, operator_id FROM type::thing(review_records, $id)";
+        if let Ok(mut resp) = await_review_query(
+            "review.records.delete_lookup",
+            db.query(lookup_sql).bind(("id", record_id.clone())),
+        )
+        .await
+        {
+            let rows: Vec<RecordAuthRow> = resp.take(0).unwrap_or_default();
+            if let Some(row) = rows.into_iter().next() {
+                let actor = claims.user_id.trim();
+                let is_operator = row
+                    .operator_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_some_and(|op| op.eq_ignore_ascii_case(actor));
+                if !is_operator {
+                    if let Some(tid) = row
+                        .task_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if let Err((status, message)) = authorize_task_write(tid, &claims).await {
+                            if status != StatusCode::NOT_FOUND {
+                                return (
+                                    status,
+                                    Json(ActionResponse {
+                                        success: false,
+                                        message: None,
+                                        error_message: Some(message),
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     match await_review_query(
         "review.records.delete",
         db.query(sql).bind(("id", record_id)),
@@ -957,8 +1020,31 @@ pub(super) async fn delete_record(Path(record_id): Path<String>) -> impl IntoRes
 }
 
 /// DELETE /api/review/records/task/:task_id - 清空任务的所有记录
-pub(super) async fn clear_records_by_task(Path(task_id): Path<String>) -> impl IntoResponse {
+pub(super) async fn clear_records_by_task(
+    Extension(claims): Extension<TokenClaims>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
     info!("Clearing records for task: {}", task_id);
+
+    let is_admin = claims
+        .role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("admin"))
+        .unwrap_or(false);
+    if !is_admin {
+        if let Err((status, message)) = authorize_task_write(&task_id, &claims).await {
+            if status != StatusCode::NOT_FOUND {
+                return (
+                    status,
+                    Json(ActionResponse {
+                        success: false,
+                        message: None,
+                        error_message: Some(message),
+                    }),
+                );
+            }
+        }
+    }
 
     let sql = CLEAR_TASK_RECORDS_SQL;
 

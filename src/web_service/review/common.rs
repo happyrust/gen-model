@@ -925,9 +925,7 @@ pub(super) async fn lookup_task_record_context(id: &str) -> anyhow::Result<Optio
     let Some(row) = rows.into_iter().next() else {
         return Ok(None);
     };
-    let Some(form_id) = normalize_optional_string(row.form_id) else {
-        return Ok(None);
-    };
+    let form_id = normalize_optional_string(row.form_id).unwrap_or_default();
     let current_node =
         normalize_optional_string(row.current_node).unwrap_or_else(default_current_node);
     Ok(Some(TaskRecordContext {
@@ -1134,6 +1132,7 @@ pub(super) async fn lookup_task_form_id(id: &str) -> Option<String> {
         .ok()
         .flatten()
         .map(|context| context.form_id)
+        .filter(|s| !s.trim().is_empty())
 }
 
 // ============================================================================

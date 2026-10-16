@@ -1,0 +1,315 @@
+#同步文件配置
+# ── 配置变更追踪 ─────────────────────────────────────────────────────────────
+# 与最后一次提交基线（7bba5fd4，2025-06-30）的完整差异清单见
+# docs/2026-08-04_dboption-config-changelog.md；新增键均带【新增 日期】标注。
+# ─────────────────────────────────────────────────────────────────────────────
+# 非CATA增量测试：数据已解析，跳过重新解析
+# Web 服务冒烟验证：关闭启动期全量同步（原值 true，gen-model-9 全量DESI复验遗留）
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+#【变更 2026-07-27】true→false：生产增量改为启动重扫后持续监听；2026-07-29 曾临时
+# 开回 true（aabbidx 轮），2026-08-04 web 冒烟验证再次关闭。
+#【变更 2026-09-04】false→true：S5 形态合一后的 live 验收（direct 默认 + watcher 接回来），
+# 配合下面 watch_dbnums 限定到两个库先跑；验收完是否保留由用户定。
+#【变更 2026-09-04】数据读取模式默认 direct（e3d-io 直接读库文件，ADR-053 / ADR-058 D8）。
+# 这个开关不在本文件里，只认环境变量 AIOS_DATA_READ_MODE（direct / db）：不设 = direct；
+# 只有显式 AIOS_DATA_READ_MODE=db 才退回 legacy db 读路由（已退役，只留退路）；认不出的
+# 值按未设置处理并在启动日志出声。读模式只决定「数据面读哪儿」，watcher（上面的 sync_live）
+# / worker / 模型复核 / 房间与它无关。
+#【变更 2026-07-27】false→true：增量重解析允许覆盖既有库文件记录。
+replace_dbs = true
+enable_index = false
+sync_chunk_size = 10_0000
+
+#项目设置
+#【变更 2026-07-27】E3D2.1→E3D3.1：AMS 样例工程迁移到 E3D3.1 项目目录。
+project_path = "D:/AVEVA/Projects/E3D3.1"
+# project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
+# included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+#【变更 2026-07-27】移除 SCB：E3D3.1 下未部署该工程，避免扫描报错。
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+#project_dirs = ["AvevaMarineSample"]
+
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
+surreal_ns = 1516
+module = "DESI"
+#是否生成模型数据
+#【变更 2026-07-27】true→false：非CATA增量监听模式，启动不做全量重算，
+# 靠 watcher 增量刷新（增量/按需路径内部自行强制 gen_model/gen_mesh=true）。
+gen_model = false
+gen_mesh = false
+replace_mesh = false
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#【死键 2026-08-07】gen_spatial_tree 的使用已从代码移除：空间/房间计算恒开启，本键
+#全仓零读取。下两键同理（rs-core 仅定义未消费）。三个字段都是必填 bool，删键会让
+#config 反序列化报 missing field 导致启动失败，待 rs-core 删除字段后随之移除。
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+#【变更 2026-07-29】16→4：ams7997 全量生成 16 并发曾在 save_instance_data
+# 撞 rocksdb 事务写冲突（empty127 轮），降到 4。
+gen_model_batch_size = 4
+
+build_cate_relate = false
+
+#【新增 2026-07-25】delivery_unit_types / append_delivery_unit_types（当前未启用，用默认集合）
+# 最小交付单元类型（增量 / 手动 / 按需生成共用的生成根口径），随"批量根重生成/
+# 交付单元"能力引入（docs/adr/ADR-012、docs/specs/manual-model-update.md）。
+# 不配置时使用默认集合 ["BRAN", "HANG", "SUPPO", "EQUI"]
+# delivery_unit_types      完全取代默认集合；写成 [] 表示不使用交付单元，全部按正常颗粒生成
+# append_delivery_unit_types  在默认集合之外追加，仅在未配置 delivery_unit_types 时生效
+# 两者都会 trim + 转大写 + 去重，且拒绝 WORL/WORLD/SITE/ZONE 和管件 FTUB
+# delivery_unit_types = ["BRAN", "HANG", "SUPPO", "EQUI"]
+# append_delivery_unit_types = ["PIPE"]
+
+#meshes_path = "E:/RustProject/new/rs-plant3-d/assets/meshes"
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+#arangodb 配置
+arangodb_database = "ams"
+multi_threads = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+#port = "4000"
+sql_threads_number = 10
+batch_insert_sql_cnt = 100 #mysql 批量插入的数量
+
+
+#版本数据库服务配置
+v_ip = "localhost"
+v_port = 8009
+v_user = "root"
+v_password = "root"
+
+#【新增 2026-08-27】in_memory_db —— 调试用，默认不写 = 连上面那台 SurrealDB
+# true：持久层换成**进程内嵌的 kv-mem 引擎**，上面 v_ip / v_port / v_user /
+#       v_password 整个不再使用。初始化解析、增量窗口写回、模型与房间派生数据
+#       全部照原路走，只是落点从 rocksdb 变成内存——SUL_DB 是 Surreal<Any>，
+#       引擎选择对上层不可见，没有第二条代码路径。
+# 【这是非正常运行状态】两条代价都不可逆：
+#   1. 进程一退整库就没了，崩溃现场只剩日志，事后取证做不了；
+#   2. 库在进程内，外面没有端口可连——rvm_verify、/sql 探针、Capture-*Evidence.ps1
+#      这类靠 ws 连库的工具全部够不着。
+# 要留证据或要让别的进程读库，用部署脚本的 -InMemory（外部 surreal 进程换 memory
+# 后端，端口还在），别用这个键。
+# 管不到的东西：assets/meshes 与 accel_tree 快照仍然落盘，那是 aios-database 自己
+# 写的派生数据；空间树启动判据照旧按库侧指纹裁决，空库会走重建。
+# 环境变量 AIOS_IN_MEMORY_DB 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
+# /health 有 in_memory_db 栏，启动横幅也会点名。
+# in_memory_db = true
+pe_chunk = 300
+att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
+
+
+#mqtt 事件 ip
+mqtt_host = "192.168.31.58"
+mqtt_port = 1883
+
+location = "SJZ"
+location_dbs = [1112]
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.58:8000/assets/archives"
+
+#【新增 2026-07-27】http_api_addr / http_api_cors
+# Web服务(REST+WebSocket)监听地址；注释掉则不启动（需编译 http_api feature）。
+# 随手动更新/按需生成 Web 服务引入（docs/specs/web-service-api.md、ADR-011）。
+# 评审决议：0.0.0.0 供局域网前端访问。
+# 【变更 2026-07-29】8021→8022：ponytail: 8021 被旧的提权进程占用；清理后可切回。
+http_api_addr = "0.0.0.0:8022"
+# CORS 允许来源列表，["*"] 为全放行（局域网前端联调用）。
+http_api_cors = ["*"]
+
+#【新增 2026-08-10】startup_autorun
+# 启动即自动干活；默认 true = 重扫发现后立即消费。
+#   false：启动重扫照常发现并入队（队列是准的、看得见停机期间攒了多少活），
+#          但排出来的行「挂起」（/queue 上状态是 held）不派发，持久积压也不消化，
+#          启动全量房间重建不跑。某个 dbnum 真的来了增量（在 E3D 里存一次盘，
+#          或 POST /api/v1/update/execute）才放行它那一条，并把积压与新会话
+#          合并成一条一起跑。别的库继续挂着。
+#   true ：历史行为——起来就消费队列，并在库侧凭据对不上时做一次全量房间重建。
+# 环境变量 AIOS_STARTUP_AUTORUN 压过本键（认 1/true/yes/on 与 0/false/no/off），
+# 用于「这一次想让它自己跑」而不改文件。
+# 注意 POST /api/v1/queue/resume 解的是持久化暂停，不是这里的挂起，两者正交。
+# 另有 AIOS_SKIP_STARTUP_ROOM_BUILD：无论本键取值都不做启动全量房间重建，
+# 给「要增量、不要 2 万面板重算」的场景（L3 夹具就用它）。
+startup_autorun = true
+# 默认继续维护旧库；新 dbnum 由 plant-ui 手动初始化。
+# 开启自动初始化：设为 true，或 serve --auto-initialize-new-dbnums。
+# 环境变量 AIOS_AUTO_INITIALIZE_NEW_DBNUMS 可覆盖此项。
+auto_initialize_new_dbnums = false
+
+# 文件名/文件头库号不一致、同项目同 dbnum 多文件：默认只记录并跳过冲突库，
+# 不再阻断其它库完成初始化。需要恢复严格阻断时设为 true。
+block_file_identity_conflicts = false
+
+#【新增 2026-08-19】三段增量执行控制，默认均为 true。
+# 顺序固定为数据 → 模型 → 房间；关闭阶段只停消费，不删除 durable 工作。
+# 环境变量 AIOS_DATA_INCREMENTAL / AIOS_MODEL_INCREMENTAL 可覆盖前两项。
+data_incremental = true
+model_incremental = true
+
+#【新增 2026-08-10，默认值 2026-08-12 改为 true】room_incremental
+# 房间归属的「增量」重算；默认 true = 照排照收。
+#   true ：位姿/删除刷新包围盒之后排 room_recalc 目标（直写事务与暂存窗口收口
+#          两个写入点），空闲轮收房间轮。
+#   false：两个写入点都不排，空闲轮也不收。已经排在 model_update_pending 里的
+#          目标原样留着，开关一开照常收——关掉不等于把那些活丢了。
+# 管的只有增量这一条链：启动全量重建、人工重建、以及 drain_rooms 直调（房间对拍
+# 夹具走的就是它）都不看本键。
+# 环境变量 AIOS_ROOM_INCREMENTAL 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），
+# 想单独排查模型增量时用 AIOS_ROOM_INCREMENTAL=0 临时关一次，不必改文件。
+# 2026-08-10 默认取假的理由是现场压着 2580 个查不到几何的房间目标，每页 256 个
+# 付两次全量查询、约 88 秒，把模型侧真正的失败埋进日志。那批目标已经收干净，
+# 而关着的代价更贵：房间归属只在删除时还会被清，搬家后的重算全靠启动全量重建
+# 回补，而那条兜底路径排在 startup_autorun 之后——默认部署里等于没有回补通道。
+room_incremental = true
+
+#【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
+# 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。
+# SYS meta（SYST/DICT/GLB/GLOB）不受限：MDB 的成员名单就存在那些库里，圈掉它们
+# 只会得到一个「什么都没发现」的假现场。
+# 命令行 `aios-database serve --watch-dbnum 7998,8000` 压过本键；两者都没给就是
+# 全范围，判定与本特性引入前逐位相同。
+# 与别的名单无关，别混：manual_db_nums / exclude_db_nums 早已被剥夺增量否决权
+# （只供全量模型生成与按需基线解析），--debug-dbnum 是另一个开关（额外带六个
+# 裁决点的链路追踪，且刻意进不了配置文件）。
+# 【这是非正常运行状态】它的形状与坑出 issue #10 的 manual_db_nums 一模一样，
+# 区别全部做在「有多大声」上：启动横幅、/health 的 watch_dbnums 栏、每一份
+# preview / execute 回执的 warnings、重扫日志里独立的一句聚合，都会点名本键
+# 并说清限定来自配置还是命令行。用完记得删——命令行参数进程一停就没了，
+# 写在这里的能躺一个月。
+#【启用 2026-09-04】S5 live 验收窗口：先限定到 7998 + 8000 两个 AMS 设计库（refactor plan §4 风险行）。
+#【变更 2026-09-08】[7998, 8000] → 全 MDB DESI 集 [7997, 7998, 8000]：房间驻留模型完善计划的
+# 验收前提（完成定义 #1/#2）——7997 的 229 块在册面板此前因未监听而无已发布几何，resident
+# 只能 blocked；配齐后首启由初始化替 7997 前进清单并物化已生成的几何。验收完是否保留由用户定。
+#【变更 2026-09-09】暂时改回 [7998, 8000]：7997 的清单行与房间分片已在 09-08 晚的全监听启动里
+# 建到 155（覆盖校验仍全 MDB 过关），而 7997 的文件轮两次复现「collecting 后失锁死等」
+#（root 24381/100817，已交增量线排查）；监听它只会把队列再堵死。等 stall 修好再扩回全集。
+watch_dbnums = [7998, 8000]
+
+#【新增 2026-09-03】model_incremental_types —— 模型增量类型限定，默认不写 = 不限类型
+# 把「模型增量」圈到这几种最小交付单元类型的生成根，例如
+#   model_incremental_types = ["BRAN", "EQUI"]
+# 只有名单内类型的 regen_root / delete_cleanup 行会被本进程认领、生成、烧 attempts；
+# 其余类型的根**照常规划、照常入队、gen_root 照常标 stale**，只是留在
+# model_update_pending 里不消费——凭证不前移、重启后随退化窗口重排、名单一撤即照常
+# 消费（与 model_incremental = false「只停消费、不删 durable 工作」同一条纪律）。
+# 数据增量（窗口收集、pe / ATT_* 写回、水位推进）一律不受影响；Transform（老规划器
+# 便宜路径）、CascadeExpand、PostRegenAabb、房间任务与按需 ensure 也不看名单。
+# 归一：trim + 大写 + 去空 + 去重；noun 未知（空）的行不挡。
+# 环境变量 AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI 压过本键；空白的环境变量当没设。
+# 与别的名单无关，别混：watch_dbnums 按「库」圈数据批次与模型工作单（会动数据面），
+# delivery_unit_types 决定生成根「怎么选」（哪些 noun 是 MDU，改变的是根的归并）；
+# 本键只圈模型消费按「类型」，不动数据面、不改根的选法。
+# 【这是非正常运行状态】护栏与 watch_dbnums 同一套：启动横幅、/health 的
+# model_incremental_types 栏与 model_update_pending.held_by_model_incremental_types
+# 计数、每一份 preview / execute 回执的 warnings、数据窗口计划 warnings 点名本窗被
+# 暂扣的根（按类型计数）、worker 空闲轮首次一句，都会点名本键并说清来自配置还是
+# 环境变量。用完记得删——写在这里的能躺一个月。
+# model_incremental_types = ["BRAN", "EQUI"]
+
+#【退役 2026-08-18 / ADR-031】net_window_collection / AIOS_NET_WINDOW
+# 收集口径已统一为净窗口（collect_window → collect_net_window）。逐会话回放
+# 降级为 legacy 诊断入口，生产路径不可达。本键与环境变量不再改变行为；
+# 残留设置会在 run_cli / full_init 打显式告警（配置层没有 deny_unknown_fields，
+# 删字段会让 `net_window_collection = false` 被安静忽略，字面意思与实际相反）。
+# 回退手段是 git revert 单路径提交，不是解开下面这行。
+# net_window_collection = false
+
+#【移除 2026-08-13】watermark_realign（2026-08-12 引入的 off/check/rebaseline 档位）
+# 随 ADR-021 退役：文件回退（file_latest_sesno < applied_sesno）的默认且唯一处置
+# 改为「扫描只入队重建批次，worker 冻结点复核仍判回退才整库清空并按首次导入重新
+# 解析」。「先别动我看看」由 startup_autorun / 队列暂停承担（清库只发生在 worker
+# 出队之后）。环境变量 AIOS_WATERMARK_REALIGN 一并退役，写了也没人读。
+
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
+reset_mdb_project = false           #是否重新生成 mdb 缓存
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+#【变更 2026-07-27】移除 "CATA"：CATA 改走闭包按需解析（cata_closure），不再全量调试解析。
+debug_refno_types = ["LOOP", "PRIM"]
+#【变更 2026-08-06】manual_db_nums / exclude_db_nums / only_sync_sys 不再影响**增量**：
+# 增量范围只由 mdb_name 那个 MDB 声明的 DESI 决定（见 data_interface/update_scope.rs）。
+# 手写名单收窄时，被挡掉的库在日志上与「MDB 里没这个库」长得一模一样——issue #10 的
+# 7999 就是这么躺了几周。这几个键仍对全量模型生成与按需基线解析生效。
+# 正式增量覆盖当前 MDB；灰度时才临时启用 included_db_files / manual_db_nums。
+# included_db_files = ["ams8000_0001"]
+#included_db_files = ["zdj7600_0001"]
+#manual_db_nums = [7999, 7997, 8000, 1112]
+#manual_db_nums = [1112]
+#【变更 2026-07-27 起启用】基线中为注释状态；各轮取值：07-27=[7997,7999,8000]、
+# 07-29=[8000]、08-04=[7998,8000]。
+# AMS 增量回归固定覆盖这三个设计库。
+# ams7997 全量生成执行窗口：临时收窄到 7997，避免手动执行把 7999 也按需初始化（跑完恢复）
+# 2026-08-04 增量实测窗口：7998（18 个会话，最小设计库）+ 8000（已应用，用来验 up_to_date 分支）
+#【变更 2026-08-06】加入 7997 与 7999：issue #10（多次增量后新增节点不进模型树）E3D 实测窗口，
+# 基线库 .surreal/ams-7997-e3d-test-20260805（7997 applied=92）。
+# 取证结论：issue 截图里的 /1WCC0211 属于 7999，而 7999 一直被排除在 manual_db_nums 外
+# （applied=3、file=41，库里的树是旧全量同步残留）——这正是「检测到增量但树不更新」的直接原因。
+# 跑完可收窄回 [7998, 8000]。
+manual_db_nums = [7997, 7998, 7999, 8000]
+# manual_db_nums = [7997, 7999, 8000]
+# exclude_db_nums = [] #不参与生成模型的数据库编号
+plat_url = ""
+
+#puhua
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+
+#【新增 2026-07-29】room_key_word（列表），替代旧键 room_keyword（单字符串，已废弃）。
+# 房间名关键词列表，用于房间面板关系匹配（fast_model/room_model.rs get_room_key_word）。
+# AMS 房间名形如 /1RX-RM03-R301；末段 R301 由 project_hd 规则校验。
+room_key_word = ["-RM"]
+
+#test_refno = "24381_46952"
+
+#debug_root_refnos = ["24381_46952"]
+gen_history_model = false
+#debug_root_refnos = ["17496/201375"]
+# debug_root_refnos = []
+
+# debug_root_refnos = ["17496_195578"]
+# 模型生成保持单协调器；claim页只控制数据库预取，execution group 与根并发控制执行。
+model_concurrency_mode = "adaptive"
+model_regen_claim_page = 100
+model_post_regen_aabb_page = 256
+model_regen_execution_group = 16
+# 一片内存批最多携带多少个已生成元素（默认 8000）。模型生成先把根产进内存、再串行
+# 发布，两端隔一条深度 1 的有界 channel（ADR-041 §8）。常规切分点仍是上面那档
+# execution group 的根数，本预算只在一页异常肥时提前封片——切片预算不能只按根数算，
+# 一个 BRAN 和一个 EQUI 的元素数差两个数量级。单根不拆（根是发布的原子单位）。
+model_memory_slice_elements = 8000
+model_root_inflight_max = 2
+model_full_rebuild_enabled = true

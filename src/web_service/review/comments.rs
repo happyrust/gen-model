@@ -339,7 +339,7 @@ pub(super) async fn get_comments_by_annotation(
     }
 }
 
-/// PATCH /api/review/comments/item/:comment_id - 编辑评论（仅作者本人）
+/// PATCH /api/review/comments/item/:comment_id - 编辑评论（仅作者本人或管理员）
 pub(super) async fn edit_comment(
     Extension(claims): Extension<TokenClaims>,
     Path(comment_id): Path<String>,
@@ -347,16 +347,20 @@ pub(super) async fn edit_comment(
 ) -> impl IntoResponse {
     info!("Editing comment: {}", comment_id);
 
-    let sql = r#"
-        LET $comment = SELECT * FROM type::thing('review_comments', $id);
-        IF $comment[0].author_id != $author_id {
-            THROW "仅评论作者本人可编辑";
-        };
-        UPDATE type::thing('review_comments', $id) SET
-            content = $content,
-            updated_at = time::now()
-    "#;
+    let user_id = claims.user_id.trim().to_string();
+    let is_admin = claims
+        .role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("admin"))
+        .unwrap_or(false);
 
+    #[derive(Debug, Deserialize)]
+    struct CommentEditOwnerRow {
+        author_id: Option<String>,
+        deleted: Option<bool>,
+    }
+
+    let lookup_sql = "SELECT author_id, deleted FROM type::thing('review_comments', $id)";
     let db = match fresh_review_db().await {
         Ok(db) => db,
         Err(e) => {
@@ -370,11 +374,73 @@ pub(super) async fn edit_comment(
             );
         }
     };
+    let owner = match await_review_query(
+        "review.comments.edit_lookup",
+        db.query(lookup_sql).bind(("id", comment_id.clone())),
+    )
+    .await
+    {
+        Ok(mut response) => {
+            let rows: Vec<CommentEditOwnerRow> = response.take(0).unwrap_or_default();
+            rows.into_iter().next()
+        }
+        Err(e) => {
+            warn!("Failed to look up comment {} for edit: {}", comment_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ActionResponse {
+                    success: false,
+                    message: None,
+                    error_message: Some(format!("查询评论失败: {}", e)),
+                }),
+            );
+        }
+    };
+
+    let Some(owner) = owner else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ActionResponse {
+                success: false,
+                message: None,
+                error_message: Some("评论不存在".to_string()),
+            }),
+        );
+    };
+
+    if owner.deleted.unwrap_or(false) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ActionResponse {
+                success: false,
+                message: None,
+                error_message: Some("评论已删除".to_string()),
+            }),
+        );
+    }
+
+    let author_id = owner.author_id.unwrap_or_default();
+    if !is_admin && author_id != user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ActionResponse {
+                success: false,
+                message: None,
+                error_message: Some("仅评论作者本人可编辑".to_string()),
+            }),
+        );
+    }
+
+    let sql = r#"
+        UPDATE type::thing('review_comments', $id) SET
+            content = $content,
+            updated_at = time::now()
+    "#;
+
     match await_review_query(
         "review.comments.edit",
         db.query(sql)
             .bind(("id", comment_id.clone()))
-            .bind(("author_id", claims.user_id.clone()))
             .bind(("content", body.content.clone())),
     )
     .await
@@ -389,14 +455,9 @@ pub(super) async fn edit_comment(
         ),
         Err(e) => {
             let msg = e.to_string();
-            let status = if msg.contains("仅评论作者本人可编辑") {
-                StatusCode::FORBIDDEN
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
             warn!("Failed to edit comment {}: {}", comment_id, msg);
             (
-                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ActionResponse {
                     success: false,
                     message: None,

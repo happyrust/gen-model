@@ -756,6 +756,7 @@ async fn create_task(
                 workflow_history: vec![],
                 return_reason: None,
             };
+            let task = hydrate_task_attachments(task).await;
             (
                 StatusCode::OK,
                 Json(TaskResponse {
@@ -836,6 +837,43 @@ async fn resave_existing_task(
                 success: false,
                 task: None,
                 error_message: Some(resave_rejected_message(&existing_node)),
+            }),
+        );
+    }
+
+    let existing_requester = existing
+        .requester_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    let actor = claims.user_id.trim();
+    let is_admin = claims
+        .role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("admin"))
+        .unwrap_or(false);
+    if !existing_requester.is_empty()
+        && !actor.is_empty()
+        && !is_admin
+        && !actor.eq_ignore_ascii_case(existing_requester)
+    {
+        warn!(
+            "[REVIEW_API.create_task] RESAVE_FORBIDDEN form_id={} existing_task_id={} requester_id={} actor_id={} elapsed_ms={}",
+            form_id,
+            existing_id,
+            existing_requester,
+            actor,
+            started.elapsed().as_millis()
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(TaskResponse {
+                success: false,
+                task: None,
+                error_message: Some(format!(
+                    "权限不足：当前用户 {} 不是该提资单发起人（{}），无权覆盖保存",
+                    actor, existing_requester
+                )),
             }),
         );
     }
@@ -1255,17 +1293,44 @@ async fn update_task(
     Json(request): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
     let started = std::time::Instant::now();
-    if let Err((status, message)) = authorize_task_write(&id, &claims).await {
+    let existing = match authorize_task_write(&id, &claims).await {
+        Ok(task) => task,
+        Err((status, message)) => {
+            warn!(
+                "[REVIEW_API.update_task] DENY task_id={} actor_id={} reason={}",
+                id, claims.user_id, message
+            );
+            return (
+                status,
+                Json(TaskResponse {
+                    success: false,
+                    task: None,
+                    error_message: Some(message),
+                }),
+            );
+        }
+    };
+    let existing_node = existing
+        .current_node
+        .as_deref()
+        .map(str::trim)
+        .filter(|node| !node.is_empty())
+        .unwrap_or("sj")
+        .to_lowercase();
+    if existing_node != "sj" {
         warn!(
-            "[REVIEW_API.update_task] DENY task_id={} actor_id={} reason={}",
-            id, claims.user_id, message
+            "[REVIEW_API.update_task] REJECT_OFF_SJ task_id={} existing_node={} actor_id={} elapsed_ms={}",
+            id,
+            existing_node,
+            claims.user_id,
+            started.elapsed().as_millis()
         );
         return (
-            status,
+            StatusCode::CONFLICT,
             Json(TaskResponse {
                 success: false,
                 task: None,
-                error_message: Some(message),
+                error_message: Some(resave_rejected_message(&existing_node)),
             }),
         );
     }
@@ -1353,7 +1418,7 @@ async fn update_task(
             {
                 let rows: Vec<TaskRow> = resp.take(0).unwrap_or_default();
                 if let Some(row) = rows.into_iter().next() {
-                    let task = row.to_review_task();
+                    let task = hydrate_task_attachments(row.to_review_task()).await;
                     // `components` 变了就同步 `review_form_model`（PMS `workflow/sync` 的 `data.models`
                     // 读的是它；计划 D6 / T1-4）。失败不回滚任务行——与 `create_task` 首建回填同口径，
                     // 但要响亮：进响应 `error_message`，前端会原文展示。
@@ -1694,10 +1759,14 @@ async fn update_task_status(
                 );
             }
             let history_sql = r#"
-                CREATE review_history CONTENT {
+                CREATE review_workflow_history CONTENT {
                     task_id: $task_id,
                     form_id: $form_id,
                     action: $action,
+                    operator_id: 'system',
+                    operator_name: '系统',
+                    actor_id: 'system',
+                    actor_name: '系统',
                     user_id: 'system',
                     user_name: '系统',
                     source: 'plant3d-internal',
@@ -1921,7 +1990,10 @@ struct BatchReactivateRequest {
 }
 
 /// POST /api/review/tasks/batch-reactivate — 批量将 sj/draft 任务推进到 jd/submitted
-async fn batch_reactivate_tasks(Json(request): Json<BatchReactivateRequest>) -> impl IntoResponse {
+async fn batch_reactivate_tasks(
+    Extension(claims): Extension<TokenClaims>,
+    Json(request): Json<BatchReactivateRequest>,
+) -> impl IntoResponse {
     if request.task_ids.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1974,11 +2046,33 @@ async fn batch_reactivate_tasks(Json(request): Json<BatchReactivateRequest>) -> 
         }
     };
 
+    let is_admin = claims
+        .role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("admin"))
+        .unwrap_or(false);
+
     for task_id in &request.task_ids {
         let trimmed = task_id.trim();
         if trimmed.is_empty() {
             skip_count += 1;
             continue;
+        }
+
+        if !is_admin {
+            if let Err((_status, message)) = authorize_task_write(trimmed, &claims).await {
+                warn!(
+                    "[BATCH_REACTIVATE] DENY task_id={} actor_id={} reason={}",
+                    trimmed, claims.user_id, message
+                );
+                results.push(serde_json::json!({
+                    "task_id": trimmed,
+                    "status": "forbidden",
+                    "error": message,
+                }));
+                skip_count += 1;
+                continue;
+            }
         }
 
         match await_review_query(

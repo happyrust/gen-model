@@ -1,0 +1,9 @@
+HTTP/1.1 422 Unprocessable Entity
+content-type: application/json
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-allow-origin: *
+access-control-expose-headers: *
+content-length: 143
+date: Fri, 11 Sep 2026 17:21:04 GMT
+
+{"code":"precondition","message":"refno 24383/99997（FTUB）不是派生隐式管身的路由容器，没有管道尺寸标注","detail":null}

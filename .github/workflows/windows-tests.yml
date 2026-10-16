@@ -5,12 +5,17 @@ name: Windows tests
 # 本仓的自研依赖是 **path 依赖**，指向仓库外的兄弟目录（Cargo.toml：
 # `../vendor/e3d-io`、`../vendor/e3d-attlib`、`../vendor/e3d-model`、
 # `../vendor/plant-mbd/crates/plant-mbd`，以及 aios_core 的 [patch] →
-# `../vendor/old-aios-core`）。e3d-io 自己又 path 依赖 `../e3d-attlib`，
+# `../vendor/old-aios-core`）。path 依赖不能放 workspace 目录内——cargo 会把
+# 树内 path 依赖强制收编成本 workspace 成员（exclude 拦不住），vendor 仓自己的
+# workspace 继承会错位。e3d-io 自己又 path 依赖 `../e3d-attlib`，
 # 所以它们只能以「并排放在 vendor/ 下」的目录形状存在——git 依赖救不了。
 #
-# 因此 CI 用多仓 checkout 复刻本地 old/ 的目录形状：
+# 但运行期/编译期路径（include_str!、测试 fixture、schema 目录）统一走仓内
+# `vendor/shared`——本地它是指向 old/vendor/ 的 junction，CI 里 checkout 完
+# 兄弟 vendor/ 后同样建一个 junction 指过去，两侧访问路径就都对上了：
 #   $GITHUB_WORKSPACE/
 #     gen-model/            ← 本仓（checkout path: gen-model）
+#       vendor/shared       ← junction → ../vendor（见下方 Link 步骤）
 #     vendor/e3d-io         ← happyrust/e3d-io
 #     vendor/e3d-attlib     ← happyrust/e3d-attlib
 #     vendor/e3d-model      ← happyrust/e3d-model
@@ -18,10 +23,10 @@ name: Windows tests
 #     vendor/old-aios-core  ← happyrust/old-aios-core
 #     target/               ← CARGO_TARGET_DIR（缓存键照旧叫 target）
 #
-# 兄弟仓是私有仓。`GITHUB_TOKEN` 只能读本仓，拿去拉 happyrust/e3d-io 等会在
+# vendor 仓是私有仓。`GITHUB_TOKEN` 只能读本仓，拿去拉 happyrust/e3d-io 等会在
 # 「Determining the default branch」得到 404 Not Found。检出用仓库 secret
 # `GH_PAT`（与 linux 打包同一把、对 happyrust/* 有读权限的 PAT）。
-# 跑之前的硬前提：**五个兄弟仓的默认分支必须
+# 跑之前的硬前提：**五个 vendor 仓的默认分支必须
 # 推到 GitHub 且与本仓当前提交互相兼容**——本地未提交/未推送的 vendor 改动，
 # CI 一概看不见。e3d-io 的 `noun_catalog` 会调 `AttlibData::catalogue_value_nouns`，
 # e3d-attlib 默认分支须含 `f37be2e`，否则生产构建在 e3d-io 上编不过。
@@ -123,6 +128,14 @@ jobs:
           path: vendor/old-aios-core
           ref: codex/libgm-snout-caliber
 
+      # 运行期/编译期路径（include_str!、测试 fixture、schema 目录）走仓内 vendor/shared——
+      # 把兄弟 vendor/ 联接进去，和本地 vendor/shared junction 同形状。
+      - name: Link vendor into gen-model/vendor/shared
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force gen-model\vendor | Out-Null
+          New-Item -ItemType Junction -Path gen-model\vendor\shared -Target "$env:GITHUB_WORKSPACE\vendor" | Out-Null
+
       # handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 嵌进二进制。
       # 路径相对 src/web_service，落到本仓库检出目录的同级：$GITHUB_WORKSPACE/plant-ui。
       - name: Check out plant-ui web assets
@@ -207,13 +220,8 @@ jobs:
         shell: pwsh
         run: ./scripts/check-production-no-legacy.ps1
 
-      - name: Compile the explicit legacy model CLI
-        shell: pwsh
-        run: >-
-          cargo check --locked
-          --bin legacy_model_gen
-          --no-default-features
-          --features ws,gen_model,manifold,project_hd,legacy_model
+      # legacy_model_gen 随 direct_model.source 于 2026-09-14 退役（见 Cargo.toml）。
+      # 保留上方生产构建与 no-legacy 护栏，不再编译已删除的 CLI。
 
       # old-pdms-io 2026-09-04 整体退出：既没有 feature 门也没有参照臂。这一步是 compile-fail
       # doctest（`collect_changes` 在任何构建里都不存在），下一步是护栏脚本（依赖图 / manifest /
@@ -400,6 +408,13 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: vendor/old-aios-core
           ref: codex/libgm-snout-caliber
+
+      # 同上一个 job：把兄弟 vendor/ 联接到仓内 vendor/shared。
+      - name: Link vendor into gen-model/vendor/shared
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force gen-model\vendor | Out-Null
+          New-Item -ItemType Junction -Path gen-model\vendor\shared -Target "$env:GITHUB_WORKSPACE\vendor" | Out-Null
 
       # handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 嵌进二进制。
       # 路径相对 src/web_service，落到本仓库检出目录的同级：$GITHUB_WORKSPACE/plant-ui。

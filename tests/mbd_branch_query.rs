@@ -249,7 +249,7 @@ fn direct_read_agrees_with_the_surreal_era_field_fixture() {
         return;
     };
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../vendor/plant-mbd/fixtures/field-24383_99996.json");
+        .join("vendor/shared/plant-mbd/fixtures/field-24383_99996.json");
     let Ok(text) = std::fs::read_to_string(&fixture_path) else {
         eprintln!("SKIP: plant-mbd field fixture not present at {fixture_path:?}");
         return;

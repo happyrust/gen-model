@@ -112,7 +112,7 @@ pub async fn ensure_review_form_stub(
                 SET
                     project_id = IF string::len(string::trim($project_id)) > 0 THEN $project_id ELSE project_id END,
                     user_id = IF string::len(string::trim($requester_id)) > 0 THEN $requester_id ELSE user_id END,
-                    requester_id = IF string::len(string::trim($requester_id)) > 0 THEN $requester_id ELSE requester_id END,
+                    requester_id = IF (requester_id IS NONE OR string::len(string::trim(requester_id)) = 0 OR $role = 'sj') AND string::len(string::trim($requester_id)) > 0 THEN $requester_id ELSE requester_id END,
                     role = IF string::len(string::trim($role)) > 0 THEN $role ELSE role END,
                     source = $source,
                     deleted = false,

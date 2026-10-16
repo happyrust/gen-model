@@ -2556,7 +2556,7 @@ mod tests {
                 .map(|f| f.to_string())
                 .collect::<Vec<_>>()
         );
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/e3d-io");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/shared/e3d-io");
         assert!(
             root.join("Cargo.toml").is_file(),
             "e3d-io 应在 {}（Cargo.toml 的 path 依赖）",
@@ -2583,7 +2583,9 @@ mod tests {
         zero.sort_unstable();
         assert_eq!(
             zero,
-            ["ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS"],
+            [
+                "ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS"
+            ],
             "e3d-io 目录求值读到的 DCHC=0 名字变了：核一遍新名字是不是在设计元素上读的"
         );
         // 它单独读到、而两票之外的名字里，没有一个是设计侧 DCHC=0 的：设计侧那几个要么 DCHC≠0 要么已在 e3d_model。
@@ -2598,8 +2600,9 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天七个，全来自 e3d-model：`DIR` catalogue_point、
-    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十个，全来自 e3d-model：`DIR` catalogue_point、
+    /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减、
+    /// `CMPR`/`OUTD`/`MINBEN` 电缆扫掠
     /// ——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都
     /// 不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
@@ -2610,7 +2613,12 @@ mod tests {
             .map(String::as_str)
             .collect();
         zero.sort_unstable();
-        assert_eq!(zero, ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF"]);
+        assert_eq!(
+            zero,
+            [
+                "CMPR", "DIR", "FILL", "GTYP", "MINBEN", "NGMR", "OUTD", "PKEY", "UKEY", "VXREF"
+            ]
+        );
         for name in DATA_ONLY_ATTR_NAMES {
             assert!(
                 !generation_reads_attribute(name),
@@ -2630,7 +2638,8 @@ mod tests {
         // `NAPP`，前三个本就在模型面那一半里，并集只多 `NAPP`（141）；宿主 FIXING 扫描带进目录件的 `NGMR`（142）。
         // 2026-09-28：详图式扶手立柱 / 端头 / 门的现算标架（e3d-model `transform::handrail_post_world`，
         // 09-28 `128e831` 起那批栏杆提交）带进 `HRJUSL`（对正 LEFT / RIGH / FORW）与 `WIDT`（HRGATE 门宽）（144）。
-        assert_eq!(generation_read_set().len(), 144, "读取集合条数漂移");
+        // 2026-10-16：电缆 `MINBEN`（最小弯曲半径，`cable.rs` `get_number("MINBEN")`）进集合（150）。
+        assert_eq!(generation_read_set().len(), 150, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2705,7 +2714,9 @@ mod tests {
         let names = wnoevt_no_event_names();
         // 快照口径：E3D 3.1 字典恰好 7 个（变了要重新确认它们仍非模型属性）。
         assert_eq!(names.len(), 7, "WNOEVT==1 的条数漂移");
-        for name in ["DPOSCA", "EVITCA", "EVITCP", "EXTEMP", "LIGTCA", "LIGTCP", "TEMPLI"] {
+        for name in [
+            "DPOSCA", "EVITCA", "EVITCP", "EXTEMP", "LIGTCA", "LIGTCP", "TEMPLI",
+        ] {
             assert!(names.contains(name), "{name} 应在 WNOEVT 名单里");
             // 事件门命中 → 无条件走「不动模型」，且这判定在 DCHC 之前（归一化 / att. 前缀同答）。
             assert!(attribute_no_event(name), "{name}");
@@ -2761,7 +2772,9 @@ mod tests {
             assert!(!attribute_is_curated_metadata(name), "{name}");
         }
         // 读取集合那一票：字典说 0、我们却真拿来生成的七个输入，一个都不放行。
-        for name in ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF", "att.dir"] {
+        for name in [
+            "DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF", "att.dir",
+        ] {
             assert_eq!(raw_dchc_code(name), Some(0), "{name}");
             assert!(generation_reads_attribute(name), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
@@ -2830,7 +2843,7 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡七个，其余全部放行。
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十个，其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2843,9 +2856,20 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 7,
+            3941 - 10,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
+    }
+
+    #[test]
+    fn cable_property_inputs_are_not_metadata_only_even_when_dchc_is_zero() {
+        for name in ["CMPR", "OUTD", "MINBEN"] {
+            assert_eq!(raw_dchc_code(name), Some(0));
+            assert!(generation_reads_attribute(name));
+            assert!(!attribute_is_metadata_only(name));
+            assert_eq!(metadata_only_tier([name]), None);
+            assert_eq!(metadata_only_tier(["NAME", name]), None);
+        }
     }
 
     /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字

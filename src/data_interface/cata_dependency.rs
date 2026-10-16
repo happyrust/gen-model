@@ -1182,7 +1182,7 @@ mod tests {
     /// 名单必须与 e3d-model 的护栏同源：`FILE_TABLE_REFERENCES` 里指向 CATA 的那一族 + `HSRO` / `LSRO`。
     #[test]
     fn catalogue_chain_attributes_match_e3d_model_guard() {
-        let guard = include_str!("../../../vendor/e3d-model/tests/reference_reads_guard.rs");
+        let guard = include_str!("../../vendor/shared/e3d-model/tests/reference_reads_guard.rs");
         for name in CATALOGUE_CHAIN_ATTRIBUTES {
             assert!(
                 guard.contains(&format!("\"{name}\"")),

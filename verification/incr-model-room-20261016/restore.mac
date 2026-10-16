@@ -1,0 +1,11 @@
+-- Restore the EQUI moved by apply.mac back to U 1400 (member of R224 again).
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/incr-room-equi/restore.log" OVER
+=24384/24776
+Q CE
+Q TYPE
+Q NAME
+Q POS
+POS E -2821.27001953125 N 8003.9599609375 U 1400
+Q POS
+SAVEWORK 'CODEX incr e2e: EQUI 24384/24776 restore U 53400 -> 1400'
+ALPHA LOG END

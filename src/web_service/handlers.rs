@@ -725,13 +725,16 @@ pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoRe
 pub(crate) async fn clear_room_rebuild_edges_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
 ) -> Result<surrealdb::Response, surrealdb::Error> {
-    db.query("DELETE room_relate; DELETE room_panel_relate; UPDATE dbnum_watermark SET model_room_generation = NONE, model_room_stray_generations = []; UPSERT room_build:main SET room_update_record = NONE, room_updated_at = NONE;")
+    // One request is not one transaction: failure of either invalidation must
+    // roll back both edge deletes, otherwise old credentials can certify empty edges.
+    db.query("BEGIN TRANSACTION; DELETE room_relate; DELETE room_panel_relate; UPDATE dbnum_watermark SET model_room_generation = NONE, model_room_stray_generations = []; UPSERT room_build:main SET room_update_record = NONE, room_updated_at = NONE; COMMIT TRANSACTION;")
         .await
         .and_then(|response| response.check())
 }
 
-/// 「重新生成房间」的后台本体。任何一步失败都不回滚也不重试——`record_startup_init`
-/// 已把生命周期翻成 `Blocked`/`Ready`，欠账靠 `model_room_generation` 与常驻代号的不等兜底。
+/// 「重新生成房间」的后台本体。全表清边与凭据作废在同一事务中，失败一起回滚；
+/// 整轮不作跨阶段回滚或重试。`record_startup_init` 把生命周期翻成 `Blocked`/`Ready`，
+/// 清边成功后未完成的逐库欠账靠 `model_room_generation` 与常驻代号的不等兜底。
 async fn run_rooms_rebuild() {
     use crate::fast_model::room_resident as resident;
     let outcome = match resident::rebuild_resident_model().await {
@@ -4571,8 +4574,10 @@ mod tests {
         );
         // Assert the URL fallbacks themselves, not an incidental total count:
         // the embedded page supports both legacy and current config shapes.
+        // (plant-ui 工作线 2026-10-16 把 data_api_url 的 trim+fallback 拆成了
+        // const + 赋值两行，钉串跟着拆成两段；语义不变：读出来先 trim，空则回退 origin。)
         assert!(index.contains("configuredModelUrl !== \"http://127.0.0.1:8022\""));
-        assert!(index.contains("current.data_api_url?.trim() || window.location.origin"));
+        assert!(index.contains("const configuredDataUrl = current.data_api_url?.trim()"));
         assert!(index.contains("current.data_api_url = configuredDataUrl || window.location.origin"));
         assert!(index.contains(": window.location.origin"));
 
