@@ -3696,9 +3696,12 @@ async fn persist_republished_roots(
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
         .collect::<anyhow::Result<Vec<_>>>()?;
     if crate::options::store_mode().is_durable() {
-        // Both cheap-path executors already crossed the single
-        // ModelWriteBehind::publish seam. Persistence and room calculation are
-        // owned by its background worker.
+        // Completed roots already crossed the ModelWriteBehind::publish seam,
+        // while replayed roots skipped publish at the idempotence gate; ensure
+        // any unacknowledged landed root is tracked by write-behind before the
+        // task's durable barrier awaits it.
+        crate::fast_model::model_write_behind::reconcile_replayed_roots(&refnos)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         return Ok(std::collections::HashMap::new());
     }
     let rooms = match frozen_room_calculator() {

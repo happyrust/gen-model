@@ -1295,8 +1295,10 @@ impl WindowRootSources {
             .collect()
     }
 
-    /// 刚体前移（ADR-066）的分桶，在 [`Self::impact`] 之后调。`expanded` = `impact.touched` 里不是
-    /// 闭包直接命中的根（C2 / C8 / P4 加进来的）——它们一律不走便宜路（D1 规则 5）。
+    /// 刚体前移（ADR-066）的分桶，在 [`Self::impact`] 之后调。`expanded` = 三条级联扩展
+    /// （[`Self::cascaded_roots`]：C2 / C8 / P4 各自的目标集）并上 `impact.touched` 里不是闭包直接命中的根——
+    /// 哪怕一根既被闭包直接命中（如所在 ZONE 挪位或自身纯位姿变动）、又是某条级联的对端，
+    /// 也必须算进 `expanded` 而一律不走便宜路（D1 规则 5）。
     /// `settled` = `roots_S` 里已发布且安定的根（[`settled_base_roots`]：S 端根集减去账本里还欠着的）。
     /// 开关关着时 `self.rigid.enabled == false`，返回默认值。
     pub(crate) fn rigid_motion(
@@ -1306,7 +1308,12 @@ impl WindowRootSources {
         impact: &WindowImpact,
     ) -> TransformClassification {
         let direct = self.directly_touched(roots_s);
-        let expanded: BTreeSet<RefnoEnum> = impact.touched.difference(&direct).copied().collect();
+        let expanded: BTreeSet<RefnoEnum> = impact
+            .touched
+            .difference(&direct)
+            .copied()
+            .chain(self.cascaded_roots())
+            .collect();
         classify_transform_roots(
             &self.roots_t,
             &self.rigid.root_ancestors_t,
@@ -3188,6 +3195,114 @@ mod tests {
             assert!(
                 collect.contains(switch),
                 "候选表为单元级收集时必须要求 {switch}"
+            );
+        }
+    }
+
+    /// ADR-066 D1 规则 5 回归：一根既被闭包直接命中（如所在 ZONE 挪位或自身纯位姿变动）、又是某条级联
+    /// （C2 / C8 / P4）的目标根时，`impact.touched.difference(&direct)` 会把它漏掉；`WindowRootSources::rigid_motion`
+    /// 必须把 [`WindowRootSources::cascaded_roots`] 并进 `expanded`，把这根挡在 `transform` 之外留在 `regen`。
+    #[test]
+    fn rigid_motion_excludes_cascaded_roots_even_when_also_directly_touched() {
+        let roots_s = vec![persisted(10, "EQUI"), persisted(20, "EQUI")];
+        let roots_t = vec![
+            root(10, "EQUI", GenerationRootKind::DeliveryUnit),
+            root(20, "EQUI", GenerationRootKind::DeliveryUnit),
+        ];
+        let settled: BTreeSet<RefnoEnum> = [r(10), r(20)].into_iter().collect();
+        let make_sources = || WindowRootSources {
+            base_sesno: 1,
+            target_sesno: 2,
+            roots_s: roots_s.clone(),
+            roots_t: roots_t.clone(),
+            plan: UpdatePlan {
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                ledger: ChangeLedger::new(),
+                full_rebuild: None,
+                report: Default::default(),
+            },
+            closure: AffectedClosure {
+                refnos: BTreeSet::from([(24384, 1), (24384, 10), (24384, 20)]),
+                unreadable: Vec::new(),
+            },
+            index_keys: 100,
+            xgeometry_observed: 0,
+            xgeometry_unreadable: 0,
+            nested_roots: 0,
+            duplicate_coverage_elements: 0,
+            structural_connection: Default::default(),
+            cable_endpoint: Default::default(),
+            design_reference: Default::default(),
+            rigid: RigidMotionSources {
+                enabled: true,
+                candidates: vec![WindowCandidate {
+                    refno: r(1),
+                    kind: CandidateKind::Anchor {
+                        delta: glam::DMat4::from_translation(glam::DVec3::new(10.0, 0.0, 0.0)),
+                        rigid: Ok(()),
+                    },
+                    chain_t: Vec::new(),
+                    chain_s: Vec::new(),
+                }],
+                root_ancestors_t: BTreeMap::from([(r(10), vec![r(1)]), (r(20), vec![r(1)])]),
+                notes: Vec::new(),
+            },
+            removed_units: Vec::new(),
+        };
+
+        // 基线：没有级联命中时，ZONE 1 名下直接命中的两个根 10、20 都走刚体前移。
+        let baseline = make_sources();
+        let impact = baseline.impact(&roots_s);
+        let out = baseline.rigid_motion(&roots_s, &settled, &impact);
+        assert_eq!(
+            out.transform.keys().copied().collect::<Vec<_>>(),
+            vec![r(10), r(20)]
+        );
+        assert!(out.rejected.is_empty());
+
+        // C2 / C8 / P4 任一条开启且把 r(10) 列为级联目标根时，哪怕 r(10) 已经在 directly_touched 里
+        // （`impact.touched.difference(&direct)` 为空），也必须被挡在 transform 之外。
+        for label in ["C2", "C8", "P4"] {
+            let mut sources = make_sources();
+            match label {
+                "C2" => {
+                    sources.structural_connection.enabled = true;
+                    sources.structural_connection.far_end_roots.insert(r(10));
+                }
+                "C8" => {
+                    sources.cable_endpoint.enabled = true;
+                    sources.cable_endpoint.referrer_roots.insert(r(10));
+                }
+                "P4" => {
+                    sources.design_reference.enabled = true;
+                    sources.design_reference.referrer_roots.insert(r(10));
+                }
+                _ => unreachable!(),
+            }
+            let impact = sources.impact(&roots_s);
+            assert_eq!(
+                impact
+                    .touched
+                    .difference(&sources.directly_touched(&roots_s))
+                    .count(),
+                0,
+                "{label}: r(10) 同时在 direct 与 cascaded_roots 里，集合差为空"
+            );
+            let out = sources.rigid_motion(&roots_s, &settled, &impact);
+            assert_eq!(
+                out.transform.keys().copied().collect::<Vec<_>>(),
+                vec![r(20)],
+                "{label}: 被级联命中的 r(10) 必须留在 regen，未被级联命中的 r(20) 照常走 transform"
+            );
+            assert!(
+                out.rejected.iter().any(|(root, reason)| {
+                    *root == r(10) && reason.contains("cascade expansion (C2 / C8 / P4)")
+                }),
+                "{label}: {:?}",
+                out.rejected
             );
         }
     }

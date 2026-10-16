@@ -655,7 +655,65 @@ pub(crate) fn publish(commits: Vec<ProjectionCommit>) -> Result<MemoryReady, Ove
     ModelWriteBehind::global().publish_commits(commits)
 }
 
+/// 幂等重放闸（`RepublishGate::SkipAlreadyAtTarget`）跳过 `publish` 的根：内存回执已在 `T`，
+/// 若已拿到匹配的 durable ACK 则不动；若仍待落盘（[`ModelMemoryStore::root_needs_persist`]），
+/// 补登记进 write-behind 队列并叫醒 worker，防止 `await_roots_durable` 因队列缺席而假阳性判 `acked`。
+pub(crate) fn reconcile_replayed_roots(roots: &[RefNo]) -> Result<(), OverlayRejected> {
+    if !crate::options::store_mode().is_durable() {
+        return Ok(());
+    }
+    ModelWriteBehind::global().reconcile_roots_if_unacked(roots)
+}
+
 impl ModelWriteBehind {
+    fn reconcile_roots_if_unacked(
+        &'static self,
+        roots: &[RefNo],
+    ) -> Result<(), OverlayRejected> {
+        let unacked: Vec<(RefNo, RootReceipt)> = roots
+            .iter()
+            .copied()
+            .filter(|root| self.store.root_needs_persist(*root))
+            .filter_map(|root| {
+                self.store
+                    .receipt(ProjectionScope::Current, root)
+                    .map(|receipt| (root, receipt))
+            })
+            .collect();
+        if unacked.is_empty() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let mut state = self.state();
+        if !state.accepting {
+            return Err(OverlayRejected);
+        }
+        for (root, receipt) in unacked {
+            let identity = RootIdentity::from(&receipt);
+            let key = (root.dbno(), packed_refno(root));
+            let rearm = match state.pending.get(&key) {
+                Some(entry)
+                    if entry.identity == identity
+                        && matches!(
+                            entry.status,
+                            PendingStatus::Pending | PendingStatus::Persisting
+                        ) =>
+                {
+                    None
+                }
+                _ => {
+                    state.next_submission_epoch =
+                        state.next_submission_epoch.wrapping_add(1).max(1);
+                    Some(state.next_submission_epoch)
+                }
+            };
+            upsert_pending(&mut state, root.dbno(), root, identity, now, rearm);
+        }
+        drop(state);
+        let _ = self.ensure_worker();
+        self.notify.notify_one();
+        Ok(())
+    }
     fn publish_commits(
         &'static self,
         commits: Vec<ProjectionCommit>,
@@ -1941,5 +1999,48 @@ mod tests {
             .0;
         assert!(deletion.contains("lock_db_generation(root.dbno())"));
         assert!(deletion.contains("model_write_behind::publish"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconciling_replayed_roots_enqueues_unacked_overlay_and_ignores_already_acked_roots() {
+        let acked_root = RefNo::new(7997, 140);
+        let unacked_replayed = RefNo::new(7997, 141);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![
+            acked(acked_root, "already-acked"),
+            acked(unacked_replayed, "replayed-at-t"),
+        ]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller: &'static ModelWriteBehind =
+            Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        // 1) acked_root 正常发布并落盘 ACK。
+        controller
+            .publish_commits(vec![commit(acked_root, "already-acked")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).pending_unique_roots == 0).await;
+        assert!(!store.root_needs_persist(acked_root));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 2) unacked_replayed 模拟「内存回执已在 T、被重放闸 SkipAlreadyAtTarget 跳过了 publish，
+        //    但尚未拿到 durable ACK 且不在 pending 队列里」的形状。
+        store.try_commit_current(vec![commit(unacked_replayed, "replayed-at-t")]);
+        assert!(store.root_needs_persist(unacked_replayed));
+        assert_eq!(snapshot_for(controller).pending_unique_roots, 0);
+
+        controller
+            .reconcile_roots_if_unacked(&[acked_root, unacked_replayed])
+            .unwrap();
+        let outcome = controller
+            .await_roots(7997, &[acked_root, unacked_replayed], budget(5, 600))
+            .await;
+        assert_eq!(outcome.acked, vec![acked_root, unacked_replayed]);
+        assert!(outcome.all_acked());
+        assert!(!store.root_needs_persist(unacked_replayed));
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "未 ACK 的重放根必须补进 write-behind 落盘，已 ACK 的根不重复刷"
+        );
+        controller.stop_now();
     }
 }
