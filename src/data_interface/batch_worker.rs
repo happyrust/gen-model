@@ -3674,8 +3674,9 @@ async fn run_single_unit(
 /// 生成服务——`the_generation_service_never_reaches_for_a_database` 那条钉守着生成入口不碰库。
 /// 「登记进文件轮次、publish 阶段统一刷 durable」那一路随 publish 退了。
 ///
-/// 房间归属与 regen 同一条路（ADR-073 D1 硬约束④：刚体变换也接）：动过的根按新投影重算它的
-/// 房间边，随模型行同一笔事务落下；计算器在这里冻一次、本批共用，冻不出来本批每根算失败。
+/// 房间归属与 regen 同一条路（ADR-073 D1 硬约束④ / B/T1 一任务一台）：动过的根按新投影重算它的
+/// 房间边，随模型行同一笔事务落下；计算器由 [`run_unit_worklist`] 在任务入口冻一次传进来共用，
+/// 这里不再自己冻。
 ///
 /// `Partial` 之后整根落盘（ADR-080 D7：第一版不跟着切）：`persist_root_impl` 从 `records_of_root`
 /// 取全量记录，没动的记录停在旧会话上、回执在 T——D3 把对账放宽成 `<=` 接的就是这个形状（A5）。
@@ -3687,10 +3688,9 @@ async fn run_single_unit(
 async fn persist_republished_roots(
     dbnum: u32,
     roots: &[String],
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
-    use crate::fast_model::model_db_adapter::{
-        PersistTarget, frozen_room_calculator, persist_roots_batched,
-    };
+    use crate::fast_model::model_db_adapter::{PersistTarget, persist_roots_batched};
     let refnos = roots
         .iter()
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
@@ -3704,22 +3704,12 @@ async fn persist_republished_roots(
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         return Ok(std::collections::HashMap::new());
     }
-    let rooms = match frozen_room_calculator() {
-        Ok(rooms) => rooms,
-        Err(error) => {
-            let text = format!("room calculator unavailable for this task: {error:#}");
-            return Ok(refnos
-                .iter()
-                .map(|root| (root.to_string(), text.clone()))
-                .collect());
-        }
-    };
     let batched = persist_roots_batched(
         PersistTarget::process(),
         crate::fast_model::model_memory_store::ModelMemoryStore::global(),
         dbnum,
         &refnos,
-        rooms.as_ref(),
+        rooms,
     )
     .await?;
     Ok(batched
@@ -3742,6 +3732,7 @@ async fn run_rigid_motion_units(
     progress: &Option<ManualUpdateProgress>,
     fallback_reason: &mut std::collections::HashMap<String, String>,
     warnings: &mut Vec<String>,
+    task_rooms: &Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
 ) -> (
     Vec<ModelUnitResult>,
     Vec<crate::data_interface::manual_update::UnitTask>,
@@ -3857,7 +3848,8 @@ async fn run_rigid_motion_units(
             .map(|task| task.root_refno.clone())
             .filter(|root| completed.contains(root) || replayed.contains(root))
             .collect();
-        let mut persist_failures = match persist_republished_roots(dbnum, &landed_roots).await {
+        let mut persist_failures =
+            match persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref()).await {
             Ok(failures) => failures,
             Err(error) => {
                 warnings.push(format!(
@@ -3948,6 +3940,7 @@ async fn run_unit_publish_units(
     progress: &Option<ManualUpdateProgress>,
     fallback_reason: &mut std::collections::HashMap<String, String>,
     warnings: &mut Vec<String>,
+    task_rooms: &Option<Arc<crate::fast_model::room_model::MemoryRoomCalculator>>,
 ) -> (
     Vec<ModelUnitResult>,
     Vec<crate::data_interface::manual_update::UnitTask>,
@@ -4074,7 +4067,8 @@ async fn run_unit_publish_units(
             .map(|task| task.root_refno.clone())
             .filter(|root| completed.contains(root) || replayed.contains(root))
             .collect();
-        let mut persist_failures = match persist_republished_roots(dbnum, &landed_roots).await {
+        let mut persist_failures =
+            match persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref()).await {
             Ok(failures) => failures,
             Err(error) => {
                 warnings.push(format!(
@@ -4242,6 +4236,7 @@ async fn run_unit_worklist(
             progress,
             &mut fallback_reason,
             warnings,
+            &task_rooms,
         )
         .await;
         settlement_failed |= transform_settlement_failed;
@@ -4265,6 +4260,7 @@ async fn run_unit_worklist(
             progress,
             &mut unit_fallback_reason,
             warnings,
+            &task_rooms,
         )
         .await;
         settlement_failed |= unit_settlement_failed;
@@ -6583,8 +6579,8 @@ mod tests {
             "回退的单元清掉提示再交回整根重算"
         );
         assert!(
-            stage.contains("persist_republished_roots(dbnum, &landed_roots)"),
-            "落库与刚体路同一条"
+            stage.contains("persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref())"),
+            "落库与刚体路同一条，且共用本任务那台房间计算器"
         );
         assert!(
             !stage.contains("records_of_root(") && !stage.contains("manifest_hash("),
@@ -6656,6 +6652,24 @@ mod tests {
         assert!(
             single.contains("generate_unit_model_with_rooms(mgr, &task.root_refno, rooms)"),
             "逐根重试同样用任务那一台: {single}"
+        );
+        let cheap_paths = source
+            .split_once("async fn persist_republished_roots(")
+            .expect("cheap-path persist")
+            .1
+            .split_once("async fn run_unit_worklist(")
+            .expect("cheap-path stages end")
+            .0;
+        assert!(
+            !cheap_paths.contains("frozen_room_calculator()"),
+            "刚体前移 / 单元级发布 / persist_republished_roots 都共用任务那一台，不许自己再冻计算器: {cheap_paths}"
+        );
+        assert_eq!(
+            cheap_paths
+                .matches("persist_republished_roots(dbnum, &landed_roots, task_rooms.as_deref())")
+                .count(),
+            2,
+            "刚体前移与单元级发布两处落库都把本任务那一台房间计算器传给 persist_republished_roots: {cheap_paths}"
         );
     }
 
