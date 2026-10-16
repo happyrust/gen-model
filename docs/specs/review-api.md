@@ -129,15 +129,16 @@ requester / checker / approver / reviewer **全部为空**（PMS 外部驱动、
 
 | 方法 · 路径 | 请求 | 响应 |
 | --- | --- | --- |
-| `POST /api/review/records` | `ConfirmedRecordData`（`camelCase`）：`taskId, formId?, type, annotations[], cloudAnnotations[], rectAnnotations[], obbAnnotations[], measurements[], dimensionDocument?, dimensionDocumentBaseVersion, note` | `ConfirmedRecordResponse = {success, record?, records?, error_message?}`；`dimensionDocument` 版本 CAS 失败 → 409 `{success:false, error_message:…}` |
+| `POST /api/review/records` | `ConfirmedRecordData`（`camelCase`）：`taskId, formId?, type, annotations[], cloudAnnotations[], rectAnnotations[], obbAnnotations[], measurements[], dimensionDocument?, dimensionDocumentBaseVersion, note, modelContext?, clearanceSnapshot?` | `ConfirmedRecordResponse = {success, record?, records?, error_message?}`；`dimensionDocument` 版本 CAS 失败 → 409 `{success:false, error_message:…}` |
 | `GET /api/review/records/by-task/{task_id}` | — | `{success, records:[ConfirmedRecordWithMeta]}` |
 | `DELETE /api/review/records/item/{record_id}` | — | `{success, error_message?}` |
 | `DELETE /api/review/records/clear-task/{task_id}` | — | `{success, error_message?}` |
 
-`ConfirmedRecordWithMeta = {recordRevision?, currentNode, operatorId, id, taskId, formId, type, annotations, cloudAnnotations, rectAnnotations, obbAnnotations, measurements,
+`ConfirmedRecordWithMeta = {recordRevision?, currentNode, operatorId, modelContext?, clearanceSnapshot?, id, taskId, formId, type, annotations, cloudAnnotations, rectAnnotations, obbAnnotations, measurements,
 dimensionDocument?, dimensionDocumentVersion, note, confirmedAt(毫秒)}`。
 
 `recordRevision` 在每次成功写入时换成新的非空字符串，`POST` 的 `record` 一定带上。库里还没有修订号的旧行，`GET` 省略该字段。`currentNode` / `operatorId` 两条读写都返回。
+`modelContext` / `clearanceSnapshot` 是请求透传字段：写入时原样落盘、读响应里原样回显；前端拿响应值与本机上下文 key 比对，不一致就判「未完整保存」。旧行没有这两字段时省略。
 
 ## 5. 评论与批注状态（`review/comments.rs`、`review/annotation_state.rs`）
 
