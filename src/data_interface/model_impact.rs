@@ -2556,7 +2556,7 @@ mod tests {
                 .map(|f| f.to_string())
                 .collect::<Vec<_>>()
         );
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/e3d-io");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/shared/e3d-io");
         assert!(
             root.join("Cargo.toml").is_file(),
             "e3d-io 应在 {}（Cargo.toml 的 path 依赖）",
@@ -2583,7 +2583,9 @@ mod tests {
         zero.sort_unstable();
         assert_eq!(
             zero,
-            ["ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS"],
+            [
+                "ANSW", "CMPR", "DKEY", "MAXA", "PSPE", "PTYP", "PURP", "QUES", "TANS"
+            ],
             "e3d-io 目录求值读到的 DCHC=0 名字变了：核一遍新名字是不是在设计元素上读的"
         );
         // 它单独读到、而两票之外的名字里，没有一个是设计侧 DCHC=0 的：设计侧那几个要么 DCHC≠0 要么已在 e3d_model。
@@ -2714,7 +2716,9 @@ mod tests {
         let names = wnoevt_no_event_names();
         // 快照口径：E3D 3.1 字典恰好 7 个（变了要重新确认它们仍非模型属性）。
         assert_eq!(names.len(), 7, "WNOEVT==1 的条数漂移");
-        for name in ["DPOSCA", "EVITCA", "EVITCP", "EXTEMP", "LIGTCA", "LIGTCP", "TEMPLI"] {
+        for name in [
+            "DPOSCA", "EVITCA", "EVITCP", "EXTEMP", "LIGTCA", "LIGTCP", "TEMPLI",
+        ] {
             assert!(names.contains(name), "{name} 应在 WNOEVT 名单里");
             // 事件门命中 → 无条件走「不动模型」，且这判定在 DCHC 之前（归一化 / att. 前缀同答）。
             assert!(attribute_no_event(name), "{name}");
@@ -2770,7 +2774,9 @@ mod tests {
             assert!(!attribute_is_curated_metadata(name), "{name}");
         }
         // 读取集合那一票：字典说 0、我们却真拿来生成的七个输入，一个都不放行。
-        for name in ["DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF", "att.dir"] {
+        for name in [
+            "DIR", "FILL", "GTYP", "NGMR", "PKEY", "UKEY", "VXREF", "att.dir",
+        ] {
             assert_eq!(raw_dchc_code(name), Some(0), "{name}");
             assert!(generation_reads_attribute(name), "{name}");
             assert!(!attribute_is_metadata_only(name), "{name}");
@@ -2855,6 +2861,17 @@ mod tests {
             3941 - 10,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
+    }
+
+    #[test]
+    fn cable_property_inputs_are_not_metadata_only_even_when_dchc_is_zero() {
+        for name in ["CMPR", "OUTD", "MINBEN"] {
+            assert_eq!(raw_dchc_code(name), Some(0));
+            assert!(generation_reads_attribute(name));
+            assert!(!attribute_is_metadata_only(name));
+            assert_eq!(metadata_only_tier([name]), None);
+            assert_eq!(metadata_only_tier(["NAME", name]), None);
+        }
     }
 
     /// S6 的分档：一次改动的属性全部放行才有档；全在老名单里是 `MetadataOnly`，混进一个新档名字

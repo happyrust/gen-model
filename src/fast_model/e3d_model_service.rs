@@ -44,6 +44,14 @@ use crate::fast_model::model_memory_store::{
     ProjectionCommit, ProjectionScope, RootReceipt, packed_refno,
 };
 
+#[cfg(test)]
+#[path = "orientation_increment_regression_tests.rs"]
+mod orientation_increment_regression_tests;
+
+#[cfg(test)]
+#[path = "orientation_source_diff_fixture.rs"]
+mod orientation_source_diff_fixture;
+
 /// 刚体前移执行体（ADR-066 B6）一轮的结果：哪些根走成便宜路（`completed`），哪些是「回执已在 T」
 /// 的窗口重放（`replayed`——投影一字未动、按已完成计，见 [`republish_gate`]），哪些回退整根重算
 /// （`fallbacks`，带原因）。回退永远正确、只是不省。用 pdms `a/b` 串标识根，方便与 `UnitTask` 对齐。
@@ -3146,7 +3154,10 @@ fn current_mdb_source_inventory()
         .unwrap_or_else(|| {
             mdb_membership::resolve(option, &project, &mdb).map(std::sync::Arc::new)
         })?;
-    let watch_dirs = crate::data_interface::project_paths::plan_watch_dirs(option);
+    // 与上面成员清单的 `get()` 同一口径：拿最近一次权威解析（startup / SYST 刷新 /
+    // 重挂 / 兜底都会刷新 `latest` 缓存）的监控目录计划。这里不是重做时刻，
+    // `plan_watch_dirs` 会把搜索根真扫一遍——探针路径上每任务一次的远程 IO。
+    let watch_dirs = crate::data_interface::mdb_closure::latest_for(option).watch_dir_plan();
     crate::data_interface::project_paths::record_watch_dir_owners(&watch_dirs);
     let mut files = HashMap::new();
     let mut project_files = HashMap::new();
@@ -9109,6 +9120,27 @@ mod tests {
         assert!(body.contains("model_source::dbnum_of_root("));
         assert!(!body.contains("dbnum_watermark"), "{body}");
         assert!(!body.contains("pins_from_watermark"), "{body}");
+    }
+
+    /// 开工探针不许每任务重扫搜索根（ADR-085 D3 追记）：监控目录计划取最近一次权威
+    /// 解析的缓存（`latest_for`，startup / SYST 刷新 / 重挂 / 兜底都会刷新它），与紧邻
+    /// 的 `get()` 成员清单同一代。`plan_watch_dirs` 是现算口，只属于重做时刻——它出现在
+    /// 这里就意味着每个任务开工前都真扫一遍全部搜索根。
+    #[test]
+    fn the_task_probe_reads_the_cached_watch_dir_plan() {
+        let source = service_source();
+        let body = source
+            .split_once(concat!("fn ", "current_mdb_source_inventory("))
+            .expect("current_mdb_source_inventory 还在")
+            .1
+            .split_once(concat!("pub(crate) fn ", "current_mdb_sources("))
+            .expect("current_mdb_source_inventory 在 current_mdb_sources 之前结束")
+            .0;
+        assert!(body.contains("latest_for(option)"), "{body}");
+        assert!(
+            !body.contains(concat!("plan_", "watch_dirs(")),
+            "探针路径不得现算搜索根（每任务一次的远程 IO）: {body}"
+        );
     }
 
     /// ADR-054 constraint 5: an explicit window target is opened as such; the

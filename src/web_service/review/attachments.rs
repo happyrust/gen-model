@@ -503,6 +503,29 @@ async fn upload_attachment(
                 );
             }
         }
+    } else if let Some(fid) = resolved_form_id.as_deref() {
+        match await_review_query(
+            "review.attachments.task_lookup_by_form",
+            db.query(ATTACHMENT_TASK_CONTEXT_BY_FORM_SQL)
+                .bind(("form_id", fid.to_string())),
+        )
+        .await
+        {
+            Ok(mut resp) => {
+                let rows: Vec<AttachmentTaskContextRow> = resp.take(0).unwrap_or_default();
+                task_context = rows.into_iter().next();
+            }
+            Err(e) => {
+                return attachment_error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("校审附件服务暂不可用（任务查询超时）: {}", e),
+                    "review.attachments.task_lookup_by_form",
+                    started,
+                    resolved_form_id.as_deref(),
+                    trimmed_task_id.as_deref(),
+                );
+            }
+        }
     }
 
     if let Some(task) = task_context.as_ref() {

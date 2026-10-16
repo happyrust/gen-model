@@ -671,6 +671,39 @@ async fn test_embed_url_returns_existing_task_for_form_id() {
     cleanup_form(form_id).await;
 }
 
+#[tokio::test]
+async fn test_embed_url_preserves_original_requester_id_when_reviewer_opens_form() {
+    let form_id = "FORM-PRESERVE-REQUESTER";
+    let (status1, _) = post_embed(serde_json::json!({
+        "project_id": "project-1",
+        "user_id": "designer-sj",
+        "form_id": form_id,
+        "role": "sj",
+        "token": s2s_token("designer-sj", "sj")
+    }))
+    .await;
+    assert_eq!(status1, StatusCode::OK);
+
+    let (status2, _) = post_embed(serde_json::json!({
+        "project_id": "project-1",
+        "user_id": "reviewer-jd",
+        "form_id": form_id,
+        "role": "jd",
+        "token": s2s_token("reviewer-jd", "jd")
+    }))
+    .await;
+    assert_eq!(status2, StatusCode::OK);
+
+    let form = super::review_form::get_review_form_by_form_id(form_id)
+        .await
+        .expect("get_review_form_by_form_id")
+        .expect("review_form exists");
+    assert_eq!(form.requester_id, "designer-sj");
+    assert_eq!(form.role.as_deref(), Some("jd"));
+
+    cleanup_form(form_id).await;
+}
+
 // ============================================================================
 // workflow/verify
 // ============================================================================

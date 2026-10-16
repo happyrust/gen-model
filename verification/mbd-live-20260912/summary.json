@@ -1,0 +1,277 @@
+{
+  "captured_at": "2026-09-12T01:20:54.3814919+08:00",
+  "repo": "D:\\work\\plant-code\\old\\gen-model",
+  "git": {
+    "branch": "e3d-direct",
+    "revision": "cf168862aadf9d2744dd2be9dc20a8c2ff270ed3",
+    "dirty": true
+  },
+  "executable": {
+    "path": "D:\\Rust\\target\\debug\\aios-database.exe",
+    "length": 218585600,
+    "last_write_time": "2026-09-12T01:06:57.9269746+08:00",
+    "product_version": null,
+    "sha256": "C2A41AB6988E75BEE0DFAF5CBD65C316E122C963C2EE1F98CDC7BA03021EF46E"
+  },
+  "current_8022": {
+    "pid": 79984,
+    "executable": "C:\\Users\\dpc\\AppData\\Local\\Temp\\gen-model-p5-spawned-mem-e3fde0d72244456ca2062ec893f9e9b6\\aios-database.exe",
+    "command_line": "\"C:\\Users\\dpc\\AppData\\Local\\Temp\\gen-model-p5-spawned-mem-e3fde0d72244456ca2062ec893f9e9b6\\aios-database.exe\" serve",
+    "executable_length": 214982656,
+    "executable_product_version": "0.1.22+g757b23e94390.1789097302.dirty",
+    "executable_sha256": "8D94C169E52FC7ACF52632AD5BFBB65E3049914C9E9AFA6950788381E0C2EED1",
+    "health_status": 200,
+    "service_status": "degraded",
+    "version": "0.1.22",
+    "build_id": "0.1.22+g757b23e94390.1789097302.dirty",
+    "data_read_mode": "direct",
+    "data_face": "read-through",
+    "in_memory_db": true,
+    "core_status": "stale",
+    "core_stale_reason": "项目 AvevaMarineSample 没有解析出任何库目录，无从读取它的 SYS 库",
+    "store_endpoint": "127.0.0.1:18809",
+    "store_medium": "spawned-mem",
+    "mbd_status": 500,
+    "mbd_error": "open D:\\work\\plant-code\\old\\gen-model\\python\\testbed\\projects\\AvevaMarineSample\\ams000\\ams1112_0001: open at None: I/O error on D:\\work\\plant-code\\old\\gen-model\\python\\testbed\\projects\\AvevaMarineSample\\ams000\\ams1112_0001: 系统找不到指定的路径。 (os error 3)"
+  },
+  "isolated_18084": {
+    "port": 18084,
+    "storage": "embedded-mem",
+    "startup_autorun": false,
+    "room_build_skipped": true,
+    "responses": {
+      "24383_99996": {
+        "status": 200,
+        "expected_status": 200,
+        "matches_expected": true,
+        "raw": "isolated-18084-24383_99996.http.txt",
+        "version": "v2",
+        "input_refno": "24383_99996",
+        "branch_refno": "24383_99996",
+        "primitive_count": 58,
+        "primitive_kinds": {
+          "linear_dim": 8,
+          "aid_line": 11,
+          "aid_text": 5,
+          "label": 17,
+          "leader_line": 17
+        },
+        "issue_count": 13,
+        "error_issue_count": 0,
+        "layout_mode": "isodim_main",
+        "geometry_space": "source_mm",
+        "source_to_design_length": 16,
+        "notes": [
+          "isolines=12 ldirs=12 isodim_main=true empty_isolines=6"
+        ]
+      },
+      "24381_145018": {
+        "status": 200,
+        "expected_status": 200,
+        "matches_expected": true,
+        "raw": "isolated-18084-24381_145018.http.txt",
+        "version": "v2",
+        "input_refno": "24381_145018",
+        "branch_refno": "24381_145018",
+        "primitive_count": 77,
+        "primitive_kinds": {
+          "slope_mark": 7,
+          "aid_line": 21,
+          "linear_dim": 18,
+          "aid_text": 3,
+          "label": 14,
+          "leader_line": 14
+        },
+        "issue_count": 0,
+        "error_issue_count": 0,
+        "layout_mode": "isodim_main",
+        "geometry_space": "source_mm",
+        "source_to_design_length": 16,
+        "notes": [
+          "isolines=11 ldirs=11 isodim_main=true empty_isolines=1"
+        ]
+      },
+      "24384_26229": {
+        "status": 200,
+        "expected_status": 200,
+        "matches_expected": true,
+        "raw": "isolated-18084-24384_26229.http.txt",
+        "version": "v2",
+        "input_refno": "24384_26229",
+        "branch_refno": "24384_26229",
+        "primitive_count": 39,
+        "primitive_kinds": {
+          "slope_mark": 1,
+          "aid_line": 6,
+          "linear_dim": 5,
+          "weld_mark": 1,
+          "aid_text": 2,
+          "label": 12,
+          "leader_line": 12
+        },
+        "issue_count": 5,
+        "error_issue_count": 0,
+        "layout_mode": "isodim_main",
+        "geometry_space": "source_mm",
+        "source_to_design_length": 16,
+        "notes": [
+          "isolines=6 ldirs=6 isodim_main=true empty_isolines=3"
+        ]
+      },
+      "bad_refno": {
+        "status": 400,
+        "expected_status": 400,
+        "matches_expected": true,
+        "raw": "isolated-18084-bad-refno.http.txt",
+        "code": "bad_request",
+        "message": "refno `not-a-refno` 无法解析：invalid refno not-a-refno",
+        "detail": null
+      },
+      "missing": {
+        "status": 404,
+        "expected_status": 404,
+        "matches_expected": true,
+        "raw": "isolated-18084-missing.http.txt",
+        "code": "not_found",
+        "message": "refno 24383/999999999 在所钉会话里不存在",
+        "detail": null
+      },
+      "non_route": {
+        "status": 422,
+        "expected_status": 422,
+        "matches_expected": true,
+        "raw": "isolated-18084-non-route.http.txt",
+        "code": "precondition",
+        "message": "refno 24383/99997（FTUB）不是派生隐式管身的路由容器，没有管道尺寸标注",
+        "detail": null
+      }
+    },
+    "pid": 74508,
+    "health": {
+      "status": 200,
+      "service_status": "ok",
+      "project": "AvevaMarineSample",
+      "mdb": "/ALL",
+      "namespace": "1516",
+      "build_id": null,
+      "version": "0.1.22",
+      "data_read_mode": "direct",
+      "data_face": "read-through",
+      "in_memory_db": true,
+      "session_vector": [
+        {
+          "dbnum": 1112,
+          "sesno": 729
+        },
+        {
+          "dbnum": 7997,
+          "sesno": 180
+        },
+        {
+          "dbnum": 7998,
+          "sesno": 12
+        },
+        {
+          "dbnum": 7999,
+          "sesno": 194
+        },
+        {
+          "dbnum": 8000,
+          "sesno": 444
+        },
+        {
+          "dbnum": 7027,
+          "sesno": 445
+        },
+        {
+          "dbnum": 7022,
+          "sesno": 254
+        },
+        {
+          "dbnum": 7015,
+          "sesno": 511
+        },
+        {
+          "dbnum": 7048,
+          "sesno": 54
+        },
+        {
+          "dbnum": 250705,
+          "sesno": 9
+        },
+        {
+          "dbnum": 7009,
+          "sesno": 479
+        },
+        {
+          "dbnum": 7011,
+          "sesno": 641
+        },
+        {
+          "dbnum": 7332,
+          "sesno": 22
+        },
+        {
+          "dbnum": 7330,
+          "sesno": 41
+        },
+        {
+          "dbnum": 7331,
+          "sesno": 23
+        },
+        {
+          "dbnum": 7321,
+          "sesno": 77
+        },
+        {
+          "dbnum": 7329,
+          "sesno": 221
+        },
+        {
+          "dbnum": 7353,
+          "sesno": 95
+        },
+        {
+          "dbnum": 7324,
+          "sesno": 1362
+        },
+        {
+          "dbnum": 7352,
+          "sesno": 50
+        },
+        {
+          "dbnum": 7350,
+          "sesno": 207
+        },
+        {
+          "dbnum": 7354,
+          "sesno": 266
+        },
+        {
+          "dbnum": 7327,
+          "sesno": 1470
+        },
+        {
+          "dbnum": 7356,
+          "sesno": 14
+        },
+        {
+          "dbnum": 7333,
+          "sesno": 1724
+        },
+        {
+          "dbnum": 7326,
+          "sesno": 639
+        },
+        {
+          "dbnum": 7334,
+          "sesno": 310
+        },
+        {
+          "dbnum": 7741,
+          "sesno": 88
+        }
+      ]
+    }
+  }
+}

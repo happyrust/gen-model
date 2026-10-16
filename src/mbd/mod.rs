@@ -1,6 +1,7 @@
 //! MBD 管道尺寸标注的宿主侧（计划 `.planning/2026-09-06-plant-mbd-pipe-dimension`，Phase 1）。
 //!
-//! 分层（plan D4）：`old/vendor/plant-mbd` 是纯求解器——不读库、不 HTTP；本模块负责把一条
+//! 分层（plan D4）：`vendor/shared/plant-mbd`（junction → old/vendor/）是纯求解器——
+//! 不读库、不 HTTP；本模块负责把一条
 //! BRAN 从 E3D 库文件读成它要的**成员结点视图** [`plant_mbd::BranchQueryResult`]
 //! （[`branch_query`]，数据来自 e3d-model 的 `route::walk_route` + `CataloguePoints`，
 //! 即 PML `isobran.getbranmems` 的 `apos/adir/lpos/ldir/pos`），再调 `layout_branch`

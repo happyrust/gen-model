@@ -8,8 +8,8 @@
 //! ```powershell
 //! cargo run --example mbd_branch_dump -- --db D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7999_0001 `
 //!     --scan-dir D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000 --refno 24383/99996 `
-//!     --out-dir ..\vendor\plant-mbd\fixtures\field
-//! cd ..\vendor\plant-mbd; cargo run -p plant-mbd-cli -- golden record --fixture fixtures/field/24383_99996.json --case 24383_99996 --note "…"
+//!     --out-dir vendor\shared\plant-mbd\fixtures\field
+//! cd vendor\shared\plant-mbd; cargo run -p plant-mbd-cli -- golden record --fixture fixtures/field/24383_99996.json --case 24383_99996 --note "…"
 //! ```
 //!
 //! 模板目录默认取 `AIOS_E3D_TEMPLATE_DIR`，再退到 `E:\reverse\e3d\shadow_e3d31_aps_all`（与 direct 系测试同款）。

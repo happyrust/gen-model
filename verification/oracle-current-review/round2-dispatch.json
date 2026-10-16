@@ -1,0 +1,21 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Session refno-gpt6-corrective-review (running; detached)\nUse the wait tool with id=\"refno-gpt6-corrective-review\" to wait without polling."
+    }
+  ],
+  "structuredContent": {
+    "sessionId": "refno-gpt6-corrective-review",
+    "status": "running",
+    "output": "",
+    "models": [
+      {
+        "model": "gpt-6-astra",
+        "status": "pending",
+        "logPath": "models\\gpt-6-astra.log"
+      }
+    ],
+    "detached": true
+  }
+}

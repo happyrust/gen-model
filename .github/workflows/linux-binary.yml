@@ -2,6 +2,7 @@ name: Linux binary
 
 # 目标：在 ubuntu runner 上构出 aios-database 的 x86_64-linux 可执行文件，供 123.57.182.243 部署。
 # 与 windows-binary.yml 的差别有三处：一是 path 依赖的五个 vendor 仓要自己克隆到 ../vendor
+# （另把 gen-model/vendor/shared 软链过去：运行期/编译期路径——include_str!、fixture——走它）
 # （windows 那条从 2026-09-11 起就是因为少了这一步在 34 秒里挂掉的），二是 plant-ui 的
 # web/public 要落在同级目录（web_service 用 include_bytes! 嵌它），三是 protoc / libclang
 # 换成 linux 版。工具链版本、feature 组合与 windows 那条保持一致。
@@ -53,7 +54,8 @@ jobs:
         with:
           path: gen-model
 
-      # Cargo.toml 用 path = "../vendor/..." 吃五个仓，其中四个是私有的，GITHUB_TOKEN 够不着。
+      # Cargo.toml 用 path = "../vendor/..." 吃五个仓（仓内 path 依赖会被 cargo 强制
+      # 收编成 workspace 成员，所以只能放仓外兄弟目录），其中四个是私有的，GITHUB_TOKEN 够不着。
       - name: Checkout vendor path dependencies
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -69,6 +71,10 @@ jobs:
               "https://x-access-token:${GH_PAT}@github.com/happyrust/${repo}.git" "vendor/${repo}"
             echo "${repo} -> $(git -C "vendor/${repo}" rev-parse --short HEAD)"
           done
+          # 运行期路径（include_str!、测试 fixture）走仓内 vendor/shared——软链到兄弟 vendor/，
+          # 和本地 vendor/shared junction 同形状。
+          mkdir -p gen-model/vendor
+          ln -sfn "${GITHUB_WORKSPACE}/vendor" gen-model/vendor/shared
 
       # web_service/handlers.rs 用 include_bytes! 把 plant-ui 的 web/public 整个嵌进二进制，
       # 路径是 ../../../plant-ui/...，即 gen-model 检出目录的同级。只要 web/public 这一棵，
@@ -84,8 +90,8 @@ jobs:
           git -C plant-ui sparse-checkout set web/public
           echo "plant-ui -> $(git -C plant-ui rev-parse --short HEAD)"
           for f in index.html config.example.json \
-                   pkg/plant_ui_app.js pkg/plant_ui_app.d.ts \
-                   pkg/plant_ui_app_bg.wasm pkg/plant_ui_app_bg.wasm.d.ts \
+                   pkg/rs-plant.js pkg/rs-plant.d.ts \
+                   pkg/rs-plant_bg.wasm pkg/rs-plant_bg.wasm.d.ts \
                    assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf \
                    assets/fonts/AlibabaPuHuiTi-2-65-Medium.ttf \
                    assets/fonts/AlibabaPuHuiTi-2-75-SemiBold.ttf \
@@ -256,6 +262,21 @@ jobs:
             old_unit="$(sed -n 's#^.*/\([^/]*\.service\)$#\1#p' "/proc/${old_pid}/cgroup" 2>/dev/null | head -1)"
             case "$(basename "$old_exe")" in
               plant-web-server|plant-model-gen) ;;
+              nginx|openresty|traefik|caddy|envoy|haproxy)
+                # nginx 兼管前端 :80 并反代后端 :${PUBLIC_PORT}，不能停也不能换它。
+                # 只要 :${PUBLIC_PORT} 反代到的后端与 :${TARGET_PORT} 是同一版本，
+                # 公共面目标已达成，跳过 socket 接管；版本对不上才真拒绝。
+                proxy_body="$(curl -fsS --max-time 10 "http://127.0.0.1:${PUBLIC_PORT}/api/v1/health" 2>/dev/null || true)"
+                target_body="$(curl -fsS --max-time 10 "http://127.0.0.1:${TARGET_PORT}/api/v1/health" 2>/dev/null || true)"
+                proxy_version="$(printf '%s' "$proxy_body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                target_version="$(printf '%s' "$target_body" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                if [ -n "$target_version" ] && [ "$proxy_version" = "$target_version" ]; then
+                  echo ":${PUBLIC_PORT} already fronted by ${old_exe:-nginx} (unit=${old_unit:-unknown}); backend versions match (${proxy_version}) — skipping socket cutover"
+                  exit 0
+                fi
+                echo "refusing to replace :${PUBLIC_PORT} listener ${old_exe:-nginx}: version mismatch (public='${proxy_version:-unreachable}' target='${target_version:-unreachable}')" >&2
+                exit 1
+                ;;
               *)
                 echo "refusing to replace unexpected :${PUBLIC_PORT} listener: pid=${old_pid} exe=${old_exe:-unknown} unit=${old_unit:-unknown}" >&2
                 exit 1

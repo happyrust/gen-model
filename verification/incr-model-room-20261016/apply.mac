@@ -1,0 +1,13 @@
+-- Combined model+room increment apply: lift EQUI /1-LNR-Q005-PJ (24384/24776)
+-- from U 1400 (member of R224 via child 24384/24777) up to U 53400 (inside R972).
+-- Exactly one SAVEWORK; returns to the wrapper (no QUIT).
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/incr-room-equi/apply.log" OVER
+=24384/24776
+Q CE
+Q TYPE
+Q NAME
+Q POS
+POS E -2821.27001953125 N 8003.9599609375 U 53400
+Q POS
+SAVEWORK 'CODEX incr e2e: EQUI 24384/24776 U 1400 -> 53400 (R224 -> R972)'
+ALPHA LOG END

@@ -1,13 +1,5 @@
 # 变更记录
 
-## 2026-10-16
-
-### 全表清边失败不得被逐库成功覆盖
-
-- **为什么**：`run_rooms_rebuild` 原本对全表清边失败只打日志、仍继续逐库重算，而 `all_ok` 无条件从 `true` 起步。只要列出的库随后算成功，收尾仍会写 `room_update_record` 宣告整库结果最新；但逐库清单不能证明未枚举 / 已消失根上的旧边已经清掉。
-- **改动**：保留清边失败后的逐库恢复尝试；把清边结果存为 `clear_succeeded`，失败时仍返回 `false`，并用它初始化 `all_ok`。全表清边失败即不写最新记录，欠账留待后续恢复。
-- **验证**：新增源码契约钉 `room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp`，修前 `0 passed; 1 failed`、exit 101 → 绿 `11 passed; 0 failed`；全量 `cargo test --offline --lib` **2524 / 0 / 132**；两个改动文件诊断 errors 0 / warnings 0。证据 `verification/room-rebuild-clear-failure-20261016/verification.md`（不入库）。本轮未注入真实数据库故障。
-
 ## 2026-10-15
 
 ### 介质裁决补齐：文件层退役别名点名 + ADR-083 二次修订的文档漂移清理
@@ -19,6 +11,37 @@
   - 死代码：删 `local` feature 及其门后 4 处内嵌 `rocksdb://*.rdb` connect（`lib.rs` ×1、`test_performance.rs` ×3）——surrealdb 依赖没编 `kv-rocksdb`，这一支从未能跑通；
   - 文档同步：ADR-083 正文 D1–D5 / 后果 / 实施约束改写成三层裁决现状（实施约束换成真实测试名）；ADR-069 / 074 / 075 各补一条 2026-10 修订注记；`database-storage-modes.md` 的表头与「怎么选介质」改写；CONTEXT.md 七处词条订正（含「向导只展示」→ 两档可选落盘、「store_mode 不在引导子集」→ 在其内）；15 份 `DbOption*.toml` 注释、`New-LocalRelease.ps1` 三处措辞与 `$startupInstruction`、`docs/2026-08-04_dboption-config-changelog.md` 表格行同步。
 - **验证**：新增 `a_retired_store_mode_in_the_config_file_is_named_too`（文件层退役写法点名；env 压文件时两条并排念）；介质相关 13 条测试全过；全量 `cargo test --lib` **2520 / 0 / 132**；`cargo check --lib` 0 error。
+
+### 启动步骤打点统一：每步干什么 + 耗时毫秒，控制台与 dblog 双出口
+
+- **为什么**：初始化排障/优化时「哪一步在干什么、吃了多久」散在三种写法里——
+  read-through 臂有 `[startup] stage=X event=begin/done elapsed_ms=N`，`run_cli` 臂只有
+  零散 `println!("…耗时")`（不上 dblog.txt，且 `db manager 初始化完成` 实测打的是路由目录的
+  耗时），还有一批步骤完全静默（锁、并发闸、退役表清扫、模型凭证复核、两个等待循环……）。
+- **改动**（全部在 `src/lib.rs`）：
+  - 新增 `startup_step_begin/done/skip` 三个 helper：`[startup] stage=<名> event=begin <干什么>` /
+    `event=done elapsed_ms=<ms> [detail]` / `event=skip <原因>`，`println!` + `log::info!` 双出口
+    （控制台 + `enable_log` 的 `*_dblog.txt`；TermLogger Warn 档不会终端二次回显）。
+  - `run_app` 公共段补 `config` / `instance-lock` / `store-connect` / `data-face-claim` /
+    `spatial-tree` 五段；`run_read_through_core` 六段收敛进 helper 并拆细为
+    `store-connect` / `surql-embedded` / `db-manager` / `mdb` / `http` / `route-directory` /
+    `spatial-room` / `session-baseline`；`run_cli` 全段打点 25+ 步，含 `data-wait` /
+    `model-converge` / `watcher-init` 的 `event=skip` 出路说明。
+  - `run_cli` 的 Web 服务由 `serve_if_configured`（裸 spawn，bind 失败只有一句 stderr）换成
+    `start_configured`——bind 完成才返回，`stage=http` 才量得出真实耗时，bind 失败就地
+    终结启动（`start_configured` 的注释契约本就如此）。
+- **验证**：`cargo check --lib` 0 error；三条源码钉
+  （`read_through_startup_reports_each_waiting_stage` 改写为钉 helper 调用形态、
+  `startup_step_helpers_emit_to_console_and_log` 钉双出口与 token 形状、
+  `run_cli_startup_reports_each_stage` 钉持久臂 16 个关键 stage 配对与三条 skip）；
+  全量 `cargo test --lib` **2519 / 0 / 132**。
+- **实测**（2026-10-16，debug build，mem + `enable_log=true`）：控制台与
+  `YYYY-M-D-H-M-S_dblog.txt` 双出口同时收到 `log-init` 起的全段 `[startup]` 行
+  （`config`/`instance-lock` 先于 logger 装载，只有控制台有——设计如此）；
+  `/health` 200；`[root-scan]` 全程 2 次且都在 `stage=mdb` 区间内，remount 节拍
+  越拍无新增（与 watch 健康闸自洽）。注：此前部署包 exe 旧于本次代码，曾误以为
+  `enable_log` 不生效——实测为陈旧二进制所致，同路径解析验证 `enable_log=true`
+  解析正确。
 
 ### 房间重算盖章与重建清边补齐进程逐出镜像（ADR-073 F3 / d-149 补丁续）
 
@@ -61,6 +84,39 @@
 - **验证**：行为红钉 `room_rebuild_regression_a_frame_frozen_by_a_panicked_loop_is_not_a_lifetime_sentence`（帧停在 `edge-recompute` / `done=1`、在飞格 = false ⇒ 必须放行；修前 `0 passed; 1 failed`、exit 101）＋展开路 `room_rebuild_regression_a_panicking_edge_loop_must_not_shut_the_gate_forever`（`catch_unwind` 里循环中途 `panic!` ⇒ 格落下、展示帧照停、闸放行）；两条 `web_service` 源码契约钉改成守卫形态；顺手把上一轮丢了 `#[test]`、因而**从没跑过**的限定域钉 `room_initialization_and_the_full_rebuild_never_consult_the_watch_scope` 归位；全量 `cargo test --lib` **2522 / 0 / 132**；四文件编辑器诊断 errors 0 / warnings 0。证据 `verification/room-rebuild-in-flight-guard-20261015/verification.md`（按约定不入库）。
 - **强杀面**：库里没有持久化的「正在重建」标记——开工写下的持久面（清边 + 水位整表 NONE + 记录 NONE）本身就是欠账，重启后判 `NeedsFullInit` 自愈；进程内那一格随进程消失。因此这一面由「欠账 + 重启」兜着，不需要再加超时层。
 
+
+### 磁盘静态资源补上可执行 MIME：`.js` / `.mjs` 按 `text/javascript`、`.wasm` 按 `application/wasm` 服务（AMS 虚拟孔洞浏览器验收修复）
+
+- **为什么**：AMS 虚拟孔洞（ADR-0031）浏览器验收时发现布尔预览整页卡在「计算中」——`web_content_type` 对 ui_root 里磁盘提供的 `.js` / `.mjs` / `.wasm` 一律落到 `application/octet-stream` 兜底；Chrome 拒绝以 octet-stream 启动 module Worker（`/virtual-hole/worker.js` 拿不到正确 MIME），布尔后端起不来，孔洞行永远停在「计算中」。桌面端不受影响（原生端走 manifold-csg 内核，不吃这条路）。
+- **改动**（`src/web_service/handlers.rs` 的 `web_content_type` 扩展名兜底）：
+  - `.js` / `.mjs` → `text/javascript; charset=utf-8`
+  - `.wasm` → `application/wasm`
+  - 单测 `disk_served_virtual_hole_assets_get_executable_mime_types`：钉住 `/virtual-hole/worker.js`、`/virtual-hole/vendor/manifold-3d@3.5.4/manifold.wasm` 与 `pkg/rs-plant_bg.wasm` 三个磁盘路径的 Content-Type。
+- **验证**：`cargo test --release --lib disk_served_virtual_hole_assets_get_executable_mime_types` 1 / 0；`cargo build --release` 过；发布到 v2-8022-run 重启服务后 live 校验 `HEAD /virtual-hole/worker.js` → `text/javascript; charset=utf-8`、`HEAD .../manifold.wasm` → `application/wasm`；浏览器端重跑 AMS 虚拟孔洞验收——全部预览 4 个孔洞 0 ms 完成、行状态「已切割」、3D 视口可见琥珀半透明切削体（Worker 真正跑通）。
+- **不变**：其余扩展名的兜底不变（`.mesh` 仍是 octet-stream）；`/api/v1/*` 与内嵌清单（`PLANT_UI_WEB`）的既有类型不变。
+
+### 搜索根扫描加健康闸：稳态不再每 60 s 重扫、任务开工探针改读缓存（ADR-085 D3 追记）
+
+- **为什么**：`[root-scan]` 行在稳态下每 `AIOS_WATCH_REMOUNT_SECS`（默认 60 s）一拍必出现——重挂轮
+  `remount_watch_dirs` 无条件 `plan_watch_dirs`（真扫全部搜索根），且开工探针
+  `current_mdb_source_inventory` 每任务也调一次。本地盘上只是日志噪音，远程根上是每拍押着事件循环、
+  每任务一次的远程 IO（单根最坏 15 s）。
+- **改动**：
+  - `mdb_closure.rs`：`ClosurePlan::has_watch_gaps()`（根不可达 ∪ `watch_dir_plan().problems()` 非空）；
+    `cached_plan_for(db_option)`——只读 `latest` 缓存、key 不符或没有就 `None`，永不现算。
+  - `increment_manager.rs` `remount_watch_dirs` 重排：先做不碰根的挂载健康复查（`refresh_health` /
+    `unwatch_lost` / `missing`），再过健康闸——闭包有缺口或有目录缺席才走原链路
+    （`plan_watch_dirs` → 补挂 → `reason=remount` 重绑 → `share-remount` 补扫）；全健康整轮零搜索根 IO、不出声。
+  - `e3d_model_service.rs` `current_mdb_source_inventory`：`plan_watch_dirs` →
+    `latest_for(option).watch_dir_plan()`，与成员清单 `get()` 同一代。
+  - `AIOS_WATCH_REMOUNT_SECS=0` 语义不变（仍是整体关闭重挂）；`resolve_for` 现算语义在四个权威
+    重做时刻（startup / syst-refresh / remount / fallback / 向导）原样保留。
+- **取舍**：全健康运行期往根里新拷进的项目目录不再被兜底发现（重启或下一个缺口拍才看见）。
+- **钉子**：`watch_gaps_cover_every_way_a_plan_can_be_incomplete`（闸判据真值表）、
+  `cached_plan_for_never_computes_and_hits_after_resolve_for`（只读缓存口）、
+  `a_remount_tick_gates_the_replan_behind_plan_health`（闸在重解析之前且有早退）、
+  `the_task_probe_reads_the_cached_watch_dir_plan`（探针只读 `latest_for`）。
+- **计划**：`docs/plans/2026-10-15-watch-root-scan-healthy-skip-plan.md`。
 
 ## 0.1.40 — 2026-10-15
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AMS 配置向导</title>
+<title>Plant3D 初始化向导</title>
 <style>
   :root {
     --bg: #f5f6f8; --card: #ffffff; --ink: #1c2330; --muted: #67707f;
@@ -66,8 +66,8 @@
 </head>
 <body>
 <main id="ams-setup-wizard">
-  <h1>AMS 配置向导 <span class="chip" id="chip-mode">…</span><span class="chip" id="chip-ver"></span></h1>
-  <div class="sub">一步步把 <code>DbOption.toml</code> 配好，然后初始化数据库。配置真值始终是那份文件；本页只是它的读写口，注释与你手改过的其他键都会原样保留。</div>
+  <h1>Plant3D 初始化向导 <span class="chip" id="chip-mode">…</span><span class="chip" id="chip-ver"></span></h1>
+  <div class="sub">选择要初始化的项目，配置数据源、存储连接与服务端口，然后初始化该项目的数据。本页可编辑的配置保存到 <code>DbOption.toml</code>；已有注释和其它配置项原样保留。</div>
 
   <div class="steps" id="stepbar">
     <div class="s" data-s="1">① 数据源</div>
@@ -114,11 +114,11 @@
     <div class="row">
       <div>
         <label>项目代号 project_code</label>
-        <input type="number" id="f-project_code" placeholder="1516">
+        <input type="number" id="f-project_code" placeholder="所选项目的编码">
       </div>
       <div>
         <label>命名空间 surreal_ns <span class="hint">通常与 project_code 一致</span></label>
-        <input type="text" id="f-surreal_ns" placeholder="1516">
+        <input type="text" id="f-surreal_ns" placeholder="通常与项目编码一致">
       </div>
     </div>
     <div class="actions"><button class="primary" id="next-1">下一步</button></div>
@@ -269,7 +269,7 @@ async function boot() {
   const state = await api("/api/v1/setup/state");
   S.state = state;
   $("chip-mode").textContent = state.mode === "setup" ? "设置模式（服务未完全启动）" : "正常模式";
-  $("chip-ver").textContent = "v" + state.version;
+  $("chip-ver").textContent = "后端 v" + state.version;
   const config = await api("/api/v1/setup/config");
   S.cfg = config.values || {};
   // 介质按「环境变量 > 配置文件 > 默认」裁决：effective 是本进程实际跑的那档与出处；
