@@ -241,6 +241,47 @@ pub(crate) async fn durable_alignment(
     })
 }
 
+/// `/health` 的欠账点名（issue #57）：逐库看 durable 侧整库对齐那一格（含盖章之后按别代写过根的 stray
+/// 账，与 [`DurableAlignment::owed`] 同一判据、同一句欠账文案），与常驻代号不等（含从没盖过）的库点名。
+///
+/// `None` = 这一面不作数：开关关着（冻不出计算器）、非落盘形态（水位行活不过重启）、常驻参照没装上、
+/// 或水位列表读不出来——不作数与「零欠账」是两回事，JSON 里它是 `null`，不是空数组；欠账库为零时
+/// `owed_dbnums` 才是 `[]`（收敛）。
+pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
+    if !crate::options::store_mode().is_durable() {
+        return None;
+    }
+    let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
+        Ok(Some(rooms)) => rooms,
+        Ok(None) | Err(_) => return None,
+    };
+    let resident = rooms.resident_generation();
+    let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
+        .await
+        .ok()?;
+    let mut owed_dbnums = Vec::new();
+    for state in states {
+        let alignment = DurableAlignment {
+            library: state.model_room_generation.clone(),
+            resident: resident.to_owned(),
+            stray: state.model_room_stray_generations.clone(),
+            stray_written_here: ModelMemoryStore::global().stray_generations_written(state.dbnum),
+        };
+        if let Some(reason) = alignment.owed() {
+            owed_dbnums.push(serde_json::json!({
+                "dbnum": state.dbnum,
+                "library_generation": alignment.library,
+                "stray_generations": alignment.stray,
+                "owed": reason,
+            }));
+        }
+    }
+    Some(serde_json::json!({
+        "resident_generation": resident,
+        "owed_dbnums": owed_dbnums,
+    }))
+}
+
 /// 一段换代（`from → to → 面板动了什么`）；定义在常驻模型那边（谁重建谁记，`room_resident::SwapLedger`），这里只是
 /// 准入链的一种段。
 pub(crate) use crate::fast_model::room_resident::PanelSwap;

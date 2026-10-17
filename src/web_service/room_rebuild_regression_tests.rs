@@ -155,6 +155,46 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
     assert!(wipe > clear, "清库成功之后才清镜像");
 }
 
+/// `/health` 的欠账点名（issue #57）：`room_build.alignment_debt` 必须由第三条电平触发
+/// 同一个判据（`DurableAlignment::owed()`）产出，不许长出一个并行的简化判据——不然
+/// health 报的欠账和触发真正会补的欠账对不上（少报 = 以为收敛其实在欠；多报 = 以为欠账
+/// 触发却不来）。这一格不作数时（开关关着 / 非落盘 / 常驻没装上）必须是 `null`，
+/// 不能冒充零欠账。
+#[test]
+fn room_rebuild_regression_health_alignment_debt_uses_the_same_owed_verdict() {
+    let source = include_str!("../data_interface/room_recompute.rs");
+    let face = source
+        .split_once("async fn alignment_debt_health(")
+        .expect("欠账点名面存在")
+        .1
+        .split_once("\n/// 一段换代")
+        .expect("欠账点名面边界")
+        .0;
+    assert!(
+        face.contains("is_durable()"),
+        "非落盘形态这一面不作数（水位行活不过重启）"
+    );
+    assert!(
+        face.contains("frozen_room_calculator"),
+        "常驻代号从冻计算器拿——开关关着 / 没装上时这面不答话"
+    );
+    assert!(
+        face.contains("DurableAlignment") && face.contains(".owed()"),
+        "欠账判定复用第三条电平触发同一个 DurableAlignment::owed()，不长并行判据"
+    );
+    assert!(
+        face.contains("stray_generations_written"),
+        "欠账含 stray 账（盖章之后按别代写过根的证词）"
+    );
+    let handlers = include_str!("handlers.rs");
+    assert!(
+        handlers.contains(
+            r#""alignment_debt": crate::data_interface::room_recompute::alignment_debt_health().await"#
+        ),
+        "room_build 要挂上 alignment_debt——不读 stderr 就能看见哪几间库欠着整库房间重算"
+    );
+}
+
 /// 「在飞」不许只活在展示帧里（2026-10-15）：整库重建的第三段跑在 `Ready` 下，而任务开工前对齐的
 /// 换代（`refresh_before_task` → `initialize_file_backed_at_startup` → `mark_loading`）会把展示帧
 /// **清零重写成别的相位**——拿 `phase` 与逐库计数当准入判据，换代一过闸就被抹开，第二趟

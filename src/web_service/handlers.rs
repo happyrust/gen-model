@@ -1046,6 +1046,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 反向传播停放给别的库的根级工作项（ADR-073 D13，U3 b 档）：`{dbnum: {entries, elements, oldest_age_ms,
         // segments}}`，进程内读数；`{}` = 谁也不欠谁。停放物由那个库的下一个任务消费、成功后清空。
         "parked": crate::data_interface::room_reverse::parked_health(),
+        // 欠账点名（issue #57）：库上整库对齐代号与常驻代号不等（含从没盖过、或盖章后按别代写过根）
+        // 的库。不读 stderr 就能看见「是哪几间库欠着整库房间重算」；`null` = 这一面不作数
+        // （开关关着 / 非落盘 / 常驻没装上），别拿它当零欠账。
+        "alignment_debt": crate::data_interface::room_recompute::alignment_debt_health().await,
     });
     let read_through = state.element_attributes.health().await;
     Json(json!({
