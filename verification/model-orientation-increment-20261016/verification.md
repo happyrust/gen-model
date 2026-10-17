@@ -348,7 +348,18 @@ type_code 10240 文本）造出与真库同形状的匿名显式属性，走 pin
   纯属性存储变化不再级联，这是相对 opaque 判决的净收益语义；
 - 第二窗改值（"JS"→"Kangwp"）仍点名同一伪名——新增与变更两形态都覆盖。
 
-聚焦套 `synthetic_*` 14/14 通过（含原 13 项方位用例无回归）。
+同日再补一钉：`synthetic_anonymous_attribute_alongside_ori_blocks_cheap_path`——
+混合窗（同记录同窗 `ORI`+匿名属性，`write_mixed` 单次会话落库）：
+
+- `attributes == ["#2902D6E2", "ORI"]`、`is_placement_only == false`、
+  `placement_input_changed == true`；
+- `plan.regen == [根10]` 且 `rigid.transform.is_empty()`——未知属性可能是模型输入，
+  便宜刚体路被正确拒掉，判保守重生；
+- 紧接一窗匿名属性原样带着、只动 ORI：`attributes == ["ORI"]`、
+  `is_placement_only == true`、`rigid.transform == 1`——**值没变的匿名属性不上报，
+  不污染纯摆放判决**。
+
+聚焦套 `synthetic_*` 15/15 通过（含原 13 项方位用例无回归）。
 
 下游语义经 `model_impact` 核对属实：`#` 伪名不在字典 DCHC 表 →
 `metadata_only_tier` 拿不到两票 → 元素本身照常上卷重生（与 opaque 同判），

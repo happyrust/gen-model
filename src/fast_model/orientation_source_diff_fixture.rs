@@ -263,6 +263,49 @@ fn write_anonymous_text(path: &Path, edits: &[(u32, u32, &str)]) {
     assert!(commit.written.sesno > commit.previous.sesno);
 }
 
+/// 一次会话内同一条记录既有模板属性改动、又有匿名显式属性（混合窗）。
+fn write_mixed(
+    path: &Path,
+    edits: &[(u32, &str, Vec<(&str, DescriptorValue)>, Vec<(u32, &str)>)],
+) {
+    const ANON_TEXT_TYPE: u16 = 10240;
+    let mut provider = template_provider();
+    let mut engine = e3d_io::ReadOnlyEngine::open(path).unwrap();
+    let mut writes = Vec::new();
+    for (n, noun, attrs, anon) in edits {
+        let element = engine
+            .find_element(source_ref(*n))
+            .unwrap()
+            .unwrap_or_else(|| panic!("fixture element {n} missing"));
+        let mut draft = RecordDraft::from_record_bytes(&element.raw_bytes).unwrap();
+        let template = provider.template_for(db1_hash(noun)).unwrap().unwrap();
+        for (name, value) in attrs {
+            draft
+                .set_attribute(template, db1_hash(name), value, TextFormat::Detect)
+                .unwrap();
+        }
+        for (hash, text) in anon {
+            draft
+                .add_explicit_text_ascii(*hash, ANON_TEXT_TYPE, text)
+                .unwrap();
+        }
+        writes.push(ElementWrite::Update(draft));
+    }
+    drop(engine);
+    let commit = write_element_session(
+        path,
+        &SessionRequest {
+            user: "orientation-test",
+            comment: "isolated mixed-attribute save",
+            clock: None,
+        },
+        &writes,
+        &[],
+    )
+    .unwrap();
+    assert!(commit.written.sesno > commit.previous.sesno);
+}
+
 fn save(path: &Path, ori: [f64; 3], xlen: Option<f64>) {
     let mut edits = vec![(
         10,
@@ -922,4 +965,56 @@ fn synthetic_anonymous_explicit_attribute_reports_hash_pseudo_name() {
     let (next_base, next_target) = (pin(&path, BASE + 1), pin(&path, BASE + 2));
     let diff = diff_element(&next_base, &next_target, source_ref(10)).unwrap();
     assert_eq!(diff.attributes, vec!["#2902D6E2"]);
+}
+
+/// 混合窗（ORI + 匿名属性同记录同窗）：`is_placement_only` 为假 → 根必须走
+/// 重生而非便宜刚体路（匿名属性可能是模型输入，保守是设计判决）；但
+/// `placement_input_changed` 仍真，级联维度不丢。随后一窗只动 ORI 而匿名
+/// 属性原样带着——值没变就不上报，纯摆放判决不被污染。
+#[test]
+fn synthetic_anonymous_attribute_alongside_ori_blocks_cheap_path() {
+    const ANON_HASH: u32 = 0x2902_D6E2;
+    let dir = tempfile::tempdir().unwrap();
+    let path = create_source(dir.path());
+    write_mixed(
+        &path,
+        &[(
+            10,
+            "EQUI",
+            vec![("ORI", DescriptorValue::RealArray(vec![0., 0., 90.]))],
+            vec![(ANON_HASH, "JS")],
+        )],
+    );
+    let (base, target) = (pin(&path, BASE), pin(&path, BASE + 1));
+    let diff = diff_element(&base, &target, source_ref(10)).unwrap();
+    assert_eq!(diff.attributes, vec!["#2902D6E2", "ORI"]);
+    assert!(!diff.is_placement_only());
+    assert!(diff.placement_input_changed());
+    let (sources, persisted) = collected(&path, &base, &target);
+    let impact = sources.impact(&persisted);
+    let plan = plan_window_roots(&sources.roots_t, &persisted, &impact);
+    assert_eq!(plan.regen.len(), 1);
+    assert_eq!(plan.regen[0].root, refno_from_e3d(source_ref(10)));
+    let settled = persisted.iter().map(|r| r.refno).collect();
+    let rigid = sources.rigid_motion(&persisted, &settled, &impact);
+    assert!(
+        rigid.transform.is_empty(),
+        "ORI+匿名属性是混合窗：未知属性可能是模型输入，必须重生不走刚体"
+    );
+    // 第二窗：匿名属性原样带着 + 只动 ORI → 仍纯摆放，便宜路照常放行。
+    save(&path, [0., 0., 45.], None);
+    let (base2, target2) = (pin(&path, BASE + 1), pin(&path, BASE + 2));
+    let diff2 = diff_element(&base2, &target2, source_ref(10)).unwrap();
+    assert_eq!(diff2.attributes, vec!["ORI"]);
+    assert!(diff2.is_placement_only());
+    let (sources2, persisted2) =
+        collected_at(&path, &base2, &target2, BASE + 1, BASE + 2);
+    let impact2 = sources2.impact(&persisted2);
+    let settled2 = persisted2.iter().map(|r| r.refno).collect();
+    let rigid2 = sources2.rigid_motion(&persisted2, &settled2, &impact2);
+    assert_eq!(
+        rigid2.transform.len(),
+        1,
+        "值没变的匿名属性不上报，纯摆放窗照常走刚体"
+    );
 }
