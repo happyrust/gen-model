@@ -441,18 +441,24 @@ impl QueryService {
 
     /// durable 侧「这个库的房间边整库对齐到哪一代」（ADR-073 D14）：水位行上的
     /// `model_room_generation`，由能替整库说话的任务（初始化 / 整库重排的 ModelOnly /
-    /// 跑过整库房间重算的任务）随 `model_sesno` 同一笔盖。
+    /// 跑过整库房间重算的任务）盖——**覆盖校验通过才算齐，算不齐不盖**（欠账留给下个任务）。
     ///
     /// 只在**落盘**形态下作数：进程内嵌 `mem://` 那一档活不过重启，库与水位行一起消失，这一格
     /// 替不了没落地的边说话——那一档的就绪判据仍只有进程内的根 ACK（d-381 的启动屏障要的就是
-    /// 本进程逐根算完那一句）。水位一次都没盖过（`model_sesno = 0`）时同样不作数：那一格此刻
-    /// 要么是旧行留下的，要么根本没写过。读不出来按「没有承诺」处理，不拿异常冒充就绪。
+    /// 本进程逐根算完那一句）。
+    ///
+    /// `model_room_generation` 自带证据链：整库重建先把它整表清 NONE、单库重算全过才回盖本代，
+    /// 所以「还在且等于此刻常驻代号」本身就是「这库按这一代算齐了」——不再叠加 `model_sesno > 0`
+    /// 门槛（issue #56）：它说的是模型投影管线的水位，房间边的对齐证据在房间代号自己手里；
+    /// 只跑数据与房间重算、从不跑模型生成的节点（如部署数据节点）`model_sesno` 恒 0，
+    /// 按旧口径这间库的房子永远报欠账。
+    /// 读不出来按「没有承诺」处理，不拿异常冒充就绪。
     async fn library_room_generation(dbnum: u32) -> Option<String> {
         if !crate::options::store_mode().is_durable() {
             return None;
         }
         match crate::data_interface::dbnum_state::DbnumState::read(dbnum).await {
-            Ok(Some(state)) if state.model_sesno > 0 => state.model_room_generation,
+            Ok(Some(state)) => state.model_room_generation,
             Ok(_) => None,
             Err(error) => {
                 log::debug!(

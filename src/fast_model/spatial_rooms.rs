@@ -420,7 +420,9 @@ async fn library_alignment_current(dbnums: &BTreeSet<u32>) -> Option<bool> {
     let mut all_current = true;
     for dbnum in dbnums {
         let generation = match crate::data_interface::dbnum_state::DbnumState::read(*dbnum).await {
-            Ok(Some(state)) if state.model_sesno > 0 => state.model_room_generation,
+            // `model_room_generation` 只在整库重算全过后才回盖本代，自带证据——不叠加
+            // `model_sesno > 0`（issue #56：不跑模型管线的节点该格恒 0，但房间边是真的算齐了）。
+            Ok(Some(state)) => state.model_room_generation,
             _ => None,
         };
         if !crate::query_service::library_room_alignment_is_current(generation.as_deref()) {
