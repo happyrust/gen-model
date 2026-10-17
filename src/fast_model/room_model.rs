@@ -2541,6 +2541,17 @@ impl MemoryRoomCalculator {
         self.panels.missing_panels()
     }
 
+    /// 这台计算器背后的常驻模型覆盖的 MDB 设计库清单——`/rooms/rebuild` 逐库循环与
+    /// `/health` 欠账点名的「期望集」口径（`run_rooms_rebuild` 拿的是
+    /// `RebuildOutcome::expected_dbnums()`，两边同源：都来自冻结令牌枚举出的库）。
+    /// 库内查询那条路（无常驻）拿不到这份清单，给 `None`。
+    pub(crate) fn expected_dbnums(&self) -> Option<&[u32]> {
+        self.panels
+            .resident
+            .as_deref()
+            .map(|model| model.expected_dbnums.as_slice())
+    }
+
     /// `model_sesno`：记录的 `source_sesno` 不得越过它（算的是哪一版模型）；
     /// `room_definition_version`：调用方以为的面板索引版本，与本计算器建索引时的那一版不符就拒算。
     /// （原先这两格装在 `dbnum_state` 的房间输入版本结构里，那个结构随第三枚水位退了，ADR-073 D2。）

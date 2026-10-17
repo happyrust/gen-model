@@ -186,6 +186,13 @@ fn room_rebuild_regression_health_alignment_debt_uses_the_same_owed_verdict() {
         face.contains("stray_generations_written"),
         "欠账含 stray 账（盖章之后按别代写过根的证词）"
     );
+    // 期望集拆分（2026-10-17 线上实证）：注册水位行的库比整库重建的期望清单宽——
+    // 期望集外的欠账（重建够不着、只有任务轮到才追）要和期望集内的分开报，
+    // 不然那批永远还不掉的账会训练操作员对这面免疫。
+    assert!(
+        face.contains("expected_dbnums()") && face.contains("owed_outside_scope"),
+        "欠账要按期望集（重建逐库清单的同源口径）拆「还得掉 / 够不着」两格"
+    );
     let handlers = include_str!("handlers.rs");
     assert!(
         handlers.contains(

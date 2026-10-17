@@ -244,9 +244,16 @@ pub(crate) async fn durable_alignment(
 /// `/health` 的欠账点名（issue #57）：逐库看 durable 侧整库对齐那一格（含盖章之后按别代写过根的 stray
 /// 账，与 [`DurableAlignment::owed`] 同一判据、同一句欠账文案），与常驻代号不等（含从没盖过）的库点名。
 ///
+/// 欠账按常驻模型的期望集（`/rooms/rebuild` 逐库循环那张清单的同源口径）分两格：
+///
+/// - `owed_dbnums`：期望集内的欠账——下一次整库重建点名会到、还得了的债；`[]` = 收敛。
+/// - `owed_outside_scope`：有水位行却不在期望集里的欠账——重建的逐库循环永远不会碰它，
+///   挂在这格是告诉操作员「它们欠着，但不在本 MDB 的重建射程内」（多半是本 MDB 之外
+///   被读透/别的会话注册的库）；真要有任务轮到它们，增量准入还会按同一判据追账。
+///   期望集拿不出来（无常驻参照）时不硬分，全部进 `owed_dbnums`、`expected_dbnums` 给 `null`。
+///
 /// `None` = 这一面不作数：开关关着（冻不出计算器）、非落盘形态（水位行活不过重启）、常驻参照没装上、
-/// 或水位列表读不出来——不作数与「零欠账」是两回事，JSON 里它是 `null`，不是空数组；欠账库为零时
-/// `owed_dbnums` 才是 `[]`（收敛）。
+/// 或水位列表读不出来——不作数与「零欠账」是两回事，JSON 里它是 `null`，不是空数组。
 pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
     if !crate::options::store_mode().is_durable() {
         return None;
@@ -256,10 +263,14 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
         Ok(None) | Err(_) => return None,
     };
     let resident = rooms.resident_generation();
+    let expected: Option<std::collections::BTreeSet<u32>> = rooms
+        .expected_dbnums()
+        .map(|dbnums| dbnums.iter().copied().collect());
     let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
         .await
         .ok()?;
     let mut owed_dbnums = Vec::new();
+    let mut owed_outside_scope = Vec::new();
     for state in states {
         let alignment = DurableAlignment {
             library: state.model_room_generation.clone(),
@@ -268,17 +279,26 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
             stray_written_here: ModelMemoryStore::global().stray_generations_written(state.dbnum),
         };
         if let Some(reason) = alignment.owed() {
-            owed_dbnums.push(serde_json::json!({
+            let entry = serde_json::json!({
                 "dbnum": state.dbnum,
                 "library_generation": alignment.library,
                 "stray_generations": alignment.stray,
                 "owed": reason,
-            }));
+            });
+            match &expected {
+                Some(scope) if !scope.contains(&state.dbnum) => {
+                    owed_outside_scope.push(entry)
+                }
+                _ => owed_dbnums.push(entry),
+            }
         }
     }
     Some(serde_json::json!({
         "resident_generation": resident,
+        "expected_dbnums": expected
+            .map(|scope| scope.into_iter().collect::<Vec<_>>()),
         "owed_dbnums": owed_dbnums,
+        "owed_outside_scope": owed_outside_scope,
     }))
 }
 
