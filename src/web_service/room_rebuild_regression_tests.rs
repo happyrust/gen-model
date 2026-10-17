@@ -193,6 +193,21 @@ fn room_rebuild_regression_health_alignment_debt_uses_the_same_owed_verdict() {
         face.contains("expected_dbnums()") && face.contains("owed_outside_scope"),
         "欠账要按期望集（重建逐库清单的同源口径）拆「还得掉 / 够不着」两格"
     );
+    // 「为什么欠」格（issue #57 第二半）：逐库失败原因不能再只活在 stderr——
+    // 每个欠账条目要挂上最近一次整库重算的留底（`recompute_attempt_for`），
+    // 远端不读日志就能看见 ENOENT 一类原因。
+    assert!(
+        face.contains("recompute_attempt_for") && face.contains("\"last_attempt\""),
+        "欠账条目要挂最近一次重算留底（last_attempt）"
+    );
+    let recompute = source
+        .split_once("async fn recompute_dbnum_room_edges_now(")
+        .expect("整库重算入口存在")
+        .1;
+    assert!(
+        recompute.matches("note_recompute_attempt").count() >= 5,
+        "recompute_dbnum_room_edges_now 的每个失败出口都要记一笔——漏一个出口，health 就答不出那一种欠: {recompute}"
+    );
     let handlers = include_str!("handlers.rs");
     assert!(
         handlers.contains(

@@ -284,6 +284,9 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
                 "library_generation": alignment.library,
                 "stray_generations": alignment.stray,
                 "owed": reason,
+                // 「为什么欠」的最近一次留底：进程内账本（`LAST_RECOMPUTE`），重启清零——
+                // `null` = 本进程以来这库还没跑过整库重算，不是没有原因的意思。
+                "last_attempt": recompute_attempt_for(state.dbnum),
             });
             match &expected {
                 Some(scope) if !scope.contains(&state.dbnum) => {
@@ -300,6 +303,48 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
         "owed_dbnums": owed_dbnums,
         "owed_outside_scope": owed_outside_scope,
     }))
+}
+
+/// 最近一次整库房间重算的逐库留底（进程内账本，`/health` 欠账点名的「为什么欠」格，issue #57）。
+///
+/// `recompute_dbnum_room_edges_now` 的每个出口记一笔：盖上了的 `stamped=true`；没盖上的把
+/// 与 stderr 同一句话的原因（含逐根失败样例 / 覆盖计数）留在 `detail`——两边同文，运维对得上。
+/// 进程内账本重启清零：水位行是持久真相，这一格只是「最近一次跑成什么样」的回声——重启后
+/// 还没跑过的库，health 里这一格是 `null`，不冒充「没跑过」之外的意思。
+static LAST_RECOMPUTE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u32, RecomputeAttempt>>,
+> = std::sync::LazyLock::new(std::sync::Mutex::default);
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RecomputeAttempt {
+    /// 这次尝试结束的时刻（本机时区 RFC3339，与 `room_updated_at` 同制式）。
+    at: String,
+    /// 整库对齐代号盖上了没有。
+    stamped: bool,
+    /// 一句话结果——与 stderr 同一句话（失败含覆盖计数与逐根样例）。
+    detail: String,
+}
+
+fn note_recompute_attempt(dbnum: u32, stamped: bool, detail: impl Into<String>) {
+    LAST_RECOMPUTE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            dbnum,
+            RecomputeAttempt {
+                at: chrono::Local::now().to_rfc3339(),
+                stamped,
+                detail: detail.into(),
+            },
+        );
+}
+
+fn recompute_attempt_for(dbnum: u32) -> Option<RecomputeAttempt> {
+    LAST_RECOMPUTE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&dbnum)
+        .cloned()
 }
 
 /// 一段换代（`from → to → 面板动了什么`）；定义在常驻模型那边（谁重建谁记，`room_resident::SwapLedger`），这里只是
@@ -1476,6 +1521,7 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
         }
         Err(error) => {
             eprintln!("dbnum={dbnum} 整库房间重算冻不出计算器: {error:#}");
+            note_recompute_attempt(dbnum, false, format!("冻不出计算器: {error:#}"));
             return false;
         }
     };
@@ -1483,6 +1529,7 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
         Ok(state) => state,
         Err(error) => {
             eprintln!("dbnum={dbnum} 读不出水位行，整库房间重算跳过（欠账仍在）: {error:#}");
+            note_recompute_attempt(dbnum, false, format!("读不出水位行: {error:#}"));
             return false;
         }
     };
@@ -1524,6 +1571,7 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
             Ok(roots) => roots,
             Err(error) => {
                 eprintln!("dbnum={dbnum} 根清单取不出，整库房间重算跳过: {error:#}");
+                note_recompute_attempt(dbnum, false, format!("根清单取不出: {error:#}"));
                 return false;
             }
         }
@@ -1572,6 +1620,11 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
                 }
                 Err(error) => {
                     eprintln!("dbnum={dbnum} 房间边已整库重算，但对齐代号没盖上（下个任务会再欠一次）: {error:#}");
+                    note_recompute_attempt(
+                        dbnum,
+                        false,
+                        format!("房间边已整库重算，但对齐代号没盖上: {error:#}"),
+                    );
                     false
                 }
             };
@@ -1582,10 +1635,20 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
                 report.failed.len(),
                 report.elapsed_ms
             );
+            if stamped {
+                note_recompute_attempt(
+                    dbnum,
+                    true,
+                    format!(
+                        "整库重算完成并盖章：根 {}、成员边 {}",
+                        report.recomputed, report.room_edges
+                    ),
+                );
+            }
             stamped
         }
         Ok(report) => {
-            if !report.failed.is_empty() {
+            let detail = if !report.failed.is_empty() {
                 let sample = report
                     .failed
                     .iter()
@@ -1593,26 +1656,29 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
                     .map(|(root, err)| format!("{root}: {err}"))
                     .collect::<Vec<_>>()
                     .join("；");
-                eprintln!(
-                    "dbnum={dbnum} 整库房间重算有 {} 根失败（覆盖 {}/{} 根，重算 {}、成员边 {}；例如 {}）：对齐代号不盖，欠账留给下个任务",
+                format!(
+                    "有 {} 根失败（覆盖 {}/{} 根，重算 {}、成员边 {}；例如 {}）：对齐代号不盖",
                     report.failed.len(),
                     report.covered_roots.len(),
                     roots.len(),
                     report.recomputed,
                     report.room_edges,
                     sample
-                );
+                )
             } else {
-                eprintln!(
-                    "dbnum={dbnum} 整库房间重算覆盖面不齐（{}/{} 根）：对齐代号不盖，欠账留给下个任务",
+                format!(
+                    "覆盖面不齐（{}/{} 根）：对齐代号不盖",
                     report.covered_roots.len(),
                     roots.len()
-                );
-            }
+                )
+            };
+            eprintln!("dbnum={dbnum} 整库房间重算{detail}，欠账留给下个任务");
+            note_recompute_attempt(dbnum, false, detail);
             false
         }
         Err(error) => {
             eprintln!("dbnum={dbnum} 整库房间重算失败（欠账仍在）: {error:#}");
+            note_recompute_attempt(dbnum, false, format!("重算失败: {error:#}"));
             false
         }
     }
