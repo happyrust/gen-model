@@ -226,6 +226,35 @@ jobs:
           test "$code" = 200
           test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "http://$REMOTE_HOST/api/v1/health" || true)" = 200
 
+      # 烘焙网格随部署同步（issue #56/#57）：部署包不含 assets/meshes，而 boole 根房间
+      # 归属重算要读 <mesh_dir>/<baked_id>.mesh——资产缺失时整库重算逐根 ENOENT、
+      # 对齐代号盖不上。bundle 挂同仓 release（私仓，runner 用 GH_TOKEN 拉），在 runner
+      # 上解开后 rsync -az 增量推到 DATA_DIR/assets/meshes——目标机已有同批文件时
+      # 传输量近零；stamp 文件记录本次同步的 bundle 出处供运维核对。
+      - name: Sync baked mesh assets to target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REMOTE_HOST: '123.57.182.243'
+          REMOTE_USER: 'root'
+          REMOTE_PASS: ${{ secrets.DEPLOY_REMOTE_PASS }}
+          MESH_RELEASE_TAG: 'assets/meshes-union-20261017'
+          MESH_DATA_DIR: '/var/lib/aios-database/assets/meshes'
+        run: |
+          set -euo pipefail
+          opts='-o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15'
+          mkdir -p /tmp/meshes-union/tree
+          gh release download "$MESH_RELEASE_TAG" --repo happyrust/gen-model \
+            --pattern 'union-meshes-*.tar.gz' --dir /tmp/meshes-union --clobber
+          tar -xzf /tmp/meshes-union/union-meshes-*.tar.gz -C /tmp/meshes-union/tree
+          count="$(find /tmp/meshes-union/tree -name '*.mesh' | wc -l)"
+          echo "mesh bundle contains ${count} files (tag ${MESH_RELEASE_TAG})"
+          test "$count" -gt 100000
+          sshpass -p "$REMOTE_PASS" ssh $opts "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$MESH_DATA_DIR'"
+          sshpass -p "$REMOTE_PASS" rsync -az --info=stats1 -e "ssh $opts" \
+            /tmp/meshes-union/tree/ "$REMOTE_USER@$REMOTE_HOST:$MESH_DATA_DIR/"
+          sshpass -p "$REMOTE_PASS" ssh $opts "$REMOTE_USER@$REMOTE_HOST" \
+            "echo '${MESH_RELEASE_TAG}' > '$MESH_DATA_DIR/.bundle-stamp' && find '$MESH_DATA_DIR' -name '*.mesh' | wc -l"
+
       - name: Cut over backend port 3100 to the refactor service
         env:
           REMOTE_HOST: '123.57.182.243'
