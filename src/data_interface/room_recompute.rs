@@ -269,31 +269,67 @@ pub(crate) async fn alignment_debt_health() -> Option<serde_json::Value> {
     let states = crate::data_interface::dbnum_state::DbnumState::list_registered()
         .await
         .ok()?;
+    // 评估集 = 注册水位行 ∪ 期望集：触发侧 `durable_alignment(job.dbnum)` 对**水位行还没建**的库
+    // 照样判欠（行缺 = 从没对齐过），这面不能因为它没注册就失声——否则「期望集内、库上一行都没有」
+    // 这种第一类欠账从此隐身（2026-10-17 副本库实测：期望集 29 库零水位行，注册行全在集外）。
+    let mut registered_dbnums = std::collections::BTreeSet::new();
     let mut owed_dbnums = Vec::new();
     let mut owed_outside_scope = Vec::new();
+    let mut push_owed = |state_dbnum: u32,
+                         alignment: DurableAlignment,
+                         owed_dbnums: &mut Vec<serde_json::Value>,
+                         owed_outside_scope: &mut Vec<serde_json::Value>| {
+        if let Some(reason) = alignment.owed() {
+            let entry = serde_json::json!({
+                "dbnum": state_dbnum,
+                "library_generation": alignment.library,
+                "stray_generations": alignment.stray,
+                "owed": reason,
+                // 「为什么欠」的最近一次留底：进程内账本（`LAST_RECOMPUTE`），重启清零——
+                // `null` = 本进程以来这库还没跑过整库重算，不是没有原因的意思。
+                "last_attempt": recompute_attempt_for(state_dbnum),
+            });
+            match &expected {
+                Some(scope) if !scope.contains(&state_dbnum) => {
+                    owed_outside_scope.push(entry)
+                }
+                _ => owed_dbnums.push(entry),
+            }
+        }
+    };
     for state in states {
+        registered_dbnums.insert(state.dbnum);
         let alignment = DurableAlignment {
             library: state.model_room_generation.clone(),
             resident: resident.to_owned(),
             stray: state.model_room_stray_generations.clone(),
             stray_written_here: ModelMemoryStore::global().stray_generations_written(state.dbnum),
         };
-        if let Some(reason) = alignment.owed() {
-            let entry = serde_json::json!({
-                "dbnum": state.dbnum,
-                "library_generation": alignment.library,
-                "stray_generations": alignment.stray,
-                "owed": reason,
-                // 「为什么欠」的最近一次留底：进程内账本（`LAST_RECOMPUTE`），重启清零——
-                // `null` = 本进程以来这库还没跑过整库重算，不是没有原因的意思。
-                "last_attempt": recompute_attempt_for(state.dbnum),
-            });
-            match &expected {
-                Some(scope) if !scope.contains(&state.dbnum) => {
-                    owed_outside_scope.push(entry)
-                }
-                _ => owed_dbnums.push(entry),
+        push_owed(
+            state.dbnum,
+            alignment,
+            &mut owed_dbnums,
+            &mut owed_outside_scope,
+        );
+    }
+    // 期望集内、水位行还没建的库：与 `durable_alignment` 读空行同一判法——`library: None` → 欠一次。
+    if let Some(scope) = &expected {
+        for dbnum in scope.iter().copied() {
+            if registered_dbnums.contains(&dbnum) {
+                continue;
             }
+            let alignment = DurableAlignment {
+                library: None,
+                resident: resident.to_owned(),
+                stray: Vec::new(),
+                stray_written_here: ModelMemoryStore::global().stray_generations_written(dbnum),
+            };
+            push_owed(
+                dbnum,
+                alignment,
+                &mut owed_dbnums,
+                &mut owed_outside_scope,
+            );
         }
     }
     Some(serde_json::json!({
@@ -1596,9 +1632,15 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
             } =>
         {
             // 整库算齐：盖章（`Aligned`）并把「按别代写过」的杂记清空，与 task_end 同一笔纪律。
+            // UPSERT 不是 UPDATE（issue #57 副案）：期望集里的库在这台节点可能从没入库过
+            // （纯数据节点不跑摄入），水位行不存在——UPDATE 对它静默空转，账面上「盖了章」、
+            // 库里什么都没有，欠账永远还不掉（2026-10-17 副本库实测复现）。行缺就建行：
+            // 整库零根算齐同样是「对齐到这一代」的真话，StateRow 全 Option 字段容忍稀疏行；
+            // `dbnum` 字段必须一起写——登记表按行内 `dbnum` 列认库，光有 record id 的行会被
+            // `states_from_rows` 滤掉、等于没注册（同一实测暴露的第二环）。
             let stamped = match aios_core::SUL_DB
                 .query(format!(
-                    "UPDATE dbnum_watermark:{dbnum} SET model_room_generation = '{}', model_room_stray_generations = [];",
+                    "UPSERT dbnum_watermark:{dbnum} SET dbnum = {dbnum}, model_room_generation = '{}', model_room_stray_generations = [];",
                     crate::data_interface::dbnum_state::escape_surql_str(
                         rooms.resident_generation()
                     )

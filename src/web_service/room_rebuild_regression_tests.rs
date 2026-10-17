@@ -98,7 +98,7 @@ fn room_rebuild_regression_success_stamp_has_mirror_invalidation_contract() {
         .expect("recompute boundary ends before the test module")
         .0;
     let write = body
-        .find("UPDATE dbnum_watermark:")
+        .find("UPSERT dbnum_watermark:")
         .expect("room generation stamp exists");
     let invalidate = body
         .find("DbnumState::invalidate_mirrored(dbnum)")
@@ -131,7 +131,7 @@ fn room_rebuild_regression_generation_stamp_feeds_the_process_eviction_mirror() 
         .expect("recompute boundary ends before the test module")
         .0;
     let write = body
-        .find("UPDATE dbnum_watermark:")
+        .find("UPSERT dbnum_watermark:")
         .expect("room generation stamp exists");
     let mirror = body
         .find("note_room_generation_stamped(dbnum, Some(")
@@ -200,6 +200,14 @@ fn room_rebuild_regression_health_alignment_debt_uses_the_same_owed_verdict() {
         face.contains("recompute_attempt_for") && face.contains("\"last_attempt\""),
         "欠账条目要挂最近一次重算留底（last_attempt）"
     );
+    // 评估集 ⊇ 期望集（2026-10-17 副本库实测）：期望集内却连水位行都没建的库，
+    // `list_registered` 产不出它们——但不等于不欠。触发侧 durable_alignment 对
+    // 缺行照样判「从没对齐过」，这面要同判（library: None 构 DurableAlignment），
+    // 不然第一类欠账隐身：注册行里永远没有它、owed_dbnums 永远 []。
+    assert!(
+        face.contains("registered_dbnums") && face.contains("library: None"),
+        "期望集内缺水位行的库要按「从没对齐过」补进评估集"
+    );
     let recompute = source
         .split_once("async fn recompute_dbnum_room_edges_now(")
         .expect("整库重算入口存在")
@@ -207,6 +215,14 @@ fn room_rebuild_regression_health_alignment_debt_uses_the_same_owed_verdict() {
     assert!(
         recompute.matches("note_recompute_attempt").count() >= 5,
         "recompute_dbnum_room_edges_now 的每个失败出口都要记一笔——漏一个出口，health 就答不出那一种欠: {recompute}"
+    );
+    // 盖章要 UPSERT 不能 UPDATE（issue #57 副案，副本库实测）：期望集里的库可能从没在这台
+    // 节点入库过——水位行不存在时 UPDATE 静默空转，账面盖章、库里什么都没有，欠账永远还不掉。
+    // 且建行时行内 `dbnum` 列必须一起写：登记表按行内 dbnum 认库，光有 record id 的稀疏行
+    // 会被 states_from_rows 滤掉、等于没注册。
+    assert!(
+        recompute.contains("UPSERT dbnum_watermark:{dbnum} SET dbnum = {dbnum},"),
+        "整库房间对齐盖章必须建行并写行内 dbnum（行缺/缺 dbnum 列 = 期望库永远欠账）: {recompute}"
     );
     let handlers = include_str!("handlers.rs");
     assert!(
