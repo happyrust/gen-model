@@ -146,6 +146,11 @@ room_membership = true
 # 或环境变量 AIOS_MODEL_DESIGN_REFERENCE_CASCADE=0（环境变量压过本键）。
 model_design_reference_cascade = true
 
+# 电缆端点 / 路由反向级联（C8，2026-10-17 起默认开，GitHub #35）：EQUI / ELCONN 或 CWBRAN 及其附着点 / 子路径变了，
+# 到本库及 MDB 其余设计库 STAREF / ENDREF 反向表点查引用它的 CABLE / EXTGEO，同库并进 touched、跨库交接。
+# 要关用 model_cable_endpoint_cascade = false 或环境变量 AIOS_MODEL_CABLE_ENDPOINT_CASCADE=0。
+model_cable_endpoint_cascade = true
+
 # 刚体前移（ADR-066，2026-10-14 起默认开，GitHub #36）：只动了方位的窗口左乘 Δ 不重算网格，
 # 判不刚或执行体不成都回退整根重算。要关用 model_transform_cheap_path = false
 # 或环境变量 AIOS_MODEL_TRANSFORM_CHEAP_PATH=0。

@@ -1245,7 +1245,7 @@ impl WindowRootSources {
                 &index.owners,
                 &roots_t,
             )
-            .with_foreign_members(&plan, &index.owners, index.dbnum, design_dbs)
+            .with_foreign_members(&plan, &index.owners, &roots_t, index.dbnum, design_dbs)
         } else {
             crate::data_interface::cable_endpoint::CableEndpointCascade::off()
         };

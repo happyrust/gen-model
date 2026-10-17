@@ -23,10 +23,12 @@
 //! - 引用者 → 根：沿 T 端 owner 索引向上（含自身），链上**每一个**落在 `roots_T` 里的根都算
 //!   （与 C2 / 祖先闭包同口径，复用 [`roots_on_owner_chain`]）；
 //! - 开关 `model_cable_endpoint_cascade`（`DbOption.toml` / `AIOS_MODEL_CABLE_ENDPOINT_CASCADE`），
-//!   **默认关**；关着时不开引擎、不查表，`touched` 一字不改。
+//!   **默认开**（2026-10-17 起，GitHub #35 Phase C，见 `docs/plans/2026-10-17-cable-endpoint-cascade-default-on-checklist.md`）；
+//!   关着时不开引擎、不查表，`touched` 一字不改。
 //!
-//! 几何上今天不显：电缆几何没按路由落地（`CABLE` 现走 cata_model，e3d-model 的 `EXTGEO` 段未接），
-//! 拉进来的电缆根重算出来的还是今天那份；先接线，电缆几何一落地这里就是正确性项（计划 §3 C8）。
+//! 2026-10-17（GitHub #35 Phase B + C）：`vendor/e3d-model` 的 `EXTGEO` 电缆路由与跨桥架圆角实体构建已对拍落地，
+//! 且规则 E 补齐了桥架附着点（`HATTA` / `TATTA` / `RATTA` / `RNODE`）直接触发与桥架子路径输入（`RPATH` / `POINTR` /
+//! 桥架件）沿 T 端 `owners` 上卷所属 `CWBRAN` 根、跳过 `Disposition::NoModel` 元数据门放行条目。
 //!
 //! **跨库版（GitHub #35，2026-10-01）**：同一批键到 MDB **其余**设计成员各自的 `STAREF` / `ENDREF` 反向表点查
 //! （[`read_foreign_referrers`]）——core 的 `DB_PseudoBACKRE` 也是 `DB_MDB::dbs` 逐库迭代，与 P4 逐库并集同一个形状，
@@ -59,17 +61,25 @@ pub const REFERENCE_ATTRIBUTES: [&str; 2] = ["STAREF", "ENDREF"];
 pub enum Rule {
     /// 规则 F：`EQUI` / `ELCONN` 变了 → `ELCXRF` = 引用它的电缆端点。
     Endpoint,
-    /// 规则 E：`CWBRAN` 变了 → `CLIST` = 路过它的电缆（查它路由节点被谁引用）。
+    /// 规则 E：`CWBRAN`、桥架附着点（`HATTA` / `TATTA` / `RATTA` / `RNODE`）或所属 `CWBRAN`
+    /// 子路径（`RPATH` / `POINTR` / 桥架件）变了 → `CLIST` = 路过它的电缆（查路由节点被哪段 `EXTGEO` 引用）。
     Route,
 }
 
-/// noun → 规则。别的 noun 给 `None` = 不查。
+/// noun → 规则。别的 noun 给 `None` = 不直接查（桥架子路径输入走 [`is_branch_route_input`] 上卷到所属 `CWBRAN`）。
 pub fn rule_for(noun: &str) -> Option<Rule> {
     match noun.trim().to_ascii_uppercase().as_str() {
         "EQUI" | "ELCONN" => Some(Rule::Endpoint),
-        "CWBRAN" => Some(Rule::Route),
+        "CWBRAN" | "HATTA" | "TATTA" | "RATTA" | "RNODE" => Some(Rule::Route),
         _ => None,
     }
+}
+
+/// 桥架分支路径输入 noun：自身不直接被 `EXTGEO.STAREF` / `ENDREF` 指向，但改动会改写所属
+/// `CWBRAN` 子路径与附着点世界坐标，需沿 T 端 owner 链上卷到所属 `CWBRAN` 按规则 E 点查整棵分支子树。
+pub fn is_branch_route_input(noun: &str) -> bool {
+    let upper = noun.trim().to_ascii_uppercase();
+    matches!(upper.as_str(), "RPATH" | "POINTR") || e3d_model::is_cable_tray_element(&upper)
 }
 
 /// 账本里落在规则表里的一个变更元素——零 I/O 粗筛的产物。
@@ -80,15 +90,31 @@ pub struct CascadeSource {
     pub rule: Rule,
 }
 
-/// 从账本挑出要查的变更元素（按 refno 去重，不分变更类型）。
+fn no_model_keys(plan: &UpdatePlan) -> BTreeSet<(u32, u32)> {
+    plan.ledger
+        .dispositions()
+        .iter()
+        .filter(|(_, d)| *d == e3d_model::ledger::Disposition::NoModel)
+        .map(|(k, _)| *k)
+        .collect()
+}
+
+/// 从账本挑出要查的变更元素（按 refno 去重，跳过 `NoModel`）。
 pub fn sources_from_plan(plan: &UpdatePlan) -> Vec<CascadeSource> {
+    let no_model = no_model_keys(plan);
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for entry in plan.ledger.entries() {
+        // `NoModel` 是元数据门放行的候选（只动了 DCHC=0 且生成器不读的字段，像 aps250514 3→4
+        // 两只 CWBRAN 只改 HCREF / TCREF），源自己都不重算，更不该沿引用边把别的根拉进 regen。
+        let key = (entry.refno.word0, entry.refno.word1);
+        if no_model.contains(&key) {
+            continue;
+        }
         let Some(rule) = rule_for(&entry.noun) else {
             continue;
         };
-        if !seen.insert((entry.refno.word0, entry.refno.word1)) {
+        if !seen.insert(key) {
             continue;
         }
         out.push(CascadeSource {
@@ -96,6 +122,54 @@ pub fn sources_from_plan(plan: &UpdatePlan) -> Vec<CascadeSource> {
             noun: entry.noun.clone(),
             rule,
         });
+    }
+    out
+}
+
+/// 从账本挑出要查的变更元素，并将落在 `CWBRAN` 子树内的路径输入（`RPATH` / `POINTR` / 桥架件）
+/// 沿 T 端 `owners` 上卷到所属 `CWBRAN` 根（按规则 E 展开整棵分支子树查 `STAREF` / `ENDREF`）。
+pub fn sources_from_plan_with_owners(
+    plan: &UpdatePlan,
+    owners: &BTreeMap<(u32, u32), RefNo>,
+    roots_t: &[GenerationRoot],
+) -> Vec<CascadeSource> {
+    let no_model = no_model_keys(plan);
+    let cwbran_roots: BTreeSet<(u32, u32)> = roots_t
+        .iter()
+        .filter(|root| root.noun.trim().eq_ignore_ascii_case("CWBRAN"))
+        .map(|root| {
+            let refno = refno_to_e3d(root.root);
+            (refno.word0, refno.word1)
+        })
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for entry in plan.ledger.entries() {
+        let key = (entry.refno.word0, entry.refno.word1);
+        if no_model.contains(&key) {
+            continue;
+        }
+        if let Some(rule) = rule_for(&entry.noun) {
+            if seen.insert(key) {
+                out.push(CascadeSource {
+                    refno: entry.refno,
+                    noun: entry.noun.clone(),
+                    rule,
+                });
+            }
+            continue;
+        }
+        if !cwbran_roots.is_empty() && is_branch_route_input(&entry.noun) {
+            for branch in roots_on_owner_chain(owners, &cwbran_roots, entry.refno) {
+                if seen.insert((branch.word0, branch.word1)) {
+                    out.push(CascadeSource {
+                        refno: branch,
+                        noun: "CWBRAN".to_string(),
+                        rule: Rule::Route,
+                    });
+                }
+            }
+        }
     }
     out
 }
@@ -332,13 +406,14 @@ impl CableEndpointCascade {
         mut self,
         plan: &UpdatePlan,
         owners: &BTreeMap<(u32, u32), RefNo>,
+        roots_t: &[GenerationRoot],
         own_dbnum: u32,
         members: &[SourceDb],
     ) -> Self {
         if !self.enabled || members.is_empty() {
             return self;
         }
-        let sources = sources_from_plan(plan);
+        let sources = sources_from_plan_with_owners(plan, owners, roots_t);
         self.foreign = read_foreign_referrers(&sources, owners, own_dbnum, members);
         self
     }
@@ -429,7 +504,7 @@ impl CableEndpointCascade {
         })
     }
 
-    /// I/O 版（从账本粗筛）。
+    /// I/O 版（从账本粗筛 + `CWBRAN` 子路径输入上卷）。
     pub fn collect(
         plan: &UpdatePlan,
         file: &Path,
@@ -437,7 +512,7 @@ impl CableEndpointCascade {
         owners: &BTreeMap<(u32, u32), RefNo>,
         roots_t: &[GenerationRoot],
     ) -> Self {
-        let sources = sources_from_plan(plan);
+        let sources = sources_from_plan_with_owners(plan, owners, roots_t);
         Self::from_sources(&sources, file, target_sesno, owners, roots_t)
     }
 
@@ -688,18 +763,99 @@ mod tests {
         assert!(!children.contains_key(&(DB, 103)));
     }
 
-    /// 规则表：三个 noun，一个不多；大小写与空白不敏感。
+    /// 规则表：规则 F（EQUI / ELCONN）与规则 E（CWBRAN + 4 种附着点 HATTA / TATTA / RATTA / RNODE）；
+    /// 桥架子路径输入（RPATH / POINTR / 桥架件）由 `is_branch_route_input` 识别并沿 owner 链上卷到所属 CWBRAN。
     #[test]
     fn the_noun_table_is_exactly_the_two_core_rules() {
         assert_eq!(rule_for("EQUI"), Some(Rule::Endpoint));
         assert_eq!(rule_for("ELCONN"), Some(Rule::Endpoint));
-        assert_eq!(rule_for(" cwbran "), Some(Rule::Route));
-        for noun in [
-            "CABLE", "EXTGEO", "HATTA", "SUBE", "CWAY", "SCTN", "BRAN", "",
-        ] {
+        for route_noun in [" cwbran ", "HATTA", "TATTA", "RATTA", "RNODE"] {
+            assert_eq!(rule_for(route_noun), Some(Rule::Route), "{route_noun}");
+        }
+        for noun in ["CABLE", "EXTGEO", "SUBE", "CWAY", "SCTN", "BRAN", ""] {
             assert_eq!(rule_for(noun), None, "{noun}");
         }
+        assert!(is_branch_route_input("RPATH"));
+        assert!(is_branch_route_input(" pointr "));
+        assert!(is_branch_route_input("CTSTRA"));
+        assert!(!is_branch_route_input("EXTGEO"));
+        assert!(!is_branch_route_input("CABLE"));
         assert_eq!(REFERENCE_ATTRIBUTES, ["STAREF", "ENDREF"]);
+    }
+
+    /// 桥架子路径输入（`RPATH` / `POINTR`）落在 `CWBRAN` 子树内时，上卷到所属 `CWBRAN` 作为 `Rule::Route` 源；
+    /// 落在 `CABLE` / `HANDRA` 下的 `POINTR` 或被元数据门判为 `NoModel` 的条目不触发路由级联。
+    #[test]
+    fn rpath_and_pointr_under_cwbran_fold_to_owning_cwbran_route_source() {
+        use e3d_model::element_diff::ElementDiff;
+        use e3d_model::increment::{IncrementReport, UpdatePlan};
+        use e3d_model::ledger::{ChangeLedger, Disposition};
+
+        let mod_diff = |refno: RefNo, noun: &str| ElementDiff {
+            refno: refno.to_string(),
+            noun: noun.into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: vec!["POS".into()],
+            opaque: false,
+        };
+
+        // 100 = CWBRAN 根 -> 101 = RPATH -> 102 = POINTR；103 = HATTA（同在 CWBRAN 下）
+        // 200 = CABLE 根 -> 201 = RPATH -> 202 = POINTR
+        // 300 = CWBRAN 根（只动了 NoModel 字段）
+        let owners: BTreeMap<(u32, u32), RefNo> = [
+            ((DB, 100), r(100)),
+            ((DB, 101), r(100)),
+            ((DB, 102), r(101)),
+            ((DB, 103), r(100)),
+            ((DB, 200), r(200)),
+            ((DB, 201), r(200)),
+            ((DB, 202), r(201)),
+            ((DB, 300), r(300)),
+            ((DB, 301), r(300)),
+        ]
+        .into_iter()
+        .collect();
+        let roots_t = vec![root(100, "CWBRAN"), root(200, "CABLE"), root(300, "CWBRAN")];
+
+        let mut ledger = ChangeLedger::default();
+        // CWBRAN 100 下的 POINTR 102 改了位置（RolledUp）
+        ledger.record(r(102), &mod_diff(r(102), "POINTR"));
+        ledger.dispose(r(102), Disposition::RolledUp);
+        // CABLE 200 下的 POINTR 202 改了位置（RolledUp）：不属于 CWBRAN，不应触发桥架级联
+        ledger.record(r(202), &mod_diff(r(202), "POINTR"));
+        ledger.dispose(r(202), Disposition::RolledUp);
+        // CWBRAN 300 及其 RPATH 301 只改了 NoModel 元数据：不应触发级联
+        ledger.record(r(300), &mod_diff(r(300), "CWBRAN"));
+        ledger.dispose(r(300), Disposition::NoModel);
+        ledger.record(r(301), &mod_diff(r(301), "RPATH"));
+        ledger.dispose(r(301), Disposition::NoModel);
+
+        let plan = UpdatePlan {
+            regenerate: BTreeSet::new(),
+            remove: BTreeSet::new(),
+            regenerate_derived: BTreeSet::new(),
+            derived_stale: BTreeSet::new(),
+            ledger,
+            full_rebuild: None,
+            report: IncrementReport::default(),
+        };
+
+        let sources = sources_from_plan_with_owners(&plan, &owners, &roots_t);
+        assert_eq!(sources, vec![cwbran(100)]);
+
+        let children = children_index(&owners);
+        let points = query_points(&sources[0], |p| {
+            children
+                .get(&(p.word0, p.word1))
+                .cloned()
+                .unwrap_or_default()
+        });
+        assert!(
+            points.contains(&r(103)),
+            "上卷到 CWBRAN 100 后，query_points 必须覆盖同分支下的附着点 HATTA 103: {points:?}"
+        );
     }
 
     #[test]
@@ -980,7 +1136,30 @@ mod tests {
                 PathBuf::from(std::env::var("AIOS_APS_PROJECT_DIR").unwrap_or_else(|_| {
                     r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000".into()
                 }));
-            let mut windows: Vec<(PathBuf, u32, u32)> = vec![(aps.join("aps7200_0001"), 3, 4)];
+            let mut windows: Vec<(PathBuf, u32, u32)> = vec![
+                (aps.join("aps7200_0001"), 3, 4),
+                (aps.join("aps250514_0001"), 3, 4),
+            ];
+            for name in ["aps250176_0001", "aps250179_0001"] {
+                let path = aps.join(name);
+                if let Ok(mut eng) = ReadOnlyEngine::open(&path) {
+                    if let Ok(sessions) = eng.sessions() {
+                        let mut sesnos: Vec<u32> = sessions.iter().map(|s| s.session_id).collect();
+                        sesnos.sort_unstable();
+                        sesnos.dedup();
+                        if !sesnos.is_empty() {
+                            if let Ok(steps) = eng.diff_steps(
+                                SessionSelector::Exact(sesnos[0]),
+                                SessionSelector::Latest,
+                            ) {
+                                for step in &steps {
+                                    windows.push((path.clone(), step.from.sesno, step.to.sesno));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let zdj = zdj7200();
             let mut engine = ReadOnlyEngine::open(&zdj).expect("open zdj7200");
             let mut sesnos: Vec<u32> = engine
@@ -1217,6 +1396,267 @@ mod tests {
                 checked += 1;
             }
             assert!(checked > 0, "前 8 条跨库端点边的端点都不在规则 F 里");
+
+            // 规则 E（#35 Phase C）：EXTGEO 段正向读 STAREF / ENDREF，收集指向其它库桥架附着点
+            // （HATTA / TATTA / RATTA / RNODE）的跨库路由边（aps250179 → aps250176 共 152 条）。
+            let mut route_edges: Vec<(RefNo, RefNo, &'static str, RefNo)> = Vec::new();
+            for (dbnum, lib) in &libs {
+                for root in lib
+                    .roots
+                    .iter()
+                    .filter(|root| root.noun.eq_ignore_ascii_case("CABLE"))
+                {
+                    let cable = refno_to_e3d(root.root);
+                    let Ok(cable_members) = all.element(cable).members() else {
+                        continue;
+                    };
+                    for member in cable_members {
+                        if !member
+                            .element_type()
+                            .is_ok_and(|t| t.eq_ignore_ascii_case("RPATH"))
+                        {
+                            continue;
+                        }
+                        let Ok(rpath_members) = member.members() else {
+                            continue;
+                        };
+                        for seg in rpath_members {
+                            if !seg
+                                .element_type()
+                                .is_ok_and(|t| t.eq_ignore_ascii_case("EXTGEO"))
+                            {
+                                continue;
+                            }
+                            let extgeo = seg.refno();
+                            for attribute in REFERENCE_ATTRIBUTES {
+                                let Ok(Some(target)) = seg.get_ref(attribute) else {
+                                    continue;
+                                };
+                                if target.is_valid()
+                                    && target.dbno() != *dbnum
+                                    && libs.contains_key(&target.dbno())
+                                {
+                                    route_edges.push((cable, extgeo, attribute, target));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            println!(
+                "[#35] 跨库 EXTGEO 路由边 {} 条（目标库在目录里的）",
+                route_edges.len()
+            );
+            assert!(
+                !route_edges.is_empty(),
+                "C6 普查说 APS 有 152 条跨库 EXTGEO 路由边——一条都没找到"
+            );
+
+            let mut route_checked = 0usize;
+            for (cable, extgeo, attribute, target) in route_edges.iter().take(8) {
+                let own = target.dbno();
+                let noun = all.element(*target).element_type().unwrap_or_default();
+                let rule = rule_for(&noun).unwrap_or_else(|| {
+                    panic!("{extgeo}.{attribute} -> {target}：附着点 noun `{noun}` 必须在规则 E 里")
+                });
+                assert_eq!(rule, Rule::Route);
+
+                // (1) 附着点自身（HATTA / TATTA / RATTA / RNODE）改动 → 跨库点查命中 EXTGEO 并折回 CABLE 根
+                let source = CascadeSource {
+                    refno: *target,
+                    noun: noun.clone(),
+                    rule,
+                };
+                let foreign = read_foreign_referrers(&[source], &libs[&own].owners, own, &members);
+                let cable_db = cable.dbno();
+                let found: Vec<RefNo> = foreign
+                    .referrers
+                    .get(&cable_db)
+                    .map(|keys| {
+                        keys.iter()
+                            .map(|&(word0, word1)| RefNo::new(word0, word1))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    found.contains(extgeo),
+                    "假定附着点 {noun} {target} 改动：跨库点查必须直接命中 {extgeo}，实得 {found:?}"
+                );
+                let folded = crate::data_interface::cross_db_handoff::fold_elements_to_roots(
+                    &libs[&cable_db].owners,
+                    &libs[&cable_db].roots,
+                    &found,
+                );
+                assert!(
+                    folded
+                        .roots
+                        .iter()
+                        .any(|root| root.refno == refno_from_e3d(*cable).to_pdms_str()),
+                    "{extgeo}.{attribute} -> {target}：EXTGEO 必须沿 owner 链折回电缆根 {cable}，实得 {:?}",
+                    folded.roots
+                );
+
+                // (2) 所属 CWBRAN 下的 RPATH 改动 → sources_from_plan_with_owners 上卷到 CWBRAN →
+                //     query_points 展开整棵 CWBRAN 子树 → 跨库点查同样命中 EXTGEO 并折回 CABLE 根
+                let cwbran_keys: BTreeSet<(u32, u32)> = libs[&own]
+                    .roots
+                    .iter()
+                    .filter(|r| r.noun.eq_ignore_ascii_case("CWBRAN"))
+                    .map(|r| {
+                        let er = refno_to_e3d(r.root);
+                        (er.word0, er.word1)
+                    })
+                    .collect();
+                let cwbran_owners = roots_on_owner_chain(&libs[&own].owners, &cwbran_keys, *target);
+                assert!(
+                    !cwbran_owners.is_empty(),
+                    "附着点 {target} 在 dbnum {own} 必须挂在某个 CWBRAN 根名下"
+                );
+                let cwbran = cwbran_owners[0];
+                let rpath = all
+                    .element(cwbran)
+                    .members()
+                    .expect("cwbran members")
+                    .into_iter()
+                    .find(|m| {
+                        m.element_type()
+                            .is_ok_and(|t| t.eq_ignore_ascii_case("RPATH"))
+                    })
+                    .expect("CWBRAN 必有 RPATH")
+                    .refno();
+                let mut ledger = e3d_model::ledger::ChangeLedger::default();
+                ledger.record(
+                    rpath,
+                    &e3d_model::element_diff::ElementDiff {
+                        refno: rpath.to_string(),
+                        noun: "RPATH".into(),
+                        type_changed: None,
+                        owner_changed: None,
+                        members: None,
+                        attributes: vec!["POS".into()],
+                        opaque: false,
+                    },
+                );
+                ledger.dispose(rpath, e3d_model::ledger::Disposition::RolledUp);
+                let plan = e3d_model::increment::UpdatePlan {
+                    regenerate: BTreeSet::new(),
+                    remove: BTreeSet::new(),
+                    regenerate_derived: BTreeSet::new(),
+                    derived_stale: BTreeSet::new(),
+                    ledger,
+                    full_rebuild: None,
+                    report: e3d_model::increment::IncrementReport::default(),
+                };
+                let branch_sources =
+                    sources_from_plan_with_owners(&plan, &libs[&own].owners, &libs[&own].roots);
+                assert_eq!(
+                    branch_sources,
+                    vec![CascadeSource {
+                        refno: cwbran,
+                        noun: "CWBRAN".into(),
+                        rule: Rule::Route,
+                    }]
+                );
+                let branch_foreign =
+                    read_foreign_referrers(&branch_sources, &libs[&own].owners, own, &members);
+                let branch_found: Vec<RefNo> = branch_foreign
+                    .referrers
+                    .get(&cable_db)
+                    .map(|keys| {
+                        keys.iter()
+                            .map(|&(word0, word1)| RefNo::new(word0, word1))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let branch_folded = crate::data_interface::cross_db_handoff::fold_elements_to_roots(
+                    &libs[&cable_db].owners,
+                    &libs[&cable_db].roots,
+                    &branch_found,
+                );
+                println!(
+                    "[#35] 假定 CWBRAN {cwbran} 的 RPATH {rpath}（dbnum {own}）变了：queries={}                      引用者数={} → 折回电缆库 {cable_db} 的根数={}",
+                    branch_foreign.queries,
+                    branch_found.len(),
+                    branch_folded.roots.len()
+                );
+                assert!(
+                    branch_folded
+                        .roots
+                        .iter()
+                        .any(|root| root.refno == refno_from_e3d(*cable).to_pdms_str()),
+                    "RPATH {rpath} (under CWBRAN {cwbran}) 改动后，跨库级联必须查回电缆根 {cable}"
+                );
+                route_checked += 1;
+            }
+            assert!(route_checked > 0, "跨库 EXTGEO 路由边至少应核验 1 条");
+        }
+
+        /// 九个钉死窗口（`window_root_plan::tests::live_ams8000_pinned_windows_land_in_the_expected_buckets`
+        /// 的表）开关两态 `regen` 逐字相同——它们没有跨根的电缆端点或桥架路由改动。只读文件：
+        /// `AIOS_PROJAMS_GEOMETRY_FILE`（默认 ams8000_0001）+ `AIOS_E3D_TEMPLATE_DIR`。
+        #[test]
+        #[ignore = "manual live: needs the real ams8000 DESI file and the E3D template directory"]
+        fn live_ams8000_nine_pinned_windows_are_identical_with_the_cascade_on_and_off() {
+            let file = PathBuf::from(std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(
+                |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into(),
+            ));
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let windows = [
+                (255u32, 256u32),
+                (195, 196),
+                (45, 46),
+                (24, 26),
+                (266, 267),
+                (267, 268),
+                (268, 269),
+                (269, 270),
+                (270, 271),
+            ];
+            let unit_types = resolve_delivery_unit_types(&[]);
+            for (base_sesno, target_sesno) in windows {
+                let (base, target) = (
+                    open(&schema, &file, base_sesno),
+                    open(&schema, &file, target_sesno),
+                );
+                let base_index = scan_index(&file, Some(base_sesno)).expect("scan base index");
+                let roots_s: Vec<PersistedRoot> =
+                    enumerate_generation_roots(&base, &base_index.roots, &unit_types)
+                        .expect("enumerate base roots")
+                        .into_iter()
+                        .map(|root| PersistedRoot {
+                            refno: root.root,
+                            noun: root.noun,
+                        })
+                        .collect();
+                let run = |on: bool| {
+                    let _switch = crate::options::CableEndpointCascadeOverride::set(on);
+                    let sources = WindowRootSources::collect(
+                        &file,
+                        base_sesno,
+                        target_sesno,
+                        &base,
+                        &target,
+                        &unit_types,
+                        &[],
+                    )
+                    .expect("collect");
+                    let impact = sources.impact(&roots_s);
+                    let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+                    let regen: Vec<RefnoEnum> = plan.regen.iter().map(|root| root.root).collect();
+                    (sources.cable_endpoint, regen)
+                };
+                let ((on, regen_on), (_, regen_off)) = (run(true), run(false));
+                println!(
+                    "ams8000 {base_sesno}→{target_sesno}: {} | regen_on={} regen_off={}",
+                    on.summary_line(8000),
+                    regen_on.len(),
+                    regen_off.len()
+                );
+                assert_eq!(
+                    regen_on, regen_off,
+                    "ams8000 {base_sesno}→{target_sesno}: 两态 regen 必须逐字相同"
+                );
+            }
         }
     }
 }

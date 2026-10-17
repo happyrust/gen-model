@@ -2382,10 +2382,14 @@ pub fn model_structural_connection_cascade() -> bool {
 /// 环境变量名：一次性覆盖 [`model_cable_endpoint_cascade`]，不必改配置文件。
 pub const MODEL_CABLE_ENDPOINT_CASCADE_ENV: &str = "AIOS_MODEL_CABLE_ENDPOINT_CASCADE";
 
-/// 电缆端点 / 路由反向级联（`DbOption.toml` 的 `model_cable_endpoint_cascade`，**默认 false**）。
+/// 电缆端点 / 路由反向级联（`DbOption.toml` 的 `model_cable_endpoint_cascade`，**默认开**——2026-10-17 翻开，
+/// GitHub #35 Phase C：`e3d-model` 电缆 `EXTGEO` 路由几何对拍收敛、桥架附着点与子路径输入上卷补齐、
+/// 30 个真库窗口开关两态逐字相同、APS 跨库 196 条端点边 + 152 条 `EXTGEO` 路由边全部命中折回 `CABLE` 根；
+/// 验收单 `docs/plans/2026-10-17-cable-endpoint-cascade-default-on-checklist.md`，此前默认关）。
 ///
 /// 联动对齐计划（`2026-09-06-core3d-cascade-parity-dev-plan.md` §3 C8 同库版）的灰度开关：direct
-/// 窗口规划器对变更的 `EQUI` / `ELCONN`（core 规则 F `ELCXRF`）与 `CWBRAN`（规则 E `CLIST`）到本库
+/// 窗口规划器对变更的 `EQUI` / `ELCONN`（core 规则 F `ELCXRF`）与 `CWBRAN`（规则 E `CLIST`，含附着点
+/// `HATTA` / `TATTA` / `RATTA` / `RNODE` 与 `CWBRAN` 子树内的 `RPATH` / `POINTR` / 桥架件上卷）到本库
 /// T 端文件自带的 `STAREF` / `ENDREF` 反向引用表点查引用它们的电缆（`CABLE` 或其 `EXTGEO` 段），把
 /// 电缆 owner 链上的生成根并进 `touched`——core 那两个伪属性底下就是 `DB_RefTableIterator`
 /// （证据 `2026-09-06-ida-core3d-change-evalat-cascade.md` §8.6）。跨库版（2026-10-01，GitHub #35）：同一批键
@@ -2402,7 +2406,7 @@ pub fn model_cable_endpoint_cascade() -> bool {
         2 => return false,
         _ => {}
     }
-    effective_default_off_switch(
+    effective_default_on_switch(
         load_ext_fields().model_cable_endpoint_cascade,
         std::env::var(MODEL_CABLE_ENDPOINT_CASCADE_ENV)
             .ok()
@@ -3825,6 +3829,11 @@ mod tests {
             .and_then(toml::Value::as_bool)
             .expect("模板写了 model_design_reference_cascade");
         assert_eq!(configured, effective_default_on_switch(None, None));
+        let cable_configured = document
+            .get("model_cable_endpoint_cascade")
+            .and_then(toml::Value::as_bool)
+            .expect("模板写了 model_cable_endpoint_cascade");
+        assert_eq!(cable_configured, effective_default_on_switch(None, None));
     }
 
     /// 缺配置文件走默认值，而且不出声。单测环境与最小部署都没有 `DbOption.toml`，

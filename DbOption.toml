@@ -218,6 +218,15 @@ room_membership = true
 # 环境变量 AIOS_MODEL_DESIGN_REFERENCE_CASCADE 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
 model_design_reference_cascade = true
 
+#【默认值 2026-10-17 改为 true，GitHub #35】model_cable_endpoint_cascade —— 电缆端点 / 路由反向级联（联动对齐计划 C8）
+# 窗口里改了 EQUI / ELCONN（规则 F ELCXRF）或 CWBRAN 及其附着点 HATTA / TATTA / RATTA / RNODE 与子路径 RPATH / POINTR
+#（规则 E CLIST）时，到本库及 MDB 其余设计库自带的 STAREF / ENDREF 反向引用表点查引用它的 CABLE / EXTGEO，
+# 同库并进 touched、跨库交接排 ModelOnly。
+#   true ：默认开启。2026-10-17 验收：e3d-model EXTGEO 电缆路由几何对拍收敛；zdj7200 同库 6 根电缆、APS 跨库 196 条端点边
+#          + 152 条 EXTGEO 路由边全命中；30 个真库窗口（aps7200 / aps250514 / aps250176 / aps250179 / zdj7200 / ams8000）开关两态逐字相同。
+#   false：关回旧路（不开引擎、不查 STAREF/ENDREF 表）。环境变量 AIOS_MODEL_CABLE_ENDPOINT_CASCADE 压过本键。
+model_cable_endpoint_cascade = true
+
 #【默认值 2026-10-14 改为 true，GitHub #36】model_transform_cheap_path —— 刚体前移（ADR-066）
 # 只动了方位的窗口不重算网格：锚点子树的已发布记录左乘 Δ，盒按「纯平移加 t / 含旋转读网格顶点」重算。
 # 判不刚（规则 3 排除命中：宿主刀 / 现算标架 / 跨边界结构连接等）或执行体任一步不成都回退整根 regen。
