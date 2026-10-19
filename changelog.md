@@ -118,6 +118,16 @@
   `the_task_probe_reads_the_cached_watch_dir_plan`（探针只读 `latest_for`）。
 - **计划**：`docs/plans/2026-10-15-watch-root-scan-healthy-skip-plan.md`。
 
+## 0.1.41 — 2026-10-19
+
+### SCTN 负体分型账修复收口并入发布线（gen-model #34 D 线）
+
+- `feat/issues-36-50-34` 并入：GeneratedElement 结构同步 `own_ngms_cuts` /
+  `joint_cuts_explained` 字段（`2a8b5753a`），以及 Phase D 勾选收尾与 S5 全语料回归记录
+  的修复计划文档（`d2b5ce61c`）。
+- 同步发布前端 `plant3d-web 0.2.7`（BRAN 净距自动计算、X 光/仅显示查看模式、
+  净距标注点选拾取目标构件、实例加载守卫）。
+
 ## 0.1.40 — 2026-10-15
 
 ### 配置向导恢复介质两档选择（external / memory）——`store_mode` 回到配置文件当向导持久化层（ADR-083 二次修订）
