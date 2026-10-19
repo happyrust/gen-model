@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use glam::{Mat4, Quat, Vec3};
 use once_cell::sync::Lazy;
-use parry3d::bounding_volume::Aabb;
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Point, Real, Vector};
 use parry3d::query::{self, ClosestPoints, PointQuery, Ray, RayCast};
 use parry3d::shape::{FeatureId, TriMesh, TriMeshFlags, Triangle};
@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 
+use crate::fast_model::spatial_clearance::vertical_z_gap;
 use crate::fast_model::spatial_query::{aabb_min_distance, parse_f32, parse_flag};
 
 /// 响应里 `unit` / `method` / `accuracy_class` 的字面值（09-11 计划 D2 的命名）。
@@ -78,6 +79,9 @@ pub struct RawSurfaceClearanceQuery {
     pub perpendicular: Option<String>,
     /// mm；缺省 50000，上限 1e6。超出即 `result: null` + warning。
     pub max_distance_mm: Option<String>,
+    /// `1` = 垂直距口径（楼板类）：不量三维最近点，量同一 XY 处两侧网格的 Z 向高差；
+    /// 目标在该 XY 打不到（板边旁）按目标整体面标高照标高差。
+    pub vertical: Option<String>,
     pub debug: Option<String>,
 }
 
@@ -103,6 +107,8 @@ pub struct SurfaceClearanceParams {
     pub target_kind: TargetKind,
     pub perpendicular: bool,
     pub max_distance_mm: f32,
+    /// 垂直距口径（楼板类）：同一 XY 处两侧网格的 Z 区间净距。
+    pub vertical: bool,
     pub debug: bool,
 }
 
@@ -157,6 +163,7 @@ impl SurfaceClearanceParams {
             target_kind,
             perpendicular,
             max_distance_mm,
+            vertical: parse_flag("vertical", raw.vertical.as_deref(), false)?,
             debug,
         })
     }
@@ -387,6 +394,313 @@ pub fn surface_clearance(
     }
 }
 
+// ───────────────────────────── 垂直距（楼板类，§vertical=1） ─────────────────────────────
+
+/// 两组叶子合并盒 XY 矩形上的最近点对：返回值是 `(源侧 x, 源侧 y, 目标侧 x, 目标侧 y)`。
+/// 与 `aabb_aabb_nearest` 同规则（重叠轴取重叠区间中点），只看 x/y 两轴。
+fn aabb_xy_nearest(source: &Aabb, target: &Aabb) -> (f32, f32, f32, f32) {
+    let pick = |axis: usize| -> (f32, f32) {
+        let (source_min, source_max) = (source.mins[axis], source.maxs[axis]);
+        let (target_min, target_max) = (target.mins[axis], target.maxs[axis]);
+        if source_max < target_min {
+            (source_max, target_min)
+        } else if target_max < source_min {
+            (source_min, target_max)
+        } else {
+            let mid = (source_min.max(target_min) + source_max.min(target_max)) * 0.5;
+            (mid, mid)
+        }
+    };
+    let (fx, tx) = pick(0);
+    let (fy, ty) = pick(1);
+    (fx, fy, tx, ty)
+}
+
+fn combined_aabb(leaves: &[LeafMesh]) -> Option<Aabb> {
+    leaves
+        .iter()
+        .map(LeafMesh::aabb)
+        .copied()
+        .reduce(|mut acc, aabb| {
+            acc.merge(&aabb);
+            acc
+        })
+}
+
+/// 在 `(x, y)` 处对一组叶子打竖直射线，合出整组网格在该列上的 z 区间 `[lo, hi]`。
+/// 每片叶子向下首命中 = 顶面 z、向上首命中 = 底面 z（命中不到的叶子不算）；
+/// `lo_leaf`/`hi_leaf` 记录给出区间端的那两片，结果要报 refno。
+fn vertical_span(
+    leaves: &[LeafMesh],
+    x: f32,
+    y: f32,
+    ray_hi: f32,
+    ray_lo: f32,
+) -> Option<(f32, f32, usize, usize)> {
+    let down = Vector::new(0.0, 0.0, -1.0);
+    let up = Vector::new(0.0, 0.0, 1.0);
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    let mut lo_leaf = 0usize;
+    let mut hi_leaf = 0usize;
+    let mut any = false;
+    for (index, leaf) in leaves.iter().enumerate() {
+        if let Some(hit) = leaf.mesh.cast_local_ray_and_get_normal(
+            &Ray::new(Point::new(x, y, ray_hi), down),
+            f32::MAX,
+            false,
+        ) {
+            let z = ray_hi - hit.time_of_impact;
+            if z > hi {
+                hi = z;
+                hi_leaf = index;
+            }
+            any = true;
+        }
+        if let Some(hit) = leaf.mesh.cast_local_ray_and_get_normal(
+            &Ray::new(Point::new(x, y, ray_lo), up),
+            f32::MAX,
+            false,
+        ) {
+            let z = ray_lo + hit.time_of_impact;
+            if z < lo {
+                lo = z;
+                lo_leaf = index;
+            }
+            any = true;
+        }
+    }
+    any.then_some((lo.min(hi), hi, lo_leaf, hi_leaf))
+}
+
+/// `vertical=1` 口径：同一 XY 处两侧网格的 Z 区间净距（楼板类板面是水平的，
+/// 三维最近距会量到板边侧棱，不是设计要的「管底到板面净高」）。
+///
+/// 1. XY 参考点取两侧合盒 XY 矩形的源侧最近点；源侧射线全落空时换目标侧点再试；
+/// 2. 两侧各自合出 z 区间（[`vertical_span`]），不重叠回正 gap、重叠即竖直真穿透
+///    （同一 XY 处两网格 z 区间套叠 → `intersects`）；
+/// 3. 目标在该 XY 打不到（管在板边旁）：按目标网格合盒的面标高当板面照标高差，
+///    `intersects` 恒 false（射线只穿了空气）；
+/// 4. 源在该 XY 也打不到（盒 XY 与网格 XY 偏差大、极反常）：两侧合盒 z 区间 gap 兜底，
+///    `witness = vertical-aabb`。
+pub fn surface_clearance_vertical(
+    source: &[LeafMesh],
+    target: &[LeafMesh],
+    opts: SurfaceClearanceOptions,
+) -> ClearanceOutcome {
+    let mut warnings = Vec::new();
+    let stats = PairStats::default();
+    let (Some(src_aabb), Some(tgt_aabb)) = (combined_aabb(source), combined_aabb(target)) else {
+        return ClearanceOutcome {
+            hit: None,
+            stats,
+            warnings,
+        };
+    };
+    let ray_hi = src_aabb.maxs.z.max(tgt_aabb.maxs.z) + 1000.0;
+    let ray_lo = src_aabb.mins.z.min(tgt_aabb.mins.z) - 1000.0;
+    let (ax, ay, bx, by) = aabb_xy_nearest(&src_aabb, &tgt_aabb);
+    let (x, y, src_span) = match vertical_span(source, ax, ay, ray_hi, ray_lo) {
+        Some(span) => (ax, ay, Some(span)),
+        None => (bx, by, vertical_span(source, bx, by, ray_hi, ray_lo)),
+    };
+    let tgt_span = vertical_span(target, x, y, ray_hi, ray_lo);
+    let src_face_toward = |span: &(f32, f32, usize, usize), below: bool| {
+        if below { span.1 } else { span.0 }
+    };
+    let src_leaf_toward = |span: &(f32, f32, usize, usize), below: bool| {
+        if below { span.3 } else { span.2 }
+    };
+    let make_hit = |x: f32,
+                    y: f32,
+                    distance: f32,
+                    intersects: bool,
+                    src_z: f32,
+                    tgt_z: f32,
+                    src_leaf: usize,
+                    tgt_leaf: usize,
+                    tgt_face_kind: FaceKind,
+                    normal_up: bool,
+                    witness: &'static str|
+     -> ClearanceHit {
+        let source_point = Point::new(x, y, src_z);
+        let target_point = Point::new(x, y, tgt_z);
+        ClearanceHit {
+            distance,
+            intersects,
+            source_point,
+            target_point,
+            source_leaf: src_leaf,
+            target_leaf: tgt_leaf,
+            target_face: Some(FaceInfo {
+                kind: tgt_face_kind,
+                normal: Vector::new(0.0, 0.0, if normal_up { 1.0 } else { -1.0 }),
+                confidence: "vertical",
+            }),
+            perpendicular: Some(Perpendicular {
+                distance,
+                from: source_point,
+                to: target_point,
+                method: "ray",
+            }),
+            witness,
+        }
+    };
+
+    let hit = match (src_span, tgt_span) {
+        (Some(src), Some(tgt)) => {
+            let (src_lo, src_hi, src_lo_leaf, src_hi_leaf) = src;
+            let (tgt_lo, tgt_hi, tgt_lo_leaf, tgt_hi_leaf) = tgt;
+            if src_lo > tgt_hi {
+                // 源在目标上方：源底面 ↔ 板顶面
+                make_hit(
+                    x,
+                    y,
+                    src_lo - tgt_hi,
+                    false,
+                    src_lo,
+                    tgt_hi,
+                    src_lo_leaf,
+                    tgt_hi_leaf,
+                    FaceKind::Top,
+                    true,
+                    "vertical-ray",
+                )
+            } else if src_hi < tgt_lo {
+                // 源在目标下方：源顶面 ↔ 板底面
+                make_hit(
+                    x,
+                    y,
+                    tgt_lo - src_hi,
+                    false,
+                    src_hi,
+                    tgt_lo,
+                    src_hi_leaf,
+                    tgt_lo_leaf,
+                    FaceKind::Bottom,
+                    false,
+                    "vertical-ray",
+                )
+            } else {
+                // 同一 XY 处两网格 z 区间套叠 → 真穿透
+                let src_below = (src_lo + src_hi) * 0.5 <= (tgt_lo + tgt_hi) * 0.5;
+                make_hit(
+                    x,
+                    y,
+                    0.0,
+                    true,
+                    src_face_toward(&src, src_below),
+                    if src_below { tgt_lo } else { tgt_hi },
+                    src_leaf_toward(&src, src_below),
+                    if src_below { tgt_lo_leaf } else { tgt_hi_leaf },
+                    if src_below {
+                        FaceKind::Bottom
+                    } else {
+                        FaceKind::Top
+                    },
+                    !src_below,
+                    "vertical-ray",
+                )
+            }
+        }
+        (Some(src), None) => {
+            // 目标在该 XY 打不到（板边旁）：按目标合盒的面标高当板面照标高差
+            let tgt_level = if src.0 > tgt_aabb.maxs.z {
+                tgt_aabb.maxs.z
+            } else if src.1 < tgt_aabb.mins.z {
+                tgt_aabb.mins.z
+            } else if (tgt_aabb.mins.z + tgt_aabb.maxs.z) * 0.5 <= (src.0 + src.1) * 0.5 {
+                tgt_aabb.maxs.z
+            } else {
+                tgt_aabb.mins.z
+            };
+            let (gap, _, src_z, tgt_z) = vertical_z_gap(src.0, src.1, tgt_level, tgt_level);
+            let tgt_leaf = target
+                .iter()
+                .enumerate()
+                .min_by(|(_, leaf), (_, other)| {
+                    let d = |l: &LeafMesh| {
+                        (l.aabb().maxs.z - tgt_z)
+                            .abs()
+                            .min((l.aabb().mins.z - tgt_z).abs())
+                    };
+                    d(leaf).total_cmp(&d(other))
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            warnings.push(
+                "垂直口径：目标在该 XY 射线落空（管在板边旁），按目标整体面标高照标高差"
+                    .to_string(),
+            );
+            make_hit(
+                x,
+                y,
+                gap,
+                false,
+                src_z,
+                tgt_z,
+                if src_z == src.0 { src.2 } else { src.3 },
+                tgt_leaf,
+                if tgt_z == tgt_aabb.maxs.z {
+                    FaceKind::Top
+                } else {
+                    FaceKind::Bottom
+                },
+                src.0 >= tgt_z,
+                "vertical-ray-miss",
+            )
+        }
+        (None, _) => {
+            // 源在两个候选 XY 都落空（极反常）：合盒 z 区间兜底
+            let (gap, z_overlap, src_z, tgt_z) = vertical_z_gap(
+                src_aabb.mins.z,
+                src_aabb.maxs.z,
+                tgt_aabb.mins.z,
+                tgt_aabb.maxs.z,
+            );
+            let xy_overlap = !(src_aabb.maxs.x < tgt_aabb.mins.x
+                || tgt_aabb.maxs.x < src_aabb.mins.x
+                || src_aabb.maxs.y < tgt_aabb.mins.y
+                || tgt_aabb.maxs.y < src_aabb.mins.y);
+            warnings.push(
+                "垂直口径：源网格在两个候选 XY 射线落空，按两侧合盒的 z 区间兜底".to_string(),
+            );
+            make_hit(
+                ax,
+                ay,
+                gap,
+                xy_overlap && z_overlap,
+                src_z,
+                tgt_z,
+                0,
+                0,
+                if tgt_z == tgt_aabb.maxs.z {
+                    FaceKind::Top
+                } else {
+                    FaceKind::Bottom
+                },
+                src_z <= tgt_z,
+                "vertical-aabb",
+            )
+        }
+    };
+
+    let hit = if hit.distance > opts.max_distance {
+        warnings.push(format!(
+            "beyond_max_distance: 垂直净距 {:.0} mm 超过 max_distance_mm {:.0}",
+            hit.distance, opts.max_distance
+        ));
+        None
+    } else {
+        Some(hit)
+    };
+    ClearanceOutcome {
+        hit,
+        stats,
+        warnings,
+    }
+}
+
 fn unit_or_none(v: Vector<Real>) -> Option<Vector<Real>> {
     let n = v.norm();
     (n > 1e-9).then(|| v / n)
@@ -468,8 +782,8 @@ fn resolve_target_face(
     // 连线在面法向上的投影就是到面所在平面的垂距；两者差在容差内 = 连线本身可以当垂距用。
     let hugs_normal = |face: &FaceInfo| distance - (p - q).dot(&face.normal) <= tolerance;
     let Some(first) = candidates.first() else {
-        let perpendicular = cast(&face, None)
-            .or_else(|| hugs_normal(&face).then(|| closest_segment("edge")));
+        let perpendicular =
+            cast(&face, None).or_else(|| hugs_normal(&face).then(|| closest_segment("edge")));
         return (face, perpendicular);
     };
     if let Some(perpendicular) = cast(&face, Some(first.center())) {
@@ -505,7 +819,10 @@ fn hit_normal(
 }
 
 /// 一组点沿方向 `dir` 的支撑区间 [min, max]。
-fn support_interval<'a>(points: impl Iterator<Item = &'a Point<Real>>, dir: &Vector<Real>) -> (f32, f32) {
+fn support_interval<'a>(
+    points: impl Iterator<Item = &'a Point<Real>>,
+    dir: &Vector<Real>,
+) -> (f32, f32) {
     points.fold((f32::MAX, f32::MIN), |(lo, hi), p| {
         let d = p.coords.dot(dir);
         (lo.min(d), hi.max(d))
@@ -1170,6 +1487,9 @@ pub struct ResultJson {
     pub target_leaf_noun: String,
     pub target_face: Option<FaceJson>,
     pub perpendicular: Option<PerpendicularJson>,
+    /// `true` = `vertical=1` 请求口径：两端点同 XY、按 Z 区间净距，`witness` 为
+    /// `vertical-ray` / `vertical-ray-miss`（目标落空按合盒标高兜底）/ `vertical-aabb`（源也落空按双侧合盒兜底）。
+    pub vertical: bool,
     pub witness: &'static str,
 }
 
@@ -1350,6 +1670,7 @@ pub async fn run(
         max_distance: params.max_distance_mm,
     };
     let debug = params.debug;
+    let vertical = params.vertical;
     let (source_refno, target_refno) = (params.source, params.target);
     let computed = tokio::task::spawn_blocking(move || {
         let mut warnings = Vec::new();
@@ -1378,7 +1699,11 @@ pub async fn run(
             });
         }
         let query_started = Instant::now();
-        let outcome = surface_clearance(&source, &target, opts);
+        let outcome = if vertical {
+            surface_clearance_vertical(&source, &target, opts)
+        } else {
+            surface_clearance(&source, &target, opts)
+        };
         let query_ms = query_started.elapsed().as_millis();
         warnings.extend(outcome.warnings);
         Ok((
@@ -1436,6 +1761,7 @@ pub async fn run(
                     to: perp.to.into(),
                     method: perp.method,
                 }),
+                vertical: params.vertical,
                 witness: hit.witness,
             })
         }
@@ -1818,7 +2144,11 @@ mod tests {
         assert_eq!(perp.distance, hit.distance);
         assert_eq!(perp.method, "contact");
         assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
-        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(
+            (perp.from - hit.source_point).norm() < 1e-6,
+            "{:?}",
+            perp.from
+        );
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
@@ -1856,7 +2186,11 @@ mod tests {
         let out = surface_clearance(&[bar], &[pane], opts());
         let hit = out.hit.expect("hit");
         assert!(!hit.intersects, "{hit:?}");
-        assert!(approx(hit.distance, 46.6, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 46.6, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         assert!(
             approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
             "{:?}",
@@ -1864,12 +2198,20 @@ mod tests {
         );
         let face = hit.target_face.expect("face");
         assert_eq!(face.kind, FaceKind::Side, "{face:?}");
-        assert!(approx(face.normal.x, 0.866, 1e-3) && approx(face.normal.y, 0.5, 1e-3), "{:?}", face.normal);
+        assert!(
+            approx(face.normal.x, 0.866, 1e-3) && approx(face.normal.y, 0.5, 1e-3),
+            "{:?}",
+            face.normal
+        );
         let perp = hit.perpendicular.expect("连线几乎沿法向，该有垂距");
         assert_eq!(perp.method, "edge");
         assert_eq!(perp.distance, hit.distance);
         assert!((perp.to - hit.target_point).norm() < 1e-6, "{:?}", perp.to);
-        assert!((perp.from - hit.source_point).norm() < 1e-6, "{:?}", perp.from);
+        assert!(
+            (perp.from - hit.source_point).norm() < 1e-6,
+            "{:?}",
+            perp.from
+        );
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
@@ -1882,7 +2224,11 @@ mod tests {
         let (pane, bar) = yawed_pane_and_bar(18.0, 100.0);
         let out = surface_clearance(&[bar], &[pane], opts());
         let hit = out.hit.expect("hit");
-        assert!(approx(hit.distance, 100.0, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 100.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         assert!(
             approx(hit.target_point.x, -10425.0, 5e-2) && approx(hit.target_point.y, 11746.9, 5e-2),
             "{:?}",
@@ -1890,7 +2236,11 @@ mod tests {
         );
         let face = hit.target_face.expect("face");
         assert_eq!(face.kind, FaceKind::End, "{face:?}");
-        assert!(approx(face.normal.x, -0.5, 1e-3) && approx(face.normal.y, 0.866, 1e-3), "{:?}", face.normal);
+        assert!(
+            approx(face.normal.x, -0.5, 1e-3) && approx(face.normal.y, 0.866, 1e-3),
+            "{:?}",
+            face.normal
+        );
         assert!(hit.perpendicular.is_none(), "{:?}", hit.perpendicular);
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
@@ -1918,7 +2268,11 @@ mod tests {
         let out = surface_clearance(&[part], &[wall], opts());
         let hit = out.hit.expect("hit");
         assert!(!hit.intersects, "{hit:?}");
-        assert!(approx(hit.distance, 128.0625, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 128.0625, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         assert!(
             approx(hit.target_point.x, 0.0, 1e-2) && approx(hit.target_point.y, 2400.0, 1e-2),
             "{:?}",
@@ -1943,7 +2297,13 @@ mod tests {
         let verts: Vec<Point<Real>> = local
             .vertices()
             .iter()
-            .map(|v| Point::new(t[0] + v.x * c - v.y * s, t[1] + v.x * s + v.y * c, t[2] + v.z))
+            .map(|v| {
+                Point::new(
+                    t[0] + v.x * c - v.y * s,
+                    t[1] + v.x * s + v.y * c,
+                    t[2] + v.z,
+                )
+            })
             .collect();
         let pane = TriMesh::with_flags(verts, local.indices().to_vec(), TriMeshFlags::empty());
         let q = Point::new(-10424.999f32, 11746.903f32, 999.99994f32);
@@ -1966,8 +2326,14 @@ mod tests {
             .map(|n| (n.x, n.y))
             .collect();
         assert_eq!(candidates.len(), 2, "{normals:?}");
-        assert!(approx(normals[0].0, 0.866, 1e-3) && approx(normals[0].1, 0.5, 1e-3), "side 该排前：{normals:?}");
-        assert!(approx(normals[1].0, -0.5, 1e-3) && approx(normals[1].1, 0.866, 1e-3), "end 该在后：{normals:?}");
+        assert!(
+            approx(normals[0].0, 0.866, 1e-3) && approx(normals[0].1, 0.5, 1e-3),
+            "side 该排前：{normals:?}"
+        );
+        assert!(
+            approx(normals[1].0, -0.5, 1e-3) && approx(normals[1].1, 0.866, 1e-3),
+            "end 该在后：{normals:?}"
+        );
     }
 
     #[test]
@@ -2142,7 +2508,11 @@ mod tests {
         let hit = out.hit.expect("hit");
         assert!(!hit.intersects, "洞里的管不该报穿墙：{hit:?}");
         assert_eq!(hit.witness, "closest-points");
-        assert!(approx(hit.distance, 50.0, 1e-2), "distance {}", hit.distance);
+        assert!(
+            approx(hit.distance, 50.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
         // 最近点对：墙侧在 y = 2000 那片洞壁上（x 在墙厚内、z 在孔高内），管侧在管的 y = 2050 面上。
         assert!(
             approx(hit.target_point.y, hole_y[0], 1e-2),
@@ -2169,7 +2539,11 @@ mod tests {
         assert!(face.normal.y > 0.99, "{:?}", face.normal);
         let perp = hit.perpendicular.expect("洞壁是主面，该有垂距");
         assert!(approx(perp.distance, 50.0, 1e-2), "perp {}", perp.distance);
-        assert!(approx(perp.to.y, hole_y[0], 1e-2), "perp lands on the hole wall: {:?}", perp.to);
+        assert!(
+            approx(perp.to.y, hole_y[0], 1e-2),
+            "perp lands on the hole wall: {:?}",
+            perp.to
+        );
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
         assert_eq!((out.stats.total, out.stats.evaluated), (1, 1));
 
@@ -2203,13 +2577,33 @@ mod tests {
         // （短盒 y 范围, z 范围, 期望法向——已翻成指向源侧, 垂足所在洞壁：(坐标轴, 值)）
         let cases: [([f32; 2], [f32; 2], Vector<Real>, (usize, f32)); 4] = [
             // 贴 y 小侧洞壁 50 mm：法向 +Y。
-            ([2050.0, 2250.0], [1100.0, 1300.0], Vector::y(), (1, hole_y[0])),
+            (
+                [2050.0, 2250.0],
+                [1100.0, 1300.0],
+                Vector::y(),
+                (1, hole_y[0]),
+            ),
             // 贴 y 大侧洞壁：法向 −Y。
-            ([2150.0, 2350.0], [1100.0, 1300.0], -Vector::y(), (1, hole_y[1])),
+            (
+                [2150.0, 2350.0],
+                [1100.0, 1300.0],
+                -Vector::y(),
+                (1, hole_y[1]),
+            ),
             // 贴洞底：法向 +Z。
-            ([2100.0, 2300.0], [1050.0, 1250.0], Vector::z(), (2, hole_z[0])),
+            (
+                [2100.0, 2300.0],
+                [1050.0, 1250.0],
+                Vector::z(),
+                (2, hole_z[0]),
+            ),
             // 贴洞顶：法向 −Z。
-            ([2100.0, 2300.0], [1150.0, 1350.0], -Vector::z(), (2, hole_z[1])),
+            (
+                [2100.0, 2300.0],
+                [1150.0, 1350.0],
+                -Vector::z(),
+                (2, hole_z[1]),
+            ),
         ];
         for (ys, zs, normal, (axis, foot)) in cases {
             let stub = leaf(
@@ -2234,7 +2628,11 @@ mod tests {
             let perp = hit
                 .perpendicular
                 .unwrap_or_else(|| panic!("{ys:?} {zs:?}: 洞壁是主面，该有垂距"));
-            assert!(approx(perp.distance, 50.0, 1e-2), "{ys:?} {zs:?}: perp {}", perp.distance);
+            assert!(
+                approx(perp.distance, 50.0, 1e-2),
+                "{ys:?} {zs:?}: perp {}",
+                perp.distance
+            );
             assert!(
                 approx(perp.to[axis], foot, 1e-2),
                 "{ys:?} {zs:?}: 垂足该落在那片洞壁上 {:?}",
@@ -2562,6 +2960,168 @@ mod tests {
             "摆放没变的行仍要命中同一份缓存"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ───────────────── 垂直距（vertical=1，楼板类）─────────────────
+
+    /// 沿 X 走的管段（盒代圆柱）：x 400–1400、y ±50、z ±50。
+    fn pipe_box() -> LeafMesh {
+        leaf(
+            "2/2",
+            "TUBI",
+            box_mesh([400.0, -50.0, -50.0], [1400.0, 50.0, 50.0]),
+        )
+    }
+
+    /// 管在板下方：同一 XY 处管顶 ↔ 板底，标注两端点同 XY、纯 Z 向；命中 `bottom` 面（法向朝下指向管）。
+    #[test]
+    fn vertical_pipe_below_floor_reports_top_to_slab_bottom() {
+        let floor = leaf(
+            "1/1",
+            "FLOOR",
+            box_mesh([0.0, -500.0, 800.0], [2000.0, 500.0, 900.0]),
+        );
+        let out = surface_clearance_vertical(&[pipe_box()], &[floor], opts());
+        let hit = out.hit.expect("hit");
+        assert!(
+            approx(hit.distance, 750.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
+        assert!(!hit.intersects);
+        assert_eq!(hit.witness, "vertical-ray");
+        assert!(
+            approx(hit.source_point.z, 50.0, 1e-2),
+            "{:?}",
+            hit.source_point
+        );
+        assert!(
+            approx(hit.target_point.z, 800.0, 1e-2),
+            "{:?}",
+            hit.target_point
+        );
+        assert!(approx(hit.source_point.x, hit.target_point.x, 1e-4));
+        assert!(approx(hit.source_point.y, hit.target_point.y, 1e-4));
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Bottom, "{face:?}");
+        assert!(face.normal.z < -0.99, "{:?}", face.normal);
+        let perp = hit.perpendicular.expect("垂直口径也要给垂距段");
+        assert!(approx(perp.distance, hit.distance, 1e-4));
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 管在板上方：管底 ↔ 板顶，命中 `top` 面（法向朝上指向管）。双向各算一种。
+    #[test]
+    fn vertical_pipe_above_floor_reports_bottom_to_slab_top() {
+        let floor = leaf(
+            "1/1",
+            "FLOOR",
+            box_mesh([0.0, -500.0, -1200.0], [2000.0, 500.0, -1000.0]),
+        );
+        let out = surface_clearance_vertical(&[pipe_box()], &[floor], opts());
+        let hit = out.hit.expect("hit");
+        assert!(
+            approx(hit.distance, 950.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
+        assert!(!hit.intersects);
+        assert!(approx(hit.source_point.z, -50.0, 1e-2));
+        assert!(approx(hit.target_point.z, -1000.0, 1e-2));
+        let face = hit.target_face.expect("face");
+        assert_eq!(face.kind, FaceKind::Top, "{face:?}");
+        assert!(face.normal.z > 0.99, "{:?}", face.normal);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// XY 不相交（板在管侧之外）：目标射线落空 → 按目标合盒面标高兜底，witness `vertical-ray-miss`、
+    /// 出声，`intersects` 恒 false。
+    #[test]
+    fn vertical_ray_miss_falls_back_to_slab_level_elevation() {
+        let floor = leaf(
+            "1/1",
+            "FLOOR",
+            box_mesh([3000.0, -500.0, 800.0], [3400.0, 500.0, 900.0]),
+        );
+        let out = surface_clearance_vertical(&[pipe_box()], &[floor], opts());
+        let hit = out.hit.expect("照标高差也要出 hit");
+        assert_eq!(hit.witness, "vertical-ray-miss");
+        assert!(!hit.intersects);
+        assert!(
+            approx(hit.distance, 750.0, 1e-2),
+            "distance {}",
+            hit.distance
+        );
+        assert!(approx(hit.target_point.z, 800.0, 1e-2), "按板底标高");
+        assert!(
+            out.warnings.iter().any(|w| w.contains("射线落空")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    /// z 区间套叠且 XY 罩住 = 竖直真穿透：0 + intersects。
+    #[test]
+    fn vertical_overlapping_spans_at_covered_xy_intersect() {
+        let slab = leaf(
+            "1/1",
+            "FLOOR",
+            box_mesh([0.0, -500.0, -200.0], [2000.0, 500.0, 200.0]),
+        );
+        let out = surface_clearance_vertical(&[pipe_box()], &[slab], opts());
+        let hit = out.hit.expect("hit");
+        assert!(hit.intersects, "{hit:?}");
+        assert_eq!(hit.distance, 0.0);
+        assert_eq!(hit.witness, "vertical-ray");
+    }
+
+    /// `max_distance` 仍然收口：垂直净距超阈值 → 无命中 + `beyond_max_distance` warning。
+    #[test]
+    fn vertical_beyond_max_distance_gives_no_hit() {
+        let floor = leaf(
+            "1/1",
+            "FLOOR",
+            box_mesh([0.0, -500.0, 800.0], [2000.0, 500.0, 900.0]),
+        );
+        let out = surface_clearance_vertical(
+            &[pipe_box()],
+            &[floor],
+            SurfaceClearanceOptions {
+                perpendicular: true,
+                max_distance: 500.0,
+            },
+        );
+        assert!(out.hit.is_none());
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("beyond_max_distance")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    /// 解析：`vertical=1` 进 params；缺省 false；非法值报错。
+    #[test]
+    fn params_parse_the_vertical_flag() {
+        let base = |vertical: Option<&str>| RawSurfaceClearanceQuery {
+            source_refno: Some("1/2".into()),
+            target_refno: Some("1/3".into()),
+            vertical: vertical.map(str::to_string),
+            ..Default::default()
+        };
+        assert!(!SurfaceClearanceParams::parse(&base(None)).unwrap().vertical);
+        assert!(
+            SurfaceClearanceParams::parse(&base(Some("1")))
+                .unwrap()
+                .vertical
+        );
+        assert!(
+            SurfaceClearanceParams::parse(&base(Some("true")))
+                .unwrap()
+                .vertical
+        );
+        assert!(SurfaceClearanceParams::parse(&base(Some("maybe"))).is_err());
     }
 
     /// live 8009（ns 1516 / AvevaMarineSample，与 `_runs/*-8022|8023` 两台服务同一个库）：

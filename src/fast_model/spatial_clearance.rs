@@ -20,7 +20,7 @@ use std::str::FromStr;
 use aios_core::{RefU64, RefnoEnum};
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
-use parry3d::math::Vector;
+use parry3d::math::{Point, Vector};
 use serde::{Deserialize, Serialize};
 
 use crate::fast_model::spatial_centerline::{BranCenterline, centerline_aabb_nearest};
@@ -59,6 +59,9 @@ pub struct RawClearanceQuery {
     pub include_self: Option<String>,
     /// `1` = 距离从管外表面起算（扣 `outside_diameter/2`），只在中心线模式下有意义。
     pub surface: Option<String>,
+    /// 垂直距口径的 NOUN 白名单（如 `FLOOR`）：命中的候选不看三维最近点，按 Z 向高差量——
+    /// 管在板上方量管底到板顶、在板下方量管顶到板底；XY 不相交也照标高差。
+    pub vertical_nouns: Option<String>,
     pub debug: Option<String>,
 }
 
@@ -120,6 +123,9 @@ pub struct ClearanceParams {
     pub max_per_group: usize,
     pub include_self: bool,
     pub surface: bool,
+    /// 这些 NOUN 的候选按 Z 向高差量（楼板类：板面是水平的，三维最近距会量到板边侧棱，
+    /// 不是设计要的「管底到板面净高」）。
+    pub vertical_nouns: BTreeSet<String>,
     pub debug: bool,
 }
 
@@ -215,6 +221,9 @@ impl ClearanceParams {
         let exclude_nouns = split_csv(raw.exclude_nouns.as_deref())
             .map(str::to_ascii_uppercase)
             .collect::<BTreeSet<_>>();
+        let vertical_nouns = split_csv(raw.vertical_nouns.as_deref())
+            .map(str::to_ascii_uppercase)
+            .collect::<BTreeSet<_>>();
 
         let radius = match raw
             .radius
@@ -295,6 +304,7 @@ impl ClearanceParams {
             max_per_group,
             include_self: parse_flag("include_self", raw.include_self.as_deref(), false)?,
             surface: parse_flag("surface", raw.surface.as_deref(), false)?,
+            vertical_nouns,
             debug: parse_flag("debug", raw.debug.as_deref(), false)?,
         })
     }
@@ -415,6 +425,87 @@ fn measure(center: &Center, target: &Aabb) -> Measured {
     }
 }
 
+/// 两个 Z 区间的垂直净距：不重叠回（正 gap、对脸 z），重叠回（0、按中点关系取的对脸 z）。
+/// 返回 `(gap, 区间重叠, 源侧面 z, 目标侧面 z)`。
+pub(crate) fn vertical_z_gap(a_lo: f32, a_hi: f32, b_lo: f32, b_hi: f32) -> (f32, bool, f32, f32) {
+    if a_lo > b_hi {
+        (a_lo - b_hi, false, a_lo, b_hi)
+    } else if a_hi < b_lo {
+        (b_lo - a_hi, false, a_hi, b_lo)
+    } else {
+        let source_below = (a_lo + a_hi) * 0.5 <= (b_lo + b_hi) * 0.5;
+        let (a_face, b_face) = if source_below {
+            (a_hi, b_lo)
+        } else {
+            (a_lo, b_hi)
+        };
+        (0.0, true, a_face, b_face)
+    }
+}
+
+/// `vertical_nouns` 命中候选的量距：只量 Z 向高差，不看三维最近点（楼板类板面是水平的，
+/// 三维最近距会量到板边侧棱，不是设计要的「管底到板面净高」）。
+///
+/// - 取源（中心线 / 源盒）XY 投影上离目标 XY 矩形最近的那一点 P：目标盒的 Z 拉成 ±∞ 后
+///   `centerline_aabb_nearest` / `aabb_aabb_nearest` 退化成「只看 XY 最近点」，顺带给出
+///   P 是否落在目标 XY 矩形内（`intersects` → `xy_inside`）；
+/// - Z 向把源看成一个区间：中心线管是 `[p.z − r, p.z + r]`（r 为管半径，`surface=1` 才有，
+///   否则 r=0、量的是中心线到板面的高差），盒源是 `[mins.z, maxs.z]`；目标板是 `[mins.z, maxs.z]`；
+/// - 区间不重叠回正 gap（管上方→管底对板顶、管下方→管顶对板底），重叠且 XY 相交才是真相交——
+///   板边旁的高差为零只算「同一标高」，不算相交（照标高差口径）；
+/// - 标注线画在 P 的正上/下方：两端点同 XY，源端在源侧面 z、目标端在板面 z（悬空对板边）。
+fn measure_vertical(center: &Center, target: &Aabb, pipe_radius_mm: Option<f32>) -> Measured {
+    let xy_target = Aabb::new(
+        Point::new(target.mins.x, target.mins.y, f32::NEG_INFINITY),
+        Point::new(target.maxs.x, target.maxs.y, f32::INFINITY),
+    );
+    let (px, py, src_lo, src_hi, xy_inside, segment_refno, segment_order) = match &center.centerline
+    {
+        Some(centerline) => {
+            let nearest = centerline_aabb_nearest(&centerline.segments, &xy_target)
+                .expect("走廊至少有一段（BranCenterline::from_branch 保证）");
+            let segment = &centerline.segments[nearest.segment_index];
+            let p = nearest.source_point;
+            let r = pipe_radius_mm.unwrap_or(0.0);
+            (
+                p.x,
+                p.y,
+                p.z - r,
+                p.z + r,
+                nearest.intersects,
+                Some(segment.refno.clone()),
+                Some(segment.order),
+            )
+        }
+        None => {
+            let source = center
+                .target_box
+                .unwrap_or_else(|| Aabb::new(center.point, center.point));
+            let (from, to) = aabb_aabb_nearest(&source, &xy_target);
+            let xy_overlap = from.x == to.x && from.y == to.y;
+            (
+                from.x,
+                from.y,
+                source.mins.z,
+                source.maxs.z,
+                xy_overlap,
+                None,
+                None,
+            )
+        }
+    };
+    let (distance_mm, z_overlap, src_face, tgt_face) =
+        vertical_z_gap(src_lo, src_hi, target.mins.z, target.maxs.z);
+    Measured {
+        distance_mm,
+        intersects: xy_inside && z_overlap,
+        source_point: Vec3::new(px, py, src_face),
+        target_point: Vec3::new(px, py, tgt_face),
+        segment_refno,
+        segment_order,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 响应
 // ---------------------------------------------------------------------------
@@ -485,6 +576,8 @@ pub struct CandidateJson {
     pub dbnum: Option<u32>,
     pub distance_mm: f32,
     pub intersects: bool,
+    /// `true` = 这条按 `vertical_nouns` 口径量的 Z 向高差（楼板类），不是三维最近距。
+    pub vertical: bool,
     pub aabb: AabbJson,
     pub nearest: NearestJson,
     pub annotation: AnnotationJson,
@@ -515,6 +608,8 @@ pub struct ResolvedFiltersJson {
     pub target_groups: Vec<TargetGroup>,
     pub group_by: &'static str,
     pub exclude_nouns: Vec<String>,
+    /// 生效的垂直距 NOUN 白名单（命中的候选按 Z 向高差量）。
+    pub vertical_nouns: Vec<String>,
     pub scope: &'static str,
     pub dbnums: Option<Vec<u32>>,
     pub radius: f32,
@@ -689,10 +784,17 @@ pub fn assemble_clearance(
             continue;
         }
 
-        let mut measured = measure(&scan.center, &entry.aabb);
-        if let Some(pipe_radius_mm) = pipe_radius_mm {
-            measured = to_surface(measured, pipe_radius_mm);
-        }
+        let vertical = params.vertical_nouns.contains(&noun);
+        let measured = if vertical {
+            // 垂直口径内部自己扣半径（沿 Z 推区间，不走 to_surface 的连线推法）
+            measure_vertical(&scan.center, &entry.aabb, pipe_radius_mm)
+        } else {
+            let mut measured = measure(&scan.center, &entry.aabb);
+            if let Some(pipe_radius_mm) = pipe_radius_mm {
+                measured = to_surface(measured, pipe_radius_mm);
+            }
+            measured
+        };
         let vector = measured.target_point - measured.source_point;
         *noun_counts.entry(noun.clone()).or_default() += 1;
         passed.push((
@@ -703,6 +805,7 @@ pub fn assemble_clearance(
                 dbnum,
                 distance_mm: measured.distance_mm,
                 intersects: measured.intersects,
+                vertical,
                 aabb: AabbJson::from(&entry.aabb),
                 nearest: NearestJson {
                     source_segment_refno: measured
@@ -770,6 +873,7 @@ pub fn assemble_clearance(
             target_groups: params.groups.clone(),
             group_by: params.group_by.as_str(),
             exclude_nouns: params.exclude_nouns.iter().cloned().collect(),
+            vertical_nouns: params.vertical_nouns.iter().cloned().collect(),
             scope: params.scope.as_str(),
             dbnums: allowed_dbnums.map(|dbnums| dbnums.into_iter().collect()),
             radius: params.radius,
@@ -957,6 +1061,7 @@ mod tests {
                 "max_per_group" => &mut raw.max_per_group,
                 "include_self" => &mut raw.include_self,
                 "surface" => &mut raw.surface,
+                "vertical_nouns" => &mut raw.vertical_nouns,
                 "debug" => &mut raw.debug,
                 other => panic!("unknown query key {other}"),
             };
@@ -970,11 +1075,19 @@ mod tests {
     }
 
     fn answer(pairs: &[(&str, &str)], table: &TableAttrs) -> ClearanceResponse {
+        answer_on(tree(), pairs, table)
+    }
+
+    fn answer_on(
+        tree: AccelerationTree,
+        pairs: &[(&str, &str)],
+        table: &TableAttrs,
+    ) -> ClearanceResponse {
         let params = params(pairs);
         let line = corridor();
         let centerline = (params.source_mode == SourceMode::BranCenterline).then(|| line.clone());
         let scan = spatial_query::scan_tree(
-            &tree(),
+            &tree,
             SpatialTreeState::Ready,
             &params.to_spatial_query(),
             centerline.as_ref(),
@@ -982,6 +1095,37 @@ mod tests {
         )
         .expect("scan");
         assemble_clearance(scan, &params, table)
+    }
+
+    /// 垂直距场景的树：走廊同 [`tree`]，三块楼板分别在管上方罩住 XY / 管下方且 XY 不相交 /
+    /// 与管同标高穿透，另加一堵普通墙供「混合口径」断言。FLOOR 用 `70/71/72`。
+    fn vertical_tree() -> AccelerationTree {
+        AccelerationTree::load(vec![
+            entry(1, "BRAN", [0.0, -100.0, -100.0], [1000.0, 100.0, 100.0]),
+            entry(60, "ELBO", [900.0, -100.0, -100.0], [1000.0, 100.0, 100.0]),
+            entry(70, "FLOOR", [200.0, -200.0, 800.0], [600.0, 200.0, 900.0]),
+            entry(
+                71,
+                "FLOOR",
+                [2000.0, -200.0, -1200.0],
+                [2400.0, 200.0, -1000.0],
+            ),
+            entry(72, "FLOOR", [200.0, -200.0, -500.0], [600.0, 200.0, 500.0]),
+            entry(10, "WALL", [0.0, 500.0, -500.0], [1000.0, 600.0, 500.0]),
+        ])
+    }
+
+    /// `group_by=noun` + `max_per_group` 放宽后，`FLOOR` 桶里按距离序躺着 72 / 70 / 71。
+    fn vertical_floors(pairs: &[(&str, &str)]) -> Vec<CandidateJson> {
+        let mut full = vec![
+            ("group_by", "noun"),
+            ("target_nouns", "floor,wall"),
+            ("vertical_nouns", "floor"),
+            ("max_per_group", "5"),
+        ];
+        full.extend_from_slice(pairs);
+        let response = answer_on(vertical_tree(), &full, &attrs(&[]));
+        group(&response, "FLOOR").candidates.clone()
     }
 
     fn group<'a>(response: &'a ClearanceResponse, name: &str) -> &'a GroupJson {
@@ -1250,6 +1394,160 @@ mod tests {
             unknown.warnings
         );
         assert!(unknown.noun_counts.contains_key("WALL"));
+    }
+
+    #[test]
+    fn vertical_nouns_parse_uppercase_dedup_and_echo() {
+        let parsed = params(&[
+            ("target_groups", "wall"),
+            ("vertical_nouns", " floor ,FLOOR, sctn ,"),
+        ]);
+        assert_eq!(
+            parsed.vertical_nouns,
+            BTreeSet::from(["FLOOR".to_string(), "SCTN".to_string()])
+        );
+        let response = answer_on(
+            vertical_tree(),
+            &[
+                ("group_by", "noun"),
+                ("target_nouns", "floor"),
+                ("vertical_nouns", "floor"),
+            ],
+            &attrs(&[]),
+        );
+        assert_eq!(response.resolved_filters.vertical_nouns, vec!["FLOOR"]);
+    }
+
+    /// 楼板在管上方、XY 罩住走廊：量的是管顶（surface=1 时管皮）到板底的竖直净距，
+    /// 标注线两端点同 XY、纯 Z 向。
+    #[test]
+    fn vertical_floor_above_measures_pipe_top_to_slab_bottom() {
+        let floors = vertical_floors(&[]);
+        let above = floors
+            .iter()
+            .find(|candidate| candidate.refno == refno(70).to_string())
+            .expect("上方楼板在桶里");
+        assert!(above.vertical, "命中 vertical_nouns 要标记");
+        // 管中心 z=0（不扣径），板底 800 → 800，不是 3D 最近距。
+        assert_eq!(above.distance_mm, 800.0);
+        assert!(!above.intersects);
+        assert_eq!(above.annotation.label_mm, 800.0);
+        assert_eq!(above.annotation.start_point.z, 0.0, "源端在管中心线");
+        assert_eq!(above.annotation.end_point.z, 800.0, "目标端在板底");
+        assert_eq!(
+            above.annotation.start_point.x, above.annotation.end_point.x,
+            "竖直线：两端点同 x"
+        );
+        assert_eq!(
+            above.annotation.start_point.y, above.annotation.end_point.y,
+            "竖直线：两端点同 y"
+        );
+        assert_eq!(above.nearest.vector.dz, 800.0);
+        assert_eq!(
+            (above.nearest.vector.dx, above.nearest.vector.dy),
+            (0.0, 0.0)
+        );
+    }
+
+    /// `surface=1` 时半径沿 Z 推：上方楼板量管顶（z=+100）到板底；下方楼板量管底到板顶。
+    #[test]
+    fn vertical_surface_pulls_the_pipe_radius_along_z() {
+        let floors = vertical_floors(&[("surface", "1")]);
+        let above = floors
+            .iter()
+            .find(|candidate| candidate.refno == refno(70).to_string())
+            .unwrap();
+        assert_eq!(above.distance_mm, 700.0, "800 - 半径 100");
+        assert_eq!(above.annotation.start_point.z, 100.0, "源端推到管顶皮");
+        assert_eq!(above.annotation.end_point.z, 800.0);
+
+        let below = floors
+            .iter()
+            .find(|candidate| candidate.refno == refno(71).to_string())
+            .expect("下方楼板在桶里");
+        assert!(below.vertical);
+        // 管在板上方：管底 -100 ↔ 板顶 -1000 → 900；方向朝下。
+        assert_eq!(below.distance_mm, 900.0);
+        assert_eq!(below.annotation.start_point.z, -100.0, "源端推到管底皮");
+        assert_eq!(below.annotation.end_point.z, -1000.0, "目标端在板顶");
+        assert_eq!(below.nearest.vector.dz, -900.0, "向下");
+    }
+
+    /// XY 不相交也照标高差：下方楼板在走廊尽头之外，标注竖在走廊上离它最近的那一点，
+    /// 目标端悬空对板边标高。
+    #[test]
+    fn vertical_floor_beside_the_run_still_reports_elevation_gap() {
+        let below = vertical_floors(&[])
+            .into_iter()
+            .find(|candidate| candidate.refno == refno(71).to_string())
+            .unwrap();
+        assert_eq!(below.distance_mm, 1000.0, "0 - (-1000)");
+        assert!(!below.intersects, "XY 不相交不算相交");
+        assert_eq!(below.annotation.start_point.x, 1000.0, "走廊尽头");
+        assert_eq!(below.annotation.end_point.x, 1000.0, "竖直悬空端");
+        assert_eq!(below.annotation.end_point.z, -1000.0);
+    }
+
+    /// 板与管同标高且 XY 罩住：z 区间套叠 + XY 内包才是真相交。
+    #[test]
+    fn vertical_floor_at_the_same_elevation_intersects() {
+        let same = vertical_floors(&[])
+            .into_iter()
+            .find(|candidate| candidate.refno == refno(72).to_string())
+            .unwrap();
+        assert_eq!(same.distance_mm, 0.0);
+        assert!(same.intersects, "z 套叠 + XY 罩住 = 穿透");
+
+        // 对照：同一块 XY 不相交的楼板即使 z 套叠也不算相交（z[-500,500] 换成悬空楼下）。
+        let floors_only_miss = answer_on(
+            AccelerationTree::load(vec![
+                entry(1, "BRAN", [0.0, -100.0, -100.0], [1000.0, 100.0, 100.0]),
+                entry(60, "ELBO", [900.0, -100.0, -100.0], [1000.0, 100.0, 100.0]),
+                entry(
+                    73,
+                    "FLOOR",
+                    [2000.0, -200.0, -500.0],
+                    [2400.0, 200.0, 500.0],
+                ),
+            ]),
+            &[
+                ("group_by", "noun"),
+                ("target_nouns", "floor"),
+                ("vertical_nouns", "floor"),
+            ],
+            &attrs(&[]),
+        );
+        let miss = &group(&floors_only_miss, "FLOOR").candidates[0];
+        assert_eq!(miss.distance_mm, 0.0, "z 套叠，标高差为 0");
+        assert!(!miss.intersects, "XY 不相交只是同标高，不是穿透");
+    }
+
+    /// 同一响应里普通候选仍走三维最近距：墙 `10` 不按垂直口径（横向 500，扣半径后 400）。
+    #[test]
+    fn non_vertical_nouns_keep_the_3d_measurement_in_a_mixed_response() {
+        let response = answer_on(
+            vertical_tree(),
+            &[
+                ("group_by", "noun"),
+                ("target_nouns", "floor,wall"),
+                ("vertical_nouns", "floor"),
+                ("max_per_group", "5"),
+                ("surface", "1"),
+            ],
+            &attrs(&[]),
+        );
+        let wall = &group(&response, "WALL").candidates[0];
+        assert!(!wall.vertical);
+        assert_eq!(wall.distance_mm, 400.0);
+        assert_eq!(wall.annotation.start_point.y, 100.0);
+        assert_eq!(wall.annotation.end_point.y, 500.0);
+        // 同桶里的楼板仍按垂直口径。
+        assert!(
+            group(&response, "FLOOR")
+                .candidates
+                .iter()
+                .all(|c| c.vertical)
+        );
     }
 
     /// 源码钉：走廊与候选都由 `spatial_query` 在它那一把读锁里取，本模块不碰全局树、不取串行锁。
