@@ -5258,7 +5258,9 @@ mod tests {
                 primitive_instance: None,
                 analytic_primitive: None,
                 negatives_applied: 0,
+                own_ngms_cuts: 0,
                 negatives_skipped: vec![],
+                joint_cuts_explained: vec![],
                 notes: vec![],
             }
         };
@@ -5637,7 +5639,9 @@ mod tests {
             primitive_instance: None,
             analytic_primitive: None,
             negatives_applied: 0,
+            own_ngms_cuts: 0,
             negatives_skipped: vec![],
+            joint_cuts_explained: vec![],
             notes: vec![],
         };
 
@@ -5680,7 +5684,9 @@ mod tests {
                 primitive_instance: None,
                 analytic_primitive: None,
                 negatives_applied: 0,
+                own_ngms_cuts: 0,
                 negatives_skipped: vec![],
+                joint_cuts_explained: vec![],
                 notes: vec![],
             }
         }
