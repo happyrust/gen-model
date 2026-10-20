@@ -101,6 +101,34 @@ mod mirror {
         key: (Identity, u32),
         revision: u64,
         changed: Arc<watch::Sender<u64>>,
+        /// `publish`/`abort` 走完结算时置位；没置位就被丢的票由 `Drop` 兜底收格子。
+        settled: bool,
+    }
+
+    impl Drop for Ticket {
+        /// 装载票没走到 `publish`/`abort` 就被丢弃（典型场景：请求任务在
+        /// `read_row` 途中被客户端超时取消）时把格子交还并唤醒等待者——否则
+        /// `loading` 永真，该 dbnum 之后的所有 `acquire` 全停在 `Wait` 上挂死。
+        fn drop(&mut self) {
+            if self.settled {
+                return;
+            }
+            let returned = {
+                let mut state = state();
+                state.entries.get_mut(&self.key).is_some_and(|entry| {
+                    // revision 变了（forget/clear 换过格）或别人已结算，都不是这票的格子。
+                    if entry.revision == self.revision && entry.loading {
+                        entry.loading = false;
+                        true
+                    } else {
+                        false
+                    }
+                })
+            };
+            if returned {
+                self.changed.send_modify(|version| *version += 1);
+            }
+        }
     }
 
     fn state() -> std::sync::MutexGuard<'static, State> {
@@ -158,11 +186,13 @@ mod mirror {
             key,
             revision: entry.revision,
             changed: Arc::clone(&entry.changed),
+            settled: false,
         })
     }
 
     /// `false` 表示装载期间发生了写入/失效；调用方必须重读，不得返回旧值。
-    pub(super) fn publish(ticket: Ticket, facts: Facts) -> bool {
+    pub(super) fn publish(mut ticket: Ticket, facts: Facts) -> bool {
+        ticket.settled = true;
         let mut state = state();
         let published = state.entries.get_mut(&ticket.key).is_some_and(|entry| {
             if entry.revision != ticket.revision || !entry.loading {
@@ -177,7 +207,8 @@ mod mirror {
         published
     }
 
-    pub(super) fn abort(ticket: Ticket) {
+    pub(super) fn abort(mut ticket: Ticket) {
+        ticket.settled = true;
         let mut state = state();
         if let Some(entry) = state.entries.get_mut(&ticket.key) {
             if entry.revision == ticket.revision {
@@ -1879,6 +1910,57 @@ mod tests {
             assert_eq!(task.await.unwrap(), 77);
         }
         assert_eq!(loads.load(Ordering::SeqCst), 1);
+        super::mirror::disable();
+    }
+
+    /// 回归：装载票随任务消失（`read_row` 途中被取消，publish/abort 都没走到）时
+    /// 必须把格子交还——否则 `loading` 永真，这个 dbnum 之后所有 acquire 全停在
+    /// `Wait` 上挂死（目录库批量重建时请求超时被取消后整库读路径锁死的事故根因）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_ticket_dropped_mid_load_returns_the_slot() {
+        let _guard = MIRROR_TEST_GUARD.lock().unwrap();
+        super::mirror::disable();
+        super::mirror::enable(mirror_identity("drop-ticket"));
+
+        let ticket = match super::mirror::acquire(7022) {
+            super::mirror::Acquire::Load(ticket) => ticket,
+            _ => panic!("first miss must load"),
+        };
+        drop(ticket);
+
+        let ticket = match super::mirror::acquire(7022) {
+            super::mirror::Acquire::Load(ticket) => ticket,
+            _ => panic!("a dropped ticket must return the slot for the next loader"),
+        };
+        assert!(super::mirror::publish(ticket, mirrored_facts(9)));
+        match super::mirror::acquire(7022) {
+            super::mirror::Acquire::Hit(facts) => assert_eq!(fact_sesno(facts), 9),
+            _ => panic!("published facts must be cached"),
+        }
+        super::mirror::disable();
+    }
+
+    /// 同一事故链的另一半：`Wait` 上的等待者要在票被丢弃时被唤醒并接管装载，
+    /// 而不是永远挂在通知通道上。
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_waiter_takes_over_after_the_loader_ticket_is_dropped() {
+        let _guard = MIRROR_TEST_GUARD.lock().unwrap();
+        super::mirror::disable();
+        super::mirror::enable(mirror_identity("drop-wakes"));
+
+        let ticket = match super::mirror::acquire(7352) {
+            super::mirror::Acquire::Load(ticket) => ticket,
+            _ => panic!("first miss must load"),
+        };
+        let waiter = tokio::spawn(singleflight_value(7352, Arc::new(AtomicUsize::new(0))));
+        tokio::task::yield_now().await;
+        drop(ticket);
+
+        let value = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must wake when the loader ticket is dropped")
+            .unwrap();
+        assert_eq!(value, 77);
         super::mirror::disable();
     }
 
