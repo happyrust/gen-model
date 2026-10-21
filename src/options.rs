@@ -2337,10 +2337,10 @@ pub const MODEL_UNIT_LEVEL_PUBLISH_ENV: &str = "AIOS_MODEL_UNIT_LEVEL_PUBLISH";
 /// 计划 warnings 里报一句为什么。
 ///
 /// 这是「少算」方向的开关。**2026-10-14 翻默认开**（Issue #50，分支 `feat/issues-36-50-34`）：
-/// 窗口计划缓存 + 按根大小设门已落地（提交 `e47f748e`，消除 300.5s 重复 `plan_update`），
-/// A6/A7 验证指南已备好（`docs/evidence/2026-10-14-issue-50-a6-a7-verification-guide.md`），
-/// 用户拍板先翻默认、跑验证、不通过再回退。环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，
-/// 取值规则同 [`startup_autorun`]。
+/// 窗口计划缓存（含 `DbSet`/`SourceIndex` 句柄移交）+ 按根大小设门（豁免 D10 零几何根）已落地，
+/// 消除同一窗重复 `plan_update` 与 `generation_input` 单槽位乒乓逐出开销。按工程分开重跑的 A6 对拍
+/// diff 为 0、A7 整窗单元路更快，覆盖范围与已知缺口见 `verification/2026-10-14-a6-test-report.md`。
+/// 环境变量 [`MODEL_UNIT_LEVEL_PUBLISH_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn model_unit_level_publish() -> bool {
     effective_default_on_switch(
         load_ext_fields().model_unit_level_publish,
