@@ -1118,12 +1118,12 @@ pub(crate) async fn refresh_room_update_record_with_model(
     model: &crate::fast_model::room_resident::ResidentRoomModel,
     unchecked: &BTreeSet<u32>,
     previous: Option<&crate::fast_model::room_resident::RoomUpdateRecord>,
-) {
+) -> bool {
     let states = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
         Ok(states) => states,
         Err(error) => {
             eprintln!("[房间启动检查] 读取 dbnum_watermark 列表失败，无法刷新房间更新时间记录: {error:#}");
-            return;
+            return false;
         }
     };
     let room_dbnums = model.room_dbnums();
@@ -1145,9 +1145,11 @@ pub(crate) async fn refresh_room_update_record_with_model(
     {
         Ok(()) => {
             crate::fast_model::room_resident::record_room_update_record(Some(record));
+            true
         }
         Err(error) => {
             eprintln!("[房间启动检查] 写入 room_build:main.room_update_record 失败: {error:#}");
+            false
         }
     }
 }
@@ -1435,10 +1437,15 @@ pub(crate) async fn check_and_init_rooms_at_startup(
             }
             if all_ok {
                 // 完整初始化覆盖全部目标，不留 unchecked；旧记录可能存在，但不能沿用其对齐凭据。
-                refresh_room_update_record_with_model(&outcome.model, &BTreeSet::new(), None).await;
-                println!(
-                    "[房间启动检查] 完整房间初始化重算已完成"
-                );
+                if refresh_room_update_record_with_model(&outcome.model, &BTreeSet::new(), None)
+                    .await
+                {
+                    println!("[房间启动检查] 完整房间初始化重算已完成");
+                } else {
+                    eprintln!(
+                        "[房间启动检查] 完整房间初始化重算已完成但写入更新记录失败，下次启动继续补检"
+                    );
+                }
             } else {
                 eprintln!(
                     "[房间启动检查] 完整房间初始化有部分 dbnum 未全部完成，暂不写入 room_updated_at，下次启动继续补检"
@@ -1524,13 +1531,23 @@ pub(crate) async fn check_and_init_rooms_at_startup(
                 }
             }
             if all_ok {
-                refresh_room_update_record_with_model(&outcome.model, &unchecked, existing_record.as_ref())
-                    .await;
-                println!("[房间启动检查] 含房 dbnum 增量检测完成，已更新最新房间时间戳");
-                if !unchecked.is_empty() {
-                    println!(
-                        "[房间启动检查] 其中 {} 个库不在 watch_dbnums 监听范围内，本轮未检查：其水位保持上一笔记录，欠账留存",
-                        unchecked.len()
+                if refresh_room_update_record_with_model(
+                    &outcome.model,
+                    &unchecked,
+                    existing_record.as_ref(),
+                )
+                .await
+                {
+                    println!("[房间启动检查] 含房 dbnum 增量检测完成，已更新最新房间时间戳");
+                    if !unchecked.is_empty() {
+                        println!(
+                            "[房间启动检查] 其中 {} 个库不在 watch_dbnums 监听范围内，本轮未检查：其水位保持上一笔记录，欠账留存",
+                            unchecked.len()
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "[房间启动检查] 含房 dbnum 增量检测虽完成但写入更新记录失败，暂不推进 room_updated_at，下次启动继续补检"
                     );
                 }
             } else {

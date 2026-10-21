@@ -422,6 +422,43 @@ fn room_rebuild_regression_a_failed_global_clear_must_veto_success_stamp() {
     assert!(clear_result < all_ok && all_ok < loop_start && loop_start < stamp);
 }
 
+/// 房间更新记录没写进库就不许报「完成」：启动整库初始化、启动增量检测、整库重建三处收尾都拿
+/// `refresh_room_update_record_with_model` 的结果分叉——写不进库就不推进 `room_updated_at`，留到下次启动补检。
+#[test]
+fn room_update_record_write_failures_are_never_reported_as_done() {
+    let room_recompute = include_str!("../data_interface/room_recompute.rs");
+    let refresh = room_recompute
+        .split_once("pub(crate) async fn refresh_room_update_record_with_model(")
+        .expect("record refresh exists")
+        .1;
+    let signature = &refresh[..refresh.find('{').expect("function body")];
+    assert!(
+        signature.contains("-> bool"),
+        "写没写进库要交回给调用方: {signature}"
+    );
+    let startup = room_recompute
+        .split_once("pub(crate) async fn check_and_init_rooms_at_startup(")
+        .expect("startup room check exists")
+        .1;
+    assert_eq!(
+        startup
+            .matches("if refresh_room_update_record_with_model(")
+            .count(),
+        2,
+        "整库初始化与增量检测两处收尾都按写库结果分叉"
+    );
+
+    let rebuild = include_str!("handlers.rs")
+        .split_once("async fn run_rooms_rebuild(")
+        .expect("rebuild body exists")
+        .1;
+    let settle = rebuild
+        .find("if crate::data_interface::room_recompute::refresh_room_update_record_with_model(")
+        .expect("重建收尾按写库结果分叉");
+    let done = rebuild.find("整库房间边重算完成").expect("完成那一句");
+    assert!(settle < done, "写进库之后才报完成: {rebuild}");
+}
+
 // 2026-10-16 audit: intentionally red until the corresponding production fixes.
 // Behavior tests and narrowly scoped source contracts; no production DB.
 #[test]

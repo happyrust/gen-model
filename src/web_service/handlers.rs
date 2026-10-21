@@ -790,13 +790,20 @@ async fn run_rooms_rebuild() {
     }
     if all_ok {
         // 整库重建没有「没看」的库：空集合 + 上一笔记录为空（这一路开头就把记录清了）。
-        crate::data_interface::room_recompute::refresh_room_update_record_with_model(
+        if crate::data_interface::room_recompute::refresh_room_update_record_with_model(
             &outcome.model,
             &std::collections::BTreeSet::new(),
             None,
         )
-        .await;
-        println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
+        .await
+        {
+            println!("[房间重建] 收尾：{} 个库的整库房间边重算完成", dbnums.len());
+        } else {
+            eprintln!(
+                "[房间重建] 收尾：{} 个库的整库房间边已重算，但更新记录没写进库，room_updated_at 不推进，下次启动继续补检",
+                dbnums.len()
+            );
+        }
     } else {
         eprintln!(
             "[房间重建] 收尾：{} 个库里有未完成项（见上面逐库日志），未全部重算完成，room_updated_at 不推进",
