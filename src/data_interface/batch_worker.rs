@@ -1627,6 +1627,9 @@ async fn execute_frozen_batch(
     } else {
         None
     };
+    if model_half_awaits_durable(initialization_closed_task, &job.db_type) {
+        retire_newly_abandoned_roots(mgr, &mut result).await;
+    }
     if let Some(flush) = flush.as_ref().filter(|_| round_complete) {
         end_time = result
             .batch
@@ -1885,6 +1888,49 @@ async fn abandon_undurable_roots(
             .collect::<Vec<_>>()
             .join("；")
     ));
+}
+
+/// 本任务里失败、记完账是「已放弃」的根（ISSUE-029 判死），把它还留在库里与投影里的旧模型撤掉。
+/// 判死的根不再拦后面窗口的 `model_sesno`；留着它，重启后账本清空，水位就拿这份数据变化之前的几何
+/// 冒充最新。撤法与「清理模型」同一条（`delete_model_subtree`，按这根的子树撤库行与投影、顺手摘账本），
+/// 摘掉的这一条再原样记回去：本进程里它仍是「已放弃」。已经撤过的根只在数据又变、重算又败时才会
+/// 再进单元清单，那时再撤一遍是空删；撤不掉（根锁被按需生成占着之类）只留告警。
+async fn retire_newly_abandoned_roots(mgr: &AiosDBManager, result: &mut DataBatchTaskResult) {
+    use crate::data_interface::model_root_ledger as ledger;
+    let mut abandoned: Vec<(u32, aios_core::RefnoEnum, ledger::RootEntry)> = Vec::new();
+    for unit in result
+        .units
+        .iter()
+        .filter(|unit| unit.status == UnitGenStatus::Failed)
+    {
+        let Some(root) = ledger::parse_root(&unit.root_refno) else {
+            continue;
+        };
+        let Some(entry) = ledger::entry(unit.dbnum, root).filter(|entry| entry.is_refused()) else {
+            continue;
+        };
+        if !abandoned
+            .iter()
+            .any(|(dbnum, seen, _)| *dbnum == unit.dbnum && *seen == root)
+        {
+            abandoned.push((unit.dbnum, root, entry));
+        }
+    }
+    for (dbnum, root, entry) in abandoned {
+        match mgr.delete_model_subtree(root).await {
+            Ok(()) => {
+                result.warnings.push(format!(
+                    "dbnum={dbnum} 生成根 {root} 同一错误连败 {} 次已判死：旧模型已撤掉，修好之前这根没有模型：{}",
+                    entry.failure_streak,
+                    entry.error().unwrap_or_default()
+                ));
+                ledger::restore(dbnum, root, entry);
+            }
+            Err(error) => result.warnings.push(format!(
+                "dbnum={dbnum} 生成根 {root} 已判死，但旧模型没撤掉（它下次再败时重撤，也可手动「清理模型」）: {error:#}"
+            )),
+        }
+    }
 }
 
 /// 收尾段整库房间重算（[`run_room_only_recompute`]）的结论：两句话分开答——「算齐了没有」管
@@ -3162,8 +3208,8 @@ async fn run_model_side_actions(
 /// `model_sesno`；其余（[`FailureEvidence::Circumstance`]）只记失败、连败清零，判不死。
 ///
 /// 进程终止账本就消失：重启后 `model_sesno` 若没盖到 T，启动核对排的 `model_sesno → T` 那一窗本来就
-/// 把这根重排（它在差分里）。已放弃、又被后面窗口的 `model_sesno` 盖过去的根不在此列：重启后账本里
-/// 没有它，水位替它担保。解析不出来的 refno 只记日志。
+/// 把这根重排（它在差分里）。已放弃的根会被后面窗口的 `model_sesno` 盖过去，所以判死那一窗就撤掉它的
+/// 旧模型（[`retire_newly_abandoned_roots`]），重启后水位担保的是「没有模型」。解析不出来的 refno 只记日志。
 fn mark_generation_failed(
     dbnum: u32,
     root_refno: &str,
@@ -5770,6 +5816,45 @@ mod tests {
             "预算沿用进程内连败账的上限"
         );
         assert_eq!(DURABLE_FLUSH_BUDGET.deadline, Duration::from_secs(600));
+    }
+
+    /// ISSUE-029：判死那一窗撤掉旧模型——在本任务的根刷完、放弃完之后，收尾那一笔之前，只在模型半边
+    /// 跑过的任务里做；只撤账本上已放弃的根，撤法是「清理模型」那一条，撤完把「已放弃」记回去。
+    #[test]
+    fn an_abandoned_root_loses_its_stale_model_in_the_window_it_dies() {
+        let source = include_str!("batch_worker.rs");
+        let task = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("task")
+            .1;
+        let abandon = task
+            .find("abandon_undurable_roots(job.dbnum, &flush, &mut result)")
+            .expect("刷盘放弃");
+        let retire = task
+            .find("retire_newly_abandoned_roots(mgr, &mut result).await")
+            .expect("判死撤旧模型");
+        let end = task.find("commit_task_end_on(").expect("收尾那一笔");
+        assert!(abandon < retire && retire < end);
+        let guard = task[..retire]
+            .rfind("if model_half_awaits_durable(initialization_closed_task, &job.db_type) {")
+            .expect("只在模型半边跑过的任务里撤");
+        assert!(abandon < guard);
+
+        let helper = source
+            .split_once("async fn retire_newly_abandoned_roots(")
+            .expect("helper")
+            .1
+            .split_once("\n}\n")
+            .expect("helper end")
+            .0;
+        let refused = helper.find("is_refused()").expect("只撤判死的");
+        let delete = helper
+            .find("mgr.delete_model_subtree(root).await")
+            .expect("「清理模型」那一条撤法");
+        let restore = helper
+            .find("ledger::restore(dbnum, root, entry)")
+            .expect("撤完记回已放弃");
+        assert!(refused < delete && delete < restore, "{helper}");
     }
 
     /// ADR-079：生成失败只进进程内账本——记 `failed`（拦水位、下一窗重排），带原话；

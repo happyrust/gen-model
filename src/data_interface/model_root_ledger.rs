@@ -8,7 +8,9 @@
 //! 都读它。同一根同一错误连败 [`DEAD_ROOT_STREAK`] 次判死转「已放弃」：不拦水位、不进 regen，
 //! 与「已追平」并排陈述（ISSUE-029：确定性失败要有终态，不能拖着整个库的水位永远追不上）。
 //! 只有这根自己的生成报错攒连败；刷盘、房间、整批报错与可重试的那几类走
-//! [`record_transient_failure`]，记失败、不攒连败。
+//! [`record_transient_failure`]，记失败、不攒连败。判死那一窗的任务把它的旧模型撤掉
+//! （`batch_worker::retire_newly_abandoned_roots`）：后面的水位担保的是「这根没有模型」，
+//! 不是一份数据变化之前的几何——重启后账本里没有它，库里也就没有什么可以冒充最新。
 //! 进程终止它就消失，这是有意的：重启后「欠什么」由两枚水位回答——`model_sesno`
 //! 落后就按 `model_sesno → 文件最新` 重排（`startup_reconcile`），写入标记停在 `writing` 就整库
 //! 重初始化（ADR-073 D3）。没有一条恢复路需要知道上一进程里哪一根曾经失败。
@@ -271,6 +273,12 @@ pub fn forget_root(dbnum: u32, root: RefnoEnum) {
     }
 }
 
+/// 把一条记录原样放回去：调用方走了一条顺手摘账本的删法（`delete_model_subtree`），删完这根还得
+/// 是原来的结局——判死撤旧模型之后它仍是「已放弃」。
+pub(crate) fn restore(dbnum: u32, root: RefnoEnum, entry: RootEntry) {
+    record(dbnum, root, entry);
+}
+
 /// 整库清空 / 回退 / 重初始化：这个库的账本整页作废。
 pub fn forget_dbnum(dbnum: u32) {
     write().roots.remove(&dbnum);
@@ -492,6 +500,22 @@ mod tests {
         assert!(entry(dbnum, r(3)).unwrap().is_refused());
         record_transient_failure(dbnum, r(3), "BRAN", 27, "write-behind exhausted");
         assert!(entry(dbnum, r(3)).unwrap().is_chasing());
+        forget_dbnum(dbnum);
+    }
+
+    /// 判死撤旧模型走的删法会摘账本：原样记回去之后，它还是那个「已放弃」，连败与错误一字不差。
+    #[test]
+    fn a_restored_entry_comes_back_exactly_as_it_was() {
+        let dbnum = 990_006;
+        forget_dbnum(dbnum);
+        for _ in 0..DEAD_ROOT_STREAK {
+            record_failed(dbnum, r(1), "BRAN", 26, "manifold boolean failed");
+        }
+        let dead = entry(dbnum, r(1)).unwrap();
+        forget_root(dbnum, r(1));
+        restore(dbnum, r(1), dead.clone());
+        assert_eq!(entry(dbnum, r(1)), Some(dead));
+        assert_eq!(census(dbnum).abandoned, 1);
         forget_dbnum(dbnum);
     }
 
