@@ -7977,9 +7977,11 @@ mod tests {
     /// S 端整根重算灌基线 → 单元路（真生产方 + 执行体）→ 与 T 端整根重算比整根 `manifest_hash`——按库汇总进证据档。
     /// **一根 DIFF 即红**（D9 ①）；回退 / 重放 / 生成失败只计数不判红（回退永远正确、只是不省）。
     ///
-    /// 目录依赖仍经**当前 MDB**（`DB_OPTION_FILE`）解，所以一次只覆盖 MDB 解得出目录的那些库；语料五个目录里
-    /// 别的项目的库要换 `DB_OPTION_FILE` 再跑一遍——pin 不进 / 开不了窗的库记 `skip`，不算红。
-    /// 旋钮：`AIOS_POSREF_DIRS`（`;` 分隔，默认 S7 那五个目录）、`AIOS_UNIT_PUBLISH_STEPS_PER_DB`（每库会话链最后 K 步，
+    /// 目录依赖仍经**当前 MDB**（`DB_OPTION_FILE`）解，所以一次只量一个工程：语料默认就是这个 MDB 声明的
+    /// 设计库，别的工程换 `DB_OPTION_FILE` 再跑一遍。一根的整根重算里有件引用了不在这个 MDB 里的库
+    /// （「db N 没注册进这个 DbSet」），就记「依赖库不在当前 MDB」、不进对拍——两端缺得一样，diff 为 0 也不是
+    /// 证据；pin 不进 / 开不了窗的库记 `skip`，不算红。
+    /// 旋钮：`AIOS_POSREF_DIRS`（`;` 分隔，给了就扫目录里全部 DESI；默认只取当前 MDB 声明的设计库）、`AIOS_UNIT_PUBLISH_STEPS_PER_DB`（每库会话链最后 K 步，
     /// 0 = 整条链）、`AIOS_UNIT_PUBLISH_ROOTS_PER_WINDOW`（默认 40，0 = 全量；一窗上千根时跨 regen 名单等距抽）、
     /// `AIOS_UNIT_PUBLISH_BUDGET_SECS`（默认 2400，到了只数不量）、`AIOS_UNIT_PUBLISH_MESH_DIR`（烘焙目录，默认临时目录、
     /// 跑完删；`AIOS_UNIT_PUBLISH_KEEP_MESHES=1` 留着）、`AIOS_UNIT_PUBLISH_REPORT`（默认
@@ -8004,13 +8006,6 @@ mod tests {
         };
         use e3d_io::engine::ReadOnlyEngine;
 
-        const DEFAULT_DIRS: [&str; 5] = [
-            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
-            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
-            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
-            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
-            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
-        ];
         let env_usize = |name: &str, default: usize| -> usize {
             std::env::var(name)
                 .ok()
@@ -8048,10 +8043,6 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir().join("unit-publish-parity-meshes"));
         std::fs::create_dir_all(&mesh_dir)?;
-        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
-            Ok(value) => value.split(';').map(PathBuf::from).collect(),
-            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
-        };
         let db_option_file = std::env::var("DB_OPTION_FILE").unwrap_or_else(|_| "(default)".into());
         let switches = format!(
             "unit_level_publish={} structural_connection={} cable_endpoint={} design_reference={} \
@@ -8066,6 +8057,9 @@ mod tests {
 
         let mut service = E3dModelService::from_current().await?;
         service.mesh_dir = mesh_dir.clone();
+        let explicit_dirs: Option<Vec<PathBuf>> = std::env::var("AIOS_POSREF_DIRS")
+            .ok()
+            .map(|value| value.split(';').map(PathBuf::from).collect());
         let unit_types = resolve_delivery_unit_types(&[]);
         let started = Instant::now();
         println!(
@@ -8087,6 +8081,8 @@ mod tests {
                 /// 两端整根重算里画不出的件数（S, T）——不拦对拍，只记。
                 failed_elements: (usize, usize),
             },
+            /// 整根重算里有件引用了不在当前 MDB 里的库：这一轮量不准它，记跳过。
+            ForeignDependency(BTreeSet<u32>),
             Fallback(String),
             Replayed,
             SeedFailed(String),
@@ -8156,6 +8152,7 @@ mod tests {
             seed_failed: usize,
             regen_failed: usize,
             with_failed_elements: usize,
+            foreign_dependency: usize,
             over_budget: usize,
             unit_secs: f64,
             regen_t_secs: f64,
@@ -8163,6 +8160,8 @@ mod tests {
         }
         let mut per_file: Vec<(String, FileStats)> = Vec::new();
         let mut skipped_files: Vec<(String, String)> = Vec::new();
+        let mut foreign_dbnums: BTreeSet<u32> = BTreeSet::new();
+        let mut foreign_examples: Vec<String> = Vec::new();
         let mut diffs: Vec<String> = Vec::new();
         let mut fallback_buckets: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut fallback_examples: BTreeMap<&'static str, String> = BTreeMap::new();
@@ -8171,17 +8170,53 @@ mod tests {
         let mut failures: Vec<String> = Vec::new();
         let mut budget_exhausted = false;
 
-        for dir in dirs.iter().filter(|dir| dir.is_dir()) {
-            let sources = match sources_in_dir(dir, &["DESI"]) {
-                Ok(sources) => sources,
-                Err(error) => {
-                    skipped_files.push((dir.display().to_string(), format!("scan: {error}")));
-                    continue;
+        // 语料：给了 `AIOS_POSREF_DIRS` 就扫那些目录里的全部 DESI；没给就只取当前 MDB 声明的设计库——
+        // 同一个目录里不属于这个 MDB 的库，目录依赖解不全。
+        let mut corpus: Vec<Vec<(u32, PathBuf)>> = Vec::new();
+        match &explicit_dirs {
+            Some(dirs) => {
+                for dir in dirs.iter().filter(|dir| dir.is_dir()) {
+                    match sources_in_dir(dir, &["DESI"]) {
+                        Ok(sources) => corpus.push(
+                            sources
+                                .into_iter()
+                                .map(|source| (source.dbnum, source.file))
+                                .collect(),
+                        ),
+                        Err(error) => skipped_files
+                            .push((dir.display().to_string(), format!("scan: {error}"))),
+                    }
                 }
-            };
-            for source in sources {
-                let dbnum = source.dbnum;
-                let file = source.file.clone();
+            }
+            None => {
+                let mut declared: Vec<(u32, PathBuf)> = service
+                    .pins
+                    .iter()
+                    .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
+                    .filter_map(|pin| {
+                        u32::try_from(pin.dbnum)
+                            .ok()
+                            .map(|dbnum| (dbnum, pin.file.clone()))
+                    })
+                    .collect();
+                declared.sort_by(|a, b| a.1.cmp(&b.1));
+                corpus.push(declared);
+            }
+        }
+        let corpus_label = match &explicit_dirs {
+            Some(dirs) => dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+            None => format!(
+                "当前 MDB 声明的 {} 个设计库",
+                corpus.iter().map(Vec::len).sum::<usize>()
+            ),
+        };
+
+        for sources in corpus {
+            for (dbnum, file) in sources {
                 let name = file
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -8258,6 +8293,16 @@ mod tests {
                             continue;
                         }
                     };
+                    // 与生产规划器同一步：打开两端集合的 service 把依赖会话表绑进缓存，执行体才复用两端输入；
+                    // 不绑就只复用计划，`plan_secs` 量到的是生产里不会发生的重开。
+                    service.bind_window_input_dependencies(
+                        dbnum,
+                        &file,
+                        base_sesno,
+                        target_sesno,
+                        &base_set,
+                        &target_set,
+                    );
                     let roots_s = sources.roots_s.clone();
                     stats.windows += 1;
                     let impact = sources.impact(&roots_s);
@@ -8325,13 +8370,28 @@ mod tests {
                         let store = ModelMemoryStore::default();
                         // 整根重算里画不出的件（e3d-model 没有 builder / 读挂）**不拦**：生产的整根重算对这种根也是
                         // 「能画的照发、失败的记账」，两端同一套生成器，失败集相同则章仍该相同；件数记进报告。
+                        // 引用了不在当前 MDB 里的库的件例外：那是配置与语料不配套，生产里不会这样缺，整根记跳过。
                         let regen_at = |sesno: u32,
                                         input: &GenerationInput,
                                         cache: &mut CatalogueMeshCache|
-                         -> anyhow::Result<(ProjectionCommit, usize)> {
+                         -> anyhow::Result<(
+                            ProjectionCommit,
+                            usize,
+                            BTreeSet<u32>,
+                        )> {
                             let snapshot =
                                 generate_snapshot_from_set(&input.set, &input.index, refno, cache)?;
                             let failed = snapshot.report.failed.len();
+                            let foreign = snapshot
+                                .report
+                                .failed
+                                .iter()
+                                .flat_map(|incident| {
+                                    crate::data_interface::mdb_route_directory::unregistered_dbnums(
+                                        &incident.detail,
+                                    )
+                                })
+                                .collect::<BTreeSet<_>>();
                             let owners = snapshot.owners.clone();
                             let baked = bake_snapshot(snapshot, &mesh_dir, None)?;
                             let (commit, _) = project_geometry_delta(
@@ -8342,16 +8402,19 @@ mod tests {
                                 None,
                                 &owners,
                             )?;
-                            Ok((commit, failed))
+                            Ok((commit, failed, foreign))
                         };
                         let outcome: Outcome = (|| -> anyhow::Result<Outcome> {
-                            let (mut seed, seed_failed) =
+                            let (mut seed, seed_failed, seed_foreign) =
                                 match regen_at(base_sesno, &base, &mut cache) {
                                     Ok(seed) => seed,
                                     Err(error) => {
                                         return Ok(Outcome::SeedFailed(format!("{error:#}")));
                                     }
                                 };
+                            if !seed_foreign.is_empty() {
+                                return Ok(Outcome::ForeignDependency(seed_foreign));
+                            }
                             let (seed_hash, seed_count) = manifest_hash(&seed.upserts)?;
                             seed.receipt = Some((
                                 refno,
@@ -8406,7 +8469,7 @@ mod tests {
                             }
                             let receipt_only = !report.receipt_only.is_empty();
                             let clock = Instant::now();
-                            let (regen_t, target_failed) =
+                            let (regen_t, target_failed, target_foreign) =
                                 match regen_at(target_sesno, &target, &mut cache) {
                                     Ok(regen_t) => regen_t,
                                     Err(error) => {
@@ -8415,6 +8478,9 @@ mod tests {
                                         )));
                                     }
                                 };
+                            if !target_foreign.is_empty() {
+                                return Ok(Outcome::ForeignDependency(target_foreign));
+                            }
                             let regen_t_secs = clock.elapsed().as_secs_f64();
                             let (regen_hash, regen_count) = manifest_hash(&regen_t.upserts)?;
                             let receipt = store
@@ -8518,6 +8584,25 @@ mod tests {
                                     diffs.push(line);
                                 }
                             }
+                            Outcome::ForeignDependency(dbnums) => {
+                                stats.foreign_dependency += 1;
+                                let named = dbnums
+                                    .iter()
+                                    .map(u32::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                foreign_dbnums.extend(dbnums);
+                                if foreign_examples.len() < 40 {
+                                    foreign_examples.push(format!(
+                                        "{label} {refno} `{}`: db {named}",
+                                        root.noun
+                                    ));
+                                }
+                                println!(
+                                    "{label}: skip {refno} `{}`: db {named} not in this MDB",
+                                    root.noun
+                                );
+                            }
                             Outcome::Fallback(reason) => {
                                 stats.fallback += 1;
                                 let bucket = fallback_bucket(&reason);
@@ -8573,8 +8658,7 @@ mod tests {
             }
         ));
         report.push_str(&format!(
-            "- 开关：{switches}\n- 语料目录：{}\n- 抽样：每库最后 {} 步（0 = 整条链），每窗最多 {} 根（跨 regen 名单等距抽，只抽 S 端也有的根）；预算 {budget_secs:.0}s{}；总耗时 {elapsed:.0}s\n\n",
-            dirs.iter().map(|dir| dir.display().to_string()).collect::<Vec<_>>().join("; "),
+            "- 开关：{switches}\n- 语料：{corpus_label}\n- 抽样：每库最后 {} 步（0 = 整条链），每窗最多 {} 根（跨 regen 名单等距抽，只抽 S 端也有的根）；预算 {budget_secs:.0}s{}；总耗时 {elapsed:.0}s\n\n",
             per_db,
             roots_per_window,
             if budget_exhausted { "（**已用尽**，其后只数不量）" } else { "" },
@@ -8611,6 +8695,10 @@ mod tests {
             (
                 "对拍过的根里两端带画不出的件的（照常对拍，只记）",
                 total(|s| s.with_failed_elements),
+            ),
+            (
+                "依赖库不在当前 MDB（记跳过，不算对拍）",
+                total(|s| s.foreign_dependency),
             ),
             ("预算用尽未量", total(|s| s.over_budget)),
         ] {
@@ -8677,6 +8765,20 @@ mod tests {
                 report.push_str(&format!("- {}\n", line.replace('\n', " ")));
             }
         }
+        if !foreign_examples.is_empty() {
+            report.push_str(&format!(
+                "\n### 依赖库不在当前 MDB（记跳过，不算对拍）：{} 根，库 {}，前 40 条\n\n",
+                total(|s| s.foreign_dependency),
+                foreign_dbnums
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            for line in &foreign_examples {
+                report.push_str(&format!("- {line}\n"));
+            }
+        }
         if !skipped_files.is_empty() {
             report.push_str(&format!("\n### 跳过的库：{} 个\n\n", skipped_files.len()));
             for (name, reason) in &skipped_files {
@@ -8726,6 +8828,8 @@ mod tests {
                 "seed_failed": total(|s| s.seed_failed),
                 "regen_failed": total(|s| s.regen_failed),
                 "with_failed_elements": total(|s| s.with_failed_elements),
+                "foreign_dependency": total(|s| s.foreign_dependency),
+                "foreign_dbnums": foreign_dbnums,
                 "over_budget": total(|s| s.over_budget),
                 "unit_secs": total_f(|s| s.unit_secs),
                 "regen_t_secs": total_f(|s| s.regen_t_secs),

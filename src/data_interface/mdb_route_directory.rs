@@ -65,8 +65,8 @@ pub fn explain_unregistered_dbs(message: &str) -> String {
     }
 }
 
-/// [`explain_unregistered_dbs`] 的纯函数芯：目录由调用方给。
-pub fn explain_unregistered_dbs_with(message: &str, directory: &MdbRouteDirectory) -> String {
+/// e3d-io「db N 没注册进这个 DbSet」点名的库号：一段报错里可能有好几句，一句都没有就是空集。
+pub fn unregistered_dbnums(message: &str) -> BTreeSet<u32> {
     const MARKER: &str = " 没注册进这个 DbSet";
     let mut dbnums = BTreeSet::new();
     let mut rest = message;
@@ -87,6 +87,12 @@ pub fn explain_unregistered_dbs_with(message: &str, directory: &MdbRouteDirector
         }
         rest = &rest[at + MARKER.len()..];
     }
+    dbnums
+}
+
+/// [`explain_unregistered_dbs`] 的纯函数芯：目录由调用方给。
+pub fn explain_unregistered_dbs_with(message: &str, directory: &MdbRouteDirectory) -> String {
+    let dbnums = unregistered_dbnums(message);
     if dbnums.is_empty() {
         return message.to_string();
     }
@@ -1749,6 +1755,20 @@ mod tests {
             ) && undeclared.contains("E3D 用这个 MDB 同样读不到它"),
             "{undeclared}"
         );
+    }
+
+    /// 一段报错里点名的库号去重取出；「db 」后面紧跟库号才算，其它数字不作数。
+    #[test]
+    fn unregistered_dbnums_are_read_off_every_sentence_in_a_message() {
+        assert_eq!(
+            unregistered_dbnums(
+                "element 17496/7388 failed: db 5052 没注册进这个 DbSet，resolver 也给不出它的文件；\
+                 db 7001 没注册进这个 DbSet；db 5052 没注册进这个 DbSet"
+            ),
+            BTreeSet::from([5_052, 7_001])
+        );
+        assert!(unregistered_dbnums("session 721 没注册进这个 DbSet").is_empty());
+        assert!(unregistered_dbnums("DESP length 2 < 10").is_empty());
     }
 
     /// 真库门（手动）：当前 DbOption 指向的 MDB，目录构造零元素扫描、每条路由的文件头自证一致、
