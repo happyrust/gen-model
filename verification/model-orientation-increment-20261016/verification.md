@@ -372,3 +372,142 @@ type_code 10240 文本）造出与真库同形状的匿名显式属性，走 pin
 监听/HTTP execute/worker/durable/重启、真实工程两库与 E3D UI SAVEWORK 端到端未验。
 `E3D_CENSUS_DB_FILE`+`E3D_CENSUS_DB_TYPE` 可把门指向任意库文件；其余库型（PADD/ISOD 等）
 未普查但同一记录头不变式适用。未提交、未推送；协同仍暂停。
+
+## 12. 2026-10-21：审核最新在途改动后的收口与生产执行体回归
+
+本节承接第 11 节。用户要求审核最新修改，继续修到「方位修改的增量更新」正常工作。工作区仍有多条工作线未提交改动（ISSUE-029 根账本、A6 窗口计划缓存、D10 门禁等），本节只改与本目标相关且已确认的缺陷/测试，不覆盖其他工作线。
+
+### 12.1 发现并修复
+
+1. **窗口计划缓存的单测依赖全局表，全量并行必红**：`window_plan_cache_replaces_same_dbnum_and_bounds_total_entries` 先清空进程级 `WINDOW_PLAN_CACHE` 再断言，而合成方位夹具（dbnum=8000）在同一进程里调用 `WindowRootSources::collect`，会并发写入同一张表并触发「同库新窗替换」，把测试刚插入的键淘汰。单独跑绿、全量跑红，红的不是淘汰逻辑。
+   - 修复：把淘汰规则抽成纯函数 `evict_window_plan_cache_entries(&mut HashMap, key, sets)`，插入路径与单测共用；单测在本地表上验证同库替换、容量上限与同键重插，不再碰全局状态。
+2. **缓存输入缺文件身份，同号跨项目副本可能拿错文件**：缓存键只有 `(dbnum, S, T)`，而 MDB 路由目录允许同号 dbnum 在不同项目下各有文件、会话号可能相同；A6 把两端 `DbSet`/`SourceIndex` 放进缓存后，执行体可能用另一个项目的输入切本窗子计划。
+   - 修复：`CachedWindowInputs` 增加 `file`；`UnitDeltaProducer::open` 命中缓存时必须核 `service.source_file(dbnum) == inputs.file`，不一致就当作未命中重算并回填。规划器（`WindowRootSources::collect`）与兜底路径都写入该格。
+3. **真实保存的 `CACHID` 戳没有进夹具**：E3D 3.1 每次图形重建都会把 `CACHID` +1，真实「只改 ORI」的 SAVEWORK 往往同时跳 `CACHID`；夹具若只写 ORI，就测不到戳是否被正确忽略。
+   - 新增 `synthetic_orientation_source_ori_with_placement_stamps_keeps_the_cheap_path`：同一真实写会话改 `ORI` + `CACHID`，断言 `attributes == ["CACHID","ORI"]`、`is_placement_only()` 为真、刚体分桶仍为 1，并与 T 端全量生成对拍。`SPAMAP` 在本夹具的 EQUI 模板未声明，同族语义由 `element_diff` 既有单测覆盖。
+4. **方位链路缺「生产执行体」级回归**：此前真实二进制夹具只直接调纯函数 `republish_records`，没有覆盖执行体的重放闸、pin@T 目标核对、网格盒回调与回执盖章。
+   - 新增 `synthetic_orientation_source_production_executor_republishes_then_replays`：真实 S/T 源文件 → `WindowRootSources::collect` 判 transform → S 端整根重算灌本地投影并盖 S 回执 → `republish_roots_by_rigid_motion_on`（真执行体）→ 与 T 端全量生成逐记录对拍；再同窗重跑一次，断言 `replayed` 且世界矩阵不再乘第二次 Δ。
+
+### 12.2 本轮新跑命令与结果
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --offline --lib synthetic_orientation_ -- --test-threads=1` | exit=0；**15 passed / 0 failed**（原 13 + 新增生产执行体 1 + ORI/CACHID 戳同窗 1） |
+| `cargo test --offline --lib window_plan_cache_replaces -- --test-threads=1` | exit=0；1 passed / 0 failed |
+| `cargo test --offline --lib` | exit=0；**2562 passed / 0 failed / 133 ignored**，12.99s |
+| `cargo check --offline --lib` | exit=0（仅既有 vendor `instantiate_cylinder` dead_code、manifest unused `cc`、future-incompatibility 提示） |
+| `rustfmt --edition 2024 --check` 三个改动文件 | exit=0 |
+
+### 12.3 仍未覆盖（沿用第 8.5 / 10.4 节）
+
+- 真实 E3D UI `SAVEWORK` → 文件监听 → HTTP execute → 队列/worker 的完整链路；本轮仍用真实 writer/reader 的合成工程，不是已安装工程副本。
+- 读透 + durable 模式下两条便宜路都按设计回退整根 regen；该回退路径的正确性由既有全量测试覆盖，但未在真实服务上做方位修改实测。
+- durable 落库、任务收尾水位、服务重启恢复与前端显示未在本轮验证。
+- 未提交、未推送；未操作真实项目数据库或服务配置。
+
+## 13. 2026-10-21：文件身份并入窗口计划缓存键
+
+本节承接 12.1 第 2 条。12.1 的修法是「命中后再核 `inputs.file`」；本轮把文件身份直接并进键，
+并补一条走真实二进制 + 生产规划器的行为测试。
+
+### 13.1 改动
+
+- `WindowPlanCacheKey`：`(dbnum, base_sesno, target_sesno)` → `(dbnum, file, base_sesno, target_sesno)`。
+  淘汰规则随之按文件分域：**同库同文件**的新窗替换该文件的旧窗（旧的 `DbSet` / `SourceIndex` 句柄不滞留），
+  不同文件（同号跨项目副本）各留一份，谁也不能把对方顶掉。容量上限仍是
+  `MAX_WINDOW_PLAN_CACHE_ENTRIES = 8`，超限按 `(S, T)` 最小者淘汰。
+- 淘汰循环取最旧键改为 `cloned()`：键含 `PathBuf`，不再 `Copy`。
+- `inputs.file` 命中复核保留（见 13.2 最后一条）；第 14 节把文件身份收进载荷键后，这一格与该复核一并删除。
+- 行为测试 `window_plan_cache_is_scoped_by_source_file_and_rejects_mismatched_inputs`
+  （`orientation_source_diff_fixture.rs`，真实 S/T 二进制文件 + 生产 `WindowRootSources::collect`
+  + 生产 `UnitDeltaProducer::open`）三段：
+  1. A 规划完，B 的同号同窗键上查不到 A 的计划；
+  2. B 也走生产规划器后，A、B 两份计划并存（B 的规划不淘汰 A），B 的缓存输入是 B 自己的文件；
+  3. 手动把 A 的计划塞到 B 的键下（模拟路径别名 / 旧键 / 未来把 `inputs` 塞错键的调用方），
+     执行体必须拒绝它、按 B 重算出空计划，并把 B 的键回填成 B 的输入。
+- 纯函数淘汰单测补一条同号跨文件并存的断言（`file_a` / `file_b` 同 dbnum 同窗）。
+
+### 13.2 评估：为什么不只做「命中时核对」
+
+两个方案都能得到正确结果，差别在复用率与覆盖面：
+
+| | 只在命中时核对（12.1 的临时修法） | 文件进键（现行） |
+|---|---|---|
+| 正确性 | 不一致就重算，正确 | 不一致的键根本查不到，正确 |
+| 跨项目复用 | A、B 同号同窗互相覆盖 / 顶掉；每窗都 miss，300.5s 的重算开销照付 | A、B 各留一份，规划完 A 再规划 B 不丢 A |
+| 覆盖面 | 只对 `inputs: Some` 的条目有效；没有 inputs 的条目仍会被接受 | 键层面隔离，与 `inputs` 是否有值无关 |
+| 代价 | 每次命中一次 `PathBuf` 比较 | 键变大；容量按文件分配，>8 个活跃文件窗口时仍淘汰最旧 `(S,T)` |
+
+结论：**文件身份该进键**。12.1 的「命中后核对」在键不含文件时是必需的，但它把「别的项目的计划」
+留在同一个格子里，两个项目同时活跃时会持续互相顶掉——正确但不省，且会把对方的计划丢掉。
+进键后 `inputs.file` 核对在生产路径上已不可达（键与 `inputs.file` 同源写入），当时保留它作为
+对「键命中 ≠ 输入同一份文件」的零成本断言；同日第 14 节进一步把这份重复删掉，身份只留键一处。
+
+### 13.3 残余风险（未改，记录）
+
+- **路径拼写即身份**：键比较原始 `PathBuf` 字节。不同副本路径不同 → 正确隔离；同一文件以不同拼写
+  （相对/绝对、`\` 与 `/`、`..`、符号链接）进入 lookup → **miss 而不是错命中**，只损失复用。
+  当前规划器与执行体都经 `E3dModelService::source_file(dbnum)` 的同一条 pin 解析取路径，拼写一致；
+  不要再引入第二条路径来源。没有加 `canonicalize`：它要一次系统调用、在网络盘上可能失败，
+  而现在的唯一来源已经足够。
+- **同路径换文件**（备份覆盖 / 就地替换副本，dbnum 与会话号都相同）仍在键外，会命中旧计划。
+  概率低但后果是静默用旧输入。要堵可在键里加 `(len, mtime)`：规划→执行之间不写文件，不会破坏
+  预期命中；跨窗本来就因 `(S,T)` 不同而 miss。本轮按「不做、记为可选硬化」处理。
+- **写入用 `index.dbnum`、查询用调用方 `dbnum`**：两者由同一文件解析，当前一致；若将来不一致，
+  表现是持续性 miss，不会错命中。
+
+### 13.4 验证
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --offline --lib window_plan_cache -- --test-threads=1` | exit=0；2 passed / 0 failed |
+| `cargo test --offline --lib` | exit=0；**2563 passed / 0 failed / 133 ignored**，12.93s（并行默认线程数，含全局缓存写入）；第 14 节收口后同一命令 **2565 passed** |
+| `rustfmt --edition 2024` 两个改动文件 | exit=0 |
+
+仍未验收：多项目同进程服务上真实 SAVEWORK 的缓存命中 / 隔离实测，以及同路径换文件场景；
+本节证据是合成双工程 + 真实二进制读写。未提交、未推送。
+
+## 14. 2026-10-21：分域键收成一个类型，淘汰规则只留一处
+
+### 14.1 改动
+
+- 新增 `WindowPlanKey`（字段私有，只能经 `new(dbnum, &Path, S, T)` 构造）：四个分量就是分域
+  规则本身，调用方不再拼 `(u32, PathBuf, u32, u32)` 元组。
+- `WindowPlanSets` 自带 `key`；唯一构造入口 `window_plan_sets(...)` 把 `plan_update` 的产出与键
+  绑在一起。插入入口 `insert_window_plan_sets(sets)` 只收载荷、键由载荷派生——「键是 B、载荷是 A」
+  不可表达。规划器不再逐字段克隆构造载荷，原 20 行 struct literal 删除。
+- 新增 `WindowPlanCache`（`entries` + `CAPACITY`）：`insert` 一处负责同文件换窗、容量淘汰与同键
+  替换，被移出的 `Arc` 返回给调用方在锁外释放。原自由函数 `evict_window_plan_cache_entries`
+  与直接暴露的全局 `HashMap` 一并删除。
+- `CachedWindowInputs.file` 与 `UnitDeltaProducer::open` 的 `inputs.file` 复核删除：文件身份只剩
+  `WindowPlanKey` 一处。原复核是「键不含文件」时代的补丁；现在同一份 `file` 在
+  `window_plan_sets` 里同时写进键与载荷，第三份重复反而会漂。行为无变化（键含文件后该复核已不可达）。
+- 单测改为对本地 `WindowPlanCache` 实例断言四条规则（同文件换窗并交还旧载荷、同号跨文件并存、
+  容量上界、同键重插）；真实二进制夹具只断言「B 的同号同窗查不到 A、B 的载荷键是 B 的文件、
+  执行体命中 B 的计划与 B 的输入」。夹具不再断言全局缓存里某一格一定还在：进程级缓存有容量上界
+  且与并行测试共用，实测全量并行时会把别的测试的插入误读成本测试失败（红过一次，已按此收紧）。
+
+### 14.2 接口
+
+| 用途 | 之前 | 现在 |
+|---|---|---|
+| 查 | `cached_window_plan_sets(dbnum, &file, S, T)` | 不变（内部构造 `WindowPlanKey`） |
+| 构造载荷 | 就地 struct literal / `cache_window_plan_sets(..)` | `window_plan_sets(dbnum, &file, S, T, &plan, inputs)` |
+| 插入 | `insert_window_plan_cache(dbnum, &file, S, T, sets)` | `insert_window_plan_sets(sets)`（键从载荷来） |
+| 淘汰 | 自由函数 + 裸 `HashMap` | `WindowPlanCache::insert` + `CAPACITY` |
+| 文件身份 | 键 + `inputs.file` 两处 + 命中复核 | 只在 `WindowPlanKey` |
+
+### 14.3 验证
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --offline --lib window_plan_cache -- --test-threads=1` | exit=0；2 passed / 0 failed |
+| `cargo test --offline --lib` ×3（默认并行） | exit=0；**2565 passed / 0 failed / 133 ignored**，12.80s / 12.92s / 15.01s（三次全绿，专门验证不再受全局缓存并行淘汰影响） |
+| `cargo check --offline --lib` | exit=0 |
+| `rustfmt --edition 2024 --check` 三个文件 | exit=0 |
+
+### 14.4 没变的限制
+
+- 路径拼写仍是身份（见 13.3）；同路径换文件仍不覆盖。
+- 规划器写 `index.dbnum`、执行体查调用方 `dbnum`，不一致时表现为 miss（13.3 第三条）。
+- 未提交、未推送；真实双工程 SAVEWORK 未跑。

@@ -448,7 +448,10 @@ fn collect_removed_units(plan: &UpdatePlan, base: &Arc<DbSet>) -> Vec<RemovedUni
             let refno = RefNo::new(word0, word1);
             RemovedUnit {
                 refno: refno_from_e3d(refno),
-                noun: nouns.get(&(word0, word1)).map(|noun| noun.to_string()).unwrap_or_default(),
+                noun: nouns
+                    .get(&(word0, word1))
+                    .map(|noun| noun.to_string())
+                    .unwrap_or_default(),
                 ancestors_s: owner_chain_in_set(base, refno).unwrap_or_default(),
             }
         })
@@ -1178,8 +1181,10 @@ impl WindowRootSources {
             observe_xgeometry_candidates(&plan, base, target);
         // `roots_S`：左端文件上的根集（ADR-079）。左端是模型水位，它承诺 S 时刻的每个根都已发布，
         // 于是「S 端有哪些根」直接问 `DbSet@S`，与 T 端同一段枚举、同一套 MDU / significant 口径。
-        let base_index = scan_index(file, Some(base_sesno))
-            .with_context(|| format!("scan index of {} at {base_sesno}", file.display()))?;
+        let base_index = Arc::new(
+            scan_index(file, Some(base_sesno))
+                .with_context(|| format!("scan index of {} at {base_sesno}", file.display()))?,
+        );
         let roots_s = enumerate_generation_roots(base, &base_index.roots, unit_types)
             .with_context(|| {
                 format!(
@@ -1190,8 +1195,10 @@ impl WindowRootSources {
             .iter()
             .map(PersistedRoot::from)
             .collect::<Vec<_>>();
-        let index = scan_index(file, Some(target_sesno))
-            .with_context(|| format!("scan index of {} at {target_sesno}", file.display()))?;
+        let index = Arc::new(
+            scan_index(file, Some(target_sesno))
+                .with_context(|| format!("scan index of {} at {target_sesno}", file.display()))?,
+        );
         let roots_t =
             enumerate_generation_roots(target, &index.roots, unit_types).with_context(|| {
                 format!(
@@ -1245,7 +1252,13 @@ impl WindowRootSources {
                 &index.owners,
                 &roots_t,
             )
-            .with_foreign_members(&plan, &index.owners, &roots_t, index.dbnum, design_dbs)
+            .with_foreign_members(
+                &plan,
+                &index.owners,
+                &roots_t,
+                index.dbnum,
+                design_dbs,
+            )
         } else {
             crate::data_interface::cable_endpoint::CableEndpointCascade::off()
         };
@@ -1265,6 +1278,27 @@ impl WindowRootSources {
         };
         // 覆盖账（计划 D3）：被删单元的 S 端属主链在这里取——两端 `DbSet` 都在手，之后只剩纯比对。
         let removed_units = collect_removed_units(&plan, base);
+        let index_keys = index.owners.len();
+        // Issue #50：把窗口计划与已打开的两端 `DbSet` / `SourceIndex` 存入有界缓存，供 `UnitDeltaProducer::open` 直接复用。
+        // 载荷自带分域键（dbnum + file + 窗），插入时由它派生，规划器不再另传一份键。两端集合的依赖会话表
+        // 这里拿不到，由打开它们的 service 随后绑定（`bind_window_input_dependencies`），没绑的只复用计划。
+        crate::fast_model::e3d_model_service::insert_window_plan_sets(
+            crate::fast_model::e3d_model_service::window_plan_sets(
+                index.dbnum,
+                file,
+                base_sesno,
+                target_sesno,
+                &plan,
+                Some(
+                    crate::fast_model::e3d_model_service::CachedWindowInputs::planned(
+                        base.clone(),
+                        base_index,
+                        target.clone(),
+                        index,
+                    ),
+                ),
+            ),
+        );
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -1273,7 +1307,7 @@ impl WindowRootSources {
             plan,
             closure,
             removed_units,
-            index_keys: index.owners.len(),
+            index_keys,
             xgeometry_observed,
             xgeometry_unreadable,
             nested_roots,
@@ -1699,7 +1733,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             } else {
                 Vec::new()
             };
-        anyhow::Ok(WindowRootSources::collect(
+        let sources = WindowRootSources::collect(
             &file,
             base_sesno,
             target_sesno,
@@ -1707,32 +1741,19 @@ pub(crate) async fn build_model_update_plan_from_window(
             &target,
             &unit_types,
             &design_dbs,
-        )?)
+        )?;
+        service.bind_window_input_dependencies(
+            dbnum,
+            &file,
+            base_sesno,
+            target_sesno,
+            &base,
+            &target,
+        );
+        anyhow::Ok(sources)
     })
     .await
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
-    // Issue #50：把窗口计划存入缓存，供单元级发布执行体（`UnitDeltaProducer::open`）复用，
-    // 省掉重复 `collect_window` + `plan_update` 的 300.5s 开销。`UpdatePlan` 不可 `Clone`，
-    // 逐字段克隆构造 `WindowPlanSets`（几 KB ~ 几十 KB，相对 300.5s 可忽略）。
-    {
-        use std::sync::Arc;
-        let plan_sets = Arc::new(crate::fast_model::e3d_model_service::WindowPlanSets {
-            regenerate: sources.plan.regenerate.clone(),
-            remove: sources.plan.remove.clone(),
-            regenerate_derived: sources.plan.regenerate_derived.clone(),
-            derived_stale: sources.plan.derived_stale.clone(),
-            full_rebuild: sources.plan.full_rebuild.clone(),
-            unreadable: sources.plan.report.unresolved.len()
-                + sources.plan.report.derived_stale_unreadable.len(),
-            dispositions: sources.plan.ledger.dispositions().to_vec(),
-        });
-        crate::fast_model::e3d_model_service::insert_window_plan_cache(
-            dbnum,
-            base_sesno,
-            target_sesno,
-            plan_sets,
-        );
-    }
     // `roots_S` 来自 `DbSet@S`（ADR-079）；「哪些根安定」= S 端根集减去账本里还欠着的根。
     // 欠着的根要随本窗重排，刚体前移那一臂另要「安定」集合。
     let roots_s = sources.roots_s.clone();
@@ -1915,8 +1936,7 @@ pub(crate) fn carry_unsettled_generation(
         return;
     }
     for root in roots_t {
-        if unsettled.contains(&root.root) && !plan.regen.iter().any(|item| item.root == root.root)
-        {
+        if unsettled.contains(&root.root) && !plan.regen.iter().any(|item| item.root == root.root) {
             plan.regen.push(root.clone());
         }
     }
@@ -2061,20 +2081,20 @@ pub(crate) async fn library_target_roots(
     dbnum: u32,
     target_sesno: u32,
 ) -> anyhow::Result<Vec<RefNo>> {
-    let (enumerated, enumerated_error) = match enumerate_target_roots(dbnum, target_sesno).await
-    {
+    let (enumerated, enumerated_error) = match enumerate_target_roots(dbnum, target_sesno).await {
         Ok(roots) => (roots, None),
         Err(error) => (Vec::new(), Some(error)),
     };
-    let (durable, durable_error) = match crate::data_interface::generation_root::enumerate_durable_generation_roots(
-        dbnum,
-        &crate::data_interface::generation_root::configured_delivery_unit_types(),
-    )
-    .await
-    {
-        Ok(roots) => (roots, None),
-        Err(error) => (Vec::new(), Some(error)),
-    };
+    let (durable, durable_error) =
+        match crate::data_interface::generation_root::enumerate_durable_generation_roots(
+            dbnum,
+            &crate::data_interface::generation_root::configured_delivery_unit_types(),
+        )
+        .await
+        {
+            Ok(roots) => (roots, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
     if let (Some(file_error), Some(durable_error)) = (&enumerated_error, &durable_error) {
         anyhow::bail!(
             "dbnum={dbnum} 文件侧根清单取不出（{file_error:#}）、持久侧也取不出（{durable_error:#}）"
@@ -2409,15 +2429,8 @@ mod tests {
         );
         assert_eq!(gap, vec![r(26481)]);
 
-        let line = delete_coverage_gap_warning(
-            8000,
-            &[r(26481)],
-            &[box_s5.clone()],
-            952,
-            952,
-            0,
-            0,
-        );
+        let line =
+            delete_coverage_gap_warning(8000, &[r(26481)], &[box_s5.clone()], 952, 952, 0, 0);
         assert!(
             line.starts_with("dbnum=8000: delete-coverage gap — ")
                 && line.contains("removes 1 model unit(s)")
@@ -2498,7 +2511,9 @@ mod tests {
             .expect("unsettled roots are carried into regen");
         let gap = body
             .find("uncovered_removed_units(&sources.removed_units, &plan.delete, &plan.regen)")
-            .expect("coverage gap is computed from the removed units and the delete / regen buckets");
+            .expect(
+                "coverage gap is computed from the removed units and the delete / regen buckets",
+            );
         let warning = body
             .find("delete_coverage_gap_warning(")
             .expect("coverage gap is reported as a warning");
@@ -2701,7 +2716,11 @@ mod tests {
             degraded: None,
         };
         carry_unsettled_generation(&BTreeSet::from([r(8), r(9), r(7)]), &roots_t, &mut plan);
-        assert_eq!(ids(&plan.regen), vec![r(8), r(9)], "7 在 T 端已不是根，随 delete 走");
+        assert_eq!(
+            ids(&plan.regen),
+            vec![r(8), r(9)],
+            "7 在 T 端已不是根，随 delete 走"
+        );
         assert_eq!(plan.advance, vec![r(5)]);
         assert!(plan.lazy.is_empty());
         assert_eq!(plan.delete, vec![persisted(7, "BRAN")]);
@@ -2713,7 +2732,11 @@ mod tests {
         assert_eq!(startup_window_base(None, 30), None, "从没盖过章：整库重排");
         assert_eq!(startup_window_base(Some(0), 30), None, "清零过：整库重排");
         assert_eq!(startup_window_base(Some(30), 30), None, "已追平：不开窗");
-        assert_eq!(startup_window_base(Some(31), 30), None, "水位高于文件（回退中）：不开窗");
+        assert_eq!(
+            startup_window_base(Some(31), 30),
+            None,
+            "水位高于文件（回退中）：不开窗"
+        );
         assert_eq!(startup_window_base(Some(12), 30), Some(12));
     }
 
@@ -2931,7 +2954,10 @@ mod tests {
         );
         assert_eq!(plan.advance, vec![r(2), r(3), r(4)]);
         assert_eq!(
-            plan.delete.iter().map(|root| root.refno).collect::<Vec<_>>(),
+            plan.delete
+                .iter()
+                .map(|root| root.refno)
+                .collect::<Vec<_>>(),
             vec![r(5)]
         );
         // 全部安定时什么都不动。

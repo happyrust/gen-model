@@ -264,10 +264,7 @@ fn write_anonymous_text(path: &Path, edits: &[(u32, u32, &str)]) {
 }
 
 /// 一次会话内同一条记录既有模板属性改动、又有匿名显式属性（混合窗）。
-fn write_mixed(
-    path: &Path,
-    edits: &[(u32, &str, Vec<(&str, DescriptorValue)>, Vec<(u32, &str)>)],
-) {
+fn write_mixed(path: &Path, edits: &[(u32, &str, Vec<(&str, DescriptorValue)>, Vec<(u32, &str)>)]) {
     const ANON_TEXT_TYPE: u16 = 10240;
     let mut provider = template_provider();
     let mut engine = e3d_io::ReadOnlyEngine::open(path).unwrap();
@@ -809,6 +806,334 @@ fn synthetic_orientation_source_second_window_restores_orientation_without_drift
     assert_eq!(moved2[0].source_sesno, BASE + 2);
 }
 
+// 真实 SAVEWORK 只动 ORI 时也会顺带跳 `CACHID` 戳（3.1 每次图形重建 +1）。戳不是摆放输入，
+// 不能把「纯方位修改」误判成混合窗、把便宜路整根踢回 regen。`SPAMAP` 同族，但本夹具的
+// EQUI 模板不声明它，改由 `element_diff` 单测覆盖。
+#[test]
+fn synthetic_orientation_source_ori_with_placement_stamps_keeps_the_cheap_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = create_source(dir.path());
+    write_updates(
+        &path,
+        &[(
+            10,
+            "EQUI",
+            vec![
+                ("ORI", DescriptorValue::RealArray(vec![0., 0., 90.])),
+                ("CACHID", DescriptorValue::Word { raw: 1, text: None }),
+            ],
+        )],
+    );
+    let (base, target) = (pin(&path, BASE), pin(&path, BASE + 1));
+    let diff = diff_element(&base, &target, source_ref(10)).unwrap();
+    assert_eq!(diff.attributes, vec!["CACHID", "ORI"], "{diff:?}");
+    assert!(diff.is_placement_only(), "{diff:?}");
+    let (sources, persisted) = collected(&path, &base, &target);
+    let impact = sources.impact(&persisted);
+    let settled: BTreeSet<_> = persisted.iter().map(|r| r.refno).collect();
+    let rigid = sources.rigid_motion(&persisted, &settled, &impact);
+    assert_eq!(
+        rigid.transform.len(),
+        1,
+        "ORI + placement stamps is still a pure placement window: {rigid:?}"
+    );
+    let anchors = &rigid.transform[&refno_from_e3d(source_ref(10))];
+    let initial = regenerate(&base, &path, BASE, dir.path(), 10);
+    let moved = republish_records(initial, anchors, BASE, BASE + 1, |r, w| {
+        rigid_motion_mesh_bounds(dir.path(), r, w)
+    })
+    .unwrap();
+    let oracle = regenerate(&target, &path, BASE + 1, dir.path(), 10);
+    close(&moved[0], &oracle[0]);
+}
+
+// 方向修改走**生产执行体**（不是只调纯函数 `republish_records`）：S 端整根投影当基线，
+// 执行体自带的重放闸 / pin@T 目标核对 / 网格盒回调 / 回执盖章全跑一遍；随后同窗再跑一次
+// 必须按「回执已在 T」重放，记录一个字节都不再动。
+#[test]
+fn synthetic_orientation_source_production_executor_republishes_then_replays() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = create_source(dir.path());
+    save(&path, [0., 0., 90.], None);
+    let (base, target) = (pin(&path, BASE), pin(&path, BASE + 1));
+    let (sources, persisted) = collected(&path, &base, &target);
+    let impact = sources.impact(&persisted);
+    let settled: BTreeSet<_> = persisted.iter().map(|r| r.refno).collect();
+    let rigid = sources.rigid_motion(&persisted, &settled, &impact);
+    let root_e3d = source_ref(10);
+    let root = refno_from_e3d(root_e3d);
+    let anchors = rigid
+        .transform
+        .get(&root)
+        .expect("pure ORI window must classify the unit root as a transform")
+        .clone();
+
+    let service = E3dModelService::from_source_files(
+        vec![crate::data_interface::direct_store::DbPin {
+            dbnum: SOURCE_DB as i32,
+            db_type: "DESI".into(),
+            file: path.clone(),
+            sesno: None,
+        }],
+        crate::data_interface::cata_closure::InMemoryCataLocator::from_parts(
+            HashMap::new(),
+            HashMap::new(),
+        ),
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+
+    // S 端整根重算 → 本地投影，回执停在 S、落款是 S 的目标（与 batch_worker 的基线同形）。
+    let initial = regenerate(&base, &path, BASE, dir.path(), 10);
+    let (manifest, geometry_count) = manifest_hash(&initial).unwrap();
+    let target_at_s = service
+        .model_target(SOURCE_DB, BASE, &service.dependency_sessions)
+        .unwrap();
+    let store = ModelMemoryStore::default();
+    store.commit(
+        ProjectionScope::Current,
+        vec![ProjectionCommit {
+            upserts: initial.clone(),
+            receipt: Some((
+                root_e3d,
+                RootReceipt {
+                    source_sesno: BASE,
+                    model_target: Some(target_at_s),
+                    manifest_hash: manifest,
+                    geometry_count,
+                    published_via: "regen".into(),
+                    room: None,
+                },
+            )),
+            ..ProjectionCommit::default()
+        }],
+    );
+    assert!(store.root_projection_complete(ProjectionScope::Current, root_e3d, dir.path()));
+
+    let units = vec![RigidMotionUnit {
+        root_refno: root.to_pdms_str(),
+        source_start_sesno: BASE,
+        anchors,
+    }];
+    let report = service
+        .republish_roots_by_rigid_motion_on(&store, SOURCE_DB, BASE + 1, &units, |commits| {
+            store.try_commit_current(commits);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(report.completed, vec![root.to_pdms_str()], "{report:?}");
+    assert!(report.fallbacks.is_empty(), "{report:?}");
+
+    let moved = store.records_of_root(ProjectionScope::Current, root_e3d);
+    let oracle = regenerate(&target, &path, BASE + 1, dir.path(), 10);
+    assert_eq!(moved.len(), oracle.len());
+    close(&moved[0], &oracle[0]);
+    assert_eq!(moved[0].source_sesno, BASE + 1);
+    let receipt = store
+        .receipt(ProjectionScope::Current, root_e3d)
+        .expect("executor stamps a receipt at T");
+    assert_eq!(receipt.source_sesno, BASE + 1);
+    assert_eq!(receipt.published_via, "transform");
+    assert!(receipt.model_target.is_some());
+    let settled_world = moved[0].world_transform.to_cols_array();
+
+    // 窗口重放：回执已在 T，重放闸必须跳过而不是再乘一次 Δ。
+    let replay = service
+        .republish_roots_by_rigid_motion_on(&store, SOURCE_DB, BASE + 1, &units, |commits| {
+            store.try_commit_current(commits);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(replay.replayed, vec![root.to_pdms_str()], "{replay:?}");
+    assert!(replay.completed.is_empty(), "{replay:?}");
+    assert_eq!(
+        store.records_of_root(ProjectionScope::Current, root_e3d)[0]
+            .world_transform
+            .to_cols_array(),
+        settled_world,
+        "replay must not apply Δ twice"
+    );
+}
+
+// 窗口计划缓存按「文件」分域：同号跨项目副本（MDB 路由目录允许）的同一会话窗是两份
+// 不同的输入。A 规划完，B 的同号同窗键上必须查不到 A；B 也走生产规划器，两份计划各归各的
+// 键；执行体命中 B 的键时读到的是 B 自己的计划与 B 自己的输入。
+// 「两份一定同时还在」由 `WindowPlanCache` 的本地单测确定性覆盖：进程级缓存有容量上界，
+// 又与并行测试共用，在这里断言某一格一定没被容量淘汰会把别的测试的插入误读成本测试的失败。
+#[test]
+fn window_plan_cache_is_scoped_by_source_file_and_keeps_both_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_a = dir.path().join("a");
+    let dir_b = dir.path().join("b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    let path_a = create_source(&dir_a);
+    let path_b = create_source(&dir_b);
+    save(&path_a, [0., 0., 90.], None);
+    // B 也保存一次，但 ORI 原值不变：会话链同样有 41→42，模型计划应为空。
+    save(&path_b, [0.; 3], None);
+
+    let (base_a, target_a) = (pin(&path_a, BASE), pin(&path_a, BASE + 1));
+    let _ = collected(&path_a, &base_a, &target_a);
+    let plan_a = cached_window_plan_sets(SOURCE_DB, &path_a, BASE, BASE + 1)
+        .expect("collect of A must fill its own cache key");
+    assert!(!plan_a.regenerate.is_empty(), "A really rotates its root");
+    assert!(
+        cached_window_plan_sets(SOURCE_DB, &path_b, BASE, BASE + 1).is_none(),
+        "same dbnum/session window on another file must not alias A's plan"
+    );
+
+    // B 也走生产规划器：B 的载荷落在 B 自己的键上，与 A 的计划互不覆盖。
+    let (base_b, target_b) = (pin(&path_b, BASE), pin(&path_b, BASE + 1));
+    collected(&path_b, &base_b, &target_b);
+    let plan_b = cached_window_plan_sets(SOURCE_DB, &path_b, BASE, BASE + 1)
+        .expect("collect of B must fill B's own cache key");
+    assert!(
+        plan_b.regenerate.is_empty(),
+        "B saved its ORI unchanged: its window names no unit to rebuild"
+    );
+    assert_eq!(
+        plan_b.key.file(),
+        path_b,
+        "B's cached plan is keyed by B's own file"
+    );
+    assert_eq!(
+        plan_a.key.file(),
+        path_a,
+        "A's cached plan still names A's file"
+    );
+
+    let service = E3dModelService::from_source_files(
+        vec![crate::data_interface::direct_store::DbPin {
+            dbnum: SOURCE_DB as i32,
+            db_type: "DESI".into(),
+            file: path_b.clone(),
+            sesno: None,
+        }],
+        crate::data_interface::cata_closure::InMemoryCataLocator::from_parts(
+            HashMap::new(),
+            HashMap::new(),
+        ),
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let producer = UnitDeltaProducer::open(&service, SOURCE_DB, BASE, BASE + 1).unwrap();
+    assert!(
+        producer.plan.regenerate.is_empty(),
+        "the producer must reuse B's own plan, not A's rotated one"
+    );
+    let (_, ori) = local_placement(&producer.target.set.element(source_ref(10))).unwrap();
+    assert_eq!(
+        ori,
+        Some([0.; 3]),
+        "the producer must read B's target, not A's rotated one"
+    );
+    assert_eq!(
+        producer.plan.key.file(),
+        path_b,
+        "the hit is B's own cache entry, keyed by B's file"
+    );
+}
+
+// 规划器与执行体是两个 service：缓存里的两端集合只能配打开它们的那张依赖会话表用——集合懒开目录库时
+// 按那张表钉会话、往那张表里记，回执的 `ModelTarget` 也从它算。没绑表的输入不复用；绑表只认这两个
+// 集合本身。用本地缓存实例：全局缓存与并行测试共用，断言某一格还在会把别的测试的插入误读成失败。
+#[test]
+fn cached_window_inputs_are_reused_only_with_the_planner_dependency_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = create_source(dir.path());
+    save(&path, [0., 0., 90.], None);
+    let service = || {
+        E3dModelService::from_source_files(
+            vec![crate::data_interface::direct_store::DbPin {
+                dbnum: SOURCE_DB as i32,
+                db_type: "DESI".into(),
+                file: path.clone(),
+                sesno: None,
+            }],
+            crate::data_interface::cata_closure::InMemoryCataLocator::from_parts(
+                HashMap::new(),
+                HashMap::new(),
+            ),
+            dir.path().to_path_buf(),
+        )
+        .unwrap()
+    };
+    let (planner, executor) = (service(), service());
+    let base = planner.build_set(SOURCE_DB, Some(BASE)).unwrap();
+    let target = planner.build_set(SOURCE_DB, Some(BASE + 1)).unwrap();
+    let inputs = CachedWindowInputs::planned(
+        base.clone(),
+        Arc::new(scan_index(&path, Some(BASE)).unwrap()),
+        target.clone(),
+        Arc::new(scan_index(&path, Some(BASE + 1)).unwrap()),
+    );
+    assert!(
+        inputs.generation_inputs().is_none(),
+        "planner inputs without their dependency table must not be reused"
+    );
+
+    let key = WindowPlanKey::new(SOURCE_DB, &path, BASE, BASE + 1);
+    let mut cache = WindowPlanCache::new();
+    assert!(
+        cache
+            .insert(Arc::new(WindowPlanSets {
+                key: key.clone(),
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                full_rebuild: None,
+                unreadable: 0,
+                dispositions: Vec::new(),
+                inputs: Some(inputs),
+            }))
+            .is_empty()
+    );
+
+    let other_target = executor.build_set(SOURCE_DB, Some(BASE + 1)).unwrap();
+    assert!(
+        cache
+            .bind_dependencies(&key, &base, &other_target, &planner.dependency_sessions)
+            .is_none(),
+        "a table binds only to the very sets its service opened"
+    );
+    assert!(
+        cache
+            .get(&key)
+            .unwrap()
+            .inputs
+            .as_ref()
+            .unwrap()
+            .generation_inputs()
+            .is_none()
+    );
+
+    assert!(
+        cache
+            .bind_dependencies(&key, &base, &target, &planner.dependency_sessions)
+            .is_some()
+    );
+    let bound = cache.get(&key).unwrap();
+    let (reused_base, reused_target) = bound
+        .inputs
+        .as_ref()
+        .unwrap()
+        .generation_inputs()
+        .expect("bound planner inputs are reusable");
+    assert!(Arc::ptr_eq(&reused_target.set, &target));
+    for reused in [&reused_base, &reused_target] {
+        assert!(
+            Arc::ptr_eq(&reused.dependency_sessions, &planner.dependency_sessions),
+            "the producer must read the table the planner's sets record into"
+        );
+        assert!(!Arc::ptr_eq(
+            &reused.dependency_sessions,
+            &executor.dependency_sessions
+        ));
+    }
+}
+
 // ---------- 真实库取证（环境变量门控，默认跳过） ----------
 //
 // `AIOS_CENSUS_DB_FILE` 指向一个真实 DESI 库文件（如 ams8000_0001）时，沿会话链逐
@@ -1007,8 +1332,7 @@ fn synthetic_anonymous_attribute_alongside_ori_blocks_cheap_path() {
     let diff2 = diff_element(&base2, &target2, source_ref(10)).unwrap();
     assert_eq!(diff2.attributes, vec!["ORI"]);
     assert!(diff2.is_placement_only());
-    let (sources2, persisted2) =
-        collected_at(&path, &base2, &target2, BASE + 1, BASE + 2);
+    let (sources2, persisted2) = collected_at(&path, &base2, &target2, BASE + 1, BASE + 2);
     let impact2 = sources2.impact(&persisted2);
     let settled2 = persisted2.iter().map(|r| r.refno).collect();
     let rigid2 = sources2.rigid_motion(&persisted2, &settled2, &impact2);

@@ -185,6 +185,69 @@ pub(crate) fn tube_segment_completeness(delta: &UnitDelta) -> Result<(), String>
     Ok(())
 }
 
+/// 规划期已打开的两端 `DbSet` / `SourceIndex`（Issue #50 / ADR-080 A7）：`UnitDeltaProducer::open`
+/// 直接复用，避免同库 S / T 在单库槽位的 `GENERATION_INPUT_CACHE` 里互相逐出并重复扫索引、开 `DbSet`。
+/// "这份输入是哪个文件的"不在这里记：分域由 [`WindowPlanKey`] 一处负责，载荷与键在
+/// [`window_plan_sets`] 里同时构造，两处不会漂。
+#[derive(Clone)]
+pub(crate) struct CachedWindowInputs {
+    pub(crate) base_set: Arc<DbSet>,
+    pub(crate) base_index: Arc<SourceIndex>,
+    pub(crate) target_set: Arc<DbSet>,
+    pub(crate) target_index: Arc<SourceIndex>,
+    /// 打开这两端集合的 service 的依赖会话表（S 端、T 端）。集合懒开目录库时按这张表钉会话、往这张表里记，
+    /// `ModelTarget` 也只能从它算——换一张表配，回执的目录依赖就不是几何实际读的那一份。规划器的输入先以
+    /// `None` 入缓存，由 [`E3dModelService::bind_window_input_dependencies`] 补上；没补上的，执行体只复用
+    /// 计划、不复用集合。
+    dependency_sessions: Option<(DependencySessions, DependencySessions)>,
+}
+
+impl CachedWindowInputs {
+    pub(crate) fn planned(
+        base_set: Arc<DbSet>,
+        base_index: Arc<SourceIndex>,
+        target_set: Arc<DbSet>,
+        target_index: Arc<SourceIndex>,
+    ) -> Self {
+        Self {
+            base_set,
+            base_index,
+            target_set,
+            target_index,
+            dependency_sessions: None,
+        }
+    }
+
+    fn from_generation_inputs(base: &GenerationInput, target: &GenerationInput) -> Self {
+        Self {
+            base_set: base.set.clone(),
+            base_index: base.index.clone(),
+            target_set: target.set.clone(),
+            target_index: target.index.clone(),
+            dependency_sessions: Some((
+                base.dependency_sessions.clone(),
+                target.dependency_sessions.clone(),
+            )),
+        }
+    }
+
+    fn generation_inputs(&self) -> Option<(GenerationInput, GenerationInput)> {
+        let (base_sessions, target_sessions) = self.dependency_sessions.as_ref()?;
+        Some((
+            GenerationInput {
+                set: self.base_set.clone(),
+                index: self.base_index.clone(),
+                dependency_sessions: base_sessions.clone(),
+            },
+            GenerationInput {
+                set: self.target_set.clone(),
+                index: self.target_index.clone(),
+                dependency_sessions: target_sessions.clone(),
+            },
+        ))
+    }
+}
+
 /// 一窗 `plan_update(S→T)` 的四个动作集，从 [`UpdatePlan`] 里拆出来按根切分（ADR-080 D1：单元级发布
 /// **直接吃 `plan_update` 的产出**，不引入第二套变更检测）。`UpdatePlan` 会被 `execute_plan` 整个吃掉、
 /// 又不 `Clone`，所以一窗算一次放在这里，逐根切出子计划再执行。
@@ -194,6 +257,8 @@ pub(crate) fn tube_segment_completeness(delta: &UnitDelta) -> Result<(), String>
 /// `Clone` 只在缓存未命中时兜底构造用。
 #[derive(Clone)]
 pub(crate) struct WindowPlanSets {
+    /// 这份计划属于哪个库、哪份文件、哪一窗。缓存键由它派生，插入不再另收一个键。
+    key: WindowPlanKey,
     pub(crate) regenerate: BTreeSet<(u32, u32)>,
     pub(crate) remove: BTreeSet<(u32, u32)>,
     pub(crate) regenerate_derived: BTreeSet<(u32, u32)>,
@@ -208,73 +273,228 @@ pub(crate) struct WindowPlanSets {
     /// 复核「这根名下的候选全是 `no_model`」——规划器的提示与生产方的计划是两次独立算的（实施约束 12），
     /// 空子计划能不能当「没变」发，两边都得点头。
     pub(crate) dispositions: Vec<((u32, u32), Disposition)>,
+    /// 规划期已打开的两端 `DbSet` 与 `SourceIndex`（Issue #50 / ADR-080 A7）：`UnitDeltaProducer::open`
+    /// 直接复用，避免同库 S / T 在单库槽位的 `GENERATION_INPUT_CACHE` 里互相逐出并重复扫索引、开 `DbSet`。
+    pub(crate) inputs: Option<CachedWindowInputs>,
 }
 
-/// Issue #50：窗口计划缓存。规划器（`build_model_update_plan_from_window` → `WindowRootSources::collect`）
-/// 算出的 `plan_update(S→T)` 结果按 `(dbnum, base_sesno, target_sesno)` 存一份 `Arc`，单元级发布执行体
-/// （`UnitDeltaProducer::open`）同一窗直接拿，省掉重复 `collect_window` + `plan_update` 的 300.5s 开销。
-/// 缓存不主动清除：键是窗口三元组，随 sesno 单调增长，服务重启即清空；单进程生命周期内条目数
-/// = 窗口数，内存可控（每条几 KB ~ 几十 KB）。
-static WINDOW_PLAN_CACHE: OnceLock<std::sync::Mutex<HashMap<(u32, u32, u32), Arc<WindowPlanSets>>>> =
-    OnceLock::new();
-
-fn window_plan_cache(
-) -> &'static std::sync::Mutex<HashMap<(u32, u32, u32), Arc<WindowPlanSets>>> {
-    WINDOW_PLAN_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-/// 把 `UpdatePlan` 拆成 `WindowPlanSets` 并按 `(dbnum, base_sesno, target_sesno)` 存入缓存，返回存入的 `Arc`。
-/// 规划器路径（`build_model_update_plan_from_window`）在 `WindowRootSources::collect` 之后调用。
-pub(crate) fn cache_window_plan_sets(
+/// 窗口计划在缓存里的分域键：**dbnum 不够**。同号跨项目副本（MDB 路由目录允许）可以有各自的
+/// 文件、甚至相同的会话号；只按 `(dbnum, S, T)` 会串项目，只靠复核载荷里的文件又会让两个项目
+/// 互相把对方的计划顶掉（谁最后规划谁留下）。文件身份是键的一部分，两个项目各留一份。
+///
+/// 字段私有、只能经 `WindowPlanKey::new` 构造：四个分量就是分域规则本身，不接受调用方自己拼
+/// 元组。`WindowPlanSets` 自带这个键，插入时由载荷派生键（`WindowPlanCache::insert`）——
+/// 不会出现「键里一个文件、载荷里另一个文件」。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WindowPlanKey {
     dbnum: u32,
+    file: PathBuf,
     base_sesno: u32,
     target_sesno: u32,
-    plan: UpdatePlan,
+}
+
+impl WindowPlanKey {
+    pub(crate) fn new(dbnum: u32, file: &Path, base_sesno: u32, target_sesno: u32) -> Self {
+        Self {
+            dbnum,
+            file: file.to_path_buf(),
+            base_sesno,
+            target_sesno,
+        }
+    }
+
+    /// 同一个库、同一个文件上的另一窗：淘汰规则按这一条替换旧窗。
+    fn same_file_other_window(&self, other: &Self) -> bool {
+        self.dbnum == other.dbnum
+            && self.file == other.file
+            && (self.base_sesno, self.target_sesno) != (other.base_sesno, other.target_sesno)
+    }
+
+    fn file(&self) -> &Path {
+        &self.file
+    }
+}
+
+/// Issue #50：窗口计划缓存本体。容量与淘汰规则只在这里写一次：
+/// 1. 同库同文件新窗替换该文件的旧窗——旧 `DbSet` / `SourceIndex` 句柄不随新窗继续滞留；
+///    **别的项目 / 别的文件不替它背锅**（键里有文件身份）；
+/// 2. 总条目超过 `WindowPlanCache::CAPACITY` 时淘汰最久没用的一格（插入与命中都算一次使用）——会话号是
+///    各文件自己的计数，跨库比大小挑不出谁旧，按它淘汰会把会话少的库刚规划完的窗先挤掉；
+/// 3. 同键重插直接替换。
+/// 键由载荷自带的 `WindowPlanSets::key` 派生，插入不接受第二个键；被移出的 `Arc` 返回给调用方，
+/// 由它在锁外释放。
+struct WindowPlanCache {
+    entries: HashMap<WindowPlanKey, CachedWindowPlan>,
+    clock: u64,
+}
+
+struct CachedWindowPlan {
+    sets: Arc<WindowPlanSets>,
+    last_used: u64,
+}
+
+impl WindowPlanCache {
+    /// 长生命周期进程最多留几窗计划：多一窗就多一副 `DbSet` / `SourceIndex` 句柄。
+    const CAPACITY: usize = 8;
+
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    fn get(&mut self, key: &WindowPlanKey) -> Option<Arc<WindowPlanSets>> {
+        let now = self.tick();
+        let cached = self.entries.get_mut(key)?;
+        cached.last_used = now;
+        Some(cached.sets.clone())
+    }
+
+    fn insert(&mut self, sets: Arc<WindowPlanSets>) -> Vec<Arc<WindowPlanSets>> {
+        let key = sets.key.clone();
+        let mut evicted = self
+            .entries
+            .keys()
+            .filter(|cached| cached.same_file_other_window(&key))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|stale| self.entries.remove(&stale))
+            .map(|stale| stale.sets)
+            .collect::<Vec<_>>();
+        while !self.entries.contains_key(&key) && self.entries.len() >= Self::CAPACITY {
+            let Some(least_recent) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(cached, _)| cached.clone())
+            else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&least_recent) {
+                evicted.push(old.sets);
+            }
+        }
+        let last_used = self.tick();
+        if let Some(old) = self
+            .entries
+            .insert(key, CachedWindowPlan { sets, last_used })
+        {
+            evicted.push(old.sets);
+        }
+        evicted
+    }
+
+    /// 给 `key` 那一格的输入补上依赖会话表，只认 `base` / `target` 这两个集合本身：那一格若已被另一次
+    /// 规划换成别的集合，就不动它。返回被换下的旧载荷，由调用方在锁外释放。
+    fn bind_dependencies(
+        &mut self,
+        key: &WindowPlanKey,
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+        sessions: &DependencySessions,
+    ) -> Option<Arc<WindowPlanSets>> {
+        let cached = self.entries.get_mut(key)?;
+        let inputs = cached.sets.inputs.as_ref()?;
+        if !Arc::ptr_eq(&inputs.base_set, base) || !Arc::ptr_eq(&inputs.target_set, target) {
+            return None;
+        }
+        let mut bound = WindowPlanSets::clone(&cached.sets);
+        if let Some(inputs) = bound.inputs.as_mut() {
+            inputs.dependency_sessions = Some((sessions.clone(), sessions.clone()));
+        }
+        Some(std::mem::replace(&mut cached.sets, Arc::new(bound)))
+    }
+}
+
+/// Issue #50：窗口计划缓存。规划器（`WindowRootSources::collect`）算出的 `plan_update(S→T)`
+/// 与两端输入按 `(dbnum, file, base_sesno, target_sesno)` 存一份 `Arc`，单元级发布执行体
+/// （`UnitDeltaProducer::open`）同一窗直接拿，省掉重复 `scan_index` + `build_set` +
+/// `collect_window` + `plan_update`。
+static WINDOW_PLAN_CACHE: OnceLock<std::sync::Mutex<WindowPlanCache>> = OnceLock::new();
+
+fn window_plan_cache() -> &'static std::sync::Mutex<WindowPlanCache> {
+    WINDOW_PLAN_CACHE.get_or_init(|| std::sync::Mutex::new(WindowPlanCache::new()))
+}
+
+/// 一窗计划折成缓存的载荷：分域键在这里与 `plan_update` 的产出绑定，规划器与执行体兜底路径
+/// 都从这里构造，字段口径只写一次。
+pub(crate) fn window_plan_sets(
+    dbnum: u32,
+    file: &Path,
+    base_sesno: u32,
+    target_sesno: u32,
+    plan: &UpdatePlan,
+    inputs: Option<CachedWindowInputs>,
 ) -> Arc<WindowPlanSets> {
-    let UpdatePlan {
-        regenerate,
-        remove,
-        regenerate_derived,
-        derived_stale,
-        ledger,
-        full_rebuild,
-        report,
-    } = plan;
-    let sets = Arc::new(WindowPlanSets {
-        regenerate,
-        remove,
-        regenerate_derived,
-        derived_stale,
-        full_rebuild,
-        unreadable: report.unresolved.len() + report.derived_stale_unreadable.len(),
-        dispositions: ledger.dispositions().to_vec(),
-    });
-    let mut cache = window_plan_cache().lock().unwrap();
-    cache.insert((dbnum, base_sesno, target_sesno), sets.clone());
-    sets
+    Arc::new(WindowPlanSets {
+        key: WindowPlanKey::new(dbnum, file, base_sesno, target_sesno),
+        regenerate: plan.regenerate.clone(),
+        remove: plan.remove.clone(),
+        regenerate_derived: plan.regenerate_derived.clone(),
+        derived_stale: plan.derived_stale.clone(),
+        full_rebuild: plan.full_rebuild.clone(),
+        unreadable: plan.report.unresolved.len() + plan.report.derived_stale_unreadable.len(),
+        dispositions: plan.ledger.dispositions().to_vec(),
+        inputs,
+    })
+}
+
+/// 把一份载荷按它自带的键存入缓存；淘汰规则由 `WindowPlanCache` 一处决定。
+pub(crate) fn insert_window_plan_sets(sets: Arc<WindowPlanSets>) {
+    let evicted = {
+        let mut cache = window_plan_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.insert(sets)
+    };
+    drop(evicted);
 }
 
 /// 从窗口计划缓存取一份 `Arc`。命中返回 `Some`，未命中返回 `None`（调用方自行计算并回填）。
 pub(crate) fn cached_window_plan_sets(
     dbnum: u32,
+    file: &Path,
     base_sesno: u32,
     target_sesno: u32,
 ) -> Option<Arc<WindowPlanSets>> {
-    let cache = window_plan_cache().lock().unwrap();
-    cache.get(&(dbnum, base_sesno, target_sesno)).cloned()
+    let key = WindowPlanKey::new(dbnum, file, base_sesno, target_sesno);
+    window_plan_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
 }
 
-/// 直接插入一份已构造好的 `WindowPlanSets` 到缓存。供规划器路径（`window_root_plan.rs`）在
-/// `WindowRootSources::collect` 之后调用——`UpdatePlan` 不可 `Clone`，无法整体移动进缓存，
-/// 只能逐字段克隆构造。
-pub(crate) fn insert_window_plan_cache(
-    dbnum: u32,
-    base_sesno: u32,
-    target_sesno: u32,
-    sets: Arc<WindowPlanSets>,
-) {
-    let mut cache = window_plan_cache().lock().unwrap();
-    cache.insert((dbnum, base_sesno, target_sesno), sets);
+impl E3dModelService {
+    /// 把本 service 的依赖会话表绑到缓存里同一窗的两端输入上。规划器用本 service `build_set` 打开
+    /// `base` / `target`、经 `WindowRootSources::collect` 入缓存之后调：执行体是另一个 service，命中时
+    /// 必须配打开这两个集合的这张表，而不是它自己的。
+    pub(crate) fn bind_window_input_dependencies(
+        &self,
+        dbnum: u32,
+        file: &Path,
+        base_sesno: u32,
+        target_sesno: u32,
+        base: &Arc<DbSet>,
+        target: &Arc<DbSet>,
+    ) {
+        let key = WindowPlanKey::new(dbnum, file, base_sesno, target_sesno);
+        let replaced = window_plan_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bind_dependencies(&key, base, target, &self.dependency_sessions);
+        drop(replaced);
+    }
 }
 
 impl WindowPlanSets {
@@ -498,10 +718,30 @@ impl<'a> UnitDeltaProducer<'a> {
         base_sesno: u32,
         target_sesno: u32,
     ) -> anyhow::Result<Self> {
+        // Issue #50：先查窗口计划缓存。分域键含文件身份，命中即同一份文件的同一窗；载荷与键在
+        // `window_plan_sets` 里同时写入，不会再出现「键是 B、输入是 A」。两端集合只在绑着打开它们的
+        // 那张依赖会话表时复用（省掉 `generation_input` 的单库槽位乒乓逐出），否则只复用计划。
+        let source_file = service.source_file(dbnum)?.to_path_buf();
+        let cached = cached_window_plan_sets(dbnum, &source_file, base_sesno, target_sesno);
+        if let Some(plan) = &cached
+            && let Some((base, target)) = plan
+                .inputs
+                .as_ref()
+                .and_then(CachedWindowInputs::generation_inputs)
+        {
+            return Ok(Self {
+                service,
+                dbnum,
+                base_sesno,
+                target_sesno,
+                base,
+                target,
+                plan: plan.clone(),
+            });
+        }
         let base = generation_input(service, dbnum, base_sesno)?;
         let target = generation_input(service, dbnum, target_sesno)?;
-        // Issue #50：缓存命中直接拿 Arc，不再重复 collect_window + plan_update
-        if let Some(plan) = cached_window_plan_sets(dbnum, base_sesno, target_sesno) {
+        if let Some(plan) = cached {
             return Ok(Self {
                 service,
                 dbnum,
@@ -531,7 +771,15 @@ impl<'a> UnitDeltaProducer<'a> {
         } else {
             plan_update(&base.set, &target.set, &window)
         };
-        let plan = cache_window_plan_sets(dbnum, base_sesno, target_sesno, plan);
+        let plan = window_plan_sets(
+            dbnum,
+            &source_file,
+            base_sesno,
+            target_sesno,
+            &plan,
+            Some(CachedWindowInputs::from_generation_inputs(&base, &target)),
+        );
+        insert_window_plan_sets(plan.clone());
         Ok(Self {
             service,
             dbnum,
@@ -568,8 +816,9 @@ impl<'a> UnitDeltaProducer<'a> {
         // Issue #50：按根大小设门——记录数 < 10 的根走单元级发布不划算（切子计划、
         // 校验、提交的固定开销摊不过来），直接回退整根重算。阈值拍脑袋定 10：
         // 小根局部重建本身就快，单元路省不下多少，反而多一道闸。
+        // 但 D10 纯回执快道（no_model_only）不切子计划网格只推回执，必须豁免门禁。
         const MIN_RECORDS_FOR_UNIT_PUBLISH: usize = 10;
-        if old_receipt.geometry_count < MIN_RECORDS_FOR_UNIT_PUBLISH {
+        if !no_model_only && old_receipt.geometry_count < MIN_RECORDS_FOR_UNIT_PUBLISH {
             bail!(
                 "root {root} has {} geometry record(s) (< {MIN_RECORDS_FOR_UNIT_PUBLISH}); \
                  unit-level publish overhead exceeds its benefit, falling back to regen",
@@ -645,6 +894,18 @@ impl<'a> UnitDeltaProducer<'a> {
             outcome.report.regen_failed.len(),
             outcome.report.derived_failed.len()
         );
+        // 生成途中懒开的目录库这时才进依赖会话表：按生成后的表重算落款再核一次。设计改动在本窗
+        // 引进的新目录依赖（换了 SPREF 一类）到这里才看得见，局部清单记不下它，回退整根重算。
+        let model_target = self.service.model_target(
+            self.dbnum,
+            self.target_sesno,
+            &self.target.dependency_sessions,
+        )?;
+        anyhow::ensure!(
+            same_target_outside_the_design_window(published_target, &model_target),
+            "immutable target of root {root} changed outside the design window during generation \
+             (a catalogue dependency first read in this window); a partial DESI delta cannot record it"
+        );
         removals_trace_back_to_the_plan(&sets, &outcome.removals)?;
         let mut tube_segments = outcome
             .report
@@ -678,7 +939,6 @@ impl<'a> UnitDeltaProducer<'a> {
             tube_segments,
         })
     }
-
 }
 
 /// 一根从一窗计划里切出来的子计划（[`restrict_plan_to_root`] 的产物）。
@@ -1125,9 +1385,15 @@ fn spawn_generation_worker(
             // 只有按根记才看得出来——按批记会把长尾摊平（7999 上 25 根里几根就占了 80%）。
             log::info!(
                 "model root generated: root={root} slot={slot} elements={} evaluate={:.1}ms bake={:.1}ms",
-                outcome.as_ref().map_or(0, |snapshot| snapshot.elements.len()),
+                outcome
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.elements.len()),
                 evaluate_micros as f64 / 1000.0,
-                (started.elapsed().as_micros().saturating_sub(evaluate_micros)) as f64 / 1000.0,
+                (started
+                    .elapsed()
+                    .as_micros()
+                    .saturating_sub(evaluate_micros)) as f64
+                    / 1000.0,
             );
             queue.store(slot, outcome);
         }
@@ -1412,9 +1678,7 @@ pub(crate) fn generation_input_cache_footprint() -> Vec<GenerationInputFootprint
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(|((dbnum, sesno, _), input, last_used)| {
-            (*dbnum, *sesno, input.set.clone(), last_used)
-        })
+        .map(|((dbnum, sesno, _), input, last_used)| (*dbnum, *sesno, input.set.clone(), last_used))
         .collect();
     let mut out: Vec<GenerationInputFootprint> = sets
         .into_iter()
@@ -1569,7 +1833,10 @@ impl E3dModelService {
     /// Check the same immutable target and mesh completeness as generation.
     /// Receipt existence alone is not freshness: SAVEWORK, replacement/rollback,
     /// catalogue dependencies and schema changes can all invalidate it.
-    pub(crate) fn current_cached_roots(&self, roots: &[RefNo]) -> anyhow::Result<std::collections::HashSet<RefNo>> {
+    pub(crate) fn current_cached_roots(
+        &self,
+        roots: &[RefNo],
+    ) -> anyhow::Result<std::collections::HashSet<RefNo>> {
         let store = ModelMemoryStore::global();
         let mut current = std::collections::HashSet::new();
         for &root in roots {
@@ -3129,11 +3396,8 @@ fn current_uda_catalog() -> Option<Arc<e3d_io::uda_catalog::UdaCatalog>> {
         });
     let catalog = membership.and_then(|membership| {
         let schema = Arc::new(DirectSchema::open_from_env()?);
-        crate::data_interface::uda_catalog_provider::UdaCatalogProvider::shared(
-            &membership,
-            schema,
-        )
-        .get()
+        crate::data_interface::uda_catalog_provider::UdaCatalogProvider::shared(&membership, schema)
+            .get()
     });
     match catalog {
         Ok(catalog) => Some(catalog),
@@ -3309,8 +3573,11 @@ pub(crate) struct GenerationRootMissing {
 
 impl std::fmt::Display for GenerationRootMissing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "generation root {} is absent from db {} session {}",
-            self.root, self.dbnum, self.source_sesno)
+        write!(
+            f,
+            "generation root {} is absent from db {} session {}",
+            self.root, self.dbnum, self.source_sesno
+        )
     }
 }
 impl std::error::Error for GenerationRootMissing {
@@ -3323,12 +3590,21 @@ pub(crate) fn classify_required_root_error(root: RefNo, error: anyhow::Error) ->
     let absent = error.chain().find_map(|cause| {
         match cause.downcast_ref::<e3d_io::db_element::DbElementError>() {
             Some(e3d_io::db_element::DbElementError::NotFound { refno, dbno, sesno })
-                if *refno == root => Some((*dbno, *sesno)),
+                if *refno == root =>
+            {
+                Some((*dbno, *sesno))
+            }
             _ => None,
         }
     });
     if let Some((dbnum, source_sesno)) = absent {
-        return GenerationRootMissing { root, dbnum, source_sesno, source: error }.into();
+        return GenerationRootMissing {
+            root,
+            dbnum,
+            source_sesno,
+            source: error,
+        }
+        .into();
     }
     error
 }
@@ -4414,7 +4690,11 @@ mod tests {
         // 上限收到 1：留刚进的那一份，其余按序出（7997@2 比 8000@1 更旧——8000 被摸过）。
         let displaced = cache.insert(key(5052, 1), "5052@1", 1);
         assert_eq!(displaced.len(), 3, "{displaced:?}");
-        assert!(displaced.contains(&"7997@2") && displaced.contains(&"8000@1") && displaced.contains(&"7998@1"));
+        assert!(
+            displaced.contains(&"7997@2")
+                && displaced.contains(&"8000@1")
+                && displaced.contains(&"7998@1")
+        );
         assert_eq!(cache.dbnum_count(), 1);
         assert_eq!(cache.evicted_dbnums, 4);
         assert_eq!(cache.get_touch(&key(5052, 1)), Some("5052@1"));
@@ -4442,7 +4722,10 @@ mod tests {
         assert_eq!(f32_value(0.1).to_string(), "0.1");
         assert_eq!(json!(0.1_f32).to_string(), "0.10000000149011612");
         assert_eq!(f32_value(1.0).to_string(), "1.0");
-        assert_eq!(f32_values([0.1_f32, -2.5, 0.0]).to_string(), "[0.1,-2.5,0.0]");
+        assert_eq!(
+            f32_values([0.1_f32, -2.5, 0.0]).to_string(),
+            "[0.1,-2.5,0.0]"
+        );
         // 解回来还是同一个 f32：短的只是写法，不是精度。
         for value in [0.1_f32, -12345.678, 1.0e-7, f32::MAX, f32::MIN_POSITIVE] {
             let rendered = f32_value(value).to_string();
@@ -4476,7 +4759,10 @@ mod tests {
     #[test]
     fn only_a_root_with_nothing_to_lose_publishes_a_partial_manifest() {
         // Cold root: the discard would "preserve" an empty snapshot.
-        assert_eq!(incomplete_root_policy(false, false), IncompleteRoot::Publish);
+        assert_eq!(
+            incomplete_root_policy(false, false),
+            IncompleteRoot::Publish
+        );
         // A receipt, geometry rows, or both — all of them can lose something.
         assert_eq!(incomplete_root_policy(true, false), IncompleteRoot::Discard);
         assert_eq!(incomplete_root_policy(false, true), IncompleteRoot::Discard);
@@ -5015,9 +5301,13 @@ mod tests {
 
         let service = E3dModelService::from_current().await?;
         let set = service.build_set(7997, None)?;
-        let dictionary = set.uda_catalog().context("MDB 声明的字典库一个都没读出来")?;
+        let dictionary = set
+            .uda_catalog()
+            .context("MDB 声明的字典库一个都没读出来")?;
         assert_eq!(
-            dictionary.by_key(0x17EF_4B61).map(|definition| definition.refno),
+            dictionary
+                .by_key(0x17EF_4B61)
+                .map(|definition| definition.refno),
             Some(RefNo::new(15198, 55)),
             "目录写下的键该由 acp7006 的 /UDA/HVAC/HXYsize（OLDKEY）认下"
         );
@@ -5028,7 +5318,11 @@ mod tests {
             Some(DescriptorValue::RealArray(vec![675.0, 600.0])),
             "本项目字典那条键下有值"
         );
-        assert_eq!(branch.uda_by_key(0x17EF_4B61)?, None, "目录指的那条键下没值");
+        assert_eq!(
+            branch.uda_by_key(0x17EF_4B61)?,
+            None,
+            "目录指的那条键下没值"
+        );
 
         let boxi = set
             .find_named(7002, "/HRTUBE1-BOXI")?
@@ -6608,6 +6902,7 @@ mod tests {
     #[test]
     fn a_degraded_or_unreadable_window_plan_admits_no_partial_publish() {
         let clean = WindowPlanSets {
+            key: WindowPlanKey::new(8000, Path::new("ams8000_0001"), 10, 11),
             regenerate: BTreeSet::from([(24383, 5)]),
             remove: BTreeSet::new(),
             regenerate_derived: BTreeSet::new(),
@@ -6615,10 +6910,12 @@ mod tests {
             full_rebuild: None,
             unreadable: 0,
             dispositions: Vec::new(),
+            inputs: None,
         };
         clean.admits_partial_publish().unwrap();
 
         let degraded = WindowPlanSets {
+            key: WindowPlanKey::new(8000, Path::new("ams8000_0001"), 10, 11),
             regenerate: BTreeSet::new(),
             remove: BTreeSet::new(),
             regenerate_derived: BTreeSet::new(),
@@ -6626,6 +6923,7 @@ mod tests {
             full_rebuild: Some("candidates 30000 > max_candidates 20000".into()),
             unreadable: 0,
             dispositions: Vec::new(),
+            inputs: None,
         };
         let err = degraded.admits_partial_publish().unwrap_err().to_string();
         assert!(
@@ -6671,6 +6969,15 @@ mod tests {
         assert!(!same_target_outside_the_design_window(
             &published,
             &catalogue_moved
+        ));
+        // 本窗设计改动引进的新目录依赖（生成途中才懒开）同样不是局部清单记得下的。
+        let mut catalogue_added = advanced.clone();
+        catalogue_added
+            .catalogue
+            .push(file(7010, "CATA", 3, "cata7010@3"));
+        assert!(!same_target_outside_the_design_window(
+            &published,
+            &catalogue_added
         ));
         let mut generator_changed = advanced.clone();
         generator_changed.generator_fingerprint = "gen-v2".into();
@@ -7719,7 +8026,10 @@ mod tests {
             .ok()
             .and_then(|value| {
                 let (k, n) = value.split_once('/')?;
-                Some((k.trim().parse::<usize>().ok()?, n.trim().parse::<usize>().ok()?))
+                Some((
+                    k.trim().parse::<usize>().ok()?,
+                    n.trim().parse::<usize>().ok()?,
+                ))
             })
             .filter(|(k, n)| *n > 0 && k < n)
             .unwrap_or((0, 1));
@@ -7758,7 +8068,10 @@ mod tests {
         service.mesh_dir = mesh_dir.clone();
         let unit_types = resolve_delivery_unit_types(&[]);
         let started = Instant::now();
-        println!("corpus probe: DB_OPTION_FILE={db_option_file}; {switches}; mesh_dir={}", mesh_dir.display());
+        println!(
+            "corpus probe: DB_OPTION_FILE={db_option_file}; {switches}; mesh_dir={}",
+            mesh_dir.display()
+        );
 
         /// 一根的结局。
         enum Outcome {
@@ -7781,11 +8094,24 @@ mod tests {
         }
         /// 回退原因归桶：同一类只按类计，不按根展开。
         fn fallback_bucket(reason: &str) -> &'static str {
-            const BUCKETS: [(&str, &str); 11] = [
+            const BUCKETS: [(&str, &str); 12] = [
+                (
+                    "overhead exceeds its benefit",
+                    "按根大小设门（< 10 条记录回退整根）",
+                ),
                 ("may leave root", "D2：局部清单会清空整根，归整根路发布"),
-                ("no_model_only hint does not hold", "空子计划·no_model_only 复核不成立"),
-                ("names no unit under root", "空子计划·级联 / 恢复选进来的根（非 no_model_only）"),
-                ("immutable target", "设计窗之外的目标变了（目录 / 模板 / 生成器 / 细分档）"),
+                (
+                    "no_model_only hint does not hold",
+                    "空子计划·no_model_only 复核不成立",
+                ),
+                (
+                    "names no unit under root",
+                    "空子计划·级联 / 恢复选进来的根（非 no_model_only）",
+                ),
+                (
+                    "immutable target",
+                    "设计窗之外的目标变了（目录 / 模板 / 生成器 / 细分档）",
+                ),
                 ("carries no model target", "旧回执没带目标"),
                 ("execute_plan under root", "execute_plan 报失败"),
                 ("tube segment", "管段完整性门"),
@@ -7870,10 +8196,7 @@ mod tests {
                 });
                 let sessions: Vec<u32> = match ReadOnlyEngine::open(&file) {
                     Ok(mut engine) => match engine.sessions() {
-                        Ok(sessions) => sessions
-                            .iter()
-                            .map(|session| session.session_id)
-                            .collect(),
+                        Ok(sessions) => sessions.iter().map(|session| session.session_id).collect(),
                         Err(error) => {
                             skipped_files.push((name, format!("sessions: {error}")));
                             continue;
@@ -7908,25 +8231,23 @@ mod tests {
                         stats.windows_skipped += 1;
                         continue;
                     }
-                    let clock = Instant::now();
-                    let mut producer =
-                        match UnitDeltaProducer::open(&service, dbnum, base_sesno, target_sesno) {
-                            Ok(producer) => producer,
-                            Err(error) => {
-                                stats.windows_skipped += 1;
-                                println!("skip {label}: open: {error:#}");
-                                continue;
-                            }
-                        };
-                    stats.plan_secs += clock.elapsed().as_secs_f64();
-                    let base = producer.base.clone();
-                    let target = producer.target.clone();
+                    let (base_set, target_set) = match (
+                        service.build_set(dbnum, Some(base_sesno)),
+                        service.build_set(dbnum, Some(target_sesno)),
+                    ) {
+                        (Ok(base_set), Ok(target_set)) => (base_set, target_set),
+                        (Err(error), _) | (_, Err(error)) => {
+                            stats.windows_skipped += 1;
+                            println!("skip {label}: build_set: {error:#}");
+                            continue;
+                        }
+                    };
                     let sources = match WindowRootSources::collect(
                         &file,
                         base_sesno,
                         target_sesno,
-                        &base.set,
-                        &target.set,
+                        &base_set,
+                        &target_set,
                         &unit_types,
                         &[],
                     ) {
@@ -7937,21 +8258,7 @@ mod tests {
                             continue;
                         }
                     };
-                    let roots_s: Vec<PersistedRoot> =
-                        match enumerate_generation_roots(&base.set, &base.index.roots, &unit_types) {
-                            Ok(roots) => roots
-                                .into_iter()
-                                .map(|root| PersistedRoot {
-                                    refno: root.root,
-                                    noun: root.noun,
-                                })
-                                .collect(),
-                            Err(error) => {
-                                stats.windows_skipped += 1;
-                                println!("skip {label}: base roots: {error:#}");
-                                continue;
-                            }
-                        };
+                    let roots_s = sources.roots_s.clone();
                     stats.windows += 1;
                     let impact = sources.impact(&roots_s);
                     let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
@@ -7967,6 +8274,19 @@ mod tests {
                         println!("{label}: degraded: {reason}");
                         continue;
                     }
+                    let clock = Instant::now();
+                    let mut producer =
+                        match UnitDeltaProducer::open(&service, dbnum, base_sesno, target_sesno) {
+                            Ok(producer) => producer,
+                            Err(error) => {
+                                stats.windows_skipped += 1;
+                                println!("skip {label}: open: {error:#}");
+                                continue;
+                            }
+                        };
+                    stats.plan_secs += clock.elapsed().as_secs_f64();
+                    let base = producer.base.clone();
+                    let target = producer.target.clone();
                     let settled: BTreeSet<_> = roots_s.iter().map(|root| root.refno).collect();
                     let no_model_only = sources.no_model_only(&roots_s, &settled, &impact, &plan);
                     let at_s: BTreeSet<(u32, u32)> = roots_s
@@ -7997,7 +8317,8 @@ mod tests {
                             continue;
                         }
                         let refno = refno_to_e3d(root.root);
-                        let root_no_model_only = no_model_only.roots.contains(&refno_from_e3d(refno));
+                        let root_no_model_only =
+                            no_model_only.roots.contains(&refno_from_e3d(refno));
                         stats.tried += 1;
 
                         // 与单根探针同一套三步；每根一份干净的本地投影。
@@ -8024,10 +8345,13 @@ mod tests {
                             Ok((commit, failed))
                         };
                         let outcome: Outcome = (|| -> anyhow::Result<Outcome> {
-                            let (mut seed, seed_failed) = match regen_at(base_sesno, &base, &mut cache) {
-                                Ok(seed) => seed,
-                                Err(error) => return Ok(Outcome::SeedFailed(format!("{error:#}"))),
-                            };
+                            let (mut seed, seed_failed) =
+                                match regen_at(base_sesno, &base, &mut cache) {
+                                    Ok(seed) => seed,
+                                    Err(error) => {
+                                        return Ok(Outcome::SeedFailed(format!("{error:#}")));
+                                    }
+                                };
                             let (seed_hash, seed_count) = manifest_hash(&seed.upserts)?;
                             seed.receipt = Some((
                                 refno,
@@ -8045,8 +8369,14 @@ mod tests {
                                 },
                             ));
                             store.commit(ProjectionScope::Current, vec![seed]);
-                            if !store.root_projection_complete(ProjectionScope::Current, refno, &mesh_dir) {
-                                return Ok(Outcome::SeedFailed("seed projection incomplete".into()));
+                            if !store.root_projection_complete(
+                                ProjectionScope::Current,
+                                refno,
+                                &mesh_dir,
+                            ) {
+                                return Ok(Outcome::SeedFailed(
+                                    "seed projection incomplete".into(),
+                                ));
                             }
                             let unit = UnitPublishUnit {
                                 root_refno: refno.to_string(),
@@ -8080,7 +8410,9 @@ mod tests {
                                 match regen_at(target_sesno, &target, &mut cache) {
                                     Ok(regen_t) => regen_t,
                                     Err(error) => {
-                                        return Ok(Outcome::RegenTargetFailed(format!("{error:#}")));
+                                        return Ok(Outcome::RegenTargetFailed(format!(
+                                            "{error:#}"
+                                        )));
                                     }
                                 };
                             let regen_t_secs = clock.elapsed().as_secs_f64();
@@ -8096,12 +8428,14 @@ mod tests {
                                 let unit_entries = records
                                     .iter()
                                     .map(manifest_entry)
-                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>(
+                                )?;
                                 let regen_entries = regen_t
                                     .upserts
                                     .iter()
                                     .map(manifest_entry)
-                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>()?;
+                                    .collect::<anyhow::Result<BTreeMap<String, Value>>>(
+                                )?;
                                 for key in unit_entries
                                     .keys()
                                     .chain(regen_entries.keys())
@@ -8128,7 +8462,9 @@ mod tests {
                                 failed_elements: (seed_failed, target_failed),
                             })
                         })()
-                        .unwrap_or_else(|error| Outcome::SeedFailed(format!("probe error: {error:#}")));
+                        .unwrap_or_else(|error| {
+                            Outcome::SeedFailed(format!("probe error: {error:#}"))
+                        });
 
                         match outcome {
                             Outcome::Parity {
@@ -8149,7 +8485,11 @@ mod tests {
                                 }
                                 let note = format!(
                                     "{}{}",
-                                    if receipt_only { " (receipt-only, D10)" } else { "" },
+                                    if receipt_only {
+                                        " (receipt-only, D10)"
+                                    } else {
+                                        ""
+                                    },
                                     if failed_elements != (0, 0) {
                                         format!(
                                             " [failed elements S {} / T {}]",
@@ -8182,22 +8522,30 @@ mod tests {
                                 stats.fallback += 1;
                                 let bucket = fallback_bucket(&reason);
                                 *fallback_buckets.entry(bucket).or_default() += 1;
-                                fallback_examples
-                                    .entry(bucket)
-                                    .or_insert_with(|| format!("{label} {refno} `{}`: {reason}", root.noun));
+                                fallback_examples.entry(bucket).or_insert_with(|| {
+                                    format!("{label} {refno} `{}`: {reason}", root.noun)
+                                });
                                 println!("{label}: fallback {refno} `{}`: {bucket}", root.noun);
                             }
                             Outcome::Replayed => {
                                 stats.replayed += 1;
-                                println!("{label}: replayed {refno} (unexpected: seed receipt is at S)");
+                                println!(
+                                    "{label}: replayed {refno} (unexpected: seed receipt is at S)"
+                                );
                             }
                             Outcome::SeedFailed(error) => {
                                 stats.seed_failed += 1;
-                                failures.push(format!("{label} {refno} `{}` seed@S: {error}", root.noun));
+                                failures.push(format!(
+                                    "{label} {refno} `{}` seed@S: {error}",
+                                    root.noun
+                                ));
                             }
                             Outcome::RegenTargetFailed(error) => {
                                 stats.regen_failed += 1;
-                                failures.push(format!("{label} {refno} `{}` regen@T: {error}", root.noun));
+                                failures.push(format!(
+                                    "{label} {refno} `{}` regen@T: {error}",
+                                    root.noun
+                                ));
                             }
                         }
                     }
@@ -8233,22 +8581,37 @@ mod tests {
         ));
         report.push_str("| 合计 | 值 |\n|---|---|\n");
         for (name, value) in [
-            ("有窗的库", per_file.iter().filter(|(_, s)| s.windows > 0).count()),
-            ("跳过的库（pin 不进 / 会话不足 / 扫描失败）", skipped_files.len()),
+            (
+                "有窗的库",
+                per_file.iter().filter(|(_, s)| s.windows > 0).count(),
+            ),
+            (
+                "跳过的库（pin 不进 / 会话不足 / 扫描失败）",
+                skipped_files.len(),
+            ),
             ("窗（规划成功）", total(|s| s.windows)),
-            ("窗（跳过：开不了 / 收不了 / 预算）", total(|s| s.windows_skipped)),
+            (
+                "窗（跳过：开不了 / 收不了 / 预算）",
+                total(|s| s.windows_skipped),
+            ),
             ("窗（退化，只数不量）", total(|s| s.windows_degraded)),
             ("regen 根（全量）", total(|s| s.regen_roots)),
             ("其中 S 端也有的根（可走单元路）", total(|s| s.roots_at_s)),
             ("量到的根", total(|s| s.tried)),
             ("**PARITY OK**", total(|s| s.parity_ok)),
-            ("其中 receipt-only（D10 空 Partial）", total(|s| s.receipt_only)),
+            (
+                "其中 receipt-only（D10 空 Partial）",
+                total(|s| s.receipt_only),
+            ),
             ("**DIFF（红）**", total(|s| s.diff)),
             ("回退整根 regen", total(|s| s.fallback)),
             ("重放（不该出现）", total(|s| s.replayed)),
             ("S 端整根生成报错（量不了）", total(|s| s.seed_failed)),
             ("T 端整根生成报错（量不了）", total(|s| s.regen_failed)),
-            ("对拍过的根里两端带画不出的件的（照常对拍，只记）", total(|s| s.with_failed_elements)),
+            (
+                "对拍过的根里两端带画不出的件的（照常对拍，只记）",
+                total(|s| s.with_failed_elements),
+            ),
             ("预算用尽未量", total(|s| s.over_budget)),
         ] {
             report.push_str(&format!("| {name} | {value} |\n"));
@@ -8306,7 +8669,10 @@ mod tests {
             }
         }
         if !failures.is_empty() {
-            report.push_str(&format!("\n### 生成失败（量不了，非红）：{} 根，前 40 条\n\n", failures.len()));
+            report.push_str(&format!(
+                "\n### 生成失败（量不了，非红）：{} 根，前 40 条\n\n",
+                failures.len()
+            ));
             for line in failures.iter().take(40) {
                 report.push_str(&format!("- {}\n", line.replace('\n', " ")));
             }
@@ -8371,7 +8737,10 @@ mod tests {
         if !keep_meshes && std::env::var("AIOS_UNIT_PUBLISH_MESH_DIR").is_err() {
             let _ = std::fs::remove_dir_all(&mesh_dir);
         }
-        assert!(total(|s| s.tried) > 0, "一根都没量到——DB_OPTION_FILE / AIOS_POSREF_DIRS 不对，或全被跳过");
+        assert!(
+            total(|s| s.tried) > 0,
+            "一根都没量到——DB_OPTION_FILE / AIOS_POSREF_DIRS 不对，或全被跳过"
+        );
         assert!(
             diffs.is_empty(),
             "D9 ①：单元路与 regen 路的整根 manifest_hash 必须逐字相同，红了 {} 根：\n{}",
@@ -8395,7 +8764,9 @@ mod tests {
         use std::time::Instant;
 
         use crate::data_interface::direct_store::DbPin;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
         use crate::data_interface::reverse_reference::sources_in_dir;
+        use crate::data_interface::window_root_plan::WindowRootSources;
 
         let list = std::fs::read_to_string(std::env::var("AIOS_A7_WINDOWS_FILE")?)?;
         let dirs: Vec<PathBuf> = std::env::var("AIOS_POSREF_DIRS")
@@ -8413,6 +8784,7 @@ mod tests {
             }
         }
         let mut service = E3dModelService::from_current().await?;
+        let unit_types = resolve_delivery_unit_types(&[]);
         let (mut total, mut windows, mut skipped) = (0.0f64, 0usize, 0usize);
         for line in list.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -8431,9 +8803,29 @@ mod tests {
             service.pins.push(DbPin {
                 dbnum: dbnum as i32,
                 db_type: "DESI".into(),
-                file,
+                file: file.clone(),
                 sesno: None,
             });
+            // 与生产一致：规划器先跑完本窗（`build_set` + `WindowRootSources::collect`），再量 `UnitDeltaProducer::open` 额外开销。
+            let pre_plan = (|| -> anyhow::Result<()> {
+                let base_set = service.build_set(dbnum, Some(base))?;
+                let target_set = service.build_set(dbnum, Some(target))?;
+                let _ = WindowRootSources::collect(
+                    &file,
+                    base,
+                    target,
+                    &base_set,
+                    &target_set,
+                    &unit_types,
+                    &[],
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = pre_plan {
+                println!("A7_SKIP {line}: {error:#}");
+                skipped += 1;
+                continue;
+            }
             let clock = Instant::now();
             let opened = UnitDeltaProducer::open(&service, dbnum, base, target);
             let secs = clock.elapsed().as_secs_f64();
@@ -8673,28 +9065,43 @@ mod tests {
     #[test]
     fn read_through_receipt_is_invalidated_by_each_target_identity_change() {
         let file = ModelFileTarget {
-            dbnum: 8000, db_type: "DESI".into(), file: "design.db".into(),
-            session: 459, digest: "generation-a".into(),
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            file: "design.db".into(),
+            session: 459,
+            digest: "generation-a".into(),
         };
         let target = ModelTarget {
-            project: "fixture".into(), design: file.clone(),
-            catalogue: vec![ModelFileTarget { dbnum: 7000, db_type: "CATA".into(), ..file }],
+            project: "fixture".into(),
+            design: file.clone(),
+            catalogue: vec![ModelFileTarget {
+                dbnum: 7000,
+                db_type: "CATA".into(),
+                ..file
+            }],
             template_attlib_digest: "schema-a".into(),
-            generator_fingerprint: "generator-a".into(), tessellation_profile: "profile-a".into(),
+            generator_fingerprint: "generator-a".into(),
+            tessellation_profile: "profile-a".into(),
         };
         let mut publication = RootPublication {
-            root: RefNo::new(24384, 1), model_target: Some(target.clone()),
+            root: RefNo::new(24384, 1),
+            model_target: Some(target.clone()),
             published: Some(RootReceipt {
-                source_sesno: 459, model_target: Some(target.clone()),
-                manifest_hash: "manifest".into(), geometry_count: 9, published_via: "regen".into(), room: None,
-            }), projection_complete: true,
+                source_sesno: 459,
+                model_target: Some(target.clone()),
+                manifest_hash: "manifest".into(),
+                geometry_count: 9,
+                published_via: "regen".into(),
+                room: None,
+            }),
+            projection_complete: true,
         };
         assert!(cached_root_target_matches(&publication, 459));
         for change in 0..7 {
             let mut changed = target.clone();
             match change {
-                0 => changed.design.session = 461, // SAVEWORK
-                1 => changed.design.session = 457, // rollback
+                0 => changed.design.session = 461,                  // SAVEWORK
+                1 => changed.design.session = 457,                  // rollback
                 2 => changed.design.digest = "generation-b".into(), // replacement
                 3 => changed.catalogue[0].session += 1,
                 4 => changed.catalogue[0].file = "other-project.db".into(),
@@ -8702,7 +9109,10 @@ mod tests {
                 _ => changed.generator_fingerprint = "generator-b".into(),
             }
             publication.model_target = Some(changed);
-            assert!(!cached_root_target_matches(&publication, 459), "change {change}");
+            assert!(
+                !cached_root_target_matches(&publication, 459),
+                "change {change}"
+            );
         }
     }
 
@@ -8743,8 +9153,14 @@ mod tests {
             .split_once("pub fn initialization_target_hash(")
             .expect("from_initialization_sources end")
             .0;
-        assert!(body.contains("Sha256::digest(frozen.commit_token_json()"), "{body}");
-        assert!(!body.contains("model_file_identity_digest(frozen.path()"), "{body}");
+        assert!(
+            body.contains("Sha256::digest(frozen.commit_token_json()"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("model_file_identity_digest(frozen.path()"),
+            "{body}"
+        );
     }
 
     /// 7bde2aeea 把字典库按会话位 0 塞进 `catalogue` 之后，凡把 `session` 当真会话用的地方
@@ -8781,7 +9197,10 @@ mod tests {
             [false, true, false, false],
             "会话位 0 的项——字典库、没钉住也没打开过的目录库——都算没记会话"
         );
-        assert_eq!(target.catalogue_sessions().collect::<Vec<_>>(), [(7000, 11)]);
+        assert_eq!(
+            target.catalogue_sessions().collect::<Vec<_>>(),
+            [(7000, 11)]
+        );
     }
 
     #[test]
@@ -9729,5 +10148,118 @@ mod tests {
         let cascade = DesignReferenceCascade::from_edges(&edges, 8000, |_| Vec::new());
         let reason = cascade.degraded.expect("打不开就是判不了");
         assert!(reason.contains("8002"), "{reason}");
+    }
+
+    /// 淘汰规则住在 `WindowPlanCache` 里，单测用本地实例：全局缓存会被并行测试里的真实规划器
+    /// （合成夹具 dbnum=8000）同时写入，先清空再断言全局表必然互相踩——红的不是淘汰逻辑。
+    #[test]
+    fn window_plan_cache_replaces_same_file_window_and_bounds_total_entries() {
+        let sets = |dbnum: u32, file: &str, base: u32, target: u32| {
+            Arc::new(WindowPlanSets {
+                key: WindowPlanKey::new(dbnum, Path::new(file), base, target),
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                full_rebuild: None,
+                unreadable: 0,
+                dispositions: Vec::new(),
+                inputs: None,
+            })
+        };
+        let file_a = "project-a/ams8000_0001";
+        let file_b = "project-b/ams8000_0001";
+        let key = |file: &str, base: u32, target: u32| {
+            WindowPlanKey::new(8000, Path::new(file), base, target)
+        };
+        let mut cache = WindowPlanCache::new();
+
+        assert!(cache.insert(sets(8000, file_a, 10, 11)).is_empty());
+        let replaced = cache.insert(sets(8000, file_a, 11, 12));
+        assert_eq!(
+            replaced.len(),
+            1,
+            "同库同文件的新窗必须替换旧窗，且旧载荷交还给调用方在锁外释放"
+        );
+        assert!(
+            cache.get(&key(file_a, 10, 11)).is_none(),
+            "旧窗不许留在缓存里，防止旧 DbSet/SourceIndex 句柄滞留"
+        );
+        assert!(cache.get(&key(file_a, 11, 12)).is_some());
+
+        // 同号跨项目副本的同一窗必须并存：文件身份进键，谁也不能把对方顶掉。
+        assert!(cache.insert(sets(8000, file_b, 11, 12)).is_empty());
+        assert!(cache.get(&key(file_a, 11, 12)).is_some());
+        assert!(cache.get(&key(file_b, 11, 12)).is_some());
+
+        for idx in 0..(WindowPlanCache::CAPACITY + 4) {
+            let dbnum = 9000 + idx as u32;
+            cache.insert(sets(
+                dbnum,
+                &format!("project-{dbnum}/ams{dbnum}_0001"),
+                idx as u32,
+                (idx + 1) as u32,
+            ));
+        }
+        assert!(
+            cache.len() <= WindowPlanCache::CAPACITY,
+            "窗口计划缓存总条目数必须受 WindowPlanCache::CAPACITY={} 约束，实际 {}",
+            WindowPlanCache::CAPACITY,
+            cache.len()
+        );
+        // 同键重插只替换，不占第二个格子，并把旧载荷交还给调用方。
+        cache.insert(sets(8100, file_a, 50, 51));
+        let len_before = cache.len();
+        assert_eq!(
+            cache.insert(sets(8100, file_a, 50, 51)).len(),
+            1,
+            "同键重插要替换旧载荷"
+        );
+        assert_eq!(cache.len(), len_before);
+    }
+
+    /// 容量淘汰按「最久没用」：会话号是各文件自己的计数，一个会话号很小、却刚被执行体命中的窗口
+    /// 不许因为号小被别的库的新窗挤掉——那会让执行体落空、把计划重算一遍。
+    #[test]
+    fn window_plan_cache_evicts_the_least_recently_used_window_not_the_smallest_session() {
+        let key = |dbnum: u32, base: u32, target: u32| {
+            WindowPlanKey::new(
+                dbnum,
+                Path::new(&format!("project/ams{dbnum}_0001")),
+                base,
+                target,
+            )
+        };
+        let sets = |dbnum: u32, base: u32, target: u32| {
+            Arc::new(WindowPlanSets {
+                key: key(dbnum, base, target),
+                regenerate: BTreeSet::new(),
+                remove: BTreeSet::new(),
+                regenerate_derived: BTreeSet::new(),
+                derived_stale: BTreeSet::new(),
+                full_rebuild: None,
+                unreadable: 0,
+                dispositions: Vec::new(),
+                inputs: None,
+            })
+        };
+        let mut cache = WindowPlanCache::new();
+        assert!(cache.insert(sets(7009, 3, 4)).is_empty());
+        for dbnum in 8000..8000 + WindowPlanCache::CAPACITY as u32 - 1 {
+            assert!(cache.insert(sets(dbnum, 600, 601)).is_empty());
+        }
+        assert_eq!(cache.len(), WindowPlanCache::CAPACITY);
+        assert!(cache.get(&key(7009, 3, 4)).is_some());
+
+        assert_eq!(cache.insert(sets(9000, 700, 701)).len(), 1);
+        assert!(
+            cache.get(&key(7009, 3, 4)).is_some(),
+            "a just-used window stays even though its session numbers are the smallest"
+        );
+        assert!(
+            cache.get(&key(8000, 600, 601)).is_none(),
+            "the least recently used window goes first"
+        );
+        assert_eq!(cache.len(), WindowPlanCache::CAPACITY);
     }
 }
