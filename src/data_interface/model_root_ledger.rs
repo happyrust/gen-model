@@ -7,6 +7,8 @@
 //! 一致性判决要数「还在赶 / 已放弃」（`dbnum_consistency`）、`/model/ensure` 要回一句发布状态，
 //! 都读它。同一根同一错误连败 [`DEAD_ROOT_STREAK`] 次判死转「已放弃」：不拦水位、不进 regen，
 //! 与「已追平」并排陈述（ISSUE-029：确定性失败要有终态，不能拖着整个库的水位永远追不上）。
+//! 只有这根自己的生成报错攒连败；刷盘、房间、整批报错与可重试的那几类走
+//! [`record_transient_failure`]，记失败、不攒连败。
 //! 进程终止它就消失，这是有意的：重启后「欠什么」由两枚水位回答——`model_sesno`
 //! 落后就按 `model_sesno → 文件最新` 重排（`startup_reconcile`），写入标记停在 `writing` 就整库
 //! 重初始化（ADR-073 D3）。没有一条恢复路需要知道上一进程里哪一根曾经失败。
@@ -25,7 +27,8 @@ use aios_core::RefnoEnum;
 
 /// 同一根带着同一句错误连续失败这么多次之后判死（ISSUE-029）：`Failed` 转 `Refused`，
 /// 不再拦 `model_sesno`、下一窗也不再并进 regen。「同一错误」才算连败——错误变了说明
-/// 现场在动，重新数；数值沿用退役前 `model_update_pending::MAX_ATTEMPTS` 的 5。
+/// 现场在动，重新数；与这根无关的失败（[`record_transient_failure`]）把连败清零。数值沿用
+/// 退役前 `model_update_pending::MAX_ATTEMPTS` 的 5。
 pub(crate) const DEAD_ROOT_STREAK: u32 = 5;
 
 /// 一根最近一次生成的结局。
@@ -137,9 +140,9 @@ pub fn record_generated(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesn
     );
 }
 
-/// 这一根这一版失败了：同一错误连败 [`DEAD_ROOT_STREAK`] 次判死转 `Refused`（ISSUE-029），
-/// 否则记 `Failed`（下一窗重排、拦水位）。`error` 截 2000 字，与退役前 `gen_root.last_error`
-/// 同一口径。返回这根记完之后是不是已放弃（`Refused`）——调用方拿它决定拦不拦水位。
+/// 这一根这一版失败了，错出在它自己的生成上（几何算不出、引用的目录件不在之类）：同一句错误
+/// 连败 [`DEAD_ROOT_STREAK`] 次判死转 `Refused`（ISSUE-029），否则记 `Failed`（下一窗重排、拦水位）。
+/// `error` 截 2000 字，与退役前 `gen_root.last_error` 同一口径。返回记完之后这根是不是已放弃。
 pub fn record_failed(
     dbnum: u32,
     root: RefnoEnum,
@@ -192,6 +195,31 @@ pub fn record_failed(
     refused
 }
 
+/// 这一根这一版没成，但失败不是「它自己坏了」的证据——刷盘预算用尽、房间算不出或计算器
+/// 冻不出、整批生成报错、初始化门 / 依赖库入库这类可重试的情形：记 `Failed`（下一窗重排、拦水位），
+/// 连败清零。已放弃的根撞上它也退回「还在赶」。一阵基础设施故障不许把整批根一起判死——
+/// 判死的根会被后面窗口的水位担保过去。
+pub fn record_transient_failure(
+    dbnum: u32,
+    root: RefnoEnum,
+    noun: &str,
+    source_end_sesno: i32,
+    error: &str,
+) {
+    record(
+        dbnum,
+        root,
+        RootEntry {
+            noun: noun.trim().to_ascii_uppercase(),
+            outcome: RootOutcome::Failed {
+                error: truncate(error),
+            },
+            source_end_sesno,
+            failure_streak: 0,
+        },
+    );
+}
+
 /// 这一根永久放弃（`http_422` 一类，服务端判它解析不出合法生成根）。
 pub fn record_refused(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesno: i32, error: &str) {
     record(
@@ -230,15 +258,6 @@ pub fn record_failed_str(
             false
         }
     }
-}
-
-/// 这根（文本 `a/b`）现在是不是已放弃（`Refused`）：判死的根不拦水位、不进 regen，
-/// 收尾与规划各拿它当「不算失败」的那一格。解析不出 `root` 按没放弃算——那种根本来就
-/// 进不了账本，拦不拦由调用方自己的判据说。
-pub fn root_refused(dbnum: u32, root: &str) -> bool {
-    parse_root(root)
-        .and_then(|refno| entry(dbnum, refno))
-        .is_some_and(|entry| entry.is_refused())
 }
 
 /// 这一根不再是根 / 已被删掉：从账本里摘掉。
@@ -418,7 +437,6 @@ mod tests {
         assert!(!dead.is_chasing());
         assert!(chasing_roots(dbnum).is_empty(), "判死的根不进 regen");
         assert_eq!(census(dbnum).abandoned, 1);
-        assert!(root_refused(dbnum, "24384/1"));
 
         // 判死后同一句错误再败（按需 ensure 之类又触到它）：仍是那个死根，不复活回 chasing。
         assert!(record_failed(
@@ -441,6 +459,39 @@ mod tests {
         assert!(entry(dbnum, r(1)).unwrap().is_chasing());
         assert_eq!(entry(dbnum, r(1)).unwrap().failure_streak, 1);
 
+        forget_dbnum(dbnum);
+    }
+
+    /// 与这根无关的失败（刷盘、房间、整批、可重试）照样记「还在赶」、下一窗重排，但不攒连败：
+    /// 再多次也判不死，夹在确定性失败中间还把连败清零；已放弃的根撞上它退回「还在赶」。
+    #[test]
+    fn failures_that_are_not_the_roots_fault_never_reach_the_death_line() {
+        let dbnum = 990_005;
+        forget_dbnum(dbnum);
+        for _ in 0..DEAD_ROOT_STREAK * 2 {
+            record_transient_failure(dbnum, r(1), "BRAN", 26, "房间计算器冻不出");
+        }
+        let entry_1 = entry(dbnum, r(1)).unwrap();
+        assert!(entry_1.is_chasing());
+        assert_eq!(entry_1.failure_streak, 0);
+        assert_eq!(chasing_roots(dbnum), BTreeSet::from([r(1)]));
+
+        for _ in 1..DEAD_ROOT_STREAK {
+            record_failed(dbnum, r(2), "BRAN", 26, "manifold boolean failed");
+        }
+        record_transient_failure(dbnum, r(2), "BRAN", 26, "write-behind exhausted");
+        assert!(
+            !record_failed(dbnum, r(2), "BRAN", 26, "manifold boolean failed"),
+            "中间夹了一次无关失败，连败从 1 重数"
+        );
+        assert_eq!(entry(dbnum, r(2)).unwrap().failure_streak, 1);
+
+        for _ in 0..DEAD_ROOT_STREAK {
+            record_failed(dbnum, r(3), "BRAN", 26, "manifold boolean failed");
+        }
+        assert!(entry(dbnum, r(3)).unwrap().is_refused());
+        record_transient_failure(dbnum, r(3), "BRAN", 27, "write-behind exhausted");
+        assert!(entry(dbnum, r(3)).unwrap().is_chasing());
         forget_dbnum(dbnum);
     }
 

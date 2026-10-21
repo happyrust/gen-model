@@ -1865,7 +1865,13 @@ async fn abandon_undurable_roots(
         store.drop_cached_root(*root);
     }
     for (root_refno, noun, error) in mark_units_undurable(&verdicts, &mut result.units) {
-        mark_generation_failed(dbnum, &root_refno, &noun, &error);
+        mark_generation_failed(
+            dbnum,
+            &root_refno,
+            &noun,
+            &error,
+            FailureEvidence::Circumstance,
+        );
     }
     result.status = ManualUpdateStatus::Partial;
     result.warnings.push(format!(
@@ -2135,7 +2141,7 @@ fn settle_room_recompute_failures(
     for (root, error) in failed {
         let root_refno =
             crate::data_interface::generation_root::refno_from_e3d(*root).to_pdms_str();
-        mark_generation_failed(dbnum, &root_refno, "", error);
+        mark_generation_failed(dbnum, &root_refno, "", error, FailureEvidence::Circumstance);
         result.units.push(ModelUnitResult {
             dbnum,
             root_refno,
@@ -3151,17 +3157,53 @@ async fn run_model_side_actions(
 /// - 一致性判决（`dbnum_consistency`）把它数进「还在赶」，库的灯不绿；
 /// - `model_sesno` 不盖（`task_end` 守着 `all_roots_ok`）就是它在库里的全部说法。
 ///
-/// 进程终止它就消失，这是有意的：重启后 `model_sesno` 若没盖到 T，启动核对排的 `model_sesno → T`
-/// 那一窗本来就把这根重排（它在差分里）；不需要任何一行留痕。判死的根（确定性失败）也记 `failed`
-/// ——ADR-076 D6 / D8 的口径：放弃、水位不盖、下一次该库任务再试；「永久放弃」那一格
-/// （`RootOutcome::Refused`）留给服务端判它解析不出合法生成根的那类判定。解析不出来的 refno 只记日志。
-fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
+/// `evidence` 决定这次失败算不算 ISSUE-029 的连败：这根自己的生成报错同一句连败
+/// `model_root_ledger::DEAD_ROOT_STREAK` 次判死转「已放弃」——不再并进 regen、不再拦后面窗口的
+/// `model_sesno`；其余（[`FailureEvidence::Circumstance`]）只记失败、连败清零，判不死。
+///
+/// 进程终止账本就消失：重启后 `model_sesno` 若没盖到 T，启动核对排的 `model_sesno → T` 那一窗本来就
+/// 把这根重排（它在差分里）。已放弃、又被后面窗口的 `model_sesno` 盖过去的根不在此列：重启后账本里
+/// 没有它，水位替它担保。解析不出来的 refno 只记日志。
+fn mark_generation_failed(
+    dbnum: u32,
+    root_refno: &str,
+    noun: &str,
+    error: &str,
+    evidence: FailureEvidence,
+) {
     use crate::data_interface::model_root_ledger as ledger;
     let Some(root) = ledger::parse_root(root_refno) else {
         log::warn!("生成失败的根 `{root_refno}` 不是 a/b refno，账本不记 dbnum={dbnum}");
         return;
     };
-    ledger::record_failed(dbnum, root, noun, 0, error);
+    match evidence {
+        FailureEvidence::RootFault => {
+            ledger::record_failed(dbnum, root, noun, 0, error);
+        }
+        FailureEvidence::Circumstance => {
+            ledger::record_transient_failure(dbnum, root, noun, 0, error)
+        }
+    }
+}
+
+/// 一次生成失败是不是「这根自己坏了」的证据：ISSUE-029 的判死只数前一种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureEvidence {
+    /// 生成器对这根报的错，且不在可重试那几类里（`on_demand_model::root_failure_is_retryable`）。
+    RootFault,
+    /// 刷盘预算用尽或写后台拒收、房间算不出或计算器冻不出、整批生成报错、可重试的那几类：
+    /// 与这根的数据无关，重排照旧，不攒连败。
+    Circumstance,
+}
+
+impl FailureEvidence {
+    fn of(error: &anyhow::Error) -> Self {
+        if crate::data_interface::on_demand_model::root_failure_is_retryable(error) {
+            Self::Circumstance
+        } else {
+            Self::RootFault
+        }
+    }
 }
 
 /// 根生成成功后，把被改判的原始位姿目标送回统一 AABB 变更链（`PostRegenAabb`，
@@ -3620,8 +3662,14 @@ async fn run_single_unit(
     // 根凭证上（`status = 'failed'`），让下一窗与启动核对看见这根还欠着。
     let settlement_failed = false;
     let _ = warnings;
-    if let Some(error) = generation_error.as_deref() {
-        mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error);
+    if let (Err(cause), Some(error)) = (&outcome, generation_error.as_deref()) {
+        mark_generation_failed(
+            task.dbnum,
+            &task.root_refno,
+            &task.noun,
+            error,
+            FailureEvidence::of(cause),
+        );
     }
     let (status, attempts, message) = match outcome {
         Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
@@ -4187,7 +4235,13 @@ async fn run_unit_worklist(
             );
         }
         for task in worklist {
-            mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, reason);
+            mark_generation_failed(
+                task.dbnum,
+                &task.root_refno,
+                &task.noun,
+                reason,
+                FailureEvidence::Circumstance,
+            );
             emit(
                 progress,
                 ManualUpdateEvent::ModelUnitFinished {
@@ -4323,6 +4377,7 @@ async fn run_unit_worklist(
                     task_rooms.clone(),
                 )
                 .await;
+            let whole_batch_failed = report.is_err();
             let (completed, mut failures) = match report {
                 Ok(report) => (
                     {
@@ -4367,13 +4422,25 @@ async fn run_unit_worklist(
             // 没有 pending 行要收口了（ADR-072 D5）：成败直接进本任务的单元清单，失败根的
             // 错误逐根记在回执上，并写到根凭证上（`status = 'failed'`）让下一窗与启动核对看见。
             for task in group {
-                let message = failures.remove(&task.root_refno).or_else(|| {
+                let reported = failures.remove(&task.root_refno);
+                let evidence = if reported.is_some() && !whole_batch_failed {
+                    FailureEvidence::RootFault
+                } else {
+                    FailureEvidence::Circumstance
+                };
+                let message = reported.or_else(|| {
                     (!completed.contains(&task.root_refno))
                         .then(|| "生成器未返回该根的成功或失败结果".to_string())
                 });
                 let success = message.is_none();
                 if let Some(error) = message.as_deref() {
-                    mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error);
+                    mark_generation_failed(
+                        task.dbnum,
+                        &task.root_refno,
+                        &task.noun,
+                        error,
+                        evidence,
+                    );
                 }
                 if !success {
                     settlement_failed = true;
@@ -5690,6 +5757,7 @@ mod tests {
             "abandon_roots(",
             "drop_cached_root(",
             "mark_generation_failed(",
+            "FailureEvidence::Circumstance",
             "ManualUpdateStatus::Partial",
         ] {
             assert!(
@@ -5711,8 +5779,20 @@ mod tests {
         use crate::data_interface::model_root_ledger as ledger;
         let dbnum = 994_100;
         ledger::forget_dbnum(dbnum);
-        mark_generation_failed(dbnum, "24384/7", "BRAN", "manifold boolean failed");
-        mark_generation_failed(dbnum, "garbage", "EQUI", "ignored");
+        mark_generation_failed(
+            dbnum,
+            "24384/7",
+            "BRAN",
+            "manifold boolean failed",
+            FailureEvidence::RootFault,
+        );
+        mark_generation_failed(
+            dbnum,
+            "garbage",
+            "EQUI",
+            "ignored",
+            FailureEvidence::RootFault,
+        );
         let census = ledger::census(dbnum);
         assert_eq!((census.chasing, census.abandoned, census.settled), (1, 0, 0));
         let root = ledger::parse_root("24384/7").unwrap();
@@ -5734,6 +5814,73 @@ mod tests {
         assert!(
             !production.contains("type::thing('gen_root'") && !production.contains("gen_root:"),
             "任务执行体不许再写逐根凭证行（ADR-079）"
+        );
+    }
+
+    /// ISSUE-029 只数这根自己的错：同一句 `RootFault` 连败到线判死，`Circumstance`（刷盘、房间、整批、
+    /// 可重试）再多次也只是「还在赶」——一阵基础设施故障不许把整批根判死、再让水位替它们担保。
+    #[test]
+    fn only_the_roots_own_generation_errors_count_towards_the_death_line() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let dbnum = 994_101;
+        ledger::forget_dbnum(dbnum);
+        for _ in 0..ledger::DEAD_ROOT_STREAK * 2 {
+            mark_generation_failed(
+                dbnum,
+                "24384/7",
+                "BRAN",
+                "房间计算器冻不出",
+                FailureEvidence::Circumstance,
+            );
+        }
+        for _ in 0..ledger::DEAD_ROOT_STREAK {
+            mark_generation_failed(
+                dbnum,
+                "24384/8",
+                "BRAN",
+                "manifold boolean failed",
+                FailureEvidence::RootFault,
+            );
+        }
+        let census = ledger::census(dbnum);
+        assert_eq!((census.chasing, census.abandoned), (1, 1));
+        let entry = |root: &str| ledger::entry(dbnum, ledger::parse_root(root).unwrap()).unwrap();
+        assert!(entry("24384/7").is_chasing());
+        assert!(entry("24384/8").is_refused());
+        ledger::forget_dbnum(dbnum);
+
+        let busy = anyhow::Error::new(
+            crate::data_interface::on_demand_model::ModelGenerationInProgress {
+                root_refno: "24384/7".into(),
+            },
+        )
+        .context("generate root 24384/7");
+        assert_eq!(FailureEvidence::of(&busy), FailureEvidence::Circumstance);
+        assert_eq!(
+            FailureEvidence::of(&anyhow::anyhow!("manifold boolean failed")),
+            FailureEvidence::RootFault
+        );
+    }
+
+    /// 源码钉：逐根生成按错误分型给证据；分组重生成只认生成器逐根点名的错，整批报错与「没回结果」
+    /// 都不算这根的。
+    #[test]
+    fn generation_paths_tell_the_ledger_whose_fault_a_failure_is() {
+        let production = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        assert!(production.contains("FailureEvidence::of(cause)"));
+        let group = production
+            .split_once("let whole_batch_failed = report.is_err();")
+            .expect("整批失败先记下")
+            .1;
+        let group = &group[..group
+            .find("ManualUpdateEvent::ModelUnitFinished")
+            .expect("逐根收尾")];
+        assert!(
+            group.contains("reported.is_some() && !whole_batch_failed"),
+            "{group}"
         );
     }
 
@@ -6606,8 +6753,14 @@ mod tests {
         let body = &body[..end];
         let unavailable = body.find("rooms.unavailable()").expect("冻不出在入口判");
         let marked = body[unavailable..]
-            .find("mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, reason);")
+            .find("mark_generation_failed(")
             .expect("每根账本记同一句原因");
+        let call = &body[unavailable + marked..];
+        let call = &call[..call.find(");").expect("调用收尾")];
+        assert!(
+            call.contains("reason,") && call.contains("FailureEvidence::Circumstance"),
+            "冻不出计算器是任务的事，不攒这根的连败: {call}"
+        );
         let transform = body
             .find("run_rigid_motion_units(")
             .expect("rigid-motion stage");
