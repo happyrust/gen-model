@@ -2643,7 +2643,9 @@ mod tests {
         // `MINBEN` / `OUTD` / `STAPOI` / `YGAP`（150）。
         // 2026-10-21：随 e3d-model `f2a3b88`（墙 FIXING 的 LMIRR 镜像 + GENSEC 端部 datum 现算标架）重生成，
         // 带进 `HANICP`（151，`f909a3746` 当时漏改这里）。
-        assert_eq!(generation_read_set().len(), 151, "读取集合条数漂移");
+        // 2026-10-22：e3d-model `7d9c943`（按主项目 SYS 库的外项目表补外项目库）读 `DB` 元素的 `DBNO` /
+        // `PROJ`（153，`430451b33` 当时漏改这里）；两个都不在字典里，上面 DCHC=0 那一列不变。
+        assert_eq!(generation_read_set().len(), 153, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
