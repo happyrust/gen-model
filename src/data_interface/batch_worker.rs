@@ -1794,7 +1794,7 @@ async fn execute_frozen_batch(
 /// 上限：退避 1+2+4+8+16 = 31 s 加五次写的时间，盖得住 RocksDB 的瞬时冲突风暴，再多就是库不健康，
 /// 等下去只是把这个库的槽位占着；加一道任务级 10 min 期限当护栏——worker 卡死时别让任务永远挂在
 /// `durable_pending`。两个都是常量，不进 `DbOption`（仓里「都是常量不做配置」的纪律）。
-const DURABLE_FLUSH_BUDGET: crate::fast_model::model_write_behind::FlushBudget =
+pub(crate) const DURABLE_FLUSH_BUDGET: crate::fast_model::model_write_behind::FlushBudget =
     crate::fast_model::model_write_behind::FlushBudget {
         max_attempts_per_root: MAX_ATTEMPTS,
         deadline: Duration::from_secs(10 * 60),

@@ -15,6 +15,7 @@ use crate::data_interface::manual_update::{generate_unit_model, generation_root_
 use crate::data_interface::model_coverage::{
     generation_root_cache_current, generation_roots_cache_current,
 };
+use crate::data_interface::model_scope_regen;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +53,28 @@ pub struct OnDemandModelResult {
     /// 本次确实执行生成的生成根数。
     #[serde(default)]
     pub generated_root_count: usize,
+    /// 本次范围里报错被跳过的生成根数。范围生成逐根记错、其余根照常跑完（不再首错中止整片），
+    /// 客户端拿 `failed_root_count > 0` 以 `force = false` 重发同一范围补齐缺口。
+    #[serde(default)]
+    pub failed_root_count: usize,
+    /// 失败根点名：refno + 首错摘要。单根路径恒为空——单根失败本来就是整个请求失败，
+    /// 直接走 `Err`。
+    #[serde(default)]
+    pub failed_roots: Vec<ScopeRootFailure>,
+}
+
+/// 范围生成里没跑出来的单根记录。`error` 是 `{error:#}` 形态的首错摘要：只进日志与详情，
+/// 分型仍走请求级错误（全灭时首错原样上抛，`ensure_error` 按域分型）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRootFailure {
+    /// 没生成出来的生成根。
+    pub generation_root: String,
+    /// 首错摘要。
+    pub error: String,
+    /// 重发同一请求有没有意义：根锁被占 / 刚生成完被判过期 / 初始化门还没放行——这些等一等
+    /// 再发就补齐；几何真坏之类的终局失败标 false，客户端不必为它干等整段补齐窗口。
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 impl AiosDBManager {
@@ -440,7 +463,7 @@ impl AiosDBManager {
 
     /// Same scope semantics with a caller-supplied authoritative subtree. In
     /// direct mode the HTTP layer supplies this from e3d-io, so model display
-    /// does not first repeat the hierarchy read through SurrealDB.
+    /// does not repeat the hierarchy read through SurrealDB.
     pub async fn ensure_model_scope_generated_from_refnos(
         &self,
         requested_refno: RefnoEnum,
@@ -463,6 +486,14 @@ impl AiosDBManager {
             .await
     }
 
+    /// 单根失败不再中止整片（2026-10-20 不全修复）：`force` 先把范围清成空，首错上抛
+    /// 会留下「已删未重生」的半截状态。现在逐根记进 `failed_roots`、其余根照常跑完；
+    /// 全部失败时才把首错原样上抛（`ensure_error` 按域分型照旧）。
+    ///
+    /// 进程级中断（issue #59）：摄入形态下先删后生成的范围在清理之前落一行持久留痕
+    /// （`model_scope_regen`），全部根落盘之后才删；进程死在中途，下次启动就绪后以
+    /// `force = false` 续跑。同一范围的 `force = false` 请求（客户端补齐、人再点一次）接手
+    /// 那一行，成了一样删。
     pub async fn ensure_model_scope_generated_from_roots(
         &self,
         requested_refno: RefnoEnum,
@@ -471,6 +502,28 @@ impl AiosDBManager {
     ) -> anyhow::Result<OnDemandModelResult> {
         roots.sort_by_key(|root| root.root.to_pdms_str());
         roots.dedup_by_key(|root| root.root);
+        // 只写内存 / 读透的清理不删权威库，没有要留痕的洞。
+        let durable_scope = crate::data_interface::model_read_route::memory_only_scope().is_none()
+            && !crate::options::data_face().is_read_through();
+        let pending = match (durable_scope, force) {
+            (true, true) => Some(model_scope_regen::begin(requested_refno, roots.len()).await?),
+            (true, false) => model_scope_regen::adopt(requested_refno),
+            (false, _) => None,
+        };
+        let outcome = self.regenerate_scope(requested_refno, roots, force).await;
+        if let Some(run) = pending {
+            model_scope_regen::settle(run, outcome.as_ref()).await;
+        }
+        outcome
+    }
+
+    /// [`Self::ensure_model_scope_generated_from_roots`] 的本体：`force` 先删整个请求范围，再逐根生成。
+    async fn regenerate_scope(
+        &self,
+        requested_refno: RefnoEnum,
+        roots: Vec<crate::data_interface::generation_root::GenerationRoot>,
+        force: bool,
+    ) -> anyhow::Result<OnDemandModelResult> {
         if force {
             // 先删后生成（见 `clear_model_scope`）。放在解根之后、逐根加锁之前：清理自己拿
             // 根锁 / 库级锁，范围内有根正在生成就按「正在后台生成」回，不与它抢。
@@ -491,8 +544,7 @@ impl AiosDBManager {
             .find(|root| root.root == requested_refno)
             .map(|root| root.noun.clone())
             .unwrap_or_else(|| "SCOPE".to_owned());
-        let mut cached_root_count = 0usize;
-        let mut generated_root_count = 0usize;
+        let mut tally = ScopeRootTally::default();
         // 只写内存的库（plan 2026-09-06 §8 R2）：凭证与计数都只问进程内投影。
         let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
         let current_roots = if force {
@@ -529,21 +581,33 @@ impl AiosDBManager {
             // only misses need the generation path and its per-root counts.
             // A durable credential survives restart, but /model/records serves the
             // process projection. Rebuild a missing resident root before calling it cached.
-            if current_roots.contains(&root.root.to_pdms_str())
-                && memory_root_current(root.root).await?
-            {
-                cached_root_count += 1;
+            let current = current_roots.contains(&root.root.to_pdms_str())
+                && match memory_root_current(root.root).await {
+                    Ok(current) => current,
+                    // 投影核对本身垮了（阻塞线程 join 失败等）不拦整片：照常进生成路径，
+                    // 生成里的同一道核对会再裁一次，真坏就记进 `failed_roots`。
+                    Err(error) => {
+                        log::warn!(
+                            "[按需生成] 生成根 {} 的投影核对失败，照常生成: {error:#}",
+                            root.root.to_pdms_str()
+                        );
+                        false
+                    }
+                };
+            if current {
+                tally.cached += 1;
                 continue;
             }
-            let result = self
+            match self
                 .ensure_exact_generation_root(root.root, root.root, &root.noun, force)
-                .await?;
-            match result.status {
-                OnDemandModelStatus::Generated => generated_root_count += 1,
-                OnDemandModelStatus::AlreadyAvailable
-                | OnDemandModelStatus::NoRenderableGeometry => cached_root_count += 1,
+                .await
+            {
+                Ok(result) => tally.settled(result.status),
+                Err(error) => tally.failed(requested_refno, &root, error, force),
             }
         }
+        let (cached_root_count, generated_root_count, failed_roots) =
+            tally.into_counts(requested_refno, root_count)?;
 
         let counts = memory_counts(&root_refnos);
         let status = if counts.renderable == 0 {
@@ -573,6 +637,8 @@ impl AiosDBManager {
             generation_roots,
             cached_root_count,
             generated_root_count,
+            failed_root_count: failed_roots.len(),
+            failed_roots,
         })
     }
 }
@@ -614,6 +680,116 @@ fn try_generation_root(
         .try_lock_owned()
         .map_err(|_| ModelGenerationInProgress {
             root_refno: root_refno.to_string(),
+        })
+}
+
+/// 范围生成的逐根结局（2026-10-20 不全修复）：一根失败只点名进 `failed`、不中止整片——`force` 已先把
+/// 范围清成空，首错上抛会把「已删未重生」的半截状态留给用户。`first_failure` 留住首错的 anyhow 链：
+/// 全灭时原样抛回，`ensure_error` 照样分型。
+#[derive(Debug, Default)]
+struct ScopeRootTally {
+    cached: usize,
+    generated: usize,
+    failed: Vec<ScopeRootFailure>,
+    first_failure: Option<anyhow::Error>,
+}
+
+impl ScopeRootTally {
+    fn settled(&mut self, status: OnDemandModelStatus) {
+        match status {
+            OnDemandModelStatus::Generated => self.generated += 1,
+            OnDemandModelStatus::AlreadyAvailable | OnDemandModelStatus::NoRenderableGeometry => {
+                self.cached += 1
+            }
+        }
+    }
+
+    /// `forced`：这一轮是强制重生成，它刚把这片范围删过，这一根此刻没有模型。它不可重试的失败
+    /// 记进账本（`Failed`，同一错误连败照 ISSUE-029 判死）：下一窗并进 regen、一致性判决数它「还在赶」。
+    /// 可重试的不记——根锁被占、初始化门这些与这根坏不坏无关。`force = false` 的补齐轮次（客户端
+    /// 续跑、接手留痕、启动续跑）也不记：同一次点击里它们会把同一根反复重试，记了会在几秒内把
+    /// 连败数抬到判死线。
+    fn failed(
+        &mut self,
+        requested_refno: RefnoEnum,
+        root: &crate::data_interface::generation_root::GenerationRoot,
+        error: anyhow::Error,
+        forced: bool,
+    ) {
+        let rendered = format!("{error:#}");
+        let retryable = root_failure_is_retryable(&error);
+        log::error!(
+            "[按需生成] 范围 {} 内生成根 {} 失败（retryable={}），继续其余根: {}",
+            requested_refno.to_pdms_str(),
+            root.root.to_pdms_str(),
+            retryable,
+            rendered
+        );
+        if forced && !retryable {
+            let dbnum = crate::data_interface::generation_root::refno_to_e3d(root.root).dbno();
+            crate::data_interface::model_root_ledger::record_failed(
+                dbnum, root.root, &root.noun, 0, &rendered,
+            );
+        }
+        self.failed.push(ScopeRootFailure {
+            generation_root: root.root.to_pdms_str(),
+            error: rendered,
+            retryable,
+        });
+        if self.first_failure.is_none() {
+            self.first_failure = Some(error);
+        }
+    }
+
+    /// 全灭 = 整个请求失败：与旧的「首错中止」同一口径上抛首错（根锁冲突仍是 409、初始化门仍是 409、
+    /// 上游故障仍是它自己的码），失败点名跟着错误日志走。部分失败 = 200 回执点名 `failed_roots`，
+    /// 客户端补齐。返回 `(命中, 生成, 失败点名)`。
+    fn into_counts(
+        self,
+        requested_refno: RefnoEnum,
+        root_count: usize,
+    ) -> anyhow::Result<(usize, usize, Vec<ScopeRootFailure>)> {
+        if root_count > 0 && self.failed.len() == root_count {
+            return Err(self.first_failure.unwrap_or_else(|| {
+                anyhow::anyhow!(
+                    "范围 {} 的 {root_count} 个生成根全部失败",
+                    requested_refno.to_pdms_str()
+                )
+            }));
+        }
+        Ok((self.cached, self.generated, self.failed))
+    }
+}
+
+/// 重发同一请求有没有意义（`ScopeRootFailure::retryable`，也是账本记不记、启动续跑再不再试的判据）：
+/// 与 HTTP 面判成 409 冲突、或带 `Retry-After` 的 503 的那几类同一口径（`handlers::ensure_error` /
+/// `ApiError::from_domain`）——根锁被占、刚生成完被判过期、初始化门、房间参照模型在建、写后台不收、
+/// 依赖库还在入库或读不开。
+pub(crate) fn root_failure_is_retryable(error: &anyhow::Error) -> bool {
+    use crate::data_interface::batch_scheduler::{DbnumIngestState, dbnum_ingest_state};
+    use crate::data_interface::direct_store::DirectStoreError;
+
+    fn caused_by<T: std::error::Error + Send + Sync + 'static>(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<T>().is_some()
+            || error
+                .chain()
+                .any(|cause| cause.downcast_ref::<T>().is_some())
+    }
+    caused_by::<ModelGenerationInProgress>(error)
+        || caused_by::<ModelStaleAfterGeneration>(error)
+        || caused_by::<super::initialization_phase::InitializationNotReady>(error)
+        || caused_by::<crate::fast_model::model_memory_store::OverlayRejected>(error)
+        || error.chain().any(|cause| {
+            cause
+                .to_string()
+                .starts_with(crate::fast_model::room_resident::RESIDENT_MODEL_UPDATING)
+                || match cause.downcast_ref::<DirectStoreError>() {
+                    Some(DirectStoreError::Session { .. }) => true,
+                    Some(DirectStoreError::NoFileForDbnum { dbnum }) => {
+                        !matches!(dbnum_ingest_state(*dbnum as u32), DbnumIngestState::Settled)
+                    }
+                    _ => false,
+                }
         })
 }
 
@@ -673,6 +849,8 @@ fn describe(
         generation_roots: vec![root.to_pdms_str()],
         cached_root_count: usize::from(status != OnDemandModelStatus::Generated),
         generated_root_count: usize::from(status == OnDemandModelStatus::Generated),
+        failed_root_count: 0,
+        failed_roots: Vec::new(),
     }
 }
 
@@ -818,6 +996,8 @@ mod tests {
             generation_roots: vec!["16192/2".into()],
             cached_root_count: 0,
             generated_root_count: 1,
+            failed_root_count: 0,
+            failed_roots: vec![],
         };
         let json = serde_json::to_string(&result).unwrap();
         let roundtrip: OnDemandModelResult = serde_json::from_str(&json).unwrap();
@@ -1164,5 +1344,222 @@ mod tests {
             .0;
         assert!(body.contains("ensure_exact_generation_root("));
         assert!(!body.contains("ensure_model_generated(root.root"));
+    }
+
+    /// 测试用生成根都落在 dbnum 6911（`word0 < 0x2000` 时 dbnum 就是 `word0`），不与别的测试共用账本页。
+    fn scope_root(id: u32, noun: &str) -> crate::data_interface::generation_root::GenerationRoot {
+        crate::data_interface::generation_root::GenerationRoot {
+            root: aios_core::RefU64::from_two_nums(6911, id).into(),
+            noun: noun.into(),
+            name: String::new(),
+            kind: crate::data_interface::generation_root::GenerationRootKind::DeliveryUnit,
+        }
+    }
+
+    fn in_progress(root: &str) -> anyhow::Error {
+        anyhow::Error::new(ModelGenerationInProgress {
+            root_refno: root.into(),
+        })
+    }
+
+    /// 范围里一根失败不拦其余根：部分失败仍是成功回执，失败根逐个点名、各带可不可重试。
+    #[test]
+    fn a_partially_failed_scope_still_answers_and_names_the_failed_roots() {
+        let requested = RefnoEnum::from("6911/1");
+        let mut tally = ScopeRootTally::default();
+        tally.settled(OnDemandModelStatus::Generated);
+        tally.settled(OnDemandModelStatus::NoRenderableGeometry);
+        tally.failed(
+            requested,
+            &scope_root(11, "BRAN"),
+            anyhow::anyhow!("几何坏了"),
+            false,
+        );
+        tally.failed(
+            requested,
+            &scope_root(12, "EQUI"),
+            in_progress("6911/12").context("生成根 6911/12"),
+            false,
+        );
+        let (cached, generated, failed) = tally
+            .into_counts(requested, 4)
+            .expect("部分失败仍回成功回执");
+        assert_eq!((cached, generated), (1, 1));
+        assert_eq!(
+            failed
+                .iter()
+                .map(|failure| (failure.generation_root.as_str(), failure.retryable))
+                .collect::<Vec<_>>(),
+            vec![("6911/11", false), ("6911/12", true)]
+        );
+        assert_eq!(failed[0].error, "几何坏了");
+    }
+
+    /// 全灭 = 整个请求失败，首错原样上抛：HTTP 面靠 `downcast_ref` 分型（根锁冲突仍是 409）。
+    /// 全是命中、或一根都不用跑，都不是「全灭」。
+    #[test]
+    fn an_all_failed_scope_rethrows_the_first_failure_with_its_type() {
+        let requested = RefnoEnum::from("6911/2");
+        let mut tally = ScopeRootTally::default();
+        tally.failed(
+            requested,
+            &scope_root(21, "BRAN"),
+            in_progress("6911/21"),
+            false,
+        );
+        tally.failed(
+            requested,
+            &scope_root(22, "BRAN"),
+            anyhow::anyhow!("几何坏了"),
+            false,
+        );
+        let error = tally
+            .into_counts(requested, 2)
+            .expect_err("全部失败 = 请求失败");
+        assert_eq!(
+            error
+                .downcast_ref::<ModelGenerationInProgress>()
+                .map(|busy| busy.root_refno.as_str()),
+            Some("6911/21")
+        );
+
+        let mut cached = ScopeRootTally::default();
+        cached.settled(OnDemandModelStatus::AlreadyAvailable);
+        assert_eq!(cached.into_counts(requested, 1).unwrap(), (1, 0, vec![]));
+        assert_eq!(
+            ScopeRootTally::default().into_counts(requested, 0).unwrap(),
+            (0, 0, vec![])
+        );
+    }
+
+    /// 强制重生成那一轮里，不可重试的失败进账本（下一窗并进 regen、一致性判决数它「还在赶」）；
+    /// 可重试的不进；`force = false` 的补齐轮次一根也不记——客户端续跑会把同一根反复重试，
+    /// 记了就是虚抬 ISSUE-029 连败。
+    #[test]
+    fn only_non_retryable_failures_of_a_forced_round_enter_the_root_ledger() {
+        use crate::data_interface::model_root_ledger as ledger;
+        let dbnum =
+            crate::data_interface::generation_root::refno_to_e3d(scope_root(31, "BRAN").root)
+                .dbno();
+        assert_eq!(dbnum, 6911);
+        ledger::forget_dbnum(dbnum);
+        let requested = RefnoEnum::from("6911/3");
+        let mut tally = ScopeRootTally::default();
+        tally.failed(
+            requested,
+            &scope_root(31, " bran "),
+            anyhow::anyhow!("几何坏了"),
+            true,
+        );
+        tally.failed(
+            requested,
+            &scope_root(32, "BRAN"),
+            in_progress("6911/32"),
+            true,
+        );
+        tally.failed(
+            requested,
+            &scope_root(33, "BRAN"),
+            anyhow::anyhow!("几何坏了"),
+            false,
+        );
+
+        let entry =
+            ledger::entry(dbnum, scope_root(31, "BRAN").root).expect("不可重试的失败进账本");
+        assert!(entry.is_chasing());
+        assert_eq!(entry.noun, "BRAN");
+        assert_eq!(entry.source_end_sesno, 0, "按需生成不知道源版本");
+        assert_eq!(entry.error(), Some("几何坏了"));
+        assert!(
+            ledger::entry(dbnum, scope_root(32, "BRAN").root).is_none(),
+            "可重试的不进账本"
+        );
+        assert!(
+            ledger::entry(dbnum, scope_root(33, "BRAN").root).is_none(),
+            "force = false 的补齐轮次不记"
+        );
+        ledger::forget_dbnum(dbnum);
+    }
+
+    /// 可重试 = HTTP 面那几类「等一等再来」，套了几层 context 也认得出；其余都是终局失败。
+    #[test]
+    fn retryable_root_failures_are_the_http_retry_classes() {
+        use crate::data_interface::direct_store::DirectStoreError;
+        let retryable = [
+            in_progress("6911/1").context("生成根 6911/1"),
+            anyhow::Error::new(ModelStaleAfterGeneration {
+                root_refno: "6911/1".into(),
+                reason: "源文件版本在生成期间前移",
+            }),
+            anyhow::Error::new(super::super::initialization_phase::InitializationNotReady {
+                snapshot: super::super::initialization_phase::InitializationCoordinator::global()
+                    .snapshot(),
+            }),
+            anyhow::Error::new(crate::fast_model::model_memory_store::OverlayRejected)
+                .context("publish"),
+            anyhow::anyhow!(
+                "{}: room resident model is not ready (loading)",
+                crate::fast_model::room_resident::RESIDENT_MODEL_UPDATING
+            )
+            .context("房间归属"),
+            anyhow::Error::new(DirectStoreError::Session {
+                dbnum: 7004,
+                detail: "locked".into(),
+            })
+            .context("读目录库"),
+        ];
+        for error in &retryable {
+            assert!(root_failure_is_retryable(error), "{error:#}");
+        }
+        let terminal = [
+            anyhow::anyhow!("几何坏了"),
+            anyhow::Error::new(DirectStoreError::DbNumberMismatch {
+                dbnum: 7004,
+                actual: 7005,
+                file: "x.db".into(),
+            }),
+            anyhow::Error::new(UnresolvableRoot::NoRoot).context("构件 6911/1 无法解析生成根"),
+        ];
+        for error in &terminal {
+            assert!(!root_failure_is_retryable(error), "{error:#}");
+        }
+    }
+
+    /// issue #59 根因 2：先删后生成的范围在清理**之前**落持久留痕，整轮跑完才收口；只写内存 / 读透不落。
+    #[test]
+    fn forced_regeneration_records_the_scope_before_clearing_and_settles_after_the_run() {
+        let source = include_str!("on_demand_model.rs");
+        let entry = source
+            .split_once("pub async fn ensure_model_scope_generated_from_roots(")
+            .expect("direct scope entry exists")
+            .1
+            .split_once("async fn regenerate_scope(")
+            .expect("the scope body follows its entry")
+            .0;
+        let durable = entry
+            .find("memory_only_scope().is_none()")
+            .expect("只写内存不落留痕");
+        assert!(
+            entry.contains("!crate::options::data_face().is_read_through()"),
+            "读透不落留痕: {entry}"
+        );
+        let begin = entry
+            .find("model_scope_regen::begin(requested_refno, roots.len()).await?")
+            .expect("强制重生成先落留痕");
+        let run = entry
+            .find(".regenerate_scope(requested_refno, roots, force)")
+            .expect("清理与生成都在本体里");
+        let settle = entry
+            .find("model_scope_regen::settle(run, outcome.as_ref())")
+            .expect("整轮跑完才收口");
+        assert!(durable < begin && begin < run && run < settle, "{entry}");
+        assert!(
+            entry.contains("model_scope_regen::adopt(requested_refno)"),
+            "force = false 接手未完成的留痕: {entry}"
+        );
+        assert!(
+            !entry.contains("clear_model_scope("),
+            "清理只在本体里、留痕落下之后: {entry}"
+        );
     }
 }

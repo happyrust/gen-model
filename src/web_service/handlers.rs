@@ -945,6 +945,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "data_face": crate::options::data_face().as_str(),
             "read_through": read_through,
             "dbnum_consistency": serde_json::Value::Null,
+            "model_scope_regen": crate::data_interface::model_scope_regen::health_snapshot(),
             "version": crate::build_info::VERSION,
             "build_id": crate::build_info::BUILD_ID,
             "started_at": crate::data_interface::task_registry::process_started_at(),
@@ -1170,6 +1171,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 是进程内那一份）；写库中途死掉的库看 `/dbnums` 每行的 `write_state`。
         "dbnum_consistency": dbnum_consistency,
         "dbnum_consistency_observation": health_census_observation(),
+        // 强制范围重生成（先删后生成）还没补回来的范围（issue #59，进程内登记表，不读库）：`pending`
+        // 非零 = 有范围被先删了、还没生成回来或还没确认落盘；`samples` 点名并带最近一次失败摘要，
+        // `resume` 是启动续跑走到哪了。与两枚水位一样是仪表，不进 degraded / blocking。
+        "model_scope_regen": crate::data_interface::model_scope_regen::health_snapshot(),
         // 空间树状态机 + 文件/库指纹（现读现比）+ 本次启动的装载裁决
         // （reused / replayed / rebuilt / migrated / degraded / preloaded）。
         // 十五键契约钉在 aabb_tree 的渲染器旁（台账 G-02 契约迁移）。
@@ -2632,6 +2637,7 @@ pub async fn model_delete_subtree(
     let direct_tree = state.direct_tree.clone();
     let clear = async move {
         let tree = direct_tree.get().await?;
+        let lookup = tree.clone();
         let root = refno.refno();
         let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
         let roots = tokio::task::spawn_blocking(move || {
@@ -2639,7 +2645,10 @@ pub async fn model_delete_subtree(
         })
         .await
         .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
-        mgr.clear_model_scope(refno, &roots).await
+        mgr.clear_model_scope(refno, &roots).await?;
+        // 清理模型 = 这片范围不要模型：它覆盖的强制重生成留痕一并撤掉，启动续跑别把它生成回来。
+        crate::data_interface::model_scope_regen::discard_covered_by(refno, lookup).await;
+        anyhow::Ok(())
     };
     match memory_only_dbnum {
         Some(dbnum) => {
@@ -4983,6 +4992,54 @@ mod tests {
                 && !health.contains("blocking_conditions.push(\"dabacon_tags\")"),
             "DAB tag 是版本诊断，不得改变服务健康结论"
         );
+    }
+
+    /// issue #59：强制范围重生成的未完成留痕在两种 health 响应里都摆出来（进程内登记表，不读库），
+    /// 只是仪表，不改健康结论。
+    #[test]
+    fn health_exposes_pending_scope_regenerations_without_making_them_a_gate() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert_eq!(
+            health
+                .matches(
+                    "\"model_scope_regen\": crate::data_interface::model_scope_regen::health_snapshot()"
+                )
+                .count(),
+            2,
+            "持久层连通与断开两种 health 响应都必须带 model_scope_regen"
+        );
+        assert!(
+            !health.contains("degraded.push(\"model_scope_regen\")")
+                && !health.contains("blocking_conditions.push(\"model_scope_regen\")"),
+            "留痕是仪表，不得改变服务健康结论"
+        );
+    }
+
+    /// 「清理模型」显式清掉的范围：被它覆盖的强制重生成留痕在清理成功之后撤掉，启动续跑不把它生成回来。
+    #[test]
+    fn explicit_scope_cleanup_discards_the_pending_regeneration_it_covers() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_delete_subtree(")
+            .expect("model subtree delete handler must exist")
+            .1
+            .split_once("/// POST /api/v1/model/ensure")
+            .expect("model ensure must follow subtree delete")
+            .0;
+        let clear = body
+            .find("mgr.clear_model_scope(refno, &roots).await?")
+            .expect("the clear itself");
+        let discard = body
+            .find("model_scope_regen::discard_covered_by(refno, lookup).await")
+            .expect("covered records are discarded");
+        assert!(clear < discard, "清理成功之后才撤留痕: {body}");
     }
 
     #[test]

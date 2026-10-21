@@ -142,6 +142,9 @@ pub mod model_coverage;
 /// 进程内的生成根账本（ADR-079）：逐根成败只活在内存，库里模型面唯一的持久事实是
 /// `dbnum_watermark.model_sesno`；进程终止账本消失，重启由两枚水位与写入标记决定欠什么。
 pub mod model_root_ledger;
+/// 强制范围重生成（先删后生成）的未完成留痕（issue #59）：水位不跟着那一删退，进程死在中途时
+/// 只有它记得哪片范围还没补回来；启动就绪后以 `force = false` 续跑。
+pub mod model_scope_regen;
 /// Ref0 统计快照的生产者：目标索引 `DbSet@T` 按 Ref0 数活元素（ADR-071 D6）。
 pub mod ref0_snapshot;
 /// 数据窗口的内存产物 + 同步落库口（原 `model_publish_queue/{structured_data_sink,

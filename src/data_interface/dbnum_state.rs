@@ -293,6 +293,8 @@ DEFINE TABLE IF NOT EXISTS dbnum_write_state SCHEMALESS;
 -- 里，这一条落在这里只因为那个文件此刻归房间段改；两处等价，都是启动序列跑一次。
 DEFINE INDEX IF NOT EXISTS idx_inst_info_dbnum ON inst_info FIELDS dbnum;
 DEFINE TABLE IF NOT EXISTS queue_control SCHEMALESS;
+-- 强制范围重生成的未完成留痕（issue #59，`model_scope_regen`）。
+DEFINE TABLE IF NOT EXISTS model_scope_regen SCHEMALESS;
 "#;
 
 const CURRENT_DATABASE_WATERMARKS: &str = "SELECT dbnum, math::max(sesno) AS sesno FROM pe \
@@ -2094,6 +2096,7 @@ mod tests {
             INFO_TABLE,
             crate::data_interface::write_state::WRITE_STATE_TABLE,
             "queue_control",
+            crate::data_interface::model_scope_regen::SCOPE_REGEN_TABLE,
         ] {
             assert!(
                 INCREMENT_STATE_SCHEMA.contains(&format!("IF NOT EXISTS {table} ")),

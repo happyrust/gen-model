@@ -172,6 +172,12 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   诊断采样，不进入顶层 `status`、`degraded_sections` 或 `blocking_conditions`；
   `release_selection` 恒为 `diagnostic_only`，不得据此自动选择 `e3d210/e3d31`。
   每个数据库在它被打开时各自冻结 latest-session 指针，因此这不是跨文件事务快照。
+- `model_scope_regen`（2026-10-21，issue #59）：强制范围重生成（§4.5 `force=true`，先删后生成）还没补回来
+  的范围，进程内登记表的读数、不读库。`pending` = 被先删、还没全部生成回来或还没确认落盘的范围数；
+  `samples` 最多 16 条，每条 `{refno, dbnum, run_id, root_count, failures, last_error, started_at, updated_at,
+  in_flight}`；`resume` 是启动续跑的进度（`loading|waiting_for_readiness|running|finished|load_failed`，
+  读透形态与服务刚起时为 `null`）。与两枚水位一样是仪表，不进 `status` / `degraded_sections` /
+  `blocking_conditions`。
 - `gen_spatial_tree` 字段已于 2026-08-07 退役：空间/房间计算恒开启，界面不再需要
   「房间增量没开」的降级文案（历史语义见 ADR-011 §8）。
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
@@ -372,6 +378,19 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   发布之间该范围在 §4.5.2 上为空；某根重算失败时其旧产物不再保留，回执按失败报、要重试再发
   一次。显示补齐**不要**传，否则每显示一次都会清掉重算；超时后的重查也不得继续携带
   `force=true`。
+- 范围内逐根生成、逐根记错（2026-10-20）：一根失败不中止整片，200 回执里 `failed_root_count` /
+  `failed_roots`（`{generation_root, error, retryable}`）点名。`retryable=true`（根锁被占、刚生成完被判过期、
+  初始化门、房间参照模型在建、写后台不收、依赖库在入库或读不开）等一等以 `force=false` 重发即可补齐；
+  全部失败时按首错分型整次报错。只有 `force=true` 那一轮里 `retryable=false` 的失败根记进进程内生成根
+  账本（下一窗并进 regen，同一错误连败 5 次判死，ISSUE-029）；可重试的不记，`force=false` 的补齐轮次（客户端
+  续跑、接手下一条的留痕、启动续跑）也不记——它们在同一次点击里会把同一根反复重试，记了会在几秒内
+  把连败数抬到判死线。
+- 进程级中断（2026-10-21，issue #59）：摄入形态下 `force=true` 在清理**之前**落一行
+  `model_scope_regen:scope_{ref0}_{ref1}`，范围内全部根生成成功且 write-behind 确认落盘之后才删；进程死在
+  「删完、还没生成完」之间时，下次启动就绪（初始化门放行、启动凭证复核落地、房间参照模型在位）后
+  服务端自行以 `force=false` 续跑同一范围，成了照样删。其间同一范围的 `force=false` 请求也接手这一行。
+  只写内存 / 读透不落这一行；§4.5.1 显式清理的范围连同被它覆盖的留痕一并撤掉。进度见 §4.1
+  `model_scope_regen`。
 - 按需边界使用一个最小领域错误枚举完成以下分型，不把所有 `anyhow::Error` 压成
   `not_found` 或 `internal`，也不扩建全局错误框架：
   - `422 container` — WORL / SITE / ZONE，按契约恒被拒绝做生成根。**这不是失败**：客户端应展开一层，对子节点逐个 ensure（ADR-0009）。
@@ -412,7 +431,8 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted", "dbnum": 8000,
   "model_source": "database" | "memory", "model_source_reason": null | "read-through" | … }`
   （后三格只在解得出所属库时有，口径同 §4.12）。
-- 本端点只清理、不重算。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
+- 本端点只清理、不重算。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。清理成功后，这个范围及其
+  子范围上还挂着的 §4.5 强制重生成留痕一并撤掉，启动续跑不会把它生成回来。
 - 同步执行、没有 120 s 预算包装：客户端超时时服务端可能已删一部分；重查 §4.5.2 即知。
 
 ### 4.5.1A `POST /api/v1/dbnums/{dbnum}/model/rebuild` — 指定库模型全量重建

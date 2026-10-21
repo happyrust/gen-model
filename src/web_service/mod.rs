@@ -513,6 +513,12 @@ async fn serve_with_ready(
         direct_tree,
         element_attributes,
     };
+    // 强制范围重生成的未完成留痕（issue #59）：就绪之后以 `force = false` 续跑上一进程没补齐的范围。
+    // 解根与 `/model/generate` 共用这份懒建的 `direct_tree`，不另起一份骨架。
+    tokio::spawn(crate::data_interface::model_scope_regen::resume_pending(
+        state.mgr.clone(),
+        state.direct_tree.clone(),
+    ));
 
     // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
     // 而它到底从哪儿来，只有这里和响应头 `x-ops-panel-source` 讲得出。
@@ -1281,6 +1287,18 @@ mod tests {
             .expect("plant-ui web fallback must exist");
         assert!(review < cors, "review router must be merged before the CORS layer");
         assert!(review < fallback, "review router must be merged before the web fallback");
+    }
+
+    /// issue #59：服务起来就挂上强制范围重生成的启动续跑，解根用 `AppState` 里那份 `direct_tree`。
+    #[test]
+    fn serving_starts_the_scope_regeneration_resume_on_the_shared_tree() {
+        let serve = serve_body();
+        let state_at = serve.find("let state = AppState {").expect("state");
+        let resume_at = serve
+            .find("model_scope_regen::resume_pending(")
+            .expect("resume is spawned");
+        assert!(state_at < resume_at, "{serve}");
+        assert!(serve.contains("state.direct_tree.clone()"), "{serve}");
     }
 
     fn serve_body() -> &'static str {
