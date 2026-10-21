@@ -533,8 +533,9 @@ pub(crate) async fn await_roots_durable_with_progress(
     budget: FlushBudget,
     on_progress: impl FnMut(usize, usize),
 ) -> RootsFlushOutcome {
+    let registered = reconcile_replayed_roots(roots);
     ModelWriteBehind::global()
-        .await_roots_reporting(dbnum, roots, budget, on_progress)
+        .await_roots_after_reconcile(dbnum, roots, budget, on_progress, registered)
         .await
 }
 
@@ -555,6 +556,44 @@ impl ModelWriteBehind {
     ) -> RootsFlushOutcome {
         self.await_roots_reporting(dbnum, roots, budget, |_, _| {})
             .await
+    }
+
+    /// 补登记被拒 = write-behind 已停止接收：没进队列、内存回执又确实还没落盘的重放根，不能按
+    /// 「不在队列 = 已 ACK」判成落盘——那会让收尾照常盖 `model_sesno`。它们改判 `exhausted`。
+    async fn await_roots_after_reconcile(
+        &self,
+        dbnum: u32,
+        roots: &[RefNo],
+        budget: FlushBudget,
+        on_progress: impl FnMut(usize, usize),
+        registered: Result<(), OverlayRejected>,
+    ) -> RootsFlushOutcome {
+        let mut outcome = self
+            .await_roots_reporting(dbnum, roots, budget, on_progress)
+            .await;
+        if registered.is_err() {
+            let (unpersisted, acked): (Vec<_>, Vec<_>) = std::mem::take(&mut outcome.acked)
+                .into_iter()
+                .partition(|root| self.store.root_needs_persist(*root));
+            outcome.acked = acked;
+            if !unpersisted.is_empty() {
+                eprintln!(
+                    "模型写后台已停止接收：dbnum={dbnum} 有 {} 个重放根补登记被拒、尚未落盘，按未确认处理",
+                    unpersisted.len()
+                );
+            }
+            outcome
+                .exhausted
+                .extend(unpersisted.into_iter().map(|root| {
+                    (
+                        root,
+                        "model write-behind stopped accepting before this replayed root was \
+                         re-registered"
+                            .to_owned(),
+                    )
+                }));
+        }
+        outcome
     }
 
     async fn await_roots_reporting(
@@ -696,7 +735,9 @@ impl ModelWriteBehind {
                     if entry.identity == identity
                         && matches!(
                             entry.status,
-                            PendingStatus::Pending | PendingStatus::Persisting
+                            PendingStatus::Pending
+                                | PendingStatus::Persisting
+                                | PendingStatus::Blocked
                         ) =>
                 {
                     None
@@ -2041,6 +2082,78 @@ mod tests {
             2,
             "未 ACK 的重放根必须补进 write-behind 落盘，已 ACK 的根不重复刷"
         );
+        controller.stop_now();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconcile_roots_if_unacked_preserves_blocked_status_on_existing_pending_root() {
+        let blocked_root = RefNo::new(7997, 142);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![failed(
+            blocked_root,
+            PersistFailureKind::Blocked,
+            "projection incomplete",
+        )]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller: &'static ModelWriteBehind =
+            Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(blocked_root, "blocked-at-t")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).blocked_roots == 1).await;
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 重放补登记不应把已处于 Blocked 的同身份条目清零重置为立即重试
+        controller
+            .reconcile_roots_if_unacked(&[blocked_root])
+            .unwrap();
+        assert_eq!(snapshot_for(controller).blocked_roots, 1);
+        let outcome = controller
+            .await_roots(7997, &[blocked_root], budget(5, 600))
+            .await;
+        assert_eq!(outcome.blocked.len(), 1);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        controller.stop_now();
+    }
+
+    // 补登记被拒（写后台已停止接收）时，没进队列、又确实没落盘的重放根不许判成 `acked`；
+    // 已经拿到 durable ACK 的根照旧算 `acked`。
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_replay_registration_is_not_reported_as_durable() {
+        let acked_root = RefNo::new(7997, 143);
+        let unacked_replayed = RefNo::new(7997, 144);
+        let adapter = Arc::new(ScriptedPersistence::new(vec![acked(
+            acked_root,
+            "already-acked",
+        )]));
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let controller: &'static ModelWriteBehind =
+            Box::leak(Box::new(ModelWriteBehind::new(store, adapter.clone())));
+
+        controller
+            .publish_commits(vec![commit(acked_root, "already-acked")])
+            .unwrap();
+        wait_until(|| snapshot_for(controller).pending_unique_roots == 0).await;
+        store.try_commit_current(vec![commit(unacked_replayed, "replayed-at-t")]);
+        assert!(store.root_needs_persist(unacked_replayed));
+
+        controller.state().accepting = false;
+        let roots = [acked_root, unacked_replayed];
+        let registered = controller.reconcile_roots_if_unacked(&roots);
+        assert_eq!(registered, Err(OverlayRejected));
+        let outcome = controller
+            .await_roots_after_reconcile(7997, &roots, budget(5, 600), |_, _| {}, registered)
+            .await;
+        assert_eq!(outcome.acked, vec![acked_root]);
+        assert_eq!(
+            outcome
+                .exhausted
+                .iter()
+                .map(|(root, _)| *root)
+                .collect::<Vec<_>>(),
+            vec![unacked_replayed]
+        );
+        assert!(!outcome.all_acked());
         controller.stop_now();
     }
 }
