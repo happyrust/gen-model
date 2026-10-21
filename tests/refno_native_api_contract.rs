@@ -130,12 +130,16 @@ fn model_generate_base_shape_and_route_enrichment_are_frozen() {
         generation_roots: vec!["24381/145018".to_string()],
         cached_root_count: 0,
         generated_root_count: 1,
+        failed_root_count: 0,
+        failed_roots: Vec::new(),
     };
     let value = serde_json::to_value(result).expect("serialize model generate result");
     assert_eq!(
         object_keys(&value),
         keys(&[
             "cached_root_count",
+            "failed_root_count",
+            "failed_roots",
             "generated_instance_count",
             "generated_root_count",
             "generation_root",
