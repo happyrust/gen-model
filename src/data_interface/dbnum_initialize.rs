@@ -160,16 +160,25 @@ impl ModelHalfReport {
         use crate::data_interface::model_root_ledger as ledger;
         for unit in &self.units {
             match unit.status {
-                UnitGenStatus::Generated => {
-                    ledger::record_generated_str(dbnum, &unit.root_refno, &unit.noun, source_end_sesno)
-                }
-                _ => ledger::record_failed_str(
+                UnitGenStatus::Generated => ledger::record_generated_str(
                     dbnum,
                     &unit.root_refno,
                     &unit.noun,
                     source_end_sesno,
-                    unit.message.as_deref().unwrap_or("initialization root failed"),
                 ),
+                // ISSUE-029：连败判死的回执在这里不用——初始化收尾的盖章判据只看本任务成败，
+                // 不死根与活根在这条路上同样算「这一根没生成」。
+                _ => {
+                    ledger::record_failed_str(
+                        dbnum,
+                        &unit.root_refno,
+                        &unit.noun,
+                        source_end_sesno,
+                        unit.message
+                            .as_deref()
+                            .unwrap_or("initialization root failed"),
+                    );
+                }
             }
         }
     }

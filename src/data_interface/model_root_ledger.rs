@@ -5,7 +5,9 @@
 //! （ADR-060：被写下的承诺，任务收尾一笔盖）；账本只是这一个进程在两次盖章之间对逐根成败的
 //! 工作记录——下一窗要把失败的根并进 regen（`window_root_plan::carry_unsettled_generation`）、
 //! 一致性判决要数「还在赶 / 已放弃」（`dbnum_consistency`）、`/model/ensure` 要回一句发布状态，
-//! 都读它。进程终止它就消失，这是有意的：重启后「欠什么」由两枚水位回答——`model_sesno`
+//! 都读它。同一根同一错误连败 [`DEAD_ROOT_STREAK`] 次判死转「已放弃」：不拦水位、不进 regen，
+//! 与「已追平」并排陈述（ISSUE-029：确定性失败要有终态，不能拖着整个库的水位永远追不上）。
+//! 进程终止它就消失，这是有意的：重启后「欠什么」由两枚水位回答——`model_sesno`
 //! 落后就按 `model_sesno → 文件最新` 重排（`startup_reconcile`），写入标记停在 `writing` 就整库
 //! 重初始化（ADR-073 D3）。没有一条恢复路需要知道上一进程里哪一根曾经失败。
 //!
@@ -21,6 +23,11 @@ use std::sync::{LazyLock, RwLock};
 
 use aios_core::RefnoEnum;
 
+/// 同一根带着同一句错误连续失败这么多次之后判死（ISSUE-029）：`Failed` 转 `Refused`，
+/// 不再拦 `model_sesno`、下一窗也不再并进 regen。「同一错误」才算连败——错误变了说明
+/// 现场在动，重新数；数值沿用退役前 `model_update_pending::MAX_ATTEMPTS` 的 5。
+pub(crate) const DEAD_ROOT_STREAK: u32 = 5;
+
 /// 一根最近一次生成的结局。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootOutcome {
@@ -29,6 +36,7 @@ pub enum RootOutcome {
     /// 这一版失败了，下一窗 / 下一次该库任务要重排它（拦水位）。
     Failed { error: String },
     /// 永久放弃：服务端判它解析不出合法生成根（`http_422` 一类，noun 与数据的永久性质），
+    /// 或同一错误连败 [`DEAD_ROOT_STREAK`] 次判死（ISSUE-029：确定性失败要有终态）。
     /// 重试多少次都一样。不拦水位，但必须与「已追平」并排陈述（ADR-060 D5 / Q10）。
     Refused { error: String },
 }
@@ -40,6 +48,8 @@ pub struct RootEntry {
     pub outcome: RootOutcome,
     /// 这一根这次是按哪一版源生成 / 失败的；`0` = 调用方不知道（按需 ensure）。
     pub source_end_sesno: i32,
+    /// 同一句错误连续失败的次数（`Generated` 时恒 0）：攒到 [`DEAD_ROOT_STREAK`] 转 `Refused`。
+    pub failure_streak: u32,
 }
 
 impl RootEntry {
@@ -122,26 +132,67 @@ pub fn record_generated(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesn
             noun: noun.trim().to_ascii_uppercase(),
             outcome: RootOutcome::Generated,
             source_end_sesno,
+            failure_streak: 0,
         },
     );
 }
 
-/// 这一根这一版失败了（可重试）。`error` 截 2000 字，与退役前 `gen_root.last_error` 同一口径。
-pub fn record_failed(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesno: i32, error: &str) {
-    record(
-        dbnum,
+/// 这一根这一版失败了：同一错误连败 [`DEAD_ROOT_STREAK`] 次判死转 `Refused`（ISSUE-029），
+/// 否则记 `Failed`（下一窗重排、拦水位）。`error` 截 2000 字，与退役前 `gen_root.last_error`
+/// 同一口径。返回这根记完之后是不是已放弃（`Refused`）——调用方拿它决定拦不拦水位。
+pub fn record_failed(
+    dbnum: u32,
+    root: RefnoEnum,
+    noun: &str,
+    source_end_sesno: i32,
+    error: &str,
+) -> bool {
+    let error = truncate(error);
+    let mut ledger = write();
+    let roots = ledger.roots.entry(dbnum).or_default();
+    let streak = match roots.get(&root) {
+        // 同一句错误接着败才累连败——`Refused` 之后同错再败仍是那个死根（继续记 `Refused`）；
+        // 错误换了说明现场变了，从 1 重新数（`Refused` 也退回 `Failed`，给它一次新的机会）。
+        Some(entry) => {
+            let same_failure = matches!(
+                &entry.outcome,
+                RootOutcome::Failed { error: last } | RootOutcome::Refused { error: last }
+                    if last == &error
+            );
+            if same_failure {
+                entry.failure_streak + 1
+            } else {
+                1
+            }
+        }
+        None => 1,
+    };
+    let refused = streak >= DEAD_ROOT_STREAK;
+    let outcome = if refused {
+        RootOutcome::Refused { error }
+    } else {
+        RootOutcome::Failed { error }
+    };
+    roots.insert(
         root,
         RootEntry {
             noun: noun.trim().to_ascii_uppercase(),
-            outcome: RootOutcome::Failed {
-                error: truncate(error),
-            },
+            outcome,
             source_end_sesno,
+            failure_streak: streak,
         },
     );
+    drop(ledger);
+    if refused && streak == DEAD_ROOT_STREAK {
+        println!(
+            "dbnum={dbnum} 生成根 {root} 同一错误连败 {streak} 次，判死放弃（Refused）：\
+             不再拦 model_sesno、下一窗不进 regen，账本与 /health 按「已放弃」并排陈述"
+        );
+    }
+    refused
 }
 
-/// 这一根永久放弃（`http_422` 一类）。
+/// 这一根永久放弃（`http_422` 一类，服务端判它解析不出合法生成根）。
 pub fn record_refused(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesno: i32, error: &str) {
     record(
         dbnum,
@@ -152,6 +203,7 @@ pub fn record_refused(dbnum: u32, root: RefnoEnum, noun: &str, source_end_sesno:
                 error: truncate(error),
             },
             source_end_sesno,
+            failure_streak: 0,
         },
     );
 }
@@ -164,11 +216,29 @@ pub fn record_generated_str(dbnum: u32, root: &str, noun: &str, source_end_sesno
     }
 }
 
-pub fn record_failed_str(dbnum: u32, root: &str, noun: &str, source_end_sesno: i32, error: &str) {
+pub fn record_failed_str(
+    dbnum: u32,
+    root: &str,
+    noun: &str,
+    source_end_sesno: i32,
+    error: &str,
+) -> bool {
     match parse_root(root) {
         Some(refno) => record_failed(dbnum, refno, noun, source_end_sesno, error),
-        None => log::warn!("model root ledger: `{root}` is not an a/b refno; failure not recorded"),
+        None => {
+            log::warn!("model root ledger: `{root}` is not an a/b refno; failure not recorded");
+            false
+        }
     }
+}
+
+/// 这根（文本 `a/b`）现在是不是已放弃（`Refused`）：判死的根不拦水位、不进 regen，
+/// 收尾与规划各拿它当「不算失败」的那一格。解析不出 `root` 按没放弃算——那种根本来就
+/// 进不了账本，拦不拦由调用方自己的判据说。
+pub fn root_refused(dbnum: u32, root: &str) -> bool {
+    parse_root(root)
+        .and_then(|refno| entry(dbnum, refno))
+        .is_some_and(|entry| entry.is_refused())
 }
 
 /// 这一根不再是根 / 已被删掉：从账本里摘掉。
@@ -307,6 +377,71 @@ mod tests {
         forget_dbnum(dbnum);
         assert_eq!(census(dbnum), LedgerCensus::default());
         assert!(!census_all().contains_key(&dbnum));
+    }
+
+    /// ISSUE-029：同一根同一句错误连败 [`DEAD_ROOT_STREAK`] 次判死——`Failed` 转 `Refused`、
+    /// 不再在赶、不拦水位；错误换了重新数；生成成功清零；判死后同错再败仍是 `Refused`。
+    #[test]
+    fn the_same_error_five_times_in_a_row_turns_a_root_into_refused() {
+        let dbnum = 990_004;
+        forget_dbnum(dbnum);
+        for turn in 1..DEAD_ROOT_STREAK {
+            assert!(
+                !record_failed(
+                    dbnum,
+                    r(1),
+                    "BRAN",
+                    26,
+                    "db 7004 会话 3 的索引里没有 15196/40431"
+                ),
+                "第 {turn} 次还没到判死线"
+            );
+            assert!(entry(dbnum, r(1)).unwrap().is_chasing());
+            assert_eq!(
+                entry(dbnum, r(1)).unwrap().failure_streak,
+                turn,
+                "连败按次累计"
+            );
+        }
+        assert!(
+            record_failed(
+                dbnum,
+                r(1),
+                "BRAN",
+                26,
+                "db 7004 会话 3 的索引里没有 15196/40431"
+            ),
+            "第 {DEAD_ROOT_STREAK} 次判死"
+        );
+        let dead = entry(dbnum, r(1)).unwrap();
+        assert!(dead.is_refused());
+        assert!(!dead.is_chasing());
+        assert!(chasing_roots(dbnum).is_empty(), "判死的根不进 regen");
+        assert_eq!(census(dbnum).abandoned, 1);
+        assert!(root_refused(dbnum, "24384/1"));
+
+        // 判死后同一句错误再败（按需 ensure 之类又触到它）：仍是那个死根，不复活回 chasing。
+        assert!(record_failed(
+            dbnum,
+            r(1),
+            "BRAN",
+            26,
+            "db 7004 会话 3 的索引里没有 15196/40431"
+        ));
+        assert!(entry(dbnum, r(1)).unwrap().is_refused());
+
+        // 另一根：错误换了 = 现场在变，重新数。
+        record_failed(dbnum, r(2), "BRAN", 26, "error-a");
+        record_failed(dbnum, r(2), "BRAN", 26, "error-b");
+        assert_eq!(entry(dbnum, r(2)).unwrap().failure_streak, 1);
+        assert!(entry(dbnum, r(2)).unwrap().is_chasing());
+
+        // 已放弃的根带着不同的错回来（数据被改过、重新进窗）：退回 chasing 重新计。
+        assert!(!record_failed(dbnum, r(1), "BRAN", 27, "error-c"));
+        assert!(entry(dbnum, r(1)).unwrap().is_chasing());
+        assert_eq!(entry(dbnum, r(1)).unwrap().failure_streak, 1);
+
+        forget_dbnum(dbnum);
     }
 
     #[test]

@@ -262,6 +262,7 @@ fn a_root_is_current_when_the_library_promise_or_its_own_ledger_entry_covers_the
         noun: "BRAN".into(),
         outcome: RootOutcome::Generated,
         source_end_sesno: sesno,
+        failure_streak: 0,
     };
     let failed = RootEntry {
         noun: "BRAN".into(),
@@ -269,6 +270,7 @@ fn a_root_is_current_when_the_library_promise_or_its_own_ledger_entry_covers_the
             error: "boom".into(),
         },
         source_end_sesno: 26,
+        failure_streak: 1,
     };
     // 库追平到 26、目录落款追平：账本里没有的根命中；要求 27 就不命中。
     assert!(root_credential_covers(Some(&library), None, 26, latest));
