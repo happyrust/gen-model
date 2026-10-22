@@ -118,6 +118,18 @@
   `the_task_probe_reads_the_cached_watch_dir_plan`（探针只读 `latest_for`）。
 - **计划**：`docs/plans/2026-10-15-watch-root-scan-healthy-skip-plan.md`。
 
+## 0.1.42 — 2026-10-22
+
+### 中心线逐段外径来源与读取版本并入发布线（配套前端连排相邻测量）
+
+- `GET /api/v1/spatial/centerline` 每段带自己的外径（隐式管身不再置空）和 `diameter_evidence`
+  （`catalogue` / `bore-estimate` / `missing`，附目录外径与到达通径），顶层补
+  `outside_diameter_refno` / `diameter_evidence`（`37aaa6527`，源 `a1e3210cd`）。
+- 中心线读取回报实际打开的设计库 / 目录库会话（`source_version`），读取期间源库变化时按
+  precondition 拒绝、不返回混版本结果；构件记录查询附 `record_source_sessions`
+  （`333fbc309`，源 `f993816c7`）。
+- 同步前端 `plant3d-web` main `7649891d`：连排相邻测量按逐段证据使用目录外径，记录带模型版本。
+
 ## 0.1.41 — 2026-10-19
 
 ### SCTN 负体分型账修复收口并入发布线（gen-model #34 D 线）
