@@ -1234,6 +1234,11 @@ mod tests {
     /// 位姿/重建归属、取消剔除、同元素重建吞并位姿，都钉在这里。
     #[test]
     fn partition_splits_pose_from_regen_and_respects_cancellation() {
+        // 入口丢弃门的测试覆盖是进程级的，只有 `set` 一侧拿锁，读的一侧不拿：别的测试
+        // （同模块的 `no_geometry_entry_gate_only_removes_model_work`、`options` 的开关测试）
+        // 把门按开的那一窗里，这里的 `SCOM` 会被当无几何入口整个丢掉。持着覆盖才与它们互斥，
+        // 所以把门钉在关。
+        let _gate_off = crate::options::ModelEntryDropNoGeometryOverride::set(false);
         let pose = aios_core::RefU64((1u64 << 32) | 11);
         let geom = aios_core::RefU64((1u64 << 32) | 12);
         let both = aios_core::RefU64((1u64 << 32) | 13);
