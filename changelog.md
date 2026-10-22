@@ -118,6 +118,23 @@
   `the_task_probe_reads_the_cached_watch_dir_plan`（探针只读 `latest_for`）。
 - **计划**：`docs/plans/2026-10-15-watch-root-scan-healthy-skip-plan.md`。
 
+## 0.1.43 — 2026-10-22
+
+### 模型生成修复随 vendor 推进并入发布线；范围重生成容错（#59）与 ISSUE-029 判死
+
+- vendor 推进（`ci/gen-model-linux-20260918` 快进到各自 main）：e3d-model `f2ecfe9` → `230d20b`（95 个提交）、
+  e3d-io `5245654` → `3bed2ba`（149 个）；e3d-attlib / plant-mbd / old-aios-core 不变。模型生成对 E3D TTY 真值的
+  修复随之上线：墙与门窗、楼板 PFIT、FIXING / datum 标架、RVM 记录种类、MDS 关节截杆、设备通用图元 GENPRI、
+  折弯板 BPANEL、楼梯踏步 TREAD 等（逐项见 e3d-model 的 `changelog.md`）。`Cargo.lock` 随之更新 e3d-io 0.5.0
+  与 e3d-model 新依赖 `spade`（`c16b99c6b`）。
+- 范围重生成逐根容错，强制重生成先落留痕，进程中断后启动续跑（GitHub #59，`aa6ccb44e`、`956e4d9b3`）。
+- ISSUE-029：同一根同一错误连败 5 次判死为「已放弃」，不再拦模型水位；只数这根自己的生成报错；判死
+  那一窗撤掉这根的旧模型（`2aeb50ddd`、`5e89f9565`、`a868cd602`）。
+- 窗口计划缓存按源文件分域，规划期两端输入移交执行体（Issue #50，`0350bac97`）；水位镜像 Ticket 加 Drop
+  兜底（`eef944635`）；write-behind 重放补登记保留 Blocked 状态（`97a9ba19b`）；房间更新记录写库失败时
+  不报完成（`4ccf3d44d`）。
+- 生成器读取集合随 e3d-model 同步到 159 个属性名（`f909a3746` … `a67fc44f9`）。
+
 ## 0.1.42 — 2026-10-22
 
 ### 中心线逐段外径来源与读取版本并入发布线（配套前端连排相邻测量）
