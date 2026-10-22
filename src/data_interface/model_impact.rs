@@ -2651,7 +2651,9 @@ mod tests {
         // 与伪属性 `TREADD`（159）；都不是 DCHC=0，上面那一列不变。
         // 2026-10-22：e3d-model `704c632`（详图式栏杆按两端距离截段）读 `SZDI` / `EZDI`（161）；都不是 DCHC=0，
         // 上面那一列不变。
-        assert_eq!(generation_read_set().len(), 161, "读取集合条数漂移");
+        // 2026-10-22：e3d-model `69dea3f`（放坡构件的 P 点按 `SLODIR` 判管身共轴）读 `SLODIR`（162）；字典 DCHC=4，
+        // 上面那一列不变。
+        assert_eq!(generation_read_set().len(), 162, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
