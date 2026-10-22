@@ -44,10 +44,11 @@
 //! `JOIE` 关节 FIXING 名下 TMPL 的负体，v0.1.31 `d3355a8` 收口），同时 e3d-model 自己的 `plan_update` 补了同库关节级联
 //! （`increment::joint_consumer_of`：FIXING 进计划集 → 指着它的 GENSEC 一并重建；`b820a4a` 的 `joint_fixings_of` 管反方向）。
 //! 所以同库 FIXING ↔ GENSEC 这一类，开关关着对端根也已在 `regen` 里（`aps250110_0001` 29→30 两态都是 258 根，见
-//! `tests::live`）。仍只有本开关补得上的是 `SJOI` / `PJOI` / `SUBJ` → SCTN 与 `CMPF.CFRA`（`aps7200_0001` 3→4：开 8 / 关 6）；
-//! SCTN 的关节负体 e3d-model 还没接（`elmodl::collect_joint_negatives` 只对 GENSEC 调用），这一类今天几何上仍不显，
-//! SCTN 那一支落地即成正确性项（计划 §3 C2 ★0907）。跨库那一格两边都盖不住：e3d-model 对 `CREF` 指到别的库的
-//! FIXING 只记一条 note（`JointConsumer::OtherDatabase`）。
+//! `tests::live`）。**SCTN 那一支 2026-10-23 落地**（e3d-model `28d0402`，计划 §3 C2 ★0907）：带目录正体、标架有样本的
+//! SJOI 自成单元，法兰端板的负体切梁端，`plan_update` 的同库关节级联也推广到 SJOI ↔ SCTN——`aps7200_0001` 3→4
+//! （94 个 `SJOI` 单独改）开关关着也是 8 根（此前关 6 / 开 8）。仍只有本开关补得上的是 `PJOI` / `SUBJ` → SCTN、
+//! 标架没有样本的 SJOI（连接梁转了 ±90°、连的就是宿主自己）与 `CMPF.CFRA`。跨库那一格两边都盖不住：
+//! e3d-model 对 `CREF` 指到别的库的关节只记一条 note（`JointConsumer::OtherDatabase`）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -824,11 +825,13 @@ mod tests {
         /// `SCTN` 不在同一根下）、`aps250110_0001` 29→30（193 个 `FIXING` 单独改 → `GENSEC`）。
         /// 开关开：回指成立的边 ≥ 普查数、对端根 ∈ `regen`、只多出对端根、两窗都没有跨库对端；开关关：一条边都不读。
         ///
-        /// 开关关着对端根进不进 `regen`，两窗从 2026-09-27 起分了家（表的最后一列）：
-        /// - `SJOI` → SCTN（aps7200）：只有本开关补得上，开关开必须严格多出根（关 6 / 开 8）；
+        /// 开关关着对端根进不进 `regen`（表的最后一列）：两窗现在都钉成「关着已全覆盖」——e3d-model 的同库关节级联
+        /// 哪天掉了，这一窗先红。
         /// - FIXING → GENSEC（aps250110）：e3d-model `plan_update` 自己的同库关节级联（`increment::joint_consumer_of`，
-        ///   `d510253`）把指着变更 FIXING 的 GENSEC 放进计划集、成了闭包种子，开关关着对端根也全在 `regen` 里
-        ///   （09-07 关 251 / 开 258，09-30 两态都是 258）。这里钉成「关着已全覆盖」：那条级联哪天掉了，这一窗先红。
+        ///   `d510253`）把指着变更 FIXING 的 GENSEC 放进计划集、成了闭包种子（09-07 关 251 / 开 258，09-30 起两态都是 258）；
+        /// - `SJOI` → SCTN（aps7200）：2026-10-23 起同一条级联推广到 SJOI ↔ SCTN（e3d-model `28d0402`），关 6 / 开 8 →
+        ///   两态都是 8。这里的 `DbSet` 没挂目录库，读不出目录链的 SJOI 按目录件算（`category::is_catalogue_joint` 的
+        ///   读挂口径）。
         ///
         /// 只读文件：`AIOS_APS_PROJECT_DIR`（默认 `D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000`）+
         /// `AIOS_E3D_TEMPLATE_DIR`。
@@ -842,7 +845,7 @@ mod tests {
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             // (库, S, T, 持属性端 noun, 普查的回指成立边数, 开关关着对端根是否已全在 regen 里)
             let table = [
-                ("aps7200_0001", 3u32, 4u32, "SJOI", 94usize, false),
+                ("aps7200_0001", 3u32, 4u32, "SJOI", 94usize, true),
                 ("aps250110_0001", 29, 30, "FIXING", 193, true),
             ];
             for (name, base_sesno, target_sesno, noun, census_edges, covered_when_off) in table {
