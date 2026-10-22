@@ -1334,7 +1334,8 @@ mod tests {
         // 隐含直管段挂在 E3D 确认的路由容器名下，几何由成员的 arrive/leave 点推导。
         assert!(unit_derives_geometry_from_member_positions("BRAN"));
         assert!(!unit_derives_geometry_from_member_positions("HANG"));
-        for noun in ["LUG", "SUPC", "TRUNNI"] {
+        assert!(!unit_derives_geometry_from_member_positions("SUPC"));
+        for noun in ["LUG", "TRUNNI"] {
             assert!(unit_derives_geometry_from_member_positions(noun));
         }
         assert!(unit_derives_geometry_from_member_positions(" bran "));

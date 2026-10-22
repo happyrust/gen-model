@@ -449,7 +449,7 @@ fn gen_model_side(
         ref_reversal: HashMap::new(),
     };
 
-    // ④ issue #5 改判：位姿目标的生成根若是派生几何单元（BRAN/LUG/SUPC/TRUNNI）→ 整根重生成；
+    // ④ issue #5 改判：位姿目标的生成根若是派生几何单元（BRAN/LUG/TRUNNI）→ 整根重生成；
     //    位姿目标子树里的派生单元 → 额外排重生成（前态子树）。
     let transform_targets: Vec<RefnoEnum> = transform.iter().copied().collect();
     let mut derived_under: BTreeMap<String, String> = BTreeMap::new();
