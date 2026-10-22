@@ -854,6 +854,20 @@ pub fn scan_tree(
         return Err(SpatialQueryError::NotReady(state));
     }
     let center = resolve_center(params, centerline, memory, tree)?;
+    scan_tree_with_center(tree, state, params, center)
+}
+
+/// 中心已在锁外解好时只过门禁、取候选，判据同 [`scan_tree`]。`nearby/branches` 的源管不在投影里时，
+/// 中心来自库里冷读的整根记录（`spatial_branches::nearby`）。
+pub fn scan_tree_with_center(
+    tree: &AccelerationTree,
+    state: SpatialTreeState,
+    params: &SpatialQueryParams,
+    center: Center,
+) -> Result<Scan, SpatialQueryError> {
+    if !state.is_ready() {
+        return Err(SpatialQueryError::NotReady(state));
+    }
     let (candidates, truncated_candidates) = if state == SpatialTreeState::ReadyEmpty {
         (Vec::new(), false)
     } else {
@@ -1380,15 +1394,24 @@ pub(crate) async fn scan_global_tree(
     params: &SpatialQueryParams,
     centerline: Option<&BranCenterline>,
 ) -> Result<Scan, SpatialQueryError> {
-    // 读锁只罩住「解中心 + 取候选」，中间没有 await；候选 `collect()` 完即放锁。
+    with_global_tree(|tree, state| {
+        scan_tree(tree, state, params, centerline, ModelMemoryStore::global())
+    })
+    .await
+}
+
+/// [`scan_tree_with_center`] 的全局树版。
+pub(crate) async fn scan_global_tree_with_center(
+    params: &SpatialQueryParams,
+    center: Center,
+) -> Result<Scan, SpatialQueryError> {
+    with_global_tree(|tree, state| scan_tree_with_center(tree, state, params, center)).await
+}
+
+/// 树的读锁只在这里拿：只罩住「解中心 + 取候选」，中间没有 await；候选 `collect()` 完即放锁。
+async fn with_global_tree<T>(scan: impl FnOnce(&AccelerationTree, SpatialTreeState) -> T) -> T {
     let tree = GLOBAL_AABB_TREE.read().await;
-    scan_tree(
-        &tree,
-        spatial_state::current_state(),
-        params,
-        centerline,
-        ModelMemoryStore::global(),
-    )
+    scan(&tree, spatial_state::current_state())
 }
 
 /// 锁外的后半程（[`assemble_nearby`] / [`assemble_nearby_refnos`]）在 `spawn_blocking` 里跑，不占 tokio worker：

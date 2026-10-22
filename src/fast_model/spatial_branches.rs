@@ -2,14 +2,15 @@
 //! they deliberately do not enter the ordinary spatial tree (ADR-072).
 use super::{
     model_memory_store::{ModelMemoryStore, ProjectionScope},
+    model_record_reader,
     spatial_query::{
-        self, BoxJson, CenterJson, ElementAttributes, NearbyItem, Scan, SpatialQueryError,
-        SpatialQueryParams, Target,
+        self, BoxJson, Center, CenterJson, CenterSource, ElementAttributes, NearbyItem, Scan,
+        SpatialQueryError, SpatialQueryParams, Target,
     },
 };
 use crate::data_interface::generation_root::refno_from_e3d;
-use aios_core::RefU64;
-use parry3d::bounding_volume::Aabb;
+use aios_core::{GeomInstQuery, RefU64, RefnoEnum};
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -168,11 +169,109 @@ pub async fn nearby(
             "周边管道查询源必须为 BRAN".into(),
         ));
     }
-    let scan = spatial_query::scan_global_tree(params, None).await?;
+    let scan = match spatial_query::scan_global_tree(params, None).await {
+        // The projection is empty after a restart, but the source's rows are in the database.
+        Err(SpatialQueryError::NotFound(_)) => {
+            let records =
+                model_record_reader::records_of_root(&aios_core::SUL_DB, RefnoEnum::from(source))
+                    .await
+                    .map_err(SpatialQueryError::Internal)?;
+            let center = durable_center(source, &records).ok_or_else(|| {
+                SpatialQueryError::NotFound(format!(
+                    "BRAN {} 还没生成模型：模型投影、空间树和库里都没有它的几何",
+                    RefnoEnum::from(source).to_pdms_str()
+                ))
+            })?;
+            spatial_query::scan_global_tree_with_center(params, center).await?
+        }
+        scan => scan?,
+    };
     let params = params.clone();
     tokio::task::spawn_blocking(move || {
         assemble(scan, &params, attrs.as_ref(), ModelMemoryStore::global())
     })
     .await
     .map_err(|error| SpatialQueryError::Internal(anyhow::anyhow!("周边管道查询线程失败: {error}")))
+}
+
+/// Source bounds when the projection has none: the union of the root's database rows that carry
+/// geometry, filtered like the projection path of `spatial_query::resolve_center`.
+pub fn durable_center(source: RefU64, records: &[GeomInstQuery]) -> Option<Center> {
+    let mut union: Option<Aabb> = None;
+    let mut subtree = HashSet::from([source]);
+    for record in records {
+        let aabb = record.world_aabb;
+        let usable = aabb
+            .mins
+            .coords
+            .iter()
+            .chain(aabb.maxs.coords.iter())
+            .all(|value| value.is_finite())
+            && (0..3).all(|axis| aabb.mins[axis] <= aabb.maxs[axis]);
+        if !usable || record.insts.iter().all(|inst| inst.geo_hash.is_empty()) {
+            continue;
+        }
+        subtree.insert(record.refno.refno());
+        union = Some(union.map_or(aabb, |current| current.merged(&aabb)));
+    }
+    let target = union?;
+    Some(Center {
+        point: target.center(),
+        source: CenterSource::RefnoAabbCenter,
+        target_box: Some(target),
+        subtree,
+        centerline: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parry3d::math::Point;
+
+    /// 本文件的用例独占 `4000000019/*` 这一组 refno。
+    fn id(seq: u32) -> RefU64 {
+        RefU64::from_two_nums(4_000_000_019, seq)
+    }
+
+    fn aabb(min: [f32; 3], max: [f32; 3]) -> Aabb {
+        Aabb::new(min.into(), max.into())
+    }
+
+    #[test]
+    fn the_durable_center_is_the_union_of_rows_with_geometry() {
+        let row = |seq: u32, min: [f32; 3], max: [f32; 3], mesh: &str| GeomInstQuery {
+            refno: RefnoEnum::from(id(seq)),
+            old_refno: None,
+            owner: RefnoEnum::from(id(1)),
+            world_aabb: aabb(min, max),
+            world_trans: Default::default(),
+            insts: vec![aios_core::ModelHashInst {
+                geo_hash: mesh.into(),
+                ..Default::default()
+            }],
+            has_neg: false,
+            generic: "ELBO".into(),
+            pts: None,
+            date: None,
+        };
+        let center = durable_center(
+            id(1),
+            &[
+                row(11, [0.0; 3], [100.0; 3], "elbo"),
+                row(1, [900.0, 0.0, 0.0], [1_000.0, 100.0, 100.0], "tube"),
+                row(12, [-5_000.0; 3], [-4_000.0; 3], ""),
+                row(13, [f32::NAN, 0.0, 0.0], [1.0; 3], "flan"),
+            ],
+        )
+        .expect("两条有几何的行");
+        assert_eq!(center.source, CenterSource::RefnoAabbCenter);
+        let target = center.target_box.expect("box");
+        assert_eq!(
+            (target.mins, target.maxs),
+            (Point::new(0.0, 0.0, 0.0), Point::new(1_000.0, 100.0, 100.0))
+        );
+        assert_eq!(center.subtree, HashSet::from([id(1), id(11)]));
+        assert!(durable_center(id(1), &[row(12, [0.0; 3], [1.0; 3], "")]).is_none());
+    }
 }
