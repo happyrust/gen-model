@@ -519,6 +519,8 @@ async fn serve_with_ready(
         state.mgr.clone(),
         state.direct_tree.clone(),
     ));
+    // 周边管道查询的直管段索引：就绪后在后台读一遍库，之后定时重读（`spatial_tube_index`）。
+    crate::fast_model::spatial_tube_index::ensure_started();
 
     // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
     // 而它到底从哪儿来，只有这里和响应头 `x-ops-panel-source` 讲得出。

@@ -82,6 +82,8 @@ pub mod spatial_state;
 
 pub mod spatial_query;
 pub mod spatial_branches;
+/// 每根 BRAN 的直管段并集盒（`nearby/branches` 补没加载过的邻管）。
+pub mod spatial_tube_index;
 
 pub mod spatial_discipline;
 

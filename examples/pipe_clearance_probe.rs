@@ -168,6 +168,7 @@ fn check_candidates() -> anyhow::Result<()> {
             RootReceipt,
         },
         spatial_branches::assemble,
+        spatial_tube_index::TubeIndexState,
         spatial_query::{
             Candidate, Center, CenterSource, ElementAttributes, RawSpatialQuery, Scan,
             SpatialQueryParams,
@@ -176,7 +177,7 @@ fn check_candidates() -> anyhow::Result<()> {
     };
     use e3d_model::elmodl::GeometryId;
     use parry3d::bounding_volume::Aabb;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     fn id(seq: u32) -> RefU64 {
         RefU64::from_two_nums(7997, seq)
     }
@@ -289,7 +290,8 @@ fn check_candidates() -> anyhow::Result<()> {
         ..Default::default()
     };
     let params = SpatialQueryParams::parse(&raw).map_err(anyhow::Error::msg)?;
-    let first = assemble(scan(), &params, &Attrs, &memory);
+    let tubes = TubeIndexState::Ready(Arc::new(HashMap::new()));
+    let first = assemble(scan(), &params, &Attrs, &memory, &tubes);
     anyhow::ensure!(
         first.total_count == 2
             && first.results.len() == 1
@@ -299,7 +301,7 @@ fn check_candidates() -> anyhow::Result<()> {
     );
     let mut second_params = params.clone();
     second_params.page = 2;
-    let second = assemble(scan(), &second_params, &Attrs, &memory);
+    let second = assemble(scan(), &second_params, &Attrs, &memory, &tubes);
     let ids: HashSet<_> = first
         .results
         .iter()
@@ -315,7 +317,7 @@ fn check_candidates() -> anyhow::Result<()> {
         entry: RStarBoundingBox::new(source, RefnoEnum::from(id(999)), "UNSET".into()),
         distance: 0.0,
     });
-    let uncertain = assemble(uncertain, &params, &Attrs, &memory);
+    let uncertain = assemble(uncertain, &params, &Attrs, &memory, &tubes);
     anyhow::ensure!(
         uncertain.truncated_candidates && !uncertain.warnings.is_empty(),
         "unknown owner hidden"
@@ -324,7 +326,7 @@ fn check_candidates() -> anyhow::Result<()> {
         ProjectionScope::Current,
         vec![commit(7, [f32::NAN, 0.0, 0.0], [50.0; 3])],
     );
-    let damaged = assemble(scan(), &params, &Attrs, &memory);
+    let damaged = assemble(scan(), &params, &Attrs, &memory, &tubes);
     anyhow::ensure!(
         damaged.total_count == 2 && damaged.truncated_candidates && !damaged.warnings.is_empty(),
         "invalid bounds hidden"

@@ -1,5 +1,6 @@
-//! Nearby loaded BRAN roots. Include implicit tubes from the current projection:
-//! they deliberately do not enter the ordinary spatial tree (ADR-072).
+//! Nearby BRAN roots. Implicit tubes deliberately do not enter the ordinary spatial tree (ADR-072):
+//! loaded roots contribute them from the current projection, every other BRAN from the per-BRAN
+//! tube box index (`spatial_tube_index`).
 use super::{
     model_memory_store::{ModelMemoryStore, ProjectionScope},
     model_record_reader,
@@ -7,6 +8,7 @@ use super::{
         self, BoxJson, Center, CenterJson, CenterSource, ElementAttributes, NearbyItem, Scan,
         SpatialQueryError, SpatialQueryParams, Target,
     },
+    spatial_tube_index::{self, TubeIndexState},
 };
 use crate::data_interface::generation_root::refno_from_e3d;
 use aios_core::{GeomInstQuery, RefU64, RefnoEnum};
@@ -45,6 +47,7 @@ pub fn assemble(
     params: &SpatialQueryParams,
     attrs: &dyn ElementAttributes,
     memory: &ModelMemoryStore,
+    tubes: &TubeIndexState,
 ) -> NearbyBranchesResponse {
     let source = match params.target {
         Target::Refno(source) => source,
@@ -78,11 +81,13 @@ pub fn assemble(
         }
     }
     // Read root indexes, then only BRAN geometry. No global deep geometry clone.
+    let mut projected = HashSet::new();
     for root in memory.roots(ProjectionScope::Current) {
         let root_refno = refno_from_e3d(root).refno();
         if root_refno == source {
             continue;
         }
+        projected.insert(root_refno);
         match attrs.noun_of(root_refno).as_deref() {
             Some("BRAN") => {}
             None => {
@@ -109,6 +114,24 @@ pub fn assemble(
         }
     }
     let source_box = scan.center.target_box.expect("refno source has bounds");
+    // A projected root's own records are newer than its index entry.
+    if let TubeIndexState::Ready(index) = tubes {
+        for (&root, aabb) in index.iter() {
+            if root == source
+                || projected.contains(&root)
+                || spatial_query::aabb_min_distance(&source_box, aabb) > params.radius
+            {
+                continue;
+            }
+            match attrs.noun_of(root).as_deref() {
+                Some("BRAN") => add_box(&mut bounds, root, *aabb),
+                None => {
+                    unresolved.insert(root);
+                }
+                _ => {}
+            }
+        }
+    }
     let mut results: Vec<_> = bounds
         .into_iter()
         .filter_map(|(root, aabb)| {
@@ -142,6 +165,17 @@ pub fn assemble(
             unresolved.len()
         ));
     }
+    let index_ready = match tubes {
+        TubeIndexState::Ready(_) => true,
+        TubeIndexState::Building => {
+            warnings.push("直管段索引还在建立，没加载过的邻管可能漏检".to_owned());
+            false
+        }
+        TubeIndexState::Failed(reason) => {
+            warnings.push(format!("直管段索引读取失败（{reason}），没加载过的邻管可能漏检"));
+            false
+        }
+    };
     NearbyBranchesResponse {
         returned_count: results.len(),
         results,
@@ -149,8 +183,12 @@ pub fn assemble(
         radius: params.radius,
         total_count,
         has_more,
-        truncated_candidates: scan.truncated_candidates || !unresolved.is_empty(),
-        coverage: "global-tree-and-current-bran-projection",
+        truncated_candidates: scan.truncated_candidates || !unresolved.is_empty() || !index_ready,
+        coverage: if index_ready {
+            "global-tree-bran-tube-index-and-current-projection"
+        } else {
+            "global-tree-and-current-bran-projection"
+        },
         warnings,
     }
 }
@@ -169,6 +207,7 @@ pub async fn nearby(
             "周边管道查询源必须为 BRAN".into(),
         ));
     }
+    spatial_tube_index::ensure_started();
     let scan = match spatial_query::scan_global_tree(params, None).await {
         // The projection is empty after a restart, but the source's rows are in the database.
         Err(SpatialQueryError::NotFound(_)) => {
@@ -186,9 +225,10 @@ pub async fn nearby(
         }
         scan => scan?,
     };
+    let tubes = spatial_tube_index::current();
     let params = params.clone();
     tokio::task::spawn_blocking(move || {
-        assemble(scan, &params, attrs.as_ref(), ModelMemoryStore::global())
+        assemble(scan, &params, attrs.as_ref(), ModelMemoryStore::global(), &tubes)
     })
     .await
     .map_err(|error| SpatialQueryError::Internal(anyhow::anyhow!("周边管道查询线程失败: {error}")))
@@ -227,6 +267,15 @@ pub fn durable_center(source: RefU64, records: &[GeomInstQuery]) -> Option<Cente
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_interface::generation_root::refno_to_e3d;
+    use crate::fast_model::{
+        model_memory_store::{
+            ProjectedGeometry, ProjectedShape, ProjectionCommit, RootReceipt, packed_refno,
+        },
+        spatial_query::RawSpatialQuery,
+        spatial_state::SpatialTreeState,
+    };
+    use e3d_model::elmodl::GeometryId;
     use parry3d::math::Point;
 
     /// 本文件的用例独占 `4000000019/*` 这一组 refno。
@@ -234,8 +283,143 @@ mod tests {
         RefU64::from_two_nums(4_000_000_019, seq)
     }
 
+    struct Attrs;
+
+    impl ElementAttributes for Attrs {
+        fn dbnum_of(&self, _: RefU64) -> Option<u32> {
+            Some(1)
+        }
+        fn name_of(&self, _: RefU64) -> Option<String> {
+            None
+        }
+        fn noun_of(&self, refno: RefU64) -> Option<String> {
+            (refno != id(99)).then(|| "BRAN".to_owned())
+        }
+    }
+
     fn aabb(min: [f32; 3], max: [f32; 3]) -> Aabb {
         Aabb::new(min.into(), max.into())
+    }
+
+    /// 源 id(1)：沿 x 的 10 m 管，树上没有候选。
+    fn scan() -> Scan {
+        let source = aabb([0.0; 3], [10_000.0, 100.0, 100.0]);
+        Scan {
+            state: SpatialTreeState::Ready,
+            center: Center {
+                point: source.center(),
+                source: CenterSource::RefnoAabbCenter,
+                target_box: Some(source),
+                subtree: HashSet::from([id(1)]),
+                centerline: None,
+            },
+            candidates: Vec::new(),
+            truncated_candidates: false,
+        }
+    }
+
+    fn params() -> SpatialQueryParams {
+        SpatialQueryParams::parse(&RawSpatialQuery {
+            refno: Some(id(1).to_string()),
+            radius: Some("500".into()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn index(entries: &[(u32, Aabb)]) -> TubeIndexState {
+        TubeIndexState::Ready(Arc::new(
+            entries.iter().map(|(seq, aabb)| (id(*seq), *aabb)).collect(),
+        ))
+    }
+
+    fn refnos(response: &NearbyBranchesResponse) -> Vec<String> {
+        response.results.iter().map(|item| item.refno.clone()).collect()
+    }
+
+    /// 投影里一根只有一段几何、带回执的 BRAN。
+    fn commit(seq: u32, min: [f32; 3], max: [f32; 3]) -> ProjectionCommit {
+        let root = refno_to_e3d(RefnoEnum::from(id(seq)));
+        ProjectionCommit {
+            upserts: vec![ProjectedGeometry {
+                record_id: format!("branches-{seq}"),
+                geometry_id: GeometryId::Element {
+                    refno: id(seq).to_string(),
+                },
+                source_refno: root,
+                dbnum: 1,
+                source_sesno: 1,
+                noun: "TUBI".into(),
+                mesh_id: format!("mesh-{seq}"),
+                world_transform: glam::DMat4::IDENTITY,
+                world_bounds: [min, max],
+                ancestors: vec![packed_refno(root)],
+                shape: ProjectedShape::Baked,
+                tube: None,
+            }],
+            receipt: Some((
+                root,
+                RootReceipt {
+                    source_sesno: 1,
+                    model_target: None,
+                    manifest_hash: "branches".into(),
+                    geometry_count: 1,
+                    published_via: "regen".into(),
+                    room: None,
+                },
+            )),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_branch_near_only_through_its_tubes_comes_from_the_tube_index() {
+        let tubes = index(&[
+            (1, aabb([0.0; 3], [10_000.0, 100.0, 100.0])),
+            (2, aabb([5_000.0, 400.0, 0.0], [6_000.0, 500.0, 100.0])),
+            (3, aabb([5_000.0, 900.0, 0.0], [6_000.0, 1_000.0, 100.0])),
+        ]);
+        let response = assemble(scan(), &params(), &Attrs, &ModelMemoryStore::default(), &tubes);
+        assert_eq!(refnos(&response), [id(2).to_string()], "300 mm 的进，800 mm 的和源自己不进");
+        assert!(!response.truncated_candidates && response.warnings.is_empty());
+        assert_eq!(response.coverage, "global-tree-bran-tube-index-and-current-projection");
+    }
+
+    #[test]
+    fn a_projected_root_is_measured_from_the_projection_not_its_index_entry() {
+        let memory = ModelMemoryStore::default();
+        memory.commit(
+            ProjectionScope::Current,
+            vec![commit(2, [0.0, 5_000.0, 0.0], [100.0, 5_100.0, 100.0])],
+        );
+        let tubes = index(&[(2, aabb([5_000.0, 400.0, 0.0], [6_000.0, 500.0, 100.0]))]);
+        let response = assemble(scan(), &params(), &Attrs, &memory, &tubes);
+        assert!(refnos(&response).is_empty(), "投影里那根已经挪远了，索引里的旧盒不算");
+    }
+
+    #[test]
+    fn without_the_tube_index_coverage_is_reported_incomplete() {
+        for (tubes, needle) in [
+            (TubeIndexState::Building, "还在建立"),
+            (TubeIndexState::Failed("connection refused".into()), "connection refused"),
+        ] {
+            let response = assemble(scan(), &params(), &Attrs, &ModelMemoryStore::default(), &tubes);
+            assert!(response.truncated_candidates);
+            assert!(
+                response.warnings.iter().any(|warning| warning.contains(needle)),
+                "{:?}",
+                response.warnings
+            );
+            assert_eq!(response.coverage, "global-tree-and-current-bran-projection");
+        }
+    }
+
+    #[test]
+    fn an_index_entry_with_an_unknown_owner_marks_coverage_incomplete() {
+        let tubes = index(&[(99, aabb([0.0, 200.0, 0.0], [100.0, 300.0, 100.0]))]);
+        let response = assemble(scan(), &params(), &Attrs, &ModelMemoryStore::default(), &tubes);
+        assert!(refnos(&response).is_empty());
+        assert!(response.truncated_candidates && !response.warnings.is_empty());
     }
 
     #[test]
