@@ -2616,8 +2616,8 @@ mod tests {
         assert_eq!(
             zero,
             [
-                "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "MINBEN", "NGMR", "OUTD", "PKEY",
-                "UKEY", "VXREF"
+                "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "MINBEN", "NGMR", "OUTD", "PKEY", "UKEY",
+                "VXREF"
             ]
         );
         for name in DATA_ONLY_ATTR_NAMES {
