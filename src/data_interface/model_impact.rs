@@ -2647,7 +2647,9 @@ mod tests {
         // `PROJ`（153，`430451b33` 当时漏改这里）；两个都不在字典里，上面 DCHC=0 那一列不变。
         // 2026-10-22：e3d-model `1cc594a`（通用图元 GENPRI 的 SMLib B-rep）读 `ATTDAT.ELDATA`（154）；字典 DCHC=0，
         // 上面那一列随之多一个——归档改了 GENPRI 的形状就变，不许当元数据放行。
-        assert_eq!(generation_read_set().len(), 154, "读取集合条数漂移");
+        // 2026-10-22：e3d-model `f21e7a1`（楼梯踏步 TREAD）读梯段的 `TWIDTH` / `TREADO` / `OGOING` / `RISE`
+        // 与伪属性 `TREADD`（159）；都不是 DCHC=0，上面那一列不变。
+        assert_eq!(generation_read_set().len(), 159, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
