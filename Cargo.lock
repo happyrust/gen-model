@@ -3094,7 +3094,7 @@ dependencies = [
 
 [[package]]
 name = "e3d-io"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "e3d-attlib",
  "encoding_rs",
@@ -3116,6 +3116,7 @@ dependencies = [
  "manifold-csg",
  "serde",
  "serde_json",
+ "spade",
  "thiserror 2.0.19",
 ]
 
