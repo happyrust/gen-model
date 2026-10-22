@@ -2655,7 +2655,9 @@ mod tests {
         // 上面那一列不变。
         // 2026-10-22：e3d-model `845f4e5`（目录 LINE 写 `Line` 记录）读目录 LINE 的 `PTS`（163）；不是 DCHC=0，
         // 上面那一列不变。
-        assert_eq!(generation_read_set().len(), 163, "读取集合条数漂移");
+        // 2026-10-23：e3d-model `28d0402`（SNOD 名下关节 SJOI 的现算标架）读 `CUTP` / `JLIN`（165）；都不是 DCHC=0，
+        // 上面那一列不变。
+        assert_eq!(generation_read_set().len(), 165, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
