@@ -2600,10 +2600,10 @@ mod tests {
         }
     }
 
-    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十个，全来自 e3d-model：`DIR` catalogue_point、
+    /// S5 验收：集合里 DCHC=0 的成员逐个点名（今天十一个，全来自 e3d-model：`DIR` catalogue_point、
     /// `FILL`/`PKEY` section、`GTYP` route、`UKEY` udet、`VXREF` polyhedron、`NGMR` catalogue 的宿主扣减、
-    /// 电缆在途段的 `CMPR`/`OUTD`/`MINBEN`——core 会话内不为它们重画，我们却真拿它们生成，S6 的第二票
-    /// 就是为它们立的）；老五个元数据名一个都
+    /// 电缆在途段的 `CMPR`/`OUTD`/`MINBEN`、GENPRI 归档里的 B-rep `ELDATA`——core 会话内不为它们重画，
+    /// 我们却真拿它们生成，S6 的第二票就是为它们立的）；老五个元数据名一个都
     /// 不在（S6 「`NAME` 等仍放行」的前提）。
     #[test]
     fn the_generation_read_set_pins_its_dchc_zero_members_and_excludes_the_metadata_five() {
@@ -2616,8 +2616,8 @@ mod tests {
         assert_eq!(
             zero,
             [
-                "CMPR", "DIR", "FILL", "GTYP", "MINBEN", "NGMR", "OUTD", "PKEY", "UKEY",
-                "VXREF"
+                "CMPR", "DIR", "ELDATA", "FILL", "GTYP", "MINBEN", "NGMR", "OUTD", "PKEY",
+                "UKEY", "VXREF"
             ]
         );
         for name in DATA_ONLY_ATTR_NAMES {
@@ -2645,7 +2645,9 @@ mod tests {
         // 带进 `HANICP`（151，`f909a3746` 当时漏改这里）。
         // 2026-10-22：e3d-model `7d9c943`（按主项目 SYS 库的外项目表补外项目库）读 `DB` 元素的 `DBNO` /
         // `PROJ`（153，`430451b33` 当时漏改这里）；两个都不在字典里，上面 DCHC=0 那一列不变。
-        assert_eq!(generation_read_set().len(), 153, "读取集合条数漂移");
+        // 2026-10-22：e3d-model `1cc594a`（通用图元 GENPRI 的 SMLib B-rep）读 `ATTDAT.ELDATA`（154）；字典 DCHC=0，
+        // 上面那一列随之多一个——归档改了 GENPRI 的形状就变，不许当元数据放行。
+        assert_eq!(generation_read_set().len(), 154, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
@@ -2849,7 +2851,7 @@ mod tests {
                 "{name} 老名单必须是新门的子集"
             );
         }
-        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十个，其余全部放行。
+        // 规模：字典 3941 个 DCHC=0 的名字，读取集合挡十一个（第十一个是 GENPRI 归档的 `ELDATA`），其余全部放行。
         let zero: Vec<&String> = dchc_change_classes()
             .iter()
             .filter(|(_, code)| **code == 0)
@@ -2862,7 +2864,7 @@ mod tests {
             .count();
         assert_eq!(
             admitted,
-            3941 - 10,
+            3941 - 11,
             "放行数 = DCHC=0 − 读取集合里的 DCHC=0 成员"
         );
     }
