@@ -1618,8 +1618,8 @@ async fn prepare_centerline(
             ApiError::bad_request("source_mode=bran_centerline 要给一条 BRAN 的 refno").into(),
         );
     };
-    let (result, _dbnum) = query_branch(branch).await?;
-    BranCenterline::from_branch(branch, &result)
+    let (query, _dbnum) = query_branch(branch).await?;
+    BranCenterline::from_branch(branch, &query.result)
         .map(Some)
         .map_err(|message| ApiError::precondition(message).into())
 }
@@ -1628,7 +1628,7 @@ async fn prepare_centerline(
 /// refno 解析失败 400、库里没有 404、不是 BRAN / 拼不出 422（`mbd::api_error`）。
 async fn query_branch(
     branch: RefU64,
-) -> Result<(plant_mbd::BranchQueryResult, Option<u32>), SpatialApiError> {
+) -> Result<(crate::mbd::branch_query::BranchQueryWithDiameters, Option<u32>), SpatialApiError> {
     let text = RefnoEnum::from(branch).to_pdms_str();
     let refno = crate::fast_model::e3d_model_service::parse_refno(&text)
         .map_err(|error| ApiError::bad_request(format!("refno `{text}` 无法解析：{error:#}")))?;
@@ -1637,7 +1637,7 @@ async fn query_branch(
         .await?
         .build_set(refno.dbno(), None)
         .map_err(ApiError::from_domain)?;
-    let result = tokio::task::spawn_blocking(move || crate::mbd::branch_query(&set, refno))
+    let result = tokio::task::spawn_blocking(move || crate::mbd::branch_query_with_diameters(&set, refno))
         .await
         .map_err(|join| {
             ApiError::from_domain(anyhow::anyhow!("centerline task aborted: {join}"))
@@ -1662,7 +1662,7 @@ pub async fn spatial_centerline(
     State(state): State<AppState>,
     Query(request): Query<SpatialCenterlineReq>,
 ) -> Result<Json<crate::fast_model::spatial_centerline::CenterlineResponse>, SpatialApiError> {
-    use crate::fast_model::spatial_centerline::{BranCenterline, centerline_response};
+    use crate::fast_model::spatial_centerline::{BranCenterline, centerline_response_with_diameters};
 
     resolve_identity(&state, &request.identity)?;
     let raw = request
@@ -1675,10 +1675,12 @@ pub async fn spatial_centerline(
         .ok()
         .filter(RefU64::is_valid)
         .ok_or_else(|| ApiError::bad_request(format!("refno 格式非法（应为 a/b 或 a_b）: {raw}")))?;
-    let (result, dbnum) = query_branch(branch).await?;
-    let centerline = BranCenterline::from_branch(branch, &result)
+    let (query, dbnum) = query_branch(branch).await?;
+    let centerline = BranCenterline::from_branch(branch, &query.result)
         .map_err(|message| SpatialApiError::from(ApiError::precondition(message)))?;
-    Ok(Json(centerline_response(&centerline, &result, dbnum)))
+    let mut response = centerline_response_with_diameters(&centerline, &query.result, dbnum, &query.diameters);
+    response.source_version = Some(query.source_version);
+    Ok(Json(response))
 }
 
 /// GET /api/v1/spatial/nearby — 按点或 refno + 半径在进程内 `GLOBAL_AABB_TREE` 里找周边构件，分页

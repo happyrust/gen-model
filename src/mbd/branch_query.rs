@@ -57,6 +57,7 @@ pub fn wire_refno(refno: RefNo) -> String {
 
 #[derive(Debug)]
 pub enum BranchQueryError {
+    SourceChanged { dbnum: u32 },
     /// refno 在所钉会话里不存在。
     NotFound {
         refno: RefNo,
@@ -92,6 +93,7 @@ pub enum BranchQueryError {
 impl std::fmt::Display for BranchQueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SourceChanged { dbnum } => write!(f, "库 {dbnum} 在管道读取期间变化，请重新读取"),
             Self::NotFound { refno } => write!(f, "refno {refno} 在所钉会话里不存在"),
             Self::NotRouteContainer { refno, noun } => write!(
                 f,
@@ -133,6 +135,39 @@ impl From<DbElementError> for BranchQueryError {
 
 /// 一条 BRAN 的成员结点视图。
 pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult, BranchQueryError> {
+    branch_query_with_diameters(set, refno).map(|query| query.result)
+}
+
+/// Host-side evidence is kept outside the frozen plant-mbd solver contract.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DiameterEvidence {
+    pub source: &'static str,
+    pub catalogue_od_mm: Option<f64>,
+    pub arrive_bore_mm: Option<f64>,
+}
+
+pub struct BranchQueryWithDiameters {
+    pub result: BranchQueryResult,
+    pub diameters: HashMap<String, DiameterEvidence>,
+    pub source_version: BranchReadVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DatabaseReadVersion {
+    pub dbnum: u32,
+    pub sesno: u32,
+    pub db_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BranchReadVersion {
+    pub dbnum: u32,
+    pub sesno: u32,
+    /// All files actually opened by this read, including catalogue/owner dependencies.
+    pub databases: Vec<DatabaseReadVersion>,
+}
+
+pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryWithDiameters, BranchQueryError> {
     let container = set.element(refno);
     if !container.exists()? {
         return Err(BranchQueryError::NotFound { refno });
@@ -155,6 +190,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     let route = walk_route(&container)?;
     let resolver = CataloguePoints;
     let mut issues: Vec<MbdV2Issue> = Vec::new();
+    let mut diameters = HashMap::new();
     if route.pass_through_unresolved > 0 {
         // 目录链走不到 SCOM（无 SPRE / 目录库没开 / 目标不在所钉会话）的 ATTA 被按穿过件处理。
         // MDS 梯架支撑那种 GTYP=ANCI 的 ATTA 本该是站点、两侧断管——目录库不在本次 DbSet 里时
@@ -261,6 +297,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         {
             push_implied_tube(
                 &mut members,
+                &mut diameters,
                 &mut issues,
                 &branch_refno,
                 from_refno,
@@ -332,6 +369,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             ));
         }
 
+        diameters.insert(object_refno.clone(), diameter_evidence(slot_od, arrive.and_then(|point| point.bore)));
         members.push(BranchMember {
             refno: object_refno.clone(),
             owner_refno: branch_refno.clone(),
@@ -384,6 +422,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             .flatten();
         push_implied_tube(
             &mut members,
+            &mut diameters,
             &mut issues,
             &branch_refno,
             from_refno,
@@ -455,7 +494,18 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     let head_connection = connection_ref(container.get_element("HREF")?)?;
     let tail_connection = connection_ref(container.get_element("TREF")?)?;
 
-    Ok(BranchQueryResult {
+    let mut databases = Vec::new();
+    for (dbnum, source) in set.opened_sources()? {
+        if !source.is_current().unwrap_or(false) {
+            return Err(BranchQueryError::SourceChanged { dbnum });
+        }
+        databases.push(DatabaseReadVersion { dbnum, sesno: source.sesno,
+            db_type: set.db_type(dbnum).unwrap_or_default() });
+    }
+    databases.sort_by_key(|database| database.dbnum);
+    let sesno = set.pinned_sesno(refno.dbno()).ok_or(BranchQueryError::SourceChanged { dbnum: refno.dbno() })?;
+    let source_version = BranchReadVersion { dbnum: refno.dbno(), sesno, databases };
+    Ok(BranchQueryWithDiameters { result: BranchQueryResult {
         branch_refno,
         members,
         head_pos,
@@ -469,7 +519,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         tail_connection,
         split_members: None,
         issues,
-    })
+    }, diameters, source_version })
 }
 
 /// 引用目标在别的库、库没注册 / 元素不在所钉会话：按「没有」，不算错（同 [`catalogue_od`]）。
@@ -592,6 +642,16 @@ fn outside_diameter(catalogue_od: Option<f64>, arrive_bore: Option<f64>) -> Opti
     }
 }
 
+fn diameter_evidence(catalogue_od: Option<f64>, arrive_bore: Option<f64>) -> DiameterEvidence {
+    let catalogue_od_mm = tube_outer_diameter(catalogue_od, None, None);
+    let arrive_bore_mm = arrive_bore.filter(|value| value.is_finite() && *value > 0.0);
+    DiameterEvidence {
+        source: if catalogue_od_mm.is_some() { "catalogue" } else if arrive_bore_mm.is_some() { "bore-estimate" } else { "missing" },
+        catalogue_od_mm,
+        arrive_bore_mm,
+    }
+}
+
 /// P1 / P2 / P3（世界系）。目录链走不到 / 点不存在 / 方向解不出都不填，不算错。
 fn catalogue_ppoints(
     member: &e3d_io::db_element::DbElement,
@@ -624,6 +684,7 @@ pub const IMPLIED_TUBE_DIAGNOSTIC_MIN_MM: f64 = 10.0;
 #[allow(clippy::too_many_arguments)]
 fn push_implied_tube(
     members: &mut Vec<BranchMember>,
+    diameters: &mut HashMap<String, DiameterEvidence>,
     issues: &mut Vec<MbdV2Issue>,
     branch_refno: &str,
     from_refno: &str,
@@ -663,6 +724,7 @@ fn push_implied_tube(
         }
     }
     let dir = (to.pos - from.pos) / length;
+    diameters.insert(refno.clone(), diameter_evidence(catalogue_od, to.bore));
     members.push(BranchMember {
         refno,
         owner_refno: branch_refno.to_string(),

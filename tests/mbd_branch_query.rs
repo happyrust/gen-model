@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aios_database::data_interface::direct_store::TEMPLATE_DIR_ENV;
-use aios_database::mbd::{BranchQueryError, branch_query, layout_pipe};
+use aios_database::mbd::{BranchQueryError, branch_query, branch_query_with_diameters, layout_pipe};
 use e3d_io::db_element::{DbFilePin, DbSet, template_file_for};
 use e3d_io::refno::RefNo;
 use e3d_model::db_discovery::DirectoryDbResolver;
@@ -408,7 +408,34 @@ fn real_branch_members_carry_ppoints_and_catalogue_od() {
         return;
     };
     let set = open_set(&db, &templates);
-    let query = branch_query(&set, BRAN).expect("branch query");
+    let enriched = branch_query_with_diameters(&set, BRAN).expect("branch query");
+    let query = &enriched.result;
+    assert_eq!(enriched.source_version.dbnum, BRAN.dbno());
+    assert_eq!(Some(enriched.source_version.sesno), set.pinned_sesno(BRAN.dbno()));
+    assert!(enriched.source_version.databases.iter().any(|database| database.dbnum == BRAN.dbno()
+        && database.sesno == enriched.source_version.sesno && database.db_type == "DESI"));
+    for database in &enriched.source_version.databases {
+        assert_eq!(Some(database.sesno), set.pinned_sesno(database.dbnum));
+    }
+    assert_eq!(enriched.diameters.len(), query.members.len());
+    let mut catalogue_count = 0;
+    let mut estimate_count = 0;
+    for member in &query.members {
+        let evidence = &enriched.diameters[&member.refno];
+        match evidence.source {
+            "catalogue" => { catalogue_count += 1; assert_eq!(member.outside_diameter, evidence.catalogue_od_mm); }
+            "bore-estimate" => {
+                estimate_count += 1;
+                let bore = evidence.arrive_bore_mm.expect("estimate must retain its input");
+                assert_eq!(member.outside_diameter, Some((bore * 1.1).min(bore + 10.0)));
+                assert!(evidence.catalogue_od_mm.is_none());
+            }
+            "missing" => assert!(member.outside_diameter.is_none()),
+            other => panic!("unsupported source {other}"),
+        }
+    }
+    assert!(catalogue_count > 0);
+    eprintln!("real member diameter sources: {catalogue_count} catalogue, {estimate_count} bore estimates");
     let stations: Vec<&BranchMember> = query
         .members
         .iter()
