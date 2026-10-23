@@ -267,6 +267,7 @@ fn check_candidates() -> anyhow::Result<()> {
             point: source.center(),
             source: CenterSource::RefnoAabbCenter,
             target_box: Some(source),
+            leaf_boxes: vec![source],
             subtree: HashSet::from([id(1)]),
             centerline: None,
         },

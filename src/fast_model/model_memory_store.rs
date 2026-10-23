@@ -336,6 +336,8 @@ struct ScopeState {
     receipts: BTreeMap<i64, RootReceipt>,
     /// Roots remain discoverable after failed refresh, including empty roots.
     invalidated_roots: BTreeSet<i64>,
+    /// 生成根 → 整根有效几何的并集盒缓存（N3：周边管道查询粗筛用，避免每次遍历全部投影记录）。
+    root_bounds: BTreeMap<i64, ProjectedRootBounds>,
     /// 生成根 → 当前进程的完整发布确认。任何候选几何变动都先使它失效。
     publication_acks: BTreeMap<i64, RootPublicationAck>,
     /// 每个库投影过的最高源会话。单调，只涨不落——它护的是「旧会话不许盖新会话」。
@@ -429,7 +431,7 @@ impl ScopeState {
         *self.commit_epochs.entry(dbnum).or_default() += 1;
     }
 
-    fn invalidate_publication_acks_for(&mut self, commit: &ProjectionCommit) {
+    fn invalidate_publication_acks_for(&mut self, commit: &ProjectionCommit) -> BTreeSet<i64> {
         let mut touched = BTreeSet::new();
         if let Some((root, _)) = &commit.receipt {
             touched.insert(packed_refno(*root));
@@ -451,8 +453,54 @@ impl ScopeState {
                 }
             }
         }
-        for root in touched {
+        for &root in &touched {
             self.publication_acks.remove(&root);
+        }
+        touched
+    }
+
+    fn compute_root_bounds(&self, packed_root: i64) -> ProjectedRootBounds {
+        let mut bounds: Option<[[f32; 3]; 2]> = None;
+        let mut has_invalid_bounds = false;
+        if let Some(ids) = self.by_ancestor.get(&packed_root) {
+            for id in ids {
+                let Some(record) = self.geometries.get(id) else {
+                    continue;
+                };
+                if record.mesh_id.is_empty()
+                    || crate::fast_model::spatial_query::is_negative_noun(&record.noun)
+                    || record.tube.as_ref().is_some_and(|tube| tube.invalid)
+                {
+                    continue;
+                }
+                let [min, max] = record.world_bounds;
+                if !min.iter().chain(&max).all(|value| value.is_finite())
+                    || (0..3).any(|axis| min[axis] > max[axis])
+                {
+                    has_invalid_bounds = true;
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    None => [min, max],
+                    Some([cmin, cmax]) => [
+                        [cmin[0].min(min[0]), cmin[1].min(min[1]), cmin[2].min(min[2])],
+                        [cmax[0].max(max[0]), cmax[1].max(max[1]), cmax[2].max(max[2])],
+                    ],
+                });
+            }
+        }
+        ProjectedRootBounds {
+            bounds,
+            has_invalid_bounds,
+        }
+    }
+
+    fn refresh_root_bounds(&mut self, packed_root: i64) {
+        if self.receipts.contains_key(&packed_root) || self.invalidated_roots.contains(&packed_root) {
+            let summary = self.compute_root_bounds(packed_root);
+            self.root_bounds.insert(packed_root, summary);
+        } else {
+            self.root_bounds.remove(&packed_root);
         }
     }
 
@@ -605,6 +653,7 @@ impl ScopeState {
         self.receipts.remove(&packed);
         self.publication_acks.remove(&packed);
         self.invalidated_roots.remove(&packed);
+        self.root_bounds.remove(&packed);
         self.commit_ticks.remove(&packed);
         for id in self.record_ids_under(root) {
             let shared = self.geometries.get(&id).is_some_and(|record| {
@@ -657,6 +706,7 @@ impl ScopeState {
         self.publication_acks.remove(&packed);
         self.commit_ticks.remove(&packed);
         self.invalidated_roots.remove(&packed);
+        self.root_bounds.remove(&packed);
         if self.receipts.remove(&packed).is_some() && removed == 0 {
             self.bump_epoch(root.dbno());
         }
@@ -748,9 +798,23 @@ impl ScopeState {
 
     #[cfg(test)]
     fn apply(&mut self, commit: ProjectionCommit) {
+        let touched = self.invalidate_publication_acks_for(&commit);
         self.apply_removals(&commit);
         self.apply_upserts_and_receipt(commit);
+        for root in touched {
+            self.refresh_root_bounds(root);
+        }
     }
+}
+
+/// 一个常驻生成根的整根有效几何并集盒缓存（[`ModelMemoryStore::root_bounds`]，N3）。
+///
+/// 只统计 `mesh_id` 非空、非负几何、非 `invalid` 直管段的记录；若该根名下存在坐标非有限或反向的
+/// 有效记录，置 `has_invalid_bounds = true`，调用方不得凭 `bounds` 粗筛跳过它。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProjectedRootBounds {
+    pub bounds: Option<[[f32; 3]; 2]>,
+    pub has_invalid_bounds: bool,
 }
 
 /// 写后台控制器当前不收件，这一批投影原样退回。没有任何一部分被装进 overlay。
@@ -1124,13 +1188,17 @@ impl ModelMemoryStore {
         // All roots describe one target snapshot. During reparenting the old
         // root removes the same identity that the new root upserts. Retire the
         // prior snapshot first, independent of root completion/order.
+        let mut touched = BTreeSet::new();
         for commit in &commits {
-            state.invalidate_publication_acks_for(commit);
+            touched.extend(state.invalidate_publication_acks_for(commit));
             state.apply_removals(commit);
         }
         let mut stamped = Vec::new();
         for commit in commits {
             stamped.extend(state.apply_upserts_and_receipt(commit));
+        }
+        for root in touched {
+            state.refresh_root_bounds(root);
         }
         stamped
     }
@@ -1146,13 +1214,17 @@ impl ModelMemoryStore {
         let mut scopes = self.write();
         let state = scopes.entry(ScopeKey::Current).or_default();
 
+        let mut touched = BTreeSet::new();
         for commit in &commits {
-            state.invalidate_publication_acks_for(commit);
+            touched.extend(state.invalidate_publication_acks_for(commit));
             state.apply_removals(commit);
         }
         let mut stamped = Vec::new();
         for commit in commits {
             stamped.extend(state.apply_upserts_and_receipt(commit));
+        }
+        for root in touched {
+            state.refresh_root_bounds(root);
         }
         stamped
     }
@@ -1229,6 +1301,7 @@ impl ModelMemoryStore {
         state.publication_acks.remove(&packed);
         state.commit_ticks.remove(&packed);
         state.invalidated_roots.remove(&packed);
+        state.root_bounds.remove(&packed);
         if state.receipts.remove(&packed).is_some() {
             state.bump_epoch(dbnum);
         }
@@ -1284,9 +1357,12 @@ impl ModelMemoryStore {
         for (root, receipt) in receipts {
             let session = state.published_sesno.entry(dbnum).or_default();
             *session = (*session).max(receipt.source_sesno);
-            state.invalidated_roots.remove(&packed_refno(root));
-            state.receipts.insert(packed_refno(root), receipt);
+            let packed = packed_refno(root);
+            state.invalidated_roots.remove(&packed);
+            state.receipts.insert(packed, receipt);
+            state.refresh_root_bounds(packed);
         }
+        state.root_bounds.retain(|packed, _| state.receipts.contains_key(packed) || state.invalidated_roots.contains(packed));
         true
     }
 
@@ -1337,6 +1413,7 @@ impl ModelMemoryStore {
         state.room_baselines.remove(&dbnum);
         state.invalidated_roots.remove(&packed);
         state.receipts.insert(packed, receipt);
+        state.refresh_root_bounds(packed);
         true
     }
 
@@ -1419,9 +1496,13 @@ impl ModelMemoryStore {
             .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
         let receipts = &state.receipts;
+        let invalidated = &state.invalidated_roots;
         state
             .commit_ticks
             .retain(|packed, _| receipts.contains_key(packed));
+        state
+            .root_bounds
+            .retain(|packed, _| receipts.contains_key(packed) || invalidated.contains(packed));
         state.stray_generations_written.remove(&dbnum);
         state.stamped_room_generations.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
@@ -1554,6 +1635,32 @@ impl ModelMemoryStore {
             .unwrap_or_default()
     }
 
+    /// 这个投影域里各常驻根的整根并集盒缓存（N3），按根升序。
+    pub fn root_bounds(&self, scope: ProjectionScope<'_>) -> Vec<(RefNo, ProjectedRootBounds)> {
+        let scopes = self.read();
+        scopes
+            .get(&scope.key())
+            .map(|state| {
+                state
+                    .receipts
+                    .keys()
+                    .chain(state.invalidated_roots.iter())
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(|packed| {
+                        let bounds = state
+                            .root_bounds
+                            .get(&packed)
+                            .copied()
+                            .unwrap_or_else(|| state.compute_root_bounds(packed));
+                        (RefNo::new((packed >> 32) as u32, packed as u32), bounds)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 一个祖先名下**盖过章的生成根**（ADR-086 D1）：`/model/records` 拿一个不是生成根的节点（ZONE / SITE）来问时，
     /// 先把它展成投影里有回执的根，再按根取记录——记录的 `owner` 仍是各自的生成根，与库上 `inst_relate.in` 同口径。
     ///
@@ -1613,9 +1720,11 @@ impl ModelMemoryStore {
     /// Called only after source absence and output deletion have succeeded.
     pub fn forget_retired_root(&self, scope: ProjectionScope<'_>, root: RefNo) {
         if let Some(state) = self.write().get_mut(&scope.key()) {
-            state.invalidated_roots.remove(&packed_refno(root));
-            state.receipts.remove(&packed_refno(root));
-            state.publication_acks.remove(&packed_refno(root));
+            let packed = packed_refno(root);
+            state.invalidated_roots.remove(&packed);
+            state.receipts.remove(&packed);
+            state.publication_acks.remove(&packed);
+            state.root_bounds.remove(&packed);
         }
     }
 

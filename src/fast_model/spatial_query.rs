@@ -551,11 +551,33 @@ pub struct Center {
     /// refno 模式下目标（含子树）的并集盒；中心线模式下是走廊的并集盒；点模式为 `None`。
     /// 它只用来划候选的粗筛范围与开关自身剔除——中心线模式的距离不走它，见 [`collect_candidates`]。
     pub target_box: Option<Aabb>,
+    /// refno 模式下目标各条有效几何（管件、直管段或树条目）的叶子盒。`nearby/branches` 用它按件探针、
+    /// 按件量最小距离，避免长折管用整根并集盒把折弯内侧空白处的远管算成 0 距候选（N3）。
+    pub leaf_boxes: Vec<Aabb>,
     /// refno 模式下 `include_self=false` 要剔除的来源：目标自身 + 投影里祖先链含目标的记录的来源；
     /// 中心线模式再并上 `branch_query` 给的成员（管子、弯头、焊缝这些在投影里未必挂得上 BRAN）。
     pub subtree: HashSet<RefU64>,
     /// 中心线模式的走廊；其它模式为 `None`。
     pub centerline: Option<BranCenterline>,
+}
+
+impl Center {
+    /// 源构件各条有效几何的叶子盒；手工构造的测试夹具没填 `leaf_boxes` 时退回 `target_box`。
+    pub fn source_boxes(&self) -> &[Aabb] {
+        if !self.leaf_boxes.is_empty() {
+            &self.leaf_boxes
+        } else {
+            self.target_box.as_slice()
+        }
+    }
+}
+
+/// 一组源叶子盒到目标盒的最小表面距离。
+pub fn aabb_slice_min_distance(boxes: &[Aabb], target: &Aabb) -> f32 {
+    boxes
+        .iter()
+        .map(|source| aabb_min_distance(source, target))
+        .fold(f32::INFINITY, f32::min)
 }
 
 /// 解中心（计划 §3.2 步骤 3）。refno 模式先看内存投影（与 `query_service::spatial_bounds` 的 subtree
@@ -576,6 +598,7 @@ pub fn resolve_center(
             point,
             source: CenterSource::Position,
             target_box: None,
+            leaf_boxes: Vec::new(),
             subtree: HashSet::new(),
             centerline: None,
         }),
@@ -583,10 +606,15 @@ pub fn resolve_center(
             let source = refno_to_e3d(RefnoEnum::from(refno));
             let packed = refno.0 as i64;
             let mut union: Option<Aabb> = None;
+            let mut leaf_boxes = Vec::new();
             let mut subtree = HashSet::from([refno]);
             for record in memory.records_of_root(ProjectionScope::Current, source) {
                 let in_scope = record.source_refno == source || record.ancestors.contains(&packed);
-                if !in_scope || record.mesh_id.is_empty() {
+                if !in_scope
+                    || record.mesh_id.is_empty()
+                    || is_negative_noun(&record.noun)
+                    || record.tube.as_ref().is_some_and(|tube| tube.invalid)
+                {
                     continue;
                 }
                 let Some(aabb) = usable_bounds(record.world_bounds) else {
@@ -594,10 +622,12 @@ pub fn resolve_center(
                 };
                 subtree.insert(refno_from_e3d(record.source_refno).refno());
                 union = Some(merge(union, aabb));
+                leaf_boxes.push(aabb);
             }
             if union.is_none() {
                 for entry in tree.entries_of(refno).iter() {
                     union = Some(merge(union, entry.aabb));
+                    leaf_boxes.push(entry.aabb);
                 }
             }
             if union.is_none() {
@@ -618,6 +648,7 @@ pub fn resolve_center(
                             subtree.insert(panel.refno());
                             if let Some(resident) = model.panels.get(panel) {
                                 union = Some(merge(union, resident.world_aabb));
+                                leaf_boxes.push(resident.world_aabb);
                             }
                         }
                     }
@@ -635,6 +666,7 @@ pub fn resolve_center(
                     point: corridor.center(),
                     source: CenterSource::BranCenterline,
                     target_box: Some(corridor),
+                    leaf_boxes: Vec::new(),
                     subtree,
                     centerline: Some(centerline.clone()),
                 });
@@ -649,6 +681,7 @@ pub fn resolve_center(
                 point: target.center(),
                 source: CenterSource::RefnoAabbCenter,
                 target_box: Some(target),
+                leaf_boxes,
                 subtree,
                 centerline: None,
             })
@@ -857,8 +890,42 @@ pub fn scan_tree(
     scan_tree_with_center(tree, state, params, center)
 }
 
-/// 中心已在锁外解好时只过门禁、取候选，判据同 [`scan_tree`]。`nearby/branches` 的源管不在投影里时，
-/// 中心来自库里冷读的整根记录（`spatial_branches::nearby`）。
+/// 按源构件的各个叶子盒逐个探针取树上候选（同 [`collect_corridor_candidates`] 的逐段探针加去重），
+/// 候选距离取「源各叶子盒到候选盒的最小距离」（N3）。
+pub fn collect_leaf_box_candidates(
+    tree: &AccelerationTree,
+    boxes: &[Aabb],
+    params: &SpatialQueryParams,
+) -> (Vec<Candidate>, bool) {
+    let radius = params.radius;
+    let mut seen: HashSet<EntryKey> = HashSet::new();
+    let mut candidates = Vec::new();
+    for bounds in boxes {
+        let probe = Aabb::new(
+            bounds.mins - Vector::repeat(radius),
+            bounds.maxs + Vector::repeat(radius),
+        );
+        for entry in tree.locate_intersecting_bounds(&probe) {
+            if !seen.insert(entry_key(entry)) {
+                continue;
+            }
+            let distance = aabb_slice_min_distance(boxes, &entry.aabb);
+            if params.shape == Shape::Sphere && distance > radius {
+                continue;
+            }
+            if candidates.len() >= CANDIDATE_CAP {
+                return (candidates, true);
+            }
+            candidates.push(Candidate {
+                entry: entry.clone(),
+                distance,
+            });
+        }
+    }
+    (candidates, false)
+}
+
+/// 中心已在锁外解好时只过门禁、取候选，判据同 [`scan_tree`]。
 pub fn scan_tree_with_center(
     tree: &AccelerationTree,
     state: SpatialTreeState,
@@ -872,6 +939,43 @@ pub fn scan_tree_with_center(
         (Vec::new(), false)
     } else {
         collect_candidates(tree, &center, params)
+    };
+    Ok(Scan {
+        state,
+        center,
+        candidates,
+        truncated_candidates,
+    })
+}
+
+/// `nearby/branches` 的树扫描（N3）：解出源管的叶子盒后，按叶子盒逐个探针取树上候选。
+pub fn scan_tree_for_branches(
+    tree: &AccelerationTree,
+    state: SpatialTreeState,
+    params: &SpatialQueryParams,
+    memory: &ModelMemoryStore,
+) -> Result<Scan, SpatialQueryError> {
+    if !state.is_ready() {
+        return Err(SpatialQueryError::NotReady(state));
+    }
+    let center = resolve_center(params, None, memory, tree)?;
+    scan_tree_for_branches_with_center(tree, state, params, center)
+}
+
+/// 中心已在锁外解好时（源管不在投影里，从库里冷读整根记录），按源管叶子盒逐个探针取候选（N3）。
+pub fn scan_tree_for_branches_with_center(
+    tree: &AccelerationTree,
+    state: SpatialTreeState,
+    params: &SpatialQueryParams,
+    center: Center,
+) -> Result<Scan, SpatialQueryError> {
+    if !state.is_ready() {
+        return Err(SpatialQueryError::NotReady(state));
+    }
+    let (candidates, truncated_candidates) = if state == SpatialTreeState::ReadyEmpty {
+        (Vec::new(), false)
+    } else {
+        collect_leaf_box_candidates(tree, center.source_boxes(), params)
     };
     Ok(Scan {
         state,
@@ -1406,6 +1510,25 @@ pub(crate) async fn scan_global_tree_with_center(
     center: Center,
 ) -> Result<Scan, SpatialQueryError> {
     with_global_tree(|tree, state| scan_tree_with_center(tree, state, params, center)).await
+}
+
+/// [`scan_tree_for_branches`] 的全局树版。
+pub(crate) async fn scan_global_tree_for_branches(
+    params: &SpatialQueryParams,
+) -> Result<Scan, SpatialQueryError> {
+    with_global_tree(|tree, state| {
+        scan_tree_for_branches(tree, state, params, ModelMemoryStore::global())
+    })
+    .await
+}
+
+/// [`scan_tree_for_branches_with_center`] 的全局树版。
+pub(crate) async fn scan_global_tree_for_branches_with_center(
+    params: &SpatialQueryParams,
+    center: Center,
+) -> Result<Scan, SpatialQueryError> {
+    with_global_tree(|tree, state| scan_tree_for_branches_with_center(tree, state, params, center))
+        .await
 }
 
 /// 树的读锁只在这里拿：只罩住「解中心 + 取候选」，中间没有 await；候选 `collect()` 完即放锁。

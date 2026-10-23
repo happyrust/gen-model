@@ -32,14 +32,26 @@ pub struct NearbyBranchesResponse {
     pub warnings: Vec<String>,
 }
 
-fn add_box(bounds: &mut HashMap<RefU64, Aabb>, root: RefU64, aabb: Aabb) {
+#[derive(Clone, Copy)]
+struct BranchCandidate {
+    aabb: Aabb,
+    distance: f32,
+}
+
+fn add_candidate(
+    bounds: &mut HashMap<RefU64, BranchCandidate>,
+    root: RefU64,
+    aabb: Aabb,
+    distance: f32,
+) {
     bounds
         .entry(root)
         .and_modify(|current| {
-            current.mins = current.mins.inf(&aabb.mins);
-            current.maxs = current.maxs.sup(&aabb.maxs);
+            current.aabb.mins = current.aabb.mins.inf(&aabb.mins);
+            current.aabb.maxs = current.aabb.maxs.sup(&aabb.maxs);
+            current.distance = current.distance.min(distance);
         })
-        .or_insert(aabb);
+        .or_insert(BranchCandidate { aabb, distance });
 }
 
 pub fn assemble(
@@ -53,6 +65,17 @@ pub fn assemble(
         Target::Refno(source) => source,
         Target::Position(_) => unreachable!(),
     };
+    let source_box = scan.center.target_box.expect("refno source has bounds");
+    let source_boxes = scan.center.source_boxes();
+    // 先用源管整根并集盒粗筛，再按源管各叶子盒求最小距离（N3）。
+    let measure = |aabb: &Aabb| -> Option<f32> {
+        if spatial_query::aabb_min_distance(&source_box, aabb) > params.radius {
+            return None;
+        }
+        let distance = spatial_query::aabb_slice_min_distance(source_boxes, aabb);
+        (distance <= params.radius).then_some(distance)
+    };
+
     let mut bounds = HashMap::new();
     let mut unresolved = HashSet::new();
     for candidate in &scan.candidates {
@@ -60,6 +83,9 @@ pub fn assemble(
         if scan.center.subtree.contains(&refno) {
             continue;
         }
+        let Some(distance) = measure(&candidate.entry.aabb) else {
+            continue;
+        };
         let Some(noun) = attrs.noun_of(refno) else {
             unresolved.insert(refno);
             continue;
@@ -68,11 +94,11 @@ pub fn assemble(
             continue;
         }
         if noun == "BRAN" {
-            add_box(&mut bounds, refno, candidate.entry.aabb);
+            add_candidate(&mut bounds, refno, candidate.entry.aabb, distance);
             continue;
         }
         if let Some(root) = attrs.branch_root_of(refno) {
-            add_box(&mut bounds, root, candidate.entry.aabb);
+            add_candidate(&mut bounds, root, candidate.entry.aabb, distance);
         } else if matches!(
             noun.as_str(),
             "TUBI" | "ELBO" | "VALV" | "TEE" | "REDU" | "WELD" | "FLAN" | "GASK"
@@ -80,14 +106,21 @@ pub fn assemble(
             unresolved.insert(refno);
         }
     }
-    // Read root indexes, then only BRAN geometry. No global deep geometry clone.
+    // 投影里的根先按回执缓存的整根并集盒粗筛，粗筛过了（或有坏盒）才判归属、读逐条记录（N3）。
     let mut projected = HashSet::new();
-    for root in memory.roots(ProjectionScope::Current) {
+    for (root, root_bounds) in memory.root_bounds(ProjectionScope::Current) {
         let root_refno = refno_from_e3d(root).refno();
         if root_refno == source {
             continue;
         }
         projected.insert(root_refno);
+        let in_range = root_bounds
+            .bounds
+            .and_then(|[min, max]| measure(&Aabb::new(min.into(), max.into())))
+            .is_some();
+        if !in_range && !root_bounds.has_invalid_bounds {
+            continue;
+        }
         match attrs.noun_of(root_refno).as_deref() {
             Some("BRAN") => {}
             None => {
@@ -95,6 +128,9 @@ pub fn assemble(
                 continue;
             }
             _ => continue,
+        }
+        if root_bounds.has_invalid_bounds {
+            unresolved.insert(root_refno);
         }
         for record in memory.records_of_root(ProjectionScope::Current, root) {
             if record.mesh_id.is_empty()
@@ -110,21 +146,23 @@ pub fn assemble(
                 unresolved.insert(root_refno);
                 continue;
             }
-            add_box(&mut bounds, root_refno, Aabb::new(min.into(), max.into()));
+            let aabb = Aabb::new(min.into(), max.into());
+            if let Some(distance) = measure(&aabb) {
+                add_candidate(&mut bounds, root_refno, aabb, distance);
+            }
         }
     }
-    let source_box = scan.center.target_box.expect("refno source has bounds");
     // A projected root's own records are newer than its index entry.
     if let TubeIndexState::Ready(index) = tubes {
         for (&root, aabb) in index.iter() {
-            if root == source
-                || projected.contains(&root)
-                || spatial_query::aabb_min_distance(&source_box, aabb) > params.radius
-            {
+            if root == source || projected.contains(&root) {
                 continue;
             }
+            let Some(distance) = measure(aabb) else {
+                continue;
+            };
             match attrs.noun_of(root).as_deref() {
-                Some("BRAN") => add_box(&mut bounds, root, *aabb),
+                Some("BRAN") => add_candidate(&mut bounds, root, *aabb, distance),
                 None => {
                     unresolved.insert(root);
                 }
@@ -134,19 +172,15 @@ pub fn assemble(
     }
     let mut results: Vec<_> = bounds
         .into_iter()
-        .filter_map(|(root, aabb)| {
-            if root == source {
-                return None;
-            }
-            let distance = spatial_query::aabb_min_distance(&source_box, &aabb);
-            (distance <= params.radius).then(|| NearbyItem {
+        .filter_map(|(root, candidate)| {
+            (root != source).then(|| NearbyItem {
                 refno: root.to_string(),
                 dbnum: attrs.dbnum_of(root),
                 noun: "BRAN".to_owned(),
                 spec_value: attrs.spec_value_of(root),
                 name: attrs.name_of(root),
-                aabb: BoxJson::from(&aabb),
-                distance,
+                aabb: BoxJson::from(&candidate.aabb),
+                distance: candidate.distance,
                 within_radius: true,
             })
         })
@@ -208,7 +242,7 @@ pub async fn nearby(
         ));
     }
     spatial_tube_index::ensure_started();
-    let scan = match spatial_query::scan_global_tree(params, None).await {
+    let scan = match spatial_query::scan_global_tree_for_branches(params).await {
         // The projection is empty after a restart, but the source's rows are in the database.
         Err(SpatialQueryError::NotFound(_)) => {
             let records =
@@ -221,7 +255,7 @@ pub async fn nearby(
                     RefnoEnum::from(source).to_pdms_str()
                 ))
             })?;
-            spatial_query::scan_global_tree_with_center(params, center).await?
+            spatial_query::scan_global_tree_for_branches_with_center(params, center).await?
         }
         scan => scan?,
     };
@@ -234,10 +268,11 @@ pub async fn nearby(
     .map_err(|error| SpatialQueryError::Internal(anyhow::anyhow!("周边管道查询线程失败: {error}")))
 }
 
-/// Source bounds when the projection has none: the union of the root's database rows that carry
-/// geometry, filtered like the projection path of `spatial_query::resolve_center`.
+/// Source bounds when the projection has none: the union and individual leaf boxes of the root's
+/// database rows that carry geometry, filtered like the projection path of `spatial_query::resolve_center`.
 pub fn durable_center(source: RefU64, records: &[GeomInstQuery]) -> Option<Center> {
     let mut union: Option<Aabb> = None;
+    let mut leaf_boxes = Vec::new();
     let mut subtree = HashSet::from([source]);
     for record in records {
         let aabb = record.world_aabb;
@@ -248,17 +283,22 @@ pub fn durable_center(source: RefU64, records: &[GeomInstQuery]) -> Option<Cente
             .chain(aabb.maxs.coords.iter())
             .all(|value| value.is_finite())
             && (0..3).all(|axis| aabb.mins[axis] <= aabb.maxs[axis]);
-        if !usable || record.insts.iter().all(|inst| inst.geo_hash.is_empty()) {
+        if !usable
+            || spatial_query::is_negative_noun(&record.generic)
+            || record.insts.iter().all(|inst| inst.geo_hash.is_empty())
+        {
             continue;
         }
         subtree.insert(record.refno.refno());
         union = Some(union.map_or(aabb, |current| current.merged(&aabb)));
+        leaf_boxes.push(aabb);
     }
     let target = union?;
     Some(Center {
         point: target.center(),
         source: CenterSource::RefnoAabbCenter,
         target_box: Some(target),
+        leaf_boxes,
         subtree,
         centerline: None,
     })
@@ -275,6 +315,7 @@ mod tests {
         spatial_query::RawSpatialQuery,
         spatial_state::SpatialTreeState,
     };
+    use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
     use e3d_model::elmodl::GeometryId;
     use parry3d::math::Point;
 
@@ -310,6 +351,7 @@ mod tests {
                 point: source.center(),
                 source: CenterSource::RefnoAabbCenter,
                 target_box: Some(source),
+                leaf_boxes: vec![source],
                 subtree: HashSet::from([id(1)]),
                 centerline: None,
             },
@@ -339,31 +381,39 @@ mod tests {
 
     /// 投影里一根只有一段几何、带回执的 BRAN。
     fn commit(seq: u32, min: [f32; 3], max: [f32; 3]) -> ProjectionCommit {
+        commit_multi(seq, &[(min, max)])
+    }
+
+    fn commit_multi(seq: u32, boxes: &[([f32; 3], [f32; 3])]) -> ProjectionCommit {
         let root = refno_to_e3d(RefnoEnum::from(id(seq)));
         ProjectionCommit {
-            upserts: vec![ProjectedGeometry {
-                record_id: format!("branches-{seq}"),
-                geometry_id: GeometryId::Element {
-                    refno: id(seq).to_string(),
-                },
-                source_refno: root,
-                dbnum: 1,
-                source_sesno: 1,
-                noun: "TUBI".into(),
-                mesh_id: format!("mesh-{seq}"),
-                world_transform: glam::DMat4::IDENTITY,
-                world_bounds: [min, max],
-                ancestors: vec![packed_refno(root)],
-                shape: ProjectedShape::Baked,
-                tube: None,
-            }],
+            upserts: boxes
+                .iter()
+                .enumerate()
+                .map(|(i, (min, max))| ProjectedGeometry {
+                    record_id: format!("branches-{seq}-{i}"),
+                    geometry_id: GeometryId::Element {
+                        refno: id(seq).to_string(),
+                    },
+                    source_refno: root,
+                    dbnum: 1,
+                    source_sesno: 1,
+                    noun: "TUBI".into(),
+                    mesh_id: format!("mesh-{seq}-{i}"),
+                    world_transform: glam::DMat4::IDENTITY,
+                    world_bounds: [*min, *max],
+                    ancestors: vec![packed_refno(root)],
+                    shape: ProjectedShape::Baked,
+                    tube: None,
+                })
+                .collect(),
             receipt: Some((
                 root,
                 RootReceipt {
                     source_sesno: 1,
                     model_target: None,
                     manifest_hash: "branches".into(),
-                    geometry_count: 1,
+                    geometry_count: boxes.len(),
                     published_via: "regen".into(),
                     room: None,
                 },
@@ -455,7 +505,63 @@ mod tests {
             (target.mins, target.maxs),
             (Point::new(0.0, 0.0, 0.0), Point::new(1_000.0, 100.0, 100.0))
         );
+        assert_eq!(center.leaf_boxes.len(), 2);
         assert_eq!(center.subtree, HashSet::from([id(1), id(11)]));
         assert!(durable_center(id(1), &[row(12, [0.0; 3], [1.0; 3], "")]).is_none());
+    }
+
+    #[test]
+    fn l_shaped_source_and_projected_roots_filter_by_leaf_boxes_and_coarse_bounds() {
+        let memory = ModelMemoryStore::default();
+        // 源管 id(1)：L 形两段，并集盒 [0..5000, 0..5000, 0..100]，折角内侧 [3000, 3000] 离两段都 2900 mm。
+        // 邻管 id(2)：落在源管并集盒折角空白处（[3000, 3000]），不该进候选；
+        // 邻管 id(3)：离第一段 300 mm，应该进候选且距离为 300；
+        // 邻管 id(4)：自身也是跨两侧的投影根（y=-1000 与 y=1000），整根并集盒穿过源管，但每段都离源管 >= 900 mm，不该进候选；
+        // 未知根 id(99)：在 5000 mm 远，粗筛直接跳过，不虚报覆盖不完整。
+        memory.commit(
+            ProjectionScope::Current,
+            vec![
+                commit_multi(
+                    1,
+                    &[
+                        ([0.0, 0.0, 0.0], [5_000.0, 100.0, 100.0]),
+                        ([0.0, 0.0, 0.0], [100.0, 5_000.0, 100.0]),
+                    ],
+                ),
+                commit_multi(
+                    4,
+                    &[
+                        ([2_000.0, -1_000.0, 0.0], [2_100.0, -900.0, 100.0]),
+                        ([2_000.0, 1_000.0, 0.0], [2_100.0, 1_100.0, 100.0]),
+                    ],
+                ),
+                commit(99, [0.0, 8_000.0, 0.0], [100.0, 8_100.0, 100.0]),
+            ],
+        );
+        let tree = AccelerationTree::load(vec![
+            RStarBoundingBox::new(
+                aabb([3_000.0, 3_000.0, 0.0], [3_100.0, 3_100.0, 100.0]),
+                RefnoEnum::from(id(2)),
+                "BRAN".into(),
+            ),
+            RStarBoundingBox::new(
+                aabb([2_500.0, 400.0, 0.0], [2_600.0, 500.0, 100.0]),
+                RefnoEnum::from(id(3)),
+                "BRAN".into(),
+            ),
+        ]);
+        let query = params();
+        let scan = spatial_query::scan_tree_for_branches(
+            &tree,
+            SpatialTreeState::Ready,
+            &query,
+            &memory,
+        )
+        .expect("scan");
+        let tubes = index(&[(2, aabb([3_000.0, 3_000.0, 0.0], [3_100.0, 3_100.0, 100.0]))]);
+        let response = assemble(scan, &query, &Attrs, &memory, &tubes);
+        assert_eq!(refnos(&response), [id(3).to_string()]);
+        assert_eq!(response.results[0].distance, 300.0);
+        assert!(!response.truncated_candidates && response.warnings.is_empty());
     }
 }
