@@ -449,10 +449,16 @@ pub(super) fn mime_type_for_extension(ext: &str) -> Option<String> {
 /// 返回 false 表示声明的扩展名与实际内容不匹配。
 pub(super) fn attachment_content_matches_extension(ext: &str, data: &[u8]) -> bool {
     match ext {
-        "pdf" => data.starts_with(b"%PDF-"),
+        // ISO 32000 允许 %PDF- 出现在前 1024 字节内（与前端 validateAttachmentBytes 对齐）
+        "pdf" => data
+            .get(..data.len().min(1024))
+            .is_some_and(|prefix| prefix.windows(5).any(|w| w == b"%PDF-")),
         "png" => data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
         "jpg" | "jpeg" => data.starts_with(&[0xFF, 0xD8, 0xFF]),
-        // 其余格式（Office/CAD/CSV）不做内容校验，仅下载查看，不参与在线预览
+        // Word（.docx / .doc）同样参与在线预览，校验 ZIP / OLE 签名（对齐前端 useReviewAttachmentPreview）
+        "docx" => data.starts_with(&[0x50, 0x4B, 0x03, 0x04]),
+        "doc" => data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
+        // 其余格式（Excel/CAD/CSV）不做内容校验，仅下载查看
         _ => true,
     }
 }

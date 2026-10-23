@@ -1190,5 +1190,21 @@ mod tests {
         ));
         assert!(!is_annotation_screenshot_edit("file", Some("cloud-1")));
     }
+
+    #[test]
+    fn previewable_attachment_magic_checks_cover_pdf_images_and_word() {
+        assert!(attachment_content_matches_extension("pdf", b"%PDF-1.7\n"));
+        assert!(attachment_content_matches_extension("pdf", b"   %PDF-1.4\n"));
+        assert!(!attachment_content_matches_extension("pdf", b"<html>not pdf</html>"));
+
+        assert!(attachment_content_matches_extension("docx", &[0x50, 0x4B, 0x03, 0x04, 0x14, 0x00]));
+        assert!(!attachment_content_matches_extension("docx", b"not a zip"));
+
+        assert!(attachment_content_matches_extension(
+            "doc",
+            &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0x00]
+        ));
+        assert!(!attachment_content_matches_extension("doc", b"{\\rtf1\\ansi fake doc}"));
+    }
 }
 
