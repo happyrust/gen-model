@@ -43,13 +43,17 @@ pub struct RoomsAvailability {
     pub model: Option<Arc<ResidentRoomModel>>,
 }
 
-/// 从总开关 + 常驻模型生命周期折出状态（`/health.features.room` 同一套输入）。
-/// `Ready` / `Degraded` 都给清单——Degraded 的模型照常算房间（ADR-073 D10），只是有缺口要说。
+/// 从「本进程算不算得了房间」+ 常驻模型生命周期折出状态（`/health.features.room` 同一套输入；房间归属
+/// 2026-10-23 起不再是开关）。`Ready` / `Degraded` 都给清单——Degraded 的模型照常算房间（ADR-073 D10），
+/// 只是有缺口要说。
 pub fn rooms_availability() -> RoomsAvailability {
     if !crate::options::room_membership() {
         return RoomsAvailability {
             status: STATUS_DISABLED,
-            reason: Some("room_membership=false：服务端未开启房间归属计算".to_string()),
+            reason: Some(format!(
+                "{}：服务端算不出房间归属",
+                crate::options::room_membership_off_reason()
+            )),
             model: None,
         };
     }
@@ -108,6 +112,8 @@ pub struct RoomListItem {
     /// 答不出为 `null`。
     pub dbnum: Option<u32>,
     pub panel_count: usize,
+    /// 在册边界面板的 `a_b` 列表（供前端房间视图构建 RoomSolid 截断直管与绘制半透明房间体）。
+    pub panel_refnos: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -135,6 +141,7 @@ pub fn room_list_items(
                 name: attrs.name_of(refno),
                 dbnum: attrs.dbnum_of(refno),
                 panel_count: room.panels.len(),
+                panel_refnos: room.panels.iter().map(|panel| panel.refno().to_string()).collect(),
             }
         })
         .collect::<Vec<_>>();
@@ -658,6 +665,7 @@ mod tests {
         assert_eq!(items[0].name.as_deref(), Some("/A101-RM"));
         assert_eq!(items[0].dbnum, Some(4_000_000_013));
         assert_eq!(items[0].panel_count, 1);
+        assert_eq!(items[0].panel_refnos, vec![refno(10).to_string()]);
         assert_eq!(items[1].refno, refno(3).to_string(), "同房间号按 refno 兜底");
         assert_eq!((items[1].name.as_deref(), items[1].dbnum), (None, None), "答不出就是 null");
         assert_eq!(items[2].panel_count, 2);
