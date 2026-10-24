@@ -9,6 +9,11 @@
 //! 不读的场合（回执里两格都缺席，前端不画）：本进程算不了房间；读透形态（边在进程 store，不在 `SUL_DB`）；
 //! 一批超过 [`MAX_ROOTS`] 根（初始化 / 整库重建：那不是「一轮增量改了什么」的账，每根多两次往返也不值）。
 //! 读失败只记日志，不拦批次。
+//!
+//! 边怎么读（GitHub #66）：按构件走**边目标** `type::thing('pe', …)<-room_relate`（计划 `Iterate Edges`），不按 `out`
+//! 过滤 `room_relate` 表——`out` 够不着 `unique_room_relate (in, out)` 的前缀，那一句是整表扫（`Iterate Table`），
+//! 夹具 15.7 万条边上实测 694 ms / 句 vs 边目标 0.4 ms；第一版每构件一句扫表，7997 一窗 60 根 1117 构件前后两次快照吃掉
+//! 29 分钟（`db-20261024-231937-000000`）。与 `room_model` 写侧「边目标」的改写同一个教训。
 
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
@@ -58,8 +63,8 @@ pub async fn snapshot(roots: &[String]) -> HashMap<String, Vec<RoomRef>> {
 }
 
 /// 在指定库上拍：每根两步——先按 `anc` / `in` 两路索引拿到根名下的构件（与 `model_record_reader::durable_scope_reads`
-/// 同一条纪律：两路分开、不写 OR），再把每个构件的 `room_relate` 边一句一构件拼成一次往返
-/// （`out = pe:…` 是 `e3d.room.lookup` 同一句）。解不出的根跳过。
+/// 同一条纪律：两路分开、不写 OR），再把每个构件的 `room_relate` 边按边目标一句一构件拼成一次往返
+/// （[`edge_statement`]）。解不出的根跳过。
 pub(crate) async fn snapshot_on(
     db: &Surreal<Any>,
     roots: &[String],
@@ -91,18 +96,21 @@ pub(crate) async fn snapshot_on(
     Ok(out)
 }
 
+/// 一个构件的房间边：从构件记录沿入边走（`Iterate Edges`）。构件记录不存在 / 没有边时回空表，不报错。
+fn edge_statement(member: &str) -> String {
+    format!(
+        "SELECT record::id(in) AS panel, room_num FROM type::thing('pe', '{}')<-room_relate;",
+        member.replace('\'', "")
+    )
+}
+
 async fn edges_of(db: &Surreal<Any>, members: &[String]) -> anyhow::Result<Vec<Edge>> {
     let mut edges = Vec::new();
     // 一次往返最多拼这么多句：一根 BRAN 几十个构件，分块只是防极端根把一条请求拼到几万句。
     for chunk in members.chunks(256) {
         let sql = chunk
             .iter()
-            .map(|member| {
-                format!(
-                    "SELECT record::id(in) AS panel, room_num FROM room_relate WHERE out = type::thing('pe', '{}');",
-                    member.replace('\'', "")
-                )
-            })
+            .map(|member| edge_statement(member))
             .collect::<Vec<_>>()
             .join("\n");
         let mut response = db.query(sql).await?.check()?;
@@ -156,15 +164,43 @@ mod tests {
              CREATE inst_relate:b SET in = type::thing('pe','24384_23262'), anc = [{packed}];\n\
              CREATE inst_relate:c SET in = type::thing('pe','24384_23257'), anc = [];\n\
              CREATE inst_relate:d SET in = type::thing('pe','24384_99999'), anc = [1];\n\
-             CREATE room_relate:e1 SET in = type::thing('pe','24381_1204'), out = type::thing('pe','24384_23262'), room_num = 'R113', inside_count = 8;\n\
-             CREATE room_relate:e2 SET in = type::thing('pe','24381_35186'), out = type::thing('pe','24384_23262'), room_num = 'R345', inside_count = 2;\n\
-             CREATE room_relate:e3 SET in = type::thing('pe','24381_1204'), out = type::thing('pe','24384_23260'), room_num = 'R113', inside_count = 8;\n\
-             CREATE room_relate:e4 SET in = type::thing('pe','24381_1'), out = type::thing('pe','24384_99999'), room_num = 'R999', inside_count = 8;"
+             RELATE pe:24381_1204->room_relate:e1->pe:24384_23262 SET room_num = 'R113', inside_count = 8;\n\
+             RELATE pe:24381_35186->room_relate:e2->pe:24384_23262 SET room_num = 'R345', inside_count = 2;\n\
+             RELATE pe:24381_1204->room_relate:e3->pe:24384_23260 SET room_num = 'R113', inside_count = 8;\n\
+             RELATE pe:24381_1->room_relate:e4->pe:24384_99999 SET room_num = 'R999', inside_count = 8;"
         ))
         .await
         .unwrap()
         .check()
         .unwrap();
+        // 读边走边目标（#66）：计划沿边走（rocksdb 上 `Iterate Edges`，mem 引擎展开成逐条 `Iterate Thing`），不许出现
+        // `Iterate Table`——`out` 够不着 `unique_room_relate` 的前缀，按 `out` 过滤表就是整表扫，15.7 万条边上 694 ms / 句。
+        let statement = edge_statement("24384_23262");
+        assert!(
+            statement.contains("<-room_relate") && !statement.contains("FROM room_relate WHERE"),
+            "{statement}"
+        );
+        let mut response = db
+            .query(format!("{} EXPLAIN;", statement.trim_end_matches(';')))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let plan: surrealdb::Value = response.take(0).unwrap();
+        let plan = plan.to_string();
+        assert!(
+            !plan.contains("Iterate Table")
+                && (plan.contains("Iterate Edges") || plan.contains("Iterate Thing")),
+            "{plan}"
+        );
+        let production = include_str!("unit_room_snapshot.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert!(
+            !production.contains("FROM room_relate WHERE"),
+            "按 out 过滤是整表扫，不许回来"
+        );
 
         let snap = snapshot_on(
             &db,

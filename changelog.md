@@ -1,5 +1,13 @@
 # 变更记录
 
+## 2026-10-25
+
+### 单元房间快照改走边目标：按构件扫 `room_relate` 整表（694 ms / 句）让 7997 一窗 60 根前后两次快照吃掉 29 分钟（GitHub #66）
+
+- **为什么**：7997 加进夹具 `watch_dbnums` 后补跑的一窗 `db-20261024-231937-000000`（78→359，60 个单元）跑了 33 分钟：数据侧 13 s、几何生成 25 s、整库房间重算 3.1 min（按设计），其余 ~29 min 是开工前 / 收尾后两次「房间归属快照」（2026-10-24 W1）：每个构件一句 `SELECT … FROM room_relate WHERE out = …`，`room_relate` 15.7 万行、只有 `(in, out)` 唯一索引，`out` 够不着前缀 → `Iterate Table`，实测 694 ms / 句；60 根 1117 构件 ≈ 1177 句 × 2 次。夹具进程空转、SurrealDB 单核跑满。白天 8000 的批次都是 1 根 ≤ 10 构件，藏在总耗时里没看见。
+- **改**：`unit_room_snapshot::edge_statement` 按边目标读 `FROM type::thing('pe', …)<-room_relate`（`Iterate Edges`，真库 0.4 ms / 句，50 句一次往返 25 ms）——与 `room_model` 写侧、`fn::room_relate_of` 同一条路，不加索引。测试夹具改 `RELATE`（边要有图键），EXPLAIN 钉没有 `Iterate Table`，源码钉生产半边不许再出现 `FROM room_relate WHERE`。`batch_worker` 两次快照各打一行 `[单元快照] … 房间 X ms 几何 Y ms`。
+- **没动**：`e3d.room.lookup` 还是 `WHERE out = $pe`（0.7 s / 构件），它有「不依赖 kv-mem 里有 pe 行」的源码钉，读透形态没试，留在 #66。
+
 ## 2026-10-24
 
 ### `/tasks` 长出历史：终态任务落盘 + `?before=` 翻页；失败批次和补排它的那条互指；整库房间重算占一行 `room_rebuild`；单元回执带房间前后、几何前后；每批一份元素级变化清单 `GET /tasks/{id}/changes`；整片删把老生成链的同根老行一起换掉，库上的模型行跟着增量走

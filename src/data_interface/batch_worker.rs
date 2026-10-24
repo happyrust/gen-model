@@ -4364,10 +4364,21 @@ async fn run_unit_worklist(
         .iter()
         .map(|task| task.root_refno.clone())
         .collect();
+    let snapshot_started = Instant::now();
     let rooms_before = crate::data_interface::unit_room_snapshot::snapshot(&snapshot_roots).await;
+    let rooms_before_ms = snapshot_started.elapsed().as_millis();
     // 几何的「前」同一处拍（计划 2026-10-24 W4）：整根重算先删行再写行，过了这一行就问不到了。
     let geometry_before =
         crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
+    // 两次快照的账要自己出声（#66：第一版按构件扫 `room_relate` 整表，60 根一窗前后共 29 分钟藏在「数据应用+模型生成」里）。
+    println!(
+        "[单元快照] 开工前 根={} 房间 {}ms（拍到 {} 根） 几何 {}ms（拍到 {} 根）",
+        snapshot_roots.len(),
+        rooms_before_ms,
+        rooms_before.len(),
+        snapshot_started.elapsed().as_millis() - rooms_before_ms,
+        geometry_before.len()
+    );
 
     // 刚体前移分流（ADR-066 B6）：先把「只动摆放」的单元交给便宜路执行体。走成的记 Transform 回执；
     // 走不成的连同回退原因改排整根重算，与其余单元一起走下面的老路。开关关时没有 transform 单元。
@@ -4613,6 +4624,7 @@ async fn run_unit_worklist(
         }
     }
     // 「后」在全部单元收尾之后拍，与「前」同一把尺子；前面没拍（空表）这里也不拍，两格同生共死。
+    let after_started = Instant::now();
     if !rooms_before.is_empty() {
         let rooms_after =
             crate::data_interface::unit_room_snapshot::snapshot(&snapshot_roots).await;
@@ -4621,6 +4633,7 @@ async fn run_unit_worklist(
             result.rooms_after = rooms_after.get(&result.root_refno).cloned();
         }
     }
+    let rooms_after_ms = after_started.elapsed().as_millis();
     if !geometry_before.is_empty() {
         let geometry_after =
             crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
@@ -4636,6 +4649,14 @@ async fn run_unit_worklist(
                 _ => None,
             };
         }
+    }
+    if !rooms_before.is_empty() || !geometry_before.is_empty() {
+        println!(
+            "[单元快照] 收尾后 根={} 房间 {}ms 几何 {}ms",
+            snapshot_roots.len(),
+            rooms_after_ms,
+            after_started.elapsed().as_millis() - rooms_after_ms
+        );
     }
     results.sort_by(|left, right| {
         (left.dbnum, left.root_refno.as_str()).cmp(&(right.dbnum, right.root_refno.as_str()))
