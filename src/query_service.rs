@@ -52,6 +52,12 @@ struct RoomMembershipEdge {
 /// 库上没有别的房间结果形态——结果目录 / 分片工件与旧结果表随房间流程退役，结果版本那一格
 /// 随第三枚水位退（D2）。排序与 `fn::room_relate_of` 同一口径（`inside_count` 降序 →
 /// `center_dist` 升序 → `room_num` 升序，ADR-010 §5），多归属时首条即材料表取到的那条。
+///
+/// 边按**边目标**读（`$pe<-room_relate`，计划 `Iterate Edges`；与 `fn::room_relate_of` 同一写法，GitHub #66）：
+/// 此前按 `out = $pe` 过滤 `room_relate` 表，`out` 够不着 `unique_room_relate (in, out)` 的前缀，整表扫，夹具 15.7 万条边上
+/// 点查一个构件 694 ms，边目标 0.4 ms。边目标不依赖 `pe` 属性行（图键挂在顶点 id 下，`RELATE` / `INSERT RELATION` 写边时就有），
+/// 读透形态没有 `pe` 行也读得到；它依赖边是按关系写的——本仓两条写路（`room_model` 整间 / 逐根）都是 `INSERT RELATION`，
+/// 夹具抽 30 个构件扫表与走边计数逐一相等。
 async fn read_room_memberships(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     member: &str,
@@ -60,7 +66,7 @@ async fn read_room_memberships(
         .query(
             "LET $pe = type::thing('pe', $member);
             SELECT record::id(in) AS panel, room_num, inside_count ?? 0 AS inside_count, \
-             center_dist ?? 0.0 AS center_dist FROM room_relate WHERE out = $pe \
+             center_dist ?? 0.0 AS center_dist FROM $pe<-room_relate \
              ORDER BY inside_count DESC, center_dist ASC, room_num ASC;",
         )
         .bind(("member", member.to_owned()))
@@ -1300,8 +1306,9 @@ mod tests {
             );
         }
         assert!(
-            production.contains("FROM room_relate WHERE out = $pe"),
-            "读口直接按 relation.out 查边，不依赖 kv-mem 里存在 pe 属性行"
+            production.contains("FROM $pe<-room_relate")
+                && !production.contains("FROM room_relate WHERE out"),
+            "读口按边目标读边（Iterate Edges），不按 out 扫表；不依赖 kv-mem 里存在 pe 属性行（#66）"
         );
         let room = source
             .split_once("async fn room(&self")
@@ -1457,10 +1464,10 @@ mod tests {
             .use_db("room_lookup")
             .await
             .expect("namespace");
+        // 边按关系写（生产写路是 `INSERT RELATION`）：`RELATE` 只挂图键，不建 `pe` 行——下面的「夹具没有属性行」断言正是要证
+        // 边目标读法在读透形态（没有 pe 行）下也读得到。
         db.query(
-            "CREATE room_relate:edge SET \
-             in=type::thing('pe','24383_500'), \
-             out=type::thing('pe','24383_10'), \
+            "RELATE pe:24383_500->room_relate:edge->pe:24383_10 SET \
              room_num='R1', inside_count=8, center_dist=12.5;",
         )
         .await

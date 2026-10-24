@@ -6,7 +6,7 @@
 
 - **为什么**：7997 加进夹具 `watch_dbnums` 后补跑的一窗 `db-20261024-231937-000000`（78→359，60 个单元）跑了 33 分钟：数据侧 13 s、几何生成 25 s、整库房间重算 3.1 min（按设计），其余 ~29 min 是开工前 / 收尾后两次「房间归属快照」（2026-10-24 W1）：每个构件一句 `SELECT … FROM room_relate WHERE out = …`，`room_relate` 15.7 万行、只有 `(in, out)` 唯一索引，`out` 够不着前缀 → `Iterate Table`，实测 694 ms / 句；60 根 1117 构件 ≈ 1177 句 × 2 次。夹具进程空转、SurrealDB 单核跑满。白天 8000 的批次都是 1 根 ≤ 10 构件，藏在总耗时里没看见。
 - **改**：`unit_room_snapshot::edge_statement` 按边目标读 `FROM type::thing('pe', …)<-room_relate`（`Iterate Edges`，真库 0.4 ms / 句，50 句一次往返 25 ms）——与 `room_model` 写侧、`fn::room_relate_of` 同一条路，不加索引。测试夹具改 `RELATE`（边要有图键），EXPLAIN 钉没有 `Iterate Table`，源码钉生产半边不许再出现 `FROM room_relate WHERE`。`batch_worker` 两次快照各打一行 `[单元快照] … 房间 X ms 几何 Y ms`。
-- **没动**：`e3d.room.lookup` 还是 `WHERE out = $pe`（0.7 s / 构件），它有「不依赖 kv-mem 里有 pe 行」的源码钉，读透形态没试，留在 #66。
+- **同一句的另一处**（用户「继续」）：`e3d.room.lookup`（`query_service::read_room_memberships`）也改走边目标 `FROM $pe<-room_relate`，点查一个构件从 820–980 ms 降到毫秒级。它那条「不依赖 kv-mem 里有 pe 行」的源码钉改口并保留本意：边目标走的是挂在顶点 id 下的图键，不要 `pe` 行（mem 库测试改用 `RELATE` 建边、仍断言没有 pe 行）；它依赖边是按关系写的（本仓两条写路都是 `INSERT RELATION`；夹具抽 30 个构件扫表与走边计数逐一相等）。
 
 ## 2026-10-24
 
