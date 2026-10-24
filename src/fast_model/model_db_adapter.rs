@@ -804,16 +804,25 @@ async fn slice_sources_on(
     if packed_roots.is_empty() {
         return Ok(Vec::new());
     }
-    let keys: Vec<String> = db
+    // 两路分开读、各走 `idx_inst_relate_anc`，不写成一条 `… OR …`（见 [`durable_records_sql`] 的说明）：模型面写的行，
+    // 加上老生成链留下的带几何指针的同根老行——整片删（[`render_slice_delete`]）两种都删，它们的来源都要进清边 /
+    // 摘树的名单。
+    //
+    // [`durable_records_sql`]: crate::fast_model::model_record_reader
+    let mut response = db
         .query(
             "SELECT VALUE record::id(in) FROM inst_relate \
-             WHERE anc CONTAINSANY $roots AND model_sesno != NONE;",
+             WHERE anc CONTAINSANY $roots AND model_sesno != NONE;\n\
+             SELECT VALUE record::id(in) FROM inst_relate \
+             WHERE anc CONTAINSANY $roots AND model_sesno = NONE \
+             AND aabb != NONE AND world_trans != NONE;",
         )
         .bind(("roots", packed_roots.to_vec()))
         .await
         .context("read model slice sources")?
-        .check()?
-        .take(0)?;
+        .check()?;
+    let mut keys: Vec<String> = response.take(0)?;
+    keys.extend(response.take::<Vec<String>>(1)?);
     let mut sources = BTreeSet::new();
     for key in keys {
         let refno = crate::fast_model::e3d_model_service::parse_refno(&key)
@@ -831,6 +840,18 @@ async fn slice_sources_on(
 ///
 /// `model_sesno != NONE` 是护栏：属性面独有的行（`pdms_inst` 写的、从没被模型碰过的）不带
 /// 这一列，谓词碰不到它们。
+///
+/// **护栏有一个例外（2026-10-24，ADR-088）：带几何指针的同根老行一并删。** 老生成链（`pdms_inst`）写的 `inst_relate` 行与模型面
+/// 同 id（`inst_relate:<a>_<b>`）、不带 `model_sesno`；有回执的根是模型面对这根的全集，投影在时这些老行本来就不对外，可
+/// 插入是 `INSERT IGNORE`——不删，模型面的新行就一次也落不进库，冷读（重启后、逻出后）答的永远是第一次生成的几何
+/// （夹具 8023 真机：BRAN `24384/23257` 的 FTUBE 在 E3D 里抬到 U3400、库上永远 2900，`docs/plans/2026-10-24-increment-records-server-gaps-plan.md`
+/// W4 落地记录）。老行的键并进 `$slice_keys`，与模型面的键同一套点删：关系行本身，加上**同键**的 `inst_info` / `aabb` / `trans`——
+/// 那是模型面自己的槽位，老行在时模型面每一轮的 `INSERT IGNORE` 都把盒 / 变换插进了槽位、关系行却被老行挡在外面，槽位里
+/// 留的是第一轮的几何（同一根真机：老行删掉、关系行落进来了，FTUBE 却指着 2900 那一套孤儿盒），不连着删就是把它们认成新行。
+/// 老行自己指着的 `aabb` / `trans` / `inst_info` 按摘要另键、可能被别的实例共用，**不顺指针删**，留给可达性 GC。没有几何指针的
+/// 属性面行照旧碰不到（模型冷读 `aabb.d != NONE AND world_trans.d != NONE` 本来也看不见它们）。不按本批要写的 id 点删：
+/// 一根两千件就是两千项的 `type::thing()` 数组，正是 [`persist_group`] 给有回执的根改走 `Initial` 要省掉的那笔账；谓词走
+/// `idx_inst_relate_anc`，与上面两句同价。
 ///
 /// 形状上照着 [`render_spooled_scope_cleanup`]，但**删的那几句一律点名记录、不下谓词**：
 /// 先把关系行的 id 与 `out` 捞进变量，再把 `aabb` / `trans` 的记录 id 直接拼出来
@@ -864,8 +885,12 @@ fn render_slice_delete(packed_roots: &[i64]) -> String {
     // 一侧拼不出来，只能按 `in` 找——走 `idx_geo_relate_in`，且照 [`append_geometry_removal`]
     // 的路子先 `SELECT` 出 id 再 `DELETE`（部署引擎上 `DELETE … WHERE` 不走索引）。
     format!(
-        "LET $slice_keys = SELECT VALUE record::id(id) FROM inst_relate \
+        "LET $slice_model_keys = SELECT VALUE record::id(id) FROM inst_relate \
          WHERE anc CONTAINSANY [{roots}] AND model_sesno != NONE;\n\
+         LET $slice_legacy_keys = SELECT VALUE record::id(id) FROM inst_relate \
+         WHERE anc CONTAINSANY [{roots}] AND model_sesno = NONE \
+         AND aabb != NONE AND world_trans != NONE;\n\
+         LET $slice_keys = array::union($slice_model_keys, $slice_legacy_keys);\n\
          LET $slice_tubes = SELECT id, aabb, world_trans FROM tubi_relate \
          WHERE anc CONTAINSANY [{roots}] AND model_sesno != NONE;\n\
          LET $slice_infos = $slice_keys.map(|$key| type::thing('inst_info', $key));\n\
@@ -2498,6 +2523,9 @@ pub fn render_spooled_scope_deletion(
 /// `aabb` / `trans` 与关系行同键直接拼；管身的盒与变换按几何摘要另键、只能顺行上的
 /// `aabb` / `world_trans` 指针删——从槽位 id 拼出来的是不存在的记录，删了等于没删。
 /// `geo_relate` 是唯一一句带谓词的删：先按 `in` 走 `idx_geo_relate_in` 选出 id 再删。
+///
+/// 老生成链的同根老行（`model_sesno = NONE`、带几何指针）与 [`render_slice_delete`] 同一个例外（2026-10-24，ADR-088 D5）：键并进
+/// `$mirror_keys` 同一套点删，不顺它们自己的摘要键指针删。同样两路分开读、不写 OR。
 fn render_spooled_scope_cleanup(root: RefNo) -> String {
     let packed = packed_refno(root);
     let owner = sql_string(&refno_key(root));
@@ -2507,7 +2535,12 @@ fn render_spooled_scope_cleanup(root: RefNo) -> String {
          WHERE anc CONTAINS {packed} AND model_sesno != NONE;\n\
          LET $mirror_keys_by_owner = SELECT VALUE record::id(id) FROM inst_relate \
          WHERE in = $mirror_owner AND model_sesno != NONE;\n\
-         LET $mirror_keys = array::union($mirror_keys_by_anc, $mirror_keys_by_owner);\n\
+         LET $mirror_legacy_by_anc = SELECT VALUE record::id(id) FROM inst_relate \
+         WHERE anc CONTAINS {packed} AND model_sesno = NONE AND aabb != NONE AND world_trans != NONE;\n\
+         LET $mirror_legacy_by_owner = SELECT VALUE record::id(id) FROM inst_relate \
+         WHERE in = $mirror_owner AND model_sesno = NONE AND aabb != NONE AND world_trans != NONE;\n\
+         LET $mirror_keys = array::union(array::union($mirror_keys_by_anc, $mirror_keys_by_owner), \
+         array::union($mirror_legacy_by_anc, $mirror_legacy_by_owner));\n\
          LET $mirror_tubes_by_anc = SELECT id, aabb, world_trans FROM tubi_relate \
          WHERE anc CONTAINS {packed} AND model_sesno != NONE;\n\
          LET $mirror_tubes_by_owner = SELECT id, aabb, world_trans FROM tubi_relate \
@@ -3314,8 +3347,9 @@ mod tests {
         }
     }
 
-    /// 整片删只圈模型面写下的行（`model_sesno != NONE`），属性面独有的行碰不到；
-    /// 多根一条 `CONTAINSANY`，不随根数展开成一堆语句。
+    /// 整片删圈模型面写下的行（`model_sesno != NONE`），外加同根带几何指针的老行（`model_sesno = NONE`，关系行连同键的
+    /// `inst_info` / `aabb` / `trans` 槽位一起删、不顺它自己的摘要键指针删，ADR-088 D1 / D2）；
+    /// 没有几何指针的属性面行碰不到；多根一条 `CONTAINSANY`，不随根数展开成一堆语句。
     #[test]
     fn slice_delete_is_one_predicate_block_guarded_by_the_model_column() {
         assert!(render_slice_delete(&[]).is_empty());
@@ -3327,8 +3361,20 @@ mod tests {
         );
         assert_eq!(
             sql.matches("anc CONTAINSANY [42,43]").count(),
-            2,
-            "多根合成一条谓词: {sql}"
+            3,
+            "多根合成一条谓词（模型面两张表 + 老行一句）: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "LET $slice_legacy_keys = SELECT VALUE record::id(id) FROM inst_relate WHERE anc CONTAINSANY [42,43] \
+                 AND model_sesno = NONE AND aabb != NONE AND world_trans != NONE;"
+            ) && sql.contains("LET $slice_keys = array::union($slice_model_keys, $slice_legacy_keys);"),
+            "同根带几何指针的老行的键要并进 $slice_keys，与模型面的键同一套点删: {sql}"
+        );
+        assert!(
+            !sql.contains("$slice_legacy_keys.map")
+                && !sql.contains("SELECT id, aabb, world_trans FROM inst_relate"),
+            "老行自己指着的盒 / 变换 / inst_info 按摘要另键、可能共用，不许顺指针删: {sql}"
         );
         assert!(
             !sql.contains("inst_geo"),
@@ -3364,9 +3410,14 @@ mod tests {
     /// 三种行形状各放一条——标准图元（`inst_relate` + `inst_info` + `geo_relate` + 同键
     /// `aabb` / `trans`）、烘焙实体（没有 `out`，只有 `inst_relate` + 同键 `aabb` / `trans`）、
     /// 隐式管身（`tubi_relate:[pe, 槽位]`，盒与变换按几何摘要另键）；再放三样不许动的——
-    /// 邻根的行、属性面独有的行（`model_sesno = NONE`）、内容寻址的 `inst_geo` 与它的本地盒。
+    /// 邻根的行、没有几何指针的属性面行（`model_sesno = NONE`）、内容寻址的 `inst_geo` 与它的本地盒。
     /// 管身那一对是这条测试的由头：按槽位 id 拼 `aabb:[pe, n]` 删的是不存在的记录，
     /// 六张表里会剩两行孤儿，只看语句形状看不出来。
+    ///
+    /// 2026-10-24 多一条老生成链的行（`inst_relate:oldgeo`：与模型面同根、没有 `model_sesno`、带按摘要另键的
+    /// `aabb` / `world_trans` 指针）：关系行要走（不走就是夹具 8023 那根 FTUBE 永远停在 2900），它指着的盒、变换、
+    /// `inst_info` 可能被别的实例共用、不许跟着走；而模型面同键槽位里的孤儿（`aabb:oldgeo` / `trans:oldgeo` / `inst_info:oldgeo`，
+    /// 老行在时被 `INSERT IGNORE` 插进去、关系行却没落成的那些）必须一起走，不然新关系行指的就是第一轮的几何。
     #[tokio::test]
     async fn slice_delete_removes_every_representation_of_the_slice_and_nothing_else() {
         let db = surreal_mem().await;
@@ -3374,11 +3425,12 @@ mod tests {
         let other = packed_refno(RefNo::new(7997, 20));
         db.query(format!(
             "INSERT INTO aabb [{{id:aabb:c1,d:1}},{{id:aabb:b1,d:1}},{{id:aabb:tube1digest,d:1}},\
-                              {{id:aabb:n1,d:1}},{{id:aabb:mesh1,d:1}}];\n\
+                              {{id:aabb:n1,d:1}},{{id:aabb:mesh1,d:1}},{{id:aabb:olddigest,d:1}},{{id:aabb:oldgeo,d:1}}];\n\
              INSERT INTO trans [{{id:trans:c1,d:1}},{{id:trans:b1,d:1}},{{id:trans:tube1digest,d:1}},\
-                               {{id:trans:n1,d:1}}];\n\
+                               {{id:trans:n1,d:1}},{{id:trans:olddigest,d:1}},{{id:trans:oldgeo,d:1}}];\n\
              INSERT INTO inst_geo [{{id:inst_geo:mesh1,aabb:aabb:mesh1}}];\n\
-             INSERT INTO inst_info [{{id:inst_info:c1,model_sesno:5}},{{id:inst_info:n1,model_sesno:5}}];\n\
+             INSERT INTO inst_info [{{id:inst_info:c1,model_sesno:5}},{{id:inst_info:n1,model_sesno:5}},\
+                                   {{id:inst_info:oldshared}},{{id:inst_info:oldgeo,model_sesno:4}}];\n\
              INSERT RELATION INTO geo_relate [\
                 {{id:geo_relate:[inst_info:c1,inst_geo:mesh1],in:inst_info:c1,out:inst_geo:mesh1}},\
                 {{id:geo_relate:[inst_info:n1,inst_geo:mesh1],in:inst_info:n1,out:inst_geo:mesh1}}];\n\
@@ -3389,7 +3441,9 @@ mod tests {
                   aabb:aabb:b1,world_trans:trans:b1,model_sesno:5}},\
                 {{id:inst_relate:n1,in:pe:⟨7997_21⟩,out:inst_info:n1,anc:[{other}],\
                   aabb:aabb:n1,world_trans:trans:n1,model_sesno:5}},\
-                {{id:inst_relate:legacy,in:pe:⟨7997_13⟩,anc:[{packed}],generic:'EQUI'}}];\n\
+                {{id:inst_relate:legacy,in:pe:⟨7997_13⟩,anc:[{packed}],generic:'EQUI'}},\
+                {{id:inst_relate:oldgeo,in:pe:⟨7997_15⟩,out:inst_info:oldshared,anc:[{packed}],\
+                  generic:'PIPE',aabb:aabb:olddigest,world_trans:trans:olddigest}}];\n\
              INSERT RELATION INTO tubi_relate [\
                 {{id:tubi_relate:[pe:⟨7997_14⟩,0],in:pe:⟨7997_14⟩,out:inst_geo:mesh1,\
                   aabb:aabb:tube1digest,world_trans:trans:tube1digest,anc:[{packed}],model_sesno:5}}];"
@@ -3420,9 +3474,12 @@ mod tests {
         let expected = [
             "aabb:n1",
             "aabb:mesh1",
+            "aabb:olddigest",
             "trans:n1",
+            "trans:olddigest",
             "inst_geo:mesh1",
             "inst_info:n1",
+            "inst_info:oldshared",
             "geo_relate:[inst_info:n1, inst_geo:mesh1]",
             "inst_relate:n1",
             "inst_relate:legacy",
@@ -3432,8 +3489,38 @@ mod tests {
         .collect::<BTreeSet<_>>();
         assert_eq!(
             survivors, expected,
-            "整片删之后只许剩下邻根、属性面独有的行与内容寻址的网格"
+            "整片删之后只许剩下邻根、没有几何指针的属性面行、内容寻址的网格，以及老行按摘要另键的盒 / 变换 / inst_info（老关系行本身必须走）"
         );
+    }
+
+    /// 整片删之前读「库里有过的来源」：模型面的行和同根带几何指针的老行都算，没有指针的属性面行和邻根不算——
+    /// 老行被整片删掉之后，它的来源要进清边 / 摘树的名单，不然树里留一只幽灵盒。
+    #[tokio::test]
+    async fn slice_sources_include_legacy_geometry_rows_under_the_root() {
+        let db = surreal_mem().await;
+        let packed = packed_refno(RefNo::new(7997, 10));
+        let other = packed_refno(RefNo::new(7997, 20));
+        db.query(format!(
+            "INSERT INTO inst_relate [\
+                {{id:inst_relate:c1,in:pe:⟨7997_11⟩,anc:[{packed}],aabb:aabb:c1,world_trans:trans:c1,model_sesno:5}},\
+                {{id:inst_relate:legacy,in:pe:⟨7997_13⟩,anc:[{packed}],generic:'EQUI'}},\
+                {{id:inst_relate:oldgeo,in:pe:⟨7997_15⟩,anc:[{packed}],aabb:aabb:old,world_trans:trans:old}},\
+                {{id:inst_relate:n1,in:pe:⟨7997_21⟩,anc:[{other}],aabb:aabb:n1,world_trans:trans:n1}}];"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let sources = slice_sources_on(&db, &[packed]).await.unwrap();
+        assert_eq!(
+            sources,
+            vec![
+                refno_from_e3d(RefNo::new(7997, 11)),
+                refno_from_e3d(RefNo::new(7997, 15)),
+            ],
+            "模型面的 7997/11 和老行的 7997/15 都是来源；没指针的 7997/13 和邻根的 7997/21 不是"
+        );
+        assert!(slice_sources_on(&db, &[]).await.unwrap().is_empty());
     }
 
     /// 整片删掉之后，本次投影里还在的来源不清房间边（重算自己先清后写），
@@ -4050,7 +4137,7 @@ mod tests {
     /// 就等于把刚拆掉的 O(N²) 原样装了回来，只是从「传回客户端」换成「库端扫」。
     ///
     /// 索引用生产那份 [`INST_RELATE_INDEX_SQL`]，测的是启动序列真会建出来的那组。
-    /// 带谓词的只许三条：两条 `anc CONTAINSANY` 读与 `geo_relate` 按 `in` 的那句。
+    /// 带谓词的只许四条：三条 `anc CONTAINSANY` 读（模型面两张表 + 同根带几何指针的老行，2026-10-24）与 `geo_relate` 按 `in` 的那句。
     ///
     /// [`INST_RELATE_INDEX_SQL`]: crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL
     #[tokio::test]
@@ -4068,7 +4155,7 @@ mod tests {
         ]);
         assert_eq!(
             sql.lines().filter(|line| !line.trim().is_empty()).count(),
-            11,
+            13,
             "块的形状变了就来更新这条测试: {sql}"
         );
         let predicated = assert_delete_block_never_iterates_a_table(
@@ -4079,11 +4166,16 @@ mod tests {
         .await;
         assert_eq!(
             predicated.len(),
-            3,
-            "exactly the two anc reads and the geo_relate lookup carry predicates: {predicated:?}"
+            4,
+            "exactly the three anc reads and the geo_relate lookup carry predicates: {predicated:?}"
         );
         assert!(
-            predicated[2].contains("FROM geo_relate WHERE in IN $slice_infos"),
+            predicated[1]
+                .contains("LET $slice_legacy_keys = SELECT VALUE record::id(id) FROM inst_relate"),
+            "老行那一句也得走 anc 索引: {predicated:?}"
+        );
+        assert!(
+            predicated[3].contains("FROM geo_relate WHERE in IN $slice_infos"),
             "{predicated:?}"
         );
     }
@@ -4104,7 +4196,7 @@ mod tests {
         let sql = render_spooled_scope_cleanup(RefNo::new(7997, 1));
         assert_eq!(
             sql.lines().filter(|line| !line.trim().is_empty()).count(),
-            16,
+            18,
             "块的形状变了就来更新这条测试: {sql}"
         );
         assert!(
@@ -4122,16 +4214,16 @@ mod tests {
         .await;
         assert_eq!(
             predicated.len(),
-            5,
-            "two anc reads, two owner reads and the geo_relate lookup carry predicates: {predicated:?}"
+            7,
+            "three anc reads, three owner reads and the geo_relate lookup carry predicates: {predicated:?}"
         );
         assert_eq!(
             predicated
                 .iter()
                 .filter(|statement| statement.contains("WHERE in = $mirror_owner"))
                 .count(),
-            2,
-            "the spool scope must keep the anc-less fallback by owner on both relation tables: {predicated:?}"
+            3,
+            "the spool scope must keep the anc-less fallback by owner on both relation tables and the legacy sweep: {predicated:?}"
         );
     }
 
@@ -4341,8 +4433,14 @@ mod tests {
             sql.contains("LET $mirror_keys_by_anc = SELECT VALUE record::id(id) FROM inst_relate")
         );
         assert!(sql.contains(
-            "LET $mirror_keys = array::union($mirror_keys_by_anc, $mirror_keys_by_owner);"
+            "LET $mirror_keys = array::union(array::union($mirror_keys_by_anc, $mirror_keys_by_owner), \
+             array::union($mirror_legacy_by_anc, $mirror_legacy_by_owner));"
         ));
+        assert!(
+            !sql.contains("$mirror_legacy_by_anc.map")
+                && !sql.contains("$mirror_legacy_by_owner.map"),
+            "老行自己的摘要键盒 / 变换不许顺指针删: {sql}"
+        );
         assert!(sql.contains("DELETE $mirror_keys.map(|$key| type::thing('inst_relate', $key));"));
         assert!(
             !sql.contains("DELETE inst_relate WHERE") && !sql.contains("DELETE aabb WHERE"),
