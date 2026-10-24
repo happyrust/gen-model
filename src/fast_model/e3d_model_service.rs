@@ -605,11 +605,139 @@ fn same_target_outside_the_design_window(published: &ModelTarget, current: &Mode
     published.project == current.project
         && published.design.dbnum == current.design.dbnum
         && published.design.db_type == current.design.db_type
-        && published.design.file == current.design.file
-        && published.catalogue == current.catalogue
+        && same_file_path(&published.design.file, &current.design.file)
+        && published.catalogue.len() == current.catalogue.len()
+        && published
+            .catalogue
+            .iter()
+            .zip(current.catalogue.iter())
+            .all(|(old, new)| same_file_target(old, new))
         && published.template_attlib_digest == current.template_attlib_digest
         && published.generator_fingerprint == current.generator_fingerprint
         && published.tessellation_profile == current.tessellation_profile
+}
+
+/// 模型目标里记文件用的路径写法：去掉 Windows `canonicalize()` 给的长路径前缀（`\\?\D:\…` → `D:\…`，
+/// `\\?\UNC\服务器\共享` → `\\服务器\共享`）。同一个文件在冻结源服务（`from_frozen_source`，钉的是 canonicalize
+/// 过的路径）和普通 MDB 服务（项目清单里的原样路径）里会以两种写法出现，按字串比就「变了」——夹具 8023
+/// 2026-10-24 `db-20261024-200916-000003`：前一窗 regen 的回执记 `\\?\D:\…\ams8000_0001`，刚体前移算的目标是
+/// `D:\…\ams8000_0001`，「immutable target changed」把刚体路永远拒在外面（d-149 2026-09-21 同症，ADR-082 追记「原因待查」）。
+/// 摘要不受影响：[`model_file_identity_digest`] 自己 canonicalize。
+pub(crate) fn plain_file_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.into_owned()
+    }
+}
+
+fn same_file_path(a: &str, b: &str) -> bool {
+    a == b || plain_file_path(Path::new(a)) == plain_file_path(Path::new(b))
+}
+
+/// 目录 / 字典项逐格相等，路径按 [`plain_file_path`] 比。
+fn same_file_target(a: &ModelFileTarget, b: &ModelFileTarget) -> bool {
+    a.dbnum == b.dbnum
+        && a.db_type == b.db_type
+        && a.session == b.session
+        && a.digest == b.digest
+        && same_file_path(&a.file, &b.file)
+}
+
+/// 两份不可变目标在设计窗之外差在哪几格，一格一句，给回退理由用。目录项按 dbnum 对齐，说清是会话前移了还是
+/// 只有摘要变了——后者在真机上曾是文件身份按 mtime 记、E3D 每开一次库就漂一次（`catalogue_file_identity_digest`）。
+/// 回执里只有「changed」一个词时，谁也看不出是目录真换版了还是判据在漂。
+fn describe_target_difference(published: &ModelTarget, current: &ModelTarget) -> String {
+    fn prefix(digest: &str) -> &str {
+        &digest[..digest.len().min(8)]
+    }
+    let mut parts = Vec::new();
+    if published.project != current.project {
+        parts.push(format!(
+            "project {} -> {}",
+            published.project, current.project
+        ));
+    }
+    if published.design.dbnum != current.design.dbnum
+        || published.design.db_type != current.design.db_type
+        || !same_file_path(&published.design.file, &current.design.file)
+    {
+        parts.push(format!(
+            "design file {} {} {} -> {} {} {}",
+            published.design.db_type,
+            published.design.dbnum,
+            published.design.file,
+            current.design.db_type,
+            current.design.dbnum,
+            current.design.file
+        ));
+    }
+    let catalogue_same = published.catalogue.len() == current.catalogue.len()
+        && published
+            .catalogue
+            .iter()
+            .zip(current.catalogue.iter())
+            .all(|(old, new)| same_file_target(old, new));
+    if !catalogue_same {
+        let mut by_dbnum: BTreeMap<u32, (Option<&ModelFileTarget>, Option<&ModelFileTarget>)> =
+            BTreeMap::new();
+        for file in &published.catalogue {
+            by_dbnum.entry(file.dbnum).or_default().0 = Some(file);
+        }
+        for file in &current.catalogue {
+            by_dbnum.entry(file.dbnum).or_default().1 = Some(file);
+        }
+        for (dbnum, pair) in by_dbnum {
+            match pair {
+                (Some(old), Some(new)) if same_file_target(old, new) => {}
+                (Some(old), Some(new)) => {
+                    let mut line = format!(
+                        "catalogue {} {dbnum}: session {} -> {}, digest {} -> {}",
+                        new.db_type,
+                        old.session,
+                        new.session,
+                        prefix(&old.digest),
+                        prefix(&new.digest)
+                    );
+                    if !same_file_path(&old.file, &new.file) {
+                        line.push_str(&format!(", file {} -> {}", old.file, new.file));
+                    }
+                    parts.push(line);
+                }
+                (Some(old), None) => {
+                    parts.push(format!("catalogue {} {dbnum} dropped", old.db_type));
+                }
+                (None, Some(new)) => {
+                    parts.push(format!("catalogue {} {dbnum} added", new.db_type));
+                }
+                (None, None) => {}
+            }
+        }
+    }
+    if published.template_attlib_digest != current.template_attlib_digest {
+        parts.push(format!(
+            "template attlib digest {} -> {}",
+            prefix(&published.template_attlib_digest),
+            prefix(&current.template_attlib_digest)
+        ));
+    }
+    if published.generator_fingerprint != current.generator_fingerprint {
+        parts.push("generator fingerprint".to_string());
+    }
+    if published.tessellation_profile != current.tessellation_profile {
+        parts.push(format!(
+            "tessellation {} -> {}",
+            published.tessellation_profile, current.tessellation_profile
+        ));
+    }
+    if parts.is_empty() {
+        "no difference".to_string()
+    } else {
+        parts.join("; ")
+    }
 }
 
 /// 刚体前移回执的落款（ADR-066 D4「与重生成同款」）。`current` 是按 pin@T 现算的目标；只有设计窗之外
@@ -627,7 +755,8 @@ pub(crate) fn rigid_motion_target_at(
     anyhow::ensure!(
         same_target_outside_the_design_window(published, &current),
         "immutable target changed outside the design window (catalogue / template / generator / \
-         tessellation); rigid motion cannot cover it"
+         tessellation); rigid motion cannot cover it: {}",
+        describe_target_difference(published, &current)
     );
     anyhow::ensure!(
         current.design.session == target_sesno,
@@ -842,7 +971,8 @@ impl<'a> UnitDeltaProducer<'a> {
         anyhow::ensure!(
             same_target_outside_the_design_window(published_target, &model_target),
             "immutable target of root {root} changed outside the design window (catalogue / \
-             template / generator / tessellation); a partial DESI delta cannot cover it"
+             template / generator / tessellation); a partial DESI delta cannot cover it: {}",
+            describe_target_difference(published_target, &model_target)
         );
 
         let subplan = restrict_plan_to_root(
@@ -904,7 +1034,8 @@ impl<'a> UnitDeltaProducer<'a> {
         anyhow::ensure!(
             same_target_outside_the_design_window(published_target, &model_target),
             "immutable target of root {root} changed outside the design window during generation \
-             (a catalogue dependency first read in this window); a partial DESI delta cannot record it"
+             (a catalogue dependency first read in this window); a partial DESI delta cannot record it: {}",
+            describe_target_difference(published_target, &model_target)
         );
         removals_trace_back_to_the_plan(&sets, &outcome.removals)?;
         let mut tube_segments = outcome
@@ -3176,7 +3307,9 @@ impl E3dModelService {
             Ok(ModelFileTarget {
                 dbnum,
                 db_type: db_type.to_string(),
-                file: file.to_string_lossy().into_owned(),
+                // 记普通写法：冻结源服务的 pin 是 canonicalize 过的 `\\?\` 长路径，普通 MDB 服务的不是，
+                // 同一个文件不该在回执里有两种写法（[`plain_file_path`]）。
+                file: plain_file_path(file),
                 session,
                 digest: match self.frozen_file_digests.get(&(dbnum, session)) {
                     Some(digest) => digest.clone(),
@@ -6997,6 +7130,103 @@ mod tests {
             &published,
             &tessellation_changed
         ));
+    }
+
+    /// 同一个文件两种写法不是「变了」：冻结源服务钉的是 `canonicalize` 过的 `\\?\D:\…`，普通 MDB 服务记项目清单里的
+    /// `D:\…`——8023 2026-10-24 `db-20261024-200916-000003` 就是这一格把刚体前移拒成 regen（GitHub #64）。摘要、会话、
+    /// 库号任一不同仍是变了；回退理由要点名是哪一格。
+    #[test]
+    fn the_windows_verbatim_prefix_is_not_a_target_difference() {
+        let file =
+            |dbnum: u32, db_type: &str, path: &str, session: u32, digest: &str| ModelFileTarget {
+                dbnum,
+                db_type: db_type.into(),
+                file: path.into(),
+                session,
+                digest: digest.into(),
+            };
+        let published = ModelTarget {
+            project: "AMS".into(),
+            design: file(
+                8000,
+                "DESI",
+                r"\\?\D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001",
+                692,
+                "design@692",
+            ),
+            catalogue: vec![file(
+                7000,
+                "CATA",
+                r"\\?\D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001",
+                9,
+                "cata@9",
+            )],
+            template_attlib_digest: "attlib".into(),
+            generator_fingerprint: "gen-v1".into(),
+            tessellation_profile: "e3d-default-v1".into(),
+        };
+        let mut current = published.clone();
+        current.design = file(
+            8000,
+            "DESI",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001",
+            694,
+            "design@694",
+        );
+        current.catalogue[0].file =
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001".into();
+        assert!(
+            same_target_outside_the_design_window(&published, &current),
+            "{}",
+            describe_target_difference(&published, &current)
+        );
+        assert_eq!(
+            describe_target_difference(&published, &current),
+            "no difference"
+        );
+        let receipt = receipt_at(692, Some(published.clone()));
+        rigid_motion_target_at(&receipt, current.clone(), 694)
+            .expect("the verbatim prefix alone must not refuse rigid motion");
+
+        // 真变了仍要拦，而且说得出是哪一格。
+        let mut catalogue_moved = current.clone();
+        catalogue_moved.catalogue[0].session = 10;
+        catalogue_moved.catalogue[0].digest = "cata@10".into();
+        let error = rigid_motion_target_at(&receipt, catalogue_moved, 694).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("immutable target changed"), "{text}");
+        assert!(
+            text.contains("catalogue CATA 7000: session 9 -> 10, digest cata@9 -> cata@10"),
+            "{text}"
+        );
+        let mut other_file = current;
+        other_file.design.file = r"D:\elsewhere\ams8000_0001".into();
+        assert!(
+            describe_target_difference(&published, &other_file)
+                .starts_with("design file DESI 8000"),
+            "{}",
+            describe_target_difference(&published, &other_file)
+        );
+    }
+
+    #[test]
+    fn plain_file_path_strips_only_the_verbatim_prefix() {
+        assert_eq!(
+            plain_file_path(Path::new(r"\\?\D:\proj\ams000\ams8000_0001")),
+            r"D:\proj\ams000\ams8000_0001"
+        );
+        assert_eq!(
+            plain_file_path(Path::new(r"\\?\UNC\server\share\ams000\ams8000_0001")),
+            r"\\server\share\ams000\ams8000_0001"
+        );
+        assert_eq!(
+            plain_file_path(Path::new(r"D:\proj\ams000\ams8000_0001")),
+            r"D:\proj\ams000\ams8000_0001"
+        );
+        assert_eq!(
+            plain_file_path(Path::new("/srv/ams000/ams8000_0001")),
+            "/srv/ams000/ams8000_0001"
+        );
     }
 
     /// ADR-080 真库探针（手动）：一窗 S→T 里挑一根 regen 根，S 端整根重算灌进本地投影当基线（回执停在 S、

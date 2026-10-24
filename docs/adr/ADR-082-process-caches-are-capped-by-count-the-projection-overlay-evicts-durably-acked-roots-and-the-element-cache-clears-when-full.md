@@ -233,6 +233,9 @@ e3d-io `PageCache` 每引擎 256 页、常驻房间模型 `MeshCache` 换代 `re
   2 s 采样能看到 9 根在 overlay 里的那一瞬；`POST /model/records` 读被逐的根走 durable 冷根路、结果正常。**便宜路一次都没走成**：被逐 / 重启后冷的根
   → `projection incomplete` → 回退整根 regen（D2 那条，真机走到了）；留在 overlay 里的 4 根 → `model target: immutable target changed outside the
   design window … rigid motion cannot cover it`——前一窗刚 regen 过、目录 / 模板没动，**为什么判成这样没查**（新欠账，不影响正确性）。
+  **2026-10-24 查清（GitHub #64）**：是 `ModelTarget.design.file` 的写法——冻结源服务（整根 regen 那一路）钉的是 `canonicalize` 过的
+  `\\?\D:\…`，刚体前移 / 单元级发布用的普通 MDB 服务记的是 `D:\…`，按字串比就「变了」。回执里现在说得出是哪一格，路径按
+  `plain_file_path` 比；8023 复现后 `db-20261024-202424-000004` 走成了 `kind = transform`。
 - **W5 room-rename（`RoomOnly`）与 W6 room-restore 复跑都「卡死」**：W5 task `db-20260921-002335-000007` 00:23:39 起停在 `rooms` 阶段、7 分钟没动被杀
   （证据 `D:\d149live\windows\W5-room-rename-roomonly\{task-000007-stuck.json, health-stuck.json, stuck-process.txt}`）；W6 用同一二进制复跑，00:35:37 起到 01:42
   被杀，67 分钟。现场像锁：aios 115 线程全 Wait、CPU 57 s 后不再涨、`stage_last_progress_at` 不动（逐根循环里没有进度计）。**但 surreal 单核满转**
