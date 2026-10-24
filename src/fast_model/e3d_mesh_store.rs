@@ -64,6 +64,20 @@ pub struct E3dPersistReport {
     pub visited_by_root: std::collections::HashMap<RefNo, Vec<RefNo>>,
 }
 
+/// 网格键（`geo_hash`）的合法字符集：内容寻址键只由数字、字母与下划线组成，长度有上限。
+///
+/// 这道门同时挡目录穿越——键要用来拼 `.mesh` 路径，只放行这一个字符集，`..`、`/`、`\`
+/// 连门都进不了。写（[`ensure_mesh_file`] 的调用方算出来的键）、读
+/// （`/api/v1/meshes/{geo_hash}`，那里叫 `is_valid_geo_hash`）、删
+/// （清理模型的「一并删网格文件」）三条路共用这一份，不许各写一份。
+pub fn is_valid_mesh_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 pub fn baked_mesh_id(mesh: &PlantMesh) -> String {
     let mut hash = Sha256::new();
     hash.update(BAKED_MESH_DOMAIN);

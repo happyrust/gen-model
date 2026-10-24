@@ -161,6 +161,11 @@ pub mod sync_publisher;
 
 pub mod helper;
 
+/// 清理模型「一并删网格文件」那一格：一片范围引用过的内容寻址几何（`inst_geo` 行 + `.mesh`）
+/// 的收集与删除。只给 `on_demand_model::clear_model_scope` / `fast_delete::wipe_dbnum_model_face` 用，
+/// HTTP 层只传 `ClearGeometry` 开关。
+pub(crate) mod mesh_purge;
+
 pub mod cata_closure;
 /// 依赖闭包的进程级解析缓存（plan 2026-09-15）：目录元素解析一次、跨调用复用；RocksDB 仍是唯一事实。
 pub(crate) mod cata_closure_cache;

@@ -2603,6 +2603,11 @@ pub struct DeleteModelSubtreeReq {
     pub refno: String,
     #[serde(default)]
     pub confirm: Option<String>,
+    /// 清理模型确认框上「一并删除网格文件」那一格（2026-10-22）：产物行删完之后，把这片范围
+    /// 引用过的内容寻址几何（`inst_geo` 行 + `.mesh`）也清掉，靠重新生成写回（单位几何除外，见
+    /// `mesh_purge`）。默认 `false`——老客户端只说「清理产物」。
+    #[serde(default)]
+    pub purge_meshes: bool,
     #[serde(flatten)]
     pub identity: ProjectReq,
 }
@@ -2661,6 +2666,10 @@ pub async fn model_delete_subtree(
     }
     let mgr = state.mgr.clone();
     let direct_tree = state.direct_tree.clone();
+    // 「一并删除网格文件」那一格只是一个开关：收键 / 删行 / 删几何的先后都在 `clear_model_scope`
+    // 里（spec §4.5.1；`mesh_purge` 模块文档），handler 自己不收键、不删文件。
+    let geometry =
+        crate::data_interface::mesh_purge::ClearGeometry::from_flag(query.purge_meshes);
     let clear = async move {
         let tree = direct_tree.get().await?;
         let lookup = tree.clone();
@@ -2671,12 +2680,12 @@ pub async fn model_delete_subtree(
         })
         .await
         .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
-        mgr.clear_model_scope(refno, &roots).await?;
+        let purge = mgr.clear_model_scope(refno, &roots, geometry).await?;
         // 清理模型 = 这片范围不要模型：它覆盖的强制重生成留痕一并撤掉，启动续跑别把它生成回来。
         crate::data_interface::model_scope_regen::discard_covered_by(refno, lookup).await;
-        anyhow::Ok(())
+        anyhow::Ok(purge)
     };
-    match memory_only_dbnum {
+    let purge = match memory_only_dbnum {
         Some(dbnum) => {
             crate::data_interface::model_read_route::scope_memory_only(dbnum, clear).await
         }
@@ -2688,6 +2697,11 @@ pub async fn model_delete_subtree(
         "scope": "exact_subtree",
         "status": "deleted",
     });
+    if let Some(purge) = &purge
+        && let Some(object) = payload.as_object_mut()
+    {
+        annotate_geometry_purge(object, purge, "清理模型");
+    }
     if let Some(route) = route
         && let Some(object) = payload.as_object_mut()
     {
@@ -2700,6 +2714,23 @@ pub async fn model_delete_subtree(
         );
     }
     Ok(Json(payload))
+}
+
+/// 「一并删除网格文件」的回执格（spec §4.5.1 / §4.5.1D）：`mesh_files_removed` / `_absent` / `_failed`
+/// 与 `inst_geo_removed`；不勾时这几格不出现。账进一条 info，删失败的逐条 `log::warn!`。
+fn annotate_geometry_purge(
+    object: &mut serde_json::Map<String, Value>,
+    purge: &crate::data_interface::mesh_purge::MeshPurgeReport,
+    what: &str,
+) {
+    object.insert("mesh_files_removed".into(), json!(purge.removed));
+    object.insert("mesh_files_absent".into(), json!(purge.absent));
+    object.insert("mesh_files_failed".into(), json!(purge.failed.len()));
+    object.insert("inst_geo_removed".into(), json!(purge.inst_geo_removed));
+    log::info!("{what}：{}", purge.note());
+    for (mesh_id, reason) in &purge.failed {
+        log::warn!("{what}：网格 {mesh_id} 删除失败（{reason}）");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3382,6 +3413,10 @@ pub async fn datacenter_deletes(
 /// 登记表 ∪ 项目扫描，每行带 `anomaly` / `blocked` / `excluded`：阻断与排除的库
 /// 压根不入队，队列面板没有它们的行，这里是「这个库的水位为什么一直不动」的
 /// 唯一出处（rollout 服务端第 8 项）。原字段是新形状的子集，旧消费者不受影响。
+///
+/// 三种请求形状：**不带身份三件套** = 启动引导那一份（骨架 + 两枚水位与模型判决，
+/// 不扫项目目录、不碰源文件——队列面板按 1–5 秒一拍，拿的就是它）；读透形态另一条；
+/// 其余走 `dbnum_statuses` 全量。引导那一份的字段取舍见 [`annotate_skeleton_status`]。
 pub async fn dbnums(
     State(state): State<AppState>,
     Query(query): Query<ProjectReq>,
@@ -3398,9 +3433,46 @@ pub async fn dbnums(
         let skeleton = service.metadata().map_err(ApiError::from_domain)?;
         let mut dbnums = skeleton_dbnums(skeleton.databases());
         annotate_ref0s(&mut dbnums, |dbnum| skeleton.ref0s_of(dbnum));
+        // 这一份不带身份参数：**不扫项目目录、不碰源文件**，所以付不起整项目扫描的代价。
+        // 但队列面板拿的正是它（1–5 秒一拍），而库行三枚按钮据 `initialized` 判灰——少了
+        // 那一格，「重算模型（整库）」「清理模型（整库）」永远停在「尚未初始化」。
+        // 两枚水位与模型判决本来就不在目录里（`dbnum_watermark` 一张小表 + 进程内根账本，
+        // 一整批读回），所以补在这里，而不是让每一拍去付一次全项目扫描。
+        let mut warnings = skeleton.problems().to_vec();
+        // 读透形态没有这张水位表可读（带身份的请求在读透下也只回冷骨架，见下一个分支）：不白读
+        // `SUL_DB`，也不让每一拍多一条「读不到」的 warning；库行按钮按旧样判灰。
+        if !crate::options::data_face().is_read_through() {
+            match crate::data_interface::dbnum_consistency::observations_for_all(
+                &aios_core::SUL_DB,
+                &dbnums
+                    .iter()
+                    .filter(|row| {
+                        row.get("db_type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|db_type| db_type.eq_ignore_ascii_case("DESI"))
+                    })
+                    .filter_map(|row| row.get("dbnum").and_then(Value::as_u64))
+                    .filter_map(|dbnum| u32::try_from(dbnum).ok())
+                    .collect(),
+            )
+            .await
+            {
+                Ok(observations) => annotate_skeleton_status(&mut dbnums, &observations),
+                // 取不到不是「未初始化」：水位表读失败与「这个库没水位」在界面上是两句相反的
+                // 话。这一格缺席时按钮仍按旧样判灰，另记一格让面板把这次降级说出来。
+                Err(error) => warnings.push(format!(
+                    "读不到两枚水位与模型判决（库一致性读取失败），本次不报库状态\
+                     ——这是取数失败，不是「未初始化」: {error:#}"
+                )),
+            }
+        }
+        annotate_model_source(&mut dbnums, crate::options::data_face(), |dbnum| {
+            crate::data_interface::task_registry::TaskRegistry::global()
+                .has_running_data_batch_for(dbnum)
+        });
         return Ok(Json(json!({
             "dbnums": dbnums,
-            "warnings": skeleton.problems(),
+            "warnings": warnings,
             "data_face": crate::options::data_face().as_str(),
             "snapshot_epoch": skeleton.epoch(),
             "summary": true,
@@ -3661,6 +3733,65 @@ fn annotate_ref0s(rows: &mut [Value], ref0s_of: impl Fn(u32) -> Vec<u32>) {
     }
 }
 
+/// 给引导形状补上队列面板判灰用的那几格：`initialized` / `applied_sesno` 与模型判决那一组。
+///
+/// 不带身份参数的 `/dbnums` 是启动序列要的那一份：只把「有哪几个库」说出来
+/// （`skeleton_dbnums_are_sufficient_for_startup_identity`）。队列面板拿的也是这一份
+/// ——它按 1–5 秒一拍，付不起整项目扫描的代价——而库行那两枚破坏性按钮据 `initialized`
+/// 判灰（`task_queue::model_rebuild` / `model_cleanup` 的 `NeedsInit` 档）：缺了这一格，
+/// 「重算模型（整库）」「清理模型（整库）」永远按不下去。水位与判决本来就不在项目目录里
+/// （`dbnum_watermark` 一张小表 + 进程内根账本），所以在这里补齐，代价与骨架同量级。
+///
+/// **不补的**：`blocked` / `excluded` / `not_in_project` 要扫源文件与 MDB 范围才答得出来，
+/// 留着缺席（客户端按 `false` 读）——那三档只是「画不画」，不是「按不按得下去」。
+///
+/// 取数走参数而不是在这里读库，让整形逻辑不依赖一份真水位表也能测（与 `annotate_model_source`
+/// 同一纪律）。
+fn annotate_skeleton_status(
+    rows: &mut [Value],
+    observations: &std::collections::BTreeMap<
+        u32,
+        crate::data_interface::dbnum_consistency::ConsistencyObservation,
+    >,
+) {
+    for row in rows.iter_mut() {
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(dbnum) = object
+            .get("dbnum")
+            .and_then(Value::as_u64)
+            .and_then(|dbnum| u32::try_from(dbnum).ok())
+        else {
+            continue;
+        };
+        let Some(observation) = observations.get(&dbnum) else {
+            continue;
+        };
+        object.insert("applied_sesno".into(), json!(observation.applied_sesno));
+        object.insert("initialized".into(), json!(observation.initialized));
+        let model = observation.verdict.columns();
+        object.insert("model_sesno".into(), json!(model.model_sesno));
+        object.insert("model_sesno_time".into(), json!(model.model_sesno_time));
+        object.insert("model_caught_up_at".into(), json!(model.model_caught_up_at));
+        object.insert("model_verdict".into(), json!(model.model_verdict));
+        object.insert(
+            "model_verdict_reason".into(),
+            json!(model.model_verdict_reason),
+        );
+        object.insert(
+            "model_caught_up_roots".into(),
+            json!(model.model_caught_up_roots),
+        );
+        object.insert(
+            "model_chasing_roots".into(),
+            json!(model.model_chasing_roots),
+        );
+        object.insert("model_dead_roots".into(), json!(model.model_dead_roots));
+        object.insert("model_lazy_roots".into(), json!(model.model_lazy_roots));
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct FastDeleteDbnumReq {
     #[serde(flatten)]
@@ -3669,6 +3800,11 @@ pub struct FastDeleteDbnumReq {
     /// generic HTTP client from becoming a large data mutation.
     #[serde(default)]
     pub confirm: Option<u32>,
+    /// 整库清理模型时要不要连这个库引用过的几何（`inst_geo` 行 + 盘上的 `.mesh`）一起清
+    /// （2026-10-22，与右键「清理模型」那一格同一件事）。数据面那条路（`dbnum_fast_delete`）不收
+    /// 这一格，收到就 400——它删的是数据面行，网格由重解析自己收拾。
+    #[serde(default)]
+    pub purge_meshes: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3734,6 +3870,10 @@ fn ensure_dbnum_mutation_idle(dbnum: u32) -> Result<(), ApiError> {
 ///
 /// `confirm` 必须等于路径 dbnum。不要求暂停队列：不碰数据面。同库有排队 / 运行中的批次、
 /// 在飞整库重建或整库即时生成、或生成锁拿不到，都是 409、一行不删。
+///
+/// `purge_meshes=true` 时另把**这个库引用过的**几何（`inst_geo` 行 + `.mesh`）一起清（库行
+/// 「清理模型（整库）」的深度清理那一档）：收键 / 删行 / 删几何的先后都在 `wipe_dbnum_model_face` 里
+/// （锁内收、行删完再清；收不动整趟中止），handler 只传开关。
 pub async fn dbnum_model_delete(
     State(state): State<AppState>,
     Path(dbnum): Path<u32>,
@@ -3752,7 +3892,11 @@ pub async fn dbnum_model_delete(
         ));
     }
     ensure_model_face_idle(dbnum)?;
-    let result = crate::data_interface::fast_delete::wipe_dbnum_model_face(dbnum)
+    // 「一并删除网格文件」那一格只是一个开关：收键 / 删行 / 删几何的先后都在 `wipe_dbnum_model_face`
+    // 里（生成锁之内收、行删完再清；spec §4.5.1D），handler 自己不收键、不删文件。
+    let geometry =
+        crate::data_interface::mesh_purge::ClearGeometry::from_flag(query.purge_meshes);
+    let result = crate::data_interface::fast_delete::wipe_dbnum_model_face(dbnum, geometry)
         .await
         .map_err(|error| {
             if error
@@ -3764,7 +3908,7 @@ pub async fn dbnum_model_delete(
                 ApiError::from_domain(error)
             }
         })?;
-    Ok(Json(json!({
+    let mut payload = json!({
         "dbnum": result.dbnum,
         "scope": "model_face",
         "status": "deleted",
@@ -3772,7 +3916,13 @@ pub async fn dbnum_model_delete(
         "range_statements": result.range_statements,
         "elapsed_ms": result.elapsed_ms,
         "model_source_after": "memory",
-    })))
+    });
+    if let Some(purge) = &result.geometry
+        && let Some(object) = payload.as_object_mut()
+    {
+        annotate_geometry_purge(object, purge, "清理模型（整库）");
+    }
+    Ok(Json(payload))
 }
 
 /// DELETE /api/v1/dbnums/{dbnum}/data — Ref0 record-id range fast delete.
@@ -3795,6 +3945,14 @@ pub async fn dbnum_fast_delete(
             "confirm must equal path dbnum: confirm={:?}, dbnum={dbnum}",
             query.confirm
         )));
+    }
+    // `purge_meshes` 只在模型面那条（`dbnum_model_delete`）有意义：数据面删的是数据行，网格由重解析
+    // 自己收拾。收到了就 400，免得调用方以为网格也清了（spec §4.5.1D）。
+    if query.purge_meshes {
+        return Err(ApiError::bad_request(
+            "purge_meshes 只在 DELETE /api/v1/dbnums/{dbnum}/model 上有效；数据面清理不收这一格"
+                .to_string(),
+        ));
     }
 
     ensure_dbnum_mutation_idle(dbnum)?;
@@ -4796,6 +4954,99 @@ mod tests {
         assert_eq!(rows[1]["dbnum"], 8000);
     }
 
+    /// 引导形状必须带上队列面板判灰的那一格。少了 `initialized`，`DbnumStatus` 按
+    /// `serde(default)` 读成 `false`，库行「重算模型（整库）」「清理模型（整库）」
+    /// 两枚按钮永远停在 `NeedsInit` 那一档——它们对着一个真初始化过的库也按不下去。
+    /// 两枚水位与模型判决本来就不在项目目录里，所以这一份付得起。
+    #[test]
+    fn the_bootstrap_shape_carries_the_gate_material() {
+        use crate::data_interface::dbnum_consistency::{
+            ConsistencyObservation, ConsistencyVerdict, RootQuadrants,
+        };
+
+        let mut rows = skeleton_dbnums(&[
+            crate::data_interface::direct_tree::TreeDatabase {
+                dbnum: 7352,
+                db_type: "DESI".into(),
+                file: std::path::PathBuf::from("ams7352_0001"),
+                sesno: 50,
+            },
+            crate::data_interface::direct_tree::TreeDatabase {
+                dbnum: 5100,
+                db_type: "CATA".into(),
+                file: std::path::PathBuf::from("ams5100_0001"),
+                sesno: 7,
+            },
+        ]);
+        let observations = std::collections::BTreeMap::from([(
+            7352,
+            ConsistencyObservation {
+                applied_sesno: 50,
+                initialized: true,
+                verdict: ConsistencyVerdict::InSync {
+                    sesno: 50,
+                    time: None,
+                    caught_up_at: None,
+                    roots: RootQuadrants::default(),
+                },
+            },
+        )]);
+
+        annotate_skeleton_status(&mut rows, &observations);
+
+        // `skeleton_dbnums` 按库号排序，所以按库号取行，不按下标。
+        let row = |dbnum: u64| {
+            rows.iter()
+                .find(|row| row["dbnum"] == dbnum)
+                .expect("这一行")
+        };
+        let desi = row(7352);
+        assert_eq!(desi["initialized"], true, "这一格就是按钮的判据");
+        assert_eq!(desi["applied_sesno"], 50);
+        assert_eq!(desi["model_sesno"], 50);
+        assert_eq!(desi["model_verdict"], "in_sync");
+        // 这一格缺席时客户端按 `false` 读，所以两枚按钮的 Hidden 档不受影响；
+        // 补出来的行不该顺手伪造它们（要扫源文件与 MDB 范围才答得出来）。
+        for absent in ["blocked", "excluded", "anomaly"] {
+            assert!(desi.get(absent).is_none(), "不补 {absent}");
+        }
+        // 水位表里没有这一行：原样留着，不写一个假的 0——「答不出」与「没水位」是两句话。
+        let cata = row(5100);
+        assert!(cata.get("initialized").is_none());
+        assert!(cata.get("applied_sesno").is_none());
+
+        // 引导那一支必须真调它，并且排在 `annotate_model_source` 之前——模型取数源
+        // 的判据吃的正是这两枚水位，顺序反了它读到的永远是缺席。
+        let source = include_str!("handlers.rs");
+        let bootstrap = source
+            .split_once("if bootstrap_request {")
+            .expect("引导分支")
+            .1
+            .split_once("let mut report = state")
+            .expect("下一个分支")
+            .0;
+        let annotate = bootstrap
+            .find("annotate_skeleton_status(&mut dbnums, &observations)")
+            .expect("引导分支要补这一格");
+        let model_source = bootstrap
+            .find("annotate_model_source(&mut dbnums,")
+            .expect("引导分支要写模型取数源");
+        assert!(
+            annotate < model_source,
+            "补水位要排在写模型取数源之前：{bootstrap}"
+        );
+        assert!(
+            bootstrap.contains("observations_for_all("),
+            "两枚水位一整批读回，不逐库回问：{bootstrap}"
+        );
+        // 读透形态没有这张水位表可读：不白读、不让每一拍多一条 warning。
+        let guard = bootstrap
+            .find("if !crate::options::data_face().is_read_through() {")
+            .expect("读透下跳过水位读");
+        let read = bootstrap.find("observations_for_all(").expect("水位读");
+        assert!(guard < read, "读透判定要在水位读之前：{bootstrap}");
+    }
+
     #[tokio::test]
     async fn timeout_does_not_cancel_background_work() {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -4835,8 +5086,19 @@ mod tests {
         // 范围清理只有一份实现（2026-10-10 清理模型计划 G1）：与 `force = true` 同一个 `clear_model_scope`，
         // 请求的 refno 原样传入；不再直调摄入形态的 `delete_model_subtree`。
         assert!(
-            body.contains("mgr.clear_model_scope(refno, &roots).await"),
+            body.contains("mgr.clear_model_scope(refno, &roots, geometry).await"),
             "handler must pass the requested refno unchanged to the shared scope cleanup: {body}"
+        );
+        // 「一并删除网格文件」那一格只是个开关：收键 / 删行 / 删几何的先后在删除例程里钉
+        // （`on_demand_model` / `mesh_purge`），handler 自己不收键、不删文件，账进回执。
+        assert!(
+            body.contains("ClearGeometry::from_flag(query.purge_meshes)")
+                && body.contains("annotate_geometry_purge(object, purge,"),
+            "这一格要由请求控制、交给删除例程、结果进回执: {body}"
+        );
+        assert!(
+            !body.contains("mesh_purge::scope_mesh_ids(") && !body.contains("remove_mesh_files("),
+            "handler 不再自己收键 / 删文件: {body}"
         );
         assert!(
             !body.contains("delete_model_subtree("),
@@ -5060,7 +5322,7 @@ mod tests {
             .expect("model ensure must follow subtree delete")
             .0;
         let clear = body
-            .find("mgr.clear_model_scope(refno, &roots).await?")
+            .find("mgr.clear_model_scope(refno, &roots, geometry).await?")
             .expect("the clear itself");
         let discard = body
             .find("model_scope_regen::discard_covered_by(refno, lookup).await")
@@ -5532,6 +5794,30 @@ mod tests {
         assert!(
             !body.contains("is_paused"),
             "整库模型清理不要求暂停队列: {body}"
+        );
+        // 深度清理那一格只是个开关：收键 / 删行 / 删几何的先后在 `fast_delete` 里钉，handler 自己
+        // 不再收键、不再删文件，账进回执。
+        assert!(
+            body.contains("ClearGeometry::from_flag(query.purge_meshes)")
+                && body.contains("wipe_dbnum_model_face(dbnum, geometry)")
+                && body.contains("annotate_geometry_purge(object, purge,"),
+            "这一格要由请求控制、交给删除例程、结果进回执: {body}"
+        );
+        assert!(
+            !body.contains("mesh_purge::dbnum_mesh_ids(") && !body.contains("remove_mesh_files("),
+            "handler 不再自己收键 / 删文件: {body}"
+        );
+        // 数据面那条共用请求结构，但不收这一格：收到就 400，不静默吞掉。
+        let data_face = source
+            .split_once("pub async fn dbnum_fast_delete(")
+            .expect("data delete exists")
+            .1
+            .split_once("pub async fn dbnum_prune_above_preview(")
+            .expect("prune preview follows")
+            .0;
+        assert!(
+            data_face.contains("if query.purge_meshes {") && data_face.contains("bad_request"),
+            "数据面清理收到 purge_meshes 要 400: {data_face}"
         );
         let gate_fn = source
             .split_once("fn ensure_model_face_idle(")

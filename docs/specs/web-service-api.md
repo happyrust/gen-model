@@ -374,6 +374,8 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   再逐根重新发布。不先清的话执行层会拿旧回执走「目标没变只重盖章」/「清单没变几何不动」
   两条捷径，库里的产物根本换不掉。清理按形态分路：「只写内存」作用域只清进程内投影、不过
   初始化门；读透形态另进 mirror spool 墓碑；摄入形态走 §4.5.1 同一条删法（库 + 投影 + 账本）。
+  这次先删**连几何一起清**（2026-10-22，与 §4.5.1 `purge_meshes=true` 同一份实现）：这片范围引用过的 `inst_geo`
+  行与 `.mesh` 随产物行一起清掉，重生成后还在用的由生成写回；单位几何永不删，其余共享键的取舍同 §4.5.1。
   范围内任一根正在生成时整次请求按 `409 conflict` 回，不与它抢。代价有意为之：清掉到重新
   发布之间该范围在 §4.5.2 上为空；某根重算失败时其旧产物不再保留，回执按失败报、要重试再发
   一次。显示补齐**不要**传，否则每显示一次都会清掉重算；超时后的重查也不得继续携带
@@ -423,8 +425,21 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   范围内的 generation root（e3d-io 骨架解出）只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
   **三种形态都**返回 `409 conflict`、一行不删，不与生成并发互相覆盖（读透形态此前只等库级锁、不回 409，2026-10-10 修）。
 - 删除模型关系、无剩余引用的实例信息、直管边和空间树条目；不删除 PE、
-  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`（d-8：清理只针对产物行）。被删除来源的 `room_relate` /
+  内容寻址共享的 `inst_geo`（d-8：级联删只针对产物行；几何行与 `.mesh` 只在下面 `purge_meshes=true` 那一格里
+  显式回收）。被删除来源的 `room_relate` /
   `room_panel_relate` 随模型对账同事务清理（§4.7.2）。
+- **`purge_meshes=true`（2026-10-22，plant-ui 确认框上的「一并删除网格文件（.mesh）」，默认勾上）**：
+  产物行删完之后，连这片范围引用过的内容寻址几何一起清：库里的 `inst_geo` 行（摄入形态）与盘上的 `.mesh`
+  （三种形态）——这一档此前承诺的「不删 `inst_geo`、不删磁盘 `.mesh`」只对不勾这一格的调用成立。收键 /
+  删行 / 删几何的先后都在 `AiosDBManager::clear_model_scope` 里（HTTP 层只传开关）：键集在删行之前收
+  （`inst_relate` 的 `booled_id` 与 `insts_flat.geo_hash`，摄入形态另收库上那一份；`tubi_relate.out` 的管身单位圆柱按段数全项目共用、重生成写回的还是同一个键，**不收不删**），
+  收不动整趟中止、一行不删（错误按 §4.5 的分型：库查询失败 `503`、其余 `500`）；几何在行之后删。
+  网格是内容寻址的，同一个键可能被范围外的模型复用，**不做跨范围引用计数**（2026-10-22 定）：别处还在
+  用的那份随这次没了，等那片范围自己重新生成时写回；这片范围重生成后还在用的行与文件由生成写回。
+  **单位几何 `1` / `2` / `3`（`BOXI_GEO_HASH` / `TUBI_GEO_HASH` / 单位球）永不删**：全项目所有管段共用，而且没有
+  生成路径会把文件写回来。回执多四格 `mesh_files_removed` / `mesh_files_absent`（本来就不在盘上）/
+  `mesh_files_failed`（字符集非法或删除失败，逐条 `log::warn!`）/ `inst_geo_removed`（发出删除的行数，按键数计；
+  只写内存 / 读透恒为 0）；不勾时这四格不出现。
 - 进程内 overlay 上，这一根的几何记录与发布回执在同一把写锁里一起摘掉。只摘记录、
   留下回执会让 `/model/records` 报 `memory overlay root … is incomplete: receipt expects N, store has 0`；
   记录已经是 0 的再次删除仍然摘掉残留回执。摘掉之后该根不再挡住冷读，库侧墓碑落完则为空
@@ -531,18 +546,39 @@ rebuild、不推进应用/模型水位。
 只删这个库的模型面，不重算、不碰数据面。与 `DELETE /dbnums/{dbnum}/data` 的分界：那条清的是整个库（含 `pe` / noun / 数据水位），而且要求队列先暂停；这条不要求暂停。
 
 - 查询参数：`confirm={dbnum}`，必须与路径 dbnum 相等，否则 `400 bad_request`。身份三件套同 §4.5。
+  另一格 `purge_meshes`（缺省 `false`）见下；数据面那条 `DELETE /dbnums/{dbnum}/data` 共用同一个请求结构，
+  但不收这一格（它删的是数据面行，网格由重解析自己收拾）：带了 `purge_meshes=true` 回 `400 bad_request`，不静默忽略。
 - `watch_scope` 之外 `400`，与 §4.5.1A 同一判据。
 - 闸门（任一不满足则 `409 conflict`、一行不删）：队列快照里该库有行；该库有在飞整库重建（§4.5.1A）或整库即时生成（§4.5.1B）；该库生成锁拿不到（有按需生成在飞）。
 - 删什么：`RANGE_TABLES` 去掉 `pe` / `ref_rev` 的表按 Ref0 区间删（`inst_relate` / `tubi_relate` / `room_relate` / `room_panel_relate` / `geo_relate` / `inst_info` / `aabb` / `trans`；`aabb:<mesh id>` 共享盒不在区间内），再按 `in.dbnum` 删房间两边。不碰 `pe`、noun 表、`ref_rev`、`dbnum_info_table`、`dbnum_stats_state`、交付台账、目录 memo。
 - 水位：只把模型半边归零（`model_sesno = 0` 及 `model_sesno_time` / `model_settled_at` / `model_lazy_roots` / `model_dead_roots` / `model_roots_observed_at = NONE`），与回退重建那一句的模型半边逐字相同；`state_revision` 加一。数据水位不动。
 - 路由：`route_for(dbnum)` 不是 `Database` 时不写库，只作废进程内投影、生成根账本并标空间树脏；读透另对该库投影里每个根渲一条 spool 墓碑。水位行在读透下不写。
+- **`purge_meshes=true`（2026-10-22，库行「清理模型（整库）」的确认框那一格，默认勾上）**：连
+  **这个库引用过的**几何一起清——`Database` 路由删 `inst_geo` 行 + `.mesh`，其余路由只删投影指向的 `.mesh`——
+  与 §4.5.1 那一格同一份实现（`mesh_purge`），先后都在 `fast_delete::wipe_dbnum_model_face` 里：闸门 → 生成锁
+  → 收键（`inst_geo` 不按 Ref0 寻址，行一删掉就再也收不出来；收不动整趟中止、一行不删）→ 按 Ref0 区间删行
+  → 删几何（反过来会先把模型还要用的几何删掉、而产物还在）。范围是整个库，比子树那一档更容易撞上共享网格
+  （同一个内容寻址键被别的库复用），不做跨范围引用计数：别的库还在用的那份随这次没了，等它自己重生成时写回。
+  单位几何 `1` / `2` / `3` 与管身单位圆柱（`tubi_relate.out`）永不删。回执多四格 `mesh_files_removed` / `mesh_files_absent` /
+  `mesh_files_failed` / `inst_geo_removed`，口径同 §4.5.1；不勾时这四格不出现。
 - 成功 `200`：
 
 ```json
 {"dbnum":8000,"scope":"model_face","status":"deleted","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory"}
 ```
 
+勾了 `purge_meshes` 时同一次回执多四格（数字是这一趟的账，与 `elapsed_ms` 同口径）：
+
+```json
+{"dbnum":8000,"scope":"model_face","status":"deleted","ref0s":["24381"],"range_statements":10,"elapsed_ms":40,"model_source_after":"memory",
+ "mesh_files_removed":389,"mesh_files_absent":0,"mesh_files_failed":0,"inst_geo_removed":389}
+```
+
 清完之后库行是「落后 + 内存」。要把模型算回来，调用方再点 §4.5.1A，或等服务重启的自动恢复。本端点不排重算。
+
+`ref0s` 的元素是**字符串**（这张表的主键就是字符串前缀），与 §4.7 行上那个同名的整数数组
+**不是同一个形状**。只拿得到 refno 的客户端（浏览器）两边都要认：整库清理的回执这一格此前
+只被当成整数收，整条回执会在解析阶段就失败。
 
 ### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
 
@@ -640,6 +676,15 @@ plant-ui 的单根调用零影响。
 ### 4.7 `GET /api/v1/dbnums` — 水位状态 + 阻断/排除（rollout 服务端第 8 项）
 - 映射：`AiosDBManager::dbnum_statuses(project)`（登记表 ∪ 项目扫描；只读头部与
   最新会话号，不收集增量窗口）。可选 `?project=`，缺省当前项目。
+- **引导形状**（2026-10-22；读透形态下不读水位表，只回骨架那几格）：身份三件套**一个都不带**时走廉价支——不扫项目目录、不碰
+  源文件，只把「有哪几个库」说出来，外加**不扫目录也拿得到**的那几格：两枚水位
+  （`applied_sesno` / `file_latest_sesno`）、`initialized`、模型判决那一组
+  （`model_sesno` / `model_verdict` / 四格根数）与 `model_source`。回执多一格
+  `"summary": true` 与 `snapshot_epoch`。队列面板按 1–5 秒一拍，拿的就是这一份；库行
+  「重算模型（整库）」「清理模型（整库）」据 `initialized` 判灰，所以那一格**必须**在。
+  不补的是 `blocked` / `excluded` / `not_in_project` / `anomaly` / `write_state` /
+  `room_alignment` / `cached_pe_rows`——它们要扫源文件与 MDB 范围才答得出来，缺席时
+  客户端按 `false` / 不画处理。要全量就带上身份三件套（本项目全量实测约 50 s）。
 - 响应：`{ "dbnums": [...], "warnings": [...] }`，每行：
 
 ```json
@@ -1036,7 +1081,7 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
-### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, nearby/tree, negative-nouns, nearest-clearance, centerline, surface-clearance, rooms, rooms/{refno}/tree}` — 进程内空间树的邻近查询
+### 4.13 `GET /api/v1/spatial/{nearby, nearby/refnos, nearby/tree, nearby/branches, negative-nouns, nearest-clearance, centerline, surface-clearance, rooms, rooms/{refno}/tree}` — 进程内空间树的邻近查询
 
 出处：`plant3d-web/docs/plans/2026-09-13-spatial-range-query-gen-model-v1-memory-tree-plan.md`（§3.1 契约、§3.2 流水线，
 §5 六项拍板均按推荐项 (a)）；实现 `fast_model::spatial_query` + `web_service::handlers::spatial_*`；消费方是 plant3d-web
@@ -1050,7 +1095,9 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 并新增第七条 `rooms`（§4.13.4：在册房间清单 + 房间体制状态）。**同日晚**（plant3d-web ADR 0068 /
 `docs/plans/2026-09-20-spatial-room-hierarchy-tree-plan.md`）再加第八、九条 **`nearby/tree`**（§4.13.5：同参的一次查询折成
 房间 → 专业 → 最小交付单元类型 → 单元 → 构件 的层级树）与 **`rooms/{refno}/tree`**（§4.13.6：一间房的同一棵树，给房间浏览）。
-九条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
+**2026-10-22 起**（`fix/nearby-branches` 快进并入 `refactor`，`d3145d26a`）再加第十条 **`nearby/branches`**（§4.13.7：以一条 BRAN 为源，
+把候选折成所属 BRAN 根、并把当前投影里的隐式管身一起算进去，答「周边有哪些管道」）。
+十条都是只读 GET、都挂在 `/api/v1/spatial/` 下（`web_service/mod.rs` 的 `spatial_routes_are_read_only_get_endpoints` 钉住）。
 
 - **候选只来自进程内的 `GLOBAL_AABB_TREE`**（`aios_core::room::room`）：拿**读锁**、锁内只把候选 `collect()` 成一个 `Vec`、
   随即放锁；不取空间串行锁、不写树（`aabb_tree.rs` 的写点白名单测试只认三个文件，本模块不在其中；
@@ -1445,7 +1492,47 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 - 响应同 §4.13.5，`rooms[]` 恒一条、`center.source = refno_aabb_center`。房间从没生成过面板模型（投影与树里都没有它的盒）→ 404
   `not_found`；不在册（名字不含房间关键词或房间号不合规）→ 400；房间体制不可用 → 422 `rooms_unavailable`。
 
-错误一览（九条路由）：400 `bad_request`（参数）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
+#### 4.13.7 `GET /api/v1/spatial/nearby/branches` — 一条 BRAN 周边的 BRAN 根：候选折成所属管道 + 当前投影的隐式管身（2026-10-22）
+
+出处：本节是对已合入代码的**补记**（`fix/nearby-branches`，2026-10-22 快进到 `refactor` `d3145d26a`，当时没有同步 spec / changelog）；
+实现 `fast_model::spatial_branches::{nearby, assemble}` + `handlers::spatial_nearby_branches`，候选取法借 §4.13 同一条 `scan_global_tree`；
+`examples/pipe_clearance_probe.rs` 的 `check_candidates` 用内存投影夹具钉 `assemble` 的折算。消费方待补（本仓内没有引用方；模块文档写的意图是
+「周边已加载的 BRAN 根，含隐式管身」——`/nearby` 的构件级结果拼不出「哪些管道」这一层，而且隐式管身 `tube` 按 ADR-072 不进空间树）。
+
+- **只接受** `refno`（必须是 BRAN）、`radius`、`page` / `per_page` 与身份三格。`x,y,z` → 400「周边管道查询必须指定 BRAN refno」；源的
+  noun 不是 BRAN → 400「周边管道查询源必须为 BRAN」；给了 `source_mode` / `nouns` / `rooms` / `dbnums` / `spec_values` / `keyword` / `shape` /
+  `sort` / `include_self` / `include_negative` 任一格 → 400（这条路由只有一种固定覆盖口径，不静默忽略过滤）。
+- **候选与折算**：树的读锁内按 §4.13 的 refno 模式取候选（源 = 目标含子树的并集盒，`shape` 恒 sphere，`candidate_cap` 同 200000），
+  锁外整段在 `spawn_blocking` 里折算：剔除源子树；剔除负实体；候选本身是 BRAN 的直接记一只；否则沿祖先链找第一个 BRAN
+  （`ElementAttributes::branch_root_of`，`DirectTreeService` 实现为 `ancestors()` 逐级看 noun），同一根的盒逐个并成一只并集盒。
+  找不到 noun 的候选，或 noun 是 TUBI / ELBO / VALV / TEE / REDU / WELD / FLAN / GASK 却找不到所属 BRAN 的候选，计入 `unresolved`。
+- **隐式管身补进来**：再遍历 `ModelMemoryStore` **当前**投影（`ProjectionScope::Current`）里所有 noun 为 BRAN 的根（源除外），把每条记录
+  （`mesh_id` 非空、非负实体、`tube` 没标 `invalid`、世界盒有限且 min ≤ max）的盒并进该根；盒不合法的根计入 `unresolved`。这一步
+  是 O(当前投影里全部 BRAN 记录)、与半径无关——大项目上每次查询都付一遍，先记在这里。
+- **距离与排序**：每只 BRAN 根的并集盒到源并集盒的最小表面距离（§4.13 同一条 `aabb_min_distance`），`≤ radius` 的才进结果，
+  距离升序、同距按 refno 字串；再按 `page` / `per_page` 切页（§4.13 同一条 `paginate`）。
+- **覆盖面**：`coverage: "global-tree-and-current-bran-projection"`——树里的盒 ∪ 当前投影里的 BRAN 记录；没进过树也不在当前投影的 BRAN
+  不在结果里。`truncated_candidates = 读锁内候选被截断 ∨ unresolved 非空`；`unresolved` 非空时 `warnings` 加一句
+  「N 个空间候选无法确认管道归属或模型边界，周边管道覆盖不完整」。
+
+响应（200；没有 `page` / `per_page` / `shape` / `groups` / `spatial_state` 这些格，每条结果 `noun` 恒 `BRAN`、`within_radius` 恒 `true`）：
+
+```json
+{ "results": [{ "refno": "24381_145018", "dbnum": 24381, "noun": "BRAN", "spec_value": 1, "name": "/P-1001/B1",
+                "aabb": { "min": [x, y, z], "max": [x, y, z] }, "distance": 123.4, "within_radius": true }],
+  "center": { "x": 0, "y": 0, "z": 0, "source": "refno_aabb_center" },
+  "radius": 5000, "total_count": 0, "returned_count": 0, "has_more": false,
+  "truncated_candidates": false, "coverage": "global-tree-and-current-bran-projection",
+  "warnings": [] }
+```
+
+- `dbnum` / `spec_value` / `name` 对本页每一根都补（`ElementAttributes` 的 `dbnum_of` / `spec_value_of` / `name_of`）；`warnings` 恒出现（可为空数组）。
+- 门禁同 §4.13：树不在 `Ready` / `ReadyEmpty` → 503 `spatial_not_ready`；源在投影与树里都没有盒 → 404 `not_found`；身份不一致 → 422 `identity_mismatch`。
+- **欠账**：`spatial_branches.rs` 与 handler 的注释是英文、没有日期；模块内没有单测，只有 `examples/pipe_clearance_probe.rs` 的夹具；
+  模块文档把「隐式管身不进空间树」的出处写成 ADR-072（那条 ADR 讲的是发布阶段退役与写入标记），应指向本节 §4.13「覆盖面」（计划 2026-09-13 §5-5）；
+  `mod.rs` 的只读 GET 钉 2026-10-22 补上这条。
+
+错误一览（十条路由）：400 `bad_request`（参数；`nearby/branches` 还包括源不是 BRAN、或带了它不接受的过滤格）、404 `not_found`（refno 模式中心在投影与树里都没有盒；中心线模式 `branch_query`
 找不到这条 refno）、422 `precondition`（中心线模式源不是 BRAN / 路由容器，或一段都拼不出）、422 `identity_mismatch`（§3）、
 503 `spatial_not_ready`（上文，唯一带 `Retry-After` 与非空 `detail` 的一档；`centerline` 不碰树、没有这一档）；其余暂时故障
 （`DirectTreeService` 取不到、MBD 服务不可用等）按 §3 统一信封 500。

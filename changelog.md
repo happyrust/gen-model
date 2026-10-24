@@ -1,5 +1,39 @@
 # 变更记录
 
+## 2026-10-22
+
+### 清理模型「一并删除网格文件」连几何一起清：`inst_geo` 行 + `.mesh` 随范围删除、靠重生成写回；单位几何永不删
+
+- **为什么**：工作区里新加的 `purge_meshes` 一格把收键 / 删文件写在两条 DELETE handler 里，删的只是 `.mesh`、不删 `inst_geo` 行，而且会把全项目所有隐含直管段共用的单位圆柱 `2.mesh`（`TUBI_GEO_HASH`，`tubi_relate.out` 恒为 `inst_geo:⟨2⟩`）也删掉——`ensure_mesh_file` 只写 baked 键，`1/2/3.mesh` 没有任何路径会写回，第一次勾着清理就是全库所有管段 404（`mesh_glb` 的 404 还是可负缓存的档）。用户 2026-10-22 定口径：不做跨范围引用计数，删除时把对应的 `inst_geo` 行与 `.mesh` 一起清，靠重新生成写回；`purge_meshes` 保留。计划 `docs/plans/2026-10-22-mesh-purge-shared-geometry-fix-plan.md`。
+- **改动**：
+  - `data_interface/mesh_purge.rs`：收成 `pub(crate)`；新增 `ClearGeometry::{Keep, Purge}`、`shared_unit_keys()`（`BOXI_GEO_HASH` / `TUBI_GEO_HASH` / 单位球 `3`，行与文件一律跳过，计入 `shared_unit_skipped`）、`purge_geometry(db, keys, durable)`（先分批 `DELETE inst_geo:⟨k⟩`、再 `spawn_blocking` 删文件）；账加 `inst_geo_removed`。收集不再看 `tubi_relate.out` / 投影里的管身记录：夹具实测管身单位圆柱是按段数哈希的键（如 `2542589811961169111` 被 3168 根管段引用）、不是常量 `2`，重生成写回的还是同一个键，删它只会让别的库的管段白白 404 一阵。
+  - `on_demand_model::clear_model_scope(refno, roots, geometry)`：`Purge` 时在删行之前收键（库是权威面才收库上那一份）、删行之后 `purge_geometry`，返回那一笔账；`force = true` 的先删一律传 `Purge`（放到重生成过程里）。
+  - `fast_delete::wipe_dbnum_model_face(dbnum, geometry)`：生成锁之内收键 → 按 Ref0 区间删行 → `purge_geometry`；`ModelFaceWipeResult` 多一格 `geometry`（不序列化，handler 逐格展开）。
+  - `web_service/handlers.rs`：两条 DELETE 只把 `purge_meshes` 映射成 `ClearGeometry` 传进删除例程，自己不再收键、不再删文件；回执四格由 `annotate_geometry_purge` 统一写（`mesh_files_removed` / `_absent` / `_failed` / `inst_geo_removed`）；数据面 `DELETE /dbnums/{dbnum}/data` 收到 `purge_meshes=true` 回 400；`/dbnums` 引导形状在读透形态下跳过 `observations_for_all`（不白读、不每拍刷 warning）；日期 2026-10-23 → 2026-10-22。
+  - spec §4.5 `force` / §4.5.1 / §4.5.1D / §4.7 同步；`helper.rs` 级联删纪律注释补一句指向 `mesh_purge`。
+- **验证**（待跑）：`cargo test --lib -- mesh_purge`（新增单位键、`inst_geo` 删除两条 `mem://` 用例 + 删几何先行后文件的源码钉）；`cargo test --lib -- web_service::handlers`、`-- fast_delete`、`-- on_demand_model`（源码钉随签名改）；全量 `cargo test --lib`；手工：对含管段的根 `DELETE /model/subtree?…&purge_meshes=true` 后 `GET /api/v1/meshes/2.mesh` 仍 200、`inst_geo:⟨2⟩` 仍在，同一根 `force=true` 重生成后行与文件回来。
+- **接受的代价**：这片范围重生成后不再用、别的库还在用的共享键，行与文件都没了，直到那个库自己重生成（计划 §7）。整库重建（`model_rebuild::start`）没有「先删」这一步（逐根覆盖），本次不动。
+
+### 补记：`GET /api/v1/spatial/nearby/branches`（`fix/nearby-branches` 并入，`d3145d26a`）——spec / 路由钉 / changelog 当时没跟
+
+- **为什么**：2026-10-22 22:47 快进并入 `refactor` 的 `fix/nearby-branches` 加了第十条空间查询路由与 `fast_model::spatial_branches`
+  模块（以一条 BRAN 为源，把候选折成所属 BRAN 根，再把当前投影里的隐式管身并进去，答「周边有哪些管道」），但
+  `docs/specs/web-service-api.md` §4.13、`web_service/mod.rs` 的只读 GET 源码钉和本文件都没有它；注释是英文、无日期，与仓里惯例不一致。
+  本条只补文档与钉子，不动行为。
+- **改动**：spec 新增 §4.13.7（参数、折算、覆盖面、响应形状、欠账），§4.13 头部与「错误一览」改成十条；`mod.rs`
+  `spatial_routes_are_read_only_get_endpoints` 补 `nearby/branches` 一条，路由块注释改十条。
+- **验证**（待跑）：`cargo test --lib -- spatial_routes_are_read_only_get_endpoints`（钉串必须与 `mod.rs` 路由那一行逐字相同）；
+  `cargo run --example pipe_clearance_probe`（`check_candidates` 覆盖 `assemble` 的折算）。
+- **仍欠**：`spatial_branches.rs` 无单测；每次查询都要遍历当前投影里全部 BRAN 根的记录（O(全部管段记录)，与半径无关），
+  大项目上值得量一次；模块文档引的 ADR-072 与隐式管身无关（应指 spec §4.13 覆盖面 / 计划 2026-09-13 §5-5）；消费方（plant3d-web）未在本仓登记。
+
+### 计划：标记线进界面（节点三段线 + 37 组只有线的记录）——只立计划，未开工
+
+- 用户 2026-10-23 对「界面要不要显示节点线」取 A：加一类「标记线」单独存（不走 `inst_geo` / `.mesh`）、GLB 按 `mode: LINES` 导、前端画线；
+  不进体积 / 碰撞 / 房间 / 空间树 / 净距；只有标记线的件不算「没有模型」。B（三根细实体杆）否决，过渡期按 C（只留 RVM 里的线）。
+- 计划 `docs/plans/2026-10-23-marker-lines-glb-display-plan.md`（D1–D9、W0–W8、V1–V9）；开工等 mesh-purge（`handlers.rs`）与 `e3d_mesh_store` / `mesh_glb`
+  在途改动合入 `refactor` 之后。
+
 ## 2026-10-15
 
 ### 介质裁决补齐：文件层退役别名点名 + ADR-083 二次修订的文档漂移清理

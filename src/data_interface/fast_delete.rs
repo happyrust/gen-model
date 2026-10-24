@@ -9,6 +9,8 @@ use surrealdb::{Surreal, engine::any::Any};
 
 use aios_core::SUL_DB;
 
+use crate::data_interface::mesh_purge::{self, ClearGeometry, MeshPurgeReport};
+
 const RANGE_END: &str = "9999999999";
 const RANGE_TABLES: &[&str] = &[
     "pe",
@@ -851,11 +853,23 @@ pub struct ModelFaceWipeResult {
     pub ref0s: Vec<String>,
     pub range_statements: usize,
     pub elapsed_ms: u64,
+    /// `purge_meshes=true` 那一格的账（`inst_geo` 行 + `.mesh`）；不勾时 `None`。回执里由 handler
+    /// 逐格展开，不整件序列化。
+    #[serde(skip)]
+    pub geometry: Option<MeshPurgeReport>,
 }
 
 /// 只清一个库的模型面：模型表区间、房间两边、模型水位归零。不碰 `pe` / noun / 数据水位 /
 /// 目录 memo。`Database` 路由才写库；其余只作废进程内投影，读透另把每个根渲成 spool 墓碑。
-pub async fn wipe_dbnum_model_face(dbnum: u32) -> anyhow::Result<ModelFaceWipeResult> {
+///
+/// `geometry = Purge`（库行「清理模型（整库）」的 `purge_meshes=true`）时连这个库引用过的几何一起清：
+/// 键在生成锁之内、删行之前收（`inst_geo` 不按 Ref0 寻址，行一删就再也收不出来；收不动整趟中止、
+/// 一行不删），`inst_geo` 行与 `.mesh` 在删行之后清。库是权威面（`Database` 路由）才收、删库上那一份；
+/// 其余路由只删投影指向的文件。口径与单位几何的例外见 [`mesh_purge`] 模块文档。
+pub async fn wipe_dbnum_model_face(
+    dbnum: u32,
+    geometry: ClearGeometry,
+) -> anyhow::Result<ModelFaceWipeResult> {
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
@@ -869,24 +883,41 @@ pub async fn wipe_dbnum_model_face(dbnum: u32) -> anyhow::Result<ModelFaceWipeRe
         .await;
     let started = Instant::now();
     let route = crate::data_interface::model_read_route::route_for(dbnum).await?;
-    if !route.is_database() {
+    let durable = route.is_database();
+    // 几何键在删行之前收（已在生成锁之内，没有生成收尾能插进来换路由）：行一删掉，库与投影
+    // 都再也说不出这个库引用过哪些网格。收不动就整趟中止（一行不删）。
+    let keys = if geometry.purges() {
+        Some(mesh_purge::dbnum_mesh_ids(dbnum, durable).await?)
+    } else {
+        None
+    };
+    let mut result = if !durable {
         if crate::options::data_face().is_read_through() {
             spool_dbnum_model_tombstones(dbnum)?;
         }
         forget_dbnum_model_in_process(dbnum);
-        return Ok(ModelFaceWipeResult {
+        ModelFaceWipeResult {
             dbnum,
             ref0s: Vec::new(),
             range_statements: 0,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        });
+            elapsed_ms: 0,
+            geometry: None,
+        }
+    } else {
+        let result = wipe_dbnum_model_face_on(&SUL_DB, dbnum).await?;
+        forget_dbnum_model_in_process(dbnum);
+        result
+    };
+    // 几何排在库行之后：反过来会先把模型还要用的几何删掉、而产物还在。整库的文件可能几万个，
+    // 写库串行闸与水位写门到这里已经没有用，先放掉，别让数据任务等一轮删盘；生成锁照持，删文件期间
+    // 不许有生成往这个库写新键。
+    drop(_state_guard);
+    drop(_commit_guard);
+    if let Some(keys) = keys {
+        result.geometry = Some(mesh_purge::purge_geometry(&SUL_DB, keys, durable).await?);
     }
-    let result = wipe_dbnum_model_face_on(&SUL_DB, dbnum).await?;
-    forget_dbnum_model_in_process(dbnum);
-    Ok(ModelFaceWipeResult {
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        ..result
-    })
+    result.elapsed_ms = started.elapsed().as_millis() as u64;
+    Ok(result)
 }
 
 /// [`wipe_dbnum_model_face`] 的库那一半，给 `mem://` 行为用例在自己的实例上跑同一份渲染。
@@ -935,6 +966,7 @@ pub(crate) async fn wipe_dbnum_model_face_on(
         ref0s,
         range_statements: statements.len(),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        geometry: None,
     })
 }
 
@@ -1849,6 +1881,42 @@ mod tests {
         assert!(
             !sql.contains("forget_persisted_catalogue_rows"),
             "渲染层不该点目录 memo"
+        );
+    }
+
+    /// 整库清理连几何一起清的先后（2026-10-22）：生成锁 → 收键 → 删库行 → 删几何。键在锁内、行前收
+    /// （`inst_geo` 不按 Ref0 寻址，行一删就收不出来），几何在行后删（反过来会先删掉模型还要用的）；
+    /// 库是权威面才收、删库上那一份。
+    #[test]
+    fn the_model_face_wipe_collects_geometry_before_the_rows_and_purges_after() {
+        let body = include_str!("fast_delete.rs")
+            .split_once("pub async fn wipe_dbnum_model_face(")
+            .expect("model face wipe exists")
+            .1
+            .split_once("pub(crate) async fn wipe_dbnum_model_face_on(")
+            .expect("library half follows")
+            .0;
+        let lock = body.find("try_lock_db_generation(dbnum)").expect("生成锁");
+        let collect = body
+            .find("mesh_purge::dbnum_mesh_ids(dbnum, durable)")
+            .expect("收键");
+        let wipe = body
+            .find("wipe_dbnum_model_face_on(&SUL_DB, dbnum)")
+            .expect("删库行");
+        let purge = body
+            .find("mesh_purge::purge_geometry(&SUL_DB, keys, durable)")
+            .expect("删几何");
+        assert!(
+            lock < collect && collect < wipe && wipe < purge,
+            "顺序必须是 生成锁 → 收键 → 删库行 → 删几何: {body}"
+        );
+        assert!(
+            body.contains("let durable = route.is_database();"),
+            "库是权威面才收、删库上那一份: {body}"
+        );
+        assert!(
+            body.contains("geometry.purges()"),
+            "要不要连几何清由调用方的 ClearGeometry 定: {body}"
         );
     }
 

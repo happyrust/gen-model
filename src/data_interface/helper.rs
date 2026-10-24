@@ -113,6 +113,10 @@ pub(crate) async fn collect_pe_ancestor_refnos_from(
 /// 就是这么处理的。真要回收，正确的位置是一次按全库引用计数的后台 sweep，而不是写入
 /// 路径上的单边删除。
 ///
+/// 2026-10-22 起唯一的显式回收在 `mesh_purge`：清理模型 / 强制重生成的先删按 `ClearGeometry::Purge`
+/// 把这片范围引用过的 `inst_geo` 行与 `.mesh` 一起清、靠重生成写回（不做跨范围引用计数，用户定）；
+/// 单位几何 `1` / `2` / `3` 在那里硬排除。这条级联删本身照旧不碰 `inst_geo`。
+///
 /// 投影保留 `[..]` + `array::flatten` 的原形、只摘掉 `out`：`DELETE` 的入参形状不变，
 /// 改动只落在删除集本身。
 fn render_cascade_delete(inst_relate_key: &str, pe_key: &str) -> String {

@@ -15,6 +15,7 @@ use crate::data_interface::manual_update::{generate_unit_model, generation_root_
 use crate::data_interface::model_coverage::{
     generation_root_cache_current, generation_roots_cache_current,
 };
+use crate::data_interface::mesh_purge::{self, ClearGeometry, MeshPurgeReport};
 use crate::data_interface::model_scope_regen;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -102,19 +103,43 @@ impl AiosDBManager {
     ///
     /// 代价（有意为之）：清掉到重新发布之间，这个范围在 `/model/records` 上是空的；某根重算失败时
     /// 它的旧产物也不再保留（原来 `IncompleteRoot::Discard` 会「保旧」），回执按失败报、要重试再点一次。
+    ///
+    /// `geometry = Purge`（`purge_meshes=true`；`force = true` 的先删一律如此）时连这片范围引用过的
+    /// 几何一起清：键在删行**之前**收（行一删就再也收不出来；收不动整趟中止、一行不删），
+    /// `inst_geo` 行与 `.mesh` 在删行**之后**清（反过来会先把模型还要用的几何删掉而产物还在）。
+    /// 库是权威面才有权威行可收、可删；「只写内存」/ 读透只有投影那一份，只删文件。口径与
+    /// 共享键的取舍见 [`mesh_purge`] 模块文档。返回那一笔账（`Keep` 时 `None`）。
     pub async fn clear_model_scope(
         &self,
         requested_refno: RefnoEnum,
         roots: &[crate::data_interface::generation_root::GenerationRoot],
-    ) -> anyhow::Result<()> {
+        geometry: ClearGeometry,
+    ) -> anyhow::Result<Option<MeshPurgeReport>> {
         let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
         let read_through = crate::options::data_face().is_read_through();
+        // 库是权威面才有权威行可收、可删；「只写内存」/ 读透只有投影那一份（也不该在
+        // `scope_memory_only` 作用域里回头去碰那个库）。
+        let durable = !(memory_only || read_through);
+        // 几何键在删行之前收：行一删掉，库与投影都再也说不出这片范围引用过哪些网格。
+        // 收不动就整趟中止（一行不删）——半成品比不删更难收拾。
+        let keys = if geometry.purges() {
+            Some(mesh_purge::scope_mesh_ids(requested_refno, durable).await?)
+        } else {
+            None
+        };
         if memory_only || read_through {
-            return self
-                .clear_projected_scope(requested_refno, roots, read_through)
-                .await;
+            self.clear_projected_scope(requested_refno, roots, read_through)
+                .await?;
+        } else {
+            self.delete_model_subtree(requested_refno).await?;
         }
-        self.delete_model_subtree(requested_refno).await
+        // 几何排在产物行之后：反过来会先把模型还要用的几何删掉、而产物还在。
+        match keys {
+            Some(keys) => Ok(Some(
+                mesh_purge::purge_geometry(&SUL_DB, keys, durable).await?,
+            )),
+            None => Ok(None),
+        }
     }
 
     /// 「只写内存」/ 读透那一路的范围清理：先对范围内的生成根逐个 `try_generation_root`（没解出根就对
@@ -527,7 +552,9 @@ impl AiosDBManager {
         if force {
             // 先删后生成（见 `clear_model_scope`）。放在解根之后、逐根加锁之前：清理自己拿
             // 根锁 / 库级锁，范围内有根正在生成就按「正在后台生成」回，不与它抢。
-            self.clear_model_scope(requested_refno, &roots).await?;
+            // 连几何一起清（2026-10-22）：马上就重新生成，这片范围还在用的 `inst_geo` 行与 `.mesh`
+            // 会被写回，旧键不留着占盘；单位几何与共享键的取舍见 `mesh_purge`。
+            self.clear_model_scope(requested_refno, &roots, ClearGeometry::Purge).await?;
         }
         if roots.is_empty() {
             return self.ensure_model_generated(requested_refno, force).await;
@@ -1058,8 +1085,8 @@ mod tests {
             .expect("direct scope entry end exists")
             .0;
         let clear_at = scope
-            .find("self.clear_model_scope(requested_refno, &roots).await?")
-            .expect("force must clear the requested scope first");
+            .find("self.clear_model_scope(requested_refno, &roots, ClearGeometry::Purge).await?")
+            .expect("force must clear the requested scope first, geometry included");
         let fallback_at = scope
             .find("ensure_model_generated(requested_refno, force)")
             .expect("single-root fallback exists");

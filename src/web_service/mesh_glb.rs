@@ -155,13 +155,10 @@ pub fn plant_mesh_to_glb(mesh: &PlantMesh) -> anyhow::Result<Vec<u8>> {
 /// `geo_hash` 合法字符集：内容寻址键只由数字、字母与下划线组成。
 ///
 /// 这道门同时挡目录穿越——路径拼接前只放行这一个字符集，`..`、`/`、`\` 连门都进不了。
-pub fn is_valid_geo_hash(stem: &str) -> bool {
-    !stem.is_empty()
-        && stem.len() <= 128
-        && stem
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
+/// 定义在网格仓库那一侧（[`crate::fast_model::e3d_mesh_store::is_valid_mesh_key`]）：
+/// 写（`ensure_mesh_file`）、读（本模块）、删（清理模型「一并删网格文件」那一格）
+/// 三条路共用同一道门，不许各写一份。
+pub use crate::fast_model::e3d_mesh_store::is_valid_mesh_key as is_valid_geo_hash;
 
 fn pad_to_4(bytes: &mut Vec<u8>, filler: u8) {
     while bytes.len() % 4 != 0 {

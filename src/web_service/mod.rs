@@ -620,9 +620,10 @@ async fn serve_with_ready(
         .route("/api/v1/tree/roots", get(handlers::tree_roots))
         .route("/api/v1/tree/children", get(handlers::tree_children))
         .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
-        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，九条都是 GET（`centerline` 只读库、
+        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，十条都是 GET（`centerline` 只读库、
         // `surface-clearance` 只读库 + 磁盘网格、`rooms` 只读常驻房间模型，都不碰树；`nearby/tree` 与
-        // `rooms/{refno}/tree` 是同一条流水线折成房间层级树，plant3d-web ADR 0068）。
+        // `rooms/{refno}/tree` 是同一条流水线折成房间层级树，plant3d-web ADR 0068；`nearby/branches` 把候选
+        // 折成所属 BRAN 根、再并进当前投影里的隐式管身，§4.13.7）。
         .route("/api/v1/spatial/nearby", get(handlers::spatial_nearby))
         .route("/api/v1/spatial/nearby/branches", get(handlers::spatial_nearby_branches))
         .route(
@@ -1113,6 +1114,7 @@ mod tests {
     /// spec §4.13：空间邻近查询三条 + `nearest-clearance`（计划 §3.2）+ `centerline`（§4.13.3）
     /// + `surface-clearance`（plant3d-web 2026-09-17 构件到墙计划 §5）+ `rooms`（§4.13.4，plant3d-web ADR 0067）
     /// + `nearby/tree` / `rooms/{refno}/tree`（§4.13.5 / §4.13.6，plant3d-web ADR 0068）
+    /// + `nearby/branches`（§4.13.7，2026-10-22：候选折成所属 BRAN 根 + 当前投影的隐式管身）
     /// 都是只读 GET，且挂在 `/api/v1/spatial/` 下。
     #[test]
     fn spatial_routes_are_read_only_get_endpoints() {
@@ -1126,6 +1128,7 @@ mod tests {
             .0;
         for route in [
             ".route(\"/api/v1/spatial/nearby\", get(handlers::spatial_nearby))",
+            ".route(\"/api/v1/spatial/nearby/branches\", get(handlers::spatial_nearby_branches))",
             "\"/api/v1/spatial/nearby/refnos\",\n            get(handlers::spatial_nearby_refnos)",
             "\"/api/v1/spatial/nearby/tree\",\n            get(handlers::spatial_nearby_tree)",
             "\"/api/v1/spatial/negative-nouns\",\n            get(handlers::spatial_negative_nouns)",
