@@ -273,6 +273,17 @@ pub mod batch_failure_log;
 
 pub mod task_registry;
 
+/// 终态任务的落盘账本 + 进程内归档（`/api/v1/tasks` 重启后还翻得到历史，计划 2026-10-24 W5）。
+pub mod task_history_log;
+
+/// 交付单元开工前 / 收尾后的房间归属快照（单元回执的 `rooms_before` / `rooms_after`，计划 2026-10-24 W1）。
+pub mod unit_room_snapshot;
+
+/// 交付单元开工前 / 收尾后的几何快照（单元回执的 `geometry_before` / `geometry_after` / `geometry_diff`，计划 2026-10-24 W4）。
+pub mod unit_geometry_snapshot;
+/// 一批的元素级变化清单（`GET /tasks/{id}/changes`，计划 2026-10-24 W3）。
+pub mod task_change_list;
+
 /// 持久层逐表对拍与「mem:// 实例 + 生产 schema」的中性载体（与暂存无关，P3 不删）。
 pub mod table_parity;
 

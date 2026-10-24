@@ -7,6 +7,7 @@
 //! durable 语义由应用/模型水位与写入状态承担；本表仅内存、重启即清空，
 //! 数据批次由 `init_watcher` 重扫水位重建，整库即时模型任务则由调用方重新发起。
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -24,6 +25,10 @@ pub const TASK_KIND_MODEL_REBUILD: &str = "model_rebuild";
 pub const TASK_KIND_DBNUM_MODEL_ENSURE: &str = "dbnum_model_ensure";
 /// A read-only source session rebuilt into the dedicated historical kv-mem.
 pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";
+/// 整库房间重算（`recompute_dbnum_room_edges_now`：启动对齐 / 「重新生成房间」逐库那一轮）。
+/// 它不是退役的 `room_recalc`（下注）：那是随每批数据走的「房间轮」，这是一次性、按库的整库重写，
+/// 此前只在 stdout 有一行「整库房间重算完成」，增量记录页看不到（计划 2026-10-24 W6）。
+pub const TASK_KIND_ROOM_REBUILD: &str = "room_rebuild";
 // 房间轮那一种 kind（`room_recalc`）随房间流程退役（ADR-073 D1 / W1）：房间归属随每个
 // 生成根在数据批次任务里算完写完，没有独立的房间任务行；`GET /tasks?kind=room_recalc`
 // 从此恒回空列表（spec §4.7.2）。
@@ -180,6 +185,71 @@ pub struct TaskEntry {
     /// 被 [`MAX_TASK_STEPS`] 挤掉的更早步数；0 = 账是全的。
     #[serde(skip_serializing_if = "step_count_is_zero")]
     pub steps_dropped: u64,
+    /// 补排链（增量记录页，计划 2026-10-24 W2）：本行是没收口的失败批次时，重新覆盖了它的窗口的
+    /// 那条后继数据批次。只在服务端自己把后继排进来 / 扩窗时写（[`TaskRegistry::link_supersession`]），
+    /// 不按时间猜；`None` = 还没有后继，或本行根本不是没收口的失败批次。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// 反向：本行入队 / 扩窗时覆盖掉的失败批次（认领序）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<String>,
+    /// 元素级变化清单的条数（计划 2026-10-24 W3）：数据窗口落地时由 `task_change_list::attach_to_task` 写，清单本身走
+    /// `GET /tasks/{id}/changes`。`None` = 没有清单（非数据批次 / 非 DESI / 崩溃回放 / 老版本），客户端不画入口。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes_total: Option<u32>,
+}
+
+impl TaskEntry {
+    /// 一行空白任务：只有身份与入队时刻，其余全缺席。新增 kind 的建行从它起改几个字段，
+    /// 不再把三十行全字段字面量再抄一遍。
+    pub(crate) fn blank(task_id: &str, kind: &'static str, project: &str) -> TaskEntry {
+        TaskEntry {
+            task_id: task_id.to_string(),
+            kind,
+            state: TaskState::Queued,
+            project: project.to_string(),
+            created_at: Local::now().to_rfc3339(),
+            started_at: None,
+            finished_at: None,
+            dbnum: None,
+            db_type: None,
+            start_sesno: None,
+            end_sesno: None,
+            start_sesno_time: None,
+            end_sesno_time: None,
+            units_done: None,
+            total_units: None,
+            events_seen: 0,
+            current_stage: None,
+            stage_started_at: None,
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
+            detail: None,
+            result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
+        }
+    }
+
+    /// 数据窗口有没有应用进库（`result.batch.status == "applied"`）。失败批次里只有**没应用**的
+    /// 才会被下一窗重新覆盖——水位没推进，下一窗必然从同一个起点重来（`batch_worker::batch_failure_blocks_data_phase`
+    /// 同一条判据）。
+    fn data_applied(&self) -> bool {
+        self.result
+            .as_ref()
+            .and_then(|result| result.get("batch"))
+            .and_then(|batch| batch.get("status"))
+            .and_then(serde_json::Value::as_str)
+            == Some("applied")
+    }
 }
 
 /// `(kind, dbnum)` 原子 single-flight 的准入结果。
@@ -264,6 +334,15 @@ fn model_drain_finished_payload(entry: &TaskEntry) -> serde_json::Value {
 /// 进程启动时刻（RFC3339）。`ensure_batch_worker` 启动时触发初始化，因此它
 /// 锚定的是服务真正起来的时间，而不是第一次被问到的时间——「队列已重建，
 /// 排队时长从重启起算」那句话靠它才说得出来（ADR-011 §4）。
+/// 收口行进落盘账本（[`super::task_history_log`]）。单测里不写：`cargo test` 不该往仓库的 `logs/`
+/// 里塞假任务，那份文件是真服务重启后要预热回来的。
+fn record_history(entry: &TaskEntry) {
+    if cfg!(test) {
+        return;
+    }
+    super::task_history_log::TaskHistory::global().record(entry);
+}
+
 static PROCESS_STARTED_AT: OnceLock<String> = OnceLock::new();
 
 pub fn process_started_at() -> &'static str {
@@ -365,6 +444,9 @@ impl TaskRegistry {
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
         });
     }
 
@@ -417,6 +499,9 @@ impl TaskRegistry {
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
         });
         #[cfg(feature = "http_api")]
         crate::web_service::events::publish(
@@ -466,7 +551,73 @@ impl TaskRegistry {
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
         });
+    }
+
+    /// 建一条整库房间重算行（state = running）。`detail` 带 `scope` / `trigger`，收口走 [`Self::finish`]。
+    pub fn insert_running_room_rebuild(
+        &self,
+        task_id: &str,
+        project: &str,
+        dbnum: u32,
+        detail: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        let mut entry = TaskEntry::blank(task_id, TASK_KIND_ROOM_REBUILD, project);
+        entry.state = TaskState::Running;
+        entry.started_at = Some(now.clone());
+        entry.dbnum = Some(dbnum);
+        entry.db_type = Some("DESI".to_string());
+        entry.current_stage = Some("room_recompute".to_string());
+        entry.stage_started_at = Some(now);
+        entry.detail = Some(detail);
+        self.insert_entry(entry);
+    }
+
+    /// 把刚排进来 / 刚扩窗的数据批次行与它重新覆盖的失败批次连起来（计划 2026-10-24 W2）。
+    ///
+    /// 判据全是服务端自己写下的事实，不按时间猜：同库、更早入队、终态 `failed` 且数据没应用
+    /// （水位没推进，下一窗必然从同一起点重来）、它的右端落在后继的 `[start_sesno, end_sesno]` 里、
+    /// 还没被别的后继认领。`partial`（数据已应用、单元失败）不算：那些根走 durable pending 的重试账，
+    /// 下一窗不重覆盖它。返回这次认领的失败批次 id。
+    pub fn link_supersession(&self, successor_task_id: &str) -> Vec<String> {
+        let mut inner = self.entries();
+        let Some(successor) = inner.get(successor_task_id).cloned() else {
+            return Vec::new();
+        };
+        if successor.kind != TASK_KIND_DATA_BATCH {
+            return Vec::new();
+        }
+        let (Some(dbnum), Some(start), Some(end)) =
+            (successor.dbnum, successor.start_sesno, successor.end_sesno)
+        else {
+            return Vec::new();
+        };
+        let covered: Vec<String> = inner
+            .values()
+            .filter(|t| t.task_id != successor.task_id && t.kind == TASK_KIND_DATA_BATCH)
+            .filter(|t| t.dbnum == Some(dbnum) && t.state == TaskState::Failed)
+            .filter(|t| t.superseded_by.is_none() && !t.data_applied())
+            .filter(|t| t.created_at < successor.created_at)
+            .filter(|t| t.end_sesno.is_some_and(|e| start <= e && e <= end))
+            .map(|t| t.task_id.clone())
+            .collect();
+        for id in &covered {
+            if let Some(failed) = inner.get_mut(id) {
+                failed.superseded_by = Some(successor.task_id.clone());
+            }
+        }
+        if let Some(row) = inner.get_mut(successor_task_id) {
+            for id in &covered {
+                if !row.supersedes.contains(id) {
+                    row.supersedes.push(id.clone());
+                }
+            }
+        }
+        covered
     }
 
     fn dbnum_model_ensure_entry(
@@ -508,6 +659,9 @@ impl TaskRegistry {
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
         }
     }
 
@@ -609,6 +763,9 @@ impl TaskRegistry {
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
         });
     }
 
@@ -766,6 +923,14 @@ impl TaskRegistry {
         }
     }
 
+    /// 这批的元素级变化清单有几条（`task_change_list::attach_to_task`）。
+    pub fn set_changes_total(&self, task_id: &str, total: u32) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            entry.changes_total = Some(total);
+        }
+    }
+
     pub fn bump_units_done(&self, task_id: &str) {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
@@ -880,6 +1045,7 @@ impl TaskRegistry {
         // 让别的读者等一次 JSON 拼装。
         #[cfg(feature = "http_api")]
         let mut finished_payload: Option<serde_json::Value> = None;
+        let mut finished_entry: Option<TaskEntry> = None;
         {
             let mut inner = self.entries();
             if let Some(entry) = inner.get_mut(task_id) {
@@ -901,7 +1067,12 @@ impl TaskRegistry {
                 if entry.kind == TASK_KIND_MODEL_DRAIN {
                     finished_payload = Some(model_drain_finished_payload(entry));
                 }
+                finished_entry = Some(entry.clone());
             }
+        }
+        // 落盘账本在锁外写：文件 IO 不该让别的读者等。
+        if let Some(entry) = finished_entry.as_ref() {
+            record_history(entry);
         }
         #[cfg(feature = "http_api")]
         if let Some(payload) = finished_payload {
@@ -958,6 +1129,33 @@ impl TaskRegistry {
         dbnums
     }
 
+    /// 与 [`Self::list`] 同一口径，再加一个入队时刻上界（不含）：`/tasks?before=` 往回翻。
+    /// 显式按 `created_at` 倒序——注册表的插入序与入队时刻基本一致，但归档合并时两边要同一把尺子。
+    pub fn list_before(
+        &self,
+        state: Option<&str>,
+        kind: Option<&str>,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Vec<TaskEntry> {
+        let inner = self.entries();
+        let mut rows: Vec<TaskEntry> = inner
+            .values()
+            .filter(|t| state.is_none_or(|s| t.state.as_str() == s))
+            .filter(|t| kind.is_none_or(|k| t.kind == k))
+            .filter(|t| before.is_none_or(|b| t.created_at.as_str() < b))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        rows.truncate(limit);
+        rows
+    }
+
+    /// 注册表里现有的全部 task_id（与落盘归档合并时去重：注册表里那份更新）。
+    pub fn task_ids(&self) -> HashSet<String> {
+        self.entries().keys().cloned().collect()
+    }
+
     /// 按创建时间倒序（最近优先）过滤列出。
     pub fn list(&self, state: Option<&str>, kind: Option<&str>, limit: usize) -> Vec<TaskEntry> {
         let inner = self.entries();
@@ -1007,12 +1205,174 @@ mod tests {
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
+            superseded_by: None,
+            supersedes: Vec::new(),
+            changes_total: None,
         });
     }
 
     /// 只关心区间的用例走这个；关心时刻的用例直接调 `insert_queued_batch`。
     fn queue_row(registry: &TaskRegistry, task_id: &str, dbnum: u32, start: i32, end: i32) {
         registry.insert_queued_batch(task_id, "P", dbnum, "DESI", start, None, end, None);
+    }
+
+    /// 一条已收口的失败数据批次（入队时刻显式给，免得同一纳秒建两行分不出先后）。
+    fn failed_row(
+        registry: &TaskRegistry,
+        task_id: &str,
+        dbnum: u32,
+        start: i32,
+        end: i32,
+        created_at: &str,
+        batch_status: &str,
+    ) {
+        let mut entry = TaskEntry::blank(task_id, TASK_KIND_DATA_BATCH, "P");
+        entry.state = TaskState::Failed;
+        entry.created_at = created_at.to_string();
+        entry.finished_at = Some(created_at.to_string());
+        entry.dbnum = Some(dbnum);
+        entry.db_type = Some("DESI".into());
+        entry.start_sesno = Some(start);
+        entry.end_sesno = Some(end);
+        entry.result = Some(serde_json::json!({
+            "status": "failed",
+            "batch": { "dbnum": dbnum, "start_sesno": start, "end_sesno": end, "status": batch_status },
+        }));
+        registry.insert_entry(entry);
+    }
+
+    /// 补排链（计划 2026-10-24 W2），复现 2026-10-23 实测：E3D 还在写时 654→654 被提交前身份复核拦下，
+    /// 5 s 后重扫排出 654→655。后继一入队两行就要互指；认领不重复，也不给第二个后继。
+    #[test]
+    fn a_follow_up_window_links_the_refused_batch_it_covers() {
+        let registry = TaskRegistry::default();
+        failed_row(
+            &registry,
+            "db-2",
+            8000,
+            654,
+            654,
+            "2026-10-23T12:53:24+08:00",
+            "failed",
+        );
+        // 别的库的失败批次不关本库的事。
+        failed_row(
+            &registry,
+            "db-x",
+            7998,
+            654,
+            654,
+            "2026-10-23T12:53:24+08:00",
+            "failed",
+        );
+        queue_row(&registry, "db-4", 8000, 654, 655);
+
+        assert_eq!(registry.link_supersession("db-4"), vec!["db-2".to_string()]);
+        assert_eq!(
+            registry.get("db-2").unwrap().superseded_by.as_deref(),
+            Some("db-4")
+        );
+        assert_eq!(
+            registry.get("db-4").unwrap().supersedes,
+            vec!["db-2".to_string()]
+        );
+        assert!(registry.get("db-x").unwrap().superseded_by.is_none());
+
+        assert!(
+            registry.link_supersession("db-4").is_empty(),
+            "再核一遍不重复认领"
+        );
+        assert_eq!(registry.get("db-4").unwrap().supersedes.len(), 1);
+        queue_row(&registry, "db-6", 8000, 654, 657);
+        assert!(
+            registry.link_supersession("db-6").is_empty(),
+            "已被认领的失败批次不再给第二个后继"
+        );
+        // 序列化上只有有话说的行才带这两格：老客户端不认字段也不会被空值绊到。
+        let plain = serde_json::to_value(registry.get("db-6").unwrap()).unwrap();
+        assert!(plain.get("superseded_by").is_none() && plain.get("supersedes").is_none());
+        let linked = serde_json::to_value(registry.get("db-2").unwrap()).unwrap();
+        assert_eq!(linked["superseded_by"], "db-4");
+    }
+
+    /// 数据已应用的批次不进链（水位推进了，下一窗不重覆盖它）；窗口没盖住右端的后继也不算；
+    /// 非数据批次的行不参与。
+    #[test]
+    fn applied_or_uncovered_batches_are_not_superseded() {
+        let registry = TaskRegistry::default();
+        failed_row(
+            &registry,
+            "db-applied",
+            8000,
+            650,
+            652,
+            "2026-10-23T12:00:00+08:00",
+            "applied",
+        );
+        failed_row(
+            &registry,
+            "db-failed",
+            8000,
+            653,
+            653,
+            "2026-10-23T12:10:00+08:00",
+            "failed",
+        );
+        queue_row(&registry, "db-miss", 8000, 654, 655);
+        assert!(
+            registry.link_supersession("db-miss").is_empty(),
+            "没盖住 653"
+        );
+        queue_row(&registry, "db-cover", 8000, 653, 655);
+        assert_eq!(
+            registry.link_supersession("db-cover"),
+            vec!["db-failed".to_string()]
+        );
+        assert!(registry.get("db-applied").unwrap().superseded_by.is_none());
+        registry.insert_running_model_rebuild("mr-1", "P", 8000, 1, serde_json::json!({}));
+        assert!(registry.link_supersession("mr-1").is_empty());
+    }
+
+    /// `list_before` 按入队时刻倒序、上界不含（`/tasks?before=` 的账）；`task_ids` 是全集。
+    #[test]
+    fn list_before_pages_by_created_at_exclusive() {
+        let registry = TaskRegistry::default();
+        terminal(&registry, "db-a", 1, "2026-10-23T10:00:00+08:00");
+        terminal(&registry, "db-c", 3, "2026-10-23T12:00:00+08:00");
+        terminal(&registry, "db-b", 2, "2026-10-23T11:00:00+08:00");
+        let page = registry.list_before(None, None, Some("2026-10-23T12:00:00+08:00"), 10);
+        assert_eq!(
+            page.iter().map(|t| t.task_id.as_str()).collect::<Vec<_>>(),
+            vec!["db-b", "db-a"]
+        );
+        assert_eq!(registry.list_before(None, None, None, 1)[0].task_id, "db-c");
+        assert_eq!(registry.task_ids().len(), 3);
+    }
+
+    /// 整库房间重算行（计划 2026-10-24 W6）：建行即 running、带库号与触发，收口按终态结算最后一步。
+    #[test]
+    fn a_room_rebuild_row_is_running_until_finished() {
+        let registry = TaskRegistry::default();
+        registry.insert_running_room_rebuild(
+            "room-1",
+            "P",
+            8000,
+            serde_json::json!({ "scope": "dbnum_full", "trigger": "startup_full_init" }),
+        );
+        let row = registry.get("room-1").unwrap();
+        assert_eq!(row.kind, TASK_KIND_ROOM_REBUILD);
+        assert_eq!(row.state, TaskState::Running);
+        assert_eq!(row.dbnum, Some(8000));
+        assert_eq!(row.detail.as_ref().unwrap()["trigger"], "startup_full_init");
+        registry.finish(
+            "room-1",
+            TaskState::Succeeded,
+            serde_json::json!({ "status": "success", "stamped": true }),
+        );
+        let row = registry.get("room-1").unwrap();
+        assert!(row.state.is_terminal());
+        assert_eq!(row.steps.len(), 1, "收口结算了 room_recompute 那一步");
+        assert!(row.steps[0].ok);
     }
 
     /// 「在飞」的唯一来源（ADR-071 / 计划 v3 S7）：读路拿它替掉

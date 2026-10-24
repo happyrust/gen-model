@@ -578,6 +578,8 @@ impl BatchScheduler {
                                         &found.file_latest_sesno_time,
                                     ),
                                 );
+                                // 扩窗之后可能盖住了一条没收口的失败批次：补排链跟着窗口走。
+                                registry.link_supersession(&task_id);
                             }
                             task_id
                         }
@@ -619,6 +621,9 @@ impl BatchScheduler {
                                     catalogue_stamps: found.catalogue_stamps.clone(),
                                 },
                             );
+                            // 新行的窗口从水位 + 1 起：同库上一条没收口的失败批次（水位没推进）必然被它重新覆盖，
+                            // 这一刻把两行连起来（计划 2026-10-24 W2）——面板上失败行立刻说得出「已被补排」。
+                            registry.link_supersession(&task_id);
                             task_id
                         }
                     };
@@ -924,6 +929,8 @@ impl BatchScheduler {
         };
         if let Some(task_id) = task_id {
             registry.set_frozen_range(&task_id, end_sesno, end_sesno_time);
+            // 冻结重扫推高了右端：窗口变了，补排链重新核一遍。
+            registry.link_supersession(&task_id);
         }
         if let Some(task_id) = shifted_task_id {
             // 后继行的左端变成 `end_sesno + 1`，那条保存的时刻这里读不到（要开文件），

@@ -2201,6 +2201,11 @@ fn settle_room_recompute_failures(
             kind: UnitKind::Regen,
             transform_fallback_reason: None,
             unit_fallback_reason: None,
+            rooms_before: None,
+            rooms_after: None,
+            geometry_before: None,
+            geometry_after: None,
+            geometry_diff: None,
         });
     }
     result.status = ManualUpdateStatus::Partial;
@@ -3431,6 +3436,19 @@ async fn execute_frozen_batch_body(
     let applied = batch
         .as_ref()
         .is_some_and(|b| b.status == BatchStatus::Applied);
+    // 元素级变化清单（计划 2026-10-24 W3）：窗口规划器按 `(dbnum, S, T)` 寄存的那份，窗口落地了才挂到本任务上。
+    if let Some(batch) = batch
+        .as_ref()
+        .filter(|batch| batch.status == BatchStatus::Applied)
+    {
+        crate::data_interface::task_change_list::attach_to_task(
+            registry,
+            &job.task_id,
+            job.dbnum,
+            batch.start_sesno,
+            batch.end_sesno,
+        );
+    }
     let model_incremental = crate::options::model_incremental();
     // ADR-065: discovery epochs only order scheduling. Once this dbnum task has
     // committed its data window, its model work runs here before the task releases
@@ -3756,6 +3774,11 @@ async fn run_single_unit(
             kind: UnitKind::Regen,
             transform_fallback_reason: None,
             unit_fallback_reason: None,
+            rooms_before: None,
+            rooms_after: None,
+            geometry_before: None,
+            geometry_after: None,
+            geometry_diff: None,
         },
         settlement_failed,
     )
@@ -4003,6 +4026,11 @@ async fn run_rigid_motion_units(
                     kind: UnitKind::Transform,
                     transform_fallback_reason: None,
                     unit_fallback_reason: None,
+                    rooms_before: None,
+                    rooms_after: None,
+                    geometry_before: None,
+                    geometry_after: None,
+                    geometry_diff: None,
                 });
             } else {
                 let reason = fallbacks
@@ -4233,6 +4261,11 @@ async fn run_unit_publish_units(
                     kind: UnitKind::Unit,
                     transform_fallback_reason: None,
                     unit_fallback_reason: None,
+                    rooms_before: None,
+                    rooms_after: None,
+                    geometry_before: None,
+                    geometry_after: None,
+                    geometry_diff: None,
                 });
             } else {
                 let reason = fallbacks
@@ -4311,6 +4344,11 @@ async fn run_unit_worklist(
                 kind: UnitKind::Regen,
                 transform_fallback_reason: None,
                 unit_fallback_reason: None,
+                rooms_before: None,
+                rooms_after: None,
+                geometry_before: None,
+                geometry_after: None,
+                geometry_diff: None,
             });
         }
         results.sort_by(|left, right| {
@@ -4319,6 +4357,17 @@ async fn run_unit_worklist(
         return (results, true);
     }
     let task_rooms = rooms.frozen().cloned();
+
+    // 房间归属的「前」在这里拍：下面三条路（刚体 / 单元级 / 整根）都会在落库事务里先删边再插边，
+    // 过了这一行就问不到「之前在哪」了（计划 2026-10-24 W1）。不拍的场合回空表，回执那两格缺席。
+    let snapshot_roots: Vec<String> = worklist
+        .iter()
+        .map(|task| task.root_refno.clone())
+        .collect();
+    let rooms_before = crate::data_interface::unit_room_snapshot::snapshot(&snapshot_roots).await;
+    // 几何的「前」同一处拍（计划 2026-10-24 W4）：整根重算先删行再写行，过了这一行就问不到了。
+    let geometry_before =
+        crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
 
     // 刚体前移分流（ADR-066 B6）：先把「只动摆放」的单元交给便宜路执行体。走成的记 Transform 回执；
     // 走不成的连同回退原因改排整根重算，与其余单元一起走下面的老路。开关关时没有 transform 单元。
@@ -4518,6 +4567,11 @@ async fn run_unit_worklist(
                     kind: UnitKind::Regen,
                     transform_fallback_reason: None,
                     unit_fallback_reason: None,
+                    rooms_before: None,
+                    rooms_after: None,
+                    geometry_before: None,
+                    geometry_after: None,
+                    geometry_diff: None,
                 });
             }
             drop(guards);
@@ -4556,6 +4610,31 @@ async fn run_unit_worklist(
             if let Some(reason) = unit_fallback_reason.get(&result.root_refno) {
                 result.unit_fallback_reason = Some(reason.clone());
             }
+        }
+    }
+    // 「后」在全部单元收尾之后拍，与「前」同一把尺子；前面没拍（空表）这里也不拍，两格同生共死。
+    if !rooms_before.is_empty() {
+        let rooms_after =
+            crate::data_interface::unit_room_snapshot::snapshot(&snapshot_roots).await;
+        for result in &mut results {
+            result.rooms_before = rooms_before.get(&result.root_refno).cloned();
+            result.rooms_after = rooms_after.get(&result.root_refno).cloned();
+        }
+    }
+    if !geometry_before.is_empty() {
+        let geometry_after =
+            crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
+        for result in &mut results {
+            let before = geometry_before.get(&result.root_refno);
+            let after = geometry_after.get(&result.root_refno);
+            result.geometry_before = before.map(|g| g.summary.clone());
+            result.geometry_after = after.map(|g| g.summary.clone());
+            result.geometry_diff = match (before, after) {
+                (Some(before), Some(after)) => Some(
+                    crate::data_interface::unit_geometry_snapshot::diff(before, after),
+                ),
+                _ => None,
+            };
         }
     }
     results.sort_by(|left, right| {
@@ -5045,6 +5124,11 @@ mod tests {
             kind: crate::data_interface::manual_update::UnitKind::Regen,
             transform_fallback_reason: None,
             unit_fallback_reason: None,
+            rooms_before: None,
+            rooms_after: None,
+            geometry_before: None,
+            geometry_after: None,
+            geometry_diff: None,
         };
         assert!(batch_round_complete(
             Some(42),
@@ -5358,6 +5442,11 @@ mod tests {
             kind: UnitKind::Regen,
             transform_fallback_reason: None,
             unit_fallback_reason: None,
+            rooms_before: None,
+            rooms_after: None,
+            geometry_before: None,
+            geometry_after: None,
+            geometry_diff: None,
         }
     }
 

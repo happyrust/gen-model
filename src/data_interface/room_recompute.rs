@@ -1315,7 +1315,7 @@ async fn apply_targeted_room_update_for_dbnum(
                     let foreign_dbnums = affected.foreign.keys().copied().collect::<Vec<_>>();
                     return startup_room_update_after_foreign(
                         foreign_dbnums,
-                        recompute_dbnum_room_edges_now,
+                        |dbnum| recompute_dbnum_room_edges_now(dbnum, "startup_alignment"),
                         || async {
                             if unresolved_elements_are_ignorable(
                                 dbnum,
@@ -1362,7 +1362,7 @@ async fn apply_targeted_room_update_for_dbnum(
                                     }
                                 }
                             }
-                            recompute_dbnum_room_edges_now(dbnum).await
+                            recompute_dbnum_room_edges_now(dbnum, "startup_alignment").await
                         },
                     ).await;
                 }
@@ -1377,7 +1377,7 @@ async fn apply_targeted_room_update_for_dbnum(
     );
     startup_room_update_after_foreign(
         targets,
-        recompute_dbnum_room_edges_now,
+        |dbnum| recompute_dbnum_room_edges_now(dbnum, "startup_alignment"),
         || async { true },
     ).await
 }
@@ -1431,7 +1431,7 @@ pub(crate) async fn check_and_init_rooms_at_startup(
             );
             let mut all_ok = true;
             for dbnum in &target_dbnums {
-                if !recompute_dbnum_room_edges_now(*dbnum).await {
+                if !recompute_dbnum_room_edges_now(*dbnum, "startup_full_init").await {
                     all_ok = false;
                 }
             }
@@ -1562,7 +1562,43 @@ pub(crate) async fn check_and_init_rooms_at_startup(
 /// 对 `dbnum` 用现有几何整库重算两张房间边（与 `RoomOnly` 同一个执行体
 /// `recompute_dbnum_room_edges`）；算齐整库才盖 `model_room_generation`，
 /// 算不齐 / 失败只记日志——欠账留着，下一个任务按 D14 兜底再算。
-pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
+///
+/// 这一轮在任务表里占一行 `room_rebuild`（计划 2026-10-24 W6）：此前它只在 stdout 有一句
+/// 「整库房间重算完成」，增量记录页对启动对齐 / 「重新生成房间」一无所知。`trigger` 是谁叫的
+/// （`startup_alignment` / `startup_full_init` / `rooms_rebuild`）；终态按「盖上对齐代号没有」定，
+/// `result.detail` 是留底账本（[`note_recompute_attempt`]）里与 stderr 同文的那一句。
+pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32, trigger: &'static str) -> bool {
+    use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+    let registry = TaskRegistry::global();
+    let task_id = TaskRegistry::new_task_id("room");
+    let project = aios_core::get_db_option().project_name.clone();
+    let started_at = chrono::Local::now().to_rfc3339();
+    registry.insert_running_room_rebuild(
+        &task_id,
+        &project,
+        dbnum,
+        serde_json::json!({ "scope": "dbnum_full", "trigger": trigger }),
+    );
+    let stamped = recompute_dbnum_room_edges_now_inner(dbnum).await;
+    // 留底账本里比开工时刻新的那一笔才是这一轮的；没有（房间算不了、整轮跳过）就说没有。
+    let attempt = recompute_attempt_for(dbnum).filter(|attempt| attempt.at >= started_at);
+    let detail = attempt.as_ref().map(|attempt| attempt.detail.clone()).unwrap_or_else(|| {
+        format!("整库房间重算跳过：{}", crate::options::room_membership_off_reason())
+    });
+    registry.finish(
+        &task_id,
+        if stamped { TaskState::Succeeded } else { TaskState::Failed },
+        serde_json::json!({
+            "status": if stamped { "success" } else { "failed" },
+            "stamped": stamped,
+            "trigger": trigger,
+            "detail": detail,
+        }),
+    );
+    stamped
+}
+
+async fn recompute_dbnum_room_edges_now_inner(dbnum: u32) -> bool {
     use crate::fast_model::model_db_adapter::{
         PersistTarget, RootScope, recompute_dbnum_room_edges,
     };

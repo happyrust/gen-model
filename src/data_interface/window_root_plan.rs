@@ -421,6 +421,9 @@ pub struct WindowRootSources {
     /// 的属主链——删掉的东西只有 S 端说得出它曾挂在谁下面。分桶之后由 [`uncovered_removed_units`]
     /// 拿它对 `delete` / `regen` 两桶比。
     pub removed_units: Vec<RemovedUnit>,
+    /// 元素级变化清单的候选（计划 2026-10-24 W3）：账本按 refno 折成一元素一条，带两端属主链；选完根之后
+    /// 由 [`build_model_update_plan_from_window`] 折成清单寄存给执行体。不进计划、不持久。
+    pub(crate) changes: crate::data_interface::task_change_list::WindowChanges,
 }
 
 /// 账本 [`UpdatePlan::remove`] 里的一个被删模型单元（几何挂在它身上的那一级：BOX / CYLI / FTUB…，
@@ -1155,17 +1158,30 @@ impl WindowRootSources {
         // 元数据门（2026-09-08，默认开；S6 起两票 = 字典 DCHC=0 ∧ 生成器不读）：只改了 NAME / DESC
         // 一类、或 core 不重画且我们不读的属性的候选不上卷、不级联。谓词是 gen-model 的
         // （`change_metadata_tier` → `model_impact`），e3d-model 只收一个闭包并按档计数；关着时逐位回到 `plan_update`。
+        // 门对每个候选的判词顺手记下来（refno → 档）：变化清单（W3）要说得出 `no_model` 是哪一档放行的，
+        // 而账本只记去向不记档；门关着就是空表。判词本身一字不改。
+        let tiers = std::cell::RefCell::new(BTreeMap::<(u32, u32), NoModelTier>::new());
         let plan = if crate::options::model_skip_metadata_only_changes() {
             plan_update_with(
                 base,
                 target,
                 &window,
                 PlanLimits::default(),
-                change_metadata_tier,
+                |diff: &ElementDiff| {
+                    let tier = change_metadata_tier(diff);
+                    if let (Some(tier), Some(key)) = (
+                        tier,
+                        crate::data_interface::task_change_list::parse_refno_key(&diff.refno),
+                    ) {
+                        tiers.borrow_mut().insert(key, tier);
+                    }
+                    tier
+                },
             )
         } else {
             plan_update(base, target, &window)
         };
+        let tiers = tiers.into_inner();
         let closure = if crate::options::model_entry_drop_no_geometry() {
             plan.affected_closure_filtering_ledger(base, target, |entry| {
                 // 删除与类型变化可能需要清旧几何；即便账本有 noun 也保守保留。
@@ -1208,6 +1224,13 @@ impl WindowRootSources {
             })?;
         let (nested_roots, duplicate_coverage_elements) =
             nested_root_observation(&roots_t, index.owners.as_ref());
+        // 变化清单的候选（W3）：账本 + T 端属主表在手，删除 / 改挂 / 换类型的再读一次 S 端链（有界）。
+        let changes = crate::data_interface::task_change_list::collect_candidates(
+            &plan,
+            index.owners.as_ref(),
+            |refno| owner_chain_in_set(base, refno),
+            &tiers,
+        );
         // 按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用）：两个开关都关 = 候选表空，下游产物
         // 与今天逐位相同。任一开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链一次算完；
         // `Δ` / 三条排除只在刚体开关开着时算（关着一次 `world_matrix` 都不算），执行体从此一个文件都不必读。
@@ -1316,6 +1339,7 @@ impl WindowRootSources {
             cable_endpoint,
             design_reference,
             rigid,
+            changes,
         })
     }
 
@@ -1769,6 +1793,23 @@ pub(crate) async fn build_model_update_plan_from_window(
     // 就不会把它判成 transform；这里的顺序只是让「提示 ⊆ 最终 regen」一目了然。
     let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
     let transform_units = transform_units_for(&plan, &rigid, base_sesno);
+    // 元素级变化清单（W3）：根桶定了才说得出每条改动折进了哪个根；按窗口寄存，执行体落地后按任务认领。
+    {
+        let regen_roots: BTreeSet<RefnoEnum> = plan.regen.iter().map(|root| root.root).collect();
+        let delete_roots: BTreeSet<RefnoEnum> = plan.delete.iter().map(|root| root.refno).collect();
+        let items = crate::data_interface::task_change_list::resolve(
+            &sources.changes.candidates,
+            &regen_roots,
+            &delete_roots,
+        );
+        crate::data_interface::task_change_list::deposit(
+            dbnum,
+            base_sesno,
+            target_sesno,
+            sources.changes.total,
+            items,
+        );
+    }
     let mut warnings = vec![format!(
         "dbnum={dbnum}: window {base_sesno}→{target_sesno} roots_T={} roots_S={} touched={} \
          regen={} delete={} advance={} lazy={} | {}",
@@ -3309,6 +3350,7 @@ mod tests {
             structural_connection: Default::default(),
             cable_endpoint: Default::default(),
             design_reference: Default::default(),
+            changes: Default::default(),
             rigid: RigidMotionSources {
                 enabled: true,
                 candidates: vec![WindowCandidate {
@@ -4791,7 +4833,8 @@ mod tests {
     }
 
     /// 接线的形状：`collect` 只在开关开着时经 `plan_update_with` 把 `change_metadata_tier`
-    /// 交给 e3d-model，关着时逐位走 `plan_update`；谓词在 `plan_update_with` 之前定义、只读
+    /// 交给 e3d-model（2026-10-24 起套一层只记 refno → 档的闭包给变化清单，判词仍是它、原样返回），
+    /// 关着时逐位走 `plan_update`；谓词在 `plan_update_with` 之前定义、只读
     /// `model_impact` 的两票与分档，不在本文件另写一份名单。
     #[test]
     fn the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch() {
@@ -4811,12 +4854,23 @@ mod tests {
             .find(concat!("plan_update_", "with("))
             .expect("开着走 plan_update_with");
         let predicate = gate
-            .find(concat!("change_metadata_", "tier,"))
+            .find(concat!("change_metadata_", "tier(diff)"))
             .expect("谓词必须是本文件的 change_metadata_tier");
         let off = gate
             .find(concat!("plan_update(", "base, target, &window)"))
             .expect("关着逐位走 plan_update");
         assert!(on < predicate && predicate < off, "开 → 谓词 → 关 的顺序");
+        // 包着它的闭包只记档、原样把判词返回，不在这里另写名单、不改判词。
+        let wrapper = &gate[on..off];
+        assert!(
+            wrapper.contains("tiers.borrow_mut().insert(key, tier)")
+                && wrapper.contains("\n                    tier\n"),
+            "闭包只记 refno → 档，判词原样返回: {wrapper}"
+        );
+        assert!(
+            !wrapper.contains("\"NAME\""),
+            "不许在闭包里再写一份属性名单"
+        );
         let predicate_body = src
             .split_once(concat!("pub(crate) fn ", "change_metadata_tier("))
             .expect("谓词定义")

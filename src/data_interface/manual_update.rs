@@ -2391,6 +2391,24 @@ pub struct ModelUnitResult {
     /// 旧回执没有该字段。
     #[serde(default)]
     pub unit_fallback_reason: Option<String>,
+    /// 本单元开工前挂在哪些房间（根 + `anc` 下全部构件，按房间 × 面板数构件；`unit_room_snapshot`，
+    /// 计划 2026-10-24 W1）。`None` = 没拍（读透 / 算不了房间 / 一批超过 64 根 / 读失败 / 老回执）；
+    /// `Some([])` = 拍了、不属于任何房间。两格同生共死。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rooms_before: Option<Vec<crate::data_interface::unit_room_snapshot::RoomRef>>,
+    /// 收尾后挂在哪些房间（同上）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rooms_after: Option<Vec<crate::data_interface::unit_room_snapshot::RoomRef>>,
+    /// 开工前这根的几何概要（行数 + 并集包围盒；`unit_geometry_snapshot`，计划 2026-10-24 W4）。`None` = 没拍
+    /// （读透 / 一批超过 64 根 / 读失败 / 老回执）；三格同生共死。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_before: Option<crate::data_interface::unit_geometry_snapshot::GeometrySnapshot>,
+    /// 收尾后这根的几何概要。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_after: Option<crate::data_interface::unit_geometry_snapshot::GeometrySnapshot>,
+    /// 前后按构件对出来的差异：动了 / 多了 / 少了几条，带几个样本 refno。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_diff: Option<crate::data_interface::unit_geometry_snapshot::GeometryDiff>,
 }
 
 /// Full result of one manual update execution.
@@ -8958,6 +8976,11 @@ mod tests {
             kind: UnitKind::Regen,
             transform_fallback_reason: None,
             unit_fallback_reason: None,
+            rooms_before: None,
+            rooms_after: None,
+            geometry_before: None,
+            geometry_after: None,
+            geometry_diff: None,
         }
     }
 

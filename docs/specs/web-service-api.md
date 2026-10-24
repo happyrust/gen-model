@@ -324,8 +324,36 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   瞬态 task 行。
 
 ### 4.4 `GET /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`
-- 列表支持 `?state=running&kind=data_batch&limit=50`（进程重启即清空——durable 状态以
-  `model_update_pending` 表与应用水位为准，本表只是 UI 视图）。
+- 列表支持 `?state=running&kind=data_batch&limit=50`（`limit` 夹到 160）。注册表本身仍是进程内的 UI 视图
+  （durable 状态以应用 / 模型水位为准），但 **2026-10-24 起终态行落盘**：收口那一刻按行的同一形状追加到
+  `logs/task-history-YYYY-MM-DD.jsonl`（除 `model_drain`），进程内归档首次访问时从最近 30 天预热（上限 5000 条），
+  所以重启后这个列表照样列得出重启前收口的批次。一页 = 注册表里的（含未收口的）⊕ 归档里注册表已经没有的，
+  按 `created_at` 倒序截 `limit`；还在进程里的行以注册表为准。
+- 翻页：`?before=<RFC3339>`（入队时刻上界，不含）——把上一页最老那条的 `created_at` 传回来就是下一页。响应
+  `{ "tasks": [...], "has_more": bool }`；`has_more = true` 表示还有更早的。`GET /tasks/{id}` 在注册表里找不到时同样翻归档，
+  列表里列得出的行详情也答得出；两边都没有才 404。
+- 补排链（增量记录页）：没收口的失败数据批次（`state = failed` 且 `result.batch.status != "applied"`，水位没推进）
+  在同库下一条数据批次排进来 / 扩窗到盖住它的 `end_sesno` 时，两行互指：失败行 `"superseded_by": "<task_id>"`，后继行
+  `"supersedes": ["<task_id>", ...]`。只在服务端自己排出后继时写，不按时间猜；一条失败批次只被认领一次；
+  `partial`（数据已应用、单元失败）不进链。两格缺席不序列化，老客户端不认也不坏。
+- 单元的房间前后（2026-10-24）：`result.units[]` 每条可带 `rooms_before` / `rooms_after`，形状
+  `[{"room_num":"R113","panel_refno":"24381_1204","members":2}]`——这根（根 + 子树全部构件）开工前 / 收尾后按
+  房间 × 面板有几个构件被判在里面（读 `room_relate` 边，开工前那一份在落库事务删边之前拍）。两格同生共死：
+  缺席 = 没拍（读透形态 / 本进程算不了房间 / 一批超过 64 根（初始化、整库重建）/ 读失败）；`[]` = 拍了、不属于任何房间。
+- 单元的几何前后（2026-10-24）：`result.units[]` 每条可带 `geometry_before` / `geometry_after`（形状
+  `{"records": 9, "aabb": [min_x, min_y, min_z, max_x, max_y, max_z]}`：这根名下模型行数与全部行的并集世界包围盒，一行都没有就没有 `aabb`）
+  与 `geometry_diff`（`{"moved": 1, "added": 0, "removed": 0, "sample": ["24384_23262"]}`：前后按构件 refno 对，位置或盒任一分量
+  差过 0.5 mm 算「动了」，`sample` 至多 8 个——先动的、再多的、再少的，各按 refno 排；三数全零时 `sample` 缺席）。读法与
+  `/model/records` 同一条（进程投影里有回执以它为准，没有再读库）：「前」= 开工那一刻进程对外答的样子、「后」= 收尾那一刻；
+  冷重启后第一批的「前」是库上的行。回执不带逐条记录。三格同生共死：缺席 = 没拍（读透形态 / 一批超过 64 根 / 这根读失败）；
+  `records = 0` = 拍了、这根一条模型行都没有。
+- 元素级变化清单（2026-10-24）：数据批次行可带 `changes_total`（账本上的不同元素数，数据窗口落地那一刻写）；清单本身走
+  §4.4.1，不内联进列表。缺席 = 没有清单（非数据批次 / 非 DESI / 崩溃回放的窗口 / 老版本收口的），客户端不画入口。
+- `kind = "room_rebuild"`：整库房间重算（`recompute_dbnum_room_edges_now`：启动对齐 / 完整房间初始化 / `POST /rooms/rebuild`
+  逐库那一轮）每库一行：`running -> succeeded | failed`（按「盖上对齐代号没有」定），`dbnum` 在，
+  `detail = {"scope": "dbnum_full", "trigger": "startup_alignment" | "startup_full_init" | "rooms_rebuild"}`，
+  `result = {"status", "stamped", "trigger", "detail"}`（`detail` 是与 stderr 同文的那一句：「整库重算完成并盖章：根 N、成员边 M」
+  或失败原因）。它不是退役的 `room_recalc`（§4.7.2）。
 - 详情响应：
 
 ```json
@@ -350,6 +378,39 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
   不把完整根数组塞进每次任务 JSON；完整集合由 §4.5.1C 按 `task_id` 查询。
 - 这类任务与投影一样只活在进程内。终态根快照短期、有界保留，服务重启后旧 task id 与快照
   同时返回 404。
+
+### 4.4.1 `GET /api/v1/tasks/{id}/changes` — 一批的元素级变化清单（2026-10-24）
+
+- 来源是窗口规划器那份 e3d-model L3 账本（`UpdatePlan::ledger`）：一个元素一条，按 refno 升序；不含内容没变的「虚候选」
+  （索引说重写过、逐字节比一个字没动的）。只有数据窗口**落地了**的批次有；崩溃回放（不重新规划）、非 DESI 窗口没有。
+- `?cursor=&limit=`（`limit` 夹 1..=1000，缺省 200）。任务不存在 404；任务在、清单没有也 404，文案分开。
+- 落盘：`logs/task-changes-YYYY-MM-DD.jsonl` 一任务一行（与 `task-history-*` 同目录同形制），进程内只缓存最近 64 个任务；重启后按任务
+  `created_at` 那一天（及次日）的文件找，所以 `/tasks` 里翻得到的历史批次清单也答得出。清单封顶 5000 条，超出 `truncated = true`，
+  `total` 仍是全数。
+- 响应：
+
+```json
+{
+  "task_id": "db-20261024-122006-000001", "dbnum": 8000, "start_sesno": 684, "end_sesno": 685,
+  "total": 3, "truncated": false, "next_cursor": null,
+  "items": [
+    {"refno": "24384/23262", "noun": "FTUB", "op": "modified", "attrs": ["POS", "SPAMAP"],
+     "root_refno": "24384/23257", "disposition": "rolled_up",
+     "details": ["属性修改: POS / SPAMAP 变了"], "placement_only": true},
+    {"refno": "24384/23257", "noun": "BRAN", "op": "modified", "attrs": ["CACHID"],
+     "root_refno": "24384/23257", "disposition": "no_model", "no_model_reason": "cache_stamp",
+     "details": ["属性修改: CACHID 变了"]}
+  ]
+}
+```
+
+- `op`：`added | deleted | type_changed | reparented | members_changed | modified | opaque | unresolved`（账本 `ChangeKind` 的对应；一个元素
+  几条账时取最「重」的那条，按这个次序，其余留在 `details`）。`attrs`：值变了的属性名（只有改过属性的条目有）。
+  `root_refno`：折进的生成根——自身或 T 端属主链上第一个进 `regen` 的；删除 / 改挂 / 换类型的再沿 S 端链找进 `delete` / `regen` 的旧根；
+  折不到（去向 `no_model`、根没进计划、链读不动、一窗超过 512 条要读 S 端链的）就缺席，不猜。
+  `disposition`：`rolled_up | no_model | unresolved`（账本去向原词）；`no_model_reason`：`metadata_only | unread_attribute | cache_stamp`，
+  只有元数据门判过的才有（门关着 / 落在没有模型归属的元素上的 `no_model` 缺席）。`placement_only`：这一窗只动了 `POS` / `ORI`。
+  缺席的格一律不序列化。
 
 ### 4.5 `POST /api/v1/model/generate`（旧名 `/api/v1/model/ensure`）— 按需生成节点范围的模型（同步）
 

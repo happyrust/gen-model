@@ -645,6 +645,11 @@ fn generated_unit(dbnum: u32, root: RefNo, nouns: &HashMap<RefNo, String>) -> Mo
         kind: UnitKind::Regen,
         transform_fallback_reason: None,
         unit_fallback_reason: None,
+        rooms_before: None,
+        rooms_after: None,
+        geometry_before: None,
+        geometry_after: None,
+        geometry_diff: None,
     }
 }
 
@@ -661,6 +666,11 @@ fn failed_unit(dbnum: u32, root: RefNo, noun: &str, reason: &str) -> ModelUnitRe
         kind: UnitKind::Regen,
         transform_fallback_reason: None,
         unit_fallback_reason: None,
+        rooms_before: None,
+        rooms_after: None,
+        geometry_before: None,
+        geometry_after: None,
+        geometry_diff: None,
     }
 }
 

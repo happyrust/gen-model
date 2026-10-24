@@ -786,7 +786,12 @@ async fn run_rooms_rebuild() {
     // 全表清边失败时仍逐库尝试恢复，但不能把本轮盖成「最新」：未枚举到的旧根没有逐库重算兜底。
     let mut all_ok = clear_succeeded;
     for dbnum in &dbnums {
-        if !crate::data_interface::room_recompute::recompute_dbnum_room_edges_now(*dbnum).await {
+        if !crate::data_interface::room_recompute::recompute_dbnum_room_edges_now(
+            *dbnum,
+            "rooms_rebuild",
+        )
+        .await
+        {
             all_ok = false;
         }
         resident::note_recompute_dbnum_done();
@@ -2095,6 +2100,47 @@ pub struct TaskListQuery {
     pub kind: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// 入队时刻上界（RFC3339，不含）：把上一页最老那条的 `created_at` 传回来就是下一页。
+    /// 缺省 = 从最新的起。翻到注册表里没有的，就翻落盘归档（`task_history_log`）。
+    #[serde(default)]
+    pub before: Option<String>,
+}
+
+/// `/tasks` 的一页：注册表里的（含未收口的）⊕ 落盘归档里注册表已经没有的，按 `created_at` 倒序，
+/// 至多 `limit` 条；第二格是「后面还有」——两边各多要一条，合并后超出 `limit` 就是还有。
+/// 归档行是收口那一刻的注册表行原样，形状与注册表行一致，客户端不必分辨。
+pub(crate) fn tasks_page(
+    registry: &crate::data_interface::task_registry::TaskRegistry,
+    state: Option<&str>,
+    kind: Option<&str>,
+    before: Option<&str>,
+    limit: usize,
+) -> (Vec<serde_json::Value>, bool) {
+    let want = limit.saturating_add(1);
+    let live = registry.list_before(state, kind, before, want);
+    let live_ids = registry.task_ids();
+    let archived = crate::data_interface::task_history_log::TaskHistory::global()
+        .page(&live_ids, state, kind, before, want);
+    let mut rows: Vec<(String, serde_json::Value)> = live
+        .iter()
+        .filter_map(|entry| {
+            serde_json::to_value(entry)
+                .ok()
+                .map(|value| (entry.created_at.clone(), value))
+        })
+        .chain(archived.into_iter().map(|value| {
+            let created_at = value
+                .get("created_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            (created_at, value)
+        }))
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    (rows.into_iter().map(|(_, value)| value).collect(), has_more)
 }
 
 /// GET /api/v1/tasks
@@ -2102,28 +2148,87 @@ pub async fn tasks_list(
     State(state): State<AppState>,
     Query(query): Query<TaskListQuery>,
 ) -> Json<serde_json::Value> {
-    let tasks = state.tasks.list(
+    // `model_drain` 每页保留 10 个根样本时，200 条任务会超过 256 KiB；
+    // 160 条保留足够查询窗口，同时守住单响应体积契约。默认 50 不变。
+    let limit = query.limit.unwrap_or(50).min(160);
+    let (tasks, has_more) = tasks_page(
+        &state.tasks,
         query.state.as_deref(),
         query.kind.as_deref(),
-        // `model_drain` 每页保留 10 个根样本时，200 条任务会超过 256 KiB；
-        // 180 条保留足够查询窗口，同时守住单响应体积契约。默认 50 不变。
-        query.limit.unwrap_or(50).min(160),
+        query.before.as_deref(),
+        limit,
     );
-    Json(json!({ "tasks": tasks }))
+    Json(json!({ "tasks": tasks, "has_more": has_more }))
 }
 
 /// GET /api/v1/tasks/{id}
+///
+/// 注册表里没有（重启前收口的、或已被容量剔掉的）就翻落盘归档：列表里列得出的行，详情也要答得出。
 pub async fn task_get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let entry = state
-        .tasks
+    if let Some(entry) = state.tasks.get(&id) {
+        return serde_json::to_value(&entry)
+            .map(Json)
+            .map_err(|e| ApiError::from_domain(e.into()));
+    }
+    crate::data_interface::task_history_log::TaskHistory::global()
         .get(&id)
-        .ok_or_else(|| ApiError::not_found(format!("task_id 不存在: {id}")))?;
-    serde_json::to_value(&entry)
         .map(Json)
-        .map_err(|e| ApiError::from_domain(e.into()))
+        .ok_or_else(|| ApiError::not_found(format!("task_id 不存在: {id}")))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TaskChangesQuery {
+    #[serde(default)]
+    pub cursor: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/tasks/{id}/changes（计划 2026-10-24 W3）
+///
+/// 一批的元素级变化清单，`cursor` / `limit` 分页（`limit` 夹 1..=1000，缺省 200）。任务不存在 404；任务在、清单没有
+/// （非数据批次 / 老版本收口的 / 崩溃回放 / 日志已清）也 404，文案分开。
+pub async fn task_changes(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TaskChangesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let created_at = match state.tasks.get(&id) {
+        Some(entry) => entry.created_at,
+        None => crate::data_interface::task_history_log::TaskHistory::global()
+            .get(&id)
+            .and_then(|row| {
+                row.get("created_at")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .ok_or_else(|| ApiError::not_found(format!("task_id 不存在: {id}")))?,
+    };
+    let changes = crate::data_interface::task_change_list::ChangeStore::global()
+        .get(&id, &created_at)
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "任务 {id} 没有元素级变化清单（不是数据批次 / 老版本收口 / 崩溃回放的窗口 / logs 里当天的 task-changes 已清）"
+            ))
+        })?;
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let cursor = query.cursor.unwrap_or(0).min(changes.items.len());
+    let items: Vec<&crate::data_interface::task_change_list::ElementChange> =
+        changes.items.iter().skip(cursor).take(limit).collect();
+    let next = cursor + items.len();
+    Ok(Json(json!({
+        "task_id": changes.task_id,
+        "dbnum": changes.dbnum,
+        "start_sesno": changes.start_sesno,
+        "end_sesno": changes.end_sesno,
+        "total": changes.total,
+        "truncated": changes.truncated,
+        "next_cursor": (next < changes.items.len()).then_some(next),
+        "items": items,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -542,6 +542,10 @@ async fn serve_with_ready(
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
         .route(
+            "/api/v1/tasks/{id}/changes",
+            get(handlers::task_changes),
+        )
+        .route(
             "/api/v1/model/subtree",
             delete(handlers::model_delete_subtree),
         )
