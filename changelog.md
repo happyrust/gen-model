@@ -26,6 +26,15 @@
 - **验证**：`the_windows_verbatim_prefix_is_not_a_target_difference`（前缀不算变、目录会话真变仍拦且点名 `catalogue CATA 7000: session 9 -> 10, digest cata@9 -> cata@10`）、`plain_file_path_strips_only_the_verbatim_prefix`；`cargo test --lib -- e3d_model_service:: room_read_through model_initial_persist` 95 过。真机：同一 EQUI 重启后两条腿，`db-20261024-202159-000002`（696→697）第一次进投影 regen，`db-20261024-202424-000004`（698→699）**`kind = transform`**、没有回退理由、`geometry_diff {moved 1}`——这台夹具上刚体前移第一次走成。
 - **顺带记下**：E3D 每次开库会重写所有已开库文件的头、mtime 跟着变（夹具工程 73xx 目录库每次 TTY 会话启动那一秒全部刷新），而 `model_file_identity_digest` 含 mtime；本次复跑里目录项摘要没有漂（走的是冻结 token 摘要），所以没动它；`room_read_through::target_current` 现算摘要那一路会不会被 mtime 绊倒没验，记在 #64。
 
+### 按需显示的新旧判据把每个未触根都判成过期（E3D 登录即前移会话把它暴露出来）：开票 GitHub #65，方向写成 ADR-089 草案（待拍板，未改代码）
+
+- **为什么**：#64 收尾时看到一个只读的 E3D 会话（打开 /ALL、`Q POS`、`QUIT`）就让 `/model/generate`（`force=false`）把刚判 `AlreadyAvailable` 的根整根重算；用户「继续下一步」选了开票 + ADR 草案。
+- **复现（夹具 8023）**：21:14 EQUI `24384/24776` / BRAN `24384/23257` 都 `AlreadyAvailable`（14 / 16 ms，回执 700）；21:15 只读登录一次：`ams000` 下被 MDB 打开的 30 个库文件 mtime 全部改写（目录库 21:15:04.958–05.196，设计库 / `amssys` / `amscom` 21:15:11.3），`ams8000_0001` 多了只有 `DBMDAT` 的会话 701，watcher `db-20261024-211524-000008` 700→701 `no_model=1 advance=953 units=0`；21:16 两根都 `Generated`（447 / 2158 ms，后者 1816 ms 在重解 341 行目录依赖），日志 `[模型目标核对] DESI 8000 已过期：会话 700 → 文件最新 701`。
+- **根因两层**：① `room_read_through::target_file_current` 要「回执会话 == 文件最新」，而窗口规划器的 `advance` 根什么都不做（ADR-079 D3）、回执留在 S——任何窗口落地后每个未触根都被判过期，库级承诺（`root_credential_covers`，单调）被 `&&` 掉；登录只是让「没有编辑的窗口」天天发生。② `model_file_identity_digest` 含 mtime，E3D 每次会话改写文件头 → 摘要变、内容没变；同一把尺子也是刚体 / 单元级「设计窗之外每一格相同」比目录项的，有目录依赖的根预计便宜路永远回退（待验）。
+- **更正上一条「顺带记下」**：「目录项摘要走的是冻结 token 摘要」不对——`frozen_file_digests` 只有初始化服务填，regen / 刚体 / 单元级三条路都现算 mtime 摘要；EQUI 没漂是因为它不读目录、回执 `catalogue` 为空。
+- **方向**（`docs/adr/ADR-089-on-demand-freshness-defers-currency-to-the-library-watermark-and-file-identity-is-the-frozen-anchor-not-mtime.md`）：回执半边只证「同一世代、没落后」（`≤`），新旧听水位；文件身份改记 `FrozenSource` 的锚（稳定文件 id + 库号 / 类型 + 会话 + 该会话两页的 sha256），不记 mtime / 长度；`advance` 仍什么都不做。不做「窗口落地时把全库回执推到 T」。
+- **留底（不入库）**：`.scratch/fixture-8023/stdout20.log`、`.scratch/fixture-8023/incr2/mtimes_before_login2.txt` / `mtimes_after_login2.txt` / `tty_touch_probe2.out`。
+
 ## 2026-10-23
 
 ### 房间归属恒开：`room_membership` 键与 `AIOS_ROOM_MEMBERSHIP` 退役，只剩「本进程算不算得了房间」这一条判据
