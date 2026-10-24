@@ -16,3 +16,18 @@
 | `05-terrain-genpri-only-in-e3d.png` | aps250212 `TRNMOD /TerrainA/DEF01/MOD01 → TRNCC 1 → TRNCEL 1..6`：E3D 每格一片 GENPRI 地形网格，我们对 TRNMOD 子树一件都没画（只在 E3D 6） |
 
 重画：`python output/w7d/render_w7t_pngs.py`（读上面两处 RVM，需要 matplotlib）。
+
+## 修后（2026-10-24，`*-fixed.png`）
+
+五堆都修了（e3d-model `df70971` 扶手端向 + 圆角踢脚板、`eb7e633` STRFLT、`87c0acb` 进了布尔的 CTOR / RTOR 粗格、`0b7b1b5` 地形 GENPRI
+的缓存面片）。同一套图换成 gen_ams `w7t8` 的 `generated.rvm` 再画一遍：`python output/w7d/render_w7t_pngs.py docs/assets/2026-10-24-aps2502xx-tty-compare w7t8 -fixed`。
+对拍总账：aps250209 4623 对、4622 exact、off 1（`/AREA07-CV_0001/Belt` 的整圈 REVO，E3D 拆两条写，ISSUE_09 既有类）、只在 E3D 0、
+种类不同 2（同一类）；aps250212 6 对全 exact（`aps_survey_aps250209-w7t8.txt`、`aps_survey_aps250212-w7t8.txt`）。
+
+| 图 | 内容 |
+|---|---|
+| `01-stair-flight-strflt-facet-e3d-vs-ours-fixed.png` | STRFLT 自己一条面片（斜梁 + 踏步 + 平台板），世界盒对 E3D 0.05 mm |
+| `02-stair-handrail-top-end-9mm-fixed.png` | 扶手顶端按 RPATH `DRNE` 竖切，末端 y = 36445.00 与 E3D 重合（+0.00） |
+| `03-arc-kickplate-handrails-only-in-e3d-fixed.png` | HANDRA 1–5 全出，踢脚板在圆角拐角按拐点斜接 |
+| `04-ctorus-equipment-template-radius-fixed.png` | 正环管与负体同一张 10 mm 粗格，布尔结果与 E3D 同形（盒 ±1968，体积 8.962e7 对 8.962e7 mm³） |
+| `05-terrain-genpri-only-in-e3d-fixed.png` | 6 格地形的缓存面片照 E3D 写成 6 条 FacetGroup，多边形数 / 环数 / 包围盒逐格相同 |
