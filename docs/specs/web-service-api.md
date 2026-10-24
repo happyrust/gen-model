@@ -183,7 +183,7 @@ RefNo 原生路由改造后删除 `core.skeleton_elements` / `core.stale_reason`
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
 - `initialization`：ADR-025 的当前 epoch、严格数据阶段、数据/模型门、逐阶段计数、
   blocker 与被项目优先级遮蔽的 DICT/CATA。`data_ready=false` 时模型写保持待处理。
-- `initialization.room_bootstrap`：`room_membership=true` 的 kv-mem 冷启动屏障，状态为
+- `initialization.room_bootstrap`：算得了房间的进程（`room_membership=true`；2026-10-23 起不再是开关）的 kv-mem 冷启动屏障，状态为
   `idle|initializing|ready|partial|blocked`。只有 `ready` 才允许 `model_ready=true`；
   进度覆盖 MDB 全部可读 DESI，不受 `watch_dbnums` 限制。
 - `features.room.status=available` 必须同时满足配置开启、resident ready、启动屏障 ready、
@@ -735,7 +735,7 @@ plant-ui 的单根调用零影响。
   | `current` | bool | 两者同一代且形态落盘。为真时 `e3d.room.lookup` 对这个库的根答得出 `ready_empty` / `ready_nonempty`，哪怕进程内一条 ACK 都没有；为假时那一层不成立，只能靠本进程刚发布过的根 |
 
   **它不是第三枚水位**：没有自己的推进规则，只随 `model_sesno` 由能替整库说话的任务同一笔盖
-  （初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务），`room_membership=false` 下盖水位时清空。
+  （初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务），算不了房间的进程（`room_membership=false`）盖水位时清空。
   `current: false` 而两枚水位相等是正常状态，不是告警——该库的下一个 dbnum 任务会按这一格欠着
   跑一次整库房间重算（不在投影里的根回读库上几何，2026-09-17）并把它盖上；不想等就给该库跑一次
   `POST /api/v1/dbnums/{dbnum}/model/rebuild` 或重初始化。
@@ -837,7 +837,7 @@ plant-ui 的单根调用零影响。
 
 - `memberships[]`、`room_membership`；
 - `published_version` / `stale` / `publication_status`：版本三元组语义不变，read-through 为
-  `null / null / "unsupported"`，关闭房间开关为 `null / null / "disabled"`；
+  `null / null / "unsupported"`，本进程算不了房间（`room_membership=false`；2026-10-23 起不再是开关）为 `null / null / "disabled"`；
 - `calculation_status`：`ready_nonempty|ready_empty|not_computed|initializing|failed|disabled`。
 
 空 `memberships` 只有在 `calculation_status=ready_empty` 时才表示“已经计算且不属于任何房间”；
@@ -852,7 +852,7 @@ ready 判据有两层，先进程后库上（ADR-073 D14，2026-09-16）：
 
 两层用的是同一个代号，所以房间 / 面板真变过时两层一起作废 → `not_computed`。库上那一格由能替**整库**
 说话的任务（初始化 / 整库重排的 ModelOnly / 跑过整库房间重算的任务）随 `model_sesno` 同盖，
-`room_membership=false` 下盖水位时清空；普通增量窗口不动它。**它不是第三枚水位**，`DbnumStatus`
+算不了房间的进程（`room_membership=false`）盖水位时清空；普通增量窗口不动它。**它不是第三枚水位**，`DbnumStatus`
 的水位仍是两枚。
 
 plant3d-web 的 `/api/room/*` 与 `/api/room-tree/*` 属于另一套旧后端，本服务仍不实现。
@@ -1127,7 +1127,7 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 | `include_self` | 默认 `false`：refno 模式剔除目标自身与祖先链含目标的整个子树；点模式无意义 |
 | `include_negative` | 默认 `false`：按 `aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES` 剔除负实体（NBOX / NCYL …） |
 | `dbnums` | 逗号分隔 u32，限定库；给了它时答不出库号的条目一律剔除 |
-| `rooms` | 逗号分隔的**房间 refno**（`a/b` / `a_b`，2026-09-20）：只保留房间归属含**任一**所选房间的候选（横跨两间房的构件两边都算；材料表取的「主归属」不在这里用）。不在册的房间 → 400 `bad_request`（消息指去 `/spatial/rooms` 看清单）；房间体制此刻答不出来（`room_membership=false` / 模型未就绪 / 非 hd·hh 构建）→ 422 `precondition`，`detail.reason = rooms_unavailable`、`detail.status` 同 §4.13.4 的 `status`。成员集怎么解见下文「房间归属」 |
+| `rooms` | 逗号分隔的**房间 refno**（`a/b` / `a_b`，2026-09-20）：只保留房间归属含**任一**所选房间的候选（横跨两间房的构件两边都算；材料表取的「主归属」不在这里用）。不在册的房间 → 400 `bad_request`（消息指去 `/spatial/rooms` 看清单）；房间体制此刻答不出来（本进程算不了房间 / 模型未就绪 / 非 hd·hh 构建）→ 422 `precondition`，`detail.reason = rooms_unavailable`、`detail.status` 同 §4.13.4 的 `status`。成员集怎么解见下文「房间归属」 |
 | `spec_values` | 逗号分隔的专业值整数（2026-09-20；0 = 其他）：只保留派生专业在其中的候选。专业怎么派生见下文「所属专业」 |
 | `page` / `per_page` | `page` 从 1 起；`per_page` 默认 500、夹在 `1..=1000`（超出钳位，不报错） |
 | `source_mode` | `aabb`（默认：源 = 目标含子树的并集盒）\| `bran_centerline`（源 = 这条 BRAN 的真实中心线走廊，见 §4.13.1）；大小写不敏感；只能与 `refno` 搭配，与 `x,y,z` 同给 400 |
@@ -1373,12 +1373,12 @@ query 参数（`?project=&mdb=&namespace=` 身份门同 §4.10）：
 
 ```json
 { "status": "ready | degraded | initializing | disabled | unsupported | failed",
-  "reason": "room_membership=false：服务端未开启房间归属计算",
+  "reason": "本进程算不了房间（AIOS_SPATIAL_COMPUTE=0，常驻房间模型不建）：服务端算不出房间归属",
   "definition_version": "…",
   "rooms": [{ "refno": "17496_8516", "room_num": "A101", "name": "/A101-RM", "dbnum": 17496, "panel_count": 6 }] }
 ```
 
-- `status` 由总开关 `room_membership` / `AIOS_SPATIAL_COMPUTE` 与常驻房间模型的生命周期折出：开关关 → `disabled`；`Loading` →
+- `status` 由「本进程算不算得了房间」（`AIOS_SPATIAL_COMPUTE` 与 hd·hh 特性；`room_membership` 2026-10-23 起不再是开关）与常驻房间模型的生命周期折出：算不了 → `disabled`；`Loading` →
   `initializing`；`Unsupported` → `unsupported`；`Blocked` → `failed`；`Ready` → `ready`；`Degraded` → `degraded`（仍给清单，`reason`
   是 problems 首句——Degraded 的模型照常算房间，ADR-073 D10）。非 `ready` / `degraded` 时 `rooms` 为空、`definition_version` 为 `null`；
   `reason` 没有就不出现。客户端据此整块收起房间过滤并写原因。

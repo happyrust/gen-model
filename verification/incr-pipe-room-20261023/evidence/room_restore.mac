@@ -1,0 +1,14 @@
+-- incr e2e 2026-10-23 / room restore: EQUI /1-LNR-Q005-PJ (=24384/24776) back to U 1400 (R224 again).
+-- Exactly one SAVEWORK; the wrapper QUITs.
+ALPHA LOG "D:/work/plant-code/old/gen-model/.scratch/fixture-8023/incr/room_restore.log" OVER
+$P INCR-ROOM-RESTORE-ALIVE
+=24384/24776
+Q CE
+Q TYPE
+Q NAME
+Q POS
+POS E -2821.27001953125 N 8003.9599609375 U 1400
+Q POS
+SAVEWORK 'incr e2e 2026-10-23: EQUI 24384/24776 restore U 53400 -> 1400'
+$P INCR-ROOM-RESTORE-DONE
+ALPHA LOG END

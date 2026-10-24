@@ -51,7 +51,7 @@ pub(crate) enum RoomGenerationStamp {
     /// 本任务说不了「整库的房间边对齐到哪一代」（普通增量窗口只重算被触到的根）：那一格原样。
     #[default]
     Untouched,
-    /// `room_membership=false` 下盖模型水位：水位此刻只承诺几何，durable 侧的房间就绪承诺随之清空。
+    /// 算不了房间的进程（`room_membership()` 为 false）盖模型水位：水位此刻只承诺几何，durable 侧的房间就绪承诺随之清空。
     Cleared,
     /// 整库的房间边对齐到这一代常驻模型（初始化 / 整库重排 / 本任务跑过整库房间重算），随 `model_sesno` 同盖。
     Aligned(String),

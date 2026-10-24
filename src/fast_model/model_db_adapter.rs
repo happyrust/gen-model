@@ -1426,7 +1426,7 @@ fn note_stray_generation_written(
 /// 任一代（`on_chain`）、又不是链尾那一代的根，代号一并对齐到链尾 `generation`——它那一代到链尾之间面板动了什么链上各段都
 /// 反查过、没命中就是边没变，与库上那一格「整库对齐到这一代」是同一句话的逐根形态。链外的代号**不动**：那是盖章之后中间
 /// 那一代写的（`/model/ensure` 在空段那一代生成的根），正是下一个任务要点名、读侧要一票否决的证据；没算房间的
-/// （`room_membership = false`）同样不动。候选前移了的（回执与 ACK 对不上）`record_publication_ack` 拒收，由它自己的刷盘另记。
+/// （算不了房间的进程，`room_membership()` 为 false）同样不动。候选前移了的（回执与 ACK 对不上）`record_publication_ack` 拒收，由它自己的刷盘另记。
 /// 只改代号那一格，几何身份不动。返回对齐了几根。
 pub fn align_room_acks_along_chain(
     store: &ModelMemoryStore,

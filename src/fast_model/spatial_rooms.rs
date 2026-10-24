@@ -43,13 +43,17 @@ pub struct RoomsAvailability {
     pub model: Option<Arc<ResidentRoomModel>>,
 }
 
-/// 从总开关 + 常驻模型生命周期折出状态（`/health.features.room` 同一套输入）。
-/// `Ready` / `Degraded` 都给清单——Degraded 的模型照常算房间（ADR-073 D10），只是有缺口要说。
+/// 从「本进程算不算得了房间」+ 常驻模型生命周期折出状态（`/health.features.room` 同一套输入；房间归属
+/// 2026-10-23 起不再是开关）。`Ready` / `Degraded` 都给清单——Degraded 的模型照常算房间（ADR-073 D10），
+/// 只是有缺口要说。
 pub fn rooms_availability() -> RoomsAvailability {
     if !crate::options::room_membership() {
         return RoomsAvailability {
             status: STATUS_DISABLED,
-            reason: Some("room_membership=false：服务端未开启房间归属计算".to_string()),
+            reason: Some(format!(
+                "{}：服务端算不出房间归属",
+                crate::options::room_membership_off_reason()
+            )),
             model: None,
         };
     }

@@ -539,20 +539,7 @@ async fn prepare_room_resident_at_startup(db_option: &DbOption) {
     }
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
 
-    // 房间归属开关（`room_membership`，缺键默认开，2026-09-29 起）关着：空间树照装（它不只服务房间），常驻房间
-    // 模型不建；`frozen_room_calculator` 返回 None，生成根与 model_sesno 照常推进，只跳过
-    // 房间边重算。生命周期记 Disabled 并点名来源，/health 看得见。
-    if !crate::options::room_membership() {
-        room_resident::mark_disabled("room_membership=false");
-        println!(
-            "房间归属计算已关闭（DbOption.toml 的 room_membership / 环境变量 {}）：\
-             跳过常驻房间模型初始化；模型根与 model_sesno 照常推进，不重算房间边；\
-             重启并打开后历史房间欠账需执行模型重建",
-            crate::options::ROOM_MEMBERSHIP_ENV
-        );
-        return;
-    }
-
+    // 房间归属不再是开关（2026-10-23）：过了上面两道「算不算得了」的门就一律建常驻房间模型。
     room_resident::mark_loading("source-snapshot");
     let step_started = Instant::now();
     initialize_resident_rooms_at_startup(db_option).await;
@@ -1971,17 +1958,11 @@ fn print_startup_complete_banner(
         println!("  常驻房间模型：{state}");
     }
     // 非正常运行状态才出声（与 watch_dbnums / model_incremental_types 同一条纪律）：
-    // 关着时「没算房间」与「房间没变」在库上长得一模一样，横幅这一行是最先被翻到的证据。
-    // 要求开、进程却算不了房间（AIOS_SPATIAL_COMPUTE=0 / 没编 project_hd）时点名来源与原因。
-    if let Some(notice) = crate::options::room_membership_notice() {
+    // 算不了房间的进程（AIOS_SPATIAL_COMPUTE=0 / 没编 project_hd）点名原因——「没算房间」与「房间没变」
+    // 在库上长得一模一样，横幅这一行是最先被翻到的证据；退役的 room_membership 键 / AIOS_ROOM_MEMBERSHIP
+    // 还写着也逐条点名（2026-10-23 起房间归属恒开）。
+    for notice in crate::options::room_membership_notices() {
         println!("  *** {notice}");
-    } else if !crate::options::room_membership() {
-        println!(
-            "  房间归属计算：关（DbOption.toml 的 room_membership / 环境变量 {}）——\
-             模型根与 model_sesno 照常推进，不重算房间边；\
-             重启并打开后历史房间欠账需执行模型重建",
-            crate::options::ROOM_MEMBERSHIP_ENV
-        );
     }
     println!("  数据读取：direct / e3d-io（唯一形态；legacy db 读路由已于 2026-09-08 退役）");
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {

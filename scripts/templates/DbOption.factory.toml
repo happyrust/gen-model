@@ -132,14 +132,13 @@ puhua_database_password = "root"
 replace_mesh = true
 room_key_word = ["-RM"]
 
-# 数据、模型增量与房间归属计算缺省开启（与代码默认一致，房间 2026-09-29 起）：
-# 构件挪了位置，它所属生成根重算时顺带重算房间归属、与模型行同一笔事务落库。
-# MDB 声明的设计库缺文件、在册面板缺几何只让房间降级（/health 的 features.room = degraded），
-# 不拦模型（ADR-073 D8–D11）。要关用 room_membership = false 或环境变量 AIOS_ROOM_MEMBERSHIP=0
-#（环境变量压过本键）；关着时房间边不更新，重新打开后要对相应库执行一次模型重建补齐。
+# 数据与模型增量缺省开启（与代码默认一致）。房间归属计算 2026-10-23 起不再是开关：算得了房间的进程
+#（AIOS_SPATIAL_COMPUTE 开着、编了 project_hd / project_hh，发布包都是）恒开——构件挪了位置，它所属生成根重算时
+# 顺带重算房间归属、与模型行同一笔事务落库。MDB 声明的设计库缺文件、在册面板缺几何只让房间降级
+#（/health 的 features.room = degraded），不拦模型（ADR-073 D8–D11）。退役的 room_membership 键 / AIOS_ROOM_MEMBERSHIP
+# 写了不生效、只在启动横幅被点名，模板里不再写。
 data_incremental = true
 model_incremental = true
-room_membership = true
 
 # 设计→设计引用级联（P4，2026-09-30 起默认开，GitHub #32）：被 POSREF 参照的件挪了，参照它的件所在的根跟着重算。
 # 反查判不了时整窗已持久化的根重算并在回执点名。要关用 model_design_reference_cascade = false

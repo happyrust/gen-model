@@ -1,0 +1,15 @@
+-- incr e2e 2026-10-23 / room apply: lift EQUI /1-LNR-Q005-PJ (=24384/24776, dbnum 8000; leaf BOX 24384/24777 in R224)
+-- from U 1400 to U 53400 (lands in R000 per verification/incr-model-room-20261016). Same E/N as baseline.
+-- Exactly one SAVEWORK; the wrapper QUITs.
+ALPHA LOG "D:/work/plant-code/old/gen-model/.scratch/fixture-8023/incr/room_apply.log" OVER
+$P INCR-ROOM-APPLY-ALIVE
+=24384/24776
+Q CE
+Q TYPE
+Q NAME
+Q POS
+POS E -2821.27001953125 N 8003.9599609375 U 53400
+Q POS
+SAVEWORK 'incr e2e 2026-10-23: EQUI 24384/24776 U 1400 -> 53400 (R224 -> R000)'
+$P INCR-ROOM-APPLY-DONE
+ALPHA LOG END

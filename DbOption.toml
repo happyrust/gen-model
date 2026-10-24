@@ -192,21 +192,15 @@ block_file_identity_conflicts = false
 data_incremental = true
 model_incremental = true
 
-#【新增 2026-09-10；默认值 2026-09-11 改为 false，2026-09-29 改回 true】room_membership —— 房间归属计算的总开关
-# ADR-073 D1 之后房间不是一条独立流程：一个生成根算完几何，紧接着用常驻房间模型里的
-# 面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行同一笔事务落库。本键就是
-# 那一步的开关，判定点只有一处（任务开工冻房间计算器 frozen_room_calculator）。
-#   true ：默认开启；构件挪了位置，它的生成根重算时房间边跟着重写。MDB 里缺文件的库、
-#          缺几何的面板只让房间降级（/health.features.room = degraded），不拦模型（ADR-073 D8–D11）。
-#   false：启动不建常驻房间模型，冻结房间计算器得到 None；模型根照常落库、
-#          model_sesno 照常前移，只是不计算、不写新房间边。被模型对账删除的来源旧边仍清。
-# 关闭期间 model_sesno 只承诺模型几何，不承诺房间归属；/health 的 room_membership=false
-# 是这项主动降级的判据。重新打开只影响之后重生成的根，历史房间欠账需显式执行模型重建补齐。
-# AIOS_SPATIAL_COMPUTE=0（或没编 project_hd / project_hh）的进程不建房间模型，不论本键怎么写都按关，
-# 启动横幅点名。
-# 环境变量 AIOS_ROOM_MEMBERSHIP 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），想临时关一次
-# 用 AIOS_ROOM_MEMBERSHIP=0，不必改文件。
-room_membership = true
+#【新增 2026-09-10；默认值 2026-09-11 改为 false，2026-09-29 改回 true；**2026-10-23 退役**】room_membership —— 曾是房间归属计算的总开关
+# 2026-10-23 起房间归属不再是开关：算得了房间的进程（AIOS_SPATIAL_COMPUTE 开着、编了 project_hd / project_hh）恒开——
+# 一个生成根算完几何，紧接着用常驻房间模型里的面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行
+# 同一笔事务落库（ADR-073 D1，判定点只有 frozen_room_calculator 一处）。MDB 里缺文件的库、缺几何的面板只让房间
+# 降级（/health.features.room = degraded），不拦模型（D8–D11）。
+# 算不了房间的进程（AIOS_SPATIAL_COMPUTE=0，或没编那两个特性）不建常驻房间模型：模型根与 model_sesno 照常推进、
+# 不写房间边，那段时间 model_sesno 只承诺几何，启动横幅与 /health 的 room_membership=false 点名原因。
+# 本键与环境变量 AIOS_ROOM_MEMBERSHIP 写了不生效，只会在启动横幅被点名「已退役」（与 in_memory_db 同一条先例）；不要再写。
+# room_membership = true
 
 #【默认值 2026-09-30 改为 true，GitHub #32】model_design_reference_cascade —— 设计→设计引用级联（级联查询换源计划 P4）
 # 窗口里每个变更元素到 MDB 每个设计库自带的反向引用表点查「谁引用它」；生成器真读的跨单元设计引用只有

@@ -391,8 +391,8 @@ pub struct DbnumState {
     /// 这个库的房间边整库对齐到哪一代常驻房间模型（ADR-073 D14）：`ResidentRoomModel::input_version`，
     /// 与根 ACK 的 `room_generation` 同一个字串。随 `model_sesno` 由任务收尾那一笔写，且只有能替
     /// **整库**说话的任务才写——初始化、整库重排的 ModelOnly、本任务跑过整库房间重算（D13）；普通
-    /// 增量窗口只重算被触到的根，这一格原样不动；`room_membership=false` 下盖模型水位时清空。
-    /// `None` = durable 侧没有房间就绪承诺（旧行、从没整库对齐过、关着开关生成的）。
+    /// 增量窗口只重算被触到的根，这一格原样不动；算不了房间的进程（`room_membership()` 为 false）盖模型水位时清空。
+    /// `None` = durable 侧没有房间就绪承诺（旧行、从没整库对齐过、算不了房间的进程生成的）。
     /// `e3d.room.lookup` 在进程内没有该根 ACK 时（rocksdb 直写不留投影、冷重启）拿它当就绪判据。
     #[serde(default)]
     pub model_room_generation: Option<String>,

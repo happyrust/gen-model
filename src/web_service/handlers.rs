@@ -585,7 +585,7 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     use crate::fast_model::room_resident::ResidentLifecycle;
 
     if !crate::options::room_membership() {
-        return json!({"status": "disabled", "reason": "room_membership=false"});
+        return json!({"status": "disabled", "reason": crate::options::room_membership_off_reason()});
     }
     if !store_connected {
         return json!({"status": "degraded", "reason": "process store unavailable"});
@@ -656,7 +656,7 @@ fn room_feature_status(store_connected: bool, worker_alive: bool) -> Value {
     }
 }
 
-/// 生成前的常驻房间模型门：`room_membership` 开着时，每次生成的落库 flush 都会冻房间计算器
+/// 生成前的常驻房间模型门：本进程算得了房间（`room_membership()`）时，每次生成的落库 flush 都会冻房间计算器
 /// （`persist_roots_batched` → `frozen_room_calculator`），常驻 `Loading`/`Blocked` 时等不到它——
 /// 不加这道门，请求会跑完整趟几何再让 write-behind flush 把全部根记 `Blocked`，响应却已经回 200。
 /// 在开工前快败成 409/updating（可重试冲突），与 `ensure_error` 归的同一码，任何介质、任何路由同判。
@@ -696,7 +696,10 @@ pub async fn rooms_rebuild(State(_state): State<AppState>) -> Result<impl IntoRe
         return Err(ApiError::coded(
             StatusCode::CONFLICT,
             "unsupported",
-            "room_membership=false：房间归属计算关着，没有可重建的参照模型",
+            format!(
+                "{}，没有可重建的参照模型",
+                crate::options::room_membership_off_reason()
+            ),
         ));
     }
     if !resident::try_begin_rebuild() {

@@ -2089,7 +2089,8 @@ async fn run_room_only_recompute(
         Ok(Some(rooms)) => rooms,
         Ok(None) => {
             result.warnings.push(format!(
-                "dbnum={dbnum} 整库房间重算跳过：room_membership=false（触发：{reason}）"
+                "dbnum={dbnum} 整库房间重算跳过：{}（触发：{reason}）",
+                crate::options::room_membership_off_reason()
             ));
             return RoomRecomputeVerdict::Disabled;
         }

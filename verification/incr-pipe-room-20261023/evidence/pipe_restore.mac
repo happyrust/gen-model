@@ -1,0 +1,15 @@
+-- incr e2e 2026-10-23 / pipe restore: FTUBE 4 of BRANCH /C-OR-1R345-C (=24384/23262) back to U 2900mm.
+-- Exactly one SAVEWORK; the wrapper (driver_pipe_restore.mac) QUITs.
+ALPHA LOG "D:/work/plant-code/old/gen-model/.scratch/fixture-8023/incr/pipe_restore.log" OVER
+$P INCR-PIPE-RESTORE-ALIVE
+=24384/23262
+Q CE
+Q REF
+Q POS
+POS E 10887mm N 12332mm U 2900mm
+Q CE
+Q REF
+Q POS
+SAVEWORK 'incr e2e 2026-10-23: FTUBE 4 of /C-OR-1R345-C restore U3400 -> U2900'
+$P INCR-PIPE-RESTORE-DONE
+ALPHA LOG END

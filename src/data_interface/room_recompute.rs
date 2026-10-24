@@ -1569,7 +1569,10 @@ pub(crate) async fn recompute_dbnum_room_edges_now(dbnum: u32) -> bool {
     let rooms = match crate::fast_model::model_db_adapter::frozen_room_calculator() {
         Ok(Some(rooms)) => rooms,
         Ok(None) => {
-            println!("dbnum={dbnum} 整库房间重算跳过：room_membership=false");
+            println!(
+                "dbnum={dbnum} 整库房间重算跳过：{}",
+                crate::options::room_membership_off_reason()
+            );
             return false;
         }
         Err(error) => {

@@ -1,5 +1,19 @@
 # 变更记录
 
+## 2026-10-23
+
+### 房间归属恒开：`room_membership` 键与 `AIOS_ROOM_MEMBERSHIP` 退役，只剩「本进程算不算得了房间」这一条判据
+
+- **为什么**：用户 2026-10-23 定口径「房间归属默认就要开启，不要再做成开关项」。此前 `options::room_membership()` = 要求值（环境变量 > 配置键 > 缺省 true）∧ 算得了，配置里一句 `room_membership = false` 就让整台服务默默不写房间边（本轮夹具 8023 就是这样起的，房间增量测不了）。
+- **改动**：
+  - `options.rs`：`room_membership()` 只看 `room_membership_capable()`（`spatial_compute()` ∧ 编了 `project_hd` / `project_hh`）；`ROOM_MEMBERSHIP_DEFAULT` / `RoomMembershipOrigin` / `requested_room_membership` / `effective_room_membership` / `room_membership_notice` 删掉；新增 `room_membership_off_reason()`（算不了时的一句原因）与 `room_membership_notices()`（退役键 / 退役环境变量还写着就逐条点名、连实际按哪档跑一起念，算不了房间另点名；与 `in_memory_db` / `store_mode_notices` 同一条先例）。配置结构里 `room_membership: Option<bool>` 留着只为老配置不进未知键告警；`ROOM_MEMBERSHIP_ENV` 常量留着只给点名用。单测的 `RoomMembershipOverride` 钩子不动（它模拟的就是「算不了」）。
+  - `lib.rs`：`prepare_room_resident_at_startup` 里「开关关着就 `mark_disabled` 返回」那段删掉（过了两道算不算得了的门就建常驻模型）；横幅改成逐条打印 `room_membership_notices()`。
+  - `/health.features.room.reason`、`/spatial/rooms` 的 `reason`、`POST /rooms/rebuild` 的 409 文案、整库房间重算跳过的 warning / 日志：`room_membership=false` → `room_membership_off_reason()`（「本进程算不了房间（AIOS_SPATIAL_COMPUTE=0 / 编译时没有 project_hd …）」）。`/health.room_membership` 布尔栏保留，语义变成「本进程算得了房间」。
+  - 配置：仓根 `DbOption.toml`、`DbOption-slyk.toml`、`db_options/DbOption-aps.toml` 的 `room_membership = …` 注掉并改注释；出厂模板 `scripts/templates/DbOption.factory.toml` 不再写该键。护栏 `no_db_option_fixture_still_carries_a_store_mode_key` 连 `room_membership` 一起扫；`factory_template_drops_the_retired_room_membership_key` 钉模板不带它。
+  - spec §2 `initialization.room_bootstrap` / §4.7 / §4.9 房间查询 / §4.13 `/spatial/rooms` 的「开关关」改「本进程算不了房间」；`dbnum_state` / `task_end` / `model_read_route` / `model_db_adapter` / `l3_suite::fixture` 的注释同步。
+- **退役形态**：老配置里的 `room_membership = false` / 启动脚本里的 `AIOS_ROOM_MEMBERSHIP=0` 读得进、不生效，启动横幅 `*** ⚠ DbOption.toml 里的 room_membership = false 已退役（…）；本进程算得了房间，按开跑。请删掉这一行`。想真不算房间只剩 `AIOS_SPATIAL_COMPUTE=0`（连空间树一起关）或不编特性。
+- **验证**：`cargo test --lib -- options::tests::room_membership options::tests::the_room options::tests::the_retired_room options::tests::factory_template options::tests::no_db_option_fixture`（待跑）；夹具 8023 用本次构建重起，配置里留着的 `room_membership = false` 在横幅被点名、`/health.features.room` 不再是 `disabled`，房间增量用例见 `verification/incr-pipe-room-20261023/`。
+
 ## 2026-10-22
 
 ### 清理模型「一并删除网格文件」连几何一起清：`inst_geo` 行 + `.mesh` 随范围删除、靠重生成写回；单位几何永不删

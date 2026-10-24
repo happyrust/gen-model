@@ -893,11 +893,11 @@ fn copy_fixture_db_snapshot(source: &Path, target: &Path) -> Result<()> {
 ///
 /// `room_membership`: the `room-member` / `room-structure` scenarios assert on
 /// `room_relate` edges, which only exist when room membership is on. Since
-/// 2026-09-29 that is the default (`options::room_membership`), so the fixture no
-/// longer pins it: whatever the base config says, the rendered config carries no
-/// such line and every fixture process is started without
-/// `aios_database::options::ROOM_MEMBERSHIP_ENV` — a default that regresses to off
-/// fails those two scenarios loudly.
+/// 2026-10-23 it is no longer a switch at all (`options::room_membership` is on for
+/// every room-capable process; the key and `AIOS_ROOM_MEMBERSHIP` are retired and only
+/// get named in the startup banner), so the fixture drops the line from whatever base
+/// config it renders and starts every fixture process without the env var, keeping
+/// the banner quiet — a build that regresses to off fails those two scenarios loudly.
 const FIXTURE_DROPPED_KEYS: [&str; 1] = ["room_membership"];
 
 fn write_runtime_config(
