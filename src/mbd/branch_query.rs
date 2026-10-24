@@ -192,16 +192,16 @@ pub fn branch_query_with_diameters(set: &Arc<DbSet>, refno: RefNo) -> Result<Bra
     let mut issues: Vec<MbdV2Issue> = Vec::new();
     let mut diameters = HashMap::new();
     if route.pass_through_unresolved > 0 {
-        // 目录链走不到 SCOM（无 SPRE / 目录库没开 / 目标不在所钉会话）的 ATTA 被按穿过件处理。
-        // MDS 梯架支撑那种 GTYP=ANCI 的 ATTA 本该是站点、两侧断管——目录库不在本次 DbSet 里时
+        // 模板里没有 SPKBRK（老模板）的 ATTA 被按穿过件处理。E3D 按 ATTA 自己的 SPKBRK 定它断不断管身：
+        // MDS 梯架支撑的 DATUM / SREF 那种置真的本该是站点、两侧断管——读不到这个属性时
         // 它们会静默降级成穿过件，管身少几段。出声，别让人去怪切段。
         issues.push(suppress_issue(
             &branch_refno,
             &branch_refno,
             "adapter.atta_catalogue_unresolved",
             &format!(
-                "{} ATTA member(s) could not be classified through SPRE -> SCOM.GTYP (catalogue not open or \
-                 target missing) and were treated as pass-through; ANCI supports among them would be stations",
+                "{} ATTA member(s) have no SPKBRK in their template and were treated as pass-through; \
+                 tube-breaking supports among them would be stations",
                 route.pass_through_unresolved
             ),
         ));
