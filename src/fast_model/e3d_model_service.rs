@@ -622,7 +622,7 @@ fn same_target_outside_the_design_window(published: &ModelTarget, current: &Mode
 /// 过的路径）和普通 MDB 服务（项目清单里的原样路径）里会以两种写法出现，按字串比就「变了」——夹具 8023
 /// 2026-10-24 `db-20261024-200916-000003`：前一窗 regen 的回执记 `\\?\D:\…\ams8000_0001`，刚体前移算的目标是
 /// `D:\…\ams8000_0001`，「immutable target changed」把刚体路永远拒在外面（d-149 2026-09-21 同症，ADR-082 追记「原因待查」）。
-/// 摘要不受影响：[`model_file_identity_digest`] 自己 canonicalize。
+/// 摘要不受影响：身份摘要里没有路径（`frozen_source::model_file_identity`，ADR-089 D2）。
 pub(crate) fn plain_file_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
@@ -2043,8 +2043,8 @@ impl E3dModelService {
         let target_dbnum = source.dbnum() as u32;
         for token in dependencies.iter().chain(tokens.clone().iter()) {
             let frozen = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
-            // 摘要故意记 sha256(commit_token_json) 而不是 `model_file_identity_digest`（路径 + 长度 +
-            // 修改时间 + 会话）：token 里全是冻结那一刻的值，同一份 token 之后重开、文件被 SAVEWORK
+            // 摘要故意记 sha256(commit_token_json) 而不是现场身份（2026-10-24 起是冻结锚 `model_file_identity`，
+            // 此前是 `model_file_identity_digest` 路径 + 长度 + 修改时间 + 会话）：token 里全是冻结那一刻的值，同一份 token 之后重开、文件被 SAVEWORK
             // 追加过也算得出同一个数（`initialization_target_tests::initialization_target_survives_append_…`），
             // `room_resident` 的 room-input-cache 就靠它让没变的文件只付重开校验的钱。它与
             // `room_read_through::target_current` 现场重算的公式对不上没关系：初始化的回执不进投影
@@ -2635,7 +2635,7 @@ impl E3dModelService {
                     .push((root_refno.clone(), "no cached receipt".into()));
                 continue;
             };
-            // 幂等闸（S4b 审核 P0 / mem-42）：只有「投影还停在规划基线 S」才许左乘。
+            // 幂等闸（S4b 审核 P0 / mem-42；ADR-089 D7）：只有「投影还停在规划基线 S 或 S 之前」才许左乘。
             match republish_gate(
                 old_receipt.source_sesno,
                 unit.source_start_sesno,
@@ -2650,8 +2650,8 @@ impl E3dModelService {
                     report.fallbacks.push((
                         root_refno.clone(),
                         format!(
-                            "projection receipt at sesno {}, but Δ was planned against baseline \
-                             {} (target {}); falling back to regen",
+                            "projection receipt at sesno {} is newer than the baseline {} Δ was \
+                             planned against (target {}); falling back to regen",
                             old_receipt.source_sesno, unit.source_start_sesno, target_sesno
                         ),
                     ));
@@ -3311,9 +3311,16 @@ impl E3dModelService {
                 // 同一个文件不该在回执里有两种写法（[`plain_file_path`]）。
                 file: plain_file_path(file),
                 session,
+                // 身份是冻结锚（ADR-089 D2）：稳定文件 id + 库号 / 类型 + 会话 + 该会话两页的 sha256。此前记的是
+                // 路径 + 长度 + mtime + 会话（`model_file_identity_digest`），而 E3D 每次会话都改写每个打开库的文件头，
+                // mtime 一漂、摘要就变：按需显示把每个回执判过期，刚体 / 单元级的目录项核对也跟着回退（GitHub #65）。
+                // 字典项会话位 0，取文件最新会话的锚。
                 digest: match self.frozen_file_digests.get(&(dbnum, session)) {
                     Some(digest) => digest.clone(),
-                    None => model_file_identity_digest(file, session)?,
+                    None => crate::data_interface::frozen_source::model_file_identity(
+                        file,
+                        (session != 0).then_some(session),
+                    )?,
                 },
             })
         };
@@ -4146,7 +4153,7 @@ pub(crate) fn republish_roots_by_unit_delta_on(
                 .push((root_refno.clone(), "no cached receipt".into()));
             continue;
         };
-        // 幂等闸（D4，实施约束 5）：在要产出、读记录、动几何之前。只有「投影还停在规划基线 S」才许叠局部清单。
+        // 幂等闸（D4，实施约束 5；ADR-089 D7）：在要产出、读记录、动几何之前。只有「投影还停在规划基线 S 或 S 之前」才许叠局部清单。
         match republish_gate(
             old_receipt.source_sesno,
             unit.source_start_sesno,
@@ -4161,8 +4168,8 @@ pub(crate) fn republish_roots_by_unit_delta_on(
                 report.fallbacks.push((
                     root_refno.clone(),
                     format!(
-                        "projection receipt at sesno {}, but the partial manifest was planned \
-                         against baseline {} (target {}); falling back to regen",
+                        "projection receipt at sesno {} is newer than the baseline {} the partial \
+                         manifest was planned against (target {}); falling back to regen",
                         old_receipt.source_sesno, unit.source_start_sesno, target_sesno
                     ),
                 ));
@@ -4568,6 +4575,9 @@ fn local_generated_mesh(element: &GeneratedElement) -> PlantMesh {
     mesh
 }
 
+/// 按路径 + 长度 + mtime + 会话记一个文件的身份。**只给模板** `attlib.dat`（静态文件，换版就是换文件）用；
+/// dabacon 库文件的身份改走冻结锚 `frozen_source::model_file_identity`（ADR-089 D2）——E3D 每次会话都改写每个打开
+/// 库的文件头，mtime 不是库文件内容的身份。
 pub(crate) fn model_file_identity_digest(path: &Path, session: u32) -> anyhow::Result<String> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("read model target identity {}", path.display()))?;
@@ -6283,21 +6293,24 @@ mod tests {
         owners
     }
 
-    /// ADR-080 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执不在规划基线 S 上的根
+    /// ADR-080 D4：闸在产出之前。回执已在 T 的根是**重放**——跳过、按已完成计；回执比规划基线 S 新又不在 T 的根
     /// **回退**整根 regen 并说明原因；两种都不叫生产方、不发布、投影一字不动。残缺 / 解析不了的根在闸之前
-    /// 就回退；生产方报错的根照 D8 回退并记原因。
+    /// 就回退；生产方报错的根照 D8 回退并记原因。回执停在 S **之前**的根过闸（ADR-089 D7：未触根的常态，
+    /// 登录写的 DBMDAT 会话让每根都这样；2026-10-24 之前它被当成 drifted 挡回 regen）。
     #[test]
     fn the_unit_gate_sorts_replays_and_baseline_mismatches_before_anything_is_produced() {
         let store = ModelMemoryStore::default();
         let mesh_dir = unit_publish_mesh_dir();
         let replayed = RefNo::new(24383, 100); // 回执已在 T = 43
-        let drifted = RefNo::new(24383, 200); // 回执停在 41，计划却是对着 S = 42 算的
+        let drifted = RefNo::new(24383, 200); // 回执在 44：比基线 S = 42 新又不在 T（被别的路径推过了头）
         let incomplete = RefNo::new(24383, 300); // 回执数与记录数对不上
         let failing = RefNo::new(24383, 400); // 停在 S，但生产方报错
+        let behind = RefNo::new(24383, 500); // 回执停在 41（S 之前）：未触根，过闸、叫生产方
         seed_complete_root(&store, &mesh_dir, replayed, 43);
-        seed_complete_root(&store, &mesh_dir, drifted, 41);
+        seed_complete_root(&store, &mesh_dir, drifted, 44);
         seed_complete_root(&store, &mesh_dir, incomplete, 42);
         seed_complete_root(&store, &mesh_dir, failing, 42);
+        seed_complete_root(&store, &mesh_dir, behind, 41);
         store.commit(
             ProjectionScope::Current,
             vec![ProjectionCommit {
@@ -6315,7 +6328,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        let roots = [replayed, drifted, incomplete, failing];
+        let roots = [replayed, drifted, incomplete, failing, behind];
         let before = roots.map(|root| store.root_snapshot(ProjectionScope::Current, root));
         let mut units = roots
             .iter()
@@ -6354,7 +6367,7 @@ mod tests {
         let reasons = report.fallbacks.into_iter().collect::<BTreeMap<_, _>>();
         let drifted_reason = &reasons[&drifted.to_string()];
         assert!(
-            drifted_reason.contains("receipt at sesno 41")
+            drifted_reason.contains("receipt at sesno 44")
                 && drifted_reason.contains("baseline 42")
                 && drifted_reason.contains("target 43")
                 && drifted_reason.contains("falling back to regen"),
@@ -6362,11 +6375,15 @@ mod tests {
         );
         assert_eq!(reasons[&incomplete.to_string()], "projection incomplete");
         assert!(reasons[&failing.to_string()].contains("regen_failed"));
+        assert!(
+            reasons[&behind.to_string()].contains("regen_failed"),
+            "停在基线之前的根过了闸，轮到生产方说话"
+        );
         assert!(reasons["not-a-refno"].contains("unparsable root"));
         assert_eq!(
             produced,
-            vec![failing],
-            "只有过了闸的根才会叫生产方；重放、基线不符、残缺的一件几何都不求"
+            vec![failing, behind],
+            "只有过了闸的根才会叫生产方；重放、比基线新、残缺的一件几何都不求"
         );
         assert_eq!(published, 0, "没有一根走到发布");
         for (root, snapshot) in roots.into_iter().zip(before) {

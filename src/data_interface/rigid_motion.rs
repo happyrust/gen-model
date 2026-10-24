@@ -367,18 +367,24 @@ impl TransformUnit {
 /// 重放 / 基线闸的判决（ADR-066 B6 幂等性，S4b 审核 P0）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepublishGate {
-    /// 回执在规划基线 S 上：`Δ` 对得上，可以左乘。
+    /// 回执不晚于规划基线 S：`Δ` 对得上，可以左乘。停在 S 之前的回执是正常的（ADR-079 D3 / ADR-089 D7）：
+    /// 未触根的回执留在它上一次真正重算的会话，「到 S 仍有效」由水位承诺；规划器只给 `settled`（S 端已发布且安定）
+    /// 的根算 `Δ`，所以这根在 S 上的几何就是回执里那份。
     Proceed,
     /// 回执已在 T：这一窗已经前移过（发布成功但回合没收尾就崩 / 水位没推进的重放）。
     /// 再乘一次 `Δ` 是双重搬移——跳过，按已完成计。
     SkipAlreadyAtTarget,
-    /// 回执既不在 S 也不在 T（半截状态 / 旧计划线格式 / 别的路径动过它）：`Δ` 对不上，
+    /// 回执比基线 S 新、又不在 T（半截状态 / 旧计划线格式基线 0 / 别的路径把它推过了头）：`Δ` 对不上，
     /// 回退整根重算——regen 从文件@T 重算，天然幂等，永远正确。
     FallbackBaselineMismatch,
 }
 
-/// transform 不像 regen 天然幂等：`Δ = W_T·W_S⁻¹` 只对「投影还停在 S」的记录成立，记录已在 T
+/// transform 不像 regen 天然幂等：`Δ = W_T·W_S⁻¹` 只对「投影还停在 S 或 S 之前」的记录成立，记录已在 T
 /// 再乘一次就是双重搬移，而且不会有任何报错。执行体读出旧回执后、动记录之前先过这道闸。
+///
+/// 2026-10-24 之前这里要求回执**等于** S：登录写的 DBMDAT 会话让每个未触根的回执都停在 S 之前，下一窗真动它时
+/// 刚体 / 单元级便宜路全被「baseline mismatch」挡回 regen（夹具 8023 `db-20261024-220835-000004`：回执 702、基线 703）。
+/// 记录级的闸（[`republish_records`]）本就是 `<=`，这里跟它同口径。
 pub fn republish_gate(
     receipt_sesno: u32,
     planned_base_sesno: u32,
@@ -386,10 +392,10 @@ pub fn republish_gate(
 ) -> RepublishGate {
     if receipt_sesno == target_sesno {
         RepublishGate::SkipAlreadyAtTarget
-    } else if receipt_sesno != planned_base_sesno {
-        RepublishGate::FallbackBaselineMismatch
-    } else {
+    } else if receipt_sesno <= planned_base_sesno {
         RepublishGate::Proceed
+    } else {
+        RepublishGate::FallbackBaselineMismatch
     }
 }
 
@@ -1055,10 +1061,11 @@ mod tests {
         );
     }
 
-    /// 幂等闸（S4b 审核 P0 / mem-42）：回执在 S 才放行；已在 T = 窗口重放（发布成功但回合没收尾），
-    /// 跳过不再乘；其余一律回退 regen。
+    /// 幂等闸（S4b 审核 P0 / mem-42；ADR-089 D7）：回执不晚于 S 才放行——停在 S 之前是未触根的常态（登录写的
+    /// DBMDAT 会话让每根都这样），与记录级的闸同口径；已在 T = 窗口重放（发布成功但回合没收尾），跳过不再乘；
+    /// 比 S 新又不在 T 一律回退 regen。
     #[test]
-    fn the_republish_gate_only_proceeds_from_the_planned_baseline() {
+    fn the_republish_gate_proceeds_from_or_before_the_planned_baseline() {
         use RepublishGate::*;
         assert_eq!(republish_gate(40, 40, 41), Proceed);
         assert_eq!(
@@ -1068,8 +1075,8 @@ mod tests {
         );
         assert_eq!(
             republish_gate(39, 40, 41),
-            FallbackBaselineMismatch,
-            "半截 / 更旧的状态"
+            Proceed,
+            "停在基线之前：未触根的回执，到 S 仍有效由水位承诺（ADR-089 D7）"
         );
         assert_eq!(
             republish_gate(42, 40, 41),
@@ -1077,9 +1084,19 @@ mod tests {
             "被别的路径推过了头"
         );
         assert_eq!(
+            republish_gate(43, 40, 42),
+            FallbackBaselineMismatch,
+            "比基线新、又不在 T：Δ 对不上"
+        );
+        assert_eq!(
             republish_gate(41, 41, 41),
             SkipAlreadyAtTarget,
             "S == T 的退化窗：无事可做"
+        );
+        assert_eq!(
+            republish_gate(40, 0, 41),
+            FallbackBaselineMismatch,
+            "旧计划线格式基线 0：任何真实回执都比它新，挡回 regen"
         );
     }
 

@@ -15,10 +15,13 @@
 //!
 //! 字段私有：调用方拼不出一个 token，只能从一次真实的打开里拿到。
 
+use std::collections::HashMap;
 use std::fs::{File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
+use anyhow::Context;
 use e3d_io::ReadOnlyEngine;
 use e3d_io::page::PageId;
 use e3d_io::session::{DbView, SessionSelector};
@@ -37,7 +40,7 @@ const CAPTURE_ATTEMPTS: usize = 4;
 /// 用来判定「同一世代」的文件头样本长度（与旧 `SNAPSHOT_HEADER_PREFIX_LEN` 同值）。
 const HEADER_PREFIX_LEN: usize = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum StableFileId {
     #[cfg(windows)]
     Windows { volume_serial: u32, file_index: u64 },
@@ -409,6 +412,39 @@ impl FrozenSource {
         session_chain(&self.path)
     }
 
+    /// 模型输入文件的身份摘要（ADR-089 D2）：稳定文件 id + dbnum / 库类型 + 目标会话 + 该会话 session page /
+    /// index root 两页的 sha256。追加会话、改写文件头（E3D 每次会话对每个打开的库都做，mtime 跟着变）都不改它；
+    /// 换文件（file id 变）、同号会话内容不同（锚变：另一个工程的同号会话、会话重编）才改。
+    /// 与 [`Self::commit_token_json`] 的摘要不是一回事：那份还含路径、长度、最新会话、头样本——每次 SAVEWORK /
+    /// 登录都漂，只配给初始化那一路做「同一份 token」的键（ADR-077）。
+    pub fn identity_digest(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"gen-model/model-file-identity/v1\0");
+        match &self.file_id {
+            #[cfg(windows)]
+            StableFileId::Windows {
+                volume_serial,
+                file_index,
+            } => {
+                digest.update(volume_serial.to_le_bytes());
+                digest.update(file_index.to_le_bytes());
+            }
+            #[cfg(unix)]
+            StableFileId::Unix { device, inode } => {
+                digest.update(device.to_le_bytes());
+                digest.update(inode.to_le_bytes());
+            }
+        }
+        digest.update(self.dbnum.to_le_bytes());
+        digest.update(self.db_type.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.target_sesno.to_le_bytes());
+        digest.update(self.anchor.session_page_sha256.as_bytes());
+        digest.update(b"\0");
+        digest.update(self.anchor.index_root_sha256.as_bytes());
+        hex::encode(digest.finalize())
+    }
+
     /// 以冻结目标会话打开只读引擎（索引根按 `target_sesno` 选）。
     pub fn open_engine_at_target(&self) -> anyhow::Result<ReadOnlyEngine> {
         self.verify_path_identity()?;
@@ -420,6 +456,47 @@ impl FrozenSource {
             )
         })
     }
+}
+
+/// 身份摘要缓存上限：键是 `(稳定文件 id, 会话)`，值 64 字节 hex；满了整个清掉（与 ADR-082 的进程缓存同一脾气），
+/// 下一次按需核对再算一遍两页 sha256 而已。
+const IDENTITY_CACHE_CAP: usize = 4096;
+
+/// 按路径与会话取模型输入文件的身份摘要（[`FrozenSource::identity_digest`]，ADR-089 D2），进程内缓存。
+///
+/// `session == None` 取文件此刻的最新会话（字典项：会话位固定 0、身份按文件记）。锚是不变量——同一文件世代里一个
+/// 已提交会话的 session page / index root 从不改写——所以缓存可以一直留着；键带稳定文件 id，路径被换成另一个文件
+/// 自然未命中。请求的会话超过文件最新会话（文件被回拨）由 [`FrozenSource::capture_at`] 报错，调用方按过期处理。
+pub fn model_file_identity(path: &Path, session: Option<u32>) -> anyhow::Result<String> {
+    static CACHE: OnceLock<Mutex<HashMap<(StableFileId, u32), String>>> = OnceLock::new();
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("read model input identity {}", path.display()))?;
+    let file_id = StableFileId::from_metadata(&metadata)?;
+    let session = match session {
+        Some(session) => session,
+        None => DbFileHeader::read(path)?.latest_session.sesno,
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&(file_id.clone(), session))
+    {
+        return Ok(hit.clone());
+    }
+    let frozen = FrozenSource::capture_at(path, session)?;
+    anyhow::ensure!(
+        frozen.file_id == file_id,
+        "dabacon 文件 {} 在取身份时被替换",
+        path.display()
+    );
+    let digest = frozen.identity_digest();
+    let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.len() >= IDENTITY_CACHE_CAP {
+        guard.clear();
+    }
+    guard.insert((file_id, session), digest.clone());
+    Ok(digest)
 }
 
 fn target_anchor(path: &Path, target_sesno: u32) -> anyhow::Result<TargetAnchorV1> {
@@ -504,6 +581,80 @@ mod tests {
         fs::rename(&replacement, &path).unwrap();
         let after = StableFileId::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
         assert_ne!(before, after);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ADR-089 D2：身份是冻结锚。同一文件追加字节、改 mtime（E3D 每次会话对每个打开的库做的事）身份不变；
+    /// 不同会话身份不同；换成另一个文件（哪怕内容相同）身份变。只改临时副本。缓存和现算两条路都验。
+    #[test]
+    #[ignore = "requires the AMS 8000 file; modifies only a temporary copy"]
+    fn model_file_identity_survives_header_rewrites_and_appends_but_not_replacement() {
+        use super::super::db_file_header::DbFileHeader;
+        let source = std::env::var_os("AIOS_TARGET_TEST_SOURCE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                "D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001".into()
+            });
+        let dir = temp_dir("identity");
+        let path = dir.join("ams8000_0001");
+        fs::copy(&source, &path).unwrap();
+        let latest = DbFileHeader::read(&path).unwrap().latest_session.sesno;
+        let at_latest = super::model_file_identity(&path, None).unwrap();
+        assert_eq!(
+            at_latest,
+            super::model_file_identity(&path, Some(latest)).unwrap()
+        );
+        assert_eq!(
+            at_latest,
+            FrozenSource::capture_at(&path, latest)
+                .unwrap()
+                .identity_digest(),
+            "缓存里的和现算的是同一个数"
+        );
+        let previous = super::model_file_identity(&path, Some(latest - 1)).unwrap();
+        assert_ne!(at_latest, previous, "会话是身份的一部分");
+
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0; 2048])
+            .unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(
+            at_latest,
+            FrozenSource::capture_at(&path, latest)
+                .unwrap()
+                .identity_digest(),
+            "追加 + 改 mtime 不改身份（现算）"
+        );
+        assert_eq!(
+            at_latest,
+            super::model_file_identity(&path, Some(latest)).unwrap()
+        );
+        assert_eq!(
+            previous,
+            super::model_file_identity(&path, Some(latest - 1)).unwrap()
+        );
+
+        let replacement = dir.join("replacement");
+        fs::copy(&source, &replacement).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert_ne!(
+            at_latest,
+            super::model_file_identity(&path, Some(latest)).unwrap(),
+            "换文件就是另一个身份，哪怕内容相同"
+        );
+        assert!(
+            super::model_file_identity(&path, Some(latest + 1)).is_err(),
+            "请求的会话超过文件最新（回拨）由 capture_at 报错"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

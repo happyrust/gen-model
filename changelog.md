@@ -26,13 +26,22 @@
 - **验证**：`the_windows_verbatim_prefix_is_not_a_target_difference`（前缀不算变、目录会话真变仍拦且点名 `catalogue CATA 7000: session 9 -> 10, digest cata@9 -> cata@10`）、`plain_file_path_strips_only_the_verbatim_prefix`；`cargo test --lib -- e3d_model_service:: room_read_through model_initial_persist` 95 过。真机：同一 EQUI 重启后两条腿，`db-20261024-202159-000002`（696→697）第一次进投影 regen，`db-20261024-202424-000004`（698→699）**`kind = transform`**、没有回退理由、`geometry_diff {moved 1}`——这台夹具上刚体前移第一次走成。
 - **顺带记下**：E3D 每次开库会重写所有已开库文件的头、mtime 跟着变（夹具工程 73xx 目录库每次 TTY 会话启动那一秒全部刷新），而 `model_file_identity_digest` 含 mtime；本次复跑里目录项摘要没有漂（走的是冻结 token 摘要），所以没动它；`room_read_through::target_current` 现算摘要那一路会不会被 mtime 绊倒没验，记在 #64。
 
-### 按需显示的新旧判据把每个未触根都判成过期（E3D 登录即前移会话把它暴露出来）：开票 GitHub #65，方向写成 ADR-089 草案（待拍板，未改代码）
+### 按需显示的新旧判据听库级承诺，模型输入文件的身份改记冻结锚不记 mtime，重放闸放行停在基线之前的回执：E3D 登录之后未触根不再整根重算、刚体前移不再被登录会话挡回 regen（GitHub #65，ADR-089）
 
-- **为什么**：#64 收尾时看到一个只读的 E3D 会话（打开 /ALL、`Q POS`、`QUIT`）就让 `/model/generate`（`force=false`）把刚判 `AlreadyAvailable` 的根整根重算；用户「继续下一步」选了开票 + ADR 草案。
+- **为什么**：#64 收尾时看到一个只读的 E3D 会话（打开 /ALL、`Q POS`、`QUIT`）就让 `/model/generate`（`force=false`）把刚判 `AlreadyAvailable` 的根整根重算；用户「继续下一步」选了开票 + ADR 草案，再「按推荐」落地。
 - **复现（夹具 8023）**：21:14 EQUI `24384/24776` / BRAN `24384/23257` 都 `AlreadyAvailable`（14 / 16 ms，回执 700）；21:15 只读登录一次：`ams000` 下被 MDB 打开的 30 个库文件 mtime 全部改写（目录库 21:15:04.958–05.196，设计库 / `amssys` / `amscom` 21:15:11.3），`ams8000_0001` 多了只有 `DBMDAT` 的会话 701，watcher `db-20261024-211524-000008` 700→701 `no_model=1 advance=953 units=0`；21:16 两根都 `Generated`（447 / 2158 ms，后者 1816 ms 在重解 341 行目录依赖），日志 `[模型目标核对] DESI 8000 已过期：会话 700 → 文件最新 701`。
 - **根因两层**：① `room_read_through::target_file_current` 要「回执会话 == 文件最新」，而窗口规划器的 `advance` 根什么都不做（ADR-079 D3）、回执留在 S——任何窗口落地后每个未触根都被判过期，库级承诺（`root_credential_covers`，单调）被 `&&` 掉；登录只是让「没有编辑的窗口」天天发生。② `model_file_identity_digest` 含 mtime，E3D 每次会话改写文件头 → 摘要变、内容没变；同一把尺子也是刚体 / 单元级「设计窗之外每一格相同」比目录项的，有目录依赖的根预计便宜路永远回退（待验）。
 - **更正上一条「顺带记下」**：「目录项摘要走的是冻结 token 摘要」不对——`frozen_file_digests` 只有初始化服务填，regen / 刚体 / 单元级三条路都现算 mtime 摘要；EQUI 没漂是因为它不读目录、回执 `catalogue` 为空。
-- **方向**（`docs/adr/ADR-089-on-demand-freshness-defers-currency-to-the-library-watermark-and-file-identity-is-the-frozen-anchor-not-mtime.md`）：回执半边只证「同一世代、没落后」（`≤`），新旧听水位；文件身份改记 `FrozenSource` 的锚（稳定文件 id + 库号 / 类型 + 会话 + 该会话两页的 sha256），不记 mtime / 长度；`advance` 仍什么都不做。不做「窗口落地时把全库回执推到 T」。
+- **补一条实测**：只读登录前后读 30 个被打开文件的页头会话号，只有 `ams8000_0001`（701→702）和 `amssys`（879→880）多了会话；目录库 / 字典库 / 别的设计库只被改写了文件头——按会话记的身份对登录完全稳定。
+- **改**（`docs/adr/ADR-089-on-demand-freshness-defers-currency-to-the-library-watermark-and-file-identity-is-the-frozen-anchor-not-mtime.md`，已接受）：
+  - `frozen_source.rs`：`FrozenSource::identity_digest()` = sha256(稳定文件 id ‖ dbnum ‖ 库类型 ‖ 会话 ‖ 该会话 session page / index root 的 sha256)；`model_file_identity(path, Option<session>)` 带 `(file_id, session)` 缓存（上限 4096，满了清空），`None` = 文件最新会话（字典项）。追加会话、改写文件头都不改它；换文件 / 同号会话内容不同才改。
+  - `e3d_model_service.rs`：`model_target` 的设计项 / 目录项 / 字典项 `digest` 改走它；`model_file_identity_digest`（路径 + 长度 + mtime + 会话）只剩模板 `attlib.dat` 还用。刚体 / 单元级的「设计窗之外每一格相同」从此按锚比目录项。
+  - `room_read_through.rs`：`SessionRule { NotBehind, Exact }`；`target_file_current` = 身份相同 ∧ 记了会话的项按规则对文件最新（`NotBehind` 只拦回拨）；`target_current_under(target, rule)`；房间点查 `lookup` 的来源会话 `==` 改 `>=`。日志分「回拨」「身份变了」「没有库级承诺可听、按等值判」三种措辞。
+  - `on_demand_model.rs`：摄入形态 `cache_current = 库级承诺 ∧ memory_root_current(NotBehind)`；读穿 / 只写内存形态先问 `generation_root(s)_cache_current`，盖到的根 `NotBehind`、其余 / 读不到 `Exact`（和从前一样）。
+  - `rigid_motion.rs`：`republish_gate` 由「回执 == S」改「回执 ≤ S」放行（`== T` 跳过、比 S 新又不在 T 回退不动）——修好前几条后第一次真动 EQUI（`db-20261024-220835-000004` 703→705）被「receipt at sesno 702, Δ planned against baseline 703」挡回 regen：702 是上次生成、703 是一次登录。记录级的闸本就是 `<=`（ADR-080 D3）。两处回退理由改口「is newer than the baseline」。
+- **验证**：`cargo test --lib -- rigid_motion orientation_increment_regression e3d_model_service::tests room_read_through on_demand_model frozen_source model_coverage` 144 过（`a_receipt_behind_the_file_is_stale_only_without_a_library_promise`、`dictionary_targets_are_judged_by_identity_alone`、源码钉 `library_file_identity_is_the_frozen_anchor_not_mtime`、`the_republish_gate_proceeds_from_or_before_the_planned_baseline`、单元闸测试多一根「停在 41、基线 42」过闸）；真文件 `--ignored frozen_source::tests::model_file_identity_survives_header_rewrites_and_appends_but_not_replacement` 1 过（追加 + 改 mtime 身份不变、换文件变）。真机（夹具 8023 重启）：冷生成两根（回执 705）→ 只读登录 `db-20261024-221942-000001` 705→706 `advance=953` → 两根 **`AlreadyAvailable`**（21 / 20 ms，此前 447 / 2158 ms）→ `equi_restore` 706→708 EQUI **`kind = transform`** `geometry_diff {moved 1}`、同窗未触的 BRAN 仍 `AlreadyAvailable`（回执 705）、EQUI 回到 U 1400；全程没有一行 `[模型目标核对]`。
+- **不做**：窗口落地时把全库 `advance` 根的回执推到 T（回执从此说不清几何按哪一版算，且不解决 mtime）；模板 `attlib.dat` 与初始化的 token 摘要不动；wire 形状不动，plant-ui 不改。老回执（mtime 摘要）升级后第一次显示重算一次。
+- **仍开着**（ADR-089 Q3 / Q4）：目录库记账会话让 `catalogue_reconcile` 每轮重报同三库；有目录依赖的根走便宜路还没真机（要带 NOZZ 的 EQUI）。
 - **留底（不入库）**：`.scratch/fixture-8023/stdout20.log`、`.scratch/fixture-8023/incr2/mtimes_before_login2.txt` / `mtimes_after_login2.txt` / `tty_touch_probe2.out`。
 
 ## 2026-10-23

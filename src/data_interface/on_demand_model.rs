@@ -17,6 +17,7 @@ use crate::data_interface::model_coverage::{
 };
 use crate::data_interface::mesh_purge::{self, ClearGeometry, MeshPurgeReport};
 use crate::data_interface::model_scope_regen;
+use crate::data_interface::room_read_through::SessionRule;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,7 +404,7 @@ impl AiosDBManager {
                 root_refno: root.to_pdms_str(),
                 reason: "源文件版本在生成期间前移",
             });
-        anyhow::ensure!(memory_root_current(root).await?,
+        anyhow::ensure!(memory_root_current(root, SessionRule::NotBehind).await?,
             ModelStaleAfterGeneration {
                 root_refno: root.to_pdms_str(),
                 reason: "投影回执的模型目标核对不过，原因见日志 [模型目标核对]",
@@ -432,10 +433,26 @@ impl AiosDBManager {
         // this root. Once the lock is ours, a completed prior run is safe to reuse.
         // A durable credential survives restart, but /model/records serves the
         // process projection: a root only counts as cached once the projection holds it.
+        // 两半各答各的（ADR-089 D1）：库级承诺（`generation_root_cache_current`：水位 / 目录落款 / 账本）答「到文件
+        // 最新一版还新不新」，回执那一半只答「还是同一份文件、没落后」。此前回执半边也要会话等值，而窗口规划器的
+        // `advance` 根回执留在 S（ADR-079 D3）——任何窗口落地后每个未触根都被判过期整根重算，E3D 每次登录写的 DBMDAT
+        // 会话让这件事天天发生（GitHub #65）。读穿 / 只写内存形态问同一枚水位（D5）：听得到就按「没落后」判，
+        // 水位行不在 / 没盖到 / 读不到就退回等值，不让任何库比从前更越权。
         let cache_current = if memory_only || crate::options::data_face().is_read_through() {
-            memory_root_current(root).await?
+            let rule = match generation_root_cache_current(&root_refno).await {
+                Ok(true) => SessionRule::NotBehind,
+                Ok(false) => SessionRule::Exact,
+                Err(error) => {
+                    log::debug!(
+                        "[按需生成] 生成根 {root_refno} 的库级承诺读不到，回执按等值判: {error:#}"
+                    );
+                    SessionRule::Exact
+                }
+            };
+            memory_root_current(root, rule).await?
         } else {
-            generation_root_cache_current(&root_refno).await? && memory_root_current(root).await?
+            generation_root_cache_current(&root_refno).await?
+                && memory_root_current(root, SessionRule::NotBehind).await?
         };
         if !force && cache_current {
             // 计数只问进程内投影（S4 之后 legacy「读 inst_relate 表数实例」那条路退役）。
@@ -579,12 +596,26 @@ impl AiosDBManager {
         } else if memory_only || crate::options::data_face().is_read_through() {
             // 整批只借一次阻塞线程：一个作用域有几百个根，逐根 `spawn_blocking` 就是
             // 几百次调度往返，而每根要做的只是几次 stat。
+            // 库级承诺盖到的根按「没落后」判，其余退回等值（ADR-089 D5）；水位读不到就是空集，全部等值。
+            let promised = generation_roots_cache_current(&generation_roots)
+                .await
+                .unwrap_or_else(|error| {
+                    log::debug!("[按需生成] 作用域的库级承诺读不到，回执按等值判: {error:#}");
+                    std::collections::HashSet::new()
+                });
             let pinned = pinned_data_window();
             let candidates = root_refnos.clone();
             tokio::task::spawn_blocking(move || {
                 candidates
                     .into_iter()
-                    .filter(|root| memory_root_current_on_thread(*root, pinned))
+                    .filter(|root| {
+                        let rule = if promised.contains(&root.to_pdms_str()) {
+                            SessionRule::NotBehind
+                        } else {
+                            SessionRule::Exact
+                        };
+                        memory_root_current_on_thread(*root, pinned, rule)
+                    })
                     .map(|root| root.to_pdms_str())
                     .collect::<std::collections::HashSet<_>>()
             })
@@ -609,7 +640,7 @@ impl AiosDBManager {
             // A durable credential survives restart, but /model/records serves the
             // process projection. Rebuild a missing resident root before calling it cached.
             let current = current_roots.contains(&root.root.to_pdms_str())
-                && match memory_root_current(root.root).await {
+                && match memory_root_current(root.root, SessionRule::NotBehind).await {
                     Ok(current) => current,
                     // 投影核对本身垮了（阻塞线程 join 失败等）不拦整片：照常进生成路径，
                     // 生成里的同一道核对会再裁一次，真坏就记进 `failed_roots`。
@@ -889,13 +920,16 @@ fn pinned_data_window() -> bool {
 }
 
 /// 核对源文件身份要做文件 stat，不能占着 runtime 线程；判「窗口已钉」的那两个
-/// task-local 由调用方在自己的任务上读好再传进来。
-async fn memory_root_current(root: RefnoEnum) -> anyhow::Result<bool> {
+/// task-local 由调用方在自己的任务上读好再传进来。`rule` 见 [`SessionRule`]（ADR-089 D1 / D5）。
+async fn memory_root_current(root: RefnoEnum, rule: SessionRule) -> anyhow::Result<bool> {
     let pinned = pinned_data_window();
-    Ok(tokio::task::spawn_blocking(move || memory_root_current_on_thread(root, pinned)).await?)
+    Ok(
+        tokio::task::spawn_blocking(move || memory_root_current_on_thread(root, pinned, rule))
+            .await?,
+    )
 }
 
-fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool) -> bool {
+fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool, rule: SessionRule) -> bool {
     crate::fast_model::e3d_model_service::parse_refno(&root.to_pdms_str())
         .ok()
         .and_then(|root| {
@@ -910,7 +944,7 @@ fn memory_root_current_on_thread(root: RefnoEnum, pinned_window: bool) -> bool {
                 return true;
             }
             receipt.model_target.as_ref().is_some_and(|target|
-                super::room_read_through::target_current(target).unwrap_or_else(|error| {
+                super::room_read_through::target_current_under(target, rule).unwrap_or_else(|error| {
                     // 核对不了（文件 stat 不到、会话解不出）按过期处理，但要说出来：此前这一句被吞成
                     // 「正在后台生成」，日志里一行不剩。
                     println!(

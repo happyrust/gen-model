@@ -1,18 +1,22 @@
 # ADR-089：按需显示的新旧判据听库级承诺——回执只证「同一世代、没落后」，模型输入文件的身份是冻结锚不是 mtime
 
-状态：**草案（待拍板）**（2026-10-24。GitHub #64 收尾时顺带看到「E3D 登录即前移 DESI 会话 → `/model/generate` 把请求的根整根重算」，
-用户「继续下一步」选了「开票 + ADR 草案」；票是 GitHub #65，本文随它一起提交。D1–D6 是提议，每一条都等用户过目；
-「仍开着」里的 Q1–Q5 是要拍的板。**号到提交时复核**——087 被 `.mesh` 原子重写的拟稿占用、088 已用，本文取 089。）
+状态：**已接受**（2026-10-24。GitHub #64 收尾时顺带看到「E3D 登录即前移 DESI 会话 → `/model/generate` 把请求的根整根重算」，
+用户「继续下一步」选了「开票 + ADR 草案」（票是 GitHub #65，草案随它提交 `3ea3350a9`），再「按推荐」：Q1 取锚、Q5 随本文一起落、
+读穿形态按 D5 的退路落；落地时多出一条 D7（重放闸），是真机验收里被同一根病挡出来的。**号到提交时复核**——087 被 `.mesh`
+原子重写的拟稿占用、088 已用，本文取 089。）
 日期：2026-10-24
-落地：**未实施**。要动的代码：`data_interface/room_read_through.rs`（`target_file_current` / `target_current`）、
-`data_interface/on_demand_model.rs`（`memory_root_current` 与读穿形态的 `cache_current`）、`fast_model/e3d_model_service.rs`
-（`ModelFileTarget.digest` 的记法、`model_file_identity_digest` 的调用点、`same_file_target`）、`data_interface/frozen_source.rs`
-（锚的导出）；没有新表、新列、新开关，`RootReceipt` / `ModelTarget` 的 wire 形状不变。
+落地：工作树 `D:\work\plant-code\old\gen-model`（分支 `refactor`），与本文的定稿同一笔提交。代码：`data_interface/frozen_source.rs`
+（`FrozenSource::identity_digest`、`model_file_identity` + 缓存）、`data_interface/room_read_through.rs`（`SessionRule`、`target_file_current` /
+`target_current_under`、`lookup` 的 `>=`）、`data_interface/on_demand_model.rs`（`memory_root_current(root, rule)` 与两条路的 `cache_current`）、
+`fast_model/e3d_model_service.rs`（`model_target` 的 `digest` 改走锚；两处闸的注释与回退理由）、`data_interface/rigid_motion.rs`（`republish_gate`
+改 `<=`）；没有新表、新列、新开关，`RootReceipt` / `ModelTarget` 的 wire 形状不变，plant-ui 不改。
 关联：
 - **修订** ADR-079 D6（按需 `ensure` 的凭证判据）：「摄入形态下仍与投影回执那一半相与」里回执那一半的**问法**——从「回执会话 == 文件最新
   ∧ mtime 摘要相同」改成「同一世代 ∧ 回执会话 ≤ 文件最新」；新旧由库级承诺那一半独自回答。库级半边的单调判据（ADR-054 实施约束 4）不动。
 - **修订** ADR-066 D4 / ADR-080 实施约束 11（「设计窗之外每一格相同」）：目录项「相同」的尺子从 mtime 摘要换成冻结锚；尺子换了，判据的意思不变。
 - **修订** ADR-073 房间点查的来源核对（`room_read_through::lookup` 里 `selected.source.sesno == before.design.session`）：同 D1 口径（D6）。
+- **修订** ADR-066 B6 / ADR-080 D4 的幂等闸（`rigid_motion::republish_gate`）：「回执在 S」放宽成「回执不晚于 S」（D7）；「在 T 跳过」「比 S 新又不在 T
+  回退」不动。
 - **不动** ADR-079 D3（`advance` 根什么都不做，水位是承诺）——本文正是让这条承诺在按需显示上真的算数；ADR-077 D5 / token 摘要（初始化回执不进投影，
   `frozen_file_digests` 记 `sha256(commit_token_json)`）——D2 是把它的思路推到按需 / 批次那一路，不是改它；ADR-086（显示按祖先查 records，生成只调
   `/model/generate`）；ADR-082（overlay 逐出）。
@@ -45,7 +49,10 @@
   在 6 s 后刷新（21:15:11.3）。上一轮（20:45）同一形状。
 - 同一个会话给 `ams8000_0001` 写了会话 701，内容只有 `DBMDAT`；watcher 批次 `db-20261024-211524-000008` 700→701：`candidates=1 … no_model=1`、
   `touched=0 regen=0 advance=953 lazy=0`、`units=0`。每次登录 / 退出都这样，这也是今天每次 SAVEWORK 都是「两个会话」的来历。
-- 目录库也收只有记账元素的会话：`/health.catalogue_reconcile` 报 `5052 189→190`、`6890 279→280`、`7000 263→274`，每一窗变动元素都只有
+- 会话只写给两个文件（第二次只读登录前后读 30 个文件的页头会话号，`.scratch/fixture-8023/incr2/sesno_{before,after}_login3.txt`）：`ams8000_0001` 701→702、
+  `amssys` 879→880；目录库（5052 190 / 6890 280 / 7000 274 / 7322 4491 …）、`ams7741/7742`、别的设计库 7997–7999 一个都没动——它们只被改写了文件头。
+  所以目录项 / 字典项按会话记的身份对登录完全稳定，只有 mtime 在漂。
+- 目录库也会收只有记账元素的会话（不是每次登录）：`/health.catalogue_reconcile` 报 `5052 189→190`、`6890 279→280`、`7000 263→274`，每一窗变动元素都只有
   `DBMDAT×1 DBMETA×1`。
 - 于是：21:14 两根（EQUI `24384/24776` 不读目录；BRAN `24384/23257` 读 341 行目录）都 `AlreadyAvailable`（14 / 16 ms）；21:15 只读登录一次；
   21:16 两根都 `Generated`（447 / 2158 ms，后者 1816 ms 在重解 341 行目录依赖），日志 `[模型目标核对] DESI 8000 已过期：会话 700 → 文件最新 701`。几何一个数都没变。
@@ -68,12 +75,13 @@ E3D 每次会话改写文件头，内容没变、摘要已变。对设计项它�
 目标会话、该会话的 **session page / index root 及二者的 sha256**（`TargetAnchorV1`）。`reopen_verified` 接受追加的会话、拒绝换文件 / 回拨 /
 锚变——正是「同一世代」该有的定义，和 mtime / 长度都没关系。dabacon 里一个已提交会话的页从不改写，所以锚一旦算出就是不变量。
 
-## 决定（草案）
+## 决定
 
 ### D1　回执半边只证「同一世代、没落后」，新旧听库级承诺
 
-`target_file_current(file, latest_sesno, identity_now)` 改成
-`identity_now == file.digest ∧ (!file.session_tracked() || file.session ≤ latest_sesno)`。设计项、目录项同一条。
+`target_file_current(file, latest_sesno, identity_now, rule)` 改成
+`identity_now == file.digest ∧ (!file.session_tracked() || 按 rule 对会话)`，`SessionRule::NotBehind` = `file.session ≤ latest_sesno`（有库级承诺可听时），
+`SessionRule::Exact` = `==`（D5 的退路）。设计项、目录项同一条。
 
 - 「落后」（`session < latest`）**不是过期**：中间的窗口有没有碰到这根，是水位说的——水位盖到 T 就是「T 以前每一窗被碰到的根都重算过了」，回执还在 S
   的根正是没被碰到的那些（被碰到的根 regen / transform / 单元级发布都把回执推到 T；重算失败的根在账本里悬着，`root_credential_covers` 一票否决）。
@@ -84,7 +92,8 @@ E3D 每次会话改写文件头，内容没变、摘要已变。对设计项它�
 ### D2　模型输入文件的身份 = 冻结锚
 
 `ModelFileTarget.digest` 改记 `hex(sha256(file_id ‖ dbnum ‖ db_type ‖ session ‖ session_page_sha256 ‖ index_root_sha256))`，由
-`FrozenSource::capture_at(path, session)` 算（新增一个导出，比如 `identity_digest()`；字段仍是私有的，调用方拼不出锚）。不记长度、不记 mtime。
+`FrozenSource::capture_at(path, session)` 算（`FrozenSource::identity_digest()`；字段仍是私有的，调用方拼不出锚；带缓存的入口是
+`frozen_source::model_file_identity(path, Option<session>)`，`None` = 文件最新会话，给会话位 0 的字典项用）。不记长度、不记 mtime。
 
 - 追加会话、改写文件头（E3D 每次会话干的事）都不改身份；换文件（file id 变）、同号会话内容不同（锚变：另一个工程的同号会话、或 #45 那种会话重编）才改。
 - `target_current` 现算的是 `capture_at(path, file.session)` 的锚，不再 stat mtime。代价是一次 `session_chain` 遍历 + 两页 sha256；锚是不变量，进程内按
@@ -104,16 +113,26 @@ E3D 每次会话改写文件头，内容没变、摘要已变。对设计项它�
 不在窗口落地时改写未触根的回执。`RootReceipt.source_sesno` / `model_target.design.session` 继续是「这份几何是按哪一版算的」（房间计算、
 `/model/records` 的 `source_sesno` 都读它）；「到哪一版仍有效」是水位。两件事两个字段，不合并。
 
-### D5　读穿 / 只写内存形态问同一枚水位
+### D5　读穿 / 只写内存形态问同一枚水位，听不到就退回等值
 
-`ensure_exact_generation_root_inner` 在读穿 / 只写内存形态下 `cache_current = memory_root_current ∧ 库级承诺`——水位行在 mem 存储里同样由任务收尾写（ADR-074 /
-ADR-083：存储模式只分 mem / rocksdb，水位写法一样），R2 当初不问它是为了不碰 durable pending 与初始化门，不是因为水位不在。水位行不存在 /
-为 0 的库（从没追平过）退回今天的等值判据，不让任何库比今天更越权。
+`ensure_exact_generation_root_inner` 在读穿 / 只写内存形态下先问 `generation_root_cache_current`（水位镜像 + 账本，不碰 durable pending 与初始化门）：
+盖到了 → 回执按 `NotBehind` 判；没盖到 / 水位行不在 / 读不到 → 回执按 `Exact` 判，即 2026-10-24 之前的判法。作用域显示（一批根）同一句：
+`generation_roots_cache_current` 批量问一次，盖到的根 `NotBehind`、其余 `Exact`。这样读穿形态不需要单独证「水位在不在」（草案的 Q2）：
+在就省，不在就和从前一样，没有一个库比从前更越权。摄入形态照旧 `① ∧ ②`，② 按 `NotBehind`。
 
 ### D6　房间点查同一口径
 
 `room_read_through::lookup` 里 `selected.source.sesno == before.design.session` 改成 `≥`，配合 D1 的 `target_current`；`RoomNotReady("model source has
 changed; regenerate model")` 只在身份变了 / 回拨时报。登录之后房间点查不再把每个根都当成「来源变了」。
+
+### D7　重放闸放行停在基线之前的回执（落地时被真机挡出来的同一根病）
+
+刚体前移 / 单元级发布的幂等闸 `rigid_motion::republish_gate(receipt, S, T)`（ADR-066 B6 / S4b P0 / ADR-080 D4）此前要求回执**等于**规划基线 S，
+回执停在 S 之前算「半截 / 更旧的状态」回退 regen。可是未触根的回执本来就停在它上一次真正重算的会话（D4），登录写的 DBMDAT 会话让每根都这样：
+修好 D1–D6 之后第一次真动 EQUI（夹具 8023 `db-20261024-220835-000004`，703→705）被 `projection receipt at sesno 702, but Δ was planned against baseline 703`
+挡回 regen——702 是它上次生成的会话，703 是一次只读登录。改成 `receipt ≤ S → Proceed`；`== T → Skip`（重放）；其余（比 S 新又不在 T：被别的路径推过头、
+旧计划线格式基线 0）照旧回退。理由与 D1 同一条：规划器只给 `settled`（S 端已发布且安定，`window_root_plan` 里「root is not a settled persisted root」那道门）的根算 `Δ`，
+这根在 S 上的几何就是回执里那份；记录级的闸（`republish_records`）本就是 `<=`（ADR-080 D3），回执级跟它同口径。
 
 ## 为什么不是别的做法
 
@@ -128,35 +147,39 @@ changed; regenerate model")` 只在身份变了 / 回拨时报。登录之后房
 
 ## 后果
 
-- 登录 / 任何窗口之后，未触根的按需显示回到 `AlreadyAvailable`（毫秒级）；被碰到的根照旧由窗口重算。这台夹具上是 447 / 2158 ms → 14 / 16 ms。
-- 便宜路（刚体 / 单元级）对有目录依赖的根有机会走成（今天还是预测，待 Q4 真机）。
+- 登录 / 任何窗口之后，未触根的按需显示回到 `AlreadyAvailable`（毫秒级）；被碰到的根照旧由窗口重算。这台夹具上是 447 / 2158 ms → 21 / 20 ms
+  （修后复跑：705 上生成、只读登录 705→706 `advance=953`、再显示两根都 `AlreadyAvailable`、回执仍 705）。
+- 便宜路对登录之后的根走得成了：复跑里 `equi_restore`（706→708，登录会话 707 + SAVEWORK 708）的 EQUI **`kind = transform`**、`geometry_diff {moved 1}`，
+  回执 705 ≤ 基线 706 过闸；同窗未触的 BRAN 仍 `AlreadyAvailable`（回执 705）。有目录依赖的根走便宜路（Q4）还没真机，但目录项的尺子已经不含 mtime。
 - 「按哪一版算的」（回执 `source_sesno`）与「到哪一版仍有效」（水位）分开读；`/model/generate` 回执的 `root_summaries[].source_sesno` 对未触根会小于文件最新，
   这是对的，不是 bug（可选：多一格 `current_through` 把水位也写出来，供 plant-ui 显示）。
 - 老回执（mtime 摘要）在升级后第一次显示时重算一次，之后不再。
 - 文件被回拨到更早的会话：回执「超前」→ 过期 → 重算（与今天一样）。文件被换成另一个工程的同号会话：锚不等 → 过期（今天靠 mtime 碰巧抓到，以后靠锚）。
 - 多付的钱：`capture_at` 一次会话链遍历 + 两页 sha256，缓存后 O(1)；省下的是每次登录后每根一次整根重算。
 
-## 实施约束（落地时要钉的）
+## 实施约束（落地时钉上的）
 
-1. `target_file_current` 真值表单测：同锚、落后（`session < latest`）= 新；同锚、等值 = 新；同锚、超前 = 过期；锚不同 = 过期；字典项（会话 0）只比锚
-   （现有 `dictionary_targets_are_judged_by_digest_alone` 改口）。
-2. `memory_root_current` × 库级承诺的组合测试（摄入形态）：回执 S、水位 T、账本安定 → `AlreadyAvailable`；回执 S、水位 S（watcher 还没追平）→ 重算；
-   账本悬着失败 → 重算。读穿形态同一张表 + 「水位行不在 → 退回等值」。
-3. `same_target_outside_the_design_window`：「只改文件头 / mtime 不算变」「换 session page 算变」「目录会话前移仍拦且点名」（现有 `the_windows_verbatim_prefix_is_not_a_target_difference`
-   那组里加）。
-4. 源码钉（本仓惯例 `include_str!`）：`model_target` 与 `target_current` 里不再出现 `model_file_identity_digest(`，只有模板项还用它；`target_file_current`
-   里没有 `== latest_sesno`。
-5. `FrozenSource` 的锚导出不暴露字段（只给摘要），`reopen_verified` 的语义不动；锚缓存按 `(file_id, session)` 键，换文件自然未命中。
-6. 真机验收（夹具 8023）：复跑 #65 步骤 1–3，步骤 3 两根 `AlreadyAvailable`；再跑 `equi_apply.mac`（只动 EQUI A），BRAN B 仍 `AlreadyAvailable`、A
-   `kind = transform`；房间点查登录后不报 `model source has changed`。
+1. `target_file_current` 真值表：`a_receipt_behind_the_file_is_stale_only_without_a_library_promise`（同锚、落后：`NotBehind` 新 / `Exact` 过期；超前、
+   锚不同：两条规则都过期）；字典项只比锚 `dictionary_targets_are_judged_by_identity_alone`。
+2. 源码钉 `library_file_identity_is_the_frozen_anchor_not_mtime`：`target_current_under` 里 `model_file_identity_digest(` 只剩 attlib 那一处，走
+   `frozen_source::model_file_identity(`；`target_file_current` 里没有 `latest_sesno == file.session`，等值只在 `SessionRule::Exact` 那一臂。
+3. 身份的真文件测试 `frozen_source::tests::model_file_identity_survives_header_rewrites_and_appends_but_not_replacement`（`#[ignore]`，要 AMS 8000，只改临时副本）：
+   追加 2048 字节 + 把 mtime 改到一小时后，缓存和现算都不变；不同会话不同；换成内容相同的另一个文件就变；请求超过最新的会话报错。落地当天跑过（1 passed）。
+4. 重放闸（D7）：`the_republish_gate_proceeds_from_or_before_the_planned_baseline`（停在基线之前 Proceed；比基线新又不在 T、基线 0 回退；在 T 跳过）；
+   `the_unit_gate_sorts_replays_and_baseline_mismatches_before_anything_is_produced` 多一根「停在 41、基线 42」的根过闸叫到生产方，drifted 改成 44。
+5. `FrozenSource` 的锚导出不暴露字段（只给摘要），`reopen_verified` 的语义不动；锚缓存按 `(file_id, session)` 键、上限 4096 满了清空，换文件自然未命中。
+6. 真机验收（夹具 8023，2026-10-24 22:03–22:23）：冷生成 EQUI / BRAN（回执 705）→ 只读登录 `db-20261024-221942-000001` 705→706 `advance=953` → 两根
+   `AlreadyAvailable`（21 / 20 ms）→ `equi_restore`（706→708）EQUI `kind = transform` `moved 1`、BRAN `AlreadyAvailable`、EQUI 回到 U 1400。没有一行
+   `[模型目标核对]`。房间点查（D6）只有单测，没在真机上单跑。
 7. plant-ui 不改（字段和形状都没动）；若加 `current_through`，另起一条。
 8. changelog 条里带上对 #64 条「顺带记下」的更正。
+9. `same_target_outside_the_design_window` 的「只改文件头不算变」没有单独的测试：它比的是 `digest` 字符串，身份稳不稳由第 3 条的真文件测试证。
 
-## 仍开着（待拍板）
+## 仍开着
 
-- **Q1** 身份用锚（D2，严、多一次会话链遍历）还是只用 `file_id + dbnum/类型 + 会话`（便宜，看不见原地改写）？推荐锚。
-- **Q2** 读穿 / 只写内存形态的水位可得性（D5）要在那个形态的夹具上证一次；证不出就只落 D1–D4，读穿照旧等值。
+- ~~**Q1** 锚还是 file_id~~ 取锚（用户「按推荐」）。
+- ~~**Q2** 读穿形态的水位可得性~~ 不再需要单独证：D5 改成「听得到就用、听不到就退回等值」，读穿形态最坏和从前一样。读穿夹具上没跑过。
 - **Q3** 目录库的记账会话让 `catalogue_reconcile` 每轮重报同三个库（5052 / 6890 / 7000，都是 `DBMDAT×1 DBMETA×1`）——`stamp_only` 有没有把库级落款推上去？
   不在本文范围，要不要另开票。
-- **Q4** 便宜路对有目录依赖的根「永远回退」是预测：选一个带 NOZZ 的 EQUI 做刚体平移，修前看回退理由是否点名 `catalogue … digest`。要写夹具工程，等用户点头再跑。
-- **Q5** D6（房间点查）随本文一起落，还是单开？推荐一起（同一个判据、同一个文件）。
+- **Q4** 有目录依赖的根走便宜路：选一个带 NOZZ 的 EQUI 做刚体平移，修后应 `kind = transform`。要写夹具工程，等用户点头再跑。
+- ~~**Q5** D6 随本文一起落~~ 一起落了（用户「按推荐」）。
