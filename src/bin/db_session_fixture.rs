@@ -12,7 +12,14 @@
 //! ```text
 //! db_session_fixture pack --recording <recording.json> --out <夹具目录> [--source <db文件>]
 //! db_session_fixture verify --fixture <夹具目录>
+//! db_session_fixture replay-init --fixture <夹具目录> | --source <终稿> --to <sesno> --out <工作文件>
+//! db_session_fixture replay-step --fixture <夹具目录> | --source <终稿> --work <工作文件> --to <sesno> [--half pages|header] [--rollback]
 //! ```
+//!
+//! `replay-*` 是 L2 回放夹具的文件半边（计划 2026-10-25 §3.1）：把工作文件就地推到下一个会话，文件身份不变。
+
+// 回放单测要核「就地追加不换文件」：Windows 上读卷序列号 + 文件索引，与 lib 的 `FrozenSource` 同一个特性门。
+#![cfg_attr(all(test, windows), feature(windows_by_handle))]
 
 #[path = "db_session_fixture/archive_util.rs"]
 mod archive_util;
@@ -20,6 +27,8 @@ mod archive_util;
 mod format;
 #[path = "db_session_fixture/pipeline.rs"]
 mod pipeline;
+#[path = "db_session_fixture/replay.rs"]
+mod replay;
 #[path = "db_session_fixture/session_cut.rs"]
 mod session_cut;
 
@@ -62,6 +71,36 @@ enum Command {
         #[arg(long)]
         source: PathBuf,
     },
+    /// L2 回放：从终稿切出会话 `to` 写成工作文件（已存在则就地覆写 = 重置）
+    ReplayInit {
+        /// 夹具目录（manifest.json + zip）
+        #[arg(long)]
+        fixture: Option<PathBuf>,
+        /// 或直接给终稿文件
+        #[arg(long)]
+        source: Option<PathBuf>,
+        #[arg(long)]
+        to: u32,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// L2 回放：把工作文件就地推到会话 `to`（追加页 + 改头，文件身份不变）
+    ReplayStep {
+        #[arg(long)]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        source: Option<PathBuf>,
+        #[arg(long)]
+        work: PathBuf,
+        #[arg(long)]
+        to: u32,
+        /// 半截：`pages`（只追加页、头不动）或 `header`（只改头、页不动）
+        #[arg(long)]
+        half: Option<String>,
+        /// 往回走（截回更早的会话）要显式说
+        #[arg(long, default_value_t = false)]
+        rollback: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,6 +123,27 @@ fn main() -> anyhow::Result<()> {
         Command::Inspect { source } => {
             let report = pipeline::inspect(&source)?;
             println!("{}", serde_json::to_string(&report)?);
+        }
+        Command::ReplayInit {
+            fixture,
+            source,
+            to,
+            out,
+        } => {
+            let final_bytes = replay::load_final(fixture.as_deref(), source.as_deref())?;
+            replay::replay_init(&final_bytes, to, &out)?.print();
+        }
+        Command::ReplayStep {
+            fixture,
+            source,
+            work,
+            to,
+            half,
+            rollback,
+        } => {
+            let final_bytes = replay::load_final(fixture.as_deref(), source.as_deref())?;
+            let half = half.as_deref().map(replay::Half::parse).transpose()?;
+            replay::replay_step(&final_bytes, &work, to, half, rollback)?.print();
         }
     }
     Ok(())

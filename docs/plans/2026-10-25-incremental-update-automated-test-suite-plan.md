@@ -2,6 +2,7 @@
 
 > 来源：用户 2026-10-25 15:5x「按推荐继续。并使用 plannatator 制定一个详细的增量更新的自动化测试案例集合。确保我们能够通过自动化测试案例来确保增量更新的正确性。」
 > 状态：**已批准**（2026-10-25 17:4x：plannotator `--gate` 回 `{"decision":"approved"}`、无批注（`.scratch/pencil/test-suite-plan-gate-r1.json`），对话里同时「按推荐继续」）。§6 八条全按推荐项定：D1 两端全量为唯一几何裁判、D2 录 4 条链 / zip 封顶 12 MB、D3 就地追加 + 改头、D4 先记基线相对 ±50 %、D5 L0/L1/L2 进 PR 门、D6 测试钩注入必败、D7 L3 一律隔离副本、D8 P0→P5。
+> **P1 开工时的修正（2026-10-25 晚）**：服务只认 `project_path` 下的整个 MDB 闭包（5 个项目、启动开 29 个库），没有按 dbnum 指定单个文件的覆盖，所以 L2 回放夹具在没有自包含语料之前**跑在本机**（影子工程根：别的项目目录走 junction、`ams000` 里除被回放的 DESI 外全走硬链接），不进 GitHub 托管 runner；§3 / §5.5 / D5 里「L2 进 CI」改为「L2 本机 nightly，进 CI 待自包含语料」。`--bookkeeping` 不要了：链里录了登录会话就是普通一步。
 > **P0 已落地**（同日）：`tests/fixtures/increment_cases.json`（55 条：有 22 / 部分 10 / 补 21 / 语料 2，有承载占 58 %）、`tests/increment_cases_registry.rs`（3 钉，CI 新步骤 `Pin the increment test-case registry`）、`scripts/increment_cases_report.py`、`windows.json` 多本周两窗。§4 的表从此以登记表为准（`python scripts/increment_cases_report.py`），本文的副本不再手改。下一段 P1。
 > 口径：本文是**案例集合 + 落地计划**，不是又一份测试总纲——分层与编号沿用 `docs/2026-08-06_model-increment-unit-test-plan.md`（U1–U13 选组、IU-/RI- 不变量），live 事实沿用 `docs/2026-08-12_live-test-ledger.md`，学科矩阵沿用 `docs/plans/2026-09-05-pipe-hvac-ctray-equi-increment-test-matrix.md`。那三份不重写，本文只接上它们**没有接住的那一截**：这两周真机上暴露的缺陷全部发生在「自动化覆盖不到的层」。
 > 代码事实对到 `refactor` `b71617ee3`（2026-10-25）。行号 / 测试名以源码为准。
@@ -56,7 +57,7 @@
 | **L0** 单测 | 无 / `mem://` | CI + 本机 | 每次 PR 必绿 |
 | **L1** 离线文件夹具 | 仓内 zip / `tests/fixtures/e3d-templates` | CI | 每次 PR 必绿 |
 | **L1′** 真文件只读门 | `D:\AVEVA\Projects\E3D3.1` 只读 | 本机 nightly | 本机红即阻塞合入 `refactor`（vendor 门缺语料默认红的纪律沿用） |
-| **L2 回放夹具（新）** | 仓内会话链夹具 + 本仓二进制 + `mem://` 或临时 rocksdb；**不要 E3D、不要外部 SurrealDB** | CI（Windows runner）+ 本机 | 每次 PR 必绿 |
+| **L2 回放夹具（新）** | 仓内会话链夹具 + 本仓二进制 + `store_mode=mem`；**不要 E3D、不要外部 SurrealDB**；但要本机的真项目目录做影子根（见头部修正） | 本机 nightly（进 CI 待自包含语料） | 本机红即开票；进 PR 门待语料 |
 | **L3 真 E3D** | E3D 3.1 TTY、隔离工程副本、`l3_suite` | 本机 nightly / 发版前 | 红即开票；不阻塞 PR |
 | **L4 能力门控** | Paragon 改目录、多项目同进程、E3D UI 点击 | 本机专项 | 有能力再跑，缺席「如实未验」 |
 
@@ -68,7 +69,8 @@
 2. 「SAVEWORK」= `db_session_fixture replay-step --to <sesno>`：对**同一个文件就地**写入 S→S+1 的追加页并改写头（不换文件，`StableFileId` 不变——ADR-089 的身份锚才不会误报换文件）；
 3. 真监听器 / 调度器 / worker / 水位 / 任务表照常跑，断言走 O2 / O3（HTTP 面 + SurrealDB 直查）；
 4. 需要「保存中途被看见」的用例（补排链）：`replay-step --half` 先只追加页不改头或先改头不追加（两种半截各一例），下一步补齐——这是 L3 永远难以稳定触发、L2 却能确定性触发的形状；
-5. 需要「只登录不改」：`replay-step --bookkeeping` 追加一个只含 `DBMDAT` 的会话（录制时从真实登录会话切出来，#65 的 701 / 706 就是这种）。
+5. 需要「只登录不改」：链里录一个只含 `DBMDAT` 的登录会话（#65 的 701 / 706 就是这种），回放到它就是普通一步；回退用例（B06 / H04）用 `replay-step --rollback` 截回更早的会话。
+6. 服务要整个 MDB 闭包，所以工作目录是一个**影子工程根**：别的项目目录（ZDJ / SCB / ACP / APS）走 junction，`AvevaMarineSample\ams000` 里除被回放的 DESI（真文件，由 `replay-init` 写出）外全走硬链接——服务只读，硬链接安全；E3D 不在这条链上。
 
 代价：录制。每条链一次性在真 E3D 上录（`Record-Db8000SessionChain.ps1` 的纪律：宏先审、每腿 sesno 恰好 +1、refno 从日志回读），打成夹具入库。zip 只装终稿（issue-019 的 3 会话 4.5 MB；8000 的 34 MB 文件压后 ~5 MB，7997 的 72 MB 压后估 ~10 MB，`max_bytes` 要放宽，见 D2）。
 
@@ -194,7 +196,7 @@
 
 ### 5.2 L2 回放夹具（新载体）
 
-- `db_session_fixture` 多两个子命令：`replay-init --fixture <dir> --to <sesno> --out <工作目录>`（从终稿现切出 S 的完整文件）、`replay-step --work <文件> --fixture <dir> --to <sesno> [--half header|pages] [--bookkeeping]`（就地追加 + 改头；`--half` 两种半截；`--bookkeeping` 追加录好的只记账会话）。切割机制复用 `session_cut.rs`，新加的只是「写回同一个文件」。
+- `db_session_fixture` 多两个子命令（P1 已落地，`src/bin/db_session_fixture/replay.rs`）：`replay-init --fixture <dir> | --source <终稿> --to <sesno> --out <工作文件>`（从终稿现切出 S；已存在则就地覆写 = 重置）、`replay-step --work <文件> --fixture <dir> | --source <终稿> --to <sesno> [--half pages|header] [--rollback]`（就地追加 + 改头，前进步要求工作文件是 cut(to) 的前缀，否则拒；`--half` 两种半截；往回走要显式 `--rollback`）。切割机制复用 `session_cut.rs`，新加的只是「写回同一个文件」。
 - `tests/increment_replay/`（`#[test]`，`required-features = ["http_api"]`）：公共 harness 起隔离服务（临时目录里的 `DbOption.toml` 由基础配置派生：`store_mode=mem`、`watch_dbnums=[夹具库]`、随机端口、`AIOS_SKIP_STARTUP_ROOM_BUILD=1`），等 `/health status=ok`，然后按用例走 `replay-step` → 轮询 `/tasks` 终态 → 断言。每条用例一进程，串行（`--test-threads=1`），单条 ≤ 90 s。
 - 夹具清单（录制，D2 决定装多少）：
   1. **`ams8000-equi-move-chain`**：基线 → 登录（`DBMDAT`）→ EQUI `=24384/24776` `BY U 500` → 登录 → `BY D 500`（覆盖 C03 / C04 / D01 / D04 / F02 / F04 / G02 / I04 / I05）；
@@ -225,7 +227,7 @@
 
 ### 5.5 CI 接线
 
-`windows-tests.yml` 的 `offline-increment-regression` job 加两步：`cargo test --test increment_replay --features http_api -- --test-threads=1`、登记表钉。L3 / L1′ 不进 GitHub 托管 runner（要 E3D / 真文件）：加一个 `nightly-local.ps1`（`Run-L3Suite.ps1 --scenarios all` + vendor 真库门 + `windows.json` 回放 + 预算比较），由本机计划任务跑，结果追加到 `docs/2026-08-12_live-test-ledger.md` 的自动段。
+`windows-tests.yml` 的 `offline-increment-regression` job 加登记表钉（P0 已加）。L2 / L1′ / L3 都要本机的真项目目录（L3 还要 E3D），不进 GitHub 托管 runner：加一个 `nightly-local.ps1`（`cargo test --test increment_replay -- --test-threads=1` + `Run-L3Suite.ps1 --scenarios all` + vendor 真库门 + `windows.json` 回放 + 预算比较），由本机计划任务跑，结果追加到 `docs/2026-08-12_live-test-ledger.md` 的自动段。L2 进 CI 的前提是一份自包含的 MDB 语料（至少 `amssys` + 被回放的 DESI + 它真读的字典 / 目录，且服务能容忍 MDB 里其余库缺席），另起一条再定。
 
 ## 6. 决策点（请在 plannotator 里批注；每条第一项是推荐）
 
@@ -233,7 +235,7 @@
 - **D2 夹具体量**：① **先录 §5.2 的 4 条链，zip 封顶 12 MB / 条，`max_bytes` 从 6 MB 放到 16 MB**；② 只录 8000 的两条（7997 文件 72 MB 太大）；③ 不入库，夹具放发布资产 / LFS。推荐 ①：7997 是唯一能复现大库规划器费用与 NOZZ 形状的语料，压后 ~10 MB 可承受；LFS 会让 CI checkout 多一道 PAT 以外的坑。
 - **D3 L2 的「SAVEWORK」实现**：① **就地追加 + 改头（同一文件，`StableFileId` 不变）**；② 用会话 N+1 的切片原子替换文件。推荐 ①：② 会让 ADR-089 的锚把每一步都判成「换了文件」，测不到真实形状；① 还顺手给了 `--half` 这个 L3 做不到的确定性触发。
 - **D4 预算怎么判**：① **先记基线、相对 ±50 % 判，两轮 nightly 后再钉绝对值**；② 直接按 §4 I 组的绝对上限判。推荐 ①：#68 / #69 还没修，绝对值今天就红。
-- **D5 门禁策略**：① **L0 / L1 / L2 进 PR 门；L1′ / L3 本机 nightly，红即开票不阻塞 PR**；② L3 也阻塞合入。推荐 ①：L3 依赖 E3D 许可与本机状态，阻塞 PR 会让它变成「大家都 skip 的那一步」。
+- **D5 门禁策略**：① **L0 / L1 进 PR 门；L1′ / L2 / L3 本机 nightly，红即开票不阻塞 PR**（P1 开工时修正：L2 也要本机真项目目录，进 CI 待自包含语料）；② L3 也阻塞合入。推荐 ①：L3 依赖 E3D 许可与本机状态，阻塞 PR 会让它变成「大家都 skip 的那一步」。
 - **D6 必败注入**：① **测试钩 `AIOS_TEST_FAIL_ROOTS=<refno,…>`（只在 `cfg(any(test, feature = "test-hooks"))` 下生效），让一个根确定性生成失败**；② 用真实会失败的语料。推荐 ①：H02 / H05 / F05 要的是确定性，真实失败根会被修掉。
 - **D7 L3 的工程**：① **一律跑在 `--check-driver` 的隔离副本上（先 `fsutil hardlink` 核一遍）**；② 继续在原件上做 apply / restore 对。推荐 ①：原件会话链已经被本周实验写了十几个会话。
 - **D8 分段顺序**：① **P0 登记表 → P1 L2 harness + 第 1 条链 → P2 其余链 + H/F/G 用例 → P3 L3 场景收编 + 预算 → P4 CI/nightly 接线 → P5 L4 语料**；② 先 L3 后 L2。推荐 ①：L2 是唯一能进 CI 的运行期门，先有它，L3 才有「只验 L2 验不了的」这个清晰分工。
