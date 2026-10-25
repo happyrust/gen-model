@@ -1,0 +1,16 @@
+-- L2 回放链 ams8000-equi-room-cross：EQUI /1-LNR-Q005-PJ (=24384/24776) 整根下 2000 mm，从 R124 回到 R224。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后拷一份库文件。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_room_restore.log" OVER
+$P REPLAY-ROOM-RESTORE-ALIVE
+=24384/24776
+Q NAME
+Q REF
+Q POS
+BY D 2000mm
+Q POS
+SAVEWORK 'replay chain ams8000-equi-room-cross: EQUI =24384/24776 down 2000mm (R124 -> R224, restore)'
+$P REPLAY-ROOM-RESTORE-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots-room\ams8000_0001.after-restore-save"'
+$P REPLAY-ROOM-RESTORE-DONE
+ALPHA LOG END

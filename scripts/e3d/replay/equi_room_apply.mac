@@ -1,0 +1,17 @@
+-- L2 回放链 ams8000-equi-room-cross：EQUI /1-LNR-Q005-PJ (=24384/24776, dbnum 8000) 整根上 2000 mm——跨过甲板：
+-- 从房间 R224（/1RX-RM02-R224，z 1400..3080）进到上一层的 R124（z 3080..6400），INC-G02 「跨房位移」那一半。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后拷一份库文件（真快照 → 字节补丁，见 equi_apply.mac）。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_room_apply.log" OVER
+$P REPLAY-ROOM-APPLY-ALIVE
+=24384/24776
+Q NAME
+Q REF
+Q POS
+BY U 2000mm
+Q POS
+SAVEWORK 'replay chain ams8000-equi-room-cross: EQUI =24384/24776 up 2000mm (R224 -> R124)'
+$P REPLAY-ROOM-APPLY-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots-room\ams8000_0001.after-apply-save"'
+$P REPLAY-ROOM-APPLY-DONE
+ALPHA LOG END

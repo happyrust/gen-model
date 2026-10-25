@@ -1,0 +1,182 @@
+{
+  "format": "aios-session-fixture-v1",
+  "dbnum": 8000,
+  "baseline_sesno": 731,
+  "archive": {
+    "path": "db8000-sesno731-735.zip",
+    "bytes": 4613902,
+    "sha256": "38cd94831b87e24489d31b84a6c35f8adcd198127e3c5ffd3a5c7f48f8519d6f",
+    "compression": "zip-deflate-level-9",
+    "max_bytes": 6291456
+  },
+  "final": {
+    "path": "final/ams8000_0001",
+    "sesno": 735,
+    "bytes": 37265408,
+    "sha256": "8b979e21f34a1d8fbea3611d33cfe8c0af0d3937503b03b69d4bab92b4a4e34e"
+  },
+  "session_snapshots": [
+    {
+      "sesno": 731,
+      "bytes": 37126144,
+      "sha256": "ecd370de6e860d35c8e16a221709a8b31dce8023df580ffad33a8ef29c3f2429",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "57",
+          "real_hex": "55"
+        },
+        {
+          "page": 18125,
+          "offset": 23,
+          "final_hex": "d0",
+          "real_hex": "cf"
+        },
+        {
+          "page": 18126,
+          "offset": 791,
+          "final_hex": "d0",
+          "real_hex": "ba"
+        }
+      ]
+    },
+    {
+      "sesno": 732,
+      "bytes": 37148672,
+      "sha256": "be8e7b1b7fd18ecddea05e34f41930616fe51098fa7046370649f44cd8ad6662",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 379,
+          "final_hex": "02",
+          "real_hex": "00"
+        },
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "57",
+          "real_hex": "56"
+        },
+        {
+          "page": 18138,
+          "offset": 23,
+          "final_hex": "dd",
+          "real_hex": "da"
+        },
+        {
+          "page": 18138,
+          "offset": 39,
+          "final_hex": "db",
+          "real_hex": "d9"
+        }
+      ]
+    },
+    {
+      "sesno": 733,
+      "bytes": 37195776,
+      "sha256": "0faa79710954d03f5aae8004f17b657ae077008c2c72778043afefbc61aa7346",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "57",
+          "real_hex": "56"
+        },
+        {
+          "page": 18159,
+          "offset": 23,
+          "final_hex": "f2",
+          "real_hex": "f1"
+        },
+        {
+          "page": 18160,
+          "offset": 791,
+          "final_hex": "f2",
+          "real_hex": "dc"
+        }
+      ]
+    },
+    {
+      "sesno": 734,
+      "bytes": 37218304,
+      "sha256": "912f9dc00a55485a88e1e9e0ce1fa6fd4045807a2d2a6907b87b63ae0b5723b4",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 379,
+          "final_hex": "02",
+          "real_hex": "00"
+        },
+        {
+          "page": 18172,
+          "offset": 23,
+          "final_hex": "ff",
+          "real_hex": "fc"
+        },
+        {
+          "page": 18172,
+          "offset": 39,
+          "final_hex": "fd",
+          "real_hex": "fb"
+        }
+      ]
+    },
+    {
+      "sesno": 735,
+      "bytes": 37265408,
+      "sha256": "8b979e21f34a1d8fbea3611d33cfe8c0af0d3937503b03b69d4bab92b4a4e34e"
+    }
+  ],
+  "cases": [
+    {
+      "id": "equi-room-cross",
+      "apply_sesno": 732,
+      "restore_sesno": 734,
+      "refs": {
+        "box": "24384/24777",
+        "equi": "24384/24776",
+        "room_before_panel": "24381/948"
+      },
+      "elements": [
+        {
+          "refno": "24384/24776",
+          "noun": "EQUI",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        },
+        {
+          "refno": "24384/24777",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        }
+      ],
+      "expected": {
+        "net_window": [
+          {
+            "refno": "24384/24776",
+            "net": "modified"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quit-tail",
+      "apply_sesno": 735,
+      "refs": {
+        "equi": "24384/24776"
+      },
+      "elements": [
+        {
+          "refno": "24384/24776",
+          "noun": "EQUI",
+          "before_apply": true,
+          "after_apply": true
+        }
+      ]
+    }
+  ]
+}
