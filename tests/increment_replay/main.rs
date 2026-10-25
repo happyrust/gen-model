@@ -13,7 +13,7 @@
 //!   `ams000` 硬链接，被回放的 DESI 留空）；
 //! - 仓根 `DbOption.toml`（本机开发配置，模板 / 资产路径从它来）。
 //!
-//! 跑法：`cargo test --test increment_replay -- --nocapture --test-threads=1`。
+//! 跑法：`cargo test --test increment_replay -- --nocapture --test-threads=1`；只跑一条加 `AIOS_REPLAY_CASE=<name>`。
 //! 单条用例的超时：初始化 10 min、每步 180 s。
 
 use std::collections::BTreeMap;
@@ -69,12 +69,36 @@ fn default_anchor_message() -> String {
     "anchor 已改变".to_string()
 }
 
+/// 冷重启对拍（INC-F02）：这一步的断言过了之后，先记下这些根的 `/model/records`（此时还是进程投影在供数），杀服务重拉，
+/// 三水位必须还在 `to`（不重新初始化），库上行供出来的 `/model/records` 与重启前逐字段相等（数字容差 `tolerance`）；
+/// 再把根叫回投影（首次 `/model/generate` 走「补常驻根」重算），重算后的行与重启前在 `reprime_tolerance` 内相等（ADR-066
+/// 「刚体前移 == 重算」那把尺）。
+#[derive(Debug, Deserialize)]
+struct Restart {
+    records_equal: Vec<String>,
+    #[serde(default = "default_restart_tolerance")]
+    tolerance: f64,
+    #[serde(default = "default_reprime_tolerance")]
+    reprime_tolerance: f64,
+}
+
+fn default_restart_tolerance() -> f64 {
+    1e-3
+}
+
+fn default_reprime_tolerance() -> f64 {
+    0.5
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct Step {
     to: u32,
     /// 见 [`Race`]。
     #[serde(default)]
     race: Option<Race>,
+    /// 见 [`Restart`]。
+    #[serde(default)]
+    restart: Option<Restart>,
     #[serde(default)]
     half: Option<String>,
     #[serde(default)]
@@ -117,6 +141,70 @@ struct Step {
     /// 这一步的任务终态（缺省 succeeded）。
     #[serde(default)]
     task_state: Option<String>,
+}
+
+/// 一条模型记录的身份：refno + 隐式管身的 `tube{ordinal, from, to}`（spec §4.5 的四元组）；没有就退到整条的文本。
+fn record_identity(item: &Value) -> String {
+    let refno = item.get("refno").map(Value::to_string).unwrap_or_default();
+    let tube = item
+        .get("tube")
+        .filter(|tube| !tube.is_null())
+        .map(Value::to_string)
+        .unwrap_or_default();
+    if refno.is_empty() {
+        item.to_string()
+    } else {
+        format!("{refno}|{tube}")
+    }
+}
+
+/// 递归比两份 JSON：数字差超过 `tolerance` 才算不同，其余逐字比。回第一处不同的路径与两边的值。
+fn json_differs(a: &Value, b: &Value, tolerance: f64, path: &str) -> Option<String> {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            let (x, y) = (
+                x.as_f64().unwrap_or(f64::NAN),
+                y.as_f64().unwrap_or(f64::NAN),
+            );
+            ((x - y).abs() > tolerance || x.is_nan() != y.is_nan())
+                .then(|| format!("{path}: {x} vs {y}"))
+        }
+        (Value::Array(xs), Value::Array(ys)) => {
+            if xs.len() != ys.len() {
+                return Some(format!("{path}: 长度 {} vs {}", xs.len(), ys.len()));
+            }
+            xs.iter()
+                .zip(ys)
+                .enumerate()
+                .find_map(|(i, (x, y))| json_differs(x, y, tolerance, &format!("{path}[{i}]")))
+        }
+        (Value::Object(xs), Value::Object(ys)) => {
+            if xs.len() != ys.len() || xs.keys().any(|k| !ys.contains_key(k)) {
+                return Some(format!(
+                    "{path}: 键集 {:?} vs {:?}",
+                    xs.keys().collect::<Vec<_>>(),
+                    ys.keys().collect::<Vec<_>>()
+                ));
+            }
+            xs.iter()
+                .find_map(|(k, x)| json_differs(x, &ys[k], tolerance, &format!("{path}.{k}")))
+        }
+        _ => (a != b).then(|| format!("{path}: {a} vs {b}")),
+    }
+}
+
+/// 比两份按身份排好序的记录。
+fn records_differ(before: &[Value], after: &[Value], tolerance: f64) -> Option<String> {
+    if before.len() != after.len() {
+        return Some(format!("行数 {} vs {}", before.len(), after.len()));
+    }
+    before.iter().zip(after).find_map(|(x, y)| {
+        let (ix, iy) = (record_identity(x), record_identity(y));
+        if ix != iy {
+            return Some(format!("身份序列不同：{ix} vs {iy}"));
+        }
+        json_differs(x, y, tolerance, &format!("[{ix}]"))
+    })
 }
 
 /// 截到最多 `max` 个字符（报错里带一段任务 JSON，不要整个刷屏）。
@@ -321,6 +409,44 @@ struct Service {
     stdout_path: PathBuf,
     client: reqwest::Client,
     runtime: tokio::runtime::Runtime,
+    /// 重启用：同一份派生配置、同一个运行目录、同一套额外环境变量。
+    server_exe: PathBuf,
+    run_dir: PathBuf,
+    extra_env: BTreeMap<String, String>,
+    restarts: u32,
+}
+
+/// 起服务进程（不含 surreal）：stdout / stderr 落到运行目录里的 `<tag>.log` / `<tag>.err`。
+fn spawn_server(
+    server_exe: &Path,
+    run_dir: &Path,
+    extra_env: &BTreeMap<String, String>,
+    tag: &str,
+) -> (Child, PathBuf) {
+    let stdout_path = run_dir.join(format!("{tag}.log"));
+    let stderr_path = run_dir.join(format!("{tag}.err"));
+    let config = run_dir.join("DbOption.toml");
+    let assets = run_dir.join("assets");
+    fs::create_dir_all(&assets).expect("assets dir");
+    let child = Command::new(server_exe)
+        .current_dir(repo())
+        .env("DB_OPTION_FILE", config.with_extension(""))
+        .env("AIOS_STORE_MODE", "rocksdb")
+        .env("AIOS_DATA_FACE", "ingest")
+        .env("AIOS_STARTUP_AUTORUN", "1")
+        .env("PLANT_ASSET_ROOT", &assets)
+        .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1")
+        .env("RUST_MIN_STACK", "134217728")
+        .envs(extra_env)
+        .stdout(Stdio::from(
+            fs::File::create(&stdout_path).expect("stdout log"),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(&stderr_path).expect("stderr log"),
+        ))
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", server_exe.display()));
+    (child, stdout_path)
 }
 
 impl Service {
@@ -354,29 +480,8 @@ impl Service {
             std::thread::sleep(Duration::from_millis(500));
         }
 
-        let stdout_path = run_dir.join("stdout.log");
-        let stderr_path = run_dir.join("stderr.log");
+        let (child, stdout_path) = spawn_server(&env.server_exe, run_dir, extra_env, "stdout");
         let config = run_dir.join("DbOption.toml");
-        let assets = run_dir.join("assets");
-        fs::create_dir_all(&assets).expect("assets dir");
-        let child = Command::new(&env.server_exe)
-            .current_dir(repo())
-            .env("DB_OPTION_FILE", config.with_extension(""))
-            .env("AIOS_STORE_MODE", "rocksdb")
-            .env("AIOS_DATA_FACE", "ingest")
-            .env("AIOS_STARTUP_AUTORUN", "1")
-            .env("PLANT_ASSET_ROOT", &assets)
-            .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1")
-            .env("RUST_MIN_STACK", "134217728")
-            .envs(extra_env)
-            .stdout(Stdio::from(
-                fs::File::create(&stdout_path).expect("stdout log"),
-            ))
-            .stderr(Stdio::from(
-                fs::File::create(&stderr_path).expect("stderr log"),
-            ))
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {}: {e}", env.server_exe.display()));
         let config_text = fs::read_to_string(&config).expect("derived config");
         let config_value = |key: &str| -> String {
             config_text
@@ -396,7 +501,78 @@ impl Service {
             stdout_path,
             client: reqwest::Client::new(),
             runtime: tokio::runtime::Runtime::new().expect("tokio runtime"),
+            server_exe: env.server_exe.clone(),
+            run_dir: run_dir.to_path_buf(),
+            extra_env: extra_env.clone(),
+            restarts: 0,
         }
+    }
+
+    /// 冷重启：杀掉服务进程（surreal 不动，库是持久的），同一份配置重新拉起，等 `/health`。进程内投影 / 回执 / 常驻根全没了，
+    /// 水位和行都在库里——INC-F02 要的就是这个形状。
+    fn restart(&mut self, what: &str) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.restarts += 1;
+        let tag = format!("stdout-restart{}", self.restarts);
+        let (child, stdout_path) =
+            spawn_server(&self.server_exe, &self.run_dir, &self.extra_env, &tag);
+        self.child = child;
+        self.stdout_path = stdout_path;
+        let started = Instant::now();
+        while self.get("health").is_none() {
+            self.assert_alive(what);
+            assert!(
+                started.elapsed() < Duration::from_secs(180),
+                "[{what}] 重启后 180 s 内 /health 没有起来；日志 {}",
+                self.stdout_path.display()
+            );
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+        eprintln!(
+            "  [{what}] 服务已冷重启（{:.1}s 到 /health），日志 {}",
+            started.elapsed().as_secs_f64(),
+            self.stdout_path.display()
+        );
+    }
+
+    /// `/model/records` 的全部行（一页取完，超过 5000 行就报），按身份排好序；根已不在索引里回 `None`。
+    fn records_items(&self, root: &str) -> Option<(String, Vec<Value>)> {
+        let url = format!("{}/model/records", self.base);
+        self.runtime.block_on(async {
+            let response = self
+                .client
+                .post(&url)
+                .json(&serde_json::json!({ "generation_root": root, "limit": 5000 }))
+                .timeout(Duration::from_secs(120))
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("POST {url}: {e}"));
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if status.as_u16() == 400 && text.contains("索引里没有它") {
+                return None;
+            }
+            assert!(status.is_success(), "POST {url} → {status}: {text}");
+            let payload: Value = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("POST {url} 回的不是 JSON: {e}\n{text}"));
+            assert!(
+                payload.get("truncated").and_then(Value::as_bool) != Some(true),
+                "根 {root} /model/records 超过一页（5000 行），harness 不翻页"
+            );
+            let source = payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut items = payload
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            items.sort_by_key(record_identity);
+            Some((source, items))
+        })
     }
 
     fn get(&self, route: &str) -> Option<Value> {
@@ -413,23 +589,44 @@ impl Service {
         })
     }
 
+    /// POST 并要求 2xx。刚（重）启的服务在常驻房间模型装好之前对 `/model/generate` 回 409
+    /// `RESIDENT_MODEL_UPDATING`（设计内：生成要等房间参照），这里最多等 120 s 再试，其他非 2xx 照报。
     fn post(&self, route: &str, body: Value) -> Value {
         let url = format!("{}/{route}", self.base);
-        self.runtime.block_on(async {
-            let response = self
-                .client
-                .post(&url)
-                .json(&body)
-                .timeout(Duration::from_secs(120))
-                .send()
-                .await
-                .unwrap_or_else(|e| panic!("POST {url}: {e}"));
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+        let started = Instant::now();
+        let mut waited_409 = false;
+        loop {
+            let (status, text) = self.runtime.block_on(async {
+                let response = self
+                    .client
+                    .post(&url)
+                    .json(&body)
+                    .timeout(Duration::from_secs(120))
+                    .send()
+                    .await
+                    .unwrap_or_else(|e| panic!("POST {url}: {e}"));
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                (status, text)
+            });
+            if status.as_u16() == 409
+                && text.contains("RESIDENT_MODEL_UPDATING")
+                && started.elapsed() < Duration::from_secs(120)
+            {
+                waited_409 = true;
+                std::thread::sleep(Duration::from_millis(1000));
+                continue;
+            }
             assert!(status.is_success(), "POST {url} → {status}: {text}");
-            serde_json::from_str(&text)
-                .unwrap_or_else(|e| panic!("POST {url} 回的不是 JSON: {e}\n{text}"))
-        })
+            if waited_409 {
+                eprintln!(
+                    "  POST {route} 等常驻房间模型装好用了 {:.1}s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            return serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("POST {url} 回的不是 JSON: {e}\n{text}"));
+        }
     }
 
     fn dbnum_row(&self, dbnum: u32) -> Option<Value> {
@@ -717,9 +914,94 @@ fn run_case(env: &Env, case: &Case) {
         let what = format!("step → {}", step.to);
         service.wait_in_sync(case.dbnum, step.to, Duration::from_secs(180), &what);
         assert_step(&service, case, step, &what);
+        if let Some(restart) = &step.restart {
+            restart_parity(
+                &mut service,
+                case,
+                step.to,
+                restart,
+                &format!("{what} 重启"),
+            );
+        }
     }
     // 服务随 Drop 按句柄杀掉；工作文件留在终态，下一条用例的 replay-init 会就地重置。
     drop(service);
+}
+
+/// INC-F02：重启前记 `/model/records`，冷重启，水位不动、库上行与重启前逐字段相等；再把根叫回投影，重算后仍相等。
+fn restart_parity(service: &mut Service, case: &Case, to: u32, restart: &Restart, what: &str) {
+    let mut before = BTreeMap::new();
+    for root in &restart.records_equal {
+        let (source, items) = service
+            .records_items(root)
+            .unwrap_or_else(|| panic!("[{what}] 根 {root} 重启前已不在索引里"));
+        eprintln!(
+            "  [{what}] 重启前根 {root}：{} 行（source={source}）",
+            items.len()
+        );
+        before.insert(root.clone(), items);
+    }
+
+    service.restart(what);
+    // 水位在库里：重启后立刻还是 to，不许重新初始化。
+    service.wait_in_sync(case.dbnum, to, Duration::from_secs(120), what);
+    let mut problems = Vec::new();
+    let mut log = Vec::new();
+    for root in &restart.records_equal {
+        let Some((source, after)) = service.records_items(root) else {
+            problems.push(format!("根 {root} 重启后不在索引里"));
+            continue;
+        };
+        if let Some(diff) = records_differ(&before[root], &after, restart.tolerance) {
+            problems.push(format!(
+                "根 {root} 重启后库上行（source={source}）与重启前不同：{diff}"
+            ));
+        } else {
+            log.push(format!(
+                "{root} 冷读 {} 行相等（source={source}）",
+                after.len()
+            ));
+        }
+        // 叫回投影：首次 Generated（重算），第二次 AlreadyAvailable；重算后的行与重启前在容差内相等。
+        let first = service.post("model/generate", serde_json::json!({ "refno": root }));
+        let first_status = first.get("status").and_then(Value::as_str).unwrap_or("");
+        let second = service.post("model/generate", serde_json::json!({ "refno": root }));
+        let second_status = second.get("status").and_then(Value::as_str).unwrap_or("");
+        if !matches!(first_status, "Generated" | "AlreadyAvailable")
+            || second_status != "AlreadyAvailable"
+        {
+            problems.push(format!(
+                "根 {root} 重启后 /model/generate → {first_status} / {second_status}，期望 Generated|AlreadyAvailable / AlreadyAvailable"
+            ));
+        }
+        match service.records_items(root) {
+            Some((source, reprimed)) => {
+                if let Some(diff) =
+                    records_differ(&before[root], &reprimed, restart.reprime_tolerance)
+                {
+                    problems.push(format!(
+                        "根 {root} 重启 + 补常驻重算后（source={source}）与重启前不同：{diff}"
+                    ));
+                } else {
+                    log.push(format!(
+                        "{root} 补常驻（{first_status} / {second_status}）后 {} 行相等（source={source}）",
+                        reprimed.len()
+                    ));
+                }
+            }
+            None => problems.push(format!("根 {root} 补常驻后不在索引里")),
+        }
+    }
+    for line in &log {
+        eprintln!("  [{what}] {line}");
+    }
+    assert!(
+        problems.is_empty(),
+        "[{what}] 重启对拍不过：\n{}\n日志 {}",
+        problems.join("\n"),
+        service.stdout_path.display()
+    );
+    eprintln!("  [{what}] 重启对拍全过");
 }
 
 /// 一步（或初始化态）的断言：任务终态与单元 kind（O3）、库上行有无（O2：HTTP + 直查 surreal）、未触根 `AlreadyAvailable`。
@@ -1016,8 +1298,13 @@ fn replay_cases_land_in_sync_and_match_their_expectations() {
             return;
         }
     };
-    let cases = load_cases();
+    let mut cases = load_cases();
     assert!(!cases.is_empty(), "tests/increment_replay/cases 下没有用例");
+    // 开发时只跑一条：`AIOS_REPLAY_CASE=<name>`（用例文件名去掉 .json）。
+    if let Ok(only) = std::env::var("AIOS_REPLAY_CASE") {
+        cases.retain(|case| case.name == only);
+        assert!(!cases.is_empty(), "AIOS_REPLAY_CASE={only} 不对应任何用例");
+    }
     for case in &cases {
         run_case(&env, case);
     }
