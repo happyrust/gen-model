@@ -1,12 +1,14 @@
 ## 2026-10-26
 
-### 窗口规划器的 `plan=` 拆段计时：8000 的一根小窗里六成在两端 `enumerate_generation_roots`、两成在两端 `build_set`（GitHub #68 第 3 条路，只记账）
+### 窗口规划器的根枚举不再每窗两端全走：S 端复用上一窗的 T 端根集，T 端只重枚举账本触到的顶层子树（GitHub #68）
 
-- **为什么**：#68 量到 `IncrementPipeline 阶段耗时` 里 `plan=` 随 `roots_T` 线性（8000 / 953 根 0.73 s，7997 / 6772 根 13.8 s），但 `plan` 只有一个总数，分不清是枚举、成员表、回执读还是分桶在花钱，票里写的是「先量再定」。
-- **改**（`window_root_plan.rs`）：`WindowRootSources::collect` 内十三段（账本 / 闭包 / XGEOM / 两端 `scan_index` / 两端枚举 / 嵌套根 / 变化候选 / 刚体候选 / 三条级联 / 覆盖账 / 窗口缓存）与外层六段（两端 `build_set` / 成员名单 / `settled` / `impact` / 分桶 / 欠账 / 刚体分桶 / 变化清单 / 收尾）各记墙钟，拼成一行 `[窗口规划] dbnum=…: window S→T 规划耗时 total=… | sets=… design=… collect=… [ledger=… … cache=…] bind=… | settled=… … finish=… (GitHub #68)` 打到 stdout，并随 `roots_T=` 那行进回执 `warnings`。不改任何判决；`collect` 的签名与返回不变，只多一格 `timings`。
-- **量到**（L2 回放夹具 `ams8000-equi-move-chain`，debug 构建，953 根，五窗）：`plan` 641–748 ms，其中 `collect` 475–567 ms = `roots_S` 191–227 + `roots_T` 186–226（两端 `enumerate_generation_roots`，从 WORL 起逐元素读 TYPE / NAME / members 直到交付单元，与窗里变了几个元素无关）+ `index_S` / `index_T` 各 16–23 + `nested` 16–23 + `cascades` 9–33 + `ledger` 7–15 + `cache` 13–16；外层 `sets`（两端 `build_set`）154–164，其余段全部 0–4 ms。即 **六成在两端枚举、两成在两端建集**，分桶 / 回执 / 级联几乎不花钱。修法（S 端复用上一窗的 T 端集合与根集、T 端只按账本触到的子树重枚举）待拍板，不在本笔。
-# 变更记录
-
+- **为什么**：#68 量到 `IncrementPipeline 阶段耗时` 里 `plan=` 随 `roots_T` 线性（8000 / 953 根 0.73 s，7997 / 6772 根 13.8 s）。先给 `plan` 拆了段（第 3 条路，`e6013ef76`）：L2 回放 `ams8000-equi-move-chain` 五窗 `plan` 641–748 ms 里 `roots_S` 191–227 + `roots_T` 186–226（两端 `enumerate_generation_roots`，从 WORL 起逐元素读 TYPE / NAME / members 直到交付单元，费用是「交付单元以上的元素数」、与窗里变了几个元素无关）≈ 六成，两端 `build_set` ≈ 160 ms 两成，分桶 / 欠账 / 刚体 / 变化清单 / 回执全部 0–4 ms。
+- **改**（`window_root_plan.rs`，不动 ADR-079 D3 的 `advance` 语义，变的是怎么算出 `roots_S` / `roots_T`，不是怎么用）：
+  1. **S 端复用**：进程内每个文件一格的根集缓存（`CachedRootSet`：会话、交付单元口径、索引键数、顶层根、根集），`collect` 算完 T 端就记一格；下一窗 `scan_index@S` 照扫（16–23 ms，顺带当身份核对），四项都对得上就直接拿缓存当 `roots_S`，认不出照旧在 `DbSet@S` 上全枚举。dabacon 只追加、钉住会话的集合不变，枚举又只读本文件的 TYPE / NAME / members，所以同一会话的根集就是同一份。
+  2. **T 端增量**：一个根在不在根集里、noun / name / 种类是什么，只取决于它自己的 TYPE / NAME 和祖先是否交付单元，而这些只会经账本里的候选（增 / 删 / 改 / 改挂 / 改名）变。于是把账本每个候选两端属主链顶上的 WORL 直接成员记成「触到的顶层子树」，按 T 端 WORL 的成员存储序重建根集：触到的子树在 `DbSet@T` 上重枚举，其余沿用 S 端那一组（按 S 端索引属主表分组），顺序仍是「WORL 序 × 成员存储序 × 子树前序」。认不准就回全枚举：账本退化 / 有读挂、WORL 自身在账上、候选的顶层成员对不上 T 端 WORL 成员表、T 端多出不在账上的顶层成员、S 端有根的顶层子树在 T 端还在却没被遍历到。
+  3. **对拍护栏**：debug 构建恒开、release 设 `AIOS_ROOT_ENUMERATION_PARITY=1` 时，增量结果与全枚举逐位比（顺序也比），对不上以全枚举为准并打 `[窗口规划] 增量根枚举与全枚举不一致 …`；`AIOS_ROOT_ENUMERATION_REUSE=0` 把两步整个关掉（两端回全枚举）。分段计时行多了 `roots_S=…ms[cached|full]`、`roots_T=…ms[incremental+parity parity=…ms | incremental | parity-mismatch | full]`。
+- **量到**（L2 回放，debug，953 根）：`ams8000-equi-move-chain` 五窗全绿、`db8000-two-delete` 两窗全绿（删除路径），没有一窗 `parity-mismatch`；连续窗 `roots_S=0ms[cached]`（首窗、超越窗 726→728、冷重启后那一窗按设计 `full`），`roots_T` 减去对拍那一遍后：只有登录 / 尾会话的 DBMDAT-only 窗 1–2 ms，移了一根 EQUI 的窗 ≈ 78 ms（重枚举它所在那个 SITE），对照全枚举 120–216 ms。release 下预计 8000 一窗 `plan` 从 ~0.7 s 到 ~0.3 s；7997 的 13.8 s 里两端枚举那 ~12 s 变成「S 端 0 + T 端只走被触到的 SITE」，符合票里「与 `touched` 成比」的预算口径——7997 的实测要等它的会话链（没有回放语料）。
+- **没动**：两端 `build_set`（≈ 130–160 ms / 窗）与 `scan_index`；`enumerate_generation_roots` 自身的每元素费用。
 ## 2026-10-25
 
 ### 单元房间快照改走边目标：按构件扫 `room_relate` 整表（694 ms / 句）让 7997 一窗 60 根前后两次快照吃掉 29 分钟（GitHub #66）

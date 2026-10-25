@@ -35,9 +35,9 @@
 //! 里（[`WindowRootSources::removed_units`] 在 `collect` 里带上 S 端属主链，[`uncovered_removed_units`]
 //! 算差集，[`delete_coverage_gap_warning`] 进回执 `warnings`）——只点名，不改任何桶、不判 `Partial`。
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use aios_core::RefnoEnum;
@@ -52,7 +52,8 @@ use e3d_model::increment::{
 use e3d_model::ledger::{ChangeKind, ChangeLedger, Disposition};
 
 use crate::data_interface::generation_root::{
-    GenerationRoot, enumerate_generation_roots, refno_from_e3d, refno_to_e3d,
+    GenerationRoot, enumerate_generation_roots, enumerate_generation_roots_in_subtree,
+    refno_from_e3d, refno_to_e3d, subtree_element_from_set,
 };
 use crate::data_interface::manual_update::DeliveryUnitSummary;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
@@ -60,7 +61,7 @@ use crate::data_interface::rigid_motion::{
     CandidateKind, TransformClassification, TransformUnit, WindowCandidate,
     classify_transform_roots,
 };
-use crate::fast_model::e3d_model_service::scan_index;
+use crate::fast_model::e3d_model_service::{SourceIndex, scan_index};
 
 #[cfg(test)]
 #[path = "window_root_plan_matrix_tests.rs"]
@@ -376,6 +377,215 @@ pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
     change_metadata_tier(diff).is_some()
 }
 
+/// GitHub #68：同一文件连续窗口之间复用的根集——上一窗的 `roots_T` 就是下一窗的 `roots_S`
+/// （dabacon 只追加，钉住会话的 `DbSet` 不变；枚举只读本文件的 TYPE / NAME / members，不碰目录）。
+/// 认同一份的条件：文件 + 会话 + 交付单元口径 + 索引形状（键数与顶层根）全相等；认不出照旧全枚举。
+/// 进程内、每个文件一格；`AIOS_ROOT_ENUMERATION_REUSE=0` 整个关掉（两端都回全枚举）。
+struct CachedRootSet {
+    sesno: u32,
+    unit_types: Vec<String>,
+    owners_len: usize,
+    worl_roots: Vec<(u32, u32)>,
+    roots: Arc<Vec<GenerationRoot>>,
+}
+
+static ROOT_SET_CACHE: OnceLock<Mutex<HashMap<(u32, PathBuf), CachedRootSet>>> = OnceLock::new();
+
+fn root_set_cache() -> &'static Mutex<HashMap<(u32, PathBuf), CachedRootSet>> {
+    ROOT_SET_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn root_set_reuse_enabled() -> bool {
+    std::env::var_os("AIOS_ROOT_ENUMERATION_REUSE").is_none_or(|value| value != "0")
+}
+
+/// 增量枚举要不要同时跑一遍全枚举对拍：debug 构建恒开（回放夹具跑的就是它），release 用
+/// `AIOS_ROOT_ENUMERATION_PARITY=1` 打开。对不上时以全枚举为准并出声。
+fn root_enumeration_parity_enabled() -> bool {
+    cfg!(debug_assertions)
+        || std::env::var_os("AIOS_ROOT_ENUMERATION_PARITY").is_some_and(|value| value != "0")
+}
+
+fn refno_key(refno: RefNo) -> (u32, u32) {
+    (refno.word0, refno.word1)
+}
+
+fn worl_keys(index: &SourceIndex) -> Vec<(u32, u32)> {
+    index.roots.iter().map(|refno| refno_key(*refno)).collect()
+}
+
+fn cached_root_set(
+    dbnum: u32,
+    file: &Path,
+    sesno: u32,
+    unit_types: &[String],
+    index: &SourceIndex,
+) -> Option<Arc<Vec<GenerationRoot>>> {
+    if !root_set_reuse_enabled() {
+        return None;
+    }
+    let cache = root_set_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cached = cache.get(&(dbnum, file.to_path_buf()))?;
+    (cached.sesno == sesno
+        && cached.unit_types == unit_types
+        && cached.owners_len == index.owners.len()
+        && cached.worl_roots == worl_keys(index))
+    .then(|| cached.roots.clone())
+}
+
+fn remember_root_set(
+    dbnum: u32,
+    file: &Path,
+    sesno: u32,
+    unit_types: &[String],
+    index: &SourceIndex,
+    roots: Arc<Vec<GenerationRoot>>,
+) {
+    if !root_set_reuse_enabled() {
+        return;
+    }
+    root_set_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            (dbnum, file.to_path_buf()),
+            CachedRootSet {
+                sesno,
+                unit_types: unit_types.to_vec(),
+                owners_len: index.owners.len(),
+                worl_roots: worl_keys(index),
+                roots,
+            },
+        );
+}
+
+/// 沿索引属主表上溯到 WORL 的直接成员（顶层子树的根）。属主是 WORL（`worl` 里）、缺席或自身就停；
+/// 自己就是 WORL 时返回自己，调用方自己判。
+fn top_level_member(
+    owners: &BTreeMap<(u32, u32), RefNo>,
+    worl: &BTreeSet<(u32, u32)>,
+    refno: RefNo,
+) -> RefNo {
+    let mut current = refno;
+    for _ in 0..RIGID_MOTION_MAX_ANCESTOR_DEPTH {
+        match owners.get(&refno_key(current)) {
+            Some(&owner) if owner != current && !worl.contains(&refno_key(owner)) => {
+                current = owner;
+            }
+            _ => break,
+        }
+    }
+    current
+}
+
+/// GitHub #68 第 2 步：T 端只按账本触到的顶层子树重枚举，其余顶层子树沿用 S 端根集。
+///
+/// 一个根在不在根集里、noun / name / 种类是什么，只取决于它自己的 TYPE / NAME 和祖先是否交付单元；
+/// 这些只会通过账本里的候选（增 / 删 / 改 / 改挂 / 改名）变，所以候选两端属主链顶上的那个 WORL 直接成员
+/// 之外的子树，T 端根集与 S 端逐位相同。结果顺序仍是「WORL 序 × 成员存储序 × 子树前序」。
+/// 认不准就 `None`（调用方回全枚举）：账本退化 / 有读挂、WORL 自身在账上、账上候选的顶层成员对不上
+/// T 端的 WORL 成员表、T 端多出不在账上的顶层成员、S 端有根的顶层子树在 T 端还在却没被遍历到。
+fn incremental_target_roots(
+    base: &Arc<DbSet>,
+    base_index: &SourceIndex,
+    roots_s: &[GenerationRoot],
+    target: &Arc<DbSet>,
+    index: &SourceIndex,
+    plan: &UpdatePlan,
+    unit_types: &[String],
+) -> anyhow::Result<Option<Vec<GenerationRoot>>> {
+    if plan.full_rebuild.is_some() || !plan.report.unresolved.is_empty() {
+        return Ok(None);
+    }
+    let worl_t: BTreeSet<(u32, u32)> = worl_keys(index).into_iter().collect();
+    let worl_s: BTreeSet<(u32, u32)> = worl_keys(base_index).into_iter().collect();
+    let mut touched: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for entry in plan.ledger.entries() {
+        let refno = entry.refno;
+        if worl_t.contains(&refno_key(refno)) || worl_s.contains(&refno_key(refno)) {
+            return Ok(None);
+        }
+        if index.owners.contains_key(&refno_key(refno)) {
+            touched.insert(refno_key(top_level_member(
+                index.owners.as_ref(),
+                &worl_t,
+                refno,
+            )));
+        }
+        let exists_s = base
+            .element(refno)
+            .exists()
+            .map_err(|error| anyhow::anyhow!("{refno}: {error}"))?;
+        if exists_s {
+            let mut top = refno;
+            for ancestor in owner_chain_in_set(base, refno)?
+                .into_iter()
+                .map(refno_to_e3d)
+            {
+                if worl_s.contains(&refno_key(ancestor)) {
+                    break;
+                }
+                top = ancestor;
+            }
+            touched.insert(refno_key(top));
+        }
+    }
+    let mut groups: HashMap<(u32, u32), Vec<GenerationRoot>> = HashMap::new();
+    for root in roots_s {
+        let top = top_level_member(base_index.owners.as_ref(), &worl_s, refno_to_e3d(root.root));
+        groups.entry(refno_key(top)).or_default().push(root.clone());
+    }
+    let mut out = Vec::with_capacity(roots_s.len());
+    let mut seen_members: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for worl in &index.roots {
+        let members = subtree_element_from_set(target, refno_from_e3d(*worl))?.members;
+        for member in members {
+            let member_refno = refno_to_e3d(member);
+            if !seen_members.insert(refno_key(member_refno)) {
+                continue;
+            }
+            if touched.contains(&refno_key(member_refno)) {
+                out.extend(enumerate_generation_roots_in_subtree(
+                    member,
+                    unit_types,
+                    |refno| subtree_element_from_set(target, refno),
+                )?);
+            } else if let Some(group) = groups.remove(&refno_key(member_refno)) {
+                out.extend(group);
+            } else if !base
+                .element(member_refno)
+                .exists()
+                .map_err(|error| anyhow::anyhow!("{member_refno}: {error}"))?
+            {
+                // T 端多出一个不在账上的顶层成员：账本不全，不冒这个险。
+                return Ok(None);
+            }
+        }
+    }
+    for member in &touched {
+        if index.owners.contains_key(member) && !seen_members.contains(member) {
+            // 账上候选的顶层成员在 T 端存在却不是 WORL 的直接成员：形状对不上。
+            return Ok(None);
+        }
+    }
+    for (top, group) in groups {
+        let top_refno = RefNo::new(top.0, top.1);
+        if !group.is_empty()
+            && !touched.contains(&top)
+            && target
+                .element(top_refno)
+                .exists()
+                .map_err(|error| anyhow::anyhow!("{top_refno}: {error}"))?
+        {
+            // S 端有根的顶层子树在 T 端还在、却既没被遍历到也不在账上。
+            return Ok(None);
+        }
+    }
+    Ok(Some(out))
+}
+
 /// 窗口规划各段的墙钟（GitHub #68 第 3 条路：`IncrementPipeline 阶段耗时` 里 `plan=` 只有一个总数，
 /// 先把它拆开再定修法）。只记账，不改任何判决：`collect` 内的十三段由 [`WindowRootSources::collect`]
 /// 填，外层段由 [`build_model_update_plan_from_window`] 填，拼成一行随 `roots_T=` 那行进 stdout 与回执 warnings。
@@ -394,21 +604,30 @@ pub(crate) struct WindowSourceTimings {
     pub cascades: Duration,
     pub removed: Duration,
     pub cache: Duration,
+    /// `roots_S` 怎么来的（`cached` / `full`）、`roots_T` 怎么来的（`incremental` / `incremental+parity` /
+    /// `parity-mismatch` / `full`），GitHub #68 的两步修法各自走没走到。
+    pub roots_s_mode: &'static str,
+    pub roots_t_mode: &'static str,
+    /// 对拍用的那一遍全枚举（只在 `incremental+parity` / `parity-mismatch` 时非零），已计在 `roots_t` 里；减掉它就是增量枚举本身的费用。
+    pub parity: Duration,
 }
 
 impl WindowSourceTimings {
     /// `collect` 内各段，毫秒；顺序即执行顺序。
     pub(crate) fn line(&self) -> String {
         format!(
-            "ledger={}ms closure={}ms xgeom={}ms index_S={}ms roots_S={}ms index_T={}ms roots_T={}ms \
+            "ledger={}ms closure={}ms xgeom={}ms index_S={}ms roots_S={}ms[{}] index_T={}ms roots_T={}ms[{} parity={}ms] \
              nested={}ms changes={}ms rigid={}ms cascades={}ms removed={}ms cache={}ms",
             self.ledger.as_millis(),
             self.closure.as_millis(),
             self.xgeometry.as_millis(),
             self.index_s.as_millis(),
             self.roots_s.as_millis(),
+            self.roots_s_mode,
             self.index_t.as_millis(),
             self.roots_t.as_millis(),
+            self.roots_t_mode,
+            self.parity.as_millis(),
             self.nested.as_millis(),
             self.changes.as_millis(),
             self.rigid.as_millis(),
@@ -1261,13 +1480,28 @@ impl WindowRootSources {
                 .with_context(|| format!("scan index of {} at {base_sesno}", file.display()))?,
         );
         timings.index_s = lap(&mut tick);
-        let roots_s = enumerate_generation_roots(base, &base_index.roots, unit_types)
-            .with_context(|| {
-                format!(
-                    "enumerate generation roots of {} at {base_sesno}",
-                    file.display()
-                )
-            })?
+        // GitHub #68 第 1 步：上一窗在同一文件上枚举过的 `roots_T`（会话 == S、口径与索引形状都对得上）就是这一窗的
+        // `roots_S`；认不出来照旧在 `DbSet@S` 上全枚举。
+        let roots_s_full: Arc<Vec<GenerationRoot>> =
+            match cached_root_set(base_index.dbnum, file, base_sesno, unit_types, &base_index) {
+                Some(cached) => {
+                    timings.roots_s_mode = "cached";
+                    cached
+                }
+                None => {
+                    timings.roots_s_mode = "full";
+                    Arc::new(
+                        enumerate_generation_roots(base, &base_index.roots, unit_types)
+                            .with_context(|| {
+                                format!(
+                                    "enumerate generation roots of {} at {base_sesno}",
+                                    file.display()
+                                )
+                            })?,
+                    )
+                }
+            };
+        let roots_s = roots_s_full
             .iter()
             .map(PersistedRoot::from)
             .collect::<Vec<_>>();
@@ -1277,13 +1511,66 @@ impl WindowRootSources {
                 .with_context(|| format!("scan index of {} at {target_sesno}", file.display()))?,
         );
         timings.index_t = lap(&mut tick);
-        let roots_t =
+        // GitHub #68 第 2 步：T 端只重枚举账本触到的顶层子树，其余沿用 S 端根集；debug 构建 / 开了对拍时同时跑
+        // 一遍全枚举比对，对不上以全枚举为准并出声。
+        let full_target_roots = || {
             enumerate_generation_roots(target, &index.roots, unit_types).with_context(|| {
                 format!(
                     "enumerate generation roots of {} at {target_sesno}",
                     file.display()
                 )
-            })?;
+            })
+        };
+        let incremental = if root_set_reuse_enabled() {
+            incremental_target_roots(
+                base,
+                &base_index,
+                &roots_s_full,
+                target,
+                &index,
+                &plan,
+                unit_types,
+            )?
+        } else {
+            None
+        };
+        let roots_t = match incremental {
+            Some(incremental) if root_enumeration_parity_enabled() => {
+                let parity_started = Instant::now();
+                let full = full_target_roots()?;
+                timings.parity = parity_started.elapsed();
+                if full == incremental {
+                    timings.roots_t_mode = "incremental+parity";
+                    incremental
+                } else {
+                    timings.roots_t_mode = "parity-mismatch";
+                    println!(
+                        "[窗口规划] 增量根枚举与全枚举不一致 dbnum={} window {base_sesno}→{target_sesno}：增量 {} 根 / \
+                         全 {} 根，这一窗改用全枚举（GitHub #68）",
+                        index.dbnum,
+                        incremental.len(),
+                        full.len()
+                    );
+                    full
+                }
+            }
+            Some(incremental) => {
+                timings.roots_t_mode = "incremental";
+                incremental
+            }
+            None => {
+                timings.roots_t_mode = "full";
+                full_target_roots()?
+            }
+        };
+        remember_root_set(
+            index.dbnum,
+            file,
+            target_sesno,
+            unit_types,
+            &index,
+            Arc::new(roots_t.clone()),
+        );
         timings.roots_t = lap(&mut tick);
         let (nested_roots, duplicate_coverage_elements) =
             nested_root_observation(&roots_t, index.owners.as_ref());
@@ -3417,6 +3704,68 @@ mod tests {
                 "候选表为单元级收集时必须要求 {switch}"
             );
         }
+    }
+
+    /// GitHub #68：顶层成员的上溯停在 WORL 之下；WORL 自己 / 没属主的元素返回自己。
+    #[test]
+    fn top_level_member_stops_right_below_the_worl() {
+        let worl = RefNo::new(1, 1);
+        let site = RefNo::new(1, 10);
+        let zone = RefNo::new(1, 20);
+        let equi = RefNo::new(1, 30);
+        let owners: BTreeMap<(u32, u32), RefNo> = BTreeMap::from([
+            ((1, 10), worl),
+            ((1, 20), site),
+            ((1, 30), zone),
+            ((1, 1), worl),
+        ]);
+        let worls: BTreeSet<(u32, u32)> = BTreeSet::from([(1, 1)]);
+        assert_eq!(top_level_member(&owners, &worls, equi), site);
+        assert_eq!(top_level_member(&owners, &worls, zone), site);
+        assert_eq!(top_level_member(&owners, &worls, site), site);
+        assert_eq!(top_level_member(&owners, &worls, worl), worl);
+        assert_eq!(
+            top_level_member(&owners, &worls, RefNo::new(1, 99)),
+            RefNo::new(1, 99),
+            "不在表里的元素停在自己"
+        );
+    }
+
+    /// GitHub #68：根集缓存只认同一文件 + 同一会话 + 同一口径 + 同一索引形状；差一样就是未命中。
+    #[test]
+    fn root_set_cache_needs_the_same_session_scope_and_index_shape() {
+        let file = Path::new("issue68-root-set-cache-test");
+        let dbnum = 68_000_001;
+        let index = SourceIndex {
+            dbnum,
+            roots: vec![RefNo::new(1, 1)],
+            owners: Arc::new(BTreeMap::from([((1, 10), RefNo::new(1, 1))])),
+        };
+        let unit_types = vec!["EQUI".to_string()];
+        let roots = Arc::new(vec![root(10, "EQUI", GenerationRootKind::DeliveryUnit)]);
+        remember_root_set(dbnum, file, 7, &unit_types, &index, roots.clone());
+        assert!(
+            cached_root_set(dbnum, file, 7, &unit_types, &index).is_some_and(|hit| hit == roots),
+            "同文件同会话同口径同形状必命中"
+        );
+        assert!(cached_root_set(dbnum, file, 8, &unit_types, &index).is_none());
+        assert!(cached_root_set(dbnum, file, 7, &["BRAN".to_string()], &index).is_none());
+        let wider = SourceIndex {
+            dbnum,
+            roots: vec![RefNo::new(1, 1)],
+            owners: Arc::new(BTreeMap::from([
+                ((1, 10), RefNo::new(1, 1)),
+                ((1, 11), RefNo::new(1, 1)),
+            ])),
+        };
+        assert!(cached_root_set(dbnum, file, 7, &unit_types, &wider).is_none());
+        let other_worl = SourceIndex {
+            dbnum,
+            roots: vec![RefNo::new(1, 2)],
+            owners: index.owners.clone(),
+        };
+        assert!(cached_root_set(dbnum, file, 7, &unit_types, &other_worl).is_none());
+        assert!(cached_root_set(dbnum + 1, file, 7, &unit_types, &index).is_none());
     }
 
     /// ADR-066 D1 规则 5 回归：一根既被闭包直接命中（如所在 ZONE 挪位或自身纯位姿变动）、又是某条级联
