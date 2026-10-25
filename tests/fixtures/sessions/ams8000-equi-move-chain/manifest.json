@@ -1,0 +1,102 @@
+{
+  "format": "aios-session-fixture-v1",
+  "dbnum": 8000,
+  "baseline_sesno": 714,
+  "archive": {
+    "path": "db8000-sesno714-720.zip",
+    "bytes": 4544236,
+    "sha256": "804aa89081248736b12e9fcef83844041e7a08791249545fbcf48a0251af49cf",
+    "compression": "zip-deflate-level-9",
+    "max_bytes": 6291456
+  },
+  "final": {
+    "path": "final/ams8000_0001",
+    "sesno": 720,
+    "bytes": 36724736,
+    "sha256": "5dbf8a0d99eb760ecd33a56dd9a3ef1a96b07b9eb5358e0b3429e93b6d6b768c"
+  },
+  "session_snapshots": [
+    {
+      "sesno": 714,
+      "bytes": 36503552,
+      "sha256": "617121f188fe6e9b6843d6f2fc198866c96e8f9e78424ba3b33c14a3ed944bda"
+    },
+    {
+      "sesno": 715,
+      "bytes": 36546560,
+      "sha256": "04e90ebe8f7544a9911b227d8fc1dbb8f66abdc86ec2090dc3c79cec15f185c3"
+    },
+    {
+      "sesno": 716,
+      "bytes": 36573184,
+      "sha256": "9bb65014376a63b5804d305510cc4dee50b26a092d675187aa28e91ac644e2cc"
+    },
+    {
+      "sesno": 719,
+      "bytes": 36683776,
+      "sha256": "335808514e68cadfee84099a6f0b0c171ab9e04dda20de0b01707753ecdd3645"
+    },
+    {
+      "sesno": 720,
+      "bytes": 36724736,
+      "sha256": "5dbf8a0d99eb760ecd33a56dd9a3ef1a96b07b9eb5358e0b3429e93b6d6b768c"
+    }
+  ],
+  "cases": [
+    {
+      "id": "equi-move",
+      "apply_sesno": 716,
+      "restore_sesno": 719,
+      "refs": {
+        "box": "24384/24777",
+        "equi": "24384/24776"
+      },
+      "elements": [
+        {
+          "refno": "24384/24776",
+          "noun": "EQUI",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        },
+        {
+          "refno": "24384/24777",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true,
+          "after_restore": true
+        }
+      ],
+      "expected": {
+        "net_window": [
+          {
+            "refno": "24384/24776",
+            "net": "modified"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quit-tail",
+      "apply_sesno": 720,
+      "refs": {
+        "box": "24384/24777",
+        "equi": "24384/24776"
+      },
+      "elements": [
+        {
+          "refno": "24384/24776",
+          "noun": "EQUI",
+          "before_apply": true,
+          "after_apply": true
+        },
+        {
+          "refno": "24384/24777",
+          "noun": "BOX",
+          "before_apply": true,
+          "after_apply": true
+        }
+      ]
+    }
+  ]
+}

@@ -4,7 +4,8 @@
 > 状态：**已批准**（2026-10-25 17:4x：plannotator `--gate` 回 `{"decision":"approved"}`、无批注（`.scratch/pencil/test-suite-plan-gate-r1.json`），对话里同时「按推荐继续」）。§6 八条全按推荐项定：D1 两端全量为唯一几何裁判、D2 录 4 条链 / zip 封顶 12 MB、D3 就地追加 + 改头、D4 先记基线相对 ±50 %、D5 L0/L1/L2 进 PR 门、D6 测试钩注入必败、D7 L3 一律隔离副本、D8 P0→P5。
 > **P1 开工时的修正（2026-10-25 晚）**：服务只认 `project_path` 下的整个 MDB 闭包（5 个项目、启动开 29 个库），没有按 dbnum 指定单个文件的覆盖，所以 L2 回放夹具在没有自包含语料之前**跑在本机**（影子工程根：别的项目目录走 junction、`ams000` 里除被回放的 DESI 外全走硬链接），不进 GitHub 托管 runner；§3 / §5.5 / D5 里「L2 进 CI」改为「L2 本机 nightly，进 CI 待自包含语料」。`--bookkeeping` 不要了：链里录了登录会话就是普通一步。
 > **P0 已落地**（同日）：`tests/fixtures/increment_cases.json`（55 条：有 22 / 部分 10 / 补 21 / 语料 2，有承载占 58 %）、`tests/increment_cases_registry.rs`（3 钉，CI 新步骤 `Pin the increment test-case registry`）、`scripts/increment_cases_report.py`、`windows.json` 多本周两窗。§4 的表从此以登记表为准（`python scripts/increment_cases_report.py`），本文的副本不再手改。
-> **P1 前两步已落地**（同日晚）：`replay-init / replay-step`（`79e318cab`）、`tests/increment_replay/` harness + `scripts/replay/New-ShadowProjectRoot.ps1`，第一条用例 `db8000-two-delete`（issue-019 链，INC-B01）在真监听器上全绿（初始化 102 s，每步 6–20 s）。未做：录 `ams8000-equi-move-chain`（要隔离工程副本 + E3D）。
+> **P1 前两步已落地**（同日晚）：`replay-init / replay-step`（`79e318cab`）、`tests/increment_replay/` harness + `scripts/replay/New-ShadowProjectRoot.ps1`，第一条用例 `db8000-two-delete`（issue-019 链，INC-B01）在真监听器上全绿（初始化 102 s，每步 6–20 s）。
+> **P1 第三步已落地**（同日更晚）：`ams8000-equi-move-chain` 在隔离副本上用 E3D 3.1 TTY 录成（`scripts/e3d/replay/*.mac`，`tests/fixtures/sessions/ams8000-equi-move-chain/`，zip 4.5 MB），用例 `cases/ams8000-equi-move-chain.json` 全绿：716 / 719 两次位移 `transform`、包围盒正好 ±500 mm、行数与房间不变；715 / 717 / 718 / 720 四个 DBMDAT-only 窗未触根 `AlreadyAvailable`（44–71 ms）；整链无 `[模型目标核对]`。两条事实订正：① 带 SAVEWORK 的 Design 腿是「先存、QUIT 时再写一个只含 DBMDAT 的尾会话」，不是「登录记账再存」；② 冷初始化 / 重启后投影里没有回执，第一次 `/model/generate` 走「补常驻根」回 `Generated`，用例要先 `generate_prime` 再谈「仍 AlreadyAvailable」。登记表 C03 / C04 / D01 / D04 / F04 翻「有」、G02 「部分」；总账有 27 / 部分 10 / 补 16 / 语料 2（67 %）。P1 尚欠：F02（杀进程重启后 `/model/records` 逐字段相等）、H01（`--half` 补排链）、B06（回退）；I04 / I05 预算归 P3。
 > 口径：本文是**案例集合 + 落地计划**，不是又一份测试总纲——分层与编号沿用 `docs/2026-08-06_model-increment-unit-test-plan.md`（U1–U13 选组、IU-/RI- 不变量），live 事实沿用 `docs/2026-08-12_live-test-ledger.md`，学科矩阵沿用 `docs/plans/2026-09-05-pipe-hvac-ctray-equi-increment-test-matrix.md`。那三份不重写，本文只接上它们**没有接住的那一截**：这两周真机上暴露的缺陷全部发生在「自动化覆盖不到的层」。
 > 代码事实对到 `refactor` `b71617ee3`（2026-10-25）。行号 / 测试名以源码为准。
 > 关联：ADR-079（库级水位）、ADR-080 / 066（单元级发布 / 刚体前移）、ADR-088（整片删老行）、ADR-089（新旧判据与冻结锚）、ADR-011（单队列单消费者）、ADR-010（房间增量 = 全量逐边）；GitHub #61 / #63 / #64 / #65 / #66 / #67 / #68 / #69；`.github/workflows/windows-tests.yml`（`offline-increment-regression` job）。
@@ -200,7 +201,7 @@
 - `db_session_fixture` 多两个子命令（P1 已落地，`src/bin/db_session_fixture/replay.rs`）：`replay-init --fixture <dir> | --source <终稿> --to <sesno> --out <工作文件>`（从终稿现切出 S；已存在则就地覆写 = 重置）、`replay-step --work <文件> --fixture <dir> | --source <终稿> --to <sesno> [--half pages|header] [--rollback]`（就地追加 + 改头，前进步要求工作文件是 cut(to) 的前缀，否则拒；`--half` 两种半截；往回走要显式 `--rollback`）。切割机制复用 `session_cut.rs`，新加的只是「写回同一个文件」。
 - `tests/increment_replay/`（`#[test]`，`required-features = ["http_api"]`）：公共 harness 起隔离服务（临时目录里的 `DbOption.toml` 由基础配置派生：`store_mode=mem`、`watch_dbnums=[夹具库]`、随机端口、`AIOS_SKIP_STARTUP_ROOM_BUILD=1`），等 `/health status=ok`，然后按用例走 `replay-step` → 轮询 `/tasks` 终态 → 断言。每条用例一进程，串行（`--test-threads=1`），单条 ≤ 90 s。
 - 夹具清单（录制，D2 决定装多少）：
-  1. **`ams8000-equi-move-chain`**：基线 → 登录（`DBMDAT`）→ EQUI `=24384/24776` `BY U 500` → 登录 → `BY D 500`（覆盖 C03 / C04 / D01 / D04 / F02 / F04 / G02 / I04 / I05）；
+  1. **`ams8000-equi-move-chain`**（已录，714→720）：基线 714 → 715 只登录（QUIT 写 DBMDAT-only 会话）→ 716 SAVEWORK：EQUI `=24384/24776` `BY U 500` + 717 QUIT 尾会话 → 718 只登录 → 719 SAVEWORK：`BY D 500` + 720 尾会话（已覆盖 C03 / C04 / D01 / D04 / F04，G02 房内那半；F02 要给 harness 加「杀进程重启」一步，I04 / I05 归 P3 预算）；
   2. **`ams8000-pipe-chain`**：FTUBE 4 位移 → 整条 PIPE 位移 → 恢复（C05、A01 真窗口）；
   3. **`ams7997-nozz-equi-chain`**：带 NOZZ 的 EQUI 位移往返 + 一个 PANE 改动（C06、G03、I02 大库形状）；
   4. **`ams7997-cata-stamp-chain`**：设计库 + 它真读的一个目录库（如 5052）；目录库追加记账会话（E02 / E03）；
@@ -246,7 +247,7 @@
 | 段 | 内容 | 验收 |
 |---|---|---|
 | **P0** 登记表 | `increment_cases.json`（§4 全部条目，`has` 的填测试名）、登记表钉、`increment_cases_report.py`；INC-A08 把本周窗口加进 `windows.json` | 钉绿；报告生成的表与本文 §4 一致；CI 多一步 |
-| **P1** L2 harness + 第 1 条链 | `replay-init / replay-step`（含 `--half` / `--bookkeeping`）、harness、录 `ams8000-equi-move-chain`、用例 C03 / C04 / D01 / D04 / F02 / F04 / G02 / I04 / I05 / H01 | 本机绿 + CI 绿；H01 用 `--half` 确定性复现补排链；F02 杀进程重启后 `/model/records` 逐字段相等 |
+| **P1** L2 harness + 第 1 条链 | `replay-init / replay-step`（含 `--half`；`--bookkeeping` 已取消）、harness、录 `ams8000-equi-move-chain`、用例 C03 / C04 / D01 / D04 / F02 / F04 / G02 / H01（I04 / I05 归 P3）。**已落地**：CLI、harness、两条链（`db8000-two-delete`、`ams8000-equi-move-chain`）、C03 / C04 / D01 / D04 / F04 + G02 半；**尚欠** F02 / H01 / B06 | 本机绿（CI 待自包含语料）；H01 用 `--half` 确定性复现补排链；F02 杀进程重启后 `/model/records` 逐字段相等 |
 | **P2** 其余链与用例 | 录另外 3 条链；B06 / B07 / E02 / E03 / F03 / F05 / G01 / G03 / H02 / H03 / H05 / J01 / J02；必败注入钩（D6） | 每条用例 ≤ 90 s，整档 ≤ 15 min |
 | **P3** L3 收编 + 预算 | `l3_suite` 新场景 x1 / l1 / e1 / p1 / n1 / u1 与新 `Expect` 变体；宏搬家；报告三格；预算采集 + 基线文件 + 比较 | 隔离副本上 `--scenarios all` 全绿；预算 JSON 产出；`.scratch/fixture-8023` 的手动流程不再需要 |
 | **P4** 接线 | CI 两步；`nightly-local.ps1` + 计划任务；live 台账自动段 | 连续 3 个 nightly 有产出 |

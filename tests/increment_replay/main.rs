@@ -69,12 +69,70 @@ struct Step {
     /// 根 refno → 期望的 `ModelUnitResult.kind`（regen / transform / unit）。
     #[serde(default)]
     unit_kinds: BTreeMap<String, String>,
+    /// 先把这些根叫进进程投影：冷初始化 / 重启后投影里没有回执，第一次 `/model/generate` 走「补常驻根」回 `Generated`
+    /// （`on_demand_model::regenerate_scope`）；紧接着第二次必须 `AlreadyAvailable`，证明常驻成了。后续窗口的
+    /// `generate_already_available` 才有意义（「仍」AlreadyAvailable，INC-D01 / D04），位移走 transform 也要根已在投影（INC-C03）。
+    #[serde(default)]
+    generate_prime: Vec<String>,
     /// 这些根 `/model/generate` 必须 `AlreadyAvailable`。
     #[serde(default)]
     generate_already_available: Vec<String>,
+    /// 根 refno → 期望的 `geometry_diff.moved`（单元回执，INC-F04）。
+    #[serde(default)]
+    geometry_moved: BTreeMap<String, u64>,
+    /// 这些根的 `rooms_before == rooms_after`（房内小位移，INC-G02）。
+    #[serde(default)]
+    rooms_unchanged: Vec<String>,
+    /// 根 refno → 期望的整根并集包围盒世界平移 `[dx, dy, dz]`（mm）：`geometry_after.aabb` 的 min / max 都要比
+    /// `geometry_before.aabb` 正好差这个向量（容差 [`AABB_TOLERANCE_MM`]），且 `records` 前后相同（刚体位移不增减行，
+    /// INC-C03 / INC-F04）。
+    #[serde(default)]
+    aabb_shift: BTreeMap<String, [f32; 3]>,
+    /// `generate_already_available` 里每一根 `/model/generate` 往返的上限（毫秒，INC-D01）；缺省只记不判。
+    #[serde(default)]
+    generate_budget_ms: Option<u64>,
+    /// 到这一步为止服务 stdout 里不得出现的子串（如 `[模型目标核对]`：未触根的回执被判过期或核对不了，INC-D01）。
+    #[serde(default)]
+    log_must_not_contain: Vec<String>,
     /// 这一步的任务终态（缺省 succeeded）。
     #[serde(default)]
     task_state: Option<String>,
+}
+
+/// 包围盒平移比对的容差：生成器浮点往返会在最后一位上抖（与 `unit_geometry_snapshot::MOVED_TOLERANCE_MM` 同量级）。
+const AABB_TOLERANCE_MM: f32 = 1.0;
+
+/// `geometry_before` / `geometry_after` 两格的 `aabb` 对出来的 min / max 平移；任一格缺席或没盒就 `None`。
+fn aabb_shift_of(unit: &Value) -> Option<([f32; 3], [f32; 3])> {
+    let aabb = |which: &str| -> Option<[f32; 6]> {
+        let values = unit.pointer(&format!("/{which}/aabb"))?.as_array()?;
+        let mut out = [0f32; 6];
+        for (slot, value) in out.iter_mut().zip(values) {
+            *slot = value.as_f64()? as f32;
+        }
+        (values.len() == 6).then_some(out)
+    };
+    let before = aabb("geometry_before")?;
+    let after = aabb("geometry_after")?;
+    Some((
+        [
+            after[0] - before[0],
+            after[1] - before[1],
+            after[2] - before[2],
+        ],
+        [
+            after[3] - before[3],
+            after[4] - before[4],
+            after[5] - before[5],
+        ],
+    ))
+}
+
+fn within_tolerance(actual: [f32; 3], expected: [f32; 3]) -> bool {
+    actual
+        .iter()
+        .zip(expected)
+        .all(|(a, e)| (a - e).abs() <= AABB_TOLERANCE_MM)
 }
 
 fn repo() -> PathBuf {
@@ -595,8 +653,13 @@ fn run_case(env: &Env, case: &Case) {
 fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
     {
         let mut problems = Vec::new();
-        // 任务终态与单元 kind。
-        if !step.unit_kinds.is_empty() || step.task_state.is_some() {
+        // 任务终态与单元 kind / 几何差 / 房间前后。
+        if !step.unit_kinds.is_empty()
+            || step.task_state.is_some()
+            || !step.geometry_moved.is_empty()
+            || !step.rooms_unchanged.is_empty()
+            || !step.aabb_shift.is_empty()
+        {
             let task = service.latest_task(case.dbnum, step.to).unwrap_or_else(|| {
                 panic!(
                     "[{what}] /tasks 里找不到 dbnum {} 右端 {} 的批次",
@@ -629,6 +692,74 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
                     None => problems.push(format!("根 {root} 不在这一窗的单元里：{units:?}")),
                 }
             }
+            let unit_of = |root: &str| {
+                units
+                    .iter()
+                    .find(|unit| unit.get("root_refno").and_then(Value::as_str) == Some(root))
+            };
+            for (root, moved) in &step.geometry_moved {
+                match unit_of(root) {
+                    Some(unit) => {
+                        let actual = unit.pointer("/geometry_diff/moved").and_then(Value::as_u64);
+                        if actual != Some(*moved) {
+                            problems.push(format!(
+                                "根 {root} geometry_diff.moved={actual:?}，期望 {moved}（diff: {:?}）",
+                                unit.get("geometry_diff")
+                            ));
+                        }
+                    }
+                    None => problems.push(format!("根 {root} 不在这一窗的单元里（几何差）")),
+                }
+            }
+            for root in &step.rooms_unchanged {
+                match unit_of(root) {
+                    Some(unit) => {
+                        let before = unit.get("rooms_before");
+                        let after = unit.get("rooms_after");
+                        if before.is_none() || before != after {
+                            problems.push(format!(
+                                "根 {root} 房间前后应相同：before={before:?} after={after:?}"
+                            ));
+                        }
+                    }
+                    None => problems.push(format!("根 {root} 不在这一窗的单元里（房间）")),
+                }
+            }
+            for (root, expected) in &step.aabb_shift {
+                let Some(unit) = unit_of(root) else {
+                    problems.push(format!("根 {root} 不在这一窗的单元里（包围盒）"));
+                    continue;
+                };
+                match aabb_shift_of(unit) {
+                    Some((mins, maxs)) => {
+                        if !within_tolerance(mins, *expected) || !within_tolerance(maxs, *expected)
+                        {
+                            problems.push(format!(
+                                "根 {root} 包围盒平移 min={mins:?} max={maxs:?}，期望 {expected:?}（before={:?} after={:?}）",
+                                unit.get("geometry_before"),
+                                unit.get("geometry_after")
+                            ));
+                        } else {
+                            eprintln!("  根 {root} 包围盒平移 {mins:?}（期望 {expected:?}）");
+                        }
+                    }
+                    None => problems.push(format!(
+                        "根 {root} 回执里缺几何前后或没包围盒：before={:?} after={:?}",
+                        unit.get("geometry_before"),
+                        unit.get("geometry_after")
+                    )),
+                }
+                let records = |which: &str| {
+                    unit.pointer(&format!("/{which}/records"))
+                        .and_then(Value::as_u64)
+                };
+                let (before, after) = (records("geometry_before"), records("geometry_after"));
+                if before.is_none() || before != after {
+                    problems.push(format!(
+                        "根 {root} 刚体位移前后行数应相同：before={before:?} after={after:?}"
+                    ));
+                }
+            }
         }
         for root in &step.records_present {
             match service.records_count(root) {
@@ -654,13 +785,68 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
                 ));
             }
         }
+        for root in &step.generate_prime {
+            let first = service.post("model/generate", serde_json::json!({ "refno": root }));
+            let first_status = first.get("status").and_then(Value::as_str).unwrap_or("");
+            if !matches!(first_status, "Generated" | "AlreadyAvailable") {
+                problems.push(format!(
+                    "根 {root} 首次 /model/generate → {first_status}，期望 Generated 或 AlreadyAvailable：{first}"
+                ));
+                continue;
+            }
+            let started = Instant::now();
+            let second = service.post("model/generate", serde_json::json!({ "refno": root }));
+            let elapsed = started.elapsed();
+            let second_status = second.get("status").and_then(Value::as_str).unwrap_or("");
+            if second_status != "AlreadyAvailable" {
+                problems.push(format!(
+                    "根 {root} 常驻后第二次 /model/generate → {second_status}，期望 AlreadyAvailable"
+                ));
+            }
+            eprintln!(
+                "  根 {root} 常驻：首次 {first_status}，第二次 {second_status}（{} ms）",
+                elapsed.as_millis()
+            );
+        }
         for root in &step.generate_already_available {
+            let started = Instant::now();
             let payload = service.post("model/generate", serde_json::json!({ "refno": root }));
+            let elapsed = started.elapsed();
             let status = payload.get("status").and_then(Value::as_str).unwrap_or("");
             if status != "AlreadyAvailable" {
                 problems.push(format!(
                     "根 {root} /model/generate → {status}，期望 AlreadyAvailable"
                 ));
+            }
+            eprintln!(
+                "  根 {root} /model/generate → {status}，{} ms",
+                elapsed.as_millis()
+            );
+            if let Some(budget) = step.generate_budget_ms {
+                if elapsed.as_millis() > u128::from(budget) {
+                    problems.push(format!(
+                        "根 {root} /model/generate 用了 {} ms，超过预算 {budget} ms",
+                        elapsed.as_millis()
+                    ));
+                }
+            }
+        }
+        if !step.log_must_not_contain.is_empty() {
+            let log = fs::read_to_string(&service.stdout_path).unwrap_or_default();
+            for needle in &step.log_must_not_contain {
+                let hits = log
+                    .lines()
+                    .filter(|line| line.contains(needle.as_str()))
+                    .count();
+                if hits > 0 {
+                    let sample = log
+                        .lines()
+                        .find(|line| line.contains(needle.as_str()))
+                        .unwrap_or_default();
+                    problems.push(format!(
+                        "服务日志里不该有「{needle}」，却有 {hits} 行，如：{sample}"
+                    ));
+                }
             }
         }
         assert!(

@@ -1,0 +1,12 @@
+-- L2 回放链 ams8000-equi-move-chain（docs/plans/2026-10-25 §5.2）：只登录不改。
+-- 一次只读的 Design 会话就会给 ams8000_0001 写一个只含 DBMDAT 的会话（#65 量过）——这就是 INC-D01 要的那一步。
+-- 没有 SAVEWORK；wrapper QUIT。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_login.log" OVER
+$P REPLAY-LOGIN-ALIVE
+=24384/24776
+Q NAME
+Q REF
+Q POS
+$P REPLAY-LOGIN-DONE
+ALPHA LOG END

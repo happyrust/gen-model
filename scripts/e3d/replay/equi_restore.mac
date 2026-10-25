@@ -1,0 +1,14 @@
+-- L2 回放链 ams8000-equi-move-chain：EQUI =24384/24776 下 500 mm 恢复原位。
+-- 恰好一个 SAVEWORK；wrapper QUIT。
+ONERROR CONTINUE
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_restore.log" OVER
+$P REPLAY-RESTORE-ALIVE
+=24384/24776
+Q NAME
+Q REF
+Q POS
+BY D 500mm
+Q POS
+SAVEWORK 'replay chain ams8000-equi-move-chain: EQUI =24384/24776 back down 500mm'
+$P REPLAY-RESTORE-DONE
+ALPHA LOG END
