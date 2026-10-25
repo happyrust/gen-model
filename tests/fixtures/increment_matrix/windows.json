@@ -324,5 +324,27 @@
       "32576/63",
       "32576/73"
     ]
+  },
+  {
+    "label": "INC-A08 8000 712->713: EQUI /1-LNR-Q005-PJ (24384/24776) BY U 500 in one cross-library save (2026-10-25, transform path)",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 712,
+    "target": 713,
+    "append_units": [],
+    "regen": [
+      "24384/24776"
+    ],
+    "delete": []
+  },
+  {
+    "label": "INC-A08 7997 363->365: NOZZ EQUI 24381/109449 BY U 500 in the same cross-library save (2026-10-25; 4 cache_stamp-only candidates must stay no_model)",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 363,
+    "target": 365,
+    "append_units": [],
+    "regen": [
+      "24381/109449"
+    ],
+    "delete": []
   }
 ]

@@ -336,6 +336,19 @@ jobs:
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
 
+      # 增量案例登记表（docs/plans/2026-10-25-incremental-update-automated-test-suite-plan.md §5.1）：
+      # tests/fixtures/increment_cases.json 里登记的每条承载测试（lib fn / tests 文件 / l3 场景 /
+      # vendor 真库门 / 脚本）必须存在——被删、改名的测试在这里先红，不让登记表慢慢说谎。只读源码与
+      # vendor/shared（上面的 junction），不跑库。
+      - name: Pin the increment test-case registry
+        shell: pwsh
+        run: >-
+          cargo test --locked
+          --test increment_cases_registry
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture
+
       # 单测层总闸（增量单测总纲 §3 的 CI 特性口径）：纯函数、源码契约与
       # 进程内 kv-mem 三层，U1–U13 全组。#[ignore] 的 live 用例照常跳过。
       - name: Run the unit-test layer (cargo test --lib)

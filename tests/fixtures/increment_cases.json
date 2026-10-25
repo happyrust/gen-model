@@ -1,0 +1,71 @@
+{
+  "format": "increment-cases-v1",
+  "plan": "docs/plans/2026-10-25-incremental-update-automated-test-suite-plan.md",
+  "_doc": "增量更新自动化测试案例登记表（计划 §5.1）。单一事实：案例在哪一层、认哪条裁判、由哪些测试承载。tests[] 的前缀：lib:<单测函数名>（src/**）、test:<tests/<name>.rs>、l3:<l3_suite 场景 id>、vendor:<vendor/shared 下相对路径>::<fn>、script:<仓内路径>、fixture:<仓内路径>、replay:<tests/increment_replay/cases/<name>.json>。status：has = 已有承载；partial = 已有一部分、stage 里的那段补其余层；todo = 待写；corpus = 要先录语料或新能力。登记了的测试被删 / 改名，tests/increment_cases_registry.rs 先红。",
+  "cases": [
+    { "id": "INC-A01", "group": "A", "layer": "L1", "title": "管道：FTUB 位移 / 增减成员 / 删 BRAN / 删 PIPE → 根与去向", "oracle": ["O3"], "status": "has", "tests": ["test:pipe26229_increment"] },
+    { "id": "INC-A02", "group": "A", "layer": "L1", "title": "设备：子件增删改尺寸位移、整台复制 / 删除、子件跨设备改挂", "oracle": ["O3"], "status": "has", "tests": ["test:equi_increment"] },
+    { "id": "INC-A03", "group": "A", "layer": "L1", "title": "HVAC：风管件增删改移，容器不进根集", "oracle": ["O3"], "status": "has", "tests": ["test:hvac_bran_increment"] },
+    { "id": "INC-A04", "group": "A", "layer": "L1", "title": "桥架：CWBRAN / CTRAY 初始导入窗口与阈值回退", "oracle": ["O3"], "status": "has", "tests": ["test:ctray_increment"] },
+    { "id": "INC-A05", "group": "A", "layer": "L0", "title": "模型影响三态：属性字典 totality、未知属性保守 regen", "oracle": ["O3"], "status": "has", "tests": ["test:model_impact", "lib:metadata_only_changes_are_known_neutral"] },
+    { "id": "INC-A06", "group": "A", "layer": "L0", "title": "只记账的会话（DBMDAT / DBMETA / CACHID / SPAMAP）→ no_model，零单元", "oracle": ["O3"], "status": "partial", "stage": "P1", "tests": ["lib:stamp_only_takes_the_stamp_alone_and_nothing_else", "lib:the_candidate_ratio_guard_nets_out_stamp_only_candidates"], "issues": ["#65"] },
+    { "id": "INC-A07", "group": "A", "layer": "L0", "title": "元数据门：NAME / DESC / PURP 改动不重算；unread_attribute 档", "oracle": ["O3"], "status": "has", "tests": ["lib:the_metadata_only_gate_is_on_by_default_and_can_be_shut", "lib:metadata_only_changes_are_known_neutral", "lib:the_impact_preview_skips_exactly_what_the_metadata_gate_admits"] },
+    { "id": "INC-A08", "group": "A", "layer": "L1'", "title": "钉死真窗口分桶与 advance 数守恒（含 2026-10-25 跨库一存的 8000 712→713 / 7997 363→365）", "oracle": ["O3"], "status": "has", "tests": ["lib:live_ams8000_pinned_windows_land_in_the_expected_buckets", "script:scripts/increment_matrix/run_window.py", "fixture:tests/fixtures/increment_matrix/windows.json"] },
+
+    { "id": "INC-B01", "group": "B", "layer": "L1", "title": "跨会话父子删除（issue-019）：净窗口 = 终态", "oracle": ["O3"], "status": "has", "tests": ["test:db8000_two_delete_fixture"], "issues": ["#19"] },
+    { "id": "INC-B02", "group": "B", "layer": "L1", "title": "历史可从终稿现切（SHA 相等）；会话对七类性质", "oracle": ["O3"], "status": "has", "tests": ["test:db_session_fixture_selfcheck", "test:db8000_session_pairs"] },
+    { "id": "INC-B03", "group": "B", "layer": "L1", "title": "基线流无幽灵无遗漏、分块不吞不重、真会话号", "oracle": ["O1"], "status": "has", "tests": ["test:baseline_stream_8000"] },
+    { "id": "INC-B04", "group": "B", "layer": "L1", "title": "读透 / 写透行级同源（含 pe.sesno）", "oracle": ["O2"], "status": "has", "tests": ["test:read_through_rows_parity"] },
+    { "id": "INC-B05", "group": "B", "layer": "L1'", "title": "增量 = 两端全量（8 个钉死窗口：插入 / 修改 / 删除 / 级联 / 改挂 / 桥架 / 管路分支 / 删管路分支）", "oracle": ["O1"], "status": "has", "tests": ["vendor:e3d-model/tests/increment_real.rs::an_increment_says_what_two_full_generations_say"] },
+    { "id": "INC-B06", "group": "B", "layer": "L0", "title": "会话回退 → 判回退、reinitialize 整库重建入队、不推水位", "oracle": ["O3"], "status": "partial", "stage": "P2", "tests": ["lib:only_a_rollback_requires_reinit", "lib:file_rollback_is_rejected", "lib:an_older_session_is_a_rollback", "lib:reinitialize_dominates_model_only_and_resets_the_model_floor"], "adrs": ["ADR-021"] },
+    { "id": "INC-B07", "group": "B", "layer": "L2", "title": "同路径换文件（dbnum / 会话号相同）必须被 identity_check 看见，不得静默复用旧计划", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "issues": ["#61"], "adrs": ["ADR-089"] },
+
+    { "id": "INC-C01", "group": "C", "layer": "L0", "title": "republish_gate：receipt == T 跳过、receipt <= S 放行、更新回退", "oracle": ["O3"], "status": "has", "tests": ["lib:the_republish_gate_proceeds_from_or_before_the_planned_baseline"], "adrs": ["ADR-089"] },
+    { "id": "INC-C02", "group": "C", "layer": "L0", "title": "model_target 核对不被 Windows 长路径前缀绊倒；回退理由逐格点名", "oracle": ["O3"], "status": "has", "tests": ["lib:the_windows_verbatim_prefix_is_not_a_target_difference", "lib:plain_file_path_strips_only_the_verbatim_prefix"], "issues": ["#64"] },
+    { "id": "INC-C03", "group": "C", "layer": "L3", "title": "regen → 整根位移 → kind=transform（根已在投影）；库上 trans / aabb 平移、记录数不变", "oracle": ["O3", "O2"], "status": "partial", "stage": "P1", "tests": ["l3:m2"], "adrs": ["ADR-066"] },
+    { "id": "INC-C04", "group": "C", "layer": "L2", "title": "regen → 登录一次 → 位移 → 仍 transform（D7：回执 < 基线）", "oracle": ["O3"], "status": "todo", "stage": "P1", "tests": [], "issues": ["#65"], "adrs": ["ADR-089"] },
+    { "id": "INC-C05", "group": "C", "layer": "L3", "title": "整条 PIPE 位移 → 刚体路按设计拒（HPOS / TPOS 变）→ regen，几何仍正确", "oracle": ["O3", "O1"], "status": "todo", "stage": "P3", "tests": [] },
+    { "id": "INC-C06", "group": "C", "layer": "L3", "title": "带 NOZZ 的 EQUI 位移走 transform；字典项（会话 0）按最新锚比", "oracle": ["O3"], "status": "todo", "stage": "P3", "tests": [], "adrs": ["ADR-089"] },
+    { "id": "INC-C07", "group": "C", "layer": "L4", "title": "读目录 ∧ 刚体路的根：目录项摘要跨登录不漂", "oracle": ["O3"], "status": "corpus", "stage": "P5", "tests": [], "adrs": ["ADR-089"] },
+
+    { "id": "INC-D01", "group": "D", "layer": "L2", "title": "只登录不改 → 未触根 /model/generate 仍 AlreadyAvailable（≤ 100 ms），无 [模型目标核对]", "oracle": ["O3"], "status": "todo", "stage": "P1", "tests": [], "issues": ["#65"], "adrs": ["ADR-089"] },
+    { "id": "INC-D02", "group": "D", "layer": "L0", "title": "文件身份锚：追加 + mtime 改写身份不变；原子替换身份变；超过最新会话报错（真文件，ignored）", "oracle": ["O3"], "status": "has", "tests": ["lib:model_file_identity_survives_header_rewrites_and_appends_but_not_replacement"], "adrs": ["ADR-089"] },
+    { "id": "INC-D03", "group": "D", "layer": "L0", "title": "回执落后于文件但库级承诺在 → 不过期；承诺不在 → 退回等值；字典项只比身份；身份不含 mtime", "oracle": ["O3"], "status": "has", "tests": ["lib:a_receipt_behind_the_file_is_stale_only_without_a_library_promise", "lib:dictionary_targets_are_judged_by_identity_alone", "lib:library_file_identity_is_the_frozen_anchor_not_mtime"], "adrs": ["ADR-089"] },
+    { "id": "INC-D04", "group": "D", "layer": "L2", "title": "编辑窗口里未触根跨多窗保持 AlreadyAvailable（回执不动）", "oracle": ["O3"], "status": "todo", "stage": "P1", "tests": [], "adrs": ["ADR-079", "ADR-089"] },
+    { "id": "INC-D05", "group": "D", "layer": "L0", "title": "房间点查对回滚会话判过期、对前移不判；任一房间输入变了即拒", "oracle": ["O3"], "status": "has", "tests": ["lib:changes_to_any_room_input_reject_the_result", "lib:a_receipt_behind_the_file_is_stale_only_without_a_library_promise"], "adrs": ["ADR-073", "ADR-089"] },
+
+    { "id": "INC-E01", "group": "E", "layer": "L0", "title": "目录落款按 watch_dbnums 分域；域外只点名；排工第 3 步不静默；周期拍安静", "oracle": ["O3"], "status": "has", "tests": ["lib:catalogue_stamps_split_by_watch_scope_and_only_behind_outsiders_are_named", "lib:the_catalogue_reconcile_scopes_stamps_before_grouping_and_never_skips_silently", "lib:the_runtime_catalogue_reconcile_speaks_only_when_it_has_something_to_say"], "issues": ["#67"] },
+    { "id": "INC-E02", "group": "E", "layer": "L2", "title": "三条入口（启动 / 周期 / update/execute）对落款落后且无引用者的库排 stamp_only 空任务并盖落款，下一拍安静", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "issues": ["#61", "#67"], "adrs": ["ADR-079"] },
+    { "id": "INC-E03", "group": "E", "layer": "L2", "title": "域外落后库：周期拍不出声，/health.catalogue_reconcile.behind_out_of_scope_libraries 点名", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "issues": ["#67"] },
+    { "id": "INC-E04", "group": "E", "layer": "L4", "title": "目录件真改（Paragon）→ 反查命中设计引用者 → 只排引用根 → 重算后几何变", "oracle": ["O1", "O3"], "status": "corpus", "stage": "P5", "tests": ["lib:live_ams7000_catalogue_window_regenerates_referrers_and_fails_stale_stamps"], "adrs": ["ADR-058"] },
+    { "id": "INC-E05", "group": "E", "layer": "L0", "title": "目录文件按设计库真读的那份分组（ACP 读 acp7000、AMS 读 ams7355）", "oracle": ["O3"], "status": "has", "tests": ["lib:libraries_group_by_the_catalogue_files_their_generation_reads"], "issues": ["#47"] },
+
+    { "id": "INC-F01", "group": "F", "layer": "L0", "title": "整片删把同根老生成链行一并换掉；没有几何指针的属性面行不碰", "oracle": ["O2"], "status": "has", "tests": ["lib:slice_delete_removes_every_representation_of_the_slice_and_nothing_else", "lib:slice_sources_include_legacy_geometry_rows_under_the_root"], "adrs": ["ADR-088"] },
+    { "id": "INC-F02", "group": "F", "layer": "L2", "title": "冷重启后 /model/records == 重启前投影（同一根、同一窗口之后）", "oracle": ["O2"], "status": "todo", "stage": "P1", "tests": [], "adrs": ["ADR-088"] },
+    { "id": "INC-F03", "group": "F", "layer": "L2", "title": "/tasks 历史跨重启、?before= 翻页、/tasks/{id}/changes 与窗口编辑一致", "oracle": ["O3"], "status": "partial", "stage": "P2", "tests": ["lib:finished_tasks_survive_a_reopen_newest_first", "lib:list_before_pages_by_created_at_exclusive", "lib:a_recorded_change_list_is_found_again_by_task_and_day", "lib:a_window_ledger_folds_into_one_change_per_element_with_its_root"] },
+    { "id": "INC-F04", "group": "F", "layer": "L2", "title": "单元回执 rooms_before/after、geometry_before/after/diff 与真实位移一致", "oracle": ["O3"], "status": "todo", "stage": "P1", "tests": [] },
+    { "id": "INC-F05", "group": "F", "layer": "L0", "title": "水位尾事务：生成失败不推 model_sesno、数据硬失败不推 applied_sesno", "oracle": ["O3"], "status": "partial", "stage": "P2", "tests": ["lib:a_failed_model_leaves_the_model_watermark_alone_but_still_records_the_roots", "lib:the_tail_is_one_transaction_and_stamps_the_model_watermark_under_the_data_gate", "lib:an_abandoned_root_leaves_the_task_partial_the_watermark_unstamped_and_the_marker_finished"], "adrs": ["ADR-001", "ADR-056"] },
+
+    { "id": "INC-G01", "group": "G", "layer": "L3", "title": "增量边集合 == 同数据全量重建边集合（RI-12）", "oracle": ["O2"], "status": "partial", "stage": "P2", "tests": ["script:scripts/Run-LiveBatch.ps1"], "adrs": ["ADR-010"] },
+    { "id": "INC-G02", "group": "G", "layer": "L2", "title": "房内小位移 rooms 不变；跨房位移 rooms_after 换房、旧房边消失", "oracle": ["O3", "O2"], "status": "todo", "stage": "P1", "tests": [] },
+    { "id": "INC-G03", "group": "G", "layer": "L2", "title": "房间定义元素（PANE / FRMW）变 → 一条 room_rebuild 任务，边数与全量相同", "oracle": ["O2", "O3"], "status": "todo", "stage": "P2", "tests": [], "adrs": ["ADR-073"] },
+    { "id": "INC-G04", "group": "G", "layer": "L0", "title": "快照 / 点查走边目标不扫表（EXPLAIN 无 Iterate Table）；边不依赖 pe 行", "oracle": ["O3"], "status": "has", "tests": ["lib:a_root_snapshot_counts_members_per_room_and_panel", "lib:room_membership_edges_are_readable_without_pe_attribute_rows"], "issues": ["#66"] },
+
+    { "id": "INC-H01", "group": "H", "layer": "L2", "title": "保存中途被看见：第一窗 failed（anchor 已改变、水位不动）→ 后继 supersedes 它并成功", "oracle": ["O3"], "status": "partial", "stage": "P1", "tests": ["lib:a_follow_up_window_links_the_refused_batch_it_covers", "lib:applied_or_uncovered_batches_are_not_superseded"] },
+    { "id": "INC-H02", "group": "H", "layer": "L2", "title": "同右端连续失败 5 次停止自动重跑，新会话或人工执行清零", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [] },
+    { "id": "INC-H03", "group": "H", "layer": "L2", "title": "一个 dbnum 失败不阻断另一个（IU-INV-04）", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "adrs": ["ADR-011"] },
+    { "id": "INC-H04", "group": "H", "layer": "L2", "title": "回退 → reinitialize 整库重建，worker 冻结点复核（同 INC-B06 的 L2 半边）", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "adrs": ["ADR-021"] },
+    { "id": "INC-H05", "group": "H", "layer": "L2", "title": "生成失败保留待重试、水位不动；库健康后下一任务再试", "oracle": ["O3"], "status": "partial", "stage": "P2", "tests": ["lib:an_abandoned_root_leaves_the_task_partial_the_watermark_unstamped_and_the_marker_finished"] },
+
+    { "id": "INC-I01", "group": "I", "layer": "L2", "title": "开工前 / 收尾后房间快照 ≤ 200 ms / 根（现值 13–53 ms）", "oracle": ["O5"], "status": "todo", "stage": "P3", "tests": [], "issues": ["#66"] },
+    { "id": "INC-I02", "group": "I", "layer": "L2", "title": "规划器 plan：1 元素窗 ≤ 1 s（现值 8000 0.73 s / 7997 13.8 s）", "oracle": ["O5"], "status": "todo", "stage": "P3", "tests": [], "issues": ["#68"] },
+    { "id": "INC-I03", "group": "I", "layer": "L3", "title": "SYS 批次（只多一个 DBMDAT 会话）≤ 2 s（现值 ~11 s）", "oracle": ["O5"], "status": "todo", "stage": "P3", "tests": [], "issues": ["#69"] },
+    { "id": "INC-I04", "group": "I", "layer": "L2", "title": "SAVEWORK → 单库 in_sync ≤ 5 s（不含排队；现值 8000 1 元素窗 ≈ 2 s）", "oracle": ["O5"], "status": "todo", "stage": "P3", "tests": [] },
+    { "id": "INC-I05", "group": "I", "layer": "L2", "title": "/model/generate 未触根 ≤ 100 ms（现值 14–21 ms）", "oracle": ["O5"], "status": "todo", "stage": "P3", "tests": [], "issues": ["#65"] },
+    { "id": "INC-I06", "group": "I", "layer": "L2", "title": "e3d.room.lookup 点查 ≤ 100 ms（现值 16–48 ms）", "oracle": ["O5"], "status": "todo", "stage": "P3", "tests": [], "issues": ["#66"] },
+
+    { "id": "INC-J01", "group": "J", "layer": "L2", "title": "/update/execute 202 回执形状、unselected、warnings 含目录核对句", "oracle": ["O3"], "status": "partial", "stage": "P2", "tests": ["lib:explicit_execute_reconciles_catalogue_versions_and_health_exposes_it", "lib:explicit_execute_arms_backlog_even_when_scan_is_up_to_date"] },
+    { "id": "INC-J02", "group": "J", "layer": "L2", "title": "/health 新格：catalogue_reconcile.behind_out_of_scope_libraries、startup.reconcile.catalogue_behind_out_of_scope、watch_dbnums(_origin)", "oracle": ["O3"], "status": "partial", "stage": "P2", "tests": ["lib:the_runtime_catalogue_reconcile_speaks_only_when_it_has_something_to_say", "lib:health_exposes_all_increment_stage_controls"], "issues": ["#67"] },
+    { "id": "INC-J03", "group": "J", "layer": "L1", "title": "/dbnums 三水位相等即 in_sync；/tasks 字段集不缩（响应契约）", "oracle": ["O3"], "status": "has", "tests": ["test:refno_native_api_contract"] }
+  ]
+}

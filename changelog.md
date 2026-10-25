@@ -15,6 +15,13 @@
 - **验证**：`cargo test --lib -- model_coverage reverse_reference startup_reconcile initialization_phase cata_dependency web_service::handlers::tests watch_scope`（分域 / 落后判定纯函数、横幅三种触发、回执合并、源码钉「先分域再分组、第 3 步不许静默 continue」）。真机复现：把 7997 的 5052 落款改回 189、`watch_dbnums = [7998, 8000]`，改前二进制启动与每拍周期核对都报 `1 个 CATA 库已前移…[5052]`、收窗 189→190、点查 408 次、排 0 根；改后启动只打 `1 个设计库的库级目录落款落在旧目录上，但在监听限定…域外…[7997]`，`stale_catalogue_dbnums = []`、没有窗口和反查，周期拍安静、`/health.catalogue_reconcile.behind_out_of_scope_libraries = [7997]`；再把 7997 加回限定域重启，启动核对排盖落款的空任务、落款回到 190，下一拍安静。
 - **不做**：不替域外的库盖落款（没有任务替它算过，盖了就是说谎）；不算 8000 / 7998 为什么没有目录落款（`task_catalogue_stamps` 只在能替整库说话的任务上盖，ADR-079 的设计）。
 
+### 增量更新自动化测试案例集合：计划批准，P0 登记表落地（`tests/fixtures/increment_cases.json` + 钉 + 报告脚本）
+
+- **为什么**：用户「使用 plannatator 制定一个详细的增量更新的自动化测试案例集合」。盘点下来：L0 单测（2700+）/ L1 离线夹具（CI）/ vendor「增量 = 两端全量」真库门是实的，**运行期那一层**（监听器 / 队列 / 回执 / 水位 / 重启 / `/health`）只有要真 E3D 的 `l3_suite` 8 个场景，而 #64 / #65 / #66 / #67 / ADR-088 / 补排链全是在这层被人手摸出来的。
+- **计划**：`docs/plans/2026-10-25-incremental-update-automated-test-suite-plan.md`（plannotator `--gate` approved + 对话「按推荐继续」，D1–D8 全按推荐）：判据只认「两端全量」（O1）与「回执 / 水位 / 库上行」（O2 / O3），RVM 只在几何算法改时出场；新建 **L2 回放夹具**（录好的会话链按 SAVEWORK 逐步「就地追加 + 改头」喂给真监听器，`--half` 确定性复现补排链、`--bookkeeping` 只登录会话；离线、进 CI）；案例 A–J 十组；本周手动场景收进 `l3_suite` 并改到隔离副本上跑；性能预算六条；P0–P5 分段。
+- **P0 落地**：`tests/fixtures/increment_cases.json`（55 条：有 22 / 部分 10 / 补 21 / 语料 2，有承载占 58 %；待落地 P1:9 P2:14 P3:8 P5:2）；`tests/increment_cases_registry.rs` 钉表的形状、十组齐全、**登记的每条承载测试真存在**（`lib:` 在 `src/**` 有同名 fn、`test:` 有文件、`l3:` 在场景表、`vendor:` 在 `vendor/shared` 下有文件且含 fn、`script:` / `fixture:` 文件在），改名一条即红（已用 bogus 名字试过）；`scripts/increment_cases_report.py` 渲 markdown / 总账；CI `offline-increment-regression` 多一步 `Pin the increment test-case registry`；`tests/fixtures/increment_matrix/windows.json` 多本周跨库一存的两窗（8000 712→713、7997 363→365，INC-A08）。
+- **顺带**：按推荐立了两张性能票 #68（规划器 `plan` 费用随 `roots_T` 线性，~2 ms/根）、#69（每次 SAVEWORK 连带的 amssys 批次 ~11 s）；#61 B 类「目录版本核对通道三条入口」「真实工程两库端到端 + 性能」两条已勾（评论 …6394528718 / …6394962969）。
+
 ## 2026-10-24
 
 ### `/tasks` 长出历史：终态任务落盘 + `?before=` 翻页；失败批次和补排它的那条互指；整库房间重算占一行 `room_rebuild`；单元回执带房间前后、几何前后；每批一份元素级变化清单 `GET /tasks/{id}/changes`；整片删把老生成链的同根老行一起换掉，库上的模型行跟着增量走

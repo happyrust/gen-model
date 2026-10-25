@@ -2,7 +2,7 @@
 
 > 来源：用户 2026-10-25 15:5x「按推荐继续。并使用 plannatator 制定一个详细的增量更新的自动化测试案例集合。确保我们能够通过自动化测试案例来确保增量更新的正确性。」
 > 状态：**已批准**（2026-10-25 17:4x：plannotator `--gate` 回 `{"decision":"approved"}`、无批注（`.scratch/pencil/test-suite-plan-gate-r1.json`），对话里同时「按推荐继续」）。§6 八条全按推荐项定：D1 两端全量为唯一几何裁判、D2 录 4 条链 / zip 封顶 12 MB、D3 就地追加 + 改头、D4 先记基线相对 ±50 %、D5 L0/L1/L2 进 PR 门、D6 测试钩注入必败、D7 L3 一律隔离副本、D8 P0→P5。
-> **P0 进行中**（同日）。
+> **P0 已落地**（同日）：`tests/fixtures/increment_cases.json`（55 条：有 22 / 部分 10 / 补 21 / 语料 2，有承载占 58 %）、`tests/increment_cases_registry.rs`（3 钉，CI 新步骤 `Pin the increment test-case registry`）、`scripts/increment_cases_report.py`、`windows.json` 多本周两窗。§4 的表从此以登记表为准（`python scripts/increment_cases_report.py`），本文的副本不再手改。下一段 P1。
 > 口径：本文是**案例集合 + 落地计划**，不是又一份测试总纲——分层与编号沿用 `docs/2026-08-06_model-increment-unit-test-plan.md`（U1–U13 选组、IU-/RI- 不变量），live 事实沿用 `docs/2026-08-12_live-test-ledger.md`，学科矩阵沿用 `docs/plans/2026-09-05-pipe-hvac-ctray-equi-increment-test-matrix.md`。那三份不重写，本文只接上它们**没有接住的那一截**：这两周真机上暴露的缺陷全部发生在「自动化覆盖不到的层」。
 > 代码事实对到 `refactor` `b71617ee3`（2026-10-25）。行号 / 测试名以源码为准。
 > 关联：ADR-079（库级水位）、ADR-080 / 066（单元级发布 / 刚体前移）、ADR-088（整片删老行）、ADR-089（新旧判据与冻结锚）、ADR-011（单队列单消费者）、ADR-010（房间增量 = 全量逐边）；GitHub #61 / #63 / #64 / #65 / #66 / #67 / #68 / #69；`.github/workflows/windows-tests.yml`（`offline-increment-regression` job）。
