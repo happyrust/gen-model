@@ -1,7 +1,7 @@
 {
   "format": "increment-cases-v1",
   "plan": "docs/plans/2026-10-25-incremental-update-automated-test-suite-plan.md",
-  "_doc": "增量更新自动化测试案例登记表（计划 §5.1）。单一事实：案例在哪一层、认哪条裁判、由哪些测试承载。tests[] 的前缀：lib:<单测函数名>（src/**）、test:<tests/<name>.rs>、l3:<l3_suite 场景 id>、vendor:<vendor/shared 下相对路径>::<fn>、script:<仓内路径>、fixture:<仓内路径>、replay:<tests/increment_replay/cases/<name>.json>。status：has = 已有承载；partial = 已有一部分、stage 里的那段补其余层；todo = 待写；corpus = 要先录语料或新能力。登记了的测试被删 / 改名，tests/increment_cases_registry.rs 先红。",
+  "_doc": "增量更新自动化测试案例登记表（计划 §5.1）。replay: 前缀的承载在 tests/increment_replay/cases/，由 `cargo test --test increment_replay -- --test-threads=1` 跑（要 AIOS_REPLAY_PROJECT_ROOT 影子工程根，本机 nightly）。单一事实：案例在哪一层、认哪条裁判、由哪些测试承载。tests[] 的前缀：lib:<单测函数名>（src/**）、test:<tests/<name>.rs>、l3:<l3_suite 场景 id>、vendor:<vendor/shared 下相对路径>::<fn>、script:<仓内路径>、fixture:<仓内路径>、replay:<tests/increment_replay/cases/<name>.json>。status：has = 已有承载；partial = 已有一部分、stage 里的那段补其余层；todo = 待写；corpus = 要先录语料或新能力。登记了的测试被删 / 改名，tests/increment_cases_registry.rs 先红。",
   "cases": [
     { "id": "INC-A01", "group": "A", "layer": "L1", "title": "管道：FTUB 位移 / 增减成员 / 删 BRAN / 删 PIPE → 根与去向", "oracle": ["O3"], "status": "has", "tests": ["test:pipe26229_increment"] },
     { "id": "INC-A02", "group": "A", "layer": "L1", "title": "设备：子件增删改尺寸位移、整台复制 / 删除、子件跨设备改挂", "oracle": ["O3"], "status": "has", "tests": ["test:equi_increment"] },
@@ -12,7 +12,7 @@
     { "id": "INC-A07", "group": "A", "layer": "L0", "title": "元数据门：NAME / DESC / PURP 改动不重算；unread_attribute 档", "oracle": ["O3"], "status": "has", "tests": ["lib:the_metadata_only_gate_is_on_by_default_and_can_be_shut", "lib:metadata_only_changes_are_known_neutral", "lib:the_impact_preview_skips_exactly_what_the_metadata_gate_admits"] },
     { "id": "INC-A08", "group": "A", "layer": "L1'", "title": "钉死真窗口分桶与 advance 数守恒（含 2026-10-25 跨库一存的 8000 712→713 / 7997 363→365）", "oracle": ["O3"], "status": "has", "tests": ["lib:live_ams8000_pinned_windows_land_in_the_expected_buckets", "script:scripts/increment_matrix/run_window.py", "fixture:tests/fixtures/increment_matrix/windows.json"] },
 
-    { "id": "INC-B01", "group": "B", "layer": "L1", "title": "跨会话父子删除（issue-019）：净窗口 = 终态", "oracle": ["O3"], "status": "has", "tests": ["test:db8000_two_delete_fixture"], "issues": ["#19"] },
+    { "id": "INC-B01", "group": "B", "layer": "L1", "title": "跨会话父子删除（issue-019）：净窗口 = 终态", "oracle": ["O3"], "status": "has", "tests": ["test:db8000_two_delete_fixture", "replay:db8000-two-delete"], "issues": ["#19"] },
     { "id": "INC-B02", "group": "B", "layer": "L1", "title": "历史可从终稿现切（SHA 相等）；会话对七类性质", "oracle": ["O3"], "status": "has", "tests": ["test:db_session_fixture_selfcheck", "test:db8000_session_pairs"] },
     { "id": "INC-B03", "group": "B", "layer": "L1", "title": "基线流无幽灵无遗漏、分块不吞不重、真会话号", "oracle": ["O1"], "status": "has", "tests": ["test:baseline_stream_8000"] },
     { "id": "INC-B04", "group": "B", "layer": "L1", "title": "读透 / 写透行级同源（含 pe.sesno）", "oracle": ["O2"], "status": "has", "tests": ["test:read_through_rows_parity"] },
