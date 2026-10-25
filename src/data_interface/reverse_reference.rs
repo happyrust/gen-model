@@ -214,6 +214,11 @@ pub struct CatalogueCascadeReport {
     pub lazy_roots: usize,
     /// 命中却因监听限定域 / 发布队列阻断而跳过的根数。
     pub skipped_out_of_scope: usize,
+    /// 落款仍旧、却被监听限定（`watch_dbnums`）挡在排工之外的设计库，升序（GitHub #67）。核对已先按限定域
+    /// 分过一次（`model_coverage::split_libraries_by_watch_scope`），这里本该恒空；非空就是有谁把域外的落款送了
+    /// 进来——说出来，不静默。
+    #[serde(default)]
+    pub libraries_out_of_scope: Vec<u32>,
     /// 反查整体没跑成的原因（MDB 成员读不到、某个库文件打不开……）。此时上面全 0、
     /// 什么都没排，受影响的根只剩按需 `ensure` 的目录指纹失配兜底——是**未知**，不是零命中。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +285,10 @@ impl CatalogueCascadeReport {
         self.stamp_only.dedup();
         self.lazy_roots += other.lazy_roots;
         self.skipped_out_of_scope += other.skipped_out_of_scope;
+        self.libraries_out_of_scope
+            .extend(other.libraries_out_of_scope);
+        self.libraries_out_of_scope.sort_unstable();
+        self.libraries_out_of_scope.dedup();
         self.error = match (self.error.take(), other.error) {
             (Some(mine), Some(theirs)) => Some(format!("{mine}；{theirs}")),
             (mine, theirs) => mine.or(theirs),
@@ -349,6 +358,13 @@ impl CatalogueCascadeReport {
             line.push_str(&format!(
                 "，{} 根在限定域外 / 被阻断跳过",
                 self.skipped_out_of_scope
+            ));
+        }
+        if !self.libraries_out_of_scope.is_empty() {
+            line.push_str(&format!(
+                "，{} 个库落款仍旧却在 watch_dbnums 限定域外、没排 {:?}",
+                self.libraries_out_of_scope.len(),
+                self.libraries_out_of_scope
             ));
         }
         if self.unrooted > 0 {
@@ -1457,6 +1473,15 @@ mod tests {
             line.contains("1 个库没被波及、只排盖落款的空任务 [8002]"),
             "{line}"
         );
+
+        // GitHub #67：被监听限定挡在排工外的库不许静默——横幅点名是 `watch_dbnums` 划的。
+        report.libraries_out_of_scope = vec![7997];
+        let line = report.banner_line();
+        assert!(
+            line.contains("1 个库落款仍旧却在 watch_dbnums 限定域外、没排 [7997]"),
+            "{line}"
+        );
+        report.libraries_out_of_scope.clear();
 
         report.degraded.insert(7351, "零表".into());
         report.enqueued_degraded.insert(8001, 40);

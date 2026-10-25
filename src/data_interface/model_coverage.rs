@@ -502,6 +502,40 @@ pub(crate) fn libraries_behind_catalogue(
         .collect()
 }
 
+/// 库级目录落款按监听限定分成域内 / 域外两份（纯函数，GitHub #67）。
+///
+/// 目录版本核对只为**域内**的库点名 → 收窗 → 反查 → 排工：本进程的模型工作单只处理 `watch_dbnums`
+/// 里的库（[`crate::data_interface::watch_scope`]），域外的库排了也没人跑，每拍为它收窗、点查上千次再报成
+/// 「已发布的根落在旧目录上」就是把一个永远不会动的库报成待办。域外的那份只走
+/// [`libraries_behind_any_catalogue`] 点个名。没限定时 `admits` 恒真，域外为空，行为与此前逐位相同。
+pub(crate) fn split_libraries_by_watch_scope(
+    libraries: BTreeMap<u32, BTreeMap<u32, u32>>,
+    admits: impl Fn(u32) -> bool,
+) -> (
+    BTreeMap<u32, BTreeMap<u32, u32>>,
+    BTreeMap<u32, BTreeMap<u32, u32>>,
+) {
+    libraries.into_iter().partition(|(dbnum, _)| admits(*dbnum))
+}
+
+/// 落款落在旧目录上的设计库（纯函数，GitHub #67）：任一目录落款 `session < 文件最新` 即算，升序。
+/// `latest(设计库, 目录库)` 是该设计库生成真读的那份目录文件的最新会话（GitHub #47 的选法）；
+/// `None`（读不到）是**未知**，不算落后——与 [`stale_catalogue_dbnums`] 同一口径。
+pub(crate) fn libraries_behind_any_catalogue(
+    libraries: &BTreeMap<u32, BTreeMap<u32, u32>>,
+    mut latest: impl FnMut(u32, u32) -> Option<u32>,
+) -> Vec<u32> {
+    libraries
+        .iter()
+        .filter(|(library, stamps)| {
+            stamps.iter().any(|(&catalogue, &session)| {
+                latest(**library, catalogue).is_some_and(|now| now > session)
+            })
+        })
+        .map(|(&library, _)| library)
+        .collect()
+}
+
 /// 记在案的目录版本与此刻文件上的一比：哪些 CATA 库已经前移了，哪些说不出来。
 ///
 /// 纯函数，当前会话从 `latest` 注入——真正的文件读在调用方（`spawn_blocking`），
@@ -554,6 +588,10 @@ pub(crate) struct CatalogueReconcile {
     pub(crate) windows: Vec<crate::data_interface::cata_cascade_window::CatalogueWindowReport>,
     /// P3：对上面那些窗口做的反查与排工。`None` = 没有过期库，没跑。
     pub(crate) cascade: Option<crate::data_interface::reverse_reference::CatalogueCascadeReport>,
+    /// 监听限定（`watch_dbnums`）之外、库级目录落款却落在旧目录上的设计库，升序（GitHub #67）。
+    /// 本进程不为它们收窗 / 反查 / 排工，`stale` 里也没有它们的目录库——这一格只把事实说出来，免得
+    /// 「排 RegenRoot 0 根」被当成「没有库落后」。没限定时恒空。
+    pub(crate) behind_out_of_scope: Vec<u32>,
     /// A3（2026-09-08）：数据面那一半——已入库依赖行（`pe.dependency = true` 与它们的 `ref_rev`）
     /// 随目录前移的账。每次核对都跑，候选是全部有 `cata_dependency_state` 行的目录库，
     /// 与上面模型面的「过期」名单无关。
@@ -578,6 +616,9 @@ impl CatalogueReconcile {
             }
             (mine, theirs) => mine.or(theirs),
         };
+        self.behind_out_of_scope.extend(other.behind_out_of_scope);
+        self.behind_out_of_scope.sort_unstable();
+        self.behind_out_of_scope.dedup();
     }
 }
 
@@ -644,8 +685,13 @@ async fn reconcile_published_root_stamps() -> CatalogueReconcile {
             return CatalogueReconcile::default();
         }
     };
+    // 监听限定（GitHub #67）：域外的库本进程不排，它们的落款不进点名 → 收窗 → 反查 → 排工——否则每一拍都为一个
+    // 永远不会排的库收窗、点查上千次，还把它报成「已发布的根落在旧目录上」而一字不提它被限定挡着。
+    // 域外的库只做最便宜的那一步（读它真读的那几份目录文件的头），落后的记进 `behind_out_of_scope`。
+    let (libraries, outside) =
+        split_libraries_by_watch_scope(libraries, crate::data_interface::watch_scope::admits);
     let recorded = oldest_catalogue_sessions(&libraries);
-    if recorded.is_empty() {
+    if recorded.is_empty() && outside.is_empty() {
         return CatalogueReconcile::default();
     }
     // 选法读不到（MDB 成员名单读挂）：每个记在案的目录库这次都是未知——与此前逐库 `latest_source_version`
@@ -680,7 +726,50 @@ async fn reconcile_published_root_stamps() -> CatalogueReconcile {
         let part = reconcile_catalogue_group(choice.clone(), overrides, members).await;
         merged.absorb(part);
     }
+    merged.behind_out_of_scope = libraries_behind_outside_scope(&choice, &outside).await;
     merged
+}
+
+/// 域外（`watch_dbnums` 之外）的设计库里落款落在旧目录上的那些（GitHub #67）：只读它们生成真读的那几份
+/// 目录文件的头（GitHub #47 的选法，同一份文件只读一次），不收窗、不反查、不排工。读不到最新的目录库是未知，
+/// 不算落后。文件 I/O，阻塞任务里做。
+async fn libraries_behind_outside_scope(
+    choice: &Arc<crate::fast_model::e3d_model_service::CatalogueFileChoice>,
+    outside: &BTreeMap<u32, BTreeMap<u32, u32>>,
+) -> Vec<u32> {
+    if outside.is_empty() {
+        return Vec::new();
+    }
+    let files: BTreeMap<(u32, u32), PathBuf> = outside
+        .iter()
+        .flat_map(|(&library, stamps)| {
+            let choice = choice.clone();
+            stamps.keys().filter_map(move |&catalogue| {
+                let file = choice
+                    .for_library(library, catalogue)
+                    .or_else(|| choice.declared(catalogue))?;
+                Some(((library, catalogue), file))
+            })
+        })
+        .collect();
+    let outside = outside.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut latest_by_file: BTreeMap<(u32, PathBuf), Option<u32>> = BTreeMap::new();
+        libraries_behind_any_catalogue(&outside, |library, catalogue| {
+            let file = files.get(&(library, catalogue))?;
+            *latest_by_file
+                .entry((catalogue, file.clone()))
+                .or_insert_with(|| {
+                    crate::data_interface::model_source::latest_source_version_of_file(
+                        catalogue, "CATA", file,
+                    )
+                    .ok()
+                    .map(|version| version.sesno)
+                })
+        })
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// 一组目录文件宇宙相同的设计库走一遍点名 → 收窗 → 反查排工（GitHub #47 之前这就是整个核对）。
@@ -800,6 +889,10 @@ pub struct CatalogueReconcileSnapshot {
     pub catalogue_windows: Vec<crate::data_interface::cata_cascade_window::CatalogueWindowReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalogue_cascade: Option<crate::data_interface::reverse_reference::CatalogueCascadeReport>,
+    /// 监听限定（`watch_dbnums`）之外、库级目录落款却落在旧目录上的设计库，升序（GitHub #67）。本进程
+    /// 不为它们收窗 / 反查 / 排工，`stale_catalogue_dbnums` 里也没有它们的目录库；要重算得把库加进限定域或
+    /// 在不限定的进程里跑。没限定时恒空。
+    pub behind_out_of_scope_libraries: Vec<u32>,
     /// A3：数据面那一半——已入库依赖行随目录前移的账（候选 = 全部有 `cata_dependency_state` 行的
     /// 目录库；`refreshed` 空且 `errors` 空 = 这一次没有依赖行要前移）。
     pub catalogue_dependency_refresh:
@@ -819,6 +912,7 @@ impl CatalogueReconcileSnapshot {
             unreadable,
             windows,
             cascade,
+            behind_out_of_scope,
             dependency_refresh,
             ..
         } = reconcile;
@@ -835,6 +929,7 @@ impl CatalogueReconcileSnapshot {
                 .is_some_and(|cascade| cascade.is_degraded()),
             catalogue_windows: windows,
             catalogue_cascade: cascade,
+            behind_out_of_scope_libraries: behind_out_of_scope,
             catalogue_dependency_refresh: dependency_refresh,
         }
     }
@@ -890,11 +985,33 @@ impl CatalogueReconcileSnapshot {
                 lines.push(format!("  {}", cascade.banner_line()));
             }
         }
+        // 域外落后的库（GitHub #67）：周期拍只在本来就要出声时附上一句，安静的那一拍照旧不打；
+        // 文件前移 / 人工触发总说——这一句就是「为什么这个库没被排」的答案。
+        if !self.behind_out_of_scope_libraries.is_empty()
+            && (self.trigger != "periodic" || !self.stale_catalogue_dbnums.is_empty())
+        {
+            lines.push(format!(
+                "[{origin}] {}",
+                behind_out_of_scope_line(&self.behind_out_of_scope_libraries)
+            ));
+        }
         if let Some(line) = self.catalogue_dependency_refresh.banner_line() {
             lines.push(format!("[{origin}] {line}"));
         }
         lines
     }
+}
+
+/// 域外落后的库那一句（GitHub #67），启动横幅与运行期横幅共用。必点名限定是 `watch_dbnums` /
+/// `--watch-dbnum` 划的（[`crate::data_interface::watch_scope`] 的纪律：说不清是谁跳的就是 issue #10）。
+pub(crate) fn behind_out_of_scope_line(libraries: &[u32]) -> String {
+    format!(
+        "目录版本核对：{} 个设计库的库级目录落款落在旧目录上，但在监听限定（{} / {}）域外，本进程不收窗、\
+         不反查、不排工 {libraries:?}——要重算请把它们加进限定域，或在不限定的进程里跑（GitHub #67）",
+        libraries.len(),
+        crate::data_interface::watch_scope::WATCH_CONFIG_KEY,
+        crate::data_interface::watch_scope::WATCH_SWITCH
+    )
 }
 
 /// 进程内：最近一次运行期目录核对 + sweep 上一轮观察到的目录文件会话。
@@ -1167,6 +1284,54 @@ fn the_runtime_catalogue_reconcile_speaks_only_when_it_has_something_to_say() {
     let lines = stale.banner_lines();
     assert_eq!(lines.len(), 3, "{lines:?}");
     assert!(lines[0].contains("1 个 CATA 库已前移") && lines[0].contains("requested"));
+
+    // GitHub #67：限定域外落后的库——安静的周期拍照旧不打；人工 / 前移触发或域内真有过期库时附上一句，
+    // 点名是 `watch_dbnums` 划的；`/health` 上那一格不管哪种触发都在。
+    let outside_only = |trigger: &'static str| {
+        CatalogueReconcileSnapshot::from_reconcile(
+            "reconcile",
+            trigger,
+            &[],
+            std::time::Duration::from_millis(3),
+            CatalogueReconcile {
+                behind_out_of_scope: vec![7997],
+                ..CatalogueReconcile::default()
+            },
+        )
+    };
+    let quiet_outside = outside_only("periodic");
+    assert!(quiet_outside.banner_lines().is_empty());
+    assert_eq!(quiet_outside.behind_out_of_scope_libraries, vec![7997]);
+    let json = serde_json::to_value(&quiet_outside).expect("serialises");
+    assert_eq!(
+        json["behind_out_of_scope_libraries"],
+        serde_json::json!([7997])
+    );
+    let lines = outside_only("requested").banner_lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("没有落在旧目录上"), "{lines:?}");
+    assert!(
+        lines[1].contains("[reconcile]")
+            && lines[1].contains("[7997]")
+            && lines[1].contains("watch_dbnums")
+            && lines[1].contains("不排工"),
+        "{lines:?}"
+    );
+    let both = CatalogueReconcileSnapshot::from_reconcile(
+        "reconcile",
+        "periodic",
+        &[],
+        std::time::Duration::from_millis(3),
+        CatalogueReconcile {
+            stale: vec![7000],
+            behind_out_of_scope: vec![7997],
+            ..CatalogueReconcile::default()
+        },
+    );
+    let lines = both.banner_lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].contains("1 个 CATA 库已前移"), "{lines:?}");
+    assert!(lines[1].contains("[7997]"), "{lines:?}");
 }
 
 /// 逐个过期目录库收窗；收不了的记 `error`，**不**让一个库的失败挡住别的库。
@@ -1349,6 +1514,7 @@ async fn cascade_stale_catalogue_windows(
             report.already_current = account.already_current;
             report.stamp_only = account.stamp_only;
             report.skipped_out_of_scope = account.skipped_out_of_scope;
+            report.libraries_out_of_scope = account.libraries_out_of_scope;
         }
         Err(error) => {
             report.error = Some(format!("enqueue the reverse cascade roots: {error:#}"));
@@ -1410,6 +1576,7 @@ struct CatalogueCascadeEnqueue {
     already_current: usize,
     stamp_only: Vec<u32>,
     skipped_out_of_scope: usize,
+    libraries_out_of_scope: Vec<u32>,
 }
 
 /// 把反查命中的根与退化库排成**带明确根名单与库级目录落款的 ModelOnly 任务**（每个设计库一条）。
@@ -1517,9 +1684,14 @@ async fn enqueue_catalogue_cascade(
             }
         }
     }
-    // 3. 落款仍旧、却一根都没排的库：只为盖落款排一条空名单任务。
+    // 3. 落款仍旧、却一根都没排的库：只为盖落款排一条空名单任务。被监听限定挡掉的库记下来、横幅点名：
+    //    静默 `continue` 就是 GitHub #67 的形状（核对已先按限定域分过一次，这里本该恒空，留作护栏）。
     for dbnum in behind.keys().copied() {
-        if planned.contains_key(&dbnum) || !in_scope(dbnum) {
+        if planned.contains_key(&dbnum) {
+            continue;
+        }
+        if !in_scope(dbnum) {
+            account.libraries_out_of_scope.push(dbnum);
             continue;
         }
         let Ok(version) = latest_design_version(&mut versions, dbnum).await else {
@@ -1825,6 +1997,7 @@ mod tests {
                 stamp_only: vec![7022],
                 ..CatalogueCascadeReport::default()
             }),
+            behind_out_of_scope: vec![7997],
             ..CatalogueReconcile::default()
         });
         merged.absorb(CatalogueReconcile {
@@ -1838,9 +2011,11 @@ mod tests {
                 error: Some("x".into()),
                 ..CatalogueCascadeReport::default()
             }),
+            behind_out_of_scope: vec![7997, 7333],
             ..CatalogueReconcile::default()
         });
         assert_eq!(merged.stale, vec![7000, 7355]);
+        assert_eq!(merged.behind_out_of_scope, vec![7333, 7997]);
         assert_eq!(merged.unreadable, 1, "两组都读不到 7016，只算一个库");
         assert_eq!(merged.windows.len(), 2);
         let cascade = merged.cascade.expect("cascade merged");
@@ -1848,6 +2023,78 @@ mod tests {
         assert_eq!(cascade.enqueued, BTreeMap::from([(7015, 4), (8000, 4)]));
         assert_eq!(cascade.stamp_only, vec![7022]);
         assert_eq!(cascade.error.as_deref(), Some("x"));
+    }
+
+    /// GitHub #67：库级目录落款先按监听限定分成域内 / 域外；域外的只点名落后的那几个（任一落款 < 该库真读的
+    /// 那份文件最新），读不到最新的目录库是未知、不算落后，回退也不算；没限定时域外为空。
+    #[test]
+    fn catalogue_stamps_split_by_watch_scope_and_only_behind_outsiders_are_named() {
+        let libraries = BTreeMap::from([
+            (7997, BTreeMap::from([(5052, 189), (7000, 274)])),
+            (8000, BTreeMap::from([(7000, 274)])),
+            (7333, BTreeMap::from([(7320, 306)])),
+            (250705, BTreeMap::from([(250700, 23)])),
+        ]);
+        let (inside, outside) =
+            split_libraries_by_watch_scope(libraries.clone(), |dbnum| matches!(dbnum, 7998 | 8000));
+        assert_eq!(inside.keys().copied().collect::<Vec<_>>(), vec![8000]);
+        assert_eq!(
+            outside.keys().copied().collect::<Vec<_>>(),
+            vec![7333, 7997, 250705]
+        );
+        let (all, none) = split_libraries_by_watch_scope(libraries.clone(), |_| true);
+        assert_eq!(all, libraries);
+        assert!(none.is_empty());
+        // 7997 的 5052 落款 189 < 文件 190 → 落后；7333 追平；250705 的目录读不到 → 未知。
+        let latest = |library: u32, catalogue: u32| match (library, catalogue) {
+            (7997, 5052) => Some(190),
+            (7997, 7000) => Some(274),
+            (7333, 7320) => Some(306),
+            (250705, 250700) => None,
+            _ => unreachable!("{library}/{catalogue} 不在域外名单上"),
+        };
+        assert_eq!(libraries_behind_any_catalogue(&outside, latest), vec![7997]);
+        let rolled_back = BTreeMap::from([(7997, BTreeMap::from([(5052, 189)]))]);
+        assert!(libraries_behind_any_catalogue(&rolled_back, |_, _| Some(188)).is_empty());
+    }
+
+    /// GitHub #67：核对先按监听限定分域再按目录文件分组，域外的库不进收窗 / 反查 / 排工；排工第 3 步不再
+    /// 静默跳过被限定挡掉的库；启动复核两个出口都带 `catalogue_behind_out_of_scope`。
+    #[test]
+    fn the_catalogue_reconcile_scopes_stamps_before_grouping_and_never_skips_silently() {
+        let source = include_str!("model_coverage.rs").replace("\r\n", "\n");
+        let driver = source
+            .split_once("async fn reconcile_published_root_stamps()")
+            .expect("driver exists")
+            .1;
+        let split = driver
+            .find("split_libraries_by_watch_scope(libraries,")
+            .expect("域内 / 域外先分开");
+        let grouped = driver
+            .find("group_libraries_by_catalogue_files(")
+            .expect("再按目录文件分组");
+        assert!(split < grouped, "分域要在分组之前，域外的库一窗都不收");
+        let enqueue = source
+            .split_once("async fn enqueue_catalogue_cascade(")
+            .expect("enqueue exists")
+            .1
+            .split_once("async fn latest_design_version(")
+            .expect("helper follows")
+            .0;
+        assert!(
+            !enqueue.contains("|| !in_scope(dbnum)")
+                && enqueue.contains("account.libraries_out_of_scope.push(dbnum);"),
+            "被限定挡掉的库要记账、横幅点名，不许静默 continue"
+        );
+        let startup = include_str!("startup_reconcile.rs").replace("\r\n", "\n");
+        let inner = startup
+            .split_once("async fn reconcile_model_coverage_at_startup_inner()")
+            .expect("inner exists")
+            .1;
+        assert!(
+            inner.matches("catalogue_behind_out_of_scope").count() >= 4,
+            "解构、启动横幅、两个出口都要带上它"
+        );
     }
 
     /// 同一行上一个目录库只留最旧的会话；`published_catalogue_sessions_on` 再跨库取最旧。

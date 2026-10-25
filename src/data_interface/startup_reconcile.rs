@@ -345,6 +345,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         unreadable: unreadable_catalogue,
         windows: catalogue_windows,
         cascade: catalogue_cascade,
+        behind_out_of_scope: catalogue_behind_out_of_scope,
         dependency_refresh: catalogue_dependency_refresh,
         ..
     } = reconcile_catalogue_versions().await;
@@ -374,6 +375,15 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
              （换过 MDB / 文件不在了），这几个是**未知**、不算已确认过期"
         );
     }
+    // GitHub #67：限定域外落后的库启动时说一次——这是它们唯一会被说出来的时刻（周期拍安静时不重复）。
+    if !catalogue_behind_out_of_scope.is_empty() {
+        println!(
+            "{}",
+            crate::data_interface::model_coverage::behind_out_of_scope_line(
+                &catalogue_behind_out_of_scope
+            )
+        );
+    }
     // A3：数据面那一半——已入库依赖行随目录前移。安静的一次不出声。
     if let Some(line) = catalogue_dependency_refresh.banner_line() {
         println!("目录版本核对：{line}");
@@ -388,6 +398,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         coverage.reconcile.catalogue_windows = catalogue_windows;
         coverage.reconcile.catalogue_cascade = catalogue_cascade;
         coverage.reconcile.catalogue_dependency_refresh = catalogue_dependency_refresh;
+        coverage.reconcile.catalogue_behind_out_of_scope = catalogue_behind_out_of_scope;
         return coverage;
     }
 
@@ -541,6 +552,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         stale_catalogue_dbnums: stale_catalogue,
         unreadable_catalogue_dbnums: unreadable_catalogue,
         catalogue_windows,
+        catalogue_behind_out_of_scope,
         catalogue_cascade,
         catalogue_dependency_refresh,
     };

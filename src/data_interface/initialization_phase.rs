@@ -220,6 +220,10 @@ pub struct StartupReconcile {
     /// 闭包碰到那个目录库时才跑。`refreshed` 空且 `errors` 空 = 这一次没有依赖行要前移。
     pub catalogue_dependency_refresh:
         crate::data_interface::cata_dependency::CatalogueDependencyRefreshReport,
+    /// 监听限定（`watch_dbnums`）之外、库级目录落款却落在旧目录上的设计库，升序（GitHub #67）。启动核对
+    /// 不为它们收窗 / 反查 / 排工，`stale_catalogue_dbnums` 里也没有它们的目录库——只点名，不参与 `result`
+    /// 取重。没限定时恒空。
+    pub catalogue_behind_out_of_scope: Vec<u32>,
 }
 
 impl Default for StartupReconcile {
@@ -238,6 +242,7 @@ impl Default for StartupReconcile {
             catalogue_windows: Vec::new(),
             catalogue_cascade: None,
             catalogue_dependency_refresh: Default::default(),
+            catalogue_behind_out_of_scope: Vec::new(),
         }
     }
 }
