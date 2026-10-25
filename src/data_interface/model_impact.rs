@@ -2657,7 +2657,10 @@ mod tests {
         // 上面那一列不变。
         // 2026-10-23：e3d-model `28d0402`（SNOD 名下关节 SJOI 的现算标架）读 `CUTP` / `JLIN`（165）；都不是 DCHC=0，
         // 上面那一列不变。
-        assert_eq!(generation_read_set().len(), 165, "读取集合条数漂移");
+        // 2026-10-24：e3d-model `eb7e633`（布局式梯段 STRFLT）读 `INSTOP` / `FTHICK` / `ORISE` / `UEXTNS` / `LEXTNS`（170），
+        // `d0fe6d1`（ATTA 按 `SPKBRK` 断管）读 `SPKBRK`（171）；都不是 DCHC=0（`86c0cf9c5` / `988cb525b` 当时漏改这里）。
+        // 2026-10-25：e3d-model 变截面 SANN 的放样读 `DRAD` / `DWID`（173）；都不是 DCHC=0，上面那一列不变。
+        assert_eq!(generation_read_set().len(), 173, "读取集合条数漂移");
     }
 
     /// `PLCF`（开发计划 2026-09-15 S1 / D4）：三态与字典快照对得上，且**只作报表**——
