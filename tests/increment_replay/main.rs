@@ -99,6 +99,23 @@ struct Step {
     /// 见 [`Restart`]。
     #[serde(default)]
     restart: Option<Restart>,
+    /// 这一步断言过了之后，把这些根的 `/model/records` 全部行按 `(to, root)` 存下，给后面的 `records_equal_to_step` 对拍。
+    #[serde(default)]
+    stash_records: Vec<String>,
+    /// 这一步的 `/model/records` 要与早先在此 sesno 存下的行相等（数字容差 `records_equal_tolerance`）——回退 → 整库重建后的库
+    /// 必须和第一次走到这个会话时一样（INC-B06 / H04，O2）。
+    #[serde(default)]
+    records_equal_to_step: Option<u32>,
+    #[serde(default = "default_reprime_tolerance")]
+    records_equal_tolerance: f64,
+    /// 这一步的任务 `intent`（如 `reinitialize`）与 `reinit_trigger`（如 `rollback`）。
+    #[serde(default)]
+    expect_intent: Option<String>,
+    #[serde(default)]
+    expect_reinit_trigger: Option<String>,
+    /// 等三水位的上限（秒；缺省 180，整库重建那一步要给多）。
+    #[serde(default)]
+    timeout_secs: Option<u64>,
     #[serde(default)]
     half: Option<String>,
     #[serde(default)]
@@ -141,6 +158,9 @@ struct Step {
     /// 这一步的任务终态（缺省 succeeded）。
     #[serde(default)]
     task_state: Option<String>,
+    /// 这一窗的交付单元数（`result.units.len()`）：只记账的会话（DBMDAT）必须是 0（INC-A06）。
+    #[serde(default)]
+    unit_count: Option<usize>,
 }
 
 /// 一条模型记录的身份：refno + 隐式管身的 `tube{ordinal, from, to}`（spec §4.5 的四元组）；没有就退到整条的文本。
@@ -889,6 +909,23 @@ fn run_case(env: &Env, case: &Case) {
         let report = run_fixture_tool(&env.fixture_exe, &args);
         eprintln!("  replay-step → {report}");
     };
+    let mut stash: BTreeMap<(u32, String), Vec<Value>> = BTreeMap::new();
+    let stash_after = |service: &Service,
+                       stash: &mut BTreeMap<(u32, String), Vec<Value>>,
+                       at: u32,
+                       step: &Step,
+                       what: &str| {
+        for root in &step.stash_records {
+            let (source, items) = service
+                .records_items(root)
+                .unwrap_or_else(|| panic!("[{what}] 根 {root} 不在索引里，存不了"));
+            eprintln!(
+                "  [{what}] 存下根 {root} 的 {} 行（source={source}）",
+                items.len()
+            );
+            stash.insert((at, root.clone()), items);
+        }
+    };
     for step in &case.steps {
         replay_step(step.to, step.half.as_deref(), step.rollback);
         if step.no_wait {
@@ -909,11 +946,22 @@ fn run_case(env: &Env, case: &Case) {
             let what = format!("step → {} 被 {} 追上", step.to, race.next);
             service.wait_in_sync(case.dbnum, race.next, Duration::from_secs(240), &what);
             assert_step(&service, case, step, &what);
+            stash_after(&service, &mut stash, race.next, step, &what);
             continue;
         }
-        let what = format!("step → {}", step.to);
-        service.wait_in_sync(case.dbnum, step.to, Duration::from_secs(180), &what);
+        let what = if step.rollback {
+            format!("step 回退 → {}", step.to)
+        } else {
+            format!("step → {}", step.to)
+        };
+        let timeout = Duration::from_secs(step.timeout_secs.unwrap_or(180));
+        service.wait_in_sync(case.dbnum, step.to, timeout, &what);
+        // 先对拍再断言：对拍要看的是这一窗（如整库重建）落库的行，不是 `generate_prime` 补常驻之后的投影。
+        if let Some(at) = step.records_equal_to_step {
+            compare_with_stash(&service, &stash, at, step.records_equal_tolerance, &what);
+        }
         assert_step(&service, case, step, &what);
+        stash_after(&service, &mut stash, step.to, step, &what);
         if let Some(restart) = &step.restart {
             restart_parity(
                 &mut service,
@@ -926,6 +974,45 @@ fn run_case(env: &Env, case: &Case) {
     }
     // 服务随 Drop 按句柄杀掉；工作文件留在终态，下一条用例的 replay-init 会就地重置。
     drop(service);
+}
+
+/// `records_equal_to_step`：当前库上每一根的行与早先在 `at` 存下的行相等（数字容差）。
+fn compare_with_stash(
+    service: &Service,
+    stash: &BTreeMap<(u32, String), Vec<Value>>,
+    at: u32,
+    tolerance: f64,
+    what: &str,
+) {
+    let stashed: Vec<_> = stash
+        .iter()
+        .filter(|((sesno, _), _)| *sesno == at)
+        .collect();
+    assert!(
+        !stashed.is_empty(),
+        "[{what}] 没有在 sesno {at} 存过任何根的行（前面的步要带 stash_records）"
+    );
+    let mut problems = Vec::new();
+    for ((_, root), before) in stashed {
+        match service.records_items(root) {
+            Some((source, now)) => match records_differ(before, &now, tolerance) {
+                Some(diff) => problems.push(format!(
+                    "根 {root} 现在的行（source={source}）与 sesno {at} 时存下的不同：{diff}"
+                )),
+                None => eprintln!(
+                    "  [{what}] 根 {root} {} 行与 sesno {at} 时相等（source={source}）",
+                    now.len()
+                ),
+            },
+            None => problems.push(format!("根 {root} 不在索引里，却在 sesno {at} 时有行")),
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "[{what}] 与 sesno {at} 对拍不过：\n{}\n日志 {}",
+        problems.join("\n"),
+        service.stdout_path.display()
+    );
 }
 
 /// INC-F02：重启前记 `/model/records`，冷重启，水位不动、库上行与重启前逐字段相等；再把根叫回投影，重算后仍相等。
@@ -1086,6 +1173,9 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
         // 任务终态与单元 kind / 几何差 / 房间前后。
         if !step.unit_kinds.is_empty()
             || step.task_state.is_some()
+            || step.unit_count.is_some()
+            || step.expect_intent.is_some()
+            || step.expect_reinit_trigger.is_some()
             || !step.geometry_moved.is_empty()
             || !step.rooms_unchanged.is_empty()
             || !step.aabb_shift.is_empty()
@@ -1101,11 +1191,55 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
             if state != expected_state {
                 problems.push(format!("任务 state={state}，期望 {expected_state}"));
             }
+            // 建行时的意图在 `detail` 里（`batch_scheduler` 入队时写：`intent` / `reinit_trigger` / `frozen_target_sesno`）。
+            let detail_str = |key: &str| {
+                task.pointer(&format!("/detail/{key}"))
+                    .or_else(|| task.get(key))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            if let Some(expected) = &step.expect_intent {
+                let intent = detail_str("intent");
+                if &intent != expected {
+                    problems.push(format!("任务 detail.intent={intent}，期望 {expected}"));
+                }
+            }
+            if let Some(expected) = &step.expect_reinit_trigger {
+                let trigger = detail_str("reinit_trigger");
+                if &trigger != expected {
+                    problems.push(format!(
+                        "任务 detail.reinit_trigger={trigger}，期望 {expected}"
+                    ));
+                }
+            }
+            if step.expect_intent.is_some() || step.expect_reinit_trigger.is_some() {
+                eprintln!(
+                    "  任务 {} intent={} reinit_trigger={} 区间 {:?}..={:?} state={state}",
+                    task.get("task_id").and_then(Value::as_str).unwrap_or("?"),
+                    detail_str("intent"),
+                    detail_str("reinit_trigger"),
+                    task.get("start_sesno").and_then(Value::as_i64),
+                    task.get("end_sesno").and_then(Value::as_i64)
+                );
+            }
             let units = task
                 .pointer("/result/units")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            if let Some(expected) = step.unit_count {
+                if units.len() != expected {
+                    problems.push(format!(
+                        "这一窗交付单元 {} 个，期望 {expected}：{:?}",
+                        units.len(),
+                        units
+                            .iter()
+                            .map(|unit| unit.get("root_refno").cloned().unwrap_or(Value::Null))
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
             for (root, kind) in &step.unit_kinds {
                 match units.iter().find(|unit| {
                     unit.get("root_refno").and_then(Value::as_str) == Some(root.as_str())
