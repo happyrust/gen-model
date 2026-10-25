@@ -38,6 +38,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use aios_core::RefnoEnum;
 use anyhow::Context;
@@ -375,6 +376,57 @@ pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
     change_metadata_tier(diff).is_some()
 }
 
+/// 窗口规划各段的墙钟（GitHub #68 第 3 条路：`IncrementPipeline 阶段耗时` 里 `plan=` 只有一个总数，
+/// 先把它拆开再定修法）。只记账，不改任何判决：`collect` 内的十三段由 [`WindowRootSources::collect`]
+/// 填，外层段由 [`build_model_update_plan_from_window`] 填，拼成一行随 `roots_T=` 那行进 stdout 与回执 warnings。
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WindowSourceTimings {
+    pub ledger: Duration,
+    pub closure: Duration,
+    pub xgeometry: Duration,
+    pub index_s: Duration,
+    pub roots_s: Duration,
+    pub index_t: Duration,
+    pub roots_t: Duration,
+    pub nested: Duration,
+    pub changes: Duration,
+    pub rigid: Duration,
+    pub cascades: Duration,
+    pub removed: Duration,
+    pub cache: Duration,
+}
+
+impl WindowSourceTimings {
+    /// `collect` 内各段，毫秒；顺序即执行顺序。
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "ledger={}ms closure={}ms xgeom={}ms index_S={}ms roots_S={}ms index_T={}ms roots_T={}ms \
+             nested={}ms changes={}ms rigid={}ms cascades={}ms removed={}ms cache={}ms",
+            self.ledger.as_millis(),
+            self.closure.as_millis(),
+            self.xgeometry.as_millis(),
+            self.index_s.as_millis(),
+            self.roots_s.as_millis(),
+            self.index_t.as_millis(),
+            self.roots_t.as_millis(),
+            self.nested.as_millis(),
+            self.changes.as_millis(),
+            self.rigid.as_millis(),
+            self.cascades.as_millis(),
+            self.removed.as_millis(),
+            self.cache.as_millis(),
+        )
+    }
+}
+
+/// 读一段墙钟并把起点挪到现在（给顺序执行的段计时用）。
+fn lap(tick: &mut Instant) -> Duration {
+    let now = Instant::now();
+    let elapsed = now.duration_since(*tick);
+    *tick = now;
+    elapsed
+}
+
 /// 文件侧输入：只读两端 `DbSet`，不碰 SurrealDB。生产由
 /// [`build_model_update_plan_from_window`] 用 `E3dModelService::build_set` 的两端调用；
 /// 测试与探针可以直接用 attlib 开两个钉住会话的 `DbSet`。
@@ -424,6 +476,8 @@ pub struct WindowRootSources {
     /// 元素级变化清单的候选（计划 2026-10-24 W3）：账本按 refno 折成一元素一条，带两端属主链；选完根之后
     /// 由 [`build_model_update_plan_from_window`] 折成清单寄存给执行体。不进计划、不持久。
     pub(crate) changes: crate::data_interface::task_change_list::WindowChanges,
+    /// GitHub #68：`collect` 内各段的墙钟，只记账。
+    pub(crate) timings: WindowSourceTimings,
 }
 
 /// 账本 [`UpdatePlan::remove`] 里的一个被删模型单元（几何挂在它身上的那一级：BOX / CYLI / FTUB…，
@@ -1149,6 +1203,8 @@ impl WindowRootSources {
         unit_types: &[String],
         design_dbs: &[crate::data_interface::reverse_reference::SourceDb],
     ) -> anyhow::Result<Self> {
+        let mut timings = WindowSourceTimings::default();
+        let mut tick = Instant::now();
         let window = collect_window(file, base_sesno, target_sesno).with_context(|| {
             format!(
                 "collect window {base_sesno}→{target_sesno} of {}",
@@ -1182,6 +1238,7 @@ impl WindowRootSources {
             plan_update(base, target, &window)
         };
         let tiers = tiers.into_inner();
+        timings.ledger = lap(&mut tick);
         let closure = if crate::options::model_entry_drop_no_geometry() {
             plan.affected_closure_filtering_ledger(base, target, |entry| {
                 // 删除与类型变化可能需要清旧几何；即便账本有 noun 也保守保留。
@@ -1193,14 +1250,17 @@ impl WindowRootSources {
         } else {
             plan.affected_closure(base, target)
         };
+        timings.closure = lap(&mut tick);
         let (xgeometry_observed, xgeometry_unreadable) =
             observe_xgeometry_candidates(&plan, base, target);
+        timings.xgeometry = lap(&mut tick);
         // `roots_S`：左端文件上的根集（ADR-079）。左端是模型水位，它承诺 S 时刻的每个根都已发布，
         // 于是「S 端有哪些根」直接问 `DbSet@S`，与 T 端同一段枚举、同一套 MDU / significant 口径。
         let base_index = Arc::new(
             scan_index(file, Some(base_sesno))
                 .with_context(|| format!("scan index of {} at {base_sesno}", file.display()))?,
         );
+        timings.index_s = lap(&mut tick);
         let roots_s = enumerate_generation_roots(base, &base_index.roots, unit_types)
             .with_context(|| {
                 format!(
@@ -1211,10 +1271,12 @@ impl WindowRootSources {
             .iter()
             .map(PersistedRoot::from)
             .collect::<Vec<_>>();
+        timings.roots_s = lap(&mut tick);
         let index = Arc::new(
             scan_index(file, Some(target_sesno))
                 .with_context(|| format!("scan index of {} at {target_sesno}", file.display()))?,
         );
+        timings.index_t = lap(&mut tick);
         let roots_t =
             enumerate_generation_roots(target, &index.roots, unit_types).with_context(|| {
                 format!(
@@ -1222,8 +1284,10 @@ impl WindowRootSources {
                     file.display()
                 )
             })?;
+        timings.roots_t = lap(&mut tick);
         let (nested_roots, duplicate_coverage_elements) =
             nested_root_observation(&roots_t, index.owners.as_ref());
+        timings.nested = lap(&mut tick);
         // 变化清单的候选（W3）：账本 + T 端属主表在手，删除 / 改挂 / 换类型的再读一次 S 端链（有界）。
         let changes = crate::data_interface::task_change_list::collect_candidates(
             &plan,
@@ -1231,6 +1295,7 @@ impl WindowRootSources {
             |refno| owner_chain_in_set(base, refno),
             &tiers,
         );
+        timings.changes = lap(&mut tick);
         // 按根归因的候选表（刚体前移 ADR-066 与单元级发布 D10 共用）：两个开关都关 = 候选表空，下游产物
         // 与今天逐位相同。任一开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链一次算完；
         // `Δ` / 三条排除只在刚体开关开着时算（关着一次 `world_matrix` 都不算），执行体从此一个文件都不必读。
@@ -1252,6 +1317,7 @@ impl WindowRootSources {
         } else {
             RigidMotionSources::default()
         };
+        timings.rigid = lap(&mut tick);
         // C2：结构连接正向级联。开关关 = 一次文件读都不发生（`off()`），touched 一字不改。
         let structural_connection = if crate::options::model_structural_connection_cascade() {
             crate::data_interface::structural_connection::StructuralConnectionCascade::collect(
@@ -1299,8 +1365,10 @@ impl WindowRootSources {
         } else {
             crate::data_interface::reverse_reference::DesignReferenceCascade::off()
         };
+        timings.cascades = lap(&mut tick);
         // 覆盖账（计划 D3）：被删单元的 S 端属主链在这里取——两端 `DbSet` 都在手，之后只剩纯比对。
         let removed_units = collect_removed_units(&plan, base);
+        timings.removed = lap(&mut tick);
         let index_keys = index.owners.len();
         // Issue #50：把窗口计划与已打开的两端 `DbSet` / `SourceIndex` 存入有界缓存，供 `UnitDeltaProducer::open` 直接复用。
         // 载荷自带分域键（dbnum + file + 窗），插入时由它派生，规划器不再另传一份键。两端集合的依赖会话表
@@ -1322,6 +1390,7 @@ impl WindowRootSources {
                 ),
             ),
         );
+        timings.cache = lap(&mut tick);
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -1340,6 +1409,7 @@ impl WindowRootSources {
             design_reference,
             rigid,
             changes,
+            timings,
         })
     }
 
@@ -1730,10 +1800,13 @@ pub(crate) async fn build_model_update_plan_from_window(
     }
     let service = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
     let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
-    let sources = tokio::task::spawn_blocking(move || {
+    let plan_started = Instant::now();
+    let planned = tokio::task::spawn_blocking(move || {
+        let mut tick = Instant::now();
         let file = service.source_file(dbnum)?.to_path_buf();
         let base = service.build_set(dbnum, Some(base_sesno))?;
         let target = service.build_set(dbnum, Some(target_sesno))?;
+        let sets_ms = lap(&mut tick);
         // P4 逐库并集的输入：一张反向表只答它自己那个库的引用者，跨库引用者只有逐个开
         // MDB 的设计成员才找得到。C8 的跨库版（电缆端点，GitHub #35）用同一份名单。两个开关都关着时
         // 连成员名单都不解——`design_sources` 要为每个未钉住的库开一次文件问最新会话。问不出会话的成员
@@ -1757,6 +1830,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             } else {
                 Vec::new()
             };
+        let design_ms = lap(&mut tick);
         let sources = WindowRootSources::collect(
             &file,
             base_sesno,
@@ -1766,6 +1840,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             &unit_types,
             &design_dbs,
         )?;
+        let collect_ms = lap(&mut tick);
         service.bind_window_input_dependencies(
             dbnum,
             &file,
@@ -1774,25 +1849,33 @@ pub(crate) async fn build_model_update_plan_from_window(
             &base,
             &target,
         );
-        anyhow::Ok(sources)
+        let bind_ms = lap(&mut tick);
+        anyhow::Ok((sources, [sets_ms, design_ms, collect_ms, bind_ms]))
     })
     .await
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
+    let (sources, [sets_ms, design_ms, collect_ms, bind_ms]) = planned;
+    let mut tick = Instant::now();
     // `roots_S` 来自 `DbSet@S`（ADR-079）；「哪些根安定」= S 端根集减去账本里还欠着的根。
     // 欠着的根要随本窗重排，刚体前移那一臂另要「安定」集合。
     let roots_s = sources.roots_s.clone();
     let settled = settled_base_roots(dbnum, &roots_s);
+    let settled_ms = lap(&mut tick);
     let impact = sources.impact(&roots_s);
+    let impact_ms = lap(&mut tick);
     let mut plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+    let bucket_ms = lap(&mut tick);
     carry_unsettled_generation(
         &crate::data_interface::model_root_ledger::chasing_roots(dbnum),
         &sources.roots_t,
         &mut plan,
     );
+    let carry_ms = lap(&mut tick);
     // 分桶在 `carry_unsettled_generation` 之后：带着未完成生成的根不在 `settled` 里，判据本身
     // 就不会把它判成 transform；这里的顺序只是让「提示 ⊆ 最终 regen」一目了然。
     let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
     let transform_units = transform_units_for(&plan, &rigid, base_sesno);
+    let rigid_ms = lap(&mut tick);
     // 元素级变化清单（W3）：根桶定了才说得出每条改动折进了哪个根；按窗口寄存，执行体落地后按任务认领。
     {
         let regen_roots: BTreeSet<RefnoEnum> = plan.regen.iter().map(|root| root.root).collect();
@@ -1810,6 +1893,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             items,
         );
     }
+    let change_list_ms = lap(&mut tick);
     let mut warnings = vec![format!(
         "dbnum={dbnum}: window {base_sesno}→{target_sesno} roots_T={} roots_S={} touched={} \
          regen={} delete={} advance={} lazy={} | {}",
@@ -1957,6 +2041,28 @@ pub(crate) async fn build_model_update_plan_from_window(
                 target_sesno as i32,
             ));
     }
+    let finish_ms = lap(&mut tick);
+    // GitHub #68：`plan=` 只有一个总数，这里把它拆到段上（只记账，不改判决）。
+    let timing_line = format!(
+        "dbnum={dbnum}: window {base_sesno}→{target_sesno} 规划耗时 total={}ms | sets={}ms design={}ms \
+         collect={}ms [{}] bind={}ms | settled={}ms impact={}ms bucket={}ms carry={}ms rigid={}ms \
+         change_list={}ms finish={}ms (GitHub #68)",
+        plan_started.elapsed().as_millis(),
+        sets_ms.as_millis(),
+        design_ms.as_millis(),
+        collect_ms.as_millis(),
+        sources.timings.line(),
+        bind_ms.as_millis(),
+        settled_ms.as_millis(),
+        impact_ms.as_millis(),
+        bucket_ms.as_millis(),
+        carry_ms.as_millis(),
+        rigid_ms.as_millis(),
+        change_list_ms.as_millis(),
+        finish_ms.as_millis(),
+    );
+    println!("[窗口规划] {timing_line}");
+    out.warnings.push(timing_line);
     Ok(out)
 }
 
@@ -3351,6 +3457,7 @@ mod tests {
             cable_endpoint: Default::default(),
             design_reference: Default::default(),
             changes: Default::default(),
+            timings: Default::default(),
             rigid: RigidMotionSources {
                 enabled: true,
                 candidates: vec![WindowCandidate {

@@ -1,3 +1,10 @@
+## 2026-10-26
+
+### 窗口规划器的 `plan=` 拆段计时：8000 的一根小窗里六成在两端 `enumerate_generation_roots`、两成在两端 `build_set`（GitHub #68 第 3 条路，只记账）
+
+- **为什么**：#68 量到 `IncrementPipeline 阶段耗时` 里 `plan=` 随 `roots_T` 线性（8000 / 953 根 0.73 s，7997 / 6772 根 13.8 s），但 `plan` 只有一个总数，分不清是枚举、成员表、回执读还是分桶在花钱，票里写的是「先量再定」。
+- **改**（`window_root_plan.rs`）：`WindowRootSources::collect` 内十三段（账本 / 闭包 / XGEOM / 两端 `scan_index` / 两端枚举 / 嵌套根 / 变化候选 / 刚体候选 / 三条级联 / 覆盖账 / 窗口缓存）与外层六段（两端 `build_set` / 成员名单 / `settled` / `impact` / 分桶 / 欠账 / 刚体分桶 / 变化清单 / 收尾）各记墙钟，拼成一行 `[窗口规划] dbnum=…: window S→T 规划耗时 total=… | sets=… design=… collect=… [ledger=… … cache=…] bind=… | settled=… … finish=… (GitHub #68)` 打到 stdout，并随 `roots_T=` 那行进回执 `warnings`。不改任何判决；`collect` 的签名与返回不变，只多一格 `timings`。
+- **量到**（L2 回放夹具 `ams8000-equi-move-chain`，debug 构建，953 根，五窗）：`plan` 641–748 ms，其中 `collect` 475–567 ms = `roots_S` 191–227 + `roots_T` 186–226（两端 `enumerate_generation_roots`，从 WORL 起逐元素读 TYPE / NAME / members 直到交付单元，与窗里变了几个元素无关）+ `index_S` / `index_T` 各 16–23 + `nested` 16–23 + `cascades` 9–33 + `ledger` 7–15 + `cache` 13–16；外层 `sets`（两端 `build_set`）154–164，其余段全部 0–4 ms。即 **六成在两端枚举、两成在两端建集**，分桶 / 回执 / 级联几乎不花钱。修法（S 端复用上一窗的 T 端集合与根集、T 端只按账本触到的子树重枚举）待拍板，不在本笔。
 # 变更记录
 
 ## 2026-10-25
