@@ -2,7 +2,7 @@
 
 状态：草稿（待评审后转 ready-for-agent）
 日期：2026-10-16
-前端：OpenCADStudio（UI spec 另发，不在本文件范围）
+前端：OpenCADStudio（UI spec 见 `docs/specs/pipe-modeling-ui.md`，不在本文件范围）
 后端：`D:\work\plant-code\old\gen-model`
 逆向依据：`docs/evidence/2026-10-15-e3d-pipe-modeling-ui-behavior.md` §15-§18（本仓快照，全部行为断言带 E3D 3.1 源文件行号；上游原文在仓外逆向库 `E:\reverse\e3d` 的 docs 目录，托管层精确参照在其 csharp-code 目录）
 
@@ -59,9 +59,9 @@ gen-model 目前只消费 E3D 会话产物（`e3d_collector` 窗口差分 → `p
 
 ### E. 分段/合并
 
-28. 在指定元件处把 BRAN 一分为二：复制管、新支管 `-Split(n)` 名冲突自增、下游成员按逆序迁入、原支管 PT 接新支管 PH、连接型互换修正法兰 return-ref——等价 `splitpipe` 全链。
+28. 在指定元件处把 BRAN 一分为二（`splitpipe.pmlfnc` 全文级语义，§18.17.1）：切点边界在元件**到侧**——切点元件含在迁移集、成新支管首成员；`moveTo` 双模（`PIPE`=新建复制管 `COPY ATT OF`+新支管名 `<新管>/B1`；`BRANCH`=同管直挂+名 `<管>/B<mCount+1>`）；管名 `-Split(n)` 先剥旧后缀再撞名自增（`handle (41,12)`）；互连按 `CONN PH TO FIRST MEM`（新支管 HREF=切点元件）+`CONN PT TO PH OF`（旧支管 TREF=新支管）+ **HCON/TCON 交叉互换**（两侧各继承对方 CONN 算出值——内核依赖，批内显式 warning 不伪造）。
 29. 合并两支管：源成员迁入目标（支持跨库确认）、恢复头尾连接数据、源支管变空即删、源管全空可级联删——等价 `mergeTwoBranches`，整批一个事务。
-30. 首件/末件/非直属成员等不合法分段点按 E3D 同一批错误码拒绝并带原因。
+30. 切点合法性按 `splitpipe` 函数级语义：仅拒**非直属成员与首件**（`sequence eq 1 AND atle eq 0`，首件切点使旧支管空）；**末件分段函数级放行**（PML 源码标 `REVISIT` 已知缺口）产出单成员新支管——UI 层另有拦截属表单侧职责。
 
 ### F. 规格/孔径变更
 
@@ -100,6 +100,17 @@ gen-model 目前只消费 E3D 会话产物（`e3d_collector` 窗口差分 → `p
 48. 每个变更操作是命名事务（UNDOABLE 等价物），事务内任何失败整批回滚并返回错误明细；Apply 与"Apply+关闭"是同一服务调用，不回滚已提交事务。
 49. 操作前置校验（写权限、属主类型合法、CE 上下文合法）统一返回结构化错误，供 UI 走 warning-Done 重试流。
 50. 服务返回的每个结果含受影响元素集合与辅助定位数据（端点 pos/dir/bore、管段中心点等），供 UI 画标记/高亮——后端不画图但给齐画图数据。
+
+### L. 制造断点编辑与管端处理（§18.16 `pfModifySpool`/`pfFabricationPipeEnd*` 取证）
+
+51. **Spool 断点是双形态数据模型**，两种表示表达同一语义、生成与校验算法必须同时识别：
+    - **No-weld 断点 = 元素标志位**：`ASFBREAK`（arrive 侧）/`LSFBREAK`（leave 侧）/`CSFBREAK`（TEE·OLET 的 cref 侧）/`TSFBREAK`（打在**对方 BRAN** 上）。相邻两元件间断点成对写：`firstComp.lsfbreak + secondComp.asfbreak`。
+    - **Weld 断点 = 真 WELD 件**：`/WELDGAP` 规格、`STYPE FWS`（现场焊）、`DESP NUM 1 = 0.001m`（写 0 不显示形状，E3D 伪零惯例）、`SHOP=false`。
+52. **断点候选规则**：TUBI 需 `itlength ≥ 1mm`、ATTA 需 `spkbrk=true` 方可作断点宿主；邻接面为 BRAN/TUBI 无条件候选，邻接元件仅当其 `shop=false` 时可打现场断点；OLET 仅 P3 侧；TEE off-leg 断点 ppoint = `6-(arrive+leave)`；跨支管 cref 连接断点成对写（TEE/OLET 的 `csfbreak` + 对方 BRAN 的 `tsfbreak`），成对清除时尊重另一端 cref 仍连的状态。
+53. **断点设置/删除/替换**：Weld 断点建序 = `NEW WELD`（BRAN 上 `BEFORE 1`、方向 FORWARD/BACKWARD 控制插入侧）→ `SELECT WITH SPEC /WELDGAP STYPE FWS` → `DESP NUM 1 0.001m` → `LSTU` 继承所选件 → backward 模式 arrive/leave 互换 → `CONNECT`，失败 (7,3) 走 `FCONNECT`，再失败 `DELETE WELD` 回滚 → `ORIENTATE`。两形态互遇时**confirm 替换**（No-weld 遇现场焊按位距 <0.002 判同位→删焊打标志；Weld 遇标志→清标志建焊）；候选探测位距 ≤0.5mm。
+54. **端/进给余量编辑**：piece 边界对 `arriveBoundary.LEXCESS` + `leaveBoundary.AEXCESS` 直写（元素无该属性视作 0）；`LOOSE` 标志件与默认散件余量值联动；BEND 弯管进给余量写 `USEFED`。
+55. **FTUB 螺纹/斜切管端**：FTUB 是规格元件非几何操作——`SPREF=/THREADPIPEEND` 或 `/SLANTEDPIPEEND` + 孔径名址；`DESP[1..5]` = 角度（螺纹=0）/管外径/流向（头+1 尾-1）/连接型/重量；斜切校验 `OD/tan(90°-α) < 管长` 否则拒绝；FLSO 属主管长扣法兰厚度（最小边）；属主规格在 `/*LIMBOSPEC` 下→拒绝并提示 reinstate；`LSTU` 继承序=head→HSTU OF BRAN、tail→LSTU OF PREV（缺则 HSTU）；重量 `desp[5] = 0.5 × uwei × fitlen`（uwei 取 LSTU 的 `cmpref.uwei`，RPRO 表达式面需解属性引用）。
+56. **焊件批量属性编辑**：`weldList` 批改 `WELDTYPE`（SHOP/FIELD/SITE → `SHOP` 布尔）与 Fab.Type（`MANU`/`MACH`/`ORBI`）；焊缝规格来源可切 `fromSpec`/`fromConfig`（`/WELDGAP` 档）。
 
 ## Implementation Decisions
 
@@ -166,7 +177,7 @@ enum PipeError { NeedsConfirmation(..), RequiresChoice(..), Blocking(..), Raised
 ## Out of Scope
 
 - OpenCADStudio UI（面板、拾取包调度、标记/高亮、命令行回显）——**独立 spec，画布定稿后发**。
-- `ROUTER`/`pipeSimpleAutoRoute` 自动布管内核——E3D 也是原生黑盒，本期只留服务接口空槽。
+- `ROUTER`/`pipeSimpleAutoRoute` 自动布管内核——E3D 也是原生黑盒，本期只留服务接口空槽；接口契约已定稿（证据文档 §18.11：`route(branch, viaPoints, config{direction,prspace,prrounding,clash}) → BSTAT 0-10`）。
 - 规格库/目录库（CATA/SPECO/答案串 schema）的**创建与维护**——resolver 只读它们。
 - 等轴图输出（isometrics/SPLDRG）、NC/DSTV 文件输出、PipingTables 材料表生成。
 - `pipeeasyeditor`、`gphreppipeedit` 报表式改管、`spl*` 老 spooler 界面——次要入口，后端服务就绪后按需补。
@@ -176,7 +187,7 @@ enum PipeError { NeedsConfirmation(..), RequiresChoice(..), Blocking(..), Raised
 
 1. **伪属性供给**：E3D 侧 `:PFCutLength`、制造状态等伪属性由 Core3D `DB_Pseudo*` 注册。本服务要么自算等价物，要么在 `pe`/`ATT_*` 上设扩展表——倾向后者（显式列，好对拍），待评审确认。
 2. **COCODATA 连接表**：法兰自动补件依赖目录连接表（按连接型取兼容件清单）。cata 侧对应物是连接型目录记录，实现前需确认 gen-model 已摄入该数据面；若未摄入，补件功能降级为"报告缺件建议"而非自动创建。
-3. **答卷串格式**：`SELECT WITH <CHOICE>` 的答案串编码规则（STYPES/属性过滤串）需在规格数据面上实测一轮补齐，当前逆向只到"调用形状"。
+3. **答卷串格式**：PML 侧选择链已摸清（证据文档 §18.6）：元件存 `questions`/`answers` 数组（PBOR0/PBOR1/STYPE…），三级回落 = 表直查→PBOR 槽位改写→SELE 树默认路径（`default`/`tdefault`/`EQUA` 链）。编码已破解（证据文档 §18.8）：`CHOICE WITH <spco>` 求值返回 `SPEC /名 Q A Q A…`；PBOR 答案词首字符即孔位号（`PBOR 0100`→键 `PBOR0`+值 100）；`CHOICE QUESTION/ANSWER/MAXANS i` 为 CE 作用域伪表达式；answers 源自 SELE 节点 `tAnswer`/`answer`+`owner.question&qualifier`，**不落库**——resolver 把 questions/answers 作调用参数即可，命中后可按 questionIndex 规则自导出答卷串回显。
 4. **LIMBOSPEC**：非当前规格元件的限制策略（UI 层 warning+失活）后端落地为"重选需带规格白名单"，白名单来源（项目 piping specs 集合）需确认数据面可用性。
 5. **refno 分配**：新建元素的 refno 生成策略——E3D 由库分配；本仓 `pe` 行沿用解析期 refno 形态，编辑期新元素 refno 空间需定规（建议独立段并在行上标 source=edit，避免与摄入行撞号；与"行同构"约束不冲突——形态同构、号段隔离）。
 

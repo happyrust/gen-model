@@ -66,6 +66,9 @@ pub mod ele_data;
 
 /// 数据面操作类型与 SurrealQL 渲染（`EleOperationData` 家族，自 old-pdms-io `io.rs` 原样搬入）。
 pub mod ele_ops;
+pub mod direct_pipe_catalog;
+pub mod direct_spec_catalog;
+pub mod pipe_model_adapter;
 
 /// UKEY → UDA 定义 refno（`ATT_UDA` 行 `u` 链接的来源；替代 `aios_core::get_uda_refno` 的逐个点查）。
 pub mod uda_keys;

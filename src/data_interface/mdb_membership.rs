@@ -99,6 +99,38 @@ impl MdbDatabase {
     }
 }
 
+/// 一个 CURD 声明元素（SYS 侧 `TYPE=DB`）上取到的写权限证据。
+///
+/// E3D 声明面上没有显式「可写」位：`ACCESSDB` 只在收窄过访问的库上落值
+/// （样本项目 AMS 的声明面上整列缺席是常态），`LREFO` 标 reference-only
+/// 声明。裁决按会话默认——声明进 MDB 的库默认可写，除非证据收窄它；
+/// 读不到声明面的库根本产不出 `DbAccess`，上游按不可读 fail-closed。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DbAccess {
+    /// `ACCESSDB` 原文（`Read`/`Update`/`Multiwrite`，旧库可能 `Controlled`）。
+    /// 缺席是常态——不等于只读。
+    pub access: Option<String>,
+    /// `LREFO`——reference-only 声明。
+    pub reference_only: bool,
+    /// `CLAI` 声明面 claim 模式原文。只留证据，不参与裁决——claim 是会话
+    /// 动态状态，不是文件面事实。
+    pub claim: Option<String>,
+}
+
+impl DbAccess {
+    /// E3D 会话默认：声明进 MDB 的库可写，除非 `ACCESSDB=Read` 或 `LREFO`
+    /// 收窄。`ACCESSDB` 其余枚举值（`Update`/`Multiwrite`/`Controlled`）均可写。
+    pub fn writable(&self) -> bool {
+        if self.reference_only {
+            return false;
+        }
+        match self.access.as_deref().map(str::trim) {
+            Some(access) => !access.eq_ignore_ascii_case("read"),
+            None => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MdbMembership {
     mdb: String,
@@ -106,6 +138,9 @@ pub struct MdbMembership {
     /// In `CURD` order. Order decides which definition wins a duplicated
     /// `UKEY`, so it is preserved rather than sorted.
     databases: Vec<MdbDatabase>,
+    /// 各 CURD 声明元素上取到的写权限证据（dbnum → [`DbAccess`]）。
+    /// 缺席键 = 声明面没留证据，消费方按会话默认可写。
+    access: BTreeMap<u32, DbAccess>,
     /// Things that went wrong while resolving this list and that a person
     /// should see. They deliberately do not live only in `log::warn!`: the
     /// sandbox and plenty of deployments run `enable_log = false`, the logger
@@ -116,7 +151,7 @@ pub struct MdbMembership {
 impl MdbMembership {
     #[cfg(test)]
     pub(crate) fn test_with_databases(project: &str, mdb: &str, databases: Vec<MdbDatabase>) -> Self {
-        Self { mdb: mdb.into(), project: project.into(), databases, problems: Vec::new() }
+        Self { mdb: mdb.into(), project: project.into(), databases, access: BTreeMap::new(), problems: Vec::new() }
     }
     pub fn mdb(&self) -> &str {
         &self.mdb
@@ -132,6 +167,12 @@ impl MdbMembership {
 
     pub fn problems(&self) -> &[String] {
         &self.problems
+    }
+
+    /// 该库 CURD 声明元素上的写权限证据。`None` = 声明面没留证据（或测试
+    /// 构造没喂）——按 E3D 会话默认可写；要 fail-closed 的消费方自己裁决。
+    pub fn access_of(&self, dbnum: u32) -> Option<&DbAccess> {
+        self.access.get(&dbnum)
     }
 
     pub fn of_type(&self, styp: i64) -> impl Iterator<Item = &MdbDatabase> {
@@ -342,6 +383,7 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
         mdb: declaration.mdb.clone(),
         project: project.to_string(),
         databases,
+        access: declaration.access.clone(),
         problems,
     })
 }
@@ -374,6 +416,9 @@ fn own_db_dirs(
 pub struct UnboundDeclaration {
     pub sys: PathBuf,
     pub databases: Vec<MdbDatabase>,
+    /// 各声明元素上取到的写权限证据（dbnum → [`DbAccess`]），随声明一起走
+    /// 到 [`MdbMembership::access_of`]。绑定只换文件归属，不换声明语义。
+    pub access: BTreeMap<u32, DbAccess>,
     pub problems: Vec<String>,
 }
 
@@ -394,11 +439,12 @@ pub(crate) fn read_unbound_declaration(
     for sys in sys_candidates(own_dirs) {
         tried.push(sys.display().to_string());
         match read_declaration(&sys, project, &wanted, &[]) {
-            Ok(Some((databases, expansion_problems))) => {
+            Ok(Some((databases, expansion_problems, access))) => {
                 problems.extend(expansion_problems);
                 return Ok(UnboundDeclaration {
                     sys,
                     databases,
+                    access,
                     problems,
                 });
             }
@@ -768,7 +814,7 @@ fn read_declaration(
     project: &str,
     wanted: &str,
     projects: &[(String, DirInventory)],
-) -> anyhow::Result<Option<(Vec<MdbDatabase>, Vec<String>)>> {
+) -> anyhow::Result<Option<(Vec<MdbDatabase>, Vec<String>, BTreeMap<u32, DbAccess>)>> {
     // e3d-io 读法（parse_pdms_db 退役清单 §B5）：SYS 库按最新会话钉进 `DbSet`
     // （模板 `sysvir.dat`）；Global Project 的 MDB 在本地 SYS、DB 声明在同目录 GLB，
     // `DbSet` 经文件头索引按 refno 自带的 dbno 惰性补开后者。MDB 元素按 SYS 的固定结构
@@ -936,6 +982,7 @@ fn read_declaration(
     }
     let members = expansion.entries;
     let mut databases = Vec::with_capacity(members.len());
+    let mut access = BTreeMap::new();
     let mut skipped_databases = 0usize;
     for (curd_index, entry) in members.into_iter().enumerate() {
         let refno = entry.refno;
@@ -1036,6 +1083,19 @@ fn read_declaration(
                 sys.display()
             )
         })?;
+        // 写权限证据在同一声明元素上：`ACCESSDB`/`LREFO`/`CLAI`。样本项目
+        // 整列缺席是常态——缺席按会话默认可写，见 `DbAccess::writable`。
+        access.insert(
+            dbnum,
+            DbAccess {
+                access: merged.get_as_string("ACCESSDB"),
+                reference_only: matches!(
+                    merged.get_val("LREFO"),
+                    Some(NamedAttrValue::BoolType(true))
+                ),
+                claim: merged.get_as_string("CLAI"),
+            },
+        );
         databases.push(MdbDatabase {
             dbnum,
             styp,
@@ -1078,7 +1138,7 @@ fn read_declaration(
         skipped_databases,
         &counts_by_styp,
     ));
-    Ok(Some((databases, problems)))
+    Ok(Some((databases, problems, access)))
 }
 
 /// Same-directory project administration files, keyed by the dbnum read from
@@ -2270,6 +2330,7 @@ mod tests {
                 db(5100, DICT_STYP, "*CNPESTD/DICT", true),
                 db(7323, DICT_STYP, "*MASTER/MDSDICT", false),
             ],
+            access: BTreeMap::new(),
             problems: Vec::new(),
         }
     }

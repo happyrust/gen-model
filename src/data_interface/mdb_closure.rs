@@ -45,6 +45,9 @@ pub struct MdbDeclaration {
     pub sys: PathBuf,
     /// CURD 序。
     pub databases: Vec<MdbDatabase>,
+    /// 各声明元素上的写权限证据（dbnum → [`DbAccess`]），见
+    /// `super::mdb_membership::DbAccess`。
+    pub access: std::collections::BTreeMap<u32, super::mdb_membership::DbAccess>,
     /// 读 SYS 时该让人看见的事（DBSET 展开问题、跳过的候选）。
     pub problems: Vec<String>,
 }
@@ -158,6 +161,7 @@ pub fn reload_declaration(
         mdb: normalize_mdb(mdb),
         sys: read.sys,
         databases: read.databases,
+        access: read.access,
         problems: read.problems,
     }))
 }
@@ -183,6 +187,7 @@ pub fn seed_declaration(project: &str, mdb: &str, entries: &[(Option<&str>, u32,
         mdb: normalize_mdb(mdb),
         sys: PathBuf::from("<seeded>"),
         databases,
+        access: Default::default(),
         problems: Vec::new(),
     });
 }

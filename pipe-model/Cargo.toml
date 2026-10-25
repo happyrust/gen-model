@@ -1,0 +1,26 @@
+# pipe-model：E3D 3.1 管道建模语义的 Rust 服务域。
+# 需求规格 docs/specs/pipe-modeling.md；行为依据 docs/evidence/2026-10-15-e3d-pipe-modeling-ui-behavior.md §15-§18。
+#
+# 铁律：本 crate 不直连 SurrealDB。每个操作返回 MutationBatch（与 e3d_collector
+# 落库行同构），由调用方走 persist_writer lane 提交——编辑行与会话行在下游不可区分。
+#
+# aios_core 的声明必须与根 crate 逐字一致（同 URL + 同 rev），根 Cargo.toml 的
+# [patch]（vendor 本地重定向 ../vendor/old-aios-core）才能把整张图收敛到同一份源码。
+#
+# 注意：不要依赖 aios-database——它的 lib 在非默认 feature 集下编不过
+# （ws/gen_model 门后符号缺失），而骨架只需要 aios_core 的 RefU64/NamedAttrMap。
+# MutationBatch 与 e3d_collector 落库行的同构性靠共享 aios_core 类型保证；
+# EleData/persist_writer 接缝在 Phase A 填充实现时再引入。
+[package]
+name = "pipe-model"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "AVEVA E3D pipe modeling domain service (reverse-engineered semantics -> MutationBatch)"
+
+[dependencies]
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "4a7a00f93f3afa4069922ea52fab174cbbbddcde", default-features = false }
+serde = { version = "1.0.137", features = ["derive"] }
+# NamedAttrValue::Vec3Type 用 glam::Vec3；版本必须与 aios_core 的 glam 0.29.3 一致，
+# 否则跨边界类型不匹配。
+glam = { version = "0.29.3" }
