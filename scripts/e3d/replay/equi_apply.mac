@@ -1,5 +1,7 @@
 -- L2 回放链 ams8000-equi-move-chain：EQUI /1-LNR-Q005-PJ (=24384/24776, dbnum 8000) 整根上 500 mm（刚体路）。
 -- 恰好一个 SAVEWORK；wrapper QUIT。
+-- SAVEWORK 之后、QUIT 之前把库文件拷一份：这是保存会话刚落完时的真字节（QUIT 尾会话会就地改它的 end / claim 字），
+-- pack 把它与终稿现切的差记成字节补丁（`db_session_fixture` format 模块注）。
 ONERROR CONTINUE
 ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_apply.log" OVER
 $P REPLAY-APPLY-ALIVE
@@ -10,5 +12,7 @@ Q POS
 BY U 500mm
 Q POS
 SAVEWORK 'replay chain ams8000-equi-move-chain: EQUI =24384/24776 up 500mm'
+$P REPLAY-APPLY-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots\ams8000_0001.after-apply-save"'
 $P REPLAY-APPLY-DONE
 ALPHA LOG END

@@ -40,6 +40,9 @@ struct Case {
     #[serde(default)]
     fixture_dir: Option<String>,
     start: u32,
+    /// 多给服务进程的环境变量（如测试钩 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY`）。
+    #[serde(default)]
+    service_env: BTreeMap<String, String>,
     /// 初始化到 S 之后先核一遍（`to` 填 S；这是让「有行」那半边的查询先被正面踩过一次）。
     #[serde(default)]
     init: Option<Step>,
@@ -52,9 +55,26 @@ struct SourceZip {
     entry: String,
 }
 
+/// 「保存中途被看见」（INC-H01）：推到 `to` 后，等监听器把 `to` 的批次跑起来，再把 `next` 按「先页后头」两半写进去；
+/// `to` 那一窗必须 failed（消息含 `message_contains`）并被 `to..=next` 的后继窗 supersede，步的其余断言落在后继窗上。
+/// 服务要带测试钩 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY="<to>:<ms>"` 把冻结与复核之间拉开（`service_env`）。
+#[derive(Debug, Deserialize)]
+struct Race {
+    next: u32,
+    #[serde(default = "default_anchor_message")]
+    message_contains: String,
+}
+
+fn default_anchor_message() -> String {
+    "anchor 已改变".to_string()
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct Step {
     to: u32,
+    /// 见 [`Race`]。
+    #[serde(default)]
+    race: Option<Race>,
     #[serde(default)]
     half: Option<String>,
     #[serde(default)]
@@ -97,6 +117,15 @@ struct Step {
     /// 这一步的任务终态（缺省 succeeded）。
     #[serde(default)]
     task_state: Option<String>,
+}
+
+/// 截到最多 `max` 个字符（报错里带一段任务 JSON，不要整个刷屏）。
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!("{}…", text.chars().take(max).collect::<String>())
+    }
 }
 
 /// 包围盒平移比对的容差：生成器浮点往返会在最后一位上抖（与 `unit_geometry_snapshot::MOVED_TOLERANCE_MM` 同量级）。
@@ -295,7 +324,13 @@ struct Service {
 }
 
 impl Service {
-    fn start(env: &Env, run_dir: &Path, port: u16, surreal_port: u16) -> Self {
+    fn start(
+        env: &Env,
+        run_dir: &Path,
+        port: u16,
+        surreal_port: u16,
+        extra_env: &BTreeMap<String, String>,
+    ) -> Self {
         // 一次性 rocksdb surreal：库目录在运行目录里，跑完就是废纸。
         let store = run_dir.join("store");
         let surreal = Command::new(&env.surreal_exe)
@@ -333,6 +368,7 @@ impl Service {
             .env("PLANT_ASSET_ROOT", &assets)
             .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1")
             .env("RUST_MIN_STACK", "134217728")
+            .envs(extra_env)
             .stdout(Stdio::from(
                 fs::File::create(&stdout_path).expect("stdout log"),
             ))
@@ -443,6 +479,23 @@ impl Service {
                 self.stdout_path.display()
             );
         }
+    }
+
+    /// 等服务 stdout 里出现某一行（如测试钩开始等待的那一句：那一句印出来时冻结源已经抓好、复核还没开始）。
+    fn wait_for_log_line(&mut self, needle: &str, timeout: Duration, what: &str) -> String {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            self.assert_alive(what);
+            let log = fs::read_to_string(&self.stdout_path).unwrap_or_default();
+            if let Some(line) = log.lines().find(|line| line.contains(needle)) {
+                return line.to_string();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        panic!(
+            "[{what}] {timeout:?} 内服务日志里没出现「{needle}」；日志 {}",
+            self.stdout_path.display()
+        );
     }
 
     /// 最近一条落在 `dbnum` 且右端 == `end` 的数据批次任务。
@@ -604,7 +657,7 @@ fn run_case(env: &Env, case: &Case) {
         surreal_port,
         case.dbnum,
     );
-    let mut service = Service::start(env, &run_dir, port, surreal_port);
+    let mut service = Service::start(env, &run_dir, port, surreal_port, &case.service_env);
     let started = Instant::now();
     while service.get("health").is_none() {
         service.assert_alive("startup");
@@ -621,24 +674,44 @@ fn run_case(env: &Env, case: &Case) {
     }
 
     // 3. 逐步回放。
-    for step in &case.steps {
+    let replay_step = |to: u32, half: Option<&str>, rollback: bool| {
         let mut args = vec!["replay-step".to_string()];
         args.extend(source.iter().cloned());
         args.extend([
             "--work".to_string(),
             work.to_string_lossy().into_owned(),
             "--to".to_string(),
-            step.to.to_string(),
+            to.to_string(),
         ]);
-        if let Some(half) = &step.half {
-            args.extend(["--half".to_string(), half.clone()]);
+        if let Some(half) = half {
+            args.extend(["--half".to_string(), half.to_string()]);
         }
-        if step.rollback {
+        if rollback {
             args.push("--rollback".to_string());
         }
         let report = run_fixture_tool(&env.fixture_exe, &args);
         eprintln!("  replay-step → {report}");
+    };
+    for step in &case.steps {
+        replay_step(step.to, step.half.as_deref(), step.rollback);
         if step.no_wait {
+            continue;
+        }
+        if let Some(race) = &step.race {
+            // 等监听器把 to 的批次跑起来（测试钩正在冻结与复核之间等着），再把下一会话按真机的写序塞进去：
+            // 先页（含对 to 会话页的就地改写——anchor 就是在这一半变的），后头。
+            let needle = format!("[测试钩] 窗口右端 {}：", step.to);
+            let line = service.wait_for_log_line(&needle, Duration::from_secs(120), "race");
+            eprintln!("  [race] {line}");
+            eprintln!(
+                "  [race] 批次 {} 已冻结、正在等，现在写入 {}（先页后头）",
+                step.to, race.next
+            );
+            replay_step(race.next, Some("pages"), false);
+            replay_step(race.next, Some("header"), false);
+            let what = format!("step → {} 被 {} 追上", step.to, race.next);
+            service.wait_in_sync(case.dbnum, race.next, Duration::from_secs(240), &what);
+            assert_step(&service, case, step, &what);
             continue;
         }
         let what = format!("step → {}", step.to);
@@ -653,6 +726,81 @@ fn run_case(env: &Env, case: &Case) {
 fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
     {
         let mut problems = Vec::new();
+        // 赛跑步：单元 / 几何 / 房间断言落在追上来的后继窗（右端 next）上；被超越的那一窗另有断言。
+        let end = step.race.as_ref().map_or(step.to, |race| race.next);
+        if let Some(race) = &step.race {
+            let refused = service.latest_task(case.dbnum, step.to).unwrap_or_else(|| {
+                panic!(
+                    "[{what}] /tasks 里找不到被追上的那一窗（dbnum {} 右端 {}）",
+                    case.dbnum, step.to
+                )
+            });
+            let follow_up = service
+                .latest_task(case.dbnum, race.next)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "[{what}] /tasks 里找不到后继窗（dbnum {} 右端 {}）",
+                        case.dbnum, race.next
+                    )
+                });
+            let refused_id = refused.get("task_id").and_then(Value::as_str).unwrap_or("");
+            let follow_up_id = follow_up
+                .get("task_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let refused_state = refused.get("state").and_then(Value::as_str).unwrap_or("");
+            if refused_state != "failed" {
+                problems.push(format!(
+                    "被追上的窗 {refused_id}（右端 {}）state={refused_state}，期望 failed",
+                    step.to
+                ));
+            }
+            let refused_text = refused.to_string();
+            if !refused_text.contains(race.message_contains.as_str()) {
+                problems.push(format!(
+                    "被追上的窗 {refused_id} 里没有「{}」：{}",
+                    race.message_contains,
+                    truncate(&refused_text, 600)
+                ));
+            }
+            let superseded_by = refused.get("superseded_by").and_then(Value::as_str);
+            if superseded_by != Some(follow_up_id) {
+                problems.push(format!(
+                    "被追上的窗 {refused_id}.superseded_by={superseded_by:?}，期望 {follow_up_id}"
+                ));
+            }
+            let supersedes = follow_up
+                .get("supersedes")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !supersedes.iter().any(|id| id == refused_id) {
+                problems.push(format!(
+                    "后继窗 {follow_up_id}.supersedes={supersedes:?}，期望含 {refused_id}"
+                ));
+            }
+            let start = follow_up.get("start_sesno").and_then(Value::as_u64);
+            if start != Some(step.to as u64) {
+                problems.push(format!(
+                    "后继窗 {follow_up_id} 应从 {} 重覆盖（start_sesno），实际 {start:?}",
+                    step.to
+                ));
+            }
+            eprintln!(
+                "  [race] {refused_id}（{}..={}）{refused_state} → superseded_by {follow_up_id}（{start:?}..={}）",
+                refused
+                    .get("start_sesno")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                step.to,
+                race.next
+            );
+        }
         // 任务终态与单元 kind / 几何差 / 房间前后。
         if !step.unit_kinds.is_empty()
             || step.task_state.is_some()
@@ -660,10 +808,10 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
             || !step.rooms_unchanged.is_empty()
             || !step.aabb_shift.is_empty()
         {
-            let task = service.latest_task(case.dbnum, step.to).unwrap_or_else(|| {
+            let task = service.latest_task(case.dbnum, end).unwrap_or_else(|| {
                 panic!(
                     "[{what}] /tasks 里找不到 dbnum {} 右端 {} 的批次",
-                    case.dbnum, step.to
+                    case.dbnum, end
                 )
             });
             let expected_state = step.task_state.as_deref().unwrap_or("succeeded");

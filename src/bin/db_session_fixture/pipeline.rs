@@ -9,16 +9,17 @@
 
 use aios_database::data_interface::db_file_header::snapshot_presence;
 use anyhow::{Context, ensure};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::archive_util::{extract_single_declared_file, sha256_file, write_archive};
 use crate::format::{
     ArchiveSpec, COMPRESSION, FORMAT, FinalSnapshotSpec, MAX_ARCHIVE_BYTES, Recording,
-    SessionFixtureManifest, SessionSnapshotSpec, SnapshotProbe, plan_cases, validate_relative_path,
+    SessionFixtureManifest, SessionSnapshotSpec, SnapshotProbe, apply_patches, diff_patches,
+    plan_cases, trim_cut_to, validate_relative_path,
 };
-use crate::session_cut::{session_chain, write_snapshot};
+use crate::session_cut::{PAGE_SIZE, session_chain, write_snapshot};
 
 /// 一个 DB 文件的会话链概览（录制脚本按它取 baseline 与逐步核对水位推进）。
 #[derive(Debug, serde::Serialize)]
@@ -64,6 +65,35 @@ pub fn pack(
     };
     let plan = plan_cases(recording.baseline_sesno, &recording.cases)?;
 
+    // 录制期拷下的真文件：按各自头里的 sesno 归位，必须落在链的范围里（拷错腿就在这里红）。
+    let mut real_snapshots: BTreeMap<u32, PathBuf> = BTreeMap::new();
+    for snapshot in &recording.snapshots {
+        let path = PathBuf::from(snapshot);
+        let bytes = fs::read(&path).with_context(|| format!("read snapshot {}", path.display()))?;
+        let sesno = session_chain(&bytes)
+            .with_context(|| format!("snapshot {} 不是能读的 DB 文件", path.display()))?
+            .latest_sesno;
+        ensure!(
+            sesno >= recording.baseline_sesno && sesno <= plan.final_sesno,
+            "快照 {} 的 sesno={sesno} 不在链的范围 {}..={} 里",
+            path.display(),
+            recording.baseline_sesno,
+            plan.final_sesno
+        );
+        ensure!(
+            real_snapshots.insert(sesno, path.clone()).is_none(),
+            "sesno={sesno} 有两份快照（{}）",
+            path.display()
+        );
+    }
+    // 台账 = 案例推导的关键 sesno ∪ 录制时拷了真文件的 sesno（回放要逐步走，每一步都要忠实）。
+    let ledger: BTreeSet<u32> = plan
+        .ledger
+        .iter()
+        .copied()
+        .chain(real_snapshots.keys().copied())
+        .collect();
+
     let source_bytes =
         fs::read(&source_path).with_context(|| format!("read source {}", source_path.display()))?;
     let source_chain = session_chain(&source_bytes)?;
@@ -106,13 +136,43 @@ pub fn pack(
             "最终快照会话链缺台账要求的 sesno={sesno}"
         );
     }
+    for &sesno in real_snapshots.keys() {
+        ensure!(
+            final_chain.contains(sesno),
+            "最终快照会话链缺录制快照的 sesno={sesno}"
+        );
+    }
 
     // 台账切割一律从**最终文件**切：verify 与回归将来就是这么切的，
-    // 台账散列必须是它们能复现的那一份。逐切过验证闸（sesno + 存在性探针）。
+    // 台账散列必须是它们能复现的那一份。有真快照的 sesno 再把「真 − 切」折成补丁打上，
+    // 台账记的是打完的那份。逐切过验证闸（sesno + 存在性探针）。
     let mut session_snapshots = Vec::new();
-    for &sesno in &plan.ledger {
+    let mut patched_sesnos = Vec::new();
+    for &sesno in &ledger {
         let cut_path = stage.path().join("cuts").join(format!("sesno-{sesno:03}"));
         write_snapshot(&final_bytes, final_chain.cut_for(sesno)?, &cut_path)?;
+        let patches = match real_snapshots.get(&sesno) {
+            Some(real_path) => {
+                let full_cut = fs::read(&cut_path)?;
+                let real_bytes = fs::read(real_path)?;
+                let mut cut_bytes = trim_cut_to(&full_cut, real_bytes.len(), PAGE_SIZE)
+                    .with_context(|| format!("sesno={sesno} 快照 {}", real_path.display()))?
+                    .to_vec();
+                let patches = diff_patches(&cut_bytes, &real_bytes, PAGE_SIZE)
+                    .with_context(|| format!("sesno={sesno} 快照 {}", real_path.display()))?;
+                apply_patches(&mut cut_bytes, &patches, PAGE_SIZE)?;
+                ensure!(
+                    cut_bytes == real_bytes,
+                    "sesno={sesno} cut + 补丁没有还原成快照（内部错误）"
+                );
+                fs::write(&cut_path, &cut_bytes)?;
+                if !patches.is_empty() {
+                    patched_sesnos.push(sesno);
+                }
+                patches
+            }
+            None => Vec::new(),
+        };
         let probes = plan.probes.get(&sesno).map_or(&[][..], Vec::as_slice);
         let observed = probe_snapshot(&cut_path, probes)?;
         ensure!(
@@ -123,7 +183,11 @@ pub fn pack(
             sesno,
             bytes: fs::metadata(&cut_path)?.len(),
             sha256: sha256_file(&cut_path)?,
+            patches,
         });
+    }
+    if !patched_sesnos.is_empty() {
+        println!("带字节补丁的台账 sesno（真文件 ≠ 终稿现切）：{patched_sesnos:?}");
     }
 
     let archive_name = format!(
@@ -172,8 +236,14 @@ pub fn pack(
     ));
     for snapshot in &manifest.session_snapshots {
         sums.push_str(&format!(
-            "{}  sesno-{:03}（运行时现切，不入库）\n",
-            snapshot.sha256, snapshot.sesno
+            "{}  sesno-{:03}（运行时现切{}，不入库）\n",
+            snapshot.sha256,
+            snapshot.sesno,
+            if snapshot.patches.is_empty() {
+                ""
+            } else {
+                " + 字节补丁"
+            }
         ));
     }
     fs::write(stage.path().join("SHA256SUMS"), sums)?;
@@ -285,10 +355,11 @@ pub fn verify_fixture(root: &Path) -> anyhow::Result<VerifyReport> {
         recorded.len() == manifest.session_snapshots.len(),
         "还原台账里有重复 sesno"
     );
+    // 案例推导的关键 sesno 必须都在台账里；台账里多出来的只能是录制时拷了真文件的 sesno（带字节补丁，或与终稿现切恰好相同）。
     ensure!(
-        recorded == plan.ledger,
-        "还原台账 sesno 集合 {recorded:?} 与案例推导 {:?} 不一致",
-        plan.ledger
+        plan.ledger.is_subset(&recorded),
+        "还原台账 sesno 集合 {recorded:?} 缺案例推导的 {:?}",
+        plan.ledger.difference(&recorded).collect::<Vec<_>>()
     );
 
     let temp = tempfile::Builder::new()
@@ -315,6 +386,15 @@ pub fn verify_fixture(root: &Path) -> anyhow::Result<VerifyReport> {
     for spec in &manifest.session_snapshots {
         let cut_path = temp.path().join(format!("sesno-{:03}", spec.sesno));
         write_snapshot(&final_bytes, chain.cut_for(spec.sesno)?, &cut_path)?;
+        if !spec.patches.is_empty() || fs::metadata(&cut_path)?.len() != spec.bytes {
+            let full_cut = fs::read(&cut_path)?;
+            let mut bytes = trim_cut_to(&full_cut, spec.bytes as usize, PAGE_SIZE)
+                .with_context(|| format!("sesno={} 台账长度对齐", spec.sesno))?
+                .to_vec();
+            apply_patches(&mut bytes, &spec.patches, PAGE_SIZE)
+                .with_context(|| format!("sesno={} 打字节补丁", spec.sesno))?;
+            fs::write(&cut_path, &bytes)?;
+        }
         let cut_bytes = fs::metadata(&cut_path)?.len();
         ensure!(
             cut_bytes == spec.bytes,

@@ -1,52 +1,188 @@
 {
   "format": "aios-session-fixture-v1",
   "dbnum": 8000,
-  "baseline_sesno": 714,
+  "baseline_sesno": 725,
   "archive": {
-    "path": "db8000-sesno714-720.zip",
-    "bytes": 4544236,
-    "sha256": "804aa89081248736b12e9fcef83844041e7a08791249545fbcf48a0251af49cf",
+    "path": "db8000-sesno725-731.zip",
+    "bytes": 4596652,
+    "sha256": "8b209f17a7f829a4c81ef7e2a04ad7f14b7ca14c7eb798cba7c9153540d935f9",
     "compression": "zip-deflate-level-9",
     "max_bytes": 6291456
   },
   "final": {
     "path": "final/ams8000_0001",
-    "sesno": 720,
-    "bytes": 36724736,
-    "sha256": "5dbf8a0d99eb760ecd33a56dd9a3ef1a96b07b9eb5358e0b3429e93b6d6b768c"
+    "sesno": 731,
+    "bytes": 37126144,
+    "sha256": "ecd370de6e860d35c8e16a221709a8b31dce8023df580ffad33a8ef29c3f2429"
   },
   "session_snapshots": [
     {
-      "sesno": 714,
-      "bytes": 36503552,
-      "sha256": "617121f188fe6e9b6843d6f2fc198866c96e8f9e78424ba3b33c14a3ed944bda"
+      "sesno": 725,
+      "bytes": 36904960,
+      "sha256": "b2b299c8a66ecf7836fdec97cc1e9f0709a498e9f11f7b7c279a28271b7636a9",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "55",
+          "real_hex": "51"
+        },
+        {
+          "page": 18019,
+          "offset": 1751,
+          "final_hex": "0d",
+          "real_hex": "00"
+        },
+        {
+          "page": 18019,
+          "offset": 1767,
+          "final_hex": "0d",
+          "real_hex": "00"
+        }
+      ]
     },
     {
-      "sesno": 715,
-      "bytes": 36546560,
-      "sha256": "04e90ebe8f7544a9911b227d8fc1dbb8f66abdc86ec2090dc3c79cec15f185c3"
+      "sesno": 726,
+      "bytes": 36945920,
+      "sha256": "74518c6930e766e497200381dfbf0c8c0d158f111049e5e98bde4d0bd7503552",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "55",
+          "real_hex": "52"
+        },
+        {
+          "page": 18037,
+          "offset": 23,
+          "final_hex": "78",
+          "real_hex": "77"
+        },
+        {
+          "page": 18038,
+          "offset": 791,
+          "final_hex": "78",
+          "real_hex": "4e"
+        }
+      ]
     },
     {
-      "sesno": 716,
-      "bytes": 36573184,
-      "sha256": "9bb65014376a63b5804d305510cc4dee50b26a092d675187aa28e91ac644e2cc"
+      "sesno": 727,
+      "bytes": 36968448,
+      "sha256": "9a8227d10ff5e82a7b38dd9c6ade116ca2f4999cb7c384c35aeca338914dcdd3",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 379,
+          "final_hex": "02",
+          "real_hex": "00"
+        },
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "55",
+          "real_hex": "53"
+        },
+        {
+          "page": 18050,
+          "offset": 23,
+          "final_hex": "85",
+          "real_hex": "82"
+        },
+        {
+          "page": 18050,
+          "offset": 39,
+          "final_hex": "83",
+          "real_hex": "81"
+        }
+      ]
     },
     {
-      "sesno": 719,
-      "bytes": 36683776,
-      "sha256": "335808514e68cadfee84099a6f0b0c171ab9e04dda20de0b01707753ecdd3645"
+      "sesno": 728,
+      "bytes": 37015552,
+      "sha256": "a4a1114ccff5e292e5023c21340de604e7770bf500597bce9fe48189bc640bd4",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "55",
+          "real_hex": "53"
+        },
+        {
+          "page": 18073,
+          "offset": 1751,
+          "final_hex": "0f",
+          "real_hex": "00"
+        },
+        {
+          "page": 18073,
+          "offset": 1767,
+          "final_hex": "0f",
+          "real_hex": "00"
+        }
+      ]
     },
     {
-      "sesno": 720,
-      "bytes": 36724736,
-      "sha256": "5dbf8a0d99eb760ecd33a56dd9a3ef1a96b07b9eb5358e0b3429e93b6d6b768c"
+      "sesno": 729,
+      "bytes": 37056512,
+      "sha256": "3f1b77532c243a73bfcc890937f637042114b282045fab1d6be66e1c02ca8aa8",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 383,
+          "final_hex": "55",
+          "real_hex": "54"
+        },
+        {
+          "page": 18091,
+          "offset": 23,
+          "final_hex": "ae",
+          "real_hex": "ad"
+        },
+        {
+          "page": 18092,
+          "offset": 791,
+          "final_hex": "ae",
+          "real_hex": "84"
+        }
+      ]
+    },
+    {
+      "sesno": 730,
+      "bytes": 37079040,
+      "sha256": "c820895c5f5cae0024cf75bd01222af452486bc5d9c20993647d75278d87544a",
+      "patches": [
+        {
+          "page": 0,
+          "offset": 379,
+          "final_hex": "02",
+          "real_hex": "00"
+        },
+        {
+          "page": 18104,
+          "offset": 23,
+          "final_hex": "bb",
+          "real_hex": "b8"
+        },
+        {
+          "page": 18104,
+          "offset": 39,
+          "final_hex": "b9",
+          "real_hex": "b7"
+        }
+      ]
+    },
+    {
+      "sesno": 731,
+      "bytes": 37126144,
+      "sha256": "ecd370de6e860d35c8e16a221709a8b31dce8023df580ffad33a8ef29c3f2429"
     }
   ],
   "cases": [
     {
       "id": "equi-move",
-      "apply_sesno": 716,
-      "restore_sesno": 719,
+      "apply_sesno": 727,
+      "restore_sesno": 730,
       "refs": {
         "box": "24384/24777",
         "equi": "24384/24776"
@@ -78,7 +214,7 @@
     },
     {
       "id": "quit-tail",
-      "apply_sesno": 720,
+      "apply_sesno": 731,
       "refs": {
         "box": "24384/24777",
         "equi": "24384/24776"

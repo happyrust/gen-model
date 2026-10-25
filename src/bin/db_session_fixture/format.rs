@@ -6,6 +6,13 @@
 //!
 //! 历史快照不入库：回归测试运行时用 `session_cut` 从最终文件现切，再拿台账对账，
 //! 这就是「任意历史可还原」性质的载体。
+//!
+//! **字节补丁**（2026-10-25）：dabacon 不是纯 append-only：每写一个新会话，E3D 会就地改前一个会话页的 `end` /
+//! `claim` 字（`end` 多往后指一页，所以从终稿切出来的 cut(S) 比真机上 S 刚存完的文件**长一页**）、前一会话的 claim 页，
+//! 和头页的几个计数。于是 cut(S) 里 S 的会话页已经是被 S+1 改过的样子，与真机上的字节不同——而冻结源的 anchor 正是这一页
+//! 的散列（`frozen_source::target_anchor`）。录制时把每个会话时刻的真文件多拷一份（`Recording::snapshots`），pack 就把
+//! 「真文件 − cut(S)」记成台账里的长度（`bytes`，真文件的）+ 几个 [`BytePatch`]；台账散列、verify 的现切与
+//! `replay-init / replay-step` 都是 cut → 截到 `bytes` → 打补丁。没有快照的 sesno 没有补丁、长度就是 cut 的，行为与从前一样。
 
 use aios_core::pdms_types::RefU64;
 use anyhow::{Context, bail, ensure};
@@ -56,8 +63,136 @@ pub struct FinalSnapshotSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshotSpec {
     pub sesno: u32,
+    /// 忠实快照的大小与散列：有真快照时是真文件的（cut 截到这个长度再打补丁），没有时就是 cut 本身。
     pub bytes: u64,
     pub sha256: String,
+    /// 真文件在这个会话时刻与 cut(sesno) 不同的字节（见模块注）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<BytePatch>,
+}
+
+/// 一段连续的字节差异：终稿切出来是 `final_hex`，真机上当时是 `real_hex`（两者等长）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BytePatch {
+    pub page: u32,
+    pub offset: u32,
+    pub final_hex: String,
+    pub real_hex: String,
+}
+
+/// 补丁总字节数上限：真正的就地改写只有几个字；超过这个数说明快照和终稿不是同一条链（或被 MERGE / PURGE 过）。
+pub const MAX_PATCH_BYTES: usize = 4096;
+/// 补丁涉及的页数上限（头页 + 前一会话页 + claim 页那一类）。
+pub const MAX_PATCH_PAGES: usize = 16;
+
+/// 真文件最多比 cut 短这么多页（E3D 把前一会话的 `end` 往后指：登录会话之后量到 +1 页，SAVEWORK 之后的 QUIT 尾会话
+/// 量到 +3 页；再多就不是同一会话时刻）。
+pub const MAX_TRAILING_PAGES: usize = 4;
+
+/// 把真文件的长度套到 cut 上：cut 只能比真文件长整页、最多 [`MAX_TRAILING_PAGES`] 页。回截短后的 cut。
+pub fn trim_cut_to(cut: &[u8], real_len: usize, page_size: usize) -> anyhow::Result<&[u8]> {
+    ensure!(
+        real_len <= cut.len(),
+        "快照 {real_len} 字节比 cut {} 字节还长，不是同一会话时刻",
+        cut.len()
+    );
+    let extra = cut.len() - real_len;
+    ensure!(
+        extra.is_multiple_of(page_size) && extra / page_size <= MAX_TRAILING_PAGES,
+        "快照 {real_len} 字节与 cut {} 字节差 {extra} 字节，不是「多指一页」那种差，不是同一会话时刻",
+        cut.len()
+    );
+    Ok(&cut[..real_len])
+}
+
+/// 把「真文件 − cut」的差异折成补丁。两者必须等长（调用方先用 [`trim_cut_to`] 对齐）；差异超过上限就拒绝。
+pub fn diff_patches(cut: &[u8], real: &[u8], page_size: usize) -> anyhow::Result<Vec<BytePatch>> {
+    ensure!(
+        cut.len() == real.len(),
+        "快照 {} 字节与 cut {} 字节不等长，不是同一会话时刻",
+        real.len(),
+        cut.len()
+    );
+    let mut patches = Vec::new();
+    let mut total = 0usize;
+    let mut pages = BTreeSet::new();
+    let mut i = 0usize;
+    while i < cut.len() {
+        if cut[i] == real[i] {
+            i += 1;
+            continue;
+        }
+        let page = i / page_size;
+        let page_end = (page + 1) * page_size;
+        let start = i;
+        while i < page_end && i < cut.len() && cut[i] != real[i] {
+            i += 1;
+        }
+        total += i - start;
+        pages.insert(page);
+        ensure!(
+            total <= MAX_PATCH_BYTES && pages.len() <= MAX_PATCH_PAGES,
+            "快照与 cut 的差异超过补丁上限（{total}+ 字节 / {} 页）：不像同一条链的就地改写",
+            pages.len()
+        );
+        patches.push(BytePatch {
+            page: page as u32,
+            offset: (start - page * page_size) as u32,
+            final_hex: hex::encode(&cut[start..i]),
+            real_hex: hex::encode(&real[start..i]),
+        });
+    }
+    Ok(patches)
+}
+
+/// 把补丁打到 cut 上（cut → 真文件）。打之前核对原字节确实是 `final_hex`：终稿换了、补丁还是老的，在这里就红。
+/// 回打进去的字节数。
+pub fn apply_patches(
+    bytes: &mut [u8],
+    patches: &[BytePatch],
+    page_size: usize,
+) -> anyhow::Result<usize> {
+    let mut applied = 0usize;
+    for patch in patches {
+        let expected = hex::decode(&patch.final_hex).with_context(|| {
+            format!(
+                "补丁 page {} +{} final_hex 不是 hex",
+                patch.page, patch.offset
+            )
+        })?;
+        let real = hex::decode(&patch.real_hex).with_context(|| {
+            format!(
+                "补丁 page {} +{} real_hex 不是 hex",
+                patch.page, patch.offset
+            )
+        })?;
+        ensure!(
+            expected.len() == real.len() && !real.is_empty(),
+            "补丁 page {} +{} 两边长度不等或为空",
+            patch.page,
+            patch.offset
+        );
+        let start = patch.page as usize * page_size + patch.offset as usize;
+        let end = start + real.len();
+        ensure!(
+            patch.offset as usize + real.len() <= page_size && end <= bytes.len(),
+            "补丁 page {} +{} 长 {} 越页或越文件尾",
+            patch.page,
+            patch.offset,
+            real.len()
+        );
+        ensure!(
+            bytes[start..end] == expected[..],
+            "补丁 page {} +{} 原字节 {} 与台账 final_hex {} 不符：终稿或补丁不是同一份",
+            patch.page,
+            patch.offset,
+            hex::encode(&bytes[start..end]),
+            patch.final_hex
+        );
+        bytes[start..end].copy_from_slice(&real);
+        applied += real.len();
+    }
+    Ok(applied)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +241,10 @@ pub struct Recording {
     pub baseline_sesno: u32,
     #[serde(default)]
     pub source: Option<String>,
+    /// 录制期间每个会话时刻拷下的真文件（路径；属于哪个 sesno 读它自己的头）。台账里有快照的 sesno 才有补丁；
+    /// 不在台账里的快照拒绝（多半是拷错了腿）。
+    #[serde(default)]
+    pub snapshots: Vec<String>,
     pub cases: Vec<CaseSpec>,
 }
 
@@ -336,5 +475,38 @@ mod tests {
         }
         #[cfg(windows)]
         assert!(validate_relative_path(r"C:\escape").is_err());
+    }
+
+    /// 真文件 = cut 截短一页 + 几个字节不同：diff 折成按页的连续段，apply 还原逐字节相等；越界的差、对不上的 final_hex、
+    /// 多出不止整页的长度都拒。
+    #[test]
+    fn byte_patches_round_trip_between_the_cut_and_the_real_snapshot() {
+        let page = 64usize;
+        let cut: Vec<u8> = (0..page * 8).map(|i| (i % 251) as u8).collect();
+        let mut real = cut[..page * 5].to_vec();
+        real[0x17] ^= 0x20;
+        real[page * 2 + 5] = 0xEE;
+        real[page * 2 + 6] = 0xEF;
+
+        let trimmed = trim_cut_to(&cut, real.len(), page).unwrap();
+        let patches = diff_patches(trimmed, &real, page).unwrap();
+        assert_eq!(
+            patches
+                .iter()
+                .map(|p| (p.page, p.offset, p.real_hex.len() / 2))
+                .collect::<Vec<_>>(),
+            vec![(0, 0x17, 1), (2, 5, 2)]
+        );
+        let mut rebuilt = trimmed.to_vec();
+        assert_eq!(apply_patches(&mut rebuilt, &patches, page).unwrap(), 3);
+        assert_eq!(rebuilt, real);
+
+        // 长度差不是整页、或超过上限，都不是同一会话时刻。
+        assert!(trim_cut_to(&cut, page * 5 + 1, page).is_err());
+        assert!(trim_cut_to(&cut, page * (8 - MAX_TRAILING_PAGES - 1), page).is_err());
+        // 打在不是那份终稿上就拒。
+        let mut other = trimmed.to_vec();
+        other[0x17] = 0x00;
+        assert!(apply_patches(&mut other, &patches, page).is_err());
     }
 }

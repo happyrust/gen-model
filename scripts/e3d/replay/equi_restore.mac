@@ -1,5 +1,5 @@
--- L2 回放链 ams8000-equi-move-chain：EQUI =24384/24776 下 500 mm 恢复原位。
--- 恰好一个 SAVEWORK；wrapper QUIT。
+-- L2 回放链 ams8000-equi-move-chain：EQUI /1-LNR-Q005-PJ (=24384/24776) 整根下 500 mm，把 apply 那一腿还回去。
+-- 恰好一个 SAVEWORK；wrapper QUIT。SAVEWORK 之后拷一份库文件（见 equi_apply.mac）。
 ONERROR CONTINUE
 ALPHA LOG "D:/work/plant-code/old/gen-model/output/replay-record/equi_restore.log" OVER
 $P REPLAY-RESTORE-ALIVE
@@ -9,6 +9,8 @@ Q REF
 Q POS
 BY D 500mm
 Q POS
-SAVEWORK 'replay chain ams8000-equi-move-chain: EQUI =24384/24776 back down 500mm'
+SAVEWORK 'replay chain ams8000-equi-move-chain: EQUI =24384/24776 down 500mm (restore)'
+$P REPLAY-RESTORE-SAVED
+SYSCOM 'cmd /c copy /Y "E:\reverse\e3d\replay-src\E3D3.1\AvevaMarineSample\ams000\ams8000_0001" "D:\work\plant-code\old\gen-model\output\replay-record\snapshots\ams8000_0001.after-restore-save"'
 $P REPLAY-RESTORE-DONE
 ALPHA LOG END

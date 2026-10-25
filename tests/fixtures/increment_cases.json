@@ -51,7 +51,7 @@
     { "id": "INC-G03", "group": "G", "layer": "L2", "title": "房间定义元素（PANE / FRMW）变 → 一条 room_rebuild 任务，边数与全量相同", "oracle": ["O2", "O3"], "status": "todo", "stage": "P2", "tests": [], "adrs": ["ADR-073"] },
     { "id": "INC-G04", "group": "G", "layer": "L0", "title": "快照 / 点查走边目标不扫表（EXPLAIN 无 Iterate Table）；边不依赖 pe 行", "oracle": ["O3"], "status": "has", "tests": ["lib:a_root_snapshot_counts_members_per_room_and_panel", "lib:room_membership_edges_are_readable_without_pe_attribute_rows"], "issues": ["#66"] },
 
-    { "id": "INC-H01", "group": "H", "layer": "L2", "title": "保存中途被看见：第一窗 failed（anchor 已改变、水位不动）→ 后继 supersedes 它并成功", "oracle": ["O3"], "status": "partial", "stage": "P1", "tests": ["lib:a_follow_up_window_links_the_refused_batch_it_covers", "lib:applied_or_uncovered_batches_are_not_superseded"] },
+    { "id": "INC-H01", "group": "H", "layer": "L2", "title": "保存中途被看见：第一窗 failed（anchor 已改变、水位不动）→ 后继 supersedes 它并成功（回放：字节忠实的 727 → 测试钩拉开冻结与复核 → 728 先页后头）", "oracle": ["O3"], "status": "has", "tests": ["lib:a_follow_up_window_links_the_refused_batch_it_covers", "lib:applied_or_uncovered_batches_are_not_superseded", "replay:ams8000-equi-move-chain"] },
     { "id": "INC-H02", "group": "H", "layer": "L2", "title": "同右端连续失败 5 次停止自动重跑，新会话或人工执行清零", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [] },
     { "id": "INC-H03", "group": "H", "layer": "L2", "title": "一个 dbnum 失败不阻断另一个（IU-INV-04）", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "adrs": ["ADR-011"] },
     { "id": "INC-H04", "group": "H", "layer": "L2", "title": "回退 → reinitialize 整库重建，worker 冻结点复核（同 INC-B06 的 L2 半边）", "oracle": ["O3"], "status": "todo", "stage": "P2", "tests": [], "adrs": ["ADR-021"] },

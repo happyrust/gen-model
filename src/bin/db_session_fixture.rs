@@ -5,6 +5,9 @@
 //! 夹具只入库**最终文件**（zip 单条目）+ manifest + SHA256SUMS；每个关键 sesno 的
 //! 历史快照在 pack 时切一遍、散列进还原台账，verify 与阶段三回归再从最终文件
 //! **现切**对账——「任意历史可从最终文件精确还原」是被验证的性质，不是假设。
+//! 还原到**字节**要多一样东西：E3D 每写一个新会话会就地改前一会话页的几个字（`end` / `claim`）和头页计数，
+//! 所以录制时把每个会话时刻的真文件拷一份（`recording.snapshots`），pack 把「真 − 现切」记成台账里的长度 + 字节补丁；
+//! 没有快照的 sesno 还是纯现切（`format` 模块注）。
 //!
 //! Issue #19 的专用实现（`db8000_two_delete_fixture`）保持冻结作回归；通用模块
 //! 的重放自检与 pack 往返覆盖在 `tests/db_session_fixture_selfcheck.rs`。

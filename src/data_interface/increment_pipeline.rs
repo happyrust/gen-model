@@ -773,6 +773,29 @@ fn reconcile_plan_with_live_set(
     removed + before - plan.work_items.len()
 }
 
+/// 测试钩：`AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY="<sesno>:<ms>"`（或 `"*:<ms>"`）——窗口右端等于 `<sesno>` 时，在冻结源复核前
+/// 睡 `<ms>` 毫秒。生产环境不设此变量，这里只是一次 `env::var`。只拉长时间、不改任何判据：复核本身还是
+/// [`verify_frozen_source`] 那一道门，夹具在这段时间里写进下一个会话，门就该像真机上那样回「anchor 已改变」。
+async fn delay_before_frozen_verify(end_sesno: u32) {
+    let Ok(spec) = std::env::var("AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY") else {
+        return;
+    };
+    let Some((which, millis)) = spec.split_once(':') else {
+        return;
+    };
+    let Ok(millis) = millis.trim().parse::<u64>() else {
+        return;
+    };
+    let which = which.trim();
+    let applies = which == "*" || which.parse::<u32>().ok() == Some(end_sesno);
+    if applies && millis > 0 {
+        println!(
+            "[测试钩] 窗口右端 {end_sesno}：冻结源复核前按 AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY 等 {millis} ms"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+    }
+}
+
 /// 冻结源复核（commit-generation gate）：收集时冻住的那个文件世代，持久化之前必须还是它。
 ///
 /// **这不是模型侧的优化。** 纯数据窗口（零模型候选）同样必须验：收集与持久化之间文件被
@@ -1059,6 +1082,9 @@ impl IncrementPipeline {
             "IncrementPipeline: {:?}, db_type={}, sesno range: {:?}",
             path, db_type, &sesno_range
         );
+        // 测试钩（只在设了 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 时生效）：把「收集已冻结、尚未复核」这一段拉长，
+        // 让 L2 回放夹具能确定性地在这里塞进下一个会话（INC-H01「保存中途被看见」：真机上是 E3D 在规划期间写下一会话）。
+        delay_before_frozen_verify(end_sesno as u32).await;
 
         let collected = collected.expect("the window is collected before the plan is built");
         let frozen = collected.frozen.ok_or_else(|| {

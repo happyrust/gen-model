@@ -6,6 +6,7 @@
 > **P0 已落地**（同日）：`tests/fixtures/increment_cases.json`（55 条：有 22 / 部分 10 / 补 21 / 语料 2，有承载占 58 %）、`tests/increment_cases_registry.rs`（3 钉，CI 新步骤 `Pin the increment test-case registry`）、`scripts/increment_cases_report.py`、`windows.json` 多本周两窗。§4 的表从此以登记表为准（`python scripts/increment_cases_report.py`），本文的副本不再手改。
 > **P1 前两步已落地**（同日晚）：`replay-init / replay-step`（`79e318cab`）、`tests/increment_replay/` harness + `scripts/replay/New-ShadowProjectRoot.ps1`，第一条用例 `db8000-two-delete`（issue-019 链，INC-B01）在真监听器上全绿（初始化 102 s，每步 6–20 s）。
 > **P1 第三步已落地**（同日更晚）：`ams8000-equi-move-chain` 在隔离副本上用 E3D 3.1 TTY 录成（`scripts/e3d/replay/*.mac`，`tests/fixtures/sessions/ams8000-equi-move-chain/`，zip 4.5 MB），用例 `cases/ams8000-equi-move-chain.json` 全绿：716 / 719 两次位移 `transform`、包围盒正好 ±500 mm、行数与房间不变；715 / 717 / 718 / 720 四个 DBMDAT-only 窗未触根 `AlreadyAvailable`（44–71 ms）；整链无 `[模型目标核对]`。两条事实订正：① 带 SAVEWORK 的 Design 腿是「先存、QUIT 时再写一个只含 DBMDAT 的尾会话」，不是「登录记账再存」；② 冷初始化 / 重启后投影里没有回执，第一次 `/model/generate` 走「补常驻根」回 `Generated`，用例要先 `generate_prime` 再谈「仍 AlreadyAvailable」。登记表 C03 / C04 / D01 / D04 / F04 翻「有」、G02 「部分」；总账有 27 / 部分 10 / 补 16 / 语料 2（67 %）。P1 尚欠：F02（杀进程重启后 `/model/records` 逐字段相等）、H01（`--half` 补排链）、B06（回退）；I04 / I05 预算归 P3。
+> **P1 第四步已落地**（同日深夜）：INC-H01 在回放里确定性复现。前提是一个没料到的事实：dabacon 不是纯 append-only，E3D 每写一个新会话就地改前一会话页的 `end` / `claim` 字（冻结源 anchor 正是这一页的散列），所以从终稿切出的 cut(S) 不是真机上 S 当时的字节，单靠 `--half` 复现不了「anchor 已改变」。于是夹具格式多了「真快照 → 长度 + 字节补丁」（`recording.snapshots`，每会话 3–4 字节），`replay-*` 还原到字节；服务多一个测试钩 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY`（D6 那类，只拉长时间不改判据）把「规划期间 E3D 写了下一会话」那段窗口拉到可控；harness 步多 `race {next}`。重录的 `ams8000-equi-move-chain`（725→731，七份真快照）上：727 窗 failed（anchor 已改变、水位不动）→ 727..=728 supersedes 它并把位移走完（transform）。登记表 H01 翻「有」；总账有 28 / 部分 9 / 补 16 / 语料 2。P1 尚欠 F02 / B06。
 > 口径：本文是**案例集合 + 落地计划**，不是又一份测试总纲——分层与编号沿用 `docs/2026-08-06_model-increment-unit-test-plan.md`（U1–U13 选组、IU-/RI- 不变量），live 事实沿用 `docs/2026-08-12_live-test-ledger.md`，学科矩阵沿用 `docs/plans/2026-09-05-pipe-hvac-ctray-equi-increment-test-matrix.md`。那三份不重写，本文只接上它们**没有接住的那一截**：这两周真机上暴露的缺陷全部发生在「自动化覆盖不到的层」。
 > 代码事实对到 `refactor` `b71617ee3`（2026-10-25）。行号 / 测试名以源码为准。
 > 关联：ADR-079（库级水位）、ADR-080 / 066（单元级发布 / 刚体前移）、ADR-088（整片删老行）、ADR-089（新旧判据与冻结锚）、ADR-011（单队列单消费者）、ADR-010（房间增量 = 全量逐边）；GitHub #61 / #63 / #64 / #65 / #66 / #67 / #68 / #69；`.github/workflows/windows-tests.yml`（`offline-increment-regression` job）。
@@ -70,7 +71,7 @@
 1. 起一份隔离服务（本仓 `aios-database.exe`，`store_mode=mem`（或临时 rocksdb）、`watch_dbnums` 只圈夹具库、`AIOS_SKIP_STARTUP_ROOM_BUILD=1`），监控目录里放会话 S 的切片；
 2. 「SAVEWORK」= `db_session_fixture replay-step --to <sesno>`：对**同一个文件就地**写入 S→S+1 的追加页并改写头（不换文件，`StableFileId` 不变——ADR-089 的身份锚才不会误报换文件）；
 3. 真监听器 / 调度器 / worker / 水位 / 任务表照常跑，断言走 O2 / O3（HTTP 面 + SurrealDB 直查）；
-4. 需要「保存中途被看见」的用例（补排链）：`replay-step --half` 先只追加页不改头或先改头不追加（两种半截各一例），下一步补齐——这是 L3 永远难以稳定触发、L2 却能确定性触发的形状；
+4. 需要「保存中途被看见」的用例（补排链）：`replay-step --half` 先只追加页不改头或先改头不追加（两种半截各一例），下一步补齐——这是 L3 永远难以稳定触发、L2 却能确定性触发的形状。**落地时的修正**：半截本身不够——anchor 是前一会话页的散列，而终稿现切里那一页已经是被下一会话改过的；要录制时拷真快照、pack 记字节补丁（夹具还原到字节），再加服务的测试钩 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 把冻结与复核之间拉开，页半截（含对前一会话页的改写）才会让在飞的窗按真机的样子 failed；
 5. 需要「只登录不改」：链里录一个只含 `DBMDAT` 的登录会话（#65 的 701 / 706 就是这种），回放到它就是普通一步；回退用例（B06 / H04）用 `replay-step --rollback` 截回更早的会话。
 6. 服务要整个 MDB 闭包，所以工作目录是一个**影子工程根**：别的项目目录（ZDJ / SCB / ACP / APS）走 junction，`AvevaMarineSample\ams000` 里除被回放的 DESI（真文件，由 `replay-init` 写出）外全走硬链接——服务只读，硬链接安全；E3D 不在这条链上。
 
@@ -235,7 +236,7 @@
 
 - **D1 几何裁判**：① **O1 两端全量为唯一几何裁判，RVM 只在几何算法改动时跑**；② 每条 L2 用例都带 RVM 对拍。推荐 ①：增量逻辑的错是「漏算 / 多算 / 算在旧输入上」，两端全量全能看见；RVM 量的是生成算法本身，混进来每条用例都要 E3D 导出。
 - **D2 夹具体量**：① **先录 §5.2 的 4 条链，zip 封顶 12 MB / 条，`max_bytes` 从 6 MB 放到 16 MB**；② 只录 8000 的两条（7997 文件 72 MB 太大）；③ 不入库，夹具放发布资产 / LFS。推荐 ①：7997 是唯一能复现大库规划器费用与 NOZZ 形状的语料，压后 ~10 MB 可承受；LFS 会让 CI checkout 多一道 PAT 以外的坑。
-- **D3 L2 的「SAVEWORK」实现**：① **就地追加 + 改头（同一文件，`StableFileId` 不变）**；② 用会话 N+1 的切片原子替换文件。推荐 ①：② 会让 ADR-089 的锚把每一步都判成「换了文件」，测不到真实形状；① 还顺手给了 `--half` 这个 L3 做不到的确定性触发。
+- **D3 L2 的「SAVEWORK」实现**：① **就地追加 + 改头（同一文件，`StableFileId` 不变）**；② 用会话 N+1 的切片原子替换文件。推荐 ①：② 会让 ADR-089 的锚把每一步都判成「换了文件」，测不到真实形状；① 还顺手给了 `--half` 这个 L3 做不到的确定性触发。落地补充（2026-10-25 深夜）：「追加 + 改头」还差一样——E3D 写新会话时就地改前一会话页的 `end` / `claim`，所以夹具要记每会话时刻的字节补丁（`recording.snapshots` → `BytePatch`），回放才和真机逐字节相同。
 - **D4 预算怎么判**：① **先记基线、相对 ±50 % 判，两轮 nightly 后再钉绝对值**；② 直接按 §4 I 组的绝对上限判。推荐 ①：#68 / #69 还没修，绝对值今天就红。
 - **D5 门禁策略**：① **L0 / L1 进 PR 门；L1′ / L2 / L3 本机 nightly，红即开票不阻塞 PR**（P1 开工时修正：L2 也要本机真项目目录，进 CI 待自包含语料）；② L3 也阻塞合入。推荐 ①：L3 依赖 E3D 许可与本机状态，阻塞 PR 会让它变成「大家都 skip 的那一步」。
 - **D6 必败注入**：① **测试钩 `AIOS_TEST_FAIL_ROOTS=<refno,…>`（只在 `cfg(any(test, feature = "test-hooks"))` 下生效），让一个根确定性生成失败**；② 用真实会失败的语料。推荐 ①：H02 / H05 / F05 要的是确定性，真实失败根会被修掉。
@@ -247,7 +248,7 @@
 | 段 | 内容 | 验收 |
 |---|---|---|
 | **P0** 登记表 | `increment_cases.json`（§4 全部条目，`has` 的填测试名）、登记表钉、`increment_cases_report.py`；INC-A08 把本周窗口加进 `windows.json` | 钉绿；报告生成的表与本文 §4 一致；CI 多一步 |
-| **P1** L2 harness + 第 1 条链 | `replay-init / replay-step`（含 `--half`；`--bookkeeping` 已取消）、harness、录 `ams8000-equi-move-chain`、用例 C03 / C04 / D01 / D04 / F02 / F04 / G02 / H01（I04 / I05 归 P3）。**已落地**：CLI、harness、两条链（`db8000-two-delete`、`ams8000-equi-move-chain`）、C03 / C04 / D01 / D04 / F04 + G02 半；**尚欠** F02 / H01 / B06 | 本机绿（CI 待自包含语料）；H01 用 `--half` 确定性复现补排链；F02 杀进程重启后 `/model/records` 逐字段相等 |
+| **P1** L2 harness + 第 1 条链 | `replay-init / replay-step`（含 `--half`；`--bookkeeping` 已取消）、harness、录 `ams8000-equi-move-chain`、用例 C03 / C04 / D01 / D04 / F02 / F04 / G02 / H01（I04 / I05 归 P3）。**已落地**：CLI（含字节补丁）、harness（含 `race`）、测试钩 `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY`、两条链（`db8000-two-delete`、`ams8000-equi-move-chain` 725→731）、C03 / C04 / D01 / D04 / F04 / H01 + G02 半；**尚欠** F02 / B06 | 本机绿（CI 待自包含语料）；H01 用 `--half` 确定性复现补排链；F02 杀进程重启后 `/model/records` 逐字段相等 |
 | **P2** 其余链与用例 | 录另外 3 条链；B06 / B07 / E02 / E03 / F03 / F05 / G01 / G03 / H02 / H03 / H05 / J01 / J02；必败注入钩（D6） | 每条用例 ≤ 90 s，整档 ≤ 15 min |
 | **P3** L3 收编 + 预算 | `l3_suite` 新场景 x1 / l1 / e1 / p1 / n1 / u1 与新 `Expect` 变体；宏搬家；报告三格；预算采集 + 基线文件 + 比较 | 隔离副本上 `--scenarios all` 全绿；预算 JSON 产出；`.scratch/fixture-8023` 的手动流程不再需要 |
 | **P4** 接线 | CI 两步；`nightly-local.ps1` + 计划任务；live 台账自动段 | 连续 3 个 nightly 有产出 |
