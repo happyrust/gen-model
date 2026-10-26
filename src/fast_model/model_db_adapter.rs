@@ -1900,7 +1900,9 @@ async fn persist_group(
         .collect::<Vec<_>>();
 
     // 一个 BRAN 的隐式管身是整段重写的：这一轮碰到的分支先清空，再插存储里的那几段。
-    // 整片删已经覆盖了带 `anc` 的管身行，这一条兜的是 `anc` 缺失的历史行。
+    // 整片删已经覆盖了带 `anc` 且 `model_sesno != NONE` 的管身行。这一条兜两类整片删
+    // 够不着的：`anc` 缺失的历史行，以及普通 `INSERT` 没登记成图边的行（按 `in` 走
+    // `idx_tubi_relate_in` 点删，不走 `->tubi_relate`）。
     let branches = group
         .iter()
         .map(|live| live.share)
@@ -3038,15 +3040,19 @@ pub fn render_tube_branch_resets(branches: &[RefNo]) -> String {
 
 fn append_tube_branch_reset(statements: &mut String, branch: RefNo) {
     let key = format!("{}_{}", branch.word0, branch.word1);
-    // 走 `pe:⟨…⟩->tubi_relate` 而不是 `WHERE in = …`：前者吃 `in` 上的边索引，
-    // 后者在部署引擎上整表扫（`rvm_baseline::compare` 的文档里记着同一条）。
-    // `WHERE` 那一句挡住历史行——没有指针的行 `map` 出来是 NONE，`DELETE` 见到 NONE 整笔事务失败。
+    // 冷读已经证明 `WHERE in = pe:⟨…⟩` 走 `idx_tubi_relate_in`
+    // （`durable_tube_rows_are_planned_through_the_in_index`）。图遍历 `pe:⟨…⟩->tubi_relate`
+    // 只看见 `INSERT RELATION` 登记成边的行；普通 `INSERT` 写下的历史行 `in` 只是字段，
+    // 边索引够不着，后面的 `INSERT RELATION IGNORE` 会把旧槽位（旧 mesh、旧变换指针）留在库里。
+    // 与 [`append_geometry_removal`] 同一纪律：先 `SELECT` 出 id（吃索引，也含非边行），再按 id 点删。
+    // 指针那一笔仍要 `aabb != NONE AND world_trans != NONE`，否则 `DELETE` 见到 NONE 整笔事务失败。
+    // 关系行本身按 id 全删，不再靠图遍历。
     statements.push_str(&format!(
-        "LET $tube_reset_{key} = SELECT aabb, world_trans FROM pe:⟨{key}⟩->tubi_relate \
-         WHERE aabb != NONE AND world_trans != NONE;\n\
+        "LET $tube_reset_{key} = SELECT aabb, world_trans FROM tubi_relate \
+         WHERE in = pe:⟨{key}⟩ AND aabb != NONE AND world_trans != NONE;\n\
          DELETE $tube_reset_{key}.map(|$row| $row.aabb);\n\
          DELETE $tube_reset_{key}.map(|$row| $row.world_trans);\n\
-         DELETE pe:⟨{key}⟩->tubi_relate;\n"
+         DELETE (SELECT VALUE id FROM tubi_relate WHERE in = pe:⟨{key}⟩);\n"
     ));
 }
 
@@ -3303,19 +3309,99 @@ mod tests {
             .find("DELETE $tube_reset_24381_103320.map(|$row| $row.world_trans);")
             .expect(&format!("变换要顺指针删: {sql}"));
         let relations = sql
-            .find("DELETE pe:⟨24381_103320⟩->tubi_relate;")
-            .expect(&format!("关系行照旧整段删: {sql}"));
+            .find("DELETE (SELECT VALUE id FROM tubi_relate WHERE in = pe:⟨24381_103320⟩);")
+            .expect(&format!("关系行按 id 点删，连没登记成边的历史行一起走: {sql}"));
         assert!(
             pointers < relations && transforms < relations,
             "指针要在关系行之前捞出来删，否则读到的是空集: {sql}"
         );
         assert!(
-            sql.contains("FROM pe:⟨24381_103320⟩->tubi_relate"),
-            "走边索引，不用 `WHERE in = …`（部署引擎上那是整表扫）: {sql}"
+            sql.contains(
+                "FROM tubi_relate WHERE in = pe:⟨24381_103320⟩ AND aabb != NONE AND world_trans != NONE"
+            ),
+            "指针查询走 idx_tubi_relate_in，并挡住没有指针的历史行: {sql}"
         );
         assert!(
-            sql.contains("WHERE aabb != NONE AND world_trans != NONE"),
-            "历史行没有指针，map 出 NONE 会让整笔事务失败: {sql}"
+            !sql.contains("->tubi_relate"),
+            "图遍历漏掉没登记成边的历史行，INSERT RELATION IGNORE 会把旧槽位留下: {sql}"
+        );
+    }
+
+    /// 普通 `INSERT` 写下的 `tubi_relate` 不是图边。按 `pe->tubi_relate` 删会漏掉它，
+    /// 同槽位的 `INSERT RELATION IGNORE` 再把旧 mesh 留下——BRAN 上 HSTU / HPOS 重算了，
+    /// 画面仍是第一次发布的管。没有指针的历史行也要能删掉，且不能因 `DELETE NONE` 把事务打失败。
+    #[tokio::test]
+    async fn a_branch_reset_deletes_tubi_rows_that_were_not_graph_edges() {
+        let db = surreal_mem().await;
+        db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.query(
+            "INSERT INTO aabb [{id:aabb:oldbox,d:1},{id:aabb:edgebox,d:1},{id:aabb:keepbox,d:1}];\n\
+             INSERT INTO trans [{id:trans:oldtrans,d:1},{id:trans:edgetrans,d:1},{id:trans:keeptrans,d:1}];\n\
+             INSERT INTO tubi_relate [\
+               {id:tubi_relate:[pe:⟨24381_103320⟩,0],in:pe:⟨24381_103320⟩,out:inst_geo:mesh1,\
+                aabb:aabb:oldbox,world_trans:trans:oldtrans},\
+               {id:tubi_relate:[pe:⟨24381_103320⟩,1],in:pe:⟨24381_103320⟩,out:inst_geo:mesh1}];\n\
+             INSERT RELATION INTO tubi_relate [\
+               {id:tubi_relate:[pe:⟨24381_103320⟩,2],in:pe:⟨24381_103320⟩,out:inst_geo:edgemesh,\
+                aabb:aabb:edgebox,world_trans:trans:edgetrans},\
+               {id:tubi_relate:[pe:⟨24381_999⟩,0],in:pe:⟨24381_999⟩,out:inst_geo:mesh1,\
+                aabb:aabb:keepbox,world_trans:trans:keeptrans}];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let sql = render_tube_branch_resets(&[RefNo::new(24381, 103320)]);
+        let predicated = assert_delete_block_never_iterates_a_table(&db, &sql, &[]).await;
+        assert_eq!(
+            predicated.len(),
+            2,
+            "指针查询与按 id 删关系各走一次 idx_tubi_relate_in: {predicated:?}"
+        );
+
+        db.query(publication_transaction(&sql))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let ids: Vec<String> = db
+            .query(
+                "SELECT VALUE <string>id FROM aabb, trans, tubi_relate;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let survivors = ids.into_iter().collect::<BTreeSet<_>>();
+        assert!(
+            survivors.iter().all(|id| !id.contains("24381_103320")),
+            "这根分支的非边行、缺指针行、图边行都要消失: {survivors:?}"
+        );
+        assert!(
+            survivors.iter().any(|id| id.contains("24381_999")),
+            "邻支的管不动: {survivors:?}"
+        );
+        assert!(
+            !survivors.iter().any(|id| {
+                id.contains("oldbox")
+                    || id.contains("oldtrans")
+                    || id.contains("edgebox")
+                    || id.contains("edgetrans")
+            }),
+            "旧盒与旧变换要在关系行之前删掉: {survivors:?}"
+        );
+        assert!(
+            survivors.iter().any(|id| id.contains("keepbox"))
+                && survivors.iter().any(|id| id.contains("keeptrans")),
+            "邻支指着的盒与变换留下: {survivors:?}"
         );
     }
 

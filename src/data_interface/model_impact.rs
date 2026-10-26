@@ -199,9 +199,10 @@ pub const ATTRIBUTE_EFFECT_TABLES: &[(&[&str], AttributeEffect)] = &[
 /// 第六张效果表：E3D 字典里设计变化码 DCHC ∈ {1, 2, 4}、而上面五张手写表**一个都没登记**的
 /// 全部属性名（2026-09-15：217 个 = DCHC=4 ×213 + DCHC=1/2 的 `HZAXI` `LHEA` `LTAI` `TZAXI`）。
 ///
-/// 来源是 core 自己的口径：字典 DCHC 非 0 的属性，Core3D `change/EVALAT` 会为它排重画
-/// （类别 4 → `change/UPGRPH` 走 `REPELE` / `SEGREP` 重建；类别 1 / 2 → 转成类别 4 落到前一元件 /
-/// 自身），见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §3–§4。
+/// 来源是 core 自己的口径：字典 DCHC 非 0 的属性，Core3D `change/EVALAT`（`0x1022C679`）会为它排重画
+/// （类别 4 → `change/UPGRPH` 走 `REPELE` / `SEGREP` 重建；类别 1 / 2 → 升成类别 4 后
+/// `EVALCD` **自身** `REF`。`NATTA(PREV)` 只在属性名哈希是 `INTUBE` 时发生，普通的 `HSTU` /
+/// `HPOS` / `HBOR` 不落到前一元件），见 `docs/2026-09-15_core-attribute-change-classes-and-model-update-paths.md` §3–§4。
 /// 这些名字此前落 `Unknown`——判决方向本来就对（`Unknown` 也是 `Regen`），但回执与
 /// `change_impact` 报表把 213 个 core 明说「会重画」的属性显示成「未知属性」。这张表只消
 /// 那层噪音，**不改任何判决**：
