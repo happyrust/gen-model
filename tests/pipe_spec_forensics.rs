@@ -276,6 +276,186 @@ fn spec_catalog_roundtrip() {
     assert_eq!(qa, qa2, "hit SPCO must carry equivalent answers");
 }
 
+/// 命中 SPCO 的各档区间是否覆盖输入答卷：
+/// walk 命中节点祖先链，每层用**父节点**的 QUES/QUAL 定键、**本节点**的
+/// TANS/ANSW/MAXA 定答域；输入答卷的每个键要么命中节点没问（放行），
+/// 要么 TANS 文本相等/`ANY`，要么数值落在 `ANSW-0.001..=MAXA+0.001`。
+/// 与 `direct_spec_catalog` 的匹配规则同形，但用真库原始区间逐键校验，
+/// 专用于判定"共界/重叠档位下命中前一档"是合法首匹配而非 bug。
+fn hit_bands_cover(store: &DirectStore, hit: RefU64, qa: &[(String, String)]) -> bool {
+    // (key, tans, answ, maxa) —— 每层一个键。
+    let mut bands: Vec<(String, Option<String>, Option<f64>, Option<f64>)> = Vec::new();
+    let mut node = hit;
+    for _ in 0..16 {
+        let Ok(map) = store.named_attmap(node) else { break };
+        let owner: RefU64 = map.get_owner().into();
+        if owner == RefU64::default() || owner == node {
+            break;
+        }
+        let Ok(omap) = store.named_attmap(owner) else { break };
+        let ques = match omap.map.get("QUES") {
+            Some(aios_core::NamedAttrValue::WordType(s))
+            | Some(aios_core::NamedAttrValue::StringType(s)) => s.clone(),
+            _ => break,
+        };
+        let qual = match omap.map.get("QUAL") {
+            Some(aios_core::NamedAttrValue::IntegerType(i)) => *i,
+            _ => 0,
+        };
+        let key = if qual > 0 {
+            format!("{ques}{qual}")
+        } else if matches!(ques.as_str(), "PBOR" | "PSHA" | "PWID" | "PHEI") {
+            format!("{ques}0")
+        } else {
+            ques
+        };
+        let tans = match map.map.get("TANS") {
+            Some(aios_core::NamedAttrValue::WordType(s))
+            | Some(aios_core::NamedAttrValue::StringType(s)) => Some(s.clone()),
+            _ => None,
+        };
+        let num = |k: &str| match map.map.get(k) {
+            Some(aios_core::NamedAttrValue::F32Type(f)) => Some(*f as f64),
+            Some(aios_core::NamedAttrValue::IntegerType(i)) => Some(*i as f64),
+            _ => None,
+        };
+        bands.push((key, tans, num("ANSW"), num("MAXA")));
+        node = owner;
+    }
+    qa.iter().all(|(k, v)| {
+        let Some((_, tans, answ, maxa)) = bands.iter().find(|(bk, ..)| bk == k) else {
+            return true; // 命中链没问此键——无约束
+        };
+        if let Some(t) = tans {
+            return t == "ANY" || t == v;
+        }
+        let (Some(lo), Ok(val)) = (answ, v.parse::<f64>()) else {
+            return false;
+        };
+        let hi = maxa.unwrap_or(*lo);
+        val >= lo - 0.001 && val <= hi + 0.001
+    })
+}
+
+/// 家族级回环：抽样全部 SPCO（每第 25 个），逐个 `derive_answers →
+/// table_lookup` 回环，按 TYPE 家族统计通过/失败——验证规格树语义在
+/// TUBE 之外的家族（ELBO/TEE/FLAN/VALV/ATTA/REDU…）上泛化。
+/// 失败逐个打印细节（答钥匙/落点），不回收到通过率里吞掉。
+#[test]
+fn spec_catalog_roundtrip_by_family() {
+    use aios_database::data_interface::direct_spec_catalog::DirectSpecCatalog;
+    use pipe_model::SpecCatalog;
+    use std::collections::BTreeMap;
+
+    let Some((db, templates)) = fixtures() else {
+        return;
+    };
+    let _gate = env_gate();
+    let cache = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var(INDEX_DIR_ENV, cache.path()) };
+    let schema = Arc::new(DirectSchema::open(&templates).expect("schema"));
+    let store = Arc::new(DirectStore::new(schema, Arc::new(NoLocator)));
+    let dbnum: i32 = std::env::var("AMS_DBNUM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let db_type = std::env::var("AMS_DBTYPE").unwrap_or_else(|_| "CATA".into());
+    store.pin(DbPin {
+        dbnum,
+        db_type,
+        file: db.clone(),
+        sesno: None,
+    });
+    let idx = store.indexes(dbnum).expect("indexes");
+    let spcos = idx.refnos_of_noun("SPCO", None);
+    if spcos.is_empty() {
+        eprintln!("SKIP: no SPCO in {db:?}");
+        return;
+    }
+    let cat = DirectSpecCatalog::new(store.clone());
+
+    // SPCO → 所属 SPEC（owner 链走到 TYPE==SPEC）；走不到归孤儿。
+    let spec_of = |mut node: RefU64| -> Option<RefU64> {
+        for _ in 0..16 {
+            let map = store.named_attmap(node).ok()?;
+            if map.get_type() == "SPEC" {
+                return Some(node);
+            }
+            let owner: RefU64 = map.get_owner().into();
+            if owner == RefU64::default() || owner == node {
+                return None;
+            }
+            node = owner;
+        }
+        None
+    };
+
+    // (family → (pass, fail)) 与失败明细。
+    let mut stats: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut orphans = 0u32;
+    let mut derive_fail = 0u32;
+    let mut sampled = 0u32;
+    for (i, spco) in spcos.iter().copied().enumerate() {
+        if i % 25 != 0 {
+            continue; // 每 25 个抽 1 —— ~470 样本跨家族自然铺开
+        }
+        sampled += 1;
+        let Some(qa) = cat.derive_answers(spco) else {
+            derive_fail += 1;
+            failures.push(format!("SPCO {} derive_answers=None", spco.0));
+            continue;
+        };
+        let ty = qa
+            .iter()
+            .find(|(k, _)| k == "TYPE")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "<no-TYPE>".into());
+        let Some(spec) = spec_of(spco) else {
+            orphans += 1;
+            continue;
+        };
+        let bucket = stats.entry(ty.clone()).or_default();
+        match cat.table_lookup(spec, &ty, &qa) {
+            Some(hit) => {
+                let qa2 = cat.derive_answers(hit).unwrap_or_default();
+                if qa2 == qa {
+                    bucket.0 += 1;
+                } else if hit_bands_cover(&store, hit, &qa) {
+                    // 答卷逐字不同但命中 SPCO 的每档区间都覆盖输入值——
+                    // 真库存在共界相邻档与重叠区间（见 §INSU 取证），
+                    // 成员序首匹配下"前一档"是 E3D 合法选择，不算 resolver bug。
+                    bucket.0 += 1;
+                    println!("  ~equivalent {ty} SPCO {} → hit {} (band-cover)", spco.0, hit.0);
+                } else {
+                    bucket.1 += 1;
+                    failures.push(format!(
+                        "{ty} SPCO {} → hit {} 答卷不等价且不覆盖 in={qa:?} out={qa2:?}",
+                        spco.0, hit.0
+                    ));
+                }
+            }
+            None => {
+                bucket.1 += 1;
+                failures.push(format!("{ty} SPCO {} 直查落空 qa={qa:?}", spco.0));
+            }
+        }
+    }
+
+    println!("== family round-trip (sampled {sampled}, orphans {orphans}, derive_fail {derive_fail}) ==");
+    for (fam, (p, f)) in &stats {
+        println!("  {fam:<12} pass={p} fail={f}");
+    }
+    for f in &failures {
+        println!("  FAIL {f}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} round-trip failures (see printout)",
+        failures.len()
+    );
+}
+
 /// 端到端：真实库上会话装配面验证——
 /// 1) `probe_writable_dbnums`：声明证据缺席 → 会话默认可写，`ACCESSDB=Read`/
 ///    `LREFO` 收窄 → 只读 + problem（DESI 文件面没有 DB 元素，证据在 CURD 上）；

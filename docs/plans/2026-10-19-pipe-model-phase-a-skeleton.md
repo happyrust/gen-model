@@ -110,3 +110,9 @@ Phase A 已填建管/支管/改名/级联/端编辑/连接批生成；**不**接
   - `pipe-model/src/specchange.rs` 的 `rebranch_spec`：原"待内核"warning 换成真实现——写 PSPE 后读 `BRAN.HBOR` 调 `select_hstu(new_spec)`，命中即写 `HSTU` SetAttrs（序：PSPE→HSTU→逐件重选）；HBOR 缺席出"无法重选"warning。
   - 生产侧零改动：`DirectSpecCatalog::table_lookup` 的 `TUBI→TUBE` 别名已在，HSTU 走的就是元件同一张规格表。
 - 测试 +5（72/72 绿）：接 spec 建管写 HSTU/未接 spec 出 warning 不阻断/直查+SELE 双落空显式落选/BRAN 换规格 HSTU 重选+写序断言/无 HBOR 显式 warning。
+
+## 2026-10-26 规格表家族级真库验证（证据 §18.19）
+
+- `tests/pipe_spec_forensics.rs` 新增 `spec_catalog_roundtrip_by_family` + `hit_bands_cover` 帮手：真 CATA 库 `ams7000_0001`（20 SPEC/14421 SELE/11858 SPCO）每 25 个抽样 475 个 SPCO 逐个 `derive_answers→table_lookup` 回环——**475/475 通过、23 家族全覆盖**（472 逐字等价 + 3 INSU band-cover 等价）。
+- 取证修正（证据文档新增 §18.19）：真库数值档位**相邻共界**（TEMP 11 档 `[-104,-91]…[-1,10]`，边界值同时是两档端点）+ **SPCO 级答案可为重叠区间**（`[300,500]`/`[400,500]` 并存于同一问层）——成员序首匹配即裁决器，命中前一档是 E3D 合法选择非 resolver bug；断言纪律改为"命中各档区间覆盖输入答卷"，逐字相等在共界/重叠数据下会误报。
+- 提交 `eb57f9870`（undo_group+HSTU+移交文档 `docs/agent-handoff/pipe-model-handover.md`）。

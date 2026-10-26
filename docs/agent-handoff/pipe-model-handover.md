@@ -14,19 +14,19 @@
 | 仓库 | `D:\work\plant-code\old\gen-model`（分支 `refactor`） |
 | 影子安装（取证源） | `E:\reverse\e3d\shadow_e3d31_aps_all` |
 | Rust target | `D:\Rust\target`（并发 cargo 会持锁 `aios-database.exe`，遇 `os error 5` 先查僵尸测试进程） |
-| 已入库主提交 | `b2f61ddcb`（pipe-model 全量，35 文件 +7262 行，2026-10-26） |
-| 未提交增量 | `batch.rs`/`service.rs`（undo_group）、`pipeline.rs`/`specchange.rs`（HSTU）、本计划文档末节 |
+| 已入库提交 | `b2f61ddcb`（pipe-model 全量 35 文件）、`eb57f9870`（undo_group+HSTU+本移交文档） |
+| 未提交增量 | `tests/pipe_spec_forensics.rs`（家族级回环）、证据文档 §18.19、计划文档末节 |
 
-真库夹具（仓内测试在用）：
+真库夹具（仓内测试在用，`AMS_FILE`/`AMS_DBNUM`/`AMS_DBTYPE` 环境变量指定）：
 
-- `ams0001_0001`（dbnum=1）、`ams8000_0001`（DESI dbnum=8000）——路径见 `tests/pipe_spec_forensics.rs`
-- `acp7000_0001`（dbnum=7000 CATA 目录库）——`spec_catalog_roundtrip` 用它
+- `ams000\ams0001_0001`（dbnum=1）、`ams000\ams8000_0001`（DESI dbnum=8000）
+- `ams000\ams7000_0001`（dbnum=7000 CATA 目录库，20 SPEC/14421 SELE/11858 SPCO）
 
 ## 2. 必读文档（按序）
 
 1. **`docs/specs/pipe-modeling.md`** —— 后端功能规格（Story 1-56，A-L 组 + 决策表）。**这是契约，改实现前先对 spec。**
 2. `docs/specs/pipe-modeling-ui.md` —— UI 规格（15 屏四区，Story 1-45）。UI 实现在外部 OpenCADStudio 仓，本仓只交 API 面。
-3. **`docs/evidence/2026-10-15-e3d-pipe-modeling-ui-behavior.md`** —— 逆向证据主文档（§15-§18 共 18 节 + §19 属性总表，~1255 行）。**注意：此文件在 `.gitignore` 内，本地留存不入库，勿删。**
+3. **`docs/evidence/2026-10-15-e3d-pipe-modeling-ui-behavior.md`** —— 逆向证据主文档（§15-§18 共 19 节 + §19 属性总表）。**注意：此文件在 `.gitignore` 内，本地留存不入库，勿删。**
 4. `docs/plans/2026-10-19-pipe-model-phase-a-skeleton.md` —— 滚动计划文档，每个里程碑有日期段落（2026-10-19 至 2026-10-22）。
 
 ## 3. 架构核心（改了会塌的四条）
@@ -117,11 +117,12 @@ sigmap review-pr                                      # 审计 tracked diff
 
 ## 9. 下一步候选（按价值排序）
 
-1. **提交未入库增量**：`pipe-model/src/{batch,service,pipeline,specchange}.rs` + 计划文档末节（undo_group + HSTU，72/72 已绿）——scoped commit，别带上其他工作线。
+1. **提交未入库增量**：`tests/pipe_spec_forensics.rs`（家族级回环）+ 证据 §18.19 + 计划末节——scoped commit，别带上其他工作线。
 2. **`sigmap review-pr`** 审当前 diff 后再提交更稳。
 3. **`splitsegment` 段长分段引擎**：`splitsegment.pmlobj`（41KB）方法面已取证（§18.17.2）——纯 PML 位置代数非内核，可实现 `split_segment`（E 组延伸）。spec 里尚无此 Story，需先补 spec 条目。
-4. **`derive_answers` 逆向校验**：真库上对更多 SPCO 类型（VALV/FLAN/ATTA 家族）跑反推→直查回环，目前只验过 TUBE。
+4. ~~`derive_answers` 逆向校验~~ **已完成（§18.19）**：475 样本 23 家族全过；共界/重叠档位形态取证归档。
 5. **组件读面补强**：`component.rs` 的 `At3D` 定位/逆流交换当前是 warning 占位，若后续接几何内核可升级成真实现。
+6. **CHOICE `(answer,maxans)` 成对导出**：§18.8 记载 `choice answer/maxans` 成对返回——`derive_answers` 当前只出低界单值，若 UI/回显需要档位上限可扩 `QuestionAnswers` 为元组面（无需求不动）。
 
 ## 10. 取证速查（已实锤、勿重复探测）
 
@@ -131,6 +132,7 @@ sigmap review-pr                                      # 审计 tracked diff
 - SPEC 元素自身即 SELE 根问键（`SPEC.QUES="TYPE"`）；SELE 树 `TANS="ANY"` 通配、`ANSW..MAXA±0.001` 数值区间、`TDEF="EQUA"`→member[1] 等值链。
 - `PMLUI\DES\pipe`（215 文件）是完整老一代 `_CD*` 界面资源层（f*/i*/m*/u*/l* 前缀分簇），无新增落库语义，已归档 §18.18——勿再逐文件深读。
 - §20 待补清单**已清零**；逆向文档范围闭合。
+- 规格树数值档位（§18.19）：真库 TEMP 类问层**相邻共界**（边界值同时是两档 MAXA/ANSW）、SPCO 级答案可为**重叠区间**（`[300,500]`/`[400,500]` 并存）——**成员序首匹配是裁决器**，命中前一档是合法选择；家族级回环 475/475 过（23 家族），断言用"区间覆盖"不用答卷逐字相等。
 
 ## 11. 恢复工作时的最小检查
 
