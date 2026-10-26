@@ -1,16 +1,17 @@
 {
   "name": "ams8000-equi-room-cross",
-  "registry": ["INC-G02"],
-  "_doc": "2026-10-26 在隔离副本上录的跨房链（tests/fixtures/sessions/ams8000-equi-room-cross，每个会话时刻都拷了真文件）：731 基线（EQUI =24384/24776 在 U 1400，属房间 R224 /1RX-RM02-R224，面板 24381_948，z 1400..3080）→ 732 SAVEWORK：BY U 2000 到 U 3400，进入上一层 R124（z 3080..6400，同一 x/y 足印）→ 733 QUIT 尾会话 → 734 SAVEWORK：BY D 2000 回到 R224 → 735 QUIT 尾会话。INC-G02 跨房那一半：732 后 `rooms_after` 应换房（R224 退出、R124 进入）、库上旧房边消失；734 后换回来。这两条房间断言要 harness 的 `rooms_changed {root: {gains, loses}}` 字段（待并行的失败注入改动落地后补），目前用例只钉位移本身（kind / moved / 包围盒 ±2000 / 行数），房间前后先从服务的 task-history 日志里人眼核。注意：跨房位移走的是否还是 transform、transform 路上房间边有没有重算，正是这条链要回答的问题。",
+  "registry": ["INC-G02", "INC-I01", "INC-I02", "INC-I04", "INC-I05"],
+  "budget_gate": true,
+  "_doc": "2026-10-26 在隔离副本上录的跨房链（tests/fixtures/sessions/ams8000-equi-room-cross，每个会话时刻都拷了真文件）：731 基线（EQUI =24384/24776 在 U 1400，属房间 R224 /1RX-RM02-R224，面板 24381_948，z 1400..3080）→ 732 SAVEWORK：BY U 2000 到 U 3400，进入上一层 R124（z 3080..6400，同一 x/y 足印）→ 733 QUIT 尾会话 → 734 SAVEWORK：BY D 2000 回到 R224 → 735 QUIT 尾会话。INC-G02 跨房那一半：732 后 `rooms_after` 应换房（R224 退出、R124 进入）、库上旧房边消失；734 后换回来。回执只比房间号：732 是 R224 → R124/R144/R413，734 再换回 R224（#71 修后的实测）。库上 `room_relate` 边还没有进 harness。",
   "dbnum": 8000,
   "db_file": "AvevaMarineSample/ams000/ams8000_0001",
   "fixture_dir": "tests/fixtures/sessions/ams8000-equi-room-cross",
   "start": 731,
   "init": { "to": 731, "records_present": ["24384/24776"], "generate_prime": ["24384/24776"] },
   "steps": [
-    { "to": 732, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, 2000.0] }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
+    { "to": 732, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, 2000.0] }, "rooms_changed": { "24384/24776": { "before": ["R224"], "after": ["R124", "R144", "R413"] } }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
     { "to": 733, "task_state": "succeeded", "unit_count": 0, "generate_already_available": ["24384/24776"], "generate_budget_ms": 250 },
-    { "to": 734, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, -2000.0] }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
+    { "to": 734, "task_state": "succeeded", "unit_count": 1, "unit_kinds": { "24384/24776": "transform" }, "geometry_moved": { "24384/24776": 1 }, "aabb_shift": { "24384/24776": [0.0, 0.0, -2000.0] }, "rooms_changed": { "24384/24776": { "before": ["R124", "R144", "R413"], "after": ["R224"] } }, "records_present": ["24384/24776"], "generate_already_available": ["24384/24776"] },
     { "to": 735, "task_state": "succeeded", "unit_count": 0, "generate_already_available": ["24384/24776"], "generate_budget_ms": 250, "log_must_not_contain": ["[模型目标核对]"] }
   ]
 }

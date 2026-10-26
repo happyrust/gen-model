@@ -259,3 +259,12 @@
 - 待办转交：#68（`INC-I02` 与实现全空）、#69（零进展 0 评论）、#34（默认仍 false）+ #45 语料、#61 B 类 3 条、#63 只剩 `v0.1.43` tag 与 `0.1.43+g` 核对串、#65 目录项便宜路语料、登记表 23 条未落（P3 的 `increment_budget_baseline.json` 与 `scripts/nightly-local.ps1` 仍缺）、45 个 `output/` 取证脚本未入库。
 - 边界：本代理未 commit / push，`D:\AVEVA` 全程只读，桥接端点未写进任何文件。协同状态不变：仍按「暂停 / 记录 only」，本条即记录。
 
+### 2026-10-26 续 · 必败注入回放的四轮实跑（同一代理）
+
+- 结论已写进 `docs/plans/2026-10-26-open-issues-audit.md` 附录（7 条，含证据行）。三条最要紧的：① 注入窗是 `partial` 不是 `failed`；② 恢复窗必须调短对账间隔（默认 300 s），否则是用例在等默认对账轮；③ **模型侧生成失败不进 `DATA_BATCH_PARK_AFTER` 的连败账**，对账轮会一直重跑同一右端——harness 为此加了 `latest_terminal_task`。
+- 顺带修 `22b7a7e0a` 的格式串编译错（main.rs:1127 少实参），那处断言此前从未跑过。
+- 本代理当前未提交的改动：`tests/increment_replay/main.rs`（+29 −5，新加 `latest_terminal_task` 与预期失败窗改用）、`tests/increment_replay/cases/ams8000-equi-fail-inject.json`（去掉重启后不可判的 records 断言、加 `service_env` 短间隔、728 超时 360 s）、`tests/fixtures/increment_cases.json`（H05 标题改实测口径）。`cargo check --offline --test increment_replay --features http_api` 绿；live 全绿待补一次（补跑时另一会话在同一影子根 `..\_runs\ams-replay\E3D3.1` 上跑 L2，`link.exe` 1104 产物占用）。H05 / F05 保持 `partial`。
+- 已按这条不对称开票：**#72「模型侧生成失败没有停跑/退避账，与数据批次 DATA_BATCH_PARK_AFTER 不对称」**（含证据行与复现命令，三个备选方案 A/B/C 等人拍板）。补跑「全绿」这一步排在本机另一会话的 L2 之后（同一影子根 `..\_runs\ams-replay\E3D3.1` 不能并发），守候脚本空闲即跑，结果落在 `.scratch/audit-l2-run9.log`。
+- 协同仍按「暂停 / 记录 only」；本条是记录，不是新工单。
+
+

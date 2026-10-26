@@ -16,7 +16,7 @@
 //! 跑法：`cargo test --test increment_replay -- --nocapture --test-threads=1`；只跑一条加 `AIOS_REPLAY_CASE=<name>`。
 //! 单条用例的超时：初始化 10 min、每步 180 s。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -47,6 +47,10 @@ struct Case {
     #[serde(default)]
     init: Option<Step>,
     steps: Vec<Step>,
+    /// 断言全过之后，对这条运行目录跑 `scripts/increment_budget.py collect --check`
+    /// （INC-I01 / I02 / I04 / I05）。只开在基线覆盖的链上；失败注入的链样本形状不同，不进这道门。
+    #[serde(default)]
+    budget_gate: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +176,10 @@ struct Step {
     /// 这些根的 `rooms_before == rooms_after`（房内小位移，INC-G02）。
     #[serde(default)]
     rooms_unchanged: Vec<String>,
+    /// 根 refno → 期望的房间号集合（只比 `room_num`，不比面板和成员数）。
+    /// 跨房位移（INC-G02）：732 从 R224 换成 R124/R144/R413，734 再换回来。
+    #[serde(default)]
+    rooms_changed: BTreeMap<String, RoomChange>,
     /// 根 refno → 期望的整根并集包围盒世界平移 `[dx, dy, dz]`（mm）：`geometry_after.aabb` 的 min / max 都要比
     /// `geometry_before.aabb` 正好差这个向量（容差 [`AABB_TOLERANCE_MM`]），且 `records` 前后相同（刚体位移不增减行，
     /// INC-C03 / INC-F04）。
@@ -189,6 +197,24 @@ struct Step {
     /// 这一窗的交付单元数（`result.units.len()`）：只记账的会话（DBMDAT）必须是 0（INC-A06）。
     #[serde(default)]
     unit_count: Option<usize>,
+}
+
+/// 一次跨房：开工前、刷盘确认后各有哪些房间号。
+#[derive(Debug, Deserialize)]
+struct RoomChange {
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+fn room_nums(value: Option<&Value>) -> Option<BTreeSet<String>> {
+    let items = value?.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| item.get("room_num").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// 一条模型记录的身份：refno + 隐式管身的 `tube{ordinal, from, to}`（spec §4.5 的四元组）；没有就退到整条的文本。
@@ -815,6 +841,27 @@ impl Service {
         self.get(&format!("tasks/{id}"))
     }
 
+    /// 最近一条**已落终态**的、落在 `dbnum` 且右端 == `end` 的数据批次任务。
+    ///
+    /// 给「预期失败的那一窗」用：模型侧生成失败不进数据批次的连败账（`DATA_BATCH_PARK_AFTER` 只管数据批次），
+    /// 对账轮会反复重跑同一个右端——`AIOS_WATCH_RECONCILE_SECS` 调短时 `/tasks` 里几乎总有一条在跑的，
+    /// 只看「最新一条」就永远等不到终态（2026-10-26 实跑踩过，用例整窗超时）。
+    fn latest_terminal_task(&self, dbnum: u32, end: u32) -> Option<Value> {
+        let list = self.get("tasks?limit=20")?;
+        let tasks = list.get("tasks")?.as_array()?;
+        let entry = tasks.iter().find(|task| {
+            task.get("dbnum").and_then(Value::as_u64) == Some(dbnum as u64)
+                && task.get("end_sesno").and_then(Value::as_u64) == Some(end as u64)
+                && task.get("kind").and_then(Value::as_str) == Some("data_batch")
+                && matches!(
+                    task.get("state").and_then(Value::as_str),
+                    Some("succeeded" | "failed" | "partial")
+                )
+        })?;
+        let id = entry.get("task_id")?.as_str()?;
+        self.get(&format!("tasks/{id}"))
+    }
+
     /// `/model/records` 的行数；根已经不在文件最新会话的索引里（被删）时服务回 400，这里记成 `None`。
     fn records_count(&self, root: &str) -> Option<usize> {
         let url = format!("{}/model/records", self.base);
@@ -1053,10 +1100,7 @@ fn run_case(env: &Env, case: &Case) {
             let deadline = Instant::now() + timeout;
             let task = loop {
                 service.assert_alive(&what);
-                if let Some(task) = service
-                    .latest_task(case.dbnum, step.to)
-                    .filter(|task| matches!(task.get("state").and_then(Value::as_str), Some("succeeded" | "failed" | "partial")))
-                {
+                if let Some(task) = service.latest_terminal_task(case.dbnum, step.to) {
                     break task;
                 }
                 assert!(
@@ -1148,8 +1192,51 @@ fn run_case(env: &Env, case: &Case) {
             assert_task_history(&service, case, step, &what);
         }
     }
+    // 预算门要在服务进程退出、stdout 句柄关上之后采日志（和事后手工 collect 同一时刻）。
+    if case.budget_gate {
+        check_increment_budget(&mut service, &run_dir, &case.name);
+    }
     // 服务随 Drop 按句柄杀掉；工作文件留在终态，下一条用例的 replay-init 会就地重置。
     drop(service);
+}
+
+/// INC-I01 / I02 / I04 / I05：`collect --check` 对基线。FAIL（含必需指标没样本）让这条用例红；
+/// WARN 与只记不判的不挡。样本写在运行目录的 `budget.json`。
+fn check_increment_budget(service: &mut Service, run_dir: &Path, case_name: &str) {
+    let _ = service.child.kill();
+    let _ = service.child.wait();
+    let script = repo().join("scripts/increment_budget.py");
+    let out = run_dir.join("budget.json");
+    let output = Command::new("python")
+        .arg(&script)
+        .arg("collect")
+        .arg(run_dir)
+        .arg("--case")
+        .arg(case_name)
+        .arg("--out")
+        .arg(&out)
+        .arg("--check")
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "[{case_name}] 跑不了 python {}：{error}。预算门要本机 PATH 里有 python",
+                script.display()
+            )
+        });
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "[{case_name}] 预算门没过（exit {:?}）：\n{text}样本 {}",
+        output.status.code(),
+        out.display()
+    );
+    eprint!("{text}");
 }
 
 /// 查询值里除了未保留字符都按百分号写进 URL。`created_at` 的 `+` 要是原样拼进去，会被读成空格。
@@ -1472,9 +1559,16 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
             || step.expect_reinit_trigger.is_some()
             || !step.geometry_moved.is_empty()
             || !step.rooms_unchanged.is_empty()
+            || !step.rooms_changed.is_empty()
             || !step.aabb_shift.is_empty()
         {
-            let task = service.latest_task(case.dbnum, end).unwrap_or_else(|| {
+            // 预期失败的那一窗会被对账反复重跑：断言状态时要挑「最近一条已落终态的」，否则读到在跑的重试。
+            let task = if step.expect_model_sesno_stay.is_some() {
+                service.latest_terminal_task(case.dbnum, end)
+            } else {
+                service.latest_task(case.dbnum, end)
+            }
+            .unwrap_or_else(|| {
                 panic!(
                     "[{what}] /tasks 里找不到 dbnum {} 右端 {} 的批次",
                     case.dbnum, end
@@ -1581,6 +1675,28 @@ fn assert_step(service: &Service, case: &Case, step: &Step, what: &str) {
                         }
                     }
                     None => problems.push(format!("根 {root} 不在这一窗的单元里（房间）")),
+                }
+            }
+            for (root, change) in &step.rooms_changed {
+                let Some(unit) = unit_of(root) else {
+                    problems.push(format!("根 {root} 不在这一窗的单元里（跨房）"));
+                    continue;
+                };
+                let before = room_nums(unit.get("rooms_before"));
+                let after = room_nums(unit.get("rooms_after"));
+                let expect_before: BTreeSet<String> = change.before.iter().cloned().collect();
+                let expect_after: BTreeSet<String> = change.after.iter().cloned().collect();
+                if before.as_ref() != Some(&expect_before) || after.as_ref() != Some(&expect_after)
+                {
+                    problems.push(format!(
+                        "根 {root} 房间号 before={before:?} after={after:?}，期望 {:?} → {:?}",
+                        change.before, change.after
+                    ));
+                } else {
+                    eprintln!(
+                        "  根 {root} 房间 {:?} → {:?}",
+                        change.before, change.after
+                    );
                 }
             }
             for (root, expected) in &step.aabb_shift {
