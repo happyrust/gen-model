@@ -288,6 +288,17 @@
   `the_task_probe_reads_the_cached_watch_dir_plan`（探针只读 `latest_for`）。
 - **计划**：`docs/plans/2026-10-15-watch-root-scan-healthy-skip-plan.md`。
 
+## 0.1.44 — 2026-10-26
+
+### 增量更新自动化测试案例集合（L2 回放夹具 + 登记表 + 预算门）并入发布线；单元回执房间「后」赛跑（#71）、规划器根枚举（#68）、Meta 批次房间半边（#69）、目录核对分域（#67）、房间快照整表扫（#66）、新旧判据冻结锚（#65）修复；本地发布包出厂改 rocksdb
+
+- **修复**：单元回执的 `rooms_after` 改到任务等到刷盘 ACK、房间重算之后拍，跨房位移不再被报成「房间没变」（GitHub #71，`22b7a7e0a` / `0f4a602b4`）；房间归属快照与 `e3d.room.lookup` 改走边目标，不再按构件扫 `room_relate` 整表（#66，`7188e1e8d` / `7350377f4`）；目录版本核对按 `watch_dbnums` 分域，域外落后的库只点名不收窗 / 不反查 / 不排工（#67，`b71617ee3`）；按需显示的新旧判据听库级承诺、文件身份记冻结锚不记 mtime，E3D 登录之后未触根不再整根重算（#65 / ADR-089，`5c70896fa`）；`model_target` 核对不再被 Windows 长路径前缀绊倒（#64，`3d4d0c066`）；整片删连老生成链的同根老行一起换掉（ADR-088，`a4be6be38`）；数据批次失败一次即记 `logs/batch-failures-*.jsonl` 并停止自动重跑，新会话 / 人工执行清账（`22b7a7e0a`、`3d6a9f069`）；服务按 `DbOption.toml` 现算的 `/config.json` 只给本机来源带库账号口令（`d2914d4f8`）。
+- **性能**：窗口规划器 `plan=` 拆段计时；根枚举 S 端复用上一窗的 T 端根集、T 端只重枚举账本触到的顶层子树，debug / 开关下与全枚举逐位对拍（#68，`c6e213736` / `b661e1f88`；回放 8000 一元素窗 `plan` 760 → ~500 ms）；Meta（SYST）批次跳过开工前的房间半边，不再替设计库付常驻房间模型重建，完成行后多一行分步账（#69，`07d7ceb8f` / `4e2aca350`）。
+- **测试**：增量更新自动化测试案例集合（计划 `docs/plans/2026-10-25-incremental-update-automated-test-suite-plan.md`，`c04571d1c`）——登记表 `tests/fixtures/increment_cases.json` + 钉 + 报告脚本（`6d5e39f81`）；`db_session_fixture replay-init / replay-step` 与「真快照 → 长度 + 字节补丁」的夹具格式（`79e318cab`、`729d33c6e`）；L2 回放 harness `tests/increment_replay/` + 影子工程根脚本，用例 `db8000-two-delete`、`ams8000-equi-move-chain`（刚体位移、保存中途被看见、冷重启对拍、回退 → 整库重建）、`ams8000-equi-room-cross`（跨房）、失败注入 / 数据失败 park（`93a871dd8` … `01870f8dd`、`1a4948f0f`、`22b7a7e0a`）；性能预算门 `scripts/increment_budget.py` + 基线（`be6578652`、`4443df2a6`），并挂进三条基线回放；跨房链断言回执房间号、必败注入回放按实跑口径（`8e055d4e3`）。
+- **功能**：`/tasks` 长出历史与翻页、失败批次与补排互指、`room_rebuild` 行、单元回执带房间 / 几何前后、每批元素级变化清单 `GET /tasks/{id}/changes`（`ee0c00bfe`）；清理模型「一并删除网格文件」连 `inst_geo` 行与 `.mesh` 一起清（#60，`b070f13ba`）；房间归属恒开，`room_membership` 键与 `AIOS_ROOM_MEMBERSHIP` 退役（`cc79e44f2`）；`/spatial/rooms` 带 `panel_refnos`、周边管道查询四处修复（`901bcf1cd`、`384e67151` / `fc4cd562b` / `b03c7ec74` / `d3145d26a`）；评审上传校验 docx / PDF 魔数（`6b5864b46`）；E3D 管编域服务 crate（pipe-model，`b2f61ddcb`）。
+- **本地发布包**：出厂默认改 rocksdb——`Start-AMS.ps1` 不给档时回填 rocksdb，本机端口上没库就用包内 `bin\surreal.exe` 起一台（`04665e5ed`）；rocksdb 档配外部工作区起得来、包里不再放静态 `web/config.json`，plant-ui 的房间功能连对库（`cce44a435`）。
+- **读取集合**随 e3d-model 推进到 `947b954`（161 → 173 个属性名，`9216e2f72` … `13b406bbe`）。`python/aios_client.py` 的 `EXPECTED_SERVER_VERSION` 同步 0.1.44。
+
 ## 0.1.43 — 2026-10-22
 
 ### 模型生成修复随 vendor 推进并入发布线；范围重生成容错（#59）与 ISSUE-029 判死
