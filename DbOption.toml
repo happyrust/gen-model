@@ -235,7 +235,13 @@ room_membership = true
 # 一度被这道监听门挡住、还报成「未找到 dbnum=1112」。同日已修在代码里——点名入口
 #（`UpdateScope::unrestricted()`）不再受 `watch_dbnums` / `--debug-dbnum` 两道监听门管，
 # 名单只圈 watcher 自己扫出来的活，于是撤回，仍是 [7998, 8000]。
-watch_dbnums = [7998, 8000]
+#【变更 2026-10-26】撤销限定（键注释掉 = 全范围）：线上 7998/8000 的初始化、逐 refno 抽查与布尔确定性
+#（e3d-model #9）都已过关，用户拍板把服务器模型范围扩到 MDB /ALL 全部 29 个 DESI 库并同步放开监听。
+# 实测 POST /api/v1/update/execute 点名不在名单里的库仍走 watcher 扫描、被这道门挡成「没有找到它的
+# 候选文件，没有可入队的批次」（2026-10-26 10:36 线上回执；上一条说的不受门管的是 bin/initialize_ams_dbnums
+# 那类直接调 initialize_project_dbnum_baseline 的点名入口），所以先放开再逐库 execute。7997 的 stall
+# 风险见 09-09 行，初始化时盯任务回执。
+# watch_dbnums = [7998, 8000]
 
 #【新增 2026-09-03】model_incremental_types —— 模型增量类型限定，默认不写 = 不限类型
 # 把「模型增量」圈到这几种最小交付单元类型的生成根，例如
