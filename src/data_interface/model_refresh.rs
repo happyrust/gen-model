@@ -59,8 +59,6 @@ pub(crate) struct TargetedGenerationReport {
     pub tubes_not_drawn: Option<String>,
 }
 
-/// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
-/// 就抹掉已经成功的根；调用方会把“不在 completed 也不在 failures”的根视为编排缺陷。
 /// 测试钩：`AIOS_TEST_FAIL_ROOTS=24384/24776,24384/23257`。
 /// 名单里的根不进入生成器，回执记成失败。没设变量就是空名单。
 /// L2 回放拉起的是普通服务进程，`cfg(test)` 在那边是关的，所以和
@@ -87,6 +85,8 @@ fn injected_generation_failures(roots: &[String]) -> Vec<RootGenerationFailure> 
         .collect()
 }
 
+/// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
+/// 就抹掉已经成功的根；调用方会把“不在 completed 也不在 failures”的根视为编排缺陷。
 fn report_from_failures(
     roots: &[String],
     failures: Vec<RootGenerationFailure>,

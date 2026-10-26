@@ -4213,7 +4213,7 @@ impl AiosDBManager {
                     file_latest_sesno as i32,
                 ) {
                     println!(
-                        "[{origin}] dbnum={db_no} 数据批次连续失败 {} 次且右端未前进，\
+                        "[{origin}] dbnum={db_no} 数据批次已失败（同右端第 {} 次）且右端未前进，\
                          本轮不自动重跑（保存新会话或人工执行恢复）",
                         parked.streak
                     );
@@ -4248,7 +4248,7 @@ impl AiosDBManager {
                                 &db_type,
                             ),
                             format!(
-                                "dbnum={db_no} 数据批次连续失败 {} 次已暂停自动重试\
+                                "dbnum={db_no} 数据批次已失败（同右端第 {} 次），已暂停自动重试\
                                  （新会话或人工执行恢复）",
                                 parked.streak
                             ),

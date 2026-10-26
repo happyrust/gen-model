@@ -1055,7 +1055,7 @@ fn run_case(env: &Env, case: &Case) {
                 service.assert_alive(&what);
                 if let Some(task) = service
                     .latest_task(case.dbnum, step.to)
-                    .filter(|task| task.get("state").and_then(Value::as_str) != Some("running"))
+                    .filter(|task| matches!(task.get("state").and_then(Value::as_str), Some("succeeded" | "failed" | "partial")))
                 {
                     break task;
                 }
@@ -1124,7 +1124,8 @@ fn run_case(env: &Env, case: &Case) {
             let left = service.batch_failure(case.dbnum);
             assert!(
                 left.is_none(),
-                "[{what}] 右端前进后 dbnum {} 的连败账还在：{left:?}"
+                "[{what}] 右端前进后 dbnum {} 的连败账还在：{left:?}",
+                case.dbnum
             );
             eprintln!("  [{what}] 连败账已清");
         }
