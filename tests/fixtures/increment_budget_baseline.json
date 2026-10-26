@@ -1,0 +1,54 @@
+{
+  "format": "increment-budget-baseline-v1",
+  "_doc": "增量性能预算基线（计划 2026-10-25 §5.4，D4：先记基线相对 ±50 %）。数字来自 2026-10-26 本机 debug 构建上的 L2 回放（ams8000-equi-move-chain × 2、ams8000-equi-room-cross、db8000-two-delete；dbnum 8000、953 根、一元素窗），由 scripts/increment_budget.py collect 采自服务日志。规则：中位数 > baseline × 1.5 或 最大值 > limit 即 FAIL；中位数 < baseline × 0.5 打 WARN。limit 是 debug 构建的门，release 目标写在 note 里（计划 §5.4 表）。改基线要在 changelog 说清为什么。",
+  "environment": {
+    "build": "debug",
+    "dbnum": 8000,
+    "roots": 953,
+    "window": "1 元素（EQUI 位移 / DBMDAT-only）",
+    "recorded": "2026-10-26",
+    "runs": [
+      "output/increment-replay/ams8000-equi-move-chain-20261026-000257",
+      "output/increment-replay/ams8000-equi-move-chain-20261026-002905",
+      "output/increment-replay/ams8000-equi-room-cross-20261026-053254",
+      "output/increment-replay/db8000-two-delete-20261026-003632"
+    ]
+  },
+  "metrics": {
+    "plan_ms": {
+      "baseline_ms": 760,
+      "limit_ms": 1500,
+      "required": true,
+      "registry": "INC-I02",
+      "note": "窗口规划器 plan=；实测中位 690–830、最大 917（#68 落地前）。release 目标 ≤ 1000。"
+    },
+    "window_batch_ms": {
+      "baseline_ms": 2700,
+      "limit_ms": 5000,
+      "required": true,
+      "registry": "INC-I04",
+      "note": "增量窗批次总耗时（不含监听器轮询与排队）；实测中位 2500–3000、最大 3421。I04 的「SAVEWORK → in_sync ≤ 5 s」里批次的那半。"
+    },
+    "room_snapshot_ms_per_root": {
+      "baseline_ms": 30,
+      "limit_ms": 200,
+      "required": true,
+      "registry": "INC-I01",
+      "note": "[单元快照] 开工前 / 收尾后 房间毫秒 ÷ 根数；实测 14–38（#66 修前是 ~5.5 s / 根）。上限即计划里的 200 ms / 根。"
+    },
+    "generate_cached_ms": {
+      "baseline_ms": 50,
+      "limit_ms": 250,
+      "required": false,
+      "registry": "INC-I05",
+      "note": "未触根 /model/generate 服务端耗时；实测中位 43–59、最大 97。release 目标 ≤ 100。没有 generate 步的用例（如 db8000-two-delete）没有样本，不算欠。"
+    },
+    "generate_rebuild_ms": {
+      "baseline_ms": 700,
+      "limit_ms": null,
+      "required": false,
+      "registry": "INC-I05",
+      "note": "冷初始化 / 重启后首次 /model/generate 走「补常驻根」重算；实测 394–1269。只记不设上限（一根 EQUI/BRAN 的重算，随根大小走）。"
+    }
+  }
+}
