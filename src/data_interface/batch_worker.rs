@@ -3464,27 +3464,34 @@ async fn execute_frozen_batch_body(
     // the dbnum slot. Reinitialization follows the same rule; the scheduler already
     // makes that intent exclusive.
     let defer_model_phase = model_phase_is_deferred(model_incremental, applied);
+    // 房间半边（开工前对齐常驻房间参照、冻本任务的房间计算器、查 durable 对齐欠账）只有模型半边用得着。
+    // Meta 批次（SYST / DICT / COMM / MISC / GLB / GLOB，`DataPhase::of_db_type`）没有模型工作
+    // （`sys_meta_changes_never_create_model_work`），却按阶段序排在同一次 SAVEWORK 连带的设计库窗口前头：
+    // 设计库文件刚前进、composite 变了，第一个开工的任务就替大家付那次常驻房间模型重建——8023 实测 SYST 批次
+    // 11 s 里 10.4 s 是这一笔（GitHub #69）。这里不对齐、不冻、不查账；设计库自己的任务开工时照样对齐，重建的
+    // 顺序与代价都不变。目录批次（CATA）可能带目录级联的根名单，照旧走模型半边。
+    let room_half = room_half_applies(defer_model_phase, &job.db_type);
 
     // 模型半边开工前把常驻房间模型对齐到此刻的文件版本（ADR-073 D12）：本窗的几何按这一版文件算，
     // 房间归属的候选面板也得是这一版的。composite 没变一次探针、零重建；变了才按文件重建；重建失败
     // 留旧代继续算、缺口进 /health。冻计算器的那几处（位姿便宜路、单元工作单 → write-behind）都在它后面。
     // 回执留着：换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
     registry.set_stage(&job.task_id, "room_reference");
-    let room_reference = if defer_model_phase {
-        None
-    } else {
+    let room_reference = if room_half {
         Some(
             crate::fast_model::model_db_adapter::refresh_room_reference_before_task(job.dbnum)
                 .await,
         )
+    } else {
+        None
     };
     // 一任务一台（B/T1）：对齐之后紧接着冻这一任务的房间计算器，本窗的批量重生成与逐根重试都用它；
     // 模型半边不跑（`defer_model_phase`）时不冻——冻了也没人用。冻不出时单元工作单入口按 D2 把每根记失败。
     registry.set_stage(&job.task_id, "room_calculator");
-    let rooms = if defer_model_phase {
-        crate::fast_model::model_db_adapter::TaskRoomCalculator::Disabled
-    } else {
+    let rooms = if room_half {
         crate::fast_model::model_db_adapter::TaskRoomCalculator::freeze()
+    } else {
+        crate::fast_model::model_db_adapter::TaskRoomCalculator::Disabled
     };
     // 第三条触发（电平型，2026-09-17）：库上 durable 侧的整库对齐代号与本任务冻的计算器代号不等
     // = 这个库欠一次整库重算。前两条触发的原因只活在本任务里，拆窗 / 单元失败 / 刷盘没齐都会把它丢掉；
@@ -3492,11 +3499,11 @@ async fn execute_frozen_batch_body(
     // （U1 第二半），落盘形态下也盖得上，所以它在每个库上只多跑一次就安静。常驻代号取冻好的那台（H1，
     // 2026-09-19）：准入链的终点与收尾定向重算用的计算器必须是同一台，不再另读一次生命周期。
     registry.set_stage(&job.task_id, "room_alignment");
-    let alignment = if defer_model_phase {
-        None
-    } else {
+    let alignment = if room_half {
         crate::data_interface::room_recompute::durable_alignment(job.dbnum, rooms.generation())
             .await
+    } else {
+        None
     };
     // 停放链（U3 b 档）：别的库定向重算时停放给本库的根级工作项，库上欠着才取来接准入链（`alignment` 为 `None` 时不动槽）。
     let parked =
@@ -3699,6 +3706,15 @@ fn batch_regen_is_allowed(non_regen_failed: bool) -> bool {
 
 fn model_phase_is_deferred(model_incremental: bool, data_applied: bool) -> bool {
     !model_incremental || !data_applied
+}
+
+/// 本任务要不要在开工前对齐房间参照、冻房间计算器、查 durable 对齐欠账（GitHub #69）：
+/// 模型半边会跑（没让位）、且不是 Meta 批次。Meta 库没有模型工作，对齐了也没人用；而它们排在
+/// 同一次 SAVEWORK 的设计库窗口前头，对齐就是替设计库付那次重建。
+fn room_half_applies(defer_model_phase: bool, db_type: &str) -> bool {
+    !defer_model_phase
+        && crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type)
+            != crate::data_interface::initialization_phase::DataPhase::Meta
 }
 
 /// 还没失败过的可解析根才并进批量重生成（ADR-012）；失败过的逐根跑，让它的错误自己说出口。
@@ -7420,6 +7436,45 @@ mod tests {
     fn failed_non_regen_work_blocks_the_batch_regen_worklist() {
         assert!(batch_regen_is_allowed(false));
         assert!(!batch_regen_is_allowed(true));
+    }
+
+    /// GitHub #69：Meta 批次（SYST 等）没有模型工作，开工前不对齐房间参照、不冻计算器、不查欠账——否则同一次
+    /// SAVEWORK 连带的 SYST 批次排在设计库窗口前头时，会替设计库付那次常驻房间模型重建（8023 实测 10.4 s）。
+    /// 三处都得过同一道 `room_half` 门；设计库与目录库照旧走。
+    #[test]
+    fn meta_batches_skip_the_room_half() {
+        assert!(room_half_applies(false, "DESI"));
+        assert!(room_half_applies(false, "ISOD"));
+        assert!(room_half_applies(false, "CATA"));
+        for meta in ["SYST", "DICT", "COMM", "MISC", "GLB", "GLOB", "syst"] {
+            assert!(!room_half_applies(false, meta), "{meta}");
+        }
+        assert!(!room_half_applies(true, "DESI"));
+
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch_body(")
+            .expect("batch body")
+            .1
+            .split_once("fn batch_regen_is_allowed(")
+            .expect("batch body boundary")
+            .0;
+        let gate = body
+            .find("let room_half = room_half_applies(defer_model_phase, &job.db_type);")
+            .expect("room_half 门");
+        assert_eq!(
+            body.matches("if room_half {").count(),
+            3,
+            "对齐 / 冻计算器 / 查欠账三处都要过 room_half 门"
+        );
+        for gated in [
+            "refresh_room_reference_before_task(job.dbnum)",
+            "TaskRoomCalculator::freeze()",
+            "durable_alignment(job.dbnum, rooms.generation())",
+        ] {
+            let at = body.find(gated).unwrap_or_else(|| panic!("{gated}"));
+            assert!(at > gate, "{gated} 必须在 room_half 门之后");
+        }
     }
 
     #[test]
