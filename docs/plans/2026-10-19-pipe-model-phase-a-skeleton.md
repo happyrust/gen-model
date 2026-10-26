@@ -36,7 +36,7 @@
 ## 验证
 
 - `cargo check -p pipe-model`：绿，零警告。
-- `cargo test -p pipe-model`：54/54 绿（全部 A-J 组 + render 渲染边界 7 测试）。
+- `cargo test -p pipe-model`：72/72 绿（全部 A-L 组 + render 渲染边界 + undo_group/HSTU）。
 - `cargo check -p aios-database` 与 `cargo check --tests`：绿。
 - `cargo test -p aios-database --lib pipe_model_adapter`：**3/3 绿**（此前报错的 `room_membership_notice`（位于 `src/` 根的 lib 入口 1976 行）系构建时文件中间态，现行代码调用的是存在的 `room_membership_notices`，复测通过）。
 
@@ -47,7 +47,7 @@
 
 ## 非目标
 
-Phase A 已填建管/支管/改名/级联/端编辑/连接批生成；**不**接连接内核（xCON 推导词、GASK/FLAN 自动补件、几何对齐兜底留 Phase C——当前显式 warning 占位）；不直连 SurrealDB；不接 ROUTER 内核（接口槽见 §18.11）；HSTU 头管选择待 spec_resolver 接入。
+Phase A 已填建管/支管/改名/级联/端编辑/连接批生成；**不**接连接内核（xCON 推导词、GASK/FLAN 自动补件、几何对齐兜底留 Phase C——当前显式 warning 占位）；不直连 SurrealDB；不接 ROUTER 内核（接口槽见 §18.11）。HSTU 头管选择已于 2026-10-22 经 `SpecCatalog` 接入（见末节）。
 
 ## 2026-10-20 生产读面完成
 
@@ -100,3 +100,13 @@ Phase A 已填建管/支管/改名/级联/端编辑/连接批生成；**不**接
 - `pipe-model` 65/65 绿；`pipe_model_adapter` 3/3 绿；`cargo check -p aios-database`/`--tests` 零新警告。
 - **端到端链路证明**（`tests/pipe_spec_forensics.rs::pipe_service_end_to_end_on_real_db`，ams8000 DESI 真库）：真 PIPE `/1RX-3AH0`（1 支管）→ `create_branch` 出批 → `render_batch` 出 `Add(BRAN owner=pipe)` 自动名 `/1RX-3AH0/B2`、新 refno `dbnum_of` 解回 8000 → `rendered_batch_to_ele_operations` 吐 `EleOperationData::Add`；`validate_fabrication` 纯读面在真 PIPE 上出 `Failed`+2 条定位消息（真库确有缺陷数据）。链路 `DirectStore→Catalog→Service→MutationBatch→render→adapter→EleOperationData→terminal_persist_changes` 在真数据上闭合。
 - `sigmap review-pr`：无 finding（scope/tests/blast-radius/sensitive 全清）；`pipe-model/` 等未跟踪新文件不进其 diff 审计面（仅审 tracked diff）。
+
+## 2026-10-22 undo_group 组合器 + SELECT HSTU 落地
+
+- **`undo_group(name) → [batches]→batch`**（spec 决策 3 承诺的显式跨操作回滚 API，对应 E3D `undo.add/endUndoable`）：`MutationBatch::undo_group` 静态组合器——空集即拒绝、逐批按序拼接 ops/requires_confirm/warnings；`PipeModel::undo_group` trait 默认方法委托。测试 +2。
+- **`SELECT HSTU` 两处接点实现**（§18.6 `sel hstu`、componentcreation 建支管序列、specification :404 BRAN.PSPE 变更自动重选）：
+  - `PipeModelService::select_hstu(pspe, bore_mm) → (Option<RefU64>, Option<PipeWarning>)`（pub(crate)）：选择键 `PBOR0`——真库 TUBE 树问键即 `PBOR0`（§18.8 取证），**不走** `resolve` 的 `PBOR0→PBOR1` 归一（那是元件 arrive/leave 孔槽语义，管段单孔位）；`table_lookup` 直查空 → `root_selector`+`sele_descend` SELE 默认链回落（与元件同链）；命中 `is_spco` 即返回。规格读面未接/落选均出显式 warning（E3D 此处静默失败，本服务不吞）。
+  - `pipe-model/src/pipeline.rs` 的 `branch_create_ops`：BRAN Create 属性面增 `HSTU`（命中才写）——建管/建支管两条路共用。
+  - `pipe-model/src/specchange.rs` 的 `rebranch_spec`：原"待内核"warning 换成真实现——写 PSPE 后读 `BRAN.HBOR` 调 `select_hstu(new_spec)`，命中即写 `HSTU` SetAttrs（序：PSPE→HSTU→逐件重选）；HBOR 缺席出"无法重选"warning。
+  - 生产侧零改动：`DirectSpecCatalog::table_lookup` 的 `TUBI→TUBE` 别名已在，HSTU 走的就是元件同一张规格表。
+- 测试 +5（72/72 绿）：接 spec 建管写 HSTU/未接 spec 出 warning 不阻断/直查+SELE 双落空显式落选/BRAN 换规格 HSTU 重选+写序断言/无 HBOR 显式 warning。

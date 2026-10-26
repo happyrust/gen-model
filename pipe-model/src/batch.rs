@@ -66,4 +66,69 @@ impl MutationBatch {
             warnings: Vec::new(),
         }
     }
+
+    /// `undo.add`/`endUndoable` 组合器（spec 决策 3）：把若干已产出的批压成
+    /// 一个命名撤销边界——跨操作回滚（如 excess 警告整批滚）走显式 API，
+    /// 不靠客户端手工拼。`ops`/`requires_confirm`/`warnings` 均按批序原样
+    /// 拼接，提交顺序不变；组名 = UNDOABLE description，子批名不保留
+    /// （撤销粒度到组）。
+    pub fn undo_group(name: impl Into<String>, batches: Vec<MutationBatch>) -> Self {
+        let mut group = Self::named(name);
+        for batch in batches {
+            group.ops.extend(batch.ops);
+            group.requires_confirm.extend(batch.requires_confirm);
+            group.warnings.extend(batch.warnings);
+        }
+        group
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outcome::PipeWarning;
+
+    fn op(refno: u64) -> MutationOp {
+        MutationOp::Delete {
+            element: RefU64(refno),
+        }
+    }
+
+    /// 组批把子批 op/confirm/warning 按序压平成单一边界（spec 决策 3）。
+    #[test]
+    fn undo_group_flattens_in_batch_order() {
+        let mut a = MutationBatch::named("create_pipe");
+        a.ops.push(op(1));
+        a.ops.push(op(2));
+        a.requires_confirm.push(Confirm {
+            prompt: "替换既有断点".into(),
+            on_yes: vec![op(3)],
+        });
+        let mut b = MutationBatch::named("connect_end");
+        b.ops.push(op(4));
+        b.warnings.push(PipeWarning {
+            message: "连接后回读失败".into(),
+            side_effect: None,
+        });
+
+        let group = MutationBatch::undo_group("编辑段 1", vec![a, b]);
+        assert_eq!(group.name, "编辑段 1");
+        assert_eq!(group.ops.len(), 3);
+        match (&group.ops[0], &group.ops[2]) {
+            (MutationOp::Delete { element: e1 }, MutationOp::Delete { element: e2 }) => {
+                assert_eq!((e1.0, e2.0), (1, 4), "op 顺序 = 批序 + 批内序");
+            }
+            _ => panic!("ops must flatten in order"),
+        }
+        assert_eq!(group.requires_confirm.len(), 1);
+        assert_eq!(group.warnings.len(), 1);
+    }
+
+    /// 空组 = 只有名字的边界（合法——E3D 空 UNDOABLE 也成立）。
+    #[test]
+    fn undo_group_empty_is_named_boundary() {
+        let group = MutationBatch::undo_group("noop", vec![]);
+        assert_eq!(group.name, "noop");
+        assert!(group.ops.is_empty() && group.requires_confirm.is_empty() && group.warnings.is_empty());
+    }
 }

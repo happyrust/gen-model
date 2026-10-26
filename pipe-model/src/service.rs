@@ -158,4 +158,12 @@ pub trait PipeModel {
     /// 由接入方替换为 ROUTER 内核绑定。
     fn route(&self, ctx: &Context, branch: RefU64,
         via: &[crate::pipeline::RoutePoint]) -> Result<MutationBatch, PipeError>;
+
+    // ---- 撤销组合（spec 决策 3）------------------------------------------
+    /// `undo.add`/`endUndoable` 组合器：把多次服务调用产出的批压成一个命名
+    /// 撤销边界——跨操作回滚（如 excess 警告整批滚）走显式 API，不靠客户端
+    /// 手工拼。默认实现=纯组合，无读面依赖；`name` = UNDOABLE description。
+    fn undo_group(&self, name: &str, batches: Vec<MutationBatch>) -> MutationBatch {
+        MutationBatch::undo_group(name, batches)
+    }
 }

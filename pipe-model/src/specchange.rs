@@ -77,7 +77,8 @@ impl<C: PipeCatalog> PipeModelService<C> {
         Ok((batch, results))
     }
 
-    /// 支管换规格：写 PSPE → 重选 HSTU（待内核，warning）→ 逐件重选。
+    /// 支管换规格：写 PSPE → `SELECT HSTU` 重选头管（`specification` :404
+    /// 语义——BRAN.PSPE 变更自动重选）→ 逐件重选。
     fn rebranch_spec(
         &self,
         batch: &mut MutationBatch,
@@ -86,10 +87,23 @@ impl<C: PipeCatalog> PipeModelService<C> {
         new_spec: RefU64,
     ) {
         batch.ops.push(set_attr(bran, "PSPE", NamedAttrValue::RefU64Type(new_spec)));
-        batch.warnings.push(PipeWarning {
-            message: "BRAN 换 PSPE 后的 HSTU 重选待内核（Story 6/28 sel hstu 语义）".into(),
-            side_effect: None,
-        });
+        match self.catalog.attr(bran, "HBOR") {
+            Some(NamedAttrValue::F32Type(hbor)) => {
+                let (hstu, warning) = self.select_hstu(new_spec, hbor as f64);
+                if let Some(spco) = hstu {
+                    batch.ops.push(set_attr(bran, "HSTU", NamedAttrValue::RefU64Type(spco)));
+                }
+                if let Some(w) = warning {
+                    batch.warnings.push(w);
+                }
+            }
+            _ => {
+                batch.warnings.push(PipeWarning {
+                    message: "BRAN 无 HBOR，HSTU 无法重选".into(),
+                    side_effect: None,
+                });
+            }
+        }
         for member in self.catalog.members_of(bran) {
             let noun = self.catalog.noun_of(member).unwrap_or_default();
             if matches!(noun.as_str(), "TUBI") {
@@ -306,5 +320,55 @@ mod tests {
             svc.change_spec(&ctx(), RefU64(10), RefU64(88)).unwrap_err(),
             PipeError::Blocking { .. }
         ));
+    }
+
+    // ── BRAN.PSPE 变更的 HSTU 重选（specification :404）─────────────
+
+    /// BRAN 有 HBOR + 新规格 TUBI 可查 → `SELECT HSTU` 紧随 PSPE 写入。
+    #[test]
+    fn bran_change_spec_reselects_hstu() {
+        let (mut cat, mut spec) = rig();
+        cat.attrs
+            .get_mut(&RefU64(11))
+            .unwrap()
+            .insert("HBOR".into(), NamedAttrValue::F32Type(100.0));
+        spec.table.insert((RefU64(88), "TUBI".into()), RefU64(900));
+        spec.table.insert((RefU64(88), "ELBO".into()), RefU64(801));
+        spec.table.insert((RefU64(88), "ATTA".into()), RefU64(802));
+        let svc = PipeModelService::new(cat).with_spec(spec);
+        let (batch, _results) = svc.change_spec(&ctx(), RefU64(11), RefU64(88)).unwrap();
+
+        // BRAN 自身的写序：PSPE → HSTU（元件重选不落在 BRAN 上）。
+        let bran_keys: Vec<String> = batch
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                MutationOp::SetAttrs { element, attrs } if *element == RefU64(11) => {
+                    attrs.keys().next().cloned()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bran_keys, ["PSPE", "HSTU"]);
+        let hstu = batch.ops.iter().find_map(|op| match op {
+            MutationOp::SetAttrs { element, attrs } if *element == RefU64(11) => {
+                attrs.get("HSTU").cloned()
+            }
+            _ => None,
+        });
+        assert_eq!(hstu, Some(NamedAttrValue::RefU64Type(RefU64(900))));
+        assert!(!batch.warnings.iter().any(|w| w.message.contains("HSTU")));
+    }
+
+    /// BRAN 无 HBOR → 不重选，显式 warning（E3D 静默，本服务不吞）。
+    #[test]
+    fn bran_change_spec_without_hbor_warns() {
+        let (cat, spec) = rig(); // rig 的 BRAN 只带 PSPE，无 HBOR
+        let svc = PipeModelService::new(cat).with_spec(spec);
+        let (batch, _results) = svc.change_spec(&ctx(), RefU64(11), RefU64(88)).unwrap();
+        assert!(batch
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("无 HBOR")));
     }
 }

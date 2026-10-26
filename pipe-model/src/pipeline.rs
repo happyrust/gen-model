@@ -149,8 +149,15 @@ impl<C: PipeCatalog> PipeModelService<C> {
         let bore = NamedAttrValue::F32Type(bore_mm as f32);
         attrs.insert("HBOR".into(), bore.clone());
         attrs.insert("TBOR".into(), bore);
-        // TODO(HSTU)：E3D 建支管后 `SELECT HSTU` 选头管——走 spec_resolver，
-        // Phase C 接 SpecCatalog 后在此补写 HSTU 行。
+        // `SELECT HSTU`（componentcreation 建支管序列的 sel hstu）：头管规格
+        // （TUBE SPCO）随批写 BRAN.HSTU；落选/未接读面进 warning 不吞。
+        let (hstu, warning) = self.select_hstu(spec, bore_mm);
+        if let Some(spco) = hstu {
+            attrs.insert("HSTU".into(), NamedAttrValue::RefU64Type(spco));
+        }
+        if let Some(w) = warning {
+            batch.warnings.push(w);
+        }
         batch.ops.push(MutationOp::Create {
             refno: self.catalog.alloc_refno(pipe),
             noun: "BRAN".into(),
@@ -158,6 +165,56 @@ impl<C: PipeCatalog> PipeModelService<C> {
             name,
             attrs,
         });
+    }
+
+    /// `SELECT HSTU`：在管规格里按孔径选 TUBE SPCO（§18.6 `sel hstu`、
+    /// `specchange :404` BRAN.PSPE 变更自动重选）。
+    ///
+    /// 选择键 `PBOR0`——真库 TUBE 树的问键即 `PBOR0`（§18.8 取证），不走
+    /// `resolve` 的 `PBOR0→PBOR1` 归一（那是元件 arrive/leave 孔槽语义，
+    /// 管段单孔位）。表直查空 → SELE 默认链回落（与元件同链）。
+    /// E3D 选不出静默，这里显式：返回 `(SPCO, warning)`。
+    pub(crate) fn select_hstu(
+        &self,
+        pspe: RefU64,
+        bore_mm: f64,
+    ) -> (Option<RefU64>, Option<PipeWarning>) {
+        let Some(spec) = self.spec.as_deref() else {
+            return (
+                None,
+                Some(PipeWarning {
+                    message: "规格读面未接（with_spec）——HSTU 未选".into(),
+                    side_effect: None,
+                }),
+            );
+        };
+        let qa: crate::choice::QuestionAnswers = vec![("PBOR0".into(), format!("{bore_mm}"))];
+        if let Some(spco) = spec.table_lookup(pspe, "TUBI", &qa) {
+            return (Some(spco), None);
+        }
+        let mut node = spec.root_selector(pspe);
+        while let Some(sele) = node {
+            match spec.sele_descend(sele, &qa) {
+                Some(next) if spec.is_spco(next) => {
+                    return (
+                        Some(next),
+                        Some(PipeWarning {
+                            message: "SELECT HSTU 表直查落空，经 SELE 默认链命中".into(),
+                            side_effect: None,
+                        }),
+                    );
+                }
+                Some(next) => node = Some(next),
+                None => break,
+            }
+        }
+        (
+            None,
+            Some(PipeWarning {
+                message: "SELECT HSTU 落空——BRAN.HSTU 未置（E3D 此处静默失败，本服务显式）".into(),
+                side_effect: None,
+            }),
+        )
     }
 }
 
@@ -831,5 +888,85 @@ mod tests {
             attrs.get("TREF"),
             Some(&NamedAttrValue::RefU64Type(RefU64(0)))
         );
+    }
+
+    // ── SELECT HSTU（§18.6 sel hstu / specchange :404）────────────────
+
+    fn pipe_spec(owner: RefU64, name: &str, pspe: RefU64, bore: f64) -> PipeSpec {
+        PipeSpec {
+            owner,
+            name: Some(name.into()),
+            spec: pspe,
+            bore_mm: bore,
+            insulation: None,
+            tracing: None,
+            temperature: None,
+            pressure: None,
+            slope_ref: None,
+        }
+    }
+
+    /// 规格读面接上时：建支管随批写 `HSTU`（SELECT HSTU 表直查命中）。
+    #[test]
+    fn create_pipe_with_spec_writes_hstu() {
+        let mut cat = MockCatalog::new();
+        cat.zone(RefU64(9), "/Z1");
+        let mut spec = crate::testkit::MockSpec::default();
+        spec.table.insert((RefU64(77), "TUBI".into()), RefU64(999));
+        let svc = PipeModelService::new(cat).with_spec(spec);
+
+        let batch = svc
+            .create_pipe(&ctx(), &pipe_spec(RefU64(9), "/P1", RefU64(77), 100.0))
+            .unwrap();
+        let MutationOp::Create { attrs, .. } = &batch.ops[1] else {
+            panic!("ops[1] 应为 BRAN 建");
+        };
+        assert_eq!(
+            attrs.get("HSTU"),
+            Some(&NamedAttrValue::RefU64Type(RefU64(999))),
+            "SELECT HSTU 命中 TUBE SPCO 应写入 BRAN"
+        );
+        assert!(batch.warnings.is_empty(), "直查命中不出 warning");
+    }
+
+    /// 规格读面未接：BRAN 照建，HSTU 缺席 + 显式 warning（不静默吞）。
+    #[test]
+    fn create_pipe_without_spec_warns_hstu() {
+        let mut cat = MockCatalog::new();
+        cat.zone(RefU64(9), "/Z1");
+        let svc = PipeModelService::new(cat);
+
+        let batch = svc
+            .create_pipe(&ctx(), &pipe_spec(RefU64(9), "/P1", RefU64(77), 100.0))
+            .unwrap();
+        let MutationOp::Create { attrs, .. } = &batch.ops[1] else {
+            panic!("ops[1] 应为 BRAN 建");
+        };
+        assert!(!attrs.map.contains_key("HSTU"));
+        assert!(batch
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("规格读面未接")));
+    }
+
+    /// 表直查落空且 SELE 链也走不通：BRAN 仍建，HSTU 缺席 + 落选 warning。
+    #[test]
+    fn create_pipe_hstu_miss_warns_not_blocks() {
+        let mut cat = MockCatalog::new();
+        cat.zone(RefU64(9), "/Z1");
+        // 规格接上了但 TUBI 查不到、无选择器根。
+        let svc = PipeModelService::new(cat).with_spec(crate::testkit::MockSpec::default());
+
+        let batch = svc
+            .create_pipe(&ctx(), &pipe_spec(RefU64(9), "/P1", RefU64(77), 100.0))
+            .unwrap();
+        let MutationOp::Create { attrs, .. } = &batch.ops[1] else {
+            panic!("ops[1] 应为 BRAN 建");
+        };
+        assert!(!attrs.map.contains_key("HSTU"));
+        assert!(batch
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("HSTU 落空") || w.message.contains("HSTU 未")));
     }
 }
