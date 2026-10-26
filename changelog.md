@@ -1,5 +1,12 @@
 ## 2026-10-26
 
+### 单元回执的「房间 后」改到任务等到刷盘 ACK 之后拍：跨房位移不再被报成「房间没变」（GitHub #71）
+
+- **为什么**：L2 回放链 `ams8000-equi-room-cross`（EQUI `=24384/24776` `BY U 2000` 穿甲板 R224 → R124）732 窗的回执 `rooms_before=[R224] rooms_after=[R224]`，而同窗 `[model-write-behind] … room_edges=3 room_recomputed=1` 已把库上的边换成 R124 / R144 / R413；734 窗（`BY D 2000` 回来）的 `rooms_before` 才看到换房，它自己的 `rooms_after` 又滞后一窗。成因：`unit_room_snapshot` 只读库上的 `room_relate` 边（按设计——「前」就是库上那份），而 `run_unit_worklist` 在「全部单元收尾之后」就拍「后」；刚体前移 / 单元级发布的房间边由 write-behind 刷盘时重算落库，整根重算的边也随模型行在刷盘那一笔里落——两者没有排序，快照赶在提交之前就拍到旧边。几何的「后」没这个问题（`unit_geometry_snapshot` 先问投影）。
+- **改**（`batch_worker.rs`）：`run_unit_worklist` 只把「前」搬上回执、不再拍「后」；新 `snapshot_rooms_after` 在 `execute_frozen_batch` 的栅栏（`await_units_durable`）与定向 / 整库房间重算之后、收尾那一笔之前，只给拍过「前」的根再读一次库填 `rooms_after`——此刻本任务发出去的边都已在库里；「后」读不到就把「前」也摘掉，两格仍同生共死。日志由一行 `[单元快照] 收尾后 根=N 房间 X ms 几何 Y ms` 变成 `收尾后 根=N 几何 Y ms` + `刷盘后 根=N 房间 X ms（拍到 K 根，缺 M）`；`scripts/increment_budget.py` 的 `room_snapshot_ms_per_root` 新旧两种行都认。源码钉 `the_rooms_after_snapshot_is_taken_after_the_durable_fence`：单元工作单里只有一次 `unit_room_snapshot::snapshot(`、不许赋 `rooms_after`；`execute_frozen_batch` 里顺序必须是 栅栏 → 房间重算 → 拍「后」 → 收尾那一笔。
+- **量到**（同一条链重跑，`output/increment-replay/ams8000-equi-room-cross-20261026-111424`）：732 窗 `db-20261026-111629-000047` 回执 `rooms_before=[R224(24381_948)] rooms_after=[R124(24381_1263), R144(24381_1445), R413(24381_35457)]`，734 窗 `db-…-111729-000049` 反过来 `[R124, R144, R413] → [R224]`（修前 05:3x 那次两窗都是前 == 后）；服务日志顺序 `收尾后 … 几何 0ms` → `[model-write-behind] … room_recomputed=1` → `刷盘后 根=1 房间 29ms`；位移本身的断言照旧全绿（两次 transform、包围盒 ±2000、其余窗 `AlreadyAvailable` 41–77 ms），预算门 ok 5 / fail 0（房间快照 n=4 中位 30 ms / 根）。
+- **没动**：`unit_room_snapshot` 仍读库不读投影（「前」必须是库上那份，「后」现在拍在库已更新之后，同一把尺子）；「前」的拍法与门（≤ 64 根 / 读透 / 算不了房间不拍）。回执级 `rooms_changed` 断言（INC-G02 翻「有」）等 harness 字段，并行的失败注入改动落地后一起补。
+
 ### 窗口规划器的根枚举不再每窗两端全走：S 端复用上一窗的 T 端根集，T 端只重枚举账本触到的顶层子树（GitHub #68）
 
 - **为什么**：#68 量到 `IncrementPipeline 阶段耗时` 里 `plan=` 随 `roots_T` 线性（8000 / 953 根 0.73 s，7997 / 6772 根 13.8 s）。先给 `plan` 拆了段（第 3 条路，`e6013ef76`）：L2 回放 `ams8000-equi-move-chain` 五窗 `plan` 641–748 ms 里 `roots_S` 191–227 + `roots_T` 186–226（两端 `enumerate_generation_roots`，从 WORL 起逐元素读 TYPE / NAME / members 直到交付单元，费用是「交付单元以上的元素数」、与窗里变了几个元素无关）≈ 六成，两端 `build_set` ≈ 160 ms 两成，分桶 / 欠账 / 刚体 / 变化清单 / 回执全部 0–4 ms。
