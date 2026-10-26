@@ -9,7 +9,8 @@
 指标（都是毫秒）：
 - `plan_ms`               窗口规划器 `plan=`（INC-I02），每个增量窗一样；
 - `window_batch_ms`       增量窗批次 `总耗时`（INC-I04 的批次半边；不含监听器轮询与排队），只计 succeeded 的增量窗（起点 > 1）；
-- `room_snapshot_ms_per_root`  `[单元快照] 开工前 / 收尾后` 的房间毫秒 ÷ 根数（INC-I01），根数 0 不计；
+- `room_snapshot_ms_per_root`  `[单元快照] 开工前 / 刷盘后` 的房间毫秒 ÷ 根数（INC-I01），根数 0 不计；也认 0.1.43 及以前
+                          的 `收尾后 … 房间 X ms 几何 Y ms`（#71 把房间的「后」改到刷盘 ACK 之后单独打一行）；
 - `generate_cached_ms`    未触根 `/model/generate` 往返（INC-I05）：`[http.model.generate]` 到同 op 的 `[处理结束]` 之间
                           没有 `[准备模型数据源] … roots=[这根]` 的那些（凭证命中也有 `[模型后台任务开始]`，
                           只有真要算的才开数据源）；
@@ -48,7 +49,9 @@ RE_TOTAL = re.compile(
 RE_SNAP_BEFORE = re.compile(
     r"\[单元快照\] 开工前 根=(?P<roots>\d+) 房间 (?P<room>\d+)ms（拍到 (?P<room_roots>\d+) 根） 几何 (?P<geom>\d+)ms"
 )
+# 0.1.43 及以前：房间与几何的「后」在单元收尾时同一行；#71 之后房间的「后」在刷盘 ACK 之后单独打 `刷盘后`。
 RE_SNAP_AFTER = re.compile(r"\[单元快照\] 收尾后 根=(?P<roots>\d+) 房间 (?P<room>\d+)ms 几何 (?P<geom>\d+)ms")
+RE_SNAP_FLUSHED = re.compile(r"\[单元快照\] 刷盘后 根=(?P<roots>\d+) 房间 (?P<room>\d+)ms（拍到 (?P<room_roots>\d+) 根")
 RE_GEN_START = re.compile(r"\[http\.model\.generate\] op=(?P<op>\d+) refno=(?P<refno>\S+)")
 RE_GEN_PREPARE = re.compile(r"\[准备模型数据源\] op=\d+ dbnum=\d+ roots=\[(?P<roots>[^\]]*)\]")
 RE_GEN_END = re.compile(r"\[处理结束\] op=(?P<op>\d+) elapsed_ms=(?P<ms>\d+) generated refno=(?P<refno>\S+)")
@@ -92,7 +95,7 @@ def collect(run_dir: Path, case: str | None, dbnum: int | None) -> dict:
                         samples.append({"metric": "room_snapshot_ms_per_root", "value_ms": int(m["room"]) / roots,
                                         "phase": "before", "roots": roots, "at": where})
                     continue
-                if m := RE_SNAP_AFTER.search(line):
+                if m := (RE_SNAP_FLUSHED.search(line) or RE_SNAP_AFTER.search(line)):
                     roots = int(m["roots"])
                     if roots > 0:
                         samples.append({"metric": "room_snapshot_ms_per_root", "value_ms": int(m["room"]) / roots,

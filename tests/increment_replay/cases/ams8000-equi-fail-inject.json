@@ -1,0 +1,15 @@
+{
+  "name": "ams8000-equi-fail-inject",
+  "registry": ["INC-F05", "INC-H05"],
+  "_doc": "计划 §6 D6 的必败注入：同一个 ams8000-equi-move-chain 夹具（不叠冻结复核钩），726 之后把服务**带 `AIOS_TEST_FAIL_ROOTS=24384/24776` 冷重启**再推 727 —— 名单里的根由 `model_refresh::injected_generation_failures` 记成生成失败、不进生成器，未触根 24384/23257 不受影响。判三件事：① 这一窗任务 `state=failed`（O3）；② **`model_sesno` 仍停在 726**（生成失败不推模型水位，INC-F05；`applied_sesno` 只打出不判——本窗数据半边是成功的，「数据硬失败不推 applied」要另一种注入，另开票）；③ 库里旧行还在（`records_present`：失败不动已落库的几何，O2）。727 落败之后 728 那一步**清掉钩子再冷重启**：监听器把 727..=728 排成下一任务，这一回生成走通，三水位追平 728、两根的行都在——这就是 INC-H05 要的「失败保留待重试、库健康后下一任务再试」，不需要人工补。**不判 `kind`**：这一窗从 726 起算，走便宜路还是整根重算取决于重启后投影里没有回执（冷重启抹掉常驻根），把它钉成 `regen` 或 `transform` 都是在测别的东西。",
+  "dbnum": 8000,
+  "db_file": "AvevaMarineSample/ams000/ams8000_0001",
+  "fixture_dir": "tests/fixtures/sessions/ams8000-equi-move-chain",
+  "start": 725,
+  "init": { "to": 725, "records_present": ["24384/24776", "24384/23257"], "generate_prime": ["24384/24776", "24384/23257"] },
+  "steps": [
+    { "to": 726, "task_state": "succeeded", "unit_count": 0, "generate_already_available": ["24384/24776", "24384/23257"] },
+    { "to": 727, "fail_roots": ["24384/24776"], "expect_model_sesno_stay": 726, "task_state": "failed", "records_present": ["24384/24776"], "timeout_secs": 240 },
+    { "to": 728, "clear_fail_injection": true, "task_state": "succeeded", "records_present": ["24384/24776", "24384/23257"], "timeout_secs": 300 }
+  ]
+}

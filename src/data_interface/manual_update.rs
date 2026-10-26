@@ -2396,7 +2396,8 @@ pub struct ModelUnitResult {
     /// `Some([])` = 拍了、不属于任何房间。两格同生共死。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rooms_before: Option<Vec<crate::data_interface::unit_room_snapshot::RoomRef>>,
-    /// 收尾后挂在哪些房间（同上）。
+    /// 收尾后挂在哪些房间（同上）：在任务等到本批根的 durable ACK、房间重算跑完之后拍（GitHub #71），
+    /// 不是单元收尾那一刻——那时库上还是旧边。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rooms_after: Option<Vec<crate::data_interface::unit_room_snapshot::RoomRef>>,
     /// 开工前这根的几何概要（行数 + 并集包围盒；`unit_geometry_snapshot`，计划 2026-10-24 W4）。`None` = 没拍

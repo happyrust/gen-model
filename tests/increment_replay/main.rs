@@ -123,6 +123,34 @@ struct Step {
     /// 这一步不等水位（半截后的中间态）。
     #[serde(default)]
     no_wait: bool,
+    /// 失败注入（INC-F05 / H05，计划 §6 D6）：非空 → **先把服务带 `AIOS_TEST_FAIL_ROOTS=<名单>` 冷重启**，再推这一窗；
+    /// 名单里的根由 `model_refresh::injected_generation_failures` 记成生成失败、不进生成器，其余根照常生成。
+    /// 钩子必须在文件前移之前挂上，否则这一窗早就跑完了。
+    #[serde(default)]
+    fail_roots: Vec<String>,
+    /// 清钩子重启（与 `fail_roots` 反向）：去掉 `AIOS_TEST_FAIL_ROOTS` 再冷重启，证明「库健康后下一任务再试」真的会重跑（INC-H05）。
+    #[serde(default)]
+    clear_fail_injection: bool,
+    /// 这一窗**预期失败**：设了就**不等 `wait_in_sync`**（三水位本就不该追上来），改为等任务落终态，再判
+    /// `model_sesno` 仍停在这个 sesno（生成失败不推模型水位，INC-F05）。`applied_sesno` 与 `file_latest_sesno`
+    /// 只打进日志不判——数据半边是成功的，「数据硬失败不推 applied」要另一种注入。
+    #[serde(default)]
+    expect_model_sesno_stay: Option<u32>,
+    /// 这一窗预期数据批次失败一次后停自动重跑并 park（INC-H02）。不等三水位。
+    /// 服务要带 `AIOS_TEST_FAIL_DATA_ENDS="<dbnum>:<to>"`，并把对账 / 限频 / 轮询间隔调短，
+    /// 否则「本轮不自动重跑」要等到下一轮对账。判：`/health` 的 `batch_failures[dbnum]` 已 `parked` 且
+    /// `end_sesno == to`、`streak >= 1`；接着日志里出现「本轮不自动重跑」，而 streak 不再涨、
+    /// `applied_sesno` 仍停在 `to` 之前。
+    #[serde(default)]
+    expect_batch_parked: bool,
+    /// 这一步追平之后，该 dbnum 的连败账必须已经清掉（新会话把右端推过 park 点，INC-H02 的复活半边）。
+    #[serde(default)]
+    expect_batch_failure_cleared: bool,
+    /// 设了就在这一步的重启（若有）之后核 INC-F03：`/tasks` 仍能按右端找到这条数据批次，
+    /// `?before=` 不再含它且能翻出更早的一页，`/tasks/{id}/changes` 的每条都有 `op` / `refno`，
+    /// 并且至少一条的 `root_refno` 是这个根。放在带 `restart` 的那一步上，才是「历史跨重启」。
+    #[serde(default)]
+    history_root: Option<String>,
     #[serde(default)]
     records_present: Vec<String>,
     #[serde(default)]
@@ -528,6 +556,21 @@ impl Service {
         }
     }
 
+    /// 换一次钩子再冷重启（失败注入 / 清钩子）：只改 `extra_env` 里的 `AIOS_TEST_FAIL_ROOTS`，配置、surreal 与库里
+    /// 的水位都不动；复用 [`Self::restart`]，所以同样等 `/health` 起来才返回。`roots` 为 `None` 就是清掉变量。
+    fn restart_with_fail_roots(&mut self, roots: Option<String>, what: &str) {
+        match roots {
+            Some(roots) => {
+                self.extra_env
+                    .insert("AIOS_TEST_FAIL_ROOTS".to_string(), roots);
+            }
+            None => {
+                self.extra_env.remove("AIOS_TEST_FAIL_ROOTS");
+            }
+        }
+        self.restart(what);
+    }
+
     /// 冷重启：杀掉服务进程（surreal 不动，库是持久的），同一份配置重新拉起，等 `/health`。进程内投影 / 回执 / 常驻根全没了，
     /// 水位和行都在库里——INC-F02 要的就是这个形状。
     fn restart(&mut self, what: &str) {
@@ -657,6 +700,50 @@ impl Service {
             .iter()
             .find(|row| row.get("dbnum").and_then(Value::as_u64) == Some(dbnum as u64))
             .cloned()
+    }
+
+    /// `/health` 里这个 dbnum 的数据连败账；没失败过、或已经清账，回 `None`。
+    fn batch_failure(&self, dbnum: u32) -> Option<Value> {
+        let health = self.get("health")?;
+        let failures = health.get("batch_failures")?;
+        if failures.is_null() {
+            return None;
+        }
+        failures
+            .get(dbnum.to_string())
+            .filter(|entry| !entry.is_null())
+            .cloned()
+    }
+
+    /// 等这个库在这个右端上失败一次并 park（INC-H02）。
+    fn wait_batch_parked(
+        &mut self,
+        dbnum: u32,
+        end: u32,
+        timeout: Duration,
+        what: &str,
+    ) -> Value {
+        let started = Instant::now();
+        let mut last = String::from("（还没有 batch_failures）");
+        loop {
+            self.assert_alive(what);
+            if let Some(entry) = self.batch_failure(dbnum) {
+                let parked = entry.get("parked").and_then(Value::as_bool).unwrap_or(false);
+                let streak = entry.get("streak").and_then(Value::as_u64).unwrap_or(0);
+                let end_sesno = entry.get("end_sesno").and_then(Value::as_i64);
+                last = format!("parked={parked} streak={streak} end_sesno={end_sesno:?}");
+                if parked && end_sesno == Some(end as i64) && streak >= 1 {
+                    eprintln!("  [{what}] {last}");
+                    return entry;
+                }
+            }
+            assert!(
+                started.elapsed() < timeout,
+                "[{what}] {timeout:?} 内 dbnum {dbnum} 右端 {end} 没有 park（最近：{last}）；日志 {}",
+                self.stdout_path.display()
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     /// 等三水位都等于 `sesno`。
@@ -927,6 +1014,12 @@ fn run_case(env: &Env, case: &Case) {
         }
     };
     for step in &case.steps {
+        // 失败注入要发生在「文件前移」之前，服务才是在这一窗的生成里失败（INC-F05 / H05，计划 §6 D6）。
+        if !step.fail_roots.is_empty() {
+            service.restart_with_fail_roots(Some(step.fail_roots.join(",")), "失败注入");
+        } else if step.clear_fail_injection {
+            service.restart_with_fail_roots(None, "清钩子");
+        }
         replay_step(step.to, step.half.as_deref(), step.rollback);
         if step.no_wait {
             continue;
@@ -955,7 +1048,86 @@ fn run_case(env: &Env, case: &Case) {
             format!("step → {}", step.to)
         };
         let timeout = Duration::from_secs(step.timeout_secs.unwrap_or(180));
+        if let Some(stay) = step.expect_model_sesno_stay {
+            // 预期失败的那一窗不能等三水位（它们不该追上来）：等任务落终态，然后只判 model_sesno 没被推。
+            let deadline = Instant::now() + timeout;
+            let task = loop {
+                service.assert_alive(&what);
+                if let Some(task) = service
+                    .latest_task(case.dbnum, step.to)
+                    .filter(|task| task.get("state").and_then(Value::as_str) != Some("running"))
+                {
+                    break task;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "[{what}] {timeout:?} 内 dbnum {} 右端 {} 的任务没有落终态；日志 {}",
+                    case.dbnum,
+                    step.to,
+                    service.stdout_path.display()
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            };
+            let task_id = task.get("task_id").and_then(Value::as_str).unwrap_or("");
+            let task_state = task.get("state").and_then(Value::as_str).unwrap_or("");
+            let row = service
+                .dbnum_row(case.dbnum)
+                .unwrap_or_else(|| panic!("[{what}] /dbnums 里没有 dbnum {} 这一行", case.dbnum));
+            let get = |key: &str| row.get(key).and_then(Value::as_i64);
+            let (applied, latest, model) = (
+                get("applied_sesno"),
+                get("file_latest_sesno"),
+                get("model_sesno"),
+            );
+            assert!(
+                model == Some(stay as i64),
+                "[{what}] 生成失败不该推模型水位：model_sesno={model:?}，期望仍停在 {stay}（applied={applied:?} file_latest={latest:?}）；任务 {task_id}",
+                );
+            eprintln!(
+                "  [{what}] 任务 {task_id} 落终态 {task_state}，model_sesno 停在 {stay}（applied={applied:?} file_latest={latest:?}）"
+            );
+            assert_step(&service, case, step, &what);
+            continue;
+        }
+        if step.expect_batch_parked {
+            let entry = service.wait_batch_parked(case.dbnum, step.to, timeout, &what);
+            let streak = entry.get("streak").and_then(Value::as_u64).unwrap_or(0);
+            let line = service.wait_for_log_line("本轮不自动重跑", timeout, &what);
+            assert!(
+                line.contains(&format!("dbnum={}", case.dbnum)),
+                "[{what}] 停跑日志不是这个库的：{line}"
+            );
+            let again = service.batch_failure(case.dbnum).unwrap_or_else(|| {
+                panic!("[{what}] 重扫已经声明不再自动重跑，连败账却消失了")
+            });
+            let streak_after = again.get("streak").and_then(Value::as_u64).unwrap_or(0);
+            assert_eq!(
+                streak_after, streak,
+                "[{what}] 触顶后重扫仍把这个库再跑了一次：streak {streak} → {streak_after}"
+            );
+            let row = service.dbnum_row(case.dbnum).unwrap_or_else(|| {
+                panic!("[{what}] /dbnums 里没有 dbnum {} 这一行", case.dbnum)
+            });
+            let applied = row.get("applied_sesno").and_then(Value::as_i64);
+            assert!(
+                applied.is_some_and(|applied| applied < step.to as i64),
+                "[{what}] 数据批次失败不该推进 applied_sesno：applied={applied:?}，窗口右端 {}",
+                step.to
+            );
+            eprintln!(
+                "  [{what}] 重扫已跳过（{line}），streak 仍是 {streak}，applied={applied:?}"
+            );
+            continue;
+        }
         service.wait_in_sync(case.dbnum, step.to, timeout, &what);
+        if step.expect_batch_failure_cleared {
+            let left = service.batch_failure(case.dbnum);
+            assert!(
+                left.is_none(),
+                "[{what}] 右端前进后 dbnum {} 的连败账还在：{left:?}"
+            );
+            eprintln!("  [{what}] 连败账已清");
+        }
         // 先对拍再断言：对拍要看的是这一窗（如整库重建）落库的行，不是 `generate_prime` 补常驻之后的投影。
         if let Some(at) = step.records_equal_to_step {
             compare_with_stash(&service, &stash, at, step.records_equal_tolerance, &what);
@@ -971,9 +1143,130 @@ fn run_case(env: &Env, case: &Case) {
                 &format!("{what} 重启"),
             );
         }
+        if step.history_root.is_some() {
+            assert_task_history(&service, case, step, &what);
+        }
     }
     // 服务随 Drop 按句柄杀掉；工作文件留在终态，下一条用例的 replay-init 会就地重置。
     drop(service);
+}
+
+/// 查询值里除了未保留字符都按百分号写进 URL。`created_at` 的 `+` 要是原样拼进去，会被读成空格。
+fn encode_query_component(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn task_page(service: &Service, query: &str, what: &str) -> Vec<Value> {
+    let page = service
+        .get(query)
+        .unwrap_or_else(|| panic!("[{what}] GET /api/v1/{query} 没有 JSON"));
+    page.get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| panic!("[{what}] {query} 回的不是任务页：{page}"))
+}
+
+/// INC-F03：这一窗的数据批次在（可能的）冷重启之后仍在 `/tasks` 里，`?before=` 往回翻不含上界，
+/// 变化清单每条都有 `op` / `refno`，并且至少一条折进 `history_root`。
+fn assert_task_history(service: &Service, case: &Case, step: &Step, what: &str) {
+    let root = step.history_root.as_deref().unwrap_or("");
+    let rows = task_page(
+        service,
+        "tasks?limit=160&kind=data_batch",
+        what,
+    );
+    let task = rows
+        .iter()
+        .find(|row| {
+            row.get("dbnum").and_then(Value::as_u64) == Some(case.dbnum as u64)
+                && row.get("end_sesno").and_then(Value::as_u64) == Some(step.to as u64)
+        })
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "[{what}] /tasks?kind=data_batch 里找不到 dbnum {} 右端 {} 的批次（共 {} 条）",
+                case.dbnum,
+                step.to,
+                rows.len()
+            )
+        });
+    let task_id = task
+        .get("task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let created_at = task
+        .get("created_at")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !task_id.is_empty() && !created_at.is_empty(),
+        "[{what}] 任务行缺 task_id / created_at：{task}"
+    );
+    let older = task_page(
+        service,
+        &format!(
+            "tasks?limit=160&kind=data_batch&before={}",
+            encode_query_component(&created_at)
+        ),
+        what,
+    );
+    assert!(
+        older.iter().all(|row| row.get("task_id").and_then(Value::as_str) != Some(task_id.as_str())),
+        "[{what}] ?before= 仍然含上界任务 {task_id}"
+    );
+    assert!(
+        older.iter().any(|row| {
+            row.get("created_at")
+                .and_then(Value::as_str)
+                .is_some_and(|at| at < created_at.as_str())
+        }),
+        "[{what}] ?before={created_at} 没有翻出更早的数据批次"
+    );
+    let changes = service
+        .get(&format!("tasks/{task_id}/changes?limit=1000"))
+        .unwrap_or_else(|| panic!("[{what}] /tasks/{task_id}/changes 没有 JSON"));
+    let items = changes
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| panic!("[{what}] 变化清单不可用：{changes}"));
+    let total = changes.get("total").and_then(Value::as_u64).unwrap_or(0);
+    assert!(
+        changes.get("end_sesno").and_then(Value::as_u64) == Some(step.to as u64),
+        "[{what}] 变化清单右端不是 {}：{changes}",
+        step.to
+    );
+    assert!(
+        total >= 1 && total == items.len() as u64 && changes.get("truncated").and_then(Value::as_bool) != Some(true),
+        "[{what}] 变化清单条数对不上：total={total} items={} truncated={:?}",
+        items.len(),
+        changes.get("truncated")
+    );
+    let mut rooted = false;
+    for item in &items {
+        let op = item.get("op").and_then(Value::as_str).unwrap_or("");
+        let refno = item.get("refno").and_then(Value::as_str).unwrap_or("");
+        assert!(!op.is_empty() && !refno.is_empty(), "[{what}] 变化条目缺 op / refno：{item}");
+        if item.get("root_refno").and_then(Value::as_str) == Some(root) {
+            rooted = true;
+        }
+    }
+    assert!(rooted, "[{what}] 变化清单里没有折进根 {root} 的条目");
+    eprintln!(
+        "  [{what}] 任务 {task_id} 重启后仍在，?before= 翻出 {} 条更早的，变化清单 {total} 条含根 {root}",
+        older.len()
+    );
 }
 
 /// `records_equal_to_step`：当前库上每一根的行与早先在 `at` 存下的行相等（数字容差）。

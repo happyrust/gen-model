@@ -37,12 +37,18 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
 const IDLE_WAKE: Duration = Duration::from_secs(30);
 
-/// 进程内两本连败账（空闲轮 panic、数据批次同右端连败）的停跑上限。
+/// 空闲轮 panic 连撞的停跑上限，也是模型刷盘每根的预算。
 ///
 /// 数值沿用退役前 `model_update_pending::MAX_ATTEMPTS` 的 5：那条队列行的重试账随第二条
-/// 异步账一起退了（ADR-072 D5），「已放弃」不再是一格状态；留下的只有这两本**进程内**的账，
-/// 它们守的是「确定性失败别每 30 秒重演一次」，与库无关。
+/// 异步账一起退了（ADR-072 D5），「已放弃」不再是一格状态。空闲轮守的是「同一句 panic
+/// 别每 30 秒重演一次」。数据批次不走这份预算，见 [`DATA_BATCH_PARK_AFTER`]。
 pub(crate) const MAX_ATTEMPTS: u32 = 5;
+
+/// 数据批次失败后还允许自动重跑的次数。1 = 失败一次就停，不再等对账重扫自己再试。
+///
+/// 失败原因仍写入 `logs/batch-failures-*.jsonl`，`/health` 的 `batch_failures.parked` 为真。
+/// 新会话（文件右端前进）或人工执行（POST /update/execute）清账后才会再跑。
+pub(crate) const DATA_BATCH_PARK_AFTER: u32 = 1;
 /// CATA 依赖进度在 `/tasks` 面板上的停滞提示阈值（`stall_deadline`）。只剩展示用途：
 /// 提交前的必需依赖门与它的看门狗随 ADR-056 D8-A 一起退役（spec 035 T121），
 /// 没有任何路径再按它超时。
@@ -423,7 +429,7 @@ struct BatchFailureEntry {
 
 impl BatchFailureEntry {
     fn parked(&self) -> bool {
-        self.streak >= MAX_ATTEMPTS
+        self.streak >= DATA_BATCH_PARK_AFTER
     }
 }
 
@@ -439,22 +445,17 @@ pub(crate) struct ParkedVerdict {
     pub last_at: String,
 }
 
-/// 数据批次连续失败账本（进程内，dbnum → 连败详情）。
+/// 数据批次失败账本（进程内，dbnum → 失败详情）。
 ///
-/// 为什么需要它：批次失败后 `mark_failed` 只把当前 epoch 拉 Blocked，而周期对账
-/// 重扫（`AIOS_WATCH_RECONCILE_SECS`，默认 300s）会装新 epoch 把水位没动的失败库
-/// 重新入队——瞬态故障（共享盘抖动、SUL_DB 重启）因此自愈；但一个**确定性**失败
-/// （坏文件、必现 panic）会以每个对账周期一次的节奏无上限重跑，大库一跑几十分钟，
-/// 正常批次全排在它后面。
+/// 批次失败后 `mark_failed` 只把当前 epoch 拉 Blocked，而周期对账重扫
+/// （`AIOS_WATCH_RECONCILE_SECS`，默认 300s）会装新 epoch，把水位没动的库重新入队。
+/// 数据批次不自动重试：同一 dbnum 在窗口右端没有前进时，第一次失败
+/// （[`DATA_BATCH_PARK_AFTER`]）就停，失败原因写入 `logs/batch-failures-*.jsonl`。
+/// 重扫侧不再自动入队（park），改记 manifest blocker，让阶段可见地不就绪。
+/// 复活：文件长出新会话（右端前进，[`Self::parked_streak`] 顺带清账）或人工执行
+/// （POST /update/execute → [`reset_batch_failure`]）。成功一次即清零。重启即清零。
 ///
-/// 上限语义与队列行对齐（[`MAX_ATTEMPTS`]）：同一 dbnum 在**窗口右端没有前进**的
-/// 前提下连败到上限，重扫侧不再自动入队（park），改记 manifest blocker 让阶段
-/// 可见地不就绪。复活条件对齐「新触发到来时清零重试」：文件长出新会话（右端
-/// 前进，[`Self::parked_streak`] 顺带清账）或人工执行（POST /update/execute →
-/// [`reset_batch_failure`]）都从头再来；成功一次即清零。重启即清零——重启本身
-/// 就是一次人为的重试机会。
-///
-/// [`MAX_ATTEMPTS`]: MAX_ATTEMPTS
+/// [`DATA_BATCH_PARK_AFTER`]: DATA_BATCH_PARK_AFTER
 #[derive(Default)]
 struct BatchFailureLedger {
     entries: std::collections::HashMap<u32, BatchFailureEntry>,
@@ -530,7 +531,7 @@ fn batch_failure_ledger() -> std::sync::MutexGuard<'static, BatchFailureLedger> 
 }
 
 /// 重扫侧的 park 查询（见 [`BatchFailureLedger`]）：返回 `Some(..)` 表示该 dbnum
-/// 连败到上限且文件右端没有前进，本轮不要再自动入队。
+/// 已经失败过且文件右端没有前进，本轮不要再自动入队。
 ///
 /// **这个查询有副作用**：它顺手把「已经报过 park 了」记下来，所以调用方拿到的
 /// `first_notice` 每次 park 只会为真一次。查询与记账合一是有意的——分成两步就会
@@ -592,33 +593,22 @@ fn batch_failure_blocks_data_phase(state: TaskState, batch_status: Option<BatchS
     }
 }
 
-/// 记一次数据侧失败进连败账，达到上限时把「停跑自动重试」喊出来。
+/// 记一次数据侧失败。第一次就停自动重跑，并写到控制台。
 ///
-/// 停跑是有代价的（该库的水位差在下一个新会话/人工执行之前不再有人追），
-/// 所以必须在控制台与 `/health` 都看得见，而不是只留一行滚走的日志。
-/// 持久的 `window_block` 终态行随 `staging/attempts.rs` 一起退了（ADR-072 D5）：
-/// 跨重启还能看见的那一份是 `logs/batch-failures-*.jsonl`（`batch_failure_log`），
-/// 它就带着这里返回的连败次数。
-///
-/// 返回同右端连败第几次：落盘记录要带上它，否则事后翻文件只看得见一串失败，
-/// 分不出哪一条是「还会自动重跑」、哪一条已经把这个库 park 住了。
+/// 停跑是有代价的（该库的水位差在下一个新会话或人工执行之前不再有人追），
+/// 所以必须在控制台与 `/health` 都看得见。持久那份是 `logs/batch-failures-*.jsonl`
+/// （`batch_failure_log`），它带着这里返回的次数；`parked` 与 `auto_retry_left` 按
+/// [`DATA_BATCH_PARK_AFTER`] 填。永久的 `window_block` 终态行随 `staging/attempts.rs` 一起退了
+/// （ADR-072 D5）。
 async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
     let streak =
         batch_failure_ledger().record(dbnum, end_sesno, reason, &Local::now().to_rfc3339());
-    let cap = MAX_ATTEMPTS;
-    if streak >= cap {
-        let message = format!(
-            "dbnum={dbnum} 数据批次连续失败第 {streak} 次（右端 {end_sesno} 未前进，上限 {cap}），\
-             重扫不再自动重跑该库；保存新会话或人工执行即恢复，账本见 /health 的 batch_failures"
-        );
-        log::error!("{message}");
-        eprintln!("{message}");
-    } else {
-        println!(
-            "dbnum={dbnum} 数据批次失败记账：同右端连续第 {streak}/{cap} 次，\
-             达上限后重扫停止自动重跑（新会话或人工执行清零）"
-        );
-    }
+    let message = format!(
+        "dbnum={dbnum} 数据批次失败已记入失败日志（同右端第 {streak} 次，右端 {end_sesno} 未前进，上限 {DATA_BATCH_PARK_AFTER}），\
+         重扫不再自动重跑该库；保存新会话或人工执行即恢复，账本见 /health 的 batch_failures"
+    );
+    log::error!("{message}");
+    eprintln!("{message}");
     streak
 }
 
@@ -981,6 +971,30 @@ async fn run_one_batch_isolated(
     beat();
 }
 
+/// 测试钩：`AIOS_TEST_FAIL_DATA_ENDS=8000:726,7997:3`。
+///
+/// 命中的 `(dbnum, 右端)` 在解析前就记成数据批次失败，不读文件、不推水位。给 INC-H02 用：
+/// 第一次失败即停自动重跑（[`DATA_BATCH_PARK_AFTER`]），失败原因进 `logs/batch-failures-*.jsonl`。
+/// 没设这个变量时是空操作。L2 拉起的服务进程里 `cfg(test)` 是关的，所以和
+/// `AIOS_TEST_FAIL_ROOTS` 一样只看环境变量。生成失败不进数据失败账，带不动这条。
+fn injected_data_batch_failure(dbnum: u32, end_sesno: i32) -> Option<String> {
+    let Ok(spec) = std::env::var("AIOS_TEST_FAIL_DATA_ENDS") else {
+        return None;
+    };
+    if !data_end_is_injected(&spec, dbnum, end_sesno) {
+        return None;
+    }
+    println!(
+        "[测试钩] 数据批次 dbnum={dbnum} 右端 {end_sesno} 按 AIOS_TEST_FAIL_DATA_ENDS 记成失败，不解析"
+    );
+    Some("AIOS_TEST_FAIL_DATA_ENDS".to_string())
+}
+
+fn data_end_is_injected(spec: &str, dbnum: u32, end_sesno: i32) -> bool {
+    let needle = format!("{dbnum}:{end_sesno}");
+    spec.split(',').map(str::trim).any(|token| token == needle)
+}
+
 /// 执行一个冻结批次：数据应用 → SYST 派生入账 → 副作用补偿 → 本批交付单元生成。
 ///
 /// 所有**预期内**的失败都折进任务终态，单个批次的失败不影响队列里的下一条（与
@@ -1026,7 +1040,25 @@ async fn run_one_batch(
     // 算出来立刻回写，否则面板显示的区间比实际应用的窄，紧接着排在后面那条的
     // 左端（running_end + 1）也建在一个过时的数上。
     let mut observed_end_sesno = job.end_sesno;
-    let result = ACTIVE_DATA_TASK
+    let result = if let Some(reason) =
+        injected_data_batch_failure(job.dbnum, observed_end_sesno)
+    {
+        // 解析前失败：`batch` 留空，后面按「没跑到数据步」记进连败账，水位不推。
+        DataBatchTaskResult {
+            project: job.project.clone(),
+            status: ManualUpdateStatus::Failed,
+            batch: None,
+            units: Vec::new(),
+            warnings: vec![reason],
+            model_verdict: None,
+            model_caught_up_at: None,
+            initialization_closed_task: false,
+            room_recompute: None,
+            room_generation_at_start: None,
+            room_calculator: None,
+        }
+    } else {
+        ACTIVE_DATA_TASK
         .scope(active_context, async {
             match refresh_candidate(&job).await {
                 Ok(mut cand) => {
@@ -1175,7 +1207,8 @@ async fn run_one_batch(
                 }
             }
         })
-        .await;
+        .await
+    };
 
     let state = match result.status {
         ManualUpdateStatus::Success | ManualUpdateStatus::UpToDate => TaskState::Succeeded,
@@ -1684,6 +1717,11 @@ async fn execute_frozen_batch(
         model_outcome = Some(outcome);
     }
 
+    // 单元回执的房间「后」（GitHub #71）在栅栏之后拍：本任务发出去的房间边——刷盘时重算的、随模型行落的——
+    // 此刻都已在库里，定向 / 整库房间重算也已跑完；`run_unit_worklist` 收尾那一刻拍到的只会是旧边。
+    // 没等栅栏的任务（非 DESI / 初始化编排）单元清单里本来就没有 `rooms_before`，这里空转。
+    snapshot_rooms_after(&mut result.units).await;
+
     // 收尾那一笔（ADR-076 D5；增量路计划 D4）：`model_sesno` + 写入标记 `finished` + Ref0 统计，
     // 一个写者、一笔事务。`applied_sesno` 不在这里——它由数据尾事务在模型阶段之前盖（ADR-056 D1 /
     // ADR-025 §7），`requeue_window_remainder` 与凭证前移都读它。这一窗没追平（截断窗口，余量还在
@@ -1793,8 +1831,8 @@ async fn execute_frozen_batch(
     result
 }
 
-/// ADR-076 增量路计划 D2：任务等本批根刷盘的预算。每根 [`MAX_ATTEMPTS`] 次——沿用进程内连败账的
-/// 上限：退避 1+2+4+8+16 = 31 s 加五次写的时间，盖得住 RocksDB 的瞬时冲突风暴，再多就是库不健康，
+/// ADR-076 增量路计划 D2：任务等本批根刷盘的预算。每根 [`MAX_ATTEMPTS`] 次，与数据批次的
+/// [`DATA_BATCH_PARK_AFTER`] 分开：退避 1+2+4+8+16 = 31 s 加五次写的时间，盖得住 RocksDB 的瞬时冲突风暴，再多就是库不健康，
 /// 等下去只是把这个库的槽位占着；加一道任务级 10 min 期限当护栏——worker 卡死时别让任务永远挂在
 /// `durable_pending`。两个都是常量，不进 `DbOption`（仓里「都是常量不做配置」的纪律）。
 pub(crate) const DURABLE_FLUSH_BUDGET: crate::fast_model::model_write_behind::FlushBudget =
@@ -1844,6 +1882,39 @@ async fn await_units_durable(
         },
     )
     .await
+}
+
+/// 单元回执的 `rooms_after`（计划 2026-10-24 W1）在栅栏之后补（GitHub #71）：只给开工前拍到 `rooms_before` 的根拍，
+/// 「前」「后」同一把尺子（都是 `unit_room_snapshot` 读库），两格同生共死——「后」没拍到（读失败）就把「前」也摘掉，
+/// 回执里两格缺席、前端不画。为什么不能在 `run_unit_worklist` 收尾时拍：刚体前移 / 单元级发布的房间边由 write-behind
+/// 刷盘时重算落库（`[model-write-behind] … room_recomputed`），整根重算的边也随模型行在刷盘那一笔里落；收尾那一刻
+/// 库上还是旧边——L2 回放链 `ams8000-equi-room-cross` 732 窗的回执把 R224 → R124 的跨房位移报成「房间没变」，
+/// 734 窗的 `rooms_before` 才看到换房。
+async fn snapshot_rooms_after(units: &mut [ModelUnitResult]) {
+    let roots: Vec<String> = units
+        .iter()
+        .filter(|unit| unit.rooms_before.is_some())
+        .map(|unit| unit.root_refno.clone())
+        .collect();
+    if roots.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    let rooms_after = crate::data_interface::unit_room_snapshot::snapshot(&roots).await;
+    let mut missing = 0usize;
+    for unit in units.iter_mut().filter(|unit| unit.rooms_before.is_some()) {
+        unit.rooms_after = rooms_after.get(&unit.root_refno).cloned();
+        if unit.rooms_after.is_none() {
+            unit.rooms_before = None;
+            missing += 1;
+        }
+    }
+    println!(
+        "[单元快照] 刷盘后 根={} 房间 {}ms（拍到 {} 根，缺 {missing}）",
+        roots.len(),
+        started.elapsed().as_millis(),
+        rooms_after.len()
+    );
 }
 
 /// 增量路计划 D3：预算用尽 / 判死的根的处置，四件一起——从 write-behind 队列摘掉（不再原地无限重试）、
@@ -4623,17 +4694,18 @@ async fn run_unit_worklist(
             }
         }
     }
-    // 「后」在全部单元收尾之后拍，与「前」同一把尺子；前面没拍（空表）这里也不拍，两格同生共死。
-    let after_started = Instant::now();
+    // 房间的「前」搬上回执；「后」**不在这里拍**（GitHub #71）：刚体前移 / 单元级发布的房间边由 write-behind
+    // 刷盘时重算落库（`[model-write-behind] … room_recomputed`），整根重算的边也随模型行在刷盘那一笔里落——
+    // 此刻库上还是旧边，拍到的「后」等于「前」，跨房位移在回执上成了「房间没变」。「后」由
+    // [`snapshot_rooms_after`] 在任务等到 durable ACK、房间重算跑完之后补（`execute_frozen_batch`）；
+    // 没拍「前」的根那里也不拍，两格同生共死。
     if !rooms_before.is_empty() {
-        let rooms_after =
-            crate::data_interface::unit_room_snapshot::snapshot(&snapshot_roots).await;
         for result in &mut results {
             result.rooms_before = rooms_before.get(&result.root_refno).cloned();
-            result.rooms_after = rooms_after.get(&result.root_refno).cloned();
         }
     }
-    let rooms_after_ms = after_started.elapsed().as_millis();
+    // 几何的「后」照旧在这里拍：`unit_geometry_snapshot` 先问投影，投影里就是这进程刚算好的「后」。
+    let after_started = Instant::now();
     if !geometry_before.is_empty() {
         let geometry_after =
             crate::data_interface::unit_geometry_snapshot::snapshot(&snapshot_roots).await;
@@ -4650,12 +4722,11 @@ async fn run_unit_worklist(
             };
         }
     }
-    if !rooms_before.is_empty() || !geometry_before.is_empty() {
+    if !geometry_before.is_empty() {
         println!(
-            "[单元快照] 收尾后 根={} 房间 {}ms 几何 {}ms",
+            "[单元快照] 收尾后 根={} 几何 {}ms（房间的「后」等刷盘之后再拍）",
             snapshot_roots.len(),
-            rooms_after_ms,
-            after_started.elapsed().as_millis() - rooms_after_ms
+            after_started.elapsed().as_millis()
         );
     }
     results.sort_by(|left, right| {
@@ -6529,23 +6600,20 @@ mod tests {
         );
     }
 
-    /// 连败账本的三条出路（对齐队列纪律「可收口 / 可复活」）：
-    /// 同右端连败计数、达上限 park、右端前进 / 显式清零即复活。
+    /// 失败账的三条出路：第一次失败即停自动重跑、右端前进复活、人工执行清零。
     #[test]
     fn the_batch_failure_ledger_parks_at_the_cap_and_revives_on_new_sessions() {
-        let cap = MAX_ATTEMPTS;
+        let cap = DATA_BATCH_PARK_AFTER;
         let mut ledger = BatchFailureLedger::default();
 
-        for attempt in 1..=cap {
-            assert_eq!(
-                ledger.record(7997, 1034, "injected failure", "t"),
-                attempt,
-                "同右端连败逐次计数"
-            );
-        }
+        assert_eq!(
+            ledger.record(7997, 1034, "injected failure", "t"),
+            1,
+            "第一次失败"
+        );
         let parked = ledger
             .parked_streak(7997, 1034)
-            .expect("达上限且右端未前进：park");
+            .expect("第一次失败且右端未前进：停自动重跑");
         assert_eq!(parked.streak, cap);
         assert_eq!(parked.end_sesno, 1034);
         assert_eq!(parked.last_reason, "injected failure");
@@ -6554,31 +6622,35 @@ mod tests {
             "没失败过的库不受影响"
         );
 
-        // 右端前进 = 有人保存了新会话：账当场作废，本轮放行。
         assert!(ledger.parked_streak(7997, 1035).is_none());
         assert_eq!(
             ledger.record(7997, 1035, "injected failure", "t"),
             1,
-            "复活后从 1 重新数"
+            "复活后从 1 重新数，这一次自己就停"
         );
-
-        // 未达上限不 park：瞬态失败靠对账重扫自动重试。
-        assert!(ledger.parked_streak(7997, 1035).is_none());
-
-        // 人工执行显式清零（POST /update/execute 的复活出口）。
-        for _ in 0..cap {
-            ledger.record(7997, 1035, "injected failure", "t");
-        }
         assert!(ledger.parked_streak(7997, 1035).is_some());
+
         ledger.clear(7997);
-        assert!(ledger.parked_streak(7997, 1035).is_none());
+        assert!(
+            ledger.parked_streak(7997, 1035).is_none(),
+            "人工执行清零"
+        );
     }
 
-    /// D1 数据侧半边：连败触顶才把「停跑自动重试」喊出来，未触顶只记账。
+    /// 数据失败钩只命中点名的 `(dbnum, 右端)`。别的库即使会话号碰巧相同也不该被误伤。
+    #[test]
+    fn the_data_fail_hook_matches_only_the_named_dbnum_and_end() {
+        assert!(data_end_is_injected("8000:726", 8000, 726));
+        assert!(!data_end_is_injected("8000:726", 7999, 726));
+        assert!(!data_end_is_injected("8000:726", 8000, 727));
+        assert!(data_end_is_injected(" 8000:726 , 7997:1 ", 7997, 1));
+        assert!(!data_end_is_injected("", 8000, 726));
+    }
+
+    /// 数据侧失败一次就宣布停跑。不再留「未达上限继续自动重试」那一臂。
     ///
-    /// 只在触顶喊是有意的——一次失败可能是瞬态的；同右端连撞 `MAX_ATTEMPTS` 次才叫确定性。
     /// 持久的 `window_block` 行随 `staging/attempts.rs` 退了（ADR-072 D5），跨重启的那一份
-    /// 是 `logs/batch-failures-*.jsonl`——它带着这里返回的连败次数，不再另写库。
+    /// 是 `logs/batch-failures-*.jsonl`。
     #[test]
     fn only_a_capped_out_data_failure_announces_the_park() {
         let source = include_str!("batch_worker.rs");
@@ -6589,14 +6661,13 @@ mod tests {
             .split_once("\nstruct WorkerLiveGuard;")
             .expect("note_batch_failure boundary")
             .0;
-        let (capped, below_cap) = body.split_once("    } else {").expect("触顶与未触顶两臂");
         assert!(
-            capped.contains("重扫不再自动重跑该库"),
-            "触顶臂必须把停跑喊到控制台: {capped}"
+            body.contains("重扫不再自动重跑该库"),
+            "失败一次就必须把停跑喊到控制台: {body}"
         );
         assert!(
-            !below_cap.contains("不再自动重跑"),
-            "未触顶不得宣告停跑——瞬态失败靠对账重扫自动重试: {below_cap}"
+            !body.contains("达上限后重扫停止自动重跑"),
+            "数据批次不再留自动重试次数: {body}"
         );
         assert!(
             !body.contains("record_window_block_at") && !body.contains("staging::attempts"),
@@ -6612,7 +6683,7 @@ mod tests {
     /// 沿用旧标记就会让第二次 park 悄无声息。
     #[test]
     fn a_park_announces_itself_once_per_episode() {
-        let cap = MAX_ATTEMPTS;
+        let cap = DATA_BATCH_PARK_AFTER;
         let mut ledger = BatchFailureLedger::default();
         for _ in 0..cap {
             ledger.record(7997, 1034, "injected failure", "t");
@@ -6640,20 +6711,22 @@ mod tests {
     }
 
     /// 失败中途右端前进过一次：record 自己也要把旧账作废重数，
-    /// 不能把新窗口的第一次失败接在旧窗口的连败后面直接 park。
+    /// 不能把新窗口的第一次失败接在旧窗口的次数后面。
     #[test]
     fn a_failure_on_a_newer_end_restarts_the_streak() {
-        let cap = MAX_ATTEMPTS;
         let mut ledger = BatchFailureLedger::default();
-        for _ in 0..cap - 1 {
-            ledger.record(7997, 1034, "old window", "t");
-        }
+        ledger.record(7997, 1034, "old window", "t");
+        assert!(ledger.parked_streak(7997, 1034).is_some());
         assert_eq!(
             ledger.record(7997, 1040, "new window", "t"),
             1,
             "右端前进的失败按新一轮从 1 数"
         );
-        assert!(ledger.parked_streak(7997, 1040).is_none());
+        let parked = ledger
+            .parked_streak(7997, 1040)
+            .expect("新窗口自己的第一次失败即停，不继承旧次数");
+        assert_eq!(parked.streak, 1);
+        assert_eq!(parked.last_reason, "new window");
     }
 
     /// mark_failed 的判据是数据窗口本身，不是任务终态标签（回退到旧写法
@@ -7017,6 +7090,62 @@ mod tests {
                 .count(),
             2,
             "刚体前移与单元级发布两处落库都把本任务那一台房间计算器传给 persist_republished_roots: {cheap_paths}"
+        );
+    }
+
+    /// GitHub #71：单元回执的房间「后」要在任务等到 durable ACK 之后拍。刚体前移 / 单元级发布的房间边由 write-behind
+    /// 刷盘时重算落库，`run_unit_worklist` 收尾那一刻库上还是旧边——那里只许拍「前」；「后」由 `snapshot_rooms_after`
+    /// 在 `execute_frozen_batch` 的栅栏（`await_units_durable`）与房间重算之后、收尾那一笔之前补，拍不到就连「前」一起摘。
+    #[test]
+    fn the_rooms_after_snapshot_is_taken_after_the_durable_fence() {
+        let source = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes the test modules")
+            .0;
+        let worklist = source
+            .split_once("async fn run_unit_worklist(")
+            .expect("worklist")
+            .1
+            .split_once("fn render_batch_finished_line<")
+            .expect("worklist end")
+            .0;
+        assert_eq!(
+            worklist.matches("unit_room_snapshot::snapshot(").count(),
+            1,
+            "单元工作单里只拍房间的「前」"
+        );
+        assert!(
+            !worklist.contains("rooms_after ="),
+            "「后」不在单元工作单收尾时拍（#71）"
+        );
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch")
+            .1;
+        let fence = body
+            .find("await_units_durable(registry, job, &result.units)")
+            .expect("栅栏");
+        let recompute = body.find("run_room_recompute(").expect("房间重算");
+        let after = body
+            .find("snapshot_rooms_after(&mut result.units)")
+            .expect("刷盘后拍「后」");
+        let task_end = body.find("commit_task_end_on(").expect("收尾那一笔");
+        assert!(
+            fence < recompute && recompute < after && after < task_end,
+            "顺序必须是 栅栏 → 房间重算 → 拍「后」 → 收尾那一笔"
+        );
+        let helper = source
+            .split_once("async fn snapshot_rooms_after(")
+            .expect("helper")
+            .1;
+        let helper = &helper[..helper
+            .find("\n}\r\n")
+            .or_else(|| helper.find("\n}\n"))
+            .expect("函数总有结尾")];
+        assert!(
+            helper.contains("filter(|unit| unit.rooms_before.is_some())")
+                && helper.contains("unit.rooms_before = None;"),
+            "只给拍过「前」的根拍「后」，拍不到就把「前」也摘掉——两格同生共死"
         );
     }
 

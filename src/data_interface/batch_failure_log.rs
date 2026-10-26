@@ -280,9 +280,8 @@ pub fn record(failure: &BatchFailure<'_>) {
 }
 
 fn to_record(failure: &BatchFailure<'_>, now: DateTime<Local>) -> Value {
-    // 这一条是不是压垮它的那一次。翻文件的人第一个要分的就是「还会自己再试」与
-    // 「从此不动了」——只给一个 streak 数字，等于要他自己去记 MAX_ATTEMPTS 是几。
-    let max_attempts = crate::data_interface::batch_worker::MAX_ATTEMPTS;
+    // 数据批次不自动重试。翻文件的人要一眼看出「这一次已经停了」还是「没有连败账」。
+    let max_attempts = crate::data_interface::batch_worker::DATA_BATCH_PARK_AFTER;
     let parked = failure.streak.is_some_and(|streak| streak >= max_attempts);
     json!({
         "event": "batch_failure",
@@ -541,28 +540,18 @@ mod tests {
         assert_eq!(record["save_time"], "2026-08-25T04:08:03+00:00");
     }
 
-    /// 「还会自己再试」与「从此不动了」必须在记录里一眼分得开。
-    ///
-    /// 只给一个 `streak` 数字等于要读文件的人自己记住 `MAX_ATTEMPTS` 是几；而这两
-    /// 种状态的处置完全不同——前者等下一个对账周期就行，后者不动手就永远停在那儿。
+    /// 数据批次不自动重试：有连败次数就是已停；没有账（模型侧失败）才谈不上 park。
     #[test]
     fn a_record_says_whether_the_engine_will_still_retry_on_its_own() {
-        let cap = crate::data_interface::batch_worker::MAX_ATTEMPTS;
+        let cap = crate::data_interface::batch_worker::DATA_BATCH_PARK_AFTER;
 
-        let mut third = failure("t", 8191, "boom");
-        third.streak = Some(3);
-        let record = to_record(&third, Local::now());
-        assert_eq!(record["parked"], false);
+        let mut once = failure("t", 8191, "boom");
+        once.streak = Some(cap);
+        let record = to_record(&once, Local::now());
+        assert_eq!(record["parked"], true, "第一次失败就要自己说停了");
         assert_eq!(record["max_attempts"], cap);
-        assert_eq!(record["auto_retry_left"], cap - 3);
-
-        let mut last = failure("t", 8191, "boom");
-        last.streak = Some(cap);
-        let record = to_record(&last, Local::now());
-        assert_eq!(record["parked"], true, "压垮它的那一次要自己说出来");
         assert_eq!(record["auto_retry_left"], 0);
 
-        // 数据窗口收口了、失败只在模型侧：没有连败账，也就谈不上 park。
         let mut model_side = failure("t", 8191, "boom");
         model_side.streak = None;
         let record = to_record(&model_side, Local::now());

@@ -3065,14 +3065,10 @@ const DEFAULT_WATCH_POLL_SECS: u64 = 30;
 
 /// 周期对账整面重扫的默认间隔（秒），`AIOS_WATCH_RECONCILE_SECS` 覆盖，0 = 关闭。
 ///
-/// 它是兜底而不是响应路径，调短不会让任何东西变快，反而会从后门缩短故障容忍
-/// 窗口：批次连败 park 预算（`model_update_pending::MAX_ATTEMPTS`）数的是**轮次**
-/// 不是时长（ADR-035 D7 把它列为出界项，要改先把 park 改成按时长裁决）。
-///
-/// 顺带澄清一个常被写错的算式：`5 × 300s = 25 分钟`只在**文件安静**时成立。
-/// park 计数的条件是「同 dbnum 窗口右端没前进」，不区分是哪种来源把它重新入的队
-/// （见 `batch_worker::BatchFailureLedger`）——一个确定性失败、文件却还在被反复
-/// 保存的库，watch 重扫一样在烧这份预算。
+/// 它是兜底而不是响应路径。数据批次第一次失败就停自动重跑
+/// （`batch_worker::DATA_BATCH_PARK_AFTER`），调短这个间隔不会多给几次自动重试，
+/// 只会让下一次重扫更早打出「本轮不自动重跑」。空闲轮 panic 仍按
+/// `batch_worker::MAX_ATTEMPTS` 计轮次。
 const DEFAULT_WATCH_RECONCILE_SECS: u64 = 300;
 
 /// 两轮 watch 触发的完整重扫之间的最小间隔（秒），`AIOS_WATCH_MIN_SWEEP_GAP_SECS`
@@ -4207,11 +4203,11 @@ impl AiosDBManager {
                     continue;
                 }
 
-                // 连败到上限的库不再自动重跑（进程内账本，见 batch_worker 的
-                // `BatchFailureLedger`）：确定性失败会被周期对账重扫以每 300s 一次
-                // 的节奏无上限重跑，大库一跑几十分钟。park 不是放行——记 blocker
-                // 让该阶段可见地不就绪；文件长出新会话（查询内部顺带清账）或人工
-                // 执行（显式清零）即恢复自动重试。对 Reinit 与普通窗口一视同仁。
+                // 失败过的库不再自动重跑（进程内账本，见 batch_worker 的
+                // `BatchFailureLedger`）：数据批次第一次失败就记失败日志并停。
+                // park 不是放行——记 blocker 让该阶段可见地不就绪；文件长出新会话
+                // （查询内部顺带清账）或人工执行（显式清零）后才会再跑。
+                // 对 Reinit 与普通窗口一视同仁。
                 if let Some(parked) = crate::data_interface::batch_worker::batch_failure_parked(
                     db_no,
                     file_latest_sesno as i32,
@@ -4237,7 +4233,7 @@ impl AiosDBManager {
                                     .as_str(),
                                 streak: parked.streak,
                                 max_attempts:
-                                    crate::data_interface::batch_worker::MAX_ATTEMPTS,
+                                    crate::data_interface::batch_worker::DATA_BATCH_PARK_AFTER,
                                 end_sesno: parked.end_sesno,
                                 file_path: path.to_str(),
                                 last_reason: &parked.last_reason,

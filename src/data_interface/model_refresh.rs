@@ -61,6 +61,32 @@ pub(crate) struct TargetedGenerationReport {
 
 /// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
 /// 就抹掉已经成功的根；调用方会把“不在 completed 也不在 failures”的根视为编排缺陷。
+/// 测试钩：`AIOS_TEST_FAIL_ROOTS=24384/24776,24384/23257`。
+/// 名单里的根不进入生成器，回执记成失败。没设变量就是空名单。
+/// L2 回放拉起的是普通服务进程，`cfg(test)` 在那边是关的，所以和
+/// `AIOS_TEST_DELAY_BEFORE_FROZEN_VERIFY` 一样只看环境变量。
+fn injected_generation_failures(roots: &[String]) -> Vec<RootGenerationFailure> {
+    let Ok(spec) = std::env::var("AIOS_TEST_FAIL_ROOTS") else {
+        return Vec::new();
+    };
+    let named = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+    roots
+        .iter()
+        .filter(|root| named.contains(root.as_str()))
+        .map(|root| {
+            println!("[测试钩] 根 {root} 按 AIOS_TEST_FAIL_ROOTS 记成生成失败，不调用生成器");
+            RootGenerationFailure {
+                root: root.clone(),
+                error: "AIOS_TEST_FAIL_ROOTS".to_string(),
+            }
+        })
+        .collect()
+}
+
 fn report_from_failures(
     roots: &[String],
     failures: Vec<RootGenerationFailure>,
@@ -198,6 +224,27 @@ impl ModelRefreshPolicy {
         if roots.is_empty() {
             return Ok(TargetedGenerationReport::default());
         }
+        let injected = injected_generation_failures(roots);
+        if !injected.is_empty() && injected.len() == roots.len() {
+            return Ok(report_from_failures(roots, injected));
+        }
+        let generate_roots: Vec<String> = if injected.is_empty() {
+            Vec::new()
+        } else {
+            let failed = injected
+                .iter()
+                .map(|failure| failure.root.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            roots.iter()
+                .filter(|root| !failed.contains(root.as_str()))
+                .cloned()
+                .collect()
+        };
+        let roots_for_generate: &[String] = if injected.is_empty() {
+            roots
+        } else {
+            generate_roots.as_slice()
+        };
         let dbnum = E3dModelService::dbnum_for_roots(roots).await?;
         // memory 读源作用域（plan 2026-09-06 §8 R2）不碰 durable 权威库，也不等 ingest
         // 初始化写者；发布目标另判：ingest fallback 只留投影，read-through 的 kv-mem
@@ -251,7 +298,7 @@ impl ModelRefreshPolicy {
         };
         diagnostic.stage("model.geometry.begin", format!("dbnum={dbnum} roots={roots:?}"));
         let persisted = service
-            .generate_and_persist_roots(dbnum, roots, failure_policy, task_rooms.clone())
+            .generate_and_persist_roots(dbnum, roots_for_generate, failure_policy, task_rooms.clone())
             .await.map_err(|error| {
                 diagnostic.finish(format!("geometry_failed dbnum={dbnum}: {error:#}"));
                 error
@@ -270,6 +317,8 @@ impl ModelRefreshPolicy {
                 error: error.clone(),
             })
             .collect::<Vec<_>>();
+        let mut generation_failures = generation_failures;
+        generation_failures.extend(injected);
         let generation_failed_roots = generation_failures
             .iter()
             .map(|failure| failure.root.clone())

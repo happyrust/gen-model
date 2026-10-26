@@ -1,0 +1,20 @@
+{
+  "name": "ams8000-equi-data-fail-park",
+  "registry": ["INC-H02"],
+  "_doc": "计划 INC-H02：同一个 ams8000-equi-move-chain 夹具。只把 dbnum 8000 的右端 726 用 AIOS_TEST_FAIL_DATA_ENDS 在解析前打成数据失败（别的库即使会话号相同也不命中）。对账 / 限频 / 轮询都调短，好让「本轮不自动重跑」尽快出现。判：第一次失败后 /health 的 batch_failures 已 park，失败原因写入 logs/batch-failures-*.jsonl，下一次重扫打出「本轮不自动重跑」且 streak 不再涨，applied_sesno 仍停在 726 之前；再推 727（不在失败名单里）右端前进，账清掉，三水位追平。不打 /update/execute：人工执行清零在账本单测里。",
+  "dbnum": 8000,
+  "db_file": "AvevaMarineSample/ams000/ams8000_0001",
+  "fixture_dir": "tests/fixtures/sessions/ams8000-equi-move-chain",
+  "start": 725,
+  "service_env": {
+    "AIOS_TEST_FAIL_DATA_ENDS": "8000:726",
+    "AIOS_WATCH_RECONCILE_SECS": "2",
+    "AIOS_WATCH_MIN_SWEEP_GAP_SECS": "1",
+    "AIOS_WATCH_POLL_SECS": "1"
+  },
+  "init": { "to": 725, "records_present": ["24384/24776", "24384/23257"] },
+  "steps": [
+    { "to": 726, "expect_batch_parked": true, "timeout_secs": 240 },
+    { "to": 727, "expect_batch_failure_cleared": true, "task_state": "succeeded", "timeout_secs": 300 }
+  ]
+}
