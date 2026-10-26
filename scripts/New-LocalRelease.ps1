@@ -34,20 +34,22 @@
     CHANGELOG 找不到当版条目时只警告、不中止。releases 目录不自动清理旧构建，
     让后续二进制 patch 始终有精确的源包可取。
 
-    存储只有两档（2026-09-13 拍板，ADR-074）：**出厂是 mem**（库在后端进程内，无 Surreal
-    TCP 端口，真正解压即跑——出厂 DbOption.toml 不写 store_mode，Start-AMS.ps1 不给 -StoreMode、
-    环境也没有时回填 AIOS_STORE_MODE=mem，不靠服务那边的默认档，它 2026-09-18 起是 rocksdb）。
+    存储只有两档（ADR-074）：**出厂是 rocksdb**（2026-10-26 用户拍板，此前出厂是 mem）——出厂
+    DbOption.toml 不写 store_mode，Start-AMS.ps1 不给 -StoreMode、环境也没有时回填
+    AIOS_STORE_MODE=rocksdb；v_ip 是本机、v_port 上又没有库时，Start-AMS 先用包根 bin\surreal.exe
+    在那个端口起一台（数据落在工作区 .surreal\ams，进程记进包根 surreal.json）。**服务本身仍只连、
+    不拉起**（ADR-074 D2），起库的是启动脚本。mem 档（库在后端进程内、零依赖、重启即清空）仍可在
+    向导第②步选 memory 或 Start-AMS.ps1 -StoreMode mem，但 plant-ui 的房间归属 / 房间详情 / 房间视图
+    直连 SurrealDB，那一档用不了。
     介质分层裁决（ADR-083 修订，2026-10）：AIOS_STORE_MODE > DbOption.toml 的 store_mode >
     默认 rocksdb——向导第②步选的档写进 store_mode 持久化，环境变量是显式覆盖层。
-    要数据活过重启的现场：在向导第②步选 external（写 store_mode="rocksdb"）或
-    Start-AMS.ps1 -StoreMode rocksdb 启动——**服务只连、不拉起**那台库，包根附 bin\surreal.exe
-    与 Start-Surreal.ps1 让人先把它起起来。包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
+    包里保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
-    health + 首页 + medium；C 腿由脚本用包内 surreal.exe 在 18010 起一台
-    rocksdb 库、服务以 AIOS_STORE_MODE=rocksdb 连它，考 medium=rocksdb + durable=true + 数据目录
-    真落盘；它经包内 Start-AMS.ps1、以一个空的外部目录当 -Workspace 起服务，再考 /config.json 的 db 段
-    指向这台库——这一腿验的是「解压后按说明起 rocksdb 档那条路走得通」。端口被占或起不来则跳过/失败并在
+    health + 首页 + medium；C 腿走出厂默认那条路：本机配置把 v_port 指到 18010、不预先起库，
+    包内 Start-AMS.ps1 不给 -StoreMode、以一个空的外部目录当 -Workspace 起服务——它得自己用包内
+    surreal.exe 在 18010 起库，考 medium=rocksdb + durable=true + 数据目录真落盘 + 服务没拉子进程 +
+    /config.json 的 db 段指向这台库——验的是「解压后直接启动就落到 rocksdb 并连上包内库」。端口被占或起不来则跳过/失败并在
     release.json / 产物名旁标「未冒烟」，不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
 
     资源不进包的部分（见 ADR-068）：SurrealDB 数据目录与源模型不打入 zip。
@@ -560,9 +562,8 @@ param(
     # 存储介质（mem / rocksdb）。分层裁决（ADR-083 修订，2026-10）：环境变量
     # AIOS_STORE_MODE > DbOption.toml 的 store_mode > 默认。这里给了就设给服务；
     # 不给、且调用方环境里也没有时，文件里写了 store_mode（向导持久化的档）就按它，
-    # 文件没写才**显式回填 mem**（库在进程内，进程一退即清空）。
-    # 为什么文件缺省仍回填 mem 而不是交给服务的默认 rocksdb：发布包是唯一「机器上
-    # 多半没有库」的场景，连不上是当场失败——所以出厂形态由包自己说出来，不靠默认兜。
+    # 文件没写才**显式回填 rocksdb**。发布包是「机器上多半没有库」的场景：rocksdb 档下
+    # v_ip 是本机、端口上又没库时，本脚本先用包根 bin\surreal.exe 起一台，服务只连它。
     [ValidateSet('mem', 'rocksdb')][string]$StoreMode,
     [switch]$NoBrowser,
     [int]$TimeoutSeconds = 600
@@ -585,9 +586,9 @@ if (-not (Test-Path -LiteralPath $configPath)) { throw "Missing workspace config
 $configText = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
 if (-not $env:AIOS_STORE_MODE) {
     # 介质分层（ADR-083 修订）：环境变量 > 配置文件 store_mode > 默认。文件里写了就
-    # 按文件（向导第②步选完保存的档必须说了算），文件没写才回填 mem。
+    # 按文件（向导第②步选完保存的档必须说了算），文件没写才回填 rocksdb。
     $fileMode = [regex]::Match($configText, '(?m)^\s*store_mode\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
-    $env:AIOS_STORE_MODE = if ($fileMode) { $fileMode } else { 'mem' }
+    $env:AIOS_STORE_MODE = if ($fileMode) { $fileMode } else { 'rocksdb' }
 }
 $addr = [regex]::Match($configText, '(?m)^\s*http_api_addr\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
 if (-not $addr) {
@@ -627,6 +628,43 @@ if ($existing) {
         New-Item -ItemType Directory -Force (Join-Path $Workspace 'resource') | Out-Null
         Copy-Item -LiteralPath (Join-Path $root 'resource\surreal') -Destination $workspaceSurql -Recurse
     }
+    # rocksdb 档要连的库若就在本机、端口上又没人听，用包内 surreal.exe 起一台（服务只连、不拉起，ADR-074 D2）。
+    # 远端地址、或端口上已经有库（上次起的那台、人自己起的那台）都不动。
+    $storeIsRocks = $env:AIOS_STORE_MODE.Trim().ToLowerInvariant() -in @('rocksdb', 'external', 'spawned-rocksdb')
+    $dbHost = [regex]::Match($configText, '(?m)^\s*v_ip\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
+    $dbPortText = [regex]::Match($configText, '(?m)^\s*v_port\s*=\s*["'']?(\d+)').Groups[1].Value
+    $dbPort = if ($dbPortText) { [int]$dbPortText } else { 0 }
+    if ($storeIsRocks -and $dbPort -gt 0 -and $dbHost -in @('127.0.0.1', 'localhost', '::1')) {
+        $dbListening = {
+            [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+                Where-Object { $_.Port -eq $dbPort } | Select-Object -First 1)
+        }
+        if (-not (& $dbListening)) {
+            $surrealExe = Join-Path $root 'bin\surreal.exe'
+            if (-not (Test-Path -LiteralPath $surrealExe)) { throw "Missing bundled SurrealDB: $surrealExe" }
+            $dbUser = [regex]::Match($configText, '(?m)^\s*v_user\s*=\s*["'']([^"'']*)["'']').Groups[1].Value
+            $dbPassword = [regex]::Match($configText, '(?m)^\s*v_password\s*=\s*["'']([^"'']*)["'']').Groups[1].Value
+            if (-not $dbUser) { $dbUser = 'root' }
+            if (-not $dbPassword) { $dbPassword = 'root' }
+            $dataDir = Join-Path $Workspace '.surreal\ams'
+            New-Item -ItemType Directory -Force $dataDir | Out-Null
+            # 与 Start-Surreal.ps1 同一条：fork 默认的响应缓冲在 Windows 上给每次顺序 RPC 加 ~15 ms。
+            if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) { $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = '0' }
+            # 同服务一样由 cmd 接日志，不把调用方的句柄继承给长命进程。
+            $dbStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $dbArgs = '/c ""{0}" start --user "{1}" --pass "{2}" --bind 127.0.0.1:{3} "rocksdb:{4}" 1>"{5}" 2>"{6}""' -f $surrealExe,
+                $dbUser, $dbPassword, $dbPort, $dataDir, (Join-Path $logRoot "$dbStamp.surreal.stdout.log"), (Join-Path $logRoot "$dbStamp.surreal.stderr.log")
+            Start-Process -FilePath $env:ComSpec -ArgumentList $dbArgs -WindowStyle Hidden | Out-Null
+            $dbDeadline = (Get-Date).AddSeconds(30)
+            while (-not (& $dbListening) -and (Get-Date) -lt $dbDeadline) { Start-Sleep -Milliseconds 300 }
+            if (-not (& $dbListening)) { throw "Bundled SurrealDB did not listen on 127.0.0.1:$dbPort within 30s; see $logRoot" }
+            $dbProcess = Get-CimInstance Win32_Process -Filter "Name='surreal.exe'" |
+                Where-Object { $_.ExecutablePath -eq $surrealExe -and $_.CommandLine -like "*127.0.0.1:$dbPort*" } | Select-Object -First 1
+            @{ pid = $dbProcess.ProcessId; port = $dbPort; datastore = $dataDir; executable = $surrealExe } |
+                ConvertTo-Json | Set-Content (Join-Path $root 'surreal.json')
+            Write-Output "SURREAL started PID=$($dbProcess.ProcessId) 127.0.0.1:$dbPort data=$dataDir"
+        }
+    }
     $env:DB_OPTION_FILE = $configPath
     $offlineRoot = Split-Path -Parent $root
     if (Test-Path -LiteralPath (Join-Path $offlineRoot 'Sync-OfflineConfig.ps1')) { $env:AIOS_OFFLINE_ROOT = $offlineRoot }
@@ -640,11 +678,11 @@ if ($existing) {
     # （机器算不了房间时的主动降级），不动。
     Remove-Item Env:AIOS_ROOM_MEMBERSHIP -ErrorAction SilentlyContinue
     Remove-Item Env:AIOS_SKIP_STARTUP_ROOM_BUILD -ErrorAction SilentlyContinue
-    # 服务不拉库（ADR-074）：rocksdb 档要先自己跑 Start-Surreal.ps1，这里不再递 AIOS_SURREAL_EXE。
+    # 服务不拉库（ADR-074 D2）：本机那台库由上面那段起，这里不再递 AIOS_SURREAL_EXE。
     # 介质随环境变量 AIOS_STORE_MODE 进服务（cmd → 服务两层都继承）；日志里点一句，免得对着配置猜。
-    # 上面已经保证它非空（不给 -StoreMode 时按文件 store_mode 或回填 mem），所以这里打出来的
+    # 上面已经保证它非空（不给 -StoreMode 时按文件 store_mode 或回填 rocksdb），所以这里打出来的
     # 就是服务实际吃到的那一档。
-    Write-Output ("STORE_MODE=" + $env:AIOS_STORE_MODE + $(if ($StoreMode) { ' (-StoreMode)' } elseif ($fileMode) { ' (配置文件 store_mode)' } elseif ($env:AIOS_STORE_MODE -ne 'mem') { ' (环境变量)' } else { ' (包默认/环境变量；要落盘在向导第②步选 external，或 -StoreMode rocksdb)' }))
+    Write-Output ("STORE_MODE=" + $env:AIOS_STORE_MODE + $(if ($StoreMode) { ' (-StoreMode)' } elseif ($fileMode) { ' (配置文件 store_mode)' } elseif ($env:AIOS_STORE_MODE -ne 'rocksdb') { ' (环境变量)' } else { ' (包默认/环境变量；要内存库在向导第②步选 memory，或 -StoreMode mem)' }))
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $stdoutLog = Join-Path $logRoot "$stamp.stdout.log"
     $stderrLog = Join-Path $logRoot "$stamp.stderr.log"
@@ -708,9 +746,10 @@ Write-Output 'Prior installation restored; files and database were not replaced.
 [System.IO.File]::WriteAllText((Join-Path $stage 'Rollback.ps1'), $rollback, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
 
 $startSurreal = @'
-# 用包内 surreal.exe（本仓 fork 的 2.1.x）起一台本地持久库（rocksdb 后端）。
-# 服务**不会**自己拉库：以 Start-AMS.ps1 -StoreMode rocksdb（= AIOS_STORE_MODE=rocksdb）启动之前，
-# 先跑这个脚本把库起起来，服务只连 DbOption.toml 里 v_ip:v_port 指的这台。mem 档则完全不需要它。
+# 用包内 surreal.exe（本仓 fork 的 2.1.x）在前台起一台本地持久库（rocksdb 后端）。
+# 平常用不着它：Start-AMS.ps1 在 rocksdb 档、v_ip 是本机且端口上没库时会自己在后台起一台（数据在工作区
+# .surreal\ams）。这个脚本留给要在前台看库日志、换端口或换数据目录手工起库的场合；服务**不会**自己
+# 拉库，只连 DbOption.toml 里 v_ip:v_port 指的这台。mem 档完全不需要它。
 # 注意：本包不含既有库数据；这台是空库，属性/搜索/补齐/更新仍需连回原始库或先导入数据。
 param(
     [int]$Port,
@@ -749,12 +788,12 @@ Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buff
 # 下面这几段以前是按档分叉的，而那两个开关删掉后变量再没被赋过值，分叉恒走 runtime 那一侧；
 # 留着只会让人以为还有第二档可走，索性摊平。
 $meshRuntimeNote = '- **本包不含 workspace 与 meshes。** 三维网格从外部 workspace 读取，或由目标环境连接 E3D 项目后生成。'
-$startupInstruction = '本包默认不带 workspace，由 ``Start-AMS.ps1`` 显式以 ``mem`` 启动：数据库在后端进程内，无 Surreal 子进程或数据库端口。介质按 ``AIOS_STORE_MODE`` > DbOption.toml 的 ``store_mode`` > 默认裁决（ADR-083 修订）——向导第②步选 external / memory 会写进 ``store_mode`` 持久化。根目录仍带 ``bin\surreal.exe``：要数据活过重启，先用它起一台 rocksdb 库、在向导填好 v_ip:v_port 并选 external，或以 ``Start-AMS.ps1 -StoreMode rocksdb`` 启动（服务只连、不拉起）。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
-$rootSurrealLayoutLine = '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切到 rocksdb 档、需要自己起一台库时使用'
+$startupInstruction = '本包默认不带 workspace，``Start-AMS.ps1`` 默认以 ``rocksdb`` 启动：``v_ip`` 是本机、``v_port`` 上又没有库时，它先用包根 ``bin\surreal.exe`` 在后台起一台（数据在工作区 ``.surreal\ams``，进程号记在包根 ``surreal.json``），服务只连它、不拉起任何库。介质按 ``AIOS_STORE_MODE`` > DbOption.toml 的 ``store_mode`` > 默认裁决（ADR-083 修订）——向导第②步选 external / memory 会写进 ``store_mode`` 持久化；选 memory 或以 ``Start-AMS.ps1 -StoreMode mem`` 启动则数据库在后端进程内、重启即清空，plant-ui 的房间归属 / 房间详情 / 房间视图在那一档用不了。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
+$rootSurrealLayoutLine = '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；rocksdb 档（默认）要连的本机端口上没有库时，``Start-AMS.ps1`` 用它起一台'
 $workspaceLayoutLines = '- 默认不含 ``workspace\``；索引、快照与 assets 由外部 workspace 提供'
 $configLayoutLine = '- ``DbOption.toml`` —— 默认运行包唯一一份、不含本机路径的出厂配置'
 $firstRunNote = '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
-$storeRuntimeNote = '- **workspace 默认不打入包。** runtime 默认使用进程内 ``mem``；``bin\surreal.exe`` 留给切到 rocksdb 档时自己起库用。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
+$storeRuntimeNote = '- **workspace 默认不打入包。** runtime 默认 ``rocksdb``，本机那台库由 ``Start-AMS.ps1`` 用 ``bin\surreal.exe`` 起（数据在工作区 ``.surreal\ams``）。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
 $readme = @"
 # AMS 本地发布包（-$packageTier）：gen-model $BackendVersion + plant-ui $WebVersion（Web）
 
@@ -769,7 +808,7 @@ $startupInstruction
 ## 首跑：配置向导
 $firstRunNote
 进入配置向导后（浏览器首页跳到 ``/setup.html``）：
-①选 E3D 项目目录与项目 → ②选存储：mem（库在进程里，零依赖）或 rocksdb（连一台已在跑的 SurrealDB）→ ③定监听端口
+①选 E3D 项目目录与项目 → ②选存储：rocksdb（默认，连 v_ip:v_port 上的 SurrealDB，本机那台已由 Start-AMS 起好）或 mem（库在进程里、重启即清空、没有房间详情）→ ③定监听端口
 → ④选「只导数据 / 一步到位」并保存重启 → ⑤勾库初始化。向导页只许在**本机**打开
 （局域网访问应用没问题，但改配置的接口只收 127.0.0.1 的请求）。
 不想用向导：直接改 ``workspace\DbOption.toml`` 后重启，并删掉 ``workspace\.first-run-pending``。
@@ -790,7 +829,7 @@ $workspaceLayoutLines
 ## 运行依赖（不在包内 —— 见 ADR-068）
 $storeRuntimeNote
   $meshRuntimeNote
-  - 两种包出厂都是 ``mem``；切到 ``rocksdb`` 后 kv-mem 保存增量 overlay、RocksDB 保存持久基线。服务在任何档位都**不拉起**数据库进程。
+  - 出厂是 ``rocksdb``：kv-mem 保存增量 overlay、RocksDB 保存持久基线。服务在任何档位都**不拉起**数据库进程；本机那台库由 ``Start-AMS.ps1`` 起，停服务时一并结束 ``surreal.json`` 里记的那个进程即可（数据留在工作区 ``.surreal\ams``）。
 - **rocksdb 档连的 SurrealDB 必须是本仓 fork 的 2.1.x**（包内 ``bin\surreal.exe``）。别用 PATH 上 ``cargo install`` 装的 3.x：
   它会要求对数据做不可逆迁移、且与 2.1.4 客户端握不上手。
 
@@ -1012,9 +1051,9 @@ function Invoke-SetupSmoke {
     $env:DB_OPTION_FILE = Join-Path $setupWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
     $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
-    # 这一腿有意**不设**介质：服务自己的默认 2026-09-18 起是 rocksdb（ADR-083 D6），而出厂配置
-    # project_path 留空——考的正是「就算落到 rocksdb 兜底，出厂形态也仍然拐进设置模式、向导打得开」，
-    # 那是配置错了还能救回来的唯一逃生门。包的正常路径由 Start-AMS.ps1 显式回填 mem，B / C 两腿各自考。
+    # 这一腿有意**不设**介质、也不起库：服务自己的默认 2026-09-18 起是 rocksdb（ADR-083 D6），而出厂配置
+    # project_path 留空——考的正是「就算落到 rocksdb 而库没起，出厂形态也仍然拐进设置模式、向导打得开」，
+    # 那是配置错了还能救回来的唯一逃生门。包的正常路径（Start-AMS.ps1 回填 rocksdb 并按需起包内库）由 C 腿考。
     Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $setupWs -WindowStyle Hidden -PassThru `
@@ -1046,12 +1085,12 @@ function Invoke-SetupSmoke {
     return $result
 }
 
-# 冒烟第三腿（ADR-074，取代 ADR-070 的「自带持久库」腿）：包要能走通
-# 「包内 surreal.exe 起一台 rocksdb 库 → Start-AMS -Workspace <外部目录> -StoreMode rocksdb 连它」这条主路。
-# 脚本用暂存包里那只 surreal.exe 在 18010 起库（避开真 8010）、数据目录落在临时外部工作区的
-# .surreal\ 下，再经包内 Start-AMS.ps1 起服务（工作区是空目录，resource\surreal 得由 Start-AMS 放进去）：
-# 正常模式起来、/health 报 medium=rocksdb + durable=true、数据目录真落盘、服务自己没拉任何 surreal
-# 子进程，且 /config.json 的 db 段指向这台库（plant-ui 的房间功能直连它）。
+# 冒烟第三腿（ADR-074，取代 ADR-070 的「自带持久库」腿）：包的出厂默认那条路要走得通——
+# 「Start-AMS -Workspace <空外部目录>，不给 -StoreMode → 回填 rocksdb → 本机端口上没库就用包内 surreal.exe 起一台 → 服务连它」。
+# 本机真配置把 v_port 指到 18010（避开真 8009 / 8010），脚本不预先起库：库得由 Start-AMS 起在 18010、
+# 数据落在空工作区的 .surreal\ams 下（resource\surreal 也得由 Start-AMS 放进去）。考正常模式起来、/health 报
+# medium=rocksdb + durable=true、数据目录真落盘、服务自己没拉任何 surreal 子进程，
+# 且 /config.json 的 db 段指向这台库（plant-ui 的房间功能直连它）。
 $rocksSmokeStorePort = 18010
 function Invoke-RocksSmoke {
     foreach ($port in $SmokeHttpPort, $rocksSmokeStorePort) {
@@ -1063,8 +1102,8 @@ function Invoke-RocksSmoke {
         return [ordered]@{ status = 'skipped'; reason = "打包机现场配置不在：$machineConfig" }
     }
     # 整份包拷到临时目录当「解压出来的包」，再给一个空的外部目录当工作区：Start-AMS 写的 logs\ /
-    # process.json 落在那份拷贝里，不进暂存包。本机真配置把端口指到脚本起的 18010、摘掉首跑哨兵；
-    # 介质由 Start-AMS -StoreMode rocksdb 递给服务（ADR-083），不写进配置。
+    # process.json / surreal.json 落在那份拷贝里，不进暂存包。本机真配置把端口指到 18010、摘掉首跑哨兵
+    # 与 store_mode——介质要由 Start-AMS 的出厂回填决定（ADR-083 分层里的最后一层）。
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $rocksPkg = Join-Path $env:TEMP "ams-rocks-smoke-pkg-$stamp"
     $rocksWs = Join-Path $env:TEMP "ams-rocks-smoke-ws-$stamp"
@@ -1072,17 +1111,8 @@ function Invoke-RocksSmoke {
     Remove-Item -LiteralPath (Join-Path $rocksPkg 'smoke-logs') -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $rocksPkg '.first-run-pending') -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $rocksWs | Out-Null
-    $rocksData = Join-Path $rocksWs '.surreal\smoke'
+    $rocksData = Join-Path $rocksWs '.surreal\ams'
     $cfg = Get-Content -LiteralPath $machineConfig -Raw
-    $surrealProc = $null
-    try {
-        $surrealProc = Start-SmokeSurreal (Join-Path $rocksPkg 'bin\surreal.exe') $rocksSmokeStorePort $rocksData `
-            (Get-ConfigCredential $cfg 'v_user' 'root') (Get-ConfigCredential $cfg 'v_password' 'root')
-    }
-    catch {
-        Remove-Item -LiteralPath $rocksPkg, $rocksWs -Recurse -Force -ErrorAction SilentlyContinue
-        return [ordered]@{ status = 'failed'; reason = "包内 surreal.exe 起库失败：$($_.Exception.Message)" }
-    }
     $cfg = [regex]::Replace($cfg, '(?m)^\s*store_mode\s*=.*\r?\n?', '')
     $cfg = $cfg -replace '(?m)^(\s*v_ip\s*=\s*).*$', '$1"127.0.0.1"'
     $cfg = $cfg -replace '(?m)^(\s*v_port\s*=\s*).*$', "`$1`"$rocksSmokeStorePort`""
@@ -1095,13 +1125,24 @@ function Invoke-RocksSmoke {
     $result = [ordered]@{ status = 'failed'; reason = 'readiness timeout' }
     try {
         # 用 Start-AMS.cmd 同款的 powershell.exe 另起进程跑：Start-AMS 往自己的环境变量里写 DB_OPTION_FILE /
-        # AIOS_STORE_MODE 等，不许漏进打包脚本。
+        # AIOS_STORE_MODE 等，不许漏进打包脚本。反过来也一样：B 腿在本会话里 pin 过 AIOS_STORE_MODE，
+        # 子进程会继承它、压掉出厂回填，先摘掉。
+        Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
         $startOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $rocksPkg 'Start-AMS.ps1') `
-            -Workspace $rocksWs -StoreMode rocksdb -NoBrowser -TimeoutSeconds $SmokeTimeoutSeconds 2>&1
+            -Workspace $rocksWs -NoBrowser -TimeoutSeconds $SmokeTimeoutSeconds 2>&1
         $startExit = $LASTEXITCODE
-        ($startOutput | Out-String) | Set-Content -LiteralPath (Join-Path $logDir 'rocks-smoke.start-ams.log') -Encoding utf8
+        $startText = $startOutput | Out-String
+        $startText | Set-Content -LiteralPath (Join-Path $logDir 'rocks-smoke.start-ams.log') -Encoding utf8
         if ($startExit -ne 0) {
-            $result.reason = "Start-AMS -Workspace <外部目录> -StoreMode rocksdb 没起来（exit $startExit）"
+            $result.reason = "Start-AMS -Workspace <外部目录>（不给 -StoreMode）没起来（exit $startExit）"
+            return $result
+        }
+        if ($startText -notmatch 'STORE_MODE=rocksdb') {
+            $result.reason = 'Start-AMS 没按出厂默认回填 rocksdb（看 rocks-smoke.start-ams.log 的 STORE_MODE= 那行）'
+            return $result
+        }
+        if ($startText -notmatch 'SURREAL started') {
+            $result.reason = "$rocksSmokeStorePort 上没库，Start-AMS 却没起包内 surreal（看 rocks-smoke.start-ams.log）"
             return $result
         }
         $deadline = (Get-Date).AddSeconds($SmokeTimeoutSeconds)
@@ -1126,7 +1167,7 @@ function Invoke-RocksSmoke {
                         break
                     }
                     $result.status = 'passed'
-                    $result.reason = "Start-AMS 以空外部目录起服务 + 包内 surreal 起库并连上（medium=rocksdb + durable=true）+ 数据目录落了 $rocksFiles 个文件 + /config.json 的 db 指向这台库"
+                    $result.reason = "Start-AMS 不给 -StoreMode、以空外部目录起服务：回填 rocksdb + 自己用包内 surreal 在 $rocksSmokeStorePort 起库并连上（medium=rocksdb + durable=true）+ 数据目录落了 $rocksFiles 个文件 + /config.json 的 db 指向这台库"
                     break
                 }
             }
@@ -1138,11 +1179,13 @@ function Invoke-RocksSmoke {
         Get-CimInstance Win32_Process -Filter "Name='aios-database.exe'" | Where-Object { $_.ExecutablePath -eq $exe } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Start-Sleep -Milliseconds 500
+        # 库是 Start-AMS 起的，脚本手里没有进程对象；按端口收（先停再拷日志，文件才写完）。
+        Stop-SmokeSurreal $null $rocksSmokeStorePort
         Get-ChildItem -LiteralPath (Join-Path $rocksPkg 'logs') -File -ErrorAction SilentlyContinue | ForEach-Object {
             $kind = if ($_.Name -like '*.stderr.log') { 'stderr' } else { 'stdout' }
-            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $logDir "rocks-smoke.$kind.log") -Force
+            $who = if ($_.Name -like '*.surreal.*') { 'rocks-smoke.surreal' } else { 'rocks-smoke' }
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $logDir "$who.$kind.log") -Force
         }
-        Stop-SmokeSurreal $surrealProc $rocksSmokeStorePort
         Remove-Item -LiteralPath $rocksPkg, $rocksWs -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $result
@@ -1177,7 +1220,7 @@ else {
     # 这一腿以前挂在「包里带不带 workspace」上，而那个档 2026-09-15 就退役了——于是它从那天起
     # 一次都没真跑过，release.json 里永远是 skipped，谁也没发现。它其实不需要包里带 workspace：
     # 库由包内 surreal.exe 现起，配置取打包机现场那份，两样都在包外。
-    Write-Step "冒烟门 C：包内 surreal 起 rocksdb 库 + Start-AMS 以空外部工作区连它（rocksdb@$rocksSmokeStorePort，超时 ${SmokeTimeoutSeconds}s）"
+    Write-Step "冒烟门 C：Start-AMS 出厂默认（不给 -StoreMode）以空外部工作区起包内库并连它（rocksdb@$rocksSmokeStorePort，超时 ${SmokeTimeoutSeconds}s）"
     $rocksSmoke = Invoke-RocksSmoke
     switch ($rocksSmoke.status) {
         'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }

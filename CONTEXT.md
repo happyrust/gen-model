@@ -739,7 +739,7 @@ _Avoid_: 重盖章（泛指时）、迁移 epoch、队列重建（那是周期�
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档由 `Start-AMS.ps1` 显式以 `mem` 起（服务自身默认档是 `rocksdb`，包不靠它）：库在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，要外部 SQL / 探针或要数据活过重启，先用它起一台 rocksdb 库、在向导第②步选 external 并填好 `v_ip:v_port`（写进 `store_mode`），或以 `Start-AMS.ps1 -StoreMode rocksdb` 启动（介质按 `AIOS_STORE_MODE` > 配置 `store_mode` > 默认裁决，ADR-083 修订；服务只连、不拉起，ADR-074）。房间兼容页仍是直连库的保留功能，mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂同样是 `mem`（+ `incremental-overlay` + `room_membership=true`）——两种包都真正解压即跑，要持久的现场先跑 `workspace\Start-Surreal.ps1` 再以 `-StoreMode rocksdb` 起服务；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档由 `Start-AMS.ps1` 显式以 `rocksdb` 起（2026-10-26 起；此前出厂是 `mem`）：`v_ip` 是本机、`v_port` 上又没有库时，它先用包根本仓 fork 的 `bin\surreal.exe` 在那个端口起一台（数据在工作区 `.surreal\ams`，进程记在包根 `surreal.json`），服务只连它、不拉起（ADR-074 D2）；介质按 `AIOS_STORE_MODE` > 配置 `store_mode` > 默认裁决（ADR-083 修订），向导第②步选 memory 或 `-StoreMode mem` 仍可落到进程内 `mem`。房间兼容页（房间归属 / 房间详情 / 房间视图）仍是直连库的保留功能：浏览器拿到的 `/config.json` 由服务按 `DbOption.toml` 现算（账号口令只发给本机来源），mem 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档 2026-09-15 起退役；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -751,7 +751,7 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式（**有意不设介质**，考的是「落到默认档 rocksdb 也仍然拐进设置模式、向导打得开」这条逃生门）；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（`-SmokeStoreMode` 缺省取 `mem` 并显式递给服务，不是靠服务的默认档；`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 由脚本用包内 `surreal.exe` 在隔离端口 18010 起一台 rocksdb 库、服务以 `AIOS_STORE_MODE=rocksdb` 连它，要求 `medium:"rocksdb"`、`durable:true`、数据目录真落盘且服务自己没拉子进程。三腿的介质都以环境变量递给服务，不往临时配置里写 `store_mode`（夹具不许预置生效介质，ADR-083 D3）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式（**有意不设介质**，考的是「落到默认档 rocksdb 也仍然拐进设置模式、向导打得开」这条逃生门）；B 腿以本机真配置和 `mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="mem"` 且后端没有拉起 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 同 runtime（`-SmokeStoreMode` 缺省取 `mem` 并显式递给服务，不是靠服务的默认档；`-SmokeStoreMode rocksdb` 时脚本先在 18011 起库）；C 走出厂默认那条路：本机真配置把 `v_port` 指到隔离端口 18010、不预先起库，包内 `Start-AMS.ps1` 不给 `-StoreMode`、以空外部目录当工作区起服务，要求它回填 `rocksdb` 并自己用包内 `surreal.exe` 在 18010 起库，`medium:"rocksdb"`、`durable:true`、数据目录真落盘、服务自己没拉子进程，且 `/config.json` 的 db 段指向这台库。三腿的介质都以环境变量递给服务，不往临时配置里写 `store_mode`（夹具不许预置生效介质，ADR-083 D3）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
 

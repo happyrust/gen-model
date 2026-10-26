@@ -10,6 +10,11 @@
 **2026-10 再修订（ADR-083 二次修订）**：裁决恢复分层——`AIOS_STORE_MODE` > `DbOption.toml` 的 `store_mode` > 默认 `rocksdb`；
 `store_mode` 回到配置文件（向导第②步 external / memory 落盘的选择），「向导一个字都不写」作废，`in_memory_db` 仍只点名；
 「D4 的别名与告警只对环境变量生效」作废——文件层的退役写法同样点名（2026-10-15 补齐）。
+**2026-10-26 修订（发布包出厂档，用户拍板「改为出厂默认 rocksdb」）**：发布包的 `Start-AMS.ps1` 在不给 `-StoreMode`、文件也没写
+`store_mode` 时回填 **`rocksdb`**（此前回填 `mem`）；`v_ip` 是本机且 `v_port` 上没有库时，由 `Start-AMS.ps1` 用包根 `bin\surreal.exe`
+起一台（数据在工作区 `.surreal\ams`，进程记在包根 `surreal.json`）。**D2 不变**：服务进程本身仍只连、不拉起，起库的是启动脚本。
+后果一节「两种包出厂都是 `mem`」随之作废；`mem` 仍可在向导第②步选 memory 或 `-StoreMode mem`，但 plant-ui 的房间兼容页直连库，
+那一档用不了。冒烟 C 腿改考这条默认路径（不给 `-StoreMode`、不预先起库）。
 日期：2026-09-13
 落地：`src/options.rs`（`StoreMode { Mem, RocksDb }`、别名解析、`retired_store_mode_meaning` 告警、`has_endpoint()` 删除）、
 `src/lib.rs`（`ensure_store_connected` 两分支：`connect_in_memory_store` / `connect_configured_store`；`ensure_own_store` 删除）、

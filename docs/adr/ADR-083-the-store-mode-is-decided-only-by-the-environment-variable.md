@@ -15,6 +15,8 @@
 `DbOption.toml` 注入 `store_mode = "rocksdb"`（external 默认走文件层，不再靠 `deploy.env` pin）。
 修订点：D1（签名里有配置那一格了）、D2（`store_mode` 恢复生效，`in_memory_db` 仍只点名）、
 D3（夹具仍不许带——现在是**生效键**，预置=静默定介质，更不许）、D5（回填改为文件优先）。
+**三次修订（2026-10-26，发布包出厂档）**：D5 里 `Start-AMS.ps1` 在文件没写 `store_mode` 时的回填由 `mem` 改为 **`rocksdb`**，
+本机端口上没库就先用包内 `bin\surreal.exe` 起一台（见 ADR-074 的 2026-10-26 修订）。分层裁决与 D1–D4、D6 不变。
 日期：2026-09-18
 落地：`src/options.rs`（`store_mode()` 只读环境变量；`effective_store_mode(env)` 签名里没有配置那一格；
 `store_mode_notices()` 逐条点名文件里残留的 `store_mode` / `in_memory_db` 与旧环境变量 `AIOS_IN_MEMORY_DB`；

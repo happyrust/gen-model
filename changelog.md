@@ -1,5 +1,13 @@
 ## 2026-10-26
 
+### 发布包出厂改 rocksdb：`Start-AMS.ps1` 不给档时回填 rocksdb，本机端口上没库就用包内 surreal 起一台
+
+- **为什么**：用户拍板「改为出厂默认 rocksdb」。此前出厂是 mem（ADR-074 / ADR-083 D5）：首跑 `Start-AMS.ps1` 回填 mem，向导第②步按生效档预选「内存库」，而 plant-ui 的房间归属 / 房间详情 / 房间视图直连 SurrealDB，mem 档没有库端口，开箱就用不了；mem 档的服务也只能给本次运行里生成过模型的构件算房间，把房间查询改走服务也补不全。
+- **改**（`scripts/New-LocalRelease.ps1` 生成的 `Start-AMS.ps1`）：不给 `-StoreMode`、环境与文件都没说时回填 `rocksdb`；rocksdb 档下 `v_ip` 是本机（`127.0.0.1` / `localhost` / `::1`）、`v_port` 上又没人听时，先用包根 `bin\surreal.exe` 在那个端口起一台（凭据取 `v_user` / `v_password`，数据在工作区 `.surreal\ams`，日志进 `logs\*.surreal.*.log`，进程记进包根 `surreal.json`），等端口起来再起服务；远端地址、或端口上已经有库都不动。服务本身仍只连、不拉起（ADR-074 D2 不变）。向导判据不用改——它本来就按生效档预选，现在预选外部库、「测试连接」直接能过；两档说明各补一句（外部库：Start-AMS 已起好本机库；内存库：房间功能用不了），外部库那句里过时的 `.\workspace\Start-Surreal.ps1` 改成包根的 `Start-Surreal.ps1`。出厂模板、包 README、`Start-Surreal.ps1` 注释、ADR-074 / ADR-083 修订行、`CONTEXT.md`、`docs/database-storage-modes.md` 同步。
+- **冒烟 C 腿**改考这条默认路径：本机配置把 `v_port` 指到 18010、不预先起库、不给 `-StoreMode`（并摘掉 B 腿在本会话里 pin 的 `AIOS_STORE_MODE`），要求 Start-AMS 打出 `STORE_MODE=rocksdb` 与 `SURREAL started`，其余照旧（medium=rocksdb + durable=true + 数据目录真落盘 + 服务没拉子进程 + `/config.json` 指向这台库）。
+- **验证**：新包 `ams-local-0.1.44_release.20261026064812.gcce44a435b72.dirty-runtime.zip` 三腿冒烟全过。解压到新目录、出厂配置原样首跑 `Start-AMS.ps1 -Workspace <空目录>`：起了包内 surreal（127.0.0.1:8009，数据在工作区 `.surreal\ams`，`surreal.json` 记下进程）、`STORE_MODE=rocksdb`、服务进设置模式；向导第②步预选「外部库」，生效介质 rocksdb，「测试连接」成功（fork 2.1.4）。按 README 手改 `DbOption.toml`（项目 AvevaMarineSample，`watch_dbnums = [7997, 8000]`，不写 `store_mode`）、删哨兵再起：复用 8009 那台、没再起第二台，`/health` medium=rocksdb + durable=true，7997 / 8000 初始化到 367 / 731；Chrome 里 EQUI `/1-LNR-Q005-PJ` 显示、所属房间 R224、房间模型、房间视图（R224，成员 108）与成员模型都正常，界面日志 0 警告 0 报错。
+- **没动**：服务侧 `store_mode` 裁决与默认（ADR-083）、mem 档本身；`scripts/Verify-OutOfBox.ps1`（它直接起服务、显式 pin mem，考的是服务不拉库）。
+
 ### `/config.json` 的库账号口令只发给本机来源
 
 - **为什么**：`cce44a435` 起包里不再放静态 `web/config.json`，浏览器拿到的是服务按 `DbOption.toml` 现算的那份（`handlers.rs` 原 `embedded_config`），db 段原样带着 `v_user` / `v_password`；出厂监听 `0.0.0.0:9099`，同网段任何一台机器 GET `/config.json` 都读得到库账号。口令还是默认 root/root 时与旧包一样，现场改过口令就会露出真口令。

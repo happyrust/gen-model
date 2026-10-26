@@ -352,10 +352,10 @@ function updateStoreUi() {
   $("lbl-v_ip").textContent = mem ? "地址 v_ip（memory 不使用）" : "地址 v_ip（连接目标）";
   $("lbl-v_port").textContent = mem ? "端口 v_port（memory 不使用）" : "端口 v_port（连接目标）";
   if (mem) {
-    $("store-note").innerHTML = '<div class="note warn">库在后端进程里，<b>重启即清空</b>；外部 <code>surreal sql</code> / rvm_verify / plant-ui 的「库供数」读面都<b>连不到</b>它。</div>';
+    $("store-note").innerHTML = '<div class="note warn">库在后端进程里，<b>重启即清空</b>；外部 <code>surreal sql</code> / rvm_verify / plant-ui 的「库供数」读面都<b>连不到</b>它——plant-ui 的房间归属、房间详情、房间视图在这一档<b>用不了</b>。</div>';
   } else {
-    $("store-note").innerHTML = '<div class="note">本服务<b>不会</b>自己把库拉起来。还没有库？用包里带的脚本先起一台（数据落在脚本所在目录的 <code>.surreal\\</code>），再回来点「测试连接」：<br>' +
-      "<code>powershell -ExecutionPolicy Bypass -File .\\workspace\\Start-Surreal.ps1</code><br>" +
+    $("store-note").innerHTML = '<div class="note">本服务<b>不会</b>自己把库拉起来。用发布包的 <code>Start-AMS.ps1</code> 启动时，地址是本机且端口上没有库，它已先用包里的 <code>bin\\surreal.exe</code> 在这个端口起好一台（数据在工作区 <code>.surreal\\ams</code>），直接点「测试连接」；别的情况先用包根的脚本起一台再回来测：<br>' +
+      "<code>powershell -ExecutionPolicy Bypass -File .\\Start-Surreal.ps1</code><br>" +
       "库的凭据默认 root/root；要让局域网连它，<b>先在 DbOption.toml 里改 v_user / v_password</b>。</div>";
   }
 }

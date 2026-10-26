@@ -9,7 +9,8 @@
 | `rocksdb`（**不设 = 这一档**；向导里的 external） | 配置 `v_ip:v_port` 上**已经在跑**的 SurrealDB（rocksdb 后端） | 有 | 是 | 基线与增量数据、属性、模型 | 文件读取仍可用；数据库保留备份（ingest） |
 
 `rocksdb` 档服务**只连、不拉起**：端口上没有库就是启动失败，不会自己起一台空库。要一台本地库先跑
-`scripts/Start-Surreal8009.ps1`（仓内）或包内 `Start-Surreal.ps1`，它们会挡住版本不匹配的二进制（必须是本仓 fork 的 2.1.x）。
+`scripts/Start-Surreal8009.ps1`（仓内）或包内 `Start-Surreal.ps1`，它们会挡住版本不匹配的二进制（必须是本仓 fork 的 2.1.x）；
+发布包的 `Start-AMS.ps1` 在 `v_ip` 是本机、端口上又没库时会自己用包内 `bin\surreal.exe` 起一台（起库的是脚本，不是服务）。
 客户端配置不会替外部服务更换存储引擎——那台服务须以 RocksDB 后端启动。
 
 ## 怎么选介质
@@ -22,7 +23,7 @@
 | --- | --- |
 | 配置向导（持久化选择） | 第②步选 external / memory，保存写进 `store_mode`；向导触发的重启把它显式递给孩子进程的 `AIOS_STORE_MODE` |
 | PowerShell 手起 | `$env:AIOS_STORE_MODE = 'rocksdb'; cargo run --release -- serve`（仓内 `Start-AiosDatabaseManual.ps1` / `Run-*.ps1` 已带） |
-| 发布包 | `Start-AMS.ps1 -StoreMode rocksdb`；不给时按文件里的 `store_mode`，文件也没写才**显式回填 `mem`**（解压即跑照旧） |
+| 发布包 | `Start-AMS.ps1 -StoreMode rocksdb` 或 `-StoreMode mem`；不给时按文件里的 `store_mode`，文件也没写才**显式回填 `rocksdb`**（2026-10-26 起，此前回填 `mem`）；`v_ip` 是本机且端口上没库时，脚本先用包内 `bin\surreal.exe` 起一台 |
 | Linux systemd | 单元里 `Environment=AIOS_STORE_MODE=rocksdb`（`deploy/linux/install_backend.sh` 已写）——pin 住后向导改档会输给环境变量，启动日志并排点名两边 |
 
 环境里设了与文件不同档的值：压过它，且启动横幅逐条点名「两边不是同一档、这一档是谁定的」——
