@@ -16,6 +16,15 @@
   3. **对拍护栏**：debug 构建恒开、release 设 `AIOS_ROOT_ENUMERATION_PARITY=1` 时，增量结果与全枚举逐位比（顺序也比），对不上以全枚举为准并打 `[窗口规划] 增量根枚举与全枚举不一致 …`；`AIOS_ROOT_ENUMERATION_REUSE=0` 把两步整个关掉（两端回全枚举）。分段计时行多了 `roots_S=…ms[cached|full]`、`roots_T=…ms[incremental+parity parity=…ms | incremental | parity-mismatch | full]`。
 - **量到**（L2 回放，debug，953 根）：`ams8000-equi-move-chain` 五窗全绿、`db8000-two-delete` 两窗全绿（删除路径），没有一窗 `parity-mismatch`；连续窗 `roots_S=0ms[cached]`（首窗、超越窗 726→728、冷重启后那一窗按设计 `full`），`roots_T` 减去对拍那一遍后：只有登录 / 尾会话的 DBMDAT-only 窗 1–2 ms，移了一根 EQUI 的窗 ≈ 78 ms（重枚举它所在那个 SITE），对照全枚举 120–216 ms。release 下预计 8000 一窗 `plan` 从 ~0.7 s 到 ~0.3 s；7997 的 13.8 s 里两端枚举那 ~12 s 变成「S 端 0 + T 端只走被触到的 SITE」，符合票里「与 `touched` 成比」的预算口径——7997 的实测要等它的会话链（没有回放语料）。
 - **没动**：两端 `build_set`（≈ 130–160 ms / 窗）与 `scan_index`；`enumerate_generation_roots` 自身的每元素费用。
+
+### SYST 批次不再替设计库付常驻房间模型重建：Meta 批次跳过开工前的房间半边；完成行后多一行分步账（GitHub #69）
+
+- **为什么**：8023 实测每次 SAVEWORK 连带的 amssys 会话排一条 ~11 s 的 8191 批次，`IncrementPipeline 阶段耗时` 只占 0.2 s。先补量：`logs/task-history-2026-10-25.jsonl` 里那两条任务的分步账（`steps`）把 10.8 / 10.7 s 全记在 `stage_apply` 一步——那一步从「暂存应用」起一直算到 `ref0_snapshot`，中间夹着开工前对齐房间参照、冻房间计算器、查 durable 对齐欠账、SYST 重读 MDB 声明，没有一个有自己的步。L2 回放复现（影子根里 amssys 与 ams8000 都留给回放，`watch_dbnums = [8191, 8000]`；8000 推 732 与 amssys 推 890 同一次重扫入队，SYST 排第 1 位）：SYST 批次 2373 ms，其中 `room_reference=1578ms`，日志 `dbnum=8191 [房间参照] 文件版本变了，常驻房间模型按文件重建 … 耗时 1556ms`；随后的 8000 窗 `room_reference=26ms`。即：常驻房间模型的 composite 是全部 DESI 的 `(dbnum, sesno, token)`，设计库一前进就变；按阶段序 Meta 批次排在设计库窗口前头，第一个开工的任务替大家付那次重建。8023 上 7997 + 8000 一起前进，这一笔 10.4 s；7997 的 QUIT 尾会话窗（366，零单元）13.4 s 也是同一笔。
+- **改**（`batch_worker.rs`）：
+  1. `room_half_applies(defer_model_phase, db_type)`：Meta 批次（SYST / DICT / COMM / MISC / GLB / GLOB，`DataPhase::of_db_type`）不对齐房间参照、不冻计算器、不查欠账——它们没有模型工作（`sys_meta_changes_never_create_model_work`）；设计库与目录库（CATA 可能带目录级联的根名单）照旧。重建还是那一次，只是由第一个开工的设计库任务付，顺序与代价都不变。
+  2. 分步账补齐并打出来：`room_reference` / `room_calculator` / `room_alignment` / `mdb_reload` / `side_actions` / `units` 各一步；完成行之后多一行 `[增量] 分步耗时 task=… dbnum=… data_parse=9ms … task_end=7ms`（与 `/tasks/{id}.steps` 同一本字典，成功批次也打）；`[SYS 解析] SYST 刷新重读声明 … reload_ms=`；`idle_round` 的范围刷新重扫多一行 `[scope-refresh] 范围刷新重扫耗时 …ms`（`sweep_log` 稳态下不打整块，这一轮的耗时此前没有下落）。
+- **量到**（同一 L2 环境、改后二进制，8000 推 733 + amssys 推 891）：SYST 批次 651 ms（`room_reference=0 room_calculator=0 room_alignment=0 mdb_reload=132 stage_apply=225`），改前同形 2373 ms；8000 窗 `room_reference=1191ms`（重建落到它头上，总 2451 ms）。SYST 批次后的范围刷新重扫 1.05–1.18 s 照旧。「只多一个 DBMDAT 会话的 SYS 批次 ≤ 2 s」在 L2 上满足；8023 真机那 ~10 s 的版本等下一次 7997 / 8000 窗口看 `分步耗时` 那一行。
+- **没动**：SYST 批次后的 `resweep_for_scope_change`（ADR-085 D2 要它发现新声明的库）与 `[SYS 解析]` 重读（~130 ms）；队列顺序（ADR-011）；设计库尾会话自己付的那次重建（7997 的 13 s 另议）。
 ## 2026-10-25
 
 ### 单元房间快照改走边目标：按构件扫 `room_relate` 整表（694 ms / 句）让 7997 一窗 60 根前后两次快照吃掉 29 分钟（GitHub #66）
