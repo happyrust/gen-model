@@ -31,7 +31,7 @@ use crate::data_interface::manual_update::{
     aggregate_manual_status, include_model_side_effect_failure, merge_unit_worklist,
 };
 use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
-use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+use crate::data_interface::task_registry::{TaskRegistry, TaskState, TaskStep};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
@@ -1250,6 +1250,15 @@ async fn run_one_batch(
             Local::now(),
         )
     );
+    // 完成行之后紧跟一行分步账（GitHub #69）：总耗时只是一个数，而 8191 那条 ~11 s 的 SYST 批次在
+    // `IncrementPipeline 阶段耗时` 里只占 0.2 s——剩下的得按步归属才查得下去。步名与 `/tasks/{id}.steps`
+    // 同一本字典，顺序即执行顺序；成功批次也打，慢在哪一步不该等失败了才看得见。
+    if let Some(entry) = registry.get(&task_id) {
+        println!(
+            "{}",
+            render_batch_steps_line(job.dbnum, &task_id, &entry.steps, entry.steps_dropped)
+        );
+    }
     // 紧跟完成行：人在控制台上找的锚点是「执行完毕 … 状态=failed」，原因就该
     // 挨着它，而不是要人再去别处取一趟。
     if matches!(state, TaskState::Failed | TaskState::Partial) {
@@ -3460,6 +3469,7 @@ async fn execute_frozen_batch_body(
     // 房间归属的候选面板也得是这一版的。composite 没变一次探针、零重建；变了才按文件重建；重建失败
     // 留旧代继续算、缺口进 /health。冻计算器的那几处（位姿便宜路、单元工作单 → write-behind）都在它后面。
     // 回执留着：换了房间代号是整库房间重算（`RoomOnly`，D13）的第二条触发。
+    registry.set_stage(&job.task_id, "room_reference");
     let room_reference = if defer_model_phase {
         None
     } else {
@@ -3470,6 +3480,7 @@ async fn execute_frozen_batch_body(
     };
     // 一任务一台（B/T1）：对齐之后紧接着冻这一任务的房间计算器，本窗的批量重生成与逐根重试都用它；
     // 模型半边不跑（`defer_model_phase`）时不冻——冻了也没人用。冻不出时单元工作单入口按 D2 把每根记失败。
+    registry.set_stage(&job.task_id, "room_calculator");
     let rooms = if defer_model_phase {
         crate::fast_model::model_db_adapter::TaskRoomCalculator::Disabled
     } else {
@@ -3480,6 +3491,7 @@ async fn execute_frozen_batch_body(
     // 这一条按库上的事实判，直到某个任务把 `Aligned` 盖上才安静——整库重算对不在投影里的根回读库上几何
     // （U1 第二半），落盘形态下也盖得上，所以它在每个库上只多跑一次就安静。常驻代号取冻好的那台（H1，
     // 2026-09-19）：准入链的终点与收尾定向重算用的计算器必须是同一台，不再另读一次生命周期。
+    registry.set_stage(&job.task_id, "room_alignment");
     let alignment = if defer_model_phase {
         None
     } else {
@@ -3503,6 +3515,7 @@ async fn execute_frozen_batch_body(
     // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
     // 原先排进补偿队列的 SYST 派生作业是空转，随非空间补偿队列一起删掉（ADR-071 D9，d-300）。
     if applied && job.db_type == "SYST" {
+        registry.set_stage(&job.task_id, "mdb_reload");
         let option = aios_core::get_db_option();
         let reloaded = tokio::task::spawn_blocking(move || {
             crate::data_interface::mdb_membership::reload_declaration_and_rebind(
@@ -3538,6 +3551,7 @@ async fn execute_frozen_batch_body(
 
     // 位姿 / 删除 / 级联先行——级联展开出来的根随后一起并进本批的单元工作单
     // （与旧手动路径的顺序一致）。这些动作全是本库的：有失败就拦下本批的生成。
+    registry.set_stage(&job.task_id, "side_actions");
     let mut derived_units = Vec::new();
     if !defer_model_phase {
         let (derived, failures) = run_model_side_actions(mgr, &side_actions).await;
@@ -3553,6 +3567,7 @@ async fn execute_frozen_batch_body(
     }
 
     // 本批新单元 + 明确要重算的根 + 级联展开出来的根并成一张工作单（同根只留最新一条）。
+    registry.set_stage(&job.task_id, "units");
     let (mut units, mut settlement_failed) = if defer_model_phase {
         registry.set_unit_totals(&job.task_id, 0);
         // 这句过去无条件打，失败批次照样宣告「已收口」——2026-08-18 现场
@@ -4705,6 +4720,29 @@ where
     )
 }
 
+/// 完成行后面那行分步账（GitHub #69）：`steps` 是登记表按阶段切换结算出来的（[`TaskStep`]），
+/// 这里只负责排成一行。空账（任务没报过阶段）也要出声，否则「没打」和「没走到」分不开。
+fn render_batch_steps_line(dbnum: u32, task_id: &str, steps: &[TaskStep], dropped: u64) -> String {
+    let mut line = format!("[增量] 分步耗时 task={task_id} dbnum={dbnum}");
+    if dropped > 0 {
+        line.push_str(&format!(" 前{dropped}步被挤掉"));
+    }
+    if steps.is_empty() {
+        line.push_str(" 无阶段记录");
+    }
+    for step in steps {
+        line.push(' ');
+        line.push_str(&step.name);
+        line.push('=');
+        line.push_str(&step.ms.to_string());
+        line.push_str("ms");
+        if !step.ok {
+            line.push_str("(未走完)");
+        }
+    }
+    line
+}
+
 /// 失败批次的原因行。
 ///
 /// 完成行只报 `状态=failed`；真话在 `result.batch.message` 里，而那句话此前**只**
@@ -4794,7 +4832,15 @@ async fn idle_round(mgr: &Arc<AiosDBManager>, _registry: &'static TaskRegistry) 
         crate::data_interface::initialization_phase::InitializationCoordinator::global()
             .take_rescan_requested();
     if phase_rescan || SCOPE_DIRTY.swap(false, Ordering::SeqCst) {
-        if let Err(error) = mgr.resweep_for_scope_change().await {
+        let resweep_started = Instant::now();
+        let resweep = mgr.resweep_for_scope_change().await;
+        // 这一轮的耗时单独报（GitHub #69）：`sweep_log` 只在结论变了才连耗时一起打整块，稳态下范围刷新
+        // 重扫花了多久就没了下落——而它排在 SYST 批次之后、下一条设计库批次之前，是同队列等待的一部分。
+        println!(
+            "[scope-refresh] 范围刷新重扫耗时 {}ms（phase_rescan={phase_rescan}）",
+            resweep_started.elapsed().as_millis()
+        );
+        if let Err(error) = resweep {
             let message = format!("阶段/范围刷新后重扫监控目录失败: {error:#}");
             println!("{message}");
             let snapshot =
@@ -7125,6 +7171,51 @@ mod tests {
             body.contains("render_batch_finished_line("),
             "完成行必须经 render_batch_finished_line 渲染: {body}"
         );
+    }
+
+    /// GitHub #69：完成行后面紧跟分步账——一步一格、顺序即执行顺序，被挤掉的步数与没走完的步都要说。
+    #[test]
+    fn the_steps_line_lists_every_step_in_order() {
+        let step = |name: &str, ms: u64, ok: bool| crate::data_interface::task_registry::TaskStep {
+            name: name.to_string(),
+            at: "2026-10-25T15:31:09+08:00".to_string(),
+            ms,
+            ok,
+        };
+        assert_eq!(
+            render_batch_steps_line(
+                8191,
+                "db-20261025-153109-000003",
+                &[
+                    step("data_parse", 27, true),
+                    step("room_reference", 9800, true),
+                    step("task_end", 14, false),
+                ],
+                0
+            ),
+            "[增量] 分步耗时 task=db-20261025-153109-000003 dbnum=8191 data_parse=27ms room_reference=9800ms task_end=14ms(未走完)"
+        );
+        assert_eq!(
+            render_batch_steps_line(8191, "t", &[step("commit", 5, true)], 2),
+            "[增量] 分步耗时 task=t dbnum=8191 前2步被挤掉 commit=5ms"
+        );
+        assert_eq!(
+            render_batch_steps_line(8191, "t", &[], 0),
+            "[增量] 分步耗时 task=t dbnum=8191 无阶段记录"
+        );
+
+        // 调用点：分步账必须紧跟在完成行之后（同一段 run_one_batch 收尾）。
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn run_one_batch(")
+            .expect("run_one_batch 必须存在")
+            .1
+            .split_once("pub(crate) enum ExplicitFlag")
+            .expect("run_one_batch 之后是 ExplicitFlag")
+            .0;
+        let finished = body.find("render_batch_finished_line(").expect("完成行");
+        let steps = body.find("render_batch_steps_line(").expect("分步账行");
+        assert!(finished < steps, "分步账必须紧跟在完成行之后");
     }
 
     /// 失败批次必须在控制台上自己说出原因。

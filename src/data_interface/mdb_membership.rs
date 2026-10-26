@@ -1985,7 +1985,14 @@ pub fn reload_declaration_and_rebind(
 ) -> anyhow::Result<Arc<MdbMembership>> {
     let plan = crate::data_interface::mdb_closure::resolve_for(db_option).watch_dir_plan();
     let own_dirs = own_db_dirs(&plan, project)?;
+    let reload_started = Instant::now();
     crate::data_interface::mdb_closure::reload_declaration(&own_dirs, project, mdb)?;
+    // 重读与重绑分开报（GitHub #69）：重绑那段的 `[ams-phase]` 阶段行自带 `elapsed_ms=`（[`rebind_phase_line`]），
+    // 重读 43 MB 的 SYS 文件这一段此前没有数。
+    println!(
+        "[SYS 解析] SYST 刷新重读声明 project={project} mdb={mdb} reload_ms={}",
+        reload_started.elapsed().as_millis()
+    );
     rebind(db_option, project, mdb, RebindReason::SystRefresh)
 }
 
