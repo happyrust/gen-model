@@ -1,5 +1,12 @@
 ## 2026-10-26
 
+### 本地发布包：rocksdb 档配外部工作区起得来了；包里不再放静态 `web/config.json`，plant-ui 的房间功能连对库
+
+- **为什么**：出 0.1.44 本地包后按说明解压验收（包内 `Start-Surreal.ps1` 起库 + `Start-AMS.ps1 -Workspace <外部目录> -StoreMode rocksdb`），「显示房间」两处走不通：① 服务的工作目录是 `-Workspace`，而 `aios_core` 连库时按工作目录读 `resource/surreal/*.surql`（`define_common_functions_on`），外部工作区里没有就 `Failed to define common functions (os error 3)` 退出；② `New-LocalRelease.ps1` 从 `config.example.json` 生成了一份静态 `web/config.json`（db 段 `127.0.0.1:8000` / ns `plant`），服务读盘优先，它盖掉了服务按现场 `DbOption.toml` 现算的那份（`handlers.rs` 的 `embedded_config`：`v_ip:v_port` / `surreal_ns` / `project_name`）；plant-ui 的房间归属 / 房间详情直连这个 db 段，于是连错库。冒烟 C 腿此前由脚本直接起 exe，工作目录是整份包的拷贝、也不看 `/config.json`，两处都没考到。
+- **改**（`scripts/New-LocalRelease.ps1`）：包里不再放 `web/config.json`（`-SkipBuild` 复用的旧 Web 里带着也剔掉），交给服务按 `DbOption.toml` 动态提供，`model_api_url` / `data_api_url` 本来就是由 `index.html` 映射到 origin 的那两个哨兵值；包内 `Start-AMS.ps1` 起服务前把包根 `resource\surreal\` 整目录放进外部工作区（工作区就是包根、或是带 `.git` 的源码检出时不动），README 布局那一行同步。冒烟 C 腿改走包内 `Start-AMS.ps1`：整份包拷到临时目录、给一个空的外部工作区，多考 `/config.json` 的 db 端口就是脚本起的那台库（18010）。
+- **验证**：重新出包 `ams-local-0.1.44_release.20261026060144.g8e0aa527cb20.dirty-runtime.zip`，三腿冒烟全过（C 腿数据目录落 7 个文件、`/config.json` 指向 18010）。解压后不做任何手工绕过：空工作区起服务前被放进 7 个 surql，`/config.json` 的 db 是 `127.0.0.1:18011` / `1516` / `AvevaMarineSample`；7997 / 8000 初始化完（验收配置的 `watch_dbnums` 含房间所在的 7997，121 s）后在 Chrome 里，EQUI `/1-LNR-Q005-PJ` 显示与定位、右侧「房间」页的所属房间 R224、房间模型、房间视图（R224，成员 108）与成员模型都正常，界面日志 0 警告 0 报错。
+- **没动**：mem 出厂档下房间归属 / 房间详情 / 房间视图仍用不了（plant-ui 这几处直连 SurrealDB，mem 档没有库端口），出厂档怎么定另议。
+
 ### 单元回执的「房间 后」改到任务等到刷盘 ACK 之后拍：跨房位移不再被报成「房间没变」（GitHub #71）
 
 - **为什么**：L2 回放链 `ams8000-equi-room-cross`（EQUI `=24384/24776` `BY U 2000` 穿甲板 R224 → R124）732 窗的回执 `rooms_before=[R224] rooms_after=[R224]`，而同窗 `[model-write-behind] … room_edges=3 room_recomputed=1` 已把库上的边换成 R124 / R144 / R413；734 窗（`BY D 2000` 回来）的 `rooms_before` 才看到换房，它自己的 `rooms_after` 又滞后一窗。成因：`unit_room_snapshot` 只读库上的 `room_relate` 边（按设计——「前」就是库上那份），而 `run_unit_worklist` 在「全部单元收尾之后」就拍「后」；刚体前移 / 单元级发布的房间边由 write-behind 刷盘时重算落库，整根重算的边也随模型行在刷盘那一笔里落——两者没有排序，快照赶在提交之前就拍到旧边。几何的「后」没这个问题（`unit_geometry_snapshot` 先问投影）。
