@@ -269,4 +269,4 @@
 
 ## 9. 验收总门
 
-① `increment_cases.json` 里 `status == has` 占比 ≥ 80 %，`todo` 全部有 P 段归属；② CI `offline-increment-regression` 含 L2 档并连续绿两周；③ nightly L3 连续 3 次有报告，预算 JSON 有基线；④ 本周六个缺陷（#64 / #65 / #66 / #67 / ADR-088 / 补排链）各至少一条 L2 用例在修复前的二进制上**能红**（回滚该修复的提交跑一次证明）、修复后绿。
+① `increment_cases.json` 里 `status == has` 占比 ≥ 80 %，`todo` 全部有 P 段归属；② `increment_cases_registry` 在 CI `offline-increment-regression` 每次 PR 必绿，L2 回放档在**本机 nightly** 连续绿两周（P1 修正：L2 不进 CI，见 §1 头部；此句按该修正改写，原文「CI 含 L2 档」与头部矛盾）；③ nightly L3 连续 3 次有报告，预算 JSON 有基线；④ 本周六个缺陷（#64 / #65 / #66 / #67 / ADR-088 / 补排链）各至少一条 L2 用例在修复前的二进制上**能红**（回滚该修复的提交跑一次证明）、修复后绿。
