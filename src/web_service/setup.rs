@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use axum::Json;
 use axum::Router;
 use axum::extract::{ConnectInfo, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -1022,12 +1022,12 @@ async fn setup_panel(State(ctx): State<SetupCtx>) -> Response {
 
 /// 正常模式的 `/`：哨兵在 → 302 向导；不在 → 原样交给 plant-ui 静态兜底。
 /// 每请求查一次哨兵（一次 `is_file`），删了哨兵不用重启就恢复正常首页。
-pub async fn root_gate(State(state): State<AppState>, uri: Uri) -> Response {
+pub async fn root_gate(State(state): State<AppState>, request: axum::extract::Request) -> Response {
     let workspace = workspace_of(&crate::options::active_config_path());
     if first_run_pending_at(&workspace) {
         return Redirect::temporary("/setup.html").into_response();
     }
-    super::handlers::plant_ui_web(State(state), uri).await
+    super::handlers::plant_ui_web(State(state), request).await
 }
 
 // ---------------------------------------------------------------------------

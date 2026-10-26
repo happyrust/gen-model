@@ -9,7 +9,7 @@ use anyhow::Context;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -369,9 +369,16 @@ fn web_response(content_type: &'static str, body: impl Into<Body>) -> Response {
         .into_response()
 }
 
-fn embedded_config() -> Vec<u8> {
-    let option = aios_core::get_db_option();
-    serde_json::to_vec(&json!({
+/// 盘上没有 `web/config.json` 时浏览器拿到的那份。db 段的账号口令只给本机来源：服务出厂监听 `0.0.0.0`，
+/// 原样发出去等于把库账号交给同网段每一台机器。两个键留着、值给空串——plant-ui 的 `BrowserDb`
+/// 两格必填，缺键整份启动配置解析失败。
+fn browser_config(option: &aios_core::options::DbOption, include_credentials: bool) -> serde_json::Value {
+    let (username, password) = if include_credentials {
+        (option.v_user.as_str(), option.v_password.as_str())
+    } else {
+        ("", "")
+    };
+    json!({
         "db": {
             "host": option.v_ip,
             "port": option.v_port,
@@ -379,14 +386,21 @@ fn embedded_config() -> Vec<u8> {
             "namespace": option.surreal_ns,
             "database": option.project_name,
             "mdb": option.mdb_name,
-            "username": option.v_user,
-            "password": option.v_password,
+            "username": username,
+            "password": password,
         },
         // index.html maps this legacy default to window.location.origin.
         "model_api_url": "http://127.0.0.1:8022",
         "data_api_url": "",
-    }))
-    .expect("plant-ui configuration is serializable")
+    })
+}
+
+/// 只认 `ConnectInfo` 里的回环地址（IPv4 映射的 `::ffff:127.0.0.1` 也算）；拿不到来源按非本机处理。
+fn is_local_peer(request: &axum::extract::Request) -> bool {
+    request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|info| info.0.ip().to_canonical().is_loopback())
 }
 
 /// Fallback for the browser build. A supplied `PLANT_UI_WEB_ROOT` keeps the old
@@ -406,8 +420,8 @@ fn disk_web_asset_path(
     })
 }
 
-pub async fn plant_ui_web(State(state): State<AppState>, uri: Uri) -> Response {
-    let requested = uri.path().trim_start_matches('/');
+pub async fn plant_ui_web(State(state): State<AppState>, request: axum::extract::Request) -> Response {
+    let requested = request.uri().path().trim_start_matches('/');
     let path = if requested.is_empty() {
         "index.html"
     } else {
@@ -423,7 +437,11 @@ pub async fn plant_ui_web(State(state): State<AppState>, uri: Uri) -> Response {
         }
     }
     if path == "config.json" {
-        return web_response("application/json; charset=utf-8", embedded_config());
+        let config = browser_config(aios_core::get_db_option(), is_local_peer(&request));
+        return web_response(
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&config).expect("plant-ui configuration is serializable"),
+        );
     }
     if let Some(asset) = embedded_web_asset(path) {
         return web_response(asset.content_type, asset.bytes);
@@ -4788,6 +4806,41 @@ mod tests {
             Some(asset_root.join("config/e3d.project.ron")),
             "a deployed disk UI keeps its matching legacy project config"
         );
+    }
+
+    #[test]
+    fn browser_config_hands_db_credentials_only_to_local_peers() {
+        let mut option = aios_core::options::DbOption::default();
+        option.v_user = "site-user".to_string();
+        option.v_password = "site-secret".to_string();
+
+        let local = browser_config(&option, true);
+        assert_eq!(local["db"]["username"], "site-user");
+        assert_eq!(local["db"]["password"], "site-secret");
+
+        let remote = browser_config(&option, false);
+        assert_eq!(remote["db"]["username"], "", "远程来源拿到的是空串而不是缺键");
+        assert_eq!(remote["db"]["password"], "", "远程来源拿到的是空串而不是缺键");
+        assert_eq!(remote["db"]["host"], local["db"]["host"], "只摘口令，库地址照给");
+        assert_eq!(remote["db"]["database"], local["db"]["database"]);
+    }
+
+    #[test]
+    fn only_loopback_peers_count_as_local_for_the_browser_config() {
+        let from = |peer: Option<&str>| {
+            let mut request = axum::extract::Request::new(axum::body::Body::empty());
+            if let Some(peer) = peer {
+                request.extensions_mut().insert(axum::extract::ConnectInfo(
+                    peer.parse::<std::net::SocketAddr>().expect("socket address"),
+                ));
+            }
+            request
+        };
+        assert!(is_local_peer(&from(Some("127.0.0.1:50000"))));
+        assert!(is_local_peer(&from(Some("[::1]:50000"))));
+        assert!(is_local_peer(&from(Some("[::ffff:127.0.0.1]:50000"))));
+        assert!(!is_local_peer(&from(Some("10.30.230.42:41234"))));
+        assert!(!is_local_peer(&from(None)), "拿不到来源按非本机处理");
     }
 
     /// `ref0s` 按行上的 `dbnum` 取、升序原样写；没有 `dbnum` 的行不碰。

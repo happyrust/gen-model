@@ -1,5 +1,12 @@
 ## 2026-10-26
 
+### `/config.json` 的库账号口令只发给本机来源
+
+- **为什么**：`cce44a435` 起包里不再放静态 `web/config.json`，浏览器拿到的是服务按 `DbOption.toml` 现算的那份（`handlers.rs` 原 `embedded_config`），db 段原样带着 `v_user` / `v_password`；出厂监听 `0.0.0.0:9099`，同网段任何一台机器 GET `/config.json` 都读得到库账号。口令还是默认 root/root 时与旧包一样，现场改过口令就会露出真口令。
+- **改**（`src/web_service/handlers.rs`、`src/web_service/setup.rs`）：`browser_config(option, include_credentials)` 只在请求来自回环地址时填账号口令（`ConnectInfo`，IPv4 映射的 `::ffff:127.0.0.1` 也算；拿不到来源按非本机），否则两格给空串——键必须留着，plant-ui 的 `BrowserDb` 两格必填，缺键整份启动配置解析失败。`plant_ui_web` 与正常模式的 `root_gate` 改收整个请求以读来源。盘上有 `web/config.json` 时仍原样发（读盘优先不变）。新增单测 `browser_config_hands_db_credentials_only_to_local_peers`、`only_loopback_peers_count_as_local_for_the_browser_config`。
+- **验证**：新包同一服务上，`http://127.0.0.1:9099/config.json` 的 db 段带 `root` / `root`，经本机另一网卡地址 `http://172.23.112.1:9099/config.json` 拿到的两格为空串（键在）；本机浏览器里 plant-ui 的房间归属、房间视图照常（直连库用的就是回环那份口令）。
+- **影响**：远程浏览器拿不到口令，房间兼容页（直连库）在远程浏览器上连不上——包内 surreal 只监听 127.0.0.1，远程浏览器本来也连不上它。
+
 ### 本地发布包：rocksdb 档配外部工作区起得来了；包里不再放静态 `web/config.json`，plant-ui 的房间功能连对库
 
 - **为什么**：出 0.1.44 本地包后按说明解压验收（包内 `Start-Surreal.ps1` 起库 + `Start-AMS.ps1 -Workspace <外部目录> -StoreMode rocksdb`），「显示房间」两处走不通：① 服务的工作目录是 `-Workspace`，而 `aios_core` 连库时按工作目录读 `resource/surreal/*.surql`（`define_common_functions_on`），外部工作区里没有就 `Failed to define common functions (os error 3)` 退出；② `New-LocalRelease.ps1` 从 `config.example.json` 生成了一份静态 `web/config.json`（db 段 `127.0.0.1:8000` / ns `plant`），服务读盘优先，它盖掉了服务按现场 `DbOption.toml` 现算的那份（`handlers.rs` 的 `embedded_config`：`v_ip:v_port` / `surreal_ns` / `project_name`）；plant-ui 的房间归属 / 房间详情直连这个 db 段，于是连错库。冒烟 C 腿此前由脚本直接起 exe，工作目录是整份包的拷贝、也不看 `/config.json`，两处都没考到。
