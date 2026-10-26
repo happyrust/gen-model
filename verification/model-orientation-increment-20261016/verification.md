@@ -346,7 +346,8 @@ type_code 10240 文本）造出与真库同形状的匿名显式属性，走 pin
 - `attributes == ["#2902D6E2"]`、`opaque == false`——伪名格式与上报档位钉死；
 - `is_placement_only == false`（非摆放名）且 **`placement_input_changed == false`**——
   纯属性存储变化不再级联，这是相对 opaque 判决的净收益语义；
-- 第二窗改值（"JS"→"Kangwp"）仍点名同一伪名——新增与变更两形态都覆盖。
+- 第二窗改值（"JS"→"Kangwp"）仍点名同一伪名，第三窗删除属性（`remove_explicit`）
+  仍点名同一伪名且不落 opaque——新增、变更、删除三形态全覆盖。
 
 同日再补一钉：`synthetic_anonymous_attribute_alongside_ori_blocks_cheap_path`——
 混合窗（同记录同窗 `ORI`+匿名属性，`write_mixed` 单次会话落库）：

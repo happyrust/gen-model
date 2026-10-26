@@ -245,3 +245,17 @@
   真因 os 112 磁盘满）；按 mtime 清掉 11:40 后写入的 20268 文件/12.35 GB（全是我方失败产物），D 回到 12.2 GB，
   默认 flags 一次即过。另有他人 cargo（78304，vendor relocation_noise_real）在跑，曾短暂抢 D 盘 target 锁。
 - 现状：31 M + 29 ?? 全部未提交，未推送。提交与否等用户定。
+
+---
+
+## 2026-10-26 · issues 复核 + P2 必败注入钩（Arena 侧代理，经 AstraFable 桥）
+
+- 交付：`docs/plans/2026-10-26-open-issues-audit.md`（未跟踪，未提交）——9 个 open issue 逐条核到 commit / 测试名 / 代码行；#65 #31 #62 #63 四条结论已发 GitHub 评论，**未关任何 issue**。
+- P2 §6 D6：`tests/increment_replay/main.rs` 加 `fail_roots` / `clear_fail_injection` / `expect_model_sesno_stay` + `Service::restart_with_fail_roots`（带 `AIOS_TEST_FAIL_ROOTS` 冷重启再推窗，预期失败的窗不等 `wait_in_sync`、改判 `model_sesno` 不推），新用例 `tests/increment_replay/cases/ams8000-equi-fail-inject.json`。本代理把 `INC-H05` 翻成 `has` 后，并发会话按「回放未跑绿前不翻」改回 `partial`——本代理认同，`INC-F05` 同理留 `partial`（只接了 `model_sesno` 半边，`applied_sesno` 半边要另一种注入）。
+- 上述四处改动已由并发会话随 `22b7a7e0a`（H02 park-after-1 + `ams8000-equi-data-fail-park`）一并提交；`git status` 里 main.rs 的 +293 是「本代理 75 行 + 对方约 218 行」的合计，不是重复劳动。
+- 修 `22b7a7e0a` 一处编译错：`tests/increment_replay/main.rs:1127` 格式串写了 `{}` 却没给实参，`cargo check --test increment_replay` 直接编不过（H02 的连败账断言因此从未被执行）→ 补 `case.dbnum`。
+- L2 跑法要点（踩过）：`AIOS_REPLAY_PROJECT_ROOT` 要指到**含 `AvevaMarineSample` 的那一层**（本机是 `..\_runs\ams-replay\E3D3.1`）；指到 `..\_runs\ams-replay` 会整档 skip 且 **exit 0**，日志里的「1 passed」是跳过不是跑绿——判绿只看有没有 `skip increment_replay:` 或断言失败。
+- 计划 §9 验收门 ② 原文「CI 含 L2 档并连续绿两周」与 P1 头部修正冲突，已按头部口径改写。
+- 待办转交：#68（`INC-I02` 与实现全空）、#69（零进展 0 评论）、#34（默认仍 false）+ #45 语料、#61 B 类 3 条、#63 只剩 `v0.1.43` tag 与 `0.1.43+g` 核对串、#65 目录项便宜路语料、登记表 23 条未落（P3 的 `increment_budget_baseline.json` 与 `scripts/nightly-local.ps1` 仍缺）、45 个 `output/` 取证脚本未入库。
+- 边界：本代理未 commit / push，`D:\AVEVA` 全程只读，桥接端点未写进任何文件。协同状态不变：仍按「暂停 / 记录 only」，本条即记录。
+

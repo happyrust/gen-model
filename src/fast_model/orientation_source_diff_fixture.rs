@@ -263,6 +263,34 @@ fn write_anonymous_text(path: &Path, edits: &[(u32, u32, &str)]) {
     assert!(commit.written.sesno > commit.previous.sesno);
 }
 
+/// 一次真实写会话里删掉元素的匿名显式属性（`(序号, hash)`）。
+fn remove_anonymous(path: &Path, edits: &[(u32, u32)]) {
+    let mut engine = e3d_io::ReadOnlyEngine::open(path).unwrap();
+    let mut writes = Vec::new();
+    for (n, hash) in edits {
+        let element = engine
+            .find_element(source_ref(*n))
+            .unwrap()
+            .unwrap_or_else(|| panic!("fixture element {n} missing"));
+        let mut draft = RecordDraft::from_record_bytes(&element.raw_bytes).unwrap();
+        assert!(draft.remove_explicit(*hash), "fixture must carry {hash:#X}");
+        writes.push(ElementWrite::Update(draft));
+    }
+    drop(engine);
+    let commit = write_element_session(
+        path,
+        &SessionRequest {
+            user: "orientation-test",
+            comment: "isolated anonymous-attribute removal",
+            clock: None,
+        },
+        &writes,
+        &[],
+    )
+    .unwrap();
+    assert!(commit.written.sesno > commit.previous.sesno);
+}
+
 /// 一次会话内同一条记录既有模板属性改动、又有匿名显式属性（混合窗）。
 fn write_mixed(path: &Path, edits: &[(u32, &str, Vec<(&str, DescriptorValue)>, Vec<(u32, &str)>)]) {
     const ANON_TEXT_TYPE: u16 = 10240;
@@ -1285,11 +1313,16 @@ fn synthetic_anonymous_explicit_attribute_reports_hash_pseudo_name() {
         !diff.placement_input_changed(),
         "纯属性存储变化挪不动世界矩阵，不该级联"
     );
-    // 改值同样点名；把属性删掉也一样。
+    // 改值同样点名；删掉也点名——before 有 after 无也是变化。
     write_anonymous_text(&path, &[(10, ANON_HASH, "Kangwp")]);
     let (next_base, next_target) = (pin(&path, BASE + 1), pin(&path, BASE + 2));
     let diff = diff_element(&next_base, &next_target, source_ref(10)).unwrap();
     assert_eq!(diff.attributes, vec!["#2902D6E2"]);
+    remove_anonymous(&path, &[(10, ANON_HASH)]);
+    let (third_base, third_target) = (pin(&path, BASE + 2), pin(&path, BASE + 3));
+    let diff = diff_element(&third_base, &third_target, source_ref(10)).unwrap();
+    assert_eq!(diff.attributes, vec!["#2902D6E2"]);
+    assert!(!diff.opaque);
 }
 
 /// 混合窗（ORI + 匿名属性同记录同窗）：`is_placement_only` 为假 → 根必须走
