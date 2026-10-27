@@ -104,6 +104,57 @@ fn running_queue_row(
     rows.iter().find(|row| row.state == "running")
 }
 
+/// 入队前的 park 复判（2026-10-28，park 双入队缺陷）。
+///
+/// 扫描循环已经按 `batch_failure_parked` 判过一次（命中 → blocker + 跳过），但从那一判到 `enqueue_discovered`
+/// 真正入队之间有一段窗口：循环还在扫别的文件时，另一条发现路（scope-refresh 与 reconcile 各自独立）排的同右端批次
+/// 可能已经跑完并失败、账本刚写 `streak=1`；本轮早已算好的 `params` 若照常入队，就是同一右端的第二次尝试——
+/// 实测两次失败相隔 545 ms，`DATA_BATCH_PARK_AFTER = 1` 的语义失守。活动闸只串行化发现轮、running 闸只挡在飞，
+/// `batch_queue::enqueue` 此刻也没有同 dbnum 排队行可并（失败行已 `finish` 摘掉），三道都挡不住「刚失败」。
+/// 所以在 `enqueue_discovered` 的 running 闸之前、仍持活动闸时再判一次——两条 drain 都在闸后，一处盖两路；
+/// 查询右端前进会顺带清账，重复判是幂等的。
+///
+/// 命中时的处置与扫描循环那一段同口径：控制台一句、首次命中落盘 `record_park`、返回一条带库号的 blocker；
+/// 入不入队由调用方决定（都不入）。库号用 HEAD 已有的 `with_dbnum` 带，不依赖未提交的 `scoped_to`，所以这条
+/// blocker 挡的是整相而不是只挡本库——为的是本修复能作为独立补丁落到 HEAD（f7ee75b6）。
+fn park_blocker_before_enqueue(
+    origin: &str,
+    found: &crate::data_interface::batch_scheduler::DiscoveredBatch,
+    parked: &crate::data_interface::batch_worker::ParkedVerdict,
+) -> crate::data_interface::initialization_phase::PhaseBlocker {
+    println!(
+        "[{origin}] dbnum={} 数据批次已失败（同右端第 {} 次）且右端未前进，入队前复判命中，\
+         本轮不自动重跑（保存新会话或人工执行恢复）",
+        found.dbnum, parked.streak
+    );
+    if parked.first_notice {
+        crate::data_interface::batch_failure_log::record_park(
+            &crate::data_interface::batch_failure_log::BatchPark {
+                dbnum: found.dbnum,
+                db_type: &found.db_type,
+                project: &found.project,
+                phase: found.phase.as_str(),
+                streak: parked.streak,
+                max_attempts: crate::data_interface::batch_worker::DATA_BATCH_PARK_AFTER,
+                end_sesno: parked.end_sesno,
+                file_path: found.path.to_str(),
+                last_reason: &parked.last_reason,
+                first_at: &parked.first_at,
+                last_at: &parked.last_at,
+            },
+        );
+    }
+    crate::data_interface::initialization_phase::PhaseBlocker::new(
+        found.phase,
+        format!(
+            "dbnum={} 数据批次已失败（同右端第 {} 次），已暂停自动重试（新会话或人工执行恢复）",
+            found.dbnum, parked.streak
+        ),
+    )
+    .with_dbnum(found.dbnum)
+    .with_project(found.project.clone())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2597,6 +2648,82 @@ mod tests {
             "两项权威读取都必须上浮，不能 return None: {discover}"
         );
     }
+
+    #[test]
+    fn a_batch_parked_between_the_scan_and_the_enqueue_is_not_enqueued_a_second_time() {
+        let source = include_str!("increment_manager.rs");
+        let body = source
+            .split_once(concat!("fn ", "enqueue_discovered("))
+            .expect("enqueue_discovered 未找到")
+            .1
+            .split_once(concat!("fn ", "sweep_holds_rows("))
+            .expect("enqueue_discovered 之后应当是 sweep_holds_rows")
+            .0;
+        let guard = body
+            .find("epoch_activation_guard();")
+            .expect("活动闸还在");
+        let recheck = body
+            .find("batch_failure_parked(")
+            .expect("入队前要复判 park");
+        let gate = body
+            .find("running_queue_row(&active_rows)")
+            .expect("running 闸还在");
+        assert!(
+            guard < recheck && recheck < gate,
+            "复判要在活动闸内、running 闸之前，才能同时盖住闸后的两条 drain: {body}"
+        );
+        assert_eq!(
+            body.matches("batch_failure_parked(").count(),
+            1,
+            "复判只许有闸前这一处，闸后两条 drain 里不得再留旧复判: {body}"
+        );
+        // 闸前那段复判：命中记 blocker、剔出 params（不入队）。
+        assert!(
+            body[recheck..gate].contains("park_blocker_before_enqueue("),
+            "命中 park 的行要记 blocker: {}",
+            &body[recheck..gate]
+        );
+
+        // running 分支：闸后第一处入队，必须排在复判之后。
+        let first_enqueue = body
+            .find("scheduler.enqueue(registry, &found, hold)")
+            .expect("running 分支仍要入队");
+        assert!(
+            recheck < first_enqueue,
+            "running 分支的入队必须在复判之后: {body}"
+        );
+
+        // 正常路：复判 → 装清单 → 入队，命中的 blocker 才进得了清单。
+        let install = body
+            .find("coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);")
+            .expect("装清单");
+        let normal_enqueue = install
+            + body[install..]
+                .find("scheduler.enqueue(registry, &found, hold)")
+                .expect("正常路入队");
+        assert!(
+            recheck < install && install < normal_enqueue,
+            "正常路：复判要在装清单之前，命中的 blocker 才进得了清单: {body}"
+        );
+
+        // 闸前复判用的 helper：库号用 HEAD 已有的 with_dbnum 带（不依赖未提交的 scoped_to，blocker 挡整相而非
+        // 只挡本库，好让本修复能独立落到 HEAD f7ee75b6），首次命中落盘，与扫描循环同口径。
+        let helper = source
+            .split_once(concat!("fn ", "park_blocker_before_enqueue("))
+            .expect("park 复判 helper 在")
+            .1
+            .split_once("\n}\n")
+            .expect("helper 以 } 收口")
+            .0;
+        assert!(
+            helper.contains(".with_dbnum(found.dbnum)") && !helper.contains(".scoped_to("),
+            "park blocker 要用 HEAD 已有的 with_dbnum 带库号，不得依赖未提交的 scoped_to: {helper}"
+        );
+        assert!(
+            helper.contains("record_park(") && helper.contains("first_notice"),
+            "首次命中要落盘 park 记录，与扫描循环同口径: {helper}"
+        );
+    }
 }
 
 /// 增量更新信息结构体
@@ -4755,6 +4882,24 @@ impl AiosDBManager {
         let coordinator =
             crate::data_interface::initialization_phase::InitializationCoordinator::global();
         let active_rows = scheduler.snapshot();
+        // park 复判（2026-10-28，见 [`park_blocker_before_enqueue`]）：扫描循环判过一次，但从那一判到这里，
+        // 另一条发现路排的同右端批次可能刚失败、账本刚写——此刻再排就是同右端第二次。放在 running 闸之前、
+        // 仍持活动闸时只判这一处：本函数是唯一的入队入口，两条 drain（running 分支与正常路）都在闸后，闸前
+        // 剔一次就同时盖住两条路；而 HEAD 的 running 分支是整轮早退、没有 drain，闸前这一处对 HEAD 与工作树
+        // 都成立。命中的行剔出 `params`、记一条 blocker：正常路随 `install_manifest` 进本轮清单，running 分支
+        // 与其它 blocker 一样留待下一次全清单重扫；控制台与首次落盘由 helper 打出，每库每轮最多消耗一次 `first_notice`。
+        params.retain(|_path, found| {
+            match crate::data_interface::batch_worker::batch_failure_parked(
+                found.dbnum,
+                found.file_latest_sesno,
+            ) {
+                Some(parked) => {
+                    phase_blockers.push(park_blocker_before_enqueue(origin, found, &parked));
+                    false
+                }
+                None => true,
+            }
+        });
         if let Some(running) = running_queue_row(&active_rows) {
             let active_epoch = coordinator.snapshot().epoch_id;
             println!(
