@@ -258,7 +258,12 @@ model_unit_level_publish = true
 # 一度被这道监听门挡住、还报成「未找到 dbnum=1112」。同日已修在代码里——点名入口
 #（`UpdateScope::unrestricted()`）不再受 `watch_dbnums` / `--debug-dbnum` 两道监听门管，
 # 名单只圈 watcher 自己扫出来的活，于是撤回，仍是 [7998, 8000]。
-watch_dbnums = [7998, 8000]
+#【变更 2026-10-27】[7998, 8000] → [7997, 7998, 8000]：7997 的 `applied_sesno` 一直是 0、
+# `initialized=false`（pe 数据面从没导入过），而 215 间在册房间里有 214 间属于 7997。
+# 后果是 `/model/ensure` 能把 7997 的 49062 行模型产物生成出来（它不受这道门管），
+# 但 `room_relate` 的成员边算不出来——`load_room_panel_map_from_pe` 要按 `pe + pe_owner`
+# 分组房间与面板，而 pe 里 7997 一行都没有。监听它才能跑基线导入把 pe 补上。
+watch_dbnums = [7997, 7998, 8000]
 
 #【新增 2026-09-03】model_incremental_types —— 模型增量类型限定，默认不写 = 不限类型
 # 把「模型增量」圈到这几种最小交付单元类型的生成根，例如
