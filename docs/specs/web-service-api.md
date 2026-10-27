@@ -1026,6 +1026,14 @@ gen-model-v1 读透形态两样都没有（投影只存网格与世界矩阵，`
 `SPRE → SCOM → PTRE → PTSE`（`e3d_model::catalogue_point_set`）解出整个点集——与隐式管身两端
 所用的 P 点是同一份求值环境算出来的数字（`web_service::ptset`）。
 
+> **库里的副本：`pe_ptset`（2026-10-27，plant-ui #2，ptset 分表计划 W2 / W3）**。这条端点仍不连库；但 SurrealQL 侧的长度函数
+> （`resource/surreal/gy_common.surql` 的 `fn::bran_comp_len` / `fn::elbo_len` / `fn::tee_len`，`aios_core`
+> `query_bran_fixing_length` 走它们）在烘焙网格的新库上取不到 `inst_info.ptset`，一律算 0。现在由生成服务在
+> **整根发布的同一笔事务里**把每个路由成员（BRAN / HANG 等容器的直属管件）与类 28 NOZZ 的点集写进
+> `pe_ptset:⟨word0_word1⟩ = { pe, root, dbnum, noun, ptset: { "<P 号>": { pt, dir, bore, noun } }, count, unresolved: [{ number, reason }], sesno, generator, reason, written_at }`
+> （局部系 mm，与本端点 `points[]` 同源：e3d-model `GenerationOutcome::point_sets`，`fast_model::ptset_rows`），三个函数改读这张表（`fn::pe_ptset_of`）。
+> 没有行 = 这根还没按新版发布过（部署后逐库 `POST /api/v1/dbnums/{dbnum}/model/rebuild` 补齐，没有后台补写）；有行但 `ptset: {}` = 这件真没有 P 点（`reason` 说明）。
+
 - 请求：`{ "refno": "24381/145031", "include_members": false }`（`refno` 收 `a/b` / `a_b` /
   带 `=` 前缀；身份三元组可选，同 §3）。`include_members=true` 一并解**直属成员**的点集：
   BRAN / EQUI 这类容器自身没有 `SPRE`，测量悬停在容器上时要显示的是成员的 P 点（E3D 元素级

@@ -1,3 +1,19 @@
+## 2026-10-27
+
+### 管件目录 P 点随根发布、同一笔事务写进 `pe_ptset`，长度函数改读它（plant-ui #2，ptset 分表计划 W2 + W3）
+
+- **为什么**：plant-ui #2「查询管件的长度」在新库上全是 0：烘焙网格的新管线没有 `inst_info.ptset`，`fn::bran_comp_len` / `fn::elbo_len` / `fn::tee_len` 取不到数据。曾有一版「durable ACK 后后台补写 + 启动补扫」（`ptset_backfill`，未提交），2026-10-27 拍板不要（计划 D5）：补写是异步的，行与模型行之间有窗口，还得养一套队列 / 补扫 / 放弃账；老根直接逐库重建就能补齐。改成发布路径同步写：e3d-model 生成一根时随 `GenerationOutcome::point_sets` 交出每个路由成员（BRAN / HANG 等容器的直属管件）与类 28 NOZZ 的目录 P 点集（vendor `b9324e0`，W1，已对 E3D TTY 真值 1471 点 0 差异），gen-model 把它折成 `pe_ptset` 行、与这根的模型行**同一笔发布事务**落库。
+- **改**：
+  - 新 `src/fast_model/ptset_rows.rs`：`ProjectedPointSet`（随 `ProjectionCommit` 序列化进模型产物）、`project_point_sets`（每件一条，没点的也一条、`reason` 说明哪一种；非有限坐标记进 `unresolved`）、`render_rows`（`UPSERT pe_ptset:⟨w0_w1⟩ CONTENT { pe, root, dbnum, noun, ptset: { "<P 号>": { pt, dir, bore, noun } }, count, unresolved: [{ number, reason }], sesno, generator, reason, written_at }`，`sesno` = 这根本次发布的 `source_sesno`，`generator` = e3d-model `PTSET_EVAL_VERSION`）、`render_root_clear`（`DELETE (SELECT VALUE id FROM pe_ptset WHERE root = …)`：按 `pe_ptset_root` 索引选 id 再删，不写谓词删）。
+  - `model_memory_store.rs`：`ProjectionCommit.point_sets: Option<Vec<_>>`（`#[serde(default)]`，盘上旧产物是 `None`）；存储按根记条目，只有 `WholeRoot` 且带 `Some` 的提交才整批替换（`Some(空)` 也替换），`None`（只盖章的 `cached_root_commit`）/ `Partial` 不动；删根 / 忘根 / 整库清空一起摘；`point_sets_of_root()`。
+  - `model_db_adapter.rs`：`RootShare.point_sets`；`persist_group` 的 prelude 对有回执且有条目的根先清旧行，新行跟在该根**最后一块**几何后面、同一笔事务（与房间边同一个位置，块字节与回执不变），结算日志多 `ptset_rows=`；`persist_root_impl` 同一规矩；镜像 spool：`render_spooled_root` 有条目才清 + 写（没条目 = 这一世没带过，镜像那份不动），`render_spooled_scope_deletion` 的墓碑一律清。
+  - `e3d_model_service.rs`：`GeneratedSnapshot` / `BakedSnapshot` 透传 `point_sets`；初始切片与整根重生成两处 `commit.point_sets = Some(…)`（清单没变的回执也带：几何一样不等于 P 点行已经在，换 vendor 后第一次重建正是这种）；单元 delta 的 `Partial` 提交 `None`。
+  - `resource/surreal/gy_common.surql`（W3）：`define table if not exists pe_ptset schemaless` + `define index if not exists pe_ptset_root … fields root`（与函数同一处出厂，`embedded_surql` 编译期内置，启动与镜像都灌）；新 `fn::pe_ptset_of($pe)`；`fn::bran_comp_len` 直通件仍是 P(LEAV)–P(ARRI) 距离、只换源；`fn::elbo_len` 改用两端 P 点算中心线弧长（弦长 + 转角 = π − 两朝外方向夹角，`chord / (2 sin(θ/2)) × θ`，直通退化为弦长；原 `PrimCTorus` 参数已随烘焙退役）；`fn::tee_len` = 主管 P1–P2 距离 + P3 到主管轴线的垂距（按 P1 / P2 而不是 ARRI / LEAV：流向 1 → 3 的三通按后者算出的是斜弦；缺席才退回）。`fn::bran_tubi_len` / `fn::bran_len` 不动。
+  - 语义：**没有行 = 这根还没按新版发布过**；**有行但 `ptset: {}` = 这件真没有 P 点**（`reason` 说明）。长度函数对两种都回 0。
+- **验证**：单测新增 7 个（`ptset_rows` 4、存储 1、适配器 2——其中 `pe_ptset_rows_land_with_the_publication_and_feed_the_length_functions` 把 `gy_common.surql` 原文灌进内存 SurrealDB，合块路 `persist_roots_batched_unacked` 与逐根路 `persist_root_on` 各跑一遍：2 行落地、`fn::bran_comp_len` = 2000、`bore` = 500、ATTA 空行带 `reason`、再发一次少一件旧行按根清掉、只盖章不动行）；`cargo test --lib` 2650 passed / 0 failed / 134 ignored（live）；`cargo test --tests` 所有集成目标通过（`src/bin/direct_model_persist.rs` 的存量断言 `content_addressed_file_is_reused_only_after_full_comparison` 自 f40e8b3d5 起就红，与本条无关）。
+- **上线（计划 W6）**：部署后 20 库低峰**串行** `POST /api/v1/dbnums/{dbnum}/model/rebuild`（每库重建期间按 #74 该库不可见）；重建前老根的长度函数回 0。以后 `PTSET_EVAL_VERSION` 加一也走同一条 SOP，行上的 `generator` 让巡检分得清哪些库还没跑。
+- **没动**：模型行的块字节与回执（ADR-071，ptset 语句只追在同一事务里）；`POST /api/v1/element/ptset` 直读端点与前端 P 点来源；三处老投影 `out.ptset.d.pt AS pts`（恒 NONE，`gy_common.surql` 头注释写明 `pe_ptset` 是唯一权威）；没有任何后台补写 / 启动补扫 / `AIOS_PTSET_BACKFILL` 开关。
+
 ## 2026-10-26
 
 ### 发布包出厂改 rocksdb：`Start-AMS.ps1` 不给档时回填 rocksdb，本机端口上没库就用包内 surreal 起一台

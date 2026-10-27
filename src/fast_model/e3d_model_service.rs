@@ -1297,6 +1297,9 @@ pub struct GeneratedSnapshot {
     /// e3d-model DFS 访问到的子树元素（含根、含不出几何的容器）。读透形态下这就是
     /// 「生成一根要顺手写透哪些元素」的名单（`GenerationOutcome::visited`）。
     pub visited: Vec<RefNo>,
+    /// 路由成员 / NOZZ 的目录 P 点集，每件一条（`GenerationOutcome::point_sets`）：与几何同一次求值，
+    /// 发布时折成 `pe_ptset` 行随根落库（[`crate::fast_model::ptset_rows`]）。
+    pub point_sets: Vec<e3d_model::MemberPointSet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2536,7 +2539,8 @@ impl E3dModelService {
                 published: None,
                 projection_complete: false,
             };
-            let (commit, mut report) = project_geometry_delta(
+            let point_sets = snapshot.point_sets;
+            let (mut commit, mut report) = project_geometry_delta(
                 dbnum,
                 source_sesno,
                 snapshot.elements,
@@ -2544,6 +2548,10 @@ impl E3dModelService {
                 Some(&publication),
                 &index.owners,
             )?;
+            // 初始切片与整根重生成同一条规矩：P 点行随根落（ptset 分表计划 W2）。
+            commit.point_sets = Some(crate::fast_model::ptset_rows::project_point_sets(
+                root, point_sets,
+            ));
             report.skipped += snapshot.report.skipped.len();
             report.generation_report = serde_json::to_value(&snapshot.report)?;
             projection.visited_by_root.insert(root, snapshot.visited);
@@ -3190,6 +3198,7 @@ impl E3dModelService {
             publication.model_target =
                 Some(self.model_target(dbnum, source_sesno, dependency_sessions)?);
             let carried_room = snapshot.room;
+            let point_sets = snapshot.point_sets;
             let (mut commit, mut projected) = project_geometry_delta(
                 dbnum,
                 source_sesno,
@@ -3203,6 +3212,11 @@ impl E3dModelService {
             if let Some((_, receipt)) = commit.receipt.as_mut() {
                 receipt.room = carried_room;
             }
+            // 路由成员的 P 点集也随整根重生成走（ptset 分表计划 W2）：清单没变的回执照带——几何一样不等于 P 点行已经在
+            // （换 vendor 后第一次重建正是这种），行便宜，写就是了。
+            commit.point_sets = Some(crate::fast_model::ptset_rows::project_point_sets(
+                root, point_sets,
+            ));
             projected.skipped += root_skipped;
             projected.failed += root_failed;
             commits.push(commit);
@@ -3762,6 +3776,7 @@ fn generate_snapshot_from_set(
         owners: Arc::clone(&index.owners),
         report: outcome.report,
         visited: outcome.visited,
+        point_sets: outcome.point_sets,
     })
 }
 
@@ -3802,6 +3817,8 @@ pub struct BakedSnapshot {
     /// 这一根随回执走的房间归属边（B/T3，`RootReceipt::room`）：bake 时给了计算器才有；发布段把它挂到
     /// `project_geometry_delta` 折出来的回执上。
     pub room: Option<crate::fast_model::model_memory_store::CarriedRoomEdges>,
+    /// 随 [`GeneratedSnapshot::point_sets`] 原样带过来；烤制不动 P 点。
+    pub point_sets: Vec<e3d_model::MemberPointSet>,
 }
 
 /// Triangulate, hash and publish one element's mesh.
@@ -4034,6 +4051,7 @@ fn bake_snapshot(
         report: snapshot.report,
         visited: snapshot.visited,
         room,
+        point_sets: snapshot.point_sets,
     })
 }
 
@@ -4243,6 +4261,8 @@ pub(crate) fn republish_roots_by_unit_delta_on(
                 },
             )),
             scope: CommitScope::Partial,
+            // 局部清单不带 P 点：只重建了变了的几件，整根的点集在存储里照旧（`None` = 不动）。
+            point_sets: None,
         });
         landing.push((root_refno.clone(), receipt_only));
     }
@@ -5775,6 +5795,7 @@ mod tests {
                 owners: Arc::new(owners.clone()),
                 report: Report::default(),
                 visited: Vec::new(),
+                point_sets: Vec::new(),
             },
             &mesh_dir,
             Some(&rooms),
@@ -5794,6 +5815,7 @@ mod tests {
                     owners: Arc::new(owners),
                     report: Report::default(),
                     visited: Vec::new(),
+                    point_sets: Vec::new(),
                 },
                 &mesh_dir,
                 None,
@@ -10200,6 +10222,7 @@ mod tests {
             report: Report::default(),
             visited: Vec::new(),
             room: None,
+            point_sets: Vec::new(),
         }
     }
 

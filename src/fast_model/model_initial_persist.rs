@@ -263,6 +263,7 @@ mod tests {
         ProjectionCommit {
             tube_branch_resets: Vec::new(),
             removals: Vec::new(),
+            point_sets: None,
             receipt: Some((
                 root,
                 RootReceipt {
