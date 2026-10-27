@@ -6370,7 +6370,7 @@ mod tests {
         TypeOrOwner,
         /// 至少一个变更属性 DCHC = 4（core `REPELE` / `SEGREP` 重建）。
         Dchc4,
-        /// 没有 4，至少一个 DCHC = 1 / 2（core 转成类别 4 落到前一元件 / 自身 / 分支）。
+        /// 没有 4，至少一个 DCHC = 1 / 2（core 升成类别 4 后 `EVALCD` 自身；只有 `INTUBE` 落到前一元件）。
         Dchc12,
         /// 没有 4 / 1 / 2，至少一个 DCHC = 3（`POS` / `ORI` / `BFORI`：core 只改段矩阵）。
         Dchc3,
