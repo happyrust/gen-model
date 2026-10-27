@@ -38,6 +38,10 @@ const RANGE_TABLES: &[&str] = &[
     "inst_info",
     "aabb",
     "trans",
+    // 管件目录 P 点分表（ptset 分表计划 W2，`fast_model::ptset_rows`）：record id 与 `pe` 同键 `<ref0>_<ref1>`，
+    // 行随模型行同一笔发布写出，所以是模型面：整库清模型 / 重初始化跟 `inst_relate` 一起按 Ref0 区间删，
+    // 不然重建后成员已经没了的管件还留着旧 P 点行，长度函数静默算旧值。
+    "pe_ptset",
     // **不在**这份清单里的两张交付台账（plan 2026-09-22 D7）：`datacenter_version`（rs-server 的
     // 提资状态账）与 `datacenter_delete`（待交中台删的老位号）。它们记的是「中台那边有什么 /
     // 该删什么」，与本库重不重建无关——回退 / 重初始化 / 删库都不清，源码钉
@@ -340,6 +344,10 @@ pub(crate) fn render_rollback(
                 "DELETE {table} WHERE dbnum = {dbnum} AND model_sesno > {target_watermark};"
             ));
         }
+        // `pe_ptset` 行上记的是这根发布时的 `sesno`（= 模型行的 `model_sesno` 口径），超过回退目标的行跟模型行一起退。
+        deletes.push(format!(
+            "DELETE pe_ptset WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
+        ));
     }
     // 房间面整库删（房间本来就是整库重算，边上不带 sesno）。谓词落在 `in` 而不是 `dbnum`：
     // `room_model::render_room_edge_row` / `render_room_panel_relate_write` 写出的边只有
@@ -1247,6 +1255,7 @@ mod tests {
             "inst_info",
             "aabb",
             "trans",
+            "pe_ptset",
         ] {
             assert!(
                 !ranges
@@ -1601,6 +1610,8 @@ mod tests {
                 "DELETE {table} WHERE dbnum = 7997 AND model_sesno > 41;"
             ));
         }
+        // P 点分表随模型面退（行上是发布时的 sesno）。
+        at("DELETE pe_ptset WHERE dbnum = 7997 AND sesno > 41;");
         assert!(
             !sql.contains("gen_root"),
             "逐根凭证行随 gen_root 退役（ADR-079）:\n{sql}"
@@ -1797,6 +1808,7 @@ mod tests {
                 "inst_info",
                 "aabb",
                 "trans",
+                "pe_ptset",
             ]
         );
         let rendered = render_model_face_wipe(7997, &["24381".into()]);
