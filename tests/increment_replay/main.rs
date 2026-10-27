@@ -490,7 +490,55 @@ struct Service {
     restarts: u32,
 }
 
+/// 把仓根 `resource/surreal/*`（普通文件）拷进 `<run_dir>/resource/surreal`，在 spawn 服务之前调。
+///
+/// 被测服务以运行目录为 CWD（自己的单实例锁、自己的 dblog / accel_tree），而 `aios_core` 连库时按 CWD 相对路径
+/// `resource/surreal` 装 SurrealQL 函数脚本，目录不在就 `Failed to define common functions … (os error 3)`，用例连场景
+/// 都进不去（与 `l3_suite` 的 `stage_surreal_scripts` 同一个理由）。拷贝而不是 junction：几份小文本，运行目录自给自足、
+/// 删起来放心。幂等：再调一次只是覆盖同名文件。源目录不在、或一个文件都没拷到，当场 panic 说清。
+fn stage_surreal_scripts(repo: &Path, run_dir: &Path) {
+    let source = repo.join("resource").join("surreal");
+    assert!(
+        source.is_dir(),
+        "仓根没有 SurrealQL 脚本目录 {}，被测服务连库时装不了函数",
+        source.display()
+    );
+    let target = run_dir.join("resource").join("surreal");
+    fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
+    let mut copied = 0usize;
+    let entries =
+        fs::read_dir(&source).unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
+        let is_file = entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false);
+        if !is_file {
+            continue;
+        }
+        fs::copy(entry.path(), target.join(entry.file_name())).unwrap_or_else(|e| {
+            panic!(
+                "stage SurrealQL script {} into {}: {e}",
+                entry.path().display(),
+                target.display()
+            )
+        });
+        copied += 1;
+    }
+    assert!(
+        copied > 0,
+        "{} 下一个 SurrealQL 脚本都没有，被测服务连库时装不了函数",
+        source.display()
+    );
+}
+
 /// 起服务进程（不含 surreal）：stdout / stderr 落到运行目录里的 `<tag>.log` / `<tag>.err`。
+///
+/// CWD 是运行目录，不是仓根：服务按进程 CWD 取单实例锁（`.gen-model.instance.lock`，Windows 上 deny-share 打开），
+/// 仓根那把锁常被本机常驻开发服务持有，用仓根当 CWD 的用例会在 `stage=instance-lock` 退出；服务还会把
+/// `<stamp>_dblog.txt` / `accel_tree_*.snapshot` / `accel_tree.bin` 写进 CWD，那些也该落在运行目录里。调用方要先
+/// [`stage_surreal_scripts`]（`Service::start` 做，冷重启复用同一个运行目录）。
 fn spawn_server(
     server_exe: &Path,
     run_dir: &Path,
@@ -503,7 +551,7 @@ fn spawn_server(
     let assets = run_dir.join("assets");
     fs::create_dir_all(&assets).expect("assets dir");
     let child = Command::new(server_exe)
-        .current_dir(repo())
+        .current_dir(run_dir)
         .env("DB_OPTION_FILE", config.with_extension(""))
         .env("AIOS_STORE_MODE", "rocksdb")
         .env("AIOS_DATA_FACE", "ingest")
@@ -554,6 +602,8 @@ impl Service {
             std::thread::sleep(Duration::from_millis(500));
         }
 
+        // 服务以运行目录为 CWD，连库时按 CWD 找 `resource/surreal`：脚本得在 spawn 之前就位。
+        stage_surreal_scripts(&repo(), run_dir);
         let (child, stdout_path) = spawn_server(&env.server_exe, run_dir, extra_env, "stdout");
         let config = run_dir.join("DbOption.toml");
         let config_text = fs::read_to_string(&config).expect("derived config");
@@ -1852,4 +1902,45 @@ fn replay_cases_land_in_sync_and_match_their_expectations() {
     for case in &cases {
         run_case(&env, case);
     }
+}
+
+/// 被测服务的 CWD 必须是运行目录，不能是仓根：服务按进程 CWD 取单实例锁（`.gen-model.instance.lock`，Windows 上
+/// deny-share 打开），仓根那把锁常被本机常驻开发服务（监听 0.0.0.0:8022）持有，每条用例都会在 `stage=instance-lock`
+/// 退出 1；CWD 在仓根还会把 `<stamp>_dblog.txt` / `accel_tree_*.snapshot` / `accel_tree.bin` 写进仓根，污染检出。
+/// 而 `aios_core` 连库时按 CWD 相对路径 `resource/surreal` 装函数脚本，目录不在就 `Failed to define common functions …
+/// (os error 3)`，所以 `Service::start` 必须先把仓根的脚本拷进运行目录再 spawn。首次启动与冷重启共用 `spawn_server`，
+/// 两条路一起钉住。不要回放环境。
+#[test]
+fn the_service_under_test_runs_from_the_run_directory_with_staged_surql_scripts() {
+    let source = include_str!("main.rs");
+    let spawn = source
+        .split_once("fn spawn_server(")
+        .expect("spawn_server 还在")
+        .1
+        .split_once("\nimpl Service {")
+        .expect("spawn_server 后面紧跟 impl Service")
+        .0;
+    assert!(
+        spawn.contains(".current_dir(run_dir)"),
+        "被测服务的 CWD 要是运行目录:\n{spawn}"
+    );
+    assert!(
+        !spawn.contains(".current_dir(repo())"),
+        "被测服务不许拿仓根当 CWD（与常驻服务抢单实例锁、往仓根写 dblog / accel_tree）:\n{spawn}"
+    );
+    let start = source
+        .split_once("impl Service {\n    fn start(")
+        .expect("Service::start 还在")
+        .1
+        .split_once("    fn restart_with_fail_roots(")
+        .expect("start 后面紧跟 restart_with_fail_roots")
+        .0;
+    let stage = start
+        .find("stage_surreal_scripts(")
+        .expect("start 要先把 surql 脚本拷进运行目录");
+    let spawn_call = start.find("spawn_server(").expect("start 调 spawn_server");
+    assert!(
+        stage < spawn_call,
+        "脚本要在 spawn 之前就位，不然服务连库就失败:\n{start}"
+    );
 }
