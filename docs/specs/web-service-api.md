@@ -1215,7 +1215,8 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
 - **房间归属（`rooms=`，`fast_model::spatial_rooms`）**：成员集的取法与 `e3d.room.lookup` 同一条判据分两路——
   读透形态（`data_face = read-through`）库上不落 `room_relate` 边，用常驻房间模型 + 候选的内存投影记录现算
   （`MemoryRoomCalculator::calculate_for_root`，只读投影快照、**不取空间串行锁**）；没有投影记录的候选（树从快照恢复而本进程没再
-  ensure 过的根）判不出归属，计入 `room_status.unresolved`、从结果剔除、`warnings` 加一句。摄入 / 落盘形态直接读 `SUL_DB` 的
+  ensure 过的根）判不出归属，计入 `room_status.unresolved`、从结果剔除（**不出 `warnings`**：构件没有房间归属是常态，
+  场地、支架、跨房间管道本来就不在任何一间房里）。摄入 / 落盘形态直接读 `SUL_DB` 的
   `room_relate`（`in ∈ 所选面板`），并按候选所在库核 `dbnum_watermark.model_room_generation` 是否当前代（`room_status.library_alignment_current`），
   不是当前代**照常答**、`warnings` 加一句，不 409。
 - **上限**：读锁内最多取 `candidate_cap = 200000` 条候选，超出置 `truncated_candidates: true`（`candidate_count` 是过滤前的
@@ -1237,7 +1238,7 @@ gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（P
                       "spec_values": [{ "value": 1, "count": 0 }] },
   "room_status": { "rooms": [{ "refno": "17496_8516", "room_num": "A101" }], "source": "memory | durable",
                    "matched": 12, "unresolved": 0, "definition_version": "…", "library_alignment_current": null },
-  "warnings": ["房间过滤：3 个候选没有内存投影记录、判不出房间归属，已从结果剔除（先显示它们再查会被纳入）"],
+  "warnings": ["房间归属不是当前代：所在库的房间边还没对齐到当前房间模型，结果可能过期"],
   "spatial_state": "ready", "coverage": "global-tree" }
 ```
 

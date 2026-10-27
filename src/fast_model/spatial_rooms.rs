@@ -12,7 +12,9 @@
 //!   可承诺的答复）；没有投影记录的候选（树从快照恢复而本进程没再 ensure 过的根）判不出归属，计入 `unresolved`、从结果剔除。
 //! - **摄入 / 落盘形态**：直接读 `SUL_DB` 的 `room_relate` 边（`in ∈ 所选面板`）。
 //!
-//! 归属不是当前代 / 没算过的候选**照常答**（Q13）：`room_status` 说清来源与缺口，`warnings` 各加一句，不 409。
+//! 归属不是当前代 / 没算过的候选**照常答**（Q13）：`room_status` 说清来源与缺口，不 409。
+//! `warnings` 只留给真正会答错的「归属不是当前代」；构件没有房间归属是常态（场地、支架、跨房间管道
+//! 本来就不在任何一间房里），只记进 `room_status.unresolved`，不出警告。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -200,14 +202,12 @@ impl RoomScope {
     }
 
     /// 要并进响应 `warnings` 的话（没有就空）。
+    ///
+    /// `unresolved` 不出警告：构件没有房间归属是常态（房间模型只覆盖有面板的房间，
+    /// 场地、支架、穿行管道本来就不在任何一间房里），条数仍如实写在 `room_status.unresolved`
+    /// 里给需要的人看。只有「归属过期」这种确实会答错的情况才值得提示。
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if self.unresolved > 0 {
-            out.push(format!(
-                "房间过滤：{} 个候选没有内存投影记录、判不出房间归属，已从结果剔除（先显示它们再查会被纳入）",
-                self.unresolved
-            ));
-        }
         if self.library_alignment_current == Some(false) {
             out.push("房间归属不是当前代：所在库的房间边还没对齐到当前房间模型，结果可能过期".to_string());
         }
@@ -700,8 +700,9 @@ mod tests {
         assert!(matches!(error, SpatialQueryError::BadRequest(message) if message.contains("不是在册房间")));
     }
 
+    /// 「判不出归属」是常态，不出警告；只有代次过期才提示。条数照旧进 `room_status`。
     #[test]
-    fn scope_warnings_name_the_unresolved_count_and_stale_alignment() {
+    fn scope_warnings_only_report_stale_alignment_not_unresolved() {
         let mut scope = room_scope_from_members(
             vec![RoomRef {
                 refno: refno(1).to_string(),
@@ -712,15 +713,15 @@ mod tests {
         );
         assert!(scope.contains(refno(100)));
         assert!(!scope.contains(refno(102)));
-        let warnings = scope.warnings();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("3 个候选"));
+        assert!(
+            scope.warnings().is_empty(),
+            "无房间归属是正常现象，不该出现在 warnings 里"
+        );
         scope.library_alignment_current = Some(false);
-        assert_eq!(scope.warnings().len(), 2);
+        assert_eq!(scope.warnings().len(), 1, "代次过期仍要提示");
         let status = scope.status_json();
-        assert_eq!((status.matched, status.unresolved), (2, 3));
+        assert_eq!((status.matched, status.unresolved), (2, 3), "条数仍如实上报");
         assert_eq!(status.rooms[0].room_num, "A101");
-        scope.unresolved = 0;
         scope.library_alignment_current = Some(true);
         assert!(scope.warnings().is_empty());
     }

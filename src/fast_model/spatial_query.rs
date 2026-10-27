@@ -3047,8 +3047,12 @@ mod tests {
         let status = response.room_status.as_ref().expect("rooms 给了就有 room_status");
         assert_eq!((status.matched, status.unresolved), (2, 2));
         assert_eq!(status.rooms[0].room_num, "A101");
-        let warnings = response.warnings.as_deref().expect("unresolved > 0 要提示");
-        assert!(warnings[0].contains("2 个候选"), "{warnings:?}");
+        // 判不出归属不是异常，不进 warnings；缺口只写在 room_status.unresolved 里。
+        assert!(
+            response.warnings.is_none(),
+            "无房间归属不该产警告：{:?}",
+            response.warnings
+        );
 
         let refnos = assemble_nearby_refnos(scan_local(&tree, &query), &query, &table, Some(&scope));
         assert_eq!(refnos.refnos, vec![refno(3).to_string(), refno(4).to_string()]);

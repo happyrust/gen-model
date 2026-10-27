@@ -995,9 +995,9 @@ impl TreeDraft {
 
         let mut warnings = response_warnings(&center, params.rooms.as_ref().map(|_| scope)).unwrap_or_default();
         if params.rooms.is_none() {
-            if scope.unresolved > 0 {
-                warnings.push(format!("{} 个候选暂时无法解析房间归属，保留在「未归属房间」中", scope.unresolved));
-            }
+            // 「未归属房间」这一组本身就是正常归宿：房间模型只覆盖有面板的房间，
+            // 场地、支架、跨房间的管道都不属于任何一间房。这类构件照旧挂进
+            // 「未归属房间」，但不再产出警告——条数在 `room_status.unresolved` 里。
             if scope.source == "unavailable" {
                 warnings.push("房间归属服务暂不可用，命中构件保留在「未归属房间」中".to_string());
             }
