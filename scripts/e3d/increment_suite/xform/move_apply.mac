@@ -1,0 +1,13 @@
+-- 登记: C03 / F04 / D04 | 语义: 整根平移；预期 unit_kinds=transform、geometry_moved=1、aabb_shift [500,0,0]、行数不变（ADR-066） | expected_net: modified | restore 搭档: xform/move_restore.mac
+-- 来源: scripts/e3d/replay/equi_apply.mac:12（BY）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-MOVE-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q POS WRT /*
+BY E 500 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/move apply: EQ-A BY E 500'
+$P SUITE-XFORM-MOVE-APPLY-DONE
+ALPHA LOG END

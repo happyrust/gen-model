@@ -1,0 +1,16 @@
+-- 登记: A08 | 语义: 两根移回 | expected_net: cancelled | restore 搭档: 本文件是 compound/two_roots_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-COMPOUND-2R-RESTORE-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+BY D 400 WRT /*
+Q POS WRT /*
+/AIOS-SUITE-EQ-NBX
+Q REF
+Q NAME
+BY D 400 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite compound/two_roots restore'
+$P SUITE-COMPOUND-2R-RESTORE-DONE
+ALPHA LOG END

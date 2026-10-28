@@ -1,0 +1,11 @@
+-- 登记: G02 | 语义: EQ-RM 回 R201 | expected_net: cancelled | restore 搭档: 本文件是 room/member_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-MEMBER-RESTORE-ALIVE
+/AIOS-SUITE-EQ-RM
+Q REF
+Q NAME
+POS E 60000 N 5000 U 1000
+Q POS WRT /*
+SAVEWORK 'AIOS suite room/member_move restore: EQ-RM back to R201'
+$P SUITE-ROOM-MEMBER-RESTORE-DONE
+ALPHA LOG END

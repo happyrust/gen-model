@@ -1,0 +1,438 @@
+{
+  "version": 1,
+  "suite": "pml-increment-suite",
+  "prefix": "/AIOS-SUITE-",
+  "description": "gen-model 增量更新 PML 测试套件：元件级增删改全覆盖，三层可逆性（L-PML restore / L-FILE replay-init / L-DB 隔离副本）。设计见 docs/specs/incr-gen-audit-aux/pml-increment-suite-design.md。",
+  "log_placeholder": "{{LOG_PATH}}",
+  "world_placeholder": "{{WORLD_ANCHOR}}",
+  "world_placeholder_note": "★ TTY 实测（2026-10-28）：{{WORLD_ANCHOR}} 渲染时必须展开成两行——第一行是名称导航（如 /1RX03-EQUI），第二行是 OWNER。第一行把 CE 挪进目标库，第二行上跳到该库 WORLD。只写导航不写 OWNER 时 COLLECT ALL SITE ... FOR CE 返回空数组（FOR CE 是相对当前元素的子级，不是世界级）。详见设计文档 7.2。",
+  "rvm_truth": {
+    "model": "rvm-truth.json",
+    "export": "Export-SuiteRvmTruth.ps1",
+    "compare": "Compare-SuiteRvmTruth.ps1",
+    "note": "每条写腿之后整棵 /AIOS-SUITE-8000 只读导出一份 RVM → rvm-truth/<sesno>.json（K 组同一约定）；每条腿应有的几何变化、AABB 看不见的腿、待校准项都在 rvm-truth.json，流程见 README「RVM 真值」节。截至 2026-10-28 还没有导过任何一份。"
+  },
+  "world_anchor": {
+    "db8000": {
+      "anchor_macro_line": "/1RX03-EQUI",
+      "anchor_refno": "24384/22399",
+      "world_refno": "16192/0",
+      "element_prefix": "24384",
+      "how_found": "从 BRAN /C-OR-1R345-C (=24384/23257) 逐级 OWNER：BRAN → PIPE /1RX-345 → ZONE /1RX03-LCT → SITE /1RX03-EQUI → WORLD /*",
+      "formula": "word0 = db_no + 0x2000 × extent（extent 从 1 起算，所以 extent 1 = +8192、extent 2 = +16384、extent 3 = +24576）。源码依据 vendor/e3d-io/src/refno.rs:17-30：dbno() = (word0 & 0x1FFF) | ((word0 >> 13) & 0x3E000)，extent() = (word0 >> 13) & 0x1FFF。★ 仅对 db_no <= 8191 成立；大库号高 5 位在 bit 26..30，须按 (db_no & 0x1FFF) | (extent << 13) | ((db_no & 0x3E000) << 13)。"
+    },
+    "db7998": {
+      "world_refno": "16190/0",
+      "element_prefix": "24382",
+      "status": "已解（2026-10-28 TTY 实测）",
+      "world_is_empty": "是。db7998 的 WORLD 下没有任何子元素，COLLECT ALL FOR CE 只返回 WORLD 自己，所以 =24382/1、/2 全部 Undefined reference。必须自己建锚点元素。",
+      "how_found": "两条独立路径互证：(1) 文件头 +0x38 的 primary_extent_ref = 16190（vendor/e3d-io/src/meta/descriptor.rs:61,198 的权威字段，world_refno = RefNo(primary_extent_ref, 0)）；(2) VAR !w COLLECT ALL WORL 里 =16190/0 存在。",
+      "bootstrap": "=16190/0 然后 NEW SITE /AIOS-SUITE-7998，得到 Ref =24382/1883，之后全部走名称导航。",
+      "navigation": "名称导航 /AIOS-SUITE-7998-Z 会跨库命中 db7998 的元素（实测 Ref =24382/1883），不需要 {{WORLD_ANCHOR}}。",
+      "danger": "★ 导航到不存在的元素会让 E3D 访问违例崩溃（exit=3221225477 = 0xC0000005），日志只有 3 字节。7998 侧所有宏必须先判存在再导航。",
+      "verified": "h03/setup_7998 + teardown_7998 两腿通过；create/cross_db_copy_apply + restore 两腿通过；7998 sesno 645→654，8000 897→900，原件未动。",
+      "extent_limit": "只有 1 个 extent 文件（ams7998_0001）。证据是目录里没有 _0002 兄弟文件（extent 是独立文件，命名见 vendor/e3d-io/src/page/io.rs:449-457），不是读 +0x2C（那只是本文件的 extent 号，五个库全是 1）。extent 3 的 =32574/1 实测报 Undefined reference。★ 未验证：extent 2 的 24382 为何能在单文件库写成功（观察到能写、文件变长、无新兄弟文件，未读 page 1 extent 表）。",
+      "refno_volatility": "★ 7998 元素的 refno 会随重建变化（实测 =24382/1883 在后续循环后被回收，新元素拿到 1888）。宏里绝不能写死 7998 元素 refno，只能写死 WORLD 16190/0 与名称。"
+    },
+    "cross_verification": "CT 窗口 bc-1d0a7c54 于 2026-10-28 独立复核（自己读 E:\\ 库头 + vendor 源码 + 自己算）：确认 db7998 WORLD = 16190/0；纠正三处——(1) extent 偏移表错位一格，(2) SYS_WORLD 24575 是 extent 2 不是 3（/3 是元素号），(3) 用 +0x2C 推 extent 个数是循环论证。"
+  },
+  "databases": {
+    "primary": {
+      "dbnum": 8000,
+      "db_file": "ams8000_0001",
+      "baseline_sesno": 734,
+      "setup_macro": "common/setup_8000.mac",
+      "teardown_macro": "common/teardown_8000.mac"
+    },
+    "companion": {
+      "dbnum": 7998,
+      "db_file": "ams7998_0001",
+      "setup_macro": "h03/setup_7998.mac",
+      "teardown_macro": "h03/teardown_7998.mac",
+      "note": "7998 而非 7997：7997 打包后 12.9 MB 超 6 MiB 上限（format.rs:25），7998 只有 1.79 MB。见设计文档 5.x。"
+    }
+  },
+  "probes": [
+    {
+      "macro": "common/probe_8000.mac",
+      "purpose": "只读探针：读出基线元素的 refno / POS / HPOS，供 bran_hpos_* 手填",
+      "no_savework": true
+    },
+    {
+      "macro": "h03/probe_7998.mac",
+      "purpose": "只读探针：7998 伙伴库的 WORL 与基线元素",
+      "no_savework": true
+    },
+    {
+      "macro": "connect/bran_reorder_probe.mac",
+      "purpose": "语法探针：REORDER 是否成立（仓内零命中，未证）。成立才补正式腿。",
+      "no_savework": true
+    }
+  ],
+  "chains": [
+    {
+      "id": "connect/bran_reparent",
+      "note": "四腿必须合成一条链：bran_copy 作为独立链会 apply→restore 闭合删掉 BRAN-NEW，后面的 reparent 必红。",
+      "legs": [
+        "create/bran_copy_apply.mac",
+        "connect/bran_reparent_apply.mac",
+        "connect/bran_reparent_restore.mac",
+        "create/bran_copy_restore.mac"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "A02-box-add",
+      "apply": "create/box_apply.mac",
+      "restore": "create/box_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A02"
+    },
+    {
+      "id": "A02-subtree-add",
+      "apply": "create/subtree_apply.mac",
+      "restore": "create/subtree_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A02"
+    },
+    {
+      "id": "A02-equi-copy",
+      "apply": "create/equi_copy_apply.mac",
+      "restore": "create/equi_copy_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A02"
+    },
+    {
+      "id": "A01-bran-copy",
+      "apply": "create/bran_copy_apply.mac",
+      "restore": "create/bran_copy_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A01",
+      "chain": "connect/bran_reparent"
+    },
+    {
+      "id": "F03-cross-db-copy",
+      "apply": "create/cross_db_copy_apply.mac",
+      "restore": "create/cross_db_copy_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "F03"
+    },
+    {
+      "id": "A01-delete-box",
+      "apply": "delete/box_apply.mac",
+      "restore": "delete/box_restore.mac",
+      "expected_net": "deleted",
+      "registration": "A01"
+    },
+    {
+      "id": "A01-delete-keep",
+      "apply": "delete/container_keep_child_apply.mac",
+      "restore": "delete/container_keep_child_restore.mac",
+      "expected_net": "deleted",
+      "registration": "A01"
+    },
+    {
+      "id": "A01-recreate-same",
+      "apply": "delete/recreate_same_name_apply.mac",
+      "restore": null,
+      "expected_net": "deleted",
+      "registration": "A01"
+    },
+    {
+      "id": "A01-child-parent",
+      "apply": "delete/child_then_parent_1_apply.mac",
+      "restore": "delete/child_then_parent_restore.mac",
+      "expected_net": "deleted",
+      "registration": "A01",
+      "chain": [
+        "delete/child_then_parent_1_apply.mac",
+        "delete/child_then_parent_2_apply.mac",
+        "delete/child_then_parent_restore.mac"
+      ]
+    },
+    {
+      "id": "A07-rename",
+      "apply": "attr/rename_apply.mac",
+      "restore": "attr/rename_restore.mac",
+      "expected_net": "modified",
+      "registration": "A07"
+    },
+    {
+      "id": "A07-desc",
+      "apply": "attr/desc_apply.mac",
+      "restore": "attr/desc_restore.mac",
+      "expected_net": "modified",
+      "registration": "A07"
+    },
+    {
+      "id": "A07-owner",
+      "apply": "attr/owner_apply.mac",
+      "restore": "attr/owner_restore.mac",
+      "expected_net": "modified",
+      "registration": "A07"
+    },
+    {
+      "id": "C01-move",
+      "apply": "xform/move_apply.mac",
+      "restore": "xform/move_restore.mac",
+      "expected_net": "modified",
+      "registration": "C01"
+    },
+    {
+      "id": "C01-rot-u",
+      "apply": "xform/rot_u_apply.mac",
+      "restore": "xform/rot_u_restore.mac",
+      "expected_net": "modified",
+      "registration": "C01"
+    },
+    {
+      "id": "C01-rot-e",
+      "apply": "xform/rot_e_apply.mac",
+      "restore": "xform/rot_e_restore.mac",
+      "expected_net": "modified",
+      "registration": "C01"
+    },
+    {
+      "id": "C01-rot-n",
+      "apply": "xform/rot_n_apply.mac",
+      "restore": "xform/rot_n_restore.mac",
+      "expected_net": "modified",
+      "registration": "C01"
+    },
+    {
+      "id": "C01-compound",
+      "apply": "xform/compound_apply.mac",
+      "restore": "xform/compound_restore.mac",
+      "expected_net": "modified",
+      "registration": "C01"
+    },
+    {
+      "id": "C06-noz-move",
+      "apply": "xform/noz_move_apply.mac",
+      "restore": "xform/noz_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "C06"
+    },
+    {
+      "id": "B01-resize",
+      "apply": "geom/resize_apply.mac",
+      "restore": "geom/resize_restore.mac",
+      "expected_net": "modified",
+      "registration": "B01"
+    },
+    {
+      "id": "B02-nbox-resize",
+      "apply": "geom/nbox_resize_apply.mac",
+      "restore": "geom/nbox_resize_restore.mac",
+      "expected_net": "modified",
+      "registration": "B02"
+    },
+    {
+      "id": "B02-nbox-add",
+      "apply": "geom/nbox_add_apply.mac",
+      "restore": "geom/nbox_add_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "B02"
+    },
+    {
+      "id": "A01-bran-add-member",
+      "apply": "connect/bran_add_member_apply.mac",
+      "restore": "connect/bran_add_member_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A01"
+    },
+    {
+      "id": "A01-bran-del-member",
+      "apply": "connect/bran_del_member_apply.mac",
+      "restore": "connect/bran_del_member_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A01"
+    },
+    {
+      "id": "A01-bran-reparent",
+      "apply": "connect/bran_reparent_apply.mac",
+      "restore": "connect/bran_reparent_restore.mac",
+      "expected_net": "cancelled",
+      "registration": "A01",
+      "chain": "connect/bran_reparent"
+    },
+    {
+      "id": "C06-nozz-move",
+      "apply": "connect/nozz_move_apply.mac",
+      "restore": "connect/nozz_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "C06"
+    },
+    {
+      "id": "C05-pipe-whole",
+      "apply": "pipe/whole_move_apply.mac",
+      "restore": "pipe/whole_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "C05"
+    },
+    {
+      "id": "A01-bran-hpos",
+      "apply": "pipe/bran_hpos_apply.mac",
+      "restore": "pipe/bran_hpos_restore.mac",
+      "expected_net": "modified",
+      "registration": "A01",
+      "baseline_hpos": "E 8551 N 14060 U 2900 (TTY 实测, setup_8000 后稳定)",
+      "apply_writes": "E 8551 N 14060 U 3100 (绝对值, 重跑幂等)",
+      "tty_status": "passed (2026-10-28, +2 会话, 重跑一致)"
+    },
+    {
+      "id": "G01-room-member",
+      "apply": "room/member_move_apply.mac",
+      "restore": "room/member_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "G01"
+    },
+    {
+      "id": "G02-pane-move",
+      "apply": "room/pane_move_apply.mac",
+      "restore": "room/pane_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "G02"
+    },
+    {
+      "id": "G03-pave-move",
+      "apply": "room/pave_move_apply.mac",
+      "restore": "room/pave_move_restore.mac",
+      "expected_net": "modified",
+      "registration": "G03"
+    },
+    {
+      "id": "G04-frmw-rename",
+      "apply": "room/frmw_rename_apply.mac",
+      "restore": "room/frmw_rename_restore.mac",
+      "expected_net": "modified",
+      "registration": "G04"
+    },
+    {
+      "id": "A01-compound-rename",
+      "apply": "compound/rename_move_add_apply.mac",
+      "restore": "compound/rename_move_add_restore.mac",
+      "expected_net": "modified",
+      "registration": "A01"
+    },
+    {
+      "id": "A01-two-roots",
+      "apply": "compound/two_roots_apply.mac",
+      "restore": "compound/two_roots_restore.mac",
+      "expected_net": "modified",
+      "registration": "A01"
+    },
+    {
+      "id": "H03-companion-move",
+      "apply": "h03/move_apply.mac",
+      "restore": "h03/move_restore.mac",
+      "expected_net": "modified",
+      "registration": "H03",
+      "companion_dbnum": 7998
+    }
+  ],
+  "not_encoded": [
+    {
+      "id": "C0x-bran-reorder",
+      "reason": "REORDER 语法仓内零命中，无已证替代，不能写进正式套件",
+      "probe": "connect/bran_reorder_probe.mac",
+      "next": "探针证成后补 connect/bran_reorder_apply.mac + restore；证不成则移到 (c) 类「PML 触发不了」"
+    },
+    {
+      "id": "C0x-spre-swap",
+      "reason": "卡 db 13244 语料：db8000_pipe_spre_swap_apply.mac:22 的 SPRE =<ALT_SPRE> 占位符未填",
+      "next": "先补 13244 语料再编"
+    }
+  ],
+  "verified_syntax": {
+    "note": "以下全部经 E3D TTY 真机实测（2026-10-28，隔离副本 db8000）。status=ttv 表示 TTY 实测通过，repo 表示仓内有同款且 TTY 也过。",
+    "list": [
+      "INCLUDE $!var — TTY 过（四腿链第 2/3 腿）",
+      "INCLUDE =refno — db8000_pipe_reparent_apply.mac:30（repo）",
+      "COPY /name — TTY 过（equi_copy / bran_copy / pipe COPY）",
+      "COPY =refno — db8000_pipe_new_member_apply.mac:20（repo）",
+      "COLLECT ALL <noun> FOR CE — TTY 过（pave / nozz / bran）",
+      "COLLECT ALL <noun> WITH (MATCHWILD(NAME,..)) FOR CE — TTY 过（clean / purge / bran_copy）",
+      "COLLECT ALL <noun> WITH (NAME EQ ..) — TTY 过（box_restore）",
+      "$!var[i] 下标导航 — TTY 过（pave_move / nozz_move）",
+      "OWNER 上跳 — TTY 过（锚点链 BRAN→PIPE→ZONE→SITE→WORLD）",
+      "NEW NBOX 在 BOX 下（分行）— TTY 过（setup）",
+      "NEW NBOX XLEN.. YLEN.. ZLEN.. 一行式 — TTY 过（step6）",
+      "NEW NOZZ — TTY 过（nozzmk：Ref =24384/26717）",
+      "DELETE FTUB/BRAN/NBOX/EQUI/SITE — TTY 过（delete/* 全组）",
+      "BY E 500 WRT /* — TTY 过（step5：1000mm→1500mm；xform/move）",
+      "BY U 2000mm 在 BRAN 上 — db8000_bran_scratch_move.mac:24（repo）",
+      "Q POS/ORI WRT /* — TTY 过（xform 全组）",
+      "ORI Y IS W AND Z IS U WRT /* 设值 — TTY 过（step4：Orientation Y is W and Z is U）",
+      "ORI Y IS W 5 S AND Z IS D（无 WRT）— equi_rotate_apply.mac:21（repo）",
+      "DESC 'x' — TTY 过（setup / desc_apply）",
+      "DESC '' — TTY 过（step4：Description unset）",
+      "HPOS E .. N .. U .. 绝对值 — TTY 过（step5）",
+      "FTUB n 序号导航 — TTY 过（step5：FTUB 2 → Ref =17496/161703）",
+      "FTUB LAST — TTY 过（step5：Ref =17496/161709；四腿链第 3 腿）",
+      "PLOO n 序号导航 — TTY 过（step6：PLOO 1 → Ref =17496/161715）",
+      "PAVE n 序号导航 — TTY 过（step6：PAVE 2 → Position E 62000mm N 3000mm）",
+      "PIPE 级 COPY — TTY 过（setup：COPY /1RX-345 带出 19 BRAN）",
+      "PIPE 级 BY — TTY 过（step6：零错误）",
+      "IF / .SET() / .SIZE() — TTY 过（ifsyn：CNT=1，走 YES 分支）",
+      "名称导航 /1RX03-EQUI（不带 =）— TTY 过（锚点，见 world_anchor）"
+    ]
+  },
+  "unverified_syntax": {
+    "note": "★ TTY 实测后仍未通过或未覆盖的。",
+    "list": [
+      "REORDER — TTY 实测 `CP: Syntax error`，确认不存在。已改探针。",
+      "HPOS BY — TTY 实测 `CP: Syntax error`，确认不存在。已改成绝对值。",
+      "COPY $!var — 未单独实测；bran_add_member_apply 两腿 completed 说明该形式可用",
+      "跨库 COPY — 未实测，阻塞在 7998 锚点",
+      "=24384/0 世界导航 — TTY 实测 `Undefined reference (DB number 8000)`，不要用",
+      "=/NAME 形式导航 — TTY 实测 `CP: Syntax error`，`=` 后不能跟名称",
+      "24384 当 WORLD refno — 错。24384 只是元素前缀；db8000 的 WORLD 是 16192/0"
+    ]
+  },
+  "tty_test_status": {
+    "date": "2026-10-28",
+    "environment": {
+      "driver": "l3_suite --check-driver",
+      "install": "E:\\reverse\\e3d\\shadow_e3d31_gen_model_test",
+      "project_copy": "E:\\reverse\\e3d\\replay-src\\E3D3.1\\AvevaMarineSample",
+      "isolation_verified": "robocopy 后 452 个库文件 fsutil hardlink list 链接数全为 1；原件 amssys 991 不变，副本 991→1001"
+    },
+    "result": {
+      "legs_run": 81,
+      "case_legs_total": 34,
+      "case_legs_completed": 34,
+      "sessions_per_leg": 2,
+      "note": "每腿 +2 会话 = 1 业务 + 1 SAVEWORK 后内务。2026-10-28 首轮 31 腿，随后补跑 pipe/bran_hpos（2 腿）、h03/setup_7998 + teardown_7998（2 腿）、create/cross_db_copy apply + restore（2 腿），现 34/34 全部通过。"
+    },
+    "blocked": [],
+    "fixed_during_test": [
+      "delete/child_then_parent_restore 改成幂等（先删同名再重建）",
+      "create/bran_copy_apply 改成幂等（先删同名 BRAN-NEW）",
+      "connect/nozz_move_apply/restore 加 IF/SET/SIZE 判空",
+      "common/setup_8000 加 NEW NOZZ /AIOS-SUITE-NOZZ-1（db8000 无生产 NOZZ）",
+      "{{WORLD_REFNO}} 改名为 {{WORLD_ANCHOR}}，渲染成两行（导航 + OWNER）",
+      "common/setup_7998.mac / teardown_7998.mac 删除（与 h03/ 下重复）"
+    ],
+    "resolved_after_first_round": [
+      {
+        "case": "F03-cross-db-copy",
+        "how": "解出 db7998 锚点：WORLD = 16190/0（文件头 +0x38 primary_extent_ref 读出），元素前缀 24382。apply+restore 两腿通过，净效果 cancelled。"
+      },
+      {
+        "case": "H03（双库）",
+        "how": "h03/setup_7998 建 SITE→ZONE→EQUI→BOX 全在 7998（24382/1884-1887），teardown 级联清空。两腿通过。"
+      },
+      {
+        "case": "pipe/bran_hpos",
+        "how": "基线探出 E 8551 N 14060 U 2900，apply 写 U 3100 绝对值、restore 写回 2900。两腿通过，重跑逐字一致（幂等）。"
+      }
+    ],
+    "known_limitations": [
+      "connect/bran_reorder：REORDER 语法 TTY 实测 CP: Syntax error，确认不存在，仍在 not_encoded",
+      "C0x-spre-swap：卡 db 13244 语料，仍在 not_encoded",
+      "db7998 extent 2 为何能在单文件库写成功：未验证（只观察到能写、文件变长、无 _0002 兄弟文件）"
+    ]
+  }
+}

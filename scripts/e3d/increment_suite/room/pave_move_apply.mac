@@ -1,0 +1,34 @@
+-- 登记: G03 | 语义: 改房间轮廓两个顶点（R201 东边从 E 62000 外扩到 64000）
+-- 预期 room_rebuild 一条，EQ-RM（E 60000）归属不变 | expected_net: modified
+-- restore 搭档: room/pave_move_restore.mac
+--
+-- PAVE 没有 NAME，PLOO 1 / PAVE 2 序号导航仓内零命中（PAVE 只有 NEW PAVE 建新）。
+-- 已证替代是 COLLECT + 下标（ploo_26251_pave_probe.mac:16 的 COLLECT ALL PAVE FOR CE、
+-- room_cap_cross_db_apply.mac:8 的 $!CAPS[1] 下标导航）。
+-- PAVE 下标从 1 起，按 NEW PAVE 的建序：1=(58000,3000) 2=(62000,3000) 3=(62000,7000) 4=(58000,7000)
+-- 要改的是第 2、3 个（东边两个角）。
+--
+-- 录制审查注意: Q REF / Q NAME 只能解出 PANE 的 refno（Record-Db8000SessionChain.ps1:99-110），
+-- 清单 elements 里登 PANE，不要登 PAVE。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-PAVE-APPLY-ALIVE
+/AIOS-SUITE-RM-R201-P1
+Q REF
+Q NAME
+VAR !paves COLLECT ALL PAVE FOR CE
+Q MEMB
+!p2 = !paves[2]
+!!CE = !p2.dbref()
+Q REF
+Q POS
+POS E 64000 N 3000 U 0
+Q POS
+!p3 = !paves[3]
+!!CE = !p3.dbref()
+Q REF
+Q POS
+POS E 64000 N 7000 U 0
+Q POS
+SAVEWORK 'AIOS suite room/pave_move apply: R201 east edge to E 64000'
+$P SUITE-ROOM-PAVE-APPLY-DONE
+ALPHA LOG END

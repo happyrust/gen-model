@@ -1,0 +1,11 @@
+-- 登记: H03 | 语义: 伙伴库位移移回（第二个成功窗，给 T-O-1 步用） | expected_net: cancelled | restore 搭档: 本文件是 h03/move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-H03-MOVE-RESTORE-ALIVE
+/AIOS-SUITE-7998-EQ
+Q REF
+Q NAME
+BY W 500 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite H03 companion 7998: EQ BY W 500'
+$P SUITE-H03-MOVE-RESTORE-DONE
+ALPHA LOG END

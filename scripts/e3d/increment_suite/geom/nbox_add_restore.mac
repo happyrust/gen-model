@@ -1,0 +1,14 @@
+-- 登记: A02 | 语义: 删掉 NBOX-N2 | expected_net: cancelled | restore 搭档: 本文件是 geom/nbox_add_apply.mac 的 restore
+-- 来源: scripts/e3d/increment_fixture/cases/add_restore.mac:2-9（按名 COLLECT 后删）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-NBOXADD-RESTORE-ALIVE
+VAR !n COLLECT ALL NBOX WITH (NAME EQ '/AIOS-SUITE-NBOX-N2')
+DO !x VALUES !n
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  DELETE NBOX
+ENDDO
+SAVEWORK 'AIOS suite geom/nbox_add restore'
+$P SUITE-GEOM-NBOXADD-RESTORE-DONE
+ALPHA LOG END

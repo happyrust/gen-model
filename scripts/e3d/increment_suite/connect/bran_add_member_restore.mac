@@ -1,0 +1,15 @@
+-- 登记: A01 | 语义: 删掉新加的 FTUB-NEW | expected_net: cancelled | restore 搭档: 本文件是 connect/bran_add_member_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-ADDMEM-RESTORE-ALIVE
+VAR !f COLLECT ALL FTUB WITH (NAME EQ '/AIOS-SUITE-FTUB-NEW')
+DO !x VALUES !f
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  DELETE FTUB
+ENDDO
+/AIOS-SUITE-BRAN-S
+Q MEMB
+SAVEWORK 'AIOS suite connect/bran_add_member restore'
+$P SUITE-CONN-ADDMEM-RESTORE-DONE
+ALPHA LOG END

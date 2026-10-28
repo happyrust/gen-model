@@ -1,0 +1,36 @@
+-- 登记: B01 | 语义: 重建 EQ-A + BOX-A1（与 setup 同值）
+-- expected_net: cancelled（按名；两个 refno 都变了）
+-- restore 搭档: 本文件是 child_then_parent_1/2 的 restore
+--
+-- ★ TTY 实测（2026-10-28）：本宏必须**幂等**。
+-- 原先直接 NEW EQUIPMENT /AIOS-SUITE-EQ-A，若 EQ-A 还在（比如第 2 腿没跑、
+-- 或链被打断后重跑），会报 "Name /AIOS-SUITE-EQ-A already used"，
+-- 宏在那一行崩掉、日志留空、驱动报 Indeterminate。
+-- 所以先按名删掉同名 EQ-A（连带其子树），再重建。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-DELETE-CTP-RESTORE-ALIVE
+/AIOS-SUITE-8000-Z
+Q CE
+Q TYPE
+-- 幂等：先清掉可能残留的同名 EQ-A
+VAR !old COLLECT ALL EQUIPMENT WITH (MATCHWILD(NAME,'/AIOS-SUITE-EQ-A')) FOR CE
+DO !e VALUES !old
+  !!CE = !e.dbref()
+  Q REF
+  Q NAME
+  DELETE EQUI
+ENDDO
+/AIOS-SUITE-8000-Z
+NEW EQUIPMENT /AIOS-SUITE-EQ-A
+DESC 'AIOS baseline'
+POS E 40000 N 5000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 1000 ZLEN 1000
+NAME /AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'AIOS suite delete/child_then_parent restore: recreate EQ-A + BOX-A1'
+$P SUITE-DELETE-CTP-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,12 @@
+-- 登记: B01 | 语义: 第 2 腿——再删父件 EQ-A；两会话的净窗口必须只有一条 DeleteCleanup（tests/equi_increment.rs:170 契约；db8000-two-delete 夹具同形） | expected_net: deleted | restore 搭档: delete/child_then_parent_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/delete_unit_apply.mac:2-6
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-DELETE-CTP2-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q MEMB
+DELETE EQUI
+SAVEWORK 'AIOS suite delete/child_then_parent leg 2: delete EQ-A'
+$P SUITE-DELETE-CTP2-APPLY-DONE
+ALPHA LOG END

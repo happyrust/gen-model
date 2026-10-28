@@ -1,0 +1,12 @@
+-- 登记: C03 | 语义: 反向平移（同 binade 加减精确可逆，scripts/e3d/s4_aps_strflt_move.mac:7） | expected_net: cancelled | restore 搭档: 本文件是 xform/move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-MOVE-RESTORE-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q POS WRT /*
+BY W 500 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/move restore: EQ-A BY W 500'
+$P SUITE-XFORM-MOVE-RESTORE-DONE
+ALPHA LOG END

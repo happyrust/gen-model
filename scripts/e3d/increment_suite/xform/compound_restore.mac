@@ -1,0 +1,13 @@
+-- 登记: C08 | 语义: 反向平移 + 写回基线方位 | expected_net: cancelled | restore 搭档: 本文件是 xform/compound_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-COMPOUND-RESTORE-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+BY S 300 WRT /*
+ORI Y IS N AND Z IS U
+Q POS WRT /*
+Q ORI WRT /*
+SAVEWORK 'AIOS suite xform/compound restore'
+$P SUITE-XFORM-COMPOUND-RESTORE-DONE
+ALPHA LOG END

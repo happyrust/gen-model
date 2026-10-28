@@ -1,0 +1,20 @@
+-- 登记: A08 | 语义: 删新子件、移回、改回名（也是一个复合窗） | expected_net: cancelled | restore 搭档: 本文件是 compound/rename_move_add_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-COMPOUND-RMA-RESTORE-ALIVE
+VAR !b COLLECT ALL BOX WITH (NAME EQ '/AIOS-SUITE-BOX-A3')
+DO !x VALUES !b
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  DELETE BOX
+ENDDO
+/AIOS-SUITE-EQ-A-V2
+Q REF
+Q NAME
+BY W 500 WRT /*
+NAME /AIOS-SUITE-EQ-A
+Q POS WRT /*
+Q NAME
+SAVEWORK 'AIOS suite compound/rename_move_add restore'
+$P SUITE-COMPOUND-RMA-RESTORE-DONE
+ALPHA LOG END

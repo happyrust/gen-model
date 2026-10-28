@@ -1,0 +1,12 @@
+-- 登记: C08（三轴独立之三） | 语义: 绕 N 轴 +90°（Y 不动，Z→E）；预期 transform | expected_net: modified | restore 搭档: xform/rot_n_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ROTN-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q ORI WRT /*
+ORI Y IS N AND Z IS E
+Q ORI WRT /*
+SAVEWORK 'AIOS suite xform/rot_n apply: EQ-A +90 about N'
+$P SUITE-XFORM-ROTN-APPLY-DONE
+ALPHA LOG END

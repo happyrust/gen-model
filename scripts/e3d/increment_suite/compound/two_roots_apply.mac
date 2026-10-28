@@ -1,0 +1,16 @@
+-- 登记: A08 / F04 | 语义: 两根同窗各自平移；预期 unit_count 2、两条 transform、互不干扰 | expected_net: modified | restore 搭档: compound/two_roots_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-COMPOUND-2R-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+BY U 400 WRT /*
+Q POS WRT /*
+/AIOS-SUITE-EQ-NBX
+Q REF
+Q NAME
+BY U 400 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite compound/two_roots apply'
+$P SUITE-COMPOUND-2R-APPLY-DONE
+ALPHA LOG END

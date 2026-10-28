@@ -1,0 +1,16 @@
+-- 登记: A01（删成员） | 语义: 删 BRAN-S 的 FTUB 4；预期 BRAN-S regen，管身行重排（复刻 scripts/e3d/db8000_bran_scratch_create.mac:11 的「删·成员」腿） | expected_net: deleted（成员） | restore 搭档: connect/bran_del_member_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-DELMEM-APPLY-ALIVE
+/AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+Q MEMB
+FTUB 4
+Q REF
+Q POS
+DELETE FTUB
+/AIOS-SUITE-BRAN-S
+Q MEMB
+SAVEWORK 'AIOS suite connect/bran_del_member apply'
+$P SUITE-CONN-DELMEM-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,24 @@
+-- 登记: A01 / A02 | 语义: 把改挂过去的 FTUB INCLUDE 回 BRAN-S。
+-- 它在 BRAN-NEW 里是末位成员（BRAN-NEW 是 BRAN-S 的副本：7 FTUB + 改挂进来的 1 个）。
+-- FTUB LAST 已 TTY 实测成立（step5：/AIOS-SUITE-BRAN-S + FTUB LAST → Ref =17496/161709），
+-- 故用 FTUB LAST 而不是硬编码 FTUB 8——成员数变化时不会指错。
+-- expected_net: cancelled（树逆；它回到 BRAN-S 末位而非第 4 位，几何序列变。
+--   要严格几何还原，再跟一条 connect/bran_del_member_restore.mac 整条重 COPY）
+-- restore 搭档: 本文件是 connect/bran_reparent_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-REPARENT-RESTORE-ALIVE
+/AIOS-SUITE-BRAN-NEW
+Q REF
+Q NAME
+Q MEMB
+FTUB LAST
+Q REF
+!ftub = !!CE
+/AIOS-SUITE-BRAN-S
+INCLUDE $!ftub
+$!ftub
+Q REF
+Q OWNE
+SAVEWORK 'AIOS suite connect/bran_reparent restore'
+$P SUITE-CONN-REPARENT-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,22 @@
+-- 登记: A02 | 语义: 把「删容器保子件」还原——重建 EQ-A（新 refno），把 BOX-A1 INCLUDE 回来 | expected_net: cancelled（按名；EQ-A 的 refno 已变） | restore 搭档: 本文件是 delete/container_keep_child_apply.mac 的 restore
+-- INCLUDE 写法: scripts/e3d/db8000_pipe_reparent_apply.mac:29-30（别写 OWNER /X，:6-9 的教训）
+-- 预期 gen-model: EQ-A 新根 regen；EQ-B 失去成员 regen（两根一窗）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-DELETE-KEEPCHILD-RESTORE-ALIVE
+/AIOS-SUITE-8000-Z
+NEW EQUIPMENT /AIOS-SUITE-EQ-A
+POS E 40000 N 5000 U 0
+Q REF
+Q NAME
+/AIOS-SUITE-BOX-A1
+!box = !!CE
+Q REF
+Q NAME
+Q OWNE
+/AIOS-SUITE-EQ-A
+INCLUDE $!box
+/AIOS-SUITE-BOX-A1
+Q OWNE
+SAVEWORK 'AIOS suite delete/container_keep_child restore'
+$P SUITE-DELETE-KEEPCHILD-RESTORE-DONE
+ALPHA LOG END

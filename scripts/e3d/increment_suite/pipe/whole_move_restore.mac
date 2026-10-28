@@ -1,0 +1,19 @@
+-- 登记: C05 | 语义: 每条 BRAN 反向平移回基线。expected_net: cancelled
+-- restore 搭档: 本文件是 pipe/whole_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-WHOLE-RESTORE-ALIVE
+/AIOS-SUITE-PIPE-P
+Q REF
+Q NAME
+VAR !brans COLLECT ALL BRAN FOR CE
+DO !b VALUES !brans
+  !!CE = !b.dbref()
+  Q REF
+  Q HPOS WRT /*
+  BY W 500 WRT /*
+  Q HPOS WRT /*
+  Q TPOS WRT /*
+ENDDO
+SAVEWORK 'AIOS suite pipe/whole_move restore: every BRAN of PIPE-P BY W 500'
+$P SUITE-PIPE-WHOLE-RESTORE-DONE
+ALPHA LOG END

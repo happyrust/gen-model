@@ -1,0 +1,12 @@
+-- 登记: H03（T-O-1 / T-O-2） | 语义: 伙伴库上一次成功的位移窗；配 service_env `AIOS_TEST_FAIL_DATA_ENDS=8000:<右端>`（主库 park，batch_worker.rs:981-994）与 `AIOS_TEST_DELAY_BEFORE_REGISTRY_FINISH=7998/<右端>:60000`（把本窗卡在 Running，batch_worker.rs:1015-1044），由 L2 companions 用例断言「8000 park 而 7998 前进」 | expected_net: modified | restore 搭档: h03/move_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-H03-MOVE-APPLY-ALIVE
+/AIOS-SUITE-7998-EQ
+Q REF
+Q NAME
+Q POS WRT /*
+BY E 500 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite H03 companion 7998: EQ BY E 500'
+$P SUITE-H03-MOVE-APPLY-DONE
+ALPHA LOG END

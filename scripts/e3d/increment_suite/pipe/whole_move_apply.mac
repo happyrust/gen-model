@@ -1,0 +1,23 @@
+-- 登记: C05 | 语义: 整条 PIPE 的每条 BRAN 同窗平移；预期每 BRAN HPOS/TPOS 变 → 刚体路拒 → regen。
+-- O1 用 SAVEWORK 前后两份 RVM 对拍（导出段可照搬 db8000_pipe_reparent_apply.mac:38-54）
+-- PIPE 级 BY 仓内零命中（只有 ZONE / BRAN / EQUI 级），故改成逐 BRAN BY
+-- （db8000_bran_scratch_move.mac:24 同款）。
+-- expected_net: modified | restore 搭档: pipe/whole_move_restore.mac
+-- 前置: setup 的 PIPE-P 是 COPY /1RX-345（★PIPE 级 COPY 连带全部 BRAN，真机待证）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-WHOLE-APPLY-ALIVE
+/AIOS-SUITE-PIPE-P
+Q REF
+Q NAME
+VAR !brans COLLECT ALL BRAN FOR CE
+DO !b VALUES !brans
+  !!CE = !b.dbref()
+  Q REF
+  Q HPOS WRT /*
+  BY E 500 WRT /*
+  Q HPOS WRT /*
+  Q TPOS WRT /*
+ENDDO
+SAVEWORK 'AIOS suite pipe/whole_move apply: every BRAN of PIPE-P BY E 500'
+$P SUITE-PIPE-WHOLE-APPLY-DONE
+ALPHA LOG END

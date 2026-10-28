@@ -1,0 +1,18 @@
+-- 登记: A02（跨设备改挂） | 语义: BOX-A1 从 EQ-A 改挂到 EQ-B，refno 不变；预期两根都 regen（tests/equi_increment.rs:187） | expected_net: modified（owner） | restore 搭档: attr/owner_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/owner_apply.mac:2-3（INCLUDE 写法）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-OWNER-APPLY-ALIVE
+/AIOS-SUITE-BOX-A1
+!box = !!CE
+Q REF
+Q NAME
+Q OWNE
+/AIOS-SUITE-EQ-B
+INCLUDE $!box
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'AIOS suite attr/owner apply: BOX-A1 -> EQ-B'
+$P SUITE-ATTR-OWNER-APPLY-DONE
+ALPHA LOG END

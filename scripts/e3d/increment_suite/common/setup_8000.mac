@@ -1,0 +1,206 @@
+-- 基线：SITE /AIOS-SUITE-8000 下一个 ZONE；EQ-A(+BOX-A1)、EQ-B(空)、EQ-NBX(BOX-N 下挂 NBOX)、EQ-NOZ（COPY 生产带 NOZZ 设备）、
+-- PIPE-P（COPY 生产 PIPE）、BRAN-S（COPY /C-OR-1R345-C）、房间 STRU/FRMW R201,R202 + EQ-RM。
+--
+-- ★ 命名纪律（2026-10-28）：本套件的**每一个元素都必须有显式 NAME**，不许留 E3D 自动命名。
+--   原因：RVM 真值比对按名匹配（Compare-SuiteRvmTruth.ps1 的键 = 导出根以下的相对路径），
+--   而 E3D 自动命名是 `BOX 1 of EQUIPMENT /xxx`、`PAVERT 3 of PLOOP 1 of PANEL /xxx` 这类
+--   带序号的形态——序号会随成员增删而变化，refno 也会随重建变化，只有显式名字稳定。
+--   实测（2026-10-28）：COPY 进来的子件**全部不带名字**（BRAN-S 的 9 个成员、PIPE-P 的 19 个
+--   BRAN 都是纯 refno），必须在 COPY 之后逐个补 NAME。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-SETUP-8000-ALIVE
+{{WORLD_ANCHOR}}
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-8000*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  DELETE SITE
+ENDDO
+{{WORLD_ANCHOR}}
+NEW SITE /AIOS-SUITE-8000
+NEW ZONE /AIOS-SUITE-8000-Z
+!zone = !!CE
+NEW EQUIPMENT /AIOS-SUITE-EQ-A
+DESC 'AIOS baseline'
+POS E 40000 N 5000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 1000 ZLEN 1000
+NAME /AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+!!CE = !zone
+NEW EQUIPMENT /AIOS-SUITE-EQ-B
+POS E 43000 N 5000 U 0
+Q REF
+Q NAME
+!!CE = !zone
+NEW EQUIPMENT /AIOS-SUITE-EQ-NBX
+POS E 46000 N 5000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 2000 YLEN 2000 ZLEN 2000
+NAME /AIOS-SUITE-BOX-N
+Q REF
+Q NAME
+NEW NBOX
+XLEN 500
+YLEN 500
+ZLEN 2500
+NAME /AIOS-SUITE-NBOX-N1
+Q REF
+Q NAME
+!!CE = !zone
+NEW EQUIPMENT /AIOS-SUITE-EQ-NOZ
+COPY /1-LNR-Q005-PJ
+Q REF
+Q NAME
+Q MEMB
+BY E 49000
+-- ★ COPY 带过来的 BOX 不带名字，补一个（命名纪律见文件头）
+-- ★ 判据必须用 MATCHWILD(NAME,'/*')，**不能**用 NAME EQ ''：
+--   实测（2026-10-28）无名元素的 NAME 属性返回的是 refno 字符串 `'=24384/27392'`，不是空串，
+--   所以 `IF (!!CE.NAME EQ '')` 永远为假，整段补名会被静默跳过。
+/AIOS-SUITE-EQ-NOZ
+!nb = !!CE.MEMBERS
+DO !b VALUES !nb
+  !!CE = !b
+  IF (!!CE.TYPE EQ 'BOX') THEN
+    !cn = !!CE.NAME
+    IF (NOT MATCHWILD(!cn,'/*')) THEN
+      NAME /AIOS-SUITE-EQ-NOZ-BOX
+    ENDIF
+  ENDIF
+ENDDO
+/AIOS-SUITE-EQ-NOZ
+Q MEMB
+-- ★ TTY 实测（2026-10-28）：COPY /1-LNR-Q005-PJ 只带过来 1 个 BOX，**没有 NOZZ**。
+-- 而 db8000 全库 40+ 个 EQUI 里也没有一个带 NOZZ（findnozz 探针：FN-HIT 计数 0）。
+-- 所以 connect/nozz_move 与 xform/noz_move 原本没有靶子，会在 !nozzs[1] 越界崩掉。
+-- 这里显式建一个 NOZZ 当靶（NEW NOZZ 已实测成立：Ref =24384/26717）。
+-- 注意：这是**自建元素**，符合「不动生产元素」纪律；生产设备上没有 NOZZ 可动。
+NEW NOZZ /AIOS-SUITE-NOZZ-1
+Q REF
+Q NAME
+Q POS
+!!CE = !zone
+NEW PIPE /AIOS-SUITE-PIPE-P
+COPY /1RX-345
+Q REF
+Q NAME
+Q MEMB
+-- ★ COPY 带过来的 19 条 BRAN 都不带名字，按序号补 /AIOS-SUITE-PIPE-P-BRAN-<n>
+-- ★ 用 MEMBERS 而不是 COLLECT ALL FOR CE：后者会额外抓到 `IL TUB OF =xxx` 这类隐含元素
+--   （实测 BRAN-S 下 COLLECT 得到 12 个，MEMBERS 只有 9 个），隐含元素不能命名。
+-- ★ 拼名字必须用单引号内插 `'/xxx-$!i'`，**不能**用 `'/xxx-' + !i`：
+--   实测 PML 不支持 STRING + REAL（报 `Method <STRING>.+(<REAL>) not found`），
+--   `!nm` 会保持 Undefined，随后 `NAME $!nm` 报 `Variable NM not defined` 而静默失败。
+/AIOS-SUITE-PIPE-P
+!br = !!CE.MEMBERS
+!i = 0
+DO !b VALUES !br
+  !!CE = !b
+  IF (!!CE.TYPE EQ 'BRAN') THEN
+    !i = !i + 1
+    !cn = !!CE.NAME
+    IF (NOT MATCHWILD(!cn,'/*')) THEN
+      !nm = '/AIOS-SUITE-PIPE-P-BRAN-$!i'
+      NAME $!nm
+    ENDIF
+  ENDIF
+ENDDO
+/AIOS-SUITE-PIPE-P
+Q MEMB
+-- ★ 再补一层：每条 BRAN 自己的管件成员（FTUB/BEND/ELBO）也都不带名字。
+--   RVM 导出会把这些管件当成成员节点，名字就是 `FTUBE 1 of BRANCH /xxx` 这种带序号的缺省名，
+--   序号随弯头增删而变，比对时无法作为稳定键。这里按 BRAN 序号 + 成员序号命名。
+!bi = 0
+DO !b VALUES !br
+  !!CE = !b
+  IF (!!CE.TYPE EQ 'BRAN') THEN
+    !bi = !bi + 1
+    !sub = !!CE.MEMBERS
+    !mi = 0
+    DO !s VALUES !sub
+      !!CE = !s
+      !mi = !mi + 1
+      !cn = !!CE.NAME
+      IF (NOT MATCHWILD(!cn,'/*')) THEN
+        !nm = '/AIOS-SUITE-PIPE-P-BRAN-$!bi-P$!mi'
+        NAME $!nm
+      ENDIF
+    ENDDO
+  ENDIF
+ENDDO
+/AIOS-SUITE-PIPE-P
+Q MEMB
+NEW BRAN /AIOS-SUITE-BRAN-S
+COPY /C-OR-1R345-C
+Q REF
+Q NAME
+Q MEMB
+-- ★ COPY 带过来的 9 个成员（FTUB/BEND）都不带名字，按序补 /AIOS-SUITE-BRAN-S-M<n>
+-- ★ FTUB / BEND 都可命名（实测 2026-10-28：NAME 后 Type BEND、Ref 不变）。
+/AIOS-SUITE-BRAN-S
+!mb = !!CE.MEMBERS
+!i = 0
+DO !m VALUES !mb
+  !!CE = !m
+  !i = !i + 1
+  !cn = !!CE.NAME
+  IF (NOT MATCHWILD(!cn,'/*')) THEN
+    !nm = '/AIOS-SUITE-BRAN-S-M$!i'
+    NAME $!nm
+  ENDIF
+ENDDO
+/AIOS-SUITE-BRAN-S
+Q MEMB
+!!CE = !zone
+NEW STRU /AIOS-SUITE-ROOM-STRU
+!stru = !!CE
+NEW FRMW /AIOS-SUITE-RM-R201
+NEW PANE /AIOS-SUITE-RM-R201-P1
+NEW PLOO
+NAME /AIOS-SUITE-RM-R201-PLOO
+HEIG 2000
+NEW PAVE
+NAME /AIOS-SUITE-RM-R201-V1
+POS E 58000 N 3000 U 0
+NEW PAVE
+NAME /AIOS-SUITE-RM-R201-V2
+POS E 62000 N 3000 U 0
+NEW PAVE
+NAME /AIOS-SUITE-RM-R201-V3
+POS E 62000 N 7000 U 0
+NEW PAVE
+NAME /AIOS-SUITE-RM-R201-V4
+POS E 58000 N 7000 U 0
+!!CE = !stru
+NEW FRMW /AIOS-SUITE-RM-R202
+NEW PANE /AIOS-SUITE-RM-R202-P1
+NEW PLOO
+NAME /AIOS-SUITE-RM-R202-PLOO
+HEIG 2000
+NEW PAVE
+NAME /AIOS-SUITE-RM-R202-V1
+POS E 68000 N 3000 U 0
+NEW PAVE
+NAME /AIOS-SUITE-RM-R202-V2
+POS E 72000 N 3000 U 0
+NEW PAVE
+NAME /AIOS-SUITE-RM-R202-V3
+POS E 72000 N 7000 U 0
+NEW PAVE
+NAME /AIOS-SUITE-RM-R202-V4
+POS E 68000 N 7000 U 0
+!!CE = !zone
+NEW EQUIPMENT /AIOS-SUITE-EQ-RM
+POS E 60000 N 5000 U 1000
+Q REF
+Q NAME
+NEW BOX XLEN 500 YLEN 500 ZLEN 500
+NAME /AIOS-SUITE-BOX-RM
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite: baseline setup db8000'
+$P SUITE-SETUP-8000-DONE
+ALPHA LOG END

@@ -1,0 +1,11 @@
+-- 登记: C06 | 语义: 反向平移 | expected_net: cancelled | restore 搭档: 本文件是 xform/noz_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-NOZMOVE-RESTORE-ALIVE
+/AIOS-SUITE-EQ-NOZ
+Q REF
+Q NAME
+BY W 500 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/noz_move restore'
+$P SUITE-XFORM-NOZMOVE-RESTORE-DONE
+ALPHA LOG END

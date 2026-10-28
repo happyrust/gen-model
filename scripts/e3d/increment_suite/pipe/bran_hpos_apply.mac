@@ -1,0 +1,18 @@
+-- 登记: A01 | 语义: 只改支管头点（U 抬 200）；预期该 BRAN regen。
+-- `HPOS BY` TTY 实测 CP: Syntax error（不存在），故写绝对值。
+-- 基线由 TTY 实测读出（2026-10-28，setup_8000 后 /AIOS-SUITE-BRAN-S）：
+--   Hposition E 8551mm N 14060mm U 2900mm
+--   Tposition E 9093mm N 9973mm U 2900mm
+-- apply 写 U 3100（=2900+200）绝对值，重跑幂等（不是相对增量）。
+-- expected_net: modified | restore 搭档: pipe/bran_hpos_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-PIPE-HPOS-APPLY-ALIVE
+/AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+Q HPOS WRT /*
+HPOS E 8551 N 14060 U 3100 WRT /*
+Q HPOS WRT /*
+SAVEWORK 'AIOS suite pipe/bran_hpos apply'
+$P SUITE-PIPE-HPOS-APPLY-DONE
+ALPHA LOG END

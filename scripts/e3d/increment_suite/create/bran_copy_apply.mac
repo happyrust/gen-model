@@ -1,0 +1,28 @@
+-- 登记: A01（建 BRAN-NEW 作为改挂靶） | 语义: PIPE-P 下复制 BRAN-S 成 BRAN-NEW（7 FTUB + 2 BEND）
+-- expected_net: cancelled | restore 搭档: create/bran_copy_restore.mac
+--
+-- ★ TTY 实测（2026-10-28）：`COPY /AIOS-SUITE-BRAN-S` 成立，
+--   复制出 7 FTUB + 2 BEND（与 setup 的 COPY /C-OR-1R345-C 同形）。
+-- 幂等：先删同名 BRAN-NEW，否则重跑会 "Name already used" 崩宏。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CREATE-BRANCOPY-APPLY-ALIVE
+/AIOS-SUITE-PIPE-P
+Q CE
+Q TYPE
+VAR !old COLLECT ALL BRAN WITH (MATCHWILD(NAME,'/AIOS-SUITE-BRAN-NEW')) FOR CE
+DO !b VALUES !old
+  !!CE = !b.dbref()
+  Q REF
+  Q NAME
+  DELETE BRAN
+ENDDO
+/AIOS-SUITE-PIPE-P
+NEW BRAN /AIOS-SUITE-BRAN-NEW
+COPY /AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+Q HPOS
+Q MEMB
+SAVEWORK 'AIOS suite create/bran_copy apply'
+$P SUITE-CREATE-BRANCOPY-APPLY-DONE
+ALPHA LOG END

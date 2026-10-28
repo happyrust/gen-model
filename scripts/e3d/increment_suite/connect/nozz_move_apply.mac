@@ -1,0 +1,36 @@
+-- 登记: C06（半边）/ A02 | 语义: NOZZ 在设备内单独移动；预期只 EQ-NOZ regen（tests/equi_increment.rs:218）
+-- expected_net: modified | restore 搭档: connect/nozz_move_restore.mac
+--
+-- ★ TTY 实测（2026-10-28）：
+--   - `NOZZ 1` 序号导航**成立**（与 FTUB n 同机制）。
+--   - 但 `COLLECT ALL NOZZ` 返回空数组时 `!nozzs[1]` 会越界，整个宏崩在那一行，
+--     日志留空、驱动报 Indeterminate。所以先 Q VAR 判空，再用 IF 包住写操作。
+--   - 靶子由 common/setup_8000.mac 的 `NEW NOZZ /AIOS-SUITE-NOZZ-1` 提供
+--     （db8000 全库没有带 NOZZ 的生产设备，findnozz 探针 FN-HIT 计数 0）。
+--   - 宏内不得写 QUIT（Record-Db8000SessionChain.ps1:78-79 会拒），故无靶时只跳过写操作。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-NOZZ-APPLY-ALIVE
+/AIOS-SUITE-EQ-NOZ
+Q REF
+Q NAME
+Q MEMB
+VAR !nozzs COLLECT ALL NOZZ FOR CE
+Q VAR !nozzs
+!count = 0
+IF (!nozzs.SET()) THEN
+  !count = !nozzs.SIZE()
+ENDIF
+IF (!count GT 0) THEN
+  !n1 = !nozzs[1]
+  !!CE = !n1.dbref()
+  Q REF
+  Q NAME
+  Q POS
+  BY U 100
+  Q POS
+ELSE
+  $P SUITE-CONN-NOZZ-APPLY-NO-TARGET
+ENDIF
+SAVEWORK 'AIOS suite connect/nozz_move apply'
+$P SUITE-CONN-NOZZ-APPLY-DONE
+ALPHA LOG END

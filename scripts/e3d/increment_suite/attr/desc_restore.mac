@@ -1,0 +1,17 @@
+-- 登记: A07 | 语义: DESC 清回空。
+-- DESC '' 已 TTY 实测成立（step4：DESC '' → "Description unset"），
+-- 所以 restore 可以直接清空，不需要 setup 预置基线值。
+-- 但为了 L-FILE 层的字节可复现，setup_8000 仍给 EQ-A 设了 DESC 'AIOS baseline'，
+-- 因此 restore 要写回那个基线值而不是清空——两条路都合法，这里选「写回基线」，
+-- 因为清空会让 attrs 与 explicit_attrs 的差分落在 DESC 上，语义窗口不干净。
+-- expected_net: cancelled | restore 搭档: 本文件是 attr/desc_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-DESC-RESTORE-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+DESC 'AIOS baseline'
+Q DESC
+SAVEWORK 'AIOS suite attr/desc restore'
+$P SUITE-ATTR-DESC-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,12 @@
+-- 登记: C08 | 语义: 写回基线方位 | expected_net: cancelled | restore 搭档: 本文件是 xform/rot_u_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ROTU-RESTORE-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q ORI WRT /*
+ORI Y IS N AND Z IS U
+Q ORI WRT /*
+SAVEWORK 'AIOS suite xform/rot_u restore'
+$P SUITE-XFORM-ROTU-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,17 @@
+-- 登记: （跨库移动，登记表无单独 ID；J01 `expect_unselected_non_empty` 的前置） | 语义: 把跨库复制过去的 EQ-X 复制回 8000 成为新的 EQ-A，再删掉 7998 里的 EQ-X；同一 SAVEWORK 写两个文件 | expected_net: cancelled（按名；EQ-A 是新 refno） | restore 搭档: 本文件是 create/cross_db_copy_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CROSSDB-RESTORE-ALIVE
+/AIOS-SUITE-8000-Z
+NEW EQUIPMENT /AIOS-SUITE-EQ-A
+COPY /AIOS-SUITE-EQ-X
+POS E 40000 N 5000 U 0
+Q REF
+Q NAME
+Q MEMB
+/AIOS-SUITE-EQ-X
+Q REF
+Q NAME
+DELETE EQUI
+SAVEWORK 'AIOS suite cross-db restore: EQ-A back into 8000, EQ-X removed from 7998'
+$P SUITE-CROSSDB-RESTORE-DONE
+ALPHA LOG END

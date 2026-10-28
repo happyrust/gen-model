@@ -1,0 +1,12 @@
+-- 登记: A07 | 语义: 改回原名（refno 不变，E3D 层真逆；gen-model 层 renamed 删除记录仍在，fixture.rs:124-126 的 INSERT IGNORE 容忍） | expected_net: cancelled | restore 搭档: 本文件是 attr/rename_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-RENAME-RESTORE-ALIVE
+/AIOS-SUITE-EQ-B-RENAMED
+Q REF
+Q NAME
+NAME /AIOS-SUITE-EQ-B
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite attr/rename restore'
+$P SUITE-ATTR-RENAME-RESTORE-DONE
+ALPHA LOG END

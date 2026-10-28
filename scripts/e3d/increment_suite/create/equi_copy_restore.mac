@@ -1,0 +1,15 @@
+-- 登记: A02（整台复制的删除半边） | 语义: 删掉复制出的整台 EQ-COPY；预期一条 DeleteCleanup | expected_net: cancelled | restore 搭档: 本文件是 create/equi_copy_apply.mac 的 restore
+-- 来源: scripts/e3d/db8000_equi_copy_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CREATE-EQCOPY-RESTORE-ALIVE
+VAR !t COLLECT ALL EQUI WITH (NAME EQ '/AIOS-SUITE-EQ-COPY')
+DO !x VALUES !t
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  DELETE EQUI
+ENDDO
+SAVEWORK 'AIOS suite create/equi_copy restore (delete clone)'
+$P SUITE-CREATE-EQCOPY-RESTORE-DONE
+ALPHA LOG END

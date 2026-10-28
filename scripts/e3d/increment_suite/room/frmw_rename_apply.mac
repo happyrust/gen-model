@@ -1,0 +1,13 @@
+-- 登记: G03 | 语义: 把 FRMW 改成不带房间关键字的名字 → 房间 R201 消失，EQ-RM 归属清空 | expected_net: modified | restore 搭档: room/frmw_rename_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/room_structure_apply.mac:2-3
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-FRMW-APPLY-ALIVE
+/AIOS-SUITE-RM-R201
+Q REF
+Q NAME
+NAME /AIOS-SUITE-NOT-A-ROOM
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite room/frmw_rename apply'
+$P SUITE-ROOM-FRMW-APPLY-DONE
+ALPHA LOG END

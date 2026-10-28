@@ -1,0 +1,12 @@
+-- 登记: G03 | 语义: 改回房间名 | expected_net: cancelled | restore 搭档: 本文件是 room/frmw_rename_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-FRMW-RESTORE-ALIVE
+/AIOS-SUITE-NOT-A-ROOM
+Q REF
+Q NAME
+NAME /AIOS-SUITE-RM-R201
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite room/frmw_rename restore'
+$P SUITE-ROOM-FRMW-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,12 @@
+-- 登记: A02（布尔） | 语义: 负体 NBOX-N1 尺寸变；预期根 EQ-NBX regen，模型行数不变（负体不单独成行） | expected_net: modified | restore 搭档: geom/nbox_resize_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/boolean_apply.mac:2-3
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-NBOXRESIZE-APPLY-ALIVE
+/AIOS-SUITE-NBOX-N1
+Q REF
+Q NAME
+XLEN 900
+Q XLEN
+SAVEWORK 'AIOS suite geom/nbox_resize apply'
+$P SUITE-GEOM-NBOXRESIZE-APPLY-DONE
+ALPHA LOG END

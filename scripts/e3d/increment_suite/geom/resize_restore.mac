@@ -1,0 +1,15 @@
+-- 登记: A02 | 语义: 尺寸写回 1000³（setup 值） | expected_net: cancelled | restore 搭档: 本文件是 geom/resize_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-RESIZE-RESTORE-ALIVE
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+XLEN 1000
+YLEN 1000
+ZLEN 1000
+Q XLEN
+Q YLEN
+Q ZLEN
+SAVEWORK 'AIOS suite geom/resize restore'
+$P SUITE-GEOM-RESIZE-RESTORE-DONE
+ALPHA LOG END

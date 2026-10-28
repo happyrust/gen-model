@@ -1,0 +1,24 @@
+-- 探针：REORDER 语法是否成立。仓内 `REORDER` 零命中，无已证替代，不能写进正式套件。
+-- 本文件**无 SAVEWORK**：改动不落库，会话由 wrapper QUIT 丢弃。
+-- 因此它会被 Record-Db8000SessionChain.ps1:74-77 拒（要求恰好一个 SAVEWORK），
+-- 设计上不进录制清单，单走 `l3_suite --check-driver`（Record 脚本 :116-118）。
+--
+-- 跑法：在隔离副本里（E:\reverse\e3d\replay-src\E3D3.1），CE 在 /AIOS-SUITE-BRAN-S 上，
+-- 看 ALPHA LOG 里 REORDER 之后有没有报错、Q MEMB 的成员序有没有变。
+-- 若语法成立 → 补回 connect/bran_reorder_apply.mac + restore，登记 C0x。
+-- 若不成立 → 从覆盖矩阵里把「支管成员换序」移到 (c) 类（PML 触发不了）。
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-REORDER-PROBE-ALIVE
+/AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+Q MEMB
+FTUB 2
+Q REF
+REORDER AFTER FTUB 3
+$P SUITE-CONN-REORDER-PROBE-TRIED
+/AIOS-SUITE-BRAN-S
+Q MEMB
+$P SUITE-CONN-REORDER-PROBE-DONE
+ALPHA LOG END

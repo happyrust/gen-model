@@ -1,0 +1,15 @@
+-- 登记: C08 / C03（转+移复合） | 语义: 同一 SAVEWORK 平移 + 旋转；预期仍 transform（刚体路覆盖全姿态） | expected_net: modified | restore 搭档: xform/compound_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-COMPOUND-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q POS WRT /*
+Q ORI WRT /*
+BY N 300 WRT /*
+ORI Y IS W AND Z IS U
+Q POS WRT /*
+Q ORI WRT /*
+SAVEWORK 'AIOS suite xform/compound apply: EQ-A BY N 300 + rot U'
+$P SUITE-XFORM-COMPOUND-APPLY-DONE
+ALPHA LOG END

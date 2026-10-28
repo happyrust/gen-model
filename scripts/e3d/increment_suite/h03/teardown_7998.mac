@@ -1,0 +1,22 @@
+-- 登记: H03 | 语义: 删掉伙伴库的 scratch SITE | expected_net: deleted（基线收场）
+-- restore 搭档: 本文件是 h03/setup_7998.mac 的 restore
+--
+-- ★ db7998 的 WORLD refno = 16190/0（TTY 实测，2026-10-28）。
+--   本宏不再依赖 {{WORLD_ANCHOR}}（那是 db8000 的两行名称锚点），
+--   直接用 `=16190/0` 这个永远存在的 WORLD 引用，跨库无歧义。
+--   `COLLECT ALL SITE ... FOR CE` 在 WORLD 上会遍历**全 MDB**，
+--   所以 WITH 条件必须带 /AIOS-SUITE-7998 前缀把范围收窄。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-H03-TEARDOWN-ALIVE
+=16190/0
+Q REF
+VAR !sites COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-7998*')) FOR CE
+DO !s VALUES !sites
+  !!CE = !s.dbref()
+  Q REF
+  Q NAME
+  DELETE SITE
+ENDDO
+SAVEWORK 'AIOS suite H03: teardown db7998'
+$P SUITE-H03-TEARDOWN-DONE
+ALPHA LOG END

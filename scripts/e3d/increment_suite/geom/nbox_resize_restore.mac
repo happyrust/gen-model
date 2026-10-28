@@ -1,0 +1,11 @@
+-- 登记: A02 | 语义: NBOX-N1 XLEN 写回 500 | expected_net: cancelled | restore 搭档: 本文件是 geom/nbox_resize_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-NBOXRESIZE-RESTORE-ALIVE
+/AIOS-SUITE-NBOX-N1
+Q REF
+Q NAME
+XLEN 500
+Q XLEN
+SAVEWORK 'AIOS suite geom/nbox_resize restore'
+$P SUITE-GEOM-NBOXRESIZE-RESTORE-DONE
+ALPHA LOG END

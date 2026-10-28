@@ -1,0 +1,24 @@
+-- 登记: A01（增成员） | 语义: 用 COPY 带 SPRE 的成员往 BRAN-S 末尾加一段 FTUB；预期 BRAN-S regen，管身行重排 | expected_net: cancelled（由 restore 删除） | restore 搭档: connect/bran_add_member_restore.mac
+-- 来源: scripts/e3d/db8000_pipe_new_member_apply.mac:20（COPY =已有 FTUB）；scripts/e3d/db8000_bran_scratch_create.mac:37-41（FTUB n 导航、OWNER 上跳）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-ADDMEM-APPLY-ALIVE
+/AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+Q MEMB
+FTUB 7
+!src = !!CE
+Q REF
+Q SPRE
+OWNER
+NEW FTUB /AIOS-SUITE-FTUB-NEW
+COPY $!src
+Q REF
+Q NAME
+Q SPRE
+Q POS
+/AIOS-SUITE-BRAN-S
+Q MEMB
+SAVEWORK 'AIOS suite connect/bran_add_member apply'
+$P SUITE-CONN-ADDMEM-APPLY-DONE
+ALPHA LOG END

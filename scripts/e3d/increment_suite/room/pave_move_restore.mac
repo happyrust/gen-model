@@ -1,0 +1,23 @@
+-- 登记: G03 | 语义: 两个顶点写回 E 62000 | expected_net: cancelled
+-- restore 搭档: 本文件是 room/pave_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-PAVE-RESTORE-ALIVE
+/AIOS-SUITE-RM-R201-P1
+Q REF
+Q NAME
+VAR !paves COLLECT ALL PAVE FOR CE
+!p2 = !paves[2]
+!!CE = !p2.dbref()
+Q REF
+Q POS
+POS E 62000 N 3000 U 0
+Q POS
+!p3 = !paves[3]
+!!CE = !p3.dbref()
+Q REF
+Q POS
+POS E 62000 N 7000 U 0
+Q POS
+SAVEWORK 'AIOS suite room/pave_move restore: R201 east edge back to E 62000'
+$P SUITE-ROOM-PAVE-RESTORE-DONE
+ALPHA LOG END

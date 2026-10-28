@@ -1,0 +1,13 @@
+-- 登记: C08 | 语义: 绕 U（铅垂）轴 +90°，POS 不动；预期 transform，/model/records 与整库重建逐条相等（四元数不分符号） | expected_net: modified | restore 搭档: xform/rot_u_restore.mac
+-- 来源: scripts/e3d/replay/equi_rotate_apply.mac:21（ORI 写法）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ROTU-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q ORI WRT /*
+ORI Y IS W AND Z IS U
+Q ORI WRT /*
+SAVEWORK 'AIOS suite xform/rot_u apply: EQ-A +90 about U'
+$P SUITE-XFORM-ROTU-APPLY-DONE
+ALPHA LOG END

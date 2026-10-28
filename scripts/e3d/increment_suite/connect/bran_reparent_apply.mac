@@ -1,0 +1,21 @@
+-- 登记: A01 / A02（跨 BRAN 改挂） | 语义: BRAN-S 的 FTUB 4 INCLUDE 到 BRAN-NEW；预期两根都 regen（scripts/e3d/db8000_pipe_reparent_apply.mac:11-13） | expected_net: modified（owner） | restore 搭档: connect/bran_reparent_restore.mac
+-- 前置: create/bran_copy_apply.mac 已建 BRAN-NEW（不要先跑它的 restore）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-REPARENT-APPLY-ALIVE
+/AIOS-SUITE-BRAN-S
+Q REF
+Q NAME
+FTUB 4
+!ftub = !!CE
+Q REF
+Q OWNE
+/AIOS-SUITE-BRAN-NEW
+Q REF
+Q NAME
+INCLUDE $!ftub
+$!ftub
+Q REF
+Q OWNE
+SAVEWORK 'AIOS suite connect/bran_reparent apply: FTUB 4 BRAN-S -> BRAN-NEW'
+$P SUITE-CONN-REPARENT-APPLY-DONE
+ALPHA LOG END

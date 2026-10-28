@@ -1,0 +1,11 @@
+-- 登记: G03 | 语义: PANE 移回 | expected_net: cancelled | restore 搭档: 本文件是 room/pane_move_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-PANE-RESTORE-ALIVE
+/AIOS-SUITE-RM-R201-P1
+Q REF
+Q NAME
+BY U 200
+Q POS
+SAVEWORK 'AIOS suite room/pane_move restore'
+$P SUITE-ROOM-PANE-RESTORE-DONE
+ALPHA LOG END

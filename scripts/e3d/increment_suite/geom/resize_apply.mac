@@ -1,0 +1,16 @@
+-- 登记: A02 | 语义: 子件尺寸变；预期 EQ-A regen（kind=regen），行数不变、包围盒变 | expected_net: modified | restore 搭档: geom/resize_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/geometry_apply.mac:2-5
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-RESIZE-APPLY-ALIVE
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+XLEN 1600
+YLEN 1200
+ZLEN 800
+Q XLEN
+Q YLEN
+Q ZLEN
+SAVEWORK 'AIOS suite geom/resize apply'
+$P SUITE-GEOM-RESIZE-APPLY-DONE
+ALPHA LOG END

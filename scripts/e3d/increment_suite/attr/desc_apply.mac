@@ -1,0 +1,13 @@
+-- 登记: A07 / A06 | 语义: 纯元数据（DESC）改动；预期任务 succeeded、unit_count 0、模型行不变、无 datacenter_delete | expected_net: modified | restore 搭档: attr/desc_restore.mac
+-- setup 没有给 EQ-A 设 DESC，所以 restore 写回空串
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-DESC-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q DESC
+DESC 'AIOS suite desc changed'
+Q DESC
+SAVEWORK 'AIOS suite attr/desc apply'
+$P SUITE-ATTR-DESC-APPLY-DONE
+ALPHA LOG END

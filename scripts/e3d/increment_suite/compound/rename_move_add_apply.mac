@@ -1,0 +1,18 @@
+-- 登记: A08（窗口分桶）/ A07 / A02 | 语义: 同一 SAVEWORK：改名 + 整根平移 + 增子件；预期 EQ-A 一窗内一次 regen（增子件压过 transform），datacenter_delete renamed 一条 | expected_net: modified | restore 搭档: compound/rename_move_add_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-COMPOUND-RMA-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+NAME /AIOS-SUITE-EQ-A-V2
+BY E 500 WRT /*
+Q POS WRT /*
+NEW BOX XLEN 300 YLEN 300 ZLEN 300
+NAME /AIOS-SUITE-BOX-A3
+POS E -1500 N 0 U 0
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'AIOS suite compound/rename_move_add apply'
+$P SUITE-COMPOUND-RMA-APPLY-DONE
+ALPHA LOG END

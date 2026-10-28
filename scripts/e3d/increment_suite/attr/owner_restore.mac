@@ -1,0 +1,17 @@
+-- 登记: A02 | 语义: BOX-A1 改挂回 EQ-A | expected_net: cancelled | restore 搭档: 本文件是 attr/owner_apply.mac 的 restore
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-OWNER-RESTORE-ALIVE
+/AIOS-SUITE-BOX-A1
+!box = !!CE
+Q REF
+Q NAME
+Q OWNE
+/AIOS-SUITE-EQ-A
+INCLUDE $!box
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'AIOS suite attr/owner restore: BOX-A1 -> EQ-A'
+$P SUITE-ATTR-OWNER-RESTORE-DONE
+ALPHA LOG END

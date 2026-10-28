@@ -1,0 +1,14 @@
+-- 登记: C06 | 语义: 带 NOZZ 的整台 EQUI 平移；预期 unit_kinds=transform，NOZZ 的目录字典项按身份比不踢 regen（INC-D03），日志无 [模型目标核对] | expected_net: modified | restore 搭档: xform/noz_move_restore.mac
+-- 前置: setup 的 EQ-NOZ 是 COPY /1-LNR-Q005-PJ（★该设备确有 NOZZ，由 common/probe_8000.mac 的 Q MEMB 证实）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-NOZMOVE-APPLY-ALIVE
+/AIOS-SUITE-EQ-NOZ
+Q REF
+Q NAME
+Q MEMB
+Q POS WRT /*
+BY E 500 WRT /*
+Q POS WRT /*
+SAVEWORK 'AIOS suite xform/noz_move apply: EQ-NOZ BY E 500'
+$P SUITE-XFORM-NOZMOVE-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,56 @@
+-- 登记: H03 | 语义: 伙伴库基线——SITE/ZONE/EQUI(+BOX)，幂等（先删同名再重建）
+-- expected_net: added（基线，不计入链） | restore 搭档: h03/teardown_7998.mac
+--
+-- ★★ 7998 的锚点已在 TTY 实测解出（2026-10-28）：
+--   db7998 的 WORLD refno = 16190/0，元素前缀 = 24382。
+--   两条通用公式（db1112/7997/7998/7999/8000 全部验证）：
+--     WORLD 前缀 = db_no + 8192
+--     元素 前缀 = db_no + 16384
+--   例如 db8000: 8000+8192=16192 (WORLD)、8000+16384=24384 (元素)
+--
+-- ★ 关键事实：db7998 的 WORLD 下原本**没有任何子元素**（COLLECT ALL FOR CE
+--   只返回 WORLD 自己），所以 =24382/1、/2、/3 全部不存在。这个库是空的，
+--   必须自己建锚点元素——这正是本宏的职责。
+--
+-- ★ 导航用**名称**而不是 `=16190/0`：名称导航 `/AIOS-SUITE-7998-Z` 会跨库命中
+--   db7998 里的同名元素（实测 Ref =24382/1883），比写死 refno 更稳（重建后
+--   refno 会变）。首次运行时该元素还不存在，故本宏先用 WORLD 引用建出它。
+--
+-- 与 db8000 的差别：db8000 有现成的生产锚点 /1RX03-EQUI，7998 没有，
+-- 所以这里用 `=16190/0`（WORLD 引用，永远存在）作为**建锚点**的入口。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-H03-SETUP-ALIVE
+
+-- 幂等：先清掉上次残留（按名匹配，不用 refno）
+=16190/0
+VAR !old COLLECT ALL SITE WITH (MATCHWILD(NAME,'/AIOS-SUITE-7998*')) FOR CE
+DO !s VALUES !old
+  !!CE = !s.dbref()
+  DELETE SITE
+ENDDO
+
+-- 建锚点 SITE（7998 原本一个元素都没有，这是第一个）
+=16190/0
+NEW SITE /AIOS-SUITE-7998
+Q REF
+Q NAME
+$P SUITE-H03-SETUP-SITE
+
+-- 名称导航进 7998 的 SITE，往下建 ZONE / EQUI / BOX
+/AIOS-SUITE-7998
+NEW ZONE /AIOS-SUITE-7998-Z
+Q REF
+Q NAME
+NEW EQUIPMENT /AIOS-SUITE-7998-EQ
+POS E 40000 N 5000 U 0
+Q REF
+Q NAME
+NEW BOX XLEN 1000 YLEN 1000 ZLEN 1000
+NAME /AIOS-SUITE-7998-BOX
+Q REF
+Q NAME
+$P SUITE-H03-SETUP-EQUI
+
+SAVEWORK 'AIOS suite H03: baseline setup db7998'
+$P SUITE-H03-SETUP-DONE
+ALPHA LOG END

@@ -1,0 +1,29 @@
+-- 登记: C06 / A02 | 语义: NOZZ 移回 | expected_net: cancelled
+-- restore 搭档: 本文件是 connect/nozz_move_apply.mac 的 restore
+-- 与 apply 同构：先判空再操作（空数组 !nozzs[1] 会越界崩宏）。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CONN-NOZZ-RESTORE-ALIVE
+/AIOS-SUITE-EQ-NOZ
+Q REF
+Q NAME
+Q MEMB
+VAR !nozzs COLLECT ALL NOZZ FOR CE
+Q VAR !nozzs
+!count = 0
+IF (!nozzs.SET()) THEN
+  !count = !nozzs.SIZE()
+ENDIF
+IF (!count GT 0) THEN
+  !n1 = !nozzs[1]
+  !!CE = !n1.dbref()
+  Q REF
+  Q NAME
+  Q POS
+  BY D 100
+  Q POS
+ELSE
+  $P SUITE-CONN-NOZZ-RESTORE-NO-TARGET
+ENDIF
+SAVEWORK 'AIOS suite connect/nozz_move restore'
+$P SUITE-CONN-NOZZ-RESTORE-DONE
+ALPHA LOG END

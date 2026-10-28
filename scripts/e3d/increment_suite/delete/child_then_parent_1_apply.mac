@@ -1,0 +1,12 @@
+-- 登记: B01 | 语义: 跨会话父子删除的第 1 腿——先删子件 BOX-A1 | expected_net: deleted（与第 2 腿合计后净窗口 = 整根 deleted） | restore 搭档: delete/child_then_parent_restore.mac（两腿共用一条 restore）
+-- 来源: scripts/e3d/increment_fixture/cases/delete_apply.mac:2-6
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-DELETE-CTP1-APPLY-ALIVE
+/AIOS-SUITE-BOX-A1
+Q REF
+Q NAME
+Q OWNE
+DELETE BOX
+SAVEWORK 'AIOS suite delete/child_then_parent leg 1: delete BOX-A1'
+$P SUITE-DELETE-CTP1-APPLY-DONE
+ALPHA LOG END

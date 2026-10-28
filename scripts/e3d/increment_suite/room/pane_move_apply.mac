@@ -1,0 +1,14 @@
+-- 登记: G03 | 语义: 房间定义元素 PANE 整块下移；预期服务排**一条** room_rebuild 整间重算，边数与全量相同 | expected_net: modified | restore 搭档: room/pane_move_restore.mac
+-- 来源: scripts/e3d/replay/room_pane_apply.mac:8-14
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-PANE-APPLY-ALIVE
+/AIOS-SUITE-RM-R201-P1
+Q TYPE
+Q REF
+Q NAME
+Q POS
+BY D 200
+Q POS
+SAVEWORK 'AIOS suite room/pane_move apply: R201-P1 down 200'
+$P SUITE-ROOM-PANE-APPLY-DONE
+ALPHA LOG END

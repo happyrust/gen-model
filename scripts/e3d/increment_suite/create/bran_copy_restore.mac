@@ -1,0 +1,14 @@
+-- 登记: A01（删 BRAN） | 语义: 删掉复制出的 BRAN-NEW；预期一条 DeleteCleanup | expected_net: cancelled | restore 搭档: 本文件是 create/bran_copy_apply.mac 的 restore（若已跑 connect/bran_reparent_apply，要先跑它的 restore，否则 FTUB 4 随此被删）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CREATE-BRANCOPY-RESTORE-ALIVE
+VAR !t COLLECT ALL BRAN WITH (NAME EQ '/AIOS-SUITE-BRAN-NEW')
+DO !x VALUES !t
+  !!CE = !x.dbref()
+  Q REF
+  Q NAME
+  Q MEMB
+  DELETE BRAN
+ENDDO
+SAVEWORK 'AIOS suite create/bran_copy restore (delete BRAN-NEW)'
+$P SUITE-CREATE-BRANCOPY-RESTORE-DONE
+ALPHA LOG END

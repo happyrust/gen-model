@@ -1,0 +1,19 @@
+-- 登记: A02（负实体增删，登记表无单独 ID） | 语义: BOX-N 下再挂一个 NBOX；预期 EQ-NBX regen、行数不增 | expected_net: cancelled（由 restore 删除） | restore 搭档: geom/nbox_add_restore.mac
+-- 来源: scripts/e3d/s4_db8000_nbox_in_box_create.mac:30（BOX 下 NEW NBOX）
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-GEOM-NBOXADD-APPLY-ALIVE
+/AIOS-SUITE-BOX-N
+Q REF
+Q NAME
+NEW NBOX
+XLEN 300
+YLEN 300
+ZLEN 2500
+NAME /AIOS-SUITE-NBOX-N2
+POS E 600 N 0 U 0
+Q REF
+Q NAME
+Q OWNE
+SAVEWORK 'AIOS suite geom/nbox_add apply'
+$P SUITE-GEOM-NBOXADD-APPLY-DONE
+ALPHA LOG END

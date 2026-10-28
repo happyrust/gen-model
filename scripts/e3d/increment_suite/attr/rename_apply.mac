@@ -1,0 +1,13 @@
+-- 登记: A07（元数据门） | 语义: 只改 NAME；预期任务 succeeded、unit_count 0、datacenter_delete reason=renamed 一条（increment_fixture manifest :262-269 同款） | expected_net: modified | restore 搭档: attr/rename_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/data_apply.mac:2-3
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ATTR-RENAME-APPLY-ALIVE
+/AIOS-SUITE-EQ-B
+Q REF
+Q NAME
+NAME /AIOS-SUITE-EQ-B-RENAMED
+Q REF
+Q NAME
+SAVEWORK 'AIOS suite attr/rename apply'
+$P SUITE-ATTR-RENAME-APPLY-DONE
+ALPHA LOG END

@@ -1,0 +1,13 @@
+-- 登记: G02 / G01 | 语义: EQ-RM 从 R201 跨入 R202；预期 rooms_changed before [R201] after [R202]，库上 room_relate 边 R201 消失、R202 出现；链尾 rebuild_edges_equal | expected_net: modified | restore 搭档: room/member_move_restore.mac
+-- 来源: scripts/e3d/increment_fixture/cases/room_member_apply.mac:2-3
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-ROOM-MEMBER-APPLY-ALIVE
+/AIOS-SUITE-EQ-RM
+Q REF
+Q NAME
+Q POS WRT /*
+POS E 70000 N 5000 U 1000
+Q POS WRT /*
+SAVEWORK 'AIOS suite room/member_move apply: EQ-RM into R202'
+$P SUITE-ROOM-MEMBER-APPLY-DONE
+ALPHA LOG END

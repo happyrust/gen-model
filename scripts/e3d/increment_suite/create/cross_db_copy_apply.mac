@@ -1,0 +1,58 @@
+-- 登记: F03（跨库复制，登记表无单独 ID；J01 `expect_unselected_non_empty` 的前置）
+-- 语义: 把 db8000 的 EQ-A 复制到 db7998 的 ZONE 下成为 EQ-X，再从 8000 删掉 EQ-A
+-- expected_net: modified（8000 少一个 EQUI，7998 多一个 EQUI）| restore 搭档: create/cross_db_copy_restore.mac
+--
+-- ★★ db7998 的锚点（TTY 实测，2026-10-28）：
+--   WORLD = 16190/0，元素前缀 = 24382。
+--   通用公式：WORLD 前缀 = db_no + 8192；元素前缀 = db_no + 16384。
+--
+-- ★ 幂等要求：本宏导航 `/AIOS-SUITE-7998-Z`，若该 ZONE 不存在，E3D 会在导航处
+--   直接**访问违例崩溃**（exit=0xC0000005），不是报语法错、也不写日志。
+--   所以必须先确认/建出这个 ZONE，再导航。
+--   实测：h03/teardown_7998 跑完后 7998 的 WORLD 下空无一物，
+--   此时直接 `/AIOS-SUITE-7998-Z` 会崩。
+--
+-- ★ 前置依赖：h03/setup_7998.mac 要先跑（它建 /AIOS-SUITE-7998-Z 与 /AIOS-SUITE-7998-EQ）。
+--   本宏自带兜底：若 ZONE 不在，自己建出来。
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-CROSSDB-APPLY-ALIVE
+
+-- 兜底 1：确保 7998 有 SITE /AIOS-SUITE-7998
+=16190/0
+VAR !s COLLECT ALL SITE WITH (NAME EQ '/AIOS-SUITE-7998') FOR CE
+IF (!s.SIZE() EQ 0) THEN
+  =16190/0
+  NEW SITE /AIOS-SUITE-7998
+ENDIF
+
+-- 兜底 2：确保 7998 有 ZONE /AIOS-SUITE-7998-Z
+/AIOS-SUITE-7998
+VAR !z COLLECT ALL ZONE WITH (NAME EQ '/AIOS-SUITE-7998-Z') FOR CE
+IF (!z.SIZE() EQ 0) THEN
+  /AIOS-SUITE-7998
+  NEW ZONE /AIOS-SUITE-7998-Z
+ENDIF
+Q REF
+Q NAME
+$P SUITE-CROSSDB-APPLY-ZONE-READY
+
+-- 在 7998 的 ZONE 下建 EQ-X，把 8000 的 EQ-A 内容复制过来
+/AIOS-SUITE-7998-Z
+NEW EQUIPMENT /AIOS-SUITE-EQ-X
+COPY /AIOS-SUITE-EQ-A
+POS E 40000 N 5000 U 0
+Q REF
+Q NAME
+Q MEMB
+$P SUITE-CROSSDB-APPLY-COPIED
+
+-- 删掉 8000 的 EQ-A（跨库移动的「移出」半边）
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+DELETE EQUI
+$P SUITE-CROSSDB-APPLY-EQA-DELETED
+
+SAVEWORK 'AIOS suite cross-db: EQ-A copied into 7998 and deleted from 8000'
+$P SUITE-CROSSDB-APPLY-DONE
+ALPHA LOG END

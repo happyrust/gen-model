@@ -1,0 +1,12 @@
+-- 登记: C08（三轴独立之二） | 语义: 绕 E 轴 +90°（Y→U，Z→S）；预期 transform | expected_net: modified | restore 搭档: xform/rot_e_restore.mac
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-XFORM-ROTE-APPLY-ALIVE
+/AIOS-SUITE-EQ-A
+Q REF
+Q NAME
+Q ORI WRT /*
+ORI Y IS U AND Z IS S
+Q ORI WRT /*
+SAVEWORK 'AIOS suite xform/rot_e apply: EQ-A +90 about E'
+$P SUITE-XFORM-ROTE-APPLY-DONE
+ALPHA LOG END
