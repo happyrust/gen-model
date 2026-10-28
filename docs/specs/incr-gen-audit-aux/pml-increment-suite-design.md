@@ -3117,3 +3117,79 @@ python .scratch\tty_batch.py A01-bran-reparent
 | aabb_blind 但已有 PML 侧断言的腿 | `pipe/bran_hpos`（`Q Hposition`）、`geom/nbox_*`（`Q XLEN`）、`connect/nozz_move`（无 CATREF） |
 | 归 (c) 类（PML 触发不了） | `connect/bran_reorder`（成员序不可写） |
 | 仍未验证 | db7998 extent 2 为何能在单文件库写成功（7.6.3） |
+
+## 7.13 用实测快照订正真值（2026-10-28）
+
+`output/increment-suite-rvm-truth/` 下已有 33 批录制快照。用其中两份订正了 `rvm-truth.json`
+里长期挂着 `★` 的推演值。
+
+### 订正的基线（3 件 → 6 件）
+
+`baseline.members_exact` 原来只有三件，且 `BOX-A1` 写的是改造前 `1000³` 的旧值。
+真实基线取 `noncube-base`（sesno 977，BOX-A1 改长方体后）与 `spre-base`（sesno 1016，148 成员全解析）：
+
+| 成员 | 旧值（推演/过期） | 实测值 |
+|---|---|---|
+| `EQ-A/AIOS-SUITE-BOX-A1` | `[39500,4500,-500,40500,5500,500]` | `[39000,4500,-250,41000,5500,250]` |
+| `EQ-NBX/AIOS-SUITE-BOX-N` | `[45000,4000,-1000,47000,6000,1000]` | 同（吻合） |
+| `EQ-RM/AIOS-SUITE-BOX-RM` | `[59750,4750,750,60250,5250,1250]` | 同（吻合） |
+| `EQ-NOZ/AIOS-SUITE-EQ-NOZ-BOX` | **缺省名键 + null** | `[45998.61,7696.57,1125,46358.85,8311.35,1675]` |
+| `ROOM-STRU/.../RM-R201-P1` | 只在 calibrate 段写推演值 | `[58000.00,3000.00,0,62000.00,7000.00,2000.00]` |
+| `ROOM-STRU/.../RM-R202-P1` | 同上 | `[68000.00,3000.00,0,72000.00,7000.00,2000.00]` |
+
+**两处是实质错误**：
+- `BOX-A1` 的旧值 `39500..40500 / -500..500` 是 `1000³` 时代的；改长方体后是 `39000..41000 / -250..250`。
+  照旧值比对，基线腿会假红。
+- `EQ-NOZ` 的键写的是 E3D 缺省名 `BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ`，但命名改造后它叫
+  `AIOS-SUITE-EQ-NOZ-BOX`。**键名不匹配 = 比对时静默取不到**，不会报错。
+
+### 四条旋转/变形腿的期望值与实测逐字吻合
+
+```
+sesno 981 (rot_u) → 39500, 4000, -250, 40500, 6000, 250      ← 期望值一致
+sesno 987 (rot_e) → 39000, 4750, -500, 41000, 5250, 500      ← 期望值一致
+sesno 993 (rot_n) → 39750, 4500, -1000, 40250, 5500, 1000    ← 期望值一致
+sesno 999 (resize)→ 39200, 4400, -400, 40800, 5600, 400      ← 期望值一致
+```
+
+这四条腿本来就没挂 `calibrate`，是真判，实测确认它们**判得对**。
+
+### 5 条 `equals_state_before` 腿上多余的 `calibrate` 已移除
+
+`attr/owner_restore`、`geom/nbox_resize_restore`、`geom/nbox_add_restore`、
+`connect/bran_reparent_restore`、`delete/container_keep_child_restore` 都同时写了
+`equals_state_before` 和 `calibrate: true`。
+
+这是**自我削弱**：`Compare-SuiteRvmTruth.ps1:172-174` 里整腿 `calibrate` 会把
+`mismatchLevel` 从 `fail` 降成 `calibrate`，于是 `unexpected-diff` 只报不判。
+而 `equals_state_before` 在 `:286` 有自己的判定路径（`$isEquals`），根本不需要这个降级。
+移除后这 5 条腿恢复真判。
+
+### ★ `equals_state_before` 的 Before 要传「apply 之前」那份
+
+手工跑 Compare 时踩了一次：把 apply 后的 `1020` 当 Before 去比 restore 后的 `1014`，
+报 `unexpected-diff: M2 Δ [187.07, 261.84, -1.5, ...]`，看着像 restore 不可逆。
+
+实际是**参数传反**。`Export-SuiteRvmTruth.ps1:401-404` 的实现是：
+
+```
+if ($e.equals_state_before) { $before = $stateBefore[$e.equals_state_before] }
+```
+
+即 Before 取的是**被引用宏（apply）跑之前**那份快照。按这个规则重跑：
+
+```
+Before = 1016（spre-base，apply 之前）
+After  = 1014（spre-restored，restore 之后）
+→ before 118 件 / after 118 件 → 新增 0 删除 0 平移 0 变形 0 未变 118
+→ [ok] equals-state-before: 其余成员逐一吻合（≤ 1 mm，共 118 件）
+→ 判定：pass
+```
+
+所以 `spre_swap` 的 restore 确实完全可逆。规则已写进 `rvm-truth.json` 的 `pairing_rules` 段。
+
+### 教训
+
+凡 `★` 项，先看 `output/increment-suite-rvm-truth/` 里有没有现成快照，再决定要不要重跑。
+本轮全部订正都来自已有录制，**没碰 E3D**。这也是第四次在 AABB 上踩坑（前三次：
+34 个缺省名、BRAN HPOS 不可见、rot_e/rot_n 区间算错）——都是「以为」而不是「读过」。

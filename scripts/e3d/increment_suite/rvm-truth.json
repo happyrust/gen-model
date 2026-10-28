@@ -2,6 +2,11 @@
   "version": 1,
   "suite": "pml-increment-suite",
   "description": "PML 增量套件的 RVM 验证模型：每条写腿（SAVEWORK 宏）跑完后，整棵 /AIOS-SUITE-8000 只读导出一份 RVM 并 rvm_verify import 成快照；本文件登记每条腿相对「它跑之前那份快照」应有的几何变化，Compare-SuiteRvmTruth.ps1 按名逐项核对。成员键 = 导出根以下的相对路径（RVM 路径里名字不带前导斜杠；无名构件用 E3D 缺省名，如 `BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ`）。带 ★ 的数值/判断没有真机验证过，首轮录制后用观测值订正。",
+  "pairing_rules": {
+    "normal": "普通腿：Before = 该宏跑之前那份快照，After = 该宏跑完之后那份。",
+    "equals_state_before": "restore 腿：Before 不是「上一份」，而是被引用宏（apply）跑之前的那份快照。Export-SuiteRvmTruth.ps1:401-404 用 $stateBefore[$ref] 取，取不到才退回与上一份比。手工跑 Compare 时必须自己按这个规则选 Before，否则会把 apply 造成的差异当成 restore 的失败（踩过一次：把 apply 后 1020 当 Before，误报 unexpected-diff）。",
+    "calibrate": "整腿 calibrate:true 会把 mismatchLevel 从 fail 降成 calibrate（Compare-SuiteRvmTruth.ps1:172-174），等于该腿不判红。只给「确实还缺观测值」的腿挂；equals_state_before 腿自带判定路径，再挂 calibrate 会自我削弱。"
+  },
   "export": {
     "element": "/AIOS-SUITE-8000",
     "anchor": "/1RX03-EQUI",
@@ -36,14 +41,15 @@
   ],
   "baseline": {
     "after": "common/setup_8000.mac",
+    "note": "2026-10-28 实测订正：数值取自 noncube-base（sesno 977，BOX-A1 改长方体后的真实基线）与 spre-base（sesno 1016，148 成员全解析）。此前 members_exact 里 BOX-A1 写的是改造前 1000³ 的旧值 [39500,4500,-500,40500,5500,500]，EQ-NOZ 的 BOX 键还是 E3D 缺省名。",
     "members_exact": {
       "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
-        39500,
+        39000,
         4500,
-        -500,
-        40500,
+        -250,
+        41000,
         5500,
-        500
+        250
       ],
       "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N": [
         45000,
@@ -60,28 +66,49 @@
         60250,
         5250,
         1250
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/AIOS-SUITE-EQ-NOZ-BOX": [
+        45998.607635498,
+        7696.57325744629,
+        1125,
+        46358.8523864746,
+        8311.34605407715,
+        1674.99995231628
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": [
+        58000.0027548522,
+        3000.00014249235,
+        0,
+        62000.002944842,
+        7000.00033248216,
+        2000.0000949949
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-P1": [
+        68000.0032298267,
+        3000.00014249235,
+        0,
+        72000.0034198165,
+        7000.00033248216,
+        2000.0000949949
       ]
     },
     "members_calibrate": {
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ": "★ 由 /1-LNR-Q005-PJ 的 BOX（tests/fixtures/sessions/ams8000-equi-move-chain/rvm-truth/725.json：[-3001.39, 7696.57, 1125, -2641.15, 8311.35, 1675]）+ setup 的 BY E 49000 推得 ≈ [45998.61, 7696.57, 1125, 46358.85, 8311.35, 1675]，前提是 COPY 原样带过 POS 且 ZONE 在原点",
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N/AIOS-SUITE-NBOX-N1": "★ 负实体 500×500×2500 居 BOX-N 原点；窄口径 RVM 是否导出未知",
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": "COPY /1RX-345 带出的 19 条 BRAN + BRAN-S（COPY /C-OR-1R345-C，HPOS E 8551 N 14060 U 2900）：并集与件数以首轮基线快照为准",
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": "★ PANE（PLOO 四顶点 58000..62000 × 3000..7000，HEIG 2000）若导出应为 [58000, 3000, 0, 62000, 7000, 2000]",
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-P1": "★ 同上，[68000, 3000, 0, 72000, 7000, 2000]"
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N/AIOS-SUITE-NBOX-N1": "★ 负实体 500×500×2500 居 BOX-N 原点；窄口径 RVM 已实测不导出（见 limits 第 4 条），此键永远取不到，保留仅作记录",
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": "COPY /1RX-345 带出的 19 条 BRAN + BRAN-S（COPY /C-OR-1R345-C，HPOS E 8551 N 14060 U 2900）：并集与件数以首轮基线快照为准"
     }
   },
   "legs": {
     "common/setup_8000.mac": {
-      "note": "基线；与「上一份」无可比性（setup 先删同名 SITE 再建）。对拍方式：members_exact 三件 AABB 逐分量 ≤ 1 mm，members_calibrate 记观测值。",
+      "note": "基线；与「上一份」无可比性（setup 先删同名 SITE 再建）。对拍方式：members_exact 六件 AABB 逐分量 ≤ 1 mm，members_calibrate 记观测值。数值已于 2026-10-28 用 noncube-base（977）与 spre-base（1016）两份实测快照订正。",
       "calibrate": true,
       "added": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
-          39500,
+          39000,
           4500,
-          -500,
-          40500,
+          -250,
+          41000,
           5500,
-          500
+          250
         ],
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX/AIOS-SUITE-BOX-N": [
           45000,
@@ -99,17 +126,27 @@
           5250,
           1250
         ],
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/BOX 1 of EQUIPMENT /AIOS-SUITE-EQ-NOZ": null
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/AIOS-SUITE-EQ-NOZ-BOX": [
+          45998.607635498,
+          7696.57325744629,
+          1125,
+          46358.8523864746,
+          8311.34605407715,
+          1674.99995231628
+        ]
       },
       "subtree": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P": {
-          "calibrate": true
+          "calibrate": true,
+          "observed": "实测（spre-base 1016）count=112 union=[2434.06, 9954.67, 190, 11285.38, 16296.14, 4930]"
         },
         "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU": {
-          "calibrate": true
+          "calibrate": true,
+          "observed": "实测（spre-base 1016）count=2 union=[58000, 3000, 0, 72000, 7000, 2000]"
         },
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
-          "calibrate": true
+          "calibrate": true,
+          "observed": "实测（spre-base 1016）count=1 union=[45000, 4000, -1000, 47000, 6000, 1000]"
         }
       },
       "unchanged_elsewhere": false
@@ -240,8 +277,7 @@
     },
     "delete/container_keep_child_restore.mac": {
       "equals_state_before": "delete/container_keep_child_apply.mac",
-      "calibrate": true,
-      "note": "★ 与 apply 同一假设的逆"
+      "note": "与 apply 同一假设的逆。equals_state_before 有自己的判定路径（Compare-SuiteRvmTruth.ps1:286 的 $isEquals），不该再挂 calibrate——挂了会让 mismatchLevel 降成 calibrate、整腿不判红。"
     },
     "delete/recreate_same_name_apply.mac": {
       "aabb_blind": true,
@@ -291,8 +327,7 @@
       "note": "★ 同 delete/container_keep_child_apply.mac 的 INCLUDE 假设"
     },
     "attr/owner_restore.mac": {
-      "equals_state_before": "attr/owner_apply.mac",
-      "calibrate": true
+      "equals_state_before": "attr/owner_apply.mac"
     },
     "xform/move_apply.mac": {
       "moved": {
@@ -414,8 +449,7 @@
       "note": "★ NBOX-N1 XLEN 500→900 全在 BOX-N 之内，并集不变；负实体若导出，其自身 AABB 变成 [45550,4750,-1250,46450,5250,1250]"
     },
     "geom/nbox_resize_restore.mac": {
-      "equals_state_before": "geom/nbox_resize_apply.mac",
-      "calibrate": true
+      "equals_state_before": "geom/nbox_resize_apply.mac"
     },
     "geom/nbox_add_apply.mac": {
       "subtree": {
@@ -431,8 +465,7 @@
       "note": "★ NBOX-N2 300×300×2500 POS E 600（相对 BOX-N）→ 若导出应新增 [46450,4850,-1250,46750,5150,1250]，件数 +1；不导出则无痕"
     },
     "geom/nbox_add_restore.mac": {
-      "equals_state_before": "geom/nbox_add_apply.mac",
-      "calibrate": true
+      "equals_state_before": "geom/nbox_add_apply.mac"
     },
     "connect/bran_add_member_apply.mac": {
       "subtree": {
@@ -482,8 +515,7 @@
     },
     "connect/bran_reparent_restore.mac": {
       "equals_state_before": "connect/bran_reparent_apply.mac",
-      "calibrate": true,
-      "note": "★ 树逆但序逆不了：FTUB 回到 BRAN-S 末位而非第 4 位，隐含管段序列不同——件数应回到原值，并集可能不同"
+      "note": "树逆但序逆不了：FTUB 回到 BRAN-S 末位而非第 4 位，隐含管段序列不同——件数应回到原值，并集可能不同。这里不再挂 calibrate（挂了整腿不判红）；若首轮录制出现并集差异，按观测值改成显式 subtree 断言。"
     },
     "connect/nozz_move_apply.mac": {
       "aabb_blind": true,
