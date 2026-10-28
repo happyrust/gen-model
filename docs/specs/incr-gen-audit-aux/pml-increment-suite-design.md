@@ -2855,6 +2855,124 @@ PANE 的 AABB 就是四个 PAVE 顶点的并集、高度取 PLOO 的 `HEIG 2000`
 → 「支管成员换序」在 PML 里触发不了，该用例从覆盖矩阵**移到 (c) 类**。
 `connect/bran_reorder_probe.mac` 保留作回归证据，结论已写进文件头，换 E3D 版本可重跑一次复核。
 
+## 7.9f 从 PML 侧生成 ATT，身份解析率 1/147 → 147/1（2026-10-28）
+
+### 问题
+
+窄口径 RVM 只写几何，不写元素身份。`rvm_verify import` 不带 ATT 时，
+148 个成员里只有导出根那 1 个是 `cli_root`，其余 147 个是 `stable_hash` 未解析。
+
+这不影响按名字比对（Compare 用相对路径当键），但会：
+- 让 `resolved/unresolved` 元数据永远是 1/147，掩盖真实覆盖率；
+- 让任何按 refno 的交叉引用（如与 PML 侧 `Q REF` 对账）无法进行。
+
+### 官方路径为何不可用
+
+官方是 `GenModelRvmExport` CAF addin 的 pair 模式，靠环境变量
+`GENMODEL_ATT_OUT` 驱动，产出 `.rvm` + `.att`。本机两个障碍：
+
+- `launch_e3d_sample_repaired.ps1:100,119` 硬编码
+  `C:\Program Files (x86)\AVEVA\Everything3D3.1\Startup.dll`，该路径**已不存在**
+  （两个影子安装 `shadow_e3d31_aps_all` / `shadow_e3d31_gen_model_test` 里都有这个 dll，
+  但启动器不读它们）；
+- `run_ams_c_entrymacro.bat` **根本不加载 addin**（全文无 `addin` / `DesignAddins`）。
+
+注意 `GenModelRvmExport.dll` 本身是存在的，`DesignAddins.xml` 里也注册了，
+`DesignAddins.xml:31` 有 `<string>GenModelRvmExport</string>`。卡的是启动链路，不是 dll。
+
+### 解法：`New-SuiteAttDump.ps1`
+
+从 PML 侧把同样的信息 dump 出来自己拼 ATT。ATT 格式取自
+`vendor/../src/rvm_baseline/att.rs:34-35`（分隔符常量）与 `:73-113`（merge 解析器）：
+
+```
+AVEVA_Attributes_File v1.0 , start: NEW , end: END , name_end: := , sep: &end&
+NEW Header Information
+Element:= /AIOS-SUITE-8000
+END
+NEW /AIOS-SUITE-8000-Z
+NAME:= =24384/27738
+TYPE:= ZONE
+END
+```
+
+三个约束：
+
+1. **键值分隔符是 `:=`，不是 `=`**（`att.rs:35` 的 `KEY_VALUE_SEPARATOR`）。
+   写成 `NAME = =ref` 会被 `split_once(":=")` 判为无键值对而**整行丢弃**——
+   section 建起来了（`identity_source` 变成 `att_name`）、但 `NAME` 取不到，
+   `resolved` 仍是 `false`。第一版就踩了这个坑，现象极隐蔽。
+2. **section key 必须与 RVM 组名逐字相同**（`import.rs:199` 的 `self.att.get(&name)`）。
+3. **`NAME` 写 `=ref0/ref1`**（`import.rs:211` 的 `refno_from_att_name`，
+   `att.rs:124-134` 要求两段都非 0），命中即 `identity_source = "att_direct"`、`resolved = true`。
+
+### 结果
+
+```
+身份 已解析/未解析: 147 / 1
+```
+
+147 个成员全部 `att_direct` 并带真实 refno：
+
+```
+/AIOS-SUITE-8000      refno=24384/27737  src=cli_root
+/AIOS-SUITE-8000-Z    refno=24384/27738  src=att_direct
+/AIOS-SUITE-EQ-RM     refno=24384/27895  src=att_direct
+/AIOS-SUITE-BOX-RM    refno=24384/27896  src=att_direct
+...
+```
+
+剩 1 个未解析是隐含 TUBI（`TUBE 1 of BRANCH /AIOS-SUITE-PIPE-P-BRAN-19`），
+PML 的 `COLLECT` 不遍历它——这是 PML 侧的边界，不是 ATT 的缺陷。
+
+已接入 `Export-SuiteRvmTruth.ps1` 的 `Export-State`：每次导出自动 dump ATT 并带 `--att`；
+dump 失败只告警不中断（ATT 只影响身份解析率，不影响比对）。
+`Import-RvmSnapshot` 新增 `-AttFile`，不传时命令行与以前逐字相同。
+
+## 7.9g BOX-A1 改长方体，三条旋转腿从 aabb_blind 变为真判（2026-10-28）
+
+### 问题
+
+`BOX-A1` 原是 `1000×1000×1000` 正方体且居设备原点，绕自身中心转 90° 后
+AABB 完全不变，`xform/rot_u|e|n` 三条腿在 RVM 里看不出任何差异。
+
+### 改造
+
+基线改成 `2000×1000×500` 长方体。三条腿现在都能真判：
+
+| 腿 | 旋转 | 尺寸变化 | 实测 AABB | 判定 |
+|---|---|---|---|---|
+| `rot_u` | 绕 U 90° | X/Y 互换 → 1000×2000×500 | `[39500,4000,-250,40500,6000,250]` | pass |
+| `rot_e` | 绕 E 90° | Y/Z 互换 → 2000×500×1000 | `[39000,4750,-500,41000,5250,500]` | pass |
+| `rot_n` | 绕 N 90° | X/Z 互换 → 500×1000×2000 | `[39750,4500,-1000,40250,5500,1000]` | pass |
+
+`geom/resize` 腿同步验证（1600×1200×800）仍 pass。
+
+### 连带同步五处尺寸字面值
+
+不改成一致，「终态与基线按名相等」的前提就不成立：
+
+- `common/setup_8000.mac`
+- `geom/resize_restore.mac`（写回 2000×1000×500）
+- `delete/box_restore.mac`
+- `delete/child_then_parent_restore.mac`
+- `delete/recreate_same_name_apply.mac`
+
+### ★ 两处期望值第一次算错
+
+- **rot_e**：我把 N 区间算成 `5000±500`，实际是 `5000±250`。
+  Y/Z 互换后 N 方向是**原来的 Z 跨度 500**，不是 Y 跨度 1000。
+- **rot_n**：我把 U 区间算成 `0±750`，实际是 `0±1000`。
+  X/Z 互换后 U 方向是**原来的 X 跨度 2000 的一半**。
+
+两次都是「尺寸互换就推区间」的错。教训与 7.9d 一致：
+AABB 期望值必须按「哪个轴换了哪个轴、中心在哪」逐个算。
+
+### 仍不可见
+
+`BOX-N`（2000³）与 `BOX-RM`（500³）仍是正方体，旋转在 AABB 上不可见。
+它们的用例（`geom/nbox_*`、`room/member_move`）不涉及旋转，未改。
+
 ## 7.10 复现命令
 
 ```powershell
