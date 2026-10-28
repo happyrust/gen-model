@@ -1,0 +1,55 @@
+-- 只读探针：核对改造后 setup_8000 产出的房间结构是否与用例宏的引用一致。
+--
+-- 用例宏引用：
+--   room/pane_move_apply.mac   → /AIOS-SUITE-RM-R201-P1
+--   room/pave_move_apply.mac   → /AIOS-SUITE-RM-R201-P1
+--   room/frmw_rename_apply.mac → /AIOS-SUITE-RM-R201
+--   room/member_move_apply.mac → /AIOS-SUITE-EQ-RM 从 R201 跨到 R202
+--
+-- 只读，不写库。
+
+ONERROR CONTINUE
+ALPHA LOG "{{LOG_PATH}}" OVER
+$P SUITE-VERIFY-ROOMS-ALIVE
+
+$P SECTION_R201
+/AIOS-SUITE-RM-R201
+Q CE
+Q NAME
+Q REF
+Q MEMB
+
+$P SECTION_R201_DEEP
+/AIOS-SUITE-RM-R201
+!walls = !!CE.MEMBERS
+DO !w VALUES !walls
+  !!CE = !w
+  Q TYPE
+  Q NAME
+  !pn = !!CE.MEMBERS
+  DO !p VALUES !pn
+    !!CE = !p
+    Q TYPE
+    Q NAME
+    Q REF
+    Q POS WRT /*
+  ENDDO
+ENDDO
+
+$P SECTION_R202
+/AIOS-SUITE-RM-R202
+Q CE
+Q NAME
+Q REF
+Q MEMB
+
+$P SECTION_EQ_CYLI
+/AIOS-SUITE-EQ-CYLI
+Q CE
+Q NAME
+Q REF
+Q POS WRT /*
+Q MEMB
+
+$P SUITE-VERIFY-ROOMS-DONE
+ALPHA LOG END

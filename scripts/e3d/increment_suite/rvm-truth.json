@@ -41,7 +41,7 @@
   ],
   "baseline": {
     "after": "common/setup_8000.mac",
-    "note": "2026-10-28 实测订正：数值取自 noncube-base（sesno 977，BOX-A1 改长方体后的真实基线）与 spre-base（sesno 1016，148 成员全解析）。此前 members_exact 里 BOX-A1 写的是改造前 1000³ 的旧值 [39500,4500,-500,40500,5500,500]，EQ-NOZ 的 BOX 键还是 E3D 缺省名。",
+    "note": "2026-10-28 语料改造后重新订正：房间与 CYLI 改用 ams 真实语料，全部数值取自实测快照 ams-corpus-final（sesno 1036，154 成员 / 125 几何 / 身份解析 153）。改造前的旧值（自造房间 [58000..72000] 那批）已作废。",
     "members_exact": {
       "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
         39000,
@@ -75,21 +75,45 @@
         8311.34605407715,
         1674.99995231628
       ],
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": [
-        58000.0027548522,
-        3000.00014249235,
-        0,
-        62000.002944842,
-        7000.00033248216,
-        2000.0000949949
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-CYLI/AIOS-SUITE-CYLI-1": [
+        51250,
+        4250,
+        -1500,
+        52750,
+        5750,
+        1500
       ],
-      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-P1": [
-        68000.0032298267,
-        3000.00014249235,
-        0,
-        72000.0034198165,
-        7000.00033248216,
-        2000.0000949949
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1": [
+        8803.29688073834,
+        10956.4160628943,
+        6569.99978306703,
+        9039.75295217242,
+        11179.2994203861,
+        6869.99979731627
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P2": [
+        8585.29646875104,
+        10750.4166885046,
+        6429.99991658144,
+        8821.75254018512,
+        10973.3000459964,
+        6729.99993083067
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-W1/AIOS-SUITE-RM-R202-P1": [
+        16803.2968807383,
+        10956.4160628943,
+        6569.99978306703,
+        17039.7529521724,
+        11179.2994203861,
+        6869.99979731627
+      ],
+      "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-W1/AIOS-SUITE-RM-R202-P2": [
+        16585.296468751,
+        10750.4166885046,
+        6429.99991658144,
+        16821.7525401851,
+        10973.3000459964,
+        6729.99993083067
       ]
     },
     "members_calibrate": {
@@ -99,7 +123,7 @@
   },
   "legs": {
     "common/setup_8000.mac": {
-      "note": "基线；与「上一份」无可比性（setup 先删同名 SITE 再建）。对拍方式：members_exact 六件 AABB 逐分量 ≤ 1 mm，members_calibrate 记观测值。数值已于 2026-10-28 用 noncube-base（977）与 spre-base（1016）两份实测快照订正。",
+      "note": "基线；与「上一份」无可比性（setup 先删同名 SITE 再建）。对拍方式：members_exact 九件 AABB 逐分量 ≤ 1 mm，members_calibrate 记观测值。数值取自 ams-corpus-final（sesno 1036，154 成员 / 125 几何 / 身份解析 153），即 2026-10-28 语料改造后的实测。",
       "calibrate": true,
       "added": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-A/AIOS-SUITE-BOX-A1": [
@@ -133,6 +157,46 @@
           46358.8523864746,
           8311.34605407715,
           1674.99995231628
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-CYLI/AIOS-SUITE-CYLI-1": [
+          51250,
+          4250,
+          -1500,
+          52750,
+          5750,
+          1500
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1": [
+          8803.29688073834,
+          10956.4160628943,
+          6569.99978306703,
+          9039.75295217242,
+          11179.2994203861,
+          6869.99979731627
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P2": [
+          8585.29646875104,
+          10750.4166885046,
+          6429.99991658144,
+          8821.75254018512,
+          10973.3000459964,
+          6729.99993083067
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-W1/AIOS-SUITE-RM-R202-P1": [
+          16803.2968807383,
+          10956.4160628943,
+          6569.99978306703,
+          17039.7529521724,
+          11179.2994203861,
+          6869.99979731627
+        ],
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R202/AIOS-SUITE-RM-R202-W1/AIOS-SUITE-RM-R202-P2": [
+          16585.296468751,
+          10750.4166885046,
+          6429.99991658144,
+          16821.7525401851,
+          10973.3000459964,
+          6729.99993083067
         ]
       },
       "subtree": {
@@ -142,11 +206,15 @@
         },
         "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU": {
           "calibrate": true,
-          "observed": "实测（spre-base 1016）count=2 union=[58000, 3000, 0, 72000, 7000, 2000]"
+          "observed": "改造后实测（ams-corpus-final 1036）：4 个 PANE（R201-P1/P2、R202-P1/P2），并集约 [8585, 10750, 6430, 17040, 11179, 6870]。真实 ams 房间坐标，不再是自造的 58000..72000 区间"
         },
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
           "calibrate": true,
           "observed": "实测（spre-base 1016）count=1 union=[45000, 4000, -1000, 47000, 6000, 1000]"
+        },
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-CYLI": {
+          "calibrate": true,
+          "observed": "改造后实测（ams-corpus-final 1036）：count=1 union=[51250, 4250, -1500, 52750, 5750, 1500]（Ø1500 × H3000 在 E52000 N5000 U0）"
         }
       },
       "unchanged_elsewhere": false
@@ -568,7 +636,7 @@
     },
     "room/pane_move_apply.mac": {
       "subtree": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": {
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1": {
           "count_delta": 0,
           "union_shift": [
             0,
@@ -577,26 +645,18 @@
           ]
         }
       },
-      "note": "PANE BY D 200：PANE 出几何已实测确认（limits 已定），并集整体下移 200"
+      "note": "PANE BY D 200：PANE 出几何已实测确认（limits 已定），并集整体下移 200。★ 2026-10-28 语料改造后路径多一层 CWALL（AIOS-SUITE-RM-R201-W1）——真实 ams 房间的 PANE 挂在 CWALL 下，不是 FRMW 直接子级。"
     },
     "room/pane_move_restore.mac": {
       "equals_state_before": "room/pane_move_apply.mac"
     },
     "room/pave_move_apply.mac": {
       "subtree": {
-        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-P1": {
-          "count_delta": 0,
-          "union_aabb": [
-            58000,
-            3000,
-            0,
-            64000,
-            7000,
-            2000
-          ]
+        "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1": {
+          "count_delta": 0
         }
       },
-      "note": "东边两顶点 E 62000→64000：PANE 并集从 [58000,3000,0,62000,7000,2000] 变 [58000,3000,0,64000,7000,2000]，属变形不是平移"
+      "note": "改 PAVE 顶点（变形不是平移，union_shift 表达不了）。★ 2026-10-28 语料改造后：PANE 换成 ams 真实房间 /1RS04TT3722P 的副本，顶点是真实坐标 [8803.30, 10956.42, 6570.00, 9039.75, 11179.30, 6870.00]，旧的 union_aabb 绝对断言（自造 58000..64000 那套）已作废。绝对并集要等这腿真跑一轮、拿到改顶点后的实测值再写；现在先只断言 count_delta:0。"
     },
     "room/pave_move_restore.mac": {
       "equals_state_before": "room/pave_move_apply.mac"

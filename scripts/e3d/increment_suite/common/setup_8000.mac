@@ -34,6 +34,14 @@ POS E 43000 N 5000 U 0
 Q REF
 Q NAME
 !!CE = !zone
+-- ★ 设备语料改造（2026-10-28）：EQ-NBX 改用 ams 真实设备 /1-RFH-437-SN。
+--   实测（probe_equi_detail）：该设备是 EQUI + 1 个 CYLI 子件（Ø38 × H52），
+--   在 db8000 里是**唯一带 CYLI 的设备**（其余 100+ EQUI 全是 BOX 或 ELCONN）。
+--   COPY 后挪到套件区域并放大尺寸，因为 Ø38 太小、AABB 比对精度吃紧。
+--
+--   ★ 但 BOX-N + NBOX-N1 这一对仍是自造：db8000 里没有任何真实负实体（NBOX），
+--     而 geom/nbox_* 三条用例需要 NBOX 挂在 BOX 之下，只能自建。
+--     所以 EQ-NBX 下同时有：真实 CYLI（来自 COPY）+ 自造 BOX-N/NBOX-N1。
 NEW EQUIPMENT /AIOS-SUITE-EQ-NBX
 POS E 46000 N 5000 U 0
 Q REF
@@ -49,6 +57,33 @@ ZLEN 2500
 NAME /AIOS-SUITE-NBOX-N1
 Q REF
 Q NAME
+-- 真实 CYLI：COPY ams 的 /1-RFH-437-SN，只留 CYLI，放大到可测尺寸
+-- ★ 用 POS 绝对值而不是 BY：BY 是相对原件位置的偏移，而原件在 E1830 S24670 U4088，
+--   BY E 52000 N 5000 U 0 会把设备带到 N -20420（跑到套件区域外，实测踩过）。
+!!CE = !zone
+NEW EQUIPMENT /AIOS-SUITE-EQ-CYLI
+COPY /1-RFH-437-SN
+Q REF
+Q NAME
+Q MEMB
+POS E 52000 N 5000 U 0
+Q POS WRT /*
+/AIOS-SUITE-EQ-CYLI
+!cm = !!CE.MEMBERS
+DO !cx VALUES !cm
+  !!CE = !cx
+  IF (!!CE.TYPE EQ 'CYLI') THEN
+    !cn = !!CE.NAME
+    IF (NOT MATCHWILD(!cn,'/*')) THEN
+      NAME /AIOS-SUITE-CYLI-1
+    ENDIF
+    DIAM 1500
+    HEIG 3000
+    Q NAME
+    Q DIAM
+    Q HEIG
+  ENDIF
+ENDDO
 !!CE = !zone
 NEW EQUIPMENT /AIOS-SUITE-EQ-NOZ
 COPY /1-LNR-Q005-PJ
@@ -157,41 +192,162 @@ Q MEMB
 !!CE = !zone
 NEW STRU /AIOS-SUITE-ROOM-STRU
 !stru = !!CE
+-- ★ 房间语料改用 ams 真实房间（2026-10-28 改造）：
+--   原先是自造 FRMW/PANE/PLOO/PAVE 四个顶点。现在改成 COPY 生产房间
+--   /1RS-WF04-W-AB（db1112 的真实房间，19 面墙），COPY 后只留第 1 面墙
+--   （CWALL R4501，带 2 个 PANE），其余 18 面墙 DELETE。
+--
+--   为什么裁墙：整个房间有 19 CWALL + 数百 PANE，搬进套件会让 RVM 成员数
+--   从 148 涨到上千，录制与比对成本不可接受。留 1 面墙（2 PANE × 4 PAVE）
+--   既保住真实命名与真实坐标，又把规模控制在可录范围内。
+--
+--   ★ 层级实测（probe_pane_owner / probe_room_trim / probe_pave_check）：
+--     FRMW → CWALL → PANE → PLOO → PAVERT 1..4
+--     PANE 不是挂在 FRMW 直接子级，而是挂在 CWALL 下。所以 COPY FRMW 后
+--     必须穿过 CWALL 才能摸到 PANE。
+--   ★ COPY 只能进空容器：`Cannot copy into an element which already has members`
+--     所以必须 NEW FRMW（空）再 COPY，不能 NEW FRMW 之后又建别的。
 NEW FRMW /AIOS-SUITE-RM-R201
-NEW PANE /AIOS-SUITE-RM-R201-P1
-NEW PLOO
-NAME /AIOS-SUITE-RM-R201-PLOO
-HEIG 2000
-NEW PAVE
-NAME /AIOS-SUITE-RM-R201-V1
-POS E 58000 N 3000 U 0
-NEW PAVE
-NAME /AIOS-SUITE-RM-R201-V2
-POS E 62000 N 3000 U 0
-NEW PAVE
-NAME /AIOS-SUITE-RM-R201-V3
-POS E 62000 N 7000 U 0
-NEW PAVE
-NAME /AIOS-SUITE-RM-R201-V4
-POS E 58000 N 7000 U 0
+COPY /1RS-WF04-W-AB
+-- 只留第 1 面墙，其余 DELETE CWALL
+/AIOS-SUITE-RM-R201
+!all = !!CE.MEMBERS
+!keep = 0
+DO !c VALUES !all
+  !!CE = !c
+  IF (!!CE.TYPE EQ 'CWALL') THEN
+    !keep = !keep + 1
+    IF (!keep GT 1) THEN
+      DELETE CWALL
+    ENDIF
+  ENDIF
+ENDDO
+-- 补名：CWALL / PANE / PLOO / PAVE 全部要有显式名（命名纪律见文件头）
+-- ★ 判据用 MATCHWILD(NAME,'/*')，不能用 NAME EQ ''（无名元素返回 refno 串）
+/AIOS-SUITE-RM-R201
+!ws = !!CE.MEMBERS
+!wi = 0
+DO !w VALUES !ws
+  !!CE = !w
+  IF (!!CE.TYPE EQ 'CWALL') THEN
+    !wi = !wi + 1
+    !cn = !!CE.NAME
+    IF (NOT MATCHWILD(!cn,'/*')) THEN
+      !nm = '/AIOS-SUITE-RM-R201-W$!wi'
+      NAME $!nm
+    ENDIF
+    !ps = !!CE.MEMBERS
+    !pi = 0
+    DO !p VALUES !ps
+      !!CE = !p
+      IF (!!CE.TYPE EQ 'PANE') THEN
+        !pi = !pi + 1
+        !cn = !!CE.NAME
+        IF (NOT MATCHWILD(!cn,'/*')) THEN
+          !nm = '/AIOS-SUITE-RM-R201-P$!pi'
+          NAME $!nm
+        ENDIF
+        !ls = !!CE.MEMBERS
+        !li = 0
+        DO !l VALUES !ls
+          !!CE = !l
+          IF (!!CE.TYPE EQ 'PLOO') THEN
+            !li = !li + 1
+            !cn = !!CE.NAME
+            IF (NOT MATCHWILD(!cn,'/*')) THEN
+              !nm = '/AIOS-SUITE-RM-R201-P$!pi-PLOO'
+              NAME $!nm
+            ENDIF
+            !vs = !!CE.MEMBERS
+            !vi = 0
+            DO !v VALUES !vs
+              !!CE = !v
+              IF (!!CE.TYPE EQ 'PAVE') THEN
+                !vi = !vi + 1
+                !cn = !!CE.NAME
+                IF (NOT MATCHWILD(!cn,'/*')) THEN
+                  !nm = '/AIOS-SUITE-RM-R201-P$!pi-V$!vi'
+                  NAME $!nm
+                ENDIF
+              ENDIF
+            ENDDO
+          ENDIF
+        ENDDO
+      ENDIF
+    ENDDO
+  ENDIF
+ENDDO
+-- 第二间房：同样是真实房间语料，COPY 同一房间再裁到 1 面墙，
+-- 挪到不同位置以便 room/member_move 有「跨房间」的目标。
 !!CE = !stru
 NEW FRMW /AIOS-SUITE-RM-R202
-NEW PANE /AIOS-SUITE-RM-R202-P1
-NEW PLOO
-NAME /AIOS-SUITE-RM-R202-PLOO
-HEIG 2000
-NEW PAVE
-NAME /AIOS-SUITE-RM-R202-V1
-POS E 68000 N 3000 U 0
-NEW PAVE
-NAME /AIOS-SUITE-RM-R202-V2
-POS E 72000 N 3000 U 0
-NEW PAVE
-NAME /AIOS-SUITE-RM-R202-V3
-POS E 72000 N 7000 U 0
-NEW PAVE
-NAME /AIOS-SUITE-RM-R202-V4
-POS E 68000 N 7000 U 0
+COPY /1RS-WF04-W-AB
+/AIOS-SUITE-RM-R202
+!all2 = !!CE.MEMBERS
+!keep2 = 0
+DO !c2 VALUES !all2
+  !!CE = !c2
+  IF (!!CE.TYPE EQ 'CWALL') THEN
+    !keep2 = !keep2 + 1
+    IF (!keep2 GT 1) THEN
+      DELETE CWALL
+    ENDIF
+  ENDIF
+ENDDO
+BY E 8000
+/AIOS-SUITE-RM-R202
+!ws2 = !!CE.MEMBERS
+!wi2 = 0
+DO !w2 VALUES !ws2
+  !!CE = !w2
+  IF (!!CE.TYPE EQ 'CWALL') THEN
+    !wi2 = !wi2 + 1
+    !cn = !!CE.NAME
+    IF (NOT MATCHWILD(!cn,'/*')) THEN
+      !nm = '/AIOS-SUITE-RM-R202-W$!wi2'
+      NAME $!nm
+    ENDIF
+    !ps2 = !!CE.MEMBERS
+    !pi2 = 0
+    DO !p2 VALUES !ps2
+      !!CE = !p2
+      IF (!!CE.TYPE EQ 'PANE') THEN
+        !pi2 = !pi2 + 1
+        !cn = !!CE.NAME
+        IF (NOT MATCHWILD(!cn,'/*')) THEN
+          !nm = '/AIOS-SUITE-RM-R202-P$!pi2'
+          NAME $!nm
+        ENDIF
+        !ls2 = !!CE.MEMBERS
+        !li2 = 0
+        DO !l2 VALUES !ls2
+          !!CE = !l2
+          IF (!!CE.TYPE EQ 'PLOO') THEN
+            !li2 = !li2 + 1
+            !cn = !!CE.NAME
+            IF (NOT MATCHWILD(!cn,'/*')) THEN
+              !nm = '/AIOS-SUITE-RM-R202-P$!pi2-PLOO'
+              NAME $!nm
+            ENDIF
+            !vs2 = !!CE.MEMBERS
+            !vi2 = 0
+            DO !v2 VALUES !vs2
+              !!CE = !v2
+              IF (!!CE.TYPE EQ 'PAVE') THEN
+                !vi2 = !vi2 + 1
+                !cn = !!CE.NAME
+                IF (NOT MATCHWILD(!cn,'/*')) THEN
+                  !nm = '/AIOS-SUITE-RM-R202-P$!pi2-V$!vi2'
+                  NAME $!nm
+                ENDIF
+              ENDIF
+            ENDDO
+          ENDIF
+        ENDDO
+      ENDIF
+    ENDDO
+  ENDIF
+ENDDO
 !!CE = !zone
 NEW EQUIPMENT /AIOS-SUITE-EQ-RM
 POS E 60000 N 5000 U 1000
