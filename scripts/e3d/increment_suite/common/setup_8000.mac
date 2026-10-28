@@ -350,10 +350,19 @@ DO !w2 VALUES !ws2
 ENDDO
 !!CE = !zone
 NEW EQUIPMENT /AIOS-SUITE-EQ-RM
-POS E 60000 N 5000 U 1000
+-- ★ 2026-10-28 语料改造：EQ-RM 初始位置放进 ams 真实房间 R201 的墙板内。
+--   原因：room/member_move 的语义是「EQ-RM 从 R201 跨入 R202」，要求它一开始就**属于 R201**。
+--   原位置 E 60000 N 5000 是自造房间时代的值，不在任何真实房间范围内，跨房间语义不成立。
+--   R201-P2 实测 AABB [8585.30, 10750.42, 6430.00, 8821.75, 10973.30, 6730.00]，
+--   取中心 E 8703 N 10861 U 6580。
+--   ★ BOX 从 500³ 缩到 150³：真实房间的 PANE 是**墙板**（实测 236×223×300mm），
+--     不是房间地板轮廓，500³ 的盒子八顶点不可能全落在面板内（room_predicate.rs:31 的 Inside 判据
+--     要求八顶点全在面板内），归属判不出来。
+--   150³ 居中后 [8628.5, 10786.9, 6505.0, 8778.5, 10936.9, 6655.0]，全在面板内。
+POS E 8703 N 10861 U 6580
 Q REF
 Q NAME
-NEW BOX XLEN 500 YLEN 500 ZLEN 500
+NEW BOX XLEN 150 YLEN 150 ZLEN 150
 NAME /AIOS-SUITE-BOX-RM
 Q REF
 Q NAME

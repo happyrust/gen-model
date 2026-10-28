@@ -60,12 +60,12 @@
         1000
       ],
       "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [
-        59750,
-        4750,
-        750,
-        60250,
-        5250,
-        1250
+        8628.00025939941,
+        10786.00025177,
+        6505.00011444092,
+        8777.99987792969,
+        10935.9998703003,
+        6654.99973297119
       ],
       "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NOZ/AIOS-SUITE-EQ-NOZ-BOX": [
         45998.607635498,
@@ -624,12 +624,12 @@
     "room/member_move_apply.mac": {
       "moved": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-RM/AIOS-SUITE-BOX-RM": [
-          10000,
+          8000,
           0,
-          0
+          -5580
         ]
       },
-      "note": "EQ-RM POS E 60000→70000"
+      "note": "EQ-RM POS (8703,10861,6580) → (16703,10861,1000)：从 R201-P2 墙板内移到 R202-P2 墙板内，位移 +8000 E / -5580 U。★ 2026-10-28 语料改造：房间换成 ams 真实房间后，EQ-RM 必须一开始就落在 R201 的墙板内才有「跨房间」语义，所以初始位置从自造的 E60000 N5000 改到 R201-P2 中心；BOX 同时从 500³ 缩到 150³（真实房间的 PANE 是墙板，实测 236×223×300mm，500³ 的八顶点不可能全落在面板内，room_predicate.rs:31 的 Inside 判据要求八顶点全在面板内）。"
     },
     "room/member_move_restore.mac": {
       "equals_state_before": "room/member_move_apply.mac"
@@ -653,10 +653,18 @@
     "room/pave_move_apply.mac": {
       "subtree": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1": {
-          "count_delta": 0
+          "count_delta": 0,
+          "union_aabb": [
+            9022.70299260272,
+            11161.0155777307,
+            -4255.00073109288,
+            15514.4273132901,
+            17217.0311032096,
+            6869.99979731627
+          ]
         }
       },
-      "note": "改 PAVE 顶点（变形不是平移，union_shift 表达不了）。★ 2026-10-28 语料改造后：PANE 换成 ams 真实房间 /1RS04TT3722P 的副本，顶点是真实坐标 [8803.30, 10956.42, 6570.00, 9039.75, 11179.30, 6870.00]，旧的 union_aabb 绝对断言（自造 58000..64000 那套）已作废。绝对并集要等这腿真跑一轮、拿到改顶点后的实测值再写；现在先只断言 count_delta:0。"
+      "note": "改 PAVE 顶点 V2/V3 的 E 8803→9003（沿 E 外扩 200），属变形不是平移。★ 2026-10-28 语料改造后：房间是 ams 真实房间 /1RS-WF04-W-AB 裁到 1 面墙的副本，顶点用真实坐标。union_aabb 是实测值（pave-applied 1051），改前是 [9022.70, 11161.02, -4255.00, 15368.16, 17080.63, 6870.00]。★★ 重要订正：PANE 的 AABB 不是「四个 PAVE 顶点的并集」——实测 U 下界是 -4255（远低于顶点最低的 6430），说明 E3D 把墙体延伸/厚度也算进了 PANE 包围盒。旧 limits 里「PANE 的 AABB = 四顶点并集」的说法只对自造房间偶然成立，对真实房间不成立。"
     },
     "room/pave_move_restore.mac": {
       "equals_state_before": "room/pave_move_apply.mac"

@@ -1,12 +1,20 @@
 -- 登记: G02 / G01 | 语义: EQ-RM 从 R201 跨入 R202；预期 rooms_changed before [R201] after [R202]，库上 room_relate 边 R201 消失、R202 出现；链尾 rebuild_edges_equal | expected_net: modified | restore 搭档: room/member_move_restore.mac
 -- 来源: scripts/e3d/increment_fixture/cases/room_member_apply.mac:2-3
+--
+-- ★ 2026-10-28 语料改造：房间换成 ams 真实房间，坐标见基线快照实测：
+--   R201-P2 [8585.30, 10750.42, 6430.00, 8821.75, 10973.30, 6730.00]
+--   R202-P2 [16585.30, 10750.42, 6430.00, 16821.75, 10973.30, 6730.00]（R202 = 同一房间东移 8000）
+--   ★ 用 P2 而不是 P1：P1 的 AABB 含墙体外延（实测 E 上界 15368、N 上界 17080），
+--     不反映房间轮廓；P2 的 AABB 与四个 PAVE 顶点吻合，是可用的判据。
+--   原宏把 EQ-RM 移到 E 70000，不在任何真实房间范围内，归属会变成「无房间」而不是「跨到 R202」。
+--   现在移到 R202-P2 的中心（E 16703 N 10861），保证落进 R202 轮廓。
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-ROOM-MEMBER-APPLY-ALIVE
 /AIOS-SUITE-EQ-RM
 Q REF
 Q NAME
 Q POS WRT /*
-POS E 70000 N 5000 U 1000
+POS E 16703 N 10861 U 1000
 Q POS WRT /*
 SAVEWORK 'AIOS suite room/member_move apply: EQ-RM into R202'
 $P SUITE-ROOM-MEMBER-APPLY-DONE

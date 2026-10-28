@@ -3193,3 +3193,179 @@ After  = 1014（spre-restored，restore 之后）
 凡 `★` 项，先看 `output/increment-suite-rvm-truth/` 里有没有现成快照，再决定要不要重跑。
 本轮全部订正都来自已有录制，**没碰 E3D**。这也是第四次在 AABB 上踩坑（前三次：
 34 个缺省名、BRAN HPOS 不可见、rot_e/rot_n 区间算错）——都是「以为」而不是「读过」。
+
+---
+
+## 7.14 语料改用 ams 真实房间与真实设备（2026-10-28）
+
+### 缘起
+
+套件原先的房间（FRMW/PANE/PLOO/PAVE）与设备（EQ-A / EQ-NBX / EQ-RM）全部自造，
+坐标是自己编的 `E 58000..72000` 一套。用户要求**结合 ams 项目去创建这些 PML 脚本**，
+即语料要来自真实项目而不是凭空造。
+
+决策（AskUser 确认）：房间挑一个真实房间 COPY 后裁到 1-2 面墙；设备 COPY 真实 EQUI
+替换自造件；**只改 `setup_8000` 的语料来源，用例宏不动**（改一处，全套装受益）。
+
+### 盘点结论（只读探针实测）
+
+db8000 本身**没有房间、没有管道**：
+
+| 集合 | 内容 |
+|---|---|
+| `SECTION_EQUI_ALL` | 100+ 个 EQUI，**每个只有 1 个 BOX 子件**（除 `/1-RFH-437-SN` 带 CYLI、若干带 ELCONN） |
+| `SECTION_STRU_ALL` / `SECTION_FRMW_ALL` / `SECTION_PIPE_ALL` / `SECTION_BRAN_ALL` | **全为空** |
+
+真实房间在 **db1112**（`STRU /1RS-WF04-F`、`FRMW /1RS-WF05-W-AB`）。
+`/1RS-WF05-W-AB` 有 17 CWALL + **911 PANE**，整套搬进来会让 RVM 成员数从 148 涨到上千。
+
+### 真实房间层级（关键）
+
+```
+FRMW /1RS-WF05-W-AB (17496/107402)
+  └─ CWALL /1RS-WF05-W-AB-R5102 (17496/132394)
+       └─ PANE /1RS06JJ0196P (17496/132395)
+            └─ PLOOP 1 → PAVERT 1..4
+```
+
+**PANE 挂在 CWALL 下，不是 FRMW 直接子级**。`COPY /1RS-WF04-F` 只带 FRMW+CFLOOR
+是正常的（那个 FRMW 本身只有 CFLOOR）。这条层级差异直接决定了 RVM 真值的键要多一层：
+
+```
+AIOS-SUITE-8000-Z/AIOS-SUITE-ROOM-STRU/AIOS-SUITE-RM-R201/AIOS-SUITE-RM-R201-W1/AIOS-SUITE-RM-R201-P1
+                                                                 ↑ 新增的 CWALL 层
+```
+
+### 三条 COPY 硬约束（实测）
+
+| 语句 | 结果 |
+|---|---|
+| `NEW STRU` 在 WORLD 下 | ❌ `Cannot create a STRU at this level` → 必须先 NEW SITE → NEW ZONE |
+| `NEW FRMW` 在 ZONE 下 | ❌ `Cannot create a FRMW at this level` → 必须先有 STRU |
+| `COPY` 进已有成员的容器 | ❌ `Cannot copy into an element which already has members` → 目标必须先是空容器 |
+
+### 房间改造
+
+`COPY /1RS-WF04-W-AB`（19 面墙）后只留第 1 面墙，其余 18 面 `DELETE CWALL`：
+
+```pml
+NEW FRMW /AIOS-SUITE-RM-R201
+COPY /1RS-WF04-W-AB
+/AIOS-SUITE-RM-R201
+!all = !!CE.MEMBERS
+!keep = 0
+DO !c VALUES !all
+  !!CE = !c
+  IF (!!CE.TYPE EQ 'CWALL') THEN
+    !keep = !keep + 1
+    IF (!keep GT 1) THEN
+      DELETE CWALL
+    ENDIF
+  ENDIF
+ENDDO
+-- 再逐层补名：CWALL / PANE / PLOO / PAVE
+```
+
+留 1 墙 = 2 PANE × 4 PAVE，既保真实命名与真实坐标，又把规模控制在可录范围内。
+R202 同法，`BY E 8000` 东移。
+
+### 设备改造：新增 EQ-CYLI
+
+`/1-RFH-437-SN` 是 db8000 里**唯一带 CYLI 的设备**（原件 Ø38 × H52 @ E1830 S24670 U4088）。
+COPY 后放大到 Ø1500 × H3000：
+
+```pml
+NEW EQUIPMENT /AIOS-SUITE-EQ-CYLI
+COPY /1-RFH-437-SN
+POS E 52000 N 5000 U 0
+NAME /AIOS-SUITE-CYLI-1
+DIAM 1500
+HEIG 3000
+```
+
+**★ 踩坑：`BY` 是相对原件位置的偏移**。原件在 `E1830 S24670 U4088`，
+`BY E 52000 N 5000 U 0` 会把设备带到 `N -20420`（跑到套件区域外）。
+实测 AABB 是 `[53080, -20420, 2588, 54580, -18920, 5588]`，改 `POS` 后正确为
+`[51250, 4250, -1500, 52750, 5750, 1500]`。
+
+`NBOX` 仍自造：db8000 里没有任何真实负实体，而 `geom/nbox_*` 三条用例需要
+NBOX 挂在 BOX 之下。
+
+### 新基线（ams-corpus-final）
+
+**154 成员 / 125 几何 / 身份解析 153**（改造前 148 / 122 / 147）。
+
+| 成员 | 实测 AABB |
+|---|---|
+| `EQ-A/AIOS-SUITE-BOX-A1` | `[39000, 4500, -250, 41000, 5500, 250]` |
+| `EQ-NBX/AIOS-SUITE-BOX-N` | `[45000, 4000, -1000, 47000, 6000, 1000]` |
+| `EQ-RM/AIOS-SUITE-BOX-RM` | `[8628.00, 10786.00, 6505.00, 8778.00, 10936.00, 6655.00]` |
+| `EQ-NOZ/AIOS-SUITE-EQ-NOZ-BOX` | `[45998.61, 7696.57, 1125, 46358.85, 8311.35, 1675]` |
+| `EQ-CYLI/AIOS-SUITE-CYLI-1` | `[51250, 4250, -1500, 52750, 5750, 1500]` |
+| `RM-R201-W1/RM-R201-P1` | `[9022.70, 11161.02, -4255.00, 15368.16, 17080.63, 6870.00]` |
+| `RM-R201-W1/RM-R201-P2` | `[8585.30, 10750.42, 6430.00, 8821.75, 10973.30, 6730.00]` |
+| `RM-R202-W1/RM-R202-P1` | 东移 8000 → `[17022.70, 11161.02, -4255.00, 23368.16, 17080.63, 6870.00]` |
+| `RM-R202-W1/RM-R202-P2` | `[16585.30, 10750.42, 6430.00, 16821.75, 10973.30, 6730.00]` |
+
+### ★★ 真实房间的 PANE 是墙板，不是房间轮廓
+
+这是本轮最重要的发现，它推翻了一条旧 limits。
+
+`R201-P2` 的实测 AABB 是 `236 × 223 × 300 mm`——这是**一块墙板**的尺寸，
+不是一间房的地板轮廓。`R201-P1` 更异常：`[9022.70, 11161.02, -4255.00, 15368.16, 17080.63, 6870.00]`，
+U 下界 -4255 远低于顶点最低的 6430，E/N 上界也远超四顶点范围。说明 E3D 把墙体延伸
+算进了 PANE 包围盒。
+
+旧 limits 里「PANE 的 AABB = 四个 PAVE 顶点的并集」**只对自造房间偶然成立**，
+对真实房间不成立。已订正。
+
+连带后果：`room/member_move` 的语义「EQ-RM 从 R201 跨入 R202」要求 EQ-RM 一开始
+就**属于 R201**。归属判定走 `room_predicate.rs:31` 的 `Inside`——**八个顶点必须全部
+落在面板三角网内**。`BOX-RM` 原本是 `500³`，八顶点不可能全落进 `236×223×300` 的墙板。
+
+处理：`BOX-RM` 从 `500³` 缩到 `150³`，初始位置从自造的 `E 60000 N 5000 U 1000`
+改到 `R201-P2` 中心 `E 8703 N 10861 U 6580`。150³ 居中后
+`[8628.5, 10786.9, 6505.0, 8778.5, 10936.9, 6655.0]`，全在面板内。
+
+### room 四条实测结果
+
+| 用例 | 实测 | 判定 |
+|---|---|---|
+| `pane_move` apply/restore | `U 6720 → 6520 → 6720` | pass，双向闭合 |
+| `pave_move` apply/restore | V2/V3 `E 8803 → 9003 → 8803` | pass，双向闭合 |
+| `frmw_rename` apply/restore | `/AIOS-SUITE-RM-R201 ↔ /AIOS-SUITE-NOT-A-ROOM` | pass，双向闭合 |
+| `member_move` apply/restore | `(8703,10861,6580) → (16703,10861,1000) → (8703,10861,6580)` | pass，双向闭合 |
+
+`member_move` 的 Compare 输出：
+
+```
+平移 [8000, 0, -5580]  ← 与订正后的 moved 断言逐字吻合
+[ok] unchanged-elsewhere: 其余成员逐一吻合（≤ 1 mm，共 120 件）
+判定：pass
+
+restore：
+[ok] equals-state-before: 其余成员逐一吻合（≤ 1 mm，共 121 件）
+判定：pass
+```
+
+### pave_move 的 union_aabb 用实测值
+
+改顶点后（`pave-applied` 1051）：
+
+```
+[9022.70299260272, 11161.0155777307, -4255.00073109288,
+ 15514.4273132901, 17217.0311032096, 6869.99979731627]
+```
+
+改前是 `[9022.70, 11161.02, -4255.00, 15368.16, 17080.63, 6870.00]`。
+E 上界 +146.27、N 上界 +136.40——**不是纯 E 方向平移**，因为顶点被移到世界坐标后
+PLOO 的相对基准变了，E3D 重算了整个面板包围盒。这条腿从「只断言 count_delta:0」
+升级为真判。
+
+### 教训
+
+真实语料不是「更真实的占位符」，它带着自己的尺度。自造房间可以随便给 4000×4000，
+真实墙板只有 236×223——所有依赖「构件能不能装进房间」的用例都会因此改变前提。
+这一轮又是**先按语义推、被实测打回**：我先算出 EQ-RM 移到 `E 16812`（R202 的 P1 中心），
+实测发现 P1 的 AABB 含墙体外延，真正可用的是 P2。第五次 AABB 推演错误。
+

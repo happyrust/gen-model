@@ -1,12 +1,17 @@
--- 登记: G03 | 语义: 改房间轮廓两个顶点（R201 东边从 E 62000 外扩到 64000）
+-- 登记: G03 | 语义: 改房间轮廓两个顶点（R201-P1 的 V2/V3 沿 E 外扩 200）
 -- 预期 room_rebuild 一条，EQ-RM（E 60000）归属不变 | expected_net: modified
 -- restore 搭档: room/pave_move_restore.mac
 --
--- PAVE 没有 NAME，PLOO 1 / PAVE 2 序号导航仓内零命中（PAVE 只有 NEW PAVE 建新）。
--- 已证替代是 COLLECT + 下标（ploo_26251_pave_probe.mac:16 的 COLLECT ALL PAVE FOR CE、
--- room_cap_cross_db_apply.mac:8 的 $!CAPS[1] 下标导航）。
--- PAVE 下标从 1 起，按 NEW PAVE 的建序：1=(58000,3000) 2=(62000,3000) 3=(62000,7000) 4=(58000,7000)
--- 要改的是第 2、3 个（东边两个角）。
+-- ★ 2026-10-28 语料改造：房间换成 ams 真实房间 /1RS-WF04-W-AB 裁到 1 面墙的副本，
+--   顶点是 ams 真实坐标（R201-P1 的 V2/V3 在 E 8803），不再是自造房间的 E 62000。
+--   原宏写死的 `POS E 64000 N 3000 U 0` 会把顶点拉离真实轮廓，已按真实值改写。
+--
+-- ★ 顶点现在有显式名（/AIOS-SUITE-RM-R201-P1-V1..V4），所以按名导航，
+--   比原先的 COLLECT + 下标稳（下标随 PAVE 增删漂移）。
+--   实测顶点（probe_pave_vertices）：
+--     V1 E 9023 N 11179 U 6570    V2 E 8803 N 10975 U 6570
+--     V3 E 8803 N 10975 U 6870    V4 E 9023 N 11179 U 6870
+--   东边两个角是 V2/V3（E 8803 那一侧），外扩 200 → E 9003。
 --
 -- 录制审查注意: Q REF / Q NAME 只能解出 PANE 的 refno（Record-Db8000SessionChain.ps1:99-110），
 -- 清单 elements 里登 PANE，不要登 PAVE。
@@ -15,20 +20,17 @@ $P SUITE-ROOM-PAVE-APPLY-ALIVE
 /AIOS-SUITE-RM-R201-P1
 Q REF
 Q NAME
-VAR !paves COLLECT ALL PAVE FOR CE
 Q MEMB
-!p2 = !paves[2]
-!!CE = !p2.dbref()
+/AIOS-SUITE-RM-R201-P1-V2
 Q REF
 Q POS
-POS E 64000 N 3000 U 0
+POS E 9003 N 10975 U 6570
 Q POS
-!p3 = !paves[3]
-!!CE = !p3.dbref()
+/AIOS-SUITE-RM-R201-P1-V3
 Q REF
 Q POS
-POS E 64000 N 7000 U 0
+POS E 9003 N 10975 U 6870
 Q POS
-SAVEWORK 'AIOS suite room/pave_move apply: R201 east edge to E 64000'
+SAVEWORK 'AIOS suite room/pave_move apply: R201-P1 east edge to E 9003'
 $P SUITE-ROOM-PAVE-APPLY-DONE
 ALPHA LOG END

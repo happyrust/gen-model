@@ -1,10 +1,15 @@
 -- 登记: G02 | 语义: EQ-RM 回 R201 | expected_net: cancelled | restore 搭档: 本文件是 room/member_move_apply.mac 的 restore
+--
+-- ★ 2026-10-28 语料改造：回 R201-P2 的墙板内，与 setup 里的初始位置逐字相同
+--   （POS E 8703 N 10861 U 6580），这样 expected_net: cancelled 才真的闭合。
+--   ★ U 必须是 6580 不是 1000：EQ-RM 的初始位置在墙板高度上（R201-P2 的 U 是 6430..6730），
+--     写 U 1000 会让 restore 后的世界坐标与基线差 5580mm。
 ALPHA LOG "{{LOG_PATH}}" OVER
 $P SUITE-ROOM-MEMBER-RESTORE-ALIVE
 /AIOS-SUITE-EQ-RM
 Q REF
 Q NAME
-POS E 60000 N 5000 U 1000
+POS E 8703 N 10861 U 6580
 Q POS WRT /*
 SAVEWORK 'AIOS suite room/member_move restore: EQ-RM back to R201'
 $P SUITE-ROOM-MEMBER-RESTORE-DONE
