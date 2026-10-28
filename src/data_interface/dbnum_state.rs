@@ -403,6 +403,17 @@ pub struct DbnumState {
     /// 下一个任务欠一次（`room_recompute::DurableAlignment::owed`）。是模型水位的属性，不是第三枚水位（W3）。
     #[serde(default)]
     pub model_room_stray_generations: Vec<String>,
+    /// 模型面的**存储架构版本**（`aios_core::model_storage::MODEL_STORAGE_VERSION`）：
+    /// 这个库的行形状是哪一版写的。随 `model_sesno` 同一笔盖（`task_end`）。
+    ///
+    /// `None` = 这一列从没写过 = 前版本化 = 读侧应当报
+    /// `MODEL_STORAGE_VERSION_MISMATCH` 并要求 `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
+    ///
+    /// 与 [`DbnumState::model_sesno`]（数据到哪一版）、`model_generator`（几何是哪一版
+    /// e3d-model 算的）、`pe_ptset.generator`（点算得对不对）都是不同的轴，
+    /// 见 `aios_core::model_storage` 的模块注释。
+    #[serde(default)]
+    pub model_storage_version: Option<u32>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
@@ -503,6 +514,9 @@ struct StateRow {
     /// 盖章之后按哪几代写过根（ADR-073 F3 落库）；旧行没有这一列 → 空。
     #[serde(default)]
     model_room_stray_generations: Option<Vec<String>>,
+    /// 模型面的存储架构版本；旧行没有这一列 → `None`（= 前版本化）。
+    #[serde(default)]
+    model_storage_version: Option<u32>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
@@ -513,7 +527,7 @@ const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
      IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
      model_lazy_roots, \
      model_dead_roots, model_roots_observed_at, model_catalogue_sessions, model_room_generation, \
-     model_room_stray_generations";
+     model_room_stray_generations, model_storage_version";
 
 #[derive(Debug, Deserialize)]
 struct DatabaseWatermark {
@@ -1382,6 +1396,7 @@ impl DbnumState {
                     model_room_stray_generations: row
                         .model_room_stray_generations
                         .unwrap_or_default(),
+                    model_storage_version: row.model_storage_version,
                     initialized: effective.is_some(),
                 })
             })
@@ -1543,6 +1558,7 @@ impl DbnumState {
             model_catalogue_sessions: row.model_catalogue_sessions.unwrap_or_default(),
             model_room_generation: row.model_room_generation,
             model_room_stray_generations: row.model_room_stray_generations.unwrap_or_default(),
+            model_storage_version: row.model_storage_version,
             initialized: applied.is_some(),
         }))
     }

@@ -262,6 +262,10 @@ pub mod model_concurrency;
 
 pub mod model_rebuild;
 
+/// 模型面存储架构版本核对：水位行的 `model_storage_version` 与本进程
+/// `aios_core::model_storage::MODEL_STORAGE_VERSION` 不一致的库只点名、不自动重建。
+pub mod storage_version_reconcile;
+
 pub mod batch_queue;
 
 pub mod batch_scheduler;

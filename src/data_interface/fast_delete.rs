@@ -595,7 +595,7 @@ pub(crate) enum WatermarkDisposal {
 /// 同一句 `UPDATE` 里；整库模型清理单独成句，字面量必须同一份。
 const MODEL_WATERMARK_RESET: &str = "model_sesno = 0, model_sesno_time = NONE, \
      model_settled_at = NONE, model_lazy_roots = NONE, model_dead_roots = NONE, \
-     model_roots_observed_at = NONE";
+     model_roots_observed_at = NONE, model_storage_version = NONE";
 
 fn is_model_face_range_table(table: &str) -> bool {
     table != "pe" && table != "ref_rev"
@@ -1384,7 +1384,7 @@ mod tests {
              applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE, \
              model_sesno = 0, model_sesno_time = NONE, model_settled_at = NONE, \
              model_lazy_roots = NONE, model_dead_roots = NONE, \
-             model_roots_observed_at = NONE;",
+             model_roots_observed_at = NONE, model_storage_version = NONE;",
             "水位清值必须是元数据阶段的最后一句（清库的提交点）"
         );
         // ADR-060 D8：模型水位与数据水位同一句、同一事务归零。分开写就有半清状态，

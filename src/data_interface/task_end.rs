@@ -161,6 +161,15 @@ fn render_watermark_update(end: &TaskEnd) -> String {
                 "model_sesno = math::max([model_sesno ?: 0, {target_sesno}])"
             ));
             sets.push("model_settled_at = time::now()".to_owned());
+            // 存储架构版本随 `model_sesno` 同一笔盖：这一格回答「这个库的模型面行形状是哪一版」，
+            // 与 `model_generator`（几何是哪一版 e3d-model 算的）和 `pe_ptset.generator`
+            // （点算得对不对）是三条正交的轴，见 `aios_core::model_storage` 的模块注释。
+            // 读侧按它判整库能不能读；缺列 = 前版本化 = 需要 rebuild。
+            sets.push(format!(
+                "{} = {}",
+                aios_core::model_storage::STORAGE_VERSION_COLUMN,
+                aios_core::model_storage::MODEL_STORAGE_VERSION
+            ));
             if let Some(stamps) = model
                 .catalogue_sessions
                 .as_ref()

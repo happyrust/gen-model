@@ -257,6 +257,19 @@ fn model_cache_health(store_reachable: bool) -> Value {
     health["store_reachable"] = json!(store_reachable);
     health["degraded_read_only"] =
         json!(crate::options::store_mode().is_durable() && !store_reachable);
+    // 模型面存储架构版本：`expected` 是本进程的版本，`lagging` 是还没按它重建的库
+    // （机器可读数组，不是散文）。`null` = 启动核对还没跑过，不冒充「已追平」。
+    // 这一格**不参与**任何 health gate 判定：一个旧库不该把整个进程标成不健康，
+    // 但它必须能被巡检看见——否则「重建」这件事永远没人做。
+    health["storage_version"] = match crate::data_interface::storage_version_reconcile::last_report()
+    {
+        Some(report) => json!({
+            "expected": report.expected,
+            "lagging": report.lagging,
+            "rebuild_hints": report.rebuild_hints(),
+        }),
+        None => Value::Null,
+    };
     health
 }
 
