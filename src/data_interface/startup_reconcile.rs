@@ -406,19 +406,22 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
     let mut windows = 0usize;
     let mut enqueued = 0usize;
     // 模型面存储架构版本：只点名、不排任务（与 generator 的自动重排刻意不同）。
-    // 读失败这一轮就不点名——一次库抖动不该把每个库都报成落后。
-    match crate::data_interface::storage_version_reconcile::report_and_log().await {
+    // 读失败这一轮就不点名——一次库抖动不该把库报成老库。
+    // 版本是整库一条记录，重建命令要写库号，所以把这次启动会碰的库一起传进去。
+    let reconcile_dbnums = registered_by_dbnum.keys().copied().collect::<Vec<_>>();
+    match crate::data_interface::storage_version_reconcile::report_and_log(&reconcile_dbnums).await
+    {
         Ok(report) if !report.is_caught_up() => {
             println!(
-                "存储架构版本核对：{} 个库落后于本进程（expected={}），未自动重建；重建命令: {:?}",
-                report.lagging.len(),
+                "存储架构版本核对：库里记的是 {:?}，本进程 expected={}；未自动重建。重建命令: {:?}",
+                report.stored,
                 report.expected,
-                report.rebuild_hints()
+                report.rebuild_hints(&reconcile_dbnums)
             );
         }
         Ok(_) => {}
         Err(error) => {
-            println!("存储架构版本核对：读不到水位行的 model_storage_version，本次跳过: {error:#}");
+            println!("存储架构版本核对：读不到 storage_version:current，本次跳过: {error:#}");
         }
     }
 

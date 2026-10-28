@@ -3,12 +3,13 @@
 // 管件的目录 P 点在 `pe_ptset` 表（ptset 分表计划，`docs/plans/2026-10-26-ptset-split-table-plan.md`；行由 gen-model
 // `fast_model::ptset_rows` 在模型行的同一笔发布事务里写出，plant-ui #2）：
 //   pe_ptset:⟨word0_word1⟩ = { pe, root, dbnum, noun, ptset: { "<P 号>": { pt: [x,y,z], dir: [x,y,z], bore, noun } },
-//                            count, unresolved: [{ number, reason }], sesno, generator, storage_version, reason, written_at }
+//                            count, unresolved: [{ number, reason }], sesno, generator, reason, written_at }
 // 坐标是管件局部系（mm）；下面只做点距与夹角，与参考系无关。没有行 = 这根还没按新版发布过；有行但 `ptset: {}` = 这件真没有 P 点（`reason` 说明）。
 // 旧管线的 inst_relate.out.ptset / out.param.PrimCTorus 已随烘焙网格退役，这里不再读它们；`inst_relate.out.ptset.d.pt AS pts` 那几处投影恒为 NONE，`pe_ptset` 是唯一权威。
 //
-// 存储架构版本（aios_core `rs_surreal/model_storage.rs`）：整库的版本在 `dbnum_watermark:{dbnum}.model_storage_version`，
-// 单行的版本在 `pe_ptset.storage_version`。两个都不等于 `MODEL_STORAGE_VERSION` 时，`fn::pe_ptset_of` 直接 THROW
+// 存储架构版本（aios_core `rs_surreal/model_storage.rs`）：整库一条记录 `storage_version:current`，
+// 三格 `version` / `shape` / `rebuild`。它回答「这份库的模型面是哪一版代码建的」，不针对某张表、也不针对某个 dbnum。
+// 没有这条记录、或 `version` 不等于 `MODEL_STORAGE_VERSION` 时，`fn::pe_ptset_of` 直接 THROW
 // `MODEL_STORAGE_VERSION_MISMATCH …`，不再静默回 NONE —— 否则老库上的长度函数会静默回 0.0，被误当成「这根没有点」。
 // 这与 `generator`（e3d-model 的 PTSET_EVAL_VERSION，说「点算得对不对」）是两条正交的轴。
 
@@ -27,17 +28,14 @@ define function fn::pe_ptset_of($pe:record) {
     // gen-model 的 `embedded_surql` 测试会钉住这个字面量（见 `fast_model::ptset_rows` 的源码钉）。
     let $storage_version_expected = 1;
     let $dbnum = $pe.dbnum;
-    let $dbnum_version = (select value model_storage_version from only type::thing('dbnum_watermark', $dbnum));
-    if $dbnum_version != $storage_version_expected {
-        throw 'MODEL_STORAGE_VERSION_MISMATCH dbnum=' + <string> $dbnum + ' stored=' + <string> ($dbnum_version ?? 'none') + ' expected=' + <string> $storage_version_expected + ' source=dbnum: 该库需 POST /api/v1/dbnums/' + <string> $dbnum + '/model/rebuild';
+    let $storage_version = (select value version from only storage_version:current);
+    // `?? 'none'` 是必须的：`<string> none` 在 SurrealDB 里抛 ConvertTo 错误，会把「版本不匹配」
+    // 变成一句看不出原因的转换失败（`$pe.dbnum` 缺失时正好走到这里）。
+    if $storage_version != $storage_version_expected {
+        throw 'MODEL_STORAGE_VERSION_MISMATCH dbnum=' + <string> ($dbnum ?? 'none') + ' stored=' + <string> ($storage_version ?? 'none') + ' expected=' + <string> $storage_version_expected + ' source=version: 该库需 POST /api/v1/dbnums/' + <string> ($dbnum ?? 'none') + '/model/rebuild';
     };
-    let $row = (select value { storage_version: storage_version, ptset: ptset } from only type::thing('pe_ptset', record::id($pe)));
-    // 行存在但版本不对：`!= 1` 同时覆盖「缺列（null）」与「旧版数字」两种。
-    // 注意不能写 `!= none`——SurrealDB 里 null != none 为 false，会漏掉缺列的行。
-    if $row != none && $row.storage_version != $storage_version_expected {
-        throw 'MODEL_STORAGE_VERSION_MISMATCH dbnum=' + <string> $dbnum + ' stored=' + <string> ($row.storage_version ?? 'none') + ' expected=' + <string> $storage_version_expected + ' source=row: 该库需 POST /api/v1/dbnums/' + <string> $dbnum + '/model/rebuild';
-    };
-    return $row.ptset;
+    let $row = (select value ptset from only type::thing('pe_ptset', record::id($pe)));
+    return $row;
 };
 
 remove function fn::bran_tubi_len;

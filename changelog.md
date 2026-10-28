@@ -1,3 +1,23 @@
+## 2026-10-28
+
+### 模型存储架构版本号收成整库一条 `storage_version:current`：老库读侧直接报错，要求逐库重建
+
+- **为什么**：ptset 分表之后 `pe_ptset` 的行形状会随版本演进（字段增删、点号键语义、坐标单位或参考系）。读侧按新形状去读一份老库，拿到的是「查不到」「空集」「0.0」这类静默错误，比报错难查得多，所以要有版本号让读侧能判断「这份库我读不读得懂」。此前那一版把号摊在两处（`dbnum_watermark:{dbnum}.model_storage_version` 管整库 + `pe_ptset.storage_version` 管单行），实际没有必要：重建的单位虽然是 dbnum，但行形状是整个模型面共用的一份约定，同一份代码写出来的行不会有第二种形状；两层判据只多出一个既不该存在、也无法从行上可靠分辨的「半重建」中间态。版本号回答的是「这份库的模型面是哪一版代码建的」，它不针对某张表，也不针对某个 dbnum。
+- **改**：
+  - 新表 `storage_version`，只有一条记录 `storage_version:current`，三个字段：`version` = 当前存储架构版本（与 `aios_core::model_storage::MODEL_STORAGE_VERSION` 同值）；`shape` = 行形状说明（人读，写清 `pe_ptset` 行的字段与坐标约定）；`rebuild` = 重建要求（人读，写清改版本号之后必须做什么）。
+  - `aios_core::model_storage`：`MODEL_STORAGE_VERSION` 不变；新增记录名与三个字段名的常量；`check_dbnum` / `check_row` 收成一个 `check`；`MismatchSource` 收成「记录缺失」与「版本不符」两种；错误文本仍以 `MODEL_STORAGE_VERSION_MISMATCH` 开头，`stored=` 取记录里的 `version`。
+  - 读侧 `geom.rs`：`ptset_map_projection` 不再带 `dbnum_watermark` 与 `pe_ptset.storage_version` 两格，改成带出全局记录；三个 `*_point_map` 的 `TryFrom` 只判这一处。
+  - 写侧 `ptset_rows.rs`：`pe_ptset` 行不再写 `storage_version`。
+  - `task_end.rs`：不再往水位行盖 `model_storage_version`；改为在模型水位盖章那一笔里 upsert `storage_version:current`，`version` / `shape` / `rebuild` 三格一起写，保证人读的两格永远与 `version` 同代。
+  - `resource/surreal/gy_common.surql` 的 `fn::pe_ptset_of`：只查全局记录，去掉行级判据。
+  - `storage_version_reconcile.rs`：读全局记录而不是逐库的那一列；`/health.storage_version` 报 `expected` / `stored` / `rebuild`。
+  - `fast_delete.rs`：整库清模型不再重置 `model_storage_version`（那一列已不存在）。
+- **语义**：**没有 `storage_version:current` 记录 = 老库**，读侧报 `MODEL_STORAGE_VERSION_MISMATCH` 并要求 `POST /api/v1/dbnums/{dbnum}/model/rebuild`；**有记录且 `version` 等于本进程常量 = 读得懂**。不自动重建：重建时机由人挑（低峰、逐库、可回退）。
+- **与另外两条轴的关系**：`version` 说「行形状能不能读」；e3d-model 的 `PTSET_EVAL_VERSION`（落在 `pe_ptset.generator`）说「点算得对不对」；`dbnum_watermark.model_generator` 说「几何是哪一版 e3d-model 算的」。三条正交，改一条不动另两条。
+- **验证**：三仓全绿。aios_core：`model_storage` 5 个、`heat_dissipation` 5 个（记录缺失判老库、版本比本进程新也判老库、当前版本放行、行上不再带版本号、三格常量非空且 `rebuild` 含 `/model/rebuild`）；gen-model：`cargo test --lib` **2674 passed / 0 failed / 134 ignored**，其中 `task_end` 39 个相关用例、`ptset_rows` 4 个、`storage_version_reconcile` 5 个；rs-server：`cargo test --bins` **76 passed / 0 failed**，含 409 映射与「文本里带码也认得出」。
+  合并与回填时踩到的两处：① `task_end` 的「水位有没有盖上」判据取的是**最后一条带回执的语句**，版本记录必须排在水位 `UPDATE` **之前**，否则 `UPSERT … RETURN id` 恒有回执、数据水位闸永远判成「盖上了」（`the_data_gate_holds_back_the_model_watermark_but_not_the_statistics` 因此红）；② 两个 ptset 落库用例的 seed 还按旧形状写 `dbnum_watermark.model_storage_version`，改成 seed `storage_version:current`。
+- **没动**：模型行的块字节与回执（ADR-071，ptset 语句只追在同一笔发布事务里）；`POST /api/v1/element/ptset` 直读端点与前端 P 点来源；`data_face_signature:current`——那条管的是「这个库归谁、是什么数据面」，不匹配直接拒绝启动，与行形状是两件事。
+
 ## 2026-10-27
 
 ### 管件目录 P 点随根发布、同一笔事务写进 `pe_ptset`，长度函数改读它（plant-ui #2，ptset 分表计划 W2 + W3）

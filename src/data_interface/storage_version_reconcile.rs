@@ -1,14 +1,21 @@
-//! 模型存储架构版本核对：水位行的 `dbnum_watermark.model_storage_version` ↔ 本进程的
+//! 模型存储架构版本核对：库里的 `storage_version:current` ↔ 本进程的
 //! `aios_core::model_storage::MODEL_STORAGE_VERSION`。
 //!
 //! # 它回答什么
 //!
-//! 「这个库的模型面行形状，本进程读不读得懂」。读不懂的库不该被静默当成「没有数据」，
+//! 「这份库的模型面行形状，本进程读不读得懂」。读不懂的库不该被静默当成「没有数据」，
 //! 而应当被点名、要求按当前版本重新生成：
 //!
 //! ```text
 //! POST /api/v1/dbnums/{dbnum}/model/rebuild
 //! ```
+//!
+//! # 只有一条记录，没有逐库的副本
+//!
+//! 行形状是整个模型面共用的一份约定，不是某个 dbnum 的属性，所以版本只有一处来源：
+//! `storage_version:current`。它要么在（且 `version` 等于本进程常量），要么不在——
+//! 不存在「有的库追平了、有的没有」这种可读状态：重建会重写那个库的全部模型行，
+//! 逐库进度看水位（`dbnum_watermark.model_sesno`），不看版本。
 //!
 //! # 与 `generator_reconcile` 的关键差别
 //!
@@ -19,91 +26,89 @@
 //!
 //! # 「没有 `pe_ptset` 行」不等于「老库」
 //!
-//! 判老库只看水位行的这一列：`None`（缺列）= 前版本化。一根管件还没按新版发布过、
+//! 判老库只看那一条记录：没有它 = 前版本化。一根管件还没按新版发布过、
 //! 或者这件本来就没有 P 点，都会没有 `pe_ptset` 行——那是正常状态，不是老库。
 
-use std::collections::BTreeMap;
-
 use serde::Serialize;
-
-/// 一个落后的库。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LaggingDbnum {
-    pub dbnum: u32,
-    /// 库里记的版本；`None` = 缺列 = 前版本化。
-    pub stored: Option<u32>,
-}
 
 /// 版本核对结果，直接进 `/health`（机器可读，不是散文）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StorageVersionReport {
     /// 本进程期望的版本。
     pub expected: u32,
-    /// 还没追平的库，按 dbnum 升序。
-    pub lagging: Vec<LaggingDbnum>,
+    /// 库里记录的版本；`None` = 没有 `storage_version:current` 这条记录 = 老库。
+    pub stored: Option<u32>,
+    /// 库里那条记录写的行形状说明（人读，原样带出来）。
+    pub shape: Option<String>,
+    /// 库里那条记录写的重建要求（人读，原样带出来）。
+    pub rebuild: Option<String>,
 }
 
 impl StorageVersionReport {
+    /// 这份库读不读得懂。
     pub fn is_caught_up(&self) -> bool {
-        self.lagging.is_empty()
+        self.stored == Some(self.expected)
     }
 
-    /// 每个落后库一条可直接复制的重建命令。
-    pub fn rebuild_hints(&self) -> Vec<String> {
-        self.lagging
+    /// 可以直接发给运维的重建命令。已追平则空。
+    ///
+    /// 版本是整库一条记录，命令里仍要写库号（重建的单位是 dbnum），
+    /// 所以这里收一个库号列表；空列表时不产出命令。
+    pub fn rebuild_hints(&self, dbnums: &[u32]) -> Vec<String> {
+        if self.is_caught_up() {
+            return Vec::new();
+        }
+        dbnums
             .iter()
-            .map(|db| format!("POST /api/v1/dbnums/{}/model/rebuild", db.dbnum))
+            .map(|dbnum| format!("POST /api/v1/dbnums/{dbnum}/model/rebuild"))
             .collect()
     }
+
+    /// 纯函数：把库里读到的三格与期望版本拼成报告。
+    pub(crate) fn from_stored(stored: Option<(u32, Option<String>, Option<String>)>) -> Self {
+        let expected = aios_core::model_storage::MODEL_STORAGE_VERSION;
+        match stored {
+            None => Self {
+                expected,
+                stored: None,
+                shape: None,
+                rebuild: None,
+            },
+            Some((version, shape, rebuild)) => Self {
+                expected,
+                stored: Some(version),
+                shape,
+                rebuild,
+            },
+        }
+    }
 }
 
-/// 纯函数：哪些库落后。
-///
-/// 只判盖过模型水位的库（`model_sesno > 0`）：从没生成过的库没有行形状可言，
-/// 把它算成「落后」会在每次冷启动刷一堆噪声。
-pub(crate) fn lagging_dbnums(
-    watermarks: &BTreeMap<u32, (i32, Option<u32>)>,
-) -> Vec<LaggingDbnum> {
-    watermarks
-        .iter()
-        .filter(|(_, (model_sesno, stored))| {
-            *model_sesno > 0
-                && *stored != Some(aios_core::model_storage::MODEL_STORAGE_VERSION)
-        })
-        .map(|(dbnum, (_, stored))| LaggingDbnum {
-            dbnum: *dbnum,
-            stored: *stored,
-        })
-        .collect()
-}
-
-/// 读库里的版本列。读失败时返回 `Err`——调用方应当把这一轮当作「没核对成」，
-/// 不要据此判断任何库落后（一次读失败不该把每个库都点名）。
-pub(crate) async fn stored_versions() -> anyhow::Result<BTreeMap<u32, (i32, Option<u32>)>> {
+/// 库里那条记录的三格。读失败时返回 `Err`——调用方应当把这一轮当作「没核对成」，
+/// 不要据此判断库落后（一次读失败不该把库点名成老库）。
+pub(crate) async fn stored_version() -> anyhow::Result<Option<(u32, Option<String>, Option<String>)>> {
     #[derive(serde::Deserialize)]
     struct Row {
-        dbnum: u32,
         #[serde(default)]
-        model_sesno: Option<i32>,
+        version: Option<u32>,
         #[serde(default)]
-        model_storage_version: Option<u32>,
+        shape: Option<String>,
+        #[serde(default)]
+        rebuild: Option<String>,
     }
     let mut response = aios_core::SUL_DB
-        .query(
-            "SELECT dbnum, model_sesno, model_storage_version FROM dbnum_watermark \
-             WHERE dbnum != NONE AND model_sesno != NONE AND model_sesno > 0;",
-        )
+        .query(format!(
+            "SELECT {} AS version, {} AS shape, {} AS rebuild FROM ONLY {};",
+            aios_core::model_storage::VERSION_COLUMN,
+            aios_core::model_storage::SHAPE_COLUMN,
+            aios_core::model_storage::REBUILD_COLUMN,
+            aios_core::model_storage::STORAGE_VERSION_RECORD,
+        ))
         .await?;
-    let rows: Vec<Row> = response.take(0)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            (
-                row.dbnum,
-                (row.model_sesno.unwrap_or_default(), row.model_storage_version),
-            )
-        })
-        .collect())
+    let row: Option<Row> = response.take(0)?;
+    // 记录存在但 `version` 那格缺失 = 一份读不懂的记录，按「没有版本」处理，
+    // 这样它会被判成老库而不是被当成追平。
+    Ok(row.and_then(|row| row.version.map(|version| (version, row.shape, row.rebuild))))
 }
 
 /// 最近一次核对的结果，供同步的 `/health` 读取。
@@ -119,30 +124,26 @@ pub fn last_report() -> Option<&'static StorageVersionReport> {
 
 /// 启动时点名。只打日志，不排任务、不阻断启动。
 ///
+/// `dbnums` 是这次启动会碰的库（用于拼重建命令）；传空切片就只报版本状态。
 /// 返回报告，方便调用方顺手塞进 `/health` 的初值。
-pub(crate) async fn report_and_log() -> anyhow::Result<StorageVersionReport> {
-    let watermarks = stored_versions().await?;
-    let report = StorageVersionReport {
-        expected: aios_core::model_storage::MODEL_STORAGE_VERSION,
-        lagging: lagging_dbnums(&watermarks),
-    };
+pub(crate) async fn report_and_log(dbnums: &[u32]) -> anyhow::Result<StorageVersionReport> {
+    let report = StorageVersionReport::from_stored(stored_version().await?);
     // 存给 `/health`；重复调用只保留第一次。
     let _ = LAST_REPORT.set(report.clone());
-    for db in &report.lagging {
-        log::warn!(
-            "MODEL_STORAGE_VERSION_MISMATCH dbnum={} stored={} expected={} source=dbnum: 该库需 POST /api/v1/dbnums/{}/model/rebuild",
-            db.dbnum,
-            db.stored.map_or_else(|| "none".to_owned(), |v| v.to_string()),
-            report.expected,
-            db.dbnum
-        );
-    }
     if !report.is_caught_up() {
         log::warn!(
-            "{} 个库的模型面存储架构版本落后于本进程（expected={}）；未自动重建，按上面的命令逐库 rebuild",
-            report.lagging.len(),
+            "MODEL_STORAGE_VERSION_MISMATCH stored={} expected={} source=version: 该库的模型面行形状本进程读不懂",
+            report
+                .stored
+                .map_or_else(|| "none".to_owned(), |v| v.to_string()),
             report.expected
         );
+        if let Some(rebuild) = &report.rebuild {
+            log::warn!("库里记的重建要求：{rebuild}");
+        }
+        for hint in report.rebuild_hints(dbnums) {
+            log::warn!("{hint}");
+        }
     }
     Ok(report)
 }
@@ -151,55 +152,56 @@ pub(crate) async fn report_and_log() -> anyhow::Result<StorageVersionReport> {
 mod tests {
     use super::*;
 
-    fn watermarks(rows: &[(u32, i32, Option<u32>)]) -> BTreeMap<u32, (i32, Option<u32>)> {
-        rows.iter()
-            .map(|(dbnum, sesno, version)| (*dbnum, (*sesno, *version)))
-            .collect()
+    fn current() -> Option<(u32, Option<String>, Option<String>)> {
+        Some((
+            aios_core::model_storage::MODEL_STORAGE_VERSION,
+            Some("shape".to_owned()),
+            Some("rebuild".to_owned()),
+        ))
     }
 
     #[test]
-    fn a_missing_column_counts_as_stale() {
-        let report = lagging_dbnums(&watermarks(&[(7997, 394, None)]));
-        assert_eq!(report.len(), 1);
-        assert_eq!(report[0].dbnum, 7997);
-        assert_eq!(report[0].stored, None);
+    fn a_missing_record_counts_as_stale() {
+        let report = StorageVersionReport::from_stored(None);
+        assert!(!report.is_caught_up());
+        assert_eq!(report.stored, None);
     }
 
     #[test]
     fn the_current_version_is_not_stale() {
-        let current = aios_core::model_storage::MODEL_STORAGE_VERSION;
-        assert!(lagging_dbnums(&watermarks(&[(7997, 394, Some(current))])).is_empty());
+        assert!(StorageVersionReport::from_stored(current()).is_caught_up());
     }
 
     #[test]
     fn a_newer_version_is_also_stale() {
         // 比本进程新的库：行形状本进程同样读不懂。
         let newer = aios_core::model_storage::MODEL_STORAGE_VERSION + 1;
-        assert_eq!(lagging_dbnums(&watermarks(&[(7997, 394, Some(newer))])).len(), 1);
+        let report = StorageVersionReport::from_stored(Some((newer, None, None)));
+        assert!(!report.is_caught_up());
+        assert_eq!(report.stored, Some(newer));
     }
 
     #[test]
-    fn a_dbnum_that_never_generated_is_not_reported() {
-        // model_sesno == 0：从没生成过，没有行形状可言，不刷噪声。
-        assert!(lagging_dbnums(&watermarks(&[(7997, 0, None)])).is_empty());
-    }
-
-    #[test]
-    fn hints_are_copy_pasteable() {
-        let report = StorageVersionReport {
-            expected: 1,
-            lagging: vec![
-                LaggingDbnum { dbnum: 7997, stored: None },
-                LaggingDbnum { dbnum: 7354, stored: Some(0) },
-            ],
-        };
+    fn hints_are_copy_pasteable_and_only_when_stale() {
+        let stale = StorageVersionReport::from_stored(None);
         assert_eq!(
-            report.rebuild_hints(),
+            stale.rebuild_hints(&[7997, 7354]),
             vec![
                 "POST /api/v1/dbnums/7997/model/rebuild".to_string(),
                 "POST /api/v1/dbnums/7354/model/rebuild".to_string(),
             ]
         );
-        assert!(!report.is_caught_up());
+        let caught_up = StorageVersionReport::from_stored(current());
+        assert!(
+            caught_up.rebuild_hints(&[7997]).is_empty(),
+            "已追平不该再产出重建命令"
+        );
+    }
+
+    #[test]
+    fn the_record_notes_are_carried_through_for_humans() {
+        let report = StorageVersionReport::from_stored(current());
+        assert_eq!(report.shape.as_deref(), Some("shape"));
+        assert_eq!(report.rebuild.as_deref(), Some("rebuild"));
     }
 }

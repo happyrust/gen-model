@@ -9427,6 +9427,10 @@ mod tests {
             )),
             "{sql}"
         );
+        assert!(
+            !sql.contains("storage_version"),
+            "行上不该再有版本号（那是整库一条记录）: {sql}"
+        );
         assert!(!sql.contains("DELETE pe_ptset WHERE"), "不写谓词删: {sql}");
 
         let tombstone = render_spooled_scope_deletion(root, &[root], &[]);
@@ -9445,15 +9449,26 @@ mod tests {
             .expect("gy_common.surql");
         seed_pe(&db).await;
         db.query(
-            "UPDATE pe:⟨24383_500⟩ SET noun = 'FTUB', refno = refno:⟨24383_500⟩; \
+            "UPDATE pe:⟨24383_500⟩ SET noun = 'FTUB', refno = refno:⟨24383_500⟩, dbnum = 7999; \
              CREATE refno:⟨24383_500⟩ SET ARRI = 1, LEAV = 2; \
-             UPDATE pe:⟨24383_600⟩ SET noun = 'ATTA', refno = refno:⟨24383_600⟩; \
+             UPDATE pe:⟨24383_600⟩ SET noun = 'ATTA', refno = refno:⟨24383_600⟩, dbnum = 7999; \
              CREATE refno:⟨24383_600⟩ SET ARRI = 1, LEAV = 2;",
         )
         .await
         .expect("seed members")
         .check()
         .expect("seed member statements");
+        // 存储架构版本是整库一条记录（`storage_version:current`）。这里把它写上，
+        // 行级那格已经不存在了。缺这条记录时 `fn::pe_ptset_of` 会按「老库」THROW ——
+        // 那是另一个用例（rs-server 的 `ptset_read_is_versioned_7997`）要看的形状。
+        db.query(format!(
+            "UPSERT storage_version:current CONTENT {{ version: {}, shape: 'test', rebuild: 'test' }};",
+            aios_core::model_storage::MODEL_STORAGE_VERSION
+        ))
+        .await
+        .expect("seed storage version")
+        .check()
+        .expect("seed storage version statement");
         let root = RefNo::new(24383, 1);
         let ftub = RefNo::new(24383, 500);
         let atta = RefNo::new(24383, 600);
