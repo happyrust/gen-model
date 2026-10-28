@@ -87,6 +87,13 @@ impl StorageVersionReport {
 /// 库里那条记录的三格。读失败时返回 `Err`——调用方应当把这一轮当作「没核对成」，
 /// 不要据此判断库落后（一次读失败不该把库点名成老库）。
 pub(crate) async fn stored_version() -> anyhow::Result<Option<(u32, Option<String>, Option<String>)>> {
+    stored_version_on(&aios_core::SUL_DB).await
+}
+
+/// [`stored_version`] 的指定库版本，供内存库用例复用同一条 SQL。
+async fn stored_version_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<Option<(u32, Option<String>, Option<String>)>> {
     #[derive(serde::Deserialize)]
     struct Row {
         #[serde(default)]
@@ -96,12 +103,13 @@ pub(crate) async fn stored_version() -> anyhow::Result<Option<(u32, Option<Strin
         #[serde(default)]
         rebuild: Option<String>,
     }
-    let mut response = aios_core::SUL_DB
+    let mut response = db
+        // `SELECT *` 而不是 `SELECT a AS a, b AS b`：`rebuild` 在 SurrealDB 2.x 里是
+        // 保留字（`REBUILD` 语句关键字），`rebuild AS rebuild` 会被解析器拒成
+        // `Parse error: Unexpected token 'AS', expected a rebuild statement keyword`。
+        // 写成 `SELECT *` 后三格原名返回，`Row` 的字段名与之逐字对应，不必起别名。
         .query(format!(
-            "SELECT {} AS version, {} AS shape, {} AS rebuild FROM ONLY {};",
-            aios_core::model_storage::VERSION_COLUMN,
-            aios_core::model_storage::SHAPE_COLUMN,
-            aios_core::model_storage::REBUILD_COLUMN,
+            "SELECT * FROM ONLY {};",
             aios_core::model_storage::STORAGE_VERSION_RECORD,
         ))
         .await?;
@@ -257,8 +265,7 @@ mod tests {
         assert_eq!(report.rebuild.as_deref(), Some("rebuild"));
     }
 
-    /// `/health` 该不该再去库里问一次。
-    ///
+    /// `/health` 该不该再去库里问一次。    ///
     /// 已追平不再问（版本号只前进，运行期不会退回老库）；没核对过、未追平都要问——
     /// 「刚重建完、等它转绿」的那段时间正靠这一条。
     #[test]
@@ -279,6 +286,53 @@ mod tests {
         assert!(
             !needs_refresh(Some(&StorageVersionReport::from_stored(current()))),
             "已追平不该再付一次库往返"
+        );
+    }
+
+    /// 读那条记录的 SQL 必须能在真引擎上跑通。
+    ///
+    /// 这条钉是补一个真库上才暴露的缺陷：原本写的是
+    /// `SELECT version AS version, shape AS shape, rebuild AS rebuild FROM ONLY …`，
+    /// 而 `rebuild` 在 SurrealDB 2.x 里是保留字，解析器报
+    /// `Unexpected token 'AS', expected a rebuild statement keyword`。所有纯函数单测
+    /// 都是绿的——它们只喂 `from_stored`，从不经过这条 SQL。结果是启动时那句
+    /// 「读不到 storage_version:current，本次跳过」被当成一次读失败吞掉，`/health`
+    /// 永远 `null`，而且没有任何迹象指向语法。
+    #[tokio::test]
+    async fn the_version_record_is_readable_from_a_real_engine() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("storage_version_reconcile")
+            .await
+            .expect("select fixture db");
+
+        // 没有记录 = 老库，且这条 SQL 本身不能报错。
+        assert_eq!(
+            stored_version_on(&db).await.expect("空库也要能读"),
+            None,
+            "没有记录时回 None，不是 Err"
+        );
+
+        db.query(format!(
+            "UPSERT {} CONTENT {{ version: {}, shape: 'sh', rebuild: 'rb' }};",
+            aios_core::model_storage::STORAGE_VERSION_RECORD,
+            aios_core::model_storage::MODEL_STORAGE_VERSION
+        ))
+        .await
+        .expect("seed reaches db")
+        .check()
+        .expect("seed statement");
+
+        assert_eq!(
+            stored_version_on(&db).await.expect("有记录时读得出来"),
+            Some((
+                aios_core::model_storage::MODEL_STORAGE_VERSION,
+                Some("sh".to_owned()),
+                Some("rb".to_owned())
+            )),
+            "三格都要原样带出来，包括保留字那格 rebuild"
         );
     }
 }
