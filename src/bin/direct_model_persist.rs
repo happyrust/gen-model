@@ -545,9 +545,13 @@ mod tests {
         assert!(write_and_verify_mesh(&path, &mesh).unwrap());
         assert!(!write_and_verify_mesh(&path, &mesh).unwrap());
 
+        // f40e8b3d5（ADR-087 D3）：同名文件与这份网格不符不再是错，而是原子重写（`Repaired`）——本调用算「写了」，
+        // 盘上从此是新的那份；复用仍只在逐字节对得上时发生，旧的那份再来就轮到它被重写。
         let mut collision = mesh.clone();
         collision.indices.swap(0, 1);
-        assert!(write_and_verify_mesh(&path, &collision).is_err());
+        assert!(write_and_verify_mesh(&path, &collision).unwrap());
+        assert!(!write_and_verify_mesh(&path, &collision).unwrap());
+        assert!(write_and_verify_mesh(&path, &mesh).unwrap());
     }
 
     #[test]

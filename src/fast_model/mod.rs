@@ -22,6 +22,8 @@ pub mod model_record_reader;
 pub(crate) mod model_write_behind;
 /// 初始化直写的模型侧渲染（ADR-077 D4 / D5）：切片 → 逐根 SQL（Initial + 房间边 + UPSERT 回执）→ 按 8 MiB 装笔。
 pub(crate) mod model_initial_persist;
+/// `pe_ptset` 分表：管件目录 P 点随根发布的行形状与渲染（ptset 分表计划 W2）。
+pub(crate) mod ptset_rows;
 
 pub mod concurrency;
 

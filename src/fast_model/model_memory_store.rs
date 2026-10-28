@@ -250,6 +250,12 @@ pub enum CommitScope {
 /// 一根（或一次增量）要落进存储的全部改动。攒齐一批再一次提交，一批就是一个原子边界。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectionCommit {
+    /// 这根的路由成员 / NOZZ 的目录 P 点集，每件一条（[`crate::fast_model::ptset_rows`]）。只有整根重生成的
+    /// `WholeRoot` 提交带（`Some`）：存储按根**整批替换**，`Some(空表)` 也替换（成员全没了就是没有行）。
+    /// `None` = 这笔没带（只重盖章的 `cached_root_commit`、局部提交、盘上没有这一格的旧产物），存储里已有的不动。
+    /// 存储里只有本进程这一世真带过点集的根才有条目，落库对「没条目」的根不动库里的 `pe_ptset` 行。
+    #[serde(default)]
+    pub point_sets: Option<Vec<crate::fast_model::ptset_rows::ProjectedPointSet>>,
     /// 这些 BRAN 的隐式管身整段重写：先清光旧段再插新的。
     #[serde(with = "refno_vec_wire")]
     pub tube_branch_resets: Vec<RefNo>,
@@ -316,6 +322,7 @@ impl ProjectionCommit {
             && self.removals.is_empty()
             && self.upserts.is_empty()
             && self.receipt.is_none()
+            && self.point_sets.is_none()
     }
 }
 
@@ -334,6 +341,9 @@ struct ScopeState {
     by_tube_branch: BTreeMap<i64, BTreeSet<String>>,
     /// 生成根 → 回执。
     receipts: BTreeMap<i64, RootReceipt>,
+    /// 生成根 → 这根最近一次 `WholeRoot` 提交带来的路由成员 P 点集（`pe_ptset` 行的来源）。
+    /// 有条目 = 本进程这一世真提交过（空表也是条目）；没条目的根（从库里恢复的视图、没带点集的旧产物）落库时不动它的 `pe_ptset` 行。
+    point_sets: BTreeMap<i64, Vec<crate::fast_model::ptset_rows::ProjectedPointSet>>,
     /// Roots remain discoverable after failed refresh, including empty roots.
     invalidated_roots: BTreeSet<i64>,
     /// 生成根 → 整根有效几何的并集盒缓存（N3：周边管道查询粗筛用，避免每次遍历全部投影记录）。
@@ -620,12 +630,16 @@ impl ScopeState {
         commit: ProjectionCommit,
     ) -> Option<(RefNo, RootReceipt)> {
         let scope = commit.scope;
+        let point_sets = commit.point_sets;
         for record in commit.upserts {
             self.insert(record);
         }
         let (root, mut receipt) = commit.receipt?;
         if scope == CommitScope::Partial {
             self.stamp_partial_receipt(root, &mut receipt);
+        } else if let Some(point_sets) = point_sets {
+            // 整根提交带的点集就是这根的全集，整批替换；没带（只重盖章）与局部提交不动已有的。
+            self.point_sets.insert(packed_refno(root), point_sets);
         }
         let sesno = self
             .published_sesno
@@ -655,6 +669,7 @@ impl ScopeState {
         self.invalidated_roots.remove(&packed);
         self.root_bounds.remove(&packed);
         self.commit_ticks.remove(&packed);
+        self.point_sets.remove(&packed);
         for id in self.record_ids_under(root) {
             let shared = self.geometries.get(&id).is_some_and(|record| {
                 record
@@ -678,6 +693,7 @@ impl ScopeState {
     /// 并且这根名下的记录全部摘掉，不因嵌套回执而留下。
     fn retire_deleted_root(&mut self, root: RefNo) -> usize {
         let packed = packed_refno(root);
+        self.point_sets.remove(&packed);
         let ids = self.record_ids_under(root);
         let branches = ids
             .iter()
@@ -1503,6 +1519,9 @@ impl ModelMemoryStore {
         state
             .root_bounds
             .retain(|packed, _| receipts.contains_key(packed) || invalidated.contains(packed));
+        state
+            .point_sets
+            .retain(|packed, _| receipts.contains_key(packed));
         state.stray_generations_written.remove(&dbnum);
         state.stamped_room_generations.remove(&dbnum);
         state.published_sesno.remove(&dbnum);
@@ -1725,6 +1744,7 @@ impl ModelMemoryStore {
             state.receipts.remove(&packed);
             state.publication_acks.remove(&packed);
             state.root_bounds.remove(&packed);
+            state.point_sets.remove(&packed);
         }
     }
 
@@ -1737,6 +1757,21 @@ impl ModelMemoryStore {
             return 0;
         };
         state.retire_deleted_root(root)
+    }
+
+    /// 这根最近一次整根提交带来的路由成员 P 点集（`pe_ptset` 行的来源）。`None` = 本进程这一世没有带着点集提交过
+    /// （从库里恢复的视图、没这一格的旧产物），落库不该动它的行；`Some(空表)` = 这根没有路由成员，旧行该清。
+    pub fn point_sets_of_root(
+        &self,
+        scope: ProjectionScope<'_>,
+        root: RefNo,
+    ) -> Option<Vec<crate::fast_model::ptset_rows::ProjectedPointSet>> {
+        let scopes = self.read();
+        scopes
+            .get(&scope.key())?
+            .point_sets
+            .get(&packed_refno(root))
+            .cloned()
     }
 
     pub fn receipt(&self, scope: ProjectionScope<'_>, root: RefNo) -> Option<RootReceipt> {
@@ -4336,5 +4371,134 @@ mod tests {
             "second 的回执更旧，先出"
         );
         assert!(store.receipt(ProjectionScope::Current, first).is_some());
+    }
+
+    /// ptset 分表（W2）：点集只随**整根**提交进存储、按根整批替换（空表也是替换）；只重盖章（不带）与局部提交
+    /// （带了也不是全集）不动已有条目；删根、忘根、整库清空把条目一起摘，之后又回到「没条目」——落库对它不动 `pe_ptset` 行。
+    #[test]
+    fn point_sets_follow_whole_root_commits_and_leave_with_the_root() {
+        use crate::fast_model::ptset_rows::{ProjectedPoint, ProjectedPointSet};
+        let store = store();
+        let root = RefNo::new(7997, 100);
+        let member = RefNo::new(7997, 101);
+        let set = |number: u32| ProjectedPointSet {
+            root,
+            refno: member,
+            noun: "ELBO".into(),
+            points: vec![ProjectedPoint {
+                number,
+                noun: "PTAX".into(),
+                pt: [0.0, 0.0, f64::from(number)],
+                dir: [0.0, 0.0, 1.0],
+                bore: Some(100.0),
+            }],
+            unresolved: Vec::new(),
+            reason: None,
+        };
+        let whole_root =
+            |hash: &str, point_sets: Option<Vec<ProjectedPointSet>>| ProjectionCommit {
+                upserts: vec![record("m1", member, root, 7997)],
+                receipt: Some((root, receipt_for(1, hash))),
+                point_sets,
+                ..Default::default()
+            };
+        assert!(
+            store
+                .point_sets_of_root(ProjectionScope::Current, root)
+                .is_none(),
+            "没提交过的根没有条目"
+        );
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![whole_root("v1", Some(vec![set(1)]))],
+        );
+        assert_eq!(
+            store.point_sets_of_root(ProjectionScope::Current, root),
+            Some(vec![set(1)])
+        );
+
+        // 只重盖章（`cached_root_commit`）不带点集：已有的不动。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((root, receipt_for(1, "v1-restamp"))),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store.point_sets_of_root(ProjectionScope::Current, root),
+            Some(vec![set(1)])
+        );
+
+        // 局部提交就算带了点集也不替换：局部不是全集。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("m2", RefNo::new(7997, 102), root, 7997)],
+                receipt: Some((root, receipt_for(0, "placeholder"))),
+                point_sets: Some(vec![set(2)]),
+                scope: CommitScope::Partial,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            store.point_sets_of_root(ProjectionScope::Current, root),
+            Some(vec![set(1)])
+        );
+
+        // 整根再提交带空表：替换成空（成员全没了 = 旧行该清）；再带点集：替换。
+        store.commit(
+            ProjectionScope::Current,
+            vec![whole_root("v2", Some(Vec::new()))],
+        );
+        assert_eq!(
+            store.point_sets_of_root(ProjectionScope::Current, root),
+            Some(Vec::new())
+        );
+        store.commit(
+            ProjectionScope::Current,
+            vec![whole_root("v3", Some(vec![set(3)]))],
+        );
+        assert_eq!(
+            store.point_sets_of_root(ProjectionScope::Current, root),
+            Some(vec![set(3)])
+        );
+
+        // 忘根：条目一起摘。
+        store.forget_retired_root(ProjectionScope::Current, root);
+        assert!(
+            store
+                .point_sets_of_root(ProjectionScope::Current, root)
+                .is_none()
+        );
+
+        // 删根：条目一起摘。
+        store.commit(
+            ProjectionScope::Current,
+            vec![whole_root("v4", Some(vec![set(4)]))],
+        );
+        assert_eq!(
+            store.point_sets_of_root(ProjectionScope::Current, root),
+            Some(vec![set(4)])
+        );
+        store.retire_deleted_root(ProjectionScope::Current, root);
+        assert!(
+            store
+                .point_sets_of_root(ProjectionScope::Current, root)
+                .is_none()
+        );
+
+        // 整库清空：回执没了，条目跟着没。
+        store.commit(
+            ProjectionScope::Current,
+            vec![whole_root("v5", Some(vec![set(5)]))],
+        );
+        store.clear_dbnum(7997);
+        assert!(
+            store
+                .point_sets_of_root(ProjectionScope::Current, root)
+                .is_none()
+        );
     }
 }

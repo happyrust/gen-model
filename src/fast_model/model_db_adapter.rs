@@ -624,6 +624,9 @@ struct RootShare {
     root: RefNo,
     records: Vec<ProjectedGeometry>,
     receipt: Option<RootReceipt>,
+    /// 这根路由成员的目录 P 点集（`pe_ptset` 行，[`crate::fast_model::ptset_rows`]）。`None` = 内存投影里没有这根的条目
+    /// （这一世没带着点集提交过），库里的 `pe_ptset` 行一个不动；`Some` 才清旧行、写新行。
+    point_sets: Option<Vec<crate::fast_model::ptset_rows::ProjectedPointSet>>,
 }
 
 impl RootShare {
@@ -631,6 +634,7 @@ impl RootShare {
         let scope = ProjectionScope::Current;
         let records = store.records_of_root(scope, root);
         let receipt = store.receipt(scope, root);
+        let point_sets = store.point_sets_of_root(scope, root);
         if let Some(receipt) = receipt.as_ref() {
             anyhow::ensure!(
                 receipt.geometry_count == records.len(),
@@ -655,6 +659,7 @@ impl RootShare {
             root,
             records,
             receipt,
+            point_sets,
         })
     }
 
@@ -1931,6 +1936,8 @@ async fn persist_group(
     // 可写，它的旧边由上面的清边那一半处理。
     let mut pieces: Vec<(usize, String)> = Vec::new();
     let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
+    // 本组随模型行同事务写的 `pe_ptset` 行数（观测用）。
+    let mut ptset_rows = 0usize;
     for live in group {
         // 整片删已经把这一根名下的行清干净了，`Incremental` 那组按 id 的删除就是纯重复——
         // 而它不便宜：一根两千多件时那是四个各两千多项的 `type::thing()` 数组，AMS 8000
@@ -1951,6 +1958,21 @@ async fn persist_group(
             match rendered.last_mut() {
                 Some((_, sql)) => sql.push_str(&live.room_statements),
                 None => rendered.push((0, live.room_statements.clone())),
+            }
+        }
+        // `pe_ptset` 行与房间边同一个位置：这一根最后一块几何之后、同一笔事务（ptset 分表计划 D1 (a)：进事务、不进
+        // 块字节）。只有带回执的根才渲（有回执 = 整根全集，前面整片删也只对它们清了旧行）；没有点集条目的根
+        // 一行不动（见 [`RootShare::point_sets`]）。
+        if let (Some(point_sets), Some(receipt)) =
+            (live.share.point_sets.as_ref(), live.share.receipt.as_ref())
+        {
+            let rows = crate::fast_model::ptset_rows::render_rows(receipt.source_sesno, point_sets);
+            ptset_rows += point_sets.len();
+            if !rows.is_empty() {
+                match rendered.last_mut() {
+                    Some((_, sql)) => sql.push_str(&rows),
+                    None => rendered.push((0, rows)),
+                }
             }
         }
         pieces.extend(rendered);
@@ -1999,6 +2021,15 @@ async fn persist_group(
     // 管身的盒与变换，重置先把关系行删光的话，它读到的就是空集（管身的盒与变换按身份做键、
     // 插入又是 `INSERT IGNORE`，没删掉就等于把第一次发布的几何永久钉在那条槽位上）。
     prelude.push_str(&render_slice_delete(&sliced_roots));
+    // 整片删也清这些根名下的 `pe_ptset` 旧行（成员删了、换了目录件的那几行靠它走）——只清带点集条目的根，
+    // 没条目的根是「这一世没带过」，库里那份不动。新行跟在各根最后一块几何后面。
+    for live in group {
+        if live.share.reconciliation_ready() && live.share.point_sets.is_some() {
+            prelude.push_str(&crate::fast_model::ptset_rows::render_root_clear(
+                live.share.root,
+            ));
+        }
+    }
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
@@ -2037,7 +2068,7 @@ async fn persist_group(
         // 落 N 组之后比这几列的头尾。读与提交分开计时——整片删的谓词收不收敛，看的是 `read`
         // 那一列随 `n` 平不平；`read` 只在第一笔算数，后面几笔是同一次读摊下来的。
         log::info!(
-            "model publication group settled: roots={} records={} sliced_roots={} slice_sources={} read={:.1}ms tx={}/{} sql_bytes={} commit={:.1}ms ok={}",
+            "model publication group settled: roots={} records={} ptset_rows={ptset_rows} sliced_roots={} slice_sources={} read={:.1}ms tx={}/{} sql_bytes={} commit={:.1}ms ok={}",
             group.len(),
             records.len(),
             sliced_roots.len(),
@@ -2149,6 +2180,7 @@ async fn persist_root_impl(
     let scope = ProjectionScope::Current;
     let records = store.records_of_root(scope, root);
     let receipt = store.receipt(scope, root);
+    let point_sets = store.point_sets_of_root(scope, root);
     let reconciliation_ready = if let Some(receipt) = receipt.as_ref() {
         anyhow::ensure!(
             receipt.geometry_count == records.len(),
@@ -2239,13 +2271,30 @@ async fn persist_root_impl(
         WriteMode::Incremental
     };
     let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
-    let pieces = render_record_chunks(&records, mode, &mut tube_slots)?;
+    let mut pieces = render_record_chunks(&records, mode, &mut tube_slots)?;
+    // `pe_ptset` 行跟在最后一块几何后面、同一笔事务（与 `persist_group` 同一条规矩）：只有带回执、且内存里有点集条目的根才渲。
+    let ptset_live = match (reconciliation_ready, point_sets.as_ref(), receipt.as_ref()) {
+        (true, Some(point_sets), Some(receipt)) => Some((receipt.source_sesno, point_sets)),
+        _ => None,
+    };
+    if let Some((sesno, point_sets)) = ptset_live {
+        let rows = crate::fast_model::ptset_rows::render_rows(sesno, point_sets);
+        if !rows.is_empty() {
+            match pieces.last_mut() {
+                Some((_, sql)) => sql.push_str(&rows),
+                None => pieces.push((0, rows)),
+            }
+        }
+    }
 
     let mut prelude = String::new();
     // 整片删排在分支重置**之前**：它靠 `tubi_relate` 行上的 `aabb` / `world_trans` 指针去删
     // 管身的盒与变换，重置先把关系行删光的话，它读到的就是空集（管身的盒与变换按身份做键、
     // 插入又是 `INSERT IGNORE`，没删掉就等于把第一次发布的几何永久钉在那条槽位上）。
     prelude.push_str(&render_slice_delete(&sliced_roots));
+    if ptset_live.is_some() {
+        prelude.push_str(&crate::fast_model::ptset_rows::render_root_clear(root));
+    }
     for &(word0, word1) in &branches {
         append_tube_branch_reset(&mut prelude, RefNo::new(word0, word1));
     }
@@ -2476,7 +2525,7 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
     let records = store.records_of_root(ProjectionScope::Current, root);
     // 回执只作前置校验（没回执的根不是一份完整投影，不许渲成整根替换）；库里没有逐根的章
     // 可盖（`gen_root` 退役，ADR-079）。
-    store
+    let receipt = store
         .receipt(ProjectionScope::Current, root)
         .with_context(|| format!("model root {root} has no publication receipt"))?;
     let mut statements = render_spooled_scope_cleanup(root);
@@ -2488,6 +2537,14 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
     statements.push_str(&render_tube_branch_resets(&branches));
     statements.push_str(&render_tube_identity_sweep(&records)?);
     statements.push_str(&render_records(&records, WriteMode::Initial)?);
+    // `pe_ptset` 行随整根替换走镜像：内存里有这根的点集条目才清旧写新（没条目 = 这一世没带过，镜像上那份不动）。
+    if let Some(point_sets) = store.point_sets_of_root(ProjectionScope::Current, root) {
+        statements.push_str(&crate::fast_model::ptset_rows::render_root_clear(root));
+        statements.push_str(&crate::fast_model::ptset_rows::render_rows(
+            receipt.source_sesno,
+            &point_sets,
+        ));
+    }
     statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     statements.push('\n');
     Ok(publication_transaction(&statements))
@@ -2503,6 +2560,8 @@ pub fn render_spooled_scope_deletion(
 ) -> String {
     let mut statements = render_spooled_scope_cleanup(root);
     statements.push_str(&render_tube_branch_resets(tube_branches));
+    // 根没了，它名下的 `pe_ptset` 行也跟着墓碑走。
+    statements.push_str(&crate::fast_model::ptset_rows::render_root_clear(root));
     // 被波及的根不再有库里的凭证行要删（`gen_root` 退役，ADR-079）：它们在进程内账本上的那一条
     // 由调用方 `model_root_ledger::forget_root` 摘掉。
     let _ = affected_roots;
@@ -3647,6 +3706,7 @@ mod tests {
             root: BRANCH,
             records: vec![record],
             receipt: Some(test_receipt(BRANCH, 1).1),
+            point_sets: None,
         }];
         let (live, failed) = room_stage(&shares, None);
         assert!(failed.is_empty());
@@ -6305,6 +6365,7 @@ mod tests {
                 root: ROOM_ROOT_A,
                 records: records.clone(),
                 receipt: Some(receipt),
+                point_sets: None,
             }
         };
 
@@ -9286,5 +9347,226 @@ mod tests {
             .take::<Option<i64>>(0)
             .expect("count record row")
             .unwrap_or_default()
+    }
+
+    fn ptset_of(
+        root: RefNo,
+        member: RefNo,
+        noun: &str,
+        points: &[(u32, [f64; 3], [f64; 3], Option<f64>)],
+    ) -> crate::fast_model::ptset_rows::ProjectedPointSet {
+        use crate::fast_model::ptset_rows::{ProjectedPoint, ProjectedPointSet};
+        ProjectedPointSet {
+            root,
+            refno: member,
+            noun: noun.into(),
+            points: points
+                .iter()
+                .map(|(number, pt, dir, bore)| ProjectedPoint {
+                    number: *number,
+                    noun: "PTAX".into(),
+                    pt: *pt,
+                    dir: *dir,
+                    bore: *bore,
+                })
+                .collect(),
+            unresolved: Vec::new(),
+            reason: points.is_empty().then(|| "no catalogue chain".to_string()),
+        }
+    }
+
+    /// `pe_ptset` 行随整根替换进镜像 spool，先按根清再逐件 UPSERT；内存里没有这根的点集条目时一句都不碰
+    /// （从库里恢复的视图重放到镜像，不许把镜像上的行删光）；根的墓碑把行一起带走。
+    #[test]
+    fn a_spooled_root_carries_its_pe_ptset_rows_only_when_the_overlay_has_them() {
+        let store = ModelMemoryStore::default();
+        let root = RefNo::new(24383, 1);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record()],
+                receipt: Some(test_receipt(root, 1)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let sql = render_spooled_root(&store, root).expect("spool rendering");
+        assert!(
+            !sql.contains("pe_ptset"),
+            "没带点集的根不动镜像上的 pe_ptset 行: {sql}"
+        );
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record()],
+                receipt: Some(test_receipt(root, 1)),
+                point_sets: Some(vec![ptset_of(
+                    root,
+                    RefNo::new(24383, 500),
+                    "FTUB",
+                    &[
+                        (1, [0.0; 3], [-1.0, 0.0, 0.0], Some(500.0)),
+                        (2, [2000.0, 0.0, 0.0], [1.0, 0.0, 0.0], Some(500.0)),
+                    ],
+                )]),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let sql = render_spooled_root(&store, root).expect("spool rendering");
+        let clear = sql
+            .find("DELETE (SELECT VALUE id FROM pe_ptset WHERE root = pe:⟨24383_1⟩);")
+            .expect("按根清旧行");
+        let upsert = sql
+            .find("UPSERT pe_ptset:⟨24383_500⟩ CONTENT { pe: pe:⟨24383_500⟩, root: pe:⟨24383_1⟩, dbnum: 7999, noun: 'FTUB'")
+            .expect("成员一行");
+        assert!(clear < upsert, "先清后写: {sql}");
+        assert!(
+            sql.contains(&format!(
+                "sesno: 42, generator: {}, reason: NONE",
+                e3d_model::PTSET_EVAL_VERSION
+            )),
+            "{sql}"
+        );
+        assert!(!sql.contains("DELETE pe_ptset WHERE"), "不写谓词删: {sql}");
+
+        let tombstone = render_spooled_scope_deletion(root, &[root], &[]);
+        assert!(
+            tombstone.contains("DELETE (SELECT VALUE id FROM pe_ptset WHERE root = pe:⟨24383_1⟩);")
+        );
+    }
+
+    /// 落库：`pe_ptset` 行与模型行同一次发布落下，`gy_common.surql`（含建表 / 索引）原文灌进内存库后长度函数就能算；
+    /// 没有点的 ATTA 也有行（`reason`）；再发一次少一件，旧行按根清掉不留孤儿。逻根路与合块路两条都走。
+    #[tokio::test]
+    async fn pe_ptset_rows_land_with_the_publication_and_feed_the_length_functions() {
+        let db = surreal_mem().await;
+        db.query(include_str!("../../resource/surreal/gy_common.surql"))
+            .await
+            .expect("gy_common.surql");
+        seed_pe(&db).await;
+        db.query(
+            "UPDATE pe:⟨24383_500⟩ SET noun = 'FTUB', refno = refno:⟨24383_500⟩; \
+             CREATE refno:⟨24383_500⟩ SET ARRI = 1, LEAV = 2; \
+             UPDATE pe:⟨24383_600⟩ SET noun = 'ATTA', refno = refno:⟨24383_600⟩; \
+             CREATE refno:⟨24383_600⟩ SET ARRI = 1, LEAV = 2;",
+        )
+        .await
+        .expect("seed members")
+        .check()
+        .expect("seed member statements");
+        let root = RefNo::new(24383, 1);
+        let ftub = RefNo::new(24383, 500);
+        let atta = RefNo::new(24383, 600);
+        let full = || {
+            vec![
+                ptset_of(
+                    root,
+                    ftub,
+                    "FTUB",
+                    &[
+                        (1, [0.0; 3], [-1.0, 0.0, 0.0], Some(500.0)),
+                        (2, [2000.0, 0.0, 0.0], [1.0, 0.0, 0.0], Some(500.0)),
+                    ],
+                ),
+                ptset_of(root, atta, "ATTA", &[]),
+            ]
+        };
+
+        for batched in [false, true] {
+            let store = ModelMemoryStore::default();
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: vec![baked_record()],
+                    receipt: Some(test_receipt(root, 1)),
+                    point_sets: Some(full()),
+                    ..ProjectionCommit::default()
+                }],
+            );
+            let target = PersistTarget::new(&db, PersistMedium::Mem);
+            if batched {
+                let report =
+                    persist_roots_batched_unacked(target, &store, root.dbno(), &[root], None)
+                        .await
+                        .expect("batched persist");
+                assert!(report.failed.is_empty(), "{:?}", report.failed);
+            } else {
+                persist_root_on(target, &store, root)
+                    .await
+                    .expect("persist");
+            }
+            assert_eq!(count(&db, "pe_ptset").await, 2, "batched={batched}");
+            let mut response = db
+                .query(
+                    "RETURN fn::bran_comp_len(pe:⟨24383_500⟩); \
+                     RETURN fn::pe_ptset_of(pe:⟨24383_500⟩)['2'].bore; \
+                     RETURN (SELECT VALUE reason FROM ONLY pe_ptset:⟨24383_600⟩); \
+                     RETURN (SELECT VALUE count FROM ONLY pe_ptset:⟨24383_600⟩); \
+                     RETURN (SELECT VALUE sesno FROM ONLY pe_ptset:⟨24383_500⟩); \
+                     RETURN (SELECT VALUE generator FROM ONLY pe_ptset:⟨24383_500⟩);",
+                )
+                .await
+                .expect("query")
+                .check()
+                .expect("query statements");
+            let length: Option<f64> = response.take(0).expect("len");
+            assert!(
+                (length.expect("length") - 2000.0).abs() < 1e-9,
+                "batched={batched}"
+            );
+            let bore: Option<f64> = response.take(1).expect("bore");
+            assert_eq!(bore, Some(500.0));
+            let reason: Option<String> = response.take(2).expect("reason");
+            assert_eq!(reason.as_deref(), Some("no catalogue chain"));
+            let count_field: Option<i64> = response.take(3).expect("count");
+            assert_eq!(count_field, Some(0));
+            let sesno: Option<i64> = response.take(4).expect("sesno");
+            assert_eq!(sesno, Some(42));
+            let generator: Option<i64> = response.take(5).expect("generator");
+            assert_eq!(generator, Some(i64::from(e3d_model::PTSET_EVAL_VERSION)));
+
+            // 再发一次，ATTA 没了：旧行按根清掉。
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: vec![baked_record()],
+                    receipt: Some(test_receipt(root, 1)),
+                    point_sets: Some(vec![full().swap_remove(0)]),
+                    ..ProjectionCommit::default()
+                }],
+            );
+            if batched {
+                let report =
+                    persist_roots_batched_unacked(target, &store, root.dbno(), &[root], None)
+                        .await
+                        .expect("batched persist");
+                assert!(report.failed.is_empty(), "{:?}", report.failed);
+            } else {
+                persist_root_on(target, &store, root)
+                    .await
+                    .expect("persist");
+            }
+            assert_eq!(count(&db, "pe_ptset").await, 1, "batched={batched}");
+            assert_eq!(count_record(&db, "pe_ptset", "24383_600").await, 0);
+
+            // 没带点集的重盖章（`cached_root_commit` 那种）不动行。
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    receipt: Some(test_receipt(root, 1)),
+                    ..ProjectionCommit::default()
+                }],
+            );
+            persist_root_on(target, &store, root)
+                .await
+                .expect("persist");
+            assert_eq!(count(&db, "pe_ptset").await, 1, "batched={batched}");
+
+            db.query("DELETE pe_ptset;")
+                .await
+                .expect("reset")
+                .check()
+                .expect("reset statement");
+        }
     }
 }

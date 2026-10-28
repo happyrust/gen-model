@@ -31,6 +31,8 @@ pub(crate) struct RenderedRoot {
     pub receipt: RootReceipt,
     pub records: usize,
     pub room_edges: usize,
+    /// 这一根随几何同笔写的 `pe_ptset` 行数（每个路由成员 / NOZZ 一行，没点的也算）。
+    pub ptset_rows: usize,
     /// 这一根的空间树条目（世界盒，隐式管身不进树）。
     pub tree_boxes: Vec<RStarBoundingBox>,
     /// 这一根写了几何的来源元素（隐式管身不算）——树收敛的 `refreshed` 名单。
@@ -53,6 +55,8 @@ pub(crate) struct InitialTransaction {
     pub root_sesnos: Vec<(RefNo, u32)>,
     pub records: usize,
     pub room_edges: usize,
+    /// 这一笔装的 `pe_ptset` 行数（观测用）。
+    pub ptset_rows: usize,
     pub tree_boxes: Vec<RStarBoundingBox>,
     pub refreshed: Vec<RefnoEnum>,
 }
@@ -119,12 +123,26 @@ pub(crate) fn render_root(
         }
         _ => 0,
     };
+    // `pe_ptset` 行与房间边同一个位置：这一根的几何之后、同一笔（ptset 分表计划 W2，与 `model_db_adapter::persist_group`
+    // 同一条规矩）。初始化前库里没有旧行（重初始化的整库 wipe 把 `pe_ptset` 一起按 Ref0 区间删了），所以不清只写；
+    // 没带点集的提交（盘上没这一格的旧产物）一行不写。
+    let ptset_rows = match commit.point_sets.as_ref() {
+        Some(point_sets) => {
+            body.push_str(&crate::fast_model::ptset_rows::render_rows(
+                receipt.source_sesno,
+                point_sets,
+            ));
+            point_sets.len()
+        }
+        None => 0,
+    };
     let rendered = RenderedRoot {
         root,
         body,
         receipt: receipt.clone(),
         records: records.len(),
         room_edges,
+        ptset_rows,
         tree_boxes: records
             .iter()
             .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
@@ -204,6 +222,7 @@ fn seal(dbnum: u32, roots: Vec<RenderedRoot>) -> InitialTransaction {
         root_sesnos: Vec::with_capacity(roots.len()),
         records: 0,
         room_edges: 0,
+        ptset_rows: 0,
         tree_boxes: Vec::new(),
         refreshed: Vec::new(),
     };
@@ -215,6 +234,7 @@ fn seal(dbnum: u32, roots: Vec<RenderedRoot>) -> InitialTransaction {
             .push((root.root, root.receipt.source_sesno));
         transaction.records += root.records;
         transaction.room_edges += root.room_edges;
+        transaction.ptset_rows += root.ptset_rows;
         transaction.tree_boxes.extend(root.tree_boxes);
         transaction.refreshed.extend(root.refreshed);
     }
@@ -263,6 +283,7 @@ mod tests {
         ProjectionCommit {
             tube_branch_resets: Vec::new(),
             removals: Vec::new(),
+            point_sets: None,
             receipt: Some((
                 root,
                 RootReceipt {
@@ -326,6 +347,53 @@ mod tests {
             .take(0)
             .unwrap();
         assert_eq!(epoch[0].value, 1, "每笔 +1");
+    }
+
+    /// ptset 分表（W2）：初始化直写这条路也把根的 `pe_ptset` 行装进同一笔——整库初始化走的是这里而不是 write-behind，
+    /// 漏了这一条，刚初始化完的库一行 P 点都没有（2026-10-27 在 8000 的临时库上实测到的形状）。没带点集的提交不写。
+    #[tokio::test]
+    async fn point_sets_land_in_the_same_initialization_transaction_as_the_geometry() {
+        use crate::fast_model::ptset_rows::{ProjectedPoint, ProjectedPointSet};
+        let db = database("ptset").await;
+        let mut with_points = commit(ROOT, 1);
+        with_points.point_sets = Some(vec![ProjectedPointSet {
+            root: ROOT,
+            refno: RefNo::new(ROOT.word0, ROOT.word1 + 7),
+            noun: "ELBO".into(),
+            points: vec![ProjectedPoint {
+                number: 1,
+                noun: "PTAX".into(),
+                pt: [0.0, 0.0, 0.0],
+                dir: [0.0, 0.0, -1.0],
+                bore: Some(100.0),
+            }],
+            unresolved: Vec::new(),
+            reason: None,
+        }]);
+        let slice = render_slice(
+            7997,
+            &[(ROOT, with_points), (OTHER, commit(OTHER, 1))],
+            None,
+            default_transaction_cap(),
+        );
+        assert!(slice.dead_letters.is_empty(), "{:?}", slice.dead_letters);
+        assert_eq!(slice.transactions.len(), 1);
+        let tx = &slice.transactions[0];
+        assert_eq!(tx.ptset_rows, 1);
+        assert!(
+            tx.sql.contains("UPSERT pe_ptset:⟨24383_73955⟩ CONTENT { pe: pe:⟨24383_73955⟩, root: pe:⟨24383_73948⟩"),
+            "{}",
+            tx.sql
+        );
+        assert!(!tx.sql.contains("DELETE"), "初始化不清旧行：{}", tx.sql);
+        db.query(tx.sql.clone()).await.unwrap().check().unwrap();
+        assert_eq!(count(&db, "SELECT count() AS n FROM inst_relate GROUP ALL;").await, 2);
+        assert_eq!(count(&db, "SELECT count() AS n FROM pe_ptset GROUP ALL;").await, 1);
+        assert_eq!(
+            count(&db, "SELECT count() AS n FROM pe_ptset WHERE sesno = 42 GROUP ALL;").await,
+            1,
+            "行上的 sesno 是回执的 source_sesno"
+        );
     }
 
     /// 零几何的根也要进笔、随根名单进账（`geometry_count = 0`）：它没有行可落，但「生成过」这件事
