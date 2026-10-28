@@ -268,6 +268,18 @@ if ($expect) {
                         else { Add-Finding $level 'subtree-union' "$prefix 预期并集平移 $(Format-Vec $want)，实得 Δ $(Format-Vec $d)（$obs）" }
                     }
                 }
+                if ($spec.PSObject.Properties['union_aabb'] -and $null -ne $spec.union_aabb) {
+                    # 绝对并集断言：after 的子树并集应逐分量等于给定值。用于「变形不是平移」的腿
+                    # （如 room/pave_move：改顶点后并集尺寸变，union_shift 表达不了）。
+                    $want = @($spec.union_aabb | ForEach-Object { [double]$_ })
+                    if ($want.Count -ne 6) { Add-Finding $level 'subtree-union-abs' "$prefix union_aabb 必须是 6 个分量，实得 $($want.Count)" }
+                    elseif ($null -eq $a.aabb) { Add-Finding $level 'subtree-union-abs' "$prefix after 没有几何（$obs）" }
+                    else {
+                        $d = Get-Delta $want $a.aabb
+                        if (Test-Within $d $ToleranceMm) { Add-Finding 'ok' 'subtree-union-abs' "$prefix 并集吻合 $(Format-Vec $a.aabb)" }
+                        else { Add-Finding $level 'subtree-union-abs' "$prefix 预期并集 $(Format-Vec $want)，实得 $(Format-Vec $a.aabb)（$obs）" }
+                    }
+                }
                 if ($spec.PSObject.Properties['like']) {
                     $ref = Get-UnionAabb $beforeMembers ([string]$spec.like)
                     if ($null -eq $ref.aabb -or $null -eq $a.aabb) { Add-Finding $level 'subtree-like' "$prefix 或参照 $($spec.like) 没有几何（$obs）" }
@@ -277,7 +289,7 @@ if ($expect) {
                         else { Add-Finding $level 'subtree-like' "$prefix 预期与 $($spec.like) 同形同位，实得 Δ $(Format-Vec $d)，成员 $($ref.count) vs $($a.count)" }
                     }
                 }
-                if (-not ($spec.PSObject.Properties['count_delta'] -or $spec.PSObject.Properties['union_shift'] -or $spec.PSObject.Properties['like'])) {
+                if (-not ($spec.PSObject.Properties['count_delta'] -or $spec.PSObject.Properties['union_shift'] -or $spec.PSObject.Properties['union_aabb'] -or $spec.PSObject.Properties['like'])) {
                     Add-Finding 'calibrate' 'subtree-observe' "$prefix $obs"
                 }
             }

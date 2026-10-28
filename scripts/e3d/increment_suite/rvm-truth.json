@@ -442,11 +442,11 @@
             0,
             0,
             0
-          ],
-          "calibrate": true
+          ]
         }
       },
-      "note": "★ NBOX-N1 XLEN 500→900 全在 BOX-N 之内，并集不变；负实体若导出，其自身 AABB 变成 [45550,4750,-1250,46450,5250,1250]"
+      "note": "NBOX-N1 XLEN 500→900 全在 BOX-N 之内，并集不变。窄口径 RVM 已实测不导出 NBOX（NBOX-N1 挂在 BOX-N 之下、不在 EQ-NBX 的 MEMBERS 里，见 limits 第 4 条），所以 count_delta:0 与 union_shift:[0,0,0] 是硬断言而非校准项。只能靠 PML 侧 Q XLEN 断言（500→900→500）。",
+      "aabb_blind": true
     },
     "geom/nbox_resize_restore.mac": {
       "equals_state_before": "geom/nbox_resize_apply.mac"
@@ -454,15 +454,16 @@
     "geom/nbox_add_apply.mac": {
       "subtree": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-EQ-NBX": {
+          "count_delta": 0,
           "union_shift": [
             0,
             0,
             0
-          ],
-          "calibrate": true
+          ]
         }
       },
-      "note": "★ NBOX-N2 300×300×2500 POS E 600（相对 BOX-N）→ 若导出应新增 [46450,4850,-1250,46750,5150,1250]，件数 +1；不导出则无痕"
+      "note": "NBOX-N2 300×300×2500 POS E 600（相对 BOX-N）。窄口径 RVM 已实测不导出 NBOX，所以件数 +0、并集平移 [0,0,0] 都是硬断言。只能靠 PML 侧 Q XLEN 断言。",
+      "aabb_blind": true
     },
     "geom/nbox_add_restore.mac": {
       "equals_state_before": "geom/nbox_add_apply.mac"
@@ -543,11 +544,10 @@
     "pipe/bran_hpos_apply.mac": {
       "subtree": {
         "AIOS-SUITE-8000-Z/AIOS-SUITE-PIPE-P/AIOS-SUITE-BRAN-S": {
-          "count_delta": 0,
-          "calibrate": true
+          "count_delta": 0
         }
       },
-      "note": "HPOS U 2900→3100 在 RVM 里**不可见**（2026-10-28 实测：9 个管件 M1..M9 的 AABB 变化全部为 0.00，HPOS 是分支拓扑属性，不重算管件几何）。只能靠 PML 侧 Q Hposition 断言（2900→3100→2900）。",
+      "note": "HPOS U 2900→3100 在 RVM 里**不可见**（2026-10-28 实测：9 个管件 M1..M9 的 AABB 变化全部为 0.00，HPOS 是分支拓扑属性，不重算管件几何）。只能靠 PML 侧 Q Hposition 断言（2900→3100→2900）。count_delta:0 是硬断言（成员数不许变），已用 named2 批次 935→939 实测 pass。",
       "aabb_blind": true
     },
     "pipe/bran_hpos_restore.mac": {
